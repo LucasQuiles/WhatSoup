@@ -2126,30 +2126,31 @@ def run_once(
             # Update consecutive-failure counter and backoff schedule.
             new_consecutive_failures = consecutive_failures_pre + 1
             remote_record["consecutiveFailures"] = new_consecutive_failures
-            # --- HD-11b capture-failure escalation ---
-            # Independent of (evaluated regardless of) the backoff/down branch
-            # below: default threshold=2 fires a full cycle before
-            # RELAY_BACKOFF_FAILURE_THRESHOLD=3's relay_host_down does. One
-            # escalation per failure episode (captureFailureEscalated flag,
-            # same one-shot pattern as downEventEmitted) -- do NOT re-emit on
-            # every subsequent failure past threshold (anti-noise; dispatcher
-            # dedup handles repeats for whichever alert we DO send).
+            # --- HD-11b capture-failure escalation ladder ---
+            # Three tiers, each SUPERSEDING the prior (boterr-lead ruling,
+            # HD-11b battery 4, extending relay_host_down's own
+            # "replaces per-attempt alerts" precedent one level down):
+            #   tier 1: remote-claim-failed (cooldown-gated generic meta-alert)
+            #   tier 2: collector_remote_unreachable (this packet)
+            #   tier 3: relay_host_down (backoff schedule entry)
+            # Exactly one open incident per remote at a time: crossing a
+            # tier's threshold ACTIVELY CLOSES the previous tier's open
+            # incident (enqueue_meta_recovery / a typed clear) before opening
+            # the new one -- not just suppressing future re-emission of the
+            # old tier, which would leave it open at the dispatcher.
+            #
+            # This MUST be a single mutually-exclusive ladder keyed on which
+            # zone new_consecutive_failures falls in (tier 3 checked FIRST,
+            # unconditionally) -- not two independent "if threshold crossed"
+            # checks. A remote already at/past RELAY_BACKOFF_FAILURE_THRESHOLD
+            # that fails again on a LATER cycle (after the backoff window
+            # expires) still has new_consecutive_failures >= escalate_threshold
+            # every time; an independent tier-2 check would reopen tier 2 on
+            # that later cycle (captureFailureEscalated was already reset when
+            # tier 3 first opened) without ever reclosing it, since tier 3's
+            # own close-tier-2 step only runs on `not is_host_down` (first
+            # entry). Caught + RED-proven during HD-11b battery 4 review.
             escalate_threshold = collector_failure_escalate_threshold()
-            if new_consecutive_failures >= escalate_threshold and not remote_record.get("captureFailureEscalated"):
-                remote_record["captureFailureEscalated"] = True
-                last_success_at = remote_record.get("lastSuccessAt")
-                last_success_age = int(time.time()) - int(last_success_at) if last_success_at else None
-                failure_class = str((remote_record.get("failureRetention") or {}).get("failureClass") or "")
-                emit_collector_capture_escalation_event(
-                    remote,
-                    "alert",
-                    consecutive_failures=new_consecutive_failures,
-                    threshold=escalate_threshold,
-                    error_class=failure_class or None,
-                    last_error=error,
-                    last_success_age_seconds=last_success_age,
-                    reachability_diagnosis_value=(reachability_diagnostics or {}).get("reachabilityDiagnosis"),
-                )
             if new_consecutive_failures >= RELAY_BACKOFF_FAILURE_THRESHOLD:
                 # Advance backoff schedule index (cap at last entry).
                 schedule_index_old = int(remote_record.get("backoffScheduleIndex") or 0)
@@ -2162,7 +2163,22 @@ def run_once(
                 remote_record["backoffScheduleIndex"] = schedule_index_new
                 remote_record["nextAttemptAt"] = int(time.time()) + RELAY_BACKOFF_SCHEDULE_S[schedule_index_new]
                 if not is_host_down:
-                    # First entry into down state: record downSince and emit event.
+                    # First entry into down state: close tier 2 if open --
+                    # tier 3 now covers this remote's failure with the
+                    # strongest signal. No-op if escalate_threshold >=
+                    # RELAY_BACKOFF_FAILURE_THRESHOLD (tier 2 never opened).
+                    if remote_record.get("captureFailureEscalated"):
+                        remote_record["captureFailureEscalated"] = False
+                        prior_error_class = str((remote_record.get("failureRetention") or {}).get("failureClass") or "")
+                        emit_collector_capture_escalation_event(
+                            remote,
+                            "clear",
+                            consecutive_failures=new_consecutive_failures,
+                            threshold=escalate_threshold,
+                            error_class=prior_error_class or None,
+                            last_success_age_seconds=None,
+                        )
+                    # Then record downSince and emit event.
                     remote_record["downSince"] = int(time.time())
                     remote_record["downEventEmitted"] = True
                     emit_relay_host_state_event(
@@ -2179,10 +2195,53 @@ def run_once(
                         state,
                         best_effort=is_best_effort,
                     )
-                # While host is in down state, do NOT fire per-attempt meta-alerts.
-                # The relay_host_down event replaces them.
+                # While host is in down state (including subsequent cycles
+                # after the backoff window expires and re-fails), do NOT fire
+                # per-attempt meta-alerts OR reopen tier 2. The relay_host_down
+                # event replaces them for the whole down episode.
+            elif new_consecutive_failures >= escalate_threshold:
+                if not remote_record.get("captureFailureEscalated"):
+                    remote_record["captureFailureEscalated"] = True
+                    # Close tier 1 if open -- tier 2 now covers this remote's
+                    # failure with a stronger, more specific signal. No-op
+                    # (enqueue_meta_recovery returns immediately) if tier 1
+                    # never opened, e.g. escalate_threshold=1.
+                    enqueue_meta_recovery(
+                        remote,
+                        "remote-claim-failed",
+                        f"BOT ERRORS collector remote-claim alert superseded by escalation: {remote}",
+                        f"remote={remote}\nsuperseded_by=collector_remote_unreachable\ncollector_log={state_root() / 'logs/collector.jsonl'}",
+                        state,
+                    )
+                    last_success_at = remote_record.get("lastSuccessAt")
+                    last_success_age = int(time.time()) - int(last_success_at) if last_success_at else None
+                    failure_class = str((remote_record.get("failureRetention") or {}).get("failureClass") or "")
+                    emit_collector_capture_escalation_event(
+                        remote,
+                        "alert",
+                        consecutive_failures=new_consecutive_failures,
+                        threshold=escalate_threshold,
+                        error_class=failure_class or None,
+                        last_error=error,
+                        last_success_age_seconds=last_success_age,
+                        reachability_diagnosis_value=(reachability_diagnostics or {}).get("reachabilityDiagnosis"),
+                    )
+                else:
+                    # Escalated (tier 2 open) but not yet backed off: the
+                    # escalation event already covers this failure -- do not
+                    # ALSO fire the generic per-attempt alert (tier 1). This
+                    # is what keeps exactly one open incident per remote at a
+                    # time; enqueue_meta_alert's own cooldown/open-incident
+                    # tracking is bypassed entirely rather than relied on,
+                    # since it has no notion of the escalation tier.
+                    append_log({
+                        "type": "remote_claim_failed_suppressed_escalated",
+                        "remote": remote,
+                        "error": error,
+                        "reachability": reachability_diagnostics,
+                    })
             else:
-                # Below threshold: normal per-attempt alert.
+                # Below both thresholds: normal per-attempt alert.
                 append_log({
                     "type": "remote_claim_failed",
                     "remote": remote,

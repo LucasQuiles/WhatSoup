@@ -166,6 +166,10 @@ def test_further_failures_do_not_reemit(tmp_state):
          patch.object(mod, "ssh_json_lines", side_effect=_fail_ssh()), \
          patch.object(mod, "remote_failure_context", return_value=([], {})), \
          _patched_collector_clock(mod, clock):
+        # 6 always-failing cycles walk the full ladder (tier1 open/close ->
+        # tier2 open/close -> tier3 open) by cycle 3, then cycles 4-6 fall
+        # inside the backoff window and are skipped entirely (no SSH attempt,
+        # no state change) -- the anti-noise proof this test exists for.
         for _ in range(6):
             _run_once_defaults(mod, [remote])
             clock.advance(30)
@@ -174,10 +178,20 @@ def test_further_failures_do_not_reemit(tmp_state):
         # only set for the duration of the with-block, and load_state() reads
         # state_root() from the environment at call time, not from tmp_state.
         state = mod.load_state()
-        assert state["remotes"][remote].get("captureFailureEscalated") is True
+        rr = state["remotes"][remote]
+        # Tier 2's flag resets to False when tier 3 (relay_host_down)
+        # supersedes it at consecutiveFailures=3 -- it is NOT "escalated" by
+        # the end of this run, it has been superseded further up the ladder.
+        assert rr.get("captureFailureEscalated") is False
+        assert rr.get("downEventEmitted") is True
+        assert rr.get("consecutiveFailures") == 3, "skipped cycles inside the backoff window must not increment further"
 
     events = _outbox_by_source(outbox_dir)
-    assert len(events.get(ESCALATION_SOURCE, [])) == 1
+    # Each tier opens and (for tiers 1 and 2) closes exactly once across all
+    # 6 cycles -- no re-emission spam within any tier, and tier 3 stays open
+    # (no premature "recovered" without a real success).
+    assert [e["eventType"] for e in events.get(ESCALATION_SOURCE, [])] == ["alert", "clear"]
+    assert len(events.get("relay_host_down", [])) == 1
 
 
 # ---------------------------------------------------------------------------
@@ -237,27 +251,32 @@ def test_recovery_emits_one_clear_and_reescalates_on_new_episode(tmp_state):
 
 
 # ---------------------------------------------------------------------------
-# Test 3b: a flap through the backoff threshold re-escalates BY DESIGN.
+# Test 3b: a flap through the backoff threshold stays on the relay_host_down
+# tier -- collector_remote_unreachable does NOT reopen mid-flap.
 #
-# escalate threshold (2) < RELAY_BACKOFF_FAILURE_THRESHOLD (3), and the clear
-# fires on a single successful collection (the contract's literal "next
-# successful collection"), while backoff recovery separately requires
-# recovery_successes (default 2) consecutive successes before
-# consecutiveFailures resets. So a fail x3 / success x1 / fail x1 sequence
-# clears and then re-opens the escalation, while relay_host_down (gated on
-# the N-successes backoff recovery) stays open across the same flap.
+# SUPERSEDED DESIGN (kept in history for context, no longer current): an
+# earlier revision of this packet let collector_remote_unreachable clear on a
+# single successful collection independently of relay_host_down's N-successes
+# backoff recovery, so a fail x3 / success x1 / fail x1 sequence cleared and
+# then RE-OPENED the escalation while relay_host_down stayed open across the
+# same flap -- two simultaneously-open incidents for one remote.
 #
-# This asymmetry is intentional (boterr-lead ruling, HD-11b review): the two
-# signals have different thresholds and different confirmation semantics by
-# design, so they are expected to behave differently on a flap. The signal is
-# per-transition-honest (alert on each new failure episode, clear on each
-# real recovery) rather than flap-suppressing; a genuinely flapping remote is
-# bounded dispatcher-side by the existing flap-storm machinery
-# (BOT_ERRORS_FLAP_TRIP_THRESHOLD/_WINDOW_SECONDS, default 5 trips/600s ->
-# storm collapse), not by holding this event open across a real recovery.
+# RATIFIED DESIGN (boterr-lead ruling, HD-11b battery 4, superseding the
+# above): collector_remote_unreachable, relay_host_down, and the generic
+# remote-claim-failed alert form a single 3-tier escalation LADDER, each tier
+# SUPERSEDING (actively closing) the prior -- exactly one open incident per
+# remote at a time. Once relay_host_down (tier 3) opens, it "owns" the
+# down-episode for as long as it stays open; collector_remote_unreachable
+# (tier 2) stays closed and does not reopen on a later failure within the
+# same down episode, even across a flap that clears the backoff window and
+# fails again. Only relay_host_down's own flap/recovery machinery governs
+# behavior during the flap -- tier 2 has nothing left to say once tier 3 has
+# taken over. A fresh escalation episode requires a FULL relay_host_recovered
+# recovery (N consecutive successes) first, starting a new fail sequence from
+# tier 1 again.
 # ---------------------------------------------------------------------------
 
-def test_flap_through_backoff_reescalates_by_design(tmp_state):
+def test_flap_through_backoff_stays_on_relay_host_down_tier(tmp_state):
     state_dir, outbox_dir = tmp_state
     mod = _load_mod_with_dirs(state_dir, outbox_dir)
 
@@ -276,38 +295,41 @@ def test_flap_through_backoff_reescalates_by_design(tmp_state):
          patch.object(mod, "remote_failure_context", return_value=([], {})), \
          _patched_collector_clock(mod, clock):
 
-        # fail x3: crosses BOTH thresholds -- escalation alert (at failure 2)
-        # and relay_host_down (at failure 3, backoff engages).
+        # fail x3: tier 1 opens+closes (failure 1->2 transition), tier 2
+        # opens+closes (failure 2->3 transition, superseded by backoff), tier
+        # 3 (relay_host_down) opens and stays open.
         for _ in range(3):
             _run_once_defaults(mod, [remote])
             clock.advance(30)
         events = _outbox_by_source(outbox_dir)
-        assert len(events.get(ESCALATION_SOURCE, [])) == 1
-        assert events[ESCALATION_SOURCE][0]["eventType"] == "alert"
+        assert [e["eventType"] for e in events[ESCALATION_SOURCE]] == ["alert", "clear"], (
+            "tier 2 must be closed (superseded), not left open, once tier 3 opens"
+        )
         assert len(events.get("relay_host_down", [])) == 1
 
         state = mod.load_state()
         rr = state["remotes"][remote]
         assert rr.get("consecutiveFailures") == 3
         assert rr.get("downEventEmitted") is True
+        assert rr.get("captureFailureEscalated") is False, "tier 2's flag resets when superseded by tier 3"
 
         # Clear the backoff window before the success attempt, otherwise the
         # dead-host backoff guard skips the remote and ssh_json_lines is
         # never called (same reasoning as test_escalation_state_survives_restart).
         clock.advance(400)
 
-        # success x1: a single successful collection genuinely resolves the
-        # capture failure for that moment -- the escalation clears. This is
-        # NOT enough successes (recovery_successes default 2) to reset
-        # consecutiveFailures/downEventEmitted, so relay_host_down stays open.
+        # success x1: NOT enough successes (recovery_successes default 2) to
+        # recover backoff -- relay_host_down stays open, and since tier 2 is
+        # already closed/superseded, nothing new fires for it either.
         failing[0] = False
         _run_once_defaults(mod, [remote])
         clock.advance(30)
 
-        events = _outbox_by_source(outbox_dir)
-        types = [e["eventType"] for e in events[ESCALATION_SOURCE]]
-        assert types == ["alert", "clear"], "a real successful collection must clear the escalation"
-        assert len(events.get("relay_host_down", [])) == 1, "one success is not enough to recover backoff"
+        events_after_one_success = _outbox_by_source(outbox_dir)
+        assert [e["eventType"] for e in events_after_one_success[ESCALATION_SOURCE]] == ["alert", "clear"], (
+            "one success is not a real recovery from the down episode -- tier 2 must stay closed"
+        )
+        assert len(events_after_one_success.get("relay_host_down", [])) == 1, "one success is not enough to recover backoff"
 
         state = mod.load_state()
         rr = state["remotes"][remote]
@@ -315,23 +337,22 @@ def test_flap_through_backoff_reescalates_by_design(tmp_state):
         assert rr.get("consecutiveFailures") == 3, "backoff recovery needs recovery_successes, not just 1"
         assert rr.get("downEventEmitted") is True
 
-        # fail x1 more: a genuinely new failure episode -> escalation
-        # re-alerts (by design, per the docstring above). relay_host_down
-        # does NOT re-fire -- its own down-state guard survives the flap.
+        # fail x1 more (post-flap, still within the same down episode): tier 3
+        # already owns this remote's failure -- tier 2 must NOT reopen.
         failing[0] = True
         _run_once_defaults(mod, [remote])
         clock.advance(30)
 
     events = _outbox_by_source(outbox_dir)
-    alert_types = [e["eventType"] for e in events[ESCALATION_SOURCE]]
-    assert alert_types == ["alert", "clear", "alert"], (
-        "collector_remote_unreachable is intentionally per-transition-honest: "
-        "it re-alerts on a genuinely new failure episode even mid-flap"
+    assert [e["eventType"] for e in events[ESCALATION_SOURCE]] == ["alert", "clear"], (
+        "collector_remote_unreachable must NOT reopen on a later failure within "
+        "the same relay_host_down episode -- exactly one open incident per "
+        "remote at a time is the ratified invariant, not per-transition honesty "
+        "independent of the other tiers"
     )
     assert len(events.get("relay_host_down", [])) == 1, (
-        "relay_host_down is gated on N-successes recovery and correctly does "
-        "NOT re-fire mid-flap -- this asymmetry with the escalation signal is "
-        "intentional, not a bug"
+        "relay_host_down correctly does not re-fire mid-flap -- its own "
+        "down-state guard survives the flap, unchanged from before"
     )
 
 
@@ -418,27 +439,41 @@ def test_escalation_state_survives_restart(tmp_state):
          patch.object(mod2, "ssh_json_lines", side_effect=_fail_ssh()), \
          patch.object(mod2, "remote_failure_context", return_value=([], {})), \
          _patched_collector_clock(mod2, clock):
-        # Further failure post-restart must NOT double-emit. This is the 3rd
-        # consecutive failure overall (2 from mod1 + 1 here), which also
-        # crosses RELAY_BACKOFF_FAILURE_THRESHOLD (3) -- a second, independent
-        # signal (relay_host_down) is expected to fire here; that's the
-        # distinctness this packet is built on, not a conflict.
+        # Further failure post-restart must NOT double-emit -- but it IS the
+        # 3rd consecutive failure overall (2 from mod1 + 1 here), which
+        # crosses RELAY_BACKOFF_FAILURE_THRESHOLD (3): per the ratified
+        # escalation ladder (HD-11b battery 4), this closes (supersedes) the
+        # escalation and opens relay_host_down instead, so
+        # collector_remote_unreachable now shows [alert, clear] here, not a
+        # bare re-emitted alert -- the persisted captureFailureEscalated flag
+        # from before the restart is what lets this transition fire exactly
+        # once rather than either double-emitting the alert or missing the
+        # supersession entirely.
         _run_once_defaults(mod2, [remote])
         events = _outbox_by_source(outbox_dir)
-        assert len(events.get(ESCALATION_SOURCE, [])) == 1
+        assert [e["eventType"] for e in events.get(ESCALATION_SOURCE, [])] == ["alert", "clear"]
+        assert len(events.get("relay_host_down", [])) == 1
+
+        state = mod2.load_state()
+        assert state["remotes"][remote].get("captureFailureEscalated") is False
 
         # Clear the backoff window (300s schedule[0]) before the success
         # attempt, otherwise the dead-host backoff guard skips the remote
         # entirely and ssh_json_lines is never even called.
         clock.advance(400)
 
-        # Success post-restart must still clear correctly.
+        # Success post-restart: only 1 success, not enough to recover
+        # backoff (recovery_successes default 2) -- relay_host_down stays
+        # open. The escalation already closed at the failure above (superseded
+        # by tier 3), so nothing new fires for it here; asserting it stays
+        # exactly [alert, clear] (not a spurious second clear) is the
+        # anti-noise proof for this restart path specifically.
         with patch.object(mod2, "ssh_json_lines", return_value=[]):
             _run_once_defaults(mod2, [remote])
 
     events = _outbox_by_source(outbox_dir)
-    types = [e["eventType"] for e in events[ESCALATION_SOURCE]]
-    assert types == ["alert", "clear"]
+    assert [e["eventType"] for e in events[ESCALATION_SOURCE]] == ["alert", "clear"]
+    assert len(events.get("relay_host_down", [])) == 1
 
 
 # ---------------------------------------------------------------------------
@@ -512,10 +547,15 @@ def test_long_remote_name_does_not_collide_or_misorder_events(tmp_state):
 
 
 # ---------------------------------------------------------------------------
-# Test 7 (load-bearing distinctness proof): independent of relay_host_down
+# Test 7 (load-bearing distinctness proof): the escalation fires at its own,
+# EARLIER threshold, distinctly before relay_host_down's -- then relay_host_down
+# supersedes it. This is the proof that the two are genuinely different
+# thresholds (not the same signal twice), even though the ratified ladder
+# design means they are never BOTH open at once (see the flap test above for
+# that invariant).
 # ---------------------------------------------------------------------------
 
-def test_escalation_independent_of_relay_host_down(tmp_state):
+def test_escalation_fires_before_backoff_then_superseded(tmp_state):
     state_dir, outbox_dir = tmp_state
     mod = _load_mod_with_dirs(state_dir, outbox_dir)
     assert mod.RELAY_BACKOFF_FAILURE_THRESHOLD == 3
@@ -529,20 +569,24 @@ def test_escalation_independent_of_relay_host_down(tmp_state):
          patch.object(mod, "remote_failure_context", return_value=([], {})), \
          _patched_collector_clock(mod, clock):
 
-        # 2 failures: escalation present, backoff/down NOT yet.
+        # 2 failures: escalation alert present (its own, earlier threshold),
+        # backoff/down NOT yet reached.
         for _ in range(2):
             _run_once_defaults(mod, [remote])
             clock.advance(30)
         events = _outbox_by_source(outbox_dir)
-        assert len(events.get(ESCALATION_SOURCE, [])) == 1
+        assert [e["eventType"] for e in events.get(ESCALATION_SOURCE, [])] == ["alert"]
         assert "relay_host_down" not in events
 
-        # 3rd failure: both present.
+        # 3rd failure: relay_host_down opens and supersedes the escalation --
+        # the escalation's typed clear proves it fired independently at its
+        # own threshold one cycle earlier, not merely as a side effect of
+        # relay_host_down opening.
         _run_once_defaults(mod, [remote])
         clock.advance(30)
 
     events = _outbox_by_source(outbox_dir)
-    assert len(events.get(ESCALATION_SOURCE, [])) == 1
+    assert [e["eventType"] for e in events.get(ESCALATION_SOURCE, [])] == ["alert", "clear"]
     assert len(events.get("relay_host_down", [])) == 1
 
 
