@@ -1459,6 +1459,10 @@ export class AgentRuntime implements Runtime {
   }
 
   private getOpenFileDescriptorCount(): number | null {
+    // /proc/self/fd exists only on Linux. On macOS readdirSync throws ENOENT
+    // on every call — gate early so the metric degrades cleanly instead of
+    // throwing-and-catching on every health-stats tick.
+    if (process.platform !== 'linux') return null;
     try {
       return readdirSync('/proc/self/fd').length;
     } catch (err) {

@@ -154,6 +154,7 @@ async function importMainWithMocks(options: {
   pendingStartupMessage?: { chatJid: string; text: string } | null;
   persistIntroSentFlagThrows?: boolean;
   execFileSyncThrows?: boolean;
+  accessSyncThrows?: boolean;
   drainPendingOutboundRejectsOnStartup?: boolean;
   selfRestartMarker?: {
     chatJid?: string;
@@ -346,6 +347,9 @@ async function importMainWithMocks(options: {
     execFileSync: options.execFileSyncThrows
       ? vi.fn(() => { throw new Error('ffmpeg missing'); })
       : vi.fn(),
+    accessSync: options.accessSyncThrows
+      ? vi.fn(() => { throw new Error('ENOENT'); })
+      : vi.fn(),
     existsSync: vi.fn((path: string) => existingPaths.has(path)),
     createConnection: vi.fn(() => connection),
     resolveLatestPluginDir: vi.fn((dir: string) => dir),
@@ -451,6 +455,7 @@ async function importMainWithMocks(options: {
   vi.doMock('node:fs', async (importOriginal: () => Promise<typeof import('node:fs')>) => ({
     ...(await importOriginal()),
     existsSync: mocks.existsSync,
+    accessSync: mocks.accessSync,
   }));
   vi.doMock('node:child_process', async (importOriginal: () => Promise<typeof import('node:child_process')>) => ({
     ...(await importOriginal()),
@@ -1552,7 +1557,7 @@ describe('main.ts — uncovered helpers and signal paths', () => {
 
   describe('periodic startup and maintenance timers', () => {
     it('logs when ffmpeg is unavailable at startup', async () => {
-      const h = await importMainWithMocks({ execFileSyncThrows: true });
+      const h = await importMainWithMocks({ accessSyncThrows: true });
 
       expect(h.logger.warn).toHaveBeenCalledWith('ffmpeg not found — video processing will fail');
     });

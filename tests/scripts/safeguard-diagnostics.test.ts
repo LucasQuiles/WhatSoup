@@ -175,9 +175,15 @@ const qualityCiSystemDepsTimeoutBlock = [
 ].join('\n');
 
 const qualityCiBrowserInstallScript = [
+  '# On macOS, install coreutils first: `brew install coreutils` (provides gtimeout)',
+  'TIMEOUT_BIN="$(command -v gtimeout || command -v timeout)"',
+  'if [ -z "$TIMEOUT_BIN" ]; then',
+  '  echo "Neither timeout nor gtimeout found. On macOS: brew install coreutils" >&2',
+  '  exit 1',
+  'fi',
   'for attempt in 1 2 3; do',
   '  echo "::group::Playwright chromium download attempt ${attempt}/3"',
-  '  if timeout 300 npx playwright install chromium; then',
+  '  if "$TIMEOUT_BIN" 300 npx playwright install chromium; then',
   '    echo "::endgroup::"',
   '    echo "Playwright chromium download succeeded on attempt ${attempt}"',
   '    exit 0',
@@ -1073,8 +1079,8 @@ describe('safeguard diagnostics', () => {
   it('fails when the browser retry reintroduces Playwright system-dependency installation', () => {
     const workflow = requiredFiles['.github/workflows/quality.yml'];
     const mutated = workflow.replace(
-      'timeout 300 npx playwright install chromium',
-      'timeout 300 npx playwright install chromium --with-deps',
+      '"$TIMEOUT_BIN" 300 npx playwright install chromium',
+      '"$TIMEOUT_BIN" 300 npx playwright install chromium --with-deps',
     );
     expect(mutated).not.toBe(workflow);
     const fixture = makeRepo({ files: { '.github/workflows/quality.yml': mutated } });
@@ -1201,8 +1207,8 @@ describe('safeguard diagnostics', () => {
   it('fails when the browser retry only echoes the required install command', () => {
     const workflow = requiredFiles['.github/workflows/quality.yml'];
     const mutated = workflow.replace(
-      'if timeout 300 npx playwright install chromium; then',
-      'if echo "timeout 300 npx playwright install chromium"; then',
+      'if "$TIMEOUT_BIN" 300 npx playwright install chromium; then',
+      'if echo "$TIMEOUT_BIN" 300 npx playwright install chromium; then',
     );
     expect(mutated).not.toBe(workflow);
     const fixture = makeRepo({ files: { '.github/workflows/quality.yml': mutated } });

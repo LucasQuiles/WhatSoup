@@ -1,13 +1,12 @@
-import { existsSync } from 'node:fs';
+import { accessSync, existsSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { join, delimiter } from 'node:path';
 import { config } from './config.ts';
 import logger, { createChildLogger, flushLogger } from './logger.ts';
 import { storeDecryptionFailure } from './core/database.ts';
 import { cleanupOldRateLimits, cleanupOldAttempts } from './runtimes/chat/rate-limits-db.ts';
 import { getMessagesBySender, getMessageCount, getUnprocessedCount } from './core/messages.ts';
 import { processHistoryBatch, type HistoryInput } from './core/history-sync.ts';
-import { execFileSync } from 'node:child_process';
 import { createConnection } from './transport/factory.ts';
 import { classifyStreamedProviderFailure } from './runtimes/agent/failure-taxonomy.ts';
 import type { RuntimeConnection } from './transport/runtime-connection.ts';
@@ -841,8 +840,13 @@ const healthServer = startHealthServer({
   },
 });
 
-// 8. ffmpeg check
-try { execFileSync('which', ['ffmpeg']); } catch { log.warn('ffmpeg not found — video processing will fail'); }
+// 8. ffmpeg check — portable PATH walk (no 'which' dependency; works on Alpine/busybox)
+{
+  const found = (process.env.PATH ?? '/usr/local/bin:/usr/bin:/bin')
+    .split(delimiter)
+    .some((dir) => { try { accessSync(`${dir}/ffmpeg`); return true; } catch { return false; } });
+  if (!found) log.warn('ffmpeg not found — video processing will fail');
+}
 
 // 9. (#1445 QR-012) Messages/receipts retention no longer runs its own
 // standalone startup timeout — it is folded into the unified

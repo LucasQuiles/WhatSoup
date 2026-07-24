@@ -243,9 +243,15 @@ const CONSOLE_DESIGN_CHAIN_EXEMPTIONS = new Set([
 ]);
 
 const QUALITY_CI_BROWSER_INSTALL_SCRIPT = [
+  '# On macOS, install coreutils first: `brew install coreutils` (provides gtimeout)',
+  'TIMEOUT_BIN="$(command -v gtimeout || command -v timeout)"',
+  'if [ -z "$TIMEOUT_BIN" ]; then',
+  '  echo "Neither timeout nor gtimeout found. On macOS: brew install coreutils" >&2',
+  '  exit 1',
+  'fi',
   'for attempt in 1 2 3; do',
   '  echo "::group::Playwright chromium download attempt ${attempt}/3"',
-  '  if timeout 300 npx playwright install chromium; then',
+  '  if "$TIMEOUT_BIN" 300 npx playwright install chromium; then',
   '    echo "::endgroup::"',
   '    echo "Playwright chromium download succeeded on attempt ${attempt}"',
   '    exit 0',
