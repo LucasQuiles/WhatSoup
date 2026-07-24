@@ -4044,7 +4044,8 @@ def suppress_alerts_recovered_before_delivery(paths: dict[str, Path]) -> int:
             alert_ids.append(str(alert_event.get("id") or "unknown"))
             suppressed += 1
 
-        clear_will_dispatch = key in open_incidents
+        migrate_legacy_unqualified_incident(clear_event, incident_state)
+        clear_will_dispatch = isinstance(open_incidents.get(key), dict)
         if not clear_will_dispatch:
             move_suppressed_event(
                 clear_path,

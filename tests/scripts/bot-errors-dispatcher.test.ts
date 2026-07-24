@@ -1010,6 +1010,53 @@ describe('bot-errors-dispatcher', () => {
     expect(rendered).not.toContain('BOT ERROR');
   });
 
+  it('keeps a qualified recovery visible for a legacy-unqualified open incident', () => {
+    tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-dispatcher-'));
+    const capturePath = join(tmpRoot, 'sent-message.txt');
+    const pendingUntil = Math.floor(Date.now() / 1000) + 3_600;
+    seedOpenIncident(tmpRoot, 'HOST-A|bot-errors-heartbeat|heartbeat-watchdog');
+
+    writeRecoveryEvent(tmpRoot, 0, {
+      id: 'retrying-qualified-watchdog-alert',
+      eventType: 'alert',
+      severity: 'critical',
+      createdAt: '2026-07-22T21:31:08Z',
+      machine: 'HOST-A',
+      instance: 'bot-errors-heartbeat',
+      source: 'heartbeat-watchdog',
+      alertSource: 'daily_health',
+      summary: 'daily health cadence stale',
+      delivery: {
+        attempts: 1,
+        status: 'retrying',
+        nextAttemptAtEpoch: pendingUntil,
+        lastError: 'transport temporarily disconnected',
+      },
+    });
+    writeRecoveryEvent(tmpRoot, 1, {
+      id: 'qualified-watchdog-clear',
+      createdAt: '2026-07-22T21:32:32Z',
+      machine: 'HOST-A',
+      instance: 'bot-errors-heartbeat',
+      source: 'heartbeat-watchdog',
+      alertSource: 'daily_health',
+      summary: 'daily health cadence recovered',
+    });
+
+    const result = dispatchCaptured(tmpRoot, capturePath);
+
+    expect(result).toMatchObject({
+      sent: 1,
+      suppressed: 1,
+      failed: 0,
+      recoveredBeforeDelivery: 1,
+    });
+    expect(readdirSync(join(tmpRoot, 'outbox'))).toHaveLength(0);
+    const rendered = readFileSync(capturePath, 'utf8');
+    expect(rendered).toContain('BOT RECOVERY');
+    expect(rendered).not.toContain('BOT ERROR');
+  });
+
   it('does not retire a retrying alert created after an older orphan clear', () => {
     tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-dispatcher-'));
     const capturePath = join(tmpRoot, 'sent-message.txt');
