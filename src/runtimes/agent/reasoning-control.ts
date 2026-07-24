@@ -30,21 +30,34 @@ export interface ReasoningControl {
  * to mock) the session module.
  */
 export function providerConfigEffort(config: Record<string, unknown> | undefined): string | null {
-  return typeof config?.['effort'] === 'string' ? config['effort'] : null;
+  const raw = config?.['effort'];
+  // Empty string normalizes to null so BOTH consumers agree. The argv builder
+  // filters falsy (it must — `--effort ''` is a malformed flag), so a reader
+  // that returned '' would report an effort the child never received, breaking
+  // getSpawnedEffort's contract. Behaviour change vs pre-Slice-3: a configured
+  // `effort: ""` previously emitted `--effort ''`; it is now omitted.
+  return typeof raw === 'string' && raw.length > 0 ? raw : null;
 }
 
 /** claude-cli `--effort` levels, strongest -> weakest. No `max` (owner decision). */
 const CLAUDE_CLI_EFFORT_LEVELS: readonly string[] = Object.freeze(['xhigh', 'high', 'medium', 'low']);
 
 /**
- * Whether `provider` consumes a reasoning-effort override at spawn. This is the
- * SINGLE home of that provider fact: the two questions are deliberately split by
- * granularity — which LEVELS a given model offers is a menu concern
- * (nativeReasoningControl, per-model in Phase-2), whether an effort reaches the
- * child at all is an apply concern (route-resolution applyRouteEffort). Both
- * read this, so Phase-2's second effort provider is ONE edit, not a lockstep
- * pair whose silent-failure direction is a receipt that lies (a pinned effort
- * echoed to the user and then dropped before spawn).
+ * Whether `provider` consumes a reasoning-effort override at spawn. Owns that
+ * provider fact for the menu (nativeReasoningControl) and for the spawn-config
+ * write (route-resolution applyRouteEffort), split by granularity: which LEVELS
+ * a model offers is a menu concern (per-model in Phase-2); whether an effort is
+ * written into the spawn config at all is an apply concern.
+ *
+ * NOT the whole story, and the gap is deliberate to document rather than claim
+ * away: the value only reaches the child through the per-provider switch in
+ * session.ts resolveProviderArgs, whose `case 'claude-cli'` arm is a THIRD
+ * encoding of this fact that does not consult this predicate. So adding a second
+ * effort provider is TWO coordinated edits — here, and an argv arm in session.ts
+ * — and skipping the argv arm yields the bad failure direction: menu offers the
+ * level, pin persists, receipt says "high reasoning", session recycles, and the
+ * child still runs at default. The drift-pin test in route-resolution.test.ts
+ * asserts through the real argv builder precisely so that omission goes RED.
  */
 export function providerHasNativeReasoningControl(provider: string): boolean {
   return provider === 'claude-cli';

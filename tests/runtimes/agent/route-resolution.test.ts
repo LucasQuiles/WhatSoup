@@ -20,8 +20,9 @@ import {
   type RouteInputs,
 } from '../../../src/runtimes/agent/route-resolution.ts';
 import type { ChatModelPreference } from '../../../src/runtimes/agent/chat-preference-db.ts';
-import { nativeReasoningControl } from '../../../src/runtimes/agent/reasoning-control.ts';
+import { nativeReasoningControl, providerConfigEffort } from '../../../src/runtimes/agent/reasoning-control.ts';
 import { PROVIDER_IDS } from '../../../src/runtimes/agent/providers/index.ts';
+import { __provider_switch_for_test } from '../../../src/runtimes/agent/session.ts';
 
 function pref(overrides: Partial<ChatModelPreference> = {}): ChatModelPreference {
   return {
@@ -398,18 +399,53 @@ describe('Slice 3 — reasoning-effort on the route', () => {
       expect(applyRouteEffort(undefined, { provider: 'claude-cli', effort: 'high' })).toEqual({ effort: 'high' });
     });
 
-    // Drift pin (not a claude-cli restatement): the provider set that OPENS a
-    // Level-3 effort menu must be EXACTLY the set whose spawn config accepts an
-    // effort. Asserted across every provider id, because the divergence that
-    // matters is silent and user-visible in the worst direction — offer levels,
-    // persist the pick, echo "high reasoning", then drop the value before spawn.
-    // This is what makes Phase-2's second effort provider one edit, not two.
-    it('menu capability and spawn application agree for every provider id', () => {
+    // Drift pin. Asserts through the REAL consumer — the argv the child is
+    // actually spawned with — NOT through applyRouteEffort's return value.
+    // Checking the latter would be a tautology: post-refactor both the menu gate
+    // and the config write read providerHasNativeReasoningControl, so comparing
+    // them compares a predicate to itself and stays green even when the effort
+    // never reaches the child. Only session.ts's per-provider switch turns the
+    // config key into `--effort`, and that switch does NOT consult the predicate.
+    // So this pins the full chain: menu offers a level  <=>  child receives it.
+    // Add a provider to reasoning-control without adding its argv arm and this
+    // goes RED — which is the whole point, because that omission is silent and
+    // user-visible in the worst way (receipt says "high reasoning", child runs
+    // at default).
+    it('menu capability and the actual spawned argv agree for every provider id', () => {
       for (const provider of PROVIDER_IDS) {
         const offersEffortMenu = nativeReasoningControl(provider, 'any-model') !== null;
-        const appliesEffortAtSpawn = applyRouteEffort({}, { provider, effort: 'high' })?.['effort'] === 'high';
-        expect(appliesEffortAtSpawn, `provider ${provider}`).toBe(offersEffortMenu);
+        const spawnConfig = applyRouteEffort({}, { provider, effort: 'high' });
+        let childReceivesEffort = false;
+        try {
+          const argv = __provider_switch_for_test.getProviderArgs(
+            provider, 'SYS', '/cwd', undefined, 'some-model', [], spawnConfig,
+          );
+          childReceivesEffort = argv.includes('--effort') && argv.includes('high');
+        } catch {
+          // A non-CLI provider builds no argv, so the flag cannot reach a child.
+          childReceivesEffort = false;
+        }
+        expect(childReceivesEffort, `provider ${provider}`).toBe(offersEffortMenu);
       }
+    });
+
+    it('an empty-string effort is omitted, and the reader agrees it is absent', () => {
+      // Both consumers must see the same thing: the argv builder cannot emit
+      // `--effort ''` (malformed), so the reader must not report '' either.
+      expect(providerConfigEffort({ effort: '' })).toBeNull();
+      const argv = __provider_switch_for_test.getProviderArgs(
+        'claude-cli', 'SYS', '/cwd', undefined, 'm', [], { effort: '' },
+      );
+      expect(argv).not.toContain('--effort');
+    });
+
+    it('a malformed non-string effort leaves a valid static effort intact', () => {
+      // Safe direction: garbage must be ignored, never clobber the operator's
+      // configured static effort into something the reader then reports as absent.
+      const base = { effort: 'high' };
+      const out = applyRouteEffort(base, { provider: 'claude-cli', effort: 7 as unknown as string });
+      expect(out).toBe(base);
+      expect(providerConfigEffort(out)).toBe('high');
     });
   });
 });

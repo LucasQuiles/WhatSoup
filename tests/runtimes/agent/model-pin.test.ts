@@ -478,6 +478,7 @@ void _mockQueueTypeCheck; // suppress unused-variable warning
 
 import { AgentRuntime } from '../../../src/runtimes/agent/runtime.ts';
 import { __resetModelCatalogueCacheForTest } from '../../../src/runtimes/agent/model-catalogue-resolver.ts';
+import { providerConfigEffort } from '../../../src/runtimes/agent/reasoning-control.ts';
 import { Database as RealDatabase } from '../../../src/core/database.ts';
 import { DurabilityEngine } from '../../../src/core/durability.ts';
 
@@ -591,11 +592,12 @@ describe('NL routing handlers (nlRouting flag)', () => {
     );
     // Slice 3: the recycle diff also reads the session's EFFECTIVE spawned
     // effort. Like getModelRef/getProviderId above, the mock must report the
-    // LATEST construction opts — the real getSpawnedEffort reads
-    // this.providerConfig.effort (session.ts), so mirror providerConfig.effort.
+    // LATEST construction opts. It calls the REAL providerConfigEffort rather
+    // than re-implementing its guard, so the double cannot silently drift from
+    // the production reader (which would make these tests verify the mock).
     (mockSession as unknown as Record<string, unknown>).getSpawnedEffort = vi.fn(() => {
       const pc = (capturedSessionManagerOptsRef.current as unknown as { providerConfig?: Record<string, unknown> } | null)?.providerConfig;
-      return typeof pc?.['effort'] === 'string' ? pc['effort'] : null;
+      return providerConfigEffort(pc);
     });
   });
 

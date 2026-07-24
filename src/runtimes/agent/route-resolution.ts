@@ -1,5 +1,5 @@
 import type { ChatModelPreference } from './chat-preference-db.ts';
-import { providerHasNativeReasoningControl } from './reasoning-control.ts';
+import { providerConfigEffort, providerHasNativeReasoningControl } from './reasoning-control.ts';
 import {
   FALLBACK_MODEL_REQUIRED_PROVIDER_IDS,
   type AgentFallbackEntry,
@@ -184,8 +184,10 @@ export function resolveRoute(i: RouteInputs): RouteDecision {
  * consumes an effort flag (claude-cli's `--effort`, read by session.ts
  * resolveProviderArgs); every other provider ignores it, so the base is
  * returned untouched. The provider set is NOT re-tested here — it is read from
- * reasoning-control.ts, the same SSOT the Level-3 menu gates on, so a menu that
- * offers levels and a spawn that honors them cannot disagree.
+ * reasoning-control.ts, the same predicate the Level-3 menu gates on. That
+ * removes one of two duplicate encodings, not all of them: writing the key here
+ * does not mean the child receives a flag, which is session.ts's per-provider
+ * argv switch (see providerHasNativeReasoningControl for the remaining gap).
  *
  * A per-chat effort PIN (a non-empty `route.effort`) OVERRIDES the static
  * `providerConfig.effort` for that spawn. A route with no effort override
@@ -198,8 +200,14 @@ export function applyRouteEffort(
   base: Record<string, unknown> | undefined,
   route: Pick<RouteDecision, 'provider' | 'effort'>,
 ): Record<string, unknown> | undefined {
-  if (!providerHasNativeReasoningControl(route.provider) || !route.effort) return base;
-  return { ...(base ?? {}), effort: route.effort };
+  if (!providerHasNativeReasoningControl(route.provider)) return base;
+  // Validate the WRITE through the same reader the spawn path reads with, so the
+  // guard is symmetric by construction. It also keeps the safe direction: a
+  // malformed (non-string) effort yields null and returns `base` untouched,
+  // rather than clobbering a valid operator-configured static effort with
+  // garbage that the reader would then report as absent.
+  const level = providerConfigEffort({ effort: route.effort });
+  return level ? { ...(base ?? {}), effort: level } : base;
 }
 
 export function isPinnedModelEligible(
