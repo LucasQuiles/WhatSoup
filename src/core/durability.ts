@@ -692,8 +692,14 @@ export class DurabilityEngine {
       getMaybeSentOutboundCount: prepare(
         `SELECT COUNT(*) as count FROM outbound_ops WHERE status = 'maybe_sent'`,
       ),
+      // Ambiguity-transition time, not queue time: a send that fails BEFORE
+      // markSubmitted() (null submitted_at — the BRICK-LAB job-1474 shape)
+      // must still age and page, not read as fresh. COALESCE mirrors the
+      // reconciliation query's fix (getLiveReconcileMaybeSent, #2079); this
+      // sibling health-staleness query was not covered by that fix and
+      // stayed null-blind exactly for the pre-submission failure case.
       getOldestMaybeSentSubmittedAt: prepare(
-        `SELECT MIN(submitted_at) as at FROM outbound_ops WHERE status = 'maybe_sent' AND submitted_at IS NOT NULL`,
+        `SELECT MIN(COALESCE(submitted_at, created_at)) as at FROM outbound_ops WHERE status = 'maybe_sent'`,
       ),
       getQuarantinedOutboundCount: prepare(
         `SELECT COUNT(*) as count FROM outbound_ops WHERE status = 'quarantined'`,
@@ -701,12 +707,19 @@ export class DurabilityEngine {
       getLastRecoveryRunCompletedAt: prepare(
         `SELECT completed_at FROM recovery_runs ORDER BY id DESC LIMIT 1`,
       ),
+      // #1789 companion fix: this INSERT sets completed_at at write time but
+      // (until now) never set status, so under migration 45's
+      // status DEFAULT 'started' a row born here was self-contradictory —
+      // already completed_at-stamped while reading status='started' forever.
+      // logRecoveryRun() is a synchronous, single-statement aggregate-stats
+      // log (no separate "start" phase to record), so 'completed' is correct
+      // at insert time, not a later transition.
       insertRecoveryRun: prepare(`
         INSERT INTO recovery_runs
           (trigger, inbound_replayed, outbound_reconciled, outbound_replayed,
            outbound_quarantined, tool_calls_recovered, tool_calls_replayed,
-           tool_calls_quarantined, sessions_restored, completed_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+           tool_calls_quarantined, sessions_restored, completed_at, status)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), 'completed')
       `),
       selectNow: prepare(`SELECT datetime('now') AS now`),
     };
@@ -1192,6 +1205,14 @@ export class DurabilityEngine {
     return this.turnRecovery.promoteBlockedTurnRecoveryJob(jobId, owner, fence, proof);
   }
 
+  getTurnRecoveryOriginalDeliveryStatus(jobId: number): { outboundStatus: string } | undefined {
+    return this.turnRecovery.getTurnRecoveryOriginalDeliveryStatus(jobId);
+  }
+
+  getTurnRecoverySourceProof(jobId: number): { processingStatus: string; outboundStatus: string } | undefined {
+    return this.turnRecovery.getTurnRecoverySourceProof(jobId);
+  }
+
   /**
    * Enumerates every pending or claimed job for one owner, including pending
    * backoff. Cursors are scoped to one scan cycle; after scanComplete, reset
@@ -1226,8 +1247,9 @@ export class DurabilityEngine {
   hasOutstandingTurnRecoveryForScope(
     scope: 'per_chat' | 'shared' | 'singleton',
     conversationKey: string,
+    options?: { excludeJobId?: number },
   ): boolean {
-    return this.turnRecovery.hasOutstandingTurnRecoveryForScope(scope, conversationKey);
+    return this.turnRecovery.hasOutstandingTurnRecoveryForScope(scope, conversationKey, options);
   }
 
   // ── Outbound ops ──
