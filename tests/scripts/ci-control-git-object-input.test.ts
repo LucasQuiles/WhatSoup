@@ -1169,7 +1169,7 @@ describe('exact commit range', () => {
         base: baseOid,
         local: localOid,
         count: '2\n',
-        rows: Buffer.from(validRows.replace('\n', '\n\n')),
+        rows: Buffer.from(`${firstOid} ${baseOid}\n\n${localOid} ${firstOid}\n`),
       },
       {
         base: baseOid,
