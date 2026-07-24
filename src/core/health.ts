@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { config } from '../config.ts';
 import { safeStringEqual } from '../lib/safe-compare.ts';
 import { lookupCredential } from '../lib/keyring.ts';
+import { envStr } from '../lib/runtime-config.ts';
 import { createChildLogger } from '../logger.ts';
 import { CURRENT_SCHEMA_MIGRATION, type Database } from './database.ts';
 import { readArcBindingHealth } from './arc-binding-health.ts';
@@ -1708,7 +1709,7 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
   // shutdown wiring needed in main.ts, which already calls healthServer.close().
   server.on('close', () => loopLagSampler.stop());
 
-  const healthHost = process.env.HEALTH_BIND_ADDRESS ?? '127.0.0.1';
+  const healthHost = envStr('HEALTH_BIND_ADDRESS', '127.0.0.1');
   // R7a: refuse a non-loopback bind without an explicit opt-in — the health server
   // exposes GET /health metadata and the token-gated POST /access endpoint, and a
   // remote plain-HTTP bind sends the health token over the wire. Mirrors the fleet guard.

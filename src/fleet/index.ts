@@ -3,6 +3,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { createChildLogger } from '../logger.ts';
+import { envStr } from '../lib/runtime-config.ts';
 import { jsonResponse, parseRoute, parseQueryString, readBody, extractBearer } from '../lib/http.ts';
 import { cleanGitEnv } from '../lib/git-env.ts';
 import { FleetDiscovery } from './discovery.ts';
@@ -1089,7 +1090,7 @@ export function createFleetServer(deps: FleetDeps) {
     wsServer,
     realtimePoller,
     start(port: number): void {
-      const host = process.env.FLEET_BIND_ADDRESS ?? '127.0.0.1';
+      const host = envStr('FLEET_BIND_ADDRESS', '127.0.0.1');
       assertSafeFleetBind(host); // fail fast — before any pollers/timers start
       discovery.startAutoRefresh();
       healthPoller.start();

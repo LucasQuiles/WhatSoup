@@ -13,6 +13,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import * as fs from 'node:fs';
 import { repoRoot, tmpRoot } from './paths.ts';
+import { envStr, envStrOpt } from '../lib/runtime-config.ts';
 
 const execFileAsync = promisify(execFile);
 
@@ -101,8 +102,8 @@ export function buildPlist(name: string): string {
   const logDir = path.join(xdgConfig, 'whatsoup', 'instances', name);
   const tmpDir = tmpRoot(name);
   const wrapper = path.join(os.homedir(), '.local', 'bin', 'whatsoup');
-  const envPath = process.env.PATH ?? '/usr/local/bin:/usr/bin:/bin';
-  const whatsoupNode = process.env.WHATSOUP_NODE;
+  const envPath = envStr('PATH', '/usr/local/bin:/usr/bin:/bin');
+  const whatsoupNode = envStrOpt('WHATSOUP_NODE');
 
   return [
     '<?xml version="1.0" encoding="UTF-8"?>',
