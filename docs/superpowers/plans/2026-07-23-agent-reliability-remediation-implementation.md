@@ -26,7 +26,7 @@ SQLite, macOS private credential stores, ARC, and Tailscale admin controls.
 As of 2026-07-24, the contract lane and three code lanes are committed, pushed,
 and published as four open pull requests against `main`. Each branch was
 reconciled through an ordinary merge with `main` at
-`eb55f3dc4c80fe2f785e37725288d08fbf82c7e9`; this preserved the published
+`ad506199d94e4cc89b9075ad5e9cd12e86dcf4ea`; this preserved the published
 lineage without force-pushing active reviews. Branch-local push gates pass at
 every recorded head. GitHub checks are head-bound and must be read live before
 merge; this checkpoint records delivery identity rather than making a timeless
@@ -36,20 +36,34 @@ every host mutation remain pending.
 | Deliverable | Branch | Pull request | Recorded code head |
 | --- | --- | --- | --- |
 | Contract, design, and implementation ledger | `fix/agent-queue-health-20260723` | #2142 | This document's commit |
-| Provider actor isolation and canary proof | `fix/agent-provider-actor-isolation-20260723` | #2128 | `c7d367617` |
-| Queue-health truth | `fix/agent-queue-health-truth-20260723` | #2129 | `922fac7dc` |
-| Suspend and platform hardening | `fix/agent-suspend-platform-hardening-20260723` | #2130 | `4bc52b44f` |
+| Provider actor isolation and canary proof | `fix/agent-provider-actor-isolation-20260723` | #2128 | `31c85959c` |
+| Queue-health truth | `fix/agent-queue-health-truth-20260723` | #2129 | `dd0352889` |
+| Suspend and platform hardening | `fix/agent-suspend-platform-hardening-20260723` | #2130 | `ec135a6f3` |
 
-The upstream reconciliation found one substantive overlap: `main` extracted
+The first upstream reconciliation found one substantive overlap: `main` extracted
 the legacy per-chat transport helpers from `AgentRuntime` while the actor lane
 replaced that legacy socket lifecycle with `PerChatMcpSocketManager`. The
 resolution keeps `chat-transport.ts` as the orchestration boundary and the
 manager as the sole socket lifecycle owner; the superseded socket/config
-implementation was removed rather than duplicated. Queue health merged
-without a behavior conflict. The documentation and suspend lanes only
+implementation was removed rather than duplicated.
+
+The second reconciliation incorporated the upstream durable turn-recovery
+supervisor. The actor and suspend lanes required no behavioral resolution.
+Queue health retained the existing `runtimeTurnRecoveryIsDegraded` predicate,
+consumed upstream's `getTurnRecoveryHealthDetails` helper, and composed the
+result with halted-queue health. This avoids a second recovery-health extractor
+or competing degradation rule. The documentation and suspend lanes only
 conflicted in generated work-index files, which were regenerated from their
-reconciled trees. Queue and suspend must still refresh again after provider
-actor isolation merges, as required by the merge order below.
+reconciled trees. Queue and suspend must still refresh after provider actor
+isolation merges, as required by the merge order below.
+
+Each reconciliation cycle ran verification, gap analysis, a falsifiable
+integration hypothesis, duplication review, and architecture/fitness
+simplification. One queue push attempt was inconclusive because a locally
+rebuilt native dependency matched the shell's Node ABI rather than the
+repository-pinned Node 24 ABI. Rebuilding it through the pinned npm wrapper,
+rerunning the two recovery suites, and rerunning the complete push gate passed;
+the failed attempt is not counted as verification.
 
 The unpushed `fix/agent-provider-canary-proof-20260723` precursor was compared
 with `git range-diff` and `git cherry`. Its actor and canary work is incorporated

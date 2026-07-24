@@ -425,6 +425,7 @@ type TurnRecoveryStatements = {
   renewTurnRecoveryClaim: PreparedStatement;
   completeTurnRecoveryJob: PreparedStatement;
   getTurnRecoverySourceInboundStatus: PreparedStatement;
+  getTurnRecoveryOriginalDeliveryStatus: PreparedStatement;
   getEchoedTurnRecoverySettlement: PreparedStatement;
   completeEchoedTurnRecoveryInbound: PreparedStatement;
   completeEchoedTurnRecoveryJob: PreparedStatement;
@@ -561,6 +562,16 @@ export class TurnRecoveryStore {
         ${VALID_RECOVERY_JOB_FROM}
         WHERE j.id = ?
           AND j.claim_expires_at > datetime('now')
+      `),
+      // Same join, no claim-liveness filter: callable BEFORE a claim exists,
+      // so the supervisor can skip claiming a job whose original selected
+      // delivery is still ambiguous (maybe_sent) rather than claim, replay,
+      // and then fail completeTurnRecoveryJob's own terminal-status gate
+      // after a real send already went out (the duplicate-output risk).
+      getTurnRecoveryOriginalDeliveryStatus: prepare(`
+        SELECT o.status AS outbound_status
+        ${VALID_RECOVERY_JOB_FROM}
+        WHERE j.id = ?
       `),
       getEchoedTurnRecoverySettlement: prepare(`
         SELECT j.id AS job_id, j.state, i.seq AS inbound_seq,
@@ -870,14 +881,19 @@ export class TurnRecoveryStore {
         LEFT JOIN inbound_events i ON i.seq = j.source_inbound_seq
         LEFT JOIN outbound_ops o ON o.id = t.delivery_op_id
       `),
+      // job_id is carried through both arms (NULL in the second: a terminal
+      // record not yet promoted to a job row can never BE the excluded job)
+      // so the exclusion is one uniform outer-query predicate instead of two
+      // arm-specific ones — a job actively claimed by the caller's own
+      // supervisor replay must not block that replay's own admission check.
       hasOutstandingTurnRecoveryForScope: prepare(`
         SELECT 1 AS found
         FROM (
-          SELECT j.scope, j.conversation_key
+          SELECT j.scope, j.conversation_key, j.id AS job_id
           FROM turn_recovery_jobs j
           WHERE j.state IN ('pending', 'claimed')
           UNION ALL
-          SELECT t.scope, t.conversation_key
+          SELECT t.scope, t.conversation_key, j.id AS job_id
           FROM turn_terminal_records t
           LEFT JOIN turn_recovery_jobs j ON j.terminal_record_id = t.id
           WHERE t.inbound_disposition = 'transferred_to_recovery_owner'
@@ -885,6 +901,7 @@ export class TurnRecoveryStore {
         ) outstanding
         WHERE outstanding.scope = ?
           AND (outstanding.scope <> 'per_chat' OR outstanding.conversation_key = ?)
+          AND (? IS NULL OR outstanding.job_id IS NULL OR outstanding.job_id != ?)
         LIMIT 1
       `),
     };
@@ -1694,18 +1711,71 @@ export class TurnRecoveryStore {
     };
   }
 
+  /**
+   * The ORIGINAL selected-delivery op's outbound status, independent of
+   * claim state — callable on a still-`pending` job (unlike
+   * `getEchoedTurnRecoverySettlement`/the completion-time check, both of
+   * which require a live claim). `undefined` covers both "job does not
+   * exist" and "no valid recovery link" the same way the shared join does
+   * elsewhere; callers that need to distinguish those already hold the row
+   * from enumeration.
+   */
+  getTurnRecoveryOriginalDeliveryStatus(jobId: number): { outboundStatus: string } | undefined {
+    validatePositiveSafeInteger(jobId, 'Recovery job ID');
+    const row = this.statements.getTurnRecoveryOriginalDeliveryStatus.get(jobId) as
+      | { outbound_status: string }
+      | undefined;
+    return row ? { outboundStatus: row.outbound_status } : undefined;
+  }
+
+  /**
+   * The exact proof pair `completeTurnRecoveryJob` re-verifies (source
+   * inbound `processing_status` + original selected delivery's outbound
+   * status), exposed as a plain read so a dispatcher can classify a replay
+   * outcome BEFORE claiming 'delivered' — reuses `getTurnRecoverySourceInboundStatus`,
+   * the same prepared statement `completeTurnRecoveryJob`'s own diagnostic
+   * branch already runs (turn-recovery-store.ts, `completeTurnRecoveryJob`).
+   * Scoped to a still-live claim, same as that statement; `undefined` covers
+   * "job not found" and "claim expired" alike — callers must fail closed on
+   * either (a claim that raced expiry mid-dispatch is not proof of anything).
+   */
+  getTurnRecoverySourceProof(jobId: number): { processingStatus: string; outboundStatus: string } | undefined {
+    validatePositiveSafeInteger(jobId, 'Recovery job ID');
+    const row = this.statements.getTurnRecoverySourceInboundStatus.get(jobId) as
+      | { processing_status: string; outbound_status: string }
+      | undefined;
+    return row ? { processingStatus: row.processing_status, outboundStatus: row.outbound_status } : undefined;
+  }
+
+  /**
+   * `options.excludeJobId` lets a caller that already owns a specific
+   * recovery job (a supervisor replaying its own claimed job) ask "is this
+   * scope blocked by OTHER outstanding recovery work" without the job it is
+   * actively replaying counting as its own blocker — see PRESTAGE-T4's
+   * admission self-block finding: without this, a supervisor replay dispatch
+   * through the normal admission gate would find its own `claimed` job still
+   * outstanding in-scope and deadlock against itself, since the job cannot
+   * reach a terminal state until the replay it is gating completes.
+   */
   hasOutstandingTurnRecoveryForScope(
     scope: 'per_chat' | 'shared' | 'singleton',
     conversationKey: string,
+    options?: { excludeJobId?: number },
   ): boolean {
     validateBoundedRequired(
       conversationKey,
       'Recovery conversation key',
       TURN_RECOVERY_MAX_ID_BYTES,
     );
+    const excludeJobId = options?.excludeJobId;
+    if (excludeJobId !== undefined) {
+      validatePositiveSafeInteger(excludeJobId, 'Recovery job ID');
+    }
     return this.statements.hasOutstandingTurnRecoveryForScope.get(
       scope,
       conversationKey,
+      excludeJobId ?? null,
+      excludeJobId ?? null,
     ) !== undefined;
   }
 
