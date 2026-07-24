@@ -98,11 +98,11 @@ describe('evaluateFallbackRecoveryTransaction', () => {
     );
     expect(decision.commit).toBe(true);
     if (!decision.commit) throw new Error('unreachable');
-    // The receipt still reports the PRIMARY'S pinned model on the `to` side —
-    // the leniency is about not REJECTING on a null observation, not about
-    // losing the configured target.
-    expect(decision.receipt.to.model).toBe('claude-opus-4-8[1m]');
+    // The receipt reports the null OBSERVATION alongside the PRIMARY'S still-
+    // pinned target model — the leniency is about not rejecting on a null
+    // observation, never about losing the configured target.
     expect(decision.receipt.evidence.model).toBeNull();
+    expect(decision.receipt.to.model).toBe('claude-opus-4-8[1m]');
   });
 
   it('rejects stale evidence beyond maxEvidenceAgeMs — a cached usable sample cannot commit a later transition', () => {
