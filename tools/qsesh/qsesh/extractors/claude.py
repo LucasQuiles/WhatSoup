@@ -28,6 +28,36 @@ ACCEPTED_CLAUDE_FINGERPRINTS = MappingProxyType(
 _SAFE_KIND = re.compile(r"[A-Za-z][A-Za-z0-9._-]{0,63}").fullmatch
 _SKILL = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}").fullmatch
 _IMAGE_MEDIA_TYPE = re.compile(r"image/[A-Za-z0-9][A-Za-z0-9.+-]{0,63}").fullmatch
+CLAUDE_OBSERVED_MODERN_CONTROL_TYPES = frozenset(
+    {
+        "agent-name",
+        "ai-title",
+        "attachment",
+        "custom-title",
+        "last-prompt",
+        "mode",
+        "permission-mode",
+        "pr-link",
+        "queue-operation",
+        "relocated",
+        "worktree-state",
+    }
+)
+CLAUDE_OBSERVED_MODERN_SYSTEM_SUBTYPES = frozenset(
+    {
+        "agents_killed",
+        "informational",
+        "local_command",
+        "model_consent_fallback",
+        "model_fallback",
+        "model_refusal_fallback",
+        "model_refusal_no_fallback",
+        "scheduled_task_fire",
+        "stop_hook_summary",
+        "turn_duration",
+    }
+)
+_CONTROL_TYPES = CLAUDE_OBSERVED_MODERN_CONTROL_TYPES | {"fixture_unknown"}
 _USAGE_KEYS = (
     "cache_creation_input_tokens",
     "cache_read_input_tokens",
@@ -110,11 +140,14 @@ class ClaudeExtractor:
         if snapshot.schema_fingerprint not in ACCEPTED_CLAUDE_FINGERPRINTS:
             raise _schema("claude-schema-fingerprint")
         rows = parse_jsonl_objects(snapshot)
-        self._validate_session_ids(rows, snapshot)
+        has_init = self._has_init(rows)
+        self._validate_session_ids(
+            rows, snapshot, require_content_identity=not has_init
+        )
         builder = EventBuilder()
         tool_calls: set[str] = set()
         tool_results: set[str] = set()
-        if not self._has_init(rows):
+        if not has_init:
             self._synthesize_session_meta(rows, builder)
         for line_index, row in enumerate(rows, start=1):
             self._dispatch(
@@ -131,9 +164,17 @@ class ClaudeExtractor:
     def _validate_session_ids(
         rows: tuple[dict[str, JsonValue], ...],
         snapshot: SourceSnapshot,
+        *,
+        require_content_identity: bool,
     ) -> None:
         native_id = snapshot.candidate.native_id
         for row in rows:
+            if (
+                require_content_identity
+                and row.get("type") in {"user", "assistant"}
+                and "sessionId" not in row
+            ):
+                raise _schema("claude-session-identity")
             if "sessionId" not in row:
                 continue
             session_id = row.get("sessionId")
@@ -167,7 +208,11 @@ class ClaudeExtractor:
             None,
         )
         project = _string(project_value, phase="claude-session-meta")
-        timestamp = normalize_timestamp(content_rows[0].get("timestamp"))
+        timestamp = next(
+            normalize_timestamp(row.get("timestamp"))
+            for row in rows
+            if row.get("timestamp") is not None
+        )
         data: dict[str, JsonValue] = {"project": project}
 
         for source_key, target_key in (
@@ -213,7 +258,11 @@ class ClaudeExtractor:
         tool_results: set[str],
     ) -> None:
         raw_type = row.get("type")
-        if not isinstance(raw_type, str) or _SAFE_KIND(raw_type) is None:
+        if (
+            not isinstance(raw_type, str)
+            or _SAFE_KIND(raw_type) is None
+            or raw_type not in {"assistant", "system", "user"} | _CONTROL_TYPES
+        ):
             raise _schema("claude-row-type")
         source_line = f"line:{line_index}"
 
@@ -330,7 +379,11 @@ class ClaudeExtractor:
                     source_ref=reference,
                 )
             return
-        if not isinstance(subtype, str) or _SAFE_KIND(subtype) is None:
+        if (
+            not isinstance(subtype, str)
+            or _SAFE_KIND(subtype) is None
+            or subtype not in CLAUDE_OBSERVED_MODERN_SYSTEM_SUBTYPES
+        ):
             raise _schema("claude-system-subtype")
         builder.add(
             EventKind.META,

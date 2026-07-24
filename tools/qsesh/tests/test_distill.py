@@ -609,3 +609,53 @@ def test_modern_claude_distills_without_widening_record_contract() -> None:
         "usage": 1,
     }
     assert result.compactions[0]["reasons"] == ["manual"]
+
+
+def test_modern_session_meta_uses_first_timed_source_row_without_reversing_order() -> (
+    None
+):
+    rows = [
+        {
+            "type": "system",
+            "subtype": "attachment",
+            "sessionId": "modern-session-001",
+            "timestamp": "2026-01-02T08:04:59Z",
+            "attachments": [{"name": "before.txt"}],
+        },
+        {
+            "type": "user",
+            "cwd": "project-modern",
+            "sessionId": "modern-session-001",
+            "timestamp": "2026-01-02T08:05:00Z",
+            "uuid": "modern-user-001",
+            "message": {"role": "user", "content": "USER_MODERN"},
+        },
+        {
+            "type": "assistant",
+            "cwd": "project-modern",
+            "sessionId": "modern-session-001",
+            "timestamp": "2026-01-02T08:05:01Z",
+            "uuid": "modern-assistant-001",
+            "isSidechain": False,
+            "message": {
+                "role": "assistant",
+                "model": "fixture-model",
+                "content": [{"type": "text", "text": "ASSISTANT_MODERN"}],
+            },
+        },
+    ]
+    raw = dump_jsonl(rows)
+    extracted = ClaudeExtractor().extract(
+        _snapshot(
+            Harness.CLAUDE,
+            "modern-session-001",
+            raw,
+            "unclassified-jsonl-v1",
+            None,
+        )
+    )
+
+    result = _distilled(extracted)
+
+    assert extracted.events[0].timestamp_utc == "2026-01-02T08:04:59Z"
+    assert result.record["started_at_utc"] == "2026-01-02T08:04:59Z"

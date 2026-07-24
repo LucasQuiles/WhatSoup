@@ -435,6 +435,25 @@ def test_present_modern_session_id_must_match_candidate_native_id() -> None:
     )
 
 
+def test_modern_content_rows_must_all_prove_session_identity() -> None:
+    rows = _modern_rows()
+    del rows[1]["sessionId"]
+
+    assert _expect_schema_error(_snapshot_rows(rows)).phase == (
+        "claude-session-identity"
+    )
+
+
+def test_modern_session_without_any_content_identity_is_rejected() -> None:
+    rows = _modern_rows()
+    del rows[1]["sessionId"]
+    del rows[2]["sessionId"]
+
+    assert _expect_schema_error(_snapshot_rows(rows)).phase == (
+        "claude-session-identity"
+    )
+
+
 def test_metadata_only_modern_session_is_quarantined() -> None:
     rows = [
         {
@@ -453,7 +472,7 @@ def test_metadata_only_modern_session_is_quarantined() -> None:
     assert _expect_schema_error(_snapshot_rows(rows)).phase == "claude-session-meta"
 
 
-def test_safe_unknown_system_subtype_is_retained_as_meta() -> None:
+def test_observed_system_subtype_is_retained_as_meta() -> None:
     rows = _modern_rows()
     rows.append(
         {
@@ -467,8 +486,8 @@ def test_safe_unknown_system_subtype_is_retained_as_meta() -> None:
     assert events[-1].data == {"raw_type": "system", "subtype": "turn_duration"}
 
 
-@pytest.mark.parametrize("subtype", [None, "", "../../private", 7])
-def test_missing_or_unsafe_unknown_system_subtype_is_rejected(
+@pytest.mark.parametrize("subtype", [None, "", "../../private", "future_subtype", 7])
+def test_missing_unsafe_or_unobserved_system_subtype_is_rejected(
     subtype: object,
 ) -> None:
     rows = _modern_rows()
@@ -481,6 +500,13 @@ def test_missing_or_unsafe_unknown_system_subtype_is_rejected(
     )
 
     assert _expect_schema_error(_snapshot_rows(rows)).phase == ("claude-system-subtype")
+
+
+def test_unobserved_top_level_control_type_is_rejected() -> None:
+    rows = _modern_rows()
+    rows.append({"type": "future-control", "sessionId": "session-claude-001"})
+
+    assert _expect_schema_error(_snapshot_rows(rows)).phase == "claude-row-type"
 
 
 def test_valid_base64_image_is_represented_without_payload() -> None:
