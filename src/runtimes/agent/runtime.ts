@@ -8,6 +8,9 @@ import type {
   DurabilityEngine,
   SessionCheckpointRow,
 } from '../../core/durability.ts';
+import type { TurnRecoveryClaimFence, TurnRecoveryJobRow } from '../../core/turn-recovery-store.ts';
+import type { TurnRecoverySupervisor, TurnRecoveryReplayDispatchResult } from './turn-recovery-supervisor.ts';
+import { createTurnRecoverySupervisorForRuntime, dispatchTurnRecoveryReplayForJob, shutdownTurnRecoverySupervisorSafely, getTurnRecoveryHealthDetails } from './turn-recovery-dispatch.ts';
 import { splitInputTokenUsage, type AgentEvent } from './stream-parser.ts';
 import {
   classifyProviderFailure,
@@ -122,6 +125,22 @@ import {
   type ModelPinPort,
   type RouteRecycleOutcome,
 } from './model-pin.ts';
+import {
+  resolveExecutingActor as resolveExecutingActorForPort,
+  derivePerChatSocketPath as derivePerChatSocketPathForPort,
+  usesPerChatActorSocket as usesPerChatActorSocketForPort,
+  createPerChatActorSocket as createPerChatActorSocketForPort,
+  wirePerChatActorSocket as wirePerChatActorSocketForPort,
+  teardownPerChatActorSocket as teardownPerChatActorSocketForPort,
+  exposedCliProviders as exposedCliProvidersForPort,
+  perChatActorRaceExposed as perChatActorRaceExposedForPort,
+  findMapKeyForSession as findMapKeyForSessionForPort,
+  getQueueForChat as getQueueForChatForPort,
+  createOperationTracker as createOperationTrackerForPort,
+  getTracker as getTrackerForPort,
+  sendDirect as sendDirectForPort,
+  type ChatTransportPort,
+} from './chat-transport.ts';
 import { getRecentMessages, getMessagesSince, hasFromMeReplyAfter } from '../../core/messages.ts';
 import { toConversationKey, isGroupConversationKey, GLOBAL_CONVERSATION_KEY } from '../../core/conversation-key.ts';
 import { formatChatRefForOwner } from '../../core/chat-display-name.ts';
@@ -194,14 +213,13 @@ import { isAdminPhone } from '../../lib/phone.ts';
 import { getCommandSpec } from './command-registry.ts';
 import { matchImperative, extractImperativeTarget } from '../../core/substrate/inline-extractor.ts';
 import { createBead } from '../../core/substrate/beads.ts';
-import { mkdirSync, copyFileSync, readdirSync, unlinkSync, readFileSync } from 'node:fs';
+import { mkdirSync, copyFileSync, readdirSync, readFileSync } from 'node:fs';
 import { join, resolve, basename } from 'node:path';
 import { homedir } from 'node:os';
-import { createHash, randomUUID } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 import { EgressProxy } from './egress-proxy.ts';
 import { ToolRegistry } from '../../mcp/registry.ts';
 import { WhatSoupSocketServer } from '../../mcp/socket-server.ts';
-import { perChatActorSession } from './per-chat-actor-session.ts';
 import type { SessionContext } from '../../mcp/types.ts';
 import type { ConnectionManager } from '../../transport/connection.ts';
 import { registerAllTools } from '../../mcp/register-all.ts';
@@ -216,7 +234,6 @@ import {
 import { makeIdleEligibilityResolver } from './fallback-eligibility-cache.ts';
 import {
   createProviderMcpBridge,
-  writeMcpConfigToPath,
   writeProviderMcpConfig,
   writeProviderMcpConfigTarget,
   type OpencodeProviderConfig,
@@ -234,7 +251,6 @@ import { jitteredDelay, sleep } from '../../core/retry.ts';
 import { synthesizeSpeech } from '../chat/providers/elevenlabs.ts';
 import { writeTempFile } from '../../core/media-download.ts';
 import { OperationTracker } from './operation-tracker.ts';
-import type { ProgressEvent } from './operation-tracker.ts';
 // Media prep (message → agent content + workspace relocation) extracted to media-prep.ts.
 // Imported for the inbound pipeline; the public surface (prepareContentForAgent + the
 // __*ForTests helpers) is re-exported below so namespace-importing tests are unchanged.
@@ -1497,33 +1513,10 @@ export class AgentRuntime implements Runtime {
     }
   }
 
-  private getTurnRecoveryHealthDetails() {
-    const counts = typeof this.durability?.getTurnRecoverySupervisorCounts === 'function'
-      ? this.durability.getTurnRecoverySupervisorCounts()
-      : {
-      outstanding: 0, pending: 0, liveClaimed: 0, expiredClaimed: 0,
-      blockedUnsafe: 0, exhausted: 0, quarantinedDelivery: 0, corruptLinks: 0,
-      orphanTransfers: 0, echoConflicts: 0, openRecoveries: 0,
-      };
-    return {
-      turnRecoveryOutstanding: counts.outstanding,
-      turnRecoveryPending: counts.pending,
-      turnRecoveryLiveClaimed: counts.liveClaimed,
-      turnRecoveryExpiredClaimed: counts.expiredClaimed,
-      turnRecoveryBlockedUnsafe: counts.blockedUnsafe,
-      turnRecoveryExhausted: counts.exhausted,
-      turnRecoveryOpenRecoveries: counts.openRecoveries,
-      turnRecoveryQuarantinedDelivery: counts.quarantinedDelivery,
-      turnRecoveryCorruptLinks: counts.corruptLinks,
-      turnRecoveryOrphanTransfers: counts.orphanTransfers ?? 0,
-      turnRecoveryEchoConflicts: counts.echoConflicts ?? 0,
-    };
-  }
-
   private logHealthStats(): void {
     const memoryUsage = process.memoryUsage();
     const finalizationHealth = this.runtimeTurnSupervisor.health();
-    const recoveryHealth = this.getTurnRecoveryHealthDetails();
+    const recoveryHealth = getTurnRecoveryHealthDetails(this.durability);
 
     log.info({
       instanceName: this.instanceName,
@@ -1883,10 +1876,13 @@ export class AgentRuntime implements Runtime {
   private currentRuntimeTurnCompletion: RuntimeTurnCompletion | null = null;
   /** Owns bounded terminal retries and sticky affected-scope degradation. */
   private readonly runtimeTurnSupervisor: RuntimeTurnSupervisor<RuntimeTurnPostEffects>;
+  private readonly turnRecoverySupervisor: TurnRecoverySupervisor;
   private readonly runtimeTurnHost: RuntimeTurnCoordinatorPort & RuntimeResultHandlerPort;
   private readonly runtimeTurnCoordinator: RuntimeTurnCoordinator;
   /** Host object backing model-pin.ts / model-catalogue-render.ts (the `/model` surface). */
   private readonly modelPinHost: ModelPinPort;
+  /** Host object backing chat-transport.ts (per-chat actor socket + queue/tracker resolution). */
+  private readonly chatTransportHost: ChatTransportPort;
   private readonly runtimeTurnAfterTerminal = new Map<string, RuntimeTurnAfterTerminalAction>();
   private readonly recoveryManagerId = randomUUID();
   private recoveryGeneration = 0;
@@ -2399,6 +2395,12 @@ export class AgentRuntime implements Runtime {
       () => this.durability,
       (result, retained) => this.runtimeTurnCoordinator.applyRecoveredRuntimeTurnFinalization(result, retained),
     );
+    this.turnRecoverySupervisor = createTurnRecoverySupervisorForRuntime({ // started in setDurability, stopped at shutdown
+      instanceName: this.instanceName, getDurability: () => this.durability,
+      dispatchReplay: (job, fence) => this.dispatchTurnRecoveryReplay(job, fence),
+      recoveryManagerId: this.recoveryManagerId, nextRecoveryGeneration: () => ++this.recoveryGeneration,
+      hasSessionForChat: (deliveryJid) => this.chatSessions.has(this.resolvePerChatMapKey(deliveryJid)),
+    });
     this.handoffDistill = new HandoffDistillCoordinator({
       db,
       instanceName: this.instanceName,
@@ -2461,6 +2463,7 @@ export class AgentRuntime implements Runtime {
     this.runtimeTurnHost = this.createRuntimeTurnHost();
     this.runtimeTurnCoordinator = new RuntimeTurnCoordinator(this.runtimeTurnHost);
     this.modelPinHost = this.createModelPinHost();
+    this.chatTransportHost = this.createChatTransportHost();
 
     // Subscribe to poll vote events for AskUserQuestion → Poll bridge
     const connection = this.messenger as ConnectionManager;
@@ -2523,6 +2526,53 @@ export class AgentRuntime implements Runtime {
       renderRouteStatus: (chatJid, senderJid) => runtime.renderRouteStatus(chatJid, senderJid),
       loadRouteView: (chatJid, senderJid) => runtime.loadRouteView(chatJid, senderJid),
       completeLocalInbound: (inboundSeq) => { if (inboundSeq !== undefined) runtime.durability?.completeInbound(inboundSeq, 'local_command_handled'); },
+    };
+  }
+
+  /**
+   * Host object for the extracted per-chat transport surface
+   * (chat-transport.ts) — same shape as createModelPinHost: readonly state
+   * and mutable Maps are captured by reference, the two fields that are
+   * reassigned elsewhere on the runtime (queue, operationTracker) are
+   * read-only getters since this surface never writes them, and every
+   * collaborator is a bound delegate.
+   */
+  private createChatTransportHost(): ChatTransportPort {
+    const runtime = this;
+    // Every data field is a live getter, not a value/reference captured once
+    // here — several tests replace these (chatSessions/chatQueues/
+    // operationTrackers with Observed* wrapper Maps, agentFallbacks/
+    // nlRoutingEnabled by direct field assignment) on the runtime instance
+    // AFTER construction to observe mutations or set up scenarios. A captured
+    // reference would keep reading the pre-test-setup value.
+    return {
+      get cwd() { return runtime.cwd; },
+      get sessionScope() { return runtime.sessionScope; },
+      get sandboxPerChat() { return runtime.sandboxPerChat; },
+      get perChatConversationBound() { return runtime.perChatConversationBound; },
+      get registry() { return runtime.registry; },
+      get agentFallbacks() { return runtime.agentFallbacks; },
+      get nlRoutingEnabled() { return runtime.nlRoutingEnabled; },
+      get shared() { return runtime.shared; },
+      get instanceName() { return runtime.instanceName; },
+      get messenger() { return runtime.messenger; },
+      get effectiveProvider() { return runtime.effectiveProvider; },
+      get queue() { return runtime.queue; },
+      get operationTracker() { return runtime.operationTracker; },
+      get chatSessions() { return runtime.chatSessions; },
+      get chatQueues() { return runtime.chatQueues; },
+      get outboundQueues() { return runtime.outboundQueues; },
+      get perChatExecActorQueue() { return runtime.perChatExecActorQueue; },
+      get perChatSocketResources() { return runtime.perChatSocketResources; },
+      get operationTrackers() { return runtime.operationTrackers; },
+      get operationTrackerConfig() { return config.operationTracker; },
+      resolvePerChatMapKey: (chatJid) => runtime.resolvePerChatMapKey(chatJid),
+      resolveExecutingActor: (chatJid) => runtime.resolveExecutingActor(chatJid),
+      derivePerChatSocketPath: (chatJid) => runtime.derivePerChatSocketPath(chatJid),
+      teardownPerChatActorSocket: (mapKey) => runtime.teardownPerChatActorSocket(mapKey),
+      createPerChatActorSocket: (mapKey, chatJid) => runtime.createPerChatActorSocket(mapKey, chatJid),
+      exposedCliProviders: () => runtime.exposedCliProviders(),
+      getQueueForChat: (chatJid, mapKey) => runtime.getQueueForChat(chatJid, mapKey),
     };
   }
 
@@ -2600,8 +2650,8 @@ export class AgentRuntime implements Runtime {
       isShuttingDown: () => runtime.shutdownRequested,
       getActiveQueue: () => runtime.getActiveQueue(),
       getQueueForChat: (chatJid, mapKey) => runtime.getQueueForChat(chatJid, mapKey),
-      sendTurnPerChat: (chatJid, text, mapKey, actorJid, context, scopeRef) =>
-        runtime.sendTurnPerChat(chatJid, text, mapKey, actorJid, context, scopeRef),
+      sendTurnPerChat: (chatJid, text, mapKey, actorJid, context, scopeRef, systemTurnLease, excludeJobId) =>
+        runtime.sendTurnPerChat(chatJid, text, mapKey, actorJid, context, scopeRef, systemTurnLease, excludeJobId),
       sendVoiceReply: (chatJid, responseText) => runtime._sendVoiceReply(chatJid, responseText),
       isSilentCompact: (scopeKey) => runtime.isSilentCompact(scopeKey),
       clearSilentCompact: (scopeKey) => runtime.clearSilentCompact(scopeKey),
@@ -2714,6 +2764,7 @@ export class AgentRuntime implements Runtime {
     if (this.queue) this.queue.setDurability(engine);
     for (const q of this.outboundQueues.values()) q.setDurability(engine);
     for (const q of this.chatQueues.values()) q.setDurability(engine);
+    this.turnRecoverySupervisor.start(); // PRESTAGE-T4; idempotent
   }
 
   /**
@@ -4892,6 +4943,7 @@ export class AgentRuntime implements Runtime {
     runtimeContext?: RuntimeTurnContext,
     scopeRef?: PerChatRuntimeScopeRef,
     systemTurnLease?: SystemTurnLeaseToken,
+    excludeJobId?: number, // PRESTAGE-T4: set only by the recovery supervisor's own replay; see beginRuntimeTurnEvidence
   ): Promise<void> {
     mapKey = scopeRef?.value ?? mapKey;
     const dispatchAllowed = runtimeContext === undefined
@@ -5001,6 +5053,7 @@ export class AgentRuntime implements Runtime {
         currentMapKey,
         runtimeContext,
         scopeRef,
+        excludeJobId,
       );
     };
 
@@ -5083,6 +5136,7 @@ export class AgentRuntime implements Runtime {
     mapKey: string,
     context: RuntimeTurnContext | undefined,
     scopeRef?: PerChatRuntimeScopeRef,
+    excludeJobId?: number,
   ): RuntimeTurnCompletion | null {
     if (!context) return null;
     mapKey = scopeRef?.value ?? mapKey;
@@ -5093,7 +5147,7 @@ export class AgentRuntime implements Runtime {
     if (contexts.length > 0) {
       throw new Error(`Per-chat runtime turn context FIFO already has an active owner for "${mapKey}"`);
     }
-    this.runtimeTurnCoordinator.beginRuntimeTurnEvidence(queue, context);
+    this.runtimeTurnCoordinator.beginRuntimeTurnEvidence(queue, context, excludeJobId);
     contexts.push(context);
     this.perChatRuntimeTurnContexts.set(mapKey, contexts);
     this.perChatRuntimeTurnScopeRefs.set(
@@ -5103,6 +5157,13 @@ export class AgentRuntime implements Runtime {
     const completion = this.runtimeTurnCoordinator.createRuntimeTurnCompletion(context);
     this.perChatRuntimeTurnCompletions.set(mapKey, completion);
     return completion;
+  }
+
+  private async dispatchTurnRecoveryReplay(job: TurnRecoveryJobRow, _fence: TurnRecoveryClaimFence): Promise<TurnRecoveryReplayDispatchResult> { // real dispatcher body in turn-recovery-dispatch.ts
+    return dispatchTurnRecoveryReplayForJob(
+      this.runtimeTurnCoordinator, (jid) => this.resolvePerChatMapKey(jid),
+      (mapKey) => this.chatSessions.get(mapKey), (s) => this.requireSessionToolScopeKey(s), job,
+    );
   }
 
   private updateSessionActorJid(session: SessionManager, actorJid: string | undefined): void {
@@ -6992,7 +7053,7 @@ export class AgentRuntime implements Runtime {
     const fallbackState = this.getFallbackState();
     const providerExecution = this.providerExecutionGate.snapshot();
     const finalizationHealth = this.runtimeTurnSupervisor.health();
-    const recoveryHealth = this.getTurnRecoveryHealthDetails();
+    const recoveryHealth = getTurnRecoveryHealthDetails(this.durability);
     const finalizationDegraded =
       finalizationHealth.retainedRetries > 0
       || finalizationHealth.degradedScopes > 0
@@ -7425,6 +7486,15 @@ export class AgentRuntime implements Runtime {
       this.healthStatsTimer = null;
     }
     this.workspaceSweeper.stop();
+    // H2: quiesce the recovery scan loop FIRST, before any per-chat teardown
+    // below -- stop() clears the scan timer synchronously and blocks
+    // scheduleScan from re-arming it, so a scan cannot fire mid-shutdown and
+    // dispatch a replay into a session that teardown is tearing down or has
+    // already torn down. The later shutdownTurnRecoverySupervisorSafely call
+    // still awaits any scan that was ALREADY in flight before this line ran
+    // -- that's a different, narrower race this stop() call does not (and
+    // cannot) close by itself.
+    this.turnRecoverySupervisor.stop();
     if (this.queueSweepTimer) {
       clearInterval(this.queueSweepTimer);
       this.queueSweepTimer = null;
@@ -7544,6 +7614,8 @@ export class AgentRuntime implements Runtime {
       preserveRuntimeTurnState = true;
       log.error({ err }, 'runtime turn finalizations remained unresolved during shutdown');
     }
+    const trErr = await shutdownTurnRecoverySupervisorSafely(this.turnRecoverySupervisor);
+    if (trErr) shutdownFailures.push(trErr);
     try {
       await this.runtimeTurnCoordinator.awaitUndispatchedCrashFinalizations();
     } catch (err) {
@@ -8193,198 +8265,60 @@ export class AgentRuntime implements Runtime {
    * Re-derives mapKey each call so it is transparent to LID rekey.
    */
   private resolveExecutingActor(chatJid: string): string | undefined {
-    const mapKey = this.resolvePerChatMapKey(chatJid);
-    const session = this.chatSessions.get(mapKey);
-    if (!session || !session.getStatus().active) return undefined;
-    return this.perChatExecActorQueue.get(mapKey)?.[0];
+    return resolveExecutingActorForPort(this.chatTransportHost, chatJid);
   }
 
-  /** F-STICKY-ACTOR (QR-247): per-chat socket path under <cwd>/.claude, sha1-shortened if it would exceed the unix sun_path limit. */
   private derivePerChatSocketPath(chatJid: string): string {
-    const dir = join(this.cwd ?? homedir(), '.claude');
-    const key = toConversationKey(chatJid);
-    const full = join(dir, `whatsoup-${key}.sock`);
-    if (Buffer.byteLength(full, 'utf8') <= 100) return full;
-    const h = createHash('sha1').update(key).digest('hex').slice(0, 16);
-    return join(dir, `whatsoup-${h}.sock`);
+    return derivePerChatSocketPathForPort(this.chatTransportHost, chatJid);
   }
 
-  /** F-STICKY-ACTOR (QR-247): true only for the mode the fix covers — claude-cli, per_chat, non-sandbox. Gates the global-broadcast SKIP (keep the shared global socket actor-less = fail-closed) and the exec-queue push. Instance-global by design: the global socket's fail-closed property must not depend on per-chat socket timing. */
   private usesPerChatActorSocket(): boolean {
-    return this.sessionScope === 'per_chat' && !this.sandboxPerChat && this.effectiveProvider === 'claude-cli';
+    return usesPerChatActorSocketForPort(this.chatTransportHost);
   }
 
-  /**
-   * F-STICKY-ACTOR (QR-247): create this chat's own MCP socket (tier:'global',
-   * bound to resolveExecutingActor) and write its per-session --mcp-config so the
-   * subprocess talks to it instead of the shared global socket. Returns the socket
-   * + cfg paths for the provider override. Torn down in cleanupPerChatState.
-   *
-   * #1785 rec-3: this socket's SessionContext also carries conversationKey, bound
-   * once here to the chat it will exclusively serve for its entire lifetime (a
-   * fresh socket is derived per chat — see derivePerChatSocketPath — and never
-   * reused across chats, so a static bind is race-free, unlike the shared global
-   * socket's per-turn rebind in bindActiveGlobalMcpConversation). Without it, the
-   * registry's cross-conversation guard and the send-pipeline's beforeAudit check
-   * (both gated on session.conversationKey) silently fail open for every send
-   * this per-chat actor subprocess makes.
-   */
   private createPerChatActorSocket(mapKey: string, chatJid: string): { socketPath: string; cfgPath: string } {
-    const socketPath = this.derivePerChatSocketPath(chatJid);
-    // Ensure <cwd>/.claude exists (mirrors the global-socket setup at startup). In
-    // production the dir already exists; wiring now runs from more spawn paths
-    // (resume / provider-fallback), so make socket creation self-sufficient.
-    mkdirSync(join(this.cwd ?? homedir(), '.claude'), { recursive: true, mode: 0o700 });
-    const cfgPath = socketPath.replace(/\.sock$/, '.mcp.json');
-    const proxyScriptPath = resolve(new URL('.', import.meta.url).pathname, '../../../deploy/mcp/whatsoup-proxy.ts');
-    writeMcpConfigToPath('claude-cli', cfgPath, socketPath, proxyScriptPath);
-    const socketServer = new WhatSoupSocketServer(
-      socketPath,
-      this.registry,
-      perChatActorSession(chatJid, this.cwd ?? homedir(), this.perChatConversationBound),
-      () => this.resolveExecutingActor(chatJid),
-    );
-    socketServer.start();
-    this.perChatSocketResources.set(mapKey, { socketServer, socketPath, cfgPath });
-    return { socketPath, cfgPath };
+    return createPerChatActorSocketForPort(this.chatTransportHost, mapKey, chatJid);
   }
 
-  /**
-   * F-STICKY-ACTOR (QR-247 hardening): the single seam that binds a per-chat
-   * session to its own actor socket, keyed on the ACTUAL session provider
-   * (route?.provider ?? effectiveProvider) — NOT the instance-global provider.
-   * Called from createSessionManager so the ensure / proactive-resume / provider-
-   * fallback spawn paths all bind identically. claude-cli non-sandbox per_chat ->
-   * create-or-reuse the socket and return the strict --mcp-config override; any
-   * other provider -> tear down a stale socket (so a fallback subprocess now on the
-   * shared global socket is not frozen behind the presence-based broadcast gate)
-   * and return undefined.
-   */
   private wirePerChatActorSocket(chatJid: string, provider: string):
     | { mcpSocketPath: string; providerConfigOverride: { mcpConfig: string[]; strictMcpConfig: true } }
     | undefined {
-    if (this.sessionScope !== 'per_chat' || this.sandboxPerChat) return undefined;
-    const mapKey = this.resolvePerChatMapKey(chatJid);
-    if (provider !== 'claude-cli') {
-      this.teardownPerChatActorSocket(mapKey);
-      return undefined;
-    }
-    const existing = this.perChatSocketResources.get(mapKey);
-    const { socketPath, cfgPath } = existing
-      ? { socketPath: existing.socketPath, cfgPath: existing.cfgPath }
-      : this.createPerChatActorSocket(mapKey, chatJid);
-    return { mcpSocketPath: socketPath, providerConfigOverride: { mcpConfig: [cfgPath], strictMcpConfig: true } };
+    return wirePerChatActorSocketForPort(this.chatTransportHost, chatJid, provider);
   }
 
-  /** F-STICKY-ACTOR (QR-247 hardening): stop + unlink a per-chat actor socket and clear its exec-queue. Idempotent — safe when no entry exists. */
   private teardownPerChatActorSocket(mapKey: string): void {
-    this.perChatExecActorQueue.delete(mapKey);
-    const sockRes = this.perChatSocketResources.get(mapKey);
-    if (sockRes) {
-      try { sockRes.socketServer.stop(); } catch (err) { log.warn({ err, mapKey }, 'per-chat socket stop failed'); }
-      try { unlinkSync(sockRes.cfgPath); } catch { /* best-effort */ }
-      this.perChatSocketResources.delete(mapKey);
-    }
+    teardownPerChatActorSocketForPort(this.chatTransportHost, mapKey);
   }
 
-  /** F-STICKY-ACTOR (QR-247): non-claude subprocess CLI providers (PRIMARY and/or configured FALLBACK) that stay on the shared global socket for this instance — the still-uncovered actor-race exposure. */
   private exposedCliProviders(): string[] {
-    const isExposedCli = (p: string | undefined): p is string =>
-      typeof p === 'string' && p.endsWith('-cli') && p !== 'claude-cli';
-    const providers = new Set<string>();
-    if (isExposedCli(this.effectiveProvider)) providers.add(this.effectiveProvider);
-    for (const entry of this.agentFallbacks) if (isExposedCli(entry.provider)) providers.add(entry.provider);
-    return [...providers];
+    return exposedCliProvidersForPort(this.chatTransportHost);
   }
 
-  /** F-STICKY-ACTOR (QR-247): true when a non-sandbox per_chat instance has ANY non-claude subprocess CLI provider on the shared global socket, so the concurrent-sender actor race is NOT closed for it. Covers the STATIC config surface (primary OR fallback) and — QR-263 — the DYNAMIC nlRouting surface (a live per-sender pin can select a non-claude CLI provider at runtime even when the static config is claude-only). Drives the honest startup warning (F11). */
   private perChatActorRaceExposed(): boolean {
-    if (this.sessionScope !== 'per_chat' || this.sandboxPerChat) return false;
-    return this.exposedCliProviders().length > 0 || this.nlRoutingEnabled;
+    return perChatActorRaceExposedForPort(this.chatTransportHost);
   }
 
   private findMapKeyForSession(session: SessionManager | undefined, fallbackMapKey?: string): string | null {
-    if (session) {
-      for (const [mapKey, currentSession] of this.chatSessions) {
-        if (currentSession === session) return mapKey;
-      }
-    }
-    if (fallbackMapKey && this.chatSessions.has(fallbackMapKey)) {
-      return fallbackMapKey;
-    }
-    return null;
+    return findMapKeyForSessionForPort(this.chatTransportHost, session, fallbackMapKey);
   }
 
-  /**
-   * Get the outbound queue for a specific chatJid (shared mode).
-   * Falls back to single queue (non-shared mode).
-   */
   private getQueueForChat(chatJid: string, mapKey?: string): IOutboundQueue | null {
-    if (this.sessionScope === 'per_chat') {
-      return this.chatQueues.get(mapKey ?? this.resolvePerChatMapKey(chatJid)) ?? null;
-    }
-    if (this.shared) {
-      return this.outboundQueues.get(chatJid) ?? null;
-    }
-    return this.queue;
+    return getQueueForChatForPort(this.chatTransportHost, chatJid, mapKey);
   }
 
-  /**
-   * Create an OperationTracker for a session and wire its callbacks to the
-   * appropriate queue and session methods. Returns null if tracking is disabled.
-   */
   private createOperationTracker(
     session: SessionManager,
     resolveQueue: () => IOutboundQueue | null | undefined,
   ): OperationTracker | null {
-    if (!config.operationTracker?.enabled) return null;
-    return new OperationTracker(
-      this.instanceName,
-      config.operationTracker,
-      {
-        onProgress: (event: ProgressEvent) => {
-          const q = resolveQueue();
-          if (q) q.enqueueProgressUpdate(event, this.instanceName);
-        },
-        onStalled: (toolId: string, toolName: string) => {
-          session.recoverStalledOperation(toolId, toolName);
-        },
-        onThinkingStalled: () => {
-          session.probeLiveness();
-        },
-      },
-    );
+    return createOperationTrackerForPort(this.chatTransportHost, session, resolveQueue);
   }
 
-  /** Resolve the operation tracker for a given mapKey (per_chat) or the singleton (single/shared).
-   *  Always checks the per-key map first — control sessions store their tracker there even in
-   *  single/shared scope, so the map lookup must precede the singleton fallback to prevent
-   *  control session stalls from triggering recovery on the main session's process. */
   private getTracker(mapKey?: string): OperationTracker | null {
-    if (mapKey !== undefined) {
-      const perKeyTracker = this.operationTrackers.get(mapKey);
-      if (perKeyTracker) return perKeyTracker;
-    }
-    if (this.sessionScope === 'per_chat') return null;
-    return this.operationTracker;
+    return getTrackerForPort(this.chatTransportHost, mapKey);
   }
 
   private sendDirect(chatJid: string, text: string, bypassEchoGuard = false): void {
-    if (bypassEchoGuard) {
-      // Bypass queue entirely — direct send for admin responses
-      this.messenger.sendMessage(chatJid, text).catch((err) =>
-        log.error({ err }, 'sendDirect bypass failed'),
-      );
-      return;
-    }
-    const queue = this.getQueueForChat(chatJid);
-    if (queue) {
-      queue.enqueueText(text);
-    } else {
-      this.messenger.sendMessage(chatJid, text).catch((err) =>
-        log.error({ err }, 'sendDirect fallback failed'),
-      );
-    }
+    sendDirectForPort(this.chatTransportHost, chatJid, text, bypassEchoGuard);
   }
 
   /**
