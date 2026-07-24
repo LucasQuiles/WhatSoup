@@ -99,7 +99,7 @@ export interface ReleaseSnapshotDriftReport {
   issues: ReleaseSnapshotDriftIssue[];
 }
 
-export type ReleaseManifestValidationErrorKind = 'missing' | 'invalid-json' | 'invalid-schema';
+export type ReleaseManifestValidationErrorKind = 'missing' | 'unreadable' | 'invalid-json' | 'invalid-schema';
 
 export interface ReleaseManifestValidationReport {
   check: 'manifest-validation';
@@ -461,42 +461,40 @@ export function createReleaseSnapshotDriftReport(releasePath: string, manifestPa
  */
 export function validateReleaseManifestFile(manifestPath: string): ReleaseManifestValidationReport {
   const absoluteManifestPath = requireAbsolute('validate-manifest', manifestPath);
+
+  const fail = (kind: ReleaseManifestValidationErrorKind, message: string): ReleaseManifestValidationReport => ({
+    check: 'manifest-validation',
+    ok: false,
+    manifestPath: absoluteManifestPath,
+    error: { kind, message },
+  });
+
   if (!existsSync(absoluteManifestPath)) {
-    return {
-      check: 'manifest-validation',
-      ok: false,
-      manifestPath: absoluteManifestPath,
-      error: { kind: 'missing', message: `release manifest not found: ${absoluteManifestPath}` },
-    };
+    return fail('missing', `release manifest not found: ${absoluteManifestPath}`);
+  }
+
+  // Read and parse are split into separate try/catch blocks so a read
+  // failure (permission denied, I/O error) is never misreported as
+  // 'invalid-json' -- the two have different causes and different
+  // remediations (a permissions fix vs. re-exporting the release).
+  let raw: string;
+  try {
+    raw = readFileSync(absoluteManifestPath, 'utf8');
+  } catch (error) {
+    return fail('unreadable', `release manifest could not be read: ${error instanceof Error ? error.message : String(error)}`);
   }
 
   let payload: unknown;
   try {
-    payload = JSON.parse(readFileSync(absoluteManifestPath, 'utf8'));
+    payload = JSON.parse(raw);
   } catch (error) {
-    return {
-      check: 'manifest-validation',
-      ok: false,
-      manifestPath: absoluteManifestPath,
-      error: {
-        kind: 'invalid-json',
-        message: `release manifest is not valid JSON: ${error instanceof Error ? error.message : String(error)}`,
-      },
-    };
+    return fail('invalid-json', `release manifest is not valid JSON: ${error instanceof Error ? error.message : String(error)}`);
   }
 
   try {
     parseReleaseSnapshotManifest(payload);
   } catch (error) {
-    return {
-      check: 'manifest-validation',
-      ok: false,
-      manifestPath: absoluteManifestPath,
-      error: {
-        kind: 'invalid-schema',
-        message: `release manifest failed schema validation: ${error instanceof Error ? error.message : String(error)}`,
-      },
-    };
+    return fail('invalid-schema', `release manifest failed schema validation: ${error instanceof Error ? error.message : String(error)}`);
   }
 
   return { check: 'manifest-validation', ok: true, manifestPath: absoluteManifestPath };

@@ -123,6 +123,9 @@ jobs:
       - name: Import boundary guard
         run: npm run guard:boundaries
 
+      - name: Durability writer invariant guard
+        run: npm run guard:durability-writer
+
       # Backs the three block-severity transport hygiene rules
       # (hygiene.no-wa-jid-literal-in-generic-ui, hygiene.no-whatsapp-copy-in-generic-ui,
       # hygiene.no-health-whatsapp-key-read). Until this step existed they were enforced

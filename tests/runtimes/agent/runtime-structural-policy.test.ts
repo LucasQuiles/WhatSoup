@@ -18,9 +18,23 @@ async function readFailureTaxonomySource(): Promise<string> {
   return readFile(new URL('../../../src/runtimes/agent/failure-taxonomy.ts', import.meta.url), 'utf8');
 }
 
+/** chat-transport.ts holds the per-chat actor-socket lifecycle extracted out of runtime.ts (pure move, see createChatTransportHost). */
+async function readChatTransportSource(): Promise<string> {
+  return readFile(new URL('../../../src/runtimes/agent/chat-transport.ts', import.meta.url), 'utf8');
+}
+
 function methodSource(source: string, methodName: string): string {
   const match = source.match(
     new RegExp(`\\n  (?:private )?(?:async )?${methodName}\\([\\s\\S]*?\\n  \\}`),
+  );
+  expect(match).toBeTruthy();
+  return match?.[0] ?? '';
+}
+
+/** Like methodSource, for a top-level `export function` (0-indent) rather than a 2-space-indented class method. */
+function functionSource(source: string, functionName: string): string {
+  const match = source.match(
+    new RegExp(`\\nexport function ${functionName}\\([\\s\\S]*?\\n\\}`),
   );
   expect(match).toBeTruthy();
   return match?.[0] ?? '';
@@ -98,9 +112,12 @@ describe('AgentRuntime structural policy', () => {
     expect(helperBody).toContain('clearPendingPollTimers(pending);');
     expect(helperBody).toContain('this.pendingPolls.questions.delete(mapKey);');
 
-    const teardownBody = methodSource(source, 'teardownPerChatActorSocket');
-    expect(teardownBody).toContain('this.perChatExecActorQueue.delete(mapKey);');
-    expect(teardownBody).toContain('this.perChatSocketResources.delete(mapKey);');
+    // teardownPerChatActorSocket's implementation lives in chat-transport.ts (pure
+    // move); runtime.ts keeps only a thin delegating wrapper, so this reads the
+    // extracted module and its port-parameterized form of the same invariant.
+    const teardownBody = functionSource(await readChatTransportSource(), 'teardownPerChatActorSocket');
+    expect(teardownBody).toContain('port.perChatExecActorQueue.delete(mapKey);');
+    expect(teardownBody).toContain('port.perChatSocketResources.delete(mapKey);');
     expect(teardownBody).toContain('sockRes.socketServer.stop();');
   });
 
