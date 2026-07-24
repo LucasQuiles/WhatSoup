@@ -370,63 +370,51 @@ afterEach(async () => {
 
 describe('Viewport matrix — Fleet (SoupKitchen)', () => {
 
-  describe('lg stacking flip — tailwind lg = 1024px', () => {
+  describe('content-grid stacking flip — mockup @media (max-width:1100px)', () => {
     /**
-     * SoupKitchen.tsx: "flex flex-col lg:flex-row flex-1 …"
-     * At <1024px the class `lg:flex-row` is inactive → computed flex-direction = column.
-     * At ≥1024px `lg:flex-row` activates → computed flex-direction = row.
+     * v3.5 b-03: SoupKitchen's main area is `.fleet-content`, a CSS grid
+     * (1fr + --fleet-activity-w). The mockup's 1100px media query stacks it
+     * to a single column — the tailwind lg:flex-row idiom is gone.
      */
-    it('at 1023px width: fleet main area has flex-direction = column (stacked)', async () => {
-      await page.viewport(1023, 768);
+    it('at 1099px width: fleet content grid stacks (grid-template-columns = 1fr)', async () => {
+      await page.viewport(1099, 768);
       const { container } = await render(wrapPage(<SoupKitchen />));
-
-      // The main area div is the first element with both "flex-col" and "flex-1".
-      // At narrow widths tailwind-generated CSS keeps flex-direction: column.
-      const candidates = Array.from(
-        container.querySelectorAll<HTMLElement>('div'),
-      ).filter((el) => el.className.includes('flex-col') && el.className.includes('flex-1'));
-
-      if (candidates.length === 0) {
-        // Empty-state may render fewer divs — the absence of flex-row is the proof.
-        // No element with flex-direction=row should exist at 1023px.
-        const rowEls = Array.from(container.querySelectorAll<HTMLElement>('div')).filter(
-          (el) => window.getComputedStyle(el).flexDirection === 'row',
-        );
-        // If empty-state renders, there should be very few row-direction divs
-        // (icon-only rows are acceptable — we check the count is small).
-        expect(rowEls.length).toBeLessThan(20);
-      } else {
-        const computed = window.getComputedStyle(candidates[0]);
-        expect(computed.flexDirection).toBe('column');
-      }
+      const grid = container.querySelector<HTMLElement>('.fleet-content');
+      expect(grid).not.toBeNull();
+      const computed = window.getComputedStyle(grid!);
+      expect(computed.gridTemplateColumns.split(' ').length).toBe(1);
     });
 
-    it('at 1024px width: fleet main area has flex-direction = row (side-by-side)', async () => {
-      await page.viewport(1024, 768);
+    it('at 1101px width: fleet content grid is side-by-side (1fr + activity column)', async () => {
+      await page.viewport(1101, 768);
       const { container } = await render(wrapPage(<SoupKitchen />));
+      const grid = container.querySelector<HTMLElement>('.fleet-content');
+      expect(grid).not.toBeNull();
+      const computed = window.getComputedStyle(grid!);
+      expect(computed.gridTemplateColumns.split(' ').length).toBe(2);
+      // KPI strip flips 5-up → 2-up at ≤1100px; at 1101 it stays 5-up.
+      const kpis = container.querySelector<HTMLElement>('.fleet-kpis');
+      expect(kpis).not.toBeNull();
+      expect(window.getComputedStyle(kpis!).gridTemplateColumns.split(' ').length).toBe(5);
+    });
 
-      // At ≥1024px tailwind `lg:flex-row` activates. Find the element that carries
-      // the stacking class and has flex-direction: row in computed style.
-      const candidates = Array.from(
-        container.querySelectorAll<HTMLElement>('div'),
-      ).filter(
-        (el) =>
-          el.className.includes('flex-col') &&
-          el.className.includes('flex-1') &&
-          window.getComputedStyle(el).flexDirection === 'row',
-      );
+    it('at 1100px width: fleet content grid is stacked (max-width:1100px matches at the boundary)', async () => {
+      await page.viewport(1100, 768);
+      const { container } = await render(wrapPage(<SoupKitchen />));
+      const grid = container.querySelector<HTMLElement>('.fleet-content');
+      expect(grid).not.toBeNull();
+      expect(window.getComputedStyle(grid!).gridTemplateColumns.split(' ').length).toBe(1);
+      const kpis = container.querySelector<HTMLElement>('.fleet-kpis');
+      expect(kpis).not.toBeNull();
+      expect(window.getComputedStyle(kpis!).gridTemplateColumns.split(' ').length).toBe(2);
+    });
 
-      // There should be at least one such element — the fleet pane container.
-      // If the empty state renders the layout shell differently, fall back to
-      // checking that no candidate has flex-direction = column at lg width.
-      if (candidates.length > 0) {
-        const computed = window.getComputedStyle(candidates[0]);
-        expect(computed.flexDirection).toBe('row');
-      } else {
-        // Fallback: no horizontal overflow is the secondary proof at lg.
-        const root = container.firstElementChild as HTMLElement;
-        if (root) expect(root.scrollWidth).toBeLessThanOrEqual(root.clientWidth + 1);
-      }
+    it('at 1099px width: KPI strip is 2-up', async () => {
+      await page.viewport(1099, 768);
+      const { container } = await render(wrapPage(<SoupKitchen />));
+      const kpis = container.querySelector<HTMLElement>('.fleet-kpis');
+      expect(kpis).not.toBeNull();
+      expect(window.getComputedStyle(kpis!).gridTemplateColumns.split(' ').length).toBe(2);
     });
   });
 

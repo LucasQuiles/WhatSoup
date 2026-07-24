@@ -652,3 +652,40 @@ stylesheet (`console/src/styles/chrome.css`) consumes `var()` only: colors from 
   caps).
 - **Shape details** — `--chrome-micro-radius` 1px (tick/dot/host-warn corner; badge.md
   shape family), `--chrome-pill-radius` 99px + `--chrome-attn-pad` (header attn pill).
+
+## 12. v3.5 fleet geometry (docs/design-system/v35/mockups/fleet.html, landed b-03)
+
+Component-tier `--fleet-*` dimension + tracking tokens in
+`console/src/styles/tokens.component.css`, single `:root` scope (theme-independent
+geometry; parity count unaffected). The mockup literals are the visual SSOT — they
+live here, dimension-allowlisted, so the fleet stylesheet
+(`console/src/styles/fleet.css`) consumes `var()` only. Full trace table:
+`docs/design-system/v35/16-tokens-v3-addendum.md` §5.
+
+- **Layout** — `--fleet-pagerow-gap` 14px / `--fleet-pagerow-pad` 14px 22px 12px
+  (surface h1 row, mockup `header` literals — same rhythm as the global header,
+  independently owned so chrome changes cannot shift the surface), `--fleet-pad-x`
+  22px (content gutter), `--fleet-activity-w` 320px
+  (activity column; mockup `.content` grid stacks at `max-width:1100px`),
+  `--fleet-panelhead-pad`, `--fleet-panelhead-gap`. Shared *laws* stay under the
+  b-02 chrome prefix and are consumed by design: `--chrome-micro-radius`,
+  `--chrome-pill-radius` (badge.md shape family), `--chrome-icon` (glyph floor),
+  `--tracking-chrome-title` (h1 voice).
+- **KPI strip** — `--fleet-kpi-pad`, `--fleet-kpi-lift` 2px (hover lift),
+  `--fleet-kpi-d-mt`, `--tracking-kpi` 0.1em.
+- **Lines table** — `--fleet-row-pad`, `--fleet-head-pad`, `--fleet-lcell-maxw` 26ch,
+  `--tracking-fleet-head` 0.08em; `--fleet-chan-box` 22px + `--fleet-chan-tag-keyline`
+  2px + `--fleet-chan-tag-offset` (channel glyph + state tag, 11-channel-glyphography
+  §1), `--fleet-avatar-box` 22px, `--fleet-mode-gap`/`--fleet-mode-dot` 6px,
+  `--fleet-grant-box` 18px + `--fleet-grant-gap`, `--fleet-spark-h` 16px /
+  `--fleet-spark-w` 3px / `--fleet-spark-gap` (7d sparkbar),
+  `--fleet-badge-pad`/`--fleet-badge-gap` + `--tracking-badge` (state pill),
+  `--fleet-rowbtn-pad` (row action).
+- **Activity feed + heartbeat rail** — `--fleet-ev-pad`, `--fleet-hb-gap`,
+  `--fleet-hb-bar-gap`.
+- **Documented deviations (carried features, no mockup row)** —
+  `--fleet-current-edge` 3px (drawer-current row accent), `--fleet-select-inset` 6px
+  (bulk-select checkbox overlay), `--fleet-filterpop-pad` (filter popover search).
+
+Half-step tokens (`--sp-*h`, DD-9 retirement queue) are not consumed by the Fleet
+surface.

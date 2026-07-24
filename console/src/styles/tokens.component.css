@@ -30,6 +30,42 @@
   --tracking-ctx: 0.18em;          /* nameplate ctx caps tracking (mockup .ctx) */
   --tracking-sec: 0.12em;          /* rail section caps tracking (mockup .nav-sec) */
   --tracking-chrome-title: -0.02em; /* chrome header h1 tracking (mockup h1) */
+  /* ═══ v3.5 Fleet surface geometry (T5 b-03; mockup fleet.html SSOT) ═══ */
+  --fleet-pagerow-gap: 14px;     /* surface h1 row item gap (mockup header gap) */
+  --fleet-pagerow-pad: 14px 22px 12px; /* surface h1 row padding (mockup header padding) */
+  --fleet-pad-x: 22px;           /* content horizontal gutter (mockup .kpis/.content padding) */
+  --fleet-kpi-pad: 12px 14px;    /* kpi card padding (mockup .kpi) */
+  --fleet-panelhead-pad: 10px 16px; /* panel header row (mockup .panel-h) */
+  --fleet-activity-w: 320px;     /* activity column width (mockup .content grid) */
+  --fleet-row-pad: 9px 12px;     /* line-row cell padding (mockup td) */
+  --fleet-head-pad: 10px 12px;   /* table head cell padding (mockup th) */
+  --fleet-ev-pad: 8px 16px;      /* activity event row (mockup .ev) */
+  --fleet-chan-box: 22px;        /* channel glyph container (11-channel-glyphography §1) */
+  --fleet-avatar-box: 22px;      /* agent avatar in line rows (mockup .av) */
+  --fleet-grant-box: 18px;       /* grant chip box (mockup .g) */
+  --fleet-spark-h: 16px;         /* sparkbar strip height (mockup .spark) */
+  --fleet-spark-w: 3px;          /* sparkbar bar width (mockup .spark i) */
+  --fleet-chan-tag-keyline: 2px; /* channel state-tag keyline (11-channel-glyphography §1) */
+  --fleet-kpi-lift: 2px;         /* kpi hover lift (mockup .kpi:hover) */
+  --fleet-kpi-d-mt: 2px;         /* kpi delta margin-top (mockup .kpi .d) */
+  --fleet-panelhead-gap: 10px;   /* panel header gap (mockup .panel-h) */
+  --fleet-current-edge: 3px;     /* drawer-current row accent edge (carried feature; no mockup row) */
+  --fleet-select-inset: 6px;     /* bulk-select checkbox overlay inset (documented deviation) */
+  --fleet-chan-tag-offset: 3px;  /* channel state-tag corner offset (mockup .chan .st) */
+  --fleet-mode-gap: 6px;         /* mode cell gap (mockup .mode) */
+  --fleet-mode-dot: 6px;         /* mode channel square (mockup .mode i) */
+  --fleet-badge-gap: 6px;        /* state pill gap (mockup .badge) */
+  --fleet-badge-pad: 3px 8px;    /* state pill padding (mockup .badge) */
+  --fleet-grant-gap: 3px;        /* grant chip gap (mockup .grants) */
+  --fleet-spark-gap: 2px;        /* sparkbar gap (mockup .spark) */
+  --fleet-rowbtn-pad: 4px 9px;   /* row action padding (mockup .rowbtn) */
+  --fleet-filterpop-pad: 6px 8px; /* filter popover search padding (documented deviation) */
+  --fleet-hb-gap: 10px;          /* heartbeat rail gap (mockup .hbw) */
+  --fleet-hb-bar-gap: 3px;       /* heartbeat bar gap (mockup .hb) */
+  --fleet-lcell-maxw: 26ch;      /* line cell max width (mockup .lcell) */
+  --tracking-kpi: 0.1em;         /* kpi label tracking (mockup .kpi .k) */
+  --tracking-fleet-head: 0.08em; /* table head + heartbeat label tracking (mockup th/.hbl) */
+  --tracking-badge: 0.04em;      /* state pill tracking (mockup .badge) */
   /* ═══ Element sizes — from design spec §2 ═══ */
   --dot-table: 8px;          /* status dot in tables */
   --dot-feed: 6px;           /* status dot in feeds */

@@ -15,3 +15,5 @@
 /* v3.5 global chrome (T5 b-02) — after primitives so the rail/header register
    wins over legacy chrome during the cutover. */
 @import "./styles/chrome.css";
+/* v3.5 Fleet surface (T5 b-03) — mockup fleet.html SSOT. */
+@import "./styles/fleet.css";
