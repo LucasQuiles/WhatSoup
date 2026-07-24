@@ -16258,6 +16258,11 @@ describe('NL routing handlers (nlRouting flag)', () => {
 
   it('spawn fails OPEN to the default route when the pin-eligibility probe throws (R13)', async () => {
     const { runtime } = makeRoutingRuntime();
+    routingDb.raw
+      .prepare(`INSERT INTO chat_model_preference
+        (chat_jid, sender_jid, intent, requested_provider, scope, pin_strict, fallback_permitted, updated_at, expires_at)
+        VALUES (?, ?, 'provider_specific', 'codex-cli', 'sticky', 1, 0, ?, NULL)`)
+      .run(CHAT, SENDER_A, Date.now());
     // routablePinTargets does keyring I/O and was called OUTSIDE the pref-read
     // guard — a probe throw must degrade to the default route, never drop the turn.
     (runtime as unknown as { routablePinTargets: () => string[] }).routablePinTargets = () => {

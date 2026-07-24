@@ -112,6 +112,9 @@ describe('resolveRoute precedence', () => {
       model: 'glm/glm-5.2',
       source: 'fallback',
       reasonCode: 'fallback_window_active_model_pin',
+      dataPolicy: null,
+      policyVersion: PROVIDER_DATA_POLICY_VERSION,
+      policyState: 'missing',
     });
   });
 
@@ -138,6 +141,9 @@ describe('resolveRoute precedence', () => {
       model: 'kimi/kimi-k3',
       source: 'fallback',
       reasonCode: 'fallback_window_active',
+      dataPolicy: null,
+      policyVersion: PROVIDER_DATA_POLICY_VERSION,
+      policyState: 'missing',
     });
   });
 
