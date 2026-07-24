@@ -532,6 +532,7 @@ describe('EnrichmentPoller', () => {
 
     const db = makeMockDb();
     const { poller } = makePoller(db);
+    const lastRunAtBeforeFailure = poller.lastRunAt; // frozen reference (null on a fresh poller)
     await triggerOneCycle(poller); // should not throw
 
     expect(markMessagesProcessed).not.toHaveBeenCalled();
@@ -556,11 +557,12 @@ describe('EnrichmentPoller', () => {
     expect(errorArg).toContain('DB connection lost');
     expect(runArgs).toContain(0); // messages_processed known at failure time
 
-    // A failed cycle must NOT advance lastRunAt — getHealthSnapshot()
-    // (src/runtimes/chat/runtime.ts) derives `degraded` purely from
-    // lastRunAt staleness, and refreshing it on every failed cycle would
-    // mask a persistently failing poller as healthy forever.
-    expect(poller.lastRunAt).toBeNull();
+    // A failed cycle must NOT advance lastRunAt — it stays frozen at its prior
+    // value (null here) rather than moving forward. getHealthSnapshot()
+    // (src/runtimes/chat/runtime.ts) derives `degraded` purely from lastRunAt
+    // staleness, and refreshing it on every failed cycle would mask a
+    // persistently failing poller as healthy forever.
+    expect(poller.lastRunAt).toBe(lastRunAtBeforeFailure);
   });
 
   it('persists a real enrichment_runs row with a non-null error when the fetch throws (real SQLite)', async () => {
