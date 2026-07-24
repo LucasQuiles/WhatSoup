@@ -1,0 +1,66 @@
+{
+  "absence_checks": [
+    "absolute-home-or-work-path",
+    "credential-pattern",
+    "live-native-id",
+    "non-allowlisted-prose",
+    "raw-source-hash",
+    "raw-source-path"
+  ],
+  "classification_policy": "explicit-observed-plus-sanitized-fixture-allowlist-v1",
+  "content_identity": {
+    "all_no_init_content_rows_had_nonempty_session_id": true,
+    "no_init_session_count": 5273
+  },
+  "observed_content_types": [
+    "advisor_tool_result",
+    "document",
+    "fallback",
+    "image",
+    "server_tool_use",
+    "text",
+    "thinking",
+    "tool_result",
+    "tool_use"
+  ],
+  "observed_control_provenance_type": "production-derived",
+  "observed_control_types": [
+    "agent-name",
+    "ai-title",
+    "attachment",
+    "custom-title",
+    "last-prompt",
+    "mode",
+    "permission-mode",
+    "pr-link",
+    "queue-operation",
+    "relocated",
+    "worktree-state"
+  ],
+  "observed_system_subtypes": [
+    "agents_killed",
+    "compact_boundary",
+    "informational",
+    "local_command",
+    "model_consent_fallback",
+    "model_fallback",
+    "model_refusal_fallback",
+    "model_refusal_no_fallback",
+    "scheduled_task_fire",
+    "stop_hook_summary",
+    "turn_duration"
+  ],
+  "observation_scope": {
+    "parse_failure_count": 3,
+    "parsed_file_count": 5388,
+    "selection": "no-init sessions containing user or assistant rows"
+  },
+  "provenance_type": "mixed-explicit-sources",
+  "sanitized_fixture_control_provenance_type": "hand-authored-sanitized-fixture",
+  "sanitized_fixture_control_types": [
+    "fixture_unknown"
+  ],
+  "sanitizer_version": "metadata-keys-only-v1",
+  "schema_version": 1,
+  "source_kind": "owner-scoped local Claude JSONL metadata-only observation"
+}
