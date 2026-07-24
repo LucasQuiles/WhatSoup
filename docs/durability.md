@@ -815,6 +815,12 @@ the lifecycle becomes `crashed`/`orphaned`, the manager retains the live handle,
 cleanup cannot repaint it resumable. Completed-turn proof lookup considers only `active` and
 `suspended` checkpoints, so retired or failed proof cannot authorize a resume.
 
+The periodic zombie-session sweep reconciles current-process residents before classifying
+active rows. This is a narrow compare-and-set repair for an `orphaned` row whose active
+checkpoint still proves the exact workspace and provider-session identity; persistent
+providers must also match the resident process ID. It does not manufacture checkpoint
+authority and refuses suspended, ended, completed, crashed, or resume-failed rows.
+
 At runtime shutdown, every session is attempted even if an earlier one fails. Successfully
 closed managers release their ownership; a failed singleton or per-chat manager remains attached
 to its session/owner so a later shutdown call can retry it. Queue and auxiliary cleanup still

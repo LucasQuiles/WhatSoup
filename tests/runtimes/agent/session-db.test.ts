@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { unlinkSync, existsSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { Database } from '../../../src/core/database.ts';
+import { DurabilityEngine } from '../../../src/core/durability.ts';
 import {
   ensureAgentSchema,
   createSession,
@@ -21,6 +22,7 @@ import {
   markOrphaned,
   getResumableSessionForChat,
   resolveResumableAgentSession,
+  restoreOrphanedResidentSessionStatus,
   backfillSessionProvider,
   listActiveSessionRows,
 } from '../../../src/runtimes/agent/session-db.ts';
@@ -680,6 +682,60 @@ describe('agent session-db', () => {
     ).get(id) as { ended_at: string | null; status: string };
     expect(row).toEqual({ ended_at: null, status: 'active' });
   });
+
+  it('restores only an exact orphaned resident provider-session identity', () => {
+    const id = createSession(db, 0, '/tmp/resident', undefined, 'resident', 'opencode-cli');
+    updateSessionId(db, id, 'ses-resident');
+    updateSessionStatus(db, id, 'orphaned');
+    const durability = new DurabilityEngine(db);
+    durability.upsertSessionCheckpoint('resident', {
+      sessionId: 'ses-resident',
+      sessionStatus: 'active',
+    });
+
+    expect(restoreOrphanedResidentSessionStatus(db, id, 'ses-other', 'opencode-cli')).toBe('refused');
+    expect(restoreOrphanedResidentSessionStatus(db, id, 'ses-resident', 'claude-cli')).toBe('refused');
+    expect(db.raw.prepare('SELECT status FROM agent_sessions WHERE id = ?').get(id)).toEqual({
+      status: 'orphaned',
+    });
+
+    expect(restoreOrphanedResidentSessionStatus(db, id, 'ses-resident', 'opencode-cli')).toBe('restored');
+    expect(db.raw.prepare('SELECT status, ended_at FROM agent_sessions WHERE id = ?').get(id)).toEqual({
+      status: 'active',
+      ended_at: null,
+    });
+    expect(restoreOrphanedResidentSessionStatus(db, id, 'ses-resident', 'opencode-cli')).toBe('already_active');
+
+    durability.upsertSessionCheckpoint('resident', { sessionStatus: 'suspended' });
+    expect(restoreOrphanedResidentSessionStatus(db, id, 'ses-resident', 'opencode-cli')).toBe('refused');
+    expect(db.raw.prepare('SELECT status FROM agent_sessions WHERE id = ?').get(id)).toEqual({
+      status: 'active',
+    });
+  });
+
+  it.each(['ended', 'completed', 'crashed', 'resume_failed', 'suspended'])(
+    'refuses to revive a %s resident row',
+    (status) => {
+      const id = createSession(db, 0, `/tmp/resident-${status}`, undefined, `resident-${status}`, 'opencode-cli');
+      updateSessionId(db, id, `ses-${status}`);
+      updateSessionStatus(db, id, status);
+      const durability = new DurabilityEngine(db);
+      durability.upsertSessionCheckpoint(`resident-${status}`, {
+        sessionId: `ses-${status}`,
+        sessionStatus: 'active',
+      });
+      const before = db.raw
+        .prepare('SELECT status, ended_at FROM agent_sessions WHERE id = ?')
+        .get(id);
+
+      expect(
+        restoreOrphanedResidentSessionStatus(db, id, `ses-${status}`, 'opencode-cli'),
+      ).toBe('refused');
+      expect(
+        db.raw.prepare('SELECT status, ended_at FROM agent_sessions WHERE id = ?').get(id),
+      ).toEqual(before);
+    },
+  );
 
   it('accumulateTokensWithEvent rolls back both writes on failure', () => {
     const id = createSession(db, 90001, '/tmp/atomic-test');
