@@ -76,7 +76,7 @@ product h1 voice, Bricolage, identical in every mockup). Fleet *layout* never
 reads chrome tokens: the surface h1 row takes its own `--fleet-pagerow-*`
 (mockup `header` literals — same values by SSOT, independently owned) so a chrome
 header change cannot shift the fleet surface.
-## 5. Agents surface geometry (`--agents-*`, T5 b-04)
+## 6. Agents surface geometry (`--agents-*`, T5 b-04)
 
 Component-register geometry for the Agents surface, all traced to
 `mockups/agents.html` and `12-agent-identity.md` §§1–4: roster column and card
@@ -90,7 +90,7 @@ the token block once; `agents.css` consumes `var()` only. Shared *laws*
 (`--chrome-micro-radius`, `--chrome-pill-radius`, `--tracking-chrome-title`)
 are consumed by design; agents layout never reads chrome tokens. Half-step
 tokens (`--sp-*h`, DD-9 retirement queue) are not consumed.
-## 5. Skills Hub surface geometry (`--skills-*`, T5 b-05)
+## 7. Skills Hub surface geometry (`--skills-*`, T5 b-05)
 
 Component-register geometry for the Skills Hub surface, all traced to
 `mockups/skills-hub.html`: page-row rhythm, hub mode toggle, filters rail
@@ -101,7 +101,7 @@ toolbar, result cards (icon box, source badge, actions), compat strip + cells
 Spec SSOT: `tokens-v3.md` §14. Same pattern as b-02…b-04: raw mockup
 dimensions land in the token block once; `skills.css` consumes `var()` only.
 Half-step tokens (`--sp-*h`, DD-9 retirement queue) are not consumed.
-## 5. Dream Lab surface geometry (`--dream-*`, T5 b-06)
+## 8. Dream Lab surface geometry (`--dream-*`, T5 b-06)
 
 Component-register geometry for the Dream Lab surface, all traced to
 `mockups/dream-lab.html` and `12-agent-identity.md` §2: page-row rhythm +
@@ -115,7 +115,7 @@ fourth distinct SSOT breakpoint (chrome/fleet 1100px, agents 1000px, dream
 b-02…b-05: raw mockup dimensions land in the token block once; `dream.css`
 consumes `var()` only. Half-step tokens (`--sp-*h`, DD-9 retirement queue) are
 not consumed.
-## 5. Inbox surface geometry (`--inbox-*`, T5 b-07)
+## 9. Inbox surface geometry (`--inbox-*`, T5 b-07)
 
 Component-register geometry for the Inbox surface, all traced to `mockups/inbox.html`:
 channel chips row, seg control, conversation list (300px, avatar anatomy with the
@@ -126,10 +126,10 @@ all consume `--inbox-composer-h`), and the context pane (person/agent/line cards
 identity rows). Breakpoints are the mockup's own: context pane hides ≤1100px,
 list hides ≤760px — the fifth distinct SSOT stacking breakpoint (chrome/fleet
 1100px, agents 1000px, dream 980px, skills 900px, inbox 760px). Spec SSOT:
-`tokens-v3.md` §12. Same pattern as b-02…b-06: raw mockup dimensions land in the
+`tokens-v3.md` §16. Same pattern as b-02…b-06: raw mockup dimensions land in the
 token block once; `inbox.css` consumes `var()` only. The v3 pane widths
 (`--inbox-pane-chats`/`--inbox-pane-contact`) are retired with the v3 page.
-## 5. Deployments surface geometry (`--deploy-*`, T5 b-08)
+## 10. Deployments surface geometry (`--deploy-*`, T5 b-08)
 
 Component-register geometry for the Deployments surface, all traced to
 `mockups/deployments.html`: surface page row with the admin-lane pill, the 4-cell
@@ -137,9 +137,9 @@ summary strip, deployment cards (38px icon box, state pills on the shared status
 vocabulary, body cells with channel/agent/issue mini-tags, org-hub row anatomy),
 and the pair card (46ch explainer measure, 0.3em-tracked code block). The summary
 strip and card bodies go 4→2 columns at the mockup's own 1000px (shared with the
-agents surface). Spec SSOT: `tokens-v3.md` §12. Same pattern as b-02…b-07: raw
+agents surface). Spec SSOT: `tokens-v3.md` §17. Same pattern as b-02…b-07: raw
 mockup dimensions land in the token block once; `deploy.css` consumes `var()` only.
-## 5. Settings surface geometry (`--settings-*`, T5 b-09)
+## 11. Settings surface geometry (`--settings-*`, T5 b-09)
 
 Component-register geometry for the Settings surface, all traced to
 `mockups/settings.html` and `17-settings-ia-spec.md`: 190px section nav,
@@ -147,10 +147,10 @@ Component-register geometry for the Settings surface, all traced to
 (shape-visible both states), 52px appearance swatches (18px/10px bands),
 120px fixed channel control zone, token rows. The section nav goes
 horizontal-scroll at the mockup's own 800px — the sixth distinct SSOT
-breakpoint. Spec SSOT: `tokens-v3.md` §12. Same pattern as b-02…b-08: raw
+breakpoint. Spec SSOT: `tokens-v3.md` §18. Same pattern as b-02…b-08: raw
 mockup dimensions land in the token block once; `settings.css` consumes
 `var()` only.
-## 5. Journey surfaces geometry (`--journey-*`, T5 b-10)
+## 12. Journey surfaces geometry (`--journey-*`, T5 b-10)
 
 Component-register geometry for the journey surfaces (splash + hatch flow),
 all traced to `mockups/splash.html` and `mockups/hatch.html`: 860px shell,
@@ -159,11 +159,11 @@ step anatomies, the ceremony (120px lockup, radial one-shot glow per 13-§2,
 72px avatar, eggshell frame, beats, first-message bar), and the splash
 (hero, proof cards, watermark canvases). **Radii consume the JOURNEY register
 exclusively** (the bead acceptance item). Breakpoints: props stack ≤700px,
-card tightens ≤640px. Spec SSOT: `tokens-v3.md` §12. Same pattern as
+card tightens ≤640px. Spec SSOT: `tokens-v3.md` §19. Same pattern as
 b-02…b-09: raw mockup dimensions land in the token block once; `journey.css`
 consumes `var()` only.
 
-## 6. Acceptance gate
+## 13. Acceptance gate
 
 - [ ] No `channel-*` token carries a hue (computed check).
 - [ ] `agent-hue-*` used only on avatar fills + nowhere else (consumer audit).

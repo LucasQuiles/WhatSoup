@@ -808,7 +808,7 @@ raw, fleet idiom); hairlines are `var(--bw)`; diff del/add washes consume the
 status-channel color-mix idiom. Half-step tokens (`--sp-*h`, DD-9 retirement
 queue) are not consumed by the Dream Lab surface.
 
-## 12. v3.5 inbox geometry (docs/design-system/v35/mockups/inbox.html, landed b-07)
+## 16. v3.5 inbox geometry (docs/design-system/v35/mockups/inbox.html, landed b-07)
 
 Component-tier dimension tokens in `console/src/styles/tokens.component.css`, single
 `:root` scope (theme-independent geometry; parity count unaffected). Mockup literals
@@ -841,7 +841,7 @@ console register where the mockup matches it.
   the v3 inbox page they sized is replaced by this surface; the v3.5 grid owns
   pane widths.
 
-## 12. v3.5 deployments geometry (docs/design-system/v35/mockups/deployments.html, landed b-08)
+## 17. v3.5 deployments geometry (docs/design-system/v35/mockups/deployments.html, landed b-08)
 
 Component-tier dimension tokens in `console/src/styles/tokens.component.css`, single
 `:root` scope (theme-independent geometry; parity count unaffected). Mockup literals
@@ -862,7 +862,7 @@ consume the shared status vocabulary with shape mandatory (●/◆/■).
   `--tracking-deploy-code` 0.3em.
 - **Tracking** — `--tracking-deploy-kpi` 0.1em, `--tracking-deploy-cell` 0.08em.
 
-## 12. v3.5 settings geometry (docs/design-system/v35/mockups/settings.html, landed b-09)
+## 18. v3.5 settings geometry (docs/design-system/v35/mockups/settings.html, landed b-09)
 
 Component-tier dimension tokens in `console/src/styles/tokens.component.css`, single
 `:root` scope (theme-independent geometry; parity count unaffected). Mockup literals
@@ -884,7 +884,7 @@ direct-edit controls, one danger area).
   `--settings-opts-{minw,gap}` (120px fixed control zone), `--settings-tok-*`,
   `--settings-acts-gap`, `--settings-sub-mt` (row sub tuck).
 
-## 12. v3.5 journey geometry (docs/design-system/v35/mockups/{splash,hatch}.html, landed b-10)
+## 19. v3.5 journey geometry (docs/design-system/v35/mockups/{splash,hatch}.html, landed b-10)
 
 Component-tier dimension tokens in `console/src/styles/tokens.component.css`, single
 `:root` scope (theme-independent geometry; parity count unaffected). Mockup literals
