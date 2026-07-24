@@ -31,6 +31,7 @@ import type { FleetDiscovery } from '../discovery.ts';
 import type { FleetDbReader } from '../db-reader.ts';
 import type { ServiceManager } from '../platform.ts';
 import type { FleetRealtimePublisher } from '../realtime-publisher.ts';
+import { validateInstanceName } from './instance-name.ts';
 
 export interface CheckpointsDeps {
   discovery: FleetDiscovery;
@@ -40,18 +41,6 @@ export interface CheckpointsDeps {
 export interface RestoreCheckpointDeps extends CheckpointsDeps {
   serviceManager: ServiceManager;
   realtime: FleetRealtimePublisher;
-}
-
-/** Valid instance name pattern — mirrors ops.ts NAME_RE (mutation routes
- *  validate before the name reaches service-manager / path construction). */
-const NAME_RE = /^[a-z][a-z0-9-]*$/;
-
-function validateInstanceName(name: string, res: ServerResponse): boolean {
-  if (!NAME_RE.test(name) || name.length < 1 || name.length > 30) {
-    jsonResponse(res, 400, { error: 'invalid instance name' });
-    return false;
-  }
-  return true;
 }
 
 export async function handleGetLineCheckpoints(
