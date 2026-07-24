@@ -244,6 +244,30 @@ and end with an alphanumeric character. Exit code 2 on violation.
 | `bot-errors-q-loop.py` | The hub's agent loop driver. |
 | `retire-outbound-quarantine.py` | Operator tool: retires one reviewed `quarantined` row in an instance's `outbound_ops` table (`--db`, `--instance`, `--op-id`, `--reason`), backing up the DB first and flipping the op to `failed_permanent`/`is_terminal=1`. When that was the last quarantined op it shells out to `bot-errors-emit.py` to emit a BOT ERRORS clear event. Supports `--dry-run` (no writes, reports whether a clear would fire), `--no-backup`, `--no-emit`, and `--emit-script`. |
 
+### Collector capture-failure escalation: per-transition semantics
+
+`collector_remote_unreachable` (alert at `consecutiveFailures >= BOT_ERRORS_COLLECTOR_FAILURE_ESCALATE_THRESHOLD`,
+default 2) is deliberately **per-transition-honest**, not flap-suppressing: it
+alerts on every new failure episode and clears on every genuinely successful
+collection, one collection at a time. It does not require the same N
+consecutive successes that `relay_host_down`'s backoff recovery does
+(`recovery_successes`, default 2) before clearing — a single successful
+collection resolves the capture failure for that moment, and the escalation
+reflects that honestly.
+
+This means a remote that flaps through `RELAY_BACKOFF_FAILURE_THRESHOLD`
+(default 3) can produce more `collector_remote_unreachable` transitions than
+`relay_host_down` transitions over the same window: `relay_host_down` stays
+open across a single recovering poll (it needs the fuller N-successes
+streak), while the escalation clears and can re-open on the very next
+failure. **This asymmetry is intentional**, not a bug — the two signals have
+different thresholds and different confirmation semantics by design, so
+behaving differently under a flap is expected. A genuinely flapping remote is
+bounded by the dispatcher's existing flap-storm machinery
+(`BOT_ERRORS_FLAP_TRIP_THRESHOLD`/`BOT_ERRORS_FLAP_WINDOW_SECONDS`, default 5
+trips per 600s, collapses into one storm digest) rather than by holding this
+event open across a real recovery.
+
 ## Canonical source for this import (diff matrix)
 
 Source of truth chosen = **newest copies** per the corrections plan. The local Mac

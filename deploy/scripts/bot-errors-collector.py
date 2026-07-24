@@ -1945,9 +1945,25 @@ def emit_collector_capture_escalation_event(
     """
     host, remote_root = parse_remote(remote)
     severity = "warning" if event_type == "alert" else "info"
+    # time_ns comes FIRST (right after a short fixed prefix), event_type and
+    # remote LAST -- two things depend on this ordering:
+    #  (1) local_outbox_path() runs safe_segment() on this id, which silently
+    #      truncates to 80 chars. A long remote ("host:/long/path") embedded
+    #      before the numeric suffix can push the id past that limit,
+    #      truncating away the very fields that make two events
+    #      distinguishable -- two genuinely different escalation events for
+    #      the same remote would then collide on the identical filename and
+    #      the second atomic_write_json silently overwrites the first (event
+    #      loss, the exact class this packet exists to close).
+    #  (2) local_outbox_path()'s filename sorts lexicographically; a text
+    #      field ("alert"/"clear") placed before the numeric time_ns would
+    #      group all alerts before all clears regardless of real emission
+    #      order. time_ns first keeps filename order == emission order for
+    #      any reader that lists the outbox directory sorted.
+    # Source is deliberately NOT repeated here -- it's already its own
+    # filename segment in local_outbox_path().
     event_id = (
-        f"collector-{safe_segment(remote)}-{COLLECTOR_CAPTURE_ESCALATION_SOURCE}"
-        f"-{event_type}-{time.time_ns()}-{os.getpid()}"
+        f"collector-{time.time_ns()}-{os.getpid()}-{event_type}-{safe_segment(remote)}"
     )
     redacted_last_error = (
         redact_collector_text(last_error)[:FAILURE_RETENTION_DETAIL_MAX_CHARS] if last_error else None
