@@ -106,7 +106,10 @@ async function main() {
     // The local vite binary (console devDependency) — npx resolution in CI
     // cost the full readiness window once (the first perf-lane CI run).
     const viteBin = resolve(consoleRoot, 'node_modules/.bin/vite');
-    serverProc = spawn(viteBin, ['preview', '--port', String(port), '--strictPort'], {
+    // --host 127.0.0.1: vite preview binds `localhost` by default, which CI
+    // resolves to ::1 (IPv6-only) — the IPv4 probe then waits forever (the
+    // second perf-lane CI failure, caught with the server log this time).
+    serverProc = spawn(viteBin, ['preview', '--host', '127.0.0.1', '--port', String(port), '--strictPort'], {
       cwd: consoleRoot,
       stdio: ['ignore', 'pipe', 'pipe'],
       detached: true,
