@@ -19,7 +19,7 @@
  */
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import { render, cleanup } from 'vitest-browser-react';
-import { page } from '@vitest/browser/context';
+import { page } from 'vitest/browser';
 import { MemoryRouter } from 'react-router-dom';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { Ceremony } from '../../console/src/components/journey/Ceremony';
