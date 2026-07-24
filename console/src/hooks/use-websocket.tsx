@@ -8,6 +8,7 @@
 
 import { createContext, useContext, useEffect, useRef, useState, type ReactNode } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
+import { wsMeter } from '../lib/perf';
 import {
   getFleetWebSocketUrl,
   getInvalidationKeys,
@@ -75,6 +76,7 @@ export function RealtimeProvider({ children }: { children: ReactNode }) {
       ws.onmessage = (msg) => {
         const event: WsEvent | null = parseWsEvent(msg.data);
         if (!event) return;
+        wsMeter.record('instance' in event && typeof event.instance === 'string' ? event.instance : 'fleet');
 
         if (event.type === 'connected') return;
 

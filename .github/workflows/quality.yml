@@ -437,3 +437,31 @@ jobs:
 
       - name: BOT ERRORS macOS health hermeticity
         run: npm run test:bot-errors-health:hermeticity
+
+  # Perf lane (T5 b-12; 19-performance-budget §2). Report-only while the §1
+  # numbers await owner sign-off; PERF_LANE_ENFORCE=1 flips it blocking.
+  perf-lane:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    continue-on-error: true
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+
+      - name: Setup Node 24
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020  # v4.4.0
+        with:
+          node-version: '24.x'
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci && npm --prefix console ci
+
+      - name: Build console
+        run: npm --prefix console run build
+
+      - name: Install Playwright chromium
+        run: npx playwright install chromium --with-deps
+
+      - name: Perf lane (report-only)
+        run: npm --prefix console run perf:lane -- --json
