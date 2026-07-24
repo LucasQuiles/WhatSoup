@@ -608,3 +608,25 @@ replacement plan); no lint-suppression directive may be used inline without a wa
   use of `--type-data-lg`.
 - All 180 legacy tokens dispositioned in §6 (counts §6.15).
 - Light-theme AA failures and fixes: `color.md` §5.
+
+## 10. v3.5 addendum (docs/design-system/v35/16-tokens-v3-addendum.md, landed b-01)
+
+Additive names; v3 names stay live for current surfaces; v3.5 surface beads consume
+`-v35` per-surface (staged cutover, no global flip).
+
+- **§A gentle-warm ramp (L1) + refined accent (L2)** — per-theme literals under
+  `--{surface,text,border,accent,shadow}-*-v35` in `console/src/styles/tokens.semantic.css`
+  (dark base `#1E1A15`, light accent `#2E66E4`; WCAG values verified in
+  `docs/design-system/v35/09-design-language-decisions.md`).
+- **§B `channel-*` structural slots** — `--channel-glyph-ink/-dim`, `--channel-tag-bg/-keyline`;
+  channels identify by glyph shape only, no hues (gate: no `channel-*` token carries a hue).
+- **§C `agent-*` identity slots** — `--agent-hue-0..7` = `hsl(H,38%,34%)`, H ∈
+  {0,30,60,100,140,250,285,325} (L3), `--agent-avatar-ink #FFF`, `--agent-dream`,
+  `--agent-ring-sel`. Avatar-only; identity, not state.
+- **§D `--presence-*` aliases** — live/paused/draft/deactivated, each resolving to the
+  status channel with its shape mandatory (color-only presence is a violation).
+- **§E register namespaces (L4)** — `--r-console-{sm,md,lg}` 4/6/8px;
+  `--r-journey-{sm,md,lg}` 8/12/16px. Per-surface consumption; cross-register use is a
+  lint error (L4 broad enforcement).
+
+Theme-parity token count moves 123 → 139 (+16 v3.5 names in each scope).
