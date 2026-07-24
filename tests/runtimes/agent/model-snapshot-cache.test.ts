@@ -243,4 +243,71 @@ describe('CatalogueSnapshotCache', () => {
       id: 'claude-opus-4-8',
     });
   });
+
+  // ── Slice 2: the drill layer shares ONE latest slot with the flat menu ──────
+  describe('drill layer (Slice 2) — single-slot recency', () => {
+    const CHAT = 'g@g.us';
+    const BRAND_ENTRY = { kind: 'brand' as const, label: 'OpenCode', brand: 'OpenCode', provider: 'opencode-cli' };
+    const FLAT_ENTRY: CatalogueEntry = { providerId: 'claude-cli', id: 'claude-opus-4-8' };
+
+    it('a drill write SUPERSEDES the flat slot: resolveLatestPick returns the drill, resolveCataloguePick MISSES', () => {
+      const c = createCatalogueSnapshotCache();
+      c.putCatalogueSnapshot(CHAT, SENDER_A, 'm-1', [FLAT_ENTRY]);
+      c.putDrillSnapshot(CHAT, SENDER_A, 'brand', [BRAND_ENTRY]);
+      expect(c.resolveLatestPick(CHAT, SENDER_A, 1)).toEqual({ kind: 'drill', entry: BRAND_ENTRY });
+      // The flat-only reader (used by `/model N default`) must NOT pin the
+      // stale flat entry while a newer drill is what the user is looking at.
+      expect(c.resolveCataloguePick(CHAT, SENDER_A, 1)).toBeNull();
+      expect(c.latestSnapshotKind(CHAT, SENDER_A)).toBe('drill');
+    });
+
+    it('a flat write SUPERSEDES the drill slot: both readers return the flat entry again', () => {
+      const c = createCatalogueSnapshotCache();
+      c.putDrillSnapshot(CHAT, SENDER_A, 'brand', [BRAND_ENTRY]);
+      c.putCatalogueSnapshot(CHAT, SENDER_A, 'm-2', [FLAT_ENTRY]);
+      expect(c.resolveLatestPick(CHAT, SENDER_A, 1)).toEqual({ kind: 'flat', entry: FLAT_ENTRY });
+      expect(c.resolveCataloguePick(CHAT, SENDER_A, 1)).toEqual(FLAT_ENTRY);
+      expect(c.latestSnapshotKind(CHAT, SENDER_A)).toBe('flat');
+    });
+
+    it('per-(chat,sender) isolation ACROSS kinds: B opening a drill never repoints A’s flat pick in the same chat', () => {
+      const c = createCatalogueSnapshotCache();
+      c.putCatalogueSnapshot(CHAT, SENDER_A, 'm-1', [FLAT_ENTRY]);
+      c.putDrillSnapshot(CHAT, SENDER_B, 'brand', [BRAND_ENTRY]);
+      expect(c.resolveLatestPick(CHAT, SENDER_A, 1)).toEqual({ kind: 'flat', entry: FLAT_ENTRY });
+      expect(c.resolveLatestPick(CHAT, SENDER_B, 1)).toEqual({ kind: 'drill', entry: BRAND_ENTRY });
+      // Each sender's `/model N default` behaves per THEIR own slot.
+      expect(c.resolveCataloguePick(CHAT, SENDER_A, 1)).toEqual(FLAT_ENTRY);
+      expect(c.resolveCataloguePick(CHAT, SENDER_B, 1)).toBeNull();
+      expect(c.latestSnapshotKind(CHAT, SENDER_A)).toBe('flat');
+      expect(c.latestSnapshotKind(CHAT, SENDER_B)).toBe('drill');
+    });
+
+    it('out-of-range on a live drill returns null without disturbing the slot kind', () => {
+      const c = createCatalogueSnapshotCache();
+      c.putDrillSnapshot(CHAT, SENDER_A, 'brand', [BRAND_ENTRY]);
+      expect(c.resolveLatestPick(CHAT, SENDER_A, 9)).toBeNull();
+      // Still a live drill — the miss re-render must show the drill, not flat.
+      expect(c.latestSnapshotKind(CHAT, SENDER_A)).toBe('drill');
+    });
+
+    it('an EXPIRED drill slot reads as no-snapshot on every path (consistent TTL boundary)', () => {
+      vi.useFakeTimers();
+      const c = createCatalogueSnapshotCache();
+      c.putDrillSnapshot(CHAT, SENDER_A, 'brand', [BRAND_ENTRY]);
+      vi.advanceTimersByTime(15 * 60_000 + 1);
+      expect(c.resolveLatestPick(CHAT, SENDER_A, 1)).toBeNull();
+      expect(c.resolveCataloguePick(CHAT, SENDER_A, 1)).toBeNull();
+      // null (not 'drill') → a true snapshot-miss, so the handler opens L1.
+      expect(c.latestSnapshotKind(CHAT, SENDER_A)).toBeNull();
+    });
+
+    it('an empty drill snapshot (Level-1 degrade) makes a following pick MISS cleanly, never resolving a stale flat entry', () => {
+      const c = createCatalogueSnapshotCache();
+      c.putCatalogueSnapshot(CHAT, SENDER_A, 'm-1', [FLAT_ENTRY]);
+      c.putDrillSnapshot(CHAT, SENDER_A, 'brand', []); // degrade path writes empty
+      expect(c.resolveLatestPick(CHAT, SENDER_A, 1)).toBeNull();
+      expect(c.resolveCataloguePick(CHAT, SENDER_A, 1)).toBeNull();
+    });
+  });
 });

@@ -17,6 +17,7 @@ import {
   isProviderId,
   type ProviderId,
 } from '../../../../src/runtimes/agent/providers/index.ts';
+import { brandOf, resolveBrandProvider } from '../../../../src/runtimes/agent/providers/provider-brand.ts';
 
 describe('Provider ID registry (#447)', () => {
   it('exposes the 6 canonical provider IDs as a frozen array', () => {
@@ -96,6 +97,25 @@ describe('Provider ID registry (#447)', () => {
       if (patterns === null) continue;
       const matched = patterns.some((p) => files.some((f) => p.test(f)));
       expect(matched, `expected an impl file for provider "${id}"`).toBe(true);
+    }
+  });
+
+  it('every canonical provider has a brand mapping (drill Level-1 anti-drift)', () => {
+    // The `/model` two-level drill builds Level-1 from routablePinTargets(),
+    // which returns PROVIDER_IDS-typed ids, then groups them via brandOf
+    // (provider-brand.ts). A canonical provider WITHOUT a brand entry would
+    // return null and be silently skipped by listBrands — routable, reachable
+    // via `/model list` + `/model <id>`, but INVISIBLE in the drill menu with
+    // no error. Pin the brand map to PROVIDER_IDS in the same lockstep this
+    // file already enforces for impl files, so "add a provider" can't silently
+    // drop it from the drill. Add the brand-map step to providers/index.ts's
+    // "Add a new provider" checklist alongside this assertion.
+    for (const id of PROVIDER_IDS) {
+      const brand = brandOf(id);
+      expect(brand, `provider "${id}" is missing a brand mapping (would vanish from the /model drill Level-1)`).not.toBeNull();
+      // And that brand must resolve back to a concrete provider (the inverse
+      // BRAND_PROVIDER_ORDER entry exists too) when this id is routable.
+      expect(resolveBrandProvider(brand!, [id]), `brand "${brand}" for "${id}" does not resolve to a provider`).not.toBeNull();
     }
   });
 });
