@@ -1729,7 +1729,7 @@ describe('SessionManager', () => {
 
     const sm = new SessionManager({ db, messenger, chatJid: CHAT_JID, onEvent: vi.fn(), instanceName: 'personal', notifyUser, treeLivenessAssessor });
     await sm.spawnSession();
-    await sm.sendTurn('run the LCP tracker export');
+    await sm.sendTurn('run the long data export');
 
     sm.recoverStalledOperation('toolu_browser_long', 'mcp__playwright__browser_navigate');
     await vi.advanceTimersByTimeAsync(STALLED_OP_KILL_GRACE_MS + 1);

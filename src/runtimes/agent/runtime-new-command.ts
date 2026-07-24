@@ -7,7 +7,7 @@
 // /new is the user's natural interrupt. It used to 409-bounce while a turn was
 // in flight ("A response is still in progress") — which made a runaway long job
 // un-cancelable: the interrupt was blocked by the very turn it was meant to
-// stop (ana-bot LCP TRACKER complaint, 2026-07-24). A mid-turn /new now
+// stop. A mid-turn /new now
 // performs the PROVEN kill-session teardown first (turn abort + durable turn
 // terminalization + session shutdown) so the admitted turn still reaches a
 // terminal transaction — the invariant the old assert protected — and then

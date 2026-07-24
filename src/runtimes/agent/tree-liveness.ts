@@ -3,12 +3,11 @@
 //
 // The stalled-operation kill and the hard turn watchdog both infer "hung" from
 // stream silence: no stream-json events for N minutes ⇒ kill. That premise is
-// false for long single tool calls — heavy browser automation (LCPtracker /
-// QuickBooks Time runs), long bash steps, or big MCP operations block the
+// false for long single tool calls: browser automation, long shell steps, or
+// tool-protocol operations can block the
 // provider's event stream for far longer than any fixed threshold while the
 // process tree underneath is doing real work. Killing on stream silence alone
-// SIGKILLs healthy jobs mid-run (heal classes crash__signal_SIGKILL_exit_none /
-// crash__signal_none_exit_143 on ana-bot, 2026-07-16..20).
+// can terminate healthy jobs mid-run.
 //
 // This module gives those kill paths a second signal: cumulative CPU time of
 // the provider's process tree, sampled twice across a short window. A tree

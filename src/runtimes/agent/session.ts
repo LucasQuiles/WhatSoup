@@ -2045,8 +2045,8 @@ export class SessionManager {
   /**
    * Liveness gate shared by the stalled-op kill and the hard watchdog: a quiet event
    * stream alone must not kill a provider whose process tree is demonstrably working
-   * (heavy browser automation / long bash / long MCP steps — the ana-bot LCP TRACKER
-   * SIGKILL/exit-143 heal class). Assessment failure (tree gone, `ps` unusable) is
+   * (heavy browser automation / long shell / tool-protocol steps). Assessment
+   * failure (tree gone, `ps` unusable) is
    * treated as no-exoneration: the kill proceeds exactly as before this gate existed.
    */
   private async runLivenessGatedKill(args: {
