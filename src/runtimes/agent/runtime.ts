@@ -8,6 +8,9 @@ import type {
   DurabilityEngine,
   SessionCheckpointRow,
 } from '../../core/durability.ts';
+import type { TurnRecoveryClaimFence, TurnRecoveryJobRow } from '../../core/turn-recovery-store.ts';
+import type { TurnRecoverySupervisor, TurnRecoveryReplayDispatchResult } from './turn-recovery-supervisor.ts';
+import { createTurnRecoverySupervisorForRuntime, dispatchTurnRecoveryReplayForJob, shutdownTurnRecoverySupervisorSafely, getTurnRecoveryHealthDetails } from './turn-recovery-dispatch.ts';
 import { splitInputTokenUsage, type AgentEvent } from './stream-parser.ts';
 import {
   classifyProviderFailure,
@@ -1510,33 +1513,10 @@ export class AgentRuntime implements Runtime {
     }
   }
 
-  private getTurnRecoveryHealthDetails() {
-    const counts = typeof this.durability?.getTurnRecoverySupervisorCounts === 'function'
-      ? this.durability.getTurnRecoverySupervisorCounts()
-      : {
-      outstanding: 0, pending: 0, liveClaimed: 0, expiredClaimed: 0,
-      blockedUnsafe: 0, exhausted: 0, quarantinedDelivery: 0, corruptLinks: 0,
-      orphanTransfers: 0, echoConflicts: 0, openRecoveries: 0,
-      };
-    return {
-      turnRecoveryOutstanding: counts.outstanding,
-      turnRecoveryPending: counts.pending,
-      turnRecoveryLiveClaimed: counts.liveClaimed,
-      turnRecoveryExpiredClaimed: counts.expiredClaimed,
-      turnRecoveryBlockedUnsafe: counts.blockedUnsafe,
-      turnRecoveryExhausted: counts.exhausted,
-      turnRecoveryOpenRecoveries: counts.openRecoveries,
-      turnRecoveryQuarantinedDelivery: counts.quarantinedDelivery,
-      turnRecoveryCorruptLinks: counts.corruptLinks,
-      turnRecoveryOrphanTransfers: counts.orphanTransfers ?? 0,
-      turnRecoveryEchoConflicts: counts.echoConflicts ?? 0,
-    };
-  }
-
   private logHealthStats(): void {
     const memoryUsage = process.memoryUsage();
     const finalizationHealth = this.runtimeTurnSupervisor.health();
-    const recoveryHealth = this.getTurnRecoveryHealthDetails();
+    const recoveryHealth = getTurnRecoveryHealthDetails(this.durability);
 
     log.info({
       instanceName: this.instanceName,
@@ -1896,6 +1876,7 @@ export class AgentRuntime implements Runtime {
   private currentRuntimeTurnCompletion: RuntimeTurnCompletion | null = null;
   /** Owns bounded terminal retries and sticky affected-scope degradation. */
   private readonly runtimeTurnSupervisor: RuntimeTurnSupervisor<RuntimeTurnPostEffects>;
+  private readonly turnRecoverySupervisor: TurnRecoverySupervisor;
   private readonly runtimeTurnHost: RuntimeTurnCoordinatorPort & RuntimeResultHandlerPort;
   private readonly runtimeTurnCoordinator: RuntimeTurnCoordinator;
   /** Host object backing model-pin.ts / model-catalogue-render.ts (the `/model` surface). */
@@ -2414,6 +2395,12 @@ export class AgentRuntime implements Runtime {
       () => this.durability,
       (result, retained) => this.runtimeTurnCoordinator.applyRecoveredRuntimeTurnFinalization(result, retained),
     );
+    this.turnRecoverySupervisor = createTurnRecoverySupervisorForRuntime({ // started in setDurability, stopped at shutdown
+      instanceName: this.instanceName, getDurability: () => this.durability,
+      dispatchReplay: (job, fence) => this.dispatchTurnRecoveryReplay(job, fence),
+      recoveryManagerId: this.recoveryManagerId, nextRecoveryGeneration: () => ++this.recoveryGeneration,
+      hasSessionForChat: (deliveryJid) => this.chatSessions.has(this.resolvePerChatMapKey(deliveryJid)),
+    });
     this.handoffDistill = new HandoffDistillCoordinator({
       db,
       instanceName: this.instanceName,
@@ -2662,8 +2649,8 @@ export class AgentRuntime implements Runtime {
       isShuttingDown: () => runtime.shutdownRequested,
       getActiveQueue: () => runtime.getActiveQueue(),
       getQueueForChat: (chatJid, mapKey) => runtime.getQueueForChat(chatJid, mapKey),
-      sendTurnPerChat: (chatJid, text, mapKey, actorJid, context, scopeRef) =>
-        runtime.sendTurnPerChat(chatJid, text, mapKey, actorJid, context, scopeRef),
+      sendTurnPerChat: (chatJid, text, mapKey, actorJid, context, scopeRef, systemTurnLease, excludeJobId) =>
+        runtime.sendTurnPerChat(chatJid, text, mapKey, actorJid, context, scopeRef, systemTurnLease, excludeJobId),
       sendVoiceReply: (chatJid, responseText) => runtime._sendVoiceReply(chatJid, responseText),
       isSilentCompact: (scopeKey) => runtime.isSilentCompact(scopeKey),
       clearSilentCompact: (scopeKey) => runtime.clearSilentCompact(scopeKey),
@@ -2776,6 +2763,7 @@ export class AgentRuntime implements Runtime {
     if (this.queue) this.queue.setDurability(engine);
     for (const q of this.outboundQueues.values()) q.setDurability(engine);
     for (const q of this.chatQueues.values()) q.setDurability(engine);
+    this.turnRecoverySupervisor.start(); // PRESTAGE-T4; idempotent
   }
 
   /**
@@ -4954,6 +4942,7 @@ export class AgentRuntime implements Runtime {
     runtimeContext?: RuntimeTurnContext,
     scopeRef?: PerChatRuntimeScopeRef,
     systemTurnLease?: SystemTurnLeaseToken,
+    excludeJobId?: number, // PRESTAGE-T4: set only by the recovery supervisor's own replay; see beginRuntimeTurnEvidence
   ): Promise<void> {
     mapKey = scopeRef?.value ?? mapKey;
     const dispatchAllowed = runtimeContext === undefined
@@ -5063,6 +5052,7 @@ export class AgentRuntime implements Runtime {
         currentMapKey,
         runtimeContext,
         scopeRef,
+        excludeJobId,
       );
     };
 
@@ -5145,6 +5135,7 @@ export class AgentRuntime implements Runtime {
     mapKey: string,
     context: RuntimeTurnContext | undefined,
     scopeRef?: PerChatRuntimeScopeRef,
+    excludeJobId?: number,
   ): RuntimeTurnCompletion | null {
     if (!context) return null;
     mapKey = scopeRef?.value ?? mapKey;
@@ -5155,7 +5146,7 @@ export class AgentRuntime implements Runtime {
     if (contexts.length > 0) {
       throw new Error(`Per-chat runtime turn context FIFO already has an active owner for "${mapKey}"`);
     }
-    this.runtimeTurnCoordinator.beginRuntimeTurnEvidence(queue, context);
+    this.runtimeTurnCoordinator.beginRuntimeTurnEvidence(queue, context, excludeJobId);
     contexts.push(context);
     this.perChatRuntimeTurnContexts.set(mapKey, contexts);
     this.perChatRuntimeTurnScopeRefs.set(
@@ -5165,6 +5156,13 @@ export class AgentRuntime implements Runtime {
     const completion = this.runtimeTurnCoordinator.createRuntimeTurnCompletion(context);
     this.perChatRuntimeTurnCompletions.set(mapKey, completion);
     return completion;
+  }
+
+  private async dispatchTurnRecoveryReplay(job: TurnRecoveryJobRow, _fence: TurnRecoveryClaimFence): Promise<TurnRecoveryReplayDispatchResult> { // real dispatcher body in turn-recovery-dispatch.ts
+    return dispatchTurnRecoveryReplayForJob(
+      this.runtimeTurnCoordinator, (jid) => this.resolvePerChatMapKey(jid),
+      (mapKey) => this.chatSessions.get(mapKey), (s) => this.requireSessionToolScopeKey(s), job,
+    );
   }
 
   private updateSessionActorJid(session: SessionManager, actorJid: string | undefined): void {
@@ -7054,7 +7052,7 @@ export class AgentRuntime implements Runtime {
     const fallbackState = this.getFallbackState();
     const providerExecution = this.providerExecutionGate.snapshot();
     const finalizationHealth = this.runtimeTurnSupervisor.health();
-    const recoveryHealth = this.getTurnRecoveryHealthDetails();
+    const recoveryHealth = getTurnRecoveryHealthDetails(this.durability);
     const finalizationDegraded =
       finalizationHealth.retainedRetries > 0
       || finalizationHealth.degradedScopes > 0
@@ -7487,6 +7485,15 @@ export class AgentRuntime implements Runtime {
       this.healthStatsTimer = null;
     }
     this.workspaceSweeper.stop();
+    // H2: quiesce the recovery scan loop FIRST, before any per-chat teardown
+    // below -- stop() clears the scan timer synchronously and blocks
+    // scheduleScan from re-arming it, so a scan cannot fire mid-shutdown and
+    // dispatch a replay into a session that teardown is tearing down or has
+    // already torn down. The later shutdownTurnRecoverySupervisorSafely call
+    // still awaits any scan that was ALREADY in flight before this line ran
+    // -- that's a different, narrower race this stop() call does not (and
+    // cannot) close by itself.
+    this.turnRecoverySupervisor.stop();
     if (this.queueSweepTimer) {
       clearInterval(this.queueSweepTimer);
       this.queueSweepTimer = null;
@@ -7606,6 +7613,8 @@ export class AgentRuntime implements Runtime {
       preserveRuntimeTurnState = true;
       log.error({ err }, 'runtime turn finalizations remained unresolved during shutdown');
     }
+    const trErr = await shutdownTurnRecoverySupervisorSafely(this.turnRecoverySupervisor);
+    if (trErr) shutdownFailures.push(trErr);
     try {
       await this.runtimeTurnCoordinator.awaitUndispatchedCrashFinalizations();
     } catch (err) {

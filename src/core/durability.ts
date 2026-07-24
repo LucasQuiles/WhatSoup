@@ -692,8 +692,14 @@ export class DurabilityEngine {
       getMaybeSentOutboundCount: prepare(
         `SELECT COUNT(*) as count FROM outbound_ops WHERE status = 'maybe_sent'`,
       ),
+      // Ambiguity-transition time, not queue time: a send that fails BEFORE
+      // markSubmitted() (null submitted_at — the BRICK-LAB job-1474 shape)
+      // must still age and page, not read as fresh. COALESCE mirrors the
+      // reconciliation query's fix (getLiveReconcileMaybeSent, #2079); this
+      // sibling health-staleness query was not covered by that fix and
+      // stayed null-blind exactly for the pre-submission failure case.
       getOldestMaybeSentSubmittedAt: prepare(
-        `SELECT MIN(submitted_at) as at FROM outbound_ops WHERE status = 'maybe_sent' AND submitted_at IS NOT NULL`,
+        `SELECT MIN(COALESCE(submitted_at, created_at)) as at FROM outbound_ops WHERE status = 'maybe_sent'`,
       ),
       getQuarantinedOutboundCount: prepare(
         `SELECT COUNT(*) as count FROM outbound_ops WHERE status = 'quarantined'`,
@@ -1199,6 +1205,14 @@ export class DurabilityEngine {
     return this.turnRecovery.promoteBlockedTurnRecoveryJob(jobId, owner, fence, proof);
   }
 
+  getTurnRecoveryOriginalDeliveryStatus(jobId: number): { outboundStatus: string } | undefined {
+    return this.turnRecovery.getTurnRecoveryOriginalDeliveryStatus(jobId);
+  }
+
+  getTurnRecoverySourceProof(jobId: number): { processingStatus: string; outboundStatus: string } | undefined {
+    return this.turnRecovery.getTurnRecoverySourceProof(jobId);
+  }
+
   /**
    * Enumerates every pending or claimed job for one owner, including pending
    * backoff. Cursors are scoped to one scan cycle; after scanComplete, reset
@@ -1233,8 +1247,9 @@ export class DurabilityEngine {
   hasOutstandingTurnRecoveryForScope(
     scope: 'per_chat' | 'shared' | 'singleton',
     conversationKey: string,
+    options?: { excludeJobId?: number },
   ): boolean {
-    return this.turnRecovery.hasOutstandingTurnRecoveryForScope(scope, conversationKey);
+    return this.turnRecovery.hasOutstandingTurnRecoveryForScope(scope, conversationKey, options);
   }
 
   // ── Outbound ops ──
