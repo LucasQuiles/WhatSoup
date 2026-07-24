@@ -201,7 +201,6 @@ describe('App renders — v3.5 route shells (T5 b-02)', () => {
     // T5 b-05: /skills graduated off the stub onto the real v3.5 surface.
     // T5 b-06: /dream-lab graduated off the stub onto the real v3.5 surface.
     const cases: Array<[string, string, string]> = [
-      ['/deployments', 'Deployments', 'b-08'],
       ['/settings', 'Settings', 'b-09'],
     ];
     for (const [path, surface, bead] of cases) {

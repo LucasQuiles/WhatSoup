@@ -335,6 +335,10 @@ export const fitnessRules = [
         // (T5 b-07): CHANNEL_LABEL names each channel there, so generic
         // consumers never hardcode one transport's name.
         'console/src/lib/transport-identity.ts',
+        // transport-identity.ts is the console-wide transport-identity home
+        // (T5 b-07/b-08): CHANNEL_LABEL names each channel there, so generic
+        // consumers never hardcode one transport's name.
+        'console/src/lib/transport-identity.ts',
       ],
     },
     source: ['audit:2026-07-20-signal-imessage-surface-sweep#S2,S3,S15'],
@@ -363,6 +367,11 @@ export const fitnessRules = [
         // transport identity (T5 b-07): the legacy health.whatsapp read lives
         // there alone as the documented Baileys fallback; all consumers route
         // through transportConnectedOf / channelOf.
+        'console/src/lib/transport-identity.ts',
+        // transport-identity.ts is the designated generic-first accessor for
+        // transport identity (T5 b-07/b-08): the legacy health.whatsapp read
+        // lives there alone as the documented Baileys fallback; all consumers
+        // route through transportConnectedOf / channelOf.
         'console/src/lib/transport-identity.ts',
       ],
     },

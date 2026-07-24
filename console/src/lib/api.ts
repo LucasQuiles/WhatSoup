@@ -446,6 +446,13 @@ export const api = {
   getVersion: () =>
     apiFetch<{ sha: string; remoteSha: string; updateAvailable: boolean; checkedAt: string }>('/api/version'),
 
+  // Fleet-process liveness (src/fleet/livez.ts) — unauthenticated loopback
+  // route; the Deployments surface reads fleet uptime from it.
+  getLivez: () =>
+    apiFetch<{ alive: boolean; instance: string; pid: number; uptime_seconds: number; started_at: string }>(
+      '/livez',
+    ),
+
   // ── Provider catalog + per-instance provider/key/fallback status ──
 
   getProviders: () =>

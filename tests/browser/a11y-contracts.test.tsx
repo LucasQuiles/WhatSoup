@@ -63,6 +63,12 @@ vi.mock('../../console/src/pages/Inbox', () => ({
   default: () => <section aria-label="Inbox route"><h1>Inbox</h1></section>,
 }));
 
+// Deployments graduated from the stub at T5 b-08: mocked here with the same
+// landmark-shaped sentinel so the app-shell law stays pinned per-route.
+vi.mock('../../console/src/pages/Deployments', () => ({
+  default: () => <section aria-label="Deployments route"><h1>Deployments</h1></section>,
+}));
+
 vi.mock('../../console/src/pages/Operator', () => ({
   default: () => <section aria-label="Ops route"><h1>Ops</h1></section>,
 }));
