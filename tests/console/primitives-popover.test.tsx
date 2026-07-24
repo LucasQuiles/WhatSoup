@@ -321,6 +321,44 @@ describe('Popover — role and ARIA', () => {
 // ---------------------------------------------------------------------------
 
 describe('Popover — aria-activedescendant', () => {
+  it('builds distinct stable ids for values that differ only by punctuation', () => {
+    const plusValue = 'owner+ops_at_example.com@imessage';
+    const dotValue = 'owner.ops_at_example.com@imessage';
+
+    expect(popoverOptionId(LISTBOX_ID, plusValue))
+      .not.toBe(popoverOptionId(LISTBOX_ID, dotValue));
+    expect(popoverOptionId(LISTBOX_ID, plusValue))
+      .toBe(popoverOptionId(LISTBOX_ID, plusValue));
+  });
+
+  it('keeps the active descendant unique without changing the selected value', () => {
+    const plusValue = 'owner+ops_at_example.com@imessage';
+    const dotValue = 'owner.ops_at_example.com@imessage';
+    const onSelect = vi.fn();
+    render(
+      <ComboboxFixture
+        initialOptions={[
+          { value: plusValue, label: 'Plus identity' },
+          { value: dotValue, label: 'Dot identity' },
+        ]}
+        onSelect={onSelect}
+      />,
+    );
+    const trigger = screen.getByTestId('trigger');
+
+    fireEvent.click(trigger);
+    fireEvent.keyDown(trigger, { key: 'ArrowDown' });
+    fireEvent.keyDown(trigger, { key: 'ArrowDown' });
+
+    const descendant = trigger.getAttribute('aria-activedescendant');
+    const dotOption = screen.getByRole('option', { name: 'Dot identity' });
+    expect(descendant).toMatch(/^fixture-listbox-opt-[a-zA-Z0-9_-]+$/);
+    expect(document.getElementById(descendant!)).toBe(dotOption);
+
+    fireEvent.keyDown(trigger, { key: 'Enter' });
+    expect(onSelect).toHaveBeenCalledWith(dotValue);
+  });
+
   it('option ids follow popoverOptionId(listboxId, value) formula', () => {
     const ref = { current: null };
     render(
