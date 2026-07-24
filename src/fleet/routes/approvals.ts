@@ -140,11 +140,27 @@ export async function handlePostApprovalDecision(
   if (proxy.status === 409) {
     // Already resolved elsewhere (WhatsApp vote or another console) — relay
     // the instance's verdict verbatim; the operator must see the race.
-    jsonResponse(res, 409, JSON.parse(proxy.body) as Record<string, unknown>);
+    try {
+      jsonResponse(res, 409, JSON.parse(proxy.body) as Record<string, unknown>);
+    } catch {
+      jsonResponse(res, 409, {
+        error: 'decision already resolved elsewhere (instance returned unparseable response)',
+        instance: instance.name,
+        mapKey: decision.mapKey,
+      });
+    }
     return;
   }
   if (proxy.status >= 400) {
-    jsonResponse(res, proxy.status, JSON.parse(proxy.body) as Record<string, unknown>);
+    try {
+      jsonResponse(res, proxy.status, JSON.parse(proxy.body) as Record<string, unknown>);
+    } catch {
+      jsonResponse(res, proxy.status, {
+        error: `instance returned an unparseable error response (status ${proxy.status})`,
+        instance: instance.name,
+        mapKey: decision.mapKey,
+      });
+    }
     return;
   }
   jsonResponse(res, 202, { status: 'decision_delivered', instance: instance.name, mapKey: decision.mapKey });
