@@ -883,3 +883,28 @@ direct-edit controls, one danger area).
   `--settings-sw*` (52px swatch, 18px/10px bands), `--settings-nchan-*`,
   `--settings-opts-{minw,gap}` (120px fixed control zone), `--settings-tok-*`,
   `--settings-acts-gap`, `--settings-sub-mt` (row sub tuck).
+
+## 12. v3.5 journey geometry (docs/design-system/v35/mockups/{splash,hatch}.html, landed b-10)
+
+Component-tier dimension tokens in `console/src/styles/tokens.component.css`, single
+`:root` scope (theme-independent geometry; parity count unaffected). Mockup literals
+are the visual SSOT — they live in the `--journey-*` block once, so `journey.css`
+consumes `var()` only. **Radii come from the JOURNEY register** (`--r-journey-{sm,
+md,lg}` = 8/12/16, L4) — the bead acceptance item; the console register is never
+consumed on journey surfaces.
+
+- **Frame** — `--journey-shell-w` 860px, crumb, step rail (`--journey-step-bar-*`;
+  done=✓ hairline, current=accent, upcoming=recessed per 14-onboarding §1),
+  `--journey-card-pad` 32px (card radius = `--r-journey-lg`).
+- **Steps** — kind cards, channel grid (`--journey-grid-{gap,min}` 88px tiles,
+  `--journey-ch-*`), agent step, link step; single accent primary per step,
+  ghost secondaries (14-onboarding §2).
+- **Ceremony** — `--journey-lockup` 120px, `--journey-glow-inset` −40px (radial
+  one-shot ≤800ms fading to 0 per 13-ceremony §2), `--journey-av` 72px,
+  eggshell dashed frame, beats row, name row, first-message bar
+  (radius = `--r-journey-md`), actions.
+- **Splash** — hero measure 640px, nameplate, CTAs, proof cards (780px,
+  stacking ≤700px), watermark glyph canvases + offsets (L7 imagery, opacity
+  0.04–0.05, pointer-events none).
+- **Buttons** — `--journey-btn-radius` 10px sits between register steps
+  (documented deviation; mockup literal).

@@ -205,8 +205,16 @@ vi.mock('../../console/src/lib/api', () => ({
     setCredential: vi.fn(() => Promise.resolve({ ok: true, service: 'deepseek' })),
     verifyCredential: vi.fn(() => Promise.resolve({ service: 'deepseek', status: 'valid' })),
     deleteCredential: vi.fn(() => Promise.resolve({ ok: true, service: 'deepseek' })),
+    // v3.5 Journey (T5 b-10): provider catalog for the Hatch page mount.
+    getProviders: vi.fn(() =>
+      Promise.resolve([
+        { id: 'claude-cli', displayName: 'Claude CLI', type: 'cli', needsApiKey: false, providerConfig: [] },
+      ]),
+    ),
+    createLine: vi.fn(() => Promise.resolve({ name: 'quinn', healthPort: 9096 })),
   },
   lockConsole: vi.fn(() => Promise.resolve()),
+  getApiTicket: vi.fn(() => Promise.resolve('browser-test-ticket')),
   // App now reaches use-websocket (via the connection-status hook), which imports
   // isProductionConsole from lib/api — expose it on the explicit-shape mock.
   isProductionConsole: () => false,
@@ -269,6 +277,9 @@ import SkillsHub from '../../console/src/pages/SkillsHub';
 import DreamLab from '../../console/src/pages/DreamLab';
 import Deployments from '../../console/src/pages/Deployments';
 import Settings from '../../console/src/pages/Settings';
+import Landing from '../../console/src/pages/Landing';
+import Hatch from '../../console/src/pages/Hatch';
+import { Ceremony } from '../../console/src/components/journey/Ceremony';
 import {
   Drawer,
   DrawerLayout,
@@ -867,6 +878,128 @@ describe('Viewport matrix — v3.5 Settings (T5 b-09)', () => {
     });
     const root = container.querySelector('.settings-page') as HTMLElement;
     expect(root.scrollWidth).toBeLessThanOrEqual(root.clientWidth + 1);
+  });
+});
+
+
+// ---------------------------------------------------------------------------
+// JOURNEY suites (T5 b-10 — splash + hatch ceremony, mockups splash/hatch.html)
+//
+// Splash stacks its proof triptych at the mockup's own 700px; the ceremony
+// composes centered at 1440×900; the journey card radius is the JOURNEY
+// register's --r-journey-lg (16px — the bead acceptance item). The browser
+// suite runs globally under prefers-reduced-motion: reduce, so the 13-§3
+// removal law is computed-proof here: the glow animation resolves to none.
+// ---------------------------------------------------------------------------
+
+function wrapLanding() {
+  return (
+    <QueryClientProvider client={makeQC()}>
+      <ToastContext.Provider value={toastValue}>
+        <MemoryRouter>
+          <Landing />
+        </MemoryRouter>
+      </ToastContext.Provider>
+    </QueryClientProvider>
+  );
+}
+
+function wrapCeremony() {
+  return (
+    <QueryClientProvider client={makeQC()}>
+      <ToastContext.Provider value={toastValue}>
+        <MemoryRouter>
+          <Ceremony
+            name="Quinn"
+            soul="Keeps the room tidy."
+            channelLabel="WhatsApp"
+            adminPhone="+15550100001"
+            lineName="quinn"
+            agentInitial="Q"
+            onAdjust={() => {}}
+          />
+        </MemoryRouter>
+      </ToastContext.Provider>
+    </QueryClientProvider>
+  );
+}
+
+describe('Viewport matrix — v3.5 Journey splash (T5 b-10)', () => {
+  it('proof triptych renders 3 columns at 1440×900', async () => {
+    await page.viewport(1440, 900);
+    const { container } = await render(wrapLanding());
+    await vi.waitFor(() => {
+      expect(container.querySelector('.journey-props')).not.toBeNull();
+    });
+    const props = container.querySelector('.journey-props') as HTMLElement;
+    expect(window.getComputedStyle(props).gridTemplateColumns.split(' ').length).toBe(3);
+  });
+
+  it('proof triptych stays 3 columns at 701px, stacks at the mockup 700px', async () => {
+    await page.viewport(701, 900);
+    const { container } = await render(wrapLanding());
+    await vi.waitFor(() => {
+      expect(container.querySelector('.journey-props')).not.toBeNull();
+    });
+    const props = container.querySelector('.journey-props') as HTMLElement;
+    expect(window.getComputedStyle(props).gridTemplateColumns.split(' ').length).toBe(3);
+
+    await page.viewport(700, 900);
+    expect(window.getComputedStyle(props).gridTemplateColumns.split(' ').length).toBe(1);
+  });
+
+  it('no horizontal overflow at 1440×900 with watermarks positioned off-viewport', async () => {
+    await page.viewport(1440, 900);
+    const { container } = await render(wrapLanding());
+    await vi.waitFor(() => {
+      expect(container.querySelector('.journey-splash')).not.toBeNull();
+    });
+    const root = container.querySelector('.journey-splash') as HTMLElement;
+    expect(root.scrollWidth).toBeLessThanOrEqual(root.clientWidth + 1);
+  });
+});
+
+describe('Viewport matrix — v3.5 Hatch ceremony (T5 b-10)', () => {
+  it('composes centered at 1440×900 with no dangling overflow', async () => {
+    await page.viewport(1440, 900);
+    const { container } = await render(
+      <QueryClientProvider client={makeQC()}>
+        <ToastContext.Provider value={toastValue}>
+          <MemoryRouter>
+            <Hatch />
+          </MemoryRouter>
+        </ToastContext.Provider>
+      </QueryClientProvider>,
+    );
+    await vi.waitFor(() => {
+      expect(container.querySelector('.journey-card')).not.toBeNull();
+    });
+    // journey card radius = the JOURNEY register lg (16px) — acceptance item
+    const card = container.querySelector('.journey-card') as HTMLElement;
+    expect(window.getComputedStyle(card).borderRadius).toBe('16px');
+    const body = container.querySelector('.journey-body') as HTMLElement;
+    expect(body.scrollWidth).toBeLessThanOrEqual(body.clientWidth + 1);
+  });
+
+  it('ceremony play contract computed: glow ≤800ms single-play, avatar pop (13-§2)', async () => {
+    await page.viewport(1440, 900);
+    const { container } = await render(wrapCeremony());
+    await vi.waitFor(() => {
+      expect(container.querySelector('.journey-glow')).not.toBeNull();
+    });
+    // The bead acceptance item, computed in Chromium: radial glow, one play,
+    // ≤800ms. (The 13-§3 removal media block is source-pinned in
+    // tests/console/ceremony-motion-contract.test.ts — the vitest browser
+    // wrapper exposes no per-test media emulation, and the config's
+    // context.reducedMotion option is inert in this provider version.)
+    const glow = container.querySelector('.journey-glow') as HTMLElement;
+    const glowStyle = window.getComputedStyle(glow);
+    expect(glowStyle.animationName).toBe('journey-glowplay');
+    expect(parseFloat(glowStyle.animationDuration)).toBeLessThanOrEqual(0.8);
+    expect(glowStyle.animationIterationCount).toBe('1');
+    const av = container.querySelector('.journey-av') as HTMLElement;
+    expect(window.getComputedStyle(av).animationName).toBe('journey-pop');
+    expect(window.getComputedStyle(av).animationIterationCount).toBe('1');
   });
 });
 

@@ -523,4 +523,77 @@
   --settings-tok-pad-y: 5px;       /* token row vertical padding (mockup .tok) */
   --settings-acts-gap: 6px;        /* token actions gap (mockup .tok .acts) */
   --settings-sub-mt: 1px;          /* row sub margin-top (mockup .row .sub) */
+
+  /* ═══ v3.5 Journey surfaces geometry (T5 b-10; mockups splash.html + hatch.html SSOT) ═══
+     Every literal traces to the mockups; journey.css consumes var() only.
+     RADII come from the JOURNEY register (--r-journey-{sm,md,lg} = 8/12/16,
+     L4) — never the console register (the bead acceptance item).
+     Breakpoints: splash stacks props ≤700px; hatch card tightens ≤640px. */
+  --journey-shell-w: 860px;        /* shell max width (hatch mockup .shell min(860px,100%)) */
+  --journey-crumb-gap: 12px;       /* crumb nameplate gap (mockup .crumb) */
+  --journey-crumb-mb: 28px;        /* crumb bottom margin (mockup .crumb) */
+  --journey-tick: 8px;             /* crumb tick (mockup .crumb .tick) */
+  --journey-steps-gap: 8px;        /* step rail gap (mockup .steps) */
+  --journey-steps-mb: 28px;        /* step rail bottom margin (mockup .steps) */
+  --journey-step-gap: 6px;         /* step bar↔label gap (mockup .step) */
+  --journey-step-bar-h: 3px;       /* step bar height (mockup .step .bar) */
+  --journey-step-bar-radius: 2px;  /* step bar radius (mockup .step .bar) */
+  --journey-card-pad: 32px;        /* journey card padding (mockup .card) */
+  --journey-h1-mb: 8px;            /* step h1 margin-bottom (mockup h1) */
+  --journey-sub-mb: 24px;          /* step sub margin-bottom (mockup .sub) */
+  --journey-sub-maxw: 56ch;        /* step sub measure (mockup .sub) */
+  --journey-btn-pad: 11px 20px;    /* journey button padding (mockup .btn) */
+  --journey-btn-radius: 10px;      /* journey button radius (mockup .btn — between register steps, documented) */
+  --journey-actions-gap: 10px;     /* action row gap (mockup .actions) */
+  --journey-grid-gap: 10px;        /* channel grid gap (mockup .grid) */
+  --journey-grid-min: 88px;        /* channel tile min size (mockup .grid minmax) */
+  --journey-ch-gap: 8px;           /* channel tile inner gap (mockup .ch) */
+  --journey-ch-glyph: 22px;        /* channel tile glyph canvas (mockup .ch svg) */
+  --journey-sec-m: 18px 0 10px;    /* section head margin (mockup .sec) */
+  --journey-stage-pad: 24px 0 8px; /* ceremony stage padding (mockup .stage) */
+  --journey-lockup: 120px;         /* ceremony lockup box (mockup .lockup) */
+  --journey-lockup-mb: 20px;       /* lockup bottom margin (mockup .lockup) */
+  --journey-glow-inset: -40px;     /* ceremony glow bleed (mockup .glow inset) */
+  --journey-av: 72px;              /* ceremony avatar box (mockup .av) */
+  --journey-eggshell-border-w: 1.5px; /* eggshell dashed frame (mockup .eggshell) */
+  --journey-beats-gap: 10px;       /* beats row gap (mockup .beats) */
+  --journey-beat-gap: 8px;         /* beat inner gap (mockup .beat) */
+  --journey-beat-pad: 8px 14px;    /* beat padding (mockup .beat) */
+  --journey-beat-dot: 6px;         /* beat dot (mockup .beat .dot) */
+  --journey-name-row-gap: 10px;    /* name row gap (mockup .name-row) */
+  --journey-name-row-mb: 6px;      /* name row bottom margin (mockup .name-row) */
+  --journey-dice: 36px;            /* dice button box (mockup .dice) */
+  --journey-dice-radius: 10px;     /* dice button radius (mockup .dice) */
+  --journey-soul-mb: 4px;          /* soul quote bottom margin (mockup .soul) */
+  --journey-meta-mb: 26px;         /* meta line bottom margin (mockup .meta) */
+  --journey-firstmsg-pad: 14px 16px; /* first-message bar padding (mockup .first-msg) */
+  --journey-firstmsg-gap: 12px;    /* first-message bar gap (mockup .first-msg) */
+  --journey-firstmsg-mb: 22px;     /* first-message bar bottom margin (mockup .first-msg) */
+  --journey-firstmsg-radius: 12px; /* first-message bar radius (mockup .first-msg = --r-journey-md) */
+  --journey-hero-maxw: 640px;      /* splash hero measure (splash .hero) */
+  --journey-hero-plate-gap: 14px;  /* splash nameplate gap (splash .nameplate) */
+  --journey-hero-plate-mb: 34px;   /* splash nameplate bottom margin (splash .nameplate) */
+  --journey-hero-tick: 10px;       /* splash nameplate tick (splash .nameplate .tick) */
+  --journey-h1-mb-splash: 16px;    /* splash h1 bottom margin (splash h1) */
+  --journey-splash-sub-maxw: 46ch; /* splash sub measure (splash .sub) */
+  --journey-splash-sub-mb: 34px;   /* splash sub bottom margin (splash .sub) */
+  --journey-cta-gap: 12px;         /* splash CTA row gap (splash .cta) */
+  --journey-splash-btn-pad: 13px 24px; /* splash button base padding (splash .btn) */
+  --journey-splash-primary-pad: 14px 28px; /* splash primary padding (splash .btn.primary) */
+  --journey-splash-ghost-pad: 12px 22px; /* splash ghost padding (splash .btn.ghost2) */
+  --journey-props-gap: 14px;       /* proof cards gap (splash .props) */
+  --journey-props-mt: 56px;        /* proof cards top margin (splash .props) */
+  --journey-props-maxw: 780px;     /* proof cards max width (splash .props) */
+  --journey-prop-pad: 18px;        /* proof card padding (splash .prop) */
+  --journey-prop-n-mb: 8px;        /* proof number bottom margin (splash .prop .n) */
+  --journey-prop-h3-mb: 6px;       /* proof h3 bottom margin (splash .prop h3) */
+  --journey-wm-g1: 340px;          /* watermark glyph 1 canvas (splash .g1) */
+  --journey-wm-g2: 260px;          /* watermark glyph 2 canvas (splash .g2) */
+  --journey-wm-g1-top: -90px;      /* watermark 1 top offset (splash .g1) */
+  --journey-wm-g1-left: -110px;    /* watermark 1 left offset (splash .g1) */
+  --journey-wm-g2-bottom: -70px;   /* watermark 2 bottom offset (splash .g2) */
+  --journey-wm-g2-right: -80px;    /* watermark 2 right offset (splash .g2) */
+  --tracking-journey-caps: 0.1em;  /* journey section caps tracking (mockup .sec/.prop .n) */
+  --tracking-journey-step: 0.08em; /* step rail caps tracking (mockup .step span) */
+  --tracking-journey-ctx: 0.18em;  /* crumb ctx caps tracking (mockup .crumb .ctx) */
 }

@@ -1,5 +1,5 @@
-import { lazy, Suspense, useState, useCallback } from 'react'
-import { Routes, Route, Navigate, useLocation } from 'react-router-dom'
+import { lazy, Suspense, useState, useCallback, useEffect, useRef } from 'react'
+import { Routes, Route, Navigate, useLocation, useNavigate } from 'react-router-dom'
 import { MotionConfig } from 'framer-motion'
 import ErrorBoundary from './components/ErrorBoundary'
 import { KeyboardShortcutsHelp } from './components/KeyboardShortcutsHelp'
@@ -21,6 +21,7 @@ const LineDetail = lazy(() => import('./pages/LineDetail'))
 const Inbox = lazy(() => import('./pages/Inbox'))
 const Deployments = lazy(() => import('./pages/Deployments'))
 const Settings = lazy(() => import('./pages/Settings'))
+const Hatch = lazy(() => import('./pages/Hatch'))
 const Metrics = lazy(() => import('./pages/Metrics'))
 const Operator = lazy(() => import('./pages/Operator'))
 const Landing = lazy(() => import('./pages/Landing'))
@@ -61,6 +62,19 @@ function UnlockedApp({ onLogout, showLogout }: { onLogout: () => void; showLogou
   const update = useUpdateCheck()
   const version = update.data?.sha ?? getStaticVersion()
   const location = useLocation()
+  const navigate = useNavigate()
+
+  // First-run (T5 b-10): when the lines query FIRST resolves with zero lines
+  // and the operator landed on the fleet root, offer the journey splash. Once
+  // per mount — deleting your last line mid-session never force-redirects.
+  const firstRunChecked = useRef(false)
+  useEffect(() => {
+    if (firstRunChecked.current || lines === undefined) return
+    firstRunChecked.current = true
+    if (lines.length === 0 && location.pathname === '/') {
+      navigate('/welcome', { replace: true })
+    }
+  }, [lines, location.pathname, navigate])
 
   // Keyboard shortcuts help modal
   const [showShortcuts, setShowShortcuts] = useState(false)
@@ -119,6 +133,7 @@ function UnlockedApp({ onLogout, showLogout }: { onLogout: () => void; showLogou
               <Routes>
                 <Route path="/" element={<ErrorBoundary><SoupKitchen /></ErrorBoundary>} />
                 <Route path="/welcome" element={<ErrorBoundary><Landing /></ErrorBoundary>} />
+                <Route path="/hatch" element={<ErrorBoundary><Hatch /></ErrorBoundary>} />
                 <Route path="/lines/:name" element={<ErrorBoundary><LineDetail /></ErrorBoundary>} />
                 <Route path="/inbox" element={<ErrorBoundary><Inbox /></ErrorBoundary>} />
                 {/* Ops consolidation (02-mapping §2, E4): /ops is canonical and

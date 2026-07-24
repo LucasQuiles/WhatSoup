@@ -29,3 +29,5 @@
 @import "./styles/deploy.css";
 /* v3.5 Settings surface (T5 b-09) — mockup settings.html SSOT. */
 @import "./styles/settings.css";
+/* v3.5 Journey surfaces (T5 b-10) — mockups splash.html + hatch.html SSOT. */
+@import "./styles/journey.css";
