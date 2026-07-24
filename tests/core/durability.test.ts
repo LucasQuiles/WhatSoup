@@ -178,6 +178,33 @@ describe('DurabilityEngine', () => {
       const ageMs = Date.now() - Date.parse((stats.oldestMaybeSentAt as string).replace(' ', 'T') + 'Z');
       expect(ageMs).toBeGreaterThan(30 * 60 * 1000);
     });
+
+    it('fails closed on a send that failed before markSubmitted: null submitted_at must still age via created_at, not read as fresh (PRESTAGE-T4)', () => {
+      const id = engine.createOutboundOp({ conversationKey: 'k', chatJid: 'j', opType: 'text', payload: '{}', replayPolicy: 'unsafe' });
+      engine.markSending(id);
+      // No markSubmitted() call: the transport attempt failed before a
+      // submission receipt existed (the BRICK-LAB job-1474 shape) — status
+      // goes straight sending -> maybe_sent with submitted_at left NULL.
+      engine.markMaybeSent(id, 'ECONNRESET');
+      const row = db.raw.prepare('SELECT status, submitted_at, created_at FROM outbound_ops WHERE id = ?').get(id) as any;
+      expect(row.status).toBe('maybe_sent');
+      expect(row.submitted_at).toBeNull();
+
+      // Back-date creation to one hour ago: the only ambiguity-transition
+      // signal available for a row that never reached markSubmitted.
+      db.raw
+        .prepare(`UPDATE outbound_ops SET created_at = datetime('now', '-3600 seconds') WHERE id = ?`)
+        .run(id);
+
+      const stats = engine.getHealthStats();
+      expect(stats.maybeSentOutbound).toBe(1);
+      // Before the fix this stayed null (MIN(submitted_at) excluded the
+      // null row entirely), silently hiding the age from health/alerts —
+      // a deterministic false negative, not merely a missing feature.
+      expect(stats.oldestMaybeSentAt).not.toBeNull();
+      const ageMs = Date.now() - Date.parse((stats.oldestMaybeSentAt as string).replace(' ', 'T') + 'Z');
+      expect(ageMs).toBeGreaterThan(30 * 60 * 1000);
+    });
   });
 
   describe('sweepStaleSubmitted()', () => {
