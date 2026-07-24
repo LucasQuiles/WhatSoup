@@ -3,6 +3,7 @@ import {
   createReplyGuaranteeLivenessSender,
   DEFAULT_REPLY_GUARANTEE_TEXT,
   DEFAULT_REPLY_GUARANTEE_TIMEOUT_MS,
+  DEFAULT_REPLY_GUARANTEE_RATE_LIMIT_MS,
   ReplyGuaranteeManager,
   type ReplyGuaranteeDurability,
 } from '../../src/core/reply-guarantee.ts';
@@ -447,10 +448,18 @@ describe('ReplyGuaranteeManager', () => {
 
     manager.arm({ inboundSeq: 16, chatJid: 'x@s.whatsapp.net' });
     await vi.advanceTimersByTimeAsync(100);
-    expect(sendFallback).not.toHaveBeenCalled(); // default 10-min window not yet elapsed
+    expect(sendFallback).not.toHaveBeenCalled(); // default timeout window not yet elapsed
 
     await vi.advanceTimersByTimeAsync(DEFAULT_REPLY_GUARANTEE_TIMEOUT_MS);
     expect(sendFallback).toHaveBeenCalledOnce();
+  });
+
+  it('characterizes the prototype liveness defaults', () => {
+    // This pins the branch's proposed constants only. It does not establish
+    // production cadence or replace the canonical two-stage contract.
+    expect(DEFAULT_REPLY_GUARANTEE_TIMEOUT_MS).toBe(2 * 60 * 1000);
+    expect(DEFAULT_REPLY_GUARANTEE_RATE_LIMIT_MS).toBe(8 * 60 * 1000);
+    expect(DEFAULT_REPLY_GUARANTEE_RATE_LIMIT_MS).toBeGreaterThan(DEFAULT_REPLY_GUARANTEE_TIMEOUT_MS);
   });
 });
 
