@@ -87,6 +87,8 @@ export function emptyConnectionStateSnapshot(
           identityHash: null,
         },
         treeHash: null,
+        fileCount: null,
+        totalBytes: null,
         backup: {
           root: 'sms_transport_not_applicable',
           latest: null,

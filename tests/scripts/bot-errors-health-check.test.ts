@@ -553,6 +553,20 @@ print(json.dumps(samples, sort_keys=True))
     }
   });
 
+  it('keeps central-profile chat monitoring operator-owned', () => {
+    const profilesDir = join(process.cwd(), 'deploy', 'health-profiles');
+    const centralProfiles = readdirSync(profilesDir)
+      .filter((name) => name.endsWith('.json'))
+      .map((name) => JSON.parse(readFileSync(join(profilesDir, name), 'utf8')) as {
+        role?: string;
+        expectQLoop?: boolean;
+      })
+      .filter((profile) => profile.role === 'central');
+
+    expect(centralProfiles).toHaveLength(1);
+    expect(centralProfiles[0]?.expectQLoop).toBe(false);
+  });
+
   it('requires private config mode enforcement for profiles with config inventory', () => {
     const profilesDir = join(process.cwd(), 'deploy', 'health-profiles');
     for (const file of readdirSync(profilesDir).filter((name) => name.endsWith('.json'))) {

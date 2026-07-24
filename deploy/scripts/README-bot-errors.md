@@ -276,6 +276,34 @@ signal has its own threshold/confirmation semantics, per above), but it
 means the notification count for a single dead host is 2, not 1; don't
 read the second page as a different host.
 
+
+## Alert source and ownership index
+
+This table is the canonical index for the in-repository BOT ERRORS runtime.
+Update it whenever a producer, scheduler, relay, or incident-state owner changes.
+The systemd cadence is shown directly; the launchd installers above own the
+equivalent macOS schedules. `deploy/bot-errors-runtime-manifest.json` owns
+deployed-file parity, `deploy/managed-components.json` owns install metadata,
+and `deploy/bot-errors-expected-fleet.json` owns the sanitized monitoring scope.
+
+| Signal lane | Detection owner | Scheduler / cadence | Relay and incident owner |
+|-------------|-----------------|---------------------|--------------------------|
+| Runtime lifecycle, provider, transport, and delivery events | Runtime call sites writing through `src/lib/bot-errors-outbox.ts` / `src/lib/emit-alert.ts`; generic command failures may use `bot-errors-runner.py` | Event-driven in the owning WhatSoup service | Local durable outbox; collector relays remote events; dispatcher owns dedupe, incident state, suppression, and final delivery |
+| Remote host outbox collection | `bot-errors-collector.py` | `bot-errors-collector.service`, daemon poll every 30 seconds | Collector owns claim/ack/relay receipts; dispatcher owns the resulting incident lifecycle |
+| Durable dispatch and notification delivery | `bot-errors-dispatcher.py` | `bot-errors-dispatcher.service`, daemon poll every 30 seconds | Dispatcher is the sole owner of dedupe keys, throttling, renotify, storm collapse, incident open/clear state, and delivery fallback |
+| Dispatcher deadman | `bot-errors-health-check.py --deadman --max-state-age 180` | `bot-errors-deadman.timer`, every 5 minutes | Health check emits the incident; dispatcher delivers it |
+| Hub-lane heartbeat and queue backlog | `bot-errors-heartbeat-watchdog.py --once` | `bot-errors-heartbeat-watchdog.timer`, every 5 minutes | Watchdog owns detection and is the only force-notify producer; dispatcher owns incident state and delivery |
+| Capability, configuration, auth-bond, provider-probe, and per-instance daily health | `bot-errors-health-check.py --daily`, wrapped by `bot-errors-runner.py` | `bot-errors-health-check.timer`, daily at 07:15 in the checked-in systemd unit | Health check owns inventory and per-instance failure/clear derivation; dispatcher owns incident state and delivery |
+| Runtime release staleness | `bot-errors-release-proof-run.sh runtime-staleness` | First run after 19 minutes, then 30 minutes after completion, with up to 2 minutes jitter | Release-proof monitor owns detection; dispatcher owns incident state and delivery |
+| Git tree provenance | `bot-errors-release-proof-run.sh tree` | First run after 7 minutes, then 30 minutes after completion, with up to 2 minutes jitter | Release-proof monitor owns detection; dispatcher owns incident state and delivery |
+| Agent coordination loop | `bot-errors-q-loop.py` | `bot-errors-q-loop.service`, continuously supervised | Coordination only; it is explicitly not the incident bus and does not replace dispatcher ownership |
+| External GUI-session loss | `bot-errors-gui-session-monitor.py` installed by `install-bot-errors-gui-monitor-launchd.sh` | Default 300-second external-host probe interval | External monitor owns detection; normal outbox/dispatcher path owns incident state and delivery |
+
+An alert source observed in BOT ERRORS but absent from this table and from the
+runtime manifest is not automatically a WhatSoup-owned producer. Resolve its
+host unit or external repository before assigning ownership or changing its
+clear policy.
+
 ## Canonical source for this import (diff matrix)
 
 Source of truth chosen = **newest copies** per the corrections plan. The local Mac

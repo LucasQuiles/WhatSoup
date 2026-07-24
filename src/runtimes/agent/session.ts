@@ -61,6 +61,7 @@ import type {
   ProviderExecutionGate,
   ProviderExecutionLease,
 } from './provider-execution-gate.ts';
+import { shortHash } from '../../lib/short-hash.ts';
 
 const log = createChildLogger('session-manager');
 
@@ -70,6 +71,10 @@ const STDIN_WRITE_TIMEOUT_MS = 30_000;
  * large no-newline blob would grow `stdoutBufferStr` unbounded → parent OOM. The
  * MCP socket MAX_BUF analogue; 16 MiB >> any real event line. */
 export const MAX_STDOUT_LINE_BYTES = 16 * 1024 * 1024;
+
+function isOpenCodeDiagnosticLogLine(line: string): boolean {
+  return /^timestamp=\S+\s+level=(?:TRACE|DEBUG|INFO|WARN|ERROR)\b/.test(line);
+}
 /** @deprecated Use WATCHDOG_SOFT_MS / WATCHDOG_HARD_MS instead. Kept for test backward-compat. */
 export const TURN_WATCHDOG_MS = 600_000;
 
@@ -1080,6 +1085,7 @@ export class SessionManager {
             sessionId: resumableSessionId,
             model: this.model,
             prompt,
+            progressLogs: true,
           });
         }
         log.info({ chatJid: this.chatJid, provider: this.provider }, 'opencode: fresh session');
@@ -1087,6 +1093,7 @@ export class SessionManager {
           providerConfig: this.providerConfig,
           model: this.model,
           prompt,
+          progressLogs: true,
         });
       }
 
@@ -2148,6 +2155,22 @@ export class SessionManager {
     });
   }
 
+  private captureProviderStderr(
+    chunk: Buffer,
+    child: ReturnType<typeof spawn>,
+  ): void {
+    const nextPreview = appendProviderCrashPreview(this.crashStderrPreview, chunk);
+    if (nextPreview === this.crashStderrPreview) return;
+    this.crashStderrPreview = nextPreview;
+    if (!this.crashStderrPreview) return;
+    log.warn({
+      provider: this.provider,
+      chatJid: this.chatJid,
+      pid: child.pid ?? null,
+      stderrPreview: this.crashStderrPreview.slice(-500),
+    }, 'provider stderr');
+  }
+
   /** Write a user message turn to the agent — via stdin (Claude) or spawn-per-turn (others). */
   async sendTurn(text: string): Promise<void> {
     return this.sendTurnAtProviderBoundary(text);
@@ -2270,12 +2293,34 @@ export class SessionManager {
         this.openCodeParser.reset();
       }
 
+      // Spawn-per-turn providers: kill any existing process and spawn a new one
+      // before waiting for the next global execution lease. The prior child
+      // owns that lease until its process tree is proven dead, so acquiring
+      // first would make a same-session successor wait on itself forever.
+      if (this.child) {
+        const child = this.child;
+        try {
+          await this.killChildTree(child, 'SIGTERM');
+        } catch (err) {
+          this.completeProviderTurn(providerTurnToken);
+          log.error({ err, pid: child.pid ?? null, chatJid: this.chatJid }, 'failed to reap replaced provider process tree');
+          throw new Error('Cannot replace provider while prior process-tree cleanup is inconclusive', {
+            cause: err,
+          });
+        }
+        this.releaseProviderExecutionLease(child);
+        if (this.child === child) this.child = null;
+      }
+
       let executionLease: ProviderExecutionLease | null = null;
       if (this.provider === 'opencode-cli' && this.providerExecutionGate) {
         const waitAbort = new AbortController();
         this.providerExecutionWaitAbort = waitAbort;
         try {
-          executionLease = await this.providerExecutionGate.acquire({ signal: waitAbort.signal });
+          executionLease = await this.providerExecutionGate.acquire({
+            signal: waitAbort.signal,
+            work: { kind: 'turn', scopeHash: shortHash(this.chatJid) },
+          });
         } catch (err) {
           this.completeProviderTurn(providerTurnToken);
           throw err;
@@ -2287,23 +2332,6 @@ export class SessionManager {
           this.completeProviderTurn(providerTurnToken);
           throw new Error('PROVIDER_EXECUTION_WAIT_ABORTED: session ended before dispatch');
         }
-      }
-
-      // Spawn-per-turn providers: kill any existing process and spawn a new one
-      // with the user prompt appended as a CLI argument.
-      if (this.child) {
-        const child = this.child;
-        try {
-          await this.killChildTree(child, 'SIGTERM');
-        } catch (err) {
-          executionLease?.release();
-          this.completeProviderTurn(providerTurnToken);
-          log.error({ err, pid: child.pid ?? null, chatJid: this.chatJid }, 'failed to reap replaced provider process tree');
-          throw new Error('Cannot replace provider while prior process-tree cleanup is inconclusive', {
-            cause: err,
-          });
-        }
-        this.child = null;
       }
 
       const cwd = this.configuredCwd ?? homedir();
@@ -2322,6 +2350,10 @@ export class SessionManager {
       }
       let sawResult = false;
       let boundarySettled = false;
+      let pendingOpenCodeResult: Extract<AgentEvent, { type: 'result' }> | null = null;
+      let pendingOpenCodeText: Extract<AgentEvent, { type: 'assistant_text' }>[] = [];
+      let openCodeStopCandidateCount = 0;
+      let openCodeStderrBufferStr = '';
 
       try {
         onProviderBoundaryReady?.();
@@ -2333,7 +2365,34 @@ export class SessionManager {
 
       const dispatchSpawnPerTurnEvent = (event: AgentEvent): void => {
         if (this.activeProviderTurnToken !== providerTurnToken) return;
-        if (event.type === 'result') sawResult = true;
+        if (this.provider === 'opencode-cli') {
+          if (pendingOpenCodeResult !== null && event.type !== 'result') {
+            if (openCodeStopCandidateCount === 1) {
+              log.warn({
+                provider: this.provider,
+                chatJid: this.chatJid,
+                sessionId: this.sessionId,
+              }, 'OpenCode stop candidate superseded by continued provider output');
+            }
+            pendingOpenCodeResult = null;
+            pendingOpenCodeText = [];
+            sawResult = false;
+          }
+          if (event.type === 'assistant_text') {
+            pendingOpenCodeText.push(event);
+            this.tickWatchdog();
+            return;
+          }
+          if (event.type === 'result') {
+            openCodeStopCandidateCount += 1;
+            pendingOpenCodeResult = event;
+            sawResult = true;
+            this.tickWatchdog();
+            return;
+          }
+        } else if (event.type === 'result') {
+          sawResult = true;
+        }
         this.handleProviderEvent(event);
       };
 
@@ -2450,22 +2509,50 @@ export class SessionManager {
       child.stderr.on('data', (chunk: Buffer) => {
         if (!this.isCurrentPersistentChild(child, childGeneration)) return;
         if (this.activeProviderTurnToken !== providerTurnToken) return;
-        const nextPreview = appendProviderCrashPreview(this.crashStderrPreview, chunk);
-        if (nextPreview === this.crashStderrPreview) return;
-        this.crashStderrPreview = nextPreview;
-        if (!this.crashStderrPreview) return;
-        log.warn({
-          provider: this.provider,
-          chatJid: this.chatJid,
-          pid: child.pid ?? null,
-          stderrPreview: this.crashStderrPreview.slice(-500),
-        }, 'provider stderr');
+        if (this.provider === 'opencode-cli') {
+          // OpenCode's JSON stdout is buffered until a tool/step completes, so
+          // long productive operations can otherwise look silent for the whole
+          // hard-watchdog window. --print-logs emits internal progress on
+          // stderr; treat those bytes as liveness without retaining structured
+          // diagnostic records in the user-facing crash preview.
+          openCodeStderrBufferStr += chunk.toString('utf8');
+          const lines = openCodeStderrBufferStr.split(/\r?\n/);
+          openCodeStderrBufferStr = lines.pop() ?? '';
+          for (const line of lines) {
+            if (isOpenCodeDiagnosticLogLine(line)) {
+              this.tickWatchdog();
+              continue;
+            }
+            this.captureProviderStderr(Buffer.from(`${line}\n`), child);
+          }
+          if (openCodeStderrBufferStr.length > MAX_STDOUT_LINE_BYTES) {
+            log.warn({
+              provider: this.provider,
+              chatJid: this.chatJid,
+              pid: child.pid ?? null,
+              bytes: openCodeStderrBufferStr.length,
+              cap: MAX_STDOUT_LINE_BYTES,
+            }, 'OpenCode stderr line exceeded cap — dropping runaway diagnostic buffer');
+            openCodeStderrBufferStr = '';
+          }
+          return;
+        }
+        this.captureProviderStderr(chunk, child);
       });
+
+      const flushOpenCodeStderr = (): void => {
+        if (this.provider !== 'opencode-cli' || openCodeStderrBufferStr === '') return;
+        const line = openCodeStderrBufferStr;
+        openCodeStderrBufferStr = '';
+        if (isOpenCodeDiagnosticLogLine(line)) return;
+        this.captureProviderStderr(Buffer.from(line), child);
+      };
 
       // For spawn-per-turn, classify the turn only after the process and all of
       // its stdio streams have closed. This makes the final unterminated record
       // part of the same atomic boundary decision.
       child.on('close', (code, signal) => {
+        flushOpenCodeStderr();
         this.releaseProviderExecutionLease(child);
         const superseded = this.child !== child;
         this.clearShutdownKillTimer(child, childGeneration);
@@ -2523,6 +2610,26 @@ export class SessionManager {
         this.clearTurnWatchdog();
         this.child = null;
 
+        let deliveredTerminalResult = sawResult;
+        if (this.provider === 'opencode-cli') {
+          deliveredTerminalResult = false;
+          if (code === 0 && signal === null && pendingOpenCodeResult !== null) {
+            for (const textEvent of pendingOpenCodeText) this.handleProviderEvent(textEvent);
+            this.handleProviderEvent(pendingOpenCodeResult);
+            deliveredTerminalResult = true;
+            if (openCodeStopCandidateCount > 1) {
+              log.info({
+                provider: this.provider,
+                chatJid: this.chatJid,
+                sessionId: this.sessionId,
+                stopCandidateCount: openCodeStopCandidateCount,
+              }, 'OpenCode turn committed after superseded stop candidates');
+            }
+          }
+          pendingOpenCodeText = [];
+          pendingOpenCodeResult = null;
+        }
+
         // A signal exit AFTER the turn delivered its terminal result is the
         // normal spawn-per-turn teardown (the provider emits its result, then
         // the process tree is torn down with SIGTERM). Only treat a signal exit
@@ -2531,8 +2638,8 @@ export class SessionManager {
         // false onCrash + unexpected-exit notification (#1870). A non-zero exit
         // code still counts as an error even with a result, as it is a stronger
         // failure signal than a teardown SIGTERM.
-        const exitedWithError = (code !== 0 && code !== null) || (signal !== null && !sawResult);
-        const missingTerminalResult = code === 0 && signal === null && !sawResult;
+        const exitedWithError = (code !== 0 && code !== null) || (signal !== null && !deliveredTerminalResult);
+        const missingTerminalResult = code === 0 && signal === null && !deliveredTerminalResult;
         if (exitedWithError || missingTerminalResult) {
           this.completeProviderTurn(providerTurnToken);
           const crashedSessionId = this.sessionId;

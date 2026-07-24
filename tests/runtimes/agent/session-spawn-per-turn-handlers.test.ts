@@ -294,7 +294,7 @@ describe('SessionManager spawn-per-turn child handlers (opencode-cli)', () => {
     expect(sm.getStatus().turnInFlight).toBe(false);
   });
 
-  it('a delivered terminal result followed by a SIGTERM teardown is not a crash (#1870)', async () => {
+  it('does not commit a pending OpenCode stop candidate after SIGTERM', async () => {
     const events: AgentEvent[] = [];
     const { sm, notifyUser, onCrash } = await makeOpencodeSession({
       onEvent: (event: AgentEvent) => events.push(event),
@@ -302,10 +302,8 @@ describe('SessionManager spawn-per-turn child handlers (opencode-cli)', () => {
     await sm.sendTurn('hello');
     events.length = 0;
 
-    // The provider streams its terminal stop result, then the process is torn
-    // down by SIGTERM (code null, signal set) — the normal spawn-per-turn exit
-    // after a delivered reply. The close-drain flushes the buffered result
-    // before exit classification runs, so sawResult is true by then.
+    // A stop record is only a candidate until the process exits cleanly. A
+    // signal exit cannot prove that a later continuation was not truncated.
     child.stdout.emit('data', Buffer.from(JSON.stringify({
       type: 'step_finish',
       part: { reason: 'stop', tokens: { input: 11, output: 13 }, cost: 0.001 },
@@ -315,11 +313,12 @@ describe('SessionManager spawn-per-turn child handlers (opencode-cli)', () => {
     child._closeCb?.(null, 'SIGTERM');
     await new Promise((resolve) => setImmediate(resolve));
 
-    // The turn succeeded; the trailing signal must not inflate crash telemetry
-    // or notify the user of a failure.
-    expect(events.filter((event) => event.type === 'result')).toHaveLength(1);
-    expect(onCrash).not.toHaveBeenCalled();
-    expect(notifyUser).not.toHaveBeenCalled();
+    expect(events.filter((event) => event.type === 'result')).toHaveLength(0);
+    expect(onCrash).toHaveBeenCalledWith(expect.objectContaining({
+      exitCode: null,
+      signal: 'SIGTERM',
+    }));
+    expect(notifyUser).toHaveBeenCalledTimes(1);
     expect(sm.getStatus().turnInFlight).toBe(false);
   });
 
@@ -446,6 +445,35 @@ describe('SessionManager spawn-per-turn child handlers (opencode-cli)', () => {
     expect(preview).toContain('boom');
   });
 
+  it('treats OpenCode diagnostic logs as watchdog progress without retaining them as crash output', async () => {
+    const { sm } = await makeOpencodeSession();
+    await sm.sendTurn('hello');
+    const tick = vi.spyOn(sm, 'tickWatchdog');
+
+    child.stderr.emit('data', Buffer.from(
+      'timestamp=2026-07-22T15:29:58.519Z level=INFO run=runtime-test message=loop session.id=test step=20\n',
+    ));
+
+    expect(tick).toHaveBeenCalledTimes(1);
+    const preview = (sm as unknown as { crashStderrPreview: string }).crashStderrPreview;
+    expect(preview).not.toContain('session.id=test');
+  });
+
+  it('recognizes fragmented progress lines and preserves adjacent raw crash diagnostics', async () => {
+    const { sm } = await makeOpencodeSession();
+    await sm.sendTurn('hello');
+    const tick = vi.spyOn(sm, 'tickWatchdog');
+
+    child.stderr.emit('data', Buffer.from('timestamp=2026-07-22T15:29:58.519Z level=INFO run=runtime-test mes'));
+    expect(tick).not.toHaveBeenCalled();
+    child.stderr.emit('data', Buffer.from('sage=loop session.id=test step=20\nopencode: fatal: boom\n'));
+
+    expect(tick).toHaveBeenCalledTimes(1);
+    const preview = (sm as unknown as { crashStderrPreview: string }).crashStderrPreview;
+    expect(preview).toContain('opencode: fatal: boom');
+    expect(preview).not.toContain('session.id=test');
+  });
+
   it('superseded child close (this.child !== child) is ignored', async () => {
     const { sm, onCrash } = await makeOpencodeSession();
     await sm.sendTurn('first');
@@ -467,10 +495,12 @@ describe('SessionManager spawn-per-turn child handlers (opencode-cli)', () => {
     expect((sm as unknown as { child: HandlerChild | null }).child).toBe(secondChild);
   });
 
-  it('does not let the replaced child close release the next provider-turn owner', async () => {
+  it('holds ownership until clean close and ignores a stale duplicate close', async () => {
+    const events: AgentEvent[] = [];
     let sm!: SessionManager;
     const session = await makeOpencodeSession({
       onEvent: (event: AgentEvent) => {
+        events.push(event);
         if (event.type === 'result') sm.completeProviderTurn();
       },
     });
@@ -481,43 +511,28 @@ describe('SessionManager spawn-per-turn child handlers (opencode-cli)', () => {
       type: 'step_finish',
       part: { reason: 'stop', tokens: { input: 1, output: 1 }, cost: 0 },
     })}\n`));
+    expect(events.filter((event) => event.type === 'result')).toHaveLength(0);
+    expect(sm.getStatus().turnInFlight).toBe(true);
+
+    const firstBoundary = sm.waitForProviderTurnToTerminalize();
+    firstChild._closeCb?.(0, null);
+    await firstBoundary;
+    expect(events.filter((event) => event.type === 'result')).toHaveLength(1);
     expect(sm.getStatus().turnInFlight).toBe(false);
 
-    let releaseReplacementKill!: () => void;
-    const replacementKill = new Promise<void>((resolve) => {
-      releaseReplacementKill = resolve;
-    });
-    vi.mocked(killSessionTree).mockImplementationOnce(async (target, signal) => {
-      if (typeof target !== 'number') target.kill(signal);
-      await replacementKill;
-    });
     const secondChild = makeHandlerChild(22222);
     vi.mocked(spawn).mockReturnValue(secondChild as unknown as ReturnType<typeof spawn>);
+    await sm.sendTurn('second');
+    expect(sm.getStatus().turnInFlight).toBe(true);
 
-    const secondTurn = sm.sendTurn('second');
-    await vi.waitFor(() => expect(firstChild.kill).toHaveBeenCalledWith('SIGTERM'));
-    const secondBoundary = sm.waitForProviderTurnToTerminalize();
-
-    firstChild.stdout.emit('data', Buffer.from(`${JSON.stringify({
-      type: 'step_finish',
-      part: { reason: 'stop', tokens: { input: 2, output: 2 }, cost: 0 },
-    })}\n`));
-    let secondBoundarySettled = false;
-    void secondBoundary.then(() => { secondBoundarySettled = true; });
-    await Promise.resolve();
-    expect(secondBoundarySettled).toBe(false);
-
+    // A duplicate close callback from the retired first child must not release
+    // the exact provider-turn token now owned by the second child.
     firstChild._closeCb?.(0, null);
     await Promise.resolve();
-
-    expect(secondBoundarySettled).toBe(false);
     expect(sm.getStatus().turnInFlight).toBe(true);
 
-    releaseReplacementKill();
-    await secondTurn;
-    expect(sm.getStatus().turnInFlight).toBe(true);
     sm.completeProviderTurn();
-    await secondBoundary;
+    expect(sm.getStatus().turnInFlight).toBe(false);
   });
 
   it('clears an inactive exact child even after its ownership generation advances', async () => {
