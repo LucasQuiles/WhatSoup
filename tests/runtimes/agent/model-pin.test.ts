@@ -1067,6 +1067,7 @@ describe('NL routing handlers (nlRouting flag)', () => {
       // test in this suite may ever touch (Task H guardrail).
       const listFn = vi.fn().mockResolvedValue({ status: 'ok', ids: ['kimi/kimi-k3'] });
       const { runtime, sentMessages } = makeRoutingRuntime({ model: 'claude-opus-4-8', modelCatalogueListFn: listFn });
+      (runtime as unknown as { routablePinTargets: () => string[] }).routablePinTargets = () => ['claude-cli', 'opencode-cli'];
       await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model list' }));
       await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model 2', messageId: 'msg-2' }));
       const rows = prefRows();
@@ -1082,7 +1083,7 @@ describe('NL routing handlers (nlRouting flag)', () => {
       expect(rows[0].model_pin_verified).toBe(1);
       expect(listFn).toHaveBeenCalledTimes(1);
       const reply = allReplies(sentMessages).join('\n');
-      expect(reply).toContain('Pinned kimi/kimi-k3 for 24h');
+      expect(reply).toContain('Now answering with kimi/kimi-k3. reply keep to make it permanent, /reset to undo.');
       expect(reply).toContain('reply keep to make it permanent, /reset to undo');
       // D10: the old deferral copy must never appear anywhere in this flow.
       expect(reply).not.toContain('applies from your next session');
@@ -1324,6 +1325,7 @@ describe('NL routing handlers (nlRouting flag)', () => {
     it('N-DEFAULT HIT: /model N default resolves the snapshot and pins the PROVIDER only (no model)', async () => {
       cfgAny().agentFallbacks = [{ provider: 'opencode-cli', model: 'kimi/kimi-k3' }];
       const { runtime, sentMessages } = makeRoutingRuntime({ model: 'claude-opus-4-8' });
+      (runtime as unknown as { routablePinTargets: () => string[] }).routablePinTargets = () => ['claude-cli', 'opencode-cli'];
       await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model list' }));
       await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model 2 default', messageId: 'msg-2' }));
       const rows = prefRows();
@@ -1335,7 +1337,7 @@ describe('NL routing handlers (nlRouting flag)', () => {
       expect(rows[0].validated_provider).toBeNull();
       expect(rows[0].model_pin_verified).toBeNull();
       const reply = allReplies(sentMessages).join('\n');
-      expect(reply).toContain('Pinned `opencode-cli` for 24h');
+      expect(reply).toContain('Now answering with `opencode-cli`. reply keep to make it permanent, /reset to undo.');
       expect(reply).not.toContain('applies from your next session');
     });
 
