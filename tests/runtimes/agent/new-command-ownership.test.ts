@@ -25,10 +25,21 @@ import {
   waitUntil,
 } from './lib/session-harness.ts';
 
-vi.mock('../../../src/logger.ts', async () => {
-  const { loggerMock } = await import('../../helpers/logger-mock.ts');
-  const mock = loggerMock();
-  const logger = mock.createChildLogger();
+vi.mock('../../../src/runtimes/agent/provider-canary-proof.ts', () => ({
+  readProviderCanaryAdmission: vi.fn(() => ({
+    required: true,
+    allowed: true,
+    reason: 'proven',
+  })),
+}));
+
+vi.mock('../../../src/logger.ts', () => {
+  const logger = {
+    info: vi.fn(),
+    warn: vi.fn(),
+    error: vi.fn(),
+    debug: vi.fn(),
+  };
   return {
     ...mock,
     default: { ...logger, child: () => logger },
@@ -41,7 +52,10 @@ type RuntimeState = {
   resolvePerChatMapKey: (chatJid: string) => string;
   ensureSessionAndQueueSync: (chatJid: string, mapKey: string) => void;
   deleteOwnedPerChatSession: (mapKey: string, expected?: SessionManager) => boolean;
-  wirePerChatActorSocket: () => { mcpSocketPath: string; providerConfigOverride: undefined };
+  wirePerChatActorSocket: () => {
+    mcpSocketPath: string;
+    providerTransitionReady: Promise<void>;
+  };
   chatSessions: Map<string, SessionManager>;
   chatQueues: Map<string, unknown>;
   operationTrackers: Map<string, unknown>;
@@ -167,7 +181,7 @@ function configureRuntime(runtime: AgentRuntime): {
   state.operationTrackers = trackers;
   state.wirePerChatActorSocket = () => ({
     mcpSocketPath: '/tmp/whatsoup-new-ownership.sock',
-    providerConfigOverride: undefined,
+    providerTransitionReady: Promise.resolve(),
   });
   return { state, ownership, sessions, queues, trackers };
 }

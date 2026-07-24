@@ -57,6 +57,17 @@ describe('PerChatMcpSocketManager', () => {
     return lease.socketPath;
   }
 
+  async function expectSocketServing(socketPath: string): Promise<void> {
+    const response = await sendJsonRpc(socketPath, {
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'tools/list',
+      params: {},
+    }) as { id?: number; result?: { tools?: unknown[] } };
+    expect(response.id).toBe(1);
+    expect(response.result?.tools).toEqual(expect.any(Array));
+  }
+
   it('binds an awaitable mode-0600 socket below a mode-0700 state-root directory using only a digest', async () => {
     const root = mkdtempSync(join(tmpdir(), 'whatsoup-actor-manager-'));
     roots.push(root);
@@ -170,7 +181,8 @@ describe('PerChatMcpSocketManager', () => {
 
     const live = lstatSync(socketPath);
     expect(live.isSocket()).toBe(true);
-    expect({ dev: live.dev, ino: live.ino }).not.toEqual({ dev: stale.dev, ino: stale.ino });
+    expect(live.mode & 0o777).toBe(0o600);
+    await expectSocketServing(socketPath);
     manager.release(identity);
   });
 
@@ -280,7 +292,7 @@ describe('PerChatMcpSocketManager', () => {
     expect(lstatSync(first.socketPath).ino).toBe(firstStat.ino);
     proveStopped();
     await replacement.ready;
-    expect(lstatSync(replacement.socketPath).ino).not.toBe(firstStat.ino);
+    await expectSocketServing(replacement.socketPath);
     manager.release(identity);
   });
 
@@ -341,7 +353,7 @@ describe('PerChatMcpSocketManager', () => {
     manager.releaseAfter(identity, Promise.resolve());
     const replacement = manager.acquire(identity, identity);
     await replacement.ready;
-    expect(lstatSync(replacement.socketPath).ino).not.toBe(firstStat.ino);
+    await expectSocketServing(replacement.socketPath);
     manager.release(identity);
   });
 

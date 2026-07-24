@@ -14,10 +14,21 @@ import {
   waitUntil,
 } from './lib/session-harness.ts';
 
-vi.mock('../../../src/logger.ts', async () => {
-  const { loggerMock } = await import('../../helpers/logger-mock.ts');
-  const mock = loggerMock();
-  const logger = mock.createChildLogger();
+vi.mock('../../../src/runtimes/agent/provider-canary-proof.ts', () => ({
+  readProviderCanaryAdmission: vi.fn(() => ({
+    required: true,
+    allowed: true,
+    reason: 'proven',
+  })),
+}));
+
+vi.mock('../../../src/logger.ts', () => {
+  const logger = {
+    info: vi.fn(),
+    warn: vi.fn(),
+    error: vi.fn(),
+    debug: vi.fn(),
+  };
   return {
     ...mock,
     default: { ...logger, child: () => logger },
@@ -166,7 +177,7 @@ describe('B2 crash ownership regression locks', () => {
       state.chatSessions = sessions;
       state.wirePerChatActorSocket = () => ({
         mcpSocketPath: '/tmp/whatsoup-b2b.sock',
-        providerConfigOverride: undefined,
+        providerTransitionReady: Promise.resolve(),
       });
       state.handleCrashNotify = () => {
         notificationDeliveryCalls += 1;

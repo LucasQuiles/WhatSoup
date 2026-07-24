@@ -70,3 +70,14 @@ export class FakePerChatMcpSocketManager {
     }
   }
 }
+
+export function installFakePerChatMcpSocketManager(
+  runtime: object,
+): FakePerChatMcpSocketManager {
+  const manager = new FakePerChatMcpSocketManager();
+  const state = runtime as {
+    perChatMcpSocketManager: FakePerChatMcpSocketManager;
+  };
+  state.perChatMcpSocketManager = manager;
+  return manager;
+}

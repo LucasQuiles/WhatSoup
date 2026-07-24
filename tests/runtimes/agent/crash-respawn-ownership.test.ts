@@ -17,10 +17,21 @@ import {
   waitUntil,
 } from './lib/session-harness.ts';
 
-vi.mock('../../../src/logger.ts', async () => {
-  const { loggerMock } = await import('../../helpers/logger-mock.ts');
-  const mock = loggerMock();
-  const logger = mock.createChildLogger();
+vi.mock('../../../src/runtimes/agent/provider-canary-proof.ts', () => ({
+  readProviderCanaryAdmission: vi.fn(() => ({
+    required: true,
+    allowed: true,
+    reason: 'proven',
+  })),
+}));
+
+vi.mock('../../../src/logger.ts', () => {
+  const logger = {
+    info: vi.fn(),
+    warn: vi.fn(),
+    error: vi.fn(),
+    debug: vi.fn(),
+  };
   return {
     ...mock,
     default: { ...logger, child: () => logger },
@@ -73,7 +84,7 @@ type RuntimeState = {
   resolvePerChatMapKey: (chatJid: string) => string;
   wirePerChatActorSocket: () => {
     mcpSocketPath: string;
-    providerConfigOverride: undefined;
+    providerTransitionReady: Promise<void>;
   };
   chatSessions: Map<string, SessionManager>;
   sessionOwnership: SessionOwnershipRegistry;
@@ -149,7 +160,7 @@ describe('per-chat crash respawn ownership', () => {
     state.pendingRespawnTimers = timers;
     state.wirePerChatActorSocket = () => ({
       mcpSocketPath: '/tmp/whatsoup-crash-respawn.sock',
-      providerConfigOverride: undefined,
+      providerTransitionReady: Promise.resolve(),
     });
 
     let providerGeneration = 0;
@@ -283,7 +294,7 @@ describe('per-chat crash respawn ownership', () => {
     state.handleCrashNotify = notification;
     state.wirePerChatActorSocket = () => ({
       mcpSocketPath: '/tmp/whatsoup-stale-crash.sock',
-      providerConfigOverride: undefined,
+      providerTransitionReady: Promise.resolve(),
     });
 
     let manager: SessionManager | null = null;
@@ -412,7 +423,7 @@ describe('per-chat crash respawn ownership', () => {
     state.pendingRespawnTimers = timers;
     state.wirePerChatActorSocket = () => ({
       mcpSocketPath: '/tmp/whatsoup-signal-respawn.sock',
-      providerConfigOverride: undefined,
+      providerTransitionReady: Promise.resolve(),
     });
 
     let manager: SessionManager | null = null;

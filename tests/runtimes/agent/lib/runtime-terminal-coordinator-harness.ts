@@ -323,6 +323,8 @@ export function sessionStub() {
     spawnSession: vi.fn(async () => {}),
     shutdown: vi.fn(async () => {}),
     getDbRowId: vi.fn(() => 41),
+    getProviderId: vi.fn(() => 'codex-cli'),
+    getModelRef: vi.fn(() => undefined),
     getStatus: vi.fn<() => {
       active: boolean;
       sessionId: string | null;

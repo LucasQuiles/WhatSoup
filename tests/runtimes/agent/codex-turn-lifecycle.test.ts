@@ -4,6 +4,7 @@ import type { SessionGenerationIdentity } from '../../../src/runtimes/agent/sess
 import type { IncomingMessage } from '../../../src/core/types.ts';
 import { parseCodexEvent } from '../../../src/runtimes/agent/providers/codex-parser.ts';
 import { createRuntimeTurnContext } from '../../../src/runtimes/agent/runtime-turn-context.ts';
+import { installFakePerChatMcpSocketManager } from './helpers/fake-per-chat-mcp-socket-manager.ts';
 
 // ─── Part 1: Parser-level tests (pure functions, no mocks needed) ────────────
 
@@ -157,6 +158,8 @@ const { mockSession, mockQueue, capturedOnEventRef, capturedGenerationOwnershipR
     bindGenerationOwnership: vi.fn((resolve: () => SessionGenerationIdentity | null) => {
       capturedGenerationOwnershipRef.current = resolve;
     }),
+    getProviderId: vi.fn(() => 'codex-cli'),
+    getModelRef: vi.fn(() => undefined),
   };
 
   const mockQueue = {
@@ -426,6 +429,7 @@ describe('Codex turn lifecycle — runtime level', () => {
     runtime = new AgentRuntime(fakeDb, fakeMessenger, 'test', {
       sessionScope: 'per_chat',
     });
+    installFakePerChatMcpSocketManager(runtime);
   });
 
   afterEach(async () => {
