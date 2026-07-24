@@ -2128,6 +2128,53 @@ describe('NL routing handlers (nlRouting flag)', () => {
       expect(allReplies(sentMessages).join('\n')).toContain('kimi/kimi-k3');
     });
 
+    // Slice 3 — Level-3 reasoning-effort menu. claude-cli has native reasoning
+    // control (nativeReasoningControl), so a claude MODEL pick opens Level-3
+    // instead of pinning; opencode-cli has none, so its model pins directly (the
+    // Slice-2 test above, unchanged). RED-first: pre-Slice-3, picking the claude
+    // model writes a pref row immediately (no effort menu, no effort column).
+    it('picking a claude-cli MODEL at Level-2 opens Level-3 (the effort menu), not a pin', async () => {
+      const { runtime, sentMessages } = makeDrillRuntime();
+      await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model' }));
+      await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model 1', messageId: 'm2' })); // Claude brand → models
+      sentMessages.length = 0;
+      mockQueue.enqueueText.mockClear();
+      await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model 1', messageId: 'm3' })); // pick claude-opus-4-8
+      const reply = allReplies(sentMessages).join('\n');
+      expect(reply).toContain('reasoning effort:');
+      expect(reply).toContain('Highest');
+      expect(reply).toContain('Default (no override)');
+      expect(prefRows()).toHaveLength(0); // opened Level-3, did NOT pin
+    });
+
+    it('picking an effort level at Level-3 pins the model AT that effort and discloses it in the receipt', async () => {
+      const { runtime, sentMessages } = makeDrillRuntime();
+      await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model' }));
+      await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model 1', messageId: 'm2' }));
+      await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model 1', messageId: 'm3' })); // → Level-3
+      sentMessages.length = 0;
+      mockQueue.enqueueText.mockClear();
+      await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model 1', messageId: 'm4' })); // pick "Highest" (xhigh)
+      const rows = prefRows();
+      expect(rows).toHaveLength(1);
+      expect(rows[0].requested_provider).toBe('claude-cli');
+      expect(rows[0].requested_model).toBe('claude-opus-4-8');
+      expect(rows[0].requested_effort).toBe('xhigh');
+      expect(allReplies(sentMessages).join('\n').toLowerCase()).toContain('highest reasoning');
+    });
+
+    it('picking "Default (no override)" at Level-3 pins the model with a null effort (clears any override)', async () => {
+      const { runtime } = makeDrillRuntime();
+      await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model' }));
+      await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model 1', messageId: 'm2' }));
+      await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model 1', messageId: 'm3' })); // → Level-3 (5 rows)
+      await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model 5', messageId: 'm4' })); // "Default (no override)"
+      const rows = prefRows();
+      expect(rows).toHaveLength(1);
+      expect(rows[0].requested_model).toBe('claude-opus-4-8');
+      expect(rows[0].requested_effort).toBeNull();
+    });
+
     it('RECENCY (drill wins): /model list → bare /model → /model 1 drills the DRILL brand, never a flat pin', async () => {
       const { runtime, sentMessages } = makeDrillRuntime();
       await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model list' }));

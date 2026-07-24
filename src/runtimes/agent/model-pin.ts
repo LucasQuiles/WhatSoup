@@ -42,7 +42,8 @@ import {
   type ModelCatalogueRenderPort,
 } from './model-catalogue-render.ts';
 import { brandOf, listBrands } from './providers/provider-brand.ts';
-import { renderBrandLevel, renderModelLevel, type RenderedLevel } from './model-drilldown-render.ts';
+import { renderBrandLevel, renderEffortLevel, renderModelLevel, prettyEffortLabel, type RenderedLevel } from './model-drilldown-render.ts';
+import { nativeReasoningControl, type ReasoningControl } from './reasoning-control.ts';
 import {
   fallbackReconfirmationOutcome,
   fallbackRouteLabel,
@@ -627,7 +628,11 @@ async function pinConfiguredModelEntry(
     );
     return;
   }
-  port.sendDirect(chatJid, renderPinOutcomeEcho(port, chatJid, senderJid, modelId, recycleOutcome));
+  // Slice 3: an effort pin discloses the level in the receipt (charter #6 — the
+  // receipt says what changed); a null effort (Default / no-rc model) echoes the
+  // model alone, so the pre-Slice-3 receipt is byte-identical when no effort is set.
+  const echoLabel = effort ? `${modelId} (${prettyEffortLabel(effort).toLowerCase()} reasoning)` : modelId;
+  port.sendDirect(chatJid, renderPinOutcomeEcho(port, chatJid, senderJid, echoLabel, recycleOutcome));
 }
 
 /**
@@ -716,6 +721,29 @@ async function sendModelDrillModelLevel(
     ? `${rendered.text}\n_showing 1–${shown.length} of ${listing.ids.length}_`
     : rendered.text;
   port.sendDirect(chatJid, text);
+}
+
+/**
+ * Slice 3 — send the drill Level-3 reasoning-effort menu for a model the user
+ * picked at Level-2 whose (provider, model) has native reasoning control. No
+ * fetch (the levels are static per provider), so no degrade path. Writes the
+ * drill 'effort' snapshot so a following `/model N` pins the model AT the level
+ * they saw; the live route's effort (only when this exact model is the current
+ * route) marks the active row `(current)`.
+ */
+function sendModelDrillEffortLevel(
+  port: ModelPinPort,
+  chatJid: string,
+  senderJid: string,
+  provider: string,
+  model: string,
+  control: ReasoningControl,
+): void {
+  const route = port.resolveRouteForTurn(chatJid, senderJid);
+  const currentEffort = route.provider === provider && route.model === model ? route.effort ?? null : null;
+  const rendered = renderEffortLevel(model, provider, control, currentEffort);
+  port.catalogueSnapshot.putDrillSnapshot(chatJid, senderJid, 'effort', rendered.entries);
+  port.sendDirect(chatJid, rendered.text);
 }
 
 /**
@@ -864,12 +892,31 @@ export async function handleModelCommand(
       await sendModelDrillModelLevel(port, chatJid, senderJid, pick.entry.brand, pick.entry.provider);
       return;
     }
-    // Level-2 (model) pick → pin the leaf through the shared sink.
+    if (pick.entry.kind === 'model') {
+      // Slice 3: a model with native reasoning control (claude-cli today)
+      // opens Level-3 to pick an effort instead of pinning immediately; a model
+      // without control pins the leaf directly (drill leaf-pin, unchanged).
+      const control = nativeReasoningControl(pick.entry.provider, pick.entry.model);
+      if (control) {
+        sendModelDrillEffortLevel(port, chatJid, senderJid, pick.entry.provider, pick.entry.model, control);
+        return;
+      }
+      await pinConfiguredModelEntry(
+        port,
+        { chatJid, senderJid, perChatMapKey, chatKey, senderKey },
+        pick.entry.provider,
+        pick.entry.model,
+      );
+      return;
+    }
+    // Slice 3 — Level-3 (effort) pick → pin the model AT that effort through the
+    // shared sink (effort null = the "Default (no override)" row, clears any pin).
     await pinConfiguredModelEntry(
       port,
       { chatJid, senderJid, perChatMapKey, chatKey, senderKey },
       pick.entry.provider,
       pick.entry.model,
+      pick.entry.effort,
     );
     return;
   }
