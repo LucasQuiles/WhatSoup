@@ -179,6 +179,11 @@ export class ProcessTmpRetentionTimer {
     const result = runProcessTmpCleanup(this.dir, this.retention.maxAgeMs);
     if (result.deleted > 0 || result.skipped > 0) {
       log.info(result, 'process tmp retention: cleanup run complete');
+    } else {
+      // Always emit a line so operators can distinguish "ran, nothing to
+      // reclaim" from "never ran" — the silent-zero case previously masked
+      // the #2122/#2162 directory-skipping failure for hours.
+      log.info(result, 'process tmp retention: cleanup ran, nothing to reclaim');
     }
     return result;
   }

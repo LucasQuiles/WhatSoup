@@ -12,13 +12,17 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
 
-vi.mock('../../src/logger.ts', () => ({
-  createChildLogger: () => ({
+const { mockLog } = vi.hoisted(() => ({
+  mockLog: {
     info: vi.fn(),
     warn: vi.fn(),
     error: vi.fn(),
     debug: vi.fn(),
-  }),
+  },
+}));
+
+vi.mock('../../src/logger.ts', () => ({
+  createChildLogger: () => mockLog,
 }));
 
 import {
@@ -179,5 +183,38 @@ describe('ProcessTmpRetentionTimer', () => {
 
     expect(existsSync(oldFile)).toBe(false);
     timer.stop();
+  });
+
+  it('logs with "cleanup run complete" when something was reclaimed', () => {
+    mockLog.info.mockClear();
+    const root = makeRoot();
+    const oldFile = makeFile(root, 'stale-enc', 'old');
+    setAge(oldFile, DEFAULT_PROCESS_TMP_RETENTION.maxAgeMs + 1_000);
+    const timer = new ProcessTmpRetentionTimer(root);
+
+    timer.runCleanup();
+
+    expect(mockLog.info).toHaveBeenCalledTimes(1);
+    expect(mockLog.info).toHaveBeenCalledWith(
+      expect.objectContaining({ deleted: 1 }),
+      'process tmp retention: cleanup run complete',
+    );
+  });
+
+  it('logs with "nothing to reclaim" when cleanup found nothing (does not mask silent failure — #2162)', () => {
+    mockLog.info.mockClear();
+    const root = makeRoot();
+    // A recent file that should be preserved — cleanup runs but deletes nothing.
+    const recentFile = makeFile(root, 'recent-enc', 'data');
+    setAge(recentFile, 1_000);
+    const timer = new ProcessTmpRetentionTimer(root);
+
+    timer.runCleanup();
+
+    expect(mockLog.info).toHaveBeenCalledTimes(1);
+    expect(mockLog.info).toHaveBeenCalledWith(
+      expect.objectContaining({ deleted: 0, skipped: 0 }),
+      'process tmp retention: cleanup ran, nothing to reclaim',
+    );
   });
 });
