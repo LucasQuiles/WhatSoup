@@ -73,6 +73,21 @@ describe('useTheme', () => {
     expect(localStorage.getItem(THEME_STORAGE_KEY)).toBe('dark')
   })
 
+  it('setTheme pins the requested theme (T5 b-09 swatches) and sanitizes input', () => {
+    const { result } = renderHook(() => useTheme())
+    act(() => result.current.setTheme('light'))
+    expect(result.current.theme).toBe('light')
+    expect(document.documentElement.getAttribute('data-theme')).toBe('light')
+    expect(localStorage.getItem(THEME_STORAGE_KEY)).toBe('light')
+
+    act(() => result.current.setTheme('dark'))
+    expect(result.current.theme).toBe('dark')
+
+    // the hook's input law holds at the new seam too: anything not 'light' is dark
+    act(() => result.current.setTheme('solarized' as never))
+    expect(result.current.theme).toBe('dark')
+  })
+
   it('updates theme-color meta to the current surface-base token', () => {
     const colors = readSurfaceBaseTokens()
     stubSurfaceBaseTokens(colors)
