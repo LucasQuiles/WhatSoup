@@ -737,3 +737,38 @@ live here, dimension-allowlisted, so the agents stylesheet
 
 Half-step tokens (`--sp-*h`, DD-9 retirement queue) are not consumed by the Agents
 surface.
+
+## 14. v3.5 skills-hub geometry (docs/design-system/v35/mockups/skills-hub.html, landed b-05)
+
+Component-tier `--skills-*` dimension + tracking tokens in
+`console/src/styles/tokens.component.css`, single `:root` scope (theme-independent
+geometry; parity count unaffected). The mockup literals are the visual SSOT — they
+live here, dimension-allowlisted, so the skills stylesheet
+(`console/src/styles/skills.css`) consumes `var()` only.
+
+- **Page row** — `--skills-pagerow-gap` 14px / `--skills-pagerow-pad` 14px 22px 12px
+  (surface h1 row, mockup `header` literals — same rhythm as the global header,
+  independently owned).
+- **Hub mode toggle** — `--skills-modebar-gap/-pad/-radius` + button
+  `-btn-pad/-btn-radius`.
+- **Filters rail** — `--skills-filters-w` 196px + pad; `--skills-fsec-m`,
+  `--skills-fitem-pad/-gap/-radius`, `--tracking-skills-fsec` 0.1em,
+  `--skills-legend-lh` 1.8. Rail hides at the mockup's own `@media
+  (max-width:900px)` — NOT the chrome/fleet 1100px or agents 1000px idioms
+  (third distinct SSOT breakpoint, browser-pinned at 899/900/901).
+- **Results column** — `--skills-main-pad`, toolbar (`--skills-toolbar-gap/-mb`,
+  `--skills-search-*`, `--skills-icon-search` + stroke).
+- **Result cards** — `--skills-scard-pad/-mb/-radius/-gap/-hover-lift`,
+  `--skills-sicon` 34px + radius + 16px glyph, source badge
+  (`--skills-src-pad`, `--tracking-skills-src` 0.06em), `--skills-acts-gap`.
+- **Compat strip** — `--skills-compat-mt/-pad/-gap/-radius`,
+  `--tracking-skills-compat`; cells `--skills-cdot-h/minw/pad-x/radius` +
+  `--skills-cdot-warn-radius` (partial = rotated diamond per the shape law).
+- **Warn-note** — `--skills-warnnote-mt/-pad/-gap/-radius` (third-party
+  publisher caution block) + `--skills-warnnote-icon-mt`. Micro-geometry:
+  `--skills-desc-mt`, `--skills-empty-pad-y` (documented deviation).
+
+Font SIZES ride the `--text-*` scale (weight/leading raw, fleet idiom); hairlines
+are `var(--bw)`; compat-cell washes consume the status-channel color-mix idiom.
+Half-step tokens (`--sp-*h`, DD-9 retirement queue) are not consumed by the
+Skills Hub surface.

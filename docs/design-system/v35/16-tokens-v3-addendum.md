@@ -90,6 +90,17 @@ the token block once; `agents.css` consumes `var()` only. Shared *laws*
 (`--chrome-micro-radius`, `--chrome-pill-radius`, `--tracking-chrome-title`)
 are consumed by design; agents layout never reads chrome tokens. Half-step
 tokens (`--sp-*h`, DD-9 retirement queue) are not consumed.
+## 5. Skills Hub surface geometry (`--skills-*`, T5 b-05)
+
+Component-register geometry for the Skills Hub surface, all traced to
+`mockups/skills-hub.html`: page-row rhythm, hub mode toggle, filters rail
+(196px — hides at the mockup's own 900px breakpoint, the third distinct SSOT
+breakpoint after chrome/fleet 1100px and agents 1000px), results column +
+toolbar, result cards (icon box, source badge, actions), compat strip + cells
+(partial = rotated diamond per the shape law), and the third-party warn-note.
+Spec SSOT: `tokens-v3.md` §14. Same pattern as b-02…b-04: raw mockup
+dimensions land in the token block once; `skills.css` consumes `var()` only.
+Half-step tokens (`--sp-*h`, DD-9 retirement queue) are not consumed.
 
 ## 6. Acceptance gate
 

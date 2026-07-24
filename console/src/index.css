@@ -19,3 +19,5 @@
 @import "./styles/fleet.css";
 /* v3.5 Agents surface (T5 b-04) — mockup agents.html SSOT. */
 @import "./styles/agents.css";
+/* v3.5 Skills Hub surface (T5 b-05) — mockup skills-hub.html SSOT. */
+@import "./styles/skills.css";
