@@ -23,6 +23,7 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { DatabaseSync } from 'node:sqlite';
 import { jsonResponse, readBody, requireInstance } from '../../lib/http.ts';
+import { errorMessage } from '../../lib/error-message.ts';
 import { proxyToInstance } from '../http-proxy.ts';
 import type { FleetDiscovery } from '../discovery.ts';
 import type { FleetDbReader } from '../db-reader.ts';
@@ -82,7 +83,7 @@ export async function handlePostApprovalDecision(
     }
     decision = p as DecisionBody;
   } catch (err) {
-    jsonResponse(res, 400, { error: `invalid decision body: ${(err as Error).message}` });
+    jsonResponse(res, 400, { error: `invalid decision body: ${errorMessage(err)}` });
     return;
   }
 
