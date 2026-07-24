@@ -6,6 +6,7 @@ import type { Messenger } from '../../../src/core/types.ts';
 import type { AgentEvent } from '../../../src/runtimes/agent/stream-parser.ts';
 import type { ProviderMcpBridge } from '../../../src/runtimes/agent/providers/types.ts';
 import { ProviderExecutionGate } from '../../../src/runtimes/agent/provider-execution-gate.ts';
+import { shortHash } from '../../../src/lib/short-hash.ts';
 import {
   CONFIG_ROOT_ISOLATION_FLAG,
   FAILCLOSED_FLAG,
@@ -2887,6 +2888,18 @@ describe('buildChildEnv', () => {
     }
   });
 
+  it('opencode-cli: forwards the Kimi credential selected by a Kimi model', () => {
+    const savedKimi = process.env.KIMI_API_KEY;
+    process.env.KIMI_API_KEY = 'kimi-api-key-for-test';
+    try {
+      const env = buildChildEnv('opencode-cli', undefined, 'kimi/kimi-k3');
+      expect(env.KIMI_API_KEY).toBe('kimi-api-key-for-test');
+    } finally {
+      if (savedKimi === undefined) delete process.env.KIMI_API_KEY;
+      else process.env.KIMI_API_KEY = savedKimi;
+    }
+  });
+
   it('opencode-cli: providerConfig.apiKeyService for a known service adds it to env forwarding', () => {
     // 'deepseek' is a known service in SERVICE_ENV_MAP -> DEEPSEEK_API_KEY
     const savedDeep = process.env.DEEPSEEK_API_KEY;
@@ -5133,6 +5146,119 @@ describe('session.ts uncovered-branch coverage', () => {
     vi.useRealTimers();
   });
 
+  it('commits only the final OpenCode stop candidate after a clean process close', async () => {
+    const events: AgentEvent[] = [];
+    const sm = new SessionManager({
+      db: makeDb(),
+      messenger: makeMessenger().messenger,
+      chatJid: CHAT_JID,
+      onEvent: (event) => events.push(event),
+      provider: 'opencode-cli',
+      model: 'glm/test-model',
+    });
+    await sm.spawnSession();
+    events.length = 0;
+    await sm.sendTurn('run one tool and report the result');
+
+    const line = (value: unknown): string => `${JSON.stringify(value)}\n`;
+    mockChild.stdout.emit('data', Buffer.from([
+      line({ type: 'step_start', sessionID: 'ses_compaction', part: { type: 'step-start' } }),
+      line({ type: 'text', part: { text: 'intermediate compaction summary' } }),
+      line({
+        type: 'step_finish',
+        part: { type: 'step-finish', reason: 'stop', tokens: { input: 130_000, output: 50 } },
+      }),
+      line({ type: 'step_start', sessionID: 'ses_compaction', part: { type: 'step-start' } }),
+      line({ type: 'text', part: { text: 'verified final answer' } }),
+      line({
+        type: 'step_finish',
+        part: { type: 'step-finish', reason: 'stop', tokens: { input: 800, output: 12 } },
+      }),
+    ].join('')));
+
+    expect(events.filter((event) => event.type === 'assistant_text' || event.type === 'result')).toEqual([]);
+
+    mockChild._closeCb?.(0, null);
+
+    expect(events.filter((event) => event.type === 'assistant_text' || event.type === 'result')).toEqual([
+      { type: 'assistant_text', text: 'verified final answer' },
+      { type: 'result', text: null, inputTokens: 800, outputTokens: 12, costUsd: undefined },
+    ]);
+  });
+
+  it('discards repeated OpenCode stop candidates and bounds delivery to the final candidate', async () => {
+    const events: AgentEvent[] = [];
+    const sm = new SessionManager({
+      db: makeDb(),
+      messenger: makeMessenger().messenger,
+      chatJid: CHAT_JID,
+      onEvent: (event) => events.push(event),
+      provider: 'opencode-cli',
+      model: 'glm/test-model',
+    });
+    await sm.spawnSession();
+    events.length = 0;
+    await sm.sendTurn('stress compaction boundaries');
+
+    const records: string[] = [];
+    for (let index = 0; index < 25; index += 1) {
+      records.push(
+        JSON.stringify({ type: 'text', part: { text: `discard-${index}` } }),
+        JSON.stringify({ type: 'step_finish', part: { type: 'step-finish', reason: 'stop' } }),
+        JSON.stringify({ type: 'step_start', sessionID: 'ses_stress', part: { type: 'step-start' } }),
+      );
+    }
+    records.push(
+      JSON.stringify({ type: 'text', part: { text: 'keep-final' } }),
+      JSON.stringify({
+        type: 'step_finish',
+        part: { type: 'step-finish', reason: 'stop', tokens: { input: 900, output: 9 } },
+      }),
+    );
+    mockChild.stdout.emit('data', Buffer.from(`${records.join('\n')}\n`));
+    mockChild._closeCb?.(0, null);
+
+    expect(events.filter((event) => event.type === 'assistant_text' || event.type === 'result')).toEqual([
+      { type: 'assistant_text', text: 'keep-final' },
+      { type: 'result', text: null, inputTokens: 900, outputTokens: 9, costUsd: undefined },
+    ]);
+  });
+
+  it('fails closed when OpenCode continues after stop but exits without a final candidate', async () => {
+    const events: AgentEvent[] = [];
+    const onCrash = vi.fn();
+    const notifyUser = vi.fn();
+    const sm = new SessionManager({
+      db: makeDb(),
+      messenger: makeMessenger().messenger,
+      chatJid: CHAT_JID,
+      onEvent: (event) => events.push(event),
+      provider: 'opencode-cli',
+      model: 'glm/test-model',
+      onCrash,
+      notifyUser,
+    });
+    await sm.spawnSession();
+    events.length = 0;
+    await sm.sendTurn('incomplete compaction continuation');
+
+    mockChild.stdout.emit('data', Buffer.from([
+      JSON.stringify({ type: 'text', part: { text: 'discarded summary' } }),
+      JSON.stringify({ type: 'step_finish', part: { type: 'step-finish', reason: 'stop' } }),
+      JSON.stringify({ type: 'step_start', sessionID: 'ses_incomplete', part: { type: 'step-start' } }),
+      '',
+    ].join('\n')));
+    mockChild._closeCb?.(0, null);
+
+    expect(events.filter((event) => event.type === 'assistant_text' || event.type === 'result')).toEqual([]);
+    expect(onCrash).toHaveBeenCalledWith(expect.objectContaining({
+      exitCode: 0,
+      signal: null,
+      crashClass: 'provider_stream_corrupt',
+    }));
+    expect(notifyUser).toHaveBeenCalledWith(expect.stringMatching(/ended before completing the turn/i));
+  });
+
   it('serializes OpenCode process lifetimes across session managers sharing one execution gate', async () => {
     const firstChild = makeMockChild(12001);
     const secondChild = makeMockChild(12002);
@@ -5172,7 +5298,14 @@ describe('session.ts uncovered-branch coverage', () => {
     expect(secondStarted).toBe(false);
     expect(firstBoundary).toHaveBeenCalledTimes(1);
     expect(secondBoundary).not.toHaveBeenCalled();
-    expect(gate.snapshot()).toMatchObject({ active: true, pending: 1 });
+    expect(gate.snapshot()).toMatchObject({
+      active: true,
+      activeWorkKind: 'turn',
+      activeScopeHash: shortHash('first@s.whatsapp.net'),
+      pending: 1,
+      oldestPendingWorkKind: 'turn',
+      oldestPendingScopeHash: shortHash('second@s.whatsapp.net'),
+    });
 
     firstChild._closeCb?.(0, null);
     await secondTurn;
@@ -5182,6 +5315,80 @@ describe('session.ts uncovered-branch coverage', () => {
     expect(gate.snapshot()).toMatchObject({ active: true, pending: 0 });
 
     secondChild._closeCb?.(0, null);
+    expect(gate.snapshot()).toMatchObject({ active: false, pending: 0 });
+  });
+
+  it('reaps a completed same-session OpenCode child before waiting for its next execution lease', async () => {
+    const firstChild = makeMockChild(12005);
+    const secondChild = makeMockChild(12006);
+    vi.mocked(spawn)
+      .mockReturnValueOnce(firstChild as never)
+      .mockReturnValueOnce(secondChild as never);
+    const gate = new ProviderExecutionGate();
+    const session = new SessionManager({
+      db: makeDb(),
+      messenger: makeMessenger().messenger,
+      chatJid: 'same@s.whatsapp.net',
+      onEvent: vi.fn(),
+      provider: 'opencode-cli',
+      model: 'glm/test-model',
+      providerExecutionGate: gate,
+    });
+    await session.spawnSession();
+
+    await session.sendTurn('first');
+    session.completeProviderTurn();
+    const secondTurn = session.sendTurn('second');
+
+    await vi.waitFor(() => {
+      expect(killSessionTree).toHaveBeenCalledWith(
+        firstChild,
+        'SIGTERM',
+        expect.objectContaining({ generationMarker: expect.any(String) }),
+      );
+    });
+    await secondTurn;
+
+    expect(spawn).toHaveBeenCalledTimes(2);
+    expect(killSessionTree).toHaveBeenCalledTimes(1);
+    expect(gate.snapshot()).toMatchObject({ active: true, pending: 0, totalWaits: 0 });
+
+    secondChild._closeCb?.(0, null);
+    expect(gate.snapshot()).toMatchObject({ active: false, pending: 0 });
+  });
+
+  it('cycles repeated same-session OpenCode turns without self-queuing behind stale leases', async () => {
+    const children = Array.from({ length: 25 }, (_, index) => makeMockChild(12100 + index));
+    for (const child of children) vi.mocked(spawn).mockReturnValueOnce(child as never);
+    const gate = new ProviderExecutionGate();
+    const session = new SessionManager({
+      db: makeDb(),
+      messenger: makeMessenger().messenger,
+      chatJid: 'same-stress@s.whatsapp.net',
+      onEvent: vi.fn(),
+      provider: 'opencode-cli',
+      model: 'glm/test-model',
+      providerExecutionGate: gate,
+    });
+    await session.spawnSession();
+
+    for (let turn = 0; turn < children.length; turn += 1) {
+      await session.sendTurn(`turn-${turn}`);
+      session.completeProviderTurn();
+      expect(gate.snapshot()).toMatchObject({ active: true, pending: 0 });
+    }
+
+    expect(spawn).toHaveBeenCalledTimes(children.length);
+    expect(killSessionTree).toHaveBeenCalledTimes(children.length - 1);
+    expect(gate.snapshot()).toMatchObject({
+      active: true,
+      pending: 0,
+      totalWaits: 0,
+      maxPending: 0,
+      pressureActive: false,
+    });
+
+    children.at(-1)?._closeCb?.(0, null);
     expect(gate.snapshot()).toMatchObject({ active: false, pending: 0 });
   });
 

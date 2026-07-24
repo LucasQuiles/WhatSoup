@@ -49,6 +49,51 @@ describe('ProviderExecutionGate', () => {
     expect(gate.snapshot()).toMatchObject({ active: false, pending: 0 });
   });
 
+  it('retains bounded work identity across FIFO handoff without exposing raw scope', async () => {
+    const gate = new ProviderExecutionGate();
+
+    const first = await gate.acquire({
+      work: { kind: 'turn', scopeHash: 'aaaaaaaaaaaa' },
+    });
+    const secondPromise = gate.acquire({
+      work: { kind: 'turn', scopeHash: 'bbbbbbbbbbbb' },
+    });
+
+    expect(gate.snapshot()).toMatchObject({
+      activeWorkKind: 'turn',
+      activeScopeHash: 'aaaaaaaaaaaa',
+      oldestPendingWorkKind: 'turn',
+      oldestPendingScopeHash: 'bbbbbbbbbbbb',
+    });
+
+    first.release();
+    const second = await secondPromise;
+    expect(gate.snapshot()).toMatchObject({
+      activeWorkKind: 'turn',
+      activeScopeHash: 'bbbbbbbbbbbb',
+      oldestPendingWorkKind: null,
+      oldestPendingScopeHash: null,
+    });
+    second.release();
+    expect(gate.snapshot()).toMatchObject({
+      activeWorkKind: null,
+      activeScopeHash: null,
+    });
+  });
+
+  it('fails closed when work identity is not a bounded hash', async () => {
+    const gate = new ProviderExecutionGate();
+    const lease = await gate.acquire({
+      work: { kind: 'turn', scopeHash: 'raw-chat-scope@example.invalid' },
+    });
+
+    expect(gate.snapshot()).toMatchObject({
+      activeWorkKind: null,
+      activeScopeHash: null,
+    });
+    lease.release();
+  });
+
   it('removes an aborted waiter without disturbing the active owner', async () => {
     const gate = new ProviderExecutionGate();
     const first = await gate.acquire();
@@ -103,8 +148,12 @@ describe('ProviderExecutionGate', () => {
       emitAlertMock.mockClear();
       clearAlertMock.mockClear();
       const gate = createProviderExecutionGate('pressure-test');
-      const first = await gate.acquire();
-      const secondPromise = gate.acquire();
+      const first = await gate.acquire({
+        work: { kind: 'turn', scopeHash: 'aaaaaaaaaaaa' },
+      });
+      const secondPromise = gate.acquire({
+        work: { kind: 'probe', scopeHash: 'bbbbbbbbbbbb' },
+      });
 
       await vi.advanceTimersByTimeAsync(30_000);
       expect(emitAlertMock).toHaveBeenCalledWith(
@@ -114,6 +163,11 @@ describe('ProviderExecutionGate', () => {
         expect.stringContaining('limitation=external_opencode_processes_are_not_serialized'),
         'warning',
       );
+      const evidence = emitAlertMock.mock.calls[0]?.[3] as string;
+      expect(evidence).toContain('active_work_kind=turn');
+      expect(evidence).toContain('active_scope_hash=aaaaaaaaaaaa');
+      expect(evidence).toContain('oldest_pending_work_kind=probe');
+      expect(evidence).toContain('oldest_pending_scope_hash=bbbbbbbbbbbb');
       first.release();
       const second = await secondPromise;
       second.release();

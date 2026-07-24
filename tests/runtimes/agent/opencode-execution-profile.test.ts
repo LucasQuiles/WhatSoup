@@ -46,22 +46,24 @@ describe('OpenCode execution profile', () => {
       providerConfig: PROFILE_CONFIG,
       model: 'glm/glm-5.2',
       prompt: 'fresh turn',
+      progressLogs: true,
     });
     const resumed = buildOpenCodeRunArgs({
       providerConfig: PROFILE_CONFIG,
       sessionId: 'session-123',
       model: 'glm/glm-5.2',
       prompt: 'resumed turn',
+      progressLogs: true,
     });
 
     expect(fresh).toEqual([
-      'run', '--format', 'json', '--pure',
+      'run', '--format', 'json', '--pure', '--print-logs', '--log-level', 'INFO',
       '--agent', 'whatsoup-headless',
       '-m', 'glm/glm-5.2',
       'fresh turn',
     ]);
     expect(resumed).toEqual([
-      'run', '--format', 'json', '--pure',
+      'run', '--format', 'json', '--pure', '--print-logs', '--log-level', 'INFO',
       '--agent', 'whatsoup-headless',
       '--session', 'session-123',
       '-m', 'glm/glm-5.2',

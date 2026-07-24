@@ -1761,6 +1761,49 @@ describe('ConnectionManager — lifecycle edge coverage', () => {
     await manager.shutdown();
   });
 
+  it('settles repeated creds.update churn before copying the protected auth tree', async () => {
+    vi.setSystemTime(new Date('2026-05-10T12:00:00.000Z'));
+    writeValidTestAuth();
+    vi.mocked(useMultiFileAuthState).mockResolvedValueOnce({
+      state: {
+        creds: {
+          me: { id: '15551230004:1@s.whatsapp.net', lid: '81536414179557:2@lid' },
+          registrationId: 42,
+        },
+        keys: {},
+      },
+      saveCreds: vi.fn(),
+    } as any);
+    const { mockSock, emit } = makeMockSocket();
+    vi.mocked(makeWASocket).mockReturnValue(mockSock as any);
+
+    const manager = new ConnectionManager();
+    await manager.connect();
+    emit(openEvent());
+    const initialLatest = readLatestAuthBond();
+
+    writeFileSync(join(testAuthDir, 'sender-key-creds.json'), JSON.stringify({ keyData: 'a' }));
+    await emit({ 'creds.update': {} });
+    writeFileSync(join(testAuthDir, 'sender-key-creds.json'), JSON.stringify({ keyData: 'b' }));
+    await emit({ 'creds.update': {} });
+
+    expect(readLatestAuthBond()).toEqual(initialLatest);
+    expect(manager.getConnectionState().credentialLifecycle.recentEvents
+      .filter(event => event.event === 'auth_snapshot_scheduled')
+      .map(event => event.note)).toEqual(['creds-update-settled', 'creds-update-settled']);
+
+    await vi.advanceTimersByTimeAsync(60_000);
+    const settled = readLatestAuthBond();
+    expect(manager.getConnectionState().credentialLifecycle.recentEvents
+      .map(event => `${event.event}:${event.note ?? ''}`)).toEqual(expect.arrayContaining([
+        expect.stringContaining('auth_snapshot_captured:'),
+      ]));
+    expect(settled.reason).toBe('creds-update-settled');
+    expect(settled.backupPath).not.toBe(initialLatest.backupPath);
+
+    await manager.shutdown();
+  });
+
   it('does not emit a local auth-bond alert for a fresh credential write window', async () => {
     writeValidTestAuth();
     const { mockSock, emit } = makeMockSocket();

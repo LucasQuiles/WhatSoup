@@ -24,6 +24,21 @@ function agentRaw(
 const createCtx = { name: 'test-line', mode: 'create' } as const;
 
 describe('validateInstanceConfig — ordered fallback chain', () => {
+  it('accepts the configured Kimi, GLM, and DeepSeek OpenCode fallback chain', () => {
+    expect(
+      validateInstanceConfig(
+        agentRaw({
+          fallbacks: [
+            { provider: 'opencode-cli', model: 'kimi/kimi-k3' },
+            { provider: 'opencode-cli', model: 'glm/glm-5.2' },
+            { provider: 'opencode-cli', model: 'deepseek/deepseek-v4-pro' },
+          ],
+        }),
+        createCtx,
+      ),
+    ).toBeNull();
+  });
+
   it('rejects configs that mix legacy fallbackProvider/fallbackModel with fallbacks[]', () => {
     const err = validateInstanceConfig(
       agentRaw({

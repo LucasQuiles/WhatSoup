@@ -276,6 +276,56 @@ signal has its own threshold/confirmation semantics, per above), but it
 means the notification count for a single dead host is 2, not 1; don't
 read the second page as a different host.
 
+
+## Alert source and ownership index
+
+This table is the canonical index for the in-repository BOT ERRORS runtime.
+Update it whenever a producer, scheduler, relay, or incident-state owner changes.
+The systemd cadence is shown directly; the launchd installers above own the
+equivalent macOS schedules. `deploy/bot-errors-runtime-manifest.json` owns
+deployed-file parity, `deploy/managed-components.json` owns install metadata,
+and `deploy/bot-errors-expected-fleet.json` owns the sanitized monitoring scope.
+
+| Signal lane | Detection owner | Scheduler / cadence | Relay and incident owner |
+|-------------|-----------------|---------------------|--------------------------|
+| Runtime lifecycle, provider, transport, and delivery events | Runtime call sites writing through `src/lib/bot-errors-outbox.ts` / `src/lib/emit-alert.ts`; generic command failures may use `bot-errors-runner.py` | Event-driven in the owning WhatSoup service | Local durable outbox; collector relays remote events; dispatcher owns dedupe, incident state, suppression, and final delivery |
+| Remote host outbox collection | `bot-errors-collector.py` | `bot-errors-collector.service`, daemon poll every 30 seconds | Collector owns claim/ack/relay receipts; dispatcher owns the resulting incident lifecycle |
+| Durable dispatch and notification delivery | `bot-errors-dispatcher.py` | `bot-errors-dispatcher.service`, daemon poll every 30 seconds | Dispatcher is the sole owner of dedupe keys, throttling, renotify, storm collapse, incident open/clear state, and delivery fallback |
+| Dispatcher deadman | `bot-errors-health-check.py --deadman --max-state-age 180` | `bot-errors-deadman.timer`, every 5 minutes | Health check emits the incident; dispatcher delivers it |
+| Hub-lane heartbeat and queue backlog | `bot-errors-heartbeat-watchdog.py --once` | `bot-errors-heartbeat-watchdog.timer`, every 5 minutes | Watchdog owns detection and is the only force-notify producer; dispatcher owns incident state and delivery |
+| Capability, configuration, auth-bond, provider-probe, and per-instance daily health | `bot-errors-health-check.py --daily`, wrapped by `bot-errors-runner.py` | `bot-errors-health-check.timer`, daily at 07:15 in the checked-in systemd unit | Health check owns inventory and per-instance failure/clear derivation; dispatcher owns incident state and delivery |
+| Runtime release staleness | `bot-errors-release-proof-run.sh runtime-staleness` | First run after 19 minutes, then 30 minutes after completion, with up to 2 minutes jitter | Release-proof monitor owns detection; dispatcher owns incident state and delivery |
+| Git tree provenance | `bot-errors-release-proof-run.sh tree` | First run after 7 minutes, then 30 minutes after completion, with up to 2 minutes jitter | Release-proof monitor owns detection; dispatcher owns incident state and delivery |
+| Agent coordination loop | `bot-errors-q-loop.py` | `bot-errors-q-loop.service`, continuously supervised | Coordination only; it is explicitly not the incident bus and does not replace dispatcher ownership |
+| External GUI-session loss | `bot-errors-gui-session-monitor.py` installed by `install-bot-errors-gui-monitor-launchd.sh` | Default 300-second external-host probe interval | External monitor owns detection; normal outbox/dispatcher path owns incident state and delivery |
+
+An alert source observed in BOT ERRORS but absent from this table and from the
+runtime manifest is not automatically a WhatSoup-owned producer. Resolve its
+host unit or external repository before assigning ownership or changing its
+clear policy.
+
+## Test suites + CI gates
+
+Two independent pytest-runner scripts gate `deploy/scripts/tests/` in `quality.yml`, and
+they answer different questions — neither replaces the other:
+
+| Script | Question it answers | quality.yml step |
+|--------|---------------------|-------------------|
+| `run-sentinel-tests.sh` | Do the pin/selfcheck/sentinel/gui-session-monitor modules hold their 98%-branch-coverage floor, plus the deployer/installer static+mutation guards and the runtime-receipt gate? | "BOT ERRORS sentinel coverage and deployer mutation gate" |
+| `run-bot-errors-full-suite.sh` | Does every test in `deploy/scripts/tests/` still pass — the full dispatcher behavioral suites (`open_renotify_suppression`, `transient_tiering`, the `f5`/`f7`/`f11`/`f12`/... fault-taxonomy suites, `autoclose_honesty`, `inhibition`, `daily_health_freshness_ledger`, and everything else, ~59 files) — not just the curated coverage-floor subset? | "BOT ERRORS full behavioral suite gate" |
+
+Before `run-bot-errors-full-suite.sh` existed, the dispatcher behavioral suites ran in NO
+CI gate at all: `run-sentinel-tests.sh` only ever exercised the six coverage-floor modules
+above, so a regression in, say, `open_renotify_suppression` or `transient_tiering` could
+merge through `quality.yml` undetected — dispatcher.py was protected in CI only by static
+guards (runtime-manifest/critical-surface/simulation-matrix/fleet-bot-hardening-parity),
+never by running its own behavioral tests. `run-bot-errors-full-suite.sh` closes that gap
+by directory-collecting `deploy/scripts/tests/` with no `--cov` flags (it is a blanket
+regression net, not a coverage-floor gate, so a newly added `test_bot_errors_*.py` file is
+swept in automatically with no script edit required). Wall-clock cost: roughly +25s on top
+of the existing curated gate (measured on origin/main, `1330 passed in ~15-25s` depending
+on cache warmth).
+
 ## Canonical source for this import (diff matrix)
 
 Source of truth chosen = **newest copies** per the corrections plan. The local Mac
