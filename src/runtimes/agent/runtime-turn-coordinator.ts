@@ -29,6 +29,7 @@ import type {
   RuntimeTurnRetryResult,
   RuntimeTurnSupervisor,
 } from './runtime-turn-supervisor.ts';
+import type { SystemTurnLeaseToken } from './pending-system-result-tracker.ts';
 import type { ReplyGuaranteeManager } from '../../core/reply-guarantee.ts';
 import type { SessionOwnershipRegistry } from './session-ownership.ts';
 import { createChildLogger } from '../../logger.ts';
@@ -132,6 +133,8 @@ export interface RuntimeTurnCoordinatorPort {
     actorJid?: string,
     runtimeContext?: RuntimeTurnContext,
     scopeRef?: PerChatRuntimeScopeRef,
+    systemTurnLease?: SystemTurnLeaseToken,
+    excludeJobId?: number,
   ): Promise<void>;
   sendVoiceReply(chatJid: string, responseText: string): Promise<void>;
 }
@@ -377,13 +380,27 @@ createRuntimeTurnForDispatch(args: {
   return context;
 }
 
-beginRuntimeTurnEvidence(queue: IOutboundQueue, context: RuntimeTurnContext): void {
+/**
+ * `excludeJobId` is set only by the turn-recovery supervisor's own replay
+ * dispatch (PRESTAGE-T4): that replay's admission check must not find its
+ * OWN still-`claimed` job and self-block — the job cannot reach a terminal
+ * state until this very replay completes, so without the exclusion every
+ * supervisor-driven replay would deadlock against itself on its first
+ * admission check. Every other caller (normal live turns) omits it, so
+ * their admission predicate is unchanged.
+ */
+beginRuntimeTurnEvidence(
+  queue: IOutboundQueue,
+  context: RuntimeTurnContext,
+  excludeJobId?: number,
+): void {
   const durability = this.host.durability;
   if (
     typeof durability?.hasOutstandingTurnRecoveryForScope === 'function'
     && durability.hasOutstandingTurnRecoveryForScope(
       context.identity.scope,
       context.identity.conversationKey,
+      excludeJobId !== undefined ? { excludeJobId } : undefined,
     )
   ) {
     throw new Error('Runtime turn scope is blocked by outstanding durable recovery');
@@ -1366,7 +1383,14 @@ finalizeRuntimeCrash(
   });
 }
 
-async processPerChatTurn(scopeRef: PerChatRuntimeScopeRef, turn: QueuedTurn): Promise<void> {
+async processPerChatTurn(
+  scopeRef: PerChatRuntimeScopeRef,
+  turn: QueuedTurn,
+  // PRESTAGE-T4: set only when the turn-recovery supervisor is calling this
+  // directly (not via the live-message queue path) to dispatch a claimed
+  // job's replay — see beginRuntimeTurnEvidence's doc comment for why.
+  excludeJobId?: number,
+): Promise<void> {
   const mapKey = scopeRef.value;
   const seqQueue = this.host.perChatInboundSeqQueue.get(mapKey) ?? [];
   if (turn.inboundSeq !== undefined) seqQueue.push(turn.inboundSeq);
@@ -1391,6 +1415,8 @@ async processPerChatTurn(scopeRef: PerChatRuntimeScopeRef, turn: QueuedTurn): Pr
       turn.senderJid,
       turn.runtimeContext,
       scopeRef,
+      undefined,
+      excludeJobId,
     );
   } catch (err) {
     dispatchFailed = true;

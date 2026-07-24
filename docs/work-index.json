@@ -1,7 +1,7 @@
 {
-  "generated_at": "2026-07-24T05:48:47Z",
+  "generated_at": "2026-07-24T06:02:09Z",
   "repo": "WhatSoup",
-  "git_head": "7a373a3be25a90898a62f8ce91c52067bf24fb25",
+  "git_head": "922fac7dc39b4198ab99de9e728e0a47dc605f08",
   "git_head_note": "git_head is captured at scan time, so it reflects the branch HEAD at the moment `build-work-index` ran — NOT the commit that carries this index. Expect divergence in two cases: (1) intra-branch, when the regenerated index is committed after further content changes are staged; (2) post-squash-merge, when the landed main SHA differs from the pre-merge branch SHA. The row data and inconsistency detection remain accurate regardless of git_head freshness.",
   "total": 76,
   "schema_version": 5,
