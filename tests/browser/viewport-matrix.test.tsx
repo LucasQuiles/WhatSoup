@@ -981,25 +981,22 @@ describe('Viewport matrix — v3.5 Hatch ceremony (T5 b-10)', () => {
     expect(body.scrollWidth).toBeLessThanOrEqual(body.clientWidth + 1);
   });
 
-  it('ceremony play contract computed: glow ≤800ms single-play, avatar pop (13-§2)', async () => {
+  it('ceremony removal law computed: reduced motion removes the glow and the pop (13-§3)', async () => {
     await page.viewport(1440, 900);
     const { container } = await render(wrapCeremony());
     await vi.waitFor(() => {
       expect(container.querySelector('.journey-glow')).not.toBeNull();
     });
-    // The bead acceptance item, computed in Chromium: radial glow, one play,
-    // ≤800ms. (The 13-§3 removal media block is source-pinned in
-    // tests/console/ceremony-motion-contract.test.ts — the vitest browser
-    // wrapper exposes no per-test media emulation, and the config's
-    // context.reducedMotion option is inert in this provider version.)
+    // This lane runs reducedMotion: 'reduce' for real since #2158 corrected the
+    // provider option (it was `instances[].context` — a key the provider never
+    // read, so this lane used to animate). The removal half of 13-§2/§3 is now
+    // computed-provable HERE; the PLAY half moved to the no-reduce motion lane
+    // (tests/browser-motion/ceremony-play.test.tsx), because a play contract
+    // cannot be asserted in a lane that correctly removes animation.
     const glow = container.querySelector('.journey-glow') as HTMLElement;
-    const glowStyle = window.getComputedStyle(glow);
-    expect(glowStyle.animationName).toBe('journey-glowplay');
-    expect(parseFloat(glowStyle.animationDuration)).toBeLessThanOrEqual(0.8);
-    expect(glowStyle.animationIterationCount).toBe('1');
+    expect(window.getComputedStyle(glow).animationName).toBe('none');
     const av = container.querySelector('.journey-av') as HTMLElement;
-    expect(window.getComputedStyle(av).animationName).toBe('journey-pop');
-    expect(window.getComputedStyle(av).animationIterationCount).toBe('1');
+    expect(window.getComputedStyle(av).animationName).toBe('none');
   });
 });
 
