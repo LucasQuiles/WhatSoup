@@ -27,3 +27,5 @@
 @import "./styles/inbox.css";
 /* v3.5 Deployments surface (T5 b-08) — mockup deployments.html SSOT. */
 @import "./styles/deploy.css";
+/* v3.5 Settings surface (T5 b-09) — mockup settings.html SSOT. */
+@import "./styles/settings.css";

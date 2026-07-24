@@ -139,6 +139,17 @@ and the pair card (46ch explainer measure, 0.3em-tracked code block). The summar
 strip and card bodies go 4→2 columns at the mockup's own 1000px (shared with the
 agents surface). Spec SSOT: `tokens-v3.md` §12. Same pattern as b-02…b-07: raw
 mockup dimensions land in the token block once; `deploy.css` consumes `var()` only.
+## 5. Settings surface geometry (`--settings-*`, T5 b-09)
+
+Component-register geometry for the Settings surface, all traced to
+`mockups/settings.html` and `17-settings-ia-spec.md`: 190px section nav,
+1080px content measure, panel + airy-row form register, the 32×18px toggle
+(shape-visible both states), 52px appearance swatches (18px/10px bands),
+120px fixed channel control zone, token rows. The section nav goes
+horizontal-scroll at the mockup's own 800px — the sixth distinct SSOT
+breakpoint. Spec SSOT: `tokens-v3.md` §12. Same pattern as b-02…b-08: raw
+mockup dimensions land in the token block once; `settings.css` consumes
+`var()` only.
 
 ## 6. Acceptance gate
 

@@ -861,3 +861,25 @@ consume the shared status vocabulary with shape mandatory (●/◆/■).
   `--deploy-pi-maxw` 46ch (explainer measure), `--deploy-code-{pad,radius}` with
   `--tracking-deploy-code` 0.3em.
 - **Tracking** — `--tracking-deploy-kpi` 0.1em, `--tracking-deploy-cell` 0.08em.
+
+## 12. v3.5 settings geometry (docs/design-system/v35/mockups/settings.html, landed b-09)
+
+Component-tier dimension tokens in `console/src/styles/tokens.component.css`, single
+`:root` scope (theme-independent geometry; parity count unaffected). Mockup literals
+are the visual SSOT — they live in the `--settings-*` block once, so `settings.css`
+consumes `var()` only. Form register per `17-settings-ia-spec.md` (airy rows,
+direct-edit controls, one danger area).
+
+- **Section nav** — `--settings-nav-w` 190px, `--settings-nav-{pad,item-gap,item-pad,
+  item-radius}`; goes horizontal-scroll at the mockup's own 800px — the sixth
+  distinct SSOT breakpoint (chrome/fleet 1100, agents 1000, dream 980, skills 900,
+  inbox 760, settings 800).
+- **Content column** — `--settings-main-{pad,maxw}` (1080px measure),
+  `--settings-{h2-mb,desc-mb}`, `--settings-panel-{radius,mb,b-pad}`,
+  `--settings-row-{gap,pad-y}`, `--settings-ctl-gap` (single right control column,
+  alignment law).
+- **Controls** — `--settings-input-{w,pad,radius}`, `--settings-tgl-{w,h,knob,inset,
+  travel}` (32×18px track, 14px knob/travel — shape-visible both states),
+  `--settings-sw*` (52px swatch, 18px/10px bands), `--settings-nchan-*`,
+  `--settings-opts-{minw,gap}` (120px fixed control zone), `--settings-tok-*`,
+  `--settings-acts-gap`, `--settings-sub-mt` (row sub tuck).

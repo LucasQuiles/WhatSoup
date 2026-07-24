@@ -20,6 +20,7 @@ const SoupKitchen = lazy(() => import('./pages/SoupKitchen'))
 const LineDetail = lazy(() => import('./pages/LineDetail'))
 const Inbox = lazy(() => import('./pages/Inbox'))
 const Deployments = lazy(() => import('./pages/Deployments'))
+const Settings = lazy(() => import('./pages/Settings'))
 const Metrics = lazy(() => import('./pages/Metrics'))
 const Operator = lazy(() => import('./pages/Operator'))
 const Landing = lazy(() => import('./pages/Landing'))
@@ -134,7 +135,7 @@ function UnlockedApp({ onLogout, showLogout }: { onLogout: () => void; showLogou
                 <Route path="/skills" element={<ErrorBoundary><SkillsHub /></ErrorBoundary>} />
                 <Route path="/dream-lab" element={<ErrorBoundary><DreamLab /></ErrorBoundary>} />
                 <Route path="/deployments" element={<ErrorBoundary><Deployments /></ErrorBoundary>} />
-                <Route path="/settings" element={<ErrorBoundary><SurfaceStub surface="Settings" bead="b-09" /></ErrorBoundary>} />
+                <Route path="/settings" element={<ErrorBoundary><Settings /></ErrorBoundary>} />
                 <Route path="*" element={<Navigate to="/" replace />} />
               </Routes>
             </Suspense>
