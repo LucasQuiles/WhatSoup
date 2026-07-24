@@ -5,7 +5,10 @@ import { basename, dirname, join } from 'node:path';
 
 import { BufferJSON } from '@whiskeysockets/baileys';
 
+import { createChildLogger } from '../logger.ts';
 import { privateWriteError } from '../lib/private-fs.ts';
+
+const log = createChildLogger('atomic-auth-save');
 
 async function assertPrivateDirectory(path: string): Promise<void> {
   const stat = await lstat(path);
@@ -89,7 +92,20 @@ export function createAtomicCredsSaver(authDir: string, getCreds: () => unknown)
 
   return () => {
     const next = tail.then(() => writeAtomicBaileysJson(credsPath, getCreds()));
-    tail = next.then(() => undefined, () => undefined);
+    tail = next.then(
+      () => undefined,
+      (err) => {
+        // The serialisation chain (tail) must not stay rejected, or every subsequent
+        // save would be permanently blocked by one failure. But flattening both paths
+        // to `undefined` with no log meant fire-and-forget callers — notably
+        // `sock.ev.on('creds.update', saveCreds)` in auth.ts — silently swallowed
+        // credential write failures (disk full, permission denied, I/O error). Await-
+        // based callers see the rejection via `next`; this ensures the silent path is
+        // visible too. See #2165.
+        log.error({ err }, 'credential save failed — will retry on next creds.update');
+        return undefined;
+      },
+    );
     return next;
   };
 }

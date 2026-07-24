@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   chmodSync,
   existsSync,
@@ -14,6 +14,20 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+
+const { mockLog } = vi.hoisted(() => ({
+  mockLog: {
+    info: vi.fn(),
+    warn: vi.fn(),
+    error: vi.fn(),
+    debug: vi.fn(),
+    child: vi.fn().mockReturnThis(),
+  },
+}));
+
+vi.mock('../../src/logger.ts', () => ({
+  createChildLogger: () => mockLog,
+}));
 
 import { createAtomicCredsSaver, writeAtomicBaileysJson } from '../../src/transport/atomic-auth-save.ts';
 
@@ -125,5 +139,34 @@ describe('createAtomicCredsSaver', () => {
       me: { id: '15551230043:1@s.whatsapp.net' },
     });
     expect(readdirSync(authDir).filter((entry) => entry.includes('.tmp'))).toEqual([]);
+  });
+
+  it('logs credential save failures instead of silently swallowing them (#2165)', async () => {
+    // Before #2165, the tail-chain rejection handler was `() => undefined` — total
+    // silence. The fire-and-forget caller in auth.ts (`sock.ev.on('creds.update',
+    // saveCreds)`) had no visibility into write failures (disk full, permissions, I/O).
+    // Now the tail chain logs every rejection while still resolving to undefined so
+    // the queue continues. Await-based callers still see the rejection via `next`.
+    mockLog.error.mockClear();
+    const authDir = tempRoot();
+    const snapshots: unknown[] = [
+      { registrationId: BigInt(42) }, // BigInt is not JSON-serialisable → writeAtomicBaileysJson rejects
+    ];
+    const saveCreds = createAtomicCredsSaver(authDir, () => snapshots.shift());
+
+    // Await the returned promise to settle the I/O; the rejection propagates to the
+    // caller (as it did before #2165 — the fix is purely additive logging on the
+    // internal tail chain).
+    await expect(saveCreds()).rejects.toThrow(/BigInt/);
+
+    // Drain one more macrotask so the tail-chain rejection handler (attached to the
+    // same `next` promise) has run and logged.
+    await new Promise((resolve) => setImmediate(resolve));
+
+    expect(mockLog.error).toHaveBeenCalledTimes(1);
+    expect(mockLog.error).toHaveBeenCalledWith(
+      expect.objectContaining({ err: expect.any(Error) }),
+      expect.stringContaining('credential save failed'),
+    );
   });
 });
