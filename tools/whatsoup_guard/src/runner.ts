@@ -72,7 +72,10 @@ export async function runCycle(args: RunCycleArgs): Promise<RunCycleResult> {
   let tokenAgingCount = 0;
   let heartbeatCount = 0;
 
-  totalEventCount += recordMuteExpirations(args);
+  const muteExpiry = await recordMuteExpirations(args);
+  totalEventCount += muteExpiry.totalEventCount;
+  deliverySucceededCount += muteExpiry.deliverySucceededCount;
+  deliveryFailedCount += muteExpiry.deliveryFailedCount;
 
   const selfProtection = runSelfProtectionChecks(args);
   selfSecretWidenedCount += selfProtection.selfSecretWidenedCount;
@@ -209,13 +212,61 @@ function evaluatorForCollector(args: RunCycleArgs, collectorId: string): Evaluat
   return (ctx) => evaluator(ctx).filter((event) => event.domain === undefined || isDomainEnabled(args, event.domain));
 }
 
-function recordMuteExpirations(args: RunCycleArgs): number {
-  if (!args.runtimeState) return 0;
+interface MuteExpiryAccounting {
+  totalEventCount: number;
+  deliverySucceededCount: number;
+  deliveryFailedCount: number;
+}
+
+async function recordMuteExpirations(args: RunCycleArgs): Promise<MuteExpiryAccounting> {
+  if (!args.runtimeState) return { totalEventCount: 0, deliverySucceededCount: 0, deliveryFailedCount: 0 };
   const nowIso = args.now().toISOString();
   const prevIso = args.runtimeState.get('prev_cycle_iso') ?? nowIso;
   const expired = args.mutes.recordExpirations(prevIso, nowIso, args.events);
   args.runtimeState.set('prev_cycle_iso', nowIso);
-  return expired.length;
+
+  let totalEventCount = expired.length;
+  let deliverySucceededCount = 0;
+  let deliveryFailedCount = 0;
+
+  for (const mute of expired) {
+    const persisted = findPersistedMuteExpire(args.events, mute.id);
+    if (!persisted || !isAlertableEvent(persisted)) continue;
+    const action = actionForEvent(args, persisted);
+    if (action === 'observe') continue;
+    assertSupportedPolicyAction(action);
+    const correlationId = correlationForExpiredMute(args.events, mute.id) ?? persisted.correlation_id;
+    const delivery = await deliverAlert(args, persisted, action, sinksForAction(args, action), {
+      source: { id: persisted.id, ...(correlationId !== undefined ? { correlation_id: correlationId } : {}) },
+    });
+    deliverySucceededCount += delivery.succeeded;
+    deliveryFailedCount += delivery.failed;
+    totalEventCount += delivery.ledgered;
+  }
+
+  return { totalEventCount, deliverySucceededCount, deliveryFailedCount };
+}
+
+/**
+ * The mute that just expired may have been actively suppressing a drift, ledgered as
+ * `drift_muted` with `payload.mute_id` set to this mute's id (engine/lifecycle.ts `applyMute`).
+ * When one exists, the expiry alert inherits its correlation id so operators see the expiry
+ * grouped with the condition it was silencing rather than as an unrelated one-off notice.
+ */
+function correlationForExpiredMute(events: EventStore, muteId: number): string | undefined {
+  return events.queryByKind('drift_muted')
+    .filter((event) => readMuteId(event.payload) === muteId)
+    .at(-1)?.correlation_id;
+}
+
+function findPersistedMuteExpire(events: EventStore, muteId: number): Event | undefined {
+  return events.queryByKind('mute_expire')
+    .filter((event) => readMuteId(event.payload) === muteId)
+    .at(-1);
+}
+
+function readMuteId(payload: Record<string, unknown>): number | undefined {
+  return typeof payload.mute_id === 'number' ? payload.mute_id : undefined;
 }
 
 interface DeliveryAccounting {
@@ -498,7 +549,7 @@ function deliveryEvent(
 }
 
 interface AlertableEvent extends EventInput {
-  kind: 'drift' | 'self_secret_widened' | 'baseline_integrity_fail' | 'alert_token_aging' | 'alert_delivery_failed_all';
+  kind: 'drift' | 'self_secret_widened' | 'baseline_integrity_fail' | 'alert_token_aging' | 'alert_delivery_failed_all' | 'mute_expire';
   domain: Domain;
   severity: Severity;
 }
@@ -515,7 +566,8 @@ function isAlertableEvent(event: EventInput): event is AlertableEvent {
       || event.kind === 'self_secret_widened'
       || event.kind === 'baseline_integrity_fail'
       || event.kind === 'alert_token_aging'
-      || event.kind === 'alert_delivery_failed_all')
+      || event.kind === 'alert_delivery_failed_all'
+      || event.kind === 'mute_expire')
     && event.domain !== undefined
     && event.severity !== undefined;
 }
