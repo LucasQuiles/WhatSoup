@@ -21,6 +21,14 @@ private schema-version-1 receipt.
 **Tech Stack:** TypeScript 5.9, Node.js 24, Vitest 4, Unix sockets, launchd,
 SQLite, macOS private credential stores, ARC, and Tailscale admin controls.
 
+## Implementation Checkpoint
+
+As of 2026-07-24, the three code lanes are committed, pushed, and published as
+open pull requests. Their Node 24, Node 25, macOS, CodeQL, coverage, console,
+and browser checks pass. The pull requests remain unmerged and one commit
+behind current `main`; merge-order integration and every host mutation remain
+pending.
+
 ## Global Constraints
 
 - Refresh live `origin/main` and inspect overlapping open PRs before every
@@ -38,30 +46,30 @@ SQLite, macOS private credential stores, ARC, and Tailscale admin controls.
 
 ## Task 1: Finalize and publish the contract
 
-- [ ] Amend the approved design with strict `> 250 ms` lag semantics, exhaustive
+- [x] Amend the approved design with strict `> 250 ms` lag semantics, exhaustive
   provider capability mapping, awaitable socket readiness, state-root socket
   placement, Tailscale-first ordering, exact host timeouts, and acceptance
   predicates.
-- [ ] Regenerate the work index and pass publication, tally, documentation,
+- [x] Regenerate the work index and pass publication, tally, documentation,
   non-vacuity, diff, and repository staged guards.
-- [ ] Commit and push the design and this plan on
+- [x] Commit and push the design and this plan on
   `fix/agent-queue-health-20260723`.
 
 ## Task 2: Provider actor isolation
 
 Create `fix/agent-provider-actor-isolation-20260723` from refreshed `main`.
 
-- [ ] RED: add exhaustive provider MCP-mode, socket readiness, proxy precedence,
+- [x] RED: add exhaustive provider MCP-mode, socket readiness, proxy precedence,
   content-free error, actor-bound child environment, concurrent-chat,
   request-override, rekey, stale-socket, cleanup, and fallback non-overlap tests.
-- [ ] GREEN: add the exhaustive MCP capability to the closed provider registry;
+- [x] GREEN: add the exhaustive MCP capability to the closed provider registry;
   extract a per-chat MCP socket manager below the runtime state root; make socket
   startup awaitable; await readiness at the central child-spawn boundary; and
   preserve the actual routed/fallback provider selected by current `main`.
-- [ ] Exact-path collision handling distinguishes a live duplicate socket from
+- [x] Exact-path collision handling distinguishes a live duplicate socket from
   an unreachable same-UID stale socket. Reject live, foreign-owned, symlink, and
   non-socket paths without unlinking them.
-- [ ] Keep static `WHATSOUP_SOCKET` compatibility only outside eligible
+- [x] Keep static `WHATSOUP_SOCKET` compatibility only outside eligible
   per-chat CLI sessions. Eligible sessions receive a live
   `WHATSOUP_MCP_SOCKET` or fail before child spawn.
 - [ ] Prove with one real-provider integration canary per eligible CLI that the
@@ -73,69 +81,72 @@ Create `fix/agent-provider-actor-isolation-20260723` from refreshed `main`.
   provider binary, platform, proxy, and canary contract. A missing, stale, or
   unproven receipt blocks only that provider in sensitive non-sandbox per-chat
   mode.
-- [ ] Derive eligibility from the actual session/provider child, not the
+  The implementation and hermetic provider-shaped canaries pass; one
+  host-local eligible provider binary remained unavailable, so its exact
+  real-provider receipt is still pending.
+- [x] Derive eligibility from the actual session/provider child, not the
   instance default. Use one provider-config adapter in production and canaries.
   Use one generic per-chat transition barrier across CLI and API modes; retain
   the actor socket after failed stop proof and remove it only after final
   logical-session teardown with successful child-stop proof.
-- [ ] Keep the shared/global socket actorless in every non-sandbox per-chat
+- [x] Keep the shared/global socket actorless in every non-sandbox per-chat
   runtime. Publish actor FIFO state only to the actual eligible session socket.
-- [ ] Run targeted tests and typechecks, then the requested verification, gap,
+- [x] Run targeted tests and typechecks, then the requested verification, gap,
   hypothesis, deduplication, and fitness pass. Fix blocking findings.
-- [ ] Pass applicable repository guards, commit, push, and open a main-based PR.
+- [x] Pass applicable repository guards, commit, push, and open a main-based PR.
 
 ## Task 3: Queue-health truth
 
 Create `fix/agent-queue-health-truth-20260723` from refreshed `main`.
 
-- [ ] RED: test queue-object lifetime halt state, active-mode aggregation,
+- [x] RED: test queue-object lifetime halt state, active-mode aggregation,
   shared/per-chat/all-materialized-per-chat severity and HTTP behavior, scope
   counts, composition with stronger health states, and privacy.
-- [ ] GREEN: expose a content-free halt accessor and publish only
+- [x] GREEN: expose a content-free halt accessor and publish only
   `turnQueueHalted` and `turnQueueHaltedScopes` under `runtime.agent`.
-- [ ] Preserve process-lifetime recovery semantics with a halted-scope latch
+- [x] Preserve process-lifetime recovery semantics with a halted-scope latch
   driven by the queue's actual halt transition. The latch survives
   `/kill-session` deletion, delayed halt races, and LID/JID rekeying; admission
   consults it before creating any replacement queue. Restart clears it.
-- [ ] A shared halt is unhealthy/503; any per-chat halt is degraded/200.
+- [x] A shared halt is unhealthy/503; any per-chat halt is degraded/200.
   Existing stronger health wins. Do not add an unhalt API.
-- [ ] Update the stable public health contract. Extend exact-cause alerting only
+- [x] Update the stable public health contract. Extend exact-cause alerting only
   if its interface has merged to `main`; otherwise preserve generic alerting.
-- [ ] Run targeted tests/typechecks and the five requested review passes, then
+- [x] Run targeted tests/typechecks and the five requested review passes, then
   applicable guards. Commit, push, and open a main-based PR.
 
 ## Task 4: Suspend and platform hardening
 
 Create `fix/agent-suspend-platform-hardening-20260723` from refreshed `main`.
 
-- [ ] RED: cover exactly-250/greater-than-250 ms; prove an exactly-10-second
+- [x] RED: cover exactly-250/greater-than-250 ms; prove an exactly-10-second
   observation is retained without incrementing the discontinuity counter
   (without assuming one outlier makes p95 starved); prove greater-than-10
   seconds resets without retaining the gap; and cover timer/snapshot single
   consumption, saturation, sampler restart, warning entry/re-entry/rate
   limiting, poller behavior, launchd working directory, ARC root precedence,
   and private-operation-record validation.
-- [ ] GREEN: share one monotonic observation transition; publish a saturating
+- [x] GREEN: share one monotonic observation transition; publish a saturating
   process-local discontinuity counter; rate-limit only warning logs; add
   deterministic launchd working directory and non-empty explicit ARC-root
   precedence; add the schema-version-1 private record validator.
-- [ ] The validator uses closed action, step-status, and abort-reason registries;
+- [x] The validator uses closed action, step-status, and abort-reason registries;
   receipts contain structured counts/hashes/statuses and never free-form raw
   errors. It enforces the seven-action host dependency order, a
   completed/skipped prefix, and a planned suffix after the first planned or
   aborted gate.
-- [ ] Expose `validate-private-operation-record schema` and a read-only
+- [x] Expose `validate-private-operation-record schema` and a read-only
   `validate --record <absolute-path> --format json` command. Emit one
   schema-valid JSON object; use exit `0` for valid, `1` for actionable record
   failure, and `2` for infrastructure/read failure.
-- [ ] Preserve health evaluation on every request and existing strict
+- [x] Preserve health evaluation on every request and existing strict
   `p95 > 250 ms` behavior.
-- [ ] Run targeted tests/typechecks and the five requested review passes, then
+- [x] Run targeted tests/typechecks and the five requested review passes, then
   applicable guards. Commit, push, and open a main-based PR.
 
 ## Task 5: Cross-lane verification and host remediation
 
-- [ ] Review every PR diff against the design, current `main`, public surfaces,
+- [x] Review every PR diff against the design, current `main`, public surfaces,
   upstream overlap, runtime fitness, and cross-lane compatibility. Resolve all
   critical/important findings and rerun fresh verification.
 - [ ] Merge order is provider actor isolation first; then rebase queue-health
