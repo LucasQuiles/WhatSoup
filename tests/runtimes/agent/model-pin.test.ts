@@ -478,6 +478,7 @@ void _mockQueueTypeCheck; // suppress unused-variable warning
 
 import { AgentRuntime } from '../../../src/runtimes/agent/runtime.ts';
 import { __resetModelCatalogueCacheForTest } from '../../../src/runtimes/agent/model-catalogue-resolver.ts';
+import { providerConfigEffort } from '../../../src/runtimes/agent/reasoning-control.ts';
 import { Database as RealDatabase } from '../../../src/core/database.ts';
 import { DurabilityEngine } from '../../../src/core/durability.ts';
 
@@ -589,6 +590,15 @@ describe('NL routing handlers (nlRouting flag)', () => {
     (mockSession as unknown as Record<string, unknown>).getProviderId = vi.fn(
       () => (capturedSessionManagerOptsRef.current as unknown as { provider?: string } | null)?.provider ?? 'claude-cli',
     );
+    // Slice 3: the recycle diff also reads the session's EFFECTIVE spawned
+    // effort. Like getModelRef/getProviderId above, the mock must report the
+    // LATEST construction opts. It calls the REAL providerConfigEffort rather
+    // than re-implementing its guard, so the double cannot silently drift from
+    // the production reader (which would make these tests verify the mock).
+    (mockSession as unknown as Record<string, unknown>).getSpawnedEffort = vi.fn(() => {
+      const pc = (capturedSessionManagerOptsRef.current as unknown as { providerConfig?: Record<string, unknown> } | null)?.providerConfig;
+      return providerConfigEffort(pc);
+    });
   });
 
   afterEach(async () => {
@@ -872,6 +882,80 @@ describe('NL routing handlers (nlRouting flag)', () => {
       const reply = allReplies(sentMessages).join('\n');
       expect(reply).toContain('Already set — extended for another 24h');
       expect(reply).not.toContain('new sessions still use claude-cli (haiku-fast)');
+    });
+
+    // Slice 3 (layer 4 — apply). The menu Level-3 input path now ships too (its
+    // own tests live below); the one-shot `/model N M K` form is the remaining
+    // deferral. These isolate the apply seam both inputs drive:
+    // routeSessionProviderConfig folds a route's effort pin into the spawn
+    // config, and the recycle diff treats an effort-only change as a genuine
+    // change. RED-first: on the pre-Slice-3 code both the config carries no
+    // `effort` and the diff misses it (returns 'noop').
+    describe('Slice 3 — route effort applies to the spawn config + recycle diff', () => {
+      type RSPC = { routeSessionProviderConfig: (r: Record<string, unknown>) => Record<string, unknown> | undefined };
+      type ARCR = { applyRouteChangeAndRecycle: (c: string, s: string, m: string | undefined) => string };
+
+      it('a claude-cli user-pin route carries its effort into providerConfig.effort', () => {
+        const { runtime } = makeRoutingRuntime({ model: 'claude-opus-4-8' });
+        const cfg = (runtime as unknown as RSPC).routeSessionProviderConfig({
+          provider: 'claude-cli', model: 'claude-opus-4-8', source: 'preference', reasonCode: 'user_pin', effort: 'low',
+        });
+        expect(cfg?.effort).toBe('low');
+      });
+
+      it('a route with NO effort override keeps the static providerConfig.effort (no forced harness default)', () => {
+        cfgAny().agentProviderConfig = { effort: 'high' };
+        const { runtime } = makeRoutingRuntime({ model: 'claude-opus-4-8' });
+        const cfg = (runtime as unknown as RSPC).routeSessionProviderConfig({
+          provider: 'claude-cli', model: 'claude-opus-4-8', source: 'default', reasonCode: 'no_preference',
+        });
+        expect(cfg?.effort).toBe('high');
+      });
+
+      it('a non-claude route never gets the pin effort applied (effort is claude-cli-only)', () => {
+        // A static effort is configured so the assertion is CONCRETE: the inherited
+        // static value must survive and the pin's 'low' must never be applied to a
+        // non-claude route (a bare toBeUndefined would not distinguish
+        // "not applied" from "no config at all").
+        cfgAny().agentProviderConfig = { effort: 'high' };
+        const { runtime } = makeRoutingRuntime({ model: 'claude-opus-4-8' });
+        const cfg = (runtime as unknown as RSPC).routeSessionProviderConfig({
+          provider: 'opencode-cli', model: 'kimi/kimi-k3', source: 'preference', reasonCode: 'user_pin', effort: 'low',
+        });
+        expect(cfg?.effort).not.toBe('low');
+        expect(cfg?.effort).toBe('high');
+      });
+
+      it('the recycle diff detects an effort-only change (same provider+model, different effective effort)', () => {
+        cfgAny().agentProviderConfig = { effort: 'high' };
+        const { runtime } = makeRoutingRuntime({ model: 'claude-opus-4-8' });
+        // A live session spawned with effort 'high'.
+        capturedSessionManagerOptsRef.current = {
+          model: 'claude-opus-4-8', provider: 'claude-cli', providerConfig: { effort: 'high' },
+        } as unknown as typeof capturedSessionManagerOptsRef.current;
+        (runtime as unknown as { session: typeof mockSession }).session = mockSession;
+        // The next route pins the SAME model but a DIFFERENT effort.
+        (runtime as unknown as { resolveRouteForTurn: (c: string, s?: string) => unknown }).resolveRouteForTurn = () => ({
+          provider: 'claude-cli', model: 'claude-opus-4-8', source: 'preference', reasonCode: 'user_pin', effort: 'low', pinnedProvider: null,
+        });
+        const outcome = (runtime as unknown as ARCR).applyRouteChangeAndRecycle(CHAT, SENDER_A, undefined);
+        expect(outcome).not.toBe('noop');
+      });
+
+      it('the recycle diff is a no-op when the effective effort is unchanged (no over-recycle, F3)', () => {
+        cfgAny().agentProviderConfig = { effort: 'high' };
+        const { runtime } = makeRoutingRuntime({ model: 'claude-opus-4-8' });
+        capturedSessionManagerOptsRef.current = {
+          model: 'claude-opus-4-8', provider: 'claude-cli', providerConfig: { effort: 'high' },
+        } as unknown as typeof capturedSessionManagerOptsRef.current;
+        (runtime as unknown as { session: typeof mockSession }).session = mockSession;
+        // Same model AND the same EFFECTIVE effort (static 'high', no pin override).
+        (runtime as unknown as { resolveRouteForTurn: (c: string, s?: string) => unknown }).resolveRouteForTurn = () => ({
+          provider: 'claude-cli', model: 'claude-opus-4-8', source: 'default', reasonCode: 'no_preference', pinnedProvider: null,
+        });
+        const outcome = (runtime as unknown as ARCR).applyRouteChangeAndRecycle(CHAT, SENDER_A, undefined);
+        expect(outcome).toBe('noop');
+      });
     });
 
     it('keeps the live session marked active when fallback only controls the next session', async () => {
@@ -2051,6 +2135,60 @@ describe('NL routing handlers (nlRouting flag)', () => {
       expect(rows[0].requested_model).toBe('kimi/kimi-k3');
       expect(rows[0].model_pin_verified).toBe(1);
       expect(allReplies(sentMessages).join('\n')).toContain('kimi/kimi-k3');
+    });
+
+    // Slice 3 — Level-3 reasoning-effort menu. claude-cli has native reasoning
+    // control (nativeReasoningControl), so a claude MODEL pick opens Level-3
+    // instead of pinning; opencode-cli has none, so its model pins directly (the
+    // Slice-2 test above, unchanged). RED-first: pre-Slice-3, picking the claude
+    // model writes a pref row immediately (no effort menu, no effort column).
+    it('picking a claude-cli MODEL at Level-2 opens Level-3 (the effort menu), not a pin', async () => {
+      const { runtime, sentMessages } = makeDrillRuntime();
+      await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model' }));
+      await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model 1', messageId: 'm2' })); // Claude brand → models
+      sentMessages.length = 0;
+      mockQueue.enqueueText.mockClear();
+      await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model 1', messageId: 'm3' })); // pick claude-opus-4-8
+      const reply = allReplies(sentMessages).join('\n');
+      expect(reply).toContain('reasoning effort:');
+      expect(reply).toContain('Highest');
+      expect(reply).toContain('Default (no override)');
+      expect(prefRows()).toHaveLength(0); // opened Level-3, did NOT pin
+    });
+
+    it('picking an effort level at Level-3 pins the model AT that effort and discloses it in the receipt', async () => {
+      const { runtime, sentMessages } = makeDrillRuntime();
+      await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model' }));
+      await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model 1', messageId: 'm2' }));
+      await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model 1', messageId: 'm3' })); // → Level-3
+      sentMessages.length = 0;
+      mockQueue.enqueueText.mockClear();
+      await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model 1', messageId: 'm4' })); // pick "Highest" (xhigh)
+      const rows = prefRows();
+      expect(rows).toHaveLength(1);
+      expect(rows[0].requested_provider).toBe('claude-cli');
+      expect(rows[0].requested_model).toBe('claude-opus-4-8');
+      expect(rows[0].requested_effort).toBe('xhigh');
+      expect(allReplies(sentMessages).join('\n').toLowerCase()).toContain('highest reasoning');
+    });
+
+    it('picking "Default (no override)" at Level-3 pins the model with a null effort (clears any override)', async () => {
+      const { runtime, sentMessages } = makeDrillRuntime();
+      await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model' }));
+      await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model 1', messageId: 'm2' }));
+      await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model 1', messageId: 'm3' })); // → Level-3 (5 rows)
+      sentMessages.length = 0;
+      mockQueue.enqueueText.mockClear();
+      await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model 5', messageId: 'm4' })); // "Default (no override)"
+      const rows = prefRows();
+      expect(rows).toHaveLength(1);
+      expect(rows[0].requested_model).toBe('claude-opus-4-8');
+      expect(rows[0].requested_effort).toBeNull();
+      // Terminal behavior assertion: a null effort echoes the model ALONE — the
+      // receipt must NOT claim a reasoning level it did not pin (charter #6).
+      const reply = allReplies(sentMessages).join('\n');
+      expect(reply).toContain('claude-opus-4-8');
+      expect(reply.toLowerCase()).not.toContain('reasoning');
     });
 
     it('RECENCY (drill wins): /model list → bare /model → /model 1 drills the DRILL brand, never a flat pin', async () => {

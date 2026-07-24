@@ -42,7 +42,8 @@ import {
   type ModelCatalogueRenderPort,
 } from './model-catalogue-render.ts';
 import { brandOf, listBrands } from './providers/provider-brand.ts';
-import { renderBrandLevel, renderModelLevel, type RenderedLevel } from './model-drilldown-render.ts';
+import { renderBrandLevel, renderEffortLevel, renderModelLevel, prettyEffortLabel, type RenderedLevel } from './model-drilldown-render.ts';
+import { nativeReasoningControl, providerConfigEffort, type ReasoningControl } from './reasoning-control.ts';
 import {
   fallbackReconfirmationOutcome,
   fallbackRouteLabel,
@@ -95,6 +96,11 @@ export interface ModelPinPort extends ModelCatalogueRenderPort {
   activeChatJid: string | null;
   operationTracker: OperationTracker | null;
   resolveRouteForTurn(chatJid: string, actorJid?: string): RouteDecision & { pinnedProvider: string | null };
+  /** The effective provider config a route would spawn with — INCLUDING the
+   *  Slice-3 effort override (applyRouteEffort is applied inside). The recycle
+   *  diff reads `.effort` from it to compare against the live session's
+   *  {@link SessionManager.getSpawnedEffort}. */
+  routeSessionProviderConfig(route: RouteDecision): Record<string, unknown> | undefined;
   resolvePerChatMapKey(chatJid: string): string;
   isTurnInFlight(scopeKey: string): boolean;
   getActiveQueue(): IOutboundQueue | null;
@@ -224,6 +230,7 @@ export function recordRouteModelPin(
   senderKey: string,
   providerId: string,
   model: string,
+  effort: string | null = null,
 ): 'set' | 'refreshed' | 'sticky_kept' {
   const now = Date.now();
   const existing = getPreference(port.db, chatKey, senderKey, now);
@@ -231,7 +238,11 @@ export function recordRouteModelPin(
     existing &&
     existing.intent === 'provider_specific' &&
     existing.requestedProvider === providerId &&
-    existing.requestedModel === model
+    existing.requestedModel === model &&
+    // Slice 3: effort is part of the pin's dedup identity — re-pinning the
+    // SAME model at a DIFFERENT effort is a genuine change (falls through to
+    // a fresh 'set' + re-verify + recycle), never a no-op 'refreshed'.
+    (existing.requestedEffort ?? null) === effort
   ) {
     if (existing.expiresAt !== null) {
       setPreference(port.db, { ...existing, updatedAt: now, expiresAt: now + PREFERENCE_TTL_MS });
@@ -252,6 +263,7 @@ export function recordRouteModelPin(
     requestedModel: model,
     validatedProvider: providerId,
     modelPinVerified: false,
+    requestedEffort: effort,
   });
   port.emitRouteEventChecked({
     event: 'model_preference_set',
@@ -376,7 +388,20 @@ export function applyRouteChangeAndRecycle(
   // resolveRouteForTurn; nothing to recycle.
   if (!session) return 'noop';
   const next = port.resolveRouteForTurn(chatJid, senderJid);
-  if (session.getProviderId() === next.provider && session.getModelRef() === next.model) {
+  // Slice 3: effort is part of the recycle diff. Compare the live session's
+  // EFFECTIVE spawned effort (getSpawnedEffort) against the effort the NEXT
+  // spawn would carry — read from routeSessionProviderConfig, which already
+  // folds the pin override over the static config via applyRouteEffort. This
+  // is symmetric (effective vs effective): a same-model re-pin at a NEW effort
+  // recycles so the new effort takes (E10); an unchanged effective effort
+  // (e.g. a pin whose override equals the static config) stays a no-op (F3, no
+  // over-recycle).
+  const nextEffort = providerConfigEffort(port.routeSessionProviderConfig(next));
+  if (
+    session.getProviderId() === next.provider &&
+    session.getModelRef() === next.model &&
+    session.getSpawnedEffort() === nextEffort
+  ) {
     return 'noop';
   }
   if (port.isTurnInFlight(scopeKey)) {
@@ -560,9 +585,10 @@ async function pinConfiguredModelEntry(
   },
   providerId: string,
   modelId: string,
+  effort: string | null = null,
 ): Promise<void> {
   const { chatJid, senderJid, perChatMapKey, chatKey, senderKey } = ctx;
-  const outcome = recordRouteModelPin(port, chatJid, chatKey, senderKey, providerId, modelId);
+  const outcome = recordRouteModelPin(port, chatJid, chatKey, senderKey, providerId, modelId, effort);
   if (outcome === 'refreshed') {
     port.sendDirect(chatJid, echoReconfirmOutcome(
       port, chatJid, senderJid, perChatMapKey, modelId,
@@ -602,7 +628,11 @@ async function pinConfiguredModelEntry(
     );
     return;
   }
-  port.sendDirect(chatJid, renderPinOutcomeEcho(port, chatJid, senderJid, modelId, recycleOutcome));
+  // Slice 3: an effort pin discloses the level in the receipt (charter #6 — the
+  // receipt says what changed); a null effort (Default / no-rc model) echoes the
+  // model alone, so the pre-Slice-3 receipt is byte-identical when no effort is set.
+  const echoLabel = effort ? `${modelId} (${prettyEffortLabel(effort).toLowerCase()} reasoning)` : modelId;
+  port.sendDirect(chatJid, renderPinOutcomeEcho(port, chatJid, senderJid, echoLabel, recycleOutcome));
 }
 
 /**
@@ -691,6 +721,29 @@ async function sendModelDrillModelLevel(
     ? `${rendered.text}\n_showing 1–${shown.length} of ${listing.ids.length}_`
     : rendered.text;
   port.sendDirect(chatJid, text);
+}
+
+/**
+ * Slice 3 — send the drill Level-3 reasoning-effort menu for a model the user
+ * picked at Level-2 whose (provider, model) has native reasoning control. No
+ * fetch (the levels are static per provider), so no degrade path. Writes the
+ * drill 'effort' snapshot so a following `/model N` pins the model AT the level
+ * they saw; the live route's effort (only when this exact model is the current
+ * route) marks the active row `(current)`.
+ */
+function sendModelDrillEffortLevel(
+  port: ModelPinPort,
+  chatJid: string,
+  senderJid: string,
+  provider: string,
+  model: string,
+  control: ReasoningControl,
+): void {
+  const route = port.resolveRouteForTurn(chatJid, senderJid);
+  const currentEffort = route.provider === provider && route.model === model ? route.effort ?? null : null;
+  const rendered = renderEffortLevel(model, provider, control, currentEffort);
+  port.catalogueSnapshot.putDrillSnapshot(chatJid, senderJid, 'effort', rendered.entries);
+  port.sendDirect(chatJid, rendered.text);
 }
 
 /**
@@ -839,12 +892,25 @@ export async function handleModelCommand(
       await sendModelDrillModelLevel(port, chatJid, senderJid, pick.entry.brand, pick.entry.provider);
       return;
     }
-    // Level-2 (model) pick → pin the leaf through the shared sink.
+    if (pick.entry.kind === 'model') {
+      // Slice 3: a model with native reasoning control (claude-cli today) opens
+      // Level-3 to pick an effort instead of pinning immediately.
+      const control = nativeReasoningControl(pick.entry.provider, pick.entry.model);
+      if (control) {
+        sendModelDrillEffortLevel(port, chatJid, senderJid, pick.entry.provider, pick.entry.model, control);
+        return;
+      }
+    }
+    // Both remaining arms pin through the SAME sink, differing only in effort: a
+    // Level-2 model with no reasoning control pins the leaf at no effort (drill
+    // leaf-pin, unchanged), and a Level-3 pick pins AT its effort (null = the
+    // "Default (no override)" row, which clears any pin).
     await pinConfiguredModelEntry(
       port,
       { chatJid, senderJid, perChatMapKey, chatKey, senderKey },
       pick.entry.provider,
       pick.entry.model,
+      pick.entry.kind === 'effort' ? pick.entry.effort : null,
     );
     return;
   }

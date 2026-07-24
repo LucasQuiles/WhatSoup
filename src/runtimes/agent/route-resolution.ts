@@ -1,4 +1,5 @@
 import type { ChatModelPreference } from './chat-preference-db.ts';
+import { providerConfigEffort, providerHasNativeReasoningControl } from './reasoning-control.ts';
 import {
   FALLBACK_MODEL_REQUIRED_PROVIDER_IDS,
   type AgentFallbackEntry,
@@ -81,6 +82,13 @@ export interface RouteDecision {
   source: 'default' | 'preference' | 'fallback' | 'pin_blocked_default' | 'tier_unconfigured_default';
   /** Machine-readable; feeds ModelRouteEvent and the /why receipt. */
   reasonCode: string;
+  /**
+   * Slice 3: the per-chat reasoning-effort override to carry to spawn (only a
+   * user model pin sets it; undefined on every other route). Consumed by
+   * {@link applyRouteEffort} → providerConfig.effort → claude-cli `--effort`.
+   * A cross-provider pin leaves it null (only claude-cli consumes effort).
+   */
+  effort?: string | null;
 }
 
 export function resolveRoute(i: RouteInputs): RouteDecision {
@@ -120,6 +128,10 @@ export function resolveRoute(i: RouteInputs): RouteDecision {
           : targetModel(i.pref.requestedProvider, i.configuredModelByProvider),
         source: 'preference',
         reasonCode: 'user_pin',
+        // Slice 3: carry the pin's reasoning-effort override. Meaningful only
+        // for claude-cli (the sole `--effort` consumer); requestedEffort is
+        // null for a cross-provider pin, so this is null there too.
+        effort: i.pref.requestedEffort ?? null,
       };
     }
     return {
@@ -164,6 +176,38 @@ export function resolveRoute(i: RouteInputs): RouteDecision {
     source: 'tier_unconfigured_default',
     reasonCode: `intent_${i.pref.intent}_unmapped`,
   };
+}
+
+/**
+ * Slice 3 — thread a route's reasoning-effort override into the provider
+ * config the session spawns with. Only a provider with native reasoning control
+ * consumes an effort flag (claude-cli's `--effort`, read by session.ts
+ * resolveProviderArgs); every other provider ignores it, so the base is
+ * returned untouched. The provider set is NOT re-tested here — it is read from
+ * reasoning-control.ts, the same predicate the Level-3 menu gates on. That
+ * removes one of two duplicate encodings, not all of them: writing the key here
+ * does not mean the child receives a flag, which is session.ts's per-provider
+ * argv switch (see providerHasNativeReasoningControl for the remaining gap).
+ *
+ * A per-chat effort PIN (a non-empty `route.effort`) OVERRIDES the static
+ * `providerConfig.effort` for that spawn. A route with no effort override
+ * (undefined, or the FW-7 "Default (no override)" pick = null) keeps whatever
+ * the base config carries — matching the hybrid's semantics: a null/absent
+ * effort is "no override", not "force the harness default over a configured
+ * static effort". Pure; never mutates `base`.
+ */
+export function applyRouteEffort(
+  base: Record<string, unknown> | undefined,
+  route: Pick<RouteDecision, 'provider' | 'effort'>,
+): Record<string, unknown> | undefined {
+  if (!providerHasNativeReasoningControl(route.provider)) return base;
+  // Validate the WRITE through the same reader the spawn path reads with, so the
+  // guard is symmetric by construction. It also keeps the safe direction: a
+  // malformed (non-string) effort yields null and returns `base` untouched,
+  // rather than clobbering a valid operator-configured static effort with
+  // garbage that the reader would then report as absent.
+  const level = providerConfigEffort({ effort: route.effort });
+  return level ? { ...(base ?? {}), effort: level } : base;
 }
 
 export function isPinnedModelEligible(
