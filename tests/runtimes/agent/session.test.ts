@@ -119,7 +119,7 @@ import { spawn } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { killSessionTree } from '../../../src/runtimes/agent/process-tree.ts';
 import { toConversationKey } from '../../../src/core/conversation-key.ts';
-import { formatAge, TURN_WATCHDOG_MS, WATCHDOG_SOFT_MS, WATCHDOG_WARN_MS, WATCHDOG_HARD_MS, STALLED_OP_KILL_GRACE_MS, PROVIDER_DISPLAY_NAMES } from '../../../src/runtimes/agent/session.ts';
+import { formatAge, TURN_WATCHDOG_MS, WATCHDOG_SOFT_MS, WATCHDOG_WARN_MS, WATCHDOG_HARD_MS, STALLED_OP_KILL_GRACE_MS, LONG_OP_CEILING_MS, PROVIDER_DISPLAY_NAMES } from '../../../src/runtimes/agent/session.ts';
 import { OpenAIApiProvider } from '../../../src/runtimes/agent/providers/openai-api.ts';
 import { AnthropicApiProvider } from '../../../src/runtimes/agent/providers/anthropic-api.ts';
 
@@ -1712,6 +1712,90 @@ describe('SessionManager', () => {
 
     await vi.advanceTimersByTimeAsync(STALLED_OP_KILL_GRACE_MS + 1);
     expect(mockChild.kill).not.toHaveBeenCalledWith('SIGKILL');
+
+    vi.useRealTimers();
+  });
+
+  it('liveness gate: a CPU-active tree defers the stalled-op kill and re-arms the grace timer', async () => {
+    vi.useFakeTimers();
+
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const notifyUser = vi.fn();
+    // First assessment: tree is working (long browser step). Second: genuinely hung.
+    const treeLivenessAssessor = vi.fn()
+      .mockResolvedValueOnce({ alive: true, cpuDeltaMs: 1_500, pidChurn: 0, pidCount: 4 })
+      .mockResolvedValueOnce({ alive: false, cpuDeltaMs: 0, pidChurn: 0, pidCount: 4 });
+
+    const sm = new SessionManager({ db, messenger, chatJid: CHAT_JID, onEvent: vi.fn(), instanceName: 'personal', notifyUser, treeLivenessAssessor });
+    await sm.spawnSession();
+    await sm.sendTurn('run the LCP tracker export');
+
+    sm.recoverStalledOperation('toolu_browser_long', 'mcp__playwright__browser_navigate');
+    await vi.advanceTimersByTimeAsync(STALLED_OP_KILL_GRACE_MS + 1);
+
+    // Working tree → NO kill; user told the long step is still running; timer re-armed.
+    expect(mockChild.kill).not.toHaveBeenCalledWith('SIGKILL');
+    expect(notifyUser).toHaveBeenCalledWith(expect.stringContaining('Long-running step still active'));
+    expect((sm as unknown as { stalledOpKill: unknown }).stalledOpKill).not.toBeNull();
+
+    // Next grace window: assessment now reads hung → kill proceeds.
+    await vi.advanceTimersByTimeAsync(STALLED_OP_KILL_GRACE_MS + 1);
+    expect(treeLivenessAssessor).toHaveBeenCalledTimes(2);
+    expect(mockChild.kill).toHaveBeenCalledWith('SIGKILL');
+
+    vi.useRealTimers();
+  });
+
+  it('liveness gate: the hard watchdog defers for a CPU-active tree instead of killing it', async () => {
+    vi.useFakeTimers();
+
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const notifyUser = vi.fn();
+    const treeLivenessAssessor = vi.fn()
+      .mockResolvedValueOnce({ alive: true, cpuDeltaMs: 900, pidChurn: 1, pidCount: 5 })
+      .mockResolvedValueOnce({ alive: false, cpuDeltaMs: 0, pidChurn: 0, pidCount: 5 });
+
+    const sm = new SessionManager({ db, messenger, chatJid: CHAT_JID, onEvent: vi.fn(), instanceName: 'personal', notifyUser, treeLivenessAssessor });
+    await sm.spawnSession();
+    await sm.sendTurn('long quiet automation');
+
+    // First hard-watchdog expiry: tree alive → deferred, watchdog re-armed, no termination notice.
+    await vi.advanceTimersByTimeAsync(WATCHDOG_HARD_MS + 1);
+    expect(mockChild.kill).not.toHaveBeenCalledWith('SIGKILL');
+    expect(notifyUser).not.toHaveBeenCalledWith(expect.stringContaining('terminated'));
+
+    // Second expiry: tree hung → the original termination behavior runs.
+    await vi.advanceTimersByTimeAsync(WATCHDOG_HARD_MS + 1);
+    expect(treeLivenessAssessor).toHaveBeenCalledTimes(2);
+    expect(notifyUser).toHaveBeenCalledWith(expect.stringContaining('terminated'));
+    expect(mockChild.kill).toHaveBeenCalledWith('SIGKILL');
+
+    vi.useRealTimers();
+  });
+
+  it('liveness gate: LONG_OP_CEILING_MS bounds extensions — a CPU-active tree is still killed at the ceiling', async () => {
+    vi.useFakeTimers();
+
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const notifyUser = vi.fn();
+    // Always alive — only the ceiling can stop this tree.
+    const treeLivenessAssessor = vi.fn().mockResolvedValue({ alive: true, cpuDeltaMs: 2_000, pidChurn: 0, pidCount: 3 });
+
+    const sm = new SessionManager({ db, messenger, chatJid: CHAT_JID, onEvent: vi.fn(), instanceName: 'personal', notifyUser, treeLivenessAssessor });
+    await sm.spawnSession();
+    await sm.sendTurn('endless spinning automation');
+
+    sm.recoverStalledOperation('toolu_spin', 'Bash');
+    // Force the gate anchor past the ceiling, then let the pending grace timer fire.
+    (sm as unknown as { longOpGateStartedAt: number | null }).longOpGateStartedAt = Date.now() - LONG_OP_CEILING_MS - 1;
+    await vi.advanceTimersByTimeAsync(STALLED_OP_KILL_GRACE_MS + 1);
+
+    // Ceiling reached → kill despite the alive verdict (assessor not even consulted).
+    expect(mockChild.kill).toHaveBeenCalledWith('SIGKILL');
+    expect(notifyUser).toHaveBeenCalledWith(expect.stringContaining('stalled'));
 
     vi.useRealTimers();
   });

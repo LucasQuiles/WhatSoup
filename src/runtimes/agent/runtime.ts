@@ -656,6 +656,7 @@ import {
   alertEvidenceValue,
 } from './tool-update.ts';
 import { maybeEmitToolFailureAlert, type ToolFailureAlertDeps } from './tool-failure-alert.ts';
+import { runNewCommand } from './runtime-new-command.ts';
 
 // Provider-failure string matchers are the single source of truth in
 // `./failure-taxonomy.ts`. They are imported above for internal use and re-exported
@@ -3966,60 +3967,57 @@ export class AgentRuntime implements Runtime {
       try {
         switch (classified.command) {
           case 'new':
-            // A local reset cannot erase the immutable evidence owner of an
-            // admitted user turn. Ask the caller to retry once that turn has
-            // reached its terminal transaction.
-            this.assertNoActiveUserTurn(perChatMapKey ?? GLOBAL_TOOL_SCOPE_KEY);
-            // Capture session ref before branches may delete it from the map.
-            // In per_chat mode, this.session is NOT reliable (shared field race),
-            // so we look up the correct session from the per-chat maps.
-            const sessionForNew = this.sessionScope === 'per_chat'
-              ? this.chatSessions.get(perChatMapKey!)
-              : this.session;
-            log.info({
+            // Extracted leaf collaborator: runtime-new-command.ts owns the control flow.
+            await runNewCommand<SessionManager>({
               chatJid,
               sessionScope: this.sessionScope,
               shared: this.shared,
               sandboxPerChat: this.sandboxPerChat,
-            }, 'resetting session and queue for /new');
-            if (this.sessionScope === 'per_chat') {
-              if (!sessionForNew) {
-                throw new Error(`No owned per-chat session found for /new at "${perChatMapKey!}"`);
-              }
-              await this.resetOwnedPerChatSession(perChatMapKey!, chatJid, sessionForNew);
-            } else {
-              // Abort the old queue — clears timers and typing heartbeat before discarding.
-              this.getQueueForChat(chatJid)?.abortTurn();
-              this.cleanupGlobalAutoCompactState();
-              // Create a fresh queue before spawning so stale output from the old session
-              // can never leak into the new session's delivery channel.
-              if (this.shared) {
-                const queue = this.createOutboundQueue(chatJid, '/new shared replacement');
-                this.outboundQueues.set(chatJid, queue);
-              } else {
-                this.queue = this.createOutboundQueue(chatJid, '/new single replacement');
-              }
-              if (sessionForNew) {
-                await this.waitForRejectedTerminalTeardown(sessionForNew);
-                await sessionForNew.handleNew();
-                this.rejectedTerminalTeardowns.delete(sessionForNew);
-              }
-            }
-            // QR-108: /new is a clean reset, so drop the one-message-handoff latches
-            // for this conversation too — otherwise a standby notice or handoff
-            // artifact stashed before /new leaks into the NEXT reply/prelude (both
-            // tables are keyed by the stable conversation_key, which /new does not
-            // change). Both fns are idempotent no-ops when nothing is pending, and
-            // their own JSDoc already documents "cleared on /new".
-            {
-              const resetKey = toConversationKey(chatJid);
-              clearStandbyNotice(this.db, resetKey);
-              deleteHandoffArtifact(this.db, resetKey);
-            }
-            // Reset turn flag — stale value from the old session must not suppress the
-            // _(no response)_ fallback if the first new-session turn has no visible text.
-            this.turnHadVisibleOutput = false;
-            this.sendDirect(chatJid, '*Starting new session* ✓');
+              scopeKey: perChatMapKey ?? GLOBAL_TOOL_SCOPE_KEY,
+              perChatMapKey: perChatMapKey ?? null,
+              isTurnInFlight: () => this.isTurnInFlight(perChatMapKey ?? GLOBAL_TOOL_SCOPE_KEY),
+              getPerChatSession: () => this.chatSessions.get(perChatMapKey!),
+              abortPerChatQueue: () => this.chatQueues.get(perChatMapKey!)?.abortTurn(),
+              terminalizePerChatTurnQueueForKill: () =>
+                this.runtimeTurnCoordinator.terminalizePerChatTurnQueueForKill(perChatMapKey!),
+              disposePerChatSession: async (session) => {
+                this.deleteOwnedPerChatSession(perChatMapKey!, session);
+                this.chatQueues.delete(perChatMapKey!);
+                this.cleanupPerChatState(perChatMapKey!);
+                await session.shutdown(false);
+              },
+              resetOwnedPerChatSession: (session) => this.resetOwnedPerChatSession(perChatMapKey!, chatJid, session),
+              getSingleSession: () => this.session,
+              abortActiveQueue: () => this.getActiveQueue()?.abortTurn(),
+              shutdownOperationTracker: () => { this.operationTracker?.shutdown(); this.operationTracker = null; },
+              cleanupGlobalAutoCompactState: () => this.cleanupGlobalAutoCompactState(),
+              shutdownSingleSession: (session) => session.shutdown(false),
+              clearSingleScopeRefs: () => {
+                this.session = null; this.queue = null; this.activeChatJid = null;
+                this.currentInboundSeq = undefined; this.currentTurnChatJid = null;
+              },
+              abortChatQueue: () => this.getQueueForChat(chatJid)?.abortTurn(),
+              replaceOutboundQueue: () => {
+                if (this.shared) {
+                  const queue = this.createOutboundQueue(chatJid, '/new shared replacement');
+                  this.outboundQueues.set(chatJid, queue);
+                } else {
+                  this.queue = this.createOutboundQueue(chatJid, '/new single replacement');
+                }
+              },
+              resetSingleSession: async (session) => {
+                await this.waitForRejectedTerminalTeardown(session);
+                await session.handleNew();
+                this.rejectedTerminalTeardowns.delete(session);
+              },
+              clearHandoffLatches: () => {
+                const resetKey = toConversationKey(chatJid);
+                clearStandbyNotice(this.db, resetKey);
+                deleteHandoffArtifact(this.db, resetKey);
+              },
+              clearTurnHadVisibleOutput: () => { this.turnHadVisibleOutput = false; },
+              sendDirect: (text) => this.sendDirect(chatJid, text),
+            });
             break;
 
           case 'status': {

@@ -472,10 +472,12 @@ sqlite3 ~/.local/share/whatsoup/instances/q/bot.db \
 - Access list blocks the sender — check `access_list` table (see §7.1)
 - Rate limit hit — check `rate_limits` table
 
-If `/new` replies `_A response is still in progress. Send /new again after it finishes._`, the
-reset was intentionally deferred. The current user or synthetic turn still owns the queue and
-terminal evidence; `/new` does not cancel it or remove its manager. Wait for the result/failure
-to finalize, then send `/new` again.
+`/new` during an in-flight turn interrupts it (reply: `*Interrupted the running task — starting
+new session* ✓`): the runaway turn is aborted and terminalized via the kill-session-equivalent
+teardown, the session is discarded, and a fresh session spawns on the next message. Use it as
+the cancel for a stuck or runaway long job. If the reply carries
+`⚠️ some in-flight turns could not be finalized — see logs`, inspect the runtime logs for the
+finalization error before assuming the durable ledger is clean.
 
 If logs report that the configured provider does not support persisted resume, the exact stale
 lifecycle has already been retired to `ended`; cleanup will not turn it back into `suspended`.
@@ -724,7 +726,8 @@ The operation tracker monitors each tool invocation and thinking gap. Stream-jso
 
 1. **Tool stall detected** — `expectedMs * stallMultiplier` exceeded (e.g. 75s for Bash, 6 min for Agent subagents)
    - Tracker records the stall and emits a user-visible warning (format depends on `toolUpdateMode`)
-   - For stream-json providers this arms a dedicated **stalled-operation kill** (`STALLED_OP_KILL_GRACE_MS`, default 3 min). Unlike the hard watchdog it is **not reset by inbound user messages**, so re-prompting a hung session cannot postpone the kill. It is cancelled if genuine provider progress arrives first. On fire: SIGKILL the provider and post "_A tool call stalled and was terminated. Send your message again to retry._" This bounds a hung tool to roughly `stall threshold + 3 min` (e.g. ~4–5 min for Bash) instead of the 30-min hard-watchdog ceiling.
+   - For stream-json providers this arms a dedicated **stalled-operation kill** (`STALLED_OP_KILL_GRACE_MS`, default 3 min). Unlike the hard watchdog it is **not reset by inbound user messages**, so re-prompting a hung session cannot postpone the kill. It is cancelled if genuine provider progress arrives first.
+   - **Liveness gate (CPU progress):** when the grace expires, the provider's process tree is CPU-sampled twice across a 5s window (`src/runtimes/agent/tree-liveness.ts`). A tree that burned CPU or changed shape is a **working long step, not a hang** (heavy browser automation, long bash/MCP calls): the kill is deferred, the grace re-arms, and the chat gets a rate-limited `_Long-running step still active (~N min in) — continuing. Send /new to interrupt._` notice. Extensions are bounded by `WHATSOUP_LONG_OP_CEILING_MS` (default 2 h) from the first fire of the quiet stretch. A flat tree — or any assessment failure — kills exactly as before: SIGKILL plus "_A tool call stalled and was terminated. Send your message again to retry._"
 
 2. **Thinking stall detected** — no events from the provider for `thinkingStallMs` (default 5 min)
    - Tracker sends a newline (`\n`) to stdin as a liveness probe
@@ -732,9 +735,8 @@ The operation tracker monitors each tool invocation and thinking gap. Stream-jso
 
 3. **Hard watchdog backstop** — no activity for 30 minutes (not configurable via `operationTracker`)
    - Reset on any agent activity (tool_use, tool_result, assistant_text) **and on every inbound user message**, so it only catches sessions that go fully silent. The stalled-operation kill (step 1) is what bounds a single hung tool while the user keeps messaging.
-   - Sends SIGKILL to the provider process
-   - User receives "_Session terminated after 30 minutes of inactivity — restarting._"
-   - Session is marked as crashed; a new session spawns on the next inbound message
+   - Runs the same CPU-progress liveness gate as step 1 before terminating a child provider: a working tree re-arms the watchdog (bounded by the same `WHATSOUP_LONG_OP_CEILING_MS` ceiling) instead of being killed mid-job. Managed API-provider sessions (no local process tree) keep the original behavior.
+   - On a genuine kill: SIGKILL to the provider process; user receives "_Session terminated after 30 minutes of inactivity — restarting._"; session is marked as crashed and a new session spawns on the next inbound message
 
 **Diagnostic steps:**
 
