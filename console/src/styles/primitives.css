@@ -49,23 +49,9 @@
 
 /* live halo — ok-disc only, the sole ambient loop (motion.md §8) */
 /* waiver:MOTION-AMBIENT-OK — badge.md explicitly grants this loop */
-.soup-shape--ok.soup-shape--live::after {
-  content: "";
-  position: absolute;
-  inset: calc(-1 * var(--sp-0h)); /* halo ring offset, 3px = sp-0h */
-  border-radius: 50%;
-  border: 1px solid var(--status-ok-solid);
-  opacity: 0;
-  animation: breathe-ring 3s ease-out infinite;
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .soup-shape--ok.soup-shape--live::after {
-    display: none;
-  }
-}
-
-/* breathe-ring keyframe defined in composites.css */
+/* Live-disc ambient motion moved to motion.css (T5 b-11): the breathe-ring
+   halo (3s scale-out, a second loop shape) is retired; the disc now pulses
+   the 13-§1 ambient loop (opacity 1→.35→1, 2400ms) — the ONE product loop. */
 
 /* --------------------------------------------------------------------------
    STATUS CELL — [shape] [label] inline-flex row (badge.md § Renderers)

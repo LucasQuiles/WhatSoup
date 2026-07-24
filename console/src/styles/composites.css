@@ -82,37 +82,17 @@ body::before {
 .scrollbar-hide { -ms-overflow-style: none; scrollbar-width: none; }
 
 /* Status dot expanding ring animation */
-@keyframes breathe-ring {
-  0% { transform: scale(1); opacity: 0.4; }
-  100% { transform: scale(1.3); opacity: 0; }
-}
+/* Retired at T5 b-11 (13-ceremony-motion §1/§4): breathe-ring halo, legacy
+   breathe, typing-bounce, and their @utilities — the v3.5 law allows exactly
+   ONE ambient loop (motion.css ambient-disc on the live status disc).
+   Typing indicators are static dots now; see .typing-dot below. */
 
-@utility animate-breathe-ring {
-  animation: breathe-ring 3s ease-out infinite;
-}
-
-/* Legacy breathe (kept for line header dot) */
-@keyframes breathe {
-  0%, 100% { opacity: 1; transform: scale(1); }
-  50% { opacity: 0.6; transform: scale(0.95); }
-}
-
-/* Typing indicator bouncing dots */
-@keyframes typing-bounce {
-  0%, 60%, 100% { transform: translateY(0); opacity: 0.4; }
-  30% { transform: translateY(-4px); opacity: 1; }
-}
-
+/* Typing indicator dots (static — the bouncing loop is retired, §4) */
 .typing-dot {
   width: var(--typing-dot);
   height: var(--typing-dot);
   border-radius: 50%;
   background: var(--mode-chat-solid);
-  animation: typing-bounce 1.2s ease-in-out infinite;
-}
-
-@utility animate-breathe {
-  animation: breathe 3s ease-in-out infinite;
 }
 
 /* Message slide-in animation */
@@ -507,16 +487,11 @@ body::before {
   border-color: var(--status-crit-border);
 }
 
-/* Shimmer animation for loading skeletons */
-@keyframes shimmer {
-  0% { background-position: -400px 0; }
-  100% { background-position: 400px 0; }
-}
-
-@utility animate-shimmer {
-  background: linear-gradient(90deg, var(--surface-raised) 0%, var(--btn-neutral-bg) 40%, var(--surface-raised) 80%);
-  background-size: 800px 100%;
-  animation: shimmer 1.5s infinite linear;
+/* Skeleton shimmer loop retired at T5 b-11 (13-§4 bans it outright).
+   Loading placeholders stay VISIBLE but static — the perceived-performance
+   rationale the waiver recorded is preserved without the loop. */
+.skeleton-bar {
+  background: var(--btn-neutral-bg);
   border-radius: var(--radius-sm);
 }
 

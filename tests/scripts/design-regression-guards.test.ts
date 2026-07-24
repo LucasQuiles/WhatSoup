@@ -164,8 +164,9 @@ describe('design-regression.sh guard contracts', () => {
   });
 
   it('allows a fixture repo when CSS infinite animations use sanctioned names', () => {
+    // T5 b-11: the sanctioned set tightened to ambient-disc ONLY (13-§1).
     const result = runDesignRegressionFixture(
-      '.fixture { animation: shimmer 1.5s infinite linear; color: var(--color-token); }\n',
+      '.fixture { animation: ambient-disc 2400ms ease-in-out infinite; color: var(--color-token); }\n',
     );
     const output = `${result.stdout}\n${result.stderr}`;
 
@@ -228,6 +229,7 @@ describe('design-regression.sh guard contracts', () => {
     // doesn't drift this pin (the registry file is the SSOT).
     const registryCount = (readFileSync(resolve(process.cwd(), 'console/eslint-waivers.yaml'), 'utf8').match(/^  - id: WVR-/gm) ?? []).length;
     expect(check15).toContain(`Registered waivers: ${registryCount}`);
+    expect(check15).toContain('Registered waivers: 8');
     expect(check15).toContain('Untagged disable directives: 0');
     expect(check15).toContain('Unknown source waiver ids: 0');
     expect(check15).toContain('Stale registry TS/TSX scopes: 0');

@@ -32,6 +32,10 @@
 # Suppression hygiene (2026-06-14):
 #   WVR-015 UPDATED — useExitPresence must clear stale close dwell state on reopen.
 # Remaining: 11 entries (WVR-001, WVR-002, WVR-005..WVR-009, WVR-011..WVR-012, WVR-015..WVR-016).
+# Remaining: 8 entries (WVR-001, WVR-002, WVR-007..WVR-009, WVR-011..WVR-012, WVR-015).
+# Retired at T5 b-11: WVR-005 (shimmer) + WVR-006 (typing-bounce) — the v3.5
+# motion law (13-ceremony-motion §4) bans both loops outright; their subjects
+# no longer exist (static skeleton bars, static typing dots).
 
 waivers:
   - id: WVR-001
@@ -79,53 +83,6 @@ waivers:
     status: permanent
     expiration_phase: D-series-close
     cleanup_trigger: QRCode library gains CSS margin support (track upstream)
-    user_approval_required: no
-
-  - id: WVR-005
-    rule: soup/no-infinite-animation
-    owner: console-maintainer
-    reason: >
-      The shimmer animation (console/src/styles/composites.css:510) is used
-      for loading skeleton states. Its disposition under the P5 motion strategy
-      has not yet been decided: it may be absorbed into the sanctioned ambient
-      budget or replaced with a CSS transition. Until the P5 motion.md spec
-      lands and disposition is confirmed, the animation holds a waiver.
-    scope:
-      - console/src/styles/composites.css (shimmer keyframe and animate-shimmer utility)
-    expiry: 2026-12-31
-    replacement_plan: >
-      At P5: either (a) add shimmer to the sanctioned ambient token list with
-      a named token per 03-spec/motion.md, or (b) replace with a CSS transition
-      on opacity. Either path retires this waiver.
-    safer_alternative_considered: >
-      Remove immediately — rejected: loading skeletons provide meaningful
-      perceived-performance feedback and blank rectangles are worse UX.
-    status: temporary
-    expiration_phase: C5-motion
-    cleanup_trigger: motion-stage skeleton disposition
-    user_approval_required: no
-
-  - id: WVR-006
-    rule: soup/no-infinite-animation
-    owner: console-maintainer
-    reason: >
-      The typing-bounce animation (console/src/styles/composites.css:108) drives
-      the typing indicator dots in chat composers. Like shimmer, its P5
-      disposition (sanctioned vs. replaced) has not yet been decided.
-    scope:
-      - console/src/styles/composites.css (typing-bounce keyframe and .typing-dot)
-    expiry: 2026-12-31
-    replacement_plan: >
-      At P5: either (a) add typing-bounce to the sanctioned ambient budget with
-      a named token, or (b) replace with a CSS offset-path or transform sequence.
-      Note: the lint-plan calls out typing-bounce explicitly as needing
-      "explicit spec disposition at P5".
-    safer_alternative_considered: >
-      Remove immediately — rejected: typing indicators are a standard chat
-      UI affordance and their absence degrades perceived responsiveness.
-    status: temporary
-    expiration_phase: C5-motion
-    cleanup_trigger: motion-stage typing-indicator disposition
     user_approval_required: no
 
   - id: WVR-007

@@ -31,3 +31,5 @@
 @import "./styles/settings.css";
 /* v3.5 Journey surfaces (T5 b-10) — mockups splash.html + hatch.html SSOT. */
 @import "./styles/journey.css";
+/* v3.5 motion system (T5 b-11) — 13-ceremony-motion §1/§3 formalized. */
+@import "./styles/motion.css";
