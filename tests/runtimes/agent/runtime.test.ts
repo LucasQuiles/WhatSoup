@@ -65,6 +65,10 @@ const { mockSession, mockQueue, capturedSessionManagerOptsRef, capturedOnEventRe
     setDurability: vi.fn((_durability: unknown) => {}),
     bindGenerationOwnership: vi.fn((_resolve: () => unknown) => {}),
     getProviderId: vi.fn((): string => 'claude-cli'),
+    // Slice 3: applyRouteChangeAndRecycle's diff-gate reads the effective
+    // spawned effort on every live session — a real SessionManager always has
+    // it (session.ts), so the mock must too (default null = no static effort).
+    getSpawnedEffort: vi.fn((): string | null => null),
   };
 
   // NOTE: IOutboundQueue cannot be imported inside vi.hoisted() (runs before imports),

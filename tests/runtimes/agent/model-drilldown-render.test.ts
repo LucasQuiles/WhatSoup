@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
-import { renderBrandLevel, renderModelLevel } from '../../../src/runtimes/agent/model-drilldown-render.ts';
+import { renderBrandLevel, renderEffortLevel, renderModelLevel } from '../../../src/runtimes/agent/model-drilldown-render.ts';
+import { nativeReasoningControl } from '../../../src/runtimes/agent/reasoning-control.ts';
 
 describe('model-drilldown-render (Slice 2 pure level renderers)', () => {
   describe('renderBrandLevel', () => {
@@ -58,6 +59,40 @@ describe('model-drilldown-render (Slice 2 pure level renderers)', () => {
     it('retired up-nav: the footer never advertises /model back', () => {
       const { text } = renderModelLevel('Claude', 'claude-cli', ['claude-opus-4-8']);
       expect(text).not.toContain('/model back');
+    });
+  });
+
+  describe('renderEffortLevel (Slice 3)', () => {
+    const control = nativeReasoningControl('claude-cli', 'claude-opus-4-8')!;
+
+    it('renders one row per level then a "Default (no override)" row LAST, entries mirroring the numbering', () => {
+      const { text, entries } = renderEffortLevel('claude-opus-4-8', 'claude-cli', control);
+      expect(text).toContain('*claude-opus-4-8 — reasoning effort:*');
+      expect(text).toContain('1. Highest');
+      expect(text).toContain('2. High');
+      expect(text).toContain('3. Medium');
+      expect(text).toContain('4. Low');
+      expect(text).toContain('5. Default (no override)');
+      expect(text).toContain('_Reply /model N_');
+      expect(entries).toEqual([
+        { kind: 'effort', label: 'Highest', provider: 'claude-cli', model: 'claude-opus-4-8', effort: 'xhigh' },
+        { kind: 'effort', label: 'High', provider: 'claude-cli', model: 'claude-opus-4-8', effort: 'high' },
+        { kind: 'effort', label: 'Medium', provider: 'claude-cli', model: 'claude-opus-4-8', effort: 'medium' },
+        { kind: 'effort', label: 'Low', provider: 'claude-cli', model: 'claude-opus-4-8', effort: 'low' },
+        { kind: 'effort', label: 'Default (no override)', provider: 'claude-cli', model: 'claude-opus-4-8', effort: null },
+      ]);
+    });
+
+    it('marks the current effort level with (current)', () => {
+      const { text } = renderEffortLevel('claude-opus-4-8', 'claude-cli', control, 'high');
+      expect(text).toContain('2. High (current)');
+      expect(text).not.toContain('5. Default (no override) (current)');
+    });
+
+    it('marks "Default (no override)" (current) when there is no effort override', () => {
+      const { text } = renderEffortLevel('claude-opus-4-8', 'claude-cli', control, null);
+      expect(text).toContain('5. Default (no override) (current)');
+      expect(text).not.toContain('1. Highest (current)');
     });
   });
 });
