@@ -2782,6 +2782,17 @@ export class SessionManager {
   }
 
   /**
+   * Reasoning effort this session was actually spawned with (null = none /
+   * provider default). Reads the resolved `providerConfig.effort` the child
+   * was launched from — the same value session.ts threads to `--effort` — so
+   * the pin/recycle diff compares the EFFECTIVE spawned effort, never a raw
+   * pin override that a static config may already satisfy (Slice 3).
+   */
+  getSpawnedEffort(): string | null {
+    return typeof this.providerConfig?.['effort'] === 'string' ? this.providerConfig['effort'] : null;
+  }
+
+  /**
    * Kill child process and mark session.
    * @param suspend - true (default) = suspended (bot shutdown, resumable);
    *                  false = ended (user chose /new, not resumable).

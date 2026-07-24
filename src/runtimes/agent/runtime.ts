@@ -107,7 +107,7 @@ import {
   type PreferenceIntent,
 } from './chat-preference-db.ts';
 import { preferenceKeys } from './preference-keys.ts';
-import { isPinnedModelEligible, resolveRoute, type RouteDecision } from './route-resolution.ts';
+import { applyRouteEffort, isPinnedModelEligible, resolveRoute, type RouteDecision } from './route-resolution.ts';
 import { decideModelPinResolution } from './config-surface.ts';
 import type { fetchAnthropicModelIdsWithStatus } from '../../lib/model-advisor.ts';
 import { deriveChatScope, emitRouteEvent, type ModelRouteEvent } from './route-events.ts';
@@ -2510,6 +2510,7 @@ export class AgentRuntime implements Runtime {
       sendDirect: (chatJid, text) => runtime.sendDirect(chatJid, text),
       resolveRouteForTurn: (chatJid, actorJid) => runtime.resolveRouteForTurn(chatJid, actorJid),
       resolvePerChatMapKey: (chatJid) => runtime.resolvePerChatMapKey(chatJid),
+      routeSessionProviderConfig: (route) => runtime.routeSessionProviderConfig(route),
       isTurnInFlight: (scopeKey) => runtime.isTurnInFlight(scopeKey),
       getActiveQueue: () => runtime.getActiveQueue(),
       deleteOwnedPerChatSession: (mapKey, expected) => runtime.deleteOwnedPerChatSession(mapKey, expected),
@@ -8495,18 +8496,18 @@ export class AgentRuntime implements Runtime {
 
   /**
    * Provider config for a route-decided session: same inheritance rules as
-   * the fallback path (fallbackProviderConfigFor), including the opencode
-   * strip of primary-specific baseUrl/apiKeyService when routing away from
-   * the primary provider.
+   * the fallback path (fallbackProviderConfigFor), incl. the opencode strip of
+   * primary baseUrl/apiKeyService when routing off-primary. Slice 3:
+   * applyRouteEffort folds a claude-cli effort pin over the static effort.
    */
   private routeSessionProviderConfig(route: RouteDecision): Record<string, unknown> | undefined {
     if (route.source !== 'preference' || route.provider === this.agentProvider) {
-      return this.sessionProviderConfig();
+      return applyRouteEffort(this.sessionProviderConfig(), route);
     }
     // Match the fallback path (effectiveProviderConfig): a provider with no
     // config of its own inherits the agent's providerConfig — including the
     // budget cap — instead of spawning with providerConfig=undefined (R2).
-    return fallbackProviderConfigFor(route.provider, this.agentProvider, this.agentProviderConfig) ?? this.agentProviderConfig;
+    return applyRouteEffort(fallbackProviderConfigFor(route.provider, this.agentProvider, this.agentProviderConfig) ?? this.agentProviderConfig, route);
   }
 
   /** Spawn-time route bookkeeping: pin-blocked notice (once per transition) + route events. */

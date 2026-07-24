@@ -589,6 +589,14 @@ describe('NL routing handlers (nlRouting flag)', () => {
     (mockSession as unknown as Record<string, unknown>).getProviderId = vi.fn(
       () => (capturedSessionManagerOptsRef.current as unknown as { provider?: string } | null)?.provider ?? 'claude-cli',
     );
+    // Slice 3: the recycle diff also reads the session's EFFECTIVE spawned
+    // effort. Like getModelRef/getProviderId above, the mock must report the
+    // LATEST construction opts — the real getSpawnedEffort reads
+    // this.providerConfig.effort (session.ts), so mirror providerConfig.effort.
+    (mockSession as unknown as Record<string, unknown>).getSpawnedEffort = vi.fn(() => {
+      const pc = (capturedSessionManagerOptsRef.current as unknown as { providerConfig?: Record<string, unknown> } | null)?.providerConfig;
+      return typeof pc?.['effort'] === 'string' ? pc['effort'] : null;
+    });
   });
 
   afterEach(async () => {
@@ -872,6 +880,73 @@ describe('NL routing handlers (nlRouting flag)', () => {
       const reply = allReplies(sentMessages).join('\n');
       expect(reply).toContain('Already set — extended for another 24h');
       expect(reply).not.toContain('new sessions still use claude-cli (haiku-fast)');
+    });
+
+    // Slice 3 (layer 4 — apply). The effort INPUT path (menu Level-3 / one-shot
+    // `/model N M K`) lands in the next slice; these isolate the apply seam the
+    // input will drive: routeSessionProviderConfig folds a route's effort pin
+    // into the spawn config, and the recycle diff treats an effort-only change
+    // as a genuine change. RED-first: on the pre-Slice-3 code both the config
+    // carries no `effort` and the diff misses it (returns 'noop').
+    describe('Slice 3 — route effort applies to the spawn config + recycle diff', () => {
+      type RSPC = { routeSessionProviderConfig: (r: Record<string, unknown>) => Record<string, unknown> | undefined };
+      type ARCR = { applyRouteChangeAndRecycle: (c: string, s: string, m: string | undefined) => string };
+
+      it('a claude-cli user-pin route carries its effort into providerConfig.effort', () => {
+        const { runtime } = makeRoutingRuntime({ model: 'claude-opus-4-8' });
+        const cfg = (runtime as unknown as RSPC).routeSessionProviderConfig({
+          provider: 'claude-cli', model: 'claude-opus-4-8', source: 'preference', reasonCode: 'user_pin', effort: 'low',
+        });
+        expect(cfg?.effort).toBe('low');
+      });
+
+      it('a route with NO effort override keeps the static providerConfig.effort (no forced harness default)', () => {
+        cfgAny().agentProviderConfig = { effort: 'high' };
+        const { runtime } = makeRoutingRuntime({ model: 'claude-opus-4-8' });
+        const cfg = (runtime as unknown as RSPC).routeSessionProviderConfig({
+          provider: 'claude-cli', model: 'claude-opus-4-8', source: 'default', reasonCode: 'no_preference',
+        });
+        expect(cfg?.effort).toBe('high');
+      });
+
+      it('a non-claude route never gets an effort applied (effort is claude-cli-only)', () => {
+        const { runtime } = makeRoutingRuntime({ model: 'claude-opus-4-8' });
+        const cfg = (runtime as unknown as RSPC).routeSessionProviderConfig({
+          provider: 'opencode-cli', model: 'kimi/kimi-k3', source: 'preference', reasonCode: 'user_pin', effort: 'low',
+        });
+        expect(cfg?.effort).toBeUndefined();
+      });
+
+      it('the recycle diff detects an effort-only change (same provider+model, different effective effort)', () => {
+        cfgAny().agentProviderConfig = { effort: 'high' };
+        const { runtime } = makeRoutingRuntime({ model: 'claude-opus-4-8' });
+        // A live session spawned with effort 'high'.
+        capturedSessionManagerOptsRef.current = {
+          model: 'claude-opus-4-8', provider: 'claude-cli', providerConfig: { effort: 'high' },
+        } as unknown as typeof capturedSessionManagerOptsRef.current;
+        (runtime as unknown as { session: typeof mockSession }).session = mockSession;
+        // The next route pins the SAME model but a DIFFERENT effort.
+        (runtime as unknown as { resolveRouteForTurn: (c: string, s?: string) => unknown }).resolveRouteForTurn = () => ({
+          provider: 'claude-cli', model: 'claude-opus-4-8', source: 'preference', reasonCode: 'user_pin', effort: 'low', pinnedProvider: null,
+        });
+        const outcome = (runtime as unknown as ARCR).applyRouteChangeAndRecycle(CHAT, SENDER_A, undefined);
+        expect(outcome).not.toBe('noop');
+      });
+
+      it('the recycle diff is a no-op when the effective effort is unchanged (no over-recycle, F3)', () => {
+        cfgAny().agentProviderConfig = { effort: 'high' };
+        const { runtime } = makeRoutingRuntime({ model: 'claude-opus-4-8' });
+        capturedSessionManagerOptsRef.current = {
+          model: 'claude-opus-4-8', provider: 'claude-cli', providerConfig: { effort: 'high' },
+        } as unknown as typeof capturedSessionManagerOptsRef.current;
+        (runtime as unknown as { session: typeof mockSession }).session = mockSession;
+        // Same model AND the same EFFECTIVE effort (static 'high', no pin override).
+        (runtime as unknown as { resolveRouteForTurn: (c: string, s?: string) => unknown }).resolveRouteForTurn = () => ({
+          provider: 'claude-cli', model: 'claude-opus-4-8', source: 'default', reasonCode: 'no_preference', pinnedProvider: null,
+        });
+        const outcome = (runtime as unknown as ARCR).applyRouteChangeAndRecycle(CHAT, SENDER_A, undefined);
+        expect(outcome).toBe('noop');
+      });
     });
 
     it('keeps the live session marked active when fallback only controls the next session', async () => {

@@ -95,6 +95,11 @@ export interface ModelPinPort extends ModelCatalogueRenderPort {
   activeChatJid: string | null;
   operationTracker: OperationTracker | null;
   resolveRouteForTurn(chatJid: string, actorJid?: string): RouteDecision & { pinnedProvider: string | null };
+  /** The effective provider config a route would spawn with — INCLUDING the
+   *  Slice-3 effort override (applyRouteEffort is applied inside). The recycle
+   *  diff reads `.effort` from it to compare against the live session's
+   *  {@link SessionManager.getSpawnedEffort}. */
+  routeSessionProviderConfig(route: RouteDecision): Record<string, unknown> | undefined;
   resolvePerChatMapKey(chatJid: string): string;
   isTurnInFlight(scopeKey: string): boolean;
   getActiveQueue(): IOutboundQueue | null;
@@ -382,7 +387,20 @@ export function applyRouteChangeAndRecycle(
   // resolveRouteForTurn; nothing to recycle.
   if (!session) return 'noop';
   const next = port.resolveRouteForTurn(chatJid, senderJid);
-  if (session.getProviderId() === next.provider && session.getModelRef() === next.model) {
+  // Slice 3: effort is part of the recycle diff. Compare the live session's
+  // EFFECTIVE spawned effort (getSpawnedEffort) against the effort the NEXT
+  // spawn would carry — read from routeSessionProviderConfig, which already
+  // folds the pin override over the static config via applyRouteEffort. This
+  // is symmetric (effective vs effective): a same-model re-pin at a NEW effort
+  // recycles so the new effort takes (E10); an unchanged effective effort
+  // (e.g. a pin whose override equals the static config) stays a no-op (F3, no
+  // over-recycle).
+  const nextEffort = (port.routeSessionProviderConfig(next)?.['effort'] as string | undefined) ?? null;
+  if (
+    session.getProviderId() === next.provider &&
+    session.getModelRef() === next.model &&
+    session.getSpawnedEffort() === nextEffort
+  ) {
     return 'noop';
   }
   if (port.isTurnInFlight(scopeKey)) {
