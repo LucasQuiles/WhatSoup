@@ -45,7 +45,8 @@
       "mustContain": [
         "decideDisconnectAction",
         "QR code received",
-        "Logged out"
+        "Logged out",
+        "scheduleSettledAuthBondSnapshot"
       ],
       "importGraph": true
     },
