@@ -656,6 +656,7 @@ import {
   alertEvidenceValue,
 } from './tool-update.ts';
 import { maybeEmitToolFailureAlert, type ToolFailureAlertDeps } from './tool-failure-alert.ts';
+import { runNewCommand } from './runtime-new-command.ts';
 
 // Provider-failure string matchers are the single source of truth in
 // `./failure-taxonomy.ts`. They are imported above for internal use and re-exported
@@ -3965,127 +3966,59 @@ export class AgentRuntime implements Runtime {
       }
       try {
         switch (classified.command) {
-          case 'new': {
-            // /new is the user's natural interrupt. It used to 409-bounce while a
-            // turn was in flight ("A response is still in progress") — which made a
-            // runaway long job un-cancelable: the interrupt was blocked by the very
-            // turn it was meant to stop (ana-bot LCP TRACKER complaint, 2026-07-24).
-            // A mid-turn /new now performs the PROVEN kill-session teardown first
-            // (turn abort + durable turn terminalization + session shutdown) so the
-            // admitted turn still reaches a terminal transaction — the invariant the
-            // old assert protected — and then proceeds as a clean reset. Idle /new
-            // is unchanged.
-            const scopeKeyForNew = perChatMapKey ?? GLOBAL_TOOL_SCOPE_KEY;
-            const interruptingTurn = this.isTurnInFlight(scopeKeyForNew);
-            let interruptFinalizationError: unknown = null;
-            if (interruptingTurn) {
-              log.warn({
-                chatJid,
-                sessionScope: this.sessionScope,
-                scopeKey: scopeKeyForNew,
-              }, '/new received mid-turn — interrupting in-flight task via kill-session-equivalent teardown');
-              if (this.sessionScope === 'per_chat') {
-                const interruptedSession = this.chatSessions.get(perChatMapKey!);
-                this.chatQueues.get(perChatMapKey!)?.abortTurn();
-                try {
-                  await this.runtimeTurnCoordinator.terminalizePerChatTurnQueueForKill(perChatMapKey!);
-                } catch (err) {
-                  interruptFinalizationError = err;
-                  log.error({ err, mapKey: perChatMapKey }, '/new interrupt: runtime turn queue teardown failed');
-                }
-                if (interruptedSession) {
-                  this.deleteOwnedPerChatSession(perChatMapKey!, interruptedSession);
-                  this.chatQueues.delete(perChatMapKey!);
-                  this.cleanupPerChatState(perChatMapKey!);
-                  await interruptedSession.shutdown(false);
-                }
-              } else {
-                this.getActiveQueue()?.abortTurn();
-                this.operationTracker?.shutdown();
-                this.operationTracker = null;
-                this.cleanupGlobalAutoCompactState();
-                if (this.session) {
-                  await this.session.shutdown(false);
-                }
-                this.session = null;
-                this.queue = null;
-                this.activeChatJid = null;
-                // The durable row terminalizes through the abort/rejection machinery;
-                // the in-memory markers must not outlive the teardown or the runtime
-                // reads "turn in progress" forever — the exact un-cancelable wedge
-                // this interrupt path exists to fix.
-                this.currentInboundSeq = undefined;
-                this.currentTurnChatJid = null;
-              }
-            }
-            // Capture session ref before branches may delete it from the map.
-            // In per_chat mode, this.session is NOT reliable (shared field race),
-            // so we look up the correct session from the per-chat maps. After an
-            // interrupt the session is deliberately gone — a fresh one spawns on
-            // the next message, exactly like the post-kill-session state.
-            const sessionForNew = interruptingTurn
-              ? undefined
-              : this.sessionScope === 'per_chat'
-                ? this.chatSessions.get(perChatMapKey!)
-                : this.session;
-            log.info({
+          case 'new':
+            // Extracted leaf collaborator: runtime-new-command.ts owns the control flow.
+            await runNewCommand<SessionManager>({
               chatJid,
               sessionScope: this.sessionScope,
               shared: this.shared,
               sandboxPerChat: this.sandboxPerChat,
-              interruptedTurn: interruptingTurn,
-            }, 'resetting session and queue for /new');
-            if (this.sessionScope === 'per_chat') {
-              if (!sessionForNew && !interruptingTurn) {
-                throw new Error(`No owned per-chat session found for /new at "${perChatMapKey!}"`);
-              }
-              if (sessionForNew) {
-                await this.resetOwnedPerChatSession(perChatMapKey!, chatJid, sessionForNew);
-              }
-            } else {
-              // Abort the old queue — clears timers and typing heartbeat before discarding.
-              this.getQueueForChat(chatJid)?.abortTurn();
-              this.cleanupGlobalAutoCompactState();
-              // Create a fresh queue before spawning so stale output from the old session
-              // can never leak into the new session's delivery channel.
-              if (this.shared) {
-                const queue = this.createOutboundQueue(chatJid, '/new shared replacement');
-                this.outboundQueues.set(chatJid, queue);
-              } else {
-                this.queue = this.createOutboundQueue(chatJid, '/new single replacement');
-              }
-              if (sessionForNew) {
-                await this.waitForRejectedTerminalTeardown(sessionForNew);
-                await sessionForNew.handleNew();
-                this.rejectedTerminalTeardowns.delete(sessionForNew);
-              }
-            }
-            // QR-108: /new is a clean reset, so drop the one-message-handoff latches
-            // for this conversation too — otherwise a standby notice or handoff
-            // artifact stashed before /new leaks into the NEXT reply/prelude (both
-            // tables are keyed by the stable conversation_key, which /new does not
-            // change). Both fns are idempotent no-ops when nothing is pending, and
-            // their own JSDoc already documents "cleared on /new".
-            {
-              const resetKey = toConversationKey(chatJid);
-              clearStandbyNotice(this.db, resetKey);
-              deleteHandoffArtifact(this.db, resetKey);
-            }
-            // Reset turn flag — stale value from the old session must not suppress the
-            // _(no response)_ fallback if the first new-session turn has no visible text.
-            this.turnHadVisibleOutput = false;
-            this.sendDirect(
-              chatJid,
-              interruptingTurn
-                ? `*Interrupted the running task — starting new session* ✓${
-                  interruptFinalizationError === null
-                    ? ''
-                    : '\n_⚠️ some in-flight turns could not be finalized — see logs_'
-                }`
-                : '*Starting new session* ✓',
-            );
+              scopeKey: perChatMapKey ?? GLOBAL_TOOL_SCOPE_KEY,
+              perChatMapKey: perChatMapKey ?? null,
+              isTurnInFlight: () => this.isTurnInFlight(perChatMapKey ?? GLOBAL_TOOL_SCOPE_KEY),
+              getPerChatSession: () => this.chatSessions.get(perChatMapKey!),
+              abortPerChatQueue: () => this.chatQueues.get(perChatMapKey!)?.abortTurn(),
+              terminalizePerChatTurnQueueForKill: () =>
+                this.runtimeTurnCoordinator.terminalizePerChatTurnQueueForKill(perChatMapKey!),
+              disposePerChatSession: async (session) => {
+                this.deleteOwnedPerChatSession(perChatMapKey!, session);
+                this.chatQueues.delete(perChatMapKey!);
+                this.cleanupPerChatState(perChatMapKey!);
+                await session.shutdown(false);
+              },
+              resetOwnedPerChatSession: (session) => this.resetOwnedPerChatSession(perChatMapKey!, chatJid, session),
+              getSingleSession: () => this.session,
+              abortActiveQueue: () => this.getActiveQueue()?.abortTurn(),
+              shutdownOperationTracker: () => { this.operationTracker?.shutdown(); this.operationTracker = null; },
+              cleanupGlobalAutoCompactState: () => this.cleanupGlobalAutoCompactState(),
+              shutdownSingleSession: (session) => session.shutdown(false),
+              clearSingleScopeRefs: () => {
+                this.session = null; this.queue = null; this.activeChatJid = null;
+                this.currentInboundSeq = undefined; this.currentTurnChatJid = null;
+              },
+              abortChatQueue: () => this.getQueueForChat(chatJid)?.abortTurn(),
+              replaceOutboundQueue: () => {
+                if (this.shared) {
+                  const queue = this.createOutboundQueue(chatJid, '/new shared replacement');
+                  this.outboundQueues.set(chatJid, queue);
+                } else {
+                  this.queue = this.createOutboundQueue(chatJid, '/new single replacement');
+                }
+              },
+              resetSingleSession: async (session) => {
+                await this.waitForRejectedTerminalTeardown(session);
+                await session.handleNew();
+                this.rejectedTerminalTeardowns.delete(session);
+              },
+              clearHandoffLatches: () => {
+                const resetKey = toConversationKey(chatJid);
+                clearStandbyNotice(this.db, resetKey);
+                deleteHandoffArtifact(this.db, resetKey);
+              },
+              clearTurnHadVisibleOutput: () => { this.turnHadVisibleOutput = false; },
+              sendDirect: (text) => this.sendDirect(chatJid, text),
+            });
             break;
-          }
 
           case 'status': {
             // Look up session from per-chat maps (not the shared field) to avoid race.
