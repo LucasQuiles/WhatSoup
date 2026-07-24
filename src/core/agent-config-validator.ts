@@ -35,7 +35,7 @@ import {
 } from './fallback-chain.ts';
 import { DEFAULT_TRANSPORT_ID, isTransportId, TRANSPORT_IDS } from '../transport/registry.ts';
 import { ACCOUNT_RE, APPLEID_EMAIL_RE } from './transport-refs.ts';
-import { E164_RE } from '../transport/twilio/types.ts';
+import { E164_RE } from './transport-refs.ts';
 import RE2 from 're2';
 import {
   isWhatSoupHeadlessExecutionProfile,

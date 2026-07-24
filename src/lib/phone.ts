@@ -38,9 +38,23 @@ export function normalizePhoneE164(input: string | number | null | undefined): s
   return digits;
 }
 
+/**
+ * Canonical E.164 phone-number validation regex — the single source of truth.
+ *
+ * Every transport adapter (Twilio, Signal, iMessage) and the cross-transport
+ * config validator must import this, not define their own copy. Re-exported
+ * through `src/core/transport-refs.ts` so transport types can carry it
+ * alongside APPLEID_EMAIL_RE and SIGNAL_UUID_RE.
+ *
+ * Lives in `src/lib/` (not `src/core/`) because the import-boundary ratchet
+ * allows core → lib but not lib → core; defining it here means every ring
+ * can import it without an upward edge.
+ */
+export const E164_RE = /^\+[1-9]\d{6,14}$/;
+
 /** True only for a canonical, plus-prefixed E.164 provider wire identity. */
 export function isE164Wire(input: string): boolean {
-  return /^\+[1-9]\d{6,14}$/.test(input);
+  return E164_RE.test(input);
 }
 
 /** Normalize phone-formatted input to provider-wire E.164, rejecting embedded junk. */

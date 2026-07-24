@@ -2,6 +2,13 @@
 
 import { isE164Wire } from '../lib/phone.ts';
 
+/**
+ * E.164 phone-number validation regex — the single source of truth.
+ * Re-exported from `src/lib/phone.ts` so transport types can import it
+ * alongside the other shared transport-identifier patterns here.
+ */
+export { E164_RE } from '../lib/phone.ts';
+
 /** Transport library / protocol family. */
 export type ChannelKind =
   | 'whatsapp'

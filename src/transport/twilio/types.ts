@@ -1,7 +1,7 @@
 // src/transport/twilio/types.ts
 
-/** E.164 phone shape — shared by config validation and runtime send guards. */
-export const E164_RE = /^\+[1-9]\d{6,14}$/;
+/** E.164 phone shape — re-exported from the canonical SSOT (src/lib/phone.ts). */
+export { E164_RE } from '../../core/transport-refs.ts';
 
 /** Inbound delivery mode. Stage 1 supports 'poll'; stage 2 adds 'webhook'. */
 export type TwilioInboundMode = 'poll' | 'webhook';
