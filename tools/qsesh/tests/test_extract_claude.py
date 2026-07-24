@@ -656,3 +656,11 @@ def test_model_fallback_is_bounded_meta() -> None:
         "meta_type": "model_fallback",
         "to_model": "fixture-new",
     }
+
+
+def test_untimed_modern_session_is_quarantined_with_stable_schema_error() -> None:
+    rows = _modern_rows()
+    del rows[1]["timestamp"]
+    del rows[2]["timestamp"]
+
+    assert _expect_schema_error(_snapshot_rows(rows)).phase == "claude-session-meta"

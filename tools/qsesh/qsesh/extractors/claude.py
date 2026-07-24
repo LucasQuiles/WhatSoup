@@ -212,10 +212,15 @@ class ClaudeExtractor:
         )
         project = _string(project_value, phase="claude-session-meta")
         timestamp = next(
-            normalize_timestamp(row.get("timestamp"))
-            for row in rows
-            if row.get("timestamp") is not None
+            (
+                normalize_timestamp(row.get("timestamp"))
+                for row in rows
+                if row.get("timestamp") is not None
+            ),
+            None,
         )
+        if timestamp is None:
+            raise _schema("claude-session-meta")
         data: dict[str, JsonValue] = {"project": project}
 
         for source_key, target_key in (
