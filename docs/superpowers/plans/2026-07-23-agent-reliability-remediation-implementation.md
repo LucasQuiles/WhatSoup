@@ -26,7 +26,7 @@ SQLite, macOS private credential stores, ARC, and Tailscale admin controls.
 As of 2026-07-24, the contract lane and three code lanes are committed, pushed,
 and published as four open pull requests against `main`. Each branch was
 reconciled through an ordinary merge with `main` at
-`ad506199d94e4cc89b9075ad5e9cd12e86dcf4ea`; this preserved the published
+`e4b8ad544897a632c5f7f38ea0e220e1f6bb46af`; this preserved the published
 lineage without force-pushing active reviews. Branch-local push gates pass at
 every recorded head. GitHub checks are head-bound and must be read live before
 merge; this checkpoint records delivery identity rather than making a timeless
@@ -36,9 +36,9 @@ every host mutation remain pending.
 | Deliverable | Branch | Pull request | Recorded code head |
 | --- | --- | --- | --- |
 | Contract, design, and implementation ledger | `fix/agent-queue-health-20260723` | #2142 | This document's commit |
-| Provider actor isolation and canary proof | `fix/agent-provider-actor-isolation-20260723` | #2128 | `31c85959c` |
-| Queue-health truth | `fix/agent-queue-health-truth-20260723` | #2129 | `dd0352889` |
-| Suspend and platform hardening | `fix/agent-suspend-platform-hardening-20260723` | #2130 | `ec135a6f3` |
+| Provider actor isolation and canary proof | `fix/agent-provider-actor-isolation-20260723` | #2128 | `04101dba4` |
+| Queue-health truth | `fix/agent-queue-health-truth-20260723` | #2129 | `8757d1eda` |
+| Suspend and platform hardening | `fix/agent-suspend-platform-hardening-20260723` | #2130 | `89c2df350` |
 
 The first upstream reconciliation found one substantive overlap: `main` extracted
 the legacy per-chat transport helpers from `AgentRuntime` while the actor lane
@@ -72,6 +72,12 @@ rebuilt native dependency matched the shell's Node ABI rather than the
 repository-pinned Node 24 ABI. Rebuilding it through the pinned npm wrapper,
 rerunning the two recovery suites, and rerunning the complete push gate passed;
 the failed attempt is not counted as verification.
+
+A third reconciliation incorporated the upstream guard mute-duration and alert
+routing fix. Dry merge-tree checks and ordinary merges were conflict-free in
+all four lanes. The change does not touch the agent runtime, health contracts,
+socket lifecycle, platform probes, or host-remediation tooling; focused lane
+tests and the complete push gates remain the acceptance evidence.
 
 The unpushed `fix/agent-provider-canary-proof-20260723` precursor was compared
 with `git range-diff` and `git cherry`. Its actor and canary work is incorporated

@@ -1,7 +1,7 @@
 {
-  "generated_at": "2026-07-24T06:25:19Z",
+  "generated_at": "2026-07-24T06:30:18Z",
   "repo": "WhatSoup",
-  "git_head": "eb48218897814b134394c5d88374918596097876",
+  "git_head": "b9132ce397f4f50068aa29a04c53c3f0a75312f1",
   "git_head_note": "git_head is captured at scan time, so it reflects the branch HEAD at the moment `build-work-index` ran — NOT the commit that carries this index. Expect divergence in two cases: (1) intra-branch, when the regenerated index is committed after further content changes are staged; (2) post-squash-merge, when the landed main SHA differs from the pre-merge branch SHA. The row data and inconsistency detection remain accurate regardless of git_head freshness.",
   "total": 78,
   "schema_version": 5,
@@ -568,7 +568,7 @@
       "canonical_parent": "docs/superpowers/plans",
       "supersedes_hint": null,
       "last_modified": "2026-07-24",
-      "size_bytes": 13935
+      "size_bytes": 14314
     },
     {
       "path": "docs/superpowers/reviews/2026-04-07-anti-echo-review-handoff.md",
