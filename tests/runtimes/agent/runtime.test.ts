@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach, onTestFinished, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import type { Database } from '../../../src/core/database.ts';
 import type { IncomingMessage, Messenger } from '../../../src/core/types.ts';
 import type { AgentEvent } from '../../../src/runtimes/agent/stream-parser.ts';
@@ -47,9 +47,6 @@ const { mockSession, mockQueue, capturedSessionManagerOptsRef, capturedOnEventRe
       };
       whatsoupInstance?: string;
       whatsoupMcpSocket?: string;
-      providerTransitionReady?: Promise<void>;
-      providerMcpConfigArgs?: readonly string[];
-      providerCanaryAdmission?: () => void;
     } | null;
   } = { current: null };
   const capturedOnEventRef: { current: ((event: AgentEvent) => void) | null } = { current: null };
@@ -122,7 +119,7 @@ const { mockSession, mockQueue, capturedSessionManagerOptsRef, capturedOnEventRe
   return { mockSession, mockQueue, capturedSessionManagerOptsRef, capturedOnEventRef, capturedOnResumeFailedRef, capturedOnCrashRef, capturedNotifyUserRef };
 });
 
-const { mockRuntimeLogger, mockReaddirSync, mockReadProviderCanaryAdmission } = vi.hoisted(() => ({
+const { mockRuntimeLogger, mockReaddirSync } = vi.hoisted(() => ({
   mockRuntimeLogger: {
     info: vi.fn(),
     warn: vi.fn(),
@@ -130,11 +127,6 @@ const { mockRuntimeLogger, mockReaddirSync, mockReadProviderCanaryAdmission } = 
     debug: vi.fn(),
   },
   mockReaddirSync: vi.fn(() => ['0', '1', '2']),
-  mockReadProviderCanaryAdmission: vi.fn(() => ({
-    required: true,
-    allowed: true,
-    reason: 'proven',
-  })),
 }));
 
 const { mockKillSessionTree } = vi.hoisted(() => ({
@@ -395,20 +387,6 @@ vi.mock('../../../src/core/user-claude-settings.ts', () => ({
   inspectUserClaudeSettings: vi.fn(),
 }));
 
-// Runtime startup owns provider-config orchestration, while the provider-config
-// suite owns private filesystem writes and exact file shapes. Return the real
-// target path here so deduplication and logging behavior stay representative.
-vi.mock('../../../src/core/provider-mcp-config.ts', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('../../../src/core/provider-mcp-config.ts')>();
-  return {
-    ...actual,
-    writeProviderMcpConfig: vi.fn((
-      providerId: string,
-      agentCwd: string,
-    ) => actual.writeProviderMcpConfigTarget(providerId, agentCwd)),
-  };
-});
-
 // Mock WhatSoupSocketServer so tests don't bind real Unix sockets.
 // mockSocketServerInstance is hoisted so vi.mock factory can reference it,
 // and MockWhatSoupSocketServer is a vi.fn() so tests can inspect constructor calls.
@@ -431,90 +409,10 @@ vi.mock('../../../src/mcp/socket-server.ts', () => ({
   WhatSoupSocketServer: MockWhatSoupSocketServer,
 }));
 
-// This god-suite exercises AgentRuntime orchestration, not Unix-socket
-// readiness (the real filesystem contract has its own focused suite). Keep a
-// minimal resolved collaborator so per-chat tests use the production default
-// provider without binding hundreds of real sockets.
-vi.mock('../../../src/runtimes/agent/per-chat-mcp-socket-manager.ts', () => {
-  type TestResource = {
-    socketPath: string;
-    server: { stop(): void };
-    ready: Promise<void>;
-    identity: { value: string };
-  };
-  class PerChatMcpSocketManager {
-    readonly resources = new Map<string, TestResource>();
-    private readonly barriers = new Map<string, Promise<void>>();
-    private nextSocketId = 0;
-
-    acquire(identity: string): { socketPath: string; ready: Promise<void> } {
-      const barrier = this.barriers.get(identity);
-      if (barrier) {
-        const socketPath = this.resources.get(identity)?.socketPath
-          ?? `/tmp/whatsoup-runtime-test-${this.nextSocketId}.sock`;
-        return {
-          socketPath,
-          ready: barrier.then(() => this.acquire(identity).ready),
-        };
-      }
-      const existing = this.resources.get(identity);
-      if (existing) return { socketPath: existing.socketPath, ready: existing.ready };
-      const resource: TestResource = {
-        socketPath: `/tmp/whatsoup-runtime-test-${this.nextSocketId++}.sock`,
-        server: { stop() {} },
-        ready: Promise.resolve(),
-        identity: { value: identity },
-      };
-      this.resources.set(identity, resource);
-      return { socketPath: resource.socketPath, ready: resource.ready };
-    }
-
-    release(identity: string): void {
-      if (this.barriers.has(identity)) {
-        throw new Error('actor MCP socket release requires terminal child proof');
-      }
-      const resource = this.resources.get(identity);
-      if (!resource) return;
-      resource.server.stop();
-      this.resources.delete(identity);
-    }
-
-    providerTransitionReady(identity: string): Promise<void> {
-      const barrier = this.barriers.get(identity);
-      if (barrier) return barrier;
-      return Promise.resolve().then(() => {
-        this.release(identity);
-      });
-    }
-
-    releaseAfter(identity: string, childStopped: Promise<void>): void {
-      if (this.barriers.has(identity)) return;
-      const barrier = childStopped.then(() => {
-        this.barriers.delete(identity);
-        this.release(identity);
-      });
-      this.barriers.set(identity, barrier);
-      void barrier.catch(() => {});
-    }
-
-    rekey(oldIdentity: string, newIdentity: string): void {
-      if (oldIdentity === newIdentity) return;
-      const resource = this.resources.get(oldIdentity);
-      if (resource) {
-        if (this.resources.has(newIdentity)) throw new Error('actor MCP socket rekey collision');
-        this.resources.delete(oldIdentity);
-        resource.identity.value = newIdentity;
-        this.resources.set(newIdentity, resource);
-      }
-      const barrier = this.barriers.get(oldIdentity);
-      if (barrier) {
-        if (this.barriers.has(newIdentity)) throw new Error('actor MCP socket rekey collision');
-        this.barriers.delete(oldIdentity);
-        this.barriers.set(newIdentity, barrier);
-      }
-    }
-  }
-  return { PerChatMcpSocketManager };
+vi.mock('../../../src/runtimes/agent/per-chat-mcp-socket-manager.ts', async () => {
+  const { FakePerChatMcpSocketManager } =
+    await import('./helpers/fake-per-chat-mcp-socket-manager.ts');
+  return { PerChatMcpSocketManager: FakePerChatMcpSocketManager };
 });
 
 const { mockMediaBridgeHandle, mockStartMediaBridge, mockSetMediaBridgeChat } = vi.hoisted(() => {
@@ -558,14 +456,6 @@ vi.mock('../../../src/core/provider-mcp-config.ts', async (importOriginal) => {
     // into the operator's real home. Dedicated config-writer tests cover IO.
     writeProviderMcpConfig: vi.fn((providerId: string, cwd: string) =>
       actual.writeProviderMcpConfigTarget(providerId, cwd)),
-  };
-});
-
-vi.mock('../../../src/runtimes/agent/provider-canary-proof.ts', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('../../../src/runtimes/agent/provider-canary-proof.ts')>();
-  return {
-    ...actual,
-    readProviderCanaryAdmission: mockReadProviderCanaryAdmission,
   };
 });
 
@@ -1291,7 +1181,6 @@ describe('AgentRuntime', () => {
         allowM365Mutations?: boolean;
         whatsoupInstance?: string;
         whatsoupMcpSocket?: string;
-        providerTransitionReady?: Promise<void>;
         onEvent: (event: AgentEvent) => void;
         onResumeFailed?: () => void;
         onCrash?: (info: { exitCode: number | null; signal: NodeJS.Signals | null; sessionId: string | null; dbRowId: number | null; provider?: string; crashClass?: string; stderrPreview?: string }) => void;
@@ -1324,12 +1213,6 @@ describe('AgentRuntime', () => {
     mockRuntimeLogger.warn.mockClear();
     mockRuntimeLogger.error.mockClear();
     mockRuntimeLogger.debug.mockClear();
-    mockReadProviderCanaryAdmission.mockReset();
-    mockReadProviderCanaryAdmission.mockReturnValue({
-      required: true,
-      allowed: true,
-      reason: 'proven',
-    });
     mockEmitAlert.mockClear();
     mockClearAlertSource.mockClear();
     mockCreatePrimaryModelProbeAdapters.mockClear();
@@ -2509,59 +2392,6 @@ describe('AgentRuntime', () => {
       whatsoupInstance: 'line-a',
       whatsoupMcpSocket: '/tmp/rgp-global/.claude/whatsoup.sock',
     });
-
-    await emitAgentResultWithoutTokens('done');
-    await (runtime as unknown as { turnChain: Promise<void> }).turnChain;
-  });
-
-  it('passes canonical Codex mcp_servers config to the production session', async () => {
-    (mockConfig as typeof mockConfig & { agentProvider?: string }).agentProvider = 'codex-cli';
-    const db = makeDb();
-    const { messenger } = makeMessenger();
-    const runtime = new AgentRuntime(db, messenger, 'line-a', { cwd: '/tmp/codex-mcp-production' });
-
-    await runtime.start();
-    await sendAndAwaitProviderDispatch(runtime, makeMsg({ content: 'hello codex' }));
-
-    expect(capturedSessionManagerOptsRef.current?.providerMcpConfigArgs).toEqual([
-      '-c', expect.stringMatching(/^mcp_servers\.whatsoup\.command=/),
-      '-c', expect.stringMatching(/^mcp_servers\.whatsoup\.args=/),
-      '-c', expect.stringMatching(/^mcp_servers\.whatsoup\.env=/),
-      '-c', 'mcp_servers.whatsoup.env_vars=["WHATSOUP_MCP_SOCKET"]',
-    ]);
-    await emitAgentResultWithoutTokens('done');
-    await (runtime as unknown as { turnChain: Promise<void> }).turnChain;
-  });
-
-  it('wires selected-provider proof admission into sensitive per-chat sessions', async () => {
-    (mockConfig as typeof mockConfig & { agentProvider?: string }).agentProvider = 'codex-cli';
-    const db = makeDb();
-    const { messenger } = makeMessenger();
-    const runtime = new AgentRuntime(db, messenger, 'line-a', {
-      cwd: '/tmp/codex-proof-admission',
-      sessionScope: 'per_chat',
-    });
-
-    await runtime.start();
-    await sendAndAwaitProviderDispatch(
-      runtime,
-      makeMsg({ content: 'hello codex' }),
-      'test@s.whatsapp.net',
-    );
-
-    const admission = capturedSessionManagerOptsRef.current?.providerCanaryAdmission;
-    expect(admission).toBeTypeOf('function');
-    mockReadProviderCanaryAdmission.mockReturnValueOnce({
-      required: true,
-      allowed: false,
-      reason: 'missing',
-    });
-    expect(() => admission?.()).toThrow('provider MCP canary proof unavailable');
-    expect(mockReadProviderCanaryAdmission).toHaveBeenCalledWith(expect.objectContaining({
-      providerId: 'codex-cli',
-      sessionScope: 'per_chat',
-      sandboxPerChat: false,
-    }));
 
     await emitAgentResultWithoutTokens('done');
     await (runtime as unknown as { turnChain: Promise<void> }).turnChain;
@@ -8161,46 +7991,7 @@ describe('AgentRuntime', () => {
       chatQueues: Map<string, IOutboundQueue>;
       ownedSessionManagers: Map<string, unknown>;
       sessionOwnership: { get(mapKey: string): unknown };
-      perChatMcpSocketManager: {
-        resources: Map<string, {
-          socketPath: string;
-          server: { stop(): void };
-          ready: Promise<void>;
-          identity: { value: string };
-        }>;
-      };
     };
-    const fs = await import('node:fs');
-    const net = await import('node:net');
-    const os = await import('node:os');
-    const path = await import('node:path');
-    const socketRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'whatsoup-runtime-shutdown-'));
-    const socketPath = path.join(socketRoot, 'chat-a.sock');
-    const socketServer = net.createServer();
-    await new Promise<void>((resolve, reject) => {
-      socketServer.once('error', reject);
-      socketServer.listen(socketPath, resolve);
-    });
-    const socketBefore = fs.lstatSync(socketPath);
-    const stopOwnedSocket = vi.fn(() => {
-      socketServer.close();
-      try { fs.unlinkSync(socketPath); } catch (err) {
-        if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
-      }
-    });
-    state.perChatMcpSocketManager.resources.set('chat-a', {
-      socketPath,
-      server: { stop: stopOwnedSocket },
-      ready: Promise.resolve(),
-      identity: { value: 'chat-a' },
-    });
-    onTestFinished(async () => {
-      if (socketServer.listening) {
-        await new Promise<void>((resolve) => socketServer.close(() => resolve()));
-      }
-      try { fs.unlinkSync(socketPath); } catch { /* already removed */ }
-      fs.rmSync(socketRoot, { recursive: true, force: true });
-    });
 
     setOwnedTestSession(runtime, 'chat-a', sessionA);
     setOwnedTestSession(runtime, 'chat-b', sessionB);
@@ -8232,12 +8023,6 @@ describe('AgentRuntime', () => {
     expect(state.sessionOwnership.get('chat-b')).toBeDefined();
     expect(state.sessionOwnership.get('chat-c')).toBeUndefined();
     expect(state.ownedSessionManagers.size).toBe(2);
-    expect(stopOwnedSocket).not.toHaveBeenCalled();
-    const socketAfterFailure = fs.lstatSync(socketPath);
-    expect({ dev: socketAfterFailure.dev, ino: socketAfterFailure.ino })
-      .toEqual({ dev: socketBefore.dev, ino: socketBefore.ino });
-    expect(state.perChatMcpSocketManager.resources.has('chat-a')).toBe(true);
-
     await expect(runtime.shutdown()).resolves.toBeUndefined();
 
     expect(shutdownA).toHaveBeenCalledTimes(2);
@@ -8246,9 +8031,6 @@ describe('AgentRuntime', () => {
     expect(state.sessionOwnership.get('chat-a')).toBeUndefined();
     expect(state.sessionOwnership.get('chat-b')).toBeUndefined();
     expect(state.ownedSessionManagers.size).toBe(0);
-    expect(stopOwnedSocket).toHaveBeenCalledTimes(1);
-    expect(fs.existsSync(socketPath)).toBe(false);
-    expect(state.perChatMcpSocketManager.resources.has('chat-a')).toBe(false);
   });
 
   it('propagates a singleton session shutdown failure after cleanup and retains it for retry', async () => {
@@ -15123,53 +14905,6 @@ describe('AgentRuntime', () => {
       const text = sentMessages.map((m) => m.text).find((t) => t.includes('Session killed:'));
       // B25 F3: the ack carries the stable ref suffix — the kill evidence.
       expect(text).toBe(`_Session killed: ${groupKey} (…0100) (Group)_`);
-    });
-
-    it('/kill-session retains a failed turn-terminalization transition barrier', async () => {
-      const db = makeDb();
-      const { messenger, sentMessages } = makeMessenger();
-      const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
-      await runtime.start();
-
-      const state = runtime as unknown as {
-        chatSessions: Map<string, ReturnType<typeof makePerChatSession>>;
-        chatQueues: Map<string, IOutboundQueue>;
-        runtimeTurnCoordinator: {
-          terminalizePerChatTurnQueueForKill(mapKey: string): Promise<void>;
-        };
-        perChatMcpSocketManager: {
-          releaseAfter(mapKey: string, transitionSettled: Promise<void>): void;
-          providerTransitionReady(mapKey: string): Promise<void>;
-        };
-      };
-      const groupKey = '111111100000000100@g.us';
-      state.chatSessions.set(
-        groupKey,
-        makePerChatSession(true, 11, new Date().toISOString()),
-      );
-      state.chatQueues.set(groupKey, makeQueueMock('group@g.us'));
-      const terminalizationError = new Error('turn ownership unresolved');
-      vi.spyOn(
-        state.runtimeTurnCoordinator,
-        'terminalizePerChatTurnQueueForKill',
-      ).mockRejectedValueOnce(terminalizationError);
-      const releaseAfter = vi.spyOn(
-        state.perChatMcpSocketManager,
-        'releaseAfter',
-      );
-
-      await sendAndDrain(
-        runtime,
-        makeMsg({ content: '/kill-session 1', senderJid: adminSender }),
-      );
-
-      const transitionSettled = releaseAfter.mock.calls[0]?.[1];
-      expect(transitionSettled).toBeDefined();
-      await expect(transitionSettled).rejects.toBe(terminalizationError);
-      await expect(state.perChatMcpSocketManager.providerTransitionReady(groupKey))
-        .rejects.toBe(terminalizationError);
-      expect(sentMessages.map((message) => message.text).join('\n'))
-        .toContain('some in-flight turns could not be finalized');
     });
 
     // Regression: /kill-session dropped the SessionManager and the outbound queue

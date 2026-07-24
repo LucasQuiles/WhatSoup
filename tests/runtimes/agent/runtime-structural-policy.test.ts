@@ -132,6 +132,16 @@ describe('AgentRuntime structural policy', () => {
     expect(globalActorWrites).toHaveLength(1);
   });
 
+  it('/kill-session retires actor ownership only after child and turn teardown settle', async () => {
+    const source = await readRuntimeSource();
+    expect(source).toContain(
+      'const transitionSettled = Promise.all([\n                childStopped,\n                turnTerminalized,\n              ]).then(() => undefined);',
+    );
+    expect(source).toContain(
+      'this.perChatMcpSocketManager.releaseAfter(mapKey, transitionSettled);',
+    );
+  });
+
   it('shared queue sweep timer is unrefd and cleared structurally', async () => {
     const source = await readRuntimeSource();
 
