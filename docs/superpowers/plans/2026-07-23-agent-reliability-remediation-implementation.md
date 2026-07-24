@@ -23,11 +23,37 @@ SQLite, macOS private credential stores, ARC, and Tailscale admin controls.
 
 ## Implementation Checkpoint
 
-As of 2026-07-24, the three code lanes are committed, pushed, and published as
-open pull requests. Their Node 24, Node 25, macOS, CodeQL, coverage, console,
-and browser checks pass. The pull requests remain unmerged and one commit
-behind current `main`; merge-order integration and every host mutation remain
-pending.
+As of 2026-07-24, the contract lane and three code lanes are committed, pushed,
+and published as four open pull requests against `main`. Branch-local push
+gates pass at every recorded head. GitHub checks are head-bound and must be
+read live before merge; this checkpoint records delivery identity rather than
+making a timeless green-CI claim. The pull requests remain unmerged and behind
+current `main`; merge-order integration and every host mutation remain pending.
+
+| Deliverable | Branch | Pull request | Recorded code head |
+| --- | --- | --- | --- |
+| Contract, design, and implementation ledger | `fix/agent-queue-health-20260723` | #2142 | This document's commit |
+| Provider actor isolation and canary proof | `fix/agent-provider-actor-isolation-20260723` | #2128 | `e615c965f` |
+| Queue-health truth | `fix/agent-queue-health-truth-20260723` | #2129 | `795d5fdd0` |
+| Suspend and platform hardening | `fix/agent-suspend-platform-hardening-20260723` | #2130 | `ab7372c55` |
+
+The unpushed `fix/agent-provider-canary-proof-20260723` precursor was compared
+with `git range-diff` and `git cherry`. Its actor and canary work is incorporated
+and expanded in PR #2128, so its clean local worktree and branch were retired;
+it never had a remote branch or pull request.
+
+Thirteen bounded external design, implementation, and pull-request reviews
+were accepted after lead source verification. Eight additional attempts were
+recorded as inconclusive because of controller, capacity, or watchdog
+termination before a valid result. All accepted decisions are incorporated in
+the design, plan, or reviewed code. The exact completed review-cache
+directories may therefore be removed while the durable dispatch ledger and
+active session journals remain intact.
+
+There is no stash attributable to this lane. The four remaining lane
+worktrees are clean, active review surfaces for the open pull requests, not
+stale worktrees. They must be removed with their local branches only after the
+corresponding pull request is merged or explicitly abandoned.
 
 ## Global Constraints
 
@@ -165,5 +191,7 @@ Create `fix/agent-suspend-platform-hardening-20260723` from refreshed `main`.
   unhalted queues, and actor-socket ownership.
 - [ ] Dry-run and retire only the three reviewed quarantine rows. Resolve access
   only with exact identity proof. Record every receipt or abort.
-- [ ] Finish with clean worktrees, pushed branches, three main-based PRs, and an
-  explicit list of skipped or inconclusive checks.
+- [ ] Finish after merge and host acceptance with no stale worktrees, local
+  branches, stashes, or temporary review artifacts; four main-based pull
+  requests (one contract and three code); and an explicit list of skipped or
+  inconclusive checks.
