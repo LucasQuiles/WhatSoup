@@ -327,25 +327,11 @@ export const fitnessRules = [
       patterns: ['WhatsApp'],
       allowlistPaths: [
         'console/src/mock-data.ts',
-        // channel-kind.ts holds the per-transport copy variants (T5 b-03
-        // CHANNEL_LABEL): each channel kind names itself there, so generic
-        // consumers never hardcode one transport's name.
-        'console/src/components/fleet/channel-kind.ts',
         // transport-identity.ts is the console-wide transport-identity home
         // (T5 b-07): CHANNEL_LABEL names each channel there, so generic
-        // consumers never hardcode one transport's name.
-        'console/src/lib/transport-identity.ts',
-        // transport-identity.ts is the console-wide transport-identity home
-        // (T5 b-07/b-08): CHANNEL_LABEL names each channel there, so generic
-        // consumers never hardcode one transport's name.
-        'console/src/lib/transport-identity.ts',
-        // transport-identity.ts is the console-wide transport-identity home
-        // (T5 b-07/b-08): CHANNEL_LABEL names each channel there, so generic
-        // consumers never hardcode one transport's name.
-        'console/src/lib/transport-identity.ts',
-        // transport-identity.ts is the console-wide transport-identity home
-        // (T5 b-07/b-08): CHANNEL_LABEL names each channel there, so generic
-        // consumers never hardcode one transport's name.
+        // consumers never hardcode one transport's name. The fleet glyph map
+        // (channel-kind.ts) converged onto it at the b-13 gate and inherits the
+        // shared copy, so it no longer needs an entry of its own.
         'console/src/lib/transport-identity.ts',
       ],
     },
@@ -367,29 +353,11 @@ export const fitnessRules = [
       patterns: ['health?.whatsapp', 'health.whatsapp'],
       allowlistPaths: [
         'console/src/mock-data.ts',
-        // channel-kind.ts is the designated generic-first accessor for transport
-        // identity (T5 b-03): the legacy health.whatsapp read lives there alone as
-        // the documented Baileys fallback; all consumers route through channelKindOf.
-        'console/src/components/fleet/channel-kind.ts',
         // transport-identity.ts is the designated generic-first accessor for
         // transport identity (T5 b-07): the legacy health.whatsapp read lives
         // there alone as the documented Baileys fallback; all consumers route
-        // through transportConnectedOf / channelOf.
-        'console/src/lib/transport-identity.ts',
-        // transport-identity.ts is the designated generic-first accessor for
-        // transport identity (T5 b-07/b-08): the legacy health.whatsapp read
-        // lives there alone as the documented Baileys fallback; all consumers
-        // route through transportConnectedOf / channelOf.
-        'console/src/lib/transport-identity.ts',
-        // transport-identity.ts is the designated generic-first accessor for
-        // transport identity (T5 b-07/b-08): the legacy health.whatsapp read
-        // lives there alone as the documented Baileys fallback; all consumers
-        // route through transportConnectedOf / channelOf.
-        'console/src/lib/transport-identity.ts',
-        // transport-identity.ts is the designated generic-first accessor for
-        // transport identity (T5 b-07/b-08): the legacy health.whatsapp read
-        // lives there alone as the documented Baileys fallback; all consumers
-        // route through transportConnectedOf / channelOf.
+        // through transportConnectedOf / channelOf / baileysFallbackChannel
+        // (the fleet glyph fallback converged onto it at the b-13 gate).
         'console/src/lib/transport-identity.ts',
       ],
     },
