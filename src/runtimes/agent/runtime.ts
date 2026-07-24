@@ -30,10 +30,13 @@ import { runDiagnosticBundle } from './diagnostic-bundle.ts';
 import { buildDiagnosticProbes } from './diagnostic-probes.ts';
 import {
   ensureStandbyNoticeSchema,
-  stashStandbyNotice,
-  consumeStandbyNotice,
   clearStandbyNotice,
 } from './standby-notice.ts';
+import {
+  stashHandoffNotice as stashHandoffNoticeImpl,
+  withHandoffPrefix as withHandoffPrefixImpl,
+  flushPendingHandoffNotice as flushPendingHandoffNoticeImpl,
+} from './handoff-notice-prefix.ts';
 import { sanitizeProviderPreviewText } from './provider-preview-sanitizer.ts';
 import { formatContextLines } from './context-lines.ts';
 import { redactHandoffPii } from './handoff-pii-redactor.ts';
@@ -41,8 +44,8 @@ import { seamForProvider } from './handoff-seam-routing.ts';
 import { ensureHandoffArtifactSchema, getHandoffArtifact, deleteHandoffArtifact } from './handoff-artifact.ts';
 import { buildHandoffPrelude } from './handoff-prelude.ts';
 import type { AgentProvider } from './providers/types.ts';
-import { EmitHealResultSchema } from '../../core/heal-protocol.ts';
-import { buildRestartSelfTool, triggerSelfRestart, assertRestartSelfAdmin, type ServiceRestarter } from './self-restart.ts';
+import { triggerSelfRestart, assertRestartSelfAdmin, type ServiceRestarter } from './self-restart.ts';
+import { registerRuntimeInlineTools } from './runtime-tool-registrations.ts';
 import { dequeueNextReport, emitHealReport, parseHealContext } from '../../core/heal.ts';
 import { sendTracked } from '../../core/durability.ts';
 import { classifyErrorForInbound } from '../../core/inbound-failure-class.ts';
@@ -320,7 +323,6 @@ const SESSION_MIN_RESIDENCY_MS = envPositiveInt('WHATSOUP_SESSION_MIN_RESIDENCY_
 // tool_calls telemetry sentinel can never drift apart.
 const GLOBAL_TOOL_SCOPE_KEY = GLOBAL_CONVERSATION_KEY;
 const GLOBAL_CRASH_SCOPE_KEY = GLOBAL_CONVERSATION_KEY;
-const TOOL_FAILURE_ALERT_DEDUP_MS = 60 * 1000;
 const MAX_TOOL_FAILURE_ALERT_DEDUP_KEYS = 1_000;
 // (TOOL_FAILURE_ALERT_EXCERPT_CHARS moved to ./tool-update.ts with alertExcerpt.)
 // Default provider-fallback window when the usage-limit message names no reset
@@ -651,11 +653,9 @@ export {
 import {
   buildToolUpdate,
   classifyToolError,
-  shouldEmitToolFailureAlert,
-  safeAlertSegment,
   alertEvidenceValue,
-  alertExcerpt,
 } from './tool-update.ts';
+import { maybeEmitToolFailureAlert, type ToolFailureAlertDeps } from './tool-failure-alert.ts';
 
 // Provider-failure string matchers are the single source of truth in
 // `./failure-taxonomy.ts`. They are imported above for internal use and re-exported
@@ -1154,88 +1154,22 @@ export class AgentRuntime implements Runtime {
     }
   }
 
-  private maybeEmitToolFailureAlert(args: {
-    chatJid: string | null | undefined;
-    toolId: string;
-    toolName: string;
-    content: string;
-    classification: ToolUpdate;
-    toolScopeKey: string;
-    mapKey?: string;
-  }): void {
-    if (process.env['BOT_ERRORS_RUNTIME_TOOL_FAILURE_ALERTS'] === '0') return;
-
-    // Root-cause noise gate: a non-zero Bash exit (glob/grep no-match, failed
-    // conditional, missing path) is reported by claude-cli as `is_error` but is
-    // a normal agent-loop result, not an operator-actionable failure. Only page
-    // when the error carries an infra/provider-health signature.
-    if (!shouldEmitToolFailureAlert(args.classification.category, args.content)) {
-      log.debug(
-        {
-          instance: this.instanceName,
-          toolName: args.toolName,
-          category: args.classification.category,
-        },
-        'suppressing benign tool-error (not operator-actionable) — no BOT ERRORS alert',
-      );
-      return;
-    }
-
-    const now = Date.now();
-    for (const [key, recordedAt] of this.recentToolFailureAlerts) {
-      if (now - recordedAt > TOOL_FAILURE_ALERT_DEDUP_MS) {
-        this.recentToolFailureAlerts.delete(key);
-      }
-    }
-
-    const provider = this.effectiveProvider || this.agentProvider || 'unknown-provider';
-    const source = `runtime-tool-error:${safeAlertSegment(provider)}:${safeAlertSegment(args.toolName)}`;
-    const fingerprint = [
-      this.instanceName,
-      provider,
-      args.toolName,
-      args.classification.category,
-      args.content.replace(/\s+/g, ' ').trim().slice(0, 500),
-    ].join('\n');
-
-    if (this.recentToolFailureAlerts.has(fingerprint)) return;
-    this.recentToolFailureAlerts.set(fingerprint, now);
-    this.capDedupeMap(this.recentToolFailureAlerts);
-
-    const evidence = [
-      'runtime_source=src/runtimes/agent/runtime.ts:tool_result',
-      `instance=${alertEvidenceValue(this.instanceName)}`,
-      `provider=${alertEvidenceValue(provider)}`,
-      `session_scope=${this.sessionScope}`,
-      `chat_jid=${alertEvidenceValue(args.chatJid ?? null)}`,
-      `tool_scope_key=${alertEvidenceValue(args.toolScopeKey)}`,
-      `map_key=${alertEvidenceValue(args.mapKey ?? null)}`,
-      `tool_id=${alertEvidenceValue(args.toolId)}`,
-      `tool_name=${alertEvidenceValue(args.toolName)}`,
-      `classification=${args.classification.category}`,
-      `detail=${alertEvidenceValue(args.classification.detail)}`,
-      `cwd=${alertEvidenceValue(this.cwd ?? process.cwd())}`,
-      'error_excerpt:',
-      alertExcerpt(args.content) || 'unknown',
-    ].join('\n');
-
-    try {
-      emitAlertChecked(
-        this.instanceName,
-        source,
-        `Agent tool failure: ${args.toolName}`,
-        evidence,
-        'warning',
-      );
-    } catch (err) {
-      log.warn({
-        instance: this.instanceName,
-        provider,
-        toolId: args.toolId,
-        toolName: args.toolName,
-        err: errorMessage(err),
-      }, 'failed to emit BOT ERRORS tool failure alert');
-    }
+  /**
+   * Bind the runtime's live state + collaborators for tool-failure alerting
+   * (tool-failure-alert.ts). Built fresh at each tool-error call site so the
+   * provider label and dedup map are read on the same tick as the failure, and
+   * the shared capDedupeMap keeps the dedup map bounded — identical to the
+   * former inline method.
+   */
+  private toolFailureAlertDeps(): ToolFailureAlertDeps {
+    return {
+      instanceName: this.instanceName,
+      sessionScope: this.sessionScope,
+      cwd: this.cwd,
+      resolveProvider: () => this.effectiveProvider || this.agentProvider || 'unknown-provider',
+      recentToolFailureAlerts: this.recentToolFailureAlerts,
+      capDedupeMap: (map) => this.capDedupeMap(map),
+    };
   }
 
   // The auto-compact bookkeeping state machine lives in AutoCompactController
@@ -3638,100 +3572,30 @@ export class AgentRuntime implements Runtime {
       }
     }
 
-    // Register emit_heal_result MCP tool (once, for control-plane repair completion).
-    // Only on non-sandboxed instances (Q) — sandboxed instances (Loops) are repair targets, not repairers.
-    // Tagged `core: false` because this registration is conditional on configured control peers;
-    // see `src/mcp/types.ts` for the contract — non-core tools must tolerate absence on instances
-    // that do not meet the gate (no control peers, sandbox mode, or per-chat sandbox).
-    if (config.controlPeers.size > 0 && !this.sandboxPerChat && !this.sandbox) {
-      this.registry.register({
-        name: 'emit_heal_result',
-        description: 'Signal completion of a repair cycle. Only callable during an active repair session.',
-        schema: EmitHealResultSchema,
-        scope: 'global',
-        targetMode: 'caller-supplied',
-        replayPolicy: 'unsafe',
-        core: false,
-        handler: async (params) => {
-          const parsed = EmitHealResultSchema.parse(params);
-
-          // Validate: must match active repair
-          if (!this.activeControlReportId) {
-            throw new Error('No active repair session');
-          }
-          if (parsed.reportId !== this.activeControlReportId) {
-            throw new Error(`No active repair for reportId ${parsed.reportId}. Active: ${this.activeControlReportId}`);
-          }
-          if (this.controlProtocolCompletedReportId === parsed.reportId) {
-            throw new Error(`Repair result already emitted for reportId ${parsed.reportId}`);
-          }
-
-          const controlQueue = this.getControlQueue();
-          if (!controlQueue) {
-            throw new Error('Control queue not found');
-          }
-
-          // Determine target JID (Loops)
-          const loopsPhone = [...config.controlPeers.entries()].find(([name]) => name === 'loops')?.[1];
-          const loopsJid = loopsPhone ? toPersonalJid(loopsPhone) : null;
-
-          if (parsed.result === 'fixed') {
-            if (loopsJid) {
-              await controlQueue.sendControlMessage(loopsJid, 'HEAL_COMPLETE', {
-                reportId: parsed.reportId,
-                errorClass: parsed.errorClass,
-                result: 'fixed',
-                commitSha: parsed.commitSha,
-                diagnosis: parsed.diagnosis,
-              }, this.durability ?? undefined);
-            }
-          } else {
-            // escalate
-            if (loopsJid) {
-              await controlQueue.sendControlMessage(loopsJid, 'HEAL_ESCALATE', {
-                reportId: parsed.reportId,
-                errorClass: parsed.errorClass,
-                diagnosis: parsed.diagnosis,
-              }, this.durability ?? undefined);
-            }
-            // Also DM admin
-            const adminPhone = [...config.adminPhones][0];
-            if (adminPhone) {
-              const adminJid = toPersonalJid(adminPhone);
-              await sendTracked(this.messenger, adminJid,
-                `[HEAL_ESCALATE] Repair for ${parsed.errorClass} escalated.\n\n${parsed.diagnosis}`,
-                this.durability ?? undefined, { replayPolicy: 'safe' });
-            }
-          }
-
-          // Resolve pending_heal_reports row (Type 3 cleanup)
-          try {
-            this.db.raw.prepare(
-              "UPDATE pending_heal_reports SET state = 'resolved' WHERE report_id = ?",
-            ).run(parsed.reportId);
-          } catch (err) {
-            // best-effort, but visible: a stuck-pending row re-fires stale-open re-notify
-            log.warn({ err, reportId: parsed.reportId }, 'failed to mark heal report resolved; row stays pending');
-          }
-
-          // The MCP result still has to travel back through this exact provider
-          // request. Retain the immutable report owner and the timeout until the
-          // provider emits its terminal result; advancing here lets report A's
-          // trailing result terminalize a newly-dispatched report B.
-          this.controlProtocolCompletedReportId = parsed.reportId;
-
-          return { sent: true, reportId: parsed.reportId, result: parsed.result };
-        },
-      });
-    }
-
-    // Register restart_self MCP tool (agent instance only — sandboxed instances
-    // are repair targets, not self-restarters). Routes through the existing
-    // graceful shutdown via ServiceManager.restart; logic lives in self-restart.ts.
-    // Requires the fleet-owned restarter injected from the composition root.
-    if (!this.sandbox && !this.sandboxPerChat && this.serviceRestarter) {
-      const serviceRestarter = this.serviceRestarter;
-      this.registry.register(buildRestartSelfTool({
+    // Register the runtime's inline MCP tools (emit_heal_result + restart_self)
+    // with their exact activation gates; the tool declarations live in
+    // runtime-tool-registrations.ts. The emit_heal_result handler receives a
+    // narrow control-report port rather than `this`, since that slot
+    // (activeControlReportId / controlProtocolCompletedReportId) is shared with
+    // the control-terminal path.
+    const serviceRestarter = this.serviceRestarter;
+    registerRuntimeInlineTools(this.registry, {
+      // `sandbox` is a SandboxPolicy|undefined used only via `!sandbox` in the
+      // original guards; coerce to the boolean the guard actually consumed.
+      sandbox: !!this.sandbox,
+      sandboxPerChat: this.sandboxPerChat,
+      emitHealResult: {
+        getActiveControlReportId: () => this.activeControlReportId,
+        isControlReportCompleted: (reportId) => this.controlProtocolCompletedReportId === reportId,
+        markControlReportCompleted: (reportId) => { this.controlProtocolCompletedReportId = reportId; },
+        getControlQueue: () => this.getControlQueue(),
+        getDurability: () => this.durability,
+        messenger: this.messenger,
+        db: this.db,
+        controlPeers: config.controlPeers,
+        adminPhones: config.adminPhones,
+      },
+      restartSelf: serviceRestarter ? {
         instanceName: this.instanceName,
         dataRoot: config.dataRoot,
         resolveChatJid: () => this.currentTurnChatJid ?? this.activeChatJid ?? undefined,
@@ -3744,8 +3608,8 @@ export class AgentRuntime implements Runtime {
         // authenticated transport BEFORE the phone match, so a spoofed @sms actor
         // that collapses to admin digits cannot induce a restart.
         assertAdmin: (session) => assertRestartSelfAdmin(session, { db: this.db, adminPhones: config.adminPhones }),
-      }));
-    }
+      } : null,
+    });
 
     // Heal the claude file-store credential from the keychain BEFORE the first
     // turn can run, so a keychain-only refresh (native login) can't false-arm
@@ -7018,7 +6882,7 @@ export class AgentRuntime implements Runtime {
           log.warn({ toolId: event.toolId, toolName, error: errorPreview }, 'tool error reported by agent');
           const classification = classifyToolError(toolName, event.content);
           queue.enqueueToolUpdate(classification);
-          this.maybeEmitToolFailureAlert({
+          maybeEmitToolFailureAlert({
             chatJid: queue.targetChatJid,
             toolId: event.toolId,
             toolName,
@@ -7026,7 +6890,7 @@ export class AgentRuntime implements Runtime {
             classification,
             toolScopeKey,
             mapKey,
-          });
+          }, this.toolFailureAlertDeps());
         }
         toolNames?.delete(event.toolId);
         if (toolNames && toolNames.size === 0) {
@@ -10488,34 +10352,6 @@ export class AgentRuntime implements Runtime {
     else queue.enqueueText(message);
   }
 
-  /** Stash the handoff notice for prepend-on-first-reply. Returns false on failure. */
-  private stashHandoffNotice(chatJid: string, message: string, now: number): boolean {
-    try {
-      stashStandbyNotice(this.db, toConversationKey(chatJid), message, now);
-      return true;
-    } catch (err) {
-      log.warn({ err, chatJid }, 'failed to stash handoff notice — sending standalone');
-      return false;
-    }
-  }
-
-  /**
-   * Prepend a pending handoff notice (if any) to a stand-in reply, collapsing the
-   * fallback notice and the reply into one message. No-op when the flag is off or
-   * no notice is pending. Never throws into the reply path.
-   */
-  private withHandoffPrefix(chatJid: string, text: string): string {
-    if (!oneMessageHandoffEnabled()) return text;
-    let prefix: string | null = null;
-    try {
-      prefix = consumeStandbyNotice(this.db, toConversationKey(chatJid));
-    } catch (err) {
-      log.warn({ err, chatJid }, 'failed to consume handoff notice');
-      return text;
-    }
-    return prefix ? `${prefix}\n\n${text}` : text;
-  }
-
   private enqueueAutoSwitchNotice(
     queue: IOutboundQueue,
     text: string,
@@ -10536,23 +10372,20 @@ export class AgentRuntime implements Runtime {
     return true;
   }
 
-  /**
-   * Flush a still-pending handoff notice as a standalone message at turn end.
-   * Closes the empty-turn gap: if the stand-in's turn produced no visible reply,
-   * {@link withHandoffPrefix} never consumed the notice, so it would otherwise
-   * defer to the next reply. Consume-once means this is a no-op when a reply
-   * already prepended the notice this turn. Never throws into the turn.
-   */
+  // Thin delegators to handoff-notice-prefix.ts: the stash/prefix/flush logic
+  // lives in that pure module, but these instance methods stay so the turn-host
+  // Port wiring and the characterization tests that exercise the collapse via the
+  // runtime instance are unchanged (same discipline as the auto-compact delegators).
+  private stashHandoffNotice(chatJid: string, message: string, now: number): boolean {
+    return stashHandoffNoticeImpl(this.db, chatJid, message, now);
+  }
+
+  private withHandoffPrefix(chatJid: string, text: string): string {
+    return withHandoffPrefixImpl(this.db, chatJid, text);
+  }
+
   private flushPendingHandoffNotice(queue: IOutboundQueue): void {
-    if (!oneMessageHandoffEnabled()) return;
-    let pending: string | null = null;
-    try {
-      pending = consumeStandbyNotice(this.db, toConversationKey(queue.targetChatJid));
-    } catch (err) {
-      log.warn({ err, chatJid: queue.targetChatJid }, 'failed to flush pending handoff notice');
-      return;
-    }
-    if (pending) queue.enqueueText(pending);
+    flushPendingHandoffNoticeImpl(this.db, queue);
   }
 
   private recreatePerChatSessionForFallback(mapKey: string, chatJid: string, actorJid?: string): void {
@@ -12246,14 +12079,14 @@ export class AgentRuntime implements Runtime {
           }, 'tool error reported by agent');
           const classification = classifyToolError(toolName, event.content);
           queue.enqueueToolUpdate(classification);
-          this.maybeEmitToolFailureAlert({
+          maybeEmitToolFailureAlert({
             chatJid: this.shared ? this.currentTurnChatJid : this.activeChatJid,
             toolId: event.toolId,
             toolName,
             content: event.content,
             classification,
             toolScopeKey: GLOBAL_TOOL_SCOPE_KEY,
-          });
+          }, this.toolFailureAlertDeps());
         }
         toolNames?.delete(event.toolId);
         if (toolNames && toolNames.size === 0) {
