@@ -2,7 +2,7 @@ import { useState, useMemo, lazy, Suspense } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { motion } from 'framer-motion'
 import { useLines, useLogs, useFeed } from '../hooks/use-fleet'
-import { Tabs, Tab } from '../components/primitives/Tabs'
+import { Tabs, Tab, TabPanel } from '../components/primitives/Tabs'
 import { OpsMetrics } from '../components/ops/OpsMetrics'
 import { formatTimeWithSeconds } from '../lib/format-time'
 import StatusDot from '../components/StatusDot'
@@ -148,14 +148,8 @@ export default function Operator() {
         <Tab id="metrics">Metrics</Tab>
       </Tabs>
       {/* Keep-alive panels: BOTH stay mounted (state survives the switch);
-          the inactive one is hidden. Each panel associates to its tab. */}
-      <div
-        role="tabpanel"
-        id="tabpanel-console"
-        aria-labelledby="tab-console"
-        hidden={opsTab !== 'console'}
-        className="flex-1 flex flex-col min-h-0 overflow-hidden"
-      >
+          the TabPanel primitive owns the hidden mechanic + tab association. */}
+      <TabPanel id="console" active={opsTab} className="flex-1 flex flex-col min-h-0 overflow-hidden">
     <div
       className="soup-operator-layout flex-1 flex min-h-0 overflow-hidden gap-[var(--sp-3)]"
     >
@@ -425,16 +419,10 @@ export default function Operator() {
         />
       </Suspense>
     </div>
-      </div>
-      <div
-        role="tabpanel"
-        id="tabpanel-metrics"
-        aria-labelledby="tab-metrics"
-        hidden={opsTab !== 'metrics'}
-        className="flex-1 flex flex-col min-h-0 overflow-hidden"
-      >
+      </TabPanel>
+      <TabPanel id="metrics" active={opsTab} className="flex-1 flex flex-col min-h-0 overflow-hidden">
         {metricsVisited ? <OpsMetrics /> : null}
-      </div>
+      </TabPanel>
     </motion.div>
   )
 }
