@@ -45,18 +45,7 @@ import { stripPlaintextProviderKeys } from '../../lib/config-plaintext-keys.ts';
 import { DEFAULT_INSTANCE_HEALTH_PORT } from '../constants.ts';
 import { privateWriteError, writePrivateFileSync } from '../../lib/private-fs.ts';
 import { errorMessage } from '../../lib/error-message.ts';
-
-/** Valid instance name pattern: lowercase alphanumeric + hyphens, must start with a letter. */
-const NAME_RE = /^[a-z][a-z0-9-]*$/;
-
-/** Guard: validate instance name from URL params before using in shell commands or path construction. */
-function validateInstanceName(name: string, res: ServerResponse): boolean {
-  if (!NAME_RE.test(name) || name.length < 1 || name.length > 30) {
-    jsonResponse(res, 400, { error: 'invalid instance name' });
-    return false;
-  }
-  return true;
-}
+import { NAME_MAX_LENGTH, NAME_RE, validateInstanceName } from './instance-name.ts';
 
 function deepMergeRecords(
   base: Record<string, unknown>,
@@ -1020,7 +1009,12 @@ export async function handleCreateLine(
 
   // --- Validate name ---
   const name = body.name;
-  if (typeof name !== 'string' || !NAME_RE.test(name) || name.length < 2 || name.length > 30) {
+  if (
+    typeof name !== 'string'
+    || !NAME_RE.test(name)
+    || name.length < 2
+    || name.length > NAME_MAX_LENGTH
+  ) {
     jsonResponse(res, 400, { error: 'name must be 2-30 lowercase alphanumeric/hyphens, starting with a letter' });
     return;
   }
