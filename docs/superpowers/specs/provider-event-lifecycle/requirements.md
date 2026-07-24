@@ -2,7 +2,7 @@
 
 **Status:** Active — refreshed at canonical main `3f560389aa14112ff91350ecfb841e771d99e6d9`; the schema-ceiling prerequisite is implemented on the current branch but remains unmerged/unpublished pending Task 1 verification, and provider-lifecycle implementation and activation remain unauthorized
 
-**Schema allocation:** current canonical schema is migration 45; bounded terminal recovery/canonical `not_sent` is forward migration 46; the provider-event lifecycle ledger is migration 47.
+**Schema allocation:** current canonical schema is migration 45; bounded terminal recovery/canonical `not_sent` is forward migration 46; the provider-event lifecycle ledger is migration 47. Migration 45 (`recovery_runs.status`) is consumed by unmerged #1789, currently in flight; that consumption is why terminal recovery is forward migration 46 and the lifecycle ledger is 47.
 
 ## Purpose
 
@@ -953,9 +953,14 @@ unproved child origins default to internal no-send/no-effect handling.
 - **Acceptance criteria:**
   - **CON-005.AC-01:** The implementation allocates the next unclaimed schema
     migration after reconciling all merged durability migrations and verifies both
-    fresh-database and upgrade paths. Canonical main already understands migration 45;
-    bounded terminal recovery/canonical `not_sent` uses migration 46, and the
-    provider-event lifecycle ledger uses migration 47.
+    fresh-database and upgrade paths. Migration 45 (`recovery_runs.status`) is
+    allocated to and implemented by unmerged #1789 (in-flight, not yet on
+    canonical main); once #1789 lands, canonical main understands migration 45,
+    and this lifecycle work bases on it, allocating bounded terminal
+    recovery/canonical `not_sent` to migration 46 and the provider-event
+    lifecycle ledger to migration 47. Provenance for migration 45's rationale and
+    commit lives in #1789's PR body; a formal Amendment Log row with a real merge
+    SHA is deferred until that lane resumes and lands.
   - **CON-005.AC-02:** Changed deployed runtime entrypoints are represented in the
     repository's managed-component and runtime manifests, and manifest guards pass.
     Before lifecycle activation, the effective configured primary/fallback routing set

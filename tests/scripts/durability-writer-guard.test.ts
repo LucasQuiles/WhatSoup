@@ -197,6 +197,80 @@ describe('durability-writer-guard — RED-GREEN teeth (case c)', () => {
     });
     expect(result.findings.filter((f) => f.table === 'synthetic_hidden_status' && f.kind === 'anti-dodge-unjustified')).toHaveLength(1);
   });
+
+  it('FAILS (anti-dodge fail-closed fallback) a NON_STATUS table whose createSql cannot be standalone-replayed but whose DDL text has a status-shaped column and no justification', () => {
+    // Gap-analysis finding: columnsByTable's replay-failure catch used to set
+    // columns.set(table, []) unconditionally, so a migrated table that fails
+    // standalone replay (today only the 4 FTS5 shadow tables, via node:sqlite's
+    // reserved-name rejection) looked column-less to check (2b) and silently
+    // skipped anti-dodge — exactly the "let a status-bearing table hide" hole
+    // (2b) exists to close. A `sqlite_`-prefixed name reproduces the identical
+    // "object name reserved for internal use" replay failure deterministically,
+    // without depending on the FTS5 module.
+    const snapshot: SchemaSnapshot = new Map([
+      [
+        'sqlite_synthetic_unreplayable',
+        {
+          createSql:
+            "CREATE TABLE sqlite_synthetic_unreplayable (id INTEGER PRIMARY KEY, status TEXT NOT NULL DEFAULT 'ok')",
+          indexes: [],
+        },
+      ],
+    ]);
+    const result = scanDurabilityWriterInvariant(snapshot, repoRoot, {
+      registry: [],
+      trackedReserved: [],
+      knownStatusTables: new Set(),
+      nonStatusTables: new Set(['sqlite_synthetic_unreplayable']),
+      reservedTables: new Set(),
+      nonStatusJustifications: {}, // the defect: no justification, even though replay failed
+      discovered: new Map(), // isolate from the real repo's discovery scan
+    });
+    expect(
+      result.findings.filter((f) => f.table === 'sqlite_synthetic_unreplayable' && f.kind === 'anti-dodge-unjustified'),
+    ).toHaveLength(1);
+  });
+
+  it('control: a justified NON_STATUS table whose createSql cannot be standalone-replayed produces no anti-dodge finding', () => {
+    const snapshot: SchemaSnapshot = new Map([
+      [
+        'sqlite_synthetic_unreplayable_justified',
+        {
+          createSql:
+            "CREATE TABLE sqlite_synthetic_unreplayable_justified (id INTEGER PRIMARY KEY, status TEXT NOT NULL DEFAULT 'ok')",
+          indexes: [],
+        },
+      ],
+    ]);
+    const result = scanDurabilityWriterInvariant(snapshot, repoRoot, {
+      registry: [],
+      trackedReserved: [],
+      knownStatusTables: new Set(),
+      nonStatusTables: new Set(['sqlite_synthetic_unreplayable_justified']),
+      reservedTables: new Set(),
+      nonStatusJustifications: { sqlite_synthetic_unreplayable_justified: 'exercised only by this test' },
+      discovered: new Map(),
+    });
+    expect(
+      result.findings.filter((f) => f.table === 'sqlite_synthetic_unreplayable_justified'),
+    ).toHaveLength(0);
+  });
+
+  it('the real repo (the 4 FTS5 shadow tables) still passes anti-dodge with the fallback in place', async () => {
+    // Regression guard for the fallback itself: the 4 FTS5 shadow tables
+    // (messages_fts_data/idx/docsize/config) are NON_STATUS and fail
+    // standalone replay in the real schema too — their DDL text (id/block,
+    // id/sz, segid/term/pgno, k/v) must not match the status-shaped-column
+    // regex, so they must not regress into anti-dodge findings now that the
+    // fallback actually scans their DDL text instead of skipping them.
+    const snapshot = await loadRealSnapshot();
+    const result = scanDurabilityWriterInvariant(snapshot, repoRoot);
+    const ftsShadowTables = ['messages_fts_data', 'messages_fts_idx', 'messages_fts_docsize', 'messages_fts_config'];
+    for (const table of ftsShadowTables) {
+      expect(snapshot.has(table), `expected '${table}' to be present in the real migrated snapshot`).toBe(true);
+    }
+    expect(result.findings.filter((f) => ftsShadowTables.includes(f.table) && f.kind === 'anti-dodge-unjustified')).toHaveLength(0);
+  });
 });
 
 describe('durability-writer-guard — recovery_runs / enrichment_runs assert-pass (case d)', () => {
@@ -403,6 +477,17 @@ describe('durability-writer-guard — self-provisioned discovery (completeness b
     expect(result.findings.filter((f) => f.kind === 'unregistered-self-provisioned-table')).toHaveLength(0);
   });
 
+  it('the real discovery scan reports a non-zero discoveredTableCount (non-vacuity precondition)', async () => {
+    // A real checkout has dozens of CREATE TABLE occurrences under src/
+    // (migrated tables plus the 6 self-provisioned ones); this pins that the
+    // scan genuinely ran, so evaluateDurabilityWriterInvariant's discovery
+    // floor (see the exit-code contract suite below) never misfires against
+    // the real repo.
+    const snapshot = await loadRealSnapshot();
+    const result = scanDurabilityWriterInvariant(snapshot, repoRoot, { registry: [], trackedReserved: [], trackedUnwiredTerminal: [] });
+    expect(result.discoveredTableCount).toBeGreaterThan(0);
+  });
+
   it('SELF_PROVISIONED declares exactly the six known self-provisioned tables', () => {
     const tables = SELF_PROVISIONED.map((e) => e.table).sort();
     expect(tables).toEqual(
@@ -462,6 +547,37 @@ describe('durability-writer-guard — exit-code contract (evaluateDurabilityWrit
     if (outcome.status === 'inconclusive') {
       expect(outcome.reason).toMatch(/scan threw/i);
       expect(outcome.reason).toMatch(/boom: simulated scan-time failure/);
+    }
+  });
+
+  it('(iii) a discovery scan that found zero CREATE TABLE occurrences is INCONCLUSIVE, not pass', () => {
+    // Gap-analysis finding: check (1b)'s only non-vacuity gate floored the
+    // SNAPSHOT (case i above), not DISCOVERY. A missing/unreadable src/ (or,
+    // as simulated here, an empty injected discovery map) makes
+    // discoverCreateTableNames() return zero names — check (1b) then finds
+    // zero unregistered tables and, before this fix, the guard would read
+    // that as "pass" instead of "the scan never actually ran". Everything
+    // else about this snapshot/registry is deliberately clean (no other
+    // findings possible) so this test isolates the discovery floor: without
+    // it, this would be 'pass'.
+    const snapshot: SchemaSnapshot = new Map([
+      ['synthetic_clean', { createSql: 'CREATE TABLE synthetic_clean (id INTEGER PRIMARY KEY)', indexes: [] }],
+    ]);
+    const outcome = evaluateDurabilityWriterInvariant(snapshot, repoRoot, {
+      registry: [],
+      trackedReserved: [],
+      trackedUnwiredTerminal: [],
+      knownStatusTables: new Set(['synthetic_clean']),
+      nonStatusTables: new Set(),
+      reservedTables: new Set(),
+      nonStatusJustifications: {},
+      selfProvisioned: [],
+      discoveryExclusions: [],
+      discovered: new Map(), // the defect being floored: nothing discovered
+    });
+    expect(outcome.status).toBe('inconclusive');
+    if (outcome.status === 'inconclusive') {
+      expect(outcome.reason).toMatch(/zero CREATE TABLE/i);
     }
   });
 

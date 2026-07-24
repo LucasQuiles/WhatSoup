@@ -51,6 +51,12 @@
 //        per-table justification in NON_STATUS_JUSTIFICATIONS — otherwise a
 //        future author could hide a genuinely status-bearing table in the
 //        "not our problem" bucket and this guard would never see it again.
+//        Real columns come from replaying each table's own createSql and
+//        reading PRAGMA table_info (columnsByTable); a table whose createSql
+//        can't be replayed standalone (today, the four FTS5 shadow tables)
+//        is NOT treated as column-less — its DDL TEXT is scanned by the same
+//        regex instead, so a status-shaped column can't dodge anti-dodge by
+//        failing replay.
 //
 //   (3) PER-TABLE WRITER-COVERAGE CHECK, for every KNOWN_STATUS_TABLES entry:
 //       `terminalFailureValues` must be non-empty, and EVERY declared
@@ -83,19 +89,26 @@
 //       proof via SQLite persistence tests (Tasks 1-2), which this guard does
 //       not attempt to replace.
 //
-//   (4) NON-VACUITY. An empty schema snapshot, or a THROW anywhere inside the
-//       scan itself (not just the async load), maps to INCONCLUSIVE (exit 2)
-//       — never 0, and never an uncaught exception falling through to Node's
-//       default exit 1. `evaluateDurabilityWriterInvariant` wraps the
-//       empty-snapshot check and the call to `scanDurabilityWriterInvariant`
-//       in ONE try/catch and returns a discriminated
-//       `{status:'pass'|'violation'|'inconclusive', ...}` result — the same
-//       function `main()` calls and tests call directly, so the exit-2
-//       contract is unit-testable without spawning a CLI subprocess. `main()`
-//       additionally carries a `.catch()` on its own invocation as a second,
-//       belt-and-braces layer.
+//   (4) NON-VACUITY. An empty schema snapshot, a scan that discovered ZERO
+//       `CREATE TABLE` occurrences under src/ (check 1b never actually ran —
+//       see `discoveredTableCount` on `DurabilityWriterScanResult`), or a
+//       THROW anywhere inside the scan itself (not just the async load), all
+//       map to INCONCLUSIVE (exit 2) — never 0, and never an uncaught
+//       exception falling through to Node's default exit 1. Only the schema
+//       snapshot's non-vacuity was originally floored here; the discovery
+//       half of check (1b) was not, so a missing/unreadable `src/` used to
+//       make check 1b pass vacuously (zero discovered, zero unregistered)
+//       instead of reporting that it never scanned anything.
+//       `evaluateDurabilityWriterInvariant` wraps the empty-snapshot check,
+//       the discovered-count floor, and the call to
+//       `scanDurabilityWriterInvariant` in ONE try/catch and returns a
+//       discriminated `{status:'pass'|'violation'|'inconclusive', ...}`
+//       result — the same function `main()` calls and tests call directly,
+//       so the exit-2 contract is unit-testable without spawning a CLI
+//       subprocess. `main()` additionally carries a `.catch()` on its own
+//       invocation as a second, belt-and-braces layer.
 //
-// Exit codes: 0 pass, 1 violation, 2 inconclusive (schema unreadable/empty/scan threw).
+// Exit codes: 0 pass, 1 violation, 2 inconclusive (schema unreadable/empty/discovery-scan-empty/scan threw).
 
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { DatabaseSync } from 'node:sqlite';
@@ -167,6 +180,16 @@ export interface DurabilityWriterScanResult {
   findings: DurabilityWriterFinding[];
   tablesScanned: number;
   registryTablesChecked: number;
+  /**
+   * Distinct table names found by check (1b)'s static `CREATE TABLE` scan
+   * (real scan of `src/**\/*.ts`, or the injected `discovered` map in tests).
+   * Floored by `evaluateDurabilityWriterInvariant`: zero here means the scan
+   * examined nothing (missing/unreadable `src/`, or an empty injected map),
+   * not that the codebase genuinely has no CREATE TABLE statements — a real
+   * checkout always has dozens. See DISCOVERY NON-VACUITY in the header
+   * comment.
+   */
+  discoveredTableCount: number;
 }
 
 /**
@@ -182,6 +205,13 @@ export type DurabilityWriterOutcome =
 
 const STATUS_LIKE_COLUMN_RE = /status|state|error|outcome|failed/i;
 
+/** Per-table result of {@link columnsByTable}: either real introspected column names, or a mark that standalone replay failed and the DDL text needs an anti-dodge fallback scan instead (see check (2b)). */
+interface ColumnIntrospection {
+  columns: string[];
+  /** true when `db.exec(createSql)` threw for this table's own DDL — `columns` is empty and NOT proof the table has no columns. */
+  replayFailed: boolean;
+}
+
 /**
  * Column names per table, derived by replaying each table's own `CREATE TABLE`
  * DDL against a throwaway in-memory database and reading `PRAGMA table_info`.
@@ -193,13 +223,19 @@ const STATUS_LIKE_COLUMN_RE = /status|state|error|outcome|failed/i;
  * A handful of tables (the FTS5 shadow tables `messages_fts_data/idx/docsize/
  * config`) use reserved internal names that `node:sqlite` refuses to
  * `CREATE TABLE` directly outside the fts5 module's own bookkeeping; those
- * fail closed to an empty column list rather than aborting the whole scan —
- * safe here because none of them are anti-dodge candidates (their real columns
- * are `id`/`block`, `id`/`sz`, `segid`/`term`/`pgno`, `k`/`v`).
+ * fail replay and are marked `replayFailed: true` rather than aborting the
+ * whole scan — today safe against anti-dodge because none of them are
+ * candidates (their real columns are `id`/`block`, `id`/`sz`,
+ * `segid`/`term`/`pgno`, `k`/`v`), but `replayFailed` is NOT proof of "zero
+ * columns": check (2b) falls back to scanning the DDL TEXT itself for a
+ * table marked `replayFailed`, the same anti-dodge symmetry the
+ * self-provisioned path (`extractCreateTableDdl` + `STATUS_LIKE_COLUMN_RE`)
+ * already has — a future migrated table that fails standalone replay must
+ * not silently look column-less and skip anti-dodge.
  */
-function columnsByTable(snapshot: SchemaSnapshot): Map<string, string[]> {
+function columnsByTable(snapshot: SchemaSnapshot): Map<string, ColumnIntrospection> {
   const db = new DatabaseSync(':memory:');
-  const columns = new Map<string, string[]>();
+  const columns = new Map<string, ColumnIntrospection>();
   try {
     for (const [table, { createSql }] of snapshot) {
       try {
@@ -207,12 +243,12 @@ function columnsByTable(snapshot: SchemaSnapshot): Map<string, string[]> {
         const rows = db.prepare(`PRAGMA table_info("${table.replaceAll('"', '""')}")`).all() as Array<{
           name: string;
         }>;
-        columns.set(
-          table,
-          rows.map((row) => row.name),
-        );
+        columns.set(table, {
+          columns: rows.map((row) => row.name),
+          replayFailed: false,
+        });
       } catch {
-        columns.set(table, []);
+        columns.set(table, { columns: [], replayFailed: true });
       }
     }
   } finally {
@@ -465,7 +501,25 @@ export function scanDurabilityWriterInvariant(
   // (2b) anti-dodge — a suspicious column in NON_STATUS_TABLES needs a justification.
   const columns = columnsByTable(snapshot);
   for (const table of nonStatusTables) {
-    const tableColumns = columns.get(table) ?? [];
+    const introspection = columns.get(table);
+    if (introspection?.replayFailed) {
+      // Fail-closed symmetry with the self-provisioned anti-dodge path: this
+      // table's own createSql couldn't be replayed standalone (today, only
+      // the four FTS5 shadow tables), so `PRAGMA table_info` never ran and
+      // real columns are genuinely unknown — NOT proof of zero columns.
+      // Fall back to scanning the DDL TEXT itself with the same regex, so a
+      // status-shaped column can't hide behind a replay failure.
+      const createSql = snapshot.get(table)?.createSql ?? '';
+      if (STATUS_LIKE_COLUMN_RE.test(createSql) && !nonStatusJustifications[table]?.trim()) {
+        findings.push({
+          kind: 'anti-dodge-unjustified',
+          table,
+          detail: `NON_STATUS table '${table}' could not be standalone-replayed to introspect real columns (its createSql throws outside migration context), but its DDL text matches /status|state|error|outcome|failed/i with no entry in NON_STATUS_JUSTIFICATIONS`,
+        });
+      }
+      continue;
+    }
+    const tableColumns = introspection?.columns ?? [];
     const suspicious = tableColumns.filter((c) => STATUS_LIKE_COLUMN_RE.test(c));
     if (suspicious.length === 0) continue;
     if (!nonStatusJustifications[table]?.trim()) {
@@ -563,7 +617,7 @@ export function scanDurabilityWriterInvariant(
     }
   }
 
-  return { findings, tablesScanned: snapshot.size, registryTablesChecked };
+  return { findings, tablesScanned: snapshot.size, registryTablesChecked, discoveredTableCount: discovered.size };
 }
 
 /**
@@ -589,6 +643,20 @@ export function evaluateDurabilityWriterInvariant(
       };
     }
     const result = scanDurabilityWriterInvariant(snapshot, repoRoot, input);
+    if (result.discoveredTableCount === 0) {
+      // Same non-vacuity doctrine as the empty-snapshot floor above, applied
+      // to check (1b)'s discovery half: a real checkout always has dozens of
+      // `CREATE TABLE` occurrences under src/. Zero discovered means the scan
+      // didn't run (missing/unreadable src/, or an empty injected discovery
+      // map) — check 1b's absence of unregistered-self-provisioned-table
+      // findings in that case is a vacuous "nothing to see", not proof of
+      // completeness, and must not read as pass.
+      return {
+        status: 'inconclusive',
+        reason:
+          'discoverCreateTableNames() found zero CREATE TABLE occurrences under src/; check (1b) did not actually scan anything',
+      };
+    }
     return result.findings.length === 0 ? { status: 'pass', result } : { status: 'violation', result };
   } catch (err) {
     return {

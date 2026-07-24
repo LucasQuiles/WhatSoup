@@ -2,7 +2,7 @@
 
 **Status:** Active — refreshed at canonical main `3f560389aa14112ff91350ecfb841e771d99e6d9`, which understands migrations through 44; the schema-ceiling prerequisite is implemented on the current branch but remains unmerged/unpublished pending Task 1 verification and later fleet verification; no provider-lifecycle implementation or deployment is authorized
 
-**Schema allocation:** current canonical schema is migration 45; bounded terminal recovery/canonical `not_sent` is forward migration 46; the provider-event lifecycle ledger is migration 47.
+**Schema allocation:** current canonical schema is migration 45; bounded terminal recovery/canonical `not_sent` is forward migration 46; the provider-event lifecycle ledger is migration 47. Migration 45 (`recovery_runs.status`) is consumed by unmerged #1789, currently in flight; that consumption is why terminal recovery is forward migration 46 and the lifecycle ledger is 47.
 
 > **REQUIRED COMPANION SKILL:** superpowers:spec-driven-development
 
