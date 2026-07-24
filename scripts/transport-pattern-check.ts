@@ -147,6 +147,26 @@ export function scanAll(repoRoot: string, specs: RuleSpec[] = loadRuleSpecs()): 
   return out;
 }
 
+/**
+ * The set of distinct files the rule globs would examine. Used only to refuse a vacuous run:
+ * zero files means the scope resolved to nothing (wrong --root, empty tree), and "0 violations
+ * over 0 files" must not read as a pass — the same non-vacuity discipline as the #2102 guards.
+ */
+export function collectScannableFiles(
+  repoRoot: string,
+  specs: RuleSpec[] = loadRuleSpecs(),
+): Set<string> {
+  const files = new Set<string>();
+  for (const spec of specs) {
+    for (const globRoot of spec.params.globs) {
+      for (const abs of walkFiles(path.join(repoRoot, globRoot), spec.params.extensions)) {
+        files.add(abs);
+      }
+    }
+  }
+  return files;
+}
+
 // ---------------------------------------------------------------------------
 // Baseline (ratchet) helpers
 // ---------------------------------------------------------------------------
@@ -340,8 +360,20 @@ Fix the new occurrences, or — if they are intentional — review and run:
     return 1;
   }
 
+  // Non-vacuity floor: a "passed" verdict is only meaningful if files were actually scanned.
+  // Before this, `--root <empty>` (or a tree with no transport files) printed "passed
+  // (0 total, 0 baselined, 0 new)" having read nothing — a false green.
+  const filesScanned = collectScannableFiles(args.root, specs).size;
+  if (filesScanned === 0) {
+    console.error(
+      `transport-pattern check: INCONCLUSIVE — the rule globs matched 0 files under ${args.root}. ` +
+        'A scan that read no files finds no transport-pattern violations trivially, which is not a pass.',
+    );
+    return 2;
+  }
+
   console.log(
-    `transport-pattern check passed (${violations.length} total, ${baselinedViolations.length} baselined, 0 new)`,
+    `transport-pattern check passed (${violations.length} total, ${baselinedViolations.length} baselined, 0 new; ${filesScanned} file(s) scanned)`,
   );
   return 0;
 }

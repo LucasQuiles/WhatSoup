@@ -12,14 +12,17 @@
  */
 import type { Database } from '../../core/database.ts';
 import type { AgentFallbackEntry } from '../../core/fallback-chain.ts';
+import type { IncomingMessage } from '../../core/types.ts';
 import { createChildLogger } from '../../logger.ts';
 import { GLOBAL_CONVERSATION_KEY, toConversationKey } from '../../core/conversation-key.ts';
 import type { fetchAnthropicModelIdsWithStatus } from '../../lib/model-advisor.ts';
+import type { CommandResult } from './commands.ts';
 import {
   getPreference,
   setPreference,
   pruneExpired,
   clearChatPreference,
+  promoteToSticky,
   type PreferenceIntent,
 } from './chat-preference-db.ts';
 import { preferenceKeys } from './preference-keys.ts';
@@ -28,12 +31,14 @@ import { resolveModelCatalogue } from './model-catalogue-resolver.ts';
 import type { ModelRouteEvent } from './route-events.ts';
 import type { RouteDecision } from './route-resolution.ts';
 import { isProviderId } from './providers/index.ts';
+import { isExplicitModelId } from './commands.ts';
 import type { listModelCatalog } from './providers/binary-preflight.ts';
 import { getProviderBinary, type SessionManager } from './session.ts';
 import type { IOutboundQueue } from './outbound-queue.ts';
 import type { OperationTracker } from './operation-tracker.ts';
 import {
   sendModelCatalogue,
+  configuredModelEntries,
   type ModelCatalogueRenderPort,
 } from './model-catalogue-render.ts';
 import {
@@ -51,6 +56,11 @@ const GLOBAL_TOOL_SCOPE_KEY = GLOBAL_CONVERSATION_KEY;
 
 /** TTL for an ephemeral (non-sticky) route preference row. */
 export const PREFERENCE_TTL_MS = 24 * 60 * 60 * 1000;
+
+// Only the receipt's promised bare reply mutates routing (Q-CANARY model-pin
+// `keep` contract, 2026-07-23). Conversational uses such as "please keep it"
+// must continue to the agent unchanged.
+const BARE_KEEP_RE = /^\s*keep[\s!.]*$/i;
 
 /**
  * Task G (D14) — outcome of applyRouteChangeAndRecycle: 'recycled' (idle,
@@ -101,6 +111,84 @@ export interface ModelPinPort extends ModelCatalogueRenderPort {
   ): 'set' | 'refreshed' | 'sticky_kept';
   routablePinTargets(): string[];
   renderRouteStatus(chatJid: string, senderJid: string): string;
+  /** Terminal durability completion for text handled locally without an
+   *  agent turn (R14 shape) — a no-op when inboundSeq is undefined. */
+  completeLocalInbound(inboundSeq: number | undefined): void;
+}
+
+/**
+ * Full bare-`keep` interception (Q-CANARY model-pin `keep` contract,
+ * 2026-07-23) — the ONE call site runtime.ts needs. Only the receipt's
+ * promised bare reply mutates routing; conversational uses like "please keep
+ * it" continue to the agent unchanged (BARE_KEEP_RE requires an exact match).
+ * Eligibility is evaluated at `msg.timestamp` (the inbound's own receive
+ * time, epoch seconds), never `Date.now()` at processing time, so a
+ * provider-queue delay cannot turn an on-time reply into a false "expired"
+ * refusal. Returns true iff this call fully handled the inbound (sent the
+ * reply and terminalized the durability row) — the caller must return
+ * immediately without any further dispatch.
+ */
+export function tryHandleBareKeep(port: ModelPinPort, classified: CommandResult, chatJid: string, msg: IncomingMessage): boolean {
+  if (classified.type !== 'message' || !BARE_KEEP_RE.test(classified.text)) return false;
+  const keepReply = handleBareKeep(port, chatJid, msg.senderJid, msg.timestamp * 1000);
+  if (keepReply === null) return false;
+  port.sendDirect(chatJid, keepReply);
+  port.completeLocalInbound(msg.inboundSeq);
+  return true;
+}
+
+/**
+ * Promote the chat's current live route preference to a permanent pin.
+ * `nowMs` is the caller's eligibility instant. Delegates the actual
+ * compare-and-set to `promoteToSticky` (chat-preference-db.ts, the
+ * preference SSOT): only the row that is STILL the chat's winning preference
+ * at `nowMs` AND still belongs to the confirming sender is promoted — never
+ * a stale, reset, or someone-else's pin. Returns null ONLY for `absent`
+ * (nothing pending for this chat), which lets the bare "keep" fall through
+ * as ordinary text via {@link tryHandleBareKeep}; every other outcome is
+ * handled locally with a truthful, visible reply.
+ */
+function handleBareKeep(port: ModelPinPort, chatJid: string, senderJid: string, nowMs: number): string | null {
+  const { chatKey, senderKey } = preferenceKeys(port.db, chatJid, senderJid);
+
+  let result: ReturnType<typeof promoteToSticky>;
+  try {
+    result = promoteToSticky(port.db, chatKey, senderKey, nowMs);
+  } catch (err) {
+    log.warn({ err, instance: port.instanceName }, 'keep: preference promotion failed');
+    return `_Couldn't confirm that pin right now — nothing changed. Try again, or /model to re-pin._`;
+  }
+
+  const label = result.preference
+    ? (result.preference.modelPinVerified === true ? result.preference.requestedModel : null)
+      ?? (result.preference.requestedProvider ?? result.preference.intent)
+    : null;
+
+  switch (result.outcome) {
+    case 'absent':
+      return null;
+    case 'expired':
+      return `_That pin already expired. /model to set a new one._`;
+    case 'actor_mismatch':
+      return `_Only whoever set this chat's pin can keep it. /model to set your own._`;
+    case 'superseded':
+      return `_That pin changed before "keep" landed — nothing was promoted. /model to check the current route._`;
+    case 'already_sticky':
+      return `_${label} is already kept for this chat. /reset to undo._`;
+    case 'promoted': {
+      const pref = result.preference!;
+      port.emitRouteEventChecked({
+        event: 'model_preference_made_sticky',
+        conversationKey: toConversationKey(chatJid),
+        provider: pref.requestedProvider ?? `intent:${pref.intent}`,
+        modelRef: pref.requestedModel,
+        source: 'user',
+        userVisible: true,
+        reasonCode: 'user_pin_kept',
+      });
+      return `_Keeping ${label} for this chat until you /reset._`;
+    }
+  }
 }
 
 /**
@@ -361,10 +449,26 @@ export function recycleLiveSession(
  */
 export function renderPinOutcomeEcho(
   port: ModelPinPort,
+  chatJid: string,
+  senderJid: string,
   label: string,
   outcome: RouteRecycleOutcome,
 ): string {
-  return renderPinPreferenceOutcome(label, outcome, fallbackRouteLabel(port.effectiveFallbackEntry));
+  return renderPinPreferenceOutcome(
+    label,
+    outcome,
+    fallbackRouteForResolvedPreference(port, chatJid, senderJid),
+  );
+}
+
+function fallbackRouteForResolvedPreference(
+  port: ModelPinPort,
+  chatJid: string,
+  senderJid: string,
+): string | null {
+  return port.resolveRouteForTurn(chatJid, senderJid).reasonCode === 'fallback_window_active_model_pin'
+    ? null
+    : fallbackRouteLabel(port.effectiveFallbackEntry);
 }
 
 /**
@@ -394,12 +498,87 @@ export function echoReconfirmOutcome(
   const fallbackOutcome = fallbackReconfirmationOutcome(
     label,
     alreadySetText,
-    fallbackRouteLabel(port.effectiveFallbackEntry),
+    fallbackRouteForResolvedPreference(port, chatJid, senderJid),
   );
   if (fallbackOutcome) return fallbackOutcome;
   const recycleOutcome = applyRouteChangeAndRecycle(port, chatJid, senderJid, perChatMapKey);
   if (recycleOutcome === 'noop') return alreadySetText;
-  return renderPinOutcomeEcho(port, label, recycleOutcome);
+  return renderPinOutcomeEcho(port, chatJid, senderJid, label, recycleOutcome);
+}
+
+/**
+ * Slice 1 — the shared pin tail. Records a resolved (provider, model)
+ * selection, verifies it against the catalogue at pin time (Task H), applies
+ * the live-session recycle (Task G), and echoes the outcome. Factored out of
+ * the `/model N` numbered-pick branch so the `/model <vendor/model>` direct
+ * selector reuses the EXACT same sink — one verify seam, one echo vocabulary,
+ * byte-identical pins — rather than a divergent copy that could drift.
+ *
+ * ROUTABILITY IS NOT VALIDATED HERE. Both callers resolve to a (provider,
+ * model) that is CONFIGURED, not necessarily routable: `configuredModelEntries`
+ * and the numbered pick's snapshot (`sendDynamicModelCatalogueSection`) are
+ * both credential-UNFILTERED. The selector gates at PROVIDER granularity
+ * (`routablePinTargets`) before calling this; the numbered `/model N` pick does
+ * not gate at all. Neither gates at MODEL granularity — a model whose provider
+ * is routable via a credentialed SIBLING model but which is itself
+ * uncredentialed can still be pinned here. A model-level routability gate for
+ * BOTH paths is owed debt (needs a model-aware port accessor). A future third
+ * caller must therefore NOT assume this sink rejects an un-routable pin.
+ */
+async function pinConfiguredModelEntry(
+  port: ModelPinPort,
+  ctx: {
+    chatJid: string;
+    senderJid: string;
+    perChatMapKey: string | undefined;
+    chatKey: string;
+    senderKey: string;
+  },
+  providerId: string,
+  modelId: string,
+): Promise<void> {
+  const { chatJid, senderJid, perChatMapKey, chatKey, senderKey } = ctx;
+  const outcome = recordRouteModelPin(port, chatJid, chatKey, senderKey, providerId, modelId);
+  if (outcome === 'refreshed') {
+    port.sendDirect(chatJid, echoReconfirmOutcome(
+      port, chatJid, senderJid, perChatMapKey, modelId,
+      '_Already set — extended for another 24h. /reset to go back to the default route._',
+    ));
+    return;
+  }
+  if (outcome === 'sticky_kept') {
+    port.sendDirect(chatJid, echoReconfirmOutcome(
+      port, chatJid, senderJid, perChatMapKey, modelId,
+      '_Already set (sticky). /reset to go back to the default route._',
+    ));
+    return;
+  }
+  // Task H: verify the fresh pin against the catalogue BEFORE the echo
+  // (awaited — no fire-and-forget) so a subsequent read (this same reply,
+  // /model status, a next-session spawn) never observes an unverified pin
+  // the catalogue would have rejected.
+  const verifyResult = await verifyModelPinAgainstCatalogue(port, chatKey, senderKey, providerId, modelId);
+  if (typeof verifyResult === 'object') {
+    port.sendDirect(
+      chatJid,
+      `_Couldn't pin ${modelId} — ${verifyResult.dropped}. Still on the default route; try /model list._`,
+    );
+    return;
+  }
+  // Task G: the recycle must run AFTER H's verify — resolveRouteForTurn needs
+  // the now-VERIFIED pin, or a recycle here would respawn the session on the
+  // provider default and defeat the switch. Still runs on a DEFERRED verify
+  // too — a provider switch (if any) is real even though the model stays
+  // unverified.
+  const recycleOutcome = applyRouteChangeAndRecycle(port, chatJid, senderJid, perChatMapKey);
+  if (verifyResult === 'deferred') {
+    port.sendDirect(
+      chatJid,
+      `_Pinned ${providerId} — ${modelId} pending a catalogue check; using ${providerId}'s default until then. /reset to undo._`,
+    );
+    return;
+  }
+  port.sendDirect(chatJid, renderPinOutcomeEcho(port, chatJid, senderJid, modelId, recycleOutcome));
 }
 
 /**
@@ -493,7 +672,7 @@ export async function handleModelCommand(
     // Task G: apply the switch immediately (idle) or defer it to the
     // next message (busy) — the echo below discloses which.
     const recycleOutcome = applyRouteChangeAndRecycle(port, chatJid, senderJid, perChatMapKey);
-    port.sendDirect(chatJid, renderPinOutcomeEcho(port, `\`${entry.providerId}\``, recycleOutcome));
+    port.sendDirect(chatJid, renderPinOutcomeEcho(port, chatJid, senderJid, `\`${entry.providerId}\``, recycleOutcome));
     return;
   }
   // D6/D10/D16: `/model N` / `/model N<letter>` — a named-model pin
@@ -507,53 +686,69 @@ export async function handleModelCommand(
       sendModelCatalogue(port, chatJid, senderJid, null);
       return;
     }
-    const outcome = recordRouteModelPin(port, chatJid, chatKey, senderKey, entry.providerId, entry.id);
-    if (outcome === 'refreshed') {
-      port.sendDirect(chatJid, echoReconfirmOutcome(
-        port, chatJid, senderJid, perChatMapKey, entry.id,
-        '_Already set — extended for another 24h. /reset to go back to the default route._',
-      ));
-      return;
-    }
-    if (outcome === 'sticky_kept') {
-      port.sendDirect(chatJid, echoReconfirmOutcome(
-        port, chatJid, senderJid, perChatMapKey, entry.id,
-        '_Already set (sticky). /reset to go back to the default route._',
-      ));
-      return;
-    }
-    // Task H: verify the fresh pin against the catalogue BEFORE the
-    // echo (awaited — no fire-and-forget) so a subsequent read
-    // (this same reply, /model status, a next-session spawn) never
-    // observes an unverified pin the catalogue would have rejected.
-    const verifyResult = await verifyModelPinAgainstCatalogue(port, chatKey, senderKey, entry.providerId, entry.id);
-    if (typeof verifyResult === 'object') {
+    // The record→verify→recycle→echo tail is the shared pin sink (Slice 1) —
+    // the `/model <vendor/model>` direct selector below reuses it verbatim.
+    await pinConfiguredModelEntry(
+      port,
+      { chatJid, senderJid, perChatMapKey, chatKey, senderKey },
+      entry.providerId,
+      entry.id,
+    );
+    return;
+  }
+  // Slice 1 — `/model <vendor/model>` direct selector (power-user path). The
+  // classifier (commands.ts isStructuredModelArg) only routes an explicit
+  // `vendor/model` id here; resolve it against the CONFIGURED (provider, model)
+  // entries — the exact set /model list enumerates — then pin through the SAME
+  // sink the numbered pick uses. rawArgs (case-PRESERVED, not the lowercased
+  // `sub`) because model ids are case-sensitive.
+  const directModelId = (args ?? '').trim();
+  if (isExplicitModelId(directModelId)) {
+    // F03: MODEL_ID_RE excludes the markdown-breaking chars (backtick, *, \n),
+    // but admits `_` (breaks WhatsApp italics) and has NO length cap, so bound
+    // the user-controlled id before echoing it into a possibly-group chat —
+    // mirroring the provider-id reject path's sanitize+cap discipline.
+    const shownId = directModelId.length > 64 ? `${directModelId.slice(0, 64)}…` : directModelId;
+    const matches = configuredModelEntries(port).filter((entry) => entry.model === directModelId);
+    if (matches.length === 0) {
       port.sendDirect(
         chatJid,
-        `_Couldn't pin ${entry.id} — ${verifyResult.dropped}. Still on the default route; try /model list._`,
+        `_${shownId} isn't configured on this instance. Use /model list to see configured models._`,
       );
       return;
     }
-    // Task G: the recycle must run AFTER H's verify — resolveRouteForTurn
-    // needs the now-VERIFIED pin, or a recycle here would respawn the
-    // session on the provider default and defeat the switch. Still
-    // runs on a DEFERRED verify too — a provider switch (if any) is
-    // real even though the model itself stays unverified.
-    const recycleOutcome = applyRouteChangeAndRecycle(port, chatJid, senderJid, perChatMapKey);
-    if (verifyResult === 'deferred') {
-      // MINOR 3 (final-review): decideModelPinResolution's
-      // needs-catalogue fail-open means an unverified pin never
-      // sets route.model — only a provider switch (if the pin's
-      // provider is eligible) actually takes effect. The old D10
-      // echo claimed the specific model was pinned/serving
-      // regardless; say what actually happens instead.
+    if (matches.length > 1) {
+      // Two configured routes share this model id (different providers) — a
+      // silent array-order pick would be a coin flip. Make the user
+      // disambiguate by number instead.
       port.sendDirect(
         chatJid,
-        `_Pinned ${entry.providerId} — ${entry.id} pending a catalogue check; using ${entry.providerId}'s default until then. /reset to undo._`,
+        `_${shownId} matches more than one configured route. Use /model list and reply with its number._`,
       );
       return;
     }
-    port.sendDirect(chatJid, renderPinOutcomeEcho(port, entry.id, recycleOutcome));
+    const target = matches[0]!;
+    // F07 parity with `/model <provider>` (below): reject a non-routable target
+    // at SET time so recording it can't force slice-2 resolution into a
+    // hard-fail or silent fallback. NOTE the granularity: routablePinTargets is
+    // PER-PROVIDER, so this rejects only when the whole PROVIDER is
+    // un-routable. A model whose provider is routable via a credentialed
+    // SIBLING model but which is itself uncredentialed still passes here — the
+    // same (wider) gap the ungated `/model N` path has. A model-level gate for
+    // both paths is owed debt (needs a model-aware port accessor).
+    if (!port.routablePinTargets().includes(target.provider)) {
+      port.sendDirect(
+        chatJid,
+        `_${shownId} isn't available on this instance right now. Use /model list to see what you can pick._`,
+      );
+      return;
+    }
+    await pinConfiguredModelEntry(
+      port,
+      { chatJid, senderJid, perChatMapKey, chatKey, senderKey },
+      target.provider,
+      target.model,
+    );
     return;
   }
   const isIntent = sub === 'strongest' || sub === 'fastest';
@@ -611,5 +806,5 @@ export async function handleModelCommand(
     return;
   }
   const recycleOutcome = applyRouteChangeAndRecycle(port, chatJid, senderJid, perChatMapKey);
-  port.sendDirect(chatJid, renderPinOutcomeEcho(port, what, recycleOutcome));
+  port.sendDirect(chatJid, renderPinOutcomeEcho(port, chatJid, senderJid, what, recycleOutcome));
 }

@@ -450,6 +450,7 @@ vi.mock('../../../src/mcp/registry.ts', () => ({
     getChatScopedToolNames = vi.fn(() => []);
     setDurability = vi.fn();
     setSensitiveToolAuthorizer = vi.fn();
+    withModule = vi.fn((_name: string, fn: () => void) => fn());
   },
 }));
 
@@ -478,6 +479,7 @@ void _mockQueueTypeCheck; // suppress unused-variable warning
 import { AgentRuntime } from '../../../src/runtimes/agent/runtime.ts';
 import { __resetModelCatalogueCacheForTest } from '../../../src/runtimes/agent/model-catalogue-resolver.ts';
 import { Database as RealDatabase } from '../../../src/core/database.ts';
+import { DurabilityEngine } from '../../../src/core/durability.ts';
 
 function makeMessenger(): { messenger: Messenger; sentMessages: Array<{ jid: string; text: string }> } {
   const sentMessages: Array<{ jid: string; text: string }> = [];
@@ -502,7 +504,11 @@ function makeMsg(overrides: Partial<IncomingMessage> = {}): IncomingMessage {
     isFromMe: false,
     isGroup: false,
     mentionedJids: [],
-    timestamp: Date.now(),
+    // IncomingMessage.timestamp is Unix epoch SECONDS (core/types.ts;
+    // production sets it via normalizeUnixTimestampSeconds) — not
+    // Date.now()'s milliseconds. Bare-keep eligibility now does real
+    // arithmetic on this field, so the unit must match the real contract.
+    timestamp: Math.floor(Date.now() / 1000),
     quotedMessageId: null,
     contentText: null,
     isResponseWorthy: true,
@@ -621,6 +627,21 @@ describe('NL routing handlers (nlRouting flag)', () => {
   function prefRows(): Array<Record<string, unknown>> {
     return (routingDb.raw as unknown as { prepare: (s: string) => { all: () => Array<Record<string, unknown>> } })
       .prepare('SELECT * FROM chat_model_preference').all();
+  }
+
+  async function readEvents(): Promise<Array<Record<string, unknown>>> {
+    // node:fs is partially mocked file-wide (readFileSync is stubbed);
+    // node:fs/promises is NOT mocked, so reads go to the real file that the
+    // sidecar's (real) appendFileSync wrote.
+    const fsp = await import('node:fs/promises');
+    const path = await import('node:path');
+    const file = path.join(eventsDir, 'route-events.ndjson');
+    try {
+      const raw = await fsp.readFile(file, 'utf8');
+      return raw.trim().split('\n').filter(Boolean).map((l) => JSON.parse(l) as Record<string, unknown>);
+    } catch {
+      return [];
+    }
   }
 
   it('D13: a chat-scoped pin steers a DIFFERENT sender turn to the same route (read-collapse at spawn)', async () => {
@@ -787,8 +808,11 @@ describe('NL routing handlers (nlRouting flag)', () => {
       expect(menu).toContain('Reply `/model N` to switch to that one.');
     });
 
-    it('marks and acknowledges the effective fallback route instead of claiming the saved primary preference is current', async () => {
-      cfgAny().agentFallbacks = [{ provider: 'claude-cli', model: 'haiku-fast' }];
+    it('acknowledges a verified exact model pin honored within the active fallback provider', async () => {
+      cfgAny().agentFallbacks = [
+        { provider: 'claude-cli', model: 'haiku-fast' },
+        { provider: 'claude-cli', model: 'claude-opus-4-8' },
+      ];
       const anthropicFn = vi.fn().mockResolvedValue({
         status: 'ok',
         ids: ['claude-opus-4-8', 'haiku-fast'],
@@ -815,13 +839,16 @@ describe('NL routing handlers (nlRouting flag)', () => {
         content: '/model 1',
         messageId: 'model-primary-during-fallback',
       }));
-      expect(allReplies(sentMessages).join('\n')).toContain(
-        'Saved claude-opus-4-8 as this chat\'s 24h preference. Health fallback is active; new sessions still use claude-cli (haiku-fast) until recovery.',
-      );
+      const reply = allReplies(sentMessages).join('\n');
+      expect(reply).toContain('Now answering with claude-opus-4-8');
+      expect(reply).not.toContain('new sessions still use claude-cli (haiku-fast)');
     });
 
-    it('reconfirms a saved model as a preference without claiming it displaced the live fallback', async () => {
-      cfgAny().agentFallbacks = [{ provider: 'claude-cli', model: 'haiku-fast' }];
+    it('reconfirms a verified exact model pin without falsely claiming fallback overrides it', async () => {
+      cfgAny().agentFallbacks = [
+        { provider: 'claude-cli', model: 'haiku-fast' },
+        { provider: 'claude-cli', model: 'claude-opus-4-8' },
+      ];
       const anthropicFn = vi.fn().mockResolvedValue({
         status: 'ok',
         ids: ['claude-opus-4-8', 'haiku-fast'],
@@ -842,9 +869,9 @@ describe('NL routing handlers (nlRouting flag)', () => {
       sentMessages.length = 0;
       await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model 1', messageId: 'reconfirm-primary' }));
 
-      expect(allReplies(sentMessages).join('\n')).toContain(
-        'Saved preference remains claude-opus-4-8 (extended for 24h). Health fallback is active; new sessions still use claude-cli (haiku-fast) until recovery.',
-      );
+      const reply = allReplies(sentMessages).join('\n');
+      expect(reply).toContain('Already set — extended for another 24h');
+      expect(reply).not.toContain('new sessions still use claude-cli (haiku-fast)');
     });
 
     it('keeps the live session marked active when fallback only controls the next session', async () => {
@@ -1100,16 +1127,11 @@ describe('NL routing handlers (nlRouting flag)', () => {
       expect(status).toContain('Saved preference: exotic/model-x');
     });
 
-    it('a verified model pin does NOT override an active health failover (source=fallback), even when validatedProvider matches the fallback provider', async () => {
-      // resolveRoute's fallback branch returns EARLY on an active window
-      // ("health beats preference" — route-resolution.ts) with the
-      // OPERATOR-configured fallback model, before it ever reads pref. Task
-      // H's sync-consumption block only applies when `decision.source ===
-      // 'preference'` — during a fallback window `decision.source` is
-      // 'fallback', so the pin is never consulted, even if the user's
-      // verified pin happens to be validated against the SAME provider the
-      // fallback window selected. Health beats preference, full stop.
-      cfgAny().agentFallbacks = [{ provider: 'claude-cli', model: 'claude-haiku-4-5' }];
+    it('a verified exact model pin refines an active health failover only within its selected provider', async () => {
+      cfgAny().agentFallbacks = [
+        { provider: 'claude-cli', model: 'claude-haiku-4-5' },
+        { provider: 'claude-cli', model: 'claude-sonnet-5' },
+      ];
       const { runtime, sentMessages } = makeRoutingRuntime({ model: 'claude-opus-4-8' });
       const prefMod = await import('../../../src/runtimes/agent/chat-preference-db.ts');
       const keysMod = await import('../../../src/runtimes/agent/preference-keys.ts');
@@ -1139,10 +1161,10 @@ describe('NL routing handlers (nlRouting flag)', () => {
       const status = allReplies(sentMessages).find((t) => t.includes('*Current route:*'));
       expect(status).toBeDefined();
       expect(status).toContain('Fallback: active');
-      // The fallback's operator-configured model wins — the verified pin
-      // (even same-provider) never bleeds into an active failover window.
-      expect(status).toContain('Model: claude-haiku-4-5');
-      expect(status).not.toContain('Model: claude-sonnet-5');
+      expect(status).toContain('Model: claude-sonnet-5');
+      expect(status).not.toContain('Model: claude-haiku-4-5');
+      expect(status).toContain('Saved preference: claude-sonnet-5');
+      expect(status).toContain('active within the health fallback provider');
     });
 
     it('a verified model pin does NOT leak onto a pin_blocked_default route, even when validatedProvider coincidentally matches the default provider', async () => {
@@ -1593,4 +1615,374 @@ describe('NL routing handlers (nlRouting flag)', () => {
     expect(reply).not.toContain('Applies from your next session');
   });
 
+  // Q-CANARY model-pin `keep` contract (2026-07-23): the bare-reply promise
+  // every successful pin receipt advertises ("reply keep to make it
+  // permanent") now has a local handler. tryHandleBareKeep/handleBareKeep
+  // live in model-pin.ts (src/runtimes/agent/model-pin.ts) — see that
+  // module for the compare-and-set + actor-policy implementation detail;
+  // this suite proves the observable behavior through the same real-runtime
+  // harness as the rest of this file.
+  describe('bare keep promotes a temporary route pin to permanent', () => {
+    async function seedTemporaryVerifiedPin(chatJid: string, senderJid: string, now = Date.now()): Promise<void> {
+      const prefMod = await import('../../../src/runtimes/agent/chat-preference-db.ts');
+      const keysMod = await import('../../../src/runtimes/agent/preference-keys.ts');
+      const { chatKey, senderKey } = keysMod.preferenceKeys(routingDb, chatJid, senderJid);
+      prefMod.setPreference(routingDb, {
+        chatJid: chatKey,
+        senderJid: senderKey,
+        intent: 'provider_specific',
+        requestedProvider: 'opencode-cli',
+        scope: 'this_thread',
+        pinStrict: true,
+        fallbackPermitted: false,
+        updatedAt: now,
+        expiresAt: now + 24 * 60 * 60 * 1000,
+        requestedModel: 'kimi/kimi-k3',
+        validatedProvider: 'opencode-cli',
+        modelPinVerified: true,
+      });
+    }
+
+    it('survives read-back, pruning, and the original TTL horizon', async () => {
+      vi.useFakeTimers({ toFake: ['Date'] });
+      const base = 1_800_000_000_000;
+      vi.setSystemTime(base);
+      const { runtime, sentMessages } = makeRoutingRuntime({ model: 'claude-opus-4-8' });
+      await seedTemporaryVerifiedPin(CHAT, SENDER_A, base);
+      expect(prefRows()[0].expires_at).toBe(base + 24 * 60 * 60 * 1000);
+
+      await sendAndDrain(runtime, makeMsg({
+        chatJid: CHAT,
+        senderJid: SENDER_A,
+        content: 'keep',
+        messageId: 'msg-2',
+      }));
+      expect(allReplies(sentMessages).join('\n')).toContain(
+        '_Keeping kimi/kimi-k3 for this chat until you /reset._',
+      );
+      expect(prefRows()[0]).toMatchObject({
+        expires_at: null,
+        requested_model: 'kimi/kimi-k3',
+        requested_provider: 'opencode-cli',
+        model_pin_verified: 1,
+      });
+
+      const prefMod = await import('../../../src/runtimes/agent/chat-preference-db.ts');
+      prefMod.pruneExpired(routingDb, base + 1_000 * 365 * 24 * 60 * 60 * 1000);
+      expect(prefRows()).toHaveLength(1);
+      expect(prefRows()[0].expires_at).toBeNull();
+      vi.setSystemTime(base + 25 * 60 * 60 * 1000);
+      await sendAndDrain(runtime, makeMsg({
+        chatJid: CHAT,
+        senderJid: SENDER_A,
+        content: '/model status',
+        messageId: 'msg-3',
+      }));
+      expect(allReplies(sentMessages).filter((text) => text.includes('*Current route:*')).pop())
+        .toContain('Saved preference: kimi/kimi-k3');
+    });
+
+    it('forwards bare keep unchanged when no live pin exists', async () => {
+      const { runtime, sentMessages } = makeRoutingRuntime();
+      await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: 'keep' }));
+      expect(prefRows()).toHaveLength(0);
+      expect(mockSession.sendTurn).toHaveBeenCalled();
+      expect(allReplies(sentMessages).join('\n')).not.toMatch(/Keeping|already kept/i);
+    });
+
+    it('is idempotent for an already-permanent pin', async () => {
+      const { runtime, sentMessages } = makeRoutingRuntime({ model: 'claude-opus-4-8' });
+      await seedTemporaryVerifiedPin(CHAT, SENDER_A);
+      await sendAndDrain(runtime, makeMsg({
+        chatJid: CHAT,
+        senderJid: SENDER_A,
+        content: 'keep',
+        messageId: 'msg-2',
+      }));
+      const updatedAt = prefRows()[0].updated_at;
+      mockSession.sendTurn.mockClear();
+      await sendAndDrain(runtime, makeMsg({
+        chatJid: CHAT,
+        senderJid: SENDER_A,
+        content: 'Keep!',
+        messageId: 'msg-3',
+      }));
+      expect(allReplies(sentMessages).join('\n')).toContain(
+        '_kimi/kimi-k3 is already kept for this chat. /reset to undo._',
+      );
+      expect(prefRows()[0].updated_at).toBe(updatedAt);
+      expect(mockSession.sendTurn).not.toHaveBeenCalled();
+    });
+
+    it('does not intercept keep embedded in a sentence', async () => {
+      const { runtime } = makeRoutingRuntime({ model: 'claude-opus-4-8' });
+      await seedTemporaryVerifiedPin(CHAT, SENDER_A);
+      mockSession.sendTurn.mockClear();
+      await sendAndDrain(runtime, makeMsg({
+        chatJid: CHAT,
+        senderJid: SENDER_A,
+        content: 'please keep it',
+        messageId: 'msg-2',
+      }));
+      expect(prefRows()[0].expires_at).not.toBeNull();
+      expect(mockSession.sendTurn).toHaveBeenCalled();
+    });
+
+    // Q-CANARY actor policy: only the sender who set the chat's current
+    // winning preference may confirm it — NOT any group member. This test
+    // used to assert the opposite (the defect GAP-CHECK flagged: "any group
+    // member may promote"); it now proves the refusal instead of the
+    // resurrection.
+    it('refuses to promote another group member\'s pin (receipt-creator-only actor policy)', async () => {
+      const { runtime, sentMessages } = makeRoutingRuntime({ model: 'claude-opus-4-8' });
+      await seedTemporaryVerifiedPin(GROUP, SENDER_A);
+      const before = prefRows()[0];
+      mockSession.sendTurn.mockClear();
+      await sendAndDrain(runtime, makeMsg({
+        chatJid: GROUP,
+        senderJid: SENDER_B,
+        isGroup: true,
+        content: 'keep',
+        messageId: 'msg-2',
+      }));
+      // No resurrection, no mutation: A's row is untouched byte-for-byte.
+      expect(prefRows()).toHaveLength(1);
+      expect(prefRows()[0]).toEqual(before);
+      expect(allReplies(sentMessages).join('\n')).toContain(
+        "_Only whoever set this chat's pin can keep it. /model to set your own._",
+      );
+      // Visible refusal, never a provider turn.
+      expect(mockSession.sendTurn).not.toHaveBeenCalled();
+    });
+
+    it('refuses a keep that arrives after the pin has already expired (no pressure involved)', async () => {
+      const { runtime, sentMessages } = makeRoutingRuntime({ model: 'claude-opus-4-8' });
+      const base = Date.now();
+      await seedTemporaryVerifiedPin(CHAT, SENDER_A, base);
+      mockSession.sendTurn.mockClear();
+      await sendAndDrain(runtime, makeMsg({
+        chatJid: CHAT,
+        senderJid: SENDER_A,
+        content: 'keep',
+        messageId: 'msg-2',
+        // Receive time itself is already past the 24h TTL — a genuinely
+        // late reply, not processing-time pressure.
+        timestamp: Math.floor((base + 25 * 60 * 60 * 1000) / 1000),
+      }));
+      expect(prefRows()[0]).toMatchObject({ scope: 'this_thread' });
+      expect(prefRows()[0].expires_at).not.toBeNull();
+      expect(allReplies(sentMessages).join('\n')).toContain(
+        '_That pin already expired. /model to set a new one._',
+      );
+      expect(mockSession.sendTurn).not.toHaveBeenCalled();
+    });
+
+    it('honors an on-time keep even when processing is delayed past the TTL (receive-time eligibility, not processing-time)', async () => {
+      const { runtime, sentMessages } = makeRoutingRuntime({ model: 'claude-opus-4-8' });
+      const base = Date.now();
+      await seedTemporaryVerifiedPin(CHAT, SENDER_A, base);
+      // Processing happens (wall-clock Date.now()) long after the 24h TTL —
+      // provider-queue pressure, exactly the Q canary scenario — but the
+      // inbound's OWN receive timestamp (msg.timestamp) is on-time.
+      vi.useFakeTimers({ toFake: ['Date'] });
+      vi.setSystemTime(base + 26 * 60 * 60 * 1000);
+      await sendAndDrain(runtime, makeMsg({
+        chatJid: CHAT,
+        senderJid: SENDER_A,
+        content: 'keep',
+        messageId: 'msg-2',
+        timestamp: Math.floor((base + 60_000) / 1000), // received 1 minute after the pin, well inside the TTL
+      }));
+      expect(allReplies(sentMessages).join('\n')).toContain(
+        '_Keeping kimi/kimi-k3 for this chat until you /reset._',
+      );
+      expect(prefRows()[0]).toMatchObject({ scope: 'sticky', expires_at: null });
+    });
+
+    it('affordance round trip: the real receipt promise, confirmed by keep, closes the loop durably with zero provider turns', async () => {
+      const { runtime, sentMessages } = makeRoutingRuntime();
+      const duraDb = new RealDatabase(':memory:');
+      duraDb.open();
+      const durability = new DurabilityEngine(duraDb);
+      runtime.setDurability(durability);
+
+      // Step 1 — render the REAL receipt (drive the actual /model handler,
+      // not a seeded fixture) and confirm it promises what the contract says.
+      await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model strongest', messageId: 'msg-1' }));
+      const receipt = allReplies(sentMessages).join('\n');
+      expect(receipt).toContain('reply keep to make it permanent');
+      expect(prefRows()[0]).toMatchObject({ scope: 'this_thread' });
+      expect(prefRows()[0].expires_at).not.toBeNull();
+
+      sentMessages.length = 0;
+      mockQueue.enqueueText.mockClear();
+      mockSession.sendTurn.mockClear();
+
+      // Step 2 — submit the EXACT advertised action as a new inbound.
+      const seq = durability.journalInbound('m-keep-rt', 'k-keep-rt', SENDER_A, 'agent');
+      await sendAndDrain(runtime, makeMsg({
+        chatJid: CHAT, senderJid: SENDER_A, content: 'keep', messageId: 'msg-2', inboundSeq: seq,
+      }));
+
+      // Promised durable state transition: scope=sticky + expires_at=NULL together.
+      expect(prefRows()).toHaveLength(1);
+      expect(prefRows()[0]).toMatchObject({ scope: 'sticky', expires_at: null });
+
+      // ONE local receipt.
+      const replies = allReplies(sentMessages);
+      expect(replies).toHaveLength(1);
+      expect(replies[0]).toContain('Keeping strongest for this chat until you /reset.');
+
+      // Terminal journal completion — never stranded in 'processing'.
+      const row = duraDb.raw.prepare(
+        'SELECT processing_status, terminal_reason FROM inbound_events WHERE seq = ?',
+      ).get(seq) as { processing_status: string; terminal_reason: string | null };
+      expect(row.processing_status).toBe('complete');
+      expect(row.terminal_reason).toBe('local_command_handled');
+
+      // ZERO provider sendTurn calls for the keep turn.
+      expect(mockSession.sendTurn).not.toHaveBeenCalled();
+
+      // Distinct typed event — never the generic model_preference_set.
+      const events = await readEvents();
+      expect(events.filter((e) => e.event === 'model_preference_made_sticky')).toHaveLength(1);
+      expect(events.filter((e) => e.event === 'model_preference_set' && e.reasonCode === 'user_pin_kept')).toHaveLength(0);
+
+      duraDb.close();
+    });
+  });
+
+  // ── Slice 1: /model <vendor/model> direct selector ─────────────────────────
+  // The power-user one-step path — pin an EXACT configured model id without
+  // first walking the numbered menu. Resolves against the same configured
+  // (provider, model) set /model list enumerates and reuses the same
+  // record→verify→recycle→echo sink as /model N (pinConfiguredModelEntry), so
+  // pins are byte-identical to the numbered pick. The F07 routability gate is
+  // this path's own responsibility (the numbered snapshot only holds routable
+  // entries) — a configured-but-non-routable id must be rejected at SET time.
+  describe('configured model-id direct selection (Slice 1)', () => {
+    it('pins an exact configured model id in one step, verified, without a prior menu snapshot', async () => {
+      // opencode-cli as the PRIMARY (agentProvider) makes it unconditionally
+      // routable (isEntryCredentialed's same-provider shortcut) AND honored by
+      // resolveRouteForTurn, so the pin + recycle are deterministic with no
+      // keyring dependency; the cross-provider F07 gate is exercised below.
+      // A slash-bearing id is required — MODEL_ID_RE mandates the vendor/model
+      // shape (a slash-less claude model is not an explicit id).
+      cfgAny().agentProvider = 'opencode-cli';
+      cfgAny().agentFallbacks = [{ provider: 'opencode-cli', model: 'glm/glm-5.2' }];
+      const listFn = vi.fn().mockResolvedValue({ status: 'ok', ids: ['kimi/kimi-k3', 'glm/glm-5.2'] });
+      const { runtime, sentMessages } = makeRoutingRuntime({ model: 'kimi/kimi-k3', modelCatalogueListFn: listFn });
+      // A live session on the default route (opencode-cli/kimi-k3) so the new
+      // pin (opencode-cli/glm-5.2) is a genuine switch → recycled echo.
+      (mockSession as unknown as { getProviderId: ReturnType<typeof vi.fn> }).getProviderId.mockReturnValue('opencode-cli');
+      (mockSession as unknown as { getModelRef: ReturnType<typeof vi.fn> }).getModelRef.mockReturnValue('kimi/kimi-k3');
+      (runtime as unknown as { session: typeof mockSession; activeChatJid: string | null }).session = mockSession;
+      (runtime as unknown as { activeChatJid: string | null }).activeChatJid = CHAT;
+
+      await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model glm/glm-5.2' }));
+
+      // Row shape is byte-identical to the C3 '/model N' HIT test — the shared
+      // pinConfiguredModelEntry sink means the selector and the numbered pick
+      // produce the same durable pin (convergence, proven by construction).
+      const rows = prefRows();
+      expect(rows).toHaveLength(1);
+      expect(rows[0].intent).toBe('provider_specific');
+      expect(rows[0].requested_provider).toBe('opencode-cli');
+      expect(rows[0].requested_model).toBe('glm/glm-5.2');
+      expect(rows[0].validated_provider).toBe('opencode-cli');
+      expect(rows[0].model_pin_verified).toBe(1);
+      expect(listFn).toHaveBeenCalledTimes(1);
+      const reply = allReplies(sentMessages).join('\n');
+      expect(reply).toContain('Now answering with glm/glm-5.2');
+      expect(reply).toContain('reply keep to make it permanent, /reset to undo');
+      // Not a reject, not a stale-defer.
+      expect(reply).not.toContain("isn't configured");
+      expect(reply).not.toContain("isn't available");
+      expect(reply).not.toContain('pending a catalogue check');
+    });
+
+    it('pins a credentialed NON-PRIMARY fallback model id — the F07 gate ACCEPT path (verified row written)', async () => {
+      // The realistic selector use the reject cases below and the happy-path
+      // above don't cover: the primary is claude-cli and the id names a
+      // CREDENTIALED non-primary FALLBACK (opencode-cli). The F07 gate must
+      // ADMIT it via routablePinTargets' credential resolution — NOT the
+      // same-provider shortcut the opencode-as-primary happy-path exercised.
+      // routablePinTargets does real per-model keyring I/O, so mock it to
+      // include opencode-cli (routable in prod; the test env lacks its
+      // per-model creds), mirroring the hybrid selector test. The row +
+      // verified bit are the deterministic gap-closer; the exact echo (recycle
+      // vs noop) depends on live-session state this test doesn't fix, so it's
+      // asserted only as "a success naming the model, never a reject".
+      cfgAny().agentFallbacks = [{ provider: 'opencode-cli', model: 'glm/glm-5.2' }];
+      const listFn = vi.fn().mockResolvedValue({ status: 'ok', ids: ['glm/glm-5.2'] });
+      const { runtime, sentMessages } = makeRoutingRuntime({ model: 'claude-opus-4-8', modelCatalogueListFn: listFn });
+      (runtime as unknown as { routablePinTargets: () => string[] }).routablePinTargets = () => ['claude-cli', 'opencode-cli'];
+
+      await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model glm/glm-5.2' }));
+
+      const rows = prefRows();
+      expect(rows).toHaveLength(1);
+      expect(rows[0].requested_provider).toBe('opencode-cli');
+      expect(rows[0].requested_model).toBe('glm/glm-5.2');
+      expect(rows[0].validated_provider).toBe('opencode-cli');
+      expect(rows[0].model_pin_verified).toBe(1);
+      expect(listFn).toHaveBeenCalledTimes(1);
+      const reply = allReplies(sentMessages).join('\n');
+      expect(reply).toContain('glm/glm-5.2');
+      expect(reply).not.toContain("isn't available");
+      expect(reply).not.toContain("isn't configured");
+      expect(reply).not.toContain('matches more than one');
+    });
+
+    it('rejects an unconfigured model id locally without writing a row or dispatching an agent turn', async () => {
+      cfgAny().agentFallbacks = [{ provider: 'opencode-cli', model: 'glm/glm-5.2' }];
+      const { runtime, sentMessages } = makeRoutingRuntime({ model: 'claude-opus-4-8' });
+
+      await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model vendor/not-configured' }));
+
+      expect(prefRows()).toHaveLength(0);
+      const reply = allReplies(sentMessages).join('\n');
+      expect(reply).toContain("vendor/not-configured isn't configured on this instance");
+      expect(reply).toContain('/model list');
+    });
+
+    it('rejects an ambiguous configured model id instead of choosing a provider by array order', async () => {
+      cfgAny().agentFallbacks = [
+        { provider: 'opencode-cli', model: 'shared/model-x' },
+        { provider: 'codex-cli', model: 'shared/model-x' },
+      ];
+      const { runtime, sentMessages } = makeRoutingRuntime({ model: 'claude-opus-4-8' });
+
+      await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model shared/model-x' }));
+
+      expect(prefRows()).toHaveLength(0);
+      const reply = allReplies(sentMessages).join('\n');
+      expect(reply).toContain('matches more than one configured route');
+      expect(reply).toContain('/model list');
+    });
+
+    it('rejects a configured-but-NON-ROUTABLE model id at SET time — F07 parity with /model <provider>, no row written', async () => {
+      // A model configured under a provider the instance can't honor (no
+      // credential): `/model <provider>` already rejects it at SET time (F07,
+      // see the uncredentialed-fallback test above); `/model <id>` MUST too, or
+      // the direct selector could pin a route that hard-fails or silently falls
+      // back. `absentService` mirrors the provider-id F07 test — no keychain
+      // dependency (the service is absent from every store → credential null).
+      const absentService = `wa-test-absent-${Math.random().toString(36).slice(2)}`;
+      cfgAny().agentProviderConfig = { apiKeyService: absentService };
+      cfgAny().agentFallbacks = [{ provider: 'anthropic-api', model: 'anthropic/claude-test-x' }];
+      const { runtime, sentMessages } = makeRoutingRuntime({ model: 'claude-opus-4-8' });
+
+      await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model anthropic/claude-test-x' }));
+
+      // The F07 invariant: no un-honorable pin is written at SET time.
+      expect(prefRows()).toHaveLength(0);
+      const reply = allReplies(sentMessages).join('\n');
+      expect(reply).toContain("isn't available on this instance");
+      expect(reply).toContain('/model list');
+      // Must NOT have reached the pin/defer tail (that echo would leak here).
+      expect(reply).not.toContain('pending a catalogue check');
+      expect(reply).not.toContain('Now answering with');
+    });
+  });
 });
