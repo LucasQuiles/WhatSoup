@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { DiscoveredInstance } from '../../src/fleet/discovery.ts';
+import { SQLITE_BUSY_TIMEOUT_PRAGMA } from '../../src/lib/sqlite-constants.ts';
 
 const mocks = vi.hoisted(() => {
   const run = vi.fn();
@@ -136,7 +137,7 @@ describe('group resolver attemptedCache eviction', () => {
     expect(mocks.proxyToInstance).not.toHaveBeenCalled();
     expect(mocks.DatabaseSync).toHaveBeenCalledWith('/tmp/q/bot.db', { open: true });
     // Concurrent-writer safety: backfill must set busy_timeout before writing the live bot.db.
-    expect(mocks.prepare).toHaveBeenCalledWith('PRAGMA busy_timeout = 5000');
+    expect(mocks.prepare).toHaveBeenCalledWith(SQLITE_BUSY_TIMEOUT_PRAGMA);
     expect(mocks.run).toHaveBeenCalledWith('1203630@g.us', 'Ops Room', 7);
     expect(mocks.close).toHaveBeenCalled();
     expect(mocks.info).toHaveBeenCalledWith(

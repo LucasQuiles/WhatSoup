@@ -53,6 +53,8 @@ function ruleEntriesFor(id) {
       return { 'fitness/approved-api-client': 'warn' };
     case 'arch.ring-boundaries':
       return { 'fitness/ring-boundaries': 'warn' };
+    case 'arch.sqlite-busy-timeout-ssot':
+      return { 'fitness/no-magic-sqlite-pragma': 'warn' };
     case 'invariant.no-unsafe-type-escapes':
       return { 'fitness/unsafe-type-escape': 'warn' };
     default:
@@ -99,6 +101,7 @@ const config = [
       ...ruleEntriesFor('invariant.fail-closed-scanner'),
       ...ruleEntriesFor('invariant.outbox-env-gated'),
       ...ruleEntriesFor('arch.ring-boundaries'),
+      ...ruleEntriesFor('arch.sqlite-busy-timeout-ssot'),
       ...ruleEntriesFor('invariant.no-unsafe-type-escapes'),
       ...ruleEntriesFor('invariant.timer-rearm-without-clear'),
     },

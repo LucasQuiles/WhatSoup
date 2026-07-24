@@ -60,6 +60,7 @@ rules into hooks, and semantic or human rules into the SDLC review flow.
 | `arch.import-boundaries` | mechanical | block | guard, ci | Ratchet import direction between src/ layers so known violations can shrink but new cross-layer reach is blocked. |
 | `arch.approved-api-client` | ast | warn | eslint | Console network calls must go through the typed API client in `console/src/lib/api.ts`; direct fetch bypasses auth, timeouts, and the test surface. |
 | `arch.ring-boundaries` | ast | block‡ | eslint, guard | Backend ring dependency direction is an architectural invariant; lower rings must not import higher rings. Promoted 2026-07-19 to a guard-ring count ratchet (`scripts/ring-boundary-guard.ts`); the eslint ring stays a warn-only visibility mirror. |
+| `arch.sqlite-busy-timeout-ssot` | ast | warn | eslint | Numeric `PRAGMA busy_timeout` strings passed directly to SQLite `exec`/`prepare` sinks and `DatabaseSync` timeout options can drift across connections; active `src/` and `scripts/` code must use the shared constants from `src/lib/sqlite-constants.ts`. Unresolvable constructor options are findings, not silent passes. The zero-debt Vitest ratchet provides the blocking PR/CI backstop. |
 | `arch.ssot-lid-reads` | mechanical | block‡ | guard, ci | Raw `lid_mappings` SQL reads outside `src/core/lid-resolver.ts` fork the LID→phone resolution discipline `resolveLid()` centralizes. |
 | `arch.ssot-jid-construction` | mechanical | block‡ | guard, ci | Inline `${x}@s.whatsapp.net`-class template construction and literal `.endsWith('@lid')`-class predicates outside `src/core/jid-constants.ts` re-derive the JID domain grammar. |
 | `arch.ssot-name-ladder` | mechanical | block‡ | guard, ci | SQL touching the name columns of contacts/chats/groups/chat_aliases outside `src/core/chat-display-name.ts` forks the owner-facing name ladder. |
@@ -75,6 +76,46 @@ rules into hooks, and semantic or human rules into the SDLC review flow.
   The **eslint ring** mirrors it at `warn` severity only — an advisory copy per `meta.no-redundant-gates`.
   The ESLint warning identity set must not change, and the recorded ceilings must not be exceeded; both are
   enforced by `tests/scripts/fitness-file-size-warning-budget.test.ts`.
+
+### SQLite busy-timeout detector boundary
+
+`arch.sqlite-busy-timeout-ssot` resolves literals, template strings, `+`
+expressions, and same-scope `const` chains. Numeric SQLite syntax includes
+signed, decimal, exponent, and hexadecimal forms, including SQLite's
+single-quote, double-quote, backtick, and bracket value forms and numeric-prefix
+conversion inside a quoted value. The scanner splits SQL statements and removes
+comments only outside quoted regions, then recognizes unqualified,
+schema-qualified, or quoted `busy_timeout` pragma names at the start of a
+statement. A phrase embedded in a `SELECT` string literal or arbitrary prose is
+not treated as a pragma. For SQL, the rule inspects the first argument of any
+direct member call named `exec` or `prepare`; it does not prove that the receiver
+is a SQLite object. A numeric `PRAGMA busy_timeout` statement is a finding only
+when it reaches one of those method-name sinks.
+
+For the second `DatabaseSync` argument, the detector resolves inline object
+literals, same-scope `const` objects, and ordered object spreads. A `const`
+binding is not assumed to make an object immutable: member assignment, update,
+or deletion and `Object.assign`, `Object.defineProperty`,
+`Object.defineProperties`, `Object.setPrototypeOf`, or
+`Reflect.defineProperty` mutations through the binding or a same-scope `const`
+alias produce `unknownOptions`. Static numeric timeout values are findings. Only
+`SQLITE_BUSY_TIMEOUT_MS` imported from the canonical
+`src/lib/sqlite-constants.ts` is accepted as the timeout value. An imported or
+otherwise unresolvable options object, spread, computed property name, or
+timeout value, and any constructor argument spread that can affect the path or
+options positions, produces an explicit `unknownOptions` finding; the blocking
+zero-finding ratchet cannot mistake that state for compliance. An omitted
+options argument and a fully resolved object with no `timeout` property are valid,
+which covers the production `READ_ONLY_DATABASE_OPTIONS` pattern.
+
+`DatabaseSync` constructors are matched through named or namespace imports from
+`node:sqlite`, including local aliases, rather than by identifier spelling.
+This is deliberately intraprocedural. SQL returned by helpers, arbitrary
+imported SQL strings, detached or aliased `exec`/`prepare` methods, mutation
+hidden inside arbitrary helper calls, non-`const` aliases, and aliases stored
+through object properties or other containers are residual dataflow limits.
+Review remains responsible for those shapes until the rule grows symbol-aware
+interprocedural analysis; the rule does not claim to cover them.
 
 ## Invariant
 
