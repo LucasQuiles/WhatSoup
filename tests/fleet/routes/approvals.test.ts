@@ -295,6 +295,30 @@ describe('POST /api/lines/:name/approvals/decision (handlePostApprovalDecision)'
     cleanup(queueDbPath);
   });
 
+  it('survives malformed 409 body without crashing the fleet server', async () => {
+    proxyMock.mockResolvedValue({ status: 409, body: 'not json!!!' });
+    const deps = makeDeps(fakeInstance(), vi.fn());
+    const res = mockRes();
+    await handlePostApprovalDecision(
+      mockReq({ method: 'POST', body: JSON.stringify({ mapKey: 'agent:chat:1', questionIndex: 0, selectedOptions: ['Deploy now'] }) }),
+      res, deps, { name: 'agent-line' },
+    );
+    expect(res._status).toBe(409);
+    expect(JSON.parse(res._body).error).toMatch(/unparseable/i);
+  });
+
+  it('survives malformed 4xx body without crashing the fleet server', async () => {
+    proxyMock.mockResolvedValue({ status: 403, body: '<html>nginx error</html>' });
+    const deps = makeDeps(fakeInstance(), vi.fn());
+    const res = mockRes();
+    await handlePostApprovalDecision(
+      mockReq({ method: 'POST', body: JSON.stringify({ mapKey: 'agent:chat:1', questionIndex: 0, selectedOptions: ['Deploy now'] }) }),
+      res, deps, { name: 'agent-line' },
+    );
+    expect(res._status).toBe(403);
+    expect(JSON.parse(res._body).error).toMatch(/unparseable/i);
+  });
+
   it('v1.1: falls back to the honest 502 when the instance is unreachable AND the durable queue write fails', async () => {
     proxyMock.mockResolvedValue({ status: 502, body: JSON.stringify({ error: 'proxy error: connect ECONNREFUSED' }) });
     const missingPath = join(tmpdir(), `no-such-dir-${randomBytes(6).toString('hex')}`, 'bot.db');
