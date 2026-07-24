@@ -426,6 +426,49 @@ def test_modern_session_without_init_synthesizes_current_contract_session_meta()
     assert events[1].timestamp_utc is None
 
 
+def test_explicit_custom_title_takes_precedence_over_generated_ai_title() -> None:
+    rows = _modern_rows()
+    rows.append(
+        {
+            "type": "custom-title",
+            "customTitle": "Owner Rename",
+            "sessionId": "session-claude-001",
+        }
+    )
+
+    events = ClaudeExtractor().extract(_snapshot_rows(rows)).events
+
+    assert events[0].data["title"] == "Owner Rename"
+
+
+def test_latest_repeated_custom_title_replaces_earlier_custom_title() -> None:
+    rows = _modern_rows()[:-1]
+    rows.extend(
+        [
+            {
+                "type": "custom-title",
+                "customTitle": "First Rename",
+                "sessionId": "session-claude-001",
+            },
+            {
+                "type": "custom-title",
+                "customTitle": "Latest Rename",
+                "sessionId": "session-claude-001",
+            },
+        ]
+    )
+
+    events = ClaudeExtractor().extract(_snapshot_rows(rows)).events
+
+    assert events[0].data["title"] == "Latest Rename"
+
+
+def test_ai_title_is_used_when_no_custom_title_exists() -> None:
+    events = ClaudeExtractor().extract(_snapshot_rows(_modern_rows())).events
+
+    assert events[0].data["title"] == "Modern Session"
+
+
 def test_present_modern_session_id_must_match_candidate_native_id() -> None:
     rows = _modern_rows()
     rows[2]["sessionId"] = "different-session"

@@ -234,18 +234,19 @@ class ClaudeExtractor:
                     phase="claude-session-meta",
                 )
 
-        titles = [
+        custom_titles = [
+            row.get("customTitle")
+            for row in rows
+            if row.get("type") == "custom-title" and "customTitle" in row
+        ]
+        ai_titles = [
             row.get("aiTitle")
             for row in rows
             if row.get("type") == "ai-title" and "aiTitle" in row
         ]
-        titles.extend(
-            row.get("customTitle")
-            for row in rows
-            if row.get("type") == "custom-title" and "customTitle" in row
-        )
+        titles = custom_titles or ai_titles
         if titles:
-            data["title"] = _string(titles[0], phase="claude-session-meta")
+            data["title"] = _string(titles[-1], phase="claude-session-meta")
 
         builder.add(
             EventKind.SESSION_META,
