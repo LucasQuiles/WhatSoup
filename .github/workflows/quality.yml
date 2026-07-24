@@ -89,7 +89,7 @@ jobs:
           node -e 'const fs=require("fs"); const r=JSON.parse(fs.readFileSync(process.env.SEMANTIC_RECEIPT,"utf8")); process.stdout.write(`### Semantic quality (shadow)\n\nDecision: **${r.decision}**\n\nFindings: ${r.findings.length}\n`)' >> "$GITHUB_STEP_SUMMARY"
 
       - name: Install Python test dependencies
-        run: python3 -m pip install --user pytest pytest-cov
+        run: python3 -m pip install --user pytest pytest-cov hypothesis
 
       # qSesh Python lane (tools/qsesh): pinned Ruff + ShellCheck, then the
       # lint/test package scripts. Requires the Setup Python 3.12 step above.
