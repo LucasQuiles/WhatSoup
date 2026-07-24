@@ -30,14 +30,26 @@ export function classifyPrePushLine(line: string): RefDecision {
   return 'branch';
 }
 
-export function classifyPrePushInput(input: string): PushDecision {
-  const decisions = input
+function nonBlankLines(input: string): string[] {
+  return input
     .split(/\r?\n/)
     .map((line) => line.trim())
-    .filter(Boolean)
-    .map(classifyPrePushLine);
+    .filter(Boolean);
+}
 
-  if (decisions.length === 0) return 'skip';
+export function classifyPrePushInput(input: string): PushDecision {
+  const lines = nonBlankLines(input);
+
+  // Zero parseable ref-update lines is NOT the same thing as a genuine
+  // all-delete push: a real delete-only push still has lines (each classifying
+  // as 'delete' below), while this branch only fires when stdin itself was
+  // empty/whitespace-only (e.g. wrapper/indirection stdin loss). Collapsing
+  // both into 'skip' silently bypassed the whole verification battery on
+  // stdin starvation, so this case fails CLOSED by routing to branch
+  // verification instead.
+  if (lines.length === 0) return 'branch';
+
+  const decisions = lines.map(classifyPrePushLine);
   if (decisions.includes('release')) return 'release';
   if (decisions.includes('branch')) return 'branch';
   return 'skip';
@@ -56,6 +68,12 @@ export function runPrePushGuard(input: string, cwd = process.cwd()): PushDecisio
   if (commands.length === 0) {
     console.error('pre-push guard: delete-only ref update; skipping content verification');
     return decision;
+  }
+
+  if (nonBlankLines(input).length === 0) {
+    console.error(
+      'pre-push guard: no ref updates received on stdin — refusing to skip verification (fail-closed); genuine branch deletions still skip',
+    );
   }
 
   for (const script of commands) {

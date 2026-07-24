@@ -12,12 +12,13 @@ import { dirname, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { spawnSync } from 'node:child_process';
 
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import {
   classifyPrePushInput,
   classifyPrePushLine,
   commandsForDecision,
+  runPrePushGuard,
   ZERO_SHA,
 } from '../../scripts/pre-push-guard.ts';
 import {
@@ -95,6 +96,124 @@ describe('pre-push guard classifier', () => {
 
   it('rejects malformed pre-push ref lines', () => {
     expect(() => classifyPrePushLine('refs/heads/main only-two-fields')).toThrow(/Invalid pre-push/);
+  });
+
+  it('classifies force-update branch refs (real, differing shas) as branch verification', () => {
+    // Regression guard: a force-update on a feature branch has a non-zero localSha
+    // AND a non-zero, DIFFERENT remoteSha (unlike a new-branch push, where remoteSha
+    // is ZERO_SHA). This already falls through to 'branch' — asserted here so the
+    // empty-stdin fix below cannot accidentally start misrouting real force-pushes.
+    expect(classifyPrePushLine(
+      'refs/heads/feature/example aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa refs/heads/feature/example bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+    )).toBe('branch');
+  });
+
+  it('routes a main branch ref update alone to release verification', () => {
+    const decision = classifyPrePushInput(
+      `refs/heads/main 8d739e7582b068387411a1d89acca11e3fd31aa4 refs/heads/main ec3ac431eb1811aeb7fa9851d658b27ae724cbb5`,
+    );
+    expect(decision).toBe('release');
+    expect(commandsForDecision(decision)).toEqual(['verify:release']);
+  });
+
+  it('does NOT silently skip when stdin has zero parseable ref-update lines (empty string)', () => {
+    // Proven defect: classifyPrePushInput('') used to return 'skip' identically to
+    // genuine all-delete input, so commandsForDecision(...) was [] and the entire
+    // verification battery silently never ran on stdin starvation.
+    const decision = classifyPrePushInput('');
+    expect(decision).not.toBe('skip');
+    expect(commandsForDecision(decision)).not.toEqual([]);
+  });
+
+  it('does NOT silently skip when stdin is whitespace-only', () => {
+    const decision = classifyPrePushInput('   \n\t\n  \n');
+    expect(decision).not.toBe('skip');
+    expect(commandsForDecision(decision)).not.toEqual([]);
+  });
+
+  it('routes empty stdin to branch verification (fail closed)', () => {
+    expect(classifyPrePushInput('')).toBe('branch');
+    expect(commandsForDecision(classifyPrePushInput(''))).toEqual(['verify:push:branch']);
+  });
+});
+
+describe('pre-push guard runtime — fail-closed on empty stdin', () => {
+  const withStubNpm = (fn: (npmCallsLog: string) => void) => {
+    const root = mkdtempSync(resolve(tmpdir(), 'whatsoup-pre-push-guard-runtime-'));
+    const bin = resolve(root, 'bin');
+    const callsLog = resolve(root, 'npm-calls.log');
+    const originalPath = process.env['PATH'];
+
+    try {
+      mkdirSync(bin, { recursive: true });
+      const npmStub = resolve(bin, 'npm');
+      writeFileSync(npmStub, [
+        '#!/bin/sh',
+        `printf "%s\\n" "$*" >> "${callsLog}"`,
+        'exit 0',
+        '',
+      ].join('\n'));
+      chmodSync(npmStub, 0o755);
+      process.env['PATH'] = `${bin}:${originalPath ?? ''}`;
+      fn(callsLog);
+    } finally {
+      if (originalPath === undefined) {
+        delete process.env['PATH'];
+      } else {
+        process.env['PATH'] = originalPath;
+      }
+      rmSync(root, { recursive: true, force: true });
+    }
+  };
+
+  it('runs branch verification (not a silent skip) when stdin has zero parseable ref-update lines', () => {
+    withStubNpm((callsLog) => {
+      const errors: string[] = [];
+      const spy = vi.spyOn(console, 'error').mockImplementation((msg?: unknown) => {
+        errors.push(String(msg));
+      });
+      try {
+        const decision = runPrePushGuard('', repoRoot);
+        expect(decision).toBe('branch');
+        expect(readFileSync(callsLog, 'utf8').trim()).toBe('run verify:push:branch');
+        expect(errors).toContain(
+          'pre-push guard: no ref updates received on stdin — refusing to skip verification (fail-closed); genuine branch deletions still skip',
+        );
+        expect(errors).not.toContain(
+          'pre-push guard: delete-only ref update; skipping content verification',
+        );
+      } finally {
+        spy.mockRestore();
+      }
+    });
+  });
+
+  it('runs branch verification for whitespace-only stdin too', () => {
+    withStubNpm((callsLog) => {
+      const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      try {
+        const decision = runPrePushGuard('   \n\t\n  \n', repoRoot);
+        expect(decision).toBe('branch');
+        expect(readFileSync(callsLog, 'utf8').trim()).toBe('run verify:push:branch');
+      } finally {
+        spy.mockRestore();
+      }
+    });
+  });
+
+  it('genuine delete-only stdin still skips verification with the delete-specific message', () => {
+    const errors: string[] = [];
+    const spy = vi.spyOn(console, 'error').mockImplementation((msg?: unknown) => {
+      errors.push(String(msg));
+    });
+    try {
+      const input = `refs/heads/old-a ${ZERO_SHA} refs/heads/old-a 1111111111111111111111111111111111111111`;
+      const decision = runPrePushGuard(input, repoRoot);
+      expect(decision).toBe('skip');
+      expect(errors).toEqual(['pre-push guard: delete-only ref update; skipping content verification']);
+    } finally {
+      spy.mockRestore();
+    }
   });
 });
 
