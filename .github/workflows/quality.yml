@@ -442,3 +442,11 @@ jobs:
 
       - name: BOT ERRORS macOS health hermeticity
         run: npm run test:bot-errors-health:hermeticity
+
+      # The credential-probe boundedness suite runs on BOTH legs on purpose. The
+      # Linux leg exercises it with timeout(1) present and with PATH stripped to
+      # simulate Darwin; this leg runs the same assertions against a real macOS
+      # bash and a real `security` binary, so the platform the incident happened
+      # on is covered by the platform itself rather than by simulation.
+      - name: Credential-probe boundedness (real macOS)
+        run: npm run test:credential-probe-boundedness

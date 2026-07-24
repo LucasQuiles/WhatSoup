@@ -16,11 +16,15 @@ import path from 'node:path';
 
 const BOUNDED_LIB = 'deploy/lib/bounded-exec.sh';
 
-/** Shell files that may invoke a credential store and must therefore be bounded. */
-function deployShellFiles(): string[] {
-  const out = execFileSync('git', ['ls-files', '-z', 'deploy/'], {
+/**
+ * Every tracked shell file, repo-wide — not just deploy/. A new script anywhere
+ * that reaches for a credential store has to be bounded too, and scoping the
+ * scan to one directory would let that regression land silently.
+ */
+function trackedShellFiles(): string[] {
+  const out = execFileSync('git', ['ls-files', '-z'], {
     encoding: 'utf8',
-    maxBuffer: 8 * 1024 * 1024,
+    maxBuffer: 32 * 1024 * 1024,
   });
   return out
     .split('\0')
@@ -55,12 +59,89 @@ function unboundedProbes(file: string): string[] {
   return findings;
 }
 
+/**
+ * CRED-1: `security add-generic-password ... -w <value>` puts the secret on argv,
+ * where `ps -ww` exposes it to every user on the host for the exec lifetime.
+ * `-w` must be the LAST option so `security` reads the value from stdin instead.
+ */
+function argvSecretLeaks(file: string): string[] {
+  const findings: string[] = [];
+  const lines = fs.readFileSync(file, 'utf8').split('\n');
+  lines.forEach((line, index) => {
+    const code = line.replace(/^\s*#.*$/, '');
+    const match = /-w(\s+.*)?$/.exec(code);
+    if (!match) return;
+    if (!/(add|find|delete)-generic-password/.test(code) && !/-w\s/.test(code)) return;
+    const rest = (match[1] ?? '').trim();
+    // Acceptable tails: nothing, a line continuation, or a redirect/pipe/close.
+    if (rest === '' || rest === '\\' || /^[>|;)&]/.test(rest)) return;
+    findings.push(`${file}:${index + 1}: ${line.trim()}`);
+  });
+  return findings;
+}
+
 describe('credential-store probes are bounded on every platform', () => {
-  it('no deploy shell script invokes security/secret-tool unbounded', () => {
-    const findings = deployShellFiles()
+  it('no tracked shell script invokes security/secret-tool unbounded', () => {
+    const findings = trackedShellFiles()
       .filter((f) => f !== BOUNDED_LIB)
       .flatMap(unboundedProbes);
     expect(findings, `unbounded credential probes:\n${findings.join('\n')}`).toEqual([]);
+  });
+
+  it('no tracked shell script passes a keychain secret on argv (CRED-1)', () => {
+    const findings = trackedShellFiles()
+      .filter((f) => /security\s|generic-password/.test(fs.readFileSync(f, 'utf8')))
+      .flatMap(argvSecretLeaks);
+    expect(findings, `secrets on argv:\n${findings.join('\n')}`).toEqual([]);
+  });
+
+  it('the TypeScript keyring backend gives up on a credential store that never answers', () => {
+    // Behavioural, not a source-string assertion: put a credential helper on PATH
+    // that answers detection but then hangs forever — the shape of a locked
+    // keychain or a stuck libsecret daemon — and require the read to return.
+    const stubDir = fs.mkdtempSync(path.join(os.tmpdir(), 'keyring-hang-'));
+    const stub = path.join(stubDir, 'secret-tool');
+    fs.writeFileSync(
+      stub,
+      '#!/usr/bin/env bash\nif [ "$1" = "--help" ]; then echo usage; exit 0; fi\nsleep 300\n',
+      { mode: 0o700 },
+    );
+
+    const probe = path.join(stubDir, 'probe.mjs');
+    fs.writeFileSync(
+      probe,
+      [
+        `import { lookupCredential, _resetBackendCache } from ${JSON.stringify(path.resolve('src/lib/keyring.ts'))};`,
+        '_resetBackendCache();',
+        'const started = Date.now();',
+        "let value = null;",
+        'try { value = lookupCredential("anthropic"); } catch { value = null; }',
+        'process.stdout.write(`elapsed=${Date.now() - started} value=${value ?? ""}`);',
+      ].join('\n'),
+    );
+
+    try {
+      const started = Date.now();
+      const res = spawnSync(
+        process.execPath,
+        ['--experimental-strip-types', probe],
+        {
+          encoding: 'utf8',
+          timeout: 60_000,
+          env: { ...process.env, PATH: `${stubDir}:${process.env.PATH}`, ANTHROPIC_API_KEY: '' },
+          cwd: process.cwd(),
+        },
+      );
+      const wall = Date.now() - started;
+
+      expect(res.error, `probe failed to run: ${res.stderr}`).toBeUndefined();
+      // A 300s sleep per candidate service; anything under 30s proves the read
+      // was cut off rather than left to block.
+      expect(wall).toBeLessThan(30_000);
+      expect(res.stdout).toMatch(/elapsed=\d+/);
+    } finally {
+      fs.rmSync(stubDir, { recursive: true, force: true });
+    }
   });
 
   it('the launcher and setup scripts source the bounded-exec library', () => {
@@ -78,6 +159,64 @@ describe('credential-store probes are bounded on every platform', () => {
     expect(helper).toContain('timeout: 3_000');
     expect(helper).toContain("killSignal: 'SIGKILL'");
   });
+});
+
+describe('health-token keyring mirroring keeps the secret off argv', () => {
+  function runMirror(platform: 'Darwin' | 'Linux') {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mirror-keyring-'));
+    const binDir = path.join(tmpDir, 'bin');
+    fs.mkdirSync(binDir);
+    const argvLog = path.join(tmpDir, 'argv.log');
+    const stdinLog = path.join(tmpDir, 'stdin.log');
+
+    for (const tool of ['security', 'secret-tool']) {
+      fs.writeFileSync(
+        path.join(binDir, tool),
+        `#!/usr/bin/env bash\nprintf '%s\\n' "$*" >> "${argvLog}"\ncat >> "${stdinLog}"\n`,
+        { mode: 0o700 },
+      );
+    }
+    fs.writeFileSync(
+      path.join(binDir, 'uname'),
+      `#!/usr/bin/env bash\nprintf '%s\\n' '${platform}'\n`,
+      { mode: 0o700 },
+    );
+
+    const source = fs.readFileSync('deploy/generate-health-tokens.sh', 'utf8');
+    const start = source.indexOf('mirror_to_keyring() {');
+    const end = source.indexOf('\n}\n', start);
+    expect(start).toBeGreaterThan(-1);
+    expect(end).toBeGreaterThan(start);
+    const fn = source.slice(start, end + 3);
+
+    const token = 'f'.repeat(64);
+    const script = path.join(tmpDir, 'probe.sh');
+    fs.writeFileSync(
+      script,
+      `#!/usr/bin/env bash\nset -uo pipefail\nPATH="${binDir}:$PATH"\n`
+        + `. "${path.resolve('deploy/lib/bounded-exec.sh')}"\n${fn}\n`
+        + `mirror_to_keyring fixture-bot ${token}\n`,
+      { mode: 0o700 },
+    );
+
+    const bash = resolveBinary('bash') ?? 'bash';
+    const res = spawnSync(bash, [script], { encoding: 'utf8', timeout: 30_000 });
+    const argv = fs.existsSync(argvLog) ? fs.readFileSync(argvLog, 'utf8') : '';
+    const stdin = fs.existsSync(stdinLog) ? fs.readFileSync(stdinLog, 'utf8') : '';
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+    return { res, argv, stdin, token };
+  }
+
+  it.each<['Darwin' | 'Linux']>([['Darwin'], ['Linux']])(
+    'passes the token via stdin on %s',
+    (platform) => {
+      const { res, argv, stdin, token } = runMirror(platform);
+      expect(res.status, res.stderr).toBe(0);
+      expect(argv).not.toContain(token);
+      expect(stdin).toContain(token);
+      expect(argv).toContain('whatsoup-health-token');
+    },
+  );
 });
 
 const SHIM_SEARCH_PATH = ['/usr/bin', '/bin', '/usr/local/bin', '/opt/homebrew/bin'];
@@ -125,7 +264,7 @@ function runSnippet(snippet: string, opts: { withoutTimeout?: boolean } = {}) {
 }
 
 describe.each([
-  ['with timeout(1) present', false],
+  ['as installed on this host', false],
   ['with timeout(1) absent (stock macOS shape)', true],
 ])('whatsoup_run_bounded %s', (_label, withoutTimeout) => {
   const opts = { withoutTimeout };
@@ -135,7 +274,20 @@ describe.each([
       'command -v timeout >/dev/null 2>&1 && echo present || echo absent',
       opts,
     );
-    expect(res.stdout.trim()).toBe(withoutTimeout ? 'absent' : 'present');
+    const branch = res.stdout.trim();
+    if (withoutTimeout) {
+      // PATH was stripped, so the pure-shell watchdog is the only reachable path.
+      expect(branch).toBe('absent');
+    } else if (process.platform === 'linux') {
+      // Linux ships timeout(1); if that ever stops being true the delegation
+      // branch would silently stop being covered anywhere.
+      expect(branch).toBe('present');
+    } else {
+      // macOS may legitimately have neither timeout nor gtimeout — that is the
+      // condition this whole change exists for. Either branch is acceptable
+      // here; the behavioural assertions below must hold regardless.
+      expect(['present', 'absent']).toContain(branch);
+    }
   });
 
   it('returns the command status for a fast command', () => {

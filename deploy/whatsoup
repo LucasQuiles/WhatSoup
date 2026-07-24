@@ -290,7 +290,9 @@ if [ "$INSTANCE_TYPE" = "chat" ]; then
     if [ -z "$val" ]; then
       echo "FATAL: $name key is empty or missing from keyring" >&2
       echo "  Linux:  secret-tool store --label='$name' service $name <<<'YOUR_KEY'" >&2
-      echo "  macOS:  security add-generic-password -s $name -a \$USER -w 'YOUR_KEY'" >&2
+      # `-w` last: security prompts for the value on stdin instead of taking it
+      # on argv, where `ps -ww` would expose it host-wide (CRED-1).
+      echo "  macOS:  security add-generic-password -U -s $name -a \$USER -w" >&2
       echo "  Either: export $(echo "$name" | tr '[:lower:]' '[:upper:]')_API_KEY=YOUR_KEY" >&2
       exit 1
     fi
