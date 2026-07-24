@@ -655,8 +655,13 @@ describe('recovery_runs status column', () => {
     const evidence = new DurabilityRecoveryEvidence(db);
     const receipt = evidence.start('pre_connect_recovery', 'status-started', 'fresh run');
 
-    expect(db.raw.prepare('SELECT status FROM recovery_runs WHERE id = ?')
-      .get(receipt.recoveryRunId)).toEqual({ status: 'started' });
+    // Inverse-correlation invariant: a fresh 'started' row must have a NULL
+    // completed_at. The companion durability.test.ts asserts the forward
+    // direction (status='completed' implies completed_at NOT NULL); without
+    // this, a future start() that pre-stamped completed_at would leave a
+    // self-contradictory 'started'-with-completed row uncaught.
+    expect(db.raw.prepare('SELECT status, completed_at FROM recovery_runs WHERE id = ?')
+      .get(receipt.recoveryRunId)).toEqual({ status: 'started', completed_at: null });
   });
 
   it("persists status 'completed' after finalize", () => {
@@ -737,6 +742,13 @@ describe('migration 45 recovery_runs status backfill', () => {
     const raw = new DatabaseSync(':memory:');
     try {
       expect(() => runMigration45(raw)).not.toThrow();
+      // A true no-op: the migration must NOT side-effect a recovery_runs table
+      // into existence when it was absent. Asserting only not.toThrow() is
+      // vacuous — it would also pass if runMigration45 were deleted outright
+      // or if it silently created the table.
+      expect(raw.prepare(
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'recovery_runs'",
+      ).get()).toBeUndefined();
     } finally {
       raw.close();
     }
