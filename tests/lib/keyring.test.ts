@@ -223,6 +223,7 @@ describe('keyring', () => {
       // reads for that provider. Each resolved service must be registered in
       // SERVICE_ENV_MAP so the child env forwards the key.
       const expected: ReadonlyArray<[model: string, service: string, envVar: string]> = [
+        ['kimi/kimi-k3', 'kimi', 'KIMI_API_KEY'],
         ['xai/grok-4', 'xai', 'XAI_API_KEY'],
         ['groq/llama-3.3-70b-versatile', 'groq', 'GROQ_API_KEY'],
         ['mistral/mistral-large-latest', 'mistral', 'MISTRAL_API_KEY'],

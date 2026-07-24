@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createPrimaryModelProbeAdapters } from '../../../src/runtimes/agent/providers/primary-model-usability-adapters.ts';
 import { ProviderExecutionGate } from '../../../src/runtimes/agent/provider-execution-gate.ts';
+import { shortHash } from '../../../src/lib/short-hash.ts';
 
 describe('createPrimaryModelProbeAdapters', () => {
   afterEach(() => {
@@ -171,7 +172,12 @@ describe('createPrimaryModelProbeAdapters', () => {
     });
     await Promise.resolve();
     expect(probeBinaryCommand).not.toHaveBeenCalled();
-    expect(gate.snapshot()).toMatchObject({ active: true, pending: 1 });
+    expect(gate.snapshot()).toMatchObject({
+      active: true,
+      pending: 1,
+      oldestPendingWorkKind: 'probe',
+      oldestPendingScopeHash: shortHash('opencode-cli\0openai/some-model'),
+    });
 
     activeTurn.release();
     await expect(probe).resolves.toEqual({ status: 'ok' });
