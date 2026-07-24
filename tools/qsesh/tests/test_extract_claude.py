@@ -486,10 +486,7 @@ def test_observed_system_subtype_is_retained_as_meta() -> None:
     assert events[-1].data == {"raw_type": "system", "subtype": "turn_duration"}
 
 
-@pytest.mark.parametrize("subtype", [None, "", "../../private", "future_subtype", 7])
-def test_missing_unsafe_or_unobserved_system_subtype_is_rejected(
-    subtype: object,
-) -> None:
+def _system_subtype_schema_error(subtype: object) -> QseshError:
     rows = _modern_rows()
     rows.append(
         {
@@ -499,7 +496,31 @@ def test_missing_unsafe_or_unobserved_system_subtype_is_rejected(
         }
     )
 
-    assert _expect_schema_error(_snapshot_rows(rows)).phase == ("claude-system-subtype")
+    return _expect_schema_error(_snapshot_rows(rows))
+
+
+def test_missing_system_subtype_is_rejected() -> None:
+    assert _system_subtype_schema_error(None).phase == "claude-system-subtype"
+
+
+def test_empty_system_subtype_is_rejected() -> None:
+    assert _system_subtype_schema_error("").phase == "claude-system-subtype"
+
+
+def test_non_string_system_subtype_is_rejected() -> None:
+    assert _system_subtype_schema_error(7).phase == "claude-system-subtype"
+
+
+def test_unsafe_system_subtype_syntax_is_rejected() -> None:
+    assert _system_subtype_schema_error("../../private").phase == (
+        "claude-system-subtype"
+    )
+
+
+def test_safe_syntax_but_unallowlisted_system_subtype_is_rejected() -> None:
+    assert _system_subtype_schema_error("future_subtype").phase == (
+        "claude-system-subtype"
+    )
 
 
 def test_unobserved_top_level_control_type_is_rejected() -> None:
