@@ -36,20 +36,24 @@ export interface CatalogueEntry {
   id: string;
 }
 
-/** A drill-down level: brand (Level-1) or model (Level-2). Slice 3 adds 'effort'. */
-export type DrillLevel = 'brand' | 'model';
+/** A drill-down level: brand (Level-1), model (Level-2), or effort (Level-3). */
+export type DrillLevel = 'brand' | 'model' | 'effort';
 
 /**
  * One numbered entry in a drill menu. A DISCRIMINATED UNION on `kind` so
  * invalid states are unrepresentable and consumers narrow (no non-null
  * assertions): a 'brand' entry (Level-1) carries brand+provider (picking it
  * renders Level-2 for that provider); a 'model' entry (Level-2) carries
- * provider+model (picking it pins that leaf). `label` is what was rendered at
- * that number. (Slice 3's 'effort' becomes a third arm.)
+ * provider+model (picking it pins that leaf, OR opens Level-3 when the model
+ * has native reasoning control); a Slice-3 'effort' entry (Level-3) carries
+ * provider+model+effort (picking it pins that leaf at that effort — `effort`
+ * is null for the "Default (no override)" row). `label` is what was rendered
+ * at that number.
  */
 export type DrillEntry =
   | { kind: 'brand'; label: string; brand: string; provider: string }
-  | { kind: 'model'; label: string; provider: string; model: string };
+  | { kind: 'model'; label: string; provider: string; model: string }
+  | { kind: 'effort'; label: string; provider: string; model: string; effort: string | null };
 
 /** resolveLatestPick's tagged result — the caller dispatches on `kind`. */
 export type LatestPick =
