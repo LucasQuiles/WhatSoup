@@ -18,7 +18,7 @@ import type { Database } from '../../core/database.ts';
 import { createChildLogger } from '../../logger.ts';
 import { getRecentMessages } from '../../core/messages.ts';
 import { emitAlertChecked } from '../../lib/emit-alert.ts';
-import { sanitizeProviderPreviewText } from './provider-preview-sanitizer.ts';
+import { providerPreview } from './provider-preview-sanitizer.ts';
 import { redactHandoffPii } from './handoff-pii-redactor.ts';
 import { upsertHandoffArtifact } from './handoff-artifact.ts';
 import type { HandoffArtifact } from './handoff-prelude.ts';
@@ -209,7 +209,7 @@ export class HandoffDistillCoordinator {
   private onDegraded(conversationKey: string, reason: string): void {
     const source = `handoff-distill:${this.instanceName}`;
     // Reason may echo upstream error text; redact before it leaves the process.
-    const safeReason = sanitizeProviderPreviewText(reason).slice(0, 200);
+    const safeReason = providerPreview(reason, 200);
     try {
       emitAlertChecked(
         this.instanceName,
