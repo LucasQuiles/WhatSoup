@@ -86,6 +86,15 @@ const EXPECTED_FILE_SIZE_WARNING_FILES = [
   'tests/fleet/index.test.ts',
   'tests/fleet/routes/feed.test.ts',
   'tests/fleet/routes/ops.test.ts',
+  // The two-level /model drill-down (Slice 2) added the drill handler cases
+  // (bare->L1, brand->L2, leaf pin, recency both orderings, L1/L2 degrade, L2
+  // discovery, cap) beside the Slice-1 selector suite, taking this file just
+  // over the 2000-line arch.file-size warn budget (~2175). Every case reuses
+  // the file's single shared /model host harness (one top-level describe +
+  // makeMessenger/makeMsg preamble), so extracting the drill block would
+  // duplicate that setup; grandfathered per the project norm for large
+  // cohesive test files (cf. the agent runtime/session twins above).
+  'tests/runtimes/agent/model-pin.test.ts',
   'tests/runtimes/agent/outbound-queue.test.ts',
   // Hang-hardening regressions reuse this suite's shared agent-runtime harness;
   // extracting them would duplicate the setup, so the cohesive suite is grandfathered.

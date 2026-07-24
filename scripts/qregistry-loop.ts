@@ -107,6 +107,7 @@ const CHILD_ENV_ALLOWLIST = [
   'LC_ALL',
   'LC_CTYPE',
   'PYTHONPATH',
+  'OPENCODE_MEMORY_MCP_ROOT',
 ] as const;
 const SECRET_REDACTIONS: Array<[RegExp, string]> = [
   [/\bBearer\s+[A-Za-z0-9._/-]{8,}/g, 'Bearer <redacted>'],
@@ -513,6 +514,18 @@ export type DispatchLockResult<T> =
   | { ran: false; reason: 'dispatch-lock-contended' };
 
 /**
+ * Single source of truth for "the memory-mcp root", shared by the dispatch
+ * lock (dispatchLockPath) and the worker child-process env (dispatchWorker).
+ * QR-022/#1978 pin: both MUST resolve from this one function so the lock's
+ * rendezvous point and the memory-mcp plugin's own root can never drift apart
+ * — they used to agree only by both independently defaulting the same way.
+ */
+export function resolveMemoryMcpRoot(env: NodeJS.ProcessEnv = process.env): string {
+  return env.OPENCODE_MEMORY_MCP_ROOT?.trim()
+    || path.join(env.HOME ?? homedir(), '.local', 'share', 'opencode', 'memory-mcp');
+}
+
+/**
  * Stable, host-wide, dispatcher-owned lock path. Lives under the memory-mcp
  * root — the natural rendezvous for "an OpenCode worker dispatch is running on
  * this host" — but is a plain dispatcher sentinel file, deliberately NOT keyed
@@ -521,9 +534,7 @@ export type DispatchLockResult<T> =
  * independent of the per-`stateDir` acquireRunLock.
  */
 export function dispatchLockPath(env: NodeJS.ProcessEnv = process.env): string {
-  const root = env.OPENCODE_MEMORY_MCP_ROOT?.trim()
-    || path.join(env.HOME ?? homedir(), '.local', 'share', 'opencode', 'memory-mcp');
-  return path.join(root, DISPATCH_LOCK_FILENAME);
+  return path.join(resolveMemoryMcpRoot(env), DISPATCH_LOCK_FILENAME);
 }
 
 function busySleep(ms: number): void {
@@ -756,6 +767,14 @@ function dispatchWorker(
     OCW_WATCHDOG: '1',
     OCW_IDLE_SECS: '240',
     OCW_FAILOVER_LADDER: PINNED_WORKER_MODEL,
+    // QR-022/#1978 pin: force the worker's memory-mcp root to be the SAME
+    // root the dispatch lock rendezvoused on (resolveMemoryMcpRoot), not a
+    // value the memory-mcp plugin re-derives independently. Explicit here
+    // (rather than relying solely on the CHILD_ENV_ALLOWLIST passthrough)
+    // so the two roots agree even when the parent process never had
+    // OPENCODE_MEMORY_MCP_ROOT set and both would otherwise default the
+    // same way only by coincidence.
+    OPENCODE_MEMORY_MCP_ROOT: resolveMemoryMcpRoot(env),
   }, env);
   return { role: plan.role, status };
 }

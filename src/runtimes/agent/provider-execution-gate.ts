@@ -49,7 +49,13 @@ export class ProviderExecutionGate {
   private pressureTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(options: ProviderExecutionGateOptions = {}) {
-    this.now = options.now ?? Date.now;
+    // Late-bind the default clock: capturing `Date.now` by reference here freezes
+    // the real-timer function at construction, so vitest fake timers (which swap
+    // globalThis.Date afterward) never reach it — the gate's clock stays real
+    // while its pressure setTimeout is faked, flaking any fake-timer test that
+    // relies on the pressure threshold. An arrow re-reads Date.now at call time;
+    // behavior is identical under real timers, so production is unchanged.
+    this.now = options.now ?? (() => Date.now());
     this.pressureAfterMs = Math.max(0, options.pressureAfterMs ?? 30_000);
     this.onPressure = options.onPressure;
     this.onRecovered = options.onRecovered;
