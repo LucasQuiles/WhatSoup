@@ -1716,6 +1716,51 @@ describe('SessionManager', () => {
     vi.useRealTimers();
   });
 
+  it('provider progress during liveness assessment invalidates the stale kill decision', async () => {
+    vi.useFakeTimers();
+
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    let resolveAssessment!: (verdict: {
+      alive: boolean;
+      cpuDeltaMs: number;
+      pidChurn: number;
+      pidCount: number;
+    }) => void;
+    const treeLivenessAssessor = vi.fn(() => new Promise<{
+      alive: boolean;
+      cpuDeltaMs: number;
+      pidChurn: number;
+      pidCount: number;
+    }>((resolve) => {
+      resolveAssessment = resolve;
+    }));
+    const sm = new SessionManager({
+      db,
+      messenger,
+      chatJid: CHAT_JID,
+      onEvent: vi.fn(),
+      treeLivenessAssessor,
+    });
+    await sm.spawnSession();
+    await sm.sendTurn('long tool with delayed assessment');
+
+    sm.recoverStalledOperation('toolu_assessment_race', 'Bash');
+    await vi.advanceTimersByTimeAsync(STALLED_OP_KILL_GRACE_MS + 1);
+    expect(treeLivenessAssessor).toHaveBeenCalledOnce();
+
+    // Real provider output arrives while the two-sample assessor is awaiting.
+    // Its eventual "not alive" verdict describes the old quiet stretch.
+    sm.tickWatchdog();
+    resolveAssessment({ alive: false, cpuDeltaMs: 0, pidChurn: 0, pidCount: 2 });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(mockChild.kill).not.toHaveBeenCalledWith('SIGKILL');
+
+    vi.useRealTimers();
+  });
+
   it('liveness gate: a CPU-active tree defers the stalled-op kill and re-arms the grace timer', async () => {
     vi.useFakeTimers();
 
@@ -1796,6 +1841,89 @@ describe('SessionManager', () => {
     // Ceiling reached → kill despite the alive verdict (assessor not even consulted).
     expect(mockChild.kill).toHaveBeenCalledWith('SIGKILL');
     expect(notifyUser).toHaveBeenCalledWith(expect.stringContaining('stalled'));
+
+    vi.useRealTimers();
+  });
+
+  it('liveness gate: crossing LONG_OP_CEILING_MS during assessment kills without rearming', async () => {
+    vi.useFakeTimers();
+
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    let resolveAssessment!: (verdict: {
+      alive: boolean;
+      cpuDeltaMs: number;
+      pidChurn: number;
+      pidCount: number;
+    }) => void;
+    const treeLivenessAssessor = vi.fn(() => new Promise<{
+      alive: boolean;
+      cpuDeltaMs: number;
+      pidChurn: number;
+      pidCount: number;
+    }>((resolve) => {
+      resolveAssessment = resolve;
+    }));
+    const sm = new SessionManager({
+      db,
+      messenger,
+      chatJid: CHAT_JID,
+      onEvent: vi.fn(),
+      treeLivenessAssessor,
+    });
+    await sm.spawnSession();
+    await sm.sendTurn('assessment crosses the ceiling');
+
+    sm.recoverStalledOperation('toolu_cross_ceiling', 'Bash');
+    const firstKillAt = Date.now() + STALLED_OP_KILL_GRACE_MS;
+    (sm as unknown as { longOpGateStartedAt: number | null }).longOpGateStartedAt =
+      firstKillAt - (LONG_OP_CEILING_MS - 1_000);
+    await vi.advanceTimersByTimeAsync(STALLED_OP_KILL_GRACE_MS + 1);
+    expect(treeLivenessAssessor).toHaveBeenCalledOnce();
+    vi.setSystemTime(Date.now() + 2_000);
+    resolveAssessment({ alive: true, cpuDeltaMs: 1_000, pidChurn: 0, pidCount: 3 });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(mockChild.kill).toHaveBeenCalledWith('SIGKILL');
+    expect((sm as unknown as { stalledOpKill: unknown }).stalledOpKill).toBeNull();
+
+    vi.useRealTimers();
+  });
+
+  it('liveness gate: an alive verdict rearms only for the time remaining before the ceiling', async () => {
+    vi.useFakeTimers();
+
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const treeLivenessAssessor = vi.fn().mockResolvedValue({
+      alive: true,
+      cpuDeltaMs: 1_000,
+      pidChurn: 0,
+      pidCount: 3,
+    });
+    const sm = new SessionManager({
+      db,
+      messenger,
+      chatJid: CHAT_JID,
+      onEvent: vi.fn(),
+      treeLivenessAssessor,
+    });
+    await sm.spawnSession();
+    await sm.sendTurn('bounded long operation');
+
+    const remainingAtAssessment = 60_000;
+    sm.recoverStalledOperation('toolu_bounded_rearm', 'Bash');
+    const firstKillAt = Date.now() + STALLED_OP_KILL_GRACE_MS;
+    (sm as unknown as { longOpGateStartedAt: number | null }).longOpGateStartedAt =
+      firstKillAt - (LONG_OP_CEILING_MS - remainingAtAssessment);
+    await vi.advanceTimersByTimeAsync(STALLED_OP_KILL_GRACE_MS + 1);
+
+    expect(mockChild.kill).not.toHaveBeenCalledWith('SIGKILL');
+    await vi.advanceTimersByTimeAsync(remainingAtAssessment + 1);
+
+    expect(mockChild.kill).toHaveBeenCalledWith('SIGKILL');
+    expect(treeLivenessAssessor).toHaveBeenCalledOnce();
 
     vi.useRealTimers();
   });
