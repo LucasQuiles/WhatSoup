@@ -26,7 +26,7 @@ SQLite, macOS private credential stores, ARC, and Tailscale admin controls.
 As of 2026-07-24, the contract lane and three code lanes are committed, pushed,
 and published as four open pull requests against `main`. Each branch was
 reconciled through an ordinary merge with `main` at
-`e4b8ad544897a632c5f7f38ea0e220e1f6bb46af`; this preserved the published
+`82a4ae1550297070614ca6634f5cc4cde9269049`; this preserved the published
 lineage without force-pushing active reviews. Branch-local push gates pass at
 every recorded head. GitHub checks are head-bound and must be read live before
 merge; this checkpoint records delivery identity rather than making a timeless
@@ -36,9 +36,9 @@ every host mutation remain pending.
 | Deliverable | Branch | Pull request | Recorded code head |
 | --- | --- | --- | --- |
 | Contract, design, and implementation ledger | `fix/agent-queue-health-20260723` | #2142 | This document's commit |
-| Provider actor isolation and canary proof | `fix/agent-provider-actor-isolation-20260723` | #2128 | `04101dba4` |
-| Queue-health truth | `fix/agent-queue-health-truth-20260723` | #2129 | `8757d1eda` |
-| Suspend and platform hardening | `fix/agent-suspend-platform-hardening-20260723` | #2130 | `89c2df350` |
+| Provider actor isolation and canary proof | `fix/agent-provider-actor-isolation-20260723` | #2128 | `aee8c7d34` |
+| Queue-health truth | `fix/agent-queue-health-truth-20260723` | #2129 | `17a07ef4d` |
+| Suspend and platform hardening | `fix/agent-suspend-platform-hardening-20260723` | #2130 | `564bb9c0d` |
 
 The first upstream reconciliation found one substantive overlap: `main` extracted
 the legacy per-chat transport helpers from `AgentRuntime` while the actor lane
@@ -78,6 +78,11 @@ routing fix. Dry merge-tree checks and ordinary merges were conflict-free in
 all four lanes. The change does not touch the agent runtime, health contracts,
 socket lifecycle, platform probes, or host-remediation tooling; focused lane
 tests and the complete push gates remain the acceptance evidence.
+
+A fourth reconciliation incorporated the upstream empty-stdin fail-closed
+pre-push guard. All four dry merge-tree checks and ordinary merges were
+conflict-free. The guard's 62 focused tests pass in each applicable tree; the
+complete branch push gates exercise the updated guard before publication.
 
 The unpushed `fix/agent-provider-canary-proof-20260723` precursor was compared
 with `git range-diff` and `git cherry`. Its actor and canary work is incorporated
