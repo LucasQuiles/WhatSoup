@@ -224,6 +224,10 @@ const srcConsoleAllowedFiles = new Set([
   'src/config.ts',
   'src/fleet/standalone.ts',
   'src/transport/auth.ts',
+  // T5 b-12: the perf meter is itself the diagnostics surface (19-§2
+  // runtime instrumentation); its sampled notes go to the dev console by
+  // design, and the structured logger is server-side only.
+  'console/src/lib/perf.ts',
 ]);
 
 const addedLinePatterns: GuardPattern[] = [
