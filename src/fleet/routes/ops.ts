@@ -333,7 +333,7 @@ async function handleServiceAction(
     jsonResponse(res, 202, { status: `${verb}_requested`, instance: params.name });
   } catch (err) {
     jsonResponse(res, 500, {
-      error: `${verb} failed: ${(err as Error).message}`,
+      error: `${verb} failed: ${errorMessage(err)}`,
       instance: params.name,
     });
   }
@@ -407,7 +407,7 @@ export async function handleConfigUpdate(
       throw new Error('body must be a JSON object');
     }
   } catch (err) {
-    jsonResponse(res, 400, { error: `invalid JSON: ${(err as Error).message}` });
+    jsonResponse(res, 400, { error: `invalid JSON: ${errorMessage(err)}` });
     return;
   }
 
@@ -420,7 +420,7 @@ export async function handleConfigUpdate(
       try {
         existing = JSON.parse(readPrivateConfigFileSync(instance.configPath));
       } catch (err) {
-        jsonResponse(res, 500, { error: `failed to read config: ${(err as Error).message}` });
+        jsonResponse(res, 500, { error: `failed to read config: ${errorMessage(err)}` });
         haltConfigUpdateAfterResponse();
       }
 
@@ -508,7 +508,7 @@ export async function handleConfigUpdate(
             ensureHomeConfinedDirectory(claudeDir);
             writePrivateFileSync(path.join(claudeDir, 'CLAUDE.md'), patch.claudeMd as string);
           } catch (err) {
-            jsonResponse(res, 500, { error: `failed to write CLAUDE.md: ${(err as Error).message}` });
+            jsonResponse(res, 500, { error: `failed to write CLAUDE.md: ${errorMessage(err)}` });
             haltConfigUpdateAfterResponse();
           }
         }
@@ -526,7 +526,7 @@ export async function handleConfigUpdate(
               writePermissionsSettings(claudeDir, settings);
             }
           } catch (err) {
-            jsonResponse(res, 500, { error: `failed to write settings.json: ${(err as Error).message}` });
+            jsonResponse(res, 500, { error: `failed to write settings.json: ${errorMessage(err)}` });
             haltConfigUpdateAfterResponse();
           }
         }
@@ -560,7 +560,7 @@ export async function handleConfigUpdate(
                 enabledPlugins: (patchAo.enabledPlugins ?? {}) as Record<string, boolean>,
               });
             } catch (err) {
-              jsonResponse(res, 500, { error: `failed to write enabledPlugins: ${(err as Error).message}` });
+              jsonResponse(res, 500, { error: `failed to write enabledPlugins: ${errorMessage(err)}` });
               haltConfigUpdateAfterResponse();
             }
           }
@@ -586,7 +586,7 @@ export async function handleConfigUpdate(
       try {
         writePrivateConfigFileSync(instance.configPath, JSON.stringify(clean, null, 2) + '\n');
       } catch (err) {
-        jsonResponse(res, 500, { error: `failed to write config: ${(err as Error).message}` });
+        jsonResponse(res, 500, { error: `failed to write config: ${errorMessage(err)}` });
         haltConfigUpdateAfterResponse();
       }
       return clean;
@@ -596,7 +596,7 @@ export async function handleConfigUpdate(
       return;
     }
     const action = errnoCode(err) === 'ENOENT' ? 'failed to read config' : 'failed to write config';
-    jsonResponse(res, 500, { error: `${action}: ${(err as Error).message}` });
+    jsonResponse(res, 500, { error: `${action}: ${errorMessage(err)}` });
     return;
   }
 
@@ -1003,7 +1003,7 @@ export async function handleCreateLine(
       throw new Error('body must be a JSON object');
     }
   } catch (err) {
-    jsonResponse(res, 400, { error: `invalid JSON: ${(err as Error).message}` });
+    jsonResponse(res, 400, { error: `invalid JSON: ${errorMessage(err)}` });
     return;
   }
 
@@ -1167,7 +1167,7 @@ export async function handleCreateLine(
       jsonResponse(res, 409, { error: `instance '${name}' already exists` });
       return;
     }
-    jsonResponse(res, 500, { error: `instance creation failed: ${(err as Error).message}` });
+    jsonResponse(res, 500, { error: `instance creation failed: ${errorMessage(err)}` });
     return;
   }
 
@@ -1245,14 +1245,14 @@ export async function handleCreateLine(
           'failed to disable service after instance creation failure',
         );
         jsonResponse(res, 500, {
-          error: `instance creation failed: ${(err as Error).message}`,
-          rollbackError: `service disable failed: ${(rollbackErr as Error).message}`,
+          error: `instance creation failed: ${errorMessage(err)}`,
+          rollbackError: `service disable failed: ${errorMessage(rollbackErr)}`,
         });
         return;
       }
     }
     cleanupPartial(name, createdExtras);
-    jsonResponse(res, 500, { error: `instance creation failed: ${(err as Error).message}` });
+    jsonResponse(res, 500, { error: `instance creation failed: ${errorMessage(err)}` });
   }
 }
 
