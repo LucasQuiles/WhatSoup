@@ -7485,6 +7485,15 @@ export class AgentRuntime implements Runtime {
       this.healthStatsTimer = null;
     }
     this.workspaceSweeper.stop();
+    // H2: quiesce the recovery scan loop FIRST, before any per-chat teardown
+    // below -- stop() clears the scan timer synchronously and blocks
+    // scheduleScan from re-arming it, so a scan cannot fire mid-shutdown and
+    // dispatch a replay into a session that teardown is tearing down or has
+    // already torn down. The later shutdownTurnRecoverySupervisorSafely call
+    // still awaits any scan that was ALREADY in flight before this line ran
+    // -- that's a different, narrower race this stop() call does not (and
+    // cannot) close by itself.
+    this.turnRecoverySupervisor.stop();
     if (this.queueSweepTimer) {
       clearInterval(this.queueSweepTimer);
       this.queueSweepTimer = null;

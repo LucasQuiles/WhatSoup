@@ -69,6 +69,7 @@ interface LiveWiringRuntimeState extends RuntimeState {
       skippedUnsupportedScope: number;
       skippedNotDispatchable: number;
     }>;
+    stop(): void;
   };
 }
 
@@ -432,5 +433,50 @@ describe('AgentRuntime.dispatchTurnRecoveryReplay — live wiring (PRESTAGE-T4 P
 
     const job = durability.getTurnRecoveryJob(jobId)!;
     expect(job.state).toBe('completed');
+  });
+});
+
+describe('AgentRuntime.shutdown — H2 turn-recovery scan quiescence ordering', () => {
+  let db: Database;
+  let durability: DurabilityEngine;
+  let runtime: ReturnType<typeof makeRuntimeState<LiveWiringRuntimeState>>['runtime'];
+  let state: LiveWiringRuntimeState;
+
+  beforeEach(() => {
+    db = new Database(':memory:');
+    db.open();
+    durability = new DurabilityEngine(db);
+    const built = makeRuntimeState<LiveWiringRuntimeState>(db, { sessionScope: 'per_chat' });
+    runtime = built.runtime;
+    state = built.state;
+    runtime.setDurability(durability);
+  });
+
+  afterEach(() => {
+    db.close();
+  });
+
+  it('H2: turnRecoverySupervisor.stop() is called BEFORE any per-chat session is torn down -- a scan cannot fire into a dying/dead session', async () => {
+    const mapKey = '15550199000@s.whatsapp.net';
+    const session = sessionStub();
+    state.chatSessions.set(mapKey, session);
+    state.chatQueues.set(mapKey, queueStub(mapKey));
+
+    const stopSpy = vi.spyOn(state.turnRecoverySupervisor, 'stop');
+
+    await runtime.shutdown();
+
+    // Pre-fix: TurnRecoverySupervisor.stop() has ZERO callers anywhere in
+    // runtime.ts (confirmed by repo-wide grep before writing this fix) --
+    // this assertion alone fails RED without the fix, since stop() is never
+    // invoked at all. Post-fix: called, AND strictly BEFORE the per-chat
+    // session's own teardown -- proving the scan loop is quiesced first,
+    // not merely called "at some point during" shutdown (which would still
+    // leave the mid-shutdown dispatch race open).
+    expect(stopSpy).toHaveBeenCalled();
+    expect(session.shutdown).toHaveBeenCalled();
+    const stopOrder = stopSpy.mock.invocationCallOrder[0]!;
+    const teardownOrder = vi.mocked(session.shutdown).mock.invocationCallOrder[0]!;
+    expect(stopOrder).toBeLessThan(teardownOrder);
   });
 });
