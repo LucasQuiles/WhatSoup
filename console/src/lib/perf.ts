@@ -27,6 +27,12 @@ declare global {
   }
 }
 
+/** The ONE shared counters object — every meter mutates it in place (the
+ *  window.__soupPerf pointer is never reassigned, so meters can't discard
+ *  each other's state; cross-review F1). */
+const counters: PerfCounters = { wsGlobalRate: 0, wsLineRates: {}, wsOverCapEvents: 0, longtasks: 0 }
+window.__soupPerf = counters
+
 /* ── WS throughput meter ── */
 
 const LINE_CAP = 10 // 19-§1: per-line cap 10/s
@@ -36,7 +42,6 @@ const WINDOW_MS = 1000
 class WsMeter {
   private lineEvents = new Map<string, number[]>()
   private globalEvents: number[] = []
-  private counters: PerfCounters = { wsGlobalRate: 0, wsLineRates: {}, wsOverCapEvents: 0, longtasks: 0 }
 
   record(instance: string, now = Date.now()): void {
     const cutoff = now - WINDOW_MS
@@ -48,16 +53,26 @@ class WsMeter {
 
     const globalRate = this.globalEvents.length
     const lineRate = this.lineEvents.get(instance)!.length
-    this.counters.wsGlobalRate = globalRate
-    this.counters.wsLineRates = { ...this.counters.wsLineRates, [instance]: lineRate }
+    counters.wsGlobalRate = globalRate
+    counters.wsLineRates[instance] = lineRate
 
     if (globalRate > GLOBAL_CAP || lineRate > LINE_CAP) {
-      this.counters.wsOverCapEvents += 1
-      if (this.counters.wsOverCapEvents <= 5) {
+      counters.wsOverCapEvents += 1
+      if (counters.wsOverCapEvents <= 5) {
         console.debug(`[perf] ws rate over budget: global ${globalRate}/s, ${instance} ${lineRate}/s`)
       }
     }
-    window.__soupPerf = this.counters
+  }
+
+  /** Test seam: drop all accumulated window state (the shared object identity
+   *  survives; the window pointer is re-asserted defensively). */
+  reset(): void {
+    this.lineEvents.clear()
+    this.globalEvents = []
+    counters.wsGlobalRate = 0
+    counters.wsLineRates = {}
+    counters.wsOverCapEvents = 0
+    window.__soupPerf = counters
   }
 }
 
@@ -67,12 +82,6 @@ export const wsMeter = new WsMeter()
 
 export function startLongtaskObserver(sampleRate = 0.01): () => void {
   if (typeof PerformanceObserver === 'undefined') return () => {}
-  const counters: PerfCounters = window.__soupPerf ?? {
-    wsGlobalRate: 0,
-    wsLineRates: {},
-    wsOverCapEvents: 0,
-    longtasks: 0,
-  }
   let observer: PerformanceObserver | null = null
   try {
     observer = new PerformanceObserver((list) => {
@@ -81,7 +90,6 @@ export function startLongtaskObserver(sampleRate = 0.01): () => void {
         counters.longtasks += 1
         console.debug(`[perf] longtask ${Math.round(entry.duration)}ms`)
       }
-      window.__soupPerf = counters
     })
     observer.observe({ type: 'longtask', buffered: true })
   } catch {
@@ -95,7 +103,7 @@ export function startLongtaskObserver(sampleRate = 0.01): () => void {
 
 export function surfaceProfilerCallback(
   id: string,
-  phase: 'mount' | 'update' | 'nested',
+  phase: 'mount' | 'update' | 'nested-update',
   actualDuration: number,
 ): void {
   if (!import.meta.env.DEV) return

@@ -2,12 +2,17 @@
  * perf instrumentation — meter contracts (T5 b-12; 19-performance-budget §2).
  * @vitest-environment jsdom
  */
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { wsMeter, startLongtaskObserver } from '../../console/src/lib/perf'
 
 describe('wsMeter (19-§1: per-line 10/s, global 200/s caps)', () => {
+  beforeEach(() => {
+    // module-singleton state must not leak across tests (cross-review F3)
+    wsMeter.reset()
+  })
+
   afterEach(() => {
-    delete window.__soupPerf
+    wsMeter.reset()
   })
 
   it('tracks per-line and global 1s-window rates on window.__soupPerf', () => {

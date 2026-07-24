@@ -69,11 +69,17 @@ async function measurePaints(url) {
       }).observe({ type: 'paint', buffered: true });
     });
     await page.goto(url, { waitUntil: 'load', timeout: 30000 });
-    await page.waitForTimeout(500);
-    const cold = await page.evaluate(() => window.__fcp);
+    // fail-closed: poll for the observer's FCP — a missing reading is a
+    // FAILED leg, never a silently skipped one (cross-review F2).
+    const cold = await page
+      .waitForFunction(() => window.__fcp != null, undefined, { timeout: 10000 })
+      .then(() => page.evaluate(() => window.__fcp))
+      .catch(() => null);
     await page.reload({ waitUntil: 'load', timeout: 30000 });
-    await page.waitForTimeout(500);
-    const warm = await page.evaluate(() => window.__fcp);
+    const warm = await page
+      .waitForFunction(() => window.__fcp != null, undefined, { timeout: 10000 })
+      .then(() => page.evaluate(() => window.__fcp))
+      .catch(() => null);
     return { cold, warm };
   } finally {
     await browser.close();
@@ -121,24 +127,15 @@ async function main() {
 
   try {
     const paints = await measurePaints(url);
-    if (paints.cold != null) {
-      results.push({
-        metric: 'cold-paint',
-        value: Math.round(paints.cold),
-        unit: 'ms',
-        budget: BUDGETS.coldPaintMs,
-        pass: paints.cold <= BUDGETS.coldPaintMs,
-      });
-    }
-    if (paints.warm != null) {
-      results.push({
-        metric: 'warm-paint',
-        value: Math.round(paints.warm),
-        unit: 'ms',
-        budget: BUDGETS.warmPaintMs,
-        pass: paints.warm <= BUDGETS.warmPaintMs,
-      });
-    }
+    // null reading = FAILED leg (fail-closed) — never skipped.
+    results.push(
+      paints.cold != null
+        ? { metric: 'cold-paint', value: Math.round(paints.cold), unit: 'ms', budget: BUDGETS.coldPaintMs, pass: paints.cold <= BUDGETS.coldPaintMs }
+        : { metric: 'cold-paint', value: 'unreadable', unit: '', budget: BUDGETS.coldPaintMs, pass: false, detail: 'FCP observer delivered nothing within 10s' },
+      paints.warm != null
+        ? { metric: 'warm-paint', value: Math.round(paints.warm), unit: 'ms', budget: BUDGETS.warmPaintMs, pass: paints.warm <= BUDGETS.warmPaintMs }
+        : { metric: 'warm-paint', value: 'unreadable', unit: '', budget: BUDGETS.warmPaintMs, pass: false, detail: 'FCP observer delivered nothing within 10s' },
+    );
   } finally {
     if (serverProc) {
       try { process.kill(-serverProc.pid, 'SIGTERM'); } catch { /* already gone */ }

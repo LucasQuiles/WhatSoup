@@ -1,4 +1,4 @@
-import { lazy, Suspense, useState, useCallback } from 'react'
+import { lazy, Profiler, Suspense, useState, useCallback } from 'react'
 import { Routes, Route, Navigate, useLocation } from 'react-router-dom'
 import { MotionConfig } from 'framer-motion'
 import ErrorBoundary from './components/ErrorBoundary'
@@ -8,6 +8,7 @@ import ChromeHeader from './components/chrome/ChromeHeader'
 import ConnectionBanner from './components/ConnectionBanner'
 import { CommandPalette } from './components/CommandPalette'
 import { useLines } from './hooks/use-fleet'
+import { surfaceProfilerCallback } from './lib/perf'
 import { useConsoleSession } from './hooks/use-console-session'
 import UnlockScreen from './components/UnlockScreen'
 import { useUpdateCheck, getStaticVersion } from './hooks/use-update-check'
@@ -111,6 +112,8 @@ function UnlockedApp({ onLogout, showLogout }: { onLogout: () => void; showLogou
           <ChromeHeader alertCount={alertCount} />
           <main className="flex-1 flex flex-col min-h-0 overflow-hidden">
             <Suspense fallback={<PageLoader />}>
+            {/* Profiler around the route tree (19-§2 render profiler, dev-mode logging) */}
+            <Profiler id="app-routes" onRender={surfaceProfilerCallback}>
               <Routes>
                 <Route path="/" element={<ErrorBoundary><SoupKitchen /></ErrorBoundary>} />
                 <Route path="/welcome" element={<ErrorBoundary><Landing /></ErrorBoundary>} />
@@ -133,6 +136,7 @@ function UnlockedApp({ onLogout, showLogout }: { onLogout: () => void; showLogou
                 <Route path="/settings" element={<ErrorBoundary><SurfaceStub surface="Settings" bead="b-09" /></ErrorBoundary>} />
                 <Route path="*" element={<Navigate to="/" replace />} />
               </Routes>
+            </Profiler>
             </Suspense>
           </main>
         </div>
