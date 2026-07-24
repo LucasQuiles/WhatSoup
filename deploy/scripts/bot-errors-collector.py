@@ -1359,6 +1359,24 @@ def default_recovery_successes() -> int:
         return 2
 
 
+# HD-11b — collector capture-failure escalation (DEFECT-REGISTER collection-
+# blindness class / NOTES.md wishlist 10, 13): a persistently uncollectable
+# remote must not silently stall collection. Distinct from and independently
+# tunable from RELAY_BACKOFF_FAILURE_THRESHOLD (backoff entry) -- both key off
+# the same consecutiveFailures counter but serve different purposes: this is
+# the earlier, lower-confidence escalation signal that opens a real dispatcher
+# incident with a typed clear; relay_host_down is backoff-schedule entry.
+COLLECTOR_CAPTURE_ESCALATION_SOURCE: str = "collector_remote_unreachable"
+
+
+def collector_failure_escalate_threshold() -> int:
+    raw = os.environ.get("BOT_ERRORS_COLLECTOR_FAILURE_ESCALATE_THRESHOLD", "2")
+    try:
+        return max(1, int(raw))
+    except ValueError:
+        return 2
+
+
 FAILURE_RETENTION_DETAIL_MAX_CHARS: int = 1000
 
 
@@ -1897,6 +1915,105 @@ def emit_relay_host_state_event(remote: str, kind: str, evidence: str, state: di
     })
 
 
+def emit_collector_capture_escalation_event(
+    remote: str,
+    event_type: str,
+    *,
+    consecutive_failures: int | None = None,
+    threshold: int | None = None,
+    error_class: str | None = None,
+    last_error: str | None = None,
+    last_success_age_seconds: int | None = None,
+    reachability_diagnosis_value: str | None = None,
+) -> None:
+    """Write a collector_remote_unreachable alert/clear outbox event (ENTRY/EXIT only).
+
+    Mirrors emit_relay_host_state_event's construction pattern (unconditional
+    outbox write, no cooldown gate, no open-alert bookkeeping) but is a
+    genuinely distinct, independently-tunable signal: default threshold=2
+    (BOT_ERRORS_COLLECTOR_FAILURE_ESCALATE_THRESHOLD) fires earlier than
+    RELAY_BACKOFF_FAILURE_THRESHOLD=3's relay_host_down, and — unlike
+    relay_host_down/relay_host_recovered, which both use eventType="alert" —
+    emits a real eventType="clear" on recovery so the dispatcher's standard
+    clear-pop path (mark_incident_sent) closes the incident directly.
+
+    instance="bot-errors-collector" + diagnostics.remote are load-bearing:
+    dispatcher.py's incident_source() qualifies collector-minted events by
+    diagnostics.remote precisely when instance == "bot-errors-collector",
+    which is what keeps two different unreachable remotes on separate
+    incident keys (no cross-remote false-clear). Do not drop either field.
+    """
+    host, remote_root = parse_remote(remote)
+    severity = "warning" if event_type == "alert" else "info"
+    event_id = (
+        f"collector-{safe_segment(remote)}-{COLLECTOR_CAPTURE_ESCALATION_SOURCE}"
+        f"-{event_type}-{time.time_ns()}-{os.getpid()}"
+    )
+    redacted_last_error = (
+        redact_collector_text(last_error)[:FAILURE_RETENTION_DETAIL_MAX_CHARS] if last_error else None
+    )
+    diagnostics: dict[str, Any] = {
+        "remote": remote,
+        "host": host,
+        "remoteRoot": remote_root,
+        "queue": str(state_root() / "outbox"),
+        "logHints": [str(state_root() / "logs/collector.jsonl")],
+        "collectorLog": str(state_root() / "logs/collector.jsonl"),
+        # Always present (possibly null) so a reader never has to distinguish
+        # "never succeeded" from "field omitted".
+        "consecutiveFailures": consecutive_failures,
+        "thresholdConfigured": threshold,
+        "errorClass": error_class,
+        "lastSuccessAgeSeconds": last_success_age_seconds,
+    }
+    if reachability_diagnosis_value:
+        diagnostics["reachabilityDiagnosis"] = reachability_diagnosis_value
+    evidence_parts = [f"remote={remote}"]
+    if consecutive_failures is not None:
+        evidence_parts.append(f"consecutive_failures={consecutive_failures}")
+    if threshold is not None:
+        evidence_parts.append(f"threshold={threshold}")
+    if error_class:
+        evidence_parts.append(f"error_class={error_class}")
+    evidence_parts.append(
+        f"last_success_age_seconds={last_success_age_seconds if last_success_age_seconds is not None else 'never'}"
+    )
+    if redacted_last_error:
+        evidence_parts.append(f"last_error={redacted_last_error}")
+    if reachability_diagnosis_value:
+        evidence_parts.append(f"reachability_diagnosis={reachability_diagnosis_value}")
+    evidence_parts.append(f"collector_log={state_root() / 'logs/collector.jsonl'}")
+    evidence = "\n".join(evidence_parts)
+    event = {
+        "schemaVersion": 1,
+        "id": event_id,
+        "eventType": event_type,
+        "severity": severity,
+        "createdAt": now_iso(),
+        "machine": socket.gethostname(),
+        "platform": sys.platform,
+        "instance": "bot-errors-collector",
+        "source": COLLECTOR_CAPTURE_ESCALATION_SOURCE,
+        "summary": (
+            f"BOT ERRORS collector cannot capture remote outbox: {remote}"
+            if event_type == "alert"
+            else f"BOT ERRORS collector remote capture recovered: {remote}"
+        ),
+        "evidence": redact_collector_text(evidence),
+        "process": {"pid": os.getpid(), "cwd": os.getcwd(), "argv": sys.argv},
+        "diagnostics": diagnostics,
+        "delivery": {"attempts": 0, "status": "queued", "nextAttemptAtEpoch": 0, "lastError": None},
+    }
+    path = local_outbox_path(event, "collector")
+    atomic_write_json(path, event)
+    append_log({
+        "type": f"{COLLECTOR_CAPTURE_ESCALATION_SOURCE}_{event_type}",
+        "remote": remote,
+        "eventId": event_id,
+        "evidence": redact_collector_text(evidence),
+    })
+
+
 def run_once(
     remotes: list[str],
     best_effort_remotes: set[str],
@@ -1982,6 +2099,30 @@ def run_once(
             # Update consecutive-failure counter and backoff schedule.
             new_consecutive_failures = consecutive_failures_pre + 1
             remote_record["consecutiveFailures"] = new_consecutive_failures
+            # --- HD-11b capture-failure escalation ---
+            # Independent of (evaluated regardless of) the backoff/down branch
+            # below: default threshold=2 fires a full cycle before
+            # RELAY_BACKOFF_FAILURE_THRESHOLD=3's relay_host_down does. One
+            # escalation per failure episode (captureFailureEscalated flag,
+            # same one-shot pattern as downEventEmitted) -- do NOT re-emit on
+            # every subsequent failure past threshold (anti-noise; dispatcher
+            # dedup handles repeats for whichever alert we DO send).
+            escalate_threshold = collector_failure_escalate_threshold()
+            if new_consecutive_failures >= escalate_threshold and not remote_record.get("captureFailureEscalated"):
+                remote_record["captureFailureEscalated"] = True
+                last_success_at = remote_record.get("lastSuccessAt")
+                last_success_age = int(time.time()) - int(last_success_at) if last_success_at else None
+                failure_class = str((remote_record.get("failureRetention") or {}).get("failureClass") or "")
+                emit_collector_capture_escalation_event(
+                    remote,
+                    "alert",
+                    consecutive_failures=new_consecutive_failures,
+                    threshold=escalate_threshold,
+                    error_class=failure_class or None,
+                    last_error=error,
+                    last_success_age_seconds=last_success_age,
+                    reachability_diagnosis_value=(reachability_diagnostics or {}).get("reachabilityDiagnosis"),
+                )
             if new_consecutive_failures >= RELAY_BACKOFF_FAILURE_THRESHOLD:
                 # Advance backoff schedule index (cap at last entry).
                 schedule_index_old = int(remote_record.get("backoffScheduleIndex") or 0)
@@ -2047,6 +2188,26 @@ def run_once(
         # surface). So clear the backoff/down state here, before the writefail try.
         if outbox_claim_succeeded:
             remote_record = remote_state.setdefault(remote, {})
+            # --- HD-11b capture-failure escalation clear ---
+            # Independent of the down/backoff recovery gate below (was_down /
+            # recovered_from_down / recovery_successes): the escalate threshold
+            # (default 2) is lower than RELAY_BACKOFF_FAILURE_THRESHOLD (3), so
+            # a remote can be escalated without ever having entered backoff/down
+            # state. Clears on the literal next successful claim per contract
+            # (not gated by consecutive-success count) -- this is a distinct,
+            # earlier-firing signal, so its clear condition is correspondingly
+            # simpler than the backoff recovery's N-successes requirement.
+            if remote_record.get("captureFailureEscalated"):
+                prior_error_class = str((remote_record.get("failureRetention") or {}).get("failureClass") or "")
+                emit_collector_capture_escalation_event(
+                    remote,
+                    "clear",
+                    consecutive_failures=0,
+                    threshold=collector_failure_escalate_threshold(),
+                    error_class=prior_error_class or None,
+                    last_success_age_seconds=0,
+                )
+                remote_record["captureFailureEscalated"] = False
             was_down = bool(remote_record.get("downEventEmitted"))
             outbox_recovery_successes = int(remote_record.get("outboxRecoveryConsecutiveSuccesses") or 0) + 1
             remote_record["outboxRecoveryConsecutiveSuccesses"] = outbox_recovery_successes
