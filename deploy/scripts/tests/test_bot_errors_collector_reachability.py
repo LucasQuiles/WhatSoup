@@ -18,6 +18,8 @@ BLOCKER 2 — tailscale_online_ssh_failed too broad:
 """
 from __future__ import annotations
 
+import importlib.util
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
@@ -27,8 +29,25 @@ import pytest
 # byte-for-byte duplicated across this file,
 # test_bot_errors_collector_backoff.py, and
 # test_bot_errors_collector_capture_escalation.py. tmp_state itself needs no
-# import -- pytest resolves it from conftest.py by fixture-parameter name.
-from conftest import _env, _load_mod_with_dirs, _run_once_defaults
+# import -- pytest resolves it from conftest.py as a fixture by parameter
+# name, mode-independent.
+#
+# The plain (non-fixture) helpers are loaded via importlib rather than
+# `from conftest import ...`: this repo's collector test suites run under
+# `--import-mode=importlib` (see deploy/scripts/run-sentinel-tests.sh), which
+# does NOT add the test directory to sys.path -- a bare `from conftest
+# import X` raises ModuleNotFoundError under that mode (found + verified
+# during HD-11b review). Loading conftest.py by file path mirrors the same
+# spec_from_file_location pattern conftest.py's own _load_module() uses to
+# load the hyphenated bot-errors-collector.py module.
+_CONFTEST_PATH = Path(__file__).resolve().parent / "conftest.py"
+_conftest_spec = importlib.util.spec_from_file_location("bot_errors_collector_test_conftest", _CONFTEST_PATH)
+_conftest = importlib.util.module_from_spec(_conftest_spec)  # type: ignore[arg-type]
+_conftest_spec.loader.exec_module(_conftest)  # type: ignore[union-attr]
+
+_env = _conftest._env
+_load_mod_with_dirs = _conftest._load_mod_with_dirs
+_run_once_defaults = _conftest._run_once_defaults
 
 # ===========================================================================
 # BLOCKER 1: Stale Tailscale cache across daemon cycles
