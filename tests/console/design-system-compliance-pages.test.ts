@@ -141,29 +141,32 @@ describe('design system compliance — Shannon slice', () => {
     expect(jsxElementOffenders(/<motion\.button\b/)).toEqual([])
   })
 
-  it('uses design tokens for Nav hardcoded pixel values', () => {
-    const source = read('console/src/components/Nav.tsx')
+  it('v3.5 chrome consumes tokens only (T5 b-02)', () => {
+    const rail = read('console/src/components/chrome/NavRail.tsx')
+    const header = read('console/src/components/chrome/ChromeHeader.tsx')
+    const chrome = read('console/src/styles/chrome.css')
 
-    // Left-rail restructure: the active-item indicator is a FULL accent fill on
-    // the row itself (showcase-accurate) — bg --accent + dark --accent-fg text,
-    // applied via Tailwind token classes (replacing the legacy left-edge bar and
-    // the even-older bottom underline). The unread badge still uses spacing tokens.
-    expect(source).toContain('bg-[var(--accent)]')
-    expect(source).toContain('text-[var(--accent-fg)]')
-    expect(source).toContain('min-w-[var(--sp-4)]')
-    expect(source).toContain('py-[var(--sp-0h)] px-[var(--sp-1)]')
-    // No raw px literals (inline styles) anywhere in the rail.
-    expect(source).not.toContain('left: "12px"')
-    expect(source).not.toContain('right: "12px"')
-    expect(source).not.toContain('height: "2px"')
-    expect(source).not.toContain('width: "2px"')
-    expect(source).not.toContain('minWidth: "16px"')
-    expect(source).not.toContain('padding: "1px 5px"')
-    expect(source).not.toContain("padding: '2px 6px'")
-    // The legacy bar/underline geometry must be gone (re-entry guard).
-    expect(source).not.toContain('w-[var(--bw-accent)]')
-    expect(source).not.toContain('h-[var(--bw-accent)]')
-    expect(source).not.toContain('bottom: "-1px"')
+    // The TSX carries class hooks only — geometry/typography live in chrome.css.
+    for (const source of [rail, header]) {
+      const code = source.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '')
+      expect(code).not.toMatch(/\d+px/)
+      expect(source).not.toMatch(/text-\[var\(--font-size-/)
+      expect(source).not.toMatch(/text-\[var\(--text-/)
+    }
+
+    // The stylesheet consumes the --chrome-* geometry tier, the -v35 semantic
+    // addendum, and the border-width tokens — pin the load-bearing recipes.
+    expect(chrome).toContain('width: var(--chrome-rail-w);')
+    expect(chrome).toContain('background: var(--accent-wash-v35);')
+    expect(chrome).toContain('box-shadow: inset var(--bw-accent) 0 0 var(--accent-v35);')
+    expect(chrome).toContain('@media (max-width: 1100px)')
+
+    // Raw-dimension law: the only raw px in chrome.css declarations is the
+    // sanctioned media-query literal (custom properties do not evaluate in
+    // @media). Comments are stripped before the scan.
+    const declarations = chrome.replace(/\/\*[\s\S]*?\*\//g, '')
+    const rawPx = declarations.match(/\d+px/g) ?? []
+    expect(rawPx).toEqual(['1100px'])
   })
 
   it('replaces remaining hardcoded values with tokens in heatmap, tags, and quoted replies', () => {
@@ -316,12 +319,12 @@ describe('design system compliance — Shannon slice', () => {
   })
 
   it('TSX files use text-* classes, not text-[var(--font-size-*)] or text-[var(--text-*)]', () => {
-    const nav = read('console/src/components/Nav.tsx')
+    const navRail = read('console/src/components/chrome/NavRail.tsx')
     const pill = read('console/src/components/FilterPill.tsx')
     // text-[var(--font-size-*)] generates no CSS in TW4 (ambiguous)
     // text-[var(--text-*)] is redundant when text-* utility exists
-    expect(nav).not.toMatch(/text-\[var\(--font-size-/)
-    expect(nav).not.toMatch(/text-\[var\(--text-/)
+    expect(navRail).not.toMatch(/text-\[var\(--font-size-/)
+    expect(navRail).not.toMatch(/text-\[var\(--text-/)
     expect(pill).not.toMatch(/text-\[var\(--font-size-/)
     // C2 migration: FilterPill no longer styles its own text — the Pill primitive owns
     // typography via soup-pill classes (pill.md). Pin the delegation instead.

@@ -82,7 +82,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { ToastContext } from '../../console/src/hooks/toast-context';
 import type { ToastContextValue } from '../../console/src/hooks/toast-context';
 import type { LineInstance, ChatItem, Message } from '../../console/src/types';
-import Nav from '../../console/src/components/Nav';
+import NavRail from '../../console/src/components/chrome/NavRail';
 import { SummaryTab } from '../../console/src/components/line-detail/SummaryTab';
 import { HistoryTab } from '../../console/src/components/line-detail/HistoryTab';
 import '../../console/src/index.css';
@@ -785,55 +785,62 @@ describe('Drawer squeeze flip — container query at 900px (DD-18r)', () => {
 });
 
 // ---------------------------------------------------------------------------
-// RAIL collapse suite (DD-18r leg 1 — nav width pressure beyond label hiding)
+// RAIL collapse suite (v3.5 T5 b-02 — mockup @media (max-width:1100px))
 //
-// The rail collapse is a VIEWPORT media query (@media (max-width: 760px),
-// primitives.css) — proven via page.viewport, mirroring the Fleet lg-flip
-// rows. Nav needs no hook mocks: useRealtime has a default context value and
-// useTheme is provider-free (localStorage + document).
+// The rail collapse is a VIEWPORT media query (chrome.css) — proven via
+// page.viewport, mirroring the Fleet lg-flip rows. NavRail needs no hook
+// mocks: useRealtime has a default context value and useTheme is
+// provider-free (localStorage + document).
+// Labels drop out of layout per the mockup SSOT via the sr-only clip recipe
+// (NOT display:none) so icon-only rows keep their content-computed accessible
+// name — label text + Inbox unread count — for screen readers (b-02
+// cross-review finding); the glyph + link title reinforce meaning.
 // ---------------------------------------------------------------------------
 
-describe('Viewport matrix — rail collapse (DD-18r leg 1)', () => {
-  it('rail is full width (220px) with visible labels at 761px viewport', async () => {
-    await page.viewport(761, 800);
+describe('Viewport matrix — rail collapse (v3.5 b-02)', () => {
+  it('rail is full width (212px) with visible labels at 1101px viewport', async () => {
+    await page.viewport(1101, 800);
     const { container } = await render(
-      <MemoryRouter><Nav /></MemoryRouter>,
+      <MemoryRouter><NavRail /></MemoryRouter>,
     );
-    const rail = container.querySelector('.soup-rail') as HTMLElement;
+    const rail = container.querySelector('.chrome-rail') as HTMLElement;
     expect(rail).not.toBeNull();
-    expect(window.getComputedStyle(rail).width).toBe('220px');
-    const label = container.querySelector('.soup-rail__label') as HTMLElement;
+    expect(window.getComputedStyle(rail).width).toBe('212px');
+    const label = container.querySelector('.chrome-nav-item__label') as HTMLElement;
     expect(label).not.toBeNull();
-    // sr-only clip recipe is NOT applied above the breakpoint
-    expect(window.getComputedStyle(label).clipPath ?? '').not.toContain('rect(0px, 0px, 0px, 0px)');
-    expect(window.getComputedStyle(label).position).not.toBe('absolute');
+    expect(window.getComputedStyle(label).display).not.toBe('none');
   });
 
-  it('rail collapses to 64px with sr-only labels at 760px viewport', async () => {
-    await page.viewport(760, 800);
+  it('rail collapses to 64px with labels out of layout at 1100px viewport', async () => {
+    await page.viewport(1100, 800);
     const { container } = await render(
-      <MemoryRouter><Nav /></MemoryRouter>,
+      <MemoryRouter><NavRail /></MemoryRouter>,
     );
-    const rail = container.querySelector('.soup-rail') as HTMLElement;
+    const rail = container.querySelector('.chrome-rail') as HTMLElement;
     expect(rail).not.toBeNull();
     expect(window.getComputedStyle(rail).width).toBe('64px');
-    const label = container.querySelector('.soup-rail__label') as HTMLElement;
+    const label = container.querySelector('.chrome-nav-item__label') as HTMLElement;
     expect(label).not.toBeNull();
-    // The visually-hidden recipe: absolute + clipped box (meaning carried by icon + aria)
-    expect(window.getComputedStyle(label).position).toBe('absolute');
-    expect(window.getComputedStyle(label).overflow).toBe('hidden');
+    // Mockup SSOT: out of visual layout via sr-only clip — still displayed
+    // (display != none) so the accessible name survives; 1px box clipped away.
+    const cs = window.getComputedStyle(label);
+    expect(cs.display).not.toBe('none');
+    expect(cs.position).toBe('absolute');
+    expect(cs.width).toBe('1px');
+    expect(cs.height).toBe('1px');
+    expect(cs.clip).toBe('rect(0px, 0px, 0px, 0px)');
   });
 
-  it('at short height (1440×500) the nav region owns the scroll and the dock stays mounted', async () => {
+  it('at short height (1440×500) the nav region owns the scroll and the utility dock stays mounted', async () => {
     await page.viewport(1440, 500);
     const { container } = await render(
-      <MemoryRouter><Nav /></MemoryRouter>,
+      <MemoryRouter><NavRail /></MemoryRouter>,
     );
-    const scroll = container.querySelector('.soup-rail__scroll') as HTMLElement;
+    const scroll = container.querySelector('.chrome-nav') as HTMLElement;
     expect(scroll).not.toBeNull();
     expect(window.getComputedStyle(scroll).overflowY).toBe('auto');
     expect(window.getComputedStyle(scroll).minHeight).toBe('0px');
-    expect(container.querySelector('.soup-rail__dock')).not.toBeNull();
+    expect(container.querySelector('.chrome-utility')).not.toBeNull();
   });
 });
 

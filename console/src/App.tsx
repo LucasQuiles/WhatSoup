@@ -3,7 +3,8 @@ import { Routes, Route, Navigate, useLocation } from 'react-router-dom'
 import { MotionConfig } from 'framer-motion'
 import ErrorBoundary from './components/ErrorBoundary'
 import { KeyboardShortcutsHelp } from './components/KeyboardShortcutsHelp'
-import Nav from './components/Nav'
+import NavRail from './components/chrome/NavRail'
+import ChromeHeader from './components/chrome/ChromeHeader'
 import ConnectionBanner from './components/ConnectionBanner'
 import { CommandPalette } from './components/CommandPalette'
 import { useLines } from './hooks/use-fleet'
@@ -21,6 +22,7 @@ const Inbox = lazy(() => import('./pages/Inbox'))
 const Metrics = lazy(() => import('./pages/Metrics'))
 const Operator = lazy(() => import('./pages/Operator'))
 const Landing = lazy(() => import('./pages/Landing'))
+const SurfaceStub = lazy(() => import('./pages/SurfaceStub'))
 
 // Modal code splitting — loaded only when opened
 const UpdateModal = lazy(() => import('./components/UpdateModal'))
@@ -93,8 +95,7 @@ function UnlockedApp({ onLogout, showLogout }: { onLogout: () => void; showLogou
   return (
     <MotionConfig reducedMotion="user">
       <div className="flex flex-row h-dvh bg-surface-base overflow-hidden">
-        <Nav
-          alertCount={alertCount}
+        <NavRail
           unreadCount={unreadCount}
           version={version}
           updateAvailable={update.data?.updateAvailable}
@@ -102,10 +103,12 @@ function UnlockedApp({ onLogout, showLogout }: { onLogout: () => void; showLogou
           onUpdateClick={update.openUpdateModal}
           onLogout={showLogout ? onLogout : undefined}
         />
-        {/* Content column — the ConnectionBanner sits above <main> so the rail
-            (Nav) stays full-height beside the whole column (DD-29). */}
+        {/* Content column — the ConnectionBanner sits above the chrome header so
+            the rail stays full-height beside the whole column (DD-29); the header
+            is v3.5 chrome (T5 b-02) and <main> owns the page surface. */}
         <div className="flex flex-col flex-1 min-h-0 overflow-hidden">
           <ConnectionBanner status={transport.status} isDisconnected={transport.isDisconnected} />
+          <ChromeHeader alertCount={alertCount} />
           <main className="flex-1 flex flex-col min-h-0 overflow-hidden">
             <Suspense fallback={<PageLoader />}>
               <Routes>
@@ -113,9 +116,21 @@ function UnlockedApp({ onLogout, showLogout }: { onLogout: () => void; showLogou
                 <Route path="/welcome" element={<ErrorBoundary><Landing /></ErrorBoundary>} />
                 <Route path="/lines/:name" element={<ErrorBoundary><LineDetail /></ErrorBoundary>} />
                 <Route path="/inbox" element={<ErrorBoundary><Inbox /></ErrorBoundary>} />
+                {/* Ops consolidation (02-mapping §2, E4): /ops is canonical and
+                    renders the Operator surface; /operator redirects to it.
+                    /metrics stays live for deep links until its content is
+                    absorbed into the Ops surface bead. */}
+                <Route path="/ops" element={<ErrorBoundary><Operator /></ErrorBoundary>} />
+                <Route path="/operator" element={<Navigate to="/ops" replace />} />
                 <Route path="/metrics" element={<ErrorBoundary><Metrics /></ErrorBoundary>} />
-                <Route path="/operator" element={<ErrorBoundary><Operator /></ErrorBoundary>} />
-                <Route path="/ops" element={<Navigate to="/operator" replace />} />
+                {/* v3.5 route shells — stubs until their surface beads land
+                    (b-04 Agents, b-05 Skills, b-06 Dream Lab, b-08 Deployments,
+                    b-09 Settings). */}
+                <Route path="/agents" element={<ErrorBoundary><SurfaceStub surface="Agents" bead="b-04" /></ErrorBoundary>} />
+                <Route path="/skills" element={<ErrorBoundary><SurfaceStub surface="Skills Hub" bead="b-05" /></ErrorBoundary>} />
+                <Route path="/dream-lab" element={<ErrorBoundary><SurfaceStub surface="Dream Lab" bead="b-06" /></ErrorBoundary>} />
+                <Route path="/deployments" element={<ErrorBoundary><SurfaceStub surface="Deployments" bead="b-08" /></ErrorBoundary>} />
+                <Route path="/settings" element={<ErrorBoundary><SurfaceStub surface="Settings" bead="b-09" /></ErrorBoundary>} />
                 <Route path="*" element={<Navigate to="/" replace />} />
               </Routes>
             </Suspense>
