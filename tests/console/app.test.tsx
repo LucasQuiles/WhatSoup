@@ -76,6 +76,23 @@ vi.mock('../../console/src/pages/Inbox', () => ({
 vi.mock('../../console/src/pages/Operator', () => ({
   default: () => createElement('div', { 'data-testid': 'page-ops' }, 'Ops'),
 }));
+// T5 b-13: the five formerly-shelled surfaces, stubbed here as sentinels so the
+// graduation pin below tests the route table, not each surface's own contracts.
+vi.mock('../../console/src/pages/Agents', () => ({
+  default: () => createElement('div', { 'data-testid': 'page-agents' }, 'Agents'),
+}));
+vi.mock('../../console/src/pages/SkillsHub', () => ({
+  default: () => createElement('div', { 'data-testid': 'page-skills' }, 'SkillsHub'),
+}));
+vi.mock('../../console/src/pages/DreamLab', () => ({
+  default: () => createElement('div', { 'data-testid': 'page-dream-lab' }, 'DreamLab'),
+}));
+vi.mock('../../console/src/pages/Deployments', () => ({
+  default: () => createElement('div', { 'data-testid': 'page-deployments' }, 'Deployments'),
+}));
+vi.mock('../../console/src/pages/Settings', () => ({
+  default: () => createElement('div', { 'data-testid': 'page-settings' }, 'Settings'),
+}));
 vi.mock('../../console/src/components/UpdateModal', () => ({
   default: ({ open, currentSha, lines }: { open: boolean; onClose: () => void; currentSha: string; lines: unknown[] }) =>
     open
@@ -196,22 +213,34 @@ describe('App renders — v3.5 route shells (T5 b-02)', () => {
     });
   });
 
-  it('stub surfaces render the honest placeholder naming their bead', async () => {
-    // T5 b-04: /agents graduated off the stub onto the real v3.5 surface.
-    // T5 b-05: /skills graduated off the stub onto the real v3.5 surface.
-    // T5 b-06: /dream-lab graduated off the stub onto the real v3.5 surface.
-    const cases: Array<[string, string, string]> = [
+  it('every shelled surface graduated — the stub placeholder is retired', async () => {
+    // T5 b-13: b-04…b-09 each replaced their SurfaceStub route with the real
+    // v3.5 surface. This pin is the retirement proof: every formerly-shelled
+    // route renders real surface content and NO route renders the placeholder
+    // sentence, so a regression that re-shadows a surface behind the stub
+    // fails here (the integration assembly did exactly that once).
+    const routes: Array<[string, string]> = [
+      ['/agents', 'page-agents'],
+      ['/skills', 'page-skills'],
+      ['/dream-lab', 'page-dream-lab'],
+      ['/deployments', 'page-deployments'],
+      ['/settings', 'page-settings'],
     ];
-    for (const [path, surface, bead] of cases) {
+    for (const [path, testid] of routes) {
       cleanup();
       await act(async () => { renderApp(path); });
-      // Pin the unique bead sentence (the rail also renders the surface
-      // name, so the name alone cannot prove the stub loaded).
       await waitFor(() => {
-        expect(screen.getByText(new RegExp(`lands with bead ${bead}`))).toBeDefined();
+        expect(screen.getByTestId(testid)).toBeDefined();
       });
-      expect(screen.getAllByText(surface).length).toBeGreaterThan(0);
+      expect(screen.queryByText(/lands with bead/)).toBeNull();
     }
+  });
+
+  it('the stub module is gone from the route table and the source tree', async () => {
+    const { readFileSync, existsSync } = await import('node:fs');
+    const app = readFileSync('console/src/App.tsx', 'utf8');
+    expect(app).not.toContain('SurfaceStub');
+    expect(existsSync('console/src/pages/SurfaceStub.tsx')).toBe(false);
   });
 });
 
