@@ -248,7 +248,7 @@ unproved child origins default to internal no-send/no-effect handling.
     response/error chrome—never hold the provider boundary open indefinitely. The final
     transaction either consumes terminal delivery truth or atomically transfers every
     exact unresolved publication operation into the bounded terminal recovery owner;
-    provider-activity classification remains independent. Migration-44 closure then
+    provider-activity classification remains independent. Migration-46 closure then
     reaches echo/not-sent/abandoned-uncertain without replay or false reply satisfaction.
     Crashes before publication settlement/transfer and before/after finalization are
     idempotent and never permit generic boundary consumption.
