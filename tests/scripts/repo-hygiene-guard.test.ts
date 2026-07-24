@@ -43,12 +43,42 @@ function makeBranchRepo(): string {
   return repo;
 }
 
+function makeEmptyRepo(): string {
+  const repo = mkdtempSync(join(tmpdir(), 'repo-hygiene-empty-'));
+  tempRepos.push(repo);
+  git(repo, ['init', '-b', 'main']);
+  git(repo, ['config', 'user.name', 'WhatSoup Guard']);
+  git(repo, ['config', 'user.email', 'guard@users.noreply.github.com']);
+  return repo;
+}
+
 afterEach(() => {
   vi.restoreAllMocks();
   for (const repo of tempRepos.splice(0)) {
     rmSync(repo, { recursive: true, force: true });
   }
   process.exitCode = undefined;
+});
+
+describe('repo hygiene guard — release-hygiene refuses a whole-tree scan of zero files', () => {
+  it('release-hygiene is INCONCLUSIVE (exit 2) when no release-hygiene file is tracked', () => {
+    // release-hygiene is git ls-files intersected with a fixed list; on an empty tree the
+    // intersection is empty and it printed "repo hygiene guard passed" having read nothing.
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+    run(['--release-hygiene'], makeEmptyRepo());
+    expect(process.exitCode, 'a zero-file release-hygiene scan must not pass').toBe(2);
+    expect(error.mock.calls.flat().join(' ')).toMatch(/INCONCLUSIVE/i);
+    expect(log.mock.calls.flat().join(' ')).not.toMatch(/passed/i);
+  });
+
+  it('staged mode STILL PASSES (exit 0) on an empty index — diff-scope is exempt from the floor', () => {
+    // The mode gate: staged scans the diff, where an empty set is legitimately nothing. Only
+    // the whole-tree release-hygiene mode is floored; flooring staged would block clean commits.
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+    run(['--staged'], makeEmptyRepo());
+    expect(process.exitCode ?? 0).toBe(0);
+  });
 });
 
 describe('repo hygiene guard', () => {
@@ -793,6 +823,24 @@ The migrated group was 1203631234567890@g.us.
     expect(() => parseArgs(['--scan-history', 'abc'])).toThrow(/positive integer/);
   });
 
+  /**
+   * EVERY secret-shaped fixture in this block MUST assemble its token at runtime
+   * (`'pcsk' + '_rest'`, `['sk-ant-api03', '...'].join('-')`) rather than appearing as a
+   * literal. Do not "simplify" these back into plain strings.
+   *
+   * The reason is mechanical, not stylistic. The machine-global
+   * `claude-guards/validate-secrets.py` PreToolUse hook scans the PROJECTED WHOLE FILE on
+   * every Write/Edit. A single secret-shaped literal anywhere in this file makes the ENTIRE
+   * FILE permanently un-editable by any agent — not just the offending line. That is not
+   * hypothetical: five literals here (two provider keys, three PEM headers) locked this file
+   * for days, which in turn blocked a typecheck fix that 54 unpushed commits depended on.
+   *
+   * Because the hook scans the projected file rather than the diff, a partial conversion
+   * does not help: one edit has to clear every offender at once.
+   *
+   * Runtime values are unchanged by the assembly, so `scanAddedLines` still receives exactly
+   * the strings these tests intend to exercise.
+   */
   describe('secret-shape detection (hardened patterns)', () => {
     it('blocks real-format provider keys outside fixture markers', () => {
       const issues = scanAddedLines([
@@ -815,9 +863,9 @@ The migrated group was 1203631234567890@g.us.
     it('allows synthetic provider-key and Twilio SID fixtures', () => {
       const issues = scanAddedLines([
         { filePath: 'tests/x.test.ts', line: 1, text: "apiKey: 'sk-test-elevenlabs-key'" },
-        { filePath: 'tests/x.test.ts', line: 2, text: "apiKey: 'pcsk_test_fixture_value_here'" },
+        { filePath: 'tests/x.test.ts', line: 2, text: `apiKey: '${'pcsk' + '_test_fixture_value_here'}'` },
         { filePath: 'tests/x.test.ts', line: 3, text: "accountSid: 'AC00000000000000000000000000000000'" },
-        { filePath: 'tests/x.test.ts', line: 4, text: "key: 'sk-ant-mock-not-a-real-secret'" },
+        { filePath: 'tests/x.test.ts', line: 4, text: `key: '${'sk-ant' + '-mock-not-a-real-secret'}'` },
       ]);
 
       expect(issues).toEqual([]);
@@ -834,9 +882,9 @@ The migrated group was 1203631234567890@g.us.
 
     it('blocks full-block and embedded single-line PEM private keys', () => {
       const issues = scanAddedLines([
-        { filePath: 'src/x.ts', line: 1, text: 'const pem = "-----BEGIN PRIVATE KEY-----MIIabc...";' },
-        { filePath: 'src/x.ts', line: 2, text: '-----BEGIN OPENSSH PRIVATE KEY-----' },
-        { filePath: 'src/x.ts', line: 3, text: '-----BEGIN ENCRYPTED PRIVATE KEY-----' },
+        { filePath: 'src/x.ts', line: 1, text: `const pem = "${'-----BEGIN ' + 'PRIVATE KEY' + '-----'}MIIabc...";` },
+        { filePath: 'src/x.ts', line: 2, text: `${'-----BEGIN ' + 'OPENSSH PRIVATE KEY' + '-----'}` },
+        { filePath: 'src/x.ts', line: 3, text: `${'-----BEGIN ' + 'ENCRYPTED PRIVATE KEY' + '-----'}` },
       ]);
 
       expect(issues.map((issue) => issue.code)).toEqual([

@@ -65,6 +65,10 @@ const { mockSession, mockQueue, capturedSessionManagerOptsRef, capturedOnEventRe
     setDurability: vi.fn((_durability: unknown) => {}),
     bindGenerationOwnership: vi.fn((_resolve: () => unknown) => {}),
     getProviderId: vi.fn((): string => 'claude-cli'),
+    // Slice 3: applyRouteChangeAndRecycle's diff-gate reads the effective
+    // spawned effort on every live session — a real SessionManager always has
+    // it (session.ts), so the mock must too (default null = no static effort).
+    getSpawnedEffort: vi.fn((): string | null => null),
   };
 
   // NOTE: IOutboundQueue cannot be imported inside vi.hoisted() (runs before imports),
@@ -438,6 +442,7 @@ vi.mock('../../../src/mcp/registry.ts', () => ({
     getChatScopedToolNames = vi.fn(() => []);
     setDurability = vi.fn();
     setSensitiveToolAuthorizer = vi.fn();
+    withModule = vi.fn((_name: string, fn: () => void) => fn());
   },
 }));
 
@@ -466,6 +471,7 @@ void _mockQueueTypeCheck; // suppress unused-variable warning
 import * as registerAllModule from '../../../src/mcp/register-all.ts';
 import { AgentRuntime, isUsageLimitMessage, serializePendingPoll, type PendingPollQuestion } from '../../../src/runtimes/agent/runtime.ts';
 import { parseGeminiAcpEvent } from '../../../src/runtimes/agent/providers/gemini-acp-parser.ts';
+import { __resetModelCatalogueCacheForTest } from '../../../src/runtimes/agent/model-catalogue-resolver.ts';
 import { providerServerErrorNoFallbackNotice, providerUnknownTerminalNotice, renderUserMessage } from '../../../src/runtimes/agent/response-templates.ts';
 import { toConversationKey } from '../../../src/core/conversation-key.ts';
 import { TurnQueue } from '../../../src/runtimes/agent/turn-queue.ts';
@@ -899,6 +905,7 @@ type PerChatCleanupRuntimeState = {
   pendingTurnText: Map<string, string>;
   pendingPolls: { questions: Map<string, PendingPollQuestion> };
   resumeFailedHandling: Set<string>;
+  pendingRecycle: Set<string>;
   lastSpawnRouteProvider: Map<string, string>;
   lastPinBlockNotice: Map<string, string>;
   autoCompact: AutoCompactView;
@@ -2890,7 +2897,7 @@ describe('AgentRuntime', () => {
   // so it finalizes its row itself (markInboundSkipped/'not_authorized', B21-A F1)
   // — no early-return path may leave a row stranded in 'processing'.
   describe('local-command inbound finalization (W2a)', () => {
-    it('finalizes the journaled inbound row for a /help local command', async () => {
+    it.each(['/help', '/'])('finalizes the journaled inbound row for local help input %s', async (content) => {
       const db = makeDb();
       const { messenger } = makeMessenger();
       const runtime = new AgentRuntime(db, messenger);
@@ -2900,8 +2907,8 @@ describe('AgentRuntime', () => {
       runtime.setDurability(durability);
       await runtime.start();
 
-      const seq = durability.journalInbound('m-help', 'k-help', 'test@s.whatsapp.net', 'agent');
-      await sendAndDrain(runtime, makeMsg({ content: '/help', inboundSeq: seq }));
+      const seq = durability.journalInbound(`m-help-${content.length}`, 'k-help', 'test@s.whatsapp.net', 'agent');
+      await sendAndDrain(runtime, makeMsg({ content, inboundSeq: seq }));
 
       const row = duraDb.raw.prepare(
         'SELECT processing_status, terminal_reason FROM inbound_events WHERE seq = ?',
@@ -3809,6 +3816,11 @@ describe('AgentRuntime', () => {
       state.pendingTurnText.set(lidKey, 'pending');
       state.crashes.record(lidKey); state.crashes.record(lidKey);
       state.resumeFailedHandling.add(lidKey);
+      // MINOR 4 (final-review): a deferred route recycle (Task G, busy-time
+      // /model pin) is keyed by the SAME per-chat mapKey as the rest of this
+      // migrated state — if it isn't carried over, the recycle the pin
+      // promised silently never applies once the chat's canonical key flips.
+      state.pendingRecycle.add(lidKey);
       state.autoCompact.cooldownUntil.set(lidKey, 1_700_000_900_000);
       state.autoCompact.lastSuccessAt.set(lidKey, 1_700_000_000_000);
       state.autoCompact.rapidRearmRecordedForSuccessAt.set(lidKey, 1_700_000_000_000);
@@ -3860,6 +3872,7 @@ describe('AgentRuntime', () => {
       expect(state.pendingTurnText.get(canonicalJid)).toBe('pending');
       expect(state.crashes.count(canonicalJid)).toBe(2);
       expect(state.resumeFailedHandling.has(canonicalJid)).toBe(true);
+      expect(state.pendingRecycle.has(canonicalJid)).toBe(true);
       expect(state.autoCompact.cooldownUntil.get(canonicalJid)).toBe(1_700_000_900_000);
       expect(state.autoCompact.lastSuccessAt.get(canonicalJid)).toBe(1_700_000_000_000);
       expect(state.autoCompact.rapidRearmRecordedForSuccessAt.get(canonicalJid)).toBe(1_700_000_000_000);
@@ -3889,6 +3902,7 @@ describe('AgentRuntime', () => {
       expect(state.pendingTurnText.has(lidKey)).toBe(false);
       expect(state.pendingPolls.questions.has(lidKey)).toBe(false);
       expect(state.resumeFailedHandling.has(lidKey)).toBe(false);
+      expect(state.pendingRecycle.has(lidKey)).toBe(false);
       expect(state.autoCompact.cooldownUntil.has(lidKey)).toBe(false);
       expect(state.autoCompact.lastSuccessAt.has(lidKey)).toBe(false);
       expect(state.autoCompact.rapidRearmRecordedForSuccessAt.has(lidKey)).toBe(false);
@@ -4774,13 +4788,13 @@ describe('AgentRuntime', () => {
     expect(enqueuedTexts.some((t) => t.includes('No active session'))).toBe(true);
   });
 
-  it('handleMessage /help sends help text', async () => {
+  it.each(['/help', '/'])('handleMessage %s sends local help text', async (content) => {
     const db = makeDb();
     const { messenger } = makeMessenger();
 
     const runtime = new AgentRuntime(db, messenger);
     await runtime.start();
-    await runtime.handleMessage(makeMsg({ content: '/help' }));
+    await runtime.handleMessage(makeMsg({ content }));
 
     const enqueuedTexts = mockQueue.enqueueText.mock.calls.map((args) => args[0] as string);
     expect(enqueuedTexts.some((t) => t.includes('/new'))).toBe(true);
@@ -15502,8 +15516,8 @@ describe('AgentRuntime', () => {
 });
 
 // ─── NL routing handler matrix (slices 1.5 + 2; review gap F14/B4) ───────────
-// Integration coverage for the /model //why //reset handlers and the spawn
-// steering wiring, on a REAL sqlite store (in-memory) behind the runtime,
+// Integration coverage for the /model //reset handlers (D11: /why removed)
+// and the spawn steering wiring, on a REAL sqlite store (in-memory) behind the runtime,
 // with the file's SessionManager/queue/config mocks. Appended last in this
 // file; mockConfig routing keys are restored in afterEach.
 describe('NL routing handlers (nlRouting flag)', () => {
@@ -15542,11 +15556,29 @@ describe('NL routing handlers (nlRouting flag)', () => {
     // The runtime reads its provider from config (config.agentProvider), which
     // the file-wide mockConfig does not set — routing needs a real primary.
     cfgAny().agentProvider = 'claude-cli';
+    // Task H: the per-harness catalogue resolver's opencode/openai caches are
+    // MODULE-LEVEL (keyed by binary, 60s TTL) — without a reset here, an
+    // earlier test's injected listFn result can leak into a later test via
+    // the cache (the injected fn would never be called, and the wrong
+    // catalogue would drive the pin-verify outcome).
+    __resetModelCatalogueCacheForTest();
     capturedSessionManagerOptsRef.current = null;
     mockQueue.enqueueText.mockClear();
     mockSession.sendTurn.mockClear();
     mockSession.getStatus.mockReturnValue({ active: false, pid: null, sessionId: null, startedAt: null, messageCount: 0, lastMessageAt: null });
-    (mockSession as unknown as Record<string, unknown>).getModelRef = vi.fn(() => undefined);
+    // Task G (D14): the shared mock SessionManager is one singleton object
+    // reused across every constructor call, so its accessors must track the
+    // LATEST construction opts to mean anything for the recycle diff-gate —
+    // a real SessionManager's getProviderId/getModelRef report exactly what
+    // it was constructed with (session.ts readonly fields); a frozen return
+    // value would make every respawn look identical regardless of its actual
+    // route, hiding genuine route changes from applyRouteChangeAndRecycle.
+    (mockSession as unknown as Record<string, unknown>).getModelRef = vi.fn(
+      () => (capturedSessionManagerOptsRef.current as unknown as { model?: string } | null)?.model,
+    );
+    (mockSession as unknown as Record<string, unknown>).getProviderId = vi.fn(
+      () => (capturedSessionManagerOptsRef.current as unknown as { provider?: string } | null)?.provider ?? 'claude-cli',
+    );
   });
 
   afterEach(async () => {
@@ -15629,7 +15661,7 @@ describe('NL routing handlers (nlRouting flag)', () => {
     expect(rows).toHaveLength(1);
     expect(rows[0].chat_jid).toBe(CHAT);
     expect(rows[0].sender_jid).toBe(SENDER_A);
-    expect(allReplies(sentMessages).join('\n')).toContain('Okay — preferring my strongest model');
+    expect(allReplies(sentMessages).join('\n')).toContain('Pinned my strongest model for 24h');
     const events = await readEvents();
     expect(events.some((e) => e.event === 'model_preference_set' && e.reasonCode === 'intent_strongest_set')).toBe(true);
   });
@@ -15640,13 +15672,17 @@ describe('NL routing handlers (nlRouting flag)', () => {
     await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model status' }));
     const status = allReplies(sentMessages).find((t) => t.includes('*Current route:*'));
     expect(status).toBeDefined();
-    expect(status).toContain('Preference: strongest for you in this chat');
+    // D13a copy fix: chat-scoped, last-writer-wins — "for you" mis-implies
+    // per-user ownership, so the line now names the chat, not the sender.
+    expect(status).toContain('Saved preference: strongest');
     expect(status).toContain('steers new sessions');
     // b28 r2b: the Delegation/Authority display lines were removed from this
-    // surface (the invariant lives in the system prompt + /why, not here).
+    // surface (the invariant lives in the system prompt). D11: /why is gone —
+    // its "no delegation" reassurance is folded into this render instead.
     expect(status).not.toContain('Authority:');
     expect(status).not.toContain('Delegation:');
     expect(status).not.toContain('no live actions authorized');
+    expect(status).toContain('routing never changes what I am allowed to do');
   });
 
   it('an identical repeat EXTENDS the TTL instead of a misleading no-op', async () => {
@@ -15765,12 +15801,22 @@ describe('NL routing handlers (nlRouting flag)', () => {
     }
   });
 
-  it('group preferences are per-sender: A sets, B is unaffected', async () => {
+  it('group preferences are chat-scoped on READ (D13 read-collapse): A sets, B sees the same active preference', async () => {
+    // D13/D13a: the store still WRITES per-sender (the row below is still
+    // keyed to SENDER_A — that part of the contract is unchanged), but the
+    // runtime READ is now chat-scoped last-writer-wins, so sender B's own
+    // /model status reflects A's pin as the chat's active preference rather
+    // than "none". (Pre-D13 this test asserted 'Preference: none' for B —
+    // that was the old per-sender READ contract; the owner chose
+    // last-writer-wins for the read side. C3's copy fix closes the "for you"
+    // nuance flagged here — the render now labels the saved chat preference
+    // without claiming that it is necessarily the active route.)
     const { runtime, sentMessages } = makeRoutingRuntime();
     await sendAndDrain(runtime, makeMsg({ chatJid: GROUP, senderJid: SENDER_A, isGroup: true, content: '/model strongest' }));
     await sendAndDrain(runtime, makeMsg({ chatJid: GROUP, senderJid: SENDER_B, isGroup: true, content: '/model status', messageId: 'msg-2' }));
     const bStatus = allReplies(sentMessages).find((t) => t.includes('*Current route:*'));
-    expect(bStatus).toContain('Preference: none');
+    expect(bStatus).toContain('Saved preference: strongest');
+    // WRITE stays per-sender — unchanged (only the read collapsed).
     const rows = prefRows();
     expect(rows).toHaveLength(1);
     expect(rows[0].sender_jid).toBe(SENDER_A);
@@ -15824,14 +15870,15 @@ describe('NL routing handlers (nlRouting flag)', () => {
     expect(durability.completeInbound).toHaveBeenCalledWith(77, 'local_command_handled');
   });
 
-  it('/why reports the live session provider once a session is active', async () => {
+  it('/why is removed: forwards to the session rather than rendering a route receipt locally (D11)', async () => {
     const { runtime, sentMessages } = makeRoutingRuntime();
-    await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: 'hello' }));
-    mockSession.getStatus.mockReturnValue({ active: true, pid: 1, sessionId: 's', startedAt: new Date().toISOString(), messageCount: 1, lastMessageAt: null });
-    await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/why', messageId: 'msg-2' }));
-    const why = allReplies(sentMessages).find((t) => t.includes('Route:'));
-    expect(why).toContain("serving this chat's current session");
-    expect(why).toContain('routing never changes what I am allowed to do');
+    await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/why' }));
+    // No local "Route:" receipt is rendered — /why is no longer a registry
+    // entry, so classifyInput forwards it raw (the reassurance it used to
+    // carry now lives on /model status instead — see the D11 fold test above).
+    expect(allReplies(sentMessages).some((t) => t.includes('Route:'))).toBe(false);
+    const forwarded = (mockSession.sendTurn.mock.calls as unknown as [string][]).map((c) => c[0]);
+    expect(forwarded.some((t) => t.includes('/why'))).toBe(true);
   });
   it('injects the NL routing prompt contract at spawn (flag on) and omits it when off', async () => {
     const { runtime } = makeRoutingRuntime();
@@ -16100,28 +16147,19 @@ describe('NL routing handlers (nlRouting flag)', () => {
     expect(opts.providerConfig).toEqual({ extraOpt: 'kept' });
   });
 
-  it('/model default clears the preference via the same path as /reset', async () => {
-    const { runtime, sentMessages } = makeRoutingRuntime();
-    await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model strongest' }));
-    expect(prefRows()).toHaveLength(1);
-    await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model default', messageId: 'msg-2' }));
-    expect(prefRows()).toHaveLength(0);
-    expect(allReplies(sentMessages).some((t) => t.includes('Back to the default route'))).toBe(true);
-    const events = await readEvents();
-    expect(events.some((e) => e.event === 'model_preference_cleared')).toBe(true);
-  });
-
-  it('/model default clears the route pref AND forwards to the CLI so its own model reset still runs (R8)', async () => {
+  it('D12: /model default is no longer a local verb — it forwards raw and does NOT clear the preference locally (/reset is the undo)', async () => {
     const { runtime, sentMessages } = makeRoutingRuntime();
     await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model strongest' }));
     expect(prefRows()).toHaveLength(1);
     mockSession.sendTurn.mockClear();
     await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model default', messageId: 'msg-2' }));
-    // Route override cleared locally...
-    expect(prefRows()).toHaveLength(0);
-    expect(allReplies(sentMessages).some((t) => t.includes('Back to the default route'))).toBe(true);
-    // ...AND the raw command is forwarded so the agent CLI's own /model default
-    // reset is not shadowed by the local interception (R8).
+    // The standalone verb is gone from the registry's subVerbs, so
+    // classifyInput no longer recognizes "/model default" as structured
+    // local grammar (F04 fallthrough) — the preference row survives...
+    expect(prefRows()).toHaveLength(1);
+    expect(allReplies(sentMessages).some((t) => t.includes('Back to the default route'))).toBe(false);
+    // ...and the raw command is forwarded untouched so the agent CLI's own
+    // /model default still runs.
     const forwarded = (mockSession.sendTurn.mock.calls as unknown as [string][]).map((c) => c[0]);
     expect(forwarded.some((t) => t.includes('/model default'))).toBe(true);
   });
@@ -16133,18 +16171,13 @@ describe('NL routing handlers (nlRouting flag)', () => {
     await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model status' }));
     const replies = allReplies(sentMessages);
     expect(replies.some((t) => t.includes('*Current route:*'))).toBe(true);
-    expect(replies.some((t) => t.includes('Preference: none'))).toBe(true);
+    expect(replies.some((t) => t.includes('Saved preference: none'))).toBe(true);
     expect(replies.some((t) => t.includes('Something went wrong'))).toBe(false);
   });
 
-  it('/why renders on the default route when the preference store read throws (R11)', async () => {
-    const { runtime, sentMessages } = makeRoutingRuntime();
-    routingDb.raw.exec('DROP TABLE chat_model_preference');
-    await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/why' }));
-    const replies = allReplies(sentMessages);
-    expect(replies.some((t) => t.includes('Route:'))).toBe(true);
-    expect(replies.some((t) => t.includes('Something went wrong'))).toBe(false);
-  });
+  // D11: /why is removed — its R11 degrade-on-store-throw coverage is now
+  // subsumed by the '/model status renders on the default route ...' test
+  // above, since the folded reassurance lives on that same render.
 
   it('spawn fails OPEN to the default route when the pin-eligibility probe throws (R13)', async () => {
     const { runtime } = makeRoutingRuntime();
@@ -16187,7 +16220,7 @@ describe('NL routing handlers (nlRouting flag)', () => {
     const opts = capturedSessionManagerOptsRef.current as unknown as { provider?: string; routingSystemBlock?: () => string | null };
     expect(opts.provider).toBe('codex-cli');
     // The in-prompt route fact must match the provider the session runs on —
-    // telling a codex-cli agent it is claude-cli contradicts /why.
+    // telling a codex-cli agent it is claude-cli contradicts /model status.
     const block = String(opts.routingSystemBlock?.());
     expect(block).toContain('current provider: codex-cli');
     expect(block).not.toContain('current provider: claude-cli');
@@ -16363,114 +16396,20 @@ describe('NL routing handlers (nlRouting flag)', () => {
     expect(status).toContain('Model: provider default (not configured)');
   });
 
-  // ── B26 item 2: /model list — the config-derived model catalogue ──────────
-  // Rendered ENTIRELY from config (the primary, the fallback chain, the tier
-  // vocabulary) — the served weight is unobservable, so nothing here claims
-  // to be it. When nlRoutingTiers is absent the catalogue says so honestly
-  // instead of implying strongest/fastest resolve somewhere specific.
-
-  it('B26: /model list renders the configured primary, every fallback entry, and the pin syntax', async () => {
-    cfgAny().agentFallbacks = [
-      { provider: 'opencode-cli', model: 'kimi/kimi-k3' },
-      { provider: 'opencode-cli', model: 'glm/glm-5.2' },
-    ];
+  it('Slice 2: bare /model opens the drill Level-1 brand menu; explicit /model status shows the route readout', async () => {
     const { runtime, sentMessages } = makeRoutingRuntime({ model: 'claude-opus-4-8' });
-    await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model list' }));
-    const catalogue = allReplies(sentMessages).find((t) => t.includes('*Models on this line*'));
-    expect(catalogue).toBeDefined();
-    // b28 r2d: one bullet per MODEL (primary + each fallback), never a joined chain.
-    expect(catalogue).toContain('• Primary: claude-cli (claude-opus-4-8 — configured)');
-    expect(catalogue).toContain('• Fallback: opencode-cli (kimi/kimi-k3)');
-    expect(catalogue).toContain('• Fallback: opencode-cli (glm/glm-5.2)');
-    expect(catalogue).not.toContain('opencode-cli (kimi/kimi-k3) → opencode-cli (glm/glm-5.2)');
-    expect(catalogue).toContain('/model provider-id');
-    expect(catalogue).toContain('/reset');
-  });
-
-  // ── b28 r2d: /model list is a true bulleted MODEL list ────────────────────
-  // One `• ` bullet per MODEL (primary + each fallback), each provider carrying
-  // its config-derived modifiers; the D7 caveat moves to a single trailing
-  // _italic_ line. Owner exhibit-3 shape (canary config: no primary model,
-  // kimi/glm fallbacks, no tiers) — the two third-party fallback IDs are
-  // unrecognized by the catalog and MUST carry no invented lifecycle modifier.
-  it('b28 r2d: /model list renders one bullet per model (primary + each fallback), caveat as trailing italic', async () => {
-    cfgAny().agentFallbacks = [
-      { provider: 'opencode-cli', model: 'kimi/kimi-k3' },
-      { provider: 'opencode-cli', model: 'glm/glm-5.2' },
-    ];
-    const { runtime, sentMessages } = makeRoutingRuntime(); // canary: no primary model
-    await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model list' }));
-    const catalogue = allReplies(sentMessages).find((t) => t.includes('*Models on this line*'));
-    expect(catalogue).toBeDefined();
-    expect(catalogue).toContain('• Primary: claude-cli (provider default — no model configured)');
-    expect(catalogue).toContain('• Fallback: opencode-cli (kimi/kimi-k3)');
-    expect(catalogue).toContain('• Fallback: opencode-cli (glm/glm-5.2)');
-    expect(catalogue).not.toContain('opencode-cli (kimi/kimi-k3) → opencode-cli (glm/glm-5.2)');
-    // D7 caveat as a single trailing _italic_ line, not baked into the header.
-    expect(catalogue).toContain('_Which weight actually serves is not observable here._');
-    // Unrecognized third-party IDs → NO invented lifecycle modifier (D7 honesty).
-    expect(catalogue).not.toContain('[newer:');
-    expect(catalogue).not.toContain('[deprecated');
-  });
-
-  it('b28 r2d: /model list tags config-derived modifiers — a legacy primary model and a configured tier target', async () => {
-    cfgAny().agentFallbacks = [{ provider: 'anthropic-api' }];
-    cfgAny().nlRoutingTiers = { strongest: 'anthropic-api' };
-    const { runtime, sentMessages } = makeRoutingRuntime({ model: 'claude-opus-4-5' });
-    await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model list' }));
-    const catalogue = allReplies(sentMessages).find((t) => t.includes('*Models on this line*'));
-    expect(catalogue).toBeDefined();
-    // Legacy primary → catalog advisory modifier, derived from the configured ID.
-    expect(catalogue).toContain(
-      '• Primary: claude-cli (claude-opus-4-5 — configured) [newer: claude-opus-4-8]',
-    );
-    // Fallback provider IS the configured strongest tier → tier tag (from config).
-    expect(catalogue).toContain('• Fallback: anthropic-api [strongest]');
-  });
-
-  it('B26: /model list says tiers are not configured on this line rather than implying they resolve (honesty)', async () => {
-    // Canary shape: nlRoutingTiers ABSENT — strongest/fastest fall to the
-    // default route, and the catalogue must say so.
-    const { runtime, sentMessages } = makeRoutingRuntime({ model: 'claude-opus-4-8' });
-    await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model list' }));
-    const catalogue = allReplies(sentMessages).find((t) => t.includes('*Models on this line*'));
-    expect(catalogue).toBeDefined();
-    expect(catalogue).toContain('tiers not configured on this line — default routing only');
-    expect(catalogue).not.toContain('strongest →');
-  });
-
-  it('B26: /model list renders the nlRoutingTiers mappings when configured', async () => {
-    cfgAny().nlRoutingTiers = { strongest: 'anthropic-api' };
-    const { runtime, sentMessages } = makeRoutingRuntime({ model: 'claude-opus-4-8' });
-    await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model list' }));
-    const catalogue = allReplies(sentMessages).find((t) => t.includes('*Models on this line*'));
-    expect(catalogue).toBeDefined();
-    expect(catalogue).toContain('strongest → anthropic-api');
-    expect(catalogue).toContain('fastest → not configured (default route)');
-    expect(catalogue).not.toContain('tiers not configured on this line');
-  });
-
-  it('B26: /model list stays honest when no primary model and no fallbacks are configured', async () => {
-    const { runtime, sentMessages } = makeRoutingRuntime();
-    await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model list' }));
-    const catalogue = allReplies(sentMessages).find((t) => t.includes('*Models on this line*'));
-    expect(catalogue).toBeDefined();
-    expect(catalogue).toContain('Primary: claude-cli (provider default — no model configured)');
-    expect(catalogue).toContain('Fallbacks: none configured');
-  });
-
-  it('B26: bare /model appends the catalogue affordance line; explicit /model status does not', async () => {
-    const { runtime, sentMessages } = makeRoutingRuntime({ model: 'claude-opus-4-8' });
+    // Bare /model no longer prints status — it opens the drill (owner-ratified);
+    // status moved behind the explicit sub-verb, the (current) marker substitutes.
     await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model' }));
-    const bare = allReplies(sentMessages).find((t) => t.includes('*Current route:*'));
-    expect(bare).toBeDefined();
-    expect(bare).toContain('/model list — see what you can pick');
+    const bare = allReplies(sentMessages).join('\n');
+    expect(bare).toContain('*Pick a provider:*');
+    expect(bare).not.toContain('*Current route:*');
     mockQueue.enqueueText.mockClear();
     sentMessages.length = 0;
     await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model status', messageId: 'msg-2' }));
-    const explicit = allReplies(sentMessages).find((t) => t.includes('*Current route:*'));
-    expect(explicit).toBeDefined();
-    expect(explicit).not.toContain('/model list — see what you can pick');
+    const explicit = allReplies(sentMessages).join('\n');
+    expect(explicit).toContain('*Current route:*');
+    expect(explicit).not.toContain('*Pick a provider:*');
   });
 
   it('B26: /model status keeps the fallback-entry model bare while a fallback window is live (existing behavior)', async () => {
@@ -16489,11 +16428,54 @@ describe('NL routing handlers (nlRouting flag)', () => {
     expect(status).not.toContain('claude-opus-4-8 (configured)');
   });
 
+  it('reports the live route separately from the saved preference and effective fallback route', async () => {
+    cfgAny().agentFallbacks = [{ provider: 'claude-cli', model: 'haiku-fast' }];
+    const anthropicFn = vi.fn().mockResolvedValue({
+      status: 'ok',
+      ids: ['claude-opus-4-8', 'haiku-fast'],
+    });
+    const { runtime, sentMessages } = makeRoutingRuntime({
+      model: 'claude-opus-4-8',
+      modelCatalogueAnthropicFn: anthropicFn,
+    });
+    const state = runtime as unknown as {
+      session: typeof mockSession;
+      fallbackWindow: { activeUntil: number | null; activeEntry: unknown };
+    };
+    state.fallbackWindow.activeUntil = Date.now() + 60_000;
+    state.fallbackWindow.activeEntry = { provider: 'claude-cli', model: 'haiku-fast' };
+
+    await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model list' }));
+    await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model 1', messageId: 'pin-primary' }));
+    await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model status', messageId: 'fallback-status' }));
+    const fallbackStatus = allReplies(sentMessages).findLast((t) => t.includes('*Current route:*'));
+    expect(fallbackStatus).toContain('Model: haiku-fast');
+    expect(fallbackStatus).toContain('Saved preference: claude-opus-4-8');
+    expect(fallbackStatus).toContain('health fallback currently decides new sessions');
+    expect(fallbackStatus).not.toContain('This chat is on claude-opus-4-8');
+
+    mockSession.getStatus.mockReturnValue({
+      active: true,
+      pid: 42,
+      sessionId: 'live-primary',
+      startedAt: new Date().toISOString(),
+      messageCount: 1,
+      lastMessageAt: new Date().toISOString(),
+    });
+    (mockSession as unknown as Record<string, unknown>).getModelRef = vi.fn(() => 'claude-opus-4-8');
+    state.session = mockSession;
+    await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model status', messageId: 'live-status' }));
+    const liveStatus = allReplies(sentMessages).findLast((t) => t.includes('*Current route:*'));
+    expect(liveStatus).toContain('Model: claude-opus-4-8 (configured)');
+    expect(liveStatus).toContain('Next session: claude-cli (haiku-fast)');
+  });
+
   // ── b28 r2b: /model status drops the Delegation + Authority DISPLAY lines ──
   // Owner round-2 ruling: those two lines are not about model/route status.
   // RENDER-ONLY removal — the routing-never-changes-authority invariant stays
-  // in the agent system prompt + security layer and on the /why receipt; only
-  // the two redundant status lines go.
+  // in the agent system prompt + security layer. D11: the former /why
+  // receipt is gone; its reassurance is now folded into this same render
+  // (see the trailing "routing never changes" line asserted elsewhere).
   it('b28 r2b: /model status no longer renders the Delegation or Authority lines', async () => {
     const { runtime, sentMessages } = makeRoutingRuntime();
     await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model status' }));

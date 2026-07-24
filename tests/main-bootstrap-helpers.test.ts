@@ -249,6 +249,7 @@ async function importMainWithMocks(options: {
     preConnectRecovery: vi.fn(),
     postConnectRecovery: vi.fn(),
     sweepStaleSubmitted: vi.fn(),
+    reconcileLiveMaybeSent: vi.fn(),
   };
   let capturedHealthDeps: HealthServerDepsForTest | null = null;
   const getHealthDeps = () => {
@@ -1614,6 +1615,7 @@ describe('main.ts — uncovered helpers and signal paths', () => {
     it('isolates echo timeout sweep and drain failures', async () => {
       const h = await importMainWithMocks();
       h.durability.sweepStaleSubmitted.mockImplementationOnce(() => { throw new Error('sweep failed'); });
+      h.durability.reconcileLiveMaybeSent.mockImplementationOnce(() => { throw new Error('reconcile failed'); });
       h.drainPendingOutbound.mockRejectedValueOnce(new Error('drain failed'));
 
       h.capturedIntervals.find((timer) => timer.ms === 10_000)!.callback();
@@ -1622,6 +1624,10 @@ describe('main.ts — uncovered helpers and signal paths', () => {
       expect(h.logger.error).toHaveBeenCalledWith(
         expect.objectContaining({ err: expect.any(Error) }),
         'echo timeout sweep failed',
+      );
+      expect(h.logger.error).toHaveBeenCalledWith(
+        expect.objectContaining({ err: expect.any(Error) }),
+        'live maybe-sent reconciliation failed',
       );
       expect(h.logger.error).toHaveBeenCalledWith(
         expect.objectContaining({ err: expect.any(Error) }),

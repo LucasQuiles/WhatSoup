@@ -13,6 +13,7 @@ npm run guard:publication:staged
 npm run guard:design-system-hygiene
 npm run guard:node-pin-consistency
 npm run guard:claude-settings
+npm run guard:no-destructive-git
 
 # qSesh Python lane — only when qSesh, package, hook, or workflow surfaces are
 # staged. Fail-closed: set -e above makes any lint/test failure block the commit.

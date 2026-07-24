@@ -1,9 +1,13 @@
-// CONSTRAINT: Only Node built-ins + fleet/paths.ts. No config.ts, no logger.ts.
+// CONSTRAINT: Only Node built-ins + fleet/paths.ts + lib/startup-error.ts. No
+// config.ts, no logger.ts. (startup-error.ts is a zero-dependency leaf error
+// type; importing it keeps this module's early-bootstrap graph minimal while
+// letting a config-validation failure exit EX_CONFIG(78) instead of flapping.)
 // Exports: loadInstance(name: string): void
 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { configRoot as fleetConfigRoot, instancePaths, type InstancePaths } from './fleet/paths.ts';
+import { ConfigValidationError } from './lib/startup-error.ts';
 import {
   validateInstanceConfig,
   VALID_TYPES as _VALID_TYPES,
@@ -134,7 +138,9 @@ function validateInstance(raw: Record<string, unknown>, name: string, authOnly =
     authOnly,
   });
   if (error) {
-    throw new Error(error.message);
+    // Permanent config-validation failure (schema/required-field/enum) — exit
+    // EX_CONFIG(78) via the bootstrap classifier so systemd stops restart-flapping.
+    throw new ConfigValidationError(error.message);
   }
 }
 
@@ -164,7 +170,8 @@ export function loadInstance(name: string, opts?: { authOnly?: boolean }): void 
     parsed = JSON.parse(raw) as Record<string, unknown>;
   } catch (err: unknown) {
     const message = errorMessage(err);
-    throw new Error(`Failed to parse config.json for "${name}": ${message}`);
+    // Malformed instance config.json is a permanent config fault — exit EX_CONFIG(78).
+    throw new ConfigValidationError(`Failed to parse config.json for "${name}": ${message}`);
   }
 
   // 4. Validate

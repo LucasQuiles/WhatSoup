@@ -1,5 +1,8 @@
 import type { Database } from './database.ts';
 import { getTransactionRunner, type TransactionRunner } from './db-tx.ts';
+import { createChildLogger } from '../logger.ts';
+
+const log = createChildLogger('session-lifecycle-store');
 
 type PreparedStatement = ReturnType<Database['raw']['prepare']>;
 
@@ -60,6 +63,7 @@ interface LifecycleStatements {
   closeExactSessionCheckpoints: PreparedStatement;
   closePreInitCheckpoint: PreparedStatement;
   updateSessionCheckpointsStatusBySessionId: PreparedStatement;
+  agentSessionRowAlreadyInStatusForProvider: PreparedStatement;
 }
 
 function validateRowId(rowId: number): void {
@@ -200,22 +204,26 @@ export class SessionLifecycleStore {
       suspendExactAgentSession: prepare(`
         UPDATE agent_sessions
         SET status = 'suspended', ended_at = NULL
-        WHERE id = ? AND session_id = ? AND provider = ? AND status = 'active'
+        WHERE id = ? AND session_id = ? AND provider = ?
+          AND status IN ('active', 'orphaned')
       `),
       endExactAgentSession: prepare(`
         UPDATE agent_sessions
         SET status = 'ended', ended_at = COALESCE(ended_at, datetime('now'))
-        WHERE id = ? AND session_id = ? AND provider = ? AND status = 'active'
+        WHERE id = ? AND session_id = ? AND provider = ?
+          AND status IN ('active', 'orphaned')
       `),
       suspendPreInitAgentSession: prepare(`
         UPDATE agent_sessions
         SET status = 'suspended', ended_at = NULL
-        WHERE id = ? AND session_id IS NULL AND provider = ? AND status = 'active'
+        WHERE id = ? AND session_id IS NULL AND provider = ?
+          AND status IN ('active', 'orphaned')
       `),
       endPreInitAgentSession: prepare(`
         UPDATE agent_sessions
         SET status = 'ended', ended_at = COALESCE(ended_at, datetime('now'))
-        WHERE id = ? AND session_id IS NULL AND provider = ? AND status = 'active'
+        WHERE id = ? AND session_id IS NULL AND provider = ?
+          AND status IN ('active', 'orphaned')
       `),
       closeExactSessionCheckpoints: prepare(`
         UPDATE session_checkpoints
@@ -237,6 +245,10 @@ export class SessionLifecycleStore {
             checkpoint_version = checkpoint_version + 1,
             updated_at = datetime('now')
         WHERE session_id = ?
+      `),
+      agentSessionRowAlreadyInStatusForProvider: prepare(`
+        SELECT 1 FROM agent_sessions
+        WHERE id = ? AND provider = ? AND session_id IS ? AND status = ?
       `),
     };
   }
@@ -387,7 +399,35 @@ export class SessionLifecycleStore {
             params.providerSessionId,
             params.provider,
           );
-      requireChanges(rowResult, 'Exact active agent session row could not be closed');
+      if (Number(rowResult.changes) < 1) {
+        // The close statements only match status = 'active', and can only ever
+        // transition a row INTO the requested status. So the ONLY idempotent
+        // no-op is a true repeat: the same-identity row is already in exactly the
+        // status this close would set (a prior identical close already ran — e.g.
+        // duplicate /new, or the concurrent-close race). Every other zero-change
+        // case is a real invariant violation that must still throw: an absent row;
+        // a still-active row whose session_id differs (codex resume-rejection
+        // rewrite); OR — the reachable evict-suspend/resume race — a same-identity
+        // row terminal in a DIFFERENT status (e.g. a delayed idle-suspend left it
+        // 'suspended', then the user /new-ends it): silently no-oping there would
+        // abandon a user-ended session as resumable. So the probe mirrors the
+        // close's EXACT identity AND requires the row already be in params.status
+        // (null-safe IS for the pre-init null-session branch).
+        const rowAlreadyInStatus = this.statements.agentSessionRowAlreadyInStatusForProvider.get(
+          params.agentSessionRowId,
+          params.provider,
+          params.providerSessionId,
+          params.status,
+        );
+        if (rowAlreadyInStatus) {
+          log.info(
+            { agentSessionRowId: params.agentSessionRowId, provider: params.provider, status: params.status },
+            'session lifecycle close: row already in the requested status for this identity — idempotent no-op',
+          );
+          return;
+        }
+        throw new Error('Exact active agent session row could not be closed');
+      }
 
       const checkpointResult = params.providerSessionId === null
         ? this.statements.closePreInitCheckpoint.run(params.status, params.conversationKey)

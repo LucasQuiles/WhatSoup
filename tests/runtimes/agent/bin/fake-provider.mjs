@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 // Shared real child fixture for the B1, B2, and X6 lifecycle probes.
 import { spawn } from 'node:child_process';
-import { writeFileSync } from 'node:fs';
 import { isOrphaned } from './orphan-predicate.ts';
+import { publishPidFile } from './publish-pid-file.ts';
 
 const config = JSON.parse(process.argv[2] ?? '{}');
 const runId = config.runId ?? 'unknown';
@@ -49,7 +49,10 @@ if (config.spawnGrandchildren) {
 }
 
 if (config.pidFile) {
-  writeFileSync(
+  // Atomic publish (publish-pid-file.ts): readers poll existsSync, so the
+  // file must appear complete — a bare writeFileSync exposed the
+  // created-but-empty inode to the B25 2b readiness poll (Node 24 CI lane).
+  publishPidFile(
     config.pidFile,
     JSON.stringify({ provider: process.pid, g1: g1?.pid ?? null, g2: g2?.pid ?? null }),
   );

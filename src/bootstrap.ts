@@ -1,6 +1,6 @@
 import './transport/install-third-party-console-redaction.ts';
 import { bootstrapCommon } from './bootstrap-common.ts';
-import { databaseCompatibilityStartupExitCode } from './core/database-compatibility-early.ts';
+import { startupExitCode } from './core/database-compatibility-early.ts';
 import { errorMessage } from './lib/error-message.ts';
 
 export async function bootstrap(): Promise<void> {
@@ -12,6 +12,6 @@ const isDirectRun = process.argv[1]?.endsWith('bootstrap.ts');
 if (isDirectRun) {
   bootstrap().catch((err) => {
     console.error(errorMessage(err));
-    process.exit(databaseCompatibilityStartupExitCode(err));
+    process.exit(startupExitCode(err));
   });
 }

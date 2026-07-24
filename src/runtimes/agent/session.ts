@@ -33,11 +33,13 @@ import {
 } from './providers/child-env.ts';
 import { ProviderBudget, type BudgetConfig } from './providers/budget.ts';
 import { watchdogHardMsForProvider } from './providers/watchdog-policy.ts';
+import { providerConfigEffort } from './reasoning-control.ts';
 import type { ProviderMcpBridge, ProviderSession } from './providers/types.ts';
 import { OpenAIApiProvider } from './providers/openai-api.ts';
 import { AnthropicApiProvider } from './providers/anthropic-api.ts';
 import {
   PROVIDER_IDS,
+  executionModeForProvider,
   isProviderId,
   assertNeverProvider,
   type ProviderId,
@@ -55,6 +57,10 @@ import {
   buildOpenCodeRunArgs,
   opencodeUsesConfigModel,
 } from './providers/opencode-execution-profile.ts';
+import type {
+  ProviderExecutionGate,
+  ProviderExecutionLease,
+} from './provider-execution-gate.ts';
 
 const log = createChildLogger('session-manager');
 
@@ -122,6 +128,13 @@ const BACKGROUND_TASK_DELIVERY_GUIDANCE = [
   '- Never say work is dispatched or running unless the dispatching tool call happened in the same turn; if you promise a report, deliver it via send_message when the task returns.',
 ].join('\n');
 
+/**
+ * Why the supervisor itself terminated the provider. Absent on a genuine provider fault.
+ * `idle_watchdog` is routine housekeeping (the 30-min inactivity reap); `stalled_operation`
+ * is a real hang that the supervisor cleaned up.
+ */
+export type SessionTerminationReason = 'idle_watchdog' | 'stalled_operation';
+
 export interface SessionCrashInfo {
   exitCode: number | null;
   signal: NodeJS.Signals | null;
@@ -137,6 +150,11 @@ export interface SessionCrashInfo {
   stderrPreview?: string;
   /** Manager generation captured by the child/provider that emitted this crash. Null for unbound sessions. */
   generationIdentity?: SessionGenerationIdentity | null;
+  /**
+   * Set when this exit was a supervisor-initiated reap rather than a provider fault, so
+   * downstream alerting can avoid paging an operator for a kill the supervisor asked for.
+   */
+  terminationReason?: SessionTerminationReason;
 }
 
 export interface SessionGenerationIdentity {
@@ -175,6 +193,8 @@ export interface SessionManagerOptions {
   routingSystemBlock?: () => string | null;
   /** Egress proxy port (#1607) — forwarded into buildChildEnv's baseOpts so spawned children pick up HTTP_PROXY/HTTPS_PROXY. Undefined when the instance has no allowedEgress. */
   egressProxyPort?: number;
+  /** Shared process-lifetime gate for providers whose local state store is single-writer. */
+  providerExecutionGate?: ProviderExecutionGate;
 }
 
 /**
@@ -383,9 +403,8 @@ function resolveProviderArgs(
       const settingSources = typeof providerConfig?.['settingSources'] === 'string'
         ? ['--setting-sources', providerConfig['settingSources']]
         : [];
-      const effort = typeof providerConfig?.['effort'] === 'string'
-        ? ['--effort', providerConfig['effort']]
-        : [];
+      const effortLevel = providerConfigEffort(providerConfig);
+      const effort = effortLevel ? ['--effort', effortLevel] : [];
       const agents = providerConfig?.['agents'];
       const agentArgs = agents === undefined || agents === ''
         ? []
@@ -533,6 +552,7 @@ export class SessionManager {
   private readonly handoffSystemBlock: (() => string | null) | undefined;
   private readonly routingSystemBlock: (() => string | null) | undefined;
   private readonly egressProxyPort: number | undefined;
+  private readonly providerExecutionGate: ProviderExecutionGate | undefined;
 
   private systemPrompt: string = '';
 
@@ -562,6 +582,14 @@ export class SessionManager {
   private providerTurnTerminalResolve: (() => void) | null = null;
   /** Bounded kill timer for a stalled tool; armed by recoverStalledOperation. */
   private stalledOpKill: ReturnType<typeof setTimeout> | null = null;
+  /**
+   * Records a kill this manager itself issued, so the exit handler can tell a supervisor
+   * reap apart from a provider fault. Bound to the exact child and signal: an exit that
+   * does not match is treated as a real crash.
+   */
+  private intentionalKill:
+    | { child: ReturnType<typeof spawn>; signal: NodeJS.Signals; reason: SessionTerminationReason }
+    | null = null;
   private pendingToolIds: Set<string> = new Set();
   /** Codex app-server thread ID for persistent sessions. */
   private codexThreadId: string | null = null;
@@ -604,6 +632,8 @@ export class SessionManager {
     SessionGenerationIdentity | null
   >();
   private readonly childTreeMarkers = new WeakMap<ReturnType<typeof spawn>, string>();
+  private readonly childExecutionLeases = new WeakMap<ReturnType<typeof spawn>, ProviderExecutionLease>();
+  private providerExecutionWaitAbort: AbortController | null = null;
   private readonly shutdownKillTimers = new Map<
     ReturnType<typeof spawn>,
     ShutdownKillTimerEntry
@@ -656,6 +686,7 @@ export class SessionManager {
     this.handoffSystemBlock = opts.handoffSystemBlock;
     this.routingSystemBlock = opts.routingSystemBlock;
     this.egressProxyPort = opts.egressProxyPort;
+    this.providerExecutionGate = opts.providerExecutionGate;
 
     // Initialize budget enforcement if configured
     const budgetConfig = opts.providerConfig?.budget as BudgetConfig | undefined;
@@ -674,17 +705,11 @@ export class SessionManager {
 
   /** Whether this provider uses a spawn-per-turn model (vs. long-running stdin pipe). */
   private get isSpawnPerTurn(): boolean {
-    // Claude CLI, Codex app-server, and Gemini ACP are persistent subprocesses.
-    // HTTP API providers are managed-loop sessions and never spawn a child.
-    // Others (opencode) still spawn per turn.
-    return !this.isManagedLoopProvider
-      && this.provider !== 'claude-cli'
-      && this.provider !== 'codex-cli'
-      && this.provider !== 'gemini-cli';
+    return executionModeForProvider(this.assertKnownProvider('isSpawnPerTurn')) === 'spawn_per_turn';
   }
 
   private get isManagedLoopProvider(): boolean {
-    return this.provider === 'openai-api' || this.provider === 'anthropic-api';
+    return executionModeForProvider(this.assertKnownProvider('isManagedLoopProvider')) === 'managed_loop';
   }
 
   private createManagedProviderSession(): ProviderSession {
@@ -1740,6 +1765,10 @@ export class SessionManager {
       this.clearShutdownKillTimer(child, childGeneration);
       if (superseded) return;
 
+      // Consume the marker for this child even on the clean-shutdown path below, so a
+      // stale reap intent can never be attributed to a later, unrelated exit.
+      const terminationReason = this.takeIntentionalKill(child, signal);
+
       if (!this.active) {
         // Clean shutdown — the caller retains its local child reference while
         // process-tree proof finishes, but this manager must not retain an
@@ -1814,9 +1843,10 @@ export class SessionManager {
           sessionId: crashedSessionId,
           dbRowId: crashedDbRowId,
           generationIdentity: childGeneration,
-          ...this.buildCrashMetadata(),
+          terminationReason,
+          ...this.buildCrashMetadata(terminationReason),
         });
-        this.notifyUnexpectedExit(code, signal, childGeneration);
+        this.notifyUnexpectedExit(code, signal, childGeneration, terminationReason);
       }
     });
   }
@@ -1825,10 +1855,19 @@ export class SessionManager {
     code: number | null,
     signal: NodeJS.Signals | null,
     generationIdentity: SessionGenerationIdentity | null,
+    terminationReason?: SessionTerminationReason,
   ): void {
     // Exit code 0 = normal shutdown (e.g. /new, graceful stop) — skip notification entirely.
     if (code === 0 && !signal) {
       log.info({ rowId: this.dbRowId }, 'session exited cleanly (code 0) — no crash notification');
+      return;
+    }
+
+    // A supervisor reap already sent the user a notice that says why the session ended
+    // (inactivity, stalled tool). The generic crash line would be a second, less accurate
+    // message for the same event.
+    if (terminationReason !== undefined) {
+      log.info({ rowId: this.dbRowId, terminationReason }, 'supervisor reap — generic crash notification suppressed');
       return;
     }
 
@@ -1866,6 +1905,13 @@ export class SessionManager {
     this.watchdogWarn = null;
     this.watchdogHard = null;
     this.pendingToolIds.clear();
+  }
+
+  private releaseProviderExecutionLease(child: ReturnType<typeof spawn>): void {
+    const lease = this.childExecutionLeases.get(child);
+    if (!lease) return;
+    this.childExecutionLeases.delete(child);
+    lease.release();
   }
 
   /**
@@ -1940,9 +1986,34 @@ export class SessionManager {
     );
     this.notifyUser?.('_A tool call stalled and was terminated. Send your message again to retry._');
     const child = this.child;
+    this.markIntentionalKill(child, 'SIGKILL', 'stalled_operation');
     void this.killChildTree(child, 'SIGKILL').catch((err) => {
       log.error({ err, pid: child.pid ?? null, chatJid: this.chatJid }, 'failed to reap stalled provider process tree');
     });
+  }
+
+  /** Record that this manager is about to kill `child` on purpose. Cleared by the exit handler. */
+  private markIntentionalKill(
+    child: ReturnType<typeof spawn>,
+    signal: NodeJS.Signals,
+    reason: SessionTerminationReason,
+  ): void {
+    this.intentionalKill = { child, signal, reason };
+  }
+
+  /**
+   * Consume the intent marker for an exiting child. Returns the reason only when the exit
+   * matches the kill we issued — a different child, or a different signal than the one we
+   * sent, means the process died of something else and must still be treated as a crash.
+   */
+  private takeIntentionalKill(
+    child: ReturnType<typeof spawn>,
+    signal: NodeJS.Signals | null,
+  ): SessionTerminationReason | undefined {
+    const marker = this.intentionalKill;
+    if (marker === null || marker.child !== child) return undefined;
+    this.intentionalKill = null;
+    return marker.signal === signal ? marker.reason : undefined;
   }
 
   /**
@@ -2005,11 +2076,11 @@ export class SessionManager {
 
     if (this.child === null) return;
     log.warn({ sessionId: this.sessionId, pid: this.child?.pid, reason: 'turn_watchdog' }, 'turn watchdog fired — killing stalled Claude process');
-    // Notify user with a specific message before the kill — the generic crash
-    // notice ("Agent session crashed") follows via the exit handler, but this
-    // message explains WHY it was terminated.
+    // This notice is the ONLY user-facing message for a reap: the intent marker below
+    // suppresses the generic crash notice (and the operator page) in the exit handler.
     this.notifyUser?.(terminationNotice);
     const child = this.child;
+    this.markIntentionalKill(child, 'SIGKILL', 'idle_watchdog');
     void this.killChildTree(child, 'SIGKILL').catch((err) => {
       log.error({ err, pid: child.pid ?? null, chatJid: this.chatJid }, 'failed to reap watchdog provider process tree');
     });
@@ -2079,6 +2150,18 @@ export class SessionManager {
 
   /** Write a user message turn to the agent — via stdin (Claude) or spawn-per-turn (others). */
   async sendTurn(text: string): Promise<void> {
+    return this.sendTurnAtProviderBoundary(text);
+  }
+
+  /**
+   * Dispatch a turn and invoke the callback only at the exact provider boundary.
+   * The separate method preserves sendTurn's stable one-argument contract for
+   * callers that do not publish runtime ownership evidence.
+   */
+  async sendTurnAtProviderBoundary(
+    text: string,
+    onProviderBoundaryReady?: () => void,
+  ): Promise<void> {
     this.db.assertWritableCompatibility();
     if (!this.active) {
       throw new Error('No active session. Call spawnSession() first.');
@@ -2133,6 +2216,12 @@ export class SessionManager {
       const providerSession = this.managedProviderSession;
       const generationIdentity = this.managedProviderGeneration;
 
+      try {
+        onProviderBoundaryReady?.();
+      } catch (err) {
+        this.completeProviderTurn(providerTurnToken);
+        throw err;
+      }
       this.clearTurnWatchdog();
       this.armWatchdog(providerSession, generationIdentity);
       try {
@@ -2181,6 +2270,25 @@ export class SessionManager {
         this.openCodeParser.reset();
       }
 
+      let executionLease: ProviderExecutionLease | null = null;
+      if (this.provider === 'opencode-cli' && this.providerExecutionGate) {
+        const waitAbort = new AbortController();
+        this.providerExecutionWaitAbort = waitAbort;
+        try {
+          executionLease = await this.providerExecutionGate.acquire({ signal: waitAbort.signal });
+        } catch (err) {
+          this.completeProviderTurn(providerTurnToken);
+          throw err;
+        } finally {
+          if (this.providerExecutionWaitAbort === waitAbort) this.providerExecutionWaitAbort = null;
+        }
+        if (!this.active) {
+          executionLease.release();
+          this.completeProviderTurn(providerTurnToken);
+          throw new Error('PROVIDER_EXECUTION_WAIT_ABORTED: session ended before dispatch');
+        }
+      }
+
       // Spawn-per-turn providers: kill any existing process and spawn a new one
       // with the user prompt appended as a CLI argument.
       if (this.child) {
@@ -2188,6 +2296,7 @@ export class SessionManager {
         try {
           await this.killChildTree(child, 'SIGTERM');
         } catch (err) {
+          executionLease?.release();
           this.completeProviderTurn(providerTurnToken);
           log.error({ err, pid: child.pid ?? null, chatJid: this.chatJid }, 'failed to reap replaced provider process tree');
           throw new Error('Cannot replace provider while prior process-tree cleanup is inconclusive', {
@@ -2207,11 +2316,20 @@ export class SessionManager {
         binary = this.getProviderBinary();
         parse = this.getParser();
       } catch (err) {
+        executionLease?.release();
         this.completeProviderTurn(providerTurnToken);
         throw err;
       }
       let sawResult = false;
       let boundarySettled = false;
+
+      try {
+        onProviderBoundaryReady?.();
+      } catch (err) {
+        executionLease?.release();
+        this.completeProviderTurn(providerTurnToken);
+        throw err;
+      }
 
       const dispatchSpawnPerTurnEvent = (event: AgentEvent): void => {
         if (this.activeProviderTurnToken !== providerTurnToken) return;
@@ -2239,10 +2357,16 @@ export class SessionManager {
             ),
           });
         } catch (err) {
+          executionLease?.release();
           this.completeProviderTurn(providerTurnToken);
           throw err;
         }
       })();
+
+      if (executionLease) {
+        this.childExecutionLeases.set(child, executionLease);
+        executionLease = null;
+      }
 
       const childGeneration = this.resolveGenerationOwnership?.() ?? null;
       this.childGenerations.set(child, childGeneration);
@@ -2342,6 +2466,7 @@ export class SessionManager {
       // its stdio streams have closed. This makes the final unterminated record
       // part of the same atomic boundary decision.
       child.on('close', (code, signal) => {
+        this.releaseProviderExecutionLease(child);
         const superseded = this.child !== child;
         this.clearShutdownKillTimer(child, childGeneration);
         if (superseded) return;
@@ -2560,6 +2685,13 @@ export class SessionManager {
         throw new Error('Child process stdin is not available');
       }
 
+      try {
+        onProviderBoundaryReady?.();
+      } catch (err) {
+        this.completeProviderTurn(providerTurnToken);
+        throw err;
+      }
+
       let timeoutHandle: ReturnType<typeof setTimeout> | null = null;
       try {
         await Promise.race([
@@ -2650,11 +2782,25 @@ export class SessionManager {
   }
 
   /**
+   * Reasoning effort this session was actually spawned with (null = none /
+   * provider default). Shares providerConfigEffort with the `--effort` argv
+   * builder, so "reports exactly what spawn threaded" holds BY CONSTRUCTION
+   * rather than by two guards agreeing — letting the pin/recycle diff compare
+   * the EFFECTIVE spawned effort, never a raw pin override that a static
+   * config may already satisfy (Slice 3).
+   */
+  getSpawnedEffort(): string | null {
+    return providerConfigEffort(this.providerConfig);
+  }
+
+  /**
    * Kill child process and mark session.
    * @param suspend - true (default) = suspended (bot shutdown, resumable);
    *                  false = ended (user chose /new, not resumable).
    */
   async shutdown(suspend = true): Promise<void> {
+    this.providerExecutionWaitAbort?.abort();
+    this.providerExecutionWaitAbort = null;
     this.clearTurnWatchdog();
     this.clearStalledOpKill();
     this.active = false; // Suppress crash notification for clean shutdown

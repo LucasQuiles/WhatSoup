@@ -12,7 +12,7 @@ const early = vi.hoisted(() => {
   }
   return {
     DatabaseCompatibilityPermanentStartupError,
-    databaseCompatibilityStartupExitCode: vi.fn((err: unknown) => (
+    startupExitCode: vi.fn((err: unknown) => (
       err instanceof DatabaseCompatibilityPermanentStartupError ? 78 : 1
     )),
     inspectExistingDatabaseForBootstrap: vi.fn(),
@@ -131,7 +131,7 @@ describe('database compatibility wrapper bootstrap', () => {
 
     expect(failure).toBeInstanceOf(early.DatabaseCompatibilityPermanentStartupError);
     expect(failure).toMatchObject({ cause: permanentError });
-    expect(early.databaseCompatibilityStartupExitCode(failure)).toBe(78);
+    expect(early.startupExitCode(failure)).toBe(78);
     expect(writeSpy).not.toHaveBeenCalled();
   });
 
@@ -151,7 +151,7 @@ describe('database compatibility wrapper bootstrap', () => {
     ]).catch((err: unknown) => err);
 
     expect(failure).toBe(transientError);
-    expect(early.databaseCompatibilityStartupExitCode(failure)).toBe(1);
+    expect(early.startupExitCode(failure)).toBe(1);
     expect(writeSpy).not.toHaveBeenCalled();
   });
 

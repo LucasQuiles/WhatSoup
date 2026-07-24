@@ -238,11 +238,43 @@ and end with an alphanumeric character. Exit code 2 on violation.
 | `bot-errors-runner.py` | Per-bot error runner: invokes the agent loop, captures failures, emits alert events to the local outbox. |
 | `bot-errors-emit.py` | Alert emission helper: builds alert event JSON (severity, dedupe key, evidence) and writes it to the local outbox. |
 | `bot-errors-health-check.py` | Daily health probe: inventories each instance/service, derives FAIL/WARN lines (auth-bond, queue age, DNS, tooling, config), emits a daily-health summary event. Largest script; hosts the auth-bond daily-layer derivation. |
-| `bot-errors-collector.py` | Hub-side relay collector: claims remote hosts' outboxes over ssh, relays events into the hub's incoming queue. Hosts the per-host claim loop. |
+| `bot-errors-collector.py` | Hub-side relay collector: claims remote hosts' outboxes over ssh, relays events into the hub's incoming queue. Hosts the per-host claim loop. Per-remote `consecutiveFailures` drives two independent, threshold-gated signals off the same counter: `relay_host_down`/`relay_host_recovered` at `RELAY_BACKOFF_FAILURE_THRESHOLD` (backoff-schedule entry/exit) and, earlier and lower-confidence, a typed `collector_remote_unreachable` alert at `BOT_ERRORS_COLLECTOR_FAILURE_ESCALATE_THRESHOLD` (default 2) naming the remote, its failure count, last error class, and last-success age — cleared with a real `eventType="clear"` on the next successful collection, so a persistently uncollectable remote (spoke events aging unseen in its outbox) escalates through the normal dispatcher incident path instead of silently stalling. |
 | `bot-errors-dispatcher.py` | Hub-side delivery + suppression engine: dedupe keys, throttle/renotify, storm-collapse, forceNotify policy, WhatsApp + email-fallback delivery. |
-| `bot-errors-heartbeat-watchdog.py` | Independent watchdog of the hub lanes (q_loop, dispatcher, collector, daily_health, queue_backlog). The only `forceNotify`-privileged source. |
+| `bot-errors-heartbeat-watchdog.py` | Independent five-minute watchdog of the hub lanes (`q_loop`, dispatcher, collector, daily health, queue backlog, local services/health, and unattended browser-debug resource trees). Stale per-host daily-health evidence reuses the collector's durable reachability receipt (diagnosis, failure count, last success, and Tailscale online/last-seen) without running a duplicate network probe. The only `forceNotify`-privileged source; browser-debug incidents are explicitly non-paging. |
 | `bot-errors-q-loop.py` | The hub's agent loop driver. |
 | `retire-outbound-quarantine.py` | Operator tool: retires one reviewed `quarantined` row in an instance's `outbound_ops` table (`--db`, `--instance`, `--op-id`, `--reason`), backing up the DB first and flipping the op to `failed_permanent`/`is_terminal=1`. When that was the last quarantined op it shells out to `bot-errors-emit.py` to emit a BOT ERRORS clear event. Supports `--dry-run` (no writes, reports whether a clear would fire), `--no-backup`, `--no-emit`, and `--emit-script`. |
+
+### Collector capture-failure escalation: per-transition semantics
+
+`collector_remote_unreachable` (alert at `consecutiveFailures >= BOT_ERRORS_COLLECTOR_FAILURE_ESCALATE_THRESHOLD`,
+default 2) is deliberately **per-transition-honest**, not flap-suppressing: it
+alerts on every new failure episode and clears on every genuinely successful
+collection, one collection at a time. It does not require the same N
+consecutive successes that `relay_host_down`'s backoff recovery does
+(`recovery_successes`, default 2) before clearing — a single successful
+collection resolves the capture failure for that moment, and the escalation
+reflects that honestly.
+
+This means a remote that flaps through `RELAY_BACKOFF_FAILURE_THRESHOLD`
+(default 3) can produce more `collector_remote_unreachable` transitions than
+`relay_host_down` transitions over the same window: `relay_host_down` stays
+open across a single recovering poll (it needs the fuller N-successes
+streak), while the escalation clears and can re-open on the very next
+failure. **This asymmetry is intentional**, not a bug — the two signals have
+different thresholds and different confirmation semantics by design, so
+behaving differently under a flap is expected. A genuinely flapping remote is
+bounded by the dispatcher's existing flap-storm machinery
+(`BOT_ERRORS_FLAP_TRIP_THRESHOLD`/`BOT_ERRORS_FLAP_WINDOW_SECONDS`, default 5
+trips per 600s, collapses into one storm digest) rather than by holding this
+event open across a real recovery.
+
+One implication worth flagging for on-call: because `collector_remote_unreachable`
+(threshold 2) and `relay_host_down` (threshold 3) are different sources —
+and therefore different dispatcher incident keys — **one persistently dead
+remote opens two separate incidents**, not one. This is intentional (each
+signal has its own threshold/confirmation semantics, per above), but it
+means the notification count for a single dead host is 2, not 1; don't
+read the second page as a different host.
 
 ## Canonical source for this import (diff matrix)
 
@@ -261,6 +293,29 @@ ahead of the hub's Jun-9 copies and the deployed mini7 vintage:
 | runner | 6fccb93be94b5288 | 19576 | hub Jun-9 copy 17629B (older) |
 
 All seven `py_compile` clean (stdlib-only, python3).
+
+### Browser-debug resource ownership
+
+The heartbeat watchdog inventories Linux browser roots that expose a local
+remote-debugging port. A tree becomes `browser_debug:<profile-hash>` only when
+all three conditions hold: it is older than the configured dwell, its aggregate
+descendant RSS exceeds the configured threshold, and the debugging port has no
+established controller connection. The alert carries only bounded operational
+metadata (hashed profile identity, root PID, age, aggregate RSS, process count,
+debug port, and controller count); it never captures page URLs or the profile
+path. The watchdog alerts and confirms recovery but does not terminate the
+browser.
+
+| Variable | Default | Meaning |
+|----------|---------|---------|
+| `BOT_ERRORS_BROWSER_DEBUG_MIN_AGE_SECONDS` | `1800` | Minimum root age before an unattended debug tree is eligible. |
+| `BOT_ERRORS_BROWSER_DEBUG_MIN_RSS_MB` | `512` | Minimum aggregate root-plus-descendants RSS before an unattended debug tree is eligible. |
+| `BOT_ERRORS_DRY_BROWSER_DEBUG_SNAPSHOT` | unset | Test-only JSON snapshot used for deterministic policy and stress tests. |
+
+If controller-connection inventory is unavailable, the watchdog opens the
+non-paging `browser_debug:probe` visibility incident instead of asserting that
+the browser is unattended. Browser checks can be omitted from a specialized
+watchdog lane by excluding `browser_debug` from `BOT_ERRORS_WATCHDOG_CHECKS`.
 
 > NOTE: the detector-misconceptions audit register cites line numbers against the
 > **deployed mini7 health-check vintage (170KB)**. This import is the newer LOCAL vintage

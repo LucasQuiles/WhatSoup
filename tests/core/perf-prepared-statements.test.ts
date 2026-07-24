@@ -34,9 +34,22 @@ describe('prepared statement caching', () => {
     // sweep query + the dead-delivery job reclaim update), the two maybe_sent
     // durability-debt diagnostics (#1865: the maybe_sent count + oldest-submitted-at
     // staleness probes that drive /health degradation), and the PR-C
-    // supersedeOutstandingStatus statement (one outstanding status ping per chat).
+    // supersedeOutstandingStatus statement (one outstanding status ping per chat),
+    // and the bounded live maybe_sent reconciliation scan.
     // Lifecycle methods must not prepare SQL per call.
-    expect(prepareSpy).toHaveBeenCalledTimes(112);
+    // (+2 vs the historical 112: the E17/E22 idempotency probe
+    // agentSessionRowAlreadyInStatusForProvider — the true-repeat-only guard
+    // that lets a duplicate lifecycle close no-op instead of throwing — plus
+    // the live maybe_sent scan above.)
+    // (+1 vs 114, PRESTAGE-T4: getTurnRecoveryOriginalDeliveryStatus — the
+    // pre-claim duplicate-send guard's read of the ORIGINAL selected
+    // delivery's outbound status, called before a recovery job is claimed
+    // so the supervisor never claims-then-replays a job whose original send
+    // is still ambiguous. A distinct statement from the pre-existing
+    // maybe_sent diagnostics above; getTurnRecoverySourceProof, added later
+    // in the same packet, deliberately REUSES getTurnRecoverySourceInboundStatus
+    // instead of adding its own, so it does not also bump this count.)
+    expect(prepareSpy).toHaveBeenCalledTimes(115);
     prepareSpy.mockClear();
 
     const seq = engine.journalInbound('msg-1', 'conv-1', 'jid-1@s.whatsapp.net', 'agent');

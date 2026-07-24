@@ -5,7 +5,7 @@
   "entrypoints": [
     {
       "path": "src/main.ts",
-      "sha256": "593ad803143d1890582de486ad726f3547f3d83f7a1519bc02d79ec2e1e443b4",
+      "sha256": "e4e2466a371f745d2d2a47b8ecc8d0e4d52d95e71cf2a28f7d73c3ba1319d505",
       "mustContain": [
         "startHealthServer",
         "createConnection"
@@ -14,7 +14,7 @@
     },
     {
       "path": "src/bootstrap.ts",
-      "sha256": "2d4a27dc749ea189c835af8584ac0a0641e47e0728cfdd6d1c7d5f300163f5d1",
+      "sha256": "71944b2d7eab217bbd7d829d88d45dbc0dbefd45644970352ddd664b75f8a1aa",
       "mustContain": [
         "bootstrapCommon"
       ],
@@ -22,7 +22,7 @@
     },
     {
       "path": "src/database-compatibility-bootstrap.ts",
-      "sha256": "5c20e02ce99fc8d9a31ec923c0286e26f08dc983be4d681684774f0afa7b0f61",
+      "sha256": "5d678b41a60b1f385c4c36cb9d81d3f688cd245d7afb273ced28348b9390991a",
       "mustContain": [
         "databaseCompatibilityBootstrap",
         "checkLoadedInstanceDatabase"
@@ -41,7 +41,7 @@
     },
     {
       "path": "src/transport/connection.ts",
-      "sha256": "5de1c4f3e997f231cfaed8105f538ff5470c1aa28b45e4a1e88dd6107e0f38fc",
+      "sha256": "9eb039f1dcf0299e5766b87c6388a15740f45029a76d8c6d06e0aae34878cac6",
       "mustContain": [
         "decideDisconnectAction",
         "QR code received",
@@ -70,7 +70,7 @@
     },
     {
       "path": "src/runtimes/agent/session.ts",
-      "sha256": "5aa4af3b298f98cda6f514af14b96b6dfc80b73c2122b09f03c3fd4493911fc6",
+      "sha256": "d2b3e135a57075d222cc34cd90590ed642ef8036264a642b671c9695da5949ea",
       "mustContain": [
         "composeWithExactLineDedup"
       ],

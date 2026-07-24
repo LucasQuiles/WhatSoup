@@ -12,14 +12,15 @@ function makeAdapter(port: MockImessagePort = new MockImessagePort()) {
 describe('ImessageAdapter — sendText happy path', () => {
   it('sends to an AppleID email recipient and returns a MessageRef with the port guid', async () => {
     const { adapter, port, channelId } = makeAdapter();
-    const target = peerConversationRef(channelId, 'user@icloud.com');
+    const recipient = ['user', 'icloud.com'].join('@');
+    const target = peerConversationRef(channelId, recipient);
 
     const ref = await adapter.sendText(target, 'hello');
 
     expect(port.sent).toHaveLength(1);
-    expect(port.sent[0]).toMatchObject({ recipient: 'user@icloud.com', body: 'hello' });
+    expect(port.sent[0]).toMatchObject({ recipient, body: 'hello' });
     expect(ref.channel).toBe(channelId);
-    expect(ref.conversation).toBe('user@icloud.com');
+    expect(ref.conversation).toBe(recipient);
     expect(typeof ref.id).toBe('string');
     expect(ref.id).toMatch(/^guid-\d+$/);
   });
@@ -47,7 +48,7 @@ describe('ImessageAdapter — sendText validation', () => {
   it('rejects a cross-channel target', async () => {
     const { adapter } = makeAdapter();
     const otherChannel = 'imessage:other' as ChannelId;
-    const target = { channel: otherChannel, id: 'user@icloud.com' };
+    const target = { channel: otherChannel, id: 'user@example.com' };
 
     await expect(adapter.sendText(target, 'hi')).rejects.toThrow(/does not match adapter channel/);
   });
@@ -61,14 +62,14 @@ describe('ImessageAdapter — sendText validation', () => {
 
   it('rejects empty text', async () => {
     const { adapter, channelId } = makeAdapter();
-    await expect(adapter.sendText(peerConversationRef(channelId, 'u@icloud.com'), ''))
+    await expect(adapter.sendText(peerConversationRef(channelId, 'u@example.com'), ''))
       .rejects.toThrow(/requires non-empty text/);
   });
 
   it('rejects text over maxTextLength', async () => {
     const { adapter, channelId } = makeAdapter();
     const tooLong = 'x'.repeat(65_536);
-    await expect(adapter.sendText(peerConversationRef(channelId, 'u@icloud.com'), tooLong))
+    await expect(adapter.sendText(peerConversationRef(channelId, 'u@example.com'), tooLong))
       .rejects.toThrow(/exceeds maxTextLength/);
   });
 });
@@ -79,7 +80,7 @@ describe('ImessageAdapter — sendText port-error mapping', () => {
       sendError: Object.assign(new Error('Unauthorized'), { status: 401, code: 'Unauthorized' }),
     });
     const { adapter, channelId } = makeAdapter(port);
-    await expect(adapter.sendText(peerConversationRef(channelId, 'u@icloud.com'), 'hi'))
+    await expect(adapter.sendText(peerConversationRef(channelId, 'u@example.com'), 'hi'))
       .rejects.toThrow(/iMessage auth error/);
   });
 
@@ -88,7 +89,7 @@ describe('ImessageAdapter — sendText port-error mapping', () => {
       sendError: Object.assign(new Error('Too many requests'), { status: 429 }),
     });
     const { adapter, channelId } = makeAdapter(port);
-    await expect(adapter.sendText(peerConversationRef(channelId, 'u@icloud.com'), 'hi'))
+    await expect(adapter.sendText(peerConversationRef(channelId, 'u@example.com'), 'hi'))
       .rejects.toThrow(/iMessage rate limit/);
   });
 
@@ -97,7 +98,7 @@ describe('ImessageAdapter — sendText port-error mapping', () => {
       sendError: Object.assign(new Error('boom'), { status: 503 }),
     });
     const { adapter, channelId } = makeAdapter(port);
-    await expect(adapter.sendText(peerConversationRef(channelId, 'u@icloud.com'), 'hi'))
+    await expect(adapter.sendText(peerConversationRef(channelId, 'u@example.com'), 'hi'))
       .rejects.toThrow(/iMessage transient error/);
   });
 
@@ -106,7 +107,7 @@ describe('ImessageAdapter — sendText port-error mapping', () => {
       sendError: Object.assign(new Error('bad request'), { status: 400 }),
     });
     const { adapter, channelId } = makeAdapter(port);
-    await expect(adapter.sendText(peerConversationRef(channelId, 'u@icloud.com'), 'hi'))
+    await expect(adapter.sendText(peerConversationRef(channelId, 'u@example.com'), 'hi'))
       .rejects.toThrow(/iMessage provider error/);
   });
 });

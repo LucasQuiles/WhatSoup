@@ -40,6 +40,7 @@ import {
   type OutboundFloodRecordResult,
   type OutboundFloodStats,
 } from './outbound-flood-detector.ts';
+import { OutboundFloodIncidentLifecycle } from './outbound-flood-incident.ts';
 import { PresenceCache } from './presence-cache.ts';
 import { jitteredDelay } from '../core/retry.ts';
 import { decideDisconnectAction } from './auth-disconnect-policy.ts';
@@ -627,6 +628,11 @@ export class ConnectionManager extends EventEmitter implements Messenger {
    */
   private readonly outboundFloodDetector = new OutboundFloodDetector({
     resolveKey: (jid) => this.contactsDir.resolveConversationKey(jid),
+  });
+  private readonly outboundFloodIncident = new OutboundFloodIncidentLifecycle({
+    instance: config.botName,
+    stateRoot: config.stateRoot ?? config.dataRoot,
+    log: this.log,
   });
 
   /** In-memory cache of the most recent presence status per JID. */
@@ -1466,23 +1472,17 @@ export class ConnectionManager extends EventEmitter implements Messenger {
       { dest: destHash, count: result.count, windowMs: OUTBOUND_FLOOD_WINDOW_MS, threshold: OUTBOUND_FLOOD_THRESHOLD },
       'outbound flood detected',
     );
-    const windowMin = Math.round(OUTBOUND_FLOOD_WINDOW_MS / 60_000);
-    // Dest hash in the SUMMARY (not just evidence) so two conversations flooding
-    // at once produce distinct alerts — the bot-errors dispatcher de-dups on
-    // instance|source|summary, so an identical summary would collapse them and
-    // break the spec's per-(bot, conversation, window) granularity.
-    emitAlertChecked(
-      config.botName,
-      'outbound_flood',
-      `outbound flood: ${result.count}+ sends in ${windowMin}m to conversation ${destHash}`,
-      JSON.stringify({ dest: destHash, count: result.count, windowMs: OUTBOUND_FLOOD_WINDOW_MS }),
-      'critical',
-    );
+    // Keep the destination hash in the summary so concurrent offenders remain
+    // distinguishable in the incident timeline. Dispatcher ownership is
+    // instance|source, so recovery below waits for every tracked destination to
+    // drain rather than clearing the shared source when only one destination does.
+    this.outboundFloodIncident.emitTrip(result, destHash, OUTBOUND_FLOOD_WINDOW_MS);
   }
 
   /** Redacted flood snapshot for the health payload (dest as short hash). */
   private getOutboundFloodStats(): ConnectionOutboundFlood {
     const stats: OutboundFloodStats = this.outboundFloodDetector.stats();
+    this.outboundFloodIncident.reconcile(stats);
     return {
       windowMs: stats.windowMs,
       threshold: stats.threshold,
@@ -1492,7 +1492,6 @@ export class ConnectionManager extends EventEmitter implements Messenger {
       worstCount: stats.worstCount,
     };
   }
-
 
   private recordDisconnect(statusCode: number | null, reason: string): void {
     const now = Date.now();

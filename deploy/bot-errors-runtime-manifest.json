@@ -6,7 +6,7 @@
   "files": [
     {
       "path": "deploy/scripts/bot-errors-collector.py",
-      "sha256": "f169290fdfe1543028a29b7c4d752e94a51564960ee9b052f3d217e74cc8ffd5",
+      "sha256": "affa51f4f6c6dee66d9187307b2f5599f8475f63ce7260c0261e072ee3eb9459",
       "mustContain": [
         "append_private_jsonl",
         "refusing to use private directory through symlink",
@@ -22,19 +22,22 @@
         "best-effort-remote",
         "redact_collector_text",
         "remote_liveness_probe_ok",
-        "tailscale_ping_command"
+        "tailscale_ping_command",
+        "collector_remote_unreachable"
       ]
     },
     {
       "path": "deploy/scripts/bot-errors-dispatcher.py",
-      "sha256": "3ea28b96285959992a6e3766671586ad9cef4b6e35f21578a51a30aa96dd073c",
+      "sha256": "b8712ed75fde6d437291a163ed879e13ed6c93a743df4d6d69daf36e0d9b070a",
       "mustContain": [
         "append_private_jsonl",
         "refusing to use private directory through symlink",
         "whatsapp_auth_bond_local_failure",
         "sourceSpecificRecoveredIncidents",
         "event_line(\"incident_key\", incident_key(event))",
-        "redacted_state_text"
+        "redacted_state_text",
+        "suppress_alerts_recovered_before_delivery",
+        "recovered_before_delivery"
       ]
     },
     {
@@ -67,7 +70,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-health-check.py",
-      "sha256": "512463cbb735d56eb80d599cbdcf06a2e3974eec8cda6fef04530afa6ebd9d3a",
+      "sha256": "53c50903327e9d27018dc2c571bdfc87dbc29cc602771e005ae9aa96911625f2",
       "mustContain": [
         "critical_file_problem",
         "mustContain",
@@ -135,7 +138,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-heartbeat-watchdog.py",
-      "sha256": "a56950aea8b2315994d8cb881dd0e3002627d7cddc8349f4ae60251e1e373fea",
+      "sha256": "fcafec6acde3c9ab1ed5fcc009e7f9020d2c0fd9ffbeee77ab19caaac84d45bc",
       "mustContain": [
         "BOT_ERRORS_Q_LOOP_STATE_DIR",
         "BOT_ERRORS_FLEET_SENTINEL_HEARTBEAT",
@@ -143,7 +146,9 @@
         "fleet_sentinel_age",
         "q_loop:supervisor",
         "refusing to trust critical file",
-        "redact_watchdog_text"
+        "redact_watchdog_text",
+        "browser_debug_problems",
+        "collector_reachability_evidence"
       ]
     },
     {

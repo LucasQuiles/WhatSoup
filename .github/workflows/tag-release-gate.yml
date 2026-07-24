@@ -62,6 +62,36 @@ jobs:
       - name: Import boundary guard
         run: npm run guard:boundaries
 
+      # `origin/main` must exist as a ref before the diff-based guard below. The checkout
+      # uses fetch-depth: 0, but this makes the remote-tracking ref explicit rather than
+      # relying on checkout's refspec behaviour — if it were missing, guard:baseline-growth
+      # would exit 2 (INCONCLUSIVE) and block the release for an infrastructure reason
+      # rather than a real finding.
+      - name: Fetch main for diff-based guards
+        run: git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
+
+      # Cycle detection, alongside the direction check above. Whole-tree and
+      # revision-independent, so it is exactly as meaningful here as on a PR.
+      - name: Import cycle guard
+        run: npm run guard:import-cycle
+
+      # Every imported package must be declared. Also whole-tree, and the property it
+      # protects — that a clean install resolves — is most load-bearing at release time.
+      - name: Phantom dependency guard
+        run: npm run guard:phantom-deps
+
+      # Tolerated-debt ceilings may only shrink.
+      #
+      # HONEST SCOPE ON THIS PATH: this guard is diff-based, comparing the candidate against
+      # `merge-base(origin/main, HEAD)`. For a tag cut at main's tip that base IS the tag, so
+      # the comparison is between a commit and itself and the step passes trivially. It does
+      # real work only when the tag diverges from main (e.g. cut from a release branch).
+      # It is wired here because it cannot report growth falsely and costs ~1s — not because
+      # it is strong protection on this path. The authoritative baseline check is the PR
+      # gate. Do not read a green here as "no debt was institutionalised".
+      - name: Baseline growth guard
+        run: npm run guard:baseline-growth
+
       - name: Repo hygiene release
         run: npm run guard:repo:release-hygiene
 

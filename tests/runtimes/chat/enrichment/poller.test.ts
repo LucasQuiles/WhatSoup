@@ -64,6 +64,10 @@ import { EnrichmentPoller } from '../../../../src/runtimes/chat/enrichment/polle
 import type { LLMProvider } from '../../../../src/runtimes/chat/providers/types.ts';
 import type { PineconeMemory } from '../../../../src/runtimes/chat/providers/pinecone.ts';
 import type { StoredMessage } from '../../../../src/core/messages.ts';
+// Real SQLite (not mocked) for the persistence checks below — proves the
+// enrichment_runs row actually lands with the right values, not just that
+// the writer was invoked with the right-looking arguments.
+import { Database } from '../../../../src/core/database.ts';
 import {
   getUnprocessedMessages,
   getUnprocessedCount,
@@ -283,6 +287,38 @@ describe('EnrichmentPoller', () => {
       expect.stringContaining('INSERT INTO enrichment_runs'),
     );
     expect(db._runFn).toHaveBeenCalledTimes(1);
+    // Success path writes no `error` column at all — SQLite defaults the
+    // omitted column to NULL, and the bound param list has exactly the four
+    // pre-existing values (no fifth error argument tacked on).
+    const [sql] = db._prepareFn.mock.calls[0] as [string];
+    expect(sql).not.toContain('error');
+    expect(db._runFn.mock.calls[0]).toHaveLength(4);
+  });
+
+  it('persists a real enrichment_runs row with error IS NULL on a successful cycle (real SQLite)', async () => {
+    // The mock-based tests above prove the writer is *called* correctly;
+    // this proves the row actually *lands* — real SQLite, no db.raw stub.
+    const realDb = new Database(':memory:');
+    realDb.open();
+    try {
+      vi.mocked(getUnprocessedMessages).mockReturnValue([makeStoredMsg({ pk: 6 })]);
+      vi.mocked(extractFacts).mockResolvedValue([]);
+
+      const { poller } = makePoller(realDb as unknown as ReturnType<typeof makeMockDb>);
+      await triggerOneCycle(poller);
+
+      const rows = realDb.raw.prepare('SELECT * FROM enrichment_runs').all() as Array<{
+        error: string | null;
+        completed_at: string | null;
+        messages_processed: number;
+      }>;
+      expect(rows).toHaveLength(1);
+      expect(rows[0].error).toBeNull();
+      expect(rows[0].completed_at).not.toBeNull();
+      expect(rows[0].messages_processed).toBe(1);
+    } finally {
+      realDb.close();
+    }
   });
 
   it('marks all messages in a chat segment as processed when 0 facts extracted', async () => {
@@ -489,16 +525,103 @@ describe('EnrichmentPoller', () => {
     expect(markMessagesProcessed).not.toHaveBeenCalled();
   });
 
-  it('does NOT mark messages as processed when DB fetch throws', async () => {
+  it('does NOT mark messages as processed when DB fetch throws, and records an enrichment_runs failure row instead of a silent skip', async () => {
     vi.mocked(getUnprocessedMessages).mockImplementation(() => {
       throw new Error('DB connection lost');
     });
 
-    const { poller } = makePoller();
+    const db = makeMockDb();
+    const { poller } = makePoller(db);
+    const lastRunAtBeforeFailure = poller.lastRunAt; // frozen reference (null on a fresh poller)
     await triggerOneCycle(poller); // should not throw
 
     expect(markMessagesProcessed).not.toHaveBeenCalled();
     expect(extractFacts).not.toHaveBeenCalled();
+
+    // Before this fix, a fetch failure logged and returned with zero rows
+    // written to enrichment_runs — a failed cycle was durably invisible.
+    // Now it must persist a terminal-failure row: error set (non-null,
+    // carrying the underlying message), completed_at set (via the same
+    // datetime('now') the success path uses), and messages_processed known
+    // at failure time (0 — nothing was fetched before the throw).
+    const insertCall = db._prepareFn.mock.calls.find(([sql]) =>
+      (sql as string).includes('INSERT INTO enrichment_runs'),
+    );
+    expect(insertCall?.[0]).toContain('error');
+    expect(insertCall?.[0]).toContain("datetime('now')");
+
+    expect(db._runFn).toHaveBeenCalledTimes(1);
+    const runArgs = db._runFn.mock.calls[0] as unknown[];
+    const errorArg = runArgs[runArgs.length - 1];
+    expect(typeof errorArg).toBe('string');
+    expect(errorArg).toContain('DB connection lost');
+    expect(runArgs).toContain(0); // messages_processed known at failure time
+
+    // A failed cycle must NOT advance lastRunAt — it stays frozen at its prior
+    // value (null here) rather than moving forward. getHealthSnapshot()
+    // (src/runtimes/chat/runtime.ts) derives `degraded` purely from lastRunAt
+    // staleness, and refreshing it on every failed cycle would mask a
+    // persistently failing poller as healthy forever.
+    expect(poller.lastRunAt).toBe(lastRunAtBeforeFailure);
+  });
+
+  it('persists a real enrichment_runs row with a non-null error when the fetch throws (real SQLite)', async () => {
+    // Same scenario as the mock-based test above, but against real SQLite —
+    // proves the failure row actually lands with the right column values,
+    // not just that the writer was invoked with the right-looking arguments.
+    const realDb = new Database(':memory:');
+    realDb.open();
+    try {
+      vi.mocked(getUnprocessedMessages).mockImplementation(() => {
+        throw new Error('DB connection lost');
+      });
+
+      const { poller } = makePoller(realDb as unknown as ReturnType<typeof makeMockDb>);
+      await triggerOneCycle(poller);
+
+      const rows = realDb.raw.prepare('SELECT * FROM enrichment_runs').all() as Array<{
+        error: string | null;
+        completed_at: string | null;
+        messages_processed: number;
+      }>;
+      expect(rows).toHaveLength(1);
+      expect(rows[0].error).toBe('DB connection lost');
+      expect(rows[0].completed_at).not.toBeNull();
+      expect(rows[0].messages_processed).toBe(0);
+      expect(poller.lastRunAt).toBeNull();
+    } finally {
+      realDb.close();
+    }
+  });
+
+  it('does NOT advance lastRunAt when a cycle throws — from null and from a prior successful value', async () => {
+    // getHealthSnapshot() (src/runtimes/chat/runtime.ts) computes `degraded`
+    // purely from staleness of lastRunAt. If a failing cycle refreshed it,
+    // a persistently failing poller would read healthy forever while error
+    // rows pile up in enrichment_runs. lastRunAt must only move forward on
+    // a cycle that actually completed (success path).
+    const { poller } = makePoller();
+
+    // From null: the very first cycle fails.
+    vi.mocked(getUnprocessedMessages).mockImplementation(() => {
+      throw new Error('DB connection lost');
+    });
+    expect(poller.lastRunAt).toBeNull();
+    await triggerOneCycle(poller);
+    expect(poller.lastRunAt).toBeNull();
+
+    // From a prior successful value: a later cycle succeeds, then fails.
+    vi.mocked(getUnprocessedMessages).mockReturnValue([makeStoredMsg({ pk: 401 })]);
+    vi.mocked(extractFacts).mockResolvedValue([]);
+    await triggerOneCycle(poller);
+    const lastRunAtAfterSuccess = poller.lastRunAt;
+    expect(lastRunAtAfterSuccess).not.toBeNull();
+
+    vi.mocked(getUnprocessedMessages).mockImplementation(() => {
+      throw new Error('DB connection lost again');
+    });
+    await triggerOneCycle(poller);
+    expect(poller.lastRunAt).toBe(lastRunAtAfterSuccess);
   });
 
   it('marks with error only after max retries (3), not before', async () => {

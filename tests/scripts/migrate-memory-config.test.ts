@@ -386,3 +386,46 @@ describe('migrate-memory-config rollback operator errors', () => {
     }
   });
 });
+
+describe('parseArgs — a flag must never be consumed as another flag\'s value', () => {
+  /**
+   * MEASURED ON origin/main BEFORE THE FIX. `argv[++i] ?? ''` accepts the next token
+   * unconditionally, so omitting a value silently ate the following FLAG:
+   *
+   *   parseArgs(['--root', '--write'])     -> { root: '--write', write: false }
+   *   parseArgs(['--config', '--write'])   -> { configs: ['--write'], write: false }
+   *   parseArgs(['--instance', '--json'])  -> { instances: ['--json'], json: false }
+   *
+   * Both halves are wrong at once, and this script MUTATES config files: the operator gets
+   * a garbage path AND the flag they typed is silently switched off. The empty case was
+   * already caught downstream ("--root must not be empty"); the flag-shaped case was not,
+   * because '--write' is a perfectly non-empty string.
+   */
+  it('THROWS instead of taking the next flag as the value of --root', () => {
+    expect(() => parseArgs(['--root', '--write'])).toThrow(/another flag/);
+  });
+
+  it('THROWS instead of taking the next flag as the value of --config', () => {
+    expect(() => parseArgs(['--config', '--write'])).toThrow(/another flag/);
+  });
+
+  it('THROWS instead of taking the next flag as the value of --instance', () => {
+    expect(() => parseArgs(['--instance', '--json'])).toThrow(/another flag/);
+  });
+
+  it('THROWS on a missing value rather than yielding an empty string', () => {
+    expect(() => parseArgs(['--root'])).toThrow(/requires a value/);
+  });
+
+  it('still parses ordinary values and flags correctly', () => {
+    const args = parseArgs(['--root', '/tmp/x', '--instance', 'q', '--write', '--json']);
+    expect(args.root).toBe('/tmp/x');
+    expect(args.instances).toEqual(['q']);
+    expect(args.write).toBe(true);
+    expect(args.json).toBe(true);
+  });
+
+  it('rejects an unknown flag rather than ignoring it silently', () => {
+    expect(() => parseArgs(['--wrte'])).toThrow(/Unknown argument/);
+  });
+});

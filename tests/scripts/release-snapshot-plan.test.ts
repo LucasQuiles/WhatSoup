@@ -1,5 +1,5 @@
 import { spawnSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -9,6 +9,7 @@ import {
   createReleaseSnapshotPlan,
   parseReleaseSnapshotManifest,
   run,
+  validateReleaseManifestFile,
 } from '../../scripts/release-snapshot-plan.ts';
 
 let tmpRoot = '';
@@ -398,5 +399,81 @@ describe('release snapshot planning', () => {
       '--release-root',
       path.join(tmpdir(), 'releases'),
     ])).toThrow(/cannot be combined with release planning flags: --release-root/);
+  });
+});
+
+describe('validateReleaseManifestFile error-kind split', () => {
+  // Pre-fix, the file-read (readFileSync) and JSON.parse(...) calls shared a
+  // single try/catch, so a read failure (permission denied, I/O error) was
+  // reported as kind='invalid-json' with a "not valid JSON" message -- the
+  // wrong diagnosis and the wrong remediation (re-exporting the release does
+  // nothing for a permissions problem). This suite pins the split: a genuine
+  // read failure gets its own 'unreadable' kind, and a merely-malformed but
+  // readable file still gets 'invalid-json'.
+  let manifestPath = '';
+
+  afterEach(() => {
+    if (manifestPath) {
+      try {
+        chmodSync(manifestPath, 0o644);
+      } catch {
+        // best-effort restore; the file lives under tmpRoot, which afterEach
+        // above removes regardless
+      }
+    }
+    manifestPath = '';
+  });
+
+  it('reports kind=unreadable when the manifest exists but cannot be read', () => {
+    tmpRoot = mkdtempSync(path.join(tmpdir(), 'whatsoup-manifest-validate-'));
+    manifestPath = path.join(tmpRoot, '.whatsoup-release-manifest.json');
+    writeFileSync(manifestPath, '{"schemaVersion":1}\n', 'utf8');
+    chmodSync(manifestPath, 0o000);
+
+    if (process.getuid && process.getuid() === 0) {
+      // root bypasses file-mode permission checks entirely -- chmod 000
+      // cannot produce a read failure to observe, so this environment
+      // cannot exercise the falsifier. Skip rather than report a false
+      // pass/fail that says nothing about the code under test.
+      return;
+    }
+
+    const report = validateReleaseManifestFile(manifestPath);
+
+    expect(report.ok).toBe(false);
+    expect(report.error?.kind).toBe('unreadable');
+    expect(report.error?.message).not.toContain('valid JSON');
+  });
+
+  it('still reports kind=invalid-json for a readable but malformed manifest', () => {
+    tmpRoot = mkdtempSync(path.join(tmpdir(), 'whatsoup-manifest-validate-'));
+    manifestPath = path.join(tmpRoot, '.whatsoup-release-manifest.json');
+    writeFileSync(manifestPath, '{not valid json', 'utf8');
+
+    const report = validateReleaseManifestFile(manifestPath);
+
+    expect(report.ok).toBe(false);
+    expect(report.error?.kind).toBe('invalid-json');
+  });
+
+  it('still reports kind=missing when the manifest does not exist', () => {
+    tmpRoot = mkdtempSync(path.join(tmpdir(), 'whatsoup-manifest-validate-'));
+    manifestPath = path.join(tmpRoot, '.whatsoup-release-manifest.json');
+
+    const report = validateReleaseManifestFile(manifestPath);
+
+    expect(report.ok).toBe(false);
+    expect(report.error?.kind).toBe('missing');
+  });
+
+  it('still reports kind=invalid-schema for valid JSON missing required fields', () => {
+    tmpRoot = mkdtempSync(path.join(tmpdir(), 'whatsoup-manifest-validate-'));
+    manifestPath = path.join(tmpRoot, '.whatsoup-release-manifest.json');
+    writeFileSync(manifestPath, '{"files":[]}\n', 'utf8');
+
+    const report = validateReleaseManifestFile(manifestPath);
+
+    expect(report.ok).toBe(false);
+    expect(report.error?.kind).toBe('invalid-schema');
   });
 });

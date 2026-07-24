@@ -134,10 +134,8 @@ describe('classifyInput', () => {
   });
 
   describe('edge cases', () => {
-    it('bare slash "/" returns forwarded (no command name)', () => {
-      // "/" → commandName is "" which is not a local command
-      const result = classifyInput('/');
-      expect(result.type).toBe('forwarded');
+    it.each(['/', '/ ', '/\t', '/\n'])('bare slash input %j opens the local help menu', (input) => {
+      expect(classifyInput(input)).toEqual({ type: 'local', command: 'help' });
     });
 
     it('command name is extracted from first whitespace-delimited token', () => {
@@ -154,7 +152,6 @@ describe('routing aliases (NL-first design, owner-approved PR-plan v2)', () => {
 
   it('flag OFF (default): /model stays forwarded — byte-identical to today', () => {
     expect(classifyInput('/model strongest')).toEqual({ type: 'forwarded', text: '/model strongest' });
-    expect(classifyInput('/why')).toEqual({ type: 'forwarded', text: '/why' });
     expect(classifyInput('/reset')).toEqual({ type: 'forwarded', text: '/reset' });
   });
 
@@ -170,8 +167,8 @@ describe('routing aliases (NL-first design, owner-approved PR-plan v2)', () => {
     expect(classifyInput('/model', NL)).toEqual({ type: 'local', command: 'model' });
   });
 
-  it('/why returns local command "why"', () => {
-    expect(classifyInput('/why', NL)).toEqual({ type: 'local', command: 'why' });
+  it('/why is removed: always forwards, even with routing aliases ON (D11)', () => {
+    expect(classifyInput('/why', NL)).toEqual({ type: 'forwarded', text: '/why' });
   });
 
   it('/reset returns local command "reset"', () => {
@@ -182,7 +179,7 @@ describe('routing aliases (NL-first design, owner-approved PR-plan v2)', () => {
     expect(classifyInput('/Model fastest', NL)).toEqual({ type: 'local', command: 'model', args: 'fastest' });
   });
 
-  it('/route stays forwarded even with routing aliases ON (not part of the 3-alias set)', () => {
+  it('/route stays forwarded even with routing aliases ON (not part of the alias set)', () => {
     expect(classifyInput('/route', NL)).toEqual({ type: 'forwarded', text: '/route' });
   });
 
@@ -215,9 +212,26 @@ describe('routing aliases — forwarded-capability fallthrough (F04)', () => {
     expect(classifyInput('/model strongest please', NL)).toEqual({ type: 'forwarded', text: '/model strongest please' });
   });
 
-  it('arged /why forwards; bare /why stays local', () => {
+  it('Slice 1: /model <vendor/model> is a local direct selector; slash-less and free-text stay forwarded (F04)', () => {
+    // The new local grammar — a slashed vendor/model id classifies local so
+    // the direct selector (model-pin.ts) can pin it in one step.
+    expect(classifyInput('/model opencode-cli/kimi-k3', NL)).toEqual({ type: 'local', command: 'model', args: 'opencode-cli/kimi-k3' });
+    expect(classifyInput('/model anthropic/claude-opus-4-8', NL)).toEqual({ type: 'local', command: 'model', args: 'anthropic/claude-opus-4-8' });
+    // Case is PRESERVED in args (model ids are case-sensitive) even though the
+    // command name is lowercased.
+    expect(classifyInput('/model Vendor/Model-X', NL)).toEqual({ type: 'local', command: 'model', args: 'Vendor/Model-X' });
+    // A slash-less token is NOT a vendor/model id — it stays on the
+    // provider-id/verb path or forwards, unchanged by Slice 1 (F04).
+    expect(classifyInput('/model gpt-4o', NL)).toEqual({ type: 'forwarded', text: '/model gpt-4o' });
+    // Free text (spaces) still forwards to the agent's own /model.
+    expect(classifyInput('/model the best kimi', NL)).toEqual({ type: 'forwarded', text: '/model the best kimi' });
+    // Flag OFF: even a vendor/model id forwards — byte-identical to today.
+    expect(classifyInput('/model opencode-cli/kimi-k3')).toEqual({ type: 'forwarded', text: '/model opencode-cli/kimi-k3' });
+  });
+
+  it('/why is removed: forwards whether bare or arged (D11)', () => {
     expect(classifyInput('/why because', NL)).toEqual({ type: 'forwarded', text: '/why because' });
-    expect(classifyInput('/why', NL)).toEqual({ type: 'local', command: 'why' });
+    expect(classifyInput('/why', NL)).toEqual({ type: 'forwarded', text: '/why' });
   });
 
   it('arged /reset forwards; bare /reset stays local', () => {
@@ -231,7 +245,6 @@ describe('routing aliases — trailing whitespace grammar (R10)', () => {
 
   it('a trailing space on a bare alias still classifies local (matches base /status )', () => {
     expect(classifyInput('/reset ', NL)).toEqual({ type: 'local', command: 'reset' });
-    expect(classifyInput('/why ', NL)).toEqual({ type: 'local', command: 'why' });
     expect(classifyInput('/model ', NL)).toEqual({ type: 'local', command: 'model' });
   });
 
@@ -244,8 +257,8 @@ describe('routing aliases — trailing whitespace grammar (R10)', () => {
     expect(classifyInput('/new ')).toEqual({ type: 'local', command: 'new' });
   });
 
-  it('a bare slash with only whitespace still forwards (no command name)', () => {
-    expect(classifyInput('/ ').type).toBe('forwarded');
+  it('routing-alias mode does not change the bare slash menu', () => {
+    expect(classifyInput('/ ', NL)).toEqual({ type: 'local', command: 'help' });
   });
 });
 
@@ -256,13 +269,13 @@ describe('classifier sets derive from COMMAND_REGISTRY (W1-T2)', () => {
     const derived = REGISTRY.filter((c) => !c.routingAlias).map((c) => c.name).sort();
     expect(derived).toEqual(['help', 'kill-session', 'new', 'sessions', 'status']);
   });
-  it('ROUTING_ALIAS_COMMANDS membership is unchanged', () => {
+  it('ROUTING_ALIAS_COMMANDS membership no longer includes why (D11)', () => {
     const derived = REGISTRY.filter((c) => c.routingAlias).map((c) => c.name).sort();
-    expect(derived).toEqual(['model', 'reset', 'why']);
+    expect(derived).toEqual(['model', 'reset']);
   });
-  it('ROUTING_MODEL_VERBS membership carries the B26 catalogue verb', () => {
+  it('ROUTING_MODEL_VERBS membership carries the B26 catalogue verb, no longer default (D12)', () => {
     const model = REGISTRY.find((c) => c.name === 'model');
-    expect(model?.subVerbs).toEqual(['status', 'list', 'default', 'strongest', 'fastest']);
+    expect(model?.subVerbs).toEqual(['status', 'list', 'strongest', 'fastest']);
   });
 });
 
@@ -274,15 +287,32 @@ describe('nlRouting flag matrix stays byte-identical (G7/D7)', () => {
     }
   });
   // FLAG ON: recognized grammar is claimed local; unrecognized still forwards (F04).
-  it('flag ON — bare aliases and recognized /model grammar are local', () => {
+  it('flag ON — bare aliases and recognized /model grammar are local; /why always forwards (D11)', () => {
     expect(classifyInput('/model', { routingAliases: true })).toEqual({ type: 'local', command: 'model' });
     expect(classifyInput('/model strongest', { routingAliases: true }))
       .toEqual({ type: 'local', command: 'model', args: 'strongest' });
-    expect(classifyInput('/why', { routingAliases: true })).toEqual({ type: 'local', command: 'why' });
+    expect(classifyInput('/why', { routingAliases: true })).toEqual({ type: 'forwarded', text: '/why' });
     expect(classifyInput('/reset', { routingAliases: true })).toEqual({ type: 'local', command: 'reset' });
   });
   it('flag ON — unrecognized /model 2nd token still forwards (F04 capability preservation)', () => {
     expect(classifyInput('/model sonnet --verbose', { routingAliases: true }))
       .toEqual({ type: 'forwarded', text: '/model sonnet --verbose' });
+  });
+});
+
+describe('structured /model grammar (C1 — agent-assisted design)', () => {
+  it('routes structured numbered forms local', () => {
+    expect(classifyInput('/model 2', { routingAliases: true })).toMatchObject({ type: 'local', command: 'model', args: '2' });
+    expect(classifyInput('/model 2b', { routingAliases: true }).type).toBe('local');
+    expect(classifyInput('/model 2 default', { routingAliases: true }).type).toBe('local');
+    expect(classifyInput('/model list openai', { routingAliases: true }).type).toBe('local');
+  });
+  it('FORWARDS free text to the agent (agent-assisted NL)', () => {
+    expect(classifyInput('/model the best kimi', { routingAliases: true }).type).toBe('forwarded');
+  });
+  it('keeps bare + verb + provider-id local; all forward when flag OFF', () => {
+    expect(classifyInput('/model', { routingAliases: true })).toMatchObject({ type: 'local', command: 'model' });
+    expect(classifyInput('/model strongest', { routingAliases: true })).toMatchObject({ type: 'local', command: 'model' });
+    expect(classifyInput('/model the best kimi').type).toBe('forwarded'); // flag off
   });
 });

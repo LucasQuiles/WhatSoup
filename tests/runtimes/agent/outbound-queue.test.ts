@@ -2853,6 +2853,143 @@ describe('OutboundQueue', () => {
   // abortTurn), not on flush() (called mid-turn by polls).
 
   describe('PR-E status-narration cap', () => {
+    it('caps status narration across logical turns inside one flood-detector window', async () => {
+      mockLog.warn.mockClear();
+      const { messenger, calls } = makeMessenger();
+      const queue = new OutboundQueue(messenger, CHAT_JID);
+      queue.setToolUpdateMode('friendly');
+      queue.setMaxStatusMessagesPerTurn(10);
+      queue.setStatusMessageWindow(3, 300_000);
+
+      for (let i = 0; i < 2; i++) {
+        queue.enqueueToolUpdate({ category: 'running', detail: `turn-1-${i}` });
+        await vi.advanceTimersByTimeAsync(TOOL_BATCH_DELAY_MS);
+      }
+      queue.endTurn();
+
+      for (let i = 0; i < 3; i++) {
+        queue.enqueueToolUpdate({ category: 'running', detail: `turn-2-${i}` });
+        await vi.advanceTimersByTimeAsync(TOOL_BATCH_DELAY_MS);
+      }
+      queue.enqueueResultText('FINAL REPORT');
+      await queue.flush();
+
+      const status = calls.filter((c) => c.includes('Working on') || c.startsWith('⚙️'));
+      expect(status).toHaveLength(3);
+      expect(calls.filter((c) => c === STATUS_CAP_NOTICE)).toHaveLength(1);
+      expect(calls).toContain('FINAL REPORT');
+      const guardLogs = mockLog.warn.mock.calls.filter((c) => c[1] === 'outbound flood-guard tripped');
+      expect(guardLogs).toHaveLength(1);
+      expect(guardLogs[0][0]).toMatchObject({
+        count: 3,
+        maxMessages: 3,
+        windowMs: 300_000,
+        outcome: 'status-suppressed',
+      });
+    });
+
+    it('inherits the cross-turn status window when a queue is replaced', async () => {
+      const first = makeMessenger();
+      const firstQueue = new OutboundQueue(first.messenger, CHAT_JID);
+      firstQueue.setToolUpdateMode('friendly');
+      firstQueue.setStatusMessageWindow(1, 300_000);
+      firstQueue.enqueueToolUpdate({ category: 'running', detail: 'before replacement' });
+      await vi.advanceTimersByTimeAsync(TOOL_BATCH_DELAY_MS);
+      firstQueue.endTurn();
+      await firstQueue.flush();
+
+      const second = makeMessenger();
+      const secondQueue = new OutboundQueue(second.messenger, CHAT_JID, {
+        conversationKey: toConversationKey(CHAT_JID),
+        senderToken: firstQueue.getSenderToken(),
+      });
+      secondQueue.setToolUpdateMode('friendly');
+      secondQueue.setStatusMessageWindow(1, 300_000);
+      secondQueue.enqueueToolUpdate({ category: 'running', detail: 'after replacement' });
+      await vi.advanceTimersByTimeAsync(TOOL_BATCH_DELAY_MS);
+      secondQueue.enqueueResultText('replacement final');
+      secondQueue.endTurn();
+      await vi.advanceTimersByTimeAsync(TEXT_AGGREGATE_DELAY_MS + MIN_SEND_GAP_MS * 4);
+      await secondQueue.flush();
+
+      expect(second.calls.filter((c) => c.includes('Working on') || c.startsWith('⚙️'))).toHaveLength(0);
+      expect(second.calls.filter((c) => c === STATUS_CAP_NOTICE)).toHaveLength(1);
+      expect(second.calls).toContain('replacement final');
+    });
+
+    it('does not share the status window with a genuinely fresh queue', async () => {
+      const first = makeMessenger();
+      const firstQueue = new OutboundQueue(first.messenger, CHAT_JID);
+      firstQueue.setToolUpdateMode('friendly');
+      firstQueue.setStatusMessageWindow(1, 300_000);
+      firstQueue.enqueueToolUpdate({ category: 'running', detail: 'first queue' });
+      await vi.advanceTimersByTimeAsync(TOOL_BATCH_DELAY_MS);
+      firstQueue.endTurn();
+
+      const second = makeMessenger();
+      const freshQueue = new OutboundQueue(second.messenger, CHAT_JID);
+      freshQueue.setToolUpdateMode('friendly');
+      freshQueue.setStatusMessageWindow(1, 300_000);
+      freshQueue.enqueueToolUpdate({ category: 'running', detail: 'fresh queue' });
+      await vi.advanceTimersByTimeAsync(TOOL_BATCH_DELAY_MS);
+      freshQueue.endTurn();
+
+      expect(first.calls.filter((c) => c.includes('Working on') || c.startsWith('⚙️'))).toHaveLength(1);
+      expect(second.calls.filter((c) => c.includes('Working on') || c.startsWith('⚙️'))).toHaveLength(1);
+      expect(second.calls).not.toContain(STATUS_CAP_NOTICE);
+    });
+
+    it('logs the cross-turn guard even when the per-turn notice already fired', async () => {
+      mockLog.warn.mockClear();
+      const { messenger } = makeMessenger();
+      const queue = new OutboundQueue(messenger, CHAT_JID);
+      queue.setToolUpdateMode('friendly');
+      queue.setMaxStatusMessagesPerTurn(1);
+      queue.setStatusMessageWindow(2, 300_000);
+
+      queue.enqueueToolUpdate({ category: 'running', detail: 'turn-1 status' });
+      await vi.advanceTimersByTimeAsync(TOOL_BATCH_DELAY_MS);
+      queue.enqueueToolUpdate({ category: 'running', detail: 'turn-1 capped' });
+      await vi.advanceTimersByTimeAsync(TOOL_BATCH_DELAY_MS);
+      queue.endTurn();
+
+      queue.enqueueToolUpdate({ category: 'running', detail: 'turn-2 status' });
+      await vi.advanceTimersByTimeAsync(TOOL_BATCH_DELAY_MS);
+      queue.endTurn();
+
+      queue.enqueueToolUpdate({ category: 'running', detail: 'cross-turn capped' });
+      await vi.advanceTimersByTimeAsync(TOOL_BATCH_DELAY_MS);
+      await queue.flush();
+
+      const guardLogs = mockLog.warn.mock.calls.filter((c) => c[1] === 'outbound flood-guard tripped');
+      expect(guardLogs).toHaveLength(1);
+    });
+
+    it('restores status narration after the cross-turn window expires', async () => {
+      const { messenger, calls } = makeMessenger();
+      const queue = new OutboundQueue(messenger, CHAT_JID);
+      queue.setToolUpdateMode('friendly');
+      queue.setStatusMessageWindow(1, 300_000);
+
+      queue.enqueueToolUpdate({ category: 'running', detail: 'first turn' });
+      await vi.advanceTimersByTimeAsync(TOOL_BATCH_DELAY_MS);
+      queue.endTurn();
+
+      queue.enqueueToolUpdate({ category: 'running', detail: 'suppressed turn' });
+      await vi.advanceTimersByTimeAsync(TOOL_BATCH_DELAY_MS);
+      queue.endTurn();
+
+      await vi.advanceTimersByTimeAsync(300_001);
+      queue.enqueueToolUpdate({ category: 'running', detail: 'after expiry' });
+      await vi.advanceTimersByTimeAsync(TOOL_BATCH_DELAY_MS);
+      queue.endTurn();
+      await queue.flush();
+
+      const status = calls.filter((c) => c.includes('Working on') || c.startsWith('⚙️'));
+      expect(status).toHaveLength(2);
+      expect(status[1]).toContain('after expiry');
+    });
+
     // Reproduces the 07-09 flood: a single turn emitting dozens of tool-status
     // batches. With the cap, at most MAX_STATUS_MESSAGES_PER_TURN status
     // messages reach the chat.
@@ -2860,6 +2997,7 @@ describe('OutboundQueue', () => {
       const { messenger, calls } = makeMessenger();
       const queue = new OutboundQueue(messenger, CHAT_JID);
       queue.setToolUpdateMode('friendly');
+      queue.setStatusMessageWindow(Number.MAX_SAFE_INTEGER, 300_000);
 
       for (let i = 0; i < 30; i++) {
         queue.enqueueToolUpdate({ category: 'running', detail: `step ${i}` });
@@ -2918,6 +3056,7 @@ describe('OutboundQueue', () => {
       const { messenger, calls } = makeMessenger();
       const queue = new OutboundQueue(messenger, CHAT_JID);
       queue.setToolUpdateMode('friendly');
+      queue.setStatusMessageWindow(Number.MAX_SAFE_INTEGER, 300_000);
 
       // Turn 1 blows past the cap.
       for (let i = 0; i < 15; i++) {

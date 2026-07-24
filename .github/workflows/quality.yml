@@ -2,6 +2,11 @@ name: Quality
 
 on:
   pull_request:
+  # `quality (24.x)` / `quality (25.x)` are REQUIRED contexts on main. A merge queue
+  # only advances once every required check reports on the merge_group ref, so without
+  # this trigger an enabled queue would stall every PR indefinitely waiting for a run
+  # that never starts. Wire the trigger BEFORE enabling the queue, never after.
+  merge_group:
   push:
     branches:
       - main
@@ -9,9 +14,12 @@ on:
 # Cancel superseded runs for the same ref. A new push/PR-sync supersedes the
 # in-flight run instead of leaving it orphaned at "pending 0s" for hours (the
 # close+reopen-to-retrigger workaround) and frees a runner slot immediately.
+# merge_group is deliberately EXEMPT: cancelling an in-flight merge-queue run
+# reports a failed/cancelled required check and ejects the PR from the queue, so
+# queue runs must always finish (same reasoning as tag-release-gate.yml).
 concurrency:
   group: quality-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name != 'merge_group' }}
 
 permissions:
   contents: read
@@ -115,6 +123,20 @@ jobs:
       - name: Import boundary guard
         run: npm run guard:boundaries
 
+      - name: Durability writer invariant guard
+        run: npm run guard:durability-writer
+
+      # Backs the three block-severity transport hygiene rules
+      # (hygiene.no-wa-jid-literal-in-generic-ui, hygiene.no-whatsapp-copy-in-generic-ui,
+      # hygiene.no-health-whatsapp-key-read). Until this step existed they were enforced
+      # ONLY by the local pre-push hook: absent from verify:release and from every
+      # workflow, so a PR merged through the GitHub UI, `gh pr merge`, `--no-verify`, or a
+      # clone without the hook installed could ship a new violation with nothing catching
+      # it. The guard ratchets against .claude/fitness/transport-patterns-baseline.json --
+      # exit 1 only on NEW violations, so existing baselined debt does not block.
+      - name: Transport pattern guard
+        run: npm run guard:transport-patterns
+
       - name: Repo hygiene staged smoke
         run: npm run guard:repo:staged
 
@@ -167,6 +189,49 @@ jobs:
           msg="$(mktemp)"
           printf 'chore(ci): guard smoke\n' > "$msg"
           npm run guard:repo:commit-msg -- "$msg"
+
+      # Runs the drift classifier CLI end-to-end against the real tree. Fails ONLY on
+      # INCONCLUSIVE — an unrecognised path — never on the drift verdict itself, which is
+      # legitimately a "stop" much of the time and would be pure noise as a gate. An
+      # unclassified surface means every future verdict touching it silently degrades to
+      # "I do not know", which is the failure worth catching at PR time.
+      - name: Drift classifier coverage
+        run: npm run guard:drift-coverage
+
+      # A committed baseline enumerates tolerated debt, and every other baseline guard
+      # compares CURRENT CODE against it — nothing checked the baseline itself, so
+      # "add a violation, re-run --update, commit" was green everywhere. This refuses any
+      # increase in a baseline's tolerated-debt weight against the merge base.
+      #
+      # It must be a NAMED CI STEP, not local-only: a guard wired solely into
+      # verify:push:branch is bypassed by any server-side merge, which is exactly what
+      # tests/scripts/pre-push-guard.test.ts caught when this shipped push-gate-only.
+      - name: Baseline growth guard
+        run: npm run guard:baseline-growth
+
+      # `guard:boundaries` checks import DIRECTION; nothing checked for CYCLES. Ships with
+      # an EMPTY baseline because src/ measured 433 modules / 1176 runtime edges / 0 cycles
+      # — so any cycle reported here is new. Type-only imports are excluded: TypeScript
+      # erases them, and counting them is what made an earlier regex prototype report three
+      # cycles that do not exist.
+      #
+      # Named CI step, not push-gate-only: tests/scripts/pre-push-guard.test.ts requires
+      # parity, because a local-only guard is bypassed by any server-side merge.
+      - name: Import cycle guard
+        run: npm run guard:import-cycle
+
+      # A package imported but never declared resolves only because something else hoisted
+      # it into node_modules — it works here and breaks on a clean install. Ships with an
+      # EMPTY baseline: measured 1972 tracked files / 9818 import sites / 0 phantoms.
+      # Declarations resolve PER FILE up the package.json chain, because tools/whatsoup_guard
+      # legitimately declares packages the root does not.
+      #
+      # Named CI step, not push-gate-only: tests/scripts/pre-push-guard.test.ts requires
+      # parity for guard:* scripts, since a local-only guard is bypassed by a server-side merge.
+      - name: Phantom dependency guard
+        run: npm run guard:phantom-deps
+
+
 
       - name: Documentation drift guard
         run: npm run guard:doc-drift
@@ -223,6 +288,12 @@ jobs:
 
       - name: Insecure tempfile guard
         run: npm run guard:insecure-tempfile
+
+      - name: No destructive git guard
+        run: npm run guard:no-destructive-git
+
+      - name: Grant resolver inventory guard
+        run: npm run guard:grant-resolver
 
       - name: Agent decision polls guard
         run: npm run guard:agent-decision-polls

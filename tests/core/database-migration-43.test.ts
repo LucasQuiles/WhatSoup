@@ -41,7 +41,7 @@ describe('migration 43 operator catch-up echo-recovery proof', () => {
   afterEach(() => db.close());
 
   it('installs schema 42 with shared admission proof and persisted witness enforcement', () => {
-    expect(CURRENT_SCHEMA_MIGRATION).toBe(44);
+    expect(CURRENT_SCHEMA_MIGRATION).toBe(45);
     expect(db.raw.prepare(`
       SELECT name FROM sqlite_master
       WHERE type = 'view' AND name = 'operator_catchup_delivery_proofs'
@@ -119,6 +119,43 @@ describe('migration 43 operator catch-up echo-recovery proof', () => {
       catchupSeq: fixture.targetSeq,
       actor: 'operator:test',
       evidenceRef: 'test://echo-recovery',
+    });
+
+    expect(receipt).toMatchObject({
+      evidenceBasis: 'selected_echoed_recovery',
+      terminalRecordId: fixture.terminalRecordId,
+      selectedOpId: fixture.selectedOpId,
+      recoveryJobId: fixture.recoveryJobId,
+      completionProofId: `outbound-op:${fixture.selectedOpId}`,
+      inserted: 1,
+      openAfter: 0,
+    });
+    expect(db.raw.prepare(`
+      SELECT delivery_kind FROM turn_terminal_records WHERE id = ?
+    `).get(fixture.terminalRecordId)).toEqual({ delivery_kind: 'flushed' });
+  });
+
+  it('keeps the primary echo-recovery proof valid across a SQLite clock boundary', () => {
+    let directNowCalls = 0;
+    db.raw.function('datetime', { varargs: true }, (...args) => {
+      if (args.length === 1 && args[0] === 'now') {
+        directNowCalls += 1;
+        return `2099-01-01 00:00:${String(directNowCalls).padStart(2, '0')}`;
+      }
+      if (args.length === 2 && args[0] === 'now' && args[1] === '+5 minutes') {
+        return '2099-01-01 00:05:00';
+      }
+      throw new Error(`Unexpected datetime() arguments: ${JSON.stringify(args)}`);
+    });
+
+    const fixture = installEchoTransferFixture();
+    const receipt = closeOperatorCatchupRecovery(db, {
+      planId: fixture.planId,
+      conversationKey: fixture.conversationKey,
+      expectedSourceSeqs: [fixture.sourceSeq],
+      catchupSeq: fixture.targetSeq,
+      actor: 'operator:test',
+      evidenceRef: 'test://clock-boundary',
     });
 
     expect(receipt).toMatchObject({
@@ -637,6 +674,20 @@ describe('migration 43 operator catch-up echo-recovery proof', () => {
     const sourceMessageId = `catchup-target-${Math.random()}`;
     const ownerLogicalTurnId = 'catchup-owner-turn';
     const ownerManagerId = 'catchup-owner-manager';
+    const timeline = {
+      sourceReceivedAt: '2026-07-13 05:21:08',
+      sourceCompletedAt: '2026-07-13 05:21:09',
+      targetReceivedAt: '2026-07-13 05:25:10',
+      selectedCreatedAt: '2026-07-13 05:25:11',
+      selectedSubmittedAt: '2026-07-13 05:25:12',
+      terminalCreatedAt: '2026-07-13 05:25:13',
+      recoveryCreatedAt: '2026-07-13 05:25:14',
+      recoveryClaimedAt: '2026-07-13 05:25:15',
+      selectedEchoedAt: '2026-07-13 05:25:16',
+      targetCompletedAt: '2026-07-13 05:25:17',
+      recoveryCompletedAt: '2026-07-13 05:25:18',
+      recoveryClaimExpiresAt: '2026-07-13 05:30:15',
+    } as const;
 
     db.raw.prepare(`
       INSERT INTO recovery_plans (plan_id, origin, actor, summary)
@@ -645,9 +696,15 @@ describe('migration 43 operator catch-up echo-recovery proof', () => {
     const sourceSeq = Number(db.raw.prepare(`
       INSERT INTO inbound_events (
         message_id, conversation_key, chat_jid, processing_status,
-        completed_at, terminal_reason, failure_class
-      ) VALUES (?, ?, ?, 'failed', datetime('now'), 'error', 'crash_recovery')
-    `).run(`catchup-source-${Math.random()}`, conversationKey, chatJid).lastInsertRowid);
+        received_at, completed_at, terminal_reason, failure_class
+      ) VALUES (?, ?, ?, 'failed', ?, ?, 'error', 'crash_recovery')
+    `).run(
+      `catchup-source-${Math.random()}`,
+      conversationKey,
+      chatJid,
+      timeline.sourceReceivedAt,
+      timeline.sourceCompletedAt,
+    ).lastInsertRowid);
     db.raw.prepare(`
       INSERT INTO inbound_disposition_links (
         inbound_seq, recovery_plan_id, disposition, superseded_by_seq,
@@ -659,9 +716,15 @@ describe('migration 43 operator catch-up echo-recovery proof', () => {
     const targetSeq = Number(db.raw.prepare(`
       INSERT INTO inbound_events (
         message_id, conversation_key, chat_jid, processing_status,
-        completed_at, terminal_reason
-      ) VALUES (?, ?, ?, 'complete', datetime('now'), 'response_echoed')
-    `).run(sourceMessageId, conversationKey, chatJid).lastInsertRowid);
+        received_at, completed_at, terminal_reason
+      ) VALUES (?, ?, ?, 'complete', ?, ?, 'response_echoed')
+    `).run(
+      sourceMessageId,
+      conversationKey,
+      chatJid,
+      timeline.targetReceivedAt,
+      timeline.targetCompletedAt,
+    ).lastInsertRowid);
     const proofSourceMessageId = options.useDifferentProofSource
       ? `different-proof-source-${Math.random()}`
       : sourceMessageId;
@@ -669,22 +732,24 @@ describe('migration 43 operator catch-up echo-recovery proof', () => {
       ? Number(db.raw.prepare(`
           INSERT INTO inbound_events (
             message_id, conversation_key, chat_jid, processing_status,
-            completed_at, terminal_reason
-          ) VALUES (?, ?, ?, 'complete', datetime('now'), 'response_echoed')
+            received_at, completed_at, terminal_reason
+          ) VALUES (?, ?, ?, 'complete', ?, ?, 'response_echoed')
         `).run(
           proofSourceMessageId,
           proofConversationKey,
           proofChatJid,
+          timeline.targetReceivedAt,
+          timeline.targetCompletedAt,
         ).lastInsertRowid)
       : targetSeq;
     const selectedOpId = Number(db.raw.prepare(`
       INSERT INTO outbound_ops (
         conversation_key, chat_jid, op_type, payload, status,
-        source_inbound_seq, is_terminal, replay_policy, submitted_at,
-        echoed_at, wa_message_id
+        source_inbound_seq, is_terminal, replay_policy, created_at,
+        submitted_at, echoed_at, wa_message_id
       ) VALUES (?, ?, 'text', '{"text":"ACK"}', ?, ?, ?, 'unsafe',
-                datetime('now'),
-                CASE WHEN ? = 'echoed' THEN datetime('now') ELSE NULL END,
+                ?, ?,
+                CASE WHEN ? = 'echoed' THEN ? ELSE NULL END,
                 'wa-migration-42-proof')
     `).run(
       proofConversationKey,
@@ -692,7 +757,10 @@ describe('migration 43 operator catch-up echo-recovery proof', () => {
       'submitted',
       proofSourceSeq,
       options.selectedIsTerminal ?? 1,
+      timeline.selectedCreatedAt,
+      timeline.selectedSubmittedAt,
       'submitted',
+      timeline.selectedEchoedAt,
     ).lastInsertRowid);
     const terminalRecordId = Number(db.raw.prepare(`
       INSERT INTO turn_terminal_records (
@@ -700,9 +768,9 @@ describe('migration 43 operator catch-up echo-recovery proof', () => {
         logical_turn_id, manager_id, generation, attempt_kind,
         inbound_disposition, delivery_kind, delivery_op_id,
         recovery_owner_logical_turn_id, recovery_owner_manager_id,
-        recovery_owner_generation, reply_guarantee_disarmed
+        recovery_owner_generation, reply_guarantee_disarmed, created_at
       ) VALUES ('per_chat', ?, ?, ?, ?, ?, ?, 1, 'replied',
-                'transferred_to_recovery_owner', 'flushed', ?, ?, ?, 1, 0)
+                'transferred_to_recovery_owner', 'flushed', ?, ?, ?, 1, 0, ?)
     `).run(
       proofConversationKey,
       proofChatJid,
@@ -713,15 +781,16 @@ describe('migration 43 operator catch-up echo-recovery proof', () => {
       selectedOpId,
       ownerLogicalTurnId,
       ownerManagerId,
+      timeline.terminalCreatedAt,
     ).lastInsertRowid);
 
     const selectedStatus = options.selectedStatus ?? 'echoed';
     db.raw.prepare(`
       UPDATE outbound_ops
       SET status = ?,
-          echoed_at = CASE WHEN ? = 'echoed' THEN datetime('now') ELSE NULL END
+          echoed_at = CASE WHEN ? = 'echoed' THEN ? ELSE NULL END
       WHERE id = ?
-    `).run(selectedStatus, selectedStatus, selectedOpId);
+    `).run(selectedStatus, selectedStatus, timeline.selectedEchoedAt, selectedOpId);
 
     const completionKind = options.completionKind ?? 'echo';
     const completionProofId = options.completionProofId
@@ -735,9 +804,9 @@ describe('migration 43 operator catch-up echo-recovery proof', () => {
             owner_logical_turn_id, owner_manager_id, owner_generation,
             assigned_owner_logical_turn_id, assigned_owner_manager_id,
             assigned_owner_generation, replay_safe, sender_jid, replay_text,
-            is_group, group_name, state
+            is_group, group_name, state, created_at
           ) VALUES (?, 'per_chat', ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, 1, ?, ?, 1,
-                    1, 'sender@test', 'catch-up', 1, 'DGX SPARK', 'pending')
+                    1, 'sender@test', 'catch-up', 1, 'DGX SPARK', 'pending', ?)
         `).run(
           terminalRecordId,
           proofConversationKey,
@@ -751,6 +820,7 @@ describe('migration 43 operator catch-up echo-recovery proof', () => {
           ownerManagerId,
           ownerLogicalTurnId,
           ownerManagerId,
+          timeline.recoveryCreatedAt,
         )
       : db.raw.prepare(`
       INSERT INTO turn_recovery_jobs (
@@ -762,11 +832,10 @@ describe('migration 43 operator catch-up echo-recovery proof', () => {
         assigned_owner_generation, replay_safe, sender_jid, replay_text,
         is_group, group_name, state, attempt_count, claim_epoch, claim_token,
         claim_expires_at, claimed_at, completed_at, completion_kind,
-        completion_proof_id
+        completion_proof_id, created_at
       ) VALUES (?, 'per_chat', ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, 1, ?, ?, 1,
                 1, 'sender@test', 'catch-up', 1, 'DGX SPARK', 'completed',
-                1, 1, ?, datetime('now', '+5 minutes'),
-                datetime('now'), datetime('now'), ?, ?)
+                1, 1, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       terminalRecordId,
       proofConversationKey,
@@ -781,8 +850,12 @@ describe('migration 43 operator catch-up echo-recovery proof', () => {
       ownerLogicalTurnId,
       ownerManagerId,
       `echo-delivery:${selectedOpId}`,
+      timeline.recoveryClaimExpiresAt,
+      timeline.recoveryClaimedAt,
+      timeline.recoveryCompletedAt,
       completionKind,
       completionProofId,
+      timeline.recoveryCreatedAt,
     )).lastInsertRowid);
     return {
       planId,

@@ -75,16 +75,9 @@ const fixtureFiles = new Set([
 // subtree as fixtures for these hygiene SHAPE patterns; the suite's own corpus_guard /
 // sensitive_pattern_loader covers its corpus. NOTE: no external secret scanner backstops this
 // repo (the repo hooksPath shadows the global git hooks) - keep exemptions minimal.
-//
-// The iMessage transport test subtree (tests/transport/imessage/) is exempted from
-// the email-shape guards because iMessage's identity model is fundamentally email-based
-// (AppleID). Every test that exercises send/receive/react paths necessarily constructs
-// email-shaped recipient fixtures; there is no phone-only form. Other guards (secrets,
-// paths, phones) stay fully enforced.
 const isFixtureFile = (filePath: string): boolean =>
   fixtureFiles.has(filePath)
-  || filePath.startsWith('tools/agent-runtime-probes/')
-  || filePath.startsWith('tests/transport/imessage/');
+  || filePath.startsWith('tools/agent-runtime-probes/');
 
 // Files that necessarily contain the operational allowlist's own private-SHAPED
 // literals: the shared allowlist source in lib, and the publication-guard test
@@ -1093,6 +1086,20 @@ export function run(argv: string[] = process.argv.slice(2), cwd: string = proces
       console.log(`repo hygiene history scan (advisory): no secret shapes in last ${depth} commits`);
     }
     return historyIssues;
+  }
+
+  // Non-vacuity floor for the release-hygiene mode, which is whole-tree (git ls-files
+  // intersected with a fixed list) rather than diff-scoped. Zero tracked matches means the
+  // scope resolved to an empty/wrong tree, and "0 issues over 0 files" must not read as a pass.
+  // Gated on mode: staged/branch-diff scan a diff, where an empty set is legitimately nothing.
+  if (args.mode === 'release-hygiene' && trackedFiles(cwd, releaseHygieneFiles).length === 0) {
+    console.error(
+      `repo hygiene guard: INCONCLUSIVE — none of the ${releaseHygieneFiles.length} release-hygiene ` +
+        `file(s) are tracked under ${cwd}. A release-hygiene scan over an empty tree certifies ` +
+        'nothing, which is not a pass.',
+    );
+    process.exitCode = 2;
+    return [];
   }
 
   const issues = args.mode === 'commit-msg'

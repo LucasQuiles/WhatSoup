@@ -32,7 +32,7 @@ import {
   inspectDatabasePathBeforeCreate,
 } from '../../src/core/database-compatibility.ts';
 import {
-  databaseCompatibilityStartupExitCode,
+  startupExitCode,
   inspectExistingDatabaseForBootstrap,
   runEarlyDatabaseCompatibilityGate,
 } from '../../src/core/database-compatibility-early.ts';
@@ -231,7 +231,7 @@ describe('database schema ceiling', () => {
       }).catch((err: unknown) => err);
 
       expect(failure).toBe(source);
-      expect(databaseCompatibilityStartupExitCode(failure)).toBe(1);
+      expect(startupExitCode(failure)).toBe(1);
       expect(startServer).not.toHaveBeenCalled();
       expect(releaseLock).toHaveBeenCalledOnce();
     } finally {
@@ -1117,7 +1117,7 @@ describe('database schema ceiling', () => {
         name: 'DatabaseCompatibilityPermanentStartupError',
         cause: expect.objectContaining({ reason: 'invalid_schema' }),
       });
-      expect(databaseCompatibilityStartupExitCode(failure)).toBe(78);
+      expect(startupExitCode(failure)).toBe(78);
       expect(startServer).not.toHaveBeenCalled();
     } finally {
       if (previousConfig === undefined) delete process.env.INSTANCE_CONFIG;

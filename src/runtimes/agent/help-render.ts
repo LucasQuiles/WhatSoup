@@ -46,8 +46,26 @@ function findSpec(name: string): CommandSpec | undefined {
   return REGISTRY.find((c) => c.name === name);
 }
 
-function toListLine(c: CommandSpec): string {
-  return `*/${c.name}* — ${c.summary}${GATE_PRESENTATION[c.gate].listTag}`;
+/**
+ * D15: strongest/fastest are a no-op when the instance has no nlRoutingTiers
+ * configured — advertising them in /help is worse than omitting them (same
+ * rule renderModelCatalogue applies to the /model list render). Scoped to the
+ * 'model' command's own summary/syntax text ONLY; every other command's copy
+ * is untouched. Caller supplies `tiersConfigured` (a config read, kept OUT of
+ * this pure-render module — R3c-1.3).
+ */
+function hideTierVerbsIfUnconfigured(text: string, commandName: string, tiersConfigured: boolean): string {
+  if (commandName !== 'model' || tiersConfigured) return text;
+  // Both the summary ("pin strongest|fastest|provider-id") and the syntax
+  // ("[status|list|strongest|fastest|provider-id]") carry this exact
+  // substring, trailing pipe included — stripping it collapses cleanly to
+  // "pin provider-id" / "[status|list|provider-id]".
+  return text.replace('strongest|fastest|', '');
+}
+
+function toListLine(c: CommandSpec, tiersConfigured: boolean): string {
+  const summary = hideTierVerbsIfUnconfigured(c.summary, c.name, tiersConfigured);
+  return `*/${c.name}* — ${summary}${GATE_PRESENTATION[c.gate].listTag}`;
 }
 
 /**
@@ -57,14 +75,16 @@ function toListLine(c: CommandSpec): string {
  * one bold-name line per command, tagged with its gate value's list tag
  * (GATE_PRESENTATION — scope-accurate per value, G34; a separate axis from
  * the section, composed independently, D4).
- * Routing-alias commands (/model /why /reset) only appear when `nlRouting`
+ * Routing-alias commands (/model /reset — D11 dropped /why) only appear when `nlRouting`
  * is on (byte-identical-off contract, D7). No placeholder/syntax in the list
- * — see module header.
+ * — see module header. D15: `tiersConfigured` (default true — preserves
+ * existing behavior for every caller that doesn't pass it) hides the
+ * strongest/fastest verbs from the /model line when false.
  */
-export function renderHelp({ nlRouting }: { nlRouting: boolean }): string {
+export function renderHelp({ nlRouting, tiersConfigured = true }: { nlRouting: boolean; tiersConfigured?: boolean }): string {
   const visible = REGISTRY.filter((c) => !c.routingAlias || nlRouting);
-  const endUserLines = visible.filter((c) => c.visibility === 'end-user').map(toListLine);
-  const operatorLines = visible.filter((c) => c.visibility === 'operator').map(toListLine);
+  const endUserLines = visible.filter((c) => c.visibility === 'end-user').map((c) => toListLine(c, tiersConfigured));
+  const operatorLines = visible.filter((c) => c.visibility === 'operator').map((c) => toListLine(c, tiersConfigured));
 
   const sections = [...endUserLines];
   if (operatorLines.length > 0) {
@@ -102,7 +122,7 @@ export function renderHelp({ nlRouting }: { nlRouting: boolean }): string {
  * first whitespace token, backticks removed, leading '/' stripped, lowercased
  * — so '/help Status', '/help /new', '/help kill-session 1' all resolve.
  * Takes the same `nlRouting` input renderHelp does: routing-alias commands
- * (/model /why /reset) are LOCAL only when the flag is on (byte-identical-off
+ * (/model /reset — D11 dropped /why) are LOCAL only when the flag is on (byte-identical-off
  * contract, D7) — flag off they forward, so their local semantics must not
  * render; they get an honest pass-through note instead (B23 — the command
  * DOES forward, so calling it "Unknown" was a lie). Genuinely-unknown
@@ -110,7 +130,10 @@ export function renderHelp({ nlRouting }: { nlRouting: boolean }): string {
  * UX; contrast with command-registry.ts's getCommandSpec, which fails closed
  * for internal drift-detection callers).
  */
-export function renderHelpDetail(name: string, { nlRouting }: { nlRouting: boolean }): string {
+export function renderHelpDetail(
+  name: string,
+  { nlRouting, tiersConfigured = true }: { nlRouting: boolean; tiersConfigured?: boolean },
+): string {
   // Backtick removal doubles as the E1-class echo guard: the normalized token
   // is what gets interpolated inside the unknown-echo's `…` span below, and a
   // backtick there would break the span pairing.
@@ -130,5 +153,7 @@ export function renderHelpDetail(name: string, { nlRouting }: { nlRouting: boole
   if (!spec) {
     return `Unknown command \`/${query}\`. Not a command — try \`/help\` for the full list.`;
   }
-  return `\`${spec.syntax}\`\n${spec.summary}${GATE_PRESENTATION[spec.gate].detailNote}`;
+  const syntax = hideTierVerbsIfUnconfigured(spec.syntax, spec.name, tiersConfigured);
+  const summary = hideTierVerbsIfUnconfigured(spec.summary, spec.name, tiersConfigured);
+  return `\`${syntax}\`\n${summary}${GATE_PRESENTATION[spec.gate].detailNote}`;
 }

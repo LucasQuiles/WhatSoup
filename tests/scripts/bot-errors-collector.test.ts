@@ -29,6 +29,67 @@ exit 255
   return script;
 }
 
+function writeMalformedOutputFakeSsh(root: string): string {
+  // Simulates an SSH session that completes successfully (rc=0) but whose
+  // remote python emitted a line that is not valid JSON — a protocol/encoding
+  // failure distinct from SSH/transport unreachability (writeFakeSsh's rc=255
+  // path). Used to prove DUR-03 classifies the two differently.
+  const script = join(root, 'fake-ssh-malformed.sh');
+  writeFileSync(
+    script,
+    `#!/bin/sh
+echo "not-json-output-from-remote"
+exit 0
+`,
+    { mode: 0o700 },
+  );
+  chmodSync(script, 0o700);
+  return script;
+}
+
+function writeFakeSshWithSecretStderr(root: string): string {
+  // Same shape as writeFakeSsh but the failure stderr carries a credential-
+  // shaped token, so the retained failure detail can be asserted redacted.
+  const script = join(root, 'fake-ssh-secret-stderr.sh');
+  writeFileSync(
+    script,
+    `#!/bin/sh
+if [ "$FAKE_SSH_MODE" = "success" ]; then
+  exit 0
+fi
+echo "Authorization: Bearer sk_live_ABCDEF1234567890abcdef" >&2
+exit 255
+`,
+    { mode: 0o700 },
+  );
+  chmodSync(script, 0o700);
+  return script;
+}
+
+function runUpdateFailureRetention(errorText: string, exceptionKind: 'runtime' | 'json_decode') {
+  const excExpr =
+    exceptionKind === 'json_decode'
+      ? `json.JSONDecodeError("Expecting value", "bad", 0)`
+      : `RuntimeError(${JSON.stringify(errorText)})`;
+  return spawnSync(
+    'python3',
+    [
+      '-c',
+      `
+import importlib.util, json
+spec = importlib.util.spec_from_file_location("bot_errors_collector", "deploy/scripts/bot-errors-collector.py")
+m = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(m)
+record = {}
+exc = ${excExpr}
+m.update_failure_retention(record, exc, ${JSON.stringify(errorText)})
+print(json.dumps(record))
+`,
+    ],
+    { cwd: process.cwd(), encoding: 'utf8' },
+  );
+}
+
 function writeExecFakeSsh(root: string): string {
   const script = join(root, 'fake-ssh-exec.sh');
   writeFileSync(
@@ -117,6 +178,25 @@ function outboxEvents() {
     .filter((file) => file.endsWith('.json'))
     .sort()
     .map((file) => JSON.parse(readFileSync(join(outbox, file), 'utf8')) as Record<string, unknown>);
+}
+
+// Groups outboxEvents() by `source`, each bucket in filename-sort order.
+// NOT a reliable global emission-order proxy across DIFFERENT sources: two
+// events from different sources sharing the same createdAt second sort by
+// the source-name filename segment (an unrelated existing ordering property
+// of local_outbox_path/enqueue_meta_alert/enqueue_meta_recovery, not
+// something HD-11b's collector_remote_unreachable emitter controls), so
+// "collector_remote_unreachable" can sort before "remote-claim-failed" even
+// when it was written second. WITHIN one source, ordering is faithful
+// (each source's own id/filename scheme is internally monotonic), so assert
+// per-source sequences, not one flat cross-source list.
+function eventsBySource(): Record<string, Record<string, unknown>[]> {
+  const bySource: Record<string, Record<string, unknown>[]> = {};
+  for (const event of outboxEvents()) {
+    const source = String(event.source ?? '_unknown');
+    (bySource[source] ??= []).push(event);
+  }
+  return bySource;
 }
 
 function writePrivateJson(path: string, value: unknown) {
@@ -405,11 +485,21 @@ describe('bot-errors-collector', () => {
     expect(logText).not.toContain('"type": "remote_writefail_claim_failed"');
   });
 
-  it('keeps one open remote-claim incident and emits recovery on the next success', () => {
+  it('escalation ladder: remote-claim-failed supersedes to collector_remote_unreachable at threshold, recovery clears the open tier', () => {
+    // Rewritten for HD-11b battery 4 (boterr-lead ruling): collector_remote_unreachable
+    // (BOT_ERRORS_COLLECTOR_FAILURE_ESCALATE_THRESHOLD, default 2, not set here)
+    // now SUPERSEDES the generic remote-claim-failed meta-alert once crossed,
+    // instead of coexisting alongside it -- exactly one open collector
+    // incident per remote at a time, transitioning tier 1 -> tier 2 at the
+    // threshold. The raw outbox event COUNT legitimately grows (a genuinely
+    // new typed source fires), so this asserts the event SEQUENCE and
+    // incident-bookkeeping state, not a bare length.
     tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-collector-'));
     mkdirSync(join(tmpRoot, 'outbox'), { recursive: true, mode: 0o700 });
     const fakeSsh = writeFakeSsh(tmpRoot);
 
+    // Failure 1: tier 1 (remote-claim-failed) opens -- below the escalation
+    // threshold, unchanged from before.
     const firstFailure = runCollector(fakeSsh, 'fail');
     expect(firstFailure.status).toBe(1);
     expect(outboxEvents()).toHaveLength(1);
@@ -421,32 +511,81 @@ describe('bot-errors-collector', () => {
       summary: 'BOT ERRORS collector cannot claim remote outbox: mini5',
     });
 
+    // Failure 2: crosses the escalation threshold. Tier 1 is ACTIVELY closed
+    // (a real typed clear, not left dangling open at the dispatcher) and
+    // tier 2 opens in the same cycle -- the clean transition this test now
+    // exists to prove. Asserted per-source (see eventsBySource's docstring):
+    // remote-claim-failed's OWN sequence is [alert, clear], and
+    // collector_remote_unreachable's OWN sequence is [alert] -- exactly one
+    // OPEN incident (collector_remote_unreachable) at this point, not two.
     const secondFailure = runCollector(fakeSsh, 'fail');
     expect(secondFailure.status).toBe(1);
-    expect(outboxEvents()).toHaveLength(1);
-    expect(readFileSync(join(tmpRoot, 'logs', 'collector.jsonl'), 'utf8')).toContain('meta_alert_suppressed_open');
-
-    const recovery = runCollector(fakeSsh, 'success');
-    expect(recovery.status).toBe(0);
-    const events = outboxEvents();
-    expect(events).toHaveLength(2);
-    expect(events[1]).toMatchObject({
+    const bySourceAfterSecondFailure = eventsBySource();
+    expect(bySourceAfterSecondFailure['remote-claim-failed']?.map((event) => event.eventType)).toEqual([
+      'alert',
+      'clear',
+    ]);
+    expect(bySourceAfterSecondFailure['collector_remote_unreachable']?.map((event) => event.eventType)).toEqual([
+      'alert',
+    ]);
+    expect(bySourceAfterSecondFailure['remote-claim-failed']?.[1]).toMatchObject({
       eventType: 'clear',
       severity: 'info',
       instance: 'bot-errors-collector',
       source: 'remote-claim-failed',
-      summary: 'BOT ERRORS collector remote recovered: mini5',
     });
-    expect(String(events[1]?.evidence)).toContain('suppressed_duplicates=1');
+    expect(bySourceAfterSecondFailure['collector_remote_unreachable']?.[0]).toMatchObject({
+      eventType: 'alert',
+      severity: 'warning',
+      instance: 'bot-errors-collector',
+      source: 'collector_remote_unreachable',
+      summary: 'BOT ERRORS collector cannot capture remote outbox: mini5',
+    });
+    // enqueue_meta_recovery (the tier-1 close path), not enqueue_meta_alert's
+    // cooldown-suppression path, is what fires on this transition -- the old
+    // "meta_alert_suppressed_open" log line no longer appears here because
+    // the generic per-attempt alert path is bypassed entirely once escalated.
+    expect(readFileSync(join(tmpRoot, 'logs', 'collector.jsonl'), 'utf8')).toContain('meta_alert_recovered');
+
+    const stateAfterSecondFailure = JSON.parse(readFileSync(join(tmpRoot, 'collector-state.json'), 'utf8')) as {
+      openAlerts?: Record<string, unknown>;
+    };
+    // Tier 1's collector-local bookkeeping is genuinely closed, not merely
+    // un-renotified -- "exactly one open incident at a time" as a real-time
+    // invariant, not something a future stale-autoclose sweep has to clean up.
+    expect(stateAfterSecondFailure.openAlerts ?? {}).not.toHaveProperty('mini5:remote-claim-failed');
+
+    // Recovery: the CURRENTLY open incident (tier 2, the escalation) gets the
+    // typed clear -- not a second remote-claim-failed recovery, since tier 1
+    // is already closed and stays closed.
+    const recovery = runCollector(fakeSsh, 'success');
+    expect(recovery.status).toBe(0);
+    const bySourceAfterRecovery = eventsBySource();
+    expect(bySourceAfterRecovery['remote-claim-failed']?.map((event) => event.eventType)).toEqual([
+      'alert',
+      'clear',
+    ]);
+    expect(bySourceAfterRecovery['collector_remote_unreachable']?.map((event) => event.eventType)).toEqual([
+      'alert',
+      'clear',
+    ]);
+    expect(bySourceAfterRecovery['collector_remote_unreachable']?.[1]).toMatchObject({
+      eventType: 'clear',
+      severity: 'info',
+      instance: 'bot-errors-collector',
+      source: 'collector_remote_unreachable',
+    });
 
     const state = JSON.parse(readFileSync(join(tmpRoot, 'collector-state.json'), 'utf8')) as {
       configuredRemoteHosts?: string[];
       configuredRemotes?: string[];
       openAlerts?: Record<string, unknown>;
+      remotes?: Record<string, { captureFailureEscalated?: boolean }>;
     };
     expect(state.configuredRemoteHosts).toEqual(['mini5']);
     expect(state.configuredRemotes).toEqual(['mini5']);
     expect(state.openAlerts ?? {}).not.toHaveProperty('mini5:remote-claim-failed');
+    expect(state.remotes?.mini5?.captureFailureEscalated).toBe(false);
   });
 
   it('persists best-effort remote hosts for watchdog daily-health classification', () => {
@@ -1260,5 +1399,132 @@ exec(collector.REMOTE_WRITEFAIL_ACK_SCRIPT, {"__name__": "__main__"})
     const summary = JSON.parse(result.stdout) as { failed: number; remotesSucceeded: number };
     expect(summary.failed).toBeGreaterThanOrEqual(1);
     expect(summary.remotesSucceeded).toBe(0);
+  });
+
+  it('retains prior failure detail and records recovery state across fail, fail, success (DUR-03)', () => {
+    tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-collector-'));
+    mkdirSync(join(tmpRoot, 'outbox'), { recursive: true, mode: 0o700 });
+    const fakeSsh = writeFakeSsh(tmpRoot);
+
+    type RetentionState = {
+      remotes?: Record<
+        string,
+        {
+          lastError?: string | null;
+          failureRetention?: {
+            status?: string;
+            failureClass?: string;
+            lastFailureDetail?: string;
+            firstObservedAt?: number;
+            firstObservedIso?: string;
+            lastObservedAt?: number;
+            lastObservedIso?: string;
+            lastSuccessAt?: number;
+            lastSuccessIso?: string;
+          };
+        }
+      >;
+    };
+    const readState = () =>
+      JSON.parse(readFileSync(join(tmpRoot, 'collector-state.json'), 'utf8')) as RetentionState;
+
+    const firstFailure = runCollector(fakeSsh, 'fail');
+    expect(firstFailure.status).toBe(1);
+    const afterFirstFailure = readState().remotes?.mini5?.failureRetention;
+    expect(afterFirstFailure).toMatchObject({
+      status: 'failing',
+      failureClass: 'ssh_failure',
+    });
+    expect(typeof afterFirstFailure?.lastFailureDetail).toBe('string');
+    expect(afterFirstFailure?.lastFailureDetail?.length).toBeGreaterThan(0);
+    expect(afterFirstFailure?.firstObservedAt).toBeDefined();
+    expect(afterFirstFailure?.lastObservedAt).toBeDefined();
+    expect((afterFirstFailure?.lastObservedAt ?? 0) >= (afterFirstFailure?.firstObservedAt ?? 0)).toBe(true);
+    expect(afterFirstFailure?.lastSuccessAt).toBeUndefined();
+
+    const secondFailure = runCollector(fakeSsh, 'fail');
+    expect(secondFailure.status).toBe(1);
+    const afterSecondFailure = readState().remotes?.mini5?.failureRetention;
+    // Same ongoing episode: first-observed is pinned, class is unchanged, and
+    // the retained record did not get replaced by a fresh empty one.
+    expect(afterSecondFailure?.status).toBe('failing');
+    expect(afterSecondFailure?.failureClass).toBe('ssh_failure');
+    expect(afterSecondFailure?.firstObservedAt).toBe(afterFirstFailure?.firstObservedAt);
+
+    const recovery = runCollector(fakeSsh, 'success');
+    expect(recovery.status).toBe(0);
+    const afterRecovery = readState().remotes?.mini5;
+    // Aggregate counters behave exactly as before (untouched by DUR-03):
+    // lastError is still wiped on success.
+    expect(afterRecovery?.lastError).toBeNull();
+    // But the retained failure record survives the transition to success and
+    // now also carries recovery state — this is the DUR-03 contract.
+    const retention = afterRecovery?.failureRetention;
+    expect(retention?.status).toBe('recovered');
+    expect(retention?.failureClass).toBe('ssh_failure');
+    expect(retention?.lastFailureDetail).toBe(afterSecondFailure?.lastFailureDetail);
+    expect(retention?.firstObservedAt).toBe(afterFirstFailure?.firstObservedAt);
+    expect(retention?.lastSuccessAt).toBeDefined();
+    expect(retention?.lastSuccessIso).toBeDefined();
+
+    // Atomic write: no leftover temp files, state file is a single valid JSON doc.
+    const leftoverTemps = readdirSync(tmpRoot).filter((name) => name.includes('.tmp'));
+    expect(leftoverTemps).toEqual([]);
+  });
+
+  it('classifies malformed remote claim output separately from an SSH transport failure (DUR-03)', () => {
+    tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-collector-'));
+    mkdirSync(join(tmpRoot, 'outbox'), { recursive: true, mode: 0o700 });
+
+    const sshFailure = writeFakeSsh(tmpRoot);
+    const sshResult = runCollector(sshFailure, 'fail');
+    expect(sshResult.status).toBe(1);
+    const sshState = JSON.parse(readFileSync(join(tmpRoot, 'collector-state.json'), 'utf8')) as {
+      remotes?: Record<string, { failureRetention?: { failureClass?: string } }>;
+    };
+    expect(sshState.remotes?.mini5?.failureRetention?.failureClass).toBe('ssh_failure');
+    rmSync(tmpRoot, { recursive: true, force: true });
+
+    tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-collector-'));
+    mkdirSync(join(tmpRoot, 'outbox'), { recursive: true, mode: 0o700 });
+    const malformedSsh = writeMalformedOutputFakeSsh(tmpRoot);
+    const malformedResult = runCollector(malformedSsh, 'fail');
+    expect(malformedResult.status).toBe(1);
+    const malformedState = JSON.parse(readFileSync(join(tmpRoot, 'collector-state.json'), 'utf8')) as {
+      remotes?: Record<string, { failureRetention?: { failureClass?: string } }>;
+    };
+    expect(malformedState.remotes?.mini5?.failureRetention?.failureClass).toBe('malformed_remote_output');
+  });
+
+  it('redacts credential-shaped text out of the retained failure detail (DUR-03)', () => {
+    tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-collector-'));
+    mkdirSync(join(tmpRoot, 'outbox'), { recursive: true, mode: 0o700 });
+    const fakeSsh = writeFakeSshWithSecretStderr(tmpRoot);
+
+    const result = runCollector(fakeSsh, 'fail');
+    expect(result.status).toBe(1);
+    const state = JSON.parse(readFileSync(join(tmpRoot, 'collector-state.json'), 'utf8')) as {
+      remotes?: Record<string, { failureRetention?: { lastFailureDetail?: string } }>;
+    };
+    const detail = state.remotes?.mini5?.failureRetention?.lastFailureDetail ?? '';
+    expect(detail).toContain('[REDACTED]');
+    expect(detail).not.toContain('sk_live_ABCDEF1234567890abcdef');
+  });
+
+  it('bounds the retained failure detail length instead of growing without limit (DUR-03)', () => {
+    const hugeError = 'x'.repeat(5000);
+    const result = runUpdateFailureRetention(hugeError, 'runtime');
+    expect(result.status).toBe(0);
+    const record = JSON.parse(result.stdout) as { failureRetention?: { lastFailureDetail?: string } };
+    const detail = record.failureRetention?.lastFailureDetail ?? '';
+    expect(detail.length).toBeGreaterThan(0);
+    expect(detail.length).toBeLessThan(5000);
+  });
+
+  it('classifies a JSONDecodeError as malformed_remote_output at the function level (DUR-03)', () => {
+    const result = runUpdateFailureRetention('irrelevant for this branch', 'json_decode');
+    expect(result.status).toBe(0);
+    const record = JSON.parse(result.stdout) as { failureRetention?: { failureClass?: string } };
+    expect(record.failureRetention?.failureClass).toBe('malformed_remote_output');
   });
 });

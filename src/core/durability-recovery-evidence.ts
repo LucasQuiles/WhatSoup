@@ -44,7 +44,10 @@ interface RecoveryEvidenceStatements {
   hasTurnDeliveryCorroboration: PreparedStatement;
 }
 
-type RecoveryOperation = 'preConnectRecovery' | 'postConnectRecovery';
+type RecoveryOperation =
+  | 'preConnectRecovery'
+  | 'postConnectRecovery'
+  | 'reconcileLiveMaybeSent';
 
 interface RecoveryPhaseFailure {
   phase: string;
@@ -94,6 +97,7 @@ export class DurabilityRecoveryEvidence {
             tool_calls_replayed = ?,
             tool_calls_quarantined = ?,
             sessions_restored = ?,
+            status = 'completed',
             notes = ?,
             completed_at = datetime('now')
         WHERE id = ? AND recovery_plan_id = ? AND completed_at IS NULL
@@ -108,6 +112,7 @@ export class DurabilityRecoveryEvidence {
             tool_calls_replayed = ?,
             tool_calls_quarantined = ?,
             sessions_restored = ?,
+            status = 'failed',
             notes = ?
         WHERE id = ? AND recovery_plan_id = ? AND completed_at IS NULL
       `),

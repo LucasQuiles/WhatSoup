@@ -16,6 +16,38 @@ rules into hooks, and semantic or human rules into the SDLC review flow.
 - `rings`: hook, eslint, guard, ci, or sdlc.
 - `severity`: block, warn, or advisory.
 - `source`: evidence that caused the rule to exist.
+- `implementedBy`: what actually enforces the rule — npm script names
+  (`guard:transport-patterns`, `typecheck:all`) or repo-relative test paths.
+  **Required for every `severity: 'block'` rule** and asserted by
+  `tests/scripts/fitness-registry-backing.test.ts`. It exists because the
+  rule→enforcement link used to live only in prose here and in `rationale`: four block
+  rules had no occurrence of their rule id anywhere outside the registry and this
+  document, so confirming they were enforced meant archaeology rather than running a
+  check.
+
+  Entries are **alternative routes to the same detector, not a conjunction** — a rule
+  is enforced on a gate path when *any* of its entries runs there. `hygiene.internal-labels`
+  lists three `guard:repo` modes for this reason, and only `guard:repo:release-hygiene`
+  runs on the tag gate.
+
+  Reachability is answered **per gate path**, because the two are not equivalent:
+
+  | path | workflow | full suite? | consequence |
+  |---|---|---|---|
+  | `pull-request` | `quality.yml` | yes (`coverage:check`) | a live-tree test can carry a guard with no named step |
+  | `tag-release` | `tag-release-gate.yml` | **no** | a named step is the only way a check runs |
+
+  All 17 block rules are covered on `pull-request`. **12 are not covered on
+  `tag-release`**, recorded as an exact ratchet in `TAG_PATH_UNCOVERED_BLOCK_RULES` so
+  the gap cannot widen — or close — unnoticed. That is second-order rather than a live
+  breach (a tag is cut from a PR-gated `main`), but `enforce_admins` is false here, so
+  the tag gate is the only check downstream of an admin push to `main`. Whether to make
+  the tag gate mirror the PR gate is a release-engineering decision, left to whoever
+  owns that workflow.
+
+  It proves each block rule *declares* a real backstop that exists, runs somewhere, and
+  is unbypassable on the PR path — not that the backstop detects what the rule
+  describes. That link stays hand-asserted, in `rationale` and in each guard's own tests.
 
 ## Architecture
 
@@ -207,3 +239,49 @@ baseline-suppressed here — they stay visible in the lint output. Local runs us
 authoritative via CI.
 
 The ESLint ring warning count for `arch.file-size` is ratcheted by `tests/scripts/fitness-file-size-warning-budget.test.ts`.
+
+## Non-Registry Guard: Durability-Writer Invariant (#1789)
+
+`scripts/durability-writer-guard.ts` is **not** a `scripts/lib/fitness/registry.ts` entry — it
+carries no row in the category tables above, so it does not appear under any rule id. It is
+recorded here on its own so the taxonomy doesn't silently omit a fail-closed guard wired into the
+push gate. Category: **invariant** (same shape as `invariant.fail-closed-gate` — a structural
+completeness check, not a code-quality or process rule). Ring: **guard** only, via
+`npm run guard:durability-writer`, wired into `verify:push:branch` next to the other guard
+invocations; its companion test, `tests/scripts/durability-writer-guard.test.ts`, is in the
+curated push-gate test list.
+
+**Defect class it prevents:** a status-bearing durability table can be structurally incapable of
+reporting bad news — the row exists, its vocabulary declares a terminal-failure value, but nothing
+in production `src/` ever writes it. `auth_loss_signal` was exactly this until #1786 wired a
+writer: the store, the controller, and the terminal-logout decision all existed, and none of them
+were connected. No test caught it because no test asserted the surface could FAIL. This guard,
+backed by the hand-curated registry `scripts/lib/durability-status-registry.ts`, makes that class
+of gap impossible to reship silently.
+
+**Checks:** (1) completeness — every table in the migrated schema snapshot classifies into exactly
+one of known-status / non-status / reserved; (1b) self-provisioned discovery — a bounded static
+scan for `CREATE TABLE` text under `src/**/*.ts` catches tables six `ensureXSchema`-style modules
+create outside the migration registry, closing the blind spot check (1) alone would have (each such
+table's DDL is also run through check (2b)'s anti-dodge regex); (2) reserved metadata — a declared
+reserved exemption must carry a non-empty reason and issue, or the exemption itself fails the
+guard; (2b) anti-dodge — a non-status table with a status/state/error/outcome/failed-shaped column
+must carry a truthful justification, or the guard fails closed; (3) per-table writer coverage —
+every status-bearing table's terminal-failure value(s) must be covered by a resolvable, non-test
+`src/` writer site or a well-formed declared exception (same reason+issue rule as check (2)).
+
+**Exit codes:** 0 pass, 1 violation, 2 inconclusive. Non-vacuity is enforced deliberately: an empty
+schema snapshot, or a throw anywhere inside the scan itself, maps to exit 2 — never a silent 0 and
+never an uncaught exception falling through to Node's default exit 1.
+
+**Completeness scope, stated honestly:** the total-completeness claim covers every table
+`migratedSchemaSnapshot()` returns, PLUS every table the check-1b discovery scan finds that is
+registered as `SELF_PROVISIONED` (6 tables created outside the migration registry by their own
+`ensureXSchema` functions) or `DISCOVERY_EXCLUSIONS` (`outbound_sends_v26`, a transient
+migration-26 create→copy→rename artifact that never persists under its own name) — not "every
+table" unconditionally.
+
+**Declared exceptions (both #1789-tracked):** `sweep_runs` (`TRACKED_RESERVED` — 0-ref reserved
+substrate table, no live sweep pipeline) and `beads`' `'failed'` value (`TRACKED_UNWIRED_TERMINAL`
+— `update_bead` is status-protected and `transition()`'s callers only ever pass
+`completed`/`cancelled`/`active`; no `fail_bead` tool exists).

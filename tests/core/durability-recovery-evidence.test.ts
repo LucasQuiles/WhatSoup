@@ -1,7 +1,12 @@
+import { DatabaseSync } from 'node:sqlite';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Database } from '../../src/core/database.ts';
+import { runMigration45 } from '../../src/core/database-migration-45.ts';
 import { DurabilityEngine } from '../../src/core/durability.ts';
-import { DurabilityRecoveryEvidence } from '../../src/core/durability-recovery-evidence.ts';
+import {
+  createRecoveryStats,
+  DurabilityRecoveryEvidence,
+} from '../../src/core/durability-recovery-evidence.ts';
 import { ReplyGuaranteeManager } from '../../src/core/reply-guarantee.ts';
 import {
   toTurnFinalizationPersistence,
@@ -596,6 +601,25 @@ describe('durable recovery evidence ordering', () => {
     ).get()).toEqual(proofCount);
   });
 
+  it('does not create recurring live-recovery evidence for corroborated maybe_sent proof', () => {
+    seedIncident();
+    db.raw.prepare(
+      "UPDATE outbound_ops SET created_at = datetime('now', '-31 seconds') WHERE id = ?",
+    ).run(INCIDENT_SELECTED_OP_ID);
+    const freshEngine = new DurabilityEngine(db);
+    freshEngine.postConnectRecovery();
+    const before = db.raw.prepare(
+      'SELECT COUNT(*) AS count FROM recovery_runs',
+    ).get();
+
+    const stats = freshEngine.reconcileLiveMaybeSent();
+
+    expect(stats.outboundReconciled).toBe(0);
+    expect(db.raw.prepare(
+      'SELECT COUNT(*) AS count FROM recovery_runs',
+    ).get()).toEqual(before);
+  });
+
   it('starts post-connect plan and run before any corroboration or outbound mutation', () => {
     const { terminalRecordId } = seedIncident();
     const selectedBefore = rowJson(db, 'outbound_ops', 'id', INCIDENT_SELECTED_OP_ID);
@@ -614,5 +638,119 @@ describe('durable recovery evidence ordering', () => {
       FROM turn_delivery_corroboration
       WHERE terminal_record_id = ?
     `).get(terminalRecordId)).toEqual({ count: 0 });
+  });
+});
+
+describe('recovery_runs status column', () => {
+  let db: Database;
+
+  beforeEach(() => {
+    db = new Database(':memory:');
+    db.open();
+  });
+
+  afterEach(() => db.close());
+
+  it("persists status 'started' for a fresh recovery run", () => {
+    const evidence = new DurabilityRecoveryEvidence(db);
+    const receipt = evidence.start('pre_connect_recovery', 'status-started', 'fresh run');
+
+    // Inverse-correlation invariant: a fresh 'started' row must have a NULL
+    // completed_at. The companion durability.test.ts asserts the forward
+    // direction (status='completed' implies completed_at NOT NULL); without
+    // this, a future start() that pre-stamped completed_at would leave a
+    // self-contradictory 'started'-with-completed row uncaught.
+    expect(db.raw.prepare('SELECT status, completed_at FROM recovery_runs WHERE id = ?')
+      .get(receipt.recoveryRunId)).toEqual({ status: 'started', completed_at: null });
+  });
+
+  it("persists status 'completed' after finalize", () => {
+    const evidence = new DurabilityRecoveryEvidence(db);
+    const receipt = evidence.start('pre_connect_recovery', 'status-completed', 'finalized run');
+
+    evidence.finalize(receipt, createRecoveryStats(receipt), 'done');
+
+    expect(db.raw.prepare('SELECT status FROM recovery_runs WHERE id = ?')
+      .get(receipt.recoveryRunId)).toEqual({ status: 'completed' });
+  });
+
+  it("persists status 'failed' after recordIncomplete", () => {
+    const evidence = new DurabilityRecoveryEvidence(db);
+    const receipt = evidence.start('pre_connect_recovery', 'status-failed', 'incomplete run');
+
+    evidence.recordIncomplete(
+      receipt,
+      createRecoveryStats(receipt),
+      JSON.stringify({ status: 'incomplete' }),
+    );
+
+    expect(db.raw.prepare('SELECT status FROM recovery_runs WHERE id = ?')
+      .get(receipt.recoveryRunId)).toEqual({ status: 'failed' });
+  });
+
+  it("persists status 'failed' when a recovery run fails via failImmediately", () => {
+    const evidence = new DurabilityRecoveryEvidence(db);
+    const run = evidence.begin(
+      'preConnectRecovery',
+      'pre_connect_recovery',
+      'status-fail-immediately',
+      'fails immediately',
+    );
+
+    expect(() => run.failImmediately('some_phase', new Error('boom'))).toThrow('boom');
+
+    expect(db.raw.prepare(`
+      SELECT status FROM recovery_runs WHERE trigger = 'status-fail-immediately'
+    `).get()).toEqual({ status: 'failed' });
+  });
+});
+
+describe('migration 45 recovery_runs status backfill', () => {
+  it("backfills completed rows to 'completed' and leaves incomplete rows at 'started'", () => {
+    const raw = new DatabaseSync(':memory:');
+    try {
+      raw.exec(`
+        CREATE TABLE recovery_runs (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          started_at TEXT NOT NULL DEFAULT (datetime('now')),
+          completed_at TEXT,
+          trigger TEXT NOT NULL,
+          notes TEXT
+        );
+      `);
+      raw.prepare(`
+        INSERT INTO recovery_runs (id, completed_at, trigger)
+        VALUES (1, datetime('now'), 'pre_connect')
+      `).run();
+      raw.prepare(`
+        INSERT INTO recovery_runs (id, completed_at, trigger)
+        VALUES (2, NULL, 'pre_connect')
+      `).run();
+
+      runMigration45(raw);
+
+      expect(raw.prepare('SELECT status FROM recovery_runs WHERE id = 1').get())
+        .toEqual({ status: 'completed' });
+      expect(raw.prepare('SELECT status FROM recovery_runs WHERE id = 2').get())
+        .toEqual({ status: 'started' });
+    } finally {
+      raw.close();
+    }
+  });
+
+  it('is a no-op when recovery_runs does not exist', () => {
+    const raw = new DatabaseSync(':memory:');
+    try {
+      expect(() => runMigration45(raw)).not.toThrow();
+      // A true no-op: the migration must NOT side-effect a recovery_runs table
+      // into existence when it was absent. Asserting only not.toThrow() is
+      // vacuous — it would also pass if runMigration45 were deleted outright
+      // or if it silently created the table.
+      expect(raw.prepare(
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'recovery_runs'",
+      ).get()).toBeUndefined();
+    } finally {
+      raw.close();
+    }
   });
 });

@@ -23,6 +23,8 @@ const TRACKER_CONFIG: OperationTrackerConfig = {
   thinkingStallMs: 300_000,
   progressPlaceholderRateLimitMs: 180_000,
   maxStatusMessagesPerTurn: Number.MAX_SAFE_INTEGER,
+  maxStatusMessagesPerWindow: Number.MAX_SAFE_INTEGER,
+  statusMessageWindowMs: 300_000,
   toolThresholds: {
     default: { expectedMs: 10_000, slowMultiplier: 2, stallMultiplier: 5 },
   },

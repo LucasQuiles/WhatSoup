@@ -254,8 +254,14 @@ export const COMMAND_REGISTRY = [
     name: 'model',
     // B26: /help guidance surfaces the catalogue — presentation renders from
     // this entry only (help-render stays literal-free; D7 keeps it flag-gated).
-    summary: 'route status; /model list — see what you can pick; pin strongest|fastest|default|provider-id',
-    syntax: '/model [status|list|default|strongest|fastest|provider-id]', // E1: no `<...>`; B26: list = config-derived catalogue
+    // D12: the standalone 'default' verb is dropped from the local surface —
+    // /model default no longer has special local handling and just forwards
+    // to the CLI's own /model (F04); /reset is the one documented undo.
+    // D11: the "no delegation" routing-never-changes-authority reassurance
+    // (formerly the /why receipt, now removed) is folded into this command's
+    // render (renderRouteStatus) so it is never lost.
+    summary: 'route status; /model list — see what you can pick; free text or pin strongest|fastest|provider-id; /reset to undo',
+    syntax: '/model [status|list|strongest|fastest|provider-id]', // E1: no `<...>`; B26: list = config-derived catalogue
     tier: 'transport-local',
     gate: 'none', // Phase-1 route-preference is ungated; W3's gated /model <id> is a SEPARATE entry
     venue: 'any', // read/set own route preference; the W3 god-priv model-switch entry is venue:'admin-group'
@@ -264,19 +270,7 @@ export const COMMAND_REGISTRY = [
     errorClasses: ['invalid-arg', 'provider-unsupported', 'internal'],
     renderContract: { asOf: true, fields: { activeModel: 'verified-runtime', pinState: 'verified-runtime' } },
     routingAlias: true,
-    subVerbs: ['status', 'list', 'default', 'strongest', 'fastest'], // B26: 'list' renders the config-derived model catalogue
-  },
-  {
-    name: 'why',
-    summary: 'why this model answered',
-    syntax: '/why',
-    tier: 'transport-local',
-    gate: 'none',
-    venue: 'any',
-    visibility: 'end-user',
-    errorClasses: ['internal'],
-    renderContract: { asOf: false }, // explains a past routing decision (as-of that decision)
-    routingAlias: true,
+    subVerbs: ['status', 'list', 'strongest', 'fastest'], // B26: 'list' renders the config-derived model catalogue; D12 dropped 'default'
   },
   {
     name: 'reset',
