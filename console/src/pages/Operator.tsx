@@ -1,6 +1,9 @@
 import { useState, useMemo, lazy, Suspense } from 'react'
+import { useSearchParams } from 'react-router-dom'
 import { motion } from 'framer-motion'
 import { useLines, useLogs, useFeed } from '../hooks/use-fleet'
+import { Tabs, Tab } from '../components/primitives/Tabs'
+import { OpsMetrics } from '../components/ops/OpsMetrics'
 import { formatTimeWithSeconds } from '../lib/format-time'
 import StatusDot from '../components/StatusDot'
 import ModeBadge from '../components/ModeBadge'
@@ -65,6 +68,28 @@ export default function Operator() {
   const { data: logs = [], error: logsError, refetch: refetchLogs } = useLogs(activeLine)
   const currentLine = lines.find(l => l.name === activeLine)
 
+  // Ops consolidation (T5 b-09a): the /metrics surface lives here as a tab;
+  // /metrics redirects to /ops?tab=metrics for deep links. State owns the
+  // tab; the URL param syncs in only when it changes EXTERNALLY (deep-link
+  // entry, back/forward) — the adjust-during-render pattern, never an
+  // effect re-imposing metrics after a local tab click.
+  const [searchParams, setSearchParams] = useSearchParams()
+  const tabParam = searchParams.get('tab')
+  const [opsTab, setOpsTab] = useState<'console' | 'metrics'>(
+    tabParam === 'metrics' ? 'metrics' : 'console',
+  )
+  const [lastParam, setLastParam] = useState(tabParam)
+  if (tabParam !== lastParam) {
+    setLastParam(tabParam)
+    setOpsTab(tabParam === 'metrics' ? 'metrics' : 'console')
+  }
+  const changeTab = (id: string) => {
+    const tab = id === 'metrics' ? 'metrics' : 'console'
+    setOpsTab(tab)
+    setLastParam(tab === 'metrics' ? 'metrics' : null)
+    setSearchParams(tab === 'metrics' ? { tab: 'metrics' } : {}, { replace: true })
+  }
+
   // Pre-format timestamps so LogStream renders human-readable times.
   const formattedLogs = useMemo(
     () => logs.map((e: LogEntry) => ({ ...e, timestamp: formatTimeWithSeconds(e.timestamp) })),
@@ -107,10 +132,20 @@ export default function Operator() {
 
   return (
     <motion.div
-      className="soup-operator-layout flex-1 flex min-h-0 overflow-hidden p-[var(--sp-4)] gap-[var(--sp-3)]"
+      className="flex-1 flex flex-col min-h-0 overflow-hidden p-[var(--sp-4)] gap-[var(--sp-3)]"
       initial={{ opacity: 0 }}
       animate={{ opacity: 1 }}
       transition={{ duration: 0.5, ease }}
+    >
+      <Tabs label="Ops sections" value={opsTab} onChange={changeTab}>
+        <Tab id="console">Console</Tab>
+        <Tab id="metrics">Metrics</Tab>
+      </Tabs>
+      {opsTab === 'metrics' ? (
+        <OpsMetrics />
+      ) : (
+    <div
+      className="soup-operator-layout flex-1 flex min-h-0 overflow-hidden gap-[var(--sp-3)]"
     >
 
       {/* ═══ LEFT: Fleet Status (swapped from right) ═══ */}
@@ -377,6 +412,8 @@ export default function Operator() {
           onLinked={() => { setRelinkTarget(null); queryClient.invalidateQueries({ queryKey: ['lines'] }); toast.success('Instance re-linked!'); }}
         />
       </Suspense>
+    </div>
+      )}
     </motion.div>
   )
 }

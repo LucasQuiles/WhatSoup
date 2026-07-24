@@ -19,7 +19,6 @@ import { useToast } from './hooks/toast-context'
 const SoupKitchen = lazy(() => import('./pages/SoupKitchen'))
 const LineDetail = lazy(() => import('./pages/LineDetail'))
 const Inbox = lazy(() => import('./pages/Inbox'))
-const Metrics = lazy(() => import('./pages/Metrics'))
 const Operator = lazy(() => import('./pages/Operator'))
 const Landing = lazy(() => import('./pages/Landing'))
 const SurfaceStub = lazy(() => import('./pages/SurfaceStub'))
@@ -118,11 +117,11 @@ function UnlockedApp({ onLogout, showLogout }: { onLogout: () => void; showLogou
                 <Route path="/inbox" element={<ErrorBoundary><Inbox /></ErrorBoundary>} />
                 {/* Ops consolidation (02-mapping §2, E4): /ops is canonical and
                     renders the Operator surface; /operator redirects to it.
-                    /metrics stays live for deep links until its content is
-                    absorbed into the Ops surface bead. */}
+                    T5 b-09a: /metrics is absorbed into Ops as the Metrics tab —
+                    the route redirects for deep links. */}
                 <Route path="/ops" element={<ErrorBoundary><Operator /></ErrorBoundary>} />
                 <Route path="/operator" element={<Navigate to="/ops" replace />} />
-                <Route path="/metrics" element={<ErrorBoundary><Metrics /></ErrorBoundary>} />
+                <Route path="/metrics" element={<Navigate to="/ops?tab=metrics" replace />} />
                 {/* v3.5 route shells — stubs until their surface beads land
                     (b-04 Agents, b-05 Skills, b-06 Dream Lab, b-08 Deployments,
                     b-09 Settings). */}
