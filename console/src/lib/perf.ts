@@ -31,7 +31,9 @@ declare global {
  *  window.__soupPerf pointer is never reassigned, so meters can't discard
  *  each other's state; cross-review F1). */
 const counters: PerfCounters = { wsGlobalRate: 0, wsLineRates: {}, wsOverCapEvents: 0, longtasks: 0 }
-window.__soupPerf = counters
+// Import-safe in non-window environments (node test harnesses import the
+// chain transitively — the integration suite caught the crash).
+if (typeof window !== 'undefined') window.__soupPerf = counters
 
 /* ── WS throughput meter ── */
 
@@ -72,7 +74,7 @@ class WsMeter {
     counters.wsGlobalRate = 0
     counters.wsLineRates = {}
     counters.wsOverCapEvents = 0
-    window.__soupPerf = counters
+    if (typeof window !== 'undefined') window.__soupPerf = counters
   }
 }
 

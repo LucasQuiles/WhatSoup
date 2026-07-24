@@ -103,14 +103,20 @@ async function main() {
   let serverProc = null;
   if (!url) {
     const port = 5199;
-    serverProc = spawn('npx', ['vite', 'preview', '--port', String(port), '--strictPort'], {
+    // The local vite binary (console devDependency) — npx resolution in CI
+    // cost the full readiness window once (the first perf-lane CI run).
+    const viteBin = resolve(consoleRoot, 'node_modules/.bin/vite');
+    serverProc = spawn(viteBin, ['preview', '--port', String(port), '--strictPort'], {
       cwd: consoleRoot,
-      stdio: 'ignore',
+      stdio: ['ignore', 'pipe', 'pipe'],
       detached: true,
     });
+    let serverLog = '';
+    serverProc.stdout?.on('data', (d) => { serverLog += d.toString(); });
+    serverProc.stderr?.on('data', (d) => { serverLog += d.toString(); });
     url = `http://127.0.0.1:${port}/`;
-    // bounded readiness wait — fail closed
-    const deadline = Date.now() + 15000;
+    // bounded readiness wait — fail closed WITH the server's own log
+    const deadline = Date.now() + 60000;
     let up = false;
     while (Date.now() < deadline) {
       try {
@@ -120,7 +126,9 @@ async function main() {
       await new Promise((r) => setTimeout(r, 250));
     }
     if (!up) {
-      console.error('perf-lane: preview server did not become ready in 15s');
+      console.error('perf-lane: preview server did not become ready in 60s');
+      console.error('--- server log ---\n' + serverLog);
+      try { process.kill(-serverProc.pid, 'SIGTERM'); } catch { /* already gone */ }
       process.exit(2);
     }
   }
