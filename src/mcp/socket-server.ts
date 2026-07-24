@@ -1,6 +1,7 @@
 import { createServer } from 'node:net';
 import type { Server, Socket } from 'node:net';
-import { lstatSync, unlinkSync } from 'node:fs';
+import { lstatSync, mkdtempSync, renameSync, rmdirSync, unlinkSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 import { createChildLogger } from '../logger.ts';
 import { toConversationKey } from '../core/conversation-key.ts';
 import type { ToolRegistry } from './registry.ts';
@@ -251,6 +252,7 @@ export class WhatSoupSocketServer {
     }
     this.activeSockets.clear();
     this.connectionSessions.clear();
+    let cleanupError: SocketCleanupError | null = null;
     if (this.ownedSocket) {
       try {
         const current = lstatSync(this.socketPath);
@@ -265,16 +267,34 @@ export class WhatSoupSocketServer {
         if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
           this.ownedSocket = null;
         } else if (err instanceof SocketCleanupError) {
-          throw err;
+          cleanupError = err;
         } else {
-          throw new SocketCleanupError();
+          cleanupError = new SocketCleanupError();
         }
       }
     }
     if (this.server) {
-      this.server.close();
-      this.server = null;
+      if (cleanupError) {
+        try {
+          const preserveDir = mkdtempSync(join(dirname(this.socketPath), '.socket-preserve-'));
+          const preservedPath = join(preserveDir, 'replacement.sock');
+          renameSync(this.socketPath, preservedPath);
+          try {
+            this.server.close();
+            this.server = null;
+          } finally {
+            renameSync(preservedPath, this.socketPath);
+            rmdirSync(preserveDir);
+          }
+        } catch {
+          throw cleanupError;
+        }
+      } else {
+        this.server.close();
+        this.server = null;
+      }
     }
+    if (cleanupError) throw cleanupError;
     if (options.unlinkSocket === false || !this.ownedSocket) return;
 
     try {

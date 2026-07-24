@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { createConnection, type Socket } from 'node:net';
+import { createConnection, type Server, type Socket } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { existsSync, lstatSync, writeFileSync, unlinkSync } from 'node:fs';
@@ -1000,9 +1000,10 @@ describe('socket-server.ts uncovered-branch coverage', () => {
   it.each([
     ['default cleanup', undefined],
     ['unlink-disabled cleanup', { unlinkSocket: false }],
-  ] as const)('does not unlink a replacement socket at the same path during %s', async (_label, options) => {
+  ] as const)('closes the original listener without unlinking a replacement socket during %s', async (_label, options) => {
     server = new WhatSoupSocketServer(socketPath, registry, session);
     await server.startAndWait();
+    const originalListener = (server as unknown as { server: Server }).server;
     const original = lstatSync(socketPath);
     expect((server as unknown as { ownedSocket: { dev: number; ino: number } }).ownedSocket)
       .toEqual({ dev: original.dev, ino: original.ino });
@@ -1014,11 +1015,24 @@ describe('socket-server.ts uncovered-branch coverage', () => {
     expect({ dev: replacementStat.dev, ino: replacementStat.ino })
       .not.toEqual({ dev: original.dev, ino: original.ino });
 
-    expect(() => server.stop(options)).toThrow(SocketCleanupError);
-    expect(() => server.stop(options)).toThrow(/^MCP socket cleanup failed$/);
+    let cleanupError: unknown;
+    try {
+      server.stop(options);
+    } catch (err) {
+      cleanupError = err;
+    }
+    expect(cleanupError).toBeInstanceOf(SocketCleanupError);
+    expect(cleanupError).toMatchObject({ message: 'MCP socket cleanup failed' });
+    expect(originalListener.listening).toBe(false);
+    expect(server.maxConnections).toBe(0);
     const after = lstatSync(socketPath);
     expect({ dev: after.dev, ino: after.ino })
       .toEqual({ dev: replacementStat.dev, ino: replacementStat.ino });
+    await expect(sendJsonRpc(socketPath, {
+      jsonrpc: '2.0',
+      id: 99,
+      method: 'tools/list',
+    })).resolves.toMatchObject({ id: 99, result: { tools: expect.any(Array) } });
 
     replacement.stop();
     server = replacement;
