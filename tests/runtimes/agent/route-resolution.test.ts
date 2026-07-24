@@ -363,6 +363,10 @@ describe('Slice 3 — reasoning-effort on the route', () => {
       pinnedProviderEligible: true,
     }));
     expect(d.effort).toBeNull();
+    // Terminal behavior assertion for the "not undefined" half of the claim: the
+    // KEY is present and explicitly null (an absent key would also satisfy
+    // toBeNull via undefined-ish reads, so assert presence concretely).
+    expect(Object.prototype.hasOwnProperty.call(d, 'effort')).toBe(true);
   });
 
   it('the default route (no pin) carries no effort', () => {

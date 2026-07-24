@@ -909,12 +909,18 @@ describe('NL routing handlers (nlRouting flag)', () => {
         expect(cfg?.effort).toBe('high');
       });
 
-      it('a non-claude route never gets an effort applied (effort is claude-cli-only)', () => {
+      it('a non-claude route never gets the pin effort applied (effort is claude-cli-only)', () => {
+        // A static effort is configured so the assertion is CONCRETE: the inherited
+        // static value must survive and the pin's 'low' must never be applied to a
+        // non-claude route (a bare toBeUndefined would not distinguish
+        // "not applied" from "no config at all").
+        cfgAny().agentProviderConfig = { effort: 'high' };
         const { runtime } = makeRoutingRuntime({ model: 'claude-opus-4-8' });
         const cfg = (runtime as unknown as RSPC).routeSessionProviderConfig({
           provider: 'opencode-cli', model: 'kimi/kimi-k3', source: 'preference', reasonCode: 'user_pin', effort: 'low',
         });
-        expect(cfg?.effort).toBeUndefined();
+        expect(cfg?.effort).not.toBe('low');
+        expect(cfg?.effort).toBe('high');
       });
 
       it('the recycle diff detects an effort-only change (same provider+model, different effective effort)', () => {
@@ -2164,15 +2170,22 @@ describe('NL routing handlers (nlRouting flag)', () => {
     });
 
     it('picking "Default (no override)" at Level-3 pins the model with a null effort (clears any override)', async () => {
-      const { runtime } = makeDrillRuntime();
+      const { runtime, sentMessages } = makeDrillRuntime();
       await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model' }));
       await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model 1', messageId: 'm2' }));
       await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model 1', messageId: 'm3' })); // → Level-3 (5 rows)
+      sentMessages.length = 0;
+      mockQueue.enqueueText.mockClear();
       await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model 5', messageId: 'm4' })); // "Default (no override)"
       const rows = prefRows();
       expect(rows).toHaveLength(1);
       expect(rows[0].requested_model).toBe('claude-opus-4-8');
       expect(rows[0].requested_effort).toBeNull();
+      // Terminal behavior assertion: a null effort echoes the model ALONE — the
+      // receipt must NOT claim a reasoning level it did not pin (charter #6).
+      const reply = allReplies(sentMessages).join('\n');
+      expect(reply).toContain('claude-opus-4-8');
+      expect(reply.toLowerCase()).not.toContain('reasoning');
     });
 
     it('RECENCY (drill wins): /model list → bare /model → /model 1 drills the DRILL brand, never a flat pin', async () => {
