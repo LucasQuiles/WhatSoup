@@ -272,9 +272,11 @@ jobs:
         run: npm run guard:bot-errors-simulation-matrix
 
       - name: BOT ERRORS sentinel coverage and deployer mutation gate
+        if: matrix.node == '24.x'
         run: bash deploy/scripts/run-sentinel-tests.sh
 
       - name: BOT ERRORS full behavioral suite gate
+        if: matrix.node == '24.x'
         run: bash deploy/scripts/run-bot-errors-full-suite.sh
 
       - name: Harness maintenance manifest guard
