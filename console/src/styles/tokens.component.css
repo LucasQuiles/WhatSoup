@@ -274,8 +274,9 @@
   --config-key-col: 140px;   /* config key-value grid key column width */
   --badge-unread: 20px;      /* chat unread count badge */
   /* ═══ Panel widths ═══ */
-  --inbox-pane-chats: 264px;   /* inbox chat-list pane (tokens-v3 §4/§6.12; renamed from --panel-chat-list 288px) */
-  --inbox-pane-contact: 248px; /* inbox contact pane  (tokens-v3 §4/§6.12; renamed from --panel-contact 256px) */
+  /* --inbox-pane-chats / --inbox-pane-contact deleted at T5 b-07: the v3 inbox
+     page they sized is replaced by the v3.5 surface (mockup inbox.html SSOT);
+     the v3.5 grid owns pane widths via --inbox-list-w / --inbox-ctx-w below. */
   --panel-actions: 260px;    /* line detail actions panel */
   --panel-history: 288px;    /* line detail history chat list */
   --pipeline-node-pad-y: 5px; /* pipeline node static vertical padding */
@@ -363,4 +364,78 @@
   --popover-check-t:  2px;     /* popover checkmark glyph: top offset */
   --popover-check-w:  6px;     /* popover checkmark glyph: stroke box width */
   --popover-check-h:  10px;    /* popover checkmark glyph: stroke box height */
+
+  /* ═══ v3.5 Inbox surface geometry (T5 b-07; mockup inbox.html SSOT) ═══
+     Every literal traces to the mockup; inbox.css consumes var() only.
+     Breakpoints (mockup @media): context pane hides ≤1100px (shared with the
+     chrome rail collapse), conversation list hides ≤760px — the fifth
+     distinct SSOT stacking breakpoint (chrome/fleet 1100, agents 1000,
+     dream 980, skills 900, inbox 760). */
+  --inbox-chips-gap: 6px;         /* channel chip row gap (mockup .chips) */
+  --inbox-chips-pad: 10px 22px 0; /* channel chip row padding (mockup .chips) */
+  --inbox-chip-gap: 7px;          /* chip glyph↔label gap (mockup .chip) */
+  --inbox-chip-pad: 5px 11px;     /* chip padding (mockup .chip) */
+  --inbox-list-w: 300px;          /* conversation list column (mockup .wrap grid) */
+  --inbox-list-w-narrow: 280px;   /* list column ≤1100px (mockup @media) */
+  --inbox-ctx-w: 260px;           /* context pane column (mockup .wrap grid) */
+  --inbox-wrap-mt: 12px;          /* wrap margin-top (mockup .wrap) */
+  --inbox-seg-pad: 10px 12px 6px; /* seg control padding (mockup .seg) */
+  --inbox-seg-gap: 4px;           /* seg button gap (mockup .seg) */
+  --inbox-seg-btn-pad-y: 6px;     /* seg button vertical padding (mockup .seg button) */
+  --inbox-seg-btn-radius: 6px;    /* seg button radius (mockup .seg button) */
+  --inbox-citem-gap: 10px;        /* conversation item gap (mockup .citem) */
+  --inbox-citem-pad: 10px 12px;   /* conversation item padding (mockup .citem) */
+  --inbox-citem-border-w: 2px;    /* selected left-border width (mockup .citem) */
+  --inbox-ava: 34px;              /* list avatar box (mockup .citem .ava) */
+  --inbox-ava-radius: 9px;        /* list avatar radius, direct (mockup .citem .ava) */
+  --inbox-ava-grp-radius: 6px;    /* list avatar radius, rooms (mockup .ava.grp) */
+  --inbox-ava-glyph: 12px;        /* avatar channel-glyph badge canvas (mockup .ava svg) */
+  --inbox-ava-glyph-off: -3px;    /* glyph badge corner offset (mockup .ava svg) */
+  --inbox-citem-pv-mt: 1px;       /* preview margin-top (mockup .citem .pv) */
+  --inbox-badges-gap: 4px;        /* badge row gap (mockup .citem .badges) */
+  --inbox-badges-mt: 3px;         /* badge row margin-top (mockup .citem .badges) */
+  --inbox-ub-pad: 1px 6px;        /* unread/takeover badge padding (mockup .ub/.take) */
+  --inbox-thead-gap: 10px;        /* thread header gap (mockup .thead) */
+  --inbox-thead-pad: 10px 16px;   /* thread header padding (mockup .thead) */
+  --inbox-thead-ava: 32px;        /* thread header avatar (mockup .thead .ava) */
+  --inbox-takeover-gap: 8px;      /* takeover label↔toggle gap (mockup .takeover) */
+  --inbox-tgl-w: 32px;            /* takeover toggle track width (mockup .tgl) */
+  --inbox-tgl-h: 18px;            /* takeover toggle track height (mockup .tgl) */
+  --inbox-tgl-knob: 14px;         /* takeover toggle knob box (mockup .tgl::after) */
+  --inbox-tgl-inset: 2px;         /* toggle knob inset (mockup .tgl::after) */
+  --inbox-tgl-travel: 14px;       /* toggle knob travel (mockup .tgl.on::after) */
+  --inbox-msgs-gap: 10px;         /* message stack gap (mockup .msgs) */
+  --inbox-msgs-pad: 16px;         /* message lane padding (mockup .msgs) */
+  --inbox-mrow-gap: 8px;          /* message row gap (mockup .mrow) */
+  --inbox-mrow-maxw: 78%;         /* message row max width (mockup .mrow) */
+  --inbox-ma: 24px;               /* message avatar box (mockup .mrow .ma) */
+  --inbox-ma-radius: 7px;         /* message avatar radius (mockup .mrow .ma) */
+  --inbox-bub-pad: 9px 12px;      /* bubble padding (mockup .bub) */
+  --inbox-bub-radius: 12px;       /* bubble radius (mockup .bub) */
+  --inbox-bub-accent-w: 2px;      /* group sender accent border (mockup .mrow.agent .bub) */
+  --inbox-bub-tm-mt: 4px;         /* bubble timestamp margin-top (mockup .bub .tm) */
+  --inbox-sys-pad: 4px 12px;      /* system pill padding (mockup .sys) */
+  --inbox-composer-gap: 10px;     /* composer gap (mockup .composer) */
+  --inbox-composer-pad: 12px 16px;/* composer padding (mockup .composer) */
+  --inbox-caps-gap: 4px;          /* composer caps gap (mockup .caps) */
+  --inbox-composer-h: 36px;       /* uniform composer control height — bead acceptance (mockup .cap/input/Send) */
+  --inbox-cap-radius: 8px;        /* composer cap radius (mockup .cap) */
+  --inbox-send-pad-x: 14px;       /* Send horizontal padding (mockup .btn) */
+  --inbox-input-radius: 9px;      /* composer input radius (mockup .composer input) */
+  --inbox-input-pad: 9px 12px;    /* composer input padding (mockup .composer input) */
+  --inbox-ctx-pad: 14px;          /* context pane padding (mockup .ctx) */
+  --inbox-ctx-h3-m: 14px 0 8px;   /* context section head margin (mockup .ctx h3) */
+  --inbox-pcard-pad: 12px;        /* person/line card padding (mockup .pcard) */
+  --inbox-pcard-radius: 10px;     /* person/line card radius (mockup .pcard) */
+  --inbox-pcard-gap: 10px;        /* person card top-row gap (mockup .pcard .top) */
+  --inbox-pcard-ava: 38px;        /* person card avatar (mockup .pcard .ava) */
+  --inbox-pcard-ava-radius: 10px; /* person card avatar radius (mockup .pcard .ava) */
+  --inbox-idrow-gap: 8px;         /* identity row gap (mockup .idrow) */
+  --inbox-idrow-pad-y: 6px;       /* identity row vertical padding (mockup .idrow) */
+  --inbox-agcard-gap: 10px;       /* agent card gap (mockup .agcard) */
+  --inbox-agcard-pad: 10px 12px;  /* agent card padding (mockup .agcard) */
+  --inbox-agcard-radius: 10px;    /* agent card radius (mockup .agcard) */
+  --inbox-agcard-ava: 26px;       /* agent card avatar (mockup .agcard .ava) */
+  --inbox-agcard-ava-radius: 7px; /* agent card avatar radius (mockup .agcard .ava) */
+  --tracking-inbox-caps: 0.1em;   /* context section head caps tracking (mockup .ctx h3) */
 }

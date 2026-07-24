@@ -54,7 +54,7 @@ describe('design token component classes', () => {
     expect(css).not.toContain('.c-dialog-backdrop')
   })
 
-  it('uses shared search input classes in SoupKitchen and Inbox', () => {
+  it('uses shared search input classes in SoupKitchen; v3.5 Inbox re-rolls no search input', () => {
     const soupKitchen = read('console/src/pages/SoupKitchen.tsx')
     const inbox = read('console/src/pages/Inbox.tsx')
 
@@ -63,10 +63,12 @@ describe('design token component classes', () => {
     // no legacy c-input classes).
     expect(soupKitchen).toContain('TextInput')
     expect(soupKitchen).not.toContain('c-input c-input-search')
-    // B4: Inbox migrated to shared SearchInput component — the last raw c-input-search
-    // re-roll is gone; Inbox now imports and uses the shared SearchInput producer.
-    expect(inbox).toContain('SearchInput')
+    // T5 b-07: the in-conversation search lane left the inbox surface per the
+    // v3.5 mockup SSOT (no search affordance in inbox.html). The pin that
+    // remains meaningful: the page re-rolls NO raw search input of its own —
+    // the B4 anti-re-roll law still holds, now by absence of the lane itself.
     expect(inbox).not.toContain('c-input c-input-search')
+    expect(inbox).not.toContain('Search this conversation')
   })
 
   it('renders message-bubble hover metadata via the HoverCard primitive (DD-43)', () => {

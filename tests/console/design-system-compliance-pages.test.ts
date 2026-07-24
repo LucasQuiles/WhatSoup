@@ -234,20 +234,21 @@ describe('design system compliance — Shannon slice', () => {
     expect(pipeline).not.toContain('<span\n      className="inline-flex items-center gap-1.5"\n      onClick={onClick}')
   })
 
-  it('migrates Inbox panels and interaction affordances to design-system classes', () => {
+  it('v3.5 Inbox surface is fully off the v3 recipes (T5 b-07 supersession)', () => {
     const inbox = read('console/src/pages/Inbox.tsx')
 
-    // Inbox migrated off the raw `.c-card` recipe onto the <Card> primitive (DD-38):
-    // the three panes (chats, messages, contact) are each a <Card>. Assert the
-    // primitive is used and no raw recipe class remains.
-    expect((inbox.match(/<Card\b/g) ?? []).length).toBeGreaterThanOrEqual(3)
+    // T5 b-07 replaced the v3 inbox page wholesale (mockup inbox.html SSOT).
+    // The DD-38 <Card>-primitive migration this leg used to pin is superseded:
+    // v3.5 surfaces render styled regions from their own -v35 stylesheet, and
+    // every interactive control goes through the Button/FormControl primitives.
+    // Pin the new contract: zero v3 recipe classes anywhere in the page source,
+    // with positive control that the primitives are the only control producers.
     expect(inbox).not.toMatch(/className="[^"]*\bc-card\b/)
-    // Interaction affordances are on the Button/ActionButton primitives.
-    expect(inbox).toContain('<Button')
-    expect(inbox).toContain('<ActionButton')
-    expect(inbox).toContain('z-[var(--z-float)]')
-    expect(inbox).toContain('aria-label="Type a message"')
-    expect(inbox).toContain('aria-label="Clear search"')
+    expect(inbox).not.toMatch(/\bc-input\b/)
+    expect(inbox).not.toMatch(/text-text-3/)
+    expect(inbox).not.toMatch(/<ActionButton/)
+    expect(inbox).toContain("from '../components/primitives/Button'")
+    expect(inbox).toContain('inbox-page')
   })
 
   it('Operator and SoupKitchen panels adopt the <Card> primitive and label the search input', () => {

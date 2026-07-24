@@ -2,11 +2,11 @@
   "generated": "design burndown queue — canonical machine-readable burndown; regenerate via: npm --prefix console run design:burndown -- --update",
   "schema_version": 1,
   "summary": {
-    "total": 51,
+    "total": 50,
     "blocking": 0,
     "byCategory": {
       "accent-law": 0,
-      "half-step": 50,
+      "half-step": 49,
       "legacy-var-css": 0,
       "raw-color-css": 0,
       "raw-dimension-css": 0,
@@ -56,7 +56,7 @@
       "id": "burndown:half-step",
       "category": "half-step",
       "severity": "polish",
-      "count": 50,
+      "count": 49,
       "files": [
         {
           "path": "src/components/ChartPanel.tsx",
@@ -198,13 +198,6 @@
           "count": 1,
           "lines": [
             665
-          ]
-        },
-        {
-          "path": "src/pages/Inbox.tsx",
-          "count": 1,
-          "lines": [
-            457
           ]
         },
         {
