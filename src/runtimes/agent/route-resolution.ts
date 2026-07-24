@@ -1,5 +1,8 @@
 import type { ChatModelPreference } from './chat-preference-db.ts';
-import { FALLBACK_MODEL_REQUIRED_PROVIDER_IDS } from '../../core/fallback-chain.ts';
+import {
+  FALLBACK_MODEL_REQUIRED_PROVIDER_IDS,
+  type AgentFallbackEntry,
+} from '../../core/fallback-chain.ts';
 
 /**
  * Pure route-resolution core (owner-approved PR-plan v2, slice 2).
@@ -9,7 +12,8 @@ import { FALLBACK_MODEL_REQUIRED_PROVIDER_IDS } from '../../core/fallback-chain.
  * authority state — the capability gate is a separate layer.
  *
  * Precedence (each level visible via `source`/`reasonCode`, never silent):
- *   1. active fallback window — health beats preference
+ *   1. active fallback window — health chooses the provider; a verified,
+ *      credentialed model pin may refine only that same provider's model
  *   2. strict user pin — eligible routes to the pin; ineligible NEVER
  *      impersonates it (pin_blocked_default; zero silent-fallback paths)
  *   3. tier-mapped intent (strongest/fastest) via the instance-config tier
@@ -26,6 +30,8 @@ export interface RouteInputs {
   pref: ChatModelPreference | null;
   /** Instance-routable probe result for the pinned provider (F07 semantics). */
   pinnedProviderEligible: boolean;
+  /** Exact configured model entry exists and its credential is available. */
+  pinnedModelEligible: boolean;
   /** Instance-config intent→provider map; null = unconfigured. */
   tierMap: { strongest?: string; fastest?: string } | null;
   /** Instance-routable probe result for the tier provider this pref maps to
@@ -79,11 +85,17 @@ export interface RouteDecision {
 
 export function resolveRoute(i: RouteInputs): RouteDecision {
   if (i.fallbackEntry) {
+    const pinnedModel = i.pref?.intent === 'provider_specific' &&
+      i.pref.requestedProvider === i.fallbackEntry.provider &&
+      i.pref.validatedProvider === i.fallbackEntry.provider &&
+      i.pref.modelPinVerified === true && i.pinnedModelEligible
+      ? i.pref.requestedModel
+      : null;
     return {
       provider: i.fallbackEntry.provider,
-      model: i.fallbackEntry.model ?? i.effectiveModel,
+      model: pinnedModel ?? i.fallbackEntry.model ?? i.effectiveModel,
       source: 'fallback',
-      reasonCode: 'fallback_window_active',
+      reasonCode: pinnedModel ? 'fallback_window_active_model_pin' : 'fallback_window_active',
     };
   }
   if (!i.pref) {
@@ -152,4 +164,16 @@ export function resolveRoute(i: RouteInputs): RouteDecision {
     source: 'tier_unconfigured_default',
     reasonCode: `intent_${i.pref.intent}_unmapped`,
   };
+}
+
+export function isPinnedModelEligible(
+  pref: ChatModelPreference | null,
+  entries: readonly AgentFallbackEntry[],
+  isCredentialed: (entry: AgentFallbackEntry) => boolean,
+): boolean {
+  if (!pref?.requestedProvider || !pref.requestedModel || pref.modelPinVerified !== true ||
+      pref.validatedProvider !== pref.requestedProvider) return false;
+  const entry = entries.find((candidate) =>
+    candidate.provider === pref.requestedProvider && candidate.model === pref.requestedModel);
+  return entry !== undefined && isCredentialed(entry);
 }

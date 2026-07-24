@@ -187,6 +187,49 @@ jobs:
           printf 'chore(ci): guard smoke\n' > "$msg"
           npm run guard:repo:commit-msg -- "$msg"
 
+      # Runs the drift classifier CLI end-to-end against the real tree. Fails ONLY on
+      # INCONCLUSIVE — an unrecognised path — never on the drift verdict itself, which is
+      # legitimately a "stop" much of the time and would be pure noise as a gate. An
+      # unclassified surface means every future verdict touching it silently degrades to
+      # "I do not know", which is the failure worth catching at PR time.
+      - name: Drift classifier coverage
+        run: npm run guard:drift-coverage
+
+      # A committed baseline enumerates tolerated debt, and every other baseline guard
+      # compares CURRENT CODE against it — nothing checked the baseline itself, so
+      # "add a violation, re-run --update, commit" was green everywhere. This refuses any
+      # increase in a baseline's tolerated-debt weight against the merge base.
+      #
+      # It must be a NAMED CI STEP, not local-only: a guard wired solely into
+      # verify:push:branch is bypassed by any server-side merge, which is exactly what
+      # tests/scripts/pre-push-guard.test.ts caught when this shipped push-gate-only.
+      - name: Baseline growth guard
+        run: npm run guard:baseline-growth
+
+      # `guard:boundaries` checks import DIRECTION; nothing checked for CYCLES. Ships with
+      # an EMPTY baseline because src/ measured 433 modules / 1176 runtime edges / 0 cycles
+      # — so any cycle reported here is new. Type-only imports are excluded: TypeScript
+      # erases them, and counting them is what made an earlier regex prototype report three
+      # cycles that do not exist.
+      #
+      # Named CI step, not push-gate-only: tests/scripts/pre-push-guard.test.ts requires
+      # parity, because a local-only guard is bypassed by any server-side merge.
+      - name: Import cycle guard
+        run: npm run guard:import-cycle
+
+      # A package imported but never declared resolves only because something else hoisted
+      # it into node_modules — it works here and breaks on a clean install. Ships with an
+      # EMPTY baseline: measured 1972 tracked files / 9818 import sites / 0 phantoms.
+      # Declarations resolve PER FILE up the package.json chain, because tools/whatsoup_guard
+      # legitimately declares packages the root does not.
+      #
+      # Named CI step, not push-gate-only: tests/scripts/pre-push-guard.test.ts requires
+      # parity for guard:* scripts, since a local-only guard is bypassed by a server-side merge.
+      - name: Phantom dependency guard
+        run: npm run guard:phantom-deps
+
+
+
       - name: Documentation drift guard
         run: npm run guard:doc-drift
 

@@ -6,9 +6,19 @@ import {
   readFileSync,
   rmSync,
   statSync,
+  unlinkSync,
   writeFileSync,
 } from 'node:fs';
+import { homedir } from 'node:os';
 import path from 'node:path';
+
+import {
+  acquireProcessLock,
+  isProcessLockError,
+  readProcessLockPayload,
+  releaseProcessLock,
+  type ProcessLockHandle,
+} from '../src/lib/process-lock.ts';
 
 type Disposition =
   | 'observed'
@@ -97,6 +107,7 @@ const CHILD_ENV_ALLOWLIST = [
   'LC_ALL',
   'LC_CTYPE',
   'PYTHONPATH',
+  'OPENCODE_MEMORY_MCP_ROOT',
 ] as const;
 const SECRET_REDACTIONS: Array<[RegExp, string]> = [
   [/\bBearer\s+[A-Za-z0-9._/-]{8,}/g, 'Bearer <redacted>'],
@@ -466,6 +477,166 @@ export function acquireRunLock(lockDir: string): { release: () => void } | null 
   return null;
 }
 
+// --- Dispatch burst lock (QR-022) -------------------------------------------
+// A dispatcher-owned, host-wide serializer around the worker-dispatch burst,
+// reusing the fleet-wide acquireProcessLock / releaseProcessLock primitive
+// (src/lib/process-lock.ts) rather than inventing a new lock.
+//
+// It closes the gap that acquireRunLock is keyed on `stateDir`: two invocations
+// with different --state-dir (e.g. a scheduled tick overlapping a manual
+// --force run) each take their own run lock and today dispatch simultaneously.
+// This lock keys on a STABLE host path so every qregistry dispatch burst on the
+// host contends regardless of --state-dir / repo / worktree, and it is forward
+// safety for auto-dispatch (QR-018).
+//
+// It is NOT a memory.db mutex: `ocw` gives each job a unique cwd and the
+// memory-mcp plugin namespaces its SQLite by hash16(cwd), so concurrent workers
+// already write disjoint memory.db files. Keying this lock on a per-job
+// hash16(cwd) namespace would be vacuous; it is deliberately a plain dispatcher
+// sentinel file instead.
+
+const DISPATCH_LOCK_FILENAME = '.qregistry-dispatch.lock';
+const DEFAULT_DISPATCH_LOCK_TIMEOUT_MS = 2_000;
+const DEFAULT_DISPATCH_LOCK_FORCE_TIMEOUT_MS = 60_000;
+const DEFAULT_DISPATCH_LOCK_POLL_MS = 100;
+
+export interface DispatchLockOptions {
+  timeoutMs: number;
+  pollMs: number;
+  /** Test seam: synchronous sleep between contention polls. */
+  sleep?: (ms: number) => void;
+  /** Test seam: liveness check used by the stale-reclaim identity gate. */
+  isAlive?: (pid: number) => boolean;
+}
+
+export type DispatchLockResult<T> =
+  | { ran: true; value: T }
+  | { ran: false; reason: 'dispatch-lock-contended' };
+
+/**
+ * Single source of truth for "the memory-mcp root", shared by the dispatch
+ * lock (dispatchLockPath) and the worker child-process env (dispatchWorker).
+ * QR-022/#1978 pin: both MUST resolve from this one function so the lock's
+ * rendezvous point and the memory-mcp plugin's own root can never drift apart
+ * — they used to agree only by both independently defaulting the same way.
+ */
+export function resolveMemoryMcpRoot(env: NodeJS.ProcessEnv = process.env): string {
+  return env.OPENCODE_MEMORY_MCP_ROOT?.trim()
+    || path.join(env.HOME ?? homedir(), '.local', 'share', 'opencode', 'memory-mcp');
+}
+
+/**
+ * Stable, host-wide, dispatcher-owned lock path. Lives under the memory-mcp
+ * root — the natural rendezvous for "an OpenCode worker dispatch is running on
+ * this host" — but is a plain dispatcher sentinel file, deliberately NOT keyed
+ * on the plugin's per-job hash16(cwd) namespace (that would be per-run and
+ * vacuous). Outside every repo/worktree, so different worktrees serialize, and
+ * independent of the per-`stateDir` acquireRunLock.
+ */
+export function dispatchLockPath(env: NodeJS.ProcessEnv = process.env): string {
+  return path.join(resolveMemoryMcpRoot(env), DISPATCH_LOCK_FILENAME);
+}
+
+function busySleep(ms: number): void {
+  if (ms <= 0) return;
+  // Synchronous, non-spinning sleep; run() is fully synchronous (spawnSync).
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+function safeUnlink(target: string): void {
+  try {
+    unlinkSync(target);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+  }
+}
+
+/**
+ * Run `fn` while holding the dispatch lock, reusing acquireProcessLock /
+ * releaseProcessLock. Bounded-wait-then-skip: if a live holder keeps the lock
+ * past `timeoutMs`, return { ran:false } so the caller records
+ * `dispatch-lock-contended` and exits 0 (the next scheduled tick retries) —
+ * mirroring the existing acquireRunLock skip posture. The lock is released on
+ * every exit path (success, throw, early-return from fn) via finally.
+ *
+ * Stale handling is a deliberate, documented divergence from the account lock:
+ * acquireProcessLock fails closed on a same-boot dead holder (no split-brain for
+ * two WhatsApp bots). This dispatch lock is a low-stakes advisory serializer
+ * where a dead holder is provably gone and reclaiming cannot cause split-brain,
+ * so on `stale` we reclaim ONCE with an identity-checked unlink (mirroring
+ * acquireProcessLock's own reclaim: re-read and only remove the SAME dead holder
+ * the error named). This keeps a crashed dispatch (up to the 20-min-per-worker
+ * spawnSync window) from wedging an unattended auto-dispatch loop until reboot,
+ * while the primitive's boot-id reclaim still handles the prior-boot case.
+ */
+export function withDispatchLock<T>(
+  lockPath: string,
+  opts: DispatchLockOptions,
+  fn: () => T,
+): DispatchLockResult<T> {
+  const deadline = Date.now() + Math.max(0, opts.timeoutMs);
+  const sleep = opts.sleep ?? busySleep;
+  const isAlive = opts.isAlive ?? pidIsAlive;
+  let handle: ProcessLockHandle;
+  let reclaimedStale = false;
+
+  for (;;) {
+    try {
+      handle = acquireProcessLock(lockPath);
+      break;
+    } catch (err) {
+      if (!isProcessLockError(err)) throw err;
+
+      if (err.reason === 'stale' && !reclaimedStale) {
+        // Same-boot dead holder. Reclaim once with an identity-checked unlink:
+        // only remove the lock if it is still the exact dead holder the error
+        // named, so a lock a live process re-linked in the race window is never
+        // blind-deleted. Then retry; acquireProcessLock fails closed if it changed.
+        reclaimedStale = true;
+        const current = readProcessLockPayload(lockPath);
+        if (current && current.pid === err.existingPid && !isAlive(current.pid)) {
+          safeUnlink(lockPath);
+        }
+        continue;
+      }
+
+      if (err.reason === 'corrupt') {
+        // Unreadable payload: remove once and retry, bounded by the deadline.
+        safeUnlink(lockPath);
+        if (Date.now() >= deadline) return { ran: false, reason: 'dispatch-lock-contended' };
+        continue;
+      }
+
+      // active (a live holder), or a re-observed stale after our single reclaim:
+      // wait within the deadline, then skip.
+      if (Date.now() >= deadline) return { ran: false, reason: 'dispatch-lock-contended' };
+      sleep(opts.pollMs);
+    }
+  }
+
+  try {
+    return { ran: true, value: fn() };
+  } finally {
+    releaseProcessLock(handle);
+  }
+}
+
+function intFromEnv(value: string | undefined, fallback: number): number {
+  if (value === undefined) return fallback;
+  const parsed = Number.parseInt(value, 10);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback;
+}
+
+function resolveDispatchLockTiming(force: boolean, env: NodeJS.ProcessEnv): DispatchLockOptions {
+  return {
+    timeoutMs: intFromEnv(
+      env.QREGISTRY_DISPATCH_LOCK_TIMEOUT_MS,
+      force ? DEFAULT_DISPATCH_LOCK_FORCE_TIMEOUT_MS : DEFAULT_DISPATCH_LOCK_TIMEOUT_MS,
+    ),
+    pollMs: intFromEnv(env.QREGISTRY_DISPATCH_LOCK_POLL_MS, DEFAULT_DISPATCH_LOCK_POLL_MS),
+  };
+}
+
 function runCommand(
   command: string,
   args: string[],
@@ -596,6 +767,14 @@ function dispatchWorker(
     OCW_WATCHDOG: '1',
     OCW_IDLE_SECS: '240',
     OCW_FAILOVER_LADDER: PINNED_WORKER_MODEL,
+    // QR-022/#1978 pin: force the worker's memory-mcp root to be the SAME
+    // root the dispatch lock rendezvoused on (resolveMemoryMcpRoot), not a
+    // value the memory-mcp plugin re-derives independently. Explicit here
+    // (rather than relying solely on the CHILD_ENV_ALLOWLIST passthrough)
+    // so the two roots agree even when the parent process never had
+    // OPENCODE_MEMORY_MCP_ROOT set and both would otherwise default the
+    // same way only by coincidence.
+    OPENCODE_MEMORY_MCP_ROOT: resolveMemoryMcpRoot(env),
   }, env);
   return { role: plan.role, status };
 }
@@ -715,31 +894,66 @@ export function run(argv: string[], env: NodeJS.ProcessEnv = process.env): numbe
 
     const workerResults: Array<{ role: string; status: number | null }> = [];
     if (dispatch && plans.length > 0) {
-      const healthStatus = runCommand(
-        'ocw-health',
-        [],
-        options.repoRoot,
-        path.join(runDir, 'ocw-health.stdout.txt'),
-        path.join(runDir, 'ocw-health.stderr.txt'),
-        {},
-        env,
+      // Serialize the worker-dispatch burst on a stable, host-wide dispatcher
+      // lock (see withDispatchLock). This is the cross-process guard that
+      // acquireRunLock (keyed on stateDir) cannot provide.
+      const lockPath = dispatchLockPath(env);
+      mkdirSync(path.dirname(lockPath), { recursive: true });
+      const dispatchOutcome = withDispatchLock(
+        lockPath,
+        resolveDispatchLockTiming(options.force, env),
+        (): 'dispatched' | 'health-failed' => {
+          const healthStatus = runCommand(
+            'ocw-health',
+            [],
+            options.repoRoot,
+            path.join(runDir, 'ocw-health.stdout.txt'),
+            path.join(runDir, 'ocw-health.stderr.txt'),
+            {},
+            env,
+          );
+          const healthStdout = readFileSync(path.join(runDir, 'ocw-health.stdout.txt'), 'utf8');
+          if (!healthAllowsDispatch(healthStatus, healthStdout)) {
+            writeJson(path.join(runDir, 'summary.json'), {
+              currentHash,
+              checkerStatus,
+              dispatch: false,
+              reason: 'ocw-health-failed',
+              healthStatus,
+            });
+            console.error(`[qregistry-loop] ocw-health failed; see ${runDir}`);
+            return 'health-failed';
+          }
+          for (const plan of plans) {
+            workerResults.push(dispatchWorker(plan, options.repoRoot, runDir, env));
+          }
+          writeFileSync(path.join(stateDir, 'last-dispatch-key'), `${checkHash}\n`, 'utf8');
+          return 'dispatched';
+        },
       );
-      const healthStdout = readFileSync(path.join(runDir, 'ocw-health.stdout.txt'), 'utf8');
-      if (!healthAllowsDispatch(healthStatus, healthStdout)) {
+
+      if (!dispatchOutcome.ran) {
+        // A concurrent dispatch burst holds the lock past our timeout. Skip
+        // without advancing register.sha256 / last-dispatch-key so the next
+        // scheduled tick retries; exit 0 (mirrors the acquireRunLock skip).
         writeJson(path.join(runDir, 'summary.json'), {
           currentHash,
+          previousHash,
           checkerStatus,
+          changed,
+          checkChanged,
           dispatch: false,
-          reason: 'ocw-health-failed',
-          healthStatus,
+          noDispatch: options.noDispatch,
+          reason: dispatchOutcome.reason,
+          dispatchLockPath: lockPath,
+          safeExport,
         });
-        console.error(`[qregistry-loop] ocw-health failed; see ${runDir}`);
+        console.error(`[qregistry-loop] ${dispatchOutcome.reason}; see ${runDir}`);
+        return 0;
+      }
+      if (dispatchOutcome.value === 'health-failed') {
         return 2;
       }
-      for (const plan of plans) {
-        workerResults.push(dispatchWorker(plan, options.repoRoot, runDir, env));
-      }
-      writeFileSync(path.join(stateDir, 'last-dispatch-key'), `${checkHash}\n`, 'utf8');
     }
 
     writeFileSync(path.join(stateDir, 'register.sha256'), `${currentHash}\n`, 'utf8');

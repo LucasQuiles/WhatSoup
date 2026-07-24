@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 from datetime import datetime, timezone
+import hashlib
 import json
 import math
 import os
@@ -27,7 +28,7 @@ from lib.bot_errors_redaction import redact_bot_errors_text, redact_json_value a
 from lib.bot_errors_roster import RosterError, load_roster  # noqa: E402
 
 
-DEFAULT_CHECKS = "q_loop,dispatcher,collector,daily_health,queue_backlog,local_services,local_instance_health"
+DEFAULT_CHECKS = "q_loop,dispatcher,collector,daily_health,queue_backlog,local_services,local_instance_health,browser_debug"
 REPO_ROOT = Path(__file__).resolve().parents[2]
 TERMINAL_AUTH_FAILURE_CLASSES = {"pairing_required", "serverside_logout_irreversible"}
 
@@ -93,6 +94,8 @@ def max_awaiting_q_age_seconds() -> int:
 # genuine-failure key ("q_loop:supervisor") so capacity is never paged critical.
 Q_LOOP_CAPACITY_KEY = "q_loop:supervisor:capacity"
 Q_LOOP_AWAITING_Q_KEY = "q_loop:awaiting_q"
+BROWSER_DEBUG_PREFIX = "browser_debug:"
+BROWSER_DEBUG_PROBE_KEY = f"{BROWSER_DEBUG_PREFIX}probe"
 
 # q-loop "q_unavailable_<reason>" phases that are self-recovering usage/rate
 # capacity conditions (claude-cli usage-window caps), NOT supervisor failures.
@@ -125,16 +128,50 @@ def is_capacity_incident_key(key: str) -> bool:
     return key == Q_LOOP_CAPACITY_KEY
 
 
+def is_browser_debug_incident_key(key: str) -> bool:
+    return key.startswith(BROWSER_DEBUG_PREFIX)
+
+
+def is_nonpaging_incident_key(key: str) -> bool:
+    return is_capacity_incident_key(key) or is_browser_debug_incident_key(key)
+
+
 def incident_severity(key: str, escalated: bool) -> str:
-    """Severity for an incident, capping capacity events at ``warning``.
+    """Severity for an incident, capping non-paging signals at ``warning``.
 
     Genuine failures escalate to ``critical`` when ``escalated`` is set, but a
-    self-recovering capacity event must never page critical regardless of age
-    or suppression count -- the only response is to wait for the window reset.
+    capacity event or resource-observation warning must never page critical
+    regardless of age or suppression count.
     """
-    if is_capacity_incident_key(key) or key == Q_LOOP_AWAITING_Q_KEY:
+    if is_nonpaging_incident_key(key) or key == Q_LOOP_AWAITING_Q_KEY:
         return "warning"
     return "critical" if escalated else "warning"
+
+
+def open_incident_summary(key: str) -> str:
+    if is_capacity_incident_key(key):
+        return f"BOT ERRORS heartbeat watchdog capacity: {key}"
+    if key == BROWSER_DEBUG_PROBE_KEY:
+        return f"BOT ERRORS browser debug visibility degraded: {key}"
+    if is_browser_debug_incident_key(key):
+        return f"BOT ERRORS browser debug session unattended: {key}"
+    return f"BOT ERRORS heartbeat watchdog stale: {key}"
+
+
+def incident_requested_action(key: str, *, persistent: bool = False) -> str:
+    if is_capacity_incident_key(key):
+        return "requested_action=No action required; Q is at usage-window capacity and self-recovers when the window resets."
+    if key == BROWSER_DEBUG_PROBE_KEY:
+        return "requested_action=Restore controller-connection visibility before classifying or terminating browser debug sessions."
+    if is_browser_debug_incident_key(key):
+        qualifier = "persistent " if persistent else ""
+        return (
+            f"requested_action=Inspect the {qualifier}unattended browser debug tree; close only the confirmed root session, "
+            "preserve its profile, and verify memory recovery."
+        )
+    if persistent:
+        return "requested_action=Q investigate persistent monitor failure; this alert bypasses duplicate suppression by design."
+    return "requested_action=Q investigate the silent monitor and restore cadence."
 
 
 def validate_thresholds() -> None:
@@ -143,6 +180,8 @@ def validate_thresholds() -> None:
     watchdog_escalate_suppressed()
     watchdog_recovery_confirmations()
     watchdog_stale_confirmations()
+    browser_debug_min_age_seconds()
+    browser_debug_min_rss_mb()
     watchdog_flap_rearm_seconds()
 
 
@@ -1263,6 +1302,51 @@ def collector_best_effort_hosts() -> list[str]:
     return []
 
 
+def collector_reachability_evidence(host: str) -> str:
+    """Return bounded, non-address collector context for a stale host.
+
+    The collector already owns the remote reachability probe. Reusing its
+    durable receipt keeps the heartbeat watchdog independent of SSH/Tailscale
+    execution while making a cadence alert actionable. Network addresses and
+    arbitrary target lists are deliberately excluded.
+    """
+    data = load_json(state_root() / "collector-state.json", require_private=True)
+    remotes = data.get("remotes") if isinstance(data, dict) else None
+    remote = remotes.get(host) if isinstance(remotes, dict) else None
+    if not isinstance(remote, dict):
+        return ""
+
+    parts: list[str] = []
+    reachability = remote.get("lastReachability")
+    if isinstance(reachability, dict):
+        diagnosis = reachability.get("reachabilityDiagnosis")
+        if isinstance(diagnosis, str) and diagnosis.strip():
+            parts.append(
+                f"collector_reachability={compact_health_field(redact_watchdog_text(diagnosis.strip()))}"
+            )
+
+    failures = remote.get("consecutiveFailures")
+    if isinstance(failures, int) and not isinstance(failures, bool) and failures >= 0:
+        parts.append(f"collector_consecutive_failures={failures}")
+    last_success = remote.get("lastSuccessIso")
+    if isinstance(last_success, str) and last_success.strip():
+        parts.append(
+            f"collector_last_success={compact_health_field(redact_watchdog_text(last_success.strip()))}"
+        )
+
+    tailscale = reachability.get("tailscale") if isinstance(reachability, dict) else None
+    if isinstance(tailscale, dict):
+        online = tailscale.get("online")
+        if isinstance(online, bool):
+            parts.append(f"tailscale_online={str(online).lower()}")
+        last_seen = tailscale.get("lastSeen")
+        if isinstance(last_seen, str) and last_seen.strip():
+            parts.append(
+                f"tailscale_last_seen={compact_health_field(redact_watchdog_text(last_seen.strip()))}"
+            )
+    return " ".join(parts)
+
+
 def optional_daily_health_hosts() -> list[str]:
     return unique_hosts([*env_host_list("BOT_ERRORS_DAILY_HEALTH_OPTIONAL_HOSTS"), *collector_best_effort_hosts()])
 
@@ -1439,6 +1523,236 @@ def daily_health_age(host: str | None = None) -> tuple[int | None, str]:
     return min(candidates, key=lambda candidate: candidate[0])
 
 
+def browser_debug_min_age_seconds() -> int:
+    return positive_env_int("BOT_ERRORS_BROWSER_DEBUG_MIN_AGE_SECONDS", 30 * 60)
+
+
+def browser_debug_min_rss_mb() -> int:
+    return positive_env_int("BOT_ERRORS_BROWSER_DEBUG_MIN_RSS_MB", 512)
+
+
+def _finite_number(value: Any) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    converted = float(value)
+    return converted if math.isfinite(converted) and converted >= 0 else None
+
+
+def _dry_browser_debug_snapshot(raw: str) -> tuple[list[dict[str, Any]], str | None]:
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        return [], f"dry snapshot invalid JSON: {exc.msg}"
+    if not isinstance(parsed, list):
+        return [], "dry snapshot must be a list"
+    rows: list[dict[str, Any]] = []
+    for index, item in enumerate(parsed):
+        if not isinstance(item, dict):
+            return [], f"dry snapshot row {index} must be an object"
+        pid = finite_epoch(item.get("pid"))
+        age_seconds = _finite_number(item.get("ageSeconds"))
+        rss_mb = _finite_number(item.get("rssMb"))
+        process_count = finite_epoch(item.get("processCount"))
+        debug_port = finite_epoch(item.get("debugPort"))
+        controller_raw = item.get("controllerConnections")
+        controller_connections = None if controller_raw is None else finite_epoch(controller_raw)
+        profile_hash = re.sub(r"[^a-zA-Z0-9_.-]", "", str(item.get("profileHash") or ""))[:40]
+        if (
+            pid is None or pid <= 0
+            or age_seconds is None
+            or rss_mb is None
+            or process_count is None or process_count <= 0
+            or debug_port is None or not 1 <= debug_port <= 65535
+            or (controller_raw is not None and (controller_connections is None or controller_connections < 0))
+            or not profile_hash
+        ):
+            return [], f"dry snapshot row {index} has invalid required fields"
+        rows.append({
+            "pid": pid,
+            "ageSeconds": age_seconds,
+            "rssMb": rss_mb,
+            "processCount": process_count,
+            "debugPort": debug_port,
+            "controllerConnections": controller_connections,
+            "profileHash": profile_hash,
+        })
+    return rows, None
+
+
+def _proc_processes() -> tuple[dict[int, dict[str, Any]], str | None]:
+    proc_root = Path("/proc")
+    if sys.platform != "linux" or not proc_root.is_dir():
+        return {}, None
+    try:
+        uptime_seconds = float((proc_root / "uptime").read_text(encoding="utf-8").split()[0])
+        clock_ticks = int(os.sysconf("SC_CLK_TCK"))
+    except (OSError, ValueError, IndexError) as exc:
+        return {}, f"process clock unavailable: {exc}"
+    records: dict[int, dict[str, Any]] = {}
+    try:
+        entries = list(proc_root.iterdir())
+    except OSError as exc:
+        return {}, f"process inventory unavailable: {exc}"
+    for entry in entries:
+        if not entry.name.isdigit():
+            continue
+        pid = int(entry.name)
+        try:
+            args = [
+                part.decode("utf-8", errors="replace")
+                for part in (entry / "cmdline").read_bytes().split(b"\0")
+                if part
+            ]
+            stat_text = (entry / "stat").read_text(encoding="utf-8")
+            stat_tail = stat_text[stat_text.rfind(")") + 1:].strip().split()
+            ppid = int(stat_tail[1])
+            start_ticks = int(stat_tail[19])
+            rss_kb = 0
+            for line in (entry / "status").read_text(encoding="utf-8").splitlines():
+                if line.startswith("VmRSS:"):
+                    rss_kb = int(line.split()[1])
+                    break
+        except (FileNotFoundError, PermissionError, ProcessLookupError, OSError, ValueError, IndexError):
+            continue
+        records[pid] = {
+            "pid": pid,
+            "ppid": ppid,
+            "args": args,
+            "ageSeconds": max(0.0, uptime_seconds - (start_ticks / clock_ticks)),
+            "rssMb": rss_kb / 1024.0,
+        }
+    return records, None
+
+
+def _browser_debug_port(args: list[str]) -> int | None:
+    for index, arg in enumerate(args):
+        raw = ""
+        if arg.startswith("--remote-debugging-port="):
+            raw = arg.partition("=")[2]
+        elif arg == "--remote-debugging-port" and index + 1 < len(args):
+            raw = args[index + 1]
+        if raw.isdigit() and 1 <= int(raw) <= 65535:
+            return int(raw)
+    return None
+
+
+def _browser_profile_hash(args: list[str], debug_port: int) -> str:
+    profile = next((arg.partition("=")[2] for arg in args if arg.startswith("--user-data-dir=")), "")
+    identity = profile or f"debug-port:{debug_port}"
+    return hashlib.sha256(identity.encode("utf-8")).hexdigest()[:12]
+
+
+def _established_debug_connections(ports: set[int]) -> tuple[dict[int, int], str | None]:
+    counts = {port: 0 for port in ports}
+    if not ports:
+        return counts, None
+    try:
+        result = subprocess.run(
+            ["ss", "-Htn", "state", "established"],
+            capture_output=True,
+            text=True,
+            timeout=3,
+            check=False,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as exc:
+        return counts, f"controller connection inventory unavailable: {exc}"
+    if result.returncode != 0:
+        return counts, f"controller connection inventory failed: rc={result.returncode}"
+    for line in result.stdout.splitlines():
+        fields = line.split()
+        if len(fields) < 4:
+            continue
+        local_endpoint = fields[2]
+        for port in ports:
+            if local_endpoint.rsplit(":", 1)[-1] == str(port):
+                counts[port] += 1
+    return counts, None
+
+
+def browser_debug_snapshot() -> tuple[list[dict[str, Any]], str | None]:
+    dry = os.environ.get("BOT_ERRORS_DRY_BROWSER_DEBUG_SNAPSHOT")
+    if dry is not None:
+        return _dry_browser_debug_snapshot(dry)
+    records, inventory_error = _proc_processes()
+    if inventory_error is not None or not records:
+        return [], inventory_error
+    roots: list[tuple[dict[str, Any], int]] = []
+    children: dict[int, list[int]] = {}
+    for record in records.values():
+        children.setdefault(int(record["ppid"]), []).append(int(record["pid"]))
+        args = record["args"]
+        if not isinstance(args, list) or not args or any(str(arg).startswith("--type=") for arg in args):
+            continue
+        binary = Path(str(args[0])).name.lower()
+        if not any(name in binary for name in ("chrome", "chromium", "msedge", "brave")):
+            continue
+        debug_port = _browser_debug_port([str(arg) for arg in args])
+        if debug_port is not None:
+            roots.append((record, debug_port))
+    connections, connection_error = _established_debug_connections({port for _, port in roots})
+    rows: list[dict[str, Any]] = []
+    for root, debug_port in roots:
+        root_pid = int(root["pid"])
+        descendants: set[int] = set()
+        pending = [root_pid]
+        while pending:
+            current = pending.pop()
+            if current in descendants:
+                continue
+            descendants.add(current)
+            pending.extend(children.get(current, []))
+        rows.append({
+            "pid": root_pid,
+            "ageSeconds": float(root["ageSeconds"]),
+            "rssMb": sum(float(records[pid]["rssMb"]) for pid in descendants if pid in records),
+            "processCount": len(descendants),
+            "debugPort": debug_port,
+            "controllerConnections": None if connection_error is not None else connections.get(debug_port, 0),
+            "profileHash": _browser_profile_hash([str(arg) for arg in root["args"]], debug_port),
+        })
+    return rows, connection_error
+
+
+def browser_debug_problems() -> dict[str, str]:
+    rows, scan_error = browser_debug_snapshot()
+    min_age = browser_debug_min_age_seconds()
+    min_rss = browser_debug_min_rss_mb()
+    qualifying = [
+        row for row in rows
+        if float(row["ageSeconds"]) >= min_age and float(row["rssMb"]) >= min_rss
+    ]
+    problems: dict[str, str] = {}
+    if scan_error is not None and not rows:
+        problems[BROWSER_DEBUG_PROBE_KEY] = (
+            "browser debug process inventory unavailable: "
+            "qualifying_sessions=unknown controller_connections=unknown "
+            f"scan_error={redact_watchdog_text(scan_error)}"
+        )
+    unknown = [row for row in qualifying if row["controllerConnections"] is None]
+    if unknown:
+        max_rss = max(float(row["rssMb"]) for row in unknown)
+        ports = ",".join(str(row["debugPort"]) for row in unknown[:8])
+        problems[BROWSER_DEBUG_PROBE_KEY] = (
+            "browser debug controller visibility unavailable: "
+            f"qualifying_sessions={len(unknown)} max_rss_mb={max_rss:.1f} "
+            f"debug_ports={ports} controller_connections=unknown "
+            f"scan_error={redact_watchdog_text(scan_error or 'unknown')}"
+        )
+    for row in qualifying:
+        if row["controllerConnections"] != 0:
+            continue
+        profile_hash = str(row["profileHash"])
+        key = f"{BROWSER_DEBUG_PREFIX}{profile_hash}"
+        problems[key] = (
+            "browser debug session unattended: "
+            f"profile_hash={profile_hash} root_pid={row['pid']} "
+            f"age_seconds={float(row['ageSeconds']):.0f} rss_mb={float(row['rssMb']):.1f} "
+            f"process_count={row['processCount']} debug_port={row['debugPort']} "
+            f"controller_connections=0 min_age_seconds={min_age} min_rss_mb={min_rss}"
+        )
+    return problems
+
+
 def configured_checks() -> set[str]:
     raw = os.environ.get("BOT_ERRORS_WATCHDOG_CHECKS", DEFAULT_CHECKS)
     return {part.strip() for part in raw.split(",") if part.strip()}
@@ -1464,6 +1778,8 @@ def active_reconcile_prefixes(checks: set[str]) -> list[str]:
         prefixes.append("fleet_sentinel")
     if "collector_roster" in checks:
         prefixes.append("collector_roster")
+    if "browser_debug" in checks:
+        prefixes.append(BROWSER_DEBUG_PREFIX)
     return prefixes
 
 
@@ -1551,7 +1867,13 @@ def collect_problems(args: argparse.Namespace, checks: set[str] | None = None) -
                 age, detail = daily_health_age(host)
                 key = f"daily_health:{host}"
                 if age is None or age > args.max_daily_health_age:
-                    problems[key] = f"daily-health cadence stale for {host}: age_seconds={age if age is not None else 'missing'} max={args.max_daily_health_age} detail={detail}"
+                    collector_context = collector_reachability_evidence(host)
+                    problems[key] = (
+                        f"daily-health cadence stale for {host}: "
+                        f"age_seconds={age if age is not None else 'missing'} "
+                        f"max={args.max_daily_health_age} detail={detail}"
+                        f"{' ' + collector_context if collector_context else ''}"
+                    )
         else:
             age, detail = daily_health_age()
             if age is None or age > args.max_daily_health_age:
@@ -1562,6 +1884,8 @@ def collect_problems(args: argparse.Namespace, checks: set[str] | None = None) -
         problems.update(local_service_problems())
     if "local_instance_health" in checks:
         problems.update(local_instance_health_problems())
+    if "browser_debug" in checks:
+        problems.update(browser_debug_problems())
     return problems
 
 
@@ -1644,9 +1968,9 @@ def reconcile(problems: dict[str, str], active_prefixes: list[str]) -> list[Path
             incident["ageSeconds"] = age_seconds
             since_notify = max(0, current - last_notified)
             escalated = age_seconds >= watchdog_escalate_seconds() or suppressed >= watchdog_escalate_suppressed()
-            # Capacity events never escalate to a paging critical alert; they
-            # self-recover when the usage window resets.
-            if is_capacity_incident_key(key):
+            # Non-paging capacity and resource signals remain warnings even
+            # when they are old or repeatedly observed.
+            if is_nonpaging_incident_key(key):
                 escalated = False
             should_renotify = since_notify >= watchdog_renotify_seconds()
             if should_renotify:
@@ -1665,12 +1989,8 @@ def reconcile(problems: dict[str, str], active_prefixes: list[str]) -> list[Path
                         "evidence": evidence,
                     },
                 )
-                capacity = is_capacity_incident_key(key)
-                requested_action = (
-                    "requested_action=No action required; Q is at usage-window capacity and self-recovers when the window resets."
-                    if capacity
-                    else "requested_action=Q investigate persistent monitor failure; this alert bypasses duplicate suppression by design."
-                )
+                nonpaging = is_nonpaging_incident_key(key)
+                requested_action = incident_requested_action(key, persistent=True)
                 written.append(outbox_event(
                     f"BOT ERRORS heartbeat watchdog {label}: {key}",
                     "\n".join([
@@ -1687,7 +2007,7 @@ def reconcile(problems: dict[str, str], active_prefixes: list[str]) -> list[Path
                     ]),
                     severity,
                     key,
-                    force_notify=not capacity,
+                    force_notify=not nonpaging,
                 ))
                 continue
             append_log("suppressed_open", {"source": key, "suppressed": suppressed, "evidence": evidence})
@@ -1729,7 +2049,7 @@ def reconcile(problems: dict[str, str], active_prefixes: list[str]) -> list[Path
                         {"source": key, "flapCount": flap_count, "evidence": evidence},
                     )
                     written.append(outbox_event(
-                        f"BOT ERRORS heartbeat watchdog stale: {key}",
+                        open_incident_summary(key),
                         "\n".join([
                             f"source={key}",
                             "incident_reopened=true",
@@ -1739,7 +2059,7 @@ def reconcile(problems: dict[str, str], active_prefixes: list[str]) -> list[Path
                             evidence,
                             f"watchdog_state={watchdog_state_path()}",
                             f"watchdog_log={state_root() / 'logs/heartbeat-watchdog.jsonl'}",
-                            "requested_action=Q investigate recurring monitor failure; this condition re-entered stale within the flap re-arm window.",
+                            incident_requested_action(key, persistent=True),
                         ]),
                         incident_severity(key, escalated=True),
                         key,
@@ -1783,17 +2103,8 @@ def reconcile(problems: dict[str, str], active_prefixes: list[str]) -> list[Path
             "lastEvidence": redacted_evidence,
             "suppressed": 0,
         }
-        capacity = is_capacity_incident_key(key)
-        new_summary = (
-            f"BOT ERRORS heartbeat watchdog capacity: {key}"
-            if capacity
-            else f"BOT ERRORS heartbeat watchdog stale: {key}"
-        )
-        new_action = (
-            "requested_action=No action required; Q is at usage-window capacity and self-recovers when the window resets."
-            if capacity
-            else "requested_action=Q investigate the silent monitor and restore cadence."
-        )
+        new_summary = open_incident_summary(key)
+        new_action = incident_requested_action(key)
         written.append(outbox_event(
             new_summary,
             "\n".join([

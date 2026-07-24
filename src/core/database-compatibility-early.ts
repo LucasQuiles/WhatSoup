@@ -17,8 +17,13 @@ import {
   sqliteFileUri,
   type DatabaseCompatibilityReason,
 } from './database-compatibility.ts';
+import { EX_CONFIG } from '../lib/exit-codes.ts';
+import { ConfigValidationError, isConfigValidationError } from '../lib/startup-error.ts';
 
-export const DATABASE_COMPATIBILITY_PERMANENT_EXIT_STATUS = 78;
+// Single source of truth for the permanent-startup exit code: sysexits EX_CONFIG
+// (78), which is what deploy/whatsoup@.service lists in RestartPreventExitStatus.
+// Kept pointed at EX_CONFIG so the two constants cannot drift apart.
+export const DATABASE_COMPATIBILITY_PERMANENT_EXIT_STATUS = EX_CONFIG;
 
 export class DatabaseCompatibilityPermanentStartupError extends Error {
   override readonly cause: unknown;
@@ -36,8 +41,19 @@ export function isDatabaseCompatibilityPermanentStartupError(
   return err instanceof DatabaseCompatibilityPermanentStartupError;
 }
 
-export function databaseCompatibilityStartupExitCode(err: unknown): 1 | 78 {
-  return isDatabaseCompatibilityPermanentStartupError(err)
+/**
+ * Classify a fatal startup error to a service-manager exit code.
+ *
+ * Returns {@link EX_CONFIG} (78) for a POSITIVELY-identified permanent startup
+ * fault — a database-compatibility permanent error or a config-validation error —
+ * so systemd's `RestartPreventExitStatus=78` stops the restart-flap. Every other
+ * error stays exit 1 (restart), because misclassifying a transient failure as
+ * permanent would halt a recoverable service (an outage), which is worse than a
+ * flap. New permanent-startup error categories must be added here explicitly;
+ * unknown errors are treated as transient by design.
+ */
+export function startupExitCode(err: unknown): 1 | 78 {
+  return isDatabaseCompatibilityPermanentStartupError(err) || isConfigValidationError(err)
     ? DATABASE_COMPATIBILITY_PERMANENT_EXIT_STATUS
     : 1;
 }
@@ -328,8 +344,15 @@ export async function runEarlyDatabaseCompatibilityGate(
   dependencies: EarlyDatabaseCompatibilityGateDependencies = {},
 ): Promise<boolean> {
   const encoded = process.env.INSTANCE_CONFIG;
-  if (!encoded) throw new Error('INSTANCE_CONFIG is required before the database compatibility gate');
-  const instance = JSON.parse(encoded) as BootstrapInstanceConfig;
+  if (!encoded) throw new ConfigValidationError('INSTANCE_CONFIG is required before the database compatibility gate');
+  let instance: BootstrapInstanceConfig;
+  try {
+    instance = JSON.parse(encoded) as BootstrapInstanceConfig;
+  } catch (err) {
+    throw new ConfigValidationError(
+      `INSTANCE_CONFIG contains invalid JSON: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
   const dbPath = instance.paths?.dbPath;
   const lockPath = instance.paths?.lockPath;
   const instanceName = instance.name;
@@ -340,7 +363,7 @@ export async function runEarlyDatabaseCompatibilityGate(
     || typeof instanceName !== 'string'
     || (healthPort !== undefined && (!Number.isInteger(healthPort) || (healthPort as number) <= 0))
   ) {
-    throw new Error('INSTANCE_CONFIG is missing canonical database gate fields');
+    throw new ConfigValidationError('INSTANCE_CONFIG is missing canonical database gate fields');
   }
 
   let existingIdentity: ReturnType<typeof inspectDatabasePathBeforeCreate>;

@@ -1359,6 +1359,72 @@ def default_recovery_successes() -> int:
         return 2
 
 
+FAILURE_RETENTION_DETAIL_MAX_CHARS: int = 1000
+
+
+def classify_collector_failure(exc: BaseException) -> str:
+    """Classify a per-remote collection failure for retained diagnostics.
+
+    Distinguishes malformed remote output (the SSH session completed and a
+    claimed line failed to parse as JSON — a protocol/encoding problem on the
+    remote side) from a genuine SSH/transport failure (nonzero exit,
+    connection refused, timeout, preflight skip — anything that kept the
+    remote command from running at all).
+    """
+    if isinstance(exc, json.JSONDecodeError):
+        return "malformed_remote_output"
+    return "ssh_failure"
+
+
+def update_failure_retention(remote_record: dict[str, Any], exc: BaseException, error_text: str) -> None:
+    """Persist bounded, redacted failure diagnostics that survive recovery.
+
+    ``remote_record["lastError"]`` is cleared to ``None`` on the next success
+    (see the success branch in :func:`run_once`), so the reason a remote was
+    previously down is lost the moment it recovers. This retains a single,
+    bounded record per remote — never an unbounded list — so an operator can
+    still see what the last failure was, when it started, and when the remote
+    recovered. Redaction runs before truncation (matching the
+    ``safe_evidence`` pattern used elsewhere in this module) so a secret is
+    never left half-exposed by the length cap.
+    """
+    current = int(time.time())
+    retention = remote_record.get("failureRetention")
+    if not isinstance(retention, dict):
+        retention = {}
+    failure_class = classify_collector_failure(exc)
+    detail = redact_collector_text(error_text)[:FAILURE_RETENTION_DETAIL_MAX_CHARS]
+    same_episode = retention.get("status") == "failing" and retention.get("failureClass") == failure_class
+    if not same_episode:
+        retention["firstObservedAt"] = current
+        retention["firstObservedIso"] = now_iso()
+    retention["status"] = "failing"
+    retention["failureClass"] = failure_class
+    retention["lastFailureDetail"] = detail
+    retention["lastObservedAt"] = current
+    retention["lastObservedIso"] = now_iso()
+    remote_record["failureRetention"] = retention
+
+
+def record_recovery_retention(remote_record: dict[str, Any]) -> None:
+    """Mark recovery on the retained failure record, if one exists.
+
+    Intentionally does not delete ``failureRetention`` — the prior failure
+    detail must remain visible after recovery (DUR-03 acceptance: a
+    fail -> success transition retains prior failure + recovery state). A
+    remote that has never failed has no retention record and none is created
+    here; retention only tracks remotes that have actually failed at least
+    once.
+    """
+    retention = remote_record.get("failureRetention")
+    if not isinstance(retention, dict):
+        return
+    current = int(time.time())
+    retention["status"] = "recovered"
+    retention["lastSuccessAt"] = current
+    retention["lastSuccessIso"] = now_iso()
+
+
 def ssh_json_lines(host: str, script: str, args: list[str], timeout: int) -> list[dict[str, Any]]:
     unreachable = preflight_remote_unreachable(host)
     if unreachable is not None:
@@ -1909,6 +1975,7 @@ def run_once(
             remote_record["lastError"] = error
             remote_record["lastFailureAt"] = int(time.time())
             remote_record["lastFailureIso"] = now_iso()
+            update_failure_retention(remote_record, exc, error)
             if reachability_diagnostics:
                 remote_record["lastReachability"] = reachability_diagnostics
                 skip_writefail_claim = skip_writefail_after_outbox_failure(reachability_diagnostics)
@@ -2054,6 +2121,7 @@ def run_once(
                 remote_record["lastError"] = error
                 remote_record["lastFailureAt"] = int(time.time())
                 remote_record["lastFailureIso"] = now_iso()
+                update_failure_retention(remote_record, exc, error)
                 if reachability_diagnostics:
                     remote_record["lastReachability"] = reachability_diagnostics
                 clear_meta_recovery_progress(state, remote, "remote-claim-failed")
@@ -2093,6 +2161,7 @@ def run_once(
             remote_record["lastSuccessAt"] = int(time.time())
             remote_record["lastSuccessIso"] = now_iso()
             remote_record["lastError"] = None
+            record_recovery_retention(remote_record)
             # NOTE: relay_host_recovered emission + backoff-field reset already
             # happened above, keyed on outbox-claim reachability (intentionally
             # decoupled from the writefail harvest). Here we only handle the

@@ -87,6 +87,31 @@ function makeTmpDir(): string {
 }
 
 /**
+ * A release manifest that satisfies scripts/release-snapshot-plan.ts's
+ * `parseReleaseSnapshotManifest` schema — schemaVersion/source/release/rollback
+ * are all required, so a bare `{"files":[]}` fixture is NOT a valid manifest
+ * and must not be used to exercise the "manifest present" pass path.
+ */
+function validReleaseManifestPayload(root: string): Record<string, unknown> {
+  return {
+    schemaVersion: 2,
+    source: { ref: 'HEAD', commit: '0'.repeat(40) },
+    release: { path: root, createdAt: '2026-01-01T00:00:00.000Z', mutablePathExcludes: [] },
+    rollback: { path: join(root, '.rollback') },
+    files: [],
+    requiredOutputs: [],
+  };
+}
+
+function writeValidReleaseManifest(root: string): void {
+  writeFileSync(
+    join(root, '.whatsoup-release-manifest.json'),
+    `${JSON.stringify(validReleaseManifestPayload(root))}\n`,
+    'utf8',
+  );
+}
+
+/**
  * Builds a minimal repo-shaped fixture tree (.nvmrc + package.json + src/main.ts).
  * mainTs is the literal contents of src/main.ts; extraFiles maps relative paths
  * (under the fixture root) to file contents.
@@ -110,9 +135,10 @@ function makeFixtureTree(
     'utf8',
   );
   // Fixture roots are non-git, so preflight treats them as release exports —
-  // which must carry the release manifest (manifest gate). Tests probing the
-  // missing-manifest failure remove this file explicitly.
-  writeFileSync(join(root, '.whatsoup-release-manifest.json'), '{"files":[]}\n', 'utf8');
+  // which must carry a schema-valid release manifest (manifest gate). Tests
+  // probing the missing/malformed-manifest failures overwrite or remove this
+  // file explicitly.
+  writeValidReleaseManifest(root);
   for (const [rel, contents] of Object.entries(extraFiles)) {
     const abs = join(root, rel);
     mkdirSync(dirname(abs), { recursive: true });
@@ -1066,15 +1092,54 @@ describe.skipIf(!NODE_IN_PIN)('deploy/preflight-check.sh — release-export mani
     expect(stderr).toContain('release export lacks .whatsoup-release-manifest.json');
   });
 
-  it('passes the manifest gate when the release manifest is present', () => {
+  it('passes the manifest gate when the release manifest is present and schema-valid', () => {
     const root = makeFixtureTree(
       "import { ok } from './helper.ts';\nconsole.log(ok);\n",
       { 'src/helper.ts': 'export const ok = true;\n' },
     );
-    writeFileSync(join(root, '.whatsoup-release-manifest.json'), '{"files":[]}\n', 'utf8');
+    writeValidReleaseManifest(root);
     const { status, stderr } = runPreflight(root);
 
     expect(status).toBe(0);
     expect(stderr).toContain('PREFLIGHT-OK');
+    expect(stderr).toContain('release manifest present and schema-valid');
+  });
+
+  // TRUTH-03: existence alone was previously sufficient — a manifest that
+  // exists but is corrupted (not valid JSON) or incomplete (valid JSON,
+  // missing required fields) passed the old `-f` check silently and would
+  // never be caught until a real drift comparison ran. Both must now fail
+  // closed, with a message distinct from the "missing" case above.
+  it('fails closed when the release manifest exists but is not valid JSON (corrupted)', () => {
+    const root = makeFixtureTree(
+      "import { ok } from './helper.ts';\nconsole.log(ok);\n",
+      { 'src/helper.ts': 'export const ok = true;\n' },
+    );
+    writeFileSync(join(root, '.whatsoup-release-manifest.json'), '{not valid json', 'utf8');
+    const { status, stderr } = runPreflight(root);
+
+    expect(status).toBe(3);
+    expect(stderr).toContain('PREFLIGHT-FAIL');
+    expect(stderr).toContain('release manifest is malformed');
+    expect(stderr).toContain('invalid-json');
+    expect(stderr).not.toContain('release export lacks .whatsoup-release-manifest.json');
+  });
+
+  it('fails closed when the release manifest is valid JSON but fails schema validation', () => {
+    const root = makeFixtureTree(
+      "import { ok } from './helper.ts';\nconsole.log(ok);\n",
+      { 'src/helper.ts': 'export const ok = true;\n' },
+    );
+    // Valid JSON, but missing every required manifest field (schemaVersion,
+    // source, release, rollback) — exactly the shape the old `{"files":[]}`
+    // fixture used, which the existence-only check let through.
+    writeFileSync(join(root, '.whatsoup-release-manifest.json'), '{"files":[]}\n', 'utf8');
+    const { status, stderr } = runPreflight(root);
+
+    expect(status).toBe(3);
+    expect(stderr).toContain('PREFLIGHT-FAIL');
+    expect(stderr).toContain('release manifest is malformed');
+    expect(stderr).toContain('invalid-schema');
+    expect(stderr).not.toContain('release export lacks .whatsoup-release-manifest.json');
   });
 });

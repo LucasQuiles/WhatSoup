@@ -76,6 +76,39 @@ function makeRepo(docText: string, classification: 'PUBLIC' | 'PRIVATE-ARCHIVE')
   return repo;
 }
 
+/** A git repo with ZERO tracked files — the empty/wrong-tree scope the floor must refuse. */
+function makeEmptyRepo(): string {
+  const repo = mkdtempSync(join(tmpdir(), 'publication-guard-empty-'));
+  repos.push(repo);
+  git(repo, ['init']);
+  return repo;
+}
+
+describe('publication guard — refuses a whole-tree audit of zero tracked files', () => {
+  it('--all is INCONCLUSIVE (exit 2), not a pass, when 0 files are tracked', () => {
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+    expect(runPublicationGuard(['--all'], makeEmptyRepo())).toBe(2);
+    expect(error.mock.calls.flat().join(' ')).toMatch(/INCONCLUSIVE/i);
+    expect(log.mock.calls.flat().join(' ')).not.toMatch(/passed/i);
+  });
+
+  it('--release is INCONCLUSIVE (exit 2) when 0 files are tracked', () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    expect(runPublicationGuard(['--release'], makeEmptyRepo())).toBe(2);
+  });
+
+  it('--staged STILL PASSES (exit 0) on an empty index — diff-scope is exempt from the floor', () => {
+    // The highest-risk line of the fix: staged mode scans the commit's ADDED lines, and an
+    // empty staged set is a legitimate "nothing to check" (committing with nothing staged is
+    // normal, and .husky/pre-commit runs guard:publication:staged). Flooring it would wrongly
+    // block every clean commit. This pins that staged is NOT swept up by the whole-tree floor.
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+    expect(runPublicationGuard(['--staged'], makeEmptyRepo())).toBe(0);
+    expect(log.mock.calls.flat().join(' ')).toMatch(/passed \(staged\)/i);
+  });
+});
+
 describe('publication guard release mode', () => {
   it('passes when every tracked internal doc is PUBLIC and private-literal clean', () => {
     const repo = makeRepo('Public-safe release note.\n', 'PUBLIC');

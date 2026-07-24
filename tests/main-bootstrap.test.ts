@@ -133,6 +133,7 @@ async function importMainWithMocks(options: {
     preConnectRecovery: vi.fn(),
     postConnectRecovery: vi.fn(),
     sweepStaleSubmitted: vi.fn(),
+    reconcileLiveMaybeSent: vi.fn(),
   };
   let capturedHealthDeps: HealthServerDepsForTest | null = null;
   const getHealthDeps = () => {
@@ -787,6 +788,7 @@ describe('main bootstrap', () => {
     // separately below / in the periodic-timer coverage tests).
     expect(h.collectHourlyMetrics).toHaveBeenCalledWith(h.db);
     expect(h.durability.sweepStaleSubmitted).toHaveBeenCalled();
+    expect(h.durability.reconcileLiveMaybeSent).toHaveBeenCalled();
     expect(h.checkDegradationSignals).toHaveBeenCalledWith(h.db, h.connection, h.durability, null);
 
     await vi.advanceTimersByTimeAsync(30 * 60_000);

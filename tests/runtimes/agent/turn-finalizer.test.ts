@@ -1,4 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { Database } from '../../../src/core/database.ts';
+import { DurabilityEngine } from '../../../src/core/durability.ts';
 import type {
   FinalizeTurnTerminalResult,
   OutboundDeliveryIdentity,
@@ -354,33 +356,145 @@ describe('runtime turn terminal mapping', () => {
     }));
   });
 
-  it.each([
-    { kind: 'failed', class: 'rate-limit' },
-    { kind: 'suppressed_by_policy' },
-  ] satisfies AttemptOutcome[])(
-    'lets echoed delivery truth outrank the later $kind attempt outcome',
-    (attemptOutcome) => {
-      const ctx = harness({ 61: 'echoed' });
-      ctx.finalizeTurnTerminal.mockImplementation((params) => {
-        normalizeFinalizeTurnTerminalParams(params);
-        return APPLIED_RECEIPT;
-      });
+  it('lets an echoed policy response prove a suppressed turn completed', () => {
+    const ctx = harness({ 61: 'echoed' });
+    ctx.finalizeTurnTerminal.mockImplementation((params) => {
+      normalizeFinalizeTurnTerminalParams(params);
+      return APPLIED_RECEIPT;
+    });
 
-      const result = terminalResult(run(ctx.durability, {
-        answerOpIds: [61],
-        attemptOutcome,
+    const attemptOutcome = { kind: 'suppressed_by_policy' } as const;
+    const result = terminalResult(run(ctx.durability, {
+      answerOpIds: [61],
+      attemptOutcome,
+    }));
+
+    expect(result.terminal).toMatchObject({
+      attemptOutcome,
+      inboundDisposition: 'finalized_replied',
+      deliveryEvidence: { kind: 'echoed', opId: 61 },
+    });
+    expect(ctx.finalizeTurnTerminal).toHaveBeenCalledWith(expect.objectContaining({
+      inbound: { kind: 'complete', seq: 41, terminalReason: 'response_echoed' },
+    }));
+  });
+
+  it('does not let echoed partial output prove a crashed attempt completed', () => {
+    const ctx = harness({ 61: 'echoed' }, {
+      ...APPLIED_RECEIPT,
+      effectiveReplyGuaranteeDisarmed: false,
+    });
+
+    const attemptOutcome = { kind: 'failed', class: 'crash' } as const;
+    const result = terminalResult(run(ctx.durability, {
+      answerOpIds: [61],
+      attemptOutcome,
+    }));
+
+    expect(result.terminal).toMatchObject({
+      attemptOutcome,
+      inboundDisposition: 'failed_terminal',
+      deliveryEvidence: { kind: 'none' },
+    });
+    expect(ctx.getOutboundDeliverySnapshot).toHaveBeenCalledExactlyOnceWith(
+      61,
+      expect.objectContaining({ sourceInboundSeq: IDENTITY.inboundSeq }),
+    );
+    expect(ctx.markContinuityCandidateIfNoTerminalOutbound).toHaveBeenCalledExactlyOnceWith(
+      IDENTITY.inboundSeq,
+      'runtime_fault_no_terminal_outbound',
+      'runtime_fault_disarm',
+    );
+    expect(ctx.finalizeTurnTerminal).toHaveBeenCalledWith(expect.objectContaining({
+      terminal: expect.objectContaining({
+        deliveryKind: 'none',
+        deliveryOpId: null,
+        inboundDisposition: 'failed_terminal',
+      }),
+      inbound: { kind: 'failed', seq: 41, failureClass: 'session_crash' },
+    }));
+    expect(emitAlertMock.mock.calls[0]?.[3]).toContain('partial_answer_op_count=1');
+  });
+
+  it('persists echoed crash output as non-terminal partial history in the real durability ledger', () => {
+    const db = new Database(':memory:');
+    db.open();
+    try {
+      const durability = new DurabilityEngine(db);
+      const conversationKey = 'conversation-crash-ledger';
+      const deliveryJid = '15550100003@s.whatsapp.net';
+      const inboundSeq = durability.journalInbound(
+        'wamid-crash-ledger',
+        conversationKey,
+        deliveryJid,
+        'agent',
+      );
+      const opId = durability.createOutboundOp({
+        conversationKey,
+        chatJid: deliveryJid,
+        opType: 'send_text',
+        payload: '{"text":"still running tests"}',
+        replayPolicy: 'unsafe',
+        sourceInboundSeq: inboundSeq,
+        isTerminal: false,
+      });
+      durability.markSending(opId);
+      durability.markSubmitted(opId, 'wamid-partial-echo');
+      durability.markEchoed(opId);
+
+      const result = terminalResult(finalizeRuntimeTurn({
+        instanceName: 'agent-alpha',
+        durability,
+        identity: {
+          scope: 'per_chat',
+          conversationKey,
+          deliveryJid,
+          inboundSeq,
+          logicalTurnId: 'turn-crash-ledger',
+          managerId: 'manager-crash-ledger',
+          generation: 1,
+        },
+        attemptOutcome: { kind: 'failed', class: 'crash' },
+        answerEvidence: { kind: 'ready', opIds: [opId] },
       }));
 
       expect(result.terminal).toMatchObject({
-        attemptOutcome,
-        inboundDisposition: 'finalized_replied',
-        deliveryEvidence: { kind: 'echoed', opId: 61 },
+        inboundDisposition: 'failed_terminal',
+        deliveryEvidence: { kind: 'none' },
       });
-      expect(ctx.finalizeTurnTerminal).toHaveBeenCalledWith(expect.objectContaining({
-        inbound: { kind: 'complete', seq: 41, terminalReason: 'response_echoed' },
-      }));
-    },
-  );
+      expect(db.raw.prepare(
+        'SELECT status, is_terminal FROM outbound_ops WHERE id = ?',
+      ).get(opId)).toEqual({ status: 'echoed', is_terminal: 0 });
+      expect(db.raw.prepare(
+        `SELECT processing_status, terminal_reason, failure_class,
+                continuity_candidate_reason, continuity_candidate_source
+           FROM inbound_events WHERE seq = ?`,
+      ).get(inboundSeq)).toEqual({
+        processing_status: 'failed',
+        terminal_reason: 'error',
+        failure_class: 'session_crash',
+        continuity_candidate_reason: 'runtime_fault_no_terminal_outbound',
+        continuity_candidate_source: 'runtime_fault_disarm',
+      });
+      expect(db.raw.prepare(
+        `SELECT attempt_kind, attempt_failure_class, inbound_disposition,
+                delivery_kind, delivery_op_id, reply_guarantee_disarmed
+           FROM turn_terminal_records WHERE inbound_seq = ?`,
+      ).get(inboundSeq)).toEqual({
+        attempt_kind: 'failed',
+        attempt_failure_class: 'crash',
+        inbound_disposition: 'failed_terminal',
+        delivery_kind: 'none',
+        delivery_op_id: null,
+        reply_guarantee_disarmed: 0,
+      });
+      expect(db.raw.prepare(
+        'SELECT COUNT(*) AS count FROM turn_recovery_jobs WHERE source_inbound_seq = ?',
+      ).get(inboundSeq)).toEqual({ count: 0 });
+    } finally {
+      db.close();
+    }
+  });
 
   it.each([
     'pending',
@@ -885,6 +999,27 @@ describe('reply guarantee breach visibility', () => {
     expect(result.kind).toBe('terminal');
     expect(emitAlertMock).not.toHaveBeenCalled();
     expect(h.markContinuityCandidateIfNoTerminalOutbound).not.toHaveBeenCalled();
+  });
+
+  it('fires for a typed pre-dispatch fault that dropped an admitted turn', () => {
+    const h = harness({}, FAILED_RECEIPT);
+    const result = run(h.durability, {
+      attemptOutcome: { kind: 'admission_rejected', class: 'pre_dispatch_error' },
+      answerOpIds: [],
+    });
+
+    expect(terminalResult(result).terminal.inboundDisposition).toBe('failed_terminal');
+    expect(h.markContinuityCandidateIfNoTerminalOutbound).toHaveBeenCalledExactlyOnceWith(
+      IDENTITY.inboundSeq,
+      'runtime_fault_no_terminal_outbound',
+      'runtime_fault_disarm',
+    );
+    expect(emitAlertMock).toHaveBeenCalledWith(
+      'agent-alpha',
+      'agent_reply_guarantee_breach',
+      expect.any(String),
+      expect.stringContaining('attempt_failure_class=pre_dispatch_error'),
+    );
   });
 
   it('does not fire for a delivered turn', () => {

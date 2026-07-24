@@ -2737,6 +2737,17 @@ def health_probe_details(status: int, body: str, expected_name: str | None = Non
             ("autoCompactIneffective", "runtime_agent_auto_compact_ineffective"),
             ("autoCompactConsecutiveRapidRearmsMax", "runtime_agent_auto_compact_rapid_rearms_max"),
             ("autoCompactNextTurnOverThreshold", "runtime_agent_auto_compact_next_turn_over_threshold"),
+            ("turnFinalizationDegradedScopes", "runtime_agent_turn_finalization_degraded_scopes"),
+            ("turnRecoveryOutstanding", "runtime_agent_turn_recovery_outstanding"),
+            ("turnRecoveryPending", "runtime_agent_turn_recovery_pending"),
+            ("turnRecoveryExpiredClaimed", "runtime_agent_turn_recovery_expired_claimed"),
+            ("turnRecoveryBlockedUnsafe", "runtime_agent_turn_recovery_blocked_unsafe"),
+            ("turnRecoveryExhausted", "runtime_agent_turn_recovery_exhausted"),
+            ("turnRecoveryOpenRecoveries", "runtime_agent_turn_recovery_open_recoveries"),
+            ("turnRecoveryQuarantinedDelivery", "runtime_agent_turn_recovery_quarantined_delivery"),
+            ("turnRecoveryCorruptLinks", "runtime_agent_turn_recovery_corrupt_links"),
+            ("turnRecoveryOrphanTransfers", "runtime_agent_turn_recovery_orphan_transfers"),
+            ("turnRecoveryEchoConflicts", "runtime_agent_turn_recovery_echo_conflicts"),
         ]:
             value = agent.get(key)
             if key in {
@@ -2761,6 +2772,16 @@ def health_probe_details(status: int, body: str, expected_name: str | None = Non
                 details.append(f"{label}={number}")
             if key not in {"activeSessions", "sessionCount"} and number > 0:
                 add_marker("runtime_agent_at_risk")
+        for key, label in [
+            ("turnFinalizationRetainedRetries", "runtime_agent_turn_finalization_retained_retries"),
+            ("turnFinalizationRetryAttempts", "runtime_agent_turn_finalization_retry_attempts"),
+            ("turnFinalizationRetryRecoveries", "runtime_agent_turn_finalization_retry_recoveries"),
+            ("turnFinalizationRetryExhaustions", "runtime_agent_turn_finalization_retry_exhaustions"),
+            ("turnRecoveryLiveClaimed", "runtime_agent_turn_recovery_live_claimed"),
+        ]:
+            number = read_int(agent.get(key))
+            if number is not None and number != 0:
+                details.append(f"{label}={number}")
         last_crash_at = agent.get("lastCrashAt")
         if isinstance(last_crash_at, str) and last_crash_at:
             details.append(f"runtime_agent_last_crash_at={last_crash_at}")

@@ -1,3 +1,4 @@
+import { takeValue } from './lib/cli-args.ts';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -56,11 +57,21 @@ export function parseArgs(argv: string[]): ParsedArgs {
     if (arg === '--help' || arg === '-h') {
       args.help = true;
     } else if (arg === '--root') {
-      args.root = argv[++i] ?? '';
+      // takeValue, not `argv[++i] ?? ''`: the old form consumed the NEXT FLAG as the value
+      // when the value was omitted, so `--root --write` set root='--write' AND silently
+      // dropped --write. In a script that mutates config files, that is a garbage path
+      // plus a switched-off flag, with no error.
+      const taken = takeValue(argv, i);
+      args.root = taken.value;
+      i = taken.index;
     } else if (arg === '--config') {
-      args.configs.push(argv[++i] ?? '');
+      const taken = takeValue(argv, i);
+      args.configs.push(taken.value);
+      i = taken.index;
     } else if (arg === '--instance') {
-      args.instances.push(argv[++i] ?? '');
+      const taken = takeValue(argv, i);
+      args.instances.push(taken.value);
+      i = taken.index;
     } else if (arg === '--write') {
       args.write = true;
     } else if (arg === '--no-backup') {

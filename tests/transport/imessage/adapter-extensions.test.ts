@@ -16,14 +16,14 @@ function peerMessageRef(channelId: ChannelId, peerId: string, guid: string): Mes
 describe('ImessageAdapter — SupportsReactions', () => {
   it('react() calls port.sendReaction with targetGuid + conversation + emoji', async () => {
     const { adapter, port, channelId } = makeAdapter();
-    const target = peerMessageRef(channelId, 'user@icloud.com', 'guid-123');
+    const target = peerMessageRef(channelId, 'user@example.com', 'guid-123');
 
     await adapter.react(target, '❤️');
 
     expect(port.reactions).toHaveLength(1);
     expect(port.reactions[0]).toMatchObject({
       targetGuid: 'guid-123',
-      conversation: 'user@icloud.com',
+      conversation: 'user@example.com',
       emoji: '❤️',
       remove: false,
     });
@@ -31,7 +31,7 @@ describe('ImessageAdapter — SupportsReactions', () => {
 
   it('unreact() calls port.sendReaction with empty emoji and remove:true', async () => {
     const { adapter, port, channelId } = makeAdapter();
-    const target = peerMessageRef(channelId, 'user@icloud.com', 'guid-123');
+    const target = peerMessageRef(channelId, 'user@example.com', 'guid-123');
 
     await adapter.unreact(target, '❤️');
 
@@ -42,7 +42,7 @@ describe('ImessageAdapter — SupportsReactions', () => {
     const { adapter } = makeAdapter();
     const target: MessageRef = {
       channel: 'imessage:nope' as ChannelId,
-      conversation: 'u@icloud.com',
+      conversation: 'u@example.com',
       id: 'guid-1',
     };
     await expect(adapter.react(target, '❤️')).rejects.toThrow(/does not match adapter channel/);
@@ -52,13 +52,13 @@ describe('ImessageAdapter — SupportsReactions', () => {
 describe('ImessageAdapter — SupportsTyping', () => {
   it('setTyping(true) calls port.sendTypingIndicator with composing:true', async () => {
     const { adapter, port, channelId } = makeAdapter();
-    await adapter.setTyping(peerConversationRef(channelId, 'user@icloud.com'), true);
-    expect(port.typings[0]).toMatchObject({ conversation: 'user@icloud.com', composing: true });
+    await adapter.setTyping(peerConversationRef(channelId, 'user@example.com'), true);
+    expect(port.typings[0]).toMatchObject({ conversation: 'user@example.com', composing: true });
   });
 
   it('setTyping(false) calls port.sendTypingIndicator with composing:false', async () => {
     const { adapter, port, channelId } = makeAdapter();
-    await adapter.setTyping(peerConversationRef(channelId, 'user@icloud.com'), false);
+    await adapter.setTyping(peerConversationRef(channelId, 'user@example.com'), false);
     expect(port.typings[0]).toMatchObject({ composing: false });
   });
 
@@ -72,13 +72,13 @@ describe('ImessageAdapter — SupportsTyping', () => {
 describe('ImessageAdapter — SupportsReadReceipts', () => {
   it('markRead() calls port.sendReadReceipts with the conversation + guid', async () => {
     const { adapter, port, channelId } = makeAdapter();
-    const target = peerMessageRef(channelId, 'user@icloud.com', 'guid-42');
+    const target = peerMessageRef(channelId, 'user@example.com', 'guid-42');
 
     await adapter.markRead(target);
 
     expect(port.receipts).toHaveLength(1);
     expect(port.receipts[0]).toMatchObject({
-      conversation: 'user@icloud.com',
+      conversation: 'user@example.com',
       guids: ['guid-42'],
     });
   });
@@ -87,7 +87,7 @@ describe('ImessageAdapter — SupportsReadReceipts', () => {
     const { adapter } = makeAdapter();
     const target: MessageRef = {
       channel: 'imessage:nope' as ChannelId,
-      conversation: 'u@icloud.com',
+      conversation: 'u@example.com',
       id: 'guid-1',
     };
     await expect(adapter.markRead(target)).rejects.toThrow(/does not match adapter channel/);

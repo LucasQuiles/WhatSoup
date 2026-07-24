@@ -140,3 +140,37 @@ describe('audit-instance-plugin-coverage', () => {
     expect(args.failOnGap).toBe(true);
   });
 });
+
+describe('parseArgs — a flag must never be consumed as another flag\'s value', () => {
+  /**
+   * MEASURED ON origin/main BEFORE THE FIX:
+   *
+   *   parseArgs(['--root', '--fail-on-gap']) -> { root: '--fail-on-gap', failOnGap: false }
+   *
+   * That is the dangerous shape for an AUDIT: the operator explicitly asked it to fail when
+   * a gap is found, and it silently will not — the audit reports success regardless.
+   */
+  it('THROWS instead of swallowing --fail-on-gap as the value of --root', () => {
+    expect(() => parseArgs(['--root', '--fail-on-gap'])).toThrow(/another flag/);
+  });
+
+  it('THROWS instead of taking the next flag as the value of --instance', () => {
+    expect(() => parseArgs(['--instance', '--json'])).toThrow(/another flag/);
+  });
+
+  it('THROWS on a missing value rather than yielding an empty string', () => {
+    expect(() => parseArgs(['--settings'])).toThrow(/requires a value/);
+  });
+
+  it('still parses ordinary values and flags correctly', () => {
+    const args = parseArgs(['--root', '/tmp/x', '--instance', 'q', '--fail-on-gap', '--json']);
+    expect(args.root).toBe('/tmp/x');
+    expect(args.instances).toEqual(['q']);
+    expect(args.failOnGap).toBe(true);
+    expect(args.json).toBe(true);
+  });
+
+  it('rejects an unknown flag rather than ignoring it silently', () => {
+    expect(() => parseArgs(['--fail-on-gaps'])).toThrow(/Unknown argument/);
+  });
+});

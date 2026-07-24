@@ -596,6 +596,25 @@ describe('durable recovery evidence ordering', () => {
     ).get()).toEqual(proofCount);
   });
 
+  it('does not create recurring live-recovery evidence for corroborated maybe_sent proof', () => {
+    seedIncident();
+    db.raw.prepare(
+      "UPDATE outbound_ops SET created_at = datetime('now', '-31 seconds') WHERE id = ?",
+    ).run(INCIDENT_SELECTED_OP_ID);
+    const freshEngine = new DurabilityEngine(db);
+    freshEngine.postConnectRecovery();
+    const before = db.raw.prepare(
+      'SELECT COUNT(*) AS count FROM recovery_runs',
+    ).get();
+
+    const stats = freshEngine.reconcileLiveMaybeSent();
+
+    expect(stats.outboundReconciled).toBe(0);
+    expect(db.raw.prepare(
+      'SELECT COUNT(*) AS count FROM recovery_runs',
+    ).get()).toEqual(before);
+  });
+
   it('starts post-connect plan and run before any corroboration or outbound mutation', () => {
     const { terminalRecordId } = seedIncident();
     const selectedBefore = rowJson(db, 'outbound_ops', 'id', INCIDENT_SELECTED_OP_ID);

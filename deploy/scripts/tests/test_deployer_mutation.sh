@@ -212,8 +212,19 @@ fail_root="$tmp/fail-runtime"
 prepare_old_root "$fail_root"
 fakebin="$tmp/fakebin"
 mkdir -p "$fakebin"
-cat > "$fakebin/python3" <<'SH'
+real_python3="$(command -v python3)"
+# Only fail smoke_redaction's invocation (python3 - <root-dir> <<PY ... PY).
+# resolve_managed_files() also calls python3 now (python3 - <manifest.json>
+# <paths...> <<PY ... PY>) to resolve MANAGED_FILES from the runtime
+# manifest -- that call must still succeed so deploy mode reaches its own
+# smoke_redaction step and the auto-rollback path this test exercises,
+# rather than failing earlier for an unrelated reason. Distinguished by the
+# script's second argument: a manifest path (.json) vs. a root directory.
+cat > "$fakebin/python3" <<SH
 #!/usr/bin/env bash
+if [[ "\$2" == *.json ]]; then
+  exec "$real_python3" "\$@"
+fi
 echo "fake python smoke failure" >&2
 exit 9
 SH
@@ -233,5 +244,114 @@ grep -q "BACKUP_VERIFIED=0" "$tmp/fail-deploy.log" || { cat "$tmp/fail-deploy.lo
 assert_backup_metadata "$fail_backup/.bot-errors-backup.json" false null
 grep -q "old:deploy/scripts/bot-errors-emit.py" "$fail_root/deploy/scripts/bot-errors-emit.py" || fail "auto-rollback did not restore old bytes"
 [ ! -e "$fail_root/deploy/scripts/bot-errors-runner.py" ] || fail "auto-rollback did not delete pre-deploy absent file"
+
+# SSOT collapse (pin-reconciliation debt fix): FILES=() no longer carries a
+# hand-maintained sha256 -- expected hashes are resolved from
+# deploy/bot-errors-runtime-manifest.json at startup via
+# BOT_ERRORS_RUNTIME_MANIFEST_PATH (or the real manifest by default). Proves
+# that resolution is a REAL enforcement, not a pass-through: a manifest
+# entry deliberately mismatched against the actual file bytes must still
+# fail closed, exactly like the old hardcoded pin did.
+ssot_root="$tmp/ssot-runtime"
+prepare_current_root "$ssot_root"
+mismatch_manifest="$tmp/mismatch-manifest.json"
+python3 - "$PWD/deploy/bot-errors-runtime-manifest.json" "$mismatch_manifest" <<'PY'
+import json
+import sys
+
+src, dst = sys.argv[1:3]
+with open(src, encoding="utf-8") as handle:
+    data = json.load(handle)
+for entry in data["files"]:
+    if entry["path"] == "deploy/scripts/bot-errors-emit.py":
+        entry["sha256"] = "f" * 64
+with open(dst, "w", encoding="utf-8") as handle:
+    json.dump(data, handle, indent=2)
+PY
+if BOT_ERRORS_RUNTIME_MANIFEST_PATH="$mismatch_manifest" bash "$D" verify "$ssot_root" > "$tmp/ssot-mismatch.log" 2>&1; then
+  cat "$tmp/ssot-mismatch.log"
+  fail "verify did not fail closed on a manifest-vs-file hash mismatch"
+fi
+grep -q "DRIFT.*bot-errors-emit.py" "$tmp/ssot-mismatch.log" || {
+  cat "$tmp/ssot-mismatch.log"
+  fail "manifest-vs-file mismatch was not reported as DRIFT"
+}
+# The real manifest (untouched by the above -- the override pointed at a
+# disposable copy) must still verify this same root clean.
+bash "$D" verify "$ssot_root" > "$tmp/ssot-clean.log" 2>&1 || {
+  cat "$tmp/ssot-clean.log"
+  fail "verify against the real manifest failed for an unmodified root"
+}
+grep -q "VERIFY_OK" "$tmp/ssot-clean.log" || {
+  cat "$tmp/ssot-clean.log"
+  fail "real-manifest verify did not report VERIFY_OK"
+}
+# The FILES=() array itself must no longer carry an embedded sha256 -- the
+# only place a hash can appear now is the manifest this test just proved is
+# authoritative.
+if grep -qE '"[^"]+:[0-9a-f]{64}"' "$D"; then
+  fail "FILES=() still embeds a hand-maintained sha256 -- SSOT collapse incomplete"
+fi
+
+# ROLLBACK MANIFEST INDEPENDENCE: rollback and rollback-lkg must succeed even
+# when deploy/bot-errors-runtime-manifest.json is corrupt or entirely
+# missing -- an emergency restore's ground truth is the backup directory
+# (bare paths, structurally verified), not the manifest's expected hashes. A
+# 3am operator must never be blocked from rolling back by an unrelated
+# manifest problem. Pre-fix this hard-failed on the manifest read before
+# ever touching the backup; post-fix rollback/rollback-lkg never attempt to
+# resolve MANAGED_FILES at all.
+corrupt_manifest="$tmp/corrupt-manifest.json"
+printf 'not valid json\n' > "$corrupt_manifest"
+missing_manifest="$tmp/does-not-exist-manifest.json"
+
+rb_backup="$tmp/rollback-independence-backup"
+copy_manifest_files "$PWD" "$rb_backup"
+: > "$rb_backup/.was-absent"
+
+rb_root="$tmp/rollback-independence-runtime"
+prepare_current_root "$rb_root"
+printf 'tampered\n' >> "$rb_root/deploy/scripts/bot-errors-emit.py"
+if ! BOT_ERRORS_RUNTIME_MANIFEST_PATH="$corrupt_manifest" bash "$D" rollback "$rb_root" "$rb_backup" > "$tmp/rollback-corrupt-manifest.log" 2>&1; then
+  cat "$tmp/rollback-corrupt-manifest.log"
+  fail "rollback failed with a corrupted manifest -- must be manifest-independent"
+fi
+grep -q "ROLLBACK_OK" "$tmp/rollback-corrupt-manifest.log" || {
+  cat "$tmp/rollback-corrupt-manifest.log"
+  fail "rollback with a corrupted manifest did not report ROLLBACK_OK"
+}
+diff "$rb_root/deploy/scripts/bot-errors-emit.py" "$PWD/deploy/scripts/bot-errors-emit.py" > /dev/null \
+  || fail "rollback with a corrupted manifest did not restore correct bytes"
+
+rb2_root="$tmp/rollback-independence-missing-manifest-runtime"
+prepare_current_root "$rb2_root"
+printf 'tampered\n' >> "$rb2_root/deploy/scripts/bot-errors-emit.py"
+if ! BOT_ERRORS_RUNTIME_MANIFEST_PATH="$missing_manifest" bash "$D" rollback "$rb2_root" "$rb_backup" > "$tmp/rollback-missing-manifest.log" 2>&1; then
+  cat "$tmp/rollback-missing-manifest.log"
+  fail "rollback failed with a missing manifest -- must be manifest-independent"
+fi
+grep -q "ROLLBACK_OK" "$tmp/rollback-missing-manifest.log" || {
+  cat "$tmp/rollback-missing-manifest.log"
+  fail "rollback with a missing manifest did not report ROLLBACK_OK"
+}
+
+rblkg_backup="$tmp/rollback-lkg-independence-backup"
+copy_manifest_files "$PWD" "$rblkg_backup"
+: > "$rblkg_backup/.was-absent"
+
+rblkg_root="$tmp/rollback-lkg-independence-runtime"
+prepare_current_root "$rblkg_root"
+printf '%s\n' "$rblkg_backup" > "$tmp/.bot-errors-last-known-good-rollback-lkg-independence-runtime"
+printf 'tampered\n' >> "$rblkg_root/deploy/scripts/bot-errors-emit.py"
+if ! BOT_ERRORS_RUNTIME_MANIFEST_PATH="$corrupt_manifest" bash "$D" rollback-lkg "$rblkg_root" > "$tmp/rollback-lkg-corrupt-manifest.log" 2>&1; then
+  cat "$tmp/rollback-lkg-corrupt-manifest.log"
+  fail "rollback-lkg failed with a corrupted manifest -- must be manifest-independent"
+fi
+grep -q "ROLLBACK_LKG_OK" "$tmp/rollback-lkg-corrupt-manifest.log" || {
+  cat "$tmp/rollback-lkg-corrupt-manifest.log"
+  fail "rollback-lkg with a corrupted manifest did not report ROLLBACK_LKG_OK"
+}
+diff "$rblkg_root/deploy/scripts/bot-errors-emit.py" "$PWD/deploy/scripts/bot-errors-emit.py" > /dev/null \
+  || fail "rollback-lkg with a corrupted manifest did not restore correct bytes"
 
 echo "DEPLOYER_MUTATION_PASS"

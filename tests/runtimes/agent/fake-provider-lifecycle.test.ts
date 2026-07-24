@@ -10,6 +10,7 @@ import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { FAKE_PROVIDER, isAlive, killPid, waitUntil } from './lib/session-harness.ts';
 import { isOrphaned } from './bin/orphan-predicate.ts';
+import { publishPidFile } from './bin/publish-pid-file.ts';
 
 // Intermediate parent: spawns the fixture detached, unrefs it, then STAYS
 // ALIVE until the test kills it (B25 3e) — the parent-death moment is
@@ -65,6 +66,33 @@ describe('orphan predicate (portable reparent signal)', () => {
 
   it('fires when the fixture started already orphaned (startup race: parent died before the record)', () => {
     expect(isOrphaned(1, 1)).toBe(true);
+  });
+});
+
+describe('pid-file publication (B25 2b readiness race)', () => {
+  it('publishes complete, parseable content and reclaims the temp file', () => {
+    const pidFile = join(tmpdir(), `pubtest${Date.now().toString(36)}${process.pid}.json`);
+    try {
+      publishPidFile(pidFile, JSON.stringify({ provider: 1, g1: 2, g2: 3 }));
+      // existsSync === true must imply complete content (the CI failure was
+      // existsSync true + "Unexpected end of JSON input" on a partial read).
+      expect(existsSync(pidFile)).toBe(true);
+      expect(readPidFile(pidFile)).toEqual({ provider: 1, g1: 2, g2: 3 });
+      expect(existsSync(`${pidFile}.${process.pid}.tmp`)).toBe(false);
+    } finally {
+      rmSync(pidFile, { force: true });
+    }
+  });
+
+  it('re-publication over an existing file replaces it wholesale (rename semantics)', () => {
+    const pidFile = join(tmpdir(), `pubtest2${Date.now().toString(36)}${process.pid}.json`);
+    try {
+      publishPidFile(pidFile, JSON.stringify({ provider: 1, g1: null, g2: null }));
+      publishPidFile(pidFile, JSON.stringify({ provider: 9, g1: 8, g2: 7 }));
+      expect(readPidFile(pidFile)).toEqual({ provider: 9, g1: 8, g2: 7 });
+    } finally {
+      rmSync(pidFile, { force: true });
+    }
   });
 });
 

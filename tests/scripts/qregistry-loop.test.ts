@@ -1,4 +1,5 @@
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { spawn, spawnSync } from 'node:child_process';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -9,16 +10,20 @@ import {
   collectSourceFiles,
   computeRegisterHash,
   acquireRunLock,
+  dispatchLockPath,
   healthAllowsDispatch,
   parseRegister,
   prepareWorkerStaging,
   redactForWorker,
   resolveCheckerPath,
+  resolveMemoryMcpRoot,
   resolveSafeExporterPath,
   run,
   safeExportScanFindings,
   shouldDispatch,
+  withDispatchLock,
 } from '../../scripts/qregistry-loop.ts';
+import { acquireProcessLock, releaseProcessLock } from '../../src/lib/process-lock.ts';
 
 function entry(overrides: Record<string, unknown> = {}): string {
   return JSON.stringify({
@@ -329,5 +334,357 @@ describe('qregistry loop helpers', () => {
       PATH: '/usr/bin',
       OCW_TIMEOUT_SECS: '1200',
     });
+  });
+});
+
+// --- QR-022 dispatch burst lock ---------------------------------------------
+
+const SCRIPT_PATH = path.join(process.cwd(), 'scripts', 'qregistry-loop.ts');
+
+function writeExecutable(file: string, body: string): void {
+  writeFileSync(file, body, 'utf8');
+  chmodSync(file, 0o755);
+}
+
+const ACTIONABLE_ENTRY = JSON.stringify({
+  schema_version: 1,
+  id: 'QR-777',
+  kind: 'debt',
+  title: 'Dispatch burst serialization',
+  severity: 'high',
+  disposition: 'under-review',
+  files: ['does/not/exist.ts'],
+});
+
+const CHECKER_OK = 'import sys\nprint("checker ok")\nsys.exit(0)\n';
+const SAFE_EXPORT_OK = [
+  'import json, sys',
+  'out = sys.argv[sys.argv.index("--out") + 1]',
+  'data = {"artifact_type":"qregistry.safe_export.v0","source_register":"qregistry.ndjson","source_rows":1,"entries":[{"id":"QR-777","title":"safe"}]}',
+  'open(out, "w").write(json.dumps(data) + "\\n")',
+  'print("SAFE_EXPORT rows=1 out=" + out)',
+].join('\n');
+
+/** Builds a self-contained qregistry fixture (repo + checker + exporter). */
+function makeDispatchFixture(prefix: string): {
+  base: string;
+  repo: string;
+  memRoot: string;
+  lockPath: string;
+  checker: string;
+  exporter: string;
+} {
+  const base = mkdtempSync(path.join(tmpdir(), prefix));
+  const repo = path.join(base, 'repo');
+  const memRoot = path.join(base, 'memroot');
+  mkdirSync(repo, { recursive: true });
+  mkdirSync(memRoot, { recursive: true });
+  writeFileSync(path.join(repo, 'qregistry.ndjson'), `${ACTIONABLE_ENTRY}\n`, 'utf8');
+  const checker = path.join(base, 'checker.py');
+  const exporter = path.join(base, 'safe-export.py');
+  writeFileSync(checker, CHECKER_OK, 'utf8');
+  writeFileSync(exporter, SAFE_EXPORT_OK, 'utf8');
+  return {
+    base,
+    repo,
+    memRoot,
+    lockPath: path.join(memRoot, '.qregistry-dispatch.lock'),
+    checker,
+    exporter,
+  };
+}
+
+function waitForFile(target: string, timeoutMs: number): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  return new Promise((resolve) => {
+    const poll = () => {
+      if (existsSync(target)) return resolve(true);
+      if (Date.now() >= deadline) return resolve(false);
+      setTimeout(poll, 20);
+    };
+    poll();
+  });
+}
+
+function readSummary(stateDir: string): Record<string, unknown> {
+  const runName = readFileSync(path.join(stateDir, 'last-run.txt'), 'utf8').trim();
+  return JSON.parse(
+    readFileSync(path.join(stateDir, 'runs', runName, 'summary.json'), 'utf8'),
+  ) as Record<string, unknown>;
+}
+
+describe('qregistry dispatch burst lock (withDispatchLock)', () => {
+  it('skips (dispatch-lock-contended) when a live holder owns the lock, without running fn', () => {
+    const dir = mkdtempSync(path.join(tmpdir(), 'qr-dispatch-lock-'));
+    const lockPath = path.join(dir, '.qregistry-dispatch.lock');
+    const held = acquireProcessLock(lockPath); // held by this (live) test process
+    try {
+      let ran = false;
+      const result = withDispatchLock(lockPath, { timeoutMs: 40, pollMs: 5 }, () => {
+        ran = true;
+        return 'entered';
+      });
+      expect(result).toEqual({ ran: false, reason: 'dispatch-lock-contended' });
+      expect(ran).toBe(false);
+    } finally {
+      releaseProcessLock(held);
+    }
+  });
+
+  it('reclaims a same-boot stale lock left by a dead holder and runs fn', () => {
+    const dir = mkdtempSync(path.join(tmpdir(), 'qr-dispatch-stale-'));
+    const lockPath = path.join(dir, '.qregistry-dispatch.lock');
+    // A genuinely dead pid: spawn+reap a child, then reuse its now-free pid.
+    const reaped = spawnSync(process.execPath, ['-e', 'process.exit(0)']);
+    const deadPid = reaped.pid!;
+    // Payload with no bootId -> acquireProcessLock treats it as same-boot stale
+    // (fails closed) rather than reclaiming it itself.
+    writeFileSync(
+      lockPath,
+      JSON.stringify({ pid: deadPid, token: 'dead-holder', startedAt: new Date().toISOString() }),
+      { mode: 0o600 },
+    );
+
+    let ran = false;
+    const result = withDispatchLock(lockPath, { timeoutMs: 1_000, pollMs: 5 }, () => {
+      ran = true;
+      return 42;
+    });
+
+    expect(result).toEqual({ ran: true, value: 42 });
+    expect(ran).toBe(true);
+    // Released in finally -> no lock file remains (AC2).
+    expect(existsSync(lockPath)).toBe(false);
+  });
+
+  it('releases the lock even when fn throws (try/finally)', () => {
+    const dir = mkdtempSync(path.join(tmpdir(), 'qr-dispatch-throw-'));
+    const lockPath = path.join(dir, '.qregistry-dispatch.lock');
+    expect(() =>
+      withDispatchLock(lockPath, { timeoutMs: 1_000, pollMs: 5 }, () => {
+        throw new Error('boom');
+      }),
+    ).toThrow('boom');
+    expect(existsSync(lockPath)).toBe(false);
+  });
+
+  it('keys the lock on the stable memory-mcp root, never a per-job hash16(cwd) namespace', () => {
+    expect(dispatchLockPath({ OPENCODE_MEMORY_MCP_ROOT: '/tmp/mroot' })).toBe(
+      '/tmp/mroot/.qregistry-dispatch.lock',
+    );
+    const fakeHome = path.join(tmpdir(), 'qr-fake-home');
+    expect(dispatchLockPath({ HOME: fakeHome })).toBe(
+      path.join(fakeHome, '.local', 'share', 'opencode', 'memory-mcp', '.qregistry-dispatch.lock'),
+    );
+    // AC7(b): not derived from a 16-hex per-job namespace.
+    expect(dispatchLockPath({ OPENCODE_MEMORY_MCP_ROOT: '/tmp/mroot' })).not.toMatch(/[0-9a-f]{16}/);
+  });
+});
+
+describe('qregistry-loop dispatch serialization', () => {
+  it('does not enter the dispatch critical section while another holder owns the stable dispatch lock', () => {
+    // Serialization proof (single process, deterministic via the lock's observable
+    // state): a foreign holder owns the STABLE dispatch lock; run() uses its own
+    // default --state-dir so acquireRunLock is uncontended, yet run() must NOT
+    // dispatch. Falsifier: remove the withDispatchLock wrap -> run() ignores the
+    // held lock, invokes ocw, summary.dispatch === true -> this test goes red.
+    const fx = makeDispatchFixture('qr-dispatch-serialize-');
+    const bin = path.join(fx.base, 'bin');
+    mkdirSync(bin, { recursive: true });
+    const ocwMarker = path.join(fx.base, 'ocw-invoked');
+    writeExecutable(path.join(bin, 'ocw'), `#!/bin/sh\necho invoked > "${ocwMarker}"\nexit 0\n`);
+    writeExecutable(path.join(bin, 'ocw-health'), '#!/bin/sh\nexit 0\n');
+
+    const held = acquireProcessLock(fx.lockPath); // foreign live holder
+    let status: number;
+    try {
+      status = run(
+        ['--repo', fx.repo, '--checker', fx.checker, '--safe-exporter', fx.exporter, '--force', '--max-workers', '1'],
+        {
+          ...process.env,
+          PATH: `${bin}:/usr/bin:/bin`,
+          PYTHON: 'python3',
+          OPENCODE_MEMORY_MCP_ROOT: fx.memRoot,
+          QREGISTRY_DISPATCH_LOCK_TIMEOUT_MS: '50',
+          QREGISTRY_DISPATCH_LOCK_POLL_MS: '10',
+        },
+      );
+    } finally {
+      releaseProcessLock(held);
+    }
+
+    expect(status).toBe(0);
+    const summary = readSummary(path.join(fx.repo, 'raw', 'qregistry-loop'));
+    expect(summary.reason).toBe('dispatch-lock-contended');
+    expect(summary.dispatch).toBe(false);
+    // The critical section was never entered -> ocw was never invoked.
+    expect(existsSync(ocwMarker)).toBe(false);
+  });
+
+  it('serializes two dispatch bursts with DIFFERENT --state-dir on the same host lock (what acquireRunLock cannot)', async () => {
+    const fx = makeDispatchFixture('qr-dispatch-crossproc-');
+    const binA = path.join(fx.base, 'binA');
+    const binB = path.join(fx.base, 'binB');
+    mkdirSync(binA, { recursive: true });
+    mkdirSync(binB, { recursive: true });
+    const aHolding = path.join(fx.base, 'A-holding');
+    const releaseA = path.join(fx.base, 'release-A');
+    const bEntered = path.join(fx.base, 'B-entered-critical');
+
+    // Run A's ocw stub: announce it is inside the critical section (holding the
+    // dispatch lock), then block until the test releases it.
+    writeExecutable(
+      path.join(binA, 'ocw'),
+      `#!/bin/sh\necho holding > "${aHolding}"\nwhile [ ! -e "${releaseA}" ]; do sleep 0.02; done\necho "worker A" \nexit 0\n`,
+    );
+    writeExecutable(path.join(binA, 'ocw-health'), '#!/bin/sh\nexit 0\n');
+    // Run B's ocw stub: entering it AT ALL is the violation we assert against.
+    writeExecutable(path.join(binB, 'ocw'), `#!/bin/sh\necho entered > "${bEntered}"\nexit 0\n`);
+    writeExecutable(path.join(binB, 'ocw-health'), '#!/bin/sh\nexit 0\n');
+
+    const stateA = path.join(fx.base, 'stateA');
+    const stateB = path.join(fx.base, 'stateB');
+
+    const baseEnv = {
+      ...process.env,
+      PYTHON: 'python3',
+      OPENCODE_MEMORY_MCP_ROOT: fx.memRoot,
+    };
+
+    const childArgs = (stateDir: string): string[] => [
+      '--experimental-strip-types',
+      '--no-warnings',
+      SCRIPT_PATH,
+      '--repo',
+      fx.repo,
+      '--state-dir',
+      stateDir,
+      '--checker',
+      fx.checker,
+      '--safe-exporter',
+      fx.exporter,
+      '--force',
+      '--max-workers',
+      '1',
+    ];
+
+    // Launch A and wait until it is provably holding the dispatch lock.
+    const childA = spawn(process.execPath, childArgs(stateA), {
+      env: { ...baseEnv, PATH: `${binA}:/usr/bin:/bin`, QREGISTRY_DISPATCH_LOCK_TIMEOUT_MS: '60000' },
+      stdio: 'ignore',
+    });
+    const aExit = new Promise<number>((resolve) => childA.on('close', (code) => resolve(code ?? -1)));
+
+    try {
+      const ready = await waitForFile(aHolding, 8_000);
+      expect(ready).toBe(true);
+
+      // B contends for the SAME dispatch lock but with a DIFFERENT --state-dir,
+      // so acquireRunLock does not serialize them. B must skip, never entering
+      // its critical section.
+      const bResult = spawnSync(process.execPath, childArgs(stateB), {
+        env: {
+          ...baseEnv,
+          PATH: `${binB}:/usr/bin:/bin`,
+          QREGISTRY_DISPATCH_LOCK_TIMEOUT_MS: '400',
+          QREGISTRY_DISPATCH_LOCK_POLL_MS: '20',
+        },
+        stdio: 'ignore',
+      });
+
+      expect(bResult.status).toBe(0);
+      expect(existsSync(bEntered)).toBe(false); // B never entered the critical section
+      const bSummary = readSummary(stateB);
+      expect(bSummary.reason).toBe('dispatch-lock-contended');
+      expect(bSummary.dispatch).toBe(false);
+    } finally {
+      writeFileSync(releaseA, 'go', 'utf8'); // unblock A on every path
+    }
+
+    const aCode = await aExit;
+    expect(aCode).toBe(0);
+    const aSummary = readSummary(stateA);
+    expect(aSummary.dispatch).toBe(true); // A completed its dispatch
+  }, 25_000);
+});
+
+// --- QR-022/#1978 pin: worker memory-mcp root === dispatch lock root -------
+//
+// The dispatch lock and the worker's memory-mcp plugin used to agree on a
+// root only by both independently defaulting the same way; nothing pinned
+// them together. These tests prove resolveMemoryMcpRoot is the single source
+// both draw from: (1) it is allowlisted for passthrough, and (2) the ocw
+// child process dispatchWorker spawns actually receives it, for both an
+// explicit override and the bare-HOME default.
+
+describe('qregistry worker env pins to the dispatch-lock memory-mcp root', () => {
+  it('allowlists OPENCODE_MEMORY_MCP_ROOT for child-process passthrough', () => {
+    const childEnv = buildChildEnv(
+      { HOME: '/home/q', PATH: '/usr/bin', OPENCODE_MEMORY_MCP_ROOT: '/tmp/mroot' },
+      {},
+    );
+    expect(childEnv.OPENCODE_MEMORY_MCP_ROOT).toBe('/tmp/mroot');
+  });
+
+  it('pins the dispatched ocw worker to the same root dispatchLockPath resolves (explicit override)', () => {
+    const fx = makeDispatchFixture('qr-dispatch-envpin-explicit-');
+    const bin = path.join(fx.base, 'bin');
+    mkdirSync(bin, { recursive: true });
+    const capturedRoot = path.join(fx.base, 'ocw-memory-root.txt');
+    // Falsifier: if dispatchWorker stopped setting OPENCODE_MEMORY_MCP_ROOT
+    // (or set a different value than the lock's root), this file would be
+    // empty/absent or mismatch fx.memRoot, and the assertion below goes red.
+    writeExecutable(
+      path.join(bin, 'ocw'),
+      `#!/bin/sh\nprintf '%s' "$OPENCODE_MEMORY_MCP_ROOT" > "${capturedRoot}"\nexit 0\n`,
+    );
+    writeExecutable(path.join(bin, 'ocw-health'), '#!/bin/sh\nexit 0\n');
+
+    const env = {
+      ...process.env,
+      PATH: `${bin}:/usr/bin:/bin`,
+      PYTHON: 'python3',
+      OPENCODE_MEMORY_MCP_ROOT: fx.memRoot,
+    };
+    const status = run(
+      ['--repo', fx.repo, '--checker', fx.checker, '--safe-exporter', fx.exporter, '--force', '--max-workers', '1'],
+      env,
+    );
+
+    expect(status).toBe(0);
+    const lockRoot = path.dirname(dispatchLockPath(env));
+    expect(lockRoot).toBe(fx.memRoot); // sanity: fixture's lock root is the override
+    expect(lockRoot).toBe(resolveMemoryMcpRoot(env));
+    expect(existsSync(capturedRoot)).toBe(true);
+    expect(readFileSync(capturedRoot, 'utf8')).toBe(lockRoot);
+  });
+
+  it('pins the dispatched ocw worker to the same root dispatchLockPath resolves (default, HOME-derived)', () => {
+    const fx = makeDispatchFixture('qr-dispatch-envpin-default-');
+    const bin = path.join(fx.base, 'bin');
+    mkdirSync(bin, { recursive: true });
+    const capturedRoot = path.join(fx.base, 'ocw-memory-root.txt');
+    writeExecutable(
+      path.join(bin, 'ocw'),
+      `#!/bin/sh\nprintf '%s' "$OPENCODE_MEMORY_MCP_ROOT" > "${capturedRoot}"\nexit 0\n`,
+    );
+    writeExecutable(path.join(bin, 'ocw-health'), '#!/bin/sh\nexit 0\n');
+
+    const fakeHome = path.join(fx.base, 'fake-home');
+    mkdirSync(fakeHome, { recursive: true });
+    const env: NodeJS.ProcessEnv = { ...process.env, HOME: fakeHome, PATH: `${bin}:/usr/bin:/bin`, PYTHON: 'python3' };
+    delete env.OPENCODE_MEMORY_MCP_ROOT; // force the HOME-derived default path
+
+    const status = run(
+      ['--repo', fx.repo, '--checker', fx.checker, '--safe-exporter', fx.exporter, '--force', '--max-workers', '1'],
+      env,
+    );
+
+    expect(status).toBe(0);
+    const lockRoot = path.dirname(dispatchLockPath(env));
+    expect(lockRoot).toBe(path.join(fakeHome, '.local', 'share', 'opencode', 'memory-mcp'));
+    expect(lockRoot).toBe(resolveMemoryMcpRoot(env));
+    expect(existsSync(capturedRoot)).toBe(true);
+    expect(readFileSync(capturedRoot, 'utf8')).toBe(lockRoot);
   });
 });

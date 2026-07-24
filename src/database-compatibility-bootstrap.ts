@@ -1,5 +1,5 @@
 import {
-  databaseCompatibilityStartupExitCode,
+  startupExitCode,
   DatabaseCompatibilityPermanentStartupError,
   inspectExistingDatabaseForBootstrap,
   runEarlyDatabaseCompatibilityGate,
@@ -47,6 +47,6 @@ const isDirectRun = process.argv[1]?.endsWith('database-compatibility-bootstrap.
 if (isDirectRun) {
   databaseCompatibilityBootstrap().catch((err) => {
     process.stderr.write(`${errorMessage(err)}\n`);
-    process.exit(databaseCompatibilityStartupExitCode(err));
+    process.exit(startupExitCode(err));
   });
 }

@@ -191,6 +191,14 @@ export const PROGRESS_PLACEHOLDER_RATE_FLOOR_MS = 180_000;
  */
 export const MAX_STATUS_MESSAGES_PER_TURN = 10;
 /**
+ * Cross-turn status budget aligned with the transport flood detector window.
+ * A burst of related inbound messages can create several logical turns in one
+ * chat; the per-turn cap alone resets between them and can therefore exceed the
+ * transport's 20-send threshold even when every individual turn is bounded.
+ */
+export const MAX_STATUS_MESSAGES_PER_WINDOW = 10;
+export const STATUS_MESSAGE_WINDOW_MS = 5 * 60_000;
+/**
  * PR-E: the single friendly note sent the first time a turn trips the status cap.
  * Classified as status delivery evidence, but emitted outside the counter gate so
  * it cannot recursively consume the exhausted budget or suppress itself.
@@ -209,6 +217,45 @@ const MAX_TERMINAL_TEXT_DEDUPE_KEYS = 1_000;
 interface TerminalTextDedupeEntry {
   lastSeenAt: number;
   suppressedCount: number;
+}
+
+interface StatusMessageWindowState {
+  emittedAt: number[];
+  noticeSentAt: number | undefined;
+  guardLoggedAt: number | undefined;
+  lastTouchedAt: number;
+}
+
+const MAX_STATUS_WINDOW_STATES = 1_000;
+const statusMessageWindows = new Map<string, StatusMessageWindowState>();
+
+function statusMessageWindowState(senderToken: string, now: number): StatusMessageWindowState {
+  const existing = statusMessageWindows.get(senderToken);
+  if (existing) {
+    existing.lastTouchedAt = now;
+    return existing;
+  }
+
+  if (statusMessageWindows.size >= MAX_STATUS_WINDOW_STATES) {
+    let oldestToken: string | undefined;
+    let oldestTouchedAt = Number.POSITIVE_INFINITY;
+    for (const [token, state] of statusMessageWindows) {
+      if (state.lastTouchedAt < oldestTouchedAt) {
+        oldestToken = token;
+        oldestTouchedAt = state.lastTouchedAt;
+      }
+    }
+    if (oldestToken !== undefined) statusMessageWindows.delete(oldestToken);
+  }
+
+  const created: StatusMessageWindowState = {
+    emittedAt: [],
+    noticeSentAt: undefined,
+    guardLoggedAt: undefined,
+    lastTouchedAt: now,
+  };
+  statusMessageWindows.set(senderToken, created);
+  return created;
 }
 
 /**
@@ -378,6 +425,11 @@ export class OutboundQueue implements IOutboundQueue {
   /** PR-E: per-turn status-narration budget (ms n/a — a message count). Override via config/test setter. */
   private maxStatusMessagesPerTurn: number =
     config.operationTracker?.maxStatusMessagesPerTurn ?? MAX_STATUS_MESSAGES_PER_TURN;
+  /** Status-narration budget shared across turns and inherited queue replacements. */
+  private maxStatusMessagesPerWindow: number =
+    config.operationTracker?.maxStatusMessagesPerWindow ?? MAX_STATUS_MESSAGES_PER_WINDOW;
+  private statusMessageWindowMs: number =
+    config.operationTracker?.statusMessageWindowMs ?? STATUS_MESSAGE_WINDOW_MS;
 
   /** Queue of text chunks ready to send with enqueue-time attribution. */
   private sendQueue: QueuedOutboundChunk[] = [];
@@ -986,6 +1038,12 @@ export class OutboundQueue implements IOutboundQueue {
     this.maxStatusMessagesPerTurn = Math.max(0, Math.floor(n));
   }
 
+  /** Override the persistent cross-turn status budget for tests or instance policy. */
+  setStatusMessageWindow(maxMessages: number, windowMs: number): void {
+    this.maxStatusMessagesPerWindow = Math.max(0, Math.floor(maxMessages));
+    this.statusMessageWindowMs = Math.max(1, Math.floor(windowMs));
+  }
+
   private pruneProgressTextDedupe(now: number): void {
     for (const [key, ts] of this.recentProgressTextAt) {
       if (now - ts >= PROGRESS_TEXT_DEDUPE_WINDOW_MS) {
@@ -1183,16 +1241,53 @@ export class OutboundQueue implements IOutboundQueue {
    * preserved (startTyping) so the user still sees "typing…" without the flood.
    */
   private statusBudgetExhausted(attribution: OutboundAttribution): boolean {
-    if (this.turnStatusCount >= this.maxStatusMessagesPerTurn) {
-      this.startTyping(); // keep the liveness signal, drop the narration
-      if (!this.statusCapNoticeSent) {
-        this.statusCapNoticeSent = true;
+    const now = Date.now();
+    const windowState = statusMessageWindowState(this.senderToken, now);
+    const cutoff = now - this.statusMessageWindowMs;
+    windowState.emittedAt = windowState.emittedAt.filter((emittedAt) => emittedAt > cutoff);
+    if (windowState.noticeSentAt !== undefined && windowState.noticeSentAt <= cutoff) {
+      windowState.noticeSentAt = undefined;
+    }
+    if (windowState.guardLoggedAt !== undefined && windowState.guardLoggedAt <= cutoff) {
+      windowState.guardLoggedAt = undefined;
+    }
+
+    if (windowState.emittedAt.length >= this.maxStatusMessagesPerWindow) {
+      this.startTyping();
+      if (windowState.guardLoggedAt === undefined) {
+        windowState.guardLoggedAt = now;
+        log.warn(
+          {
+            chatJid: attribution.chatJid,
+            count: windowState.emittedAt.length,
+            maxMessages: this.maxStatusMessagesPerWindow,
+            windowMs: this.statusMessageWindowMs,
+            outcome: 'status-suppressed',
+          },
+          'outbound flood-guard tripped',
+        );
+      }
+      if (windowState.noticeSentAt === undefined) {
+        windowState.noticeSentAt = now;
         this.flushStreamBuffer();
         this.turnHasVisibleText = true;
         this.enqueuePreparedText(STATUS_CAP_NOTICE, attribution);
       }
       return true;
     }
+
+    if (this.turnStatusCount >= this.maxStatusMessagesPerTurn) {
+      this.startTyping(); // keep the liveness signal, drop the narration
+      if (!this.statusCapNoticeSent) {
+        this.statusCapNoticeSent = true;
+        windowState.noticeSentAt ??= now;
+        this.flushStreamBuffer();
+        this.turnHasVisibleText = true;
+        this.enqueuePreparedText(STATUS_CAP_NOTICE, attribution);
+      }
+      return true;
+    }
+    windowState.emittedAt.push(now);
     this.turnStatusCount++;
     return false;
   }
