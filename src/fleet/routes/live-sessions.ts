@@ -32,28 +32,62 @@ export interface ProcessInfo {
   args: string;
 }
 
-/** Parse `ps -eo pid=,ppid=,stat=,etimes=,args=` output (headerless). */
+/**
+ * Parse a `ps` elapsed-time field (`[[dd-]hh:]mm:ss`) into seconds.
+ *
+ * Returns null for anything that is not that shape, so a malformed column
+ * cannot become NaN — `NaN` survives `?? null` (it is not nullish) and would
+ * reach API consumers as a number that fails every comparison.
+ */
+export function parseEtimeSeconds(raw: string): number | null {
+  const m = raw.match(/^(?:(\d+)-)?(?:(\d+):)?(\d+):(\d+)$/);
+  if (!m) return null;
+  const days = m[1] ? Number(m[1]) : 0;
+  const hours = m[2] ? Number(m[2]) : 0;
+  const minutes = Number(m[3]);
+  const seconds = Number(m[4]);
+  if (minutes > 59 || seconds > 59) return null;
+  return days * 86_400 + hours * 3_600 + minutes * 60 + seconds;
+}
+
+/** Parse `ps -eo pid=,ppid=,stat=,etime=,args=` output (headerless). */
 export function parsePsTable(text: string): ProcessInfo[] {
   const out: ProcessInfo[] = [];
   for (const line of text.split('\n')) {
-    const m = line.trim().match(/^(\d+)\s+(\d+)\s+(\S+)\s+(\d+)\s+(.+)$/);
+    const m = line.trim().match(/^(\d+)\s+(\d+)\s+(\S+)\s+((?:\d+-)?(?:\d+:)?\d+:\d+)\s+(.+)$/);
     if (!m) continue;
+    const etimeSeconds = parseEtimeSeconds(m[4]!);
+    if (etimeSeconds === null) continue;
     out.push({
       pid: Number(m[1]),
       ppid: Number(m[2]),
       state: m[3]!,
-      etimeSeconds: Number(m[4]),
+      etimeSeconds,
       args: m[5]!,
     });
   }
   return out;
 }
 
-/** The real scoped probe: claude processes only, own user, read-only. */
+/**
+ * The real scoped probe: claude processes only, own user, read-only.
+ *
+ * Uses `etime`, not `etimes`. `etimes` (elapsed seconds) is a GNU procps-ng
+ * extension: BSD `ps` on macOS rejects it with `ps: etimes: keyword not found`
+ * AND still exits non-zero while printing the remaining columns, so the field
+ * silently disappears from the table. Since this fleet server explicitly
+ * supports macOS (`platform.ts` `macos-launchd`), that made every live-sessions
+ * probe fail there. `etime` is the field BOTH procps-ng and BSD implement, so
+ * using it needs no platform branch at all — one code path that is also correct
+ * on any third `ps` (busybox, docker images) that implements only the POSIX
+ * field.
+ */
+export const PS_PROBE_ARGS: readonly string[] = ['-eo', 'pid=,ppid=,stat=,etime=,args='];
+
 function probeClaudeProcesses(): ProcessInfo[] {
   const text = execFileSync(
     'ps',
-    ['-eo', 'pid=,ppid=,stat=,etimes=,args='],
+    [...PS_PROBE_ARGS],
     { encoding: 'utf8', timeout: 5_000 },
   );
   return parsePsTable(text).filter((p) => /(^|\/)claude( |$)/.test(p.args));
