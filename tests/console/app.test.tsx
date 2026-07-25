@@ -44,7 +44,7 @@ vi.mock('../../console/src/hooks/use-update-check', () => ({
   getStaticVersion: () => mockStaticVersion,
 }));
 
-// Nav renders inside the test tree and calls useRealtime
+// The NavRail chrome renders inside the test tree and calls useRealtime
 // Mutable realtime flag. Defaults to connected so the ConnectionBanner
 // (DD-29) stays hidden for the routing/nav suites, preserving their DOM;
 // the transport suite below flips it to drive the recovery toast.
@@ -75,6 +75,23 @@ vi.mock('../../console/src/pages/Inbox', () => ({
 }));
 vi.mock('../../console/src/pages/Operator', () => ({
   default: () => createElement('div', { 'data-testid': 'page-ops' }, 'Ops'),
+}));
+// T5 b-13: the five formerly-shelled surfaces, stubbed here as sentinels so the
+// graduation pin below tests the route table, not each surface's own contracts.
+vi.mock('../../console/src/pages/Agents', () => ({
+  default: () => createElement('div', { 'data-testid': 'page-agents' }, 'Agents'),
+}));
+vi.mock('../../console/src/pages/SkillsHub', () => ({
+  default: () => createElement('div', { 'data-testid': 'page-skills' }, 'SkillsHub'),
+}));
+vi.mock('../../console/src/pages/DreamLab', () => ({
+  default: () => createElement('div', { 'data-testid': 'page-dream-lab' }, 'DreamLab'),
+}));
+vi.mock('../../console/src/pages/Deployments', () => ({
+  default: () => createElement('div', { 'data-testid': 'page-deployments' }, 'Deployments'),
+}));
+vi.mock('../../console/src/pages/Settings', () => ({
+  default: () => createElement('div', { 'data-testid': 'page-settings' }, 'Settings'),
 }));
 vi.mock('../../console/src/components/UpdateModal', () => ({
   default: ({ open, currentSha, lines }: { open: boolean; onClose: () => void; currentSha: string; lines: unknown[] }) =>
@@ -152,7 +169,7 @@ describe('App renders — default route /', () => {
     });
   });
 
-  it('renders the Nav element with correct aria-label', async () => {
+  it('renders the chrome rail landmark with correct aria-label', async () => {
     await act(async () => { renderApp('/'); });
     const nav = screen.getByRole('navigation');
     expect(nav.getAttribute('aria-label')).toBe('Main navigation');
@@ -185,6 +202,45 @@ describe('App renders — /ops route', () => {
     await waitFor(() => {
       expect(screen.getByTestId('page-ops')).toBeDefined();
     });
+  });
+});
+
+describe('App renders — v3.5 route shells (T5 b-02)', () => {
+  it('/operator redirects to the canonical /ops surface', async () => {
+    await act(async () => { renderApp('/operator'); });
+    await waitFor(() => {
+      expect(screen.getByTestId('page-ops')).toBeDefined();
+    });
+  });
+
+  it('every shelled surface graduated — the stub placeholder is retired', async () => {
+    // T5 b-13: b-04…b-09 each replaced their SurfaceStub route with the real
+    // v3.5 surface. This pin is the retirement proof: every formerly-shelled
+    // route renders real surface content and NO route renders the placeholder
+    // sentence, so a regression that re-shadows a surface behind the stub
+    // fails here (the integration assembly did exactly that once).
+    const routes: Array<[string, string]> = [
+      ['/agents', 'page-agents'],
+      ['/skills', 'page-skills'],
+      ['/dream-lab', 'page-dream-lab'],
+      ['/deployments', 'page-deployments'],
+      ['/settings', 'page-settings'],
+    ];
+    for (const [path, testid] of routes) {
+      cleanup();
+      await act(async () => { renderApp(path); });
+      await waitFor(() => {
+        expect(screen.getByTestId(testid)).toBeDefined();
+      });
+      expect(screen.queryByText(/lands with bead/)).toBeNull();
+    }
+  });
+
+  it('the stub module is gone from the route table and the source tree', async () => {
+    const { readFileSync, existsSync } = await import('node:fs');
+    const app = readFileSync('console/src/App.tsx', 'utf8');
+    expect(app).not.toContain('SurfaceStub');
+    expect(existsSync('console/src/pages/SurfaceStub.tsx')).toBe(false);
   });
 });
 
@@ -321,24 +377,26 @@ describe('App — KeyboardShortcutsHelp modal', () => {
 });
 
 // ---------------------------------------------------------------------------
-// 6. Nav counts and update-available integration
+// 6. Chrome counts and update-available integration
 // ---------------------------------------------------------------------------
 
-describe('App — nav counts and update check integration', () => {
+describe('App — chrome counts and update check integration', () => {
   it('does not render UpdateModal when no update data', async () => {
     mockUpdateData = undefined;
     await act(async () => { renderApp('/'); });
     expect(screen.queryByTestId('update-modal')).toBeNull();
   });
 
-  it('nav shows "All systems operational" (no lines data → 0 alerts)', async () => {
+  it('chrome header renders with no attention pill (no lines data → 0 alerts)', async () => {
     await act(async () => { renderApp('/'); });
     await waitFor(() => {
-      expect(screen.getByText('All systems operational')).toBeDefined();
+      // h1 law: the surface owns the h1 — the chrome title is a styled span.
+      expect(document.querySelector('.chrome-title')?.textContent).toBe('Fleet');
     });
+    expect(screen.queryByText(/need.*attention/)).toBeNull();
   });
 
-  it('derives Nav alert and unread counts from line data', async () => {
+  it('derives chrome alert pill and rail unread count from line data', async () => {
     mockLines = [
       { name: 'primary', status: 'online', unread: 2 },
       { name: 'sandbox', status: 'degraded', unread: 3 },
@@ -348,20 +406,22 @@ describe('App — nav counts and update check integration', () => {
     await act(async () => { renderApp('/'); });
 
     await waitFor(() => {
-      expect(screen.getByText('2 alerts')).toBeDefined();
-      expect(screen.getByText('5')).toBeDefined();
+      // degraded + unreachable → 2 lines needing attention (header pill);
+      // 2 + 3 unread → the rail's sr-only inbox count.
+      expect(screen.getByText('2 lines need attention')).toBeDefined();
+      expect(screen.getByText('5 unread')).toBeDefined();
     });
   });
 
-  it('line detail route keeps Fleet active in Nav', async () => {
+  it('line detail route keeps Fleet active in the rail', async () => {
     await act(async () => { renderApp('/lines/primary-line'); });
 
     await waitFor(() => screen.getByTestId('page-line-detail'));
-    const fleetLink = screen.getByText('Fleet').closest('a');
-    expect(fleetLink?.getAttribute('aria-current')).toBe('page');
+    const fleetLink = screen.getByRole('link', { name: 'Fleet' });
+    expect(fleetLink.getAttribute('aria-current')).toBe('page');
   });
 
-  it('static version is shown in Nav when update data has not loaded', async () => {
+  it('static version is shown in the rail when update data has not loaded', async () => {
     mockStaticVersion = 'static-sha';
 
     await act(async () => { renderApp('/'); });
@@ -371,12 +431,12 @@ describe('App — nav counts and update check integration', () => {
     });
   });
 
-  it('update sha from query data overrides static version in Nav', async () => {
+  it('update sha from query data overrides static version in the rail', async () => {
     mockStaticVersion = 'static-sha';
     mockUpdateData = { sha: 'live-sha', remoteSha: 'new-sha', updateAvailable: true };
     await act(async () => { renderApp('/'); });
     await waitFor(() => {
-      // C1: Nav now includes a theme toggle button; use the update button's aria-label for specificity
+      // The chrome header includes a theme toggle button; use the update button's aria-label for specificity
       const btn = screen.getByRole('button', { name: /Update available/ });
       expect(btn.textContent).toContain('live-sha');
       expect(btn.textContent).toContain('new-sha');
@@ -387,7 +447,7 @@ describe('App — nav counts and update check integration', () => {
   it('clicking the update button calls openUpdateModal', async () => {
     mockUpdateData = { sha: 'live-sha', remoteSha: 'new-sha', updateAvailable: true };
     await act(async () => { renderApp('/'); });
-    // C1: Nav now includes a theme toggle button; click the update button specifically
+    // The chrome header includes a theme toggle button; click the update button specifically
     await waitFor(() => screen.getByRole('button', { name: /Update available/ }));
     fireEvent.click(screen.getByRole('button', { name: /Update available/ }));
     expect(mockOpenUpdateModal).toHaveBeenCalledTimes(1);

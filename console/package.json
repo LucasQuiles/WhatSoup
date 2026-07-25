@@ -34,7 +34,8 @@
     "lint:shadow:baseline": "node scripts/check-shadow-baseline.mjs",
     "design:metrics": "node scripts/design-metrics.mjs",
     "design:burndown": "node scripts/check-design-burndown.mjs",
-    "coverage:check": "node scripts/check-coverage-thresholds.mjs"
+    "coverage:check": "node scripts/check-coverage-thresholds.mjs",
+    "perf:lane": "node scripts/perf-lane.mjs"
   },
   "dependencies": {
     "@tanstack/react-query": "5.96.0",
