@@ -63,8 +63,9 @@ describe('migration 47 recovery receipt immutability', () => {
       WHERE type = 'trigger'
         AND name = 'turn_recovery_source_inbound_receipt_immutable'
     `).get() as { sql: string } | undefined;
-    expect(trigger?.sql).toContain('BEFORE UPDATE OF received_at ON inbound_events');
+    expect(trigger?.sql).toContain('BEFORE UPDATE OF seq, received_at ON inbound_events');
     expect(trigger?.sql).toContain('j.source_inbound_seq = OLD.seq');
+    expect(trigger?.sql).toContain('NEW.seq IS NOT OLD.seq');
     expect(trigger?.sql).toContain('NEW.received_at IS NOT OLD.received_at');
 
     const replacementTrigger = db.raw.prepare(`
@@ -86,6 +87,11 @@ describe('migration 47 recovery receipt immutability', () => {
     expect(() => db.raw.prepare(`
       UPDATE inbound_events
       SET received_at = datetime(received_at, '+1 second')
+      WHERE message_id = 'unlinked-receipt'
+    `).run()).not.toThrow();
+    expect(() => db.raw.prepare(`
+      UPDATE inbound_events
+      SET seq = seq + 100
       WHERE message_id = 'unlinked-receipt'
     `).run()).not.toThrow();
 
@@ -192,6 +198,24 @@ describe('migration 47 recovery receipt immutability', () => {
           seq, message_id, conversation_key, chat_jid, received_at
         ) VALUES (?, 'linked-message', 'conversation', 'chat', '2040-01-01 00:00:00')
       `).run(linked.sourceSeq)).toThrow(/recovery source inbound replacement is blocked/i);
+      expect(linkedReceipt(linked.raw)).toEqual(before);
+    } finally {
+      linked.raw.close();
+    }
+  });
+
+  it('rejects changing a linked journal sequence while allowing a no-op assignment', () => {
+    const linked = openLinkedReceiptDatabase();
+    try {
+      const before = linkedReceipt(linked.raw);
+      expect(() => linked.raw.prepare(`
+        UPDATE inbound_events SET seq = seq + 100 WHERE seq = ?
+      `).run(linked.sourceSeq)).toThrow(/recovery source inbound receipt is immutable/i);
+      expect(linkedReceipt(linked.raw)).toEqual(before);
+
+      expect(() => linked.raw.prepare(`
+        UPDATE inbound_events SET seq = seq WHERE seq = ?
+      `).run(linked.sourceSeq)).not.toThrow();
       expect(linkedReceipt(linked.raw)).toEqual(before);
     } finally {
       linked.raw.close();

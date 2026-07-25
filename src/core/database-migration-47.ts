@@ -8,10 +8,13 @@ const REQUIRED_COLUMNS = new Map([
 const TRIGGERS = new Map([
   ['turn_recovery_source_inbound_receipt_immutable', `
     CREATE TRIGGER turn_recovery_source_inbound_receipt_immutable
-    BEFORE UPDATE OF received_at ON inbound_events
+    BEFORE UPDATE OF seq, received_at ON inbound_events
     WHEN EXISTS (
       SELECT 1 FROM turn_recovery_jobs j WHERE j.source_inbound_seq = OLD.seq
-    ) AND NEW.received_at IS NOT OLD.received_at
+    ) AND (
+      NEW.seq IS NOT OLD.seq
+      OR NEW.received_at IS NOT OLD.received_at
+    )
     BEGIN
       SELECT RAISE(ABORT, 'turn recovery source inbound receipt is immutable');
     END
@@ -54,7 +57,7 @@ function assertCanonicalTrigger(db: DatabaseSync, name: string, sql: string): bo
  *
  * Migration 40 already protects the source identity. These separate triggers
  * preserve that shipped trigger byte-for-byte while closing the chronology
- * provenance gap for received_at.
+ * provenance gap for the journal sequence and received_at.
  */
 export function runMigration47(db: DatabaseSync): void {
   const missingTables = REQUIRED_TABLES.filter((name) => !db.prepare(`
