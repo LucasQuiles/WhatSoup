@@ -816,7 +816,7 @@ process.stdout.write('ready\\n');
     expect(result.stderr).toContain('database-compatibility-dependency.ts');
   });
 
-  it('rejects a transitive symlink redirect before its target sentinel executes', () => {
+  it('rejects a dirty contained symlink redirect before its target sentinel executes', () => {
     const fixture = makeWrapperFixture();
     const dependency = join(fixture.root, 'src', 'database-compatibility-dependency.ts');
     const redirect = join(fixture.root, 'src', 'database-compatibility-redirect.ts');
@@ -849,7 +849,7 @@ writeFileSync(sentinel, 'executed', 'utf8');
     expect(existsSync(sentinel)).toBe(false);
     expect(result.status).toBe(1);
     expect(result.stderr).toContain('FATAL: database compatibility bootstrap trust check failed');
-    expect(result.stderr).toContain('file-kind');
+    expect(result.stderr).toContain('file-dirty');
     expect(result.stderr).toContain('database-compatibility-dependency.ts');
   });
 
