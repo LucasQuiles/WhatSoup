@@ -79,7 +79,7 @@ vi.mock('../../../src/runtimes/agent/session-db.ts', () => ({
 import { spawn } from 'node:child_process';
 import { SessionManager } from '../../../src/runtimes/agent/session.ts';
 import { OpenAIApiProvider } from '../../../src/runtimes/agent/providers/openai-api.ts';
-import { incrementMessageCount } from '../../../src/runtimes/agent/session-db.ts';
+import { incrementMessageCount, updateTranscriptPath } from '../../../src/runtimes/agent/session-db.ts';
 import type { Database } from '../../../src/core/database.ts';
 import type { Messenger } from '../../../src/core/types.ts';
 import type { AgentEvent } from '../../../src/runtimes/agent/stream-parser.ts';
@@ -442,3 +442,48 @@ describe('spawnSession already-active short-circuit', () => {
 //     timeouts / codex thread-resume retry params (~1167,1260,1804,1837) require
 //     persistent codex/gemini timer harnesses; deferred (harness cost) — they are
 //     reachable in principle but out of scope for this pure/handler-branch pass.
+
+// ════════════════════════════════════════════════════════════════════════════
+// claude-cli transcript path derivation (#2321)
+// The project subdirectory must be derived from the actual cwd (replace '/' with
+// '-'), not a hardcoded Linux-only '-home-<user>' prefix that breaks on macOS.
+// ════════════════════════════════════════════════════════════════════════════
+
+describe('claude-cli transcript path derivation (#2321)', () => {
+  beforeEach(() => vi.clearAllMocks());
+  afterEach(() => vi.restoreAllMocks());
+
+  it('encodes the configured cwd into the project dir name (not a hardcoded -home- prefix)', async () => {
+    const child = makeMockChild();
+    (spawn as ReturnType<typeof vi.fn>).mockReturnValue(child);
+    const sm = new SessionManager({
+      db: makeDb(),
+      messenger: makeMessenger().messenger,
+      chatJid: CHAT_JID,
+      onEvent: vi.fn(),
+      provider: 'claude-cli',
+      cwd: '/Users/testuser/whatsoup-instance',
+    });
+    await sm.spawnSession();
+
+    // Emit a claude-cli init event (type:system, subtype:init) to trigger
+    // the transcript-path derivation.
+    child.stdout.emit('data', Buffer.from(JSON.stringify({
+      type: 'system',
+      subtype: 'init',
+      session_id: 'sess-transcript-test',
+    }) + '\n'));
+
+    // The project dir must be the cwd with '/' → '-', NOT '-home-testuser'.
+    expect(updateTranscriptPath).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.any(Number),
+      expect.stringContaining('-Users-testuser-whatsoup-instance'),
+    );
+    expect(updateTranscriptPath).not.toHaveBeenCalledWith(
+      expect.anything(),
+      expect.any(Number),
+      expect.stringContaining('-home-'),
+    );
+  });
+});

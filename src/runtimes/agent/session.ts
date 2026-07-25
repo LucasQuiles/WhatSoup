@@ -4,7 +4,7 @@
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
-import { homedir, userInfo } from 'node:os';
+import { homedir } from 'node:os';
 import { join } from 'node:path';
 import type { Database } from '../../core/database.ts';
 import type { Messenger } from '../../core/types.ts';
@@ -990,11 +990,19 @@ export class SessionManager {
       }
 
       if (this.provider === 'claude-cli') {
+        // Claude Code names its project subdirectory by encoding the CWD path
+        // (replacing '/' with '-'). Derive it from the actual configuredCwd
+        // (the directory claude-cli runs in) rather than reconstructing a
+        // Linux-only '/home/<user>' assumption — on macOS the home is
+        // '/Users/<user>', so a hardcoded '-home-' prefix produced a path to a
+        // non-existent directory, silently breaking transcript access (#2321).
+        const cwd = this.configuredCwd ?? homedir();
+        const encodedProjectDir = cwd.replace(/\//g, '-');
         const transcriptPath = join(
           homedir(),
           '.claude',
           'projects',
-          `-home-${userInfo().username}`,
+          encodedProjectDir,
           `${event.sessionId}.jsonl`,
         );
         updateTranscriptPath(this.db, this.dbRowId, transcriptPath);
