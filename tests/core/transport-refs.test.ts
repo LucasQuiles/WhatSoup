@@ -2,10 +2,16 @@
 import { describe, it, expect } from 'vitest';
 import {
   makeChannelId, kindOf, accountOf,
+  isImessageGroupAddress,
   refToKey, msgToKey,
   type ChannelId, type ChannelKind,
   type ConversationRef, type ParticipantRef, type MessageRef,
 } from '../../src/core/transport-refs.ts';
+import {
+  isBluebubblesPasswordService,
+  isBluebubblesPasswordServiceForAccount,
+  isTrustedBluebubblesUrl,
+} from '../../src/lib/bluebubbles-config.ts';
 
 describe('ChannelId / ChannelKind', () => {
   it('makeChannelId produces "kind:account" form', () => {
@@ -57,6 +63,37 @@ describe('imessage channel kind', () => {
     expect(id).toBe('imessage:mac-mini');
     expect(kindOf(id)).toBe('imessage');
     expect(accountOf(id)).toBe('mac-mini');
+  });
+
+  it('recognizes only iMessage group chat GUIDs with a provider id', () => {
+    expect(isImessageGroupAddress('iMessage;+;chatABC')).toBe(true);
+    expect(isImessageGroupAddress('iMessage;+;')).toBe(false);
+    expect(isImessageGroupAddress('iMessage;-;chatABC')).toBe(false);
+    expect(isImessageGroupAddress('owner@example.test')).toBe(false);
+    expect(isImessageGroupAddress('+15551230008')).toBe(false);
+    expect(isImessageGroupAddress('imessage;+;chatABC')).toBe(false);
+  });
+
+  it('accepts only provider-scoped BlueBubbles password services', () => {
+    expect(isBluebubblesPasswordService('whatsoup-bluebubbles')).toBe(true);
+    expect(isBluebubblesPasswordService('whatsoup-bluebubbles-support-1')).toBe(true);
+    expect(isBluebubblesPasswordService('whatsoup-health-token')).toBe(false);
+    expect(isBluebubblesPasswordService('openai')).toBe(false);
+  });
+
+  it('binds a BlueBubbles password service to its exact transport account', () => {
+    expect(isBluebubblesPasswordServiceForAccount('whatsoup-bluebubbles-support-1', 'support-1')).toBe(true);
+    expect(isBluebubblesPasswordServiceForAccount('whatsoup-bluebubbles-support-2', 'support-1')).toBe(false);
+    expect(isBluebubblesPasswordServiceForAccount('whatsoup-bluebubbles', 'support-1')).toBe(false);
+  });
+
+  it('requires HTTPS except for loopback BlueBubbles endpoints', () => {
+    expect(isTrustedBluebubblesUrl('https://messages.example.test')).toBe(true);
+    expect(isTrustedBluebubblesUrl('http://localhost:1234')).toBe(true);
+    expect(isTrustedBluebubblesUrl('http://127.0.0.1:1234')).toBe(true);
+    expect(isTrustedBluebubblesUrl('http://messages.example.test')).toBe(false);
+    expect(isTrustedBluebubblesUrl('https://user:secret@messages.example.test')).toBe(false);
+    expect(isTrustedBluebubblesUrl('https://messages.example.test?password=secret')).toBe(false);
   });
 });
 

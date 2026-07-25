@@ -1,6 +1,10 @@
 // src/core/transport-refs.ts
 
 import { isE164Wire } from '../lib/phone.ts';
+import { ACCOUNT_RE } from '../lib/account-segment.ts';
+export { ACCOUNT_RE } from '../lib/account-segment.ts';
+import { canonicalizeAppleIdEmail } from '../lib/appleid.ts';
+export { APPLEID_EMAIL_RE, canonicalizeAppleIdEmail, isAppleIdEmail } from '../lib/appleid.ts';
 
 /** Transport library / protocol family. */
 export type ChannelKind =
@@ -21,20 +25,30 @@ declare const __channelIdBrand: unique symbol;
  */
 export type ChannelId = string & { readonly [__channelIdBrand]: true };
 
-/** Channel account segment pattern — shared with config validation. */
-export const ACCOUNT_RE = /^[a-z][a-z0-9-]{0,63}$/;
-
 /**
  * AppleID email shape — iMessage accepts iCloud / me.com / mac.com addresses
  * plus any email registered against an AppleID. We accept any RFC-5322-ish
  * shape here; the daemon/Server is the final arbiter.
  *
- * Lives in core (not src/transport/imessage/) because config validation needs
- * it: core may only import [core, lib], so defining it under transport/ would
- * force a core → transport edge that the import-boundary ratchet rejects.
+ * Re-exported from lib (not src/transport/imessage/) because config validation
+ * and the console share it: core may only import [core, lib], so defining it
+ * under transport/ would force a core → transport edge that the import-boundary
+ * ratchet rejects.
  * `src/transport/imessage/types.ts` re-exports it for the adapter.
  */
-export const APPLEID_EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+const IMESSAGE_GROUP_PREFIX = 'iMessage;+;';
+
+/** BlueBubbles/imsg group chat GUID prefix with a non-empty provider id. */
+export function isImessageGroupAddress(address: string): boolean {
+  return address.startsWith(IMESSAGE_GROUP_PREFIX)
+    && address.length > IMESSAGE_GROUP_PREFIX.length;
+}
+
+/** Canonicalize a direct iMessage identity without altering chat GUIDs. */
+export function canonicalizeImessageDirectIdentity(identity: string): string | null {
+  if (isE164Wire(identity)) return identity;
+  return canonicalizeAppleIdEmail(identity);
+}
 
 /** Signal service UUID and V2 group-id shapes shared by core JID policy. */
 export const SIGNAL_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
