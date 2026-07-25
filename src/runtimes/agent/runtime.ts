@@ -94,10 +94,11 @@ import {
   type SessionCrashInfo,
 } from './session.ts';
 import { createProviderExecutionGate, ProviderExecutionGate } from './provider-execution-gate.ts';
-import { dispatchProviderTurn } from './provider-boundary-dispatch.ts';
+import { dispatchProviderTurn, withProviderApplicationContext } from './provider-boundary-dispatch.ts';
 import { TurnChronologyTracker, type TurnDeliveryKind } from './turn-chronology.ts';
 import {
   receivedAtUnixSeconds,
+  renderPendingReplay,
   renderUserTurnForProvider,
   sharedRuntimeTurnText,
 } from './turn-provider-text.ts';
@@ -4732,10 +4733,10 @@ export class AgentRuntime implements Runtime {
         runtimeContext ?? null,
         deliveryKind,
       );
-      const turnText = contextPreamble === null
+      const turnInput = contextPreamble === null
         ? userTurnText
-        : `${contextPreamble}\n\n[Current message]\n${userTurnText}`;
-      await dispatchProviderTurn(session, turnText, onProviderBoundaryReady);
+        : withProviderApplicationContext(userTurnText, contextPreamble);
+      await dispatchProviderTurn(session, turnInput, onProviderBoundaryReady);
     } catch (err) {
       if (actorPushed && effectiveMapKey !== undefined) {
         this.removeFailedExecutingActor(effectiveMapKey, actorJid, systemTurnLease);
@@ -11725,12 +11726,12 @@ export class AgentRuntime implements Runtime {
               err,
             );
           }
-
           // Replay the pending turn that was lost during the failed resume
           if (pendingText && mapKey) {
             log.info({ chatJid, mapKey, textPreview: providerPreview(pendingText, 80) }, 'replaying pending turn after resume failure');
             try {
-              await session.sendTurn(pendingText);
+              await session.sendTurn(renderPendingReplay(this.turnChronology, pendingText,
+                this.perChatRuntimeTurnContexts.get(mapKey)?.[0], this.perChatTurnQueues.get(mapKey)?.activeTurn ?? null));
             } catch (err) {
               log.warn({ err, chatJid }, 'pending turn replay failed');
               // Retain the replay evidence. A failed or ambiguously accepted

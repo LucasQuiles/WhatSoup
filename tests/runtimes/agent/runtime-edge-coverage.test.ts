@@ -640,6 +640,7 @@ function runtimeContext(
   inboundSeq: number,
   logicalTurnId: string,
   owner: { managerId?: string; generation?: number; toolScopeKey?: string } = {},
+  replayText = 'original edge turn',
 ): RuntimeTurnContext {
   return createRuntimeTurnContext({
     identity: {
@@ -658,7 +659,7 @@ function runtimeContext(
       replaySafe: true,
       senderJid: 'sender-edge@s.whatsapp.net',
       senderName: null,
-      text: 'original edge turn',
+      text: replayText,
       isGroup: false,
     },
     contentType: 'text',
@@ -1974,6 +1975,26 @@ describe('AgentRuntime edge coverage', () => {
     state.sessionEventToolScopes.set(session, toolScopeKey);
     state.pendingTurnText.set(mapKey, 'lost user turn after rejected resume');
     state.pendingTurnActorJid.set(mapKey, 'actor-recovery@s.whatsapp.net');
+    const replayContext = runtimeContext(
+      'per_chat', mapKey, chatJid, 42, 'resume-failure-replay', {},
+      'lost user turn after rejected resume',
+    );
+    state.perChatTurnQueues.set(mapKey, {
+      activeTurn: {
+        conversationKey: mapKey,
+        chatJid,
+        senderJid: replayContext.replay.senderJid,
+        senderName: replayContext.replay.senderName,
+        sourceMessageId: replayContext.replay.sourceMessageId,
+        receivedAtUnixSeconds: replayContext.replay.receivedAtUnixSeconds,
+        text: replayContext.replay.text,
+        isGroup: false,
+        contentType: 'text',
+        runtimeContext: replayContext,
+        inboundSeq: replayContext.identity.inboundSeq,
+      },
+    } as never);
+    vi.spyOn(Date, 'now').mockReturnValue((1_780_000_000 + 75) * 1000);
     state.imageCoalesce.buffers.set(mapKey, {
       timer: coalesceTimer,
       msg: { chatJid },
@@ -2035,7 +2056,20 @@ describe('AgentRuntime edge coverage', () => {
     state.handleEventPerChat(session, { type: 'result', text: null }, toolScopeKey);
     await drainMicrotasks();
 
-    expect(session.sendTurn).toHaveBeenNthCalledWith(2, 'lost user turn after rejected resume');
+    expect(session.sendTurn).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({
+        applicationContext: [
+          expect.stringContaining('Delivery: recovery replay'),
+        ],
+        userText: 'lost user turn after rejected resume',
+      }),
+    );
+    const replayTurn = (session.sendTurn.mock.calls as unknown as Array<[
+      { applicationContext: string[]; userText: string },
+    ]>)[1]![0];
+    expect(replayTurn.applicationContext[0]).toContain('Queue age: 75 seconds');
+    expect(replayTurn.userText).toBe('lost user turn after rejected resume');
     expect(session.completeProviderTurn).toHaveBeenCalledOnce();
     expect(state.resumeFailedHandling.has(mapKey)).toBe(false);
   });

@@ -56,11 +56,14 @@ describe('runtime turn chronology integration', () => {
       );
 
       const calls = vi.mocked(session.sendTurn).mock.calls as unknown[][];
-      const providerText = calls[0]?.[0] as string | undefined;
-      expect(providerText).toContain('Trusted WhatSoup delivery context');
-      expect(providerText).toContain('Queue age: 95 seconds');
-      expect(providerText).toContain('Delivery: queued');
-      expect(providerText?.endsWith('\nstop the stale action')).toBe(true);
+      const providerInput = calls[0]?.[0] as {
+        applicationContext: string[];
+        userText: string;
+      };
+      expect(providerInput.applicationContext[0]).toContain('WhatSoup delivery context');
+      expect(providerInput.applicationContext[0]).toContain('Queue age: 95 seconds');
+      expect(providerInput.applicationContext[0]).toContain('Delivery: queued');
+      expect(providerInput.userText).toBe('stop the stale action');
       expect(runtime.getHealthSnapshot().details).toMatchObject({
         chronologyDelayedDispatches: 1,
         chronologyRecoveryReplayDispatches: 0,
@@ -113,9 +116,12 @@ describe('runtime turn chronology integration', () => {
       );
 
       const calls = vi.mocked(session.sendTurn).mock.calls as unknown[][];
-      const providerText = calls[0]?.[0] as string | undefined;
-      expect(providerText).toContain('Delivery: recovery replay');
-      expect(providerText?.endsWith(`\n${runtimeContext.replay.text}`)).toBe(true);
+      const providerInput = calls[0]?.[0] as {
+        applicationContext: string[];
+        userText: string;
+      };
+      expect(providerInput.applicationContext[0]).toContain('Delivery: recovery replay');
+      expect(providerInput.userText).toBe(runtimeContext.replay.text);
       expect(state.perChatRuntimeTurnContexts.get(mapKey)?.[0]).toBe(runtimeContext);
     } finally {
       db.close();

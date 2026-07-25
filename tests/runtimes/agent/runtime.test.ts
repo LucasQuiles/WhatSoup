@@ -6937,10 +6937,13 @@ describe('AgentRuntime', () => {
     );
     // The single provider send carries the context preamble plus the user text.
     expect(mockSession.sendTurn).toHaveBeenCalledTimes(1);
-    const sent = (vi.mocked(mockSession.sendTurn).mock.calls[0] as unknown as [string])[0];
-    expect(sent).toMatch(/^\[Recent chat context — read before responding\]\n/);
-    expect(sent).toContain('earlier message');
-    expect(sent).toMatch(/\n\n\[Current message\]\nhello$/);
+    const sent = (vi.mocked(mockSession.sendTurn).mock.calls[0] as unknown as [{
+      applicationContext: string[];
+      userText: string;
+    }])[0];
+    expect(sent.applicationContext[0]).toMatch(/^\[Recent chat context — read before responding\]\n/);
+    expect(sent.applicationContext[0]).toContain('earlier message');
+    expect(sent.userText).toBe('hello');
 
     // Complete the (single) user turn so the queued test work does not outlive
     // this test.

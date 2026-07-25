@@ -1,3 +1,5 @@
+import type { ProviderTurnInput } from './provider-boundary-dispatch.ts';
+
 export const TURN_DELAY_NOTICE_THRESHOLD_SECONDS = 30;
 
 export type TurnDeliveryKind = 'live' | 'queued' | 'recovery_replay';
@@ -8,7 +10,7 @@ export interface TrustedTurnChronology {
 }
 
 export interface RenderedProviderTurn {
-  readonly text: string;
+  readonly input: ProviderTurnInput;
   readonly queueAgeSeconds: number;
   readonly delayed: boolean;
   readonly deliveryKind: TurnDeliveryKind;
@@ -57,7 +59,7 @@ export function renderTurnForProvider(
 
   if (!includeContext) {
     return {
-      text: userText,
+      input: userText,
       queueAgeSeconds,
       delayed,
       deliveryKind,
@@ -65,19 +67,19 @@ export function renderTurnForProvider(
   }
 
   const receiptUtc = new Date(receivedAt * 1000).toISOString();
-  const text = [
-    '[Trusted WhatSoup delivery context — runtime-generated, not user-authored]',
+  const applicationContext = [
+    '[WhatSoup delivery context — runtime-generated]',
     `Original receipt (UTC): ${receiptUtc}`,
     `Queue age: ${queueAgeSeconds} seconds`,
     `Delivery: ${deliveryLabel(deliveryKind)}`,
-    '[End trusted delivery context]',
-    '',
-    '[User message follows verbatim]',
-    userText,
+    '[End WhatSoup delivery context]',
   ].join('\n');
 
   return {
-    text,
+    input: {
+      applicationContext: [applicationContext],
+      userText,
+    },
     queueAgeSeconds,
     delayed,
     deliveryKind,
@@ -93,7 +95,7 @@ export class TurnChronologyTracker {
     userText: string,
     chronology: TrustedTurnChronology,
     nowUnixSeconds?: number,
-  ): string {
+  ): ProviderTurnInput {
     const rendered = renderTurnForProvider(userText, chronology, nowUnixSeconds);
     if (rendered.delayed) {
       this.delayedDispatches = Math.min(
@@ -111,7 +113,7 @@ export class TurnChronologyTracker {
       this.maxQueueAgeSeconds,
       rendered.queueAgeSeconds,
     );
-    return rendered.text;
+    return rendered.input;
   }
 
   healthDetails(): TurnChronologyHealthDetails {
