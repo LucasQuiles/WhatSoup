@@ -310,9 +310,6 @@ jobs:
       - name: BOT ERRORS critical surface guard
         run: npm run guard:bot-errors-critical-surface
 
-      - name: Repo hygiene tests
-        run: npm test -- tests/scripts/repo-hygiene-guard.test.ts --pool=forks
-
       - name: Secret-leak history scan (advisory)
         continue-on-error: true
         run: npm run guard:repo:scan-history -- 100

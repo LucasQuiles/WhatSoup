@@ -910,6 +910,24 @@ describe('quality workflow composition', () => {
     expect(qualityWorkflow).toContain('--base "origin/$GITHUB_BASE_REF"');
   });
 
+  it('relies on authoritative coverage instead of rerunning repo-hygiene tests', () => {
+    const compatibilityIndex = qualityWorkflow.indexOf('  compatibility:');
+    const authority = qualityWorkflow.slice(0, compatibilityIndex);
+    const stagedIndex = authority.indexOf('npm run guard:repo:staged');
+    const branchDiffIndex = authority.indexOf('npm run guard:repo:branch-diff');
+    const commitAuthorIndex = authority.indexOf('npm run guard:repo:commit-authors');
+    const coverageIndex = authority.indexOf('npm run coverage:check -- --pool=forks');
+
+    expect(compatibilityIndex).toBeGreaterThanOrEqual(0);
+    expect(stagedIndex).toBeGreaterThanOrEqual(0);
+    expect(branchDiffIndex).toBeGreaterThan(stagedIndex);
+    expect(commitAuthorIndex).toBeGreaterThan(branchDiffIndex);
+    expect(coverageIndex).toBeGreaterThan(commitAuthorIndex);
+    expect(authority).not.toContain(
+      'run: npm test -- tests/scripts/repo-hygiene-guard.test.ts --pool=forks',
+    );
+  });
+
   it('runs BOT ERRORS runtime manifest verification before the simulation matrix in CI', () => {
     const runtimeManifestIndex = qualityWorkflow.indexOf('npm run guard:bot-errors-runtime-manifest');
     const simulationIndex = qualityWorkflow.indexOf('npm run guard:bot-errors-simulation-matrix');
