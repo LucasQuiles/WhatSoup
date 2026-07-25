@@ -11,8 +11,8 @@
 // the provider E.164 when exposed and fall back to UUID when the number is private;
 // WhatSoup does not claim a durable UUID↔E.164 alias map.
 
-/** E.164 phone shape — shared with the Twilio transport's validator. */
-export const E164_RE = /^\+[1-9]\d{6,14}$/;
+/** E.164 phone shape shared with the other transport validators. */
+export { E164_RE } from '../../core/transport-refs.ts';
 
 export {
   SIGNAL_GROUP_ID_RE,
