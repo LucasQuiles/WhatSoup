@@ -54,8 +54,13 @@ export function parseEtimeSeconds(raw: string): number | null {
 export function parsePsTable(text: string): ProcessInfo[] {
   const out: ProcessInfo[] = [];
   for (const line of text.split('\n')) {
-    const m = line.trim().match(/^(\d+)\s+(\d+)\s+(\S+)\s+((?:\d+-)?(?:\d+:)?\d+:\d+)\s+(.+)$/);
+    const m = line.trim().match(/^(\d+)\s+(\d+)\s+(\S+)\s+(\S+)\s+(.+)$/);
     if (!m) continue;
+    // parseEtimeSeconds is the single gate on this column. Constraining the
+    // shape in the regex as well reads as defence-in-depth but is dead weight:
+    // no input distinguishes the two, because anything the looser pattern
+    // admits is rejected here instead. Mutation-tested — tightening the regex
+    // kills no test.
     const etimeSeconds = parseEtimeSeconds(m[4]!);
     if (etimeSeconds === null) continue;
     out.push({
