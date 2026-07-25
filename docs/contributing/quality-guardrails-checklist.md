@@ -69,11 +69,15 @@ Pre-push hook routes through `scripts/pre-push-guard.ts`:
 
 Before branch or release verification starts, the dispatcher checks that the
 installed console package exposes executable `eslint`, `tsc`, and `vite`
-entrypoints. A missing or partial install fails before the expensive composite
-with the remediation `npm ci --prefix console`. Delete-only pushes bypass this
-prerequisite so the file-based metadata checks remain runnable without console
-dependencies. Branch and release composites already include those metadata
-checks through `verify:console-design`; the hook does not repeat them.
+entrypoints, then uses the pinned npm wrapper to validate the complete installed
+package graph in offline, lifecycle-script-disabled mode. A missing or invalid
+package, plugin, or transitive dependency fails before the expensive composite
+with the remediation `npm ci --prefix console`. Child output is suppressed so
+the diagnostic stays bounded and cannot echo package-manager configuration.
+Delete-only pushes bypass this prerequisite so the file-based metadata checks
+remain runnable without console dependencies. Branch and release composites
+already include those metadata checks through `verify:console-design`; the hook
+does not repeat them.
 
 The "ring/boundary/service/config guards" phrasing above folds in several named
 guards that `verify:push:branch` runs. Spelled out:
@@ -84,7 +88,7 @@ guards that `verify:push:branch` runs. Spelled out:
 | Instance config integrity | `npm run guard:instance-config` | Verify instance `config.json` files for memory-config integrity (non-empty `memory.pinecone.expectedHostSuffix`, no UUID-shaped `projectId` host trap) and per-host health-port map integrity. | yes |
 | Fail-closed gate | `npm run guard:fail-closed-gate` | Reject fail-open shell gate shapes: a probe that substitutes a sentinel on failure (`\|\| echo "000"`, `\|\| true`) then gates only on success, and the `grep -c ... \|\| echo 0` double-zero shape. | yes |
 | Fleet bot-hardening parity | `npm run guard:fleet-bot-hardening-parity` | Verify the redacted fleet bot-hardening parity manifest and its source anchors stay aligned with the A–D provider-resilience standard. | yes |
-| ARC binding drift | `npm run guard:arc-binding-drift` | Verify the tracked `.arc/` shim. Always-on vendored-pin check (`.arc/.canonical-sha` vs the payload sha in `arc.toml`/`ARC_BINDING.md`) hard-blocks a stale `.arc/` even in CI without the sibling repo; when the sibling agent-runtime-protocol is reachable (via `ARC_REPO_DIR`), additionally runs the full byte-for-byte adopt-generator comparison and cross-checks the pin against the live sha. | no (pre-push only) |
+| ARC binding drift | `npm run guard:arc-binding-drift` | Verify the tracked `.arc/` shim. Always-on vendored-pin check (`.arc/.canonical-sha` vs the payload sha in `arc.toml`/`ARC_BINDING.md`) hard-blocks a stale `.arc/` even in CI without the sibling repo; when the sibling agent-runtime-protocol is reachable (via `ARC_REPO_DIR`), additionally runs the full byte-for-byte adopt-generator comparison and cross-checks the pin against the live sha. | yes |
 | Guard test coverage (meta-guard) | `npm run guard:guard-test-coverage` | Meta-guard: every guard-family script (`scripts/*guard*.ts`, `scripts/check-*.ts`) must ship a companion test wired into `verify:push:branch`, or carry a `// meta-guard:no-test <reason>` opt-out. | no (pre-push only) |
 
 ### Regenerating the ARC binding shim (`.arc/`)

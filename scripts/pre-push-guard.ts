@@ -84,6 +84,33 @@ function assertConsoleDependencies(cwd: string): void {
       `pre-push guard: missing required console executables: ${missing.join(', ')}; run npm ci --prefix console before pushing`,
     );
   }
+
+  try {
+    execFileSync(
+      'bash',
+      [
+        'scripts/run-with-pinned-npm.sh',
+        '--prefix',
+        'console',
+        'ls',
+        '--all',
+        '--offline',
+        '--ignore-scripts',
+        '--audit=false',
+        '--fund=false',
+        '--update-notifier=false',
+        '--json',
+      ],
+      {
+        cwd,
+        stdio: 'ignore',
+      },
+    );
+  } catch {
+    throw new Error(
+      'pre-push guard: console dependency tree is incomplete or invalid; run npm ci --prefix console before pushing',
+    );
+  }
 }
 
 export function runPrePushGuard(

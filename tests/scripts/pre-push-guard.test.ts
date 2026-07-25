@@ -1,5 +1,6 @@
 import {
   chmodSync,
+  copyFileSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -35,6 +36,10 @@ const packageJson = JSON.parse(
 ) as { scripts: Record<string, string> };
 const vitestConfig = readFileSync(resolve(repoRoot, 'vitest.config.ts'), 'utf8');
 const qualityWorkflow = readFileSync(resolve(repoRoot, '.github/workflows/quality.yml'), 'utf8');
+const qualityGuardrailsChecklist = readFileSync(
+  resolve(repoRoot, 'docs/contributing/quality-guardrails-checklist.md'),
+  'utf8',
+);
 const whatsoupGuardWorkflow = readFileSync(resolve(repoRoot, '.github/workflows/whatsoup-guard.yml'), 'utf8');
 const tagReleaseWorkflow = readFileSync(resolve(repoRoot, '.github/workflows/tag-release-gate.yml'), 'utf8');
 const guardPackageJson = JSON.parse(
@@ -218,6 +223,137 @@ describe('pre-push guard runtime — fail-closed on empty stdin', () => {
         expect(existsSync(callsLog)).toBe(false);
       });
     }
+  });
+
+  const withConsoleTreeFixture = (
+    state: 'broken' | 'valid',
+    fn: (root: string, npmCallsLog: string, lifecycleMarker: string) => void,
+  ) => {
+    const root = mkdtempSync(resolve(tmpdir(), 'whatsoup-pre-push-console-tree-'));
+    const bin = resolve(root, 'bin');
+    const callsLog = resolve(root, 'npm-calls.log');
+    const lifecycleMarker = resolve(root, 'lifecycle-ran');
+    const originalPath = process.env['PATH'];
+    const originalNode = process.env['WHATSOUP_NODE'];
+    const originalNpm = process.env['WHATSOUP_NPM'];
+    const originalCache = process.env['npm_config_cache'];
+    const originalRegistry = process.env['npm_config_registry'];
+
+    try {
+      mkdirSync(bin, { recursive: true });
+      mkdirSync(resolve(root, 'scripts'), { recursive: true });
+      mkdirSync(resolve(root, 'deploy/lib'), { recursive: true });
+      mkdirSync(resolve(root, 'console/node_modules/.bin'), { recursive: true });
+      mkdirSync(resolve(root, 'console/node_modules/fixture-parent'), { recursive: true });
+      copyFileSync(
+        resolve(repoRoot, 'scripts/run-with-pinned-npm.sh'),
+        resolve(root, 'scripts/run-with-pinned-npm.sh'),
+      );
+      copyFileSync(
+        resolve(repoRoot, 'deploy/lib/resolve-node.sh'),
+        resolve(root, 'deploy/lib/resolve-node.sh'),
+      );
+      const runtimeMajor = Number(process.versions.node.split('.')[0]);
+      writeFileSync(resolve(root, '.nvmrc'), `${process.versions.node}\n`);
+      writeFileSync(
+        resolve(root, 'package.json'),
+        JSON.stringify({ engines: { node: `>=${runtimeMajor}.0.0 <${runtimeMajor + 1}` } }),
+      );
+      writeFileSync(
+        resolve(root, 'console/package.json'),
+        JSON.stringify({
+          name: 'console-tree-fixture',
+          version: '1.0.0',
+          scripts: {
+            preinstall: `node -e "require('node:fs').writeFileSync(${JSON.stringify(lifecycleMarker)}, 'ran')"`,
+          },
+          dependencies: {
+            'fixture-parent': '1.0.0',
+          },
+        }),
+      );
+      writeFileSync(
+        resolve(root, 'console/node_modules/fixture-parent/package.json'),
+        JSON.stringify({
+          name: 'fixture-parent',
+          version: '1.0.0',
+          dependencies: {
+            'fixture-child': '1.0.0',
+          },
+        }),
+      );
+      if (state === 'valid') {
+        mkdirSync(
+          resolve(root, 'console/node_modules/fixture-parent/node_modules/fixture-child'),
+          { recursive: true },
+        );
+        writeFileSync(
+          resolve(root, 'console/node_modules/fixture-parent/node_modules/fixture-child/package.json'),
+          JSON.stringify({
+            name: 'fixture-child',
+            version: '1.0.0',
+          }),
+        );
+      }
+
+      for (const executable of ['eslint', 'tsc', 'vite']) {
+        const target = resolve(root, 'console/node_modules/.bin', executable);
+        writeFileSync(target, '#!/bin/sh\nexit 0\n');
+        chmodSync(target, 0o755);
+      }
+
+      const npmStub = resolve(bin, 'npm');
+      writeFileSync(npmStub, [
+        '#!/bin/sh',
+        `printf "%s\\n" "$*" >> "${callsLog}"`,
+        'exit 0',
+        '',
+      ].join('\n'));
+      chmodSync(npmStub, 0o755);
+
+      process.env['PATH'] = `${bin}:${originalPath ?? ''}`;
+      process.env['WHATSOUP_NODE'] = process.execPath;
+      process.env['WHATSOUP_NPM'] = resolve(dirname(process.execPath), 'npm');
+      process.env['npm_config_cache'] = resolve(root, 'npm-cache');
+      process.env['npm_config_registry'] = 'http://127.0.0.1:9';
+      fn(root, callsLog, lifecycleMarker);
+    } finally {
+      if (originalPath === undefined) delete process.env['PATH'];
+      else process.env['PATH'] = originalPath;
+      if (originalNode === undefined) delete process.env['WHATSOUP_NODE'];
+      else process.env['WHATSOUP_NODE'] = originalNode;
+      if (originalNpm === undefined) delete process.env['WHATSOUP_NPM'];
+      else process.env['WHATSOUP_NPM'] = originalNpm;
+      if (originalCache === undefined) delete process.env['npm_config_cache'];
+      else process.env['npm_config_cache'] = originalCache;
+      if (originalRegistry === undefined) delete process.env['npm_config_registry'];
+      else process.env['npm_config_registry'] = originalRegistry;
+      rmSync(root, { recursive: true, force: true });
+    }
+  };
+
+  it('fails closed before the composite when all bins exist but the console dependency tree is broken', () => {
+    withConsoleTreeFixture('broken', (root, callsLog, lifecycleMarker) => {
+      const input = `refs/heads/feature/example 8d739e7582b068387411a1d89acca11e3fd31aa4 refs/heads/feature/example ${ZERO_SHA}`;
+
+      expect(() => runPrePushGuard(input, root)).toThrowError(
+        new Error(
+          'pre-push guard: console dependency tree is incomplete or invalid; run npm ci --prefix console before pushing',
+        ),
+      );
+      expect(existsSync(callsLog)).toBe(false);
+      expect(existsSync(lifecycleMarker)).toBe(false);
+    });
+  });
+
+  it('validates a complete console tree offline without lifecycle scripts before running the composite', () => {
+    withConsoleTreeFixture('valid', (root, callsLog, lifecycleMarker) => {
+      const input = `refs/heads/feature/example 8d739e7582b068387411a1d89acca11e3fd31aa4 refs/heads/feature/example ${ZERO_SHA}`;
+
+      expect(runPrePushGuard(input, root)).toBe('branch');
+      expect(readFileSync(callsLog, 'utf8').trim()).toBe('run verify:push:branch');
+      expect(existsSync(lifecycleMarker)).toBe(false);
+    });
   });
 
   it('runs metadata checks without console dependencies for genuine delete-only stdin', () => {
@@ -423,6 +559,13 @@ describe('verify chain composition (package.json)', () => {
     const chain = packageJson.scripts['verify:push:branch'];
     expect(chain, 'verify:push:branch script must exist').toBeDefined();
     expect(chain).toMatch(/\bnpm run guard:work-index\b/);
+  });
+
+  it('documents ARC binding drift as enforced in both local pre-push and CI quality', () => {
+    expect(qualityWorkflow).toContain('run: npm run guard:arc-binding-drift');
+    expect(qualityGuardrailsChecklist).toMatch(
+      /\| ARC binding drift \| `npm run guard:arc-binding-drift` \|[^\n]+\| yes \|/,
+    );
   });
 
   it('verify:push:branch invokes staged publication guard', () => {
