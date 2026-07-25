@@ -29,6 +29,7 @@ import {
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const prePushHook = resolve(repoRoot, '.husky/pre-push');
+const pushGateScope = readFileSync(resolve(repoRoot, 'scripts/print-push-gate-scope.sh'), 'utf8');
 const packageJson = JSON.parse(
   readFileSync(resolve(repoRoot, 'package.json'), 'utf8'),
 ) as { scripts: Record<string, string> };
@@ -138,7 +139,7 @@ describe('pre-push guard classifier', () => {
 });
 
 describe('pre-push guard runtime — fail-closed on empty stdin', () => {
-  const withStubNpm = (fn: (npmCallsLog: string) => void) => {
+  const withStubNpm = (fn: (npmCallsLog: string, root: string) => void) => {
     const root = mkdtempSync(resolve(tmpdir(), 'whatsoup-pre-push-guard-runtime-'));
     const bin = resolve(root, 'bin');
     const callsLog = resolve(root, 'npm-calls.log');
@@ -155,7 +156,7 @@ describe('pre-push guard runtime — fail-closed on empty stdin', () => {
       ].join('\n'));
       chmodSync(npmStub, 0o755);
       process.env['PATH'] = `${bin}:${originalPath ?? ''}`;
-      fn(callsLog);
+      fn(callsLog, root);
     } finally {
       if (originalPath === undefined) {
         delete process.env['PATH'];
@@ -173,14 +174,16 @@ describe('pre-push guard runtime — fail-closed on empty stdin', () => {
         errors.push(String(msg));
       });
       try {
-        const decision = runPrePushGuard('', repoRoot);
+        const decision = runPrePushGuard('', repoRoot, {
+          assertConsoleDependencies: () => {},
+        });
         expect(decision).toBe('branch');
         expect(readFileSync(callsLog, 'utf8').trim()).toBe('run verify:push:branch');
         expect(errors).toContain(
           'pre-push guard: no ref updates received on stdin — refusing to skip verification (fail-closed); genuine branch deletions still skip',
         );
         expect(errors).not.toContain(
-          'pre-push guard: delete-only ref update; skipping content verification',
+          'pre-push guard: delete-only ref update; running metadata verification',
         );
       } finally {
         spy.mockRestore();
@@ -192,7 +195,9 @@ describe('pre-push guard runtime — fail-closed on empty stdin', () => {
     withStubNpm((callsLog) => {
       const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
       try {
-        const decision = runPrePushGuard('   \n\t\n  \n', repoRoot);
+        const decision = runPrePushGuard('   \n\t\n  \n', repoRoot, {
+          assertConsoleDependencies: () => {},
+        });
         expect(decision).toBe('branch');
         expect(readFileSync(callsLog, 'utf8').trim()).toBe('run verify:push:branch');
       } finally {
@@ -201,18 +206,64 @@ describe('pre-push guard runtime — fail-closed on empty stdin', () => {
     });
   });
 
-  it('genuine delete-only stdin still skips verification with the delete-specific message', () => {
-    const errors: string[] = [];
-    const spy = vi.spyOn(console, 'error').mockImplementation((msg?: unknown) => {
-      errors.push(String(msg));
-    });
+  it('fails before branch and release verification when required console executables are missing', () => {
+    for (const input of [
+      `refs/heads/feature/example 8d739e7582b068387411a1d89acca11e3fd31aa4 refs/heads/feature/example ${ZERO_SHA}`,
+      'refs/heads/main 8d739e7582b068387411a1d89acca11e3fd31aa4 refs/heads/main ec3ac431eb1811aeb7fa9851d658b27ae724cbb5',
+    ]) {
+      withStubNpm((callsLog, root) => {
+        expect(() => runPrePushGuard(input, root)).toThrow(
+          /missing required console executables: eslint, tsc, vite.*npm ci --prefix console/,
+        );
+        expect(existsSync(callsLog)).toBe(false);
+      });
+    }
+  });
+
+  it('runs metadata checks without console dependencies for genuine delete-only stdin', () => {
+    const root = mkdtempSync(resolve(tmpdir(), 'whatsoup-pre-push-delete-runtime-'));
+    const bin = resolve(root, 'bin');
+    const callsLog = resolve(root, 'bash-calls.log');
+    const originalPath = process.env['PATH'];
+
     try {
+      mkdirSync(bin, { recursive: true });
+      const bashStub = resolve(bin, 'bash');
+      writeFileSync(bashStub, [
+        '#!/bin/sh',
+        `printf "%s\\n" "$*" >> "${callsLog}"`,
+        'exit 0',
+        '',
+      ].join('\n'));
+      chmodSync(bashStub, 0o755);
+      process.env['PATH'] = `${bin}:${originalPath ?? ''}`;
+
+      const errors: string[] = [];
+      const spy = vi.spyOn(console, 'error').mockImplementation((msg?: unknown) => {
+        errors.push(String(msg));
+      });
       const input = `refs/heads/old-a ${ZERO_SHA} refs/heads/old-a 1111111111111111111111111111111111111111`;
-      const decision = runPrePushGuard(input, repoRoot);
-      expect(decision).toBe('skip');
-      expect(errors).toEqual(['pre-push guard: delete-only ref update; skipping content verification']);
+      try {
+        const decision = runPrePushGuard(input, root);
+        expect(decision).toBe('skip');
+        expect(existsSync(callsLog)).toBe(true);
+        expect(readFileSync(callsLog, 'utf8').trim().split('\n')).toEqual([
+          'scripts/run-with-pinned-npm.sh --prefix console run design:metrics',
+          'scripts/run-with-pinned-npm.sh --prefix console run design:burndown',
+        ]);
+        expect(errors).toEqual([
+          'pre-push guard: delete-only ref update; running metadata verification',
+        ]);
+      } finally {
+        spy.mockRestore();
+      }
     } finally {
-      spy.mockRestore();
+      if (originalPath === undefined) {
+        delete process.env['PATH'];
+      } else {
+        process.env['PATH'] = originalPath;
+      }
+      rmSync(root, { recursive: true, force: true });
     }
   });
 });
@@ -284,12 +335,8 @@ describe('pre-push hook runtime isolation', () => {
       expect(result.status, result.stderr || result.stdout).toBe(0);
       expect(readFileSync(calls, 'utf8').trim().split('\n')).toEqual([
         'bash scripts/run-with-pinned-node.sh scripts/pre-push-guard.ts',
-        'bash scripts/run-with-pinned-npm.sh --prefix console run design:metrics',
-        'bash scripts/run-with-pinned-npm.sh --prefix console run design:burndown',
       ]);
       expect(readFileSync(environments, 'utf8').trim().split('\n')).toEqual([
-        'unset|unset|unset|unset',
-        'unset|unset|unset|unset',
         'unset|unset|unset|unset',
       ]);
       expect(readFileSync(stdin, 'utf8').trim()).toBe(refUpdate);
@@ -475,6 +522,28 @@ describe('verify chain composition (package.json)', () => {
     const chain = packageJson.scripts['verify:console-design'];
     expect(chain, 'verify:console-design script must exist').toBeDefined();
     expect(chain).toMatch(/\bnpm run test:design-guards\b/);
+  });
+
+  it('runs design metadata checks exactly once for branch and release verification', () => {
+    const sharedDesign = packageJson.scripts['verify:console-design'];
+    const hookSource = readFileSync(prePushHook, 'utf8');
+
+    for (const scriptName of ['design:metrics', 'design:burndown']) {
+      expect(sharedDesign.match(new RegExp(`run ${scriptName}`, 'g')) ?? []).toHaveLength(1);
+      expect(hookSource).not.toContain(`run ${scriptName}`);
+    }
+    for (const scriptName of ['verify:push:branch', 'verify:release']) {
+      expect(packageJson.scripts[scriptName].match(/npm run verify:console-design/g) ?? []).toHaveLength(1);
+    }
+  });
+
+  it('describes stable push-gate scope and distinguishes manual invocation from the hook dispatcher', () => {
+    expect(pushGateScope).not.toMatch(/typecheck x\d+/);
+    expect(pushGateScope).not.toMatch(/~\d+-file test subset/);
+    expect(pushGateScope).toContain('targeted test subset');
+    expect(pushGateScope).toContain('manual npm run verify:push:branch bypasses ref classification');
+    expect(pushGateScope).toContain('installed hook invokes pre-push-guard.ts');
+    expect(pushGateScope).toContain('delete-only runs design metadata checks only');
   });
 
   it('design guard fixture lane covers the scanner contracts used by console design verification', () => {

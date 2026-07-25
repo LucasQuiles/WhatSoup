@@ -1,11 +1,19 @@
 import { execFileSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import { accessSync, constants, readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 export const ZERO_SHA = '0000000000000000000000000000000000000000';
 
 export type RefDecision = 'delete' | 'branch' | 'release';
 export type PushDecision = 'skip' | 'branch' | 'release';
+
+const REQUIRED_CONSOLE_EXECUTABLES = ['eslint', 'tsc', 'vite'] as const;
+const DELETE_ONLY_METADATA_SCRIPTS = ['design:metrics', 'design:burndown'] as const;
+
+interface PrePushGuardDependencies {
+  assertConsoleDependencies: (cwd: string) => void;
+}
 
 interface RefUpdate {
   localRef: string;
@@ -61,12 +69,40 @@ export function commandsForDecision(decision: PushDecision): string[] {
   return [];
 }
 
-export function runPrePushGuard(input: string, cwd = process.cwd()): PushDecision {
+function assertConsoleDependencies(cwd: string): void {
+  const missing = REQUIRED_CONSOLE_EXECUTABLES.filter((executable) => {
+    try {
+      accessSync(resolve(cwd, 'console/node_modules/.bin', executable), constants.X_OK);
+      return false;
+    } catch {
+      return true;
+    }
+  });
+
+  if (missing.length > 0) {
+    throw new Error(
+      `pre-push guard: missing required console executables: ${missing.join(', ')}; run npm ci --prefix console before pushing`,
+    );
+  }
+}
+
+export function runPrePushGuard(
+  input: string,
+  cwd = process.cwd(),
+  dependencies: PrePushGuardDependencies = { assertConsoleDependencies },
+): PushDecision {
   const decision = classifyPrePushInput(input);
   const commands = commandsForDecision(decision);
 
   if (commands.length === 0) {
-    console.error('pre-push guard: delete-only ref update; skipping content verification');
+    console.error('pre-push guard: delete-only ref update; running metadata verification');
+    for (const script of DELETE_ONLY_METADATA_SCRIPTS) {
+      execFileSync(
+        'bash',
+        ['scripts/run-with-pinned-npm.sh', '--prefix', 'console', 'run', script],
+        { cwd, stdio: 'inherit' },
+      );
+    }
     return decision;
   }
 
@@ -75,6 +111,8 @@ export function runPrePushGuard(input: string, cwd = process.cwd()): PushDecisio
       'pre-push guard: no ref updates received on stdin — refusing to skip verification (fail-closed); genuine branch deletions still skip',
     );
   }
+
+  dependencies.assertConsoleDependencies(cwd);
 
   for (const script of commands) {
     console.error(`pre-push guard: running npm run ${script}`);

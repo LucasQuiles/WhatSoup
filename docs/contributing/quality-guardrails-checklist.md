@@ -65,6 +65,15 @@ Pre-push hook routes through `scripts/pre-push-guard.ts`:
 |---|---|---|
 | Branch push | `npm run verify:push:branch` | repo hygiene staged smoke, repo hygiene branch/base diff, publication staged guard, doc drift guard, public-surface drift guard, work-index guard, node-pin guard, source-runtime drift guard, BOT ERRORS runtime-manifest guard, simulation matrix guard, Claude settings guard, AskUser poll protocol guard, safeguard diagnostics, test-integrity baseline, ring/boundary/service/config guards, `npm run typecheck:all`, the targeted guard test list below, design-system hygiene guard, harness-maintenance manifest guard, tokenomics Python tests, and console lint + build (#1105: these last four mirror blocking CI quality-job steps so console strict-tsconfig/design-system/tokenomics violations fail fast locally; the slow coverage/drills/browser tail stays in `verify:release` and CI) |
 | `main` or release tag push | `npm run verify:release` | release repo hygiene, full publication audit, doc drift guard, public-surface drift guard, work-index guard, node-pin guard, source-runtime drift guard, BOT ERRORS runtime-manifest guard, simulation matrix guard, Claude settings guard, AskUser poll protocol guard, safeguard diagnostics, test-integrity baseline, ring/boundary/service/config guards, tokenomics/drills, `tools/whatsoup_guard` install/typecheck/test, console dependency install/lint/build, `npm run typecheck:all`, full Vitest suite with `--pool=forks --fileParallelism=false`, and coverage thresholds |
+| Delete-only push | metadata-only dispatcher path | `design:metrics` and `design:burndown`, each once through the pinned npm wrapper; content verification and console dependency prerequisites are skipped |
+
+Before branch or release verification starts, the dispatcher checks that the
+installed console package exposes executable `eslint`, `tsc`, and `vite`
+entrypoints. A missing or partial install fails before the expensive composite
+with the remediation `npm ci --prefix console`. Delete-only pushes bypass this
+prerequisite so the file-based metadata checks remain runnable without console
+dependencies. Branch and release composites already include those metadata
+checks through `verify:console-design`; the hook does not repeat them.
 
 The "ring/boundary/service/config guards" phrasing above folds in several named
 guards that `verify:push:branch` runs. Spelled out:
