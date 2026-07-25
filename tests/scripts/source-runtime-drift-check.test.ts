@@ -1,6 +1,14 @@
 import { execFileSync, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  chmodSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -250,6 +258,58 @@ describe('source runtime drift check', () => {
     ]);
   });
 
+  it.each(Array.from({ length: 23 }, (_, index) => index + 41))(
+    'fails closed on a %i-character branch object ID',
+    (width) => {
+      const root = makeRepo();
+      const manifest = parseSourceRuntimeManifest(JSON.parse(readFileSync(path.join(root, 'manifest.json'), 'utf8')));
+
+      const issues = collectSourceRuntimeIssues(root, manifest, {
+        git: (cwd, args) => {
+          const result = runGit(cwd, args);
+          return args[0] === 'status'
+            ? {
+                ...result,
+                stdout: result.stdout.replace(
+                  /# branch\.oid [^\0]+\0/,
+                  `# branch.oid ${'a'.repeat(width)}\0`,
+                ),
+              }
+            : result;
+        },
+      });
+
+      expect(issues).toEqual([
+        expect.objectContaining({
+          kind: 'git-error',
+          message: expect.stringContaining('invalid branch object ID'),
+        }),
+      ]);
+    },
+  );
+
+  it('accepts an exact 64-character branch object ID', () => {
+    const root = makeRepo();
+    const manifest = parseSourceRuntimeManifest(JSON.parse(readFileSync(path.join(root, 'manifest.json'), 'utf8')));
+
+    const issues = collectSourceRuntimeIssues(root, manifest, {
+      git: (cwd, args) => {
+        const result = runGit(cwd, args);
+        return args[0] === 'status'
+          ? {
+              ...result,
+              stdout: result.stdout.replace(
+                /# branch\.oid [^\0]+\0/,
+                `# branch.oid ${'a'.repeat(64)}\0`,
+              ),
+            }
+          : result;
+      },
+    });
+
+    expect(issues).toEqual([]);
+  });
+
   it('ignores inherited hook Git environment when creating synthetic repos', () => {
     const parentHead = execFileSync('git', ['rev-parse', 'HEAD'], {
       cwd: process.cwd(),
@@ -418,6 +478,70 @@ describe('source runtime drift check', () => {
     } finally {
       rmSync(outsidePath, { recursive: true, force: true });
     }
+  });
+
+  it('does not read or expand an import reached through a directory symlink outside the repository', () => {
+    const root = makeRepo();
+    const outsideRoot = mkdtempSync(path.join(tmpdir(), 'whatsoup-source-runtime-outside-'));
+    const symlinkPath = path.join(root, 'src/transport/outside');
+    writeFileSync(
+      path.join(outsideRoot, 'payload.ts'),
+      "import './expanded.ts';\nexport const payload = true;\n",
+      'utf8',
+    );
+    writeFileSync(path.join(outsideRoot, 'expanded.ts'), 'export const expanded = true;\n', 'utf8');
+    symlinkSync(outsideRoot, symlinkPath, 'dir');
+    writeFileSync(
+      path.join(root, 'src/main.ts'),
+      "import './transport/outside/payload.ts';\nexport const connect = true;\n",
+      'utf8',
+    );
+    const manifest = parseSourceRuntimeManifest(JSON.parse(readFileSync(path.join(root, 'manifest.json'), 'utf8')));
+
+    try {
+      const issues = collectSourceRuntimeIssues(root, manifest);
+
+      expect(issues).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          kind: 'import-outside-repo',
+          path: 'src/transport/outside/payload.ts',
+          importedBy: 'src/main.ts',
+          specifier: './transport/outside/payload.ts',
+        }),
+      ]));
+      expect(issues.some((item) => item.path === 'src/transport/outside/expanded.ts')).toBe(false);
+    } finally {
+      rmSync(outsideRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('allows a tracked file symlink whose real target remains inside the repository', () => {
+    const root = makeRepo();
+    mkdirSync(path.join(root, 'src/shared'));
+    writeFileSync(
+      path.join(root, 'src/shared/helper.ts'),
+      "import { value } from './value.ts';\nexport function helper() { return value; }\n",
+      'utf8',
+    );
+    writeFileSync(path.join(root, 'src/shared/value.ts'), "export const value = 'ok';\n", 'utf8');
+    const symlinkPath = path.join(root, 'src/transport/helper-link.ts');
+    symlinkSync('../shared/helper.ts', symlinkPath);
+    writeFileSync(
+      path.join(root, 'src/transport/connection.ts'),
+      "import { helper } from './helper-link.ts';\nexport function connect() { return helper(); }\n",
+      'utf8',
+    );
+    execGit(root, [
+      'add',
+      'src/shared/helper.ts',
+      'src/shared/value.ts',
+      'src/transport/connection.ts',
+      'src/transport/helper-link.ts',
+    ]);
+    execGit(root, ['commit', '-qm', 'contained symlink']);
+    const manifest = parseSourceRuntimeManifest(JSON.parse(readFileSync(path.join(root, 'manifest.json'), 'utf8')));
+
+    expect(collectSourceRuntimeIssues(root, manifest)).toEqual([]);
   });
 
   it('flags non-regular runtime files', () => {

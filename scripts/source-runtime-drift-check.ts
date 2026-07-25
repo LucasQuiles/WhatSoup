@@ -1,6 +1,6 @@
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { existsSync, lstatSync, readFileSync } from 'node:fs';
+import { existsSync, lstatSync, readFileSync, realpathSync } from 'node:fs';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 
@@ -221,7 +221,7 @@ function parseGitStatusSnapshot(value: string): GitStatusSnapshot {
     if (!record) continue;
     if (record.startsWith('# branch.oid ')) {
       const head = record.slice('# branch.oid '.length);
-      if (!/^[0-9a-f]{40,64}$/i.test(head)) {
+      if (!/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i.test(head)) {
         snapshot.error = 'git status returned an invalid branch object ID';
         return snapshot;
       }
@@ -351,20 +351,31 @@ function resolveRelativeImport(cwd: string, importerRel: string, specifier: stri
   return match ? repoRelative(cwd, match) : repoRelative(cwd, candidates[0] ?? base);
 }
 
-function readImports(cwd: string, relPath: string): Array<{ specifier: string; resolved: string | null }> {
+function readImports(
+  cwd: string,
+  repoRealPath: string,
+  relPath: string,
+): Array<{ specifier: string; resolved: string | null }> {
   const absolute = path.resolve(cwd, relPath);
-  const text = readFileSync(absolute, 'utf8');
+  const realAbsolute = realpathSync(absolute);
+  if (!withinRepo(repoRealPath, realAbsolute)) return [];
+  const text = readFileSync(realAbsolute, 'utf8');
+  const realImporterRel = repoRelative(repoRealPath, realAbsolute);
   const imports: Array<{ specifier: string; resolved: string | null }> = [];
   for (const match of text.matchAll(IMPORT_PATTERN)) {
     const specifier = match[1] ?? match[2];
     if (!specifier || !specifier.startsWith('.')) continue;
-    imports.push({ specifier, resolved: resolveRelativeImport(cwd, relPath, specifier) });
+    imports.push({
+      specifier,
+      resolved: resolveRelativeImport(repoRealPath, realImporterRel, specifier),
+    });
   }
   return imports;
 }
 
 function inspectSourceFile(
   cwd: string,
+  repoRealPath: string,
   relPath: string,
   gitSnapshot: GitStateSnapshot,
   options: { expectedSha256?: string; mustContain?: string[]; importedBy?: string; specifier?: string },
@@ -384,13 +395,21 @@ function inspectSourceFile(
       specifier: options.specifier,
     })];
   }
-  const stat = lstatSync(absolute);
-  if (!stat.isFile() || stat.isSymbolicLink()) {
+  const realAbsolute = realpathSync(absolute);
+  if (!withinRepo(repoRealPath, realAbsolute)) {
+    return [issue('import-outside-repo', 'critical', `source import escapes repo: ${relPath}`, {
+      path: relPath,
+      importedBy: options.importedBy,
+      specifier: options.specifier,
+    })];
+  }
+  const stat = lstatSync(realAbsolute);
+  if (!stat.isFile()) {
     return [issue('file-kind', 'critical', `source runtime file is not a regular file: ${relPath}`, {
       path: relPath,
       importedBy: options.importedBy,
       specifier: options.specifier,
-      actual: stat.isSymbolicLink() ? 'symlink' : 'not-file',
+      actual: 'not-file',
     })];
   }
 
@@ -419,7 +438,7 @@ function inspectSourceFile(
     issues.push(issue('file-staged', 'high', `source runtime file has staged-but-uncommitted drift: ${relPath}`, { path: relPath }));
   }
 
-  const body = readFileSync(absolute);
+  const body = readFileSync(realAbsolute);
   const actualSha256 = sha256(body);
   if (options.expectedSha256 && actualSha256 !== options.expectedSha256) {
     issues.push(issue('file-sha256-drift', 'critical', `source runtime file hash drift: ${relPath}`, {
@@ -446,6 +465,7 @@ export function collectSourceRuntimeIssues(
   dependencies: SourceRuntimeDependencies = {},
 ): SourceRuntimeIssue[] {
   const issues: SourceRuntimeIssue[] = [];
+  const repoRealPath = realpathSync(cwd);
   const gitSnapshot = loadGitStateSnapshot(cwd, dependencies.git ?? git);
   if (gitSnapshot.error) {
     return [issue('git-error', 'critical', `source runtime Git snapshot failed: ${gitSnapshot.error}`)];
@@ -465,7 +485,7 @@ export function collectSourceRuntimeIssues(
     visited.add(visitKey);
     inspectedPaths.add(relPath);
 
-    const fileIssues = inspectSourceFile(cwd, relPath, gitSnapshot, {
+    const fileIssues = inspectSourceFile(cwd, repoRealPath, relPath, gitSnapshot, {
       expectedSha256: current.entry?.sha256,
       mustContain: current.entry?.mustContain,
       importedBy: current.importedBy,
@@ -484,7 +504,7 @@ export function collectSourceRuntimeIssues(
     if (expandedPaths.has(relPath)) continue;
     expandedPaths.add(relPath);
 
-    for (const imported of readImports(cwd, relPath)) {
+    for (const imported of readImports(cwd, repoRealPath, relPath)) {
       if (!imported.resolved) continue;
       if (visited.has(`${imported.resolved}:${relPath}:${imported.specifier}`)) continue;
       queue.push({ path: imported.resolved, importedBy: relPath, specifier: imported.specifier });
