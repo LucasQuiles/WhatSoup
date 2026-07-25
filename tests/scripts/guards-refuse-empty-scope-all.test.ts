@@ -60,6 +60,7 @@ type ScopeClass =
   | 'probe-nonzero'
   | 'skip-diff-scoped'
   | 'skip-host-state'
+  | 'skip-repo-state'
   | 'skip-immune'
   | 'skip-alias'
   | 'skip-network'
@@ -123,6 +124,9 @@ const SCOPE_MAP: Record<string, ScopeEntry> = {
   repo: { class: 'skip-diff-scoped', reason: 'default mode staged scans ADDED lines; empty index -> legitimately clean. Its whole-tree release-hygiene mode is floored + covered by MODE_PROBES below' },
   'pre-push': { class: 'skip-diff-scoped', reason: 'consumes stdin ref updates; no push context -> "delete-only" no-op, not a tree scan' },
   'semantic-quality': { class: 'skip-diff-scoped', reason: 'evaluates a push CANDIDATE receipt; candidate-unavailable -> no-op, not a tree scan' },
+
+  // ---- skip-repo-state: scans Git topology/refs/status, not files in the tracked tree ----
+  'git-estate': { class: 'skip-repo-state', reason: 'explicit snapshot/guard/baseline subcommands inspect registered Git worktrees, refs, status, and stashes; an empty tracked tree still has a real one-worktree estate, and fixture tests cover missing-baseline fail-closed behavior' },
 
   // ---- skip-host-state: roots off $HOME / the script location; cwd is irrelevant ----
   'unit-drift': { class: 'skip-host-state', reason: 'BASH_SOURCE-rooted; compares $HOME/.config systemd units to repo templates — empty cwd changes nothing' },

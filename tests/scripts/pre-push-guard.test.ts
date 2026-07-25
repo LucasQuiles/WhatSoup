@@ -256,6 +256,24 @@ describe('pre-push guard runtime — fail-closed on empty stdin', () => {
     });
   });
 
+  it('maps a symbolic HEAD push to its branch destination for lane exemption', () => {
+    withStubNpm((callsLog) => {
+      const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      try {
+        const input =
+          `HEAD ${'a'.repeat(40)} refs/heads/feature/example ${ZERO_SHA}`;
+        const decision = runPrePushGuard(input, repoRoot);
+        expect(decision).toBe('branch');
+        expect(readFileSync(callsLog, 'utf8').trim().split('\n')).toEqual([
+          'run guard:git-estate -- guard --phase pre-push --push-local-ref refs/heads/feature/example',
+          'run verify:push:branch',
+        ]);
+      } finally {
+        spy.mockRestore();
+      }
+    });
+  });
+
   it('genuine delete-only stdin still runs the estate gate before skipping content verification', () => {
     withStubNpm((callsLog) => {
       const errors: string[] = [];

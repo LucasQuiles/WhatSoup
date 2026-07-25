@@ -20,6 +20,15 @@ function isZeroObjectId(oid: string): boolean {
   return oid === ZERO_SHA || oid === ZERO_SHA_256;
 }
 
+function pushedBranchRef(update: RefUpdate): string | null {
+  if (isZeroObjectId(update.localSha)) return null;
+  if (update.localRef.startsWith('refs/heads/')) return update.localRef;
+  if (update.localRef === 'HEAD' && update.remoteRef.startsWith('refs/heads/')) {
+    return update.remoteRef;
+  }
+  return null;
+}
+
 function parsePrePushLine(line: string): RefUpdate {
   const fields = line.trim().split(/\s+/);
   if (fields.length !== 4) {
@@ -90,10 +99,8 @@ export function runPrePushGuard(input: string, cwd = process.cwd()): PushDecisio
     parseError = error;
   }
   const pushedLocalBranchRefs = parsedUpdates
-    .filter(({ localRef, localSha }) =>
-      !isZeroObjectId(localSha) && localRef.startsWith('refs/heads/')
-    )
-    .map(({ localRef }) => localRef)
+    .map(pushedBranchRef)
+    .filter((localRef): localRef is string => localRef !== null)
     .sort();
   const estateArgs = ['run', 'guard:git-estate', '--', 'guard', '--phase', 'pre-push'];
   for (const localRef of pushedLocalBranchRefs) {

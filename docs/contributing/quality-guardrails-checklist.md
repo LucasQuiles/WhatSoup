@@ -62,15 +62,18 @@ churn remains blocking.
 
 Pre-push ref updates accept object IDs at exactly the 40-character SHA-1 or
 64-character SHA-256 width. Intermediate widths are malformed, and an all-zero
-local object ID at either supported width is treated as a deletion. Missing or
-malformed baselines, malformed ref input or porcelain, Git command timeouts, and
-racing or incomplete scans are **INCONCLUSIVE** and fail closed. Worktree status
-scans use a four-worker bounded pool and every Git subprocess has a bounded
-timeout. Inherited critical debt, dirty worktrees, untracked files, missing
-upstreams, and ahead/behind/diverged branches remain explicit warnings so an
-unrelated in-flight lane is visible but does not become a working bottleneck.
-After reviewing the complete human snapshot, initialize or deliberately refresh
-the local ratchet with:
+local object ID at either supported width is treated as a deletion. A normal
+`git push -u origin HEAD` maps symbolic `HEAD` to its branch destination before
+the exact invoking-lane comparison; pushing `HEAD` to a differently named
+destination does not exempt the differently named local branch. Missing or
+malformed baselines, malformed ref input or porcelain, Git command timeouts,
+and racing or incomplete scans are **INCONCLUSIVE** and fail closed. Worktree
+status scans use a four-worker bounded pool and every Git subprocess has a
+bounded timeout. Inherited critical debt, dirty worktrees, untracked files,
+missing upstreams, and ahead/behind/diverged branches remain explicit warnings
+so an unrelated in-flight lane is visible but does not become a working
+bottleneck. After reviewing the complete human snapshot, initialize or
+deliberately refresh the local ratchet with:
 
 ```bash
 npm run guard:git-estate -- baseline write
