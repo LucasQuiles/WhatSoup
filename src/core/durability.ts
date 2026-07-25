@@ -931,9 +931,13 @@ export class DurabilityEngine {
   ): number {
     if (
       receivedAtUnixSeconds !== undefined
-      && (!Number.isSafeInteger(receivedAtUnixSeconds) || receivedAtUnixSeconds < 0)
+      && (
+        !Number.isSafeInteger(receivedAtUnixSeconds)
+        || receivedAtUnixSeconds < 0
+        || receivedAtUnixSeconds > 253_402_300_799
+      )
     ) {
-      throw new Error('Inbound receipt timestamp must be a nonnegative Unix timestamp');
+      throw new Error('Inbound receipt timestamp must be within the SQLite Unix timestamp range');
     }
     const result = this.statements.journalInbound.run(
       messageId,
@@ -947,14 +951,13 @@ export class DurabilityEngine {
     return seq;
   }
 
-  getInboundReceivedAtUnixSeconds(seq: number): number {
+  getInboundReceivedAtUnixSeconds(seq: number): number | undefined {
     const row = this.statements.selectInboundReceipt.get(seq) as {
       received_at_unix_seconds: number;
     } | undefined;
-    if (!row || !Number.isSafeInteger(row.received_at_unix_seconds)) {
-      throw new Error(`Journaled inbound ${seq} has no valid receipt timestamp`);
-    }
-    return row.received_at_unix_seconds;
+    return Number.isSafeInteger(row?.received_at_unix_seconds)
+      ? row?.received_at_unix_seconds
+      : undefined;
   }
 
   markTurnDone(seq: number): void {

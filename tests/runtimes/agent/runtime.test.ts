@@ -8979,7 +8979,7 @@ describe('AgentRuntime', () => {
 
     expect(mockSession.sendTurn).toHaveBeenCalledWith({
       applicationContext: [
-        expect.stringContaining('[Group: chat-timeout@g.us — Taylor]'),
+        expect.stringContaining('"displayName":"Taylor"'),
       ],
       userText: 'wake up',
     });
@@ -9093,7 +9093,7 @@ describe('AgentRuntime', () => {
 
     expect(mockSession.sendTurn).toHaveBeenCalledWith({
       applicationContext: [
-        expect.stringContaining('[DM from Jason (15550100001)]'),
+        expect.stringContaining('"kind":"direct"'),
       ],
       userText: 'test message',
     });
@@ -9119,7 +9119,7 @@ describe('AgentRuntime', () => {
 
     expect(mockSession.sendTurn).toHaveBeenCalledWith({
       applicationContext: [
-        expect.stringContaining('[Group: the-group@g.us — Jason]'),
+        expect.stringContaining('"kind":"group"'),
       ],
       userText: 'group message',
     });

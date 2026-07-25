@@ -96,12 +96,8 @@ import {
 import { createProviderExecutionGate, ProviderExecutionGate } from './provider-execution-gate.ts';
 import { dispatchProviderTurn, withProviderApplicationContext } from './provider-boundary-dispatch.ts';
 import { TurnChronologyTracker, type TurnDeliveryKind } from './turn-chronology.ts';
-import {
-  receivedAtUnixSeconds,
-  renderPendingReplay,
-  renderUserTurnForProvider,
-  sharedRuntimeApplicationContext,
-} from './turn-provider-text.ts';
+import { receivedAtUnixSeconds, renderPendingReplay, renderUserTurnForProvider,
+  sharedReplayApplicationContext, sharedRuntimeApplicationContext } from './turn-provider-text.ts';
 import { markDeferredSystemTurn, requireSystemTurnProviderBoundary } from './system-turn-deadline.ts';
 import {
   OutboundQueue,
@@ -2693,13 +2689,11 @@ export class AgentRuntime implements Runtime {
       isShuttingDown: () => runtime.shutdownRequested,
       getActiveQueue: () => runtime.getActiveQueue(),
       getQueueForChat: (chatJid, mapKey) => runtime.getQueueForChat(chatJid, mapKey),
-      sendTurnPerChat: (chatJid, text, mapKey, actorJid, context, scopeRef, systemTurnLease, excludeJobId) =>
-        runtime.sendTurnPerChat(chatJid, text, mapKey, actorJid, context, scopeRef, systemTurnLease, excludeJobId),
+      sendTurnPerChat: (chatJid, text, mapKey, actorJid, context, scopeRef, systemTurnLease, excludeJobId, deliveryKind) =>
+        runtime.sendTurnPerChat(chatJid, text, mapKey, actorJid, context, scopeRef, systemTurnLease, excludeJobId, deliveryKind),
       deleteOwnedPerChatSession: (mapKey, expected) => runtime.deleteOwnedPerChatSession(mapKey, expected),
-      recreatePerChatSessionForFallback: (mapKey, chatJid, actorJid) =>
-        runtime.recreatePerChatSessionForFallback(mapKey, chatJid, actorJid),
-      recreateSingletonSessionForFallback: (chatJid, actorJid) =>
-        runtime.recreateSingletonSessionForFallback(chatJid, actorJid),
+      recreatePerChatSessionForFallback: (mapKey, chatJid, actorJid) => runtime.recreatePerChatSessionForFallback(mapKey, chatJid, actorJid),
+      recreateSingletonSessionForFallback: (chatJid, actorJid) => runtime.recreateSingletonSessionForFallback(chatJid, actorJid),
       bindActiveGlobalMcpConversation: (chatJid) => runtime.bindActiveGlobalMcpConversation(chatJid),
       sendTurnToSession: (...args) => runtime.sendTurnToSession(...args),
       sendVoiceReply: (chatJid, responseText) => runtime._sendVoiceReply(chatJid, responseText),
@@ -4545,12 +4539,7 @@ export class AgentRuntime implements Runtime {
     try {
       this.updateSessionActorJid(this.session!, senderJid);
       await this.session!.sendTurn(withProviderApplicationContext(
-        renderUserTurnForProvider(
-          this.turnChronology,
-          exactText,
-          context,
-          'live',
-        ),
+        renderUserTurnForProvider(this.turnChronology, exactText, context, 'live'),
         participantContext,
       ));
     } catch (err) {
@@ -4725,10 +4714,8 @@ export class AgentRuntime implements Runtime {
     };
     try {
       const userTurnText = renderUserTurnForProvider(
-        this.turnChronology,
-        text,
-        runtimeContext ?? null,
-        deliveryKind,
+        this.turnChronology, text, runtimeContext ?? null, deliveryKind,
+        sharedReplayApplicationContext(runtimeContext, this.db),
       );
       const turnInput = contextPreamble === null
         ? userTurnText
@@ -4839,6 +4826,7 @@ export class AgentRuntime implements Runtime {
     scopeRef?: PerChatRuntimeScopeRef,
     systemTurnLease?: SystemTurnLeaseToken,
     excludeJobId?: number, // PRESTAGE-T4: set only by the recovery supervisor's own replay; see beginRuntimeTurnEvidence
+    requestedDeliveryKind?: TurnDeliveryKind,
   ): Promise<void> {
     mapKey = scopeRef?.value ?? mapKey;
     const dispatchAllowed = runtimeContext === undefined
@@ -4848,14 +4836,12 @@ export class AgentRuntime implements Runtime {
       ? this.perChatRuntimeTurnContexts.get(mapKey)?.[0]
       : undefined;
     const providerTurnContext = runtimeContext ?? continuationContext;
-    const providerDeliveryKind: TurnDeliveryKind =
-      excludeJobId === undefined
-        && (
-          continuationContext === undefined
-          || !this.runtimeTurnCoordinator.isRuntimeTurnContinuation(continuationContext)
-        )
+    const providerDeliveryKind = requestedDeliveryKind ?? (
+      excludeJobId === undefined && (continuationContext === undefined
+        || !this.runtimeTurnCoordinator.isRuntimeTurnContinuation(continuationContext))
         ? 'live'
-        : 'recovery_replay';
+        : 'recovery_replay'
+    );
     // AskUserQuestion → Poll bridge: if a poll question is pending for this
     // chat and the user sends a text reply, resolve it as an option number,
     // label, description match, or free-text answer and inject it back.

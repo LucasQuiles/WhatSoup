@@ -770,14 +770,17 @@ describe('Inbound journaling: durabilityEngine.journalInbound', () => {
     expect(msg.receivedAtUnixSeconds).toBe(1_780_000_000);
   });
 
-  it('dispatches exact user text when the durable receipt lookup is invalid', async () => {
+  it('dispatches exact user text when the stored durable receipt is invalid', async () => {
     const db = makeTempDb();
     const messenger = makeMessenger();
     const runtime = makeRuntime();
     const durability = new DurabilityEngine(db);
-    vi.spyOn(durability, 'journalInbound').mockReturnValue(43);
-    vi.spyOn(durability, 'getInboundReceivedAtUnixSeconds')
-      .mockImplementation(() => { throw new Error('invalid durable receipt'); });
+    const journalInbound = durability.journalInbound.bind(durability);
+    vi.spyOn(durability, 'journalInbound').mockImplementation((...args) => {
+      const seq = journalInbound(...args);
+      db.raw.prepare(`UPDATE inbound_events SET received_at = 'invalid' WHERE seq = ?`).run(seq);
+      return seq;
+    });
 
     const handler = makeIngest(db, messenger, runtime, BOT_JID, BOT_LID, durability);
     const msg = makeIncomingMessage({ content: 'preserve this exact request' });
@@ -788,10 +791,24 @@ describe('Inbound journaling: durabilityEngine.journalInbound', () => {
     expect(vi.mocked(runtime.handleMessage)).toHaveBeenCalledWith(
       expect.objectContaining({
         content: 'preserve this exact request',
-        inboundSeq: 43,
+        inboundSeq: expect.any(Number),
         receivedAtUnixSeconds: undefined,
       }),
     );
+  });
+
+  it('does not dispatch when the durable receipt query itself fails', async () => {
+    const db = makeTempDb();
+    const messenger = makeMessenger();
+    const runtime = makeRuntime();
+    const durability = new DurabilityEngine(db);
+    vi.spyOn(durability, 'getInboundReceivedAtUnixSeconds')
+      .mockImplementation(() => { throw new Error('SQLITE_BUSY while reading receipt'); });
+
+    const handler = makeIngest(db, messenger, runtime, BOT_JID, BOT_LID, durability);
+    await runIngest(handler, makeIncomingMessage({ content: 'must remain fail closed' }));
+
+    expect(vi.mocked(runtime.handleMessage)).not.toHaveBeenCalled();
   });
 
   it('journalInbound is called before runtime.handleMessage', async () => {

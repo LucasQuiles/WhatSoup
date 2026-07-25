@@ -512,12 +512,10 @@ export function createIngestHandler(
             ingressReceivedAtUnixSeconds,
           );
           msg.inboundSeq = seq;  // Thread seq into runtime for lifecycle tracking
-          msg.receivedAtUnixSeconds = undefined;
-          try {
-            msg.receivedAtUnixSeconds = durability.getInboundReceivedAtUnixSeconds(seq);
-          } catch (err) {
+          msg.receivedAtUnixSeconds = durability.getInboundReceivedAtUnixSeconds(seq);
+          if (msg.receivedAtUnixSeconds === undefined) {
             log.warn(
-              { err, inboundSeq: seq },
+              { inboundSeq: seq },
               'journaled inbound receipt is invalid — dispatching without chronology',
             );
           }

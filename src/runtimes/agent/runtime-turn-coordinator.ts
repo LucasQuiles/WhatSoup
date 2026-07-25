@@ -169,6 +169,7 @@ export interface RuntimeTurnCoordinatorPort {
     scopeRef?: PerChatRuntimeScopeRef,
     systemTurnLease?: SystemTurnLeaseToken,
     excludeJobId?: number,
+    deliveryKind?: TurnDeliveryKind,
   ): Promise<void>;
   deleteOwnedPerChatSession(mapKey: string, expected?: SessionManager): boolean;
   recreatePerChatSessionForFallback(mapKey: string, chatJid: string, actorJid?: string): void;
@@ -393,6 +394,10 @@ async replayTurnOnFallback(args: ProviderFallbackReplayArgs): Promise<void> {
       args.mapKey,
       args.actorJid,
       args.runtimeContext,
+      undefined,
+      undefined,
+      undefined,
+      'recovery_replay',
     );
     return;
   }
