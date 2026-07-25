@@ -890,7 +890,7 @@ describe('git-estate guard', () => {
     const { root, repo } = initRepo();
     const remote = join(root, 'remote.git');
     mkdirSync(remote);
-    git(remote, ['init', '--bare']);
+    git(remote, ['init', '--bare', '--initial-branch=main']);
     git(repo, ['remote', 'add', 'origin', remote]);
     git(repo, ['push', '-u', 'origin', 'main']);
 
