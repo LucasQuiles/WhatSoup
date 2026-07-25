@@ -618,6 +618,12 @@ describe('AuthBondGuard auth-tree races (#2285)', () => {
     expect(() => { snapshot = guardFor(root, authDir, mod).inspect(); }).not.toThrow();
     expect(snapshot['treeHash']).toBeNull();
     expect(snapshot['fileCount']).toBeNull();
+    // Positive terminal: the snapshot is still a real observation whose tree
+    // hash was deliberately withheld — not a degenerate object from a
+    // short-circuited inspect(). `status === 'present'` is also the precondition
+    // for reaching the tree walk at all, so this proves the fixture got there.
+    expect(snapshot['status']).toBe('present');
+    expect(snapshot['creds']).toMatchObject({ exists: true });
   });
 
   it('reports no tree hash when a directory vanishes, taking its subtree out of the walk', async () => {
@@ -642,6 +648,10 @@ describe('AuthBondGuard auth-tree races (#2285)', () => {
     let snapshot!: Record<string, unknown>;
     expect(() => { snapshot = guardFor(root, authDir, mod).inspect(); }).not.toThrow();
     expect(snapshot['treeHash']).toBeNull();
+    // Positive terminal: a real snapshot was produced and reached the walk; only
+    // the hash was withheld.
+    expect(snapshot['status']).toBe('present');
+    expect(snapshot['creds']).toMatchObject({ exists: true });
   });
 
   it('reports no tree hash when a file vanishes between lstat and read', async () => {
@@ -662,6 +672,10 @@ describe('AuthBondGuard auth-tree races (#2285)', () => {
     let snapshot!: Record<string, unknown>;
     expect(() => { snapshot = guardFor(root, authDir, mod).inspect(); }).not.toThrow();
     expect(snapshot['treeHash']).toBeNull();
+    // Positive terminal: a real snapshot was produced and reached the walk; only
+    // the hash was withheld.
+    expect(snapshot['status']).toBe('present');
+    expect(snapshot['creds']).toMatchObject({ exists: true });
   });
 
   // THE load-bearing assertion. A "skip the vanished entry and keep hashing"
@@ -704,8 +718,13 @@ describe('AuthBondGuard auth-tree races (#2285)', () => {
     }));
     const raceHash = guardFor(raceRoot, raceAuthDir, raceMod).inspect()['treeHash'];
 
-    expect(raceHash).not.toBe(controlHash);
     expect(raceHash).toBeNull();
+    expect(raceHash).not.toBe(controlHash);
+    // Positive terminal, and the guard against a vacuous inequality: two absent
+    // values are also "not equal". Pinning the control side to a real 64-hex
+    // sha256 proves the comparison above discriminates a genuine hash from a
+    // withheld one, rather than comparing two nulls.
+    expect(controlHash).toMatch(/^[0-9a-f]{64}$/);
   });
 
   it('still propagates a non-ENOENT stat failure instead of swallowing it', async () => {
