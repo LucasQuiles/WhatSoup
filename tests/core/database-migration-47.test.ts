@@ -76,6 +76,20 @@ describe('migration 47 recovery receipt immutability', () => {
     expect(replacementTrigger?.sql).toContain('BEFORE INSERT ON inbound_events');
     expect(replacementTrigger?.sql).toContain('existing.seq = NEW.seq');
     expect(replacementTrigger?.sql).toContain('existing.message_id = NEW.message_id');
+
+    const updateReplacementTrigger = db.raw.prepare(`
+      SELECT sql FROM sqlite_master
+      WHERE type = 'trigger'
+        AND name = 'turn_recovery_source_inbound_update_replacement_blocked'
+    `).get() as { sql: string } | undefined;
+    expect(updateReplacementTrigger?.sql).toContain(
+      'BEFORE UPDATE OF seq, message_id ON inbound_events',
+    );
+    expect(updateReplacementTrigger?.sql).toContain('existing.seq IS NOT OLD.seq');
+    expect(updateReplacementTrigger?.sql).toContain('existing.seq = NEW.seq');
+    expect(updateReplacementTrigger?.sql).toContain(
+      'existing.message_id = NEW.message_id',
+    );
   });
 
   it('does not block receipt correction or replacement before a recovery job is linked', () => {
@@ -94,6 +108,11 @@ describe('migration 47 recovery receipt immutability', () => {
       SET seq = seq + 100
       WHERE message_id = 'unlinked-receipt'
     `).run()).not.toThrow();
+    expect(() => db.raw.prepare(`
+      UPDATE OR REPLACE inbound_events
+      SET message_id = 'unlinked-receipt-renamed'
+      WHERE message_id = 'unlinked-receipt'
+    `).run()).not.toThrow();
 
     expect(() => db.raw.prepare(`
       INSERT OR REPLACE INTO inbound_events (
@@ -103,7 +122,7 @@ describe('migration 47 recovery receipt immutability', () => {
         seq, message_id, conversation_key, chat_jid,
         datetime(received_at, '+1 second')
       FROM inbound_events
-      WHERE message_id = 'unlinked-receipt'
+      WHERE message_id = 'unlinked-receipt-renamed'
     `).run()).not.toThrow();
   });
 
@@ -140,6 +159,39 @@ describe('migration 47 recovery receipt immutability', () => {
         AND name = 'turn_recovery_source_inbound_replacement_blocked'
     `).get()).toEqual({
       name: 'turn_recovery_source_inbound_replacement_blocked',
+    });
+  });
+
+  it('restores a missing update replacement fence without rewriting its peers', () => {
+    const immutableSql = db.raw.prepare(`
+      SELECT sql FROM sqlite_master
+      WHERE type = 'trigger'
+        AND name = 'turn_recovery_source_inbound_receipt_immutable'
+    `).get();
+    const insertReplacementSql = db.raw.prepare(`
+      SELECT sql FROM sqlite_master
+      WHERE type = 'trigger'
+        AND name = 'turn_recovery_source_inbound_replacement_blocked'
+    `).get();
+    db.raw.exec('DROP TRIGGER turn_recovery_source_inbound_update_replacement_blocked');
+
+    expect(() => runMigration47(db.raw)).not.toThrow();
+    expect(db.raw.prepare(`
+      SELECT sql FROM sqlite_master
+      WHERE type = 'trigger'
+        AND name = 'turn_recovery_source_inbound_receipt_immutable'
+    `).get()).toEqual(immutableSql);
+    expect(db.raw.prepare(`
+      SELECT sql FROM sqlite_master
+      WHERE type = 'trigger'
+        AND name = 'turn_recovery_source_inbound_replacement_blocked'
+    `).get()).toEqual(insertReplacementSql);
+    expect(db.raw.prepare(`
+      SELECT name FROM sqlite_master
+      WHERE type = 'trigger'
+        AND name = 'turn_recovery_source_inbound_update_replacement_blocked'
+    `).get()).toEqual({
+      name: 'turn_recovery_source_inbound_update_replacement_blocked',
     });
   });
 
@@ -189,6 +241,20 @@ describe('migration 47 recovery receipt immutability', () => {
     );
   });
 
+  it('fails closed on a drifted update replacement fence', () => {
+    db.raw.exec(`
+      DROP TRIGGER turn_recovery_source_inbound_update_replacement_blocked;
+      CREATE TRIGGER turn_recovery_source_inbound_update_replacement_blocked
+      BEFORE UPDATE OF seq ON inbound_events
+      BEGIN
+        SELECT 1;
+      END;
+    `);
+    expect(() => runMigration47(db.raw)).toThrow(
+      'migration 47 found drifted trigger: turn_recovery_source_inbound_update_replacement_blocked',
+    );
+  });
+
   it('rejects linked replacement at the same inbound sequence', () => {
     const linked = openLinkedReceiptDatabase();
     try {
@@ -235,6 +301,58 @@ describe('migration 47 recovery receipt immutability', () => {
       expect(linked.raw.prepare(`
         SELECT source_inbound_seq FROM turn_recovery_jobs WHERE id = 1
       `).get()).toEqual({ source_inbound_seq: linked.sourceSeq });
+    } finally {
+      linked.raw.close();
+    }
+  });
+
+  it('rejects UPDATE OR REPLACE of another row by a linked message id', () => {
+    const linked = openLinkedReceiptDatabase();
+    try {
+      linked.raw.exec('PRAGMA recursive_triggers = OFF');
+      linked.raw.prepare(`
+        INSERT INTO inbound_events (
+          message_id, conversation_key, chat_jid, received_at
+        ) VALUES ('unlinked-message', 'conversation', 'chat', '2030-01-01 00:00:00')
+      `).run();
+      const before = linkedReceipt(linked.raw);
+
+      expect(() => linked.raw.prepare(`
+        UPDATE OR REPLACE inbound_events
+        SET message_id = 'linked-message'
+        WHERE message_id = 'unlinked-message'
+      `).run()).toThrow(/recovery source inbound update replacement is blocked/i);
+      expect(linkedReceipt(linked.raw)).toEqual(before);
+      expect(linked.raw.prepare(`
+        SELECT message_id FROM inbound_events WHERE message_id = 'unlinked-message'
+      `).get()).toEqual({ message_id: 'unlinked-message' });
+    } finally {
+      linked.raw.close();
+    }
+  });
+
+  it('rejects UPDATE OR REPLACE of another row by a linked sequence', () => {
+    const linked = openLinkedReceiptDatabase();
+    try {
+      linked.raw.exec('PRAGMA recursive_triggers = OFF');
+      linked.raw.prepare(`
+        INSERT INTO inbound_events (
+          message_id, conversation_key, chat_jid, received_at
+        ) VALUES ('unlinked-message', 'conversation', 'chat', '2030-01-01 00:00:00')
+      `).run();
+      const before = linkedReceipt(linked.raw);
+
+      expect(() => linked.raw.prepare(`
+        UPDATE OR REPLACE inbound_events
+        SET seq = ?, received_at = '2040-01-01 00:00:00'
+        WHERE message_id = 'unlinked-message'
+      `).run(linked.sourceSeq)).toThrow(
+        /recovery source inbound update replacement is blocked/i,
+      );
+      expect(linkedReceipt(linked.raw)).toEqual(before);
+      expect(linked.raw.prepare(`
+        SELECT message_id FROM inbound_events WHERE message_id = 'unlinked-message'
+      `).get()).toEqual({ message_id: 'unlinked-message' });
     } finally {
       linked.raw.close();
     }

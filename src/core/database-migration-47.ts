@@ -33,6 +33,23 @@ const TRIGGERS = new Map([
       SELECT RAISE(ABORT, 'turn recovery source inbound replacement is blocked');
     END
   `],
+  ['turn_recovery_source_inbound_update_replacement_blocked', `
+    CREATE TRIGGER turn_recovery_source_inbound_update_replacement_blocked
+    BEFORE UPDATE OF seq, message_id ON inbound_events
+    WHEN EXISTS (
+      SELECT 1
+      FROM inbound_events existing
+      JOIN turn_recovery_jobs j ON j.source_inbound_seq = existing.seq
+      WHERE existing.seq IS NOT OLD.seq
+        AND (
+          existing.seq = NEW.seq
+          OR existing.message_id = NEW.message_id
+        )
+    )
+    BEGIN
+      SELECT RAISE(ABORT, 'turn recovery source inbound update replacement is blocked');
+    END
+  `],
 ] as const);
 
 function normalizeSql(sql: string): string {
@@ -52,8 +69,8 @@ function assertCanonicalTrigger(db: DatabaseSync, name: string, sql: string): bo
 
 /**
  * Freeze the journal receipt once an inbound event is linked to a recovery job,
- * including SQLite replacement inserts whose implicit delete skips DELETE
- * triggers when recursive_triggers is disabled.
+ * including SQLite replacement inserts and updates whose implicit delete skips
+ * DELETE triggers when recursive_triggers is disabled.
  *
  * Migration 40 already protects the source identity. These separate triggers
  * preserve that shipped trigger byte-for-byte while closing the chronology
