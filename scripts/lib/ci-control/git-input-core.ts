@@ -2,9 +2,24 @@ import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { lstatSync, readFileSync } from "node:fs";
 import { dirname, isAbsolute, join, resolve } from "node:path";
+import { performance } from "node:perf_hooks";
 import { TextDecoder, types as utilTypes } from "node:util";
 
 import { cleanGitEnv } from "../../../src/lib/git-env.ts";
+
+const TYPED_ARRAY_PROTOTYPE = Object.getPrototypeOf(Uint8Array.prototype) as object;
+const TYPED_ARRAY_BYTE_LENGTH = Object.getOwnPropertyDescriptor(
+  TYPED_ARRAY_PROTOTYPE,
+  "byteLength",
+)!.get!;
+const TYPED_ARRAY_BYTE_OFFSET = Object.getOwnPropertyDescriptor(
+  TYPED_ARRAY_PROTOTYPE,
+  "byteOffset",
+)!.get!;
+const TYPED_ARRAY_BUFFER = Object.getOwnPropertyDescriptor(
+  TYPED_ARRAY_PROTOTYPE,
+  "buffer",
+)!.get!;
 
 export const MAX_CHANGE_SET_BYTES = 16 * 1024 * 1024;
 export const MAX_CHANGE_FACT_COUNT = 50_000;
@@ -38,6 +53,7 @@ export const MAX_EXACT_TREE_ENTRY_PATH_SEGMENT_COUNT = 1_023;
 export const MAX_EXACT_SINGLE_TREE_BYTES = 4 * 1_024 * 1_024;
 export const MAX_EXACT_AGGREGATE_TREE_BYTES = 16 * 1_024 * 1_024;
 export const MAX_EXACT_TREE_ENTRY_COUNT = 50_000;
+const MAX_EXACT_TREE_GIT_COMMAND_COUNT = 4_000;
 
 export type ChangeStatusV1 =
   "added" | "modified" | "deleted" | "renamed" | "copied";
@@ -47,6 +63,17 @@ export type ChangeObjectTypeV1 =
 export type ExactTreeModeV1 = Exclude<ChangeModeV1, "000000"> | "040000";
 export type ExactTreeObjectTypeV1 = Exclude<ChangeObjectTypeV1, "absent"> | "tree";
 
+/**
+ * Exact endpoint state with state-compatible Git presentation grouping.
+ *
+ * Paths, modes, object identities, and the expanded added/deleted/modified
+ * endpoint multiset are verified from exact commit/tree objects. For
+ * `renamed` and `copied` facts, `status`, `oldPath`, and `similarity` remain
+ * advisory diffcore grouping: Git objects do not encode lineage or similarity.
+ * Blocker-grade added-line consumers must therefore scan every line of a
+ * changed rename/copy destination; only equal-object moves/copies prove zero
+ * byte additions.
+ */
 export interface ChangeFactV1 {
   status: ChangeStatusV1;
   path: string;
@@ -205,6 +232,7 @@ export type ExactGitInputErrorCode =
   | "ci.input.added-lines.identity-mismatch"
   | "ci.classification.merge-base-unavailable"
   | "ci.classification.change-set-malformed"
+  | "ci.classification.change-set-identity-mismatch"
   | "ci.classification.change-set-budget"
   | "ci.classification.execution-timeout";
 
@@ -351,7 +379,7 @@ export function gitBytes(
   } catch (error) {
     const candidate = error as NodeJS.ErrnoException & { signal?: string };
     const failureCode =
-      candidate.code === "ETIMEDOUT" || candidate.signal === "SIGKILL"
+      candidate.code === "ETIMEDOUT"
         ? "ci.classification.execution-timeout"
         : candidate.code === "ENOBUFS"
         ? "ci.classification.change-set-budget"
@@ -360,15 +388,13 @@ export function gitBytes(
   }
 }
 
-function exactInputGitBytes(
+export function exactInputGitBytes(
   cwd: string,
   args: readonly string[],
   failureCode: ExactGitInputErrorCode,
-  budgetCode: Extract<
-    ExactGitInputErrorCode,
-    "ci.input.commit-range-budget" | "ci.input.blob-set-budget"
-  >,
+  budgetCode: ExactGitInputErrorCode,
   maxBuffer: number,
+  timeoutCode: ExactGitInputErrorCode = "ci.input.git-execution-timeout",
 ): Buffer {
   assertNoLegacyGrafts(cwd);
   try {
@@ -383,7 +409,7 @@ function exactInputGitBytes(
   } catch (error) {
     const candidate = error as NodeJS.ErrnoException & { signal?: string };
     const code = candidate.code === "ETIMEDOUT"
-      ? "ci.input.git-execution-timeout"
+      ? timeoutCode
       : candidate.code === "ENOBUFS"
       ? budgetCode
       : failureCode;
@@ -391,20 +417,12 @@ function exactInputGitBytes(
   }
 }
 
-function requireSha1ObjectFormat(
+export function requireSha1ObjectFormat(
   cwd: string,
-  malformedCode: Extract<
-    ExactGitInputErrorCode,
-    "ci.input.commit-range-malformed" | "ci.input.blob-set-malformed"
-  >,
-  unavailableCode: Extract<
-    ExactGitInputErrorCode,
-    "ci.input.commit-range-unavailable" | "ci.input.blob-unavailable"
-  >,
-  budgetCode: Extract<
-    ExactGitInputErrorCode,
-    "ci.input.commit-range-budget" | "ci.input.blob-set-budget"
-  >,
+  malformedCode: ExactGitInputErrorCode,
+  unavailableCode: ExactGitInputErrorCode,
+  budgetCode: ExactGitInputErrorCode,
+  timeoutCode: ExactGitInputErrorCode = "ci.input.git-execution-timeout",
 ): void {
   const format = canonicalAsciiLine(exactInputGitBytes(
     cwd,
@@ -412,13 +430,14 @@ function requireSha1ObjectFormat(
     unavailableCode,
     budgetCode,
     64,
+    timeoutCode,
   ), malformedCode);
   if (format !== "sha1") {
     throw new ExactGitInputError(malformedCode, malformedCode);
   }
 }
 
-function canonicalAsciiLine(
+export function canonicalAsciiLine(
   bytes: Buffer,
   malformedCode: ExactGitInputErrorCode,
 ): string {
@@ -432,7 +451,7 @@ function canonicalAsciiLine(
   return body.toString("ascii");
 }
 
-function requireFullOid(
+export function requireFullOid(
   value: unknown,
   code: Extract<
     ExactGitInputErrorCode,
@@ -483,7 +502,7 @@ function requireAncestor(cwd: string, ancestorOid: string, localOid: string): vo
   }
 }
 
-function parseBoundedInteger(
+export function parseBoundedInteger(
   bytes: Buffer,
   malformedCode: ExactGitInputErrorCode,
 ): number {
@@ -499,50 +518,49 @@ function parseBoundedInteger(
 }
 
 function validateExactCommitRangeInput(value: unknown): ExactCommitRangeInputV1 {
-  if (
-    typeof value !== "object"
-    || value === null
-    || Array.isArray(value)
-    || Object.getPrototypeOf(value) !== Object.prototype
-  ) {
+  try {
+    if (
+      typeof value !== "object"
+      || value === null
+      || Array.isArray(value)
+      || utilTypes.isProxy(value)
+      || Object.getPrototypeOf(value) !== Object.prototype
+    ) {
+      throw new Error();
+    }
+    const keys = Reflect.ownKeys(value).sort((left, right) =>
+      String(left).localeCompare(String(right)));
+    if (
+      keys.length !== 3
+      || keys[0] !== "baseOid"
+      || keys[1] !== "localOid"
+      || keys[2] !== "remoteOid"
+    ) {
+      throw new Error();
+    }
+    const descriptors = Object.getOwnPropertyDescriptors(value);
+    const base = descriptors.baseOid;
+    const remote = descriptors.remoteOid;
+    const local = descriptors.localOid;
+    if (
+      base === undefined || !("value" in base) || !base.enumerable
+      || remote === undefined || !("value" in remote) || !remote.enumerable
+      || local === undefined || !("value" in local) || !local.enumerable
+    ) {
+      throw new Error();
+    }
+    const baseOid = requireFullOid(base.value, "ci.input.commit-range-malformed");
+    const remoteOid = remote.value === null
+      ? null
+      : requireFullOid(remote.value, "ci.input.commit-range-malformed");
+    const localOid = requireFullOid(local.value, "ci.input.commit-range-malformed");
+    return { baseOid, remoteOid, localOid };
+  } catch {
     throw new ExactGitInputError(
       "ci.input.commit-range-malformed",
       "ci.input.commit-range-malformed",
     );
   }
-  const keys = Reflect.ownKeys(value).sort((left, right) =>
-    String(left).localeCompare(String(right)));
-  if (
-    keys.length !== 3
-    || keys[0] !== "baseOid"
-    || keys[1] !== "localOid"
-    || keys[2] !== "remoteOid"
-  ) {
-    throw new ExactGitInputError(
-      "ci.input.commit-range-malformed",
-      "ci.input.commit-range-malformed",
-    );
-  }
-  const descriptors = Object.getOwnPropertyDescriptors(value);
-  const base = descriptors.baseOid;
-  const remote = descriptors.remoteOid;
-  const local = descriptors.localOid;
-  if (
-    base === undefined || !("value" in base) || !base.enumerable
-    || remote === undefined || !("value" in remote) || !remote.enumerable
-    || local === undefined || !("value" in local) || !local.enumerable
-  ) {
-    throw new ExactGitInputError(
-      "ci.input.commit-range-malformed",
-      "ci.input.commit-range-malformed",
-    );
-  }
-  const baseOid = requireFullOid(base.value, "ci.input.commit-range-malformed");
-  const remoteOid = remote.value === null
-    ? null
-    : requireFullOid(remote.value, "ci.input.commit-range-malformed");
-  const localOid = requireFullOid(local.value, "ci.input.commit-range-malformed");
-  return { baseOid, remoteOid, localOid };
 }
 
 function parseCommitRows(bytes: Buffer, expectedCount: number): Map<string, ExactCommitV1> {
@@ -746,6 +764,7 @@ function boundedEvidenceGitBytes(
   args: readonly string[],
   maxBuffer: number,
   codes: EvidenceGitErrorCodes,
+  timeout: number = GIT_TIMEOUT_MS,
 ): Buffer {
   assertNoLegacyGrafts(cwd);
   try {
@@ -753,9 +772,40 @@ function boundedEvidenceGitBytes(
       cwd,
       env: gitEnvironment(),
       maxBuffer,
-      timeout: GIT_TIMEOUT_MS,
+      timeout,
       killSignal: "SIGKILL",
       stdio: ["ignore", "pipe", "pipe"],
+    });
+  } catch (error) {
+    const candidate = error as NodeJS.ErrnoException;
+    if (candidate.code === "ETIMEDOUT") {
+      throw new ExactGitInputError(codes.timeout, codes.timeout);
+    }
+    if (candidate.code === "ENOBUFS") {
+      throw new ExactGitInputError(codes.budget, codes.budget);
+    }
+    throw new ExactGitInputError(codes.unavailable, codes.unavailable);
+  }
+}
+
+function boundedEvidenceGitInputBytes(
+  cwd: string,
+  args: readonly string[],
+  input: Buffer,
+  maxBuffer: number,
+  codes: EvidenceGitErrorCodes,
+  timeout: number = GIT_TIMEOUT_MS,
+): Buffer {
+  assertNoLegacyGrafts(cwd);
+  try {
+    return execFileSync("git", ["--no-replace-objects", ...args], {
+      cwd,
+      env: gitEnvironment(),
+      input,
+      maxBuffer,
+      timeout,
+      killSignal: "SIGKILL",
+      stdio: ["pipe", "pipe", "pipe"],
     });
   } catch (error) {
     const candidate = error as NodeJS.ErrnoException;
@@ -832,15 +882,13 @@ function validateCommitMetadataOids(value: unknown): string[] {
 }
 
 function requireCommitMetadataSha1(cwd: string): void {
-  const format = metadataAsciiLine(boundedEvidenceGitBytes(
+  requireSha1ObjectFormat(
     cwd,
-    ["rev-parse", "--show-object-format"],
-    64,
-    COMMIT_METADATA_GIT_CODES,
-  ));
-  if (format !== "sha1") {
-    throw commitMetadataError("ci.input.commit-metadata-malformed");
-  }
+    "ci.input.commit-metadata-malformed",
+    COMMIT_METADATA_GIT_CODES.unavailable,
+    COMMIT_METADATA_GIT_CODES.budget,
+    COMMIT_METADATA_GIT_CODES.timeout,
+  );
 }
 
 function preflightCommitMetadata(
@@ -1055,6 +1103,34 @@ const RAW_TREE_MODE_TYPES: Readonly<Record<
   "160000": { mode: "160000", objectType: "gitlink" },
 };
 
+const LS_TREE_MODE_TYPES: Readonly<Record<string, string>> = {
+  "040000": "tree",
+  "100644": "blob",
+  "100755": "blob",
+  "120000": "blob",
+  "160000": "commit",
+};
+
+function parseRawTreeMode(
+  bytes: Buffer,
+  start: number,
+  end: number,
+): { rawMode: string; mapping: { mode: ExactTreeModeV1; objectType: ExactTreeObjectTypeV1 } } {
+  const modeBytes = bytes.subarray(start, end);
+  if (
+    modeBytes.byteLength === 0
+    || modeBytes.some((byte) => byte < 0x30 || byte > 0x39)
+  ) {
+    throw treeEntryError("ci.input.tree-entry-malformed");
+  }
+  const rawMode = modeBytes.toString("ascii");
+  const mapping = RAW_TREE_MODE_TYPES[rawMode];
+  if (mapping === undefined) {
+    throw treeEntryError("ci.input.tree-entry-malformed");
+  }
+  return { rawMode, mapping };
+}
+
 function treeEntryError(
   code: Extract<ExactGitInputErrorCode, `ci.input.tree-entry-${string}`>,
 ): ExactGitInputError {
@@ -1201,9 +1277,31 @@ function treeAsciiLine(bytes: Buffer): string {
   }
 }
 
+function compareRawTreeEntryNames(
+  left: Buffer,
+  leftIsTree: boolean,
+  right: Buffer,
+  rightIsTree: boolean,
+): number {
+  const commonLength = Math.min(left.byteLength, right.byteLength);
+  for (let index = 0; index < commonLength; index += 1) {
+    if (left[index] !== right[index]) return left[index]! - right[index]!;
+  }
+  if (left.byteLength === right.byteLength) return 0;
+  const leftNext = left.byteLength === commonLength
+    ? (leftIsTree ? 0x2f : 0x00)
+    : left[commonLength]!;
+  const rightNext = right.byteLength === commonLength
+    ? (rightIsTree ? 0x2f : 0x00)
+    : right[commonLength]!;
+  return leftNext - rightNext;
+}
+
 function rawTreeEntryCount(bytes: Buffer, remainingCount: number): number {
   let cursor = 0;
   let count = 0;
+  let previousName: Buffer | null = null;
+  let previousIsTree = false;
   while (cursor < bytes.byteLength) {
     const modeEnd = bytes.indexOf(0x20, cursor);
     if (modeEnd <= cursor) throw treeEntryError("ci.input.tree-entry-malformed");
@@ -1211,16 +1309,26 @@ function rawTreeEntryCount(bytes: Buffer, remainingCount: number): number {
     if (nameEnd <= modeEnd + 1 || nameEnd + 21 > bytes.byteLength) {
       throw treeEntryError("ci.input.tree-entry-malformed");
     }
-    const rawMode = bytes.subarray(cursor, modeEnd).toString("ascii");
-    if (!Object.hasOwn(RAW_TREE_MODE_TYPES, rawMode)) {
-      throw treeEntryError("ci.input.tree-entry-malformed");
-    }
+    const { mapping } = parseRawTreeMode(bytes, cursor, modeEnd);
     const name = bytes.subarray(modeEnd + 1, nameEnd);
     if (name.includes(0x2f)) throw treeEntryError("ci.input.tree-entry-malformed");
+    if (
+      previousName !== null
+      && compareRawTreeEntryNames(
+        previousName,
+        previousIsTree,
+        name,
+        mapping.objectType === "tree",
+      ) >= 0
+    ) {
+      throw treeEntryError("ci.input.tree-entry-malformed");
+    }
     const objectOid = bytes.subarray(nameEnd + 1, nameEnd + 21);
     if (objectOid.every((byte) => byte === 0)) {
       throw treeEntryError("ci.input.tree-entry-malformed");
     }
+    previousName = name;
+    previousIsTree = mapping.objectType === "tree";
     count += 1;
     if (count > remainingCount) {
       throw treeEntryError("ci.input.tree-entry-budget");
@@ -1236,8 +1344,7 @@ function parseRawTreeEntries(bytes: Buffer): ReadonlyMap<string, ParsedRawTreeEn
   while (cursor < bytes.byteLength) {
     const modeEnd = bytes.indexOf(0x20, cursor);
     const nameEnd = bytes.indexOf(0x00, modeEnd + 1);
-    const rawMode = bytes.subarray(cursor, modeEnd).toString("ascii");
-    const mapping = RAW_TREE_MODE_TYPES[rawMode]!;
+    const { mapping } = parseRawTreeMode(bytes, cursor, modeEnd);
     const nameKey = bytes.subarray(modeEnd + 1, nameEnd).toString("hex");
     if (entries.has(nameKey)) throw treeEntryError("ci.input.tree-entry-malformed");
     entries.set(nameKey, {
@@ -1250,99 +1357,68 @@ function parseRawTreeEntries(bytes: Buffer): ReadonlyMap<string, ParsedRawTreeEn
   return entries;
 }
 
-/** Enumerate one exact commit tree through the canonical bounded Git execution boundary. */
-export function readExactTreePaths(cwd: string, candidateOid: string): ExactTreePathSetV1 {
-  if (!FULL_OID.test(candidateOid)) throw treeEntryError("ci.input.tree-entry-malformed");
-  let metadata: ExactCommitMetadataV1;
-  try {
-    metadata = readExactCommitMetadata(cwd, [candidateOid])[0]!;
-  } catch (error) {
-    mapTreeCommitError(error);
-  }
-  const bytes = boundedEvidenceGitBytes(
-    cwd,
-    ["ls-tree", "-rz", "--full-tree", metadata.treeOid],
-    MAX_EXACT_AGGREGATE_TREE_BYTES + 1,
-    TREE_GIT_CODES,
-  );
-  const paths = parseExactTreePathListing(bytes);
-  return {
-    candidateOid,
-    treeOid: metadata.treeOid,
-    listingDigest: `sha256:${createHash("sha256").update(bytes).digest("hex")}`,
-    paths,
-  };
+interface ExactTreeReader {
+  loadTree: (oid: string, materializeEntries: boolean) => LoadedTree;
+  requireBlobType: (oid: string) => void;
+  requireBlobTypes: (oids: readonly string[]) => void;
+  rereadBlobTypes: (oids: readonly string[]) => void;
+  rereadTrees: () => void;
 }
 
-export function parseExactTreePathListing(value: Uint8Array): string[] {
-  let bytes: Buffer;
-  try {
-    bytes = Buffer.from(value);
-  } catch {
-    throw treeEntryError("ci.input.tree-entry-malformed");
-  }
-  if (bytes.byteLength > MAX_EXACT_AGGREGATE_TREE_BYTES) {
-    throw treeEntryError("ci.input.tree-entry-budget");
-  }
-  if (bytes.byteLength > 0 && bytes[bytes.byteLength - 1] !== 0) {
-    throw treeEntryError("ci.input.tree-entry-malformed");
-  }
-  const rows = bytes.byteLength === 0
-    ? []
-    : bytes.subarray(0, bytes.byteLength - 1).toString("binary").split("\0");
-  if (rows.length > MAX_EXACT_TREE_ENTRY_COUNT) {
-    throw treeEntryError("ci.input.tree-entry-budget");
-  }
-  const decoder = new TextDecoder("utf-8", { fatal: true });
-  const paths: string[] = [];
-  for (const row of rows) {
-    const raw = Buffer.from(row, "binary");
-    const tab = raw.indexOf(0x09);
-    if (tab <= 0) throw treeEntryError("ci.input.tree-entry-malformed");
-    const header = raw.subarray(0, tab).toString("ascii");
-    const pathBytes = raw.subarray(tab + 1);
-    if (!/^(?:040000|100644|100755|120000|160000) (?:blob|tree|commit) [0-9a-f]{40}$/.test(header)) {
-      throw treeEntryError("ci.input.tree-entry-malformed");
-    }
-    if (pathBytes.byteLength === 0 || pathBytes.byteLength > MAX_EXACT_TREE_ENTRY_PATH_BYTES) {
-      throw treeEntryError(pathBytes.byteLength > MAX_EXACT_TREE_ENTRY_PATH_BYTES
-        ? "ci.input.tree-entry-budget"
-        : "ci.input.tree-entry-malformed");
-    }
-    let path: string;
-    try {
-      path = decoder.decode(pathBytes);
-    } catch {
-      throw treeEntryError("ci.input.tree-entry-malformed");
-    }
-    if (path.startsWith("/") || path.endsWith("/") || path.includes("\\")
-      || path.split("/").some((segment) => segment === "" || segment === "." || segment === "..")) {
-      throw treeEntryError("ci.input.tree-entry-malformed");
-    }
-    if (paths.length > 0 && compareUtf8(paths.at(-1)!, path) >= 0) {
-      throw treeEntryError("ci.input.tree-entry-malformed");
-    }
-    paths.push(path);
-  }
-  return paths;
+export interface ExactPrimitiveChangeEvidenceV1 {
+  changes: ChangeFactV1[];
+  lookupBaseEntry: (path: string) => {
+    mode: Exclude<ChangeModeV1, "000000">;
+    objectType: ChangeObjectTypeV1;
+    objectOid: string;
+  } | null;
+  validateObjectTypes: () => void;
+  revalidate: () => void;
 }
 
-export function readExactTreeEntries(
-  cwd: string,
-  input: ExactTreeLookupInputV1,
-): ExactTreeEntrySetV1 {
-  const { candidateOid, paths } = validateExactTreeLookupInput(input);
-  let metadata: ExactCommitMetadataV1;
-  try {
-    metadata = readExactCommitMetadata(cwd, [candidateOid])[0]!;
-  } catch (error) {
-    mapTreeCommitError(error);
-  }
-
+function createExactTreeReader(cwd: string): ExactTreeReader {
   const trees = new Map<string, LoadedTree>();
   const actualTypes = new Map<string, string>();
   let aggregateTreeBytes = 0;
   let aggregateEntryCount = 0;
+  let gitCommandCount = 0;
+  const deadline = performance.now() + GIT_TIMEOUT_MS;
+
+  const remainingTimeout = (): number => {
+    gitCommandCount += 1;
+    if (gitCommandCount > MAX_EXACT_TREE_GIT_COMMAND_COUNT) {
+      throw treeEntryError("ci.input.tree-entry-budget");
+    }
+    const remaining = deadline - performance.now();
+    if (remaining <= 0) {
+      throw treeEntryError("ci.input.tree-entry-timeout");
+    }
+    return Math.max(1, Math.floor(remaining));
+  };
+
+  const treeGitBytes = (
+    args: readonly string[],
+    maxBuffer: number,
+  ): Buffer => boundedEvidenceGitBytes(
+    cwd,
+    args,
+    maxBuffer,
+    TREE_GIT_CODES,
+    remainingTimeout(),
+  );
+
+  const treeGitInputBytes = (
+    args: readonly string[],
+    input: Buffer,
+    maxBuffer: number,
+  ): Buffer => boundedEvidenceGitInputBytes(
+    cwd,
+    args,
+    input,
+    maxBuffer,
+    TREE_GIT_CODES,
+    remainingTimeout(),
+  );
 
   const loadTree = (oid: string, materializeEntries: boolean): LoadedTree => {
     const cached = trees.get(oid);
@@ -1352,21 +1428,17 @@ export function readExactTreeEntries(
       }
       return cached;
     }
-    const type = treeAsciiLine(boundedEvidenceGitBytes(
-      cwd,
+    const type = treeAsciiLine(treeGitBytes(
       ["cat-file", "-t", "--", oid],
       64,
-      TREE_GIT_CODES,
     ));
     if (type !== "tree") throw treeEntryError("ci.input.tree-entry-identity-mismatch");
     let byteLength: number;
     try {
       byteLength = parseBoundedInteger(
-        boundedEvidenceGitBytes(
-          cwd,
+        treeGitBytes(
           ["cat-file", "-s", "--", oid],
           64,
-          TREE_GIT_CODES,
         ),
         "ci.input.tree-entry-malformed",
       );
@@ -1380,11 +1452,9 @@ export function readExactTreeEntries(
     ) {
       throw treeEntryError("ci.input.tree-entry-budget");
     }
-    const bytes = boundedEvidenceGitBytes(
-      cwd,
+    const bytes = treeGitBytes(
       ["cat-file", "tree", "--", oid],
       Math.max(1_024, byteLength + 1),
-      TREE_GIT_CODES,
     );
     const identity = createHash("sha1")
       .update(`tree ${byteLength}\0`)
@@ -1412,11 +1482,9 @@ export function readExactTreeEntries(
 
   const requireBlobType = (oid: string): void => {
     const cached = actualTypes.get(oid);
-    const actual = cached ?? treeAsciiLine(boundedEvidenceGitBytes(
-      cwd,
+    const actual = cached ?? treeAsciiLine(treeGitBytes(
       ["cat-file", "-t", "--", oid],
       64,
-      TREE_GIT_CODES,
     ));
     actualTypes.set(oid, actual);
     if (actual !== "blob") {
@@ -1424,14 +1492,472 @@ export function readExactTreeEntries(
     }
   };
 
-  loadTree(metadata.treeOid, paths.length > 0);
+  const readObjectTypes = (oids: readonly string[]): ReadonlyMap<string, string> => {
+    const exactOids = [...new Set(oids)].sort();
+    if (exactOids.length === 0) return new Map();
+    const input = Buffer.from(`${exactOids.join("\n")}\n`, "ascii");
+    const output = treeGitInputBytes(
+      ["cat-file", "--batch-check=%(objectname) %(objecttype)"],
+      input,
+      Math.max(1_024, exactOids.length * 64 + 1),
+    );
+    if (
+      output.byteLength === 0
+      || output[output.byteLength - 1] !== 0x0a
+      || output.some((byte) => byte !== 0x0a && (byte < 0x20 || byte > 0x7e))
+    ) {
+      throw treeEntryError("ci.input.tree-entry-malformed");
+    }
+    const rows = output.subarray(0, output.byteLength - 1).toString("ascii").split("\n");
+    if (rows.length !== exactOids.length) {
+      throw treeEntryError("ci.input.tree-entry-identity-mismatch");
+    }
+    const result = new Map<string, string>();
+    for (let index = 0; index < rows.length; index += 1) {
+      const expectedOid = exactOids[index]!;
+      if (rows[index] === `${expectedOid} missing`) {
+        throw treeEntryError("ci.input.tree-entry-unavailable");
+      }
+      const match = /^([0-9a-f]{40}) (blob|tree|commit|tag)$/u.exec(rows[index]!);
+      if (match === null || match[1] !== expectedOid) {
+        throw treeEntryError("ci.input.tree-entry-identity-mismatch");
+      }
+      result.set(match[1], match[2]!);
+    }
+    return result;
+  };
+
+  const requireBlobTypes = (oids: readonly string[]): void => {
+    const unknown = [...new Set(oids)].filter((oid) => !actualTypes.has(oid));
+    for (const [oid, type] of readObjectTypes(unknown)) {
+      actualTypes.set(oid, type);
+    }
+    for (const oid of oids) {
+      if (actualTypes.get(oid) !== "blob") {
+        throw treeEntryError("ci.input.tree-entry-identity-mismatch");
+      }
+    }
+  };
+
+  const rereadBlobTypes = (oids: readonly string[]): void => {
+    for (const type of readObjectTypes(oids).values()) {
+      if (type !== "blob") {
+        throw treeEntryError("ci.input.tree-entry-identity-mismatch");
+      }
+    }
+  };
+
+  const rereadTrees = (): void => {
+    for (const tree of trees.values()) {
+      const reread = treeGitBytes(
+        ["cat-file", "tree", "--", tree.oid],
+        Math.max(1_024, tree.byteLength + 1),
+      );
+      if (!reread.equals(tree.bytes)) {
+        throw treeEntryError("ci.input.tree-entry-identity-mismatch");
+      }
+    }
+  };
+
+  return {
+    loadTree,
+    requireBlobType,
+    requireBlobTypes,
+    rereadBlobTypes,
+    rereadTrees,
+  };
+}
+
+function exactPrimitiveChangePath(
+  prefix: Buffer,
+  nameKey: string,
+  segmentCount: number,
+): { bytes: Buffer; path: string; segmentCount: number } {
+  const name = Buffer.from(nameKey, "hex");
+  const nextSegmentCount = segmentCount + 1;
+  const byteLength = prefix.byteLength + (prefix.byteLength === 0 ? 0 : 1)
+    + name.byteLength;
+  if (
+    byteLength > MAX_EXACT_TREE_ENTRY_PATH_BYTES
+    || nextSegmentCount > MAX_EXACT_TREE_ENTRY_PATH_SEGMENT_COUNT
+  ) {
+    throw treeEntryError("ci.input.tree-entry-budget");
+  }
+  const bytes = prefix.byteLength === 0
+    ? name
+    : Buffer.concat([prefix, Buffer.from("/"), name], byteLength);
+  let path: string;
+  try {
+    path = UTF8.decode(bytes);
+  } catch {
+    throw treeEntryError("ci.input.tree-entry-malformed");
+  }
+  if (
+    path.startsWith("/")
+    || path.endsWith("/")
+    || path.includes("\\")
+    || /[\u0000-\u001f\u007f]/u.test(path)
+    || path.split("/").some((segment) => segment === "" || segment === "." || segment === "..")
+  ) {
+    throw treeEntryError("ci.input.tree-entry-malformed");
+  }
+  return { bytes, path, segmentCount: nextSegmentCount };
+}
+
+function exactLeafType(entry: ParsedRawTreeEntry): ChangeObjectTypeV1 {
+  if (entry.objectType === "tree") {
+    throw treeEntryError("ci.input.tree-entry-malformed");
+  }
+  return entry.objectType;
+}
+
+export function readExactPrimitiveChangeEvidence(
+  cwd: string,
+  baseOid: string,
+  candidateOid: string,
+  primitiveLimit: number,
+): ExactPrimitiveChangeEvidenceV1 {
+  const commitOids = [...new Set([baseOid, candidateOid])].sort();
+  const initialMetadata = readExactCommitMetadata(cwd, commitOids);
+  const metadataByOid = new Map(initialMetadata.map((item) => [item.oid, item]));
+  const baseMetadata = metadataByOid.get(baseOid);
+  const candidateMetadata = metadataByOid.get(candidateOid);
+  if (baseMetadata === undefined || candidateMetadata === undefined) {
+    throw treeEntryError("ci.input.tree-entry-identity-mismatch");
+  }
+
+  const reader = createExactTreeReader(cwd);
+  const changes: ChangeFactV1[] = [];
+  const requiredBlobOids = new Set<string>();
+  let serializedBytes = 0;
+  let expandedEntryCount = 0;
+
+  const append = (
+    status: Extract<ChangeStatusV1, "added" | "modified" | "deleted">,
+    path: string,
+    oldEntry: ParsedRawTreeEntry | null,
+    newEntry: ParsedRawTreeEntry | null,
+  ): void => {
+    if (changes.length >= primitiveLimit) {
+      throw treeEntryError("ci.input.tree-entry-budget");
+    }
+    if (oldEntry?.objectType === "tree" || newEntry?.objectType === "tree") {
+      throw treeEntryError("ci.input.tree-entry-malformed");
+    }
+    if (oldEntry !== null && oldEntry.objectType !== "gitlink") {
+      requiredBlobOids.add(oldEntry.objectOid);
+    }
+    if (newEntry !== null && newEntry.objectType !== "gitlink") {
+      requiredBlobOids.add(newEntry.objectOid);
+    }
+    const oldMode = (oldEntry?.mode ?? "000000") as ChangeModeV1;
+    const newMode = (newEntry?.mode ?? "000000") as ChangeModeV1;
+    const oldObjectOid = oldEntry?.objectOid ?? ZERO_OID;
+    const newObjectOid = newEntry?.objectOid ?? ZERO_OID;
+    const rawBytes = Buffer.byteLength(
+      `:${oldMode} ${newMode} ${oldObjectOid} ${newObjectOid} ${status[0]!.toUpperCase()}\0${path}\0`,
+      "utf8",
+    );
+    serializedBytes += rawBytes;
+    if (serializedBytes > MAX_CHANGE_SET_BYTES) {
+      throw treeEntryError("ci.input.tree-entry-budget");
+    }
+    changes.push({
+      status,
+      path,
+      oldPath: null,
+      oldMode,
+      newMode,
+      oldOid: oldObjectOid,
+      newOid: newObjectOid,
+      oldType: oldEntry === null ? "absent" : exactLeafType(oldEntry),
+      newType: newEntry === null ? "absent" : exactLeafType(newEntry),
+      similarity: null,
+    });
+  };
+
+  const walk = (
+    oldTreeOid: string | null,
+    newTreeOid: string | null,
+    prefix: Buffer,
+    segmentCount: number,
+  ): void => {
+    if (oldTreeOid !== null && oldTreeOid === newTreeOid) return;
+    const oldEntries = oldTreeOid === null
+      ? new Map<string, ParsedRawTreeEntry>()
+      : reader.loadTree(oldTreeOid, true).entries!;
+    const newEntries = newTreeOid === null
+      ? new Map<string, ParsedRawTreeEntry>()
+      : reader.loadTree(newTreeOid, true).entries!;
+    const names = [...new Set([...oldEntries.keys(), ...newEntries.keys()])]
+      .sort((left, right) => Buffer.compare(Buffer.from(left, "hex"), Buffer.from(right, "hex")));
+
+    for (const nameKey of names) {
+      expandedEntryCount += 1;
+      if (expandedEntryCount > MAX_EXACT_TREE_ENTRY_COUNT) {
+        throw treeEntryError("ci.input.tree-entry-budget");
+      }
+      const oldEntry = oldEntries.get(nameKey) ?? null;
+      const newEntry = newEntries.get(nameKey) ?? null;
+      const next = exactPrimitiveChangePath(prefix, nameKey, segmentCount);
+      if (oldEntry?.objectType === "tree" && newEntry?.objectType === "tree") {
+        walk(oldEntry.objectOid, newEntry.objectOid, next.bytes, next.segmentCount);
+        continue;
+      }
+      if (oldEntry?.objectType === "tree") {
+        walk(oldEntry.objectOid, null, next.bytes, next.segmentCount);
+        if (newEntry !== null) append("added", next.path, null, newEntry);
+        continue;
+      }
+      if (newEntry?.objectType === "tree") {
+        if (oldEntry !== null) append("deleted", next.path, oldEntry, null);
+        walk(null, newEntry.objectOid, next.bytes, next.segmentCount);
+        continue;
+      }
+      if (oldEntry === null) {
+        append("added", next.path, null, newEntry);
+      } else if (newEntry === null) {
+        append("deleted", next.path, oldEntry, null);
+      } else if (
+        oldEntry.mode !== newEntry.mode
+        || oldEntry.objectOid !== newEntry.objectOid
+      ) {
+        append("modified", next.path, oldEntry, newEntry);
+      }
+    }
+  };
+
+  walk(baseMetadata.treeOid, candidateMetadata.treeOid, Buffer.alloc(0), 0);
+
+  const lookupBaseEntry = (path: string): {
+    mode: Exclude<ChangeModeV1, "000000">;
+    objectType: ChangeObjectTypeV1;
+    objectOid: string;
+  } | null => {
+    let treeOid = baseMetadata.treeOid;
+    const components = path.split("/");
+    for (let index = 0; index < components.length; index += 1) {
+      const tree = reader.loadTree(treeOid, true);
+      const entry = tree.entries!.get(Buffer.from(components[index]!, "utf8").toString("hex"));
+      if (entry === undefined) return null;
+      const leaf = index === components.length - 1;
+      if (entry.objectType === "tree") {
+        if (leaf) return null;
+        treeOid = entry.objectOid;
+        continue;
+      }
+      if (!leaf) return null;
+      if (entry.objectType !== "gitlink") requiredBlobOids.add(entry.objectOid);
+      return {
+        mode: entry.mode as Exclude<ChangeModeV1, "000000">,
+        objectType: exactLeafType(entry),
+        objectOid: entry.objectOid,
+      };
+    }
+    return null;
+  };
+
+  const validateObjectTypes = (): void => {
+    reader.requireBlobTypes([...requiredBlobOids]);
+  };
+
+  const revalidate = (): void => {
+    const currentMetadata = readExactCommitMetadata(cwd, commitOids);
+    for (const current of currentMetadata) {
+      const initial = metadataByOid.get(current.oid);
+      if (
+        initial === undefined
+        || initial.treeOid !== current.treeOid
+        || initial.byteLength !== current.byteLength
+        || initial.contentSha256 !== current.contentSha256
+      ) {
+        throw treeEntryError("ci.input.tree-entry-identity-mismatch");
+      }
+    }
+    reader.rereadTrees();
+    reader.rereadBlobTypes([...requiredBlobOids]);
+  };
+
+  return { changes, lookupBaseEntry, validateObjectTypes, revalidate };
+}
+
+function serializeExactRecursiveTreeListing(reader: ExactTreeReader, rootOid: string): Buffer {
+  const chunks: Buffer[] = [];
+  const pathSeparator = Buffer.from("/");
+  const rowTerminator = Buffer.from([0]);
+  let outputBytes = 0;
+  let expandedEntryCount = 0;
+
+  const visit = (treeOid: string, prefix: Buffer, prefixSegments: number): void => {
+    const tree = reader.loadTree(treeOid, true);
+    for (const [nameKey, entry] of tree.entries!) {
+      expandedEntryCount += 1;
+      if (expandedEntryCount > MAX_EXACT_TREE_ENTRY_COUNT) {
+        throw treeEntryError("ci.input.tree-entry-budget");
+      }
+      const name = Buffer.from(nameKey, "hex");
+      const pathByteLength = prefix.byteLength + (prefix.byteLength === 0 ? 0 : 1)
+        + name.byteLength;
+      const segmentCount = prefixSegments + 1;
+      if (
+        pathByteLength > MAX_EXACT_TREE_ENTRY_PATH_BYTES
+        || segmentCount > MAX_EXACT_TREE_ENTRY_PATH_SEGMENT_COUNT
+      ) {
+        throw treeEntryError("ci.input.tree-entry-budget");
+      }
+      const path = prefix.byteLength === 0
+        ? name
+        : Buffer.concat([prefix, pathSeparator, name], pathByteLength);
+      if (entry.objectType === "tree") {
+        visit(entry.objectOid, path, segmentCount);
+        continue;
+      }
+      const objectType = entry.objectType === "gitlink" ? "commit" : "blob";
+      const header = Buffer.from(
+        `${entry.mode} ${objectType} ${entry.objectOid}\t`,
+        "ascii",
+      );
+      const rowBytes = header.byteLength + path.byteLength + 1;
+      if (rowBytes > MAX_EXACT_AGGREGATE_TREE_BYTES - outputBytes) {
+        throw treeEntryError("ci.input.tree-entry-budget");
+      }
+      chunks.push(header, path, rowTerminator);
+      outputBytes += rowBytes;
+    }
+  };
+
+  visit(rootOid, Buffer.alloc(0), 0);
+  return Buffer.concat(chunks, outputBytes);
+}
+
+/** Enumerate one exact commit tree through the canonical bounded Git execution boundary. */
+export function readExactTreePaths(cwd: string, candidateOid: string): ExactTreePathSetV1 {
+  if (typeof candidateOid !== "string" || !FULL_OID.test(candidateOid)) {
+    throw treeEntryError("ci.input.tree-entry-malformed");
+  }
+  let metadata: ExactCommitMetadataV1;
+  try {
+    metadata = readExactCommitMetadata(cwd, [candidateOid])[0]!;
+  } catch (error) {
+    mapTreeCommitError(error);
+  }
+  const bytes = boundedEvidenceGitBytes(
+    cwd,
+    ["ls-tree", "-rz", "--full-tree", metadata.treeOid],
+    MAX_EXACT_AGGREGATE_TREE_BYTES + 1,
+    TREE_GIT_CODES,
+  );
+  const paths = parseExactTreePathListing(bytes);
+  const reader = createExactTreeReader(cwd);
+  const verifiedListing = serializeExactRecursiveTreeListing(reader, metadata.treeOid);
+  reader.rereadTrees();
+  if (!bytes.equals(verifiedListing)) {
+    throw treeEntryError("ci.input.tree-entry-identity-mismatch");
+  }
+  return {
+    candidateOid,
+    treeOid: metadata.treeOid,
+    listingDigest: `sha256:${createHash("sha256").update(bytes).digest("hex")}`,
+    paths,
+  };
+}
+
+export function parseExactTreePathListing(value: Uint8Array): string[] {
+  let byteLength: number;
+  try {
+    if (!utilTypes.isUint8Array(value)) {
+      throw treeEntryError("ci.input.tree-entry-malformed");
+    }
+    byteLength = Reflect.apply(TYPED_ARRAY_BYTE_LENGTH, value, []) as number;
+  } catch {
+    throw treeEntryError("ci.input.tree-entry-malformed");
+  }
+  if (byteLength > MAX_EXACT_AGGREGATE_TREE_BYTES) {
+    throw treeEntryError("ci.input.tree-entry-budget");
+  }
+  let bytes: Buffer;
+  try {
+    const buffer = Reflect.apply(TYPED_ARRAY_BUFFER, value, []) as ArrayBufferLike;
+    if (utilTypes.isSharedArrayBuffer(buffer)) {
+      throw treeEntryError("ci.input.tree-entry-malformed");
+    }
+    const byteOffset = Reflect.apply(TYPED_ARRAY_BYTE_OFFSET, value, []) as number;
+    bytes = Buffer.from(new Uint8Array(buffer, byteOffset, byteLength));
+  } catch {
+    throw treeEntryError("ci.input.tree-entry-malformed");
+  }
+  if (bytes.byteLength > 0 && bytes[bytes.byteLength - 1] !== 0) {
+    throw treeEntryError("ci.input.tree-entry-malformed");
+  }
+  const rows = bytes.byteLength === 0
+    ? []
+    : bytes.subarray(0, bytes.byteLength - 1).toString("binary").split("\0");
+  if (rows.length > MAX_EXACT_TREE_ENTRY_COUNT) {
+    throw treeEntryError("ci.input.tree-entry-budget");
+  }
+  const decoder = new TextDecoder("utf-8", { fatal: true });
+  const paths: string[] = [];
+  for (const row of rows) {
+    const raw = Buffer.from(row, "binary");
+    const tab = raw.indexOf(0x09);
+    if (tab <= 0) throw treeEntryError("ci.input.tree-entry-malformed");
+    const header = raw.subarray(0, tab).toString("ascii");
+    const pathBytes = raw.subarray(tab + 1);
+    const match =
+      /^(040000|100644|100755|120000|160000) (blob|tree|commit) ([0-9a-f]{40})$/
+        .exec(header);
+    if (
+      match === null
+      || LS_TREE_MODE_TYPES[match[1]!] !== match[2]
+      || match[3] === ZERO_OID
+    ) {
+      throw treeEntryError("ci.input.tree-entry-malformed");
+    }
+    if (pathBytes.byteLength === 0 || pathBytes.byteLength > MAX_EXACT_TREE_ENTRY_PATH_BYTES) {
+      throw treeEntryError(pathBytes.byteLength > MAX_EXACT_TREE_ENTRY_PATH_BYTES
+        ? "ci.input.tree-entry-budget"
+        : "ci.input.tree-entry-malformed");
+    }
+    let path: string;
+    try {
+      path = decoder.decode(pathBytes);
+    } catch {
+      throw treeEntryError("ci.input.tree-entry-malformed");
+    }
+    if (path.startsWith("/") || path.endsWith("/") || path.includes("\\")
+      || /[\u0000-\u001f\u007f]/u.test(path)
+      || path.split("/").some((segment) => segment === "" || segment === "." || segment === "..")) {
+      throw treeEntryError("ci.input.tree-entry-malformed");
+    }
+    if (paths.length > 0 && compareUtf8(paths.at(-1)!, path) >= 0) {
+      throw treeEntryError("ci.input.tree-entry-malformed");
+    }
+    paths.push(path);
+  }
+  return paths;
+}
+
+export function readExactTreeEntries(
+  cwd: string,
+  input: ExactTreeLookupInputV1,
+): ExactTreeEntrySetV1 {
+  const { candidateOid, paths } = validateExactTreeLookupInput(input);
+  let metadata: ExactCommitMetadataV1;
+  try {
+    metadata = readExactCommitMetadata(cwd, [candidateOid])[0]!;
+  } catch (error) {
+    mapTreeCommitError(error);
+  }
+
+  const reader = createExactTreeReader(cwd);
+  reader.loadTree(metadata.treeOid, paths.length > 0);
   const entries: ExactTreeEntryV1[] = [];
   for (const path of paths) {
     const components = path.split("/");
     let treeOid = metadata.treeOid;
     let resolved: ExactTreeEntryV1 | null = null;
     for (let index = 0; index < components.length; index += 1) {
-      const tree = loadTree(treeOid, true);
+      const tree = reader.loadTree(treeOid, true);
       const entry = tree.entries!.get(Buffer.from(components[index]!, "utf8").toString("hex"));
       if (entry === undefined) {
         resolved = { path, presence: "absent", mode: null, objectType: null, objectOid: null };
@@ -1439,7 +1965,7 @@ export function readExactTreeEntries(
       }
       const leaf = index === components.length - 1;
       if (entry.objectType === "tree") {
-        loadTree(entry.objectOid, !leaf);
+        reader.loadTree(entry.objectOid, !leaf);
         if (leaf) {
           resolved = {
             path,
@@ -1453,7 +1979,7 @@ export function readExactTreeEntries(
         treeOid = entry.objectOid;
         continue;
       }
-      if (entry.objectType !== "gitlink") requireBlobType(entry.objectOid);
+      if (entry.objectType !== "gitlink") reader.requireBlobType(entry.objectOid);
       resolved = leaf
         ? {
           path,
@@ -1468,147 +1994,6 @@ export function readExactTreeEntries(
     entries.push(resolved!);
   }
 
-  for (const tree of trees.values()) {
-    const reread = boundedEvidenceGitBytes(
-      cwd,
-      ["cat-file", "tree", "--", tree.oid],
-      Math.max(1_024, tree.byteLength + 1),
-      TREE_GIT_CODES,
-    );
-    if (!reread.equals(tree.bytes)) {
-      throw treeEntryError("ci.input.tree-entry-identity-mismatch");
-    }
-  }
+  reader.rereadTrees();
   return { candidateOid, treeOid: metadata.treeOid, entries };
-}
-
-interface BlobPreflight {
-  oid: string;
-  byteLength: number;
-}
-
-function preflightBlob(cwd: string, oid: string): BlobPreflight {
-  const type = canonicalAsciiLine(exactInputGitBytes(
-    cwd,
-    ["cat-file", "-t", "--", oid],
-    "ci.input.blob-unavailable",
-    "ci.input.blob-set-budget",
-    64,
-  ), "ci.input.blob-set-malformed");
-  if (type !== "blob") {
-    throw new ExactGitInputError(
-      "ci.input.blob-type-unsupported",
-      "ci.input.blob-type-unsupported",
-    );
-  }
-  const byteLength = parseBoundedInteger(
-    exactInputGitBytes(
-      cwd,
-      ["cat-file", "-s", "--", oid],
-      "ci.input.blob-unavailable",
-      "ci.input.blob-set-budget",
-      64,
-    ),
-    "ci.input.blob-set-malformed",
-  );
-  if (byteLength > MAX_EXACT_SINGLE_BLOB_BYTES) {
-    throw new ExactGitInputError(
-      "ci.input.blob-set-budget",
-      "ci.input.blob-set-budget",
-    );
-  }
-  return { oid, byteLength };
-}
-
-export function readExactBlobs(
-  cwd: string,
-  objectOids: readonly string[],
-): ExactBlobV1[] {
-  return readExactBlobsWithinAggregateBudget(
-    cwd,
-    objectOids,
-    MAX_EXACT_AGGREGATE_BLOB_BYTES,
-  );
-}
-
-export function readExactBlobsWithinAggregateBudget(
-  cwd: string,
-  objectOids: readonly string[],
-  aggregateByteLimit: number,
-): ExactBlobV1[] {
-  if (!Array.isArray(objectOids)) {
-    throw new ExactGitInputError(
-      "ci.input.blob-set-malformed",
-      "ci.input.blob-set-malformed",
-    );
-  }
-  if (objectOids.length > MAX_EXACT_BLOB_COUNT) {
-    throw new ExactGitInputError(
-      "ci.input.blob-set-budget",
-      "ci.input.blob-set-budget",
-    );
-  }
-  const validatedOids: string[] = [];
-  for (let index = 0; index < objectOids.length; index += 1) {
-    const descriptor = Object.getOwnPropertyDescriptor(objectOids, String(index));
-    if (descriptor === undefined || !("value" in descriptor)) {
-      throw new ExactGitInputError(
-        "ci.input.blob-set-malformed",
-        "ci.input.blob-set-malformed",
-      );
-    }
-    validatedOids.push(requireFullOid(
-      descriptor.value,
-      "ci.input.blob-set-malformed",
-    ));
-  }
-  requireSha1ObjectFormat(
-    cwd,
-    "ci.input.blob-set-malformed",
-    "ci.input.blob-unavailable",
-    "ci.input.blob-set-budget",
-  );
-  const oids = [...new Set(validatedOids)].sort();
-
-  const preflight: BlobPreflight[] = [];
-  let aggregateBytes = 0;
-  for (const oid of oids) {
-    const blob = preflightBlob(cwd, oid);
-    aggregateBytes += blob.byteLength;
-    if (aggregateBytes > aggregateByteLimit) {
-      throw new ExactGitInputError(
-        "ci.input.blob-set-budget",
-        "ci.input.blob-set-budget",
-      );
-    }
-    preflight.push(blob);
-  }
-
-  const blobs: ExactBlobV1[] = [];
-  for (const blob of preflight) {
-    const content = exactInputGitBytes(
-      cwd,
-      ["cat-file", "blob", "--", blob.oid],
-      "ci.input.blob-unavailable",
-      "ci.input.blob-set-budget",
-      Math.max(1_024, blob.byteLength + 1),
-    );
-    const identity = createHash("sha1")
-      .update(`blob ${blob.byteLength}\0`)
-      .update(content)
-      .digest("hex");
-    if (content.byteLength !== blob.byteLength || identity !== blob.oid) {
-      throw new ExactGitInputError(
-        "ci.input.blob-identity-mismatch",
-        "ci.input.blob-identity-mismatch",
-      );
-    }
-    blobs.push({
-      oid: blob.oid,
-      byteLength: blob.byteLength,
-      contentSha256: `sha256:${createHash("sha256").update(content).digest("hex")}`,
-      bytes: Uint8Array.from(content),
-    });
-  }
-  return blobs;
 }

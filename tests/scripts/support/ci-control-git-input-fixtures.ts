@@ -203,8 +203,27 @@ export interface GitShimResponse {
   signal?: 'SIGKILL';
 }
 
+export interface ExactGitShimScenario {
+  baseOid: string;
+  candidateOid: string;
+  responses: Record<string, GitShimResponse>;
+}
+
 export function responseKey(args: readonly string[]): string {
   return JSON.stringify(args);
+}
+
+function setBatchBlobTypeResponse(
+  responses: Record<string, GitShimResponse>,
+  oids: readonly string[],
+): void {
+  const exactOids = [...new Set(oids)].sort();
+  responses[responseKey([
+    'cat-file',
+    '--batch-check=%(objectname) %(objecttype)',
+  ])] = {
+    stdout: exactOids.map((oid) => `${oid} blob\n`).join(''),
+  };
 }
 
 export function withGitShim<T>(
@@ -286,7 +305,7 @@ export function addedLineShimResponses(
     '--no-indent-heuristic', '--text', '--full-index', '--no-prefix',
     '--no-color', '--no-ext-diff', '--no-textconv', oldOid, newOid, '--',
   ];
-  return {
+  const responses: Record<string, GitShimResponse> = {
     [responseKey(['cat-file', '-t', '--', baseOid])]: { stdout: 'commit\n' },
     [responseKey(['cat-file', '-t', '--', candidateOid])]: { stdout: 'commit\n' },
     [responseKey(['merge-base', '--all', baseOid, candidateOid])]: { stdout: `${baseOid}\n` },
@@ -310,6 +329,201 @@ export function addedLineShimResponses(
     [responseKey(['cat-file', 'blob', '--', newOid])]: { stdoutBase64: newBytes.toString('base64') },
     [responseKey(diffArgs)]: { stdoutBase64: patch.toString('base64') },
   };
+  setBatchBlobTypeResponse(responses, [oldOid, newOid]);
+  return responses;
+}
+
+function exactFlatTree(
+  entries: readonly { path: string; oid: string }[],
+): { rootOid: string; trees: ReadonlyMap<string, Buffer> } {
+  interface Node {
+    files: Map<string, string>;
+    directories: Map<string, Node>;
+  }
+  const root: Node = { files: new Map(), directories: new Map() };
+  for (const { path, oid } of entries) {
+    const components = path.split('/');
+    let node = root;
+    for (const component of components.slice(0, -1)) {
+      const existing = node.directories.get(component);
+      if (existing !== undefined) {
+        node = existing;
+      } else {
+        const created: Node = { files: new Map(), directories: new Map() };
+        node.directories.set(component, created);
+        node = created;
+      }
+    }
+    node.files.set(components.at(-1)!, oid);
+  }
+  const trees = new Map<string, Buffer>();
+  const materialize = (node: Node): string => {
+    const rows: { mode: string; name: string; oid: string; sortKey: Buffer }[] = [];
+    for (const [name, oid] of node.files) {
+      rows.push({ mode: '100644', name, oid, sortKey: Buffer.from(name, 'utf8') });
+    }
+    for (const [name, child] of node.directories) {
+      rows.push({
+        mode: '40000',
+        name,
+        oid: materialize(child),
+        sortKey: Buffer.from(`${name}/`, 'utf8'),
+      });
+    }
+    rows.sort((left, right) => Buffer.compare(left.sortKey, right.sortKey));
+    const body = rawTreeBody(rows);
+    const oid = treeOid(body);
+    trees.set(oid, body);
+    return oid;
+  };
+  return { rootOid: materialize(root), trees };
+}
+
+function exactCommitPairResponses(
+  baseEntries: readonly { path: string; oid: string }[],
+  candidateEntries: readonly { path: string; oid: string }[],
+): {
+  baseOid: string;
+  candidateOid: string;
+  responses: Record<string, GitShimResponse>;
+} {
+  const baseTree = exactFlatTree(baseEntries);
+  const baseBody = rawCommitBody({ treeOid: baseTree.rootOid, message: 'base\n' });
+  const baseOid = commitOid(baseBody);
+  const candidateTree = exactFlatTree(candidateEntries);
+  const candidateBody = rawCommitBody({
+    treeOid: candidateTree.rootOid,
+    parentOids: [baseOid],
+    message: 'candidate\n',
+  });
+  const candidateOid = commitOid(candidateBody);
+  const responses = commitMetadataResponses([
+    { oid: baseOid, body: baseBody },
+    { oid: candidateOid, body: candidateBody },
+  ]);
+  for (const [oid, body] of new Map([...baseTree.trees, ...candidateTree.trees])) {
+    responses[responseKey(['cat-file', '-t', '--', oid])] = { stdout: 'tree\n' };
+    responses[responseKey(['cat-file', '-s', '--', oid])] = { stdout: `${body.byteLength}\n` };
+    responses[responseKey(['cat-file', 'tree', '--', oid])] = {
+      stdoutBase64: body.toString('base64'),
+    };
+  }
+  responses[responseKey(['merge-base', '--all', baseOid, candidateOid])] = {
+    stdout: `${baseOid}\n`,
+  };
+  return { baseOid, candidateOid, responses };
+}
+
+export function addedLineShimScenario(
+  paths: string | readonly string[],
+  oldBytes: Buffer,
+  newBytes: Buffer,
+  patch: Buffer,
+): ExactGitShimScenario {
+  const normalizedPaths = typeof paths === 'string' ? [paths] : [...paths];
+  const oldOid = blobOid(oldBytes);
+  const newOid = blobOid(newBytes);
+  const scenario = exactCommitPairResponses(
+    normalizedPaths.map((path) => ({ path, oid: oldOid })),
+    normalizedPaths.map((path) => ({ path, oid: newOid })),
+  );
+  const raw = Buffer.concat(normalizedPaths.map((path) => Buffer.from(
+    `:100644 100644 ${oldOid} ${newOid} M\0${path}\0`,
+    'utf8',
+  )));
+  scenario.responses[responseKey([
+    '-c', `diff.renameLimit=${MAX_CHANGE_FACT_COUNT}`, 'diff-tree', '--raw', '-z',
+    '--no-commit-id', '-r', '--abbrev=40', '--no-ext-diff', '--no-textconv',
+    '--ignore-submodules=none', '--find-renames', '--find-copies',
+    '--find-copies-harder', scenario.baseOid, scenario.candidateOid, '--',
+  ])] = { stdoutBase64: raw.toString('base64') };
+  for (const [oid, bytes] of [[oldOid, oldBytes], [newOid, newBytes]] as const) {
+    scenario.responses[responseKey(['cat-file', '-t', '--', oid])] = { stdout: 'blob\n' };
+    scenario.responses[responseKey(['cat-file', '-s', '--', oid])] = {
+      stdout: `${bytes.byteLength}\n`,
+    };
+    scenario.responses[responseKey(['cat-file', 'blob', '--', oid])] = {
+      stdoutBase64: bytes.toString('base64'),
+    };
+  }
+  setBatchBlobTypeResponse(scenario.responses, [oldOid, newOid]);
+  scenario.responses[responseKey([
+    '-c', 'diff.algorithm=myers', 'diff', '--patch', '--unified=0',
+    '--no-indent-heuristic', '--text', '--full-index', '--no-prefix',
+    '--no-color', '--no-ext-diff', '--no-textconv', oldOid, newOid, '--',
+  ])] = { stdoutBase64: patch.toString('base64') };
+  return scenario;
+}
+
+export function modifiedFactsShimScenario(
+  facts: readonly { path: string; oldBytes: Buffer; newBytes: Buffer; patch: Buffer }[],
+): ExactGitShimScenario {
+  const scenario = exactCommitPairResponses(
+    facts.map(({ path, oldBytes }) => ({ path, oid: blobOid(oldBytes) })),
+    facts.map(({ path, newBytes }) => ({ path, oid: blobOid(newBytes) })),
+  );
+  const raw = Buffer.concat(facts.map(({ path, oldBytes, newBytes }) => Buffer.from(
+    `:100644 100644 ${blobOid(oldBytes)} ${blobOid(newBytes)} M\0${path}\0`,
+    'utf8',
+  )));
+  scenario.responses[responseKey([
+    '-c', `diff.renameLimit=${MAX_CHANGE_FACT_COUNT}`, 'diff-tree', '--raw', '-z',
+    '--no-commit-id', '-r', '--abbrev=40', '--no-ext-diff', '--no-textconv',
+    '--ignore-submodules=none', '--find-renames', '--find-copies',
+    '--find-copies-harder', scenario.baseOid, scenario.candidateOid, '--',
+  ])] = { stdoutBase64: raw.toString('base64') };
+  for (const { oldBytes, newBytes, patch } of facts) {
+    const oldOid = blobOid(oldBytes);
+    const newOid = blobOid(newBytes);
+    for (const [oid, bytes] of [[oldOid, oldBytes], [newOid, newBytes]] as const) {
+      scenario.responses[responseKey(['cat-file', '-t', '--', oid])] = { stdout: 'blob\n' };
+      scenario.responses[responseKey(['cat-file', '-s', '--', oid])] = {
+        stdout: `${bytes.byteLength}\n`,
+      };
+      scenario.responses[responseKey(['cat-file', 'blob', '--', oid])] = {
+        stdoutBase64: bytes.toString('base64'),
+      };
+    }
+    scenario.responses[responseKey([
+      '-c', 'diff.algorithm=myers', 'diff', '--patch', '--unified=0',
+      '--no-indent-heuristic', '--text', '--full-index', '--no-prefix',
+      '--no-color', '--no-ext-diff', '--no-textconv', oldOid, newOid, '--',
+    ])] = { stdoutBase64: patch.toString('base64') };
+  }
+  setBatchBlobTypeResponse(scenario.responses, facts.flatMap(({ oldBytes, newBytes }) => [
+    blobOid(oldBytes),
+    blobOid(newBytes),
+  ]));
+  return scenario;
+}
+
+export function addedFactsShimScenario(
+  facts: readonly { path: string; bytes: Buffer }[],
+): ExactGitShimScenario {
+  const entries = facts.map(({ path, bytes }) => ({ path, oid: blobOid(bytes) }));
+  const scenario = exactCommitPairResponses([], entries);
+  const raw = Buffer.concat(facts.map(({ path, bytes }) => Buffer.from(
+    `:000000 100644 ${'0'.repeat(40)} ${blobOid(bytes)} A\0${path}\0`,
+    'utf8',
+  )));
+  scenario.responses[responseKey([
+    '-c', `diff.renameLimit=${MAX_CHANGE_FACT_COUNT}`, 'diff-tree', '--raw', '-z',
+    '--no-commit-id', '-r', '--abbrev=40', '--no-ext-diff', '--no-textconv',
+    '--ignore-submodules=none', '--find-renames', '--find-copies',
+    '--find-copies-harder', scenario.baseOid, scenario.candidateOid, '--',
+  ])] = { stdoutBase64: raw.toString('base64') };
+  for (const { bytes } of facts) {
+    const oid = blobOid(bytes);
+    scenario.responses[responseKey(['cat-file', '-t', '--', oid])] = { stdout: 'blob\n' };
+    scenario.responses[responseKey(['cat-file', '-s', '--', oid])] = {
+      stdout: `${bytes.byteLength}\n`,
+    };
+    scenario.responses[responseKey(['cat-file', 'blob', '--', oid])] = {
+      stdoutBase64: bytes.toString('base64'),
+    };
+  }
+  setBatchBlobTypeResponse(scenario.responses, facts.map(({ bytes }) => blobOid(bytes)));
+  return scenario;
 }
 
 export function addedFactsShimResponses(
@@ -348,6 +562,7 @@ export function addedFactsShimResponses(
       stdoutBase64: bytes.toString('base64'),
     };
   }
+  setBatchBlobTypeResponse(responses, facts.map(({ bytes }) => blobOid(bytes)));
   return responses;
 }
 
@@ -393,7 +608,11 @@ export function treeLookupResponses(options: {
 export type GitInputModule = typeof import('../../../scripts/lib/ci-control/git-input.ts');
 
 export async function withMockedGitInput<T>(
-  execute: (file: string, args: string[]) => Buffer,
+  execute: (
+    file: string,
+    args: string[],
+    options: Parameters<typeof execFileSync>[2],
+  ) => Buffer,
   run: (module: GitInputModule) => T | Promise<T>,
 ): Promise<T> {
   vi.resetModules();
