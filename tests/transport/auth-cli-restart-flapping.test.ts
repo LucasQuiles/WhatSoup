@@ -186,7 +186,11 @@ describe('auth CLI restartRequired handling', () => {
 
     try {
       await expect(import('../../src/transport/auth.ts')).rejects.toThrow('exit:1');
-      expect(checkedPaths).toContain('/var/run/whatsoup.lock');
+      // The default lock path is now portable (os.tmpdir()-based, not the
+      // Linux-only /var/run). Verify the checked path ends with whatsoup.lock
+      // and is NOT the old /var/run path. (#2322)
+      expect(checkedPaths.some((p) => typeof p === 'string' && p.endsWith('whatsoup.lock'))).toBe(true);
+      expect(checkedPaths).not.toContain('/var/run/whatsoup.lock');
       expect(mocks.makeWASocket).not.toHaveBeenCalled();
     } finally {
       vi.doUnmock('../../src/config.ts');

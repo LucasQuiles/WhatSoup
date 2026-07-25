@@ -7,6 +7,8 @@
  */
 
 import { existsSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import {
   makeWASocket,
   useMultiFileAuthState,
@@ -27,7 +29,10 @@ import { classifyPairNumber, maskPairingCode, pairingEmissionLine, pairingGate }
 // Lock check
 // ---------------------------------------------------------------------------
 
-const lockPath = (config as any).lockPath ?? '/var/run/whatsoup.lock';
+// Default lock path: use a portable tmpdir-based path instead of the Linux-only
+// /var/run (which is root-owned on macOS at /private/var/run). (#2322)
+const defaultLockPath = join(tmpdir(), 'whatsoup.lock');
+const lockPath = (config as any).lockPath ?? defaultLockPath;
 
 if (existsSync(lockPath)) {
   console.error(
