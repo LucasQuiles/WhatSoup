@@ -910,6 +910,43 @@ describe('quality workflow composition', () => {
     expect(qualityWorkflow).toContain('--base "origin/$GITHUB_BASE_REF"');
   });
 
+  it('fetches one fail-closed PR base snapshot before every authority consumer', () => {
+    const compatibilityIndex = qualityWorkflow.indexOf('  compatibility:');
+    const authority = qualityWorkflow.slice(0, compatibilityIndex);
+    const fetchCommand =
+      'git fetch origin "$GITHUB_BASE_REF:refs/remotes/origin/$GITHUB_BASE_REF"';
+    const fetchLines = authority
+      .split('\n')
+      .map((line) => line.trim())
+      .filter(
+        (line) =>
+          line.includes('git fetch')
+          && line.includes('refs/remotes/origin/$GITHUB_BASE_REF'),
+      );
+    const fetchIndex = authority.indexOf(fetchCommand);
+    const snapshotStepIndex = authority.indexOf('- name: Refresh PR base snapshot');
+    const semanticStepIndex = authority.indexOf('- name: Semantic quality (shadow)');
+    const snapshotStep = authority.slice(snapshotStepIndex, semanticStepIndex);
+    const consumerCommands = [
+      'npm run guard:semantic-quality -- --mode shadow --base "$base"',
+      'npm run guard:repo:branch-diff',
+      'npm run guard:repo:commit-authors',
+      'npm run guard:baseline-growth',
+      'npm run guard:design-system-hygiene -- --changed-since "origin/${GITHUB_BASE_REF}"',
+    ];
+
+    expect(compatibilityIndex).toBeGreaterThanOrEqual(0);
+    expect(fetchLines).toEqual([fetchCommand]);
+    expect(fetchIndex).toBeGreaterThanOrEqual(0);
+    expect(snapshotStepIndex).toBeGreaterThanOrEqual(0);
+    expect(semanticStepIndex).toBeGreaterThan(snapshotStepIndex);
+    expect(snapshotStep).toContain(fetchCommand);
+    expect(snapshotStep).not.toMatch(/continue-on-error|set \+e|\|\| true/);
+    for (const command of consumerCommands) {
+      expect(authority.indexOf(command)).toBeGreaterThan(fetchIndex);
+    }
+  });
+
   it('relies on authoritative coverage instead of rerunning repo-hygiene tests', () => {
     const compatibilityIndex = qualityWorkflow.indexOf('  compatibility:');
     const authority = qualityWorkflow.slice(0, compatibilityIndex);

@@ -68,6 +68,12 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Refresh PR base snapshot
+        run: |
+          if [ -n "${GITHUB_BASE_REF:-}" ]; then
+            git fetch origin "$GITHUB_BASE_REF:refs/remotes/origin/$GITHUB_BASE_REF"
+          fi
+
       - name: Semantic quality (shadow)
         env:
           SEMANTIC_RECEIPT: ${{ runner.temp }}/semantic-quality.json
@@ -127,18 +133,13 @@ jobs:
       - name: Repo hygiene branch diff
         run: |
           if [ -n "${GITHUB_BASE_REF:-}" ]; then
-            git fetch origin "$GITHUB_BASE_REF:refs/remotes/origin/$GITHUB_BASE_REF"
             npm run guard:repo:branch-diff -- --base "origin/$GITHUB_BASE_REF"
           else
             npm run guard:repo:branch-diff
           fi
 
       - name: Repo hygiene commit-author guard
-        run: |
-          if [ -n "${GITHUB_BASE_REF:-}" ]; then
-            git fetch origin "$GITHUB_BASE_REF:refs/remotes/origin/$GITHUB_BASE_REF"
-          fi
-          npm run guard:repo:commit-authors
+        run: npm run guard:repo:commit-authors
 
       - name: Install test-integrity plugin
         env:
