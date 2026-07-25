@@ -74,6 +74,94 @@ describe('runtime turn chronology integration', () => {
     }
   });
 
+  it('delivers exact user text when the stored receipt timestamp is invalid', async () => {
+    const db = new Database(':memory:');
+    db.open();
+    try {
+      const { state } = makeRuntimeState<RuntimeState>(db);
+      const baseContext = context('singleton', '15550190041', 83, 'turn-invalid-receipt');
+      const runtimeContext: RuntimeTurnContext = {
+        ...baseContext,
+        replay: { ...baseContext.replay, receivedAtUnixSeconds: Number.NaN },
+      };
+      const session = sessionStub();
+
+      await state.sendTurnToSession(
+        session,
+        runtimeContext.identity.deliveryJid,
+        'deliver this exact text',
+        undefined,
+        runtimeContext.replay.senderJid,
+        undefined,
+        undefined,
+        undefined,
+        runtimeContext,
+        'queued',
+      );
+
+      expect(session.sendTurn).toHaveBeenCalledWith('deliver this exact text');
+    } finally {
+      db.close();
+    }
+  });
+
+  it('keeps the captured fallback chronology when ambient turn state changes during shutdown', async () => {
+    const db = new Database(':memory:');
+    db.open();
+    try {
+      const { state } = makeRuntimeState<RuntimeState>(db);
+      const captured = context('singleton', '15550190042', 84, 'turn-captured-fallback');
+      const ambientReplacement = context('singleton', '15550190043', 85, 'turn-ambient-replacement');
+      const oldSession = sessionStub();
+      const replacementSession = sessionStub();
+      let releaseShutdown!: () => void;
+      const shutdownGate = new Promise<void>((resolve) => {
+        releaseShutdown = resolve;
+      });
+      oldSession.shutdown.mockImplementation(async () => shutdownGate);
+
+      const dispatch = vi.fn(async (..._args: unknown[]) => {});
+      const mutable = state as RuntimeState & {
+        session: ReturnType<typeof sessionStub> | null;
+        recreateSingletonSessionForFallback(chatJid: string, actorJid?: string): void;
+        sendTurnToSession: typeof dispatch;
+      };
+      mutable.recreateSingletonSessionForFallback = vi.fn(() => {
+        mutable.session = replacementSession;
+      });
+      mutable.sendTurnToSession = dispatch;
+      state.currentRuntimeTurnContext = captured;
+
+      const replay = (
+        state.runtimeTurnCoordinator as unknown as {
+          replayTurnOnFallback(args: {
+            chatJid: string;
+            replayText: string;
+            oldSession: ReturnType<typeof sessionStub>;
+            runtimeContext: RuntimeTurnContext;
+          }): Promise<void>;
+        }
+      ).replayTurnOnFallback({
+        chatJid: captured.identity.deliveryJid,
+        replayText: captured.replay.text,
+        oldSession,
+        runtimeContext: captured,
+      });
+
+      await vi.waitFor(() => expect(oldSession.shutdown).toHaveBeenCalledWith(false));
+      state.currentRuntimeTurnContext = ambientReplacement;
+      releaseShutdown();
+      await replay;
+
+      const call = dispatch.mock.calls[0]!;
+      expect(call[2]).toBe(captured.replay.text);
+      expect(call[8]).toBe(captured);
+      expect(call[9]).toBe('recovery_replay');
+    } finally {
+      db.close();
+    }
+  });
+
   it('labels a held per-chat fallback continuation without re-admitting its context', async () => {
     const db = new Database(':memory:');
     db.open();

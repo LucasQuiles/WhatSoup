@@ -8977,12 +8977,12 @@ describe('AgentRuntime', () => {
       isGroup: true,
     }))).resolves.toBeUndefined();
 
-    expect(mockSession.sendTurn).toHaveBeenCalledWith(
-      expect.stringContaining('[Group: chat-timeout@g.us — Taylor]'),
-    );
-    expect(mockSession.sendTurn).toHaveBeenCalledWith(
-      expect.stringContaining('wake up'),
-    );
+    expect(mockSession.sendTurn).toHaveBeenCalledWith({
+      applicationContext: [
+        expect.stringContaining('[Group: chat-timeout@g.us — Taylor]'),
+      ],
+      userText: 'wake up',
+    });
     expect(mockRuntimeLogger.warn).toHaveBeenCalledWith(
       expect.objectContaining({
         chatJid: 'chat-timeout@g.us',
@@ -9075,7 +9075,7 @@ describe('AgentRuntime', () => {
 
   // @check CHK-064
 // @traces REQ-012.AC-02
-  it('shared: DM turn prefixed with [DM from <name> (<phone>)]', async () => {
+  it('shared: DM metadata is application context and userText stays exact', async () => {
     const db = makeDb();
     const { messenger } = makeMessenger();
 
@@ -9091,17 +9091,17 @@ describe('AgentRuntime', () => {
       isGroup: false,
     }));
 
-    expect(mockSession.sendTurn).toHaveBeenCalledWith(
-      expect.stringContaining('[DM from Jason (15550100001)]'),
-    );
-    expect(mockSession.sendTurn).toHaveBeenCalledWith(
-      expect.stringContaining('test message'),
-    );
+    expect(mockSession.sendTurn).toHaveBeenCalledWith({
+      applicationContext: [
+        expect.stringContaining('[DM from Jason (15550100001)]'),
+      ],
+      userText: 'test message',
+    });
   });
 
   // @check CHK-064
 // @traces REQ-012.AC-02
-  it('shared: group turn prefixed with [Group: <chatJid> — <senderName>]', async () => {
+  it('shared: group metadata is application context and userText stays exact', async () => {
     const db = makeDb();
     const { messenger } = makeMessenger();
 
@@ -9117,12 +9117,12 @@ describe('AgentRuntime', () => {
       isGroup: true,
     }));
 
-    expect(mockSession.sendTurn).toHaveBeenCalledWith(
-      expect.stringContaining('[Group: the-group@g.us — Jason]'),
-    );
-    expect(mockSession.sendTurn).toHaveBeenCalledWith(
-      expect.stringContaining('group message'),
-    );
+    expect(mockSession.sendTurn).toHaveBeenCalledWith({
+      applicationContext: [
+        expect.stringContaining('[Group: the-group@g.us — Jason]'),
+      ],
+      userText: 'group message',
+    });
   });
 
   // @check CHK-065

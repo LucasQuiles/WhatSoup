@@ -162,6 +162,10 @@ export interface RuntimeState {
     mapKey?: string,
     actorJid?: string,
     beforeUserSend?: () => void,
+    systemTurnLease?: undefined,
+    dispatchAllowed?: () => boolean,
+    runtimeContext?: RuntimeTurnContext,
+    deliveryKind?: 'live' | 'queued' | 'recovery_replay',
   ): Promise<void>;
   ensureSessionAndQueueSync: ReturnType<typeof vi.fn>;
   handleEventWithContext(

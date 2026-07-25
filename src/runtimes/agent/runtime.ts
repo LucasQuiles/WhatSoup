@@ -100,7 +100,7 @@ import {
   receivedAtUnixSeconds,
   renderPendingReplay,
   renderUserTurnForProvider,
-  sharedRuntimeTurnText,
+  sharedRuntimeApplicationContext,
 } from './turn-provider-text.ts';
 import { markDeferredSystemTurn, requireSystemTurnProviderBoundary } from './system-turn-deadline.ts';
 import {
@@ -4338,17 +4338,10 @@ export class AgentRuntime implements Runtime {
       this.currentTurnSourceMessageId = msg.messageId;
       this.currentTurnAssistantText = '';
       this.currentTurnAssistantItemText.clear();
-      const prefixedText = sharedRuntimeTurnText({
-        chatJid,
-        senderJid: msg.senderJid,
-        senderName: msg.senderName,
-        text,
-        isGroup: msg.isGroup,
-      }, this.db);
       const runtimeContext = this.runtimeTurnCoordinator.createRuntimeTurnForDispatch({
         scope: 'shared',
         chatJid,
-        text: prefixedText,
+        text,
         inboundSeq: msg.inboundSeq,
         source: {
           sourceMessageId: msg.messageId,
@@ -4506,7 +4499,8 @@ export class AgentRuntime implements Runtime {
     // The journal-backed context was minted at admission so queue rejection and
     // processor failure use the same immutable identity. Legacy unjournaled
     // test/system turns still derive only their display text here.
-    const prefixedText = turn.runtimeContext?.replay.text ?? sharedRuntimeTurnText(turn, this.db);
+    const exactText = turn.runtimeContext?.replay.text ?? text;
+    const participantContext = sharedRuntimeApplicationContext(turn, this.db);
 
     // Track which chat this turn belongs to for event routing
     // @check CHK-065 // @traces REQ-012.AC-03
@@ -4517,7 +4511,7 @@ export class AgentRuntime implements Runtime {
     this.turnHadSuppressedReplySatisfaction = false;
     // Arm the R1 first-line marker scan for this shared turn (flag-gated).
     this.currentTurnRouteMarkerHold = config.nlRouting ? '' : null;
-    this.currentTurnReplayText = prefixedText;
+    this.currentTurnReplayText = exactText;
     this.currentTurnReplayActorJid = senderJid;
     this.replyGuarantee?.arm({ inboundSeq: turn.inboundSeq, chatJid });
 
@@ -4550,11 +4544,14 @@ export class AgentRuntime implements Runtime {
       : null;
     try {
       this.updateSessionActorJid(this.session!, senderJid);
-      await this.session!.sendTurn(renderUserTurnForProvider(
-        this.turnChronology,
-        prefixedText,
-        context,
-        'live',
+      await this.session!.sendTurn(withProviderApplicationContext(
+        renderUserTurnForProvider(
+          this.turnChronology,
+          exactText,
+          context,
+          'live',
+        ),
+        participantContext,
       ));
     } catch (err) {
       if (legacyOwner) {
@@ -10531,6 +10528,17 @@ export class AgentRuntime implements Runtime {
       ? this.perChatRuntimeTurnContexts.get(args.mapKey)?.[0]
       : this.currentRuntimeTurnContext;
     if (runtimeContext) {
+      if (
+        runtimeContext.replay.text !== replayText
+        || runtimeContext.identity.deliveryJid !== args.chatJid
+      ) {
+        log.error({
+          chatJid: args.chatJid,
+          mapKey: args.mapKey,
+          logicalTurnId: runtimeContext.identity.logicalTurnId,
+        }, 'refusing fallback replay with mismatched captured turn context');
+        return false;
+      }
       const scopeRef = args.mapKey === undefined
         ? undefined
         : this.perChatRuntimeTurnScopeRefs.get(runtimeContext.identity.logicalTurnId)
@@ -10548,7 +10556,10 @@ export class AgentRuntime implements Runtime {
         );
       });
       void this.dispatchFallbackReplay(
-        scopeRef === undefined ? args : { ...args, mapKey: scopeRef.value },
+        {
+          ...(scopeRef === undefined ? args : { ...args, mapKey: scopeRef.value }),
+          runtimeContext,
+        },
         replayText,
         actorJid,
       ).catch((err) => this.finalizeFailedFallbackContinuation(
@@ -10587,6 +10598,7 @@ export class AgentRuntime implements Runtime {
       chatJid: string;
       mapKey?: string;
       oldSession: SessionManager | null;
+      runtimeContext?: RuntimeTurnContext;
     },
     replayText: string,
     actorJid: string | undefined,
@@ -10597,6 +10609,7 @@ export class AgentRuntime implements Runtime {
       replayText,
       actorJid,
       oldSession: args.oldSession,
+      runtimeContext: args.runtimeContext,
     });
   }
 

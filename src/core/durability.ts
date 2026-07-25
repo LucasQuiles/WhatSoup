@@ -297,8 +297,10 @@ export class DurabilityEngine {
     const prepare = db.raw.prepare.bind(db.raw);
     this.statements = {
       journalInbound: prepare(
-        `INSERT INTO inbound_events (message_id, conversation_key, chat_jid, routed_to, processing_status)
-         VALUES (?, ?, ?, ?, 'processing')`,
+        `INSERT INTO inbound_events (
+           message_id, conversation_key, chat_jid, routed_to, processing_status, received_at
+         )
+         VALUES (?, ?, ?, ?, 'processing', COALESCE(datetime(?, 'unixepoch'), datetime('now')))`,
       ),
       markTurnDone: prepare(`UPDATE inbound_events SET processing_status = 'turn_done' WHERE seq = ?`),
       markInboundComplete: prepare(
@@ -920,8 +922,26 @@ export class DurabilityEngine {
   }
 
   // ── Inbound events ──
-  journalInbound(messageId: string, conversationKey: string, chatJid: string, routedTo: string): number {
-    const result = this.statements.journalInbound.run(messageId, conversationKey, chatJid, routedTo);
+  journalInbound(
+    messageId: string,
+    conversationKey: string,
+    chatJid: string,
+    routedTo: string,
+    receivedAtUnixSeconds?: number,
+  ): number {
+    if (
+      receivedAtUnixSeconds !== undefined
+      && (!Number.isSafeInteger(receivedAtUnixSeconds) || receivedAtUnixSeconds < 0)
+    ) {
+      throw new Error('Inbound receipt timestamp must be a nonnegative Unix timestamp');
+    }
+    const result = this.statements.journalInbound.run(
+      messageId,
+      conversationKey,
+      chatJid,
+      routedTo,
+      receivedAtUnixSeconds ?? null,
+    );
     const seq = Number(result.lastInsertRowid);
     log.debug({ seq, messageId, routedTo }, 'journalInbound');
     return seq;

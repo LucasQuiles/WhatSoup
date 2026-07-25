@@ -322,6 +322,11 @@ export function createIngestHandler(
         }
 
         // --- Backpressure gate (SP1) ---
+        const observedIngressUnixSeconds = Math.floor(Date.now() / 1000);
+        const ingressReceivedAtUnixSeconds =
+          Number.isSafeInteger(observedIngressUnixSeconds) && observedIngressUnixSeconds >= 0
+            ? observedIngressUnixSeconds
+            : undefined;
         const admission = await acquireSlot(msg);
         if (admission.status === 'displaced') return;
         slotAcquired = true;
@@ -499,9 +504,23 @@ export function createIngestHandler(
         const routedTo = runtime.constructor?.name?.toLowerCase() ?? 'runtime';
         let seq: number | undefined;
         if (durability) {
-          seq = durability.journalInbound(msg.messageId, conversationKey, msg.chatJid, routedTo);
+          seq = durability.journalInbound(
+            msg.messageId,
+            conversationKey,
+            msg.chatJid,
+            routedTo,
+            ingressReceivedAtUnixSeconds,
+          );
           msg.inboundSeq = seq;  // Thread seq into runtime for lifecycle tracking
-          msg.receivedAtUnixSeconds = durability.getInboundReceivedAtUnixSeconds(seq);
+          msg.receivedAtUnixSeconds = undefined;
+          try {
+            msg.receivedAtUnixSeconds = durability.getInboundReceivedAtUnixSeconds(seq);
+          } catch (err) {
+            log.warn(
+              { err, inboundSeq: seq },
+              'journaled inbound receipt is invalid — dispatching without chronology',
+            );
+          }
         }
 
         // Strip the bot's own @mention token from inbound GROUP text so the agent

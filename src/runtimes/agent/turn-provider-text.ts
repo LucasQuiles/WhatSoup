@@ -9,7 +9,7 @@ import {
 } from './turn-chronology.ts';
 import type { ProviderTurnInput } from './provider-boundary-dispatch.ts';
 
-export function sharedRuntimeTurnText(
+export function sharedRuntimeApplicationContext(
   turn: Pick<QueuedTurn, 'chatJid' | 'senderJid' | 'senderName' | 'text' | 'isGroup'>,
   db: Database,
 ): string {
@@ -18,11 +18,11 @@ export function sharedRuntimeTurnText(
   const prefix = turn.isGroup
     ? `[Group: ${turn.chatJid} — ${displayName}]`
     : `[DM from ${displayName} (${phone})]`;
-  return `${prefix}\n${turn.text}`;
+  return prefix;
 }
 
 export function receivedAtUnixSeconds(msg: IncomingMessage): number {
-  return msg.receivedAtUnixSeconds ?? msg.timestamp;
+  return msg.receivedAtUnixSeconds ?? Number.NaN;
 }
 
 export function renderUserTurnForProvider(
@@ -32,6 +32,10 @@ export function renderUserTurnForProvider(
   deliveryKind: TurnDeliveryKind,
 ): ProviderTurnInput {
   if (!context) return text;
+  if (
+    !Number.isSafeInteger(context.replay.receivedAtUnixSeconds)
+    || context.replay.receivedAtUnixSeconds < 0
+  ) return text;
   return tracker.render(text, {
     receivedAtUnixSeconds: context.replay.receivedAtUnixSeconds,
     deliveryKind,

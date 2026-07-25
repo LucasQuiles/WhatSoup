@@ -71,6 +71,7 @@ export interface ProviderFallbackReplayArgs {
   replayText: string;
   actorJid?: string;
   oldSession: SessionManager | null;
+  runtimeContext?: RuntimeTurnContext;
 }
 
 export interface RuntimeTurnPostEffects {
@@ -386,7 +387,13 @@ async replayTurnOnFallback(args: ProviderFallbackReplayArgs): Promise<void> {
     this.host.perChatExecActorQueue.delete(args.mapKey);
     this.host.deleteOwnedPerChatSession(args.mapKey, args.oldSession ?? undefined);
     this.host.recreatePerChatSessionForFallback(args.mapKey, args.chatJid, args.actorJid);
-    await this.host.sendTurnPerChat(args.chatJid, args.replayText, args.mapKey, args.actorJid);
+    await this.host.sendTurnPerChat(
+      args.chatJid,
+      args.replayText,
+      args.mapKey,
+      args.actorJid,
+      args.runtimeContext,
+    );
     return;
   }
   this.host.recreateSingletonSessionForFallback(args.chatJid, args.actorJid);
@@ -404,8 +411,8 @@ async replayTurnOnFallback(args: ProviderFallbackReplayArgs): Promise<void> {
     undefined,
     undefined,
     undefined,
-    this.host.currentRuntimeTurnContext ?? undefined,
-    this.host.currentRuntimeTurnContext === null ? 'live' : 'recovery_replay',
+    args.runtimeContext,
+    args.runtimeContext === undefined ? 'live' : 'recovery_replay',
   );
 }
 
