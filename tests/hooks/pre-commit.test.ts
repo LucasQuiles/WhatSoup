@@ -5,6 +5,17 @@ import { describe, expect, it } from 'vitest';
 const HOOK_PATH = resolve(new URL('.', import.meta.url).pathname, '../../.husky/pre-commit');
 
 describe('pre-commit hook', () => {
+  it('runs the estate scan unconditionally as a warn-only early signal', () => {
+    const source = readFileSync(HOOK_PATH, 'utf8');
+    const estateCommand = 'npm run guard:git-estate -- guard --phase pre-commit';
+
+    expect(source).toContain(`if ! ${estateCommand}`);
+    expect(source).toContain('git estate scan was inconclusive (warn-only)');
+    expect(source.indexOf(estateCommand)).toBeLessThan(
+      source.indexOf('npm run guard:repo:staged'),
+    );
+  });
+
   it('checks console lint dependencies before running lint-staged', () => {
     const source = readFileSync(HOOK_PATH, 'utf8');
 

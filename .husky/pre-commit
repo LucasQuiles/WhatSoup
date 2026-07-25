@@ -6,6 +6,12 @@ set -e
 # the commit object is written. Self-contained — see .husky/check-commit-identity.sh.
 ./.husky/check-commit-identity.sh
 
+# Estate awareness is unconditional but warn-only at commit time. Pre-push runs
+# the same scanner fail-closed against the machine-local conflict ratchet.
+if ! npm run guard:git-estate -- guard --phase pre-commit; then
+  echo "git estate scan was inconclusive (warn-only); pre-push will require a complete scan" >&2
+fi
+
 npm run guard:repo:staged
 
 # Sub-second deterministic guards — no console deps required, always run.

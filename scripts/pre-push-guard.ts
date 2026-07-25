@@ -3,6 +3,8 @@ import { readFileSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
 
 export const ZERO_SHA = '0000000000000000000000000000000000000000';
+const ZERO_SHA_256 = '0'.repeat(64);
+const OBJECT_ID_PATTERN = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
 
 export type RefDecision = 'delete' | 'branch' | 'release';
 export type PushDecision = 'skip' | 'branch' | 'release';
@@ -14,9 +16,27 @@ interface RefUpdate {
   remoteSha: string;
 }
 
+function isZeroObjectId(oid: string): boolean {
+  return oid === ZERO_SHA || oid === ZERO_SHA_256;
+}
+
 function parsePrePushLine(line: string): RefUpdate {
-  const [localRef, localSha, remoteRef, remoteSha] = line.trim().split(/\s+/);
-  if (!localRef || !localSha || !remoteRef || !remoteSha) {
+  const fields = line.trim().split(/\s+/);
+  if (fields.length !== 4) {
+    throw new Error(`Invalid pre-push ref update line: ${line}`);
+  }
+  const [localRef, localSha, remoteRef, remoteSha] = fields as [
+    string,
+    string,
+    string,
+    string,
+  ];
+  if (
+    !localRef
+    || !OBJECT_ID_PATTERN.test(localSha)
+    || !remoteRef
+    || !OBJECT_ID_PATTERN.test(remoteSha)
+  ) {
     throw new Error(`Invalid pre-push ref update line: ${line}`);
   }
   return { localRef, localSha, remoteRef, remoteSha };
@@ -24,7 +44,7 @@ function parsePrePushLine(line: string): RefUpdate {
 
 export function classifyPrePushLine(line: string): RefDecision {
   const update = parsePrePushLine(line);
-  if (update.localSha === ZERO_SHA) return 'delete';
+  if (isZeroObjectId(update.localSha)) return 'delete';
   if (update.remoteRef === 'refs/heads/main') return 'release';
   if (/^refs\/tags\/v.+/.test(update.remoteRef)) return 'release';
   return 'branch';
@@ -62,11 +82,38 @@ export function commandsForDecision(decision: PushDecision): string[] {
 }
 
 export function runPrePushGuard(input: string, cwd = process.cwd()): PushDecision {
+  let parsedUpdates: RefUpdate[] = [];
+  let parseError: unknown = null;
+  try {
+    parsedUpdates = nonBlankLines(input).map(parsePrePushLine);
+  } catch (error) {
+    parseError = error;
+  }
+  const pushedLocalBranchRefs = parsedUpdates
+    .filter(({ localRef, localSha }) =>
+      !isZeroObjectId(localSha) && localRef.startsWith('refs/heads/')
+    )
+    .map(({ localRef }) => localRef)
+    .sort();
+  const estateArgs = ['run', 'guard:git-estate', '--', 'guard', '--phase', 'pre-push'];
+  for (const localRef of pushedLocalBranchRefs) {
+    estateArgs.push('--push-local-ref', localRef);
+  }
+  console.error('pre-push guard: running deterministic Git estate gate');
+  execFileSync(
+    'npm',
+    estateArgs,
+    { cwd, stdio: 'inherit' },
+  );
+  if (parseError) throw parseError;
+
   const decision = classifyPrePushInput(input);
   const commands = commandsForDecision(decision);
 
   if (commands.length === 0) {
-    console.error('pre-push guard: delete-only ref update; skipping content verification');
+    console.error(
+      'pre-push guard: delete-only ref update; estate verified; skipping content verification',
+    );
     return decision;
   }
 
@@ -89,6 +136,9 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
     runPrePushGuard(readFileSync(0, 'utf8'));
   } catch (err) {
     console.error((err as Error).message);
-    process.exitCode = 1;
+    const childStatus = (err as Error & { status?: number }).status;
+    process.exitCode = typeof childStatus === 'number' && Number.isInteger(childStatus) && childStatus > 0
+      ? childStatus
+      : 1;
   }
 }
