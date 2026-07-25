@@ -20,7 +20,18 @@ const SCHEMA_VERSION = 1 as const;
 const BASELINE_SCHEMA_VERSION = 2 as const;
 const BASELINE_NAME = 'git-estate-baseline.v2.json';
 const HASH_PATTERN = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
-const STATUS_XY_PATTERN = /^[.MTADRC]{2}$/;
+const ORDINARY_XY = new Set([
+  '.M', '.T', '.A', '.D',
+  'M.', 'MM', 'MT', 'MD',
+  'T.', 'TM', 'TT', 'TD',
+  'A.', 'AM', 'AT', 'AD',
+  'D.',
+]);
+const RENAME_XY = new Set([
+  'R.', 'RM', 'RT', 'RD', 'RR', 'RC',
+  'C.', 'CM', 'CT', 'CD', 'CR', 'CC',
+  '.R', '.C', 'MR', 'MC', 'TR', 'TC', 'AR', 'AC',
+]);
 const UNMERGED_XY_PATTERN = /^(?:DD|AU|UD|UA|DU|AA|UU)$/;
 const SUBMODULE_STATE_PATTERN = /^(?:N\.\.\.|S[.C][.M][.U])$/;
 const FILE_MODE_PATTERN = /^[0-7]{6}$/;
@@ -300,24 +311,50 @@ function requireGit(cwd: string, args: string[], label: string): string {
 
 export function parseWorktreePorcelain(raw: string): WorktreePorcelain[] {
   const records: WorktreePorcelain[] = [];
-  let current: Partial<WorktreePorcelain> = {};
+  let current: (Partial<WorktreePorcelain> & { bare?: boolean }) | null = null;
+  let phase: 'identity' | 'checkout' | 'annotations' = 'identity';
+  if (!raw.endsWith('\0\0')) {
+    throw new GitEstateError(
+      'worktree_parse_failed',
+      'worktree porcelain omitted its final record terminator',
+    );
+  }
   const finish = (): void => {
-    if (current.path !== undefined) {
-      records.push({
-        path: current.path,
-        head: current.head ?? null,
-        branch: current.branch ?? null,
-        detached: current.detached ?? false,
-        locked: current.locked ?? false,
-        lockReason: current.lockReason ?? null,
-        prunable: current.prunable ?? false,
-        pruneReason: current.pruneReason ?? null,
-      });
+    if (current === null) {
+      throw new GitEstateError('worktree_parse_failed', 'unexpected empty worktree record');
     }
-    current = {};
+    if (
+      !current.path
+      || (current.bare !== true && (
+        current.head === undefined
+        || (current.branch === undefined && current.detached !== true)
+      ))
+    ) {
+      throw new GitEstateError('worktree_parse_failed', 'incomplete worktree record');
+    }
+    records.push({
+      path: current.path,
+      head: current.head ?? null,
+      branch: current.branch ?? null,
+      detached: current.detached ?? false,
+      locked: current.locked ?? false,
+      lockReason: current.lockReason ?? null,
+      prunable: current.prunable ?? false,
+      pruneReason: current.pruneReason ?? null,
+    });
+    current = null;
+    phase = 'identity';
   };
 
-  for (const token of raw.split('\0')) {
+  const tokens = raw.split('\0');
+  for (let index = 0; index < tokens.length; index += 1) {
+    const token = tokens[index]!;
+    if (index === tokens.length - 1) {
+      if (token !== '' || current !== null) {
+        throw new GitEstateError('worktree_parse_failed', 'invalid worktree record framing');
+      }
+      continue;
+    }
     if (token === '') {
       finish();
       continue;
@@ -325,40 +362,75 @@ export function parseWorktreePorcelain(raw: string): WorktreePorcelain[] {
     const space = token.indexOf(' ');
     const key = space < 0 ? token : token.slice(0, space);
     const value = space < 0 ? '' : token.slice(space + 1);
+    if (current === null) {
+      if (key !== 'worktree' || !value) {
+        throw new GitEstateError(
+          'worktree_parse_failed',
+          'worktree must be the first attribute of every record',
+        );
+      }
+      current = { path: value };
+      phase = 'identity';
+      continue;
+    }
     switch (key) {
-      case 'worktree':
-        if (current.path !== undefined) finish();
-        current.path = value;
-        break;
       case 'HEAD':
-        if (current.head !== undefined || !isFullObjectId(value)) {
+        if (phase !== 'identity' || current.head !== undefined || !isFullObjectId(value)) {
           throw new GitEstateError('worktree_parse_failed', 'invalid worktree HEAD identity');
         }
         current.head = value;
+        phase = 'checkout';
         break;
       case 'branch':
-        current.branch = value.startsWith('refs/heads/')
-          ? value.slice('refs/heads/'.length)
-          : value;
+        if (phase !== 'checkout' || !/^refs\/heads\/\S+$/.test(value)) {
+          throw new GitEstateError('worktree_parse_failed', 'invalid worktree branch identity');
+        }
+        current.branch = value.slice('refs/heads/'.length);
+        phase = 'annotations';
         break;
       case 'detached':
+        if (phase !== 'checkout' || value) {
+          throw new GitEstateError('worktree_parse_failed', 'invalid detached worktree marker');
+        }
         current.detached = true;
+        phase = 'annotations';
         break;
       case 'locked':
+        if (
+          phase !== 'annotations'
+          || current.bare === true
+          || current.locked === true
+          || current.prunable === true
+        ) {
+          throw new GitEstateError('worktree_parse_failed', 'invalid locked worktree marker');
+        }
         current.locked = true;
         current.lockReason = value || null;
         break;
       case 'prunable':
+        if (
+          phase !== 'annotations'
+          || current.bare === true
+          || current.locked === true
+          || current.prunable === true
+          || !value
+        ) {
+          throw new GitEstateError('worktree_parse_failed', 'invalid prunable worktree marker');
+        }
         current.prunable = true;
-        current.pruneReason = value || null;
+        current.pruneReason = value;
         break;
       case 'bare':
+        if (phase !== 'identity' || value) {
+          throw new GitEstateError('worktree_parse_failed', 'invalid bare worktree marker');
+        }
+        current.bare = true;
+        phase = 'annotations';
         break;
       default:
         throw new GitEstateError('worktree_parse_failed', `unknown worktree field: ${key}`);
     }
   }
-  finish();
   if (records.length === 0) {
     throw new GitEstateError('worktree_parse_failed', 'git returned no worktree records');
   }
@@ -432,7 +504,7 @@ export function parseStatus(raw: string): WorktreeStatus {
       if (
         !record
         || record.fields[0] !== '1'
-        || !isValidTrackedStatusFields(record.fields)
+        || !isValidTrackedStatusFields(record.fields, ORDINARY_XY)
       ) {
         throw new GitEstateError('status_parse_failed', 'invalid ordinary status record');
       }
@@ -451,7 +523,7 @@ export function parseStatus(raw: string): WorktreeStatus {
       if (
         !record
         || record.fields[0] !== '2'
-        || !isValidTrackedStatusFields(record.fields)
+        || !isValidTrackedStatusFields(record.fields, RENAME_XY)
         || !isValidRenameScore(record.fields[1]!, record.fields[8]!)
         || !originalPath
       ) {
@@ -504,10 +576,12 @@ export function parseStatus(raw: string): WorktreeStatus {
   return status;
 }
 
-function isValidTrackedStatusFields(fields: string[]): boolean {
+function isValidTrackedStatusFields(
+  fields: string[],
+  allowedXy: ReadonlySet<string>,
+): boolean {
   return (
-    STATUS_XY_PATTERN.test(fields[1]!)
-    && fields[1] !== '..'
+    allowedXy.has(fields[1]!)
     && SUBMODULE_STATE_PATTERN.test(fields[2]!)
     && fields.slice(3, 6).every((mode) => FILE_MODE_PATTERN.test(mode))
     && fields.slice(6, 8).every(isFullObjectId)

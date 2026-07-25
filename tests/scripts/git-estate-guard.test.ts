@@ -25,6 +25,23 @@ import {
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const script = resolve(repoRoot, 'scripts/git-estate-guard.ts');
 const scratchRoots: string[] = [];
+const STATUS_XY_CHARACTERS = ['.', 'M', 'T', 'A', 'D', 'R', 'C'] as const;
+const ALL_TRACKED_XY = STATUS_XY_CHARACTERS.flatMap((indexStatus) =>
+  STATUS_XY_CHARACTERS.map((worktreeStatus) => `${indexStatus}${worktreeStatus}`)
+);
+const ORDINARY_XY = new Set([
+  '.M', '.T', '.A', '.D',
+  'M.', 'MM', 'MT', 'MD',
+  'T.', 'TM', 'TT', 'TD',
+  'A.', 'AM', 'AT', 'AD',
+  'D.',
+]);
+const RENAME_XY = new Set([
+  'R.', 'RM', 'RT', 'RD', 'RR', 'RC',
+  'C.', 'CM', 'CT', 'CD', 'CR', 'CC',
+  '.R', '.C', 'MR', 'MC', 'TR', 'TC', 'AR', 'AC',
+]);
+const UNMERGED_XY = new Set(['DD', 'AU', 'UD', 'UA', 'DU', 'AA', 'UU']);
 
 interface CliResult {
   status: number | null;
@@ -187,6 +204,34 @@ for arg in "$@"; do
 done
 if [ "$is_status" -eq 1 ]; then
 ${statusBody}
+  exit 0
+fi
+exec ${shellQuote(resolvedGit.stdout.trim())} "$@"
+`);
+  chmodSync(wrapper, 0o755);
+  return {
+    PATH: `${bin}:${process.env['PATH'] ?? ''}`,
+  };
+}
+
+function worktreeOutputEnvironment(
+  root: string,
+  worktreeBody: string,
+): NodeJS.ProcessEnv {
+  const resolvedGit = spawnSync('sh', ['-c', 'command -v git'], { encoding: 'utf8' });
+  expect(resolvedGit.status, resolvedGit.stderr).toBe(0);
+  const bin = join(root, `worktree-bin-${Math.random().toString(16).slice(2)}`);
+  mkdirSync(bin);
+  const wrapper = join(bin, 'git');
+  writeFileSync(wrapper, `#!/bin/sh
+is_worktree=0
+for arg in "$@"; do
+  if [ "$arg" = "worktree" ]; then
+    is_worktree=1
+  fi
+done
+if [ "$is_worktree" -eq 1 ]; then
+${worktreeBody}
   exit 0
 fi
 exec ${shellQuote(resolvedGit.stdout.trim())} "$@"
@@ -465,6 +510,51 @@ describe('git-estate guard', () => {
     )).toThrow(/status record|stage identities/);
   });
 
+  it.each(ALL_TRACKED_XY)(
+    'enforces the exhaustive ordinary-record XY matrix for %s',
+    (xy) => {
+      const oid = 'a'.repeat(40);
+      const parse = () => parseStatus(
+        `# branch.oid ${oid}\0# branch.head main\0`
+        + `1 ${xy} N... 100644 100644 100644 ${oid} ${oid} tracked.txt\0`,
+      );
+
+      if (ORDINARY_XY.has(xy)) expect(parse).not.toThrow();
+      else expect(parse).toThrow(/ordinary status record/);
+    },
+  );
+
+  it.each(ALL_TRACKED_XY)(
+    'enforces the exhaustive rename/copy-record XY matrix for %s',
+    (xy) => {
+      const oid = 'a'.repeat(40);
+      const scoreKind = xy.match(/[RC]/)?.[0] ?? 'R';
+      const parse = () => parseStatus(
+        `# branch.oid ${oid}\0# branch.head main\0`
+        + `2 ${xy} N... 100644 100644 100644 ${oid} ${oid} `
+        + `${scoreKind}100 renamed.txt\0original.txt\0`,
+      );
+
+      if (RENAME_XY.has(xy)) expect(parse).not.toThrow();
+      else expect(parse).toThrow(/rename\/copy status record/);
+    },
+  );
+
+  it.each(ALL_TRACKED_XY)(
+    'enforces the exhaustive unmerged-record XY matrix for %s',
+    (xy) => {
+      const oid = 'a'.repeat(40);
+      const parse = () => parseStatus(
+        `# branch.oid ${oid}\0# branch.head main\0`
+        + `u ${xy} N... 100644 100644 100644 100644 `
+        + `${oid} ${oid} ${oid} conflicted.txt\0`,
+      );
+
+      if (UNMERGED_XY.has(xy)) expect(parse).not.toThrow();
+      else expect(parse).toThrow(/unmerged stage identities/);
+    },
+  );
+
   it.each([40, 64])(
     'accepts exact %i-character object IDs in every porcelain-v2 tracked record',
     (width) => {
@@ -483,14 +573,18 @@ describe('git-estate guard', () => {
     },
   );
 
-  it('fails closed end-to-end when a status parser receives a malformed full record', () => {
+  it.each([
+    ['unknown XY', 'ZZ'],
+    ['unmerged AA disguised as ordinary', 'AA'],
+    ['unmerged DD disguised as ordinary', 'DD'],
+  ])('fails closed end-to-end on %s', (_label, xy) => {
     const { root, repo } = initRepo();
     const result = run(
       repo,
       ['snapshot', '--json'],
       statusOutputEnvironment(
         root,
-        `  printf '\\043 branch.oid ${'a'.repeat(40)}\\000\\043 branch.head main\\0001 ZZ N... 100644 100644 100644 ${'b'.repeat(40)} ${'c'.repeat(40)} tracked.txt\\000'`,
+        `  printf '\\043 branch.oid ${'a'.repeat(40)}\\000\\043 branch.head main\\0001 ${xy} N... 100644 100644 100644 ${'b'.repeat(40)} ${'c'.repeat(40)} tracked.txt\\000'`,
       ),
     );
 
@@ -534,6 +628,121 @@ describe('git-estate guard', () => {
     )).toEqual([
       expect.objectContaining({ path: '/repo', head: 'a'.repeat(width), branch: 'main' }),
     ]);
+  });
+
+  it('accepts canonical branch, detached, bare, locked, and prunable worktree records', () => {
+    const oid = 'a'.repeat(40);
+    expect(parseWorktreePorcelain(
+      `worktree /branch path\0HEAD ${oid}\0branch refs/heads/main\0locked reason\nline\0\0`
+      + `worktree /detached\0HEAD ${oid}\0detached\0prunable missing gitdir\0\0`
+      + 'worktree /bare\0bare\0\0',
+    )).toEqual([
+      expect.objectContaining({
+        path: '/branch path',
+        head: oid,
+        branch: 'main',
+        detached: false,
+        locked: true,
+        lockReason: 'reason\nline',
+        prunable: false,
+      }),
+      expect.objectContaining({
+        path: '/detached',
+        head: oid,
+        branch: null,
+        detached: true,
+        locked: false,
+        prunable: true,
+        pruneReason: 'missing gitdir',
+      }),
+      expect.objectContaining({
+        path: '/bare',
+        head: null,
+        branch: null,
+        detached: false,
+      }),
+    ]);
+  });
+
+  it.each([
+    [
+      'attribute before worktree',
+      `HEAD ${'a'.repeat(40)}\0worktree /repo\0branch refs/heads/main\0\0`,
+    ],
+    [
+      'implicit record boundary',
+      `worktree /one\0HEAD ${'a'.repeat(40)}\0branch refs/heads/main\0`
+      + `worktree /two\0HEAD ${'a'.repeat(40)}\0detached\0\0`,
+    ],
+    [
+      'missing final record terminator',
+      `worktree /repo\0HEAD ${'a'.repeat(40)}\0branch refs/heads/main\0`,
+    ],
+    ['empty worktree path', 'worktree \0bare\0\0'],
+    ['non-bare record without HEAD', 'worktree /repo\0branch refs/heads/main\0\0'],
+    [
+      'HEAD without branch or detached',
+      `worktree /repo\0HEAD ${'a'.repeat(40)}\0\0`,
+    ],
+    [
+      'bare record with HEAD',
+      `worktree /repo\0bare\0HEAD ${'a'.repeat(40)}\0\0`,
+    ],
+    [
+      'noncanonical branch ref',
+      `worktree /repo\0HEAD ${'a'.repeat(40)}\0branch main\0\0`,
+    ],
+    [
+      'branch and detached states',
+      `worktree /repo\0HEAD ${'a'.repeat(40)}\0branch refs/heads/main\0detached\0\0`,
+    ],
+    [
+      'valued detached marker',
+      `worktree /repo\0HEAD ${'a'.repeat(40)}\0detached reason\0\0`,
+    ],
+    ['valued bare marker', 'worktree /repo\0bare reason\0\0'],
+    ['locked bare record', 'worktree /repo\0bare\0locked\0\0'],
+    ['prunable bare record', 'worktree /repo\0bare\0prunable missing gitdir\0\0'],
+    [
+      'locked before checkout state',
+      `worktree /repo\0HEAD ${'a'.repeat(40)}\0locked\0branch refs/heads/main\0\0`,
+    ],
+    [
+      'prunable marker without reason',
+      `worktree /repo\0HEAD ${'a'.repeat(40)}\0detached\0prunable\0\0`,
+    ],
+    [
+      'duplicate locked marker',
+      `worktree /repo\0HEAD ${'a'.repeat(40)}\0detached\0locked\0locked\0\0`,
+    ],
+    [
+      'locked and prunable markers',
+      `worktree /repo\0HEAD ${'a'.repeat(40)}\0detached\0locked\0`
+      + 'prunable missing gitdir\0\0',
+    ],
+    ['extra empty record', 'worktree /repo\0bare\0\0\0'],
+  ])('rejects canonical worktree grammar violation: %s', (_label, raw) => {
+    expect(() => parseWorktreePorcelain(raw)).toThrow(/worktree/);
+  });
+
+  it('fails closed end-to-end when worktree porcelain begins out of record order', () => {
+    const { root, repo } = initRepo();
+    const oid = 'a'.repeat(40);
+    const result = run(
+      repo,
+      ['snapshot', '--json'],
+      worktreeOutputEnvironment(
+        root,
+        `  printf 'HEAD ${oid}\\000worktree ${repo}\\000branch refs/heads/main\\000\\000'`,
+      ),
+    );
+
+    expect(result.status).toBe(2);
+    expect(JSON.parse(result.stdout)).toMatchObject({
+      exitCode: 2,
+      snapshot: null,
+      error: { kind: 'scan_failed' },
+    });
   });
 
   it.each([41, 52, 63])(
