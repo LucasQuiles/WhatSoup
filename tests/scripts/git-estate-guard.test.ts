@@ -29,19 +29,23 @@ const STATUS_XY_CHARACTERS = ['.', 'M', 'T', 'A', 'D', 'R', 'C'] as const;
 const ALL_TRACKED_XY = STATUS_XY_CHARACTERS.flatMap((indexStatus) =>
   STATUS_XY_CHARACTERS.map((worktreeStatus) => `${indexStatus}${worktreeStatus}`)
 );
-const ORDINARY_XY = new Set([
+const EXPECTED_ORDINARY_XY = new Set([
   '.M', '.T', '.A', '.D',
   'M.', 'MM', 'MT', 'MD',
   'T.', 'TM', 'TT', 'TD',
   'A.', 'AM', 'AT', 'AD',
   'D.',
 ]);
-const RENAME_XY = new Set([
-  'R.', 'RM', 'RT', 'RD', 'RR', 'RC',
-  'C.', 'CM', 'CT', 'CD', 'CR', 'CC',
-  '.R', '.C', 'MR', 'MC', 'TR', 'TC', 'AR', 'AC',
+const EXPECTED_RENAME_XY = new Set([
+  'R.', 'RM', 'RT', 'RD',
+  'C.', 'CM', 'CT', 'CD',
+  '.R', '.C',
 ]);
-const UNMERGED_XY = new Set(['DD', 'AU', 'UD', 'UA', 'DU', 'AA', 'UU']);
+const EXPECTED_UNMERGED_XY = new Set(['DD', 'AU', 'UD', 'UA', 'DU', 'AA', 'UU']);
+const INVALID_RENAME_XY = [
+  'RR', 'RC', 'CR', 'CC',
+  'MR', 'MC', 'TR', 'TC', 'AR', 'AC',
+] as const;
 
 interface CliResult {
   status: number | null;
@@ -407,6 +411,26 @@ describe('git-estate guard', () => {
       'ordinary record with an empty fixed field',
       `  printf '\\043 branch.oid ${'a'.repeat(40)}\\000\\043 branch.head main\\0001 .M N... 100644 100644 100644 ${'b'.repeat(40)}  tracked.txt\\000'`,
     ],
+    [
+      'complete ordinary record without its final NUL',
+      `  printf '\\043 branch.oid ${'a'.repeat(40)}\\000\\043 branch.head main\\0001 .M N... 100644 100644 100644 ${'b'.repeat(40)} ${'c'.repeat(40)} tracked.txt'`,
+    ],
+    [
+      'interior empty status record',
+      `  printf '\\043 branch.oid ${'a'.repeat(40)}\\000\\000\\043 branch.head main\\000'`,
+    ],
+    [
+      'status record before branch identity headers',
+      `  printf '? early.txt\\000\\043 branch.oid ${'a'.repeat(40)}\\000\\043 branch.head main\\000'`,
+    ],
+    [
+      'duplicate branch.oid header',
+      `  printf '\\043 branch.oid ${'a'.repeat(40)}\\000\\043 branch.oid ${'a'.repeat(40)}\\000\\043 branch.head main\\000'`,
+    ],
+    [
+      'duplicate branch.head header',
+      `  printf '\\043 branch.oid ${'a'.repeat(40)}\\000\\043 branch.head main\\000\\043 branch.head main\\000'`,
+    ],
   ])('fails closed on exit-zero %s from porcelain-v2 status', (_label, statusBody) => {
     const { root, repo } = initRepo();
     writeFileSync(join(repo, 'tracked.txt'), 'dirty\n');
@@ -545,7 +569,7 @@ describe('git-estate guard', () => {
         + `1 ${xy} N... 100644 100644 100644 ${oid} ${oid} tracked.txt\0`,
       );
 
-      if (ORDINARY_XY.has(xy)) expect(parse).not.toThrow();
+      if (EXPECTED_ORDINARY_XY.has(xy)) expect(parse).not.toThrow();
       else expect(parse).toThrow(/ordinary status record/);
     },
   );
@@ -561,7 +585,7 @@ describe('git-estate guard', () => {
         + `${scoreKind}100 renamed.txt\0original.txt\0`,
       );
 
-      if (RENAME_XY.has(xy)) expect(parse).not.toThrow();
+      if (EXPECTED_RENAME_XY.has(xy)) expect(parse).not.toThrow();
       else expect(parse).toThrow(/rename\/copy status record/);
     },
   );
@@ -576,7 +600,7 @@ describe('git-estate guard', () => {
         + `${oid} ${oid} ${oid} conflicted.txt\0`,
       );
 
-      if (UNMERGED_XY.has(xy)) expect(parse).not.toThrow();
+      if (EXPECTED_UNMERGED_XY.has(xy)) expect(parse).not.toThrow();
       else expect(parse).toThrow(/unmerged stage identities/);
     },
   );
@@ -621,6 +645,57 @@ describe('git-estate guard', () => {
         incomplete: true,
         errors: [expect.objectContaining({ kind: 'worktree_status_failed' })],
       },
+    });
+  });
+
+  it.each(INVALID_RENAME_XY)(
+    'fails closed end-to-end on impossible rename/copy XY %s',
+    (xy) => {
+      const { root, repo } = initRepo();
+      const scoreKind = xy.match(/[RC]/)?.[0] ?? 'R';
+      const result = run(
+        repo,
+        ['snapshot', '--json'],
+        statusOutputEnvironment(
+          root,
+          `  printf '\\043 branch.oid ${'a'.repeat(40)}\\000\\043 branch.head main\\0002 ${xy} N... 100644 100644 100644 ${'b'.repeat(40)} ${'c'.repeat(40)} ${scoreKind}100 renamed.txt\\000original.txt\\000'`,
+        ),
+      );
+
+      expect(result.status).toBe(2);
+      expect(JSON.parse(result.stdout) as SnapshotDocument).toMatchObject({
+        exitCode: 2,
+        snapshot: {
+          incomplete: true,
+          errors: [expect.objectContaining({ kind: 'worktree_status_failed' })],
+        },
+      });
+    },
+  );
+
+  it('ignores unknown headers without relaxing mandatory branch identity headers', () => {
+    const oid = 'a'.repeat(40);
+    expect(parseStatus(
+      `# future.before value\0# branch.oid ${oid}\0`
+      + `# future.middle value\0# branch.head main\0# future.after value\0`,
+    )).toMatchObject({
+      branchOid: oid,
+      branchHead: 'main',
+    });
+  });
+
+  it('accepts real Git branch headers and record ordering', () => {
+    const { repo } = initRepo();
+    writeFileSync(join(repo, 'tracked.txt'), 'dirty\n');
+    const output = spawnSync(
+      'git',
+      ['-C', repo, 'status', '--porcelain=v2', '--branch', '-z', '--untracked-files=all'],
+      { encoding: 'utf8' },
+    );
+    expect(output.status, output.stderr).toBe(0);
+    expect(parseStatus(output.stdout)).toMatchObject({
+      branchHead: 'main',
+      tracked: [expect.objectContaining({ path: 'tracked.txt', xy: '.M' })],
     });
   });
 

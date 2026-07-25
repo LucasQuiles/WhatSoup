@@ -28,9 +28,9 @@ const ORDINARY_XY = new Set([
   'D.',
 ]);
 const RENAME_XY = new Set([
-  'R.', 'RM', 'RT', 'RD', 'RR', 'RC',
-  'C.', 'CM', 'CT', 'CD', 'CR', 'CC',
-  '.R', '.C', 'MR', 'MC', 'TR', 'TC', 'AR', 'AC',
+  'R.', 'RM', 'RT', 'RD',
+  'C.', 'CM', 'CT', 'CD',
+  '.R', '.C',
 ]);
 const UNMERGED_XY_PATTERN = /^(?:DD|AU|UD|UA|DU|AA|UU)$/;
 const SUBMODULE_STATE_PATTERN = /^(?:N\.\.\.|S[.C][.M][.U])$/;
@@ -439,6 +439,19 @@ export function parseWorktreePorcelain(raw: string): WorktreePorcelain[] {
 }
 
 export function parseStatus(raw: string): WorktreeStatus {
+  if (!raw.endsWith('\0')) {
+    throw new GitEstateError(
+      'status_parse_failed',
+      'porcelain-v2 status omitted its final NUL terminator',
+    );
+  }
+  const tokens = raw.slice(0, -1).split('\0');
+  if (tokens.some((token) => token.length === 0)) {
+    throw new GitEstateError(
+      'status_parse_failed',
+      'porcelain-v2 status contained an empty record',
+    );
+  }
   const status: WorktreeStatus = {
     branchOid: null,
     branchHead: null,
@@ -453,10 +466,8 @@ export function parseStatus(raw: string): WorktreeStatus {
   };
   let branchOidSeen = false;
   let branchHeadSeen = false;
-  const tokens = raw.split('\0');
   for (let index = 0; index < tokens.length; index++) {
     const token = tokens[index]!;
-    if (!token) continue;
     if (token.startsWith('# ')) {
       const body = token.slice(2);
       const space = body.indexOf(' ');
@@ -485,6 +496,12 @@ export function parseStatus(raw: string): WorktreeStatus {
       continue;
     }
 
+    if (!branchOidSeen || !branchHeadSeen) {
+      throw new GitEstateError(
+        'status_parse_failed',
+        'porcelain-v2 status record preceded mandatory branch identity headers',
+      );
+    }
     const kind = token[0];
     if (kind === '?') {
       const untrackedPath = token.startsWith('? ') ? token.slice(2) : '';
