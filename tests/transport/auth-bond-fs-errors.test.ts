@@ -595,9 +595,17 @@ describe('AuthBondGuard filesystem error paths', () => {
 // primitive from fail-closed into fail-open. An incomplete observation
 // therefore yields NO hash.
 describe('AuthBondGuard auth-tree races (#2285)', () => {
-  function guardFor(root: string, authDir: string, mod: { AuthBondGuard: new (opts: Record<string, unknown>) => { inspect: () => Record<string, unknown> } }) {
+  // Typed off the real module rather than a hand-rolled structural shape: a
+  // `Record<string, unknown>` constructor parameter does not satisfy
+  // AuthBondGuardOptions, which `typecheck:all` (tsconfig.test.json) rejects
+  // even though the looser default project accepts it.
+  type GuardModule = Awaited<ReturnType<typeof importGuardWithFsMock>>;
+
+  function guardFor(root: string, authDir: string, mod: GuardModule) {
     return new mod.AuthBondGuard({ authDir, stateRoot: join(root, 'state'), instanceName: 'race-bot' });
   }
+
+  type Snapshot = ReturnType<ReturnType<typeof guardFor>['inspect']>;
 
   it('reports no tree hash when an entry vanishes between readdir and lstat', async () => {
     const root = makeRoot();
@@ -614,16 +622,16 @@ describe('AuthBondGuard auth-tree races (#2285)', () => {
       }) as unknown as FsModule['lstatSync'],
     }));
 
-    let snapshot!: Record<string, unknown>;
+    let snapshot!: Snapshot;
     expect(() => { snapshot = guardFor(root, authDir, mod).inspect(); }).not.toThrow();
-    expect(snapshot['treeHash']).toBeNull();
-    expect(snapshot['fileCount']).toBeNull();
+    expect(snapshot.treeHash).toBeNull();
+    expect(snapshot.fileCount).toBeNull();
     // Positive terminal: the snapshot is still a real observation whose tree
     // hash was deliberately withheld — not a degenerate object from a
     // short-circuited inspect(). `status === 'present'` is also the precondition
     // for reaching the tree walk at all, so this proves the fixture got there.
-    expect(snapshot['status']).toBe('present');
-    expect(snapshot['creds']).toMatchObject({ exists: true });
+    expect(snapshot.status).toBe('present');
+    expect(snapshot.creds).toMatchObject({ exists: true });
   });
 
   it('reports no tree hash when a directory vanishes, taking its subtree out of the walk', async () => {
@@ -645,13 +653,13 @@ describe('AuthBondGuard auth-tree races (#2285)', () => {
       }) as unknown as FsModule['readdirSync'],
     }));
 
-    let snapshot!: Record<string, unknown>;
+    let snapshot!: Snapshot;
     expect(() => { snapshot = guardFor(root, authDir, mod).inspect(); }).not.toThrow();
-    expect(snapshot['treeHash']).toBeNull();
+    expect(snapshot.treeHash).toBeNull();
     // Positive terminal: a real snapshot was produced and reached the walk; only
     // the hash was withheld.
-    expect(snapshot['status']).toBe('present');
-    expect(snapshot['creds']).toMatchObject({ exists: true });
+    expect(snapshot.status).toBe('present');
+    expect(snapshot.creds).toMatchObject({ exists: true });
   });
 
   it('reports no tree hash when a file vanishes between lstat and read', async () => {
@@ -669,13 +677,13 @@ describe('AuthBondGuard auth-tree races (#2285)', () => {
       }) as unknown as FsModule['readFileSync'],
     }));
 
-    let snapshot!: Record<string, unknown>;
+    let snapshot!: Snapshot;
     expect(() => { snapshot = guardFor(root, authDir, mod).inspect(); }).not.toThrow();
-    expect(snapshot['treeHash']).toBeNull();
+    expect(snapshot.treeHash).toBeNull();
     // Positive terminal: a real snapshot was produced and reached the walk; only
     // the hash was withheld.
-    expect(snapshot['status']).toBe('present');
-    expect(snapshot['creds']).toMatchObject({ exists: true });
+    expect(snapshot.status).toBe('present');
+    expect(snapshot.creds).toMatchObject({ exists: true });
   });
 
   // THE load-bearing assertion. A "skip the vanished entry and keep hashing"
