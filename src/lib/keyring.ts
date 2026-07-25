@@ -78,13 +78,18 @@ const warnedKeyringReadServices = new Set<string>();
  */
 const credentialReadFailures = new Set<string>();
 
-function recordCredentialReadFailure(
+/**
+ * Warn once per (source, operation, service) that a credential store operation
+ * failed. Does NOT touch {@link credentialReadFailures} — only a READ failure
+ * should influence the typed lookup's reason code.
+ */
+function warnCredentialStoreFailure(
   service: string,
   source: CredentialReadSource,
+  operation: 'read' | 'delete',
   err: unknown,
 ): void {
-  credentialReadFailures.add(service);
-  const dedupKey = `${source}:${service}`;
+  const dedupKey = `${source}:${operation}:${service}`;
   if (warnedKeyringReadServices.has(dedupKey)) return;
   warnedKeyringReadServices.add(dedupKey);
   // errorMessage() only — never the raw error. A raw child-process error carries
@@ -92,9 +97,21 @@ function recordCredentialReadFailure(
   // global `log.error({ err })` handler would serialize. Same constraint the
   // KeyringWriteError docstring states for the write path.
   getLog().warn(
-    { service, source, err: errorMessage(err) },
-    'credential read failed — value is present-but-unreadable, not absent',
+    { service, source, operation, err: errorMessage(err) },
+    operation === 'read'
+      ? 'credential read failed — value is present-but-unreadable, not absent'
+      : 'credential delete failed — value may still be present',
   );
+}
+
+/** A READ failed: warn AND flag, so the typed lookup reports `unreadable`. */
+function recordCredentialReadFailure(
+  service: string,
+  source: CredentialReadSource,
+  err: unknown,
+): void {
+  credentialReadFailures.add(service);
+  warnCredentialStoreFailure(service, source, 'read', err);
 }
 const keyringExecOptions = {
   timeout: KEYRING_COMMAND_TIMEOUT_MS,
@@ -626,7 +643,18 @@ function fileStoreDelete(service: string): boolean {
     // absence: returning a bare false told the caller "there was nothing to
     // delete" when the credential is still on disk and merely unremovable —
     // the dangerous direction for a revocation path.
-    recordCredentialReadFailure(service, 'file-store', err);
+    //
+    // Warn only, with a delete-specific message. Routing this through
+    // recordCredentialReadFailure would log "credential read failed — value is
+    // present-but-unreadable", which is false for a delete and would send an
+    // operator to investigate the read path.
+    //
+    // It also deliberately does NOT set credentialReadFailures: a failed delete
+    // says nothing about whether the value can be READ. That flag could not
+    // actually leak into a later typed lookup anyway, since lookupCredentialTyped
+    // clears it on entry — so this separation prevents a false log signal, it
+    // does not fix a reachable classification bug.
+    warnCredentialStoreFailure(service, 'file-store', 'delete', err);
     return false;
   }
 }
