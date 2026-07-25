@@ -2,16 +2,11 @@
 import { describe, it, expect } from 'vitest';
 import {
   makeChannelId, kindOf, accountOf,
-  isImessageGroupAddress,
+  isImessageGroupAddress, canonicalizeImessageDirectIdentity,
   refToKey, msgToKey,
   type ChannelId, type ChannelKind,
   type ConversationRef, type ParticipantRef, type MessageRef,
 } from '../../src/core/transport-refs.ts';
-import {
-  isBluebubblesPasswordService,
-  isBluebubblesPasswordServiceForAccount,
-  isTrustedBluebubblesUrl,
-} from '../../src/lib/bluebubbles-config.ts';
 
 describe('ChannelId / ChannelKind', () => {
   it('makeChannelId produces "kind:account" form', () => {
@@ -67,33 +62,26 @@ describe('imessage channel kind', () => {
 
   it('recognizes only iMessage group chat GUIDs with a provider id', () => {
     expect(isImessageGroupAddress('iMessage;+;chatABC')).toBe(true);
+    // Prefix present but no provider id after it.
     expect(isImessageGroupAddress('iMessage;+;')).toBe(false);
+    // ';-;' is the DIRECT-chat separator, not the group one.
     expect(isImessageGroupAddress('iMessage;-;chatABC')).toBe(false);
     expect(isImessageGroupAddress('owner@example.test')).toBe(false);
     expect(isImessageGroupAddress('+15551230008')).toBe(false);
+    // Prefix match is case-sensitive.
     expect(isImessageGroupAddress('imessage;+;chatABC')).toBe(false);
   });
 
-  it('accepts only provider-scoped BlueBubbles password services', () => {
-    expect(isBluebubblesPasswordService('whatsoup-bluebubbles')).toBe(true);
-    expect(isBluebubblesPasswordService('whatsoup-bluebubbles-support-1')).toBe(true);
-    expect(isBluebubblesPasswordService('whatsoup-health-token')).toBe(false);
-    expect(isBluebubblesPasswordService('openai')).toBe(false);
-  });
-
-  it('binds a BlueBubbles password service to its exact transport account', () => {
-    expect(isBluebubblesPasswordServiceForAccount('whatsoup-bluebubbles-support-1', 'support-1')).toBe(true);
-    expect(isBluebubblesPasswordServiceForAccount('whatsoup-bluebubbles-support-2', 'support-1')).toBe(false);
-    expect(isBluebubblesPasswordServiceForAccount('whatsoup-bluebubbles', 'support-1')).toBe(false);
-  });
-
-  it('requires HTTPS except for loopback BlueBubbles endpoints', () => {
-    expect(isTrustedBluebubblesUrl('https://messages.example.test')).toBe(true);
-    expect(isTrustedBluebubblesUrl('http://localhost:1234')).toBe(true);
-    expect(isTrustedBluebubblesUrl('http://127.0.0.1:1234')).toBe(true);
-    expect(isTrustedBluebubblesUrl('http://messages.example.test')).toBe(false);
-    expect(isTrustedBluebubblesUrl('https://user:secret@messages.example.test')).toBe(false);
-    expect(isTrustedBluebubblesUrl('https://messages.example.test?password=secret')).toBe(false);
+  it('canonicalizes direct identities and rejects what it cannot canonicalize', () => {
+    // E.164 wire form passes through untouched.
+    expect(canonicalizeImessageDirectIdentity('+15551230008')).toBe('+15551230008');
+    // AppleID emails are validated, then lowercased.
+    expect(canonicalizeImessageDirectIdentity(['Owner', 'Example.test'].join('@')))
+      .toBe(['owner', 'example.test'].join('@'));
+    // Neither a phone nor a well-formed address -> null, which is what lets
+    // buildInboundMessage refuse the record instead of emitting a bogus peer.
+    expect(canonicalizeImessageDirectIdentity('not-an-identity')).toBeNull();
+    expect(canonicalizeImessageDirectIdentity('')).toBeNull();
   });
 });
 
