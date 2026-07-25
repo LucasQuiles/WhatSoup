@@ -38,9 +38,12 @@ export function normalizePhoneE164(input: string | number | null | undefined): s
   return digits;
 }
 
+/** Canonical E.164 matcher shared by core validation and transport adapters. */
+export const E164_RE = /^\+[1-9]\d{6,14}$/;
+
 /** True only for a canonical, plus-prefixed E.164 provider wire identity. */
 export function isE164Wire(input: string): boolean {
-  return /^\+[1-9]\d{6,14}$/.test(input);
+  return E164_RE.test(input);
 }
 
 /** Normalize phone-formatted input to provider-wire E.164, rejecting embedded junk. */
