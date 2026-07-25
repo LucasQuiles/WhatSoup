@@ -386,6 +386,32 @@ describe('publication guard tilde-relative home paths', () => {
 });
 
 describe('publication guard operational allowlist', () => {
+  it('allows the exact GitHub SSH transport principal without allowing a real mailbox', () => {
+    const sshPrincipal = ['git', 'github.com'].join('@');
+    expect(
+      scanTextForPrivateLiterals(
+        '.github/workflows/quality.yml',
+        `git remote add origin ${sshPrincipal}:LucasQuiles/test-integrity.git`,
+      ),
+    ).toEqual([]);
+
+    const githubMailbox = ['operator', 'github.com'].join('@');
+    expect(
+      scanTextForPrivateLiterals('.github/workflows/quality.yml', `contact ${githubMailbox}`),
+    ).toMatchObject([{ code: 'personal-email' }]);
+
+    const realAddress = ['operator', 'company.dev'].join('@');
+    const mixedLine = scanTextForPrivateLiterals(
+      '.github/workflows/quality.yml',
+      `${sshPrincipal}:LucasQuiles/test-integrity.git contact ${githubMailbox}`,
+    );
+    expect(mixedLine.map((issue) => issue.code)).toEqual(['personal-email']);
+
+    expect(
+      scanTextForPrivateLiterals('.github/workflows/quality.yml', `contact ${realAddress}`),
+    ).toMatchObject([{ code: 'personal-email' }]);
+  });
+
   it('allows template-unit tokens only in operational fleet files, never alongside a real address', () => {
     // Composed so the test source itself carries no email-shaped literal.
     const personalUnit = ['whatsoup@personal', 'service'].join('.');

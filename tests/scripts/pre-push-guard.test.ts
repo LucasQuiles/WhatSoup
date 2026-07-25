@@ -616,7 +616,8 @@ describe('quality workflow composition', () => {
     expect(semanticIndex).toBeGreaterThanOrEqual(0);
     expect(semanticIndex).toBeLessThan(integrityInstallIndex);
     expect(semanticIndex).toBeLessThan(suiteIndex);
-    expect(qualityWorkflow).toContain("if: matrix.node == '24.x'");
+    expect(qualityWorkflow).toContain('name: quality (24.x)');
+    expect(qualityWorkflow).not.toContain("if: matrix.node == '24.x'");
     expect(qualityWorkflow).toContain('SEMANTIC_RECEIPT: ${{ runner.temp }}/semantic-quality.json');
     expect(qualityWorkflow).toContain('base="origin/$GITHUB_BASE_REF"');
     expect(qualityWorkflow).toContain('base="HEAD^"');
@@ -635,12 +636,18 @@ describe('quality workflow composition', () => {
     expect(gateIndex).toBeGreaterThan(installIndex);
     expect(qualityWorkflow).toContain('TEST_INTEGRITY_DEPLOY_KEY');
     expect(qualityWorkflow).toContain('LucasQuiles/test-integrity.git');
+    expect(qualityWorkflow).toContain('TEST_INTEGRITY_COMMIT: ea0b01a4e3d99dc58a9a475c57e22ee204b04a7c');
+    expect(qualityWorkflow).toContain('mkdir -p "$plugin_dir" "$HOME/.ssh"');
+    expect(qualityWorkflow).toContain('fetch --depth 1 origin "$TEST_INTEGRITY_COMMIT"');
+    expect(qualityWorkflow).toContain('if [ "$observed_commit" != "$TEST_INTEGRITY_COMMIT" ]; then');
+    expect(qualityWorkflow).not.toContain('git clone --depth 1');
+    expect(qualityWorkflow).not.toMatch(/git -C "\$plugin_dir" push/);
     expect(qualityWorkflow).toContain("WHATSOUP_REQUIRE_TEST_INTEGRITY: '1'");
   });
 
   it('sets up Python 3.12 with pytest-cov before Python-backed gates run', () => {
     const setupPythonIndex = qualityWorkflow.indexOf('name: Setup Python 3.12');
-    const pythonDepsIndex = qualityWorkflow.indexOf('name: Install Python test dependencies');
+    const pythonDepsIndex = qualityWorkflow.indexOf('name: Install Python and Linux quality prerequisites');
     const testIntegrityIndex = qualityWorkflow.indexOf('name: Test integrity baseline check');
 
     expect(setupPythonIndex).toBeGreaterThanOrEqual(0);
@@ -648,7 +655,34 @@ describe('quality workflow composition', () => {
     expect(testIntegrityIndex).toBeGreaterThan(pythonDepsIndex);
     expect(qualityWorkflow).toMatch(/uses: actions\/setup-python@[0-9a-f]{40}/);
     expect(qualityWorkflow).toContain("python-version: '3.12'");
-    expect(qualityWorkflow).toContain('python3 -m pip install --user pytest pytest-cov');
+    expect(qualityWorkflow).toContain('python3 -m pip install --user pytest pytest-cov hypothesis ruff==0.15.10');
+    expect(qualityWorkflow.match(/sudo apt-get update/g)).toHaveLength(2);
+    expect(qualityWorkflow).toContain('sudo apt-get install -y shellcheck ripgrep');
+  });
+
+  it('preserves exact required contexts while isolating Node 25 compatibility work', () => {
+    const compatibilityStart = qualityWorkflow.indexOf('  compatibility:');
+    const nextJob = qualityWorkflow.indexOf('  bot-errors-health-macos:', compatibilityStart);
+    const compatibility = qualityWorkflow.slice(compatibilityStart, nextJob);
+
+    expect(qualityWorkflow).toContain('name: quality (24.x)');
+    expect(compatibility).toContain('name: quality (25.x)');
+    expect(qualityWorkflow).not.toContain('matrix:');
+    expect(compatibility).toContain("node-version: '25.x'");
+    expect(compatibility).toContain('run: npm test -- --pool=forks');
+    expect(compatibility).toContain('run: npm --prefix console run build');
+    expect(compatibility).not.toContain('coverage:check');
+    expect(compatibility).not.toContain('guard:');
+    expect(compatibility).not.toContain('Playwright');
+    expect(compatibility).not.toContain('Setup Python');
+    expect(compatibility).not.toContain('test-integrity');
+    expect(compatibility).not.toContain('ci-disk-reclaim');
+  });
+
+  it('runs measured disk enforcement only in the Node 24 authority job', () => {
+    expect(qualityWorkflow.match(/bash scripts\/ci-disk-reclaim\.sh/g)).toHaveLength(1);
+    expect(qualityWorkflow).not.toContain('sudo rm -rf /usr/share/dotnet');
+    expect(qualityWorkflow).not.toContain('docker image prune --all --force || true');
   });
 
   it('runs the commit-author guard in CI quality workflow', () => {
