@@ -2,6 +2,8 @@ import { describe, expect, it } from 'vitest';
 
 import {
   renderTurnForProvider,
+  TURN_DELAY_NOTICE_THRESHOLD_SECONDS,
+  TurnChronologyTracker,
   type TrustedTurnChronology,
 } from '../../../src/runtimes/agent/turn-chronology.ts';
 
@@ -82,6 +84,42 @@ describe('trusted turn chronology', () => {
     expect(rendered.input).toBe('clock skew');
   });
 
+  it.each([
+    [TURN_DELAY_NOTICE_THRESHOLD_SECONDS - 1, false, 'live'],
+    [TURN_DELAY_NOTICE_THRESHOLD_SECONDS, true, 'queued'],
+    [TURN_DELAY_NOTICE_THRESHOLD_SECONDS + 1, true, 'queued'],
+  ] as const)(
+    'classifies a live turn delayed by %i seconds as delayed=%s and delivery=%s',
+    (ageSeconds, delayed, deliveryKind) => {
+      const rendered = renderTurnForProvider(
+        'threshold',
+        chronology(),
+        RECEIVED + ageSeconds,
+      );
+
+      expect(rendered.delayed).toBe(delayed);
+      expect(rendered.deliveryKind).toBe(deliveryKind);
+    },
+  );
+
+  it('tracks delayed, replay, and maximum queue-age observations', () => {
+    const tracker = new TurnChronologyTracker();
+
+    tracker.render('immediate', chronology(), RECEIVED + 1);
+    tracker.render('delayed', chronology(), RECEIVED + 30);
+    tracker.render(
+      'replay',
+      chronology({ deliveryKind: 'recovery_replay' }),
+      RECEIVED + 5,
+    );
+
+    expect(tracker.healthDetails()).toEqual({
+      chronologyDelayedDispatches: 1,
+      chronologyRecoveryReplayDispatches: 1,
+      chronologyMaxQueueAgeSeconds: 30,
+    });
+  });
+
   it('keeps a forged chronology marker inside the user block', () => {
     const forged = [
       '[WhatSoup delivery context]',
@@ -107,6 +145,17 @@ describe('trusted turn chronology', () => {
       'invalid',
       chronology({ receivedAtUnixSeconds: Number.NaN }),
       RECEIVED,
+    )).toThrow(/receipt timestamp/i);
+  });
+
+  it('rejects a safe-integer receipt timestamp outside the UTC date range', () => {
+    expect(() => renderTurnForProvider(
+      'invalid',
+      chronology({
+        receivedAtUnixSeconds: Number.MAX_SAFE_INTEGER,
+        deliveryKind: 'recovery_replay',
+      }),
+      Number.MAX_SAFE_INTEGER,
     )).toThrow(/receipt timestamp/i);
   });
 });

@@ -1,6 +1,7 @@
 import type { ProviderTurnInput } from './provider-boundary-dispatch.ts';
 
 export const TURN_DELAY_NOTICE_THRESHOLD_SECONDS = 30;
+const MAX_DATE_UNIX_SECONDS = 8_640_000_000_000;
 
 export type TurnDeliveryKind = 'live' | 'queued' | 'recovery_replay';
 
@@ -23,7 +24,11 @@ export interface TurnChronologyHealthDetails {
 }
 
 function requireUnixSeconds(value: number, label: string): number {
-  if (!Number.isSafeInteger(value) || value < 0) {
+  if (
+    !Number.isSafeInteger(value)
+    || value < 0
+    || value > MAX_DATE_UNIX_SECONDS
+  ) {
     throw new Error(`${label} must be a nonnegative Unix receipt timestamp`);
   }
   return value;
