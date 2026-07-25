@@ -1669,20 +1669,25 @@ describe('WHATSOUP_ALERT_SINK dry-run capture', () => {
       process.env['WHATSOUP_ALERT_SINK'] = join(sinkDir, 'missing-dir', 'alerts.jsonl');
     }
 
-    it('does not throw, and falls through to the durable outbox', () => {
+    it('does not throw, and reports the failure without paging', () => {
       pointSinkAtUnwritablePath();
 
       expect(() => emitAlert('whatsoup-prod', 'connection_exhausted', 'sum', 'evidence')).not.toThrow();
 
-      // The fallback is the POINT: the alert still becomes durable via the
-      // outbox ladder that already existed below the sink branch.
       const result = emitAlert('whatsoup-prod', 'connection_exhausted', 'sum2', 'evidence2');
-      expect(result.ok).toBe(true);
-      expect(result.channel).toBe('outbox');
-      expect(readdirSync(outboxDir).length).toBeGreaterThan(0);
+      expect(result.ok).toBe(false);
+      expect(result.channel).toBe('sink');
+      expect(result.status).toBe('failed');
+
+      // The load-bearing assertion. Sink mode's contract is that NOTHING is
+      // paged; falling through to the outbox on a write failure would turn an
+      // unwritable dry-run sink into a real operator page — the exact thing the
+      // sink exists to prevent.
+      expect(readdirSync(outboxDir)).toHaveLength(0);
+      expect(spawn).not.toHaveBeenCalled();
     });
 
-    it('does not throw on the CLEAR path either', () => {
+    it('does not throw on the CLEAR path either, and also does not page', () => {
       // clearAlertSource shares captureToAlertSink and had the identical
       // defect; #2287's write-up only named emitAlert.
       pointSinkAtUnwritablePath();
@@ -1690,8 +1695,10 @@ describe('WHATSOUP_ALERT_SINK dry-run capture', () => {
       expect(() => clearAlertSource('whatsoup-prod', 'connection_exhausted')).not.toThrow();
 
       const result = clearAlertSource('whatsoup-prod', 'connection_exhausted');
-      expect(result.ok).toBe(true);
-      expect(result.channel).toBe('outbox');
+      expect(result.ok).toBe(false);
+      expect(result.channel).toBe('sink');
+      expect(readdirSync(outboxDir)).toHaveLength(0);
+      expect(spawn).not.toHaveBeenCalled();
     });
 
     it('warns about the failed sink write rather than failing silently', () => {
