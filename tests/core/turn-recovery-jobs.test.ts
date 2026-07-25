@@ -315,6 +315,30 @@ describe('atomic linked turn recovery jobs', () => {
     expect(durability.getInboundStatus(transfer.inboundSeq)).toBe('processing');
   });
 
+  it('freezes the trusted source receipt once a recovery job is linked', () => {
+    const transfer = createTransfer('immutable-receipt');
+    const receipt = durability.finalizeTurnTerminal(transfer.params);
+    const before = durability.getTurnRecoveryJob(receipt.recoveryJob!.jobId);
+
+    expect(() => db.raw.prepare(`
+      UPDATE inbound_events
+      SET received_at = datetime(received_at, '+1 day')
+      WHERE seq = ?
+    `).run(transfer.inboundSeq)).toThrow(/recovery source inbound receipt is immutable/i);
+
+    expect(() => db.raw.prepare(`
+      UPDATE inbound_events SET received_at = received_at WHERE seq = ?
+    `).run(transfer.inboundSeq)).not.toThrow();
+    expect(() => db.raw.prepare(`
+      UPDATE inbound_events SET routed_to = 'recovery' WHERE seq = ?
+    `).run(transfer.inboundSeq)).not.toThrow();
+
+    expect(durability.getTurnRecoveryJob(receipt.recoveryJob!.jobId))
+      .toMatchObject({
+        source_received_at_unix_seconds: before!.source_received_at_unix_seconds,
+      });
+  });
+
   it('parks an unsafe exact envelope under a durable manual owner without claimability', () => {
     const transfer = createTransfer('blocked-unsafe', OWNER, { replaySafe: false });
 
