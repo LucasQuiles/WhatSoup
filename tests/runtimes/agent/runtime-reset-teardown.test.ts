@@ -268,6 +268,7 @@ function makeMsg(overrides: Partial<IncomingMessage> = {}): IncomingMessage {
 function makeQueuedTurn(overrides: Partial<QueuedTurn> = {}): QueuedTurn {
   return {
     sourceMessageId: 'queued-turn-probe',
+    receivedAtUnixSeconds: 1_780_000_000,
     conversationKey: 'test',
     chatJid: 'test@s.whatsapp.net',
     senderJid: 'sender@s.whatsapp.net',
@@ -395,6 +396,7 @@ function makeRuntimeTurnContext(
     },
     replay: {
       sourceMessageId: `wamid-${logicalTurnId}`,
+      receivedAtUnixSeconds: 1_780_000_000,
       replaySafe: true,
       senderJid: '15550009999@s.whatsapp.net',
       senderName: null,

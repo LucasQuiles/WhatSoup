@@ -654,6 +654,7 @@ function runtimeContext(
     recoveryOwner: { logicalTurnId: `${logicalTurnId}:recovery`, managerId: 'manager-recovery', generation: 2 },
     replay: {
       sourceMessageId: `wamid-${logicalTurnId}`,
+      receivedAtUnixSeconds: 1_780_000_000,
       replaySafe: true,
       senderJid: 'sender-edge@s.whatsapp.net',
       senderName: null,
@@ -1857,6 +1858,7 @@ describe('AgentRuntime edge coverage', () => {
           senderName: null,
           contentType: 'image',
           isGroup: false,
+          receivedAtUnixSeconds: Math.floor(Date.now() / 1000),
           ...(i === 0 || i === 1 ? {} : { inboundSeq: i + 1 }),
         },
       );

@@ -32,6 +32,16 @@ describe('DurabilityEngine', () => {
       expect(row.routed_to).toBe('agent');
     });
 
+    it('reads the canonical durable receipt time for a journaled inbound', () => {
+      const seq = engine.journalInbound('msg-receipt', 'key-1', 'jid-1@s.whatsapp.net', 'agent');
+      const row = db.raw.prepare(
+        'SELECT unixepoch(received_at) AS received_at_unix_seconds FROM inbound_events WHERE seq = ?',
+      ).get(seq) as { received_at_unix_seconds: number };
+
+      expect(engine.getInboundReceivedAtUnixSeconds(seq)).toBe(row.received_at_unix_seconds);
+      expect(() => engine.getInboundReceivedAtUnixSeconds(seq + 1)).toThrow(/receipt timestamp/i);
+    });
+
     it('markTurnDone transitions processing → turn_done', () => {
       const seq = engine.journalInbound('msg-1', 'key-1', 'jid-1', 'agent');
       engine.markTurnDone(seq);

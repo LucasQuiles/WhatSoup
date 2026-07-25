@@ -501,6 +501,7 @@ export function createIngestHandler(
         if (durability) {
           seq = durability.journalInbound(msg.messageId, conversationKey, msg.chatJid, routedTo);
           msg.inboundSeq = seq;  // Thread seq into runtime for lifecycle tracking
+          msg.receivedAtUnixSeconds = durability.getInboundReceivedAtUnixSeconds(seq);
         }
 
         // Strip the bot's own @mention token from inbound GROUP text so the agent

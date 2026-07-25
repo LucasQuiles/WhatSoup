@@ -64,6 +64,7 @@ function replayEnvelope(
 ): TurnRecoveryReplayEnvelope {
   return {
     sourceMessageId: `wamid-${suffix}`,
+    receivedAtUnixSeconds: 1_780_000_000,
     replaySafe: true,
     senderJid: '15550100002:9@s.whatsapp.net',
     senderName: 'Exact Sender',
@@ -298,6 +299,7 @@ describe('atomic linked turn recovery jobs', () => {
       terminal_record_id: terminal!.id,
       source_inbound_seq: transfer.inboundSeq,
       source_message_id: 'wamid-atomic',
+      source_received_at_unix_seconds: expect.any(Number),
       source_manager_id: 'manager-source',
       owner_logical_turn_id: OWNER.logicalTurnId,
       assigned_owner_logical_turn_id: OWNER.logicalTurnId,
@@ -307,6 +309,9 @@ describe('atomic linked turn recovery jobs', () => {
       attempt_count: 0,
       claim_epoch: 0,
     });
+    expect(job?.source_received_at_unix_seconds).toBe(
+      durability.getInboundReceivedAtUnixSeconds(transfer.inboundSeq),
+    );
     expect(durability.getInboundStatus(transfer.inboundSeq)).toBe('processing');
   });
 

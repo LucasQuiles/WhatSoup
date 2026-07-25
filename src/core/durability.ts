@@ -232,6 +232,7 @@ type DurabilityStatements = {
   markContinuityCandidateIfUnownedAndNoTerminalOutbound: PreparedStatement;
   markInboundSkipped: PreparedStatement;
   selectInboundStatus: PreparedStatement;
+  selectInboundReceipt: PreparedStatement;
   recordTurnTerminal: PreparedStatement;
   getTurnTerminal: PreparedStatement;
   createOutboundOp: PreparedStatement;
@@ -337,6 +338,10 @@ export class DurabilityEngine {
       ),
       selectInboundStatus: prepare(
         `SELECT processing_status, conversation_key, chat_jid, message_id
+         FROM inbound_events WHERE seq = ?`,
+      ),
+      selectInboundReceipt: prepare(
+        `SELECT unixepoch(received_at) AS received_at_unix_seconds
          FROM inbound_events WHERE seq = ?`,
       ),
       recordTurnTerminal: prepare(`
@@ -920,6 +925,16 @@ export class DurabilityEngine {
     const seq = Number(result.lastInsertRowid);
     log.debug({ seq, messageId, routedTo }, 'journalInbound');
     return seq;
+  }
+
+  getInboundReceivedAtUnixSeconds(seq: number): number {
+    const row = this.statements.selectInboundReceipt.get(seq) as {
+      received_at_unix_seconds: number;
+    } | undefined;
+    if (!row || !Number.isSafeInteger(row.received_at_unix_seconds)) {
+      throw new Error(`Journaled inbound ${seq} has no valid receipt timestamp`);
+    }
+    return row.received_at_unix_seconds;
   }
 
   markTurnDone(seq: number): void {

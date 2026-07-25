@@ -95,6 +95,12 @@ import {
 } from './session.ts';
 import { createProviderExecutionGate, ProviderExecutionGate } from './provider-execution-gate.ts';
 import { dispatchProviderTurn } from './provider-boundary-dispatch.ts';
+import { TurnChronologyTracker, type TurnDeliveryKind } from './turn-chronology.ts';
+import {
+  receivedAtUnixSeconds,
+  renderUserTurnForProvider,
+  sharedRuntimeTurnText,
+} from './turn-provider-text.ts';
 import { markDeferredSystemTurn, requireSystemTurnProviderBoundary } from './system-turn-deadline.ts';
 import {
   OutboundQueue,
@@ -197,6 +203,7 @@ import {
   RuntimeTurnCoordinator,
   RUNTIME_TURN_SHUTDOWN_FINALIZATION_TIMEOUT_MS,
   type PerChatRuntimeScopeRef,
+  type ProviderFallbackReplayArgs,
   type RuntimeTurnAfterTerminalAction,
   type RuntimeTurnCompletion,
   type RuntimeTurnCoordinatorPort,
@@ -910,6 +917,7 @@ export class AgentRuntime implements Runtime {
   // (captured at the top of start()); consumed by the startup resume gate.
   private restartLoopInterruptedBoot = false;
   private unownedProviderEventRejects = 0;
+  private readonly turnChronology = new TurnChronologyTracker();
   private readonly providerEventRejectReasonCounts = new Map<string, number>();
   /**
    * Explicit source-bound ownership for turns admitted without a durability
@@ -2135,6 +2143,7 @@ export class AgentRuntime implements Runtime {
       if (!session) throw new Error(`Coalesced image turn has no session for "${mapKey}"`);
       const source: RuntimeTurnSourceSnapshot = {
         sourceMessageId: msg.messageId,
+        receivedAtUnixSeconds: receivedAtUnixSeconds(msg),
         conversationKey: canonicalConversationKey(chatJid, this.db),
         senderJid: msg.senderJid,
         senderName: msg.senderName,
@@ -2154,6 +2163,7 @@ export class AgentRuntime implements Runtime {
       });
       this.enqueuePerChatRuntimeTurn(mapKey, {
         sourceMessageId: source.sourceMessageId,
+        receivedAtUnixSeconds: source.receivedAtUnixSeconds,
         conversationKey: source.conversationKey,
         chatJid,
         senderJid: source.senderJid,
@@ -2684,6 +2694,13 @@ export class AgentRuntime implements Runtime {
       getQueueForChat: (chatJid, mapKey) => runtime.getQueueForChat(chatJid, mapKey),
       sendTurnPerChat: (chatJid, text, mapKey, actorJid, context, scopeRef, systemTurnLease, excludeJobId) =>
         runtime.sendTurnPerChat(chatJid, text, mapKey, actorJid, context, scopeRef, systemTurnLease, excludeJobId),
+      deleteOwnedPerChatSession: (mapKey, expected) => runtime.deleteOwnedPerChatSession(mapKey, expected),
+      recreatePerChatSessionForFallback: (mapKey, chatJid, actorJid) =>
+        runtime.recreatePerChatSessionForFallback(mapKey, chatJid, actorJid),
+      recreateSingletonSessionForFallback: (chatJid, actorJid) =>
+        runtime.recreateSingletonSessionForFallback(chatJid, actorJid),
+      bindActiveGlobalMcpConversation: (chatJid) => runtime.bindActiveGlobalMcpConversation(chatJid),
+      sendTurnToSession: (...args) => runtime.sendTurnToSession(...args),
       sendVoiceReply: (chatJid, responseText) => runtime._sendVoiceReply(chatJid, responseText),
       isSilentCompact: (scopeKey) => runtime.isSilentCompact(scopeKey),
       clearSilentCompact: (scopeKey) => runtime.clearSilentCompact(scopeKey),
@@ -4320,13 +4337,13 @@ export class AgentRuntime implements Runtime {
       this.currentTurnSourceMessageId = msg.messageId;
       this.currentTurnAssistantText = '';
       this.currentTurnAssistantItemText.clear();
-      const prefixedText = this.sharedRuntimeTurnText({
+      const prefixedText = sharedRuntimeTurnText({
         chatJid,
         senderJid: msg.senderJid,
         senderName: msg.senderName,
         text,
         isGroup: msg.isGroup,
-      });
+      }, this.db);
       const runtimeContext = this.runtimeTurnCoordinator.createRuntimeTurnForDispatch({
         scope: 'shared',
         chatJid,
@@ -4334,6 +4351,7 @@ export class AgentRuntime implements Runtime {
         inboundSeq: msg.inboundSeq,
         source: {
           sourceMessageId: msg.messageId,
+          receivedAtUnixSeconds: receivedAtUnixSeconds(msg),
           conversationKey: journalConversationKey,
           senderJid: msg.senderJid,
           senderName: msg.senderName,
@@ -4346,6 +4364,7 @@ export class AgentRuntime implements Runtime {
       });
       this.turnQueue.enqueue({
         sourceMessageId: msg.messageId,
+        receivedAtUnixSeconds: receivedAtUnixSeconds(msg),
         conversationKey: journalConversationKey,
         chatJid,
         senderJid: msg.senderJid,
@@ -4379,6 +4398,7 @@ export class AgentRuntime implements Runtime {
           inboundSeq: msg.inboundSeq,
           source: {
             sourceMessageId: msg.messageId,
+            receivedAtUnixSeconds: receivedAtUnixSeconds(msg),
             conversationKey: journalConversationKey,
             senderJid: msg.senderJid,
             senderName: msg.senderName,
@@ -4393,6 +4413,7 @@ export class AgentRuntime implements Runtime {
 
         this.enqueuePerChatRuntimeTurn(mapKey, {
           sourceMessageId: msg.messageId,
+          receivedAtUnixSeconds: receivedAtUnixSeconds(msg),
           conversationKey: journalConversationKey,
           chatJid,
           senderJid: msg.senderJid,
@@ -4420,6 +4441,7 @@ export class AgentRuntime implements Runtime {
       this.currentTurnRouteMarkerHold = config.nlRouting ? '' : null;
       await this.sendTurnNonShared(chatJid, text, msg.senderJid, {
         sourceMessageId: msg.messageId,
+        receivedAtUnixSeconds: receivedAtUnixSeconds(msg),
         conversationKey: journalConversationKey,
         senderJid: msg.senderJid,
         senderName: msg.senderName,
@@ -4428,15 +4450,6 @@ export class AgentRuntime implements Runtime {
         ...(msg.isGroup ? { groupName: chatJid } : {}),
       }, msg.inboundSeq);
     }
-  }
-
-  private sharedRuntimeTurnText(turn: Pick<QueuedTurn, 'chatJid' | 'senderJid' | 'senderName' | 'text' | 'isGroup'>): string {
-    const phone = resolvePhoneFromJid(turn.senderJid, this.db);
-    const displayName = turn.senderName ?? phone;
-    const prefix = turn.isGroup
-      ? `[Group: ${turn.chatJid} — ${displayName}]`
-      : `[DM from ${displayName} (${phone})]`;
-    return `${prefix}\n${turn.text}`;
   }
 
   private enqueuePerChatRuntimeTurn(mapKey: string, turn: QueuedTurn): boolean {
@@ -4492,7 +4505,7 @@ export class AgentRuntime implements Runtime {
     // The journal-backed context was minted at admission so queue rejection and
     // processor failure use the same immutable identity. Legacy unjournaled
     // test/system turns still derive only their display text here.
-    const prefixedText = turn.runtimeContext?.replay.text ?? this.sharedRuntimeTurnText(turn);
+    const prefixedText = turn.runtimeContext?.replay.text ?? sharedRuntimeTurnText(turn, this.db);
 
     // Track which chat this turn belongs to for event routing
     // @check CHK-065 // @traces REQ-012.AC-03
@@ -4536,7 +4549,12 @@ export class AgentRuntime implements Runtime {
       : null;
     try {
       this.updateSessionActorJid(this.session!, senderJid);
-      await this.session!.sendTurn(prefixedText);
+      await this.session!.sendTurn(renderUserTurnForProvider(
+        this.turnChronology,
+        prefixedText,
+        context,
+        'live',
+      ));
     } catch (err) {
       if (legacyOwner) {
         this.clearLegacyProviderTurn(GLOBAL_TOOL_SCOPE_KEY, legacyOwner);
@@ -4572,6 +4590,8 @@ export class AgentRuntime implements Runtime {
     beforeUserSend?: () => void,
     systemTurnLease?: SystemTurnLeaseToken,
     dispatchAllowed?: () => boolean,
+    runtimeContext?: RuntimeTurnContext,
+    deliveryKind: TurnDeliveryKind = 'live',
   ): Promise<void> {
     let effectiveMapKey = mapKey;
     let spawnedForTurn = false;
@@ -4706,7 +4726,15 @@ export class AgentRuntime implements Runtime {
       if (queue) queue.indicateTyping();
     };
     try {
-      const turnText = contextPreamble === null ? text : `${contextPreamble}\n\n[Current message]\n${text}`;
+      const userTurnText = renderUserTurnForProvider(
+        this.turnChronology,
+        text,
+        runtimeContext ?? null,
+        deliveryKind,
+      );
+      const turnText = contextPreamble === null
+        ? userTurnText
+        : `${contextPreamble}\n\n[Current message]\n${userTurnText}`;
       await dispatchProviderTurn(session, turnText, onProviderBoundaryReady);
     } catch (err) {
       if (actorPushed && effectiveMapKey !== undefined) {
@@ -4780,7 +4808,7 @@ export class AgentRuntime implements Runtime {
       }, undefined, () => (
         !this.shutdownRequested
         && (context === null || !this.runtimeTurnCoordinator.isUndispatchedRuntimeTurnCancelled(context))
-      ));
+      ), context ?? undefined);
       if (context && completion.value === null) {
         if (!this.runtimeTurnCoordinator.isUndispatchedRuntimeTurnCancelled(context)) {
           this.runtimeTurnCoordinator.terminalizeUndispatchedRuntimeCrash(context);
@@ -4818,6 +4846,18 @@ export class AgentRuntime implements Runtime {
     const dispatchAllowed = runtimeContext === undefined
       ? undefined
       : () => !this.runtimeTurnCoordinator.isUndispatchedRuntimeTurnCancelled(runtimeContext);
+    const continuationContext = runtimeContext === undefined
+      ? this.perChatRuntimeTurnContexts.get(mapKey)?.[0]
+      : undefined;
+    const providerTurnContext = runtimeContext ?? continuationContext;
+    const providerDeliveryKind: TurnDeliveryKind =
+      excludeJobId === undefined
+        && (
+          continuationContext === undefined
+          || !this.runtimeTurnCoordinator.isRuntimeTurnContinuation(continuationContext)
+        )
+        ? 'live'
+        : 'recovery_replay';
     // AskUserQuestion → Poll bridge: if a poll question is pending for this
     // chat and the user sends a text reply, resolve it as an option number,
     // label, description match, or free-text answer and inject it back.
@@ -4975,7 +5015,7 @@ export class AgentRuntime implements Runtime {
             retrySession,
             scopeRef?.value ?? currentMapKey,
           );
-        }, systemTurnLease, dispatchAllowed);
+        }, systemTurnLease, dispatchAllowed, providerTurnContext, providerDeliveryKind);
       } catch (err) {
         if (legacyOwner.value) {
           this.clearLegacyProviderTurn(currentMapKey, legacyOwner.value);
@@ -4992,7 +5032,7 @@ export class AgentRuntime implements Runtime {
           session,
           scopeRef?.value ?? mapKey,
         );
-      }, systemTurnLease, dispatchAllowed);
+      }, systemTurnLease, dispatchAllowed, providerTurnContext, providerDeliveryKind);
     } catch (err) {
       if (legacyOwner.value) {
         this.clearLegacyProviderTurn(scopeRef?.value ?? mapKey, legacyOwner.value);
@@ -6988,6 +7028,7 @@ export class AgentRuntime implements Runtime {
             ),
           },
           unownedProviderEventRejects: this.unownedProviderEventRejects,
+          ...this.turnChronology.healthDetails(),
           providerExecution,
           turnFinalizationRetainedRetries: finalizationHealth.retainedRetries,
           turnFinalizationDegradedScopes: finalizationHealth.degradedScopes,
@@ -7029,6 +7070,7 @@ export class AgentRuntime implements Runtime {
           ),
         },
         unownedProviderEventRejects: this.unownedProviderEventRejects,
+        ...this.turnChronology.healthDetails(),
         providerExecution,
         turnFinalizationRetainedRetries: finalizationHealth.retainedRetries,
         turnFinalizationDegradedScopes: finalizationHealth.degradedScopes,
@@ -10605,34 +10647,8 @@ export class AgentRuntime implements Runtime {
     });
   }
 
-  private async replayTurnOnFallback(args: {
-    chatJid: string;
-    mapKey?: string;
-    replayText: string;
-    actorJid?: string;
-    oldSession: SessionManager | null;
-  }): Promise<void> {
-    if (args.oldSession) {
-      await args.oldSession.shutdown(false);
-    }
-    if (args.mapKey !== undefined) {
-      // F-STICKY-ACTOR (QR-247): the fallback kills the child (active=false, so
-      // onCrash never fires) and replays on a fresh session. Clear the executing-actor
-      // queue so the old in-flight turn's actor cannot linger as HEAD; the replay
-      // re-pushes via sendTurnPerChat -> sendTurnToSession.
-      this.perChatExecActorQueue.delete(args.mapKey);
-      this.deleteOwnedPerChatSession(args.mapKey, args.oldSession ?? undefined);
-      this.recreatePerChatSessionForFallback(args.mapKey, args.chatJid, args.actorJid);
-      await this.sendTurnPerChat(args.chatJid, args.replayText, args.mapKey, args.actorJid);
-      return;
-    }
-    this.recreateSingletonSessionForFallback(args.chatJid, args.actorJid);
-    this.currentTurnChatJid = args.chatJid;
-    this.bindActiveGlobalMcpConversation(args.chatJid);
-    this.turnHadVisibleOutput = false;
-    this.currentTurnReplayText = args.replayText;
-    this.currentTurnReplayActorJid = args.actorJid;
-    await this.sendTurnToSession(this.session!, args.chatJid, args.replayText, undefined, args.actorJid);
+  private replayTurnOnFallback(args: ProviderFallbackReplayArgs): Promise<void> {
+    return this.runtimeTurnCoordinator.replayTurnOnFallback(args);
   }
 
   /**

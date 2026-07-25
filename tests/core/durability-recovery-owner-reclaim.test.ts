@@ -103,6 +103,7 @@ describe('sweepStuckInbound — recovery-owner reclaim (#1749 rem-2/3b)', () => 
     };
     const envelope: TurnRecoveryReplayEnvelope = {
       sourceMessageId: messageId,
+      receivedAtUnixSeconds: 1_780_000_000,
       replaySafe: true,
       senderJid: '15550109998:9@s.whatsapp.net',
       senderName: 'Pinned Sender',

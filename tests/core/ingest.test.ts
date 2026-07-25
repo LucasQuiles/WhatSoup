@@ -751,6 +751,7 @@ describe('Inbound journaling: durabilityEngine.journalInbound', () => {
     const runtime = makeRuntime();
     const durability = new DurabilityEngine(db);
     const journalSpy = vi.spyOn(durability, 'journalInbound').mockReturnValue(42);
+    vi.spyOn(durability, 'getInboundReceivedAtUnixSeconds').mockReturnValue(1_780_000_000);
 
     const handler = makeIngest(db, messenger, runtime, BOT_JID, BOT_LID, durability);
     const msg = makeIncomingMessage();
@@ -765,6 +766,7 @@ describe('Inbound journaling: durabilityEngine.journalInbound', () => {
       expect.any(String),   // routedTo runtime name
     );
     expect(vi.mocked(runtime.handleMessage)).toHaveBeenCalledWith(msg);
+    expect(msg.receivedAtUnixSeconds).toBe(1_780_000_000);
   });
 
   it('journalInbound is called before runtime.handleMessage', async () => {
@@ -778,6 +780,7 @@ describe('Inbound journaling: durabilityEngine.journalInbound', () => {
       callOrder.push('journalInbound');
       return 1;
     });
+    vi.spyOn(durability, 'getInboundReceivedAtUnixSeconds').mockReturnValue(1_780_000_000);
     vi.mocked(runtime.handleMessage).mockImplementation(async () => {
       callOrder.push('handleMessage');
     });
@@ -837,6 +840,7 @@ describe('Inbound journaling: durabilityEngine.journalInbound', () => {
     vi.mocked(runtime.handleMessage).mockRejectedValue(new Error('runtime crash'));
 
     const journalSpy = vi.spyOn(durability, 'journalInbound').mockReturnValue(11);
+    vi.spyOn(durability, 'getInboundReceivedAtUnixSeconds').mockReturnValue(1_780_000_000);
     const failSpy = vi.spyOn(durability, 'markInboundFailed');
 
     const handler = makeIngest(db, messenger, runtime, BOT_JID, BOT_LID, durability);
@@ -858,6 +862,7 @@ describe('Inbound journaling: durabilityEngine.journalInbound', () => {
     );
 
     vi.spyOn(durability, 'journalInbound').mockReturnValue(12);
+    vi.spyOn(durability, 'getInboundReceivedAtUnixSeconds').mockReturnValue(1_780_000_000);
     const failSpy = vi.spyOn(durability, 'markInboundFailed');
 
     const handler = makeIngest(db, messenger, runtime, BOT_JID, BOT_LID, durability);
@@ -1563,6 +1568,7 @@ describe('ingest.ts uncovered-branch coverage', () => {
     const runtime = makeRuntime();
     const durability = new DurabilityEngine(db);
     const journalSpy = vi.spyOn(durability, 'journalInbound').mockReturnValue(33);
+    vi.spyOn(durability, 'getInboundReceivedAtUnixSeconds').mockReturnValue(1_780_000_000);
 
     const handler = makeIngest(db, messenger, runtime, BOT_JID, BOT_LID, durability);
 

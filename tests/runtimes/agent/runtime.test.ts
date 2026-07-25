@@ -860,6 +860,7 @@ function makeRuntimeTurnContext(
     },
     replay: {
       sourceMessageId: `wamid-${logicalTurnId}`,
+      receivedAtUnixSeconds: 1_780_000_000,
       replaySafe: true,
       senderJid: '15550009999@s.whatsapp.net',
       senderName: null,
@@ -6616,6 +6617,7 @@ describe('AgentRuntime', () => {
       },
       replay: {
         sourceMessageId: 'wamid-source-b',
+        receivedAtUnixSeconds: 1_780_000_000,
         replaySafe: true,
         senderJid: mapKey,
         senderName: null,
