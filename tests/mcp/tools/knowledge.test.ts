@@ -640,6 +640,75 @@ describe('knowledge_search handler - schema enforcement', () => {
 });
 
 describe('knowledge_search handler - Pinecone search behavior', () => {
+  it('filters hits below a profile-specific minimum score', async () => {
+    searchRecordsMock
+      .mockResolvedValueOnce({
+        result: {
+          hits: [
+            { _id: 'relevant', _score: 0.47, fields: { text: 'Relevant memory' } },
+            { _id: 'floor', _score: 0.2, fields: { text: 'Bootstrap floor' } },
+          ],
+        },
+      })
+      .mockResolvedValueOnce({ result: { hits: [] } });
+    const profile = configStub.memory.pinecone.knowledgeProfiles['index-a']! as
+      typeof configStub.memory.pinecone.knowledgeProfiles['index-a'] & { minScore?: number };
+    profile.minScore = 0.3;
+
+    try {
+      const registry = registryWithKnowledgeTool(['index-a']);
+      const result = await registry.call(
+        'knowledge_search',
+        { index: 'index-a', query: 'relevance threshold' },
+        { tier: 'global' },
+      );
+
+      expect(parseRegistryText(result)).toEqual({
+        index: 'index-a',
+        query: 'relevance threshold',
+        results_count: 1,
+        results: [
+          { id: 'relevant', score: 0.47, entity_type: 'unknown' },
+        ],
+        formatted: '[relevant]\nRelevant memory',
+      });
+    } finally {
+      delete profile.minScore;
+    }
+  });
+
+  it('returns an explicit no-results response when every hit is below the minimum score', async () => {
+    searchRecordsMock
+      .mockResolvedValueOnce({
+        result: {
+          hits: [{ _id: 'floor', _score: 0.2, fields: { text: 'Bootstrap floor' } }],
+        },
+      })
+      .mockResolvedValueOnce({ result: { hits: [] } });
+    const profile = configStub.memory.pinecone.knowledgeProfiles['index-a']! as
+      typeof configStub.memory.pinecone.knowledgeProfiles['index-a'] & { minScore?: number };
+    profile.minScore = 0.3;
+
+    try {
+      const registry = registryWithKnowledgeTool(['index-a']);
+      const result = await registry.call(
+        'knowledge_search',
+        { index: 'index-a', query: 'no relevant memory' },
+        { tier: 'global' },
+      );
+
+      expect(parseRegistryText(result)).toEqual({
+        index: 'index-a',
+        query: 'no relevant memory',
+        results_count: 0,
+        results: [],
+        formatted: 'No results found for this query. Try different wording or a broader search.',
+      });
+    } finally {
+      delete profile.minScore;
+    }
+  });
+
   it('searches configured namespaces and formats returned hits', async () => {
     searchRecordsMock
       .mockResolvedValueOnce({

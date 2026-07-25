@@ -467,6 +467,13 @@ export function registerKnowledgeTools(
           hits = hits.slice(0, MAX_RESULTS);
         }
 
+        const hitsBeforeScoreFilter = hits.length;
+        const minScore = profile.minScore;
+        if (typeof minScore === 'number') {
+          hits = hits.filter((hit) => hit.score >= minScore);
+        }
+        const discardedLowScore = hitsBeforeScoreFilter - hits.length;
+
         // Dedup by ID
         const seen = new Set<string>();
         const deduped = hits.filter((h) => {
@@ -497,6 +504,8 @@ export function registerKnowledgeTools(
             index: indexName,
             routedNamespaces: namespacesToSearch,
             hits: deduped.length,
+            discardedLowScore,
+            ...(typeof minScore === 'number' ? { minScore } : {}),
             durationMs,
             ...(queryIntent ? { queryIntent } : {}),
           },
