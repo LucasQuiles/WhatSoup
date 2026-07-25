@@ -77,6 +77,11 @@ interface GitStatusSnapshot {
   error?: string;
 }
 
+interface SourcePathContext {
+  importedBy?: string;
+  specifier?: string;
+}
+
 export interface SourceRuntimeDependencies {
   git?: (cwd: string, args: string[]) => GitCommandResult;
 }
@@ -338,6 +343,45 @@ function gitFileState(snapshot: GitStateSnapshot, relPath: string): GitFileState
   };
 }
 
+function inspectGitFileState(
+  snapshot: GitStateSnapshot,
+  relPath: string,
+  context: SourcePathContext,
+): SourceRuntimeIssue[] {
+  const issues: SourceRuntimeIssue[] = [];
+  const state = gitFileState(snapshot, relPath);
+  if (state.error) {
+    issues.push(issue('git-error', 'critical', `git state check failed for ${relPath}: ${state.error}`, {
+      path: relPath,
+      ...context,
+    }));
+  }
+  if (!state.tracked) {
+    issues.push(issue('file-untracked', 'critical', `source runtime file is untracked: ${relPath}`, {
+      path: relPath,
+      ...context,
+    }));
+  } else if (!state.committed) {
+    issues.push(issue('file-uncommitted', 'critical', `source runtime file is not committed at HEAD: ${relPath}`, {
+      path: relPath,
+      ...context,
+    }));
+  }
+  if (state.dirty) {
+    issues.push(issue('file-dirty', 'high', `source runtime file has unstaged worktree drift: ${relPath}`, {
+      path: relPath,
+      ...context,
+    }));
+  }
+  if (state.staged) {
+    issues.push(issue('file-staged', 'high', `source runtime file has staged-but-uncommitted drift: ${relPath}`, {
+      path: relPath,
+      ...context,
+    }));
+  }
+  return issues;
+}
+
 function resolveRelativeImport(cwd: string, importerRel: string, specifier: string): string | null {
   if (!specifier.startsWith('.')) return null;
   const importerDir = path.dirname(path.resolve(cwd, importerRel));
@@ -378,6 +422,7 @@ function inspectSourceFile(
   repoRealPath: string,
   relPath: string,
   gitSnapshot: GitStateSnapshot,
+  inspectedPaths: Map<string, SourcePathContext>,
   options: { expectedSha256?: string; mustContain?: string[]; importedBy?: string; specifier?: string },
 ): SourceRuntimeIssue[] {
   const absolute = path.resolve(cwd, relPath);
@@ -413,29 +458,17 @@ function inspectSourceFile(
     })];
   }
 
-  const issues: SourceRuntimeIssue[] = [];
-  const state = gitFileState(gitSnapshot, relPath);
-  if (state.error) {
-    issues.push(issue('git-error', 'critical', `git state check failed for ${relPath}: ${state.error}`, { path: relPath }));
+  const context: SourcePathContext = {
+    importedBy: options.importedBy,
+    specifier: options.specifier,
+  };
+  const canonicalPath = repoRelative(repoRealPath, realAbsolute);
+  if (!inspectedPaths.has(canonicalPath)) {
+    inspectedPaths.set(canonicalPath, context);
   }
-  if (!state.tracked) {
-    issues.push(issue('file-untracked', 'critical', `source runtime file is untracked: ${relPath}`, {
-      path: relPath,
-      importedBy: options.importedBy,
-      specifier: options.specifier,
-    }));
-  } else if (!state.committed) {
-    issues.push(issue('file-uncommitted', 'critical', `source runtime file is not committed at HEAD: ${relPath}`, {
-      path: relPath,
-      importedBy: options.importedBy,
-      specifier: options.specifier,
-    }));
-  }
-  if (state.dirty) {
-    issues.push(issue('file-dirty', 'high', `source runtime file has unstaged worktree drift: ${relPath}`, { path: relPath }));
-  }
-  if (state.staged) {
-    issues.push(issue('file-staged', 'high', `source runtime file has staged-but-uncommitted drift: ${relPath}`, { path: relPath }));
+  const issues = inspectGitFileState(gitSnapshot, relPath, context);
+  if (canonicalPath !== relPath) {
+    issues.push(...inspectGitFileState(gitSnapshot, canonicalPath, context));
   }
 
   const body = readFileSync(realAbsolute);
@@ -471,7 +504,7 @@ export function collectSourceRuntimeIssues(
     return [issue('git-error', 'critical', `source runtime Git snapshot failed: ${gitSnapshot.error}`)];
   }
   const visited = new Set<string>();
-  const inspectedPaths = new Set<string>();
+  const inspectedPaths = new Map<string, SourcePathContext>();
   const expandedPaths = new Set<string>();
   const queue: Array<{ path: string; entry?: SourceRuntimeEntry; importedBy?: string; specifier?: string }> =
     manifest.entrypoints.map((entry) => ({ path: entry.path, entry }));
@@ -483,9 +516,15 @@ export function collectSourceRuntimeIssues(
     const visitKey = `${relPath}:${current.importedBy ?? ''}:${current.specifier ?? ''}`;
     if (visited.has(visitKey)) continue;
     visited.add(visitKey);
-    inspectedPaths.add(relPath);
+    const pathContext: SourcePathContext = {
+      importedBy: current.importedBy,
+      specifier: current.specifier,
+    };
+    if (!inspectedPaths.has(relPath)) {
+      inspectedPaths.set(relPath, pathContext);
+    }
 
-    const fileIssues = inspectSourceFile(cwd, repoRealPath, relPath, gitSnapshot, {
+    const fileIssues = inspectSourceFile(cwd, repoRealPath, relPath, gitSnapshot, inspectedPaths, {
       expectedSha256: current.entry?.sha256,
       mustContain: current.entry?.mustContain,
       importedBy: current.importedBy,
@@ -515,12 +554,18 @@ export function collectSourceRuntimeIssues(
   if (finalGitError) {
     return [issue('git-error', 'critical', `source runtime final Git verification failed: ${finalGitError}`)];
   }
-  for (const relPath of inspectedPaths) {
+  for (const [relPath, context] of inspectedPaths) {
     if (gitSnapshot.dirty.has(relPath)) {
-      issues.push(issue('file-dirty', 'high', `source runtime file has unstaged worktree drift: ${relPath}`, { path: relPath }));
+      issues.push(issue('file-dirty', 'high', `source runtime file has unstaged worktree drift: ${relPath}`, {
+        path: relPath,
+        ...context,
+      }));
     }
     if (gitSnapshot.staged.has(relPath)) {
-      issues.push(issue('file-staged', 'high', `source runtime file has staged-but-uncommitted drift: ${relPath}`, { path: relPath }));
+      issues.push(issue('file-staged', 'high', `source runtime file has staged-but-uncommitted drift: ${relPath}`, {
+        path: relPath,
+        ...context,
+      }));
     }
   }
 

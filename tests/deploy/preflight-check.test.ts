@@ -853,6 +853,42 @@ writeFileSync(sentinel, 'executed', 'utf8');
     expect(result.stderr).toContain('database-compatibility-dependency.ts');
   });
 
+  it('rejects a clean contained symlink alias with a dirty target before its sentinel executes', () => {
+    const fixture = makeWrapperFixture();
+    const dependency = join(fixture.root, 'src', 'database-compatibility-dependency.ts');
+    const target = join(fixture.root, 'src', 'database-compatibility-target.ts');
+    const sentinel = join(fixture.root, 'contained-symlink-target-executed');
+    writeFileSync(target, 'export const dependency = true;\n', 'utf8');
+    symlinkSync('./database-compatibility-target.ts', dependency);
+    writeFileSync(
+      fixture.bootstrap,
+      "import './database-compatibility-dependency.ts';\nprocess.stdout.write('ready\\n');\n",
+      'utf8',
+    );
+    commitWrapperFixture(fixture, 'add clean contained database compatibility symlink');
+    writeFileSync(
+      target,
+      `import { writeFileSync } from 'node:fs';
+const sentinel = process.env['WHATSOUP_TEST_SENTINEL'];
+if (!sentinel) throw new Error('missing test sentinel');
+writeFileSync(sentinel, 'executed', 'utf8');
+`,
+      'utf8',
+    );
+
+    const result = runWrapper(fixture, {
+      WHATSOUP_NODE: PINNED_NODE,
+      WHATSOUP_SKIP_PREFLIGHT: '1',
+      WHATSOUP_TEST_SENTINEL: sentinel,
+    });
+
+    expect(existsSync(sentinel)).toBe(false);
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain('FATAL: database compatibility bootstrap trust check failed');
+    expect(result.stderr).toContain('file-dirty');
+    expect(result.stderr).toContain('database-compatibility-target.ts');
+  });
+
   it('rejects a dirty trust checker before checker code can execute', () => {
     const fixture = makeWrapperFixture();
     const sentinel = join(fixture.root, 'dirty-checker-executed');

@@ -78,6 +78,42 @@ function makeRepo(): string {
   return root;
 }
 
+function makeContainedSymlinkRepo(): {
+  root: string;
+  manifest: ReturnType<typeof parseSourceRuntimeManifest>;
+  targetPath: string;
+  targetRelPath: string;
+} {
+  const root = makeRepo();
+  const targetRelPath = 'src/shared/helper.ts';
+  const targetPath = path.join(root, targetRelPath);
+  mkdirSync(path.dirname(targetPath));
+  writeFileSync(
+    targetPath,
+    "import { value } from './value.ts';\nexport function helper() { return value; }\n",
+    'utf8',
+  );
+  writeFileSync(path.join(root, 'src/shared/value.ts'), "export const value = 'ok';\n", 'utf8');
+  symlinkSync('../shared/helper.ts', path.join(root, 'src/transport/helper-link.ts'));
+  writeFileSync(
+    path.join(root, 'src/transport/connection.ts'),
+    "import { helper } from './helper-link.ts';\nexport function connect() { return helper(); }\n",
+    'utf8',
+  );
+  execGit(root, [
+    'add',
+    targetRelPath,
+    'src/shared/value.ts',
+    'src/transport/connection.ts',
+    'src/transport/helper-link.ts',
+  ]);
+  execGit(root, ['commit', '-qm', 'contained symlink']);
+  const manifest = parseSourceRuntimeManifest(
+    JSON.parse(readFileSync(path.join(root, 'manifest.json'), 'utf8')),
+  );
+  return { root, manifest, targetPath, targetRelPath };
+}
+
 describe('source runtime drift check', () => {
   it('passes when the entrypoint import graph is tracked, committed, and clean', () => {
     const root = makeRepo();
@@ -515,31 +551,92 @@ describe('source runtime drift check', () => {
     }
   });
 
-  it('allows a tracked file symlink whose real target remains inside the repository', () => {
+  it('blocks a clean committed symlink alias when its tracked target is dirty', () => {
+    const { root, manifest, targetPath, targetRelPath } = makeContainedSymlinkRepo();
+    writeFileSync(
+      targetPath,
+      "import { value } from './value.ts';\nexport function helper() { return `${value}-dirty`; }\n",
+      'utf8',
+    );
+
+    expect(collectSourceRuntimeIssues(root, manifest)).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        kind: 'file-dirty',
+        path: targetRelPath,
+        importedBy: 'src/transport/connection.ts',
+        specifier: './helper-link.ts',
+      }),
+    ]));
+  });
+
+  it('blocks a clean committed symlink alias when its tracked target is staged', () => {
+    const { root, manifest, targetPath, targetRelPath } = makeContainedSymlinkRepo();
+    writeFileSync(
+      targetPath,
+      "import { value } from './value.ts';\nexport function helper() { return `${value}-staged`; }\n",
+      'utf8',
+    );
+    execGit(root, ['add', targetRelPath]);
+
+    expect(collectSourceRuntimeIssues(root, manifest)).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        kind: 'file-staged',
+        path: targetRelPath,
+        importedBy: 'src/transport/connection.ts',
+        specifier: './helper-link.ts',
+      }),
+    ]));
+  });
+
+  it('includes a contained symlink target in final Git race verification', () => {
+    const { root, manifest, targetPath, targetRelPath } = makeContainedSymlinkRepo();
+    let calls = 0;
+
+    const issues = collectSourceRuntimeIssues(root, manifest, {
+      git: (cwd, args) => {
+        calls += 1;
+        const result = runGit(cwd, args);
+        if (calls === 3) {
+          writeFileSync(
+            targetPath,
+            "import { value } from './value.ts';\nexport function helper() { return `${value}-raced`; }\n",
+            'utf8',
+          );
+        }
+        return result;
+      },
+    });
+
+    expect(calls).toBe(4);
+    expect(issues).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        kind: 'file-dirty',
+        path: targetRelPath,
+        importedBy: 'src/transport/connection.ts',
+        specifier: './helper-link.ts',
+      }),
+    ]));
+  });
+
+  it('does not duplicate Git-state issues when the lexical and canonical paths are equal', () => {
     const root = makeRepo();
-    mkdirSync(path.join(root, 'src/shared'));
     writeFileSync(
-      path.join(root, 'src/shared/helper.ts'),
-      "import { value } from './value.ts';\nexport function helper() { return value; }\n",
+      path.join(root, 'src/transport/helper.ts'),
+      "export function helper() { return 'dirty'; }\n",
       'utf8',
     );
-    writeFileSync(path.join(root, 'src/shared/value.ts'), "export const value = 'ok';\n", 'utf8');
-    const symlinkPath = path.join(root, 'src/transport/helper-link.ts');
-    symlinkSync('../shared/helper.ts', symlinkPath);
-    writeFileSync(
-      path.join(root, 'src/transport/connection.ts'),
-      "import { helper } from './helper-link.ts';\nexport function connect() { return helper(); }\n",
-      'utf8',
+    const manifest = parseSourceRuntimeManifest(
+      JSON.parse(readFileSync(path.join(root, 'manifest.json'), 'utf8')),
     );
-    execGit(root, [
-      'add',
-      'src/shared/helper.ts',
-      'src/shared/value.ts',
-      'src/transport/connection.ts',
-      'src/transport/helper-link.ts',
-    ]);
-    execGit(root, ['commit', '-qm', 'contained symlink']);
-    const manifest = parseSourceRuntimeManifest(JSON.parse(readFileSync(path.join(root, 'manifest.json'), 'utf8')));
+
+    const issues = collectSourceRuntimeIssues(root, manifest);
+    expect(issues.filter((item) =>
+      item.kind === 'file-dirty' && item.path === 'src/transport/helper.ts'
+    )).toHaveLength(1);
+  });
+
+  it('allows a clean tracked file symlink whose real target remains inside the repository', () => {
+    const { root, manifest } = makeContainedSymlinkRepo();
 
     expect(collectSourceRuntimeIssues(root, manifest)).toEqual([]);
   });
