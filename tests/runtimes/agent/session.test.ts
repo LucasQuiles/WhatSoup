@@ -3103,10 +3103,174 @@ describe('Event-driven provider ready signal', () => {
       'data',
       Buffer.from(`${violationLine}\n${bufferedPartialLine}`),
     );
+
+    const stdoutState = sm as unknown as {
+      stdoutChunks: Buffer[];
+      stdoutBufferStr: string;
+    };
+    expect(stdoutState.stdoutChunks).toEqual([]);
+    expect(stdoutState.stdoutBufferStr).toBe(bufferedPartialLine);
+
     mockChild._exitCb?.(1, 'SIGKILL');
 
     expect(events.filter((event) => event.type === 'assistant_text')).toEqual([]);
-    expect(sm.getStatus().active).toBe(false);
+    expect(stdoutState.stdoutChunks).toEqual([]);
+    expect(stdoutState.stdoutBufferStr).toBe('');
+    expect(sm.getStatus()).toMatchObject({
+      active: false,
+      pid: null,
+      turnInFlight: false,
+    });
+  });
+
+  it('Codex quarantine remains scoped to an exited child after replacement', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const childA = mockChild;
+    const childB = makeMockChild(23456);
+    const events: AgentEvent[] = [];
+    let generation = { managerId: 'codex-child-replacement', generation: 1 };
+    let sm!: SessionManager;
+    sm = new SessionManager({
+      db,
+      messenger,
+      chatJid: CHAT_JID,
+      provider: 'codex-cli',
+      onEvent: (event) => {
+        events.push(event);
+        if (event.type === 'result') sm.completeProviderTurn();
+      },
+    });
+    sm.bindGenerationOwnership(() => generation);
+
+    await sm.spawnSession();
+    childA.stdout.emit('data', Buffer.from(JSON.stringify({
+      jsonrpc: '2.0',
+      id: 'rpc-child-a',
+      result: { id: 'thread-child-a' },
+    }) + '\n'));
+    await sm.sendTurn('first child turn');
+
+    childA.stdout.emit('data', Buffer.from(JSON.stringify({
+      jsonrpc: '2.0',
+      method: 'turn/completed',
+      params: {
+        threadId: 'thread-child-a',
+        turn: { id: 'unowned-child-a-turn', status: 'completed' },
+      },
+    }) + '\n'));
+    childA._exitCb?.(1, 'SIGKILL');
+
+    expect(sm.getStatus()).toMatchObject({
+      active: false,
+      pid: null,
+      turnInFlight: false,
+    });
+
+    generation = { managerId: 'codex-child-replacement', generation: 2 };
+    (spawn as ReturnType<typeof vi.fn>).mockReturnValue(childB);
+    await sm.spawnSession();
+    childB.stdout.emit('data', Buffer.from(JSON.stringify({
+      jsonrpc: '2.0',
+      id: 'rpc-child-b',
+      result: { id: 'thread-child-b' },
+    }) + '\n'));
+    await sm.sendTurn('replacement child turn');
+    const childBTurnRequest = lastJsonRpcRequest(childB, 'turn/start');
+    childB.stdout.emit('data', Buffer.from([
+      JSON.stringify({
+        jsonrpc: '2.0',
+        id: childBTurnRequest['id'],
+        result: { turn: { id: 'turn-child-b', status: 'inProgress' } },
+      }),
+      JSON.stringify({
+        jsonrpc: '2.0',
+        method: 'turn/started',
+        params: {
+          threadId: 'thread-child-b',
+          turn: { id: 'turn-child-b', status: 'inProgress' },
+        },
+      }),
+      '',
+    ].join('\n')));
+
+    childB.stdin.write.mockClear();
+    childA.stdout.emit('data', Buffer.from([
+      JSON.stringify({
+        jsonrpc: '2.0',
+        method: 'item/agentMessage/delta',
+        params: {
+          delta: 'late-child-a-output',
+          itemId: 'late-child-a-message',
+        },
+      }),
+      JSON.stringify({
+        jsonrpc: '2.0',
+        id: 'late-child-a-approval',
+        method: 'item/commandExecution/requestApproval',
+        params: {},
+      }),
+      '',
+    ].join('\n')));
+    childA._exitCb?.(1, 'SIGKILL');
+
+    expect(
+      events.some(
+        (event) =>
+          event.type === 'assistant_text'
+          && event.text === 'late-child-a-output',
+      ),
+    ).toBe(false);
+    expect(childB.stdin.write).not.toHaveBeenCalled();
+    expect(sm.getStatus()).toMatchObject({
+      active: true,
+      pid: 23456,
+      turnInFlight: true,
+    });
+    expect(sm.getActiveProviderTurn()).toMatchObject({
+      provider: 'codex-cli',
+      identity: {
+        sessionId: 'thread-child-b',
+        turnId: 'turn-child-b',
+      },
+      generation,
+    });
+
+    childB.stdout.emit('data', Buffer.from(JSON.stringify({
+      jsonrpc: '2.0',
+      id: 'child-b-approval',
+      method: 'item/commandExecution/requestApproval',
+      params: {},
+    }) + '\n'));
+    expect(childB.stdin.write).toHaveBeenCalledTimes(1);
+    expect(childB.stdin.write).toHaveBeenCalledWith(
+      expect.stringContaining('"id":"child-b-approval"'),
+    );
+    expect(childB.stdin.write).toHaveBeenCalledWith(
+      expect.stringContaining('"decision":"approved"'),
+    );
+
+    childB.stdout.emit('data', Buffer.from(JSON.stringify({
+      jsonrpc: '2.0',
+      method: 'turn/completed',
+      params: {
+        threadId: 'thread-child-b',
+        turn: { id: 'turn-child-b', status: 'completed' },
+      },
+    }) + '\n'));
+    expect(events).toContainEqual(expect.objectContaining({
+      type: 'result',
+      providerTurn: {
+        sessionId: 'thread-child-b',
+        turnId: 'turn-child-b',
+        status: 'completed',
+      },
+    }));
+    expect(sm.getStatus()).toMatchObject({
+      active: true,
+      pid: 23456,
+      turnInFlight: false,
+    });
   });
 
   it('Codex invalidates an ambiguous second start identity and quarantines the source', async () => {
