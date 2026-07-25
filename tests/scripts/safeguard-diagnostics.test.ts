@@ -175,9 +175,10 @@ const qualityCiSystemDepsTimeoutBlock = [
 ].join('\n');
 
 const qualityCiBrowserInstallScript = [
+  'TIMEOUT_BIN="$(bash scripts/resolve-timeout-bin.sh)"',
   'for attempt in 1 2 3; do',
   '  echo "::group::Playwright chromium download attempt ${attempt}/3"',
-  '  if timeout 300 npx playwright install chromium; then',
+  '  if "$TIMEOUT_BIN" 300 npx playwright install chromium; then',
   '    echo "::endgroup::"',
   '    echo "Playwright chromium download succeeded on attempt ${attempt}"',
   '    exit 0',
@@ -1073,8 +1074,8 @@ describe('safeguard diagnostics', () => {
   it('fails when the browser retry reintroduces Playwright system-dependency installation', () => {
     const workflow = requiredFiles['.github/workflows/quality.yml'];
     const mutated = workflow.replace(
-      'timeout 300 npx playwright install chromium',
-      'timeout 300 npx playwright install chromium --with-deps',
+      '"$TIMEOUT_BIN" 300 npx playwright install chromium',
+      '"$TIMEOUT_BIN" 300 npx playwright install chromium --with-deps',
     );
     expect(mutated).not.toBe(workflow);
     const fixture = makeRepo({ files: { '.github/workflows/quality.yml': mutated } });
@@ -1201,8 +1202,8 @@ describe('safeguard diagnostics', () => {
   it('fails when the browser retry only echoes the required install command', () => {
     const workflow = requiredFiles['.github/workflows/quality.yml'];
     const mutated = workflow.replace(
-      'if timeout 300 npx playwright install chromium; then',
-      'if echo "timeout 300 npx playwright install chromium"; then',
+      'if "$TIMEOUT_BIN" 300 npx playwright install chromium; then',
+      'if echo "$TIMEOUT_BIN" 300 npx playwright install chromium; then',
     );
     expect(mutated).not.toBe(workflow);
     const fixture = makeRepo({ files: { '.github/workflows/quality.yml': mutated } });

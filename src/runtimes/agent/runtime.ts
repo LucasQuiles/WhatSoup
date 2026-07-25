@@ -1474,6 +1474,7 @@ export class AgentRuntime implements Runtime {
   }
 
   private getOpenFileDescriptorCount(): number | null {
+    if (process.platform !== 'linux') return null;
     try {
       return readdirSync('/proc/self/fd').length;
     } catch (err) {

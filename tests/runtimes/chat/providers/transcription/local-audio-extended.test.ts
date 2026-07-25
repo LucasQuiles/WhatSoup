@@ -25,9 +25,9 @@
 
 import { describe, expect, it, vi, beforeEach } from 'vitest';
 import { existsSync } from 'node:fs';
-import { mkdtemp, rm, readFile } from 'node:fs/promises';
+import { chmod, mkdtemp, rm, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { delimiter, join } from 'node:path';
 
 import {
   extensionForMimeType,
@@ -97,6 +97,70 @@ describe('resolveBinaryPath', () => {
   it('returns null for a non-existent absolute path (L19 if[0] cond-expr[1])', () => {
     const result = resolveBinaryPath('/definitely/does/not/exist/binary');
     expect(result).toBe(null);
+  });
+
+  it('rejects an explicit path that exists but is not executable', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'whatsoup-non-executable-'));
+    const candidate = join(dir, 'ffmpeg');
+    try {
+      await writeFile(candidate, '#!/bin/sh\nexit 0\n', { mode: 0o644 });
+
+      expect(resolveBinaryPath(candidate)).toBe(null);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects a non-executable ffmpeg found on PATH', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'whatsoup-path-non-executable-'));
+    const originalPath = process.env.PATH;
+    try {
+      await writeFile(join(dir, 'ffmpeg'), '#!/bin/sh\nexit 0\n', { mode: 0o644 });
+      process.env.PATH = dir;
+
+      expect(resolveBinaryPath('ffmpeg')).toBe(null);
+    } finally {
+      if (originalPath === undefined) delete process.env.PATH;
+      else process.env.PATH = originalPath;
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('resolves an executable from the configured PATH', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'whatsoup-path-executable-'));
+    const candidate = join(dir, 'ffmpeg');
+    const originalPath = process.env.PATH;
+    try {
+      await writeFile(candidate, '#!/bin/sh\nexit 0\n');
+      await chmod(candidate, 0o755);
+      process.env.PATH = dir;
+
+      expect(resolveBinaryPath('ffmpeg')).toBe(candidate);
+    } finally {
+      if (originalPath === undefined) delete process.env.PATH;
+      else process.env.PATH = originalPath;
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('treats an empty PATH component as the current directory', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'whatsoup-path-current-dir-'));
+    const candidate = join(dir, 'ffmpeg');
+    const originalCwd = process.cwd();
+    const originalPath = process.env.PATH;
+    try {
+      await writeFile(candidate, '#!/bin/sh\nexit 0\n');
+      await chmod(candidate, 0o755);
+      process.chdir(dir);
+      process.env.PATH = `${delimiter}${join(dir, 'missing')}`;
+
+      expect(resolveBinaryPath('ffmpeg')).toBe(candidate);
+    } finally {
+      process.chdir(originalCwd);
+      if (originalPath === undefined) delete process.env.PATH;
+      else process.env.PATH = originalPath;
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 
   // Short-name (no '/') path: finds binary in well-known dirs
@@ -217,7 +281,9 @@ describe('withNormalizedAudioFile', () => {
     vi.resetModules();
     vi.doMock('node:fs', async (importOriginal) => ({
       ...(await importOriginal<typeof import('node:fs')>()),
-      existsSync: vi.fn(() => false),
+      accessSync: vi.fn(() => {
+        throw new Error('not executable');
+      }),
     }));
     const { withNormalizedAudioFile: isolatedWithNormalizedAudioFile } = await import(
       '../../../../../src/runtimes/chat/providers/transcription/local-audio.ts'
