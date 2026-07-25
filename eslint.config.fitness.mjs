@@ -55,6 +55,13 @@ function ruleEntriesFor(id) {
       return { 'fitness/ring-boundaries': 'warn' };
     case 'arch.sqlite-busy-timeout-ssot':
       return { 'fitness/no-magic-sqlite-pragma': 'warn' };
+    case 'hygiene.catch-justification':
+      return {
+        'fitness/require-catch-justification': [
+          'warn',
+          { baselinePath: rule.params?.baselinePath ?? 'eslint-rules/catch-ratchet-baseline.json' },
+        ],
+      };
     case 'invariant.no-unsafe-type-escapes':
       return { 'fitness/unsafe-type-escape': 'warn' };
     default:
@@ -102,6 +109,7 @@ const config = [
       ...ruleEntriesFor('invariant.outbox-env-gated'),
       ...ruleEntriesFor('arch.ring-boundaries'),
       ...ruleEntriesFor('arch.sqlite-busy-timeout-ssot'),
+      ...ruleEntriesFor('hygiene.catch-justification'),
       ...ruleEntriesFor('invariant.no-unsafe-type-escapes'),
       ...ruleEntriesFor('invariant.timer-rearm-without-clear'),
     },

@@ -33,13 +33,14 @@ describe('eslint fitness config — registry drift', () => {
     expect(missing).toEqual([]);
   });
 
-  it('covers the ten known eslint-ring rules', () => {
+  it('covers the eleven known eslint-ring rules', () => {
     expect(eslintRingRuleIds).toEqual([
       'arch.approved-api-client',
       'arch.file-size',
       'arch.god-class',
       'arch.ring-boundaries',
       'arch.sqlite-busy-timeout-ssot',
+      'hygiene.catch-justification',
       'invariant.fail-closed-scanner',
       'invariant.no-unsafe-type-escapes',
       'invariant.outbox-env-gated',

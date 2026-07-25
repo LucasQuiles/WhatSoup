@@ -150,6 +150,7 @@ interprocedural analysis; the rule does not claim to cover them.
 | `hygiene.no-wa-jid-literal-in-generic-ui` | mechanical | block | guard, ci | Block new WhatsApp JID literals (`@s.whatsapp.net`, `@g.us`) in generic UI/ops surfaces (console + deploy/scripts); existing occurrences ratchet-baselined. |
 | `hygiene.no-whatsapp-copy-in-generic-ui` | mechanical | block | guard, ci | Block new WhatsApp-presuming copy in generic console components; per-transport copy variants instead. |
 | `hygiene.no-health-whatsapp-key-read` | mechanical | block | guard, ci | Block new direct `health.whatsapp` key reads in console; reads go through the generic transport-health accessor with legacy fallback. |
+| `hygiene.catch-justification` | ast | warn | eslint | Flag empty `catch {}` blocks (no bound variable, empty body) that lack a justification comment; 120 inherited locations are ratchet-baselined and reduced per-sprint. |
 
 ## Test
 

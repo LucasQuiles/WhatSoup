@@ -363,6 +363,19 @@ export const fitnessRules = [
     source: ['audit:2026-07-20-signal-imessage-surface-sweep#S17'],
   },
   {
+    id: 'hygiene.catch-justification',
+    title: 'Empty catch {} justification',
+    category: 'hygiene',
+    rationale:
+      'An empty catch {} (no bound variable, empty body) bypasses useUnknownInCatchVariables and silently swallows errors; the catch { syntax gives no lint, runtime, or TypeScript signal of intent. New bare catches must bind the error or carry a justification comment; the 120 inherited locations are baselined (ratchet) and reduced per-sprint.',
+    detect: 'ast',
+    rings: ['eslint'],
+    severity: 'warn',
+    ratchet: true,
+    params: { baselinePath: 'eslint-rules/catch-ratchet-baseline.json' },
+    source: ['issue:2190'],
+  },
+  {
     id: 'test.typecheck-all-required',
     title: 'Full typecheck required',
     category: 'test',
