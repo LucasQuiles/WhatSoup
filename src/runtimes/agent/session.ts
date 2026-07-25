@@ -67,6 +67,9 @@ import { assessTreeLiveness } from './tree-liveness.ts';
 const log = createChildLogger('session-manager');
 
 const STDIN_WRITE_TIMEOUT_MS = 30_000;
+const OPENCODE_COMPACTION_CONTINUITY_GUIDANCE =
+  'After automatic context compaction, continue the original user request from the summary. ' +
+  'Do not answer the provider synthetic continuation prompt or ask whether to continue unless the original request genuinely requires new user input.';
 
 /** Cap on the retained no-newline stdout line (QR-064): a provider streaming a
  * large no-newline blob would grow `stdoutBufferStr` unbounded → parent OOM. The
@@ -497,7 +500,21 @@ function resolveProviderParser(
     case 'claude-cli': return parseEvents;
     case 'codex-cli': return (line: string) => singleEventEnvelope(parseCodexEvent(line));
     case 'gemini-cli': return (line: string) => singleEventEnvelope(parseGeminiAcpEvent(line));
-    case 'opencode-cli': return (line: string) => singleEventEnvelope(openCodeParser.parse(line));
+    case 'opencode-cli': return (line: string) => {
+      const event = openCodeParser.parse(line);
+      if (event?.type === 'tool_result' && !event.isError && event.toolName) {
+        return [
+          {
+            type: 'tool_use',
+            toolName: event.toolName,
+            toolId: event.toolId,
+            toolInput: {},
+          },
+          event,
+        ];
+      }
+      return singleEventEnvelope(event);
+    };
     case 'openai-api':
     case 'anthropic-api':
       throw new Error(
@@ -778,6 +795,7 @@ export class SessionManager {
       `Working directory: ${cwd}`,
       POLL_DECISION_GUIDANCE,
       BACKGROUND_TASK_DELIVERY_GUIDANCE,
+      ...(this.provider === 'opencode-cli' ? [OPENCODE_COMPACTION_CONTINUITY_GUIDANCE] : []),
     ].join('\n');
     const sources = [transportPrelude];
 
