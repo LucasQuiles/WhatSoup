@@ -3321,6 +3321,32 @@ describe('buildSystemPrompt edge cases', () => {
     vi.restoreAllMocks();
   });
 
+  it('instructs OpenCode to continue the original request after automatic compaction', () => {
+    const sm = new SessionManager({
+      db: makeDb(),
+      messenger: makeMessenger().messenger,
+      chatJid: CHAT_JID,
+      onEvent: vi.fn(),
+      provider: 'opencode-cli',
+    });
+
+    expect(sm.buildSystemPrompt()).toContain(
+      'After automatic context compaction, continue the original user request from the summary',
+    );
+  });
+
+  it('does not add OpenCode compaction guidance to other providers', () => {
+    const sm = new SessionManager({
+      db: makeDb(),
+      messenger: makeMessenger().messenger,
+      chatJid: CHAT_JID,
+      onEvent: vi.fn(),
+      provider: 'gemini-cli',
+    });
+
+    expect(sm.buildSystemPrompt()).not.toContain('After automatic context compaction');
+  });
+
   it('includes handoffSystemBlock output when provided', async () => {
     const db = makeDb();
     const { messenger } = makeMessenger();
@@ -5394,6 +5420,70 @@ describe('session.ts uncovered-branch coverage', () => {
 
     expect(events.filter((event) => event.type === 'assistant_text' || event.type === 'result')).toEqual([
       { type: 'assistant_text', text: 'verified final answer' },
+      { type: 'result', text: null, inputTokens: 800, outputTokens: 12, costUsd: undefined },
+    ]);
+  });
+
+  it('surfaces bounded OpenCode tool activity while terminal text remains buffered', async () => {
+    const events: AgentEvent[] = [];
+    const sm = new SessionManager({
+      db: makeDb(),
+      messenger: makeMessenger().messenger,
+      chatJid: CHAT_JID,
+      onEvent: (event) => events.push(event),
+      provider: 'opencode-cli',
+      model: 'glm/test-model',
+    });
+    await sm.spawnSession();
+    events.length = 0;
+    await sm.sendTurn('run one tool and report the result');
+
+    const line = (value: unknown): string => `${JSON.stringify(value)}\n`;
+    mockChild.stdout.emit('data', Buffer.from([
+      line({
+        type: 'tool_use',
+        part: {
+          tool: 'bash',
+          callID: 'call-live-progress',
+          state: {
+            status: 'completed',
+            input: { command: 'sensitive command text' },
+            output: 'sensitive command output',
+          },
+        },
+      }),
+      line({ type: 'text', part: { text: 'terminal text must wait for process close' } }),
+    ].join('')));
+
+    const toolEvents = events.filter(
+      (event) => event.type === 'tool_use' || event.type === 'tool_result',
+    );
+    expect(toolEvents).toEqual([
+      {
+        type: 'tool_use',
+        toolName: 'bash',
+        toolId: 'call-live-progress',
+        toolInput: {},
+      },
+      {
+        type: 'tool_result',
+        isError: false,
+        toolId: 'call-live-progress',
+        toolName: 'bash',
+        content: 'sensitive command output',
+      },
+    ]);
+    expect(JSON.stringify(toolEvents[0])).not.toContain('sensitive command');
+    expect(events.filter((event) => event.type === 'assistant_text' || event.type === 'result')).toEqual([]);
+
+    mockChild.stdout.emit('data', Buffer.from(line({
+      type: 'step_finish',
+      part: { type: 'step-finish', reason: 'stop', tokens: { input: 800, output: 12 } },
+    })));
+    mockChild._closeCb?.(0, null);
+
+    expect(events.filter((event) => event.type === 'assistant_text' || event.type === 'result')).toEqual([
+      { type: 'assistant_text', text: 'terminal text must wait for process close' },
       { type: 'result', text: null, inputTokens: 800, outputTokens: 12, costUsd: undefined },
     ]);
   });
