@@ -1046,3 +1046,428 @@ describe('fresh-spawn context preamble (P4 — effect-free by construction)', ()
     expect(mockSession.sendTurn).toHaveBeenCalledWith('Continue');
   });
 });
+
+describe('AgentRuntime route recycle publication and shutdown ownership', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.useRealTimers();
+    capturedOnEventRef.current = null;
+    capturedOnCrashRef.current = null;
+    capturedNotifyUserRef.current = null;
+    mockSession.spawnSession.mockReset().mockResolvedValue(undefined);
+    mockSession.shutdown.mockReset().mockResolvedValue(undefined);
+    mockSession.getStatus.mockReset().mockReturnValue({ active: false, pid: null, sessionId: null, startedAt: null, messageCount: 0, lastMessageAt: null });
+    mockSession.sendTurn.mockReset().mockResolvedValue(undefined);
+    mockSession.getDbRowId.mockReset().mockReturnValue(null);
+    mockQueue.flush.mockReset().mockResolvedValue(undefined);
+    mockQueue.abortTurn.mockReset();
+    mockConfig.controlPeers = new Map();
+  });
+
+  function makeMsg(overrides: Partial<IncomingMessage> = {}): IncomingMessage {
+    return {
+      messageId: 'msg-1',
+      chatJid: 'test@s.whatsapp.net',
+      senderJid: 'sender@s.whatsapp.net',
+      senderName: 'Test User',
+      content: 'hello',
+      contentType: 'text',
+      isFromMe: false,
+      isGroup: false,
+      mentionedJids: [],
+      timestamp: Date.now(),
+      quotedMessageId: null,
+      contentText: null,
+      isResponseWorthy: true,
+      ...overrides,
+    };
+  }
+
+  function makeQueueMock(targetChatJid: string): IOutboundQueue {
+    return {
+      enqueueText: vi.fn(),
+      getSenderToken: () => 'mock-sender-token',
+      enqueueStreamingText: vi.fn(),
+      enqueueResultText: vi.fn(),
+      enqueueToolUpdate: vi.fn(),
+      enqueueProgressUpdate: vi.fn(),
+      indicateTyping: vi.fn(),
+      flush: vi.fn(async () => {}),
+      shutdown: vi.fn(async () => {}),
+      abortTurn: vi.fn(),
+      endTurn: vi.fn(),
+      updateDeliveryJid: vi.fn(),
+      setInboundSeq: vi.fn(),
+      markLastTerminal: vi.fn(),
+      clearLastOpId: vi.fn(),
+      beginTurnEvidence: vi.fn(),
+      flushTurnEvidence: vi.fn(async (turnId: string) => ({
+        turnId,
+        answerOpIds: [] as number[],
+        lifecycleOpIds: [] as number[],
+        statusOpIds: [] as number[],
+      })),
+      setToolUpdateMode: vi.fn(),
+      setToolUpdateRedirectJid: vi.fn(),
+      setTextAggregateDelayMs: vi.fn(),
+      enqueuePoll: vi.fn(async (fn: () => Promise<void>) => { await fn(); }),
+      hasPendingPoll: vi.fn(() => false),
+      setPollPending: vi.fn(),
+      targetChatJid,
+      getLastOpId: vi.fn(() => undefined),
+      setDurability: vi.fn(),
+    };
+  }
+
+  it('tracks ordinary singleton handleMessage work until its deferred recycle is published and settled', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const runtime = new AgentRuntime(db, messenger);
+    let releaseQueuedWork!: () => void;
+    const queuedWorkBlocker = new Promise<void>((resolve) => {
+      releaseQueuedWork = resolve;
+    });
+    let releaseRecycle!: () => void;
+    const recycleBlocker = new Promise<void>((resolve) => {
+      releaseRecycle = resolve;
+    });
+    const session = {
+      getProviderId: () => 'claude-cli',
+      getModelRef: () => 'old-model',
+      getSpawnedEffort: () => null,
+      shutdown: vi.fn(async () => {
+        await recycleBlocker;
+      }),
+    };
+    const state = runtime as unknown as {
+      session: typeof session | null;
+      queue: IOutboundQueue | null;
+      activeChatJid: string | null;
+      turnChain: Promise<void>;
+      pendingRecycle: Set<string>;
+      routeRecyclePublicationWork: Map<Promise<void>, string>;
+    };
+    state.session = session;
+    state.queue = makeQueueMock('test@s.whatsapp.net');
+    state.activeChatJid = 'test@s.whatsapp.net';
+    state.pendingRecycle.add('__global__');
+    state.turnChain = queuedWorkBlocker;
+
+    await runtime.handleMessage(makeMsg({ content: '/status' }));
+    const ordinaryQueuedWork = state.turnChain;
+
+    expect([...state.routeRecyclePublicationWork.entries()]).toEqual([
+      [ordinaryQueuedWork, '__global__'],
+    ]);
+
+    const shutdown = runtime.shutdown();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    expect(session.shutdown).not.toHaveBeenCalled();
+    expect(state.session).toBe(session);
+
+    releaseQueuedWork();
+    await vi.waitFor(() => expect(session.shutdown).toHaveBeenCalledOnce());
+
+    expect(session.shutdown).toHaveBeenCalledWith(false);
+    expect(state.session).toBe(session);
+
+    releaseRecycle();
+    await expect(shutdown).resolves.toBeUndefined();
+
+    expect({
+      shutdownCalls: session.shutdown.mock.calls,
+      publicationScopes: [...state.routeRecyclePublicationWork.values()],
+      session: state.session,
+    }).toEqual({
+      shutdownCalls: [[false]],
+      publicationScopes: [],
+      session: null,
+    });
+  });
+
+  it('retains and retries the exact per-chat owner when ordinary handleMessage recycle publication fails', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
+    const mapKey = 'test@s.whatsapp.net';
+    const recycleError = new Error('route recycle tree still live');
+    let releaseQueuedWork!: () => void;
+    const queuedWorkBlocker = new Promise<void>((resolve) => {
+      releaseQueuedWork = resolve;
+    });
+    let rejectRecycle!: (error: unknown) => void;
+    const recycleBlocker = new Promise<void>((_resolve, reject) => {
+      rejectRecycle = reject;
+    });
+    const session = {
+      getProviderId: () => 'claude-cli',
+      getModelRef: () => 'old-model',
+      getSpawnedEffort: () => null,
+      shutdown: vi.fn(() => recycleBlocker),
+    };
+    const queue = makeQueueMock(mapKey);
+    const state = runtime as unknown as {
+      chatSessions: Map<string, typeof session>;
+      chatQueues: Map<string, IOutboundQueue>;
+      turnChain: Promise<void>;
+      pendingRecycle: Set<string>;
+      routeRecyclePublicationWork: Map<Promise<void>, string>;
+    };
+    state.chatSessions.set(mapKey, session);
+    state.chatQueues.set(mapKey, queue);
+    state.pendingRecycle.add(mapKey);
+    state.turnChain = queuedWorkBlocker;
+
+    await runtime.handleMessage(makeMsg({ content: '/status' }));
+    const ordinaryQueuedWork = state.turnChain;
+
+    expect([...state.routeRecyclePublicationWork.entries()]).toEqual([
+      [ordinaryQueuedWork, mapKey],
+    ]);
+
+    const shutdown = runtime.shutdown();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    expect(session.shutdown).not.toHaveBeenCalled();
+    expect(state.chatSessions.get(mapKey)).toBe(session);
+
+    releaseQueuedWork();
+    await vi.waitFor(() => expect(session.shutdown).toHaveBeenCalledOnce());
+    expect(session.shutdown).toHaveBeenCalledWith(false);
+    expect(state.chatSessions.get(mapKey)).toBe(session);
+
+    rejectRecycle(recycleError);
+    await expect(shutdown).rejects.toBe(recycleError);
+
+    expect(session.shutdown).toHaveBeenCalledTimes(1);
+    expect(state.chatSessions.get(mapKey)).toBe(session);
+    expect(state.chatQueues.get(mapKey)).toBe(queue);
+    expect(state.routeRecyclePublicationWork.size).toBe(0);
+
+    session.shutdown.mockResolvedValueOnce(undefined);
+    await expect(runtime.shutdown()).resolves.toBeUndefined();
+
+    expect(session.shutdown).toHaveBeenCalledTimes(2);
+    expect(state.chatSessions.has(mapKey)).toBe(false);
+    expect(state.chatQueues.has(mapKey)).toBe(false);
+  });
+
+  it('retains only the exact per-chat owner when ordinary recycle publication misses the shutdown deadline', async () => {
+    vi.useFakeTimers();
+    try {
+      const db = makeDb();
+      const { messenger } = makeMessenger();
+      const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
+      const targetKey = 'test@s.whatsapp.net';
+      const unrelatedKey = 'other@s.whatsapp.net';
+      let releaseQueuedWork!: () => void;
+      const queuedWorkBlocker = new Promise<void>((resolve) => {
+        releaseQueuedWork = resolve;
+      });
+      const targetSession = {
+        getProviderId: () => 'claude-cli',
+        getModelRef: () => 'old-model',
+        getSpawnedEffort: () => null,
+        shutdown: vi.fn(async () => {}),
+      };
+      const unrelatedSession = {
+        getProviderId: () => 'claude-cli',
+        getModelRef: () => 'other-model',
+        getSpawnedEffort: () => null,
+        shutdown: vi.fn(async () => {}),
+      };
+      const state = runtime as unknown as {
+        chatSessions: Map<string, typeof targetSession>;
+        chatQueues: Map<string, IOutboundQueue>;
+        turnChain: Promise<void>;
+        pendingRecycle: Set<string>;
+        routeRecyclePublicationWork: Map<Promise<void>, string>;
+      };
+      state.chatSessions.set(targetKey, targetSession);
+      state.chatSessions.set(unrelatedKey, unrelatedSession);
+      state.chatQueues.set(targetKey, makeQueueMock(targetKey));
+      state.chatQueues.set(unrelatedKey, makeQueueMock(unrelatedKey));
+      state.pendingRecycle.add(targetKey);
+      state.turnChain = queuedWorkBlocker;
+
+      await runtime.handleMessage(makeMsg({ content: '/status' }));
+      expect([...state.routeRecyclePublicationWork.values()]).toEqual([targetKey]);
+
+      const shutdown = runtime.shutdown();
+      const shutdownFailure = expect(shutdown).rejects.toThrow(
+        'Route recycle shutdown join deadline expired',
+      );
+      await Promise.resolve();
+      await vi.advanceTimersByTimeAsync(2_000);
+      await shutdownFailure;
+
+      expect(targetSession.shutdown).not.toHaveBeenCalled();
+      expect(unrelatedSession.shutdown).toHaveBeenCalledOnce();
+      expect(state.chatSessions.get(targetKey)).toBe(targetSession);
+
+      releaseQueuedWork();
+      await state.turnChain;
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('joins a newly published singleton route recycle before shutdown enumerates sessions', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const runtime = new AgentRuntime(db, messenger);
+    let releaseSessionShutdown!: () => void;
+    const sessionShutdownBlocked = new Promise<void>((resolve) => {
+      releaseSessionShutdown = resolve;
+    });
+    const session = {
+      getProviderId: () => 'claude-cli',
+      getModelRef: () => 'old-model',
+      getSpawnedEffort: () => null,
+      shutdown: vi.fn(async () => {
+        await sessionShutdownBlocked;
+      }),
+    };
+    let releaseQueuedCommand!: () => void;
+    const queuedCommandGate = new Promise<void>((resolve) => {
+      releaseQueuedCommand = resolve;
+    });
+    let markFinalizationStarted!: () => void;
+    const finalizationStarted = new Promise<void>((resolve) => {
+      markFinalizationStarted = resolve;
+    });
+    let releaseFinalization!: () => void;
+    const finalizationBlocked = new Promise<void>((resolve) => {
+      releaseFinalization = resolve;
+    });
+    const state = runtime as unknown as {
+      session: typeof session | null;
+      queue: IOutboundQueue | null;
+      activeChatJid: string | null;
+      turnChain: Promise<void>;
+      routeRecycleCommandWork: Set<Promise<void>>;
+      resolveRouteForTurn: () => unknown;
+      applyRouteChangeAndRecycle(
+        chatJid: string,
+        senderJid: string,
+        mapKey: string | undefined,
+      ): Promise<string>;
+      runtimeTurnCoordinator: {
+        finalizeActiveRuntimeTurnsForShutdown(deadlineAt?: number): Promise<void>;
+      };
+    };
+    state.session = session;
+    state.queue = makeQueueMock('test@s.whatsapp.net');
+    state.activeChatJid = 'test@s.whatsapp.net';
+    state.resolveRouteForTurn = () => ({
+      provider: 'claude-cli',
+      model: 'new-model',
+      source: 'preference',
+      reasonCode: 'user_pin',
+      pinnedProvider: null,
+    });
+    let queuedCommand!: Promise<void>;
+    queuedCommand = queuedCommandGate.then(async () => {
+      await state.applyRouteChangeAndRecycle(
+        'test@s.whatsapp.net',
+        'sender@s.whatsapp.net',
+        undefined,
+      );
+    }).finally(() => {
+      state.routeRecycleCommandWork.delete(queuedCommand);
+    });
+    state.turnChain = queuedCommand;
+    state.routeRecycleCommandWork.add(queuedCommand);
+    state.runtimeTurnCoordinator.finalizeActiveRuntimeTurnsForShutdown = vi.fn(async () => {
+      markFinalizationStarted();
+      await finalizationBlocked;
+    });
+
+    const shutdown = runtime.shutdown();
+    await finalizationStarted;
+    releaseQueuedCommand();
+    await vi.waitFor(() => expect(session.shutdown).toHaveBeenCalledTimes(1));
+    expect(state.session).toBe(session);
+    expect(state.queue).not.toBeNull();
+    releaseFinalization();
+    await Promise.resolve();
+
+    expect(session.shutdown).toHaveBeenCalledTimes(1);
+    expect(state.session).toBe(session);
+    releaseSessionShutdown();
+    await expect(shutdown).resolves.toBeUndefined();
+    expect({
+      shutdownCalls: session.shutdown.mock.calls.length,
+      session: state.session,
+      queue: state.queue,
+    }).toEqual({
+      shutdownCalls: 1,
+      session: null,
+      queue: null,
+    });
+  });
+
+  it('does not re-enter a failed per-chat route recycle during runtime shutdown', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
+    const mapKey = 'test@s.whatsapp.net';
+    const recycleError = new Error('route recycle tree still live');
+    let rejectSessionShutdown!: (error: unknown) => void;
+    const sessionShutdownBlocked = new Promise<void>((_resolve, reject) => {
+      rejectSessionShutdown = reject;
+    });
+    const session = {
+      getProviderId: () => 'claude-cli',
+      getModelRef: () => 'old-model',
+      getSpawnedEffort: () => null,
+      shutdown: vi.fn(() => sessionShutdownBlocked),
+    };
+    const queue = makeQueueMock(mapKey);
+    const state = runtime as unknown as {
+      chatSessions: Map<string, typeof session>;
+      chatQueues: Map<string, IOutboundQueue>;
+      resolveRouteForTurn: () => unknown;
+      applyRouteChangeAndRecycle(
+        chatJid: string,
+        senderJid: string,
+        mapKey: string | undefined,
+      ): Promise<string>;
+    };
+    state.chatSessions.set(mapKey, session);
+    state.chatQueues.set(mapKey, queue);
+    state.resolveRouteForTurn = () => ({
+      provider: 'claude-cli',
+      model: 'new-model',
+      source: 'preference',
+      reasonCode: 'user_pin',
+      pinnedProvider: null,
+    });
+
+    const recycle = state.applyRouteChangeAndRecycle(
+      mapKey,
+      'sender@s.whatsapp.net',
+      mapKey,
+    );
+    await vi.waitFor(() => expect(session.shutdown).toHaveBeenCalledTimes(1));
+    const shutdown = runtime.shutdown();
+    await Promise.resolve();
+
+    expect(session.shutdown).toHaveBeenCalledTimes(1);
+    expect(state.chatSessions.get(mapKey)).toBe(session);
+    expect(state.chatQueues.get(mapKey)).toBe(queue);
+    rejectSessionShutdown(recycleError);
+    await expect(recycle).rejects.toBe(recycleError);
+    await expect(shutdown).rejects.toBe(recycleError);
+    expect(session.shutdown).toHaveBeenCalledTimes(1);
+    expect(state.chatSessions.get(mapKey)).toBe(session);
+    expect(state.chatQueues.get(mapKey)).toBe(queue);
+
+    session.shutdown.mockResolvedValueOnce(undefined);
+    await expect(runtime.shutdown()).resolves.toBeUndefined();
+    expect(session.shutdown).toHaveBeenCalledTimes(2);
+    expect(state.chatSessions.has(mapKey)).toBe(false);
+    expect(state.chatQueues.has(mapKey)).toBe(false);
+  });
+});

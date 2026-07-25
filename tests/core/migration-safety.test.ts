@@ -19,6 +19,7 @@ import { join, resolve } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { readFileSync, realpathSync, unlinkSync, existsSync } from 'node:fs';
 import { Database, CURRENT_SCHEMA_MIGRATION } from '../../src/core/database.ts';
+import { SQLITE_BUSY_TIMEOUT_MS } from '../../src/lib/sqlite-constants.ts';
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -41,7 +42,7 @@ function cleanup(...paths: string[]): void {
   }
 }
 
-const ALL_MIGRATION_VERSIONS = Array.from({ length: 45 }, (_, i) => i + 1);
+const ALL_MIGRATION_VERSIONS = Array.from({ length: 46 }, (_, i) => i + 1);
 
 /**
  * Raw migration 1 SQL — extracted verbatim from database.ts.
@@ -1370,13 +1371,13 @@ describe('Test 10 — WAL mode and busy_timeout are set before migrations run', 
     db.close();
   });
 
-  it('busy_timeout is set to 5000ms', () => {
+  it('busy_timeout is set to the shared default', () => {
     dbPath = tmpFile();
     const db = new Database(dbPath);
     db.open();
 
     const row = db.raw.prepare('PRAGMA busy_timeout').get() as { timeout: number };
-    expect(row.timeout).toBe(5000);
+    expect(row.timeout).toBe(SQLITE_BUSY_TIMEOUT_MS);
 
     db.close();
   });

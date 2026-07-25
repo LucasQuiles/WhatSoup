@@ -276,6 +276,25 @@ export const REGISTRY: DurabilityStatusEntry[] = [
     // reviewed gap instead of a silent pass or a silent drop.
     writerSites: [],
   },
+  {
+    table: 'background_work',
+    statusColumn: 'state',
+    vocabulary: ['registered', 'running', 'completed', 'failed', 'orphaned'],
+    vocabularySource: 'sql-check',
+    // 'orphaned' is deliberately NOT terminal: it is the sweep's verdict that the
+    // parent died, and such work can still finish and report (that is the whole
+    // point of the ledger). Only 'failed' is terminal failure.
+    terminalFailureValues: ['failed'],
+    writerSites: ['src/core/background-work-store.ts'], // completeBackgroundWork()
+  },
+  {
+    table: 'work_results',
+    statusColumn: 'delivery_state',
+    vocabulary: ['pending', 'delivering', 'delivered', 'failed'],
+    vocabularySource: 'sql-check',
+    terminalFailureValues: ['failed'],
+    writerSites: ['src/core/background-work-store.ts'], // releaseWorkResultDelivery(retryable=false)
+  },
 ];
 
 /**

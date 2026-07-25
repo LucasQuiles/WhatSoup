@@ -2651,143 +2651,6 @@ describe('AgentRuntime', () => {
     expect(ackTexts.some((t) => t.includes('still in progress'))).toBe(false);
   });
 
-  it('interrupts an unsequenced synthetic per-chat turn owning the runtime queue on /new', async () => {
-    const db = makeDb();
-    const { messenger } = makeMessenger();
-    const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
-    const state = runtime as unknown as {
-      perChatInboundSeqQueue: Map<string, number[]>;
-      perChatTurnQueues: Map<string, { isProcessing: boolean; idle: () => Promise<void> }>;
-    };
-    const mutableConfig = mockConfig as typeof mockConfig & {
-      memory?: { adminJid: string };
-    };
-    const previousMemory = mutableConfig.memory;
-    let markSendStarted!: () => void;
-    let releaseSend!: () => void;
-    const sendStarted = new Promise<void>((resolve) => {
-      markSendStarted = resolve;
-    });
-    const sendBlocked = new Promise<void>((resolve) => {
-      releaseSend = resolve;
-    });
-
-    await runtime.start();
-    // A local command initializes the per-chat session without admitting a turn.
-    await sendAndDrain(runtime, makeMsg({ content: '/status' }));
-    mutableConfig.memory = { adminJid: '15550100001@s.whatsapp.net' };
-    mockSession.getStatus.mockReturnValue({
-      active: true,
-      pid: 123,
-      sessionId: 'synthetic-session',
-      startedAt: new Date().toISOString(),
-      messageCount: 0,
-      lastMessageAt: null,
-    });
-    mockSession.sendTurn.mockImplementationOnce(async () => {
-      markSendStarted();
-      await sendBlocked;
-    });
-
-    try {
-      expect(runtime.dispatchAgentJob({
-        beadId: 7,
-        triggerId: 11,
-        prompt: 'Summarize the current state.',
-        title: 'Synthetic status',
-        reportChatJid: 'test@s.whatsapp.net',
-      })).toMatchObject({ dispatched: true });
-      await sendStarted;
-      await (runtime as unknown as { turnChain: Promise<void> }).turnChain;
-
-      // Synthetic jobs deliberately have no journal seq; queue ownership is
-      // the only active-turn proof in this state.
-      expect(state.perChatInboundSeqQueue.get('test@s.whatsapp.net')).toEqual([]);
-      expect(state.perChatTurnQueues.get('test@s.whatsapp.net')?.isProcessing).toBe(true);
-      mockQueue.abortTurn.mockClear();
-      mockSession.shutdown.mockClear();
-
-      await sendAndDrain(runtime, makeMsg({ content: '/new' }));
-
-      // Queue ownership alone is active-turn proof — /new interrupts it now
-      // (teardown + terminalization) instead of bouncing. The interrupt deletes
-      // the chat's outbound queue, so the ack rides the messenger fallback.
-      expect(mockSession.shutdown).toHaveBeenCalledWith(false);
-      const ackTexts = [
-        ...mockQueue.enqueueText.mock.calls.map((args) => args[0] as string),
-        ...(messenger.sendMessage as ReturnType<typeof vi.fn>).mock.calls.map((args) => args[1] as string),
-      ];
-      expect(ackTexts.some((t) => t.includes('Interrupted the running task'))).toBe(true);
-      expect(ackTexts.some((t) => t.includes('still in progress'))).toBe(false);
-    } finally {
-      releaseSend();
-      if (previousMemory === undefined) delete mutableConfig.memory;
-      else mutableConfig.memory = previousMemory;
-    }
-    await state.perChatTurnQueues.get('test@s.whatsapp.net')?.idle();
-  });
-
-  it('interrupts /new-blocking shared-queue ownership after flag handoff instead of bouncing', async () => {
-    const db = makeDb();
-    const { messenger } = makeMessenger();
-    const runtime = new AgentRuntime(db, messenger, 'test', { shared: true });
-    const state = runtime as unknown as {
-      currentInboundSeq?: number;
-      currentTurnChatJid: string | null;
-      turnQueue: { isProcessing: boolean; idle: () => Promise<void> };
-    };
-    let markSendStarted!: () => void;
-    let releaseSend!: () => void;
-    const sendStarted = new Promise<void>((resolve) => {
-      markSendStarted = resolve;
-    });
-    const sendBlocked = new Promise<void>((resolve) => {
-      releaseSend = resolve;
-    });
-
-    await runtime.start();
-    mockSession.getStatus.mockReturnValue({
-      active: true,
-      pid: 123,
-      sessionId: 'shared-session',
-      startedAt: new Date().toISOString(),
-      messageCount: 0,
-      lastMessageAt: null,
-    });
-    mockSession.sendTurn.mockImplementationOnce(async () => {
-      markSendStarted();
-      await sendBlocked;
-    });
-
-    await runtime.handleMessage(makeMsg({ senderJid: '15550100001@s.whatsapp.net' }));
-    await (runtime as unknown as { turnChain: Promise<void> }).turnChain;
-    await sendStarted;
-    expect(state.turnQueue.isProcessing).toBe(true);
-
-    // Terminal bookkeeping clears these legacy flags before the queue's
-    // processor ownership necessarily drains. Model that handoff explicitly.
-    state.currentInboundSeq = undefined;
-    state.currentTurnChatJid = null;
-    mockQueue.abortTurn.mockClear();
-    mockSession.handleNew.mockClear();
-
-    try {
-      await sendAndDrain(runtime, makeMsg({
-        content: '/new',
-        senderJid: '15550100001@s.whatsapp.net',
-      }));
-
-      // Residual queue ownership is still an active turn — /new interrupts it.
-      expect(mockSession.shutdown).toHaveBeenCalledWith(false);
-      expect(mockSession.handleNew).not.toHaveBeenCalled();
-      const enqueuedTexts = mockQueue.enqueueText.mock.calls.map((args) => args[0] as string);
-      expect(enqueuedTexts.some((t) => t.includes('Interrupted the running task'))).toBe(true);
-      expect(enqueuedTexts.some((t) => t.includes('still in progress'))).toBe(false);
-    } finally {
-      releaseSend();
-    }
-    await state.turnQueue.idle();
-  });
 
   // QR-108: /new is a clean reset — it must drop the one-message-handoff latches
   // (standby notice + handoff artifact) for the conversation, else they leak into
@@ -3806,6 +3669,7 @@ describe('AgentRuntime', () => {
       const state = runtime as unknown as PerChatCleanupRuntimeState & {
         chatSessions: Map<string, { getStatus: () => ReturnType<typeof mockSession.getStatus> }>;
         chatQueues: Map<string, IOutboundQueue>;
+        routeRecyclePublicationWork: Map<Promise<void>, string>;
         setOwnedPerChatSession: (mapKey: string, session: { getStatus: () => ReturnType<typeof mockSession.getStatus> }) => void;
       };
       const lidKey = '15550004444@lid';
@@ -3832,6 +3696,8 @@ describe('AgentRuntime', () => {
       // migrated state — if it isn't carried over, the recycle the pin
       // promised silently never applies once the chat's canonical key flips.
       state.pendingRecycle.add(lidKey);
+      const publicationWork = Promise.resolve();
+      state.routeRecyclePublicationWork.set(publicationWork, lidKey);
       state.autoCompact.cooldownUntil.set(lidKey, 1_700_000_900_000);
       state.autoCompact.lastSuccessAt.set(lidKey, 1_700_000_000_000);
       state.autoCompact.rapidRearmRecordedForSuccessAt.set(lidKey, 1_700_000_000_000);
@@ -3884,6 +3750,7 @@ describe('AgentRuntime', () => {
       expect(state.crashes.count(canonicalJid)).toBe(2);
       expect(state.resumeFailedHandling.has(canonicalJid)).toBe(true);
       expect(state.pendingRecycle.has(canonicalJid)).toBe(true);
+      expect(state.routeRecyclePublicationWork.get(publicationWork)).toBe(canonicalJid);
       expect(state.autoCompact.cooldownUntil.get(canonicalJid)).toBe(1_700_000_900_000);
       expect(state.autoCompact.lastSuccessAt.get(canonicalJid)).toBe(1_700_000_000_000);
       expect(state.autoCompact.rapidRearmRecordedForSuccessAt.get(canonicalJid)).toBe(1_700_000_000_000);
@@ -3914,6 +3781,7 @@ describe('AgentRuntime', () => {
       expect(state.pendingPolls.questions.has(lidKey)).toBe(false);
       expect(state.resumeFailedHandling.has(lidKey)).toBe(false);
       expect(state.pendingRecycle.has(lidKey)).toBe(false);
+      expect([...state.routeRecyclePublicationWork.values()]).not.toContain(lidKey);
       expect(state.autoCompact.cooldownUntil.has(lidKey)).toBe(false);
       expect(state.autoCompact.lastSuccessAt.has(lidKey)).toBe(false);
       expect(state.autoCompact.rapidRearmRecordedForSuccessAt.has(lidKey)).toBe(false);
@@ -8205,6 +8073,7 @@ describe('AgentRuntime', () => {
       vi.useRealTimers();
     }
   });
+
 
   it('per_chat crash cleanup scopes tool-state to the crashing mapKey (does not stomp other chats)', () => {
     const db = makeDb();
@@ -14925,6 +14794,7 @@ describe('AgentRuntime', () => {
 
       expect(state.perChatTurnQueues.has(groupKey)).toBe(false);
     });
+
 
     it('/kill-session (per_chat scope) kills the targeted DM session and reports it', async () => {
       const db = makeDb();

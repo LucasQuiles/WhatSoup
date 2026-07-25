@@ -26,11 +26,13 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { DatabaseSync } from 'node:sqlite';
 import { jsonResponse, readBody, requireInstance } from '../../lib/http.ts';
+import { errorMessage } from '../../lib/error-message.ts';
 import { publishFeedEvent, publishInstanceStatus } from '../realtime-publisher.ts';
 import type { FleetDiscovery } from '../discovery.ts';
 import type { FleetDbReader } from '../db-reader.ts';
 import type { ServiceManager } from '../platform.ts';
 import type { FleetRealtimePublisher } from '../realtime-publisher.ts';
+import { validateInstanceName } from './instance-name.ts';
 
 export interface CheckpointsDeps {
   discovery: FleetDiscovery;
@@ -40,18 +42,6 @@ export interface CheckpointsDeps {
 export interface RestoreCheckpointDeps extends CheckpointsDeps {
   serviceManager: ServiceManager;
   realtime: FleetRealtimePublisher;
-}
-
-/** Valid instance name pattern — mirrors ops.ts NAME_RE (mutation routes
- *  validate before the name reaches service-manager / path construction). */
-const NAME_RE = /^[a-z][a-z0-9-]*$/;
-
-function validateInstanceName(name: string, res: ServerResponse): boolean {
-  if (!NAME_RE.test(name) || name.length < 1 || name.length > 30) {
-    jsonResponse(res, 400, { error: 'invalid instance name' });
-    return false;
-  }
-  return true;
 }
 
 export async function handleGetLineCheckpoints(
@@ -130,7 +120,7 @@ export async function handleRestoreCheckpoint(
     await deps.serviceManager.stop(instance.name);
   } catch (err) {
     jsonResponse(res, 500, {
-      error: `restore failed at stop: ${(err as Error).message}`,
+      error: `restore failed at stop: ${errorMessage(err)}`,
       instance: instance.name,
       conversationKey,
     });
@@ -157,7 +147,7 @@ export async function handleRestoreCheckpoint(
       restartAttempted = true;
     } catch { /* start failure reported below as part of the same 500 */ }
     jsonResponse(res, 500, {
-      error: `restore failed at write: ${(err as Error).message}`,
+      error: `restore failed at write: ${errorMessage(err)}`,
       instance: instance.name,
       conversationKey,
       restartAttempted,
@@ -169,7 +159,7 @@ export async function handleRestoreCheckpoint(
     await deps.serviceManager.start(instance.name);
   } catch (err) {
     jsonResponse(res, 500, {
-      error: `restore write landed but start failed — instance is down: ${(err as Error).message}`,
+      error: `restore write landed but start failed — instance is down: ${errorMessage(err)}`,
       instance: instance.name,
       conversationKey,
       instanceDown: true,

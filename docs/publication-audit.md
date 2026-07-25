@@ -4,15 +4,15 @@
 
 Internal publication roots covered by the guard: `docs/runbooks/`, `docs/sdlc/`, `docs/superpowers/`, `docs/plans/`, `docs/cutover/`, `docs/research/`, `docs/specs/` (selected), `docs/work-index*`, `docs/current-program.md`, `docs/handoff-*.md`, `HANDOFF-*.md`, `docs/project-status-*.md`, `docs/audit-*.md`, `tmp/`.
 
-**Total classification rows:** 123
+**Total classification rows:** 124
 
 | Classification | Count |
 |---|---:|
 | PUBLIC | 1 |
-| PRIVATE-ARCHIVE | 122 |
+| PRIVATE-ARCHIVE | 123 |
 | SANITIZE | 0 |
 | DELETE | 0 |
-| Total | 123 |
+| Total | 124 |
 
 | Path | Classification | Rationale |
 |---|---|---|
@@ -106,6 +106,7 @@ Internal publication roots covered by the guard: `docs/runbooks/`, `docs/sdlc/`,
 | `docs/superpowers/reviews/2026-04-07-anti-echo-review-handoff.md` | PRIVATE-ARCHIVE | Internal planning or operational documentation; retained in the repository but excluded from public publication by default. |
 | `docs/superpowers/reviews/2026-05-31-bot-errors-tool-call-audit.md` | PRIVATE-ARCHIVE | Internal planning or operational documentation; retained in the repository but excluded from public publication by default. |
 | `docs/superpowers/reviews/2026-07-09-wall-to-wall-audit-pr-briefs.md` | PRIVATE-ARCHIVE | Internal copy-ready PR briefs from the audit; retained in the repository but excluded from public publication by default. |
+| `docs/superpowers/reviews/2026-07-24-r13-r15-tech-debt-review-map.md` | PRIVATE-ARCHIVE | Internal R13-R15 tech-debt review map, live-inventory reconciliation, and closed-issue audit snapshot; retained in the repository but excluded from public publication by default. |
 | `docs/superpowers/specs/2026-04-04-colony-orchestration-design.md` | PRIVATE-ARCHIVE | Internal planning or operational documentation; retained in the repository but excluded from public publication by default. |
 | `docs/superpowers/specs/2026-04-04-mcp-feature-gaps-design.md` | PRIVATE-ARCHIVE | Internal planning or operational documentation; retained in the repository but excluded from public publication by default. |
 | `docs/superpowers/specs/2026-04-05-phase2-mcp-features-design.md` | PRIVATE-ARCHIVE | Internal planning or operational documentation; retained in the repository but excluded from public publication by default. |

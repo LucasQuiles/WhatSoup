@@ -1,5 +1,6 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { readBody, jsonResponse } from '../../lib/http.ts';
+import { errorMessage } from '../../lib/error-message.ts';
 import { listActiveSilences, addSilence, removeSilence } from '../silence-manager.ts';
 
 /** GET /api/fleet/silences — list active silences */
@@ -14,7 +15,7 @@ export async function handleAddSilence(req: IncomingMessage, res: ServerResponse
   try {
     raw = await readBody(req);
   } catch (err) {
-    jsonResponse(res, 400, { error: (err as Error).message });
+    jsonResponse(res, 400, { error: errorMessage(err) });
     return;
   }
 

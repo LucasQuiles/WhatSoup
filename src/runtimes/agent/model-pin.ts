@@ -35,6 +35,7 @@ import { isExplicitModelId } from './commands.ts';
 import type { listModelCatalog } from './providers/binary-preflight.ts';
 import { getProviderBinary, type SessionManager } from './session.ts';
 import type { IOutboundQueue } from './outbound-queue.ts';
+import type { TurnQueue } from './turn-queue.ts';
 import type { OperationTracker } from './operation-tracker.ts';
 import {
   sendModelCatalogue,
@@ -44,6 +45,10 @@ import {
 import { brandOf, listBrands } from './providers/provider-brand.ts';
 import { renderBrandLevel, renderEffortLevel, renderModelLevel, prettyEffortLabel, type RenderedLevel } from './model-drilldown-render.ts';
 import { nativeReasoningControl, providerConfigEffort, type ReasoningControl } from './reasoning-control.ts';
+import {
+  RouteRecycleLifecycle,
+  type RouteRecycleFailure as LifecycleRouteRecycleFailure,
+} from './route-recycle-lifecycle.ts';
 import {
   fallbackReconfirmationOutcome,
   fallbackRouteLabel,
@@ -57,6 +62,8 @@ const log = createChildLogger('agent-runtime');
 
 /** Scope key for the single/shared session (mirrors runtime.ts's GLOBAL_TOOL_SCOPE_KEY). */
 const GLOBAL_TOOL_SCOPE_KEY = GLOBAL_CONVERSATION_KEY;
+
+class RouteRecycleOwnershipChangedError extends Error {}
 
 /** TTL for an ephemeral (non-sticky) route preference row. */
 export const PREFERENCE_TTL_MS = 24 * 60 * 60 * 1000;
@@ -74,6 +81,8 @@ const BARE_KEEP_RE = /^\s*keep[\s!.]*$/i;
  */
 export type RouteRecycleOutcome = 'recycled' | 'deferred' | 'noop';
 
+export type RouteRecycleFailure = LifecycleRouteRecycleFailure<SessionManager>;
+
 /**
  * The AgentRuntime surface the pin/recycle path reads and mutates. Declared
  * here rather than importing AgentRuntime so this module stays free of a cycle
@@ -83,10 +92,18 @@ export interface ModelPinPort extends ModelCatalogueRenderPort {
   readonly db: Database;
   readonly sessionScope: 'single' | 'shared' | 'per_chat';
   readonly pendingRecycle: Set<string>;
+  readonly recyclePromises: Map<string, Promise<void>>;
+  readonly recycleOwners: Map<string, SessionManager>;
+  readonly recycleFailures: Map<string, RouteRecycleFailure>;
+  readonly routeRecycleLifecycle?: RouteRecycleLifecycle<SessionManager>;
   readonly chatSessions: Map<string, SessionManager>;
   readonly chatQueues: Map<string, IOutboundQueue>;
   readonly runtimeTurnCoordinator: {
-    terminalizePerChatTurnQueueForKill(mapKey: string): Promise<void>;
+    captureIdlePerChatTurnQueueForRecycle(mapKey: string): TurnQueue | null;
+    retireIdlePerChatTurnQueueForRecycle(
+      mapKey: string,
+      expectedQueue: TurnQueue | null,
+    ): void;
   };
   readonly modelCatalogueListFn: typeof listModelCatalog | undefined;
   readonly modelCatalogueAnthropicFn: typeof fetchAnthropicModelIdsWithStatus | undefined;
@@ -365,19 +382,18 @@ export async function verifyModelPinAgainstCatalogue(
  * resolver won't even honor (e.g. a blocked/ineligible provider) must
  * never tear down a perfectly good session.
  *
- * EAGER-when-idle + defer-when-busy: idle recycles NOW (detach + fire-
- * and-forget shutdown, mirroring /kill-session's teardown so the next
- * inbound finds no session and respawns via createSessionManager — the
- * sole route.model chokepoint); busy sets a pendingRecycle flag consumed
- * at the next turn-idle boundary (consumePendingRecycleIfIdle) and NEVER
- * tears down mid-turn.
+ * EAGER-when-idle + defer-when-busy: idle begins a fail-closed recycle NOW
+ * (prove idle ownership, await process-tree shutdown, then retire and detach);
+ * busy sets a pendingRecycle flag consumed at the next turn-idle boundary and
+ * NEVER tears down mid-turn.
  */
-export function applyRouteChangeAndRecycle(
+export async function applyRouteChangeAndRecycle(
   port: ModelPinPort,
   chatJid: string,
   senderJid: string,
   perChatMapKey: string | undefined,
-): RouteRecycleOutcome {
+): Promise<RouteRecycleOutcome> {
+  const lifecycle = routeRecycleLifecycle(port);
   const scopeKey = port.sessionScope === 'per_chat'
     ? (perChatMapKey ?? port.resolvePerChatMapKey(chatJid))
     : GLOBAL_TOOL_SCOPE_KEY;
@@ -405,83 +421,168 @@ export function applyRouteChangeAndRecycle(
     return 'noop';
   }
   if (port.isTurnInFlight(scopeKey)) {
-    port.pendingRecycle.add(scopeKey);
+    lifecycle.pending.add(scopeKey);
     return 'deferred';
   }
-  recycleLiveSession(port, port.sessionScope === 'per_chat' ? scopeKey : undefined, session);
-  port.pendingRecycle.delete(scopeKey);
+  lifecycle.pending.add(scopeKey);
+  try {
+    await runOwnedRecycle(
+      port,
+      scopeKey,
+      port.sessionScope === 'per_chat' ? scopeKey : undefined,
+      session,
+    );
+  } catch (error) {
+    // The original owner is already gone or terminal. Do not let a stale
+    // retry flag recycle the replacement on the next inbound.
+    if (error instanceof RouteRecycleOwnershipChangedError) {
+      lifecycle.pending.delete(scopeKey);
+    }
+    throw error;
+  }
+  lifecycle.pending.delete(scopeKey);
   return 'recycled';
 }
 
 /**
  * Consumption hook for a deferred recycle (Task G busy branch). Called at
- * the top of ensureSessionAndQueueSync — the point every inbound message
- * reaches BEFORE any turn dispatch or "does a session exist" check — so
- * this can only ever fire between turns, never mid-turn: it re-checks
- * isTurnInFlight itself (a turn may still be draining, or a new one may
- * already be queued behind it) and leaves the flag set to try again on a
- * later message if so.
+ * the inbound initialization boundary before any turn dispatch or "does a
+ * session exist" check, so it can only fire between turns, never mid-turn:
+ * it re-checks isTurnInFlight itself (a turn may still be draining, or a new
+ * one may already be queued behind it) and leaves the flag set to try again
+ * on a later message if so.
  */
-export function consumePendingRecycleIfIdle(port: ModelPinPort, scopeKey: string): void {
-  if (!port.pendingRecycle.has(scopeKey)) return;
+export async function consumePendingRecycleIfIdle(
+  port: ModelPinPort,
+  scopeKey: string,
+): Promise<void> {
+  const lifecycle = routeRecycleLifecycle(port);
+  const inProgress = lifecycle.promises.get(scopeKey);
+  if (inProgress) {
+    await inProgress;
+    return;
+  }
+  if (!lifecycle.pending.has(scopeKey)) return;
   if (port.isTurnInFlight(scopeKey)) return;
-  port.pendingRecycle.delete(scopeKey);
   const session = port.sessionScope === 'per_chat'
     ? port.chatSessions.get(scopeKey)
     : port.session;
-  if (!session) return;
-  recycleLiveSession(port, port.sessionScope === 'per_chat' ? scopeKey : undefined, session);
+  if (!session) {
+    lifecycle.pending.delete(scopeKey);
+    lifecycle.failures.delete(scopeKey);
+    return;
+  }
+  try {
+    await runOwnedRecycle(
+      port,
+      scopeKey,
+      port.sessionScope === 'per_chat' ? scopeKey : undefined,
+      session,
+    );
+  } catch (error) {
+    if (error instanceof RouteRecycleOwnershipChangedError) {
+      lifecycle.pending.delete(scopeKey);
+    }
+    throw error;
+  }
+  lifecycle.pending.delete(scopeKey);
+}
+
+async function runOwnedRecycle(
+  port: ModelPinPort,
+  scopeKey: string,
+  mapKey: string | undefined,
+  session: SessionManager,
+): Promise<void> {
+  return routeRecycleLifecycle(port).runOwned(
+    scopeKey,
+    session,
+    () => recycleLiveSession(port, mapKey, session),
+    (error) => !(error instanceof RouteRecycleOwnershipChangedError),
+  );
+}
+
+function routeRecycleLifecycle(port: ModelPinPort): RouteRecycleLifecycle<SessionManager> {
+  return port.routeRecycleLifecycle ?? new RouteRecycleLifecycle({
+    pending: port.pendingRecycle,
+    promises: port.recyclePromises,
+    owners: port.recycleOwners,
+    failures: port.recycleFailures,
+  });
 }
 
 /**
- * Detach the live session from every map/queue it is reachable through —
- * synchronously, so the caller's subsequent "does a session exist" check
- * (ensureSessionAndQueueSync, reached either immediately after an idle
- * recycle or on the next inbound after a deferred one) sees none and
- * respawns fresh. The actual process teardown is fire-and-forget past
- * that point (mirrors the existing idle-eviction precedent,
- * evictIdleSession) — detachment, not the kill finishing, is what next
- * inbound's respawn correctness depends on.
+ * Retire an idle live session without losing a journal/processor owner. Exact
+ * ownership stays published while process-tree shutdown is awaited; the
+ * runtime queue is then re-proven and retired synchronously before session/
+ * queue maps detach, so success cannot race a next inbound onto the old route.
  *
- * Per-chat teardown mirrors /kill-session's per-chat branch exactly
- * (abort queue, terminalize the runtime TurnQueue, drop from
- * chatSessions/chatQueues, cleanupPerChatState, shutdown(false)) — NOT
- * resetOwnedPerChatSession, which respawns the SAME manager with its
- * cached readonly model and would never apply the switch. Single/shared
- * teardown mirrors /kill-session's else branch.
+ * Per-chat teardown awaits shutdown(false), then atomically retires the
+ * already-proven runtime TurnQueue and drops chatSessions/chatQueues — NOT
+ * resetOwnedPerChatSession, which respawns the SAME manager with its cached
+ * readonly model and would never apply the switch. Single/shared teardown
+ * follows the same shutdown-before-detach rule.
  */
-export function recycleLiveSession(
+export async function recycleLiveSession(
   port: ModelPinPort,
   mapKey: string | undefined,
   session: SessionManager,
-): void {
+): Promise<void> {
   if (port.sessionScope === 'per_chat') {
     const key = mapKey!;
-    port.chatQueues.get(key)?.abortTurn();
-    port.deleteOwnedPerChatSession(key, session);
+    const outboundQueue = port.chatQueues.get(key);
+    if (port.chatSessions.get(key) !== session) {
+      throw new RouteRecycleOwnershipChangedError(
+        `Per-chat session ownership changed before route recycle for ${key}`,
+      );
+    }
+    const runtimeQueue = port.runtimeTurnCoordinator.captureIdlePerChatTurnQueueForRecycle(key);
+    await session.shutdown(false);
+    if (
+      port.chatSessions.get(key) !== session
+      || port.chatQueues.get(key) !== outboundQueue
+    ) {
+      throw new RouteRecycleOwnershipChangedError(
+        `Per-chat session or queue ownership changed during route recycle for ${key}`,
+      );
+    }
+    outboundQueue?.abortTurn({ preserveEvidence: true });
+    port.runtimeTurnCoordinator.retireIdlePerChatTurnQueueForRecycle(key, runtimeQueue);
+    if (!port.deleteOwnedPerChatSession(key, session)) {
+      throw new Error(`Route recycle lost exact per-chat session ownership for ${key}`);
+    }
     port.chatQueues.delete(key);
     port.cleanupPerChatState(key);
-    void port.runtimeTurnCoordinator.terminalizePerChatTurnQueueForKill(key)
-      .catch((err) => {
-        log.error({ err, mapKey: key }, 'route recycle: runtime turn queue teardown failed');
-      })
-      .finally(() => {
-        void session.shutdown(false).catch((err) => {
-          log.warn({ err, mapKey: key }, 'route recycle: session shutdown failed');
-        });
-      });
     return;
   }
-  port.getActiveQueue()?.abortTurn();
-  port.operationTracker?.shutdown();
+  if (port.session !== session) {
+    throw new RouteRecycleOwnershipChangedError(
+      'Singleton/shared session ownership changed before route recycle',
+    );
+  }
+  const activeQueue = port.getActiveQueue();
+  const queue = port.queue;
+  const activeChatJid = port.activeChatJid;
+  const operationTracker = port.operationTracker;
+  await session.shutdown(false);
+  if (
+    port.session !== session
+    || port.getActiveQueue() !== activeQueue
+    || port.queue !== queue
+    || port.activeChatJid !== activeChatJid
+    || port.operationTracker !== operationTracker
+  ) {
+    throw new RouteRecycleOwnershipChangedError(
+      'Singleton/shared ownership changed during route recycle',
+    );
+  }
+  activeQueue?.abortTurn({ preserveEvidence: true });
+  operationTracker?.shutdown();
   port.operationTracker = null;
   port.cleanupGlobalAutoCompactState();
   port.session = null;
   port.queue = null;
   port.activeChatJid = null;
-  void session.shutdown(false).catch((err) => {
-    log.warn({ err }, 'route recycle: session shutdown failed');
-  });
 }
 
 /**
@@ -530,21 +631,21 @@ function fallbackRouteForResolvedPreference(
  * winner flip gets the honest recycle echo instead, matching what the live
  * session just did.
  */
-export function echoReconfirmOutcome(
+export async function echoReconfirmOutcome(
   port: ModelPinPort,
   chatJid: string,
   senderJid: string,
   perChatMapKey: string | undefined,
   label: string,
   alreadySetText: string,
-): string {
+): Promise<string> {
   const fallbackOutcome = fallbackReconfirmationOutcome(
     label,
     alreadySetText,
     fallbackRouteForResolvedPreference(port, chatJid, senderJid),
   );
   if (fallbackOutcome) return fallbackOutcome;
-  const recycleOutcome = applyRouteChangeAndRecycle(port, chatJid, senderJid, perChatMapKey);
+  const recycleOutcome = await applyRouteChangeAndRecycle(port, chatJid, senderJid, perChatMapKey);
   if (recycleOutcome === 'noop') return alreadySetText;
   return renderPinOutcomeEcho(port, chatJid, senderJid, label, recycleOutcome);
 }
@@ -590,14 +691,14 @@ async function pinConfiguredModelEntry(
   const { chatJid, senderJid, perChatMapKey, chatKey, senderKey } = ctx;
   const outcome = recordRouteModelPin(port, chatJid, chatKey, senderKey, providerId, modelId, effort);
   if (outcome === 'refreshed') {
-    port.sendDirect(chatJid, echoReconfirmOutcome(
+    port.sendDirect(chatJid, await echoReconfirmOutcome(
       port, chatJid, senderJid, perChatMapKey, modelId,
       '_Already set — extended for another 24h. /reset to go back to the default route._',
     ));
     return;
   }
   if (outcome === 'sticky_kept') {
-    port.sendDirect(chatJid, echoReconfirmOutcome(
+    port.sendDirect(chatJid, await echoReconfirmOutcome(
       port, chatJid, senderJid, perChatMapKey, modelId,
       '_Already set (sticky). /reset to go back to the default route._',
     ));
@@ -620,7 +721,7 @@ async function pinConfiguredModelEntry(
   // provider default and defeat the switch. Still runs on a DEFERRED verify
   // too — a provider switch (if any) is real even though the model stays
   // unverified.
-  const recycleOutcome = applyRouteChangeAndRecycle(port, chatJid, senderJid, perChatMapKey);
+  const recycleOutcome = await applyRouteChangeAndRecycle(port, chatJid, senderJid, perChatMapKey);
   if (verifyResult === 'deferred') {
     port.sendDirect(
       chatJid,
@@ -843,14 +944,14 @@ export async function handleModelCommand(
     }
     const outcome = port.recordRoutePreference(chatJid, chatKey, senderKey, 'provider_specific', entry.providerId);
     if (outcome === 'refreshed') {
-      port.sendDirect(chatJid, echoReconfirmOutcome(
+      port.sendDirect(chatJid, await echoReconfirmOutcome(
         port, chatJid, senderJid, perChatMapKey, `\`${entry.providerId}\``,
         '_Already set — extended for another 24h. /reset to go back to the default route._',
       ));
       return;
     }
     if (outcome === 'sticky_kept') {
-      port.sendDirect(chatJid, echoReconfirmOutcome(
+      port.sendDirect(chatJid, await echoReconfirmOutcome(
         port, chatJid, senderJid, perChatMapKey, `\`${entry.providerId}\``,
         '_Already set (sticky). /reset to go back to the default route._',
       ));
@@ -858,7 +959,7 @@ export async function handleModelCommand(
     }
     // Task G: apply the switch immediately (idle) or defer it to the
     // next message (busy) — the echo below discloses which.
-    const recycleOutcome = applyRouteChangeAndRecycle(port, chatJid, senderJid, perChatMapKey);
+    const recycleOutcome = await applyRouteChangeAndRecycle(port, chatJid, senderJid, perChatMapKey);
     port.sendDirect(chatJid, renderPinOutcomeEcho(port, chatJid, senderJid, `\`${entry.providerId}\``, recycleOutcome));
     return;
   }
@@ -1010,19 +1111,19 @@ export async function handleModelCommand(
   const what = isProvider ? `\`${sub}\`` : `my ${sub} model`;
   const outcome = port.recordRoutePreference(chatJid, chatKey, senderKey, intent, requestedProvider);
   if (outcome === 'refreshed') {
-    port.sendDirect(chatJid, echoReconfirmOutcome(
+    port.sendDirect(chatJid, await echoReconfirmOutcome(
       port, chatJid, senderJid, perChatMapKey, what,
       '_Already set — extended for another 24h. /reset to go back to the default route._',
     ));
     return;
   }
   if (outcome === 'sticky_kept') {
-    port.sendDirect(chatJid, echoReconfirmOutcome(
+    port.sendDirect(chatJid, await echoReconfirmOutcome(
       port, chatJid, senderJid, perChatMapKey, what,
       '_Already set (sticky). /reset to go back to the default route._',
     ));
     return;
   }
-  const recycleOutcome = applyRouteChangeAndRecycle(port, chatJid, senderJid, perChatMapKey);
+  const recycleOutcome = await applyRouteChangeAndRecycle(port, chatJid, senderJid, perChatMapKey);
   port.sendDirect(chatJid, renderPinOutcomeEcho(port, chatJid, senderJid, what, recycleOutcome));
 }
