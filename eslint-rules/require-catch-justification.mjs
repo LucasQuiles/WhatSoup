@@ -86,6 +86,21 @@ function unwrapExpression(node) {
   return node;
 }
 
+function argumentsHaveObservableEffect(args) {
+  return args.some((argument) =>
+    expressionHasObservableEffect(
+      argument.type === 'SpreadElement' ? argument.argument : argument,
+    ));
+}
+
+function directFunctionCallHasObservableEffect(expression, callee) {
+  if (argumentsHaveObservableEffect(expression.arguments)) return true;
+  if (callee.body.type === 'BlockStatement') {
+    return callee.body.body.some(statementHasObservableHandling);
+  }
+  return expressionHasObservableEffect(callee.body);
+}
+
 function expressionHasObservableEffect(node) {
   const expression = unwrapExpression(node);
   switch (expression.type) {
@@ -96,12 +111,19 @@ function expressionHasObservableEffect(node) {
     case 'NewExpression':
     case 'TaggedTemplateExpression':
       return true;
-    case 'CallExpression':
-      return !(
-        expression.arguments.length === 0
-        && expression.callee.type === 'Identifier'
-        && NOOP_CALLEES.has(expression.callee.name)
-      );
+    case 'CallExpression': {
+      const callee = unwrapExpression(expression.callee);
+      if (callee.type === 'Identifier' && NOOP_CALLEES.has(callee.name)) {
+        return argumentsHaveObservableEffect(expression.arguments);
+      }
+      if (
+        callee.type === 'ArrowFunctionExpression'
+        || callee.type === 'FunctionExpression'
+      ) {
+        return directFunctionCallHasObservableEffect(expression, callee);
+      }
+      return true;
+    }
     case 'UnaryExpression':
       return expression.operator === 'delete'
         || expressionHasObservableEffect(expression.argument);
@@ -143,6 +165,36 @@ function expressionHasObservableEffect(node) {
     default:
       return false;
   }
+}
+
+function declaredIdentifierNames(declaration) {
+  const names = new Set();
+  for (const declarator of declaration.declarations) {
+    if (declarator.id.type === 'Identifier') names.add(declarator.id.name);
+  }
+  return names;
+}
+
+function isLocalCounterUpdate(node, localNames) {
+  const expression = unwrapExpression(node);
+  if (expression.type === 'SequenceExpression') {
+    return expression.expressions.every((entry) =>
+      isLocalCounterUpdate(entry, localNames));
+  }
+  if (expression.type === 'UpdateExpression') {
+    return (
+      expression.argument.type === 'Identifier'
+      && localNames.has(expression.argument.name)
+    );
+  }
+  if (expression.type === 'AssignmentExpression') {
+    return (
+      expression.left.type === 'Identifier'
+      && localNames.has(expression.left.name)
+      && !expressionHasObservableEffect(expression.right)
+    );
+  }
+  return false;
 }
 
 function statementHasObservableHandling(statement) {
@@ -191,7 +243,16 @@ function statementHasObservableHandling(statement) {
     case 'DoWhileStatement':
       return expressionHasObservableEffect(statement.test)
         || statementHasObservableHandling(statement.body);
-    case 'ForStatement':
+    case 'ForStatement': {
+      const localNames = statement.init?.type === 'VariableDeclaration'
+        ? declaredIdentifierNames(statement.init)
+        : new Set();
+      const updateHasObservableEffect = statement.update !== null
+        && !(
+          localNames.size > 0
+          && isLocalCounterUpdate(statement.update, localNames)
+        )
+        && expressionHasObservableEffect(statement.update);
       return (
         (
           statement.init?.type === 'VariableDeclaration'
@@ -205,12 +266,10 @@ function statementHasObservableHandling(statement) {
           statement.test !== null
           && expressionHasObservableEffect(statement.test)
         )
-        || (
-          statement.update !== null
-          && expressionHasObservableEffect(statement.update)
-        )
+        || updateHasObservableEffect
         || statementHasObservableHandling(statement.body)
       );
+    }
     case 'ForInStatement':
     case 'ForOfStatement':
       return expressionHasObservableEffect(statement.right)
@@ -219,7 +278,7 @@ function statementHasObservableHandling(statement) {
       return expressionHasObservableEffect(statement.object)
         || statementHasObservableHandling(statement.body);
     case 'DebuggerStatement':
-      return true;
+      return false;
     default:
       return false;
   }

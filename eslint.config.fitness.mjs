@@ -86,14 +86,10 @@ const plugins = {
 // pre-existing inline rule-disable directives for rules that belong to a
 // different (general/console) config — `@typescript-eslint/no-explicit-any`,
 // `prefer-arrow-callback`, etc. Under this narrow config those directives
-// reference undefined rules and/or suppress nothing, which ESLint would surface
-// as errors. They are not fitness findings, so the fitness ring ignores inline
-// disable directives entirely (`reportUnusedDisableDirectives: 'off'`).
+// suppress nothing, so unused-directive reporting would add unrelated noise.
+// The standalone catch-ratchet scanner disables inline config and is the
+// authoritative suppression-resistant gate for that rule.
 const linterOptions = { reportUnusedDisableDirectives: 'off' };
-const catchRatchetLinterOptions = {
-  ...linterOptions,
-  noInlineConfig: true,
-};
 
 const config = [
   {
@@ -122,7 +118,10 @@ const config = [
     // Keep the configured rule on that exact scope so scripts/ cannot produce
     // untracked warnings outside the shrink-only multiset.
     files: ['src/**/*.ts'],
-    linterOptions: catchRatchetLinterOptions,
+    // The standalone shrink-only scanner is the authoritative suppression-
+    // resistant gate. Keep the broad fitness pass quiet for unrelated inline
+    // directives that belong to the repo's general ESLint configuration.
+    linterOptions,
     languageOptions: {
       parser: tseslint.parser,
       parserOptions: { ecmaVersion: 2024, sourceType: 'module' },
