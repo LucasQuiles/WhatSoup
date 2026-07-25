@@ -13,6 +13,42 @@ import { resolveGroupNames } from '../group-resolver.ts';
 import { isGroupConversationKey, conversationKeyToJid } from '../../core/conversation-key.ts';
 import { normalizeTimestamp, toIsoFromUnix } from '../time-utils.ts';
 import { isTypingHealthEntry } from '../typing-payload.ts';
+import { isPathWithinAllowedRoot } from '../../lib/path-boundary.ts';
+
+/**
+ * Canonicalize `p` as far as it exists on disk, re-appending the not-yet-created
+ * tail.
+ *
+ * A plain `realpathSync(p)` is wrong here: this endpoint reports on directories
+ * that may not exist yet (`exists: false` is a normal, expected response), and
+ * realpath throws ENOENT for those. A plain `path.resolve` is also wrong: it is
+ * lexical and cannot see symlinks, so a link inside $HOME pointing outside it
+ * passes a `startsWith(homedir())` check while the stat that follows lands
+ * outside.
+ *
+ * Walking up to the deepest existing ancestor covers the case a single
+ * dirname-realpath misses — a symlinked GRANDparent with two missing levels
+ * below it. (`runtimes/agent/media-bridge.ts` uses the one-level form; that has
+ * the same residual gap and is out of scope here.)
+ *
+ * Falls back to the lexical path only when nothing in the chain resolves, which
+ * means the confinement check below still runs against something.
+ */
+function canonicalizeDeepestExisting(p: string): string {
+  let current = p;
+  const missing: string[] = [];
+  for (;;) {
+    try {
+      const real = fs.realpathSync(current);
+      return missing.length === 0 ? real : path.join(real, ...missing.slice().reverse());
+    } catch {
+      const parent = path.dirname(current);
+      if (parent === current) return p;
+      missing.push(path.basename(current));
+      current = parent;
+    }
+  }
+}
 
 export interface DataDeps {
   discovery: FleetDiscovery;
@@ -476,8 +512,8 @@ export function handleCheckDirectory(
     jsonResponse(res, 400, { error: 'missing required query parameter: path' });
     return;
   }
-  const resolved = path.resolve(dirPath);
-  if (!resolved.startsWith(os.homedir() + path.sep) && resolved !== os.homedir()) {
+  const resolved = canonicalizeDeepestExisting(path.resolve(dirPath));
+  if (!isPathWithinAllowedRoot(resolved, os.homedir())) {
     jsonResponse(res, 400, { error: 'path must be within the home directory' });
     return;
   }
