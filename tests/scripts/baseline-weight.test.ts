@@ -121,4 +121,14 @@ describe('BASELINE_REGISTRY — the scan cannot go vacuous', () => {
     expect(new Set(ids).size).toBe(ids.length);
     expect(new Set(paths).size).toBe(paths.length);
   });
+
+  it('pins the catch-ratchet baseline to its audited introduction ceiling', () => {
+    expect(
+      BASELINE_REGISTRY.find((entry) => entry.id === 'catch-justification'),
+    ).toMatchObject({
+      path: 'eslint-rules/catch-ratchet-baseline.json',
+      shape: 'entry-array',
+      initialWeight: 127,
+    });
+  });
 });

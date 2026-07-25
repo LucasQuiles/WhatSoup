@@ -31,6 +31,11 @@ export interface RegisteredBaseline {
   /** Repo-relative path. */
   path: string;
   shape: BaselineShape;
+  /**
+   * Exact audited weight allowed when this path does not exist at the base
+   * revision. Once the path lands, ordinary base-vs-head comparison takes over.
+   */
+  initialWeight?: number;
   /** Why this file is allowed to exist at all — quoted back when it grows. */
   tolerates: string;
 }
@@ -85,6 +90,13 @@ export const BASELINE_REGISTRY: readonly RegisteredBaseline[] = [
     path: 'scripts/service-units-baseline.json',
     shape: 'single-array-object',
     tolerates: 'grandfathered service-unit guard exceptions',
+  },
+  {
+    id: 'catch-justification',
+    path: 'eslint-rules/catch-ratchet-baseline.json',
+    shape: 'entry-array',
+    initialWeight: 127,
+    tolerates: 'inherited catch blocks that swallow failures without meaningful handling',
   },
 ];
 

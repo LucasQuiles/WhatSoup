@@ -55,6 +55,13 @@ function ruleEntriesFor(id) {
       return { 'fitness/ring-boundaries': 'warn' };
     case 'arch.sqlite-busy-timeout-ssot':
       return { 'fitness/no-magic-sqlite-pragma': 'warn' };
+    case 'hygiene.catch-justification':
+      return {
+        'fitness/require-catch-justification': [
+          'warn',
+          { baselinePath: rule.params?.baselinePath ?? 'eslint-rules/catch-ratchet-baseline.json' },
+        ],
+      };
     case 'invariant.no-unsafe-type-escapes':
       return { 'fitness/unsafe-type-escape': 'warn' };
     default:
@@ -104,6 +111,21 @@ const config = [
       ...ruleEntriesFor('arch.sqlite-busy-timeout-ssot'),
       ...ruleEntriesFor('invariant.no-unsafe-type-escapes'),
       ...ruleEntriesFor('invariant.timer-rearm-without-clear'),
+    },
+  },
+  {
+    // The catch ratchet's semantic baseline and generator both scan src/.
+    // Keep the configured rule on that exact scope so scripts/ cannot produce
+    // untracked warnings outside the shrink-only multiset.
+    files: ['src/**/*.ts'],
+    linterOptions,
+    languageOptions: {
+      parser: tseslint.parser,
+      parserOptions: { ecmaVersion: 2024, sourceType: 'module' },
+    },
+    plugins,
+    rules: {
+      ...ruleEntriesFor('hygiene.catch-justification'),
     },
   },
   {

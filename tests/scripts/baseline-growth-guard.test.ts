@@ -189,6 +189,32 @@ describe('baseline growth guard — the red proof', () => {
     expect(status).toBe(2);
     expect(out).toMatch(/Unknown argument/);
   });
+
+  it('BLOCKS an introduced baseline above its audited initial ceiling', () => {
+    const dir = makeRepo(2);
+    mkdirSync(join(dir, 'eslint-rules'), { recursive: true });
+    writeFileSync(
+      join(dir, 'eslint-rules/catch-ratchet-baseline.json'),
+      JSON.stringify(Array.from({ length: 128 }, (_, index) => `entry-${index}`)),
+    );
+
+    const { status, out } = runGuard(['--repo', dir, '--base', 'HEAD']);
+    expect(status, out).toBe(1);
+    expect(out).toMatch(/catch-ratchet-baseline\.json/);
+    expect(out).toMatch(/127 -> 128/);
+  });
+
+  it('permits an introduced baseline at or below its audited initial ceiling', () => {
+    const dir = makeRepo(2);
+    mkdirSync(join(dir, 'eslint-rules'), { recursive: true });
+    writeFileSync(
+      join(dir, 'eslint-rules/catch-ratchet-baseline.json'),
+      JSON.stringify(Array.from({ length: 127 }, (_, index) => `entry-${index}`)),
+    );
+
+    const { status, out } = runGuard(['--repo', dir, '--base', 'HEAD']);
+    expect(status, out).toBe(0);
+  });
 });
 
 describe('registry coverage — the scan cannot silently narrow', () => {

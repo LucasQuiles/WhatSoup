@@ -183,6 +183,17 @@ function main(): number {
   for (const entry of BASELINE_REGISTRY) {
     const atBase = weighAt(base, entry.path, repoRoot);
     const atHead = weighAt(null, entry.path, repoRoot);
+    if (
+      entry.initialWeight !== undefined
+      && (
+        !Number.isInteger(entry.initialWeight)
+        || entry.initialWeight < 0
+      )
+    ) {
+      shapeErrors.push(
+        `${entry.path} (registry): initialWeight must be a non-negative integer`,
+      );
+    }
 
     // A registry row that cannot be weighed is a BROKEN GUARD, not a clean baseline. It is
     // reported by path and message so it gets fixed, never dropped.
@@ -199,7 +210,16 @@ function main(): number {
     comparable.push({
       id: entry.id,
       path: entry.path,
-      base: atBase.kind === 'weight' ? atBase.value : null,
+      base:
+        atBase.kind === 'weight'
+          ? atBase.value
+          : (
+              atBase.kind === 'absent'
+              && atHead.kind === 'weight'
+              && entry.initialWeight !== undefined
+            )
+            ? entry.initialWeight
+            : null,
       head: atHead.kind === 'weight' ? atHead.value : null,
     });
   }
