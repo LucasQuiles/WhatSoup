@@ -183,18 +183,58 @@ function extractMeHash(parsed: unknown): string | null {
   return id ? shortHash(id, 20) : null;
 }
 
-function walkAuthFiles(root: string): string[] {
+/**
+ * True only for "the entry is no longer there" — Baileys rotates key files
+ * constantly, so an entry can disappear between the readdir that listed it and
+ * the stat/read that consumes it.
+ *
+ * ENOENT only, on purpose. EACCES means the tree is genuinely unreadable and
+ * EIO means the disk is failing; both are real faults that must keep
+ * propagating. A blanket `catch { continue }` here would convert them into a
+ * silently short auth-tree observation.
+ */
+function isVanishedEntry(err: unknown): boolean {
+  return (err as NodeJS.ErrnoException | null)?.code === 'ENOENT';
+}
+
+/**
+ * Enumerate the auth tree.
+ *
+ * `complete: false` means at least one entry vanished mid-walk, so `paths` is a
+ * SUBSET of what was on disk. Callers must not treat a subset as a description
+ * of the tree — see inspectAuthTree.
+ */
+function walkAuthFiles(root: string): { paths: string[]; complete: boolean } {
   const out: string[] = [];
   const stack = [root];
+  let complete = true;
   while (stack.length > 0) {
     const current = stack.pop()!;
-    const st = lstatSync(current);
+    let st;
+    try {
+      st = lstatSync(current);
+    } catch (err) {
+      // lstat does not follow the final component, so an existing symlink —
+      // even a dangling one — returns the link itself rather than ENOENT. This
+      // allowance therefore cannot mask the symlink refusal below.
+      if (isVanishedEntry(err)) { complete = false; continue; }
+      throw err;
+    }
     if (st.isDirectory()) {
-      const entries = readdirSync(current)
-        .filter(name => name !== '.DS_Store')
-        .map(name => join(current, name))
-        .sort()
-        .reverse();
+      let entries: string[];
+      try {
+        entries = readdirSync(current)
+          .filter(name => name !== '.DS_Store')
+          .map(name => join(current, name))
+          .sort()
+          .reverse();
+      } catch (err) {
+        // A vanished directory takes its whole subtree out of the walk, which
+        // is a larger loss than a single file — and one that leaves no trace in
+        // `paths`. It only shows up as `complete: false`.
+        if (isVanishedEntry(err)) { complete = false; continue; }
+        throw err;
+      }
       stack.push(...entries);
       continue;
     }
@@ -205,17 +245,45 @@ function walkAuthFiles(root: string): string[] {
       out.push(current);
     }
   }
-  return out.sort();
+  return { paths: out.sort(), complete };
 }
 
+/**
+ * Hash the auth tree, or return null if it could not be observed completely.
+ *
+ * An incomplete observation yields NO hash rather than a shorter one. The
+ * digest commits only to the files it hashed, so a tree read while an entry was
+ * vanishing would produce a digest byte-identical to that of a genuinely
+ * smaller tree — `hash({a,b,c} with c skipped) === hash({a,b})`. `treeHash` is
+ * a tamper-detection primitive (authTreeValidationError below compares it
+ * against a recorded baseline, and ConnectionManager gates clearing the local
+ * auth-bond alert on it), so a partial read silently colliding with a real tree
+ * state would turn that control from fail-closed into fail-open.
+ *
+ * Returning null keeps it fail-closed without the crash that #2285 is about:
+ * every consumer already handles null (`auth tree is unreadable`, and the
+ * capture path skips on a missing treeHash), whereas the pre-fix throw escaped
+ * inspect() on a `void`-ed async path and shut the instance down.
+ */
 function inspectAuthTree(authDir: string): { treeHash: string; fileCount: number; totalBytes: number } | null {
   if (!existsSync(authDir)) return null;
+  const { paths, complete } = walkAuthFiles(authDir);
+  if (!complete) return null;
   const hasher = createHash('sha256');
-  const paths = walkAuthFiles(authDir);
   let totalBytes = 0;
   for (const path of paths) {
     const rel = relative(authDir, path);
-    const st = lstatSync(path);
+    // stat and read together: a file that survived the stat can still be
+    // renamed away before the read, so both halves need the same allowance.
+    let st;
+    let contents;
+    try {
+      st = lstatSync(path);
+      contents = readFileSync(path);
+    } catch (err) {
+      if (isVanishedEntry(err)) return null;
+      throw err;
+    }
     totalBytes += st.size;
     hasher.update(rel);
     hasher.update('\0');
@@ -223,9 +291,12 @@ function inspectAuthTree(authDir: string): { treeHash: string; fileCount: number
     hasher.update('\0');
     hasher.update('file');
     hasher.update('\0');
-    hasher.update(readFileSync(path));
+    hasher.update(contents);
     hasher.update('\0');
   }
+  // Safe as paths.length precisely because a short read returns null above:
+  // every path in `paths` was hashed, so the count and the digest describe the
+  // same file set.
   return { treeHash: hasher.digest('hex'), fileCount: paths.length, totalBytes };
 }
 
