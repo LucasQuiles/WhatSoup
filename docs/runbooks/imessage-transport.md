@@ -113,13 +113,69 @@ Both backends use **config-only auth** (matches the Twilio precedent — no
 | Feature | State |
 |---|---|
 | Text send/receive (1:1 + group) | ✅ |
-| Reactions (tapback: 👍👎❤️‼️❓😂 + remove) | ✅ |
-| Typing indicators (composing/stopped) | ✅ |
-| Read receipts (per conversation, coalesced GUIDs) | ✅ |
+| Reactions — outbound (tapback: 👍👎❤️‼️❓😂 + remove) | ✅ |
+| Reactions — inbound (tapback surfacing) | ✅ BlueBubbles (`associatedMessageGuid` + documented numeric `associatedMessageType`; named compatibility values are also tolerated); ❌ imsg daemon (needs daemon-side reaction surfacing) |
+| Typing indicators — outbound (composing/stopped) | ✅ |
+| Typing indicators — inbound | ❌ deferred (BlueBubbles surfaces typing only via socket/SSE push events, not in `/message/query`; needs webhook/socket mode) |
+| Read receipts — outbound (per conversation, coalesced GUIDs) | ✅ |
+| Read receipts — inbound | ❌ deferred (iMessage read receipts ride on the original outbound message's `dateRead` field, updated in place; needs cross-poll state diffing, not a separate envelope) |
 | Remote delete | ❌ iMessage has no remote-delete protocol (documented parity gap) |
 | Media attachments | ❌ deferred (adapter declares `media.maxBytes: 0`) |
 | Polls | ❌ rejected (WhatsApp-only feature) |
 | `webhook` inbound mode | BlueBubbles only |
+
+## Inbound envelope routing
+
+`ImessageAdapter.handleInboundRecord` (src/transport/imessage/adapter.ts) routes
+by the `kind` discriminator on `InboundImessage`:
+
+| `kind` | Listener | Notes |
+|---|---|---|
+| `text` | `message` (InboundMessage) | body !== null |
+| `reaction` | `reaction` (ReactionEvent) | requires `reactionTargetGuid`; the BlueBubbles port populates `reactionEmoji`/`reactionRemove`/`reactionTargetGuid` from `associatedMessageGuid`+`associatedMessageType` |
+| other | dropped | typing/call events have no v1 contract event; read receipts handled separately (deferred) |
+
+Accepted envelope classes share the `seen` dedupe set (keyed by `guid`);
+redelivery never double-emits. Malformed reaction payloads are rejected before
+dedupe admission, so a corrected same-GUID redelivery remains processable.
+Disposed or non-connected adapters drop silently.
+
+### Reaction envelope shapes
+
+Per the authoritative BlueBubbles
+[`MessageResponse`](https://github.com/BlueBubblesApp/bluebubbles-server#message-response)
+type, `/message/query` surfaces inbound tapback reactions as separate message
+records with two fields:
+
+- **`associatedMessageGuid: string | null`** — set to the reacted-to
+  message's GUID on tapback envelopes; null on plain messages. Text-part
+  reactions may qualify it as `p:<index>/<guid>`; the port strips that
+  qualifier before emitting the target `MessageRef`.
+- **`associatedMessageType: number | null`** — the documented API shape uses
+  the iMessage chat.db numeric code. The parser also accepts the named
+  reaction vocabulary used by `/message/react` as a defensive compatibility
+  path.
+
+The iMessage chat.db `SUBMESSAGES_TYPE_TABLE` codes the parser accepts:
+
+| Code range | Meaning |
+|---|---|
+| `2000`-`2005` | tapback add: love, like, dislike, laugh, emphasize, question (in that order) |
+| `3000`-`3005` | tapback removal counterparts (same emoji ordering) |
+| `0`, null, anything else | not a reaction — falls through to text surfacing |
+
+The port (`reactionTypeToEmoji` in `bluebubbles-port.ts`) emits a
+`ReactionEvent` with the canonical tapback emoji + `removed` flag for codes
+in the valid ranges. Removal events retain the emoji being removed rather
+than replacing it with an empty string. Non-integer numeric values (NaN,
+2000.5, etc.) are rejected as corrupt data — the schema is integer-only.
+Out-of-range codes (1999, 2006, 4000, negative numbers) fall through to text
+surfacing.
+
+**Outbound symmetry note:** the OUTBOUND `/message/react` endpoint uses
+string reaction kinds (`'love'`, `'-like'`, etc.) — see
+`EMOJI_TO_REACTION_TYPE`. The parser accepts the same names inbound so both
+BlueBubbles response representations round-trip through one mapping.
 
 ## Health + recovery
 
