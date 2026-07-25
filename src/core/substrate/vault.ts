@@ -2,9 +2,43 @@
 import type { DatabaseSync } from 'node:sqlite';
 import { mkdirSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { createChildLogger } from '../../logger.ts';
+import { privateWriteError } from '../../lib/private-fs.ts';
 import { listBeads, getBead } from './beads.ts';
 import { getProfile, listEntities } from './entities.ts';
 import type { BeadRow, EntityRow, ObservationRow } from './types.ts';
+
+const log = createChildLogger('substrate:vault');
+
+/**
+ * Write one projection file, converting a raw filesystem errno into a logged,
+ * structured failure.
+ *
+ * Both projection writers funnel through here rather than each wrapping their
+ * own `writeFileSync`: the guard is identical at both sites and the only thing
+ * that differs is which projection was being written.
+ *
+ * The failure is logged AND rethrown on purpose. Swallowing it would leave the
+ * vault silently missing a projection with no operator signal — the failure mode
+ * #2359 calls out — while rethrowing alone gives the caller an errno with no
+ * indication that a vault projection was its source. `unlinkSync` in this module
+ * is best-effort by contrast, because a stale projection that is already gone is
+ * the expected case, not a fault.
+ */
+function writeProjection(file: string, body: string, projection: 'bead' | 'entity'): void {
+  try {
+    writeFileSync(file, body, 'utf8');
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException | null)?.code ?? 'EIO';
+    log.error({ err, code, path: file, projection }, 'vault projection write failed');
+    const wrapped = privateWriteError(
+      `vault projection unavailable: cannot write ${projection} projection ${file}`,
+      code,
+    );
+    wrapped.path = file;
+    throw wrapped;
+  }
+}
 
 const PROJECTED_FOLDERS = [
   'Profiles/person', 'Profiles/org', 'Profiles/project',
@@ -100,7 +134,7 @@ export function projectBead(db: DatabaseSync, args: ProjectBeadArgs): string | n
     ...r.events.slice(-10).map(e => `- ${new Date(e.created_at * 1000).toISOString()} · **${e.event_type}** by ${e.actor}`),
     '',
   ].join('\n');
-  writeFileSync(file, body, 'utf8');
+  writeProjection(file, body, 'bead');
   return file;
 }
 
@@ -140,7 +174,7 @@ export function projectEntity(db: DatabaseSync, args: ProjectEntityArgs): string
     beadLines.length ? beadLines.join('\n') : '_(none)_',
     '',
   ].join('\n');
-  writeFileSync(file, body, 'utf8');
+  writeProjection(file, body, 'entity');
   return file;
 }
 
