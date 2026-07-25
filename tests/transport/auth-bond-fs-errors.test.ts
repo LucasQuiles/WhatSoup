@@ -580,3 +580,153 @@ describe('AuthBondGuard filesystem error paths', () => {
     expect(actualFs.existsSync(flakyHistoryEntry)).toBe(true);
   });
 });
+
+// ── #2285: the auth tree can change under the walk ────────────────────────────
+//
+// Baileys rewrites key material constantly, so an entry can disappear between
+// the readdir that listed it and the stat/read that consumes it. Pre-fix those
+// calls were bare, so the ENOENT escaped inspect() — and inspect() is reached
+// from a `void`-ed async path, so the throw became an unhandled rejection and
+// main.ts shut the instance down.
+//
+// The fix must not simply skip the vanished entry: the digest commits only to
+// the files it hashed, so a skipped entry would make a partial read produce a
+// hash byte-identical to a genuinely smaller tree, turning a tamper-detection
+// primitive from fail-closed into fail-open. An incomplete observation
+// therefore yields NO hash.
+describe('AuthBondGuard auth-tree races (#2285)', () => {
+  function guardFor(root: string, authDir: string, mod: { AuthBondGuard: new (opts: Record<string, unknown>) => { inspect: () => Record<string, unknown> } }) {
+    return new mod.AuthBondGuard({ authDir, stateRoot: join(root, 'state'), instanceName: 'race-bot' });
+  }
+
+  it('reports no tree hash when an entry vanishes between readdir and lstat', async () => {
+    const root = makeRoot();
+    const authDir = join(root, 'auth');
+    writeAuth(authDir);
+    const vanishing = join(authDir, 'app-state-sync-key-test.json');
+
+    const mod = await importGuardWithFsMock((actual) => ({
+      lstatSync: vi.fn((path: Parameters<FsModule['lstatSync']>[0]) => {
+        if (String(path) === vanishing) {
+          throw Object.assign(new Error('ENOENT: vanished'), { code: 'ENOENT' });
+        }
+        return actual.lstatSync(path);
+      }) as unknown as FsModule['lstatSync'],
+    }));
+
+    let snapshot!: Record<string, unknown>;
+    expect(() => { snapshot = guardFor(root, authDir, mod).inspect(); }).not.toThrow();
+    expect(snapshot['treeHash']).toBeNull();
+    expect(snapshot['fileCount']).toBeNull();
+  });
+
+  it('reports no tree hash when a directory vanishes, taking its subtree out of the walk', async () => {
+    // The subtree case leaves no trace in `paths` at all — without the
+    // completeness flag it would be invisible, not merely miscounted.
+    const root = makeRoot();
+    const authDir = join(root, 'auth');
+    writeAuth(authDir);
+    const subDir = join(authDir, 'keys');
+    actualFs.mkdirSync(subDir, { mode: 0o700 });
+    actualFs.writeFileSync(join(subDir, 'pre-key-1.json'), JSON.stringify({ k: 1 }));
+
+    const mod = await importGuardWithFsMock((actual) => ({
+      readdirSync: vi.fn((path: Parameters<FsModule['readdirSync']>[0], options?: unknown) => {
+        if (String(path) === subDir) {
+          throw Object.assign(new Error('ENOENT: vanished'), { code: 'ENOENT' });
+        }
+        return (actual.readdirSync as (p: unknown, o?: unknown) => unknown)(path, options);
+      }) as unknown as FsModule['readdirSync'],
+    }));
+
+    let snapshot!: Record<string, unknown>;
+    expect(() => { snapshot = guardFor(root, authDir, mod).inspect(); }).not.toThrow();
+    expect(snapshot['treeHash']).toBeNull();
+  });
+
+  it('reports no tree hash when a file vanishes between lstat and read', async () => {
+    const root = makeRoot();
+    const authDir = join(root, 'auth');
+    writeAuth(authDir);
+    const vanishing = join(authDir, 'app-state-sync-key-test.json');
+
+    const mod = await importGuardWithFsMock((actual) => ({
+      readFileSync: vi.fn((path: Parameters<FsModule['readFileSync']>[0], options?: unknown) => {
+        if (String(path) === vanishing) {
+          throw Object.assign(new Error('ENOENT: vanished'), { code: 'ENOENT' });
+        }
+        return (actual.readFileSync as (p: unknown, o?: unknown) => unknown)(path, options);
+      }) as unknown as FsModule['readFileSync'],
+    }));
+
+    let snapshot!: Record<string, unknown>;
+    expect(() => { snapshot = guardFor(root, authDir, mod).inspect(); }).not.toThrow();
+    expect(snapshot['treeHash']).toBeNull();
+  });
+
+  // THE load-bearing assertion. A "skip the vanished entry and keep hashing"
+  // implementation passes every test above — it also returns without throwing.
+  // What it CANNOT do is avoid colliding with the genuine smaller tree, because
+  // the digest would then cover exactly the surviving file. Pinning the racing
+  // read against a real one-file tree's hash is what discriminates the two
+  // designs, and it does not depend on any particular error being reachable.
+  it('does not let a partial read collide with a genuinely smaller tree', async () => {
+    // Control: a real tree containing ONLY creds.json, read with no races.
+    const controlRoot = makeRoot();
+    const controlAuthDir = join(controlRoot, 'auth');
+    actualFs.mkdirSync(controlAuthDir, { recursive: true, mode: 0o700 });
+    actualFs.writeFileSync(join(controlAuthDir, 'creds.json'), JSON.stringify({
+      me: { id: '15550100001:1@s.whatsapp.net', lid: '12345:1@lid' },
+      registrationId: 1,
+    }));
+    const controlMod = await importGuardWithFsMock(() => ({}));
+    const controlHash = guardFor(controlRoot, controlAuthDir, controlMod).inspect()['treeHash'];
+
+    // A complete read must still produce a hash — the guard must not have
+    // degenerated into "always null".
+    expect(typeof controlHash).toBe('string');
+    expect(controlHash).not.toBeNull();
+
+    // Racing: a two-file tree whose second file vanishes during the read. A
+    // skip-and-continue implementation hashes only creds.json and therefore
+    // reproduces controlHash exactly.
+    const raceRoot = makeRoot();
+    const raceAuthDir = join(raceRoot, 'auth');
+    writeAuth(raceAuthDir);
+    const vanishing = join(raceAuthDir, 'app-state-sync-key-test.json');
+    const raceMod = await importGuardWithFsMock((actual) => ({
+      readFileSync: vi.fn((path: Parameters<FsModule['readFileSync']>[0], options?: unknown) => {
+        if (String(path) === vanishing) {
+          throw Object.assign(new Error('ENOENT: vanished'), { code: 'ENOENT' });
+        }
+        return (actual.readFileSync as (p: unknown, o?: unknown) => unknown)(path, options);
+      }) as unknown as FsModule['readFileSync'],
+    }));
+    const raceHash = guardFor(raceRoot, raceAuthDir, raceMod).inspect()['treeHash'];
+
+    expect(raceHash).not.toBe(controlHash);
+    expect(raceHash).toBeNull();
+  });
+
+  it('still propagates a non-ENOENT stat failure instead of swallowing it', async () => {
+    // The allowlist is ENOENT-only on purpose: EACCES means the tree is
+    // genuinely unreadable, and must not be downgraded to "vanished".
+    // Blocks a NON-creds file deliberately — inspect() only reaches the tree
+    // walk when status === 'present', which a creds.json failure would prevent.
+    const root = makeRoot();
+    const authDir = join(root, 'auth');
+    writeAuth(authDir);
+    const blocked = join(authDir, 'app-state-sync-key-test.json');
+
+    const mod = await importGuardWithFsMock((actual) => ({
+      lstatSync: vi.fn((path: Parameters<FsModule['lstatSync']>[0]) => {
+        if (String(path) === blocked) {
+          throw Object.assign(new Error('EACCES: permission denied'), { code: 'EACCES' });
+        }
+        return actual.lstatSync(path);
+      }) as unknown as FsModule['lstatSync'],
+    }));
+
+    expect(() => guardFor(root, authDir, mod).inspect()).toThrow(/EACCES/);
+  });
+});
