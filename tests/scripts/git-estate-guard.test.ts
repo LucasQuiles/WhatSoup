@@ -13,7 +13,14 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { main as runGitEstateGuard } from '../../scripts/git-estate-guard.ts';
+import {
+  isFullObjectId,
+  main as runGitEstateGuard,
+  parseBranches,
+  parseStashes,
+  parseStatus,
+  parseWorktreePorcelain,
+} from '../../scripts/git-estate-guard.ts';
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const script = resolve(repoRoot, 'scripts/git-estate-guard.ts');
@@ -37,11 +44,13 @@ interface SnapshotDocument {
     racing: boolean;
     worktrees: Array<{
       path: string;
+      head: string | null;
       primary: boolean;
       detached: boolean;
       locked: boolean;
       prunable: boolean;
       status: {
+        branchOid: string | null;
         tracked: Array<{ path: string; xy: string }>;
         untracked: string[];
         conflicts: Array<{
@@ -53,6 +62,7 @@ interface SnapshotDocument {
     }>;
     branches: Array<{
       name: string;
+      oid: string;
       upstream: string | null;
       ahead: number;
       behind: number;
@@ -239,12 +249,12 @@ function git(cwd: string, args: string[], expectedStatus = 0): string {
   return proc.stdout.trim();
 }
 
-function initRepo(): { root: string; repo: string } {
+function initRepo(objectFormat: 'sha1' | 'sha256' = 'sha1'): { root: string; repo: string } {
   const root = mkdtempSync(join(tmpdir(), 'whatsoup-git-estate-'));
   scratchRoots.push(root);
   const repo = join(root, 'repo');
   mkdirSync(repo);
-  git(repo, ['init', '--initial-branch=main']);
+  git(repo, ['init', `--object-format=${objectFormat}`, '--initial-branch=main']);
   writeFileSync(join(repo, 'tracked.txt'), 'base\n');
   git(repo, ['add', 'tracked.txt']);
   git(repo, ['commit', '-m', 'base']);
@@ -345,6 +355,227 @@ describe('git-estate guard', () => {
     });
   });
 
+  it.each(Array.from({ length: 23 }, (_, index) => index + 41))(
+    'rejects a %i-character object ID between the supported widths',
+    (width) => {
+      expect(isFullObjectId('a'.repeat(width))).toBe(false);
+      expect(() => parseStatus(
+        `# branch.oid ${'a'.repeat(width)}\0# branch.head main\0`,
+      )).toThrow(/branch\.oid/);
+    },
+  );
+
+  it.each([40, 64])('accepts an exact %i-character object ID', (width) => {
+    expect(isFullObjectId('a'.repeat(width))).toBe(true);
+  });
+
+  it('accepts real Git SHA-256 output across worktree, status, branch, and stash scans', () => {
+    const { repo } = initRepo('sha256');
+    writeFileSync(join(repo, 'tracked.txt'), 'dirty\n');
+
+    const dirty = snapshot(repo);
+    expect(dirty.snapshot.worktrees[0]).toMatchObject({
+      head: expect.stringMatching(/^[0-9a-f]{64}$/),
+      status: {
+        branchOid: expect.stringMatching(/^[0-9a-f]{64}$/),
+        tracked: [expect.objectContaining({ path: 'tracked.txt', xy: '.M' })],
+      },
+    });
+    expect(dirty.snapshot.branches).toEqual([
+      expect.objectContaining({
+        name: 'main',
+        oid: expect.stringMatching(/^[0-9a-f]{64}$/),
+      }),
+    ]);
+
+    git(repo, ['stash', 'push', '-m', 'sha256 fixture']);
+    const stashed = snapshot(repo);
+    expect(stashed.snapshot.stashes).toEqual([
+      {
+        oid: expect.stringMatching(/^[0-9a-f]{64}$/),
+        parents: expect.arrayContaining([expect.stringMatching(/^[0-9a-f]{64}$/)]),
+      },
+    ]);
+  });
+
+  it.each([
+    [
+      'ordinary XY',
+      `1 ZZ N... 100644 100644 100644 ${'a'.repeat(40)} ${'b'.repeat(40)} tracked.txt`,
+    ],
+    [
+      'ordinary submodule state',
+      `1 .M SXYZ 100644 100644 100644 ${'a'.repeat(40)} ${'b'.repeat(40)} tracked.txt`,
+    ],
+    [
+      'ordinary mode',
+      `1 .M N... 100648 100644 100644 ${'a'.repeat(40)} ${'b'.repeat(40)} tracked.txt`,
+    ],
+    [
+      'ordinary object ID',
+      `1 .M N... 100644 100644 100644 ${'a'.repeat(41)} ${'b'.repeat(40)} tracked.txt`,
+    ],
+    [
+      'rename XY',
+      `2 ZZ N... 100644 100644 100644 ${'a'.repeat(40)} ${'b'.repeat(40)} R100 renamed.txt\\000original.txt`,
+    ],
+    [
+      'rename submodule state',
+      `2 R. SXYZ 100644 100644 100644 ${'a'.repeat(40)} ${'b'.repeat(40)} R100 renamed.txt\\000original.txt`,
+    ],
+    [
+      'rename mode',
+      `2 R. N... 100644 100644 888888 ${'a'.repeat(40)} ${'b'.repeat(40)} R100 renamed.txt\\000original.txt`,
+    ],
+    [
+      'rename object ID',
+      `2 R. N... 100644 100644 100644 ${'a'.repeat(40)} ${'b'.repeat(63)} R100 renamed.txt\\000original.txt`,
+    ],
+    [
+      'rename score kind',
+      `2 R. N... 100644 100644 100644 ${'a'.repeat(40)} ${'b'.repeat(40)} X100 renamed.txt\\000original.txt`,
+    ],
+    [
+      'rename score range',
+      `2 R. N... 100644 100644 100644 ${'a'.repeat(40)} ${'b'.repeat(40)} R101 renamed.txt\\000original.txt`,
+    ],
+    [
+      'rename score/XY mismatch',
+      `2 R. N... 100644 100644 100644 ${'a'.repeat(40)} ${'b'.repeat(40)} C75 renamed.txt\\000original.txt`,
+    ],
+    [
+      'unmerged XY',
+      `u ZZ N... 100644 100644 100644 100644 ${'a'.repeat(40)} ${'b'.repeat(40)} ${'c'.repeat(40)} conflicted.txt`,
+    ],
+    [
+      'unmerged submodule state',
+      `u UU SXYZ 100644 100644 100644 100644 ${'a'.repeat(40)} ${'b'.repeat(40)} ${'c'.repeat(40)} conflicted.txt`,
+    ],
+    [
+      'unmerged mode',
+      `u UU N... 100644 100644 100649 100644 ${'a'.repeat(40)} ${'b'.repeat(40)} ${'c'.repeat(40)} conflicted.txt`,
+    ],
+    [
+      'unmerged object ID',
+      `u UU N... 100644 100644 100644 100644 ${'a'.repeat(40)} ${'b'.repeat(52)} ${'c'.repeat(40)} conflicted.txt`,
+    ],
+  ])('fails closed on nonempty garbage in the %s field', (_label, record) => {
+    expect(() => parseStatus(
+      `# branch.oid ${'d'.repeat(40)}\0# branch.head main\0${record.replace('\\000', '\0')}\0`,
+    )).toThrow(/status record|stage identities/);
+  });
+
+  it.each([40, 64])(
+    'accepts exact %i-character object IDs in every porcelain-v2 tracked record',
+    (width) => {
+      const oid = 'a'.repeat(width);
+      const records = [
+        `1 .M N... 100644 100644 100644 ${oid} ${oid} tracked path.txt`,
+        `2 R. N... 100644 100644 100644 ${oid} ${oid} R100 renamed path.txt\0original path.txt`,
+        `u UU N... 100644 100644 100644 100644 ${oid} ${oid} ${oid} conflicted path.txt`,
+      ];
+
+      for (const record of records) {
+        expect(() => parseStatus(
+          `# branch.oid ${oid}\0# branch.head main\0${record}\0`,
+        )).not.toThrow();
+      }
+    },
+  );
+
+  it('fails closed end-to-end when a status parser receives a malformed full record', () => {
+    const { root, repo } = initRepo();
+    const result = run(
+      repo,
+      ['snapshot', '--json'],
+      statusOutputEnvironment(
+        root,
+        `  printf '\\043 branch.oid ${'a'.repeat(40)}\\000\\043 branch.head main\\0001 ZZ N... 100644 100644 100644 ${'b'.repeat(40)} ${'c'.repeat(40)} tracked.txt\\000'`,
+      ),
+    );
+
+    expect(result.status).toBe(2);
+    expect(JSON.parse(result.stdout) as SnapshotDocument).toMatchObject({
+      exitCode: 2,
+      snapshot: {
+        incomplete: true,
+        errors: [expect.objectContaining({ kind: 'worktree_status_failed' })],
+      },
+    });
+  });
+
+  it('preserves NUL-delimited paths and ignores valid ignored records', () => {
+    const status = parseStatus(
+      `# branch.oid ${'a'.repeat(40)}\0# branch.head main\0`
+      + '? untracked path.txt\0! ignored path.txt\0'
+      + `2 R. N... 100644 100644 100644 ${'b'.repeat(40)} ${'c'.repeat(40)} `
+      + 'R100 renamed path.txt\0original path.txt\0',
+    );
+
+    expect(status.untracked).toEqual(['untracked path.txt']);
+    expect(status.tracked).toContainEqual(expect.objectContaining({
+      path: 'renamed path.txt',
+      originalPath: 'original path.txt',
+    }));
+  });
+
+  it.each([41, 52, 63])(
+    'fails closed on a %i-character worktree HEAD object ID',
+    (width) => {
+      expect(() => parseWorktreePorcelain(
+        `worktree /repo\0HEAD ${'a'.repeat(width)}\0branch refs/heads/main\0\0`,
+      )).toThrow(/HEAD identity/);
+    },
+  );
+
+  it.each([40, 64])('accepts an exact %i-character worktree HEAD object ID', (width) => {
+    expect(parseWorktreePorcelain(
+      `worktree /repo\0HEAD ${'a'.repeat(width)}\0branch refs/heads/main\0\0`,
+    )).toEqual([
+      expect.objectContaining({ path: '/repo', head: 'a'.repeat(width), branch: 'main' }),
+    ]);
+  });
+
+  it.each([41, 52, 63])(
+    'fails closed on a %i-character local branch object ID',
+    (width) => {
+      expect(() => parseBranches(
+        `main\0${'a'.repeat(width)}\0\0\0\n`,
+      )).toThrow(/local branch record/);
+    },
+  );
+
+  it.each([40, 64])('accepts an exact %i-character local branch object ID', (width) => {
+    expect(parseBranches(
+      `main\0${'a'.repeat(width)}\0\0\0\n`,
+    )).toEqual([
+      expect.objectContaining({ name: 'main', oid: 'a'.repeat(width) }),
+    ]);
+  });
+
+  it.each([
+    ['stash object ID', 41, 40],
+    ['stash parent object ID', 40, 63],
+  ])('fails closed on an unsupported-width %s', (_label, oidWidth, parentWidth) => {
+    expect(() => parseStashes(
+      `${'a'.repeat(oidWidth)}\0${'b'.repeat(parentWidth)}\0\n`,
+    )).toThrow(/stash .* identity/);
+  });
+
+  it.each([40, 64])(
+    'accepts exact %i-character stash and parent object IDs',
+    (width) => {
+      expect(parseStashes(
+        `${'a'.repeat(width)}\0${'b'.repeat(width)}\0\n`,
+      )).toEqual([
+        {
+          oid: 'a'.repeat(width),
+          parents: ['b'.repeat(width)],
+        },
+      ]);
+    },
+  );
+
   it('enumerates detached, locked, prunable, no-upstream, gone, ahead, and behind state', () => {
     const { root, repo } = initRepo();
     const remote = join(root, 'remote.git');
@@ -407,8 +638,10 @@ describe('git-estate guard', () => {
     const doc = JSON.parse(result.stdout) as SnapshotDocument;
     expect(doc.snapshot.stashes).toEqual([
       {
-        oid: expect.stringMatching(/^[0-9a-f]{40,64}$/),
-        parents: expect.arrayContaining([expect.stringMatching(/^[0-9a-f]{40,64}$/)]),
+        oid: expect.stringMatching(/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/),
+        parents: expect.arrayContaining([
+          expect.stringMatching(/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/),
+        ]),
       },
     ]);
   });
@@ -545,9 +778,9 @@ describe('git-estate guard', () => {
       .map(({ id }) => id);
     expect(conflictIds).toHaveLength(1);
     expect(conflict.snapshot.worktrees[0]?.status?.conflicts[0]?.stageOids).toEqual([
-      expect.stringMatching(/^[0-9a-f]{40,64}$/),
-      expect.stringMatching(/^[0-9a-f]{40,64}$/),
-      expect.stringMatching(/^[0-9a-f]{40,64}$/),
+      expect.stringMatching(/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/),
+      expect.stringMatching(/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/),
+      expect.stringMatching(/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/),
     ]);
 
     const newConflict = run(repo, ['guard', '--phase', 'pre-push', '--json']);

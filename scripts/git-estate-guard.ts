@@ -19,7 +19,12 @@ import { cleanGitEnv } from './lib/guard-core.ts';
 const SCHEMA_VERSION = 1 as const;
 const BASELINE_SCHEMA_VERSION = 2 as const;
 const BASELINE_NAME = 'git-estate-baseline.v2.json';
-const HASH_PATTERN = /^[0-9a-f]{40,64}$/;
+const HASH_PATTERN = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
+const STATUS_XY_PATTERN = /^[.MTADRC]{2}$/;
+const UNMERGED_XY_PATTERN = /^(?:DD|AU|UD|UA|DU|AA|UU)$/;
+const SUBMODULE_STATE_PATTERN = /^(?:N\.\.\.|S[.C][.M][.U])$/;
+const FILE_MODE_PATTERN = /^[0-7]{6}$/;
+const RENAME_SCORE_PATTERN = /^([RC])(?:100|[1-9]?\d)$/;
 const FINDING_ID_PATTERN = /^(dirty|untracked|conflict|detached|locked|prunable|branch_no_upstream|branch_gone|branch_ahead|branch_behind|stash):[0-9a-f]{24}$/;
 const WORKTREE_ID_PATTERN = /^worktree:[0-9a-f]{24}$/;
 const BRANCH_ID_PATTERN = /^branch:[0-9a-f]{24}$/;
@@ -215,6 +220,10 @@ function stableJson(value: unknown): string {
   ).join(',')}}`;
 }
 
+export function isFullObjectId(value: string): boolean {
+  return HASH_PATTERN.test(value);
+}
+
 function cleanGitEnvironment(): NodeJS.ProcessEnv {
   return { ...cleanGitEnv(), GIT_OPTIONAL_LOCKS: '0' };
 }
@@ -289,7 +298,7 @@ function requireGit(cwd: string, args: string[], label: string): string {
   return result.stdout;
 }
 
-function parseWorktreePorcelain(raw: string): WorktreePorcelain[] {
+export function parseWorktreePorcelain(raw: string): WorktreePorcelain[] {
   const records: WorktreePorcelain[] = [];
   let current: Partial<WorktreePorcelain> = {};
   const finish = (): void => {
@@ -322,6 +331,9 @@ function parseWorktreePorcelain(raw: string): WorktreePorcelain[] {
         current.path = value;
         break;
       case 'HEAD':
+        if (current.head !== undefined || !isFullObjectId(value)) {
+          throw new GitEstateError('worktree_parse_failed', 'invalid worktree HEAD identity');
+        }
         current.head = value;
         break;
       case 'branch':
@@ -353,7 +365,7 @@ function parseWorktreePorcelain(raw: string): WorktreePorcelain[] {
   return records;
 }
 
-function parseStatus(raw: string): WorktreeStatus {
+export function parseStatus(raw: string): WorktreeStatus {
   const status: WorktreeStatus = {
     branchOid: null,
     branchHead: null,
@@ -378,7 +390,7 @@ function parseStatus(raw: string): WorktreeStatus {
       const key = space < 0 ? body : body.slice(0, space);
       const value = space < 0 ? '' : body.slice(space + 1);
       if (key === 'branch.oid') {
-        if (branchOidSeen || (value !== '(initial)' && !HASH_PATTERN.test(value))) {
+        if (branchOidSeen || (value !== '(initial)' && !isFullObjectId(value))) {
           throw new GitEstateError('status_parse_failed', 'invalid branch.oid header');
         }
         branchOidSeen = true;
@@ -417,7 +429,11 @@ function parseStatus(raw: string): WorktreeStatus {
     }
     if (kind === '1') {
       const record = splitFixedStatusFields(token, 8);
-      if (!record || record.fields[0] !== '1' || record.fields[1]!.length !== 2) {
+      if (
+        !record
+        || record.fields[0] !== '1'
+        || !isValidTrackedStatusFields(record.fields)
+      ) {
         throw new GitEstateError('status_parse_failed', 'invalid ordinary status record');
       }
       const xy = record.fields[1]!;
@@ -435,7 +451,8 @@ function parseStatus(raw: string): WorktreeStatus {
       if (
         !record
         || record.fields[0] !== '2'
-        || record.fields[1]!.length !== 2
+        || !isValidTrackedStatusFields(record.fields)
+        || !isValidRenameScore(record.fields[1]!, record.fields[8]!)
         || !originalPath
       ) {
         throw new GitEstateError('status_parse_failed', 'invalid rename/copy status record');
@@ -457,9 +474,11 @@ function parseStatus(raw: string): WorktreeStatus {
       if (
         !record
         || record.fields[0] !== 'u'
-        || record.fields[1]!.length !== 2
+        || !UNMERGED_XY_PATTERN.test(record.fields[1]!)
+        || !SUBMODULE_STATE_PATTERN.test(record.fields[2]!)
+        || !record.fields.slice(3, 7).every((mode) => FILE_MODE_PATTERN.test(mode))
         || stageOids.length !== 3
-        || !stageOids.every((oid) => HASH_PATTERN.test(oid))
+        || !stageOids.every(isFullObjectId)
       ) {
         throw new GitEstateError('status_parse_failed', 'invalid unmerged stage identities');
       }
@@ -483,6 +502,21 @@ function parseStatus(raw: string): WorktreeStatus {
   status.untracked.sort(compareText);
   status.conflicts.sort((a, b) => compareText(a.path, b.path) || compareText(a.xy, b.xy));
   return status;
+}
+
+function isValidTrackedStatusFields(fields: string[]): boolean {
+  return (
+    STATUS_XY_PATTERN.test(fields[1]!)
+    && fields[1] !== '..'
+    && SUBMODULE_STATE_PATTERN.test(fields[2]!)
+    && fields.slice(3, 6).every((mode) => FILE_MODE_PATTERN.test(mode))
+    && fields.slice(6, 8).every(isFullObjectId)
+  );
+}
+
+function isValidRenameScore(xy: string, score: string): boolean {
+  const match = RENAME_SCORE_PATTERN.exec(score);
+  return match !== null && xy.includes(match[1]!);
 }
 
 function splitFixedStatusFields(
@@ -566,12 +600,12 @@ function readConflictOperationInstance(
   return { marker: null, reliable: false };
 }
 
-function parseBranches(raw: string): EstateBranch[] {
+export function parseBranches(raw: string): EstateBranch[] {
   const branches: EstateBranch[] = [];
   for (const line of raw.split('\n')) {
     if (!line) continue;
     const [name = '', oid = '', upstreamValue = '', trackValue = ''] = line.split('\0');
-    if (!name || !HASH_PATTERN.test(oid)) {
+    if (!name || !isFullObjectId(oid)) {
       throw new GitEstateError('branch_parse_failed', 'invalid local branch record');
     }
     const track = trackValue.trim();
@@ -590,6 +624,24 @@ function parseBranches(raw: string): EstateBranch[] {
   return branches.sort((a, b) => compareText(a.name, b.name));
 }
 
+export function parseStashes(raw: string): EstateStash[] {
+  const stashes: EstateStash[] = [];
+  for (const line of raw.split('\n')) {
+    if (!line) continue;
+    const [oid = '', parentsValue = ''] = line.split('\0');
+    if (!isFullObjectId(oid)) {
+      throw new GitEstateError('stash_parse_failed', 'invalid stash object identity');
+    }
+    const parents = parentsValue.split(' ').filter(Boolean).sort(compareText);
+    if (!parents.every(isFullObjectId)) {
+      throw new GitEstateError('stash_parse_failed', 'invalid stash parent identity');
+    }
+    stashes.push({ oid, parents });
+  }
+  stashes.sort((a, b) => compareText(a.oid, b.oid));
+  return stashes;
+}
+
 function readStashes(cwd: string): { raw: string; stashes: EstateStash[] } {
   const exists = runGit(cwd, ['show-ref', '--verify', '--quiet', 'refs/stash']);
   if (exists.status === 1) return { raw: '', stashes: [] };
@@ -601,21 +653,7 @@ function readStashes(cwd: string): { raw: string; stashes: EstateStash[] } {
     ['reflog', 'show', '--format=%H%x00%P%x00', 'refs/stash'],
     'stash identity scan',
   );
-  const stashes: EstateStash[] = [];
-  for (const line of raw.split('\n')) {
-    if (!line) continue;
-    const [oid = '', parentsValue = ''] = line.split('\0');
-    if (!HASH_PATTERN.test(oid)) {
-      throw new GitEstateError('stash_parse_failed', 'invalid stash object identity');
-    }
-    const parents = parentsValue.split(' ').filter(Boolean).sort(compareText);
-    if (!parents.every((parent) => HASH_PATTERN.test(parent))) {
-      throw new GitEstateError('stash_parse_failed', 'invalid stash parent identity');
-    }
-    stashes.push({ oid, parents });
-  }
-  stashes.sort((a, b) => compareText(a.oid, b.oid));
-  return { raw, stashes };
+  return { raw, stashes: parseStashes(raw) };
 }
 
 interface CommonCapture {
