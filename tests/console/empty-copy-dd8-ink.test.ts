@@ -40,15 +40,20 @@ describe('DD-8 empty and paused state copy carries secondary ink', () => {
     expect(source).not.toContain('text-text-3 text-center py-8 font-mono text-data')
   })
 
-  it('keeps Inbox load-more and empty-selection labels off ghost ink (text-text-3)', () => {
+  it('keeps the v3.5 Inbox off the v3 ghost-ink class entirely (T5 b-07)', () => {
     const source = read('console/src/pages/Inbox.tsx')
+    const css = read('console/src/styles/inbox.css')
 
-    // v3 semantic class names: secondary ink is text-text-2 (--text-2),
-    // ghost ink is text-text-3 (--text-3). These labels must carry secondary ink.
-    expect(source).toContain('w-full justify-center text-text-2')
-    expect(source).toContain('text-center text-text-2 text-sm')
-    expect(source).not.toContain('w-full justify-center text-text-3')
-    expect(source).not.toContain('text-center text-text-3 text-sm')
+    // T5 b-07 supersession: the v3 page pinned quiet copy at text-text-2; the
+    // v3.5 surface consumes the -v35 register where quiet tiers are a palette
+    // decision (contrast re-verified at the G3 gate, b-13). The law that still
+    // holds here: the v3 ghost-ink utility class is gone from the page source,
+    // and the surface's quiet copy (list empty note, ctx empty note, preview
+    // lane) consumes the designed -v35 quiet register — never a re-rolled hex.
+    expect(source).not.toContain('text-text-3')
+    expect(source).toContain('inbox-page') // positive control: the file is the v3.5 surface
+    expect(css).toMatch(/\.inbox-list__empty\s*{[^}]*var\(--text-3-v35\)/)
+    expect(css).toMatch(/\.inbox-citem__pv\s*{[^}]*var\(--text-3-v35\)/)
   })
 
   it('keeps HistoryTab load/no-more/jump controls off text-t5', () => {

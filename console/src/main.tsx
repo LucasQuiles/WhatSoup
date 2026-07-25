@@ -6,6 +6,9 @@ import { ToastProvider } from './hooks/use-toast'
 import { RealtimeProvider } from './hooks/use-websocket'
 import './index.css'
 import App from './App'
+import { startLongtaskObserver } from './lib/perf'
+
+startLongtaskObserver()
 
 const queryClient = new QueryClient({
   defaultOptions: {
