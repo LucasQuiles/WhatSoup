@@ -201,12 +201,31 @@ function captureToAlertSink(
     severity: BotErrorsSeverity;
     criticalAsset?: BotErrorsCriticalAssetDiagnostic;
   },
-): AlertEmissionResult {
+): AlertEmissionResult | null {
   // Reuse buildBotErrorsEvent so the captured record is identical-shape AND
   // redacted exactly like a real outbox event — a secret in evidence must never
   // leak to the sink file.
   const event = buildBotErrorsEvent(input);
-  appendFileSync(sink, `${JSON.stringify(event)}\n`);
+  try {
+    appendFileSync(sink, `${JSON.stringify(event)}\n`);
+  } catch (err) {
+    // A sink write can fail for reasons entirely outside this process: disk
+    // full, EACCES, or the configured path being invalidated by a config
+    // reload. Throwing here would escape emitAlert/clearAlertSource — and both
+    // are reached from `void`-ed async paths (ConnectionManager's 'exhausted'
+    // handler), so the throw becomes an unhandled rejection and main.ts's
+    // handler shuts the instance down. An alerting path must never be the thing
+    // that kills the host it is trying to report on (#2287).
+    //
+    // Returning null instead of a failure result lets both callers fall through
+    // to the outbox + legacy fallback they already implement, rather than
+    // duplicating that ladder here.
+    log.warn(
+      { instance: input.instance, source: input.source, err: errorMessage(err) },
+      'alert sink write failed; falling back to outbox',
+    );
+    return null;
+  }
   return { ok: true, channel: 'sink', status: 'durably_queued' };
 }
 
@@ -224,7 +243,9 @@ export function emitAlert(
 ): AlertEmissionResult {
   const sink = alertSinkPath();
   if (sink) {
-    return captureToAlertSink(sink, { eventType: 'alert', instance, source, summary, evidence, severity, criticalAsset });
+    const captured = captureToAlertSink(sink, { eventType: 'alert', instance, source, summary, evidence, severity, criticalAsset });
+    if (captured) return captured;
+    // Sink write failed — fall through to the outbox ladder below.
   }
   try {
     const outbox = writeBotErrorsEvent({ eventType: 'alert', instance, source, summary, evidence, severity, criticalAsset });
@@ -261,7 +282,7 @@ export function clearAlertSource(
 ): AlertEmissionResult {
   const sink = alertSinkPath();
   if (sink) {
-    return captureToAlertSink(sink, {
+    const captured = captureToAlertSink(sink, {
       eventType: 'clear',
       instance,
       source,
@@ -270,6 +291,8 @@ export function clearAlertSource(
       severity: 'info',
       criticalAsset,
     });
+    if (captured) return captured;
+    // Sink write failed — fall through to the outbox ladder below.
   }
   try {
     const outbox = writeBotErrorsEvent({
