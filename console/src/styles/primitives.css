@@ -49,23 +49,9 @@
 
 /* live halo — ok-disc only, the sole ambient loop (motion.md §8) */
 /* waiver:MOTION-AMBIENT-OK — badge.md explicitly grants this loop */
-.soup-shape--ok.soup-shape--live::after {
-  content: "";
-  position: absolute;
-  inset: calc(-1 * var(--sp-0h)); /* halo ring offset, 3px = sp-0h */
-  border-radius: 50%;
-  border: 1px solid var(--status-ok-solid);
-  opacity: 0;
-  animation: breathe-ring 3s ease-out infinite;
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .soup-shape--ok.soup-shape--live::after {
-    display: none;
-  }
-}
-
-/* breathe-ring keyframe defined in composites.css */
+/* Live-disc ambient motion moved to motion.css (T5 b-11): the breathe-ring
+   halo (3s scale-out, a second loop shape) is retired; the disc now pulses
+   the 13-§1 ambient loop (opacity 1→.35→1, 2400ms) — the ONE product loop. */
 
 /* --------------------------------------------------------------------------
    STATUS CELL — [shape] [label] inline-flex row (badge.md § Renderers)
@@ -1947,58 +1933,13 @@ button.soup-pill[aria-disabled="true"] {
 }
 
 /* --------------------------------------------------------------------------
-   INBOX LAYOUT BAND — soup-inbox-layout / soup-inbox-contact (DD-18r)
-   Container query root: the Inbox page flex root carries container-type so
-   the contact-pane collapse is expressed as a container query, not a viewport
-   query (layout-density §5; C2.3 squeeze idiom, second use after soup-drawer-layout).
-   Threshold: ~1080px — "inbox loses contact pane" per layout-density §5, pinned
-   at 1080px container width per C-B4-2.
-   Below 1080px: contact pane is removed from layout (display:none). The chat-list
-   keeps its --inbox-pane-chats fixed width; the thread flexes into the freed space.
-   Re-growing the container restores the pane with identical content (CSS-only —
-   React state is never touched, §6.1).
-   Orphaned actions note: Mark Read / Allow / Block / Save Contact are unreachable
-   below the threshold (DD-24; spec-mandated drop, C-B4-3).
+   INBOX LAYOUT BAND — retired at T5 b-07.
+   The v3 soup-inbox-layout / soup-inbox-contact container-query band (DD-18r,
+   1080px contact-pane collapse, 640px master-detail switch) died with the v3
+   Inbox page: the v3.5 surface (console/src/styles/inbox.css, mockup
+   inbox.html SSOT) owns its grid with the mockup's own viewport breakpoints
+   (ctx ≤1100px, CSS-only master-detail ≤760px, same React-state ethos).
    -------------------------------------------------------------------------- */
-
-.soup-inbox-layout {
-  container-type: inline-size;
-}
-
-@container (max-width: 1079px) {
-  .soup-inbox-contact {
-    display: none;
-  }
-}
-
-/* The mobile back affordance is hidden on desktop — both list + thread are
-   visible there, so there is no pane to return to. */
-.soup-inbox-back {
-  display: none;
-}
-
-/* Phone master-detail (mobile responsive pass): below the 640px narrow-surface
-   breakpoint (DRAWER_BOTTOM_SHEET_QUERY) the chats list + thread can't both fit
-   — the thread squeezes to an unusable sliver — so show ONE pane at a time.
-   data-mobile-detail reflects the React selection state: 'list' (no chat
-   selected) shows the full-width chats list and hides the thread; 'thread' (a
-   chat selected) hides the list and shows the full-width thread plus its back
-   affordance. CSS-only switch — selection state stays the single source of
-   truth, mirroring the contact-pane container-query ethos above. */
-@media (max-width: 640px) {
-  .soup-inbox-chats {
-    width: 100%;
-  }
-  .soup-inbox-layout[data-mobile-detail="list"] .soup-inbox-thread {
-    display: none;
-  }
-  .soup-inbox-layout[data-mobile-detail="thread"] .soup-inbox-chats {
-    display: none;
-  }
-  .soup-inbox-back {
-    display: inline-flex;
-  }
-}
 
 /* OPERATOR LAYOUT — soup-operator-layout (mobile responsive pass)
    The Operator's Fleet-Status + Logs panes are a horizontal flex row on desktop.
@@ -2007,8 +1948,8 @@ button.soup-pill[aria-disabled="true"] {
    breakpoint (DRAWER_BOTTOM_SHEET_QUERY) the panes stack vertically — each
    full-width and readable, keeping its own internal scroll. Same reachable-on-
    narrow principle as the §26 bottom-sheet. Viewport @media (not a container
-   query) because it flips the flex container's own direction, mirroring the
-   soup-rail collapse pattern. */
+   query) because it flips the flex container's own direction (the same
+   reachable-on-narrow collapse pattern the v3.5 chrome rail uses). */
 @media (max-width: 640px) {
   .soup-operator-layout {
     flex-direction: column;
@@ -2394,134 +2335,6 @@ button.soup-pill[aria-disabled="true"] {
 /* The accent letter (the "U" in SO·U·P) per the showcase brand wordmark. */
 .soup-nameplate__accent {
   color: var(--accent);
-}
-
-/* --------------------------------------------------------------------------
-   SOUP LEFT RAIL — the vertical app-chrome navigation (layout-density §9,
-   decision-log "top bar → left rail"). Replaces the legacy horizontal top-bar
-   nav. Fixed width via --rail-w (tokens-v3 §4); inset surface one ladder notch
-   below content (research-digest §5: chrome recedes); hairline right edge via
-   c-border-r. Nameplate docks TOP, nav items stack as icon+label rows, a flex
-   spacer pushes the secondary controls (theme/status/logout) to the BOTTOM.
-   Classes: .soup-rail · .soup-rail__nav · .soup-rail__item
-            · .soup-rail__spacer · .soup-rail__dock
-   At the --bp-rail-collapse narrow breakpoint the rail collapses to an
-   icon-only column (labels go sr-only in TSX; width drops to --rail-w-collapsed)
-   so it never overflows a phone viewport and <main> keeps its width.
-   -------------------------------------------------------------------------- */
-
-.soup-rail {
-  /* the rail collapse breakpoint — one source for the JS-free media query */
-  --bp-rail-collapse: 760px;
-  display: flex;
-  flex-direction: column;
-  flex-shrink: 0;
-  width: var(--rail-w);
-  height: 100%;
-  gap: var(--sp-1);
-  padding: var(--sp-5) var(--sp-3);
-}
-
-/* Nameplate dock — sits at the top, with breathing room before the nav list. */
-.soup-rail__head {
-  display: flex;
-  align-items: center;
-  padding: var(--sp-2);
-  margin-bottom: var(--sp-4);
-}
-
-/* The stacked nav-item list. */
-.soup-rail__nav {
-  display: flex;
-  flex-direction: column;
-  gap: var(--sp-1);
-  min-width: 0;
-}
-
-/* A single nav row: icon + label, full rail width. The active row is marked by a
-   full accent fill (bg --accent + --accent-fg text, applied in TSX) — showcase-
-   accurate, replacing the prior left-edge accent bar. */
-.soup-rail__item {
-  display: flex;
-  align-items: center;
-  gap: var(--sp-2);
-  padding: var(--sp-2) var(--sp-3);
-  border-radius: var(--r-2);
-  min-width: 0;
-  white-space: nowrap;
-}
-
-/* Flex spacer — pushes the dock to the bottom of the rail. */
-.soup-rail__spacer {
-  flex: 1 1 auto;
-  min-height: var(--sp-4);
-}
-
-/* Bottom control dock: theme toggle, realtime status, version, logout. */
-.soup-rail__dock {
-  display: flex;
-  flex-direction: column;
-  gap: var(--sp-2);
-  padding-top: var(--sp-3);
-  margin-top: var(--sp-1);
-}
-
-.soup-rail__dock-row {
-  display: flex;
-  align-items: center;
-  gap: var(--sp-2);
-  min-width: 0;
-}
-
-/* Narrow viewport: collapse to an icon-only rail. The label spans carry
-   .soup-rail__label and go visually hidden; width drops to the collapsed token;
-   rows + head center their icons. Reduced-height is unaffected (the rail scrolls
-   internally via min-height:0 on the nav region below). */
-.soup-rail__label {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-@media (max-width: 760px) {
-  .soup-rail {
-    width: var(--rail-w-collapsed);
-    padding: var(--sp-5) var(--sp-1);
-  }
-  .soup-rail__head {
-    justify-content: center;
-    padding: var(--sp-1) 0;
-  }
-  .soup-rail__item {
-    justify-content: center;
-    padding: var(--sp-2) 0;
-  }
-  .soup-rail__dock-row {
-    justify-content: center;
-  }
-  /* Labels collapse out of the icon-only rail; the icon + aria/title carry meaning.
-     Visually-hidden recipe (sr-only equivalent) expressed with --bw (1px) so no raw
-     dimension literal lands outside the token files. */
-  .soup-rail__label {
-    position: absolute;
-    width: var(--bw);
-    height: var(--bw);
-    padding: 0;
-    margin: calc(-1 * var(--bw));
-    overflow: hidden;
-    clip: rect(0, 0, 0, 0);
-    white-space: nowrap;
-    border: 0;
-  }
-}
-
-/* Reduced-height: the nav region owns its own scroll so the nameplate stays
-   pinned and the dock stays reachable; min-height:0 lets it shrink (scroll-owner
-   law — overflow-y-auto paired with min-h-0). */
-.soup-rail__scroll {
-  flex: 1 1 auto;
-  min-height: 0;
-  overflow-y: auto;
 }
 
 /* --------------------------------------------------------------------------

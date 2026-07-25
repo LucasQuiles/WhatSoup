@@ -188,7 +188,18 @@ describe('validateInstanceName — 400 on invalid name', () => {
     vi.mocked(fs.existsSync).mockImplementation(actualExistsSync);
   });
 
+  const VALID_NAMES = ['a', 'agent-2', 'a'.repeat(30)];
   const INVALID_NAMES = ['', 'UPPER', '1starts-with-digit', 'has spaces', 'a'.repeat(31), '-dash-start'];
+
+  for (const name of VALID_NAMES) {
+    it(`handleSend accepts name="${name}"`, async () => {
+      const deps = makeDeps();
+      const res = mockRes();
+      await handleSend(mockReq('{}'), res, deps, { name });
+      expect(res._status).toBe(404);
+      expect(JSON.parse(res._body)).toEqual({ error: `instance '${name}' not found` });
+    });
+  }
 
   for (const name of INVALID_NAMES) {
     it(`handleSend rejects name="${name}"`, async () => {
@@ -196,7 +207,7 @@ describe('validateInstanceName — 400 on invalid name', () => {
       const res = mockRes();
       await handleSend(mockReq('{}'), res, deps, { name });
       expect(res._status).toBe(400);
-      expect(JSON.parse(res._body).error).toMatch(/invalid instance name/);
+      expect(JSON.parse(res._body)).toEqual({ error: 'invalid instance name' });
     });
   }
 

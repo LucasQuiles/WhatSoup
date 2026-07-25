@@ -1,0 +1,261 @@
+/* ═══════════════════════════════════════════════════════════════════════════
+   v3.5 Deployments surface (T5 b-08) — mockup deployments.html SSOT.
+   Consumes the --deploy-* component geometry (tokens.component.css) and the
+   -v35 semantic color register only; raw mockup dimensions never land here.
+   Font SIZES come from the --text-* and --type-* scales (weight + leading
+   raw, the b-03 fleet idiom); 1px hairlines are var(--bw). State pills use
+   the shared status vocabulary with shape mandatory (status law §12).
+   Breakpoint: summary + card bodies go 4→2 columns at the mockup's own
+   1000px (shared with the agents surface; pinned in viewport-matrix).
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+/* ── Page root ── */
+.deploy-page {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+}
+
+/* ── Page row: surface-owned h1 (single-h1 law) + admin pill + pair action ── */
+.deploy-pagerow {
+  display: flex;
+  align-items: center;
+  gap: var(--deploy-pagerow-gap);
+  padding: var(--deploy-pagerow-pad);
+  padding-bottom: 0;
+}
+.deploy-pagerow h1 {
+  font: 700 var(--text-lg) / 1.35 var(--font-display);
+  letter-spacing: var(--tracking-chrome-title);
+  color: var(--text-1-v35);
+  margin: 0;
+}
+.deploy-admin {
+  display: flex;
+  align-items: center;
+  gap: var(--deploy-admin-gap);
+  padding: var(--deploy-admin-pad);
+  border-radius: var(--chrome-pill-radius);
+  background: var(--surface-inset-v35);
+  border: var(--bw) solid var(--border-strong-v35);
+  color: var(--text-2-v35);
+  font: 600 var(--text-sm) / 1.45 var(--font-mono);
+}
+.deploy-pagerow__spacer { flex: 1; }
+
+/* ── Main column (mockup .main) ── */
+.deploy-main {
+  flex: 1;
+  padding: var(--deploy-main-pad);
+  overflow: auto;
+  min-height: 0;
+}
+
+/* ── Summary strip (mockup .sum / .kpi) ── */
+.deploy-sum {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: var(--deploy-sum-gap);
+  margin-bottom: var(--deploy-sum-mb);
+}
+.deploy-kpi {
+  background: var(--surface-raised-v35);
+  border: var(--bw) solid var(--border-hairline-v35);
+  border-radius: var(--deploy-kpi-radius);
+  padding: var(--deploy-kpi-pad);
+}
+.deploy-kpi__k {
+  font: 500 var(--text-sm) / 1.3 var(--font-mono);
+  letter-spacing: var(--tracking-deploy-kpi);
+  color: var(--text-3-v35);
+  text-transform: uppercase;
+}
+.deploy-kpi__v {
+  font: 700 var(--text-lg) / 1.3 var(--font-display);
+  color: var(--text-1-v35);
+  margin-top: var(--deploy-kpi-v-mt);
+}
+.deploy-kpi__d {
+  font: 500 var(--text-sm) / 1.3 var(--font-mono);
+  color: var(--text-3-v35);
+  margin-top: var(--deploy-kpi-d-mt);
+}
+
+/* ── Deployment card (mockup .dcard) ── */
+.deploy-dcard {
+  background: var(--surface-raised-v35);
+  border: var(--bw) solid var(--border-hairline-v35);
+  border-radius: var(--deploy-dcard-radius);
+  margin-bottom: var(--deploy-dcard-mb);
+}
+.deploy-dhead {
+  display: flex;
+  align-items: center;
+  gap: var(--deploy-dhead-gap);
+  padding: var(--deploy-dhead-pad);
+}
+.deploy-dicon {
+  width: var(--deploy-dicon);
+  height: var(--deploy-dicon);
+  border-radius: var(--deploy-dicon-radius);
+  background: var(--surface-inset-v35);
+  border: var(--bw) solid var(--border-hairline-v35);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+}
+.deploy-dicon svg { width: var(--deploy-dicon-glyph); height: var(--deploy-dicon-glyph); fill: var(--text-2-v35); }
+.deploy-dhead__nm {
+  font: 700 var(--text-body) / 1.25 var(--font-display);
+  color: var(--text-1-v35);
+}
+.deploy-dhead__suffix { color: var(--text-3-v35); font-weight: 400; }
+.deploy-dhead__sub {
+  font: 400 var(--text-sm) / 1.35 var(--font-mono);
+  color: var(--text-3-v35);
+  margin-top: var(--deploy-kpi-d-mt);
+}
+.deploy-acts { margin-left: auto; display: flex; gap: var(--deploy-acts-gap); }
+
+/* state pill (mockup .st) — shared status vocabulary, shape mandatory */
+.deploy-st {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--deploy-admin-gap);
+  padding: var(--deploy-mini-pad);
+  border-radius: var(--chrome-pill-radius);
+  font: 600 var(--text-sm) / 1.3 var(--font-mono);
+}
+.deploy-st::before { font-size: var(--text-sm); }
+.deploy-st--ok {
+  background: color-mix(in srgb, var(--status-ok-solid) 12%, transparent);
+  color: var(--status-ok-fg);
+}
+.deploy-st--ok::before { content: "●"; }
+.deploy-st--warn {
+  background: color-mix(in srgb, var(--status-warn-solid) 12%, transparent);
+  color: var(--status-warn-fg);
+}
+.deploy-st--warn::before { content: "◆"; }
+.deploy-st--crit {
+  background: color-mix(in srgb, var(--status-crit-solid) 12%, transparent);
+  color: var(--status-crit-fg);
+}
+.deploy-st--crit::before { content: "■"; }
+
+/* version (mockup .ver) */
+.deploy-ver { font: 500 var(--text-sm) / 1.3 var(--font-mono); color: var(--text-3-v35); }
+.deploy-ver__up { color: var(--accent-v35); font-weight: 600; cursor: default; }
+
+/* body cells (mockup .dbody / .dcell) */
+.deploy-dbody {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  border-top: var(--bw) solid var(--border-hairline-v35);
+}
+.deploy-dcell {
+  padding: var(--deploy-dcell-pad);
+  border-right: var(--bw) solid var(--border-hairline-v35);
+  min-width: 0;
+}
+.deploy-dcell:last-child { border-right: none; }
+.deploy-dcell__k {
+  font: 500 var(--text-sm) / 1.3 var(--font-mono);
+  letter-spacing: var(--tracking-deploy-cell);
+  color: var(--text-3-v35);
+  text-transform: uppercase;
+}
+.deploy-dcell__v {
+  font: 700 var(--text-body) / 1.35 var(--font-display);
+  color: var(--text-1-v35);
+  margin-top: var(--deploy-kpi-v-mt);
+}
+.deploy-dcell__sub { font: 400 var(--text-sm) / 1.3 var(--font-mono); color: var(--text-3-v35); }
+
+/* mini-tags (mockup .mini) */
+.deploy-mini { display: flex; gap: var(--deploy-mini-gap); margin-top: var(--deploy-mini-mt); flex-wrap: wrap; }
+.deploy-mini span {
+  font: 500 var(--text-sm) / 1.3 var(--font-mono);
+  color: var(--text-2-v35);
+  background: var(--surface-inset-v35);
+  border: var(--bw) solid var(--border-hairline-v35);
+  border-radius: var(--deploy-mini-radius);
+  padding: var(--deploy-mini-pad);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 100%;
+}
+.deploy-mini span.deploy-mini__agt { color: var(--mode-agent-fg); }
+.deploy-mini span.deploy-mini__warn {
+  color: var(--status-warn-fg);
+  border-color: color-mix(in srgb, var(--status-warn-solid) 30%, transparent);
+}
+
+/* org-hub row (mockup .hub) — designed anatomy, honest no-endpoint state */
+.deploy-hub {
+  display: flex;
+  align-items: center;
+  gap: var(--deploy-hub-gap);
+  padding: var(--deploy-hub-pad);
+  border-top: var(--bw) solid var(--border-hairline-v35);
+  font-size: var(--text-data);
+  color: var(--text-2-v35);
+}
+.deploy-hub__dot {
+  width: var(--deploy-hub-dot);
+  height: var(--deploy-hub-dot);
+  border-radius: 50%;
+  background: var(--text-3-v35);
+  flex: none;
+}
+.deploy-hub__pull { margin-left: auto; flex: none; }
+
+/* ── Pair card (mockup .pair) — designed-state, no pairing backend ── */
+.deploy-pair {
+  border-color: var(--border-strong-v35);
+  background: var(--surface-inset-v35);
+}
+.deploy-pair__head {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--deploy-pair-gap);
+  padding: var(--deploy-pair-pad);
+}
+.deploy-pair__pi {
+  color: var(--text-3-v35);
+  font-size: var(--text-data);
+  max-width: var(--deploy-pi-maxw);
+  margin: 0;
+}
+.deploy-pair__row {
+  display: flex;
+  align-items: center;
+  gap: var(--deploy-pairrow-gap);
+  margin-top: var(--deploy-pairrow-mt);
+  width: 100%;
+}
+.deploy-code {
+  font: 700 var(--text-lg) / 1.35 var(--font-mono);
+  letter-spacing: var(--tracking-deploy-code);
+  color: var(--text-3-v35);
+  background: var(--surface-inset-v35);
+  border: var(--bw) solid var(--border-hairline-v35);
+  border-radius: var(--deploy-code-radius);
+  padding: var(--deploy-code-pad);
+}
+.deploy-pair__row .deploy-acts { margin-left: auto; }
+
+/* ── Mockup stacking breakpoint (SSOT: @media max-width:1000px) ── */
+@media (max-width: 1000px) {
+  .deploy-dbody { grid-template-columns: repeat(2, 1fr); }
+  .deploy-sum { grid-template-columns: repeat(2, 1fr); }
+}
+
+/* ── Light presence: card separation per the locked token consumption ── */
+[data-theme="light"] .deploy-kpi,
+[data-theme="light"] .deploy-dcard { box-shadow: var(--shadow-rest-v35); }

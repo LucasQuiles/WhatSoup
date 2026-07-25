@@ -48,6 +48,8 @@ import {
   readExactCommitRange,
   readExactCommitMetadata,
   readExactTreeEntries,
+  readExactTreePaths,
+  parseExactTreePathListing,
 } from '../../scripts/lib/ci-control/git-input.ts';
 
 import {
@@ -73,8 +75,9 @@ import {
   GitShimResponse,
   responseKey,
   withGitShim,
-  addedLineShimResponses,
-  addedFactsShimResponses,
+  addedLineShimScenario,
+  addedFactsShimScenario,
+  modifiedFactsShimScenario,
   addedLineBudget,
   emptyRangeResponses,
   treeLookupResponses,
@@ -106,6 +109,164 @@ describe('exact added lines', () => {
         ).toBe(false);
       }
     }
+  });
+
+  it('rejects unsupported repository object formats before accepting abbreviated identities', () => {
+    const root = mkdtempSync(join(tmpdir(), 'ci-control-git-input-sha256-'));
+    registerTemporaryRoot(root);
+    git(root, ['init', '--quiet', '--object-format=sha256']);
+    git(root, ['config', 'user.email', 'fixture@example.invalid']);
+    git(root, ['config', 'user.name', 'Fixture Author']);
+    write(root, 'base.txt', 'base\n');
+    const baseOid = commit(root, 'base').slice(0, 40);
+    write(root, 'candidate.txt', 'candidate\n');
+    const candidateOid = commit(root, 'candidate').slice(0, 40);
+
+    expectCode(
+      () => readExactChangeFacts(root, baseOid, candidateOid),
+      'ci.input.revision-unavailable',
+    );
+  });
+
+  it('requires canonical scalar framing before accepting change facts', () => {
+    const bytes = Buffer.from('added\n');
+    const cases = [
+      {
+        key: () => responseKey(['rev-parse', '--show-object-format']),
+        output: 'sha1\r\n',
+        code: 'ci.input.revision-unavailable',
+      },
+      {
+        key: (baseOid: string) => responseKey(['cat-file', '-t', '--', baseOid]),
+        output: 'commit\r\n',
+        code: 'ci.input.revision-unavailable',
+      },
+      {
+        key: (baseOid: string, candidateOid: string) =>
+          responseKey(['merge-base', '--all', baseOid, candidateOid]),
+        output: null,
+        code: 'ci.classification.merge-base-unavailable',
+      },
+    ] as const;
+    for (const item of cases) {
+      const scenario = addedFactsShimScenario([{ path: 'safe.txt', bytes }]);
+      scenario.responses[item.key(scenario.baseOid, scenario.candidateOid)] = {
+        stdout: item.output ?? `${scenario.baseOid}\r\n`,
+      };
+      expectCode(
+        () => withGitShim(
+          scenario.responses,
+          (cwd) => readExactChangeFacts(cwd, scenario.baseOid, scenario.candidateOid),
+        ),
+        item.code,
+      );
+    }
+  });
+
+  it('rejects malformed change-fact identities before invoking Git', async () => {
+    const baseOid = 'a'.repeat(40);
+    const candidateOid = 'b'.repeat(40);
+    const hostileOid = {
+      [Symbol.toPrimitive]: () => {
+        throw new Error('private revision trap');
+      },
+    };
+    let gitCalls = 0;
+    vi.resetModules();
+    vi.doMock('node:child_process', () => ({
+      execFileSync: () => {
+        gitCalls += 1;
+        throw new Error('private Git invocation');
+      },
+    }));
+    try {
+      const isolated = await import('../../scripts/lib/ci-control/git-input.ts');
+      for (const [base, candidate] of [
+        ['HEAD', candidateOid],
+        [baseOid, 'HEAD'],
+        [hostileOid, candidateOid],
+      ] as const) {
+        let thrown: unknown;
+        try {
+          isolated.readExactChangeFacts(
+            '/isolated-fixture',
+            base as never,
+            candidate,
+          );
+        } catch (error) {
+          thrown = error;
+        }
+        expect(thrown).toMatchObject({ code: 'ci.input.revision-unavailable' });
+        expect(String(thrown)).not.toContain('private Git invocation');
+        expect(String(thrown)).not.toContain('private revision trap');
+        expectNoVisibleCause(thrown);
+      }
+      expect(gitCalls).toBe(0);
+    } finally {
+      vi.doUnmock('node:child_process');
+      vi.resetModules();
+    }
+  });
+
+  it('maps only proven timeout and output-budget failures to their specific change-fact codes', async () => {
+    const { root, baseOid } = fixture();
+    write(root, 'candidate.txt', 'candidate\n');
+    const candidateOid = commit(root, 'candidate');
+    const detectedKey = responseKey([
+      '-c', `diff.renameLimit=${MAX_CHANGE_FACT_COUNT}`, 'diff-tree', '--raw', '-z',
+      '--no-commit-id', '-r', '--abbrev=40', '--no-ext-diff', '--no-textconv',
+      '--ignore-submodules=none', '--find-renames', '--find-copies',
+      '--find-copies-harder', baseOid, candidateOid, '--',
+    ]);
+    const verify = async (
+      failure: NodeJS.ErrnoException & { signal?: string },
+      expectedCode: string,
+    ): Promise<void> => {
+      vi.resetModules();
+      vi.doMock('node:child_process', () => ({
+        execFileSync: (
+          file: string,
+          args: string[],
+          options: Parameters<typeof execFileSync>[2],
+        ) => {
+          const key = responseKey(args.slice(1));
+          if (key === detectedKey) throw failure;
+          return execFileSync(file, args, options as never);
+        },
+      }));
+      try {
+        const isolated = await import('../../scripts/lib/ci-control/git-input.ts');
+        let thrown: unknown;
+        try {
+          isolated.readExactChangeFacts(root, baseOid, candidateOid);
+        } catch (error) {
+          thrown = error;
+        }
+        expect(thrown).toMatchObject({ code: expectedCode });
+        expect(String(thrown)).not.toContain(failure.message);
+        expectNoVisibleCause(thrown);
+      } finally {
+        vi.doUnmock('node:child_process');
+        vi.resetModules();
+      }
+    };
+
+    await verify(
+      Object.assign(new Error('private timeout'), { code: 'ETIMEDOUT', signal: 'SIGKILL' }),
+      'ci.classification.execution-timeout',
+    );
+    await verify(
+      Object.assign(new Error('private bare signal'), { signal: 'SIGKILL' }),
+      'ci.classification.change-set-malformed',
+    );
+    await verify(
+      Object.assign(new Error('private output budget'), { code: 'ENOBUFS' }),
+      'ci.classification.change-set-budget',
+    );
+    await verify(
+      Object.assign(new Error('private ordinary failure'), { code: 'EIO' }),
+      'ci.classification.change-set-malformed',
+    );
   });
 
   it('returns canonical rows for added, modified, deleted, repeated, CRLF, and unterminated lines', () => {
@@ -197,7 +358,7 @@ describe('exact added lines', () => {
     expect(rows.find(({ path }) => path === 'mode-only.sh')?.addedLines).toEqual([]);
   });
 
-  it('preserves modified rename/copy facts and reports only their actual additions', () => {
+  it('preserves modified rename/copy labels while scanning every destination line', () => {
     const { root } = fixture();
     write(root, 'rename-old.txt', `${'rename base\n'.repeat(20)}`);
     write(root, 'copy-source.txt', `${'copy base\n'.repeat(20)}`);
@@ -218,16 +379,39 @@ describe('exact added lines', () => {
         status: 'copied',
         path: 'copy-target.txt',
         oldPath: 'copy-source.txt',
-        texts: ['copy addition'],
+        texts: [...Array.from({ length: 20 }, () => 'copy base'), 'copy addition'],
       },
       {
         status: 'renamed',
         path: 'rename-new.txt',
         oldPath: 'rename-old.txt',
-        texts: ['rename addition'],
+        texts: [...Array.from({ length: 20 }, () => 'rename base'), 'rename addition'],
       },
     ]);
     expect(changes.every(({ similarity }) => similarity !== null)).toBe(true);
+  });
+
+  it('derives file-to-directory and directory-to-file changes from verified trees', () => {
+    const { root } = fixture();
+    write(root, 'file-to-directory', 'old standalone file\n');
+    write(root, 'directory-to-file/old-child.txt', 'old nested file\n');
+    const baseOid = commit(root, 'shape base');
+
+    rmSync(join(root, 'file-to-directory'));
+    write(root, 'file-to-directory/new-child.txt', 'new nested file\n');
+    rmSync(join(root, 'directory-to-file'), { recursive: true });
+    write(root, 'directory-to-file', 'new standalone file\n');
+    const candidateOid = commit(root, 'shape candidate');
+
+    expect(readExactChangeFacts(root, baseOid, candidateOid).map((fact) => ({
+      status: fact.status,
+      path: fact.path,
+    }))).toEqual([
+      { status: 'added', path: 'directory-to-file' },
+      { status: 'deleted', path: 'directory-to-file/old-child.txt' },
+      { status: 'deleted', path: 'file-to-directory' },
+      { status: 'added', path: 'file-to-directory/new-child.txt' },
+    ]);
   });
 
   it('handles repeated additions and patch-marker content without trusting patch text as identity', () => {
@@ -302,8 +486,6 @@ describe('exact added lines', () => {
   });
 
   it('executes one Git diff for a shared blob pair and remaps cached lines to each path', async () => {
-    const baseOid = 'a'.repeat(40);
-    const candidateOid = 'b'.repeat(40);
     const oldBytes = Buffer.from('old\n');
     const newBytes = Buffer.from('new\n');
     const oldOid = blobOid(oldBytes);
@@ -312,25 +494,9 @@ describe('exact added lines', () => {
       `diff --git ${oldOid} ${newOid}\nindex ${oldOid}..${newOid} 100644\n`
       + `--- ${oldOid}\n+++ ${newOid}\n@@ -1 +1 @@\n-old\n+new\n`,
     );
-    const responses = addedLineShimResponses(
-      baseOid, candidateOid, 'first.txt', oldBytes, newBytes, patch,
+    const { baseOid, candidateOid, responses } = addedLineShimScenario(
+      ['first.txt', 'second.txt'], oldBytes, newBytes, patch,
     );
-    const raw = Buffer.concat(['first.txt', 'second.txt'].map((path) => Buffer.from(
-      `:100644 100644 ${oldOid} ${newOid} M\0${path}\0`,
-      'ascii',
-    )));
-    for (const args of [[
-      'diff-tree', '--raw', '-z', '--no-commit-id', '-r', '--abbrev=40',
-      '--no-renames', '--no-ext-diff', '--no-textconv', '--ignore-submodules=none',
-      baseOid, candidateOid, '--',
-    ], [
-      '-c', `diff.renameLimit=${MAX_CHANGE_FACT_COUNT}`, 'diff-tree', '--raw', '-z',
-      '--no-commit-id', '-r', '--abbrev=40', '--no-ext-diff', '--no-textconv',
-      '--ignore-submodules=none', '--find-renames', '--find-copies',
-      '--find-copies-harder', baseOid, candidateOid, '--',
-    ]]) {
-      responses[responseKey(args)] = { stdoutBase64: raw.toString('base64') };
-    }
     const diffKey = responseKey([
       '-c', 'diff.algorithm=myers', 'diff', '--patch', '--unified=0',
       '--no-indent-heuristic', '--text', '--full-index', '--no-prefix',
@@ -392,6 +558,14 @@ describe('exact added lines', () => {
       'ci.input.added-lines.input-malformed');
     expect(getterCalls).toBe(0);
 
+    expectCode(
+      () => readExactAddedLines(
+        '/not-a-repository',
+        new Proxy({ baseOid: oid, candidateOid: oid }, {}),
+      ),
+      'ci.input.added-lines.input-malformed',
+    );
+
     for (const trap of ['getPrototypeOf', 'ownKeys', 'getOwnPropertyDescriptor'] as const) {
       let trapCalls = 0;
       const hostile = new Proxy({ baseOid: oid, candidateOid: oid }, {
@@ -408,7 +582,7 @@ describe('exact added lines', () => {
       }
       expect(thrown).toMatchObject({ code: 'ci.input.added-lines.input-malformed' });
       expect((thrown as Error & { cause?: unknown }).cause).toBeUndefined();
-      expect(trapCalls).toBe(1);
+      expect(trapCalls).toBe(0);
     }
   });
 
@@ -463,8 +637,6 @@ describe('exact added lines', () => {
   });
 
   it('rejects malformed, truncated, and wrong-OID blob-pair patches without retaining raw evidence', () => {
-    const baseOid = 'a'.repeat(40);
-    const candidateOid = 'b'.repeat(40);
     const oldBytes = Buffer.from('old\n');
     const newBytes = Buffer.from('new\n');
     const oldOid = blobOid(oldBytes);
@@ -476,12 +648,13 @@ describe('exact added lines', () => {
       Buffer.from(`diff --git ${oldOid} ${newOid}\nindex ${'c'.repeat(40)}..${newOid} 100644\n--- ${oldOid}\n+++ ${newOid}\n@@ -1 +1 @@\n-old\n+new\n`),
     ];
     for (const patch of cases) {
-      const responses = addedLineShimResponses(
-        baseOid, candidateOid, 'safe.txt', oldBytes, newBytes, patch,
-      );
+      const scenario = addedLineShimScenario('safe.txt', oldBytes, newBytes, patch);
       let thrown: unknown;
       try {
-        withGitShim(responses, (cwd) => readExactAddedLines(cwd, { baseOid, candidateOid }));
+        withGitShim(scenario.responses, (cwd) => readExactAddedLines(cwd, {
+          baseOid: scenario.baseOid,
+          candidateOid: scenario.candidateOid,
+        }));
       } catch (error) {
         thrown = error;
       }
@@ -501,22 +674,19 @@ describe('exact added lines', () => {
       + `index ${omittedOldOid}..${omittedNewOid} 100644\n`
       + `--- ${omittedOldOid}\n+++ ${omittedNewOid}\n@@ -1 +1 @@\n-old\n+new\n`,
     );
+    const omitted = addedLineShimScenario(
+      'safe.txt', oldWithTail, omittedNew, omittedPatch,
+    );
     expectCode(() => withGitShim(
-      addedLineShimResponses(
-        baseOid,
-        candidateOid,
-        'safe.txt',
-        oldWithTail,
-        omittedNew,
-        omittedPatch,
-      ),
-      (cwd) => readExactAddedLines(cwd, { baseOid, candidateOid }),
+      omitted.responses,
+      (cwd) => readExactAddedLines(cwd, {
+        baseOid: omitted.baseOid,
+        candidateOid: omitted.candidateOid,
+      }),
     ), 'ci.input.added-lines.patch-malformed');
   });
 
   it('rejects partial child output when the producer exits unsuccessfully', () => {
-    const baseOid = 'a'.repeat(40);
-    const candidateOid = 'b'.repeat(40);
     const oldBytes = Buffer.from('old\n');
     const newBytes = Buffer.from('new\n');
     const oldOid = blobOid(oldBytes);
@@ -525,8 +695,8 @@ describe('exact added lines', () => {
       `diff --git ${oldOid} ${newOid}\nindex ${oldOid}..${newOid} 100644\n`
       + `--- ${oldOid}\n+++ ${newOid}\n@@ -1 +1 @@\n-old\n+new\n`,
     );
-    const responses = addedLineShimResponses(
-      baseOid, candidateOid, 'safe.txt', oldBytes, newBytes, patch,
+    const { baseOid, candidateOid, responses } = addedLineShimScenario(
+      'safe.txt', oldBytes, newBytes, patch,
     );
     const diffKey = responseKey([
       '-c', 'diff.algorithm=myers', 'diff', '--patch', '--unified=0',
@@ -549,9 +719,7 @@ describe('exact added lines', () => {
     expectNoVisibleCause(thrown);
   });
 
-  it('distinguishes direct timeout, signal, and output-budget failures without trusting legacy timeout', async () => {
-    const baseOid = 'a'.repeat(40);
-    const candidateOid = 'b'.repeat(40);
+  it('distinguishes timeout, signal, and output-budget failures at exact bounded boundaries', async () => {
     const oldBytes = Buffer.from('old\n');
     const newBytes = Buffer.from('new\n');
     const oldOid = blobOid(oldBytes);
@@ -560,8 +728,8 @@ describe('exact added lines', () => {
       `diff --git ${oldOid} ${newOid}\nindex ${oldOid}..${newOid} 100644\n`
       + `--- ${oldOid}\n+++ ${newOid}\n@@ -1 +1 @@\n-old\n+new\n`,
     );
-    const responses = addedLineShimResponses(
-      baseOid, candidateOid, 'safe.txt', oldBytes, newBytes, patch,
+    const { baseOid, candidateOid, responses } = addedLineShimScenario(
+      'safe.txt', oldBytes, newBytes, patch,
     );
     const diffKey = responseKey([
       '-c', 'diff.algorithm=myers', 'diff', '--patch', '--unified=0',
@@ -616,7 +784,7 @@ describe('exact added lines', () => {
     vi.resetModules();
     vi.doMock('node:child_process', () => ({
       execFileSync: () => {
-        throw Object.assign(new Error('ambiguous legacy timeout'), { code: 'ETIMEDOUT' });
+        throw Object.assign(new Error('exact boundary timeout'), { code: 'ETIMEDOUT' });
       },
     }));
     try {
@@ -627,7 +795,7 @@ describe('exact added lines', () => {
       } catch (error) {
         thrown = error;
       }
-      expect(thrown).toMatchObject({ code: 'ci.input.added-lines.unavailable' });
+      expect(thrown).toMatchObject({ code: 'ci.input.added-lines.timeout' });
       expect((thrown as Error & { cause?: unknown }).cause).toBeUndefined();
     } finally {
       vi.doUnmock('node:child_process');
@@ -636,8 +804,6 @@ describe('exact added lines', () => {
   });
 
   it('rejects a blob whose exact bytes change during terminal revalidation', async () => {
-    const baseOid = 'a'.repeat(40);
-    const candidateOid = 'b'.repeat(40);
     const oldBytes = Buffer.from('old\n');
     const newBytes = Buffer.from('new\n');
     const oldOid = blobOid(oldBytes);
@@ -646,8 +812,8 @@ describe('exact added lines', () => {
       `diff --git ${oldOid} ${newOid}\nindex ${oldOid}..${newOid} 100644\n`
       + `--- ${oldOid}\n+++ ${newOid}\n@@ -1 +1 @@\n-old\n+new\n`,
     );
-    const responses = addedLineShimResponses(
-      baseOid, candidateOid, 'safe.txt', oldBytes, newBytes, patch,
+    const { baseOid, candidateOid, responses } = addedLineShimScenario(
+      'safe.txt', oldBytes, newBytes, patch,
     );
     const changedKey = responseKey(['cat-file', 'blob', '--', newOid]);
     let changedReads = 0;
@@ -681,55 +847,97 @@ describe('exact added lines', () => {
     }
   });
 
-  it('accepts the change-count boundary and rejects one additional fact before blob reads', () => {
-    const baseOid = 'a'.repeat(40);
-    const candidateOid = 'b'.repeat(40);
-    const oldBytes = Buffer.from('deleted\n');
+  it('rejects a verified change tree whose bytes change during terminal revalidation', async () => {
+    const oldBytes = Buffer.from('old\n');
+    const newBytes = Buffer.from('new\n');
     const oldOid = blobOid(oldBytes);
-    const rawForCount = (count: number): Buffer => Buffer.concat(
-      Array.from({ length: count }, (_, index) => Buffer.from(
-        `:100644 000000 ${oldOid} ${'0'.repeat(40)} D\0file-${String(index).padStart(4, '0')}.txt\0`,
-        'ascii',
-      )),
+    const newOid = blobOid(newBytes);
+    const patch = Buffer.from(
+      `diff --git ${oldOid} ${newOid}\nindex ${oldOid}..${newOid} 100644\n`
+      + `--- ${oldOid}\n+++ ${newOid}\n@@ -1 +1 @@\n-old\n+new\n`,
     );
-    const responsesForCount = (count: number): Record<string, GitShimResponse> => {
-      const raw = rawForCount(count);
-      return {
-        [responseKey(['cat-file', '-t', '--', baseOid])]: { stdout: 'commit\n' },
-        [responseKey(['cat-file', '-t', '--', candidateOid])]: { stdout: 'commit\n' },
-        [responseKey(['merge-base', '--all', baseOid, candidateOid])]: { stdout: `${baseOid}\n` },
-        [responseKey([
-          'diff-tree', '--raw', '-z', '--no-commit-id', '-r', '--abbrev=40',
-          '--no-renames', '--no-ext-diff', '--no-textconv', '--ignore-submodules=none',
-          baseOid, candidateOid, '--',
-        ])]: { stdoutBase64: raw.toString('base64') },
-        [responseKey([
-          '-c', `diff.renameLimit=${MAX_CHANGE_FACT_COUNT}`, 'diff-tree', '--raw', '-z',
-          '--no-commit-id', '-r', '--abbrev=40', '--no-ext-diff', '--no-textconv',
-          '--ignore-submodules=none', '--find-renames', '--find-copies',
-          '--find-copies-harder', baseOid, candidateOid, '--',
-        ])]: { stdoutBase64: raw.toString('base64') },
-        [responseKey(['rev-parse', '--show-object-format'])]: { stdout: 'sha1\n' },
-        [responseKey(['cat-file', '-t', '--', oldOid])]: { stdout: 'blob\n' },
-        [responseKey(['cat-file', '-s', '--', oldOid])]: { stdout: `${oldBytes.byteLength}\n` },
-        [responseKey(['cat-file', 'blob', '--', oldOid])]: {
-          stdoutBase64: oldBytes.toString('base64'),
-        },
-      };
-    };
+    const { baseOid, candidateOid, responses } = addedLineShimScenario(
+      'safe.txt', oldBytes, newBytes, patch,
+    );
+    const candidateTree = Object.entries(responses).find(([key, response]) => {
+      const args = JSON.parse(key) as string[];
+      if (
+        args[0] !== 'cat-file'
+        || args[1] !== 'tree'
+        || response.stdoutBase64 === undefined
+      ) {
+        return false;
+      }
+      return Buffer.from(response.stdoutBase64, 'base64').includes(Buffer.from(newOid, 'hex'));
+    });
+    expect(candidateTree).toBeDefined();
+    const [candidateTreeKey, candidateTreeResponse] = candidateTree!;
+    const originalTree = Buffer.from(candidateTreeResponse.stdoutBase64!, 'base64');
+    const substitutedTree = Buffer.from(originalTree);
+    const pathOffset = substitutedTree.indexOf(Buffer.from('safe.txt', 'utf8'));
+    expect(pathOffset).toBeGreaterThanOrEqual(0);
+    substitutedTree.set(Buffer.from('evil.txt', 'utf8'), pathOffset);
+    expect(substitutedTree.byteLength).toBe(originalTree.byteLength);
 
+    let treeReads = 0;
+    vi.resetModules();
+    vi.doMock('node:child_process', () => ({
+      execFileSync: (_file: string, args: string[]) => {
+        const key = responseKey(args.slice(1));
+        if (key === candidateTreeKey) {
+          treeReads += 1;
+          return treeReads === 1 ? originalTree : substitutedTree;
+        }
+        const response = responses[key];
+        if (response === undefined) throw new Error('unexpected synthetic command');
+        if (response.stdoutBase64 !== undefined) return Buffer.from(response.stdoutBase64, 'base64');
+        return Buffer.from(response.stdout ?? '', 'utf8');
+      },
+    }));
+    try {
+      const isolated = await import('../../scripts/lib/ci-control/git-input.ts');
+      let thrown: unknown;
+      try {
+        isolated.readExactAddedLines('/isolated-fixture', { baseOid, candidateOid });
+      } catch (error) {
+        thrown = error;
+      }
+      expect(thrown).toMatchObject({ code: 'ci.input.added-lines.identity-mismatch' });
+      expect(treeReads).toBe(2);
+      expectNoVisibleCause(thrown);
+    } finally {
+      vi.doUnmock('node:child_process');
+      vi.resetModules();
+    }
+  });
+
+  it('accepts the change-count boundary and rejects one additional fact before blob reads', () => {
+    const bytes = Buffer.from('added\n');
+    const scenarioForCount = (count: number) => addedFactsShimScenario(
+      Array.from({ length: count }, (_, index) => ({
+        path: `file-${String(index).padStart(4, '0')}.txt`,
+        bytes,
+      })),
+    );
+    const exact = scenarioForCount(MAX_EXACT_ADDED_LINE_CHANGE_COUNT);
     expect(withGitShim(
-      responsesForCount(MAX_EXACT_ADDED_LINE_CHANGE_COUNT),
-      (cwd) => readExactAddedLines(cwd, { baseOid, candidateOid }),
+      exact.responses,
+      (cwd) => readExactAddedLines(cwd, {
+        baseOid: exact.baseOid,
+        candidateOid: exact.candidateOid,
+      }),
     ).changes).toHaveLength(MAX_EXACT_ADDED_LINE_CHANGE_COUNT);
-    const overResponses = responsesForCount(MAX_EXACT_ADDED_LINE_CHANGE_COUNT + 1);
-    delete overResponses[responseKey(['rev-parse', '--show-object-format'])];
-    delete overResponses[responseKey(['cat-file', '-t', '--', oldOid])];
-    delete overResponses[responseKey(['cat-file', '-s', '--', oldOid])];
-    delete overResponses[responseKey(['cat-file', 'blob', '--', oldOid])];
+    const over = scenarioForCount(MAX_EXACT_ADDED_LINE_CHANGE_COUNT + 1);
+    const objectOid = blobOid(bytes);
+    delete over.responses[responseKey(['cat-file', '-t', '--', objectOid])];
+    delete over.responses[responseKey(['cat-file', '-s', '--', objectOid])];
+    delete over.responses[responseKey(['cat-file', 'blob', '--', objectOid])];
     expectCode(() => withGitShim(
-      overResponses,
-      (cwd) => readExactAddedLines(cwd, { baseOid, candidateOid }),
+      over.responses,
+      (cwd) => readExactAddedLines(cwd, {
+        baseOid: over.baseOid,
+        candidateOid: over.candidateOid,
+      }),
     ), 'ci.input.added-lines.budget');
   });
 
@@ -742,31 +950,35 @@ describe('exact added lines', () => {
     expect(MAX_EXACT_ADDED_LINE_PATCH_TOTAL_BYTES).toBe(16 * 1_024 * 1_024);
     expect(MAX_EXACT_ADDED_LINE_BYTES).toBe(16 * 1_024 * 1_024);
 
-    const baseOid = 'a'.repeat(40);
-    const candidateOid = 'b'.repeat(40);
     const shared = Buffer.from(`${'x\n'.repeat(MAX_EXACT_ADDED_LINE_COUNT / 2 - 1)}x`);
     const exactFacts = [
       { path: 'first.txt', bytes: shared },
       { path: 'second.txt', bytes: shared },
     ];
+    const exact = addedFactsShimScenario(exactFacts);
     expect(withGitShim(
-      addedFactsShimResponses(baseOid, candidateOid, exactFacts),
-      (cwd) => readExactAddedLines(cwd, { baseOid, candidateOid }),
+      exact.responses,
+      (cwd) => readExactAddedLines(cwd, {
+        baseOid: exact.baseOid,
+        candidateOid: exact.candidateOid,
+      }),
     ).changes.flatMap(({ addedLines }) => addedLines)).toHaveLength(MAX_EXACT_ADDED_LINE_COUNT);
 
     const oneLine = Buffer.from('one');
+    const over = addedFactsShimScenario([
+      ...exactFacts,
+      { path: 'third.txt', bytes: oneLine },
+    ]);
     expectCode(() => withGitShim(
-      addedFactsShimResponses(baseOid, candidateOid, [
-        ...exactFacts,
-        { path: 'third.txt', bytes: oneLine },
-      ]),
-      (cwd) => readExactAddedLines(cwd, { baseOid, candidateOid }),
+      over.responses,
+      (cwd) => readExactAddedLines(cwd, {
+        baseOid: over.baseOid,
+        candidateOid: over.candidateOid,
+      }),
     ), 'ci.input.added-lines.budget');
   });
 
   it('accepts the source-line processing boundary with one returned addition and rejects one over', () => {
-    const baseOid = 'a'.repeat(40);
-    const candidateOid = 'b'.repeat(40);
     const half = MAX_EXACT_ADDED_LINE_SOURCE_LINE_COUNT / 2;
     const oldBytes = Buffer.from('x\n'.repeat(half));
     const exactNewBytes = Buffer.from(
@@ -779,11 +991,15 @@ describe('exact added lines', () => {
       + `--- ${oldOid}\n+++ ${exactNewOid}\n`
       + `@@ -${half / 2 + 1} +${half / 2 + 1} @@\n-x\n+one replacement\n`,
     );
+    const exact = addedLineShimScenario(
+      'source-lines.txt', oldBytes, exactNewBytes, exactPatch,
+    );
     expect(withGitShim(
-      addedLineShimResponses(
-        baseOid, candidateOid, 'source-lines.txt', oldBytes, exactNewBytes, exactPatch,
-      ),
-      (cwd) => readExactAddedLines(cwd, { baseOid, candidateOid }),
+      exact.responses,
+      (cwd) => readExactAddedLines(cwd, {
+        baseOid: exact.baseOid,
+        candidateOid: exact.candidateOid,
+      }),
     ).changes[0]?.addedLines).toMatchObject([
       { newLineNumber: half / 2 + 1, text: 'one replacement' },
     ]);
@@ -794,17 +1010,19 @@ describe('exact added lines', () => {
       `diff --git ${oldOid} ${overNewOid}\nindex ${oldOid}..${overNewOid} 100644\n`
       + `--- ${oldOid}\n+++ ${overNewOid}\n@@ -${half},0 +${half + 1} @@\n+one addition\n`,
     );
+    const over = addedLineShimScenario(
+      'source-lines.txt', oldBytes, overNewBytes, overPatch,
+    );
     expectCode(() => withGitShim(
-      addedLineShimResponses(
-        baseOid, candidateOid, 'source-lines.txt', oldBytes, overNewBytes, overPatch,
-      ),
-      (cwd) => readExactAddedLines(cwd, { baseOid, candidateOid }),
+      over.responses,
+      (cwd) => readExactAddedLines(cwd, {
+        baseOid: over.baseOid,
+        candidateOid: over.candidateOid,
+      }),
     ), 'ci.input.added-lines.budget');
   });
 
   it('checks the raw patch-row boundary before decoding or splitting', () => {
-    const baseOid = 'a'.repeat(40);
-    const candidateOid = 'b'.repeat(40);
     const oldBytes = Buffer.from('old\n');
     const newBytes = Buffer.from('new\n');
     for (const [rowCount, code] of [
@@ -812,51 +1030,51 @@ describe('exact added lines', () => {
       [MAX_EXACT_ADDED_LINE_PATCH_ROW_COUNT + 1, 'ci.input.added-lines.budget'],
     ] as const) {
       const patch = Buffer.from('x\n'.repeat(rowCount));
+      const scenario = addedLineShimScenario('safe.txt', oldBytes, newBytes, patch);
       expectCode(() => withGitShim(
-        addedLineShimResponses(
-          baseOid, candidateOid, 'safe.txt', oldBytes, newBytes, patch,
-        ),
-        (cwd) => readExactAddedLines(cwd, { baseOid, candidateOid }),
+        scenario.responses,
+        (cwd) => readExactAddedLines(cwd, {
+          baseOid: scenario.baseOid,
+          candidateOid: scenario.candidateOid,
+        }),
       ), code);
     }
   });
 
   it('accepts the aggregate added-text byte boundary and rejects one byte over', () => {
-    const baseOid = 'a'.repeat(40);
-    const candidateOid = 'b'.repeat(40);
     const shared = Buffer.alloc(MAX_EXACT_ADDED_LINE_BYTES / 4, 0x61);
     const exactFacts = Array.from({ length: 4 }, (_, index) => ({
       path: `exact-${index}.txt`,
       bytes: shared,
     }));
+    const exactScenario = addedFactsShimScenario(exactFacts);
     const exact = withGitShim(
-      addedFactsShimResponses(baseOid, candidateOid, exactFacts),
-      (cwd) => readExactAddedLines(cwd, { baseOid, candidateOid }),
+      exactScenario.responses,
+      (cwd) => readExactAddedLines(cwd, {
+        baseOid: exactScenario.baseOid,
+        candidateOid: exactScenario.candidateOid,
+      }),
     );
     expect(exact.changes.flatMap(({ addedLines }) => addedLines)
       .reduce((total, { text }) => total + Buffer.byteLength(text, 'utf8'), 0))
       .toBe(MAX_EXACT_ADDED_LINE_BYTES);
 
+    const overScenario = addedFactsShimScenario([
+      ...exactFacts,
+      { path: 'over-extra.txt', bytes: Buffer.from('x') },
+    ]);
     expectCode(() => withGitShim(
-      addedFactsShimResponses(baseOid, candidateOid, [
-        ...exactFacts,
-        { path: 'over-extra.txt', bytes: Buffer.from('x') },
-      ]),
-      (cwd) => readExactAddedLines(cwd, { baseOid, candidateOid }),
+      overScenario.responses,
+      (cwd) => readExactAddedLines(cwd, {
+        baseOid: overScenario.baseOid,
+        candidateOid: overScenario.candidateOid,
+      }),
     ), 'ci.input.added-lines.budget');
   });
 
   it('accepts exact single/aggregate patch byte limits and rejects one byte over', async () => {
-    const baseOid = 'a'.repeat(40);
-    const candidateOid = 'b'.repeat(40);
     const runScenario = async (patchSizes: number[], expectedCode?: string): Promise<void> => {
-      const rawParts: Buffer[] = [];
-      const responses = new Map<string, Buffer>();
-      responses.set(responseKey(['cat-file', '-t', '--', baseOid]), Buffer.from('commit\n'));
-      responses.set(responseKey(['cat-file', '-t', '--', candidateOid]), Buffer.from('commit\n'));
-      responses.set(responseKey(['merge-base', '--all', baseOid, candidateOid]), Buffer.from(`${baseOid}\n`));
-      responses.set(responseKey(['rev-parse', '--show-object-format']), Buffer.from('sha1\n'));
-      for (const [index, patchSize] of patchSizes.entries()) {
+      const facts = patchSizes.map((patchSize, index) => {
         const placeholder = '0'.repeat(40);
         const fixed = Buffer.byteLength(
           `diff --git ${placeholder} ${placeholder}\nindex ${placeholder}..${placeholder} 100644\n`
@@ -877,39 +1095,23 @@ describe('exact added lines', () => {
           + `--- ${oldOid}\n+++ ${newOid}\n@@ -1 +1 @@\n-${oldText}\n+${newText}\n`,
         );
         expect(patchBytes).toHaveLength(patchSize);
-        rawParts.push(Buffer.from(
-          `:100644 100644 ${oldOid} ${newOid} M\0patch-${index}.txt\0`,
-          'ascii',
-        ));
-        for (const [oid, bytes] of [[oldOid, oldBytes], [newOid, newBytes]] as const) {
-          responses.set(responseKey(['cat-file', '-t', '--', oid]), Buffer.from('blob\n'));
-          responses.set(responseKey(['cat-file', '-s', '--', oid]), Buffer.from(`${bytes.byteLength}\n`));
-          responses.set(responseKey(['cat-file', 'blob', '--', oid]), bytes);
-        }
-        responses.set(responseKey([
-          '-c', 'diff.algorithm=myers', 'diff', '--patch', '--unified=0',
-          '--no-indent-heuristic', '--text', '--full-index', '--no-prefix',
-          '--no-color', '--no-ext-diff', '--no-textconv', oldOid, newOid, '--',
-        ]), patchBytes);
-      }
-      const raw = Buffer.concat(rawParts);
-      responses.set(responseKey([
-        'diff-tree', '--raw', '-z', '--no-commit-id', '-r', '--abbrev=40',
-        '--no-renames', '--no-ext-diff', '--no-textconv', '--ignore-submodules=none',
-        baseOid, candidateOid, '--',
-      ]), raw);
-      responses.set(responseKey([
-        '-c', `diff.renameLimit=${MAX_CHANGE_FACT_COUNT}`, 'diff-tree', '--raw', '-z',
-        '--no-commit-id', '-r', '--abbrev=40', '--no-ext-diff', '--no-textconv',
-        '--ignore-submodules=none', '--find-renames', '--find-copies',
-        '--find-copies-harder', baseOid, candidateOid, '--',
-      ]), raw);
+        return {
+          path: `patch-${index}.txt`,
+          oldBytes,
+          newBytes,
+          patch: patchBytes,
+        };
+      });
+      const scenario = modifiedFactsShimScenario(facts);
 
       vi.resetModules();
       vi.doMock('node:child_process', () => ({
         execFileSync: (_file: string, args: string[], options: { maxBuffer: number }) => {
-          const output = responses.get(responseKey(args.slice(1)));
-          if (output === undefined) throw new Error('unexpected synthetic command');
+          const response = scenario.responses[responseKey(args.slice(1))];
+          if (response === undefined) throw new Error('unexpected synthetic command');
+          const output = response.stdoutBase64 !== undefined
+            ? Buffer.from(response.stdoutBase64, 'base64')
+            : Buffer.from(response.stdout ?? '', 'utf8');
           if (output.byteLength > options.maxBuffer) {
             throw Object.assign(new Error('synthetic output cap'), { code: 'ENOBUFS' });
           }
@@ -920,12 +1122,18 @@ describe('exact added lines', () => {
         const isolated = await import('../../scripts/lib/ci-control/git-input.ts');
         if (expectedCode === undefined) {
           expect(isolated.readExactAddedLines(
-            '/isolated-fixture', { baseOid, candidateOid },
+            '/isolated-fixture', {
+              baseOid: scenario.baseOid,
+              candidateOid: scenario.candidateOid,
+            },
           ).changes).toHaveLength(patchSizes.length);
         } else {
           let thrown: unknown;
           try {
-            isolated.readExactAddedLines('/isolated-fixture', { baseOid, candidateOid });
+            isolated.readExactAddedLines('/isolated-fixture', {
+              baseOid: scenario.baseOid,
+              candidateOid: scenario.candidateOid,
+            });
           } catch (error) {
             thrown = error;
           }
@@ -1204,24 +1412,23 @@ describe('exact added lines', () => {
       `diff --git ${oldOid} ${newOid}\nindex ${oldOid}..${newOid} 100644\n`
       + `--- ${oldOid}\n+++ ${newOid}\n@@ -1 +1 @@\n-old\n+new\n`,
     );
+    const scenario = addedLineShimScenario('safe.txt', oldBytes, newBytes, patch);
     expectCode(() => withGitShim(
-      addedLineShimResponses(baseOid, candidateOid, 'safe.txt', oldBytes, newBytes, patch),
+      scenario.responses,
       (cwd) => readExactAddedLinesWithinBudget(cwd, {
-        baseOid,
-        candidateOid,
+        baseOid: scenario.baseOid,
+        candidateOid: scenario.candidateOid,
         budget: addedLineBudget({ patchBytes: patch.byteLength - 1 }),
       }),
     ), 'ci.input.added-lines.budget');
   });
 
   it('applies narrowed change and fixed per-item blob bounds before blob materialization', () => {
-    const baseOid = 'a'.repeat(40);
-    const candidateOid = 'b'.repeat(40);
     const bytes = Buffer.from('candidate');
-    const responses = addedFactsShimResponses(baseOid, candidateOid, [
+    const scenario = addedFactsShimScenario([
       { path: 'candidate.txt', bytes },
     ]);
-    delete responses[responseKey(['rev-parse', '--show-object-format'])];
+    const { baseOid, candidateOid, responses } = scenario;
     delete responses[responseKey(['cat-file', '-t', '--', blobOid(bytes)])];
     delete responses[responseKey(['cat-file', '-s', '--', blobOid(bytes)])];
     delete responses[responseKey(['cat-file', 'blob', '--', blobOid(bytes)])];
@@ -1232,84 +1439,49 @@ describe('exact added lines', () => {
         budget: addedLineBudget({ changeCount: 0 }),
       })), 'ci.input.added-lines.budget');
 
-    const oversized = addedFactsShimResponses(baseOid, candidateOid, [
+    const oversizedScenario = addedFactsShimScenario([
       { path: 'candidate.txt', bytes },
     ]);
+    const oversized = oversizedScenario.responses;
     oversized[responseKey(['cat-file', '-s', '--', blobOid(bytes)])] = {
       stdout: `${MAX_EXACT_SINGLE_BLOB_BYTES + 1}\n`,
     };
     delete oversized[responseKey(['cat-file', 'blob', '--', blobOid(bytes)])];
     expectCode(() => withGitShim(oversized,
       (cwd) => readExactAddedLinesWithinBudget(cwd, {
-        baseOid,
-        candidateOid,
+        baseOid: oversizedScenario.baseOid,
+        candidateOid: oversizedScenario.candidateOid,
         budget: addedLineBudget(),
       })), 'ci.input.added-lines.budget');
   });
 
-  it('stops a zero change budget after the conservative preflight and admits one real rename', () => {
-    const baseOid = 'a'.repeat(40);
-    const candidateOid = 'b'.repeat(40);
-    const blob = 'c'.repeat(40);
-    const oneAdded = Buffer.from(
-      `:000000 100644 ${'0'.repeat(40)} ${blob} A\0one.txt\0`,
-      'ascii',
-    );
-    const zeroBudgetResponses: Record<string, GitShimResponse> = {
-      [responseKey(['cat-file', '-t', '--', baseOid])]: { stdout: 'commit\n' },
-      [responseKey(['cat-file', '-t', '--', candidateOid])]: { stdout: 'commit\n' },
-      [responseKey(['merge-base', '--all', baseOid, candidateOid])]: { stdout: `${baseOid}\n` },
-      [responseKey([
-        'diff-tree', '--raw', '-z', '--no-commit-id', '-r', '--abbrev=40',
-        '--no-renames', '--no-ext-diff', '--no-textconv', '--ignore-submodules=none',
-        baseOid, candidateOid, '--',
-      ])]: { stdoutBase64: oneAdded.toString('base64') },
-    };
-    expectCode(() => withGitShim(zeroBudgetResponses,
-      (cwd) => readExactAddedLinesWithinBudget(cwd, {
-        baseOid,
-        candidateOid,
-        budget: addedLineBudget({ changeCount: 0 }),
-      })), 'ci.input.added-lines.budget');
+  it('stops a zero change budget from verified trees and admits one real rename', () => {
+    const added = fixture();
+    write(added.root, 'one.txt', 'one\n');
+    const addedCandidate = commit(added.root, 'one addition');
+    expectCode(() => readExactAddedLinesWithinBudget(added.root, {
+      baseOid: added.baseOid,
+      candidateOid: addedCandidate,
+      budget: addedLineBudget({ changeCount: 0 }),
+    }), 'ci.input.added-lines.budget');
 
-    const noRenames = Buffer.concat([
-      Buffer.from(`:100644 000000 ${blob} ${'0'.repeat(40)} D\0old.txt\0`, 'ascii'),
-      Buffer.from(`:000000 100644 ${'0'.repeat(40)} ${blob} A\0new.txt\0`, 'ascii'),
-    ]);
-    const withRename = Buffer.from(
-      `:100644 100644 ${blob} ${blob} R100\0old.txt\0new.txt\0`,
-      'ascii',
-    );
-    const renameResponses: Record<string, GitShimResponse> = {
-      [responseKey(['cat-file', '-t', '--', baseOid])]: { stdout: 'commit\n' },
-      [responseKey(['cat-file', '-t', '--', candidateOid])]: { stdout: 'commit\n' },
-      [responseKey(['merge-base', '--all', baseOid, candidateOid])]: { stdout: `${baseOid}\n` },
-      [responseKey([
-        'diff-tree', '--raw', '-z', '--no-commit-id', '-r', '--abbrev=40',
-        '--no-renames', '--no-ext-diff', '--no-textconv', '--ignore-submodules=none',
-        baseOid, candidateOid, '--',
-      ])]: { stdoutBase64: noRenames.toString('base64') },
-      [responseKey([
-        '-c', `diff.renameLimit=${MAX_CHANGE_FACT_COUNT}`, 'diff-tree', '--raw', '-z',
-        '--no-commit-id', '-r', '--abbrev=40', '--no-ext-diff', '--no-textconv',
-        '--ignore-submodules=none', '--find-renames', '--find-copies',
-        '--find-copies-harder', baseOid, candidateOid, '--',
-      ])]: { stdoutBase64: withRename.toString('base64') },
-      [responseKey(['rev-parse', '--show-object-format'])]: { stdout: 'sha1\n' },
-    };
-    const renamed = withGitShim(renameResponses,
-      (cwd) => readExactAddedLinesWithinBudget(cwd, {
-        baseOid,
-        candidateOid,
-        budget: {
-          changeCount: 1,
-          sourceBlobBytes: 0,
-          sourceLineCount: 0,
-          patchBytes: 0,
-          addedLineCount: 0,
-          addedTextBytes: 0,
-        },
-      }));
+    const renamedFixture = fixture();
+    write(renamedFixture.root, 'old.txt', '');
+    const renameBase = commit(renamedFixture.root, 'rename base');
+    git(renamedFixture.root, ['mv', 'old.txt', 'new.txt']);
+    const renameCandidate = commit(renamedFixture.root, 'rename candidate');
+    const renamed = readExactAddedLinesWithinBudget(renamedFixture.root, {
+      baseOid: renameBase,
+      candidateOid: renameCandidate,
+      budget: {
+        changeCount: 1,
+        sourceBlobBytes: 0,
+        sourceLineCount: 0,
+        patchBytes: 0,
+        addedLineCount: 0,
+        addedTextBytes: 0,
+      },
+    });
     expect(renamed.changes).toMatchObject([
       { status: 'renamed', oldPath: 'old.txt', path: 'new.txt', addedLines: [] },
     ]);
@@ -1317,8 +1489,6 @@ describe('exact added lines', () => {
   });
 
   it('rejects narrowed aggregate blob bytes from size preflight before any body read', () => {
-    const baseOid = 'a'.repeat(40);
-    const candidateOid = 'b'.repeat(40);
     const oldBytes = Buffer.from('old source\n');
     const newBytes = Buffer.from('new source\n');
     const oldOid = blobOid(oldBytes);
@@ -1327,8 +1497,8 @@ describe('exact added lines', () => {
       `diff --git ${oldOid} ${newOid}\nindex ${oldOid}..${newOid} 100644\n`
       + `--- ${oldOid}\n+++ ${newOid}\n@@ -1 +1 @@\n-old source\n+new source\n`,
     );
-    const responses = addedLineShimResponses(
-      baseOid, candidateOid, 'source.txt', oldBytes, newBytes, patch,
+    const { baseOid, candidateOid, responses } = addedLineShimScenario(
+      'source.txt', oldBytes, newBytes, patch,
     );
     delete responses[responseKey(['cat-file', 'blob', '--', oldOid])];
     delete responses[responseKey(['cat-file', 'blob', '--', newOid])];
@@ -1375,8 +1545,6 @@ describe('exact added lines', () => {
   });
 
   it('charges a shared patch once while charging cached output once per path', () => {
-    const baseOid = 'a'.repeat(40);
-    const candidateOid = 'b'.repeat(40);
     const oldBytes = Buffer.from('old\n');
     const newBytes = Buffer.from('new\n');
     const oldOid = blobOid(oldBytes);
@@ -1385,25 +1553,9 @@ describe('exact added lines', () => {
       `diff --git ${oldOid} ${newOid}\nindex ${oldOid}..${newOid} 100644\n`
       + `--- ${oldOid}\n+++ ${newOid}\n@@ -1 +1 @@\n-old\n+new\n`,
     );
-    const responses = addedLineShimResponses(
-      baseOid, candidateOid, 'first.txt', oldBytes, newBytes, patch,
+    const { baseOid, candidateOid, responses } = addedLineShimScenario(
+      ['first.txt', 'second.txt'], oldBytes, newBytes, patch,
     );
-    const raw = Buffer.concat(['first.txt', 'second.txt'].map((path) => Buffer.from(
-      `:100644 100644 ${oldOid} ${newOid} M\0${path}\0`,
-      'ascii',
-    )));
-    for (const args of [[
-      'diff-tree', '--raw', '-z', '--no-commit-id', '-r', '--abbrev=40',
-      '--no-renames', '--no-ext-diff', '--no-textconv', '--ignore-submodules=none',
-      baseOid, candidateOid, '--',
-    ], [
-      '-c', `diff.renameLimit=${MAX_CHANGE_FACT_COUNT}`, 'diff-tree', '--raw', '-z',
-      '--no-commit-id', '-r', '--abbrev=40', '--no-ext-diff', '--no-textconv',
-      '--ignore-submodules=none', '--find-renames', '--find-copies',
-      '--find-copies-harder', baseOid, candidateOid, '--',
-    ]]) {
-      responses[responseKey(args)] = { stdoutBase64: raw.toString('base64') };
-    }
     const result = withGitShim(responses, (cwd) => readExactAddedLinesWithinBudget(cwd, {
       baseOid,
       candidateOid,
@@ -1429,8 +1581,6 @@ describe('exact added lines', () => {
   });
 
   it('publishes accounting only after terminal reread and does not double-charge physical reads', async () => {
-    const baseOid = 'a'.repeat(40);
-    const candidateOid = 'b'.repeat(40);
     const oldBytes = Buffer.from('old\n');
     const newBytes = Buffer.from('new\n');
     const oldOid = blobOid(oldBytes);
@@ -1439,8 +1589,8 @@ describe('exact added lines', () => {
       `diff --git ${oldOid} ${newOid}\nindex ${oldOid}..${newOid} 100644\n`
       + `--- ${oldOid}\n+++ ${newOid}\n@@ -1 +1 @@\n-old\n+new\n`,
     );
-    const responses = addedLineShimResponses(
-      baseOid, candidateOid, 'safe.txt', oldBytes, newBytes, patch,
+    const { baseOid, candidateOid, responses } = addedLineShimScenario(
+      'safe.txt', oldBytes, newBytes, patch,
     );
     const bodyReads = new Map<string, number>();
     const run = (substituteTerminal: boolean) => withMockedGitInput((_file, args) => {

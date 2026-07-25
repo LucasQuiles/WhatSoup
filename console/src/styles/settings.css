@@ -1,0 +1,244 @@
+/* ═══════════════════════════════════════════════════════════════════════════
+   v3.5 Settings surface (T5 b-09) — mockup settings.html SSOT +
+   17-settings-ia-spec.md (form register: airy rows, direct-edit controls,
+   one danger area).
+   Consumes the --settings-* component geometry (tokens.component.css) and the
+   -v35 semantic color register only; raw mockup dimensions never land here.
+   Font SIZES come from the --text-* scales (weight + leading raw, the b-03
+   fleet idiom); 1px hairlines are var(--bw).
+   Swatch mechanism: each preview band carries its OWN data-theme attribute,
+   so the -v35 tokens re-scope per swatch (no raw hex previews). Breakpoint:
+   the section nav goes horizontal-scroll at the mockup's own 800px — the
+   sixth distinct SSOT breakpoint (pinned in viewport-matrix).
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+/* ── Page root ── */
+.settings-page {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+}
+
+/* Single-h1 law: chrome's header title is an aria-hidden span, so the surface
+   owns the document h1 — visually hidden (sr-only clip, --bw idiom). */
+.settings-sr-h1 {
+  position: absolute;
+  width: var(--bw);
+  height: var(--bw);
+  padding: 0;
+  margin: calc(-1 * var(--bw));
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* ── Wrap: section nav + content (mockup .wrap) ── */
+.settings-wrap {
+  flex: 1;
+  display: grid;
+  grid-template-columns: var(--settings-nav-w) 1fr;
+  min-height: 0;
+}
+
+/* section nav (mockup .snav) */
+.settings-snav {
+  border-right: var(--bw) solid var(--border-hairline-v35);
+  padding: var(--settings-nav-pad);
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+}
+.settings-snav a {
+  display: flex;
+  align-items: center;
+  gap: var(--settings-nav-item-gap);
+  padding: var(--settings-nav-item-pad);
+  border-radius: var(--settings-nav-item-radius);
+  color: var(--text-2-v35);
+  text-decoration: none;
+  font-weight: 500;
+  font-size: var(--text-data);
+}
+.settings-snav a:hover { background: var(--surface-raised-v35); color: var(--text-1-v35); }
+.settings-snav a.on {
+  background: color-mix(in srgb, var(--accent-v35) 10%, transparent);
+  color: var(--text-1-v35);
+  box-shadow: inset 2px 0 0 var(--accent-v35);
+}
+
+/* content column (mockup .main) */
+.settings-main {
+  padding: var(--settings-main-pad);
+  overflow: auto;
+  max-width: var(--settings-main-maxw);
+  min-height: 0;
+}
+.settings-main h2 {
+  font: 700 var(--text-body) / 1.3 var(--font-display);
+  color: var(--text-1-v35);
+  margin: 0 0 var(--settings-h2-mb);
+}
+.settings-main section + section { margin-top: var(--settings-ctl-gap); }
+.settings-h2--danger { color: var(--status-crit-fg); }
+.settings-desc {
+  color: var(--text-3-v35);
+  font-size: var(--text-data);
+  margin: 0 0 var(--settings-desc-mb);
+}
+
+/* panel + rows (mockup .panel / .row) */
+.settings-panel {
+  background: var(--surface-raised-v35);
+  border: var(--bw) solid var(--border-hairline-v35);
+  border-radius: var(--settings-panel-radius);
+  margin-bottom: var(--settings-panel-mb);
+}
+.settings-panel--danger {
+  border-color: color-mix(in srgb, var(--status-crit-solid) 30%, transparent);
+}
+.settings-panel__b { padding: var(--settings-panel-b-pad); }
+.settings-row {
+  display: flex;
+  align-items: center;
+  gap: var(--settings-row-gap);
+  padding: var(--settings-row-pad-y) 0;
+  border-bottom: var(--bw) solid var(--border-hairline-v35);
+}
+.settings-row:last-child { border-bottom: none; }
+.settings-row__body { min-width: 0; }
+.settings-lbl { font-weight: 600; font-size: var(--text-data); color: var(--text-1-v35); }
+.settings-sub {
+  font: 400 var(--text-sm) / 1.35 var(--font-mono);
+  color: var(--text-3-v35);
+  margin-top: var(--settings-sub-mt);
+}
+.settings-sub--status { color: var(--accent-v35); }
+.settings-ctl {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: var(--settings-ctl-gap);
+  flex: none;
+}
+.settings-colhead {
+  font: 600 var(--text-sm) / 1.3 var(--font-mono);
+  letter-spacing: var(--tracking-inbox-caps, 0.1em);
+  color: var(--text-3-v35);
+  text-transform: uppercase;
+  padding: var(--settings-row-pad-y) 0;
+}
+.settings-empty {
+  color: var(--text-3-v35);
+  font: 400 var(--text-data) / 1.35 var(--font-body);
+  padding: var(--settings-row-pad-y) 0;
+}
+
+/* inputs (mockup .inp) */
+.settings-input {
+  width: var(--settings-input-w);
+  border-radius: var(--settings-input-radius);
+}
+.settings-input--minutes { width: calc(var(--settings-input-w) / 2); }
+
+/* toggle (mockup .tgl — shape-visible in BOTH states, spec §3) */
+.settings-tgl {
+  width: var(--settings-tgl-w);
+  height: var(--settings-tgl-h);
+  border-radius: var(--chrome-pill-radius);
+  background: var(--border-strong-v35);
+  position: relative;
+  cursor: pointer;
+  flex: none;
+  box-shadow: inset 0 0 0 var(--bw) var(--border-strong-v35);
+}
+.settings-tgl::after {
+  content: "";
+  position: absolute;
+  left: var(--settings-tgl-inset);
+  top: var(--settings-tgl-inset);
+  width: var(--settings-tgl-knob);
+  height: var(--settings-tgl-knob);
+  border-radius: 50%;
+  background: var(--text-2-v35);
+}
+.settings-tgl--on { background: var(--accent-v35); }
+.settings-tgl--on::after {
+  transform: translateX(var(--settings-tgl-travel));
+  background: var(--accent-fg-v35);
+}
+.settings-tgl--off { opacity: var(--opacity-disabled); cursor: not-allowed; }
+
+/* appearance swatches (mockup .sw) — bands re-scope -v35 tokens via their
+   own data-theme attribute; the auto band splits both themes. */
+.settings-swatches { display: flex; gap: var(--settings-swatches-gap); }
+.settings-sw {
+  width: var(--settings-sw-w);
+  border-radius: var(--settings-sw-radius);
+  border: var(--bw) solid var(--border-strong-v35);
+  overflow: hidden;
+  cursor: pointer;
+  padding: 0;
+  background: transparent;
+  display: flex;
+  flex-direction: column;
+  height: auto;
+}
+.settings-sw:disabled { opacity: var(--opacity-disabled); cursor: not-allowed; }
+.settings-sw--on {
+  border-color: var(--accent-v35);
+  box-shadow: 0 0 0 var(--bw) var(--accent-v35);
+}
+.settings-sw__a { height: var(--settings-sw-a-h); display: block; }
+.settings-sw__b { height: var(--settings-sw-b-h); display: block; }
+.settings-sw__t {
+  font: 500 var(--text-sm) / 1.3 var(--font-mono);
+  color: var(--text-3-v35);
+  text-transform: uppercase;
+  letter-spacing: var(--tracking-inbox-caps, 0.08em);
+  text-align: center;
+  padding: var(--settings-tgl-inset) 0;
+  background: var(--surface-inset-v35);
+}
+/* Swatch previews: the button carries its own data-theme so the -v35 tokens
+   re-scope to the PREVIEWED theme regardless of the live page theme — zero
+   raw hex in the surface stylesheet. Auto splits two half-bands, each scoped. */
+.settings-sw .settings-sw__a { background: var(--surface-base-v35); }
+.settings-sw .settings-sw__b { background: var(--text-1-v35); }
+.settings-sw--auto .settings-sw__a,
+.settings-sw--auto .settings-sw__b { display: flex; background: none; }
+.settings-sw--auto .settings-sw__a > i,
+.settings-sw--auto .settings-sw__b > i { flex: 1; display: block; }
+.settings-sw--auto .settings-sw__a > i { background: var(--surface-base-v35); }
+.settings-sw--auto .settings-sw__b > i { background: var(--text-1-v35); }
+
+/* link-state pill (Channels rows) */
+.settings-pill {
+  display: inline-flex;
+  align-items: center;
+  padding: var(--settings-tgl-inset) var(--settings-ctl-gap);
+  border-radius: var(--chrome-pill-radius);
+  font: 600 var(--text-sm) / 1.3 var(--font-mono);
+  background: var(--surface-overlay-v35);
+  color: var(--text-3-v35);
+}
+.settings-pill--live {
+  background: color-mix(in srgb, var(--status-ok-solid) 12%, transparent);
+  color: var(--status-ok-fg);
+}
+
+/* ── Mockup breakpoint (SSOT: @media max-width:800px) ── */
+@media (max-width: 800px) {
+  .settings-wrap { grid-template-columns: 1fr; }
+  .settings-snav {
+    flex-direction: row;
+    overflow-x: auto;
+    border-right: none;
+    border-bottom: var(--bw) solid var(--border-hairline-v35);
+  }
+}
+
+/* ── Light presence: card separation per the locked token consumption ── */
+[data-theme="light"] .settings-panel { box-shadow: var(--shadow-rest-v35); }

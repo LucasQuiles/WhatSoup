@@ -15,10 +15,13 @@ import {
   UTF8,
   ZERO_OID,
   assertNoLegacyGrafts,
+  canonicalAsciiLine,
   gitBytes,
   gitEnvironment,
-  readExactBlobsWithinAggregateBudget,
+  readExactPrimitiveChangeEvidence,
+  requireSha1ObjectFormat,
 } from "./git-input-core.ts";
+import { readExactBlobsWithinAggregateBudget } from "./git-blob-input.ts";
 import type {
   ChangeFactV1,
   ChangeModeV1,
@@ -33,6 +36,7 @@ import type {
   ExactBudgetedAddedLineSetV1,
   ExactChangeWithAddedLinesV1,
   ExactGitInputErrorCode,
+  ExactPrimitiveChangeEvidenceV1,
 } from "./git-input-core.ts";
 
 export {
@@ -66,8 +70,8 @@ export {
   readExactTreeEntries,
   readExactTreePaths,
   parseExactTreePathListing,
-  readExactBlobs,
 } from "./git-input-core.ts";
+export { readExactBlobs } from "./git-blob-input.ts";
 export type {
   ChangeStatusV1,
   ChangeModeV1,
@@ -95,32 +99,45 @@ export type {
   ExactGitInputErrorCode,
 } from "./git-input-core.ts";
 
-function requireCommit(
-  cwd: string,
-  value: string,
+function validateCommitOid(
+  value: unknown,
   label: "base" | "candidate",
 ): string {
-  if (!FULL_OID.test(value)) {
+  if (typeof value !== "string" || !FULL_OID.test(value)) {
     throw new ExactGitInputError(
       "ci.input.revision-unavailable",
       `ci.input.revision-unavailable: ${label} must be a full lowercase 40-hex commit OID`,
     );
   }
-  const type = gitBytes(
+  return value;
+}
+
+function requireCommitType(
+  cwd: string,
+  value: string,
+  label: "base" | "candidate",
+): void {
+  const output = gitBytes(
     cwd,
     ["cat-file", "-t", "--", value],
     "ci.input.revision-unavailable",
     1_024,
-  )
-    .toString("ascii")
-    .trim();
+  );
+  let type: string;
+  try {
+    type = canonicalAsciiLine(output, "ci.input.revision-unavailable");
+  } catch {
+    throw new ExactGitInputError(
+      "ci.input.revision-unavailable",
+      `ci.input.revision-unavailable: ${label} OID type is malformed`,
+    );
+  }
   if (type !== "commit") {
     throw new ExactGitInputError(
       "ci.input.revision-unavailable",
       `ci.input.revision-unavailable: ${label} OID is not a commit`,
     );
   }
-  return value;
 }
 
 function readMergeBase(
@@ -133,15 +150,26 @@ function readMergeBase(
     ["merge-base", "--all", baseOid, candidateOid],
     "ci.classification.merge-base-unavailable",
     1_024,
-  ).toString("ascii");
-  const rows = output.split(/\r?\n/).filter(Boolean);
-  if (rows.length !== 1 || !FULL_OID.test(rows[0]!)) {
+  );
+  let mergeBase: string;
+  try {
+    mergeBase = canonicalAsciiLine(
+      output,
+      "ci.classification.merge-base-unavailable",
+    );
+  } catch {
+    throw new ExactGitInputError(
+      "ci.classification.merge-base-unavailable",
+      "ci.classification.merge-base-unavailable: Git did not produce exactly one canonical commit OID",
+    );
+  }
+  if (!FULL_OID.test(mergeBase)) {
     throw new ExactGitInputError(
       "ci.classification.merge-base-unavailable",
       "ci.classification.merge-base-unavailable: Git did not produce exactly one full commit OID",
     );
   }
-  return rows[0]!;
+  return mergeBase;
 }
 
 function splitNulFields(bytes: Buffer): Buffer[] {
@@ -182,11 +210,10 @@ function decodePath(field: Buffer): string {
   let value: string;
   try {
     value = UTF8.decode(field);
-  } catch (error) {
+  } catch {
     throw new ExactGitInputError(
       "ci.classification.change-set-malformed",
       "ci.classification.change-set-malformed: path is not valid UTF-8",
-      { cause: error },
     );
   }
   if (
@@ -228,6 +255,81 @@ function compareFacts(left: ChangeFactV1, right: ChangeFactV1): number {
   const leftKey = `${left.path}\0${left.oldPath ?? ""}\0${left.status}\0${left.oldMode}\0${left.newMode}\0${left.oldOid}\0${left.newOid}`;
   const rightKey = `${right.path}\0${right.oldPath ?? ""}\0${right.status}\0${right.oldMode}\0${right.newMode}\0${right.oldOid}\0${right.newOid}`;
   return leftKey < rightKey ? -1 : leftKey > rightKey ? 1 : 0;
+}
+
+function atomicFactKey(fact: ChangeFactV1): string {
+  return `${fact.path}\0${fact.status}\0${fact.oldMode}\0${fact.newMode}\0${fact.oldOid}\0${fact.newOid}`;
+}
+
+function atomicAddedFact(fact: ChangeFactV1): ChangeFactV1 {
+  return {
+    status: "added",
+    path: fact.path,
+    oldPath: null,
+    oldMode: "000000",
+    newMode: fact.newMode,
+    oldOid: ZERO_OID,
+    newOid: fact.newOid,
+    oldType: "absent",
+    newType: fact.newType,
+    similarity: null,
+  };
+}
+
+function atomicDeletedFact(fact: ChangeFactV1): ChangeFactV1 {
+  return {
+    status: "deleted",
+    path: fact.oldPath ?? fact.path,
+    oldPath: null,
+    oldMode: fact.oldMode,
+    newMode: "000000",
+    oldOid: fact.oldOid,
+    newOid: ZERO_OID,
+    oldType: fact.oldType,
+    newType: "absent",
+    similarity: null,
+  };
+}
+
+function validateDetectedFacts(
+  evidence: ExactPrimitiveChangeEvidenceV1,
+  detected: readonly ChangeFactV1[],
+): void {
+  const expanded: ChangeFactV1[] = [];
+  for (const fact of detected) {
+    if (fact.status === "renamed") {
+      expanded.push(atomicDeletedFact(fact), atomicAddedFact(fact));
+      continue;
+    }
+    if (fact.status === "copied") {
+      const source = evidence.lookupBaseEntry(fact.oldPath!);
+      if (
+        source === null
+        || source.mode !== fact.oldMode
+        || source.objectOid !== fact.oldOid
+        || source.objectType !== fact.oldType
+      ) {
+        throw new ExactGitInputError(
+          "ci.classification.change-set-identity-mismatch",
+          "ci.classification.change-set-identity-mismatch",
+        );
+      }
+      expanded.push(atomicAddedFact(fact));
+      continue;
+    }
+    expanded.push({ ...fact, similarity: null });
+  }
+  const expectedKeys = evidence.changes.map(atomicFactKey).sort();
+  const actualKeys = expanded.map(atomicFactKey).sort();
+  if (
+    expectedKeys.length !== actualKeys.length
+    || expectedKeys.some((key, index) => key !== actualKeys[index])
+  ) {
+    throw new ExactGitInputError(
+      "ci.classification.change-set-identity-mismatch",
+      "ci.classification.change-set-identity-mismatch",
+    );
+  }
 }
 
 function parseChangeFacts(
@@ -341,45 +443,89 @@ export function readExactChangeFacts(
   );
 }
 
-function readExactChangeFactsWithinLimit(
+interface ExactChangeFactEvidenceRead {
+  facts: ChangeFactV1[];
+  evidence: ExactPrimitiveChangeEvidenceV1;
+}
+
+function mapPrimitiveChangeError(error: unknown): never {
+  if (error instanceof ExactGitInputError) {
+    if (
+      error.code === "ci.classification.change-set-identity-mismatch"
+      || error.code === "ci.classification.change-set-budget"
+      || error.code === "ci.classification.execution-timeout"
+    ) {
+      throw error;
+    }
+    if (
+      error.code === "ci.input.tree-entry-budget"
+      || error.code === "ci.input.commit-metadata-budget"
+    ) {
+      throw new ExactGitInputError(
+        "ci.classification.change-set-budget",
+        "ci.classification.change-set-budget",
+      );
+    }
+    if (
+      error.code === "ci.input.tree-entry-timeout"
+      || error.code === "ci.input.commit-metadata-timeout"
+      || error.code === "ci.input.git-execution-timeout"
+    ) {
+      throw new ExactGitInputError(
+        "ci.classification.execution-timeout",
+        "ci.classification.execution-timeout",
+      );
+    }
+    if (
+      error.code === "ci.input.tree-entry-malformed"
+      || error.code === "ci.input.tree-entry-identity-mismatch"
+      || error.code === "ci.input.commit-metadata-malformed"
+      || error.code === "ci.input.commit-metadata-invalid-utf8"
+      || error.code === "ci.input.commit-metadata-identity-mismatch"
+    ) {
+      throw new ExactGitInputError(
+        "ci.classification.change-set-identity-mismatch",
+        "ci.classification.change-set-identity-mismatch",
+      );
+    }
+  }
+  throw new ExactGitInputError(
+    "ci.input.revision-unavailable",
+    "ci.input.revision-unavailable",
+  );
+}
+
+function readExactChangeFactEvidence(
   cwd: string,
   baseOid: string,
   candidateOid: string,
   maxFactCount: number,
-): ChangeFactV1[] {
-  const exactBase = requireCommit(cwd, baseOid, "base");
-  const exactCandidate = requireCommit(cwd, candidateOid, "candidate");
-  readMergeBase(cwd, exactBase, exactCandidate);
-  const preflight = gitBytes(
+): ExactChangeFactEvidenceRead {
+  const exactBase = validateCommitOid(baseOid, "base");
+  const exactCandidate = validateCommitOid(candidateOid, "candidate");
+  requireSha1ObjectFormat(
     cwd,
-    [
-      "diff-tree",
-      "--raw",
-      "-z",
-      "--no-commit-id",
-      "-r",
-      "--abbrev=40",
-      "--no-renames",
-      "--no-ext-diff",
-      "--no-textconv",
-      "--ignore-submodules=none",
-      exactBase,
-      exactCandidate,
-      "--",
-    ],
-    "ci.classification.change-set-malformed",
-    MAX_CHANGE_SET_BYTES + 1,
+    "ci.input.revision-unavailable",
+    "ci.input.revision-unavailable",
+    "ci.classification.change-set-budget",
+    "ci.classification.execution-timeout",
   );
-  let nulCount = 0;
-  for (const byte of preflight) if (byte === 0) nulCount += 1;
-  const preflightFactLimit = maxFactCount > Math.floor(MAX_CHANGE_FACT_COUNT / 2)
+  requireCommitType(cwd, exactBase, "base");
+  requireCommitType(cwd, exactCandidate, "candidate");
+  readMergeBase(cwd, exactBase, exactCandidate);
+  const primitiveLimit = maxFactCount > Math.floor(MAX_CHANGE_FACT_COUNT / 2)
     ? MAX_CHANGE_FACT_COUNT
     : Math.min(MAX_CHANGE_FACT_COUNT, maxFactCount * 2);
-  if (nulCount % 2 !== 0 || nulCount / 2 > preflightFactLimit) {
-    throw new ExactGitInputError(
-      "ci.classification.change-set-budget",
-      "ci.classification.change-set-budget: preflight change count is invalid or over budget",
+  let evidence: ExactPrimitiveChangeEvidenceV1;
+  try {
+    evidence = readExactPrimitiveChangeEvidence(
+      cwd,
+      exactBase,
+      exactCandidate,
+      primitiveLimit,
     );
+  } catch (error) {
+    mapPrimitiveChangeError(error);
   }
   const bytes = gitBytes(
     cwd,
@@ -405,7 +551,34 @@ function readExactChangeFactsWithinLimit(
     "ci.classification.change-set-malformed",
     MAX_CHANGE_SET_BYTES + 1,
   );
-  return parseChangeFacts(bytes, maxFactCount);
+  const facts = parseChangeFacts(bytes, maxFactCount);
+  try {
+    validateDetectedFacts(evidence, facts);
+    evidence.validateObjectTypes();
+  } catch (error) {
+    mapPrimitiveChangeError(error);
+  }
+  return { facts, evidence };
+}
+
+function readExactChangeFactsWithinLimit(
+  cwd: string,
+  baseOid: string,
+  candidateOid: string,
+  maxFactCount: number,
+): ChangeFactV1[] {
+  const result = readExactChangeFactEvidence(
+    cwd,
+    baseOid,
+    candidateOid,
+    maxFactCount,
+  );
+  try {
+    result.evidence.revalidate();
+  } catch (error) {
+    mapPrimitiveChangeError(error);
+  }
+  return result.facts;
 }
 
 interface ExactTextLine {
@@ -426,6 +599,7 @@ function validateExactAddedLineInput(value: unknown): ExactAddedLineInputV1 {
       typeof value !== "object"
       || value === null
       || Array.isArray(value)
+      || utilTypes.isProxy(value)
       || Object.getPrototypeOf(value) !== Object.prototype
     ) {
       throw addedLinesError("ci.input.added-lines.input-malformed");
@@ -589,6 +763,7 @@ function mapAddedLineInputError(error: unknown): never {
   if (error instanceof ExactGitInputError) {
     if (
       error.code === "ci.input.git-execution-timeout"
+      || error.code === "ci.classification.execution-timeout"
     ) {
       throw addedLinesError("ci.input.added-lines.timeout");
     }
@@ -598,7 +773,10 @@ function mapAddedLineInputError(error: unknown): never {
     ) {
       throw addedLinesError("ci.input.added-lines.budget");
     }
-    if (error.code === "ci.input.blob-identity-mismatch") {
+    if (
+      error.code === "ci.input.blob-identity-mismatch"
+      || error.code === "ci.classification.change-set-identity-mismatch"
+    ) {
       throw addedLinesError("ci.input.added-lines.identity-mismatch");
     }
   }
@@ -607,7 +785,11 @@ function mapAddedLineInputError(error: unknown): never {
 
 function mapAddedLineTerminalError(error: unknown): never {
   if (error instanceof ExactGitInputError) {
-    if (error.code === "ci.input.git-execution-timeout") {
+    if (
+      error.code === "ci.input.git-execution-timeout"
+      || error.code === "ci.input.tree-entry-timeout"
+      || error.code === "ci.input.commit-metadata-timeout"
+    ) {
       throw addedLinesError("ci.input.added-lines.timeout");
     }
     if (error.code === "ci.input.blob-unavailable") {
@@ -618,6 +800,13 @@ function mapAddedLineTerminalError(error: unknown): never {
       || error.code === "ci.input.blob-set-budget"
       || error.code === "ci.input.blob-type-unsupported"
       || error.code === "ci.input.blob-identity-mismatch"
+      || error.code === "ci.input.tree-entry-malformed"
+      || error.code === "ci.input.tree-entry-budget"
+      || error.code === "ci.input.tree-entry-identity-mismatch"
+      || error.code === "ci.input.commit-metadata-malformed"
+      || error.code === "ci.input.commit-metadata-budget"
+      || error.code === "ci.input.commit-metadata-invalid-utf8"
+      || error.code === "ci.input.commit-metadata-identity-mismatch"
     ) {
       throw addedLinesError("ci.input.added-lines.identity-mismatch");
     }
@@ -902,15 +1091,22 @@ function requireBlobSetUnchanged(
   }
 }
 
+function requiresConservativeDestinationScan(fact: ChangeFactV1): boolean {
+  return (
+    (fact.status === "renamed" || fact.status === "copied")
+    && fact.oldOid !== fact.newOid
+  );
+}
+
 function readExactAddedLinesCore(
   cwd: string,
   baseOid: string,
   candidateOid: string,
   budget: ExactAddedLineBudgetV1,
 ): ExactBudgetedAddedLineSetV1 {
-  let facts: ChangeFactV1[];
+  let changeEvidence: ExactChangeFactEvidenceRead;
   try {
-    facts = readExactChangeFactsWithinLimit(
+    changeEvidence = readExactChangeFactEvidence(
       cwd,
       baseOid,
       candidateOid,
@@ -919,13 +1115,16 @@ function readExactAddedLinesCore(
   } catch (error) {
     mapAddedLineInputError(error);
   }
+  const facts = changeEvidence.facts;
   if (facts.some((fact) => fact.oldType === "gitlink" || fact.newType === "gitlink")) {
     throw addedLinesError("ci.input.added-lines.gitlink");
   }
 
   const objectOids = [...new Set(facts.flatMap((fact) => {
     if (fact.status === "deleted" || fact.oldOid === fact.newOid) return [];
-    if (fact.status === "added") return [fact.newOid];
+    if (fact.status === "added" || requiresConservativeDestinationScan(fact)) {
+      return [fact.newOid];
+    }
     return [fact.oldOid, fact.newOid];
   }))].sort();
   let exactBlobs: ExactBlobV1[];
@@ -963,7 +1162,10 @@ function readExactAddedLinesCore(
     let addedLines: ExactAddedLineV1[];
     if (fact.newOid === ZERO_OID || fact.oldOid === fact.newOid) {
       addedLines = [];
-    } else if (fact.oldOid === ZERO_OID) {
+    } else if (
+      fact.oldOid === ZERO_OID
+      || requiresConservativeDestinationScan(fact)
+    ) {
       const newPreflight = preflightByOid.get(fact.newOid)!;
       if (
         newPreflight.lineCount > budget.addedLineCount - addedLineCount
@@ -1055,6 +1257,11 @@ function readExactAddedLinesCore(
     mapAddedLineTerminalError(error);
   }
   requireBlobSetUnchanged(blobs, reread);
+  try {
+    changeEvidence.evidence.revalidate();
+  } catch (error) {
+    mapAddedLineTerminalError(error);
+  }
   const consumed: ExactAddedLineBudgetV1 = {
     changeCount: facts.length,
     sourceBlobBytes: exactBlobs.reduce((total, blob) => total + blob.byteLength, 0),

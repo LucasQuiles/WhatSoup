@@ -104,6 +104,7 @@
     "test": "vitest run",
     "test:design-guards": "npm test -- tests/scripts/theme-parity.test.ts tests/scripts/token-spec-drift.test.ts tests/scripts/contrast-matrix.test.ts tests/scripts/shadow-baseline.test.ts tests/scripts/shadow-frozen-inventory.test.ts tests/scripts/raw-form-control-inventory.test.ts tests/scripts/design-regression-guards.test.ts tests/scripts/design-metrics.test.ts tests/scripts/design-burndown-check.test.ts tests/scripts/color-semantics.test.ts tests/scripts/design-resilience-audit.test.ts tests/scripts/font-assets.test.ts tests/scripts/brand-assets.test.ts tests/scripts/design-lint-fixtures.test.ts --pool=forks",
     "test:bot-errors-health:hermeticity": "vitest run tests/scripts/bot-errors-health-check.test.ts -t \"macOS clock\" --pool=forks --fileParallelism=false --retry=0",
+    "test:credential-probe-boundedness": "vitest run tests/deploy/credential-probe-boundedness.test.ts --pool=forks --fileParallelism=false --retry=0",
     "test:tokenomics": "bash scripts/run-tokenomics-pytests.sh",
     "test:qsesh": "bash scripts/run-qsesh-pytests.sh",
     "lint:qsesh": "ruff check tools/qsesh && ruff format --check tools/qsesh && shellcheck scripts/run-qsesh-pytests.sh",

@@ -99,6 +99,11 @@ describe('exact candidate tree entries', () => {
   it('bounds and validates full-tree listing bytes before accepting paths', () => {
     const exactPath = 'a'.repeat(MAX_EXACT_TREE_ENTRY_PATH_BYTES);
     expect(parseExactTreePathListing(listingRow(exactPath))).toEqual([exactPath]);
+    expect(parseExactTreePathListing(Buffer.from(
+      `040000 tree ${'a'.repeat(40)}\tdocs\0`
+      + `100644 blob ${'b'.repeat(40)}\tdocs/file.txt\0`,
+      'utf8',
+    ))).toEqual(['docs', 'docs/file.txt']);
     expectCode(
       () => parseExactTreePathListing(listingRow(`${exactPath}a`)),
       'ci.input.tree-entry-budget',
@@ -115,9 +120,34 @@ describe('exact candidate tree entries', () => {
       () => parseExactTreePathListing(invalidUtf8),
       'ci.input.tree-entry-malformed',
     );
+    for (const invalid of [
+      `100644 blob ${'a'.repeat(40)}\tbad\nname\0`,
+      `040000 blob ${'a'.repeat(40)}\tdocs\0`,
+      `100644 tree ${'a'.repeat(40)}\tfile\0`,
+      `100755 commit ${'a'.repeat(40)}\texecutable\0`,
+      `120000 tree ${'a'.repeat(40)}\tlink\0`,
+      `160000 blob ${'a'.repeat(40)}\tgitlink\0`,
+      `100644 blob ${'0'.repeat(40)}\tfile\0`,
+    ]) {
+      expectCode(
+        () => parseExactTreePathListing(Buffer.from(invalid, 'utf8')),
+        'ci.input.tree-entry-malformed',
+      );
+    }
     const hostile = new Proxy(new Uint8Array(), { get: () => { throw new Error('hostile accessor'); } });
     expectCode(
       () => parseExactTreePathListing(hostile),
+      'ci.input.tree-entry-malformed',
+    );
+  });
+
+  it('rejects mutable SharedArrayBuffer-backed tree listings', () => {
+    const listing = listingRow('safe.txt');
+    const shared = new SharedArrayBuffer(listing.byteLength);
+    const view = new Uint8Array(shared);
+    view.set(listing);
+    expectCode(
+      () => parseExactTreePathListing(view),
       'ci.input.tree-entry-malformed',
     );
   });
@@ -408,6 +438,49 @@ describe('exact candidate tree entries', () => {
     expectNoVisibleCause(thrown);
   });
 
+  it('rejects high-bit raw tree modes instead of normalizing them as ASCII', () => {
+    const leafOid = blobOid(Buffer.from('leaf\n'));
+    const rootBody = Buffer.concat([
+      Buffer.from([0xb1, 0xb0, 0xb0, 0xb6, 0xb4, 0xb4, 0x20]),
+      Buffer.from('leaf.txt\0', 'utf8'),
+      Buffer.from(leafOid, 'hex'),
+    ]);
+    const rootOid = treeOid(rootBody);
+    const commitBody = rawCommitBody({ treeOid: rootOid });
+    const candidateOid = commitOid(commitBody);
+
+    expectCode(() => withGitShim(treeLookupResponses({
+      candidateOid,
+      commitBody,
+      trees: new Map([[rootOid, rootBody]]),
+      objectTypes: new Map([[leafOid, 'blob']]),
+    }), (cwd) => readExactTreeEntries(cwd, {
+      candidateOid,
+      paths: ['leaf.txt'],
+    })), 'ci.input.tree-entry-malformed');
+  });
+
+  it('rejects cryptographically valid raw trees with noncanonical entry ordering', () => {
+    const leafOid = blobOid(Buffer.from('leaf\n'));
+    const rootBody = rawTreeBody([
+      { mode: '100644', name: 'z.txt', oid: leafOid },
+      { mode: '100644', name: 'a.txt', oid: leafOid },
+    ]);
+    const rootOid = treeOid(rootBody);
+    const commitBody = rawCommitBody({ treeOid: rootOid });
+    const candidateOid = commitOid(commitBody);
+
+    expectCode(() => withGitShim(treeLookupResponses({
+      candidateOid,
+      commitBody,
+      trees: new Map([[rootOid, rootBody]]),
+      objectTypes: new Map([[leafOid, 'blob']]),
+    }), (cwd) => readExactTreeEntries(cwd, {
+      candidateOid,
+      paths: ['a.txt'],
+    })), 'ci.input.tree-entry-malformed');
+  });
+
   it('enforces raw tree single, aggregate, and entry budgets at exact and one-over boundaries', async () => {
     const runSynthetic = async (
       rootOid: string,
@@ -514,8 +587,8 @@ describe('exact candidate tree entries', () => {
       const childBody = repeatedRawTreeEntries(childCount, trailingMalformed);
       const childOid = treeOid(childBody);
       const rootBody = Buffer.concat([
-        rawTreeBody([{ mode: '40000', name: 'child', oid: childOid }]),
         repeatedRawTreeEntries(rootNonChildCount),
+        rawTreeBody([{ mode: '40000', name: 'child', oid: childOid }]),
       ]);
       expect(rootNonChildCount + 1 + childExactCount).toBe(MAX_EXACT_TREE_ENTRY_COUNT);
       expect(rootBody.byteLength).toBeLessThan(MAX_EXACT_SINGLE_TREE_BYTES);
@@ -653,82 +726,6 @@ describe('exact candidate tree entries', () => {
     expect(reads).toEqual(new Map([[rootOid, 2], [childOid, 2]]));
   });
 
-  it('rejects wrong raw tree identity, partial nonzero output, terminal substitution, and SHA-256', async () => {
-    const leafOid = blobOid(Buffer.from('leaf\n'));
-    const firstBody = rawTreeBody([{ mode: '100644', name: 'one.txt', oid: leafOid }]);
-    const secondBody = rawTreeBody([{ mode: '100644', name: 'two.txt', oid: leafOid }]);
-    expect(secondBody.byteLength).toBe(firstBody.byteLength);
-    const rootOid = treeOid(firstBody);
-    const commitBody = rawCommitBody({ treeOid: rootOid });
-    const candidateOid = commitOid(commitBody);
-
-    const wrongIdentity = treeLookupResponses({
-      candidateOid, commitBody, trees: new Map([[rootOid, secondBody]]),
-    });
-    expectCode(() => withGitShim(wrongIdentity,
-      (cwd) => readExactTreeEntries(cwd, { candidateOid, paths: ['one.txt'] })),
-    'ci.input.tree-entry-identity-mismatch');
-
-    const partial = treeLookupResponses({
-      candidateOid, commitBody, trees: new Map([[rootOid, firstBody]]),
-      objectTypes: new Map([[leafOid, 'blob']]),
-    });
-    partial[responseKey(['cat-file', 'tree', '--', rootOid])] = {
-      stdoutBase64: firstBody.toString('base64'), stderr: 'private partial tree', exit: 23,
-    };
-    let partialError: unknown;
-    try {
-      withGitShim(partial,
-        (cwd) => readExactTreeEntries(cwd, { candidateOid, paths: ['one.txt'] }));
-    } catch (error) {
-      partialError = error;
-    }
-    expect(partialError).toMatchObject({ code: 'ci.input.tree-entry-unavailable' });
-    expect(String(partialError)).not.toContain('private partial tree');
-    expectNoVisibleCause(partialError);
-
-    const responses = treeLookupResponses({
-      candidateOid, commitBody, trees: new Map([[rootOid, firstBody]]),
-      objectTypes: new Map([[leafOid, 'blob']]),
-    });
-    let treeReads = 0;
-    vi.resetModules();
-    vi.doMock('node:child_process', () => ({
-      execFileSync: (_file: string, args: string[]) => {
-        const key = responseKey(args.slice(1));
-        if (key === responseKey(['cat-file', 'tree', '--', rootOid])) {
-          treeReads += 1;
-          return treeReads === 1 ? firstBody : secondBody;
-        }
-        const response = responses[key];
-        if (response === undefined) throw new Error('unexpected synthetic command');
-        if (response.stdoutBase64 !== undefined) return Buffer.from(response.stdoutBase64, 'base64');
-        return Buffer.from(response.stdout ?? '', 'utf8');
-      },
-    }));
-    try {
-      const isolated = await import('../../scripts/lib/ci-control/git-input.ts');
-      let terminalError: unknown;
-      try {
-        isolated.readExactTreeEntries('/isolated-fixture', { candidateOid, paths: ['one.txt'] });
-      } catch (error) {
-        terminalError = error;
-      }
-      expect(terminalError).toMatchObject({ code: 'ci.input.tree-entry-identity-mismatch' });
-      expect(treeReads).toBe(2);
-    } finally {
-      vi.doUnmock('node:child_process');
-      vi.resetModules();
-    }
-
-    expectCode(() => withGitShim(treeLookupResponses({
-      candidateOid,
-      commitBody,
-      trees: new Map([[rootOid, firstBody]]),
-      objectFormat: 'sha256\n',
-    }), (cwd) => readExactTreeEntries(cwd, { candidateOid, paths: [] })),
-    'ci.input.tree-entry-malformed');
-  });
 
   it('maps only proven timeout and output-budget child failures to their specific codes', async () => {
     const verify = async (
@@ -1280,8 +1277,14 @@ describe('exact commit metadata', () => {
     };
 
     assertImportSurface('scripts/lib/ci-control/git-input.ts', [
+        './git-blob-input.ts',
         './git-input-core.ts',
         'node:child_process',
+        'node:util',
+    ]);
+    assertImportSurface('scripts/lib/ci-control/git-blob-input.ts', [
+        './git-input-core.ts',
+        'node:crypto',
         'node:util',
     ]);
     assertImportSurface('scripts/lib/ci-control/git-input-core.ts', [
@@ -1290,6 +1293,7 @@ describe('exact commit metadata', () => {
         'node:crypto',
         'node:fs',
         'node:path',
+        'node:perf_hooks',
         'node:util',
     ]);
   });

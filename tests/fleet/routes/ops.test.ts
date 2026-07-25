@@ -645,6 +645,24 @@ describe('handleRestart', () => {
     expect(res._status).toBe(500);
     expect(JSON.parse(res._body).error).toMatch(/unit not found/);
   });
+
+  it('returns a useful message when restart rejects with a non-Error value (#2178)', async () => {
+    const inst = fakeInstance();
+    const svc = mockServiceManager();
+    // JavaScript permits rejecting with a non-Error value; assuming every
+    // rejection has a message leaves an absent value. errorMessage() normalizes
+    // it to String(value).
+    svc.restart.mockRejectedValueOnce('service vanished');
+    const deps = makeDeps({ serviceManager: svc });
+    vi.spyOn(deps.discovery, 'getInstance').mockReturnValue(inst);
+
+    const res = mockRes();
+    await handleRestart(mockReq(), res, deps, { name: 'test-line' });
+    expect(res._status).toBe(500);
+    const error = JSON.parse(res._body).error;
+    expect(error).toMatch(/service vanished/);
+    expect(error).not.toMatch(/undefined/);
+  });
 });
 
 // ---------------------------------------------------------------------------
