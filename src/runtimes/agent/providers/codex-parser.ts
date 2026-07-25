@@ -486,7 +486,13 @@ function parseLegacyExecEvent(parsed: JsonObject): AgentEvent {
 
   if (eventType === 'turn.completed') {
     const { inputTokens, outputTokens } = extractTokenCounts(parsed['usage']);
-    return { type: 'result', text: null, inputTokens, outputTokens };
+    return {
+      type: 'result',
+      text: null,
+      inputTokens,
+      outputTokens,
+      providerTurnProtocolError: 'missing_identity',
+    };
   }
 
   if (eventType === 'turn.failed') {
@@ -502,6 +508,7 @@ function parseLegacyExecEvent(parsed: JsonObject): AgentEvent {
       isError: true,
       inputTokens,
       outputTokens,
+      providerTurnProtocolError: 'missing_identity',
     };
   }
 

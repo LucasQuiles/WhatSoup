@@ -78,6 +78,7 @@ describe('parseCodexEvent', () => {
         isError: true,
         inputTokens: 4,
         outputTokens: 2,
+        providerTurnProtocolError: 'missing_identity',
       });
     });
   });
@@ -758,6 +759,9 @@ describe('parseCodexEvent', () => {
         type: 'result',
         text: 'details failure',
         isError: true,
+        inputTokens: undefined,
+        outputTokens: undefined,
+        providerTurnProtocolError: 'missing_identity',
       });
     });
 

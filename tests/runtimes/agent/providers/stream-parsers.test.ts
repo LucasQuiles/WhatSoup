@@ -50,6 +50,7 @@ describe('Codex stream parser', () => {
         text: null,
         inputTokens: 38365,
         outputTokens: 564,
+        providerTurnProtocolError: 'missing_identity',
       });
     });
 
@@ -149,6 +150,7 @@ describe('Codex stream parser', () => {
         text: null,
         inputTokens: 100392,
         outputTokens: 2102,
+        providerTurnProtocolError: 'missing_identity',
       });
     });
   });
@@ -283,7 +285,12 @@ describe('Codex stream parser', () => {
         usage: { input_tokens: 100, output_tokens: 5 },
       });
       const event = parseCodexEvent(line);
-      expect(event).toMatchObject({ type: 'result', inputTokens: 100, outputTokens: 5 });
+      expect(event).toMatchObject({
+        type: 'result',
+        inputTokens: 100,
+        outputTokens: 5,
+        providerTurnProtocolError: 'missing_identity',
+      });
       const result = event as { type: 'result'; text: string | null };
       expect(result.text).toBeTruthy();
       expect(result.text).toContain('context window exceeded');
@@ -292,7 +299,10 @@ describe('Codex stream parser', () => {
     it('parses turn.failed with no error fields → fallback text', () => {
       const line = JSON.stringify({ type: 'turn.failed' });
       const event = parseCodexEvent(line);
-      expect(event).toMatchObject({ type: 'result' });
+      expect(event).toMatchObject({
+        type: 'result',
+        providerTurnProtocolError: 'missing_identity',
+      });
       const result = event as { type: 'result'; text: string | null };
       expect(result.text).toBe('Codex CLI turn failed');
     });

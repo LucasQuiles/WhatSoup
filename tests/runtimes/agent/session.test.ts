@@ -3082,6 +3082,43 @@ describe('Event-driven provider ready signal', () => {
     expect(sm.getActiveProviderTurn()).toBeNull();
   });
 
+  it('Codex quarantines an identity-free legacy completion without clearing its owner', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const results: Extract<AgentEvent, { type: 'result' }>[] = [];
+    const sm = new SessionManager({
+      db,
+      messenger,
+      chatJid: CHAT_JID,
+      provider: 'codex-cli',
+      onEvent: (event) => {
+        if (event.type === 'result') results.push(event);
+      },
+    });
+    await sm.spawnSession();
+    mockChild.stdout.emit('data', Buffer.from(JSON.stringify({
+      jsonrpc: '2.0',
+      id: 'thread-request',
+      result: { id: 'thread-owned' },
+    }) + '\n'));
+    await sm.sendTurn('current');
+    const turnRequest = lastJsonRpcRequest(mockChild, 'turn/start');
+    mockChild.stdout.emit('data', Buffer.from(JSON.stringify({
+      jsonrpc: '2.0',
+      id: turnRequest['id'],
+      result: { turn: { id: 'turn-current', status: 'inProgress' } },
+    }) + '\n'));
+
+    mockChild.stdout.emit('data', Buffer.from(JSON.stringify({
+      type: 'turn.completed',
+      usage: { input_tokens: 7, output_tokens: 3 },
+    }) + '\n'));
+
+    await vi.waitFor(() => expect(mockChild.kill).toHaveBeenCalledWith('SIGKILL'));
+    expect(results).toEqual([]);
+    expect(sm.getActiveProviderTurn()).toBeNull();
+  });
+
   it('Codex admits an exact turn-start request error with the owning token', async () => {
     const db = makeDb();
     const { messenger } = makeMessenger();
