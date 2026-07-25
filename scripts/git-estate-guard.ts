@@ -45,6 +45,7 @@ const STATUS_SCAN_CONCURRENCY = 4;
 
 type GuardPhase = 'pre-commit' | 'pre-push';
 type BaselineState = 'valid' | 'missing' | 'malformed';
+type SnapshotConsistency = 'single-pass' | 'verified';
 
 interface GitResult {
   status: number | null;
@@ -1044,7 +1045,10 @@ async function scanWorktreeStatuses(
   };
 }
 
-async function collectSnapshot(cwd: string): Promise<EstateSnapshot> {
+async function collectSnapshot(
+  cwd: string,
+  consistency: SnapshotConsistency = 'verified',
+): Promise<EstateSnapshot> {
   const start = captureCommonState(cwd);
   const invokingWorktreePathRaw = requireGit(
     cwd,
@@ -1070,32 +1074,34 @@ async function collectSnapshot(cwd: string): Promise<EstateSnapshot> {
   let endFingerprint = start.fingerprint;
   let endStatusFingerprint = initialStatus.fingerprint;
   let racing = false;
-  try {
-    const end = captureCommonState(cwd);
-    endFingerprint = end.fingerprint;
-    const finalStatus = await scanWorktreeStatuses(end.worktrees, primaryPath);
-    endStatusFingerprint = finalStatus.fingerprint;
-    const initialFailedPaths = new Set(
-      initialStatus.errors.map(({ worktree }) => worktree).filter(Boolean),
-    );
-    for (const error of finalStatus.errors) {
-      if (!initialFailedPaths.has(error.worktree)) {
-        errors.push({ ...error, kind: 'worktree_status_rescan_failed' });
+  if (consistency === 'verified') {
+    try {
+      const end = captureCommonState(cwd);
+      endFingerprint = end.fingerprint;
+      const finalStatus = await scanWorktreeStatuses(end.worktrees, primaryPath);
+      endStatusFingerprint = finalStatus.fingerprint;
+      const initialFailedPaths = new Set(
+        initialStatus.errors.map(({ worktree }) => worktree).filter(Boolean),
+      );
+      for (const error of finalStatus.errors) {
+        if (!initialFailedPaths.has(error.worktree)) {
+          errors.push({ ...error, kind: 'worktree_status_rescan_failed' });
+        }
       }
+      racing = (
+        end.commonDir !== start.commonDir
+        || end.fingerprint !== start.fingerprint
+        || finalStatus.fingerprint !== initialStatus.fingerprint
+      );
+    } catch {
+      errors.push({
+        kind: 'topology_rescan_failed',
+        message: 'final topology/ref/stash fingerprint scan failed',
+      });
+      racing = true;
+      endFingerprint = 'unavailable';
+      endStatusFingerprint = 'unavailable';
     }
-    racing = (
-      end.commonDir !== start.commonDir
-      || end.fingerprint !== start.fingerprint
-      || finalStatus.fingerprint !== initialStatus.fingerprint
-    );
-  } catch {
-    errors.push({
-      kind: 'topology_rescan_failed',
-      message: 'final topology/ref/stash fingerprint scan failed',
-    });
-    racing = true;
-    endFingerprint = 'unavailable';
-    endStatusFingerprint = 'unavailable';
   }
 
   const withoutHash: EstateSnapshotWithoutHash = {
@@ -1527,7 +1533,10 @@ async function runGuardCommand(
   let baseline: BaselineReceipt;
   let scanFailure: string | null = null;
   try {
-    snapshot = await collectSnapshot(cwd);
+    snapshot = await collectSnapshot(
+      cwd,
+      phase === 'pre-commit' ? 'single-pass' : 'verified',
+    );
     baseline = readBaseline(snapshot);
   } catch (error) {
     scanFailure = error instanceof Error ? error.message : 'unknown scan failure';

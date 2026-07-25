@@ -32,8 +32,10 @@ The `.husky/pre-commit` hook first runs the deterministic
 `npm run guard:git-estate -- guard --phase pre-commit` scan. It inventories every
 linked worktree, local branch/upstream state, stash object identity, and conflict
 identity without printing filenames or stash subjects. The commit-time scan is
-warn-only so an unrelated lane cannot block a local checkpoint, but an incomplete
-scan remains visible and the same estate check is fail-closed at pre-push.
+one estate-wide capture and is warn-only so an unrelated lane cannot block a
+local checkpoint; incomplete scans and estate growth remain visible warnings.
+Pre-push retains two independent captures for race detection and applies the
+same estate evaluation fail-closed.
 
 The hook then hard-runs `npm run guard:repo:staged` (and console `lint-staged` for
 `console/src` changes). It additionally emits a **warn-only** architectural-drift

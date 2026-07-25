@@ -242,6 +242,32 @@ exec ${shellQuote(resolvedGit.stdout.trim())} "$@"
   };
 }
 
+function gitCallLogEnvironment(
+  root: string,
+): { env: NodeJS.ProcessEnv; log: string } {
+  const resolvedGit = spawnSync('sh', ['-c', 'command -v git'], { encoding: 'utf8' });
+  expect(resolvedGit.status, resolvedGit.stderr).toBe(0);
+  const bin = join(root, `call-log-bin-${Math.random().toString(16).slice(2)}`);
+  const log = join(root, `git-calls-${Math.random().toString(16).slice(2)}.log`);
+  mkdirSync(bin);
+  const wrapper = join(bin, 'git');
+  writeFileSync(wrapper, `#!/bin/sh
+printf '%s\\n' "$*" >> ${shellQuote(log)}
+exec ${shellQuote(resolvedGit.stdout.trim())} "$@"
+`);
+  chmodSync(wrapper, 0o755);
+  return {
+    env: {
+      PATH: `${bin}:${process.env['PATH'] ?? ''}`,
+    },
+    log,
+  };
+}
+
+function readGitCalls(log: string): string[] {
+  return readFileSync(log, 'utf8').trim().split('\n').filter(Boolean);
+}
+
 function statusConcurrencyEnvironment(
   root: string,
 ): { env: NodeJS.ProcessEnv; counts: string } {
@@ -884,6 +910,75 @@ describe('git-estate guard', () => {
     });
   });
 
+  it('uses one estate capture for pre-commit while preserving two for pre-push', () => {
+    const { root, repo } = initRepo();
+    const prePushCalls = gitCallLogEnvironment(root);
+    const prePush = run(
+      repo,
+      ['guard', '--phase', 'pre-push', '--json'],
+      prePushCalls.env,
+    );
+    expect(prePush.status).toBe(2);
+    const prePushLog = readGitCalls(prePushCalls.log);
+    expect(prePushLog).toHaveLength(13);
+    expect(prePushLog.filter((call) =>
+      call.includes(' worktree list --porcelain -z')
+    )).toHaveLength(2);
+    expect(prePushLog.filter((call) =>
+      call.includes(' status --porcelain=v2 --branch -z --untracked-files=all')
+    )).toHaveLength(2);
+
+    const preCommitCalls = gitCallLogEnvironment(root);
+    const preCommit = run(
+      repo,
+      ['guard', '--phase', 'pre-commit', '--json'],
+      preCommitCalls.env,
+    );
+    expect(preCommit.status).toBe(0);
+    const preCommitLog = readGitCalls(preCommitCalls.log);
+    expect(preCommitLog).toHaveLength(7);
+    expect(preCommitLog.filter((call) =>
+      call.includes(' worktree list --porcelain -z')
+    )).toHaveLength(1);
+    expect(preCommitLog.filter((call) =>
+      call.includes(' status --porcelain=v2 --branch -z --untracked-files=all')
+    )).toHaveLength(1);
+  });
+
+  it('keeps the same incomplete status advisory in pre-commit and blocking in pre-push', () => {
+    const { root, repo } = initRepo();
+    const env = statusOutputEnvironment(
+      root,
+      `  printf '\\043 branch.oid ${'a'.repeat(40)}\\000'`,
+    );
+
+    const preCommit = run(repo, ['guard', '--phase', 'pre-commit', '--json'], env);
+    expect(preCommit.status).toBe(0);
+    expect(preCommit.stderr).toContain('pre-commit warnings:');
+    expect(preCommit.stderr).toContain('scan_incomplete');
+    expect(JSON.parse(preCommit.stdout) as GuardDocument).toMatchObject({
+      exitCode: 0,
+      decision: { blocked: false },
+      snapshot: {
+        incomplete: true,
+        errors: [expect.objectContaining({ kind: 'worktree_status_failed' })],
+      },
+    });
+
+    const prePush = run(repo, ['guard', '--phase', 'pre-push', '--json'], env);
+    expect(prePush.status).toBe(2);
+    expect(prePush.stderr).toContain('pre-push warnings:');
+    expect(prePush.stderr).toContain('scan_incomplete');
+    expect(JSON.parse(prePush.stdout) as GuardDocument).toMatchObject({
+      exitCode: 2,
+      decision: { blocked: true },
+      snapshot: {
+        incomplete: true,
+        errors: [expect.objectContaining({ kind: 'worktree_status_failed' })],
+      },
+    });
+  });
+
   it('atomically accepts a complete snapshot as the supported baseline initializer', () => {
     const { repo } = initRepo();
     writeFileSync(join(repo, 'tracked.txt'), 'accepted dirty state\n');
@@ -1255,6 +1350,33 @@ describe('git-estate guard', () => {
       '--json',
     ]);
     expect(wrongRef.status).toBe(2);
+  });
+
+  it('keeps estate growth advisory in pre-commit and blocking in pre-push', () => {
+    const { root, repo } = initRepo();
+    expect(run(repo, ['baseline', 'write', '--json']).status).toBe(0);
+    git(repo, ['worktree', 'add', '-b', 'lane/growth', join(root, 'growth-lane')]);
+
+    const preCommit = run(repo, ['guard', '--phase', 'pre-commit', '--json']);
+    expect(preCommit.status).toBe(0);
+    expect(preCommit.stderr).toContain('estate_count_growth');
+    expect(JSON.parse(preCommit.stdout) as GuardDocument).toMatchObject({
+      exitCode: 0,
+      decision: {
+        blocked: false,
+        countGrowth: { worktrees: 1, branches: 1 },
+      },
+    });
+
+    const prePush = run(repo, ['guard', '--phase', 'pre-push', '--json']);
+    expect(prePush.status).toBe(2);
+    expect(JSON.parse(prePush.stdout) as GuardDocument).toMatchObject({
+      exitCode: 2,
+      decision: {
+        blocked: true,
+        countGrowth: { worktrees: 1, branches: 1 },
+      },
+    });
   });
 
   it('independently exempts a new invoking worktree for an exact pushed branch already in the baseline', () => {

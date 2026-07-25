@@ -11,6 +11,7 @@ describe('pre-commit hook', () => {
 
     expect(source).toContain(`if ! ${estateCommand}`);
     expect(source).toContain('git estate scan was inconclusive (warn-only)');
+    expect(source.split(estateCommand)).toHaveLength(2);
     expect(source.indexOf(estateCommand)).toBeLessThan(
       source.indexOf('npm run guard:repo:staged'),
     );
