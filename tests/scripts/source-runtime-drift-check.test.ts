@@ -1,4 +1,4 @@
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -26,6 +26,24 @@ function execGit(cwd: string, args: string[]): void {
     env: cleanGitEnv(),
     stdio: 'pipe',
   });
+}
+
+function runGit(cwd: string, args: string[]): {
+  status: number | null;
+  stdout: string;
+  stderr: string;
+  error?: string;
+} {
+  const proc = spawnSync('git', ['-C', cwd, ...args], {
+    encoding: 'utf8',
+    env: cleanGitEnv(),
+  });
+  return {
+    status: proc.status,
+    stdout: proc.stdout ?? '',
+    stderr: proc.stderr ?? '',
+    error: proc.error?.message,
+  };
 }
 
 function makeRepo(): string {
@@ -58,6 +76,154 @@ describe('source runtime drift check', () => {
     const manifest = parseSourceRuntimeManifest(JSON.parse(readFileSync(path.join(root, 'manifest.json'), 'utf8')));
 
     expect(collectSourceRuntimeIssues(root, manifest)).toEqual([]);
+  });
+
+  it('loads Git state with a constant number of bulk commands across a diamond import graph', () => {
+    const root = makeRepo();
+    writeFileSync(
+      path.join(root, 'src/main.ts'),
+      "import './left.ts';\nimport './right.ts';\nexport const connect = true;\n",
+      'utf8',
+    );
+    writeFileSync(path.join(root, 'src/left.ts'), "import './shared.ts';\n", 'utf8');
+    writeFileSync(path.join(root, 'src/right.ts'), "import './shared.ts';\n", 'utf8');
+    writeFileSync(path.join(root, 'src/shared.ts'), "export const shared = true;\n", 'utf8');
+    execGit(root, ['add', 'src/main.ts', 'src/left.ts', 'src/right.ts', 'src/shared.ts']);
+    execGit(root, ['commit', '-qm', 'diamond']);
+    const manifest = parseSourceRuntimeManifest(JSON.parse(readFileSync(path.join(root, 'manifest.json'), 'utf8')));
+    const calls: string[][] = [];
+
+    expect(collectSourceRuntimeIssues(root, manifest, {
+      git: (cwd, args) => {
+        calls.push(args);
+        return runGit(cwd, args);
+      },
+    })).toEqual([]);
+    expect(calls).toEqual([
+      ['status', '--porcelain=v2', '--branch', '-z', '--untracked-files=no'],
+      ['ls-files', '-z'],
+      ['ls-tree', '-r', '--name-only', '-z', 'HEAD'],
+      ['status', '--porcelain=v2', '--branch', '-z', '--untracked-files=no'],
+    ]);
+  });
+
+  it('fails closed when a tracked runtime file changes during graph traversal', () => {
+    const root = makeRepo();
+    const manifest = parseSourceRuntimeManifest(JSON.parse(readFileSync(path.join(root, 'manifest.json'), 'utf8')));
+    let calls = 0;
+
+    const issues = collectSourceRuntimeIssues(root, manifest, {
+      git: (cwd, args) => {
+        calls += 1;
+        const result = runGit(cwd, args);
+        if (calls === 3) {
+          writeFileSync(
+            path.join(root, 'src/main.ts'),
+            "import { connect } from './transport/connection.ts';\nconnect();\n// concurrent edit\n",
+            'utf8',
+          );
+        }
+        return result;
+      },
+    });
+
+    expect(calls).toBe(4);
+    expect(issues).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: 'file-dirty', path: 'src/main.ts' }),
+    ]));
+  });
+
+  it('fails closed when HEAD changes during graph traversal', () => {
+    const root = makeRepo();
+    const manifest = parseSourceRuntimeManifest(JSON.parse(readFileSync(path.join(root, 'manifest.json'), 'utf8')));
+    let calls = 0;
+
+    const issues = collectSourceRuntimeIssues(root, manifest, {
+      git: (cwd, args) => {
+        calls += 1;
+        const result = runGit(cwd, args);
+        if (calls === 3) {
+          writeFileSync(
+            path.join(root, 'src/main.ts'),
+            "import { connect } from './transport/connection.ts';\nconnect();\n// concurrent commit\n",
+            'utf8',
+          );
+          execGit(root, ['add', 'src/main.ts']);
+          execGit(root, ['commit', '-qm', 'concurrent']);
+        }
+        return result;
+      },
+    });
+
+    expect(calls).toBe(4);
+    expect(issues).toEqual([
+      expect.objectContaining({
+        kind: 'git-error',
+        message: expect.stringContaining('HEAD changed during inspection'),
+      }),
+    ]);
+  });
+
+  it('flags an inspected runtime path renamed during graph traversal', () => {
+    const root = makeRepo();
+    const manifest = parseSourceRuntimeManifest(JSON.parse(readFileSync(path.join(root, 'manifest.json'), 'utf8')));
+    let calls = 0;
+
+    const issues = collectSourceRuntimeIssues(root, manifest, {
+      git: (cwd, args) => {
+        calls += 1;
+        if (calls === 4) {
+          execGit(root, ['mv', 'src/main.ts', 'src/renamed.ts']);
+        }
+        return runGit(cwd, args);
+      },
+    });
+
+    expect(calls).toBe(4);
+    expect(issues).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: 'file-staged', path: 'src/main.ts' }),
+    ]));
+  });
+
+  it('fails closed when a bulk Git snapshot command fails', () => {
+    const root = makeRepo();
+    const manifest = parseSourceRuntimeManifest(JSON.parse(readFileSync(path.join(root, 'manifest.json'), 'utf8')));
+
+    const issues = collectSourceRuntimeIssues(root, manifest, {
+      git: (cwd, args) => args[0] === 'ls-tree'
+        ? { status: 2, stdout: '', stderr: 'synthetic ls-tree failure' }
+        : runGit(cwd, args),
+    });
+
+    expect(issues).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        kind: 'git-error',
+        message: expect.stringContaining('synthetic ls-tree failure'),
+      }),
+    ]));
+    expect(issues.filter((issue) => issue.kind !== 'git-error')).toEqual([]);
+  });
+
+  it('fails closed when final bulk Git verification fails', () => {
+    const root = makeRepo();
+    const manifest = parseSourceRuntimeManifest(JSON.parse(readFileSync(path.join(root, 'manifest.json'), 'utf8')));
+    let calls = 0;
+
+    const issues = collectSourceRuntimeIssues(root, manifest, {
+      git: (cwd, args) => {
+        calls += 1;
+        return calls === 4
+          ? { status: 2, stdout: '', stderr: 'synthetic final diff failure' }
+          : runGit(cwd, args);
+      },
+    });
+
+    expect(issues).toEqual([
+      expect.objectContaining({
+        kind: 'git-error',
+        message: expect.stringContaining('synthetic final diff failure'),
+      }),
+    ]);
   });
 
   it('ignores inherited hook Git environment when creating synthetic repos', () => {
@@ -158,6 +324,50 @@ describe('source runtime drift check', () => {
       schemaVersion: 1,
       entrypoints: [{ path: '../outside.ts' }],
     })).toThrow(/repo-relative/);
+  });
+
+  it('canonicalizes accepted repo-relative manifest paths before Git classification', () => {
+    const root = makeRepo();
+    const manifest = parseSourceRuntimeManifest({
+      schemaVersion: 1,
+      scope: 'test',
+      entrypoints: [{ path: './src/main.ts', mustContain: ['connect'], importGraph: true }],
+    });
+
+    expect(manifest.entrypoints[0]?.path).toBe('src/main.ts');
+    expect(collectSourceRuntimeIssues(root, manifest)).toEqual([]);
+  });
+
+  it('rejects duplicate manifest paths after canonicalization', () => {
+    expect(() => parseSourceRuntimeManifest({
+      schemaVersion: 1,
+      entrypoints: [
+        { path: 'src/main.ts' },
+        { path: './src/main.ts' },
+      ],
+    })).toThrow(/duplicate entrypoint src\/main\.ts/);
+  });
+
+  it('returns a structured issue without reading an import outside the repository', () => {
+    const root = makeRepo();
+    const outsideName = `whatsoup-outside-${path.basename(root)}.ts`;
+    const outsidePath = path.join(root, '..', outsideName);
+    mkdirSync(outsidePath);
+    writeFileSync(path.join(root, 'src/main.ts'), `import '../../${outsideName}';\nexport const connect = true;\n`, 'utf8');
+    const manifest = parseSourceRuntimeManifest(JSON.parse(readFileSync(path.join(root, 'manifest.json'), 'utf8')));
+
+    try {
+      expect(collectSourceRuntimeIssues(root, manifest)).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          kind: 'import-outside-repo',
+          path: `../${outsideName}`,
+          importedBy: 'src/main.ts',
+          specifier: `../../${outsideName}`,
+        }),
+      ]));
+    } finally {
+      rmSync(outsidePath, { recursive: true, force: true });
+    }
   });
 
   it('flags non-regular runtime files', () => {

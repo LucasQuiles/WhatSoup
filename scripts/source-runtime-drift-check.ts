@@ -54,6 +54,33 @@ interface GitFileState {
   error?: string;
 }
 
+interface GitCommandResult {
+  status: number | null;
+  stdout: string;
+  stderr: string;
+  error?: string;
+}
+
+interface GitStateSnapshot {
+  head?: string;
+  tracked: Set<string>;
+  committed: Set<string>;
+  dirty: Set<string>;
+  staged: Set<string>;
+  error?: string;
+}
+
+interface GitStatusSnapshot {
+  head?: string;
+  dirty: Set<string>;
+  staged: Set<string>;
+  error?: string;
+}
+
+export interface SourceRuntimeDependencies {
+  git?: (cwd: string, args: string[]) => GitCommandResult;
+}
+
 interface CheckOptions {
   cwd: string;
   manifestPath: string;
@@ -103,15 +130,19 @@ export function parseSourceRuntimeManifest(payload: unknown): SourceRuntimeManif
     if (path.isAbsolute(filePath) || filePath.includes('\0') || filePath.split(/[\\/]/).includes('..')) {
       throw new Error(`source runtime manifest entrypoint[${index}] path must be repo-relative`);
     }
-    if (seen.has(filePath)) throw new Error(`source runtime manifest duplicate entrypoint ${filePath}`);
-    seen.add(filePath);
+    const canonicalPath = path.posix.normalize(filePath);
+    if (canonicalPath === '.') {
+      throw new Error(`source runtime manifest entrypoint[${index}] path must name a file`);
+    }
+    if (seen.has(canonicalPath)) throw new Error(`source runtime manifest duplicate entrypoint ${canonicalPath}`);
+    seen.add(canonicalPath);
 
     const sha256Value = item['sha256'];
     if (sha256Value !== undefined && (typeof sha256Value !== 'string' || !/^[0-9a-fA-F]{64}$/.test(sha256Value))) {
       throw new Error(`source runtime manifest ${filePath} invalid sha256`);
     }
     return {
-      path: filePath,
+      path: canonicalPath,
       sha256: sha256Value?.toLowerCase(),
       mustContain: normalizeMarkers(item['mustContain']),
       importGraph: item['importGraph'] !== false,
@@ -151,11 +182,11 @@ function sha256(body: Buffer | string): string {
 // Intentional local wrapper: this guard needs status/stdout/stderr together to
 // distinguish untracked, dirty, staged, and git-error states. guard-core's
 // gitList/readText helpers intentionally expose narrower contracts.
-function git(cwd: string, args: string[]): { status: number | null; stdout: string; stderr: string; error?: string } {
+function git(cwd: string, args: string[]): GitCommandResult {
   const proc = spawnSync('git', ['-C', cwd, ...args], {
     encoding: 'utf8',
     env: cleanGitEnv(),
-    maxBuffer: 1024 * 1024,
+    maxBuffer: 16 * 1024 * 1024,
   });
   return {
     status: proc.status,
@@ -165,22 +196,141 @@ function git(cwd: string, args: string[]): { status: number | null; stdout: stri
   };
 }
 
-function gitFileState(cwd: string, relPath: string): GitFileState {
-  const tracked = git(cwd, ['ls-files', '--error-unmatch', '--', relPath]);
-  if (tracked.status !== 0) {
-    return { tracked: false, committed: false, dirty: false, staged: false, error: tracked.error };
-  }
+function nulPaths(value: string): Set<string> {
+  return new Set(value.split('\0').filter(Boolean));
+}
 
-  const committed = git(cwd, ['cat-file', '-e', `HEAD:${relPath}`]);
-  const worktree = git(cwd, ['diff', '--quiet', '--', relPath]);
-  const index = git(cwd, ['diff', '--cached', '--quiet', '--', relPath]);
-  const gitError = [committed, worktree, index].find((result) => result.error || (result.status !== 0 && result.status !== 1));
+function pathAfterSpaces(record: string, count: number): string | undefined {
+  let offset = 0;
+  for (let index = 0; index < count; index += 1) {
+    offset = record.indexOf(' ', offset);
+    if (offset < 0) return undefined;
+    offset += 1;
+  }
+  return record.slice(offset);
+}
+
+function parseGitStatusSnapshot(value: string): GitStatusSnapshot {
+  const snapshot: GitStatusSnapshot = {
+    dirty: new Set(),
+    staged: new Set(),
+  };
+  const records = value.split('\0').filter(Boolean);
+  for (let index = 0; index < records.length; index += 1) {
+    const record = records[index];
+    if (!record) continue;
+    if (record.startsWith('# branch.oid ')) {
+      const head = record.slice('# branch.oid '.length);
+      if (!/^[0-9a-f]{40,64}$/i.test(head)) {
+        snapshot.error = 'git status returned an invalid branch object ID';
+        return snapshot;
+      }
+      snapshot.head = head;
+      continue;
+    }
+    const recordType = record[0];
+    if (recordType !== '1' && recordType !== '2' && recordType !== 'u') continue;
+    const stagedCode = record[2];
+    const dirtyCode = record[3];
+    const relPath = pathAfterSpaces(record, recordType === '1' ? 8 : recordType === '2' ? 9 : 10);
+    if (!relPath || !stagedCode || !dirtyCode) {
+      snapshot.error = `git status returned a malformed ${recordType} record`;
+      return snapshot;
+    }
+    if (stagedCode !== '.') snapshot.staged.add(relPath);
+    if (dirtyCode !== '.') snapshot.dirty.add(relPath);
+    if (recordType === '2') {
+      const originalPath = records[index + 1];
+      const recordPrefix = record.slice(0, -(relPath.length + 1));
+      const score = recordPrefix.slice(recordPrefix.lastIndexOf(' ') + 1);
+      if (!originalPath || !/^[RC][0-9]+$/.test(score)) {
+        snapshot.error = 'git status returned a malformed rename/copy record';
+        return snapshot;
+      }
+      if (score.startsWith('R')) {
+        if (stagedCode !== '.') snapshot.staged.add(originalPath);
+        if (dirtyCode !== '.') snapshot.dirty.add(originalPath);
+      }
+      index += 1;
+    }
+  }
+  if (!snapshot.head) snapshot.error = 'git status did not report branch.oid';
+  return snapshot;
+}
+
+function loadGitStatusSnapshot(
+  cwd: string,
+  runGit: (cwd: string, args: string[]) => GitCommandResult,
+): GitStatusSnapshot {
+  const args = ['status', '--porcelain=v2', '--branch', '-z', '--untracked-files=no'];
+  const result = runGit(cwd, args);
+  if (result.status !== 0 || result.error) {
+    const detail = result.error || result.stderr.trim() || `exit ${String(result.status)}`;
+    return { dirty: new Set(), staged: new Set(), error: `git ${args.join(' ')} failed: ${detail}` };
+  }
+  return parseGitStatusSnapshot(result.stdout);
+}
+
+function loadGitStateSnapshot(
+  cwd: string,
+  runGit: (cwd: string, args: string[]) => GitCommandResult,
+): GitStateSnapshot {
+  const commands = [
+    { key: 'tracked', args: ['ls-files', '-z'] },
+    { key: 'committed', args: ['ls-tree', '-r', '--name-only', '-z', 'HEAD'] },
+  ] as const;
+  const snapshot: GitStateSnapshot = {
+    tracked: new Set(),
+    committed: new Set(),
+    dirty: new Set(),
+    staged: new Set(),
+  };
+  const status = loadGitStatusSnapshot(cwd, runGit);
+  if (status.error) {
+    snapshot.error = status.error;
+    return snapshot;
+  }
+  snapshot.head = status.head;
+  snapshot.dirty = status.dirty;
+  snapshot.staged = status.staged;
+  for (const command of commands) {
+    const result = runGit(cwd, [...command.args]);
+    if (result.status !== 0 || result.error) {
+      const detail = result.error || result.stderr.trim() || `exit ${String(result.status)}`;
+      snapshot.error = `git ${command.args.join(' ')} failed: ${detail}`;
+      return snapshot;
+    }
+    snapshot[command.key] = nulPaths(result.stdout);
+  }
+  return snapshot;
+}
+
+function refreshGitDriftSnapshot(
+  cwd: string,
+  snapshot: GitStateSnapshot,
+  runGit: (cwd: string, args: string[]) => GitCommandResult,
+): string | undefined {
+  const status = loadGitStatusSnapshot(cwd, runGit);
+  if (status.error) return status.error;
+  if (status.head !== snapshot.head) {
+    return `HEAD changed during inspection: initial=${String(snapshot.head)} final=${String(status.head)}`;
+  }
+  for (const relPath of status.dirty) {
+    snapshot.dirty.add(relPath);
+  }
+  for (const relPath of status.staged) {
+    snapshot.staged.add(relPath);
+  }
+  return undefined;
+}
+
+function gitFileState(snapshot: GitStateSnapshot, relPath: string): GitFileState {
   return {
-    tracked: true,
-    committed: committed.status === 0,
-    dirty: worktree.status === 1,
-    staged: index.status === 1,
-    error: gitError?.error || (gitError ? gitError.stderr.trim() : undefined),
+    tracked: snapshot.tracked.has(relPath),
+    committed: snapshot.committed.has(relPath),
+    dirty: snapshot.dirty.has(relPath),
+    staged: snapshot.staged.has(relPath),
+    error: snapshot.error,
   };
 }
 
@@ -212,6 +362,7 @@ function readImports(cwd: string, relPath: string): Array<{ specifier: string; r
 function inspectSourceFile(
   cwd: string,
   relPath: string,
+  gitSnapshot: GitStateSnapshot,
   options: { expectedSha256?: string; mustContain?: string[]; importedBy?: string; specifier?: string },
 ): SourceRuntimeIssue[] {
   const absolute = path.resolve(cwd, relPath);
@@ -240,7 +391,7 @@ function inspectSourceFile(
   }
 
   const issues: SourceRuntimeIssue[] = [];
-  const state = gitFileState(cwd, relPath);
+  const state = gitFileState(gitSnapshot, relPath);
   if (state.error) {
     issues.push(issue('git-error', 'critical', `git state check failed for ${relPath}: ${state.error}`, { path: relPath }));
   }
@@ -288,9 +439,16 @@ function inspectSourceFile(
 export function collectSourceRuntimeIssues(
   cwd: string,
   manifest: SourceRuntimeManifest,
+  dependencies: SourceRuntimeDependencies = {},
 ): SourceRuntimeIssue[] {
   const issues: SourceRuntimeIssue[] = [];
+  const gitSnapshot = loadGitStateSnapshot(cwd, dependencies.git ?? git);
+  if (gitSnapshot.error) {
+    return [issue('git-error', 'critical', `source runtime Git snapshot failed: ${gitSnapshot.error}`)];
+  }
   const visited = new Set<string>();
+  const inspectedPaths = new Set<string>();
+  const expandedPaths = new Set<string>();
   const queue: Array<{ path: string; entry?: SourceRuntimeEntry; importedBy?: string; specifier?: string }> =
     manifest.entrypoints.map((entry) => ({ path: entry.path, entry }));
 
@@ -301,23 +459,44 @@ export function collectSourceRuntimeIssues(
     const visitKey = `${relPath}:${current.importedBy ?? ''}:${current.specifier ?? ''}`;
     if (visited.has(visitKey)) continue;
     visited.add(visitKey);
+    inspectedPaths.add(relPath);
 
-    const fileIssues = inspectSourceFile(cwd, relPath, {
+    const fileIssues = inspectSourceFile(cwd, relPath, gitSnapshot, {
       expectedSha256: current.entry?.sha256,
       mustContain: current.entry?.mustContain,
       importedBy: current.importedBy,
       specifier: current.specifier,
     });
     issues.push(...fileIssues);
-    if (fileIssues.some((item) => item.kind === 'file-missing' || item.kind === 'file-kind' || item.kind === 'import-missing')) {
+    if (fileIssues.some((item) =>
+      item.kind === 'file-missing'
+      || item.kind === 'file-kind'
+      || item.kind === 'import-missing'
+      || item.kind === 'import-outside-repo'
+    )) {
       continue;
     }
     if (current.entry && !current.entry.importGraph) continue;
+    if (expandedPaths.has(relPath)) continue;
+    expandedPaths.add(relPath);
 
     for (const imported of readImports(cwd, relPath)) {
       if (!imported.resolved) continue;
       if (visited.has(`${imported.resolved}:${relPath}:${imported.specifier}`)) continue;
       queue.push({ path: imported.resolved, importedBy: relPath, specifier: imported.specifier });
+    }
+  }
+
+  const finalGitError = refreshGitDriftSnapshot(cwd, gitSnapshot, dependencies.git ?? git);
+  if (finalGitError) {
+    return [issue('git-error', 'critical', `source runtime final Git verification failed: ${finalGitError}`)];
+  }
+  for (const relPath of inspectedPaths) {
+    if (gitSnapshot.dirty.has(relPath)) {
+      issues.push(issue('file-dirty', 'high', `source runtime file has unstaged worktree drift: ${relPath}`, { path: relPath }));
+    }
+    if (gitSnapshot.staged.has(relPath)) {
+      issues.push(issue('file-staged', 'high', `source runtime file has staged-but-uncommitted drift: ${relPath}`, { path: relPath }));
     }
   }
 
