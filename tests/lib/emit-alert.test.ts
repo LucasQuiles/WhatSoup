@@ -1708,18 +1708,60 @@ describe('WHATSOUP_ALERT_SINK dry-run capture', () => {
       emitAlert('whatsoup-prod', 'connection_exhausted', 'sum', 'evidence');
 
       const warned = loggerWarn.mock.calls.some(
-        (call) => typeof call[1] === 'string' && call[1].includes('alert sink write failed'),
+        (call) => typeof call[1] === 'string' && call[1].includes('alert sink capture failed'),
       );
       expect(warned).toBe(true);
     });
 
-    it('still prefers the sink when it IS writable (guard did not disable capture)', () => {
-      // Over-correction guard: catching the write error must not turn the sink
-      // branch into a no-op that always falls through to the outbox.
-      emitAlert('whatsoup-prod', 'connection_exhausted', 'sum', 'evidence');
+    // The production callers are the *Checked wrappers, not the bare functions.
+    // A wrapper that reported success on a failed capture would be exactly the
+    // silent-success mode this fix exists to prevent, so the contract is
+    // asserted at the layer production actually calls.
+    it('reports failure through emitAlertChecked/clearAlertSourceChecked', () => {
+      pointSinkAtUnwritablePath();
+
+      expect(emitAlertChecked('whatsoup-prod', 'connection_exhausted', 'sum', 'evidence')).toBe(false);
+      expect(clearAlertSourceChecked('whatsoup-prod', 'connection_exhausted', 'evidence')).toBe(false);
+      expect(readdirSync(outboxDir)).toHaveLength(0);
+    });
+
+    it('still prefers the sink when it IS writable, and reports success', () => {
+      // Over-correction guard: catching the capture error must not turn the
+      // sink branch into a no-op. Asserting through emitAlertChecked covers the
+      // success half of the same contract the failure case asserts above — the
+      // earlier form of this test only re-asserted what the writable-sink tests
+      // above already prove, so it passed with or without the fix.
+      expect(emitAlertChecked('whatsoup-prod', 'connection_exhausted', 'sum', 'evidence')).toBe(true);
 
       expect(readFileSync(sinkPath, 'utf8').trim().split('\n')).toHaveLength(1);
       expect(readdirSync(outboxDir)).toHaveLength(0);
+    });
+
+    // The guard has to cover event CONSTRUCTION, not just the write.
+    // buildBotErrorsEvent reads ambient process state — process.cwd() throws
+    // ENOENT outright once the working directory is deleted out from under a
+    // long-lived instance. Built above the try, that throw escapes on the same
+    // `void`-ed async path and kills the instance, which is the precise failure
+    // this fix claims to prevent.
+    it('survives the event itself failing to build (deleted cwd)', () => {
+      const cwdSpy = vi.spyOn(process, 'cwd').mockImplementation(() => {
+        throw Object.assign(new Error('ENOENT: process.cwd failed'), { code: 'ENOENT' });
+      });
+
+      try {
+        expect(() => emitAlert('whatsoup-prod', 'connection_exhausted', 'sum', 'evidence')).not.toThrow();
+
+        const result = emitAlert('whatsoup-prod', 'connection_exhausted', 'sum2', 'evidence2');
+        expect(result.ok).toBe(false);
+        expect(result.channel).toBe('sink');
+        expect(result.status).toBe('failed');
+
+        // Still must not page: a construction failure is not a licence to fall
+        // through to the outbox ladder any more than a write failure is.
+        expect(readdirSync(outboxDir)).toHaveLength(0);
+      } finally {
+        cwdSpy.mockRestore();
+      }
     });
   });
 });
