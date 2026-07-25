@@ -53,7 +53,66 @@ export interface CredentialLookupOptions {
 let _cachedBackend: KeyringBackend | undefined;
 const KEYRING_COMMAND_TIMEOUT_MS = 3_000;
 const FILE_STORE_MAX_BYTES = 4_096;
+/**
+ * Which store a credential read failed against. Keyed into the warn-dedup set so
+ * a platform-keyring failure for a service does not suppress the file-store or
+ * opencode warning for that SAME service — they are independent faults and an
+ * operator needs to see both. Keying by bare service name silently dropped the
+ * second one.
+ */
+type CredentialReadSource = 'keyring' | 'file-store' | 'opencode-auth';
+
 const warnedKeyringReadServices = new Set<string>();
+
+/**
+ * Services whose credential read FAILED (as opposed to being absent) during the
+ * current lookup. `lookupCredential` keeps its `string | null` contract — see
+ * the note on {@link lookupCredentialTyped} — so this is how a hard read failure
+ * reaches the typed surface without turning "not configured" into a throw on the
+ * credential-presence hot path.
+ *
+ * Written only by {@link recordCredentialReadFailure}; read and cleared by
+ * `lookupCredentialTyped`. Safe despite being module state: the whole lookup
+ * chain is synchronous, so no other lookup can interleave between the clear and
+ * the read.
+ */
+const credentialReadFailures = new Set<string>();
+
+/**
+ * Warn once per (source, operation, service) that a credential store operation
+ * failed. Does NOT touch {@link credentialReadFailures} — only a READ failure
+ * should influence the typed lookup's reason code.
+ */
+function warnCredentialStoreFailure(
+  service: string,
+  source: CredentialReadSource,
+  operation: 'read' | 'delete',
+  err: unknown,
+): void {
+  const dedupKey = `${source}:${operation}:${service}`;
+  if (warnedKeyringReadServices.has(dedupKey)) return;
+  warnedKeyringReadServices.add(dedupKey);
+  // errorMessage() only — never the raw error. A raw child-process error carries
+  // `spawnargs` (may include the secret) and `stderr`, which the fleet server's
+  // global `log.error({ err })` handler would serialize. Same constraint the
+  // KeyringWriteError docstring states for the write path.
+  getLog().warn(
+    { service, source, operation, err: errorMessage(err) },
+    operation === 'read'
+      ? 'credential read failed — value is present-but-unreadable, not absent'
+      : 'credential delete failed — value may still be present',
+  );
+}
+
+/** A READ failed: warn AND flag, so the typed lookup reports `unreadable`. */
+function recordCredentialReadFailure(
+  service: string,
+  source: CredentialReadSource,
+  err: unknown,
+): void {
+  credentialReadFailures.add(service);
+  warnCredentialStoreFailure(service, source, 'read', err);
+}
 const keyringExecOptions = {
   timeout: KEYRING_COMMAND_TIMEOUT_MS,
   killSignal: 'SIGKILL' as const,
@@ -258,8 +317,13 @@ export function lookupCredential(service: string, options: CredentialLookupOptio
 }
 
 function warnKeyringReadFailure(service: string, backend: KeyringBackend, err: unknown): void {
-  if (warnedKeyringReadServices.has(service)) return;
-  warnedKeyringReadServices.add(service);
+  // Source-qualified key: previously this deduped on bare `service`, so a
+  // platform-keyring warning suppressed the file-store/opencode warning for the
+  // same service (and vice versa) even though they are independent faults.
+  const dedupKey = `keyring:${service}`;
+  if (warnedKeyringReadServices.has(dedupKey)) return;
+  warnedKeyringReadServices.add(dedupKey);
+  credentialReadFailures.add(service);
   getLog().warn(
     { service, backend, err: errorMessage(err) },
     'keyring read failed — falling back to env lookup',
@@ -270,6 +334,7 @@ function warnKeyringReadFailure(service: string, backend: KeyringBackend, err: u
 export function _resetBackendCache(): void {
   _cachedBackend = undefined;
   warnedKeyringReadServices.clear();
+  credentialReadFailures.clear();
 }
 
 // ─── Typed lookup with closed-id gate (W-1 / Pattern A) ───────────────────────
@@ -282,7 +347,8 @@ export function _resetBackendCache(): void {
 export type CredentialLookupReasonCode =
   | 'ok'                // value found
   | 'unknown_service'   // service not in SERVICE_ENV_MAP — closed-id gate rejected it
-  | 'not_found';        // service is known but no credential was available
+  | 'not_found'         // service is known but no credential was available
+  | 'unreadable';       // a store holding this credential failed to read (EACCES/EIO/corrupt)
 
 /**
  * Typed result from {@link lookupCredentialTyped}. Carries the value (or null)
@@ -331,9 +397,21 @@ export function lookupCredentialTyped(
     return { value: null, reason: 'unknown_service', service };
   }
 
+  // Clear before the lookup so the flag reflects THIS call only — a failure
+  // recorded by an earlier lookup of the same service must not leak into this
+  // result. The whole chain below is synchronous, so nothing can interleave.
+  credentialReadFailures.delete(service);
   const value = lookupCredential(service, options);
   if (value && value.length > 0) {
     return { value, reason: 'ok', service };
+  }
+  // A null value with a recorded read failure is NOT "not configured" — a store
+  // holding this credential was unreadable (EACCES/EIO/corrupt JSON). Reporting
+  // `not_found` here is what drove false `fallback_credential_missing` alerts
+  // and could lead an operator to re-store a key that is present but broken.
+  if (credentialReadFailures.has(service)) {
+    credentialReadFailures.delete(service);
+    return { value: null, reason: 'unreadable', service };
   }
   return { value: null, reason: 'not_found', service };
 }
@@ -485,7 +563,15 @@ function fileStoreRead(service: string): string | null {
     });
     const val = raw?.trim();
     return val || null;
-  } catch {
+  } catch (err) {
+    // No errno branching here on purpose: readPrivateFileSync ALREADY returns
+    // null for both ENOENT cases (missing directory and missing file) and only
+    // throws for a genuine fault — EACCES, EIO, EFBIG, or a private-mode
+    // violation. So reaching this catch means "present but unreadable", never
+    // "absent". The previous bare `catch { return null }` discarded that
+    // distinction the layer below had already made, which is what let a
+    // permission flip masquerade as a missing credential.
+    recordCredentialReadFailure(service, 'file-store', err);
     return null;
   }
 }
@@ -524,7 +610,19 @@ export function readOpenCodeAuthKey(provider: string): string | null {
       if (typeof key === 'string' && key.trim()) return key.trim();
     }
     return null;
-  } catch {
+  } catch (err) {
+    // Deliberately NOT the same shape as fileStoreRead. This path calls
+    // fs.readFileSync directly, with no private-fs layer to normalize absence,
+    // so ENOENT arrives here and is legitimate: most services have no opencode
+    // auth.json at all, and this is the terminal fallback consulted for every
+    // lookup. Treating that as a fault would warn on nearly every credential
+    // resolution.
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return null;
+    // Everything else is a real fault worth surfacing: EACCES/EIO from the read,
+    // or a SyntaxError from JSON.parse on a truncated/corrupt store. Note a
+    // SyntaxError carries no `.code`, so errno branching alone cannot classify
+    // this — the ENOENT check must be an allowlist, not a blocklist of bad codes.
+    recordCredentialReadFailure(provider, 'opencode-auth', err);
     return null;
   }
 }
@@ -539,7 +637,24 @@ function fileStoreWrite(service: string, value: string): void {
 function fileStoreDelete(service: string): boolean {
   try {
     return deletePrivateFileSync(fileStorePath(service), 'credential');
-  } catch {
+  } catch (err) {
+    // deleteCredential's contract is "never throws on absence", so this keeps
+    // returning false rather than propagating. But a backend failure is not an
+    // absence: returning a bare false told the caller "there was nothing to
+    // delete" when the credential is still on disk and merely unremovable —
+    // the dangerous direction for a revocation path.
+    //
+    // Warn only, with a delete-specific message. Routing this through
+    // recordCredentialReadFailure would log "credential read failed — value is
+    // present-but-unreadable", which is false for a delete and would send an
+    // operator to investigate the read path.
+    //
+    // It also deliberately does NOT set credentialReadFailures: a failed delete
+    // says nothing about whether the value can be READ. That flag could not
+    // actually leak into a later typed lookup anyway, since lookupCredentialTyped
+    // clears it on entry — so this separation prevents a false log signal, it
+    // does not fix a reachable classification bug.
+    warnCredentialStoreFailure(service, 'file-store', 'delete', err);
     return false;
   }
 }
