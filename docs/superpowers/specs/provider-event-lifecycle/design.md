@@ -2,7 +2,7 @@
 
 **Status:** Active — refreshed at canonical main `3f560389aa14112ff91350ecfb841e771d99e6d9`; provider-lifecycle implementation remains blocked on Task 1 verification/publication/fleet verification of the implemented schema-ceiling prerequisite and on the migration-46 terminal-recovery prerequisite
 
-**Schema allocation:** current canonical schema is migration 45; bounded terminal recovery/canonical `not_sent` is forward migration 46; the provider-event lifecycle ledger is migration 47. Migration 45 (`recovery_runs.status`) is consumed by unmerged #1789, currently in flight; that consumption is why terminal recovery is forward migration 46 and the lifecycle ledger is 47.
+**Schema allocation:** current canonical schema is migration 46; bounded terminal recovery/canonical `not_sent` is forward migration 47; the provider-event lifecycle ledger is migration 48. Migration 45 (`recovery_runs.status`) is consumed by unmerged #1789, currently in flight; that consumption is why terminal recovery is forward migration 46 and the lifecycle ledger is 47.
 
 ## Context
 
@@ -108,7 +108,7 @@ provider-content replay path.
 
 #### DES-003: Add a child receipt ledger inside `DurabilityEngine`
 - **Traces-from:** REQ-002, REQ-004, REQ-006, CON-002, CON-004, CON-007
-- **Rationale:** Migration 47 adds one empty activation marker table plus nine
+- **Rationale:** Migration 48 adds one empty activation marker table plus nine
   content-free lifecycle tables: `provider_request_attempts`, immutable
   `provider_attempt_handoffs`, `provider_request_segments`,
   `provider_continuation_obligations`, `provider_event_receipts`, append-only
@@ -430,9 +430,9 @@ provider-content replay path.
   settles consumed only from terminal already-effectful proof, otherwise quarantine/
   failed uncertainty. Canonical `not_sent` is a distinct pre-send-rejection operation
   status and terminal evidence retains the exact op ID/status proof; generic
-  `failed_permanent` is not. Migration 46 enables aggregate no-send only for proved
+  `failed_permanent` is not. Migration 47 enables aggregate no-send only for proved
   single-op answers; pre-lifecycle multi-op answers remain uncertain because they lack
-  a sealed expected set. Migration 47 may prove multi-op no-send only from an immutable
+  a sealed expected set. Migration 48 may prove multi-op no-send only from an immutable
   complete effect plan where every expected sibling is not-sent—missing, late-created,
   echoed, or ambiguous siblings dominate. No-send never clears an
   independent provider/tool/lifecycle replay veto. A receipt in a mixed/shared plan settles consumed only

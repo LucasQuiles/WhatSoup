@@ -41,7 +41,7 @@ describe('migration 43 operator catch-up echo-recovery proof', () => {
   afterEach(() => db.close());
 
   it('installs schema 42 with shared admission proof and persisted witness enforcement', () => {
-    expect(CURRENT_SCHEMA_MIGRATION).toBe(45);
+    expect(CURRENT_SCHEMA_MIGRATION).toBe(46);
     expect(db.raw.prepare(`
       SELECT name FROM sqlite_master
       WHERE type = 'view' AND name = 'operator_catchup_delivery_proofs'

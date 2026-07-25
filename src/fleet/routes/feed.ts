@@ -1,5 +1,6 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { jsonResponse, parseQueryString, parseIntParam } from '../../lib/http.ts';
+import { errorMessage } from '../../lib/error-message.ts';
 import type { FleetDiscovery, DiscoveredInstance } from '../discovery.ts';
 import type { HealthPoller, InstanceStatus } from '../health-poller.ts';
 import { inspectLatestLogFile, readTailLinesDetailed, type LogReadFailure } from '../log-utils.ts';
@@ -653,7 +654,7 @@ function enrichMessagePreviews(
       d.conversationKey = d.conversationKey ?? ck;
       return 'hit';
     } catch (err) {
-      recordWarning(instName, 'fallback', (err as Error).message);
+      recordWarning(instName, 'fallback', errorMessage(err));
       return 'error';
     }
   };
@@ -681,7 +682,7 @@ function enrichMessagePreviews(
             recordWarning(instName, 'messageId', result.error);
           }
         } catch (err) {
-          recordWarning(instName, 'messageId', (err as Error).message);
+          recordWarning(instName, 'messageId', errorMessage(err));
         }
       }
 
@@ -713,7 +714,7 @@ function enrichMessagePreviews(
         }
       }
     } catch (err) {
-      recordWarning(instName, 'instance', (err as Error).message);
+      recordWarning(instName, 'instance', errorMessage(err));
     }
   }
 
@@ -764,7 +765,7 @@ export function handleGetFeed(
         }
       }
     } catch (err) {
-      log.warn({ err: (err as Error).message, instance: inst.name }, 'feed: log parsing degraded for instance');
+      log.warn({ err: errorMessage(err), instance: inst.name }, 'feed: log parsing degraded for instance');
     }
   }
 
@@ -774,7 +775,7 @@ export function handleGetFeed(
     coalesced = coalesceConnectionEvents(events);
     observability.coalesced = Math.max(0, events.length - coalesced.length);
   } catch (err) {
-    log.warn({ err: (err as Error).message }, 'feed: connection coalescing failed');
+    log.warn({ err: errorMessage(err) }, 'feed: connection coalescing failed');
   }
 
   // 4. Enrich message events with DB-backed content previews BEFORE collapsing,
@@ -787,7 +788,7 @@ export function handleGetFeed(
   try {
     collapsed = collapseOutboundMessages(coalesced);
   } catch (err) {
-    log.warn({ err: (err as Error).message }, 'feed: outbound collapse failed');
+    log.warn({ err: errorMessage(err) }, 'feed: outbound collapse failed');
   }
 
   // 6. Deduplicate identical events (messageId-aware)
@@ -806,7 +807,7 @@ export function handleGetFeed(
     });
     observability.deduped = Math.max(0, collapsed.length - deduped.length);
   } catch (err) {
-    log.warn({ err: (err as Error).message }, 'feed: dedupe failed');
+    log.warn({ err: errorMessage(err) }, 'feed: dedupe failed');
   }
 
   if (previewWarnings.length > 0) {

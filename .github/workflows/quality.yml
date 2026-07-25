@@ -89,7 +89,7 @@ jobs:
           node -e 'const fs=require("fs"); const r=JSON.parse(fs.readFileSync(process.env.SEMANTIC_RECEIPT,"utf8")); process.stdout.write(`### Semantic quality (shadow)\n\nDecision: **${r.decision}**\n\nFindings: ${r.findings.length}\n`)' >> "$GITHUB_STEP_SUMMARY"
 
       - name: Install Python test dependencies
-        run: python3 -m pip install --user pytest pytest-cov
+        run: python3 -m pip install --user pytest pytest-cov hypothesis
 
       # qSesh Python lane (tools/qsesh): pinned Ruff + ShellCheck, then the
       # lint/test package scripts. Requires the Setup Python 3.12 step above.
@@ -272,7 +272,12 @@ jobs:
         run: npm run guard:bot-errors-simulation-matrix
 
       - name: BOT ERRORS sentinel coverage and deployer mutation gate
+        if: matrix.node == '24.x'
         run: bash deploy/scripts/run-sentinel-tests.sh
+
+      - name: BOT ERRORS full behavioral suite gate
+        if: matrix.node == '24.x'
+        run: bash deploy/scripts/run-bot-errors-full-suite.sh
 
       - name: Harness maintenance manifest guard
         run: npm run guard:harness-maintenance
@@ -437,6 +442,14 @@ jobs:
 
       - name: BOT ERRORS macOS health hermeticity
         run: npm run test:bot-errors-health:hermeticity
+
+      # The credential-probe boundedness suite runs on BOTH legs on purpose. The
+      # Linux leg exercises it with timeout(1) present and with PATH stripped to
+      # simulate Darwin; this leg runs the same assertions against a real macOS
+      # bash and a real `security` binary, so the platform the incident happened
+      # on is covered by the platform itself rather than by simulation.
+      - name: Credential-probe boundedness (real macOS)
+        run: npm run test:credential-probe-boundedness
 
   # Perf lane (T5 b-12; 19-performance-budget §2). Report-only while the §1
   # numbers await owner sign-off; PERF_LANE_ENFORCE=1 flips it blocking.

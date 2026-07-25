@@ -420,6 +420,29 @@ chance to land and re-settle the turn before the reclaim would otherwise record 
 a reclaim-failure. `unfinalized_retry_owned` incidents are owned by the finalization
 supervisor's own exhaustion (§4.6), not by this recovery-owner reclaim.
 
+### 4.8 Undispatched Admission Rejection
+
+A journaled user turn can be rejected before provider dispatch when its runtime queue is closed,
+halted, or full. The immutable replay envelope proves what was admitted, and the absence of an
+answer operation proves that no provider response was sent. The current terminal contract still
+records this as `attempt_kind='admission_rejected'`, `inbound_disposition='failed_terminal'`, and
+`delivery_kind='none'`. It does **not** create a `turn_recovery_jobs` row and no runtime worker
+automatically replays it after restart.
+
+This boundary must stay visible. `turn_recovery_jobs` currently owns ambiguous answer-delivery
+reconciliation and late-echo proof; its claim/reassignment APIs are not an active self-replay
+worker. Treating those rows as proof that Q will retry its own prompt is incorrect.
+
+Every journaled admission rejection emits `agent_turn_admission_rejected` with the inbound
+sequence, scope, exact queue reason, and `automatic_replay=false`. Unjournaled system turns stay
+silent. The safe current remediation is an owner-authorized new inbound that restates or continues
+the lost intent after checking the target worktree and external state for already-applied effects.
+The old inbound remains failed as an immutable audit record; do not relabel it delivered merely
+because a later turn succeeds. A future automatic replay worker requires a separate proof contract
+for undispatched input, restart-time owner reassignment, bounded claims/backoff, per-chat ordering,
+and completion tied to the replay turn's echoed terminal output—not the selected-delivery
+assumptions of the current recovery-job schema.
+
 ---
 
 ## 5. Operational Notes
@@ -792,6 +815,12 @@ the lifecycle becomes `crashed`/`orphaned`, the manager retains the live handle,
 cleanup cannot repaint it resumable. Completed-turn proof lookup considers only `active` and
 `suspended` checkpoints, so retired or failed proof cannot authorize a resume.
 
+The periodic zombie-session sweep reconciles current-process residents before classifying
+active rows. This is a narrow compare-and-set repair for an `orphaned` row whose active
+checkpoint still proves the exact workspace and provider-session identity; persistent
+providers must also match the resident process ID. It does not manufacture checkpoint
+authority and refuses suspended, ended, completed, crashed, or resume-failed rows.
+
 At runtime shutdown, every session is attempted even if an earlier one fails. Successfully
 closed managers release their ownership; a failed singleton or per-chat manager remains attached
 to its session/owner so a later shutdown call can retry it. Queue and auxiliary cleanup still
@@ -855,3 +884,92 @@ before the throw, so a failed cycle is no longer invisible to anything reading `
 (`src/runtimes/chat/runtime.ts`) derives `degraded` from `lastRunAt` staleness, so a persistently
 failing cycle must keep tripping that staleness window rather than reading healthy forever while
 failure rows accumulate.
+
+---
+
+## 7. Durable Background Work (Work Ledger + Results Outbox)
+
+Sections 1–6 make *turns* durable. This section covers the other loss class: **in-session
+background workers** — agent-spawned subagents, background bash, CI babysitters — which live
+inside the provider child's process tree.
+
+### 7.1 The loss class
+
+A background worker historically had no registration row, wrote its results to the parent's
+stdout/memory, and depended on the parent's turn for delivery. So the parent's death was total:
+the process tree died with it and finished work was stranded — pushed branches with no chat
+notice, completed analyses never delivered, "the chat just stops".
+
+That is not hypothetical. A production instance's heal reports show a 30-minute-cadence
+`crash__signal_SIGKILL_exit_none` wave across the night of 07-22→23 (23:32, 00:02, 00:33, 01:03,
+01:33, 02:03, 02:38, 03:08, 03:38, 04:09) plus 07-24 10:07Z — the hard watchdog serially
+executing long agentic runs.
+
+PR #2226's liveness gate stops the *false-positive* kills (a working tree is no longer mistaken
+for a hung one). It does nothing for a genuine death. This is the durability half.
+
+### 7.2 `background_work` — the Work Ledger
+
+A sanctioned worker is REGISTERED at spawn, which binds it to a `conversation_key` (canonical,
+alias-stable chat identity) instead of to its parent session's lifetime. A lease plus an optional
+`parent_pid` turn "is the parent still alive?" into a deterministic query rather than an inference.
+
+States: `registered → running → completed | failed`, with `orphaned` as the sweep's verdict on
+running work whose lease expired. The sweep only **relabels** — it never kills or re-runs — so a
+merely-slow worker that later renews or completes is not destroyed.
+
+`worker_kind` is CHECK-constrained (currently `agent_subagent` only). An unsanctioned kind fails
+loudly at write time instead of quietly creating an unmanaged class of worker.
+
+### 7.3 `work_results` — the Results Outbox
+
+Workers MUST write results here — a durable summary plus an optional artifact reference — never
+only to parent stdout. An independent delivery daemon drains the outbox, so delivery no longer
+depends on any session being alive.
+
+`completeBackgroundWork()` writes the terminal state and the outbox row in **one transaction**.
+That atomicity is the durability guarantee: there is no window where the ledger reads "completed"
+with no result, nor one where a result exists for work still marked running. A process that dies
+mid-call rolls back entirely and the row stays `running`, which the orphan sweep then collects —
+rather than the work silently reading as done with nothing to show.
+
+`delivery_dedupe_key` is UNIQUE, which is what makes at-least-once delivery safe to retry (the
+bot-errors dispatcher discipline). Claiming a result flips `pending → delivering` and bumps the
+attempt counter in one transaction, so two daemon ticks cannot deliver the same row twice.
+
+### 7.4 Delivery honesty (`recovered`, `produced_at`)
+
+A result produced by an orphaned worker and delivered later is, by construction, a statement about
+the past. Section 5 and the alert-ordering findings record what happens when that goes unmarked:
+reachability alerts not revalidated at delivery, digest retries not episode-fenced, a
+clear-before-open leaving an incident falsely open — all cases where a stale delivery read as a
+false claim about *now*.
+
+So the schema records both facts and `describeResultStaleness()` renders them:
+
+| Condition | Prefix |
+|---|---|
+| `recovered = 1` | `[recovered result · produced <age> ago]` — always, with age |
+| age ≥ `STALE_DELIVERY_NOTICE_MS` (5 min) | `[delayed result · produced <age> ago]` |
+| fresh, live parent | *(no qualifier)* |
+
+`recovered` is **derived, never passed in**: it is true exactly when the work had already been
+swept to `orphaned` before finishing. Letting a caller assert it would make it a claim rather than
+an observation.
+
+### 7.5 Re-adoption posture
+
+Orphan detection is **notify-first** by owner ruling (2026-07-24): a detected orphan delivers its
+results and notifies the originating chat, but does **not** auto-spawn an orchestrator to continue
+the work. Fully autonomous re-adoption is a deliberate later decision, not a default.
+
+### 7.6 Staging
+
+- **PR1a (this change)** — migration 46 + `src/core/background-work-store.ts` + tests, including a
+  real `kill -9` test that SIGKILLs a child which registered work, then asserts the registration
+  survived, the sweep marks it orphaned, and a late result is marked `recovered`.
+- **PR1b** (#2279) — registration write-path at the worker spawn sites + the delivery daemon.
+  Until it lands, `src/core/background-work-store.ts` is intentionally unwired and is declared in
+  `TRACKED_UNREACHABLE` (`tests/scripts/orphan-reachability-guard.test.ts`) so the gap stays
+  visible rather than silent.
+- **PR3** — CLI shim so operator-side scripts can register, plus the runbook.

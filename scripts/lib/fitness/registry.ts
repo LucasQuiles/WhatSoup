@@ -78,6 +78,17 @@ export const fitnessRules = [
     source: ['retrospective:AgentRuntime-mixed-responsibilities'],
   },
   {
+    id: 'arch.sqlite-busy-timeout-ssot',
+    title: 'SQLite busy-timeout single source',
+    category: 'architecture',
+    rationale:
+      'Statically resolvable numeric PRAGMA busy_timeout strings reaching direct member calls named exec/prepare and node:sqlite DatabaseSync timeout options can drift across connections; active src/ and scripts/ code must use the canonical constants, while ambiguous argument spreads, unresolvable options, and recognized const-object mutations fail visibly.',
+    detect: 'ast',
+    rings: ['eslint'],
+    severity: 'warn',
+    source: ['issue:2217', 'incident:sqlite-busy-timeout-drift'],
+  },
+  {
     id: 'arch.test-colocation-churn',
     title: 'Test colocation churn',
     category: 'architecture',

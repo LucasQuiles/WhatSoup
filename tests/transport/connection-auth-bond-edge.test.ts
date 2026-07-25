@@ -124,6 +124,8 @@ function makeSnapshot(overrides: AuthBondSnapshotOverrides = {}): AuthBondSnapsh
     },
     meHash: 'me-hash',
     treeHash: 'tree-hash',
+    fileCount: 42,
+    totalBytes: 4096,
     backup: {
       root: `${mockConfig.stateRoot}/auth-backups`,
       latest: '/tmp/auth-backup/latest',

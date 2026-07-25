@@ -658,6 +658,15 @@ describe('main bootstrap', () => {
       unprocessed: 0,
       runtimeDegraded: false,
     });
+    h.chatRuntime.getHealthSnapshot.mockReturnValueOnce({
+      status: 'degraded',
+      details: { enrichmentLastRunAt: '2026-06-14T00:00:00.000Z' },
+    });
+    expect(healthDeps.getEnrichmentStats()).toEqual({
+      lastRun: '2026-06-14T00:00:00.000Z',
+      unprocessed: 4,
+      runtimeDegraded: true,
+    });
 
     h.connection.emit('chatCleared', 'chat@s.whatsapp.net');
     expect(h.db.clearChat).toHaveBeenCalledWith('conversation:chat@s.whatsapp.net');
@@ -899,6 +908,18 @@ describe('main bootstrap', () => {
     expect(reconcileOrder).toBeLessThan(h.connection.connect.mock.invocationCallOrder[0]!);
     expect(h.chatRuntime.start).not.toHaveBeenCalled();
     expect(h.agentInstances[0].start).toHaveBeenCalledOnce();
+
+    h.agentInstances[0].getHealthSnapshot.mockReturnValueOnce({
+      status: 'degraded',
+      details: {
+        enrichmentLastRunAt: '2026-06-14T00:00:00.000Z',
+      },
+    });
+    expect(h.getHealthDeps().getEnrichmentStats()).toEqual({
+      lastRun: '2026-06-14T00:00:00.000Z',
+      unprocessed: 4,
+      runtimeDegraded: false,
+    });
 
     const onError = h.createCapabilityGrantManager.mock.calls[0]?.[0]?.onError as
       | ((err: unknown, operation: string) => void)

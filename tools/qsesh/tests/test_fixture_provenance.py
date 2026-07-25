@@ -7,6 +7,11 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from qsesh.extractors import claude as claude_extractor
+from qsesh.extractors.claude import (
+    CLAUDE_OBSERVED_MODERN_CONTROL_TYPES,
+    CLAUDE_OBSERVED_MODERN_SYSTEM_SUBTYPES,
+)
 
 FIXTURE_ROOT = Path(__file__).parent / "fixtures"
 PROVENANCE_PATH = FIXTURE_ROOT / "provenance.json"
@@ -260,7 +265,7 @@ def test_provenance_has_exact_harness_and_observation_matrix() -> None:
     assert isinstance(corpus, list)
     assert [entry["harness"] for entry in corpus] == list(HARNESSES)
     for entry in corpus:
-        assert set(entry) == {
+        expected_keys = {
             "absence_checks",
             "coverage",
             "expected_path",
@@ -278,6 +283,15 @@ def test_provenance_has_exact_harness_and_observation_matrix() -> None:
             "reviewer",
             "source_kind",
         }
+        if entry["harness"] == "claude":
+            expected_keys.update(
+                {
+                    "modern_schema_observation_derivation",
+                    "modern_schema_observation_path",
+                    "modern_schema_observation_sha256",
+                }
+            )
+        assert set(entry) == expected_keys
         assert entry["absence_checks"] == sorted(ABSENCE_CHECKS)
         assert set(entry["coverage"]) <= COVERAGE_CASES
         assert entry["provenance_type"] == "production-derived"
@@ -292,6 +306,14 @@ def test_provenance_has_exact_harness_and_observation_matrix() -> None:
         assert isinstance(expected, dict)
         assert entry["coverage"] == expected["coverage"]
     assert {case for entry in corpus for case in entry["coverage"]} == COVERAGE_CASES
+
+    claude = next(entry for entry in corpus if entry["harness"] == "claude")
+    assert claude["modern_schema_observation_derivation"] == (
+        "metadata-only production observation plus one sanitized fixture sentinel"
+    )
+    observation_path = FIXTURE_ROOT / claude["modern_schema_observation_path"]
+    assert observation_path.is_file()
+    assert sha256(observation_path) == claude["modern_schema_observation_sha256"]
 
 
 @pytest.mark.parametrize("harness", HARNESSES)
@@ -365,6 +387,36 @@ def test_provenance_hashes_match_every_corpus_file() -> None:
             path = FIXTURE_ROOT / entry[path_key]
             assert path.is_file()
             assert sha256(path) == entry[digest_key]
+
+
+def test_modern_claude_runtime_allowlists_match_sanitized_observation() -> None:
+    observation = load_json(FIXTURE_ROOT / "claude/modern-schema-observation.json")
+    assert isinstance(observation, dict)
+    assert set(observation["observed_control_types"]) == (
+        CLAUDE_OBSERVED_MODERN_CONTROL_TYPES
+    )
+    assert observation.get("sanitized_fixture_control_types") == ["fixture_unknown"]
+    assert observation.get("provenance_type") == "mixed-explicit-sources"
+    assert observation.get("observed_control_provenance_type") == "production-derived"
+    assert observation.get("sanitized_fixture_control_provenance_type") == (
+        "hand-authored-sanitized-fixture"
+    )
+    assert claude_extractor.CLAUDE_SANITIZED_FIXTURE_CONTROL_TYPES == {
+        "fixture_unknown"
+    }
+    assert getattr(claude_extractor, "CLAUDE_ACCEPTED_CONTROL_TYPES", None) == (
+        CLAUDE_OBSERVED_MODERN_CONTROL_TYPES | {"fixture_unknown"}
+    )
+    assert set(observation["observed_system_subtypes"]) == (
+        CLAUDE_OBSERVED_MODERN_SYSTEM_SUBTYPES | {"compact_boundary"}
+    )
+    assert observation["content_identity"] == {
+        "all_no_init_content_rows_had_nonempty_session_id": True,
+        "no_init_session_count": 5273,
+    }
+    assert observation["classification_policy"] == (
+        "explicit-observed-plus-sanitized-fixture-allowlist-v1"
+    )
 
 
 def test_session_fixture_bytes_contain_no_private_paths_credentials_or_live_ids() -> (

@@ -489,3 +489,173 @@ def test_distiller_has_one_event_dispatcher_and_no_harness_policy_branch() -> No
     assert "qsesh.extractors" not in source
     assert "qsesh.store" not in source
     assert "qsesh.archive" not in source
+
+
+def test_modern_claude_distills_without_widening_record_contract() -> None:
+    rows = [
+        {
+            "type": "mode",
+            "mode": "normal",
+            "sessionId": "modern-session-001",
+        },
+        {
+            "type": "user",
+            "cwd": "project-modern",
+            "gitBranch": "main",
+            "sessionId": "modern-session-001",
+            "timestamp": "2026-01-02T08:05:00Z",
+            "uuid": "modern-user-001",
+            "message": {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": "image/png",
+                            "data": "AAAA",
+                        },
+                    },
+                    {"type": "text", "text": "USER_MODERN"},
+                ],
+            },
+        },
+        {
+            "type": "assistant",
+            "cwd": "project-modern",
+            "sessionId": "modern-session-001",
+            "timestamp": "2026-01-02T08:05:01Z",
+            "uuid": "modern-assistant-001",
+            "isSidechain": False,
+            "message": {
+                "role": "assistant",
+                "model": "fixture-model",
+                "usage": {
+                    "cache_creation_input_tokens": 1,
+                    "cache_read_input_tokens": 2,
+                    "input_tokens": 3,
+                    "output_tokens": 4,
+                    "service_tier": "standard",
+                },
+                "content": [
+                    {"type": "text", "text": "ASSISTANT_MODERN"},
+                    {
+                        "type": "fallback",
+                        "from": {"model": "fixture-old"},
+                        "to": {"model": "fixture-new"},
+                    },
+                ],
+            },
+        },
+        {
+            "type": "system",
+            "subtype": "turn_duration",
+            "timestamp": "2026-01-02T08:05:02Z",
+        },
+        {
+            "type": "system",
+            "subtype": "compact_boundary",
+            "timestamp": "2026-01-02T08:05:03Z",
+            "content": "Conversation compacted",
+            "compactMetadata": {
+                "trigger": "manual",
+                "preTokens": 100,
+                "postTokens": 10,
+                "durationMs": 5,
+            },
+        },
+        {
+            "type": "ai-title",
+            "aiTitle": "Modern Session",
+            "sessionId": "modern-session-001",
+        },
+    ]
+    raw = dump_jsonl(rows)
+    extracted = ClaudeExtractor().extract(
+        _snapshot(
+            Harness.CLAUDE,
+            "modern-session-001",
+            raw,
+            "unclassified-jsonl-v1",
+            None,
+        )
+    )
+    result = _distilled(extracted)
+    legacy_record = _distilled(_cases()["claude"]).record
+
+    assert set(result.record) == set(legacy_record)
+    assert "cwds" not in result.record
+    assert result.record["project"] == "project-modern"
+    assert result.record["title"] == "Modern Session"
+    assert result.record["token_totals"] == [
+        {
+            "model": "fixture-model",
+            "provider": None,
+            "scope": "session",
+            "source": "claude",
+            "unit": "tokens",
+            "values": {
+                "cache_creation_input_tokens": 1,
+                "cache_read_input_tokens": 2,
+                "input_tokens": 3,
+                "output_tokens": 4,
+            },
+        }
+    ]
+    assert result.record["meta_counts"] == {
+        "image": 1,
+        "model_fallback": 1,
+        "unknown": 3,
+        "usage": 1,
+    }
+    assert result.compactions[0]["reasons"] == ["manual"]
+
+
+def test_modern_session_meta_uses_first_timed_source_row_without_reversing_order() -> (
+    None
+):
+    rows = [
+        {
+            "type": "system",
+            "subtype": "attachment",
+            "sessionId": "modern-session-001",
+            "timestamp": "2026-01-02T08:04:59Z",
+            "attachments": [{"name": "before.txt"}],
+        },
+        {
+            "type": "user",
+            "cwd": "project-modern",
+            "sessionId": "modern-session-001",
+            "timestamp": "2026-01-02T08:05:00Z",
+            "uuid": "modern-user-001",
+            "message": {"role": "user", "content": "USER_MODERN"},
+        },
+        {
+            "type": "assistant",
+            "cwd": "project-modern",
+            "sessionId": "modern-session-001",
+            "timestamp": "2026-01-02T08:05:01Z",
+            "uuid": "modern-assistant-001",
+            "isSidechain": False,
+            "message": {
+                "role": "assistant",
+                "model": "fixture-model",
+                "content": [{"type": "text", "text": "ASSISTANT_MODERN"}],
+            },
+        },
+    ]
+    raw = dump_jsonl(rows)
+    extracted = ClaudeExtractor().extract(
+        _snapshot(
+            Harness.CLAUDE,
+            "modern-session-001",
+            raw,
+            "unclassified-jsonl-v1",
+            None,
+        )
+    )
+
+    result = _distilled(extracted)
+
+    assert extracted.events[0].timestamp_utc == "2026-01-02T08:04:59Z"
+    assert result.record["started_at_utc"] == "2026-01-02T08:04:59Z"

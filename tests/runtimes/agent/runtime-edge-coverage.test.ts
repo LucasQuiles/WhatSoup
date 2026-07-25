@@ -162,6 +162,7 @@ vi.mock('../../../src/runtimes/agent/session-db.ts', () => ({
   incrementMessageCount: vi.fn(),
   updateSessionId: vi.fn(),
   updateSessionStatus: vi.fn(),
+  restoreOrphanedResidentSessionStatus: vi.fn(() => 'already_active'),
   getActiveSession: vi.fn(() => null),
   backfillWorkspaceKeys: vi.fn(),
   markOrphaned: vi.fn(),
@@ -370,6 +371,7 @@ type RuntimeView = {
   handlePerChatCrash: ReturnType<typeof vi.fn>;
   handleCrashNotify: ReturnType<typeof vi.fn>;
   handleResumeFailed(chatJid: string): void;
+  sweepStaleAgentSessions(): Promise<Set<string>>;
   activateProviderFallback(resetAt: Date | null, reason?: string): {
     reason: 'usage-limit' | 'auth-required' | 'rate-limit' | 'server-error' | 'model-unavailable' | 'empty-output' | 'probe-unusable';
     fallbackProvider: string;
@@ -695,6 +697,73 @@ describe('AgentRuntime edge coverage', () => {
     delete process.env['WHATSOUP_RESPONSE_REGISTRY_DISPATCH'];
     vi.useRealTimers();
     vi.restoreAllMocks();
+  });
+
+  it('preserves a zombie-classified row owned by a resident manager', async () => {
+    const runtime = makeRuntime({ sessionScope: 'per_chat' });
+    const state = view(runtime);
+    const session = makeSession();
+    session.getDbRowId.mockReturnValue(42 as never);
+    state.chatSessions.set('resident', session);
+    runtime.setDurability({} as never);
+    const { markOrphaned } = await import('../../../src/runtimes/agent/session-db.ts');
+    const { classifyActiveSessions } = await import('../../../src/runtimes/agent/session-classifier.ts');
+    vi.mocked(markOrphaned).mockClear();
+    vi.mocked(classifyActiveSessions).mockReturnValueOnce([{
+      id: 42, sessionId: 'ses-resident', claudePid: 0,
+      chatJid: 'resident@s.whatsapp.net', conversationKey: 'resident', status: 'active',
+      classification: 'stale_dead', reason: 'checkpoint mismatch', startedAt: null, messageCount: 1,
+    }]);
+
+    await state.sweepStaleAgentSessions();
+
+    expect(markOrphaned).not.toHaveBeenCalledWith(expect.anything(), 42);
+    expect(mockRuntimeLogger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 42, providerSessionId: 'ses-resident' }),
+      'skipping zombie-session disposition for current-process resident manager',
+    );
+  });
+
+  it('reconciles resident persistence before classifying active rows', async () => {
+    const runtime = makeRuntime({ sessionScope: 'per_chat' });
+    const state = view(runtime);
+    const session = makeSession();
+    session.getDbRowId.mockReturnValue(42 as never);
+    session.getProviderId.mockReturnValue('opencode-cli' as never);
+    session.getStatus.mockReturnValue({
+      active: true,
+      pid: null,
+      sessionId: 'ses-resident',
+      startedAt: null,
+      messageCount: 2,
+      lastMessageAt: null,
+      turnInFlight: false,
+      durableFailureClosed: false,
+    } as never);
+    state.chatSessions.set('resident', session);
+    runtime.setDurability({} as never);
+    const { restoreOrphanedResidentSessionStatus } = await import('../../../src/runtimes/agent/session-db.ts');
+    const { classifyActiveSessions } = await import('../../../src/runtimes/agent/session-classifier.ts');
+    const order: string[] = [];
+    vi.mocked(restoreOrphanedResidentSessionStatus).mockImplementationOnce(() => {
+      order.push('reconcile');
+      return 'already_active';
+    });
+    vi.mocked(classifyActiveSessions).mockImplementationOnce(() => {
+      order.push('classify');
+      return [];
+    });
+
+    await state.sweepStaleAgentSessions();
+
+    expect(order).toEqual(['reconcile', 'classify']);
+    expect(restoreOrphanedResidentSessionStatus).toHaveBeenCalledWith(
+      expect.anything(),
+      42,
+      'ses-resident',
+      'opencode-cli',
+      undefined,
+    );
   });
 
   it('caches group admin metadata and reuses it without refetching', async () => {
@@ -1940,6 +2009,7 @@ describe('AgentRuntime edge coverage', () => {
       owner: expect.objectContaining({ generation: 1, toolScopeKey }),
       routeChatJid: chatJid,
       timeoutMs: 240_000,
+      deferDeadlineUntilActivated: true,
       onTimeout: expect.any(Function),
     });
     expect(cancel).not.toHaveBeenCalled();
@@ -2002,6 +2072,7 @@ describe('AgentRuntime edge coverage', () => {
       owner: expect.objectContaining({ generation: 1, toolScopeKey }),
       routeChatJid: chatJid,
       timeoutMs: 240_000,
+      deferDeadlineUntilActivated: true,
       onTimeout: expect.any(Function),
     });
     expect(cancel).toHaveBeenCalledWith(expect.objectContaining({ scopeKey: mapKey }));

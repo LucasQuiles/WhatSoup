@@ -156,7 +156,9 @@ index are configured; see
 [docs/tools.md](tools.md#whatsoup-mcp-tool-api-reference) for the full gating conditions).
 Tool definitions live under [`src/mcp/tools/*.ts`](../src/mcp/tools/) — each file exports a
 factory that registers tools with the names listed below — except for `emit_heal_result`,
-which is registered inline from [`src/runtimes/agent/runtime.ts`](../src/runtimes/agent/runtime.ts).
+which is declared in
+[`src/runtimes/agent/runtime-tool-registrations.ts`](../src/runtimes/agent/runtime-tool-registrations.ts)
+and registered from `AgentRuntime.start()`.
 Tool counts and module groupings come from the
 [docs/tools.md table of contents](tools.md#table-of-contents).
 

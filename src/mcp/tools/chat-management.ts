@@ -11,6 +11,7 @@ import type { ExtendedBaileysSocket } from '../types.ts';
 import { type MessageRow, rowToMessage } from '../../core/messages.ts';
 import { createChildLogger } from '../../logger.ts';
 import { nowUnixSec } from '../../fleet/time-utils.ts';
+import { escapeSqlLikePattern } from '../../lib/sql-like.ts';
 import { toConversationKey } from '../../core/conversation-key.ts';
 import { DOMAIN_PERSONAL, DOMAIN_LID, DOMAIN_GROUP } from '../../core/jid-constants.ts';
 import { type SockToolConfig, registerSockTools } from './sock-tool-factory.ts';
@@ -177,10 +178,6 @@ function contentPreview(contentText: string | null, content: string | null): str
   const text = contentText ?? content;
   if (text === null) return null;
   return text.length > 100 ? `${text.slice(0, 97)}...` : text;
-}
-
-function escapeSqlLikePattern(value: string): string {
-  return value.replace(/[\\%_]/g, (char) => `\\${char}`);
 }
 
 function makeListChats(db: Database): ToolDeclaration {

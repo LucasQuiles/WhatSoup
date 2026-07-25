@@ -235,7 +235,18 @@ def test_remote_python_command_never_splits_hostile_input_into_extra_argv_tokens
     # this checks position/structure, not occurrence count.)
     assert argv == expected
     assert len(argv) == len(expected)
-    _assert_argv_is_read_only(argv)
+    # No _assert_argv_is_read_only(argv) here (HD-06 de-flake, 2026-07-24):
+    # the `argv == expected` equality above IS the anti-injection proof --
+    # host/arg each land as exactly one opaque, un-split, non-shell-
+    # interpolated token, so nothing can smuggle in a second argv element.
+    # `arg` is itself the Hypothesis-fuzzed value; when st.text() happens to
+    # generate a literal blocklisted word ("launchctl", "git", ...), it is
+    # opaque DATA passed to `python3 -` as a script argument, never executed
+    # as a command -- scanning it against MUTATING_ARGV_VERBS is a false
+    # positive on fuzzer payload content, not a real regression. The
+    # read-only scan stays in place on every other test in this file, where
+    # the argv is a real fixed command skeleton (ssh -G, tailscale status/
+    # ping) and the check is meaningful.
 
 
 def test_ssh_json_lines_pipes_only_the_known_claim_script(collector, monkeypatch):

@@ -11,7 +11,8 @@
   "expectPrimaryPhoneVerification": true,
   "requiredCredentialFiles": [
     "fleet-tokens.json",
-    "instances/mw-bot/tokens.env"
+    "instances/mw-bot/tokens.env",
+    "instances/personal/tokens.env"
   ],
   "instances": [
     {
@@ -20,6 +21,13 @@
       "service": "com.whatsoup.mw-bot",
       "healthPort": 9090,
       "primaryPhoneOwner": "instance:mw-bot"
+    },
+    {
+      "name": "personal",
+      "expected": "always_on",
+      "service": "com.whatsoup.personal",
+      "healthPort": 9091,
+      "primaryPhoneOwner": "instance:personal"
     }
   ]
 }
