@@ -2968,6 +2968,147 @@ describe('Event-driven provider ready signal', () => {
     expect(events.filter((event) => event.type === 'result')).toEqual([]);
   });
 
+  it('Codex drops same-chunk non-terminal output after a native identity violation', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const events: AgentEvent[] = [];
+    const sm = new SessionManager({
+      db,
+      messenger,
+      chatJid: CHAT_JID,
+      provider: 'codex-cli',
+      onEvent: (event) => events.push(event),
+    });
+    await sm.spawnSession();
+    mockChild.stdout.emit('data', Buffer.from(JSON.stringify({
+      jsonrpc: '2.0',
+      id: 'rpc-2',
+      result: { id: 'thread-owned' },
+    }) + '\n'));
+    await sm.sendTurn('hello');
+
+    const lines = [
+      {
+        jsonrpc: '2.0',
+        method: 'turn/completed',
+        params: {
+          threadId: 'thread-owned',
+          turn: { id: 'turn-unowned', status: 'completed' },
+        },
+      },
+      {
+        jsonrpc: '2.0',
+        method: 'item/agentMessage/delta',
+        params: { delta: 'must not escape quarantine', itemId: 'message-stale' },
+      },
+      {
+        jsonrpc: '2.0',
+        method: 'item/started',
+        params: {
+          item: {
+            id: 'tool-stale',
+            type: 'commandExecution',
+            command: 'pwd',
+            status: 'inProgress',
+          },
+        },
+      },
+    ];
+    mockChild.stdout.emit(
+      'data',
+      Buffer.from(`${lines.map((line) => JSON.stringify(line)).join('\n')}\n`),
+    );
+
+    expect(events.filter(
+      (event) => event.type === 'assistant_text' || event.type === 'tool_use',
+    )).toEqual([]);
+  });
+
+  it('Codex does not approve a same-chunk server request after quarantine', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const sm = new SessionManager({
+      db,
+      messenger,
+      chatJid: CHAT_JID,
+      provider: 'codex-cli',
+      onEvent: vi.fn(),
+    });
+    await sm.spawnSession();
+    mockChild.stdout.emit('data', Buffer.from(JSON.stringify({
+      jsonrpc: '2.0',
+      id: 'rpc-2',
+      result: { id: 'thread-owned' },
+    }) + '\n'));
+    await sm.sendTurn('hello');
+    mockChild.stdin.write.mockClear();
+
+    const lines = [
+      {
+        jsonrpc: '2.0',
+        method: 'turn/completed',
+        params: {
+          threadId: 'thread-owned',
+          turn: { id: 'turn-unowned', status: 'completed' },
+        },
+      },
+      {
+        jsonrpc: '2.0',
+        id: 'approval-stale',
+        method: 'item/commandExecution/requestApproval',
+        params: {},
+      },
+    ];
+    mockChild.stdout.emit(
+      'data',
+      Buffer.from(`${lines.map((line) => JSON.stringify(line)).join('\n')}\n`),
+    );
+
+    expect(mockChild.stdin.write).not.toHaveBeenCalled();
+  });
+
+  it('Codex drops a buffered partial event drained on exit after quarantine', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const events: AgentEvent[] = [];
+    const sm = new SessionManager({
+      db,
+      messenger,
+      chatJid: CHAT_JID,
+      provider: 'codex-cli',
+      onEvent: (event) => events.push(event),
+    });
+    await sm.spawnSession();
+    mockChild.stdout.emit('data', Buffer.from(JSON.stringify({
+      jsonrpc: '2.0',
+      id: 'rpc-2',
+      result: { id: 'thread-owned' },
+    }) + '\n'));
+    await sm.sendTurn('hello');
+
+    const violationLine = JSON.stringify({
+      jsonrpc: '2.0',
+      method: 'turn/completed',
+      params: {
+        threadId: 'thread-owned',
+        turn: { id: 'turn-unowned', status: 'completed' },
+      },
+    });
+    const bufferedPartialLine = JSON.stringify({
+      jsonrpc: '2.0',
+      method: 'item/agentMessage/delta',
+      params: { delta: 'must not drain after quarantine', itemId: 'message-stale' },
+    });
+    mockChild.stdout.emit(
+      'data',
+      Buffer.from(`${violationLine}\n${bufferedPartialLine}`),
+    );
+    mockChild._exitCb?.(1, 'SIGKILL');
+
+    expect(events.filter((event) => event.type === 'assistant_text')).toEqual([]);
+    expect(sm.getStatus().active).toBe(false);
+  });
+
   it('Codex invalidates an ambiguous second start identity and quarantines the source', async () => {
     const db = makeDb();
     const { messenger } = makeMessenger();

@@ -1253,6 +1253,10 @@ export class SessionManager {
     });
   }
 
+  private isQuarantinedNativeTurnChild(child: ReturnType<typeof spawn>): boolean {
+    return this.quarantinedNativeTurnChildren.has(child);
+  }
+
   /**
    * Write a JSON-RPC request to a Codex app-server child process.
    * Uses newline-delimited JSON (nd-JSON) framing.
@@ -1288,7 +1292,8 @@ export class SessionManager {
    * Auto-approves all requests since we run in full-access mode.
    */
   private handleCodexServerRequest(parsed: Record<string, unknown>): void {
-    if (!this.child) return;
+    const child = this.child;
+    if (child === null || this.isQuarantinedNativeTurnChild(child)) return;
     const id = parsed['id'];
     const method = String(parsed['method'] ?? '');
 
@@ -1300,14 +1305,14 @@ export class SessionManager {
       method === 'execCommandApproval'
     ) {
       log.info({ method, id, chatJid: this.chatJid }, 'codex: auto-approving server request');
-      this.sendCodexResponse(this.child, id, { decision: 'approved' });
+      this.sendCodexResponse(child, id, { decision: 'approved' });
       return;
     }
 
     if (method === 'item/tool/requestUserInput') {
       // Cannot provide interactive input; deny gracefully
       log.warn({ method, id, chatJid: this.chatJid }, 'codex: denying user input request (non-interactive)');
-      this.sendCodexResponse(this.child, id, { input: '' });
+      this.sendCodexResponse(child, id, { input: '' });
       return;
     }
 
@@ -2444,9 +2449,14 @@ export class SessionManager {
         }, 'persistent child stdout dropped — superseded generation');
         return;
       }
+      if (this.isQuarantinedNativeTurnChild(child)) return;
       const lines = this.appendStdoutChunk(chunk);
       for (const line of lines) {
-        if (!this.active || !this.isCurrentPersistentChild(child, childGeneration)) return;
+        if (
+          !this.active
+          || !this.isCurrentPersistentChild(child, childGeneration)
+          || this.isQuarantinedNativeTurnChild(child)
+        ) return;
         // Codex app-server: intercept server-initiated requests (approval callbacks)
         // before they reach the parser. These have both 'id' and 'method'.
         if (this.provider === 'codex-cli' && line[0] === '{' && line.includes('"jsonrpc"')) {
@@ -2492,9 +2502,17 @@ export class SessionManager {
         }
 
         for (const event of parse(line)) {
-          if (!this.active || !this.isCurrentPersistentChild(child, childGeneration)) return;
+          if (
+            !this.active
+            || !this.isCurrentPersistentChild(child, childGeneration)
+            || this.isQuarantinedNativeTurnChild(child)
+          ) return;
           this.handleProviderEvent(event);
-          if (!this.active || !this.isCurrentPersistentChild(child, childGeneration)) return;
+          if (
+            !this.active
+            || !this.isCurrentPersistentChild(child, childGeneration)
+            || this.isQuarantinedNativeTurnChild(child)
+          ) return;
         }
       }
     });
@@ -2551,13 +2569,19 @@ export class SessionManager {
       // Drain any buffered stdout lines before crash processing.
       // The process may have written final output that was not yet newline-terminated.
       const bufferedLines = this.drainBufferedStdoutLines();
-      if (bufferedLines.length > 0) {
+      if (
+        bufferedLines.length > 0
+        && !this.isQuarantinedNativeTurnChild(child)
+      ) {
         for (const line of bufferedLines) {
           if (!this.active || !this.isCurrentPersistentChild(child, childGeneration)) return;
+          if (this.isQuarantinedNativeTurnChild(child)) break;
           for (const event of parse(line)) {
             if (!this.active || !this.isCurrentPersistentChild(child, childGeneration)) return;
+            if (this.isQuarantinedNativeTurnChild(child)) break;
             this.handleProviderEvent(event);
             if (!this.active || !this.isCurrentPersistentChild(child, childGeneration)) return;
+            if (this.isQuarantinedNativeTurnChild(child)) break;
           }
         }
       }
