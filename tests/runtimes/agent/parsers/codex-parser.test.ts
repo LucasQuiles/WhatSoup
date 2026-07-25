@@ -12,7 +12,9 @@ describe('parseCodexEvent', () => {
         jsonrpc: '2.0',
         method: 'turn/completed',
         params: {
+          threadId: 'thread-1',
           turn: {
+            id: 'turn-1',
             status: 'failed',
             error: { message: 'raw provider failure detail' },
           },
@@ -23,6 +25,11 @@ describe('parseCodexEvent', () => {
         type: 'result',
         text: 'raw provider failure detail',
         isError: true,
+        providerTurn: {
+          sessionId: 'thread-1',
+          turnId: 'turn-1',
+          status: 'failed',
+        },
       });
     });
 
@@ -436,15 +443,35 @@ describe('parseCodexEvent', () => {
       expect(parseCodexEvent(line(parsed))).toEqual({ type: 'unknown', raw: parsed });
     });
 
-    it('uses fallback error text for failed turns and JSON-RPC errors without messages', () => {
+    it('fails closed when a terminal event lacks an exact native identity', () => {
       expect(parseCodexEvent(line({
         jsonrpc: '2.0',
         method: 'turn/completed',
         params: { turn: { status: 'failed' } },
       }))).toEqual({
         type: 'result',
+        text: 'Provider turn completed without an exact native identity',
+        isError: true,
+      });
+    });
+
+    it('uses fallback error text for exactly identified failed turns and sparse JSON-RPC errors', () => {
+      expect(parseCodexEvent(line({
+        jsonrpc: '2.0',
+        method: 'turn/completed',
+        params: {
+          threadId: 'thread-1',
+          turn: { id: 'turn-1', status: 'failed' },
+        },
+      }))).toEqual({
+        type: 'result',
         text: 'Codex turn failed',
         isError: true,
+        providerTurn: {
+          sessionId: 'thread-1',
+          turnId: 'turn-1',
+          status: 'failed',
+        },
       });
 
       expect(parseCodexEvent(line({
@@ -500,7 +527,7 @@ describe('parseCodexEvent', () => {
       });
     });
 
-    it('ignores app-server item events with missing type and non-failed turns', () => {
+    it('ignores app-server item events with missing type and fails closed on malformed terminal turns', () => {
       expect(parseCodexEvent(line({
         jsonrpc: '2.0',
         method: 'item/started',
@@ -517,24 +544,40 @@ describe('parseCodexEvent', () => {
         jsonrpc: '2.0',
         method: 'turn/completed',
         params: {},
-      }))).toEqual({ type: 'result', text: null });
+      }))).toEqual({
+        type: 'result',
+        text: 'Provider turn completed without an exact native identity',
+        isError: true,
+      });
 
       expect(parseCodexEvent(line({
         jsonrpc: '2.0',
         method: 'turn/completed',
         params: { turn: {} },
-      }))).toEqual({ type: 'result', text: null });
+      }))).toEqual({
+        type: 'result',
+        text: 'Provider turn completed without an exact native identity',
+        isError: true,
+      });
     });
 
     it('uses fallback messages for failed turns and JSON-RPC errors with sparse shapes', () => {
       expect(parseCodexEvent(line({
         jsonrpc: '2.0',
         method: 'turn/completed',
-        params: { turn: { status: 'failed', error: {} } },
+        params: {
+          threadId: 'thread-1',
+          turn: { id: 'turn-1', status: 'failed', error: {} },
+        },
       }))).toEqual({
         type: 'result',
         text: 'Codex turn failed',
         isError: true,
+        providerTurn: {
+          sessionId: 'thread-1',
+          turnId: 'turn-1',
+          status: 'failed',
+        },
       });
 
       expect(parseCodexEvent(line({

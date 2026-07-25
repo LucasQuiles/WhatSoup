@@ -6,7 +6,11 @@
 // - Server responses:     { jsonrpc: "2.0", id: "...", result: {...} }
 // - Server requests:      { jsonrpc: "2.0", id: "...", method: "...", params: {...} }
 
-import type { AgentEvent } from '../stream-parser.ts';
+import type {
+  AgentEvent,
+  ProviderTurnIdentity,
+  ProviderTurnTerminalStatus,
+} from '../stream-parser.ts';
 import { type JsonObject, isRecord, stringifyValue, extractMessage, extractTokenCounts } from './parser-utils.ts';
 
 // ─── Item helpers ─────────────────────────────────────────────────────────────
@@ -97,6 +101,34 @@ function isErrorStatus(status: string): boolean {
   return normalized !== '' && normalized !== 'completed' && normalized !== 'success' && normalized !== 'ok';
 }
 
+function exactTurnIdentity(
+  params: JsonObject,
+  turn: JsonObject | null,
+): ProviderTurnIdentity | null {
+  const sessionId = params['threadId'];
+  const turnId = turn?.['id'];
+  if (
+    typeof sessionId !== 'string'
+    || sessionId.trim() === ''
+    || typeof turnId !== 'string'
+    || turnId.trim() === ''
+  ) {
+    return null;
+  }
+  return { sessionId, turnId };
+}
+
+function terminalStatus(value: unknown): ProviderTurnTerminalStatus {
+  switch (value) {
+    case 'completed':
+    case 'failed':
+    case 'interrupted':
+      return value;
+    default:
+      return 'unknown';
+  }
+}
+
 // ─── JSON-RPC notification handlers ──────────────────────────────────────────
 
 function handleNotification(method: string, params: JsonObject): AgentEvent {
@@ -109,8 +141,13 @@ function handleNotification(method: string, params: JsonObject): AgentEvent {
       return { type: 'init', sessionId: '' };
     }
 
-    case 'turn/started':
-      return { type: 'ignored' };
+    case 'turn/started': {
+      const turn = isRecord(params['turn']) ? params['turn'] : null;
+      const identity = exactTurnIdentity(params, turn);
+      return identity === null
+        ? { type: 'unknown', raw: { method, params } }
+        : { type: 'provider_turn_started', identity };
+    }
 
     case 'item/agentMessage/delta': {
       const delta = params['delta'];
@@ -163,8 +200,17 @@ function handleNotification(method: string, params: JsonObject): AgentEvent {
 
     case 'turn/completed': {
       // turn field contains a Turn object with status
-      const turn = params['turn'];
-      const status = isRecord(turn) ? String(turn['status'] ?? '') : '';
+      const turn = isRecord(params['turn']) ? params['turn'] : null;
+      const identity = exactTurnIdentity(params, turn);
+      if (identity === null) {
+        return {
+          type: 'result',
+          text: 'Provider turn completed without an exact native identity',
+          isError: true,
+        };
+      }
+      const status = terminalStatus(turn?.['status']);
+      const providerTurn = { ...identity, status };
 
       // Neither branch below carries inputTokens/outputTokens — that is NOT
       // the #1775 zero-token defect. Codex reports usage on a separate
@@ -173,13 +219,24 @@ function handleNotification(method: string, params: JsonObject): AgentEvent {
       // turn completion (see the 'token_usage' case in runtime.ts). Adding
       // usage fields here would double-count against that path.
       if (status === 'failed') {
-        const error = isRecord(turn) && isRecord(turn['error'])
+        const error = isRecord(turn?.['error'])
           ? String((turn['error'] as JsonObject)['message'] ?? 'Codex turn failed')
           : 'Codex turn failed';
-        return { type: 'result', text: error, isError: true };
+        return { type: 'result', text: error, isError: true, providerTurn };
       }
 
-      return { type: 'result', text: null };
+      if (status === 'interrupted') {
+        return { type: 'result', text: null, isError: true, providerTurn };
+      }
+      if (status === 'unknown') {
+        return {
+          type: 'result',
+          text: 'Provider turn completed with an unrecognized terminal status',
+          isError: true,
+          providerTurn,
+        };
+      }
+      return { type: 'result', text: null, providerTurn };
     }
 
     case 'thread/compacted':

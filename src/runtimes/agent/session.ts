@@ -27,7 +27,7 @@ import {
   updateTranscriptPath,
 } from './session-db.ts';
 import { parseEvents } from './stream-parser.ts';
-import type { AgentEvent } from './stream-parser.ts';
+import type { AgentEvent, ProviderTurnIdentity } from './stream-parser.ts';
 import { parseCodexEvent } from './providers/codex-parser.ts';
 import { parseGeminiAcpEvent, buildInitializeRequest, buildSessionNewRequest, buildSessionPromptRequest } from './providers/gemini-acp-parser.ts';
 import { createOpenCodeParser, type OpenCodeParser } from './providers/opencode-parser.ts';
@@ -49,6 +49,10 @@ import {
   assertNeverProvider,
   type ProviderId,
 } from './providers/index.ts';
+import {
+  providerTurnControlCapabilities,
+  type ProviderTurnControlCapabilities,
+} from './providers/turn-control-capabilities.ts';
 import { composeWithExactLineDedup } from './prompt-compose.ts';
 import {
   appendProviderCrashPreview,
@@ -198,6 +202,13 @@ export interface SessionCrashInfo {
 export interface SessionGenerationIdentity {
   readonly managerId: string;
   readonly generation: number;
+}
+
+export interface ActiveProviderTurn {
+  readonly provider: 'codex-cli';
+  readonly identity: ProviderTurnIdentity;
+  readonly generation: SessionGenerationIdentity;
+  readonly providerTurnToken: number;
 }
 
 interface ShutdownKillTimerEntry {
@@ -634,6 +645,8 @@ export class SessionManager {
   private providerTurnInFlight = false;
   private nextProviderTurnToken = 0;
   private activeProviderTurnToken: number | null = null;
+  private activeProviderTurnGeneration: SessionGenerationIdentity | null = null;
+  private activeProviderTurn: ActiveProviderTurn | null = null;
   private providerTurnTerminalPromise: Promise<void> = Promise.resolve();
   private providerTurnTerminalResolve: (() => void) | null = null;
   /** Bounded kill timer for a stalled tool; armed by recoverStalledOperation. */
@@ -791,6 +804,25 @@ export class SessionManager {
 
   private get isManagedLoopProvider(): boolean {
     return executionModeForProvider(this.assertKnownProvider('isManagedLoopProvider')) === 'managed_loop';
+  }
+
+  getTurnControlCapabilities(): ProviderTurnControlCapabilities {
+    return providerTurnControlCapabilities[this.assertKnownProvider('getTurnControlCapabilities')];
+  }
+
+  getActiveProviderTurn(): ActiveProviderTurn | null {
+    const activeTurn = this.activeProviderTurn;
+    if (
+      activeTurn === null
+      || !this.isCurrentGeneration(activeTurn.generation)
+      || !this.providerTurnInFlight
+      || this.activeProviderTurnToken !== activeTurn.providerTurnToken
+    ) return null;
+    return {
+      ...activeTurn,
+      identity: { ...activeTurn.identity },
+      generation: { ...activeTurn.generation },
+    };
   }
 
   private createManagedProviderSession(): ProviderSession {
@@ -1053,6 +1085,47 @@ export class SessionManager {
         this.durability.upsertSessionCheckpoint(this.conversationKey, {
           sessionId: this.sessionId,
         });
+      }
+    }
+
+    if (event.type === 'provider_turn_started') {
+      const generation = this.activeProviderTurnGeneration;
+      const providerTurnToken = this.activeProviderTurnToken;
+      const matchesOwnedTurn = this.provider === 'codex-cli'
+        && this.providerTurnInFlight
+        && providerTurnToken !== null
+        && generation !== null
+        && this.isCurrentGeneration(generation)
+        && event.identity.sessionId === this.codexThreadId;
+      if (matchesOwnedTurn) {
+        const existing = this.activeProviderTurn;
+        if (
+          existing === null
+          || (
+            existing.providerTurnToken === providerTurnToken
+            && existing.identity.sessionId === event.identity.sessionId
+            && existing.identity.turnId === event.identity.turnId
+          )
+        ) {
+          this.activeProviderTurn = {
+            provider: 'codex-cli',
+            identity: { ...event.identity },
+            generation: { ...generation },
+            providerTurnToken,
+          };
+        } else {
+          log.warn({
+            chatJid: this.chatJid,
+            sessionId: event.identity.sessionId,
+            turnId: event.identity.turnId,
+          }, 'provider turn identity changed while the request owner was active');
+        }
+      } else {
+        log.warn({
+          chatJid: this.chatJid,
+          sessionId: event.identity.sessionId,
+          turnId: event.identity.turnId,
+        }, 'provider turn identity rejected without exact active ownership');
       }
     }
 
@@ -2500,6 +2573,8 @@ export class SessionManager {
     const resolveTerminal = this.providerTurnTerminalResolve;
     this.providerTurnInFlight = false;
     this.activeProviderTurnToken = null;
+    this.activeProviderTurnGeneration = null;
+    this.activeProviderTurn = null;
     this.providerTurnTerminalResolve = null;
     resolveTerminal?.();
     this.clearTurnWatchdog();
@@ -2889,6 +2964,8 @@ export class SessionManager {
     this.providerTurnInFlight = true;
     const providerTurnToken = ++this.nextProviderTurnToken;
     this.activeProviderTurnToken = providerTurnToken;
+    this.activeProviderTurnGeneration = this.resolveGenerationOwnership?.() ?? null;
+    this.activeProviderTurn = null;
     this.providerTurnTerminalPromise = new Promise<void>((resolve) => {
       this.providerTurnTerminalResolve = resolve;
     });

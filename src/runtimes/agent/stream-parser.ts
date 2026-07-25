@@ -42,8 +42,24 @@ export const IGNORED_BLOCK_REASONS = {
 type IgnoredBlockReason =
   (typeof IGNORED_BLOCK_REASONS)[keyof typeof IGNORED_BLOCK_REASONS];
 
+export interface ProviderTurnIdentity {
+  readonly sessionId: string;
+  readonly turnId: string;
+}
+
+export type ProviderTurnTerminalStatus =
+  | 'completed'
+  | 'failed'
+  | 'interrupted'
+  | 'unknown';
+
+export interface ProviderTurnTerminalIdentity extends ProviderTurnIdentity {
+  readonly status: ProviderTurnTerminalStatus;
+}
+
 export type AgentEvent =
   | { type: 'init'; sessionId: string }
+  | { type: 'provider_turn_started'; identity: ProviderTurnIdentity }
   | { type: 'compact_boundary' }
   | { type: 'assistant_text'; text: string; itemId?: string; complete?: boolean }
   | { type: 'tool_use'; toolName: string; toolId: string; toolInput: Record<string, unknown> }
@@ -64,6 +80,8 @@ export type AgentEvent =
        */
       cacheReadTokens?: number;
       costUsd?: number;
+      /** Exact native identity and terminal status when the provider exposes it. */
+      providerTurn?: ProviderTurnTerminalIdentity;
     }
   | { type: 'token_usage'; inputTokens?: number; outputTokens?: number; cacheReadTokens?: number }
   | { type: 'ignored' }

@@ -2790,6 +2790,69 @@ describe('Event-driven provider ready signal', () => {
       expect.any(Function),
     );
   });
+
+  it('Codex stdout lifecycle captures and terminalizes the exact owned native turn', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const generation = { managerId: 'manager-a', generation: 7 } as const;
+    const events: AgentEvent[] = [];
+    let sm!: SessionManager;
+    sm = new SessionManager({
+      db,
+      messenger,
+      chatJid: CHAT_JID,
+      provider: 'codex-cli',
+      onEvent: (event) => {
+        events.push(event);
+        if (event.type === 'result') sm.completeProviderTurn();
+      },
+    });
+    sm.bindGenerationOwnership(() => generation);
+    await sm.spawnSession();
+
+    mockChild.stdout.emit('data', Buffer.from(JSON.stringify({
+      jsonrpc: '2.0',
+      id: 'rpc-2',
+      result: { id: 'thread-owned' },
+    }) + '\n'));
+    await sm.sendTurn('hello');
+
+    mockChild.stdout.emit('data', Buffer.from(JSON.stringify({
+      jsonrpc: '2.0',
+      method: 'turn/started',
+      params: {
+        threadId: 'thread-owned',
+        turn: { id: 'turn-owned', status: 'inProgress' },
+      },
+    }) + '\n'));
+
+    expect(sm.getActiveProviderTurn()).toEqual({
+      provider: 'codex-cli',
+      identity: { sessionId: 'thread-owned', turnId: 'turn-owned' },
+      generation,
+      providerTurnToken: 1,
+    });
+
+    mockChild.stdout.emit('data', Buffer.from(JSON.stringify({
+      jsonrpc: '2.0',
+      method: 'turn/completed',
+      params: {
+        threadId: 'thread-owned',
+        turn: { id: 'turn-owned', status: 'completed' },
+      },
+    }) + '\n'));
+
+    expect(events).toContainEqual({
+      type: 'result',
+      text: null,
+      providerTurn: {
+        sessionId: 'thread-owned',
+        turnId: 'turn-owned',
+        status: 'completed',
+      },
+    });
+    expect(sm.getActiveProviderTurn()).toBeNull();
+  });
 });
 
 // ─── Codex session resume on crash tests ─────────────────────────────────────
@@ -3654,6 +3717,100 @@ describe('handleProviderEvent branch coverage', () => {
 
     expect((sm as unknown as { codexResumeThreadStartReqId: string | null }).codexResumeThreadStartReqId).toBeNull();
     expect(sm.getStatus().sessionId).toBe('thread_success_xyz');
+  });
+
+  it('captures an exact active provider turn only for the current request generation', () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const sm = new SessionManager({
+      db, messenger, chatJid: CHAT_JID, provider: 'codex-cli', onEvent: vi.fn(),
+    });
+    const generation = { managerId: 'manager-a', generation: 7 } as const;
+    sm.bindGenerationOwnership(() => generation);
+    Object.assign(sm as unknown as Record<string, unknown>, {
+      providerTurnInFlight: true,
+      activeProviderTurnToken: 23,
+      activeProviderTurnGeneration: generation,
+      codexThreadId: 'thread-current',
+    });
+    const handler = (
+      sm as unknown as { handleProviderEvent: (event: AgentEvent) => void }
+    ).handleProviderEvent.bind(sm);
+
+    handler({
+      type: 'provider_turn_started',
+      identity: { sessionId: 'thread-current', turnId: 'turn-current' },
+    });
+
+    expect(sm.getActiveProviderTurn()).toEqual({
+      provider: 'codex-cli',
+      identity: { sessionId: 'thread-current', turnId: 'turn-current' },
+      generation,
+      providerTurnToken: 23,
+    });
+
+    sm.completeProviderTurn(22);
+    expect(sm.getActiveProviderTurn()).not.toBeNull();
+    sm.completeProviderTurn(23);
+    expect(sm.getActiveProviderTurn()).toBeNull();
+  });
+
+  it('rejects stale, mismatched, and unowned provider turn identities', () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const sm = new SessionManager({
+      db, messenger, chatJid: CHAT_JID, provider: 'codex-cli', onEvent: vi.fn(),
+    });
+    const generation = { managerId: 'manager-a', generation: 7 } as const;
+    let currentGeneration: { managerId: string; generation: number } = generation;
+    sm.bindGenerationOwnership(() => currentGeneration);
+    Object.assign(sm as unknown as Record<string, unknown>, {
+      providerTurnInFlight: true,
+      activeProviderTurnToken: 23,
+      activeProviderTurnGeneration: generation,
+      codexThreadId: 'thread-current',
+    });
+    const handler = (
+      sm as unknown as { handleProviderEvent: (event: AgentEvent) => void }
+    ).handleProviderEvent.bind(sm);
+
+    handler({
+      type: 'provider_turn_started',
+      identity: { sessionId: 'thread-stale', turnId: 'turn-stale' },
+    });
+    expect(sm.getActiveProviderTurn()).toBeNull();
+
+    currentGeneration = { managerId: 'manager-a', generation: 8 };
+    handler({
+      type: 'provider_turn_started',
+      identity: { sessionId: 'thread-current', turnId: 'turn-superseded' },
+    });
+    expect(sm.getActiveProviderTurn()).toBeNull();
+
+    Object.assign(sm as unknown as Record<string, unknown>, {
+      providerTurnInFlight: false,
+      activeProviderTurnToken: null,
+    });
+    handler({
+      type: 'provider_turn_started',
+      identity: { sessionId: 'thread-current', turnId: 'turn-unowned' },
+    });
+    expect(sm.getActiveProviderTurn()).toBeNull();
+  });
+
+  it('exposes the closed turn-control capability row for the configured provider', () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const sm = new SessionManager({
+      db, messenger, chatJid: CHAT_JID, provider: 'codex-cli', onEvent: vi.fn(),
+    });
+
+    expect(sm.getTurnControlCapabilities()).toEqual({
+      startTurn: true,
+      busyInput: 'steer_active_turn',
+      interrupt: 'interrupt_active_turn',
+      nativeTurnIdentity: 'required',
+    });
   });
 
   it('handleProviderEvent records token_usage events in budget', async () => {
