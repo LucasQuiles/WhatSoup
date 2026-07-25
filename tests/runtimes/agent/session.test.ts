@@ -4120,6 +4120,39 @@ describe('handleProviderEvent branch coverage', () => {
     expect(sm.getActiveProviderTurn()).toBeNull();
   });
 
+  it('does not reacquire turn ownership after quarantining the request source', () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const sm = new SessionManager({
+      db, messenger, chatJid: CHAT_JID, provider: 'codex-cli', onEvent: vi.fn(),
+    });
+    const generation = { managerId: 'manager-a', generation: 7 } as const;
+    sm.bindGenerationOwnership(() => generation);
+    Object.assign(sm as unknown as Record<string, unknown>, {
+      providerTurnInFlight: true,
+      activeProviderTurnToken: 23,
+      activeProviderTurnGeneration: generation,
+      codexThreadId: 'thread-current',
+      activeCodexTurnStartRequestId: 'request-current',
+    });
+    const handler = (
+      sm as unknown as { handleProviderEvent: (event: AgentEvent) => void }
+    ).handleProviderEvent.bind(sm);
+
+    handler({
+      type: 'provider_turn_accepted',
+      requestId: 'request-stale',
+      turnId: 'turn-stale',
+    });
+    handler({
+      type: 'provider_turn_accepted',
+      requestId: 'request-current',
+      turnId: 'turn-replayed',
+    });
+
+    expect(sm.getActiveProviderTurn()).toBeNull();
+  });
+
   it('rejects stale, mismatched, and unowned provider turn identities', () => {
     const db = makeDb();
     const { messenger } = makeMessenger();

@@ -1231,6 +1231,7 @@ export class SessionManager {
     evidence: Record<string, unknown>,
   ): void {
     this.activeProviderTurn = null;
+    this.activeCodexTurnStartRequestId = null;
     const child = this.child;
     if (child === null || this.quarantinedNativeTurnChildren.has(child)) return;
     const generation = this.childGenerations.get(child) ?? null;
