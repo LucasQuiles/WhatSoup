@@ -647,6 +647,10 @@ export class SessionManager {
   private activeProviderTurnToken: number | null = null;
   private activeProviderTurnGeneration: SessionGenerationIdentity | null = null;
   private activeProviderTurn: ActiveProviderTurn | null = null;
+  private readonly localGenerationManagerId = randomUUID();
+  private localGeneration = 0;
+  private localGenerationIdentity: SessionGenerationIdentity | null = null;
+  private readonly quarantinedNativeTurnChildren = new WeakSet<ReturnType<typeof spawn>>();
   private providerTurnTerminalPromise: Promise<void> = Promise.resolve();
   private providerTurnTerminalResolve: (() => void) | null = null;
   /** Bounded kill timer for a stalled tool; armed by recoverStalledOperation. */
@@ -664,6 +668,7 @@ export class SessionManager {
   private codexThreadId: string | null = null;
   /** Monotonic counter for Codex JSON-RPC request IDs. */
   private codexRequestSeq = 0;
+  private activeCodexTurnStartRequestId: string | null = null;
   /** Gemini ACP session ID captured from session/new response. */
   private geminiSessionId: string | null = null;
   /** Monotonic counter for Gemini ACP JSON-RPC request IDs. */
@@ -931,6 +936,13 @@ export class SessionManager {
     return left.managerId === right.managerId && left.generation === right.generation;
   }
 
+  private currentGenerationIdentity(): SessionGenerationIdentity | null {
+    if (this.resolveGenerationOwnership !== null) {
+      return this.resolveGenerationOwnership();
+    }
+    return this.localGenerationIdentity;
+  }
+
   private clearShutdownKillTimer(
     child: ReturnType<typeof spawn>,
     generation: SessionGenerationIdentity | null,
@@ -1088,45 +1100,116 @@ export class SessionManager {
       }
     }
 
-    if (event.type === 'provider_turn_started') {
+    if (event.type === 'provider_turn_accepted') {
       const generation = this.activeProviderTurnGeneration;
       const providerTurnToken = this.activeProviderTurnToken;
+      const codexThreadId = this.codexThreadId;
       const matchesOwnedTurn = this.provider === 'codex-cli'
         && this.providerTurnInFlight
         && providerTurnToken !== null
         && generation !== null
         && this.isCurrentGeneration(generation)
-        && event.identity.sessionId === this.codexThreadId;
-      if (matchesOwnedTurn) {
-        const existing = this.activeProviderTurn;
-        if (
-          existing === null
-          || (
-            existing.providerTurnToken === providerTurnToken
-            && existing.identity.sessionId === event.identity.sessionId
-            && existing.identity.turnId === event.identity.turnId
-          )
-        ) {
-          this.activeProviderTurn = {
-            provider: 'codex-cli',
-            identity: { ...event.identity },
-            generation: { ...generation },
-            providerTurnToken,
-          };
-        } else {
-          log.warn({
-            chatJid: this.chatJid,
+        && codexThreadId !== null
+        && event.requestId === this.activeCodexTurnStartRequestId
+        && this.activeProviderTurn === null;
+      if (!matchesOwnedTurn) {
+        this.quarantineNativeTurnSource(
+          'provider turn acceptance rejected without exact request ownership',
+          {
+            requestId: event.requestId,
+            turnId: event.turnId,
+          },
+        );
+        return;
+      }
+      this.activeProviderTurn = {
+        provider: 'codex-cli',
+        identity: {
+          sessionId: codexThreadId,
+          turnId: event.turnId,
+        },
+        generation: { ...generation },
+        providerTurnToken,
+      };
+      return;
+    }
+
+    if (event.type === 'provider_turn_started') {
+      const activeTurn = this.getActiveProviderTurn();
+      if (
+        this.provider !== 'codex-cli'
+        || activeTurn === null
+        || event.identity.sessionId !== activeTurn.identity.sessionId
+        || event.identity.turnId !== activeTurn.identity.turnId
+      ) {
+        this.quarantineNativeTurnSource(
+          'provider start notification rejected without exact accepted-turn ownership',
+          {
             sessionId: event.identity.sessionId,
             turnId: event.identity.turnId,
-          }, 'provider turn identity changed while the request owner was active');
-        }
-      } else {
-        log.warn({
-          chatJid: this.chatJid,
-          sessionId: event.identity.sessionId,
-          turnId: event.identity.turnId,
-        }, 'provider turn identity rejected without exact active ownership');
+          },
+        );
       }
+      return;
+    }
+
+    if (
+      this.provider === 'codex-cli'
+      && event.type === 'result'
+      && (
+        event.providerTurn !== undefined
+        || event.providerTurnProtocolError !== undefined
+      )
+    ) {
+      const activeTurn = this.getActiveProviderTurn();
+      const terminal = event.providerTurn;
+      if (
+        event.providerTurnProtocolError !== undefined
+        || terminal === undefined
+        || activeTurn === null
+        || terminal.sessionId !== activeTurn.identity.sessionId
+        || terminal.turnId !== activeTurn.identity.turnId
+      ) {
+        this.quarantineNativeTurnSource(
+          'provider terminal rejected without exact active-turn ownership',
+          {
+            protocolError: event.providerTurnProtocolError ?? null,
+            sessionId: terminal?.sessionId ?? null,
+            turnId: terminal?.turnId ?? null,
+          },
+        );
+        return;
+      }
+      event = {
+        ...event,
+        providerTurnOwnerToken: activeTurn.providerTurnToken,
+      };
+    }
+
+    if (
+      this.provider === 'codex-cli'
+      && event.type === 'result'
+      && event.providerRequestId !== undefined
+    ) {
+      const providerTurnToken = this.activeProviderTurnToken;
+      const generation = this.activeProviderTurnGeneration;
+      if (
+        !this.providerTurnInFlight
+        || providerTurnToken === null
+        || generation === null
+        || !this.isCurrentGeneration(generation)
+        || event.providerRequestId !== this.activeCodexTurnStartRequestId
+      ) {
+        this.quarantineNativeTurnSource(
+          'provider request error rejected without exact request ownership',
+          { providerRequestId: event.providerRequestId },
+        );
+        return;
+      }
+      event = {
+        ...event,
+        providerTurnOwnerToken: providerTurnToken,
+      };
     }
 
     // Record token usage for budget tracking on result and token_usage events
@@ -1141,6 +1224,32 @@ export class SessionManager {
     }
 
     this.onEvent(event);
+  }
+
+  private quarantineNativeTurnSource(
+    message: string,
+    evidence: Record<string, unknown>,
+  ): void {
+    this.activeProviderTurn = null;
+    const child = this.child;
+    if (child === null || this.quarantinedNativeTurnChildren.has(child)) return;
+    const generation = this.childGenerations.get(child) ?? null;
+    if (!this.isCurrentPersistentChild(child, generation)) return;
+    this.quarantinedNativeTurnChildren.add(child);
+    log.error({
+      ...evidence,
+      chatJid: this.chatJid,
+      pid: child.pid ?? null,
+      managerId: generation?.managerId ?? null,
+      generation: generation?.generation ?? null,
+    }, message);
+    void this.killChildTree(child, 'SIGKILL').catch((err) => {
+      log.error({
+        err,
+        chatJid: this.chatJid,
+        pid: child.pid ?? null,
+      }, 'failed to quarantine provider after native turn identity violation');
+    });
   }
 
   /**
@@ -1856,6 +1965,7 @@ export class SessionManager {
 
   bindGenerationOwnership(resolve: () => SessionGenerationIdentity | null): void {
     this.resolveGenerationOwnership = resolve;
+    this.localGenerationIdentity = null;
   }
 
   private isCurrentPersistentChild(
@@ -1867,9 +1977,11 @@ export class SessionManager {
   }
 
   private isCurrentGeneration(captured: SessionGenerationIdentity | null): boolean {
-    if (this.resolveGenerationOwnership === null) return captured === null;
-    if (captured === null) return false;
-    const current = this.resolveGenerationOwnership();
+    if (captured === null) {
+      return this.resolveGenerationOwnership === null
+        && this.localGenerationIdentity === null;
+    }
+    const current = this.currentGenerationIdentity();
     return current?.managerId === captured.managerId && current.generation === captured.generation;
   }
 
@@ -1925,6 +2037,12 @@ export class SessionManager {
     const admissionWatchdogState = this.routePolicyAdmissionCheckpointState(
       checkpointWatchdogState,
     );
+    if (this.resolveGenerationOwnership === null && provider === 'codex-cli') {
+      this.localGenerationIdentity = {
+        managerId: this.localGenerationManagerId,
+        generation: ++this.localGeneration,
+      };
+    }
     let resolvedRowId = existingRowId;
     if (resumeSessionId !== undefined) {
       const resumeIdentity = {
@@ -2004,7 +2122,7 @@ export class SessionManager {
 
     if (this.isManagedLoopProvider) {
       const providerSession = this.createManagedProviderSession();
-      const managedGeneration = this.resolveGenerationOwnership?.() ?? null;
+      const managedGeneration = this.currentGenerationIdentity();
 
       this.managedProviderSession = providerSession;
       this.managedProviderGeneration = managedGeneration;
@@ -2183,7 +2301,7 @@ export class SessionManager {
       ),
     });
 
-    const childGeneration = this.resolveGenerationOwnership?.() ?? null;
+    const childGeneration = this.currentGenerationIdentity();
     this.childGenerations.set(child, childGeneration);
     this.childTreeMarkers.set(
       child,
@@ -2575,6 +2693,7 @@ export class SessionManager {
     this.activeProviderTurnToken = null;
     this.activeProviderTurnGeneration = null;
     this.activeProviderTurn = null;
+    this.activeCodexTurnStartRequestId = null;
     this.providerTurnTerminalResolve = null;
     resolveTerminal?.();
     this.clearTurnWatchdog();
@@ -2964,7 +3083,7 @@ export class SessionManager {
     this.providerTurnInFlight = true;
     const providerTurnToken = ++this.nextProviderTurnToken;
     this.activeProviderTurnToken = providerTurnToken;
-    this.activeProviderTurnGeneration = this.resolveGenerationOwnership?.() ?? null;
+    this.activeProviderTurnGeneration = this.currentGenerationIdentity();
     this.activeProviderTurn = null;
     this.providerTurnTerminalPromise = new Promise<void>((resolve) => {
       this.providerTurnTerminalResolve = resolve;
@@ -3170,7 +3289,7 @@ export class SessionManager {
         executionLease = null;
       }
 
-      const childGeneration = this.resolveGenerationOwnership?.() ?? null;
+      const childGeneration = this.currentGenerationIdentity();
       this.childGenerations.set(child, childGeneration);
       this.childTreeMarkers.set(
         child,
@@ -3518,6 +3637,7 @@ export class SessionManager {
           }
         }
         const id = `ws-${++this.codexRequestSeq}`;
+        this.activeCodexTurnStartRequestId = id;
         payload = JSON.stringify({
           jsonrpc: '2.0',
           method: 'turn/start',

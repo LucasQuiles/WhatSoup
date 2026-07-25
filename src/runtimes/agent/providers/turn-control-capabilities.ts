@@ -15,14 +15,19 @@ export interface ProviderTurnControlCapabilities {
   readonly startTurn: true;
   readonly busyInput: BusyTurnInputCapability;
   readonly interrupt: ActiveTurnInterruptCapability;
-  readonly nativeTurnIdentity: 'required' | 'none';
+  readonly native: {
+    readonly busyInput: 'steer_active_turn';
+    readonly interrupt: 'interrupt_active_turn';
+    readonly turnIdentity: 'required';
+    readonly runtimeEnabled: false;
+  } | null;
 }
 
 const queueOnly = Object.freeze({
   startTurn: true,
   busyInput: 'queue_only',
   interrupt: 'terminate_provider_session',
-  nativeTurnIdentity: 'none',
+  native: null,
 } as const satisfies ProviderTurnControlCapabilities);
 
 export const providerTurnControlCapabilities: Readonly<
@@ -31,9 +36,14 @@ export const providerTurnControlCapabilities: Readonly<
   'claude-cli': queueOnly,
   'codex-cli': Object.freeze({
     startTurn: true,
-    busyInput: 'steer_active_turn',
-    interrupt: 'interrupt_active_turn',
-    nativeTurnIdentity: 'required',
+    busyInput: 'queue_only',
+    interrupt: 'terminate_provider_session',
+    native: Object.freeze({
+      busyInput: 'steer_active_turn',
+      interrupt: 'interrupt_active_turn',
+      turnIdentity: 'required',
+      runtimeEnabled: false,
+    }),
   }),
   'gemini-cli': queueOnly,
   'opencode-cli': queueOnly,

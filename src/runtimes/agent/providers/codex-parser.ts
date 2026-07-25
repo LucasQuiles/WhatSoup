@@ -207,6 +207,7 @@ function handleNotification(method: string, params: JsonObject): AgentEvent {
           type: 'result',
           text: 'Provider turn completed without an exact native identity',
           isError: true,
+          providerTurnProtocolError: 'missing_identity',
         };
       }
       const status = terminalStatus(turn?.['status']);
@@ -266,11 +267,39 @@ function handleResponse(id: unknown, result: unknown): AgentEvent {
   // the thread object. But we capture threadId from the thread/started
   // notification instead, so responses are generally ignored.
 
-  // thread/start response: result contains a Thread object with an 'id' field
-  // Accept any result object with a string 'id' — don't require 'turns' field
-  // since the schema may vary across Codex versions.
-  if (isRecord(result) && typeof result['id'] === 'string') {
-    return { type: 'init', sessionId: result['id'] as string };
+  if (isRecord(result)) {
+    const turn = result['turn'];
+    if (isRecord(turn)) {
+      const turnId = turn['id'];
+      if (
+        (typeof id === 'string' || typeof id === 'number')
+        && typeof turnId === 'string'
+        && turnId.trim() !== ''
+      ) {
+        return {
+          type: 'provider_turn_accepted',
+          requestId: id,
+          turnId,
+        };
+      }
+      return {
+        type: 'result',
+        text: 'Provider accepted a turn without an exact request and turn identity',
+        isError: true,
+        ...(typeof id === 'string' || typeof id === 'number' ? { providerRequestId: id } : {}),
+        providerTurnProtocolError: 'missing_identity',
+      };
+    }
+
+    // Current responses wrap the Thread object, while historical fixtures
+    // used the Thread object itself.
+    const thread = result['thread'];
+    if (isRecord(thread) && typeof thread['id'] === 'string') {
+      return { type: 'init', sessionId: thread['id'] };
+    }
+    if (typeof result['id'] === 'string') {
+      return { type: 'init', sessionId: result['id'] };
+    }
   }
 
   return { type: 'ignored' };
@@ -341,7 +370,19 @@ export function parseCodexEvent(line: string): AgentEvent | null {
   if (id !== undefined && parsed['error'] !== undefined) {
     const error = parsed['error'];
     const errorMsg = isRecord(error) ? String(error['message'] ?? 'Unknown error') : String(error);
-    return { type: 'result', text: `Codex error: ${errorMsg}`, isError: true };
+    return typeof id === 'string' || typeof id === 'number'
+      ? {
+        type: 'result',
+        text: `Codex error: ${errorMsg}`,
+        isError: true,
+        providerRequestId: id,
+      }
+      : {
+        type: 'result',
+        text: `Codex error: ${errorMsg}`,
+        isError: true,
+        providerTurnProtocolError: 'missing_request_identity',
+      };
   }
 
   return { type: 'unknown', raw: parsed };

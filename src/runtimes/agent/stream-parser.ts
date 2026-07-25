@@ -59,6 +59,7 @@ export interface ProviderTurnTerminalIdentity extends ProviderTurnIdentity {
 
 export type AgentEvent =
   | { type: 'init'; sessionId: string }
+  | { type: 'provider_turn_accepted'; requestId: string | number; turnId: string }
   | { type: 'provider_turn_started'; identity: ProviderTurnIdentity }
   | { type: 'compact_boundary' }
   | { type: 'assistant_text'; text: string; itemId?: string; complete?: boolean }
@@ -82,6 +83,12 @@ export type AgentEvent =
       costUsd?: number;
       /** Exact native identity and terminal status when the provider exposes it. */
       providerTurn?: ProviderTurnTerminalIdentity;
+      /** Session-owned request token attached only after exact native terminal admission. */
+      providerTurnOwnerToken?: number;
+      /** Exact JSON-RPC request identity when a request fails before native turn creation. */
+      providerRequestId?: string | number;
+      /** Native terminal notification could not establish the identity required for admission. */
+      providerTurnProtocolError?: 'missing_identity' | 'missing_request_identity';
     }
   | { type: 'token_usage'; inputTokens?: number; outputTokens?: number; cacheReadTokens?: number }
   | { type: 'ignored' }

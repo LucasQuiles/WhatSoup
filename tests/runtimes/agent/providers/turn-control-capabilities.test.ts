@@ -12,12 +12,17 @@ describe('provider turn-control capabilities', () => {
     );
   });
 
-  it('declares exact native steering only for the directly proven persistent surface', () => {
+  it('records proven native controls without enabling them for runtime routing', () => {
     expect(providerTurnControlCapabilities['codex-cli']).toEqual({
       startTurn: true,
-      busyInput: 'steer_active_turn',
-      interrupt: 'interrupt_active_turn',
-      nativeTurnIdentity: 'required',
+      busyInput: 'queue_only',
+      interrupt: 'terminate_provider_session',
+      native: {
+        busyInput: 'steer_active_turn',
+        interrupt: 'interrupt_active_turn',
+        turnIdentity: 'required',
+        runtimeEnabled: false,
+      },
     });
   });
 
@@ -25,7 +30,7 @@ describe('provider turn-control capabilities', () => {
     for (const provider of PROVIDER_IDS) {
       if (provider === 'codex-cli') continue;
       expect(providerTurnControlCapabilities[provider].busyInput).toBe('queue_only');
-      expect(providerTurnControlCapabilities[provider].nativeTurnIdentity).toBe('none');
+      expect(providerTurnControlCapabilities[provider].native).toBeNull();
     }
   });
 });

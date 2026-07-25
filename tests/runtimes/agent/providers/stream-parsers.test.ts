@@ -483,7 +483,7 @@ describe('Codex app-server parser (JSON-RPC)', () => {
         error: { code: -32600, message: 'Invalid Request' },
       });
       const event = parseCodexEvent(line);
-      expect(event).toMatchObject({ type: 'result' });
+      expect(event).toMatchObject({ type: 'result', providerRequestId: expect.any(String) });
       const result = event as { type: 'result'; text: string | null };
       expect(result.text).toContain('Invalid Request');
     });

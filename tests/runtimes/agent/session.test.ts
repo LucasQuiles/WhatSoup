@@ -157,6 +157,14 @@ function makeSseResponse(events: Array<Record<string, unknown> | string>): Respo
   });
 }
 
+function lastJsonRpcRequest(child: MockChild, method: string): Record<string, unknown> {
+  const request = child.stdin.write.mock.calls
+    .map((call) => JSON.parse(String(call[0])) as Record<string, unknown>)
+    .findLast((candidate) => candidate['method'] === method);
+  if (request === undefined) throw new Error(`missing ${method} request`);
+  return request;
+}
+
 // ─── DB mock helpers ──────────────────────────────────────────────────────────
 
 vi.mock('../../../src/runtimes/agent/session-db.ts', () => ({
@@ -2816,6 +2824,12 @@ describe('Event-driven provider ready signal', () => {
       result: { id: 'thread-owned' },
     }) + '\n'));
     await sm.sendTurn('hello');
+    const turnRequest = lastJsonRpcRequest(mockChild, 'turn/start');
+    mockChild.stdout.emit('data', Buffer.from(JSON.stringify({
+      jsonrpc: '2.0',
+      id: turnRequest['id'],
+      result: { turn: { id: 'turn-owned', status: 'inProgress' } },
+    }) + '\n'));
 
     mockChild.stdout.emit('data', Buffer.from(JSON.stringify({
       jsonrpc: '2.0',
@@ -2845,6 +2859,7 @@ describe('Event-driven provider ready signal', () => {
     expect(events).toContainEqual({
       type: 'result',
       text: null,
+      providerTurnOwnerToken: 1,
       providerTurn: {
         sessionId: 'thread-owned',
         turnId: 'turn-owned',
@@ -2852,6 +2867,317 @@ describe('Event-driven provider ready signal', () => {
       },
     });
     expect(sm.getActiveProviderTurn()).toBeNull();
+  });
+
+  it.each([
+    {
+      name: 'wrong thread',
+      terminal: { sessionId: 'thread-other', turnId: 'turn-owned' },
+    },
+    {
+      name: 'wrong turn',
+      terminal: { sessionId: 'thread-owned', turnId: 'turn-other' },
+    },
+  ])('Codex quarantines a $name terminal without forwarding it', async ({ terminal }) => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const events: AgentEvent[] = [];
+    const sm = new SessionManager({
+      db,
+      messenger,
+      chatJid: CHAT_JID,
+      provider: 'codex-cli',
+      onEvent: (event) => events.push(event),
+    });
+    await sm.spawnSession();
+    mockChild.stdout.emit('data', Buffer.from(JSON.stringify({
+      jsonrpc: '2.0',
+      id: 'rpc-2',
+      result: { id: 'thread-owned' },
+    }) + '\n'));
+    await sm.sendTurn('hello');
+    const turnRequest = lastJsonRpcRequest(mockChild, 'turn/start');
+    mockChild.stdout.emit('data', Buffer.from(JSON.stringify({
+      jsonrpc: '2.0',
+      id: turnRequest['id'],
+      result: { turn: { id: 'turn-owned', status: 'inProgress' } },
+    }) + '\n'));
+    mockChild.stdout.emit('data', Buffer.from(JSON.stringify({
+      jsonrpc: '2.0',
+      method: 'turn/started',
+      params: {
+        threadId: 'thread-owned',
+        turn: { id: 'turn-owned', status: 'inProgress' },
+      },
+    }) + '\n'));
+    expect(sm.getActiveProviderTurn()).toMatchObject({
+      provider: 'codex-cli',
+      identity: { sessionId: 'thread-owned', turnId: 'turn-owned' },
+      generation: { managerId: expect.any(String), generation: 1 },
+      providerTurnToken: 1,
+    });
+
+    mockChild.stdout.emit('data', Buffer.from(JSON.stringify({
+      jsonrpc: '2.0',
+      method: 'turn/completed',
+      params: {
+        threadId: terminal.sessionId,
+        turn: { id: terminal.turnId, status: 'completed' },
+      },
+    }) + '\n'));
+
+    await vi.waitFor(() => expect(mockChild.kill).toHaveBeenCalledWith('SIGKILL'));
+    expect(events.filter((event) => event.type === 'result')).toEqual([]);
+    expect(sm.getActiveProviderTurn()).toBeNull();
+  });
+
+  it('Codex quarantines terminal-before-start and missing-identity notifications', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const events: AgentEvent[] = [];
+    const sm = new SessionManager({
+      db,
+      messenger,
+      chatJid: CHAT_JID,
+      provider: 'codex-cli',
+      onEvent: (event) => events.push(event),
+    });
+    await sm.spawnSession();
+    mockChild.stdout.emit('data', Buffer.from(JSON.stringify({
+      jsonrpc: '2.0',
+      id: 'rpc-2',
+      result: { id: 'thread-owned' },
+    }) + '\n'));
+    await sm.sendTurn('hello');
+
+    mockChild.stdout.emit('data', Buffer.from(JSON.stringify({
+      jsonrpc: '2.0',
+      method: 'turn/completed',
+      params: {
+        threadId: 'thread-owned',
+        turn: { id: 'turn-before-start', status: 'completed' },
+      },
+    }) + '\n'));
+    mockChild.stdout.emit('data', Buffer.from(JSON.stringify({
+      jsonrpc: '2.0',
+      method: 'turn/completed',
+      params: { turn: { status: 'completed' } },
+    }) + '\n'));
+
+    await vi.waitFor(() => expect(mockChild.kill).toHaveBeenCalledWith('SIGKILL'));
+    expect(events.filter((event) => event.type === 'result')).toEqual([]);
+  });
+
+  it('Codex invalidates an ambiguous second start identity and quarantines the source', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const events: AgentEvent[] = [];
+    const sm = new SessionManager({
+      db,
+      messenger,
+      chatJid: CHAT_JID,
+      provider: 'codex-cli',
+      onEvent: (event) => events.push(event),
+    });
+    await sm.spawnSession();
+    mockChild.stdout.emit('data', Buffer.from(JSON.stringify({
+      jsonrpc: '2.0',
+      id: 'rpc-2',
+      result: { id: 'thread-owned' },
+    }) + '\n'));
+    await sm.sendTurn('hello');
+    const turnRequest = lastJsonRpcRequest(mockChild, 'turn/start');
+    mockChild.stdout.emit('data', Buffer.from(JSON.stringify({
+      jsonrpc: '2.0',
+      id: turnRequest['id'],
+      result: { turn: { id: 'turn-first', status: 'inProgress' } },
+    }) + '\n'));
+    for (const turnId of ['turn-first', 'turn-conflict']) {
+      mockChild.stdout.emit('data', Buffer.from(JSON.stringify({
+        jsonrpc: '2.0',
+        method: 'turn/started',
+        params: {
+          threadId: 'thread-owned',
+          turn: { id: turnId, status: 'inProgress' },
+        },
+      }) + '\n'));
+    }
+
+    await vi.waitFor(() => expect(mockChild.kill).toHaveBeenCalledWith('SIGKILL'));
+    expect(sm.getActiveProviderTurn()).toBeNull();
+    expect(events.some((event) => event.type === 'provider_turn_started')).toBe(false);
+  });
+
+  it('Codex rejects a duplicate old completion after the next owned turn starts', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const results: Extract<AgentEvent, { type: 'result' }>[] = [];
+    let sm!: SessionManager;
+    sm = new SessionManager({
+      db,
+      messenger,
+      chatJid: CHAT_JID,
+      provider: 'codex-cli',
+      onEvent: (event) => {
+        if (event.type !== 'result') return;
+        results.push(event);
+        sm.completeProviderTurn(event.providerTurnOwnerToken);
+      },
+    });
+    await sm.spawnSession();
+    mockChild.stdout.emit('data', Buffer.from(JSON.stringify({
+      jsonrpc: '2.0',
+      id: 'rpc-2',
+      result: { id: 'thread-owned' },
+    }) + '\n'));
+
+    await sm.sendTurn('first');
+    const firstTurnRequest = lastJsonRpcRequest(mockChild, 'turn/start');
+    mockChild.stdout.emit('data', Buffer.from(JSON.stringify({
+      jsonrpc: '2.0',
+      id: firstTurnRequest['id'],
+      result: { turn: { id: 'turn-first', status: 'inProgress' } },
+    }) + '\n'));
+    for (const method of ['turn/started', 'turn/completed']) {
+      mockChild.stdout.emit('data', Buffer.from(JSON.stringify({
+        jsonrpc: '2.0',
+        method,
+        params: {
+          threadId: 'thread-owned',
+          turn: {
+            id: 'turn-first',
+            status: method === 'turn/started' ? 'inProgress' : 'completed',
+          },
+        },
+      }) + '\n'));
+    }
+    expect(results).toHaveLength(1);
+
+    await sm.sendTurn('second');
+    const secondTurnRequest = lastJsonRpcRequest(mockChild, 'turn/start');
+    mockChild.stdout.emit('data', Buffer.from(JSON.stringify({
+      jsonrpc: '2.0',
+      id: secondTurnRequest['id'],
+      result: { turn: { id: 'turn-second', status: 'inProgress' } },
+    }) + '\n'));
+    mockChild.stdout.emit('data', Buffer.from(JSON.stringify({
+      jsonrpc: '2.0',
+      method: 'turn/started',
+      params: {
+        threadId: 'thread-owned',
+        turn: { id: 'turn-second', status: 'inProgress' },
+      },
+    }) + '\n'));
+    mockChild.stdout.emit('data', Buffer.from(JSON.stringify({
+      jsonrpc: '2.0',
+      method: 'turn/completed',
+      params: {
+        threadId: 'thread-owned',
+        turn: { id: 'turn-first', status: 'completed' },
+      },
+    }) + '\n'));
+
+    await vi.waitFor(() => expect(mockChild.kill).toHaveBeenCalledWith('SIGKILL'));
+    expect(results).toHaveLength(1);
+    expect(sm.getActiveProviderTurn()).toBeNull();
+  });
+
+  it('Codex admits an exact turn-start request error with the owning token', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const results: Extract<AgentEvent, { type: 'result' }>[] = [];
+    let sm!: SessionManager;
+    sm = new SessionManager({
+      db,
+      messenger,
+      chatJid: CHAT_JID,
+      provider: 'codex-cli',
+      onEvent: (event) => {
+        if (event.type !== 'result') return;
+        results.push(event);
+        sm.completeProviderTurn(event.providerTurnOwnerToken);
+      },
+    });
+    await sm.spawnSession();
+    mockChild.stdout.emit('data', Buffer.from(JSON.stringify({
+      jsonrpc: '2.0',
+      id: 'rpc-2',
+      result: { id: 'thread-owned' },
+    }) + '\n'));
+    await sm.sendTurn('first');
+    const request = lastJsonRpcRequest(mockChild, 'turn/start');
+
+    mockChild.stdout.emit('data', Buffer.from(JSON.stringify({
+      jsonrpc: '2.0',
+      id: request['id'],
+      error: { code: -32600, message: 'request rejected' },
+    }) + '\n'));
+
+    expect(results).toContainEqual({
+      type: 'result',
+      text: 'Codex error: request rejected',
+      isError: true,
+      providerRequestId: request['id'],
+      providerTurnOwnerToken: 1,
+    });
+  });
+
+  it('Codex quarantines a stale turn-start request error after a later request owns the lane', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const results: Extract<AgentEvent, { type: 'result' }>[] = [];
+    let sm!: SessionManager;
+    sm = new SessionManager({
+      db,
+      messenger,
+      chatJid: CHAT_JID,
+      provider: 'codex-cli',
+      onEvent: (event) => {
+        if (event.type !== 'result') return;
+        results.push(event);
+        sm.completeProviderTurn(event.providerTurnOwnerToken);
+      },
+    });
+    await sm.spawnSession();
+    mockChild.stdout.emit('data', Buffer.from(JSON.stringify({
+      jsonrpc: '2.0',
+      id: 'rpc-2',
+      result: { id: 'thread-owned' },
+    }) + '\n'));
+
+    await sm.sendTurn('first');
+    const firstRequest = lastJsonRpcRequest(mockChild, 'turn/start');
+    mockChild.stdout.emit('data', Buffer.from(JSON.stringify({
+      jsonrpc: '2.0',
+      id: firstRequest['id'],
+      result: { turn: { id: 'turn-first', status: 'inProgress' } },
+    }) + '\n'));
+    mockChild.stdout.emit('data', Buffer.from(JSON.stringify({
+      jsonrpc: '2.0',
+      method: 'turn/started',
+      params: {
+        threadId: 'thread-owned',
+        turn: { id: 'turn-first', status: 'inProgress' },
+      },
+    }) + '\n'));
+    mockChild.stdout.emit('data', Buffer.from(JSON.stringify({
+      jsonrpc: '2.0',
+      method: 'turn/completed',
+      params: {
+        threadId: 'thread-owned',
+        turn: { id: 'turn-first', status: 'completed' },
+      },
+    }) + '\n'));
+
+    await sm.sendTurn('second');
+    mockChild.stdout.emit('data', Buffer.from(JSON.stringify({
+      jsonrpc: '2.0',
+      id: firstRequest['id'],
+      error: { code: -32600, message: 'stale request rejected' },
+    }) + '\n'));
+
+    await vi.waitFor(() => expect(mockChild.kill).toHaveBeenCalledWith('SIGKILL'));
+    expect(results).toHaveLength(1);
   });
 });
 
@@ -3732,14 +4058,16 @@ describe('handleProviderEvent branch coverage', () => {
       activeProviderTurnToken: 23,
       activeProviderTurnGeneration: generation,
       codexThreadId: 'thread-current',
+      activeCodexTurnStartRequestId: 'request-current',
     });
     const handler = (
       sm as unknown as { handleProviderEvent: (event: AgentEvent) => void }
     ).handleProviderEvent.bind(sm);
 
     handler({
-      type: 'provider_turn_started',
-      identity: { sessionId: 'thread-current', turnId: 'turn-current' },
+      type: 'provider_turn_accepted',
+      requestId: 'request-current',
+      turnId: 'turn-current',
     });
 
     expect(sm.getActiveProviderTurn()).toEqual({
@@ -3769,21 +4097,24 @@ describe('handleProviderEvent branch coverage', () => {
       activeProviderTurnToken: 23,
       activeProviderTurnGeneration: generation,
       codexThreadId: 'thread-current',
+      activeCodexTurnStartRequestId: 'request-current',
     });
     const handler = (
       sm as unknown as { handleProviderEvent: (event: AgentEvent) => void }
     ).handleProviderEvent.bind(sm);
 
     handler({
-      type: 'provider_turn_started',
-      identity: { sessionId: 'thread-stale', turnId: 'turn-stale' },
+      type: 'provider_turn_accepted',
+      requestId: 'request-stale',
+      turnId: 'turn-stale',
     });
     expect(sm.getActiveProviderTurn()).toBeNull();
 
     currentGeneration = { managerId: 'manager-a', generation: 8 };
     handler({
-      type: 'provider_turn_started',
-      identity: { sessionId: 'thread-current', turnId: 'turn-superseded' },
+      type: 'provider_turn_accepted',
+      requestId: 'request-current',
+      turnId: 'turn-superseded',
     });
     expect(sm.getActiveProviderTurn()).toBeNull();
 
@@ -3792,8 +4123,9 @@ describe('handleProviderEvent branch coverage', () => {
       activeProviderTurnToken: null,
     });
     handler({
-      type: 'provider_turn_started',
-      identity: { sessionId: 'thread-current', turnId: 'turn-unowned' },
+      type: 'provider_turn_accepted',
+      requestId: 'request-current',
+      turnId: 'turn-unowned',
     });
     expect(sm.getActiveProviderTurn()).toBeNull();
   });
@@ -3807,9 +4139,14 @@ describe('handleProviderEvent branch coverage', () => {
 
     expect(sm.getTurnControlCapabilities()).toEqual({
       startTurn: true,
-      busyInput: 'steer_active_turn',
-      interrupt: 'interrupt_active_turn',
-      nativeTurnIdentity: 'required',
+      busyInput: 'queue_only',
+      interrupt: 'terminate_provider_session',
+      native: {
+        busyInput: 'steer_active_turn',
+        interrupt: 'interrupt_active_turn',
+        turnIdentity: 'required',
+        runtimeEnabled: false,
+      },
     });
   });
 

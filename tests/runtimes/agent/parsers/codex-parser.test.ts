@@ -6,6 +6,23 @@ function line(payload: unknown): string {
 }
 
 describe('parseCodexEvent', () => {
+  it('binds an accepted native turn to the exact turn/start request response', () => {
+    expect(parseCodexEvent(line({
+      jsonrpc: '2.0',
+      id: 'request-3',
+      result: {
+        turn: {
+          id: 'turn-accepted',
+          status: 'inProgress',
+        },
+      },
+    }))).toEqual({
+      type: 'provider_turn_accepted',
+      requestId: 'request-3',
+      turnId: 'turn-accepted',
+    });
+  });
+
   describe('terminal error results', () => {
     it('marks app-server failed turns as isError so runtime default-denies raw text', () => {
       const line = JSON.stringify({
@@ -44,6 +61,7 @@ describe('parseCodexEvent', () => {
         type: 'result',
         text: 'Codex error: server rejected request',
         isError: true,
+        providerRequestId: 7,
       });
     });
 
@@ -452,6 +470,7 @@ describe('parseCodexEvent', () => {
         type: 'result',
         text: 'Provider turn completed without an exact native identity',
         isError: true,
+        providerTurnProtocolError: 'missing_identity',
       });
     });
 
@@ -482,6 +501,7 @@ describe('parseCodexEvent', () => {
         type: 'result',
         text: 'Codex error: Unknown error',
         isError: true,
+        providerRequestId: 'req-1',
       });
     });
 
@@ -548,6 +568,7 @@ describe('parseCodexEvent', () => {
         type: 'result',
         text: 'Provider turn completed without an exact native identity',
         isError: true,
+        providerTurnProtocolError: 'missing_identity',
       });
 
       expect(parseCodexEvent(line({
@@ -558,6 +579,7 @@ describe('parseCodexEvent', () => {
         type: 'result',
         text: 'Provider turn completed without an exact native identity',
         isError: true,
+        providerTurnProtocolError: 'missing_identity',
       });
     });
 
@@ -588,6 +610,7 @@ describe('parseCodexEvent', () => {
         type: 'result',
         text: 'Codex error: fatal',
         isError: true,
+        providerRequestId: 'req-2',
       });
     });
   });
