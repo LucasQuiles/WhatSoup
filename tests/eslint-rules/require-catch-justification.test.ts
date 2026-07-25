@@ -8,6 +8,8 @@ import { afterEach, describe, expect, it } from 'vitest';
 
 // @ts-expect-error -- local ESLint plugin is a .mjs module with no type declarations; expires 2026-12-31
 import fitnessPlugin from '../../eslint-rules/index.mjs';
+// @ts-expect-error -- local ESLint rule is a .mjs module with no type declarations; expires 2026-12-31
+import { parseCatchBaseline } from '../../eslint-rules/require-catch-justification.mjs';
 import tseslint from 'typescript-eslint';
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
@@ -163,6 +165,11 @@ describe('fitness/require-catch-justification', () => {
     await expect(
       lint(sourceWith(catchClause('', '')), baselineFile({ old: true })),
     ).rejects.toThrow(/baseline.*array/i);
+  });
+
+  it('accepts a long segmented path without ambiguous regex backtracking', () => {
+    const identity = `${'9/'.repeat(256)}probe.ts::${'a'.repeat(64)}`;
+    expect(parseCatchBaseline(JSON.stringify([identity]))).toEqual([identity]);
   });
 
   it('keeps the same baseline identity after unrelated line movement', async () => {

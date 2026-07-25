@@ -20,7 +20,7 @@ import { fileURLToPath } from 'node:url';
 
 const RULE_DIR = dirname(fileURLToPath(import.meta.url));
 const DEFAULT_BASELINE = resolve(RULE_DIR, 'catch-ratchet-baseline.json');
-const IDENTITY_RE = /^[^:\r\n]+(?:\/[^:\r\n]+)*::[a-f0-9]{64}$/;
+const IDENTITY_RE = /^[^:\r\n]+::[a-f0-9]{64}$/;
 const JUSTIFICATION_CLASS_RE =
   /\b(intentional|by design|already (?:exited|dead|finished)|prior guard|ok if|deliberately)\b\s*(?::|—|-)\s*(.+)/i;
 const NOOP_CALLEES = new Set(['ignore', 'ignored', 'intentional', 'noop', 'noOp']);
