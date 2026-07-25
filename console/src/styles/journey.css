@@ -1,0 +1,379 @@
+/* ═══════════════════════════════════════════════════════════════════════════
+   v3.5 Journey surfaces (T5 b-10) — mockups splash.html + hatch.html SSOT,
+   13-ceremony-motion.md + 14-onboarding-spec.md.
+   Consumes the --journey-* component geometry (tokens.component.css) and the
+   -v35 semantic color register only; raw mockup dimensions never land here.
+   RADII consume the JOURNEY register (--r-journey-{sm,md,lg}) exclusively —
+   never the console register (the bead acceptance item).
+   Ceremony motion (13-§2): the glow is radial, accent-hued, ONE play,
+   ≤800ms, fades to 0; the avatar pop is 500ms spring + 250ms delay;
+   prefers-reduced-motion removes both (instant, not sped-up). The
+   .journey-glow class is banned outside the hatch ceremony.
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+/* ── Shared journey frame ── */
+.journey-body,
+.journey-splash {
+  background: var(--surface-base-v35);
+  color: var(--text-1-v35);
+  min-height: 100dvh;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: var(--journey-card-pad) var(--journey-firstmsg-gap);
+  position: relative;
+  overflow: hidden;
+  font-family: var(--font-body);
+}
+.journey-shell { width: min(var(--journey-shell-w), 100%); position: relative; z-index: 1; }
+
+.journey-theme-toggle {
+  position: fixed;
+  top: var(--journey-firstmsg-pad);
+  right: var(--journey-firstmsg-pad);
+  z-index: 2;
+  background: transparent;
+  border: var(--bw) solid var(--border-hairline-v35);
+  border-radius: var(--r-journey-sm);
+  color: var(--text-2-v35);
+  padding: var(--chrome-btn-pad);
+  cursor: pointer;
+  font: 600 var(--text-data) / 1.3 var(--font-body);
+}
+.journey-theme-toggle:hover { color: var(--text-1-v35); }
+
+/* crumb nameplate (hatch .crumb) */
+.journey-crumb {
+  display: flex;
+  align-items: center;
+  gap: var(--journey-crumb-gap);
+  margin-bottom: var(--journey-crumb-mb);
+}
+.journey-tick {
+  width: var(--journey-tick);
+  height: var(--journey-tick);
+  border-radius: var(--chrome-micro-radius);
+  background: var(--mode-passive-solid);
+}
+.journey-wm {
+  font: 800 var(--text-body) / 1.25 var(--font-display);
+  letter-spacing: -0.06em;
+  color: var(--text-1-v35);
+}
+.journey-wm b { color: var(--accent-v35); font-weight: 800; }
+.journey-wm--hero { font-size: var(--text-xl); }
+.journey-ctx {
+  font: 400 var(--text-sm) / 1.45 var(--font-mono);
+  letter-spacing: var(--tracking-journey-ctx);
+  color: var(--text-3-v35);
+}
+
+/* ── Step rail (14-onboarding §1) ── */
+.journey-steps { display: flex; gap: var(--journey-steps-gap); margin-bottom: var(--journey-steps-mb); }
+.journey-step { flex: 1; display: flex; flex-direction: column; gap: var(--journey-step-gap); }
+.journey-step__bar {
+  height: var(--journey-step-bar-h);
+  border-radius: var(--journey-step-bar-radius);
+  background: var(--border-strong-v35);
+}
+.journey-step--done .journey-step__bar { background: var(--border-strong-v35); }
+.journey-step--now .journey-step__bar { background: var(--accent-v35); }
+.journey-step span {
+  font: 500 var(--text-sm) / 1.3 var(--font-mono);
+  letter-spacing: var(--tracking-journey-step);
+  color: var(--text-3-v35);
+  text-transform: uppercase;
+}
+.journey-step--now span { color: var(--text-1-v35); }
+.journey-step--done span { color: var(--text-2-v35); }
+.journey-step--done span::before { content: "✓ "; color: var(--text-2-v35); }
+
+/* ── Journey card (radius = --r-journey-lg, L4 register law) ── */
+.journey-card {
+  background: var(--surface-raised-v35);
+  border: var(--bw) solid var(--border-hairline-v35);
+  border-radius: var(--r-journey-lg);
+  padding: var(--journey-card-pad);
+  box-shadow: var(--shadow-lift-v35);
+}
+.journey-card h1 {
+  font: 700 var(--text-xl) / 1.25 var(--font-display);
+  letter-spacing: -0.02em;
+  color: var(--text-1-v35);
+  margin: 0 0 var(--journey-h1-mb);
+}
+.journey-sub {
+  color: var(--text-2-v35);
+  margin: 0 0 var(--journey-sub-mb);
+  max-width: var(--journey-sub-maxw);
+}
+.journey-note { color: var(--text-3-v35); font-size: var(--text-data); }
+.journey-note--crit { color: var(--status-crit-fg); }
+.journey-field { margin-bottom: var(--journey-sub-mb); }
+.journey-label {
+  display: block;
+  font: 600 var(--text-sm) / 1.3 var(--font-mono);
+  letter-spacing: var(--tracking-journey-caps);
+  color: var(--text-3-v35);
+  text-transform: uppercase;
+  margin-bottom: var(--journey-step-gap);
+}
+.journey-name-edit { display: flex; gap: var(--journey-steps-gap); align-items: center; }
+
+/* actions — single accent primary, ghost secondaries (14-onboarding §2) */
+.journey-actions { display: flex; gap: var(--journey-actions-gap); justify-content: center; }
+
+/* ── Kind + channel grids (mockup .grid / .ch) ── */
+.journey-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(var(--journey-grid-min), 1fr));
+  gap: var(--journey-grid-gap);
+  margin-bottom: var(--journey-sub-mb);
+}
+.journey-ch {
+  border-radius: var(--r-journey-md);
+  border: var(--bw) solid var(--border-hairline-v35);
+  background: var(--surface-inset-v35);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--journey-ch-gap);
+  cursor: pointer;
+  padding: var(--journey-firstmsg-pad);
+  text-align: center;
+  min-height: var(--journey-grid-min);
+}
+.journey-ch--sel {
+  border-color: var(--accent-v35);
+  box-shadow: 0 0 0 var(--bw) var(--accent-v35);
+  background: color-mix(in srgb, var(--accent-v35) 8%, var(--surface-inset-v35));
+}
+.journey-ch--off { opacity: var(--opacity-disabled); cursor: not-allowed; }
+.journey-ch__label {
+  font: 500 var(--text-sm) / 1.2 var(--font-mono);
+  color: var(--text-3-v35);
+  letter-spacing: var(--tracking-journey-step);
+}
+.journey-ch--sel .journey-ch__label { color: var(--text-1-v35); }
+.journey-ch__desc { font-size: var(--text-sm); color: var(--text-3-v35); }
+
+/* link stage */
+.journey-linkstage {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--journey-steps-gap);
+  padding: var(--journey-stage-pad);
+}
+
+/* ── Ceremony (14-onboarding §5) ── */
+.journey-stage {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  padding: var(--journey-stage-pad);
+}
+.journey-lockup {
+  position: relative;
+  width: var(--journey-lockup);
+  height: var(--journey-lockup);
+  margin-bottom: var(--journey-lockup-mb);
+}
+
+/* the sanctioned one-shot glow (13-§2): radial, accent, ≤800ms, ends at 0 */
+.journey-glow {
+  position: absolute;
+  inset: var(--journey-glow-inset);
+  border-radius: 50%;
+  background: radial-gradient(circle, color-mix(in srgb, var(--accent-v35) 35%, transparent) 0%, transparent 62%);
+  animation: journey-glowplay 0.8s ease-out 1 both;
+}
+@keyframes journey-glowplay {
+  0% { opacity: 0; transform: scale(0.6); }
+  45% { opacity: 1; }
+  100% { opacity: 0; transform: scale(1.05); }
+}
+.journey-eggshell {
+  position: absolute;
+  inset: 0;
+  border-radius: var(--r-journey-lg);
+  border: var(--journey-eggshell-border-w) dashed var(--border-strong-v35);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.journey-av {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  translate: -50% -50%;
+  width: var(--journey-av);
+  height: var(--journey-av);
+  border-radius: var(--r-journey-lg);
+  background: var(--agent-hue-5);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font: 700 var(--text-xl) / 1 var(--font-body);
+  color: var(--agent-avatar-ink);
+  animation: journey-pop 0.5s cubic-bezier(0.2, 1.4, 0.4, 1) 0.25s both;
+}
+@keyframes journey-pop {
+  0% { transform: scale(0.4); opacity: 0; }
+  100% { transform: scale(1); opacity: 1; }
+}
+
+.journey-beats { display: flex; gap: var(--journey-beats-gap); margin: var(--journey-lockup-mb) 0; }
+.journey-beat {
+  display: flex;
+  align-items: center;
+  gap: var(--journey-beat-gap);
+  padding: var(--journey-beat-pad);
+  border-radius: var(--chrome-pill-radius);
+  border: var(--bw) solid var(--border-strong-v35);
+  font: 500 var(--text-data) / 1.35 var(--font-mono);
+  color: var(--text-2-v35);
+}
+.journey-beat__dot {
+  width: var(--journey-beat-dot);
+  height: var(--journey-beat-dot);
+  border-radius: 50%;
+  background: var(--status-ok-solid);
+}
+.journey-name-row {
+  display: flex;
+  align-items: center;
+  gap: var(--journey-name-row-gap);
+  margin-bottom: var(--journey-name-row-mb);
+}
+.journey-name {
+  font: 800 var(--text-2xl) / 1.2 var(--font-display);
+  letter-spacing: -0.03em;
+  color: var(--text-1-v35);
+}
+.journey-soul { color: var(--text-2-v35); font-style: italic; margin: 0 0 var(--journey-soul-mb); }
+.journey-meta {
+  font: 400 var(--text-sm) / 1.45 var(--font-mono);
+  color: var(--text-3-v35);
+  margin: 0 0 var(--journey-meta-mb);
+}
+.journey-meta b { color: var(--mode-chat-fg); font-weight: 500; }
+
+.journey-firstmsg {
+  width: 100%;
+  background: var(--surface-inset-v35);
+  border: var(--bw) solid var(--border-hairline-v35);
+  border-radius: var(--journey-firstmsg-radius);
+  padding: var(--journey-firstmsg-pad);
+  display: flex;
+  gap: var(--journey-firstmsg-gap);
+  align-items: center;
+  margin-bottom: var(--journey-firstmsg-mb);
+}
+.journey-firstmsg input { flex: 1; }
+
+/* ── Splash (splash.html) ── */
+.journey-wm-glyph {
+  position: fixed;
+  z-index: 0;
+  opacity: 0.05;
+  pointer-events: none;
+  fill: var(--text-1-v35);
+}
+.journey-wm-glyph--g1 {
+  width: var(--journey-wm-g1);
+  height: var(--journey-wm-g1);
+  top: var(--journey-wm-g1-top);
+  left: var(--journey-wm-g1-left);
+  transform: rotate(-14deg);
+}
+.journey-wm-glyph--g2 {
+  width: var(--journey-wm-g2);
+  height: var(--journey-wm-g2);
+  bottom: var(--journey-wm-g2-bottom);
+  right: var(--journey-wm-g2-right);
+  transform: rotate(11deg);
+  opacity: 0.04;
+}
+.journey-hero { position: relative; z-index: 1; text-align: center; max-width: var(--journey-hero-maxw); }
+.journey-hero__plate {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--journey-hero-plate-gap);
+  margin-bottom: var(--journey-hero-plate-mb);
+}
+.journey-hero__tick {
+  width: var(--journey-hero-tick);
+  height: var(--journey-hero-tick);
+  border-radius: var(--chrome-micro-radius);
+  background: var(--mode-passive-solid);
+}
+.journey-hero h1 {
+  font: 800 var(--text-2xl) / 1.15 var(--font-display);
+  letter-spacing: -0.035em;
+  color: var(--text-1-v35);
+  margin: 0 0 var(--journey-h1-mb-splash);
+}
+.journey-accent { color: var(--accent-v35); }
+.journey-splash-sub {
+  color: var(--text-2-v35);
+  font-size: var(--text-body);
+  max-width: var(--journey-splash-sub-maxw);
+  margin: 0 auto var(--journey-splash-sub-mb);
+}
+.journey-cta { display: flex; gap: var(--journey-cta-gap); justify-content: center; }
+.journey-splash__primary { padding: var(--journey-splash-primary-pad); height: auto; }
+.journey-splash__ghost { padding: var(--journey-splash-ghost-pad); height: auto; }
+
+.journey-props {
+  position: relative;
+  z-index: 1;
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: var(--journey-props-gap);
+  margin-top: var(--journey-props-mt);
+  max-width: var(--journey-props-maxw);
+}
+.journey-prop {
+  background: var(--surface-raised-v35);
+  border: var(--bw) solid var(--border-hairline-v35);
+  border-radius: var(--r-journey-md);
+  padding: var(--journey-prop-pad);
+  text-align: left;
+}
+.journey-prop__n {
+  font: 600 var(--text-sm) / 1.3 var(--font-mono);
+  letter-spacing: var(--tracking-journey-caps);
+  color: var(--text-3-v35);
+  text-transform: uppercase;
+  margin-bottom: var(--journey-prop-n-mb);
+}
+.journey-prop h2 {
+  font: 700 var(--text-body) / 1.35 var(--font-display);
+  color: var(--text-1-v35);
+  margin: 0 0 var(--journey-prop-h3-mb);
+}
+.journey-prop p { color: var(--text-2-v35); font-size: var(--text-data); margin: 0; }
+
+/* ── Mockup breakpoints (splash ≤700px; hatch ≤640px) ── */
+@media (max-width: 700px) {
+  .journey-hero h1 { font-size: var(--text-2xl); }
+  .journey-props { grid-template-columns: 1fr; }
+}
+@media (max-width: 640px) {
+  .journey-card { padding: var(--journey-prop-pad); }
+  .journey-name { font-size: var(--text-xl); }
+}
+
+/* ── Reduced-motion law (13-§3): removal, not speed-up ── */
+@media (prefers-reduced-motion: reduce) {
+  .journey-glow,
+  .journey-av { animation: none; }
+}
+
+/* ── Light presence ── */
+[data-theme="light"] .journey-prop,
+[data-theme="light"] .journey-card { box-shadow: var(--shadow-rest-v35); }

@@ -287,7 +287,18 @@ const aliasMarkerIdx = semanticRaw.indexOf('Legacy aliases');
 if (aliasMarkerIdx === -1) {
   fail('ERROR(derive:legacy-alias-block): marker "Legacy aliases" not found in tokens.semantic.css — cannot derive legacy-name list');
 }
-const aliasSection = stripCssComments(semanticRaw.slice(aliasMarkerIdx), 'tokens.semantic.css(alias-block)');
+// The alias section ends where the v3.5 token addendum begins (b-01 appended
+// §A–§E below the legacy block) — without the bound, every -v35 name derives
+// as "legacy" and the first v3.5 consumer (b-02 chrome) false-positives.
+// Older trees without the addendum fall back to the EOF slice.
+const v35MarkerIdx = semanticRaw.indexOf('v3.5 token addendum');
+// Bound at the addendum comment's opener, not the marker text itself — the
+// banner `/* ----` line precedes the marker, and slicing at the marker would
+// leave an unterminated comment in the alias section (fail-closed parse).
+const aliasSectionEnd = v35MarkerIdx > aliasMarkerIdx
+  ? semanticRaw.lastIndexOf('/*', v35MarkerIdx)
+  : semanticRaw.length;
+const aliasSection = stripCssComments(semanticRaw.slice(aliasMarkerIdx, aliasSectionEnd), 'tokens.semantic.css(alias-block)');
 const legacyNames = new Set();
 for (const m of aliasSection.matchAll(/^\s*(--[a-zA-Z0-9-]+)\s*:/gm)) {
   legacyNames.add(m[1]);
