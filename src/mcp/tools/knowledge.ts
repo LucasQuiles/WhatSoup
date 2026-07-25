@@ -508,6 +508,7 @@ export function registerKnowledgeTools(
             index: indexName,
             query,
             results_count: 0,
+            results: [],
             formatted: 'No results found for this query. Try different wording or a broader search.',
           };
         }
@@ -520,6 +521,11 @@ export function registerKnowledgeTools(
           index: indexName,
           query,
           results_count: deduped.length,
+          results: deduped.map((hit) => ({
+            id: hit.id,
+            score: hit.score,
+            entity_type: hit.entityType,
+          })),
           formatted,
         };
       } catch (err) {

@@ -693,6 +693,10 @@ describe('knowledge_search handler - Pinecone search behavior', () => {
       index: 'index-a',
       query: 'project notes',
       results_count: 2,
+      results: [
+        { id: 'doc-b', score: 0.91, entity_type: 'unknown' },
+        { id: 'doc-a', score: 0.61, entity_type: 'unknown' },
+      ],
       formatted: '[b.md]\nBeta summary\n\n[a.md]\nAlpha summary',
     });
   });
@@ -726,6 +730,7 @@ describe('knowledge_search handler - Pinecone search behavior', () => {
       index: 'mw-mind',
       query: 'message context',
       results_count: 0,
+      results: [],
     });
   });
 
@@ -793,6 +798,11 @@ describe('knowledge_search handler - Pinecone search behavior', () => {
       index: 'entity-index',
       query: 'who owns budget',
       results_count: 3,
+      results: [
+        { id: 'alice', score: 0.8, entity_type: 'person' },
+        { id: 'teams', score: 0.7, entity_type: 'teams' },
+        { id: 'unknown', score: 0.6, entity_type: 'unknown' },
+      ],
       formatted: 'Persons:\n• Alice owns budget\n\nTeams:\n• Ops team\n\nUnknowns:\n• ',
     });
   });
@@ -854,6 +864,9 @@ describe('knowledge_search handler - Pinecone search behavior', () => {
       index: 'single-ns',
       query: 'raw body',
       results_count: 1,
+      results: [
+        { id: 'raw-doc', score: 0.7, entity_type: 'unknown' },
+      ],
       formatted: '[raw-doc]\nRaw body only',
     });
   });
@@ -903,6 +916,10 @@ describe('knowledge_search handler - Pinecone search behavior', () => {
       index: 'vector-index',
       query: 'vector query',
       results_count: 2,
+      results: [
+        { id: 'vec-b', score: 0.9, entity_type: 'document' },
+        { id: 'vec-a', score: 0.4, entity_type: 'document' },
+      ],
       formatted: '[b.md]\nBeta vector\n\n[a.md]\nAlpha vector',
     });
   });
@@ -1006,6 +1023,9 @@ describe('knowledge_search handler - Pinecone search behavior', () => {
       index: 'vector-index',
       query: 'vector query',
       results_count: 1,
+      results: [
+        { id: 'survivor', score: 0.7, entity_type: 'document' },
+      ],
       formatted: '[survivor.md]\nHealthy namespace',
     });
   });
@@ -1034,6 +1054,9 @@ describe('knowledge_search handler - Pinecone search behavior', () => {
       index: 'vector-index',
       query: 'vector query',
       results_count: 1,
+      results: [
+        { id: 'sparse', score: 0, entity_type: 'document' },
+      ],
       formatted: '[sparse]\n',
     });
   });
@@ -1077,6 +1100,10 @@ describe('knowledge_search handler - Pinecone search behavior', () => {
       index: 'rerank-index',
       query: 'rank these',
       results_count: 2,
+      results: [
+        { id: 'doc-a', score: 0.99, entity_type: 'unknown' },
+        { id: 'doc-b', score: 0.42, entity_type: 'unknown' },
+      ],
       formatted: '[a.md]\nAlpha body\n\n[b.md]\nBeta body',
     });
   });
@@ -1103,6 +1130,10 @@ describe('knowledge_search handler - Pinecone search behavior', () => {
       index: 'rerank-index',
       query: 'rank these',
       results_count: 2,
+      results: [
+        { id: 'doc-b', score: 0.9, entity_type: 'unknown' },
+        { id: 'doc-a', score: 0.2, entity_type: 'unknown' },
+      ],
       formatted: '[b.md]\nBeta body\n\n[a.md]\nAlpha body',
     });
   });
