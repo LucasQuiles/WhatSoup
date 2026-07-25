@@ -92,4 +92,26 @@ describe('catch-ratchet generator', () => {
       /zero source files|no files (?:matching|found)/i,
     );
   });
+
+  it.each([
+    [
+      'file-level suppression',
+      '/* eslint-disable fitness/require-catch-justification -- suppression-resistance regression fixture; expires 2026-12-31 */\n'
+        + `export function probe() { try { operation(); } ${catchClause('')} }\n`,
+    ],
+    [
+      'next-line suppression',
+      'export function probe() {\n'
+        + '  try { operation(); }\n'
+        + '  // eslint-disable-next-line fitness/require-catch-justification -- suppression-resistance regression fixture; expires 2026-12-31\n'
+        + `  ${catchClause('')}\n`
+        + '}\n',
+    ],
+  ])('blocks growth hidden by %s', (_label, source) => {
+    const root = makeFixture(source, '[]\n');
+    const result = runGenerator(root, '--check');
+
+    expect(result.status).toBe(1);
+    expect(`${result.stdout}${result.stderr}`).toMatch(/growth|new catch/i);
+  });
 });

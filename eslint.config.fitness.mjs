@@ -90,6 +90,10 @@ const plugins = {
 // as errors. They are not fitness findings, so the fitness ring ignores inline
 // disable directives entirely (`reportUnusedDisableDirectives: 'off'`).
 const linterOptions = { reportUnusedDisableDirectives: 'off' };
+const catchRatchetLinterOptions = {
+  ...linterOptions,
+  noInlineConfig: true,
+};
 
 const config = [
   {
@@ -118,7 +122,7 @@ const config = [
     // Keep the configured rule on that exact scope so scripts/ cannot produce
     // untracked warnings outside the shrink-only multiset.
     files: ['src/**/*.ts'],
-    linterOptions,
+    linterOptions: catchRatchetLinterOptions,
     languageOptions: {
       parser: tseslint.parser,
       parserOptions: { ecmaVersion: 2024, sourceType: 'module' },

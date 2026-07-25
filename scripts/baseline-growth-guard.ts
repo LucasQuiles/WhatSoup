@@ -27,6 +27,7 @@ import {
   BASELINE_REGISTRY,
   type BaselineFinding,
   type WeighedBaseline,
+  baselineIdentities,
   compareWeights,
   weighBaseline,
 } from './lib/baseline-weight.ts';
@@ -112,7 +113,7 @@ function resolveBase(explicit: string | null, repoRoot: string): string | null {
  * broken row loud instead of invisible.
  */
 type Weighing =
-  | { kind: 'weight'; value: number }
+  | { kind: 'weight'; value: number; identities?: string[] }
   | { kind: 'absent' }
   | { kind: 'error'; message: string };
 
@@ -139,7 +140,12 @@ function weighAt(revision: string | null, path: string, repoRoot: string): Weigh
   const entry = BASELINE_REGISTRY.find((b) => b.path === path);
   if (!entry) return { kind: 'error', message: `${path} is not in BASELINE_REGISTRY` };
   try {
-    return { kind: 'weight', value: weighBaseline(entry.shape, JSON.parse(text)) };
+    const document: unknown = JSON.parse(text);
+    return {
+      kind: 'weight',
+      value: weighBaseline(entry.shape, document),
+      identities: baselineIdentities(entry.shape, document),
+    };
   } catch (error) {
     return { kind: 'error', message: error instanceof Error ? error.message : String(error) };
   }
@@ -221,6 +227,10 @@ function main(): number {
             ? entry.initialWeight
             : null,
       head: atHead.kind === 'weight' ? atHead.value : null,
+      baseIdentities:
+        atBase.kind === 'weight' ? atBase.identities : undefined,
+      headIdentities:
+        atHead.kind === 'weight' ? atHead.identities : undefined,
     });
   }
 
@@ -258,7 +268,7 @@ function main(): number {
 
   if (grew.length > 0) {
     console.error(
-      `\n${grew.length} baseline(s) grew against ${base}. Reproduce with:\n` +
+      `\n${grew.length} baseline(s) expanded or replaced debt against ${base}. Reproduce with:\n` +
         '  ./scripts/run-with-pinned-node.sh scripts/baseline-growth-guard.ts --json',
     );
     return EXIT_BLOCK;

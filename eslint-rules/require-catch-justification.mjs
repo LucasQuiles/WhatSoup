@@ -86,40 +86,147 @@ function unwrapExpression(node) {
   return node;
 }
 
-function isTrivialExpression(node) {
+function expressionHasObservableEffect(node) {
   const expression = unwrapExpression(node);
-  if (
-    expression.type === 'Identifier'
-    || expression.type === 'Literal'
-    || expression.type === 'JSXText'
-  ) {
-    return true;
+  switch (expression.type) {
+    case 'AssignmentExpression':
+    case 'UpdateExpression':
+    case 'AwaitExpression':
+    case 'YieldExpression':
+    case 'NewExpression':
+    case 'TaggedTemplateExpression':
+      return true;
+    case 'CallExpression':
+      return !(
+        expression.arguments.length === 0
+        && expression.callee.type === 'Identifier'
+        && NOOP_CALLEES.has(expression.callee.name)
+      );
+    case 'UnaryExpression':
+      return expression.operator === 'delete'
+        || expressionHasObservableEffect(expression.argument);
+    case 'LogicalExpression':
+    case 'BinaryExpression':
+      return expressionHasObservableEffect(expression.left)
+        || expressionHasObservableEffect(expression.right);
+    case 'ConditionalExpression':
+      return expressionHasObservableEffect(expression.test)
+        || expressionHasObservableEffect(expression.consequent)
+        || expressionHasObservableEffect(expression.alternate);
+    case 'SequenceExpression':
+      return expression.expressions.some(expressionHasObservableEffect);
+    case 'TemplateLiteral':
+      return expression.expressions.some(expressionHasObservableEffect);
+    case 'ArrayExpression':
+      return expression.elements.some((element) =>
+        element !== null && (
+          element.type === 'SpreadElement'
+            ? expressionHasObservableEffect(element.argument)
+            : expressionHasObservableEffect(element)
+        ));
+    case 'ObjectExpression':
+      return expression.properties.some((property) => {
+        if (property.type === 'SpreadElement') {
+          return expressionHasObservableEffect(property.argument);
+        }
+        return (
+          (property.computed && expressionHasObservableEffect(property.key))
+          || expressionHasObservableEffect(property.value)
+        );
+      });
+    case 'MemberExpression':
+      return expressionHasObservableEffect(expression.object)
+        || (
+          expression.computed
+          && expressionHasObservableEffect(expression.property)
+        );
+    default:
+      return false;
   }
-  if (expression.type === 'TemplateLiteral') {
-    return expression.expressions.length === 0;
+}
+
+function statementHasObservableHandling(statement) {
+  switch (statement.type) {
+    case 'ThrowStatement':
+    case 'ReturnStatement':
+    case 'BreakStatement':
+    case 'ContinueStatement':
+      return true;
+    case 'ExpressionStatement':
+      return expressionHasObservableEffect(statement.expression);
+    case 'VariableDeclaration':
+      return statement.declarations.some((declaration) =>
+        declaration.init !== null
+        && expressionHasObservableEffect(declaration.init));
+    case 'BlockStatement':
+      return statement.body.some(statementHasObservableHandling);
+    case 'IfStatement':
+      return expressionHasObservableEffect(statement.test)
+        || statementHasObservableHandling(statement.consequent)
+        || (
+          statement.alternate !== null
+          && statementHasObservableHandling(statement.alternate)
+        );
+    case 'SwitchStatement':
+      return expressionHasObservableEffect(statement.discriminant)
+        || statement.cases.some((switchCase) =>
+          (
+            switchCase.test !== null
+            && expressionHasObservableEffect(switchCase.test)
+          )
+          || switchCase.consequent.some(statementHasObservableHandling));
+    case 'TryStatement':
+      return statementHasObservableHandling(statement.block)
+        || (
+          statement.handler !== null
+          && statementHasObservableHandling(statement.handler.body)
+        )
+        || (
+          statement.finalizer !== null
+          && statementHasObservableHandling(statement.finalizer)
+        );
+    case 'LabeledStatement':
+      return statementHasObservableHandling(statement.body);
+    case 'WhileStatement':
+    case 'DoWhileStatement':
+      return expressionHasObservableEffect(statement.test)
+        || statementHasObservableHandling(statement.body);
+    case 'ForStatement':
+      return (
+        (
+          statement.init?.type === 'VariableDeclaration'
+            ? statementHasObservableHandling(statement.init)
+            : (
+                statement.init !== null
+                && expressionHasObservableEffect(statement.init)
+              )
+        )
+        || (
+          statement.test !== null
+          && expressionHasObservableEffect(statement.test)
+        )
+        || (
+          statement.update !== null
+          && expressionHasObservableEffect(statement.update)
+        )
+        || statementHasObservableHandling(statement.body)
+      );
+    case 'ForInStatement':
+    case 'ForOfStatement':
+      return expressionHasObservableEffect(statement.right)
+        || statementHasObservableHandling(statement.body);
+    case 'WithStatement':
+      return expressionHasObservableEffect(statement.object)
+        || statementHasObservableHandling(statement.body);
+    case 'DebuggerStatement':
+      return true;
+    default:
+      return false;
   }
-  if (expression.type === 'UnaryExpression' && expression.operator === 'void') {
-    return true;
-  }
-  if (expression.type === 'SequenceExpression') {
-    return expression.expressions.every(isTrivialExpression);
-  }
-  return (
-    expression.type === 'CallExpression'
-    && expression.arguments.length === 0
-    && expression.callee.type === 'Identifier'
-    && NOOP_CALLEES.has(expression.callee.name)
-  );
 }
 
 export function isTrivialCatchBody(body) {
-  return body.body.every((statement) =>
-    statement.type === 'EmptyStatement'
-    || (
-      statement.type === 'ExpressionStatement'
-      && isTrivialExpression(statement.expression)
-    ),
-  );
+  return !body.body.some(statementHasObservableHandling);
 }
 
 export function hasMeaningfulCatchJustification(comments) {

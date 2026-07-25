@@ -61,6 +61,14 @@ async function lint(
   return eslint.lintText(code, { filePath: SYNTH_PATH });
 }
 
+async function lintWithFitnessConfig(code: string) {
+  const eslint = new ESLint({
+    cwd: REPO_ROOT,
+    overrideConfigFile: resolve(REPO_ROOT, 'eslint.config.fitness.mjs'),
+  });
+  return eslint.lintText(code, { filePath: SYNTH_PATH });
+}
+
 function ruleMessages(results: Awaited<ReturnType<typeof lint>>) {
   return results.flatMap((result) =>
     result.messages.filter(
@@ -94,8 +102,37 @@ describe('fitness/require-catch-justification', () => {
     ['void expressions', ' void ignored;'],
     ['obvious noop calls', ' noop();'],
     ['literal expression statements', " 'intentional';"],
+    ['inert declarations', ' const observed = ignored;'],
+    ['inert logical expressions', ' ignored && "still ignored";'],
+    ['empty nested blocks', ' { ; }'],
+    ['inert function expressions', ' (() => ignored);'],
   ])('flags %s as trivial handling', async (_label, body) => {
-    const messages = ruleMessages(await lint(sourceWith(catchClause('', body))));
+    const messages = ruleMessages(
+      await lint(sourceWith(catchClause(' (ignored)', body))),
+    );
+    expect(messages.map((message) => message.messageId)).toEqual(['unjustifiedCatch']);
+  });
+
+  it.each([
+    [
+      'file-level suppression',
+      '/* eslint-disable fitness/require-catch-justification -- suppression-resistance regression fixture; expires 2026-12-31 */\n',
+      catchClause('', ''),
+    ],
+    [
+      'next-line suppression',
+      '',
+      '// eslint-disable-next-line fitness/require-catch-justification -- suppression-resistance regression fixture; expires 2026-12-31\n  catch {}',
+    ],
+  ])('does not let %s hide catch debt in the fitness config', async (
+    _label,
+    leading,
+    clause,
+  ) => {
+    const code = clause.startsWith('//')
+      ? `${leading}export function probe() {\n  try { operation(); }\n  ${clause}\n}\n`
+      : sourceWith(clause, leading);
+    const messages = ruleMessages(await lintWithFitnessConfig(code));
     expect(messages.map((message) => message.messageId)).toEqual(['unjustifiedCatch']);
   });
 

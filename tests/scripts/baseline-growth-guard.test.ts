@@ -130,6 +130,26 @@ describe('baseline growth guard — the red proof', () => {
     expect(status, out).toBe(0);
   });
 
+  it('BLOCKS constant-count replacement of a baseline identity', () => {
+    const dir = makeRepo(1);
+    const replacement = [{
+      file: 'src/core/replacement.ts',
+      line: 99,
+      specifier: '../runtimes/types.ts',
+      fromLayer: 'core',
+      toLayer: 'runtimes',
+    }];
+    writeFileSync(
+      join(dir, '.claude/fitness/boundary-baseline.json'),
+      `${JSON.stringify(replacement, null, 2)}\n`,
+    );
+
+    const { status, out } = runGuard(['--repo', dir, '--base', 'HEAD']);
+    expect(status, out).toBe(1);
+    expect(out).toMatch(/boundary-baseline\.json/);
+    expect(out).toMatch(/new|identity|subset/i);
+  });
+
   it('is INCONCLUSIVE (exit 2), never a pass, when the baseline becomes unparseable', () => {
     // A truncated/corrupt baseline weighs as nothing. Since shrinking is allowed, treating
     // an unweighable document as 0 would sail through as an improvement.

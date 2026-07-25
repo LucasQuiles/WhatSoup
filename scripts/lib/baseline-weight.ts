@@ -217,6 +217,37 @@ export function weighBaseline(shape: BaselineShape, doc: unknown): number {
   }
 }
 
+function canonicalJson(value: unknown): string {
+  if (Array.isArray(value)) {
+    return `[${value.map(canonicalJson).join(',')}]`;
+  }
+  if (value !== null && typeof value === 'object') {
+    const entries = Object.entries(value as Record<string, unknown>)
+      .sort(([left], [right]) => left.localeCompare(right));
+    return `{${entries.map(([key, entry]) =>
+      `${JSON.stringify(key)}:${canonicalJson(entry)}`).join(',')}}`;
+  }
+  return JSON.stringify(value);
+}
+
+/**
+ * Return the semantic multiset compared for array baselines.
+ *
+ * Count alone cannot distinguish a true hold from replacing one tolerated
+ * violation with another. Canonical JSON keeps object key reordering inert
+ * while preserving duplicate entries as duplicate identities.
+ */
+export function baselineIdentities(
+  shape: BaselineShape,
+  doc: unknown,
+): string[] | undefined {
+  if (shape !== 'entry-array') return undefined;
+  if (!Array.isArray(doc)) {
+    throw new BaselineShapeError('expected an array of baseline entries');
+  }
+  return doc.map(canonicalJson);
+}
+
 export interface WeighedBaseline {
   id: string;
   path: string;
@@ -224,6 +255,10 @@ export interface WeighedBaseline {
   base: number | null;
   /** Weight in the candidate. `null` means the file could not be weighed there. */
   head: number | null;
+  /** Canonical entry multiset when the baseline shape has semantic identities. */
+  baseIdentities?: readonly string[];
+  /** Candidate entry multiset; every occurrence must exist in baseIdentities. */
+  headIdentities?: readonly string[];
 }
 
 export interface BaselineFinding {
@@ -259,6 +294,34 @@ export function compareWeights(weighed: readonly WeighedBaseline[]): BaselineFin
           'This is INCONCLUSIVE, not a pass.',
       });
       continue;
+    }
+    if (b.baseIdentities !== undefined && b.headIdentities !== undefined) {
+      const remaining = new Map<string, number>();
+      for (const identity of b.baseIdentities) {
+        remaining.set(identity, (remaining.get(identity) ?? 0) + 1);
+      }
+      const introduced: string[] = [];
+      for (const identity of b.headIdentities) {
+        const count = remaining.get(identity) ?? 0;
+        if (count === 0) {
+          introduced.push(identity);
+        } else {
+          remaining.set(identity, count - 1);
+        }
+      }
+      if (introduced.length > 0) {
+        findings.push({
+          ...b,
+          delta: b.head - b.base,
+          inconclusive: false,
+          message:
+            `${b.path}: tolerated-debt weight changed ${b.base} -> ${b.head}; candidate ` +
+            `introduced ${introduced.length} baseline identity ` +
+            `occurrence(s) not present in the base multiset. A baseline may only shrink; ` +
+            'candidate identities must be a multiset subset of the base.',
+        });
+        continue;
+      }
     }
     if (b.head > b.base) {
       findings.push({

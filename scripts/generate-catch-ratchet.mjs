@@ -75,6 +75,9 @@ async function scanCurrentIdentities() {
     overrideConfigFile: true,
     overrideConfig: {
       files: ['src/**/*.ts'],
+      linterOptions: {
+        noInlineConfig: true,
+      },
       languageOptions: {
         parser: (await import('typescript-eslint')).parser,
         parserOptions: { ecmaVersion: 2024, sourceType: 'module' },
