@@ -215,14 +215,35 @@ describe('memory_write tool', () => {
     }
   });
 
-  it('REJECTS a global session even with a caller-supplied chatJid (no cross-conversation write)', async () => {
+  it('REJECTS an unbound global session with no pinned conversation key', async () => {
     const { tool, upsert } = setup();
     const res = await tool.handler(
       { chatJid: '999', text: 'sneaky', memory_type: 'user_fact' },
-      { tier: 'global' }, // global session: registry would accept caller chatJid
+      { tier: 'global' },
     );
     expect(isToolErrorPayload(res)).toBe(true);
     expect(upsert).not.toHaveBeenCalled();
+  });
+
+  it('ACCEPTS a global per-chat actor session with a pinned conversation key and ignores the caller target', async () => {
+    const { tool, upsert } = setup();
+    const res = await tool.handler(
+      { chatJid: '999@evil', text: 'operational marker', memory_type: 'group_context' },
+      {
+        tier: 'global',
+        conversationKey: '12345',
+        actorJid: 'phil@s.whatsapp.net',
+      },
+    );
+
+    expect(isToolErrorPayload(res)).toBe(false);
+    const [records] = upsert.mock.calls[0] as [MemoryRecord[]];
+    expect(records[0]).toMatchObject({
+      chatJid: '12345',
+      senderJid: 'phil@s.whatsapp.net',
+      text: 'operational marker',
+      memoryType: 'group_context',
+    });
   });
 
   it('REJECTS a chat-scoped session with no bound conversationKey', async () => {
