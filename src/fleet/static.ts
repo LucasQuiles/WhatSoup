@@ -1,6 +1,34 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import type { IncomingMessage, ServerResponse } from 'node:http';
+import { isPathWithinAllowedRoot } from '../lib/path-boundary.ts';
+
+/**
+ * Canonicalize a candidate path and confine it to `root`, or return null.
+ *
+ * `path.normalize` + stripping a leading `..` is a LEXICAL defence: it cannot
+ * see symlinks. A symlink planted inside the served root resolves outside it and
+ * the lexical check still passes, so the file that actually gets read is not the
+ * file that was validated. Canonicalizing first closes that gap — this is the
+ * same realpath-then-check shape used by `mcp/tools/media.ts` and
+ * `mcp/tools/status.ts`.
+ *
+ * Note `isPathWithinAllowedRoot` canonicalizes only the ROOT, not the candidate,
+ * despite what its docstring used to claim (corrected in this change). The
+ * caller must realpath the candidate, which is what happens here.
+ *
+ * Returns null rather than throwing for a missing path: a 404 is the normal,
+ * frequent case on this handler and must not become an exception.
+ */
+function confineToRoot(candidate: string, root: string): string | null {
+  let real: string;
+  try {
+    real = fs.realpathSync(candidate);
+  } catch {
+    return null;
+  }
+  return isPathWithinAllowedRoot(real, root) ? real : null;
+}
 
 const MIME_TYPES: Record<string, string> = {
   '.html': 'text/html; charset=utf-8',
@@ -47,25 +75,30 @@ export function createStaticHandler(distDir: string, getVersion?: () => string) 
       return version ? serveHtmlWithMeta(htmlPath, version, res) : serveFile(htmlPath, res);
     };
 
+    // Every candidate below is confined AFTER canonicalization, and the
+    // canonical path is what gets served — resolving and then serving the
+    // pre-resolution path would re-open the same gap.
+
     // Try exact file first
-    if (fs.existsSync(filePath) && fs.statSync(filePath).isFile()) {
+    const realFile = confineToRoot(filePath, distDir);
+    if (realFile && fs.statSync(realFile).isFile()) {
       // Serve HTML with public metadata (version + auth mode) — no secrets injected
-      if (path.extname(filePath) === '.html') return serveHtml(filePath);
-      return serveFile(filePath, res);
+      if (path.extname(realFile) === '.html') return serveHtml(realFile);
+      return serveFile(realFile, res);
     }
 
     // Try with index.html for directory requests
-    const dirIndex = path.join(filePath, 'index.html');
-    if (fs.existsSync(dirIndex)) {
-      return serveHtml(dirIndex);
+    const realDirIndex = confineToRoot(path.join(filePath, 'index.html'), distDir);
+    if (realDirIndex) {
+      return serveHtml(realDirIndex);
     }
 
     // SPA fallback: non-API routes without file extensions → index.html
     const ext = path.extname(safePath);
     if (!ext && !url.startsWith('/api/')) {
-      const indexPath = path.join(distDir, 'index.html');
-      if (fs.existsSync(indexPath)) {
-        return serveHtml(indexPath);
+      const realIndex = confineToRoot(path.join(distDir, 'index.html'), distDir);
+      if (realIndex) {
+        return serveHtml(realIndex);
       }
     }
 
