@@ -229,7 +229,11 @@ function parseGitStatusSnapshot(value: string): GitStatusSnapshot {
       continue;
     }
     const recordType = record[0];
-    if (recordType !== '1' && recordType !== '2' && recordType !== 'u') continue;
+    if (record.startsWith('# ') || record.startsWith('? ') || record.startsWith('! ')) continue;
+    if (recordType !== '1' && recordType !== '2' && recordType !== 'u') {
+      snapshot.error = `git status returned an unsupported porcelain record type: ${recordType}`;
+      return snapshot;
+    }
     const stagedCode = record[2];
     const dirtyCode = record[3];
     const relPath = pathAfterSpaces(record, recordType === '1' ? 8 : recordType === '2' ? 9 : 10);

@@ -226,6 +226,30 @@ describe('source runtime drift check', () => {
     ]);
   });
 
+  it('fails closed on an unsupported non-header porcelain record', () => {
+    const root = makeRepo();
+    const manifest = parseSourceRuntimeManifest(JSON.parse(readFileSync(path.join(root, 'manifest.json'), 'utf8')));
+    let injected = false;
+
+    const issues = collectSourceRuntimeIssues(root, manifest, {
+      git: (cwd, args) => {
+        const result = runGit(cwd, args);
+        if (!injected && args[0] === 'status') {
+          injected = true;
+          return { ...result, stdout: `${result.stdout}x unsupported-porcelain-record\0` };
+        }
+        return result;
+      },
+    });
+
+    expect(issues).toEqual([
+      expect.objectContaining({
+        kind: 'git-error',
+        message: expect.stringContaining('unsupported porcelain record'),
+      }),
+    ]);
+  });
+
   it('ignores inherited hook Git environment when creating synthetic repos', () => {
     const parentHead = execFileSync('git', ['rev-parse', 'HEAD'], {
       cwd: process.cwd(),
@@ -299,6 +323,32 @@ describe('source runtime drift check', () => {
     expect(collectSourceRuntimeIssues(root, manifest)).toEqual(expect.arrayContaining([
       expect.objectContaining({ kind: 'file-staged', path: 'src/transport/helper.ts' }),
     ]));
+  });
+
+  it('flags a staged new imported module as uncommitted and staged, not untracked', () => {
+    const root = makeRepo();
+    const modulePath = 'src/transport/staged-new.ts';
+    writeFileSync(
+      path.join(root, 'src/main.ts'),
+      "import { connect } from './transport/connection.ts';\nimport { stagedNew } from './transport/staged-new.ts';\nconnect();\nstagedNew();\n",
+      'utf8',
+    );
+    writeFileSync(path.join(root, modulePath), "export function stagedNew() { return 'staged'; }\n", 'utf8');
+    execGit(root, ['add', 'src/main.ts', modulePath]);
+    const manifest = parseSourceRuntimeManifest(JSON.parse(readFileSync(path.join(root, 'manifest.json'), 'utf8')));
+
+    const issues = collectSourceRuntimeIssues(root, manifest);
+
+    expect(issues).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        kind: 'file-uncommitted',
+        path: modulePath,
+        importedBy: 'src/main.ts',
+        specifier: './transport/staged-new.ts',
+      }),
+      expect.objectContaining({ kind: 'file-staged', path: modulePath }),
+    ]));
+    expect(issues.filter((item) => item.kind === 'file-untracked' && item.path === modulePath)).toEqual([]);
   });
 
   it('exits nonzero and emits JSON for drift', () => {
