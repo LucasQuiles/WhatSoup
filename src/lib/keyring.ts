@@ -668,49 +668,123 @@ function fileStoreIsAbsent(service: string): boolean {
   }
 }
 
-export interface CredentialDeleteResult { deleted: boolean; backend: KeyringBackend }
+/**
+ * Why a delete returned what it did. Completes the reason-code taxonomy the
+ * read path already carries ({@link CredentialLookupReasonCode}) and the write
+ * path already carries ({@link KeyringErrorCode}); delete was the one remaining
+ * unclassified operation.
+ *
+ * `absent` and `backend_failed` are the distinction that matters: both used to
+ * surface as `deleted:false`, and the fleet route mapped that to 404. An
+ * operator with a locked keychain was told the credential did not exist.
+ */
+export type CredentialDeleteReasonCode =
+  | 'deleted'          // the credential was present and is now gone
+  | 'absent'           // nothing to remove — the legitimate 404
+  | 'unknown_service'  // closed-id gate rejected the service name
+  | 'backend_failed';  // the store could NOT be consulted — never a 404
 
-/** Remove a credential from the platform keyring. Never throws on absence. */
+export interface CredentialDeleteResult {
+  deleted: boolean;
+  backend: KeyringBackend;
+  reason: CredentialDeleteReasonCode;
+  /**
+   * Sanitized code when `reason === 'backend_failed'`. Reuses the write-path
+   * taxonomy. NEVER a raw child-process error: those carry `spawnargs` (may
+   * include the secret) and `stderr`, which the fleet server's global
+   * `log.error({ err })` handler would serialize.
+   */
+  errorCode?: KeyringErrorCode;
+}
+
+/**
+ * `security delete-generic-password` exits non-zero for BOTH "no such item" and
+ * real failures, so absence cannot be inferred from the throw alone. Status 44
+ * is errSecItemNotFound; the message check covers locale-stable wording.
+ */
+function isDarwinItemNotFound(err: unknown): boolean {
+  const status = (err as { status?: number } | null)?.status;
+  if (status === 44) return true;
+  const stderr = String((err as { stderr?: Buffer | string } | null)?.stderr ?? '');
+  return /could not be found|SecKeychainSearchCopyNext/i.test(stderr);
+}
+
+/**
+ * Remove a credential from the platform keyring. Never throws — on absence OR
+ * on failure — but the two are now distinguishable via `reason`.
+ */
 export function deleteCredential(
   service: string,
   options: { user?: string } = {},
 ): CredentialDeleteResult {
   const backend = detectKeyringBackend();
-  if (!isValidCredentialService(service)) return { deleted: false, backend };
+  if (!isValidCredentialService(service)) {
+    return { deleted: false, backend, reason: 'unknown_service' };
+  }
   const account = options.user ?? os.userInfo().username;
 
   if (backend === 'macos-keychain') {
     let keychainDeleted = false;
+    let keychainFailure: KeyringErrorCode | null = null;
     try {
       execFileSync('security', ['delete-generic-password', '-s', service, '-a', account], {
         ...keyringExecOptions,
         stdio: ['ignore', 'ignore', 'pipe'],
       });
       keychainDeleted = true;
-    } catch {
-      keychainDeleted = false;
+    } catch (err) {
+      // Absence is not a failure; anything else is. Classification only —
+      // the mirror sweep below still runs either way, because removing what
+      // CAN be removed is the long-standing contract of this function.
+      if (!isDarwinItemNotFound(err)) keychainFailure = classifyDarwinWriteError(err);
     }
-    if (options.user !== undefined) return { deleted: keychainDeleted, backend };
+    if (options.user !== undefined) {
+      if (keychainDeleted) return { deleted: true, backend, reason: 'deleted' };
+      return keychainFailure === null
+        ? { deleted: false, backend, reason: 'absent' }
+        : { deleted: false, backend, reason: 'backend_failed', errorCode: keychainFailure };
+    }
 
     let fileAbsent = false;
+    let mirrorFailed = false;
     try {
       fileStoreDelete(service);
       fileAbsent = fileStoreIsAbsent(service);
     } catch {
-      fileAbsent = false;
+      mirrorFailed = true;
     }
-    return { deleted: keychainDeleted && fileAbsent, backend };
+
+    if (keychainFailure !== null) {
+      return { deleted: false, backend, reason: 'backend_failed', errorCode: keychainFailure };
+    }
+    if (mirrorFailed || !fileAbsent) {
+      // The mirror may still hold a readable copy, so this is not an "absent".
+      return { deleted: false, backend, reason: 'backend_failed', errorCode: 'KEYRING_WRITE_FAILED' };
+    }
+    return keychainDeleted
+      ? { deleted: true, backend, reason: 'deleted' }
+      : { deleted: false, backend, reason: 'absent' };
   }
+
   if (backend === 'secret-tool') {
     try {
       execFileSync('secret-tool', ['clear', 'service', service], {
         ...keyringExecOptions,
         stdio: ['ignore', 'ignore', 'pipe'],
       });
-      return { deleted: true, backend };
-    } catch {
-      return { deleted: false, backend };
+      return { deleted: true, backend, reason: 'deleted' };
+    } catch (err) {
+      // `secret-tool clear` exits 0 when nothing matched, so a throw here is a
+      // genuine backend failure, not absence.
+      return {
+        deleted: false,
+        backend,
+        reason: 'backend_failed',
+        errorCode: classifyDarwinWriteError(err),
+      };
     }
   }
-  return { deleted: fileStoreDelete(service), backend };
+
+  const removed = fileStoreDelete(service);
+  return { deleted: removed, backend, reason: removed ? 'deleted' : 'absent' };
 }
