@@ -6,7 +6,20 @@
 
 > **This table is a curated subset.** As of 2026-07-21 the live `quality.yml` runs ~40+ steps: the full `guard:*` family, coverage (`coverage:check`), browser/Playwright suites, console design checks, mutation via `deploy/scripts/run-sentinel-tests.sh` (pytest `--cov-fail-under=98` + deployer mutation drill — note `stryker.conf.json` is dormant/unwired), and tokenomics/drills. Blocking authority for the 36-rule architectural-fitness registry (`scripts/lib/fitness/registry.ts`) lives in the **guard ring** (`verify:push:branch`), not the ESLint ring, which is warn-only. Semantic-quality (`semantic-quality-check.ts`) runs in **shadow mode** (exit 0) everywhere it is wired; its enforce path is unwired/on-demand.
 
-The `Quality` workflow (`.github/workflows/quality.yml`) runs all of these on every PR and on every push to `main`:
+The `Quality` workflow (`.github/workflows/quality.yml`) runs on every PR and
+every push to `main`, with two explicit required-context jobs:
+
+- `quality (24.x)` is the full enforcement authority. It owns all static,
+  Python, guard, coverage, console-design, and browser checks listed below.
+- `quality (25.x)` is the compatibility lane. It performs clean root and
+  console installs, the complete non-coverage Vitest suite, and the console
+  production build. It intentionally does not duplicate version-invariant
+  guards, coverage, Python, lint/design, or browser work.
+
+This split preserves both required context names while removing roughly
+6.7 duplicated runner-minutes per workflow run across five recent successful
+main runs. It primarily frees runner capacity; Node 24 remains the critical
+path, and exact savings vary with runner scheduling and step duration.
 
 | Step | Command | Purpose |
 |---|---|---|
@@ -21,10 +34,17 @@ The `Quality` workflow (`.github/workflows/quality.yml`) runs all of these on ev
 | Work index coverage | `npm run guard:work-index` | docs/work-index.json completeness |
 | AskUser poll protocol guard | `npm run guard:agent-decision-polls` | Verifies the WhatsApp poll decision protocol remains wired across prompt guidance, MCP schema descriptions, sandbox diagnostics, docs, and release gates. |
 | Safeguard diagnostics | `npm run guard:safeguard-diagnostics` | Deterministic readout of guard-chain wiring, sensitive-publication anchors, runtime-boundary anchors, public-exposure guards, and portability blockers. |
-| **Test integrity baseline check** | `npm run guard:test-integrity` | Runs the baseline check for tautologies, weak assertions, raw sleeps, and assertion-free tests when the plugin is installed; skips missing-plugin cases only outside CI and when `WHATSOUP_REQUIRE_TEST_INTEGRITY` is not set. GitHub Actions installs the private `LucasQuiles/test-integrity` plugin over SSH using the `TEST_INTEGRITY_DEPLOY_KEY` secret (read-only deploy key on `LucasQuiles/test-integrity`) before running this gate. |
+| **Test integrity baseline check** | `npm run guard:test-integrity` | Runs the baseline check for tautologies, weak assertions, raw sleeps, and assertion-free tests when the plugin is installed; skips missing-plugin cases only outside CI and when `WHATSOUP_REQUIRE_TEST_INTEGRITY` is not set. The Node 24 job installs the private `LucasQuiles/test-integrity` plugin over SSH using the read-only `TEST_INTEGRITY_DEPLOY_KEY`, fetches the exact `TEST_INTEGRITY_COMMIT`, detaches at that object, and verifies `HEAD` byte-for-byte. Pin updates are reviewed repository changes; CI never pushes or publishes plugin state. |
 | Repo-hygiene tests | `npm test -- tests/scripts/repo-hygiene-guard.test.ts` | tests that the hygiene-guard itself works |
-| Full test suite | `npm test -- --pool=forks` | vitest with --pool=forks for stability |
+| Full test suite + coverage | `npm run coverage:check -- --pool=forks` | Node 24 runs the entire Vitest suite under V8 coverage and enforces thresholds. Node 25 separately runs `npm test -- --pool=forks` without duplicating coverage. |
 | Console build | `npm --prefix console run build` | Vite production build smoke |
+
+Before the Node 24 toolchain setup, `scripts/ci-disk-reclaim.sh` records free
+space and enforces a 30 GiB budget. Sufficient runners skip mutation with a
+structured receipt. Low-space runners remove only the allowlisted unused
+toolchains and Docker images, report every action, and re-measure. Malformed
+disk observations are inconclusive (exit 2); a measured post-reclaim shortfall
+is blocking (exit 1). Cleanup failures are never hidden with `|| true`.
 
 ## Layer 1.5 — Local pre-commit early-drift signal (warn-only)
 
@@ -45,6 +65,19 @@ Pre-push hook routes through `scripts/pre-push-guard.ts`:
 |---|---|---|
 | Branch push | `npm run verify:push:branch` | repo hygiene staged smoke, repo hygiene branch/base diff, publication staged guard, doc drift guard, public-surface drift guard, work-index guard, node-pin guard, source-runtime drift guard, BOT ERRORS runtime-manifest guard, simulation matrix guard, Claude settings guard, AskUser poll protocol guard, safeguard diagnostics, test-integrity baseline, ring/boundary/service/config guards, `npm run typecheck:all`, the targeted guard test list below, design-system hygiene guard, harness-maintenance manifest guard, tokenomics Python tests, and console lint + build (#1105: these last four mirror blocking CI quality-job steps so console strict-tsconfig/design-system/tokenomics violations fail fast locally; the slow coverage/drills/browser tail stays in `verify:release` and CI) |
 | `main` or release tag push | `npm run verify:release` | release repo hygiene, full publication audit, doc drift guard, public-surface drift guard, work-index guard, node-pin guard, source-runtime drift guard, BOT ERRORS runtime-manifest guard, simulation matrix guard, Claude settings guard, AskUser poll protocol guard, safeguard diagnostics, test-integrity baseline, ring/boundary/service/config guards, tokenomics/drills, `tools/whatsoup_guard` install/typecheck/test, console dependency install/lint/build, `npm run typecheck:all`, full Vitest suite with `--pool=forks --fileParallelism=false`, and coverage thresholds |
+| Delete-only push | metadata-only dispatcher path | `design:metrics` and `design:burndown`, each once through the pinned npm wrapper; content verification and console dependency prerequisites are skipped |
+
+Before branch or release verification starts, the dispatcher checks that the
+installed console package exposes executable `eslint`, `tsc`, and `vite`
+entrypoints, then uses the pinned npm wrapper to validate the complete installed
+package graph in offline, lifecycle-script-disabled mode. A missing or invalid
+package, plugin, or transitive dependency fails before the expensive composite
+with the remediation `npm ci --prefix console`. Child output is suppressed so
+the diagnostic stays bounded and cannot echo package-manager configuration.
+Delete-only pushes bypass this prerequisite so the file-based metadata checks
+remain runnable without console dependencies. Branch and release composites
+already include those metadata checks through `verify:console-design`; the hook
+does not repeat them.
 
 The "ring/boundary/service/config guards" phrasing above folds in several named
 guards that `verify:push:branch` runs. Spelled out:
@@ -55,7 +88,7 @@ guards that `verify:push:branch` runs. Spelled out:
 | Instance config integrity | `npm run guard:instance-config` | Verify instance `config.json` files for memory-config integrity (non-empty `memory.pinecone.expectedHostSuffix`, no UUID-shaped `projectId` host trap) and per-host health-port map integrity. | yes |
 | Fail-closed gate | `npm run guard:fail-closed-gate` | Reject fail-open shell gate shapes: a probe that substitutes a sentinel on failure (`\|\| echo "000"`, `\|\| true`) then gates only on success, and the `grep -c ... \|\| echo 0` double-zero shape. | yes |
 | Fleet bot-hardening parity | `npm run guard:fleet-bot-hardening-parity` | Verify the redacted fleet bot-hardening parity manifest and its source anchors stay aligned with the A–D provider-resilience standard. | yes |
-| ARC binding drift | `npm run guard:arc-binding-drift` | Verify the tracked `.arc/` shim. Always-on vendored-pin check (`.arc/.canonical-sha` vs the payload sha in `arc.toml`/`ARC_BINDING.md`) hard-blocks a stale `.arc/` even in CI without the sibling repo; when the sibling agent-runtime-protocol is reachable (via `ARC_REPO_DIR`), additionally runs the full byte-for-byte adopt-generator comparison and cross-checks the pin against the live sha. | no (pre-push only) |
+| ARC binding drift | `npm run guard:arc-binding-drift` | Verify the tracked `.arc/` shim. Always-on vendored-pin check (`.arc/.canonical-sha` vs the payload sha in `arc.toml`/`ARC_BINDING.md`) hard-blocks a stale `.arc/` even in CI without the sibling repo; when the sibling agent-runtime-protocol is reachable (via `ARC_REPO_DIR`), additionally runs the full byte-for-byte adopt-generator comparison and cross-checks the pin against the live sha. | yes |
 | Guard test coverage (meta-guard) | `npm run guard:guard-test-coverage` | Meta-guard: every guard-family script (`scripts/*guard*.ts`, `scripts/check-*.ts`) must ship a companion test wired into `verify:push:branch`, or carry a `// meta-guard:no-test <reason>` opt-out. | no (pre-push only) |
 
 ### Regenerating the ARC binding shim (`.arc/`)
