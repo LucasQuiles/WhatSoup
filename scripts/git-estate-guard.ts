@@ -196,11 +196,13 @@ interface BaselineReceipt {
  * `estate_count_growth` is advisory because the ratchet is repo-global while the
  * repo is worked by several agents at once. Measured 2026-07-26: this guard
  * blocked a push whose entire recorded growth — 5 of 5 new worktrees and 6 of 8
- * new branches — belonged to a *different* agent working the same repo. The
- * pushing agent had no legitimate remedy: growth is an ID SET DIFFERENCE against
- * the baseline, so retiring unrelated work cannot offset it (deleting 27
- * branches, 77 -> 67, moved countGrowth by zero). A gate one agent cannot clear
- * by any correct action is a deadlock, not a guard.
+ * new branches — belonged to a *different* agent working the same repo. Growth
+ * is an ID SET DIFFERENCE against the baseline, so retiring unrelated work
+ * cannot offset it (deleting 27 branches, 77 -> 67, moved countGrowth by zero).
+ * The pushing agent's only remedy was a global accept-all (`baseline write`),
+ * which simultaneously launders every co-agent's conflicts, stashes, locks,
+ * and gone branches into the new floor. A gate whose sole remedy is to disarm
+ * the gate is not a gate.
  *
  * Integrity reasons stay blocking: a corrupt baseline, an incomplete or racing
  * scan, new conflicts, and new critical housekeeping debt all describe a repo

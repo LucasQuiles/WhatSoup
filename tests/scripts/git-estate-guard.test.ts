@@ -1022,6 +1022,7 @@ describe('git-estate guard', () => {
 
   it('keeps the same incomplete status advisory in pre-commit and blocking in pre-push', () => {
     const { root, repo } = initRepo();
+    expect(run(repo, ['baseline', 'write', '--json']).status).toBe(0);
     const env = statusOutputEnvironment(
       root,
       `  printf '\\043 branch.oid ${'a'.repeat(40)}\\000'`,

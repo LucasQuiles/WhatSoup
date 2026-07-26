@@ -52,15 +52,16 @@ Pre-push routes through `scripts/pre-push-guard.ts`. Before classifying any ref
 update—including delete-only pushes—it requires a complete Git-estate scan and
 compares it with the machine-local baseline under the repository's common Git
 directory. It blocks newly introduced conflict instances, prunable/detached/
-locked worktrees, stashes, gone-upstream branches, and new registered worktree or
-local-branch identities. The current invoking worktree identity and its
-checked-out branch identity are evaluated independently: whichever identity is
-new is exempted only when that exact branch appears in a non-delete pre-push ref
-update. A baselined branch may therefore acquire its expected new worktree, and a
-baselined worktree may push its expected new branch, without requiring both
-identities to be new together. Every other new identity—including an earlier
-unaccepted lane during sequential lane creation—and count-neutral replacement
-churn remains blocking.
+locked worktrees, stashes, gone-upstream branches, and new critical housekeeping
+debt. New registered worktree or local-branch identities are reported as
+**advisory only** and never block, in either phase — the current invoking
+worktree identity and its checked-out branch identity are still evaluated
+independently and exempted only when that exact branch appears in a non-delete
+pre-push ref update, so the reported growth reflects only genuinely new
+identities, but even unexempted growth no longer blocks. The ratchet is
+repo-global while several agents work the repo concurrently, so growth is
+routinely caused by an agent other than the pusher, who cannot clear it: growth
+is an ID set difference, and retiring unrelated work does not offset it.
 
 Pre-push ref updates accept object IDs at exactly the 40-character SHA-1 or
 64-character SHA-256 width. Intermediate widths are malformed, and an all-zero
@@ -110,7 +111,7 @@ guards that `verify:push:branch` runs. Spelled out:
 
 | Guard | Command | Purpose | Also in CI (`quality.yml`)? |
 |---|---|---|---|
-| Git estate awareness | `npm run guard:git-estate -- guard --phase pre-push` | Snapshot all linked worktrees twice plus branch/upstream state, stash object identity, and conflict-instance identity; fail closed on malformed porcelain, timeouts, incomplete/racing scans, invalid v2 local baselines, new critical housekeeping debt, or new worktree/branch identities after independently exempting whichever invoking-lane identity is new for the exact pushed branch; prior unaccepted lanes remain blocking. | no (local estate only) |
+| Git estate awareness | `npm run guard:git-estate -- guard --phase pre-push` | Snapshot all linked worktrees twice plus branch/upstream state, stash object identity, and conflict-instance identity; fail closed on malformed porcelain, timeouts, incomplete/racing scans, invalid v2 local baselines, new conflicts, and new critical housekeeping debt; new worktree/branch identities are reported advisory-only and never block — the ratchet is repo-global while several agents work the repo concurrently, so growth is routinely caused by an agent other than the pusher, who cannot clear it (growth is an ID set difference; retiring unrelated work does not offset it). | no (local estate only) |
 | Service unit validity | `npm run guard:service-units` | Validate launchd plists / systemd units (label == filename stem, no bare/`env` node, no unexpanded `${VAR}`, node-pin match, absolute well-formed paths, valid plist structure). | yes |
 | Instance config integrity | `npm run guard:instance-config` | Verify instance `config.json` files for memory-config integrity (non-empty `memory.pinecone.expectedHostSuffix`, no UUID-shaped `projectId` host trap) and per-host health-port map integrity. | yes |
 | Fail-closed gate | `npm run guard:fail-closed-gate` | Reject fail-open shell gate shapes: a probe that substitutes a sentinel on failure (`\|\| echo "000"`, `\|\| true`) then gates only on success, and the `grep -c ... \|\| echo 0` double-zero shape. | yes |

@@ -118,6 +118,7 @@ const SCOPE_MAP: Record<string, ScopeEntry> = {
   'ring-boundary-ratchet': { class: 'probe-nonzero', reason: 'reads cwd ring config; "FAILED to run" ENOENT -> non-zero', probe: { via: 'cwd' } },
   'coverage-headroom': { class: 'probe-nonzero', reason: 'reads cwd coverage summary; ENOENT -> non-zero', probe: { via: 'cwd' } },
   'bot-errors-simulation-matrix': { class: 'probe-nonzero', reason: 'reads cwd simulation matrix; absent -> non-zero', probe: { via: 'cwd' } },
+  'branch-retirement': { class: 'probe-nonzero', reason: 'no live collector wired yet; predicate always refuses -> non-zero exit, no INCONCLUSIVE token', probe: { via: 'cwd' } },
 
   // ---- skip-diff-scoped: empty diff/index is legitimately nothing (not a whole-tree scan) ----
   'design-system-hygiene': { class: 'skip-diff-scoped', reason: 'scans STAGED files; empty index -> legitimately clean (exit 0), not vacuity' },
