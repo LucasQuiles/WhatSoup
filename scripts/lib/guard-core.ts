@@ -198,3 +198,8 @@ const documentationEmailRhs = /@(?:[A-Za-z0-9-]+\.)*(?:example\.(?:com|net|org)|
 export function isDocumentationEmailFixture(token: string): boolean {
   return documentationEmailRhs.test(token);
 }
+
+/** GitHub's fixed SSH transport principal is not a mailbox. */
+export function isGitHubSshTransportPrincipal(token: string): boolean {
+  return token === 'git@github.com';
+}
