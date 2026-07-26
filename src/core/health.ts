@@ -205,10 +205,74 @@ export const HEALTH_TURN_ERROR_CLASSES = new Set([
   'model-unavailable',
   'policy-block',
   'context-overflow',
-  'server-error', 'transient-network',   // W1-T6: were missing → last_turn_error_class nulled on /health
+  'server-error',
+  'transient-network',
   'unknown-terminal',
   'empty-output',
 ]);
+
+export type HealthDegradationCause =
+  | 'provider_fallback_active'
+  | 'fallback_chain_exhausted'
+  | 'fallback_entry_failures'
+  | 'primary_model_unusable'
+  | 'model_unusable'
+  | 'turn_capability_error'
+  | 'primary_model_evidence_stale'
+  | 'turn_capability_evidence_stale'
+  | 'auth_bond_degraded'
+  | 'transport_disconnected'
+  | 'enrichment_stale'
+  | 'enrichment_runtime_degraded'
+  | 'connection_churn'
+  | 'outbound_flood'
+  | 'event_loop_starved'
+  | 'durability_debt'
+  | 'schema_future'
+  | 'schema_not_ready'
+  | 'pending_polls_unreadable'
+  | 'agent_recent_crashes'
+  | 'agent_session_inactive'
+  | 'turn_finalization_degraded'
+  | 'turn_recovery_degraded'
+  | 'provider_execution_pressure'
+  | 'agent_runtime_degraded_unclassified'
+  | 'agent_runtime_unhealthy'
+  | 'unclassified';
+
+const HEALTH_DEGRADATION_CAUSE_PRESENCE: Readonly<Record<HealthDegradationCause, true>> = {
+  provider_fallback_active: true,
+  fallback_chain_exhausted: true,
+  fallback_entry_failures: true,
+  primary_model_unusable: true,
+  model_unusable: true,
+  turn_capability_error: true,
+  primary_model_evidence_stale: true,
+  turn_capability_evidence_stale: true,
+  auth_bond_degraded: true,
+  transport_disconnected: true,
+  enrichment_stale: true,
+  enrichment_runtime_degraded: true,
+  connection_churn: true,
+  outbound_flood: true,
+  event_loop_starved: true,
+  durability_debt: true,
+  schema_future: true,
+  schema_not_ready: true,
+  pending_polls_unreadable: true,
+  agent_recent_crashes: true,
+  agent_session_inactive: true,
+  turn_finalization_degraded: true,
+  turn_recovery_degraded: true,
+  provider_execution_pressure: true,
+  agent_runtime_degraded_unclassified: true,
+  agent_runtime_unhealthy: true,
+  unclassified: true,
+};
+
+export const HEALTH_DEGRADATION_CAUSES = Object.freeze(
+  Object.keys(HEALTH_DEGRADATION_CAUSE_PRESENCE),
+) as readonly HealthDegradationCause[];
 
 function latestSuccessfulOutboundSend(deps: HealthDeps): LatestSuccessfulOutboundSend {
   return safeDbQuery(
@@ -1462,8 +1526,8 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
         }
       }
 
-      const degradationCauses: string[] = [];
-      const addDegradationCause = (cause: string): void => {
+      const degradationCauses: HealthDegradationCause[] = [];
+      const addDegradationCause = (cause: HealthDegradationCause): void => {
         if (!degradationCauses.includes(cause)) degradationCauses.push(cause);
       };
       const fallbackWindowActive =

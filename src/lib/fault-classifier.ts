@@ -38,6 +38,7 @@ interface FaultTaxonomyRegistry {
     providerFailureKinds: FailureDomainRegistryEntry;
     turnCapabilityErrorClasses: FailureDomainRegistryEntry;
     healthTurnErrorClasses: FailureDomainRegistryEntry;
+    healthDegradationCauses: FailureDomainRegistryEntry;
     terminalAttemptFailureClasses: FailureDomainRegistryEntry;
     durableInboundFailureClasses: FailureDomainRegistryEntry;
     admissionRejectClasses: FailureDomainRegistryEntry;

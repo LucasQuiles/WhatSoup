@@ -5,6 +5,7 @@ import {
   INBOUND_FAILURE_CLASSES,
 } from '../../src/core/inbound-failure-class.ts';
 import {
+  HEALTH_DEGRADATION_CAUSES,
   HEALTH_TURN_ERROR_CLASSES,
 } from '../../src/core/health.ts';
 import { normalizeFinalizeTurnTerminalParams } from '../../src/core/turn-finalization-contract.ts';
@@ -51,6 +52,8 @@ describe('failure taxonomy cross-contract', () => {
       .toEqual(sorted(TURN_CAPABILITY_ERROR_CLASSES));
     expect(sorted(registry.failureDomains.healthTurnErrorClasses.values))
       .toEqual(sorted(HEALTH_TURN_ERROR_CLASSES));
+    expect(sorted(registry.failureDomains.healthDegradationCauses.values))
+      .toEqual(sorted(HEALTH_DEGRADATION_CAUSES));
     expect(sorted(registry.failureDomains.terminalAttemptFailureClasses.values))
       .toEqual(sorted(TERMINAL_ATTEMPT_FAILURE_CLASSES));
     expect(sorted(registry.failureDomains.durableInboundFailureClasses.values))

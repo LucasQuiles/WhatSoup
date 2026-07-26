@@ -95,6 +95,39 @@
       "owner": "src/core/health.ts",
       "test": "tests/core/failure-taxonomy-cross-contract.test.ts"
     },
+    "healthDegradationCauses": {
+      "values": [
+        "provider_fallback_active",
+        "fallback_chain_exhausted",
+        "fallback_entry_failures",
+        "primary_model_unusable",
+        "model_unusable",
+        "turn_capability_error",
+        "primary_model_evidence_stale",
+        "turn_capability_evidence_stale",
+        "auth_bond_degraded",
+        "transport_disconnected",
+        "enrichment_stale",
+        "enrichment_runtime_degraded",
+        "connection_churn",
+        "outbound_flood",
+        "event_loop_starved",
+        "durability_debt",
+        "schema_future",
+        "schema_not_ready",
+        "pending_polls_unreadable",
+        "agent_recent_crashes",
+        "agent_session_inactive",
+        "turn_finalization_degraded",
+        "turn_recovery_degraded",
+        "provider_execution_pressure",
+        "agent_runtime_degraded_unclassified",
+        "agent_runtime_unhealthy",
+        "unclassified"
+      ],
+      "owner": "src/core/health.ts",
+      "test": "tests/core/failure-taxonomy-cross-contract.test.ts"
+    },
     "terminalAttemptFailureClasses": {
       "values": [
         "usage-limit",
