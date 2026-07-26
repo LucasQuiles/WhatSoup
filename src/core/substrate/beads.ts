@@ -3,6 +3,40 @@ import type { DatabaseSync, SQLInputValue } from 'node:sqlite';
 import { nowUnixSec } from './time.ts';
 import { writeBeadEvent } from './events.ts';
 import type { BeadKind, BeadStatus, BeadRow, BeadEventRow, ActivityFeedRow } from './types.ts';
+import { createChildLogger } from '../../logger.ts';
+
+const log = createChildLogger('substrate.beads');
+
+/**
+ * Parse an opaque `metadata_json` cell, degrading to `{}` rather than throwing.
+ *
+ * #2290 M9: this was the only unguarded `JSON.parse` in `src/core/`. A corrupt
+ * or non-JSON cell threw a `SyntaxError` out of `updateBead` — a substrate
+ * WRITE path — so a single bad row made every later metadata update on that
+ * bead fail, and the throw escaped into whatever was driving the write.
+ *
+ * Shape follows `parseHealContext` (`core/heal.ts:380`): object-or-`{}`, never
+ * throws, and a non-object JSON value (array, string, number) is treated as
+ * absent because the merge below spreads it into a record.
+ *
+ * The warn is not decoration. Degrading to `{}` means the previous metadata is
+ * DISCARDED by the spread that follows, so a silent fallback would drop keys an
+ * operator may still care about. The value was already unreadable, but the loss
+ * should be visible.
+ */
+function parseMetadataJson(raw: string | null, beadId: number): Record<string, unknown> {
+  if (!raw) return {};
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      return parsed as Record<string, unknown>;
+    }
+    log.warn({ beadId }, 'bead metadata_json is not a JSON object; treating as empty');
+  } catch (err) {
+    log.warn({ beadId, err }, 'bead metadata_json is unparseable; treating as empty');
+  }
+  return {};
+}
 
 export interface CreateBeadArgs {
   kind: BeadKind; title: string; ownerJid: string;
@@ -191,11 +225,14 @@ export function updateBead(db: DatabaseSync, id: number, args: UpdateBeadArgs): 
     // metadata_json as an opaque bag; deep-merge semantics would couple
     // substrate to caller-specific nesting conventions and silently delay
     // schema-incompatibility discovery.
-    const merged = { ...JSON.parse(current.metadata_json), ...args.fields.metadata };
+    // Parsed once and reused: the previous code parsed the same cell twice, so
+    // a corrupt value threw from either site depending on which branch ran.
+    const previous = parseMetadataJson(current.metadata_json, id);
+    const merged = { ...previous, ...args.fields.metadata };
     const next = JSON.stringify(merged);
     if (next !== current.metadata_json) {
       sets.push('metadata_json = ?'); binds.push(next);
-      changed['metadata'] = { from: JSON.parse(current.metadata_json), to: merged };
+      changed['metadata'] = { from: previous, to: merged };
     }
   }
   if (sets.length === 1) return;

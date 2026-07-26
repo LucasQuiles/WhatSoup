@@ -15,6 +15,30 @@ describe('isE164Wire', () => {
     expect(isE164Wire('+01234567')).toBe(false);
     expect(isE164Wire('+1 (555) 010-0101')).toBe(false);
   });
+
+  it('uses one runtime matcher instance across core and every transport', async () => {
+    const modules = await Promise.all([
+      import('../../src/lib/phone.ts'),
+      import('../../src/core/transport-refs.ts'),
+      import('../../src/transport/twilio/types.ts'),
+      import('../../src/transport/signal/types.ts'),
+      import('../../src/transport/imessage/types.ts'),
+    ]);
+
+    for (const module of modules) {
+      expect('E164_RE' in module).toBe(true);
+    }
+
+    const matchers = modules.map((module) => module.E164_RE);
+    const canonical = matchers[0];
+    expect(canonical).toBeInstanceOf(RegExp);
+    for (const matcher of matchers) {
+      expect(matcher).toBe(canonical);
+      expect(matcher.test('+15550100101')).toBe(true);
+      expect(matcher.test('+01234567')).toBe(false);
+      expect(matcher.test('15550100101')).toBe(false);
+    }
+  });
 });
 
 describe('normalizePhone', () => {

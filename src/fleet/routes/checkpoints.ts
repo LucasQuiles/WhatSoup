@@ -127,16 +127,21 @@ export async function handleRestoreCheckpoint(
     return;
   }
 
+  // The UPDATE's own verdict, not the advisory read's. Zero matched rows means
+  // the SQL preconditions were NOT met at write time — the checkpoint changed
+  // under us during the stop window — and nothing was restored (#2292 L10).
+  let changedRows = 0;
   try {
     const db = new DatabaseSync(instance.dbPath);
     try {
-      db.prepare(`
+      const result = db.prepare(`
         UPDATE session_checkpoints
         SET session_status = 'suspended', updated_at = datetime('now')
         WHERE conversation_key = ?
           AND session_id IS NOT NULL
           AND session_status NOT IN ('active', 'suspended')
       `).run(conversationKey);
+      changedRows = Number(result.changes);
     } finally {
       db.close();
     }
@@ -163,6 +168,21 @@ export async function handleRestoreCheckpoint(
       instance: instance.name,
       conversationKey,
       instanceDown: true,
+    });
+    return;
+  }
+
+  // Reported only AFTER the restart above, so a no-op never leaves the instance
+  // down. The stop/start still happened — that is real disruption the operator
+  // needs to know about — but no checkpoint was made resumable, so this is not
+  // a 202. Previously this path returned 'restore_requested' and the operator
+  // had no way to tell a restore from a stop/start that changed nothing.
+  if (changedRows === 0) {
+    jsonResponse(res, 409, {
+      error: 'restore matched no checkpoint — it changed state during the restart window',
+      instance: instance.name,
+      conversationKey,
+      instanceRestarted: true,
     });
     return;
   }

@@ -111,6 +111,33 @@ describe('OpenCode parser — text branch', () => {
     expect(event).toEqual({ type: 'assistant_text', text: '' });
   });
 
+  it('ignores the exact synthetic auto-compaction continuation control', () => {
+    const p = createOpenCodeParser();
+    const event = p.parse(JSON.stringify({
+      type: 'text',
+      part: {
+        type: 'text',
+        synthetic: true,
+        metadata: { compaction_continue: true },
+        text: 'Continue if you have next steps.',
+      },
+    }));
+    expect(event).toEqual({ type: 'ignored' });
+  });
+
+  it('preserves synthetic text without the exact auto-compaction marker', () => {
+    const p = createOpenCodeParser();
+    const event = p.parse(JSON.stringify({
+      type: 'text',
+      part: {
+        synthetic: true,
+        metadata: { compaction_continue: false },
+        text: 'visible synthetic assistant text',
+      },
+    }));
+    expect(event).toEqual({ type: 'assistant_text', text: 'visible synthetic assistant text' });
+  });
+
   it('returns ignored when part is not a record', () => {
     const p = createOpenCodeParser();
     expect(p.parse(JSON.stringify({ type: 'text', part: 'oops' }))).toEqual({

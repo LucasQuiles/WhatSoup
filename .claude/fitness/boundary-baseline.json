@@ -1,35 +1,28 @@
 [
   {
     "file": "src/core/admin.ts",
-    "line": 13,
+    "line": 14,
     "specifier": "../runtimes/types.ts",
     "fromLayer": "core",
     "toLayer": "runtimes"
   },
   {
     "file": "src/core/agent-config-validator.ts",
-    "line": 19,
+    "line": 25,
     "specifier": "../runtimes/agent/providers/index.ts",
     "fromLayer": "core",
     "toLayer": "runtimes"
   },
   {
     "file": "src/core/agent-config-validator.ts",
-    "line": 24,
+    "line": 36,
     "specifier": "../transport/registry.ts",
     "fromLayer": "core",
     "toLayer": "transport"
   },
   {
-    "file": "src/core/agent-config-validator.ts",
-    "line": 26,
-    "specifier": "../transport/twilio/types.ts",
-    "fromLayer": "core",
-    "toLayer": "transport"
-  },
-  {
     "file": "src/core/health.ts",
-    "line": 36,
+    "line": 37,
     "specifier": "../runtimes/types.ts",
     "fromLayer": "core",
     "toLayer": "runtimes"
@@ -43,7 +36,7 @@
   },
   {
     "file": "src/core/health.ts",
-    "line": 37,
+    "line": 38,
     "specifier": "../transport/connection.ts",
     "fromLayer": "core",
     "toLayer": "transport"
@@ -134,7 +127,7 @@
   },
   {
     "file": "src/mcp/tools/media.ts",
-    "line": 461,
+    "line": 486,
     "specifier": "../../runtimes/chat/providers/whisper.ts",
     "fromLayer": "mcp",
     "toLayer": "runtimes"
@@ -148,7 +141,7 @@
   },
   {
     "file": "src/mcp/tools/messaging.ts",
-    "line": 35,
+    "line": 38,
     "specifier": "../../runtimes/agent/runtime.ts",
     "fromLayer": "mcp",
     "toLayer": "runtimes"
@@ -211,7 +204,7 @@
   },
   {
     "file": "src/transport/connection.ts",
-    "line": 28,
+    "line": 29,
     "specifier": "../fleet/time-utils.ts",
     "fromLayer": "transport",
     "toLayer": "fleet"

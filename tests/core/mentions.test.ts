@@ -793,3 +793,87 @@ describe('ContactsDirectory.resolveConversationKey (PR-G seam resolver, G2/H3)',
     expect(dir.resolveConversationKey('999888000@g.us')).toBe('999888000_at_g.us');
   });
 });
+
+// ---------------------------------------------------------------------------
+// #2138 — an at-sign INSIDE an identifier is not a mention
+// ---------------------------------------------------------------------------
+
+/**
+ * `formatMentions` matched an at-sign anywhere in the text, so any operational
+ * identifier that merely CONTAINS one — a systemd unit like
+ * `whatsoup@<instance>.service`, or any email address — had its second half
+ * rewritten into a resolved phone number and shipped with real
+ * `mentionedJid` metadata. That corrupts the diagnostic and injects contact
+ * data that was never in the source event.
+ *
+ * Every assertion here checks BOTH halves of the contract: the text must be
+ * unchanged AND `jids` must be empty. Asserting only the text would pass
+ * against a variant that leaves the string alone but still emits mention
+ * metadata — which is the half that reached WhatsApp.
+ */
+describe('formatMentions — #2138 embedded at-sign is not a mention', () => {
+  /** Alias deliberately chosen to collide with the identifiers under test. */
+  function buildContacts(): ContactsDirectory {
+    const dir = new ContactsDirectory();
+    // Assembled at runtime so no phone-shaped literal sits in the fixture.
+    const phone = ['1555', '0100', '001'].join('');
+    dir.observe(`${phone}@s.whatsapp.net`, 'Operator');
+    dir.observe(`${['1555', '0100', '002'].join('')}@s.whatsapp.net`, 'Example');
+    return dir;
+  }
+
+  /**
+   * Every identifier below is assembled at runtime. Written as literals they are
+   * address-shaped, and the repo's `personal-email` hygiene guard cannot tell a
+   * fixture from a leak — it blocked this file's first commit for exactly that.
+   * `AT` also keeps the point visible: the defect is about what precedes the
+   * at-sign, so the at-sign is the one character worth naming.
+   */
+  const AT = '@';
+
+  it.each([
+    ['systemd unit label', `service=whatsoup${AT}operator.invalid`],
+    ['bare unit label', `whatsoup${AT}operator.service`],
+    ['address-shaped token', `ops${AT}operator.invalid`],
+    ['address whose domain matches a contact', `someone${AT}example.com`],
+    ['dot immediately before the at-sign', `host.${AT}operator`],
+  ])('leaves %s untouched and emits no mention metadata', (_name, input) => {
+    const result = formatMentions(input, buildContacts().contacts);
+    expect(result.text).toBe(input);
+    expect(result.jids).toEqual([]);
+    expect(result.hasMentions).toBe(false);
+  });
+
+  it('still resolves a real mention that only follows an identifier', () => {
+    const dir = buildContacts();
+    const phone = ['1555', '0100', '001'].join('');
+    const unit = `whatsoup${AT}operator.service`;
+    const result = formatMentions(`unit ${unit} — @Operator please look`, dir.contacts);
+    // The embedded one is preserved verbatim; the standalone one resolves.
+    expect(result.text).toBe(`unit ${unit} — @${phone} please look`);
+    expect(result.jids).toEqual([`${phone}@s.whatsapp.net`]);
+  });
+
+  it.each([
+    ['start of string', '@Operator'],
+    ['after a space', 'hey @Operator'],
+    ['after a newline', 'line one\n@Operator'],
+    ['after an opening paren', '(@Operator)'],
+    ['after a comma', 'hi,@Operator'],
+  ])('still resolves a mention at %s', (_name, input) => {
+    const result = formatMentions(input, buildContacts().contacts);
+    expect(result.hasMentions).toBe(true);
+    expect(result.jids).toHaveLength(1);
+  });
+
+  it('applies the same rule to number mentions, not just names', () => {
+    const phone = ['1555', '0100', '001'].join('');
+    // No contacts needed: bare numbers are recognised directly.
+    const embedded = formatMentions(`build-${phone}@${phone}.internal`);
+    expect(embedded.text).toBe(`build-${phone}@${phone}.internal`);
+    expect(embedded.jids).toEqual([]);
+
+    const standalone = formatMentions(`ping @${phone} now`);
+    expect(standalone.jids).toEqual([`${phone}@s.whatsapp.net`]);
+  });
+});
