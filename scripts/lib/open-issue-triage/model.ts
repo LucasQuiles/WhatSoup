@@ -43,6 +43,7 @@ export const LIVE_LABELS = [
   'SOC',
   'portability',
   'linux',
+  'deploy',
 ] as const;
 
 export const ADDABLE_LABELS = [
@@ -71,6 +72,7 @@ export const ADDABLE_LABELS = [
   'dead-code',
   'duplicate',
   'invalid',
+  'deploy',
 ] as const;
 
 export type IssueClassification =
@@ -229,8 +231,8 @@ const pullRequestOverlapSchema = z.object({
   updated_at: timestampSchema,
   disposition: z.enum(['open', 'merged', 'closed-unmerged']),
   is_draft: z.boolean(),
-  head_ref: gitRefSchema,
-  base_ref: gitRefSchema,
+  head_ref: gitRefSchema.nullable(),
+  base_ref: gitRefSchema.nullable(),
   matched_by: matchedBySchema,
   overlapping_paths: pathListSchema,
   assessment: z.enum(['owns', 'partial', 'collision-only', 'historical-attempt']),
@@ -241,6 +243,15 @@ const pullRequestOverlapSchema = z.object({
       path: ['url'],
       message: 'pull request URL must match overlap number exactly',
     });
+  }
+  for (const field of ['head_ref', 'base_ref'] as const) {
+    if (overlap[field] === 'redacted/private-ref') {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: [field],
+        message: 'privacy-withheld pull request refs must be represented as null',
+      });
+    }
   }
 });
 

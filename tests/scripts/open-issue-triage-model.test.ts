@@ -273,20 +273,20 @@ describe('open issue registry schema', () => {
   });
 
   it('pins the exact live and addable label catalogues', () => {
-    expect(LIVE_LABELS).toHaveLength(36);
+    expect(LIVE_LABELS).toHaveLength(37);
     expect(LIVE_LABELS).toEqual([
       'bug', 'documentation', 'duplicate', 'enhancement', 'good first issue', 'help wanted',
       'invalid', 'question', 'wontfix', 'reliability', 'ops', 'P0', 'transport', 'alerts',
       'launchd', 'dependencies', 'javascript', 'audit', 'security', 'accessibility', 'console',
       'chat', 'config', 'media', 'scheduler', 'mcp', 'fleet', 'refactor', 'DRY', 'SSOT',
-      'tech-debt', 'type-safety', 'dead-code', 'SOC', 'portability', 'linux',
+      'tech-debt', 'type-safety', 'dead-code', 'SOC', 'portability', 'linux', 'deploy',
     ]);
-    expect(ADDABLE_LABELS).toHaveLength(25);
+    expect(ADDABLE_LABELS).toHaveLength(26);
     expect(ADDABLE_LABELS).toEqual([
       'bug', 'enhancement', 'refactor', 'documentation', 'alerts', 'chat', 'config', 'console',
       'fleet', 'mcp', 'ops', 'scheduler', 'transport', 'audit', 'reliability', 'security',
       'portability', 'tech-debt', 'type-safety', 'DRY', 'SOC', 'SSOT', 'dead-code',
-      'duplicate', 'invalid',
+      'duplicate', 'invalid', 'deploy',
     ]);
   });
 
@@ -305,6 +305,23 @@ describe('open issue registry schema', () => {
     const numberOnly = cloneRegistry();
     numberOnly.issues[0].pull_request_overlaps = [88];
     expect(() => parseRegistry(numberOnly)).toThrow();
+  });
+
+  it('represents privacy-withheld pull request refs as null, never as fake refs', () => {
+    const withheld = cloneRegistry();
+    withheld.issues[0].pull_request_overlaps = [{
+      ...overlap,
+      head_ref: null,
+      base_ref: null,
+    }];
+    expect(parseRegistry(withheld)).toEqual(withheld);
+
+    const ambiguousPlaceholder = cloneRegistry();
+    ambiguousPlaceholder.issues[0].pull_request_overlaps = [{
+      ...overlap,
+      head_ref: 'redacted/private-ref',
+    }];
+    expect(() => parseRegistry(ambiguousPlaceholder)).toThrow(/withheld.*null/i);
   });
 
   it('rejects malformed, unsorted, and duplicate pull request overlap evidence', () => {

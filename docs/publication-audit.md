@@ -4,15 +4,15 @@
 
 Internal publication roots covered by the guard: `docs/runbooks/`, `docs/sdlc/`, `docs/superpowers/`, `docs/plans/`, `docs/cutover/`, `docs/research/`, `docs/triage/`, `docs/specs/` (selected), `docs/work-index*`, `docs/current-program.md`, `docs/handoff-*.md`, `HANDOFF-*.md`, `docs/project-status-*.md`, `docs/audit-*.md`, `tmp/`.
 
-**Total classification rows:** 126
+**Total classification rows:** 129
 
 | Classification | Count |
 |---|---:|
-| PUBLIC | 3 |
+| PUBLIC | 6 |
 | PRIVATE-ARCHIVE | 123 |
 | SANITIZE | 0 |
 | DELETE | 0 |
-| Total | 126 |
+| Total | 129 |
 
 | Path | Classification | Rationale |
 |---|---|---|
@@ -137,7 +137,10 @@ Internal publication roots covered by the guard: `docs/runbooks/`, `docs/sdlc/`,
 | `docs/superpowers/specs/provider-event-lifecycle/requirements.md` | PRIVATE-ARCHIVE | Internal protocol requirements; retained in the repository but excluded from public publication by default. |
 | `docs/superpowers/specs/provider-event-lifecycle/tasks.md` | PRIVATE-ARCHIVE | Internal implementation plan; retained in the repository but excluded from public publication by default. |
 | `docs/triage/README.md` | PUBLIC | Sanitized operator contract for deterministic issue evidence, dry-run, confirmation, and recovery; complete issue bodies and private runtime identifiers are forbidden. |
+| `docs/triage/open-issue-registry.json` | PUBLIC | Canonical body-free open-issue evidence registry containing public issue metadata, repository-relative evidence paths, hashes, dependency analysis, and remediation guidance. |
+| `docs/triage/open-issue-registry.md` | PUBLIC | Deterministically generated human-readable projection of the canonical body-free open-issue evidence registry. |
 | `docs/triage/open-issue-review-ledger.jsonl` | PUBLIC | Body-free append-only mutation receipts containing only public issue metadata, repository-relative paths, hashes, and sanitized diagnostics. |
+| `docs/triage/snapshots/open-issues-20260726T220717Z.json` | PUBLIC | Body-free bounded live-inventory seal recording issue, pull-request, label, pagination, and main-revision facts immediately after the registry cutoff. |
 | `docs/work-index-repair-matrix.md` | PRIVATE-ARCHIVE | Internal planning or operational documentation; retained in the repository but excluded from public publication by default. |
 | `docs/work-index.json` | PRIVATE-ARCHIVE | Internal planning or operational documentation; retained in the repository but excluded from public publication by default. |
 | `docs/work-index.md` | PRIVATE-ARCHIVE | Internal planning or operational documentation; retained in the repository but excluded from public publication by default. |
