@@ -140,7 +140,7 @@ Internal publication roots covered by the guard: `docs/runbooks/`, `docs/sdlc/`,
 | `docs/triage/open-issue-registry.json` | PUBLIC | Canonical body-free open-issue evidence registry containing public issue metadata, repository-relative evidence paths, hashes, dependency analysis, and remediation guidance. |
 | `docs/triage/open-issue-registry.md` | PUBLIC | Deterministically generated human-readable projection of the canonical body-free open-issue evidence registry. |
 | `docs/triage/open-issue-review-ledger.jsonl` | PUBLIC | Body-free append-only mutation receipts containing only public issue metadata, repository-relative paths, hashes, and sanitized diagnostics. |
-| `docs/triage/snapshots/open-issues-20260726T220717Z.json` | PUBLIC | Body-free bounded live-inventory seal recording issue, pull-request, label, pagination, and main-revision facts immediately after the registry cutoff. |
+| `docs/triage/snapshots/open-issues-20260726T224049Z.json` | PUBLIC | Body-free bounded live-inventory seal recording issue, pull-request, label, pagination, and main-revision facts immediately after the registry cutoff. |
 | `docs/work-index-repair-matrix.md` | PRIVATE-ARCHIVE | Internal planning or operational documentation; retained in the repository but excluded from public publication by default. |
 | `docs/work-index.json` | PRIVATE-ARCHIVE | Internal planning or operational documentation; retained in the repository but excluded from public publication by default. |
 | `docs/work-index.md` | PRIVATE-ARCHIVE | Internal planning or operational documentation; retained in the repository but excluded from public publication by default. |

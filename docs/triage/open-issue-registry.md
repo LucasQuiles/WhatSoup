@@ -3,9 +3,9 @@
 > Generated from `docs/triage/open-issue-registry.json`. Do not edit this view by hand.
 
 - Pinned main revision: `a91f5301266fae2049cd1ae1b3c1b236a7ea2aa8`
-- Captured at: 2026-07-26T22:07:17Z
-- Open issues: 214
-- Registry SHA-256: `224fd3a4976fc4fdbf11be9be006b9644e25a21676262853a251295d912fb4f6`
+- Captured at: 2026-07-26T22:40:49Z
+- Open issues: 217
+- Registry SHA-256: `e29f910de91e8ab40711e22b960925ab7ff8a63bf8eec3e30b6a478eba57ad08`
 
 ## #1786: Durable auth-loss rows are written but never imported or resolved after recovery
 
@@ -4500,3 +4500,66 @@ Add one bounded GitHub closing-directive parser with file/stdin and explicit com
 ### Impact and blast radius
 
 A grammatically negative disclaimer can silently become an issue-closing instruction when a pull request reaches the default branch, so a merge that passes every source and test gate can mutate unrelated planning state and falsely report broader work complete. Open-issue lifecycle integrity, pull-request descriptions, candidate commit bodies, stacked-branch retargeting, merge-queue and default-branch CI, pre-push and release gates, issue registries and ledgers, implementation scheduling, audit evidence, and any automation that trusts open or closed issue state.
+
+## #2513: reliability(logging): configured rolling-file sink can silently disappear or crash the process without health
+
+- Classification: `leaf`
+- Evidence state: `verified`
+- Confidence: `high`
+- Current labels: None
+- Recommended labels: `audit`, `bug`, `reliability`
+- Dependencies: None
+
+### Evidence
+
+Two identical live captures established the issue identity, body hash, zero-label state, and timestamp. On pinned main, the logger swallows synchronous transport-construction failure into stdout-only operation, retains no ready/error/unexpected-close lifecycle owner, and lets a fixed timeout resolve flushLogger() without distinguishing confirmed close from timeout. Fleet log readers map a missing log directory or file to an empty result, BOT ERRORS only exposes a path hint, and top-level health has no logger-sink state. The write-free focused logger suite passed 28/28, including the silent synchronous fallback and success-shaped timeout behavior. Fully paginated file and closing-reference inventories for all 39 current open pull requests found 13 coordination collisions or references, but no open implementation owner for src/logger.ts or its focused tests; two merged logger test/serializer changes are historical attempts only.
+
+### Suggested remediation
+
+Give the rolling-file transport one explicit lifecycle owner with bounded disabled, starting, active, degraded, failed, closing, and closed states. Capture synchronous construction failure and asynchronous worker ready/error/unexpected-close events, publish one non-recursive bounded startup/stderr receipt plus the same state through health, and make startup policy explicit. Return a typed flush result for no sink, confirmed close, transport failure, and timeout/inconclusive. Pass qualified sink state to fleet log, feed, data, and BOT ERRORS consumers so empty, disabled, failed, unreadable, and stale evidence remain distinct. Coordinate the shared logger-options seam with #2164 without combining availability and metadata-sanitization review.
+
+### Impact and blast radius
+
+A configured secondary sink can disappear while health remains green, leaving operators and consumers unable to distinguish legitimate empty evidence from a logger failure. An asynchronous worker failure can instead terminate the observed service, while shutdown can report completion after an unconfirmed flush. The direct boundary is TypeScript logger construction, worker lifecycle, and shutdown. Downstream effects include top-level health, fleet feed and log-data routes, BOT ERRORS evidence hints, startup admission, and any operator workflow that treats rolling files as durable diagnostics; stdout/journal logging must remain available without making sink failure recursive.
+
+## #2514: health: database probe failures are published as measured zeros and inconsistent readiness causes
+
+- Classification: `leaf`
+- Evidence state: `verified`
+- Confidence: `high`
+- Current labels: None
+- Recommended labels: `SSOT`, `audit`, `bug`, `reliability`
+- Dependencies: #2447
+
+### Evidence
+
+At the pinned revision, safeDbQuery catches every exception and returns a caller-selected fallback. The health producer uses zero for message count, pending access-list count, SQLite schema cookie, migration maximum, and past-due triggers, and null timestamps or identifiers for latest successful send; only pending polls carry an explicit readability bit. The existing focused health tests require both a dropped messages table and a successfully queried empty table to return HTTP 200 with messages_total=0. A content-free write-free canary reproduced the helper's failed and successful-empty branches as indistinguishable zero values. The pending WS-B01 plan and work index were read directly: they specify typed observations, nullable failed values, probe metadata, criticality, database-free instance liveness, and negative tests, while current source has not implemented HealthDbProbe or an instance /live route.
+
+### Suggested remediation
+
+Implement the pending WS-B01 health-observation tasks: replace fallback-valued database reads with typed results, publish null plus bounded availability metadata on failure, declare per-probe readiness criticality, add a database-free instance /live route, classify migration unavailability separately from readable schema drift, link the probe namespace to issue #2447, and add positive, negative, recovery, consumer-coverage, mutation, and privacy tests. Preserve the separate fleet /livez meaning and coordinate independently with issue #2513.
+
+### Impact and blast radius
+
+Operators, self-healing logic, and fleet consumers can treat unavailable database observations as measured emptiness, aggregate false zeros, erase prior-send uncertainty, or direct remediation toward schema drift when storage availability was never established. Instance health readiness and its SQLite-derived message, access-list, outbound-send, schema, migration, pending-poll, and past-due-trigger observations; fleet aggregation and self-healing consumers; instance-process liveness separation; and health-probe logging. No live database, instance, service, transport, or message state was inspected or mutated.
+
+## #2515: security(health): split public liveness from privileged diagnostic metadata
+
+- Classification: `leaf`
+- Evidence state: `verified`
+- Confidence: `high`
+- Current labels: None
+- Recommended labels: `audit`, `bug`, `reliability`, `security`
+- Dependencies: None
+
+### Evidence
+
+Two identical GraphQL reads established the live issue identity, title, body hash, empty label set, and timestamp, while both the local SSH tracking ref and the remote SSH main ref remained at the pinned revision. At that revision, the existing bearer helper is invoked by protected routes, but the GET /health route reaches its serializer without calling it. The serializer emits instance identity and mode, socket location, provider, full revision, branch, process identifier, runtime fallback state, generic and legacy transport identity, a formatted auth-bond object containing paths and hashes, and the full credential-lifecycle object. The bind guard defaults to loopback but explicitly returns successfully for a non-loopback address when its unsafe override is set, without changing the health route's authorization or projection. A write-free deterministic source probe confirmed all of those predicates, and pinned test source issues unauthenticated GET /health requests while asserting raw instance, location, auth-bond, and lifecycle fields. The current fleet poller, daily-health probe, heartbeat watchdog, rendered watchdog, cutover path, and operator documentation consume the detailed health shape. A fully paginated all-state scan covered 512 issues in six pages: closed #385 documents mutation-route token scope, closed #389 protects the separate typing-presence route, #2514 owns database-observation truth, and the remaining health issues do not own this authorization and projection boundary. A fully paginated scan of all 39 current open pull requests covered one pull-request page and 43 changed-file pages, including four continuation pages; it found no direct #2515 reference or implementation owner and 23 collision-only path overlaps. Merged PRs #387, #395, and #1686 are narrower historical partials for documentation, typing-route authentication, and remote-bind reachability respectively. No production response, identity, location, credential evidence, topology value, service, process, queue, or message surface was read or mutated.
+
+### Suggested remediation
+
+Define three independently versioned, closed health projections: a minimal unauthenticated liveness envelope, a bounded readiness envelope with an explicit visibility policy, and a bearer-protected privileged diagnostic envelope. Build each response from a projection-specific allowlist rather than spreading the current diagnostic object and reject unknown fields at the boundary. Preserve detailed forensics in private bounded artifacts, require TLS plus authentication for remote diagnostic access, and migrate fleet, daily-health, watchdog, deploy, restart, cutover, console, and documentation consumers through an explicit versioned compatibility window that cannot silently weaken authorization.
+
+### Impact and blast radius
+
+Any caller that can reach the instance health port receives substantially more process, runtime, transport, identity, filesystem, credential-lifecycle, and error-derived context than is necessary to prove liveness or readiness. Loopback defaults reduce reachability but do not supply application authorization, and the supported remote-bind override can expand exposure without changing the unauthenticated payload. This also forces lightweight monitors to transport and parse privileged, unstable data and makes safe central aggregation and schema evolution harder. Instance health HTTP authorization and response bytes; remote-bind exposure; fleet, daily-health, watchdog, deploy, restart, cutover, console, and operator consumers; schema-version compatibility; outage routing and restart decisions; public-surface documentation; diagnostic retention; and any collector that currently receives the complete unauthenticated health document.
