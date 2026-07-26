@@ -132,6 +132,48 @@ describe('beads core', () => {
     expect(stored.body).toMatch(/\.\.\.\[truncated\]$/);
   });
 
+  // #2290 M9: metadata_json was the sole unguarded JSON.parse in src/core/. A
+  // corrupt cell threw a SyntaxError out of updateBead -- a WRITE path -- so one
+  // bad row permanently broke every later metadata update on that bead.
+
+  it('updateBead survives a corrupt metadata_json cell instead of throwing', () => {
+    const bead = createBead(db.raw, { kind: 'task', title: 'corrupt-meta', ownerJid: 'u', actor: 'inline' });
+    db.raw.prepare('UPDATE beads SET metadata_json = ? WHERE id = ?').run('{not json', bead.id);
+
+    expect(() =>
+      updateBead(db.raw, bead.id, { fields: { metadata: { fresh: 1 } }, actor: 'inline' }),
+    ).not.toThrow();
+
+    const row = db.raw.prepare('SELECT metadata_json FROM beads WHERE id = ?').get(bead.id) as { metadata_json: string };
+    expect(JSON.parse(row.metadata_json)).toEqual({ fresh: 1 });
+  });
+
+  it('updateBead treats a non-object metadata_json as empty rather than spreading it', () => {
+    // JSON.parse succeeds here, so a try/catch alone would not catch it: an
+    // array or scalar spread into a record yields index keys or nothing.
+    const bead = createBead(db.raw, { kind: 'task', title: 'array-meta', ownerJid: 'u', actor: 'inline' });
+    db.raw.prepare('UPDATE beads SET metadata_json = ? WHERE id = ?').run('[1,2,3]', bead.id);
+
+    updateBead(db.raw, bead.id, { fields: { metadata: { fresh: 1 } }, actor: 'inline' });
+
+    const row = db.raw.prepare('SELECT metadata_json FROM beads WHERE id = ?').get(bead.id) as { metadata_json: string };
+    expect(JSON.parse(row.metadata_json)).toEqual({ fresh: 1 });
+  });
+
+  it('updateBead still merges normally when metadata_json is valid', () => {
+    // The accept side: a guard that degraded everything to {} would pass both
+    // tests above while silently discarding good metadata on every update.
+    const bead = createBead(db.raw, {
+      kind: 'task', title: 'good-meta', ownerJid: 'u', actor: 'inline',
+      metadata: { keep: 'yes', replace: 'old' },
+    });
+
+    updateBead(db.raw, bead.id, { fields: { metadata: { replace: 'new' } }, actor: 'inline' });
+
+    const row = db.raw.prepare('SELECT metadata_json FROM beads WHERE id = ?').get(bead.id) as { metadata_json: string };
+    expect(JSON.parse(row.metadata_json)).toEqual({ keep: 'yes', replace: 'new' });
+  });
+
   it('updateBead metadata merge is shallow by contract', () => {
     // The metadata field is an opaque bag; top-level keys are REPLACED
     // wholesale on update, not deep-merged. Callers needing to preserve
