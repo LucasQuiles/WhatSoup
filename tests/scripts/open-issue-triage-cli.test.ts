@@ -281,6 +281,15 @@ describe('open issue triage CLI', () => {
       '--registry',
       'docs/triage/open-issue-registry.json',
     ])).toThrow(/check|write/i);
+    expect(() => parseArgs([
+      'snapshot',
+      '--registry',
+      'docs/triage/open-issue-registry.json',
+      '--output',
+      'docs/triage/snapshots/example.json',
+      '--limit',
+      '-1',
+    ])).toThrow(/positive integer/i);
   });
 
   it('discovers compact schemas fully offline with TTY-independent JSON and effects', async () => {

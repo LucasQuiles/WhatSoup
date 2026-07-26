@@ -20,6 +20,7 @@ import {
   releaseProcessLock,
   type ProcessLockHandle,
 } from '../../../src/lib/process-lock.ts';
+import { isRecord } from '../../../src/lib/type-guards.ts';
 import { mergeReviewBlock, renderReviewBlock } from './body.ts';
 import type {
   GitHubIssueClient,
@@ -163,10 +164,6 @@ function planDigest(plans: readonly IssueMutationPlan[]): string {
   return sha256(canonicalJson(
     plans.map(({ plan_sha256: _planSha256, ...plan }) => plan),
   ));
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
 
 function assertExactKeys(
