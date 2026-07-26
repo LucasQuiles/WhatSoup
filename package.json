@@ -51,6 +51,7 @@
     "guard:source-runtime-drift": "bash scripts/run-with-pinned-node.sh scripts/source-runtime-drift-check.ts",
     "guard:arc-binding-drift": "bash scripts/run-with-pinned-node.sh scripts/arc-binding-drift-check.ts",
     "guard:branch-protection-drift": "gh api repos/LucasQuiles/WhatSoup/branches/main/protection | bash scripts/run-with-pinned-node.sh scripts/branch-protection-drift-check.ts --observed -",
+    "guard:branch-retirement": "bash scripts/run-with-pinned-node.sh scripts/branch-retirement.ts",
     "guard:fleet-bot-hardening-parity": "bash scripts/run-with-pinned-node.sh scripts/check-fleet-bot-hardening-parity.ts",
     "guard:bot-errors-runtime-manifest": "bash scripts/run-with-pinned-node.sh scripts/check-bot-errors-runtime-manifest.ts",
     "guard:bot-errors-critical-surface": "bash scripts/run-with-pinned-node.sh scripts/bot-errors-critical-surface-audit.ts",
