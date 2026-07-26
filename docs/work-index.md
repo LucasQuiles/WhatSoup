@@ -18,15 +18,15 @@ The **Inconsistencies** section lists missing or stale index entries compared wi
 scoped markdown files currently on disk.
 
 **Repo:** `WhatSoup`
-**Total entries:** 77
+**Total entries:** 78
 
 ## Totals
 
 | Dimension | Breakdown |
 |---|---|
-| Kind | handoff=7, plan=38, review=4, spec=27, state=1 |
-| Status | active=14, closed=4, completed=33, deferred=7, pending=14, unknown=5 |
-| Status source | body-marker=73, fallback=3, state-md-status=1 |
+| Kind | handoff=7, plan=38, review=4, spec=28, state=1 |
+| Status | active=15, closed=4, completed=33, deferred=7, pending=14, unknown=5 |
+| Status source | body-marker=74, fallback=3, state-md-status=1 |
 
 ## Inconsistencies
 
@@ -34,7 +34,7 @@ scoped markdown files currently on disk.
 
 ## Synthesis
 
-### Active (14)
+### Active (15)
 
 | Path | Kind | Topic | Status source |
 |------|------|-------|---------------|
@@ -47,6 +47,7 @@ scoped markdown files currently on disk.
 | `docs/superpowers/specs/2026-07-15-semantic-boundary-hygiene-design.md` | spec | semantic-boundary-hygiene-design | body-marker |
 | `docs/superpowers/specs/2026-07-17-boundary-exit-parser-codeql-hardening-design.md` | spec | boundary-exit-parser-codeql-hardening-design | body-marker |
 | `docs/superpowers/specs/2026-07-17-boundary-validator-ci-refactor-design.md` | spec | boundary-validator-ci-refactor-design | body-marker |
+| `docs/superpowers/specs/2026-07-26-open-issue-triage-and-cohort-pr-design.md` | spec | open-issue-triage-and-cohort-pr-design | body-marker |
 | `docs/superpowers/specs/kill-session-transactional-cancellation/design.md` | spec | design | body-marker |
 | `docs/superpowers/specs/kill-session-transactional-cancellation/requirements.md` | spec | requirements | body-marker |
 | `docs/superpowers/specs/provider-event-lifecycle/design.md` | spec | design | body-marker |
@@ -167,7 +168,7 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 | `docs/superpowers/reviews/2026-07-09-wall-to-wall-audit-pr-briefs.md` | review | completed | body-marker | wall-to-wall-audit-pr-briefs | 2026-07-10 |  |
 | `docs/superpowers/reviews/2026-07-24-r13-r15-tech-debt-review-map.md` | review | completed | body-marker | r13-r15-tech-debt-review-map | 2026-07-24 |  |
 
-### docs/superpowers/specs  _(21 entries)_
+### docs/superpowers/specs  _(22 entries)_
 
 | Path | Kind | Status | Source | Topic | Last Mod | Supersedes |
 |------|------|--------|--------|-------|----------|------------|
@@ -192,6 +193,7 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 | `docs/superpowers/specs/2026-07-17-boundary-exit-parser-codeql-hardening-design.md` | spec | active | body-marker | boundary-exit-parser-codeql-hardening-design | 2026-07-17 |  |
 | `docs/superpowers/specs/2026-07-17-boundary-validator-ci-refactor-design.md` | spec | active | body-marker | boundary-validator-ci-refactor-design | 2026-07-17 |  |
 | `docs/superpowers/specs/2026-07-17-macos-credential-durability-design.md` | spec | unknown | fallback | macos-credential-durability-design | 2026-07-17 |  |
+| `docs/superpowers/specs/2026-07-26-open-issue-triage-and-cohort-pr-design.md` | spec | active | body-marker | open-issue-triage-and-cohort-pr-design | 2026-07-27 |  |
 
 ### docs/superpowers/specs/kill-session-transactional-cancellation  _(3 entries)_
 
@@ -212,4 +214,4 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 ---
 
 - Derived from `docs/work-index.json`
-- Generated at 2026-07-27T02:51:43Z from commit `232b2181bda0a594a9292037c73f698ecf2e97f6`
+- Generated at 2026-07-27T18:22:19Z from commit `e82e61fc54762f852bb480bf43eb04094141bc6f`
