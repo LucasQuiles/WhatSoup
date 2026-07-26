@@ -148,6 +148,20 @@ describe('managed triage review body', () => {
     ['mixed canonical pair', '<!-- triage-review:start -->\nA\n<!-- TRIAGE-REVIEW:END -->'],
     ['multiline kind', '<!-- triage-review:\nstart -->\nA\n<!-- triage-review:\nend -->'],
     ['multiline CRLF', '<!-- triage-review\r\n:\r\nstart -->\nA\n<!-- triage-review\r\n:\r\nend -->'],
+    ['trailing word payload', '<!-- triage-review:start extra -->\nA\n<!-- triage-review:end extra -->'],
+    ['trailing punctuation payload', '<!-- triage-review:start! -->\nA\n<!-- triage-review:end! -->'],
+    ['incomplete comment', '<!-- triage-review:start extra'],
+    [
+      'malformed plus canonical',
+      [
+        '<!-- triage-review:start extra -->',
+        'stale',
+        '<!-- triage-review:end extra -->',
+        '<!-- triage-review:start -->',
+        'canonical',
+        '<!-- triage-review:end -->',
+      ].join('\n'),
+    ],
   ])('refuses %s markers', (_name, body) => {
     expect(() => mergeReviewBlock(
       body,
@@ -161,6 +175,7 @@ describe('managed triage review body', () => {
         'The literal triage-review:start appears in parser docs.',
         'The unrelated token triage-review:startling remains ordinary prose.',
         '<!-- docs mention triage-review:start as text -->',
+        '<!-- triage-review:startling -->',
       ].join(' '),
     }))).not.toThrow();
 

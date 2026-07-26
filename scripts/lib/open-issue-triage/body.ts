@@ -6,8 +6,8 @@ import { sha256 } from './model.ts';
 
 const START_MARKER = '<!-- triage-review:start -->';
 const END_MARKER = '<!-- triage-review:end -->';
-const SENTINEL_COMMENT =
-  /<!--[ \t\r\n\f\v]{0,32}triage-review[ \t\r\n\f\v]{0,32}:[ \t\r\n\f\v]{0,32}(?:start|end)(?=[ \t\r\n\f\v]{0,32}(?:-->|$))/giu;
+const SENTINEL_COMMENT_PREFIX =
+  /<!--[ \t\r\n\f\v]{0,32}triage-review[ \t\r\n\f\v]{0,32}:[ \t\r\n\f\v]{0,32}(?:start|end)\b/giu;
 const STANDALONE_MARKER =
   /(^|\n)(<!-- triage-review:(start|end) -->)(?=\r?(?:\n|$))/g;
 const CLOSING_REFERENCE =
@@ -213,7 +213,7 @@ function assertNoClosingReference(label: string, text: string): void {
 }
 
 function managedSpan(text: string, pairRequired: boolean): ManagedSpan | null {
-  const sentinelCount = [...text.matchAll(SENTINEL_COMMENT)].length;
+  const sentinelCount = [...text.matchAll(SENTINEL_COMMENT_PREFIX)].length;
   const markers = [...text.matchAll(STANDALONE_MARKER)].map((match) => ({
     kind: match[3] as 'start' | 'end',
     start: match.index + match[1].length,
