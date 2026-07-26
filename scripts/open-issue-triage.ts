@@ -17,6 +17,7 @@ import {
 import { dirname, isAbsolute, join, relative, sep } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
+import { CliArgError, takeValue } from './lib/cli-args.ts';
 import {
   applyIssueBatch,
   ApplyIssueBatchError,
@@ -51,6 +52,7 @@ import {
   releaseProcessLock,
   type ProcessLockHandle,
 } from '../src/lib/process-lock.ts';
+import { isRecord } from '../src/lib/type-guards.ts';
 
 const SCHEMA_VERSION = 1;
 const REPOSITORY = 'LucasQuiles/WhatSoup';
@@ -402,12 +404,25 @@ function parseFlags(
       values.set(flag, true);
       continue;
     }
-    const value = argv[index + 1];
-    if (value === undefined || value.startsWith('--')) {
+    let taken;
+    try {
+      taken = takeValue(argv, index, flag);
+    } catch (error) {
+      if (!(error instanceof CliArgError)) throw error;
+      const compatibilityValue = argv[index + 1];
+      if (
+        compatibilityValue !== undefined
+        && compatibilityValue.startsWith('-')
+        && !compatibilityValue.startsWith('--')
+      ) {
+        values.set(flag, compatibilityValue);
+        index += 1;
+        continue;
+      }
       throw new CliFailure(2, 'missing-flag-value', `Missing value for ${flag}`, 'Pass one explicit value after the flag.');
     }
-    values.set(flag, value);
-    index += 1;
+    values.set(flag, taken.value);
+    index = taken.index;
   }
   return values;
 }
@@ -1186,13 +1201,6 @@ interface PlanSummary {
   before: { titleSha256: string; bodySha256: string; labels: string[] };
 }
 
-function recordValue(value: unknown, label: string): Record<string, unknown> {
-  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
-    throw new CliFailure(2, 'plan-schema-invalid', `${label} must be an object`, 'Regenerate the plan using issue dry-run.');
-  }
-  return value as Record<string, unknown>;
-}
-
 function exactKeys(value: Record<string, unknown>, keys: readonly string[], label: string): void {
   const observed = Object.keys(value).sort();
   const expected = [...keys].sort();
@@ -1213,14 +1221,23 @@ function parsePlanSummaries(value: unknown): PlanSummary[] {
     throw new CliFailure(2, 'plan-schema-invalid', 'Plan must be a nonempty array', 'Regenerate the plan using issue dry-run.');
   }
   const summaries = value.map((entry, index) => {
-    const plan = recordValue(entry, `plan[${index}]`);
+    if (!isRecord(entry)) {
+      throw new CliFailure(2, 'plan-schema-invalid', `plan[${index}] must be an object`, 'Regenerate the plan using issue dry-run.');
+    }
+    const plan = entry;
     exactKeys(plan, [
       'schema_version', 'repository', 'issue_number', 'issue_node_id', 'expected_main_sha',
       'etag', 'expected_before', 'managed_block', 'desired', 'title_delta', 'label_delta',
       'body_delta', 'intent_sha256', 'registry_sha256', 'plan_sha256', 'changed',
     ], `plan[${index}]`);
-    const before = recordValue(plan.expected_before, `plan[${index}].expected_before`);
-    const desired = recordValue(plan.desired, `plan[${index}].desired`);
+    if (!isRecord(plan.expected_before)) {
+      throw new CliFailure(2, 'plan-schema-invalid', `plan[${index}].expected_before must be an object`, 'Regenerate the plan using issue dry-run.');
+    }
+    const before = plan.expected_before;
+    if (!isRecord(plan.desired)) {
+      throw new CliFailure(2, 'plan-schema-invalid', `plan[${index}].desired must be an object`, 'Regenerate the plan using issue dry-run.');
+    }
+    const desired = plan.desired;
     exactKeys(before, ['updated_at', 'body_sha256', 'title_sha256', 'labels'], `plan[${index}].expected_before`);
     exactKeys(desired, ['title', 'labels', 'title_sha256', 'body_sha256'], `plan[${index}].desired`);
     if (

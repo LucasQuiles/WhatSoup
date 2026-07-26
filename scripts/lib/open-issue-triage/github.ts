@@ -3,6 +3,8 @@ import {
   type SpawnSyncOptionsWithStringEncoding,
 } from 'node:child_process';
 
+import { isRecord } from '../../../src/lib/type-guards.ts';
+
 const DEFAULT_REPOSITORY = 'LucasQuiles/WhatSoup';
 const API_VERSION_HEADER = 'X-GitHub-Api-Version: 2022-11-28';
 const DEFAULT_MAX_OUTPUT_BYTES = 8 * 1024 * 1024;
@@ -170,10 +172,6 @@ function defaultSpawn(
 
 function compareUtf8(left: string, right: string): number {
   return Buffer.from(left).compare(Buffer.from(right));
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
 
 function requiredString(
