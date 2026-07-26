@@ -4,6 +4,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  renameSync,
   rmSync,
   symlinkSync,
   writeFileSync,
@@ -526,6 +527,60 @@ describe('open issue batch apply', () => {
     expect(client.events).toEqual([]);
     expect(client.updates).toEqual([]);
     expect(readFileSync(canonical, 'utf8')).toBe('');
+  });
+
+  it('rejects first-create pathname replacement after file fsync', async () => {
+    const client = new InMemoryClient([101]);
+    const { plans, inputRegistry } = await makePlans(client, [record(101)]);
+
+    await expect(applyIssueBatch(applyInput(client, plans, inputRegistry, {
+      beforeLedgerDurablePathCheck: (path) => {
+        renameSync(path, `${path}.displaced`);
+        writeFileSync(path, '');
+      },
+    } as Partial<ApplyIssueBatchInput>))).rejects.toMatchObject({
+      code: 'ledger-durability-failed',
+      exitClass: 5,
+    });
+    expect(client.updates).toEqual([]);
+  });
+
+  it.each(['ledger-replace', 'ledger-hardlink', 'lock-replace', 'lock-hardlink'] as const)(
+    'revalidates %s immediately before the first PATCH',
+    async (race) => {
+      const client = new InMemoryClient([101]);
+      const { plans, inputRegistry } = await makePlans(client, [record(101)]);
+      let calls = 0;
+      const now = () => {
+        calls += 1;
+        if (calls === 2) {
+          const target = race.startsWith('lock') ? `${ledgerPath}.lock` : ledgerPath;
+          if (race.endsWith('replace')) {
+            renameSync(target, `${target}.displaced`);
+            writeFileSync(target, '');
+          } else {
+            linkSync(target, `${target}.alias`);
+          }
+        }
+        return NOW;
+      };
+
+      await expect(applyIssueBatch(applyInput(client, plans, inputRegistry, { now })))
+        .rejects.toMatchObject({ exitClass: 5 });
+      expect(client.updates).toEqual([]);
+    },
+  );
+
+  it('stops a two-target batch before target2 when ledger identity changes', async () => {
+    const client = new InMemoryClient([101, 102]);
+    const { plans, inputRegistry } = await makePlans(client, [record(101), record(102)]);
+    const delay = async () => {
+      linkSync(ledgerPath, `${ledgerPath}.target2-alias`);
+    };
+
+    await expect(applyIssueBatch(applyInput(client, plans, inputRegistry, { delay })))
+      .rejects.toMatchObject({ exitClass: 5 });
+    expect(client.updates.map((update) => update.number)).toEqual([101]);
   });
 
   it('classifies an ambiguous desired state without retrying PATCH', async () => {

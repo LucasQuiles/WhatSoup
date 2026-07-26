@@ -15,6 +15,7 @@ import { dirname } from 'node:path';
 import {
   acquireProcessLock,
   isProcessLockError,
+  readProcessLockPayload,
   releaseProcessLock,
   type ProcessLockHandle,
 } from '../../../src/lib/process-lock.ts';
@@ -56,7 +57,8 @@ export type ApplyIssueBatchErrorCode =
   | 'idempotency-key-reused'
   | 'write-failed-before-response'
   | 'write-outcome-unknown'
-  | 'post-write-verification-failed';
+  | 'post-write-verification-failed'
+  | 'mutation-rendezvous-unstable';
 
 export class ApplyIssueBatchError extends Error {
   readonly code: ApplyIssueBatchErrorCode;
@@ -104,6 +106,7 @@ export interface ApplyIssueBatchInput {
   delay: (milliseconds: number) => Promise<void>;
   confirmedPlanSha256: string;
   idempotencyKey: string;
+  beforeLedgerDurablePathCheck?: (path: string) => void;
 }
 
 interface PreparedTarget {
@@ -467,9 +470,16 @@ class DurableLedger {
   #receipts: MutationReceipt[];
   #identity: FileIdentity | null;
 
-  constructor(path: string, inspectedIdentity: FileIdentity | null) {
+  readonly #beforeDurablePathCheck?: (path: string) => void;
+
+  constructor(
+    path: string,
+    inspectedIdentity: FileIdentity | null,
+    beforeDurablePathCheck?: (path: string) => void,
+  ) {
     this.#path = path;
     this.#identity = inspectedIdentity;
+    this.#beforeDurablePathCheck = beforeDurablePathCheck;
     try {
       this.#text = readLedgerNoFollow(path, inspectedIdentity);
       this.#receipts = parseLedger(this.#text);
@@ -510,7 +520,12 @@ class DurableLedger {
       );
     }
     try {
-      this.#identity = appendDurably(this.#path, line, this.#identity);
+      this.#identity = appendDurably(
+        this.#path,
+        line,
+        this.#identity,
+        this.#beforeDurablePathCheck,
+      );
     } catch (error) {
       throw fail(
         'ledger-durability-failed',
@@ -523,6 +538,39 @@ class DurableLedger {
     this.#text += line;
     this.#receipts = validated;
     return receipt;
+  }
+
+  assertIdentityStable(): void {
+    if (this.#identity === null) {
+      throw fail('mutation-rendezvous-unstable', 'ledger identity was not established', 5);
+    }
+    assertOpenPathIdentity(this.#path, this.#identity);
+  }
+}
+
+function assertOpenPathIdentity(path: string, expectedIdentity: FileIdentity): void {
+  let descriptor: number;
+  try {
+    descriptor = openSync(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
+  } catch (error) {
+    throw fail('mutation-rendezvous-unstable', 'mutation ledger cannot be reopened safely', 5, undefined, error);
+  }
+  try {
+    const descriptorStat = fstatSync(descriptor);
+    const pathStat = lstatSync(path);
+    if (
+      !descriptorStat.isFile()
+      || descriptorStat.nlink !== 1
+      || !pathStat.isFile()
+      || pathStat.isSymbolicLink()
+      || pathStat.nlink !== 1
+      || !sameIdentity(identityOf(descriptorStat), expectedIdentity)
+      || !sameIdentity(identityOf(pathStat), expectedIdentity)
+    ) {
+      throw fail('mutation-rendezvous-unstable', 'mutation ledger identity changed before PATCH', 5);
+    }
+  } finally {
+    closeSync(descriptor);
   }
 }
 
@@ -570,6 +618,7 @@ function appendDurably(
   path: string,
   text: string,
   expectedIdentity: FileIdentity | null,
+  beforeDurablePathCheck?: (path: string) => void,
 ): FileIdentity {
   const noFollow = constants.O_NOFOLLOW ?? 0;
   const fileDescriptor = openSync(
@@ -581,12 +630,13 @@ function appendDurably(
       | (expectedIdentity === null ? constants.O_EXCL : 0),
     0o644,
   );
+  let descriptorIdentity: FileIdentity;
   try {
     const descriptorStat = fstatSync(fileDescriptor);
     if (!descriptorStat.isFile() || descriptorStat.nlink !== 1) {
       throw new Error('opened ledger is not a regular file');
     }
-    const descriptorIdentity = identityOf(descriptorStat);
+    descriptorIdentity = identityOf(descriptorStat);
     if (expectedIdentity !== null && !sameIdentity(descriptorIdentity, expectedIdentity)) {
       throw new Error('opened ledger identity differs from prior append');
     }
@@ -624,11 +674,13 @@ function appendDurably(
   } finally {
     closeSync(directoryDescriptor);
   }
+  beforeDurablePathCheck?.(path);
   const durablePathStat = lstatSync(path);
   if (
-    durablePathStat.nlink !== 1
-    || (expectedIdentity !== null
-      && !sameIdentity(identityOf(durablePathStat), expectedIdentity))
+    !durablePathStat.isFile()
+    || durablePathStat.isSymbolicLink()
+    || durablePathStat.nlink !== 1
+    || !sameIdentity(identityOf(durablePathStat), descriptorIdentity)
   ) {
     throw new Error('ledger path identity changed after durable append');
   }
@@ -760,7 +812,12 @@ async function preflight(
   });
 }
 
-function acquireApplyLock(ledgerPath: string): ProcessLockHandle {
+interface AcquiredApplyLock {
+  handle: ProcessLockHandle;
+  identity: FileIdentity;
+}
+
+function acquireApplyLock(ledgerPath: string): AcquiredApplyLock {
   const lockPath = `${ledgerPath}.lock`;
   try {
     if (existsSync(lockPath)) {
@@ -769,12 +826,34 @@ function acquireApplyLock(ledgerPath: string): ProcessLockHandle {
         throw new Error('apply lock rendezvous is not a single-link regular file');
       }
     }
-    return acquireProcessLock(lockPath);
+    const handle = acquireProcessLock(lockPath);
+    const acquiredStat = lstatSync(lockPath);
+    if (!acquiredStat.isFile() || acquiredStat.isSymbolicLink() || acquiredStat.nlink !== 1) {
+      throw new Error('acquired apply lock is not a single-link regular file');
+    }
+    return { handle, identity: identityOf(acquiredStat) };
   } catch (error) {
     if (isProcessLockError(error)) {
       throw fail('apply-lock-unavailable', 'another apply owner holds the receipt lock', 3, undefined, error);
     }
     throw fail('apply-lock-unavailable', 'the receipt lock could not be acquired', 3, undefined, error);
+  }
+}
+
+function assertApplyLockStable(lock: AcquiredApplyLock): void {
+  const stat = lstatSync(lock.handle.path);
+  const payload = readProcessLockPayload(lock.handle.path);
+  const after = lstatSync(lock.handle.path);
+  if (
+    !stat.isFile()
+    || stat.isSymbolicLink()
+    || stat.nlink !== 1
+    || !sameIdentity(identityOf(stat), lock.identity)
+    || !sameIdentity(identityOf(after), lock.identity)
+    || payload?.pid !== lock.handle.pid
+    || payload.token !== lock.handle.token
+  ) {
+    throw fail('mutation-rendezvous-unstable', 'apply lock identity or ownership changed before PATCH', 5);
   }
 }
 
@@ -812,7 +891,11 @@ export async function applyIssueBatch(
   let normalReturn = false;
   let primaryError: unknown;
   try {
-    const ledger = new DurableLedger(input.ledgerPath, ledgerIdentity);
+    const ledger = new DurableLedger(
+      input.ledgerPath,
+      ledgerIdentity,
+      input.beforeLedgerDurablePathCheck,
+    );
     assertIdempotencyAvailable(ledger.receipts, input.idempotencyKey);
     const prepared = await preflight(plans, input);
     const plannedAt = input.now();
@@ -871,6 +954,8 @@ export async function applyIssueBatch(
       }
       mutationRequests += 1;
       const appliedAt = input.now();
+      ledger.assertIdentityStable();
+      assertApplyLockStable(lock);
       let writeResult: GitHubWriteResult;
       try {
         writeResult = await input.client.updateIssue(target.plan.issue_number, {
@@ -983,7 +1068,7 @@ export async function applyIssueBatch(
   } finally {
     let released = false;
     try {
-      released = releaseProcessLock(lock);
+      released = releaseProcessLock(lock.handle);
     } catch (releaseError) {
       if (primaryError === undefined) {
         throw fail(
