@@ -71,6 +71,7 @@ function errorLines(): string[] {
 
 describe('#2165 auth CLI credential-save failure', () => {
   let unhandled: unknown[];
+  let onUnhandled: (reason: unknown) => void;
 
   beforeEach(() => {
     vi.useFakeTimers();
@@ -104,11 +105,15 @@ describe('#2165 auth CLI credential-save failure', () => {
     vi.spyOn(process, 'exit').mockImplementation((() => undefined) as never);
 
     unhandled = [];
-    process.on('unhandledRejection', (reason) => { unhandled.push(reason); });
+    onUnhandled = (reason: unknown) => { unhandled.push(reason); };
+    process.on('unhandledRejection', onUnhandled);
   });
 
   afterEach(() => {
-    process.removeAllListeners('unhandledRejection');
+    // `off` with the captured reference, NOT removeAllListeners: the latter
+    // would also strip vitest's own unhandled-rejection handler, and a
+    // suppressed rejection reads as a green run.
+    process.off('unhandledRejection', onUnhandled);
     vi.restoreAllMocks();
     vi.useRealTimers();
   });
