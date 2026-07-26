@@ -8,6 +8,7 @@ import {
   openSync,
   readFileSync,
   writeSync,
+  type Stats,
 } from 'node:fs';
 import { dirname } from 'node:path';
 
@@ -17,7 +18,7 @@ import {
   releaseProcessLock,
   type ProcessLockHandle,
 } from '../../../src/lib/process-lock.ts';
-import { mergeReviewBlock } from './body.ts';
+import { mergeReviewBlock, renderReviewBlock } from './body.ts';
 import type {
   GitHubIssueClient,
   GitHubWriteResult,
@@ -25,10 +26,14 @@ import type {
 } from './github.ts';
 import {
   parseLedger,
+  parseRegistry,
   receiptSha256,
+  registrySha256,
   sha256,
+  validateRegistry,
   type MutationReceipt,
   type MutationReceiptWithoutHash,
+  type OpenIssueRegistry,
 } from './model.ts';
 import type { IssueMutationPlan } from './planner.ts';
 
@@ -39,6 +44,7 @@ const INTENT_MARKER = /^<!-- triage-review:intent-sha256=([0-9a-f]{64}) -->$/gm;
 export type ApplyIssueBatchErrorCode =
   | 'invalid-apply-input'
   | 'plan-digest-mismatch'
+  | 'plan-registry-mismatch'
   | 'registry-digest-mismatch'
   | 'main-sha-drift'
   | 'precondition-drift'
@@ -56,6 +62,7 @@ export class ApplyIssueBatchError extends Error {
   readonly code: ApplyIssueBatchErrorCode;
   readonly exitClass: 3 | 5;
   readonly issueNumber: number | null;
+  readonly retryable: boolean;
 
   constructor(
     code: ApplyIssueBatchErrorCode,
@@ -64,6 +71,7 @@ export class ApplyIssueBatchError extends Error {
       exitClass: 3 | 5;
       issueNumber?: number;
       cause?: unknown;
+      retryable?: boolean;
     },
   ) {
     super(message, options.cause === undefined ? undefined : { cause: options.cause });
@@ -71,6 +79,7 @@ export class ApplyIssueBatchError extends Error {
     this.code = code;
     this.exitClass = options.exitClass;
     this.issueNumber = options.issueNumber ?? null;
+    this.retryable = options.retryable ?? false;
   }
 
   toJSON(): Record<string, unknown> {
@@ -80,19 +89,20 @@ export class ApplyIssueBatchError extends Error {
       message: this.message,
       exitClass: this.exitClass,
       issueNumber: this.issueNumber,
+      retryable: this.retryable,
     };
   }
 }
 
 export interface ApplyIssueBatchInput {
   expectedMainSha: string;
-  plans: IssueMutationPlan[];
+  plans: unknown;
+  registry: unknown;
   client: GitHubIssueClient;
   ledgerPath: string;
   now: () => string;
   delay: (milliseconds: number) => Promise<void>;
   confirmedPlanSha256: string;
-  registrySha256: string;
   idempotencyKey: string;
 }
 
@@ -108,11 +118,13 @@ function fail(
   exitClass: 3 | 5,
   issueNumber?: number,
   cause?: unknown,
+  retryable = false,
 ): ApplyIssueBatchError {
   return new ApplyIssueBatchError(code, message, {
     exitClass,
     issueNumber,
     cause,
+    retryable,
   });
 }
 
@@ -149,20 +161,168 @@ function planDigest(plans: readonly IssueMutationPlan[]): string {
   ));
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+function assertExactKeys(
+  value: unknown,
+  expectedKeys: readonly string[],
+  label: string,
+): asserts value is Record<string, unknown> {
+  if (!isRecord(value)) {
+    throw fail('plan-registry-mismatch', `${label} must be an object`, 3);
+  }
+  const observed = Object.keys(value).sort(compareUtf8);
+  const expected = [...expectedKeys].sort(compareUtf8);
+  if (!sameStrings(observed, expected)) {
+    throw fail('plan-registry-mismatch', `${label} has unknown or missing fields`, 3);
+  }
+}
+
+function parsePlanBatch(value: unknown): IssueMutationPlan[] {
+  if (!Array.isArray(value) || value.length === 0) {
+    throw fail('invalid-apply-input', 'the complete plan batch must be nonempty', 3);
+  }
+  for (const [index, plan] of value.entries()) {
+    const label = `plans[${index}]`;
+    assertExactKeys(plan, [
+      'schema_version', 'repository', 'issue_number', 'issue_node_id',
+      'expected_main_sha', 'etag', 'expected_before', 'managed_block', 'desired',
+      'title_delta', 'label_delta', 'body_delta', 'intent_sha256',
+      'registry_sha256', 'plan_sha256', 'changed',
+    ], label);
+    assertExactKeys(plan.expected_before, [
+      'updated_at', 'body_sha256', 'title_sha256', 'labels',
+    ], `${label}.expected_before`);
+    assertExactKeys(plan.desired, [
+      'title', 'labels', 'title_sha256', 'body_sha256',
+    ], `${label}.desired`);
+    assertExactKeys(plan.label_delta, ['add', 'remove'], `${label}.label_delta`);
+    if (plan.title_delta !== null) {
+      assertExactKeys(plan.title_delta, [
+        'before', 'after', 'before_sha256', 'after_sha256',
+      ], `${label}.title_delta`);
+    }
+    if (plan.body_delta !== null) {
+      assertExactKeys(plan.body_delta, [
+        'before_sha256', 'after_sha256',
+      ], `${label}.body_delta`);
+    }
+    if (
+      plan.schema_version !== 1
+      || typeof plan.repository !== 'string'
+      || !Number.isSafeInteger(plan.issue_number)
+      || typeof plan.issue_node_id !== 'string'
+      || typeof plan.expected_main_sha !== 'string'
+      || !(plan.etag === null || typeof plan.etag === 'string')
+      || typeof plan.managed_block !== 'string'
+      || typeof plan.intent_sha256 !== 'string'
+      || typeof plan.registry_sha256 !== 'string'
+      || typeof plan.plan_sha256 !== 'string'
+      || typeof plan.changed !== 'boolean'
+      || typeof plan.expected_before.updated_at !== 'string'
+      || typeof plan.expected_before.body_sha256 !== 'string'
+      || typeof plan.expected_before.title_sha256 !== 'string'
+      || !Array.isArray(plan.expected_before.labels)
+      || plan.expected_before.labels.some((entry) => typeof entry !== 'string')
+      || typeof plan.desired.title !== 'string'
+      || !Array.isArray(plan.desired.labels)
+      || plan.desired.labels.some((entry) => typeof entry !== 'string')
+      || typeof plan.desired.title_sha256 !== 'string'
+      || typeof plan.desired.body_sha256 !== 'string'
+      || !Array.isArray(plan.label_delta.add)
+      || plan.label_delta.add.some((entry) => typeof entry !== 'string')
+      || !Array.isArray(plan.label_delta.remove)
+      || plan.label_delta.remove.some((entry) => typeof entry !== 'string')
+      || (plan.title_delta !== null && (
+        typeof plan.title_delta.before !== 'string'
+        || typeof plan.title_delta.after !== 'string'
+        || typeof plan.title_delta.before_sha256 !== 'string'
+        || typeof plan.title_delta.after_sha256 !== 'string'
+      ))
+      || (plan.body_delta !== null && (
+        typeof plan.body_delta.before_sha256 !== 'string'
+        || typeof plan.body_delta.after_sha256 !== 'string'
+      ))
+    ) {
+      throw fail('plan-registry-mismatch', `${label} has invalid runtime types`, 3);
+    }
+  }
+  return value as IssueMutationPlan[];
+}
+
 function extractIntentSha256(text: string): string | null {
   const matches = [...text.matchAll(INTENT_MARKER)];
   return matches.length === 1 ? matches[0]?.[1] ?? null : null;
 }
 
-function assertInput(input: ApplyIssueBatchInput): IssueMutationPlan[] {
+function bindRegistry(
+  input: ApplyIssueBatchInput,
+  plans: readonly IssueMutationPlan[],
+): { registry: OpenIssueRegistry; digest: string } {
+  let registry: OpenIssueRegistry;
+  try {
+    registry = parseRegistry(input.registry);
+  } catch (error) {
+    throw fail('plan-registry-mismatch', 'registry parsing or public-safety validation failed', 3, undefined, error);
+  }
+  const validationIssues = validateRegistry(registry);
+  if (validationIssues.length > 0) {
+    throw fail('plan-registry-mismatch', 'registry semantic validation failed', 3);
+  }
+  const digest = registrySha256(registry);
+  const records = new Map(registry.issues.map((record) => [record.issue_number, record]));
+  for (const plan of plans) {
+    const record = records.get(plan.issue_number);
+    if (record === undefined) {
+      throw fail('plan-registry-mismatch', `Issue #${plan.issue_number} is absent from registry`, 3, plan.issue_number);
+    }
+    let rendered: string;
+    try {
+      rendered = renderReviewBlock(record);
+    } catch (error) {
+      throw fail('plan-registry-mismatch', `Issue #${plan.issue_number} registry rendering failed`, 3, plan.issue_number, error);
+    }
+    const desiredTitle = record.recommended_title ?? record.title;
+    if (
+      registry.repository !== REPOSITORY
+      || registry.pinned_main_revision !== input.expectedMainSha
+      || record.pinned_revision !== input.expectedMainSha
+      || plan.repository !== registry.repository
+      || plan.expected_main_sha !== registry.pinned_main_revision
+      || plan.issue_node_id !== record.issue_node_id
+      || plan.expected_before.updated_at !== record.updated_at
+      || plan.expected_before.body_sha256 !== record.pre_review_body_sha256
+      || plan.expected_before.title_sha256 !== sha256(record.title)
+      || !sameStrings(plan.expected_before.labels, record.current_labels)
+      || plan.desired.title !== desiredTitle
+      || plan.desired.title_sha256 !== sha256(desiredTitle)
+      || !sameStrings(plan.desired.labels, record.recommended_labels)
+      || plan.managed_block !== rendered
+      || plan.intent_sha256 !== extractIntentSha256(rendered)
+      || plan.registry_sha256 !== digest
+    ) {
+      throw fail(
+        'plan-registry-mismatch',
+        `Issue #${plan.issue_number} plan is not exactly derived from the registry`,
+        3,
+        plan.issue_number,
+      );
+    }
+  }
+  return { registry, digest };
+}
+
+function assertInput(
+  input: ApplyIssueBatchInput,
+): { plans: IssueMutationPlan[]; registryDigest: string } {
+  const plans = parsePlanBatch(input.plans);
   if (!/^[0-9a-f]{40}$/.test(input.expectedMainSha)) {
     throw fail('invalid-apply-input', 'expectedMainSha must be a 40-character object ID', 3);
   }
   if (!/^[0-9a-f]{64}$/.test(input.confirmedPlanSha256)) {
     throw fail('invalid-apply-input', 'confirmedPlanSha256 must be a SHA-256 digest', 3);
-  }
-  if (!/^[0-9a-f]{64}$/.test(input.registrySha256)) {
-    throw fail('invalid-apply-input', 'registrySha256 must be a SHA-256 digest', 3);
   }
   if (!/^[a-z0-9][a-z0-9-]{0,127}$/.test(input.idempotencyKey)) {
     throw fail('invalid-apply-input', 'idempotencyKey must be a nonempty lowercase slug', 3);
@@ -170,11 +330,7 @@ function assertInput(input: ApplyIssueBatchInput): IssueMutationPlan[] {
   if (typeof input.ledgerPath !== 'string' || input.ledgerPath.length === 0) {
     throw fail('invalid-apply-input', 'ledgerPath must be nonempty', 3);
   }
-  if (input.plans.length === 0) {
-    throw fail('invalid-apply-input', 'the complete plan batch must be nonempty', 3);
-  }
-
-  const plans = [...input.plans];
+  const registryBinding = bindRegistry(input, plans);
   for (const [index, plan] of plans.entries()) {
     if (
       plan.schema_version !== 1
@@ -191,7 +347,7 @@ function assertInput(input: ApplyIssueBatchInput): IssueMutationPlan[] {
     }
     if (
       plan.expected_main_sha !== input.expectedMainSha
-      || plan.registry_sha256 !== input.registrySha256
+      || plan.registry_sha256 !== registryBinding.digest
     ) {
       throw fail(
         'registry-digest-mismatch',
@@ -265,10 +421,23 @@ function assertInput(input: ApplyIssueBatchInput): IssueMutationPlan[] {
   if (plans.some((plan) => plan.plan_sha256 !== observedPlanSha256)) {
     throw fail('plan-digest-mismatch', 'one or more plan records have a stale batch digest', 3);
   }
-  return plans;
+  return { plans, registryDigest: registryBinding.digest };
 }
 
-function assertSafeLedgerPath(ledgerPath: string): void {
+interface FileIdentity {
+  dev: string;
+  ino: string;
+}
+
+function sameIdentity(left: FileIdentity, right: FileIdentity): boolean {
+  return left.dev === right.dev && left.ino === right.ino;
+}
+
+function identityOf(stat: Stats): FileIdentity {
+  return { dev: String(stat.dev), ino: String(stat.ino) };
+}
+
+function inspectLedgerPath(ledgerPath: string): FileIdentity | null {
   const parent = dirname(ledgerPath);
   let parentStat;
   try {
@@ -279,28 +448,30 @@ function assertSafeLedgerPath(ledgerPath: string): void {
   if (!parentStat.isDirectory() || parentStat.isSymbolicLink()) {
     throw fail('ledger-path-unsafe', 'ledger parent must be a real directory', 5);
   }
-  if (!existsSync(ledgerPath)) return;
+  if (!existsSync(ledgerPath)) return null;
   let ledgerStat;
   try {
     ledgerStat = lstatSync(ledgerPath);
   } catch (error) {
     throw fail('ledger-path-unsafe', 'ledger path could not be inspected', 5, undefined, error);
   }
-  if (!ledgerStat.isFile() || ledgerStat.isSymbolicLink()) {
+  if (!ledgerStat.isFile() || ledgerStat.isSymbolicLink() || ledgerStat.nlink !== 1) {
     throw fail('ledger-path-unsafe', 'ledger must be a no-follow regular file', 5);
   }
+  return identityOf(ledgerStat);
 }
 
 class DurableLedger {
   readonly #path: string;
   #text: string;
   #receipts: MutationReceipt[];
+  #identity: FileIdentity | null;
 
-  constructor(path: string) {
+  constructor(path: string, inspectedIdentity: FileIdentity | null) {
     this.#path = path;
-    assertSafeLedgerPath(path);
+    this.#identity = inspectedIdentity;
     try {
-      this.#text = readLedgerNoFollow(path);
+      this.#text = readLedgerNoFollow(path, inspectedIdentity);
       this.#receipts = parseLedger(this.#text);
     } catch (error) {
       if (error instanceof ApplyIssueBatchError) throw error;
@@ -339,7 +510,7 @@ class DurableLedger {
       );
     }
     try {
-      appendDurably(this.#path, line);
+      this.#identity = appendDurably(this.#path, line, this.#identity);
     } catch (error) {
       throw fail(
         'ledger-durability-failed',
@@ -355,7 +526,7 @@ class DurableLedger {
   }
 }
 
-function readLedgerNoFollow(path: string): string {
+function readLedgerNoFollow(path: string, expectedIdentity: FileIdentity | null): string {
   let fileDescriptor: number;
   try {
     fileDescriptor = openSync(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
@@ -364,25 +535,76 @@ function readLedgerNoFollow(path: string): string {
     throw error;
   }
   try {
-    if (!fstatSync(fileDescriptor).isFile()) {
+    const descriptorStat = fstatSync(fileDescriptor);
+    if (!descriptorStat.isFile() || descriptorStat.nlink !== 1) {
       throw new Error('opened ledger is not a regular file');
     }
-    return readFileSync(fileDescriptor, 'utf8');
+    const descriptorIdentity = identityOf(descriptorStat);
+    if (expectedIdentity === null || !sameIdentity(descriptorIdentity, expectedIdentity)) {
+      throw new Error('opened ledger identity differs from inspected path');
+    }
+    const pathStat = lstatSync(path);
+    if (
+      !pathStat.isFile()
+      || pathStat.isSymbolicLink()
+      || pathStat.nlink !== 1
+      || !sameIdentity(identityOf(pathStat), descriptorIdentity)
+    ) {
+      throw new Error('ledger path identity changed before read');
+    }
+    const text = readFileSync(fileDescriptor, 'utf8');
+    const afterRead = lstatSync(path);
+    if (
+      afterRead.nlink !== 1
+      || !sameIdentity(identityOf(afterRead), descriptorIdentity)
+    ) {
+      throw new Error('ledger path identity changed during read');
+    }
+    return text;
   } finally {
     closeSync(fileDescriptor);
   }
 }
 
-function appendDurably(path: string, text: string): void {
+function appendDurably(
+  path: string,
+  text: string,
+  expectedIdentity: FileIdentity | null,
+): FileIdentity {
   const noFollow = constants.O_NOFOLLOW ?? 0;
   const fileDescriptor = openSync(
     path,
-    constants.O_WRONLY | constants.O_APPEND | constants.O_CREAT | noFollow,
+    constants.O_WRONLY
+      | constants.O_APPEND
+      | constants.O_CREAT
+      | noFollow
+      | (expectedIdentity === null ? constants.O_EXCL : 0),
     0o644,
   );
   try {
-    if (!fstatSync(fileDescriptor).isFile()) {
+    const descriptorStat = fstatSync(fileDescriptor);
+    if (!descriptorStat.isFile() || descriptorStat.nlink !== 1) {
       throw new Error('opened ledger is not a regular file');
+    }
+    const descriptorIdentity = identityOf(descriptorStat);
+    if (expectedIdentity !== null && !sameIdentity(descriptorIdentity, expectedIdentity)) {
+      throw new Error('opened ledger identity differs from prior append');
+    }
+    const pathStat = lstatSync(path);
+    if (
+      !pathStat.isFile()
+      || pathStat.isSymbolicLink()
+      || pathStat.nlink !== 1
+      || !sameIdentity(identityOf(pathStat), descriptorIdentity)
+    ) {
+      throw new Error('ledger path identity changed before append');
+    }
+    const beforeWriteStat = fstatSync(fileDescriptor);
+    if (
+      beforeWriteStat.nlink !== 1
+      || !sameIdentity(identityOf(beforeWriteStat), descriptorIdentity)
+    ) {
+      throw new Error('ledger descriptor identity changed before append');
     }
     const bytes = Buffer.from(text, 'utf8');
     let offset = 0;
@@ -402,6 +624,15 @@ function appendDurably(path: string, text: string): void {
   } finally {
     closeSync(directoryDescriptor);
   }
+  const durablePathStat = lstatSync(path);
+  if (
+    durablePathStat.nlink !== 1
+    || (expectedIdentity !== null
+      && !sameIdentity(identityOf(durablePathStat), expectedIdentity))
+  ) {
+    throw new Error('ledger path identity changed after durable append');
+  }
+  return identityOf(durablePathStat);
 }
 
 function beforeSnapshotMatches(issue: LiveIssue, plan: IssueMutationPlan): boolean {
@@ -530,8 +761,15 @@ async function preflight(
 }
 
 function acquireApplyLock(ledgerPath: string): ProcessLockHandle {
+  const lockPath = `${ledgerPath}.lock`;
   try {
-    return acquireProcessLock(`${ledgerPath}.lock`);
+    if (existsSync(lockPath)) {
+      const lockStat = lstatSync(lockPath);
+      if (!lockStat.isFile() || lockStat.isSymbolicLink() || lockStat.nlink !== 1) {
+        throw new Error('apply lock rendezvous is not a single-link regular file');
+      }
+    }
+    return acquireProcessLock(lockPath);
   } catch (error) {
     if (isProcessLockError(error)) {
       throw fail('apply-lock-unavailable', 'another apply owner holds the receipt lock', 3, undefined, error);
@@ -568,20 +806,20 @@ function updateDiagnostic(result: GitHubWriteResult): string | null {
 export async function applyIssueBatch(
   input: ApplyIssueBatchInput,
 ): Promise<MutationReceipt[]> {
-  const plans = assertInput(input);
-  assertSafeLedgerPath(input.ledgerPath);
+  const { plans, registryDigest } = assertInput(input);
+  const ledgerIdentity = inspectLedgerPath(input.ledgerPath);
   const lock = acquireApplyLock(input.ledgerPath);
   let normalReturn = false;
   let primaryError: unknown;
   try {
-    const ledger = new DurableLedger(input.ledgerPath);
+    const ledger = new DurableLedger(input.ledgerPath, ledgerIdentity);
     assertIdempotencyAvailable(ledger.receipts, input.idempotencyKey);
     const prepared = await preflight(plans, input);
     const plannedAt = input.now();
     const batchId = sha256([
       input.idempotencyKey,
       input.confirmedPlanSha256,
-      input.registrySha256,
+      registryDigest,
       input.expectedMainSha,
     ].join('\n'));
     const envelope = {
@@ -599,7 +837,7 @@ export async function applyIssueBatch(
       pinned_main_revision: envelope.pinnedMainRevision,
       planned_at: envelope.plannedAt,
       plan_sha256: input.confirmedPlanSha256,
-      registry_sha256: input.registrySha256,
+      registry_sha256: registryDigest,
       issue_numbers: plans.map((plan) => plan.issue_number),
       operation_result: 'planned',
       diagnostic_code: null,
@@ -659,7 +897,28 @@ export async function applyIssueBatch(
       }
       appliedCount += 1;
 
-      const reread = (await input.client.readIssue(target.plan.issue_number)).issue;
+      let reread: LiveIssue;
+      try {
+        reread = (await input.client.readIssue(target.plan.issue_number)).issue;
+      } catch (error) {
+        const diagnosticCode = writeResult.kind === 'ambiguous'
+          ? 'verification-read-failed-after-ambiguous'
+          : 'verification-read-failed-after-success';
+        batchReceipts.push(ledger.append(targetReceiptPayload(target, envelope, {
+          receiptType: 'target_unknown',
+          operationResult: 'write-outcome-unknown',
+          appliedAt,
+          verifiedAt: null,
+          diagnosticCode,
+        })));
+        throw fail(
+          'write-outcome-unknown',
+          `Issue #${target.plan.issue_number} verification read failed after one PATCH`,
+          5,
+          target.plan.issue_number,
+          error,
+        );
+      }
       const desired = desiredSnapshotMatches(reread, target);
       const diagnosticCode = updateDiagnostic(writeResult);
       if (desired) {
@@ -678,18 +937,27 @@ export async function applyIssueBatch(
       const operationResult = writeResult.kind === 'ambiguous'
         ? 'write-outcome-unknown'
         : 'post-write-verification-failed';
+      const exactBefore = writeResult.kind === 'ambiguous'
+        && beforeSnapshotMatches(reread, target.plan);
+      const outcomeDiagnostic = writeResult.kind === 'ambiguous'
+        ? exactBefore
+          ? 'ambiguous-write-not-applied'
+          : 'ambiguous-write-third-state'
+        : 'post-write-verification-failed';
       batchReceipts.push(ledger.append(targetReceiptPayload(target, envelope, {
         receiptType: 'target_unknown',
         operationResult,
         appliedAt,
         verifiedAt: null,
-        diagnosticCode: diagnosticCode ?? 'post-write-verification-failed',
+        diagnosticCode: outcomeDiagnostic,
       })));
       throw fail(
         operationResult,
         `Issue #${target.plan.issue_number} could not be verified after one PATCH`,
         5,
         target.plan.issue_number,
+        undefined,
+        exactBefore,
       );
     }
 

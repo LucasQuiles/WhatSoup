@@ -1,5 +1,6 @@
 import {
   chmodSync,
+  linkSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -26,7 +27,6 @@ import type {
 import {
   LIVE_LABELS,
   parseLedger,
-  registrySha256,
   sha256,
   type OpenIssueRegistry,
 } from '../../scripts/lib/open-issue-triage/model.ts';
@@ -145,6 +145,7 @@ class InMemoryClient implements GitHubIssueClient {
   ambiguousState: 'desired' | 'before' | 'third' = 'desired';
   afterUpdate?: (issue: LiveIssue) => LiveIssue;
   updateError: Error | null = null;
+  verificationReadError: Error | null = null;
 
   constructor(issueNumbers: number[]) {
     this.issues = new Map(issueNumbers.map((number) => [number, liveIssue(number)]));
@@ -178,6 +179,9 @@ class InMemoryClient implements GitHubIssueClient {
 
   async readIssue(number: number): Promise<{ issue: LiveIssue; etag: string | null }> {
     this.events.push(`read:${number}`);
+    if (this.updates.length > 0 && this.verificationReadError !== null) {
+      throw this.verificationReadError;
+    }
     const issue = this.issues.get(number);
     if (issue === undefined) throw new Error(`missing fixture issue ${number}`);
     return { issue: structuredClone(issue), etag: `"etag-${number}"` };
@@ -250,10 +254,10 @@ function applyInput(
     now: () => NOW,
     delay: async () => undefined,
     confirmedPlanSha256: plans[0]!.plan_sha256,
-    registrySha256: registrySha256(inputRegistry),
+    registry: inputRegistry,
     idempotencyKey: 'review-batch-101-102-v1',
     ...overrides,
-  };
+  } as unknown as ApplyIssueBatchInput;
 }
 
 function receiptFor(
@@ -353,7 +357,7 @@ describe('open issue batch apply', () => {
     const { plans, inputRegistry } = await makePlans(client, [record(101)]);
     const cases: Array<Partial<ApplyIssueBatchInput>> = [
       { confirmedPlanSha256: 'c'.repeat(64) },
-      { registrySha256: 'd'.repeat(64) },
+      { registry: { ...inputRegistry, generated_at: 'invalid' } },
       { expectedMainSha: 'not-a-sha' },
       { idempotencyKey: 'contains spaces' },
       {
@@ -405,6 +409,125 @@ describe('open issue batch apply', () => {
     });
   });
 
+  it.each(['success', 'ambiguous'] as const)(
+    'records an unknown target when the post-%s PATCH verification read throws',
+    async (responseKind) => {
+      const client = new InMemoryClient([101]);
+      const { plans, inputRegistry } = await makePlans(client, [record(101)]);
+      client.writeResult = responseKind;
+      client.verificationReadError = new Error(
+        'transport stderr with Example finding 101 and Owner-authored body',
+      );
+
+      await expect(applyIssueBatch(applyInput(client, plans, inputRegistry)))
+        .rejects.toMatchObject({
+          code: 'write-outcome-unknown',
+          exitClass: 5,
+          retryable: false,
+        });
+
+      expect(client.updates).toHaveLength(1);
+      const ledger = readFileSync(ledgerPath, 'utf8');
+      expect(parseLedger(ledger).at(-1)).toMatchObject({
+        receipt_type: 'target_unknown',
+        operation_result: 'write-outcome-unknown',
+        diagnostic_code: responseKind === 'ambiguous'
+          ? 'verification-read-failed-after-ambiguous'
+          : 'verification-read-failed-after-success',
+      });
+      expect(ledger).not.toContain('transport stderr');
+      expect(ledger).not.toContain('Example finding');
+      expect(ledger).not.toContain('Owner-authored body');
+    },
+  );
+
+  it('preserves ledger-durability failure when verification read and lock release also fail', async () => {
+    const client = new InMemoryClient([101]);
+    const { plans, inputRegistry } = await makePlans(client, [record(101)]);
+    client.afterUpdate = (issue) => {
+      chmodSync(ledgerPath, 0o400);
+      chmodSync(tempRoot, 0o500);
+      return issue;
+    };
+    client.verificationReadError = new Error('verification transport failed');
+
+    await expect(applyIssueBatch(applyInput(client, plans, inputRegistry)))
+      .rejects.toMatchObject({ code: 'ledger-durability-failed', exitClass: 5 });
+    chmodSync(tempRoot, 0o700);
+    chmodSync(ledgerPath, 0o600);
+    expect(client.updates).toHaveLength(1);
+    expect(parseLedger(readFileSync(ledgerPath, 'utf8'))).toHaveLength(1);
+  });
+
+  it('binds rehashed plans exactly to the parsed registry before state access', async () => {
+    const client = new InMemoryClient([101]);
+    const { plans, inputRegistry } = await makePlans(client, [record(101)]);
+    const privateTitle = ['/', 'Users', 'operator', 'private runtime'].join('');
+    const forgedTitle = structuredClone(plans);
+    forgedTitle[0]!.desired.title = privateTitle;
+    forgedTitle[0]!.desired.title_sha256 = sha256(privateTitle);
+    forgedTitle[0]!.title_delta = {
+      before: plans[0]!.desired.title,
+      after: privateTitle,
+      before_sha256: plans[0]!.expected_before.title_sha256,
+      after_sha256: sha256(privateTitle),
+    };
+    const forgedLabels = structuredClone(plans);
+    forgedLabels[0]!.desired.labels = ['bug', 'ops', 'reliability'];
+    forgedLabels[0]!.label_delta = { add: ['ops', 'reliability'], remove: [] };
+    const forgedBlock = structuredClone(plans);
+    forgedBlock[0]!.managed_block = forgedBlock[0]!.managed_block.replace(
+      '## Triage review',
+      '## Triage review altered',
+    );
+    const { mergeReviewBlock } = await import('../../scripts/lib/open-issue-triage/body.ts');
+    const alteredBody = mergeReviewBlock(OWNER_BODY, forgedBlock[0]!.managed_block).body;
+    forgedBlock[0]!.desired.body_sha256 = sha256(alteredBody);
+    forgedBlock[0]!.body_delta = {
+      before_sha256: forgedBlock[0]!.expected_before.body_sha256,
+      after_sha256: sha256(alteredBody),
+    };
+    const unknownField = structuredClone(plans) as Array<IssueMutationPlan & {
+      expected_body?: string;
+    }>;
+    unknownField[0]!.expected_body = 'forbidden';
+    const nestedUnknown = structuredClone(plans) as Array<IssueMutationPlan & {
+      desired: IssueMutationPlan['desired'] & { body?: string };
+    }>;
+    nestedUnknown[0]!.desired.body = 'forbidden';
+
+    for (const candidate of [
+      forgedTitle,
+      forgedLabels,
+      forgedBlock,
+      unknownField,
+      nestedUnknown,
+    ]) {
+      const rehashed = rehashPlans(candidate);
+      client.events.length = 0;
+      await expect(applyIssueBatch(applyInput(client, rehashed, inputRegistry, {
+        confirmedPlanSha256: rehashed[0]!.plan_sha256,
+      }))).rejects.toMatchObject({ code: 'plan-registry-mismatch', exitClass: 3 });
+      expect(client.events).toEqual([]);
+      expect(client.updates).toEqual([]);
+      expect(() => readFileSync(ledgerPath, 'utf8')).toThrow();
+    }
+  });
+
+  it('rejects a hardlinked existing ledger before reads, receipts, or PATCH', async () => {
+    const client = new InMemoryClient([101]);
+    const { plans, inputRegistry } = await makePlans(client, [record(101)]);
+    const canonical = join(tempRoot, 'canonical.jsonl');
+    writeFileSync(canonical, '');
+    linkSync(canonical, ledgerPath);
+
+    await expect(applyIssueBatch(applyInput(client, plans, inputRegistry)))
+      .rejects.toMatchObject({ code: 'ledger-path-unsafe', exitClass: 5 });
+    expect(client.events).toEqual([]);
+    expect(client.updates).toEqual([]);
+    expect(readFileSync(canonical, 'utf8')).toBe('');
+  });
+
   it('classifies an ambiguous desired state without retrying PATCH', async () => {
     const client = new InMemoryClient([101]);
     const { plans, inputRegistry } = await makePlans(client, [record(101)]);
@@ -422,21 +545,26 @@ describe('open issue batch apply', () => {
   });
 
   it.each([
-    ['exact before', 'before'],
-    ['third state', 'third'],
-  ] as const)('records ambiguous %s as unknown and never retries', async (_name, state) => {
+    ['exact before', 'before', 'ambiguous-write-not-applied', true],
+    ['third state', 'third', 'ambiguous-write-third-state', false],
+  ] as const)('records ambiguous %s as unknown and never retries', async (
+    _name,
+    state,
+    diagnosticCode,
+    retryable,
+  ) => {
     const client = new InMemoryClient([101]);
     const { plans, inputRegistry } = await makePlans(client, [record(101)]);
     client.writeResult = 'ambiguous';
     client.ambiguousState = state;
 
     await expect(applyIssueBatch(applyInput(client, plans, inputRegistry)))
-      .rejects.toMatchObject({ code: 'write-outcome-unknown', exitClass: 5 });
+      .rejects.toMatchObject({ code: 'write-outcome-unknown', exitClass: 5, retryable });
     expect(client.updates).toHaveLength(1);
     expect(parseLedger(readFileSync(ledgerPath, 'utf8')).at(-1)).toMatchObject({
       receipt_type: 'target_unknown',
       operation_result: 'write-outcome-unknown',
-      diagnostic_code: 'transport-timeout',
+      diagnostic_code: diagnosticCode,
     });
   });
 
