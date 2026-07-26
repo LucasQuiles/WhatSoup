@@ -441,6 +441,10 @@ describe('per-chat /new ownership transition', () => {
     let oldPid: number | null = null;
     let replacementPid: number | null = null;
     let manager: SessionManager | null = null;
+    let replacementPidReadyBeforeFailure = false;
+    const replacementPidReadinessSignal = new Int32Array(
+      new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT),
+    );
 
     try {
       state.ensureSessionAndQueueSync(chatJid, mapKey);
@@ -452,10 +456,13 @@ describe('per-chat /new ownership transition', () => {
       oldPid = currentManager.getStatus().pid;
 
       db.raw.function('fail_after_replacement_fork', () => {
-        const deadline = Date.now() + 200;
-        while (Date.now() < deadline) {
-          // Hold the SQLite insert on the parent thread while the real child records its PID.
+        const deadline = Date.now() + 6_000;
+        while (!existsSync(replacementPidFile)) {
+          const remainingMs = deadline - Date.now();
+          if (remainingMs <= 0) break;
+          Atomics.wait(replacementPidReadinessSignal, 0, 0, Math.min(remainingMs, 25));
         }
+        replacementPidReadyBeforeFailure = existsSync(replacementPidFile);
         throw new Error('forced replacement spawn failure');
       });
       db.raw.exec(`
@@ -467,6 +474,7 @@ describe('per-chat /new ownership transition', () => {
       `);
 
       await state._handleMessageInner(makeNewMessage(chatJid));
+      expect(replacementPidReadyBeforeFailure).toBe(true);
       const replacementRecord = JSON.parse(readFileSync(replacementPidFile, 'utf8')) as { provider: number };
       replacementPid = replacementRecord.provider;
 

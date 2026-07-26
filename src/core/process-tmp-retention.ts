@@ -175,11 +175,18 @@ export class ProcessTmpRetentionTimer {
     this.timer = null;
   }
 
+  /**
+   * Always logs, including a run that reclaimed nothing (#2162).
+   *
+   * The previous `deleted > 0 || skipped > 0` gate made the quiet case — every
+   * entry recent, nothing to do — indistinguishable from the timer not running
+   * at all. That is the case an operator most needs to tell apart, and it is
+   * also the steady state once the directory is healthy, so gating on activity
+   * silences the reclaimer exactly when it is working correctly.
+   */
   runCleanup(): ProcessTmpCleanupResult {
     const result = runProcessTmpCleanup(this.dir, this.retention.maxAgeMs);
-    if (result.deleted > 0 || result.skipped > 0) {
-      log.info(result, 'process tmp retention: cleanup run complete');
-    }
+    log.info(result, 'process tmp retention: cleanup run complete');
     return result;
   }
 }
