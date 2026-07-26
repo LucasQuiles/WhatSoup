@@ -6,6 +6,7 @@
 // Each member carries a one-line comment naming its consumer.
 // Members that have no SMS equivalent reject or no-op with typed errors.
 
+import { REQUIRES_WHATSAPP_DETAIL, UnsupportedTransportOperationError } from '../unsupported-operation.ts';
 import { EventEmitter } from 'node:events';
 import { createChildLogger } from '../../logger.ts';
 import type { TransportAdapter } from '../contract/adapter.ts';
@@ -24,15 +25,13 @@ import type { TwilioWebhookServer } from './webhook-server.ts';
 import type { TwilioSmsAdapter } from './adapter.ts';
 
 /** Error thrown when an operation is not supported by the SMS transport. */
-export class UnsupportedTransportOperationError extends Error {
-  readonly code = 'UNSUPPORTED_TRANSPORT_OPERATION';
-  constructor(operation: string) {
-    super(
-      `[TwilioConnection] "${operation}" is not supported on the SMS transport. ` +
-      'This operation requires a WhatsApp connection.',
-    );
-    this.name = 'UnsupportedTransportOperationError';
-  }
+// #2202: the canonical error lives in transport/unsupported-operation.ts.
+// Re-exported here so existing importers of this module keep working.
+export { UnsupportedTransportOperationError };
+
+/** Build the SMS-flavoured unsupported-operation error. */
+function unsupported(operation: string): UnsupportedTransportOperationError {
+  return new UnsupportedTransportOperationError('TwilioConnection', 'SMS', operation, REQUIRES_WHATSAPP_DETAIL);
 }
 
 // ---------------------------------------------------------------------------
@@ -254,7 +253,7 @@ export class TwilioConnection extends EventEmitter implements RuntimeConnection 
    */
   async sendMedia(_chatJid: string, _media: OutboundMedia): Promise<SubmissionReceipt> {
     return Promise.reject(
-      new UnsupportedTransportOperationError('sendMedia'),
+      unsupported('sendMedia'),
     );
   }
 
@@ -289,7 +288,7 @@ export class TwilioConnection extends EventEmitter implements RuntimeConnection 
    */
   async sendRaw(_chatJid: string, _content: Record<string, unknown>): Promise<SubmissionReceipt> {
     return Promise.reject(
-      new UnsupportedTransportOperationError('sendRaw'),
+      unsupported('sendRaw'),
     );
   }
 
@@ -304,7 +303,7 @@ export class TwilioConnection extends EventEmitter implements RuntimeConnection 
     _selectableCount: number,
   ): Promise<{ waMessageId: string | null; hasSecret: boolean }> {
     return Promise.reject(
-      new UnsupportedTransportOperationError('sendPollMessage'),
+      unsupported('sendPollMessage'),
     );
   }
 }

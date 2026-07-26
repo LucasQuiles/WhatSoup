@@ -313,6 +313,15 @@ describe('FleetRealtimeEventPoller', () => {
     await poller.poll();
     expect(publisher.calls).toHaveLength(0);
 
+    // Poll 3 is a 503. Before #2137 this published `composing: false`, treating
+    // failure-to-observe as observed-empty. A failed probe now says nothing.
+    await poller.poll();
+    expect(publisher.calls).toHaveLength(0);
+
+    // Poll 4 answers 200 with an invalid (non-array) composing field, so the
+    // instance reports nobody typing. THAT is an observation of absence, and the
+    // entry carried forward across the 503 is retired here.
+    publisher.calls.length = 0;
     await poller.poll();
     expect(publisher.calls).toEqual([
       expect.objectContaining({
@@ -323,9 +332,155 @@ describe('FleetRealtimeEventPoller', () => {
       }),
     ]);
 
+    poller.stop();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// #2137 — a failed probe is not an observation of "nobody is typing"
+// ---------------------------------------------------------------------------
+
+/**
+ * `proxyToInstance` turns timeouts and transport errors into `{ status: 502 }`,
+ * and the production window behind this issue recorded 857 failed `/typing`
+ * probes (848 of them timeouts) over ~38 hours. Each one previously emitted a
+ * false `composing: false` for every active typing entry on that instance, then
+ * replaced `lastTyping` with the partial map — so recovery emitted a spurious
+ * `composing: true` as well.
+ *
+ * Each test below asserts the exact published set, not merely that something
+ * was or was not published: the defect was about which edges were emitted.
+ */
+describe('FleetRealtimeEventPoller — #2137 failed typing probe', () => {
+  let publisher: ReturnType<typeof makePublisher>;
+
+  beforeEach(() => {
+    publisher = makePublisher();
+    vi.useFakeTimers();
+    mockProxyToInstance.mockReset();
+  });
+
+  function typingOk(jid: string, since: number) {
+    return { status: 200, body: JSON.stringify({ composing: [{ jid, since }] }) };
+  }
+  const typingEmpty = { status: 200, body: JSON.stringify({ composing: [] }) };
+
+  function onePoller(publisherRef: ReturnType<typeof makePublisher>) {
+    const discovery = makeDiscovery({
+      test: { name: 'test', dbPath: '/tmp/test.db', logDir: '/tmp/test-logs', healthPort: 9099 },
+    });
+    return new FleetRealtimeEventPoller({ discovery, dbReader: makeDbReader(), realtime: publisherRef });
+  }
+
+  it('publishes NOTHING when the probe times out mid-composing', async () => {
+    mockProxyToInstance
+      .mockResolvedValueOnce(typingOk('group@g.us', 30))
+      .mockResolvedValueOnce({ status: 502, body: 'timeout' });
+    const poller = onePoller(publisher);
+
+    await poller.poll();
+    expect(publisher.calls).toHaveLength(1);
+
+    publisher.calls.length = 0;
+    await poller.poll();
+    expect(publisher.calls).toHaveLength(0); // was: one false composing:false
+
+    poller.stop();
+  });
+
+  it('does not re-publish composing:true when the probe recovers unchanged', async () => {
+    mockProxyToInstance
+      .mockResolvedValueOnce(typingOk('group@g.us', 30))
+      .mockResolvedValueOnce({ status: 502, body: 'timeout' })
+      .mockResolvedValueOnce(typingOk('group@g.us', 30));
+    const poller = onePoller(publisher);
+
+    await poller.poll();
+    publisher.calls.length = 0;
+    await poller.poll();
+    await poller.poll();
+
+    // The entry was carried across the failure, so recovery is a no-op. Before
+    // #2137 `lastTyping` had been wiped, so this re-published composing:true.
+    expect(publisher.calls).toHaveLength(0);
+
+    poller.stop();
+  });
+
+  it('still retires the entry when the instance answers with an empty set', async () => {
+    mockProxyToInstance
+      .mockResolvedValueOnce(typingOk('group@g.us', 30))
+      .mockResolvedValueOnce(typingEmpty);
+    const poller = onePoller(publisher);
+
+    await poller.poll();
+    publisher.calls.length = 0;
+    await poller.poll();
+
+    expect(publisher.calls).toEqual([
+      expect.objectContaining({ type: 'typing_update', instance: 'test', jid: 'group@g.us', composing: false }),
+    ]);
+
+    poller.stop();
+  });
+
+  it('retires the entry after a failure once the instance answers empty', async () => {
+    mockProxyToInstance
+      .mockResolvedValueOnce(typingOk('group@g.us', 30))
+      .mockResolvedValueOnce({ status: 502, body: 'timeout' })
+      .mockResolvedValueOnce(typingEmpty);
+    const poller = onePoller(publisher);
+
+    await poller.poll();
     publisher.calls.length = 0;
     await poller.poll();
     expect(publisher.calls).toHaveLength(0);
+    await poller.poll();
+
+    expect(publisher.calls).toEqual([
+      expect.objectContaining({ type: 'typing_update', instance: 'test', jid: 'group@g.us', composing: false }),
+    ]);
+
+    poller.stop();
+  });
+
+  it('treats an unparseable 200 body as unobserved, not as empty', async () => {
+    mockProxyToInstance
+      .mockResolvedValueOnce(typingOk('group@g.us', 30))
+      .mockResolvedValueOnce({ status: 200, body: 'not json at all' });
+    const poller = onePoller(publisher);
+
+    await poller.poll();
+    publisher.calls.length = 0;
+    await poller.poll();
+
+    // JSON.parse throws before the instance is marked observed.
+    expect(publisher.calls).toHaveLength(0);
+
+    poller.stop();
+  });
+
+  it('does NOT carry entries forward for an instance that left the fleet', async () => {
+    mockProxyToInstance.mockResolvedValueOnce(typingOk('group@g.us', 30));
+    // `makeDiscovery` snapshots its argument into a Map at call time, so the
+    // removal has to happen on the Map the poller actually reads.
+    const live = new Map<string, unknown>([
+      ['test', { name: 'test', dbPath: '/tmp/test.db', logDir: '/tmp/test-logs', healthPort: 9099 }],
+    ]);
+    const discovery = { getInstances: () => live } as never;
+    const poller = new FleetRealtimeEventPoller({ discovery, dbReader: makeDbReader(), realtime: publisher });
+
+    await poller.poll();
+    publisher.calls.length = 0;
+
+    // Instance removed: it can never be observed again, so holding its key would
+    // leak it forever. Retire it instead.
+    live.delete('test');
+    await poller.poll();
+
+    expect(publisher.calls).toEqual([
+      expect.objectContaining({ type: 'typing_update', instance: 'test', jid: 'group@g.us', composing: false }),
+    ]);
 
     poller.stop();
   });
