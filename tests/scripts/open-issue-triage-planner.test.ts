@@ -823,6 +823,78 @@ describe('gh CLI issue client', () => {
   });
 
   it.each([
+    ['empty stderr', ''],
+    ['unrelated stderr', 'request could not be completed'],
+  ])('treats authoritative status 4 with %s as one definite auth throw', async (
+    _name,
+    stderr,
+  ) => {
+    let calls = 0;
+    const spawn: GhSpawn = (() => {
+      calls += 1;
+      return spawnResult('', { status: 4, stderr });
+    }) as GhSpawn;
+    const client = new GhCliIssueClient({ spawn });
+
+    await expect(client.updateIssue(101, {
+      title: 'Retitled',
+      body: 'Expected body',
+      labels: ['bug'],
+    })).rejects.toMatchObject({
+      code: 'gh-auth-failed',
+      retryable: false,
+    });
+    expect(calls).toBe(1);
+  });
+
+  it.each([
+    ['ENOENT', 'gh-not-found'],
+    ['ETIMEDOUT', 'gh-timeout'],
+  ])('classifies a thrown %s on reads without retry', async (errnoCode, code) => {
+    let calls = 0;
+    const spawn: GhSpawn = (() => {
+      calls += 1;
+      throw Object.assign(new Error(`spawnSync gh ${errnoCode}`), { code: errnoCode });
+    }) as GhSpawn;
+    const client = new GhCliIssueClient({ spawn });
+
+    await expect(client.readMainSha()).rejects.toMatchObject({ code });
+    expect(calls).toBe(1);
+  });
+
+  it.each([
+    ['ENOENT', 'throw', 'gh-not-found'],
+    ['ETIMEDOUT', 'ambiguous', 'transport-timeout'],
+    ['EUNKNOWN', 'ambiguous', 'write-disposition-unknown'],
+  ])('classifies a thrown %s on PATCH without retry', async (
+    errnoCode,
+    outcome,
+    code,
+  ) => {
+    let calls = 0;
+    const spawn: GhSpawn = (() => {
+      calls += 1;
+      throw Object.assign(new Error(`spawnSync gh ${errnoCode}`), { code: errnoCode });
+    }) as GhSpawn;
+    const client = new GhCliIssueClient({ spawn });
+    const update = client.updateIssue(101, {
+      title: 'Retitled',
+      body: 'Expected body',
+      labels: ['bug'],
+    });
+
+    if (outcome === 'throw') {
+      await expect(update).rejects.toMatchObject({ code });
+    } else {
+      await expect(update).resolves.toEqual({
+        kind: 'ambiguous',
+        diagnosticCode: code,
+      });
+    }
+    expect(calls).toBe(1);
+  });
+
+  it.each([
     ['missing gh', spawnResult('', {
       status: null,
       error: Object.assign(new Error('spawnSync gh ENOENT'), { code: 'ENOENT' }),

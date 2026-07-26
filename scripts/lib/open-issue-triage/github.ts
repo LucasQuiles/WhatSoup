@@ -505,6 +505,23 @@ export class GhCliIssueClient implements GitHubIssueClient {
     try {
       result = this.#spawn('gh', args, spawnOptions);
     } catch (error) {
+      const errorCode = error !== null && typeof error === 'object'
+        ? (error as { code?: unknown }).code
+        : undefined;
+      if (errorCode === 'ENOENT') {
+        throw new GitHubClientError(
+          'gh-not-found',
+          `GitHub CLI is unavailable for ${options.operation}`,
+          { operation: options.operation, retryable: false, cause: error },
+        );
+      }
+      if (errorCode === 'ETIMEDOUT') {
+        throw new GitHubClientError(
+          'gh-timeout',
+          `GitHub CLI timed out for ${options.operation}`,
+          { operation: options.operation, retryable: true, cause: error },
+        );
+      }
       throw new GitHubClientError(
         'gh-api-failed',
         `GitHub CLI could not start for ${options.operation}`,
@@ -547,7 +564,8 @@ export class GhCliIssueClient implements GitHubIssueClient {
       );
     }
     if (result.error !== undefined || result.status !== 0) {
-      const authFailure = /(?:auth(?:entication)?|login|credential|token)/i.test(stderr);
+      const authFailure = result.status === 4
+        || /(?:auth(?:entication)?|login|credential|token)/i.test(stderr);
       throw new GitHubClientError(
         authFailure ? 'gh-auth-failed' : 'gh-api-failed',
         authFailure
