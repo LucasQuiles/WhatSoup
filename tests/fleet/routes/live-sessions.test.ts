@@ -15,7 +15,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { unlinkSync, existsSync } from 'node:fs';
-import { parsePsTable, handleGetLiveSessions, type LiveSessionsDeps } from '../../../src/fleet/routes/live-sessions.ts';
+import { parsePsTable, parseEtimeSeconds, PS_PROBE_ARGS, handleGetLiveSessions, type LiveSessionsDeps } from '../../../src/fleet/routes/live-sessions.ts';
 import { FleetDbReader } from '../../../src/fleet/db-reader.ts';
 import type { DiscoveredInstance } from '../../../src/fleet/discovery.ts';
 import { mockReq, mockRes } from '../../helpers/http-mocks.ts';
@@ -23,21 +23,71 @@ import { mockReq, mockRes } from '../../helpers/http-mocks.ts';
 // ─── parsePsTable ───────────────────────────────────────────────────────────
 
 describe('parsePsTable (scoped ps probe parser)', () => {
-  it('parses pid/ppid/stat/etimes/args rows', () => {
+  // The probe reads `etime`, not `etimes` (#2360). `etimes` is a GNU procps-ng
+  // extension; BSD ps on macOS rejects it. `etime` is the field both
+  // implement, and it is a FORMATTED string — `[[dd-]hh:]mm:ss` — not an
+  // integer count of seconds.
+  it('parses pid/ppid/stat/etime/args rows across all three etime shapes', () => {
     const out = parsePsTable(
-      '  101   1 Ss    3600 claude --resume sess-1\n' +
-      '  202 101 S+      45 claude --print\n' +
-      '  303   1 Z        0 [claude] <defunct>\n',
+      '  101   1 Ss    01:00:00 claude --resume sess-1\n' +
+      '  202 101 S+       00:45 claude --print\n' +
+      '  303   1 Z     13-11:20:42 [claude] <defunct>\n',
     );
     expect(out).toHaveLength(3);
     expect(out[0]).toMatchObject({ pid: 101, ppid: 1, state: 'Ss', etimeSeconds: 3600 });
     expect(out[1]).toMatchObject({ pid: 202, ppid: 101, state: 'S+', etimeSeconds: 45 });
-    expect(out[2]!.state).toBe('Z');
+    expect(out[2]).toMatchObject({ state: 'Z', etimeSeconds: 13 * 86_400 + 11 * 3_600 + 20 * 60 + 42 });
+  });
+
+  // Reachability-independent invariant: the parser must not silently accept the
+  // OLD `etimes` integer column. If someone reverts the probe to `etimes=` the
+  // rows stop parsing here rather than flowing through as plausible data.
+  it('rejects the pre-#2360 bare-integer etimes column', () => {
+    expect(parsePsTable('  101   1 Ss    3600 claude --resume sess-1\n')).toEqual([]);
+  });
+
+  it('never yields NaN for a malformed elapsed-time column', () => {
+    // NaN is NOT nullish, so `proc?.etimeSeconds ?? null` would pass it straight
+    // to API consumers as a number that fails every comparison.
+    const out = parsePsTable(
+      '  101   1 Ss    99:99 claude --resume sess-1\n' +
+      '  202 101 S+    ab:cd claude --print\n',
+    );
+    expect(out).toEqual([]);
+    for (const row of parsePsTable('  303   1 Ss    00:30 claude x\n')) {
+      expect(Number.isFinite(row.etimeSeconds)).toBe(true);
+    }
   });
 
   it('returns an empty array on empty/garbage input (never throws)', () => {
     expect(parsePsTable('')).toEqual([]);
     expect(parsePsTable('not a ps table')).toEqual([]);
+  });
+});
+
+describe('ps probe arguments (#2360 source invariant)', () => {
+  // Reachability-independent: the parser tests above all exercise parsePsTable
+  // directly, so reverting the PROBE back to the GNU-only `etimes=` column
+  // would leave every one of them green while breaking macOS in production.
+  // This asserts the field actually requested.
+  it('requests the portable `etime` field and never GNU-only `etimes`', () => {
+    const spec = PS_PROBE_ARGS.join(' ');
+    expect(spec).toContain('etime=');
+    expect(spec).not.toContain('etimes=');
+  });
+});
+
+describe('parseEtimeSeconds (#2360)', () => {
+  it('converts every documented ps elapsed-time shape', () => {
+    expect(parseEtimeSeconds('00:45')).toBe(45);
+    expect(parseEtimeSeconds('01:00:00')).toBe(3600);
+    expect(parseEtimeSeconds('13-11:20:42')).toBe(13 * 86_400 + 11 * 3_600 + 20 * 60 + 42);
+  });
+
+  it('returns null rather than NaN for non-conforming input', () => {
+    for (const bad of ['3600', '', 'abc', '1:2:3:4', '99:99', '01:60']) {
+      expect(parseEtimeSeconds(bad)).toBeNull();
+    }
   });
 });
 

@@ -6,6 +6,9 @@ export { ACCOUNT_RE } from '../lib/account-segment.ts';
 import { canonicalizeAppleIdEmail } from '../lib/appleid.ts';
 export { APPLEID_EMAIL_RE, canonicalizeAppleIdEmail, isAppleIdEmail } from '../lib/appleid.ts';
 
+/** E.164 phone shape shared across transport identity surfaces. */
+export { E164_RE } from '../lib/phone.ts';
+
 /** Transport library / protocol family. */
 export type ChannelKind =
   | 'whatsapp'

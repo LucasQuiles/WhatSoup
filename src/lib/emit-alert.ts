@@ -202,11 +202,40 @@ function captureToAlertSink(
     criticalAsset?: BotErrorsCriticalAssetDiagnostic;
   },
 ): AlertEmissionResult {
-  // Reuse buildBotErrorsEvent so the captured record is identical-shape AND
-  // redacted exactly like a real outbox event — a secret in evidence must never
-  // leak to the sink file.
-  const event = buildBotErrorsEvent(input);
-  appendFileSync(sink, `${JSON.stringify(event)}\n`);
+  try {
+    // Reuse buildBotErrorsEvent so the captured record is identical-shape AND
+    // redacted exactly like a real outbox event — a secret in evidence must
+    // never leak to the sink file.
+    //
+    // It is built INSIDE the guard on purpose: it reads ambient process state
+    // (process.cwd(), hostname()), and process.cwd() throws ENOENT outright
+    // when the working directory has been deleted out from under a long-lived
+    // instance. Constructing it above the try would leave the single most
+    // throw-prone call in this function uncovered by the guard whose whole
+    // purpose is to keep an alert from killing its host.
+    const event = buildBotErrorsEvent(input);
+    appendFileSync(sink, `${JSON.stringify(event)}\n`);
+  } catch (err) {
+    // Capturing to the sink can fail for reasons entirely outside this process:
+    // disk full, EACCES, a deleted cwd, or the configured path being
+    // invalidated by a config reload. Throwing here would escape
+    // emitAlert/clearAlertSource — and both are reached from `void`-ed async
+    // paths (ConnectionManager's 'exhausted' handler), so the throw becomes an
+    // unhandled rejection and main.ts's handler shuts the instance down. An
+    // alerting path must never be the thing that kills the host it is trying to
+    // report on (#2287).
+    //
+    // Deliberately NOT falling through to the outbox ladder. Sink mode's whole
+    // contract (see alertSinkPath above) is that NOTHING is paged — it exists so
+    // a verifier can observe operator-facing alerts without waking a live
+    // operator, and it is opt-in and unset in production. Falling through would
+    // turn an unwritable dry-run sink into a real page, which is the one thing
+    // the sink is there to prevent. Report the failure instead: `ok: false`
+    // routes through observeAlertEmission's existing loud path.
+    const reason = errorMessage(err);
+    log.warn({ instance: input.instance, source: input.source, err: reason }, 'alert sink capture failed');
+    return { ok: false, channel: 'sink', status: 'failed', outboxError: reason };
+  }
   return { ok: true, channel: 'sink', status: 'durably_queued' };
 }
 

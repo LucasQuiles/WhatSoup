@@ -27,6 +27,18 @@ export interface SendImessageArgs {
  * A single iMessage envelope returned from the provider. Mirrors what both
  * `imsg rpc` and BlueBubbles `/api/v1/chat/query` surface, narrowed to
  * the fields the adapter actually consumes.
+ *
+ * The `kind` discriminator selects which optional payload fields are set:
+ *   - 'text'     → `body` is non-null
+ *   - 'reaction' → `reactionEmoji`, `reactionRemove`, `reactionTargetGuid` set
+ *   - 'other'    → none of the above (typing indicators, read receipts, call
+ *                  events, etc.); the adapter drops these silently today
+ *
+ * Read receipts and typing indicators are NOT surfaced via this type yet:
+ * iMessage read receipts ride on the `dateRead` field of the ORIGINAL outbound
+ * message (state-tracking across polls), and typing indicators are pushed via
+ * BlueBubbles socket/SSE events rather than surfaced in `/message/query`. Both
+ * require polling-model changes and are deferred.
  */
 export interface InboundImessage {
   /**
@@ -44,10 +56,23 @@ export interface InboundImessage {
   readonly body: string | null;
   /** True iff this is our own outbound message echoed back. */
   readonly fromMe: boolean;
-  /** Envelope kind tag ('text' / 'reaction' / 'typing' / 'read' / etc.). */
+  /** Envelope kind tag ('text' / 'reaction' / 'other'). */
   readonly kind: string;
   /** Envelope timestamp (epoch ms). */
   readonly timestamp: number;
+  /**
+   * Reaction emoji (set when `kind === 'reaction'`). One of the 6 iMessage
+   * tapback emojis: '❤️' | '👍' | '👎' | '😂' | '‼️' | '❓'. Removal
+   * envelopes retain the emoji being removed and set `reactionRemove: true`.
+   */
+  readonly reactionEmoji?: string;
+  /** True iff this tapback removes a prior reaction. Set when kind === 'reaction'. */
+  readonly reactionRemove?: boolean;
+  /**
+   * GUID of the message being reacted to (set when `kind === 'reaction'`).
+   * BlueBubbles: `associatedMessageGuid` field. imsg: `associated_guid`.
+   */
+  readonly reactionTargetGuid?: string;
 }
 
 /**

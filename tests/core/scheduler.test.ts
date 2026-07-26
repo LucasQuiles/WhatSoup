@@ -898,7 +898,14 @@ describe('MessageScheduler — tick() additional edge cases', () => {
     expect(statuses.every((r) => r.status === 'sent')).toBe(true);
   });
 
-  it('treats a malformed JSON payload as a send failure and applies the retry path', async () => {
+  // #2359: this previously asserted status='pending', retry_count=1 — the row
+  // went down the transient retry ladder. That was a characterization of the
+  // defect, not a specification: an undecodable payload fails identically on
+  // every attempt, so retrying only spent the budget before dropping the
+  // message with a generic error. It is now dead-lettered on the first
+  // occurrence. The transport-not-reached assertion is unchanged and still the
+  // point: nothing is sent for a row that cannot be decoded.
+  it('dead-letters a malformed JSON payload instead of spending the retry budget', async () => {
     const { mock: conn2, sendRawCalls } = makeMockConnection();
     const id = insertScheduledMessage(db.raw, {
       chatJid: '15550700004@s.whatsapp.net',
@@ -910,10 +917,11 @@ describe('MessageScheduler — tick() additional edge cases', () => {
 
     expect(sendRawCalls).toHaveLength(0);
     const row = db.raw
-      .prepare('SELECT status, retry_count FROM scheduled_messages WHERE id = ?')
-      .get(id) as { status: string; retry_count: number };
-    expect(row.status).toBe('pending');
-    expect(row.retry_count).toBe(1);
+      .prepare('SELECT status, retry_count, error FROM scheduled_messages WHERE id = ?')
+      .get(id) as { status: string; retry_count: number; error: string | null };
+    expect(row.status).toBe('failed');
+    expect(row.retry_count).toBe(0);
+    expect(row.error).toMatch(/payload is not decodable/i);
   });
 
   it('serializes a non-Error rejection into the error column via String(err)', async () => {

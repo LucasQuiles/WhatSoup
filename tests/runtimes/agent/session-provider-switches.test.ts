@@ -112,6 +112,65 @@ describe('SessionManager provider switches — fail-fast (#447)', () => {
     }
   });
 
+  it('exposes completed OpenCode tools as bounded activity before their result', () => {
+    const parser = __provider_switch_for_test.getParser('opencode-cli');
+    const events = parser(JSON.stringify({
+      type: 'tool_use',
+      part: {
+        tool: 'bash',
+        callID: 'call-live-progress',
+        state: {
+          status: 'completed',
+          input: { command: 'sensitive command text' },
+          output: 'sensitive command output',
+        },
+      },
+    }));
+
+    expect(events).toEqual([
+      {
+        type: 'tool_use',
+        toolName: 'bash',
+        toolId: 'call-live-progress',
+        toolInput: {},
+      },
+      {
+        type: 'tool_result',
+        isError: false,
+        toolId: 'call-live-progress',
+        toolName: 'bash',
+        content: 'sensitive command output',
+      },
+    ]);
+    expect(JSON.stringify(events[0])).not.toContain('sensitive command');
+  });
+
+  it('does not synthesize OpenCode activity for failed tools', () => {
+    const parser = __provider_switch_for_test.getParser('opencode-cli');
+    const events = parser(JSON.stringify({
+      type: 'tool_use',
+      part: {
+        tool: 'bash',
+        callID: 'call-failed-tool',
+        state: {
+          status: 'error',
+          input: { command: 'failing command' },
+          error: 'command failed',
+        },
+      },
+    }));
+
+    expect(events).toEqual([
+      {
+        type: 'tool_result',
+        isError: true,
+        toolId: 'call-failed-tool',
+        toolName: 'bash',
+        content: 'command failed',
+      },
+    ]);
+  });
+
   it('buildChildEnv throws on an unknown provider ID', () => {
     expect(() => buildChildEnv('claud-cli')).toThrow(/unknown provider/i);
   });

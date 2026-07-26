@@ -52,7 +52,7 @@
     },
     {
       "path": "src/transport/auth.ts",
-      "sha256": "76c616e9126e46bd6a68bf3a6311baa86e16c44d597e4d3339b36688fd320667",
+      "sha256": "5072b5af6294199b0dc4878687fd0f8abc692784059239745b161f6a3a0b6341",
       "mustContain": [
         "useMultiFileAuthState",
         "decideDisconnectAction"
@@ -71,7 +71,7 @@
     },
     {
       "path": "src/runtimes/agent/session.ts",
-      "sha256": "93373bd2c85f48622f4cfc7874fa5e08d788860a77f523aefc31851f2a66553c",
+      "sha256": "15a2bcb8a8927bc52c4e29559c9523897bb11aa112a0c8251236daea51b07d1d",
       "mustContain": [
         "composeWithExactLineDedup"
       ],

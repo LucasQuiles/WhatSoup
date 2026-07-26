@@ -21,8 +21,8 @@
 // E.164 phone. The port accepts both forms; iMessage itself routes either to
 // the same AppleID-verified destination.
 
-/** E.164 phone shape — shared with the Twilio and Signal transports. */
-export const E164_RE = /^\+[1-9]\d{6,14}$/;
+/** E.164 phone shape shared with the other transport validators. */
+export { E164_RE } from '../../core/transport-refs.ts';
 
 /**
  * AppleID email shape. Defined in core/transport-refs.ts and re-exported here
