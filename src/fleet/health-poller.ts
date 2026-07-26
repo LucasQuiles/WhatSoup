@@ -626,6 +626,20 @@ export class HealthPoller {
   private healthBodyDegradedPolls: Map<string, number> = new Map();
   private operationalFallbackReclassified: Set<string> = new Set();
   private unreachableAlerted: Set<string> = new Set();
+  /**
+   * Open alert-suppression episodes, keyed by the same `name:source` key the
+   * throttle store uses (#2355). An unchanged condition is re-observed on every
+   * poll, so logging each suppression writes one record per poll for as long as
+   * the condition holds — at the 5s default cadence a single 15-minute throttle
+   * window emits ~180 identical records, and a silenced instance is unbounded.
+   * Each episode is logged once on entry and once on exit with a count, so the
+   * journal carries bounded state transitions instead of steady-state noise.
+   * Cardinality matches `persistedAlertThrottle`: one entry per instance+source.
+   */
+  private alertSuppressionEpisodes: Map<
+    string,
+    { reason: string; since: number; count: number; name: string; source: string }
+  > = new Map();
   private targetPids: Map<string, number> = new Map();
   private readonly loopLagSampler: LoopLagSampler;
   /**
@@ -695,6 +709,10 @@ export class HealthPoller {
       this.pollInterval = null;
       this.loopLagSampler.stop();
     }
+    // #2355: an episode only closes when suppression stops applying. On shutdown
+    // that never happens, so flush what is still open rather than losing the
+    // count — otherwise a long-running suppression leaves no record of its size.
+    for (const key of [...this.alertSuppressionEpisodes.keys()]) this.endAlertSuppressionEpisode(key);
   }
 
   getStatuses(): Map<string, InstanceStatus> {
@@ -707,6 +725,56 @@ export class HealthPoller {
 
   private alertThrottleKey(name: string, source: string): string {
     return `${name}:${source}`;
+  }
+
+  /**
+   * Record one suppressed alert observation (#2355).
+   *
+   * Logs on ENTRY into a suppression episode — same message and fields the
+   * per-poll log used, so existing operator greps keep working — then counts
+   * subsequent identical observations silently. A change of reason (silenced ->
+   * throttled, or vice versa) closes the current episode and opens a new one,
+   * because that IS a state transition worth a record.
+   *
+   * The delivery throttle itself is untouched: this changes only how suppression
+   * is narrated, never whether an alert is sent.
+   */
+  private noteAlertSuppressed(
+    key: string,
+    name: string,
+    source: string,
+    reason: string,
+    extra?: Record<string, unknown>,
+  ): void {
+    const open = this.alertSuppressionEpisodes.get(key);
+    if (open && open.reason === reason) {
+      open.count += 1;
+      return;
+    }
+    if (open) this.endAlertSuppressionEpisode(key);
+    this.alertSuppressionEpisodes.set(key, { reason, since: Date.now(), count: 1, name, source });
+    log.info({ name, source, ...extra }, reason);
+  }
+
+  /**
+   * Close an open suppression episode and summarise it (#2355).
+   *
+   * Emits nothing when the episode was a single observation — that one already
+   * has its entry record, and a summary would just restore the 2-records-per-poll
+   * shape this is meant to remove.
+   */
+  private endAlertSuppressionEpisode(key: string): void {
+    const open = this.alertSuppressionEpisodes.get(key);
+    if (!open) return;
+    this.alertSuppressionEpisodes.delete(key);
+    if (open.count <= 1) return;
+    log.info({
+      name: open.name,
+      source: open.source,
+      suppressedObservations: open.count,
+      episodeDurationMs: Date.now() - open.since,
+      reason: open.reason,
+    }, 'alert suppression episode ended');
   }
 
   private lastAlertAtFor(name: string, existing: InstanceStatus | undefined): string | null {
@@ -1953,21 +2021,25 @@ export class HealthPoller {
     criticalAsset?: BotErrorsCriticalAssetDiagnostic,
   ): boolean {
     const bypassSuppression = source === 'instance_logged_out';
+    const throttleKey = this.alertThrottleKey(name, source);
     if (!bypassSuppression && isInstanceSilenced(name)) {
-      log.info({ name, source }, 'alert suppressed — instance is silenced');
+      this.noteAlertSuppressed(throttleKey, name, source, 'alert suppressed — instance is silenced');
       return false;
     }
 
     const existing = this.statuses.get(name);
-    const throttleKey = this.alertThrottleKey(name, source);
     const lastAlertAt = this.persistedAlertThrottle.get(throttleKey) ?? null;
     if (!bypassSuppression && lastAlertAt !== null) {
       const elapsed = Date.now() - new Date(lastAlertAt).getTime();
       if (elapsed < MIN_ALERT_INTERVAL_MS) {
-        log.info({ name, source, elapsed }, 'alert suppressed — rate limit (15min)');
+        this.noteAlertSuppressed(throttleKey, name, source, 'alert suppressed — rate limit (15min)', { elapsed });
         return false;
       }
     }
+
+    // Suppression no longer applies for this key — close any open episode before
+    // the emit path, so the summary lands before the alert it was suppressing.
+    this.endAlertSuppressionEpisode(throttleKey);
 
     const throttleLoadErrorCode = this.alertThrottleLoadErrorCode;
     const throttleEvidence = throttleLoadErrorCode

@@ -77,6 +77,41 @@ function framePrefixFromPattern(pattern: string): string {
   return basename(pattern).replace(/_%03d\.jpg$/, '');
 }
 
+/**
+ * Remove every frame this task produced, under BOTH the primary
+ * (`frames_<token>_NNN.jpg`) and fallback (`frames_<token>-fb_NNN.jpg`)
+ * prefixes (#2184).
+ *
+ * The read loops already unlink each frame they consume, but only on paths that
+ * reach them: when the primary ffmpeg pass rejects, control jumps straight to
+ * the fallback and any partial frames the failed pass wrote are never removed.
+ * The same holds for the `dependency_missing`, `fallback_failed` and
+ * `fallback_no_frames` early returns. Sweeping in the outer `finally` covers
+ * every return and throw once, instead of adding a cleanup call per exit.
+ *
+ * Isolation is preserved by matching the two exact per-task prefixes rather
+ * than `startsWith(\`frames_${token}\`)`: a concurrent task whose token merely
+ * began with this one's could otherwise be swept. Tokens come from
+ * `writeTempFile`'s random stem, so that is already improbable — this makes it
+ * impossible rather than unlikely.
+ *
+ * Best-effort by construction: `cleanupTempFile` swallows its own errors, and
+ * the `readdir` is wrapped, so cleanup can never replace the extraction result.
+ */
+async function sweepTaskFrames(outputDir: string, frameToken: string): Promise<void> {
+  const primaryPrefix = `frames_${frameToken}_`;
+  const fallbackPrefix = `frames_${frameToken}-fb_`;
+  try {
+    for (const file of await readdir(outputDir)) {
+      if (!file.endsWith('.jpg')) continue;
+      if (!file.startsWith(primaryPrefix) && !file.startsWith(fallbackPrefix)) continue;
+      cleanupTempFile(join(outputDir, file));
+    }
+  } catch (err) {
+    log.debug({ err }, 'frame sweep failed — leaving residue for the retention timer');
+  }
+}
+
 export async function extractFrames(videoBuffer: Buffer): Promise<VideoFrame[]> {
   const details = await extractFramesDetailed(videoBuffer);
   return details.frames;
@@ -136,9 +171,6 @@ export async function extractFramesDetailed(videoBuffer: Buffer): Promise<VideoF
         ], opts);
       } catch (fallbackErr) {
         const message = errorMessage(fallbackErr);
-        // ENOENT means the ffmpeg binary itself is absent — a missing system
-        // dependency, not a bad video. Surface it distinctly so a host without
-        // ffmpeg is alertable instead of looking like generic frame failure (#1075).
         // ENOENT means the ffmpeg binary itself is absent — a missing system
         // dependency, not a bad video. Surface it distinctly so a host without
         // ffmpeg is alertable instead of looking like generic frame failure (#1075).
@@ -241,6 +273,9 @@ export async function extractFramesDetailed(videoBuffer: Buffer): Promise<VideoF
     log.error({ err: message }, 'extractFrames failed entirely');
     return { frames: [], status: 'failed', fallbackUsed: false, error: message };
   } finally {
+    // #2184: sweep this task's frames on every exit. Files the read loops
+    // already unlinked are tolerated — cleanupTempFile ignores ENOENT.
+    await sweepTaskFrames(outputDir, frameToken);
     cleanupTempFile(inputPath);
   }
 }

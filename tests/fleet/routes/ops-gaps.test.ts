@@ -103,6 +103,9 @@ function mockRes(): ServerResponse & { _status: number; _headers: Record<string,
       if (headers) Object.assign(res._headers, headers);
     },
     end(data?: string) { if (data) res._body = data; },
+    // ServerResponse is an EventEmitter; createSSEWriter attaches an 'error'
+    // listener (#2292 L7), so a fake without `on` is an incomplete fake.
+    on() { return res; },
   };
   return res as any;
 }
@@ -122,6 +125,7 @@ function mockSseRes() {
       if (data) res._chunks.push(data);
       res._ended = true;
     },
+    on() { return res; },
   };
   return res as any;
 }
