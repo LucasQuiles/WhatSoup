@@ -150,6 +150,8 @@ describe('managed triage review body', () => {
     ['multiline CRLF', '<!-- triage-review\r\n:\r\nstart -->\nA\n<!-- triage-review\r\n:\r\nend -->'],
     ['trailing word payload', '<!-- triage-review:start extra -->\nA\n<!-- triage-review:end extra -->'],
     ['trailing punctuation payload', '<!-- triage-review:start! -->\nA\n<!-- triage-review:end! -->'],
+    ['trailing slash payload', '<!-- triage-review:start/foo -->\nA\n<!-- triage-review:end/foo -->'],
+    ['trailing Unicode dash payload', '<!-- triage-review:start—foo -->\nA\n<!-- triage-review:end—foo -->'],
     ['incomplete comment', '<!-- triage-review:start extra'],
     [
       'malformed plus canonical',
@@ -181,6 +183,23 @@ describe('managed triage review body', () => {
 
     expect(() => mergeReviewBlock(
       'Owner example:\n```\ntriage-review:start\n```\n',
+      '<!-- triage-review:start -->\nA\n<!-- triage-review:end -->',
+    )).not.toThrow();
+  });
+
+  it.each([
+    ['ASCII letters', 'startling'],
+    ['ASCII digit', 'start2'],
+    ['underscore', 'start_extra'],
+    ['non-ASCII Latin letter', 'starté'],
+    ['non-ASCII Greek letter', 'startα'],
+    ['combining mark', `start\u0301`],
+    ['connector punctuation', 'start‿'],
+    ['ZWNJ', `start\u200Cfoo`],
+    ['ZWJ', `start\u200Dfoo`],
+  ])('allows harmless sentinel-like identifier continuation: %s', (_name, identifier) => {
+    expect(() => mergeReviewBlock(
+      `Owner comment:\n<!-- triage-review:${identifier} -->\n`,
       '<!-- triage-review:start -->\nA\n<!-- triage-review:end -->',
     )).not.toThrow();
   });

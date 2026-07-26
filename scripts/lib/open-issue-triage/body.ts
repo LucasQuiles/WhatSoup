@@ -7,7 +7,7 @@ import { sha256 } from './model.ts';
 const START_MARKER = '<!-- triage-review:start -->';
 const END_MARKER = '<!-- triage-review:end -->';
 const SENTINEL_COMMENT_PREFIX =
-  /<!--[ \t\r\n\f\v]{0,32}triage-review[ \t\r\n\f\v]{0,32}:[ \t\r\n\f\v]{0,32}(?:start|end)\b/giu;
+  /<!--[ \t\r\n\f\v]{0,32}triage-review[ \t\r\n\f\v]{0,32}:[ \t\r\n\f\v]{0,32}(?:start|end)(?![\p{ID_Continue}\u200C\u200D])/giu;
 const STANDALONE_MARKER =
   /(^|\n)(<!-- triage-review:(start|end) -->)(?=\r?(?:\n|$))/g;
 const CLOSING_REFERENCE =
