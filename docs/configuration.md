@@ -429,6 +429,7 @@ into place during deployment.
 | `name` | string | yes | — | Instance name. Must match the directory name. Validated by the loader. |
 | `type` | string | yes | — | Instance type: `chat`, `agent`, or `passive`. |
 | `adminPhones` | string[] | yes | — | Non-empty array of phone numbers with admin access. All elements must be non-empty strings. |
+| `internalPeerJids` | string[] | no | `[]` | Exact authenticated direct-chat JIDs whose outbound messages are internal operator coordination. Ordinary paths and operator vocabulary are preserved, while secrets and credential paths remain masked. This does not grant inbound admin access. Group JIDs, duplicate entries, whitespace, and spoofable transports such as `@sms` are rejected. |
 | `accessMode` | string | yes | — | Who can interact with the bot. See [Access Modes](#access-modes). |
 | `systemPrompt` | string | see rules | — | LLM system prompt. **Required** for `chat`. **Forbidden** for `passive`. Optional for `agent` (falls back to `DEFAULT_SYSTEM_PROMPT` in `config.ts`). |
 | `models` | object | no | env/default | Model overrides. Keys: `conversation`, `extraction`, `validation`, `fallback`. Each takes a literal model ID or a symbolic `<vendor>[:<family>]:latest[-stable]` form (see [Dynamic model resolution](#dynamic-model-resolution)). |

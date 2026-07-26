@@ -6,6 +6,7 @@ import {
   evaluateOutboundMessageSafety,
   resolveOutboundAudience,
   isOperatorDmPeer,
+  isTrustedInternalDmPeer,
   resetSpoofWarnDedupe,
   CLIENT_TEMPORARY_ISSUE_TEXT,
 } from '../../src/core/outbound-message-safety.ts';
@@ -704,6 +705,44 @@ describe('resolveOutboundAudience', () => {
     expect(resolveOutboundAudience('111@g.us')).toBe('client');
     delete process.env['WHATSOUP_INTERNAL_JIDS'];
     expect(resolveOutboundAudience('111@g.us')).toBe('client');
+  });
+
+  it('treats an explicitly trusted internal DM peer as internal even when it is not this instance admin', () => {
+    delete process.env['BOT_ERRORS_JID'];
+    delete process.env['WHATSOUP_INTERNAL_JIDS'];
+    expect(resolveOutboundAudience('222@s.whatsapp.net', {
+      isGroup: false,
+      peerIsAdmin: false,
+      peerIsTrustedInternal: true,
+      fallbackActive: true,
+    })).toBe('internal');
+  });
+
+  it('does not elevate a group from the trusted internal DM peer signal', () => {
+    expect(resolveOutboundAudience('222@g.us', {
+      isGroup: true,
+      peerIsAdmin: false,
+      peerIsTrustedInternal: true,
+      fallbackActive: false,
+    })).toBe('client');
+  });
+});
+
+describe('isTrustedInternalDmPeer', () => {
+  const trustedPhoneJid = `${'15555550002'}@${'s.whatsapp.net'}`;
+
+  it('requires an exact configured authenticated DM JID', () => {
+    const peers = new Set([trustedPhoneJid]);
+    expect(isTrustedInternalDmPeer(trustedPhoneJid, false, peers)).toBe(true);
+    const otherPeer = `${'15555550003'}@${'s.whatsapp.net'}`;
+    expect(isTrustedInternalDmPeer(otherPeer, false, peers)).toBe(false);
+  });
+
+  it('rejects groups and spoofable transport identities even when configured', () => {
+    const spoofedSms = `${'15555550002'}@${'sms'}`;
+    const groupPeer = `${'15555550002'}@${'g.us'}`;
+    expect(isTrustedInternalDmPeer(groupPeer, true, new Set([groupPeer]))).toBe(false);
+    expect(isTrustedInternalDmPeer(spoofedSms, false, new Set([spoofedSms]))).toBe(false);
   });
 });
 
