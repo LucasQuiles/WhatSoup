@@ -18,15 +18,15 @@ The **Inconsistencies** section lists missing or stale index entries compared wi
 scoped markdown files currently on disk.
 
 **Repo:** `WhatSoup`
-**Total entries:** 78
+**Total entries:** 79
 
 ## Totals
 
 | Dimension | Breakdown |
 |---|---|
-| Kind | handoff=7, plan=38, review=4, spec=28, state=1 |
-| Status | active=15, closed=4, completed=33, deferred=7, pending=14, unknown=5 |
-| Status source | body-marker=74, fallback=3, state-md-status=1 |
+| Kind | handoff=7, plan=39, review=4, spec=28, state=1 |
+| Status | active=16, closed=4, completed=33, deferred=7, pending=14, unknown=5 |
+| Status source | body-marker=75, fallback=3, state-md-status=1 |
 
 ## Inconsistencies
 
@@ -34,13 +34,14 @@ scoped markdown files currently on disk.
 
 ## Synthesis
 
-### Active (15)
+### Active (16)
 
 | Path | Kind | Topic | Status source |
 |------|------|-------|---------------|
 | `docs/superpowers/handoffs/2026-07-16-boundary-contract-feedback-implementation-notes.md` | handoff | boundary-contract-feedback-implementation-notes | body-marker |
 | `docs/superpowers/plans/2026-07-11-central-hub-release-proof-pilot.md` | plan | central-hub-release-proof-pilot | body-marker |
 | `docs/superpowers/plans/2026-07-17-boundary-exit-parser-codeql-hardening.md` | plan | boundary-exit-parser-codeql-hardening | body-marker |
+| `docs/superpowers/plans/2026-07-26-open-issue-triage-tooling.md` | plan | open-issue-triage-tooling | body-marker |
 | `docs/superpowers/specs/2026-07-09-wall-to-wall-audit-remediation-design.md` | spec | wall-to-wall-audit-remediation-design | body-marker |
 | `docs/superpowers/specs/2026-07-11-central-hub-release-proof-pilot-design.md` | spec | central-hub-release-proof-pilot-design | body-marker |
 | `docs/superpowers/specs/2026-07-15-headless-fallback-runtime-alignment-design.md` | spec | headless-fallback-runtime-alignment-design | body-marker |
@@ -116,7 +117,7 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 | `docs/superpowers/handoffs/2026-07-16-boundary-contract-feedback-implementation-notes.md` | handoff | active | body-marker | boundary-contract-feedback-implementation-notes | 2026-07-16 |  |
 | `docs/superpowers/handoffs/2026-07-16-boundary-core-history-mining.md` | handoff | pending | body-marker | boundary-core-history-mining | 2026-07-16 |  |
 
-### docs/superpowers/plans  _(38 entries)_
+### docs/superpowers/plans  _(39 entries)_
 
 | Path | Kind | Status | Source | Topic | Last Mod | Supersedes |
 |------|------|--------|--------|-------|----------|------------|
@@ -158,6 +159,7 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 | `docs/superpowers/plans/2026-07-17-boundary-exit-parser-codeql-hardening.md` | plan | active | body-marker | boundary-exit-parser-codeql-hardening | 2026-07-17 |  |
 | `docs/superpowers/plans/2026-07-17-boundary-validator-ci-refactor.md` | plan | unknown | fallback | boundary-validator-ci-refactor | 2026-07-17 |  |
 | `docs/superpowers/plans/2026-07-17-macos-credential-durability.md` | plan | unknown | fallback | macos-credential-durability | 2026-07-17 |  |
+| `docs/superpowers/plans/2026-07-26-open-issue-triage-tooling.md` | plan | active | body-marker | open-issue-triage-tooling | 2026-07-27 |  |
 
 ### docs/superpowers/reviews  _(4 entries)_
 
@@ -214,4 +216,4 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 ---
 
 - Derived from `docs/work-index.json`
-- Generated at 2026-07-27T18:22:19Z from commit `e82e61fc54762f852bb480bf43eb04094141bc6f`
+- Generated at 2026-07-27T18:26:09Z from commit `88f160a1402b1438d6fcfafee256f16a68deee7c`
