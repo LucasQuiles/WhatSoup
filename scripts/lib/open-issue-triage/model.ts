@@ -572,6 +572,10 @@ export function receiptSha256(receiptWithoutHash: unknown): string {
 }
 
 export function parseLedger(text: string): MutationReceipt[] {
+  if (text === '' || text === '\n') return [];
+  if (/^[\t\r\n ]*$/.test(text)) {
+    throw new Error('an empty ledger must use the canonical empty string or one-LF seed');
+  }
   if (text !== '' && !text.endsWith('\n')) {
     throw new Error('a nonempty ledger must end with LF');
   }

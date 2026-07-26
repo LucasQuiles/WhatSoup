@@ -3,6 +3,7 @@ import {
   constants,
   existsSync,
   fstatSync,
+  ftruncateSync,
   fsyncSync,
   lstatSync,
   openSync,
@@ -261,7 +262,7 @@ function extractIntentSha256(text: string): string | null {
 }
 
 function bindRegistry(
-  input: ApplyIssueBatchInput,
+  input: Pick<ApplyIssueBatchInput, 'expectedMainSha' | 'registry'>,
   plans: readonly IssueMutationPlan[],
 ): { registry: OpenIssueRegistry; digest: string } {
   let registry: OpenIssueRegistry;
@@ -318,7 +319,15 @@ function bindRegistry(
 }
 
 function assertInput(
-  input: ApplyIssueBatchInput,
+  input: Pick<
+    ApplyIssueBatchInput,
+    | 'expectedMainSha'
+    | 'plans'
+    | 'registry'
+    | 'confirmedPlanSha256'
+    | 'idempotencyKey'
+    | 'ledgerPath'
+  >,
 ): { plans: IssueMutationPlan[]; registryDigest: string } {
   const plans = parsePlanBatch(input.plans);
   if (!/^[0-9a-f]{40}$/.test(input.expectedMainSha)) {
@@ -427,6 +436,33 @@ function assertInput(
   return { plans, registryDigest: registryBinding.digest };
 }
 
+export function validateIssuePlanBatch(
+  plansValue: unknown,
+  registryValue: unknown,
+): {
+  plans: IssueMutationPlan[];
+  expectedMainSha: string;
+  planSha256: string;
+  registryDigest: string;
+} {
+  const parsed = parsePlanBatch(plansValue);
+  const first = parsed[0]!;
+  const validated = assertInput({
+    expectedMainSha: first.expected_main_sha,
+    plans: plansValue,
+    registry: registryValue,
+    confirmedPlanSha256: first.plan_sha256,
+    idempotencyKey: 'read-only-plan-validation',
+    ledgerPath: 'read-only-plan-validation',
+  });
+  return {
+    plans: validated.plans,
+    expectedMainSha: first.expected_main_sha,
+    planSha256: first.plan_sha256,
+    registryDigest: validated.registryDigest,
+  };
+}
+
 interface FileIdentity {
   dev: string;
   ino: string;
@@ -469,6 +505,7 @@ class DurableLedger {
   #text: string;
   #receipts: MutationReceipt[];
   #identity: FileIdentity | null;
+  #replaceWhitespaceOnNextAppend = false;
 
   readonly #beforeDurablePathCheck?: (path: string) => void;
 
@@ -481,8 +518,11 @@ class DurableLedger {
     this.#identity = inspectedIdentity;
     this.#beforeDurablePathCheck = beforeDurablePathCheck;
     try {
-      this.#text = readLedgerNoFollow(path, inspectedIdentity);
-      this.#receipts = parseLedger(this.#text);
+      const existingText = readLedgerNoFollow(path, inspectedIdentity);
+      this.#receipts = parseLedger(existingText);
+      this.#replaceWhitespaceOnNextAppend =
+        this.#receipts.length === 0 && existingText.length > 0;
+      this.#text = this.#receipts.length === 0 ? '' : existingText;
     } catch (error) {
       if (error instanceof ApplyIssueBatchError) throw error;
       throw fail('ledger-invalid', 'existing receipt ledger is invalid', 5, undefined, error);
@@ -525,7 +565,9 @@ class DurableLedger {
         line,
         this.#identity,
         this.#beforeDurablePathCheck,
+        this.#replaceWhitespaceOnNextAppend,
       );
+      this.#replaceWhitespaceOnNextAppend = false;
     } catch (error) {
       throw fail(
         'ledger-durability-failed',
@@ -619,12 +661,13 @@ function appendDurably(
   text: string,
   expectedIdentity: FileIdentity | null,
   beforeDurablePathCheck?: (path: string) => void,
+  replaceWhitespace = false,
 ): FileIdentity {
   const noFollow = constants.O_NOFOLLOW ?? 0;
   const fileDescriptor = openSync(
     path,
     constants.O_WRONLY
-      | constants.O_APPEND
+      | (replaceWhitespace ? 0 : constants.O_APPEND)
       | constants.O_CREAT
       | noFollow
       | (expectedIdentity === null ? constants.O_EXCL : 0),
@@ -656,6 +699,7 @@ function appendDurably(
     ) {
       throw new Error('ledger descriptor identity changed before append');
     }
+    if (replaceWhitespace) ftruncateSync(fileDescriptor, 0);
     const bytes = Buffer.from(text, 'utf8');
     let offset = 0;
     while (offset < bytes.length) {
@@ -687,12 +731,20 @@ function appendDurably(
   return identityOf(durablePathStat);
 }
 
-function beforeSnapshotMatches(issue: LiveIssue, plan: IssueMutationPlan): boolean {
-  return issue.number === plan.issue_number
-    && issue.nodeId === plan.issue_node_id
-    && issue.repository === REPOSITORY
+export function issueIdentityMatches(
+  issue: LiveIssue,
+  expected: { issue_number: number; issue_node_id: string; repository: string },
+): boolean {
+  return issue.number === expected.issue_number
+    && issue.nodeId === expected.issue_node_id
+    && issue.repository === expected.repository
+    && issue.url === `https://github.com/${expected.repository}/issues/${expected.issue_number}`
     && issue.state === 'open'
-    && issue.isPullRequest === false
+    && issue.isPullRequest === false;
+}
+
+function beforeSnapshotMatches(issue: LiveIssue, plan: IssueMutationPlan): boolean {
+  return issueIdentityMatches(issue, plan)
     && issue.updatedAt === plan.expected_before.updated_at
     && sha256(issue.title) === plan.expected_before.title_sha256
     && sha256(issue.body) === plan.expected_before.body_sha256
@@ -701,11 +753,7 @@ function beforeSnapshotMatches(issue: LiveIssue, plan: IssueMutationPlan): boole
 
 function desiredSnapshotMatches(issue: LiveIssue, target: PreparedTarget): boolean {
   const { plan } = target;
-  return issue.number === plan.issue_number
-    && issue.nodeId === plan.issue_node_id
-    && issue.repository === REPOSITORY
-    && issue.state === 'open'
-    && issue.isPullRequest === false
+  return issueIdentityMatches(issue, plan)
     && sha256(issue.title) === plan.desired.title_sha256
     && sha256(issue.body) === plan.desired.body_sha256
     && extractIntentSha256(issue.body) === plan.intent_sha256

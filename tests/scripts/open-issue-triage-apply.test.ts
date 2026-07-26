@@ -649,6 +649,12 @@ describe('open issue batch apply', () => {
   it('rejects broken ledgers and symlink ledger paths before mutation', async () => {
     const client = new InMemoryClient([101]);
     const { plans, inputRegistry } = await makePlans(client, [record(101)]);
+    writeFileSync(ledgerPath, ' \n\t');
+    await expect(applyIssueBatch(applyInput(client, plans, inputRegistry)))
+      .rejects.toMatchObject({ code: 'ledger-invalid' });
+    expect(readFileSync(ledgerPath, 'utf8')).toBe(' \n\t');
+    expect(client.updates).toEqual([]);
+
     writeFileSync(ledgerPath, '{"broken":true}\n');
     await expect(applyIssueBatch(applyInput(client, plans, inputRegistry)))
       .rejects.toMatchObject({ code: 'ledger-invalid' });

@@ -801,6 +801,8 @@ describe('mutation receipt schema and ledger lifecycle', () => {
 
   it('accepts an empty ledger and an interrupted terminal-unknown batch', () => {
     expect(parseLedger('')).toEqual([]);
+    expect(parseLedger('\n')).toEqual([]);
+    expect(() => parseLedger(' \n\t')).toThrow(/canonical|whitespace/i);
     const interrupted = [
       batchStarted(HASH_E, 'op-101', [101, 102]),
       targetReceipt(

@@ -15,6 +15,13 @@ const CLOSING_REFERENCE =
 const PUBLIC_BODY_PATH = 'docs/triage/open-issue-review.md';
 const PUBLIC_TITLE_PATH = 'docs/triage/open-issue-title.md';
 
+export class TriagePublicSafetyError extends Error {
+  constructor(message: string, cause?: unknown) {
+    super(message, cause === undefined ? undefined : { cause });
+    this.name = 'TriagePublicSafetyError';
+  }
+}
+
 export type ReviewRecord = OpenIssueRegistry['issues'][number];
 
 export interface ManagedBodyResult {
@@ -197,13 +204,17 @@ function assertPublicText(filePath: string, label: string, text: string): void {
   );
   const issues = [...publicationIssues, ...hygieneIssues];
   if (issues.length > 0) {
-    throw new Error(
+    throw new TriagePublicSafetyError(
       `PUBLIC ${label} rejected: ${issues
         .map((issue) => `${issue.code}@${issue.line ?? 1}`)
         .join(', ')}`,
     );
   }
-  assertNoSecretLike(text, label);
+  try {
+    assertNoSecretLike(text, label);
+  } catch (error) {
+    throw new TriagePublicSafetyError(`PUBLIC ${label} rejected: secret-like content`, error);
+  }
 }
 
 function assertNoClosingReference(label: string, text: string): void {
