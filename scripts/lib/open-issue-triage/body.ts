@@ -6,11 +6,12 @@ import { sha256 } from './model.ts';
 
 const START_MARKER = '<!-- triage-review:start -->';
 const END_MARKER = '<!-- triage-review:end -->';
-const MARKER_TOKEN = /triage-review[ \t]*:[ \t]*(?:start|end)/gi;
+const SENTINEL_COMMENT =
+  /<!--[ \t\r\n\f\v]{0,32}triage-review[ \t\r\n\f\v]{0,32}:[ \t\r\n\f\v]{0,32}(?:start|end)(?=[ \t\r\n\f\v]{0,32}(?:-->|$))/giu;
 const STANDALONE_MARKER =
   /(^|\n)(<!-- triage-review:(start|end) -->)(?=\r?(?:\n|$))/g;
 const CLOSING_REFERENCE =
-  /\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\b[\s\\:;,()[\]{}<>*_~`.!|\-]*(?:#\d+|LucasQuiles\/WhatSoup#\d+|https:\/\/github\.com\/LucasQuiles\/WhatSoup\/issues\/\d+)\b/i;
+  /\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\b[\p{White_Space}\p{P}\p{S}]{0,32}(?:#\d+|LucasQuiles\/WhatSoup#\d+|https:\/\/github\.com\/LucasQuiles\/WhatSoup\/issues\/\d+)\b/iu;
 const PUBLIC_BODY_PATH = 'docs/triage/open-issue-review.md';
 const PUBLIC_TITLE_PATH = 'docs/triage/open-issue-title.md';
 
@@ -26,7 +27,14 @@ interface ManagedSpan {
   end: number;
 }
 
+function assertRequiredValue(value: string, label: string): void {
+  if (singleLine(value) === '') {
+    throw new Error(`${label} is required and empty after whitespace normalization`);
+  }
+}
+
 function code(value: string): string {
+  assertRequiredValue(value, 'Inline code value');
   const backtickRuns = value.match(/`+/g) ?? [];
   const fence = '`'.repeat(
     1 + Math.max(0, ...backtickRuns.map((run) => run.length)),
@@ -56,6 +64,11 @@ function plainText(value: string): string {
     .replace(/([\\`*_[\]{}()#+.|~\-])/g, '\\$1');
 }
 
+function requiredPlainText(value: string, label: string): string {
+  assertRequiredValue(value, label);
+  return plainText(value);
+}
+
 function list(values: readonly string[], empty = 'None recorded.'): string {
   if (values.length === 0) return empty;
   return values.map((value) => `- ${value}`).join('\n');
@@ -70,7 +83,8 @@ function renderPartialFindings(record: ReviewRecord): string {
     const relatedIssue = finding.related_issue_number === null
       ? ''
       : `; related issue #${finding.related_issue_number}`;
-    return `${code(finding.key)} — ${finding.disposition}: ${plainText(finding.summary)}${relatedIssue}`;
+    return `${code(finding.key)} — ${finding.disposition}: `
+      + `${requiredPlainText(finding.summary, 'Partial-finding summary')}${relatedIssue}`;
   }));
 }
 
@@ -85,7 +99,8 @@ function renderOverlap(overlap: ReviewRecord['pull_request_overlaps'][number]): 
   const paths = overlap.overlapping_paths.length === 0
     ? ''
     : `; paths: ${overlap.overlapping_paths.map(code).join(', ')}`;
-  return `${overlapPrefix(overlap)}: #${overlap.number}${draft} — ${plainText(overlap.title)}`
+  return `${overlapPrefix(overlap)}: #${overlap.number}${draft} — `
+    + `${requiredPlainText(overlap.title, 'PR overlap title')}`
     + ` — ${overlap.assessment}; matched by: ${overlap.matched_by.join(', ')}${paths}`
     + ` — ${overlap.url}`;
 }
@@ -127,7 +142,7 @@ function renderPayload(record: ReviewRecord): string {
     '',
     '### Evidence',
     '',
-    plainText(record.evidence_summary),
+    requiredPlainText(record.evidence_summary, 'Evidence summary'),
     '',
     '**Decisive source paths:**',
     pathList(record.decisive_source_paths),
@@ -143,15 +158,16 @@ function renderPayload(record: ReviewRecord): string {
     '',
     '### Suggested remediation',
     '',
-    plainText(record.suggested_remediation),
+    requiredPlainText(record.suggested_remediation, 'Suggested remediation'),
     '',
     '**Acceptance criteria:**',
-    list(record.acceptance_criteria.map(plainText)),
+    list(record.acceptance_criteria.map((value) =>
+      requiredPlainText(value, 'Acceptance-criteria item'))),
     '',
     '### Impact and blast radius',
     '',
-    `**Impact:** ${plainText(record.impact)}`,
-    `**Blast radius:** ${plainText(record.blast_radius)}`,
+    `**Impact:** ${requiredPlainText(record.impact, 'Impact')}`,
+    `**Blast radius:** ${requiredPlainText(record.blast_radius, 'Blast radius')}`,
     '',
     '**Affected paths:**',
     pathList(record.affected_paths),
@@ -164,7 +180,8 @@ function renderPayload(record: ReviewRecord): string {
     '',
     '### Verification obligations',
     '',
-    list(record.lead_verification_obligations.map(plainText)),
+    list(record.lead_verification_obligations.map((value) =>
+      requiredPlainText(value, 'Verification-obligation item'))),
     END_MARKER,
   ].join('\n');
 }
@@ -196,14 +213,14 @@ function assertNoClosingReference(label: string, text: string): void {
 }
 
 function managedSpan(text: string, pairRequired: boolean): ManagedSpan | null {
-  const tokenCount = [...text.matchAll(MARKER_TOKEN)].length;
+  const sentinelCount = [...text.matchAll(SENTINEL_COMMENT)].length;
   const markers = [...text.matchAll(STANDALONE_MARKER)].map((match) => ({
     kind: match[3] as 'start' | 'end',
     start: match.index + match[1].length,
     end: match.index + match[1].length + match[2].length,
   }));
 
-  if (tokenCount !== markers.length) {
+  if (sentinelCount !== markers.length) {
     throw new Error('Managed triage marker is malformed or is not standalone');
   }
   if (markers.length === 0) {
@@ -221,6 +238,20 @@ function managedSpan(text: string, pairRequired: boolean): ManagedSpan | null {
   return { start: markers[0].start, end: markers[1].end };
 }
 
+function visitStringValues(value: unknown, visit: (text: string) => void): void {
+  if (typeof value === 'string') {
+    visit(value);
+    return;
+  }
+  if (Array.isArray(value)) {
+    value.forEach((entry) => visitStringValues(entry, visit));
+    return;
+  }
+  if (value !== null && typeof value === 'object') {
+    Object.values(value).forEach((entry) => visitStringValues(entry, visit));
+  }
+}
+
 function assertManagedBlock(block: string): void {
   const span = managedSpan(block, true);
   if (span === null || span.start !== 0 || span.end !== block.length) {
@@ -230,12 +261,17 @@ function assertManagedBlock(block: string): void {
 
 export function renderReviewBlock(record: ReviewRecord): string {
   const proposedTitle = record.recommended_title ?? record.title;
+  assertRequiredValue(proposedTitle, 'Proposed issue title');
   assertPublicText(PUBLIC_TITLE_PATH, 'proposed issue title', proposedTitle);
   assertNoClosingReference('Proposed issue title', proposedTitle);
 
-  const rawRecord = JSON.stringify(record);
-  managedSpan(rawRecord, false);
-  assertNoClosingReference('Registry review record', rawRecord);
+  visitStringValues(record, (text) => {
+    const span = managedSpan(text, false);
+    if (span !== null) {
+      throw new Error('Registry review record rejected: managed marker comment is not allowed');
+    }
+    assertNoClosingReference('Registry review record', text);
+  });
 
   const payload = renderPayload(record);
   assertManagedBlock(payload);

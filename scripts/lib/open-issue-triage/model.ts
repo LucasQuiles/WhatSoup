@@ -103,9 +103,15 @@ export type MutationResult =
 const liveLabelSet = new Set<string>(LIVE_LABELS);
 const addableLabelSet = new Set<string>(ADDABLE_LABELS);
 
-const nonEmptyTextSchema = z.string().min(1).max(16_384);
+const nonEmptyTextSchema = z.string().min(1).max(16_384).refine(
+  (value) => /\S/u.test(value),
+  'text must contain a non-whitespace character',
+);
 const boundedTextSchema = z.string().max(16_384);
-const shortTextSchema = z.string().min(1).max(1_024);
+const shortTextSchema = z.string().min(1).max(1_024).refine(
+  (value) => /\S/u.test(value),
+  'text must contain a non-whitespace character',
+);
 const slugSchema = z.string().regex(/^[a-z0-9][a-z0-9-]{0,127}$/);
 const sha256Schema = z.string().regex(/^[0-9a-f]{64}$/);
 const revisionSchema = z.string().regex(/^[0-9a-f]{40}$/);
@@ -144,7 +150,12 @@ function sortedUniqueIntegerArray() {
 }
 
 const repositoryPathSchema = z.string().min(1).max(1_024).refine((value) => {
-  if (value.startsWith('/') || value.includes('\\') || /[\u0000-\u001f\u007f]/.test(value)) return false;
+  if (
+    !/\S/u.test(value)
+    || value.startsWith('/')
+    || value.includes('\\')
+    || /[\u0000-\u001f\u007f]/.test(value)
+  ) return false;
   return value.split('/').every((part) => part !== '' && part !== '.' && part !== '..');
 }, 'repository path must be a safe relative POSIX path');
 

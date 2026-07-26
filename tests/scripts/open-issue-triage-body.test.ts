@@ -146,11 +146,28 @@ describe('managed triage review body', () => {
     ['compact comment', '<!--triage-review:start-->\nA\n<!--triage-review:end-->'],
     ['extra comment spacing', '<!--  triage-review:start  -->\nA\n<!--  triage-review:end  -->'],
     ['mixed canonical pair', '<!-- triage-review:start -->\nA\n<!-- TRIAGE-REVIEW:END -->'],
+    ['multiline kind', '<!-- triage-review:\nstart -->\nA\n<!-- triage-review:\nend -->'],
+    ['multiline CRLF', '<!-- triage-review\r\n:\r\nstart -->\nA\n<!-- triage-review\r\n:\r\nend -->'],
   ])('refuses %s markers', (_name, body) => {
     expect(() => mergeReviewBlock(
       body,
       '<!-- triage-review:start -->\nA\n<!-- triage-review:end -->',
     )).toThrow(/marker/i);
+  });
+
+  it('allows harmless bare marker prose and fenced examples', () => {
+    expect(() => renderReviewBlock(reviewRecord({
+      evidence_summary: [
+        'The literal triage-review:start appears in parser docs.',
+        'The unrelated token triage-review:startling remains ordinary prose.',
+        '<!-- docs mention triage-review:start as text -->',
+      ].join(' '),
+    }))).not.toThrow();
+
+    expect(() => mergeReviewBlock(
+      'Owner example:\n```\ntriage-review:start\n```\n',
+      '<!-- triage-review:start -->\nA\n<!-- triage-review:end -->',
+    )).not.toThrow();
   });
 
   it('fails closed on unsafe proposed titles, blocks, and expected bodies', () => {
@@ -203,6 +220,27 @@ describe('managed triage review body', () => {
         'See LucasQuiles/WhatSoup#100.',
         'Evidence at https://github.com/LucasQuiles/WhatSoup/issues/101.',
       ].join(' '),
+    }))).not.toThrow();
+  });
+
+  it.each([
+    ['straight double quotes', '"#99"'],
+    ['straight single quotes', "'#99'"],
+    ['curly quotes', '“#99”'],
+    ['slash wrapper', '/#99/'],
+    ['Unicode brackets', '【#99】'],
+    ['backticks', '`LucasQuiles/WhatSoup#99`'],
+    ['Markdown punctuation', '**[https://github.com/LucasQuiles/WhatSoup/issues/99]**'],
+    ['symbol boundary', '→ #99'],
+  ])('rejects closing references through %s', (_name, wrappedReference) => {
+    expect(() => renderReviewBlock(reviewRecord({
+      evidence_summary: `Fixes ${wrappedReference}`,
+    }))).toThrow(/closing reference/i);
+  });
+
+  it('does not treat intervening prose as a closing-reference wrapper', () => {
+    expect(() => renderReviewBlock(reviewRecord({
+      evidence_summary: 'Fixes the display behavior discussed in #99.',
     }))).not.toThrow();
   });
 
@@ -263,5 +301,45 @@ describe('managed triage review body', () => {
     expect(block).toContain('```tests/`edge``.test.ts```');
     expect(block).toContain('``` `owner``boundary` ```');
     expect(block).not.toContain('a\\`b');
+  });
+
+  it.each([
+    ['proposed title', reviewRecord({ recommended_title: ' \n\t ' })],
+    ['evidence summary', reviewRecord({ evidence_summary: ' \n\t ' })],
+    ['remediation', reviewRecord({ suggested_remediation: ' \n\t ' })],
+    ['impact', reviewRecord({ impact: ' \n\t ' })],
+    ['blast radius', reviewRecord({ blast_radius: ' \n\t ' })],
+    ['partial-finding summary', reviewRecord({
+      partial_findings: [{
+        key: 'blank-summary',
+        summary: ' \n\t ',
+        disposition: 'survives',
+        related_issue_number: null,
+      }],
+    })],
+    ['PR overlap title', reviewRecord({
+      pull_request_overlaps: [{ ...overlap, title: ' \n\t ' }],
+    })],
+    ['acceptance-criteria item', reviewRecord({ acceptance_criteria: [' \n\t '] })],
+    ['verification-obligation item', reviewRecord({
+      lead_verification_obligations: [' \n\t '],
+    })],
+    ['owner boundary', reviewRecord({ owner_boundary: ' \n\t ' })],
+    ['decisive source path', reviewRecord({ decisive_source_paths: [' \t '] })],
+    ['decisive test path', reviewRecord({ decisive_test_paths: [' \t '] })],
+    ['affected path', reviewRecord({ affected_paths: [' \t '] })],
+    ['overlap path', reviewRecord({
+      pull_request_overlaps: [{ ...overlap, overlapping_paths: [' \t '] }],
+    })],
+  ])('rejects whitespace-empty required rendered %s', (_name, record) => {
+    expect(() => renderReviewBlock(record)).toThrow(/empty|blank|required/i);
+  });
+
+  it('preserves the optional empty falsifier or remaining gap behavior', () => {
+    const block = renderReviewBlock(reviewRecord({
+      falsifier_or_remaining_gap: ' \n\t ',
+    }));
+
+    expect(block).toContain('**Falsifier or remaining gap:**\nNone recorded.');
   });
 });

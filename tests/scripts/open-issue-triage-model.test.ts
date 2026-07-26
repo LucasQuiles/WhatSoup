@@ -314,6 +314,71 @@ describe('open issue registry schema', () => {
     expect(() => parseRegistry(invalid)).toThrow(/path/i);
   });
 
+  it('rejects whitespace-only required registry text and repository paths', () => {
+    const invalidRegistries = [
+      (() => {
+        const invalid = cloneRegistry();
+        invalid.issues[0].evidence_summary = ' \n\t ';
+        return invalid;
+      })(),
+      (() => {
+        const invalid = cloneRegistry();
+        invalid.issues[0].acceptance_criteria = [' \n\t '];
+        return invalid;
+      })(),
+      (() => {
+        const invalid = cloneRegistry();
+        invalid.issues[0].owner_boundary = ' \n\t ';
+        return invalid;
+      })(),
+      (() => {
+        const invalid = cloneRegistry();
+        invalid.issues[0].pull_request_overlaps = [{ ...overlap, title: ' \n\t ' }];
+        return invalid;
+      })(),
+      (() => {
+        const invalid = cloneRegistry();
+        invalid.issues[0].partial_findings = [{
+          key: 'blank-summary',
+          summary: ' \n\t ',
+          disposition: 'survives',
+          related_issue_number: null,
+        }];
+        return invalid;
+      })(),
+      (() => {
+        const invalid = cloneRegistry();
+        invalid.issues[0].affected_paths = [' \n\t '];
+        return invalid;
+      })(),
+    ];
+
+    for (const invalid of invalidRegistries) {
+      expect(() => parseRegistry(invalid)).toThrow(/non-whitespace|path/i);
+    }
+  });
+
+  it('preserves accepted required text and path bytes without trimming', () => {
+    const padded = cloneRegistry();
+    padded.issues[0].evidence_summary = '  Evidence remains padded.  ';
+    padded.issues[0].acceptance_criteria = ['  Criterion remains padded.  '];
+    padded.issues[0].owner_boundary = '  runtime-owner  ';
+    padded.issues[0].affected_paths = ['  src/example.ts  '];
+    padded.issues[0].pull_request_overlaps = [{
+      ...overlap,
+      title: '  Existing work remains padded.  ',
+      overlapping_paths: ['  src/example.ts  '],
+    }];
+    padded.issues[0].partial_findings = [{
+      key: 'padded-summary',
+      summary: '  Finding remains padded.  ',
+      disposition: 'survives',
+      related_issue_number: null,
+    }];
+
+    expect(parseRegistry(padded)).toEqual(padded);
+  });
+
   it('rejects duplicate issues, self-references, URL drift, and inventory drift deterministically', () => {
     const invalid = cloneRegistry();
     invalid.issues.push({
