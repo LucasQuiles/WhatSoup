@@ -25,6 +25,25 @@ function observation(
   };
 }
 
+function durableIdentity(value: ContinuityGapObservation): {
+  evidenceRef: string;
+  planId: string;
+} {
+  const evidenceRef = [
+    'continuity-gap:v1',
+    `receipt=${value.receiptFingerprint}`,
+    `destination=${value.destinationFingerprint}`,
+    `manifest=${value.manifestFingerprint}`,
+    `evidence=${value.evidenceFingerprint}`,
+    `ordinal=${value.ordinal}`,
+    `classification=${value.classification}`,
+  ].join(';');
+  return {
+    evidenceRef,
+    planId: `continuity-gap:v1:${digest(evidenceRef)}`,
+  };
+}
+
 describe('continuity gap ledger', () => {
   let db: Database;
 
@@ -137,5 +156,37 @@ describe('continuity gap ledger', () => {
 
     expect(() => readContinuityGapHealth(db.raw))
       .toThrow('continuity gap ledger contains malformed state');
+  });
+
+  it('fails closed when a foreign plan claims the reserved continuity trigger namespace', () => {
+    db.raw.prepare(`
+      INSERT INTO recovery_plans (plan_id, origin, actor, summary, evidence_ref)
+      VALUES ('foreign', 'operator', 'other_recovery_owner',
+              'Unrelated recovery work', NULL)
+    `).run();
+    db.raw.prepare(`
+      INSERT INTO recovery_runs (trigger, recovery_plan_id, status)
+      VALUES ('continuity_gap_absent', 'foreign', 'started')
+    `).run();
+
+    expect(() => readContinuityGapHealth(db.raw))
+      .toThrow('continuity gap ledger contains foreign reserved state');
+  });
+
+  it('fails closed when canonical evidence is attached to malformed plan ownership', () => {
+    const value = observation(1, 'absent');
+    const identity = durableIdentity(value);
+    db.raw.prepare(`
+      INSERT INTO recovery_plans (plan_id, origin, actor, summary, evidence_ref)
+      VALUES (?, 'operator', 'continuity_manifest_recorder',
+              'Wrong recovery contract', ?)
+    `).run(identity.planId, identity.evidenceRef);
+    db.raw.prepare(`
+      INSERT INTO recovery_runs (trigger, recovery_plan_id, status)
+      VALUES ('continuity_gap_absent', ?, 'started')
+    `).run(identity.planId);
+
+    expect(() => readContinuityGapHealth(db.raw))
+      .toThrow('continuity gap ledger contains malformed plan ownership');
   });
 });

@@ -48,6 +48,9 @@ interface StoredPlanRow {
 
 interface HealthRow {
   plan_id: string;
+  origin: string;
+  actor: string;
+  summary: string;
   trigger: string | null;
   status: string | null;
   completed_at: string | null;
@@ -255,8 +258,19 @@ export function recordContinuityGaps(
 }
 
 export function readContinuityGapHealth(raw: DatabaseSync): ContinuityGapHealth {
+  const foreignReservedState = raw.prepare(`
+    SELECT 1
+    FROM recovery_runs runs
+    JOIN recovery_plans plans ON plans.plan_id = runs.recovery_plan_id
+    WHERE runs.trigger LIKE 'continuity_gap_%'
+      AND plans.actor <> ?
+    LIMIT 1
+  `).get(ACTOR);
+  if (foreignReservedState) {
+    throw new Error('continuity gap ledger contains foreign reserved state');
+  }
   const rows = raw.prepare(`
-    SELECT plans.plan_id, plans.evidence_ref,
+    SELECT plans.plan_id, plans.origin, plans.actor, plans.summary, plans.evidence_ref,
            runs.trigger, runs.status, runs.completed_at
     FROM recovery_plans plans
     LEFT JOIN recovery_runs runs
@@ -279,6 +293,13 @@ export function readContinuityGapHealth(raw: DatabaseSync): ContinuityGapHealth 
     const evidence = parseEvidenceRef(row.evidence_ref);
     if (planId(evidence) !== row.plan_id) {
       throw new Error('continuity gap ledger contains malformed evidence');
+    }
+    if (
+      row.origin !== 'operator'
+      || row.actor !== ACTOR
+      || row.summary !== SUMMARY
+    ) {
+      throw new Error('continuity gap ledger contains malformed plan ownership');
     }
     const classification = classificationFromTrigger(row.trigger);
     if (classification !== evidence.classification) {

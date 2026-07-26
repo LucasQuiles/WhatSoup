@@ -1677,6 +1677,32 @@ describe('GET /health', () => {
     expect(body).not.toContain('a'.repeat(64));
   });
 
+  it('fails health closed when reserved continuity state has a foreign owner', async () => {
+    db.raw.prepare(`
+      INSERT INTO recovery_plans (plan_id, origin, actor, summary)
+      VALUES ('foreign-continuity-state', 'operator', 'other_recovery_owner',
+              'Unrelated recovery work')
+    `).run();
+    db.raw.prepare(`
+      INSERT INTO recovery_runs (trigger, recovery_plan_id, status)
+      VALUES ('continuity_gap_absent', 'foreign-continuity-state', 'started')
+    `).run();
+
+    const { status, body } = await httpReq(port, '/health', 'GET');
+    const json = JSON.parse(body);
+    expect(status).toBe(200);
+    expect(json.status).toBe('degraded');
+    expect(json.degradation_causes).toContain('continuity_gap_unreadable');
+    expect(json.continuity).toEqual({
+      readable: false,
+      open: 0,
+      unresolved: 0,
+      ambiguous: 0,
+    });
+    expect(body).not.toContain('foreign-continuity-state');
+    expect(body).not.toContain('other_recovery_owner');
+  });
+
   it('degrades health when the applied migration version is behind the code-required schema', async () => {
     db.raw.prepare('DELETE FROM schema_migrations WHERE version = ?').run(CURRENT_SCHEMA_MIGRATION);
 
