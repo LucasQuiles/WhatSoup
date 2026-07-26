@@ -15,11 +15,12 @@ afterEach(() => {
   tmpDirs.length = 0;
 });
 
-function runScript() {
+function runScript(env: Record<string, string> = {}) {
   return spawnSync('bash', [SCRIPT], {
     cwd: process.cwd(),
     encoding: 'utf8',
     maxBuffer: 8 * 1024 * 1024,
+    env: { ...process.env, ...env },
   });
 }
 
@@ -237,6 +238,31 @@ describe('design-regression.sh guard contracts', () => {
     expect(check15).toContain('Unknown source waiver ids: 0');
     expect(check15).toContain('Stale registry TS/TSX scopes: 0');
     expect(check15).toContain('PASS  count=0  (waiver registry and source suppression tags in sync)');
+  });
+
+  it('reports Check 15 as PASS even when FORCE_COLOR is set (#2449)', () => {
+    // Regression pin. Check 15 captured its count via `console.log(<number>)`, which
+    // formats through util.inspect and colourises numbers whenever FORCE_COLOR is set —
+    // including when stdout is a pipe, not a TTY. The captured value became
+    // $'\\033[33m0\\033[39m', `[ "$C15_COUNT" -eq 0 ]` failed with "integer expected",
+    // and the check reported a waiver mismatch that did not exist, hard-blocking `git
+    // push` on every machine with the variable exported. CI never sets it, so this was
+    // invisible there.
+    //
+    // Asserting on the SAME tree the unset-FORCE_COLOR test above asserts on, so the two
+    // differ only by the environment variable — that is what makes this a pin on the
+    // colourisation bug rather than on waiver state.
+    const result = runScript({ FORCE_COLOR: '3' });
+    const output = `${result.stdout}\n${result.stderr}`;
+    const check15 = checkBlock(output, 15);
+
+    // The specific shell error the ANSI-wrapped value produced. Its absence is the
+    // proof that the captured value is a bare integer.
+    expect(output).not.toContain('integer expected');
+    // No ESC byte anywhere in the block - an ANSI-wrapped count carries one.
+    expect(check15).not.toContain('\u001b[');
+    expect(check15).toContain('PASS  count=0  (waiver registry and source suppression tags in sync)');
+    expect(result.status).toBe(0);
   });
 
   it('waiver sync passes when source tags and registry scopes agree', () => {
