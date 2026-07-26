@@ -6,11 +6,11 @@ import { sha256 } from './model.ts';
 
 const START_MARKER = '<!-- triage-review:start -->';
 const END_MARKER = '<!-- triage-review:end -->';
-const MARKER_TOKEN = /triage-review:(?:start|end)/g;
+const MARKER_TOKEN = /triage-review[ \t]*:[ \t]*(?:start|end)/gi;
 const STANDALONE_MARKER =
   /(^|\n)(<!-- triage-review:(start|end) -->)(?=\r?(?:\n|$))/g;
 const CLOSING_REFERENCE =
-  /\b(?:close[sd]?|fixe[sd]?|resolve[sd]?)\s+#/i;
+  /\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\b[\s\\:;,()[\]{}<>*_~`.!|\-]*(?:#\d+|LucasQuiles\/WhatSoup#\d+|https:\/\/github\.com\/LucasQuiles\/WhatSoup\/issues\/\d+)\b/i;
 const PUBLIC_BODY_PATH = 'docs/triage/open-issue-review.md';
 const PUBLIC_TITLE_PATH = 'docs/triage/open-issue-title.md';
 
@@ -27,7 +27,33 @@ interface ManagedSpan {
 }
 
 function code(value: string): string {
-  return `\`${value.replaceAll('`', '\\`')}\``;
+  const backtickRuns = value.match(/`+/g) ?? [];
+  const fence = '`'.repeat(
+    1 + Math.max(0, ...backtickRuns.map((run) => run.length)),
+  );
+  const needsPadding = value.startsWith('`')
+    || value.endsWith('`')
+    || (value.startsWith(' ') && value.endsWith(' ') && value.trim() !== '');
+  const content = needsPadding ? ` ${value} ` : value;
+  return `${fence}${content}${fence}`;
+}
+
+function singleLine(value: string): string {
+  return value
+    .replace(/\r\n?/g, '\n')
+    .split('\n')
+    .map((line) => line.trim())
+    .join(' ')
+    .replace(/[ \t]+/g, ' ')
+    .trim();
+}
+
+function plainText(value: string): string {
+  return singleLine(value)
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replace(/([\\`*_[\]{}()#+.|~\-])/g, '\\$1');
 }
 
 function list(values: readonly string[], empty = 'None recorded.'): string {
@@ -44,7 +70,7 @@ function renderPartialFindings(record: ReviewRecord): string {
     const relatedIssue = finding.related_issue_number === null
       ? ''
       : `; related issue #${finding.related_issue_number}`;
-    return `${code(finding.key)} — ${finding.disposition}: ${finding.summary}${relatedIssue}`;
+    return `${code(finding.key)} — ${finding.disposition}: ${plainText(finding.summary)}${relatedIssue}`;
   }));
 }
 
@@ -59,7 +85,7 @@ function renderOverlap(overlap: ReviewRecord['pull_request_overlaps'][number]): 
   const paths = overlap.overlapping_paths.length === 0
     ? ''
     : `; paths: ${overlap.overlapping_paths.map(code).join(', ')}`;
-  return `${overlapPrefix(overlap)}: #${overlap.number}${draft} — ${overlap.title}`
+  return `${overlapPrefix(overlap)}: #${overlap.number}${draft} — ${plainText(overlap.title)}`
     + ` — ${overlap.assessment}; matched by: ${overlap.matched_by.join(', ')}${paths}`
     + ` — ${overlap.url}`;
 }
@@ -83,12 +109,12 @@ function renderDependencies(record: ReviewRecord): string {
 }
 
 function renderPayload(record: ReviewRecord): string {
-  const remainingGap = record.falsifier_or_remaining_gap === ''
+  const remainingGap = plainText(record.falsifier_or_remaining_gap) === ''
     ? 'None recorded.'
-    : record.falsifier_or_remaining_gap;
+    : plainText(record.falsifier_or_remaining_gap);
   const ownerBoundary = record.owner_boundary === null
     ? 'None recorded.'
-    : code(record.owner_boundary);
+    : code(singleLine(record.owner_boundary));
 
   return [
     START_MARKER,
@@ -101,7 +127,7 @@ function renderPayload(record: ReviewRecord): string {
     '',
     '### Evidence',
     '',
-    record.evidence_summary,
+    plainText(record.evidence_summary),
     '',
     '**Decisive source paths:**',
     pathList(record.decisive_source_paths),
@@ -117,15 +143,15 @@ function renderPayload(record: ReviewRecord): string {
     '',
     '### Suggested remediation',
     '',
-    record.suggested_remediation,
+    plainText(record.suggested_remediation),
     '',
     '**Acceptance criteria:**',
-    list(record.acceptance_criteria),
+    list(record.acceptance_criteria.map(plainText)),
     '',
     '### Impact and blast radius',
     '',
-    `**Impact:** ${record.impact}`,
-    `**Blast radius:** ${record.blast_radius}`,
+    `**Impact:** ${plainText(record.impact)}`,
+    `**Blast radius:** ${plainText(record.blast_radius)}`,
     '',
     '**Affected paths:**',
     pathList(record.affected_paths),
@@ -138,7 +164,7 @@ function renderPayload(record: ReviewRecord): string {
     '',
     '### Verification obligations',
     '',
-    list(record.lead_verification_obligations),
+    list(record.lead_verification_obligations.map(plainText)),
     END_MARKER,
   ].join('\n');
 }
@@ -206,6 +232,10 @@ export function renderReviewBlock(record: ReviewRecord): string {
   const proposedTitle = record.recommended_title ?? record.title;
   assertPublicText(PUBLIC_TITLE_PATH, 'proposed issue title', proposedTitle);
   assertNoClosingReference('Proposed issue title', proposedTitle);
+
+  const rawRecord = JSON.stringify(record);
+  managedSpan(rawRecord, false);
+  assertNoClosingReference('Registry review record', rawRecord);
 
   const payload = renderPayload(record);
   assertManagedBlock(payload);

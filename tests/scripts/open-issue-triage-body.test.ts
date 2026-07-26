@@ -3,7 +3,10 @@ import {
   mergeReviewBlock,
   renderReviewBlock,
 } from '../../scripts/lib/open-issue-triage/body.ts';
-import type { OpenIssueRegistry } from '../../scripts/lib/open-issue-triage/model.ts';
+import {
+  sha256,
+  type OpenIssueRegistry,
+} from '../../scripts/lib/open-issue-triage/model.ts';
 
 type ReviewRecord = OpenIssueRegistry['issues'][number];
 
@@ -83,6 +86,21 @@ describe('managed triage review body', () => {
     }))).not.toBe(block);
   });
 
+  it('hashes exactly the canonical payload without its intent comment', () => {
+    const block = renderReviewBlock(reviewRecord());
+    const intentComments = block.match(
+      /^<!-- triage-review:intent-sha256=([0-9a-f]{64}) -->$/gm,
+    ) ?? [];
+    const match = /^<!-- triage-review:intent-sha256=([0-9a-f]{64}) -->$/m.exec(block);
+
+    expect(intentComments).toHaveLength(1);
+    if (match === null) throw new Error('intent comment missing');
+
+    const canonicalPayload = block.replace(`${match[0]}\n`, '');
+    expect(canonicalPayload).not.toContain('triage-review:intent-sha256=');
+    expect(sha256(canonicalPayload)).toBe(match[1]);
+  });
+
   it('appends once, replaces only the managed span, and detects a no-op', () => {
     const first = mergeReviewBlock(
       'Owner-authored body.\n',
@@ -122,6 +140,12 @@ describe('managed triage review body', () => {
     ['nested', '<!-- triage-review:start -->\n<!-- triage-review:start -->\n<!-- triage-review:end -->\n<!-- triage-review:end -->'],
     ['reversed', '<!-- triage-review:end -->\nA\n<!-- triage-review:start -->'],
     ['non-standalone', 'prefix <!-- triage-review:start -->\nA\n<!-- triage-review:end -->'],
+    ['uppercase', '<!-- TRIAGE-REVIEW:START -->\nA\n<!-- TRIAGE-REVIEW:END -->'],
+    ['mixed case', '<!-- Triage-Review:Start -->\nA\n<!-- triage-review:end -->'],
+    ['colon spacing', '<!-- triage-review : start -->\nA\n<!-- triage-review : end -->'],
+    ['compact comment', '<!--triage-review:start-->\nA\n<!--triage-review:end-->'],
+    ['extra comment spacing', '<!--  triage-review:start  -->\nA\n<!--  triage-review:end  -->'],
+    ['mixed canonical pair', '<!-- triage-review:start -->\nA\n<!-- TRIAGE-REVIEW:END -->'],
   ])('refuses %s markers', (_name, body) => {
     expect(() => mergeReviewBlock(
       body,
@@ -154,5 +178,90 @@ describe('managed triage review body', () => {
       'Owner body.',
       `<!-- triage-review:start -->\n${secretLike}\n<!-- triage-review:end -->`,
     )).toThrow(/secret-like/i);
+  });
+
+  it.each([
+    ['close', '#99'],
+    ['Closes', 'LucasQuiles/WhatSoup#99'],
+    ['CLOSED', 'https://github.com/LucasQuiles/WhatSoup/issues/99'],
+    ['fix', '#99'],
+    ['Fixes', 'LucasQuiles/WhatSoup#99'],
+    ['FIXED', 'https://github.com/LucasQuiles/WhatSoup/issues/99'],
+    ['resolve', '#99'],
+    ['Resolves', 'LucasQuiles/WhatSoup#99'],
+    ['RESOLVED', 'https://github.com/LucasQuiles/WhatSoup/issues/99'],
+  ])('rejects the closing keyword %s with same-repository reference %s', (keyword, reference) => {
+    expect(() => renderReviewBlock(reviewRecord({
+      evidence_summary: `Evidence. **${keyword}:** [${reference}]`,
+    }))).toThrow(/closing reference/i);
+  });
+
+  it('allows ordinary non-closing references', () => {
+    expect(() => renderReviewBlock(reviewRecord({
+      evidence_summary: [
+        'Related to #99.',
+        'See LucasQuiles/WhatSoup#100.',
+        'Evidence at https://github.com/LucasQuiles/WhatSoup/issues/101.',
+      ].join(' '),
+    }))).not.toThrow();
+  });
+
+  it('renders multiline registry prose as plain text without spoofed Markdown structure', () => {
+    const block = renderReviewBlock(reviewRecord({
+      evidence_summary: [
+        'Evidence.',
+        '',
+        '### Suggested remediation',
+        '- forged item',
+        '> forged quote',
+        '```ts',
+        'forged fence',
+        '```',
+        '<!-- hidden -->',
+      ].join('\n'),
+      falsifier_or_remaining_gap: 'Gap.\n### Verification obligations',
+      partial_findings: [{
+        key: 'surviving-finding',
+        summary: 'Finding.\n- forged finding item',
+        disposition: 'survives',
+        related_issue_number: null,
+      }],
+      suggested_remediation: 'Remediation.\n> forged remediation',
+      acceptance_criteria: ['Criterion.\n- forged criterion'],
+      impact: 'Impact.\n### Dependencies and overlap',
+      blast_radius: 'Radius.\n1. forged ordered item',
+      owner_boundary: 'owner\n### Evidence',
+      pull_request_overlaps: [{
+        ...overlap,
+        title: 'Overlap title\n- forged overlap item',
+      }],
+      lead_verification_obligations: ['Verify.\n> forged obligation'],
+    }));
+
+    expect(block.match(/^### Evidence$/gm)).toHaveLength(1);
+    expect(block.match(/^### Suggested remediation$/gm)).toHaveLength(1);
+    expect(block.match(/^### Impact and blast radius$/gm)).toHaveLength(1);
+    expect(block.match(/^### Dependencies and overlap$/gm)).toHaveLength(1);
+    expect(block.match(/^### Verification obligations$/gm)).toHaveLength(1);
+    expect(block).not.toMatch(/^> forged/gm);
+    expect(block).not.toMatch(/^- forged/gm);
+    expect(block).not.toMatch(/^\d+\. forged/gm);
+    expect(block).not.toContain('```');
+    expect(block).not.toContain('<!-- hidden -->');
+    expect(block).toContain('&lt;!\\-\\- hidden \\-\\-&gt;');
+  });
+
+  it('uses CommonMark-safe inline-code fences for embedded and boundary backticks', () => {
+    const block = renderReviewBlock(reviewRecord({
+      decisive_source_paths: ['src/a`b``c.ts'],
+      decisive_test_paths: ['tests/`edge``.test.ts'],
+      affected_paths: ['src/a`b``c.ts'],
+      owner_boundary: '`owner``boundary`',
+    }));
+
+    expect(block).toContain('```src/a`b``c.ts```');
+    expect(block).toContain('```tests/`edge``.test.ts```');
+    expect(block).toContain('``` `owner``boundary` ```');
+    expect(block).not.toContain('a\\`b');
   });
 });
