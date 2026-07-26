@@ -2,6 +2,7 @@ import { mergeReviewBlock, renderReviewBlock } from './body.ts';
 import {
   ADDABLE_LABELS,
   LIVE_LABELS,
+  registrySha256 as computeRegistrySha256,
   sha256,
   type OpenIssueRegistry,
 } from './model.ts';
@@ -22,7 +23,6 @@ export interface IssueSnapshot {
 
 export interface DesiredIssueSnapshot {
   title: string;
-  body: string;
   labels: string[];
   title_sha256: string;
   body_sha256: string;
@@ -48,6 +48,7 @@ export interface IssueMutationPlan {
   expected_main_sha: string;
   etag: string | null;
   expected_before: IssueSnapshot;
+  managed_block: string;
   desired: DesiredIssueSnapshot;
   title_delta: TitleDelta | null;
   label_delta: {
@@ -63,7 +64,8 @@ export interface IssueMutationPlan {
 
 export interface PlanIssueBatchInput {
   expectedMainSha: string;
-  records: OpenIssueRegistry['issues'];
+  registry: OpenIssueRegistry;
+  targetIssueNumbers: number[];
   client: GitHubIssueClient;
 }
 
@@ -72,6 +74,8 @@ type IssuePlanningErrorCode =
   | 'main-sha-drift'
   | 'record-main-sha-drift'
   | 'duplicate-record'
+  | 'invalid-target-selection'
+  | 'target-not-in-registry'
   | 'inventory-repository-drift'
   | 'inventory-pagination-incomplete'
   | 'inventory-count-drift'
@@ -183,7 +187,7 @@ function assertUniqueSortedIntegers(
 
 function assertCompleteInventory(
   inventory: LiveInventory,
-  records: readonly ReviewRecord[],
+  registry: OpenIssueRegistry,
 ): void {
   if (inventory.repository !== REPOSITORY) {
     throw planningError(
@@ -226,7 +230,6 @@ function assertCompleteInventory(
       'Live inventory counts do not match the complete item sets',
     );
   }
-
   const labelFolds = new Map<string, string>();
   for (const label of inventory.labels) {
     const fold = label.toLocaleLowerCase('en-US');
@@ -240,18 +243,21 @@ function assertCompleteInventory(
     labelFolds.set(fold, label);
   }
   const observedLabels = sortedStrings(inventory.labels);
-  const expectedLabels = sortedStrings(LIVE_LABELS);
-  if (!sameStrings(observedLabels, expectedLabels)) {
+  const registryLabels = sortedStrings(registry.inventory.labels);
+  if (
+    !sameStrings(observedLabels, sortedStrings(LIVE_LABELS))
+    || !sameStrings(observedLabels, registryLabels)
+  ) {
     throw planningError(
       'inventory-label-catalogue-drift',
       'Live label catalogue differs from the pinned catalogue',
     );
   }
 
-  const recordNumbers = records.map((record) => record.issue_number)
+  const recordNumbers = registry.issues.map((record) => record.issue_number)
     .sort((left, right) => left - right);
   if (
-    inventory.counts.openIssues !== records.length
+    inventory.counts.openIssues !== registry.issues.length
     || !sameStrings(
       inventory.openIssueNumbers.map(String),
       recordNumbers.map(String),
@@ -260,6 +266,17 @@ function assertCompleteInventory(
     throw planningError(
       'inventory-open-issue-set-drift',
       'Live open issue set differs from the validated registry records',
+    );
+  }
+  if (
+    inventory.counts.openIssues !== registry.inventory.open_issue_count
+    || inventory.counts.openPullRequests !== registry.inventory.open_pull_request_count
+    || inventory.counts.draftPullRequests !== registry.inventory.draft_pull_request_count
+    || inventory.counts.labels !== registry.inventory.label_count
+  ) {
+    throw planningError(
+      'inventory-count-drift',
+      'Live inventory counts differ from the complete registry envelope',
     );
   }
 }
@@ -373,7 +390,19 @@ export async function planIssueBatch(
     throw planningError('main-sha-drift', 'Live main differs from the expected object ID');
   }
 
-  const records = [...input.records].sort((left, right) =>
+  if (input.registry.repository !== REPOSITORY) {
+    throw planningError(
+      'inventory-repository-drift',
+      `Registry repository is not ${REPOSITORY}`,
+    );
+  }
+  if (input.registry.pinned_main_revision !== input.expectedMainSha) {
+    throw planningError(
+      'record-main-sha-drift',
+      'Registry is pinned to a different main object ID',
+    );
+  }
+  const records = [...input.registry.issues].sort((left, right) =>
     left.issue_number - right.issue_number);
   for (const [index, record] of records.entries()) {
     if (index > 0 && records[index - 1]?.issue_number === record.issue_number) {
@@ -393,17 +422,48 @@ export async function planIssueBatch(
   }
 
   const inventory = await input.client.readInventory();
-  assertCompleteInventory(inventory, records);
-  records.forEach((record) => assertRecordLabels(record, inventory));
+  assertCompleteInventory(inventory, input.registry);
+
+  if (input.targetIssueNumbers.length === 0) {
+    throw planningError(
+      'invalid-target-selection',
+      'Target issue selection must be nonempty',
+    );
+  }
+  if (input.targetIssueNumbers.some((number, index) =>
+    !Number.isSafeInteger(number)
+    || number <= 0
+    || (index > 0 && input.targetIssueNumbers[index - 1] >= number))) {
+    throw planningError(
+      'invalid-target-selection',
+      'Target issue selection must be sorted, unique positive integers',
+    );
+  }
+  const recordsByNumber = new Map(records.map((record) => [
+    record.issue_number,
+    record,
+  ]));
+  const selectedRecords = input.targetIssueNumbers.map((number) => {
+    const record = recordsByNumber.get(number);
+    if (record === undefined) {
+      throw planningError(
+        'target-not-in-registry',
+        `Selected issue #${number} is absent from the complete registry`,
+        number,
+      );
+    }
+    return record;
+  });
+  selectedRecords.forEach((record) => assertRecordLabels(record, inventory));
 
   const liveTargets = new Map<
     number,
     { issue: LiveIssue; etag: string | null }
   >();
-  for (const record of records) {
+  for (const record of selectedRecords) {
     liveTargets.set(record.issue_number, await input.client.readIssue(record.issue_number));
   }
-  for (const record of records) {
+  for (const record of selectedRecords) {
     const live = liveTargets.get(record.issue_number);
     if (live === undefined) {
       throw planningError(
@@ -415,8 +475,9 @@ export async function planIssueBatch(
     assertLivePreconditions(record, live.issue);
   }
 
-  const registrySha256 = sha256(canonicalJson(records));
-  const plansWithoutHash: Array<Omit<IssueMutationPlan, 'plan_sha256'>> = records.map((record) => {
+  const registrySha256 = computeRegistrySha256(input.registry);
+  const plansWithoutHash: Array<Omit<IssueMutationPlan, 'plan_sha256'>> =
+    selectedRecords.map((record) => {
     const live = liveTargets.get(record.issue_number);
     if (live === undefined) {
       throw planningError(
@@ -449,9 +510,9 @@ export async function planIssueBatch(
           title_sha256: titleBeforeSha256,
           labels: sortedStrings(live.issue.labels),
         },
+        managed_block: block,
         desired: {
           title: desiredTitle,
-          body: merged.body,
           labels: desiredLabels,
           title_sha256: titleAfterSha256,
           body_sha256: afterBodySha256,
@@ -487,7 +548,7 @@ export async function planIssueBatch(
         error,
       );
     }
-  });
+    });
   const batchPlanSha256 = sha256(canonicalJson(plansWithoutHash));
   return plansWithoutHash.map((plan) => ({
     ...plan,

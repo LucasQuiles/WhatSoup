@@ -18,6 +18,7 @@ import { mergeReviewBlock, renderReviewBlock } from '../../scripts/lib/open-issu
 import {
   ADDABLE_LABELS,
   LIVE_LABELS,
+  registrySha256,
   sha256,
   type OpenIssueRegistry,
 } from '../../scripts/lib/open-issue-triage/model.ts';
@@ -77,6 +78,24 @@ function record(overrides: Partial<ReviewRecord> = {}): ReviewRecord {
     review_confidence: 'high',
     lead_verification_obligations: ['Re-read the decisive source before mutation.'],
     ...overrides,
+  };
+}
+
+function registry(issues: ReviewRecord[] = [record()]): OpenIssueRegistry {
+  return {
+    schema_version: 1,
+    repository: REPOSITORY,
+    generated_at: '2026-07-26T12:30:00Z',
+    pinned_main_revision: MAIN_SHA,
+    inventory: {
+      captured_at: '2026-07-26T12:30:00Z',
+      open_issue_count: issues.length,
+      open_pull_request_count: 2,
+      draft_pull_request_count: 1,
+      label_count: LIVE_LABELS.length,
+      labels: utf8Sort(LIVE_LABELS),
+    },
+    issues,
   };
 }
 
@@ -147,7 +166,11 @@ class InMemoryClient implements GitHubIssueClient {
   async updateIssue(
     number: number,
     patch: IssuePatch,
-  ): Promise<{ issue: LiveIssue; etag: string | null }> {
+  ): Promise<{
+    kind: 'success';
+    issue: LiveIssue;
+    etag: string | null;
+  }> {
     this.events.push(`update:${number}`);
     this.updates.push({ number, patch: structuredClone(patch) });
     const before = this.issues.get(number);
@@ -159,7 +182,11 @@ class InMemoryClient implements GitHubIssueClient {
       labels: [...patch.labels],
     };
     this.issues.set(number, after);
-    return { issue: structuredClone(after), etag: `"etag-${number}-after"` };
+    return {
+      kind: 'success',
+      issue: structuredClone(after),
+      etag: `"etag-${number}-after"`,
+    };
   }
 }
 
@@ -168,12 +195,83 @@ function expectedBody(reviewRecord: ReviewRecord): string {
 }
 
 describe('open issue mutation planner', () => {
+  it('plans a selected subset while reconciling the complete registry', async () => {
+    const client = new InMemoryClient();
+    const secondRecord = record({
+      issue_number: 102,
+      issue_node_id: 'I_kwDOExample102',
+      url: 'https://github.com/LucasQuiles/WhatSoup/issues/102',
+    });
+    client.liveInventory = inventory({
+      openIssueNumbers: [101, 102],
+      counts: {
+        openIssues: 2,
+        openPullRequests: 2,
+        draftPullRequests: 1,
+        labels: LIVE_LABELS.length,
+      },
+    });
+    client.issues.set(102, liveIssue({
+      number: 102,
+      nodeId: 'I_kwDOExample102',
+      url: 'https://github.com/LucasQuiles/WhatSoup/issues/102',
+    }));
+
+    const plans = await planIssueBatch({
+      expectedMainSha: MAIN_SHA,
+      registry: registry([record(), secondRecord]),
+      targetIssueNumbers: [101],
+      client,
+    });
+
+    expect(plans.map((plan) => plan.issue_number)).toEqual([101]);
+    expect(client.events).toEqual(['main', 'inventory', 'issue:101']);
+    expect(client.updates).toEqual([]);
+
+    const multiClient = new InMemoryClient();
+    multiClient.liveInventory = structuredClone(client.liveInventory);
+    multiClient.issues.set(102, structuredClone(client.issues.get(102)!));
+    const multiPlans = await planIssueBatch({
+      expectedMainSha: MAIN_SHA,
+      registry: registry([record(), secondRecord]),
+      targetIssueNumbers: [101, 102],
+      client: multiClient,
+    });
+    expect(multiPlans.map((plan) => plan.issue_number)).toEqual([101, 102]);
+    expect(multiPlans[0]?.plan_sha256).not.toBe(plans[0]?.plan_sha256);
+  });
+
+  it.each([
+    ['empty', [], 'invalid-target-selection'],
+    ['duplicate', [101, 101], 'invalid-target-selection'],
+    ['unsorted', [102, 101], 'invalid-target-selection'],
+    ['nonpositive', [0], 'invalid-target-selection'],
+    ['non-integer', [1.5], 'invalid-target-selection'],
+    ['registry-absent', [999], 'target-not-in-registry'],
+  ])('rejects %s target selection before target reads', async (
+    _name,
+    targetIssueNumbers,
+    code,
+  ) => {
+    const client = new InMemoryClient();
+
+    await expect(planIssueBatch({
+      expectedMainSha: MAIN_SHA,
+      registry: registry(),
+      targetIssueNumbers,
+      client,
+    })).rejects.toMatchObject({ code });
+    expect(client.events).toEqual(['main', 'inventory']);
+  });
+
   it('plans exact title, label, and body deltas without writing', async () => {
     const client = new InMemoryClient();
     const reviewRecord = record();
+    const inputRegistry = registry([reviewRecord]);
     const plans = await planIssueBatch({
       expectedMainSha: MAIN_SHA,
-      records: [reviewRecord],
+      registry: inputRegistry,
+      targetIssueNumbers: [101],
       client,
     });
 
@@ -193,16 +291,27 @@ describe('open issue mutation planner', () => {
       before_sha256: sha256(OWNER_BODY),
       after_sha256: sha256(expectedBody(reviewRecord)),
     });
+    expect(plans[0]?.managed_block).toBe(renderReviewBlock(reviewRecord));
     expect(plans[0]?.desired).toEqual({
       title: 'Example finding',
-      body: expectedBody(reviewRecord),
       labels: ['bug', 'reliability'],
       title_sha256: sha256('Example finding'),
       body_sha256: sha256(expectedBody(reviewRecord)),
     });
     expect(plans[0]?.intent_sha256).toMatch(/^[0-9a-f]{64}$/);
-    expect(plans[0]?.registry_sha256).toMatch(/^[0-9a-f]{64}$/);
+    expect(plans[0]?.registry_sha256).toBe(registrySha256(inputRegistry));
     expect(plans[0]?.plan_sha256).toMatch(/^[0-9a-f]{64}$/);
+    const canonical = canonicalPlanJson(plans);
+    expect(canonical).not.toContain(OWNER_BODY.trim());
+    expect(canonical).not.toContain('"expected_body"');
+    expect(canonical).not.toContain('"body":"');
+    const recomputed = mergeReviewBlock(
+      liveIssue().body,
+      plans[0]!.managed_block,
+    );
+    expect(sha256(recomputed.body)).toBe(plans[0]?.desired.body_sha256);
+    expect(mergeReviewBlock(recomputed.body, plans[0]!.managed_block))
+      .toEqual({ body: recomputed.body, changed: false });
     expect(client.events).toEqual(['main', 'inventory', 'issue:101']);
     expect(client.updates).toEqual([]);
   });
@@ -223,7 +332,8 @@ describe('open issue mutation planner', () => {
 
     await expect(planIssueBatch({
       expectedMainSha: MAIN_SHA,
-      records: [record()],
+      registry: registry(),
+      targetIssueNumbers: [101],
       client,
     })).rejects.toMatchObject({ code });
     expect(client.updates).toEqual([]);
@@ -245,7 +355,8 @@ describe('open issue mutation planner', () => {
 
     const plans = await planIssueBatch({
       expectedMainSha: MAIN_SHA,
-      records: [noOpRecord],
+      registry: registry([noOpRecord]),
+      targetIssueNumbers: [101],
       client,
     });
 
@@ -275,7 +386,8 @@ describe('open issue mutation planner', () => {
 
     await expect(planIssueBatch({
       expectedMainSha: MAIN_SHA,
-      records: [record()],
+      registry: registry(),
+      targetIssueNumbers: [101],
       client,
     })).rejects.toMatchObject({ code, issueNumber: 101 });
     expect(client.updates).toEqual([]);
@@ -312,7 +424,8 @@ describe('open issue mutation planner', () => {
 
     await expect(planIssueBatch({
       expectedMainSha: MAIN_SHA,
-      records: [record()],
+      registry: registry(),
+      targetIssueNumbers: [101],
       client,
     })).rejects.toMatchObject({ code });
     expect(client.events).toEqual(['main', 'inventory']);
@@ -344,7 +457,8 @@ describe('open issue mutation planner', () => {
 
     await expect(planIssueBatch({
       expectedMainSha: MAIN_SHA,
-      records: [secondRecord, record()],
+      registry: registry([record(), secondRecord]),
+      targetIssueNumbers: [101, 102],
       client,
     })).rejects.toMatchObject({ code: 'issue-title-drift', issueNumber: 102 });
     expect(client.events).toEqual(['main', 'inventory', 'issue:101', 'issue:102']);
@@ -392,7 +506,8 @@ describe('open issue mutation planner', () => {
 
     await expect(planIssueBatch({
       expectedMainSha: MAIN_SHA,
-      records: [configured.reviewRecord],
+      registry: registry([configured.reviewRecord]),
+      targetIssueNumbers: [101],
       client,
     })).rejects.toMatchObject({ code });
     expect(client.updates).toEqual([]);
@@ -408,7 +523,8 @@ describe('open issue mutation planner', () => {
 
     const plans = await planIssueBatch({
       expectedMainSha: MAIN_SHA,
-      records: [reviewRecord],
+      registry: registry([reviewRecord]),
+      targetIssueNumbers: [101],
       client,
     });
 
@@ -443,12 +559,14 @@ describe('open issue mutation planner', () => {
 
     const forward = await planIssueBatch({
       expectedMainSha: MAIN_SHA,
-      records: [record(), second],
+      registry: registry([record(), second]),
+      targetIssueNumbers: [101, 102],
       client: makeClient(),
     });
     const reverse = await planIssueBatch({
       expectedMainSha: MAIN_SHA,
-      records: [second, record()],
+      registry: registry([record(), second]),
+      targetIssueNumbers: [101, 102],
       client: makeClient(),
     });
 
@@ -622,7 +740,7 @@ describe('gh CLI issue client', () => {
       title: 'Retitled',
       body: 'Expected body',
       labels: ['bug', 'reliability'],
-    })).resolves.toMatchObject({ etag: '"after-etag"' });
+    })).resolves.toMatchObject({ kind: 'success', etag: '"after-etag"' });
 
     expect(calls.map((call) => call.args[call.args.indexOf('--method') + 1]))
       .toEqual(['GET', 'GET', 'PATCH']);
@@ -646,6 +764,62 @@ describe('gh CLI issue client', () => {
       code: 'pagination-incomplete',
       operation: 'read-inventory-issues',
     });
+  });
+
+  it.each([
+    ['timeout', spawnResult('', {
+      status: null,
+      error: Object.assign(new Error('spawnSync gh ETIMEDOUT'), { code: 'ETIMEDOUT' }),
+    }), 'transport-timeout'],
+    ['termination', spawnResult('', {
+      status: null,
+      signal: 'SIGTERM',
+    }), 'process-terminated'],
+    ['HTTP or transport failure', spawnResult('', {
+      status: 1,
+      stderr: 'gh: HTTP 503',
+    }), 'write-disposition-unknown'],
+    ['bounded-output failure', spawnResult('x'.repeat(257)), 'output-bound-exceeded'],
+    ['empty response', spawnResult('  \n'), 'empty-response'],
+    ['malformed response', spawnResult('{not-included-json'), 'malformed-response'],
+  ])('returns one explicit ambiguous PATCH result for %s', async (
+    _name,
+    response,
+    diagnosticCode,
+  ) => {
+    let calls = 0;
+    const spawn: GhSpawn = (() => {
+      calls += 1;
+      return response;
+    }) as GhSpawn;
+    const client = new GhCliIssueClient({ spawn, maxOutputBytes: 256 });
+
+    await expect(client.updateIssue(101, {
+      title: 'Retitled',
+      body: 'Expected body',
+      labels: ['bug'],
+    })).resolves.toEqual({ kind: 'ambiguous', diagnosticCode });
+    expect(calls).toBe(1);
+  });
+
+  it.each([
+    ['missing gh', spawnResult('', {
+      status: null,
+      error: Object.assign(new Error('spawnSync gh ENOENT'), { code: 'ENOENT' }),
+    }), 'gh-not-found'],
+    ['authentication refusal', spawnResult('', {
+      status: 1,
+      stderr: 'authentication required: run gh auth login',
+    }), 'gh-auth-failed'],
+  ])('keeps proven pre-write %s as a typed throw', async (_name, response, code) => {
+    const spawn: GhSpawn = (() => response) as GhSpawn;
+    const client = new GhCliIssueClient({ spawn });
+
+    await expect(client.updateIssue(101, {
+      title: 'Retitled',
+      body: 'Expected body',
+      labels: ['bug'],
+    })).rejects.toMatchObject({ code });
   });
 
   it.each([

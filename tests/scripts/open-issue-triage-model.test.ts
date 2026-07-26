@@ -2,9 +2,11 @@ import { describe, expect, it } from 'vitest';
 import {
   ADDABLE_LABELS,
   LIVE_LABELS,
+  canonicalRegistryJson,
   parseLedger,
   parseRegistry,
   receiptSha256,
+  registrySha256,
   sha256,
   validateRegistry,
 } from '../../scripts/lib/open-issue-triage/model.ts';
@@ -210,6 +212,66 @@ function oneTargetRows(target: Record<string, unknown>): Array<Record<string, un
 }
 
 describe('open issue registry schema', () => {
+  it('canonically serializes and hashes the complete registry envelope', () => {
+    const parsed = parseRegistry(registry);
+    const canonical = canonicalRegistryJson(parsed);
+    const digest = registrySha256(parsed);
+
+    expect(canonical.endsWith('\n')).toBe(true);
+    expect(JSON.parse(canonical)).toEqual(parsed);
+    expect(digest).toBe(sha256(canonical));
+
+    const mutations: Array<(value: typeof registry) => void> = [
+      (value) => {
+        (value as { schema_version: number }).schema_version = 2;
+      },
+      (value) => {
+        (value as { repository: string }).repository = 'LucasQuiles/Other';
+      },
+      (value) => {
+        value.generated_at = '2026-07-26T12:31:00Z';
+      },
+      (value) => {
+        value.pinned_main_revision = 'c'.repeat(40);
+        value.issues[0]!.pinned_revision = 'c'.repeat(40);
+      },
+      (value) => {
+        value.inventory.captured_at = '2026-07-26T12:31:00Z';
+      },
+      (value) => {
+        value.inventory.open_issue_count += 1;
+      },
+      (value) => {
+        value.inventory.open_pull_request_count += 1;
+      },
+      (value) => {
+        value.inventory.draft_pull_request_count += 1;
+      },
+      (value) => {
+        value.inventory.label_count += 1;
+      },
+      (value) => {
+        value.inventory.labels = ['bug', 'ops', 'reliability'];
+        value.inventory.label_count = 3;
+      },
+      (value) => {
+        value.issues[0]!.impact = 'Accepted work can be delayed.';
+      },
+    ];
+    for (const mutate of mutations) {
+      const changed = cloneRegistry();
+      mutate(changed);
+      expect(registrySha256(changed as never)).not.toBe(digest);
+    }
+
+    const padded = cloneRegistry();
+    padded.issues[0]!.evidence_summary = '  Accepted bytes remain padded.  ';
+    expect(
+      (JSON.parse(canonicalRegistryJson(parseRegistry(padded))) as typeof registry)
+        .issues[0]!.evidence_summary,
+    ).toBe('  Accepted bytes remain padded.  ');
+  });
+
   it('pins the exact live and addable label catalogues', () => {
     expect(LIVE_LABELS).toHaveLength(36);
     expect(LIVE_LABELS).toEqual([

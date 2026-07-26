@@ -52,10 +52,24 @@ export interface IssuePatch {
   labels: string[];
 }
 
-export interface GitHubWriteResult {
-  issue: LiveIssue;
-  etag: string | null;
-}
+export type GitHubAmbiguousDiagnosticCode =
+  | 'transport-timeout'
+  | 'process-terminated'
+  | 'write-disposition-unknown'
+  | 'output-bound-exceeded'
+  | 'empty-response'
+  | 'malformed-response';
+
+export type GitHubWriteResult =
+  | {
+    kind: 'success';
+    issue: LiveIssue;
+    etag: string | null;
+  }
+  | {
+    kind: 'ambiguous';
+    diagnosticCode: GitHubAmbiguousDiagnosticCode;
+  };
 
 export interface GitHubIssueClient {
   readMainSha(): Promise<string>;
@@ -88,6 +102,8 @@ type GitHubClientErrorCode =
   | 'gh-output-too-large'
   | 'gh-malformed-json'
   | 'gh-malformed-response'
+  | 'gh-timeout'
+  | 'gh-terminated'
   | 'pagination-incomplete';
 
 interface GitHubClientErrorOptions {
@@ -394,15 +410,41 @@ export class GhCliIssueClient implements GitHubIssueClient {
   async updateIssue(number: number, patch: IssuePatch): Promise<GitHubWriteResult> {
     assertPositiveBound(number, 'issue number');
     const operation = `update-issue-${number}`;
-    const response = this.#apiIncluded(
-      `repos/${this.#repository}/issues/${number}`,
-      'PATCH',
-      { operation, includeHeaders: true, payload: patch },
-    );
-    return {
-      issue: parseIssue(response.body, operation),
-      etag: response.etag,
-    };
+    try {
+      const response = this.#apiIncluded(
+        `repos/${this.#repository}/issues/${number}`,
+        'PATCH',
+        { operation, includeHeaders: true, payload: patch },
+      );
+      return {
+        kind: 'success',
+        issue: parseIssue(response.body, operation),
+        etag: response.etag,
+      };
+    } catch (error) {
+      if (!(error instanceof GitHubClientError)) throw error;
+      if (error.code === 'gh-not-found' || error.code === 'gh-auth-failed') {
+        throw error;
+      }
+      const diagnosticCode = (() => {
+        switch (error.code) {
+          case 'gh-timeout':
+            return 'transport-timeout';
+          case 'gh-terminated':
+            return 'process-terminated';
+          case 'gh-output-too-large':
+            return 'output-bound-exceeded';
+          case 'gh-empty-output':
+            return 'empty-response';
+          case 'gh-malformed-json':
+          case 'gh-malformed-response':
+            return 'malformed-response';
+          default:
+            return 'write-disposition-unknown';
+        }
+      })();
+      return { kind: 'ambiguous', diagnosticCode };
+    }
   }
 
   #readPages(resource: string, query: string, operation: string): unknown[] {
@@ -488,6 +530,20 @@ export class GhCliIssueClient implements GitHubIssueClient {
         'gh-not-found',
         `GitHub CLI is unavailable for ${options.operation}`,
         { operation: options.operation, retryable: false, cause: result.error },
+      );
+    }
+    if (errorCode === 'ETIMEDOUT') {
+      throw new GitHubClientError(
+        'gh-timeout',
+        `GitHub CLI timed out for ${options.operation}`,
+        { operation: options.operation, retryable: true, cause: result.error },
+      );
+    }
+    if (result.signal !== null) {
+      throw new GitHubClientError(
+        'gh-terminated',
+        `GitHub CLI was terminated for ${options.operation}`,
+        { operation: options.operation, retryable: true, cause: result.error },
       );
     }
     if (result.error !== undefined || result.status !== 0) {

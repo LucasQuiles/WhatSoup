@@ -528,7 +528,7 @@ export interface ValidationIssue {
 
 export function parseRegistry(value: unknown): OpenIssueRegistry {
   const registry = registrySchema.parse(value);
-  const text = `${JSON.stringify(canonicalize(registry))}\n`;
+  const text = canonicalRegistryJson(registry);
   const filePath = 'docs/triage/open-issue-registry.json';
   const publicationIssues = scanTextForPrivateLiterals(filePath, text);
   const hygieneIssues = scanContentLines(
@@ -556,6 +556,14 @@ function canonicalize(value: unknown): unknown {
       .sort(([left], [right]) => compareUtf8(left, right))
       .map(([key, nested]) => [key, canonicalize(nested)]),
   );
+}
+
+export function canonicalRegistryJson(registry: OpenIssueRegistry): string {
+  return `${JSON.stringify(canonicalize(registry))}\n`;
+}
+
+export function registrySha256(registry: OpenIssueRegistry): string {
+  return sha256(canonicalRegistryJson(registry));
 }
 
 export function receiptSha256(receiptWithoutHash: unknown): string {
