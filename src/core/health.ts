@@ -6,6 +6,10 @@ import { lookupCredential } from '../lib/keyring.ts';
 import { createChildLogger } from '../logger.ts';
 import { CURRENT_SCHEMA_MIGRATION, type Database } from './database.ts';
 import { readArcBindingHealth } from './arc-binding-health.ts';
+import {
+  readContinuityGapHealth,
+  type ContinuityGapHealth,
+} from './continuity-gap-ledger.ts';
 import { assertSafeHealthBind } from './health-bind-guard.ts';
 import { getMessageCount } from './messages.ts';
 import { getPendingCount, upsertAccess } from './access-list.ts';
@@ -1391,6 +1395,22 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
       const durabilityDebtIsDegraded =
         Number.isFinite(oldestMaybeSentMs)
         && Date.now() - oldestMaybeSentMs > DURABILITY_STALE_MAYBE_SENT_MS;
+      const continuity = safeDbQuery<ContinuityGapHealth | {
+        readable: false;
+        open: number;
+        unresolved: number;
+        ambiguous: number;
+      }>(
+        () => readContinuityGapHealth(deps.db.raw),
+        {
+          readable: false as const,
+          open: 0,
+          unresolved: 0,
+          ambiguous: 0,
+        },
+        'failed to read continuity gap ledger',
+      );
+      const continuityIsDegraded = !continuity.readable || continuity.open > 0;
 
       let status: 'healthy' | 'degraded' | 'unhealthy';
       if (authFailureIsUnhealthy) {
@@ -1409,7 +1429,8 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
         agentRuntimeStatus === 'degraded' ||
         turnCapabilityIsDegraded ||
         loopLag.locallyStarved ||
-        durabilityDebtIsDegraded
+        durabilityDebtIsDegraded ||
+        continuityIsDegraded
       ) {
         status = 'degraded';
       } else {
@@ -1565,6 +1586,8 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
       if (outboundFloodIsDegraded) addDegradationCause('outbound_flood');
       if (loopLag.locallyStarved) addDegradationCause('event_loop_starved');
       if (durabilityDebtIsDegraded) addDegradationCause('durability_debt');
+      if (!continuity.readable) addDegradationCause('continuity_gap_unreadable');
+      else if (continuity.open > 0) addDegradationCause('continuity_gap_open');
       if (schemaIsFuture) addDegradationCause('schema_future');
       else if (!schemaReady) addDegradationCause('schema_not_ready');
       if (!pendingPollsReadable) addDegradationCause('pending_polls_unreadable');
@@ -1724,6 +1747,7 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
         },
         model_advisories: getModelAdvisories(),
         durability: durabilityStats,
+        continuity,
         // Q control-peer wiring. The heal_delivery_unavailable critical latches
         // to one emission per process; this counter is where the suppressed
         // occurrences are visible afterward (see emitHealReport in heal.ts).

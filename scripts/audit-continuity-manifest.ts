@@ -14,14 +14,14 @@ import {
   parseContinuityManifest,
 } from './lib/continuity-manifest-audit.ts';
 
-const MAX_MANIFEST_BYTES = 1024 * 1024;
+export const MAX_MANIFEST_BYTES = 1024 * 1024;
 
 interface CliArgs {
   dbPath: string;
   manifestPath: string;
 }
 
-interface FileIdentity {
+export interface FileIdentity {
   device: number;
   inode: number;
   mode: number;
@@ -62,7 +62,7 @@ export function parseAuditContinuityManifestArgs(argv: string[]): CliArgs {
   };
 }
 
-function existingRegularFile(filePath: string, maxBytes?: number): FileIdentity {
+export function existingRegularFile(filePath: string, maxBytes?: number): FileIdentity {
   try {
     const stat = statSync(filePath);
     if (!stat.isFile()) throw new Error('not regular');
@@ -86,7 +86,7 @@ function identityFromStat(stat: Pick<Stats, 'dev' | 'ino' | 'mode'>): FileIdenti
   return { device: stat.dev, inode: stat.ino, mode: stat.mode };
 }
 
-function assertSameFile(
+export function assertSameFile(
   expected: FileIdentity,
   observed: FileIdentity,
   label: string,
@@ -94,7 +94,7 @@ function assertSameFile(
   if (!sameFile(expected, observed)) throw new Error(`${label} changed during read-only audit`);
 }
 
-function assertContiguousSchema43Receipts(raw: DatabaseSync): void {
+export function assertContiguousSchema43Receipts(raw: DatabaseSync): void {
   const table = raw.prepare(`
     SELECT name
     FROM sqlite_master
@@ -109,7 +109,7 @@ function assertContiguousSchema43Receipts(raw: DatabaseSync): void {
   }
 }
 
-function readManifest(manifestPath: string, identity: FileIdentity): unknown {
+export function readManifest(manifestPath: string, identity: FileIdentity): unknown {
   if ((identity.mode & 0o077) !== 0) {
     throw new Error('Continuity manifest must not be group- or world-readable');
   }

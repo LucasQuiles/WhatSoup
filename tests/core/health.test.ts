@@ -69,6 +69,7 @@ vi.mock('../../src/lib/emit-alert.ts', () => ({
 // ---------------------------------------------------------------------------
 
 import { CURRENT_SCHEMA_MIGRATION, Database } from '../../src/core/database.ts';
+import { recordContinuityGaps } from '../../src/core/continuity-gap-ledger.ts';
 import { DurabilityEngine } from '../../src/core/durability.ts';
 import { config } from '../../src/config.ts';
 import { emitHealReport, resetDeliveryUnavailableLatch } from '../../src/core/heal.ts';
@@ -1639,6 +1640,41 @@ describe('GET /health', () => {
     expect(json.sqlite.schema_migration_latest).toBe(CURRENT_SCHEMA_MIGRATION);
     expect(json.sqlite.schema_ready).toBe(true);
     expect(json.sqlite.pending_polls_readable).toBe(true);
+  });
+
+  it('keeps health degraded while external-history continuity gaps remain open', async () => {
+    recordContinuityGaps(db.raw, [
+      {
+        ordinal: 1,
+        classification: 'absent',
+        receiptFingerprint: 'a'.repeat(64),
+        destinationFingerprint: 'b'.repeat(64),
+        manifestFingerprint: 'c'.repeat(64),
+        evidenceFingerprint: 'd'.repeat(64),
+      },
+      {
+        ordinal: 2,
+        classification: 'ambiguous',
+        receiptFingerprint: 'e'.repeat(64),
+        destinationFingerprint: 'b'.repeat(64),
+        manifestFingerprint: 'c'.repeat(64),
+        evidenceFingerprint: 'd'.repeat(64),
+      },
+    ]);
+
+    const { status, body } = await httpReq(port, '/health', 'GET');
+    const json = JSON.parse(body);
+    expect(status).toBe(200);
+    expect(json.status).toBe('degraded');
+    expect(json.degradation_causes).toContain('continuity_gap_open');
+    expect(json.continuity).toEqual({
+      readable: true,
+      open: 2,
+      unresolved: 1,
+      ambiguous: 1,
+    });
+    expect(body).not.toContain('continuity-gap:v1:');
+    expect(body).not.toContain('a'.repeat(64));
   });
 
   it('degrades health when the applied migration version is behind the code-required schema', async () => {
