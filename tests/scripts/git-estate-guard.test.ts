@@ -1344,17 +1344,22 @@ describe('git-estate guard', () => {
     expect(Math.max(...activeCounts)).toBeLessThanOrEqual(4);
   });
 
-  it('ratchets identities, blocks unrelated replacement, and exempts only the pushed lane', () => {
+  it('ratchets identities, records unrelated replacement as advisory growth, and exempts only the pushed lane', () => {
     const { root, repo } = initRepo();
     expect(run(repo, ['baseline', 'write', '--json']).status).toBe(0);
 
     const firstLane = join(root, 'first-lane');
     git(repo, ['worktree', 'add', '-b', 'lane/first', firstLane]);
+    // Growth is advisory since 2026-07-26, so the ratchet is asserted on the
+    // IDENTITIES it records rather than on an exit code. The identity tracking
+    // is the part worth keeping; blocking on it was the part that deadlocked.
     const growth = run(repo, ['guard', '--phase', 'pre-push', '--json']);
-    expect(growth.status).toBe(2);
+    expect(growth.status).toBe(0);
     expect(JSON.parse(growth.stdout) as GuardDocument).toMatchObject({
       decision: {
-        blocked: true,
+        blocked: false,
+        advisoryReasons: ['estate_count_growth'],
+        blockingReasons: [],
         countGrowth: { worktrees: 1, branches: 1 },
         newCriticalFindingIds: [],
         newWorktreeIds: [expect.stringMatching(/^worktree:/)],
@@ -1388,11 +1393,15 @@ describe('git-estate guard', () => {
     const replacement = join(root, 'replacement-lane');
     git(repo, ['worktree', 'add', '-b', 'lane/replacement', replacement]);
 
+    // The replacement is a DIFFERENT identity from the retired lane, so the
+    // ratchet must still count it as growth (that is the anti-swap property
+    // worth preserving) — it just no longer blocks.
     const neutral = run(repo, ['guard', '--phase', 'pre-push', '--json']);
-    expect(neutral.status, neutral.stderr).toBe(2);
+    expect(neutral.status, neutral.stderr).toBe(0);
     expect(JSON.parse(neutral.stdout) as GuardDocument).toMatchObject({
       decision: {
-        blocked: true,
+        blocked: false,
+        advisoryReasons: ['estate_count_growth'],
         countGrowth: { worktrees: 1, branches: 1 },
         newCriticalFindingIds: [],
       },
@@ -1416,6 +1425,10 @@ describe('git-estate guard', () => {
       },
     });
 
+    // A ref that does not match the invoking worktree earns no exemption, so the
+    // replacement lane still registers as growth. Advisory now, so exit 0 — the
+    // assertion moves onto the exemption arithmetic, which is what this case is
+    // actually about.
     const wrongRef = run(replacement, [
       'guard',
       '--phase',
@@ -1424,34 +1437,44 @@ describe('git-estate guard', () => {
       'refs/heads/lane/other',
       '--json',
     ]);
-    expect(wrongRef.status).toBe(2);
+    expect(wrongRef.status).toBe(0);
+    expect(JSON.parse(wrongRef.stdout) as GuardDocument).toMatchObject({
+      decision: {
+        blocked: false,
+        advisoryReasons: ['estate_count_growth'],
+        countGrowth: { worktrees: 1, branches: 1 },
+        exemptedWorktreeIds: [],
+        exemptedBranchIds: [],
+      },
+    });
   });
 
-  it('keeps estate growth advisory in pre-commit and blocking in pre-push', () => {
+  // Contract changed 2026-07-26: estate growth is advisory in BOTH phases.
+  // The ratchet is repo-global but the repo is worked by several agents at once,
+  // so growth is routinely caused by an agent other than the one pushing, who
+  // then has no correct action available — growth is an ID set difference, so
+  // retiring unrelated work cannot offset it. Blocking on it deadlocks rather
+  // than guards. Integrity reasons stay blocking; see the scan_incomplete test
+  // above, which is the independent proof that pre-push can still exit 2.
+  it('keeps estate growth advisory in both pre-commit and pre-push', () => {
     const { root, repo } = initRepo();
     expect(run(repo, ['baseline', 'write', '--json']).status).toBe(0);
     git(repo, ['worktree', 'add', '-b', 'lane/growth', join(root, 'growth-lane')]);
 
-    const preCommit = run(repo, ['guard', '--phase', 'pre-commit', '--json']);
-    expect(preCommit.status).toBe(0);
-    expect(preCommit.stderr).toContain('estate_count_growth');
-    expect(JSON.parse(preCommit.stdout) as GuardDocument).toMatchObject({
-      exitCode: 0,
-      decision: {
-        blocked: false,
-        countGrowth: { worktrees: 1, branches: 1 },
-      },
-    });
-
-    const prePush = run(repo, ['guard', '--phase', 'pre-push', '--json']);
-    expect(prePush.status).toBe(2);
-    expect(JSON.parse(prePush.stdout) as GuardDocument).toMatchObject({
-      exitCode: 2,
-      decision: {
-        blocked: true,
-        countGrowth: { worktrees: 1, branches: 1 },
-      },
-    });
+    for (const phase of ['pre-commit', 'pre-push'] as const) {
+      const result = run(repo, ['guard', '--phase', phase, '--json']);
+      expect(result.status, `${phase} must not block on count growth alone`).toBe(0);
+      expect(result.stderr).toContain('estate_count_growth');
+      expect(JSON.parse(result.stdout) as GuardDocument).toMatchObject({
+        exitCode: 0,
+        decision: {
+          blocked: false,
+          countGrowth: { worktrees: 1, branches: 1 },
+          blockingReasons: [],
+          advisoryReasons: ['estate_count_growth'],
+        },
+      });
+    }
   });
 
   it('independently exempts a new invoking worktree for an exact pushed branch already in the baseline', () => {
@@ -1510,7 +1533,13 @@ describe('git-estate guard', () => {
     });
   });
 
-  it('blocks earlier unaccepted lane identities while exempting a later exact pushed lane', () => {
+  // This is the cross-agent deadlock in miniature, and the reason growth became
+  // advisory: the LATER lane is correctly exempted for its own push, yet an
+  // EARLIER unrelated lane — in production, another agent's worktree — still
+  // registers as growth. Under the old contract that earlier lane blocked this
+  // push, and no action available to this pusher could clear it. The residual
+  // countGrowth of 1 is still asserted: the accounting is kept, the block is not.
+  it('reports earlier unaccepted lane identities as advisory while exempting a later exact pushed lane', () => {
     const { root, repo } = initRepo();
     expect(run(repo, ['baseline', 'write', '--json']).status).toBe(0);
     git(repo, ['worktree', 'add', '-b', 'lane/earlier', join(root, 'earlier-lane')]);
@@ -1526,10 +1555,12 @@ describe('git-estate guard', () => {
       '--json',
     ]);
 
-    expect(guarded.status, guarded.stderr).toBe(2);
+    expect(guarded.status, guarded.stderr).toBe(0);
     expect(JSON.parse(guarded.stdout) as GuardDocument).toMatchObject({
       decision: {
-        blocked: true,
+        blocked: false,
+        advisoryReasons: ['estate_count_growth'],
+        blockingReasons: [],
         countGrowth: { worktrees: 1, branches: 1 },
         newWorktreeIds: [
           expect.stringMatching(/^worktree:/),

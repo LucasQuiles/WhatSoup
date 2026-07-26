@@ -190,6 +190,24 @@ interface BaselineReceipt {
   error?: string;
 }
 
+/**
+ * Reasons that are reported but never block a push.
+ *
+ * `estate_count_growth` is advisory because the ratchet is repo-global while the
+ * repo is worked by several agents at once. Measured 2026-07-26: this guard
+ * blocked a push whose entire recorded growth — 5 of 5 new worktrees and 6 of 8
+ * new branches — belonged to a *different* agent working the same repo. The
+ * pushing agent had no legitimate remedy: growth is an ID SET DIFFERENCE against
+ * the baseline, so retiring unrelated work cannot offset it (deleting 27
+ * branches, 77 -> 67, moved countGrowth by zero). A gate one agent cannot clear
+ * by any correct action is a deadlock, not a guard.
+ *
+ * Integrity reasons stay blocking: a corrupt baseline, an incomplete or racing
+ * scan, new conflicts, and new critical housekeeping debt all describe a repo
+ * state the pusher CAN act on.
+ */
+const ADVISORY_REASONS = new Set(['estate_count_growth']);
+
 interface GuardDecision {
   blocked: boolean;
   newConflictIds: string[];
@@ -204,6 +222,10 @@ interface GuardDecision {
   exemptedBranchIds: string[];
   warningCounts: Record<string, number>;
   reasons: string[];
+  /** Subset of `reasons` that actually caused `blocked`. Empty when advisory-only. */
+  blockingReasons: string[];
+  /** Subset of `reasons` that were reported without blocking. */
+  advisoryReasons: string[];
 }
 
 class GitEstateError extends Error {
@@ -1353,8 +1375,10 @@ function decideGuard(
   if (countGrowth.worktrees > 0 || countGrowth.branches > 0) {
     reasons.push('estate_count_growth');
   }
+  const blockingReasons = reasons.filter((reason) => !ADVISORY_REASONS.has(reason));
+  const advisoryReasons = reasons.filter((reason) => ADVISORY_REASONS.has(reason));
   return {
-    blocked: phase === 'pre-push' && reasons.length > 0,
+    blocked: phase === 'pre-push' && blockingReasons.length > 0,
     newConflictIds,
     newCriticalFindingIds,
     countGrowth,
@@ -1364,6 +1388,8 @@ function decideGuard(
     exemptedBranchIds,
     warningCounts: warningCounts(snapshot.findings),
     reasons,
+    blockingReasons,
+    advisoryReasons,
   };
 }
 
@@ -1421,7 +1447,13 @@ function printHumanGuard(
       `worktree-growth=${decision.countGrowth.worktrees} branch-growth=${decision.countGrowth.branches} ` +
       `detached=${count.detached} locked=${count.locked} ` +
       `gone=${count.gone} stashes=${count.stashes} prunable=${count.prunable} ` +
-      `ahead=${count.ahead} behind=${count.behind} no-upstream=${count.noUpstream}\n`,
+      `ahead=${count.ahead} behind=${count.behind} no-upstream=${count.noUpstream}` +
+      // Advisory reasons never set `blocked`, so name them explicitly — an
+      // unexplained WARN reads as noise and gets ignored.
+      (decision.advisoryReasons.length > 0
+        ? ` advisory=${decision.advisoryReasons.join(',')}`
+        : '') +
+      '\n',
   );
 }
 
@@ -1572,6 +1604,8 @@ async function runGuardCommand(
   const decision: GuardDecision = snapshot
     ? decideGuard(snapshot, baseline, phase, pushLocalRefs)
     : {
+        // No snapshot means the estate could not be evaluated at all. That is an
+        // integrity failure, not count growth, so it stays blocking on pre-push.
         blocked: phase === 'pre-push',
         newConflictIds: [],
         newCriticalFindingIds: [],
@@ -1582,6 +1616,8 @@ async function runGuardCommand(
         exemptedBranchIds: [],
         warningCounts: {},
         reasons: ['scan_incomplete'],
+        blockingReasons: ['scan_incomplete'],
+        advisoryReasons: [],
       };
   const exitCode = phase === 'pre-commit' ? 0 : decision.blocked ? 2 : 0;
   if (json) {
