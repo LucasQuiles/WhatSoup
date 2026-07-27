@@ -1,19 +1,18 @@
 /**
- * vitest.browser.motion.config.ts — no-reduce browser context for animated-exit proofs.
+ * vitest.browser.motion.config.ts — explicit no-reduce browser context.
  *
- * B5 C-B5-7: animated-exit proofs need a separate browser context WITHOUT
- * reducedMotion so CSS animations actually play and computed animation-duration
- * resolves to the real token value (120ms / 180ms).
+ * Production motion-policy proofs need a separate browser context with
+ * reducedMotion set to no-preference so CSS animations actually play and
+ * computed animation-duration resolves to the real token values.
  *
  * The existing vitest.browser.config.ts uses `reducedMotion: 'reduce'` as
  * deliberate determinism machinery (d7-investigation §6.1) and MUST NOT be
  * changed. This config is additive and uses a separate test include glob
  * (tests/browser-motion/**) so it never overlaps with the existing D7 suite.
  *
- * This file is wired as `npm run test:browser:motion` and runs in CI after
- * the reduced-motion browser suite. Keep it separate from `test:browser` so
- * the main D7 suite stays deterministic while these proofs exercise the real
- * animated path.
+ * This file is wired as `npm run test:browser:motion` and runs in CI after the
+ * reduced-motion browser suite. Keep it separate from `test:browser` so the
+ * main D7 suite stays deterministic while these proofs exercise motion enabled.
  *
  * Local run:
  *   npm run test:browser:motion
@@ -66,14 +65,15 @@ export default defineConfig({
 
     browser: {
       enabled: true,
-      provider: playwright(),
+      provider: playwright({
+        contextOptions: {
+          reducedMotion: 'no-preference',
+        },
+      }),
       headless: true,
       instances: [
         {
           browser: 'chromium',
-          // NO reducedMotion here — animations must actually play so we can
-          // assert computed durations and data-state="closing" dwell behavior.
-          context: {},
         },
       ],
       screenshotFailures: true,

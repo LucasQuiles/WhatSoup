@@ -34,6 +34,7 @@ import { Modal, ModalHeader, ModalBody } from '../../console/src/components/prim
 import { _resetInertCount } from '../../console/src/hooks/use-background-inert.ts';
 import { ToastProvider } from '../../console/src/hooks/use-toast.tsx';
 import { useToast } from '../../console/src/hooks/toast-context.ts';
+import '../../console/src/index.css';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -61,6 +62,8 @@ describe('B5 — reduced-motion exit: modal removed instantly on close', () => {
     // Under reducedMotion: 'reduce' the browser emits prefers-reduced-motion: reduce.
     // The CSS block sets animation: none on [data-state="closing"] → computed duration
     // is 0s → the presence hook takes the instant path → unmount is synchronous.
+    expect(window.matchMedia('(prefers-reduced-motion: reduce)').matches).toBe(true);
+
     const { getByRole, rerender } = await render(
       <Modal open onClose={() => {}}>
         <ModalHeader title="Reduced motion test" />
@@ -68,7 +71,9 @@ describe('B5 — reduced-motion exit: modal removed instantly on close', () => {
       </Modal>
     );
 
-    expect(getByRole('dialog')).toBeTruthy();
+    const dialog = getByRole('dialog').element();
+    expect(dialog).not.toBeNull();
+    expect(getComputedStyle(dialog).animationName).toBe('none');
 
     await rerender(
       <Modal open={false} onClose={() => {}}>
