@@ -684,10 +684,22 @@ export function findWorkIndexCoverageIssues(cwd = process.cwd()): WorkIndexCover
 }
 
 function normalizeVolatileMetadata(expected: WorkIndexData, actual: WorkIndexData): WorkIndexData {
+  // `last_modified` is a commit date, not content: a squash-merge re-commits
+  // byte-identical files under the merge date, so `%cs` moves whenever a PR is
+  // authored on one UTC day and landed on the next. Comparing it would make a
+  // correctly regenerated artifact stale the instant it lands — main went red
+  // exactly this way after #2352. The field is display-only (rendered into the
+  // Markdown tables, read by nothing), and `writeWorkIndex` still emits current
+  // values, so every regeneration refreshes it.
+  const committedLastModified = new Map(actual.rows.map((row) => [row.path, row.last_modified]));
   return {
     ...expected,
     generated_at: actual.generated_at,
     git_head: actual.git_head,
+    rows: expected.rows.map((row) => {
+      const committed = committedLastModified.get(row.path);
+      return committed === undefined ? row : { ...row, last_modified: committed };
+    }),
   };
 }
 

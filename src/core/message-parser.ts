@@ -287,11 +287,9 @@ export function parseIncomingMessage(msg: WAMessage): IncomingMessage | null {
   // that produce invalid JSON when serialized for LLM API calls.
   const safeContent = content !== null ? stripLoneSurrogates(content) : null;
   const safeContentText = contentText !== null ? stripLoneSurrogates(contentText) : null;
-  // QR-056: senderName (pushName) is attacker-controlled and is embedded verbatim
-  // into the agent prompt prefix (`[DM from ${senderName} …]`). Sanitize it the same
-  // as content so a crafted pushName cannot smuggle a lone surrogate into the agent's
-  // API request (which strict server-side JSON parsers reject → turn DoS). The HTTP
-  // providers re-sanitize, but the spawned-CLI path does not.
+  // QR-056: senderName (pushName) is attacker-controlled. It is JSON-escaped and
+  // labeled as untrusted at the provider boundary, but lone surrogates must still
+  // be removed before strict JSON serializers see it on every provider path.
   const safeSenderName = senderName !== null ? stripLoneSurrogates(senderName) : null;
 
   return {

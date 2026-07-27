@@ -10,6 +10,8 @@ const log = createChildLogger('turn-queue');
 export interface QueuedTurn {
   /** Stable journal/source message id captured at admission; never reconstructed at result time. */
   sourceMessageId: string;
+  /** Immutable original journal receipt time, in Unix epoch seconds. */
+  receivedAtUnixSeconds: number;
   /** Exact conversation key used when the inbound row was journaled. */
   conversationKey: string;
   chatJid: string;

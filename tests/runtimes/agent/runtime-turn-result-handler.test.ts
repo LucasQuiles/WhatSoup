@@ -116,6 +116,7 @@ function makeHarness(options: {
     },
     replay: {
       sourceMessageId: 'wamid-result-handler',
+      receivedAtUnixSeconds: 1_780_000_000,
       replaySafe: true,
       senderJid: '15550190050@s.whatsapp.net',
       senderName: null,

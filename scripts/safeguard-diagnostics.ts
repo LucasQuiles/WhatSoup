@@ -82,6 +82,7 @@ const REQUIRED_SCRIPTS = [
   'guard:test-integrity',
   'guard:test-integrity:required',
   'guard:lint:src',
+  'guard:catch-ratchet',
   'guard:claude-settings',
   'guard:agent-decision-polls',
   'guard:semantic-quality',
@@ -144,6 +145,7 @@ const CHAIN_REQUIREMENTS: ChainRequirement[] = [
       'npm run verify:semantic:shadow',
       'npm run guard:test-integrity',
       'npm run guard:boundaries',
+      'npm run guard:catch-ratchet',
       'npm run guard:lint:src',
       'npm run typecheck:all',
       'npm test',
@@ -187,6 +189,7 @@ const CHAIN_REQUIREMENTS: ChainRequirement[] = [
       'npm run guard:service-units',
       'npm run guard:insecure-tempfile',
       'npm run guard:no-destructive-git',
+      'npm run guard:catch-ratchet',
       'npm run guard:grant-resolver',
       'npm run guard:instance-config',
       'npm run guard:guard-test-coverage',
@@ -243,9 +246,10 @@ const CONSOLE_DESIGN_CHAIN_EXEMPTIONS = new Set([
 ]);
 
 const QUALITY_CI_BROWSER_INSTALL_SCRIPT = [
+  'TIMEOUT_BIN="$(bash scripts/resolve-timeout-bin.sh)"',
   'for attempt in 1 2 3; do',
   '  echo "::group::Playwright chromium download attempt ${attempt}/3"',
-  '  if timeout 300 npx playwright install chromium; then',
+  '  if "$TIMEOUT_BIN" 300 npx playwright install chromium; then',
   '    echo "::endgroup::"',
   '    echo "Playwright chromium download succeeded on attempt ${attempt}"',
   '    exit 0',

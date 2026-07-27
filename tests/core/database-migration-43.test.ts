@@ -41,7 +41,7 @@ describe('migration 43 operator catch-up echo-recovery proof', () => {
   afterEach(() => db.close());
 
   it('installs schema 42 with shared admission proof and persisted witness enforcement', () => {
-    expect(CURRENT_SCHEMA_MIGRATION).toBe(46);
+    expect(CURRENT_SCHEMA_MIGRATION).toBe(47);
     expect(db.raw.prepare(`
       SELECT name FROM sqlite_master
       WHERE type = 'view' AND name = 'operator_catchup_delivery_proofs'
@@ -872,6 +872,7 @@ describe('migration 43 operator catch-up echo-recovery proof', () => {
     db.raw.exec(`
       DROP TRIGGER turn_terminal_recovery_envelope_immutable;
       DROP TRIGGER turn_recovery_immutable_envelope;
+      DROP TRIGGER turn_recovery_source_inbound_receipt_immutable;
     `);
   }
 

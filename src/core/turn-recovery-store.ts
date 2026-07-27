@@ -60,6 +60,7 @@ export interface TurnRecoveryJobRow {
   source_manager_id: string;
   source_generation: number;
   source_message_id: string;
+  source_received_at_unix_seconds: number;
   owner_logical_turn_id: string;
   owner_manager_id: string;
   owner_generation: number;
@@ -416,6 +417,11 @@ const VALID_RECOVERY_JOB_FROM = `
    AND o.chat_jid = j.delivery_jid
 `;
 
+const RECOVERY_JOB_SELECT = `
+  j.*,
+  unixepoch(i.received_at) AS source_received_at_unix_seconds
+`;
+
 type TurnRecoveryStatements = {
   enqueueTurnRecoveryJob: PreparedStatement;
   getTurnRecoveryJob: PreparedStatement;
@@ -469,11 +475,11 @@ export class TurnRecoveryStore {
         RETURNING id, state, duplicate_enqueue_count
       `),
       getTurnRecoveryJob: prepare(`
-        SELECT j.* ${VALID_RECOVERY_JOB_FROM}
+        SELECT ${RECOVERY_JOB_SELECT} ${VALID_RECOVERY_JOB_FROM}
         WHERE j.id = ?
       `),
       getTurnRecoveryJobBySource: prepare(`
-        SELECT j.* ${VALID_RECOVERY_JOB_FROM}
+        SELECT ${RECOVERY_JOB_SELECT} ${VALID_RECOVERY_JOB_FROM}
         WHERE j.source_inbound_seq_key = ?
           AND j.source_logical_turn_id = ?
           AND j.source_generation = ?
@@ -711,7 +717,7 @@ export class TurnRecoveryStore {
         RETURNING *
       `),
       getStaleTurnRecoveryJobs: prepare(`
-        SELECT j.* ${VALID_RECOVERY_JOB_FROM}
+        SELECT ${RECOVERY_JOB_SELECT} ${VALID_RECOVERY_JOB_FROM}
         WHERE j.state = 'claimed'
           AND j.claim_expires_at <= datetime('now')
         ORDER BY j.id ASC
@@ -778,7 +784,7 @@ export class TurnRecoveryStore {
           AND state IN ('pending', 'claimed')
       `),
       getRecoverableTurnRecoveryJobs: prepare(`
-        SELECT j.* ${VALID_RECOVERY_JOB_FROM}
+        SELECT ${RECOVERY_JOB_SELECT} ${VALID_RECOVERY_JOB_FROM}
         WHERE j.assigned_owner_logical_turn_id = ?
           AND j.assigned_owner_manager_id = ?
           AND j.assigned_owner_generation = ?
@@ -791,7 +797,7 @@ export class TurnRecoveryStore {
         LIMIT ?
       `),
       getOutstandingTurnRecoveryJobsForSupervisor: prepare(`
-        SELECT j.* ${VALID_RECOVERY_JOB_FROM}
+        SELECT ${RECOVERY_JOB_SELECT} ${VALID_RECOVERY_JOB_FROM}
         WHERE j.id > ?
           AND (
             j.state = 'blocked_unsafe'
