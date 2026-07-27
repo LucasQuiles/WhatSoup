@@ -4,7 +4,7 @@ import { createChildLogger } from '../../logger.ts';
 import {
   bucketMemoryScores,
   normalizeMemoryTraceId,
-} from './memory/operation-telemetry.ts';
+} from '../../lib/memory-operation-telemetry.ts';
 import { routeQuery } from './memory/query-router.ts';
 
 const log = createChildLogger('conversation');

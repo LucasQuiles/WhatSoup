@@ -23,7 +23,7 @@ import {
   type MemoryOperationContext,
   type MemoryOperationFailure,
   type MemoryOperationFailureCode,
-} from '../memory/operation-telemetry.ts';
+} from '../../../lib/memory-operation-telemetry.ts';
 
 const logger = createChildLogger('pinecone-provider');
 

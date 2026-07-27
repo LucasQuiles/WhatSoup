@@ -193,7 +193,7 @@
         "provider_unavailable",
         "unknown"
       ],
-      "owner": "src/runtimes/chat/memory/operation-telemetry.ts",
+      "owner": "src/lib/memory-operation-telemetry.ts",
       "test": "tests/runtimes/chat/memory/operation-telemetry.test.ts"
     }
   },

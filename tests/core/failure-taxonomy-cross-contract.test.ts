@@ -24,7 +24,7 @@ import {
 } from '../../src/runtimes/agent/turn-terminal.ts';
 import {
   MEMORY_OPERATION_FAILURE_CODES,
-} from '../../src/runtimes/chat/memory/operation-telemetry.ts';
+} from '../../src/lib/memory-operation-telemetry.ts';
 
 const sorted = (values: Iterable<string>): string[] => [...values].sort();
 

@@ -20,7 +20,7 @@ import { shortHash } from '../../lib/short-hash.ts';
 import {
   classifyMemoryOperationFailure,
   createMemoryOperationContext,
-} from '../../runtimes/chat/memory/operation-telemetry.ts';
+} from '../../lib/memory-operation-telemetry.ts';
 import { PineconeMemory, type MemoryRecord } from '../../runtimes/chat/providers/pinecone.ts';
 import {
   conversationBoundKey,
