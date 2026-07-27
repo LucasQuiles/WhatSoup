@@ -388,22 +388,26 @@ describe('ActivityFeed #2524 — display state cannot authorize mutations', () =
   // credential, or topology detail is referenced.
 
   it('a filter cannot resurrect restart/stop on a superseded incident (errors filter hides the recovery)', () => {
-    // Default view: an online recovery row supersedes an older logged-out row
-    // for the same instance. The resolved row correctly has no actions.
+    // Default view: a newer online recovery row supersedes an older logged-out
+    // error for the same instance. The resolved row correctly has no actions.
     // Selecting the `errors` filter hides the recovery row from DISPLAY, but
     // must NOT re-enable actions on the resolved incident — eligibility scans
     // the complete live observation, not the filtered presentation.
+    //
+    // Event order is newest-first (feed order). The recovery appears above the
+    // older incident, so the eligibility scan sees it first and marks the
+    // instance as resolved before encountering the stale error.
     renderFeed([
+      event({
+        time: '2026-06-14T12:00:02.000Z',
+        instance: 'line-synthetic-resurrect',
+        detail: { type: 'connection', state: 'connected' },
+      }),
       event({
         time: '2026-06-14T12:00:01.000Z',
         instance: 'line-synthetic-resurrect',
         isError: true,
         detail: { type: 'connection', statusCode: 428, reason: 'connectionLost' },
-      }),
-      event({
-        time: '2026-06-14T12:00:02.000Z',
-        instance: 'line-synthetic-resurrect',
-        detail: { type: 'connection', state: 'connected' },
       }),
     ])
 
