@@ -7,6 +7,8 @@ import {
   type OpenIssueRegistry,
 } from "../../scripts/lib/open-issue-triage/model.ts";
 import {
+  issueRecordSha256,
+  parseRegistryReviewBatch,
   reconcileRegistry,
   reconcilePullRequestOverlaps,
   referencedRepositoryNumbers,
@@ -352,6 +354,328 @@ function closedIssue(
 }
 
 describe("complete registry reconciliation", () => {
+  it("repins an exact source record while retaining exact live label metadata", () => {
+    const oldRegistry = completeRegistry();
+    const targetMain = "c".repeat(40);
+    const live = liveIssue();
+    live.updatedAt = "2026-07-26T13:00:00Z";
+    live.labels = ["audit", "bug"];
+    const sourceRecord = oldRegistry.issues[0]!;
+    const batch: RegistryReviewBatch = {
+      schema_version: 2,
+      repository: "LucasQuiles/WhatSoup",
+      source_main_revision: oldRegistry.pinned_main_revision,
+      pinned_main_revision: targetMain,
+      source_registry_sha256: registrySha256(oldRegistry),
+      reviewed_at: "2026-07-26T13:01:00Z",
+      records: [],
+      repins: [
+        {
+          issue_number: 101,
+          source_record_sha256: issueRecordSha256(sourceRecord),
+        },
+      ],
+      removals: [],
+      retained_issue_states: [
+        {
+          issue_number: 101,
+          issue_node_id: live.issueNodeId,
+          title: live.title,
+          url: live.url,
+          updated_at: live.updatedAt,
+          pre_review_body_sha256: sha256(live.body),
+          current_labels: live.labels,
+          recommended_labels: ["audit", "bug", "reliability"],
+        },
+      ],
+      retained_overlap_states: [],
+    };
+
+    const result = reconcileRegistry({
+      oldRegistry,
+      reviewBatch: batch,
+      liveIssues: [live],
+      closedIssues: [],
+      openPullRequests: [],
+      labels: oldRegistry.inventory.labels,
+      capturedAt: "2026-07-26T13:02:00Z",
+      expectedMainOid: targetMain,
+    });
+
+    expect(result.registry.pinned_main_revision).toBe(targetMain);
+    expect(result.registry.issues[0]).toEqual({
+      ...sourceRecord,
+      pinned_revision: targetMain,
+      updated_at: live.updatedAt,
+      current_labels: live.labels,
+      recommended_labels: ["audit", "bug", "reliability"],
+    });
+  });
+
+  it("rejects a cross-main v2 batch without exact source-record coverage", () => {
+    const oldRegistry = completeRegistry();
+    const targetMain = "c".repeat(40);
+    const batch: RegistryReviewBatch = {
+      schema_version: 2,
+      repository: "LucasQuiles/WhatSoup",
+      source_main_revision: oldRegistry.pinned_main_revision,
+      pinned_main_revision: targetMain,
+      source_registry_sha256: registrySha256(oldRegistry),
+      reviewed_at: "2026-07-26T13:01:00Z",
+      records: [],
+      repins: [],
+      removals: [],
+      retained_issue_states: [],
+      retained_overlap_states: [],
+    };
+
+    expect(() =>
+      parseRegistryReviewBatch(batch, oldRegistry, targetMain),
+    ).toThrow(/coverage/i);
+  });
+
+  it.each([
+    [
+      "source revision drift",
+      (batch: RegistryReviewBatch) => {
+        batch.source_main_revision = "d".repeat(40);
+      },
+      /source main revision/i,
+    ],
+    [
+      "target revision drift",
+      (batch: RegistryReviewBatch) => {
+        batch.pinned_main_revision = "d".repeat(40);
+      },
+      /main revision.*requested pin/i,
+    ],
+    [
+      "source registry digest drift",
+      (batch: RegistryReviewBatch) => {
+        batch.source_registry_sha256 = "e".repeat(64);
+      },
+      /source registry digest/i,
+    ],
+    [
+      "source record digest drift",
+      (batch: RegistryReviewBatch) => {
+        batch.repins![0]!.source_record_sha256 = "e".repeat(64);
+      },
+      /source record digest/i,
+    ],
+    [
+      "unknown repin",
+      (batch: RegistryReviewBatch) => {
+        batch.repins![0]!.issue_number = 102;
+      },
+      /repin #102.*source registry/i,
+    ],
+    [
+      "duplicate repin",
+      (batch: RegistryReviewBatch) => {
+        batch.repins!.push(structuredClone(batch.repins![0]!));
+      },
+      /repin numbers.*sorted|unique/i,
+    ],
+    [
+      "repin and full-record conflict",
+      (batch: RegistryReviewBatch) => {
+        const replacement = structuredClone(completeRegistry().issues[0]!);
+        replacement.pinned_revision = batch.pinned_main_revision;
+        batch.records = [replacement];
+      },
+      /repin #101.*conflicts/i,
+    ],
+    [
+      "repin and removal conflict",
+      (batch: RegistryReviewBatch) => {
+        batch.removals = [
+          {
+            issue_number: 101,
+            issue_node_id: "I_kwDOExample101",
+            url: "https://github.com/LucasQuiles/WhatSoup/issues/101",
+            updated_at: "2026-07-26T13:00:00Z",
+            pre_review_body_sha256: sha256("Closed owner-authored body.\n"),
+            state: "closed",
+          },
+        ];
+      },
+      /repin #101.*conflicts/i,
+    ],
+    [
+      "repin metadata source identity drift",
+      (batch: RegistryReviewBatch) => {
+        batch.retained_issue_states = [
+          {
+            issue_number: 101,
+            issue_node_id: "I_kwDOExample101",
+            title: "Substantively changed title",
+            url: "https://github.com/LucasQuiles/WhatSoup/issues/101",
+            updated_at: "2026-07-26T13:00:00Z",
+            pre_review_body_sha256: sha256("Owner-authored body.\n"),
+            current_labels: ["bug"],
+            recommended_labels: ["bug", "reliability"],
+          },
+        ];
+      },
+      /metadata.*source identity/i,
+    ],
+    [
+      "full record and retained overlap conflict",
+      (batch: RegistryReviewBatch) => {
+        const replacement = structuredClone(completeRegistry().issues[0]!);
+        replacement.pinned_revision = batch.pinned_main_revision;
+        batch.records = [replacement];
+        batch.repins = [];
+        batch.retained_overlap_states = [
+          {
+            issue_number: 101,
+            pull_request_number: 88,
+            overlap: null,
+          },
+        ];
+      },
+      /replace.*retained overlap/i,
+    ],
+  ])("rejects v2 %s before live reconciliation", (_name, mutate, pattern) => {
+    const oldRegistry = completeRegistry();
+    const targetMain = "c".repeat(40);
+    const batch: RegistryReviewBatch = {
+      schema_version: 2,
+      repository: "LucasQuiles/WhatSoup",
+      source_main_revision: oldRegistry.pinned_main_revision,
+      pinned_main_revision: targetMain,
+      source_registry_sha256: registrySha256(oldRegistry),
+      reviewed_at: "2026-07-26T13:01:00Z",
+      records: [],
+      repins: [
+        {
+          issue_number: 101,
+          source_record_sha256: issueRecordSha256(oldRegistry.issues[0]!),
+        },
+      ],
+      removals: [],
+      retained_issue_states: [],
+      retained_overlap_states: [],
+    };
+    mutate(batch);
+
+    expect(() =>
+      parseRegistryReviewBatch(batch, oldRegistry, targetMain),
+    ).toThrow(pattern);
+  });
+
+  it("rejects source identity drift in same-pin v2 metadata retention", () => {
+    const oldRegistry = completeRegistry();
+    const batch: RegistryReviewBatch = {
+      schema_version: 2,
+      repository: "LucasQuiles/WhatSoup",
+      source_main_revision: oldRegistry.pinned_main_revision,
+      pinned_main_revision: oldRegistry.pinned_main_revision,
+      source_registry_sha256: registrySha256(oldRegistry),
+      reviewed_at: "2026-07-26T13:01:00Z",
+      records: [],
+      repins: [],
+      removals: [],
+      retained_issue_states: [
+        {
+          issue_number: 101,
+          issue_node_id: "I_kwDOExample101",
+          title: "Substantively changed title",
+          url: "https://github.com/LucasQuiles/WhatSoup/issues/101",
+          updated_at: "2026-07-26T13:00:00Z",
+          pre_review_body_sha256: sha256("Owner-authored body.\n"),
+          current_labels: ["bug"],
+          recommended_labels: ["bug", "reliability"],
+        },
+      ],
+      retained_overlap_states: [],
+    };
+
+    expect(() =>
+      parseRegistryReviewBatch(
+        batch,
+        oldRegistry,
+        oldRegistry.pinned_main_revision,
+      ),
+    ).toThrow(/metadata.*source identity/i);
+  });
+
+  it("accepts a target-pinned full record for a substantive cross-main change", () => {
+    const oldRegistry = completeRegistry();
+    const targetMain = "c".repeat(40);
+    const replacement = structuredClone(oldRegistry.issues[0]!);
+    replacement.pinned_revision = targetMain;
+    replacement.evidence_summary =
+      "The target revision was rereviewed and preserves the ownership finding.";
+    const batch: RegistryReviewBatch = {
+      schema_version: 2,
+      repository: "LucasQuiles/WhatSoup",
+      source_main_revision: oldRegistry.pinned_main_revision,
+      pinned_main_revision: targetMain,
+      source_registry_sha256: registrySha256(oldRegistry),
+      reviewed_at: "2026-07-26T13:01:00Z",
+      records: [replacement],
+      repins: [],
+      removals: [],
+      retained_issue_states: [],
+      retained_overlap_states: [],
+    };
+
+    expect(
+      reconcileRegistry({
+        oldRegistry,
+        reviewBatch: batch,
+        liveIssues: [liveIssue()],
+        closedIssues: [],
+        openPullRequests: [],
+        labels: oldRegistry.inventory.labels,
+        capturedAt: "2026-07-26T13:02:00Z",
+        expectedMainOid: targetMain,
+      }).registry.issues[0],
+    ).toEqual(replacement);
+  });
+
+  it("does not let a cross-main repin bypass changed overlap review", () => {
+    const oldRegistry = completeRegistry();
+    const targetMain = "c".repeat(40);
+    oldRegistry.inventory.open_pull_request_count = 1;
+    oldRegistry.inventory.draft_pull_request_count = 1;
+    oldRegistry.issues[0]!.pull_request_overlaps =
+      issueRecord().pull_request_overlaps;
+    const batch: RegistryReviewBatch = {
+      schema_version: 2,
+      repository: "LucasQuiles/WhatSoup",
+      source_main_revision: oldRegistry.pinned_main_revision,
+      pinned_main_revision: targetMain,
+      source_registry_sha256: registrySha256(oldRegistry),
+      reviewed_at: "2026-07-26T13:01:00Z",
+      records: [],
+      repins: [
+        {
+          issue_number: 101,
+          source_record_sha256: issueRecordSha256(oldRegistry.issues[0]!),
+        },
+      ],
+      removals: [],
+      retained_issue_states: [],
+      retained_overlap_states: [],
+    };
+
+    expect(() =>
+      reconcileRegistry({
+        oldRegistry,
+        reviewBatch: batch,
+        liveIssues: [liveIssue()],
+        closedIssues: [],
+        openPullRequests: [pullRequest("2026-07-26T13:00:00Z")],
+        labels: oldRegistry.inventory.labels,
+        capturedAt: "2026-07-26T13:02:00Z",
+        expectedMainOid: targetMain,
+      }),
+    ).toThrow(/changed after review/i);
+  });
+
   it("requires an exact reviewed record for timestamp drift", () => {
     const oldRegistry = completeRegistry();
     const liveIssue = {

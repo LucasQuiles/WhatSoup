@@ -6,6 +6,7 @@ import type {
   RegistryReviewBatch,
   RetainedIssueState,
   RetainedOverlapState,
+  ReviewedIssueRepin,
   ReviewedIssueRemoval,
 } from "./reconcile.ts";
 
@@ -61,15 +62,28 @@ const removalSchema: z.ZodType<ReviewedIssueRemoval> = z
     state: z.literal("closed"),
   })
   .strict();
+const retainedIssueStateShape = {
+  issue_number: positiveIntegerSchema,
+  issue_node_id: z.string().min(1).max(1_024),
+  title: z.string().min(1).max(16_384),
+  url: issueUrlSchema,
+  updated_at: timestampSchema,
+  pre_review_body_sha256: sha256Schema,
+  current_labels: z.array(z.string().min(1).max(1_024)).max(10_000),
+};
 const retainedIssueStateSchema: z.ZodType<RetainedIssueState> = z
+  .object(retainedIssueStateShape)
+  .strict();
+const retainedIssueStateV2Schema = z
+  .object({
+    ...retainedIssueStateShape,
+    recommended_labels: z.array(z.string().min(1).max(1_024)).max(10_000),
+  })
+  .strict();
+const repinSchema: z.ZodType<ReviewedIssueRepin> = z
   .object({
     issue_number: positiveIntegerSchema,
-    issue_node_id: z.string().min(1).max(1_024),
-    title: z.string().min(1).max(16_384),
-    url: issueUrlSchema,
-    updated_at: timestampSchema,
-    pre_review_body_sha256: sha256Schema,
-    current_labels: z.array(z.string().min(1).max(1_024)).max(10_000),
+    source_record_sha256: sha256Schema,
   })
   .strict();
 const overlapSchema = z
@@ -110,7 +124,7 @@ const retainedOverlapStateSchema: z.ZodType<RetainedOverlapState> = z
   })
   .strict();
 
-const manifestSchema = z
+const manifestV1Schema = z
   .object({
     schema_version: z.literal(1),
     repository: z.literal("LucasQuiles/WhatSoup"),
@@ -123,10 +137,27 @@ const manifestSchema = z
     retained_overlap_states: z.array(retainedOverlapStateSchema).max(100_000),
   })
   .strict();
+const manifestV2Schema = z
+  .object({
+    schema_version: z.literal(2),
+    repository: z.literal("LucasQuiles/WhatSoup"),
+    source_main_revision: z.string().regex(/^[0-9a-f]{40}$/),
+    pinned_main_revision: z.string().regex(/^[0-9a-f]{40}$/),
+    source_registry_sha256: sha256Schema,
+    reviewed_at: timestampSchema,
+    record_files: z.array(recordFileSchema).max(10_000),
+    repins: z.array(repinSchema).max(10_000),
+    removals: z.array(removalSchema).max(10_000),
+    retained_issue_states: z.array(retainedIssueStateV2Schema).max(10_000),
+    retained_overlap_states: z.array(retainedOverlapStateSchema).max(100_000),
+  })
+  .strict();
+const manifestSchema = z.discriminatedUnion("schema_version", [
+  manifestV1Schema,
+  manifestV2Schema,
+]);
 
-export interface RegistryReviewManifest extends z.infer<
-  typeof manifestSchema
-> {}
+export type RegistryReviewManifest = z.infer<typeof manifestSchema>;
 
 function compareUtf8(left: string, right: string): number {
   return Buffer.from(left).compare(Buffer.from(right));
@@ -174,6 +205,13 @@ export function parseRegistryReviewManifest(
     (entry) => String(entry.issue_number).padStart(20, "0"),
     "review removals",
   );
+  if (manifest.schema_version === 2) {
+    assertSortedUnique(
+      manifest.repins,
+      (entry) => String(entry.issue_number).padStart(20, "0"),
+      "review repins",
+    );
+  }
   assertSortedUnique(
     manifest.retained_issue_states,
     (entry) => String(entry.issue_number).padStart(20, "0"),
@@ -223,6 +261,12 @@ export function materializeRegistryReviewBatch(
     schema_version: manifest.schema_version,
     repository: manifest.repository,
     pinned_main_revision: manifest.pinned_main_revision,
+    ...(manifest.schema_version === 2
+      ? {
+          source_main_revision: manifest.source_main_revision,
+          repins: structuredClone(manifest.repins),
+        }
+      : {}),
     source_registry_sha256: manifest.source_registry_sha256,
     reviewed_at: manifest.reviewed_at,
     records,

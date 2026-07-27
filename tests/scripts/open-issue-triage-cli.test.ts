@@ -39,6 +39,7 @@ import {
   type LiveIssue,
   type RegistryCapture,
 } from "../../scripts/lib/open-issue-triage/github.ts";
+import { issueRecordSha256 } from "../../scripts/lib/open-issue-triage/reconcile.ts";
 import {
   acquireProcessLock,
   getCurrentBootId,
@@ -150,10 +151,11 @@ class FakeClient implements GitHubIssueClient {
   liveInventory = inventory();
   issue = liveIssue();
   capture = registryCapture();
+  mainSha = MAIN_SHA;
 
   async readMainSha(): Promise<string> {
     this.calls.push("main");
-    return MAIN_SHA;
+    return this.mainSha;
   }
 
   async readInventory(): Promise<LiveInventory> {
@@ -323,7 +325,46 @@ function writeRefreshManifest(root: string): string {
   return text;
 }
 
-function reconcileGit(root: string): CliRuntime["git"] {
+function writeCrossMainRefreshManifest(
+  root: string,
+  targetMain: string,
+  repins: Array<{ issue_number: number; source_record_sha256: string }>,
+): void {
+  writeFileSync(
+    join(root, "docs/triage/reviews/refresh.json"),
+    `${JSON.stringify({
+      schema_version: 2,
+      repository: REPOSITORY,
+      source_main_revision: MAIN_SHA,
+      pinned_main_revision: targetMain,
+      source_registry_sha256: registrySha256(registry()),
+      reviewed_at: "2026-07-26T13:00:00Z",
+      record_files: [],
+      repins,
+      removals: [],
+      retained_issue_states: [],
+      retained_overlap_states: [],
+    })}\n`,
+  );
+}
+
+function reconcileCheckArgs(targetMain: string): string[] {
+  return [
+    "registry",
+    "reconcile",
+    "--check",
+    "--registry",
+    "docs/triage/open-issue-registry.json",
+    "--reviews",
+    "docs/triage/reviews/refresh.json",
+    "--snapshot",
+    "docs/triage/snapshots/reconciled.json",
+    "--expected-main-oid",
+    targetMain,
+  ];
+}
+
+function reconcileGit(root: string, mainSha = MAIN_SHA): CliRuntime["git"] {
   const commonDirectory = `${root}-git-common`;
   if (!existsSync(commonDirectory)) {
     mkdirSync(commonDirectory);
@@ -341,12 +382,12 @@ function reconcileGit(root: string): CliRuntime["git"] {
       return { status: 0, stdout: `${commonDirectory}\n`, stderr: "" };
     }
     if (args[0] === "rev-parse" && args.at(-1) === "refs/remotes/origin/main") {
-      return { status: 0, stdout: `${MAIN_SHA}\n`, stderr: "" };
+      return { status: 0, stdout: `${mainSha}\n`, stderr: "" };
     }
     if (args[0] === "ls-remote") {
       return {
         status: 0,
-        stdout: `${MAIN_SHA}\trefs/heads/main\n`,
+        stdout: `${mainSha}\trefs/heads/main\n`,
         stderr: "",
       };
     }
@@ -1502,6 +1543,50 @@ describe("open issue triage CLI", () => {
         issue_count: 1,
         added_issue_numbers: [],
         removed_issue_numbers: [],
+      },
+    });
+  });
+
+  it("rejects incomplete cross-main review coverage before network capture", async () => {
+    const root = fixtureRoot({ generatedView: true });
+    const targetMain = "d".repeat(40);
+    writeCrossMainRefreshManifest(root, targetMain, []);
+    const client = new FakeClient();
+    const io = harness({ git: reconcileGit(root) });
+
+    expect(
+      await run(reconcileCheckArgs(targetMain), root, client, io.runtime),
+    ).toBe(3);
+    expect(client.calls).toEqual([]);
+    expect(JSON.parse(io.stderr.join(""))).toMatchObject({
+      kind: "review-precondition-failed",
+      details: {
+        reason: expect.stringMatching(/coverage/i),
+      },
+    });
+  });
+
+  it("checks a complete digest-bound cross-main reconciliation", async () => {
+    const root = fixtureRoot({ generatedView: true });
+    const targetMain = "d".repeat(40);
+    const sourceRegistry = registry();
+    writeCrossMainRefreshManifest(root, targetMain, [
+      {
+        issue_number: 101,
+        source_record_sha256: issueRecordSha256(sourceRegistry.issues[0]!),
+      },
+    ]);
+    const client = new FakeClient();
+    client.mainSha = targetMain;
+    const io = harness({ git: reconcileGit(root, targetMain) });
+
+    expect(
+      await run(reconcileCheckArgs(targetMain), root, client, io.runtime),
+    ).toBe(0);
+    expect(JSON.parse(io.stdout.join(""))).toMatchObject({
+      summary: {
+        status: "ready",
+        issue_count: 1,
       },
     });
   });

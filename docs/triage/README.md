@@ -121,6 +121,30 @@ reads around the final complete capture. Timestamp-only retention and overlap re
 must be explicit manifest attestations; the reconciler never silently carries changed
 evidence forward.
 
+Schema version 1 remains the same-pin format: its target main revision must already
+match the source registry and every issue record. Schema version 2 is the cross-main
+format. It binds `source_main_revision` to the source registry, keeps
+`pinned_main_revision` as the exact target, and requires the existing
+`source_registry_sha256` to match the complete canonical source bytes.
+
+When the source and target revisions differ, every source issue must be covered exactly
+as a full replacement record, an exact reviewed removal, or a sorted `repins` entry. A
+repin names the issue and SHA-256 of that source record's canonical JSON plus one LF.
+It authorizes only changing `pinned_revision`; all other record fields are carried
+byte-for-byte from the digest-bound source. New issues and substantive evidence changes
+still require full record files. Repins cannot overlap replacements or removals, and
+unknown, duplicate, stale-digest, incomplete, or source/target-mismatched contracts fail
+before GitHub capture.
+
+Version 2 retained issue states also carry exact `recommended_labels` in addition to
+the node ID, title, URL, timestamp, body hash, and current labels. This permits an
+explicit metadata-only label refresh without copying the complete semantic review.
+The node ID, title, URL, and body hash must match the digest-bound source record; only
+`updated_at`, `current_labels`, and `recommended_labels` may differ. Substantive drift
+requires a full replacement record. The refresh does not infer or union recommendations:
+current labels must still be explicitly recommended, and changed owner or pull-request
+overlap evidence retains its independent full-review or retained-overlap requirements.
+
 First run the read-only gate:
 
 ```bash

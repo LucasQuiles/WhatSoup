@@ -3,6 +3,7 @@ import { z } from "zod";
 import { assertNoSecretLike } from "../../artifact-redaction.ts";
 import { scanTextForPrivateLiterals } from "../../publication-guard.ts";
 import { scanContentLines } from "../../repo-hygiene-guard.ts";
+import { canonicalJson } from "./artifact-transaction-internal.ts";
 import {
   parseRegistry,
   registrySha256,
@@ -90,6 +91,7 @@ export interface RetainedIssueState {
   updated_at: string;
   pre_review_body_sha256: string;
   current_labels: string[];
+  recommended_labels?: string[];
 }
 
 export interface RetainedOverlapState {
@@ -98,13 +100,20 @@ export interface RetainedOverlapState {
   overlap: ReconcilePullRequestOverlap | null;
 }
 
+export interface ReviewedIssueRepin {
+  issue_number: number;
+  source_record_sha256: string;
+}
+
 export interface RegistryReviewBatch {
-  schema_version: 1;
+  schema_version: 1 | 2;
   repository: "LucasQuiles/WhatSoup";
+  source_main_revision?: string;
   pinned_main_revision: string;
   source_registry_sha256: string;
   reviewed_at: string;
   records: FullIssueRecord[];
+  repins?: ReviewedIssueRepin[];
   removals: ReviewedIssueRemoval[];
   retained_issue_states?: RetainedIssueState[];
   retained_overlap_states?: RetainedOverlapState[];
@@ -218,15 +227,28 @@ const overlapSchema: z.ZodType<ReconcilePullRequestOverlap> = z
     ]),
   })
   .strict();
+const retainedIssueStateShape = {
+  issue_number: positiveIntegerSchema,
+  issue_node_id: z.string().min(1).max(1_024),
+  title: z.string().min(1).max(16_384),
+  url: issueUrlSchema,
+  updated_at: timestampSchema,
+  pre_review_body_sha256: sha256Schema,
+  current_labels: sortedUniqueStringSchema(z.string().min(1).max(1_024)),
+};
 const retainedIssueStateSchema: z.ZodType<RetainedIssueState> = z
+  .object(retainedIssueStateShape)
+  .strict();
+const retainedIssueStateV2Schema = z
+  .object({
+    ...retainedIssueStateShape,
+    recommended_labels: sortedUniqueStringSchema(z.string().min(1).max(1_024)),
+  })
+  .strict();
+const repinSchema: z.ZodType<ReviewedIssueRepin> = z
   .object({
     issue_number: positiveIntegerSchema,
-    issue_node_id: z.string().min(1).max(1_024),
-    title: z.string().min(1).max(16_384),
-    url: issueUrlSchema,
-    updated_at: timestampSchema,
-    pre_review_body_sha256: sha256Schema,
-    current_labels: sortedUniqueStringSchema(z.string().min(1).max(1_024)),
+    source_record_sha256: sha256Schema,
   })
   .strict();
 const removalSchema: z.ZodType<ReviewedIssueRemoval> = z
@@ -246,7 +268,7 @@ const retainedOverlapStateSchema: z.ZodType<RetainedOverlapState> = z
     overlap: overlapSchema.nullable(),
   })
   .strict();
-const reviewBatchSchema = z
+const reviewBatchV1Schema = z
   .object({
     schema_version: z.literal(1),
     repository: z.literal("LucasQuiles/WhatSoup"),
@@ -265,6 +287,25 @@ const reviewBatchSchema = z
       .optional(),
   })
   .strict();
+const reviewBatchV2Schema = z
+  .object({
+    schema_version: z.literal(2),
+    repository: z.literal("LucasQuiles/WhatSoup"),
+    source_main_revision: z.string().regex(/^[0-9a-f]{40}$/),
+    pinned_main_revision: z.string().regex(/^[0-9a-f]{40}$/),
+    source_registry_sha256: sha256Schema,
+    reviewed_at: timestampSchema,
+    records: z.array(z.unknown()).max(10_000),
+    repins: z.array(repinSchema).max(10_000),
+    removals: z.array(removalSchema).max(10_000),
+    retained_issue_states: z.array(retainedIssueStateV2Schema).max(10_000),
+    retained_overlap_states: z.array(retainedOverlapStateSchema).max(100_000),
+  })
+  .strict();
+const reviewBatchSchema = z.discriminatedUnion("schema_version", [
+  reviewBatchV1Schema,
+  reviewBatchV2Schema,
+]);
 const closedIssueSchema: z.ZodType<RefreshClosedIssue> = z
   .object({
     issueNumber: positiveIntegerSchema,
@@ -570,6 +611,10 @@ function sameStrings(left: string[], right: string[]): boolean {
   return JSON.stringify(left) === JSON.stringify(right);
 }
 
+export function issueRecordSha256(record: FullIssueRecord): string {
+  return sha256(canonicalJson(record));
+}
+
 function assertLiveIdentity(
   record: FullIssueRecord,
   live: RefreshIssue,
@@ -627,10 +672,7 @@ function assertReviewBatch(
     );
   }
   assertNoSecretLike(publicText, "open issue registry review batch");
-  if (
-    batch.schema_version !== 1 ||
-    batch.repository !== "LucasQuiles/WhatSoup"
-  ) {
+  if (batch.repository !== "LucasQuiles/WhatSoup") {
     throw new Error("review batch repository or schema is invalid");
   }
   if (batch.pinned_main_revision !== expectedMainOid) {
@@ -652,6 +694,12 @@ function assertReviewBatch(
     batch.removals.map((removal) => removal.issue_number),
     "review batch removal numbers",
   );
+  if (batch.schema_version === 2) {
+    assertSortedUniqueNumbers(
+      batch.repins.map((repin) => repin.issue_number),
+      "review batch repin numbers",
+    );
+  }
   assertSortedUniqueNumbers(
     (batch.retained_issue_states ?? []).map((state) => state.issue_number),
     "retained issue state numbers",
@@ -693,6 +741,116 @@ function assertReviewBatch(
   ) {
     throw new Error("review batch cannot both replace and retain one issue");
   }
+  if (
+    (batch.retained_overlap_states ?? []).some((state) =>
+      recordNumbers.has(state.issue_number),
+    )
+  ) {
+    throw new Error(
+      "review batch cannot both replace one issue and include retained overlap state",
+    );
+  }
+  if (batch.schema_version === 2) {
+    if (batch.source_main_revision !== oldRegistry.pinned_main_revision) {
+      throw new Error(
+        "review batch source main revision does not match the source registry",
+      );
+    }
+    const oldByNumber = new Map(
+      oldRegistry.issues.map((record) => [record.issue_number, record]),
+    );
+    const repinNumbers = new Set(
+      batch.repins.map((repin) => repin.issue_number),
+    );
+    const removalNumbers = new Set(
+      batch.removals.map((removal) => removal.issue_number),
+    );
+    const retainedIssueNumbers = new Set(
+      batch.retained_issue_states.map((state) => state.issue_number),
+    );
+    const retainedOverlapNumbers = new Set(
+      batch.retained_overlap_states.map((state) => state.issue_number),
+    );
+    for (const record of parsed.records) {
+      if (record.pinned_revision !== expectedMainOid) {
+        throw new Error(
+          `review record #${record.issue_number} does not match the requested target pin`,
+        );
+      }
+    }
+    for (const repin of batch.repins) {
+      const source = oldByNumber.get(repin.issue_number);
+      if (source === undefined) {
+        throw new Error(
+          `review repin #${repin.issue_number} is not in the source registry`,
+        );
+      }
+      if (repin.source_record_sha256 !== issueRecordSha256(source)) {
+        throw new Error(
+          `review repin #${repin.issue_number} source record digest does not match`,
+        );
+      }
+      if (
+        recordNumbers.has(repin.issue_number) ||
+        removalNumbers.has(repin.issue_number)
+      ) {
+        throw new Error(
+          `review repin #${repin.issue_number} conflicts with another review category`,
+        );
+      }
+    }
+    for (const number of removalNumbers) {
+      if (
+        !oldByNumber.has(number) ||
+        retainedIssueNumbers.has(number) ||
+        retainedOverlapNumbers.has(number)
+      ) {
+        throw new Error(
+          `reviewed removal #${number} conflicts with the source registry or retained evidence`,
+        );
+      }
+    }
+    for (const number of retainedIssueNumbers) {
+      if (!oldByNumber.has(number)) {
+        throw new Error(
+          `retained issue state #${number} is not in the source registry`,
+        );
+      }
+    }
+    for (const state of batch.retained_issue_states) {
+      const source = oldByNumber.get(state.issue_number)!;
+      if (
+        state.issue_node_id !== source.issue_node_id ||
+        state.title !== source.title ||
+        state.url !== source.url ||
+        state.pre_review_body_sha256 !== source.pre_review_body_sha256
+      ) {
+        throw new Error(
+          `retained metadata for issue #${state.issue_number} changes source identity`,
+        );
+      }
+    }
+    for (const number of retainedOverlapNumbers) {
+      if (!oldByNumber.has(number)) {
+        throw new Error(
+          `retained overlap state #${number} is not in the source registry`,
+        );
+      }
+    }
+    if (batch.source_main_revision !== batch.pinned_main_revision) {
+      for (const source of oldRegistry.issues) {
+        if (
+          !recordNumbers.has(source.issue_number) &&
+          !repinNumbers.has(source.issue_number) &&
+          !removalNumbers.has(source.issue_number)
+        ) {
+          throw new Error(
+            `cross-main review coverage is missing issue #${source.issue_number}`,
+          );
+        }
+      }
+    }
+  }
   return parsed;
 }
 
@@ -732,7 +890,8 @@ export function reconcileRegistry(input: {
   );
   if (
     oldRegistry.repository !== "LucasQuiles/WhatSoup" ||
-    oldRegistry.pinned_main_revision !== input.expectedMainOid
+    (reviewBatch.schema_version === 1 &&
+      oldRegistry.pinned_main_revision !== input.expectedMainOid)
   ) {
     throw new Error("source registry repository or main pin does not match");
   }
@@ -770,6 +929,9 @@ export function reconcileRegistry(input: {
   const removalByNumber = new Map(
     reviewBatch.removals.map((removal) => [removal.issue_number, removal]),
   );
+  const repinByNumber = new Map(
+    (reviewBatch.repins ?? []).map((repin) => [repin.issue_number, repin]),
+  );
   const retainedIssueByNumber = new Map(
     (reviewBatch.retained_issue_states ?? []).map((state) => [
       state.issue_number,
@@ -789,6 +951,7 @@ export function reconcileRegistry(input: {
   for (const live of input.liveIssues) {
     const old = oldByNumber.get(live.issueNumber);
     const reviewed = reviewedByNumber.get(live.issueNumber);
+    const repin = repinByNumber.get(live.issueNumber);
     const retainedIssue = retainedIssueByNumber.get(live.issueNumber);
     const retainedOverlaps = retainedOverlapByIssue.get(live.issueNumber) ?? [];
     const oldOwner = old?.pull_request_owner_pr_number;
@@ -825,7 +988,7 @@ export function reconcileRegistry(input: {
         old.updated_at !== live.updatedAt ||
         old.pre_review_body_sha256 !== sha256(live.body) ||
         !sameStrings(old.current_labels, [...live.labels].sort(compareUtf8)) ||
-        old.pinned_revision !== input.expectedMainOid;
+        (old.pinned_revision !== input.expectedMainOid && repin === undefined);
       if (drift) {
         throw new Error(
           `changed issue #${live.issueNumber} requires an exact review record`,
@@ -833,6 +996,9 @@ export function reconcileRegistry(input: {
       }
     }
     const selected = structuredClone(reviewed ?? old!);
+    if (repin !== undefined) {
+      selected.pinned_revision = input.expectedMainOid;
+    }
     if (retainedIssue !== undefined) {
       Object.assign(selected, {
         issue_node_id: retainedIssue.issue_node_id,
@@ -841,6 +1007,9 @@ export function reconcileRegistry(input: {
         updated_at: retainedIssue.updated_at,
         pre_review_body_sha256: retainedIssue.pre_review_body_sha256,
         current_labels: [...retainedIssue.current_labels],
+        ...(retainedIssue.recommended_labels === undefined
+          ? {}
+          : { recommended_labels: [...retainedIssue.recommended_labels] }),
       });
     }
     for (const state of retainedOverlaps) {

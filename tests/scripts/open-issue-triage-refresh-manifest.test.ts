@@ -87,6 +87,98 @@ describe("registry refresh manifest", () => {
     });
   });
 
+  it("materializes a strict v2 cross-main review contract", () => {
+    const parsed = parseRegistryReviewManifest({
+      schema_version: 2,
+      repository: "LucasQuiles/WhatSoup",
+      source_main_revision: "b".repeat(40),
+      pinned_main_revision: MAIN_SHA,
+      source_registry_sha256: "c".repeat(64),
+      reviewed_at: "2026-07-26T12:30:00Z",
+      record_files: [],
+      repins: [
+        {
+          issue_number: 101,
+          source_record_sha256: "d".repeat(64),
+        },
+      ],
+      removals: [],
+      retained_issue_states: [
+        {
+          issue_number: 101,
+          issue_node_id: "I_example101",
+          title: "Example issue",
+          url: "https://github.com/LucasQuiles/WhatSoup/issues/101",
+          updated_at: "2026-07-26T12:10:00Z",
+          pre_review_body_sha256: sha256("owner body"),
+          current_labels: ["P1", "bug"],
+          recommended_labels: ["P1", "bug"],
+        },
+      ],
+      retained_overlap_states: [],
+    });
+
+    expect(materializeRegistryReviewBatch(parsed, new Map())).toMatchObject({
+      schema_version: 2,
+      source_main_revision: "b".repeat(40),
+      pinned_main_revision: MAIN_SHA,
+      repins: [
+        {
+          issue_number: 101,
+          source_record_sha256: "d".repeat(64),
+        },
+      ],
+      retained_issue_states: [
+        {
+          issue_number: 101,
+          current_labels: ["P1", "bug"],
+          recommended_labels: ["P1", "bug"],
+        },
+      ],
+    });
+  });
+
+  it("rejects unsorted v2 repins and incomplete v2 metadata", () => {
+    const base = {
+      schema_version: 2,
+      repository: "LucasQuiles/WhatSoup",
+      source_main_revision: "b".repeat(40),
+      pinned_main_revision: MAIN_SHA,
+      source_registry_sha256: "c".repeat(64),
+      reviewed_at: "2026-07-26T12:30:00Z",
+      record_files: [],
+      removals: [],
+      retained_issue_states: [],
+      retained_overlap_states: [],
+    };
+    expect(() =>
+      parseRegistryReviewManifest({
+        ...base,
+        repins: [
+          { issue_number: 102, source_record_sha256: "d".repeat(64) },
+          { issue_number: 101, source_record_sha256: "e".repeat(64) },
+        ],
+      }),
+    ).toThrow(/repins.*sorted|unique/i);
+    expect(() =>
+      parseRegistryReviewManifest({
+        ...base,
+        repins: [],
+        retained_issue_states: [
+          {
+            issue_number: 101,
+            issue_node_id: "I_example101",
+            title: "Example issue",
+            url: "https://github.com/LucasQuiles/WhatSoup/issues/101",
+            updated_at: "2026-07-26T12:10:00Z",
+            pre_review_body_sha256: sha256("owner body"),
+            current_labels: ["bug"],
+          },
+        ],
+      }),
+    ).toThrow(/recommended_labels|required/i);
+  });
+
   it.each([
     ["unknown manifest field", { extra: true }],
     [

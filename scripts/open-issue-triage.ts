@@ -1318,18 +1318,31 @@ export async function run(
         const message = error instanceof Error ? error.message : "";
         const publicSafety =
           message.startsWith("PUBLIC review batch rejected:") ||
+          message.startsWith("PUBLIC registry rejected:") ||
           message.startsWith("redaction_violation:");
+        const reviewPrecondition =
+          /main revision does not match|requested (?:target )?pin|source registry digest|source record digest|source identity|cross-main review coverage|review repin|conflicts with the source registry|not in the source registry/i.test(
+            message,
+          );
         throw new CliFailure(
-          publicSafety ? 4 : 2,
+          publicSafety ? 4 : reviewPrecondition ? 3 : 2,
           publicSafety
             ? "review-public-safety-rejection"
-            : "review-record-schema-invalid",
+            : reviewPrecondition
+              ? "review-precondition-failed"
+              : "review-record-schema-invalid",
           publicSafety
             ? "The committed review batch violates the PUBLIC artifact policy"
-            : "A committed review record violates the strict registry schema",
+            : reviewPrecondition
+              ? "The committed review batch does not match the requested source and target evidence"
+              : "A committed review record violates the strict registry schema",
           publicSafety
             ? "Remove private runtime identifiers, secrets, and complete bodies before retrying."
-            : "Regenerate and recommit the exact body-free review record.",
+            : reviewPrecondition
+              ? "Regenerate the exact digest-bound review contract from the committed source registry."
+              : "Regenerate and recommit the exact body-free review record.",
+          false,
+          reviewPrecondition ? { reason: message.slice(0, 256) } : undefined,
         );
       }
       const reviewSha256 = sha256(review.text);
