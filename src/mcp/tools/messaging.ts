@@ -27,6 +27,7 @@ import {
   redactInternalArtifacts,
   resolveOutboundAudience,
   isOperatorDmPeer,
+  isTrustedInternalDmPeer,
   type AssistantTextSuppressionReason,
   type OutboundMessageSafetyDecision,
 } from '../../core/outbound-message-safety.ts';
@@ -139,6 +140,8 @@ export interface MessagingDeps {
    * isOperatorDmPeer the same way every other send path does.
    */
   adminPhones: Set<string>;
+  /** Exact authenticated DM JIDs whose operator coordination text is internal. */
+  internalPeerJids?: ReadonlySet<string>;
   profiles?: ProfileRegistry;
   auditWriter?: OutboundSendsWriter;
   pollRegistrar?: PollRegistrar;
@@ -219,11 +222,12 @@ export function registerMessagingTools(
   // site below — an admin's 1:1 DM on the trusted primary is an operator
   // channel. fallbackActive fails closed when the runtime didn't inject a
   // fallback-provider query (see MessagingDeps).
-  const audienceCtx = (chatJid: string): { isGroup: boolean; peerIsAdmin: boolean; fallbackActive: boolean } => {
+  const audienceCtx = (chatJid: string) => {
     const isGroup = isGroupJid(chatJid);
     return {
       isGroup,
       peerIsAdmin: isOperatorDmPeer(chatJid, isGroup, deps.dbWrapper, deps.adminPhones),
+      peerIsTrustedInternal: isTrustedInternalDmPeer(chatJid, isGroup, deps.internalPeerJids),
       fallbackActive: deps.fallbackActive ? deps.fallbackActive() : true,
     };
   };

@@ -156,10 +156,14 @@ export function registerAllTools(
     // established dbWrapper/adminPhones pattern for LID-aware admin gating)
     // let send/reply/edit/poll resolve isOperatorDmPeer; fallbackActive is
     // OPTIONAL (see RegisterAllToolsOptions) and threaded straight through.
-    dbWrapper: db, adminPhones: config.adminPhones, fallbackActive: options.fallbackActive,
+    dbWrapper: db, adminPhones: config.adminPhones,
+    internalPeerJids: config.internalPeerJids,
+    fallbackActive: options.fallbackActive,
   }));
   runModule('media', true, () => mediaTools.registerMediaTools(registry, {
-    connection, db, adminPhones: config.adminPhones, fallbackActive: options.fallbackActive,
+    connection, db, adminPhones: config.adminPhones,
+    internalPeerJids: config.internalPeerJids,
+    fallbackActive: options.fallbackActive,
   }));
   runModule('voice', true, () => voiceTools.registerVoiceTools(registry, { connection, db }));
   runModule('retention', true, () => retentionTools.registerRetentionTools(registry, { db }));

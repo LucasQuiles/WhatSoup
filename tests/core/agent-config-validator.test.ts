@@ -354,6 +354,34 @@ describe('adminPhones validation', () => {
   });
 });
 
+describe('internalPeerJids validation', () => {
+  const whatsappPeer = `${'15555550002'}@${'s.whatsapp.net'}`;
+  const lidPeer = `${'123456789'}@${'lid'}`;
+  const groupPeer = `${'15555550002'}@${'g.us'}`;
+  const smsPeer = `${'15555550002'}@${'sms'}`;
+
+  it('accepts exact authenticated WhatsApp DM JIDs', () => {
+    const raw = baseAgent({
+      internalPeerJids: [whatsappPeer, lidPeer],
+    });
+    expect(validateInstanceConfig(raw, ctx('create'))).toBeNull();
+  });
+
+  it.each([
+    ['group JID', [groupPeer]],
+    ['spoofable SMS JID', [smsPeer]],
+    ['blank JID', ['']],
+    ['duplicate JID', [whatsappPeer, whatsappPeer]],
+    ['non-array', whatsappPeer],
+  ])('rejects %s', (_label, internalPeerJids) => {
+    const result = validateInstanceConfig(
+      baseAgent({ internalPeerJids }),
+      ctx('create'),
+    );
+    expect(result?.field).toBe('internalPeerJids');
+  });
+});
+
 describe('chatAliases validation', () => {
   it('rejects non-object chatAliases', () => {
     const raw = baseChat({ chatAliases: ['not an object'] });
