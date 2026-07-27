@@ -27,6 +27,7 @@ function context() {
     },
     replay: {
       sourceMessageId: 'wamid-73',
+      receivedAtUnixSeconds: 1_780_000_000,
       replaySafe: true,
       senderJid: '15551111111@s.whatsapp.net',
       senderName: null,

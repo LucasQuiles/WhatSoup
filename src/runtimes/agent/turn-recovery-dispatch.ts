@@ -131,6 +131,7 @@ export async function dispatchTurnRecoveryReplayForJob(
 
   const source: RuntimeTurnSourceSnapshot = {
     sourceMessageId: job.source_message_id,
+    receivedAtUnixSeconds: job.source_received_at_unix_seconds,
     conversationKey: job.conversation_key,
     senderJid: job.sender_jid,
     senderName: job.sender_name,
@@ -159,6 +160,7 @@ export async function dispatchTurnRecoveryReplayForJob(
 
   const turn: QueuedTurn = {
     sourceMessageId: source.sourceMessageId,
+    receivedAtUnixSeconds: source.receivedAtUnixSeconds,
     conversationKey: source.conversationKey,
     chatJid: job.delivery_jid,
     senderJid: source.senderJid,

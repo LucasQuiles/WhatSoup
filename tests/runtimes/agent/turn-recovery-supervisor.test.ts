@@ -54,6 +54,7 @@ function replayEnvelope(
 ): TurnRecoveryReplayEnvelope {
   return {
     sourceMessageId: `wamid-${suffix}`,
+    receivedAtUnixSeconds: 1_780_000_000,
     replaySafe: true,
     senderJid: '15550100002:9@s.whatsapp.net',
     senderName: 'Brick Owner',
