@@ -363,19 +363,20 @@ describe("complete registry reconciliation", () => {
       body: "Owner-authored body.\n",
       labels: ["bug"],
     };
+    const reviewBatch: RegistryReviewBatch = {
+      schema_version: 1,
+      repository: "LucasQuiles/WhatSoup",
+      pinned_main_revision: "b".repeat(40),
+      source_registry_sha256: registrySha256(oldRegistry),
+      reviewed_at: "2026-07-26T13:01:00Z",
+      records: [],
+      removals: [],
+      retained_issue_states: [],
+      retained_overlap_states: [],
+    };
     const input = {
       oldRegistry,
-      reviewBatch: {
-        schema_version: 1,
-        repository: "LucasQuiles/WhatSoup",
-        pinned_main_revision: "b".repeat(40),
-        source_registry_sha256: registrySha256(oldRegistry),
-        reviewed_at: "2026-07-26T13:01:00Z",
-        records: [],
-        removals: [],
-        retained_issue_states: [],
-        retained_overlap_states: [],
-      },
+      reviewBatch,
       liveIssues: [liveIssue],
       closedIssues: [],
       openPullRequests: [],
