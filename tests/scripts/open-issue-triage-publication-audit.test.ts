@@ -72,6 +72,7 @@ describe("open issue publication audit updates", () => {
       path,
       "Body-free reviewed issue evidence batch.",
     );
+    expect(result).toContain(path);
     const rowPaths = (text: string) =>
       [
         ...text.matchAll(
