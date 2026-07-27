@@ -70,6 +70,7 @@ export const internalPublicationRoots = [
   /^docs\/project-status-[^/]+\.md$/,
   /^docs\/audit-[^/]+\.md$/,
   /^docs\/research\//,
+  /^docs\/triage\//,
   /^docs\/specs\/(?!2026-04-25-prompt-enrichment-design\.md$|image-tools-design\.md$|2026-04-26-byok-hardening-remaining-work\.md$)/,
   /^tmp\//,
   /^docs\/work-index(?:\.md|\.json|-repair-matrix\.md)?$/,
