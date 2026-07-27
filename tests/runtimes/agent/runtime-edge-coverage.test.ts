@@ -340,6 +340,9 @@ type RuntimeView = {
   perChatRuntimeTurnContexts: Map<string, RuntimeTurnContext[]>;
   perChatTurnQueues: Map<string, { pending: number; isProcessing: boolean; haltedError: unknown; idle(): Promise<void> }>;
   currentRuntimeTurnContext: RuntimeTurnContext | null;
+  runtimeTurnCoordinator: {
+    rekeyPerChatTurnQueueHaltScope(fromScopeKey: string, toScopeKey: string): void;
+  };
   pendingTurnText: Map<string, string>;
   pendingTurnActorJid: Map<string, string | undefined>;
   perChatTurnContentType: Map<string, string>;
@@ -1259,6 +1262,7 @@ describe('AgentRuntime edge coverage', () => {
     const runtime = makeRuntime({ sessionScope: 'per_chat' });
     const state = view(runtime);
     state.flushImageCoalesce = vi.fn(async () => {});
+    const rekeyHaltScope = vi.spyOn(state.runtimeTurnCoordinator, 'rekeyPerChatTurnQueueHaltScope');
     const conversationKey = '15551234567';
     const lidKey = `${conversationKey}@lid`;
     const phoneJid = `${conversationKey}@s.whatsapp.net`;
@@ -1308,6 +1312,7 @@ describe('AgentRuntime edge coverage', () => {
 
     runtime.handleJidAliasChanged(conversationKey, phoneJid);
 
+    expect(rekeyHaltScope).toHaveBeenCalledWith(lidKey, phoneJid);
     expect(chatQueue.updateDeliveryJid).toHaveBeenCalledWith(phoneJid);
     expect(socketServer.updateDeliveryJid).toHaveBeenCalledWith(phoneJid);
     expect(singletonQueue.updateDeliveryJid).toHaveBeenCalledWith(phoneJid);

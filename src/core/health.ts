@@ -5,7 +5,7 @@ import { safeStringEqual } from '../lib/safe-compare.ts';
 import { lookupCredential } from '../lib/keyring.ts';
 import { createChildLogger } from '../logger.ts';
 import { CURRENT_SCHEMA_MIGRATION, type Database } from './database.ts';
-import { readArcBindingHealth } from './arc-binding-health.ts';
+import { readArcBindingHealth, resolveArcRepoRoot } from './arc-binding-health.ts';
 import {
   readContinuityGapHealth,
   type ContinuityGapHealth,
@@ -97,6 +97,8 @@ export interface HealthDeps {
    * Injectable for tests; defaults to a real sampler in production.
    */
   loopLagSampler?: LoopLagSampler;
+  /** Monotonic clock for starvation-warning suppression; injectable for tests. */
+  loopLagWarningNow?: () => number;
 }
 
 /**
@@ -702,6 +704,10 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
   // lag between now and the first /health request, not just lag that happens
   // to occur while a request is in flight.
   const loopLagSampler = deps.loopLagSampler ?? new LoopLagSampler();
+  const loopLagWarningNow = deps.loopLagWarningNow ?? (() => performance.now());
+  const loopLagWarningRepeatMs = 5 * 60 * 1_000;
+  let loopLagWasStarved = false;
+  let lastLoopLagWarningAtMs: number | null = null;
   loopLagSampler.start();
   const server = createServer((req: IncomingMessage, res: ServerResponse) => {
     // ── POST /poll-decision — D-4 console approval queue: deliver a decision
@@ -1291,11 +1297,22 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
       // lag this handler's own (synchronous) work might introduce.
       const loopLag = loopLagSampler.snapshot();
       if (loopLag.locallyStarved) {
-        log.warn({
-          p95LagMs: loopLag.p95LagMs,
-          sampleCount: loopLag.sampleCount,
-          thresholdMs: LOOP_LAG_STARVATION_THRESHOLD_MS,
-        }, 'event loop starvation detected during health check');
+        const warningNowMs = loopLagWarningNow();
+        if (
+          !loopLagWasStarved
+          || lastLoopLagWarningAtMs === null
+          || warningNowMs - lastLoopLagWarningAtMs >= loopLagWarningRepeatMs
+        ) {
+          log.warn({
+            p95LagMs: loopLag.p95LagMs,
+            sampleCount: loopLag.sampleCount,
+            thresholdMs: LOOP_LAG_STARVATION_THRESHOLD_MS,
+          }, 'event loop starvation detected during health check');
+          lastLoopLagWarningAtMs = warningNowMs;
+        }
+        loopLagWasStarved = true;
+      } else {
+        loopLagWasStarved = false;
       }
 
       const enrichmentStats = deps.getEnrichmentStats();
@@ -1645,7 +1662,7 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
         degradation_causes: degradationCauses,
         generated_at: new Date().toISOString(),
         uptime_seconds: Math.floor((Date.now() - deps.startedAt) / 1000),
-        arc: readArcBindingHealth(process.env.WHATSOUP_REPO_ROOT ?? process.cwd()),
+        arc: readArcBindingHealth(resolveArcRepoRoot()),
         instance: {
           name: deps.instanceName,
           mode: deps.instanceType,
@@ -1766,6 +1783,7 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
           sample_count: loopLag.sampleCount,
           locally_starved: loopLag.locallyStarved,
           starvation_threshold_ms: LOOP_LAG_STARVATION_THRESHOLD_MS,
+          discontinuity_count: loopLag.discontinuityCount,
         },
         mcp_liveness: mcpLiveness
           ? {

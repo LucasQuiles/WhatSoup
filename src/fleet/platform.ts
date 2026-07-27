@@ -127,6 +127,8 @@ export function buildPlist(name: string): string {
     `  <string>${escapeXml(logDir)}/stdout.log</string>`,
     '  <key>StandardErrorPath</key>',
     `  <string>${escapeXml(logDir)}/stderr.log</string>`,
+    '  <key>WorkingDirectory</key>',
+    `  <string>${escapeXml(repoRoot)}</string>`,
     '  <key>EnvironmentVariables</key>',
     '  <dict>',
     '    <key>PATH</key>',

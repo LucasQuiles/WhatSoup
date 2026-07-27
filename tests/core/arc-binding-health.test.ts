@@ -1,9 +1,18 @@
-import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';
+import {
+  mkdtempSync,
+  mkdirSync,
+  realpathSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 
-import { readArcBindingHealth } from '../../src/core/arc-binding-health.ts';
+import {
+  readArcBindingHealth,
+  resolveArcRepoRoot,
+} from '../../src/core/arc-binding-health.ts';
 
 function repoWithArcToml(content: string): string {
   const root = mkdtempSync(path.join(tmpdir(), 'whatsoup-arc-health.'));
@@ -13,6 +22,57 @@ function repoWithArcToml(content: string): string {
 }
 
 describe('readArcBindingHealth', () => {
+  it('accepts an explicit root only when its realpath matches the source-anchored checkout', () => {
+    const reviewedRoot = repoWithArcToml('');
+    const linkRoot = `${reviewedRoot}-link`;
+    symlinkSync(reviewedRoot, linkRoot);
+
+    expect(resolveArcRepoRoot(
+      { WHATSOUP_REPO_ROOT: `  ${linkRoot}  ` },
+      reviewedRoot,
+    )).toBe(realpathSync(reviewedRoot));
+  });
+
+  it('uses the source-anchored checkout rather than cwd when the explicit root is empty', () => {
+    const reviewedRoot = repoWithArcToml('');
+    expect(resolveArcRepoRoot({ WHATSOUP_REPO_ROOT: '   ' }, reviewedRoot))
+      .toBe(realpathSync(reviewedRoot));
+    expect(resolveArcRepoRoot({}, reviewedRoot)).toBe(realpathSync(reviewedRoot));
+  });
+
+  it('fails closed when an explicit root does not match the source-anchored checkout', () => {
+    const reviewedRoot = repoWithArcToml([
+      'arc_version = "0.1.0"',
+      'consumer = "whatsoup"',
+      'modules = []',
+      'emits = []',
+      'binding = "bindings/whatsoup.arc.json"',
+      `payload_sha = "sha256:${'a'.repeat(64)}"`,
+      '',
+    ].join('\n'));
+    const otherRoot = repoWithArcToml('');
+    const resolved = resolveArcRepoRoot(
+      { WHATSOUP_REPO_ROOT: otherRoot },
+      reviewedRoot,
+    );
+
+    expect(resolved).toBeNull();
+    expect(readArcBindingHealth(resolved)).toEqual({
+      loaded: false,
+      reason: 'repository root invalid',
+    });
+  });
+
+  it('fails closed when the source-anchored checkout is unavailable', () => {
+    const explicitRoot = repoWithArcToml('');
+
+    expect(resolveArcRepoRoot({}, null)).toBeNull();
+    expect(resolveArcRepoRoot(
+      { WHATSOUP_REPO_ROOT: explicitRoot },
+      null,
+    )).toBeNull();
+  });
+
   it('loads safe ARC metadata from generated arc.toml', () => {
     const root = repoWithArcToml([
       'arc_version = "0.1.0"',

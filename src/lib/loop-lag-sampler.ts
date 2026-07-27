@@ -1,11 +1,14 @@
 export const LOOP_LAG_SAMPLE_INTERVAL_MS = 500;
 export const LOOP_LAG_WINDOW_SAMPLES = 20;
 export const LOOP_LAG_STARVATION_THRESHOLD_MS = 250;
+export const LOOP_LAG_DISCONTINUITY_THRESHOLD_MS =
+  LOOP_LAG_SAMPLE_INTERVAL_MS * LOOP_LAG_WINDOW_SAMPLES;
 
 export interface LoopLagSnapshot {
   sampleCount: number;
   p95LagMs: number | null;
   locallyStarved: boolean;
+  discontinuityCount: number;
 }
 
 export interface LoopLagSamplerOptions {
@@ -16,6 +19,7 @@ export class LoopLagSampler {
   private timer: NodeJS.Timeout | null = null;
   private samples: number[] = [];
   private expectedAtMs: number | null = null;
+  private discontinuityCount = 0;
   private readonly now: () => number;
 
   constructor(options: LoopLagSamplerOptions = {}) {
@@ -39,30 +43,38 @@ export class LoopLagSampler {
   }
 
   snapshot(): LoopLagSnapshot {
-    const completed = this.samples;
-    const expectedAtMs = this.expectedAtMs;
-    const actualAtMs = this.now();
-    const effectiveSamples = expectedAtMs !== null && actualAtMs >= expectedAtMs
-      ? [
-          ...completed.slice(-(LOOP_LAG_WINDOW_SAMPLES - 1)),
-          Math.max(0, actualAtMs - expectedAtMs),
-        ]
-      : completed;
-    const p95LagMs = this.percentile95(effectiveSamples);
+    this.observe();
+    const p95LagMs = this.percentile95(this.samples);
     return {
-      sampleCount: effectiveSamples.length,
+      sampleCount: this.samples.length,
       p95LagMs,
       locallyStarved:
-        effectiveSamples.length === LOOP_LAG_WINDOW_SAMPLES
+        this.samples.length === LOOP_LAG_WINDOW_SAMPLES
         && p95LagMs !== null
         && p95LagMs > LOOP_LAG_STARVATION_THRESHOLD_MS,
+      discontinuityCount: this.discontinuityCount,
     };
   }
 
   private sample(): void {
+    this.observe();
+  }
+
+  private observe(): void {
     const actualAtMs = this.now();
-    const expectedAtMs = this.expectedAtMs ?? actualAtMs;
-    this.samples.push(Math.max(0, actualAtMs - expectedAtMs));
+    const expectedAtMs = this.expectedAtMs;
+    if (expectedAtMs === null || actualAtMs < expectedAtMs) return;
+
+    const lagMs = Math.max(0, actualAtMs - expectedAtMs);
+    if (lagMs > LOOP_LAG_DISCONTINUITY_THRESHOLD_MS) {
+      this.resetWindow();
+      this.discontinuityCount = Math.min(
+        Number.MAX_SAFE_INTEGER,
+        this.discontinuityCount + 1,
+      );
+    } else {
+      this.samples.push(lagMs);
+    }
     if (this.samples.length > LOOP_LAG_WINDOW_SAMPLES) this.samples.shift();
     this.expectedAtMs = actualAtMs + LOOP_LAG_SAMPLE_INTERVAL_MS;
   }

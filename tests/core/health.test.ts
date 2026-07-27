@@ -7,7 +7,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { createServer } from 'node:http';
 import { request } from 'node:http';
-import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
@@ -315,35 +315,24 @@ describe('GET /health', () => {
     }
   });
 
-  it('surfaces safe ARC binding metadata from runtime health', async () => {
+  it('binds ARC health to the source checkout and rejects a different explicit root', async () => {
     const repoRoot = mkdtempSync(path.join(tmpdir(), 'whatsoup-health-arc.'));
-    mkdirSync(path.join(repoRoot, '.arc'));
-    writeFileSync(path.join(repoRoot, '.arc', 'arc.toml'), [
-      'arc_version = "0.1.0"',
-      'consumer = "whatsoup"',
-      'modules = ["app-runtime", "telemetry", "verification"]',
-      'emits = ["verification-record"]',
-      '',
-      '[source]',
-      'binding = "bindings/whatsoup.arc.json"',
-      `payload_sha = "sha256:${'b'.repeat(64)}"`,
-      'generated_by = "arc adopt"',
-      '',
-    ].join('\n'), 'utf8');
     const prev = process.env.WHATSOUP_REPO_ROOT;
     process.env.WHATSOUP_REPO_ROOT = repoRoot;
     try {
-      const { status, body } = await httpReq(port, '/health', 'GET');
-      expect(status).toBe(200);
-      const json = JSON.parse(body);
-      expect(json.arc).toEqual({
+      const mismatch = await httpReq(port, '/health', 'GET');
+      expect(JSON.parse(mismatch.body).arc).toEqual({
+        loaded: false,
+        reason: 'repository root invalid',
+      });
+
+      delete process.env.WHATSOUP_REPO_ROOT;
+      const sourceAnchored = await httpReq(port, '/health', 'GET');
+      expect(sourceAnchored.status).toBe(200);
+      expect(JSON.parse(sourceAnchored.body).arc).toMatchObject({
         loaded: true,
         consumer: 'whatsoup',
-        arcVersion: '0.1.0',
-        modules: ['app-runtime', 'telemetry', 'verification'],
-        emits: ['verification-record'],
-        binding: 'bindings/whatsoup.arc.json',
-        payloadSha: `sha256:${'b'.repeat(64)}`,
+        payloadSha: expect.stringMatching(/^sha256:[0-9a-f]{64}$/),
       });
     } finally {
       if (prev === undefined) {
@@ -1508,6 +1497,8 @@ describe('GET /health', () => {
           effectiveProvider: 'openai-api',
           fallbackActiveUntil: Date.now() + 600_000,
           fallbackReason: 'usage-limit',
+          turnQueueHalted: true,
+          turnQueueHaltedScopes: 2,
         },
       }),
       getFallbackState: () => null,
@@ -1524,6 +1515,8 @@ describe('GET /health', () => {
     const json = JSON.parse(body);
     expect(json.status).toBe('degraded');
     expect(json.runtime.agent.effectiveProvider).toBe('openai-api');
+    expect(json.runtime.agent.turnQueueHalted).toBe(true);
+    expect(json.runtime.agent.turnQueueHaltedScopes).toBe(2);
     db2.close();
   });
 
@@ -1569,6 +1562,8 @@ describe('GET /health', () => {
         details: {
           activeSessions: 0,
           lastTurnErrorClass: 'auth-required',
+          turnQueueHalted: true,
+          turnQueueHaltedScopes: 1,
         },
       }),
       getFallbackState: () => null,
@@ -1584,6 +1579,8 @@ describe('GET /health', () => {
     expect(status).toBe(503);
     const json = JSON.parse(body);
     expect(json.status).toBe('unhealthy');
+    expect(json.runtime.agent.turnQueueHalted).toBe(true);
+    expect(json.runtime.agent.turnQueueHaltedScopes).toBe(1);
     expect(json.runtime.agent.lastTurnErrorClass).toBe('auth-required');
     db2.close();
   });
@@ -4404,7 +4401,12 @@ describe('health.ts upper-branch coverage (624-1020)', () => {
       mockHealthLogger.warn.mockClear();
     });
 
-    function fakeLoopLagSampler(snapshot: { sampleCount: number; p95LagMs: number | null; locallyStarved: boolean }) {
+    function fakeLoopLagSampler(snapshot: {
+      sampleCount: number;
+      p95LagMs: number | null;
+      locallyStarved: boolean;
+      discontinuityCount: number;
+    }) {
       return {
         start: vi.fn(),
         stop: vi.fn(),
@@ -4422,12 +4424,18 @@ describe('health.ts upper-branch coverage (624-1020)', () => {
         sample_count: expect.any(Number),
         locally_starved: false,
         starvation_threshold_ms: 250,
+        discontinuity_count: expect.any(Number),
       });
       expect(json.event_loop.lag_p95_ms === null || typeof json.event_loop.lag_p95_ms === 'number').toBe(true);
     });
 
     it('folds a starved sampler snapshot into the event_loop body and degrades status', async () => {
-      const sampler = fakeLoopLagSampler({ sampleCount: 20, p95LagMs: 412, locallyStarved: true });
+      const sampler = fakeLoopLagSampler({
+        sampleCount: 20,
+        p95LagMs: 412,
+        locallyStarved: true,
+        discontinuityCount: 3,
+      });
       const deps = makeDeps(db, { loopLagSampler: sampler as any });
       ({ server, port } = await buildTestServer(deps));
 
@@ -4440,11 +4448,17 @@ describe('health.ts upper-branch coverage (624-1020)', () => {
         sample_count: 20,
         locally_starved: true,
         starvation_threshold_ms: 250,
+        discontinuity_count: 3,
       });
     });
 
     it('logs a warning when the sampler reports local starvation', async () => {
-      const sampler = fakeLoopLagSampler({ sampleCount: 20, p95LagMs: 500, locallyStarved: true });
+      const sampler = fakeLoopLagSampler({
+        sampleCount: 20,
+        p95LagMs: 500,
+        locallyStarved: true,
+        discontinuityCount: 0,
+      });
       const deps = makeDeps(db, { loopLagSampler: sampler as any });
       ({ server, port } = await buildTestServer(deps));
 
@@ -4455,8 +4469,70 @@ describe('health.ts upper-branch coverage (624-1020)', () => {
       );
     });
 
+    it('rate-limits continuous starvation warnings using monotonic time without hiding health', async () => {
+      let nowMs = 1_000;
+      const sampler = fakeLoopLagSampler({
+        sampleCount: 20,
+        p95LagMs: 500,
+        locallyStarved: true,
+        discontinuityCount: 2,
+      });
+      const deps = makeDeps(db, {
+        loopLagSampler: sampler as any,
+        loopLagWarningNow: () => nowMs,
+      });
+      ({ server, port } = await buildTestServer(deps));
+
+      const first = JSON.parse((await httpReq(port, '/health', 'GET')).body);
+      nowMs += 299_999;
+      const suppressed = JSON.parse((await httpReq(port, '/health', 'GET')).body);
+      expect(first.status).toBe('degraded');
+      expect(suppressed.status).toBe('degraded');
+      expect(suppressed.event_loop.discontinuity_count).toBe(2);
+      expect(mockHealthLogger.warn).toHaveBeenCalledTimes(1);
+
+      nowMs += 1;
+      await httpReq(port, '/health', 'GET');
+      expect(mockHealthLogger.warn).toHaveBeenCalledTimes(2);
+    });
+
+    it('warns immediately when starvation re-enters inside the repeat interval', async () => {
+      let nowMs = 1_000;
+      const snapshot = {
+        sampleCount: 20,
+        p95LagMs: 500,
+        locallyStarved: true,
+        discontinuityCount: 0,
+      };
+      const sampler = fakeLoopLagSampler(snapshot);
+      const deps = makeDeps(db, {
+        loopLagSampler: sampler as any,
+        loopLagWarningNow: () => nowMs,
+      });
+      ({ server, port } = await buildTestServer(deps));
+
+      await httpReq(port, '/health', 'GET');
+      sampler.snapshot.mockReturnValue({
+        ...snapshot,
+        p95LagMs: 0,
+        locallyStarved: false,
+      });
+      nowMs += 1;
+      await httpReq(port, '/health', 'GET');
+      sampler.snapshot.mockReturnValue(snapshot);
+      nowMs += 1;
+      await httpReq(port, '/health', 'GET');
+
+      expect(mockHealthLogger.warn).toHaveBeenCalledTimes(2);
+    });
+
     it('does not log a starvation warning when the sampler is not starved', async () => {
-      const sampler = fakeLoopLagSampler({ sampleCount: 3, p95LagMs: 10, locallyStarved: false });
+      const sampler = fakeLoopLagSampler({
+        sampleCount: 3,
+        p95LagMs: 10,
+        locallyStarved: false,
+        discontinuityCount: 0,
+      });
       const deps = makeDeps(db, { loopLagSampler: sampler as any });
       ({ server, port } = await buildTestServer(deps));
 
@@ -4468,7 +4544,12 @@ describe('health.ts upper-branch coverage (624-1020)', () => {
     });
 
     it('stops the injected sampler when the server closes', async () => {
-      const sampler = fakeLoopLagSampler({ sampleCount: 0, p95LagMs: null, locallyStarved: false });
+      const sampler = fakeLoopLagSampler({
+        sampleCount: 0,
+        p95LagMs: null,
+        locallyStarved: false,
+        discontinuityCount: 0,
+      });
       const deps = makeDeps(db, { loopLagSampler: sampler as any });
       ({ server, port } = await buildTestServer(deps));
       expect(sampler.start).toHaveBeenCalled();
