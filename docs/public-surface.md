@@ -265,6 +265,7 @@ scripts are public; build/test scripts are internal.
 | `cli:npm.audit-instance-plugins` | `npm run audit:instance-plugins` | `package.json` | stable | active | Audit plugin allowlists across instances |
 | `cli:npm.backfill-enrichment` | `npm run backfill-enrichment` | `package.json` | stable | active | One-shot enrichment backfill |
 | `cli:npm.token-window` | `npm run token-window` | `package.json` | beta | active | Tokenomics pilot helper; reports rolling agent-token totals from an instance `bot.db` |
+| `cli:npm.audit-continuity-manifest` | `npm run audit-continuity-manifest` | `package.json` | beta | active | Read-only comparison of a bounded independent-history receipt manifest against exact local message, admission, and echoed-reply proof; emits only ordinals, classifications, actions, and counts |
 | `cli:npm.close-recovery-catchup` | `npm run close-recovery-catchup` | `package.json` | beta | active | Validate an exact schema-43 operator catch-up proof read-only; `--confirm` atomically persists the closure |
 | `cli:npm.triage-issues` | `npm run triage:issues` | `package.json` | beta | active | Deterministic open-issue registry schema/check/render and bounded live snapshot/dry-run/re-read commands; apply requires a tracked clean plan plus explicit digest, issue-set, and idempotency confirmations |
 | `cli:npm.migrate-memory-config` | `npm run migrate-memory-config` | `package.json` | stable | active | Migrate legacy flat `pinecone*` config to `memory.*` |

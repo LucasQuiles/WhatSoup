@@ -701,6 +701,11 @@ delivery proof. Recent chains and every unresolved/retry/orphan/corrupt obligati
 Runtime health reports an admission-active `outstanding` count (`pending` plus `claimed` jobs and
 orphan transfers), every job-state bucket (including live claims), unmatched operator catch-ups,
 quarantined selected deliveries, orphan transfers, corrupt links, and echo conflicts.
+Those receiver-local gauges cannot prove that the transport admitted every message sent during a
+disconnect. The read-only `audit-continuity-manifest` operator command compares a bounded receipt
+manifest from an independent participant history against exact local message, admission, and
+delivery-proof state before any catch-up action. It separates already-admitted unanswered work from
+work that requires provenance-labeled operator catch-up and emits no identifiers or content.
 Admission blocks only `pending` or `claimed` jobs plus orphan transfers, and only on the affected
 per-chat or global scope. When the selected delivery is provably dead (`failed_permanent`/
 `quarantined`) the job can never echo-settle, so the stuck-inbound reclaim (§4.7) drives a
