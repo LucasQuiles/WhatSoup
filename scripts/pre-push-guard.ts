@@ -3,6 +3,14 @@ import { accessSync, constants, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
+import {
+  verifyAlignmentAfter,
+  verifyAlignmentBefore,
+  type AlignmentAfterOptions,
+  type AlignmentBeforeOptions,
+  type AlignmentReceipt,
+} from './pre-push-alignment.ts';
+
 export const ZERO_SHA = '0000000000000000000000000000000000000000';
 const ZERO_SHA_256 = '0'.repeat(64);
 const OBJECT_ID_PATTERN = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
@@ -15,6 +23,16 @@ const DELETE_ONLY_METADATA_SCRIPTS = ['design:metrics', 'design:burndown'] as co
 
 interface PrePushGuardDependencies {
   assertConsoleDependencies: (cwd: string) => void;
+  verifyAlignmentBefore?: (options: AlignmentBeforeOptions) => AlignmentReceipt;
+  verifyAlignmentAfter?: (
+    receipt: AlignmentReceipt,
+    options: AlignmentAfterOptions,
+  ) => void;
+}
+
+interface PushRemote {
+  remoteName: string;
+  remoteUrl: string;
 }
 
 interface RefUpdate {
@@ -146,6 +164,7 @@ export function runPrePushGuard(
   input: string,
   cwd = process.cwd(),
   dependencies: PrePushGuardDependencies = { assertConsoleDependencies },
+  remote?: PushRemote,
 ): PushDecision {
   let parsedUpdates: RefUpdate[] = [];
   let parseError: unknown = null;
@@ -193,6 +212,19 @@ export function runPrePushGuard(
     );
   }
 
+  const alignmentBefore = dependencies.verifyAlignmentBefore ?? verifyAlignmentBefore;
+  const alignmentAfter = dependencies.verifyAlignmentAfter ?? verifyAlignmentAfter;
+  const alignmentReceipt = remote
+    ? alignmentBefore({
+        cwd,
+        remoteName: remote.remoteName,
+        remoteUrl: remote.remoteUrl,
+        candidateOids: parsedUpdates
+          .filter((update) => !isZeroObjectId(update.localSha))
+          .map((update) => update.localSha),
+      })
+    : null;
+
   dependencies.assertConsoleDependencies(cwd);
 
   for (const script of commands) {
@@ -200,17 +232,30 @@ export function runPrePushGuard(
     execFileSync('npm', ['run', script], { cwd, stdio: 'inherit' });
   }
 
+  if (alignmentReceipt) {
+    alignmentAfter(alignmentReceipt, { cwd });
+  }
+
   return decision;
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   try {
-    runPrePushGuard(readFileSync(0, 'utf8'));
+    runPrePushGuard(
+      readFileSync(0, 'utf8'),
+      process.cwd(),
+      { assertConsoleDependencies },
+      {
+        remoteName: process.argv[2] ?? '',
+        remoteUrl: process.argv[3] ?? '',
+      },
+    );
   } catch (err) {
     console.error((err as Error).message);
-    const childStatus = (err as Error & { status?: number }).status;
-    process.exitCode = typeof childStatus === 'number' && Number.isInteger(childStatus) && childStatus > 0
-      ? childStatus
+    const errorStatus = (err as Error & { status?: number; exitCode?: number }).status
+      ?? (err as Error & { exitCode?: number }).exitCode;
+    process.exitCode = typeof errorStatus === 'number' && Number.isInteger(errorStatus) && errorStatus > 0
+      ? errorStatus
       : 1;
   }
 }

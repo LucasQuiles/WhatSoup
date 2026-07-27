@@ -91,6 +91,7 @@ const REQUIRED_SCRIPTS = [
   'test:design-guards',
   'test:browser',
   'test:browser:motion',
+  'verify:console-design:live',
   'verify:console-design',
   'verify:console-browser',
   'verify:semantic',
@@ -102,8 +103,8 @@ const REQUIRED_SCRIPTS = [
 
 const CHAIN_REQUIREMENTS: ChainRequirement[] = [
   {
-    id: 'console-design-chain',
-    scriptName: 'verify:console-design',
+    id: 'console-design-live-chain',
+    scriptName: 'verify:console-design:live',
     orderedSteps: [
       'npm --prefix console run design:theme-parity',
       'npm --prefix console run design:token-drift',
@@ -119,8 +120,16 @@ const CHAIN_REQUIREMENTS: ChainRequirement[] = [
       'npm --prefix console run design:font-assets',
       'npm --prefix console run design:brand-assets',
       'npm --prefix console run design:lint-fixtures',
+    ],
+  },
+  {
+    id: 'console-design-chain',
+    scriptName: 'verify:console-design',
+    orderedSteps: [
+      'npm run verify:console-design:live',
       'npm run test:design-guards',
     ],
+    exactSequence: true,
   },
   {
     id: 'branch-push-chain',
@@ -201,7 +210,7 @@ const CHAIN_REQUIREMENTS: ChainRequirement[] = [
       'npm run typecheck:all',
       'npm run coverage:check -- --pool=forks --fileParallelism=false',
       'bash scripts/run-with-pinned-npm.sh --prefix console run build',
-      'npm run verify:console-design',
+      'npm run verify:console-design:live',
       'npm run verify:console-browser',
     ],
     exactSequence: true,
@@ -429,7 +438,7 @@ const ANCHOR_REQUIREMENTS: AnchorRequirement[] = [
       'npm run guard:design-system-hygiene -- --changed-since',
       'name: Console build',
       'name: Console design verification',
-      'run: npm run verify:console-design',
+      'run: npm run verify:console-design:live',
       'run: npx playwright install-deps chromium',
       'name: Install Playwright chromium',
       'npx playwright install chromium',
@@ -706,15 +715,15 @@ function consoleDesignScriptSteps(consoleScripts: Record<string, string>): strin
 }
 
 function checkConsoleDesignScriptCoverage(rootScripts: Record<string, string>, consoleScripts: Record<string, string>): DiagnosticCheck {
-  const chain = rootScripts['verify:console-design'];
+  const chain = rootScripts['verify:console-design:live'];
   if (!chain) {
     return {
       id: 'console-design-script-coverage',
       category: 'guard-chain',
       status: 'fail',
-      message: 'verify:console-design is missing.',
-      evidence: ['verify:console-design'],
-      remediation: 'Restore verify:console-design before relying on console design guard coverage.',
+      message: 'verify:console-design:live is missing.',
+      evidence: ['verify:console-design:live'],
+      remediation: 'Restore verify:console-design:live before relying on console design guard coverage.',
     };
   }
 
@@ -725,10 +734,10 @@ function checkConsoleDesignScriptCoverage(rootScripts: Record<string, string>, c
     category: 'guard-chain',
     status: missing.length === 0 ? 'pass' : 'fail',
     message: missing.length === 0
-      ? 'All non-capture console design scripts are wired into verify:console-design.'
-      : `verify:console-design omits ${missing.length} console design script(s).`,
+      ? 'All non-capture console design scripts are wired into verify:console-design:live.'
+      : `verify:console-design:live omits ${missing.length} console design script(s).`,
     evidence: missing.length === 0 ? requiredSteps : missing.map((step) => `missing ${step}`),
-    remediation: 'Add the missing console design guard scripts to verify:console-design, or explicitly classify them as visual capture-only.',
+    remediation: 'Add the missing console design guard scripts to verify:console-design:live, or explicitly classify them as visual capture-only.',
   };
 }
 
@@ -931,7 +940,7 @@ function qualityCiLanePartitionFailures(text: string): string[] {
   }
   for (const run of [
     'npm run coverage:check -- --pool=forks',
-    'npm run verify:console-design',
+    'npm run verify:console-design:live',
     'npm run test:browser',
     'npm run test:browser:motion',
   ]) {
