@@ -82,6 +82,8 @@ interface InstanceConfig {
   type: InstanceType;
   systemPrompt?: string;
   adminPhones: string[];
+  /** Exact authenticated DM JIDs treated as internal operator coordination peers. */
+  internalPeerJids?: string[];
   accessMode: AccessMode;
   /** R5: per-sender group response policy. Defaults to 'any_member' (current behavior). */
   groupSenderPolicy?: GroupSenderPolicy;

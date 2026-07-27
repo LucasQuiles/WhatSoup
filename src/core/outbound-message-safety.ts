@@ -169,6 +169,13 @@ export type OutboundAudience = 'client' | 'ops' | 'internal';
 
 export type OutboundMessageSafetyAction = 'allow' | 'redact' | 'divert' | 'suppress';
 
+export interface OutboundAudienceContext {
+  isGroup: boolean;
+  peerIsAdmin: boolean;
+  peerIsTrustedInternal?: boolean;
+  fallbackActive: boolean;
+}
+
 export type AssistantTextSuppressionReason =
   | 'ack_filler'
   | 'internal_narration'
@@ -360,17 +367,38 @@ function internalGroupJids(): ReadonlySet<string> {
 
 export function resolveOutboundAudience(
   chatJid: string,
-  ctx?: { isGroup: boolean; peerIsAdmin: boolean; fallbackActive: boolean },
+  ctx?: OutboundAudienceContext,
 ): OutboundAudience {
   const opsJid = process.env['BOT_ERRORS_JID']?.trim();
   if (opsJid && chatJid === opsJid) return 'ops';
   if (internalGroupJids().has(chatJid)) return 'internal';
+  // An explicitly configured internal DM is an operator coordination channel
+  // even when the peer is not an access-control admin for this instance.
+  // The caller must derive this boolean from an exact, authenticated JID match;
+  // groups never elevate through this lane.
+  if (ctx && !ctx.isGroup && ctx.peerIsTrustedInternal) return 'internal';
   // T8-F1+F2: an admin's 1:1 DM on the trusted primary (no fallback window) is
   // an operator channel. This SUPERSEDES the WHATSOUP_INTERNAL_JIDS owner-DM
   // stopgap entry (which stays group-oriented going forward) — an env-absent
   // owner DM still resolves `internal` via this branch.
   if (ctx && !ctx.isGroup && ctx.peerIsAdmin && !ctx.fallbackActive) return 'internal';
   return 'client';
+}
+
+/**
+ * Exact-match predicate for explicitly configured internal DM peers.
+ *
+ * Transport authentication is mandatory so an `@sms` address bearing the
+ * same digits cannot inherit the trusted peer's audience.
+ */
+export function isTrustedInternalDmPeer(
+  chatJid: string,
+  isGroup: boolean,
+  internalPeerJids: ReadonlySet<string> | undefined,
+): boolean {
+  return !isGroup
+    && isAuthenticatedSenderJid(chatJid)
+    && (internalPeerJids?.has(chatJid) ?? false);
 }
 
 // --- Internal-artifact shapes (linear / ReDoS-safe; no nested quantifiers) ---
