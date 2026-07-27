@@ -92,6 +92,15 @@
         "composeWithExactLineDedup"
       ],
       "importGraph": true
+    },
+    {
+      "path": "scripts/imsg-rpc-relay.ts",
+      "sha256": "b5b0347a83b9badf31df389f0215d9cf51a90f648db42e2a8bebda3576684997",
+      "mustContain": [
+        "SUPPORTED_IMSG_VERSIONS",
+        "startImsgRpcRelay"
+      ],
+      "importGraph": true
     }
   ]
 }
