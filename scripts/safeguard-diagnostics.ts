@@ -411,6 +411,15 @@ const ANCHOR_REQUIREMENTS: AnchorRequirement[] = [
       'Restore the single Node 24 semantic shadow step, isolated receipt, read-only permissions, and pre-suite ordering in quality.yml.',
   },
   {
+    id: 'quality-ci-lane-partition',
+    category: 'guard-chain',
+    file: '.github/workflows/quality.yml',
+    anchors: [],
+    validate: qualityCiLanePartitionFailures,
+    remediation:
+      'Restore the exact quality (24.x) authority job, quality (25.x) compatibility job, pinned Test Integrity checkout, and measured disk-budget step.',
+  },
+  {
     id: 'quality-ci-console-design-chain',
     category: 'guard-chain',
     file: '.github/workflows/quality.yml',
@@ -825,8 +834,8 @@ function qualityCiSemanticShadowFailures(text: string): string[] {
   if (suiteIndex < 0 || semanticIndex > suiteIndex) {
     failures.push('Semantic quality (shadow) must run before Test suite + coverage thresholds');
   }
-  if (semantic.if !== "matrix.node == '24.x'") {
-    failures.push("Semantic quality (shadow) must be gated by matrix.node == '24.x'");
+  if (hasOwn(semantic, 'if')) {
+    failures.push('Semantic quality (shadow) must be unconditional inside the Node 24 authority job');
   }
   if (hasOwn(semantic, 'continue-on-error') || hasOwn(semantic, 'uses')) {
     failures.push('Semantic quality (shadow) must use a blocking run step without continue-on-error');
@@ -858,6 +867,137 @@ function qualityCiSemanticShadowFailures(text: string): string[] {
     && collectStringValues(step).some((value) => value.includes('semantic-quality'))
   ));
   if (uploadsSemanticReceipt) failures.push('semantic quality receipts must not be uploaded as artifacts');
+  return failures;
+}
+
+function qualityCiLanePartitionFailures(text: string): string[] {
+  const { root, failures: parseFailures } = parseWorkflow(text, 'quality workflow');
+  if (!root) return parseFailures;
+  const failures: string[] = [];
+  const jobs = asRecord(root.jobs);
+  const quality = asRecord(jobs?.quality);
+  const compatibility = asRecord(jobs?.compatibility);
+  if (!quality || !compatibility) {
+    return ['quality workflow must declare jobs.quality and jobs.compatibility'];
+  }
+  if (quality.name !== 'quality (24.x)') failures.push('jobs.quality name must be exactly quality (24.x)');
+  if (compatibility.name !== 'quality (25.x)') {
+    failures.push('jobs.compatibility name must be exactly quality (25.x)');
+  }
+  if (hasOwn(quality, 'strategy') || hasOwn(compatibility, 'strategy')) {
+    failures.push('quality authority and compatibility jobs must not use a matrix strategy');
+  }
+  if (compatibility['timeout-minutes'] !== 40) {
+    failures.push('quality (25.x) compatibility timeout must be exactly 40 minutes');
+  }
+  if (compatibility['runs-on'] !== 'ubuntu-latest') {
+    failures.push('quality (25.x) compatibility runner must be exactly ubuntu-latest');
+  }
+  if (hasOwn(compatibility, 'continue-on-error') && compatibility['continue-on-error'] !== false) {
+    failures.push('quality (25.x) compatibility job must be blocking');
+  }
+  for (const forbiddenKey of ['if', 'needs', 'defaults', 'env']) {
+    if (hasOwn(compatibility, forbiddenKey)) {
+      failures.push(`quality (25.x) compatibility job must not declare ${forbiddenKey}`);
+    }
+  }
+
+  const qualitySteps = Array.isArray(quality.steps) ? quality.steps.map(asRecord) : [];
+  const compatibilitySteps = Array.isArray(compatibility.steps) ? compatibility.steps.map(asRecord) : [];
+  if (qualitySteps.some((step) => !step) || compatibilitySteps.some((step) => !step)) {
+    failures.push('quality authority and compatibility steps must all be mappings');
+    return failures;
+  }
+  const authority = qualitySteps as Record<string, unknown>[];
+  const compat = compatibilitySteps as Record<string, unknown>[];
+  const exactRunCount = (steps: Record<string, unknown>[], run: string): number =>
+    steps.filter((step) => step.run === run).length;
+
+  const setup24 = authority.filter((step) => step.name === 'Setup Node 24');
+  const setup25 = compat.filter((step) => step.name === 'Setup Node 25');
+  if (
+    setup24.length !== 1
+    || setup24[0]?.uses !== 'actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020'
+    || !collectStringValues(setup24[0]).includes('24.x')
+  ) {
+    failures.push('quality (24.x) must contain one Setup Node 24 step pinned to 24.x');
+  }
+  if (
+    setup25.length !== 1
+    || setup25[0]?.uses !== 'actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020'
+    || !collectStringValues(setup25[0]).includes('25.x')
+  ) {
+    failures.push('quality (25.x) must contain one Setup Node 25 step pinned to 25.x');
+  }
+  for (const run of [
+    'npm run coverage:check -- --pool=forks',
+    'npm run verify:console-design',
+    'npm run test:browser',
+    'npm run test:browser:motion',
+  ]) {
+    if (exactRunCount(authority, run) !== 1) failures.push(`quality (24.x) must run exactly once: ${run}`);
+  }
+  for (const run of [
+    'npm ci',
+    'npm --prefix console ci',
+    'npm test -- --pool=forks',
+    'npm --prefix console run build',
+  ]) {
+    const matchingSteps = compat.filter((step) => step.run === run);
+    if (matchingSteps.length !== 1) {
+      failures.push(`quality (25.x) must run exactly once: ${run}`);
+    } else {
+      const matchingStep = matchingSteps[0]!;
+      if (hasOwn(matchingStep, 'if') || hasOwn(matchingStep, 'continue-on-error')) {
+        failures.push(`quality (25.x) required step must be unconditional and blocking: ${run}`);
+      }
+    }
+  }
+  const compatibilityText = collectStringValues(compatibility).join('\n');
+  for (const forbidden of [
+    'coverage:check',
+    'guard:',
+    'playwright',
+    'setup-python',
+    'test-integrity',
+    'ci-disk-reclaim',
+  ]) {
+    if (compatibilityText.toLowerCase().includes(forbidden)) {
+      failures.push(`quality (25.x) must not duplicate ${forbidden}`);
+    }
+  }
+
+  if (exactRunCount(authority, 'bash scripts/ci-disk-reclaim.sh') !== 1) {
+    failures.push('quality (24.x) must run the measured CI disk-budget helper exactly once');
+  }
+  if (text.includes('docker image prune --all --force || true') || text.includes('sudo rm -rf /usr/share/dotnet')) {
+    failures.push('quality workflow must not retain masked unconditional disk cleanup');
+  }
+
+  const integritySteps = authority.filter((step) => step.name === 'Install test-integrity plugin');
+  const integrity = integritySteps[0];
+  if (integritySteps.length !== 1 || !integrity) {
+    failures.push('quality (24.x) must install Test Integrity exactly once');
+  } else {
+    const env = asRecord(integrity.env);
+    const pin = env?.TEST_INTEGRITY_COMMIT;
+    if (pin !== 'ea0b01a4e3d99dc58a9a475c57e22ee204b04a7c') {
+      failures.push('Test Integrity commit pin must match the reviewed 40-hex object');
+    }
+    const run = typeof integrity.run === 'string' ? integrity.run : '';
+    for (const required of [
+      'mkdir -p "$plugin_dir" "$HOME/.ssh"',
+      'fetch --depth 1 origin "$TEST_INTEGRITY_COMMIT"',
+      'switch --detach FETCH_HEAD',
+      'observed_commit="$(git -C "$plugin_dir" rev-parse HEAD)"',
+      'if [ "$observed_commit" != "$TEST_INTEGRITY_COMMIT" ]; then',
+    ]) {
+      if (!run.includes(required)) failures.push(`Test Integrity install is missing ${required}`);
+    }
+    if (/\bgit\b[^\n]*\b(?:push|clone)\b/.test(run)) {
+      failures.push('Test Integrity install must not use floating clone or any push command');
+    }
+  }
   return failures;
 }
 

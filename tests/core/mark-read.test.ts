@@ -98,7 +98,9 @@ describe('markConversationRead', () => {
   it('zeroes unread_count on success even when there are no messages and no socket', async () => {
     seedChat(db, { unread: 7 });
     const result = await markConversationRead(db, makeConnMgr(null), CONV_KEY);
-    expect(result).toEqual({ ok: true, jid: CHAT_JID, conversation_key: CONV_KEY });
+    expect(result).toEqual({
+      ok: true, jid: CHAT_JID, conversation_key: CONV_KEY, remote: 'nothing_to_ack',
+    });
     const row = db.raw
       .prepare('SELECT unread_count FROM chats WHERE conversation_key = ?')
       .get(CONV_KEY) as { unread_count: number };
@@ -159,7 +161,11 @@ describe('markConversationRead', () => {
       throw new Error('boom');
     });
     const result = await markConversationRead(db, makeConnMgr(makeSocket(chatModify)), CONV_KEY);
-    expect(result).toEqual({ ok: true, jid: CHAT_JID, conversation_key: CONV_KEY });
+    // The local zero is still applied — that is the specified behaviour. What is
+    // new is that the caller can now SEE the remote receipt failed.
+    expect(result).toEqual({
+      ok: true, jid: CHAT_JID, conversation_key: CONV_KEY, remote: 'failed',
+    });
     const row = db.raw
       .prepare('SELECT unread_count FROM chats WHERE conversation_key = ?')
       .get(CONV_KEY) as { unread_count: number };
@@ -176,6 +182,65 @@ describe('markConversationRead', () => {
   it('returns the chat_jid (raw chat JID for sends) on success', async () => {
     seedChat(db);
     const result = await markConversationRead(db, makeConnMgr(null), CONV_KEY);
-    expect(result).toEqual({ ok: true, jid: CHAT_JID, conversation_key: CONV_KEY });
+    expect(result).toEqual({
+      ok: true, jid: CHAT_JID, conversation_key: CONV_KEY, remote: 'nothing_to_ack',
+    });
+  });
+
+  // ─── #2292 L16: the REMOTE receipt outcome is now visible to the caller ────
+  //
+  // The local zero is unchanged and still specified above. What these pin is
+  // that a caller can distinguish "WhatsApp accepted the receipt" from "the
+  // local badge was cleared while the remote may still show unread".
+  describe('remote receipt status (#2292 L16)', () => {
+    it("reports 'acked' when chatModify succeeds", async () => {
+      seedChat(db, { unread: 4 });
+      seedMessage(db, { id: 'm1', sender: PEER_JID, ts: 1_000 });
+      const result = await markConversationRead(db, makeConnMgr(makeSocket()), CONV_KEY);
+      expect(result).toMatchObject({ ok: true, remote: 'acked' });
+    });
+
+    it("reports 'failed' when chatModify throws — distinguishable from a real ack", async () => {
+      seedChat(db, { unread: 4 });
+      seedMessage(db, { id: 'm1', sender: PEER_JID, ts: 1_000 });
+      const chatModify = makeChatModify(async () => { throw new Error('boom'); });
+      const result = await markConversationRead(db, makeConnMgr(makeSocket(chatModify)), CONV_KEY);
+      expect(result).toMatchObject({ ok: true, remote: 'failed' });
+      // The local badge is still cleared — that is the specified behaviour, and
+      // the point of the status is that the divergence is now REPORTED.
+      const row = db.raw
+        .prepare('SELECT unread_count FROM chats WHERE conversation_key = ?')
+        .get(CONV_KEY) as { unread_count: number };
+      expect(row.unread_count).toBe(0);
+    });
+
+    it("reports 'offline' when there is no socket, not 'failed'", async () => {
+      seedChat(db, { unread: 4 });
+      seedMessage(db, { id: 'm1', sender: PEER_JID, ts: 1_000 });
+      const result = await markConversationRead(db, makeConnMgr(null), CONV_KEY);
+      expect(result).toMatchObject({ ok: true, remote: 'offline' });
+    });
+
+    it("reports 'nothing_to_ack' for a chat with no messages", async () => {
+      seedChat(db, { unread: 0 });
+      const result = await markConversationRead(db, makeConnMgr(makeSocket()), CONV_KEY);
+      expect(result).toMatchObject({ ok: true, remote: 'nothing_to_ack' });
+    });
+
+    // Discriminating case: hardcoding any single status would satisfy one test
+    // above while collapsing the distinction the field exists to make.
+    it('gives the four cases four DISTINCT statuses', async () => {
+      seedChat(db, { unread: 1 });
+      const nothing = await markConversationRead(db, makeConnMgr(makeSocket()), CONV_KEY);
+      seedMessage(db, { id: 'm1', sender: PEER_JID, ts: 1_000 });
+      const acked = await markConversationRead(db, makeConnMgr(makeSocket()), CONV_KEY);
+      const offline = await markConversationRead(db, makeConnMgr(null), CONV_KEY);
+      const failed = await markConversationRead(
+        db, makeConnMgr(makeSocket(makeChatModify(async () => { throw new Error('boom'); }))), CONV_KEY,
+      );
+      const seen = [nothing, acked, offline, failed].map((r) => (r as { remote: string }).remote);
+      expect(seen).toEqual(['nothing_to_ack', 'acked', 'offline', 'failed']);
+      expect(new Set(seen).size).toBe(4);
+    });
   });
 });

@@ -3090,10 +3090,13 @@ describe('health command endpoints — malformed bodies and side effects', () =>
     );
 
     expect(status).toBe(200);
+    // `remote` reaches the HTTP body because the handler serialises the result
+    // verbatim; no socket and no messages means there was no receipt to send.
     expect(JSON.parse(body)).toEqual({
       ok: true,
       jid: '15551234567@s.whatsapp.net',
       conversation_key: '15551234567',
+      remote: 'nothing_to_ack',
     });
     const row = db.raw
       .prepare('SELECT unread_count FROM chats WHERE conversation_key = ?')

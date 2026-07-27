@@ -1,4 +1,13 @@
-import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
+import { randomUUID } from 'node:crypto';
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  renameSync,
+  unlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 import { createChildLogger } from '../logger.ts';
@@ -45,7 +54,19 @@ function saveRules(rules: SilenceRule[]): void {
   if (!existsSync(CONFIG_DIR)) {
     mkdirSync(CONFIG_DIR, { recursive: true, mode: 0o700 });
   }
-  writeFileSync(SILENCES_FILE, JSON.stringify(rules, null, 2) + '\n', { mode: 0o600 });
+  const tmpFile = join(CONFIG_DIR, `.fleet-silences.${process.pid}.${randomUUID()}.tmp`);
+  try {
+    writeFileSync(tmpFile, JSON.stringify(rules, null, 2) + '\n', { mode: 0o600 });
+    chmodSync(tmpFile, 0o600);
+    renameSync(tmpFile, SILENCES_FILE);
+  } catch (err) {
+    try {
+      unlinkSync(tmpFile);
+    } catch {
+      // Best-effort cleanup must not mask the persistence failure.
+    }
+    throw err;
+  }
 }
 
 export function isInstanceSilenced(name: string): boolean {

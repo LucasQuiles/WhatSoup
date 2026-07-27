@@ -96,6 +96,21 @@ function advanceRecurringRun(
   };
 }
 
+/**
+ * A scheduled row whose stored payload is not decodable.
+ *
+ * Distinct from a send failure because it is a property of the ROW, not of the
+ * transport: no retry and no later occurrence can decode the same bytes. The
+ * retry ladder exists for transient conditions, so burning it here costs
+ * `maxRetries` attempts and then drops the message with a generic error.
+ */
+export class ScheduledPayloadError extends Error {
+  constructor(reason: string) {
+    super(`scheduled payload is not decodable: ${reason}`);
+    this.name = 'ScheduledPayloadError';
+  }
+}
+
 export class MessageScheduler {
   private timer: NodeJS.Timeout | null = null;
   private db: Database;
@@ -493,6 +508,45 @@ export class MessageScheduler {
   private handleSendFailure(row: ScheduledRow, err: unknown): void {
     const newRetryCount = row.retry_count + 1;
     const errorMsg = errorMessage(err);
+
+    // An undecodable payload is permanent: the same bytes fail identically on
+    // every attempt, so the retry ladder can only delay the drop while
+    // producing `maxRetries` indistinguishable warnings. Dead-letter it on the
+    // first occurrence instead, with a reason that names the actual cause.
+    //
+    // This applies to recurring rows too. The recurrence-preservation path
+    // below deliberately refuses to destroy a schedule over transient
+    // per-occurrence failures — but a corrupt payload is not transient, and
+    // advancing to the next slot would re-fail forever rather than heal.
+    if (err instanceof ScheduledPayloadError) {
+      this.db.raw
+        .prepare(
+          `UPDATE scheduled_messages
+           SET status = 'failed', retry_count = ?, error = ?, send_started_at = NULL
+           WHERE id = ?`,
+        )
+        .run(row.retry_count, errorMsg, row.id);
+      log.error(
+        { event: 'scheduler_payload_undecodable', id: row.id, recurring: row.recurrence !== null, err },
+        'scheduler: scheduled payload is undecodable; dead-lettered without retry',
+      );
+      if (this.config.instance) {
+        emitAlertChecked(
+          this.config.instance,
+          'scheduler_send_failed',
+          `whatsoup@${this.config.instance} dead-lettered scheduled send (id ${row.id}) — stored payload is undecodable, message DROPPED: ${errorMsg}`,
+          [
+            `scheduledId=${row.id}`,
+            `recurring=${row.recurrence !== null}`,
+            `error=${errorMsg}`,
+            'ref: #2359 — an undecodable payload is permanent, so it is dead-lettered on the first occurrence rather than consuming the retry budget. Inspect the scheduled_messages row; the payload column is not valid JSON.',
+          ].join('\n'),
+          'warning',
+        );
+      }
+      return;
+    }
+
     if (newRetryCount >= this.config.maxRetries) {
       if (row.recurrence) {
         // Recurring: a recurring schedule must not be permanently destroyed by
@@ -590,7 +644,14 @@ export class MessageScheduler {
   }
 
   private async executeSend(row: ScheduledRow): Promise<void> {
-    const payload = JSON.parse(row.payload) as Record<string, unknown>;
+    let payload: Record<string, unknown>;
+    try {
+      payload = JSON.parse(row.payload) as Record<string, unknown>;
+    } catch (err) {
+      // Tagged so handleSendFailure can tell "this row can never send" from
+      // "the transport is having a bad minute".
+      throw new ScheduledPayloadError(errorMessage(err));
+    }
 
     if (row.content_type === 'text') {
       await this.connection.sendRaw(row.chat_jid, payload);

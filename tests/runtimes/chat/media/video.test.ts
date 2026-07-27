@@ -472,7 +472,7 @@ describe('extractFrames — ffmpeg failure recovery', () => {
     expect(cleanupTempFile).toHaveBeenCalledWith('/tmp/frames_test-video-fb_001.jpg');
   });
 
-  it('filters fallback frames to the fallback (-fb) prefix and leaves main-pass partials alone', async () => {
+  it('filters fallback READS to the -fb prefix but still sweeps the main-pass partial', async () => {
     mockExecFile
       .mockImplementationOnce(
         (_b: string, _a: string[], _o: unknown, cb: (e: null, v: { stdout: string; stderr: string }) => void) =>
@@ -486,10 +486,12 @@ describe('extractFrames — ffmpeg failure recovery', () => {
         (_b: string, _a: string[], _o: unknown, cb: (e: null, v: { stdout: string; stderr: string }) => void) =>
           cb(null, { stdout: '', stderr: '' }),
       );
-    // The failed main pass may have left a partial frame under the main prefix;
-    // the fallback must read/clean only its own `-fb` frame, not the partial.
+    // The failed main pass may have left a partial frame under the main prefix.
+    // READ isolation and CLEANUP are different obligations (#2184): the fallback
+    // must not consume the partial as if it were its own frame, but leaving it
+    // on disk is a leak, not isolation.
     mockReaddir.mockResolvedValue([
-      'frames_test-video_001.jpg', // main-pass partial — must be left alone
+      'frames_test-video_001.jpg', // main-pass partial — not read, but swept
       'frames_test-video-fb_001.jpg', // the fallback's frame
     ]);
     mockReadFile.mockResolvedValue(Buffer.from('fallback-frame'));
@@ -504,10 +506,13 @@ describe('extractFrames — ffmpeg failure recovery', () => {
       fallbackUsed: true,
       durationSeconds: 30,
     });
+    // READ isolation — unchanged, and still the thing that must not regress.
     expect(mockReadFile).toHaveBeenCalledTimes(1);
     expect(mockReadFile).toHaveBeenCalledWith('/tmp/frames_test-video-fb_001.jpg');
     expect(cleanupTempFile).toHaveBeenCalledWith('/tmp/frames_test-video-fb_001.jpg');
-    expect(cleanupTempFile).not.toHaveBeenCalledWith('/tmp/frames_test-video_001.jpg');
+    // CLEANUP — this assertion was `.not.toHaveBeenCalledWith` before #2184,
+    // pinning the leak as if it were the isolation guarantee.
+    expect(cleanupTempFile).toHaveBeenCalledWith('/tmp/frames_test-video_001.jpg');
   });
 
   it('marks fallback no-frame when the fallback frame cannot be read', async () => {
@@ -745,5 +750,133 @@ describe('QR-123: protocol whitelist pins ffprobe/ffmpeg to the file protocol', 
     const [fallbackBin, fallbackArgs] = mockExecFile.mock.calls[2] as [string, string[]];
     expect(fallbackBin).toBe('ffmpeg');
     assertWhitelistedBeforeInput(fallbackArgs, '-i');
+  });
+});
+
+/**
+ * #2184 — partial frames must not survive an aborted extraction.
+ *
+ * Before this, the only cleanup ran inside the read loops, so it covered just
+ * the paths that reached them. Every other exit — primary reject, fallback
+ * reject, ffmpeg missing, no frames produced, readdir failure — left whatever
+ * the failed pass had already written on disk until the retention timer.
+ *
+ * Each test below asserts the exact set of paths handed to cleanupTempFile, not
+ * merely that "cleanup happened": the defect was always about which files were
+ * missed, so a containment assertion could pass while leaking.
+ */
+describe('extractFramesDetailed — #2184 partial-frame sweep', () => {
+  /** Paths passed to cleanupTempFile, in call order. */
+  function sweptPaths(): string[] {
+    return vi.mocked(cleanupTempFile).mock.calls.map((c) => c[0] as string);
+  }
+
+  function ffprobeOk(stdout: string) {
+    return (_b: string, _a: string[], _o: unknown, cb: (e: null, v: { stdout: string; stderr: string }) => void) =>
+      cb(null, { stdout, stderr: '' });
+  }
+  function ffmpegFails(message: string, code?: string) {
+    return (_b: string, _a: string[], _o: unknown, cb: (e: Error) => void) => {
+      const err = new Error(message) as NodeJS.ErrnoException;
+      if (code) err.code = code;
+      cb(err);
+    };
+  }
+  function ffmpegOk() {
+    return (_b: string, _a: string[], _o: unknown, cb: (e: null, v: { stdout: string; stderr: string }) => void) =>
+      cb(null, { stdout: '', stderr: '' });
+  }
+
+  it('sweeps partial primary output when BOTH passes fail', async () => {
+    mockExecFile
+      .mockImplementationOnce(ffprobeOk('30\n'))
+      .mockImplementationOnce(ffmpegFails('primary failed'))
+      .mockImplementationOnce(ffmpegFails('fallback failed'));
+    mockReaddir.mockResolvedValue([
+      'frames_test-video_001.jpg',
+      'frames_test-video_002.jpg',
+    ]);
+
+    const details = await extractFramesDetailed(Buffer.from('fake-video'));
+
+    expect(details.status).toBe('fallback_failed');
+    // No read loop ran at all, so before #2184 nothing here was cleaned.
+    expect(sweptPaths()).toEqual(expect.arrayContaining([
+      '/tmp/frames_test-video_001.jpg',
+      '/tmp/frames_test-video_002.jpg',
+      '/tmp/test-video.mp4',
+    ]));
+  });
+
+  it('sweeps partial output when ffmpeg itself is missing (ENOENT)', async () => {
+    mockExecFile
+      .mockImplementationOnce(ffprobeOk('30\n'))
+      .mockImplementationOnce(ffmpegFails('spawn ffmpeg', 'ENOENT'))
+      .mockImplementationOnce(ffmpegFails('spawn ffmpeg', 'ENOENT'));
+    mockReaddir.mockResolvedValue(['frames_test-video_001.jpg']);
+
+    const details = await extractFramesDetailed(Buffer.from('fake-video'));
+
+    expect(details.status).toBe('dependency_missing');
+    expect(sweptPaths()).toContain('/tmp/frames_test-video_001.jpg');
+  });
+
+  it('sweeps partial output when the fallback produced no frames', async () => {
+    mockExecFile
+      .mockImplementationOnce(ffprobeOk('30\n'))
+      .mockImplementationOnce(ffmpegFails('primary failed'))
+      .mockImplementationOnce(ffmpegOk());
+    // Only the primary partial exists; the fallback wrote nothing.
+    mockReaddir.mockResolvedValue(['frames_test-video_001.jpg']);
+
+    const details = await extractFramesDetailed(Buffer.from('fake-video'));
+
+    expect(details.status).toBe('fallback_no_frames');
+    expect(sweptPaths()).toContain('/tmp/frames_test-video_001.jpg');
+  });
+
+  it('NEVER sweeps a concurrent task\'s frames', async () => {
+    mockExecFile
+      .mockImplementationOnce(ffprobeOk('30\n'))
+      .mockImplementationOnce(ffmpegFails('primary failed'))
+      .mockImplementationOnce(ffmpegFails('fallback failed'));
+    mockReaddir.mockResolvedValue([
+      'frames_test-video_001.jpg', // ours
+      'frames_test-video-fb_001.jpg', // ours (fallback prefix)
+      'frames_other-task_001.jpg', // a concurrent extraction — must survive
+      'frames_test-video-extra_001.jpg', // token is a PREFIX of ours, not ours
+      'frames_test-video_notes.txt', // right prefix, wrong extension
+    ]);
+
+    await extractFramesDetailed(Buffer.from('fake-video'));
+
+    const swept = sweptPaths();
+    expect(swept).toContain('/tmp/frames_test-video_001.jpg');
+    expect(swept).toContain('/tmp/frames_test-video-fb_001.jpg');
+    expect(swept).not.toContain('/tmp/frames_other-task_001.jpg');
+    // `frames_test-video-extra_001.jpg` starts with `frames_test-video` but with
+    // neither `frames_test-video_` nor `frames_test-video-fb_`, which is exactly
+    // why the sweep matches two exact prefixes instead of one loose one.
+    expect(swept).not.toContain('/tmp/frames_test-video-extra_001.jpg');
+    expect(swept).not.toContain('/tmp/frames_test-video_notes.txt');
+  });
+
+  it('never lets a sweep failure replace the extraction result', async () => {
+    mockExecFile
+      .mockImplementationOnce(ffprobeOk('30\n'))
+      .mockImplementationOnce(ffmpegOk());
+    // First readdir (frame collection) succeeds; the sweep's readdir throws.
+    mockReaddir
+      .mockResolvedValueOnce(['frames_test-video_001.jpg'])
+      .mockRejectedValueOnce(new Error('EIO: directory listing failed'));
+    mockReadFile.mockResolvedValue(Buffer.from('frame-one'));
+
+    const details = await extractFramesDetailed(Buffer.from('fake-video'));
+
+    // The result is the extraction's, not the sweep's.
+    expect(details.status).toBe('ok');
+    expect(details.frames).toHaveLength(1);
+    // The input file is still cleaned even though the sweep threw first.
+    expect(sweptPaths()).toContain('/tmp/test-video.mp4');
   });
 });

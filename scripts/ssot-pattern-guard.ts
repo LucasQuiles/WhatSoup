@@ -345,21 +345,6 @@ export const SSOT_RULES: readonly SsotRuleSpec[] = [
       'use src/lib/phone.ts (isPhoneLocal/normalizePhone/normalizePhoneE164) for phone shape checks and formatting',
     allowlist: [
       {
-        file: 'src/transport/twilio/types.ts',
-        reason:
-          'E164_RE validates the Twilio WIRE format (leading +, [1-9] first digit — strict E.164) for an external API contract; phone.ts isPhoneLocal validates bare 7-15-digit JID locals. Different contract, deliberately separate.',
-      },
-      {
-        file: 'src/transport/signal/types.ts',
-        reason:
-          'E164_RE validates the signal-cli WIRE format (strict E.164) for an external API contract; same separation rationale as src/transport/twilio/types.ts (signal-cli accepts E.164 or UUID, not bare JID locals).',
-      },
-      {
-        file: 'src/transport/imessage/types.ts',
-        reason:
-          'E164_RE validates the iMessage WIRE format (strict E.164, accepted alongside AppleID email or chat GUID); same separation rationale as src/transport/twilio/types.ts.',
-      },
-      {
         file: 'src/core/admin.ts',
         reason:
           'three `+${normalizePhoneE164(…)}` compositions build E.164-with-plus for SMS JID lookups; phone.ts exposes no plus-format primitive yet — extract one and migrate (W1.5 debt).',
@@ -462,20 +447,21 @@ export function scanFileForRule(
   }));
 }
 
-/** Scan the repo under one rule. */
-export function scanRepoForRule(cwd: string, rule: SsotRuleSpec): SsotFinding[] {
+export type SsotSourceReader = (file: string, encoding: 'utf8') => string;
+
+/** Scan the repo under one rule; any source read failure aborts the guard. */
+export function scanRepoForRule(
+  cwd: string,
+  rule: SsotRuleSpec,
+  readSource: SsotSourceReader = readFileSync,
+): SsotFinding[] {
   const findings: SsotFinding[] = [];
   for (const root of rule.roots) {
     const rootAbs = path.join(cwd, root);
     const files: string[] = [];
     walkFiles(cwd, rootAbs, rule.extensions, files);
     for (const rel of files) {
-      let content: string;
-      try {
-        content = readFileSync(path.join(cwd, rel), 'utf8');
-      } catch {
-        continue;
-      }
+      const content = readSource(path.join(cwd, rel), 'utf8');
       findings.push(...scanFileForRule(rule, rel, content));
     }
   }
