@@ -1,0 +1,98 @@
+{
+  "schema_version": 1,
+  "repository": "LucasQuiles/WhatSoup",
+  "pinned_main_revision": "a91f5301266fae2049cd1ae1b3c1b236a7ea2aa8",
+  "source_registry_sha256": "e29f910de91e8ab40711e22b960925ab7ff8a63bf8eec3e30b6a478eba57ad08",
+  "reviewed_at": "2026-07-27T00:02:22Z",
+  "record_files": [
+    {
+      "issue_number": 1882,
+      "path": "docs/triage/reviews/open-issue-refresh-20260726/1882.json",
+      "sha256": "7c944e87279d9341c5356ddd922ad998d2f44ee899fa5dd57cea9bbb6d6a5a69"
+    },
+    {
+      "issue_number": 2137,
+      "path": "docs/triage/reviews/open-issue-refresh-20260726/2137.json",
+      "sha256": "9c1d23f46ced01ed33a00fc0fa89125b9e5c7dd78045bdb35b95cb0673fc62c5"
+    },
+    {
+      "issue_number": 2517,
+      "path": "docs/triage/reviews/open-issue-refresh-20260726/2517.json",
+      "sha256": "70fa24723a0e1c6a0d8628eea3ab581340dec38a8fb81394084f4636c49f63d4"
+    },
+    {
+      "issue_number": 2518,
+      "path": "docs/triage/reviews/open-issue-refresh-20260726/2518.json",
+      "sha256": "e7e72192a56670f033dd4d078d27561d27e8a6f3d7d27b5189112b8c0e429f2b"
+    },
+    {
+      "issue_number": 2519,
+      "path": "docs/triage/reviews/open-issue-refresh-20260726/2519.json",
+      "sha256": "57706bdfa22ea884a7ed350e16243c586bed310248b33d17c871d30af4f713a0"
+    },
+    {
+      "issue_number": 2520,
+      "path": "docs/triage/reviews/open-issue-refresh-20260726/2520.json",
+      "sha256": "9ca4270b112c8d23316437ef1e2bc983e811d7ae7953a8e82c0557b980ab3090"
+    },
+    {
+      "issue_number": 2521,
+      "path": "docs/triage/reviews/open-issue-refresh-20260726/2521.json",
+      "sha256": "f7e6a51c9675aca56907b96634ac7be892092d8a0b145df9990d8b8f900679ce"
+    },
+    {
+      "issue_number": 2522,
+      "path": "docs/triage/reviews/open-issue-refresh-20260726/2522.json",
+      "sha256": "8da2aecdc34b14319f304d7b90e87790a1051190a661126a81f415f81e15713f"
+    },
+    {
+      "issue_number": 2523,
+      "path": "docs/triage/reviews/open-issue-refresh-20260726/2523.json",
+      "sha256": "1a8443c5d8e034ba6531be0dcf03f8e0483ddb9b054c1f7961db2beaa7aca247"
+    },
+    {
+      "issue_number": 2524,
+      "path": "docs/triage/reviews/open-issue-refresh-20260726/2524.json",
+      "sha256": "0148609e797f1786448ebd3cb777e6cbcb25c657d2b15e27278d7e52dc25260c"
+    },
+    {
+      "issue_number": 2525,
+      "path": "docs/triage/reviews/open-issue-refresh-20260726/2525.json",
+      "sha256": "2f75ce7fab9addcf9d538253b1f54dc4d9b18553d6a2d67cf600925fe5841c7a"
+    },
+    {
+      "issue_number": 2526,
+      "path": "docs/triage/reviews/open-issue-refresh-20260726/2526.json",
+      "sha256": "830135876c74f671dbe63876c404d3adcef4ddeb0ff20401731084e3c46e6434"
+    },
+    {
+      "issue_number": 2527,
+      "path": "docs/triage/reviews/open-issue-refresh-20260726/2527.json",
+      "sha256": "30245f3e0ad1f7826cefde1ab913acf9182367b23b8cd697d26a0a3f751749b3"
+    }
+  ],
+  "removals": [],
+  "retained_issue_states": [
+    {
+      "issue_number": 2447,
+      "issue_node_id": "I_kwDOR1Sep88AAAABKO2ZQg",
+      "title": "observability: runtime, durability, health, and alert taxonomies lack a canonical cross-contract and drift guard",
+      "url": "https://github.com/LucasQuiles/WhatSoup/issues/2447",
+      "updated_at": "2026-07-26T23:35:08Z",
+      "pre_review_body_sha256": "603bd1062845e0f4d96be8e8d6a7630a9c59282948016e483e5c1ec9861299b5",
+      "current_labels": ["SSOT", "audit", "bug", "reliability"]
+    }
+  ],
+  "retained_overlap_states": [
+    {
+      "issue_number": 2513,
+      "pull_request_number": 2516,
+      "overlap": null
+    },
+    {
+      "issue_number": 2514,
+      "pull_request_number": 2516,
+      "overlap": null
+    }
+  ]
+}

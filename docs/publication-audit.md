@@ -4,15 +4,15 @@
 
 Internal publication roots covered by the guard: `docs/runbooks/`, `docs/sdlc/`, `docs/superpowers/`, `docs/plans/`, `docs/cutover/`, `docs/research/`, `docs/triage/`, `docs/specs/` (selected), `docs/work-index*`, `docs/current-program.md`, `docs/handoff-*.md`, `HANDOFF-*.md`, `docs/project-status-*.md`, `docs/audit-*.md`, `tmp/`.
 
-**Total classification rows:** 142
+**Total classification rows:** 143
 
 | Classification | Count |
 |---|---:|
-| PUBLIC | 19 |
+| PUBLIC | 20 |
 | PRIVATE-ARCHIVE | 123 |
 | SANITIZE | 0 |
 | DELETE | 0 |
-| Total | 142 |
+| Total | 143 |
 
 | Path | Classification | Rationale |
 |---|---|---|
@@ -140,6 +140,7 @@ Internal publication roots covered by the guard: `docs/runbooks/`, `docs/sdlc/`,
 | `docs/triage/open-issue-registry.json` | PUBLIC | Canonical body-free open-issue evidence registry containing public issue metadata, repository-relative evidence paths, hashes, dependency analysis, and remediation guidance. |
 | `docs/triage/open-issue-registry.md` | PUBLIC | Deterministically generated human-readable projection of the canonical body-free open-issue evidence registry. |
 | `docs/triage/open-issue-review-ledger.jsonl` | PUBLIC | Body-free append-only mutation receipts containing only public issue metadata, repository-relative paths, hashes, and sanitized diagnostics. |
+| `docs/triage/reviews/open-issue-refresh-20260726.json` | PUBLIC | Body-free review manifest binding exact issue-evidence records and explicit retained-state attestations to the source registry and main revision. |
 | `docs/triage/reviews/open-issue-refresh-20260726/1882.json` | PUBLIC | Body-free reviewed issue evidence for the post-cutoff registry refresh. |
 | `docs/triage/reviews/open-issue-refresh-20260726/2137.json` | PUBLIC | Body-free reviewed issue evidence for the post-cutoff registry refresh. |
 | `docs/triage/reviews/open-issue-refresh-20260726/2517.json` | PUBLIC | Body-free reviewed issue evidence for the post-cutoff registry refresh. |
