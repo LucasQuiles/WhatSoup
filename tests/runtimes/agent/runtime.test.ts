@@ -8342,11 +8342,12 @@ describe('AgentRuntime', () => {
     expect(MockOutboundQueueCtor).toHaveBeenCalledWith(
       messenger,
       'recreated@s.whatsapp.net',
-      // T8-F1+F2: createOutboundQueue also injects the admin-peer + fallback
-      // callbacks (peerIsAdmin/fallbackActive) — asserted by identity below.
+      // createOutboundQueue injects exact admin/internal-peer audience
+      // predicates plus the fallback-window callback.
       {
         conversationKey: 'recreated',
         peerIsAdmin: expect.any(Function),
+        peerIsTrustedInternal: expect.any(Function),
         fallbackActive: expect.any(Function),
       },
     );
@@ -8377,6 +8378,7 @@ describe('AgentRuntime', () => {
       {
         conversationKey: 'mapped-phone',
         peerIsAdmin: expect.any(Function),
+        peerIsTrustedInternal: expect.any(Function),
         fallbackActive: expect.any(Function),
       },
     );
@@ -8410,6 +8412,7 @@ describe('AgentRuntime', () => {
         conversationKey: 'inherit',
         senderToken: priorToken,
         peerIsAdmin: expect.any(Function),
+        peerIsTrustedInternal: expect.any(Function),
         fallbackActive: expect.any(Function),
       },
     );
