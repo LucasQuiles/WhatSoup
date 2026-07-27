@@ -63,7 +63,7 @@ function saveRules(rules: SilenceRule[]): void {
     try {
       unlinkSync(tmpFile);
     } catch {
-      // Best-effort cleanup must not mask the persistence failure.
+      // intentional: best-effort temp cleanup must not mask the persistence failure being rethrown
     }
     throw err;
   }
