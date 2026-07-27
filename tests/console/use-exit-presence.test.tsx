@@ -15,11 +15,10 @@
  *   - Effect cleanup (open→true) prevents in-flight timer/animationend from unmounting.
  *   - StrictMode double-invoke is safe (symmetric effect cleanup).
  *
- * Duration-stub seam (C-B5-9): tests use renderHook with a persistent manually-
- * controlled DOM element to keep shellRef populated during the open=false effect.
- * This is necessary because a component-render Fixture clears shellRef before the
- * effect fires (React unmounts the element synchronously on the first render where
- * mounted=false, before effects run), making lines 110–168 unreachable from a Fixture.
+ * Duration-stub seam (C-B5-9): tests use both a component shell with an inline
+ * animation duration and renderHook with a persistent manually controlled element.
+ * The component path proves open=false retains the real referenced shell until the
+ * exit completes; the persistent element keeps parser/guard arms independently testable.
  *
  * Cleanup-before-next-effect is the cancellation contract: when open flips back to
  * true, React runs the open=false cleanup before the open=true effect, cancelling
@@ -41,20 +40,23 @@ const ANIM_NAME = 'soup-modal-shell-out'
 // ---------------------------------------------------------------------------
 
 /**
- * Component Fixture: tests the instant-path (jsdom default, C-B5-1).
- * Shell is unmounted synchronously on open=false (before the effect fires)
- * because shellRef is cleared by React on element unmount. The sentinel
- * appears when mounted=false.
- *
- * This fixture does NOT test the closing-dwell path — that requires the
- * renderHook + persistent-ref approach below.
+ * Component Fixture: tests both the instant path and a non-zero closing dwell.
  */
-const Fixture: FC<{ open: boolean; animName?: string }> = ({ open, animName = ANIM_NAME }) => {
+const Fixture: FC<{ open: boolean; animName?: string; duration?: string }> = ({
+  open,
+  animName = ANIM_NAME,
+  duration,
+}) => {
   const shellRef = useRef<HTMLDivElement>(null)
   const { mounted, phase } = useExitPresence(open, shellRef, animName)
   if (!mounted) return <div data-testid="unmounted-sentinel" />
   return (
-    <div data-testid="shell" ref={shellRef} data-phase={phase}>
+    <div
+      data-testid="shell"
+      ref={shellRef}
+      data-phase={phase}
+      style={duration ? { animationDuration: duration } : undefined}
+    >
       <div data-testid="child-node">child</div>
     </div>
   )
@@ -480,6 +482,24 @@ describe('useExitPresence — instant path via component Fixture (C-B5-1)', () =
     const shell = document.querySelector('[data-testid="shell"]')
     expect(shell).not.toBeNull()
     expect(shell!.getAttribute('data-phase')).toBe('open')
+  })
+
+  it('open→false retains a non-zero-duration component shell until animationend', async () => {
+    const { rerender } = render(<Fixture open duration="120ms" />)
+
+    rerender(<Fixture open={false} duration="120ms" />)
+    await act(async () => {})
+
+    const closingShell = document.querySelector('[data-testid="shell"]')
+    expect(closingShell).not.toBeNull()
+    expect(closingShell!.getAttribute('data-phase')).toBe('closing')
+
+    await act(async () => {
+      fireEvent.animationEnd(closingShell!)
+    })
+
+    expect(document.querySelector('[data-testid="shell"]')).toBeNull()
+    expect(document.querySelector('[data-testid="unmounted-sentinel"]')).not.toBeNull()
   })
 })
 
