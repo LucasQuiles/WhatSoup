@@ -3,6 +3,8 @@ import { perChatActorSession } from '../../../src/runtimes/agent/per-chat-actor-
 
 const CHAT = '12345@s.whatsapp.net';
 const GROUP = 'team-room@g.us';
+const CANONICAL_CHAT = 'canonical-user@s.whatsapp.net';
+const DELIVERY_LID = 'delivery-alias@lid';
 
 describe('perChatActorSession', () => {
   it('default (not conversation-bound) reproduces the #1785 rec-3 shape exactly — no binding, no deliveryJid', () => {
@@ -27,5 +29,24 @@ describe('perChatActorSession', () => {
   it('encodes group JIDs to the canonical conversation key in both shapes', () => {
     expect(perChatActorSession(GROUP, '/root', false).conversationKey).toBe('team-room_at_g.us');
     expect(perChatActorSession(GROUP, '/root', true).binding!.conversationKey).toBe('team-room_at_g.us');
+  });
+
+  it('keeps canonical conversation identity separate from the raw delivery JID', () => {
+    expect(perChatActorSession(CANONICAL_CHAT, '/root', false, DELIVERY_LID)).toEqual({
+      tier: 'global',
+      allowedRoot: '/root',
+      conversationKey: 'canonical-user',
+    });
+
+    const bound = perChatActorSession(CANONICAL_CHAT, '/root', true, DELIVERY_LID);
+    expect(bound).toMatchObject({
+      conversationKey: 'canonical-user',
+      deliveryJid: DELIVERY_LID,
+      binding: {
+        kind: 'conversation-bound',
+        conversationKey: 'canonical-user',
+        deliveryJid: DELIVERY_LID,
+      },
+    });
   });
 });

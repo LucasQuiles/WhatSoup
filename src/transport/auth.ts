@@ -86,7 +86,17 @@ async function startSocket(): Promise<void> {
     generateHighQualityLinkPreview: false,
   });
 
-  sock.ev.on('creds.update', saveCreds);
+  // #2165: `saveCreds()` rejects on a real write failure (full disk, EACCES).
+  // Passing it straight to `.on` discards the returned promise, so that
+  // rejection had no handler — and the `main().catch` at the bottom of this
+  // file does NOT cover it, because listener callbacks are outside main()'s
+  // promise chain. Under Node's default unhandled-rejection policy that
+  // terminates the pairing CLI with no explanation of what failed.
+  sock.ev.on('creds.update', () => {
+    void saveCreds().catch((err) => {
+      console.error('Credential save failed:', redactAuthCliText(errorMessage(err)));
+    });
+  });
 
   sock.ev.on('connection.update', async (update) => {
     const { connection, lastDisconnect, qr } = update;
@@ -108,7 +118,19 @@ async function startSocket(): Promise<void> {
       const jid = rawId ?? 'unknown';
       console.error(`\nAuthenticated successfully as ${redactAuthCliText(jid)}`);
       console.error('Saving credentials...');
-      await saveCreds();
+      // #2165: an unguarded await here had two failure modes, both silent to
+      // the operator — the rejection was unhandled (listener bodies are outside
+      // main()'s chain), and the success path below never ran, so the CLI
+      // neither printed "Done" nor exited. Pairing is worthless without
+      // persisted creds, so a save failure is fatal and must say so.
+      try {
+        await saveCreds();
+      } catch (err) {
+        console.error('FATAL: credential save failed:', redactAuthCliText(errorMessage(err)));
+        console.error('Pairing did not complete — the bot cannot start without saved credentials.');
+        process.exit(1);
+        return;
+      }
       // Give the file system a moment to flush before we exit
       setTimeout(() => {
         try { sock.end(undefined); } catch { /* best-effort */ }

@@ -7,9 +7,12 @@ Tracks branch off `main`, one PR per bead, cross-model review on every bead
 ## Gate state
 
 - **G1** (lock A): ✅ — program on main.
-- **G2** (spec lock): pending owner sign-offs — `18-debt-disposition.md` (14 DD rows),
-  `19-performance-budget.md` §1 numbers, DD-22 choice. **T5 code lands after G2**;
-  foundation beads (token/runtime plumbing, zero visual change) may prep parallel.
+- **G2** (spec lock): ✅ **2026-07-22** — owner sign-off (WhatsApp directive: "Proceed —
+  continue with the additional beads, completing and shipping each piece as a clean PR
+  to main", accepting the G2 packet recommendations): `18-debt-disposition.md` all 14
+  rows approved, `19-performance-budget.md` §1 numbers approved for CI enforcement
+  (bundle falsifier wired into b-12), DD-22 = **defer** (§4 rationale corrected at
+  sign-off — two factual errors fixed). **Surface beads (b-03…b-09) are open.**
 
 ## Decomposition
 
@@ -24,6 +27,7 @@ Tracks branch off `main`, one PR per bead, cross-model review on every bead
 | b-07 | Inbox | 3-pane: channel chips, seg control, conversation list, thread (bottom-anchored), composer (uniform 36px), ctx cards | mockup-conformant; takeover state end-to-end |
 | b-08 | Deployments | summary strip, deployment cards, hub sync rows, pair card | mockup-conformant; fits 1440×900 |
 | b-09 | Settings | section nav + 5 sections per `17-settings-ia-spec.md`, swatch sync, danger zone | nav==sections 1:1; fits 1440×900 |
+| b-09a | Metrics→Ops absorption (added at G2) | move the metrics charts/content (KpiCard set, ChartPanel, FleetMetricsChart, FleetTokenChart, FleetSessionChart) from `/metrics` + the Fleet surface into the Ops surface per `02-mapping.md` §2 E4; `/metrics` then redirects to `/ops` | Ops renders the absorbed metrics content; `/metrics` deep links land on Ops; no duplicate h1 |
 | b-10 | Journey | splash (hero+proof+watermarks) + hatch 5-step flow + ceremony (one-shot glow) | journey register; ceremony ≤800ms, fades to 0 |
 | b-11 | Motion system | lift class, ambient loop (live disc only), reduced-motion=instant, lint bans | `13-ceremony-motion.md` gates pass |
 | b-12 | Perf instrumentation | per `19-performance-budget.md` §2: profiler points, WS meters, long-task observer, CI perf lane | lane runs with approved numbers |

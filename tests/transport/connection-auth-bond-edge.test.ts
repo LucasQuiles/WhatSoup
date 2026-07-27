@@ -113,6 +113,7 @@ function makeSnapshot(overrides: AuthBondSnapshotOverrides = {}): AuthBondSnapsh
       size: 128,
       mtime: '2026-07-01T00:00:00.000Z',
       sha256: 'auth-dir-hash',
+      error: null,
     },
     creds: {
       path: `${mockConfig.authDir}/creds.json`,
@@ -121,9 +122,12 @@ function makeSnapshot(overrides: AuthBondSnapshotOverrides = {}): AuthBondSnapsh
       size: 2048,
       mtime: '2026-07-01T00:00:00.000Z',
       sha256: 'a'.repeat(64),
+      error: null,
     },
     meHash: 'me-hash',
     treeHash: 'tree-hash',
+    fileCount: 42,
+    totalBytes: 4096,
     backup: {
       root: `${mockConfig.stateRoot}/auth-backups`,
       latest: '/tmp/auth-backup/latest',

@@ -5,7 +5,7 @@
   "entrypoints": [
     {
       "path": "src/main.ts",
-      "sha256": "e4e2466a371f745d2d2a47b8ecc8d0e4d52d95e71cf2a28f7d73c3ba1319d505",
+      "sha256": "14d9ac086cb786d8b2364bbe6eea6d5db5143c2451a9e32048964bce232f1d39",
       "mustContain": [
         "startHealthServer",
         "createConnection"
@@ -41,17 +41,18 @@
     },
     {
       "path": "src/transport/connection.ts",
-      "sha256": "9eb039f1dcf0299e5766b87c6388a15740f45029a76d8c6d06e0aae34878cac6",
+      "sha256": "23d36156578baa0aebe43776d5eb46ceab61679b6c041fd5bf66a06795316b95",
       "mustContain": [
         "decideDisconnectAction",
         "QR code received",
-        "Logged out"
+        "Logged out",
+        "scheduleSettledAuthBondSnapshot"
       ],
       "importGraph": true
     },
     {
       "path": "src/transport/auth.ts",
-      "sha256": "76c616e9126e46bd6a68bf3a6311baa86e16c44d597e4d3339b36688fd320667",
+      "sha256": "5072b5af6294199b0dc4878687fd0f8abc692784059239745b161f6a3a0b6341",
       "mustContain": [
         "useMultiFileAuthState",
         "decideDisconnectAction"
@@ -70,7 +71,7 @@
     },
     {
       "path": "src/runtimes/agent/session.ts",
-      "sha256": "be60c80578629fbce16b0dfa2f9e8b00ab792d76832587ab7a0c0e5d016cc286",
+      "sha256": "54f705d813f83bd5d33ca0ab666d0fa461176ce3727efeba59843a878fed3b5a",
       "mustContain": [
         "composeWithExactLineDedup"
       ],
@@ -78,7 +79,7 @@
     },
     {
       "path": "src/runtimes/agent/session-db.ts",
-      "sha256": "fd089d2199018596efa59f72f1b0059458134b71aa959ba2bf864a630e891c5c",
+      "sha256": "ca6f48bf7aa888296420e6990e2057fe5f60f5da48be939222a2dc27f2e97f42",
       "mustContain": [
         "getSessionTokenSnapshot"
       ],
@@ -89,6 +90,15 @@
       "sha256": "8edabbbc670aa79a9ae91a806db296f9ea6d32d3d7aaffa07da70f20c0b20f43",
       "mustContain": [
         "composeWithExactLineDedup"
+      ],
+      "importGraph": true
+    },
+    {
+      "path": "scripts/imsg-rpc-relay.ts",
+      "sha256": "b5b0347a83b9badf31df389f0215d9cf51a90f648db42e2a8bebda3576684997",
+      "mustContain": [
+        "SUPPORTED_IMSG_VERSIONS",
+        "startImsgRpcRelay"
       ],
       "importGraph": true
     }

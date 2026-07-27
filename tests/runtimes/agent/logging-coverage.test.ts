@@ -13,12 +13,15 @@ import { readFile } from 'node:fs/promises';
 describe('critical path logging coverage', () => {
   it('runtime critical paths emit structured lifecycle logs', async () => {
     const source = await readFile(new URL('../../../src/runtimes/agent/runtime.ts', import.meta.url), 'utf8');
+    // /new's control flow (and its lifecycle log lines) live in the extracted
+    // leaf collaborator; scan it alongside the runtime for the pinned strings.
+    const newCommandSource = await readFile(new URL('../../../src/runtimes/agent/runtime-new-command.ts', import.meta.url), 'utf8');
 
     expect(source).toContain("'AgentRuntime started'");
     expect(source).toContain('instanceName: this.instanceName');
     expect(source).toContain("'control session crashed'");
     expect(source).toContain('reportId: crashedReportId');
-    expect(source).toContain("'resetting session and queue for /new'");
+    expect(newCommandSource).toContain("'resetting session and queue for /new'");
     expect(source).toContain("'created outbound queue'");
     expect(source).toContain("'provider event rejected before runtime effects'");
     expect(source).toContain("'workspace resources stopped in shutdown'");

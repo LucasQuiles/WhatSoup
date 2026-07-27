@@ -1,5 +1,8 @@
 import { Buffer } from 'node:buffer';
-import type { ProviderFailureKind } from './failure-taxonomy.ts';
+import {
+  PROVIDER_FAILURE_KINDS,
+  type ProviderFailureKind,
+} from './failure-taxonomy.ts';
 import {
   admissionRejectInboundFailureClass,
   type AdmissionRejectClass,
@@ -21,11 +24,35 @@ export interface TurnIdentity {
   readonly generation: number;
 }
 
+export type NonProviderTerminalFailureClass =
+  | 'crash'
+  | 'processor_throw'
+  | 'unknown_terminal'
+  | 'provider_stream_corrupt';
+
+const NON_PROVIDER_TERMINAL_FAILURE_CLASS_PRESENCE: Readonly<
+  Record<NonProviderTerminalFailureClass, true>
+> = {
+  crash: true,
+  processor_throw: true,
+  unknown_terminal: true,
+  provider_stream_corrupt: true,
+};
+
+export const NON_PROVIDER_TERMINAL_FAILURE_CLASSES = Object.freeze(
+  Object.keys(NON_PROVIDER_TERMINAL_FAILURE_CLASS_PRESENCE),
+) as readonly NonProviderTerminalFailureClass[];
+
+export const TERMINAL_ATTEMPT_FAILURE_CLASSES = Object.freeze([
+  ...PROVIDER_FAILURE_KINDS,
+  ...NON_PROVIDER_TERMINAL_FAILURE_CLASSES,
+]);
+
 export type AttemptOutcome =
   | { readonly kind: 'completed' }
   | {
     readonly kind: 'failed';
-    readonly class: ProviderFailureKind | 'crash' | 'processor_throw' | 'unknown_terminal' | 'provider_stream_corrupt';
+    readonly class: ProviderFailureKind | NonProviderTerminalFailureClass;
   }
   | { readonly kind: 'suppressed_by_policy' }
   | {
@@ -93,6 +120,7 @@ export interface ReplyGuaranteeDisarmContext {
 
 export interface TurnRecoveryReplayEnvelope {
   readonly sourceMessageId: string;
+  readonly receivedAtUnixSeconds: number;
   readonly replaySafe: boolean;
   readonly senderJid: string;
   readonly senderName: string | null;

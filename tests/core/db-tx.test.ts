@@ -130,6 +130,136 @@ describe('withTransaction', () => {
     expect(rollbackSpy).toHaveBeenCalledTimes(1);
   });
 
+  // --- #2291 M8: composition. SQLite has no nested BEGIN, so a withTransaction
+  // reached from inside another open transaction must use a SAVEPOINT. The
+  // outer transaction stays the sole authority on COMMIT/ROLLBACK.
+
+  function insert(id: string): void {
+    db.raw
+      .prepare(
+        "INSERT INTO messages (chat_jid, conversation_key, sender_jid, message_id, content_type, is_from_me, timestamp) VALUES ('x', 'x', 'x', ?, 'text', 0, 1)",
+      )
+      .run(id);
+  }
+
+  function count(id: string): number {
+    return (
+      db.raw.prepare('SELECT COUNT(*) as c FROM messages WHERE message_id=?').get(id) as { c: number }
+    ).c;
+  }
+
+  it('commits both levels when a nested withTransaction succeeds', () => {
+    const result = withTransaction(db, () => {
+      insert('TXN-OUTER');
+      const inner = withTransaction(db, () => {
+        insert('TXN-INNER');
+        return 'inner-value';
+      });
+      expect(inner).toBe('inner-value');
+      return 'outer-value';
+    });
+
+    expect(result).toBe('outer-value');
+    expect(count('TXN-OUTER')).toBe(1);
+    expect(count('TXN-INNER')).toBe(1);
+  });
+
+  it('unwinds only the inner level when the nested callback throws, leaving the outer transaction usable', () => {
+    withTransaction(db, () => {
+      insert('TXN-KEEP');
+
+      expect(() =>
+        withTransaction(db, () => {
+          insert('TXN-DROP');
+          throw new Error('inner-boom');
+        }),
+      ).toThrow('inner-boom');
+
+      // The outer transaction must still be open and writable — this is the
+      // exact behaviour a nested BEGIN destroyed (its catch ran ROLLBACK,
+      // discarding the outer work too).
+      expect(db.raw.isTransaction).toBe(true);
+      insert('TXN-AFTER');
+    });
+
+    expect(count('TXN-KEEP')).toBe(1);
+    expect(count('TXN-AFTER')).toBe(1);
+    expect(count('TXN-DROP')).toBe(0);
+  });
+
+  it('composes when the OUTER transaction was opened by a raw BEGIN rather than by withTransaction', () => {
+    // The scenario #2291 M8 actually describes, and the one an internal depth
+    // counter cannot fix: ~23 callsites in src/core open transactions with a
+    // bare db.exec('BEGIN'). A counter would read depth 0 here and issue a
+    // second BEGIN, which throws. Reading isTransaction sees the real state.
+    db.raw.exec('BEGIN');
+    try {
+      insert('RAW-OUTER');
+
+      const value = withTransaction(db, () => {
+        insert('RAW-INNER');
+        return 7;
+      });
+      expect(value).toBe(7);
+
+      expect(() =>
+        withTransaction(db, () => {
+          insert('RAW-DROP');
+          throw new Error('raw-nested-boom');
+        }),
+      ).toThrow('raw-nested-boom');
+
+      expect(db.raw.isTransaction).toBe(true);
+      db.raw.exec('COMMIT');
+    } catch (err) {
+      if (db.raw.isTransaction) db.raw.exec('ROLLBACK');
+      throw err;
+    }
+
+    expect(count('RAW-OUTER')).toBe(1);
+    expect(count('RAW-INNER')).toBe(1);
+    expect(count('RAW-DROP')).toBe(0);
+  });
+
+  it('gives each nesting level its own savepoint so a depth-2 failure unwinds one level only', () => {
+    withTransaction(db, () => {
+      insert('D1');
+      withTransaction(db, () => {
+        insert('D2');
+        expect(() =>
+          withTransaction(db, () => {
+            insert('D3');
+            throw new Error('depth3-boom');
+          }),
+        ).toThrow('depth3-boom');
+        // Level 2 survives its child's failure.
+        insert('D2-AFTER');
+      });
+    });
+
+    expect(count('D1')).toBe(1);
+    expect(count('D2')).toBe(1);
+    expect(count('D2-AFTER')).toBe(1);
+    expect(count('D3')).toBe(0);
+  });
+
+  it('discards committed inner work when the OUTER transaction rolls back', () => {
+    expect(() =>
+      withTransaction(db, () => {
+        withTransaction(db, () => {
+          insert('NEST-INNER-OK');
+        });
+        throw new Error('outer-boom');
+      }),
+    ).toThrow('outer-boom');
+
+    // A released savepoint is not durable on its own — the outer ROLLBACK is
+    // still the authority. Without this, "inner succeeded" could be mistaken
+    // for "inner persisted".
+    expect(count('NEST-INNER-OK')).toBe(0);
+    expect(db.raw.isTransaction).toBe(false);
+  });
+
   it('swallows rollback failures and re-throws the original callback error', () => {
     const rollbackSpy = vi.fn(() => {
       throw new Error('rollback-io-error');

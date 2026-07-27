@@ -34,7 +34,8 @@
     "lint:shadow:baseline": "node scripts/check-shadow-baseline.mjs",
     "design:metrics": "node scripts/design-metrics.mjs",
     "design:burndown": "node scripts/check-design-burndown.mjs",
-    "coverage:check": "node scripts/check-coverage-thresholds.mjs"
+    "coverage:check": "node scripts/check-coverage-thresholds.mjs",
+    "perf:lane": "node scripts/perf-lane.mjs"
   },
   "dependencies": {
     "@tanstack/react-query": "5.96.0",
@@ -46,7 +47,7 @@
     "qrcode": "1.5.4",
     "react": "19.2.4",
     "react-dom": "19.2.4",
-    "react-router-dom": "^7.17.0",
+    "react-router-dom": "^7.18.1",
     "recharts": "3.8.1"
   },
   "devDependencies": {

@@ -105,6 +105,14 @@ class FaultTaxonomyRegistryTest(unittest.TestCase):
                 if not (ROOT / test_path).exists():
                     missing.append(f"faultClasses.{entry['id']}.tests={test_path}")
 
+        for key, entry in registry["failureDomains"].items():
+            owner = ROOT / entry["owner"]
+            test_path = ROOT / entry["test"]
+            if not owner.exists():
+                missing.append(f"failureDomains.{key}.owner={entry['owner']}")
+            if not test_path.exists():
+                missing.append(f"failureDomains.{key}.test={entry['test']}")
+
         for section in ("failureClassDispositions", "sourceDispositions"):
             for key, entry in registry[section].items():
                 owner = ROOT / entry["owner"]

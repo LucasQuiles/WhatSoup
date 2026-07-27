@@ -6,6 +6,10 @@ import { lookupCredential } from '../lib/keyring.ts';
 import { createChildLogger } from '../logger.ts';
 import { CURRENT_SCHEMA_MIGRATION, type Database } from './database.ts';
 import { readArcBindingHealth, resolveArcRepoRoot } from './arc-binding-health.ts';
+import {
+  readContinuityGapHealth,
+  type ContinuityGapHealth,
+} from './continuity-gap-ledger.ts';
 import { assertSafeHealthBind } from './health-bind-guard.ts';
 import { getMessageCount } from './messages.ts';
 import { getPendingCount, upsertAccess } from './access-list.ts';
@@ -207,10 +211,78 @@ export const HEALTH_TURN_ERROR_CLASSES = new Set([
   'model-unavailable',
   'policy-block',
   'context-overflow',
-  'server-error', 'transient-network',   // W1-T6: were missing → last_turn_error_class nulled on /health
+  'server-error',
+  'transient-network',
   'unknown-terminal',
   'empty-output',
 ]);
+
+export type HealthDegradationCause =
+  | 'provider_fallback_active'
+  | 'fallback_chain_exhausted'
+  | 'fallback_entry_failures'
+  | 'primary_model_unusable'
+  | 'model_unusable'
+  | 'turn_capability_error'
+  | 'primary_model_evidence_stale'
+  | 'turn_capability_evidence_stale'
+  | 'auth_bond_degraded'
+  | 'transport_disconnected'
+  | 'enrichment_stale'
+  | 'enrichment_runtime_degraded'
+  | 'connection_churn'
+  | 'outbound_flood'
+  | 'event_loop_starved'
+  | 'durability_debt'
+  | 'continuity_gap_unreadable'
+  | 'continuity_gap_open'
+  | 'schema_future'
+  | 'schema_not_ready'
+  | 'pending_polls_unreadable'
+  | 'agent_recent_crashes'
+  | 'agent_session_inactive'
+  | 'turn_finalization_degraded'
+  | 'turn_recovery_degraded'
+  | 'provider_execution_pressure'
+  | 'agent_runtime_degraded_unclassified'
+  | 'agent_runtime_unhealthy'
+  | 'unclassified';
+
+const HEALTH_DEGRADATION_CAUSE_PRESENCE: Readonly<Record<HealthDegradationCause, true>> = {
+  provider_fallback_active: true,
+  fallback_chain_exhausted: true,
+  fallback_entry_failures: true,
+  primary_model_unusable: true,
+  model_unusable: true,
+  turn_capability_error: true,
+  primary_model_evidence_stale: true,
+  turn_capability_evidence_stale: true,
+  auth_bond_degraded: true,
+  transport_disconnected: true,
+  enrichment_stale: true,
+  enrichment_runtime_degraded: true,
+  connection_churn: true,
+  outbound_flood: true,
+  event_loop_starved: true,
+  durability_debt: true,
+  continuity_gap_unreadable: true,
+  continuity_gap_open: true,
+  schema_future: true,
+  schema_not_ready: true,
+  pending_polls_unreadable: true,
+  agent_recent_crashes: true,
+  agent_session_inactive: true,
+  turn_finalization_degraded: true,
+  turn_recovery_degraded: true,
+  provider_execution_pressure: true,
+  agent_runtime_degraded_unclassified: true,
+  agent_runtime_unhealthy: true,
+  unclassified: true,
+};
+
+export const HEALTH_DEGRADATION_CAUSES = Object.freeze(
+  Object.keys(HEALTH_DEGRADATION_CAUSE_PRESENCE),
+) as readonly HealthDegradationCause[];
 
 function latestSuccessfulOutboundSend(deps: HealthDeps): LatestSuccessfulOutboundSend {
   return safeDbQuery(
@@ -427,6 +499,8 @@ function getConnectionState(connectionManager: HealthDeps['connectionManager']):
           identityHash: null,
         },
         treeHash: null,
+        fileCount: null,
+        totalBytes: null,
         backup: {
           root: cfg.stateRoot ?? 'unknown',
           latest: null,
@@ -485,6 +559,8 @@ function formatAuthBond(connectionState: ConnectionStateSnapshot): Record<string
     },
     me_hash: authBond.meHash,
     tree_hash: authBond.treeHash?.slice(0, 20) ?? null,
+    file_count: authBond.fileCount,
+    total_bytes: authBond.totalBytes,
     backup: {
       root: authBond.backup.root,
       latest: authBond.backup.latest,
@@ -1340,6 +1416,22 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
       const durabilityDebtIsDegraded =
         Number.isFinite(oldestMaybeSentMs)
         && Date.now() - oldestMaybeSentMs > DURABILITY_STALE_MAYBE_SENT_MS;
+      const continuity = safeDbQuery<ContinuityGapHealth | {
+        readable: false;
+        open: number;
+        unresolved: number;
+        ambiguous: number;
+      }>(
+        () => readContinuityGapHealth(deps.db.raw),
+        {
+          readable: false as const,
+          open: 0,
+          unresolved: 0,
+          ambiguous: 0,
+        },
+        'failed to read continuity gap ledger',
+      );
+      const continuityIsDegraded = !continuity.readable || continuity.open > 0;
 
       let status: 'healthy' | 'degraded' | 'unhealthy';
       if (authFailureIsUnhealthy) {
@@ -1358,7 +1450,8 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
         agentRuntimeStatus === 'degraded' ||
         turnCapabilityIsDegraded ||
         loopLag.locallyStarved ||
-        durabilityDebtIsDegraded
+        durabilityDebtIsDegraded ||
+        continuityIsDegraded
       ) {
         status = 'degraded';
       } else {
@@ -1475,8 +1568,98 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
         }
       }
 
+      const degradationCauses: HealthDegradationCause[] = [];
+      const addDegradationCause = (cause: HealthDegradationCause): void => {
+        if (!degradationCauses.includes(cause)) degradationCauses.push(cause);
+      };
+      const fallbackWindowActive =
+        fallbackState !== null
+        && typeof fallbackState.fallbackActiveUntil === 'number'
+        && Number.isFinite(fallbackState.fallbackActiveUntil)
+        && fallbackState.fallbackActiveUntil > Date.now()
+        && typeof fallbackState.fallbackReason === 'string'
+        && fallbackState.fallbackReason.length > 0;
+      if (fallbackWindowActive) addDegradationCause('provider_fallback_active');
+      if (fallbackState?.fallbackChainExhausted === true) {
+        addDegradationCause('fallback_chain_exhausted');
+      }
+      if (
+        typeof fallbackState?.failedEntryCount === 'number'
+        && Number.isFinite(fallbackState.failedEntryCount)
+        && fallbackState.failedEntryCount > 0
+      ) {
+        addDegradationCause('fallback_entry_failures');
+      }
+      if (turnCapability?.model_usable === false) {
+        addDegradationCause(fallbackWindowActive ? 'primary_model_unusable' : 'model_unusable');
+      }
+      if (turnCapabilityErrorIsDegraded) addDegradationCause('turn_capability_error');
+      if (turnCapability !== null && modelEvidenceStaleWhileRelied(turnCapability, Date.now())) {
+        addDegradationCause(fallbackWindowActive
+          ? 'primary_model_evidence_stale'
+          : 'turn_capability_evidence_stale');
+      }
+      if (authFailureIsUnhealthy || authFailureIsDegraded) addDegradationCause('auth_bond_degraded');
+      if (!isConnected) addDegradationCause('transport_disconnected');
+      if (enrichmentIsStale) addDegradationCause('enrichment_stale');
+      if (enrichmentStats.runtimeDegraded) addDegradationCause('enrichment_runtime_degraded');
+      if (connectionChurnIsDegraded) addDegradationCause('connection_churn');
+      if (outboundFloodIsDegraded) addDegradationCause('outbound_flood');
+      if (loopLag.locallyStarved) addDegradationCause('event_loop_starved');
+      if (durabilityDebtIsDegraded) addDegradationCause('durability_debt');
+      if (!continuity.readable) addDegradationCause('continuity_gap_unreadable');
+      else if (continuity.open > 0) addDegradationCause('continuity_gap_open');
+      if (schemaIsFuture) addDegradationCause('schema_future');
+      else if (!schemaReady) addDegradationCause('schema_not_ready');
+      if (!pendingPollsReadable) addDegradationCause('pending_polls_unreadable');
+
+      const runtimeDetails = runtimeSnapshot?.details as Record<string, unknown> | undefined;
+      const runtimeProviderExecution = runtimeDetails?.['providerExecution'] as Record<string, unknown> | undefined;
+      const positiveRuntimeCounter = (key: string): boolean => {
+        const value = runtimeDetails?.[key];
+        return typeof value === 'number' && Number.isFinite(value) && value > 0;
+      };
+      if (positiveRuntimeCounter('recentCrashes')) addDegradationCause('agent_recent_crashes');
+      if (agentRuntimeStatus === 'degraded' && runtimeDetails?.['active'] === false) {
+        addDegradationCause('agent_session_inactive');
+      }
+      if (
+        positiveRuntimeCounter('turnFinalizationRetainedRetries')
+        || positiveRuntimeCounter('turnFinalizationDegradedScopes')
+      ) {
+        addDegradationCause('turn_finalization_degraded');
+      }
+      if (
+        positiveRuntimeCounter('turnRecoveryOutstanding')
+        || positiveRuntimeCounter('turnRecoveryExhausted')
+        || positiveRuntimeCounter('turnRecoveryOpenRecoveries')
+        || positiveRuntimeCounter('turnRecoveryCorruptLinks')
+        || positiveRuntimeCounter('turnRecoveryEchoConflicts')
+      ) {
+        addDegradationCause('turn_recovery_degraded');
+      }
+      if (runtimeProviderExecution?.['pressureActive'] === true) {
+        addDegradationCause('provider_execution_pressure');
+      }
+      if (
+        agentRuntimeStatus === 'degraded'
+        && !fallbackWindowActive
+        && !degradationCauses.some((cause) => cause.startsWith('agent_')
+          || cause === 'turn_finalization_degraded'
+          || cause === 'turn_recovery_degraded'
+          || cause === 'provider_execution_pressure')
+      ) {
+        addDegradationCause('agent_runtime_degraded_unclassified');
+      } else if (agentRuntimeStatus === 'unhealthy') {
+        addDegradationCause('agent_runtime_unhealthy');
+      }
+      if (status !== 'healthy' && degradationCauses.length === 0) {
+        addDegradationCause('unclassified');
+      }
+
       const body = JSON.stringify({
         status,
+        degradation_causes: degradationCauses,
         generated_at: new Date().toISOString(),
         uptime_seconds: Math.floor((Date.now() - deps.startedAt) / 1000),
         arc: readArcBindingHealth(resolveArcRepoRoot()),
@@ -1585,6 +1768,7 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
         },
         model_advisories: getModelAdvisories(),
         durability: durabilityStats,
+        continuity,
         // Q control-peer wiring. The heal_delivery_unavailable critical latches
         // to one emission per process; this counter is where the suppressed
         // occurrences are visible afterward (see emitHealReport in heal.ts).

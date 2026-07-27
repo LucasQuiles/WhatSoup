@@ -299,6 +299,35 @@ full window whose nearest-rank p95 is strictly greater than 250 ms.
 - Keep generated artifacts under ignored `artifacts/` paths.
 - Keep auth, token, DB, and keychain material outside the repo.
 
+## Auto-Login Hosts Cannot Serve Keychain Reads
+
+An auto-login host (`autoLoginUser` set, FileVault off) never unlocks the user's
+login keychain: the unlock is derived from an interactively typed login password,
+and `/etc/kcpassword` bypasses that step. The first keychain read after boot
+therefore raises a `SecurityAgent` password prompt on the console — which nobody
+is there to answer — and the caller blocks until the prompt is dismissed.
+
+Symptoms, in the order they usually surface:
+
+- `security` processes accumulate, all in `S` state, none exiting.
+- A `SecurityAgent.bundle` process is running under the console user.
+- Unrelated `security` calls from *other* users on the host also hang, because a
+  pending console prompt serialises the authorization path.
+
+Consequences for deployment:
+
+- **Treat the keychain as unavailable on auto-login hosts.** Per-instance
+  `tokens.env` is the supported credential path there; see
+  `deploy/generate-health-tokens.sh`.
+- **Every credential-store probe must be bounded** — see
+  `deploy/lib/bounded-exec.sh`. Note `timeout(1)` does not exist on stock macOS,
+  so a bare `timeout 3s security ...` is not a fix.
+- Recovery without console access: kill the pending `SecurityAgent` and hung
+  `security` processes, then
+  `security unlock-keychain /Users/<user>/Library/Keychains/login.keychain-db`.
+  This must be repeated after every boot, which is why the code path may not
+  depend on it.
+
 ## Known Limits
 
 - `KeepAlive -> Crashed` only restarts crashed services. Clean exits do not

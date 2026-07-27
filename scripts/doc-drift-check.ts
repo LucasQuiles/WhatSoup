@@ -188,7 +188,11 @@ export function findToolRegistrations(cwd: string = process.cwd()): ToolRegistra
   // Inline registrations are listed here explicitly to keep this scan
   // file-anchored rather than AST-derived.
   const inlineRegistrationSources: ReadonlyArray<{ relativePath: string; toolName: string }> = [
-    { relativePath: 'src/runtimes/agent/runtime.ts', toolName: 'emit_heal_result' },
+    // emit_heal_result's declaration lives in runtime-tool-registrations.ts
+    // (buildEmitHealResultTool); AgentRuntime.start() wires it via
+    // registerRuntimeInlineTools. Anchor the scan at the declaration file (where
+    // the `name:` field is) so the canonical count stays correct after #1977.
+    { relativePath: 'src/runtimes/agent/runtime-tool-registrations.ts', toolName: 'emit_heal_result' },
   ];
 
   const inlineRegistrationPattern = (toolName: string) =>

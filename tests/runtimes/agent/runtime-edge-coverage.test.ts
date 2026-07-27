@@ -162,6 +162,7 @@ vi.mock('../../../src/runtimes/agent/session-db.ts', () => ({
   incrementMessageCount: vi.fn(),
   updateSessionId: vi.fn(),
   updateSessionStatus: vi.fn(),
+  restoreOrphanedResidentSessionStatus: vi.fn(() => 'already_active'),
   getActiveSession: vi.fn(() => null),
   backfillWorkspaceKeys: vi.fn(),
   markOrphaned: vi.fn(),
@@ -339,6 +340,9 @@ type RuntimeView = {
   perChatRuntimeTurnContexts: Map<string, RuntimeTurnContext[]>;
   perChatTurnQueues: Map<string, { pending: number; isProcessing: boolean; haltedError: unknown; idle(): Promise<void> }>;
   currentRuntimeTurnContext: RuntimeTurnContext | null;
+  runtimeTurnCoordinator: {
+    rekeyPerChatTurnQueueHaltScope(fromScopeKey: string, toScopeKey: string): void;
+  };
   pendingTurnText: Map<string, string>;
   pendingTurnActorJid: Map<string, string | undefined>;
   perChatTurnContentType: Map<string, string>;
@@ -370,6 +374,7 @@ type RuntimeView = {
   handlePerChatCrash: ReturnType<typeof vi.fn>;
   handleCrashNotify: ReturnType<typeof vi.fn>;
   handleResumeFailed(chatJid: string): void;
+  sweepStaleAgentSessions(): Promise<Set<string>>;
   activateProviderFallback(resetAt: Date | null, reason?: string): {
     reason: 'usage-limit' | 'auth-required' | 'rate-limit' | 'server-error' | 'model-unavailable' | 'empty-output' | 'probe-unusable';
     fallbackProvider: string;
@@ -638,6 +643,7 @@ function runtimeContext(
   inboundSeq: number,
   logicalTurnId: string,
   owner: { managerId?: string; generation?: number; toolScopeKey?: string } = {},
+  replayText = 'original edge turn',
 ): RuntimeTurnContext {
   return createRuntimeTurnContext({
     identity: {
@@ -652,10 +658,11 @@ function runtimeContext(
     recoveryOwner: { logicalTurnId: `${logicalTurnId}:recovery`, managerId: 'manager-recovery', generation: 2 },
     replay: {
       sourceMessageId: `wamid-${logicalTurnId}`,
+      receivedAtUnixSeconds: 1_780_000_000,
       replaySafe: true,
       senderJid: 'sender-edge@s.whatsapp.net',
       senderName: null,
-      text: 'original edge turn',
+      text: replayText,
       isGroup: false,
     },
     contentType: 'text',
@@ -695,6 +702,73 @@ describe('AgentRuntime edge coverage', () => {
     delete process.env['WHATSOUP_RESPONSE_REGISTRY_DISPATCH'];
     vi.useRealTimers();
     vi.restoreAllMocks();
+  });
+
+  it('preserves a zombie-classified row owned by a resident manager', async () => {
+    const runtime = makeRuntime({ sessionScope: 'per_chat' });
+    const state = view(runtime);
+    const session = makeSession();
+    session.getDbRowId.mockReturnValue(42 as never);
+    state.chatSessions.set('resident', session);
+    runtime.setDurability({} as never);
+    const { markOrphaned } = await import('../../../src/runtimes/agent/session-db.ts');
+    const { classifyActiveSessions } = await import('../../../src/runtimes/agent/session-classifier.ts');
+    vi.mocked(markOrphaned).mockClear();
+    vi.mocked(classifyActiveSessions).mockReturnValueOnce([{
+      id: 42, sessionId: 'ses-resident', claudePid: 0,
+      chatJid: 'resident@s.whatsapp.net', conversationKey: 'resident', status: 'active',
+      classification: 'stale_dead', reason: 'checkpoint mismatch', startedAt: null, messageCount: 1,
+    }]);
+
+    await state.sweepStaleAgentSessions();
+
+    expect(markOrphaned).not.toHaveBeenCalledWith(expect.anything(), 42);
+    expect(mockRuntimeLogger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 42, providerSessionId: 'ses-resident' }),
+      'skipping zombie-session disposition for current-process resident manager',
+    );
+  });
+
+  it('reconciles resident persistence before classifying active rows', async () => {
+    const runtime = makeRuntime({ sessionScope: 'per_chat' });
+    const state = view(runtime);
+    const session = makeSession();
+    session.getDbRowId.mockReturnValue(42 as never);
+    session.getProviderId.mockReturnValue('opencode-cli' as never);
+    session.getStatus.mockReturnValue({
+      active: true,
+      pid: null,
+      sessionId: 'ses-resident',
+      startedAt: null,
+      messageCount: 2,
+      lastMessageAt: null,
+      turnInFlight: false,
+      durableFailureClosed: false,
+    } as never);
+    state.chatSessions.set('resident', session);
+    runtime.setDurability({} as never);
+    const { restoreOrphanedResidentSessionStatus } = await import('../../../src/runtimes/agent/session-db.ts');
+    const { classifyActiveSessions } = await import('../../../src/runtimes/agent/session-classifier.ts');
+    const order: string[] = [];
+    vi.mocked(restoreOrphanedResidentSessionStatus).mockImplementationOnce(() => {
+      order.push('reconcile');
+      return 'already_active';
+    });
+    vi.mocked(classifyActiveSessions).mockImplementationOnce(() => {
+      order.push('classify');
+      return [];
+    });
+
+    await state.sweepStaleAgentSessions();
+
+    expect(order).toEqual(['reconcile', 'classify']);
+    expect(restoreOrphanedResidentSessionStatus).toHaveBeenCalledWith(
+      expect.anything(),
+      42,
+      'ses-resident',
+      'opencode-cli',
+      undefined,
+    );
   });
 
   it('caches group admin metadata and reuses it without refetching', async () => {
@@ -1188,6 +1262,7 @@ describe('AgentRuntime edge coverage', () => {
     const runtime = makeRuntime({ sessionScope: 'per_chat' });
     const state = view(runtime);
     state.flushImageCoalesce = vi.fn(async () => {});
+    const rekeyHaltScope = vi.spyOn(state.runtimeTurnCoordinator, 'rekeyPerChatTurnQueueHaltScope');
     const conversationKey = '15551234567';
     const lidKey = `${conversationKey}@lid`;
     const phoneJid = `${conversationKey}@s.whatsapp.net`;
@@ -1237,6 +1312,7 @@ describe('AgentRuntime edge coverage', () => {
 
     runtime.handleJidAliasChanged(conversationKey, phoneJid);
 
+    expect(rekeyHaltScope).toHaveBeenCalledWith(lidKey, phoneJid);
     expect(chatQueue.updateDeliveryJid).toHaveBeenCalledWith(phoneJid);
     expect(socketServer.updateDeliveryJid).toHaveBeenCalledWith(phoneJid);
     expect(singletonQueue.updateDeliveryJid).toHaveBeenCalledWith(phoneJid);
@@ -1788,6 +1864,7 @@ describe('AgentRuntime edge coverage', () => {
           senderName: null,
           contentType: 'image',
           isGroup: false,
+          receivedAtUnixSeconds: Math.floor(Date.now() / 1000),
           ...(i === 0 || i === 1 ? {} : { inboundSeq: i + 1 }),
         },
       );
@@ -1903,6 +1980,26 @@ describe('AgentRuntime edge coverage', () => {
     state.sessionEventToolScopes.set(session, toolScopeKey);
     state.pendingTurnText.set(mapKey, 'lost user turn after rejected resume');
     state.pendingTurnActorJid.set(mapKey, 'actor-recovery@s.whatsapp.net');
+    const replayContext = runtimeContext(
+      'per_chat', mapKey, chatJid, 42, 'resume-failure-replay', {},
+      'lost user turn after rejected resume',
+    );
+    state.perChatTurnQueues.set(mapKey, {
+      activeTurn: {
+        conversationKey: mapKey,
+        chatJid,
+        senderJid: replayContext.replay.senderJid,
+        senderName: replayContext.replay.senderName,
+        sourceMessageId: replayContext.replay.sourceMessageId,
+        receivedAtUnixSeconds: replayContext.replay.receivedAtUnixSeconds,
+        text: replayContext.replay.text,
+        isGroup: false,
+        contentType: 'text',
+        runtimeContext: replayContext,
+        inboundSeq: replayContext.identity.inboundSeq,
+      },
+    } as never);
+    vi.spyOn(Date, 'now').mockReturnValue((1_780_000_000 + 75) * 1000);
     state.imageCoalesce.buffers.set(mapKey, {
       timer: coalesceTimer,
       msg: { chatJid },
@@ -1940,6 +2037,7 @@ describe('AgentRuntime edge coverage', () => {
       owner: expect.objectContaining({ generation: 1, toolScopeKey }),
       routeChatJid: chatJid,
       timeoutMs: 240_000,
+      deferDeadlineUntilActivated: true,
       onTimeout: expect.any(Function),
     });
     expect(cancel).not.toHaveBeenCalled();
@@ -1963,7 +2061,20 @@ describe('AgentRuntime edge coverage', () => {
     state.handleEventPerChat(session, { type: 'result', text: null }, toolScopeKey);
     await drainMicrotasks();
 
-    expect(session.sendTurn).toHaveBeenNthCalledWith(2, 'lost user turn after rejected resume');
+    expect(session.sendTurn).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({
+        applicationContext: [
+          expect.stringContaining('Delivery: recovery replay'),
+        ],
+        userText: 'lost user turn after rejected resume',
+      }),
+    );
+    const replayTurn = (session.sendTurn.mock.calls as unknown as Array<[
+      { applicationContext: string[]; userText: string },
+    ]>)[1]![0];
+    expect(replayTurn.applicationContext[0]).toContain('Queue age: 75 seconds');
+    expect(replayTurn.userText).toBe('lost user turn after rejected resume');
     expect(session.completeProviderTurn).toHaveBeenCalledOnce();
     expect(state.resumeFailedHandling.has(mapKey)).toBe(false);
   });
@@ -2002,6 +2113,7 @@ describe('AgentRuntime edge coverage', () => {
       owner: expect.objectContaining({ generation: 1, toolScopeKey }),
       routeChatJid: chatJid,
       timeoutMs: 240_000,
+      deferDeadlineUntilActivated: true,
       onTimeout: expect.any(Function),
     });
     expect(cancel).toHaveBeenCalledWith(expect.objectContaining({ scopeKey: mapKey }));

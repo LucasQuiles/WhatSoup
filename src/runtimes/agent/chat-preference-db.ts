@@ -69,6 +69,21 @@ export interface ChatModelPreference {
   requestedModel: string | null;
   validatedProvider: string | null;
   modelPinVerified: boolean | null;
+  /**
+   * The per-chat reasoning-EFFORT override for the pinned model (Slice 3).
+   * NULL = no override (harness default, no `--effort` flag). A raw native
+   * provider level (claude-cli: xhigh/high/medium/low). Meaningful ONLY
+   * alongside a model pin — effort with no `requestedModel` is out-of-contract
+   * garbage (enforced in rowToPreference), so it moves with the model-pin
+   * fields above. It is part of the pin's dedup identity: re-pinning the same
+   * model at a new effort is a genuine change, not a no-op refresh.
+   *
+   * OPTIONAL on write (unset ≡ null ≡ no override) so pre-Slice-3 writers —
+   * e.g. recordRoutePreference's provider-only pin — need no change and the
+   * frozen runtime.ts stays unchanged; setPreference coalesces to null.
+   * ALWAYS present on read (rowToPreference populates string | null).
+   */
+  requestedEffort?: string | null;
 }
 
 const INTENTS: ReadonlySet<string> = new Set<string>(PREFERENCE_INTENTS);
@@ -101,6 +116,12 @@ export function ensureChatPreferenceSchema(db: Database): void {
     ['requested_model', 'requested_model TEXT'],
     ['validated_provider', 'validated_provider TEXT'],
     ['model_pin_verified', 'model_pin_verified INTEGER'],
+    // Slice 3: reasoning-effort override for the pinned model. Nullable, no
+    // default — existing rows read back NULL = "no effort override", so this
+    // is a rollback-safe additive migration (new binary/old DB: column
+    // absent → probe adds it; old binary/new column: the extra column is
+    // simply unread).
+    ['requested_effort', 'requested_effort TEXT'],
   ] as const) {
     const present = db.raw
       .prepare(`SELECT 1 AS present FROM pragma_table_info('chat_model_preference') WHERE name = ?`)
@@ -116,8 +137,8 @@ export function setPreference(db: Database, p: ChatModelPreference): void {
     .prepare(
       `INSERT INTO chat_model_preference
          (chat_jid, sender_jid, intent, requested_provider, scope, pin_strict, fallback_permitted, updated_at, expires_at,
-          requested_model, validated_provider, model_pin_verified)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          requested_model, validated_provider, model_pin_verified, requested_effort)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(chat_jid, sender_jid) DO UPDATE SET
          intent = excluded.intent,
          requested_provider = excluded.requested_provider,
@@ -128,7 +149,8 @@ export function setPreference(db: Database, p: ChatModelPreference): void {
          expires_at = excluded.expires_at,
          requested_model = excluded.requested_model,
          validated_provider = excluded.validated_provider,
-         model_pin_verified = excluded.model_pin_verified`,
+         model_pin_verified = excluded.model_pin_verified,
+         requested_effort = excluded.requested_effort`,
     )
     .run(
       p.chatJid,
@@ -143,12 +165,13 @@ export function setPreference(db: Database, p: ChatModelPreference): void {
       p.requestedModel,
       p.validatedProvider,
       p.modelPinVerified === null ? null : p.modelPinVerified ? 1 : 0,
+      p.requestedEffort ?? null,
     );
 }
 
 const PREFERENCE_COLUMNS =
   `chat_jid, sender_jid, intent, requested_provider, scope, pin_strict, fallback_permitted, updated_at, expires_at,
-   requested_model, validated_provider, model_pin_verified`;
+   requested_model, validated_provider, model_pin_verified, requested_effort`;
 
 interface PreferenceRow {
   chat_jid: unknown;
@@ -163,6 +186,7 @@ interface PreferenceRow {
   requested_model: unknown;
   validated_provider: unknown;
   model_pin_verified: unknown;
+  requested_effort: unknown;
 }
 
 /**
@@ -203,8 +227,12 @@ function rowToPreference(row: PreferenceRow, now: number): ChatModelPreference |
   if (row.requested_model !== null && typeof row.requested_model !== 'string') return null;
   if (row.validated_provider !== null && typeof row.validated_provider !== 'string') return null;
   if (row.model_pin_verified !== null && row.model_pin_verified !== 0 && row.model_pin_verified !== 1) return null;
+  // Slice 3: a reasoning-effort override is a string level or null, and is
+  // meaningful ONLY alongside a model pin — an effort with no requested_model
+  // is out-of-contract garbage (no model to attach the override to).
+  if (row.requested_effort !== null && typeof row.requested_effort !== 'string') return null;
   if (row.requested_model === null) {
-    if (row.validated_provider !== null || row.model_pin_verified !== null) return null;
+    if (row.validated_provider !== null || row.model_pin_verified !== null || row.requested_effort !== null) return null;
   } else if (row.model_pin_verified === null) {
     return null; // a live model pin must carry a verified/unverified bit
   }
@@ -221,6 +249,7 @@ function rowToPreference(row: PreferenceRow, now: number): ChatModelPreference |
     requestedModel: row.requested_model as string | null,
     validatedProvider: row.validated_provider as string | null,
     modelPinVerified: row.model_pin_verified === null ? null : row.model_pin_verified === 1,
+    requestedEffort: row.requested_effort as string | null,
   };
 }
 

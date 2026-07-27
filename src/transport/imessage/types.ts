@@ -3,11 +3,10 @@
 //
 // iMessage has TWO supported backends, selected by `backend`:
 //
-//   'imsg'        — macOS-native. Uses the `imsg` CLI daemon
-//                   (https://github.com/AsamK/signal-cli namesake, but for
-//                   iMessage) which reads the local `chat.db` and sends via
-//                   the macOS Messages framework. Requires the daemon host
-//                   be a signed-in Mac with Full Disk Access granted.
+//   'imsg'        — macOS-native. Uses the `imsg rpc` CLI through a
+//                   WhatSoup-owned local UNIX relay. imsg reads the local
+//                   `chat.db` and sends via the macOS Messages framework.
+//                   The host must be a signed-in Mac with Full Disk Access.
 //
 //   'bluebubbles' — BlueBubbles Server (https://bluebubbles.app) — an HTTP
 //                   API fronting a Mac mini / Mac Studio that signs into
@@ -22,8 +21,8 @@
 // E.164 phone. The port accepts both forms; iMessage itself routes either to
 // the same AppleID-verified destination.
 
-/** E.164 phone shape — shared with the Twilio and Signal transports. */
-export const E164_RE = /^\+[1-9]\d{6,14}$/;
+/** E.164 phone shape shared with the other transport validators. */
+export { E164_RE } from '../../core/transport-refs.ts';
 
 /**
  * AppleID email shape. Defined in core/transport-refs.ts and re-exported here
@@ -49,7 +48,7 @@ export interface ImessageRateLimit {
 
 /**
  * iMessage transport configuration. The `backend` discriminator selects
- * between the macOS-native `imsg` daemon and the BlueBubbles HTTP Server.
+ * between macOS-native `imsg rpc` and the BlueBubbles HTTP Server.
  * Backend-specific fields are conditionally required based on `backend`.
  */
 export interface ImessageConfig {
@@ -62,7 +61,8 @@ export interface ImessageConfig {
   // ── imsg backend fields (required when backend === 'imsg') ──────────────
 
   /**
-   * UNIX socket path to the imsg daemon. Required when backend === 'imsg'.
+   * UNIX socket path to WhatSoup's local imsg RPC relay. Required when
+   * backend === 'imsg'.
    * Default '/tmp/imsg.sock'.
    */
   readonly imsgSocketPath?: string;

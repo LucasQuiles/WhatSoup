@@ -78,6 +78,17 @@ export const fitnessRules = [
     source: ['retrospective:AgentRuntime-mixed-responsibilities'],
   },
   {
+    id: 'arch.sqlite-busy-timeout-ssot',
+    title: 'SQLite busy-timeout single source',
+    category: 'architecture',
+    rationale:
+      'Statically resolvable numeric PRAGMA busy_timeout strings reaching direct member calls named exec/prepare and node:sqlite DatabaseSync timeout options can drift across connections; active src/ and scripts/ code must use the canonical constants, while ambiguous argument spreads, unresolvable options, and recognized const-object mutations fail visibly.',
+    detect: 'ast',
+    rings: ['eslint'],
+    severity: 'warn',
+    source: ['issue:2217', 'incident:sqlite-busy-timeout-drift'],
+  },
+  {
     id: 'arch.test-colocation-churn',
     title: 'Test colocation churn',
     category: 'architecture',
@@ -327,6 +338,12 @@ export const fitnessRules = [
       patterns: ['WhatsApp'],
       allowlistPaths: [
         'console/src/mock-data.ts',
+        // transport-identity.ts is the console-wide transport-identity home
+        // (T5 b-07): CHANNEL_LABEL names each channel there, so generic
+        // consumers never hardcode one transport's name. The fleet glyph map
+        // (channel-kind.ts) converged onto it at the b-13 gate and inherits the
+        // shared copy, so it no longer needs an entry of its own.
+        'console/src/lib/transport-identity.ts',
       ],
     },
     source: ['audit:2026-07-20-signal-imessage-surface-sweep#S2,S3,S15'],
@@ -347,9 +364,28 @@ export const fitnessRules = [
       patterns: ['health?.whatsapp', 'health.whatsapp'],
       allowlistPaths: [
         'console/src/mock-data.ts',
+        // transport-identity.ts is the designated generic-first accessor for
+        // transport identity (T5 b-07): the legacy health.whatsapp read lives
+        // there alone as the documented Baileys fallback; all consumers route
+        // through transportConnectedOf / channelOf / baileysFallbackChannel
+        // (the fleet glyph fallback converged onto it at the b-13 gate).
+        'console/src/lib/transport-identity.ts',
       ],
     },
     source: ['audit:2026-07-20-signal-imessage-surface-sweep#S17'],
+  },
+  {
+    id: 'hygiene.catch-justification',
+    title: 'Swallowed catch justification',
+    category: 'hygiene',
+    rationale:
+      'A catch whose body is empty or only performs syntactic no-ops silently swallows errors; binding an unused variable or adding a magic-word comment does not provide handling. New swallows must perform observable handling or carry a reasoned justification. The 127 inherited semantic identities are shrink-only ratchet debt.',
+    detect: 'ast',
+    rings: ['eslint'],
+    severity: 'warn',
+    ratchet: true,
+    params: { baselinePath: 'eslint-rules/catch-ratchet-baseline.json' },
+    source: ['issue:2190'],
   },
   {
     id: 'test.typecheck-all-required',

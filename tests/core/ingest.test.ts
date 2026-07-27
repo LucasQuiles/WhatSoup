@@ -751,6 +751,7 @@ describe('Inbound journaling: durabilityEngine.journalInbound', () => {
     const runtime = makeRuntime();
     const durability = new DurabilityEngine(db);
     const journalSpy = vi.spyOn(durability, 'journalInbound').mockReturnValue(42);
+    vi.spyOn(durability, 'getInboundReceivedAtUnixSeconds').mockReturnValue(1_780_000_000);
 
     const handler = makeIngest(db, messenger, runtime, BOT_JID, BOT_LID, durability);
     const msg = makeIncomingMessage();
@@ -763,8 +764,51 @@ describe('Inbound journaling: durabilityEngine.journalInbound', () => {
       expect.any(String),   // conversationKey
       msg.chatJid,
       expect.any(String),   // routedTo runtime name
+      expect.any(Number),   // receipt captured before admission backpressure
     );
     expect(vi.mocked(runtime.handleMessage)).toHaveBeenCalledWith(msg);
+    expect(msg.receivedAtUnixSeconds).toBe(1_780_000_000);
+  });
+
+  it('dispatches exact user text when the stored durable receipt is invalid', async () => {
+    const db = makeTempDb();
+    const messenger = makeMessenger();
+    const runtime = makeRuntime();
+    const durability = new DurabilityEngine(db);
+    const journalInbound = durability.journalInbound.bind(durability);
+    vi.spyOn(durability, 'journalInbound').mockImplementation((...args) => {
+      const seq = journalInbound(...args);
+      db.raw.prepare(`UPDATE inbound_events SET received_at = 'invalid' WHERE seq = ?`).run(seq);
+      return seq;
+    });
+
+    const handler = makeIngest(db, messenger, runtime, BOT_JID, BOT_LID, durability);
+    const msg = makeIncomingMessage({ content: 'preserve this exact request' });
+
+    await runIngest(handler, msg);
+
+    expect(vi.mocked(runtime.handleMessage)).toHaveBeenCalledOnce();
+    expect(vi.mocked(runtime.handleMessage)).toHaveBeenCalledWith(
+      expect.objectContaining({
+        content: 'preserve this exact request',
+        inboundSeq: expect.any(Number),
+        receivedAtUnixSeconds: undefined,
+      }),
+    );
+  });
+
+  it('does not dispatch when the durable receipt query itself fails', async () => {
+    const db = makeTempDb();
+    const messenger = makeMessenger();
+    const runtime = makeRuntime();
+    const durability = new DurabilityEngine(db);
+    vi.spyOn(durability, 'getInboundReceivedAtUnixSeconds')
+      .mockImplementation(() => { throw new Error('SQLITE_BUSY while reading receipt'); });
+
+    const handler = makeIngest(db, messenger, runtime, BOT_JID, BOT_LID, durability);
+    await runIngest(handler, makeIncomingMessage({ content: 'must remain fail closed' }));
+
+    expect(vi.mocked(runtime.handleMessage)).not.toHaveBeenCalled();
   });
 
   it('journalInbound is called before runtime.handleMessage', async () => {
@@ -778,6 +822,7 @@ describe('Inbound journaling: durabilityEngine.journalInbound', () => {
       callOrder.push('journalInbound');
       return 1;
     });
+    vi.spyOn(durability, 'getInboundReceivedAtUnixSeconds').mockReturnValue(1_780_000_000);
     vi.mocked(runtime.handleMessage).mockImplementation(async () => {
       callOrder.push('handleMessage');
     });
@@ -837,6 +882,7 @@ describe('Inbound journaling: durabilityEngine.journalInbound', () => {
     vi.mocked(runtime.handleMessage).mockRejectedValue(new Error('runtime crash'));
 
     const journalSpy = vi.spyOn(durability, 'journalInbound').mockReturnValue(11);
+    vi.spyOn(durability, 'getInboundReceivedAtUnixSeconds').mockReturnValue(1_780_000_000);
     const failSpy = vi.spyOn(durability, 'markInboundFailed');
 
     const handler = makeIngest(db, messenger, runtime, BOT_JID, BOT_LID, durability);
@@ -858,6 +904,7 @@ describe('Inbound journaling: durabilityEngine.journalInbound', () => {
     );
 
     vi.spyOn(durability, 'journalInbound').mockReturnValue(12);
+    vi.spyOn(durability, 'getInboundReceivedAtUnixSeconds').mockReturnValue(1_780_000_000);
     const failSpy = vi.spyOn(durability, 'markInboundFailed');
 
     const handler = makeIngest(db, messenger, runtime, BOT_JID, BOT_LID, durability);
@@ -1091,6 +1138,48 @@ describe('ingest.ts uncovered-branch coverage', () => {
         expect(s.active).toBe(0);
         expect(s.queued).toBe(0);
       });
+    });
+  });
+
+  it('captures the durable receipt before a message waits for an ingest slot', async () => {
+    await withIngestConfig({ maxConcurrent: 1, maxQueueDepth: 5 }, async () => {
+      const hold = deferred<void>();
+      const receivedAt = 1_780_000_000;
+      let now = receivedAt;
+      const nowSpy = vi.spyOn(Date, 'now').mockImplementation(() => now * 1000);
+      try {
+        const db = makeTempDb();
+        const messenger = makeMessenger();
+        const runtime = makeRuntime();
+        const durability = new DurabilityEngine(db);
+        vi.mocked(runtime.handleMessage).mockImplementation(async (msg: IncomingMessage) => {
+          if (msg.messageId === 'receipt-slot-holder') return hold.promise;
+        });
+        const handler = makeIngest(db, messenger, runtime, BOT_JID, BOT_LID, durability);
+
+        handler(makeIncomingMessage({ messageId: 'receipt-slot-holder' }));
+        await waitForStats((s) => { expect(s.active).toBe(1); });
+
+        handler(makeIncomingMessage({
+          messageId: 'receipt-slot-waiter',
+          content: 'queued exact text',
+        }));
+        await waitForStats((s) => { expect(s.queued).toBe(1); });
+
+        now += 95;
+        hold.resolve();
+        await vi.waitFor(() => {
+          expect(vi.mocked(runtime.handleMessage)).toHaveBeenCalledTimes(2);
+        });
+        const queued = vi.mocked(runtime.handleMessage).mock.calls[1]?.[0];
+        expect(queued).toMatchObject({
+          messageId: 'receipt-slot-waiter',
+          content: 'queued exact text',
+          receivedAtUnixSeconds: receivedAt,
+        });
+      } finally {
+        nowSpy.mockRestore();
+      }
     });
   });
 
@@ -1563,6 +1652,7 @@ describe('ingest.ts uncovered-branch coverage', () => {
     const runtime = makeRuntime();
     const durability = new DurabilityEngine(db);
     const journalSpy = vi.spyOn(durability, 'journalInbound').mockReturnValue(33);
+    vi.spyOn(durability, 'getInboundReceivedAtUnixSeconds').mockReturnValue(1_780_000_000);
 
     const handler = makeIngest(db, messenger, runtime, BOT_JID, BOT_LID, durability);
 
@@ -1580,7 +1670,13 @@ describe('ingest.ts uncovered-branch coverage', () => {
 
     // journalInbound received the phone-derived conversationKey '15550000009',
     // proving the LID branch (line 198) ran instead of toConversationKey.
-    expect(journalSpy).toHaveBeenCalledWith(msg.messageId, '15550000009', lidJid, expect.any(String));
+    expect(journalSpy).toHaveBeenCalledWith(
+      msg.messageId,
+      '15550000009',
+      lidJid,
+      expect.any(String),
+      expect.any(Number),
+    );
     expect(vi.mocked(runtime.handleMessage)).toHaveBeenCalledOnce();
   });
 

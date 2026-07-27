@@ -51,6 +51,12 @@ def _optional_string(value: object, *, phase: str = "distill-event-data") -> str
     return _string(value, phase=phase)
 
 
+def _nonnegative_int(value: object) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise _fail("distill-event-data")
+    return value
+
+
 def _timestamp(value: object) -> datetime:
     if not isinstance(value, str) or not value.endswith("Z"):
         raise _fail("distill-timestamp")
@@ -176,11 +182,14 @@ def distill(
         raise _fail("distill-session-meta")
     harness_version = metadata_version or snapshot_version
 
-    parsed_times = [_timestamp(event.timestamp_utc) for event in events]
+    timed_events = [event for event in events if event.timestamp_utc is not None]
+    if not timed_events:
+        raise _fail("distill-timestamp")
+    parsed_times = [_timestamp(event.timestamp_utc) for event in timed_events]
     if any(later < earlier for earlier, later in zip(parsed_times, parsed_times[1:])):
         raise _fail("distill-timestamp-order")
-    started_at = events[0].timestamp_utc
-    ended_at = events[-1].timestamp_utc
+    started_at = timed_events[0].timestamp_utc
+    ended_at = timed_events[-1].timestamp_utc
     assert started_at is not None and ended_at is not None
     duration = parsed_times[-1] - parsed_times[0]
     duration_us = (
@@ -310,12 +319,25 @@ def distill(
             subagent_sidechains[agent] += int(sidechain)
             continue
         if event.kind is EventKind.COMPACTION:
-            _exact_keys(event.data, set(), {"reason"})
             if event.text is None:
                 raise _fail("distill-event-data")
-            reason = event.data.get("reason")
-            if reason is not None:
-                compaction_reasons.append(_string(reason))
+            if "trigger" in event.data:
+                _exact_keys(
+                    event.data,
+                    {"duration_ms", "post_tokens", "pre_tokens", "trigger"},
+                    {"cumulative_dropped_tokens"},
+                )
+                _nonnegative_int(event.data.get("duration_ms"))
+                _nonnegative_int(event.data.get("post_tokens"))
+                _nonnegative_int(event.data.get("pre_tokens"))
+                if "cumulative_dropped_tokens" in event.data:
+                    _nonnegative_int(event.data.get("cumulative_dropped_tokens"))
+                compaction_reasons.append(_string(event.data.get("trigger")))
+            else:
+                _exact_keys(event.data, set(), {"reason"})
+                reason = event.data.get("reason")
+                if reason is not None:
+                    compaction_reasons.append(_string(reason))
             compaction_indices.append(event.event_index)
             continue
         if event.kind is not EventKind.META:
@@ -345,8 +367,20 @@ def distill(
             _string(event.data.get("file"))
             meta_counts["attachment"] += 1
             continue
-        _exact_keys(event.data, {"raw_type"})
+        if meta_type == "image":
+            _exact_keys(event.data, {"media_type", "meta_type"})
+            _string(event.data.get("media_type"))
+            meta_counts["image"] += 1
+            continue
+        if meta_type == "model_fallback":
+            _exact_keys(event.data, {"from_model", "meta_type", "to_model"})
+            _string(event.data.get("from_model"))
+            _string(event.data.get("to_model"))
+            meta_counts["model_fallback"] += 1
+            continue
+        _exact_keys(event.data, {"raw_type"}, {"subtype"})
         _string(event.data.get("raw_type"))
+        _optional_string(event.data.get("subtype"))
         meta_counts["unknown"] += 1
 
     if set(calls) != results:

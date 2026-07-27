@@ -32,6 +32,7 @@ function runtimeContext() {
     },
     replay: {
       sourceMessageId: 'wamid-escape-91',
+      receivedAtUnixSeconds: 1_780_000_000,
       replaySafe: true,
       senderJid: '15550190077@s.whatsapp.net',
       senderName: null,

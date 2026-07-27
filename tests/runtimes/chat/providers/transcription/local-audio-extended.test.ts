@@ -6,8 +6,8 @@
  * Uncovered lines/branches addressed:
  *   L14 (if[0])  — extensionForMimeType: mp4/m4a branch
  *   L15          — extensionForMimeType: m4a return value
- *   L19 (if[0]/cond-expr) — resolveBinaryPath: absolute path with '/' → existsSync branch
- *   L19 cond-expr[0/1]   — existsSync true vs false for absolute paths
+ *   L19 (if[0]/cond-expr) — resolveBinaryPath: absolute path with '/' → accessSync(X_OK) branch
+ *   L19 cond-expr[0/1]   — executable vs non-executable absolute paths
  *   L75 cond-expr[1]     — stdout data arriving as plain string (not Buffer)
  *   L78 (if[0])  — runCommand: stdout overflow threshold exceeded
  *   L84 cond-expr[1]     — stderr data arriving as plain string
@@ -15,7 +15,7 @@
  *   L94 (if[0] inverted) — child error handler: AbortError is ignored (not rejectOnce)
  *   L98 (if[0])  — close handler: settled=true on re-entry (deduplication guard)
  *   L116-118     — close handler: non-zero exit code → reject with stderr/stdout/code message
- *   L129 (if[0]) — withNormalizedAudioFile: ffmpeg not found → throw
+ *   L129 (if[0]) — withNormalizedAudioFile: executable ffmpeg not found → throw
  *
  * Dead branch notes:
  *   L? (if[1]) repeated branches: these are Istanbul artefacts for the else branches
@@ -25,9 +25,9 @@
 
 import { describe, expect, it, vi, beforeEach } from 'vitest';
 import { existsSync } from 'node:fs';
-import { mkdtemp, rm, readFile } from 'node:fs/promises';
+import { chmod, mkdtemp, rm, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { delimiter, join } from 'node:path';
 
 import {
   extensionForMimeType,
@@ -97,6 +97,70 @@ describe('resolveBinaryPath', () => {
   it('returns null for a non-existent absolute path (L19 if[0] cond-expr[1])', () => {
     const result = resolveBinaryPath('/definitely/does/not/exist/binary');
     expect(result).toBe(null);
+  });
+
+  it('rejects an explicit path that exists but is not executable', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'whatsoup-non-executable-'));
+    const candidate = join(dir, 'ffmpeg');
+    try {
+      await writeFile(candidate, '#!/bin/sh\nexit 0\n', { mode: 0o644 });
+
+      expect(resolveBinaryPath(candidate)).toBe(null);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects a non-executable ffmpeg found on PATH', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'whatsoup-path-non-executable-'));
+    const originalPath = process.env.PATH;
+    try {
+      await writeFile(join(dir, 'ffmpeg'), '#!/bin/sh\nexit 0\n', { mode: 0o644 });
+      process.env.PATH = dir;
+
+      expect(resolveBinaryPath('ffmpeg')).toBe(null);
+    } finally {
+      if (originalPath === undefined) delete process.env.PATH;
+      else process.env.PATH = originalPath;
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('resolves an executable from the configured PATH', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'whatsoup-path-executable-'));
+    const candidate = join(dir, 'ffmpeg');
+    const originalPath = process.env.PATH;
+    try {
+      await writeFile(candidate, '#!/bin/sh\nexit 0\n');
+      await chmod(candidate, 0o755);
+      process.env.PATH = dir;
+
+      expect(resolveBinaryPath('ffmpeg')).toBe(candidate);
+    } finally {
+      if (originalPath === undefined) delete process.env.PATH;
+      else process.env.PATH = originalPath;
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('treats an empty PATH component as the current directory', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'whatsoup-path-current-dir-'));
+    const candidate = join(dir, 'ffmpeg');
+    const originalCwd = process.cwd();
+    const originalPath = process.env.PATH;
+    try {
+      await writeFile(candidate, '#!/bin/sh\nexit 0\n');
+      await chmod(candidate, 0o755);
+      process.chdir(dir);
+      process.env.PATH = `${delimiter}${join(dir, 'missing')}`;
+
+      expect(resolveBinaryPath('ffmpeg')).toBe(candidate);
+    } finally {
+      process.chdir(originalCwd);
+      if (originalPath === undefined) delete process.env.PATH;
+      else process.env.PATH = originalPath;
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 
   // Short-name (no '/') path: finds binary in well-known dirs
@@ -217,7 +281,9 @@ describe('withNormalizedAudioFile', () => {
     vi.resetModules();
     vi.doMock('node:fs', async (importOriginal) => ({
       ...(await importOriginal<typeof import('node:fs')>()),
-      existsSync: vi.fn(() => false),
+      accessSync: vi.fn(() => {
+        throw new Error('not executable');
+      }),
     }));
     const { withNormalizedAudioFile: isolatedWithNormalizedAudioFile } = await import(
       '../../../../../src/runtimes/chat/providers/transcription/local-audio.ts'
@@ -245,6 +311,8 @@ describe('withNormalizedAudioFile', () => {
   // `safe`/whitelist posture (which varies by version across the fleet).
   it('pins ffmpeg to the file protocol whitelist for untrusted media (QR-122)', async () => {
     vi.resetModules();
+    const originalPath = process.env.PATH;
+    process.env.PATH = '/virtual/bin';
     const spawnCalls: Array<{ command: string; args: string[] }> = [];
     vi.doMock('node:child_process', async (importOriginal) => ({
       ...(await importOriginal<typeof import('node:child_process')>()),
@@ -262,20 +330,26 @@ describe('withNormalizedAudioFile', () => {
         } as unknown as import('node:child_process').ChildProcess;
       }),
     }));
-    // ffmpeg-presence must be deterministic on CI (no ffmpeg installed):
-    // mock existsSync->true so resolveBinaryPath finds ffmpeg and execution
-    // reaches the spawn assertion below (sibling absence test mocks ->false).
-    vi.doMock('node:fs', async (importOriginal) => ({
-      ...(await importOriginal<typeof import('node:fs')>()),
-      existsSync: vi.fn(() => true),
-    }));
+    // Grant execute access only to the virtual ffmpeg fixture. This mirrors
+    // accessSync(path, X_OK) exactly and cannot leak a host ffmpeg into the test.
+    vi.doMock('node:fs', async (importOriginal) => {
+      const actual = await importOriginal<typeof import('node:fs')>();
+      return {
+        ...actual,
+        accessSync: vi.fn((path: string, mode?: number) => {
+          if (path === '/virtual/bin/ffmpeg' && mode === actual.constants.X_OK) return;
+          throw new Error('not executable');
+        }),
+      };
+    });
     const { withNormalizedAudioFile: isolated } = await import(
       '../../../../../src/runtimes/chat/providers/transcription/local-audio.ts'
     );
     try {
       const seenWavPath = await isolated(Buffer.from([0x00]), 'audio/ogg', async (wavPath) => wavPath);
       expect(spawnCalls).toHaveLength(1);
-      const { args } = spawnCalls[0];
+      const { command, args } = spawnCalls[0];
+      expect(command).toBe('/virtual/bin/ffmpeg');
       // The security control: -protocol_whitelist file, applied as an input
       // option (before -i) so it governs the demuxer that opens the media.
       const wlIndex = args.indexOf('-protocol_whitelist');
@@ -284,6 +358,8 @@ describe('withNormalizedAudioFile', () => {
       expect(wlIndex).toBeLessThan(args.indexOf('-i'));
       expect(seenWavPath).toMatch(/normalized\.wav$/);
     } finally {
+      if (originalPath === undefined) delete process.env.PATH;
+      else process.env.PATH = originalPath;
       vi.doUnmock('node:child_process');
       vi.doUnmock('node:fs');
       vi.resetModules();

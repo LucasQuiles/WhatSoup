@@ -14,6 +14,7 @@ import {
   renderUserMessage,
 } from './response-templates.ts';
 import { emitAlertChecked } from '../../lib/emit-alert.ts';
+import { providerPreview } from '../../lib/provider-preview-sanitizer.ts';
 import { accumulateTokensWithEvent, markSessionCompacted } from './session-db.ts';
 import { createChildLogger } from '../../logger.ts';
 import type { TurnCapabilityErrorClass } from './turn-capability-tracker.ts';
@@ -284,7 +285,7 @@ if (config.nlRouting) {
 }
 const compactScopeKey = mapKey ?? GLOBAL_TOOL_SCOPE_KEY;
 const hadCompactBoundary = host.consumeCompactBoundary(compactScopeKey);
-session?.completeProviderTurn();
+session?.completeProviderTurn(event.providerTurnOwnerToken);
 tracker?.onTurnComplete();
 // Turn-end choke point: clear the typing indicator unconditionally so no
 // early-break branch below can leave 'composing' asserted into the idle
@@ -339,7 +340,7 @@ if (event.text && !hasPendingPoll) {
   // Suppress usage-limit messages — log and skip instead of forwarding
   if (providerFailureKind === 'usage-limit') {
     recordTurnFailure(providerFailureKind);
-    log.warn({ chatJid: queue.targetChatJid, textPreview: event.text.slice(0, 300) }, 'suppressed usage-limit message from result — session will be killed');
+    log.warn({ chatJid: queue.targetChatJid, textPreview: providerPreview(event.text, 300) }, 'suppressed usage-limit message from result — session will be killed');
     // Route the auto-respawned next session to the fallback provider
     // (if configured) until the limit resets, before tearing down.
     const activation = host.activateProviderFallbackAfterTerminalResult(
@@ -371,7 +372,7 @@ if (event.text && !hasPendingPoll) {
   }
   if (providerFailureKind === 'policy-block') {
     recordTurnFailure(providerFailureKind);
-    log.error({ chatJid: queue.targetChatJid, textPreview: event.text.slice(0, 300) }, 'suppressed provider policy-block message from result — session will be killed');
+    log.error({ chatJid: queue.targetChatJid, textPreview: providerPreview(event.text, 300) }, 'suppressed provider policy-block message from result — session will be killed');
     // Deliberate silence: a policy block is not an operational fault to notify or
     // recover from, and any user notice here would coach around the block. Log +
     // shut down, no user-facing message and no fallback.
@@ -380,7 +381,7 @@ if (event.text && !hasPendingPoll) {
   }
   if (providerFailureKind === 'auth-required') {
     recordTurnFailure(providerFailureKind);
-    log.warn({ chatJid: queue.targetChatJid, textPreview: event.text.slice(0, 300) }, 'suppressed provider auth-required message from result — session will be shut down');
+    log.warn({ chatJid: queue.targetChatJid, textPreview: providerPreview(event.text, 300) }, 'suppressed provider auth-required message from result — session will be shut down');
     const activation = host.activateProviderFallbackAfterTerminalResult(
       null,
       'auth-required',
@@ -412,7 +413,7 @@ if (event.text && !hasPendingPoll) {
   }
   if (providerFailureKind === 'rate-limit' || providerFailureKind === 'server-error') {
     recordTurnFailure(providerFailureKind);
-    log.warn({ chatJid: queue.targetChatJid, textPreview: event.text.slice(0, 300) }, armingFailureLogMessage(providerFailureKind));
+    log.warn({ chatJid: queue.targetChatJid, textPreview: providerPreview(event.text, 300) }, armingFailureLogMessage(providerFailureKind));
     const activation = host.activateProviderFallbackAfterTerminalResult(
       null,
       providerFailureKind,
@@ -445,7 +446,7 @@ if (event.text && !hasPendingPoll) {
   }
   if (providerFailureKind === 'model-unavailable') {
     recordTurnFailure(providerFailureKind);
-    log.warn({ chatJid: queue.targetChatJid, textPreview: event.text.slice(0, 300) }, 'suppressed provider model-unavailable message from result — session will be shut down');
+    log.warn({ chatJid: queue.targetChatJid, textPreview: providerPreview(event.text, 300) }, 'suppressed provider model-unavailable message from result — session will be shut down');
     const activation = host.activateProviderFallback(null, 'model-unavailable');
     const replayScheduled = activation
       ? host.scheduleFallbackReplay({
@@ -471,7 +472,7 @@ if (event.text && !hasPendingPoll) {
   // Context overflow — session is unsalvageable, kill and let next message respawn
   if (providerFailureKind === 'context-overflow') {
     recordTurnFailure(providerFailureKind);
-    log.warn({ chatJid: queue.targetChatJid, textPreview: event.text.slice(0, 300) }, 'prompt too long — killing session');
+    log.warn({ chatJid: queue.targetChatJid, textPreview: providerPreview(event.text, 300) }, 'prompt too long — killing session');
     queue.enqueueText(contextOverflowNotice());
     session?.shutdown();
     return;
@@ -480,7 +481,7 @@ if (event.text && !hasPendingPoll) {
   // Suppress raw provider text; emit a generic notice and a WARNING (not CRITICAL) alert.
   if (providerFailureKind === 'transient-network') {
     recordTurnFailure(providerFailureKind);
-    log.warn({ chatJid: queue.targetChatJid, textPreview: event.text.slice(0, 300) }, 'transient provider connection drop — session will recover on next message');
+    log.warn({ chatJid: queue.targetChatJid, textPreview: providerPreview(event.text, 300) }, 'transient provider connection drop — session will recover on next message');
     emitAlertChecked(
       host.instanceName,
       'provider_transient_network',
@@ -497,7 +498,7 @@ if (event.text && !hasPendingPoll) {
       // Default-deny: an is_error result with no recognised failure class is an
       // UNKNOWN terminal provider error. Never forward raw provider/CLI text to the
       // user — emit one generic notice and alert ops with the raw text.
-      log.error({ chatJid: queue.targetChatJid, textPreview: event.text.slice(0, 300) }, 'suppressed unclassified terminal provider error from result — not forwarded to user');
+      log.error({ chatJid: queue.targetChatJid, textPreview: providerPreview(event.text, 300) }, 'suppressed unclassified terminal provider error from result — not forwarded to user');
       emitAlertChecked(
         host.instanceName,
         'provider_unknown_terminal',
@@ -741,7 +742,7 @@ const kind = wf.providerKind;
 // future direct caller — never silently no-op a null kind here.
 if (kind === null) return;
 ctx.recordTurnFailure(kind);
-const textPreview = providerText.slice(0, 300);
+const textPreview = providerPreview(providerText, 300);
 
 // Non-arming, kill-and-respawn classes: context-overflow surfaces a notice,
 // policy-block stays silent. Neither activates a fallback.
@@ -835,7 +836,7 @@ if (config.nlRouting && host.currentTurnRouteMarkerHold !== null) {
   }
 }
 const hadCompactBoundary = host.consumeCompactBoundary(GLOBAL_TOOL_SCOPE_KEY);
-host.session?.completeProviderTurn();
+host.session?.completeProviderTurn(event.providerTurnOwnerToken);
 tracker?.onTurnComplete();
 // Turn-end choke point: clear the typing indicator unconditionally so no
 // early-break branch below can leave 'composing' asserted into the idle
@@ -896,7 +897,7 @@ if (event.text) {
   // Suppress usage-limit messages — log and kill session instead of forwarding
   if (providerFailureKind === 'usage-limit') {
     recordTurnFailure(providerFailureKind);
-    log.warn({ chatJid: host.shared ? host.currentTurnChatJid : host.activeChatJid, textPreview: event.text.slice(0, 300) }, 'suppressed usage-limit message from result — session will be killed');
+    log.warn({ chatJid: host.shared ? host.currentTurnChatJid : host.activeChatJid, textPreview: providerPreview(event.text, 300) }, 'suppressed usage-limit message from result — session will be killed');
     // Route the auto-respawned next session to the fallback provider
     // (if configured) until the limit resets, before tearing down.
     const activation = host.activateProviderFallbackAfterTerminalResult(
@@ -928,7 +929,7 @@ if (event.text) {
   }
   if (providerFailureKind === 'policy-block') {
     recordTurnFailure(providerFailureKind);
-    log.error({ chatJid: host.shared ? host.currentTurnChatJid : host.activeChatJid, textPreview: event.text.slice(0, 300) }, 'suppressed provider policy-block message from result — session will be killed');
+    log.error({ chatJid: host.shared ? host.currentTurnChatJid : host.activeChatJid, textPreview: providerPreview(event.text, 300) }, 'suppressed provider policy-block message from result — session will be killed');
     // Deliberate silence (see the per-chat policy-block branch): no user notice,
     // no fallback — a policy block is not an operational fault to recover from.
     host.session?.shutdown();
@@ -936,7 +937,7 @@ if (event.text) {
   }
   if (providerFailureKind === 'auth-required') {
     recordTurnFailure(providerFailureKind);
-    log.warn({ chatJid: host.shared ? host.currentTurnChatJid : host.activeChatJid, textPreview: event.text.slice(0, 300) }, 'suppressed provider auth-required message from result — session will be shut down');
+    log.warn({ chatJid: host.shared ? host.currentTurnChatJid : host.activeChatJid, textPreview: providerPreview(event.text, 300) }, 'suppressed provider auth-required message from result — session will be shut down');
     const activation = host.activateProviderFallbackAfterTerminalResult(
       null,
       'auth-required',
@@ -968,7 +969,7 @@ if (event.text) {
   }
   if (providerFailureKind === 'rate-limit' || providerFailureKind === 'server-error') {
     recordTurnFailure(providerFailureKind);
-    log.warn({ chatJid: host.shared ? host.currentTurnChatJid : host.activeChatJid, textPreview: event.text.slice(0, 300) }, armingFailureLogMessage(providerFailureKind));
+    log.warn({ chatJid: host.shared ? host.currentTurnChatJid : host.activeChatJid, textPreview: providerPreview(event.text, 300) }, armingFailureLogMessage(providerFailureKind));
     const activation = host.activateProviderFallbackAfterTerminalResult(
       null,
       providerFailureKind,
@@ -1001,7 +1002,7 @@ if (event.text) {
   }
   if (providerFailureKind === 'model-unavailable') {
     recordTurnFailure(providerFailureKind);
-    log.warn({ chatJid: host.shared ? host.currentTurnChatJid : host.activeChatJid, textPreview: event.text.slice(0, 300) }, 'suppressed provider model-unavailable message from result — session will be shut down');
+    log.warn({ chatJid: host.shared ? host.currentTurnChatJid : host.activeChatJid, textPreview: providerPreview(event.text, 300) }, 'suppressed provider model-unavailable message from result — session will be shut down');
     const activation = host.activateProviderFallback(null, 'model-unavailable');
     const replayScheduled = activation
       ? host.scheduleFallbackReplay({
@@ -1027,7 +1028,7 @@ if (event.text) {
   // Context overflow — session is unsalvageable, kill and let next message respawn
   if (providerFailureKind === 'context-overflow') {
     recordTurnFailure(providerFailureKind);
-    log.warn({ chatJid: host.shared ? host.currentTurnChatJid : host.activeChatJid, textPreview: event.text.slice(0, 300) }, 'prompt too long — killing session');
+    log.warn({ chatJid: host.shared ? host.currentTurnChatJid : host.activeChatJid, textPreview: providerPreview(event.text, 300) }, 'prompt too long — killing session');
     queue.enqueueText(contextOverflowNotice());
     host.session?.shutdown();
     return;
@@ -1036,7 +1037,7 @@ if (event.text) {
   // Suppress raw provider text; emit a generic notice and a WARNING (not CRITICAL) alert.
   if (providerFailureKind === 'transient-network') {
     recordTurnFailure(providerFailureKind);
-    log.warn({ chatJid: host.shared ? host.currentTurnChatJid : host.activeChatJid, textPreview: event.text.slice(0, 300) }, 'transient provider connection drop — session will recover on next message');
+    log.warn({ chatJid: host.shared ? host.currentTurnChatJid : host.activeChatJid, textPreview: providerPreview(event.text, 300) }, 'transient provider connection drop — session will recover on next message');
     emitAlertChecked(
       host.instanceName,
       'provider_transient_network',
@@ -1053,7 +1054,7 @@ if (event.text) {
       recordTurnFailure('unknown-terminal');
       // Default-deny: is_error result with no recognised class = unknown terminal
       // provider error. Suppress the raw text; emit a generic notice + ops alert.
-      log.error({ chatJid: host.shared ? host.currentTurnChatJid : host.activeChatJid, textPreview: event.text.slice(0, 300) }, 'suppressed unclassified terminal provider error from result — not forwarded to user');
+      log.error({ chatJid: host.shared ? host.currentTurnChatJid : host.activeChatJid, textPreview: providerPreview(event.text, 300) }, 'suppressed unclassified terminal provider error from result — not forwarded to user');
       emitAlertChecked(
         host.instanceName,
         'provider_unknown_terminal',

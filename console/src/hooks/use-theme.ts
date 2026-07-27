@@ -18,8 +18,8 @@ function applyTheme(theme: Theme): void {
   if (themeColor) meta?.setAttribute('content', themeColor);
 }
 
-export function useTheme(): { theme: Theme; toggleTheme: () => void } {
-  const [theme, setTheme] = useState<Theme>(() => {
+export function useTheme(): { theme: Theme; toggleTheme: () => void; setTheme: (t: Theme) => void } {
+  const [theme, setThemeState] = useState<Theme>(() => {
     const stored = getPreference<Theme>(THEME_KEY, 'dark');
     return stored === 'light' ? 'light' : 'dark';
   });
@@ -30,8 +30,14 @@ export function useTheme(): { theme: Theme; toggleTheme: () => void } {
   }, [theme]);
 
   const toggleTheme = useCallback(() => {
-    setTheme((prev) => (prev === 'dark' ? 'light' : 'dark'));
+    setThemeState((prev) => (prev === 'dark' ? 'light' : 'dark'));
   }, []);
 
-  return { theme, toggleTheme };
+  // Direct set for the v3.5 Settings appearance swatches (T5 b-09);
+  // ChromeHeader keeps the toggle.
+  const setTheme = useCallback((t: Theme) => {
+    setThemeState(t === 'light' ? 'light' : 'dark');
+  }, []);
+
+  return { theme, toggleTheme, setTheme };
 }

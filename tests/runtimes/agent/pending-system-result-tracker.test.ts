@@ -44,6 +44,30 @@ describe('PendingSystemResultTracker', () => {
     expect(tracker.blockingCount('15550000001@s.whatsapp.net')).toBe(0);
   });
 
+  it('does not spend a deferred deadline while queued before provider admission', async () => {
+    vi.useFakeTimers();
+    const tracker = new PendingSystemResultTracker();
+    const onTimeout = vi.fn(async () => true);
+    const lease = tracker.mark({
+      scopeKey: 'queued-chat',
+      purpose: 'respawn_context',
+      owner: { managerId: 'manager-a', generation: 1, toolScopeKey: 'queued-chat#1' },
+      timeoutMs: 1_000,
+      onTimeout,
+      deferDeadlineUntilActivated: true,
+    });
+
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(onTimeout).not.toHaveBeenCalled();
+    expect(tracker.count('queued-chat')).toBe(1);
+
+    expect(tracker.activateDeadline(lease)).toBe(true);
+    await vi.advanceTimersByTimeAsync(999);
+    expect(onTimeout).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(onTimeout).toHaveBeenCalledExactlyOnceWith(lease);
+  });
+
   it('keeps an expired lease classified and blocking when teardown is not proven', async () => {
     vi.useFakeTimers();
     const tracker = new PendingSystemResultTracker();

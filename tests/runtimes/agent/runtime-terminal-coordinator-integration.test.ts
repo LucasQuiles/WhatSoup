@@ -868,6 +868,7 @@ describe('runtime terminal coordinator integration', () => {
       };
       const turn: QueuedTurn = {
         sourceMessageId: runtimeContext.replay.sourceMessageId,
+        receivedAtUnixSeconds: runtimeContext.replay.receivedAtUnixSeconds,
         conversationKey: runtimeContext.identity.conversationKey,
         chatJid: runtimeContext.identity.deliveryJid,
         senderJid: runtimeContext.replay.senderJid,
@@ -985,6 +986,7 @@ describe('runtime terminal coordinator integration', () => {
       };
       const turn: QueuedTurn = {
         sourceMessageId: runtimeContext.replay.sourceMessageId,
+        receivedAtUnixSeconds: runtimeContext.replay.receivedAtUnixSeconds,
         conversationKey: runtimeContext.identity.conversationKey,
         chatJid: runtimeContext.identity.deliveryJid,
         senderJid: runtimeContext.replay.senderJid,
@@ -1246,6 +1248,7 @@ describe('runtime terminal coordinator integration', () => {
       state.outboundQueues.set(queuedContext.identity.deliveryJid, queue);
       const queued: QueuedTurn = {
         sourceMessageId: queuedContext.replay.sourceMessageId,
+        receivedAtUnixSeconds: queuedContext.replay.receivedAtUnixSeconds,
         conversationKey: queuedContext.identity.conversationKey,
         chatJid: queuedContext.identity.deliveryJid,
         senderJid: queuedContext.replay.senderJid,
@@ -1293,6 +1296,7 @@ describe('runtime terminal coordinator integration', () => {
       );
       const queued: QueuedTurn = {
         sourceMessageId: runtimeContext.replay.sourceMessageId,
+        receivedAtUnixSeconds: runtimeContext.replay.receivedAtUnixSeconds,
         conversationKey: runtimeContext.identity.conversationKey,
         chatJid: runtimeContext.identity.deliveryJid,
         senderJid: runtimeContext.replay.senderJid,
@@ -1341,6 +1345,7 @@ describe('runtime terminal coordinator integration', () => {
 
       expect(state.turnQueue.enqueue({
         sourceMessageId: runtimeContext.replay.sourceMessageId,
+        receivedAtUnixSeconds: runtimeContext.replay.receivedAtUnixSeconds,
         conversationKey: runtimeContext.identity.conversationKey,
         chatJid: runtimeContext.identity.deliveryJid,
         senderJid: runtimeContext.replay.senderJid,
@@ -1484,6 +1489,7 @@ describe('runtime terminal coordinator integration', () => {
       const second = context('per_chat', mapKey, 32, 'turn-startup-fifo-2');
       const queued = (runtimeContext: RuntimeTurnContext): QueuedTurn => ({
         sourceMessageId: runtimeContext.replay.sourceMessageId,
+        receivedAtUnixSeconds: runtimeContext.replay.receivedAtUnixSeconds,
         conversationKey: mapKey,
         chatJid: runtimeContext.identity.deliveryJid,
         senderJid: runtimeContext.replay.senderJid,
@@ -1648,7 +1654,7 @@ describe('runtime terminal coordinator integration', () => {
         'must not dispatch after shutdown',
         '15550190002@s.whatsapp.net',
         {
-          sourceMessageId: 'wamid-singleton-shutdown-race',
+          sourceMessageId: 'wamid-singleton-shutdown-race', receivedAtUnixSeconds: 1_780_000_000,
           conversationKey: '15550190034',
           senderJid: '15550190002@s.whatsapp.net',
           senderName: null,
@@ -1716,7 +1722,7 @@ describe('runtime terminal coordinator integration', () => {
         'hold ownership until handoff proof exists',
         '15550190002@s.whatsapp.net',
         {
-          sourceMessageId: 'wamid-singleton-unproven-handoff',
+          sourceMessageId: 'wamid-singleton-unproven-handoff', receivedAtUnixSeconds: 1_780_000_000,
           conversationKey: '15550190035',
           senderJid: '15550190002@s.whatsapp.net',
           senderName: null,
@@ -1771,6 +1777,7 @@ describe('runtime terminal coordinator integration', () => {
       const late = makeOwnedContext(65, 'turn-shutdown-late-admission');
       const queued = (runtimeContext: RuntimeTurnContext): QueuedTurn => ({
         sourceMessageId: runtimeContext.replay.sourceMessageId,
+        receivedAtUnixSeconds: runtimeContext.replay.receivedAtUnixSeconds,
         conversationKey: runtimeContext.identity.conversationKey,
         chatJid: runtimeContext.identity.deliveryJid,
         senderJid: runtimeContext.replay.senderJid,
@@ -1842,6 +1849,7 @@ describe('runtime terminal coordinator integration', () => {
       const late = context('per_chat', mapKey, 67, 'turn-shutdown-rejected-sink-failure');
       const lateTurn: QueuedTurn = {
         sourceMessageId: late.replay.sourceMessageId,
+        receivedAtUnixSeconds: late.replay.receivedAtUnixSeconds,
         conversationKey: late.identity.conversationKey,
         chatJid: late.identity.deliveryJid,
         senderJid: late.replay.senderJid,
@@ -1909,6 +1917,47 @@ describe('runtime terminal coordinator integration', () => {
       expect(call!.bookkeeping.checkpoint.fields).toMatchObject({
         activeTurnId: null,
         lastInboundSeq: 43,
+      });
+    } finally {
+      db.close();
+    }
+  });
+
+  it('does not repaint an inconclusive durable checkpoint as suspended', async () => {
+    const db = new Database(':memory:');
+    db.open();
+    try {
+      const { runtime, state } = makeRuntimeState(db);
+      const runtimeContext = context('singleton', '15550190014', 44, 'turn-inconclusive-checkpoint');
+      const queue = queueStub(runtimeContext.identity.deliveryJid);
+      const session = sessionStub();
+      session.getStatus.mockReturnValue({
+        active: false,
+        sessionId: null,
+        pid: null,
+        durableFailureClosed: false,
+        durableFailureInconclusive: true,
+      });
+      state.durability = durabilityMock();
+      state.replyGuarantee = replyGuaranteeMock();
+      state.currentRuntimeTurnContext = runtimeContext;
+      state.currentInboundSeq = 44;
+
+      await state.runtimeTurnCoordinator.finalizeRuntimeTurnContext({
+        context: runtimeContext,
+        queue,
+        attemptOutcome: { kind: 'failed', class: 'crash' },
+        session,
+      });
+
+      const call = state.durability.finalizeTurnTerminal.mock.calls[0]?.[0] as {
+        bookkeeping: { checkpoint: { fields: Record<string, unknown> } };
+      } | undefined;
+      expect(call).toBeDefined();
+      expect(call!.bookkeeping.checkpoint.fields).not.toHaveProperty('sessionStatus');
+      expect(call!.bookkeeping.checkpoint.fields).toMatchObject({
+        activeTurnId: null,
+        lastInboundSeq: 44,
       });
     } finally {
       db.close();

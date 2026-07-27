@@ -99,6 +99,40 @@ describe('compareWeights — growth blocks, shrink passes', () => {
     expect(compareWeights([{ id: 'x', path: 'p.json', base: 10, head: 10 }])).toEqual([]);
   });
 
+  it('blocks constant-count identity replacement and preserves multiset multiplicity', () => {
+    const replaced = compareWeights([{
+      id: 'x',
+      path: 'p.json',
+      base: 2,
+      head: 2,
+      baseIdentities: ['old', 'kept'],
+      headIdentities: ['new', 'kept'],
+    }]);
+    expect(replaced).toHaveLength(1);
+    expect(replaced[0]?.message).toMatch(/new|identity|subset/i);
+
+    const duplicated = compareWeights([{
+      id: 'x',
+      path: 'p.json',
+      base: 2,
+      head: 2,
+      baseIdentities: ['old', 'kept'],
+      headIdentities: ['kept', 'kept'],
+    }]);
+    expect(duplicated).toHaveLength(1);
+  });
+
+  it('permits an identity multiset that is a true subset of the base', () => {
+    expect(compareWeights([{
+      id: 'x',
+      path: 'p.json',
+      base: 3,
+      head: 2,
+      baseIdentities: ['same', 'same', 'removed'],
+      headIdentities: ['same', 'same'],
+    }])).toEqual([]);
+  });
+
   it('treats an unreadable BASE as inconclusive, never as growth or as clean', () => {
     // null base = "could not look" (new file, or base revision unavailable). Reporting it
     // as growth would be a false alarm; reporting it as clean would be a false green.
@@ -120,5 +154,15 @@ describe('BASELINE_REGISTRY — the scan cannot go vacuous', () => {
     const paths = BASELINE_REGISTRY.map((b) => b.path);
     expect(new Set(ids).size).toBe(ids.length);
     expect(new Set(paths).size).toBe(paths.length);
+  });
+
+  it('pins the catch-ratchet baseline to its audited introduction ceiling', () => {
+    expect(
+      BASELINE_REGISTRY.find((entry) => entry.id === 'catch-justification'),
+    ).toMatchObject({
+      path: 'eslint-rules/catch-ratchet-baseline.json',
+      shape: 'entry-array',
+      initialWeight: 127,
+    });
   });
 });

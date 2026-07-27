@@ -11,6 +11,10 @@ import {
   type OwnedGenerationState,
 } from '../../../src/runtimes/agent/session-ownership.ts';
 import { SessionManager } from '../../../src/runtimes/agent/session.ts';
+import {
+  isStructuredProviderTurn,
+  type ProviderTurnInput,
+} from '../../../src/runtimes/agent/provider-boundary-dispatch.ts';
 import { ensureStandbyNoticeSchema } from '../../../src/runtimes/agent/standby-notice.ts';
 import {
   FAKE_PROVIDER,
@@ -336,19 +340,30 @@ describe('per-chat /new ownership transition', () => {
       const initialQueue = state.chatQueues.get(lidKey) as { indicateTyping: () => void } | undefined;
       if (!initialQueue) throw new Error('real outbound queue was not created');
       const indicateTyping = vi.spyOn(initialQueue, 'indicateTyping');
-      const routedTurns: Array<{ mapKey: string | null; text: string }> = [];
+      const routedTurns: Array<{
+        mapKey: string | null;
+        applicationContext: readonly string[];
+        text: string;
+      }> = [];
       const realSendTurnAtProviderBoundary = currentManager.sendTurnAtProviderBoundary.bind(currentManager);
-      currentManager.sendTurnAtProviderBoundary = async (text: string, onReady?: () => void) => {
-        await realSendTurnAtProviderBoundary(text, () => {
+      currentManager.sendTurnAtProviderBoundary = async (input: ProviderTurnInput, onReady?: () => void) => {
+        await realSendTurnAtProviderBoundary(input, () => {
           const activeMapKey = sessions.get(canonicalKey) === currentManager
             ? canonicalKey
             : sessions.get(lidKey) === currentManager
               ? lidKey
               : null;
-          routedTurns.push({ mapKey: activeMapKey, text });
+          routedTurns.push({
+            mapKey: activeMapKey,
+            applicationContext: isStructuredProviderTurn(input) ? input.applicationContext : [],
+            text: isStructuredProviderTurn(input) ? input.userText : input,
+          });
           onReady?.();
         });
-        if (text.includes('[Recent chat context')) {
+        if (
+          isStructuredProviderTurn(input)
+          && input.applicationContext.some((text) => text.includes('[Recent chat context'))
+        ) {
           void contextResultRelease.then(() => {
             (currentManager as any).onEvent({ type: 'result', text: null });
           });
@@ -409,8 +424,10 @@ describe('per-chat /new ownership transition', () => {
       expect(state.perChatExecActorQueue.has(lidKey)).toBe(false);
       expect(routedTurns).toHaveLength(1);
       expect(routedTurns[0]?.mapKey).toBe(canonicalKey);
-      expect(routedTurns[0]?.text).toMatch(/^\[Recent chat context — read before responding\]\n/);
-      expect(routedTurns[0]?.text).toMatch(/\n\n\[Current message\]\nturn crossing a LID rekey$/);
+      expect(routedTurns[0]?.applicationContext[0]).toMatch(
+        /^\[Recent chat context — read before responding\]\n/,
+      );
+      expect(routedTurns[0]?.text).toBe('turn crossing a LID rekey');
     } finally {
       releaseSpawn();
       releaseContextResult();
@@ -441,6 +458,10 @@ describe('per-chat /new ownership transition', () => {
     let oldPid: number | null = null;
     let replacementPid: number | null = null;
     let manager: SessionManager | null = null;
+    let replacementPidReadyBeforeFailure = false;
+    const replacementPidReadinessSignal = new Int32Array(
+      new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT),
+    );
 
     try {
       state.ensureSessionAndQueueSync(chatJid, mapKey);
@@ -452,10 +473,13 @@ describe('per-chat /new ownership transition', () => {
       oldPid = currentManager.getStatus().pid;
 
       db.raw.function('fail_after_replacement_fork', () => {
-        const deadline = Date.now() + 200;
-        while (Date.now() < deadline) {
-          // Hold the SQLite insert on the parent thread while the real child records its PID.
+        const deadline = Date.now() + 6_000;
+        while (!existsSync(replacementPidFile)) {
+          const remainingMs = deadline - Date.now();
+          if (remainingMs <= 0) break;
+          Atomics.wait(replacementPidReadinessSignal, 0, 0, Math.min(remainingMs, 25));
         }
+        replacementPidReadyBeforeFailure = existsSync(replacementPidFile);
         throw new Error('forced replacement spawn failure');
       });
       db.raw.exec(`
@@ -467,6 +491,7 @@ describe('per-chat /new ownership transition', () => {
       `);
 
       await state._handleMessageInner(makeNewMessage(chatJid));
+      expect(replacementPidReadyBeforeFailure).toBe(true);
       const replacementRecord = JSON.parse(readFileSync(replacementPidFile, 'utf8')) as { provider: number };
       replacementPid = replacementRecord.provider;
 

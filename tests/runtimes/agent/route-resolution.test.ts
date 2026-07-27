@@ -14,11 +14,20 @@
  */
 import { describe, it, expect } from 'vitest';
 import {
+  applyRouteEffort,
   isPinnedModelEligible,
   resolveRoute,
   type RouteInputs,
 } from '../../../src/runtimes/agent/route-resolution.ts';
 import type { ChatModelPreference } from '../../../src/runtimes/agent/chat-preference-db.ts';
+import {
+  PROVIDER_DATA_POLICY_VERSION,
+  ProviderDataPolicyError,
+  providerRoutePolicyKey,
+} from '../../../src/core/provider-data-policy.ts';
+import { nativeReasoningControl, providerConfigEffort } from '../../../src/runtimes/agent/reasoning-control.ts';
+import { PROVIDER_IDS } from '../../../src/runtimes/agent/providers/index.ts';
+import { __provider_switch_for_test } from '../../../src/runtimes/agent/session.ts';
 
 function pref(overrides: Partial<ChatModelPreference> = {}): ChatModelPreference {
   return {
@@ -52,6 +61,9 @@ function inputs(overrides: Partial<RouteInputs> = {}): RouteInputs {
     // via override — keeps every existing exact-`toEqual` assertion (e.g.
     // codex-cli pin → model: undefined) unaffected.
     configuredModelByProvider: {},
+    agentDataPolicy: 'trusted',
+    boundaryMode: 'shadow',
+    configuredDataPolicyByRoute: {},
     ...overrides,
   };
 }
@@ -63,12 +75,15 @@ describe('resolveRoute precedence', () => {
       model: 'opus-4-8',
       source: 'default',
       reasonCode: 'no_preference',
+      dataPolicy: 'trusted',
+      policyVersion: PROVIDER_DATA_POLICY_VERSION,
+      policyState: 'classified',
     });
   });
 
   it('active fallback window beats everything, including an eligible pin', () => {
     const d = resolveRoute(inputs({
-      fallbackEntry: { provider: 'opencode-cli', model: 'glm-4.7' },
+      fallbackEntry: { provider: 'opencode-cli', model: 'glm-4.7', dataPolicy: 'trusted' },
       pref: pref({ intent: 'provider_specific', requestedProvider: 'codex-cli' }),
       pinnedProviderEligible: true,
     }));
@@ -77,6 +92,9 @@ describe('resolveRoute precedence', () => {
       model: 'glm-4.7',
       source: 'fallback',
       reasonCode: 'fallback_window_active',
+      dataPolicy: 'trusted',
+      policyVersion: PROVIDER_DATA_POLICY_VERSION,
+      policyState: 'classified',
     });
   });
 
@@ -98,6 +116,9 @@ describe('resolveRoute precedence', () => {
       model: 'glm/glm-5.2',
       source: 'fallback',
       reasonCode: 'fallback_window_active_model_pin',
+      dataPolicy: null,
+      policyVersion: PROVIDER_DATA_POLICY_VERSION,
+      policyState: 'missing',
     });
   });
 
@@ -124,6 +145,9 @@ describe('resolveRoute precedence', () => {
       model: 'kimi/kimi-k3',
       source: 'fallback',
       reasonCode: 'fallback_window_active',
+      dataPolicy: null,
+      policyVersion: PROVIDER_DATA_POLICY_VERSION,
+      policyState: 'missing',
     });
   });
 
@@ -143,6 +167,10 @@ describe('resolveRoute precedence', () => {
       model: undefined,
       source: 'preference',
       reasonCode: 'user_pin',
+      dataPolicy: null,
+      policyVersion: PROVIDER_DATA_POLICY_VERSION,
+      policyState: 'missing',
+      effort: null,
     });
   });
 
@@ -168,6 +196,9 @@ describe('resolveRoute precedence', () => {
       model: undefined,
       source: 'preference',
       reasonCode: 'intent_strongest',
+      dataPolicy: null,
+      policyVersion: PROVIDER_DATA_POLICY_VERSION,
+      policyState: 'missing',
     });
   });
 
@@ -253,6 +284,10 @@ describe('resolveRoute precedence', () => {
       model: undefined,
       source: 'preference',
       reasonCode: 'user_pin',
+      dataPolicy: null,
+      policyVersion: PROVIDER_DATA_POLICY_VERSION,
+      policyState: 'missing',
+      effort: null,
     });
   });
 
@@ -310,6 +345,52 @@ describe('resolveRoute precedence', () => {
     expect(d.provider).toBe('claude-cli');
     expect(d.source).toBe('tier_unconfigured_default');
   });
+
+  it('selects policy by the exact fallback provider/model route', () => {
+    const first = resolveRoute(inputs({
+      fallbackEntry: { provider: 'openai-api', model: 'gpt-5-mini', dataPolicy: 'trusted' },
+    }));
+    const second = resolveRoute(inputs({
+      fallbackEntry: { provider: 'openai-api', model: 'gpt-5', dataPolicy: 'restricted' },
+    }));
+
+    expect(first.dataPolicy).toBe('trusted');
+    expect(second.dataPolicy).toBe('restricted');
+    expect(Object.isFrozen(first)).toBe(true);
+    expect(Object.isFrozen(second)).toBe(true);
+  });
+
+  it('uses the exact configured target policy for pin and tier routes', () => {
+    const configuredModelByProvider = { 'openai-api': 'gpt-5' };
+    const configuredDataPolicyByRoute = {
+      [providerRoutePolicyKey('openai-api', 'gpt-5-mini')]: 'trusted' as const,
+      [providerRoutePolicyKey('openai-api', 'gpt-5')]: 'restricted' as const,
+    };
+    const pin = resolveRoute(inputs({
+      pref: pref({ intent: 'provider_specific', requestedProvider: 'openai-api' }),
+      pinnedProviderEligible: true,
+      configuredModelByProvider,
+      configuredDataPolicyByRoute,
+    }));
+    const tier = resolveRoute(inputs({
+      pref: pref({ intent: 'strongest' }),
+      tierMap: { strongest: 'openai-api' },
+      tierProviderEligible: true,
+      configuredModelByProvider,
+      configuredDataPolicyByRoute,
+    }));
+
+    expect(pin).toMatchObject({ model: 'gpt-5', dataPolicy: 'restricted' });
+    expect(tier).toMatchObject({ model: 'gpt-5', dataPolicy: 'restricted' });
+  });
+
+  it('throws typed enforcement errors before admitting an unclassified selected route', () => {
+    expect(() => resolveRoute(inputs({
+      boundaryMode: 'enforce',
+      pref: pref({ intent: 'provider_specific', requestedProvider: 'codex-cli' }),
+      pinnedProviderEligible: true,
+    }))).toThrow(ProviderDataPolicyError);
+  });
 });
 
 describe('isPinnedModelEligible', () => {
@@ -341,5 +422,105 @@ describe('isPinnedModelEligible', () => {
     ['provider mismatch', { ...verifiedPin, validatedProvider: 'codex-cli' }, entries, true],
   ])('rejects %s', (_label, candidate, configured, credentialed) => {
     expect(isPinnedModelEligible(candidate, configured, () => credentialed)).toBe(false);
+  });
+});
+
+describe('Slice 3 — reasoning-effort on the route', () => {
+  it('an eligible claude-cli model pin carries its requestedEffort as route.effort', () => {
+    const d = resolveRoute(inputs({
+      pref: pref({ intent: 'provider_specific', requestedProvider: 'claude-cli', requestedEffort: 'high' }),
+      pinnedProviderEligible: true,
+    }));
+    expect(d.source).toBe('preference');
+    expect(d.effort).toBe('high');
+  });
+
+  it('a pin with no effort override sets route.effort=null (not undefined)', () => {
+    const d = resolveRoute(inputs({
+      pref: pref({ intent: 'provider_specific', requestedProvider: 'claude-cli' }),
+      pinnedProviderEligible: true,
+    }));
+    expect(d.effort).toBeNull();
+    // Terminal behavior assertion for the "not undefined" half of the claim: the
+    // KEY is present and explicitly null (an absent key would also satisfy
+    // toBeNull via undefined-ish reads, so assert presence concretely).
+    expect(Object.prototype.hasOwnProperty.call(d, 'effort')).toBe(true);
+  });
+
+  it('the default route (no pin) carries no effort', () => {
+    expect(resolveRoute(inputs()).effort).toBeUndefined();
+  });
+
+  describe('applyRouteEffort', () => {
+    it('overrides claude-cli providerConfig.effort with a non-empty pin effort (base not mutated)', () => {
+      const base = { effort: 'low', permissionMode: 'default' };
+      const out = applyRouteEffort(base, { provider: 'claude-cli', effort: 'xhigh' });
+      expect(out).toEqual({ effort: 'xhigh', permissionMode: 'default' });
+      expect(base.effort).toBe('low'); // pure — original untouched
+    });
+
+    it('leaves a non-claude provider untouched (opencode ignores --effort)', () => {
+      const base = { baseUrl: 'x' };
+      expect(applyRouteEffort(base, { provider: 'opencode-cli', effort: 'high' })).toBe(base);
+    });
+
+    it('a null/absent effort keeps the base static effort (no override — hybrid semantics)', () => {
+      const base = { effort: 'medium' };
+      expect(applyRouteEffort(base, { provider: 'claude-cli', effort: null })).toBe(base);
+      expect(applyRouteEffort(base, { provider: 'claude-cli' })).toBe(base);
+    });
+
+    it('undefined base + a pin effort yields a config carrying just the effort', () => {
+      expect(applyRouteEffort(undefined, { provider: 'claude-cli', effort: 'high' })).toEqual({ effort: 'high' });
+    });
+
+    // Drift pin. Asserts through the REAL consumer — the argv the child is
+    // actually spawned with — NOT through applyRouteEffort's return value.
+    // Checking the latter would be a tautology: post-refactor both the menu gate
+    // and the config write read providerHasNativeReasoningControl, so comparing
+    // them compares a predicate to itself and stays green even when the effort
+    // never reaches the child. Only session.ts's per-provider switch turns the
+    // config key into `--effort`, and that switch does NOT consult the predicate.
+    // So this pins the full chain: menu offers a level  <=>  child receives it.
+    // Add a provider to reasoning-control without adding its argv arm and this
+    // goes RED — which is the whole point, because that omission is silent and
+    // user-visible in the worst way (receipt says "high reasoning", child runs
+    // at default).
+    it('menu capability and the actual spawned argv agree for every provider id', () => {
+      for (const provider of PROVIDER_IDS) {
+        const offersEffortMenu = nativeReasoningControl(provider, 'any-model') !== null;
+        const spawnConfig = applyRouteEffort({}, { provider, effort: 'high' });
+        let childReceivesEffort = false;
+        try {
+          const argv = __provider_switch_for_test.getProviderArgs(
+            provider, 'SYS', '/cwd', undefined, 'some-model', [], spawnConfig,
+          );
+          childReceivesEffort = argv.includes('--effort') && argv.includes('high');
+        } catch {
+          // A non-CLI provider builds no argv, so the flag cannot reach a child.
+          childReceivesEffort = false;
+        }
+        expect(childReceivesEffort, `provider ${provider}`).toBe(offersEffortMenu);
+      }
+    });
+
+    it('an empty-string effort is omitted, and the reader agrees it is absent', () => {
+      // Both consumers must see the same thing: the argv builder cannot emit
+      // `--effort ''` (malformed), so the reader must not report '' either.
+      expect(providerConfigEffort({ effort: '' })).toBeNull();
+      const argv = __provider_switch_for_test.getProviderArgs(
+        'claude-cli', 'SYS', '/cwd', undefined, 'm', [], { effort: '' },
+      );
+      expect(argv).not.toContain('--effort');
+    });
+
+    it('a malformed non-string effort leaves a valid static effort intact', () => {
+      // Safe direction: garbage must be ignored, never clobber the operator's
+      // configured static effort into something the reader then reports as absent.
+      const base = { effort: 'high' };
+      const out = applyRouteEffort(base, { provider: 'claude-cli', effort: 7 as unknown as string });
+      expect(out).toBe(base);
+      expect(providerConfigEffort(out)).toBe('high');
+    });
   });
 });

@@ -1,0 +1,393 @@
+/* ==========================================================================
+   v3.5 GLOBAL CHROME — NavRail + header (T5 b-02; 20-t5-cutover-plan.md)
+
+   Visual SSOT: docs/design-system/v35/mockups/*.html. This stylesheet
+   consumes tokens ONLY — geometry from the --chrome-* component tier
+   (tokens.component.css §v3.5, mockup literals), colors from the -v35
+   semantic addendum (tokens.semantic.css §A), radii from the console
+   register (--r-console-md, L4), status/mode from the live channels.
+   Raw-dimension law: zero raw px here (1px = --bw, 2px = --bw-accent);
+   the single exception is the collapse media query, whose raw value is
+   the sanctioned idiom (custom properties do not evaluate in @media —
+   mirrors the legacy --bp-rail-collapse comment pattern).
+
+   Classes: .chrome-rail · .chrome-nameplate · .chrome-ctx
+            · .chrome-nav · .chrome-nav-sec · .chrome-nav-item(__label)
+            · .chrome-attn-dot · .chrome-hosts · .chrome-hchip(__label) · .chrome-hst
+            · .chrome-header · .chrome-title · .chrome-attn · .chrome-spacer
+            · .chrome-theme-toggle · .chrome-utility · .chrome-utility-row
+   -------------------------------------------------------------------------- */
+
+/* --------------------------------------------------------------------------
+   RAIL — 212px inset column, hairline right edge, one ladder notch below
+   content (research-digest §5: chrome recedes). Column flex; the nav region
+   owns its own scroll (scroll-owner law: overflow-y + min-height:0) so the
+   nameplate stays pinned and the hosts block docks at the bottom.
+   -------------------------------------------------------------------------- */
+.chrome-rail {
+  display: flex;
+  flex-direction: column;
+  flex: none;
+  width: var(--chrome-rail-w);
+  height: 100%;
+  min-height: 0;
+  padding: var(--chrome-rail-pad);
+  gap: var(--chrome-rail-gap);
+  background: var(--surface-inset-v35);
+  border-right: var(--bw) solid var(--border-hairline-v35);
+}
+
+/* Nameplate dock — the spec-locked .soup-nameplate lockup (brand.md §1)
+   renders inside; this block owns only layout + the page-context caps. */
+.chrome-nameplate {
+  display: flex;
+  align-items: center;
+  padding: var(--chrome-nameplate-pad);
+}
+
+.chrome-ctx {
+  margin-left: auto;
+  font: var(--type-data-sm);
+  letter-spacing: var(--tracking-ctx);
+  color: var(--text-3-v35);
+  text-transform: uppercase;
+}
+
+/* Stacked nav region — scroll owner. */
+.chrome-nav {
+  display: flex;
+  flex-direction: column;
+  gap: var(--chrome-rail-gap);
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.chrome-nav-sec {
+  font: var(--type-data-sm);
+  font-weight: 500;
+  letter-spacing: var(--tracking-sec);
+  color: var(--text-3-v35);
+  padding: var(--chrome-sec-pad);
+  text-transform: uppercase;
+}
+
+/* Nav row: 16px glyph + label. Active = accent wash + inset accent bar
+   (mockup box-shadow recipe), marked in TSX via aria-current="page" so the
+   visual and a11y state can never drift apart. */
+.chrome-nav-item {
+  display: flex;
+  align-items: center;
+  gap: var(--chrome-item-gap);
+  padding: var(--chrome-item-pad);
+  border-radius: var(--r-console-md);
+  color: var(--text-2-v35);
+  font-weight: 500;
+  text-decoration: none;
+  white-space: nowrap;
+  min-width: 0;
+  transition: transform var(--dur-base) var(--ease-enter),
+    box-shadow var(--dur-base) var(--ease-enter),
+    background var(--dur-base) var(--ease-enter);
+}
+
+.chrome-nav-item:hover {
+  background: var(--surface-raised-v35);
+  color: var(--text-1-v35);
+  transform: translateY(calc(-1 * var(--bw)));
+}
+
+.chrome-nav-item:focus-visible {
+  outline: var(--bw-accent) solid var(--focus-ring);
+  outline-offset: var(--bw-accent);
+}
+
+.chrome-nav-item[aria-current="page"] {
+  background: var(--accent-wash-v35);
+  color: var(--text-1-v35);
+  box-shadow: inset var(--bw-accent) 0 0 var(--accent-v35);
+}
+
+.chrome-nav-item svg {
+  width: var(--chrome-icon);
+  height: var(--chrome-icon);
+  flex: none;
+  opacity: 0.85;
+}
+
+.chrome-nav-item__label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Inbox attention dot — warn diamond (badge.md shape family: status is
+   color + shape). */
+.chrome-attn-dot {
+  margin-left: auto;
+  width: var(--chrome-dot);
+  height: var(--chrome-dot);
+  flex: none;
+  border-radius: var(--chrome-micro-radius);
+  transform: rotate(45deg);
+  background: var(--status-warn-solid);
+}
+
+/* Hosts block — docked bottom, hairline-separated (mockup .deploy). */
+.chrome-hosts {
+  margin-top: auto;
+  border-top: var(--bw) solid var(--border-hairline-v35);
+  padding-top: var(--chrome-hosts-pad-top);
+}
+
+.chrome-hchip {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: var(--chrome-hostchip-pad);
+  font: var(--type-data-sm);
+  font-weight: 500;
+  color: var(--text-3-v35);
+  min-width: 0;
+}
+
+.chrome-hchip__label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chrome-hst {
+  width: var(--chrome-dot);
+  height: var(--chrome-dot);
+  flex: none;
+  border-radius: 50%;
+  background: var(--status-ok-solid);
+}
+
+.chrome-hst--warn {
+  background: var(--status-warn-solid);
+  border-radius: var(--chrome-micro-radius);
+  transform: rotate(45deg);
+}
+
+/* Utility dock — version / update / realtime / lock, under the hosts block.
+   v3.5 keeps these operational controls on the rail until the Settings
+   surface (b-09) owns them; mono recessed ink per the chrome register. */
+.chrome-utility {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+  padding-top: var(--sp-2);
+}
+
+.chrome-utility-row {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  min-width: 0;
+  font: var(--type-data-sm);
+}
+
+.chrome-utility-row__label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chrome-utility-row svg {
+  width: var(--sp-3);
+  height: var(--sp-3);
+  flex: none;
+}
+
+/* Utility ink tiers — Live = ok channel; Polling = AA text-2 (DD-8 contract:
+   essential degraded-transport text never drops to ghost); version +
+   lock recessed; update CTA = chat channel (carries the v3 semantic). */
+.chrome-utility-row--ok {
+  color: var(--status-ok-solid);
+}
+
+.chrome-utility-row--dim {
+  color: var(--text-2-v35);
+}
+
+.chrome-utility-row--recessed {
+  color: var(--text-3-v35);
+}
+
+/* Clickable utility rows (update available, lock) — rendered through the
+   Button primitive (soup/no-raw-button); these overrides re-register it to
+   the chrome dock: left-aligned, mono, auto height. Scoped selectors beat
+   the primitive's variant specificity without !important. */
+.chrome-utility button.chrome-utility-row {
+  height: auto;
+  width: 100%;
+  justify-content: flex-start;
+  padding: 0;
+  font: var(--type-data-sm);
+  border-radius: var(--r-console-sm);
+}
+
+.chrome-utility button.chrome-utility-row--update,
+.chrome-utility button.chrome-utility-row--update:not([disabled]):not([aria-disabled="true"]):hover {
+  color: var(--mode-chat-solid);
+  background: var(--mode-chat-wash);
+  padding-left: var(--sp-1);
+  padding-right: var(--sp-1);
+}
+
+.chrome-utility button.chrome-utility-row--lock,
+.chrome-utility button.chrome-utility-row--lock:not([disabled]):not([aria-disabled="true"]):hover {
+  color: var(--text-2-v35);
+  background: transparent;
+}
+
+/* --------------------------------------------------------------------------
+   HEADER — page title + attention pill + rightmost theme toggle
+   (mockup main > header). b-02 owns title/spacer/toggle; page actions
+   (primary CTA, sort/filter) land with the surface beads b-03+.
+   -------------------------------------------------------------------------- */
+.chrome-header {
+  display: flex;
+  align-items: center;
+  gap: var(--chrome-header-gap);
+  padding: var(--chrome-header-pad);
+  border-bottom: var(--bw) solid var(--border-hairline-v35);
+  flex: none;
+}
+
+.chrome-title {
+  font: var(--type-title);
+  letter-spacing: var(--tracking-chrome-title);
+  color: var(--text-1-v35);
+  margin: 0;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Attention pill — "N lines need attention", warn channel, links to the
+   fleet surface where the attention rows live. */
+.chrome-attn {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: var(--chrome-attn-pad);
+  border-radius: var(--chrome-pill-radius);
+  background: var(--status-warn-wash);
+  color: var(--status-warn-solid);
+  border: var(--bw) solid var(--status-warn-border);
+  font: var(--type-data);
+  font-weight: 600;
+  text-decoration: none;
+  white-space: nowrap;
+  transition: transform var(--dur-base) var(--ease-enter),
+    box-shadow var(--dur-base) var(--ease-enter);
+}
+
+.chrome-attn:hover {
+  transform: translateY(calc(-1 * var(--bw)));
+  box-shadow: var(--shadow-lift-v35);
+}
+
+.chrome-attn:focus-visible {
+  outline: var(--bw-accent) solid var(--focus-ring);
+  outline-offset: var(--bw-accent);
+}
+
+.chrome-attn::before {
+  content: "◆";
+  font-size: var(--type-data-sm);
+}
+
+.chrome-spacer {
+  flex: 1;
+}
+
+/* Theme toggle — sun SVG + mono label, rightmost (mockup .theme-toggle),
+   rendered through the Button primitive (soup/no-raw-button) and re-registered
+   to the chrome header: transparent bed, subtle keyline, mono label. Scoped
+   selectors beat the primitive's variant specificity without !important. */
+.chrome-header button.chrome-theme-toggle {
+  padding: var(--chrome-btn-pad);
+  border-color: var(--border-subtle-v35);
+  border-radius: var(--r-console-md);
+  background: transparent;
+  color: var(--text-2-v35);
+  font: var(--type-data);
+  transition: transform var(--dur-fast) var(--ease-enter),
+    box-shadow var(--dur-fast) var(--ease-enter),
+    background var(--dur-fast) var(--ease-enter);
+}
+
+.chrome-header button.chrome-theme-toggle:not([disabled]):not([aria-disabled="true"]):hover {
+  transform: translateY(calc(-1 * var(--bw)));
+  box-shadow: var(--shadow-lift-v35);
+  color: var(--text-1-v35);
+  background: transparent;
+}
+
+.chrome-header button.chrome-theme-toggle svg {
+  width: var(--sp-3);
+  height: var(--sp-3);
+}
+
+/* --------------------------------------------------------------------------
+   COLLAPSE ≤1100px (mockup @media (max-width:1100px)): icon-only rail at
+   --rail-w-collapsed. Sections/wordmark/ctx/host labels drop out of layout
+   per the mockup SSOT; nav-item labels take the sr-only clip instead of
+   display:none so icon-only rows keep their content-computed accessible
+   name (label + Inbox unread count) for screen readers (b-02 cross-review).
+   Raw 1100px is the sanctioned media-query idiom (custom properties do not
+   evaluate in @media — same pattern as the legacy --bp-rail-collapse).
+   -------------------------------------------------------------------------- */
+@media (max-width: 1100px) {
+  .chrome-rail {
+    width: var(--rail-w-collapsed);
+    padding-left: var(--sp-1);
+    padding-right: var(--sp-1);
+  }
+  .chrome-nameplate {
+    justify-content: center;
+    padding-left: 0;
+    padding-right: 0;
+  }
+  .chrome-nav-item {
+    justify-content: center;
+    padding-left: 0;
+    padding-right: 0;
+  }
+  .chrome-hchip {
+    justify-content: center;
+    padding-left: 0;
+    padding-right: 0;
+  }
+  .chrome-utility-row {
+    justify-content: center;
+  }
+  /* Nav labels: visually hidden but announced (sr-only clip recipe, expressed
+     with --bw so no raw dimension literal lands outside the token files —
+     same idiom as .soup-wiz-steps__sr). */
+  .chrome-nav-item__label {
+    position: absolute;
+    width: var(--bw);
+    height: var(--bw);
+    padding: 0;
+    margin: calc(-1 * var(--bw));
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border: 0;
+  }
+  .chrome-nav-sec,
+  .chrome-nameplate .soup-nameplate__wm,
+  .chrome-ctx,
+  .chrome-hchip__label,
+  .chrome-utility-row__label {
+    display: none;
+  }
+}
