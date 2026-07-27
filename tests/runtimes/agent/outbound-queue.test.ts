@@ -1828,18 +1828,18 @@ describe('OutboundQueue', () => {
     expect(calls).toHaveLength(callCountBefore); // no new message added
   });
 
-  // ─── shouldShowMinimal: all switch branches ───────────────────────────────
+  // ─── minimal mode category suppression ───────────────────────────────────
 
-  it('shouldShowMinimal: searching with "Checking my notes" prefix passes through in minimal mode', async () => {
+  it('shouldShowMinimal: friendly knowledge search is suppressed in minimal mode', async () => {
     const { messenger, calls } = makeMessenger();
     const queue = new OutboundQueue(messenger, CHAT_JID);
     queue.setToolUpdateMode('minimal');
 
     queue.enqueueToolUpdate({ category: 'searching', detail: 'Checking my notes on TypeScript' });
-    await vi.advanceTimersByTimeAsync(1_500 + 100); // minimal mode uses 1500ms idle delay
+    await vi.advanceTimersByTimeAsync(1_600);
     await queue.flush();
 
-    expect(calls.some((c) => c.includes('Checking my notes on TypeScript'))).toBe(true);
+    expect(calls).toHaveLength(0);
   });
 
   it('shouldShowMinimal: searching without "Checking my notes" prefix is suppressed in minimal mode', async () => {
@@ -1855,7 +1855,7 @@ describe('OutboundQueue', () => {
     expect(calls).toHaveLength(0);
   });
 
-  it('shouldShowMinimal: fetching category passes through in minimal mode', async () => {
+  it('shouldShowMinimal: fetching category is suppressed in minimal mode', async () => {
     const { messenger, calls } = makeMessenger();
     const queue = new OutboundQueue(messenger, CHAT_JID);
     queue.setToolUpdateMode('minimal');
@@ -1864,7 +1864,7 @@ describe('OutboundQueue', () => {
     await vi.advanceTimersByTimeAsync(1_500 + 100);
     await queue.flush();
 
-    expect(calls.some((c) => c.includes('fetch-detail-marker'))).toBe(true);
+    expect(calls).toHaveLength(0);
   });
 
   it('shouldShowMinimal: skill, planning, blocked, cancelled, reading, modifying suppressed in minimal mode', async () => {
@@ -1943,24 +1943,18 @@ describe('OutboundQueue', () => {
     expect(calls[0]).not.toContain('📖 Reading:');
   });
 
-  // ─── enqueueToolUpdate: minimal mode uses 1500ms delay ──────────────────
+  // ─── enqueueToolUpdate: minimal mode keeps tool progress silent ──────────
 
-  it('minimal mode uses 1500ms idle timer (not 5000ms)', async () => {
+  it('minimal mode does not arm a visible tool-update timer', async () => {
     const { messenger, calls } = makeMessenger();
     const queue = new OutboundQueue(messenger, CHAT_JID);
     queue.setToolUpdateMode('minimal');
 
-    // fetching passes through in minimal mode
     queue.enqueueToolUpdate({ category: 'fetching', detail: 'api.example.com' });
 
-    // Should NOT have fired after 1400ms
-    await vi.advanceTimersByTimeAsync(1_400);
+    await vi.advanceTimersByTimeAsync(5_000);
     expect(calls).toHaveLength(0);
-
-    // Should fire after 1500ms
-    await vi.advanceTimersByTimeAsync(100);
-    expect(calls).toHaveLength(1);
-    await queue.flush();
+    queue.abortTurn();
   });
 
   // ─── TOOL_BATCH_MAX_AGE_MS fires even when idle timer keeps resetting ────

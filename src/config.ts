@@ -52,6 +52,7 @@ export interface KnowledgeProfileConfig {
   rerankModel: string;
   topK: number;
   rerankTopN: number;
+  minScore?: number;
   description: string;
   embedUrl?: string;
 }
@@ -606,6 +607,7 @@ function mergeKnowledgeProfile(
   override: Record<string, unknown> | undefined,
 ): KnowledgeProfileConfig {
   if (!override) return base;
+  const minScore = override['minScore'];
   return {
     namespace: stringProp(override, 'namespace') ?? base.namespace,
     namespaces: stringArrayProp(override, 'namespaces').length > 0
@@ -616,6 +618,9 @@ function mergeKnowledgeProfile(
     rerankModel: stringProp(override, 'rerankModel') ?? base.rerankModel,
     topK: numberProp(override, 'topK', base.topK),
     rerankTopN: numberProp(override, 'rerankTopN', base.rerankTopN),
+    minScore: typeof minScore === 'number' && Number.isFinite(minScore)
+      ? minScore
+      : base.minScore,
     description: stringProp(override, 'description') ?? base.description,
     embedUrl: stringProp(override, 'embedUrl') ?? base.embedUrl,
   };
