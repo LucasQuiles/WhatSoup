@@ -1,0 +1,382 @@
+{
+  "acceptance_criteria": [
+    "Recovery admission classifies every active or suspended checkpoint into a durable typed state before proactive resume selection, including eligible, identity-unprovable, identity-mismatched, repair-pending, quarantined, and terminal.",
+    "Identity-unprovable and identity-mismatched checkpoints are excluded from repeated proactive selection by their durable admission state rather than by a process-local counter.",
+    "Every non-eligible checkpoint has one explicit retry, repair, quarantine, or terminal owner with bounded attempts and a durable reason.",
+    "Current blocked recovery obligations, oldest age, retry state, and last transition affect runtime health; lifetime rejection totals remain diagnostic and do not substitute for current state.",
+    "Operator-visible evidence distinguishes a safe fail-closed rejection from a checkpoint that has no recovery owner.",
+    "A corrected checkpoint can re-enter eligibility through an auditable state transition without deleting historical rejection evidence.",
+    "Restart and concurrent-worker tests prove that the same unprovable checkpoint is not selected indefinitely, is never resumed under the wrong identity, and cannot be claimed by two repair owners.",
+    "Focused health tests prove warning onset, persistence across restart while unresolved, and recovery only after a verified durable transition."
+  ],
+  "affected_paths": [
+    "src/core/durability.ts",
+    "src/core/health.ts",
+    "src/runtimes/agent/runtime.ts",
+    "tests/core/durability-checkpoints.test.ts",
+    "tests/core/health.test.ts",
+    "tests/runtimes/agent/runtime.test.ts"
+  ],
+  "blast_radius": "Agent restart recovery, proactive resume admission, durable checkpoint lifecycle, health truth, operator repair workflows, and repeated boot behavior for legacy or identity-mismatched sessions.",
+  "classification": "leaf",
+  "current_labels": ["P1", "audit", "bug", "reliability"],
+  "decisive_source_paths": [
+    "src/core/durability.ts",
+    "src/core/health.ts",
+    "src/runtimes/agent/runtime.ts"
+  ],
+  "decisive_test_paths": [
+    "tests/core/durability-checkpoints.test.ts",
+    "tests/core/health.test.ts",
+    "tests/runtimes/agent/runtime.test.ts"
+  ],
+  "dependency_issue_numbers": [2155, 2169, 2197, 2332, 2352, 2444, 2447, 2451, 2455, 2535, 2537],
+  "duplicate_of_issue_number": null,
+  "evidence_state": "verified",
+  "evidence_summary": "Three live identity reads spanning 23 seconds pinned open issue #2540 to node I_kwDOR1Sep88AAAABKQqliw, its current title, P1, audit, bug, and reliability labels, update time, URL, and exact 10,054-byte body hash while the SSH remote main remained 9a1bd7b3d3c529b276c1ad764d2c312d7f3abfc3. Exact-main durability source selects resumable checkpoints solely from active or suspended rows with a non-null session ID; the query does not encode completed identity evidence or a durable rejected, repair-pending, quarantined, or terminal admission state. The runtime correctly fails closed when legacy or ambiguous identity cannot be proved, but records the rejection in one process-local cumulative counter. That counter appears in two health detail shapes and is absent from both health-status predicates. The exact focused legacy-row characterization passed, as did 218 adjacent durability, health, poll, approval, and auto-compact controls; the selected runtime run also included one passing adjacent persistence characterization. Merged PR #1733 is a partial historical implementation. A fresh complete open-PR changed-file scan found 19 collision or coordination overlaps and no implementation owner; exact-term issue and pull-request searches found no additional owner.",
+  "falsifier_or_remaining_gap": "The finding would be falsified if exact main durably removed an identity-unprovable or mismatched checkpoint from proactive selection, assigned it a bounded repair or terminal owner, or degraded health while the unresolved recovery obligation remained. Exact source inspection disproved all three conditions while confirming the identity gate itself fails closed. The 220 passing issue-relevant and control tests establish current safety behavior, not durable disposition or recovery ownership. This audit did not mutate a live checkpoint store, restart a production instance, or measure repeated-selection incidence, so fleet prevalence, repair policy, and alert thresholds remain implementation-time measurement obligations.",
+  "impact": "The runtime avoids an unsafe resume but can select and reject the same legacy or mismatched checkpoint on every boot indefinitely. Because the rejection is only a process-local lifetime counter and does not affect status, an unresolved recovery obligation can remain ownerless while health reports healthy.",
+  "implementation_after_issue_numbers": [2447],
+  "issue_node_id": "I_kwDOR1Sep88AAAABKQqliw",
+  "issue_number": 2540,
+  "lead_verification_obligations": [
+    "Re-read issue #2540 immediately before registry integration and reject this record if its state, node ID, title, labels, update time, URL, or exact body hash changed.",
+    "Reconfirm the SSH origin, local origin/main, remote main, and every decisive path byte; reject integration on revision drift until the evidence is rerun.",
+    "Re-scan every open pull request and merged PR #1733 before dispatch; preserve a single owner and coordinate taxonomy and continuity work without assigning ownership from a shared path alone.",
+    "Define the durable recovery-admission state machine, transition preconditions, ownership lease, retry budget, and terminal evidence before changing selection.",
+    "Preserve the current fail-closed identity gate and prove no repair path can resume a checkpoint until completed identity evidence matches.",
+    "Backfill legacy rows deterministically or classify them as repair-pending or quarantined without silently deleting historical recovery evidence.",
+    "Derive health from current unresolved admission obligations and verify restart-stable warning and verified recovery semantics.",
+    "Add RED and GREEN tests for legacy identity absence, identity mismatch, repeated boot, correction, lease expiry, competing repair workers, exhausted repair, quarantine, and recovery.",
+    "Run all three decisive suites plus migration and broader recovery controls against committed implementation bytes."
+  ],
+  "owner_boundary": "durable-resume-admission-disposition-and-repair",
+  "partial_findings": [],
+  "pinned_revision": "9a1bd7b3d3c529b276c1ad764d2c312d7f3abfc3",
+  "pre_review_body_sha256": "bff6ada720b297bf49a446eb7694ecbe8f26f91a19480c0c277b33d3cd28097d",
+  "proposed_cohort_id": null,
+  "pull_request_overlaps": [
+    {
+      "assessment": "partial",
+      "base_ref": "main",
+      "disposition": "merged",
+      "head_ref": "codex/turn-lifecycle-canonical-20260711",
+      "is_draft": false,
+      "matched_by": ["acceptance-criteria", "touched-path"],
+      "number": 1733,
+      "overlapping_paths": [
+        "src/core/durability.ts",
+        "src/core/health.ts",
+        "src/runtimes/agent/runtime.ts",
+        "tests/core/durability-checkpoints.test.ts",
+        "tests/core/health.test.ts"
+      ],
+      "title": "Turn lifecycle: fail-closed recovery consolidation, runtime fixes, and fitness extraction",
+      "updated_at": "2026-07-12T04:57:51Z",
+      "url": "https://github.com/LucasQuiles/WhatSoup/pull/1733"
+    },
+    {
+      "assessment": "collision-only",
+      "base_ref": "main",
+      "disposition": "open",
+      "head_ref": "takeover/console-successor-20260722",
+      "is_draft": true,
+      "matched_by": ["touched-path"],
+      "number": 2078,
+      "overlapping_paths": [
+        "src/core/durability.ts",
+        "src/core/health.ts",
+        "src/runtimes/agent/runtime.ts"
+      ],
+      "title": "chore: track transport and iMessage source for selective reconstruction",
+      "updated_at": "2026-07-27T02:07:42Z",
+      "url": "https://github.com/LucasQuiles/WhatSoup/pull/2078"
+    },
+    {
+      "assessment": "collision-only",
+      "base_ref": "main",
+      "disposition": "open",
+      "head_ref": "fix/agent-provider-actor-isolation-20260723",
+      "is_draft": false,
+      "matched_by": ["touched-path"],
+      "number": 2128,
+      "overlapping_paths": [
+        "src/runtimes/agent/runtime.ts",
+        "tests/runtimes/agent/runtime.test.ts"
+      ],
+      "title": "fix(agent): isolate per-chat actors across CLI providers",
+      "updated_at": "2026-07-27T02:08:01Z",
+      "url": "https://github.com/LucasQuiles/WhatSoup/pull/2128"
+    },
+    {
+      "assessment": "collision-only",
+      "base_ref": "main",
+      "disposition": "open",
+      "head_ref": "fix/agent-queue-health-truth-20260723",
+      "is_draft": false,
+      "matched_by": ["touched-path"],
+      "number": 2129,
+      "overlapping_paths": [
+        "src/runtimes/agent/runtime.ts",
+        "tests/core/health.test.ts"
+      ],
+      "title": "fix(agent): surface halted turn queues in health",
+      "updated_at": "2026-07-27T02:08:00Z",
+      "url": "https://github.com/LucasQuiles/WhatSoup/pull/2129"
+    },
+    {
+      "assessment": "collision-only",
+      "base_ref": "main",
+      "disposition": "open",
+      "head_ref": "fix/agent-suspend-platform-hardening-20260723",
+      "is_draft": false,
+      "matched_by": ["touched-path"],
+      "number": 2130,
+      "overlapping_paths": [
+        "src/core/health.ts",
+        "tests/core/health.test.ts"
+      ],
+      "title": "fix: harden suspend-aware platform health",
+      "updated_at": "2026-07-27T02:07:58Z",
+      "url": "https://github.com/LucasQuiles/WhatSoup/pull/2130"
+    },
+    {
+      "assessment": "collision-only",
+      "base_ref": "main",
+      "disposition": "open",
+      "head_ref": "feat/provider-route-policy-task3-20260723",
+      "is_draft": false,
+      "matched_by": ["touched-path"],
+      "number": 2149,
+      "overlapping_paths": [
+        "src/core/durability.ts",
+        "src/runtimes/agent/runtime.ts",
+        "tests/runtimes/agent/runtime.test.ts"
+      ],
+      "title": "feat(agent): bind provider routes to data policy",
+      "updated_at": "2026-07-27T02:07:57Z",
+      "url": "https://github.com/LucasQuiles/WhatSoup/pull/2149"
+    },
+    {
+      "assessment": "collision-only",
+      "base_ref": "main",
+      "disposition": "open",
+      "head_ref": "codex/steering-2334",
+      "is_draft": true,
+      "matched_by": ["touched-path"],
+      "number": 2362,
+      "overlapping_paths": ["src/runtimes/agent/runtime.ts"],
+      "title": "feat(runtime): establish fail-closed native turn ownership",
+      "updated_at": "2026-07-27T02:08:02Z",
+      "url": "https://github.com/LucasQuiles/WhatSoup/pull/2362"
+    },
+    {
+      "assessment": "partial",
+      "base_ref": "main",
+      "disposition": "open",
+      "head_ref": "feat/taxonomy-cross-contract-2447",
+      "is_draft": true,
+      "matched_by": ["acceptance-criteria", "touched-path"],
+      "number": 2451,
+      "overlapping_paths": ["src/core/health.ts"],
+      "title": "feat(observability): add failure taxonomy cross-contract",
+      "updated_at": "2026-07-27T02:10:30Z",
+      "url": "https://github.com/LucasQuiles/WhatSoup/pull/2451"
+    },
+    {
+      "assessment": "collision-only",
+      "base_ref": "feat/continuity-manifest-dry-run-2444",
+      "disposition": "open",
+      "head_ref": "feat/continuity-gap-health-2444",
+      "is_draft": true,
+      "matched_by": ["touched-path"],
+      "number": 2455,
+      "overlapping_paths": [
+        "src/core/health.ts",
+        "tests/core/health.test.ts"
+      ],
+      "title": "feat(durability): persist continuity gap health",
+      "updated_at": "2026-07-27T02:07:50Z",
+      "url": "https://github.com/LucasQuiles/WhatSoup/pull/2455"
+    },
+    {
+      "assessment": "collision-only",
+      "base_ref": "main",
+      "disposition": "open",
+      "head_ref": "fix/internal-peer-redaction-20260726",
+      "is_draft": false,
+      "matched_by": ["touched-path"],
+      "number": 2456,
+      "overlapping_paths": [
+        "src/runtimes/agent/runtime.ts",
+        "tests/runtimes/agent/runtime.test.ts"
+      ],
+      "title": "Fix trusted internal DM path redaction",
+      "updated_at": "2026-07-27T02:07:49Z",
+      "url": "https://github.com/LucasQuiles/WhatSoup/pull/2456"
+    },
+    {
+      "assessment": "collision-only",
+      "base_ref": "main",
+      "disposition": "open",
+      "head_ref": "gate/fix-pr2129-queue-health-20260724",
+      "is_draft": true,
+      "matched_by": ["touched-path"],
+      "number": 2491,
+      "overlapping_paths": [
+        "src/core/health.ts",
+        "src/runtimes/agent/runtime.ts",
+        "tests/core/health.test.ts"
+      ],
+      "title": "preserve: fix(agent): report halted turn queues in health",
+      "updated_at": "2026-07-27T02:07:46Z",
+      "url": "https://github.com/LucasQuiles/WhatSoup/pull/2491"
+    },
+    {
+      "assessment": "collision-only",
+      "base_ref": "main",
+      "disposition": "open",
+      "head_ref": "feat/wedge-remediation-20260720",
+      "is_draft": true,
+      "matched_by": ["touched-path"],
+      "number": 2493,
+      "overlapping_paths": ["src/runtimes/agent/runtime.ts"],
+      "title": "preserve: fix(agent): retry a refused watchdog/stalled-op SIGKILL instead of fire-and-forget (C-F4)",
+      "updated_at": "2026-07-27T02:07:45Z",
+      "url": "https://github.com/LucasQuiles/WhatSoup/pull/2493"
+    },
+    {
+      "assessment": "collision-only",
+      "base_ref": "main",
+      "disposition": "open",
+      "head_ref": "qr017-tool-group-taxonomy",
+      "is_draft": true,
+      "matched_by": ["touched-path"],
+      "number": 2494,
+      "overlapping_paths": ["src/runtimes/agent/runtime.ts"],
+      "title": "preserve: feat(mcp): add optional tool group taxonomy tag (QR-017 #1976)",
+      "updated_at": "2026-07-27T02:07:20Z",
+      "url": "https://github.com/LucasQuiles/WhatSoup/pull/2494"
+    },
+    {
+      "assessment": "collision-only",
+      "base_ref": "main",
+      "disposition": "open",
+      "head_ref": "fix/inline-proposal-protocol-20260720",
+      "is_draft": true,
+      "matched_by": ["touched-path"],
+      "number": 2495,
+      "overlapping_paths": [
+        "src/runtimes/agent/runtime.ts",
+        "tests/runtimes/agent/runtime.test.ts"
+      ],
+      "title": "preserve: chore(ops): pin watchdog parity probe",
+      "updated_at": "2026-07-27T02:07:19Z",
+      "url": "https://github.com/LucasQuiles/WhatSoup/pull/2495"
+    },
+    {
+      "assessment": "collision-only",
+      "base_ref": "main",
+      "disposition": "open",
+      "head_ref": null,
+      "is_draft": true,
+      "matched_by": ["touched-path"],
+      "number": 2496,
+      "overlapping_paths": [
+        "src/core/health.ts",
+        "tests/core/health.test.ts"
+      ],
+      "title": "preserve: Align preflight tests with deferred credentials",
+      "updated_at": "2026-07-27T02:07:18Z",
+      "url": "https://github.com/LucasQuiles/WhatSoup/pull/2496"
+    },
+    {
+      "assessment": "collision-only",
+      "base_ref": "main",
+      "disposition": "open",
+      "head_ref": null,
+      "is_draft": true,
+      "matched_by": ["touched-path"],
+      "number": 2497,
+      "overlapping_paths": [
+        "src/core/health.ts",
+        "tests/core/health.test.ts"
+      ],
+      "title": "preserve: test: strengthen credential absence assertion",
+      "updated_at": "2026-07-27T02:07:17Z",
+      "url": "https://github.com/LucasQuiles/WhatSoup/pull/2497"
+    },
+    {
+      "assessment": "collision-only",
+      "base_ref": "main",
+      "disposition": "open",
+      "head_ref": "feat/provider-boundary-audit-20260722",
+      "is_draft": true,
+      "matched_by": ["touched-path"],
+      "number": 2498,
+      "overlapping_paths": [
+        "src/core/durability.ts",
+        "src/runtimes/agent/runtime.ts",
+        "tests/runtimes/agent/runtime.test.ts"
+      ],
+      "title": "preserve: fix: canonicalize provider secret intervals",
+      "updated_at": "2026-07-27T02:07:44Z",
+      "url": "https://github.com/LucasQuiles/WhatSoup/pull/2498"
+    },
+    {
+      "assessment": "collision-only",
+      "base_ref": "main",
+      "disposition": "open",
+      "head_ref": "fix/provider-boundary-canonical-successor-20260723",
+      "is_draft": true,
+      "matched_by": ["touched-path"],
+      "number": 2499,
+      "overlapping_paths": [
+        "src/core/durability.ts",
+        "src/runtimes/agent/runtime.ts",
+        "tests/runtimes/agent/runtime.test.ts"
+      ],
+      "title": "preserve: test(provider): isolate atomicity oracle falsifiers",
+      "updated_at": "2026-07-27T02:07:14Z",
+      "url": "https://github.com/LucasQuiles/WhatSoup/pull/2499"
+    },
+    {
+      "assessment": "collision-only",
+      "base_ref": "main",
+      "disposition": "open",
+      "head_ref": "takeover/console-consolidated-20260721",
+      "is_draft": true,
+      "matched_by": ["touched-path"],
+      "number": 2500,
+      "overlapping_paths": ["src/runtimes/agent/runtime.ts"],
+      "title": "preserve: feat(console): add transport-aware line creation",
+      "updated_at": "2026-07-27T02:07:13Z",
+      "url": "https://github.com/LucasQuiles/WhatSoup/pull/2500"
+    },
+    {
+      "assessment": "collision-only",
+      "base_ref": "main",
+      "disposition": "open",
+      "head_ref": "takeover/console-live-main-20260722-2",
+      "is_draft": true,
+      "matched_by": ["touched-path"],
+      "number": 2501,
+      "overlapping_paths": [
+        "src/core/durability.ts",
+        "src/core/health.ts",
+        "src/runtimes/agent/runtime.ts"
+      ],
+      "title": "preserve: merge: reconcile console successor with main",
+      "updated_at": "2026-07-27T02:07:12Z",
+      "url": "https://github.com/LucasQuiles/WhatSoup/pull/2501"
+    }
+  ],
+  "pull_request_owner_pr_number": null,
+  "recommended_labels": ["P1", "audit", "bug", "reliability"],
+  "recommended_title": null,
+  "review_confidence": "high",
+  "suggested_remediation": "Add a durable recovery-admission state machine beside checkpoint identity evidence and make proactive selection require an eligible state. On an unprovable or mismatched identity, atomically transition the checkpoint to repair-pending, quarantined, or terminal with a reason, attempt budget, next-attempt time, and one leased owner. Project unresolved admission obligations into health, retain cumulative rejection evidence separately, and provide an auditable correction transition that must re-prove identity before eligibility.",
+  "title": "reliability(recovery): unprovable resume identities stay resumable while health remains green",
+  "updated_at": "2026-07-27T01:41:07Z",
+  "url": "https://github.com/LucasQuiles/WhatSoup/issues/2540"
+}

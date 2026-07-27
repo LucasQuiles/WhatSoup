@@ -1,0 +1,177 @@
+{
+  "acceptance_criteria": [
+    "All-success empty chat reads retain the existing valid-empty presentation only after every eligible source completes successfully.",
+    "All-failed chat reads render unavailable with retry and never render zero conversations.",
+    "A failed line alongside successful peers renders a partial list with exact observed-versus-expected source coverage.",
+    "An initial selected-thread message failure renders unavailable with retry, distinct from a successful empty thread.",
+    "Retained chats or messages after refetch failure remain visible but are marked stale with bounded last-success age.",
+    "Recovery clears unavailable or stale state only after a fresh successful query.",
+    "Deep links distinguish an unavailable source, a missing conversation, and valid empty history.",
+    "Realtime connection and reconciliation evidence remain separate from chat/message data currentness.",
+    "Inbox and Line Detail use the same bounded adapter for initial, partial, stale, empty, and recovered states.",
+    "Mutation coverage fails if chat or message query state is reduced to a data-only empty-array fallback.",
+    "Replay, no-work, or recovery decisions require complete current observation or an independently authoritative receipt.",
+    "Tests and telemetry use reserved synthetic values and expose no identities, payloads, credentials, locations, raw errors, or process details."
+  ],
+  "affected_paths": [
+    "console/src/components/inbox/ThreadPane.tsx",
+    "console/src/components/line-detail/HistoryTab.tsx",
+    "console/src/hooks/use-fleet.ts",
+    "console/src/pages/Inbox.tsx",
+    "console/src/pages/LineDetail.tsx",
+    "tests/console/history-tab.test.tsx",
+    "tests/console/inbox-page.test.tsx",
+    "tests/console/line-detail-tabs.test.tsx",
+    "tests/console/use-fleet.test.tsx"
+  ],
+  "blast_radius": "Unified Inbox and per-line history inspection across every eligible fleet line; failed or stale reads can otherwise appear to prove that no conversation, unanswered message, replay work, or recovery gap exists.",
+  "classification": "leaf",
+  "current_labels": ["P2", "SSOT", "bug", "chat", "console", "reliability"],
+  "decisive_source_paths": [
+    "console/src/components/inbox/ThreadPane.tsx",
+    "console/src/components/line-detail/HistoryTab.tsx",
+    "console/src/hooks/use-fleet.ts",
+    "console/src/pages/Inbox.tsx",
+    "console/src/pages/LineDetail.tsx"
+  ],
+  "decisive_test_paths": [
+    "tests/console/history-tab.test.tsx",
+    "tests/console/inbox-page.test.tsx",
+    "tests/console/line-detail-tabs.test.tsx",
+    "tests/console/use-fleet.test.tsx"
+  ],
+  "dependency_issue_numbers": [2444, 2447, 2519, 2523, 2527],
+  "duplicate_of_issue_number": null,
+  "evidence_state": "verified",
+  "evidence_summary": "Pinned main directly returns raw chat/message query results, while Inbox and Line Detail consume data only and coerce absent results to empty arrays; 6 issue-specific assertions within an 11-of-11 write-free source falsifier observed the claimed projection. All nine cited decisive source and test paths are byte-identical to pinned main. The four cited focused suites passed 182 of 182 tests under the repository-pinned runtime, but none covers initial/refetch chat/message failure or partial-line coverage. Three live identity reads spanning 26 seconds were stable with six current labels; the node, open state, title, URL, update time, and exact body hash remained unchanged while local and SSH remote main stayed at the pin. A 529-issue, 1,984-PR, fully paginated 39-open-PR and 1,333-path-occurrence capture found no owner; three open preservation drafts are collision-only.",
+  "falsifier_or_remaining_gap": "The finding is falsified if the pinned consumers preserve chat/message error, refetch, freshness, retained-data, and source-coverage state and emit valid empty copy only after complete success. The inspected flow does not. The issue's removed audit-only behavior tests could not be recreated because this lane forbids tracked writes, so runtime failure projections remain an explicit implementation-time test obligation; runner-level operating-system transient writes were not syscall-audited.",
+  "impact": "A transport or partial-source failure is projected as domain truth, allowing operators or downstream reasoning to mistake absent rows for complete current evidence and skip necessary review or replay.",
+  "implementation_after_issue_numbers": [2447, 2523],
+  "issue_node_id": "I_kwDOR1Sep88AAAABKQU9TA",
+  "issue_number": 2530,
+  "lead_verification_obligations": [
+    "Re-read issue #2530 immediately before publication and reject the record if its updated timestamp, title, labels, node ID, URL, or body hash changed.",
+    "Reconfirm exact SSH origin, local origin/main, remote main, and the decisive source bytes before ownership or implementation.",
+    "Re-scan the fully paginated issue, pull-request, and changed-file estate; PRs #2078, #2500, and #2501 are collision-only drafts, while merged PRs #881 and #2198 are partial history.",
+    "Preserve #2444 ingress ownership and #2519 realtime reconciliation ownership while adopting #2447 vocabulary, #2523 presentation rules, and #2527's analogous fail-visible read contract.",
+    "Add direct initial-error, refetch-error with retained data, partial multi-line coverage, deep-link, retry, recovery, accessibility, and data-only mutation tests before completion.",
+    "Keep automatic replay outside this visibility change and require authoritative source receipts plus separate mutation authority."
+  ],
+  "owner_boundary": "chat-message-observation-projection",
+  "partial_findings": [],
+  "pinned_revision": "9a1bd7b3d3c529b276c1ad764d2c312d7f3abfc3",
+  "pre_review_body_sha256": "aec7ed81fa576ebdbcb1d00b62a761e33b2ff8ea6753b9606e9f2983ca8287a6",
+  "proposed_cohort_id": null,
+  "pull_request_overlaps": [
+    {
+      "assessment": "partial",
+      "base_ref": "main",
+      "disposition": "merged",
+      "head_ref": "feat/soup-v3-foundation",
+      "is_draft": false,
+      "matched_by": ["touched-path"],
+      "number": 881,
+      "overlapping_paths": [
+        "console/src/components/line-detail/HistoryTab.tsx",
+        "console/src/pages/Inbox.tsx",
+        "console/src/pages/LineDetail.tsx",
+        "tests/console/history-tab.test.tsx",
+        "tests/console/inbox-page.test.tsx",
+        "tests/console/line-detail-tabs.test.tsx"
+      ],
+      "title": "SOUP v3 design system — foundation cutover",
+      "updated_at": "2026-06-15T20:09:57Z",
+      "url": "https://github.com/LucasQuiles/WhatSoup/pull/881"
+    },
+    {
+      "assessment": "collision-only",
+      "base_ref": "main",
+      "disposition": "open",
+      "head_ref": "takeover/console-successor-20260722",
+      "is_draft": true,
+      "matched_by": ["touched-path"],
+      "number": 2078,
+      "overlapping_paths": [
+        "console/src/components/line-detail/HistoryTab.tsx",
+        "console/src/pages/Inbox.tsx",
+        "console/src/pages/LineDetail.tsx",
+        "tests/console/inbox-page.test.tsx",
+        "tests/console/line-detail-tabs.test.tsx"
+      ],
+      "title": "chore: track transport and iMessage source for selective reconstruction",
+      "updated_at": "2026-07-25T03:24:03Z",
+      "url": "https://github.com/LucasQuiles/WhatSoup/pull/2078"
+    },
+    {
+      "assessment": "partial",
+      "base_ref": "main",
+      "disposition": "merged",
+      "head_ref": "feat/console-v35-integration",
+      "is_draft": false,
+      "matched_by": ["touched-path"],
+      "number": 2198,
+      "overlapping_paths": [
+        "console/src/components/inbox/ThreadPane.tsx",
+        "console/src/pages/Inbox.tsx",
+        "tests/console/inbox-page.test.tsx",
+        "tests/console/line-detail-tabs.test.tsx"
+      ],
+      "title": "feat(console): v3.5 console — integrated program (13 beads + harness fix), one merge",
+      "updated_at": "2026-07-25T02:19:04Z",
+      "url": "https://github.com/LucasQuiles/WhatSoup/pull/2198"
+    },
+    {
+      "assessment": "collision-only",
+      "base_ref": "main",
+      "disposition": "open",
+      "head_ref": "takeover/console-consolidated-20260721",
+      "is_draft": true,
+      "matched_by": ["touched-path"],
+      "number": 2500,
+      "overlapping_paths": [
+        "console/src/components/line-detail/HistoryTab.tsx",
+        "console/src/pages/Inbox.tsx",
+        "console/src/pages/LineDetail.tsx",
+        "tests/console/line-detail-tabs.test.tsx"
+      ],
+      "title": "preserve: feat(console): add transport-aware line creation",
+      "updated_at": "2026-07-26T21:00:56Z",
+      "url": "https://github.com/LucasQuiles/WhatSoup/pull/2500"
+    },
+    {
+      "assessment": "collision-only",
+      "base_ref": "main",
+      "disposition": "open",
+      "head_ref": "takeover/console-live-main-20260722-2",
+      "is_draft": true,
+      "matched_by": ["touched-path"],
+      "number": 2501,
+      "overlapping_paths": [
+        "console/src/components/line-detail/HistoryTab.tsx",
+        "console/src/pages/Inbox.tsx",
+        "console/src/pages/LineDetail.tsx",
+        "tests/console/inbox-page.test.tsx",
+        "tests/console/line-detail-tabs.test.tsx"
+      ],
+      "title": "preserve: merge: reconcile console successor with main",
+      "updated_at": "2026-07-26T21:00:57Z",
+      "url": "https://github.com/LucasQuiles/WhatSoup/pull/2501"
+    }
+  ],
+  "pull_request_owner_pr_number": null,
+  "recommended_labels": [
+    "P2",
+    "SSOT",
+    "audit",
+    "bug",
+    "chat",
+    "console",
+    "reliability"
+  ],
+  "recommended_title": null,
+  "review_confidence": "high",
+  "suggested_remediation": "Introduce one bounded chat/message observation adapter that preserves availability, freshness, retained-after-error state, last success, and multi-line coverage; adopt it in Inbox and Line Detail, qualify partial aggregates, and reserve empty copy for complete successful reads.",
+  "title": "observability(console): chat and message query failures render as valid empty history",
+  "updated_at": "2026-07-27T01:40:35Z",
+  "url": "https://github.com/LucasQuiles/WhatSoup/issues/2530"
+}

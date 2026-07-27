@@ -1,0 +1,282 @@
+{
+  "acceptance_criteria": [
+    "Tracked source, tests, console code, and public documentation contain zero unresolved oc-re/**/*.md references.",
+    "Every retained provenance citation resolves to a committed public repository artifact or a canonical GitHub issue, pull request, or commit reference.",
+    "Replacement evidence is concise, topology-neutral, publication-reviewed, and contains no host, user, account, message, credential, private path, or private-topology detail.",
+    "The provenance-repair change modifies comments and documentation only; runtime behavior and test assertions remain byte-identical.",
+    "Closed design-debt rows and proposal grounding retain their historical status while their evidence becomes publicly resolvable.",
+    "A deterministic guard scans tracked text in source, tests, console code, and documentation and rejects newly introduced unresolved internal Markdown references.",
+    "The guard distinguishes valid repository-local Markdown, canonical public issue and pull-request links, explicit external public references, and path-like prose that is not a reference.",
+    "The guard fails closed on an incomplete scan and uses only a small reason-bearing exception list for intentionally non-local public references.",
+    "Current unresolved debt is repaired before the guard becomes enforcing so the new check starts from a zero-debt baseline.",
+    "Focused guard fixtures and every affected existing feature suite pass against committed bytes."
+  ],
+  "affected_paths": [
+    "console/src/components/line-detail/CheckpointsTab.tsx",
+    "console/src/components/line-detail/RateLimitsCard.tsx",
+    "docs/design-system/06-implementation/conformance-manifest.md",
+    "docs/design-system/06-implementation/design-debt-register.md",
+    "docs/proposals/2026-07-19-approval-queue.md",
+    "docs/proposals/2026-07-20-terminal-leg-map.md",
+    "scripts/publication-guard.ts",
+    "src/fleet/routes/checkpoints.ts",
+    "src/fleet/routes/rate-limits.ts",
+    "src/runtimes/agent/restart-loop-guard.ts",
+    "tests/console/components/line-detail/CheckpointsTab.test.tsx",
+    "tests/console/components/line-detail/RateLimitsCard.test.tsx",
+    "tests/fleet/routes/checkpoints-restore.test.ts",
+    "tests/fleet/routes/lines-checkpoints.test.ts",
+    "tests/fleet/routes/rate-limits.test.ts",
+    "tests/runtimes/agent/restart-loop-guard.test.ts",
+    "tests/scripts/publication-guard.test.ts"
+  ],
+  "blast_radius": "Publicly reproducible design and implementation lineage for restart-loop protection, rate-limit visibility, checkpoint browsing and restore, design-debt closeouts, and proposal grounding; pre-commit and pre-push enforcement of repository-local Markdown provenance across source, tests, console code, and documentation.",
+  "classification": "leaf",
+  "current_labels": ["P4", "documentation"],
+  "decisive_source_paths": [
+    "console/src/components/line-detail/CheckpointsTab.tsx",
+    "console/src/components/line-detail/RateLimitsCard.tsx",
+    "docs/design-system/06-implementation/conformance-manifest.md",
+    "docs/design-system/06-implementation/design-debt-register.md",
+    "docs/proposals/2026-07-19-approval-queue.md",
+    "docs/proposals/2026-07-20-terminal-leg-map.md",
+    "scripts/publication-guard.ts",
+    "src/fleet/routes/checkpoints.ts",
+    "src/fleet/routes/rate-limits.ts",
+    "src/runtimes/agent/restart-loop-guard.ts"
+  ],
+  "decisive_test_paths": [
+    "tests/console/components/line-detail/CheckpointsTab.test.tsx",
+    "tests/console/components/line-detail/RateLimitsCard.test.tsx",
+    "tests/fleet/routes/checkpoints-restore.test.ts",
+    "tests/fleet/routes/lines-checkpoints.test.ts",
+    "tests/fleet/routes/rate-limits.test.ts",
+    "tests/runtimes/agent/restart-loop-guard.test.ts",
+    "tests/scripts/publication-guard.test.ts"
+  ],
+  "dependency_issue_numbers": [2461],
+  "duplicate_of_issue_number": null,
+  "evidence_state": "verified",
+  "evidence_summary": "Three live identity reads spanning 24 seconds pinned open issue #2536 to node I_kwDOR1Sep88AAAABKQhulg, its current title, labels, update time, URL, and exact 4,669-byte body hash while the SSH remote main remained 9a1bd7b3d3c529b276c1ad764d2c312d7f3abfc3. All 17 decisive source and focused-test blobs are byte-identical between the prior and new pins. Exact current main contains 24 oc-re/**/*.md reference matches across 15 tracked source, console, test, and documentation files. They name 10 unique Markdown targets, and git object lookup proves all 10 are absent from the tree. No tracked oc-re path exists in repository history. The existing publication guard recognizes missing backticked or linked docs/**/*.md references only in staged Markdown additions. A corrected direct probe produced one missing-doc-ref for docs/missing.md but zero findings for an absent oc-re/specs/missing.md reference in either a Markdown file or source file. All seven decisive feature and publication-guard suites passed 99 of 99 tests at the new exact main. Merged PRs #1929, #1930, #1937, #1939, #1940, #1943, #1947, #1951, #1953, and #1969 preserve public implementation lineage but do not make the cited records resolvable. The prior complete scan found only collision-only open changes in PR #2078 and PR #2489, and both overlap identities remain current; publication still requires the declared fresh estate rescan. Issue #2461 owns a separate BOT ERRORS documentation split and remains a coordination dependency rather than a duplicate.",
+  "falsifier_or_remaining_gap": "The finding is falsified if every referenced oc-re Markdown target exists on exact main or the enforcing guard rejects the current unresolved references across source, tests, console code, and docs. Git object checks and the direct matcher probe disproved both conditions. Earlier malformed audit commands and this revalidation's first malformed shell-regex command were treated as inconclusive; corrected no-write scans reproduced 24 references, 15 files, 10 unique targets, 10 missing targets, and the guard boundary. The seven decisive suites passed 99 of 99, establishing current behavior rather than the missing whole-tree provenance contract. This bounded audit did not read or recover any private lane artifact, determine whether its contents are publication-safe, map every sentence to replacement public evidence, or implement a whole-tree guard. Those remain implementation-time publication review and verification obligations.",
+  "impact": "Reviewers and maintainers are directed from production comments, tests, public proposals, and conformance claims to evidence that cannot be resolved from the repository. The missing lineage cannot be checked mechanically, and copying unknown private artifacts as a repair could expose operational context. Existing enforcement allows the same unresolved internal-path pattern to be introduced again outside staged Markdown docs.",
+  "implementation_after_issue_numbers": [],
+  "issue_node_id": "I_kwDOR1Sep88AAAABKQhulg",
+  "issue_number": 2536,
+  "lead_verification_obligations": [
+    "Re-read issue #2536 immediately before registry integration and reject this record if its state, node ID, title, labels, update time, URL, or exact body hash changed.",
+    "Reconfirm the SSH origin, local origin/main, remote main, and all 17 decisive path bytes; main advanced once during this audit and must remain pinned for implementation.",
+    "Inventory every tracked internal Markdown reference from committed bytes and require the repair manifest to account for all 24 current oc-re occurrences and all 10 missing targets.",
+    "Do not publish or reconstruct any absent lane artifact without a separate publication review; prefer merged pull requests, current source and tests, or a newly written topology-neutral public record.",
+    "Coordinate #2461's BOT ERRORS documentation split without absorbing its normative-contract and stale-topology cleanup into this cross-feature provenance owner.",
+    "Split cleanup from enforcement: first land a documentation and comment-only repair with zero runtime or assertion changes, then enable a zero-baseline unresolved-reference guard.",
+    "Add RED and GREEN guard fixtures for valid local Markdown, canonical GitHub issue and pull-request references, missing internal paths in source and Markdown, explicit external public references, anchors, deleted targets, and path-like non-reference prose.",
+    "Require the guard to scan the complete tracked text scope or prove an equivalent base-plus-diff model; staged-added-lines-only enforcement cannot retire or prevent inherited unresolved debt.",
+    "Run the publication guard plus the restart-loop, rate-limit, checkpoint browser, checkpoint restore, design-system, and proposal-focused suites against committed repair bytes.",
+    "Re-scan all open PR references and changed files before dispatch; PR #2078 and PR #2489 are collision-only and no open implementation owner was found."
+  ],
+  "owner_boundary": "public-provenance-reference-repair-and-unresolved-internal-markdown-enforcement",
+  "partial_findings": [],
+  "pinned_revision": "9a1bd7b3d3c529b276c1ad764d2c312d7f3abfc3",
+  "pre_review_body_sha256": "bf74763a2e646a6a39e24763d540fc620c716fdba2356d47aeb2774317774b3c",
+  "proposed_cohort_id": null,
+  "pull_request_overlaps": [
+    {
+      "assessment": "partial",
+      "base_ref": "main",
+      "disposition": "merged",
+      "head_ref": "feat/c5-restart-loop-guard-20260719",
+      "is_draft": false,
+      "matched_by": ["acceptance-criteria", "touched-path"],
+      "number": 1929,
+      "overlapping_paths": [
+        "src/runtimes/agent/restart-loop-guard.ts",
+        "tests/runtimes/agent/restart-loop-guard.test.ts"
+      ],
+      "title": "feat(agent): restart-loop guard — resume-replay circuit breaker (C5)",
+      "updated_at": "2026-07-19T23:05:32Z",
+      "url": "https://github.com/LucasQuiles/WhatSoup/pull/1929"
+    },
+    {
+      "assessment": "partial",
+      "base_ref": "main",
+      "disposition": "merged",
+      "head_ref": "feat/checkpoint-browser-ui-20260719",
+      "is_draft": false,
+      "matched_by": ["acceptance-criteria", "touched-path"],
+      "number": 1930,
+      "overlapping_paths": [
+        "console/src/components/line-detail/CheckpointsTab.tsx",
+        "docs/design-system/06-implementation/conformance-manifest.md",
+        "src/fleet/routes/checkpoints.ts",
+        "tests/console/components/line-detail/CheckpointsTab.test.tsx",
+        "tests/fleet/routes/lines-checkpoints.test.ts"
+      ],
+      "title": "feat(console): checkpoint browser — read-only session_checkpoints surface (LineDetail tab)",
+      "updated_at": "2026-07-20T01:58:43Z",
+      "url": "https://github.com/LucasQuiles/WhatSoup/pull/1930"
+    },
+    {
+      "assessment": "partial",
+      "base_ref": "main",
+      "disposition": "merged",
+      "head_ref": "feat/rate-limits-surface-20260719",
+      "is_draft": false,
+      "matched_by": ["acceptance-criteria", "touched-path"],
+      "number": 1937,
+      "overlapping_paths": [
+        "console/src/components/line-detail/RateLimitsCard.tsx",
+        "src/fleet/routes/rate-limits.ts",
+        "tests/console/components/line-detail/RateLimitsCard.test.tsx",
+        "tests/fleet/routes/rate-limits.test.ts"
+      ],
+      "title": "feat(fleet+console): rate-limit/throttle surface — per-line windowed pills on LineDetail (D-5, PDR-5 corrected)",
+      "updated_at": "2026-07-20T00:27:59Z",
+      "url": "https://github.com/LucasQuiles/WhatSoup/pull/1937"
+    },
+    {
+      "assessment": "partial",
+      "base_ref": "main",
+      "disposition": "merged",
+      "head_ref": "feat/dd8-ghost-tier-remaining-20260719",
+      "is_draft": false,
+      "matched_by": ["acceptance-criteria", "touched-path"],
+      "number": 1939,
+      "overlapping_paths": [
+        "docs/design-system/06-implementation/design-debt-register.md"
+      ],
+      "title": "fix(console): DD-8 close — ghost-tier essential-text promotions (log D tag, menu labels, heatmap axis, unlock copy, inbox load-more)",
+      "updated_at": "2026-07-20T03:48:05Z",
+      "url": "https://github.com/LucasQuiles/WhatSoup/pull/1939"
+    },
+    {
+      "assessment": "partial",
+      "base_ref": "main",
+      "disposition": "merged",
+      "head_ref": "feat/dd18r-side-panel-fold-20260719",
+      "is_draft": false,
+      "matched_by": ["acceptance-criteria", "touched-path"],
+      "number": 1940,
+      "overlapping_paths": [
+        "docs/design-system/06-implementation/design-debt-register.md"
+      ],
+      "title": "feat(console): DD-18r close — side-panel fold law for LineDetail + rail-collapse coverage",
+      "updated_at": "2026-07-20T20:06:41Z",
+      "url": "https://github.com/LucasQuiles/WhatSoup/pull/1940"
+    },
+    {
+      "assessment": "partial",
+      "base_ref": "main",
+      "disposition": "merged",
+      "head_ref": "docs/approval-queue-design-20260719",
+      "is_draft": false,
+      "matched_by": ["acceptance-criteria", "touched-path"],
+      "number": 1943,
+      "overlapping_paths": ["docs/proposals/2026-07-19-approval-queue.md"],
+      "title": "docs(proposals): console approval queue design (D-4/PDR-2) — for owner nod",
+      "updated_at": "2026-07-20T02:47:24Z",
+      "url": "https://github.com/LucasQuiles/WhatSoup/pull/1943"
+    },
+    {
+      "assessment": "partial",
+      "base_ref": "main",
+      "disposition": "merged",
+      "head_ref": "docs/terminal-leg-map-20260720",
+      "is_draft": false,
+      "matched_by": ["acceptance-criteria", "touched-path"],
+      "number": 1947,
+      "overlapping_paths": ["docs/proposals/2026-07-20-terminal-leg-map.md"],
+      "title": "docs(proposals): terminal leg MAP (D-5/PDR-1) — staged live-view → gated-exec → full PTY",
+      "updated_at": "2026-07-20T03:05:59Z",
+      "url": "https://github.com/LucasQuiles/WhatSoup/pull/1947"
+    },
+    {
+      "assessment": "partial",
+      "base_ref": "main",
+      "disposition": "merged",
+      "head_ref": "feat/checkpoints-tab-followups-20260719-clean",
+      "is_draft": false,
+      "matched_by": ["acceptance-criteria", "touched-path"],
+      "number": 1951,
+      "overlapping_paths": [
+        "console/src/components/line-detail/CheckpointsTab.tsx",
+        "tests/console/components/line-detail/CheckpointsTab.test.tsx"
+      ],
+      "title": "feat(console): CheckpointsTab sort + Delivery column — UI/UX follow-ups (F-UX-1/F-UX-3; clean-history recreation of #1933)",
+      "updated_at": "2026-07-20T04:24:26Z",
+      "url": "https://github.com/LucasQuiles/WhatSoup/pull/1951"
+    },
+    {
+      "assessment": "partial",
+      "base_ref": "main",
+      "disposition": "merged",
+      "head_ref": "feat/checkpoint-restore-20260719-v2",
+      "is_draft": false,
+      "matched_by": ["acceptance-criteria", "touched-path"],
+      "number": 1953,
+      "overlapping_paths": [
+        "console/src/components/line-detail/CheckpointsTab.tsx",
+        "src/fleet/routes/checkpoints.ts",
+        "tests/console/components/line-detail/CheckpointsTab.test.tsx",
+        "tests/fleet/routes/checkpoints-restore.test.ts"
+      ],
+      "title": "feat(fleet+console): checkpoint-restore — restart-mediated, through the runtime's own resume gate (D-1; clean-stack recreation of #1935)",
+      "updated_at": "2026-07-21T00:34:52Z",
+      "url": "https://github.com/LucasQuiles/WhatSoup/pull/1953"
+    },
+    {
+      "assessment": "partial",
+      "base_ref": "main",
+      "disposition": "merged",
+      "head_ref": "feat/restart-loop-guard-observability-20260720",
+      "is_draft": false,
+      "matched_by": ["acceptance-criteria", "touched-path"],
+      "number": 1969,
+      "overlapping_paths": [
+        "src/runtimes/agent/restart-loop-guard.ts",
+        "tests/runtimes/agent/restart-loop-guard.test.ts"
+      ],
+      "title": "feat(restart-loop-guard): observability counters — read the breaker by its decisions, not its silence",
+      "updated_at": "2026-07-20T09:26:16Z",
+      "url": "https://github.com/LucasQuiles/WhatSoup/pull/1969"
+    },
+    {
+      "assessment": "collision-only",
+      "base_ref": "main",
+      "disposition": "open",
+      "head_ref": "takeover/console-successor-20260722",
+      "is_draft": true,
+      "matched_by": ["touched-path"],
+      "number": 2078,
+      "overlapping_paths": [
+        "console/src/components/line-detail/CheckpointsTab.tsx"
+      ],
+      "title": "chore: track transport and iMessage source for selective reconstruction",
+      "updated_at": "2026-07-25T03:24:03Z",
+      "url": "https://github.com/LucasQuiles/WhatSoup/pull/2078"
+    },
+    {
+      "assessment": "collision-only",
+      "base_ref": "main",
+      "disposition": "open",
+      "head_ref": "gate/fix-exit-presence-20260724",
+      "is_draft": true,
+      "matched_by": ["touched-path"],
+      "number": 2489,
+      "overlapping_paths": [
+        "docs/design-system/06-implementation/design-debt-register.md"
+      ],
+      "title": "preserve: fix(console): preserve animated exit presence",
+      "updated_at": "2026-07-26T21:00:40Z",
+      "url": "https://github.com/LucasQuiles/WhatSoup/pull/2489"
+    }
+  ],
+  "pull_request_owner_pr_number": null,
+  "recommended_labels": ["P4", "audit", "bug", "documentation", "reliability"],
+  "recommended_title": null,
+  "review_confidence": "high",
+  "suggested_remediation": "Create a deterministic repair manifest for all 24 references. Replace each with the smallest durable public evidence: the merged pull request plus current source and focused tests when sufficient, or a concise newly authored topology-neutral record when normative design content still matters. Do not copy absent artifacts without publication review. After cleanup reaches zero unresolved internal references, extend the existing publication guard or add one shared checker that scans tracked text across source, tests, console, and docs, resolves repository-relative Markdown against the committed tree, recognizes canonical public references, and fails closed with reason-bearing exceptions and focused fixtures.",
+  "title": "docs(provenance): replace unresolved lane-artifact references with durable public evidence",
+  "updated_at": "2026-07-27T01:40:38Z",
+  "url": "https://github.com/LucasQuiles/WhatSoup/issues/2536"
+}

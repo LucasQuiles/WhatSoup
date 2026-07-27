@@ -4,15 +4,15 @@
 
 Internal publication roots covered by the guard: `docs/runbooks/`, `docs/sdlc/`, `docs/superpowers/`, `docs/plans/`, `docs/cutover/`, `docs/research/`, `docs/triage/`, `docs/specs/` (selected), `docs/work-index*`, `docs/current-program.md`, `docs/handoff-*.md`, `HANDOFF-*.md`, `docs/project-status-*.md`, `docs/audit-*.md`, `tmp/`.
 
-**Total classification rows:** 143
+**Total classification rows:** 158
 
 | Classification | Count |
 |---|---:|
-| PUBLIC | 20 |
+| PUBLIC | 35 |
 | PRIVATE-ARCHIVE | 123 |
 | SANITIZE | 0 |
 | DELETE | 0 |
-| Total | 143 |
+| Total | 158 |
 
 | Path | Classification | Rationale |
 |---|---|---|
@@ -154,6 +154,21 @@ Internal publication roots covered by the guard: `docs/runbooks/`, `docs/sdlc/`,
 | `docs/triage/reviews/open-issue-refresh-20260726/2525.json` | PUBLIC | Body-free reviewed issue evidence for the post-cutoff registry refresh. |
 | `docs/triage/reviews/open-issue-refresh-20260726/2526.json` | PUBLIC | Body-free reviewed issue evidence for the post-cutoff registry refresh. |
 | `docs/triage/reviews/open-issue-refresh-20260726/2527.json` | PUBLIC | Body-free reviewed issue evidence for the post-cutoff registry refresh. |
+| `docs/triage/reviews/open-issue-refresh-20260727/2355.json` | PUBLIC | Body-free reviewed issue evidence for the next post-cutoff registry refresh. |
+| `docs/triage/reviews/open-issue-refresh-20260727/2528.json` | PUBLIC | Body-free reviewed issue evidence for the next post-cutoff registry refresh. |
+| `docs/triage/reviews/open-issue-refresh-20260727/2529.json` | PUBLIC | Body-free reviewed issue evidence for the next post-cutoff registry refresh. |
+| `docs/triage/reviews/open-issue-refresh-20260727/2530.json` | PUBLIC | Body-free reviewed issue evidence for the next post-cutoff registry refresh. |
+| `docs/triage/reviews/open-issue-refresh-20260727/2531.json` | PUBLIC | Body-free reviewed issue evidence for the next post-cutoff registry refresh. |
+| `docs/triage/reviews/open-issue-refresh-20260727/2532.json` | PUBLIC | Body-free reviewed issue evidence for the next post-cutoff registry refresh. |
+| `docs/triage/reviews/open-issue-refresh-20260727/2533.json` | PUBLIC | Body-free reviewed issue evidence for the next post-cutoff registry refresh. |
+| `docs/triage/reviews/open-issue-refresh-20260727/2534.json` | PUBLIC | Body-free reviewed issue evidence for the next post-cutoff registry refresh. |
+| `docs/triage/reviews/open-issue-refresh-20260727/2535.json` | PUBLIC | Body-free reviewed issue evidence for the next post-cutoff registry refresh. |
+| `docs/triage/reviews/open-issue-refresh-20260727/2536.json` | PUBLIC | Body-free reviewed issue evidence for the next post-cutoff registry refresh. |
+| `docs/triage/reviews/open-issue-refresh-20260727/2537.json` | PUBLIC | Body-free reviewed issue evidence for the next post-cutoff registry refresh. |
+| `docs/triage/reviews/open-issue-refresh-20260727/2538.json` | PUBLIC | Body-free reviewed issue evidence for the next post-cutoff registry refresh. |
+| `docs/triage/reviews/open-issue-refresh-20260727/2539.json` | PUBLIC | Body-free reviewed issue evidence for the next post-cutoff registry refresh. |
+| `docs/triage/reviews/open-issue-refresh-20260727/2540.json` | PUBLIC | Body-free reviewed issue evidence for the next post-cutoff registry refresh. |
+| `docs/triage/reviews/open-issue-refresh-20260727/2541.json` | PUBLIC | Body-free reviewed issue evidence for the next post-cutoff registry refresh. |
 | `docs/triage/snapshots/open-issues-20260726T224049Z.json` | PUBLIC | Body-free bounded live-inventory seal recording issue, pull-request, label, pagination, and main-revision facts immediately after the registry cutoff. |
 | `docs/work-index-repair-matrix.md` | PRIVATE-ARCHIVE | Internal planning or operational documentation; retained in the repository but excluded from public publication by default. |
 | `docs/work-index.json` | PRIVATE-ARCHIVE | Internal planning or operational documentation; retained in the repository but excluded from public publication by default. |

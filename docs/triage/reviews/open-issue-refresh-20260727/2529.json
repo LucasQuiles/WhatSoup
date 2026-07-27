@@ -1,0 +1,226 @@
+{
+  "acceptance_criteria": [
+    "Each of the five per-line metric groups renders available-zero, unavailable, and not-applicable distinctly.",
+    "Fleet drawer values and sort keys never use an unavailable fallback as a measured zero or confirmed empty value.",
+    "Pipeline, Metrics, and Summary detail surfaces preserve the availability state for every database-derived value they expose.",
+    "A missing availability map from an older payload renders an explicit unsupported or unknown compatibility state.",
+    "Aggregate coverage is reported per metric group, or its copy names the one metric group it actually counts.",
+    "Query freshness, carried health freshness, and database observation availability remain independent dimensions.",
+    "Recovery from unavailable to available-zero is visible and requires a fresh available observation.",
+    "Behavior and mutation tests cover every metric group across compact, detail, accessible-text, sorting, compatibility, and recovery projections.",
+    "Public UI and test projections use reserved synthetic values and bounded state rather than raw errors or environment detail."
+  ],
+  "affected_paths": [
+    "console/src/components/fleet/FleetKpis.tsx",
+    "console/src/components/line-detail/MetricsTab.tsx",
+    "console/src/components/line-detail/PipelineTab.tsx",
+    "console/src/components/line-detail/SummaryTab.tsx",
+    "console/src/lib/compute-kpis.ts",
+    "console/src/pages/SoupKitchen.tsx",
+    "console/src/types.ts",
+    "tests/console/compute-kpis.test.ts",
+    "tests/console/line-detail-history-metrics.test.ts",
+    "tests/console/line-detail-pipeline-tab.test.tsx",
+    "tests/console/line-detail-tabs.test.tsx",
+    "tests/console/soup-kitchen.test.tsx"
+  ],
+  "blast_radius": "Every operator-facing per-line database metric, Fleet sorting and drill-down, line-detail diagnosis, aggregate coverage copy, compatibility behavior during mixed deployments, and any future action gate that treats a fallback value as proof of inactivity.",
+  "classification": "leaf",
+  "current_labels": ["P2", "SSOT", "bug", "console", "reliability"],
+  "decisive_source_paths": [
+    "console/src/components/fleet/FleetKpis.tsx",
+    "console/src/components/line-detail/MetricsTab.tsx",
+    "console/src/components/line-detail/PipelineTab.tsx",
+    "console/src/components/line-detail/SummaryTab.tsx",
+    "console/src/lib/compute-kpis.ts",
+    "console/src/pages/SoupKitchen.tsx",
+    "console/src/types.ts",
+    "src/fleet/routes/lines.ts"
+  ],
+  "decisive_test_paths": [
+    "tests/console/compute-kpis.test.ts",
+    "tests/console/line-detail-history-metrics.test.ts",
+    "tests/console/line-detail-pipeline-tab.test.tsx",
+    "tests/console/line-detail-tabs.test.tsx",
+    "tests/console/soup-kitchen.test.tsx",
+    "tests/fleet/routes/lines.test.ts"
+  ],
+  "dependency_issue_numbers": [2447, 2514, 2519, 2523, 2528],
+  "duplicate_of_issue_number": null,
+  "evidence_state": "verified",
+  "evidence_summary": "Exact-main-identical producer code returns availability for message statistics, sessions, chat counts, token statistics, and last activity, and the shared console type documents that unavailable must not be treated as zero. Production console source reads that map only for messageStats aggregation. The Fleet drawer renders raw fallbacks, six numeric sort keys collapse absence to zero, token and last-activity absence become an em dash, Pipeline emits raw values, and Metrics and Summary hide a zero-valued token fallback without consulting availability. Eighteen write-free source assertions reproduced those seams. All fourteen cited decisive source and test paths are byte-identical to pinned main. The six cited focused suites, including the lines-route producer suite, passed 191 of 191 tests under the repository-pinned runtime, but they cover only messageStats aggregation availability rather than the other groups or per-line presentation. Three live identity reads spanning 26 seconds were stable with five current labels; the node, open state, title, URL, update time, and exact body hash remained unchanged while local and SSH remote main stayed at the pin. At the reviewed cutoff, two complete captures stabilized at the same byte hash over 235 open issues, all 39 open pull requests, all changed-file pages, all closing-reference pages, and 37 labels. No open pull request references, closes, semantically owns, or implements this issue; three broad drafts collide only by path. The same-cutoff all-state search covered 528 issues and 1,984 pull requests. Later publication-time full-capture attempts detected top-level inventory drift and failed closed, so estate freshness requires the declared final rescan.",
+  "falsifier_or_remaining_gap": "The issue is falsified if every pinned per-line consumer joins all five raw values to their availability discriminator before rendering or sorting and if compatibility absence remains explicit. Exact source assertions found no such adapter or consumer reads. The issue body's removed audit-only drawer test cannot be independently rerun from the current tree. The complete cited producer and consumer suites now pass under the repository-pinned runtime, but none asserts the missing availability join across all five metric groups.",
+  "impact": "A database fault can look like an idle line, unavailable rows can sort with confirmed empty rows, investigation can be suppressed, and recovery can be visually indistinguishable from continued unavailability.",
+  "implementation_after_issue_numbers": [2447, 2523],
+  "issue_node_id": "I_kwDOR1Sep88AAAABKQTvdQ",
+  "issue_number": 2529,
+  "lead_verification_obligations": [
+    "Re-read issue #2529 immediately before publication and reject the record if its state, node identity, title, labels, update time, or exact body hash changed.",
+    "Reconfirm SSH origin, tracking main, remote main, and API main agreement before integrating the record.",
+    "Coordinate canonical vocabulary with #2447, presentation behavior with #2523, and the separate aggregate metrics contract in #2528 without collapsing the two owner boundaries.",
+    "Run the complete lines-route metric-availability tests under the repository-pinned native runtime in an isolated mutable harness before claiming producer coverage complete.",
+    "Add executable truth-table, compatibility, accessibility, sorting, mutation, and unavailable-to-available-zero recovery tests for all five metric groups before completion.",
+    "Re-scan every open pull request and all changed-file and closing-reference pages immediately before assigning ownership; PRs #2078, #2500, and #2501 are collision-only drafts."
+  ],
+  "owner_boundary": "per-line-metric-availability-consumer-projection",
+  "partial_findings": [],
+  "pinned_revision": "9a1bd7b3d3c529b276c1ad764d2c312d7f3abfc3",
+  "pre_review_body_sha256": "83509cef96ddc7fa51997f9d32715f99e8ffa16684534e82dc8e15ffec1e86f0",
+  "proposed_cohort_id": null,
+  "pull_request_overlaps": [
+    {
+      "assessment": "partial",
+      "base_ref": "main",
+      "disposition": "merged",
+      "head_ref": "fix-1879",
+      "is_draft": false,
+      "matched_by": ["acceptance-criteria", "touched-path"],
+      "number": 1911,
+      "overlapping_paths": [
+        "console/src/lib/compute-kpis.ts",
+        "console/src/pages/SoupKitchen.tsx",
+        "console/src/types.ts",
+        "tests/console/compute-kpis.test.ts",
+        "tests/console/soup-kitchen.test.tsx"
+      ],
+      "title": "fix(fleet): distinguish faulted DB reads from real zeros on /api/lines",
+      "updated_at": "2026-07-18T02:01:52Z",
+      "url": "https://github.com/LucasQuiles/WhatSoup/pull/1911"
+    },
+    {
+      "assessment": "partial",
+      "base_ref": "main",
+      "disposition": "merged",
+      "head_ref": "feat/gui5-metrics-freshness-20260718",
+      "is_draft": false,
+      "matched_by": ["acceptance-criteria", "touched-path"],
+      "number": 1925,
+      "overlapping_paths": [
+        "console/src/components/line-detail/MetricsTab.tsx",
+        "console/src/components/line-detail/PipelineTab.tsx"
+      ],
+      "title": "feat(console): observed-at freshness for metrics surfaces (GUI-5)",
+      "updated_at": "2026-07-19T00:45:56Z",
+      "url": "https://github.com/LucasQuiles/WhatSoup/pull/1925"
+    },
+    {
+      "assessment": "partial",
+      "base_ref": "main",
+      "disposition": "merged",
+      "head_ref": "feat/soupkitchen-freshness-contract-20260719",
+      "is_draft": false,
+      "matched_by": ["acceptance-criteria", "touched-path"],
+      "number": 1934,
+      "overlapping_paths": [
+        "console/src/pages/SoupKitchen.tsx",
+        "tests/console/soup-kitchen.test.tsx"
+      ],
+      "title": "feat(console): SoupKitchen universal freshness contract — Carried Health card, carried-shape demotion, strip marker (D-3/F-UX-4)",
+      "updated_at": "2026-07-19T23:39:43Z",
+      "url": "https://github.com/LucasQuiles/WhatSoup/pull/1934"
+    },
+    {
+      "assessment": "collision-only",
+      "base_ref": "main",
+      "disposition": "open",
+      "head_ref": "takeover/console-successor-20260722",
+      "is_draft": true,
+      "matched_by": ["touched-path"],
+      "number": 2078,
+      "overlapping_paths": [
+        "console/src/pages/SoupKitchen.tsx",
+        "console/src/types.ts",
+        "tests/console/line-detail-tabs.test.tsx",
+        "tests/console/soup-kitchen.test.tsx"
+      ],
+      "title": "chore: track transport and iMessage source for selective reconstruction",
+      "updated_at": "2026-07-25T03:24:03Z",
+      "url": "https://github.com/LucasQuiles/WhatSoup/pull/2078"
+    },
+    {
+      "assessment": "historical-attempt",
+      "base_ref": "feat/console-v35-b02-chrome",
+      "disposition": "closed-unmerged",
+      "head_ref": "feat/console-v35-b03-fleet",
+      "is_draft": false,
+      "matched_by": ["touched-path"],
+      "number": 2086,
+      "overlapping_paths": [
+        "console/src/components/fleet/FleetKpis.tsx",
+        "console/src/pages/SoupKitchen.tsx",
+        "tests/console/soup-kitchen.test.tsx"
+      ],
+      "title": "feat(console): v3.5 Fleet surface — KPI strip, lines table, activity feed, heartbeat rail (T5 b-03)",
+      "updated_at": "2026-07-24T12:08:07Z",
+      "url": "https://github.com/LucasQuiles/WhatSoup/pull/2086"
+    },
+    {
+      "assessment": "partial",
+      "base_ref": "main",
+      "disposition": "merged",
+      "head_ref": "feat/console-v35-integration",
+      "is_draft": false,
+      "matched_by": ["touched-path"],
+      "number": 2198,
+      "overlapping_paths": [
+        "console/src/components/fleet/FleetKpis.tsx",
+        "console/src/pages/SoupKitchen.tsx",
+        "tests/console/line-detail-tabs.test.tsx",
+        "tests/console/soup-kitchen.test.tsx"
+      ],
+      "title": "feat(console): v3.5 console — integrated program (13 beads + harness fix), one merge",
+      "updated_at": "2026-07-25T02:19:04Z",
+      "url": "https://github.com/LucasQuiles/WhatSoup/pull/2198"
+    },
+    {
+      "assessment": "collision-only",
+      "base_ref": "main",
+      "disposition": "open",
+      "head_ref": "takeover/console-consolidated-20260721",
+      "is_draft": true,
+      "matched_by": ["touched-path"],
+      "number": 2500,
+      "overlapping_paths": [
+        "console/src/pages/SoupKitchen.tsx",
+        "console/src/types.ts",
+        "tests/console/line-detail-tabs.test.tsx"
+      ],
+      "title": "preserve: feat(console): add transport-aware line creation",
+      "updated_at": "2026-07-26T21:00:56Z",
+      "url": "https://github.com/LucasQuiles/WhatSoup/pull/2500"
+    },
+    {
+      "assessment": "collision-only",
+      "base_ref": "main",
+      "disposition": "open",
+      "head_ref": "takeover/console-live-main-20260722-2",
+      "is_draft": true,
+      "matched_by": ["touched-path"],
+      "number": 2501,
+      "overlapping_paths": [
+        "console/src/pages/SoupKitchen.tsx",
+        "console/src/types.ts",
+        "tests/console/line-detail-tabs.test.tsx",
+        "tests/console/soup-kitchen.test.tsx"
+      ],
+      "title": "preserve: merge: reconcile console successor with main",
+      "updated_at": "2026-07-26T21:00:57Z",
+      "url": "https://github.com/LucasQuiles/WhatSoup/pull/2501"
+    }
+  ],
+  "pull_request_owner_pr_number": null,
+  "recommended_labels": [
+    "P2",
+    "SSOT",
+    "audit",
+    "bug",
+    "console",
+    "reliability"
+  ],
+  "recommended_title": null,
+  "review_confidence": "high",
+  "suggested_remediation": "Introduce one exhaustive adapter that joins each per-line database value to its availability discriminator before rendering or sorting, defines older-payload compatibility, and provides per-group coverage plus explicit recovery transitions.",
+  "title": "observability(console): per-line metric availability is discarded as zero or no data",
+  "updated_at": "2026-07-27T01:40:35Z",
+  "url": "https://github.com/LucasQuiles/WhatSoup/issues/2529"
+}
