@@ -1041,7 +1041,59 @@ sqlite3 $DB \
    VALUES ('phone', '15551234567', 'allowed', 'Alice', datetime('now'));"
 ```
 
-### 7.4 Check Inbound/Outbound Durability State
+### 7.5 Validate a Private Host-Operation Record
+
+Host remediation receipts live outside the repository under
+`~/.local/state/whatsoup/private-ops/`. The directory must be owned by the
+operator with mode `0700`; each JSON record must be owned by the operator with
+mode `0600`. The validator is read-only and never contacts the network or
+loads credentials.
+
+Inspect the closed action/status/reason registries and command schemas:
+
+```bash
+npm --silent run validate-private-operation-record -- schema
+```
+
+Validate one record before the first mutation and after every completed or
+aborted step:
+
+```bash
+npm --silent run validate-private-operation-record -- \
+  validate \
+  --record "$HOME/.local/state/whatsoup/private-ops/<record>.json" \
+  --format json
+```
+
+The command emits exactly one JSON object. Exit `0` means the schema-v1 record
+is valid; exit `1` identifies an actionable record, mode, ownership, or
+completeness failure; exit `2` means the file could not be read safely.
+Diagnostics contain stable kinds and JSON paths but never rejected values, raw
+file content, private target IDs, or filesystem paths.
+
+The published schema includes the same closed action, status, reason, evidence,
+and error-kind registries enforced by the validator. Runtime validation also
+enforces semantic relationships JSON Schema cannot fully express: timestamps
+must be calendar-valid RFC 3339 values in nondecreasing execution order;
+completed steps form the executed prefix; every step after the first planned,
+aborted, or attempted skipped gate remains planned; and each registered host
+action appears once in the published dependency order (Tailscale preservation
+first, then credential/token/launchd gates, then quarantine/access work and
+final acceptance). Schema v1 retains `skipped` as a recognized status so it can
+return a stable fail-closed diagnostic, but none of the seven actions is
+skippable: an already-satisfied action must be recorded as completed with its
+normal proof.
+
+Action-specific evidence proves expected port and global-socket ownership,
+model-probe settlement, SQLite expected-schema equality, ARC consumer and
+canonical-SHA match, quarantine backup mode and pre-row counts, and final
+Tailscale identity/hostname/tag continuity. Tailscale evidence pins those
+hashes across initial and final receipts and requires the same node to remain
+online with expiry disabled. Full phone-like target IDs and operator
+identities are rejected even when prefixed or separator-formatted; short
+numeric database row IDs remain valid.
+
+### 7.6 Check Inbound/Outbound Durability State
 
 ```bash
 DB=~/.local/share/whatsoup/instances/sandbox-agent/bot.db
@@ -1213,7 +1265,7 @@ It fails on a busy writer, a changed database file, schema drift, a partial sour
 or a later-only corroborated delivery. Coordinate against a live writer rather than retrying blindly.
 An exact repeated invocation is idempotent; changed evidence is rejected.
 
-### 7.5 Useful SQL Queries
+### 7.7 Useful SQL Queries
 
 ```bash
 DB=~/.local/share/whatsoup/instances/sandbox-agent/bot.db

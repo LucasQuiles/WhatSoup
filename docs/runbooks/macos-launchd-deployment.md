@@ -87,6 +87,11 @@ The bridge row is a deployment pattern, not evidence that a bridge is installed.
 Verify the concrete plist, wrapper, logs, and target Pinecone project before
 claiming queued facts are exported.
 
+Generated instance plists set `WorkingDirectory` to the checkout containing the
+running WhatSoup code. This makes relative repository health inputs, including
+`.arc/arc.toml`, deterministic. Regenerate the plist when changing checkouts;
+do not hand-edit it to point at a different tree.
+
 Example wrapper chain:
 
 ```bash
@@ -280,6 +285,12 @@ the bot user is logged in.
 
 Fleet emits health-poller warnings when a polled instance is unreachable. If the
 instance is intentionally offline, set `enabled: false` and bounce fleet.
+
+`GET /health` includes `event_loop.discontinuity_count`, a saturating,
+process-local count of monotonic scheduling gaps above 10 seconds. Such gaps
+reset the retained lag window and are not themselves starvation samples.
+Exactly 10 seconds remains a retained sample; local starvation still requires a
+full window whose nearest-rank p95 is strictly greater than 250 ms.
 
 ## Worktree Discipline
 

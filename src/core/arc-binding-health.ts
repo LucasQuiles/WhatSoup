@@ -1,5 +1,18 @@
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, realpathSync } from 'node:fs';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+function resolveSourceRepoRoot(): string | null {
+  try {
+    const moduleUrl = new URL(import.meta.url);
+    if (moduleUrl.protocol !== 'file:') return null;
+    return realpathSync(fileURLToPath(new URL('../..', moduleUrl)));
+  } catch {
+    return null;
+  }
+}
+
+const SOURCE_REPO_ROOT = resolveSourceRepoRoot();
 
 export interface ArcBindingHealthLoaded {
   loaded: true;
@@ -17,6 +30,23 @@ export interface ArcBindingHealthMissing {
 }
 
 export type ArcBindingHealth = ArcBindingHealthLoaded | ArcBindingHealthMissing;
+
+export function resolveArcRepoRoot(
+  env: { WHATSOUP_REPO_ROOT?: string } = process.env,
+  reviewedRoot: string | null = SOURCE_REPO_ROOT,
+): string | null {
+  try {
+    if (reviewedRoot === null) return null;
+    const canonicalReviewedRoot = realpathSync(reviewedRoot);
+    const explicitRoot = env.WHATSOUP_REPO_ROOT?.trim();
+    if (!explicitRoot) return canonicalReviewedRoot;
+    return realpathSync(explicitRoot) === canonicalReviewedRoot
+      ? canonicalReviewedRoot
+      : null;
+  } catch {
+    return null;
+  }
+}
 
 function parseStringLine(text: string, key: string): string {
   const prefix = `${key} = "`;
@@ -45,8 +75,9 @@ function safeReason(err: unknown): string {
   return reason.replace(/[^A-Za-z0-9_.: -]/g, '_');
 }
 
-export function readArcBindingHealth(repoRoot = process.cwd()): ArcBindingHealth {
+export function readArcBindingHealth(repoRoot: string | null = SOURCE_REPO_ROOT): ArcBindingHealth {
   try {
+    if (repoRoot === null) return { loaded: false, reason: 'repository root invalid' };
     const arcToml = path.join(repoRoot, '.arc', 'arc.toml');
     if (!existsSync(arcToml)) return { loaded: false, reason: '.arc/arc.toml missing' };
     const text = readFileSync(arcToml, 'utf8');
