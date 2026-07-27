@@ -2,6 +2,7 @@
 // Minimal in-memory ImessagePort stub for adapter tests.
 import type {
   ImessagePort,
+  InboundImessagePage,
   SendImessageArgs,
   InboundImessage,
   ReactImessageArgs,
@@ -36,10 +37,14 @@ export class MockImessagePort implements ImessagePort {
     return { guid: `guid-${this.nextGuid++}` };
   }
 
-  async listInboundSince(_since: Date, _pageSize?: number): Promise<readonly InboundImessage[]> {
+  async listInboundSince(
+    _since: Date,
+    _pageSize?: number,
+    _cursor?: string | null,
+  ): Promise<InboundImessagePage> {
     const records = this.opts.nextInbound ?? [];
     this.opts = { ...this.opts, nextInbound: undefined };
-    return records;
+    return { records, cursor: 'mock:idle', hasMore: false };
   }
 
   async sendReaction(args: ReactImessageArgs): Promise<void> {
@@ -53,6 +58,24 @@ export class MockImessagePort implements ImessagePort {
   async sendTypingIndicator(args: SendTypingArgs): Promise<void> {
     this.typings.push(args);
   }
+}
+
+export function imessagePage(
+  records: readonly InboundImessage[],
+  nextOffset: number | null = null,
+): InboundImessagePage {
+  return {
+    records,
+    cursor: nextOffset === null ? 'mock:complete' : `mock:offset:${nextOffset}`,
+    hasMore: nextOffset !== null,
+  };
+}
+
+export function imessageCursorOffset(cursor: string | null | undefined): number {
+  if (cursor === null || cursor === undefined) return 0;
+  const match = /^mock:offset:(\d+)$/.exec(cursor);
+  if (match === null) return 0;
+  return Number(match[1]);
 }
 
 import type { ImessageConfig } from '../../../src/transport/imessage/types.ts';

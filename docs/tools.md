@@ -3172,7 +3172,7 @@ Search company knowledge bases using natural language queries. Results are pre-f
 | top_k | number | optional | Number of results (1-20) |
 | namespace | string | optional | Override default namespace(s) |
 
-**Returns:** Formatted search results with relevance scores. Available indexes are dynamically configured per instance.
+**Returns:** `index`, `query`, `results_count`, a structured `results` array containing each result's `id`, numeric `score`, and `entity_type`, plus a human-readable `formatted` summary. Available indexes are dynamically configured per instance. When an index profile defines `minScore`, lower-scoring hits are omitted and an all-low-score search returns zero results.
 
 ---
 

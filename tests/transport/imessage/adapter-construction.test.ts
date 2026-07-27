@@ -57,6 +57,16 @@ describe('ImessageAdapter — construction', () => {
     }
   });
 
+  it('does not advertise bridge-gated extensions for imsg without runtime attestation', () => {
+    const adapter = new ImessageAdapter(
+      makeImessageConfig({ backend: 'imsg', imsgSocketPath: '/tmp/imsg-test.sock' }),
+      new MockImessagePort(),
+    );
+    expect([...adapter.capabilities.extensions]).toEqual([]);
+    expect(adapter.capabilities.readReceipts).toBe('none');
+    expect(adapter.capabilities.reactions).toBe('none');
+  });
+
   it('does NOT declare delete in v1 (iMessage has no remote-delete protocol)', () => {
     const adapter = new ImessageAdapter(makeImessageConfig(), new MockImessagePort());
     expect(adapter.capabilities.extensions.has('delete')).toBe(false);

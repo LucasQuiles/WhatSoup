@@ -22,8 +22,8 @@ function makeStubPort(): ImessagePort {
       sent.push(args);
       return { guid: `guid-${sent.length}` };
     },
-    async listInboundSince(_since: Date, _pageSize?: number) {
-      return [] as readonly InboundImessage[];
+    async listInboundSince(_since: Date, _pageSize?: number, _cursor?: string | null) {
+      return { records: [] as readonly InboundImessage[], cursor: 'stub:0', hasMore: false };
     },
     async sendReaction(args) { reactions.push(args); },
     async sendReadReceipts(args) { receipts.push(args); },
@@ -48,10 +48,10 @@ describe('imessage transport — port interface contract', () => {
     expect(typeof r.guid).toBe('string');
   });
 
-  it('listInboundSince returns an empty array by default', async () => {
+  it('listInboundSince returns an empty page by default', async () => {
     const port = makeStubPort();
-    const rows = await port.listInboundSince(new Date(0));
-    expect(rows).toEqual([]);
+    const page = await port.listInboundSince(new Date(0));
+    expect(page).toEqual({ records: [], cursor: 'stub:0', hasMore: false });
   });
 
   it('InboundImessage carries the documented fields', () => {
