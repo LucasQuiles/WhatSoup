@@ -133,8 +133,11 @@ export interface PopoverProps {
 
 /** Build the id for an option element (used for aria-activedescendant). */
 export function popoverOptionId(listboxId: string, value: string): string {
-  // Escape spaces/special chars for valid id usage
-  return `${listboxId}-opt-${value.replace(/[^a-zA-Z0-9_-]/g, '_')}`;
+  let encodedValue = '';
+  for (let index = 0; index < value.length; index += 1) {
+    encodedValue += value.charCodeAt(index).toString(16).padStart(4, '0');
+  }
+  return `${listboxId}-opt-${encodedValue}`;
 }
 
 // ---------------------------------------------------------------------------

@@ -30,18 +30,22 @@ import { runDiagnosticBundle } from './diagnostic-bundle.ts';
 import { buildDiagnosticProbes } from './diagnostic-probes.ts';
 import {
   ensureStandbyNoticeSchema,
-  stashStandbyNotice,
-  consumeStandbyNotice,
   clearStandbyNotice,
 } from './standby-notice.ts';
-import { sanitizeProviderPreviewText } from './provider-preview-sanitizer.ts';
+import {
+  stashHandoffNotice as stashHandoffNoticeImpl,
+  withHandoffPrefix as withHandoffPrefixImpl,
+  flushPendingHandoffNotice as flushPendingHandoffNoticeImpl,
+} from './handoff-notice-prefix.ts';
+import { providerPreview } from './provider-preview-sanitizer.ts';
+import { formatContextLines } from './context-lines.ts';
 import { redactHandoffPii } from './handoff-pii-redactor.ts';
 import { seamForProvider } from './handoff-seam-routing.ts';
 import { ensureHandoffArtifactSchema, getHandoffArtifact, deleteHandoffArtifact } from './handoff-artifact.ts';
 import { buildHandoffPrelude } from './handoff-prelude.ts';
 import type { AgentProvider } from './providers/types.ts';
-import { EmitHealResultSchema } from '../../core/heal-protocol.ts';
-import { buildRestartSelfTool, triggerSelfRestart, assertRestartSelfAdmin, type ServiceRestarter } from './self-restart.ts';
+import { triggerSelfRestart, assertRestartSelfAdmin, type ServiceRestarter } from './self-restart.ts';
+import { registerRuntimeInlineTools } from './runtime-tool-registrations.ts';
 import { dequeueNextReport, emitHealReport, parseHealContext } from '../../core/heal.ts';
 import { sendTracked } from '../../core/durability.ts';
 import { classifyErrorForInbound } from '../../core/inbound-failure-class.ts';
@@ -49,6 +53,13 @@ import {
   normalizeFallbackEntriesFromAgentOptions,
   type AgentFallbackEntry,
 } from '../../core/fallback-chain.ts';
+import {
+  ProviderDataPolicyError,
+  providerRoutePolicyKey,
+  resolveProviderRoutePolicy,
+  type ProviderBoundaryMode,
+  type ProviderDataPolicy,
+} from '../../core/provider-data-policy.ts';
 import {
   createReplyGuaranteeLivenessSender,
   DEFAULT_REPLY_GUARANTEE_TIMEOUT_MS,
@@ -71,6 +82,7 @@ import {
   getSessionTokenSnapshot,
   markSessionCompacted,
 } from './session-db.ts';
+import { reconcileResidentSessionStatuses } from './resident-session-reconciler.ts';
 import {
   ensureFallbackStateSchema,
   saveFallbackState,
@@ -89,7 +101,11 @@ import {
   type SessionCrashInfo,
 } from './session.ts';
 import { createProviderExecutionGate, ProviderExecutionGate } from './provider-execution-gate.ts';
-import { dispatchProviderTurn } from './provider-boundary-dispatch.ts';
+import { dispatchProviderTurn, withProviderApplicationContext } from './provider-boundary-dispatch.ts';
+import { TurnChronologyTracker, type TurnDeliveryKind } from './turn-chronology.ts';
+import { receivedAtUnixSeconds, renderPendingReplay, renderUserTurnForProvider,
+  sharedReplayApplicationContext, sharedRuntimeApplicationContext } from './turn-provider-text.ts';
+import { markDeferredSystemTurn, requireSystemTurnProviderBoundary } from './system-turn-deadline.ts';
 import {
   OutboundQueue,
   type IOutboundQueue,
@@ -110,7 +126,7 @@ import {
   type PreferenceIntent,
 } from './chat-preference-db.ts';
 import { preferenceKeys } from './preference-keys.ts';
-import { isPinnedModelEligible, resolveRoute, type RouteDecision } from './route-resolution.ts';
+import { applyRouteEffort, isPinnedModelEligible, resolveRoute, type RouteDecision } from './route-resolution.ts';
 import { decideModelPinResolution } from './config-surface.ts';
 import type { fetchAnthropicModelIdsWithStatus } from '../../lib/model-advisor.ts';
 import { deriveChatScope, emitRouteEvent, type ModelRouteEvent } from './route-events.ts';
@@ -125,6 +141,13 @@ import {
   type ModelPinPort,
   type RouteRecycleOutcome,
 } from './model-pin.ts';
+import { RouteRecycleLifecycle } from './route-recycle-lifecycle.ts';
+import {
+  runKillSessionCommand,
+  runSessionsCommand,
+  shutdownOwnedSessions,
+  type RuntimeSessionLifecycleHost,
+} from './runtime-session-lifecycle.ts';
 import {
   resolveExecutingActor as resolveExecutingActorForPort,
   derivePerChatSocketPath as derivePerChatSocketPathForPort,
@@ -143,7 +166,6 @@ import {
 } from './chat-transport.ts';
 import { getRecentMessages, getMessagesSince, hasFromMeReplyAfter } from '../../core/messages.ts';
 import { toConversationKey, isGroupConversationKey, GLOBAL_CONVERSATION_KEY } from '../../core/conversation-key.ts';
-import { formatChatRefForOwner } from '../../core/chat-display-name.ts';
 import { bulletedSection, savedPreferenceLine } from './owner-render-format.ts';
 import { classifyAssistantTextEgress } from '../../core/outbound-message-safety.ts';
 import { toPersonalJid, isGroupJid } from '../../core/jid-constants.ts';
@@ -183,11 +205,14 @@ import {
 } from './runtime-turn-result-handler.ts';
 import {
   RuntimeTurnCoordinator,
+  RUNTIME_TURN_SHUTDOWN_FINALIZATION_TIMEOUT_MS,
   type PerChatRuntimeScopeRef,
+  type ProviderFallbackReplayArgs,
   type RuntimeTurnAfterTerminalAction,
   type RuntimeTurnCompletion,
   type RuntimeTurnCoordinatorPort,
   type RuntimeTurnPostEffects,
+  type RuntimeTurnQueueTeardown,
   type RuntimeTurnSourceSnapshot,
 } from './runtime-turn-coordinator.ts';
 import { TurnCapabilityTracker, type TurnCapabilityErrorClass } from './turn-capability-tracker.ts';
@@ -231,6 +256,15 @@ import {
   fallbackRequiresIndependentProbe,
   oneMessageHandoffEnabled,
 } from './fallback-config.ts';
+import {
+  fallbackRequiresPrimaryProbe,
+  formatClockForUser,
+  formatTokenCount,
+  isProviderFallbackReason,
+  modelCardLabel,
+  providerDisplayName,
+  templateForFallbackReason,
+} from './runtime-presentation.ts';
 import { makeIdleEligibilityResolver } from './fallback-eligibility-cache.ts';
 import {
   createProviderMcpBridge,
@@ -247,6 +281,14 @@ import {
 } from './providers/primary-model-usability.ts';
 import { createPrimaryModelProbeAdapters } from './providers/primary-model-usability-adapters.ts';
 import { ensureClaudeFileStoreCredential } from './providers/claude-filestore-heal.ts';
+import {
+  formatFallbackRecoveryReceiptEvidence,
+  resolveFallbackRecoveryDecision,
+  stallAlertPlan,
+  type FallbackRecoveryDecision,
+  type FallbackRecoveryEvidence,
+  type FallbackRecoveryReceipt,
+} from './fallback-recovery-transaction.ts';
 import { jitteredDelay, sleep } from '../../core/retry.ts';
 import { synthesizeSpeech } from '../chat/providers/elevenlabs.ts';
 import { writeTempFile } from '../../core/media-download.ts';
@@ -309,7 +351,6 @@ const SESSION_MIN_RESIDENCY_MS = envPositiveInt('WHATSOUP_SESSION_MIN_RESIDENCY_
 // tool_calls telemetry sentinel can never drift apart.
 const GLOBAL_TOOL_SCOPE_KEY = GLOBAL_CONVERSATION_KEY;
 const GLOBAL_CRASH_SCOPE_KEY = GLOBAL_CONVERSATION_KEY;
-const TOOL_FAILURE_ALERT_DEDUP_MS = 60 * 1000;
 const MAX_TOOL_FAILURE_ALERT_DEDUP_KEYS = 1_000;
 // (TOOL_FAILURE_ALERT_EXCERPT_CHARS moved to ./tool-update.ts with alertExcerpt.)
 // Default provider-fallback window when the usage-limit message names no reset
@@ -342,6 +383,12 @@ const PROVIDER_FALLBACK_PROBE_STALL_THRESHOLD = (() => {
   if (!Number.isFinite(raw) || raw <= 0) return 12;
   return Math.min(Math.max(Math.trunc(raw), 3), 100);
 })();
+// Bounded-escalation ceiling multiple, passed to stallAlertPlan as a parameter (not a module-hidden global).
+const PROVIDER_FALLBACK_PROBE_STALL_CEILING_MULTIPLE = (() => {
+  const raw = Number(process.env['WHATSOUP_PROVIDER_FALLBACK_PROBE_STALL_CEILING_MULTIPLE']);
+  if (!Number.isFinite(raw) || raw <= 0) return 10;
+  return Math.min(Math.max(Math.trunc(raw), 1), 1000);
+})();
 // Opt-in: on an arming provider failure (via the registry dispatcher), run the
 // best-effort diagnostic bundle and emit its findings to the alert outbox.
 // Fire-and-forget — never blocks, delays, or alters the turn's fallback path.
@@ -366,17 +413,6 @@ const HANDOFF_STALE_MS = 120_000;
  * is hours out of date. See RCA 2026-06-24 (rb-bot stale-`modelUsable` gap).
  */
 const MODEL_USABILITY_FRESHNESS_MS = 30 * 60_000;
-// ── Background handoff-distiller sweep tuning (all gated behind the flag) ──────
-// One periodic sweep enumerates active conversations and asks the runner to
-// (maybe) distill each. The runner+gate own growth/budget/breaker/concurrency,
-// so the interval only sets how often that machinery is consulted.
-/** Narrow an arbitrary (possibly null) string to a ProviderFallbackReason. */
-function isProviderFallbackReason(value: unknown): value is ProviderFallbackReason {
-  return value === 'usage-limit' || value === 'rate-limit'
-    || value === 'auth-required' || value === 'model-unavailable'
-    || value === 'server-error' || value === 'empty-output'
-    || value === 'probe-unusable' || value === 'unknown-terminal-repeated';
-}
 
 /**
  * Consecutive empty PRIMARY-provider user turns that force a provider fallback
@@ -618,7 +654,12 @@ import {
   type AskUserQuestion,
   type AskUserOption,
 } from './poll-resolution.ts';
-import { resolveOutboundAudience, isOperatorDmPeer, type OutboundAudience } from '../../core/outbound-message-safety.ts';
+import {
+  resolveOutboundAudience,
+  isOperatorDmPeer,
+  isTrustedInternalDmPeer,
+  type OutboundAudience,
+} from '../../core/outbound-message-safety.ts';
 
 // Tool_use → ToolUpdate formatting, tool-error classification, and operator-alert
 // gating extracted to ./tool-update.ts (module-level FILE-reduction slice). Re-exported
@@ -634,11 +675,10 @@ export {
 import {
   buildToolUpdate,
   classifyToolError,
-  shouldEmitToolFailureAlert,
-  safeAlertSegment,
   alertEvidenceValue,
-  alertExcerpt,
 } from './tool-update.ts';
+import { maybeEmitToolFailureAlert, type ToolFailureAlertDeps } from './tool-failure-alert.ts';
+import { runNewCommand } from './runtime-new-command.ts';
 
 // Provider-failure string matchers are the single source of truth in
 // `./failure-taxonomy.ts`. They are imported above for internal use and re-exported
@@ -653,58 +693,10 @@ export {
 } from './failure-taxonomy.ts';
 import { errorMessage } from '../../lib/error-message.ts';
 
-function providerDisplayName(provider: string): string {
-  switch (provider) {
-    case 'claude-cli': return 'Claude';
-    case 'codex-cli': return 'Codex';
-    case 'gemini-cli': return 'Gemini';
-    case 'opencode-cli': return 'OpenCode';
-    case 'openai-api': return 'OpenAI';
-    case 'anthropic-api': return 'Anthropic';
-    default: return provider;
-  }
-}
 
-function modelCardLabel(provider: string, model: string | undefined): string {
-  const providerName = providerDisplayName(provider);
-  return model && model.trim() ? `${providerName} / ${model.trim()}` : providerName;
-}
 
-function formatClockForUser(epochMs: number): string {
-  return new Date(epochMs).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
-}
 
-/**
- * B26 human-scaled token count: 96_200 → '96.2k', 150_000 → '150k', 500 → '500'.
- * Same >1000 → one-decimal 'k' formula the /sessions handler inlines, plus a
- * trailing-'.0' strip so round budgets render '150k', not '150.0k'. The
- * /sessions inline sites keep their exact pre-B26 output ('2.0k') — do not
- * swap them onto this helper without updating their pinned renders.
- */
-function formatTokenCount(count: number): string {
-  return count > 1000 ? `${(count / 1000).toFixed(1).replace(/\.0$/, '')}k` : String(count);
-}
 
-function fallbackRequiresPrimaryProbe(reason: ProviderFallbackReason): boolean {
-  // Recovery-probe gating is intentionally BROADER than independent-provider
-  // routing (`fallbackRequiresIndependentProbe`, used at the routing call-site).
-  // Usage/rate limits carry an unreliable reset estimate — e.g. a weekly limit's
-  // "resets 9am" is parsed as a daily clock time — so we must re-probe the
-  // primary and revert the moment it recovers rather than blind-waiting for the
-  // window to elapse. Routing semantics are unchanged; only the recovery path widens.
-  //
-  // unknown-terminal-repeated joins the recovery-probe set (NOT the
-  // independent-probe set): an unclassified terminal error has NO parseable
-  // reset estimate, so without a recovery probe the window blind-waits. It is
-  // deliberately kept OUT of fallbackRequiresIndependentProbe so an operator's
-  // same-provider downgrade rung (e.g. claude-cli/opus) stays selectable.
-  return (
-    fallbackRequiresIndependentProbe(reason) ||
-    reason === 'usage-limit' ||
-    reason === 'rate-limit' ||
-    reason === 'unknown-terminal-repeated'
-  );
-}
 
 
 /**
@@ -783,21 +775,6 @@ export function extractUsageLimitResetTime(text: string, now: Date = new Date())
 
 // `isPromptTooLongMessage` lives in `./failure-taxonomy.ts` (imported + re-exported above).
 
-function templateForFallbackReason(reason: ProviderFallbackReason): UserTemplateId {
-  // empty-output / probe-unusable / unknown-terminal-repeated are transient
-  // primary failovers from the user's perspective (no hard auth/usage fault) —
-  // they reuse the existing 'transient' user copy rather than minting new
-  // user-facing templates (#1421).
-  if (
-    reason === 'server-error'
-    || reason === 'empty-output'
-    || reason === 'probe-unusable'
-    || reason === 'unknown-terminal-repeated'
-  ) {
-    return 'transient';
-  }
-  return reason;
-}
 
 export class AgentRuntime implements Runtime {
 
@@ -833,6 +810,8 @@ export class AgentRuntime implements Runtime {
   private readonly autoCompactInputTokens: number | undefined;
   private readonly agentProvider: string;
   private readonly agentProviderConfig: Record<string, unknown> | undefined;
+  private readonly agentDataPolicy: ProviderDataPolicy | null;
+  private readonly providerBoundaryMode: ProviderBoundaryMode;
   // Automatic provider fallback (claude-cli → opencode-cli etc.) on usage limit.
   // The legacy scalar pair is normalized as entry zero for compatibility.
   private readonly agentFallbacks: AgentFallbackEntry[];
@@ -884,6 +863,7 @@ export class AgentRuntime implements Runtime {
   // (captured at the top of start()); consumed by the startup resume gate.
   private restartLoopInterruptedBoot = false;
   private unownedProviderEventRejects = 0;
+  private readonly turnChronology = new TurnChronologyTracker();
   private readonly providerEventRejectReasonCounts = new Map<string, number>();
   /**
    * Explicit source-bound ownership for turns admitted without a durability
@@ -938,6 +918,8 @@ export class AgentRuntime implements Runtime {
   // Epoch ms of the most recent recovery probe (either path); null until the
   // first probe. Process-local observability only — never persisted.
   private fallbackLastProbeAt: number | null = null;
+  // A2: set on a probe-confirmed revert; cleared by the first real post-revert turn success (the honest canary) — a failing turn leaves it untouched.
+  private pendingPostRevertConfirmation = false;
   // Epoch ms of the last diagnostic-bundle kick (instance-level throttle).
   private lastDiagnosticBundleAt = 0;
   private primaryModelUsability: RuntimePrimaryModelUsability | null = null;
@@ -1135,88 +1117,22 @@ export class AgentRuntime implements Runtime {
     }
   }
 
-  private maybeEmitToolFailureAlert(args: {
-    chatJid: string | null | undefined;
-    toolId: string;
-    toolName: string;
-    content: string;
-    classification: ToolUpdate;
-    toolScopeKey: string;
-    mapKey?: string;
-  }): void {
-    if (process.env['BOT_ERRORS_RUNTIME_TOOL_FAILURE_ALERTS'] === '0') return;
-
-    // Root-cause noise gate: a non-zero Bash exit (glob/grep no-match, failed
-    // conditional, missing path) is reported by claude-cli as `is_error` but is
-    // a normal agent-loop result, not an operator-actionable failure. Only page
-    // when the error carries an infra/provider-health signature.
-    if (!shouldEmitToolFailureAlert(args.classification.category, args.content)) {
-      log.debug(
-        {
-          instance: this.instanceName,
-          toolName: args.toolName,
-          category: args.classification.category,
-        },
-        'suppressing benign tool-error (not operator-actionable) — no BOT ERRORS alert',
-      );
-      return;
-    }
-
-    const now = Date.now();
-    for (const [key, recordedAt] of this.recentToolFailureAlerts) {
-      if (now - recordedAt > TOOL_FAILURE_ALERT_DEDUP_MS) {
-        this.recentToolFailureAlerts.delete(key);
-      }
-    }
-
-    const provider = this.effectiveProvider || this.agentProvider || 'unknown-provider';
-    const source = `runtime-tool-error:${safeAlertSegment(provider)}:${safeAlertSegment(args.toolName)}`;
-    const fingerprint = [
-      this.instanceName,
-      provider,
-      args.toolName,
-      args.classification.category,
-      args.content.replace(/\s+/g, ' ').trim().slice(0, 500),
-    ].join('\n');
-
-    if (this.recentToolFailureAlerts.has(fingerprint)) return;
-    this.recentToolFailureAlerts.set(fingerprint, now);
-    this.capDedupeMap(this.recentToolFailureAlerts);
-
-    const evidence = [
-      'runtime_source=src/runtimes/agent/runtime.ts:tool_result',
-      `instance=${alertEvidenceValue(this.instanceName)}`,
-      `provider=${alertEvidenceValue(provider)}`,
-      `session_scope=${this.sessionScope}`,
-      `chat_jid=${alertEvidenceValue(args.chatJid ?? null)}`,
-      `tool_scope_key=${alertEvidenceValue(args.toolScopeKey)}`,
-      `map_key=${alertEvidenceValue(args.mapKey ?? null)}`,
-      `tool_id=${alertEvidenceValue(args.toolId)}`,
-      `tool_name=${alertEvidenceValue(args.toolName)}`,
-      `classification=${args.classification.category}`,
-      `detail=${alertEvidenceValue(args.classification.detail)}`,
-      `cwd=${alertEvidenceValue(this.cwd ?? process.cwd())}`,
-      'error_excerpt:',
-      alertExcerpt(args.content) || 'unknown',
-    ].join('\n');
-
-    try {
-      emitAlertChecked(
-        this.instanceName,
-        source,
-        `Agent tool failure: ${args.toolName}`,
-        evidence,
-        'warning',
-      );
-    } catch (err) {
-      log.warn({
-        instance: this.instanceName,
-        provider,
-        toolId: args.toolId,
-        toolName: args.toolName,
-        err: errorMessage(err),
-      }, 'failed to emit BOT ERRORS tool failure alert');
-    }
+  /**
+   * Bind the runtime's live state + collaborators for tool-failure alerting
+   * (tool-failure-alert.ts). Built fresh at each tool-error call site so the
+   * provider label and dedup map are read on the same tick as the failure, and
+   * the shared capDedupeMap keeps the dedup map bounded — identical to the
+   * former inline method.
+   */
+  private toolFailureAlertDeps(): ToolFailureAlertDeps {
+    return {
+      instanceName: this.instanceName,
+      sessionScope: this.sessionScope,
+      cwd: this.cwd,
+      resolveProvider: () => this.effectiveProvider || this.agentProvider || 'unknown-provider',
+      recentToolFailureAlerts: this.recentToolFailureAlerts,
+      capDedupeMap: (map) => this.capDedupeMap(map),
+    };
   }
 
   // The auto-compact bookkeeping state machine lives in AutoCompactController
@@ -1481,15 +1397,22 @@ export class AgentRuntime implements Runtime {
       const runtimeQueue = this.perChatTurnQueues.get(scopeKey);
       return (
         (this.perChatInboundSeqQueue.get(scopeKey)?.length ?? 0) > 0
+        || (this.perChatRuntimeTurnContexts.get(scopeKey)?.length ?? 0) > 0
+        || this.perChatRuntimeTurnCompletions.has(scopeKey)
         || runtimeQueue?.isProcessing === true
         || (runtimeQueue?.pending ?? 0) > 0
+        || this.runtimeTurnCoordinator.hasPerChatTeardownPending(scopeKey)
       );
     }
     return (
       this.currentInboundSeq !== undefined
       || this.currentTurnChatJid !== null
+      || this.currentRuntimeTurnContext !== null
+      || this.pendingSingletonRuntimeTurnContext !== null
+      || this.currentRuntimeTurnCompletion !== null
       || this.turnQueue.isProcessing
       || this.turnQueue.pending > 0
+      || this.runtimeTurnCoordinator.hasGlobalTeardownPending()
     );
   }
 
@@ -1505,6 +1428,7 @@ export class AgentRuntime implements Runtime {
   }
 
   private getOpenFileDescriptorCount(): number | null {
+    if (process.platform !== 'linux') return null;
     try {
       return readdirSync('/proc/self/fd').length;
     } catch (err) {
@@ -1676,8 +1600,17 @@ export class AgentRuntime implements Runtime {
       return proactiveResumeBlockedConversationKeys;
     }
 
+    const residentRowIds = reconcileResidentSessionStatuses(this.db, this.chatSessions.values());
     const classified = classifyActiveSessions(this.db, this.durability);
     for (const session of classified) {
+      if (residentRowIds.has(session.id)) {
+        log.warn(
+          { id: session.id, conversationKey: session.conversationKey, classification: session.classification,
+            reason: session.reason, providerSessionId: session.sessionId },
+          'skipping zombie-session disposition for current-process resident manager');
+        if (session.conversationKey) proactiveResumeBlockedConversationKeys.add(session.conversationKey);
+        continue;
+      }
       switch (session.classification) {
         case 'stale_dead':
           markOrphaned(this.db, session.id);
@@ -1857,16 +1790,13 @@ export class AgentRuntime implements Runtime {
   private perChatRuntimeTurnContexts = new Map<string, RuntimeTurnContext[]>();
   private perChatRuntimeTurnCompletions = new Map<string, RuntimeTurnCompletion>();
   private readonly perChatRuntimeTurnScopeRefs = new Map<string, PerChatRuntimeScopeRef>();
-  /** One FIFO per chat: provider dispatch N+1 waits for turn N's durable outcome. */
   private perChatTurnQueues = new Map<string, TurnQueue>();
-  /**
-   * Task G (D14): scope keys (per-chat mapKey, or GLOBAL_TOOL_SCOPE_KEY for
-   * single/shared) whose live session recycle was deferred because a turn
-   * was in flight at pin time. Consumed at the next turn-idle boundary — the
-   * top of ensureSessionAndQueueSync, which every inbound message reaches
-   * BEFORE any turn dispatch (see consumePendingRecycleIfIdle).
-   */
-  private pendingRecycle = new Set<string>();
+  /** Deferred and in-progress live-route recycle ownership by scope key. */
+  private readonly routeRecycleLifecycle = new RouteRecycleLifecycle<SessionManager>();
+  private pendingRecycle = this.routeRecycleLifecycle.pending;
+  private recyclePromises = this.routeRecycleLifecycle.promises;
+  private recycleOwners = this.routeRecycleLifecycle.owners;
+  private recycleFailures = this.routeRecycleLifecycle.failures;
   /** Mutable callback key for a queue that may be re-keyed from LID to phone JID. */
   private readonly perChatTurnQueueKeys = new WeakMap<TurnQueue, PerChatRuntimeScopeRef>();
   /** The sole shared/singleton user turn whose provider result is still unresolved. */
@@ -1879,9 +1809,8 @@ export class AgentRuntime implements Runtime {
   private readonly turnRecoverySupervisor: TurnRecoverySupervisor;
   private readonly runtimeTurnHost: RuntimeTurnCoordinatorPort & RuntimeResultHandlerPort;
   private readonly runtimeTurnCoordinator: RuntimeTurnCoordinator;
-  /** Host object backing model-pin.ts / model-catalogue-render.ts (the `/model` surface). */
   private readonly modelPinHost: ModelPinPort;
-  /** Host object backing chat-transport.ts (per-chat actor socket + queue/tracker resolution). */
+  private readonly sessionLifecycleHost: RuntimeSessionLifecycleHost<SessionManager, RuntimeTurnQueueTeardown>;
   private readonly chatTransportHost: ChatTransportPort;
   private readonly runtimeTurnAfterTerminal = new Map<string, RuntimeTurnAfterTerminalAction>();
   private readonly recoveryManagerId = randomUUID();
@@ -1903,6 +1832,8 @@ export class AgentRuntime implements Runtime {
   /** Exact-source teardowns for terminal results that could not be safely attributed. */
   private readonly rejectedTerminalTeardowns = new WeakMap<SessionManager, Promise<boolean>>();
   private readonly activeMessageHandlers = new Set<Promise<void>>();
+  private readonly routeRecycleCommandWork = this.routeRecycleLifecycle.commandWork;
+  private readonly routeRecyclePublicationWork = this.routeRecycleLifecycle.publicationWork;
   private shutdownRequested = false;
 
   // Startup notification deferred until after WA connects
@@ -2159,6 +2090,7 @@ export class AgentRuntime implements Runtime {
       if (!session) throw new Error(`Coalesced image turn has no session for "${mapKey}"`);
       const source: RuntimeTurnSourceSnapshot = {
         sourceMessageId: msg.messageId,
+        receivedAtUnixSeconds: receivedAtUnixSeconds(msg),
         conversationKey: canonicalConversationKey(chatJid, this.db),
         senderJid: msg.senderJid,
         senderName: msg.senderName,
@@ -2178,6 +2110,7 @@ export class AgentRuntime implements Runtime {
       });
       this.enqueuePerChatRuntimeTurn(mapKey, {
         sourceMessageId: source.sourceMessageId,
+        receivedAtUnixSeconds: source.receivedAtUnixSeconds,
         conversationKey: source.conversationKey,
         chatJid,
         senderJid: source.senderJid,
@@ -2242,7 +2175,7 @@ export class AgentRuntime implements Runtime {
         chatJid: queue.targetChatJid,
         reason: decision.reason,
         satisfiesReplyGuarantee: decision.satisfiesReplyGuarantee,
-        textPreview: sanitizeProviderPreviewText(text).slice(0, 200),
+        textPreview: providerPreview(text, 200),
       },
       'assistant_text egress gate suppressed non-user-facing text',
     );
@@ -2278,7 +2211,7 @@ export class AgentRuntime implements Runtime {
           {
             chatJid: queue.targetChatJid,
             inboundSeq,
-            textPreview: sanitizeProviderPreviewText(text).slice(0, 200),
+            textPreview: providerPreview(text, 200),
           },
           'send_verification text without origin-chat outbound — reply guarantee stays armed',
         );
@@ -2334,7 +2267,7 @@ export class AgentRuntime implements Runtime {
     if (classification === null) return { suppress: false, ambient: null };
     if (classification.confidence === 'banner') {
       log.warn(
-        { chatJid, kind: classification.kind, textPreview: normalizedText.slice(0, MAX_STREAMED_BANNER_LENGTH) },
+        { chatJid, kind: classification.kind, textPreview: providerPreview(normalizedText, MAX_STREAMED_BANNER_LENGTH) },
         'suppressed provider-failure message from assistant_text',
       );
       return { suppress: true, ambient: null };
@@ -2366,7 +2299,7 @@ export class AgentRuntime implements Runtime {
         chatJid,
         kind: ambient.kind,
         textLength: normalizedText.length,
-        textPreview: normalizedText.slice(0, MAX_STREAMED_BANNER_LENGTH),
+        textPreview: providerPreview(normalizedText, MAX_STREAMED_BANNER_LENGTH),
         outcome: delivered ? 'delivered' : 'suppressed',
       },
       delivered
@@ -2437,32 +2370,25 @@ export class AgentRuntime implements Runtime {
     this.replyGuaranteeTimeoutMs = options?.replyGuaranteeTimeoutMs ?? DEFAULT_REPLY_GUARANTEE_TIMEOUT_MS;
     this.agentProvider = config.agentProvider;
     this.agentProviderConfig = config.agentProviderConfig;
+    this.agentDataPolicy = config.agentProviderDataPolicy ?? null;
+    this.providerBoundaryMode = config.agentProviderBoundaryMode ?? 'shadow';
     const configuredFallbacks = Array.isArray(config.agentFallbacks)
       ? config.agentFallbacks
       : normalizeFallbackEntriesFromAgentOptions({
           fallbackProvider: config.agentFallbackProvider,
           fallbackModel: config.agentFallbackModel,
+          fallbackDataPolicy: config.agentFallbackDataPolicy,
         });
-    this.agentFallbacks = configuredFallbacks.map((entry) =>
-      entry.model ? { provider: entry.provider, model: entry.model } : { provider: entry.provider },
-    );
+    this.agentFallbacks = configuredFallbacks.map((entry) => ({ ...entry }));
     this.registry = new ToolRegistry();
     this.registerAllTools();
     this.catalogueSnapshot = createCatalogueSnapshotCache();
 
-    this.turnQueue = new TurnQueue({
-      maxDepth: config.agentMaxQueueDepth,
-      onReject: (turn, reason) => {
-        this.finalizeRejectedRuntimeTurn(turn, reason);
-        log.warn({ chatJid: turn.chatJid, senderJid: turn.senderJid, reason },
-          'turn rejected — agent queue full');
-      },
-      onProcessorError: (turn, error) => this.finalizeSharedProcessorError(turn, error),
-    });
-    this.turnQueue.setProcessor((turn) => this.processTurn(turn));
+    this.turnQueue = this.createGlobalTurnQueue();
     this.runtimeTurnHost = this.createRuntimeTurnHost();
     this.runtimeTurnCoordinator = new RuntimeTurnCoordinator(this.runtimeTurnHost);
     this.modelPinHost = this.createModelPinHost();
+    this.sessionLifecycleHost = this.createSessionLifecycleHost();
     this.chatTransportHost = this.createChatTransportHost();
 
     // Subscribe to poll vote events for AskUserQuestion → Poll bridge
@@ -2477,12 +2403,28 @@ export class AgentRuntime implements Runtime {
     }
   }
 
-  /**
-   * Host object for the extracted `/model` surface (model-pin.ts,
-   * model-catalogue-render.ts) — same shape as createRuntimeTurnHost: readonly
-   * state is captured by value, the four fields recycleLiveSession mutates are
-   * get/set pairs, and every collaborator is a bound delegate.
-   */
+  private createGlobalTurnQueue(): TurnQueue {
+    const turnQueue = new TurnQueue({
+      maxDepth: config.agentMaxQueueDepth,
+      onReject: (turn, reason) => {
+        this.finalizeRejectedRuntimeTurn(turn, reason);
+        log.warn({ chatJid: turn.chatJid, senderJid: turn.senderJid, reason },
+          'turn rejected — agent queue full');
+      },
+      onProcessorError: (turn, error) => this.finalizeSharedProcessorError(turn, error),
+    });
+    turnQueue.setProcessor((turn) => this.processTurn(turn));
+    return turnQueue;
+  }
+
+  private replaceGlobalTurnQueue(expected: TurnQueue): void {
+    if (this.turnQueue !== expected) {
+      throw new Error('Cannot replace a superseded singleton/shared runtime TurnQueue');
+    }
+    this.turnQueue = this.createGlobalTurnQueue();
+  }
+
+  /** Narrow host for model-pin.ts and model-catalogue-render.ts. */
   private createModelPinHost(): ModelPinPort {
     const runtime = this;
     return {
@@ -2496,6 +2438,10 @@ export class AgentRuntime implements Runtime {
       catalogueSnapshot: runtime.catalogueSnapshot,
       nlRoutingTiers: config.nlRoutingTiers,
       pendingRecycle: runtime.pendingRecycle,
+      recyclePromises: runtime.recyclePromises,
+      recycleOwners: runtime.recycleOwners,
+      recycleFailures: runtime.recycleFailures,
+      routeRecycleLifecycle: runtime.routeRecycleLifecycle,
       chatSessions: runtime.chatSessions,
       chatQueues: runtime.chatQueues,
       modelCatalogueListFn: runtime.modelCatalogueListFn,
@@ -2513,6 +2459,7 @@ export class AgentRuntime implements Runtime {
       sendDirect: (chatJid, text) => runtime.sendDirect(chatJid, text),
       resolveRouteForTurn: (chatJid, actorJid) => runtime.resolveRouteForTurn(chatJid, actorJid),
       resolvePerChatMapKey: (chatJid) => runtime.resolvePerChatMapKey(chatJid),
+      routeSessionProviderConfig: (route) => runtime.routeSessionProviderConfig(route),
       isTurnInFlight: (scopeKey) => runtime.isTurnInFlight(scopeKey),
       getActiveQueue: () => runtime.getActiveQueue(),
       deleteOwnedPerChatSession: (mapKey, expected) => runtime.deleteOwnedPerChatSession(mapKey, expected),
@@ -2525,6 +2472,49 @@ export class AgentRuntime implements Runtime {
       renderRouteStatus: (chatJid, senderJid) => runtime.renderRouteStatus(chatJid, senderJid),
       loadRouteView: (chatJid, senderJid) => runtime.loadRouteView(chatJid, senderJid),
       completeLocalInbound: (inboundSeq) => { if (inboundSeq !== undefined) runtime.durability?.completeInbound(inboundSeq, 'local_command_handled'); },
+    };
+  }
+
+  private createSessionLifecycleHost(): RuntimeSessionLifecycleHost<SessionManager, RuntimeTurnQueueTeardown> {
+    const runtime = this;
+    return {
+      db: runtime.db,
+      instanceName: runtime.instanceName,
+      sessionScope: runtime.sessionScope,
+      get chatSessions() { return runtime.chatSessions; },
+      getSession: () => runtime.session,
+      getActiveChatJid: () => runtime.activeChatJid,
+      resolvePerChatMapKey: (chatJid) => runtime.resolvePerChatMapKey(chatJid),
+      sendDirect: (chatJid, text, force) => runtime.sendDirect(chatJid, text, force),
+      abortPerChatQueue: (mapKey) => runtime.chatQueues.get(mapKey)?.abortTurn({ preserveEvidence: true }),
+      terminalizePerChatTurn: (mapKey) =>
+        runtime.runtimeTurnCoordinator.terminalizePerChatTurnQueueForKill(mapKey),
+      retirePerChatTurn: (teardown) =>
+        runtime.runtimeTurnCoordinator.retirePerChatTurnQueueAfterKill(teardown),
+      deletePerChatSessionAndQueue: (mapKey, session) => {
+        runtime.deleteOwnedPerChatSession(mapKey, session);
+        runtime.chatQueues.delete(mapKey);
+      },
+      cleanupPerChatState: (mapKey) => runtime.cleanupPerChatState(mapKey),
+      getGlobalInterruptChatJid: () => runtime.getGlobalInterruptChatJid(),
+      abortGlobalInterruptQueue: () =>
+        runtime.getGlobalInterruptQueue()?.abortTurn({ preserveEvidence: true }),
+      terminalizeGlobalTurn: () =>
+        runtime.runtimeTurnCoordinator.terminalizeGlobalTurnForReset(),
+      shutdownOperationTracker: () => {
+        runtime.operationTracker?.shutdown();
+        runtime.operationTracker = null;
+      },
+      cleanupGlobalAutoCompactState: () => runtime.cleanupGlobalAutoCompactState(),
+      retireGlobalTurn: (teardown) =>
+        runtime.runtimeTurnCoordinator.retireGlobalTurnQueueAfterReset(teardown),
+      clearGlobalSessionRefs: () => {
+        runtime.session = null;
+        runtime.queue = null;
+        runtime.activeChatJid = null;
+        runtime.currentInboundSeq = undefined;
+        runtime.currentTurnChatJid = null;
+      },
     };
   }
 
@@ -2593,7 +2583,8 @@ export class AgentRuntime implements Runtime {
       perChatRuntimeTurnContexts: runtime.perChatRuntimeTurnContexts,
       perChatRuntimeTurnCompletions: runtime.perChatRuntimeTurnCompletions,
       perChatRuntimeTurnScopeRefs: runtime.perChatRuntimeTurnScopeRefs,
-      turnQueue: runtime.turnQueue,
+      get turnQueue() { return runtime.turnQueue; },
+      replaceGlobalTurnQueue: (expected) => runtime.replaceGlobalTurnQueue(expected),
       perChatTurnQueues: runtime.perChatTurnQueues,
       perChatTurnQueueKeys: runtime.perChatTurnQueueKeys,
       perChatExecActorQueue: runtime.perChatExecActorQueue,
@@ -2649,8 +2640,13 @@ export class AgentRuntime implements Runtime {
       isShuttingDown: () => runtime.shutdownRequested,
       getActiveQueue: () => runtime.getActiveQueue(),
       getQueueForChat: (chatJid, mapKey) => runtime.getQueueForChat(chatJid, mapKey),
-      sendTurnPerChat: (chatJid, text, mapKey, actorJid, context, scopeRef, systemTurnLease, excludeJobId) =>
-        runtime.sendTurnPerChat(chatJid, text, mapKey, actorJid, context, scopeRef, systemTurnLease, excludeJobId),
+      sendTurnPerChat: (chatJid, text, mapKey, actorJid, context, scopeRef, systemTurnLease, excludeJobId, deliveryKind) =>
+        runtime.sendTurnPerChat(chatJid, text, mapKey, actorJid, context, scopeRef, systemTurnLease, excludeJobId, deliveryKind),
+      deleteOwnedPerChatSession: (mapKey, expected) => runtime.deleteOwnedPerChatSession(mapKey, expected),
+      recreatePerChatSessionForFallback: (mapKey, chatJid, actorJid) => runtime.recreatePerChatSessionForFallback(mapKey, chatJid, actorJid),
+      recreateSingletonSessionForFallback: (chatJid, actorJid) => runtime.recreateSingletonSessionForFallback(chatJid, actorJid),
+      bindActiveGlobalMcpConversation: (chatJid) => runtime.bindActiveGlobalMcpConversation(chatJid),
+      sendTurnToSession: (...args) => runtime.sendTurnToSession(...args),
       sendVoiceReply: (chatJid, responseText) => runtime._sendVoiceReply(chatJid, responseText),
       isSilentCompact: (scopeKey) => runtime.isSilentCompact(scopeKey),
       clearSilentCompact: (scopeKey) => runtime.clearSilentCompact(scopeKey),
@@ -2730,6 +2726,8 @@ export class AgentRuntime implements Runtime {
     const q = new OutboundQueue(this.messenger, chatJid, { // T8-F1+F2: inject admin-peer + fallback-window queries
       conversationKey, ...(priorToken === undefined ? {} : { senderToken: priorToken }),
       peerIsAdmin: (jid) => isOperatorDmPeer(jid, isGroupJid(jid), this.db, config.adminPhones),
+      peerIsTrustedInternal: (jid) =>
+        isTrustedInternalDmPeer(jid, isGroupJid(jid), config.internalPeerJids),
       fallbackActive: () => this.isFallbackWindowActive,
     });
     if (this.durability) q.setDurability(this.durability);
@@ -3008,10 +3006,7 @@ export class AgentRuntime implements Runtime {
           // the flag under the dead lidKey and silently drop the recycle
           // (the pin still applies on the next fresh spawn, so this is
           // non-destructive either way — but cheap to carry correctly).
-          if (this.pendingRecycle.has(lidKey)) {
-            this.pendingRecycle.delete(lidKey);
-            this.pendingRecycle.add(canonical);
-          }
+          this.routeRecycleLifecycle.rekeyScope(lidKey, canonical);
           // Migrate auto-compact cooldown/last-success/rapid-rearm/measure state
           // from the LID key onto the canonical JID (silent timers, boundary set,
           // and in-flight waiters are intentionally left untouched, as before).
@@ -3432,7 +3427,12 @@ export class AgentRuntime implements Runtime {
                 'proactive_resume_context',
                 chatJid,
               );
-              const injected = await this.injectMissedMessages(session, chatJid, checkpointUpdatedAt);
+              const injected = await this.injectMissedMessages(
+                session,
+                chatJid,
+                checkpointUpdatedAt,
+                () => this.requireSystemTurnProviderBoundary(contextLease!),
+              );
               if (!injected) this.pendingSystemResults.cancel(contextLease);
               else {
                 await this.pendingSystemResults.waitUntilEmpty(effectiveMapKey);
@@ -3446,7 +3446,9 @@ export class AgentRuntime implements Runtime {
               'proactive_resume_continuation',
               chatJid,
             );
-            await session.sendTurn('[System: session resumed after service restart — continue where you left off]');
+            await this.dispatchSystemTurn(
+              session, '[System: session resumed after service restart — continue where you left off]', continuationLease!,
+            );
             log.info({ chatJid }, 'sent continuation turn after proactive resume');
           } catch (err) {
             log.warn({ err, chatJid }, 'failed to send continuation turn after resume');
@@ -3498,11 +3500,20 @@ export class AgentRuntime implements Runtime {
         if (ageMs > 60 * 60 * 1000) {
           log.info({ chatJid: priorResumeIdentity.deliveryJid, ageMinutes: Math.round(ageMs / 60_000) },
             'skipping shared/single resume — session too stale');
-          this.durability!.retireSessionLifecycle({
-            agentSessionRowId: priorSession.id,
-            providerSessionId: priorSession.session_id!,
-            provider: this.effectiveProvider,
-          });
+          if (priorSession.workspace_key === null) {
+            log.warn({
+              rowId: priorSession.id,
+              conversationKey: checkpoint.conversation_key,
+            }, 'cannot retire stale shared/single resume without exact workspace identity');
+          } else {
+            this.durability!.retireExactSessionLifecycle({
+              agentSessionRowId: priorSession.id,
+              providerSessionId: priorSession.session_id!,
+              provider: this.effectiveProvider,
+              workspaceKey: priorSession.workspace_key,
+              conversationKey: checkpoint.conversation_key,
+            });
+          }
           priorSession = null;
           priorResumeIdentity = null;
         }
@@ -3603,100 +3614,30 @@ export class AgentRuntime implements Runtime {
       }
     }
 
-    // Register emit_heal_result MCP tool (once, for control-plane repair completion).
-    // Only on non-sandboxed instances (Q) — sandboxed instances (Loops) are repair targets, not repairers.
-    // Tagged `core: false` because this registration is conditional on configured control peers;
-    // see `src/mcp/types.ts` for the contract — non-core tools must tolerate absence on instances
-    // that do not meet the gate (no control peers, sandbox mode, or per-chat sandbox).
-    if (config.controlPeers.size > 0 && !this.sandboxPerChat && !this.sandbox) {
-      this.registry.register({
-        name: 'emit_heal_result',
-        description: 'Signal completion of a repair cycle. Only callable during an active repair session.',
-        schema: EmitHealResultSchema,
-        scope: 'global',
-        targetMode: 'caller-supplied',
-        replayPolicy: 'unsafe',
-        core: false,
-        handler: async (params) => {
-          const parsed = EmitHealResultSchema.parse(params);
-
-          // Validate: must match active repair
-          if (!this.activeControlReportId) {
-            throw new Error('No active repair session');
-          }
-          if (parsed.reportId !== this.activeControlReportId) {
-            throw new Error(`No active repair for reportId ${parsed.reportId}. Active: ${this.activeControlReportId}`);
-          }
-          if (this.controlProtocolCompletedReportId === parsed.reportId) {
-            throw new Error(`Repair result already emitted for reportId ${parsed.reportId}`);
-          }
-
-          const controlQueue = this.getControlQueue();
-          if (!controlQueue) {
-            throw new Error('Control queue not found');
-          }
-
-          // Determine target JID (Loops)
-          const loopsPhone = [...config.controlPeers.entries()].find(([name]) => name === 'loops')?.[1];
-          const loopsJid = loopsPhone ? toPersonalJid(loopsPhone) : null;
-
-          if (parsed.result === 'fixed') {
-            if (loopsJid) {
-              await controlQueue.sendControlMessage(loopsJid, 'HEAL_COMPLETE', {
-                reportId: parsed.reportId,
-                errorClass: parsed.errorClass,
-                result: 'fixed',
-                commitSha: parsed.commitSha,
-                diagnosis: parsed.diagnosis,
-              }, this.durability ?? undefined);
-            }
-          } else {
-            // escalate
-            if (loopsJid) {
-              await controlQueue.sendControlMessage(loopsJid, 'HEAL_ESCALATE', {
-                reportId: parsed.reportId,
-                errorClass: parsed.errorClass,
-                diagnosis: parsed.diagnosis,
-              }, this.durability ?? undefined);
-            }
-            // Also DM admin
-            const adminPhone = [...config.adminPhones][0];
-            if (adminPhone) {
-              const adminJid = toPersonalJid(adminPhone);
-              await sendTracked(this.messenger, adminJid,
-                `[HEAL_ESCALATE] Repair for ${parsed.errorClass} escalated.\n\n${parsed.diagnosis}`,
-                this.durability ?? undefined, { replayPolicy: 'safe' });
-            }
-          }
-
-          // Resolve pending_heal_reports row (Type 3 cleanup)
-          try {
-            this.db.raw.prepare(
-              "UPDATE pending_heal_reports SET state = 'resolved' WHERE report_id = ?",
-            ).run(parsed.reportId);
-          } catch (err) {
-            // best-effort, but visible: a stuck-pending row re-fires stale-open re-notify
-            log.warn({ err, reportId: parsed.reportId }, 'failed to mark heal report resolved; row stays pending');
-          }
-
-          // The MCP result still has to travel back through this exact provider
-          // request. Retain the immutable report owner and the timeout until the
-          // provider emits its terminal result; advancing here lets report A's
-          // trailing result terminalize a newly-dispatched report B.
-          this.controlProtocolCompletedReportId = parsed.reportId;
-
-          return { sent: true, reportId: parsed.reportId, result: parsed.result };
-        },
-      });
-    }
-
-    // Register restart_self MCP tool (agent instance only — sandboxed instances
-    // are repair targets, not self-restarters). Routes through the existing
-    // graceful shutdown via ServiceManager.restart; logic lives in self-restart.ts.
-    // Requires the fleet-owned restarter injected from the composition root.
-    if (!this.sandbox && !this.sandboxPerChat && this.serviceRestarter) {
-      const serviceRestarter = this.serviceRestarter;
-      this.registry.register(buildRestartSelfTool({
+    // Register the runtime's inline MCP tools (emit_heal_result + restart_self)
+    // with their exact activation gates; the tool declarations live in
+    // runtime-tool-registrations.ts. The emit_heal_result handler receives a
+    // narrow control-report port rather than `this`, since that slot
+    // (activeControlReportId / controlProtocolCompletedReportId) is shared with
+    // the control-terminal path.
+    const serviceRestarter = this.serviceRestarter;
+    registerRuntimeInlineTools(this.registry, {
+      // `sandbox` is a SandboxPolicy|undefined used only via `!sandbox` in the
+      // original guards; coerce to the boolean the guard actually consumed.
+      sandbox: !!this.sandbox,
+      sandboxPerChat: this.sandboxPerChat,
+      emitHealResult: {
+        getActiveControlReportId: () => this.activeControlReportId,
+        isControlReportCompleted: (reportId) => this.controlProtocolCompletedReportId === reportId,
+        markControlReportCompleted: (reportId) => { this.controlProtocolCompletedReportId = reportId; },
+        getControlQueue: () => this.getControlQueue(),
+        getDurability: () => this.durability,
+        messenger: this.messenger,
+        db: this.db,
+        controlPeers: config.controlPeers,
+        adminPhones: config.adminPhones,
+      },
+      restartSelf: serviceRestarter ? {
         instanceName: this.instanceName,
         dataRoot: config.dataRoot,
         resolveChatJid: () => this.currentTurnChatJid ?? this.activeChatJid ?? undefined,
@@ -3709,8 +3650,8 @@ export class AgentRuntime implements Runtime {
         // authenticated transport BEFORE the phone match, so a spoofed @sms actor
         // that collapses to admin digits cannot induce a restart.
         assertAdmin: (session) => assertRestartSelfAdmin(session, { db: this.db, adminPhones: config.adminPhones }),
-      }));
-    }
+      } : null,
+    });
 
     // Heal the claude file-store credential from the keychain BEFORE the first
     // turn can run, so a keychain-only refresh (native login) can't false-arm
@@ -3799,15 +3740,37 @@ export class AgentRuntime implements Runtime {
     if (this.shutdownRequested) {
       return Promise.reject(new Error('Agent runtime is shutting down; new turns are not accepted'));
     }
-    const processing = this.handleMessageInner(msg);
+    const initialClassification = msg.content === null
+      ? null
+      : classifyInput(msg.content, { routingAliases: config.nlRouting });
+    const tracksRouteRecycle = (
+      initialClassification?.type === 'local'
+      && (
+        initialClassification.command === 'model'
+        || initialClassification.command === 'reset'
+      )
+    );
+    const processing = this.handleMessageInner(msg, tracksRouteRecycle);
     this.activeMessageHandlers.add(processing);
+    if (tracksRouteRecycle) {
+      const scopeKey = this.sessionScope === 'per_chat'
+        ? this.resolvePerChatMapKey(msg.chatJid)
+        : GLOBAL_TOOL_SCOPE_KEY;
+      this.routeRecycleLifecycle.trackRouteCommand(processing, scopeKey);
+    }
     void processing.finally(() => {
       this.activeMessageHandlers.delete(processing);
+      if (tracksRouteRecycle) {
+        this.routeRecycleLifecycle.untrackRouteCommand(processing);
+      }
     }).catch(() => {});
     return processing;
   }
 
-  private async handleMessageInner(msg: IncomingMessage): Promise<void> {
+  private async handleMessageInner(
+    msg: IncomingMessage,
+    awaitQueuedRouteCommand = false,
+  ): Promise<void> {
     // Process media messages (transcription, text extraction, etc.) before routing.
     // For text messages this is a no-op. For all other types we attempt to convert
     // to a plain-text representation suitable for the stream-json agent protocol.
@@ -3920,7 +3883,7 @@ export class AgentRuntime implements Runtime {
       log.warn({ err, messageId: msg.messageId }, 'inline extractor hook failed (continuing)');
     }
 
-    this.turnChain = this.turnChain
+    const queuedWork = this.turnChain
       .then(() => this._handleMessageInner(msg))
       .catch((err) => {
         log.error(
@@ -3939,6 +3902,12 @@ export class AgentRuntime implements Runtime {
         // Notify user of failure
         this.sendDirect(msg.chatJid, 'Something went wrong processing that message. Try again?');
       });
+    const recycleScopeKey = this.sessionScope === 'per_chat'
+      ? this.resolvePerChatMapKey(msg.chatJid)
+      : GLOBAL_TOOL_SCOPE_KEY;
+    this.routeRecycleLifecycle.trackPublication(queuedWork, recycleScopeKey);
+    this.turnChain = queuedWork;
+    if (awaitQueuedRouteCommand) await queuedWork;
   }
 
   private async _handleMessageInner(msg: IncomingMessage): Promise<void> {
@@ -3976,6 +3945,12 @@ export class AgentRuntime implements Runtime {
     // the pre-fix path (validator-warned, F11).
     if (!this.usesPerChatActorSocket()) {
       this.globalSocketServer?.updateActorJid(msg.senderJid);
+    }
+    const recycleScopeKey = this.sessionScope === 'per_chat'
+      ? perChatMapKey!
+      : GLOBAL_TOOL_SCOPE_KEY;
+    if (this.routeRecycleLifecycle.isPendingOrRunning(recycleScopeKey)) {
+      await consumePendingRecycleIfIdleForPort(this.modelPinHost, recycleScopeKey);
     }
     if (this.sandboxPerChat) {
       await this.ensureSessionAndQueue(chatJid, msg.senderJid);
@@ -4067,60 +4042,64 @@ export class AgentRuntime implements Runtime {
       try {
         switch (classified.command) {
           case 'new':
-            // A local reset cannot erase the immutable evidence owner of an
-            // admitted user turn. Ask the caller to retry once that turn has
-            // reached its terminal transaction.
-            this.assertNoActiveUserTurn(perChatMapKey ?? GLOBAL_TOOL_SCOPE_KEY);
-            // Capture session ref before branches may delete it from the map.
-            // In per_chat mode, this.session is NOT reliable (shared field race),
-            // so we look up the correct session from the per-chat maps.
-            const sessionForNew = this.sessionScope === 'per_chat'
-              ? this.chatSessions.get(perChatMapKey!)
-              : this.session;
-            log.info({
+            // Extracted leaf collaborator: runtime-new-command.ts owns the control flow.
+            await runNewCommand<SessionManager, RuntimeTurnQueueTeardown>({
               chatJid,
               sessionScope: this.sessionScope,
               shared: this.shared,
               sandboxPerChat: this.sandboxPerChat,
-            }, 'resetting session and queue for /new');
-            if (this.sessionScope === 'per_chat') {
-              if (!sessionForNew) {
-                throw new Error(`No owned per-chat session found for /new at "${perChatMapKey!}"`);
-              }
-              await this.resetOwnedPerChatSession(perChatMapKey!, chatJid, sessionForNew);
-            } else {
-              // Abort the old queue — clears timers and typing heartbeat before discarding.
-              this.getQueueForChat(chatJid)?.abortTurn();
-              this.cleanupGlobalAutoCompactState();
-              // Create a fresh queue before spawning so stale output from the old session
-              // can never leak into the new session's delivery channel.
-              if (this.shared) {
-                const queue = this.createOutboundQueue(chatJid, '/new shared replacement');
-                this.outboundQueues.set(chatJid, queue);
-              } else {
-                this.queue = this.createOutboundQueue(chatJid, '/new single replacement');
-              }
-              if (sessionForNew) {
-                await this.waitForRejectedTerminalTeardown(sessionForNew);
-                await sessionForNew.handleNew();
-                this.rejectedTerminalTeardowns.delete(sessionForNew);
-              }
-            }
-            // QR-108: /new is a clean reset, so drop the one-message-handoff latches
-            // for this conversation too — otherwise a standby notice or handoff
-            // artifact stashed before /new leaks into the NEXT reply/prelude (both
-            // tables are keyed by the stable conversation_key, which /new does not
-            // change). Both fns are idempotent no-ops when nothing is pending, and
-            // their own JSDoc already documents "cleared on /new".
-            {
-              const resetKey = toConversationKey(chatJid);
-              clearStandbyNotice(this.db, resetKey);
-              deleteHandoffArtifact(this.db, resetKey);
-            }
-            // Reset turn flag — stale value from the old session must not suppress the
-            // _(no response)_ fallback if the first new-session turn has no visible text.
-            this.turnHadVisibleOutput = false;
-            this.sendDirect(chatJid, '*Starting new session* ✓');
+              scopeKey: perChatMapKey ?? GLOBAL_TOOL_SCOPE_KEY,
+              perChatMapKey: perChatMapKey ?? null,
+              isTurnInFlight: () => this.isTurnInFlight(perChatMapKey ?? GLOBAL_TOOL_SCOPE_KEY),
+              getPerChatSession: () => this.chatSessions.get(perChatMapKey!),
+              abortPerChatQueue: () => this.chatQueues.get(perChatMapKey!)
+                ?.abortTurn({ preserveEvidence: true }),
+              disposePerChatSession: async (session, teardown) => {
+                await session.shutdown(false);
+                await this.runtimeTurnCoordinator.retirePerChatTurnQueueAfterKill(teardown);
+                this.deleteOwnedPerChatSession(perChatMapKey!, session);
+                this.chatQueues.delete(perChatMapKey!);
+                this.cleanupPerChatState(perChatMapKey!);
+              },
+              resetOwnedPerChatSession: (session) => this.resetOwnedPerChatSession(perChatMapKey!, chatJid, session),
+              getSingleSession: () => this.session,
+              abortActiveQueue: () => this.getGlobalInterruptQueue()
+                ?.abortTurn({ preserveEvidence: true }),
+              terminalizeTurnForInterrupt: () => this.sessionScope === 'per_chat'
+                ? this.runtimeTurnCoordinator.terminalizePerChatTurnQueueForKill(perChatMapKey!)
+                : this.runtimeTurnCoordinator.terminalizeGlobalTurnForReset(),
+              retireTurnQueueAfterInterrupt: (teardown) => this.sessionScope === 'per_chat'
+                ? this.runtimeTurnCoordinator.retirePerChatTurnQueueAfterKill(teardown)
+                : this.runtimeTurnCoordinator.retireGlobalTurnQueueAfterReset(teardown),
+              shutdownOperationTracker: () => { this.operationTracker?.shutdown(); this.operationTracker = null; },
+              cleanupGlobalAutoCompactState: () => this.cleanupGlobalAutoCompactState(),
+              shutdownSingleSession: (session) => session.shutdown(false),
+              clearSingleScopeRefs: () => {
+                this.session = null; this.queue = null; this.activeChatJid = null;
+                this.currentInboundSeq = undefined; this.currentTurnChatJid = null;
+              },
+              abortChatQueue: () => this.getQueueForChat(chatJid)?.abortTurn(),
+              replaceOutboundQueue: () => {
+                if (this.shared) {
+                  const queue = this.createOutboundQueue(chatJid, '/new shared replacement');
+                  this.outboundQueues.set(chatJid, queue);
+                } else {
+                  this.queue = this.createOutboundQueue(chatJid, '/new single replacement');
+                }
+              },
+              resetSingleSession: async (session) => {
+                await this.waitForRejectedTerminalTeardown(session);
+                await session.handleNew();
+                this.rejectedTerminalTeardowns.delete(session);
+              },
+              clearHandoffLatches: () => {
+                const resetKey = toConversationKey(chatJid);
+                clearStandbyNotice(this.db, resetKey);
+                deleteHandoffArtifact(this.db, resetKey);
+              },
+              clearTurnHadVisibleOutput: () => { this.turnHadVisibleOutput = false; },
+              sendDirect: (text) => this.sendDirect(chatJid, text),
+            });
             break;
 
           case 'status': {
@@ -4221,7 +4200,7 @@ export class AgentRuntime implements Runtime {
             // Task G: /reset undoes just as immediately as a pin applies —
             // recycle back toward the default route (idle now, or deferred to
             // the next message if a turn is in flight).
-            this.applyRouteChangeAndRecycle(chatJid, msg.senderJid, perChatMapKey);
+            await this.applyRouteChangeAndRecycle(chatJid, msg.senderJid, perChatMapKey);
             break;
           }
 
@@ -4240,152 +4219,16 @@ export class AgentRuntime implements Runtime {
           }
 
           case 'sessions': {
-            // #1774: the per-session token figures below read total_input_tokens
-            // uncompensated — they now show genuinely-new input, not the old
-            // inflated (cache-read-inclusive) total. This display has no
-            // budget/quota semantics, so the smaller, honest number is a
-            // straight improvement.
-            const entries: string[] = [];
-            let idx = 1;
-            // b28 r2c: the row whose conversation key matches the chat that sent
-            // /sessions is labelled "Current session" instead of its resolved
-            // name — derived through the same canonical key the runtime dispatches
-            // on, so lid vs pn presentation cannot cause a miss.
-            const requestingKey = this.sessionScope === 'per_chat'
-              ? this.resolvePerChatMapKey(chatJid)
-              : null;
-            if (this.sessionScope === 'per_chat') {
-              for (const [mapKey, sess] of this.chatSessions) {
-                const st = sess.getStatus();
-                if (!st.active) continue;
-                const isGrp = isGroupConversationKey(mapKey);
-                const label = isGrp ? 'Group' : 'DM';
-                const ageStr = st.startedAt ? formatAge(st.startedAt) : '?';
-                const dbRowId = sess.getDbRowId();
-                let tkStr = '0';
-                if (dbRowId !== null) {
-                  const tokenRow = this.db.raw.prepare(
-                    'SELECT total_input_tokens, total_output_tokens FROM agent_sessions WHERE id = ?'
-                  ).get(dbRowId) as { total_input_tokens: number | null; total_output_tokens: number | null } | undefined;
-                  if (tokenRow) {
-                    const tkTotal = (tokenRow.total_input_tokens ?? 0) + (tokenRow.total_output_tokens ?? 0);
-                    tkStr = tkTotal > 1000 ? `${(tkTotal / 1000).toFixed(1)}k` : String(tkTotal);
-                  }
-                }
-                // B23 owner ruling: render the resolved chat name (alias →
-                // group subject/chat name → contact name → formatted phone),
-                // raw key only as last resort. Local DB reads only — cheap.
-                // b28 r2c: the requesting chat's own row reads "Current session".
-                const identifier = mapKey === requestingKey
-                  ? 'Current session'
-                  : formatChatRefForOwner(this.db, mapKey);
-                entries.push(`${idx}. ${identifier} (${label}) — ${ageStr}, ${st.messageCount} msgs, ${tkStr} tokens`);
-                idx++;
-              }
-            } else {
-              const st = this.session?.getStatus();
-              if (st?.active) {
-                const ageStr = st.startedAt ? formatAge(st.startedAt) : '?';
-                const dbRowId = this.session?.getDbRowId() ?? null;
-                let tkStr = '0';
-                if (dbRowId !== null) {
-                  const tokenRow = this.db.raw.prepare(
-                    'SELECT total_input_tokens, total_output_tokens FROM agent_sessions WHERE id = ?'
-                  ).get(dbRowId) as { total_input_tokens: number | null; total_output_tokens: number | null } | undefined;
-                  if (tokenRow) {
-                    const tkTotal = (tokenRow.total_input_tokens ?? 0) + (tokenRow.total_output_tokens ?? 0);
-                    tkStr = tkTotal > 1000 ? `${(tkTotal / 1000).toFixed(1)}k` : String(tkTotal);
-                  }
-                }
-                // b28 r2c: when /sessions is sent from the active chat itself,
-                // the single row reads "Current session". Canonicalize BOTH
-                // sides — the request may present as @lid while activeChatJid is
-                // stored as the pn (or vice versa).
-                const requestIsActiveChat = this.activeChatJid !== null
-                  && canonicalizeChatJid(chatJid, this.db) === canonicalizeChatJid(this.activeChatJid, this.db);
-                const identifier = requestIsActiveChat
-                  ? 'Current session'
-                  : (this.activeChatJid ? formatChatRefForOwner(this.db, this.activeChatJid) : 'unknown');
-                entries.push(`1. ${identifier} — ${ageStr}, ${st.messageCount} msgs, ${tkStr} tokens`);
-              }
-            }
-            const sessionsText = entries.length > 0
-              ? `*Active Sessions (${entries.length})*\n\n${entries.join('\n')}\n\n/kill-session <number> to terminate`
-              : '_No active sessions._';
-            this.sendDirect(chatJid, sessionsText, true);
+            runSessionsCommand(this.sessionLifecycleHost, chatJid);
             break;
           }
 
           case 'kill-session': {
-            // B25 F4: strict integer parse — parseInt('2x') === 2 silently
-            // accepted trailing garbage and killed a session the admin never
-            // named. Digits only, everywhere.
-            const rawIdxArg = (classified.args ?? '').trim();
-            const targetIdx = /^\d+$/.test(rawIdxArg) ? Number(rawIdxArg) : NaN;
-            if (!Number.isInteger(targetIdx) || targetIdx < 1) {
-              this.sendDirect(chatJid, '_Usage: /kill-session <number>_\nRun /sessions first to see the list.', true);
-              break;
-            }
-            if (this.sessionScope === 'per_chat') {
-              const activeSessions = [...this.chatSessions.entries()].filter(([, s]) => s.getStatus().active);
-              if (targetIdx > activeSessions.length) {
-                this.sendDirect(chatJid, `_Invalid session number. ${activeSessions.length} active._`, true);
-                break;
-              }
-              const [mapKey, targetSession] = activeSessions[targetIdx - 1];
-              this.chatQueues.get(mapKey)?.abortTurn();
-              // The runtime TurnQueue owns the turn processor and is NOT part of
-              // cleanupPerChatState. Left behind, the next inbound turn for this
-              // chat queues behind a processor whose session is gone, never
-              // reaches spawnSession, and the chat deadlocks.
-              let killFinalizationError: unknown = null;
-              try {
-                await this.runtimeTurnCoordinator.terminalizePerChatTurnQueueForKill(mapKey);
-              } catch (err) {
-                killFinalizationError = err;
-                log.error({ err, mapKey }, 'kill-session: runtime turn queue teardown failed');
-              }
-              this.deleteOwnedPerChatSession(mapKey, targetSession);
-              this.chatQueues.delete(mapKey);
-              this.cleanupPerChatState(mapKey);
-              await targetSession.shutdown(false);
-              const killLabel = isGroupConversationKey(mapKey) ? 'Group' : 'DM';
-              const killSuffix = killFinalizationError === null
-                ? ''
-                : '\n_⚠️ some in-flight turns could not be finalized — see logs_';
-              // B23: same name resolution as the /sessions list above.
-              this.sendDirect(chatJid, `_Session killed: ${formatChatRefForOwner(this.db, mapKey)} (${killLabel})_${killSuffix}`, true);
-            } else {
-              if (!this.session?.getStatus().active) {
-                this.sendDirect(chatJid, '_No active session to kill._', true);
-                break;
-              }
-              // B25 F4: the parsed index was IGNORED here — any N>=1 killed
-              // the lone session. Exactly one session exists in this scope,
-              // so only index 1 is valid; mirror per_chat's invalid reply.
-              if (targetIdx !== 1) {
-                this.sendDirect(chatJid, '_Invalid session number. 1 active._', true);
-                break;
-              }
-              // Capture the chat identity BEFORE teardown nulls it — the ack
-              // must prove which chat died (same choke point as /sessions).
-              const killedRef = this.activeChatJid;
-              this.getActiveQueue()?.abortTurn();
-              this.operationTracker?.shutdown();
-              this.operationTracker = null;
-              this.cleanupGlobalAutoCompactState();
-              await this.session.shutdown(false);
-              this.session = null;
-              this.queue = null;
-              this.activeChatJid = null;
-              this.sendDirect(
-                chatJid,
-                killedRef
-                  ? `_Session killed: ${formatChatRefForOwner(this.db, killedRef)}_`
-                  : '_Session killed._',
-                true,
-              );
-            }
+            await runKillSessionCommand(
+              this.sessionLifecycleHost,
+              chatJid,
+              classified.args ?? '',
+            );
             break;
           }
 
@@ -4452,20 +4295,14 @@ export class AgentRuntime implements Runtime {
       this.currentTurnSourceMessageId = msg.messageId;
       this.currentTurnAssistantText = '';
       this.currentTurnAssistantItemText.clear();
-      const prefixedText = this.sharedRuntimeTurnText({
-        chatJid,
-        senderJid: msg.senderJid,
-        senderName: msg.senderName,
-        text,
-        isGroup: msg.isGroup,
-      });
       const runtimeContext = this.runtimeTurnCoordinator.createRuntimeTurnForDispatch({
         scope: 'shared',
         chatJid,
-        text: prefixedText,
+        text,
         inboundSeq: msg.inboundSeq,
         source: {
           sourceMessageId: msg.messageId,
+          receivedAtUnixSeconds: receivedAtUnixSeconds(msg),
           conversationKey: journalConversationKey,
           senderJid: msg.senderJid,
           senderName: msg.senderName,
@@ -4478,6 +4315,7 @@ export class AgentRuntime implements Runtime {
       });
       this.turnQueue.enqueue({
         sourceMessageId: msg.messageId,
+        receivedAtUnixSeconds: receivedAtUnixSeconds(msg),
         conversationKey: journalConversationKey,
         chatJid,
         senderJid: msg.senderJid,
@@ -4511,6 +4349,7 @@ export class AgentRuntime implements Runtime {
           inboundSeq: msg.inboundSeq,
           source: {
             sourceMessageId: msg.messageId,
+            receivedAtUnixSeconds: receivedAtUnixSeconds(msg),
             conversationKey: journalConversationKey,
             senderJid: msg.senderJid,
             senderName: msg.senderName,
@@ -4525,6 +4364,7 @@ export class AgentRuntime implements Runtime {
 
         this.enqueuePerChatRuntimeTurn(mapKey, {
           sourceMessageId: msg.messageId,
+          receivedAtUnixSeconds: receivedAtUnixSeconds(msg),
           conversationKey: journalConversationKey,
           chatJid,
           senderJid: msg.senderJid,
@@ -4552,6 +4392,7 @@ export class AgentRuntime implements Runtime {
       this.currentTurnRouteMarkerHold = config.nlRouting ? '' : null;
       await this.sendTurnNonShared(chatJid, text, msg.senderJid, {
         sourceMessageId: msg.messageId,
+        receivedAtUnixSeconds: receivedAtUnixSeconds(msg),
         conversationKey: journalConversationKey,
         senderJid: msg.senderJid,
         senderName: msg.senderName,
@@ -4560,15 +4401,6 @@ export class AgentRuntime implements Runtime {
         ...(msg.isGroup ? { groupName: chatJid } : {}),
       }, msg.inboundSeq);
     }
-  }
-
-  private sharedRuntimeTurnText(turn: Pick<QueuedTurn, 'chatJid' | 'senderJid' | 'senderName' | 'text' | 'isGroup'>): string {
-    const phone = resolvePhoneFromJid(turn.senderJid, this.db);
-    const displayName = turn.senderName ?? phone;
-    const prefix = turn.isGroup
-      ? `[Group: ${turn.chatJid} — ${displayName}]`
-      : `[DM from ${displayName} (${phone})]`;
-    return `${prefix}\n${turn.text}`;
   }
 
   private enqueuePerChatRuntimeTurn(mapKey: string, turn: QueuedTurn): boolean {
@@ -4624,7 +4456,8 @@ export class AgentRuntime implements Runtime {
     // The journal-backed context was minted at admission so queue rejection and
     // processor failure use the same immutable identity. Legacy unjournaled
     // test/system turns still derive only their display text here.
-    const prefixedText = turn.runtimeContext?.replay.text ?? this.sharedRuntimeTurnText(turn);
+    const exactText = turn.runtimeContext?.replay.text ?? text;
+    const participantContext = sharedRuntimeApplicationContext(turn, this.db);
 
     // Track which chat this turn belongs to for event routing
     // @check CHK-065 // @traces REQ-012.AC-03
@@ -4635,7 +4468,7 @@ export class AgentRuntime implements Runtime {
     this.turnHadSuppressedReplySatisfaction = false;
     // Arm the R1 first-line marker scan for this shared turn (flag-gated).
     this.currentTurnRouteMarkerHold = config.nlRouting ? '' : null;
-    this.currentTurnReplayText = prefixedText;
+    this.currentTurnReplayText = exactText;
     this.currentTurnReplayActorJid = senderJid;
     this.replyGuarantee?.arm({ inboundSeq: turn.inboundSeq, chatJid });
 
@@ -4668,7 +4501,10 @@ export class AgentRuntime implements Runtime {
       : null;
     try {
       this.updateSessionActorJid(this.session!, senderJid);
-      await this.session!.sendTurn(prefixedText);
+      await this.session!.sendTurn(withProviderApplicationContext(
+        renderUserTurnForProvider(this.turnChronology, exactText, context, 'live'),
+        participantContext,
+      ));
     } catch (err) {
       if (legacyOwner) {
         this.clearLegacyProviderTurn(GLOBAL_TOOL_SCOPE_KEY, legacyOwner);
@@ -4704,6 +4540,8 @@ export class AgentRuntime implements Runtime {
     beforeUserSend?: () => void,
     systemTurnLease?: SystemTurnLeaseToken,
     dispatchAllowed?: () => boolean,
+    runtimeContext?: RuntimeTurnContext,
+    deliveryKind: TurnDeliveryKind = 'live',
   ): Promise<void> {
     let effectiveMapKey = mapKey;
     let spawnedForTurn = false;
@@ -4818,6 +4656,7 @@ export class AgentRuntime implements Runtime {
     }
     let actorPushed = false;
     const onProviderBoundaryReady = (): void => {
+      if (systemTurnLease) this.requireSystemTurnProviderBoundary(systemTurnLease);
       beforeUserSend?.();
       // Publish actor and typing evidence only when provider execution begins.
       if (this.usesPerChatActorSocket() && effectiveMapKey !== undefined) {
@@ -4837,8 +4676,14 @@ export class AgentRuntime implements Runtime {
       if (queue) queue.indicateTyping();
     };
     try {
-      const turnText = contextPreamble === null ? text : `${contextPreamble}\n\n[Current message]\n${text}`;
-      await dispatchProviderTurn(session, turnText, onProviderBoundaryReady);
+      const userTurnText = renderUserTurnForProvider(
+        this.turnChronology, text, runtimeContext ?? null, deliveryKind,
+        sharedReplayApplicationContext(runtimeContext, this.db),
+      );
+      const turnInput = contextPreamble === null
+        ? userTurnText
+        : withProviderApplicationContext(userTurnText, contextPreamble);
+      await dispatchProviderTurn(session, turnInput, onProviderBoundaryReady);
     } catch (err) {
       if (actorPushed && effectiveMapKey !== undefined) {
         this.removeFailedExecutingActor(effectiveMapKey, actorJid, systemTurnLease);
@@ -4911,7 +4756,7 @@ export class AgentRuntime implements Runtime {
       }, undefined, () => (
         !this.shutdownRequested
         && (context === null || !this.runtimeTurnCoordinator.isUndispatchedRuntimeTurnCancelled(context))
-      ));
+      ), context ?? undefined);
       if (context && completion.value === null) {
         if (!this.runtimeTurnCoordinator.isUndispatchedRuntimeTurnCancelled(context)) {
           this.runtimeTurnCoordinator.terminalizeUndispatchedRuntimeCrash(context);
@@ -4944,11 +4789,22 @@ export class AgentRuntime implements Runtime {
     scopeRef?: PerChatRuntimeScopeRef,
     systemTurnLease?: SystemTurnLeaseToken,
     excludeJobId?: number, // PRESTAGE-T4: set only by the recovery supervisor's own replay; see beginRuntimeTurnEvidence
+    requestedDeliveryKind?: TurnDeliveryKind,
   ): Promise<void> {
     mapKey = scopeRef?.value ?? mapKey;
     const dispatchAllowed = runtimeContext === undefined
       ? undefined
       : () => !this.runtimeTurnCoordinator.isUndispatchedRuntimeTurnCancelled(runtimeContext);
+    const continuationContext = runtimeContext === undefined
+      ? this.perChatRuntimeTurnContexts.get(mapKey)?.[0]
+      : undefined;
+    const providerTurnContext = runtimeContext ?? continuationContext;
+    const providerDeliveryKind = requestedDeliveryKind ?? (
+      excludeJobId === undefined && (continuationContext === undefined
+        || !this.runtimeTurnCoordinator.isRuntimeTurnContinuation(continuationContext))
+        ? 'live'
+        : 'recovery_replay'
+    );
     // AskUserQuestion → Poll bridge: if a poll question is pending for this
     // chat and the user sends a text reply, resolve it as an option number,
     // label, description match, or free-text answer and inject it back.
@@ -5064,6 +4920,9 @@ export class AgentRuntime implements Runtime {
       if (this.sandboxPerChat) {
         await this.ensureSessionAndQueue(chatJid, actorJid);
       } else {
+        if (this.routeRecycleLifecycle.isPendingOrRunning(mapKey)) {
+          await consumePendingRecycleIfIdleForPort(this.modelPinHost, mapKey);
+        }
         this.ensureSessionAndQueueSync(chatJid, mapKey, actorJid);
       }
       const currentMapKey = scopeRef?.value ?? mapKey;
@@ -5103,7 +4962,7 @@ export class AgentRuntime implements Runtime {
             retrySession,
             scopeRef?.value ?? currentMapKey,
           );
-        }, systemTurnLease, dispatchAllowed);
+        }, systemTurnLease, dispatchAllowed, providerTurnContext, providerDeliveryKind);
       } catch (err) {
         if (legacyOwner.value) {
           this.clearLegacyProviderTurn(currentMapKey, legacyOwner.value);
@@ -5120,7 +4979,7 @@ export class AgentRuntime implements Runtime {
           session,
           scopeRef?.value ?? mapKey,
         );
-      }, systemTurnLease, dispatchAllowed);
+      }, systemTurnLease, dispatchAllowed, providerTurnContext, providerDeliveryKind);
     } catch (err) {
       if (legacyOwner.value) {
         this.clearLegacyProviderTurn(scopeRef?.value ?? mapKey, legacyOwner.value);
@@ -5427,7 +5286,7 @@ export class AgentRuntime implements Runtime {
     event: Extract<AgentEvent, { type: 'result' }>,
     tracker: OperationTracker | null,
   ): void {
-    sourceSession.completeProviderTurn();
+    sourceSession.completeProviderTurn(event.providerTurnOwnerToken);
     tracker?.onTurnComplete();
     const rowId = sourceSession.getDbRowId();
     if (rowId !== null && (event.inputTokens !== undefined || event.outputTokens !== undefined)) {
@@ -5483,7 +5342,7 @@ export class AgentRuntime implements Runtime {
     const reportId = this.activeControlReportId;
     if (reportId === null || this.controlTerminalizingReportId === reportId) return;
 
-    sourceSession.completeProviderTurn();
+    sourceSession.completeProviderTurn(event.providerTurnOwnerToken);
 
     this.operationTrackers.get('control@heal.internal')?.onTurnComplete();
     controlQueue.endTurn();
@@ -6048,7 +5907,17 @@ export class AgentRuntime implements Runtime {
   /** T8-F1+F2: shared operator-DM elevation ctx for direct sends/polls. */
   private resolveSendAudience(chatJid: string, isGroup: boolean): OutboundAudience {
     const peerIsAdmin = isOperatorDmPeer(chatJid, isGroup, this.db, config.adminPhones);
-    return resolveOutboundAudience(chatJid, { isGroup, peerIsAdmin, fallbackActive: this.isFallbackWindowActive });
+    const peerIsTrustedInternal = isTrustedInternalDmPeer(
+      chatJid,
+      isGroup,
+      config.internalPeerJids,
+    );
+    return resolveOutboundAudience(chatJid, {
+      isGroup,
+      peerIsAdmin,
+      peerIsTrustedInternal,
+      fallbackActive: this.isFallbackWindowActive,
+    });
   }
 
   private sendUnansweredPollTextFallback(
@@ -6845,7 +6714,7 @@ export class AgentRuntime implements Runtime {
         // but before the next user message. These are model reactions to SDK-injected
         // system-reminders (e.g., TodoWrite) and must not trigger typing or outbound messages.
         if (mapKey !== undefined && this.postTurnGate.has(mapKey)) {
-          log.info({ mapKey, textPreview: event.text.slice(0, 200) }, 'post-turn gate: suppressed phantom assistant_text');
+          log.info({ mapKey, textPreview: providerPreview(event.text, 200) }, 'post-turn gate: suppressed phantom assistant_text');
           break;
         }
         if (this.isSilentCompact(mapKey)) break;
@@ -6978,11 +6847,11 @@ export class AgentRuntime implements Runtime {
         }
         if (event.isError) {
           const toolName = trackedToolName ?? resultToolName ?? 'unknown';
-          const errorPreview = event.content.length > 200 ? event.content.slice(0, 200) + '...' : event.content;
+          const errorPreview = event.content.length > 200 ? `${providerPreview(event.content, 200)}...` : providerPreview(event.content, event.content.length);
           log.warn({ toolId: event.toolId, toolName, error: errorPreview }, 'tool error reported by agent');
           const classification = classifyToolError(toolName, event.content);
           queue.enqueueToolUpdate(classification);
-          this.maybeEmitToolFailureAlert({
+          maybeEmitToolFailureAlert({
             chatJid: queue.targetChatJid,
             toolId: event.toolId,
             toolName,
@@ -6990,7 +6859,7 @@ export class AgentRuntime implements Runtime {
             classification,
             toolScopeKey,
             mapKey,
-          });
+          }, this.toolFailureAlertDeps());
         }
         toolNames?.delete(event.toolId);
         if (toolNames && toolNames.size === 0) {
@@ -7111,6 +6980,7 @@ export class AgentRuntime implements Runtime {
             ),
           },
           unownedProviderEventRejects: this.unownedProviderEventRejects,
+          ...this.turnChronology.healthDetails(),
           providerExecution,
           turnFinalizationRetainedRetries: finalizationHealth.retainedRetries,
           turnFinalizationDegradedScopes: finalizationHealth.degradedScopes,
@@ -7155,6 +7025,7 @@ export class AgentRuntime implements Runtime {
           ),
         },
         unownedProviderEventRejects: this.unownedProviderEventRejects,
+        ...this.turnChronology.healthDetails(),
         providerExecution,
         turnFinalizationRetainedRetries: finalizationHealth.retainedRetries,
         turnFinalizationDegradedScopes: finalizationHealth.degradedScopes,
@@ -7377,7 +7248,7 @@ export class AgentRuntime implements Runtime {
       try {
         await this.waitForSystemTurnQuarantine(mapKey);
         await this.pendingSystemResults.waitUntilDispatchable(mapKey, compactLease);
-        await session.sendTurn('/compact');
+        await this.dispatchSystemTurn(session, '/compact', compactLease);
       } catch (err) {
         if (silent) this.clearSilentCompact(mapKey);
         await this.settleFailedSystemTurnDispatch(session, mapKey, compactLease, err);
@@ -7428,7 +7299,7 @@ export class AgentRuntime implements Runtime {
         GLOBAL_TOOL_SCOPE_KEY,
         compactLease,
       );
-      await session.sendTurn('/compact');
+      await this.dispatchSystemTurn(session, '/compact', compactLease);
     } catch (err) {
       if (silent) this.clearSilentCompact(GLOBAL_TOOL_SCOPE_KEY);
       this.currentTurnChatJid = null;
@@ -7464,6 +7335,7 @@ export class AgentRuntime implements Runtime {
   async shutdown(): Promise<void> {
     const shutdownFailures: unknown[] = [];
     const failedPerChatSessions = new Map<string, SessionManager>();
+    const recycleShutdownSkipOwners = new Set<SessionManager>();
     let singletonSessionShutdownFailed = false;
     let preserveRuntimeTurnState = false;
     this.shutdownRequested = true;
@@ -7474,6 +7346,7 @@ export class AgentRuntime implements Runtime {
       sandboxPerChat: this.sandboxPerChat,
     }, 'AgentRuntime shutting down');
     const startedAt = Date.now();
+    const shutdownDeadlineAt = startedAt + RUNTIME_TURN_SHUTDOWN_FINALIZATION_TIMEOUT_MS;
 
     if (this.controlSessionTimeout) {
       clearTimeout(this.controlSessionTimeout);
@@ -7534,7 +7407,7 @@ export class AgentRuntime implements Runtime {
     this.autoCompact.shutdown();
 
     try {
-      await this.runtimeTurnCoordinator.finalizeActiveRuntimeTurnsForShutdown();
+      await this.runtimeTurnCoordinator.finalizeActiveRuntimeTurnsForShutdown(shutdownDeadlineAt);
     } catch (err) {
       shutdownFailures.push(err);
       preserveRuntimeTurnState = true;
@@ -7542,7 +7415,11 @@ export class AgentRuntime implements Runtime {
     }
     this.pendingSystemResults.clear();
     if (!preserveRuntimeTurnState) {
-      const messageHandlers = await Promise.allSettled([...this.activeMessageHandlers]);
+      const messageHandlers = await Promise.allSettled(
+        [...this.activeMessageHandlers].filter(
+          (handler) => !this.routeRecycleCommandWork.has(handler),
+        ),
+      );
       const rejectedMessageHandlers = messageHandlers.filter(
         (item): item is PromiseRejectedResult => item.status === 'rejected',
       );
@@ -7555,6 +7432,31 @@ export class AgentRuntime implements Runtime {
       }
     }
 
+    try {
+      await this.routeRecycleLifecycle.awaitForShutdown(shutdownDeadlineAt);
+    } catch (err) {
+      shutdownFailures.push(err);
+      preserveRuntimeTurnState = true;
+      log.error({ err }, 'route recycle lifecycles did not quiesce during shutdown');
+      for (const session of this.routeRecycleLifecycle.retainedOwners((scopeKey) =>
+        scopeKey === GLOBAL_TOOL_SCOPE_KEY ? this.session ?? undefined : this.chatSessions.get(scopeKey)
+      )) {
+        recycleShutdownSkipOwners.add(session);
+      }
+    }
+    const recycleFailures = this.routeRecycleLifecycle.takeFailures();
+    if (recycleFailures.length > 0) {
+      preserveRuntimeTurnState = true;
+      for (const failure of recycleFailures) {
+        recycleShutdownSkipOwners.add(failure.session);
+        shutdownFailures.push(failure.error);
+      }
+      log.error(
+        { failureCount: recycleFailures.length },
+        'route recycle lifecycle failed during shutdown',
+      );
+    }
+
     // Shutdown per_chat sessions
     let perChatKeys: Set<string> | null = null;
     if (this.sessionScope === 'per_chat') {
@@ -7563,45 +7465,16 @@ export class AgentRuntime implements Runtime {
         ...this.chatQueues.keys(),
         ...this.imageCoalesce.buffers.keys(),
       ]);
-      // #1755: shut the per_chat sessions down CONCURRENTLY. Each session.shutdown()
-      // touches only its own per-session state, synchronous (event-loop-serialized)
-      // SQLite on its own rows, and its own distinct process tree — so the kill-grace
-      // waits OVERLAP instead of stacking linearly against the service manager's stop
-      // timeout (the observed cause of SIGTERM-timeout SIGKILLs). Each task captures
-      // its own error so the batch never rejects; runtime state (shutdownFailures,
-      // failedPerChatSessions) is reconciled sequentially AFTER settle, never
-      // mutated concurrently. Per-chat outcome + duration is logged for attribution.
-      const perChatOutcomes = await Promise.all(
-        [...this.chatSessions].map(async ([chatJid, session]) => {
-          const startedAt = Date.now();
-          try {
-            await session.shutdown();
-            return { chatJid, session, err: null as unknown, durationMs: Date.now() - startedAt };
-          } catch (err) {
-            return { chatJid, session, err, durationMs: Date.now() - startedAt };
-          }
-        }),
-      );
-      for (const { chatJid, session, err, durationMs } of perChatOutcomes) {
-        if (err !== null) {
-          shutdownFailures.push(err);
-          failedPerChatSessions.set(chatJid, session);
-          log.warn({ err, chatJid, durationMs }, 'per_chat session shutdown failed');
-        } else {
-          log.debug({ chatJid, durationMs }, 'per_chat session shutdown ok');
-        }
-      }
     }
-
-    if (this.session && this.sessionScope !== 'per_chat') {
-      try {
-        await this.session.shutdown();
-      } catch (err) {
-        shutdownFailures.push(err);
-        singletonSessionShutdownFailed = true;
-        log.warn({ err, instanceName: this.instanceName }, 'session shutdown failed');
-      }
+    const ownedSessionShutdown = await shutdownOwnedSessions(
+      this.sessionLifecycleHost,
+      recycleShutdownSkipOwners,
+    );
+    shutdownFailures.push(...ownedSessionShutdown.failures);
+    for (const [mapKey, session] of ownedSessionShutdown.failedPerChatSessions) {
+      failedPerChatSessions.set(mapKey, session);
     }
+    singletonSessionShutdownFailed = ownedSessionShutdown.singletonSessionShutdownFailed;
 
     // Session shutdown can synchronously surface a final result or failure.
     // Drain those records while their queues, FIFO maps, and reply guarantee
@@ -7806,6 +7679,19 @@ export class AgentRuntime implements Runtime {
     return this.queue;
   }
 
+  private getGlobalInterruptChatJid(): string | null {
+    return this.currentRuntimeTurnContext?.identity.deliveryJid
+      ?? this.pendingSingletonRuntimeTurnContext?.identity.deliveryJid
+      ?? this.turnQueue.activeTurn?.chatJid
+      ?? this.currentTurnChatJid
+      ?? (this.turnQueue.isProcessing ? null : this.activeChatJid);
+  }
+
+  private getGlobalInterruptQueue(): IOutboundQueue | null {
+    const chatJid = this.getGlobalInterruptChatJid();
+    return chatJid === null ? this.getActiveQueue() : this.getQueueForChat(chatJid);
+  }
+
   private resolvePerChatMapKey(chatJid: string): string {
     if (this.sandboxPerChat) {
       return chatJidToWorkspace(this.cwd ?? homedir(), chatJid).workspaceKey;
@@ -7905,45 +7791,28 @@ export class AgentRuntime implements Runtime {
     purpose: SystemTurnPurpose,
     routeChatJid?: string,
   ): SystemTurnLeaseToken {
-    // One retry window per lease before quarantine: a production 240s expiry
-    // was a claude-cli subprocess merely slow to start under host I/O pressure
-    // (zero stderr), and immediate teardown killed the session under the
-    // queued user turn ('No active session'). The stream still has no request
-    // IDs, so the request is never re-sent — the lease keeps blocking while
-    // one more full window lets the slow result land; a second consecutive
-    // expiry quarantines exactly as before.
-    let retryWindowGranted = false;
-    return this.pendingSystemResults.mark({
+    return markDeferredSystemTurn({
+      tracker: this.pendingSystemResults,
       scopeKey,
       purpose,
       owner: this.captureSystemTurnOwner(session, scopeKey),
       ...(routeChatJid !== undefined ? { routeChatJid } : {}),
-      ...(purpose === 'auto_compact_silent'
-        ? {}
-        : {
-            timeoutMs: SYSTEM_TURN_TIMEOUT_MS,
-            onTimeout: async (lease: SystemTurnLeaseToken): Promise<boolean | 'retry'> => {
-              if (!retryWindowGranted) {
-                retryWindowGranted = true;
-                log.warn(
-                  { scopeKey, leaseId: lease.id, purpose, timeoutMs: SYSTEM_TURN_TIMEOUT_MS },
-                  'system provider request timed out — retrying once before quarantine',
-                );
-                return 'retry';
-              }
-              log.error(
-                { scopeKey, leaseId: lease.id, purpose, timeoutMs: SYSTEM_TURN_TIMEOUT_MS },
-                'system provider request timed out — quarantining source generation',
-              );
-              const provedClosed = await this.quarantineTimedOutSystemTurn(
-                session,
-                scopeKey,
-                lease,
-              );
-              if (provedClosed) this.releaseSystemTurnExecutingActorByLease(lease);
-              return provedClosed;
-            },
-          }),
+      timeoutMs: SYSTEM_TURN_TIMEOUT_MS,
+      quarantine: async (lease) => {
+        const provedClosed = await this.quarantineTimedOutSystemTurn(session, scopeKey, lease);
+        if (provedClosed) this.releaseSystemTurnExecutingActorByLease(lease);
+        return provedClosed;
+      },
+    });
+  }
+
+  private requireSystemTurnProviderBoundary(lease: SystemTurnLeaseToken): void {
+    requireSystemTurnProviderBoundary(this.pendingSystemResults, lease);
+  }
+
+  private dispatchSystemTurn(session: SessionManager, text: string, lease: SystemTurnLeaseToken, onBoundary?: () => void): Promise<void> {
+    return dispatchProviderTurn(session, text, () => {
+      this.requireSystemTurnProviderBoundary(lease); onBoundary?.();
     });
   }
 
@@ -8335,7 +8204,9 @@ export class AgentRuntime implements Runtime {
     // resolution failure must degrade to the default route and NEVER drop a
     // turn — so the pin probe is inside this guard, not just the pref read.
     try {
-      const pref = actorJid ? this.loadSenderPreference(chatJid, actorJid) : null;
+      const pref = this.nlRoutingEnabled && actorJid
+        ? this.loadSenderPreference(chatJid, actorJid)
+        : null;
       const pinned = pref?.intent === 'provider_specific' ? pref.requestedProvider : null;
       // The tier provider this pref maps to (if any) is probed for routability
       // the same way a pin is — an ineligible tier degrades to the default
@@ -8344,11 +8215,17 @@ export class AgentRuntime implements Runtime {
         pref?.intent === 'strongest' ? config.nlRoutingTiers?.strongest
         : pref?.intent === 'fastest' ? config.nlRoutingTiers?.fastest
         : undefined;
-      const routable = this.routablePinTargets();
-      const decision = resolveRoute({
+      const fallbackEntry = this.effectiveFallbackEntry;
+      // Health-window fallback and unconfigured/NL-disabled routes do not need
+      // a credential probe. Avoid making an unrelated probe a prerequisite for
+      // selecting the already-known exact route.
+      const routable = fallbackEntry === null && pref !== null
+        ? this.routablePinTargets()
+        : [this.agentProvider];
+      let decision = resolveRoute({
         agentProvider: this.agentProvider,
         effectiveModel: this.effectiveModel,
-        fallbackEntry: this.effectiveFallbackEntry,
+        fallbackEntry,
         pref,
         pinnedProviderEligible: pinned !== null && routable.includes(pinned),
         pinnedModelEligible: isPinnedModelEligible(
@@ -8356,7 +8233,7 @@ export class AgentRuntime implements Runtime {
           this.agentFallbacks,
           (entry) => this.isEntryCredentialed(entry),
         ),
-        tierMap: config.nlRoutingTiers,
+        tierMap: this.nlRoutingEnabled ? config.nlRoutingTiers : null,
         tierProviderEligible: tierProvider !== undefined && routable.includes(tierProvider),
         // Finding 2 fix: the same agentFallbacks entries that
         // routablePinTargets/isEntryCredentialed just read to prove a pin/tier
@@ -8366,6 +8243,9 @@ export class AgentRuntime implements Runtime {
         // `undefined`. First entry wins per provider, matching
         // routablePinTargets' own dedup.
         configuredModelByProvider: this.configuredModelByProvider(),
+        agentDataPolicy: this.agentDataPolicy,
+        boundaryMode: this.providerBoundaryMode,
+        configuredDataPolicyByRoute: this.configuredDataPolicyByRoute(),
       });
       // Task H — sync consumption of a verified model pin (decideModelPinResolution's
       // hot path: verified + same provider needs no catalogue, so this stays
@@ -8386,19 +8266,25 @@ export class AgentRuntime implements Runtime {
           decision.provider,
         );
         if (modelPinDecision.action === 'use') {
-          decision.model = modelPinDecision.modelId;
+          decision = Object.freeze({ ...decision, model: modelPinDecision.modelId });
         }
       }
-      return { ...decision, pinnedProvider: pinned };
+      return Object.freeze({ ...decision, pinnedProvider: pinned });
     } catch (err) {
+      if (err instanceof ProviderDataPolicyError) throw err;
       log.warn({ err, instance: this.instanceName }, 'route resolution failed - routing on default');
-      return {
+      const policy = resolveProviderRoutePolicy({
         provider: this.agentProvider,
-        model: this.effectiveModel,
+        model: this.model,
+        dataPolicy: this.agentDataPolicy,
+        boundaryMode: this.providerBoundaryMode,
+      });
+      return Object.freeze({
+        ...policy,
         source: 'default',
         reasonCode: 'route_resolution_failed',
         pinnedProvider: null,
-      };
+      });
     }
   }
 
@@ -8429,18 +8315,20 @@ export class AgentRuntime implements Runtime {
 
   /**
    * Provider config for a route-decided session: same inheritance rules as
-   * the fallback path (fallbackProviderConfigFor), including the opencode
-   * strip of primary-specific baseUrl/apiKeyService when routing away from
-   * the primary provider.
+   * the fallback path (fallbackProviderConfigFor), incl. the opencode strip of
+   * primary baseUrl/apiKeyService when routing off-primary. Slice 3:
+   * applyRouteEffort folds a claude-cli effort pin over the static effort.
    */
   private routeSessionProviderConfig(route: RouteDecision): Record<string, unknown> | undefined {
-    if (route.source !== 'preference' || route.provider === this.agentProvider) {
-      return this.sessionProviderConfig();
-    }
     // Match the fallback path (effectiveProviderConfig): a provider with no
     // config of its own inherits the agent's providerConfig — including the
     // budget cap — instead of spawning with providerConfig=undefined (R2).
-    return fallbackProviderConfigFor(route.provider, this.agentProvider, this.agentProviderConfig) ?? this.agentProviderConfig;
+    const base = route.source !== 'preference' || route.provider === this.agentProvider
+      ? this.sessionProviderConfig()
+      : (fallbackProviderConfigFor(route.provider, this.agentProvider, this.agentProviderConfig) ?? this.agentProviderConfig);
+    // ONE effort application point — a future third base branch cannot silently
+    // skip the wrap (an effort pinned and echoed, then dropped before spawn).
+    return applyRouteEffort(base, route);
   }
 
   /** Spawn-time route bookkeeping: pin-blocked notice (once per transition) + route events. */
@@ -8545,6 +8433,16 @@ export class AgentRuntime implements Runtime {
       models[entry.provider] = entry.model;
     }
     return models;
+  }
+
+  private configuredDataPolicyByRoute(): Record<string, ProviderDataPolicy | undefined> {
+    const policies: Record<string, ProviderDataPolicy | undefined> = {};
+    for (const entry of this.agentFallbacks) {
+      const key = providerRoutePolicyKey(entry.provider, entry.model);
+      if (key in policies) continue;
+      policies[key] = entry.dataPolicy;
+    }
+    return policies;
   }
 
   /**
@@ -8678,11 +8576,11 @@ export class AgentRuntime implements Runtime {
    * private method (rather than inlining the port call at each site) because
    * /reset and the recycle characterization suite both reach it by name.
    */
-  private applyRouteChangeAndRecycle(
+  private async applyRouteChangeAndRecycle(
     chatJid: string,
     senderJid: string,
     perChatMapKey: string | undefined,
-  ): RouteRecycleOutcome {
+  ): Promise<RouteRecycleOutcome> {
     return applyRouteChangeAndRecycleForPort(this.modelPinHost, chatJid, senderJid, perChatMapKey);
   }
 
@@ -9397,6 +9295,11 @@ export class AgentRuntime implements Runtime {
     this.consecutivePrimaryEmptyTurns = 0;
     this.consecutiveUnknownTerminalTurns = 0;
     if (this.isFallbackWindowActive) return; // #1884 follow-up: a fallback turn proves nothing about the primary
+    // A2: this real post-revert turn IS the honest canary — the deferred clear a probe-confirmed revert withheld.
+    if (this.pendingPostRevertConfirmation) {
+      clearAlertSourceChecked(this.instanceName, 'provider_fallback_activated', 'reason=post-revert-turn-success');
+      this.pendingPostRevertConfirmation = false;
+    }
     const wasStale = deriveModelUsable(this.primaryModelUsability, Date.now()).modelUsableStale;
     this.recordPrimaryModelUsability({ status: 'usable', provider: this.agentProvider, model: this.model ?? null, reason: 'turn-success' }, 'manual');
     if (wasStale) log.info({ provider: this.agentProvider, model: this.model ?? null }, 'primary model usability refreshed by turn success after going stale');
@@ -10037,8 +9940,8 @@ export class AgentRuntime implements Runtime {
     };
   }
 
-  /** Clear the fallback window + timer, reverting new sessions to the primary provider. */
-  private deactivateProviderFallback(reason: string): void {
+  /** Clear the fallback window + timer, reverting new sessions to the primary provider. `receipt` (DUR-02, probe-confirmed only) drives the dual clear below; every durable emission fires BEFORE the counter reset and the DB clear, so a crash mid-transition replays idempotently instead of stranding an open incident. */
+  private deactivateProviderFallback(reason: string, receipt: FallbackRecoveryReceipt | null = null): void {
     if (this.revertTimer) {
       clearTimeout(this.revertTimer);
       this.revertTimer = null;
@@ -10066,6 +9969,22 @@ export class AgentRuntime implements Runtime {
       userVisible: false,
       reasonCode: reason,
     });
+    // A revert is a RECOVERY, not a fault: the window ran its course (or was
+    // manually disabled) and new sessions are back on the primary provider.
+    // It carries useful per-window telemetry (turns served/empty, duration) so
+    // it stays an emitted source rather than a bare clear — but at `info`, not
+    // the emitAlertChecked `critical` default. Paging an operator to
+    // "investigate/remediate" a healthy revert is pure noise (it was firing
+    // critical for clean window-elapsed cycles). The matching FAULT alert —
+    // provider_fallback_activated — keeps its critical default. A
+    // probe-confirmed recovery appends the receipt (allowlisted fields only).
+    const receiptEvidence = receipt ? formatFallbackRecoveryReceiptEvidence(receipt) : null;
+    emitAlertChecked(this.instanceName, 'provider_fallback_reverted', 'Provider fallback window ended — reverted to primary provider', `reason=${reason} turnsServed=${windowTurnsServed} turnsEmpty=${windowTurnsEmpty} windowMs=${windowMs ?? 'unknown'}${receiptEvidence ? ` ${receiptEvidence}` : ''}`, 'info');
+    // A2: real traffic isn't proven yet — the FIRST post-revert turn succeeding is (recordTurnCapabilitySuccess); a non-probe-confirmed deactivation makes no recovery claim, so it clears now.
+    if (receipt) this.pendingPostRevertConfirmation = true;
+    else clearAlertSourceChecked(this.instanceName, 'provider_fallback_activated', `reason=${reason} windowMs=${windowMs ?? 'unknown'}`);
+    // H5: stall-incident open/closed = attempts>=threshold NOW, true for ANY reason — fixes admin-disable-mid-stall re-stranding it forever.
+    if (this.fallbackProbeAttempts >= PROVIDER_FALLBACK_PROBE_STALL_THRESHOLD) clearAlertSourceChecked(this.instanceName, 'fallback_recovery_stalled', receiptEvidence ?? `reason=${reason} attempts=${this.fallbackProbeAttempts} recovery=unconfirmed episode=abandoned`);
     this.fallbackWindow.activeUntil = null;
     this.fallbackWindow.activatedAt = null;
     this.fallbackWindow.armReason = null;
@@ -10090,31 +10009,6 @@ export class AgentRuntime implements Runtime {
       reason,
     }, 'reverting to primary provider');
     this.fallbackMetrics.recordRevert();
-    // A revert is a RECOVERY, not a fault: the window ran its course (or was
-    // manually disabled) and new sessions are back on the primary provider.
-    // It carries useful per-window telemetry (turns served/empty, duration) so
-    // it stays an emitted source rather than a bare clear — but at `info`, not
-    // the emitAlertChecked `critical` default. Paging an operator to
-    // "investigate/remediate" a healthy revert is pure noise (it was firing
-    // critical for clean window-elapsed cycles). The matching FAULT alert —
-    // provider_fallback_activated — keeps its critical default.
-    emitAlertChecked(
-      this.instanceName,
-      'provider_fallback_reverted',
-      'Provider fallback window ended — reverted to primary provider',
-      `reason=${reason} turnsServed=${windowTurnsServed} turnsEmpty=${windowTurnsEmpty}`
-        + ` windowMs=${windowMs ?? 'unknown'}`,
-      'info',
-    );
-    // Recovery clears the activation incident this window opened. Mirrors the
-    // primary_model_unusable → clear pairing above; a clear of a non-open
-    // incident is a downstream no-op, so this is safe across restarts and
-    // manual disables alike.
-    clearAlertSourceChecked(
-      this.instanceName,
-      'provider_fallback_activated',
-      `reason=${reason} windowMs=${windowMs ?? 'unknown'}`,
-    );
   }
 
   private handleFallbackRevertTimer(): void {
@@ -10130,71 +10024,63 @@ export class AgentRuntime implements Runtime {
     // spawnSync froze the WHOLE event loop for the same duration, forever on
     // a dead auth primary.
     const windowAtProbe = this.fallbackWindow.activeUntil;
-    void Promise.resolve()
-      .then(() => this.probePrimaryProviderRecovered())
-      .catch((err) => {
-        // probePrimaryProviderRecovered never throws by contract; this guards
-        // test stubs and future edits — a throwing probe is a failed probe.
-        log.warn({ err }, 'primary provider recovery probe threw — treating as failed');
-        return false;
-      })
-      .then((recovered) => {
-        // Stale-result guards: drop the probe outcome if the window was
-        // deactivated or re-armed while the probe was in flight (a stale
-        // extend would shorten a fresh window; the next cadence re-probes).
-        if (this.fallbackWindow.activeUntil === null || this.fallbackWindow.activeUntil !== windowAtProbe) return;
-        if (recovered) {
-          this.deactivateProviderFallback('primary-probe-ok');
-          return;
-        }
-        this.fallbackProbeAttempts += 1;
-        const now = Date.now();
-        const until = now + PROVIDER_FALLBACK_PRIMARY_RECHECK_MS;
-        this.fallbackWindow.activeUntil = until;
-        this.revertTimer = setTimeout(() => {
-          this.handleFallbackRevertTimer();
-        }, PROVIDER_FALLBACK_PRIMARY_RECHECK_MS);
-        this.revertTimer.unref?.();
-        try {
-          saveFallbackState(this.db, {
-            activeUntil: until,
-            activatedAt: this.fallbackWindow.activatedAt ?? now,
-            reason: this.fallbackWindow.armReason ?? 'auth-required',
-            // Persist the stall clock with the window so a restart mid-stall
-            // resumes the count instead of resetting it.
-            probeAttempts: this.fallbackProbeAttempts,
-          });
-        } catch (err) {
-          log.warn({ err }, 'failed to extend persisted fallback window after failed recovery probe');
-        }
-        // Stall alert at threshold and every subsequent multiple (T, 2T, 3T ...).
-        // Re-alerting on multiples surfaces a long-running stall without
-        // drowning operators with per-probe noise. The counter only resets on
-        // deactivation. Extension continues regardless — surfacing must never
-        // strand the instance on a dead primary.
-        const T = PROVIDER_FALLBACK_PROBE_STALL_THRESHOLD;
-        const atts = this.fallbackProbeAttempts;
-        if (atts === T || (atts > T && (atts - T) % T === 0)) {
-          emitAlertChecked(
-            this.instanceName,
-            'fallback_recovery_stalled',
-            'Primary provider recovery probe is stalled — fallback window extending indefinitely',
-            `reason=${this.fallbackWindow.armReason ?? 'auth-required'} attempts=${atts} `
-              + `windowEnd=${new Date(until).toISOString()} primaryProvider=${this.agentProvider}`,
-          );
-        }
-        // No scheduleFallbackPrimaryProbe() here: the extension window equals the
-        // recheck cadence, so this timer IS the probe cadence. Re-arming the
-        // standing probe alongside it produced a double-probe (two probes per
-        // cadence); the standing probe's guard makes it a no-op in this state.
-        log.warn({
-          instanceName: this.instanceName,
-          primaryProvider: this.agentProvider,
-          fallbackProvider: this.fallbackWindow.activeEntry?.provider,
-          reason: this.fallbackWindow.armReason,
+    void this.probeAndEvaluateFallbackRecovery().then((decision) => {
+      if (this.fallbackWindow.activeUntil === null || this.fallbackWindow.activeUntil !== windowAtProbe) return; // stale: window deactivated/re-armed mid-flight
+      if (decision.commit) {
+        this.deactivateProviderFallback('primary-probe-ok', decision.receipt);
+        return;
+      }
+      this.fallbackProbeAttempts += 1;
+      const now = Date.now();
+      const until = now + PROVIDER_FALLBACK_PRIMARY_RECHECK_MS;
+      this.fallbackWindow.activeUntil = until;
+      this.revertTimer = setTimeout(() => {
+        this.handleFallbackRevertTimer();
+      }, PROVIDER_FALLBACK_PRIMARY_RECHECK_MS);
+      this.revertTimer.unref?.();
+      try {
+        saveFallbackState(this.db, {
+          activeUntil: until,
+          activatedAt: this.fallbackWindow.activatedAt ?? now,
+          reason: this.fallbackWindow.armReason ?? 'auth-required',
+          // Persist the stall clock with the window so a restart mid-stall
+          // resumes the count instead of resetting it.
           probeAttempts: this.fallbackProbeAttempts,
-        }, 'primary provider recovery probe still failing; keeping fallback armed');
-      });
+        });
+      } catch (err) {
+        log.warn({ err }, 'failed to extend persisted fallback window after failed recovery probe');
+      }
+      // Stall alert at T, 2T, 3T ... up to the DUR-02 escalation ceiling, then no repeats (see stallAlertPlan) — counter resets only on deactivation, window keeps extending.
+      const atts = this.fallbackProbeAttempts;
+      const plan = stallAlertPlan(atts, PROVIDER_FALLBACK_PROBE_STALL_THRESHOLD, PROVIDER_FALLBACK_PROBE_STALL_CEILING_MULTIPLE);
+      if (plan.emit) {
+        emitAlertChecked(this.instanceName, 'fallback_recovery_stalled', 'Primary provider recovery probe is stalled — fallback window extending indefinitely', `reason=${this.fallbackWindow.armReason ?? 'auth-required'} attempts=${atts} windowEnd=${new Date(until).toISOString()} primaryProvider=${this.agentProvider}${plan.ceiling ? ' ceiling=true' : ''}`);
+      }
+      // No scheduleFallbackPrimaryProbe() here: the extension window equals the
+      // recheck cadence, so this timer IS the probe cadence. Re-arming the
+      // standing probe alongside it produced a double-probe (two probes per
+      // cadence); the standing probe's guard makes it a no-op in this state.
+      log.warn({
+        instanceName: this.instanceName,
+        primaryProvider: this.agentProvider,
+        fallbackProvider: this.fallbackWindow.activeEntry?.provider,
+        reason: this.fallbackWindow.armReason,
+        probeAttempts: this.fallbackProbeAttempts,
+      }, 'primary provider recovery probe still failing; keeping fallback armed');
+    });
+  }
+
+  /** DUR-02: thin delegator — see resolveFallbackRecoveryDecision (fallback-recovery-transaction.ts) for the shared probe/evaluate core. A3: a commit feeds its fresh evidence straight into recordPrimaryModelUsability so /health refreshes immediately, not transitively on the first post-revert turn. */
+  private probeAndEvaluateFallbackRecovery(): Promise<FallbackRecoveryDecision> {
+    return resolveFallbackRecoveryDecision(
+      (onEvidence) => this.probePrimaryProviderRecovered(onEvidence),
+      {
+        instanceName: this.instanceName, primaryProvider: this.agentProvider, primaryModel: this.model ?? null,
+        fallbackProvider: this.fallbackWindow.activeEntry?.provider ?? this.agentProvider, fallbackModel: this.fallbackWindow.activeEntry?.model ?? null,
+        probeAttemptsAtTransition: this.fallbackProbeAttempts,
+      },
+      (err) => log.warn({ err }, 'primary provider recovery probe threw — treating as failed'),
+    ).then((decision) => { if (decision.commit) this.recordPrimaryModelUsability(decision.receipt.evidence, 'manual'); return decision; });
   }
 
   /**
@@ -10221,24 +10107,18 @@ export class AgentRuntime implements Runtime {
       if (this.fallbackWindow.activeUntil === null || !this.fallbackWindow.recoveryProbeRequired) return;
       this.fallbackLastProbeAt = Date.now();
       const windowAtProbe = this.fallbackWindow.activeUntil;
-      void Promise.resolve()
-        .then(() => this.probePrimaryProviderRecovered())
-        .catch((err) => {
-          log.warn({ err }, 'primary provider recovery probe threw — treating as failed');
-          return false;
-        })
-        .then((recovered) => {
-          if (
-            this.fallbackWindow.activeUntil === null ||
-            !this.fallbackWindow.recoveryProbeRequired ||
-            this.fallbackWindow.activeUntil !== windowAtProbe
-          ) return;
-          if (recovered) {
-            this.deactivateProviderFallback('primary-probe-ok');
-            return;
-          }
-          this.scheduleFallbackPrimaryProbe();
-        });
+      void this.probeAndEvaluateFallbackRecovery().then((decision) => {
+        if (
+          this.fallbackWindow.activeUntil === null ||
+          !this.fallbackWindow.recoveryProbeRequired ||
+          this.fallbackWindow.activeUntil !== windowAtProbe
+        ) return;
+        if (decision.commit) {
+          this.deactivateProviderFallback('primary-probe-ok', decision.receipt);
+          return;
+        }
+        this.scheduleFallbackPrimaryProbe();
+      });
     }, PROVIDER_FALLBACK_PRIMARY_RECHECK_MS);
     this.fallbackPrimaryProbeTimer.unref?.();
   }
@@ -10326,13 +10206,16 @@ export class AgentRuntime implements Runtime {
    * real model-usability success, not credential presence: a revoked API key or
    * expired OAuth token can still be present in the key store while live turns
    * continue returning auth failures. The probe is timeout-bounded and never
-   * rejects.
+   * rejects. `onEvidence` (DUR-02) gets the full result pre-resolve — see resolveFallbackRecoveryDecision for why a callback, not a field.
    */
-  private async probePrimaryProviderRecovered(): Promise<boolean> {
+  private async probePrimaryProviderRecovered(
+    onEvidence?: (evidence: FallbackRecoveryEvidence) => void,
+  ): Promise<boolean> {
     const result = await probePrimaryModelUsability(
       { provider: this.agentProvider, model: this.model ?? null },
       createPrimaryModelProbeAdapters(this.agentProviderConfig, { cwd: this.cwd ?? homedir(), egressProxyPort: this.egressProxy?.port, providerExecutionGate: this.providerExecutionGate }),
     );
+    onEvidence?.({ ...result, checkedAt: Date.now() });
     return result.status === 'usable';
   }
 
@@ -10481,34 +10364,6 @@ export class AgentRuntime implements Runtime {
     else queue.enqueueText(message);
   }
 
-  /** Stash the handoff notice for prepend-on-first-reply. Returns false on failure. */
-  private stashHandoffNotice(chatJid: string, message: string, now: number): boolean {
-    try {
-      stashStandbyNotice(this.db, toConversationKey(chatJid), message, now);
-      return true;
-    } catch (err) {
-      log.warn({ err, chatJid }, 'failed to stash handoff notice — sending standalone');
-      return false;
-    }
-  }
-
-  /**
-   * Prepend a pending handoff notice (if any) to a stand-in reply, collapsing the
-   * fallback notice and the reply into one message. No-op when the flag is off or
-   * no notice is pending. Never throws into the reply path.
-   */
-  private withHandoffPrefix(chatJid: string, text: string): string {
-    if (!oneMessageHandoffEnabled()) return text;
-    let prefix: string | null = null;
-    try {
-      prefix = consumeStandbyNotice(this.db, toConversationKey(chatJid));
-    } catch (err) {
-      log.warn({ err, chatJid }, 'failed to consume handoff notice');
-      return text;
-    }
-    return prefix ? `${prefix}\n\n${text}` : text;
-  }
-
   private enqueueAutoSwitchNotice(
     queue: IOutboundQueue,
     text: string,
@@ -10529,23 +10384,20 @@ export class AgentRuntime implements Runtime {
     return true;
   }
 
-  /**
-   * Flush a still-pending handoff notice as a standalone message at turn end.
-   * Closes the empty-turn gap: if the stand-in's turn produced no visible reply,
-   * {@link withHandoffPrefix} never consumed the notice, so it would otherwise
-   * defer to the next reply. Consume-once means this is a no-op when a reply
-   * already prepended the notice this turn. Never throws into the turn.
-   */
+  // Thin delegators to handoff-notice-prefix.ts: the stash/prefix/flush logic
+  // lives in that pure module, but these instance methods stay so the turn-host
+  // Port wiring and the characterization tests that exercise the collapse via the
+  // runtime instance are unchanged (same discipline as the auto-compact delegators).
+  private stashHandoffNotice(chatJid: string, message: string, now: number): boolean {
+    return stashHandoffNoticeImpl(this.db, chatJid, message, now);
+  }
+
+  private withHandoffPrefix(chatJid: string, text: string): string {
+    return withHandoffPrefixImpl(this.db, chatJid, text);
+  }
+
   private flushPendingHandoffNotice(queue: IOutboundQueue): void {
-    if (!oneMessageHandoffEnabled()) return;
-    let pending: string | null = null;
-    try {
-      pending = consumeStandbyNotice(this.db, toConversationKey(queue.targetChatJid));
-    } catch (err) {
-      log.warn({ err, chatJid: queue.targetChatJid }, 'failed to flush pending handoff notice');
-      return;
-    }
-    if (pending) queue.enqueueText(pending);
+    flushPendingHandoffNoticeImpl(this.db, queue);
   }
 
   private recreatePerChatSessionForFallback(mapKey: string, chatJid: string, actorJid?: string): void {
@@ -10661,6 +10513,17 @@ export class AgentRuntime implements Runtime {
       ? this.perChatRuntimeTurnContexts.get(args.mapKey)?.[0]
       : this.currentRuntimeTurnContext;
     if (runtimeContext) {
+      if (
+        runtimeContext.replay.text !== replayText
+        || runtimeContext.identity.deliveryJid !== args.chatJid
+      ) {
+        log.error({
+          chatJid: args.chatJid,
+          mapKey: args.mapKey,
+          logicalTurnId: runtimeContext.identity.logicalTurnId,
+        }, 'refusing fallback replay with mismatched captured turn context');
+        return false;
+      }
       const scopeRef = args.mapKey === undefined
         ? undefined
         : this.perChatRuntimeTurnScopeRefs.get(runtimeContext.identity.logicalTurnId)
@@ -10678,7 +10541,10 @@ export class AgentRuntime implements Runtime {
         );
       });
       void this.dispatchFallbackReplay(
-        scopeRef === undefined ? args : { ...args, mapKey: scopeRef.value },
+        {
+          ...(scopeRef === undefined ? args : { ...args, mapKey: scopeRef.value }),
+          runtimeContext,
+        },
         replayText,
         actorJid,
       ).catch((err) => this.finalizeFailedFallbackContinuation(
@@ -10717,6 +10583,7 @@ export class AgentRuntime implements Runtime {
       chatJid: string;
       mapKey?: string;
       oldSession: SessionManager | null;
+      runtimeContext?: RuntimeTurnContext;
     },
     replayText: string,
     actorJid: string | undefined,
@@ -10727,6 +10594,7 @@ export class AgentRuntime implements Runtime {
       replayText,
       actorJid,
       oldSession: args.oldSession,
+      runtimeContext: args.runtimeContext,
     });
   }
 
@@ -10778,34 +10646,8 @@ export class AgentRuntime implements Runtime {
     });
   }
 
-  private async replayTurnOnFallback(args: {
-    chatJid: string;
-    mapKey?: string;
-    replayText: string;
-    actorJid?: string;
-    oldSession: SessionManager | null;
-  }): Promise<void> {
-    if (args.oldSession) {
-      await args.oldSession.shutdown(false);
-    }
-    if (args.mapKey !== undefined) {
-      // F-STICKY-ACTOR (QR-247): the fallback kills the child (active=false, so
-      // onCrash never fires) and replays on a fresh session. Clear the executing-actor
-      // queue so the old in-flight turn's actor cannot linger as HEAD; the replay
-      // re-pushes via sendTurnPerChat -> sendTurnToSession.
-      this.perChatExecActorQueue.delete(args.mapKey);
-      this.deleteOwnedPerChatSession(args.mapKey, args.oldSession ?? undefined);
-      this.recreatePerChatSessionForFallback(args.mapKey, args.chatJid, args.actorJid);
-      await this.sendTurnPerChat(args.chatJid, args.replayText, args.mapKey, args.actorJid);
-      return;
-    }
-    this.recreateSingletonSessionForFallback(args.chatJid, args.actorJid);
-    this.currentTurnChatJid = args.chatJid;
-    this.bindActiveGlobalMcpConversation(args.chatJid);
-    this.turnHadVisibleOutput = false;
-    this.currentTurnReplayText = args.replayText;
-    this.currentTurnReplayActorJid = args.actorJid;
-    await this.sendTurnToSession(this.session!, args.chatJid, args.replayText, undefined, args.actorJid);
+  private replayTurnOnFallback(args: ProviderFallbackReplayArgs): Promise<void> {
+    return this.runtimeTurnCoordinator.replayTurnOnFallback(args);
   }
 
   /**
@@ -10901,15 +10743,15 @@ export class AgentRuntime implements Runtime {
     eventToolScopeKey?: string;
   }): SessionManager {
     const conversationKey = toConversationKey(opts.chatJid);
-    // Slice-2 routing wiring (flag-gated): preferences steer the session being
-    // spawned; flag off keeps the exact base expressions below.
-    const route = config.nlRouting ? this.resolveRouteForTurn(opts.chatJid, opts.actorJid) : null;
-    if (route) this.noteRouteAtSpawn(opts.chatJid, conversationKey, route);
+    // Resolve the provider/model/policy tuple for every session. NL preferences
+    // remain flag-gated inside resolveRouteForTurn; policy admission does not.
+    const route = this.resolveRouteForTurn(opts.chatJid, opts.actorJid);
+    if (this.nlRoutingEnabled) this.noteRouteAtSpawn(opts.chatJid, conversationKey, route);
     // F-STICKY-ACTOR (QR-247 hardening): wire the per-chat actor socket HERE — the
     // single choke point every spawn path (ensure / proactive-resume / provider-
     // fallback) flows through — keyed on the session's ACTUAL provider, not the
     // instance-global one. A fallback to a non-claude provider tears the socket down.
-    const sessionProvider = route ? route.provider : this.effectiveProvider;
+    const sessionProvider = route.provider;
     const perChatWire = this.wirePerChatActorSocket(opts.chatJid, sessionProvider);
     const mcpSocketPath = opts.mcpSocketPath ?? perChatWire?.mcpSocketPath;
     const providerConfigOverride = opts.providerConfigOverride ?? perChatWire?.providerConfigOverride;
@@ -10950,19 +10792,20 @@ export class AgentRuntime implements Runtime {
       configRoot: this.sandboxPerChat && opts.cwd ? join(opts.cwd, '.agent-home') : undefined,
       configSystemPrompt: this.configSystemPrompt,
       instructionsPath: this.instructionsPath,
-      model: route ? route.model : this.effectiveModel,
+      model: route.model,
       pluginDirs: this.pluginDirs,
       allowM365Mutations: this.allowM365Mutations,
-      provider: route ? route.provider : this.effectiveProvider,
+      provider: route.provider,
       providerConfig: providerConfigOverride
-        ? { ...(route ? this.routeSessionProviderConfig(route) : this.sessionProviderConfig()), ...providerConfigOverride }
-        : (route ? this.routeSessionProviderConfig(route) : this.sessionProviderConfig()),
+        ? { ...this.routeSessionProviderConfig(route), ...providerConfigOverride }
+        : this.routeSessionProviderConfig(route),
       mcpBridge: createProviderMcpBridge(this.registry, providerToolSession),
       mcpSessionContext: providerToolSession,
       whatsoupInstance: this.instanceName,
       whatsoupMcpSocket: mcpSocketPath ?? this.globalMcpSocketPath ?? undefined,
-      handoffSystemBlock: this.buildHandoffSystemBlock(conversationKey, route ? route.provider : this.effectiveProvider),
-      routingSystemBlock: config.nlRouting ? () => this.buildRoutingContractBlock(route ? route.provider : this.effectiveProvider) : undefined,
+      routePolicy: route,
+      handoffSystemBlock: this.buildHandoffSystemBlock(conversationKey, route.provider),
+      routingSystemBlock: this.nlRoutingEnabled ? () => this.buildRoutingContractBlock(route.provider) : undefined,
       egressProxyPort: this.egressProxy?.port,
       providerExecutionGate: this.providerExecutionGate,
     });
@@ -11173,10 +11016,6 @@ export class AgentRuntime implements Runtime {
     // boundary a busy-time pin deferred to. Detaching here (only when truly
     // idle) makes the per_chat/single checks below see no session and
     // respawn fresh via createSessionManager, which re-resolves the route.
-    consumePendingRecycleIfIdleForPort(
-      this.modelPinHost,
-      this.sessionScope === 'per_chat' ? initialMapKey : GLOBAL_TOOL_SCOPE_KEY,
-    );
     if (this.sessionScope === 'per_chat') {
       // per_chat: independent session + queue per canonical chat key
       if (!this.chatSessions.has(initialMapKey)) {
@@ -11533,7 +11372,12 @@ export class AgentRuntime implements Runtime {
       ) {
         return;
       }
-      clearAlertSourceChecked(this.instanceName, 'agent_respawn_failed');
+      let respawnRecoveryPublished = false;
+      const publishRespawnRecovery = (): void => {
+        if (respawnRecoveryPublished) return;
+        respawnRecoveryPublished = true;
+        clearAlertSourceChecked(this.instanceName, 'agent_respawn_failed');
+      };
       let contextLease: SystemTurnLeaseToken | null = null;
       let continuationLease: SystemTurnLeaseToken | null = null;
       try {
@@ -11544,7 +11388,14 @@ export class AgentRuntime implements Runtime {
             'respawn_context',
             args.chatJid,
           );
-          const injected = await this.injectMissedMessages(args.session, args.chatJid, args.crashedAtSec);
+          const injected = await this.injectMissedMessages(
+            args.session,
+            args.chatJid,
+            args.crashedAtSec,
+            () => {
+              this.requireSystemTurnProviderBoundary(contextLease!);
+            },
+          );
           if (!injected) this.pendingSystemResults.cancel(contextLease);
           else {
             await this.pendingSystemResults.waitUntilEmpty(activeMapKey);
@@ -11558,7 +11409,10 @@ export class AgentRuntime implements Runtime {
           'respawn_continuation',
           args.chatJid,
         );
-        await args.session.sendTurn('[System: session resumed after crash ��� continue where you left off]');
+        await this.dispatchSystemTurn(
+          args.session, '[System: session resumed after crash ��� continue where you left off]',
+          continuationLease!, publishRespawnRecovery,
+        );
         log.info({ mapKey: activeMapKey }, 'sent continuation turn after auto-respawn');
       } catch (err) {
         log.warn({ err, mapKey: activeMapKey }, 'failed to send continuation turn after auto-respawn');
@@ -11729,35 +11583,10 @@ export class AgentRuntime implements Runtime {
     }
   }
 
-  private formatRecoveryTimestamp(unixMs: number): string {
-    const d = new Date(unixMs * 1000); // timestamps are unix seconds
-    return d.toTimeString().slice(0, 5); // HH:MM
-  }
-
-  /**
-   * Format chat messages into the `[HH:MM] sender: content` lines injected as
-   * recent-context into a fresh/stand-in session. Single source of truth for
-   * that line shape (previously duplicated across the three injection sites).
-   * Caller controls ordering — getRecentMessages is reverse-chronological (pass
-   * a reversed copy), getMessagesSince is already chronological.
-   *
-   * Cross-provider safety: while a fallback window is active the target session
-   * is a DIFFERENT provider than the conversation originated on, so message
-   * content is scrubbed of secret shapes (tokens, keys, Bearer, emails) before
-   * it crosses the provider boundary. Same-provider respawns inject verbatim —
-   * the content was already seen by that provider, so there is no new exposure.
-   */
   private formatContextLines(
     messages: ReadonlyArray<{ timestamp: number; senderName: string | null; senderJid: string; content: string | null }>,
   ): string {
-    const redactForBackup = this.isFallbackWindowActive;
-    return messages
-      .map((m) => {
-        const content = m.content ?? '[media]';
-        const safe = redactForBackup ? sanitizeProviderPreviewText(content) : content;
-        return `[${this.formatRecoveryTimestamp(m.timestamp)}] ${m.senderName ?? m.senderJid}: ${safe}`;
-      })
-      .join('\n');
+    return formatContextLines(messages, this.isFallbackWindowActive);
   }
 
   /**
@@ -11770,6 +11599,7 @@ export class AgentRuntime implements Runtime {
     session: SessionManager,
     chatJid: string,
     sinceUnixSec: number,
+    onProviderBoundaryReady: () => void = () => {},
   ): Promise<boolean> {
     let lines: string;
     let messageCount: number;
@@ -11786,7 +11616,11 @@ export class AgentRuntime implements Runtime {
     // Dispatch errors propagate so the caller can distinguish a proven
     // pre-dispatch failure from an ambiguous accepted write and quarantine the
     // provider generation before releasing this system lease.
-    await session.sendTurn(`[Recent chat context — read before responding]\n${lines}`);
+    await dispatchProviderTurn(
+      session,
+      `[Recent chat context — read before responding]\n${lines}`,
+      onProviderBoundaryReady,
+    );
     log.info({ chatJid, messageCount, sinceUnixSec }, 'injected missed messages after resume');
     return true;
   }
@@ -11875,7 +11709,9 @@ export class AgentRuntime implements Runtime {
                 'resume_failure_context',
                 chatJid,
               );
-              await session.sendTurn(`[CONTEXT RECOVERY — prior session expired]\n${lines}`);
+              await this.dispatchSystemTurn(
+                session, `[CONTEXT RECOVERY — prior session expired]\n${lines}`, contextLease!,
+              );
               await this.pendingSystemResults.waitUntilEmpty(mapKey ?? GLOBAL_TOOL_SCOPE_KEY);
               await this.waitForSystemTurnQuarantine(mapKey ?? GLOBAL_TOOL_SCOPE_KEY);
               if (!session.getStatus().active) return;
@@ -11889,12 +11725,12 @@ export class AgentRuntime implements Runtime {
               err,
             );
           }
-
           // Replay the pending turn that was lost during the failed resume
           if (pendingText && mapKey) {
-            log.info({ chatJid, mapKey, textPreview: pendingText.slice(0, 80) }, 'replaying pending turn after resume failure');
+            log.info({ chatJid, mapKey, textPreview: providerPreview(pendingText, 80) }, 'replaying pending turn after resume failure');
             try {
-              await session.sendTurn(pendingText);
+              await session.sendTurn(renderPendingReplay(this.turnChronology, pendingText,
+                this.perChatRuntimeTurnContexts.get(mapKey)?.[0], this.perChatTurnQueues.get(mapKey)?.activeTurn ?? null));
             } catch (err) {
               log.warn({ err, chatJid }, 'pending turn replay failed');
               // Retain the replay evidence. A failed or ambiguously accepted
@@ -12101,7 +11937,7 @@ export class AgentRuntime implements Runtime {
         tracker?.onAnyActivity();
         // Post-turn gate: suppress phantom assistant_text (same as handleEventWithContext)
         if (this.postTurnGate.has(GLOBAL_TOOL_SCOPE_KEY)) {
-          log.info({ textPreview: event.text.slice(0, 200) }, 'post-turn gate: suppressed phantom assistant_text (shared)');
+          log.info({ textPreview: providerPreview(event.text, 200) }, 'post-turn gate: suppressed phantom assistant_text (shared)');
           break;
         }
         if (this.isSilentCompact(GLOBAL_TOOL_SCOPE_KEY)) break;
@@ -12233,7 +12069,7 @@ export class AgentRuntime implements Runtime {
         }
         if (event.isError) {
           const toolName = trackedToolName ?? resultToolName ?? 'unknown';
-          const errorPreview = event.content.length > 200 ? event.content.slice(0, 200) + '...' : event.content;
+          const errorPreview = event.content.length > 200 ? `${providerPreview(event.content, 200)}...` : providerPreview(event.content, event.content.length);
           log.warn({
             chatJid: this.shared ? this.currentTurnChatJid : this.activeChatJid,
             toolId: event.toolId,
@@ -12242,14 +12078,14 @@ export class AgentRuntime implements Runtime {
           }, 'tool error reported by agent');
           const classification = classifyToolError(toolName, event.content);
           queue.enqueueToolUpdate(classification);
-          this.maybeEmitToolFailureAlert({
+          maybeEmitToolFailureAlert({
             chatJid: this.shared ? this.currentTurnChatJid : this.activeChatJid,
             toolId: event.toolId,
             toolName,
             content: event.content,
             classification,
             toolScopeKey: GLOBAL_TOOL_SCOPE_KEY,
-          });
+          }, this.toolFailureAlertDeps());
         }
         toolNames?.delete(event.toolId);
         if (toolNames && toolNames.size === 0) {

@@ -180,6 +180,25 @@ function outboxEvents() {
     .map((file) => JSON.parse(readFileSync(join(outbox, file), 'utf8')) as Record<string, unknown>);
 }
 
+// Groups outboxEvents() by `source`, each bucket in filename-sort order.
+// NOT a reliable global emission-order proxy across DIFFERENT sources: two
+// events from different sources sharing the same createdAt second sort by
+// the source-name filename segment (an unrelated existing ordering property
+// of local_outbox_path/enqueue_meta_alert/enqueue_meta_recovery, not
+// something HD-11b's collector_remote_unreachable emitter controls), so
+// "collector_remote_unreachable" can sort before "remote-claim-failed" even
+// when it was written second. WITHIN one source, ordering is faithful
+// (each source's own id/filename scheme is internally monotonic), so assert
+// per-source sequences, not one flat cross-source list.
+function eventsBySource(): Record<string, Record<string, unknown>[]> {
+  const bySource: Record<string, Record<string, unknown>[]> = {};
+  for (const event of outboxEvents()) {
+    const source = String(event.source ?? '_unknown');
+    (bySource[source] ??= []).push(event);
+  }
+  return bySource;
+}
+
 function writePrivateJson(path: string, value: unknown) {
   writeFileSync(path, JSON.stringify(value), { mode: 0o600 });
   chmodSync(path, 0o600);
@@ -466,11 +485,21 @@ describe('bot-errors-collector', () => {
     expect(logText).not.toContain('"type": "remote_writefail_claim_failed"');
   });
 
-  it('keeps one open remote-claim incident and emits recovery on the next success', () => {
+  it('escalation ladder: remote-claim-failed supersedes to collector_remote_unreachable at threshold, recovery clears the open tier', () => {
+    // Rewritten for HD-11b battery 4 (boterr-lead ruling): collector_remote_unreachable
+    // (BOT_ERRORS_COLLECTOR_FAILURE_ESCALATE_THRESHOLD, default 2, not set here)
+    // now SUPERSEDES the generic remote-claim-failed meta-alert once crossed,
+    // instead of coexisting alongside it -- exactly one open collector
+    // incident per remote at a time, transitioning tier 1 -> tier 2 at the
+    // threshold. The raw outbox event COUNT legitimately grows (a genuinely
+    // new typed source fires), so this asserts the event SEQUENCE and
+    // incident-bookkeeping state, not a bare length.
     tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-collector-'));
     mkdirSync(join(tmpRoot, 'outbox'), { recursive: true, mode: 0o700 });
     const fakeSsh = writeFakeSsh(tmpRoot);
 
+    // Failure 1: tier 1 (remote-claim-failed) opens -- below the escalation
+    // threshold, unchanged from before.
     const firstFailure = runCollector(fakeSsh, 'fail');
     expect(firstFailure.status).toBe(1);
     expect(outboxEvents()).toHaveLength(1);
@@ -482,32 +511,81 @@ describe('bot-errors-collector', () => {
       summary: 'BOT ERRORS collector cannot claim remote outbox: mini5',
     });
 
+    // Failure 2: crosses the escalation threshold. Tier 1 is ACTIVELY closed
+    // (a real typed clear, not left dangling open at the dispatcher) and
+    // tier 2 opens in the same cycle -- the clean transition this test now
+    // exists to prove. Asserted per-source (see eventsBySource's docstring):
+    // remote-claim-failed's OWN sequence is [alert, clear], and
+    // collector_remote_unreachable's OWN sequence is [alert] -- exactly one
+    // OPEN incident (collector_remote_unreachable) at this point, not two.
     const secondFailure = runCollector(fakeSsh, 'fail');
     expect(secondFailure.status).toBe(1);
-    expect(outboxEvents()).toHaveLength(1);
-    expect(readFileSync(join(tmpRoot, 'logs', 'collector.jsonl'), 'utf8')).toContain('meta_alert_suppressed_open');
-
-    const recovery = runCollector(fakeSsh, 'success');
-    expect(recovery.status).toBe(0);
-    const events = outboxEvents();
-    expect(events).toHaveLength(2);
-    expect(events[1]).toMatchObject({
+    const bySourceAfterSecondFailure = eventsBySource();
+    expect(bySourceAfterSecondFailure['remote-claim-failed']?.map((event) => event.eventType)).toEqual([
+      'alert',
+      'clear',
+    ]);
+    expect(bySourceAfterSecondFailure['collector_remote_unreachable']?.map((event) => event.eventType)).toEqual([
+      'alert',
+    ]);
+    expect(bySourceAfterSecondFailure['remote-claim-failed']?.[1]).toMatchObject({
       eventType: 'clear',
       severity: 'info',
       instance: 'bot-errors-collector',
       source: 'remote-claim-failed',
-      summary: 'BOT ERRORS collector remote recovered: mini5',
     });
-    expect(String(events[1]?.evidence)).toContain('suppressed_duplicates=1');
+    expect(bySourceAfterSecondFailure['collector_remote_unreachable']?.[0]).toMatchObject({
+      eventType: 'alert',
+      severity: 'warning',
+      instance: 'bot-errors-collector',
+      source: 'collector_remote_unreachable',
+      summary: 'BOT ERRORS collector cannot capture remote outbox: mini5',
+    });
+    // enqueue_meta_recovery (the tier-1 close path), not enqueue_meta_alert's
+    // cooldown-suppression path, is what fires on this transition -- the old
+    // "meta_alert_suppressed_open" log line no longer appears here because
+    // the generic per-attempt alert path is bypassed entirely once escalated.
+    expect(readFileSync(join(tmpRoot, 'logs', 'collector.jsonl'), 'utf8')).toContain('meta_alert_recovered');
+
+    const stateAfterSecondFailure = JSON.parse(readFileSync(join(tmpRoot, 'collector-state.json'), 'utf8')) as {
+      openAlerts?: Record<string, unknown>;
+    };
+    // Tier 1's collector-local bookkeeping is genuinely closed, not merely
+    // un-renotified -- "exactly one open incident at a time" as a real-time
+    // invariant, not something a future stale-autoclose sweep has to clean up.
+    expect(stateAfterSecondFailure.openAlerts ?? {}).not.toHaveProperty('mini5:remote-claim-failed');
+
+    // Recovery: the CURRENTLY open incident (tier 2, the escalation) gets the
+    // typed clear -- not a second remote-claim-failed recovery, since tier 1
+    // is already closed and stays closed.
+    const recovery = runCollector(fakeSsh, 'success');
+    expect(recovery.status).toBe(0);
+    const bySourceAfterRecovery = eventsBySource();
+    expect(bySourceAfterRecovery['remote-claim-failed']?.map((event) => event.eventType)).toEqual([
+      'alert',
+      'clear',
+    ]);
+    expect(bySourceAfterRecovery['collector_remote_unreachable']?.map((event) => event.eventType)).toEqual([
+      'alert',
+      'clear',
+    ]);
+    expect(bySourceAfterRecovery['collector_remote_unreachable']?.[1]).toMatchObject({
+      eventType: 'clear',
+      severity: 'info',
+      instance: 'bot-errors-collector',
+      source: 'collector_remote_unreachable',
+    });
 
     const state = JSON.parse(readFileSync(join(tmpRoot, 'collector-state.json'), 'utf8')) as {
       configuredRemoteHosts?: string[];
       configuredRemotes?: string[];
       openAlerts?: Record<string, unknown>;
+      remotes?: Record<string, { captureFailureEscalated?: boolean }>;
     };
     expect(state.configuredRemoteHosts).toEqual(['mini5']);
     expect(state.configuredRemotes).toEqual(['mini5']);
     expect(state.openAlerts ?? {}).not.toHaveProperty('mini5:remote-claim-failed');
+    expect(state.remotes?.mini5?.captureFailureEscalated).toBe(false);
   });
 
   it('persists best-effort remote hosts for watchdog daily-health classification', () => {

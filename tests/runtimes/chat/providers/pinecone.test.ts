@@ -322,27 +322,33 @@ describe('PineconeMemory', () => {
       }
     });
 
-    // ── QR-006: trace-grade logging — candidate ids + threaded traceId ──────
+    // ── Content-free operation telemetry ────────────────────────────────────
 
-    it('search success log includes candidate ids, bounded to 10', async () => {
+    it('search success log includes bounded counts without candidate ids', async () => {
       const hits = Array.from({ length: 15 }, (_, i) => makePineconeHit(`hit-${i}`, 0.9 - i * 0.01));
       mockSearchRecords.mockResolvedValueOnce({ result: { hits } });
 
       await memory.search('query', {}, 15);
 
       const [fields] = mockPineconeLogger.info.mock.calls[0];
-      expect(fields.ids).toEqual(hits.slice(0, 10).map((h) => h._id));
-      expect(fields.ids).toHaveLength(10);
+      expect(fields).toMatchObject({
+        schema: 'whatsoup-memory-operation-v1',
+        operation: 'search',
+        status: 'completed',
+        attempt: 1,
+        result_count: 15,
+      });
+      expect(JSON.stringify(fields)).not.toContain('hit-');
     });
 
     it('search success log threads a supplied traceId', async () => {
       mockSearchRecords.mockResolvedValueOnce({ result: { hits: [makePineconeHit('hit-1', 0.9)] } });
 
-      await memory.searchDetailed('query', {}, 5, 'trace-xyz');
+      await memory.searchDetailed('query', {}, 5, '0123abcd');
 
       expect(mockPineconeLogger.info).toHaveBeenCalledWith(
-        expect.objectContaining({ traceId: 'trace-xyz' }),
-        'Pinecone search complete',
+        expect.objectContaining({ trace_id: '0123abcd' }),
+        'memory_operation',
       );
     });
 
@@ -352,25 +358,29 @@ describe('PineconeMemory', () => {
       await memory.search('query', {}, 5);
 
       const [fields] = mockPineconeLogger.info.mock.calls[0];
-      expect(fields).not.toHaveProperty('traceId');
+      expect(fields).not.toHaveProperty('trace_id');
     });
 
-    it('search retry-success log includes candidate ids and threaded traceId', async () => {
+    it('search retry-success log includes attempt count and opaque traceId', async () => {
       mockSearchRecords.mockRejectedValueOnce(new Error('transient'));
       mockSearchRecords.mockResolvedValueOnce({ result: { hits: [makePineconeHit('retry-hit', 0.81)] } });
 
-      await memory.searchDetailed('query', {}, 5, 'trace-retry');
+      await memory.searchDetailed('query', {}, 5, '89abcdef');
 
       expect(mockPineconeLogger.info).toHaveBeenCalledWith(
-        expect.objectContaining({ ids: ['retry-hit'], traceId: 'trace-retry', retried: true }),
-        'Pinecone search complete (after retry)',
+        expect.objectContaining({
+          attempt: 2,
+          result_count: 1,
+          trace_id: '89abcdef',
+        }),
+        'memory_operation',
       );
     });
 
     it('searchForChat threads a supplied traceId into the completion log without altering the SDK call', async () => {
       mockSearchRecords.mockResolvedValueOnce({ result: { hits: [makePineconeHit('chat-hit', 0.91)] } });
 
-      await memory.searchForChat('chat-42@g.us', 'query', 'trace-chat-1');
+      await memory.searchForChat('chat-42@g.us', 'query', 'abcdef12');
 
       expect(mockSearchRecords.mock.calls).toEqual([[
         {
@@ -383,8 +393,12 @@ describe('PineconeMemory', () => {
         },
       ]]);
       expect(mockPineconeLogger.info).toHaveBeenCalledWith(
-        expect.objectContaining({ traceId: 'trace-chat-1' }),
-        'Pinecone search complete',
+        expect.objectContaining({
+          trace_id: 'abcdef12',
+          scope_kind: 'chat',
+          filter_shape: 'chat_eq',
+        }),
+        'memory_operation',
       );
     });
 
@@ -428,8 +442,10 @@ describe('PineconeMemory', () => {
         results: [],
         status: 'failed',
         retried: true,
-        error: 'Pinecone still down',
+        failureCode: 'unknown',
+        retryable: true,
       });
+      expect(details).not.toHaveProperty('error');
       expect(details.durationMs).toEqual(expect.any(Number));
     });
 
@@ -874,8 +890,9 @@ describe('PineconeMemory', () => {
       expect(results).toEqual([]);
       const serializedLogs = JSON.stringify(mockPineconeLogger.error.mock.calls);
       expect(serializedLogs).not.toContain(sensitiveClaim);
-      expect(serializedLogs).toContain('queryHash');
-      expect(serializedLogs).toContain('queryLength');
+      expect(serializedLogs).not.toContain('queryHash');
+      expect(serializedLogs).not.toContain('queryLength');
+      expect(serializedLogs).toContain('whatsoup-memory-operation-v1');
     });
   });
 });
@@ -1075,8 +1092,10 @@ describe('entity mode', () => {
       results: [],
       status: 'failed',
       retried: true,
-      error: 'entity index still down',
+      failureCode: 'unknown',
+      retryable: true,
     });
+    expect(details).not.toHaveProperty('error');
     expect(details.durationMs).toEqual(expect.any(Number));
   });
 
@@ -1093,9 +1112,9 @@ describe('entity mode', () => {
     expect(details.results.map((r) => r.id)).toEqual(['entity-retry-hit']);
   });
 
-  // ── QR-006: trace-grade logging — candidate ids + threaded traceId ────────
+  // ── Content-free operation telemetry ──────────────────────────────────────
 
-  it('searchEntitiesDetailed success log includes candidate ids, bounded to 10', async () => {
+  it('searchEntitiesDetailed success log includes counts without candidate ids', async () => {
     const hits = Array.from({ length: 12 }, (_, i) =>
       makeEntityHit(`ent-${i}`, 0.9 - i * 0.01, { entity_type: 'building' }),
     );
@@ -1104,18 +1123,26 @@ describe('entity mode', () => {
     await memory.searchEntitiesDetailed('query');
 
     const [fields] = mockPineconeLogger.info.mock.calls[0];
-    expect(fields.ids).toEqual(hits.slice(0, 10).map((h) => h._id));
-    expect(fields.ids).toHaveLength(10);
+    expect(fields).toMatchObject({
+      schema: 'whatsoup-memory-operation-v1',
+      operation: 'entity_search',
+      status: 'completed',
+      result_count: 12,
+    });
+    expect(JSON.stringify(fields)).not.toContain('ent-');
   });
 
   it('searchEntitiesDetailed success log threads a supplied traceId', async () => {
     mockSearchRecords.mockResolvedValueOnce({ result: { hits: [makeEntityHit('ent-1', 0.9)] } });
 
-    await memory.searchEntitiesDetailed('query', 'trace-entity-99');
+    await memory.searchEntitiesDetailed('query', '1234abcd');
 
     expect(mockPineconeLogger.info).toHaveBeenCalledWith(
-      expect.objectContaining({ traceId: 'trace-entity-99' }),
-      'Pinecone entity search complete',
+      expect.objectContaining({
+        trace_id: '1234abcd',
+        operation: 'entity_search',
+      }),
+      'memory_operation',
     );
   });
 
@@ -1125,7 +1152,7 @@ describe('entity mode', () => {
     await memory.searchEntitiesDetailed('query');
 
     const [fields] = mockPineconeLogger.info.mock.calls[0];
-    expect(fields).not.toHaveProperty('traceId');
+    expect(fields).not.toHaveProperty('trace_id');
   });
 
   // ── fromPineconeHitEntity — field mapping ──────────────────────────────────
@@ -1530,11 +1557,11 @@ describe('upsert retry success', () => {
     }])).resolves.toBeUndefined();
 
     expect(mockUpsertRecords).toHaveBeenCalledTimes(2);
-    // Verify the retry success log was emitted
+    // Verify the retry success event was emitted.
     expect(mockPineconeLogger.info.mock.calls.some(
       (args: unknown[]) => {
-        const msg = args[1];
-        return typeof msg === 'string' && msg.includes('after retry');
+        const event = args[0] as Record<string, unknown>;
+        return event.operation === 'upsert' && event.attempt === 2;
       },
     )).toBe(true);
   });
@@ -1900,11 +1927,13 @@ describe('searchEntities rerank error fallback', () => {
     expect(results.map((r) => r.id)).toEqual(['e1', 'e2']);
     expect(results[0].score).toBe(0.88);
     expect(results[1].score).toBe(0.75);
-    // Warn log should have been emitted for rerank failure
+    // A bounded partial rerank event records fallback without exception prose.
     expect(mockPineconeLogger.warn.mock.calls.some(
       (args: unknown[]) => {
-        const msg = args[1];
-        return typeof msg === 'string' && msg.includes('rerank failed');
+        const event = args[0] as Record<string, unknown>;
+        return event.operation === 'rerank' &&
+          event.status === 'partial' &&
+          event.evidence_coverage === 'fallback_scores';
       },
     )).toBe(true);
   });
@@ -2074,25 +2103,28 @@ describe('pinecone.ts uncovered-branch coverage', () => {
     delete process.env['PINECONE_API_KEY'];
   });
 
-  // ── errorMessage (line 34): non-Error branch ─────────────────────────────
+  // ── Bounded failure classification: non-Error branch ─────────────────────
 
-  it('errorMessage falls back to String(err) when err is not an Error instance (upsert path)', async () => {
-    // Every upsertRecords call throws a non-Error value (string). The retry
-    // also throws a string. trackFailure → errorMessage(err) → String(err)
-    // exercises the `err instanceof Error` false branch on line 34.
+  it('classifies a non-Error upsert failure without serializing it', async () => {
     mockUpsertRecords.mockImplementation(() => {
-      // deliberate non-Error throw to exercise the errorMessage non-Error branch
       throw 'pinecone_string_error';
     });
     const record: MemoryRecord = makeMemoryRecord({ id: 'err-msg-1' });
     await expect(memory.upsert([record])).rejects.toBeInstanceOf(AppError);
-    // The thrown string is reflected in the warn log via errorMessage → String(err)
-    expect(mockPineconeLogger.warn.mock.calls.some(
-      (args: unknown[]) => {
-        const meta = args[0] as { error?: string } | undefined;
-        return meta?.error === 'pinecone_string_error';
-      },
-    )).toBe(true);
+    const serializedLogs = JSON.stringify({
+      error: mockPineconeLogger.error.mock.calls,
+      info: mockPineconeLogger.info.mock.calls,
+      warn: mockPineconeLogger.warn.mock.calls,
+    });
+    expect(serializedLogs).not.toContain('pinecone_string_error');
+    expect(mockPineconeLogger.error).toHaveBeenCalledWith(
+      expect.objectContaining({
+        operation: 'upsert',
+        failure_code: 'unknown',
+        retryable: true,
+      }),
+      'memory_operation',
+    );
     // upsertRecords was called exactly twice (initial + retry)
     expect(mockUpsertRecords.mock.calls.length).toBe(2);
   });
@@ -2109,9 +2141,12 @@ describe('pinecone.ts uncovered-branch coverage', () => {
     const details = await memory.searchDetailed('recover', {}, 1);
     expect(details.status).toBe('ok');
     expect(details.results).toEqual([]);
-    // Confirm the success path logged completion (proves trackSuccess ran)
+    // Confirm the success path emitted its operation event (proves trackSuccess ran).
     expect(mockPineconeLogger.info.mock.calls.some(
-      (args: unknown[]) => typeof args[1] === 'string' && args[1].includes('Pinecone search complete'),
+      (args: unknown[]) => {
+        const event = args[0] as Record<string, unknown>;
+        return event.operation === 'search' && event.status === 'completed';
+      },
     )).toBe(true);
   });
 
@@ -2232,7 +2267,11 @@ describe('pinecone.ts uncovered-branch coverage', () => {
     const details = await memory.searchEntitiesDetailed('q');
     expect(details.status).toBe('project_guard_failed');
     expect(details.results).toEqual([]);
-    expect(details.projectGuardError).toContain('missing');
+    expect(details).toMatchObject({
+      failureCode: 'project_guard_failed',
+      retryable: false,
+    });
+    expect(details).not.toHaveProperty('projectGuardError');
     // The underlying searchRecords call must NOT have happened (we short-circuited)
     expect(mockSearchRecords).not.toHaveBeenCalled();
   });

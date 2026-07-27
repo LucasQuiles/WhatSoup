@@ -1,7 +1,8 @@
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
@@ -12,14 +13,18 @@ import {
   parseArgs,
   parseCommitAuthorLog,
   parseUnifiedDiffAddedLines,
+  projectedFileSecretFixtureFiles,
+  projectedFileSecretPatternCodes,
   run,
   scanAddedLines,
   scanBranchDiff,
   scanCommitMessage,
   scanCommitAuthors,
   scanContentLines,
+  scanProjectedFileSecretLines,
 } from '../../scripts/repo-hygiene-guard.ts';
 
+const repoRoot = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const tempRepos: string[] = [];
 const privateHostLabelFixture = ['nuc', 'les'].join('');
 const privateHostDomainFixture = `${privateHostLabelFixture}.${['qui', 'les'].join('')}.${['stu', 'dio'].join('')}`;
@@ -689,6 +694,36 @@ Contact dev@example.net for help.
     expect(personalIssues.map((issue) => issue.code)).toEqual(['personal-email']);
   });
 
+  it('allows the exact GitHub SSH transport principal while preserving mailbox detection', () => {
+    const sshPrincipal = ['git', 'github.com'].join('@');
+    const sshIssues = scanAddedLines([
+      {
+        filePath: '.github/workflows/quality.yml',
+        line: 1,
+        text: `git remote add origin ${sshPrincipal}:LucasQuiles/test-integrity.git`,
+      },
+    ]);
+    const githubMailbox = ['operator', 'github.com'].join('@');
+    const githubMailboxIssues = scanAddedLines([
+      {
+        filePath: '.github/workflows/quality.yml',
+        line: 2,
+        text: `contact ${githubMailbox}`,
+      },
+    ]);
+    const mixedIssues = scanAddedLines([
+      {
+        filePath: '.github/workflows/quality.yml',
+        line: 3,
+        text: `${sshPrincipal}:LucasQuiles/test-integrity.git contact ${githubMailbox}`,
+      },
+    ]);
+
+    expect(sshIssues).toEqual([]);
+    expect(githubMailboxIssues.map((issue) => issue.code)).toEqual(['personal-email']);
+    expect(mixedIssues.map((issue) => issue.code)).toEqual(['personal-email']);
+  });
+
   it('allows synthetic group JIDs in commit messages while blocking real-shaped ones', () => {
     const syntheticIssues = scanCommitMessage(`fix(guard): allow synthetic group examples
 
@@ -823,6 +858,76 @@ The migrated group was 1203631234567890@g.us.
     expect(() => parseArgs(['--scan-history', 'abc'])).toThrow(/positive integer/);
   });
 
+  it('blocks edit-breaking literal secret shapes in runtime-assembled fixture sources', () => {
+    const filePath = 'tests/scripts/repo-hygiene-guard.test.ts';
+    const samples = [
+      ['anthropic-key', ['sk', 'ant', 'api03', 'A1b2C3d4E5f6G7h8'].join('-')],
+      ['openai-key', ['sk', 'A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6'].join('-')],
+      ['pinecone-key', ['pcsk', 'A1b2C3d4E5f6G7h8I9j0'].join('_')],
+      ['private-key', `${'-----BEGIN'} ${'PRIVATE KEY'}-----`],
+      ['supabase-secret', ['sb', 'secret', 'A1b2C3d4E5f6G7h8I9j0'].join('_')],
+    ] as const;
+
+    expect(projectedFileSecretPatternCodes).toEqual(samples.map(([code]) => code));
+
+    const issues = scanAddedLines(
+      samples.map(([, text], index) => ({ filePath, line: index + 1, text })),
+    );
+
+    expect(issues.map((issue) => issue.code)).toEqual(samples.map(([code]) => code));
+  });
+
+  it('keeps intentional literal-secret corpora exempt from source-assembly policy', () => {
+    const secret = ['pcsk', 'A1b2C3d4E5f6G7h8I9j0'].join('_');
+
+    expect(scanAddedLines([
+      { filePath: 'tests/fixtures/redaction-parity-corpus.jsonl', line: 1, text: secret },
+      { filePath: 'tools/agent-runtime-probes/tests/test_redact.py', line: 1, text: secret },
+    ])).toEqual([]);
+  });
+
+  it('blocks Supabase secret shapes outside fixture paths', () => {
+    const secret = ['sb', 'secret', 'A1b2C3d4E5f6G7h8I9j0'].join('_');
+
+    expect(scanAddedLines([
+      { filePath: 'src/config.ts', line: 1, text: `const secret = '${secret}';` },
+    ]).map((issue) => issue.code)).toContain('supabase-secret');
+  });
+
+  it('tracks at least one runtime-assembled fixture source', () => {
+    expect(projectedFileSecretFixtureFiles.length).toBeGreaterThan(0);
+  });
+
+  it.each(projectedFileSecretFixtureFiles)(
+    '%s remains readable and free of edit-blocking literal secret shapes',
+    (relPath) => {
+      let content: string;
+      try {
+        content = readFileSync(join(repoRoot, relPath), 'utf8');
+      } catch (error) {
+        throw new Error(
+          `cannot read ${relPath} to verify fixture shape (${(error as Error).message}). ` +
+            'If the file moved, update projectedFileSecretFixtureFiles; do not delete the check.',
+        );
+      }
+
+      const issues = scanProjectedFileSecretLines(
+        content.split(/\r?\n/).map((text, index) => ({
+          filePath: relPath,
+          line: index + 1,
+          text,
+        })),
+      );
+
+      expect(
+        issues,
+        issues.length === 0
+          ? ''
+          : 'Assemble synthetic secret fixtures at runtime so projected-file scanners do not block edits.',
+      ).toEqual([]);
+    },
+  );
+
   /**
    * EVERY secret-shaped fixture in this block MUST assemble its token at runtime
    * (`'pcsk' + '_rest'`, `['sk-ant-api03', '...'].join('-')`) rather than appearing as a
@@ -862,7 +967,7 @@ The migrated group was 1203631234567890@g.us.
 
     it('allows synthetic provider-key and Twilio SID fixtures', () => {
       const issues = scanAddedLines([
-        { filePath: 'tests/x.test.ts', line: 1, text: "apiKey: 'sk-test-elevenlabs-key'" },
+        { filePath: 'tests/x.test.ts', line: 1, text: `apiKey: '${['sk', 'test-elevenlabs-key'].join('-')}'` },
         { filePath: 'tests/x.test.ts', line: 2, text: `apiKey: '${'pcsk' + '_test_fixture_value_here'}'` },
         { filePath: 'tests/x.test.ts', line: 3, text: "accountSid: 'AC00000000000000000000000000000000'" },
         { filePath: 'tests/x.test.ts', line: 4, text: `key: '${'sk-ant' + '-mock-not-a-real-secret'}'` },

@@ -1,5 +1,5 @@
 import type { Database } from 'better-sqlite3';
-import { formatDurationMs } from '../../../../src/lib/capability-grant.ts';
+import { formatDurationMsExact } from '../lib/duration.ts';
 import { MuteSchema, type Domain, type Mute } from '../types.ts';
 import type { EventStore } from './events.ts';
 
@@ -126,7 +126,7 @@ export class MuteStore {
     const maxDurationMs = this.options.maxDurationMs ?? DAY_MS;
     if (expiresAtMs - nowMs > maxDurationMs) {
       throw new Error(
-        `mute duration exceeds maximum (requested ${formatDurationMs(expiresAtMs - nowMs)}, max ${formatDurationMs(maxDurationMs)})`,
+        `mute duration exceeds maximum (requested ${formatDurationMsExact(expiresAtMs - nowMs)}, max ${formatDurationMsExact(maxDurationMs)})`,
       );
     }
   }

@@ -3,7 +3,7 @@
 //
 // OpenCode emits newline-delimited JSON with these event types:
 //   step_start  — marks the beginning of a step (first = session init)
-//   text        — assistant text content
+//   text        — completed text part (assistant output or synthetic control text)
 //   tool_use    — completed tool call (input + output both present in one event)
 //   step_finish — end of step; reason="stop" → final result, reason="tool-calls" → more steps follow
 //
@@ -91,6 +91,14 @@ export function createOpenCodeParser(): OpenCodeParser {
       if (eventType === 'text') {
         const part = parsed['part'];
         if (isRecord(part)) {
+          const metadata = part['metadata'];
+          if (
+            part['synthetic'] === true
+            && isRecord(metadata)
+            && metadata['compaction_continue'] === true
+          ) {
+            return { type: 'ignored' };
+          }
           return { type: 'assistant_text', text: String(part['text'] ?? '') };
         }
         return { type: 'ignored' };

@@ -1,7 +1,14 @@
 # 19 — Performance Budget (WS6)
 
 Scale set by owner: **200 lines** on Fleet. All targets are at N=200 lines unless noted.
-Owner approval requested on the numbers (§1) before they become CI-enforced.
+**Owner approval received 2026-07-22** (G2 sign-off) — §1 numbers are approved for
+CI enforcement when the b-12 lane lands.
+
+**Baseline evidence (pre-G2 audit, prod build at b-02 tip):** console shell =
+**134 KB gzip JS** vs the ≤250 KB budget (46% headroom). The bundle number is the
+only §1 target with an observed baseline; all others are approved-but-unmeasured
+until b-12 instrumentation exists. **Bundle falsifier wired to b-12:** the CI perf
+lane fails any PR that pushes the shell above 250 KB gzip.
 
 ## 1. Budget doc (6.1) — proposed targets
 
@@ -42,13 +49,23 @@ Owner approval requested on the numbers (§1) before they become CI-enforced.
 
 ## 4. DD-22 decision (6.4) — LogStream live-tail
 
-**Recommendation: DEFER.** Keep bounded poll snapshots (current v3 behavior).
+**Decision (owner, 2026-07-22): DEFER.** Keep snapshot-refresh tailing.
 
-Rationale: at the 200-line scale, poll snapshots at 2s meet the operator's freshness need;
-live-tail adds a permanent WS stream, unbounded DOM pressure, and a second freshness
-paradigm to one surface — cost exceeds value at this scale. Revisit if the owner scale
-moves above 200 lines or if ops usage shows poll-lag complaints. **Decision requested:**
-defer ☐ · ship live-tail ☐ · ship as opt-in toggle ☐
+Corrected rationale (amended at G2 — the original text contained two factual errors
+surfaced by the pre-G2 read-only audit):
+1. ~~"poll snapshots at 2s"~~ — the poll fallback is `POLL_LOGS = 3s` and runs **only
+   when the WS transport is disconnected** (`useLogs`: `refetchInterval: connected ?
+   false : POLL_LOGS`).
+2. ~~"live-tail adds a permanent WS stream / a second freshness paradigm"~~ — both
+   already exist: `src/fleet/realtime-publisher.ts` emits a `log_entry` WS event per
+   entry and the console invalidates `['logs', instance]` on it
+   (`console/src/lib/realtime-events.ts`), so connected clients already get
+   event-driven log freshness.
+The defer decision stands on the remaining grounds: true live-tail (line payloads in
+the event + append-only DOM) removes the full-snapshot refetch-per-entry but adds
+unbounded DOM pressure on one surface — cost exceeds value at the 200-line scale.
+**Falsifiers:** b-12 instrumentation shows logs-refetch longtasks > 50ms while
+connected, or operator staleness complaints on Logs → reopen DD-22.
 
 ## 5. Staleness affordances (DD-28 fold target)
 

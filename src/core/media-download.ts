@@ -3,6 +3,7 @@ import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { config } from '../config.ts';
 import { createChildLogger } from '../logger.ts';
+import { privateWriteError } from '../lib/private-fs.ts';
 import { resizeImageIfNeeded } from './image-resize.ts';
 
 const log = createChildLogger('media:download');
@@ -119,10 +120,24 @@ export async function downloadMedia(
 }
 
 export function writeTempFile(buffer: Buffer, ext: string): string {
-  mkdirSync(config.mediaDir, { recursive: true, mode: 0o700 });
   const name = randomBytes(8).toString('hex');
   const filePath = join(config.mediaDir, `${name}.${ext}`);
-  writeFileSync(filePath, buffer, { mode: 0o600 });
+  // Both calls are guarded, not just the write: a read-only or full volume fails
+  // at mkdirSync first, and an unguarded EACCES there reaches the MCP tool
+  // boundary as a raw errno with no indication that media storage was the cause.
+  try {
+    mkdirSync(config.mediaDir, { recursive: true, mode: 0o700 });
+    writeFileSync(filePath, buffer, { mode: 0o600 });
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException | null)?.code ?? 'EIO';
+    log.error(
+      { err, code, dir: config.mediaDir, path: filePath, bytes: buffer.length },
+      'media temp-file write failed',
+    );
+    const wrapped = privateWriteError(`media storage unavailable: cannot write ${filePath}`, code);
+    wrapped.path = filePath;
+    throw wrapped;
+  }
   return filePath;
 }
 

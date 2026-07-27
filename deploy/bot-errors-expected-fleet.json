@@ -29,6 +29,12 @@
           "expected": "always_on",
           "service": "com.whatsoup.mw-bot",
           "healthPort": 9090
+        },
+        {
+          "name": "personal",
+          "expected": "always_on",
+          "service": "com.whatsoup.personal",
+          "healthPort": 9091
         }
       ]
     },
@@ -91,16 +97,16 @@
     },
     {
       "host": "mini2",
-      "role": "bot-host-blocked",
-      "guiSessionExpected": "not_applicable",
+      "role": "bot-host",
+      "guiSessionExpected": "always_aqua",
       "profile": "mini2.json",
       "collectorRemote": true,
       "instances": [
         {
           "name": "ar-bot",
-          "expected": "blocked",
+          "expected": "always_on",
           "service": "com.whatsoup.ar-bot",
-          "reason": "Service is unloaded/down pending Lucas approval to bootstrap"
+          "healthPort": 9097
         }
       ]
     },

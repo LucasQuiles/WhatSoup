@@ -333,3 +333,398 @@ def test_production_extractor_is_parse_only_and_has_no_policy_or_store_imports()
     assert "qsesh.store" not in source
     assert "qsesh.archive" not in source
     assert "sqlite3" not in source
+
+
+_MODERN_TIMESTAMP = "2026-01-02T08:05:00Z"
+
+
+def _modern_rows() -> list[dict[str, object]]:
+    return [
+        {
+            "type": "mode",
+            "mode": "normal",
+            "sessionId": "session-claude-001",
+        },
+        {
+            "type": "user",
+            "cwd": "project-modern",
+            "gitBranch": "main",
+            "sessionId": "session-claude-001",
+            "timestamp": _MODERN_TIMESTAMP,
+            "uuid": "modern-user-001",
+            "message": {
+                "role": "user",
+                "content": [{"type": "text", "text": "USER_MODERN"}],
+            },
+        },
+        {
+            "type": "assistant",
+            "cwd": "project-modern",
+            "sessionId": "session-claude-001",
+            "timestamp": "2026-01-02T08:05:01Z",
+            "uuid": "modern-assistant-001",
+            "isSidechain": False,
+            "message": {
+                "role": "assistant",
+                "model": "fixture-model",
+                "content": [{"type": "text", "text": "ASSISTANT_MODERN"}],
+            },
+        },
+        {
+            "type": "ai-title",
+            "aiTitle": "Modern Session",
+            "sessionId": "session-claude-001",
+        },
+    ]
+
+
+def _modern_assistant_row(
+    content: list[dict[str, object]],
+    *,
+    timestamp: str = "2026-01-02T08:05:02Z",
+) -> dict[str, object]:
+    return {
+        "type": "assistant",
+        "cwd": "project-modern",
+        "sessionId": "session-claude-001",
+        "timestamp": timestamp,
+        "uuid": "modern-assistant-extra",
+        "isSidechain": False,
+        "message": {
+            "role": "assistant",
+            "model": "fixture-model",
+            "content": content,
+        },
+    }
+
+
+def _modern_user_row(content: list[dict[str, object]]) -> dict[str, object]:
+    return {
+        "type": "user",
+        "cwd": "project-modern",
+        "sessionId": "session-claude-001",
+        "timestamp": "2026-01-02T08:05:03Z",
+        "uuid": "modern-user-extra",
+        "message": {"role": "user", "content": content},
+    }
+
+
+def test_modern_session_without_init_synthesizes_current_contract_session_meta() -> (
+    None
+):
+    events = ClaudeExtractor().extract(_snapshot_rows(_modern_rows())).events
+
+    assert events[0].kind.value == "session_meta"
+    assert events[0].source_ref == "synthetic:session"
+    assert events[0].data == {
+        "git_branch": "main",
+        "project": "project-modern",
+        "title": "Modern Session",
+    }
+    assert sum(event.kind.value == "session_meta" for event in events) == 1
+    assert events[1].data == {"raw_type": "mode"}
+    assert events[1].timestamp_utc is None
+
+
+def test_explicit_custom_title_takes_precedence_over_generated_ai_title() -> None:
+    rows = _modern_rows()
+    rows.append(
+        {
+            "type": "custom-title",
+            "customTitle": "Owner Rename",
+            "sessionId": "session-claude-001",
+        }
+    )
+
+    events = ClaudeExtractor().extract(_snapshot_rows(rows)).events
+
+    assert events[0].data["title"] == "Owner Rename"
+
+
+def test_latest_repeated_custom_title_replaces_earlier_custom_title() -> None:
+    rows = _modern_rows()[:-1]
+    rows.extend(
+        [
+            {
+                "type": "custom-title",
+                "customTitle": "First Rename",
+                "sessionId": "session-claude-001",
+            },
+            {
+                "type": "custom-title",
+                "customTitle": "Latest Rename",
+                "sessionId": "session-claude-001",
+            },
+        ]
+    )
+
+    events = ClaudeExtractor().extract(_snapshot_rows(rows)).events
+
+    assert events[0].data["title"] == "Latest Rename"
+
+
+def test_ai_title_is_used_when_no_custom_title_exists() -> None:
+    events = ClaudeExtractor().extract(_snapshot_rows(_modern_rows())).events
+
+    assert events[0].data["title"] == "Modern Session"
+
+
+def test_present_modern_session_id_must_match_candidate_native_id() -> None:
+    rows = _modern_rows()
+    rows[2]["sessionId"] = "different-session"
+
+    assert _expect_schema_error(_snapshot_rows(rows)).phase == (
+        "claude-session-identity"
+    )
+
+
+def test_modern_content_rows_must_all_prove_session_identity() -> None:
+    rows = _modern_rows()
+    del rows[1]["sessionId"]
+
+    assert _expect_schema_error(_snapshot_rows(rows)).phase == (
+        "claude-session-identity"
+    )
+
+
+def test_modern_session_without_any_content_identity_is_rejected() -> None:
+    rows = _modern_rows()
+    del rows[1]["sessionId"]
+    del rows[2]["sessionId"]
+
+    assert _expect_schema_error(_snapshot_rows(rows)).phase == (
+        "claude-session-identity"
+    )
+
+
+def test_metadata_only_modern_session_is_quarantined() -> None:
+    rows = [
+        {
+            "type": "mode",
+            "cwd": "project-metadata-only",
+            "mode": "normal",
+            "sessionId": "session-claude-001",
+        },
+        {
+            "type": "ai-title",
+            "aiTitle": "No conversation",
+            "sessionId": "session-claude-001",
+        },
+    ]
+
+    assert _expect_schema_error(_snapshot_rows(rows)).phase == "claude-session-meta"
+
+
+def test_observed_system_subtype_is_retained_as_meta() -> None:
+    rows = _modern_rows()
+    rows.append(
+        {
+            "type": "system",
+            "subtype": "turn_duration",
+            "timestamp": "2026-01-02T08:05:02Z",
+        }
+    )
+    events = ClaudeExtractor().extract(_snapshot_rows(rows)).events
+
+    assert events[-1].data == {"raw_type": "system", "subtype": "turn_duration"}
+
+
+def _system_subtype_schema_error(subtype: object) -> QseshError:
+    rows = _modern_rows()
+    rows.append(
+        {
+            "type": "system",
+            "subtype": subtype,
+            "timestamp": "2026-01-02T08:05:02Z",
+        }
+    )
+
+    return _expect_schema_error(_snapshot_rows(rows))
+
+
+def test_missing_system_subtype_is_rejected() -> None:
+    assert _system_subtype_schema_error(None).phase == "claude-system-subtype"
+
+
+def test_empty_system_subtype_is_rejected() -> None:
+    assert _system_subtype_schema_error("").phase == "claude-system-subtype"
+
+
+def test_non_string_system_subtype_is_rejected() -> None:
+    assert _system_subtype_schema_error(7).phase == "claude-system-subtype"
+
+
+def test_unsafe_system_subtype_syntax_is_rejected() -> None:
+    assert _system_subtype_schema_error("../../private").phase == (
+        "claude-system-subtype"
+    )
+
+
+def test_safe_syntax_but_unallowlisted_system_subtype_is_rejected() -> None:
+    assert _system_subtype_schema_error("future_subtype").phase == (
+        "claude-system-subtype"
+    )
+
+
+def test_unobserved_top_level_control_type_is_rejected() -> None:
+    rows = _modern_rows()
+    rows.append({"type": "future-control", "sessionId": "session-claude-001"})
+
+    assert _expect_schema_error(_snapshot_rows(rows)).phase == "claude-row-type"
+
+
+def test_valid_base64_image_is_represented_without_payload() -> None:
+    rows = _modern_rows()
+    rows.append(
+        _modern_user_row(
+            [
+                {
+                    "type": "image",
+                    "source": {
+                        "type": "base64",
+                        "media_type": "image/png",
+                        "data": "AAAA",
+                    },
+                }
+            ]
+        )
+    )
+    event = ClaudeExtractor().extract(_snapshot_rows(rows)).events[-1]
+
+    assert event.data == {"media_type": "image/png", "meta_type": "image"}
+    assert "data" not in event.data
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        None,
+        {"type": "url", "media_type": "image/png", "data": "AAAA"},
+        {"type": "base64", "media_type": "image/png"},
+        {"type": "base64", "media_type": "image/png", "data": 7},
+        {"type": "base64", "media_type": "image/png", "data": "not base64!"},
+        {"type": "base64", "media_type": "text/plain", "data": "AAAA"},
+    ],
+)
+def test_malformed_image_source_type_data_or_base64_is_rejected(
+    source: object,
+) -> None:
+    rows = _modern_rows()
+    rows.append(_modern_user_row([{"type": "image", "source": source}]))
+
+    assert _expect_schema_error(_snapshot_rows(rows)).phase == "claude-image"
+
+
+def test_modern_usage_tolerates_extras_but_preserves_only_known_counts() -> None:
+    rows = _modern_rows()
+    assistant = rows[2]["message"]
+    assistant["usage"] = {
+        "cache_creation_input_tokens": 1,
+        "cache_read_input_tokens": 2,
+        "input_tokens": 3,
+        "output_tokens": 4,
+        "service_tier": "standard",
+        "server_tool_use": {"web_search_requests": 1},
+    }
+    event = ClaudeExtractor().extract(_snapshot_rows(rows)).events[-2]
+
+    assert event.data["usage"] == {
+        "cache_creation_input_tokens": 1,
+        "cache_read_input_tokens": 2,
+        "input_tokens": 3,
+        "output_tokens": 4,
+    }
+
+
+def test_modern_compaction_preserves_bounded_scalar_metadata() -> None:
+    rows = _modern_rows()
+    rows.append(
+        {
+            "type": "system",
+            "subtype": "compact_boundary",
+            "timestamp": "2026-01-02T08:05:02Z",
+            "content": "Conversation compacted",
+            "compactMetadata": {
+                "trigger": "manual",
+                "preTokens": 100,
+                "postTokens": 10,
+                "durationMs": 5,
+                "cumulativeDroppedTokens": 2,
+                "preservedMessages": {"count": 3},
+            },
+        }
+    )
+    event = ClaudeExtractor().extract(_snapshot_rows(rows)).events[-1]
+
+    assert event.kind.value == "compaction"
+    assert event.data == {
+        "cumulative_dropped_tokens": 2,
+        "duration_ms": 5,
+        "post_tokens": 10,
+        "pre_tokens": 100,
+        "trigger": "manual",
+    }
+
+
+def test_server_tool_and_advisor_result_use_existing_link_contract() -> None:
+    rows = _modern_rows()
+    rows.extend(
+        [
+            _modern_assistant_row(
+                [
+                    {
+                        "type": "server_tool_use",
+                        "id": "server-call-001",
+                        "name": "advisor",
+                        "input": {"question": "bounded"},
+                    }
+                ]
+            ),
+            _modern_assistant_row(
+                [
+                    {
+                        "type": "advisor_tool_result",
+                        "tool_use_id": "server-call-001",
+                        "content": {"text": "bounded answer"},
+                    }
+                ],
+                timestamp="2026-01-02T08:05:03Z",
+            ),
+        ]
+    )
+    events = ClaudeExtractor().extract(_snapshot_rows(rows)).events
+
+    assert events[-2].data["call_id"] == "server-call-001"
+    assert events[-2].kind.value == "tool_call"
+    assert events[-1].data["call_id"] == "server-call-001"
+    assert events[-1].kind.value == "tool_result"
+
+
+def test_model_fallback_is_bounded_meta() -> None:
+    rows = _modern_rows()
+    rows.append(
+        _modern_assistant_row(
+            [
+                {
+                    "type": "fallback",
+                    "from": {"model": "fixture-old"},
+                    "to": {"model": "fixture-new"},
+                }
+            ]
+        )
+    )
+    event = ClaudeExtractor().extract(_snapshot_rows(rows)).events[-1]
+
+    assert event.data == {
+        "from_model": "fixture-old",
+        "meta_type": "model_fallback",
+        "to_model": "fixture-new",
+    }
+
+
+def test_untimed_modern_session_is_quarantined_with_stable_schema_error() -> None:
+    rows = _modern_rows()
+    del rows[1]["timestamp"]
+    del rows[2]["timestamp"]
+
+    assert _expect_schema_error(_snapshot_rows(rows)).phase == "claude-session-meta"

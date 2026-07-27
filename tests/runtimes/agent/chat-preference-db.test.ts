@@ -51,6 +51,7 @@ function pref(overrides: Partial<ChatModelPreference> = {}): ChatModelPreference
     requestedModel: null,
     validatedProvider: null,
     modelPinVerified: null,
+    requestedEffort: null,
     ...overrides,
   };
 }
@@ -262,6 +263,28 @@ describe('model pin storage', () => {
     expect(getPreference(db, CHAT_A, SENDER_A, NOW)).toBeNull();
   });
 
+  // Slice 3 — reasoning-effort override on the pin.
+  it('round-trips a model pin WITH a reasoning-effort override', () => {
+    const p = pref({ requestedModel: 'claude-opus-4-8', validatedProvider: 'claude-cli', modelPinVerified: true, requestedEffort: 'high' });
+    setPreference(db, p);
+    expect(getPreference(db, CHAT_A, SENDER_A, NOW)).toEqual(p);
+    expect(getPreference(db, CHAT_A, SENDER_A, NOW)?.requestedEffort).toBe('high');
+  });
+
+  it('a model pin with NO effort override reads back requestedEffort:null (additive-migration default)', () => {
+    // Omitting requestedEffort (optional on write) must persist + read as null,
+    // never undefined — the rollback-safe additive-column default.
+    const p = pref({ requestedModel: 'claude-opus-4-8', validatedProvider: 'claude-cli', modelPinVerified: true });
+    setPreference(db, p);
+    expect(getPreference(db, CHAT_A, SENDER_A, NOW)?.requestedEffort).toBeNull();
+  });
+
+  it('rejects a corrupt row: an effort override with NO model to attach it to', () => {
+    setPreference(db, pref());
+    db.raw.prepare("UPDATE chat_model_preference SET requested_effort = 'high'").run(); // requested_model still NULL
+    expect(getPreference(db, CHAT_A, SENDER_A, NOW)).toBeNull();
+  });
+
   it('migration is idempotent — model columns exist after a second ensure', () => {
     ensureChatPreferenceSchema(db);
     const cols = db.raw.prepare("PRAGMA table_info('chat_model_preference')").all() as Array<{ name: string }>;
@@ -269,6 +292,7 @@ describe('model pin storage', () => {
     expect(names).toContain('requested_model');
     expect(names).toContain('validated_provider');
     expect(names).toContain('model_pin_verified');
+    expect(names).toContain('requested_effort');
   });
 });
 

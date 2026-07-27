@@ -472,10 +472,12 @@ sqlite3 ~/.local/share/whatsoup/instances/q/bot.db \
 - Access list blocks the sender — check `access_list` table (see §7.1)
 - Rate limit hit — check `rate_limits` table
 
-If `/new` replies `_A response is still in progress. Send /new again after it finishes._`, the
-reset was intentionally deferred. The current user or synthetic turn still owns the queue and
-terminal evidence; `/new` does not cancel it or remove its manager. Wait for the result/failure
-to finalize, then send `/new` again.
+`/new` during an in-flight turn interrupts it (reply: `*Interrupted the running task — starting
+new session* ✓`): the runaway turn is aborted and terminalized via the kill-session-equivalent
+teardown, the session is discarded, and a fresh session spawns on the next message. Use it as
+the cancel for a stuck or runaway long job. If the reply carries
+`⚠️ some in-flight turns could not be finalized — see logs`, inspect the runtime logs for the
+finalization error before assuming the durable ledger is clean.
 
 If logs report that the configured provider does not support persisted resume, the exact stale
 lifecycle has already been retired to `ended`; cleanup will not turn it back into `suspended`.
@@ -724,7 +726,8 @@ The operation tracker monitors each tool invocation and thinking gap. Stream-jso
 
 1. **Tool stall detected** — `expectedMs * stallMultiplier` exceeded (e.g. 75s for Bash, 6 min for Agent subagents)
    - Tracker records the stall and emits a user-visible warning (format depends on `toolUpdateMode`)
-   - For stream-json providers this arms a dedicated **stalled-operation kill** (`STALLED_OP_KILL_GRACE_MS`, default 3 min). Unlike the hard watchdog it is **not reset by inbound user messages**, so re-prompting a hung session cannot postpone the kill. It is cancelled if genuine provider progress arrives first. On fire: SIGKILL the provider and post "_A tool call stalled and was terminated. Send your message again to retry._" This bounds a hung tool to roughly `stall threshold + 3 min` (e.g. ~4–5 min for Bash) instead of the 30-min hard-watchdog ceiling.
+   - For stream-json providers this arms a dedicated **stalled-operation kill** (`STALLED_OP_KILL_GRACE_MS`, default 3 min). Unlike the hard watchdog it is **not reset by inbound user messages**, so re-prompting a hung session cannot postpone the kill. It is cancelled if genuine provider progress arrives first.
+   - **Liveness gate (CPU progress):** when the grace expires, the provider's process tree is CPU-sampled twice across a 5s window (`src/runtimes/agent/tree-liveness.ts`). A tree that burned CPU or changed shape is a **working long step, not a hang** (heavy browser automation, long bash/MCP calls): the kill is deferred, the grace re-arms, and the chat gets a rate-limited `_Long-running step still active (~N min in) — continuing. Send /new to interrupt._` notice. Extensions are bounded by `WHATSOUP_LONG_OP_CEILING_MS` (default 2 h) from the first fire of the quiet stretch. A flat tree — or any assessment failure — kills exactly as before: SIGKILL plus "_A tool call stalled and was terminated. Send your message again to retry._"
 
 2. **Thinking stall detected** — no events from the provider for `thinkingStallMs` (default 5 min)
    - Tracker sends a newline (`\n`) to stdin as a liveness probe
@@ -732,9 +735,8 @@ The operation tracker monitors each tool invocation and thinking gap. Stream-jso
 
 3. **Hard watchdog backstop** — no activity for 30 minutes (not configurable via `operationTracker`)
    - Reset on any agent activity (tool_use, tool_result, assistant_text) **and on every inbound user message**, so it only catches sessions that go fully silent. The stalled-operation kill (step 1) is what bounds a single hung tool while the user keeps messaging.
-   - Sends SIGKILL to the provider process
-   - User receives "_Session terminated after 30 minutes of inactivity — restarting._"
-   - Session is marked as crashed; a new session spawns on the next inbound message
+   - Runs the same CPU-progress liveness gate as step 1 before terminating a child provider: a working tree re-arms the watchdog (bounded by the same `WHATSOUP_LONG_OP_CEILING_MS` ceiling) instead of being killed mid-job. Managed API-provider sessions (no local process tree) keep the original behavior.
+   - On a genuine kill: SIGKILL to the provider process; user receives "_Session terminated after 30 minutes of inactivity — restarting._"; session is marked as crashed and a new session spawns on the next inbound message
 
 **Diagnostic steps:**
 
@@ -1074,6 +1076,100 @@ sqlite3 $DB \
   "SELECT conversation_key, session_id, session_status, claude_pid, updated_at
    FROM session_checkpoints ORDER BY updated_at DESC LIMIT 10;"
 ```
+
+#### Audit an independent continuity manifest (read-only)
+
+Receiver-local health and an empty durability queue cannot prove that a linked client received
+messages sent while it was disconnected. Before any catch-up send or database mutation, compare a
+bounded receipt manifest exported from an independently authenticated participant history:
+
+```bash
+chmod 600 continuity-manifest.json
+npm run audit-continuity-manifest -- \
+  --db "$DB" \
+  --manifest continuity-manifest.json
+```
+
+The version-1 manifest is strict JSON:
+
+```json
+{
+  "schemaVersion": 1,
+  "source": "independent_participant_history",
+  "manifestId": "operator-defined-opaque-id",
+  "evidenceRef": "operator-defined-private-reference",
+  "destination": {
+    "conversationKey": "exact-private-conversation-key",
+    "channelFingerprint": "0000000000000000000000000000000000000000000000000000000000000000"
+  },
+  "receipts": [
+    {
+      "ordinal": 1,
+      "messageId": "exact-private-source-message-id",
+      "sentAt": 1750000001,
+      "senderFingerprint": "1111111111111111111111111111111111111111111111111111111111111111",
+      "contentHash": "2222222222222222222222222222222222222222222222222222222222222222",
+      "contentType": "text"
+    }
+  ]
+}
+```
+
+Fingerprints are lowercase SHA-256 digests of the exact UTF-8 channel or sender identifier.
+`contentHash` is the lowercase SHA-256 digest of the exact local comparison text
+(`content_text`, else `content`, else the empty string). Ordinals must be contiguous from one;
+receipts are capped at 200 and the manifest at 1 MiB. The manifest can contain private identifiers,
+so the command rejects group- or world-readable files.
+
+The command opens an existing database read-only, requires contiguous schema-43-or-newer receipts
+and the canonical delivery-proof view, and never creates, migrates, sends, replays, or writes. Its
+JSON output contains only receipt ordinals, bounded classifications/actions, and counts:
+
+- `present_answered`: exact local message and admission plus echoed/corroborated reply proof;
+- `present_unanswered`: exact admission but no reply proof; use the existing inbound recovery lane;
+- `observed_not_admitted`: exact message history exists but no inbound admission; operator catch-up
+  is required;
+- `absent`: neither receiver history nor admission contains the receipt; operator catch-up is
+  required;
+- `ambiguous`: local identity or provenance does not exactly match; stop for manual review.
+
+Exit `0` means every receipt is `present_answered`. Exit `2` means a continuity gap or ambiguity was
+detected. Exit `1` means the audit itself failed. Do not treat exit `2` as a command failure or
+blindly send every listed row: use the per-row action to keep already-admitted work on the durable
+recovery mechanism and missing work on the provenance-labeled operator catch-up mechanism.
+
+To make a confirmed dry-run gap visible across restarts and in health, rerun the same manifest
+through the explicit recorder:
+
+```bash
+npm run record-continuity-manifest -- \
+  --db "$DB" \
+  --manifest continuity-manifest.json \
+  --confirm-record
+```
+
+The recorder first acquires the database writer reservation, then repeats the exact audit and
+persists only `absent`, `observed_not_admitted`, and `ambiguous` receipts. It writes deterministic
+fingerprints and bounded taxonomy into the existing recovery ledger; it never stores raw message,
+destination, manifest, or evidence values. Repeating the command is idempotent. Its JSON output
+contains only audit counts plus created/existing/unresolved/ambiguous ledger counts.
+
+After recording, `/health` remains `degraded` with `continuity_gap_open` and a content-free
+`continuity` block:
+
+```json
+{
+  "readable": true,
+  "open": 3,
+  "unresolved": 2,
+  "ambiguous": 1
+}
+```
+
+If the ledger cannot be parsed exactly, health fails closed with `continuity_gap_unreadable`.
+Recording does not send, replay, synthesize an inbound, or close a gap. Do not edit the recovery
+rows to force green health; controlled catch-up and terminal closure require a later proof-bound
+mechanism.
 
 #### Close a proven operator catch-up recovery (exact schema 43 only)
 

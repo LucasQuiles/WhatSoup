@@ -606,42 +606,59 @@ describe('loadContext — entity mode', () => {
 });
 
 // ---------------------------------------------------------------------------
-// QR-006: trace-grade read-path logging — candidate IDs + threaded traceId
+// Content-free read-path telemetry
 // ---------------------------------------------------------------------------
 
-describe('loadContext — trace-grade logging (QR-006, memory mode)', () => {
+describe('loadContext — content-free telemetry (memory mode)', () => {
   beforeEach(() => {
     vi.clearAllMocks();
   });
 
-  it('logs candidate ids alongside scores, bounded to 10', async () => {
-    const chatResults = Array.from({ length: 8 }, (_, i) => makeResult(`chat-${i}`, `chat fact ${i}`));
-    const senderResults = Array.from({ length: 8 }, (_, i) => makeResult(`sender-${i}`, `sender fact ${i}`));
+  it('logs bounded aggregates without identities or candidate ids', async () => {
+    const chatResults = Array.from({ length: 8 }, (_, i) =>
+      makeResult(`SYNTHETIC_PRIVATE_CHAT_RESULT_${i}`, `chat fact ${i}`),
+    );
+    const senderResults = Array.from({ length: 8 }, (_, i) =>
+      makeResult(`SYNTHETIC_PRIVATE_SENDER_RESULT_${i}`, `sender fact ${i}`),
+    );
     const pinecone = makeMockPinecone(chatResults, senderResults);
 
-    await loadContext(pinecone as any, 'chat@g.us', 'alice@s.whatsapp.net', 'query');
+    await loadContext(
+      pinecone as any,
+      'SYNTHETIC_PRIVATE_CHAT_JID_MARKER',
+      'SYNTHETIC_PRIVATE_SENDER_JID_MARKER',
+      'query',
+    );
 
-    const expectedIds = [...chatResults, ...senderResults].slice(0, 10).map((r) => r.id);
     expect(mockContextLogger.info).toHaveBeenCalledWith(
-      expect.objectContaining({ candidateIds: expectedIds }),
+      {
+        query_intent: 'hybrid',
+        routed_namespace_count: 3,
+        scope_coverage: ['chat', 'sender', 'self'],
+        result_count: 16,
+        score_buckets: { high: 16, medium: 0, low: 0 },
+      },
       'context retrieval complete',
     );
-    const [fields] = mockContextLogger.info.mock.calls[0];
-    expect(fields.candidateIds).toHaveLength(10);
+    const serialized = JSON.stringify(mockContextLogger.info.mock.calls);
+    expect(serialized).not.toContain('SYNTHETIC_PRIVATE_CHAT_JID_MARKER');
+    expect(serialized).not.toContain('SYNTHETIC_PRIVATE_SENDER_JID_MARKER');
+    expect(serialized).not.toContain('SYNTHETIC_PRIVATE_CHAT_RESULT_');
+    expect(serialized).not.toContain('SYNTHETIC_PRIVATE_SENDER_RESULT_');
   });
 
   it('threads a supplied traceId into the completion log and down to each search call', async () => {
     const pinecone = makeMockPinecone([makeResult('r1', 'chat fact')], []);
 
-    await loadContext(pinecone as any, 'chat@g.us', 'alice@s.whatsapp.net', 'query', 'trace-abc123');
+    await loadContext(pinecone as any, 'chat@g.us', 'alice@s.whatsapp.net', 'query', 'abc12345');
 
     expect(mockContextLogger.info).toHaveBeenCalledWith(
-      expect.objectContaining({ traceId: 'trace-abc123' }),
+      expect.objectContaining({ trace_id: 'abc12345' }),
       'context retrieval complete',
     );
-    expect(pinecone.searchForChat).toHaveBeenCalledWith('chat@g.us', 'query', 'trace-abc123');
-    expect(pinecone.searchForSender).toHaveBeenCalledWith('alice@s.whatsapp.net', 'query', 'trace-abc123');
-    expect(pinecone.searchSelfFacts).toHaveBeenCalledWith('query', 'trace-abc123');
+    expect(pinecone.searchForChat).toHaveBeenCalledWith('chat@g.us', 'query', 'abc12345');
+    expect(pinecone.searchForSender).toHaveBeenCalledWith('alice@s.whatsapp.net', 'query', 'abc12345');
+    expect(pinecone.searchSelfFacts).toHaveBeenCalledWith('query', 'abc12345');
   });
 
   it('omits traceId from the completion log and search calls when not supplied', async () => {
@@ -650,13 +667,29 @@ describe('loadContext — trace-grade logging (QR-006, memory mode)', () => {
     await loadContext(pinecone as any, 'chat@g.us', 'alice@s.whatsapp.net', 'query');
 
     const [fields] = mockContextLogger.info.mock.calls[0];
-    expect(fields).not.toHaveProperty('traceId');
+    expect(fields).not.toHaveProperty('trace_id');
     // Existing (pre-QR-006) callers keep the exact 2-arg call shape.
     expect(pinecone.searchForChat).toHaveBeenCalledWith('chat@g.us', 'query');
   });
+
+  it('omits caller-controlled non-opaque trace text from telemetry', async () => {
+    const pinecone = makeMockPinecone([makeResult('r1', 'chat fact')], []);
+
+    await loadContext(
+      pinecone as any,
+      'chat@g.us',
+      'alice@s.whatsapp.net',
+      'query',
+      'SYNTHETIC_PRIVATE_TRACE_MARKER',
+    );
+
+    expect(JSON.stringify(mockContextLogger.info.mock.calls)).not.toContain(
+      'SYNTHETIC_PRIVATE_TRACE_MARKER',
+    );
+  });
 });
 
-describe('loadContext — trace-grade logging (QR-006, entity mode)', () => {
+describe('loadContext — content-free telemetry (entity mode)', () => {
   const mutableConfig = configModule.config as unknown as Record<string, unknown>;
 
   beforeEach(() => {
@@ -668,29 +701,47 @@ describe('loadContext — trace-grade logging (QR-006, entity mode)', () => {
     mutableConfig.pineconeSearchMode = 'memory';
   });
 
-  it('logs entity candidate ids, bounded to 10', async () => {
+  it('logs entity aggregates without identities or candidate ids', async () => {
     const entityResults = Array.from({ length: 12 }, (_, i) =>
-      makeEntityResult(`ent-${i}`, 'building', `Building ${i}`),
+      makeEntityResult(
+        `SYNTHETIC_PRIVATE_ENTITY_RESULT_${i}`,
+        'building',
+        `Building ${i}`,
+      ),
     );
     const pinecone = makeMockPineconeWithEntity(entityResults);
 
-    await loadContext(pinecone as any, 'chat@g.us', 'alice@s.whatsapp.net', 'find building');
+    await loadContext(
+      pinecone as any,
+      'SYNTHETIC_PRIVATE_ENTITY_CHAT_MARKER',
+      'SYNTHETIC_PRIVATE_ENTITY_SENDER_MARKER',
+      'find building',
+    );
 
     const [fields] = mockContextLogger.info.mock.calls[0];
-    expect(fields.entityIds).toEqual(entityResults.slice(0, 10).map((r) => r.id));
-    expect(fields.entityIds).toHaveLength(10);
+    expect(fields).toEqual({
+      query_intent: 'hybrid',
+      routed_namespace_count: 3,
+      scope_coverage: ['entity'],
+      result_count: 12,
+      score_buckets: { high: 12, medium: 0, low: 0 },
+    });
+    const serialized = JSON.stringify(mockContextLogger.info.mock.calls);
+    expect(serialized).not.toContain('SYNTHETIC_PRIVATE_ENTITY_CHAT_MARKER');
+    expect(serialized).not.toContain('SYNTHETIC_PRIVATE_ENTITY_SENDER_MARKER');
+    expect(serialized).not.toContain('SYNTHETIC_PRIVATE_ENTITY_RESULT_');
   });
 
   it('threads a supplied traceId into the entity completion log and to searchEntities', async () => {
     const pinecone = makeMockPineconeWithEntity([]);
 
-    await loadContext(pinecone as any, 'chat@g.us', 'alice@s.whatsapp.net', 'find invoice', 'trace-entity-1');
+    await loadContext(pinecone as any, 'chat@g.us', 'alice@s.whatsapp.net', 'find invoice', 'deadbeef');
 
     expect(mockContextLogger.info).toHaveBeenCalledWith(
-      expect.objectContaining({ traceId: 'trace-entity-1' }),
+      expect.objectContaining({ trace_id: 'deadbeef' }),
       'entity context retrieval complete',
     );
-    expect(pinecone.searchEntities).toHaveBeenCalledWith('find invoice', 'trace-entity-1');
+    expect(pinecone.searchEntities).toHaveBeenCalledWith('find invoice', 'deadbeef');
   });
 
   it('omits traceId from the entity log and searchEntities call when not supplied', async () => {
@@ -699,7 +750,7 @@ describe('loadContext — trace-grade logging (QR-006, entity mode)', () => {
     await loadContext(pinecone as any, 'chat@g.us', 'alice@s.whatsapp.net', 'find invoice');
 
     const [fields] = mockContextLogger.info.mock.calls[0];
-    expect(fields).not.toHaveProperty('traceId');
+    expect(fields).not.toHaveProperty('trace_id');
     expect(pinecone.searchEntities).toHaveBeenCalledWith('find invoice');
   });
 });

@@ -2,6 +2,7 @@
 // Core type definitions for the multi-provider runtime abstraction.
 
 import type { AgentEvent } from '../stream-parser.ts';
+import type { ProviderRoutePolicy } from '../../../core/provider-data-policy.ts';
 
 // ---------------------------------------------------------------------------
 // Enums / union types
@@ -158,6 +159,8 @@ export interface ProviderSessionOptions {
   systemPrompt: string;
   /** Model to use (may be overridden per-turn). */
   model?: string;
+  /** Immutable route policy selected atomically with provider/model. */
+  routePolicy?: ProviderRoutePolicy;
   /** Plugin directories to load (CLI providers). */
   pluginDirs?: string[];
   /** Per-instance opt-in for propagating ALLOW_M365_MUTATIONS when fail-closed mode is enabled. */

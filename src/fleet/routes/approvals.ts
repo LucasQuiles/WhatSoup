@@ -23,6 +23,8 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { DatabaseSync } from 'node:sqlite';
 import { jsonResponse, readBody, requireInstance } from '../../lib/http.ts';
+import { errorMessage } from '../../lib/error-message.ts';
+import { SQLITE_BUSY_TIMEOUT_PRAGMA } from '../../lib/sqlite-constants.ts';
 import { proxyToInstance } from '../http-proxy.ts';
 import type { FleetDiscovery } from '../discovery.ts';
 import type { FleetDbReader } from '../db-reader.ts';
@@ -82,7 +84,7 @@ export async function handlePostApprovalDecision(
     }
     decision = p as DecisionBody;
   } catch (err) {
-    jsonResponse(res, 400, { error: `invalid decision body: ${(err as Error).message}` });
+    jsonResponse(res, 400, { error: `invalid decision body: ${errorMessage(err)}` });
     return;
   }
 
@@ -96,14 +98,15 @@ export async function handlePostApprovalDecision(
 
   if (proxy.status === 502) {
     // v1.1 offline durable fallback (design D2(b)): queue the decision in the
-    // instance's own DB for boot-time consumption. Write-while-down is the
-    // same discipline as checkpoint-restore — the 502 says the runtime is not
-    // serving, so a direct row write cannot race it; its boot rehydrate
-    // consumes the row through the same poll-resolution path. If the write
-    // itself fails we fall back to the honest 502 (never fake-queue).
+    // instance's own DB for boot-time consumption. A 502 proves the health
+    // endpoint is unreachable, not that the process has stopped writing its DB,
+    // so the connection waits through transient lock contention before writing.
+    // Boot rehydrate consumes the row through the same poll-resolution path. If
+    // the write itself fails we fall back to the honest 502 (never fake-queue).
     try {
       const db = new DatabaseSync(instance.dbPath);
       try {
+        db.prepare(SQLITE_BUSY_TIMEOUT_PRAGMA).run();
         db.exec(`
           CREATE TABLE IF NOT EXISTS pending_poll_decisions (
             map_key TEXT NOT NULL,
@@ -140,11 +143,27 @@ export async function handlePostApprovalDecision(
   if (proxy.status === 409) {
     // Already resolved elsewhere (WhatsApp vote or another console) — relay
     // the instance's verdict verbatim; the operator must see the race.
-    jsonResponse(res, 409, JSON.parse(proxy.body) as Record<string, unknown>);
+    try {
+      jsonResponse(res, 409, JSON.parse(proxy.body) as Record<string, unknown>);
+    } catch {
+      jsonResponse(res, 409, {
+        error: 'decision already resolved elsewhere (instance returned unparseable response)',
+        instance: instance.name,
+        mapKey: decision.mapKey,
+      });
+    }
     return;
   }
   if (proxy.status >= 400) {
-    jsonResponse(res, proxy.status, JSON.parse(proxy.body) as Record<string, unknown>);
+    try {
+      jsonResponse(res, proxy.status, JSON.parse(proxy.body) as Record<string, unknown>);
+    } catch {
+      jsonResponse(res, proxy.status, {
+        error: `instance returned an unparseable error response (status ${proxy.status})`,
+        instance: instance.name,
+        mapKey: decision.mapKey,
+      });
+    }
     return;
   }
   jsonResponse(res, 202, { status: 'decision_delivered', instance: instance.name, mapKey: decision.mapKey });

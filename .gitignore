@@ -94,6 +94,7 @@ codex-exec-deep-dive.md
 # Browser test failure screenshots (vitest browser screenshotFailures: true)
 # Never commit — CI artifacts are uploaded separately; local screenshots are noise.
 tests/browser/__screenshots__/
+tests/browser-motion/__screenshots__/
 # vitest 4 attachment artifacts (failure screenshots routed through the attachments API)
 .vitest-attachments/
 

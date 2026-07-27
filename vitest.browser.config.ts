@@ -86,16 +86,21 @@ export default defineConfig({
     // Single chromium instance, sequential files — deterministic geometry.
     browser: {
       enabled: true,
-      provider: playwright(),
+      // The playwright provider takes context options at the FACTORY level
+      // (provider options — see @vitest/browser-playwright types), not the
+      // instance config; `instances[].context` was never read (b-10 probe:
+      // matchMedia did NOT match). Corrected + probe-pinned.
+      provider: playwright({
+        contextOptions: {
+          // reducedMotion: 'reduce' makes CSS animations resolve to end-state
+          // on first paint so geometry assertions are stable (d7-investigation §6.1).
+          reducedMotion: 'reduce',
+        },
+      }),
       headless: true,
       instances: [
         {
           browser: 'chromium',
-          // reducedMotion: 'reduce' makes CSS animations resolve to end-state
-          // on first paint so geometry assertions are stable (d7-investigation §6.1).
-          context: {
-            reducedMotion: 'reduce',
-          },
         },
       ],
       // Screenshot on failure for CI artifact upload.

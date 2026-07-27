@@ -5,6 +5,13 @@ import { join } from 'node:path';
 import { PassThrough } from 'node:stream';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mockReq, mockRes } from '../../helpers/http-mocks.ts';
+import { MAX_SILENCE_MINUTES } from '../../../src/fleet/routes/silence.ts';
+
+// Built from the exported bound so the two can never drift. The bound's own
+// VALUE is pinned separately below — otherwise a mutation that changed the cap
+// would silently move this expectation with it and prove nothing.
+const DURATION_ERROR =
+  `duration_minutes must be a positive number of minutes no greater than ${MAX_SILENCE_MINUTES}`;
 
 let homeDir: string;
 
@@ -183,12 +190,38 @@ describe('fleet silence routes', () => {
     [
       'bad duration',
       JSON.stringify({ instance: 'q', duration_minutes: 0 }),
-      'duration_minutes must be a positive number',
+      DURATION_ERROR,
     ],
     [
       'nonnumeric duration',
       JSON.stringify({ instance: 'q', duration_minutes: '15' }),
-      'duration_minutes must be a positive number',
+      DURATION_ERROR,
+    ],
+    // #2292 L11. `1e999` is a VALID JSON number literal that parses to Infinity;
+    // typeof is 'number' and `Infinity <= 0` is false, so it passed the old
+    // guard and reached addSilence, where toISOString() threw a RangeError out
+    // of an unguarded call.
+    [
+      'an overflowing duration literal (parses to Infinity)',
+      '{"instance":"q","duration_minutes":1e999}',
+      DURATION_ERROR,
+    ],
+    // The case Number.isFinite alone does NOT catch: finite, yet past the
+    // ECMA-262 maximum time value, so it throws identically.
+    [
+      'a finite duration that still overflows Date',
+      JSON.stringify({ instance: 'q', duration_minutes: 1e308 }),
+      DURATION_ERROR,
+    ],
+    [
+      'a finite duration one minute past the cap',
+      JSON.stringify({ instance: 'q', duration_minutes: MAX_SILENCE_MINUTES + 1 }),
+      DURATION_ERROR,
+    ],
+    [
+      'a negative duration',
+      JSON.stringify({ instance: 'q', duration_minutes: -30 }),
+      DURATION_ERROR,
     ],
   ])('rejects %s', async (_name, body, expectedError) => {
     const { handleAddSilence } = await importRoutes();
@@ -201,6 +234,55 @@ describe('fleet silence routes', () => {
 
     expect(res._status).toBe(400);
     expect(JSON.parse(res._body)).toEqual({ error: expectedError });
+  });
+
+  // Pins the bound's VALUE. The table above derives its expected message from
+  // MAX_SILENCE_MINUTES, so without this a change to the cap would drag every
+  // expectation along with it and stay invisible.
+  it('caps a silence at one year', () => {
+    expect(MAX_SILENCE_MINUTES).toBe(365 * 24 * 60);
+    expect(MAX_SILENCE_MINUTES).toBe(525_600);
+  });
+
+  // The accept side of the boundary — a cap that rejected everything would pass
+  // every rejection test above while breaking the endpoint.
+  it('accepts a silence exactly at the cap and stores a valid expiry', async () => {
+    const { handleAddSilence } = await importRoutes();
+    const res = mockRes();
+
+    await handleAddSilence(
+      mockReq({
+        method: 'POST',
+        url: '/api/fleet/silence',
+        body: JSON.stringify({ instance: 'q', duration_minutes: MAX_SILENCE_MINUTES }),
+      }),
+      res,
+    );
+
+    expect(res._status).toBe(200);
+    const body = JSON.parse(res._body);
+    // The value that used to throw came from toISOString() on an Invalid Date;
+    // a parseable expiry in the future is exactly what that failure destroyed.
+    expect(Date.parse(body.rule.until)).not.toBeNaN();
+    expect(Date.parse(body.rule.until)).toBeGreaterThan(Date.now());
+    expect(JSON.parse(readFileSync(silencesFile(), 'utf8'))).toHaveLength(1);
+  });
+
+  it('persists nothing when an overflowing duration is rejected', async () => {
+    const { handleAddSilence } = await importRoutes();
+    const res = mockRes();
+
+    await handleAddSilence(
+      mockReq({
+        method: 'POST',
+        url: '/api/fleet/silence',
+        body: '{"instance":"q","duration_minutes":1e999}',
+      }),
+      res,
+    );
+
+    expect(res._status).toBe(400);
+    expect(() => readFileSync(silencesFile(), 'utf8')).toThrow();
   });
 
   it('reports request stream failures without persisting a silence', async () => {

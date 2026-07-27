@@ -20,7 +20,8 @@ describe('Codex turn lifecycle — parser level', () => {
       tokenUsage: { input_tokens: 500, output_tokens: 100 },
     });
     const turnCompletedLine = notification('turn/completed', {
-      turn: { status: 'completed' },
+      threadId: 'thread-1',
+      turn: { id: 'turn-1', status: 'completed' },
     });
 
     const tokenUsageEvent = parseCodexEvent(tokenUsageLine);
@@ -36,6 +37,11 @@ describe('Codex turn lifecycle — parser level', () => {
     expect(resultEvent).toEqual({
       type: 'result',
       text: null,
+      providerTurn: {
+        sessionId: 'thread-1',
+        turnId: 'turn-1',
+        status: 'completed',
+      },
     });
 
     // Critically: they are different types
@@ -56,7 +62,8 @@ describe('Codex turn lifecycle — parser level', () => {
   it('turn/completed maps to result, not token_usage, even with token data in turn', () => {
     // Ensure turn/completed always produces 'result' regardless of payload shape
     const line = notification('turn/completed', {
-      turn: { status: 'completed' },
+      threadId: 'thread-1',
+      turn: { id: 'turn-1', status: 'completed' },
     });
     const event = parseCodexEvent(line);
     expect(event!.type).toBe('result');
@@ -64,13 +71,19 @@ describe('Codex turn lifecycle — parser level', () => {
 
   it('failed turn/completed produces result with error text', () => {
     const line = notification('turn/completed', {
-      turn: { status: 'failed', error: { message: 'out of context' } },
+      threadId: 'thread-1',
+      turn: { id: 'turn-1', status: 'failed', error: { message: 'out of context' } },
     });
     const event = parseCodexEvent(line);
     expect(event).toEqual({
       type: 'result',
       text: 'out of context',
       isError: true,
+      providerTurn: {
+        sessionId: 'thread-1',
+        turnId: 'turn-1',
+        status: 'failed',
+      },
     });
   });
 
@@ -82,12 +95,13 @@ describe('Codex turn lifecycle — parser level', () => {
     ];
 
     const events: AgentEvent[] = [];
-    for (const turn of turns) {
+    for (const [index, turn] of turns.entries()) {
       const tokenLine = notification('thread/tokenUsage/updated', {
         tokenUsage: { input_tokens: turn.input, output_tokens: turn.output },
       });
       const completeLine = notification('turn/completed', {
-        turn: { status: 'completed' },
+        threadId: 'thread-1',
+        turn: { id: `turn-${index + 1}`, status: 'completed' },
       });
       events.push(parseCodexEvent(tokenLine)!);
       events.push(parseCodexEvent(completeLine)!);
@@ -370,6 +384,7 @@ function runtimeContext(
     },
     replay: {
       sourceMessageId: `wamid-${inboundSeq}`,
+      receivedAtUnixSeconds: 1_780_000_000,
       replaySafe: true,
       senderJid: '1234@s.whatsapp.net',
       senderName: 'Test User',

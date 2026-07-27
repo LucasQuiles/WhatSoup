@@ -624,7 +624,22 @@ export class HealthPoller {
   private failureStartedAt: Map<string, number> = new Map();
   private healthBodyDegradedStartedAt: Map<string, number> = new Map();
   private healthBodyDegradedPolls: Map<string, number> = new Map();
+  private operationalFallbackReclassified: Set<string> = new Set();
   private unreachableAlerted: Set<string> = new Set();
+  /**
+   * Open alert-suppression episodes, keyed by the same `name:source` key the
+   * throttle store uses (#2355). An unchanged condition is re-observed on every
+   * poll, so logging each suppression writes one record per poll for as long as
+   * the condition holds — at the 5s default cadence a single 15-minute throttle
+   * window emits ~180 identical records, and a silenced instance is unbounded.
+   * Each episode is logged once on entry and once on exit with a count, so the
+   * journal carries bounded state transitions instead of steady-state noise.
+   * Cardinality matches `persistedAlertThrottle`: one entry per instance+source.
+   */
+  private alertSuppressionEpisodes: Map<
+    string,
+    { reason: string; since: number; count: number; name: string; source: string }
+  > = new Map();
   private targetPids: Map<string, number> = new Map();
   private readonly loopLagSampler: LoopLagSampler;
   /**
@@ -694,6 +709,10 @@ export class HealthPoller {
       this.pollInterval = null;
       this.loopLagSampler.stop();
     }
+    // #2355: an episode only closes when suppression stops applying. On shutdown
+    // that never happens, so flush what is still open rather than losing the
+    // count — otherwise a long-running suppression leaves no record of its size.
+    for (const key of [...this.alertSuppressionEpisodes.keys()]) this.endAlertSuppressionEpisode(key);
   }
 
   getStatuses(): Map<string, InstanceStatus> {
@@ -706,6 +725,56 @@ export class HealthPoller {
 
   private alertThrottleKey(name: string, source: string): string {
     return `${name}:${source}`;
+  }
+
+  /**
+   * Record one suppressed alert observation (#2355).
+   *
+   * Logs on ENTRY into a suppression episode — same message and fields the
+   * per-poll log used, so existing operator greps keep working — then counts
+   * subsequent identical observations silently. A change of reason (silenced ->
+   * throttled, or vice versa) closes the current episode and opens a new one,
+   * because that IS a state transition worth a record.
+   *
+   * The delivery throttle itself is untouched: this changes only how suppression
+   * is narrated, never whether an alert is sent.
+   */
+  private noteAlertSuppressed(
+    key: string,
+    name: string,
+    source: string,
+    reason: string,
+    extra?: Record<string, unknown>,
+  ): void {
+    const open = this.alertSuppressionEpisodes.get(key);
+    if (open && open.reason === reason) {
+      open.count += 1;
+      return;
+    }
+    if (open) this.endAlertSuppressionEpisode(key);
+    this.alertSuppressionEpisodes.set(key, { reason, since: Date.now(), count: 1, name, source });
+    log.info({ name, source, ...extra }, reason);
+  }
+
+  /**
+   * Close an open suppression episode and summarise it (#2355).
+   *
+   * Emits nothing when the episode was a single observation — that one already
+   * has its entry record, and a summary would just restore the 2-records-per-poll
+   * shape this is meant to remove.
+   */
+  private endAlertSuppressionEpisode(key: string): void {
+    const open = this.alertSuppressionEpisodes.get(key);
+    if (!open) return;
+    this.alertSuppressionEpisodes.delete(key);
+    if (open.count <= 1) return;
+    log.info({
+      name: open.name,
+      source: open.source,
+      suppressedObservations: open.count,
+      episodeDurationMs: Date.now() - open.since,
+      reason: open.reason,
+    }, 'alert suppression episode ended');
   }
 
   private lastAlertAtFor(name: string, existing: InstanceStatus | undefined): string | null {
@@ -840,7 +909,7 @@ export class HealthPoller {
           const degradedEvidence = `Health body reports status=${healthStatus}`;
           const degradedAlert = healthStatus === 'degraded'
             ? this.shouldAlertHealthBodyDegraded(name, health, degradedEvidence)
-            : { shouldAlert: true, evidence: degradedEvidence };
+            : { shouldAlert: true, evidence: degradedEvidence, operationalFallback: false };
           this.updateDegraded(
             name,
             health,
@@ -853,8 +922,11 @@ export class HealthPoller {
             false,
             classification.confidence,
             classification.reason,
-            classification.evidence,
+            [...classification.evidence, ...degradedAlert.evidence.split(/\s+/).filter(Boolean)],
           );
+          if (healthStatus === 'degraded' && degradedAlert.operationalFallback) {
+            this.clearReclassifiedHealthBodyAlert(name, degradedAlert.evidence);
+          }
           return;
         }
 
@@ -1242,13 +1314,36 @@ export class HealthPoller {
   private resetHealthBodyDegradedDebounce(name: string): void {
     this.healthBodyDegradedStartedAt.delete(name);
     this.healthBodyDegradedPolls.delete(name);
+    this.operationalFallbackReclassified.delete(name);
+  }
+
+  private clearReclassifiedHealthBodyAlert(name: string, evidence: string): void {
+    if (this.operationalFallbackReclassified.has(name)) return;
+    try {
+      const cleared = clearAlertSourceChecked(
+        name,
+        'health_body_degraded',
+        `reclassified=operational_fallback ${evidence.replace(/\n/g, ' ')}`,
+        undefined,
+      );
+      if (!cleared) return;
+      this.operationalFallbackReclassified.add(name);
+      const status = this.statuses.get(name);
+      if (status) {
+        status.activeAlertSources = status.activeAlertSources.filter(
+          (source) => source !== 'health_body_degraded',
+        );
+      }
+    } catch (err) {
+      log.warn({ err, name }, 'failed to clear reclassified health-body alert');
+    }
   }
 
   private shouldAlertHealthBodyDegraded(
     name: string,
     health: Record<string, unknown>,
     baseEvidence: string,
-  ): { shouldAlert: boolean; evidence: string } {
+  ): { shouldAlert: boolean; evidence: string; operationalFallback: boolean } {
     const now = Date.now();
     const startedAt = this.healthBodyDegradedStartedAt.get(name) ?? now;
     this.healthBodyDegradedStartedAt.set(name, startedAt);
@@ -1257,6 +1352,65 @@ export class HealthPoller {
     const dwellMs = now - startedAt;
     const whatsapp = this.readRecord(health['whatsapp']);
     const connection = this.readRecord(whatsapp?.['connection']);
+    const instance = this.readRecord(health['instance']);
+    const turnCapability = this.readRecord(health['turn_capability']);
+    const controlPeer = this.readRecord(health['control_peer']);
+    const runtime = this.readRecord(health['runtime']);
+    const runtimeAgent = this.readRecord(runtime?.['agent']);
+    const providerExecution = this.readRecord(runtimeAgent?.['providerExecution']);
+    const fallbackReason = this.formatEvidenceValue(instance?.['fallbackReason'], 80);
+    const effectiveProvider = this.formatEvidenceValue(instance?.['effectiveProvider'], 80);
+    const fallbackChainExhausted = instance?.['fallbackChainExhausted'];
+    const failedEntryCount = this.readNumber(instance?.['failedEntryCount']);
+    const fallbackTurnsServed = this.readNumber(instance?.['fallbackTurnsServed']);
+    const lastFallbackTurnAt = this.readNumber(instance?.['lastFallbackTurnAt']);
+    const lastTurnErrorClass = turnCapability?.['last_turn_error_class'];
+    const lastSuccessfulTurnAt = this.readNumber(turnCapability?.['last_successful_turn_at']);
+    const providerExecutionActive = providerExecution?.['active'];
+    const providerExecutionPending = this.readNumber(providerExecution?.['pending']);
+    const providerExecutionOldestWaitMs = this.readNumber(providerExecution?.['oldestWaitMs']);
+    const providerPressure = providerExecution?.['pressureActive'];
+    const recoveryOutstanding = this.readNumber(runtimeAgent?.['turnRecoveryOutstanding']);
+    const recoveryBlockedUnsafe = this.readNumber(runtimeAgent?.['turnRecoveryBlockedUnsafe']);
+    const recoveryQuarantinedDelivery = this.readNumber(
+      runtimeAgent?.['turnRecoveryQuarantinedDelivery'],
+    );
+    const controlPeerConfigured = controlPeer?.['configured'];
+    const controlPeerSuppressedUnavailableAlerts = this.readNumber(
+      controlPeer?.['suppressed_unavailable_alerts'],
+    );
+    const degradationCausesRaw = health['degradation_causes'];
+    const degradationCauses = Array.isArray(degradationCausesRaw)
+      && degradationCausesRaw.length > 0
+      && degradationCausesRaw.every((cause) => typeof cause === 'string' && cause.length > 0)
+      ? degradationCausesRaw as string[]
+      : null;
+    const operationalFallbackCauses = new Set([
+      'provider_fallback_active',
+      'primary_model_unusable',
+      'primary_model_evidence_stale',
+    ]);
+    const exactOperationalFallbackCauses = degradationCauses !== null
+      && degradationCauses.includes('provider_fallback_active')
+      && degradationCauses.every((cause) => operationalFallbackCauses.has(cause));
+    const operationalFallback =
+      exactOperationalFallbackCauses
+      && whatsapp?.['connected'] === true
+      && connection?.['state'] === 'connected'
+      && fallbackReason !== null
+      && effectiveProvider !== null
+      && fallbackChainExhausted === false
+      && failedEntryCount === 0
+      && fallbackTurnsServed !== null
+      && fallbackTurnsServed > 0
+      && lastFallbackTurnAt !== null
+      && lastFallbackTurnAt > 0
+      && lastSuccessfulTurnAt !== null
+      && lastSuccessfulTurnAt > 0
+      && (lastTurnErrorClass === null || lastTurnErrorClass === undefined)
+      && providerPressure === false
+      && recoveryOutstanding === 0;
+    if (!operationalFallback) this.operationalFallbackReclassified.delete(name);
     const evidence = [
       baseEvidence,
       `health_body_degraded_polls=${polls}`,
@@ -1265,6 +1419,26 @@ export class HealthPoller {
       `health_body_degraded_required_dwell_ms=${HEALTH_BODY_DEGRADED_ALERT_DWELL_MS}`,
       `whatsapp_connected=${String(whatsapp?.['connected'] ?? 'unknown')}`,
       `connection_state=${String(connection?.['state'] ?? 'unknown')}`,
+      `degradation_class=${operationalFallback ? 'operational_fallback' : 'undifferentiated'}`,
+      `degradation_causes=${degradationCauses?.join(',') ?? 'unknown'}`,
+      `effective_provider=${effectiveProvider ?? 'unknown'}`,
+      `fallback_reason=${fallbackReason ?? 'unknown'}`,
+      `instance_fallback_model=${this.formatEvidenceValue(instance?.['fallbackModel'], 120) ?? 'unknown'}`,
+      `fallback_chain_exhausted=${String(fallbackChainExhausted ?? 'unknown')}`,
+      `failed_entry_count=${failedEntryCount === null ? 'unknown' : String(failedEntryCount)}`,
+      `fallback_turns_served=${fallbackTurnsServed === null ? 'unknown' : String(fallbackTurnsServed)}`,
+      `last_fallback_turn_at=${lastFallbackTurnAt === null ? 'unknown' : String(lastFallbackTurnAt)}`,
+      `last_successful_turn_at=${lastSuccessfulTurnAt === null ? 'unknown' : String(lastSuccessfulTurnAt)}`,
+      `last_turn_error_class=${lastTurnErrorClass == null ? 'none' : this.formatEvidenceValue(lastTurnErrorClass, 80) ?? 'unknown'}`,
+      `provider_execution_active=${String(providerExecutionActive ?? 'unknown')}`,
+      `provider_execution_pending=${providerExecutionPending === null ? 'unknown' : String(providerExecutionPending)}`,
+      `provider_execution_oldest_wait_ms=${providerExecutionOldestWaitMs === null ? 'unknown' : String(providerExecutionOldestWaitMs)}`,
+      `provider_execution_pressure_active=${String(providerPressure ?? 'unknown')}`,
+      `turn_recovery_outstanding=${recoveryOutstanding === null ? 'unknown' : String(recoveryOutstanding)}`,
+      `turn_recovery_blocked_unsafe=${recoveryBlockedUnsafe === null ? 'unknown' : String(recoveryBlockedUnsafe)}`,
+      `turn_recovery_quarantined_delivery=${recoveryQuarantinedDelivery === null ? 'unknown' : String(recoveryQuarantinedDelivery)}`,
+      `control_peer_configured=${String(controlPeerConfigured ?? 'unknown')}`,
+      `control_peer_suppressed_unavailable_alerts=${controlPeerSuppressedUnavailableAlerts === null ? 'unknown' : String(controlPeerSuppressedUnavailableAlerts)}`,
     ].join('\n');
     const shouldAlert = polls >= HEALTH_BODY_DEGRADED_ALERT_POLLS
       && dwellMs >= HEALTH_BODY_DEGRADED_ALERT_DWELL_MS;
@@ -1277,7 +1451,7 @@ export class HealthPoller {
         requiredDwellMs: HEALTH_BODY_DEGRADED_ALERT_DWELL_MS,
       }, 'health body degraded; waiting for debounce before alert');
     }
-    return { shouldAlert, evidence };
+    return { shouldAlert: operationalFallback ? false : shouldAlert, evidence, operationalFallback };
   }
 
   private trackTargetPid(name: string, health: Record<string, unknown>): void {
@@ -1469,7 +1643,9 @@ export class HealthPoller {
       // `health` here is always a live payload just fetched (even when
       // classified degraded/logged_out) — never the carried-forward branch.
       healthObservedAt: observedAt,
-      consecutiveFailures: existing?.consecutiveFailures ?? 0,
+      // A parsed health payload proves transport reachability even when the
+      // payload reports a separate degraded condition.
+      consecutiveFailures: 0,
       everReachable: true,
       status: newStatus,
       statusConfidence,
@@ -1845,21 +2021,25 @@ export class HealthPoller {
     criticalAsset?: BotErrorsCriticalAssetDiagnostic,
   ): boolean {
     const bypassSuppression = source === 'instance_logged_out';
+    const throttleKey = this.alertThrottleKey(name, source);
     if (!bypassSuppression && isInstanceSilenced(name)) {
-      log.info({ name, source }, 'alert suppressed — instance is silenced');
+      this.noteAlertSuppressed(throttleKey, name, source, 'alert suppressed — instance is silenced');
       return false;
     }
 
     const existing = this.statuses.get(name);
-    const throttleKey = this.alertThrottleKey(name, source);
     const lastAlertAt = this.persistedAlertThrottle.get(throttleKey) ?? null;
     if (!bypassSuppression && lastAlertAt !== null) {
       const elapsed = Date.now() - new Date(lastAlertAt).getTime();
       if (elapsed < MIN_ALERT_INTERVAL_MS) {
-        log.info({ name, source, elapsed }, 'alert suppressed — rate limit (15min)');
+        this.noteAlertSuppressed(throttleKey, name, source, 'alert suppressed — rate limit (15min)', { elapsed });
         return false;
       }
     }
+
+    // Suppression no longer applies for this key — close any open episode before
+    // the emit path, so the summary lands before the alert it was suppressing.
+    this.endAlertSuppressionEpisode(throttleKey);
 
     const throttleLoadErrorCode = this.alertThrottleLoadErrorCode;
     const throttleEvidence = throttleLoadErrorCode

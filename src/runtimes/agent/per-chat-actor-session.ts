@@ -16,11 +16,12 @@ import { makeConversationBinding, type SessionContext } from '../../mcp/types.ts
  * CONVERSATION_SAFE_GLOBAL_TOOLS block in src/mcp/registry.ts.
  */
 export function perChatActorSession(
-  chatJid: string,
+  conversationJid: string,
   allowedRoot: string,
   conversationBound: boolean,
+  deliveryJid: string = conversationJid,
 ): SessionContext {
-  const conversationKey = toConversationKey(chatJid);
+  const conversationKey = toConversationKey(conversationJid);
   if (!conversationBound) {
     return { tier: 'global', allowedRoot, conversationKey };
   }
@@ -28,7 +29,7 @@ export function perChatActorSession(
     tier: 'global',
     allowedRoot,
     conversationKey,
-    deliveryJid: chatJid,
-    binding: makeConversationBinding(conversationKey, chatJid),
+    deliveryJid,
+    binding: makeConversationBinding(conversationKey, deliveryJid),
   };
 }

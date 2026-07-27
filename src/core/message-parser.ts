@@ -80,6 +80,13 @@ export function parseIncomingMessage(msg: WAMessage): IncomingMessage | null {
   let content: string | null = null;
   let contentText: string | null = null;
   let contentType: import('./types.ts').ContentType = 'unknown';
+  // Baileys may surface an outbound poll echo under any of the three protocol
+  // generations. Their readable fields share the same shape; treating only
+  // v1 as a poll stores v2/v3 questions as unknown rows with null bodies.
+  const pollCreation =
+    innerMessage.pollCreationMessage ??
+    innerMessage.pollCreationMessageV2 ??
+    innerMessage.pollCreationMessageV3;
 
   if (innerMessage.conversation) {
     content = innerMessage.conversation;
@@ -213,8 +220,8 @@ export function parseIncomingMessage(msg: WAMessage): IncomingMessage | null {
     });
     contentText = `Contacts: ${contacts.map((c: any) => c.displayName).join(', ')}`;
     contentType = 'contact';
-  } else if (innerMessage.pollCreationMessage) {
-    const pm = innerMessage.pollCreationMessage;
+  } else if (pollCreation) {
+    const pm = pollCreation;
     const options = (pm.options ?? []).map((o: any) => o.optionName);
     content = JSON.stringify({
       type: 'poll',
@@ -280,11 +287,9 @@ export function parseIncomingMessage(msg: WAMessage): IncomingMessage | null {
   // that produce invalid JSON when serialized for LLM API calls.
   const safeContent = content !== null ? stripLoneSurrogates(content) : null;
   const safeContentText = contentText !== null ? stripLoneSurrogates(contentText) : null;
-  // QR-056: senderName (pushName) is attacker-controlled and is embedded verbatim
-  // into the agent prompt prefix (`[DM from ${senderName} …]`). Sanitize it the same
-  // as content so a crafted pushName cannot smuggle a lone surrogate into the agent's
-  // API request (which strict server-side JSON parsers reject → turn DoS). The HTTP
-  // providers re-sanitize, but the spawned-CLI path does not.
+  // QR-056: senderName (pushName) is attacker-controlled. It is JSON-escaped and
+  // labeled as untrusted at the provider boundary, but lone surrogates must still
+  // be removed before strict JSON serializers see it on every provider path.
   const safeSenderName = senderName !== null ? stripLoneSurrogates(senderName) : null;
 
   return {

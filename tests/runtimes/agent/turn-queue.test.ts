@@ -1,5 +1,9 @@
 import { describe, it, expect, vi } from 'vitest';
-import { TurnQueue, type QueuedTurn } from '../../../src/runtimes/agent/turn-queue.ts';
+import {
+  TurnQueue,
+  type QueuedTurn,
+  type TurnRejectReason,
+} from '../../../src/runtimes/agent/turn-queue.ts';
 
 vi.mock('../../../src/logger.ts', () => ({
   createChildLogger: () => ({
@@ -13,6 +17,7 @@ vi.mock('../../../src/logger.ts', () => ({
 function makeTurn(overrides: Partial<QueuedTurn> = {}): QueuedTurn {
   return {
     sourceMessageId: 'wamid-test',
+    receivedAtUnixSeconds: 1_780_000_000,
     conversationKey: 'chat',
     chatJid: 'chat@s.whatsapp.net',
     senderJid: 'sender@s.whatsapp.net',
@@ -156,6 +161,136 @@ describe('TurnQueue', () => {
 
     expect(processed).toEqual([active]);
     expect(rejected).toEqual([late]);
+  });
+
+  it('does not reopen a pre-closed queue after teardown rollback', () => {
+    const rejected: Array<{ turn: QueuedTurn; reason: string }> = [];
+    const queue = new TurnQueue({
+      onReject: (turn, reason) => rejected.push({ turn, reason }),
+    });
+    const first = makeTurn({ text: 'first', inboundSeq: 1 });
+    const second = makeTurn({ text: 'second', inboundSeq: 2 });
+    const late = makeTurn({ text: 'late', inboundSeq: 3 });
+    queue.enqueue(first);
+    queue.enqueue(second);
+
+    const legitimatelyClosed = queue.closeAndTakePendingTurns();
+    expect(legitimatelyClosed).toEqual([first, second]);
+    const teardown = queue.beginTeardown();
+    expect(teardown.pending).toEqual([]);
+    queue.rollbackFailedTeardown(teardown, []);
+
+    expect(queue.enqueue(late)).toBe(false);
+    expect(rejected).toEqual([{ turn: late, reason: 'queue_closed' }]);
+    expect(legitimatelyClosed).toEqual([first, second]);
+  });
+
+  it('rejects stale rollback after the teardown owner commits and a later close supersedes it', () => {
+    const rejected: QueuedTurn[] = [];
+    const queue = new TurnQueue({
+      onReject: (turn) => rejected.push(turn),
+    });
+    const pending = makeTurn({ text: 'pending', inboundSeq: 1 });
+    const late = makeTurn({ text: 'late', inboundSeq: 2 });
+    queue.enqueue(pending);
+
+    const teardown = queue.beginTeardown();
+    expect(teardown.pending).toEqual([pending]);
+    queue.commitTeardown(teardown);
+    expect(queue.closeAndTakePendingTurns()).toEqual([]);
+    expect(() => queue.rollbackFailedTeardown(teardown, [pending])).toThrow(/stale|consumed/i);
+
+    expect(queue.enqueue(late)).toBe(false);
+    expect(rejected).toEqual([late]);
+    expect(queue.closeAndTakePendingTurns()).toEqual([]);
+    expect(teardown.pending).toEqual([pending]);
+  });
+
+  it('restores a partial unresolved subset in original FIFO order', () => {
+    const queue = new TurnQueue();
+    const first = makeTurn({ text: 'first', inboundSeq: 1 });
+    const owned = makeTurn({ text: 'owned', inboundSeq: 2 });
+    const third = makeTurn({ text: 'third', inboundSeq: 3 });
+    queue.enqueue(first);
+    queue.enqueue(owned);
+    queue.enqueue(third);
+
+    const teardown = queue.beginTeardown();
+    expect(queue.rollbackFailedTeardown(teardown, [third, first])).toBe(true);
+
+    expect(queue.closeAndTakePendingTurns()).toEqual([first, third]);
+  });
+
+  it('rejects duplicate and foreign rollback turns without consuming the valid receipt', () => {
+    const queue = new TurnQueue();
+    const otherQueue = new TurnQueue();
+    const pending = makeTurn({ text: 'pending', inboundSeq: 1 });
+    queue.enqueue(pending);
+    const teardown = queue.beginTeardown();
+
+    expect(
+      () => otherQueue.rollbackFailedTeardown(teardown, [pending]),
+    ).toThrow(/stale|consumed/i);
+    expect(
+      () => queue.rollbackFailedTeardown(teardown, [pending, pending]),
+    ).toThrow(/outside its receipt/i);
+    expect(queue.rollbackFailedTeardown(teardown, [pending])).toBe(true);
+    expect(queue.closeAndTakePendingTurns()).toEqual([pending]);
+  });
+
+  it('resumes a restored pending turn after the active processor drains during teardown', async () => {
+    const queue = new TurnQueue();
+    const processed: QueuedTurn[] = [];
+    const release = deferred();
+    const active = makeTurn({ text: 'active', inboundSeq: 1 });
+    const pending = makeTurn({ text: 'pending', inboundSeq: 2 });
+
+    queue.setProcessor(async (turn) => {
+      processed.push(turn);
+      if (turn === active) await release.promise;
+    });
+    queue.enqueue(active);
+    queue.enqueue(pending);
+    await vi.waitFor(() => expect(queue.activeTurn).toBe(active));
+    const teardown = queue.beginTeardown();
+    expect(teardown.pending).toEqual([pending]);
+    expect(() => queue.closeAndTakePendingTurns()).toThrow(/teardown.*active/i);
+
+    release.resolve();
+    await queue.idle();
+    queue.rollbackFailedTeardown(teardown, [pending]);
+    const later = makeTurn({ text: 'later', inboundSeq: 3 });
+    expect(queue.enqueue(later)).toBe(true);
+    await queue.idle();
+
+    expect(processed).toEqual([active, pending, later]);
+  });
+
+  it('keeps a halted queue fail-closed after teardown rollback', async () => {
+    const reasons: TurnRejectReason[] = [];
+    const failure = new Error('terminal sink unavailable');
+    const queue = new TurnQueue({
+      onReject: (_turn, reason) => reasons.push(reason),
+      onProcessorError: async () => {
+        throw failure;
+      },
+    });
+    const blocked = makeTurn({ text: 'blocked', inboundSeq: 2 });
+    queue.setProcessor(async (turn) => {
+      if (turn.text === 'bad') throw new Error('processor exploded');
+    });
+    queue.enqueue(makeTurn({ text: 'bad', inboundSeq: 1 }));
+    queue.enqueue(blocked);
+    await expect(queue.idle()).rejects.toBe(failure);
+
+    const teardown = queue.beginTeardown();
+    expect(teardown.pending).toEqual([blocked]);
+    expect(queue.rollbackFailedTeardown(teardown, [blocked])).toBe(true);
+    expect(queue.enqueue(makeTurn({ text: 'late', inboundSeq: 3 }))).toBe(false);
+
+    expect(queue.haltedError).toBe(failure);
+    expect(queue.pending).toBe(1);
+    expect(reasons).toEqual(['queue_halted']);
   });
 
   it('pending goes to 0 after all turns processed', async () => {

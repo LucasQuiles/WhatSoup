@@ -47,6 +47,7 @@ const WRAPPER = join(REPO_ROOT, 'deploy/whatsoup');
 const RESOLVE_NODE_LIB = join(REPO_ROOT, 'deploy/lib/resolve-node.sh');
 const READ_PRIVATE_HEALTH_TOKEN_LIB = join(REPO_ROOT, 'deploy/lib/read-private-health-token.sh');
 const READ_PRIVATE_HEALTH_TOKEN_READER = join(REPO_ROOT, 'deploy/lib/read-private-health-token.mjs');
+const BOUNDED_EXEC_LIB = join(REPO_ROOT, 'deploy/lib/bounded-exec.sh');
 const SOURCE_RUNTIME_CHECK = join(REPO_ROOT, 'scripts/source-runtime-drift-check.ts');
 const GUARD_CORE = join(REPO_ROOT, 'scripts/lib/guard-core.ts');
 const GIT_ENV = join(REPO_ROOT, 'src/lib/git-env.ts');
@@ -206,6 +207,7 @@ function makeWrapperFixture(): WrapperFixture {
   copyFileSync(RESOLVE_NODE_LIB, join(lib, 'resolve-node.sh'));
   copyFileSync(READ_PRIVATE_HEALTH_TOKEN_LIB, join(lib, 'read-private-health-token.sh'));
   copyFileSync(READ_PRIVATE_HEALTH_TOKEN_READER, join(lib, 'read-private-health-token.mjs'));
+  copyFileSync(BOUNDED_EXEC_LIB, join(lib, 'bounded-exec.sh'));
   copyFileSync(SOURCE_RUNTIME_CHECK, trustChecker);
   copyFileSync(GUARD_CORE, join(scriptsLib, 'guard-core.ts'));
   copyFileSync(GIT_ENV, join(srcLib, 'git-env.ts'));
@@ -814,7 +816,7 @@ process.stdout.write('ready\\n');
     expect(result.stderr).toContain('database-compatibility-dependency.ts');
   });
 
-  it('rejects a transitive symlink redirect before its target sentinel executes', () => {
+  it('rejects a dirty contained symlink redirect before its target sentinel executes', () => {
     const fixture = makeWrapperFixture();
     const dependency = join(fixture.root, 'src', 'database-compatibility-dependency.ts');
     const redirect = join(fixture.root, 'src', 'database-compatibility-redirect.ts');
@@ -847,8 +849,44 @@ writeFileSync(sentinel, 'executed', 'utf8');
     expect(existsSync(sentinel)).toBe(false);
     expect(result.status).toBe(1);
     expect(result.stderr).toContain('FATAL: database compatibility bootstrap trust check failed');
-    expect(result.stderr).toContain('file-kind');
+    expect(result.stderr).toContain('file-dirty');
     expect(result.stderr).toContain('database-compatibility-dependency.ts');
+  });
+
+  it('rejects a clean contained symlink alias with a dirty target before its sentinel executes', () => {
+    const fixture = makeWrapperFixture();
+    const dependency = join(fixture.root, 'src', 'database-compatibility-dependency.ts');
+    const target = join(fixture.root, 'src', 'database-compatibility-target.ts');
+    const sentinel = join(fixture.root, 'contained-symlink-target-executed');
+    writeFileSync(target, 'export const dependency = true;\n', 'utf8');
+    symlinkSync('./database-compatibility-target.ts', dependency);
+    writeFileSync(
+      fixture.bootstrap,
+      "import './database-compatibility-dependency.ts';\nprocess.stdout.write('ready\\n');\n",
+      'utf8',
+    );
+    commitWrapperFixture(fixture, 'add clean contained database compatibility symlink');
+    writeFileSync(
+      target,
+      `import { writeFileSync } from 'node:fs';
+const sentinel = process.env['WHATSOUP_TEST_SENTINEL'];
+if (!sentinel) throw new Error('missing test sentinel');
+writeFileSync(sentinel, 'executed', 'utf8');
+`,
+      'utf8',
+    );
+
+    const result = runWrapper(fixture, {
+      WHATSOUP_NODE: PINNED_NODE,
+      WHATSOUP_SKIP_PREFLIGHT: '1',
+      WHATSOUP_TEST_SENTINEL: sentinel,
+    });
+
+    expect(existsSync(sentinel)).toBe(false);
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain('FATAL: database compatibility bootstrap trust check failed');
+    expect(result.stderr).toContain('file-dirty');
+    expect(result.stderr).toContain('database-compatibility-target.ts');
   });
 
   it('rejects a dirty trust checker before checker code can execute', () => {

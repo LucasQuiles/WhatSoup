@@ -60,6 +60,9 @@ const { mockSession, mockQueue, capturedOnEventRef } = vi.hoisted(() => {
     // every live session, same as getProviderId — a real SessionManager
     // always has it (session.ts), so the mock must too.
     getModelRef: vi.fn((): string | undefined => undefined),
+    // Slice 3: the diff-gate also reads the effective spawned effort (null =
+    // no static effort) — same "a real SessionManager always has it" reason.
+    getSpawnedEffort: vi.fn((): string | null => null),
   };
   const mockQueue = {
     enqueueText: vi.fn(),

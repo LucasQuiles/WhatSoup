@@ -149,6 +149,36 @@ describe('process lock ownership', () => {
     });
   });
 
+  it('reclaims a dead same-boot lock only for an explicitly recoverable coordination lane', () => {
+    const lockPath = makeLockPath();
+    writeFileSync(lockPath, JSON.stringify({
+      pid: 33333,
+      token: 'stale-token',
+      startedAt: '2026-06-13T00:00:00.000Z',
+      bootId: 'boot-current',
+    }));
+
+    const handle = acquireProcessLock(lockPath, {
+      pid: 44444,
+      token: 'new-token',
+      now: new Date('2026-06-13T00:10:00.000Z'),
+      bootId: 'boot-current',
+      isProcessAlive: () => false,
+      reclaimDeadSameBoot: true,
+    });
+
+    expect(handle).toEqual({
+      path: lockPath,
+      pid: 44444,
+      token: 'new-token',
+      reclaimedPreviousBoot: false,
+    });
+    expect(readProcessLockPayload(lockPath)).toMatchObject({
+      pid: 44444,
+      token: 'new-token',
+    });
+  });
+
   it('fails closed on a corrupt existing lock instead of deleting it', () => {
     const lockPath = makeLockPath();
     writeFileSync(lockPath, 'not-json');

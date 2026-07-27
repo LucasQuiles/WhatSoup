@@ -226,6 +226,7 @@ function expectedTerminalInboundFailureClass(
   if (detailed === 'crash') return 'session_crash';
   if (detailed === 'processor_throw') return 'processor_throw';
   if (detailed === 'unknown_terminal') return 'unknown';
+  if (detailed === 'provider_stream_corrupt') return 'provider_failure';
   if (TERMINAL_PROVIDER_FAILURE_CLASSES.has(detailed)) return 'provider_failure';
   throw new Error('failed_terminal terminal disposition has an invalid attempt failure class');
 }
@@ -278,6 +279,7 @@ export function normalizeFinalizeTurnTerminalParams(
         detailed !== 'crash' &&
         detailed !== 'processor_throw' &&
         detailed !== 'unknown_terminal' &&
+        detailed !== 'provider_stream_corrupt' &&
         !TERMINAL_PROVIDER_FAILURE_CLASSES.has(detailed)
       )
     ) {

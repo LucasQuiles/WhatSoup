@@ -141,7 +141,7 @@ export function createPerChatActorSocket(
   const socketServer = new WhatSoupSocketServer(
     socketPath,
     port.registry,
-    perChatActorSession(chatJid, port.cwd ?? homedir(), port.perChatConversationBound),
+    perChatActorSession(mapKey, port.cwd ?? homedir(), port.perChatConversationBound, chatJid),
     () => port.resolveExecutingActor(chatJid),
   );
   socketServer.start();
