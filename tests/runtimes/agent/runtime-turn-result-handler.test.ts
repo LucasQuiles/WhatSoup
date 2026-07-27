@@ -318,6 +318,28 @@ describe('runtime result terminal provider notices', () => {
 });
 
 describe('journaled result without runtime turn context (invariant-violation path)', () => {
+  it('releases only the provider request token attached by exact terminal admission', () => {
+    const harness = makeHarness({ fallbackActivation: null, replayScheduled: false });
+
+    handleScopedRuntimeResult(harness.host, {
+      event: {
+        type: 'result',
+        text: 'done',
+        providerTurnOwnerToken: 41,
+      },
+      queue: harness.queue,
+      session: harness.session as never,
+      conversationKey: '15550190050',
+      inboundSeq: 71,
+      mapKey: '15550190050',
+      toolScopeKey: '15550190050#session',
+      isSystemResult: false,
+      extractUsageLimitResetTime: () => null,
+    });
+
+    expect(harness.session.completeProviderTurn).toHaveBeenCalledWith(41);
+  });
+
   it('releases the per-chat replay latch when a journaled completed result has no runtime turn context', () => {
     const harness = makeHarness({ fallbackActivation: null, replayScheduled: false });
     const host = harness.host as unknown as {

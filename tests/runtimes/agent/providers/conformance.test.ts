@@ -133,6 +133,7 @@ class ProviderHarness {
 
   private readonly sessions = new Map<string, SessionState>();
   private nextPid = 1000;
+  private nextTurn = 1;
   /** Codex app-server baseInstructions, captured from thread/start params. */
   private _baseInstructions: string | null = null;
 
@@ -211,7 +212,25 @@ class ProviderHarness {
           const input = params['input'] as Array<{ type: string; text?: string }>;
           const text = input?.find((i) => i.type === 'text')?.text ?? '';
           const systemPrompt = this._baseInstructions ?? '';
-          queueMicrotask(() => this.runTurn(child, text, undefined, systemPrompt));
+          const turnId = `turn-${this.nextTurn++}`;
+          queueMicrotask(() => {
+            this.emitLine(child, JSON.stringify({
+              jsonrpc: '2.0',
+              id: payload['id'],
+              result: {
+                turn: { id: turnId, items: [], status: 'inProgress', error: null },
+              },
+            }));
+            this.emitLine(child, JSON.stringify({
+              jsonrpc: '2.0',
+              method: 'turn/started',
+              params: {
+                threadId: this.provider.sessionId,
+                turn: { id: turnId, items: [], status: 'inProgress', error: null },
+              },
+            }));
+            this.runTurn(child, text, undefined, systemPrompt, turnId);
+          });
           cb?.(null);
           return true;
         }
@@ -297,6 +316,7 @@ class ProviderHarness {
     text: string,
     resumeSessionId: string | undefined,
     systemPrompt: string,
+    providerTurnId = 'turn-1',
   ): void {
     const sessionId = resumeSessionId ?? this.provider.sessionId;
     const state = this.sessions.get(sessionId) ?? { name: null };
@@ -309,12 +329,12 @@ class ProviderHarness {
     }
 
     if (this.scenario === 'memory') {
-      this.handleMemoryScenario(child, text, state);
+      this.handleMemoryScenario(child, text, state, providerTurnId);
     } else {
-      this.handleSystemPromptScenario(child, systemPrompt);
+      this.handleSystemPromptScenario(child, systemPrompt, providerTurnId);
     }
 
-    this.emitLine(child, this.buildResultEvent());
+    this.emitLine(child, this.buildResultEvent(providerTurnId));
 
     // Spawn-per-turn providers exit after each turn; persistent providers stay alive
     if (!isPersistent) {
@@ -322,12 +342,20 @@ class ProviderHarness {
     }
   }
 
-  private handleMemoryScenario(child: MockChild, rawText: string, state: SessionState): void {
+  private handleMemoryScenario(
+    child: MockChild,
+    rawText: string,
+    state: SessionState,
+    providerTurnId: string,
+  ): void {
     const text = this.extractUserText(rawText);
     const nameMatch = text.match(/my name is ([a-z]+)\.?/i);
     if (nameMatch) {
       state.name = nameMatch[1]!;
-      this.emitLine(child, this.buildAssistantTextEvent(`I will remember that your name is ${state.name}.`));
+      this.emitLine(child, this.buildAssistantTextEvent(
+        `I will remember that your name is ${state.name}.`,
+        providerTurnId,
+      ));
       return;
     }
 
@@ -335,16 +363,23 @@ class ProviderHarness {
       const response = state.name
         ? `Your name is ${state.name}.`
         : 'I do not know your name.';
-      this.emitLine(child, this.buildAssistantTextEvent(response));
+      this.emitLine(child, this.buildAssistantTextEvent(response, providerTurnId));
       return;
     }
 
-    this.emitLine(child, this.buildAssistantTextEvent('Unhandled turn.'));
+    this.emitLine(child, this.buildAssistantTextEvent('Unhandled turn.', providerTurnId));
   }
 
-  private handleSystemPromptScenario(child: MockChild, systemPrompt: string): void {
+  private handleSystemPromptScenario(
+    child: MockChild,
+    systemPrompt: string,
+    providerTurnId: string,
+  ): void {
     const adhered = systemPrompt.includes('Always answer with the exact word BLUE.');
-    this.emitLine(child, this.buildAssistantTextEvent(adhered ? 'BLUE' : 'RED'));
+    this.emitLine(child, this.buildAssistantTextEvent(
+      adhered ? 'BLUE' : 'RED',
+      providerTurnId,
+    ));
   }
 
   private extractResumeSessionId(args: string[]): string | undefined {
@@ -422,7 +457,7 @@ class ProviderHarness {
     }
   }
 
-  private buildAssistantTextEvent(text: string): string {
+  private buildAssistantTextEvent(text: string, providerTurnId: string): string {
     switch (this.provider.id) {
       case 'claude-cli':
         return JSON.stringify({
@@ -435,7 +470,7 @@ class ProviderHarness {
           method: 'item/agentMessage/delta',
           params: {
             threadId: this.provider.sessionId,
-            turnId: 'turn-1',
+            turnId: providerTurnId,
             itemId: 'msg-1',
             delta: text,
           },
@@ -453,7 +488,7 @@ class ProviderHarness {
     }
   }
 
-  private buildResultEvent(): string {
+  private buildResultEvent(providerTurnId: string): string {
     switch (this.provider.id) {
       case 'claude-cli':
         return JSON.stringify({
@@ -467,7 +502,7 @@ class ProviderHarness {
           method: 'turn/completed',
           params: {
             threadId: this.provider.sessionId,
-            turn: { id: 'turn-1', items: [], status: 'completed', error: null },
+            turn: { id: providerTurnId, items: [], status: 'completed', error: null },
           },
         });
       case 'gemini-cli':

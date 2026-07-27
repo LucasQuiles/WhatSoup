@@ -99,6 +99,7 @@ describe('BlueBubblesPort — send', () => {
 
 describe('BlueBubblesPort — listInboundSince', () => {
   const bbMsg = (overrides: Record<string, unknown> = {}) => ({
+    originalROWID: 1,
     guid: 'g-1',
     text: 'hello',
     isFromMe: false,
@@ -107,12 +108,98 @@ describe('BlueBubblesPort — listInboundSince', () => {
     ...overrides,
   });
 
+  const queryResult = (
+    data: readonly Record<string, unknown>[],
+    limit: number,
+    total = data.length,
+  ) => ({
+    data,
+    metadata: { offset: 0, limit, count: data.length, total },
+  });
+
+  const serveSnapshot = (
+    mock: MockHttpClient,
+    rows: readonly Record<string, unknown>[],
+  ): void => {
+    const upper = rows.reduce((max, row) => Math.max(max, Number(row.originalROWID ?? 0)), 0);
+    mock.on('POST', '/message/query', (request) => {
+      const limit = Number(request.body?.limit ?? 0);
+      const where = request.body?.where as Array<{ statement?: string }> | undefined;
+      if (where?.[0]?.statement?.includes('SELECT MAX')) {
+        const upperRow = rows.find((row) => row.originalROWID === upper);
+        return queryResult(upperRow === undefined ? [] : [upperRow], 1);
+      }
+      return queryResult(rows, limit, rows.length);
+    });
+  };
+
+  it('captures a ROWID upper bound and pages through an opaque keyset cursor', async () => {
+    const { port, mock } = makePort();
+    let query = 0;
+    mock.on('POST', '/message/query', () => {
+      query += 1;
+      if (query === 1) return queryResult([bbMsg({ originalROWID: 9 })], 1);
+      if (query === 2) {
+        return queryResult([
+          bbMsg({ originalROWID: 2, guid: 'g-2', dateCreated: 2000 }),
+          bbMsg({ originalROWID: 3, guid: 'g-3', dateCreated: 3000 }),
+        ], 2, 8);
+      }
+      return queryResult([bbMsg({ originalROWID: 7, guid: 'g-7', dateCreated: 7000 })], 2, 8);
+    });
+
+    const first = await port.listInboundSince(new Date(1000), 2, null);
+    const second = await port.listInboundSince(new Date(1000), 2, first.cursor);
+
+    expect(first.records.map((record) => record.guid)).toEqual(['g-2', 'g-3']);
+    expect(first.hasMore).toBe(true);
+    expect(typeof first.cursor).toBe('string');
+    expect(second.records.map((record) => record.guid)).toEqual(['g-7']);
+    expect(mock.calls).toHaveLength(3);
+    expect(mock.calls[0]?.body).toMatchObject({ limit: 1, offset: 0, sort: 'ASC' });
+    expect(mock.calls[1]?.body).toMatchObject({ limit: 2, offset: 0, sort: 'ASC' });
+    expect(mock.calls[1]?.body?.where).toEqual([
+      expect.objectContaining({
+        args: expect.objectContaining({ afterRowId: 0, upperRowId: 9, pageLimit: 2 }),
+      }),
+    ]);
+    expect(mock.calls[2]?.body?.where).toEqual([
+      expect.objectContaining({
+        args: expect.objectContaining({ afterRowId: 3, upperRowId: 9, pageLimit: 2 }),
+      }),
+    ]);
+  });
+
+  it('rejects malformed provider metadata and ROWIDs without returning a cursor', async () => {
+    const { port, mock } = makePort();
+    let query = 0;
+    mock.on('POST', '/message/query', () => {
+      query += 1;
+      if (query === 1) return queryResult([bbMsg({ originalROWID: 4 })], 1);
+      return {
+        data: [bbMsg({ originalROWID: 2 })],
+        metadata: { offset: 1, limit: 1, count: 7, total: 7 },
+      };
+    });
+
+    await expect(port.listInboundSince(new Date(0), 1, null)).rejects.toMatchObject({
+      code: 'MalformedResponse',
+    });
+  });
+
+  it('rejects page sizes above the BlueBubbles maximum before making a request', async () => {
+    const { port, mock } = makePort();
+
+    await expect(port.listInboundSince(new Date(0), 1001, null)).rejects.toThrow(RangeError);
+    expect(mock.calls).toHaveLength(0);
+  });
+
   it('normalizes inbound text messages (fromMe=false)', async () => {
     const { port, mock } = makePort();
-    mock.on('POST', '/message/query', () => ({ data: [bbMsg()] }));
-    const out = await port.listInboundSince(new Date(0));
-    expect(out).toHaveLength(1);
-    expect(out[0]).toMatchObject({
+    serveSnapshot(mock, [bbMsg()]);
+    const page = await port.listInboundSince(new Date(0));
+    expect(page.records).toHaveLength(1);
+    expect(page.records[0]).toMatchObject({
       guid: 'g-1',
       from: 'friend@users.noreply.github.com',
       body: 'hello',
@@ -120,67 +207,79 @@ describe('BlueBubblesPort — listInboundSince', () => {
       kind: 'text',
       timestamp: 1000,
     });
-    expect(mock.calls[0]?.body).toMatchObject({ sort: 'ASC', limit: 100 });
+    expect(mock.calls[1]?.body).toMatchObject({ sort: 'ASC', limit: 100, offset: 0 });
   });
 
   it('marks echoes fromMe=true and flags group messages via chat guid', async () => {
     const { port, mock } = makePort();
-    mock.on('POST', '/message/query', () => ({
-      data: [
-        bbMsg({ guid: 'g-2', isFromMe: true, handle: null }),
-        bbMsg({ guid: 'g-3', chats: [{ guid: 'iMessage;+;chatG' }] }),
-      ],
-    }));
-    const out = await port.listInboundSince(new Date(0));
-    expect(out[0]).toMatchObject({ guid: 'g-2', fromMe: true });
-    expect(out[1]).toMatchObject({ guid: 'g-3', chatGuid: 'iMessage;+;chatG' });
+    serveSnapshot(mock, [
+      bbMsg({ originalROWID: 1, guid: 'g-2', isFromMe: true, handle: null }),
+      bbMsg({ originalROWID: 2, guid: 'g-3', chats: [{ guid: 'iMessage;+;chatG' }] }),
+    ]);
+    const page = await port.listInboundSince(new Date(0));
+    expect(page.records[0]).toMatchObject({ guid: 'g-2', fromMe: true });
+    expect(page.records[1]).toMatchObject({ guid: 'g-3', chatGuid: 'iMessage;+;chatG' });
   });
 
-  it('drops messages older than `since` but keeps the inclusive boundary', async () => {
+  it('includes the bootstrap timestamp predicate inside the ROWID subquery', async () => {
     const { port, mock } = makePort();
-    mock.on('POST', '/message/query', () => ({
-      data: [
-        bbMsg({ guid: 'g-old', dateCreated: 500 }),
-        bbMsg({ guid: 'g-eq', dateCreated: 1000 }),
-        bbMsg({ guid: 'g-new', dateCreated: 1500 }),
-      ],
-    }));
-    const out = await port.listInboundSince(new Date(1000));
-    expect(out.map((m) => m.guid)).toEqual(['g-eq', 'g-new']);
+    serveSnapshot(mock, [
+      bbMsg({ originalROWID: 2, guid: 'g-eq', dateCreated: 1000 }),
+      bbMsg({ originalROWID: 3, guid: 'g-new', dateCreated: 1500 }),
+    ]);
+    const page = await port.listInboundSince(new Date(1000));
+    expect(page.records.map((m) => m.guid)).toEqual(['g-eq', 'g-new']);
+    expect(mock.calls[1]?.body?.where).toEqual([
+      expect.objectContaining({
+        statement: expect.stringContaining('bb_page.date >='),
+        args: expect.objectContaining({ afterUnixMs: 1000 }),
+      }),
+    ]);
   });
 
-  it('sorts ascending by timestamp and caps at pageSize', async () => {
+  it('orders a provider page by ROWID rather than timestamp ties', async () => {
     const { port, mock } = makePort();
-    mock.on('POST', '/message/query', () => ({
-      data: [
-        bbMsg({ guid: 'g3', dateCreated: 3000 }),
-        bbMsg({ guid: 'g1', dateCreated: 1000 }),
-        bbMsg({ guid: 'g2', dateCreated: 2000 }),
-      ],
-    }));
-    const out = await port.listInboundSince(new Date(0), 2);
-    expect(out.map((m) => m.guid)).toEqual(['g1', 'g2']);
+    serveSnapshot(mock, [
+      bbMsg({ originalROWID: 3, guid: 'g3', dateCreated: 1000 }),
+      bbMsg({ originalROWID: 1, guid: 'g1', dateCreated: 1000 }),
+      bbMsg({ originalROWID: 2, guid: 'g2', dateCreated: 1000 }),
+    ]);
+    const page = await port.listInboundSince(new Date(0), 3);
+    expect(page.records.map((m) => m.guid)).toEqual(['g1', 'g2', 'g3']);
+  });
+
+  it('rejects a malformed row instead of advancing past it', async () => {
+    const { port, mock } = makePort();
+    let query = 0;
+    mock.on('POST', '/message/query', () => {
+      query += 1;
+      return query === 1
+        ? queryResult([bbMsg({ originalROWID: 2 })], 1)
+        : queryResult([bbMsg({ originalROWID: 1, guid: undefined })], 500);
+    });
+
+    await expect(port.listInboundSince(new Date(0), 500, null)).rejects.toMatchObject({
+      code: 'MalformedResponse',
+    });
   });
 
   it('rejects invalid pageSize with RangeError', async () => {
     const { port, mock } = makePort();
-    mock.on('POST', '/message/query', () => ({ data: [] }));
     await expect(port.listInboundSince(new Date(0), 0)).rejects.toThrow(RangeError);
     await expect(port.listInboundSince(new Date(0), 1.5)).rejects.toThrow(RangeError);
+    await expect(port.listInboundSince(new Date(0), -1)).rejects.toThrow(RangeError);
+    expect(mock.calls).toHaveLength(0);
   });
 
-  it('drops records with no guid or non-text body shape', async () => {
+  it('preserves a valid non-text body shape', async () => {
     const { port, mock } = makePort();
-    mock.on('POST', '/message/query', () => ({
-      data: [
-        { text: 'no guid' },
-        bbMsg({ guid: 'g-null-body', text: null }),
-        bbMsg({ guid: 'g-ok' }),
-      ],
-    }));
-    const out = await port.listInboundSince(new Date(0));
-    expect(out.map((m) => m.guid)).toEqual(['g-null-body', 'g-ok']);
-    expect(out[0]).toMatchObject({ body: null, kind: 'other' });
+    serveSnapshot(mock, [
+      bbMsg({ originalROWID: 1, guid: 'g-null-body', text: null }),
+      bbMsg({ originalROWID: 2, guid: 'g-ok' }),
+    ]);
+    const page = await port.listInboundSince(new Date(0));
+    expect(page.records.map((m) => m.guid)).toEqual(['g-null-body', 'g-ok']);
+    expect(page.records[0]).toMatchObject({ body: null, kind: 'other' });
   });
 });
 

@@ -6,13 +6,32 @@ function line(payload: unknown): string {
 }
 
 describe('parseCodexEvent', () => {
+  it('binds an accepted native turn to the exact turn/start request response', () => {
+    expect(parseCodexEvent(line({
+      jsonrpc: '2.0',
+      id: 'request-3',
+      result: {
+        turn: {
+          id: 'turn-accepted',
+          status: 'inProgress',
+        },
+      },
+    }))).toEqual({
+      type: 'provider_turn_accepted',
+      requestId: 'request-3',
+      turnId: 'turn-accepted',
+    });
+  });
+
   describe('terminal error results', () => {
     it('marks app-server failed turns as isError so runtime default-denies raw text', () => {
       const line = JSON.stringify({
         jsonrpc: '2.0',
         method: 'turn/completed',
         params: {
+          threadId: 'thread-1',
           turn: {
+            id: 'turn-1',
             status: 'failed',
             error: { message: 'raw provider failure detail' },
           },
@@ -23,6 +42,11 @@ describe('parseCodexEvent', () => {
         type: 'result',
         text: 'raw provider failure detail',
         isError: true,
+        providerTurn: {
+          sessionId: 'thread-1',
+          turnId: 'turn-1',
+          status: 'failed',
+        },
       });
     });
 
@@ -37,6 +61,7 @@ describe('parseCodexEvent', () => {
         type: 'result',
         text: 'Codex error: server rejected request',
         isError: true,
+        providerRequestId: 7,
       });
     });
 
@@ -53,6 +78,7 @@ describe('parseCodexEvent', () => {
         isError: true,
         inputTokens: 4,
         outputTokens: 2,
+        providerTurnProtocolError: 'missing_identity',
       });
     });
   });
@@ -436,15 +462,36 @@ describe('parseCodexEvent', () => {
       expect(parseCodexEvent(line(parsed))).toEqual({ type: 'unknown', raw: parsed });
     });
 
-    it('uses fallback error text for failed turns and JSON-RPC errors without messages', () => {
+    it('fails closed when a terminal event lacks an exact native identity', () => {
       expect(parseCodexEvent(line({
         jsonrpc: '2.0',
         method: 'turn/completed',
         params: { turn: { status: 'failed' } },
       }))).toEqual({
         type: 'result',
+        text: 'Provider turn completed without an exact native identity',
+        isError: true,
+        providerTurnProtocolError: 'missing_identity',
+      });
+    });
+
+    it('uses fallback error text for exactly identified failed turns and sparse JSON-RPC errors', () => {
+      expect(parseCodexEvent(line({
+        jsonrpc: '2.0',
+        method: 'turn/completed',
+        params: {
+          threadId: 'thread-1',
+          turn: { id: 'turn-1', status: 'failed' },
+        },
+      }))).toEqual({
+        type: 'result',
         text: 'Codex turn failed',
         isError: true,
+        providerTurn: {
+          sessionId: 'thread-1',
+          turnId: 'turn-1',
+          status: 'failed',
+        },
       });
 
       expect(parseCodexEvent(line({
@@ -455,6 +502,7 @@ describe('parseCodexEvent', () => {
         type: 'result',
         text: 'Codex error: Unknown error',
         isError: true,
+        providerRequestId: 'req-1',
       });
     });
 
@@ -500,7 +548,7 @@ describe('parseCodexEvent', () => {
       });
     });
 
-    it('ignores app-server item events with missing type and non-failed turns', () => {
+    it('ignores app-server item events with missing type and fails closed on malformed terminal turns', () => {
       expect(parseCodexEvent(line({
         jsonrpc: '2.0',
         method: 'item/started',
@@ -517,24 +565,42 @@ describe('parseCodexEvent', () => {
         jsonrpc: '2.0',
         method: 'turn/completed',
         params: {},
-      }))).toEqual({ type: 'result', text: null });
+      }))).toEqual({
+        type: 'result',
+        text: 'Provider turn completed without an exact native identity',
+        isError: true,
+        providerTurnProtocolError: 'missing_identity',
+      });
 
       expect(parseCodexEvent(line({
         jsonrpc: '2.0',
         method: 'turn/completed',
         params: { turn: {} },
-      }))).toEqual({ type: 'result', text: null });
+      }))).toEqual({
+        type: 'result',
+        text: 'Provider turn completed without an exact native identity',
+        isError: true,
+        providerTurnProtocolError: 'missing_identity',
+      });
     });
 
     it('uses fallback messages for failed turns and JSON-RPC errors with sparse shapes', () => {
       expect(parseCodexEvent(line({
         jsonrpc: '2.0',
         method: 'turn/completed',
-        params: { turn: { status: 'failed', error: {} } },
+        params: {
+          threadId: 'thread-1',
+          turn: { id: 'turn-1', status: 'failed', error: {} },
+        },
       }))).toEqual({
         type: 'result',
         text: 'Codex turn failed',
         isError: true,
+        providerTurn: {
+          sessionId: 'thread-1',
+          turnId: 'turn-1',
+          status: 'failed',
+        },
       });
 
       expect(parseCodexEvent(line({
@@ -545,6 +611,7 @@ describe('parseCodexEvent', () => {
         type: 'result',
         text: 'Codex error: fatal',
         isError: true,
+        providerRequestId: 'req-2',
       });
     });
   });
@@ -692,6 +759,9 @@ describe('parseCodexEvent', () => {
         type: 'result',
         text: 'details failure',
         isError: true,
+        inputTokens: undefined,
+        outputTokens: undefined,
+        providerTurnProtocolError: 'missing_identity',
       });
     });
 
