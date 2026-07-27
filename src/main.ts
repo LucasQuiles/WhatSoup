@@ -67,6 +67,7 @@ import { TriggerPoller } from './core/substrate/poller.ts';
 import { createPineconeWatchSearch } from './mcp/tools/knowledge.ts';
 import { backfillMetrics, collectHourlyMetrics } from './core/metrics-collector.ts';
 import { startModelCurrencyMonitor } from './lib/model-advisor.ts';
+import { buildMemoryReadinessLogFields } from './lib/memory-operation-telemetry.ts';
 import { shutdownExitCode } from './main-shutdown-policy.ts';
 import { markCleanExit, restartLoopGuardPath } from './runtimes/agent/restart-loop-guard.ts';
 import { acquireProcessLock, isProcessLockError, releaseProcessLock, type ProcessLockHandle } from './lib/process-lock.ts';
@@ -191,9 +192,10 @@ if (databaseStartup.mode === 'drained') {
 const db = databaseStartup.db;
 
 const pineconeReadiness = await getPineconeReadiness(config.pineconeIndex);
-log.info({
-  pineconeReadiness: pineconeReadiness.state,
-}, 'pinecone readiness');
+log.info(
+  buildMemoryReadinessLogFields(pineconeReadiness.state),
+  'pinecone readiness',
+);
 
 const seededChatAliases = seedChatAliases(db.raw, config.chatAliases);
 if (seededChatAliases > 0) {

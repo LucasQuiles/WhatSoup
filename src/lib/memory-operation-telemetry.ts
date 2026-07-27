@@ -19,6 +19,18 @@ export const MEMORY_OPERATION_FAILURE_CODES = [
 export type MemoryOperationFailureCode =
   (typeof MEMORY_OPERATION_FAILURE_CODES)[number];
 
+export type MemoryReadinessState =
+  | 'disabled'
+  | 'auth_failed'
+  | 'index_missing'
+  | 'project_mismatch'
+  | 'network_error'
+  | 'ready';
+
+export interface MemoryReadinessLogFields {
+  pineconeReadiness: MemoryReadinessState;
+}
+
 export interface MemoryOperationFailure {
   code: MemoryOperationFailureCode;
   retryable: boolean;
@@ -134,6 +146,12 @@ export function normalizeMemoryTraceId(
   traceId: string | undefined,
 ): string | undefined {
   return traceId && OPAQUE_TRACE_ID.test(traceId) ? traceId : undefined;
+}
+
+export function buildMemoryReadinessLogFields(
+  state: MemoryReadinessState,
+): MemoryReadinessLogFields {
+  return { pineconeReadiness: state };
 }
 
 export function createMemoryOperationContext(input: {

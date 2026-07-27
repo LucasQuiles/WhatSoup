@@ -7,7 +7,7 @@ import {
   classifyMemoryFilter,
   classifyMemoryOperationFailure,
   createMemoryOperationContext,
-} from '../../../../src/runtimes/chat/memory/operation-telemetry.ts';
+} from '../../../../src/lib/memory-operation-telemetry.ts';
 
 describe('memory operation telemetry', () => {
   it('creates a content-independent opaque operation identity', () => {
