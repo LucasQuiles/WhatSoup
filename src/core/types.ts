@@ -74,6 +74,8 @@ export interface IncomingMessage {
   rawMessage?: unknown;
   /** durability: seq from inbound_events journal — threads the inbound event through the runtime lifecycle */
   inboundSeq?: number;
+  /** Journal receipt time captured at durable admission, in Unix epoch seconds. */
+  receivedAtUnixSeconds?: number;
   /**
    * Set when this is a synthetic turn injected by the agent-job dispatcher
    * (a scheduled `agent_job` bead firing), not a real inbound WhatsApp message.

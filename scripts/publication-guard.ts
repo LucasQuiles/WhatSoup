@@ -10,6 +10,7 @@ import {
   readStagedAddedLines,
   readStagedFileContentResult,
   isDocumentationEmailFixture,
+  isGitHubSshTransportPrincipal,
   isOperationalProtocolToken,
   operationalReleaseHygieneFiles,
 } from './lib/guard-core.ts';
@@ -223,10 +224,15 @@ function isOperationalUnitLine(filePath: string, lineText: string, regex: RegExp
 // documentation domains: skip the rule only when EVERY email-shaped token on the
 // line is a fixture. A real address sharing a line with a fixture still flags.
 // Not file-scoped — a reserved domain is unroutable wherever it appears.
-function isDocumentationEmailLine(lineText: string, regex: RegExp): boolean {
+function isAllowedNonMailboxEmailLine(lineText: string, regex: RegExp): boolean {
   const flags = regex.flags.includes('g') ? regex.flags : `${regex.flags}g`;
   const tokens = lineText.match(new RegExp(regex.source, flags)) ?? [];
-  return tokens.length > 0 && tokens.every((token) => isDocumentationEmailFixture(token));
+  return (
+    tokens.length > 0
+    && tokens.every((token) => (
+      isDocumentationEmailFixture(token) || isGitHubSshTransportPrincipal(token)
+    ))
+  );
 }
 
 export function scanTextForPrivateLiterals(filePath: string, text: string): GuardIssue[] {
@@ -238,7 +244,7 @@ export function scanTextForPrivateLiterals(filePath: string, text: string): Guar
         if (pattern.code === 'personal-email' && isOperationalUnitLine(filePath, lineText, pattern.regex)) {
           continue;
         }
-        if (pattern.code === 'personal-email' && isDocumentationEmailLine(lineText, pattern.regex)) {
+        if (pattern.code === 'personal-email' && isAllowedNonMailboxEmailLine(lineText, pattern.regex)) {
           continue;
         }
         issues.push({

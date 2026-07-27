@@ -153,7 +153,6 @@ async function importMainWithMocks(options: {
   seedAutoRespondGroupsReturn?: number;
   pendingStartupMessage?: { chatJid: string; text: string } | null;
   persistIntroSentFlagThrows?: boolean;
-  execFileSyncThrows?: boolean;
   drainPendingOutboundRejectsOnStartup?: boolean;
   selfRestartMarker?: {
     chatJid?: string;
@@ -162,6 +161,7 @@ async function importMainWithMocks(options: {
     timestamp: string;
   } | null;
   selfRestartMarkerThrows?: boolean;
+  resolveBinaryPathReturn?: string | null;
 } = {}) {
   vi.resetModules();
   vi.useFakeTimers();
@@ -343,9 +343,11 @@ async function importMainWithMocks(options: {
     getMessageCount: vi.fn(() => options.messageCount ?? 1),
     getUnprocessedCount: vi.fn(() => 0),
     processHistoryBatch: vi.fn(() => ({ inserted: 0, upgraded: 0, placeholders: 0, skipped: 0 })),
-    execFileSync: options.execFileSyncThrows
-      ? vi.fn(() => { throw new Error('ffmpeg missing'); })
-      : vi.fn(),
+    resolveBinaryPath: vi.fn(() =>
+      options.resolveBinaryPathReturn === undefined
+        ? '/usr/bin/ffmpeg'
+        : options.resolveBinaryPathReturn,
+    ),
     existsSync: vi.fn((path: string) => existingPaths.has(path)),
     createConnection: vi.fn(() => connection),
     resolveLatestPluginDir: vi.fn((dir: string) => dir),
@@ -452,10 +454,6 @@ async function importMainWithMocks(options: {
     ...(await importOriginal()),
     existsSync: mocks.existsSync,
   }));
-  vi.doMock('node:child_process', async (importOriginal: () => Promise<typeof import('node:child_process')>) => ({
-    ...(await importOriginal()),
-    execFileSync: mocks.execFileSync,
-  }));
   vi.doMock('../src/transport/factory.ts', () => ({ createConnection: mocks.createConnection }));
   vi.doMock('../src/runtimes/chat/runtime.ts', () => ({ ChatRuntime }));
   vi.doMock('../src/runtimes/agent/runtime.ts', () => ({ AgentRuntime }));
@@ -468,6 +466,9 @@ async function importMainWithMocks(options: {
   }));
   vi.doMock('../src/runtimes/chat/providers/anthropic.ts', () => ({ createAnthropicProvider: mocks.createAnthropicProvider }));
   vi.doMock('../src/runtimes/chat/providers/openai.ts', () => ({ createOpenAIProvider: mocks.createOpenAIProvider }));
+  vi.doMock('../src/runtimes/chat/providers/transcription/local-audio.ts', () => ({
+    resolveBinaryPath: mocks.resolveBinaryPath,
+  }));
   vi.doMock('../src/memory/consolidation-scheduler.ts', () => ({ MemoryConsolidationScheduler: mocks.MemoryConsolidationScheduler }));
   vi.doMock('../src/core/health.ts', () => ({ startHealthServer: mocks.startHealthServer }));
   vi.doMock('../src/core/heal.ts', () => ({ checkDegradationSignals: mocks.checkDegradationSignals }));
@@ -1552,9 +1553,16 @@ describe('main.ts — uncovered helpers and signal paths', () => {
 
   describe('periodic startup and maintenance timers', () => {
     it('logs when ffmpeg is unavailable at startup', async () => {
-      const h = await importMainWithMocks({ execFileSyncThrows: true });
+      const h = await importMainWithMocks({ resolveBinaryPathReturn: null });
 
       expect(h.logger.warn).toHaveBeenCalledWith('ffmpeg not found — video processing will fail');
+    });
+
+    it('does not warn when ffmpeg resolves to an executable', async () => {
+      const h = await importMainWithMocks({ resolveBinaryPathReturn: '/opt/bin/ffmpeg' });
+
+      expect(h.resolveBinaryPath).toHaveBeenCalledWith('ffmpeg');
+      expect(h.logger.warn).not.toHaveBeenCalledWith('ffmpeg not found — video processing will fail');
     });
 
     // #1445 QR-012: messages/receipts retention used to run from a standalone

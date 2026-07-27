@@ -94,7 +94,10 @@ import {
   type SessionCrashInfo,
 } from './session.ts';
 import { createProviderExecutionGate, ProviderExecutionGate } from './provider-execution-gate.ts';
-import { dispatchProviderTurn } from './provider-boundary-dispatch.ts';
+import { dispatchProviderTurn, withProviderApplicationContext } from './provider-boundary-dispatch.ts';
+import { TurnChronologyTracker, type TurnDeliveryKind } from './turn-chronology.ts';
+import { receivedAtUnixSeconds, renderPendingReplay, renderUserTurnForProvider,
+  sharedReplayApplicationContext, sharedRuntimeApplicationContext } from './turn-provider-text.ts';
 import { markDeferredSystemTurn, requireSystemTurnProviderBoundary } from './system-turn-deadline.ts';
 import {
   OutboundQueue,
@@ -197,6 +200,7 @@ import {
   RuntimeTurnCoordinator,
   RUNTIME_TURN_SHUTDOWN_FINALIZATION_TIMEOUT_MS,
   type PerChatRuntimeScopeRef,
+  type ProviderFallbackReplayArgs,
   type RuntimeTurnAfterTerminalAction,
   type RuntimeTurnCompletion,
   type RuntimeTurnCoordinatorPort,
@@ -915,6 +919,7 @@ export class AgentRuntime implements Runtime {
   // (captured at the top of start()); consumed by the startup resume gate.
   private restartLoopInterruptedBoot = false;
   private unownedProviderEventRejects = 0;
+  private readonly turnChronology = new TurnChronologyTracker();
   private readonly providerEventRejectReasonCounts = new Map<string, number>();
   /**
    * Explicit source-bound ownership for turns admitted without a durability
@@ -1479,6 +1484,7 @@ export class AgentRuntime implements Runtime {
   }
 
   private getOpenFileDescriptorCount(): number | null {
+    if (process.platform !== 'linux') return null;
     try {
       return readdirSync('/proc/self/fd').length;
     } catch (err) {
@@ -2140,6 +2146,7 @@ export class AgentRuntime implements Runtime {
       if (!session) throw new Error(`Coalesced image turn has no session for "${mapKey}"`);
       const source: RuntimeTurnSourceSnapshot = {
         sourceMessageId: msg.messageId,
+        receivedAtUnixSeconds: receivedAtUnixSeconds(msg),
         conversationKey: canonicalConversationKey(chatJid, this.db),
         senderJid: msg.senderJid,
         senderName: msg.senderName,
@@ -2159,6 +2166,7 @@ export class AgentRuntime implements Runtime {
       });
       this.enqueuePerChatRuntimeTurn(mapKey, {
         sourceMessageId: source.sourceMessageId,
+        receivedAtUnixSeconds: source.receivedAtUnixSeconds,
         conversationKey: source.conversationKey,
         chatJid,
         senderJid: source.senderJid,
@@ -2687,8 +2695,13 @@ export class AgentRuntime implements Runtime {
       isShuttingDown: () => runtime.shutdownRequested,
       getActiveQueue: () => runtime.getActiveQueue(),
       getQueueForChat: (chatJid, mapKey) => runtime.getQueueForChat(chatJid, mapKey),
-      sendTurnPerChat: (chatJid, text, mapKey, actorJid, context, scopeRef, systemTurnLease, excludeJobId) =>
-        runtime.sendTurnPerChat(chatJid, text, mapKey, actorJid, context, scopeRef, systemTurnLease, excludeJobId),
+      sendTurnPerChat: (chatJid, text, mapKey, actorJid, context, scopeRef, systemTurnLease, excludeJobId, deliveryKind) =>
+        runtime.sendTurnPerChat(chatJid, text, mapKey, actorJid, context, scopeRef, systemTurnLease, excludeJobId, deliveryKind),
+      deleteOwnedPerChatSession: (mapKey, expected) => runtime.deleteOwnedPerChatSession(mapKey, expected),
+      recreatePerChatSessionForFallback: (mapKey, chatJid, actorJid) => runtime.recreatePerChatSessionForFallback(mapKey, chatJid, actorJid),
+      recreateSingletonSessionForFallback: (chatJid, actorJid) => runtime.recreateSingletonSessionForFallback(chatJid, actorJid),
+      bindActiveGlobalMcpConversation: (chatJid) => runtime.bindActiveGlobalMcpConversation(chatJid),
+      sendTurnToSession: (...args) => runtime.sendTurnToSession(...args),
       sendVoiceReply: (chatJid, responseText) => runtime._sendVoiceReply(chatJid, responseText),
       isSilentCompact: (scopeKey) => runtime.isSilentCompact(scopeKey),
       clearSilentCompact: (scopeKey) => runtime.clearSilentCompact(scopeKey),
@@ -4327,20 +4340,14 @@ export class AgentRuntime implements Runtime {
       this.currentTurnSourceMessageId = msg.messageId;
       this.currentTurnAssistantText = '';
       this.currentTurnAssistantItemText.clear();
-      const prefixedText = this.sharedRuntimeTurnText({
-        chatJid,
-        senderJid: msg.senderJid,
-        senderName: msg.senderName,
-        text,
-        isGroup: msg.isGroup,
-      });
       const runtimeContext = this.runtimeTurnCoordinator.createRuntimeTurnForDispatch({
         scope: 'shared',
         chatJid,
-        text: prefixedText,
+        text,
         inboundSeq: msg.inboundSeq,
         source: {
           sourceMessageId: msg.messageId,
+          receivedAtUnixSeconds: receivedAtUnixSeconds(msg),
           conversationKey: journalConversationKey,
           senderJid: msg.senderJid,
           senderName: msg.senderName,
@@ -4353,6 +4360,7 @@ export class AgentRuntime implements Runtime {
       });
       this.turnQueue.enqueue({
         sourceMessageId: msg.messageId,
+        receivedAtUnixSeconds: receivedAtUnixSeconds(msg),
         conversationKey: journalConversationKey,
         chatJid,
         senderJid: msg.senderJid,
@@ -4386,6 +4394,7 @@ export class AgentRuntime implements Runtime {
           inboundSeq: msg.inboundSeq,
           source: {
             sourceMessageId: msg.messageId,
+            receivedAtUnixSeconds: receivedAtUnixSeconds(msg),
             conversationKey: journalConversationKey,
             senderJid: msg.senderJid,
             senderName: msg.senderName,
@@ -4400,6 +4409,7 @@ export class AgentRuntime implements Runtime {
 
         this.enqueuePerChatRuntimeTurn(mapKey, {
           sourceMessageId: msg.messageId,
+          receivedAtUnixSeconds: receivedAtUnixSeconds(msg),
           conversationKey: journalConversationKey,
           chatJid,
           senderJid: msg.senderJid,
@@ -4427,6 +4437,7 @@ export class AgentRuntime implements Runtime {
       this.currentTurnRouteMarkerHold = config.nlRouting ? '' : null;
       await this.sendTurnNonShared(chatJid, text, msg.senderJid, {
         sourceMessageId: msg.messageId,
+        receivedAtUnixSeconds: receivedAtUnixSeconds(msg),
         conversationKey: journalConversationKey,
         senderJid: msg.senderJid,
         senderName: msg.senderName,
@@ -4435,15 +4446,6 @@ export class AgentRuntime implements Runtime {
         ...(msg.isGroup ? { groupName: chatJid } : {}),
       }, msg.inboundSeq);
     }
-  }
-
-  private sharedRuntimeTurnText(turn: Pick<QueuedTurn, 'chatJid' | 'senderJid' | 'senderName' | 'text' | 'isGroup'>): string {
-    const phone = resolvePhoneFromJid(turn.senderJid, this.db);
-    const displayName = turn.senderName ?? phone;
-    const prefix = turn.isGroup
-      ? `[Group: ${turn.chatJid} — ${displayName}]`
-      : `[DM from ${displayName} (${phone})]`;
-    return `${prefix}\n${turn.text}`;
   }
 
   private enqueuePerChatRuntimeTurn(mapKey: string, turn: QueuedTurn): boolean {
@@ -4499,7 +4501,8 @@ export class AgentRuntime implements Runtime {
     // The journal-backed context was minted at admission so queue rejection and
     // processor failure use the same immutable identity. Legacy unjournaled
     // test/system turns still derive only their display text here.
-    const prefixedText = turn.runtimeContext?.replay.text ?? this.sharedRuntimeTurnText(turn);
+    const exactText = turn.runtimeContext?.replay.text ?? text;
+    const participantContext = sharedRuntimeApplicationContext(turn, this.db);
 
     // Track which chat this turn belongs to for event routing
     // @check CHK-065 // @traces REQ-012.AC-03
@@ -4510,7 +4513,7 @@ export class AgentRuntime implements Runtime {
     this.turnHadSuppressedReplySatisfaction = false;
     // Arm the R1 first-line marker scan for this shared turn (flag-gated).
     this.currentTurnRouteMarkerHold = config.nlRouting ? '' : null;
-    this.currentTurnReplayText = prefixedText;
+    this.currentTurnReplayText = exactText;
     this.currentTurnReplayActorJid = senderJid;
     this.replyGuarantee?.arm({ inboundSeq: turn.inboundSeq, chatJid });
 
@@ -4543,7 +4546,10 @@ export class AgentRuntime implements Runtime {
       : null;
     try {
       this.updateSessionActorJid(this.session!, senderJid);
-      await this.session!.sendTurn(prefixedText);
+      await this.session!.sendTurn(withProviderApplicationContext(
+        renderUserTurnForProvider(this.turnChronology, exactText, context, 'live'),
+        participantContext,
+      ));
     } catch (err) {
       if (legacyOwner) {
         this.clearLegacyProviderTurn(GLOBAL_TOOL_SCOPE_KEY, legacyOwner);
@@ -4579,6 +4585,8 @@ export class AgentRuntime implements Runtime {
     beforeUserSend?: () => void,
     systemTurnLease?: SystemTurnLeaseToken,
     dispatchAllowed?: () => boolean,
+    runtimeContext?: RuntimeTurnContext,
+    deliveryKind: TurnDeliveryKind = 'live',
   ): Promise<void> {
     let effectiveMapKey = mapKey;
     let spawnedForTurn = false;
@@ -4713,8 +4721,14 @@ export class AgentRuntime implements Runtime {
       if (queue) queue.indicateTyping();
     };
     try {
-      const turnText = contextPreamble === null ? text : `${contextPreamble}\n\n[Current message]\n${text}`;
-      await dispatchProviderTurn(session, turnText, onProviderBoundaryReady);
+      const userTurnText = renderUserTurnForProvider(
+        this.turnChronology, text, runtimeContext ?? null, deliveryKind,
+        sharedReplayApplicationContext(runtimeContext, this.db),
+      );
+      const turnInput = contextPreamble === null
+        ? userTurnText
+        : withProviderApplicationContext(userTurnText, contextPreamble);
+      await dispatchProviderTurn(session, turnInput, onProviderBoundaryReady);
     } catch (err) {
       if (actorPushed && effectiveMapKey !== undefined) {
         this.removeFailedExecutingActor(effectiveMapKey, actorJid, systemTurnLease);
@@ -4787,7 +4801,7 @@ export class AgentRuntime implements Runtime {
       }, undefined, () => (
         !this.shutdownRequested
         && (context === null || !this.runtimeTurnCoordinator.isUndispatchedRuntimeTurnCancelled(context))
-      ));
+      ), context ?? undefined);
       if (context && completion.value === null) {
         if (!this.runtimeTurnCoordinator.isUndispatchedRuntimeTurnCancelled(context)) {
           this.runtimeTurnCoordinator.terminalizeUndispatchedRuntimeCrash(context);
@@ -4820,11 +4834,22 @@ export class AgentRuntime implements Runtime {
     scopeRef?: PerChatRuntimeScopeRef,
     systemTurnLease?: SystemTurnLeaseToken,
     excludeJobId?: number, // PRESTAGE-T4: set only by the recovery supervisor's own replay; see beginRuntimeTurnEvidence
+    requestedDeliveryKind?: TurnDeliveryKind,
   ): Promise<void> {
     mapKey = scopeRef?.value ?? mapKey;
     const dispatchAllowed = runtimeContext === undefined
       ? undefined
       : () => !this.runtimeTurnCoordinator.isUndispatchedRuntimeTurnCancelled(runtimeContext);
+    const continuationContext = runtimeContext === undefined
+      ? this.perChatRuntimeTurnContexts.get(mapKey)?.[0]
+      : undefined;
+    const providerTurnContext = runtimeContext ?? continuationContext;
+    const providerDeliveryKind = requestedDeliveryKind ?? (
+      excludeJobId === undefined && (continuationContext === undefined
+        || !this.runtimeTurnCoordinator.isRuntimeTurnContinuation(continuationContext))
+        ? 'live'
+        : 'recovery_replay'
+    );
     // AskUserQuestion → Poll bridge: if a poll question is pending for this
     // chat and the user sends a text reply, resolve it as an option number,
     // label, description match, or free-text answer and inject it back.
@@ -4982,7 +5007,7 @@ export class AgentRuntime implements Runtime {
             retrySession,
             scopeRef?.value ?? currentMapKey,
           );
-        }, systemTurnLease, dispatchAllowed);
+        }, systemTurnLease, dispatchAllowed, providerTurnContext, providerDeliveryKind);
       } catch (err) {
         if (legacyOwner.value) {
           this.clearLegacyProviderTurn(currentMapKey, legacyOwner.value);
@@ -4999,7 +5024,7 @@ export class AgentRuntime implements Runtime {
           session,
           scopeRef?.value ?? mapKey,
         );
-      }, systemTurnLease, dispatchAllowed);
+      }, systemTurnLease, dispatchAllowed, providerTurnContext, providerDeliveryKind);
     } catch (err) {
       if (legacyOwner.value) {
         this.clearLegacyProviderTurn(scopeRef?.value ?? mapKey, legacyOwner.value);
@@ -7005,6 +7030,7 @@ export class AgentRuntime implements Runtime {
             ),
           },
           unownedProviderEventRejects: this.unownedProviderEventRejects,
+          ...this.turnChronology.healthDetails(),
           providerExecution,
           turnFinalizationRetainedRetries: finalizationHealth.retainedRetries,
           turnFinalizationDegradedScopes: finalizationHealth.degradedScopes,
@@ -7046,6 +7072,7 @@ export class AgentRuntime implements Runtime {
           ),
         },
         unownedProviderEventRejects: this.unownedProviderEventRejects,
+        ...this.turnChronology.healthDetails(),
         providerExecution,
         turnFinalizationRetainedRetries: finalizationHealth.retainedRetries,
         turnFinalizationDegradedScopes: finalizationHealth.degradedScopes,
@@ -10505,6 +10532,17 @@ export class AgentRuntime implements Runtime {
       ? this.perChatRuntimeTurnContexts.get(args.mapKey)?.[0]
       : this.currentRuntimeTurnContext;
     if (runtimeContext) {
+      if (
+        runtimeContext.replay.text !== replayText
+        || runtimeContext.identity.deliveryJid !== args.chatJid
+      ) {
+        log.error({
+          chatJid: args.chatJid,
+          mapKey: args.mapKey,
+          logicalTurnId: runtimeContext.identity.logicalTurnId,
+        }, 'refusing fallback replay with mismatched captured turn context');
+        return false;
+      }
       const scopeRef = args.mapKey === undefined
         ? undefined
         : this.perChatRuntimeTurnScopeRefs.get(runtimeContext.identity.logicalTurnId)
@@ -10522,7 +10560,10 @@ export class AgentRuntime implements Runtime {
         );
       });
       void this.dispatchFallbackReplay(
-        scopeRef === undefined ? args : { ...args, mapKey: scopeRef.value },
+        {
+          ...(scopeRef === undefined ? args : { ...args, mapKey: scopeRef.value }),
+          runtimeContext,
+        },
         replayText,
         actorJid,
       ).catch((err) => this.finalizeFailedFallbackContinuation(
@@ -10561,6 +10602,7 @@ export class AgentRuntime implements Runtime {
       chatJid: string;
       mapKey?: string;
       oldSession: SessionManager | null;
+      runtimeContext?: RuntimeTurnContext;
     },
     replayText: string,
     actorJid: string | undefined,
@@ -10571,6 +10613,7 @@ export class AgentRuntime implements Runtime {
       replayText,
       actorJid,
       oldSession: args.oldSession,
+      runtimeContext: args.runtimeContext,
     });
   }
 
@@ -10622,34 +10665,8 @@ export class AgentRuntime implements Runtime {
     });
   }
 
-  private async replayTurnOnFallback(args: {
-    chatJid: string;
-    mapKey?: string;
-    replayText: string;
-    actorJid?: string;
-    oldSession: SessionManager | null;
-  }): Promise<void> {
-    if (args.oldSession) {
-      await args.oldSession.shutdown(false);
-    }
-    if (args.mapKey !== undefined) {
-      // F-STICKY-ACTOR (QR-247): the fallback kills the child (active=false, so
-      // onCrash never fires) and replays on a fresh session. Clear the executing-actor
-      // queue so the old in-flight turn's actor cannot linger as HEAD; the replay
-      // re-pushes via sendTurnPerChat -> sendTurnToSession.
-      this.perChatExecActorQueue.delete(args.mapKey);
-      this.deleteOwnedPerChatSession(args.mapKey, args.oldSession ?? undefined);
-      this.recreatePerChatSessionForFallback(args.mapKey, args.chatJid, args.actorJid);
-      await this.sendTurnPerChat(args.chatJid, args.replayText, args.mapKey, args.actorJid);
-      return;
-    }
-    this.recreateSingletonSessionForFallback(args.chatJid, args.actorJid);
-    this.currentTurnChatJid = args.chatJid;
-    this.bindActiveGlobalMcpConversation(args.chatJid);
-    this.turnHadVisibleOutput = false;
-    this.currentTurnReplayText = args.replayText;
-    this.currentTurnReplayActorJid = args.actorJid;
-    await this.sendTurnToSession(this.session!, args.chatJid, args.replayText, undefined, args.actorJid);
+  private replayTurnOnFallback(args: ProviderFallbackReplayArgs): Promise<void> {
+    return this.runtimeTurnCoordinator.replayTurnOnFallback(args);
   }
 
   /**
@@ -11726,12 +11743,12 @@ export class AgentRuntime implements Runtime {
               err,
             );
           }
-
           // Replay the pending turn that was lost during the failed resume
           if (pendingText && mapKey) {
             log.info({ chatJid, mapKey, textPreview: providerPreview(pendingText, 80) }, 'replaying pending turn after resume failure');
             try {
-              await session.sendTurn(pendingText);
+              await session.sendTurn(renderPendingReplay(this.turnChronology, pendingText,
+                this.perChatRuntimeTurnContexts.get(mapKey)?.[0], this.perChatTurnQueues.get(mapKey)?.activeTurn ?? null));
             } catch (err) {
               log.warn({ err, chatJid }, 'pending turn replay failed');
               // Retain the replay evidence. A failed or ambiguously accepted

@@ -860,6 +860,7 @@ function makeRuntimeTurnContext(
     },
     replay: {
       sourceMessageId: `wamid-${logicalTurnId}`,
+      receivedAtUnixSeconds: 1_780_000_000,
       replaySafe: true,
       senderJid: '15550009999@s.whatsapp.net',
       senderName: null,
@@ -6616,6 +6617,7 @@ describe('AgentRuntime', () => {
       },
       replay: {
         sourceMessageId: 'wamid-source-b',
+        receivedAtUnixSeconds: 1_780_000_000,
         replaySafe: true,
         senderJid: mapKey,
         senderName: null,
@@ -6935,10 +6937,13 @@ describe('AgentRuntime', () => {
     );
     // The single provider send carries the context preamble plus the user text.
     expect(mockSession.sendTurn).toHaveBeenCalledTimes(1);
-    const sent = (vi.mocked(mockSession.sendTurn).mock.calls[0] as unknown as [string])[0];
-    expect(sent).toMatch(/^\[Recent chat context — read before responding\]\n/);
-    expect(sent).toContain('earlier message');
-    expect(sent).toMatch(/\n\n\[Current message\]\nhello$/);
+    const sent = (vi.mocked(mockSession.sendTurn).mock.calls[0] as unknown as [{
+      applicationContext: string[];
+      userText: string;
+    }])[0];
+    expect(sent.applicationContext[0]).toMatch(/^\[Recent chat context — read before responding\]\n/);
+    expect(sent.applicationContext[0]).toContain('earlier message');
+    expect(sent.userText).toBe('hello');
 
     // Complete the (single) user turn so the queued test work does not outlive
     // this test.
@@ -8215,7 +8220,7 @@ describe('AgentRuntime', () => {
           chatQueues: 1,
           outboundQueues: 1,
           workspaceResources: 1,
-          fdCount: 3,
+          fdCount: process.platform === 'linux' ? 3 : null,
           memoryUsage: expect.objectContaining({
             rss: expect.any(Number),
             heapTotal: expect.any(Number),
@@ -8239,6 +8244,20 @@ describe('AgentRuntime', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  // @skip-env this assertion applies only where Linux /proc is unavailable.
+  it.runIf(process.platform !== 'linux')('does not probe Linux /proc for file descriptors on non-Linux hosts', () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const runtime = new AgentRuntime(db, messenger, 'test');
+    const getOpenFileDescriptorCount = (
+      runtime as unknown as { getOpenFileDescriptorCount: () => number | null }
+    ).getOpenFileDescriptorCount.bind(runtime);
+    mockReaddirSync.mockClear();
+
+    expect(getOpenFileDescriptorCount()).toBe(null);
+    expect(mockReaddirSync).not.toHaveBeenCalled();
   });
 
   it('shared sweepIdleQueues evicts idle outbound queues and shuts them down', () => {
@@ -8975,12 +8994,12 @@ describe('AgentRuntime', () => {
       isGroup: true,
     }))).resolves.toBeUndefined();
 
-    expect(mockSession.sendTurn).toHaveBeenCalledWith(
-      expect.stringContaining('[Group: chat-timeout@g.us — Taylor]'),
-    );
-    expect(mockSession.sendTurn).toHaveBeenCalledWith(
-      expect.stringContaining('wake up'),
-    );
+    expect(mockSession.sendTurn).toHaveBeenCalledWith({
+      applicationContext: [
+        expect.stringContaining('"displayName":"Taylor"'),
+      ],
+      userText: 'wake up',
+    });
     expect(mockRuntimeLogger.warn).toHaveBeenCalledWith(
       expect.objectContaining({
         chatJid: 'chat-timeout@g.us',
@@ -9073,7 +9092,7 @@ describe('AgentRuntime', () => {
 
   // @check CHK-064
 // @traces REQ-012.AC-02
-  it('shared: DM turn prefixed with [DM from <name> (<phone>)]', async () => {
+  it('shared: DM metadata is application context and userText stays exact', async () => {
     const db = makeDb();
     const { messenger } = makeMessenger();
 
@@ -9089,17 +9108,17 @@ describe('AgentRuntime', () => {
       isGroup: false,
     }));
 
-    expect(mockSession.sendTurn).toHaveBeenCalledWith(
-      expect.stringContaining('[DM from Jason (15550100001)]'),
-    );
-    expect(mockSession.sendTurn).toHaveBeenCalledWith(
-      expect.stringContaining('test message'),
-    );
+    expect(mockSession.sendTurn).toHaveBeenCalledWith({
+      applicationContext: [
+        expect.stringContaining('"kind":"direct"'),
+      ],
+      userText: 'test message',
+    });
   });
 
   // @check CHK-064
 // @traces REQ-012.AC-02
-  it('shared: group turn prefixed with [Group: <chatJid> — <senderName>]', async () => {
+  it('shared: group metadata is application context and userText stays exact', async () => {
     const db = makeDb();
     const { messenger } = makeMessenger();
 
@@ -9115,12 +9134,12 @@ describe('AgentRuntime', () => {
       isGroup: true,
     }));
 
-    expect(mockSession.sendTurn).toHaveBeenCalledWith(
-      expect.stringContaining('[Group: the-group@g.us — Jason]'),
-    );
-    expect(mockSession.sendTurn).toHaveBeenCalledWith(
-      expect.stringContaining('group message'),
-    );
+    expect(mockSession.sendTurn).toHaveBeenCalledWith({
+      applicationContext: [
+        expect.stringContaining('"kind":"group"'),
+      ],
+      userText: 'group message',
+    });
   });
 
   // @check CHK-065
