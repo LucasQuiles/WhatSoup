@@ -232,6 +232,8 @@ export type HealthDegradationCause =
   | 'outbound_flood'
   | 'event_loop_starved'
   | 'durability_debt'
+  | 'continuity_gap_unreadable'
+  | 'continuity_gap_open'
   | 'schema_future'
   | 'schema_not_ready'
   | 'pending_polls_unreadable'
@@ -261,6 +263,8 @@ const HEALTH_DEGRADATION_CAUSE_PRESENCE: Readonly<Record<HealthDegradationCause,
   outbound_flood: true,
   event_loop_starved: true,
   durability_debt: true,
+  continuity_gap_unreadable: true,
+  continuity_gap_open: true,
   schema_future: true,
   schema_not_ready: true,
   pending_polls_unreadable: true,
