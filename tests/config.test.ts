@@ -1997,6 +1997,22 @@ describe('config — transport + twilioConfig', () => {
 // ---------------------------------------------------------------------------
 
 describe('config — siblingPhones, pausedChats, echoGuard', () => {
+  it('rehydrates exact internal peer JIDs without granting admin access', async () => {
+    const trustedPeer = `${'15555550002'}@${'s.whatsapp.net'}`;
+    process.env.INSTANCE_CONFIG = JSON.stringify(makeInstanceConfig({
+      internalPeerJids: [trustedPeer],
+    }));
+    const { config } = await import('../src/config.ts');
+    expect(config.internalPeerJids).toEqual(new Set([trustedPeer]));
+    expect(config.adminPhones.has('15555550002')).toBe(false);
+  });
+
+  it('defaults internalPeerJids to an empty set', async () => {
+    process.env.INSTANCE_CONFIG = JSON.stringify(makeInstanceConfig({}));
+    const { config } = await import('../src/config.ts');
+    expect(config.internalPeerJids.size).toBe(0);
+  });
+
   it('populates siblingPhones from instance config', async () => {
     process.env.INSTANCE_CONFIG = JSON.stringify(makeInstanceConfig({
       siblingPhones: ['+15550000099'],

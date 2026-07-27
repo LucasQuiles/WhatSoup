@@ -18,6 +18,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import { MemoryRouter } from 'react-router-dom'
 import type { ReactNode } from 'react'
 import { ToastContext, type ToastContextValue } from '../../console/src/hooks/toast-context'
 import { statusWashClass } from '../../console/src/lib/status-severity'
@@ -174,9 +175,13 @@ function renderOps(opts: RenderOptions = {}) {
   }))
 
   const result = render(
-    <ToastContext.Provider value={toast}>
-      <Ops />
-    </ToastContext.Provider>,
+    // T5 b-09a: Ops now consumes useSearchParams for the Metrics tab deep
+    // link — the harness wraps it in a router (behavior unchanged).
+    <MemoryRouter>
+      <ToastContext.Provider value={toast}>
+        <Ops />
+      </ToastContext.Provider>
+    </MemoryRouter>,
   )
 
   return { ...result, toast, linesRefetch, feedRefetch, logsRefetch }
@@ -241,9 +246,11 @@ describe('Ops page fleet states', () => {
     useLogsMock.mockReturnValue({ data: [], error: null, refetch: vi.fn() })
 
     rerender(
-      <ToastContext.Provider value={makeToast()}>
-        <Ops />
-      </ToastContext.Provider>,
+      <MemoryRouter>
+        <ToastContext.Provider value={makeToast()}>
+          <Ops />
+        </ToastContext.Provider>
+      </MemoryRouter>,
     )
 
     expect(screen.getByText('No Lines discovered. Create one from the Fleet.')).toBeDefined()
@@ -379,17 +386,21 @@ describe('Ops page — health summary derived from current line state, not the f
       refetch: vi.fn(),
     })
     rerender(
-      <ToastContext.Provider value={makeToast()}>
-        <Ops />
-      </ToastContext.Provider>,
+      <MemoryRouter>
+        <ToastContext.Provider value={makeToast()}>
+          <Ops />
+        </ToastContext.Provider>
+      </MemoryRouter>,
     )
     expect(screen.getByText('1 unhealthy')).toBeDefined()
 
     useLinesMock.mockReturnValue({ data: onlineLines, isLoading: false, error: null, refetch: vi.fn() })
     rerender(
-      <ToastContext.Provider value={makeToast()}>
-        <Ops />
-      </ToastContext.Provider>,
+      <MemoryRouter>
+        <ToastContext.Provider value={makeToast()}>
+          <Ops />
+        </ToastContext.Provider>
+      </MemoryRouter>,
     )
     expect(screen.getByText('all healthy')).toBeDefined()
   })
@@ -406,14 +417,18 @@ describe('Ops page — health summary derived from current line state, not the f
     useLogsMock.mockImplementation(() => ({ data: [], error: null, refetch: vi.fn() }))
 
     const clientA = render(
-      <ToastContext.Provider value={makeToast()}>
-        <Ops />
-      </ToastContext.Provider>,
+      <MemoryRouter>
+        <ToastContext.Provider value={makeToast()}>
+          <Ops />
+        </ToastContext.Provider>
+      </MemoryRouter>,
     )
     const clientB = render(
-      <ToastContext.Provider value={makeToast()}>
-        <Ops />
-      </ToastContext.Provider>,
+      <MemoryRouter>
+        <ToastContext.Provider value={makeToast()}>
+          <Ops />
+        </ToastContext.Provider>
+      </MemoryRouter>,
     )
 
     expect(within(clientA.container).getByText('1 unhealthy')).toBeDefined()

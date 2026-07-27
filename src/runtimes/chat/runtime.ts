@@ -1,6 +1,11 @@
 import { randomBytes } from 'node:crypto';
 import type { Database } from '../../core/database.ts';
-import { redactInternalArtifacts, resolveOutboundAudience, isOperatorDmPeer } from '../../core/outbound-message-safety.ts';
+import {
+  redactInternalArtifacts,
+  resolveOutboundAudience,
+  isOperatorDmPeer,
+  isTrustedInternalDmPeer,
+} from '../../core/outbound-message-safety.ts';
 import { isGroupJid } from '../../core/jid-constants.ts';
 import type {
   IncomingMessage,
@@ -544,6 +549,11 @@ export class ChatRuntime implements Runtime {
     responseText = redactInternalArtifacts(responseText, resolveOutboundAudience(msg.chatJid, {
       isGroup: chatIsGroup,
       peerIsAdmin: isOperatorDmPeer(msg.chatJid, chatIsGroup, this.db, config.adminPhones),
+      peerIsTrustedInternal: isTrustedInternalDmPeer(
+        msg.chatJid,
+        chatIsGroup,
+        config.internalPeerJids,
+      ),
       fallbackActive: usedFallbackProvider,
     })).text;
 

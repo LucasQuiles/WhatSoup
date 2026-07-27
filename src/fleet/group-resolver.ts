@@ -11,6 +11,7 @@
 
 import * as fs from 'node:fs';
 import { DatabaseSync } from 'node:sqlite';
+import { SQLITE_BUSY_TIMEOUT_PRAGMA } from '../lib/sqlite-constants.ts';
 import { mcpCall } from './mcp-client.ts';
 import { proxyToInstance } from './http-proxy.ts';
 import { conversationKeyToJid } from '../core/conversation-key.ts';
@@ -150,7 +151,7 @@ async function backfill(
         // The instance process is actively writing the same bot.db. Without a busy
         // timeout this second writer gets an immediate SQLITE_BUSY under WAL; wait for
         // the lock instead, matching FleetDbReader.queryWrite (db-reader.ts).
-        db.prepare('PRAGMA busy_timeout = 5000').run();
+        db.prepare(SQLITE_BUSY_TIMEOUT_PRAGMA).run();
         db.prepare(`
           INSERT OR REPLACE INTO groups (jid, subject, participant_count, updated_at)
           VALUES (?, ?, ?, datetime('now'))

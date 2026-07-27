@@ -31,6 +31,15 @@ export interface AuthBondFileSnapshot {
   size: number | null;
   mtime: string | null;
   sha256: string | null;
+  /**
+   * errno of a non-ENOENT failure while snapshotting, else null.
+   *
+   * `exists: false` alone cannot be read as "absent": it is also what a bare
+   * catch produced for EACCES/EIO. With this field, absent is `exists:false,
+   * error:null` and unreadable is a non-null error — and when lstat succeeded
+   * but the content read did not, `exists` stays TRUE alongside the error.
+   */
+  error: string | null;
 }
 
 export interface AuthBondBackupSnapshot {
@@ -137,26 +146,57 @@ function modeString(mode: number): string {
   return (mode & 0o777).toString(8);
 }
 
+/**
+ * Snapshot one path, keeping "absent" and "unreadable" distinct.
+ *
+ * The two failures are stated separately on purpose, and it matters which one
+ * you are looking at: absent means re-pair, unreadable means fix the mode or
+ * the disk. The same ENOENT-only rule isVanishedEntry documents applies here —
+ * a blanket catch turned EACCES/EIO into "there are no credentials".
+ *
+ * lstat and the content read are caught separately because a read that fails
+ * AFTER a successful lstat has already proven the file exists; collapsing both
+ * into one catch reported exists:false for a file the very same call had just
+ * stat'd, and discarded the mode/size/mtime it had successfully obtained.
+ */
 function fileSnapshot(path: string, includeHash = false): AuthBondFileSnapshot {
+  const absent = (error: string | null): AuthBondFileSnapshot => ({
+    path,
+    exists: false,
+    mode: null,
+    size: null,
+    mtime: null,
+    sha256: null,
+    error,
+  });
+
+  let st;
   try {
-    const st = lstatSync(path);
-    return {
-      path,
-      exists: true,
-      mode: modeString(st.mode),
-      size: st.size,
-      mtime: st.mtime.toISOString(),
-      sha256: includeHash && st.isFile() && !st.isSymbolicLink() ? hashBuffer(readFileSync(path)) : null,
-    };
-  } catch {
-    return {
-      path,
-      exists: false,
-      mode: null,
-      size: null,
-      mtime: null,
-      sha256: null,
-    };
+    st = lstatSync(path);
+  } catch (err) {
+    // ENOENT is the only code that means "not there"; anything else is a fault
+    // we could not see past, so it is reported as such rather than as absence.
+    return absent(isVanishedEntry(err) ? null : errnoCode(err));
+  }
+
+  const base = {
+    path,
+    exists: true,
+    mode: modeString(st.mode),
+    size: st.size,
+    mtime: st.mtime.toISOString(),
+  };
+
+  if (!includeHash || !st.isFile() || st.isSymbolicLink()) {
+    return { ...base, sha256: null, error: null };
+  }
+
+  try {
+    return { ...base, sha256: hashBuffer(readFileSync(path)), error: null };
+  } catch (err) {
+    // The file demonstrably exists — lstat just returned for it. Keep the
+    // metadata that succeeded and report why the content could not be hashed.
+    return { ...base, sha256: null, error: errnoCode(err) };
   }
 }
 
@@ -183,18 +223,67 @@ function extractMeHash(parsed: unknown): string | null {
   return id ? shortHash(id, 20) : null;
 }
 
-function walkAuthFiles(root: string): string[] {
+/**
+ * True only for "the entry is no longer there" — Baileys rotates key files
+ * constantly, so an entry can disappear between the readdir that listed it and
+ * the stat/read that consumes it.
+ *
+ * ENOENT only, on purpose. EACCES means the tree is genuinely unreadable and
+ * EIO means the disk is failing; both are real faults that must keep
+ * propagating. A blanket `catch { continue }` here would convert them into a
+ * silently short auth-tree observation.
+ */
+function isVanishedEntry(err: unknown): boolean {
+  return (err as NodeJS.ErrnoException | null)?.code === 'ENOENT';
+}
+
+/**
+ * errno of a filesystem rejection, defaulting to EIO when the thrown value
+ * carries no code — an unlabelled failure is still a failure, and returning
+ * null there would make it indistinguishable from success.
+ */
+function errnoCode(err: unknown): string {
+  return (err as NodeJS.ErrnoException | null)?.code ?? 'EIO';
+}
+
+/**
+ * Enumerate the auth tree.
+ *
+ * `complete: false` means at least one entry vanished mid-walk, so `paths` is a
+ * SUBSET of what was on disk. Callers must not treat a subset as a description
+ * of the tree — see inspectAuthTree.
+ */
+function walkAuthFiles(root: string): { paths: string[]; complete: boolean } {
   const out: string[] = [];
   const stack = [root];
+  let complete = true;
   while (stack.length > 0) {
     const current = stack.pop()!;
-    const st = lstatSync(current);
+    let st;
+    try {
+      st = lstatSync(current);
+    } catch (err) {
+      // lstat does not follow the final component, so an existing symlink —
+      // even a dangling one — returns the link itself rather than ENOENT. This
+      // allowance therefore cannot mask the symlink refusal below.
+      if (isVanishedEntry(err)) { complete = false; continue; }
+      throw err;
+    }
     if (st.isDirectory()) {
-      const entries = readdirSync(current)
-        .filter(name => name !== '.DS_Store')
-        .map(name => join(current, name))
-        .sort()
-        .reverse();
+      let entries: string[];
+      try {
+        entries = readdirSync(current)
+          .filter(name => name !== '.DS_Store')
+          .map(name => join(current, name))
+          .sort()
+          .reverse();
+      } catch (err) {
+        // A vanished directory takes its whole subtree out of the walk, which
+        // is a larger loss than a single file — and one that leaves no trace in
+        // `paths`. It only shows up as `complete: false`.
+        if (isVanishedEntry(err)) { complete = false; continue; }
+        throw err;
+      }
       stack.push(...entries);
       continue;
     }
@@ -205,17 +294,45 @@ function walkAuthFiles(root: string): string[] {
       out.push(current);
     }
   }
-  return out.sort();
+  return { paths: out.sort(), complete };
 }
 
+/**
+ * Hash the auth tree, or return null if it could not be observed completely.
+ *
+ * An incomplete observation yields NO hash rather than a shorter one. The
+ * digest commits only to the files it hashed, so a tree read while an entry was
+ * vanishing would produce a digest byte-identical to that of a genuinely
+ * smaller tree — `hash({a,b,c} with c skipped) === hash({a,b})`. `treeHash` is
+ * a tamper-detection primitive (authTreeValidationError below compares it
+ * against a recorded baseline, and ConnectionManager gates clearing the local
+ * auth-bond alert on it), so a partial read silently colliding with a real tree
+ * state would turn that control from fail-closed into fail-open.
+ *
+ * Returning null keeps it fail-closed without the crash that #2285 is about:
+ * every consumer already handles null (`auth tree is unreadable`, and the
+ * capture path skips on a missing treeHash), whereas the pre-fix throw escaped
+ * inspect() on a `void`-ed async path and shut the instance down.
+ */
 function inspectAuthTree(authDir: string): { treeHash: string; fileCount: number; totalBytes: number } | null {
   if (!existsSync(authDir)) return null;
+  const { paths, complete } = walkAuthFiles(authDir);
+  if (!complete) return null;
   const hasher = createHash('sha256');
-  const paths = walkAuthFiles(authDir);
   let totalBytes = 0;
   for (const path of paths) {
     const rel = relative(authDir, path);
-    const st = lstatSync(path);
+    // stat and read together: a file that survived the stat can still be
+    // renamed away before the read, so both halves need the same allowance.
+    let st;
+    let contents;
+    try {
+      st = lstatSync(path);
+      contents = readFileSync(path);
+    } catch (err) {
+      if (isVanishedEntry(err)) return null;
+      throw err;
+    }
     totalBytes += st.size;
     hasher.update(rel);
     hasher.update('\0');
@@ -223,9 +340,12 @@ function inspectAuthTree(authDir: string): { treeHash: string; fileCount: number
     hasher.update('\0');
     hasher.update('file');
     hasher.update('\0');
-    hasher.update(readFileSync(path));
+    hasher.update(contents);
     hasher.update('\0');
   }
+  // Safe as paths.length precisely because a short read returns null above:
+  // every path in `paths` was hashed, so the count and the digest describe the
+  // same file set.
   return { treeHash: hasher.digest('hex'), fileCount: paths.length, totalBytes };
 }
 
@@ -342,6 +462,12 @@ function authTreeValidationError(
   }
   const credsPath = join(authDir, 'creds.json');
   const creds = fileSnapshot(credsPath, true);
+  // Before the content checks: an unread file has a null hash, which the
+  // comparison below would otherwise report as a hash mismatch — telling the
+  // operator the copy is corrupt when it was never read in the first place.
+  if (creds.error !== null) {
+    return `${prefix} creds.json is unreadable (${creds.error})`;
+  }
   if (!creds.exists) return `${prefix} auth missing creds.json`;
   if (creds.size === 0 || creds.sha256 === EMPTY_SHA256) {
     return `${prefix} creds.json is empty`;
@@ -456,18 +582,32 @@ export class AuthBondGuard {
     let meHash: string | null = null;
     const hasSymlinkIssue = issues.some(issue => issue.startsWith('auth_tree_symlink:'));
 
-    if (!authDir.exists) {
+    // An errno means the path could not be READ, which is not the same as it
+    // not being there. The distinction is the operator's next move: 'missing'
+    // says re-pair (destructive), 'unreadable' says fix a mode or a disk.
+    // Classified ahead of the content checks below, which would otherwise read
+    // the null hash of an unread file as "empty" or as a hash mismatch.
+    const authDirUnreadable = authDir.error !== null;
+    const credsUnreadable = creds.error !== null;
+
+    if (authDirUnreadable) {
+      status = 'invalid';
+      issues.push(`auth_dir_unreadable:${authDir.error}`);
+    } else if (!authDir.exists) {
       status = 'missing';
       issues.push('auth_dir_missing');
     }
-    if (!creds.exists) {
+    if (credsUnreadable) {
+      status = 'invalid';
+      issues.push(`creds_json_unreadable:${creds.error}`);
+    } else if (!creds.exists) {
       status = 'missing';
       issues.push('creds_json_missing');
     }
     if (hasSymlinkIssue) {
       status = 'invalid';
     }
-    if (creds.exists && !hasSymlinkIssue) {
+    if (creds.exists && !credsUnreadable && !hasSymlinkIssue) {
       if (creds.size === 0 || creds.sha256 === EMPTY_SHA256) {
         status = 'invalid';
         issues.push('creds_json_empty');

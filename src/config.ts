@@ -12,6 +12,10 @@ import { DEFAULT_TWILIO_SMS, DEFAULT_TWILIO_VOICE, type TwilioSmsConfig, type Tw
 import { DEFAULT_IMESSAGE, type ImessageConfig, type ImessageInboundMode } from './transport/imessage/types.ts';
 import { DEFAULT_SIGNAL, SIGNAL_UUID_RE, type SignalConfig, type SignalInboundMode } from './transport/signal/types.ts';
 import { normalizeFallbackEntriesFromAgentOptions } from './core/fallback-chain.ts';
+import {
+  isProviderBoundaryMode,
+  isProviderDataPolicy,
+} from './core/provider-data-policy.ts';
 import { errorMessage } from './lib/error-message.ts';
 import { validateModelRoleValue } from './lib/model-resolver.ts';
 import { ConfigValidationError } from './lib/startup-error.ts';
@@ -1177,6 +1181,15 @@ export const config = {
   // Access control — rehydrate from instance (string[]) or use defaults
   adminPhones: new Set<string>(resolvedAdminPhones),
 
+  // Exact authenticated DM peers used for internal operator coordination.
+  // This is deliberately separate from adminPhones: audience classification
+  // must not widen inbound access-control authority.
+  internalPeerJids: new Set<string>(
+    (Array.isArray(instance?.internalPeerJids) ? instance.internalPeerJids : [])
+      .filter((jid: unknown): jid is string => typeof jid === 'string' && jid.trim() !== '')
+      .map((jid: string) => jid.trim()),
+  ),
+
   // Control peers — phones trusted to send self-healing control messages
   controlPeers: new Map<string, string>(
     Object.entries((instance?.controlPeers ?? {}) as Record<string, string>)
@@ -1262,6 +1275,12 @@ export const config = {
   // Defaults to 'claude-cli' for backward compatibility when not specified.
   agentProvider: (resolvedAgentOptions['provider'] as string | undefined) ?? 'claude-cli',
   agentProviderConfig: (resolvedAgentOptions['providerConfig'] as Record<string, unknown> | undefined) ?? undefined,
+  agentProviderDataPolicy: isProviderDataPolicy(resolvedAgentOptions['providerDataPolicy'])
+    ? resolvedAgentOptions['providerDataPolicy']
+    : null,
+  agentProviderBoundaryMode: isProviderBoundaryMode(resolvedAgentOptions['providerBoundaryMode'])
+    ? resolvedAgentOptions['providerBoundaryMode']
+    : 'shadow',
 
   // Chat OpenAI provider endpoint/key override — read from
   // chatOptions.openaiProviderConfig (QR-218 PR-2). Undefined (the default)
@@ -1282,6 +1301,7 @@ export const config = {
   agentFallbacks: resolvedFallbacks,
   agentFallbackProvider: resolvedFallbacks[0]?.provider,
   agentFallbackModel: resolvedFallbacks[0]?.model,
+  agentFallbackDataPolicy: resolvedFallbacks[0]?.dataPolicy,
 
   // Voice (ElevenLabs TTS)
   elevenlabs: {

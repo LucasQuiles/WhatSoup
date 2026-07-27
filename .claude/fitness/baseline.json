@@ -6,8 +6,8 @@
       "measurements": [
         {
           "filePath": "src/runtimes/agent/runtime.ts",
-          "lines": 12131,
-          "maxLines": 12131
+          "lines": 12130,
+          "maxLines": 12500
         },
         {
           "filePath": "tests/runtimes/agent/runtime.test.ts",
@@ -26,13 +26,13 @@
       "violationCount": 5
     },
     "arch.ssot-phone-shape": {
-      "violationCount": 9
+      "violationCount": 6
     },
     "arch.ssot-presentation-literals": {
       "violationCount": 0
     },
     "arch.ring-boundaries": {
-      "violationCount": 57
+      "violationCount": 56
     }
   }
 }

@@ -622,7 +622,7 @@ delivery proof while adding auditable completion and conflict evidence.
 | `processing_status` | TEXT NOT NULL | Lifecycle state: `pending`, `processing`, `turn_done`, `complete`, `failed`. Default `pending`. |
 | `completed_at` | TEXT | Timestamp when status reached a terminal state. |
 | `terminal_reason` | TEXT | Human-readable terminal cause: `response_sent`, `error`, `local_command` / `empty_content` (skipped without a turn), `recovered_turn_done` / `recovered_response_sent` (finalized by recovery or the stuck-inbound reconciler §4.5), etc. Every failed row keeps `terminal_reason = 'error'` exactly (an external matcher contract); the driver split lives in `failure_class`. |
-| `failure_class` | TEXT | Bounded, content-free failure driver stamped alongside `terminal_reason = 'error'` on a failed row. Migration 36; nullable, no CHECK/default/backfill/index (the vocabulary is gated in code at `src/core/inbound-failure-class.ts`). One of: `provider_failure`, `transport_send_failed`, `transport_disconnected`, `timeout`, `db_error`, `session_crash`, `session_spawn_failed`, `crash_recovery`, `stale_reclaim`, the admission-rejection subclasses `queue_full` / `queue_halted` / `queue_closed` / `pre_dispatch_error` / `scope_blocked_recovery` (#1750), `recovery_owner_reclaimed` (#1749), or `unknown`. **NULL** = a pre-taxonomy row (failed before migration 36); **`unknown`** = classified but unattributable. Crash reclaim in `preConnectRecovery` stamps `crash_recovery`; the stuck-inbound reconciler (§4.5) stamps `stale_reclaim` (bucket 3) and `recovery_owner_reclaimed` (bucket 4, the recovery-owner reclaim of §4.7). An admitted-then-rejected turn stamps its distinct rejection driver (queue depth-cap shed, halt, closed admissions, pre-dispatch error, or recovery-scope block) instead of collapsing to `unknown`, so alerting can page on a queue halt without false-positiving on a benign capacity shed. |
+| `failure_class` | TEXT | Bounded, content-free failure driver stamped alongside `terminal_reason = 'error'` on a failed row. Migration 36; nullable, no CHECK/default/backfill/index (the vocabulary is gated in code at `src/core/inbound-failure-class.ts`). One of: `provider_failure`, `transport_send_failed`, `transport_disconnected`, `timeout`, `db_error`, `session_crash`, `session_spawn_failed`, `crash_recovery`, `stale_reclaim`, the admission-rejection subclasses `queue_full` / `queue_halted` / `queue_closed` / `pre_dispatch_error` / `scope_blocked_recovery` (#1750), `recovery_owner_reclaimed` (#1749), `processor_throw`, or `unknown`. **NULL** = a pre-taxonomy row (failed before migration 36); **`unknown`** = classified but unattributable. Crash reclaim in `preConnectRecovery` stamps `crash_recovery`; the stuck-inbound reconciler (§4.5) stamps `stale_reclaim` (bucket 3) and `recovery_owner_reclaimed` (bucket 4, the recovery-owner reclaim of §4.7). An admitted-then-rejected turn stamps its distinct rejection driver (queue depth-cap shed, halt, closed admissions, pre-dispatch error, or recovery-scope block) instead of collapsing to `unknown`, so alerting can page on a queue halt without false-positiving on a benign capacity shed. Exact terminal-attempt classes remain independently preserved on `turn_terminal_records.attempt_failure_class`: for example, `provider_stream_corrupt` projects to the bounded inbound class `provider_failure` rather than expanding this column's vocabulary. |
 
 ### `outbound_ops`
 
@@ -701,6 +701,19 @@ delivery proof. Recent chains and every unresolved/retry/orphan/corrupt obligati
 Runtime health reports an admission-active `outstanding` count (`pending` plus `claimed` jobs and
 orphan transfers), every job-state bucket (including live claims), unmatched operator catch-ups,
 quarantined selected deliveries, orphan transfers, corrupt links, and echo conflicts.
+Those receiver-local gauges cannot prove that the transport admitted every message sent during a
+disconnect. The read-only `audit-continuity-manifest` operator command compares a bounded receipt
+manifest from an independent participant history against exact local message, admission, and
+delivery-proof state before any catch-up action. It separates already-admitted unanswered work from
+work that requires provenance-labeled operator catch-up and emits no identifiers or content.
+After that dry run, `record-continuity-manifest --confirm-record` can persist only the
+`absent`, `observed_not_admitted`, and `ambiguous` classifications in the existing recovery
+ledger. Durable identities and evidence are SHA-256 fingerprints; no raw receipt, destination,
+manifest, or evidence value is written. Repeated recording is idempotent. `/health` exposes only
+open/unresolved/ambiguous counts and remains degraded with `continuity_gap_open`; malformed or
+unreadable ledger evidence degrades with `continuity_gap_unreadable`. The recorder does not send,
+replay, admit, or close work. A later proof-bound catch-up lane must close these rows only after an
+exact provenance link and terminal delivery proof exist.
 Admission blocks only `pending` or `claimed` jobs plus orphan transfers, and only on the affected
 per-chat or global scope. When the selected delivery is provably dead (`failed_permanent`/
 `quarantined`) the job can never echo-settle, so the stuck-inbound reclaim (§4.7) drives a
@@ -884,3 +897,92 @@ before the throw, so a failed cycle is no longer invisible to anything reading `
 (`src/runtimes/chat/runtime.ts`) derives `degraded` from `lastRunAt` staleness, so a persistently
 failing cycle must keep tripping that staleness window rather than reading healthy forever while
 failure rows accumulate.
+
+---
+
+## 7. Durable Background Work (Work Ledger + Results Outbox)
+
+Sections 1–6 make *turns* durable. This section covers the other loss class: **in-session
+background workers** — agent-spawned subagents, background bash, CI babysitters — which live
+inside the provider child's process tree.
+
+### 7.1 The loss class
+
+A background worker historically had no registration row, wrote its results to the parent's
+stdout/memory, and depended on the parent's turn for delivery. So the parent's death was total:
+the process tree died with it and finished work was stranded — pushed branches with no chat
+notice, completed analyses never delivered, "the chat just stops".
+
+That is not hypothetical. A production instance's heal reports show a 30-minute-cadence
+`crash__signal_SIGKILL_exit_none` wave across the night of 07-22→23 (23:32, 00:02, 00:33, 01:03,
+01:33, 02:03, 02:38, 03:08, 03:38, 04:09) plus 07-24 10:07Z — the hard watchdog serially
+executing long agentic runs.
+
+PR #2226's liveness gate stops the *false-positive* kills (a working tree is no longer mistaken
+for a hung one). It does nothing for a genuine death. This is the durability half.
+
+### 7.2 `background_work` — the Work Ledger
+
+A sanctioned worker is REGISTERED at spawn, which binds it to a `conversation_key` (canonical,
+alias-stable chat identity) instead of to its parent session's lifetime. A lease plus an optional
+`parent_pid` turn "is the parent still alive?" into a deterministic query rather than an inference.
+
+States: `registered → running → completed | failed`, with `orphaned` as the sweep's verdict on
+running work whose lease expired. The sweep only **relabels** — it never kills or re-runs — so a
+merely-slow worker that later renews or completes is not destroyed.
+
+`worker_kind` is CHECK-constrained (currently `agent_subagent` only). An unsanctioned kind fails
+loudly at write time instead of quietly creating an unmanaged class of worker.
+
+### 7.3 `work_results` — the Results Outbox
+
+Workers MUST write results here — a durable summary plus an optional artifact reference — never
+only to parent stdout. An independent delivery daemon drains the outbox, so delivery no longer
+depends on any session being alive.
+
+`completeBackgroundWork()` writes the terminal state and the outbox row in **one transaction**.
+That atomicity is the durability guarantee: there is no window where the ledger reads "completed"
+with no result, nor one where a result exists for work still marked running. A process that dies
+mid-call rolls back entirely and the row stays `running`, which the orphan sweep then collects —
+rather than the work silently reading as done with nothing to show.
+
+`delivery_dedupe_key` is UNIQUE, which is what makes at-least-once delivery safe to retry (the
+bot-errors dispatcher discipline). Claiming a result flips `pending → delivering` and bumps the
+attempt counter in one transaction, so two daemon ticks cannot deliver the same row twice.
+
+### 7.4 Delivery honesty (`recovered`, `produced_at`)
+
+A result produced by an orphaned worker and delivered later is, by construction, a statement about
+the past. Section 5 and the alert-ordering findings record what happens when that goes unmarked:
+reachability alerts not revalidated at delivery, digest retries not episode-fenced, a
+clear-before-open leaving an incident falsely open — all cases where a stale delivery read as a
+false claim about *now*.
+
+So the schema records both facts and `describeResultStaleness()` renders them:
+
+| Condition | Prefix |
+|---|---|
+| `recovered = 1` | `[recovered result · produced <age> ago]` — always, with age |
+| age ≥ `STALE_DELIVERY_NOTICE_MS` (5 min) | `[delayed result · produced <age> ago]` |
+| fresh, live parent | *(no qualifier)* |
+
+`recovered` is **derived, never passed in**: it is true exactly when the work had already been
+swept to `orphaned` before finishing. Letting a caller assert it would make it a claim rather than
+an observation.
+
+### 7.5 Re-adoption posture
+
+Orphan detection is **notify-first** by owner ruling (2026-07-24): a detected orphan delivers its
+results and notifies the originating chat, but does **not** auto-spawn an orchestrator to continue
+the work. Fully autonomous re-adoption is a deliberate later decision, not a default.
+
+### 7.6 Staging
+
+- **PR1a (this change)** — migration 46 + `src/core/background-work-store.ts` + tests, including a
+  real `kill -9` test that SIGKILLs a child which registered work, then asserts the registration
+  survived, the sweep marks it orphaned, and a late result is marked `recovered`.
+- **PR1b** (#2279) — registration write-path at the worker spawn sites + the delivery daemon.
+  Until it lands, `src/core/background-work-store.ts` is intentionally unwired and is declared in
+  `TRACKED_UNREACHABLE` (`tests/scripts/orphan-reachability-guard.test.ts`) so the gap stays
+  visible rather than silent.
+- **PR3** — CLI shim so operator-side scripts can register, plus the runbook.

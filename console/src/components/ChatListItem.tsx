@@ -53,9 +53,9 @@ const ChatListItem: FC<ChatListItemProps> = ({ chat, isSelected, onClick, tabInd
         <div className="flex items-center gap-[var(--sp-2)]">
           {isTyping ? (
             <span className="flex items-center text-m-cht gap-[var(--sp-0h)] flex-1 text-data">
-              <span className="typing-dot" style={{ animationDelay: '0ms' }} />
-              <span className="typing-dot" style={{ animationDelay: '150ms' }} />
-              <span className="typing-dot" style={{ animationDelay: '300ms' }} />
+              <span className="typing-dot" />
+              <span className="typing-dot" />
+              <span className="typing-dot" />
               <span className="ml-[var(--sp-1)]">typing</span>
             </span>
           ) : (

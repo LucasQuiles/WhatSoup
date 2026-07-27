@@ -12,3 +12,24 @@
 @import "./styles/tokens.component.css";
 @import "./styles/composites.css";
 @import "./styles/primitives.css";
+/* v3.5 global chrome (T5 b-02) — after primitives so the rail/header register
+   wins over legacy chrome during the cutover. */
+@import "./styles/chrome.css";
+/* v3.5 Fleet surface (T5 b-03) — mockup fleet.html SSOT. */
+@import "./styles/fleet.css";
+/* v3.5 Agents surface (T5 b-04) — mockup agents.html SSOT. */
+@import "./styles/agents.css";
+/* v3.5 Skills Hub surface (T5 b-05) — mockup skills-hub.html SSOT. */
+@import "./styles/skills.css";
+/* v3.5 Dream Lab surface (T5 b-06) — mockup dream-lab.html SSOT. */
+@import "./styles/dream.css";
+/* v3.5 Inbox surface (T5 b-07) — mockup inbox.html SSOT. */
+@import "./styles/inbox.css";
+/* v3.5 Deployments surface (T5 b-08) — mockup deployments.html SSOT. */
+@import "./styles/deploy.css";
+/* v3.5 Settings surface (T5 b-09) — mockup settings.html SSOT. */
+@import "./styles/settings.css";
+/* v3.5 Journey surfaces (T5 b-10) — mockups splash.html + hatch.html SSOT. */
+@import "./styles/journey.css";
+/* v3.5 motion system (T5 b-11) — 13-ceremony-motion §1/§3 formalized. */
+@import "./styles/motion.css";

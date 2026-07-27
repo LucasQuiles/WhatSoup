@@ -92,6 +92,9 @@ jobs:
       - name: Baseline growth guard
         run: npm run guard:baseline-growth
 
+      - name: Catch ratchet drift
+        run: npm run guard:catch-ratchet
+
       - name: Repo hygiene release
         run: npm run guard:repo:release-hygiene
 

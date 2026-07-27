@@ -16,6 +16,7 @@ import type { IncomingMessage, Messenger } from '../../../src/core/types.ts';
 import type { AgentEvent } from '../../../src/runtimes/agent/stream-parser.ts';
 import type { IOutboundQueue } from '../../../src/runtimes/agent/outbound-queue.ts';
 import { createRuntimeTurnContext } from '../../../src/runtimes/agent/runtime-turn-context.ts';
+import { TurnQueue } from '../../../src/runtimes/agent/turn-queue.ts';
 import { createOpenCodeParser } from '../../../src/runtimes/agent/providers/opencode-parser.ts';
 import type {
   MarkSystemTurnInput,
@@ -477,6 +478,12 @@ void _mockQueueTypeCheck; // suppress unused-variable warning
 // ─── Import after mocks ───────────────────────────────────────────────────────
 
 import { AgentRuntime } from '../../../src/runtimes/agent/runtime.ts';
+import {
+  applyRouteChangeAndRecycle,
+  consumePendingRecycleIfIdle,
+  recycleLiveSession,
+  type ModelPinPort,
+} from '../../../src/runtimes/agent/model-pin.ts';
 import { __resetModelCatalogueCacheForTest } from '../../../src/runtimes/agent/model-catalogue-resolver.ts';
 import { providerConfigEffort } from '../../../src/runtimes/agent/reasoning-control.ts';
 import { Database as RealDatabase } from '../../../src/core/database.ts';
@@ -576,6 +583,7 @@ describe('NL routing handlers (nlRouting flag)', () => {
     capturedSessionManagerOptsRef.current = null;
     mockQueue.enqueueText.mockClear();
     mockSession.sendTurn.mockClear();
+    mockSession.shutdown.mockReset().mockResolvedValue(undefined);
     mockSession.getStatus.mockReturnValue({ active: false, pid: null, sessionId: null, startedAt: null, messageCount: 0, lastMessageAt: null });
     // Task G (D14): the shared mock SessionManager is one singleton object
     // reused across every constructor call, so its accessors must track the
@@ -607,6 +615,7 @@ describe('NL routing handlers (nlRouting flag)', () => {
     delete cfgAny().nlRoutingEventsDir;
     delete cfgAny().agentFallbacks;
     delete cfgAny().agentProvider;
+    delete cfgAny().agentProviderDataPolicy;
     delete cfgAny().agentProviderConfig;
     vi.useRealTimers();
     const fs = await import('node:fs');
@@ -626,6 +635,27 @@ describe('NL routing handlers (nlRouting flag)', () => {
     if (cfgAny().nlRouting === true) ensurePrefSchema?.(routingDb);
     return { runtime, sentMessages };
   }
+
+  it('passes a frozen route policy from production turn resolution into SessionManager', async () => {
+    cfgAny().agentProviderDataPolicy = 'trusted';
+    const { runtime } = makeRoutingRuntime();
+
+    await sendAndDrain(runtime, makeMsg({
+      chatJid: CHAT,
+      senderJid: SENDER_A,
+      content: 'hello',
+    }));
+
+    const opts = capturedSessionManagerOptsRef.current as unknown as {
+      routePolicy?: Record<string, unknown>;
+    } | null;
+    expect(opts?.routePolicy).toMatchObject({
+      provider: 'claude-cli',
+      dataPolicy: 'trusted',
+      pinnedProvider: null,
+    });
+    expect(Object.isFrozen(opts?.routePolicy)).toBe(true);
+  });
 
   function allReplies(sentMessages: Array<{ jid: string; text: string }>): string[] {
     return [
@@ -893,7 +923,7 @@ describe('NL routing handlers (nlRouting flag)', () => {
     // `effort` and the diff misses it (returns 'noop').
     describe('Slice 3 — route effort applies to the spawn config + recycle diff', () => {
       type RSPC = { routeSessionProviderConfig: (r: Record<string, unknown>) => Record<string, unknown> | undefined };
-      type ARCR = { applyRouteChangeAndRecycle: (c: string, s: string, m: string | undefined) => string };
+      type ARCR = { applyRouteChangeAndRecycle: (c: string, s: string, m: string | undefined) => Promise<string> };
 
       it('a claude-cli user-pin route carries its effort into providerConfig.effort', () => {
         const { runtime } = makeRoutingRuntime({ model: 'claude-opus-4-8' });
@@ -926,7 +956,7 @@ describe('NL routing handlers (nlRouting flag)', () => {
         expect(cfg?.effort).toBe('high');
       });
 
-      it('the recycle diff detects an effort-only change (same provider+model, different effective effort)', () => {
+      it('the recycle diff detects an effort-only change (same provider+model, different effective effort)', async () => {
         cfgAny().agentProviderConfig = { effort: 'high' };
         const { runtime } = makeRoutingRuntime({ model: 'claude-opus-4-8' });
         // A live session spawned with effort 'high'.
@@ -938,11 +968,11 @@ describe('NL routing handlers (nlRouting flag)', () => {
         (runtime as unknown as { resolveRouteForTurn: (c: string, s?: string) => unknown }).resolveRouteForTurn = () => ({
           provider: 'claude-cli', model: 'claude-opus-4-8', source: 'preference', reasonCode: 'user_pin', effort: 'low', pinnedProvider: null,
         });
-        const outcome = (runtime as unknown as ARCR).applyRouteChangeAndRecycle(CHAT, SENDER_A, undefined);
+        const outcome = await (runtime as unknown as ARCR).applyRouteChangeAndRecycle(CHAT, SENDER_A, undefined);
         expect(outcome).not.toBe('noop');
       });
 
-      it('the recycle diff is a no-op when the effective effort is unchanged (no over-recycle, F3)', () => {
+      it('the recycle diff is a no-op when the effective effort is unchanged (no over-recycle, F3)', async () => {
         cfgAny().agentProviderConfig = { effort: 'high' };
         const { runtime } = makeRoutingRuntime({ model: 'claude-opus-4-8' });
         capturedSessionManagerOptsRef.current = {
@@ -953,7 +983,7 @@ describe('NL routing handlers (nlRouting flag)', () => {
         (runtime as unknown as { resolveRouteForTurn: (c: string, s?: string) => unknown }).resolveRouteForTurn = () => ({
           provider: 'claude-cli', model: 'claude-opus-4-8', source: 'default', reasonCode: 'no_preference', pinnedProvider: null,
         });
-        const outcome = (runtime as unknown as ARCR).applyRouteChangeAndRecycle(CHAT, SENDER_A, undefined);
+        const outcome = await (runtime as unknown as ARCR).applyRouteChangeAndRecycle(CHAT, SENDER_A, undefined);
         expect(outcome).toBe('noop');
       });
     });
@@ -1424,6 +1454,229 @@ describe('NL routing handlers (nlRouting flag)', () => {
       expect(opts?.model).toBe('claude-sonnet-5');
     });
 
+    it('a per-chat route recycle proves shutdown before exact queue/session retirement and success', async () => {
+      const mapKey = CHAT;
+      const chatSessions = new Map([[mapKey, mockSession]]);
+      const chatQueues = new Map([[mapKey, mockQueue as IOutboundQueue]]);
+      const runtimeQueue = {};
+      const captureIdle = vi.fn(() => runtimeQueue);
+      const retireIdle = vi.fn();
+      const deleteOwnedPerChatSession = vi.fn(() => {
+        chatSessions.delete(mapKey);
+        return true;
+      });
+      const cleanupPerChatState = vi.fn();
+      const port = {
+        sessionScope: 'per_chat',
+        chatSessions,
+        chatQueues,
+        runtimeTurnCoordinator: {
+          captureIdlePerChatTurnQueueForRecycle: captureIdle,
+          retireIdlePerChatTurnQueueForRecycle: retireIdle,
+        },
+        deleteOwnedPerChatSession,
+        cleanupPerChatState,
+      } as unknown as ModelPinPort;
+
+      mockSession.shutdown.mockClear();
+      await recycleLiveSession(port, mapKey, mockSession as never);
+
+      expect(captureIdle).toHaveBeenCalledWith(mapKey);
+      expect(retireIdle).toHaveBeenCalledWith(mapKey, runtimeQueue);
+      expect(deleteOwnedPerChatSession).toHaveBeenCalledWith(mapKey, mockSession);
+      expect(cleanupPerChatState).toHaveBeenCalledWith(mapKey);
+      expect(chatQueues.has(mapKey)).toBe(false);
+      expect(mockSession.shutdown).toHaveBeenCalledWith(false);
+    });
+
+    it('a per-chat route recycle retains ownership and does not report success when idle proof fails', async () => {
+      const mapKey = CHAT;
+      const chatSessions = new Map([[mapKey, mockSession]]);
+      const chatQueues = new Map([[mapKey, mockQueue as IOutboundQueue]]);
+      const proofError = new Error('runtime queue is not idle');
+      const deleteOwnedPerChatSession = vi.fn(() => true);
+      const cleanupPerChatState = vi.fn();
+      const port = {
+        sessionScope: 'per_chat',
+        chatSessions,
+        chatQueues,
+        runtimeTurnCoordinator: {
+          captureIdlePerChatTurnQueueForRecycle: vi.fn(() => {
+            throw proofError;
+          }),
+          retireIdlePerChatTurnQueueForRecycle: vi.fn(),
+        },
+        deleteOwnedPerChatSession,
+        cleanupPerChatState,
+      } as unknown as ModelPinPort;
+
+      mockSession.shutdown.mockClear();
+
+      await expect(recycleLiveSession(port, mapKey, mockSession as never)).rejects.toThrow(proofError);
+      expect(chatSessions.get(mapKey)).toBe(mockSession);
+      expect(chatQueues.get(mapKey)).toBe(mockQueue);
+      expect(deleteOwnedPerChatSession).not.toHaveBeenCalled();
+      expect(cleanupPerChatState).not.toHaveBeenCalled();
+      expect(mockSession.shutdown).not.toHaveBeenCalled();
+    });
+
+    it('retains the exact per-chat owner and queue when process-tree shutdown fails', async () => {
+      const mapKey = CHAT;
+      const chatSessions = new Map([[mapKey, mockSession]]);
+      const chatQueues = new Map([[mapKey, mockQueue as IOutboundQueue]]);
+      const runtimeQueue = {};
+      const retireIdle = vi.fn();
+      const deleteOwnedPerChatSession = vi.fn(() => true);
+      const cleanupPerChatState = vi.fn();
+      const port = {
+        sessionScope: 'per_chat',
+        chatSessions,
+        chatQueues,
+        runtimeTurnCoordinator: {
+          captureIdlePerChatTurnQueueForRecycle: vi.fn(() => runtimeQueue),
+          retireIdlePerChatTurnQueueForRecycle: retireIdle,
+        },
+        deleteOwnedPerChatSession,
+        cleanupPerChatState,
+      } as unknown as ModelPinPort;
+      mockSession.shutdown.mockRejectedValueOnce(new Error('tree still live'));
+
+      await expect(recycleLiveSession(port, mapKey, mockSession as never))
+        .rejects.toThrow('tree still live');
+
+      expect(chatSessions.get(mapKey)).toBe(mockSession);
+      expect(chatQueues.get(mapKey)).toBe(mockQueue);
+      expect(retireIdle).not.toHaveBeenCalled();
+      expect(deleteOwnedPerChatSession).not.toHaveBeenCalled();
+      expect(cleanupPerChatState).not.toHaveBeenCalled();
+    });
+
+    it('retains global ownership when process-tree shutdown fails', async () => {
+      const cleanupGlobalAutoCompactState = vi.fn();
+      const operationTracker = { shutdown: vi.fn() };
+      const port = {
+        sessionScope: 'single',
+        session: mockSession,
+        queue: mockQueue,
+        activeChatJid: CHAT,
+        operationTracker,
+        getActiveQueue: () => mockQueue,
+        cleanupGlobalAutoCompactState,
+      } as unknown as ModelPinPort;
+      mockSession.shutdown.mockRejectedValueOnce(new Error('global tree still live'));
+
+      await expect(recycleLiveSession(port, undefined, mockSession as never))
+        .rejects.toThrow('global tree still live');
+
+      expect(port.session).toBe(mockSession);
+      expect(port.queue).toBe(mockQueue);
+      expect(port.activeChatJid).toBe(CHAT);
+      expect(port.operationTracker).toBe(operationTracker);
+      expect(operationTracker.shutdown).not.toHaveBeenCalled();
+      expect(cleanupGlobalAutoCompactState).not.toHaveBeenCalled();
+    });
+
+    it('makes the next inbound join an in-progress recycle instead of admitting a successor', async () => {
+      let releaseShutdown!: () => void;
+      const shutdownBlocked = new Promise<void>((resolve) => {
+        releaseShutdown = resolve;
+      });
+      mockSession.shutdown.mockImplementationOnce(async () => {
+        await shutdownBlocked;
+      });
+      const pendingRecycle = new Set<string>();
+      const recyclePromises = new Map<string, Promise<void>>();
+      const recycleOwners = new Map();
+      const recycleFailures = new Map();
+      const port = {
+        sessionScope: 'single',
+        session: mockSession,
+        queue: mockQueue,
+        activeChatJid: CHAT,
+        operationTracker: null,
+        pendingRecycle,
+        recyclePromises,
+        recycleOwners,
+        recycleFailures,
+        chatSessions: new Map(),
+        chatQueues: new Map(),
+        resolveRouteForTurn: () => ({
+          provider: 'claude-cli',
+          model: 'claude-sonnet-5',
+          pinnedProvider: null,
+        }),
+        routeSessionProviderConfig: () => undefined,
+        isTurnInFlight: () => false,
+        getActiveQueue: () => mockQueue,
+        cleanupGlobalAutoCompactState: vi.fn(),
+      } as unknown as ModelPinPort;
+
+      const pinRecycle = applyRouteChangeAndRecycle(port, CHAT, SENDER_A, undefined);
+      const nextInbound = consumePendingRecycleIfIdle(port, '__global__');
+      await Promise.resolve();
+
+      expect(mockSession.shutdown).toHaveBeenCalledTimes(1);
+      expect(port.session).toBe(mockSession);
+      expect(port.queue).toBe(mockQueue);
+      expect(pendingRecycle.has('__global__')).toBe(true);
+
+      releaseShutdown();
+      await expect(pinRecycle).resolves.toBe('recycled');
+      await expect(nextInbound).resolves.toBeUndefined();
+      expect({
+        session: port.session,
+        queue: port.queue,
+        pending: pendingRecycle.has('__global__'),
+        inProgress: recyclePromises.has('__global__'),
+        owner: recycleOwners.get('__global__') ?? null,
+        failure: recycleFailures.get('__global__') ?? null,
+      }).toEqual({
+        session: null,
+        queue: null,
+        pending: false,
+        inProgress: false,
+        owner: null,
+        failure: null,
+      });
+    });
+
+    it('does not clobber a successor installed by a stale per-chat callback during shutdown', async () => {
+      const mapKey = CHAT;
+      const replacementSession = { ...mockSession };
+      const replacementQueue = { ...mockQueue } as IOutboundQueue;
+      const chatSessions = new Map([[mapKey, mockSession]]);
+      const chatQueues = new Map([[mapKey, mockQueue as IOutboundQueue]]);
+      const runtimeQueue = {};
+      let releaseShutdown!: () => void;
+      mockSession.shutdown.mockImplementationOnce(() => new Promise<void>((resolve) => {
+        releaseShutdown = resolve;
+      }));
+      const deleteOwnedPerChatSession = vi.fn(() => true);
+      const cleanupPerChatState = vi.fn();
+      const port = {
+        sessionScope: 'per_chat',
+        chatSessions,
+        chatQueues,
+        runtimeTurnCoordinator: {
+          captureIdlePerChatTurnQueueForRecycle: vi.fn(() => runtimeQueue),
+          retireIdlePerChatTurnQueueForRecycle: vi.fn(),
+        },
+        deleteOwnedPerChatSession,
+        cleanupPerChatState,
+      } as unknown as ModelPinPort;
+
+      const recycle = recycleLiveSession(port, mapKey, mockSession as never);
+      chatSessions.set(mapKey, replacementSession as never);
+      chatQueues.set(mapKey, replacementQueue);
+      releaseShutdown();
+
+      await expect(recycle).rejects.toThrow(/ownership changed during route recycle/i);
+      expect(chatSessions.get(mapKey)).toBe(replacementSession);
+      expect(chatQueues.get(mapKey)).toBe(replacementQueue);
+      expect(deleteOwnedPerChatSession).not.toHaveBeenCalled();
+      expect(cleanupPerChatState).not.toHaveBeenCalled();
+    });
+
     it('pinning the SAME route the live session is already on does not recycle (diff-gate no-op)', async () => {
       // Entry 1 in the numbered snapshot IS the live session's own route
       // (claude-cli/claude-opus-4-8, the configured primary) — a genuine
@@ -1571,12 +1824,12 @@ describe('NL routing handlers (nlRouting flag)', () => {
       expect(opts?.model).toBe('claude-opus-4-8');
     });
 
-    it('no live session at pin time is a no-op — nothing to recycle, the next spawn reads the pin regardless', () => {
+    it('no live session at pin time is a no-op — nothing to recycle, the next spawn reads the pin regardless', async () => {
       const runtime = new AgentRuntime(routingDb, makeMessenger().messenger, 'test');
       const outcome = (runtime as unknown as {
-        applyRouteChangeAndRecycle: (chatJid: string, senderJid: string, mapKey: string | undefined) => string;
+        applyRouteChangeAndRecycle: (chatJid: string, senderJid: string, mapKey: string | undefined) => Promise<string>;
       }).applyRouteChangeAndRecycle(CHAT, SENDER_A, undefined);
-      expect(outcome).toBe('noop');
+      await expect(outcome).resolves.toBe('noop');
     });
 
     // IMPORTANT 1 (final-review): a group re-confirm's 'refreshed'/

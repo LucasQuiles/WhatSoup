@@ -1077,6 +1077,100 @@ sqlite3 $DB \
    FROM session_checkpoints ORDER BY updated_at DESC LIMIT 10;"
 ```
 
+#### Audit an independent continuity manifest (read-only)
+
+Receiver-local health and an empty durability queue cannot prove that a linked client received
+messages sent while it was disconnected. Before any catch-up send or database mutation, compare a
+bounded receipt manifest exported from an independently authenticated participant history:
+
+```bash
+chmod 600 continuity-manifest.json
+npm run audit-continuity-manifest -- \
+  --db "$DB" \
+  --manifest continuity-manifest.json
+```
+
+The version-1 manifest is strict JSON:
+
+```json
+{
+  "schemaVersion": 1,
+  "source": "independent_participant_history",
+  "manifestId": "operator-defined-opaque-id",
+  "evidenceRef": "operator-defined-private-reference",
+  "destination": {
+    "conversationKey": "exact-private-conversation-key",
+    "channelFingerprint": "0000000000000000000000000000000000000000000000000000000000000000"
+  },
+  "receipts": [
+    {
+      "ordinal": 1,
+      "messageId": "exact-private-source-message-id",
+      "sentAt": 1750000001,
+      "senderFingerprint": "1111111111111111111111111111111111111111111111111111111111111111",
+      "contentHash": "2222222222222222222222222222222222222222222222222222222222222222",
+      "contentType": "text"
+    }
+  ]
+}
+```
+
+Fingerprints are lowercase SHA-256 digests of the exact UTF-8 channel or sender identifier.
+`contentHash` is the lowercase SHA-256 digest of the exact local comparison text
+(`content_text`, else `content`, else the empty string). Ordinals must be contiguous from one;
+receipts are capped at 200 and the manifest at 1 MiB. The manifest can contain private identifiers,
+so the command rejects group- or world-readable files.
+
+The command opens an existing database read-only, requires contiguous schema-43-or-newer receipts
+and the canonical delivery-proof view, and never creates, migrates, sends, replays, or writes. Its
+JSON output contains only receipt ordinals, bounded classifications/actions, and counts:
+
+- `present_answered`: exact local message and admission plus echoed/corroborated reply proof;
+- `present_unanswered`: exact admission but no reply proof; use the existing inbound recovery lane;
+- `observed_not_admitted`: exact message history exists but no inbound admission; operator catch-up
+  is required;
+- `absent`: neither receiver history nor admission contains the receipt; operator catch-up is
+  required;
+- `ambiguous`: local identity or provenance does not exactly match; stop for manual review.
+
+Exit `0` means every receipt is `present_answered`. Exit `2` means a continuity gap or ambiguity was
+detected. Exit `1` means the audit itself failed. Do not treat exit `2` as a command failure or
+blindly send every listed row: use the per-row action to keep already-admitted work on the durable
+recovery mechanism and missing work on the provenance-labeled operator catch-up mechanism.
+
+To make a confirmed dry-run gap visible across restarts and in health, rerun the same manifest
+through the explicit recorder:
+
+```bash
+npm run record-continuity-manifest -- \
+  --db "$DB" \
+  --manifest continuity-manifest.json \
+  --confirm-record
+```
+
+The recorder first acquires the database writer reservation, then repeats the exact audit and
+persists only `absent`, `observed_not_admitted`, and `ambiguous` receipts. It writes deterministic
+fingerprints and bounded taxonomy into the existing recovery ledger; it never stores raw message,
+destination, manifest, or evidence values. Repeating the command is idempotent. Its JSON output
+contains only audit counts plus created/existing/unresolved/ambiguous ledger counts.
+
+After recording, `/health` remains `degraded` with `continuity_gap_open` and a content-free
+`continuity` block:
+
+```json
+{
+  "readable": true,
+  "open": 3,
+  "unresolved": 2,
+  "ambiguous": 1
+}
+```
+
+If the ledger cannot be parsed exactly, health fails closed with `continuity_gap_unreadable`.
+Recording does not send, replay, synthesize an inbound, or close a gap. Do not edit the recovery
+rows to force green health; controlled catch-up and terminal closure require a later proof-bound
+mechanism.
+
 #### Close a proven operator catch-up recovery (exact schema 43 only)
 
 This command records that a newer, independently delivered operator catch-up supersedes an exact set

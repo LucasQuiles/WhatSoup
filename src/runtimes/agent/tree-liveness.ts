@@ -3,12 +3,11 @@
 //
 // The stalled-operation kill and the hard turn watchdog both infer "hung" from
 // stream silence: no stream-json events for N minutes ⇒ kill. That premise is
-// false for long single tool calls — heavy browser automation (LCPtracker /
-// QuickBooks Time runs), long bash steps, or big MCP operations block the
+// false for long single tool calls: browser automation, long shell steps, or
+// tool-protocol operations can block the
 // provider's event stream for far longer than any fixed threshold while the
 // process tree underneath is doing real work. Killing on stream silence alone
-// SIGKILLs healthy jobs mid-run (heal classes crash__signal_SIGKILL_exit_none /
-// crash__signal_none_exit_143 on ana-bot, 2026-07-16..20).
+// can terminate healthy jobs mid-run.
 //
 // This module gives those kill paths a second signal: cumulative CPU time of
 // the provider's process tree, sampled twice across a short window. A tree
@@ -50,18 +49,18 @@ export const TREE_LIVENESS_WINDOW_MS = 5_000;
 /** Minimum CPU delta across the window that counts as "working". */
 export const TREE_LIVENESS_MIN_CPU_DELTA_MS = 200;
 
-function execPs(args: string[]): Promise<string> {
+function execPs(args: string[]): Promise<string | null> {
   return new Promise((resolve) => {
     execFile('ps', args, { timeout: 4_000 }, (err, stdout) => {
-      // ps exits 1 when every listed pid is gone — treat as empty, not error.
-      resolve(err && !stdout ? '' : stdout);
+      resolve(err ? null : stdout);
     });
   });
 }
 
 /** Enumerate rootPid's descendant tree (root included) via a full pid/ppid census. */
-async function listTreePids(rootPid: number): Promise<number[]> {
+async function listTreePids(rootPid: number): Promise<number[] | null> {
   const out = await execPs(['-axo', 'pid=,ppid=']);
+  if (out === null) return null;
   const children = new Map<number, number[]>();
   for (const line of out.split('\n')) {
     const m = line.trim().match(/^(\d+)\s+(\d+)$/);
@@ -102,8 +101,9 @@ export function parsePsTimeMs(raw: string): number | null {
  */
 export async function sampleTreeCpuMs(rootPid: number): Promise<TreeCpuSample | null> {
   const pids = await listTreePids(rootPid);
-  if (pids.length === 0) return null;
+  if (pids === null || pids.length === 0) return null;
   const out = await execPs(['-o', 'time=', '-p', pids.join(',')]);
+  if (out === null) return null;
   let cpuMs = 0;
   let parsed = 0;
   for (const line of out.split('\n')) {

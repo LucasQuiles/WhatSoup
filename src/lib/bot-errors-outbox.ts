@@ -292,6 +292,109 @@ export function botErrorsOutboxDir(): string {
   return process.env['BOT_ERRORS_OUTBOX_DIR'] ?? join(stateDir(), 'outbox');
 }
 
+/**
+ * Strong test-runner signals, mirroring `STRONG_TEST_SIGNAL_KEYS` in
+ * `deploy/scripts/bot-errors-emit.py` and `deploy/hooks/post-tool-use-log.mjs`.
+ *
+ * `VITEST_POOL_ID` is present here but absent from the two sibling producers
+ * because `runningUnderVitest()` above already treats it as a vitest signal for
+ * *routing*. Omitting it would let a worker that sets only `VITEST_POOL_ID`
+ * route into the isolated test state tree while still reporting `test: false` —
+ * the exact split this stamp exists to prevent. The list is therefore a strict
+ * superset, never a subset, of the shared four.
+ */
+const STRONG_TEST_SIGNAL_KEYS = [
+  'VITEST',
+  'VITEST_POOL_ID',
+  'VITEST_WORKER_ID',
+  'JEST_WORKER_ID',
+  'PYTEST_CURRENT_TEST',
+] as const;
+
+function envValue(key: string): string | undefined {
+  const value = process.env[key];
+  return value !== undefined && value.trim().length > 0 ? value : undefined;
+}
+
+function strongTestSignals(): string[] {
+  return STRONG_TEST_SIGNAL_KEYS.filter((key) => envValue(key) !== undefined);
+}
+
+function provenanceSignals(): string[] {
+  const signals = strongTestSignals();
+  if ((process.env['NODE_ENV'] ?? '').trim().toLowerCase() === 'test') signals.push('NODE_ENV');
+  return [...new Set(signals)].sort();
+}
+
+/**
+ * Which branch of `stateDir()` / `botErrorsOutboxDir()` actually decided this
+ * process's queue. Values match the `policy` strings emitted by the Python and
+ * hook producers so a dispatcher-side audit reads one vocabulary.
+ *
+ * There is no `test-redirect` here: that policy belongs to the sibling
+ * producers, which re-point an already-live path when strong signals are
+ * present. This module reaches the same end state earlier, via
+ * `vitestStateDir()`, and its escape hatch is `BOT_ERRORS_ALLOW_LIVE_IN_TESTS`.
+ */
+function outboxPolicy(): 'explicit-outbox' | 'explicit-state' | 'test-default' | 'default' {
+  if (process.env['BOT_ERRORS_OUTBOX_DIR'] !== undefined) return 'explicit-outbox';
+  if (process.env['BOT_ERRORS_STATE_DIR'] !== undefined) return 'explicit-state';
+  if (vitestStateDir() !== null) return 'test-default';
+  return 'default';
+}
+
+/**
+ * Producer provenance for the BOT ERRORS dispatcher's test-traffic backstop
+ * (`is_test_provenance_event` in `deploy/scripts/bot-errors-dispatcher.py`,
+ * which screens on `runtime.provenance.test === true`).
+ *
+ * Until this existed, TypeScript was the only one of the repo's event builders
+ * that emitted no provenance, so TypeScript-shaped verifier and falsifier
+ * traffic reached the dispatcher indistinguishable from a genuine incident.
+ *
+ * `resolvedOutbox` intentionally repeats `diagnostics.queue`: both sibling
+ * producers carry it inside provenance, and a provenance record that cannot be
+ * audited without cross-referencing a second branch of the event is worth less
+ * than one duplicated path field.
+ *
+ * `BOT_ERRORS_ALLOW_LIVE_IN_TESTS` deliberately does NOT clear `test`. That
+ * hatch governs routing — it sends a runner process's events to the live queue
+ * instead of the sandbox — and attestation must not follow it: a runner process
+ * writing to the live queue is exactly the combination the dispatcher backstop
+ * exists to refuse. This does change behaviour for that hatch: such an event
+ * previously reached delivery and now reaches suppressed audit state.
+ *
+ * Not covered: the legacy fallback in `emit-alert.ts`, which spawns a helper
+ * with raw CLI arguments when the outbox write throws. It builds no event, so
+ * it carries no provenance and cannot reach the dispatcher screen at all.
+ */
+export function botErrorsRuntimeProvenance(): {
+  producer: string;
+  test: boolean;
+  signals: string[];
+  strongSignals: string[];
+  outboxPolicy: string;
+  liveOutboxRedirected: boolean;
+  resolvedOutbox: string;
+} {
+  const strongSignals = strongTestSignals();
+  const policy = outboxPolicy();
+  return {
+    producer: 'typescript-outbox',
+    test: strongSignals.length > 0,
+    signals: provenanceSignals(),
+    strongSignals,
+    outboxPolicy: policy,
+    // True exactly when the vitest state tree diverted this process off the
+    // live home-based default. Derivable from `outboxPolicy` today; carried
+    // explicitly because the sibling producers do, and a consumer should not
+    // have to know each producer's policy vocabulary to answer "was this
+    // steered away from the live queue?".
+    liveOutboxRedirected: policy === 'test-default',
+    resolvedOutbox: botErrorsOutboxDir(),
+  };
+}
+
 function hostPlatform(): string {
   return process.env['BOT_ERRORS_DRY_PLATFORM'] ?? platform();
 }
@@ -449,6 +552,7 @@ export function buildBotErrorsEvent(input: BotErrorsOutboxInput, eventId = rando
       envKeys: relevantEnvKeys(),
       invocationId: process.env['INVOCATION_ID'] ?? null,
       systemdExecPid: process.env['SYSTEMD_EXEC_PID'] ?? null,
+      provenance: botErrorsRuntimeProvenance(),
     },
     diagnostics: {
       logHints: logHints(instance),

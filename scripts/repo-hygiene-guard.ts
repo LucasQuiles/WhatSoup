@@ -5,6 +5,7 @@ import { pathToFileURL } from 'node:url';
 import {
   git,
   isDocumentationEmailFixture,
+  isGitHubSshTransportPrincipal,
   isOperationalProtocolToken,
   normalizeRepoPath,
   operationalReleaseHygieneFiles,
@@ -182,6 +183,7 @@ const disallowedCommitAuthorPatterns: GuardPattern[] = [
 export function isAllowedPatternMatch(filePath: string, code: string, token: string): boolean {
   if (allowedEnvVarNameToken.test(token)) return true;
   if (code === 'personal-email' && allowedMessagingAddressRhs.test(token)) return true;
+  if (code === 'personal-email' && isGitHubSshTransportPrincipal(token)) return true;
   // File content only. scanCommitMessage scans with an empty filePath, and a commit
   // message never legitimately carries an email fixture — so the documentation-domain
   // allowance must not reach it, or history text would silently gain an email escape.
@@ -222,6 +224,10 @@ const srcConsoleAllowedFiles = new Set([
   'src/config.ts',
   'src/fleet/standalone.ts',
   'src/transport/auth.ts',
+  // T5 b-12: the perf meter is itself the diagnostics surface (19-§2
+  // runtime instrumentation); its sampled notes go to the dev console by
+  // design, and the structured logger is server-side only.
+  'console/src/lib/perf.ts',
 ]);
 
 export const projectedFileSecretPatternCodes = [
@@ -272,7 +278,7 @@ const addedLinePatterns: GuardPattern[] = [
   {
     code: 'personal-email',
     message: 'Public repo text must not include personal email addresses.',
-    regex: /\b[A-Z0-9._%+-]+@(?!(?:users\.noreply\.github\.com|github\.com|s\.whatsapp\.net|g\.us|heal\.internal)\b)[A-Z0-9.-]+\.[A-Z]{2,}\b/i,
+    regex: /\b[A-Z0-9._%+-]+@(?!(?:users\.noreply\.github\.com|s\.whatsapp\.net|g\.us|heal\.internal)\b)[A-Z0-9.-]+\.[A-Z]{2,}\b/i,
   },
   {
     code: 'local-home-path',

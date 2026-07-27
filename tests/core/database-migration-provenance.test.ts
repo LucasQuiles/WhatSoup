@@ -39,7 +39,7 @@ describe('deployed schema migration provenance', () => {
     db = new Database(':memory:');
     db.open();
 
-    expect(CURRENT_SCHEMA_MIGRATION).toBe(45);
+    expect(CURRENT_SCHEMA_MIGRATION).toBe(47);
     expect(db.raw.prepare(`
       SELECT version FROM schema_migrations WHERE version IN (41, 42, 43) ORDER BY version
     `).all()).toEqual([{ version: 41 }, { version: 42 }, { version: 43 }]);

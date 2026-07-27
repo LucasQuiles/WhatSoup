@@ -6,6 +6,10 @@ import { lookupCredential } from '../lib/keyring.ts';
 import { createChildLogger } from '../logger.ts';
 import { CURRENT_SCHEMA_MIGRATION, type Database } from './database.ts';
 import { readArcBindingHealth } from './arc-binding-health.ts';
+import {
+  readContinuityGapHealth,
+  type ContinuityGapHealth,
+} from './continuity-gap-ledger.ts';
 import { assertSafeHealthBind } from './health-bind-guard.ts';
 import { getMessageCount } from './messages.ts';
 import { getPendingCount, upsertAccess } from './access-list.ts';
@@ -205,10 +209,78 @@ export const HEALTH_TURN_ERROR_CLASSES = new Set([
   'model-unavailable',
   'policy-block',
   'context-overflow',
-  'server-error', 'transient-network',   // W1-T6: were missing → last_turn_error_class nulled on /health
+  'server-error',
+  'transient-network',
   'unknown-terminal',
   'empty-output',
 ]);
+
+export type HealthDegradationCause =
+  | 'provider_fallback_active'
+  | 'fallback_chain_exhausted'
+  | 'fallback_entry_failures'
+  | 'primary_model_unusable'
+  | 'model_unusable'
+  | 'turn_capability_error'
+  | 'primary_model_evidence_stale'
+  | 'turn_capability_evidence_stale'
+  | 'auth_bond_degraded'
+  | 'transport_disconnected'
+  | 'enrichment_stale'
+  | 'enrichment_runtime_degraded'
+  | 'connection_churn'
+  | 'outbound_flood'
+  | 'event_loop_starved'
+  | 'durability_debt'
+  | 'continuity_gap_unreadable'
+  | 'continuity_gap_open'
+  | 'schema_future'
+  | 'schema_not_ready'
+  | 'pending_polls_unreadable'
+  | 'agent_recent_crashes'
+  | 'agent_session_inactive'
+  | 'turn_finalization_degraded'
+  | 'turn_recovery_degraded'
+  | 'provider_execution_pressure'
+  | 'agent_runtime_degraded_unclassified'
+  | 'agent_runtime_unhealthy'
+  | 'unclassified';
+
+const HEALTH_DEGRADATION_CAUSE_PRESENCE: Readonly<Record<HealthDegradationCause, true>> = {
+  provider_fallback_active: true,
+  fallback_chain_exhausted: true,
+  fallback_entry_failures: true,
+  primary_model_unusable: true,
+  model_unusable: true,
+  turn_capability_error: true,
+  primary_model_evidence_stale: true,
+  turn_capability_evidence_stale: true,
+  auth_bond_degraded: true,
+  transport_disconnected: true,
+  enrichment_stale: true,
+  enrichment_runtime_degraded: true,
+  connection_churn: true,
+  outbound_flood: true,
+  event_loop_starved: true,
+  durability_debt: true,
+  continuity_gap_unreadable: true,
+  continuity_gap_open: true,
+  schema_future: true,
+  schema_not_ready: true,
+  pending_polls_unreadable: true,
+  agent_recent_crashes: true,
+  agent_session_inactive: true,
+  turn_finalization_degraded: true,
+  turn_recovery_degraded: true,
+  provider_execution_pressure: true,
+  agent_runtime_degraded_unclassified: true,
+  agent_runtime_unhealthy: true,
+  unclassified: true,
+};
+
+export const HEALTH_DEGRADATION_CAUSES = Object.freeze(
+  Object.keys(HEALTH_DEGRADATION_CAUSE_PRESENCE),
+) as readonly HealthDegradationCause[];
 
 function latestSuccessfulOutboundSend(deps: HealthDeps): LatestSuccessfulOutboundSend {
   return safeDbQuery(
@@ -1327,6 +1399,22 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
       const durabilityDebtIsDegraded =
         Number.isFinite(oldestMaybeSentMs)
         && Date.now() - oldestMaybeSentMs > DURABILITY_STALE_MAYBE_SENT_MS;
+      const continuity = safeDbQuery<ContinuityGapHealth | {
+        readable: false;
+        open: number;
+        unresolved: number;
+        ambiguous: number;
+      }>(
+        () => readContinuityGapHealth(deps.db.raw),
+        {
+          readable: false as const,
+          open: 0,
+          unresolved: 0,
+          ambiguous: 0,
+        },
+        'failed to read continuity gap ledger',
+      );
+      const continuityIsDegraded = !continuity.readable || continuity.open > 0;
 
       let status: 'healthy' | 'degraded' | 'unhealthy';
       if (authFailureIsUnhealthy) {
@@ -1345,7 +1433,8 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
         agentRuntimeStatus === 'degraded' ||
         turnCapabilityIsDegraded ||
         loopLag.locallyStarved ||
-        durabilityDebtIsDegraded
+        durabilityDebtIsDegraded ||
+        continuityIsDegraded
       ) {
         status = 'degraded';
       } else {
@@ -1462,8 +1551,8 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
         }
       }
 
-      const degradationCauses: string[] = [];
-      const addDegradationCause = (cause: string): void => {
+      const degradationCauses: HealthDegradationCause[] = [];
+      const addDegradationCause = (cause: HealthDegradationCause): void => {
         if (!degradationCauses.includes(cause)) degradationCauses.push(cause);
       };
       const fallbackWindowActive =
@@ -1501,6 +1590,8 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
       if (outboundFloodIsDegraded) addDegradationCause('outbound_flood');
       if (loopLag.locallyStarved) addDegradationCause('event_loop_starved');
       if (durabilityDebtIsDegraded) addDegradationCause('durability_debt');
+      if (!continuity.readable) addDegradationCause('continuity_gap_unreadable');
+      else if (continuity.open > 0) addDegradationCause('continuity_gap_open');
       if (schemaIsFuture) addDegradationCause('schema_future');
       else if (!schemaReady) addDegradationCause('schema_not_ready');
       if (!pendingPollsReadable) addDegradationCause('pending_polls_unreadable');
@@ -1660,6 +1751,7 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
         },
         model_advisories: getModelAdvisories(),
         durability: durabilityStats,
+        continuity,
         // Q control-peer wiring. The heal_delivery_unavailable critical latches
         // to one emission per process; this counter is where the suppressed
         // occurrences are visible afterward (see emitHealReport in heal.ts).

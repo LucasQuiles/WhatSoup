@@ -81,8 +81,8 @@ export class OutboundIdentityError extends Error {
 /**
  * Call-site helper: run the guard, audit every non-allow decision, and throw on
  * block. Synchronous (node:sqlite is sync). A store read failure is retried once
- * (node:sqlite's busy_timeout already waited up to 5s, so one more attempt covers
- * a checkpoint-truncate blip); only if the retry also throws does it fail open
+ * (node:sqlite's shared busy-timeout window already elapsed, so one more attempt
+ * covers a checkpoint-truncate blip); only if the retry also throws does it fail open
  * with a loud STORE_UNAVAILABLE audit. A cold target is blocked only on a
  * SUCCESSFUL read — a transient DB blip never becomes a blocked send.
  */
@@ -97,7 +97,7 @@ export function applyOutboundIdentityGuard(
     try {
       decision = assertOutboundIdentity(chatJid, opts, store);
     } catch {
-      // node:sqlite busy_timeout already waited up to 5s; one more attempt
+      // node:sqlite's shared busy-timeout window already elapsed; one more attempt
       // covers a checkpoint-truncate blip. Persistent failure → fail open.
       decision = assertOutboundIdentity(chatJid, opts, store);
     }

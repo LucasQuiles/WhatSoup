@@ -9,6 +9,11 @@ BIN_DIR="$HOME/.local/bin"
 SYSTEMD_DIR="$HOME/.config/systemd/user"
 PLATFORM="$(uname -s)"
 
+# Credential-store probes must be bounded on BOTH platforms; `timeout(1)` is not
+# present on stock macOS (see deploy/lib/bounded-exec.sh).
+# shellcheck source=deploy/lib/bounded-exec.sh
+. "$REPO_ROOT/deploy/lib/bounded-exec.sh"
+
 LAUNCH_AGENTS_DIR="$HOME/Library/LaunchAgents"
 LAUNCHD_TIMER_LABELS=(
   "com.whatsoup.harness-maintenance"
@@ -426,7 +431,7 @@ if [ "$PLATFORM" = "Darwin" ]; then
   check_key() {
     local service="$1"
     local required="$2"
-    if security find-generic-password -s "$service" -a "$USER" -w &>/dev/null; then
+    if whatsoup_run_bounded 3 security find-generic-password -s "$service" -a "$USER" -w &>/dev/null; then
       echo "  ✓ $service key found in macOS Keychain"
     elif [ "$required" = "required" ]; then
       echo "  ✗ $service key missing — run: security add-generic-password -s $service -a \"\$USER\" -w"
@@ -446,7 +451,7 @@ else
     check_key() {
       local service="$1"
       local required="$2"
-      if secret-tool lookup service "$service" &>/dev/null; then
+      if whatsoup_run_bounded 3 secret-tool lookup service "$service" &>/dev/null; then
         echo "  ✓ $service key found in keyring"
       elif [ "$required" = "required" ]; then
         echo "  ✗ $service key missing — run: secret-tool store --label='$service' service $service"

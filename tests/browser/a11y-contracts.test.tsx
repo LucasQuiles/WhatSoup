@@ -30,7 +30,10 @@ vi.mock('../../console/src/hooks/use-console-session', () => ({
 }));
 
 vi.mock('../../console/src/hooks/use-fleet', () => ({
-  useLines: () => ({ data: [] }),
+  // One fixture line: a zero-line fleet is genuinely first-run (T5 b-10
+  // redirects / → /welcome), which is correct behavior this suite is not
+  // about — the landmark law is pinned per-route on a normal fleet.
+  useLines: () => ({ data: [{ name: 'support', status: 'online', mode: 'chat', unread: 0 }] }),
 }));
 
 vi.mock('../../console/src/hooks/use-update-check', () => ({
@@ -63,8 +66,40 @@ vi.mock('../../console/src/pages/Inbox', () => ({
   default: () => <section aria-label="Inbox route"><h1>Inbox</h1></section>,
 }));
 
+// Deployments graduated from the stub at T5 b-08: mocked here with the same
+// landmark-shaped sentinel so the app-shell law stays pinned per-route.
+vi.mock('../../console/src/pages/Deployments', () => ({
+  default: () => <section aria-label="Deployments route"><h1>Deployments</h1></section>,
+}));
+
+// Settings graduated from the stub at T5 b-09: same landmark-shaped sentinel.
+vi.mock('../../console/src/pages/Settings', () => ({
+  default: () => <section aria-label="Settings route"><h1>Settings</h1></section>,
+}));
+
 vi.mock('../../console/src/pages/Operator', () => ({
   default: () => <section aria-label="Ops route"><h1>Ops</h1></section>,
+}));
+
+// T5 b-04: /agents graduated off SurfaceStub onto the real surface — mock it
+// like the other graduated pages (landmark law is pinned app-shell-wide; the
+// surface's own contracts live in tests/console/agents.test.tsx).
+vi.mock('../../console/src/pages/Agents', () => ({
+  default: () => <section aria-label="Agents route"><h1>Agents</h1></section>,
+}));
+
+// T5 b-05: /skills graduated off SurfaceStub onto the real surface — mock it
+// like the other graduated pages (landmark law is pinned app-shell-wide; the
+// surface's own contracts live in tests/console/skills-hub.test.tsx).
+vi.mock('../../console/src/pages/SkillsHub', () => ({
+  default: () => <section aria-label="Skills Hub route"><h1>Skills Hub</h1></section>,
+}));
+
+// T5 b-06: /dream-lab graduated off SurfaceStub onto the real surface — mock
+// it like the other graduated pages (landmark law is pinned app-shell-wide;
+// the surface's own contracts live in tests/console/dream-lab.test.tsx).
+vi.mock('../../console/src/pages/DreamLab', () => ({
+  default: () => <section aria-label="Dream Lab route"><h1>Dream Lab</h1></section>,
 }));
 
 // ChatPicker reaches lib/api for async contact search. Stub it so the browser
@@ -137,6 +172,11 @@ describe('D1.3 App-shell landmark contract', () => {
     ['Line detail', '/lines/support'],
     ['Inbox', '/inbox'],
     ['Ops', '/ops'],
+    ['Agents', '/agents'],
+    ['Skills Hub', '/skills'],
+    ['Dream Lab', '/dream-lab'],
+    ['Deployments', '/deployments'],
+    ['Settings', '/settings'],
   ] as const;
 
   for (const [heading, path] of routes) {

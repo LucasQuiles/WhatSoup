@@ -2,11 +2,11 @@
   "generated": "design burndown queue — canonical machine-readable burndown; regenerate via: npm --prefix console run design:burndown -- --update",
   "schema_version": 1,
   "summary": {
-    "total": 56,
+    "total": 49,
     "blocking": 0,
     "byCategory": {
       "accent-law": 0,
-      "half-step": 55,
+      "half-step": 48,
       "legacy-var-css": 0,
       "raw-color-css": 0,
       "raw-dimension-css": 0,
@@ -56,7 +56,7 @@
       "id": "burndown:half-step",
       "category": "half-step",
       "severity": "polish",
-      "count": 55,
+      "count": 48,
       "files": [
         {
           "path": "src/components/ChartPanel.tsx",
@@ -172,15 +172,6 @@
           ]
         },
         {
-          "path": "src/components/Nav.tsx",
-          "count": 5,
-          "lines": [
-            97,
-            177,
-            197
-          ]
-        },
-        {
           "path": "src/components/shared/SearchInput.tsx",
           "count": 2,
           "lines": [
@@ -206,50 +197,42 @@
           "path": "src/components/wizard/ConfigStep.tsx",
           "count": 1,
           "lines": [
-            698
-          ]
-        },
-        {
-          "path": "src/pages/Inbox.tsx",
-          "count": 1,
-          "lines": [
-            457
+            665
           ]
         },
         {
           "path": "src/pages/Operator.tsx",
           "count": 1,
           "lines": [
-            364
+            405
           ]
         },
         {
           "path": "src/styles/composites.css",
           "count": 12,
           "lines": [
-            239,
-            317,
-            338,
-            382,
-            444,
-            467,
-            620,
-            621,
-            628,
-            666,
-            759,
-            844
+            219,
+            297,
+            318,
+            362,
+            424,
+            447,
+            595,
+            596,
+            603,
+            641,
+            734,
+            819
           ]
         },
         {
           "path": "src/styles/primitives.css",
-          "count": 5,
+          "count": 4,
           "lines": [
-            55,
-            247,
-            294,
-            306,
-            552
+            233,
+            280,
+            292,
+            538
           ]
         }
       ],

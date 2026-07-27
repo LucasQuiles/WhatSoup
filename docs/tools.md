@@ -3206,7 +3206,9 @@ Persist a durable memory about the current conversation into the instance's conf
 | warrant | string | optional | Toulmin warrant |
 | contradicts | string | optional | id of a superseded memory |
 
-**Returns:** `{ id, status: "written", memory_type }`. The conversation and speaker are derived from the session, never caller-supplied.
+**Returns on success:** `{ operation_id, status: "written", memory_type }`, where `operation_id` is an opaque correlation reference. The internal record ID is not returned.
+
+**Returns on provider failure:** `{ error: "memory_write failed", code, retryable, operation_id }`, where `code` is a stable memory-operation failure code and no provider exception prose is exposed. The conversation and speaker are derived from the session, never caller-supplied.
 
 ---
 
