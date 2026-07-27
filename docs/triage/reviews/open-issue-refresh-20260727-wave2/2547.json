@@ -1,0 +1,306 @@
+{
+  "acceptance_criteria": [
+    "Work status and document mode are represented and resolved independently.",
+    "Current completed-artifact lifecycle warnings are emitted deterministically with path and reason.",
+    "A completed plan cannot remain executable.",
+    "Unchecked tasks in completed artifacts are checked historical evidence, linked to live ownership, explicitly deferred or accepted closed, or isolated inside a non-executable historical snapshot.",
+    "Branch, worktree, and commit-era commands in retained records are clearly non-executable historical evidence.",
+    "Every remaining gap in a completed reliability artifact maps to a current issue, explicit supersession, or accepted no-action disposition.",
+    "The reliability, health, and error-observability cohort has no unowned active-looking residuals.",
+    "Historical evidence remains readable and traceable to merged public evidence.",
+    "Work-index freshness failures remain distinct from lifecycle-semantic failures.",
+    "Positive and negative fixtures cover executable, normative, historical-receipt, and review-snapshot modes."
+  ],
+  "affected_paths": [
+    "docs/canonical-status-policy.md",
+    "docs/superpowers/plans/2026-06-13-d20-provider-keychain-unlock-policy.md",
+    "docs/superpowers/plans/2026-06-13-provider-errpreview-sanitization.md",
+    "docs/superpowers/reviews/2026-05-31-bot-errors-tool-call-audit.md",
+    "docs/superpowers/specs/2026-04-07-provider-attribution.md",
+    "docs/work-index.json",
+    "docs/work-index.md",
+    "scripts/work-index.ts",
+    "tests/scripts/work-index.test.ts"
+  ],
+  "blast_radius": "Agent task discovery, work-index lifecycle semantics, retained planning and review evidence, reliability backlog ownership, runbook authority, and documentation maintenance across every indexed completed artifact.",
+  "classification": "tracker",
+  "current_labels": ["P4"],
+  "decisive_source_paths": [
+    "docs/canonical-status-policy.md",
+    "docs/work-index.json",
+    "scripts/work-index.ts"
+  ],
+  "decisive_test_paths": ["tests/scripts/work-index.test.ts"],
+  "dependency_issue_numbers": [2461, 2536],
+  "duplicate_of_issue_number": null,
+  "evidence_state": "verified",
+  "evidence_summary": "Three stable live identity reads pinned open issue #2547 to node I_kwDOR1Sep88AAAABKQ12hw, its current title, P4 label, update time, URL, and exact 7,508-byte body hash while the SSH remote main remained de3f69bbb5648b804ea2843d310c47dda544a056. The prior audited main and this revision have identical bytes for every decisive and affected path. Exact-main object scanning reconfirmed 33 completed work-index rows, including 19 plans, with 16 completed artifacts containing 775 unchecked task boxes and zero reported index inconsistencies. The canonical policy defines work status but no orthogonal reader mode; the scanner parses status and coverage or generated drift but does not inspect unchecked tasks, execution language, residual ownership, or document mode. Merged PR #2543 only normalizes volatile last-modified metadata and leaves lifecycle semantics unchanged. A fresh fully paginated scan covered all 36 open pull requests and 1,276 changed-file rows; all nine overlaps touch only generated work-index artifacts and none owns the lifecycle contract.",
+  "falsifier_or_remaining_gap": "The finding would be falsified if completed artifacts carried an enforced non-executable document mode and every apparent task or residual had a live owner or explicit disposition. Exact source and object-level scanning disproved those conditions. The 33, 19, 16, and 775 counts are independently reproducible; the issue's separate execution-language tally needs its exact pattern specified before it can become a stable guard baseline.",
+  "impact": "Agents and maintainers can mistake obsolete branch-era instructions or unchecked historical tasks for live work, while real residual gaps remain trapped in completed prose. The index reports internal consistency without revealing this separate lifecycle contradiction.",
+  "implementation_after_issue_numbers": [],
+  "issue_node_id": "I_kwDOR1Sep88AAAABKQ12hw",
+  "issue_number": 2547,
+  "lead_verification_obligations": [
+    "Re-read issue #2547 immediately before registry integration and reject this record if its state, node ID, title, labels, update time, URL, or exact body hash changed.",
+    "Reconfirm the SSH origin, local origin/main, remote main, and every decisive path byte before implementation.",
+    "Re-run the exact completed-row and unchecked-task inventory and define the execution-language matcher before accepting a baseline.",
+    "Re-scan all open pull requests and merged PRs #14, #15, #323, #608, #1979, and #2543 immediately before dispatch; preserve one lifecycle-contract owner.",
+    "Introduce document mode orthogonally to existing status and keep freshness, coverage, and lifecycle findings as separate machine-readable classes.",
+    "Start with a report-only inventory and synthetic positive and negative fixtures before enforcing any repository baseline.",
+    "Reconcile the reliability cohort with #2461 and #2536 while preserving historical rationale and merged public evidence.",
+    "Normalize remaining completed artifacts in bounded topic cohorts and enforce only after the reviewed baseline reaches zero.",
+    "Run scanner tests, work-index regeneration and drift checks, documentation guards, and publication guards against committed implementation bytes."
+  ],
+  "owner_boundary": "completed-artifact-document-mode-and-lifecycle-enforcement",
+  "partial_findings": [],
+  "pinned_revision": "de3f69bbb5648b804ea2843d310c47dda544a056",
+  "pre_review_body_sha256": "8ad32dd4075d76f96c3099a87d1f1c89ed473163f4938df3c85dd74e3c9ecd6b",
+  "proposed_cohort_id": null,
+  "pull_request_overlaps": [
+    {
+      "assessment": "historical-attempt",
+      "base_ref": "main",
+      "disposition": "merged",
+      "head_ref": "docs/work-index-repair",
+      "is_draft": false,
+      "matched_by": ["touched-path"],
+      "number": 14,
+      "overlapping_paths": [
+        "docs/work-index.json",
+        "docs/work-index.md"
+      ],
+      "title": "docs(repair): resolve all 12 work-index inconsistencies",
+      "updated_at": "2026-04-24T02:34:37Z",
+      "url": "https://github.com/LucasQuiles/WhatSoup/pull/14"
+    },
+    {
+      "assessment": "partial",
+      "base_ref": "main",
+      "disposition": "merged",
+      "head_ref": "docs/canonical-status-policy",
+      "is_draft": false,
+      "matched_by": ["acceptance-criteria", "touched-path"],
+      "number": 15,
+      "overlapping_paths": [
+        "docs/canonical-status-policy.md",
+        "docs/work-index.json",
+        "docs/work-index.md"
+      ],
+      "title": "docs: canonical-status-policy (step 2 of integrity program)",
+      "updated_at": "2026-04-24T02:49:35Z",
+      "url": "https://github.com/LucasQuiles/WhatSoup/pull/15"
+    },
+    {
+      "assessment": "partial",
+      "base_ref": "main",
+      "disposition": "merged",
+      "head_ref": "docs/historical-banner-fleet-archived-20260512",
+      "is_draft": false,
+      "matched_by": ["acceptance-criteria"],
+      "number": 323,
+      "overlapping_paths": [],
+      "title": "docs(superpowers): HISTORICAL banner on pre-#310 fleet token docs",
+      "updated_at": "2026-05-12T07:30:46Z",
+      "url": "https://github.com/LucasQuiles/WhatSoup/pull/323"
+    },
+    {
+      "assessment": "historical-attempt",
+      "base_ref": "main",
+      "disposition": "merged",
+      "head_ref": "fix/work-index-ignore-gitignored-docs-20260514",
+      "is_draft": false,
+      "matched_by": ["touched-path"],
+      "number": 608,
+      "overlapping_paths": [
+        "scripts/work-index.ts",
+        "tests/scripts/work-index.test.ts"
+      ],
+      "title": "fix(work-index): ignore gitignored local docs",
+      "updated_at": "2026-05-14T06:56:09Z",
+      "url": "https://github.com/LucasQuiles/WhatSoup/pull/608"
+    },
+    {
+      "assessment": "partial",
+      "base_ref": "main",
+      "disposition": "merged",
+      "head_ref": "feat/sentinel-p0-hardening-20260720",
+      "is_draft": false,
+      "matched_by": ["acceptance-criteria"],
+      "number": 1979,
+      "overlapping_paths": [],
+      "title": "docs(sentinel): reconcile P0 hardening-backlog vs main — P0 cluster already done+tested (#1876)",
+      "updated_at": "2026-07-20T18:25:33Z",
+      "url": "https://github.com/LucasQuiles/WhatSoup/pull/1979"
+    },
+    {
+      "assessment": "collision-only",
+      "base_ref": "main",
+      "disposition": "open",
+      "head_ref": "design/cicd-control-integrator-20260722",
+      "is_draft": false,
+      "matched_by": ["touched-path"],
+      "number": 2084,
+      "overlapping_paths": [
+        "docs/work-index.json",
+        "docs/work-index.md"
+      ],
+      "title": "feat(ci): land report-only exact-revision control foundation",
+      "updated_at": "2026-07-27T02:07:39Z",
+      "url": "https://github.com/LucasQuiles/WhatSoup/pull/2084"
+    },
+    {
+      "assessment": "collision-only",
+      "base_ref": "main",
+      "disposition": "open",
+      "head_ref": "fix/agent-provider-actor-isolation-20260723",
+      "is_draft": false,
+      "matched_by": ["touched-path"],
+      "number": 2128,
+      "overlapping_paths": [
+        "docs/work-index.json",
+        "docs/work-index.md"
+      ],
+      "title": "fix(agent): isolate per-chat actors across CLI providers",
+      "updated_at": "2026-07-27T02:08:01Z",
+      "url": "https://github.com/LucasQuiles/WhatSoup/pull/2128"
+    },
+    {
+      "assessment": "collision-only",
+      "base_ref": "main",
+      "disposition": "open",
+      "head_ref": "fix/agent-queue-health-truth-20260723",
+      "is_draft": false,
+      "matched_by": ["touched-path"],
+      "number": 2129,
+      "overlapping_paths": [
+        "docs/work-index.json",
+        "docs/work-index.md"
+      ],
+      "title": "fix(agent): surface halted turn queues in health",
+      "updated_at": "2026-07-27T02:08:00Z",
+      "url": "https://github.com/LucasQuiles/WhatSoup/pull/2129"
+    },
+    {
+      "assessment": "collision-only",
+      "base_ref": "main",
+      "disposition": "open",
+      "head_ref": "fix/agent-suspend-platform-hardening-20260723",
+      "is_draft": false,
+      "matched_by": ["touched-path"],
+      "number": 2130,
+      "overlapping_paths": [
+        "docs/work-index.json",
+        "docs/work-index.md"
+      ],
+      "title": "fix: harden suspend-aware platform health",
+      "updated_at": "2026-07-27T02:07:58Z",
+      "url": "https://github.com/LucasQuiles/WhatSoup/pull/2130"
+    },
+    {
+      "assessment": "collision-only",
+      "base_ref": "main",
+      "disposition": "open",
+      "head_ref": "fix/agent-queue-health-20260723",
+      "is_draft": false,
+      "matched_by": ["touched-path"],
+      "number": 2142,
+      "overlapping_paths": [
+        "docs/work-index.json",
+        "docs/work-index.md"
+      ],
+      "title": "docs: define agent reliability remediation",
+      "updated_at": "2026-07-27T02:07:41Z",
+      "url": "https://github.com/LucasQuiles/WhatSoup/pull/2142"
+    },
+    {
+      "assessment": "collision-only",
+      "base_ref": "main",
+      "disposition": "open",
+      "head_ref": "docs/issue-triage-pipeline-20260726",
+      "is_draft": true,
+      "matched_by": ["touched-path"],
+      "number": 2442,
+      "overlapping_paths": [
+        "docs/work-index.json",
+        "docs/work-index.md"
+      ],
+      "title": "docs(triage): define evidence-backed issue pipeline",
+      "updated_at": "2026-07-27T02:07:35Z",
+      "url": "https://github.com/LucasQuiles/WhatSoup/pull/2442"
+    },
+    {
+      "assessment": "collision-only",
+      "base_ref": "main",
+      "disposition": "open",
+      "head_ref": "fix/inline-proposal-protocol-20260720",
+      "is_draft": true,
+      "matched_by": ["touched-path"],
+      "number": 2495,
+      "overlapping_paths": [
+        "docs/work-index.json",
+        "docs/work-index.md"
+      ],
+      "title": "preserve: chore(ops): pin watchdog parity probe",
+      "updated_at": "2026-07-27T02:07:19Z",
+      "url": "https://github.com/LucasQuiles/WhatSoup/pull/2495"
+    },
+    {
+      "assessment": "collision-only",
+      "base_ref": "main",
+      "disposition": "open",
+      "head_ref": "docs/work-index-main-fix-20260724",
+      "is_draft": true,
+      "matched_by": ["touched-path"],
+      "number": 2502,
+      "overlapping_paths": [
+        "docs/work-index.json",
+        "docs/work-index.md"
+      ],
+      "title": "preserve: docs: refresh work index after durability merge",
+      "updated_at": "2026-07-27T02:07:11Z",
+      "url": "https://github.com/LucasQuiles/WhatSoup/pull/2502"
+    },
+    {
+      "assessment": "collision-only",
+      "base_ref": "main",
+      "disposition": "open",
+      "head_ref": "feat/git-estate-push-guard-20260727",
+      "is_draft": true,
+      "matched_by": ["touched-path"],
+      "number": 2542,
+      "overlapping_paths": [
+        "docs/work-index.json",
+        "docs/work-index.md"
+      ],
+      "title": "feat(guards): bind pushes to live main",
+      "updated_at": "2026-07-27T03:09:29Z",
+      "url": "https://github.com/LucasQuiles/WhatSoup/pull/2542"
+    },
+    {
+      "assessment": "collision-only",
+      "base_ref": "main",
+      "disposition": "merged",
+      "head_ref": "chore/work-index-refresh-20260727",
+      "is_draft": false,
+      "matched_by": ["touched-path"],
+      "number": 2543,
+      "overlapping_paths": [
+        "docs/work-index.json",
+        "docs/work-index.md",
+        "scripts/work-index.ts",
+        "tests/scripts/work-index.test.ts"
+      ],
+      "title": "chore(docs): refresh work-index after the 07-26 merge wave",
+      "updated_at": "2026-07-27T02:30:52Z",
+      "url": "https://github.com/LucasQuiles/WhatSoup/pull/2543"
+    }
+  ],
+  "pull_request_owner_pr_number": null,
+  "recommended_labels": ["P4", "SSOT", "audit", "documentation", "reliability", "tech-debt"],
+  "recommended_title": null,
+  "review_confidence": "high",
+  "suggested_remediation": "Add an orthogonal document-mode contract, teach work-index tooling to report lifecycle warnings separately from status and freshness drift, normalize the reliability cohort without deleting evidence, then adopt guarded enforcement only after bounded topic cohorts reduce the reviewed baseline to zero.",
+  "title": "docs(lifecycle): completed reliability artifacts remain executable-looking and obscure live gaps",
+  "updated_at": "2026-07-27T02:51:33Z",
+  "url": "https://github.com/LucasQuiles/WhatSoup/issues/2547"
+}

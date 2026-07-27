@@ -1,0 +1,380 @@
+{
+  "acceptance_criteria": [
+    "A healthy snapshot with only turnRecoveryBlockedUnsafe greater than zero remains healthy or OK in runtime, core health, the scheduled checker, fleet status, and console status.",
+    "The aggregate blocked count remains visible in an authorized diagnostic or operator projection without creating outage semantics.",
+    "Outstanding, exhausted, open-recovery, corrupt-link, and echo-conflict states retain their declared current-health effects.",
+    "A proof-promoted job moves from blocked audit evidence into the appropriate pending or outstanding current-state bucket exactly once.",
+    "Reassignment that preserves blocked-unsafe evidence does not manufacture a new health episode.",
+    "Repeated unchanged blocked counts do not re-page, refresh an outage, or require a restart to clear.",
+    "Any operator-attention episode has a distinct source, member identity, acknowledgement, disposition, and evidence-gated clear authority.",
+    "A deterministic guard fails when a numeric health field lacks a signal kind or consumers assign conflicting dispositions.",
+    "Exact-byte synthetic tests prove no routing identity, content, proof reference, location, process value, or private topology reaches public health or shared alerts."
+  ],
+  "affected_paths": [
+    "deploy/scripts/bot-errors-health-check.py",
+    "src/core/health.ts",
+    "src/runtimes/agent/runtime.ts",
+    "tests/core/health.test.ts",
+    "tests/runtimes/agent/runtime-turn-recovery-health.test.ts",
+    "tests/scripts/bot-errors-health-check.test.ts"
+  ],
+  "blast_radius": "Agent recovery health, core degradation-cause agreement, scheduled health-check severity, fleet and console status, operator alerts, and the disposition contract for retained recovery evidence.",
+  "classification": "leaf",
+  "current_labels": ["P1", "SSOT", "alerts", "audit", "bug", "reliability"],
+  "decisive_source_paths": [
+    "deploy/scripts/bot-errors-health-check.py",
+    "src/core/health.ts",
+    "src/runtimes/agent/runtime.ts"
+  ],
+  "decisive_test_paths": [
+    "tests/core/health.test.ts",
+    "tests/runtimes/agent/runtime-turn-recovery-health.test.ts",
+    "tests/scripts/bot-errors-health-check.test.ts"
+  ],
+  "dependency_issue_numbers": [2155, 2409, 2447, 2541],
+  "duplicate_of_issue_number": null,
+  "evidence_state": "verified",
+  "evidence_summary": "Three stable live identity reads pinned open issue #2544 to node I_kwDOR1Sep88AAAABKQwPzw, its current title, P1, SSOT, alerts, audit, bug, and reliability labels, update time, URL, and exact 8,599-byte body hash while the SSH remote main remained de3f69bbb5648b804ea2843d310c47dda544a056. The prior audited main and this revision have identical bytes for every decisive and affected path. Exact-main source inspection confirms runtime tests intentionally keep a lone blocked-unsafe receipt healthy, core excludes that counter from turn_recovery_degraded, and the scheduled checker groups it with positive current-risk counters and adds runtime_agent_at_risk. A direct exact-blob falsifier supplied a healthy synthetic snapshot with only one blocked-unsafe receipt and returned a checker warning with the at-risk marker. The exact bot-errors and core suites passed 269 of 269 tests. A fresh fully paginated scan covered all 36 open pull requests and 1,276 changed-file rows, found 19 touched-path overlaps plus taxonomy coordination in draft PR #2451, and found no implementation owner.",
+  "falsifier_or_remaining_gap": "The finding would be falsified if a healthy blocked-only snapshot remained OK through the scheduled checker while retaining its authorized diagnostic count. The exact-source canary instead produced checker_warn=true and runtime_agent_at_risk=true. Passing existing suites establish current behavior rather than the missing signal-kind contract; this review did not implement the cross-consumer matrix or observe production alert frequency.",
+  "impact": "A safely retained replay refusal is presented as current runtime danger even though admission and later turns remain healthy. The warning can persist until administrative disposition, reducing trust in genuine recovery alerts and making evidence cleanup look like runtime healing.",
+  "implementation_after_issue_numbers": [2447],
+  "issue_node_id": "I_kwDOR1Sep88AAAABKQwPzw",
+  "issue_number": 2544,
+  "lead_verification_obligations": [
+    "Re-read issue #2544 immediately before registry integration and reject this record if its state, node ID, title, labels, update time, URL, or exact body hash changed.",
+    "Reconfirm the SSH origin, local origin/main, remote main, and every decisive path byte before implementation.",
+    "Re-scan all open pull requests, merged PRs #1770 and #2051, and draft PR #2451 immediately before dispatch; preserve one implementation owner.",
+    "Use #2447's canonical signal taxonomy and coordinate the shared signal-kind registry with #2541 without combining their producer-specific recovery predicates.",
+    "Keep #2155's evidence-gated operator workflow and #2409's downstream cause-aware alert policy outside this checker-disposition owner.",
+    "Add RED and GREEN identical-snapshot tests across runtime, core, scheduled checker, fleet, console, and alert consumers.",
+    "Prove blocked evidence remains visible without degrading health, re-paging unchanged evidence, or being cleared by unrelated recovery.",
+    "Require unknown numeric fields and conflicting consumer dispositions to fail the deterministic registry guard.",
+    "Run all decisive suites plus broader health and deployment checks against committed implementation bytes."
+  ],
+  "owner_boundary": "typed-runtime-health-signal-kind-and-scheduled-checker-disposition",
+  "partial_findings": [],
+  "pinned_revision": "de3f69bbb5648b804ea2843d310c47dda544a056",
+  "pre_review_body_sha256": "0a2c40cc28cb6221491e8d1ff8f2c1f0d20cfbdc8133f4df6ba4a976c24dfc30",
+  "proposed_cohort_id": null,
+  "pull_request_overlaps": [
+    {
+      "assessment": "partial",
+      "base_ref": "main",
+      "disposition": "merged",
+      "head_ref": "fix/turn-recovery-health-semantics",
+      "is_draft": false,
+      "matched_by": ["acceptance-criteria", "touched-path"],
+      "number": 1770,
+      "overlapping_paths": [
+        "src/runtimes/agent/runtime.ts",
+        "tests/runtimes/agent/runtime-turn-recovery-health.test.ts"
+      ],
+      "title": "fix(recovery): separate active work from audit health",
+      "updated_at": "2026-07-14T06:07:09Z",
+      "url": "https://github.com/LucasQuiles/WhatSoup/pull/1770"
+    },
+    {
+      "assessment": "partial",
+      "base_ref": "main",
+      "disposition": "merged",
+      "head_ref": "fix/health-degraded-causality-20260722",
+      "is_draft": false,
+      "matched_by": ["acceptance-criteria", "touched-path"],
+      "number": 2051,
+      "overlapping_paths": [
+        "src/core/health.ts",
+        "src/runtimes/agent/runtime.ts",
+        "tests/core/health.test.ts",
+        "tests/scripts/bot-errors-health-check.test.ts"
+      ],
+      "title": "fix: classify degraded health by exact cause",
+      "updated_at": "2026-07-24T09:12:01Z",
+      "url": "https://github.com/LucasQuiles/WhatSoup/pull/2051"
+    },
+    {
+      "assessment": "collision-only",
+      "base_ref": "main",
+      "disposition": "open",
+      "head_ref": "takeover/console-successor-20260722",
+      "is_draft": true,
+      "matched_by": ["touched-path"],
+      "number": 2078,
+      "overlapping_paths": [
+        "src/core/health.ts",
+        "src/runtimes/agent/runtime.ts",
+        "tests/core/health.test.ts"
+      ],
+      "title": "chore: track transport and iMessage source for selective reconstruction",
+      "updated_at": "2026-07-27T02:07:42Z",
+      "url": "https://github.com/LucasQuiles/WhatSoup/pull/2078"
+    },
+    {
+      "assessment": "collision-only",
+      "base_ref": "main",
+      "disposition": "open",
+      "head_ref": "fix/agent-provider-actor-isolation-20260723",
+      "is_draft": false,
+      "matched_by": ["touched-path"],
+      "number": 2128,
+      "overlapping_paths": ["src/runtimes/agent/runtime.ts"],
+      "title": "fix(agent): isolate per-chat actors across CLI providers",
+      "updated_at": "2026-07-27T02:08:01Z",
+      "url": "https://github.com/LucasQuiles/WhatSoup/pull/2128"
+    },
+    {
+      "assessment": "collision-only",
+      "base_ref": "main",
+      "disposition": "open",
+      "head_ref": "fix/agent-queue-health-truth-20260723",
+      "is_draft": false,
+      "matched_by": ["touched-path"],
+      "number": 2129,
+      "overlapping_paths": [
+        "src/runtimes/agent/runtime.ts",
+        "tests/core/health.test.ts"
+      ],
+      "title": "fix(agent): surface halted turn queues in health",
+      "updated_at": "2026-07-27T02:08:00Z",
+      "url": "https://github.com/LucasQuiles/WhatSoup/pull/2129"
+    },
+    {
+      "assessment": "collision-only",
+      "base_ref": "main",
+      "disposition": "open",
+      "head_ref": "fix/agent-suspend-platform-hardening-20260723",
+      "is_draft": false,
+      "matched_by": ["touched-path"],
+      "number": 2130,
+      "overlapping_paths": [
+        "src/core/health.ts",
+        "tests/core/health.test.ts"
+      ],
+      "title": "fix: harden suspend-aware platform health",
+      "updated_at": "2026-07-27T02:07:58Z",
+      "url": "https://github.com/LucasQuiles/WhatSoup/pull/2130"
+    },
+    {
+      "assessment": "collision-only",
+      "base_ref": "main",
+      "disposition": "open",
+      "head_ref": "feat/provider-route-policy-task3-20260723",
+      "is_draft": false,
+      "matched_by": ["touched-path"],
+      "number": 2149,
+      "overlapping_paths": ["src/runtimes/agent/runtime.ts"],
+      "title": "feat(agent): bind provider routes to data policy",
+      "updated_at": "2026-07-27T02:07:57Z",
+      "url": "https://github.com/LucasQuiles/WhatSoup/pull/2149"
+    },
+    {
+      "assessment": "collision-only",
+      "base_ref": "main",
+      "disposition": "open",
+      "head_ref": "codex/steering-2334",
+      "is_draft": true,
+      "matched_by": ["touched-path"],
+      "number": 2362,
+      "overlapping_paths": ["src/runtimes/agent/runtime.ts"],
+      "title": "feat(runtime): establish fail-closed native turn ownership",
+      "updated_at": "2026-07-27T02:08:02Z",
+      "url": "https://github.com/LucasQuiles/WhatSoup/pull/2362"
+    },
+    {
+      "assessment": "partial",
+      "base_ref": "main",
+      "disposition": "open",
+      "head_ref": "feat/taxonomy-cross-contract-2447",
+      "is_draft": true,
+      "matched_by": ["acceptance-criteria", "touched-path"],
+      "number": 2451,
+      "overlapping_paths": ["src/core/health.ts"],
+      "title": "feat(observability): add failure taxonomy cross-contract",
+      "updated_at": "2026-07-27T03:07:48Z",
+      "url": "https://github.com/LucasQuiles/WhatSoup/pull/2451"
+    },
+    {
+      "assessment": "collision-only",
+      "base_ref": "feat/continuity-manifest-dry-run-2444",
+      "disposition": "open",
+      "head_ref": "feat/continuity-gap-health-2444",
+      "is_draft": true,
+      "matched_by": ["touched-path"],
+      "number": 2455,
+      "overlapping_paths": [
+        "src/core/health.ts",
+        "tests/core/health.test.ts"
+      ],
+      "title": "feat(durability): persist continuity gap health",
+      "updated_at": "2026-07-27T02:07:50Z",
+      "url": "https://github.com/LucasQuiles/WhatSoup/pull/2455"
+    },
+    {
+      "assessment": "collision-only",
+      "base_ref": "main",
+      "disposition": "open",
+      "head_ref": "fix/internal-peer-redaction-20260726",
+      "is_draft": false,
+      "matched_by": ["touched-path"],
+      "number": 2456,
+      "overlapping_paths": ["src/runtimes/agent/runtime.ts"],
+      "title": "Fix trusted internal DM path redaction",
+      "updated_at": "2026-07-27T02:07:49Z",
+      "url": "https://github.com/LucasQuiles/WhatSoup/pull/2456"
+    },
+    {
+      "assessment": "collision-only",
+      "base_ref": "main",
+      "disposition": "open",
+      "head_ref": "gate/fix-pr2129-queue-health-20260724",
+      "is_draft": true,
+      "matched_by": ["touched-path"],
+      "number": 2491,
+      "overlapping_paths": [
+        "src/core/health.ts",
+        "src/runtimes/agent/runtime.ts",
+        "tests/core/health.test.ts"
+      ],
+      "title": "preserve: fix(agent): report halted turn queues in health",
+      "updated_at": "2026-07-27T02:07:46Z",
+      "url": "https://github.com/LucasQuiles/WhatSoup/pull/2491"
+    },
+    {
+      "assessment": "collision-only",
+      "base_ref": "main",
+      "disposition": "open",
+      "head_ref": "feat/wedge-remediation-20260720",
+      "is_draft": true,
+      "matched_by": ["touched-path"],
+      "number": 2493,
+      "overlapping_paths": ["src/runtimes/agent/runtime.ts"],
+      "title": "preserve: fix(agent): retry a refused watchdog/stalled-op SIGKILL instead of fire-and-forget (C-F4)",
+      "updated_at": "2026-07-27T02:07:45Z",
+      "url": "https://github.com/LucasQuiles/WhatSoup/pull/2493"
+    },
+    {
+      "assessment": "collision-only",
+      "base_ref": "main",
+      "disposition": "open",
+      "head_ref": "qr017-tool-group-taxonomy",
+      "is_draft": true,
+      "matched_by": ["touched-path"],
+      "number": 2494,
+      "overlapping_paths": ["src/runtimes/agent/runtime.ts"],
+      "title": "preserve: feat(mcp): add optional tool group taxonomy tag (QR-017 #1976)",
+      "updated_at": "2026-07-27T02:07:20Z",
+      "url": "https://github.com/LucasQuiles/WhatSoup/pull/2494"
+    },
+    {
+      "assessment": "collision-only",
+      "base_ref": "main",
+      "disposition": "open",
+      "head_ref": "fix/inline-proposal-protocol-20260720",
+      "is_draft": true,
+      "matched_by": ["touched-path"],
+      "number": 2495,
+      "overlapping_paths": [
+        "deploy/scripts/bot-errors-health-check.py",
+        "src/runtimes/agent/runtime.ts"
+      ],
+      "title": "preserve: chore(ops): pin watchdog parity probe",
+      "updated_at": "2026-07-27T02:07:19Z",
+      "url": "https://github.com/LucasQuiles/WhatSoup/pull/2495"
+    },
+    {
+      "assessment": "collision-only",
+      "base_ref": "main",
+      "disposition": "open",
+      "head_ref": null,
+      "is_draft": true,
+      "matched_by": ["touched-path"],
+      "number": 2496,
+      "overlapping_paths": [
+        "src/core/health.ts",
+        "tests/core/health.test.ts"
+      ],
+      "title": "preserve: Align preflight tests with deferred credentials",
+      "updated_at": "2026-07-27T02:07:18Z",
+      "url": "https://github.com/LucasQuiles/WhatSoup/pull/2496"
+    },
+    {
+      "assessment": "collision-only",
+      "base_ref": "main",
+      "disposition": "open",
+      "head_ref": null,
+      "is_draft": true,
+      "matched_by": ["touched-path"],
+      "number": 2497,
+      "overlapping_paths": [
+        "src/core/health.ts",
+        "tests/core/health.test.ts"
+      ],
+      "title": "preserve: test: strengthen credential absence assertion",
+      "updated_at": "2026-07-27T02:07:17Z",
+      "url": "https://github.com/LucasQuiles/WhatSoup/pull/2497"
+    },
+    {
+      "assessment": "collision-only",
+      "base_ref": "main",
+      "disposition": "open",
+      "head_ref": "feat/provider-boundary-audit-20260722",
+      "is_draft": true,
+      "matched_by": ["touched-path"],
+      "number": 2498,
+      "overlapping_paths": ["src/runtimes/agent/runtime.ts"],
+      "title": "preserve: fix: canonicalize provider secret intervals",
+      "updated_at": "2026-07-27T02:07:44Z",
+      "url": "https://github.com/LucasQuiles/WhatSoup/pull/2498"
+    },
+    {
+      "assessment": "collision-only",
+      "base_ref": "main",
+      "disposition": "open",
+      "head_ref": "fix/provider-boundary-canonical-successor-20260723",
+      "is_draft": true,
+      "matched_by": ["touched-path"],
+      "number": 2499,
+      "overlapping_paths": ["src/runtimes/agent/runtime.ts"],
+      "title": "preserve: test(provider): isolate atomicity oracle falsifiers",
+      "updated_at": "2026-07-27T02:07:14Z",
+      "url": "https://github.com/LucasQuiles/WhatSoup/pull/2499"
+    },
+    {
+      "assessment": "collision-only",
+      "base_ref": "main",
+      "disposition": "open",
+      "head_ref": "takeover/console-consolidated-20260721",
+      "is_draft": true,
+      "matched_by": ["touched-path"],
+      "number": 2500,
+      "overlapping_paths": ["src/runtimes/agent/runtime.ts"],
+      "title": "preserve: feat(console): add transport-aware line creation",
+      "updated_at": "2026-07-27T02:07:13Z",
+      "url": "https://github.com/LucasQuiles/WhatSoup/pull/2500"
+    },
+    {
+      "assessment": "collision-only",
+      "base_ref": "main",
+      "disposition": "open",
+      "head_ref": "takeover/console-live-main-20260722-2",
+      "is_draft": true,
+      "matched_by": ["touched-path"],
+      "number": 2501,
+      "overlapping_paths": [
+        "src/core/health.ts",
+        "src/runtimes/agent/runtime.ts",
+        "tests/core/health.test.ts"
+      ],
+      "title": "preserve: merge: reconcile console successor with main",
+      "updated_at": "2026-07-27T02:07:12Z",
+      "url": "https://github.com/LucasQuiles/WhatSoup/pull/2501"
+    }
+  ],
+  "pull_request_owner_pr_number": null,
+  "recommended_labels": ["P1", "SSOT", "alerts", "audit", "bug", "reliability"],
+  "recommended_title": null,
+  "review_confidence": "high",
+  "suggested_remediation": "Register every runtime health field with a signal kind and per-consumer disposition, classify turnRecoveryBlockedUnsafe as retained terminal audit evidence rather than current risk, and replace the checker's generic positive-number rule with typed field evaluation. Add identical-snapshot cross-surface tests and a fail-closed drift guard while keeping any operator-attention workflow separately owned.",
+  "title": "observability(health): scheduled checker turns blocked recovery audit evidence into a sticky current warning",
+  "updated_at": "2026-07-27T02:45:36Z",
+  "url": "https://github.com/LucasQuiles/WhatSoup/issues/2544"
+}

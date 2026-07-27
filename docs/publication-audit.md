@@ -4,15 +4,15 @@
 
 Internal publication roots covered by the guard: `docs/runbooks/`, `docs/sdlc/`, `docs/superpowers/`, `docs/plans/`, `docs/cutover/`, `docs/research/`, `docs/triage/`, `docs/specs/` (selected), `docs/work-index*`, `docs/current-program.md`, `docs/handoff-*.md`, `HANDOFF-*.md`, `docs/project-status-*.md`, `docs/audit-*.md`, `tmp/`.
 
-**Total classification rows:** 158
+**Total classification rows:** 167
 
 | Classification | Count |
 |---|---:|
-| PUBLIC | 35 |
+| PUBLIC | 44 |
 | PRIVATE-ARCHIVE | 123 |
 | SANITIZE | 0 |
 | DELETE | 0 |
-| Total | 158 |
+| Total | 167 |
 
 | Path | Classification | Rationale |
 |---|---|---|
@@ -154,6 +154,15 @@ Internal publication roots covered by the guard: `docs/runbooks/`, `docs/sdlc/`,
 | `docs/triage/reviews/open-issue-refresh-20260726/2525.json` | PUBLIC | Body-free reviewed issue evidence for the post-cutoff registry refresh. |
 | `docs/triage/reviews/open-issue-refresh-20260726/2526.json` | PUBLIC | Body-free reviewed issue evidence for the post-cutoff registry refresh. |
 | `docs/triage/reviews/open-issue-refresh-20260726/2527.json` | PUBLIC | Body-free reviewed issue evidence for the post-cutoff registry refresh. |
+| `docs/triage/reviews/open-issue-refresh-20260727-wave2/2544.json` | PUBLIC | Body-free reviewed issue evidence for the next post-cutoff registry refresh. |
+| `docs/triage/reviews/open-issue-refresh-20260727-wave2/2545.json` | PUBLIC | Body-free reviewed issue evidence for the next post-cutoff registry refresh. |
+| `docs/triage/reviews/open-issue-refresh-20260727-wave2/2546.json` | PUBLIC | Body-free reviewed issue evidence for the next post-cutoff registry refresh. |
+| `docs/triage/reviews/open-issue-refresh-20260727-wave2/2547.json` | PUBLIC | Body-free reviewed issue evidence for the next post-cutoff registry refresh. |
+| `docs/triage/reviews/open-issue-refresh-20260727-wave2/2548.json` | PUBLIC | Body-free reviewed issue evidence for the next post-cutoff registry refresh. |
+| `docs/triage/reviews/open-issue-refresh-20260727-wave2/2549.json` | PUBLIC | Body-free reviewed issue evidence for the next post-cutoff registry refresh. |
+| `docs/triage/reviews/open-issue-refresh-20260727-wave2/2550.json` | PUBLIC | Body-free reviewed issue evidence for the next post-cutoff registry refresh. |
+| `docs/triage/reviews/open-issue-refresh-20260727-wave2/2551.json` | PUBLIC | Body-free reviewed issue evidence for the next post-cutoff registry refresh. |
+| `docs/triage/reviews/open-issue-refresh-20260727-wave2/2552.json` | PUBLIC | Body-free reviewed issue evidence for the next post-cutoff registry refresh. |
 | `docs/triage/reviews/open-issue-refresh-20260727/2355.json` | PUBLIC | Body-free reviewed issue evidence for the next post-cutoff registry refresh. |
 | `docs/triage/reviews/open-issue-refresh-20260727/2528.json` | PUBLIC | Body-free reviewed issue evidence for the next post-cutoff registry refresh. |
 | `docs/triage/reviews/open-issue-refresh-20260727/2529.json` | PUBLIC | Body-free reviewed issue evidence for the next post-cutoff registry refresh. |
