@@ -10,7 +10,10 @@ The canonical artifacts are:
 - `open-issue-registry.md`: a byte-for-byte generated view of that registry;
 - `open-issue-review-ledger.jsonl`: an append-only, hash-linked mutation receipt;
 - `plans/*.json`: tracked, body-free mutation plans; and
-- `snapshots/*.json`: bounded, field-projected live-inventory captures.
+- `reviews/*.json`: tracked review manifests that bind exact body-free evidence
+  records to one source registry and main revision; and
+- `snapshots/*.json`: bounded, field-projected live-inventory captures and
+  immutable reconciliation seals.
 
 Every tracked plan or snapshot needs its own `PUBLIC` row in
 `docs/publication-audit.md` in the same commit. The publication guard rejects an
@@ -107,6 +110,65 @@ npm run --silent triage:issues -- issue re-read \
 Do not create a replacement plan, retry a PATCH, edit the ledger, or delete the branch
 while an outcome is unknown. Preserve the tracked plan and ledger, inspect the live
 issue and receipt chain, then resolve the evidence gap in a separately reviewed batch.
+
+## Registry reconciliation
+
+A refresh manifest is the only accepted input for adding, replacing, retaining, or
+removing registry records. The manifest and every referenced record must be
+repository-confined, tracked, clean, committed, byte-hash matched, sorted, unique, and
+strict-schema valid. An issue removal additionally requires two exact closed-state
+reads around the final complete capture. Timestamp-only retention and overlap removal
+must be explicit manifest attestations; the reconciler never silently carries changed
+evidence forward.
+
+First run the read-only gate:
+
+```bash
+npm run --silent triage:issues -- registry reconcile --check \
+  --registry docs/triage/open-issue-registry.json \
+  --reviews docs/triage/reviews/<refresh-id>.json \
+  --snapshot docs/triage/snapshots/<seal-id>.json \
+  --expected-main-oid <origin-main-object-id>
+```
+
+The gate requires the exact SSH origin, tracking `origin/main`, live remote `main`, and
+GitHub API `main` to equal the requested object ID. It captures the complete open issue,
+pull-request, changed-file, closing-reference, and label estate three times; any
+inventory or nested pull-request drift stops the operation. The check computes and
+validates the candidate registry, generated view, snapshot classification, additions,
+and removals without writing files.
+
+After reviewing the committed manifest bytes and check summary, write all four
+artifacts as one common-git-directory transaction:
+
+```bash
+npm run --silent triage:issues -- registry reconcile --write \
+  --registry docs/triage/open-issue-registry.json \
+  --reviews docs/triage/reviews/<refresh-id>.json \
+  --snapshot docs/triage/snapshots/<seal-id>.json \
+  --expected-main-oid <origin-main-object-id> \
+  --confirm-review-sha256 <manifest-byte-sha256> \
+  --idempotency-key <stable-refresh-key>
+```
+
+The transaction creates the immutable body-free snapshot and replaces the canonical
+registry, generated Markdown, and publication audit only from exact before-state
+hashes. Its lock and journal live in the Git common directory so sibling worktrees
+coordinate. A live owner blocks. Candidate, backup, journal, or target ambiguity fails
+closed without overwriting unproven bytes.
+
+If the write is interrupted, preserve every common-directory transaction artifact and
+rerun the exact `--write` command with the same manifest digest, snapshot path, main
+object ID, and idempotency key. Do not delete a journal, candidate, backup, snapshot, or
+lock to make a retry proceed. The recovery path may roll forward only links and bytes
+whose ownership and hashes it can prove.
+
+The local filesystem API does not expose descriptor-relative mutation on every
+supported platform. The transaction therefore revalidates parent identities at every
+available boundary and coordinates all repository writers, but it does not claim
+atomic protection against a hostile process swapping a parent directory between the
+last check and the operating-system call. Such interference is an inconclusive
+recovery event, not a clean write.
 
 ## Exit contract
 

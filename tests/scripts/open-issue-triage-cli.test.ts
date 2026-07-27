@@ -1,4 +1,4 @@
-import { execFileSync } from 'node:child_process';
+import { execFileSync } from "node:child_process";
 import {
   existsSync,
   linkSync,
@@ -10,10 +10,10 @@ import {
   symlinkSync,
   unlinkSync,
   writeFileSync,
-} from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+} from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, describe, expect, it } from "vitest";
 
 import {
   commandSchema,
@@ -21,14 +21,15 @@ import {
   renderRegistryMarkdown,
   run,
   type CliRuntime,
-} from '../../scripts/open-issue-triage.ts';
+} from "../../scripts/open-issue-triage.ts";
 import {
   LIVE_LABELS,
   canonicalRegistryJson,
   parseLedger,
+  registrySha256,
   sha256,
   type OpenIssueRegistry,
-} from '../../scripts/lib/open-issue-triage/model.ts';
+} from "../../scripts/lib/open-issue-triage/model.ts";
 import {
   GitHubClientError,
   type GitHubIssueClient,
@@ -36,82 +37,89 @@ import {
   type IssuePatch,
   type LiveInventory,
   type LiveIssue,
-} from '../../scripts/lib/open-issue-triage/github.ts';
+  type RegistryCapture,
+} from "../../scripts/lib/open-issue-triage/github.ts";
 import {
   acquireProcessLock,
   getCurrentBootId,
   releaseProcessLock,
-} from '../../src/lib/process-lock.ts';
+} from "../../src/lib/process-lock.ts";
 
-const MAIN_SHA = 'b'.repeat(40);
-const OWNER_BODY = 'Owner-authored body.\n';
-const REPOSITORY = 'LucasQuiles/WhatSoup';
+const MAIN_SHA = "b".repeat(40);
+const OWNER_BODY = "Owner-authored body.\n";
+const REPOSITORY = "LucasQuiles/WhatSoup";
 
 function utf8Sort(values: readonly string[]): string[] {
-  return [...values].sort((left, right) => Buffer.from(left).compare(Buffer.from(right)));
+  return [...values].sort((left, right) =>
+    Buffer.from(left).compare(Buffer.from(right)),
+  );
 }
 
 function registry(): OpenIssueRegistry {
   return {
     schema_version: 1,
     repository: REPOSITORY,
-    generated_at: '2026-07-26T12:30:00Z',
+    generated_at: "2026-07-26T12:30:00Z",
     pinned_main_revision: MAIN_SHA,
     inventory: {
-      captured_at: '2026-07-26T12:30:00Z',
+      captured_at: "2026-07-26T12:30:00Z",
       open_issue_count: 1,
       open_pull_request_count: 0,
       draft_pull_request_count: 0,
       label_count: LIVE_LABELS.length,
       labels: utf8Sort(LIVE_LABELS),
     },
-    issues: [{
-      issue_number: 101,
-      issue_node_id: 'I_kwDOExample101',
-      title: 'Example finding',
-      recommended_title: null,
-      url: 'https://github.com/LucasQuiles/WhatSoup/issues/101',
-      updated_at: '2026-07-26T12:00:00Z',
-      pre_review_body_sha256: sha256(OWNER_BODY),
-      current_labels: ['bug'],
-      recommended_labels: ['bug', 'reliability'],
-      classification: 'leaf',
-      evidence_state: 'verified',
-      pinned_revision: MAIN_SHA,
-      decisive_source_paths: ['src/example.ts'],
-      decisive_test_paths: ['tests/example.test.ts'],
-      evidence_summary: 'The production caller does not preserve ownership.',
-      falsifier_or_remaining_gap: 'Run the focused example test.',
-      partial_findings: [],
-      suggested_remediation: 'Give the operation one durable owner.',
-      impact: 'Accepted work can be lost.',
-      blast_radius: 'One runtime path.',
-      affected_paths: ['src/example.ts'],
-      owner_boundary: 'runtime-owner',
-      acceptance_criteria: ['The focused ownership test passes.'],
-      dependency_issue_numbers: [],
-      duplicate_of_issue_number: null,
-      implementation_after_issue_numbers: [],
-      pull_request_overlaps: [],
-      proposed_cohort_id: null,
-      pull_request_owner_pr_number: null,
-      review_confidence: 'high',
-      lead_verification_obligations: ['Re-read the decisive source before mutation.'],
-    }],
+    issues: [
+      {
+        issue_number: 101,
+        issue_node_id: "I_kwDOExample101",
+        title: "Example finding",
+        recommended_title: null,
+        url: "https://github.com/LucasQuiles/WhatSoup/issues/101",
+        updated_at: "2026-07-26T12:00:00Z",
+        pre_review_body_sha256: sha256(OWNER_BODY),
+        current_labels: ["bug"],
+        recommended_labels: ["bug", "reliability"],
+        classification: "leaf",
+        evidence_state: "verified",
+        pinned_revision: MAIN_SHA,
+        decisive_source_paths: ["src/example.ts"],
+        decisive_test_paths: ["tests/example.test.ts"],
+        evidence_summary: "The production caller does not preserve ownership.",
+        falsifier_or_remaining_gap: "Run the focused example test.",
+        partial_findings: [],
+        suggested_remediation: "Give the operation one durable owner.",
+        impact: "Accepted work can be lost.",
+        blast_radius: "One runtime path.",
+        affected_paths: ["src/example.ts"],
+        owner_boundary: "runtime-owner",
+        acceptance_criteria: ["The focused ownership test passes."],
+        dependency_issue_numbers: [],
+        duplicate_of_issue_number: null,
+        implementation_after_issue_numbers: [],
+        pull_request_overlaps: [],
+        proposed_cohort_id: null,
+        pull_request_owner_pr_number: null,
+        review_confidence: "high",
+        lead_verification_obligations: [
+          "Re-read the decisive source before mutation.",
+        ],
+      },
+    ],
   };
 }
 
 function liveIssue(): LiveIssue {
   return {
     number: 101,
-    nodeId: 'I_kwDOExample101',
+    nodeId: "I_kwDOExample101",
     repository: REPOSITORY,
-    url: 'https://github.com/LucasQuiles/WhatSoup/issues/101',
-    title: 'Example finding',
+    url: "https://github.com/LucasQuiles/WhatSoup/issues/101",
+    title: "Example finding",
     body: OWNER_BODY,
-    labels: ['bug'],
-    state: 'open',
-    updatedAt: '2026-07-26T12:00:00Z',
+    labels: ["bug"],
+    state: "open",
+    updatedAt: "2026-07-26T12:00:00Z",
     isPullRequest: false,
   };
 }
@@ -141,23 +149,29 @@ class FakeClient implements GitHubIssueClient {
   readonly calls: string[] = [];
   liveInventory = inventory();
   issue = liveIssue();
+  capture = registryCapture();
 
   async readMainSha(): Promise<string> {
-    this.calls.push('main');
+    this.calls.push("main");
     return MAIN_SHA;
   }
 
   async readInventory(): Promise<LiveInventory> {
-    this.calls.push('inventory');
+    this.calls.push("inventory");
     return structuredClone(this.liveInventory);
   }
 
-  async readIssue(number: number): Promise<{ issue: LiveIssue; etag: string | null }> {
+  async readIssue(
+    number: number,
+  ): Promise<{ issue: LiveIssue; etag: string | null }> {
     this.calls.push(`issue:${number}`);
     return { issue: structuredClone(this.issue), etag: '"fixture-etag"' };
   }
 
-  async updateIssue(number: number, patch: IssuePatch): Promise<GitHubWriteResult> {
+  async updateIssue(
+    number: number,
+    patch: IssuePatch,
+  ): Promise<GitHubWriteResult> {
     this.calls.push(`update:${number}`);
     this.updates.push({ number, patch: structuredClone(patch) });
     this.issue = {
@@ -166,8 +180,43 @@ class FakeClient implements GitHubIssueClient {
       body: patch.body,
       labels: [...patch.labels],
     };
-    return { kind: 'success', issue: structuredClone(this.issue), etag: '"after-etag"' };
+    return {
+      kind: "success",
+      issue: structuredClone(this.issue),
+      etag: '"after-etag"',
+    };
   }
+
+  async readRegistryCapture(): Promise<RegistryCapture> {
+    this.calls.push("registry-capture");
+    return structuredClone(this.capture);
+  }
+}
+
+function registryCapture(): RegistryCapture {
+  return {
+    repository: REPOSITORY,
+    issues: [
+      {
+        number: 101,
+        nodeId: "I_kwDOExample101",
+        title: "Example finding",
+        url: "https://github.com/LucasQuiles/WhatSoup/issues/101",
+        body: OWNER_BODY,
+        updatedAt: "2026-07-26T12:00:00Z",
+        labels: ["bug"],
+      },
+    ],
+    pullRequests: [],
+    labels: utf8Sort(LIVE_LABELS),
+    pagination: {
+      issuesComplete: true,
+      pullRequestsComplete: true,
+      labelsComplete: true,
+      changedFilesComplete: true,
+      closingReferencesComplete: true,
+    },
+  };
 }
 
 interface Harness {
@@ -185,9 +234,9 @@ function harness(overrides: Partial<CliRuntime> = {}): Harness {
     runtime: {
       stdout: (text) => stdout.push(text),
       stderr: (text) => stderr.push(text),
-      now: () => '2026-07-26T14:00:00Z',
+      now: () => "2026-07-26T14:00:00Z",
       delay: async () => undefined,
-      git: () => ({ status: 0, stdout: '', stderr: '' }),
+      git: () => ({ status: 0, stdout: "", stderr: "" }),
       ...overrides,
     },
   };
@@ -195,114 +244,250 @@ function harness(overrides: Partial<CliRuntime> = {}): Harness {
 
 const roots: string[] = [];
 
-function fixtureRoot(options: { generatedView?: boolean; git?: boolean } = {}): string {
-  const root = realpathSync(mkdtempSync(join(tmpdir(), 'whatsoup-triage-cli-')));
+function fixtureRoot(
+  options: { generatedView?: boolean; git?: boolean } = {},
+): string {
+  const root = realpathSync(
+    mkdtempSync(join(tmpdir(), "whatsoup-triage-cli-")),
+  );
   roots.push(root);
-  mkdirSync(join(root, 'docs/triage/plans'), { recursive: true });
-  mkdirSync(join(root, 'docs/triage/snapshots'), { recursive: true });
+  mkdirSync(join(root, "docs/triage/plans"), { recursive: true });
+  mkdirSync(join(root, "docs/triage/reviews"), { recursive: true });
+  mkdirSync(join(root, "docs/triage/snapshots"), { recursive: true });
   writeFileSync(
-    join(root, 'docs/triage/open-issue-registry.json'),
+    join(root, "docs/triage/open-issue-registry.json"),
     canonicalRegistryJson(registry()),
   );
-  writeFileSync(join(root, 'docs/triage/open-issue-review-ledger.jsonl'), '\n');
+  writeFileSync(join(root, "docs/triage/open-issue-review-ledger.jsonl"), "\n");
+  writeFileSync(
+    join(root, "docs/publication-audit.md"),
+    [
+      "# Publication Audit",
+      "",
+      "**Total classification rows:** 4",
+      "",
+      "| Classification | Count |",
+      "|---|---:|",
+      "| PUBLIC | 4 |",
+      "| PRIVATE-ARCHIVE | 0 |",
+      "| SANITIZE | 0 |",
+      "| DELETE | 0 |",
+      "| Total | 4 |",
+      "",
+      "| Path | Classification | Rationale |",
+      "|---|---|---|",
+      "| `docs/triage/open-issue-registry.json` | PUBLIC | Fixture registry. |",
+      "| `docs/triage/open-issue-registry.md` | PUBLIC | Fixture view. |",
+      "| `docs/triage/open-issue-review-ledger.jsonl` | PUBLIC | Fixture ledger. |",
+      "| `docs/triage/reviews/refresh.json` | PUBLIC | Fixture review manifest. |",
+      "",
+    ].join("\n"),
+  );
   if (options.generatedView === true) {
     writeFileSync(
-      join(root, 'docs/triage/open-issue-registry.md'),
+      join(root, "docs/triage/open-issue-registry.md"),
       renderRegistryMarkdown(registry()),
     );
   }
   if (options.git === true) {
-    execFileSync('git', ['init'], { cwd: root });
-    execFileSync('git', ['config', 'user.name', 'Fixture'], { cwd: root });
+    execFileSync("git", ["init"], { cwd: root });
+    execFileSync("git", ["config", "user.name", "Fixture"], { cwd: root });
     execFileSync(
-      'git',
-      ['config', 'user.email', 'fixture@users.noreply.github.com'],
+      "git",
+      ["config", "user.email", "fixture@users.noreply.github.com"],
       { cwd: root },
     );
-    execFileSync('git', ['add', '.'], { cwd: root });
-    execFileSync('git', ['commit', '-m', 'fixture'], { cwd: root });
+    execFileSync("git", ["add", "."], { cwd: root });
+    execFileSync("git", ["commit", "-m", "fixture"], { cwd: root });
   }
   return root;
 }
 
+function writeRefreshManifest(root: string): string {
+  const text = `${JSON.stringify(
+    {
+      schema_version: 1,
+      repository: REPOSITORY,
+      pinned_main_revision: MAIN_SHA,
+      source_registry_sha256: registrySha256(registry()),
+      reviewed_at: "2026-07-26T13:00:00Z",
+      record_files: [],
+      removals: [],
+      retained_issue_states: [],
+      retained_overlap_states: [],
+    },
+    null,
+    2,
+  )}\n`;
+  writeFileSync(join(root, "docs/triage/reviews/refresh.json"), text);
+  return text;
+}
+
+function reconcileGit(root: string): CliRuntime["git"] {
+  const commonDirectory = `${root}-git-common`;
+  if (!existsSync(commonDirectory)) {
+    mkdirSync(commonDirectory);
+    roots.push(commonDirectory);
+  }
+  return (args) => {
+    if (args[0] === "remote" && args[1] === "get-url") {
+      return {
+        status: 0,
+        stdout: "git@github.com:LucasQuiles/WhatSoup.git\n",
+        stderr: "",
+      };
+    }
+    if (args[0] === "rev-parse" && args.includes("--git-common-dir")) {
+      return { status: 0, stdout: `${commonDirectory}\n`, stderr: "" };
+    }
+    if (args[0] === "rev-parse" && args.at(-1) === "refs/remotes/origin/main") {
+      return { status: 0, stdout: `${MAIN_SHA}\n`, stderr: "" };
+    }
+    if (args[0] === "ls-remote") {
+      return {
+        status: 0,
+        stdout: `${MAIN_SHA}\trefs/heads/main\n`,
+        stderr: "",
+      };
+    }
+    if (args[0] === "ls-files") {
+      const path = args.at(-1)!;
+      return { status: 0, stdout: `${path}\n`, stderr: "" };
+    }
+    if (args[0] === "diff") {
+      return { status: 0, stdout: "", stderr: "" };
+    }
+    return {
+      status: 1,
+      stdout: "",
+      stderr: `unexpected git command: ${args.join(" ")}`,
+    };
+  };
+}
+
 afterEach(() => {
   for (const root of roots.splice(0)) {
-    execFileSync('rm', ['-rf', root]);
+    execFileSync("rm", ["-rf", root]);
   }
 });
 
-describe('open issue triage CLI', () => {
-  it('exports an import-safe command boundary', () => {
-    expect(typeof parseArgs).toBe('function');
-    expect(typeof run).toBe('function');
+describe("open issue triage CLI", () => {
+  it("exports an import-safe command boundary", () => {
+    expect(typeof parseArgs).toBe("function");
+    expect(typeof run).toBe("function");
     expect(commandSchema()).toMatchObject({
       schema_version: 1,
-      command: 'schema',
+      command: "schema",
     });
   });
 
-  it('rejects missing confirmations, unknown commands and flags, duplicates, and bad types', () => {
-    expect(() => parseArgs([
-      'issue',
-      'apply',
-      '--registry',
-      'docs/triage/open-issue-registry.json',
-      '--plan',
-      'docs/triage/plans/batch-101.json',
-    ])).toThrow(/confirm-plan-sha256/);
-    expect(() => parseArgs([
-      'issue',
-      'dry-run',
-      '--registry',
-      'docs/triage/open-issue-registry.json',
-      '--issue-number',
-      '101',
-      '--expected-main-oid',
-      MAIN_SHA,
-      '--output',
-      'docs/triage/plans/batch-101.json',
-      '--unknown',
-    ])).toThrow(/unknown/i);
-    expect(() => parseArgs(['unknown'])).toThrow(/unknown/i);
-    expect(() => parseArgs(['check', '--registry', 'a', '--registry', 'b']))
-      .toThrow(/duplicate/i);
-    expect(() => parseArgs([
-      'snapshot',
-      '--registry',
-      'docs/triage/open-issue-registry.json',
-      '--output',
-      'docs/triage/snapshots/snapshot.json',
-      '--limit',
-      '1.5',
-    ])).toThrow(/limit/i);
-    expect(() => parseArgs(['check'])).toThrow(/registry/i);
-    expect(() => parseArgs([
-      'render',
-      '--registry',
-      'docs/triage/open-issue-registry.json',
-    ])).toThrow(/check|write/i);
-    expect(() => parseArgs([
-      'snapshot',
-      '--registry',
-      'docs/triage/open-issue-registry.json',
-      '--output',
-      'docs/triage/snapshots/example.json',
-      '--limit',
-      '-1',
-    ])).toThrow(/positive integer/i);
+  it("rejects missing confirmations, unknown commands and flags, duplicates, and bad types", () => {
+    expect(() =>
+      parseArgs([
+        "issue",
+        "apply",
+        "--registry",
+        "docs/triage/open-issue-registry.json",
+        "--plan",
+        "docs/triage/plans/batch-101.json",
+      ]),
+    ).toThrow(/confirm-plan-sha256/);
+    expect(() =>
+      parseArgs([
+        "issue",
+        "dry-run",
+        "--registry",
+        "docs/triage/open-issue-registry.json",
+        "--issue-number",
+        "101",
+        "--expected-main-oid",
+        MAIN_SHA,
+        "--output",
+        "docs/triage/plans/batch-101.json",
+        "--unknown",
+      ]),
+    ).toThrow(/unknown/i);
+    expect(() => parseArgs(["unknown"])).toThrow(/unknown/i);
+    expect(() =>
+      parseArgs(["check", "--registry", "a", "--registry", "b"]),
+    ).toThrow(/duplicate/i);
+    expect(() =>
+      parseArgs([
+        "snapshot",
+        "--registry",
+        "docs/triage/open-issue-registry.json",
+        "--output",
+        "docs/triage/snapshots/snapshot.json",
+        "--limit",
+        "1.5",
+      ]),
+    ).toThrow(/limit/i);
+    expect(() => parseArgs(["check"])).toThrow(/registry/i);
+    expect(() =>
+      parseArgs([
+        "render",
+        "--registry",
+        "docs/triage/open-issue-registry.json",
+      ]),
+    ).toThrow(/check|write/i);
+    expect(() =>
+      parseArgs([
+        "snapshot",
+        "--registry",
+        "docs/triage/open-issue-registry.json",
+        "--output",
+        "docs/triage/snapshots/example.json",
+        "--limit",
+        "-1",
+      ]),
+    ).toThrow(/positive integer/i);
+    expect(
+      parseArgs([
+        "registry",
+        "reconcile",
+        "--check",
+        "--registry",
+        "docs/triage/open-issue-registry.json",
+        "--reviews",
+        "docs/triage/reviews/open-issue-refresh-20260726.json",
+        "--snapshot",
+        "docs/triage/snapshots/open-issues-next.json",
+        "--expected-main-oid",
+        MAIN_SHA,
+      ]),
+    ).toMatchObject({ name: "registry reconcile --check" });
+    expect(() =>
+      parseArgs([
+        "registry",
+        "reconcile",
+        "--write",
+        "--registry",
+        "docs/triage/open-issue-registry.json",
+        "--reviews",
+        "docs/triage/reviews/open-issue-refresh-20260726.json",
+        "--snapshot",
+        "docs/triage/snapshots/open-issues-next.json",
+        "--expected-main-oid",
+        MAIN_SHA,
+      ]),
+    ).toThrow(/confirm-review-sha256|idempotency-key/i);
   });
 
-  it('discovers compact schemas fully offline with TTY-independent JSON and effects', async () => {
+  it("discovers compact schemas fully offline with TTY-independent JSON and effects", async () => {
     const client = new FakeClient();
     const nonTty = harness({ isTTY: false });
     const tty = harness({ isTTY: true });
 
-    expect(await run(['schema'], '/does/not/exist', client, nonTty.runtime)).toBe(0);
-    expect(await run(['schema'], '/does/not/exist', client, tty.runtime)).toBe(0);
+    expect(
+      await run(["schema"], "/does/not/exist", client, nonTty.runtime),
+    ).toBe(0);
+    expect(await run(["schema"], "/does/not/exist", client, tty.runtime)).toBe(
+      0,
+    );
     expect(nonTty.stdout).toEqual(tty.stdout);
     expect(nonTty.stderr).toEqual([]);
     expect(client.calls).toEqual([]);
-    const document = JSON.parse(nonTty.stdout.join('')) as {
+    const document = JSON.parse(nonTty.stdout.join("")) as {
       commands: Array<{
         name: string;
         effects: Record<string, boolean>;
@@ -313,145 +498,204 @@ describe('open issue triage CLI', () => {
       }>;
     };
     expect(document.commands.map((command) => command.name)).toEqual([
-      'check',
-      'issue apply',
-      'issue dry-run',
-      'issue re-read',
-      'render --check',
-      'render --write',
-      'schema',
-      'snapshot',
+      "check",
+      "issue apply",
+      "issue dry-run",
+      "issue re-read",
+      "registry reconcile --check",
+      "registry reconcile --write",
+      "render --check",
+      "render --write",
+      "schema",
+      "snapshot",
     ]);
-    expect(document.commands.every((command) =>
-      Object.keys(command.effects).sort().join(',') ===
-        'destructive,idempotent,open_world,read_only,supports_dry_run')).toBe(true);
-    expect(document.commands.every((command) =>
-      command.input_schema !== undefined
-      && command.output_schema !== undefined
-      && command.confirmation !== undefined
-      && command.retry !== undefined)).toBe(true);
-    const apply = document.commands.find((command) => command.name === 'issue apply')!;
+    expect(
+      document.commands.every(
+        (command) =>
+          Object.keys(command.effects).sort().join(",") ===
+          "destructive,idempotent,open_world,read_only,supports_dry_run",
+      ),
+    ).toBe(true);
+    expect(
+      document.commands.every(
+        (command) =>
+          command.input_schema !== undefined &&
+          command.output_schema !== undefined &&
+          command.confirmation !== undefined &&
+          command.retry !== undefined,
+      ),
+    ).toBe(true);
+    const apply = document.commands.find(
+      (command) => command.name === "issue apply",
+    )!;
     expect(apply.effects.supports_dry_run).toBe(false);
     expect(apply.input_schema).toMatchObject({
       properties: {
         plan: {
-          pattern: '^docs\\/triage\\/plans\\/[A-Za-z0-9][A-Za-z0-9._-]{0,127}\\.json$',
+          pattern:
+            "^docs\\/triage\\/plans\\/[A-Za-z0-9][A-Za-z0-9._-]{0,127}\\.json$",
         },
       },
     });
-    const reRead = document.commands.find((command) => command.name === 'issue re-read')!;
+    const reRead = document.commands.find(
+      (command) => command.name === "issue re-read",
+    )!;
     expect(reRead.input_schema).toMatchObject({
       properties: {
         plan: {
-          pattern: '^docs\\/triage\\/plans\\/[A-Za-z0-9][A-Za-z0-9._-]{0,127}\\.json$',
+          pattern:
+            "^docs\\/triage\\/plans\\/[A-Za-z0-9][A-Za-z0-9._-]{0,127}\\.json$",
         },
       },
     });
-    const schema = document.commands.find((command) => command.name === 'schema')!;
+    const schema = document.commands.find(
+      (command) => command.name === "schema",
+    )!;
     expect(schema.output_schema).toMatchObject({
-      required: expect.arrayContaining(['commands']),
-      properties: { commands: { type: 'array' } },
+      required: expect.arrayContaining(["commands"]),
+      properties: { commands: { type: "array" } },
     });
   });
 
-  it('checks registry, empty ledger, hash chain, and generated Markdown entirely offline', async () => {
+  it("checks registry, empty ledger, hash chain, and generated Markdown entirely offline", async () => {
     const root = fixtureRoot({ generatedView: true });
     const client = new FakeClient();
     const io = harness();
 
-    expect(await run([
-      'check',
-      '--registry',
-      'docs/triage/open-issue-registry.json',
-    ], root, client, io.runtime)).toBe(0);
+    expect(
+      await run(
+        ["check", "--registry", "docs/triage/open-issue-registry.json"],
+        root,
+        client,
+        io.runtime,
+      ),
+    ).toBe(0);
     expect(client.calls).toEqual([]);
     expect(io.stderr).toEqual([]);
 
-    writeFileSync(join(root, 'docs/triage/open-issue-registry.md'), '# drift\n');
+    writeFileSync(
+      join(root, "docs/triage/open-issue-registry.md"),
+      "# drift\n",
+    );
     const drift = harness();
-    expect(await run([
-      'render',
-      '--check',
-      '--registry',
-      'docs/triage/open-issue-registry.json',
-    ], root, client, drift.runtime)).toBe(1);
+    expect(
+      await run(
+        [
+          "render",
+          "--check",
+          "--registry",
+          "docs/triage/open-issue-registry.json",
+        ],
+        root,
+        client,
+        drift.runtime,
+      ),
+    ).toBe(1);
     expect(drift.stdout).toEqual([]);
-    expect(JSON.parse(drift.stderr.join(''))).toMatchObject({
-      kind: 'generated-view-drift',
+    expect(JSON.parse(drift.stderr.join(""))).toMatchObject({
+      kind: "generated-view-drift",
       retryable: false,
     });
     expect(client.calls).toEqual([]);
   });
 
-  it('writes the generated view only through the explicit render mutation', async () => {
+  it("writes the generated view only through the explicit render mutation", async () => {
     const root = fixtureRoot();
     const client = new FakeClient();
     const io = harness();
-    const output = join(root, 'docs/triage/open-issue-registry.md');
+    const output = join(root, "docs/triage/open-issue-registry.md");
 
     expect(existsSync(output)).toBe(false);
-    expect(await run([
-      'render',
-      '--write',
-      '--registry',
-      'docs/triage/open-issue-registry.json',
-    ], root, client, io.runtime)).toBe(0);
-    expect(readFileSync(output, 'utf8')).toBe(renderRegistryMarkdown(registry()));
+    expect(
+      await run(
+        [
+          "render",
+          "--write",
+          "--registry",
+          "docs/triage/open-issue-registry.json",
+        ],
+        root,
+        client,
+        io.runtime,
+      ),
+    ).toBe(0);
+    expect(readFileSync(output, "utf8")).toBe(
+      renderRegistryMarkdown(registry()),
+    );
     expect(client.calls).toEqual([]);
 
-    writeFileSync(output, '# stale generated view\n');
+    writeFileSync(output, "# stale generated view\n");
     const rewrite = harness();
-    expect(await run([
-      'render',
-      '--write',
-      '--registry',
-      'docs/triage/open-issue-registry.json',
-    ], root, client, rewrite.runtime)).toBe(0);
-    expect(readFileSync(output, 'utf8')).toBe(renderRegistryMarkdown(registry()));
+    expect(
+      await run(
+        [
+          "render",
+          "--write",
+          "--registry",
+          "docs/triage/open-issue-registry.json",
+        ],
+        root,
+        client,
+        rewrite.runtime,
+      ),
+    ).toBe(0);
+    expect(readFileSync(output, "utf8")).toBe(
+      renderRegistryMarkdown(registry()),
+    );
 
     unlinkSync(output);
-    symlinkSync('missing-target.md', output);
+    symlinkSync("missing-target.md", output);
     const dangling = harness();
-    expect(await run([
-      'render',
-      '--write',
-      '--registry',
-      'docs/triage/open-issue-registry.json',
-    ], root, client, dangling.runtime)).toBe(4);
-    expect(JSON.parse(dangling.stderr.join(''))).toMatchObject({
-      kind: 'unsafe-generated-view',
+    expect(
+      await run(
+        [
+          "render",
+          "--write",
+          "--registry",
+          "docs/triage/open-issue-registry.json",
+        ],
+        root,
+        client,
+        dangling.runtime,
+      ),
+    ).toBe(4);
+    expect(JSON.parse(dangling.stderr.join(""))).toMatchObject({
+      kind: "unsafe-generated-view",
       retryable: false,
     });
   });
 
-  it('creates a body-free dry-run plan exclusively and never PATCHes', async () => {
+  it("creates a body-free dry-run plan exclusively and never PATCHes", async () => {
     const root = fixtureRoot();
     const client = new FakeClient();
     const io = harness();
     const args = [
-      'issue',
-      'dry-run',
-      '--registry',
-      'docs/triage/open-issue-registry.json',
-      '--issue-number',
-      '101',
-      '--expected-main-oid',
+      "issue",
+      "dry-run",
+      "--registry",
+      "docs/triage/open-issue-registry.json",
+      "--issue-number",
+      "101",
+      "--expected-main-oid",
       MAIN_SHA,
-      '--output',
-      'docs/triage/plans/batch-101.json',
+      "--output",
+      "docs/triage/plans/batch-101.json",
     ];
 
     expect(await run(args, root, client, io.runtime)).toBe(0);
     expect(client.updates).toEqual([]);
-    const artifact = readFileSync(join(root, 'docs/triage/plans/batch-101.json'), 'utf8');
+    const artifact = readFileSync(
+      join(root, "docs/triage/plans/batch-101.json"),
+      "utf8",
+    );
     expect(artifact).not.toContain(OWNER_BODY.trim());
     expect(artifact).not.toContain('"body":');
-    expect(JSON.parse(io.stdout.join(''))).toMatchObject({
+    expect(JSON.parse(io.stdout.join(""))).toMatchObject({
       schema_version: 1,
       ok: true,
-      command: 'issue dry-run',
+      command: "issue dry-run",
       summary: {
-        artifact_path: 'docs/triage/plans/batch-101.json',
+        artifact_path: "docs/triage/plans/batch-101.json",
         issue_numbers: [101],
       },
     });
@@ -459,201 +703,266 @@ describe('open issue triage CLI', () => {
     const second = harness();
     expect(await run(args, root, client, second.runtime)).toBe(4);
     expect(second.stdout).toEqual([]);
-    expect(JSON.parse(second.stderr.join(''))).toMatchObject({
-      kind: 'artifact-exists',
+    expect(JSON.parse(second.stderr.join(""))).toMatchObject({
+      kind: "artifact-exists",
       retryable: false,
     });
   });
 
-  it('re-reads only a tracked, clean, digest-valid plan bound to the registry', async () => {
+  it("re-reads only a tracked, clean, digest-valid plan bound to the registry", async () => {
     const root = fixtureRoot();
     const client = new FakeClient();
-    const output = 'docs/triage/plans/batch-101.json';
+    const output = "docs/triage/plans/batch-101.json";
     const planned = harness();
 
-    expect(await run([
-      'issue',
-      'dry-run',
-      '--registry',
-      'docs/triage/open-issue-registry.json',
-      '--issue-number',
-      '101',
-      '--expected-main-oid',
-      MAIN_SHA,
-      '--output',
-      output,
-    ], root, client, planned.runtime)).toBe(0);
+    expect(
+      await run(
+        [
+          "issue",
+          "dry-run",
+          "--registry",
+          "docs/triage/open-issue-registry.json",
+          "--issue-number",
+          "101",
+          "--expected-main-oid",
+          MAIN_SHA,
+          "--output",
+          output,
+        ],
+        root,
+        client,
+        planned.runtime,
+      ),
+    ).toBe(0);
 
-    const cleanGit = (gitArgs: string[]) => gitArgs[0] === 'ls-files'
-      ? { status: 0, stdout: `${output}\n`, stderr: '' }
-      : { status: 0, stdout: '', stderr: '' };
+    const cleanGit = (gitArgs: string[]) =>
+      gitArgs[0] === "ls-files"
+        ? { status: 0, stdout: `${output}\n`, stderr: "" }
+        : { status: 0, stdout: "", stderr: "" };
     const reread = harness({ git: cleanGit });
-    expect(await run([
-      'issue',
-      're-read',
-      '--registry',
-      'docs/triage/open-issue-registry.json',
-      '--plan',
-      output,
-    ], root, client, reread.runtime)).toBe(0);
-    expect(JSON.parse(reread.stdout.join(''))).toMatchObject({
+    expect(
+      await run(
+        [
+          "issue",
+          "re-read",
+          "--registry",
+          "docs/triage/open-issue-registry.json",
+          "--plan",
+          output,
+        ],
+        root,
+        client,
+        reread.runtime,
+      ),
+    ).toBe(0);
+    expect(JSON.parse(reread.stdout.join(""))).toMatchObject({
       summary: {
-        status: 'review-required',
-        issues: [{ issue_number: 101, state: 'before' }],
+        status: "review-required",
+        issues: [{ issue_number: 101, state: "before" }],
       },
     });
 
     const originalIssue = structuredClone(client.issue);
     for (const identityDrift of [
-      { nodeId: 'I_kwDODifferent' },
-      { repository: 'LucasQuiles/Different' },
-      { url: 'https://github.com/LucasQuiles/WhatSoup/issues/999' },
-      { state: 'closed' as const },
+      { nodeId: "I_kwDODifferent" },
+      { repository: "LucasQuiles/Different" },
+      { url: "https://github.com/LucasQuiles/WhatSoup/issues/999" },
+      { state: "closed" as const },
       { isPullRequest: true },
     ]) {
       client.issue = { ...originalIssue, ...identityDrift };
       const drifted = harness({ git: cleanGit });
-      expect(await run([
-        'issue',
-        're-read',
-        '--registry',
-        'docs/triage/open-issue-registry.json',
-        '--plan',
-        output,
-      ], root, client, drifted.runtime)).toBe(0);
-      expect(JSON.parse(drifted.stdout.join(''))).toMatchObject({
+      expect(
+        await run(
+          [
+            "issue",
+            "re-read",
+            "--registry",
+            "docs/triage/open-issue-registry.json",
+            "--plan",
+            output,
+          ],
+          root,
+          client,
+          drifted.runtime,
+        ),
+      ).toBe(0);
+      expect(JSON.parse(drifted.stdout.join(""))).toMatchObject({
         summary: {
-          status: 'review-required',
-          issues: [{ issue_number: 101, state: 'third-state' }],
+          status: "review-required",
+          issues: [{ issue_number: 101, state: "third-state" }],
         },
       });
     }
     client.issue = originalIssue;
 
     const planPath = join(root, output);
-    const forged = JSON.parse(readFileSync(planPath, 'utf8')) as Array<Record<string, unknown>>;
-    forged[0]!.issue_node_id = 'I_kwDOForged';
+    const forged = JSON.parse(readFileSync(planPath, "utf8")) as Array<
+      Record<string, unknown>
+    >;
+    forged[0]!.issue_node_id = "I_kwDOForged";
     writeFileSync(planPath, `${JSON.stringify(forged)}\n`);
     const invalid = harness({ git: cleanGit });
-    expect(await run([
-      'issue',
-      're-read',
-      '--registry',
-      'docs/triage/open-issue-registry.json',
-      '--plan',
-      output,
-    ], root, client, invalid.runtime)).toBe(3);
+    expect(
+      await run(
+        [
+          "issue",
+          "re-read",
+          "--registry",
+          "docs/triage/open-issue-registry.json",
+          "--plan",
+          output,
+        ],
+        root,
+        client,
+        invalid.runtime,
+      ),
+    ).toBe(3);
 
     const untracked = harness({
-      git: () => ({ status: 1, stdout: '', stderr: '' }),
+      git: () => ({ status: 1, stdout: "", stderr: "" }),
     });
-    expect(await run([
-      'issue',
-      're-read',
-      '--registry',
-      'docs/triage/open-issue-registry.json',
-      '--plan',
-      output,
-    ], root, client, untracked.runtime)).toBe(4);
+    expect(
+      await run(
+        [
+          "issue",
+          "re-read",
+          "--registry",
+          "docs/triage/open-issue-registry.json",
+          "--plan",
+          output,
+        ],
+        root,
+        client,
+        untracked.runtime,
+      ),
+    ).toBe(4);
     expect(client.updates).toEqual([]);
   });
 
-  it('classifies unsafe live-body rendering as a public-safety rejection', async () => {
+  it("classifies unsafe live-body rendering as a public-safety rejection", async () => {
     const root = fixtureRoot();
     const client = new FakeClient();
-    const unsafeBody = ['Owner path: ', 'Users', 'privateoperator', 'project'].join('/');
+    const unsafeBody = [
+      "Owner path: ",
+      "Users",
+      "privateoperator",
+      "project",
+    ].join("/");
     client.issue.body = unsafeBody;
     const updatedRegistry = registry();
     updatedRegistry.issues[0]!.pre_review_body_sha256 = sha256(unsafeBody);
     writeFileSync(
-      join(root, 'docs/triage/open-issue-registry.json'),
+      join(root, "docs/triage/open-issue-registry.json"),
       canonicalRegistryJson(updatedRegistry),
     );
     const io = harness();
 
-    expect(await run([
-      'issue',
-      'dry-run',
-      '--registry',
-      'docs/triage/open-issue-registry.json',
-      '--issue-number',
-      '101',
-      '--expected-main-oid',
-      MAIN_SHA,
-      '--output',
-      'docs/triage/plans/unsafe.json',
-    ], root, client, io.runtime)).toBe(4);
+    expect(
+      await run(
+        [
+          "issue",
+          "dry-run",
+          "--registry",
+          "docs/triage/open-issue-registry.json",
+          "--issue-number",
+          "101",
+          "--expected-main-oid",
+          MAIN_SHA,
+          "--output",
+          "docs/triage/plans/unsafe.json",
+        ],
+        root,
+        client,
+        io.runtime,
+      ),
+    ).toBe(4);
     expect(io.stdout).toEqual([]);
-    expect(JSON.parse(io.stderr.join(''))).toMatchObject({
-      kind: 'public-safety-rejection',
+    expect(JSON.parse(io.stderr.join(""))).toMatchObject({
+      kind: "public-safety-rejection",
       retryable: false,
     });
     expect(client.updates).toEqual([]);
   });
 
-  it('rejects escaped, symlinked, and hardlinked output surfaces', async () => {
+  it("rejects escaped, symlinked, and hardlinked output surfaces", async () => {
     const root = fixtureRoot();
     const client = new FakeClient();
     const common = [
-      'issue',
-      'dry-run',
-      '--registry',
-      'docs/triage/open-issue-registry.json',
-      '--issue-number',
-      '101',
-      '--expected-main-oid',
+      "issue",
+      "dry-run",
+      "--registry",
+      "docs/triage/open-issue-registry.json",
+      "--issue-number",
+      "101",
+      "--expected-main-oid",
       MAIN_SHA,
     ];
 
     const escaped = harness();
-    expect(await run([
-      ...common,
-      '--output',
-      '../outside.json',
-    ], root, client, escaped.runtime)).toBe(4);
+    expect(
+      await run(
+        [...common, "--output", "../outside.json"],
+        root,
+        client,
+        escaped.runtime,
+      ),
+    ).toBe(4);
 
-    const real = join(root, 'docs/triage/real-plans');
+    const real = join(root, "docs/triage/real-plans");
     mkdirSync(real);
-    symlinkSync(real, join(root, 'docs/triage/plans-link'));
+    symlinkSync(real, join(root, "docs/triage/plans-link"));
     const symlinked = harness();
-    expect(await run([
-      ...common,
-      '--output',
-      'docs/triage/plans-link/batch.json',
-    ], root, client, symlinked.runtime)).toBe(4);
+    expect(
+      await run(
+        [...common, "--output", "docs/triage/plans-link/batch.json"],
+        root,
+        client,
+        symlinked.runtime,
+      ),
+    ).toBe(4);
 
-    const existing = join(root, 'docs/triage/plans/existing.json');
-    writeFileSync(existing, '');
-    linkSync(existing, join(root, 'docs/triage/plans/alias.json'));
+    const existing = join(root, "docs/triage/plans/existing.json");
+    writeFileSync(existing, "");
+    linkSync(existing, join(root, "docs/triage/plans/alias.json"));
     const hardlinked = harness();
-    expect(await run([
-      ...common,
-      '--output',
-      'docs/triage/plans/alias.json',
-    ], root, client, hardlinked.runtime)).toBe(4);
+    expect(
+      await run(
+        [...common, "--output", "docs/triage/plans/alias.json"],
+        root,
+        client,
+        hardlinked.runtime,
+      ),
+    ).toBe(4);
 
-    symlinkSync('missing-target.json', join(root, 'docs/triage/plans/dangling.json'));
+    symlinkSync(
+      "missing-target.json",
+      join(root, "docs/triage/plans/dangling.json"),
+    );
     const dangling = harness();
-    expect(await run([
-      ...common,
-      '--output',
-      'docs/triage/plans/dangling.json',
-    ], root, client, dangling.runtime)).toBe(4);
-    expect(JSON.parse(dangling.stderr.join(''))).toMatchObject({
-      kind: 'artifact-exists',
+    expect(
+      await run(
+        [...common, "--output", "docs/triage/plans/dangling.json"],
+        root,
+        client,
+        dangling.runtime,
+      ),
+    ).toBe(4);
+    expect(JSON.parse(dangling.stderr.join(""))).toMatchObject({
+      kind: "artifact-exists",
       retryable: false,
     });
     expect(client.updates).toEqual([]);
   });
 
-  it('fails closed when the plans ancestor is swapped before artifact open', async () => {
+  it("fails closed when the plans ancestor is swapped before artifact open", async () => {
     const root = fixtureRoot();
     const external = fixtureRoot();
-    const sentinel = join(external, 'sentinel.txt');
-    writeFileSync(sentinel, 'unchanged\n');
-    const plans = join(root, 'docs/triage/plans');
-    const displaced = join(root, 'docs/triage/plans-displaced');
-    const output = 'docs/triage/plans/before-open.json';
+    const sentinel = join(external, "sentinel.txt");
+    writeFileSync(sentinel, "unchanged\n");
+    const plans = join(root, "docs/triage/plans");
+    const displaced = join(root, "docs/triage/plans-displaced");
+    const output = "docs/triage/plans/before-open.json";
     const client = new FakeClient();
     const io = harness({
       artifactHooks: {
@@ -664,164 +973,219 @@ describe('open issue triage CLI', () => {
       },
     });
 
-    expect(await run([
-      'issue',
-      'dry-run',
-      '--registry',
-      'docs/triage/open-issue-registry.json',
-      '--issue-number',
-      '101',
-      '--expected-main-oid',
-      MAIN_SHA,
-      '--output',
-      output,
-    ], root, client, io.runtime)).toBe(4);
-    expect(JSON.parse(io.stderr.join(''))).toMatchObject({
-      kind: 'artifact-identity-changed',
+    expect(
+      await run(
+        [
+          "issue",
+          "dry-run",
+          "--registry",
+          "docs/triage/open-issue-registry.json",
+          "--issue-number",
+          "101",
+          "--expected-main-oid",
+          MAIN_SHA,
+          "--output",
+          output,
+        ],
+        root,
+        client,
+        io.runtime,
+      ),
+    ).toBe(4);
+    expect(JSON.parse(io.stderr.join(""))).toMatchObject({
+      kind: "artifact-identity-changed",
       retryable: false,
     });
-    expect(readFileSync(sentinel, 'utf8')).toBe('unchanged\n');
-    expect(existsSync(join(external, 'before-open.json'))).toBe(false);
+    expect(readFileSync(sentinel, "utf8")).toBe("unchanged\n");
+    expect(existsSync(join(external, "before-open.json"))).toBe(false);
     expect(client.updates).toEqual([]);
   });
 
-  it('does not create a leaf through a symlinked ancestor before rejecting it', async () => {
-    const root = realpathSync(mkdtempSync(join(tmpdir(), 'whatsoup-triage-cli-')));
-    const external = realpathSync(mkdtempSync(join(tmpdir(), 'whatsoup-triage-external-')));
+  it("does not create a leaf through a symlinked ancestor before rejecting it", async () => {
+    const root = realpathSync(
+      mkdtempSync(join(tmpdir(), "whatsoup-triage-cli-")),
+    );
+    const external = realpathSync(
+      mkdtempSync(join(tmpdir(), "whatsoup-triage-external-")),
+    );
     roots.push(root, external);
-    mkdirSync(join(root, 'docs'));
-    symlinkSync(external, join(root, 'docs/triage'));
-    writeFileSync(join(root, 'registry.json'), canonicalRegistryJson(registry()));
+    mkdirSync(join(root, "docs"));
+    symlinkSync(external, join(root, "docs/triage"));
+    writeFileSync(
+      join(root, "registry.json"),
+      canonicalRegistryJson(registry()),
+    );
     const client = new FakeClient();
     const io = harness();
 
-    expect(await run([
-      'issue',
-      'dry-run',
-      '--registry',
-      'registry.json',
-      '--issue-number',
-      '101',
-      '--expected-main-oid',
-      MAIN_SHA,
-      '--output',
-      'docs/triage/plans/no-external-write.json',
-    ], root, client, io.runtime)).toBe(4);
-    expect(JSON.parse(io.stderr.join(''))).toMatchObject({
-      kind: 'unsafe-path',
+    expect(
+      await run(
+        [
+          "issue",
+          "dry-run",
+          "--registry",
+          "registry.json",
+          "--issue-number",
+          "101",
+          "--expected-main-oid",
+          MAIN_SHA,
+          "--output",
+          "docs/triage/plans/no-external-write.json",
+        ],
+        root,
+        client,
+        io.runtime,
+      ),
+    ).toBe(4);
+    expect(JSON.parse(io.stderr.join(""))).toMatchObject({
+      kind: "unsafe-path",
       retryable: false,
     });
-    expect(existsSync(join(external, 'plans'))).toBe(false);
+    expect(existsSync(join(external, "plans"))).toBe(false);
     expect(client.updates).toEqual([]);
   });
 
-  it('refuses an artifact write while a cooperating writer lock exists', async () => {
+  it("refuses an artifact write while a cooperating writer lock exists", async () => {
     const root = fixtureRoot();
-    const lock = join(root, '.open-issue-triage-artifact-write.lock');
-    const held = acquireProcessLock(lock, { token: 'held-artifact-writer' });
+    const lock = join(root, ".open-issue-triage-artifact-write.lock");
+    const held = acquireProcessLock(lock, { token: "held-artifact-writer" });
     const client = new FakeClient();
     const io = harness();
 
     try {
-      expect(await run([
-        'issue',
-        'dry-run',
-        '--registry',
-        'docs/triage/open-issue-registry.json',
-        '--issue-number',
-        '101',
-        '--expected-main-oid',
-        MAIN_SHA,
-        '--output',
-        'docs/triage/plans/locked.json',
-      ], root, client, io.runtime)).toBe(4);
-      expect(JSON.parse(io.stderr.join(''))).toMatchObject({
-        kind: 'artifact-write-locked',
+      expect(
+        await run(
+          [
+            "issue",
+            "dry-run",
+            "--registry",
+            "docs/triage/open-issue-registry.json",
+            "--issue-number",
+            "101",
+            "--expected-main-oid",
+            MAIN_SHA,
+            "--output",
+            "docs/triage/plans/locked.json",
+          ],
+          root,
+          client,
+          io.runtime,
+        ),
+      ).toBe(4);
+      expect(JSON.parse(io.stderr.join(""))).toMatchObject({
+        kind: "artifact-write-locked",
         retryable: true,
       });
-      expect(existsSync(join(root, 'docs/triage/plans/locked.json'))).toBe(false);
+      expect(existsSync(join(root, "docs/triage/plans/locked.json"))).toBe(
+        false,
+      );
       expect(client.updates).toEqual([]);
     } finally {
       expect(releaseProcessLock(held)).toBe(true);
     }
   });
 
-  it('recovers a dead same-boot artifact writer lock without operator cleanup', async () => {
+  it("recovers a dead same-boot artifact writer lock without operator cleanup", async () => {
     const root = fixtureRoot();
-    const lock = join(root, '.open-issue-triage-artifact-write.lock');
-    const deadChild = execFileSync(process.execPath, ['-e', 'process.stdout.write(String(process.pid))'], {
-      encoding: 'utf8',
-    });
-    writeFileSync(lock, JSON.stringify({
-      pid: Number(deadChild),
-      token: 'dead-artifact-writer',
-      startedAt: '2026-07-26T14:00:00.000Z',
-      bootId: getCurrentBootId(),
-    }));
+    const lock = join(root, ".open-issue-triage-artifact-write.lock");
+    const deadChild = execFileSync(
+      process.execPath,
+      ["-e", "process.stdout.write(String(process.pid))"],
+      {
+        encoding: "utf8",
+      },
+    );
+    writeFileSync(
+      lock,
+      JSON.stringify({
+        pid: Number(deadChild),
+        token: "dead-artifact-writer",
+        startedAt: "2026-07-26T14:00:00.000Z",
+        bootId: getCurrentBootId(),
+      }),
+    );
     const client = new FakeClient();
     const io = harness();
 
-    expect(await run([
-      'issue',
-      'dry-run',
-      '--registry',
-      'docs/triage/open-issue-registry.json',
-      '--issue-number',
-      '101',
-      '--expected-main-oid',
-      MAIN_SHA,
-      '--output',
-      'docs/triage/plans/recovered.json',
-    ], root, client, io.runtime)).toBe(0);
-    expect(existsSync(join(root, 'docs/triage/plans/recovered.json'))).toBe(true);
+    expect(
+      await run(
+        [
+          "issue",
+          "dry-run",
+          "--registry",
+          "docs/triage/open-issue-registry.json",
+          "--issue-number",
+          "101",
+          "--expected-main-oid",
+          MAIN_SHA,
+          "--output",
+          "docs/triage/plans/recovered.json",
+        ],
+        root,
+        client,
+        io.runtime,
+      ),
+    ).toBe(0);
+    expect(existsSync(join(root, "docs/triage/plans/recovered.json"))).toBe(
+      true,
+    );
     expect(existsSync(lock)).toBe(false);
     expect(client.updates).toEqual([]);
   });
 
-  it('rejects an identical-payload artifact lock replacement before artifact open', async () => {
+  it("rejects an identical-payload artifact lock replacement before artifact open", async () => {
     const root = fixtureRoot();
-    const lock = join(root, '.open-issue-triage-artifact-write.lock');
+    const lock = join(root, ".open-issue-triage-artifact-write.lock");
     const displaced = `${lock}.displaced`;
     const client = new FakeClient();
     const io = harness({
       artifactHooks: {
         beforeOpen: () => {
-          const payload = readFileSync(lock, 'utf8');
+          const payload = readFileSync(lock, "utf8");
           renameSync(lock, displaced);
           writeFileSync(lock, payload, { mode: 0o600 });
         },
       },
     });
 
-    expect(await run([
-      'issue',
-      'dry-run',
-      '--registry',
-      'docs/triage/open-issue-registry.json',
-      '--issue-number',
-      '101',
-      '--expected-main-oid',
-      MAIN_SHA,
-      '--output',
-      'docs/triage/plans/replaced-lock.json',
-    ], root, client, io.runtime)).toBe(4);
-    expect(JSON.parse(io.stderr.join(''))).toMatchObject({
-      kind: 'artifact-identity-changed',
+    expect(
+      await run(
+        [
+          "issue",
+          "dry-run",
+          "--registry",
+          "docs/triage/open-issue-registry.json",
+          "--issue-number",
+          "101",
+          "--expected-main-oid",
+          MAIN_SHA,
+          "--output",
+          "docs/triage/plans/replaced-lock.json",
+        ],
+        root,
+        client,
+        io.runtime,
+      ),
+    ).toBe(4);
+    expect(JSON.parse(io.stderr.join(""))).toMatchObject({
+      kind: "artifact-identity-changed",
       retryable: false,
     });
-    expect(existsSync(join(root, 'docs/triage/plans/replaced-lock.json'))).toBe(false);
+    expect(existsSync(join(root, "docs/triage/plans/replaced-lock.json"))).toBe(
+      false,
+    );
     expect(client.updates).toEqual([]);
   });
 
-  it('fails closed when the triage ancestor is swapped after open before mutation', async () => {
+  it("fails closed when the triage ancestor is swapped after open before mutation", async () => {
     const root = fixtureRoot();
     const external = fixtureRoot();
-    mkdirSync(join(external, 'plans'), { recursive: true });
-    const sentinel = join(external, 'sentinel.txt');
-    writeFileSync(sentinel, 'unchanged\n');
-    const triage = join(root, 'docs/triage');
-    const displaced = join(root, 'docs/triage-displaced');
-    const output = 'docs/triage/plans/after-open.json';
+    mkdirSync(join(external, "plans"), { recursive: true });
+    const sentinel = join(external, "sentinel.txt");
+    writeFileSync(sentinel, "unchanged\n");
+    const triage = join(root, "docs/triage");
+    const displaced = join(root, "docs/triage-displaced");
+    const output = "docs/triage/plans/after-open.json";
     const client = new FakeClient();
     const io = harness({
       artifactHooks: {
@@ -832,124 +1196,152 @@ describe('open issue triage CLI', () => {
       },
     });
 
-    expect(await run([
-      'issue',
-      'dry-run',
-      '--registry',
-      'docs/triage/open-issue-registry.json',
-      '--issue-number',
-      '101',
-      '--expected-main-oid',
-      MAIN_SHA,
-      '--output',
-      output,
-    ], root, client, io.runtime)).toBe(4);
-    expect(JSON.parse(io.stderr.join(''))).toMatchObject({
-      kind: 'artifact-identity-changed',
+    expect(
+      await run(
+        [
+          "issue",
+          "dry-run",
+          "--registry",
+          "docs/triage/open-issue-registry.json",
+          "--issue-number",
+          "101",
+          "--expected-main-oid",
+          MAIN_SHA,
+          "--output",
+          output,
+        ],
+        root,
+        client,
+        io.runtime,
+      ),
+    ).toBe(4);
+    expect(JSON.parse(io.stderr.join(""))).toMatchObject({
+      kind: "artifact-identity-changed",
       retryable: false,
     });
-    expect(readFileSync(sentinel, 'utf8')).toBe('unchanged\n');
-    expect(existsSync(join(external, 'plans/after-open.json'))).toBe(false);
+    expect(readFileSync(sentinel, "utf8")).toBe("unchanged\n");
+    expect(existsSync(join(external, "plans/after-open.json"))).toBe(false);
     expect(client.updates).toEqual([]);
   });
 
-  it('supports bounded inventory projection without leaking unrequested fields', async () => {
+  it("supports bounded inventory projection without leaking unrequested fields", async () => {
     const root = fixtureRoot();
     const client = new FakeClient();
-    client.liveInventory = inventory(Array.from({ length: 50 }, (_, index) => index + 1));
+    client.liveInventory = inventory(
+      Array.from({ length: 50 }, (_, index) => index + 1),
+    );
     const io = harness();
 
-    expect(await run([
-      'snapshot',
-      '--registry',
-      'docs/triage/open-issue-registry.json',
-      '--output',
-      'docs/triage/snapshots/projected.json',
-      '--fields',
-      'counts,open_issue_numbers',
-      '--limit',
-      '3',
-    ], root, client, io.runtime)).toBe(0);
+    expect(
+      await run(
+        [
+          "snapshot",
+          "--registry",
+          "docs/triage/open-issue-registry.json",
+          "--output",
+          "docs/triage/snapshots/projected.json",
+          "--fields",
+          "counts,open_issue_numbers",
+          "--limit",
+          "3",
+        ],
+        root,
+        client,
+        io.runtime,
+      ),
+    ).toBe(0);
     const snapshot = JSON.parse(
-      readFileSync(join(root, 'docs/triage/snapshots/projected.json'), 'utf8'),
+      readFileSync(join(root, "docs/triage/snapshots/projected.json"), "utf8"),
     ) as Record<string, unknown>;
     expect(snapshot).toMatchObject({
       schema_version: 1,
-      fields: ['counts', 'open_issue_numbers'],
+      fields: ["counts", "open_issue_numbers"],
       open_issue_numbers: [1, 2, 3],
       truncated: { open_issue_numbers: true },
     });
-    expect(snapshot).not.toHaveProperty('labels');
-    expect(snapshot).not.toHaveProperty('open_pull_requests');
+    expect(snapshot).not.toHaveProperty("labels");
+    expect(snapshot).not.toHaveProperty("open_pull_requests");
     expect(io.stderr).toEqual([]);
   });
 
-  it('applies a tracked clean plan once and emits only body-free receipt summaries', async () => {
+  it("applies a tracked clean plan once and emits only body-free receipt summaries", async () => {
     const root = fixtureRoot();
     const client = new FakeClient();
-    const output = 'docs/triage/plans/apply-101.json';
+    const output = "docs/triage/plans/apply-101.json";
     const planned = harness();
-    expect(await run([
-      'issue',
-      'dry-run',
-      '--registry',
-      'docs/triage/open-issue-registry.json',
-      '--issue-number',
-      '101',
-      '--expected-main-oid',
-      MAIN_SHA,
-      '--output',
-      output,
-    ], root, client, planned.runtime)).toBe(0);
-    const plans = JSON.parse(readFileSync(join(root, output), 'utf8')) as Array<{
+    expect(
+      await run(
+        [
+          "issue",
+          "dry-run",
+          "--registry",
+          "docs/triage/open-issue-registry.json",
+          "--issue-number",
+          "101",
+          "--expected-main-oid",
+          MAIN_SHA,
+          "--output",
+          output,
+        ],
+        root,
+        client,
+        planned.runtime,
+      ),
+    ).toBe(0);
+    const plans = JSON.parse(
+      readFileSync(join(root, output), "utf8"),
+    ) as Array<{
       plan_sha256: string;
     }>;
     const clean = harness({
-      git: (gitArgs) => gitArgs[0] === 'ls-files'
-        ? { status: 0, stdout: `${output}\n`, stderr: '' }
-        : { status: 0, stdout: '', stderr: '' },
+      git: (gitArgs) =>
+        gitArgs[0] === "ls-files"
+          ? { status: 0, stdout: `${output}\n`, stderr: "" }
+          : { status: 0, stdout: "", stderr: "" },
     });
     const args = [
-      'issue',
-      'apply',
-      '--registry',
-      'docs/triage/open-issue-registry.json',
-      '--plan',
+      "issue",
+      "apply",
+      "--registry",
+      "docs/triage/open-issue-registry.json",
+      "--plan",
       output,
-      '--confirm-plan-sha256',
+      "--confirm-plan-sha256",
       plans[0]!.plan_sha256,
-      '--confirm-issues',
-      '101',
-      '--idempotency-key',
-      'apply-101-v1',
+      "--confirm-issues",
+      "101",
+      "--idempotency-key",
+      "apply-101-v1",
     ];
 
     expect(await run(args, root, client, clean.runtime)).toBe(0);
     expect(client.updates).toHaveLength(1);
     expect(clean.stderr).toEqual([]);
-    const outputJson = clean.stdout.join('');
+    const outputJson = clean.stdout.join("");
     expect(outputJson).not.toContain(OWNER_BODY.trim());
     expect(outputJson).not.toContain('"body":');
     expect(JSON.parse(outputJson)).toMatchObject({
       summary: {
-        status: 'verified',
-        operation_id: 'apply-101-v1',
+        status: "verified",
+        operation_id: "apply-101-v1",
         receipt_count: 3,
-        issue_results: [{
-          issue_number: 101,
-          result: 'applied-verified',
-        }],
+        issue_results: [
+          {
+            issue_number: 101,
+            result: "applied-verified",
+          },
+        ],
       },
     });
     const ledger = readFileSync(
-      join(root, 'docs/triage/open-issue-review-ledger.jsonl'),
-      'utf8',
+      join(root, "docs/triage/open-issue-review-ledger.jsonl"),
+      "utf8",
     );
     expect(parseLedger(ledger)).toHaveLength(3);
     expect(ledger).not.toContain(OWNER_BODY.trim());
   });
 
-  it('stops with exit 5 and durable target-unknown evidence after an ambiguous write', async () => {
+  it("stops with exit 5 and durable target-unknown evidence after an ambiguous write", async () => {
     class AmbiguousClient extends FakeClient {
       override async updateIssue(
         number: number,
@@ -957,150 +1349,533 @@ describe('open issue triage CLI', () => {
       ): Promise<GitHubWriteResult> {
         this.calls.push(`update:${number}`);
         this.updates.push({ number, patch: structuredClone(patch) });
-        return { kind: 'ambiguous', diagnosticCode: 'transport-timeout' };
+        return { kind: "ambiguous", diagnosticCode: "transport-timeout" };
       }
     }
 
     const root = fixtureRoot();
     const client = new AmbiguousClient();
-    const output = 'docs/triage/plans/ambiguous-101.json';
-    expect(await run([
-      'issue',
-      'dry-run',
-      '--registry',
-      'docs/triage/open-issue-registry.json',
-      '--issue-number',
-      '101',
-      '--expected-main-oid',
-      MAIN_SHA,
-      '--output',
-      output,
-    ], root, client, harness().runtime)).toBe(0);
-    const plans = JSON.parse(readFileSync(join(root, output), 'utf8')) as Array<{
+    const output = "docs/triage/plans/ambiguous-101.json";
+    expect(
+      await run(
+        [
+          "issue",
+          "dry-run",
+          "--registry",
+          "docs/triage/open-issue-registry.json",
+          "--issue-number",
+          "101",
+          "--expected-main-oid",
+          MAIN_SHA,
+          "--output",
+          output,
+        ],
+        root,
+        client,
+        harness().runtime,
+      ),
+    ).toBe(0);
+    const plans = JSON.parse(
+      readFileSync(join(root, output), "utf8"),
+    ) as Array<{
       plan_sha256: string;
     }>;
     const io = harness({
-      git: (gitArgs) => gitArgs[0] === 'ls-files'
-        ? { status: 0, stdout: `${output}\n`, stderr: '' }
-        : { status: 0, stdout: '', stderr: '' },
+      git: (gitArgs) =>
+        gitArgs[0] === "ls-files"
+          ? { status: 0, stdout: `${output}\n`, stderr: "" }
+          : { status: 0, stdout: "", stderr: "" },
     });
 
-    expect(await run([
-      'issue',
-      'apply',
-      '--registry',
-      'docs/triage/open-issue-registry.json',
-      '--plan',
-      output,
-      '--confirm-plan-sha256',
-      plans[0]!.plan_sha256,
-      '--confirm-issues',
-      '101',
-      '--idempotency-key',
-      'ambiguous-101-v1',
-    ], root, client, io.runtime)).toBe(5);
+    expect(
+      await run(
+        [
+          "issue",
+          "apply",
+          "--registry",
+          "docs/triage/open-issue-registry.json",
+          "--plan",
+          output,
+          "--confirm-plan-sha256",
+          plans[0]!.plan_sha256,
+          "--confirm-issues",
+          "101",
+          "--idempotency-key",
+          "ambiguous-101-v1",
+        ],
+        root,
+        client,
+        io.runtime,
+      ),
+    ).toBe(5);
     expect(io.stdout).toEqual([]);
-    expect(JSON.parse(io.stderr.join(''))).toMatchObject({
-      kind: 'write-outcome-unknown',
+    expect(JSON.parse(io.stderr.join(""))).toMatchObject({
+      kind: "write-outcome-unknown",
     });
     expect(client.updates).toHaveLength(1);
-    expect(parseLedger(readFileSync(
-      join(root, 'docs/triage/open-issue-review-ledger.jsonl'),
-      'utf8',
-    )).map((receipt) => receipt.receipt_type)).toEqual([
-      'batch_started',
-      'target_unknown',
-    ]);
+    expect(
+      parseLedger(
+        readFileSync(
+          join(root, "docs/triage/open-issue-review-ledger.jsonl"),
+          "utf8",
+        ),
+      ).map((receipt) => receipt.receipt_type),
+    ).toEqual(["batch_started", "target_unknown"]);
   });
 
-  it('maps a pre-mutation GitHub transport failure to exit 6', async () => {
+  it("maps a pre-mutation GitHub transport failure to exit 6", async () => {
     class FailingClient extends FakeClient {
       override async readMainSha(): Promise<string> {
-        throw new GitHubClientError(
-          'gh-timeout',
-          'fixture timeout',
-          { operation: 'read-main', retryable: true },
-        );
+        throw new GitHubClientError("gh-timeout", "fixture timeout", {
+          operation: "read-main",
+          retryable: true,
+        });
       }
     }
 
     const root = fixtureRoot();
     const client = new FailingClient();
     const io = harness();
-    expect(await run([
-      'issue',
-      'dry-run',
-      '--registry',
-      'docs/triage/open-issue-registry.json',
-      '--issue-number',
-      '101',
-      '--expected-main-oid',
-      MAIN_SHA,
-      '--output',
-      'docs/triage/plans/transport-failure.json',
-    ], root, client, io.runtime)).toBe(6);
+    expect(
+      await run(
+        [
+          "issue",
+          "dry-run",
+          "--registry",
+          "docs/triage/open-issue-registry.json",
+          "--issue-number",
+          "101",
+          "--expected-main-oid",
+          MAIN_SHA,
+          "--output",
+          "docs/triage/plans/transport-failure.json",
+        ],
+        root,
+        client,
+        io.runtime,
+      ),
+    ).toBe(6);
     expect(io.stdout).toEqual([]);
-    expect(JSON.parse(io.stderr.join(''))).toMatchObject({
-      kind: 'gh-timeout',
+    expect(JSON.parse(io.stderr.join(""))).toMatchObject({
+      kind: "gh-timeout",
       retryable: true,
     });
     expect(client.updates).toEqual([]);
   });
 
-  it('refuses untracked or dirty apply plans before client access', async () => {
+  it("checks a stable registry reconciliation without writing artifacts", async () => {
+    const root = fixtureRoot({ generatedView: true });
+    writeRefreshManifest(root);
+    const client = new FakeClient();
+    const io = harness({ git: reconcileGit(root) });
+    const snapshot = "docs/triage/snapshots/reconciled.json";
+
+    const exitCode = await run(
+      [
+        "registry",
+        "reconcile",
+        "--check",
+        "--registry",
+        "docs/triage/open-issue-registry.json",
+        "--reviews",
+        "docs/triage/reviews/refresh.json",
+        "--snapshot",
+        snapshot,
+        "--expected-main-oid",
+        MAIN_SHA,
+      ],
+      root,
+      client,
+      io.runtime,
+    );
+    expect(exitCode).toBe(0);
+
+    expect(existsSync(join(root, snapshot))).toBe(false);
+    expect(
+      client.calls.filter((call) => call === "registry-capture"),
+    ).toHaveLength(3);
+    expect(JSON.parse(io.stdout.join(""))).toMatchObject({
+      ok: true,
+      command: "registry reconcile --check",
+      summary: {
+        status: "ready",
+        issue_count: 1,
+        added_issue_numbers: [],
+        removed_issue_numbers: [],
+      },
+    });
+  });
+
+  it("transactionally writes a body-free reconciliation seal after exact confirmation", async () => {
+    const root = fixtureRoot({ generatedView: true });
+    const reviewText = writeRefreshManifest(root);
+    const client = new FakeClient();
+    const io = harness({ git: reconcileGit(root) });
+    const snapshot = "docs/triage/snapshots/reconciled.json";
+
+    const exitCode = await run(
+      [
+        "registry",
+        "reconcile",
+        "--write",
+        "--registry",
+        "docs/triage/open-issue-registry.json",
+        "--reviews",
+        "docs/triage/reviews/refresh.json",
+        "--snapshot",
+        snapshot,
+        "--expected-main-oid",
+        MAIN_SHA,
+        "--confirm-review-sha256",
+        sha256(reviewText),
+        "--idempotency-key",
+        "refresh-fixture-v1",
+      ],
+      root,
+      client,
+      io.runtime,
+    );
+    expect(io.stderr).toEqual([]);
+    expect(exitCode).toBe(0);
+
+    const snapshotText = readFileSync(join(root, snapshot), "utf8");
+    expect(snapshotText).not.toContain(OWNER_BODY.trim());
+    expect(snapshotText).not.toContain("head_ref");
+    expect(
+      readFileSync(join(root, "docs/publication-audit.md"), "utf8"),
+    ).toContain("docs/triage/snapshots/reconciled.json");
+    expect(
+      readFileSync(join(root, "docs/triage/open-issue-registry.md"), "utf8"),
+    ).toBe(
+      renderRegistryMarkdown(
+        JSON.parse(
+          readFileSync(
+            join(root, "docs/triage/open-issue-registry.json"),
+            "utf8",
+          ),
+        ),
+      ),
+    );
+    expect(JSON.parse(io.stdout.join(""))).toMatchObject({
+      summary: {
+        status: "written",
+        issue_count: 1,
+        transaction: {
+          operation_count: 4,
+        },
+      },
+    });
+  });
+
+  it("recovers an interrupted registry transaction from the exact write command", async () => {
+    const root = fixtureRoot({ generatedView: true });
+    const reviewText = writeRefreshManifest(root);
+    const client = new FakeClient();
+    const snapshot = "docs/triage/snapshots/reconciled-recovery.json";
+    const args = [
+      "registry",
+      "reconcile",
+      "--write",
+      "--registry",
+      "docs/triage/open-issue-registry.json",
+      "--reviews",
+      "docs/triage/reviews/refresh.json",
+      "--snapshot",
+      snapshot,
+      "--expected-main-oid",
+      MAIN_SHA,
+      "--confirm-review-sha256",
+      sha256(reviewText),
+      "--idempotency-key",
+      "refresh-recovery-v1",
+    ];
+    let interrupted = false;
+    const first = harness({
+      git: reconcileGit(root),
+      registryTransactionHook: (event) => {
+        if (!interrupted && event.phase === "after-operation-mutation") {
+          interrupted = true;
+          throw new Error("fixture interruption");
+        }
+      },
+    });
+
+    expect(await run(args, root, client, first.runtime)).toBe(5);
+    expect(JSON.parse(first.stderr.join(""))).toMatchObject({
+      kind: expect.stringMatching(/^artifact-transaction-/),
+      details: {
+        recovery_transaction_id: expect.stringMatching(/^[0-9a-f]{64}$/),
+      },
+    });
+
+    const recoveryClient = new FakeClient();
+    const second = harness({ git: reconcileGit(root) });
+    expect(await run(args, root, recoveryClient, second.runtime)).toBe(0);
+    expect(recoveryClient.calls).toEqual([]);
+    expect(JSON.parse(second.stdout.join(""))).toMatchObject({
+      summary: {
+        status: "recovered",
+        transaction: {
+          recovered: true,
+          operation_count: 4,
+        },
+      },
+    });
+    expect(existsSync(join(root, snapshot))).toBe(true);
+    expect(
+      readFileSync(join(root, "docs/publication-audit.md"), "utf8"),
+    ).toContain(snapshot);
+  });
+
+  it("fails closed when repeated captures or the three main revisions disagree", async () => {
+    class DriftingClient extends FakeClient {
+      captureReads = 0;
+
+      override async readRegistryCapture(): Promise<RegistryCapture> {
+        const capture = await super.readRegistryCapture();
+        this.captureReads += 1;
+        if (this.captureReads === 2)
+          capture.issues[0]!.updatedAt = "2026-07-26T12:01:00Z";
+        return capture;
+      }
+    }
+    const root = fixtureRoot({ generatedView: true });
+    writeRefreshManifest(root);
+    const drifting = new DriftingClient();
+    const driftIo = harness({ git: reconcileGit(root) });
+    const args = [
+      "registry",
+      "reconcile",
+      "--check",
+      "--registry",
+      "docs/triage/open-issue-registry.json",
+      "--reviews",
+      "docs/triage/reviews/refresh.json",
+      "--snapshot",
+      "docs/triage/snapshots/reconciled.json",
+      "--expected-main-oid",
+      MAIN_SHA,
+    ];
+    expect(await run(args, root, drifting, driftIo.runtime)).toBe(3);
+    expect(JSON.parse(driftIo.stderr.join(""))).toMatchObject({
+      kind: "registry-capture-drift",
+    });
+
+    const mainIo = harness({
+      git: (gitArgs, cwd) => {
+        const result = reconcileGit(root)(gitArgs, cwd);
+        if (gitArgs[0] === "ls-remote") {
+          return {
+            status: 0,
+            stdout: `${"c".repeat(40)}\trefs/heads/main\n`,
+            stderr: "",
+          };
+        }
+        return result;
+      },
+    });
+    expect(await run(args, root, new FakeClient(), mainIo.runtime)).toBe(3);
+    expect(JSON.parse(mainIo.stderr.join(""))).toMatchObject({
+      kind: "main-revision-disagreement",
+    });
+
+    class MainMovingClient extends FakeClient {
+      mainReads = 0;
+
+      override async readMainSha(): Promise<string> {
+        this.calls.push("main");
+        this.mainReads += 1;
+        return this.mainReads === 1 ? MAIN_SHA : "d".repeat(40);
+      }
+    }
+    const movingClient = new MainMovingClient();
+    const movingIo = harness({ git: reconcileGit(root) });
+    expect(await run(args, root, movingClient, movingIo.runtime)).toBe(3);
+    expect(
+      movingClient.calls.filter((call) => call === "registry-capture"),
+    ).toHaveLength(3);
+    expect(JSON.parse(movingIo.stderr.join(""))).toMatchObject({
+      kind: "main-revision-disagreement",
+    });
+  });
+
+  it("rejects a non-SSH origin before remote access and maps SSH transport failure to exit 6", async () => {
+    const root = fixtureRoot({ generatedView: true });
+    writeRefreshManifest(root);
+    const args = [
+      "registry",
+      "reconcile",
+      "--check",
+      "--registry",
+      "docs/triage/open-issue-registry.json",
+      "--reviews",
+      "docs/triage/reviews/refresh.json",
+      "--snapshot",
+      "docs/triage/snapshots/reconciled.json",
+      "--expected-main-oid",
+      MAIN_SHA,
+    ];
+    const originCommands: string[][] = [];
+    const originClient = new FakeClient();
+    const originIo = harness({
+      git: (gitArgs, cwd) => {
+        originCommands.push([...gitArgs]);
+        if (gitArgs[0] === "remote") {
+          return {
+            status: 0,
+            stdout: "https://github.com/LucasQuiles/WhatSoup.git\n",
+            stderr: "",
+          };
+        }
+        return reconcileGit(root)(gitArgs, cwd);
+      },
+    });
+    expect(await run(args, root, originClient, originIo.runtime)).toBe(4);
+    expect(originClient.calls).toEqual([]);
+    expect(originCommands.some((command) => command[0] === "ls-remote")).toBe(
+      false,
+    );
+
+    const transportClient = new FakeClient();
+    const transportIo = harness({
+      git: (gitArgs, cwd) => {
+        if (gitArgs[0] === "ls-remote") {
+          return { status: 128, stdout: "", stderr: "fixture SSH failure" };
+        }
+        return reconcileGit(root)(gitArgs, cwd);
+      },
+    });
+    expect(await run(args, root, transportClient, transportIo.runtime)).toBe(6);
+    expect(JSON.parse(transportIo.stderr.join(""))).toMatchObject({
+      kind: "remote-main-unavailable",
+      retryable: true,
+    });
+    expect(transportClient.calls).toEqual([]);
+  });
+
+  it("validates strict review-record schema before any network capture", async () => {
+    const root = fixtureRoot({ generatedView: true });
+    const recordPath = "docs/triage/reviews/refresh-records/101.json";
+    mkdirSync(join(root, "docs/triage/reviews/refresh-records"));
+    const recordText = '{\"issue_number\":101}\n';
+    writeFileSync(join(root, recordPath), recordText);
+    const manifestText = `${JSON.stringify(
+      {
+        schema_version: 1,
+        repository: REPOSITORY,
+        pinned_main_revision: MAIN_SHA,
+        source_registry_sha256: registrySha256(registry()),
+        reviewed_at: "2026-07-26T13:00:00Z",
+        record_files: [
+          {
+            issue_number: 101,
+            path: recordPath,
+            sha256: sha256(recordText),
+          },
+        ],
+        removals: [],
+        retained_issue_states: [],
+        retained_overlap_states: [],
+      },
+      null,
+      2,
+    )}\n`;
+    writeFileSync(join(root, "docs/triage/reviews/refresh.json"), manifestText);
+    const client = new FakeClient();
+    const io = harness({ git: reconcileGit(root) });
+
+    expect(
+      await run(
+        [
+          "registry",
+          "reconcile",
+          "--check",
+          "--registry",
+          "docs/triage/open-issue-registry.json",
+          "--reviews",
+          "docs/triage/reviews/refresh.json",
+          "--snapshot",
+          "docs/triage/snapshots/reconciled.json",
+          "--expected-main-oid",
+          MAIN_SHA,
+        ],
+        root,
+        client,
+        io.runtime,
+      ),
+    ).toBe(2);
+    expect(JSON.parse(io.stderr.join(""))).toMatchObject({
+      kind: "review-record-schema-invalid",
+    });
+    expect(client.calls).toEqual([]);
+  });
+
+  it("refuses untracked or dirty apply plans before client access", async () => {
     const root = fixtureRoot({ git: true });
     const client = new FakeClient();
-    const planPath = join(root, 'docs/triage/plans/batch-101.json');
-    writeFileSync(planPath, '[]\n');
+    const planPath = join(root, "docs/triage/plans/batch-101.json");
+    writeFileSync(planPath, "[]\n");
     const args = [
-      'issue',
-      'apply',
-      '--registry',
-      'docs/triage/open-issue-registry.json',
-      '--plan',
-      'docs/triage/plans/batch-101.json',
-      '--confirm-plan-sha256',
-      'c'.repeat(64),
-      '--confirm-issues',
-      '101',
-      '--idempotency-key',
-      'batch-101-v1',
+      "issue",
+      "apply",
+      "--registry",
+      "docs/triage/open-issue-registry.json",
+      "--plan",
+      "docs/triage/plans/batch-101.json",
+      "--confirm-plan-sha256",
+      "c".repeat(64),
+      "--confirm-issues",
+      "101",
+      "--idempotency-key",
+      "batch-101-v1",
     ];
     const untracked = harness({
-      git: (gitArgs) => gitArgs[0] === 'ls-files'
-        ? { status: 1, stdout: '', stderr: '' }
-        : { status: 0, stdout: '', stderr: '' },
+      git: (gitArgs) =>
+        gitArgs[0] === "ls-files"
+          ? { status: 1, stdout: "", stderr: "" }
+          : { status: 0, stdout: "", stderr: "" },
     });
     expect(await run(args, root, client, untracked.runtime)).toBe(4);
     expect(client.calls).toEqual([]);
     expect(client.updates).toEqual([]);
 
     const dirty = harness({
-      git: (gitArgs) => gitArgs[0] === 'ls-files'
-        ? { status: 0, stdout: 'docs/triage/plans/batch-101.json\n', stderr: '' }
-        : { status: 1, stdout: '', stderr: '' },
+      git: (gitArgs) =>
+        gitArgs[0] === "ls-files"
+          ? {
+              status: 0,
+              stdout: "docs/triage/plans/batch-101.json\n",
+              stderr: "",
+            }
+          : { status: 1, stdout: "", stderr: "" },
     });
     expect(await run(args, root, client, dirty.runtime)).toBe(4);
     expect(client.calls).toEqual([]);
   });
 
-  it('emits one bounded structured error on stderr and leaves stdout empty', async () => {
+  it("emits one bounded structured error on stderr and leaves stdout empty", async () => {
     const root = fixtureRoot();
-    writeFileSync(join(root, 'docs/triage/open-issue-registry.json'), '{broken');
+    writeFileSync(
+      join(root, "docs/triage/open-issue-registry.json"),
+      "{broken",
+    );
     const io = harness();
 
-    expect(await run([
-      'check',
-      '--registry',
-      'docs/triage/open-issue-registry.json',
-    ], root, new FakeClient(), io.runtime)).toBe(2);
+    expect(
+      await run(
+        ["check", "--registry", "docs/triage/open-issue-registry.json"],
+        root,
+        new FakeClient(),
+        io.runtime,
+      ),
+    ).toBe(2);
     expect(io.stdout).toEqual([]);
     expect(io.stderr).toHaveLength(1);
     const error = JSON.parse(io.stderr[0]!) as Record<string, unknown>;
     expect(error).toMatchObject({
       schema_version: 1,
       ok: false,
-      kind: 'invalid-json',
+      kind: "invalid-json",
       retryable: false,
     });
     expect(error.message).toEqual(expect.any(String));
@@ -1108,24 +1883,32 @@ describe('open issue triage CLI', () => {
     expect(JSON.stringify(error).length).toBeLessThan(4096);
   });
 
-  it('classifies PUBLIC-safety rejection as workflow policy rather than schema invalidity', async () => {
+  it("classifies PUBLIC-safety rejection as workflow policy rather than schema invalidity", async () => {
     const root = fixtureRoot({ generatedView: true });
     const unsafe = registry();
-    unsafe.issues[0]!.evidence_summary = ['', 'Users', 'privateoperator', 'project'].join('/');
+    unsafe.issues[0]!.evidence_summary = [
+      "",
+      "Users",
+      "privateoperator",
+      "project",
+    ].join("/");
     writeFileSync(
-      join(root, 'docs/triage/open-issue-registry.json'),
+      join(root, "docs/triage/open-issue-registry.json"),
       canonicalRegistryJson(unsafe),
     );
     const io = harness();
 
-    expect(await run([
-      'check',
-      '--registry',
-      'docs/triage/open-issue-registry.json',
-    ], root, new FakeClient(), io.runtime)).toBe(4);
+    expect(
+      await run(
+        ["check", "--registry", "docs/triage/open-issue-registry.json"],
+        root,
+        new FakeClient(),
+        io.runtime,
+      ),
+    ).toBe(4);
     expect(io.stdout).toEqual([]);
-    expect(JSON.parse(io.stderr.join(''))).toMatchObject({
-      kind: 'public-safety-rejection',
+    expect(JSON.parse(io.stderr.join(""))).toMatchObject({
+      kind: "public-safety-rejection",
       retryable: false,
     });
   });
