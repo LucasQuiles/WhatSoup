@@ -5285,7 +5285,7 @@ export class AgentRuntime implements Runtime {
     event: Extract<AgentEvent, { type: 'result' }>,
     tracker: OperationTracker | null,
   ): void {
-    sourceSession.completeProviderTurn();
+    sourceSession.completeProviderTurn(event.providerTurnOwnerToken);
     tracker?.onTurnComplete();
     const rowId = sourceSession.getDbRowId();
     if (rowId !== null && (event.inputTokens !== undefined || event.outputTokens !== undefined)) {
@@ -5341,7 +5341,7 @@ export class AgentRuntime implements Runtime {
     const reportId = this.activeControlReportId;
     if (reportId === null || this.controlTerminalizingReportId === reportId) return;
 
-    sourceSession.completeProviderTurn();
+    sourceSession.completeProviderTurn(event.providerTurnOwnerToken);
 
     this.operationTrackers.get('control@heal.internal')?.onTurnComplete();
     controlQueue.endTurn();

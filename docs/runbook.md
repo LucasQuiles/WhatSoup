@@ -1138,6 +1138,39 @@ detected. Exit `1` means the audit itself failed. Do not treat exit `2` as a com
 blindly send every listed row: use the per-row action to keep already-admitted work on the durable
 recovery mechanism and missing work on the provenance-labeled operator catch-up mechanism.
 
+To make a confirmed dry-run gap visible across restarts and in health, rerun the same manifest
+through the explicit recorder:
+
+```bash
+npm run record-continuity-manifest -- \
+  --db "$DB" \
+  --manifest continuity-manifest.json \
+  --confirm-record
+```
+
+The recorder first acquires the database writer reservation, then repeats the exact audit and
+persists only `absent`, `observed_not_admitted`, and `ambiguous` receipts. It writes deterministic
+fingerprints and bounded taxonomy into the existing recovery ledger; it never stores raw message,
+destination, manifest, or evidence values. Repeating the command is idempotent. Its JSON output
+contains only audit counts plus created/existing/unresolved/ambiguous ledger counts.
+
+After recording, `/health` remains `degraded` with `continuity_gap_open` and a content-free
+`continuity` block:
+
+```json
+{
+  "readable": true,
+  "open": 3,
+  "unresolved": 2,
+  "ambiguous": 1
+}
+```
+
+If the ledger cannot be parsed exactly, health fails closed with `continuity_gap_unreadable`.
+Recording does not send, replay, synthesize an inbound, or close a gap. Do not edit the recovery
+rows to force green health; controlled catch-up and terminal closure require a later proof-bound
+mechanism.
+
 #### Close a proven operator catch-up recovery (exact schema 43 only)
 
 This command records that a newer, independently delivered operator catch-up supersedes an exact set

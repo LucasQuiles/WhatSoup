@@ -55,6 +55,29 @@ class MockHttpClient {
   };
 }
 
+/**
+ * Serve the paginated `/message/query` protocol the port now uses.
+ *
+ * `listInboundSince` issues two requests: a `limit: 1` ROWID upper-bound probe
+ * (a `SELECT MAX` where-statement), then the real page. `parseQueryPage`
+ * rejects any response whose metadata does not match the limit that was
+ * requested, so a single fixed reply cannot satisfy both. These tests predate
+ * the pagination change and assert on reaction parsing, not on paging.
+ */
+function paged(req: BlueBubblesHttpRequest, data: readonly Record<string, unknown>[]) {
+  const limit = Number((req.body as { limit?: unknown } | undefined)?.limit ?? 100);
+  const where = (req.body as { where?: Array<{ statement?: string }> } | undefined)?.where;
+  // Keyset paging validates each row against the ROWID window, so every row
+  // needs an ascending `originalROWID`. These fixtures assert reaction parsing
+  // and do not care about ordering, so synthesise them rather than restating
+  // the field at all 14 call sites.
+  const withRowIds = data.map((row, index) => ({ originalROWID: index + 1, ...row }));
+  const rows = where?.[0]?.statement?.includes('SELECT MAX')
+    ? withRowIds.slice(-1)
+    : withRowIds;
+  return { data: rows, metadata: { offset: 0, limit, count: rows.length, total: rows.length } };
+}
+
 function bbMsg(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return {
     guid: 'msg-1',
@@ -77,18 +100,17 @@ function peerMessageRef(channelId: ChannelId, peerId: string, guid: string): Mes
 describe('BlueBubblesPort — reaction envelope surfacing', () => {
   it('normalizes a part-qualified associated-message GUID before surfacing a reaction', async () => {
     const mock = new MockHttpClient();
-    mock.reply(() => ({
-      data: [
+    mock.reply((req) => paged(req, [
         bbMsg({
           guid: 'tap-1',
           text: null,
           associatedMessageGuid: 'p:0/orig-1',
           associatedMessageType: 'love',
         }),
-      ],
-    }));
+    ]));
     const port = new BlueBubblesPort(makeConfig(), mock.client);
-    const out = await port.listInboundSince(new Date(0));
+    const page = await port.listInboundSince(new Date(0));
+    const out = page.records;
     expect(out).toHaveLength(1);
     expect(out[0]).toMatchObject({
       guid: 'tap-1',
@@ -111,18 +133,17 @@ describe('BlueBubblesPort — reaction envelope surfacing', () => {
     ];
     for (const [typeName, emoji] of cases) {
       const mock = new MockHttpClient();
-      mock.reply(() => ({
-        data: [
+      mock.reply((req) => paged(req, [
           bbMsg({
             guid: `tap-${typeName}`,
             text: null,
             associatedMessageGuid: 'orig-x',
             associatedMessageType: typeName,
           }),
-        ],
-      }));
+      ]));
       const port = new BlueBubblesPort(makeConfig(), mock.client);
-      const out = await port.listInboundSince(new Date(0));
+      const page = await port.listInboundSince(new Date(0));
+    const out = page.records;
       expect(out[0]?.kind, `reactionType ${typeName} should surface`).toBe('reaction');
       expect(out[0]?.reactionEmoji, `reactionType ${typeName} should map to ${emoji}`).toBe(emoji);
       expect(out[0]?.reactionRemove).toBe(false);
@@ -131,18 +152,17 @@ describe('BlueBubblesPort — reaction envelope surfacing', () => {
 
   it('treats a "-"-prefixed string reactionType as a removal tapback', async () => {
     const mock = new MockHttpClient();
-    mock.reply(() => ({
-      data: [
+    mock.reply((req) => paged(req, [
         bbMsg({
           guid: 'tap-remove',
           text: null,
           associatedMessageGuid: 'orig-1',
           associatedMessageType: '-like',
         }),
-      ],
-    }));
+    ]));
     const port = new BlueBubblesPort(makeConfig(), mock.client);
-    const out = await port.listInboundSince(new Date(0));
+    const page = await port.listInboundSince(new Date(0));
+    const out = page.records;
     expect(out[0]).toMatchObject({
       kind: 'reaction',
       reactionEmoji: '👍',
@@ -164,18 +184,17 @@ describe('BlueBubblesPort — reaction envelope surfacing', () => {
     ];
     for (const [code, emoji] of cases) {
       const mock = new MockHttpClient();
-      mock.reply(() => ({
-        data: [
+      mock.reply((req) => paged(req, [
           bbMsg({
             guid: `tap-${code}`,
             text: null,
             associatedMessageGuid: 'orig-x',
             associatedMessageType: code,
           }),
-        ],
-      }));
+      ]));
       const port = new BlueBubblesPort(makeConfig(), mock.client);
-      const out = await port.listInboundSince(new Date(0));
+      const page = await port.listInboundSince(new Date(0));
+    const out = page.records;
       expect(out[0]?.kind, `code ${code} should surface as reaction`).toBe('reaction');
       expect(out[0]?.reactionEmoji, `code ${code} should map to ${emoji}`).toBe(emoji);
       expect(out[0]?.reactionRemove).toBe(false);
@@ -184,18 +203,17 @@ describe('BlueBubblesPort — reaction envelope surfacing', () => {
 
   it('maps numeric removal codes (3000-3005) with reactionRemove:true', async () => {
     const mock = new MockHttpClient();
-    mock.reply(() => ({
-      data: [
+    mock.reply((req) => paged(req, [
         bbMsg({
           guid: 'tap-3000',
           text: null,
           associatedMessageGuid: 'orig-1',
           associatedMessageType: 3000, // love removal
         }),
-      ],
-    }));
+    ]));
     const port = new BlueBubblesPort(makeConfig(), mock.client);
-    const out = await port.listInboundSince(new Date(0));
+    const page = await port.listInboundSince(new Date(0));
+    const out = page.records;
     expect(out[0]).toMatchObject({
       kind: 'reaction',
       reactionEmoji: '❤️',
@@ -205,18 +223,17 @@ describe('BlueBubblesPort — reaction envelope surfacing', () => {
 
   it('treats associatedMessageType:0 as a non-reaction (code 0 is not in the tapback range)', async () => {
     const mock = new MockHttpClient();
-    mock.reply(() => ({
-      data: [
+    mock.reply((req) => paged(req, [
         bbMsg({
           guid: 'msg-0',
           text: 'hi',
           associatedMessageGuid: 'orig-1',
           associatedMessageType: 0,
         }),
-      ],
-    }));
+    ]));
     const port = new BlueBubblesPort(makeConfig(), mock.client);
-    const out = await port.listInboundSince(new Date(0));
+    const page = await port.listInboundSince(new Date(0));
+    const out = page.records;
     expect(out).toEqual([
       {
         guid: 'msg-0',
@@ -234,18 +251,17 @@ describe('BlueBubblesPort — reaction envelope surfacing', () => {
     // MessageResponse declares associatedMessageType as `number | null`.
     // null is the common case for non-reaction associated messages.
     const mock = new MockHttpClient();
-    mock.reply(() => ({
-      data: [
+    mock.reply((req) => paged(req, [
         bbMsg({
           guid: 'msg-null',
           text: 'associated but not a reaction',
           associatedMessageGuid: 'orig-1',
           associatedMessageType: null,
         }),
-      ],
-    }));
+    ]));
     const port = new BlueBubblesPort(makeConfig(), mock.client);
-    const out = await port.listInboundSince(new Date(0));
+    const page = await port.listInboundSince(new Date(0));
+    const out = page.records;
     expect(out[0]?.kind).toBe('text');
   });
 
@@ -254,18 +270,17 @@ describe('BlueBubblesPort — reaction envelope surfacing', () => {
     // fractional value is corrupt data. The parser must NOT misclassify
     // 2000.5 as reaction code 2000 (love) — it must fall through to text.
     const mock = new MockHttpClient();
-    mock.reply(() => ({
-      data: [
+    mock.reply((req) => paged(req, [
         bbMsg({
           guid: 'msg-float',
           text: 'corrupt',
           associatedMessageGuid: 'orig-1',
           associatedMessageType: 2000.5,
         }),
-      ],
-    }));
+    ]));
     const port = new BlueBubblesPort(makeConfig(), mock.client);
-    const out = await port.listInboundSince(new Date(0));
+    const page = await port.listInboundSince(new Date(0));
+    const out = page.records;
     expect(out).toEqual([
       {
         guid: 'msg-float',
@@ -281,52 +296,49 @@ describe('BlueBubblesPort — reaction envelope surfacing', () => {
 
   it('rejects NaN associatedMessageType (corrupt data)', async () => {
     const mock = new MockHttpClient();
-    mock.reply(() => ({
-      data: [
+    mock.reply((req) => paged(req, [
         bbMsg({
           guid: 'msg-nan',
           text: 'corrupt',
           associatedMessageGuid: 'orig-1',
           associatedMessageType: Number.NaN,
         }),
-      ],
-    }));
+    ]));
     const port = new BlueBubblesPort(makeConfig(), mock.client);
-    const out = await port.listInboundSince(new Date(0));
+    const page = await port.listInboundSince(new Date(0));
+    const out = page.records;
     expect(out[0]?.kind).toBe('text');
   });
 
   it('rejects negative associatedMessageType (no negative codes in the schema)', async () => {
     const mock = new MockHttpClient();
-    mock.reply(() => ({
-      data: [
+    mock.reply((req) => paged(req, [
         bbMsg({
           guid: 'msg-neg',
           text: 'corrupt',
           associatedMessageGuid: 'orig-1',
           associatedMessageType: -2000,
         }),
-      ],
-    }));
+    ]));
     const port = new BlueBubblesPort(makeConfig(), mock.client);
-    const out = await port.listInboundSince(new Date(0));
+    const page = await port.listInboundSince(new Date(0));
+    const out = page.records;
     expect(out[0]?.kind).toBe('text');
   });
 
   it('rejects out-of-range high codes (e.g. 4000 — past the removal range)', async () => {
     const mock = new MockHttpClient();
-    mock.reply(() => ({
-      data: [
+    mock.reply((req) => paged(req, [
         bbMsg({
           guid: 'msg-4000',
           text: 'unknown code',
           associatedMessageGuid: 'orig-1',
           associatedMessageType: 4000,
         }),
-      ],
-    }));
+    ]));
     const port = new BlueBubblesPort(makeConfig(), mock.client);
-    const out = await port.listInboundSince(new Date(0));
+    const page = await port.listInboundSince(new Date(0));
+    const out = page.records;
     expect(out[0]?.kind).toBe('text');
   });
 
@@ -334,18 +346,17 @@ describe('BlueBubblesPort — reaction envelope surfacing', () => {
     // Boundary integrity: 1999 < 2000 (excluded from add); 2006 > 2005 (excluded).
     for (const code of [1999, 2006, 2999, 3006]) {
       const mock = new MockHttpClient();
-      mock.reply(() => ({
-        data: [
+      mock.reply((req) => paged(req, [
           bbMsg({
             guid: `msg-${code}`,
             text: 'boundary',
             associatedMessageGuid: 'orig-1',
             associatedMessageType: code,
           }),
-        ],
-      }));
+      ]));
       const port = new BlueBubblesPort(makeConfig(), mock.client);
-      const out = await port.listInboundSince(new Date(0));
+      const page = await port.listInboundSince(new Date(0));
+    const out = page.records;
       expect(out[0]?.kind, `code ${code} should NOT be a reaction`).toBe('text');
     }
   });
@@ -354,18 +365,17 @@ describe('BlueBubblesPort — reaction envelope surfacing', () => {
     // BlueBubbles sets associatedMessageGuid on a few non-reaction associations
     // (thread identifiers, etc.). These must NOT surface as reactions.
     const mock = new MockHttpClient();
-    mock.reply(() => ({
-      data: [
+    mock.reply((req) => paged(req, [
         bbMsg({
           guid: 'thread-msg',
           text: 'thread reply',
           associatedMessageGuid: 'orig-1',
           associatedMessageType: 'thread',
         }),
-      ],
-    }));
+    ]));
     const port = new BlueBubblesPort(makeConfig(), mock.client);
-    const out = await port.listInboundSince(new Date(0));
+    const page = await port.listInboundSince(new Date(0));
+    const out = page.records;
     expect(out).toEqual([
       {
         guid: 'thread-msg',
@@ -381,11 +391,10 @@ describe('BlueBubblesPort — reaction envelope surfacing', () => {
 
   it('still surfaces plain-text messages with kind:"text" (regression guard)', async () => {
     const mock = new MockHttpClient();
-    mock.reply(() => ({
-      data: [bbMsg({ guid: 'plain-1', text: 'hi' })],
-    }));
+    mock.reply((req) => paged(req, [bbMsg({ guid: 'plain-1', text: 'hi' })]));
     const port = new BlueBubblesPort(makeConfig(), mock.client);
-    const out = await port.listInboundSince(new Date(0));
+    const page = await port.listInboundSince(new Date(0));
+    const out = page.records;
     expect(out).toEqual([
       {
         guid: 'plain-1',

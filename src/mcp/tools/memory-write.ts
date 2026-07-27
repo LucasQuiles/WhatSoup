@@ -90,17 +90,16 @@ export function registerMemoryWriteTools(
     replayPolicy: 'unsafe',
     handler: async (params, session) => {
       const p = params as z.infer<typeof MemoryWriteSchema>;
-      // Confined sessions ONLY: chat-scoped, or conversation-bound (the
-      // per-chat actor socket — tier:'global' but binding-confined to one
-      // chat by the registry's default-deny gate and the binding-keyed
-      // helpers). In an UNBOUND global session the registry would accept a
-      // caller-supplied chatJid (registry.ts global branch) → a
-      // cross-conversation write, so those stay refused. File ONLY under the
-      // session's own key — binding first (SSOT), never params.chatJid.
+      // File ONLY under a conversation key already pinned by the runtime —
+      // binding first (SSOT), then the session mirror. The registry validates
+      // a global caller's chatJid against session.conversationKey before this
+      // handler runs; this second boundary still ignores params.chatJid, so a
+      // direct or future caller cannot retarget the write. A global session
+      // with no pinned conversation key remains refused.
       const boundKey = conversationBoundKey(session);
-      const rawChat = boundKey ?? (session.tier === 'chat-scoped' ? session.conversationKey : undefined);
+      const rawChat = boundKey ?? session.conversationKey;
       if (!rawChat) {
-        return errorResult('memory_write is only available in a chat-scoped or conversation-bound session');
+        return errorResult('memory_write requires a session with a pinned conversation key');
       }
 
       const memoryType = p.memory_type;

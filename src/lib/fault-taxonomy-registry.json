@@ -113,6 +113,8 @@
         "outbound_flood",
         "event_loop_starved",
         "durability_debt",
+        "continuity_gap_unreadable",
+        "continuity_gap_open",
         "schema_future",
         "schema_not_ready",
         "pending_polls_unreadable",
