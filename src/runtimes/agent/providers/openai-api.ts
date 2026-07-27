@@ -143,7 +143,8 @@ export class OpenAIApiProvider implements ProviderSession {
     // Per-turn model override (e.g. model-switch mid-conversation)
     const turnModel = request.model ?? this.model;
 
-    const hasRichParts = request.parts.some((part) => part.kind !== 'text');
+    const hasRichParts = request.parts.length > 1
+      || request.parts.some((part) => part.kind !== 'text');
     const userContent = hasRichParts
       ? turnPartsToOpenAIContent(request.parts)
       : stripLoneSurrogates(

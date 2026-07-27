@@ -89,6 +89,7 @@ function makeDurability() {
   const durability = {
     matchEcho,
     journalInbound,
+    getInboundReceivedAtUnixSeconds: vi.fn().mockReturnValue(1_780_000_000),
     markInboundSkipped: vi.fn(),
     markInboundFailed: vi.fn(),
   } as unknown as DurabilityEngine;

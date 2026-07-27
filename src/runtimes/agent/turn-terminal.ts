@@ -93,6 +93,7 @@ export interface ReplyGuaranteeDisarmContext {
 
 export interface TurnRecoveryReplayEnvelope {
   readonly sourceMessageId: string;
+  readonly receivedAtUnixSeconds: number;
   readonly replaySafe: boolean;
   readonly senderJid: string;
   readonly senderName: string | null;

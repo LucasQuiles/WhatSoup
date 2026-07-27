@@ -40,6 +40,7 @@ import {
   isWhatSoupHeadlessExecutionProfile,
   WHATSOUP_HEADLESS_EXECUTION_PROFILE,
 } from '../lib/opencode-execution-profile-contract.ts';
+import { isAuthenticatedSenderJid, isGroupJid } from './jid-constants.ts';
 
 export const VALID_TYPES: ReadonlySet<string> = new Set(['chat', 'agent', 'passive']);
 export const ACCESS_MODES = [
@@ -320,6 +321,35 @@ export function validateInstanceConfig(
         );
       }
       return err('adminPhones', 'adminPhones must be a non-empty array of strings');
+    }
+  }
+
+  // --- internalPeerJids ---
+  // Audience trust is intentionally distinct from adminPhones/access control.
+  // Require exact authenticated direct-chat JIDs and reject group/spoofable
+  // transport identities at config load.
+  if (raw['internalPeerJids'] !== undefined) {
+    const peers = raw['internalPeerJids'];
+    if (!Array.isArray(peers)) {
+      return err('internalPeerJids', 'internalPeerJids must be an array of authenticated DM JIDs');
+    }
+    for (const peer of peers) {
+      if (
+        typeof peer !== 'string'
+        || peer.trim() !== peer
+        || peer === ''
+        || !/^[^@\s]+@[^@\s]+$/.test(peer)
+        || !isAuthenticatedSenderJid(peer)
+        || isGroupJid(peer)
+      ) {
+        return err(
+          'internalPeerJids',
+          'internalPeerJids must contain only exact authenticated DM JIDs',
+        );
+      }
+    }
+    if (new Set(peers).size !== peers.length) {
+      return err('internalPeerJids', 'internalPeerJids must not contain duplicates');
     }
   }
 

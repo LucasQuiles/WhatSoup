@@ -63,6 +63,10 @@ import type {
 } from './provider-execution-gate.ts';
 import { shortHash } from '../../lib/short-hash.ts';
 import { assessTreeLiveness } from './tree-liveness.ts';
+import {
+  isStructuredProviderTurn,
+  type ProviderTurnInput,
+} from './provider-boundary-dispatch.ts';
 
 const log = createChildLogger('session-manager');
 
@@ -1102,20 +1106,30 @@ export class SessionManager {
     log.warn({ method, id, chatJid: this.chatJid }, 'codex: unhandled server request');
   }
 
-  private buildSpawnPerTurnPrompt(text: string): string {
-    if (!this.systemPrompt) return text;
+  private buildSpawnPerTurnPrompt(input: ProviderTurnInput): string {
+    if (!isStructuredProviderTurn(input)) {
+      if (!this.systemPrompt) return input;
+      return [
+        'System instructions:',
+        this.systemPrompt,
+        '',
+        'User message:',
+        input,
+      ].join('\n');
+    }
 
-    return [
-      'System instructions:',
-      this.systemPrompt,
-      '',
-      'User message:',
-      text,
-    ].join('\n');
+    const sections = this.systemPrompt
+      ? ['System instructions:', this.systemPrompt, '']
+      : [];
+    for (const applicationContext of input.applicationContext) {
+      sections.push('Application context (runtime-provided):', applicationContext, '');
+    }
+    sections.push('User message:', input.userText);
+    return sections.join('\n');
   }
 
-  private buildSpawnPerTurnArgs(cwd: string, text: string): string[] {
-    const prompt = this.buildSpawnPerTurnPrompt(text);
+  private buildSpawnPerTurnArgs(cwd: string, input: ProviderTurnInput): string[] {
+    const prompt = this.buildSpawnPerTurnPrompt(input);
 
     switch (this.provider) {
       // codex-cli and gemini-cli are now persistent, not spawn-per-turn.
@@ -2313,8 +2327,8 @@ export class SessionManager {
   }
 
   /** Write a user message turn to the agent — via stdin (Claude) or spawn-per-turn (others). */
-  async sendTurn(text: string): Promise<void> {
-    return this.sendTurnAtProviderBoundary(text);
+  async sendTurn(input: ProviderTurnInput): Promise<void> {
+    return this.sendTurnAtProviderBoundary(input);
   }
 
   /**
@@ -2323,7 +2337,7 @@ export class SessionManager {
    * callers that do not publish runtime ownership evidence.
    */
   async sendTurnAtProviderBoundary(
-    text: string,
+    input: ProviderTurnInput,
     onProviderBoundaryReady?: () => void,
   ): Promise<void> {
     this.db.assertWritableCompatibility();
@@ -2389,10 +2403,16 @@ export class SessionManager {
       this.clearTurnWatchdog();
       this.armWatchdog(providerSession, generationIdentity);
       try {
+        const parts = isStructuredProviderTurn(input)
+          ? [
+              ...input.applicationContext.map((text) => ({ kind: 'text' as const, text })),
+              { kind: 'text' as const, text: input.userText },
+            ]
+          : [{ kind: 'text' as const, text: input }];
         await providerSession.sendTurn({
           role: 'user',
           conversationKey: this.conversationKey,
-          parts: [{ kind: 'text', text }],
+          parts,
           ...(this.model ? { model: this.model } : {}),
         });
       } catch (err) {
@@ -2481,7 +2501,7 @@ export class SessionManager {
       let binary: string;
       let parse: ProviderEventParser;
       try {
-        args = this.buildSpawnPerTurnArgs(cwd, text);
+        args = this.buildSpawnPerTurnArgs(cwd, input);
         binary = this.getProviderBinary();
         parse = this.getParser();
       } catch (err) {
@@ -2879,7 +2899,13 @@ export class SessionManager {
           this.completeProviderTurn();
           throw new Error('Session generation was superseded before turn dispatch.');
         }
-        payload = buildSessionPromptRequest(++this.geminiRequestSeq, this.geminiSessionId, text);
+        payload = buildSessionPromptRequest(
+          ++this.geminiRequestSeq,
+          this.geminiSessionId,
+          isStructuredProviderTurn(input)
+            ? [...input.applicationContext, input.userText]
+            : input,
+        );
       } else if (this.provider === 'codex-cli') {
         // Codex app-server: wait for threadId from thread/started response
         // (spawnSession sends initialize + thread/start, response arrives async on stdout)
@@ -2915,7 +2941,9 @@ export class SessionManager {
           method: 'turn/start',
           params: {
             threadId: this.codexThreadId,
-            input: [{ type: 'text', text, text_elements: [] }],
+            input: (isStructuredProviderTurn(input)
+              ? [...input.applicationContext, input.userText]
+              : [input]).map((text) => ({ type: 'text', text, text_elements: [] })),
           },
           id,
         });
@@ -2923,7 +2951,12 @@ export class SessionManager {
         // Claude-cli: stream-json user message
         payload = JSON.stringify({
           type: 'user',
-          message: { role: 'user', content: [{ type: 'text', text }] },
+          message: {
+            role: 'user',
+            content: (isStructuredProviderTurn(input)
+              ? [...input.applicationContext, input.userText]
+              : [input]).map((text) => ({ type: 'text', text })),
+          },
         });
       }
 

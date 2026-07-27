@@ -17,6 +17,7 @@ vi.mock('../../../src/logger.ts', () => ({
 function makeTurn(overrides: Partial<QueuedTurn> = {}): QueuedTurn {
   return {
     sourceMessageId: 'wamid-test',
+    receivedAtUnixSeconds: 1_780_000_000,
     conversationKey: 'chat',
     chatJid: 'chat@s.whatsapp.net',
     senderJid: 'sender@s.whatsapp.net',

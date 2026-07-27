@@ -195,7 +195,7 @@ export class FleetRealtimeEventPoller {
             currentTyping.set(key, entry.since);
           }
         }
-      } catch { /* skip — instance stays unobserved */ }
+      } catch { /* intentional: one unreachable instance simply stays unobserved for this poll cycle */ }
     });
 
     await Promise.all(promises);

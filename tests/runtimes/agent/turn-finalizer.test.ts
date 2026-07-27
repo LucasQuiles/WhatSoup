@@ -50,6 +50,7 @@ const RECOVERY_OWNER: RecoveryOwnerIdentity = {
 
 const REPLAY: TurnRecoveryReplayEnvelope = {
   sourceMessageId: 'wamid-41',
+  receivedAtUnixSeconds: 1_780_000_000,
   replaySafe: true,
   senderJid: '15550100002:9@s.whatsapp.net',
   senderName: 'Exact Sender',

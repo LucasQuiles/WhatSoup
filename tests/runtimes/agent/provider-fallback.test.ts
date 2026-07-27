@@ -123,6 +123,7 @@ import { ensureStandbyNoticeSchema } from '../../../src/runtimes/agent/standby-n
 import { ensureHandoffArtifactSchema, upsertHandoffArtifact } from '../../../src/runtimes/agent/handoff-artifact.ts';
 import type { Messenger } from '../../../src/core/types.ts';
 import { emitAlert } from '../../../src/lib/emit-alert.ts';
+import { createRuntimeTurnContext } from '../../../src/runtimes/agent/runtime-turn-context.ts';
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -172,6 +173,7 @@ type FallbackView = {
   effectiveModel: string | undefined;
   pendingTurnText: Map<string, string>;
   pendingTurnActorJid: Map<string, string | undefined>;
+  perChatRuntimeTurnContexts: Map<string, ReturnType<typeof createRuntimeTurnContext>[]>;
   activateProviderFallback(
     resetAt: Date | null,
     reason?: 'usage-limit' | 'rate-limit' | 'auth-required' | 'model-unavailable' | 'server-error' | 'empty-output' | 'probe-unusable',
@@ -494,6 +496,34 @@ describe('AgentRuntime — provider fallback state machine', () => {
     const activation = v.activateProviderFallback(null, 'usage-limit')!;
     v.pendingTurnText.set('chat-key', 'please continue the task');
     v.pendingTurnActorJid.set('chat-key', 'sender@s.whatsapp.net');
+    const runtimeContext = createRuntimeTurnContext({
+      identity: {
+        scope: 'per_chat',
+        conversationKey: 'chat-key',
+        deliveryJid: 'chat@s.whatsapp.net',
+        inboundSeq: 91,
+        logicalTurnId: 'fallback-context-91',
+        managerId: 'fallback-manager',
+        generation: 1,
+      },
+      recoveryOwner: {
+        logicalTurnId: 'fallback-context-91:recovery',
+        managerId: 'fallback-recovery',
+        generation: 2,
+      },
+      replay: {
+        sourceMessageId: 'wamid-fallback-91',
+        receivedAtUnixSeconds: 1_780_000_000,
+        replaySafe: true,
+        senderJid: 'sender@s.whatsapp.net',
+        senderName: null,
+        text: 'please continue the task',
+        isGroup: false,
+      },
+      contentType: 'text',
+      toolScopeKey: 'chat-key',
+    });
+    v.perChatRuntimeTurnContexts.set('chat-key', [runtimeContext]);
     v.replayTurnOnFallback = vi.fn(async () => {});
 
     expect(v.scheduleFallbackReplay({
@@ -508,6 +538,7 @@ describe('AgentRuntime — provider fallback state machine', () => {
       replayText: 'please continue the task',
       actorJid: 'sender@s.whatsapp.net',
       oldSession: null,
+      runtimeContext,
     });
 
     const extended = v.activateProviderFallback(null, 'usage-limit')!;

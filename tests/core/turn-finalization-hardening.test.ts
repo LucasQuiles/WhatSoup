@@ -98,6 +98,7 @@ describe('turn finalization proof boundary', () => {
     };
     const replay = {
       sourceMessageId: `message-${suffix}`,
+      receivedAtUnixSeconds: 1_780_000_000,
       replaySafe: true,
       senderJid: '15550100002:9@s.whatsapp.net',
       senderName: 'Recovery Sender',
@@ -799,6 +800,9 @@ describe('turn finalization proof boundary', () => {
 
   it('excludes terminal-record-owned inbounds from every stuck-sweep bucket', () => {
     const echoedRetry = journal('sweep-echoed-retry');
+    db.raw.prepare(
+      "UPDATE inbound_events SET received_at = datetime('now', '-2 days') WHERE seq = ?",
+    ).run(echoedRetry);
     const echoedOpId = outbound(echoedRetry, 'maybe_sent');
     durability.finalizeTurnTerminal(toTurnFinalizationPersistence(result(
       echoedRetry,
@@ -811,19 +815,22 @@ describe('turn finalization proof boundary', () => {
 
     const staleTurnDone = journal('sweep-transfer-turn-done');
     durability.markTurnDone(staleTurnDone);
+    db.raw.prepare(
+      "UPDATE inbound_events SET received_at = datetime('now', '-2 days') WHERE seq = ?",
+    ).run(staleTurnDone);
     durability.finalizeTurnTerminal(transferParams(
       staleTurnDone,
       'sweep-transfer-turn-done',
     ));
 
     const staleProcessing = journal('sweep-transfer-processing');
+    db.raw.prepare(
+      "UPDATE inbound_events SET received_at = datetime('now', '-2 days') WHERE seq = ?",
+    ).run(staleProcessing);
     durability.finalizeTurnTerminal(transferParams(
       staleProcessing,
       'sweep-transfer-processing',
     ));
-    db.raw.prepare(
-      "UPDATE inbound_events SET received_at = datetime('now', '-2 days') WHERE seq IN (?, ?, ?)",
-    ).run(echoedRetry, staleTurnDone, staleProcessing);
 
     expect(durability.sweepStuckInbound()).toEqual({
       completedEchoed: 0,
