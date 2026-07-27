@@ -3,8 +3,6 @@ import { config } from '../../../config.ts';
 import { createChildLogger } from '../../../logger.ts';
 import { WhatSoupError as AppError } from '../../../errors.ts';
 import { truncateForRerank } from '../../../lib/text-utils.ts';
-import { errorMessage } from '../../../lib/error-message.ts';
-import { shortHash } from '../../../lib/short-hash.ts';
 import { resolveApiKey } from '../../../lib/api-key-resolver.ts';
 import { emitAlertChecked, clearAlertSourceChecked } from '../../../lib/emit-alert.ts';
 import { CircuitBreaker } from '../../../core/circuit-breaker.ts';
@@ -16,6 +14,17 @@ import {
   pineconeProjectGuardError,
   type PineconeProjectGuard,
 } from '../../../lib/pinecone-project-guard.ts';
+import {
+  buildMemoryOperationEvent,
+  classifyMemoryFilter,
+  classifyMemoryOperationFailure,
+  createMemoryOperationContext,
+  type MemoryOperation,
+  type MemoryOperationContext,
+  type MemoryOperationFailure,
+  type MemoryOperationFailureCode,
+  type MemoryReadinessState,
+} from '../../../lib/memory-operation-telemetry.ts';
 
 const logger = createChildLogger('pinecone-provider');
 
@@ -23,31 +32,23 @@ const FAILURE_ALERT_THRESHOLD = 3;
 const RETRY_DELAY_MS = 500;
 
 /** Per-operation circuit breakers (threshold=3, reset after 30s) */
-const breakers: Record<string, CircuitBreaker> = {};
+const breakers: Partial<Record<MemoryOperation, CircuitBreaker>> = {};
 
-function queryLogFields(query: string): { queryHash: string; queryLength: number } {
-  return {
-    queryHash: shortHash(query),
-    queryLength: query.length,
-  };
-}
-
-function getBreaker(operation: string): CircuitBreaker {
+function getBreaker(operation: MemoryOperation): CircuitBreaker {
   if (!breakers[operation]) {
     breakers[operation] = new CircuitBreaker(operation, FAILURE_ALERT_THRESHOLD, 30_000, logger);
   }
   return breakers[operation];
 }
 
-function trackFailure(operation: string, err: unknown): void {
+function trackFailure(
+  operation: MemoryOperation,
+  operationId: string,
+  failure: MemoryOperationFailure,
+  attempt: 1 | 2,
+): void {
   const breaker = getBreaker(operation);
   breaker.recordFailure();
-  const message = errorMessage(err);
-
-  logger.warn(
-    { operation, error: message },
-    'pinecone_api_error',
-  );
 
   if (breaker.isOpen()) {
     alertedOperations.add(operation);
@@ -55,15 +56,21 @@ function trackFailure(operation: string, err: unknown): void {
       config.botName,
       'pinecone_degraded',
       `Pinecone ${operation} circuit breaker tripped`,
-      `Last error: ${message}`,
+      [
+        `operation=${operation}`,
+        `operation_id=${operationId}`,
+        `failure_code=${failure.code}`,
+        `retryable=${failure.retryable}`,
+        `attempt=${attempt}`,
+      ].join(' '),
     );
   }
 }
 
 /** Track operations that have had alerts emitted, so we can clear on recovery. */
-const alertedOperations = new Set<string>();
+const alertedOperations = new Set<MemoryOperation>();
 
-function trackSuccess(operation: string): void {
+function trackSuccess(operation: MemoryOperation): void {
   getBreaker(operation).recordSuccess();
   if (alertedOperations.has(operation)) {
     alertedOperations.delete(operation);
@@ -71,17 +78,25 @@ function trackSuccess(operation: string): void {
   }
 }
 
-function isBreakerOpen(operation: string): boolean {
+function isBreakerOpen(operation: MemoryOperation): boolean {
   return getBreaker(operation).isOpen();
 }
 
-export type PineconeReadinessState =
-  | 'disabled'
-  | 'auth_failed'
-  | 'index_missing'
-  | 'project_mismatch'
-  | 'network_error'
-  | 'ready';
+function logMemoryOperation(
+  context: MemoryOperationContext,
+  outcome: Parameters<typeof buildMemoryOperationEvent>[1],
+): void {
+  const event = buildMemoryOperationEvent(context, outcome);
+  if (outcome.status === 'failed') {
+    logger.error(event, 'memory_operation');
+  } else if (outcome.status === 'partial' || outcome.status === 'skipped') {
+    logger.warn(event, 'memory_operation');
+  } else {
+    logger.info(event, 'memory_operation');
+  }
+}
+
+export type PineconeReadinessState = MemoryReadinessState;
 
 function classifyReadinessError(err: unknown): Extract<PineconeReadinessState, 'auth_failed' | 'network_error'> {
   const status = typeof err === 'object' && err !== null && 'status' in err
@@ -109,18 +124,51 @@ export async function getPineconeReadiness(indexName: string = config.pineconeIn
   state: PineconeReadinessState;
   index: string;
 }> {
+  const operation = createMemoryOperationContext({
+    operation: 'readiness',
+    scopeKind: 'none',
+    filterShape: 'none',
+  });
+  const startMs = Date.now();
   const targetIndex = indexName.trim();
   if (!targetIndex) {
+    logMemoryOperation(operation, {
+      stage: 'guard',
+      status: 'skipped',
+      failureCode: 'none',
+      retryable: false,
+      attempt: 0,
+      resultCount: 0,
+      evidenceCoverage: 'local_guard',
+    });
     return { state: 'disabled', index: targetIndex };
   }
 
   const apiKey = resolvePineconeApiKey().trim();
   if (!apiKey) {
+    logMemoryOperation(operation, {
+      stage: 'guard',
+      status: 'skipped',
+      failureCode: 'none',
+      retryable: false,
+      attempt: 0,
+      resultCount: 0,
+      evidenceCoverage: 'local_guard',
+    });
     return { state: 'disabled', index: targetIndex };
   }
 
   const guard = configuredPineconeProjectGuard();
   if (missingRequiredProjectGuardError(guard)) {
+    logMemoryOperation(operation, {
+      stage: 'guard',
+      status: 'failed',
+      failureCode: 'project_guard_failed',
+      retryable: false,
+      attempt: 0,
+      resultCount: 0,
+      evidenceCoverage: 'local_guard',
+    });
     return { state: 'project_mismatch', index: targetIndex };
   }
 
@@ -130,15 +178,55 @@ export async function getPineconeReadiness(indexName: string = config.pineconeIn
 
     if (found) {
       if (!matchesPineconeProjectGuard(found.host, guard)) {
+        logMemoryOperation(operation, {
+          stage: 'guard',
+          status: 'failed',
+          failureCode: 'project_guard_failed',
+          retryable: false,
+          attempt: 1,
+          resultCount: 0,
+          durationMs: Date.now() - startMs,
+          evidenceCoverage: 'provider_response',
+        });
         return { state: 'project_mismatch', index: targetIndex };
       }
+      logMemoryOperation(operation, {
+        stage: 'request',
+        status: 'completed',
+        failureCode: 'none',
+        retryable: false,
+        attempt: 1,
+        resultCount: 1,
+        durationMs: Date.now() - startMs,
+        evidenceCoverage: 'provider_response',
+      });
       return { state: 'ready', index: targetIndex };
     }
 
+    logMemoryOperation(operation, {
+      stage: 'request',
+      status: 'completed',
+      failureCode: 'none',
+      retryable: false,
+      attempt: 1,
+      resultCount: 0,
+      durationMs: Date.now() - startMs,
+      evidenceCoverage: 'provider_response',
+    });
     return { state: 'index_missing', index: targetIndex };
   } catch (err) {
     const state = classifyReadinessError(err);
-    logger.warn({ err, indexName: targetIndex, state }, 'pinecone readiness check failed');
+    const failure = classifyMemoryOperationFailure(err);
+    logMemoryOperation(operation, {
+      stage: 'request',
+      status: 'failed',
+      failureCode: failure.code,
+      retryable: failure.retryable,
+      attempt: 1,
+      resultCount: 0,
+      durationMs: Date.now() - startMs,
+      evidenceCoverage: 'provider_error',
+    });
     return { state, index: targetIndex };
   }
 }
@@ -248,8 +336,8 @@ export interface PineconeSearchDetails {
   status: PineconeSearchStatus;
   durationMs?: number;
   retried?: boolean;
-  error?: string;
-  projectGuardError?: string;
+  failureCode?: MemoryOperationFailureCode;
+  retryable?: boolean;
 }
 
 export interface PineconeEntitySearchDetails {
@@ -257,8 +345,8 @@ export interface PineconeEntitySearchDetails {
   status: PineconeSearchStatus;
   durationMs?: number;
   retried?: boolean;
-  error?: string;
-  projectGuardError?: string;
+  failureCode?: MemoryOperationFailureCode;
+  retryable?: boolean;
 }
 
 type PineconeRecord = {
@@ -423,14 +511,47 @@ export class PineconeMemory {
     topK: number,
     traceId?: string,
   ): Promise<PineconeSearchDetails> {
+    const filter = classifyMemoryFilter(filters);
+    const operation = createMemoryOperationContext({
+      operation: 'search',
+      traceId,
+      scopeKind: filter.scopeKind,
+      filterShape: filter.filterShape,
+    });
     if (isBreakerOpen('search')) {
-      logger.warn('pinecone search circuit breaker open — skipping');
-      return { results: [], status: 'breaker_open' };
+      logMemoryOperation(operation, {
+        stage: 'guard',
+        status: 'skipped',
+        failureCode: 'breaker_open',
+        retryable: true,
+        attempt: 0,
+        resultCount: 0,
+        evidenceCoverage: 'local_guard',
+      });
+      return {
+        results: [],
+        status: 'breaker_open',
+        failureCode: 'breaker_open',
+        retryable: true,
+      };
     }
     const projectGuardError = await this.getProjectGuardError();
     if (projectGuardError) {
-      logger.error({ projectGuardError, index: config.pineconeIndex }, 'Pinecone project guard failed — skipping search');
-      return { results: [], status: 'project_guard_failed', projectGuardError };
+      logMemoryOperation(operation, {
+        stage: 'guard',
+        status: 'failed',
+        failureCode: 'project_guard_failed',
+        retryable: false,
+        attempt: 0,
+        resultCount: 0,
+        evidenceCoverage: 'local_guard',
+      });
+      return {
+        results: [],
+        status: 'project_guard_failed',
+        failureCode: 'project_guard_failed',
+        retryable: false,
+      };
     }
 
     const doSearch = () =>
@@ -448,17 +569,17 @@ export class PineconeMemory {
       const response = await doSearch();
       const results = (response.result.hits ?? []).map(fromPineconeHit);
       const durationMs = Date.now() - startMs;
-      logger.info(
-        {
-          topScores: results.slice(0, 3).map((r) => r.score),
-          // QR-006: candidate IDs alongside scores — bounded to 10 so a
-          // large candidate set can't blow up log volume.
-          ids: results.slice(0, 10).map((r) => r.id),
-          durationMs,
-          ...(traceId ? { traceId } : {}),
-        },
-        'Pinecone search complete',
-      );
+      logMemoryOperation(operation, {
+        stage: 'request',
+        status: 'completed',
+        failureCode: 'none',
+        retryable: false,
+        attempt: 1,
+        resultCount: results.length,
+        durationMs,
+        scores: results.map((result) => result.score),
+        evidenceCoverage: 'provider_response',
+      });
       trackSuccess('search');
       return { results, status: 'ok', durationMs };
     } catch (err) {
@@ -468,27 +589,41 @@ export class PineconeMemory {
         const response = await doSearch();
         const results = (response.result.hits ?? []).map(fromPineconeHit);
         const durationMs = Date.now() - startMs;
-        logger.info(
-          {
-            topScores: results.slice(0, 3).map((r) => r.score),
-            ids: results.slice(0, 10).map((r) => r.id),
-            durationMs,
-            retried: true,
-            ...(traceId ? { traceId } : {}),
-          },
-          'Pinecone search complete (after retry)',
-        );
+        logMemoryOperation(operation, {
+          stage: 'request',
+          status: 'completed',
+          failureCode: 'none',
+          retryable: false,
+          attempt: 2,
+          resultCount: results.length,
+          durationMs,
+          scores: results.map((result) => result.score),
+          evidenceCoverage: 'provider_response',
+        });
         trackSuccess('search');
         return { results, status: 'ok', durationMs, retried: true };
       } catch (retryErr) {
         const durationMs = Date.now() - startMs;
-        const message = errorMessage(retryErr);
-        trackFailure('search', retryErr);
-        logger.error(
-          { err: retryErr, ...queryLogFields(query), topK, filter: filters, durationMs },
-          'Pinecone search failed — returning empty results',
-        );
-        return { results: [], status: 'failed', durationMs, retried: true, error: message };
+        const failure = classifyMemoryOperationFailure(retryErr);
+        trackFailure('search', operation.operationId, failure, 2);
+        logMemoryOperation(operation, {
+          stage: 'request',
+          status: 'failed',
+          failureCode: failure.code,
+          retryable: failure.retryable,
+          attempt: 2,
+          resultCount: 0,
+          durationMs,
+          evidenceCoverage: 'provider_error',
+        });
+        return {
+          results: [],
+          status: 'failed',
+          durationMs,
+          retried: true,
+          failureCode: failure.code,
+          retryable: failure.retryable,
+        };
       }
     }
   }
@@ -550,14 +685,46 @@ export class PineconeMemory {
   }
 
   async searchEntitiesDetailed(query: string, traceId?: string): Promise<PineconeEntitySearchDetails> {
-    if (isBreakerOpen('searchEntities')) {
-      logger.warn('pinecone searchEntities circuit breaker open — skipping');
-      return { results: [], status: 'breaker_open' };
+    const operation = createMemoryOperationContext({
+      operation: 'entity_search',
+      traceId,
+      scopeKind: 'entity',
+      filterShape: 'source_ne',
+    });
+    if (isBreakerOpen('entity_search')) {
+      logMemoryOperation(operation, {
+        stage: 'guard',
+        status: 'skipped',
+        failureCode: 'breaker_open',
+        retryable: true,
+        attempt: 0,
+        resultCount: 0,
+        evidenceCoverage: 'local_guard',
+      });
+      return {
+        results: [],
+        status: 'breaker_open',
+        failureCode: 'breaker_open',
+        retryable: true,
+      };
     }
     const projectGuardError = await this.getProjectGuardError();
     if (projectGuardError) {
-      logger.error({ projectGuardError, index: config.pineconeIndex }, 'Pinecone project guard failed — skipping entity search');
-      return { results: [], status: 'project_guard_failed', projectGuardError };
+      logMemoryOperation(operation, {
+        stage: 'guard',
+        status: 'failed',
+        failureCode: 'project_guard_failed',
+        retryable: false,
+        attempt: 0,
+        resultCount: 0,
+        evidenceCoverage: 'local_guard',
+      });
+      return {
+        results: [],
+        status: 'project_guard_failed',
+        failureCode: 'project_guard_failed',
+        retryable: false,
+      };
     }
 
     const doSearch = () =>
@@ -572,13 +739,13 @@ export class PineconeMemory {
 
     const startMs = Date.now();
     let retried = false;
+    let usedFallbackScores = false;
     try {
       // Step 1: vector search (no server-side rerank — docs may exceed 512-token reranker limit)
       let response: Awaited<ReturnType<typeof doSearch>>;
       try {
         response = await doSearch();
-      } catch (firstErr) {
-        logger.debug({ err: (firstErr as Error).message, operation: 'searchEntities' }, 'pinecone_first_attempt_failed');
+      } catch {
         // One retry after short delay
         retried = true;
         await sleep(RETRY_DELAY_MS);
@@ -590,6 +757,13 @@ export class PineconeMemory {
 
       // Step 2: client-side rerank with truncated text to stay within token limits
       if (config.pineconeRerank && mapped.length > 0) {
+        const rerankStartMs = Date.now();
+        const rerankOperation = createMemoryOperationContext({
+          operation: 'rerank',
+          traceId,
+          scopeKind: 'entity',
+          filterShape: 'source_ne',
+        });
         try {
           const rerankResult = await this.client.inference.rerank({
             model: 'pinecone-rerank-v0',
@@ -609,9 +783,33 @@ export class PineconeMemory {
             }
           }
           mapped = reranked;
+          logMemoryOperation(rerankOperation, {
+            stage: 'rerank',
+            status: 'completed',
+            failureCode: 'none',
+            retryable: false,
+            attempt: 1,
+            resultCount: mapped.length,
+            durationMs: Date.now() - rerankStartMs,
+            scores: mapped.map((result) => result.score),
+            evidenceCoverage: 'provider_response',
+          });
+          trackSuccess('rerank');
         } catch (rerankErr) {
-          trackFailure('rerank', rerankErr);
-          logger.warn({ err: rerankErr }, 'Client-side rerank failed — using vector scores');
+          usedFallbackScores = true;
+          const failure = classifyMemoryOperationFailure(rerankErr);
+          trackFailure('rerank', rerankOperation.operationId, failure, 1);
+          logMemoryOperation(rerankOperation, {
+            stage: 'rerank',
+            status: 'partial',
+            failureCode: failure.code,
+            retryable: failure.retryable,
+            attempt: 1,
+            resultCount: mapped.length,
+            durationMs: Date.now() - rerankStartMs,
+            scores: mapped.map((result) => result.score),
+            evidenceCoverage: 'fallback_scores',
+          });
         }
       }
 
@@ -640,43 +838,103 @@ export class PineconeMemory {
       }
 
       const durationMs = Date.now() - startMs;
-      logger.info(
-        {
-          topScores: capped.slice(0, 3).map((r) => r.score),
-          // QR-006: candidate IDs alongside scores — bounded to 10 so a
-          // large candidate set can't blow up log volume.
-          ids: capped.slice(0, 10).map((r) => r.id),
-          total: capped.length,
-          durationMs,
-          ...(traceId ? { traceId } : {}),
-        },
-        'Pinecone entity search complete',
-      );
-      trackSuccess('searchEntities');
+      logMemoryOperation(operation, {
+        stage: 'request',
+        status: 'completed',
+        failureCode: 'none',
+        retryable: false,
+        attempt: retried ? 2 : 1,
+        resultCount: capped.length,
+        durationMs,
+        scores: capped.map((result) => result.score),
+        evidenceCoverage: usedFallbackScores
+          ? 'fallback_scores'
+          : 'provider_response',
+      });
+      trackSuccess('entity_search');
       return { results: capped, status: 'ok', durationMs, ...(retried ? { retried } : {}) };
     } catch (err) {
       const durationMs = Date.now() - startMs;
-      const message = errorMessage(err);
-      trackFailure('searchEntities', err);
-      logger.error(
-        { err, ...queryLogFields(query), durationMs },
-        'Pinecone entity search failed — returning empty results',
-      );
-      return { results: [], status: 'failed', durationMs, retried, error: message };
+      const failure = classifyMemoryOperationFailure(err);
+      const attempt = retried ? 2 : 1;
+      trackFailure('entity_search', operation.operationId, failure, attempt);
+      logMemoryOperation(operation, {
+        stage: 'request',
+        status: 'failed',
+        failureCode: failure.code,
+        retryable: failure.retryable,
+        attempt,
+        resultCount: 0,
+        durationMs,
+        evidenceCoverage: 'provider_error',
+      });
+      return {
+        results: [],
+        status: 'failed',
+        durationMs,
+        retried,
+        failureCode: failure.code,
+        retryable: failure.retryable,
+      };
     }
   }
 
-  async upsert(records: MemoryRecord[]): Promise<void> {
-    if (records.length === 0) return;
+  async upsert(
+    records: MemoryRecord[],
+    contextInput: {
+      operationId?: string;
+      traceId?: string;
+      operation?: 'upsert' | 'memory_write';
+    } = {},
+  ): Promise<void> {
+    const operation = createMemoryOperationContext({
+      operation: contextInput.operation ?? 'upsert',
+      operationId: contextInput.operationId,
+      traceId: contextInput.traceId,
+      scopeKind: 'batch',
+      filterShape: 'none',
+    });
+    if (records.length === 0) {
+      logMemoryOperation(operation, {
+        stage: 'finalize',
+        status: 'skipped',
+        failureCode: 'none',
+        retryable: false,
+        attempt: 0,
+        resultCount: 0,
+        evidenceCoverage: 'not_observed',
+      });
+      return;
+    }
 
     if (isBreakerOpen('upsert')) {
-      logger.warn('pinecone upsert circuit breaker open — skipping');
+      logMemoryOperation(operation, {
+        stage: 'guard',
+        status: 'skipped',
+        failureCode: 'breaker_open',
+        retryable: true,
+        attempt: 0,
+        resultCount: 0,
+        evidenceCoverage: 'local_guard',
+      });
       throw new AppError('Pinecone circuit breaker open', 'PINECONE_UNAVAILABLE');
     }
     const projectGuardError = await this.getProjectGuardError();
     if (projectGuardError) {
-      logger.error({ projectGuardError, index: config.pineconeIndex }, 'Pinecone project guard failed — skipping upsert');
-      throw new AppError(projectGuardError, 'PINECONE_UNAVAILABLE');
+      logMemoryOperation(operation, {
+        stage: 'guard',
+        status: 'failed',
+        failureCode: 'project_guard_failed',
+        retryable: false,
+        attempt: 0,
+        resultCount: 0,
+        evidenceCoverage: 'local_guard',
+      });
+      throw new AppError(
+        'Pinecone project guard failed',
+        'PINECONE_UNAVAILABLE',
+        projectGuardError,
+      );
     }
 
     const pineconeRecords = records.map(toPineconeRecord);
@@ -686,10 +944,16 @@ export class PineconeMemory {
     try {
       await doUpsert();
       const durationMs = Date.now() - startMs;
-      logger.info(
-        { count: records.length, ids: records.map((r) => r.id), durationMs },
-        'Pinecone upsert complete',
-      );
+      logMemoryOperation(operation, {
+        stage: 'write',
+        status: 'completed',
+        failureCode: 'none',
+        retryable: false,
+        attempt: 1,
+        resultCount: records.length,
+        durationMs,
+        evidenceCoverage: 'provider_response',
+      });
       trackSuccess('upsert');
     } catch (err) {
       // One retry after short delay
@@ -697,14 +961,30 @@ export class PineconeMemory {
       try {
         await doUpsert();
         const durationMs = Date.now() - startMs;
-        logger.info(
-          { count: records.length, ids: records.map((r) => r.id), durationMs, retried: true },
-          'Pinecone upsert complete (after retry)',
-        );
+        logMemoryOperation(operation, {
+          stage: 'write',
+          status: 'completed',
+          failureCode: 'none',
+          retryable: false,
+          attempt: 2,
+          resultCount: records.length,
+          durationMs,
+          evidenceCoverage: 'provider_response',
+        });
         trackSuccess('upsert');
       } catch (retryErr) {
-        trackFailure('upsert', retryErr);
-        logger.error({ err: retryErr, count: records.length }, 'Pinecone upsert failed');
+        const failure = classifyMemoryOperationFailure(retryErr);
+        trackFailure('upsert', operation.operationId, failure, 2);
+        logMemoryOperation(operation, {
+          stage: 'write',
+          status: 'failed',
+          failureCode: failure.code,
+          retryable: failure.retryable,
+          attempt: 2,
+          resultCount: 0,
+          durationMs: Date.now() - startMs,
+          evidenceCoverage: 'provider_error',
+        });
         throw new AppError('Pinecone upsert failed', 'PINECONE_UNAVAILABLE', retryErr);
       }
     }

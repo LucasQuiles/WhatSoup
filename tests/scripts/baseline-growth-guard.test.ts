@@ -18,7 +18,7 @@ import { fileURLToPath } from 'node:url';
 
 import { afterAll, describe, expect, it } from 'vitest';
 
-import { BASELINE_REGISTRY } from '../../scripts/lib/baseline-weight.ts';
+import { BASELINE_REGISTRY, GROWTH_WAIVERS_PATH } from '../../scripts/lib/baseline-weight.ts';
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const guard = resolve(repoRoot, 'scripts/baseline-growth-guard.ts');
@@ -288,5 +288,132 @@ describe('the guard runs clean on this branch', () => {
     // Green-on-arrival: wiring a guard that is already red would block every unrelated PR.
     const { status, out } = runGuard([]);
     expect(status, `guard is not green on arrival:\n${out}`).toBe(0);
+  });
+});
+
+describe('growth waivers — the reviewed-widening escape valve, fail-closed', () => {
+  // Waiver fixtures use pinned dates far from the wall clock so expiry logic is
+  // deterministic: an "active" waiver expires 2199-01-01, an "expired" one 2020-01-01.
+  function writeFitness(dir: string, maxLines: number): void {
+    writeFileSync(
+      join(dir, '.claude/fitness/baseline.json'),
+      `${JSON.stringify({
+        schemaVersion: 1,
+        rules: {
+          'arch.file-size': {
+            measurements: [{ filePath: 'src/big.ts', lines: maxLines, maxLines }],
+          },
+        },
+      }, null, 2)}\n`,
+    );
+  }
+
+  function writeWaivers(dir: string, waiver: Record<string, unknown>): void {
+    writeFileSync(
+      join(dir, '.claude/fitness/growth-waivers.json'),
+      `${JSON.stringify({ schemaVersion: 1, waivers: [waiver] }, null, 2)}\n`,
+    );
+  }
+
+  const activeWaiver = (maxWeight: number): Record<string, unknown> => ({
+    path: '.claude/fitness/baseline.json',
+    maxWeight,
+    reason: 'test widening',
+    issue: 'https://example.invalid/issues/1',
+    grantedAt: '2020-01-01',
+    expiresAt: '2199-01-01',
+  });
+
+  it('WAIVES (exit 0) numeric growth within an active waiver present at the base', () => {
+    const dir = makeRepo(2);
+    writeFitness(dir, 100);
+    writeWaivers(dir, activeWaiver(501)); // future weight = 1 + 500 = 501
+    git(dir, ['add', '-A']);
+    git(dir, ['commit', '-qm', 'waiver granted']);
+    writeFitness(dir, 500); // widen under the cap
+    const { status, out } = runGuard(['--repo', dir, '--base', 'HEAD']);
+    expect(status, out).toBe(0);
+    expect(out).toMatch(/WAIVED\(baseline-growth\)/);
+    expect(out, 'the authorizing issue must be cited').toMatch(/example\.invalid\/issues\/1/);
+  });
+
+  it('BLOCKS (exit 1) growth exceeding the waiver cap', () => {
+    const dir = makeRepo(2);
+    writeFitness(dir, 100);
+    writeWaivers(dir, activeWaiver(400)); // cap below the future weight of 501
+    git(dir, ['add', '-A']);
+    git(dir, ['commit', '-qm', 'waiver granted']);
+    writeFitness(dir, 500);
+    const { status, out } = runGuard(['--repo', dir, '--base', 'HEAD']);
+    if (status !== 1) console.error(`guard exited ${status}, expected 1:\n${out}`);
+    expect(status).toBe(1);
+    expect(out).toMatch(/may only shrink/);
+  });
+
+  it('BLOCKS (exit 1) when the waiver exists only in the candidate — no self-authorization', () => {
+    const dir = makeRepo(2);
+    writeFitness(dir, 100);
+    git(dir, ['add', '-A']);
+    git(dir, ['commit', '-qm', 'no waiver at base']);
+    writeFitness(dir, 500);
+    writeWaivers(dir, activeWaiver(501)); // smuggled in the same candidate
+    const { status, out } = runGuard(['--repo', dir, '--base', 'HEAD']);
+    if (status !== 1) console.error(`guard exited ${status}, expected 1:\n${out}`);
+    expect(status).toBe(1);
+    expect(out).toMatch(/may only shrink/);
+  });
+
+  it('BLOCKS (exit 1) under an expired waiver', () => {
+    const dir = makeRepo(2);
+    writeFitness(dir, 100);
+    writeWaivers(dir, {
+      ...activeWaiver(501),
+      grantedAt: '2019-01-01',
+      expiresAt: '2020-01-01',
+    });
+    git(dir, ['add', '-A']);
+    git(dir, ['commit', '-qm', 'expired waiver']);
+    writeFitness(dir, 500);
+    const { status, out } = runGuard(['--repo', dir, '--base', 'HEAD']);
+    if (status !== 1) console.error(`guard exited ${status}, expected 1:\n${out}`);
+    expect(status).toBe(1);
+  });
+
+  it('is INCONCLUSIVE (exit 2) when the base waiver document is malformed', () => {
+    // An unreadable authorization must not fail open into either blocking or allowing.
+    const dir = makeRepo(2);
+    writeFitness(dir, 100);
+    writeFileSync(join(dir, '.claude/fitness/growth-waivers.json'), '{ not json');
+    git(dir, ['add', '-A']);
+    git(dir, ['commit', '-qm', 'malformed waiver']);
+    writeFitness(dir, 500);
+    const { status, out } = runGuard(['--repo', dir, '--base', 'HEAD']);
+    expect(status, `expected INCONCLUSIVE, got ${status}.\n${out}`).toBe(2);
+    expect(out).toMatch(/growth-waivers/);
+  });
+
+  it('NEVER waives identity introduction, regardless of cap', () => {
+    // A waiver widens a numeric ceiling; it must not admit new debt identities.
+    const dir = makeRepo(1);
+    writeWaivers(dir, {
+      ...activeWaiver(1_000_000),
+      path: '.claude/fitness/boundary-baseline.json',
+    });
+    git(dir, ['add', '-A']);
+    git(dir, ['commit', '-qm', 'waiver for boundary']);
+    writeBoundary(dir, 3); // introduces 2 new identities
+    const { status, out } = runGuard(['--repo', dir, '--base', 'HEAD']);
+    if (status !== 1) console.error(`guard exited ${status}, expected 1:\n${out}`);
+    expect(status).toBe(1);
+    expect(out).toMatch(/identity|subset/i);
+  });
+
+  it('the waiver file deliberately does not match the baseline registry scan', () => {
+    // growth-waivers.json is guard configuration (reviewed authority), not a debt
+    // baseline; registering it would deadlock the mechanism. This canary fails if a
+    // rename ever drags it into the scan pattern above.
+    expect(GROWTH_WAIVERS_PATH).toBe('.claude/fitness/growth-waivers.json');
+    expect(/baseline.*\.json$/.test(GROWTH_WAIVERS_PATH)).toBe(false);
+    expect(/-baseline\.json$/.test(GROWTH_WAIVERS_PATH)).toBe(false);
   });
 });

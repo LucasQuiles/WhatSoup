@@ -39,7 +39,7 @@ const requiredPackageScripts = {
   'test:design-guards': 'npm test -- tests/scripts/theme-parity.test.ts tests/scripts/token-spec-drift.test.ts tests/scripts/contrast-matrix.test.ts tests/scripts/shadow-baseline.test.ts tests/scripts/shadow-frozen-inventory.test.ts tests/scripts/raw-form-control-inventory.test.ts tests/scripts/design-regression-guards.test.ts tests/scripts/design-metrics.test.ts tests/scripts/design-burndown-check.test.ts tests/scripts/color-semantics.test.ts tests/scripts/design-resilience-audit.test.ts tests/scripts/font-assets.test.ts tests/scripts/brand-assets.test.ts tests/scripts/design-lint-fixtures.test.ts --pool=forks',
   'test:browser': 'vitest run --config vitest.browser.config.ts',
   'test:browser:motion': 'vitest run --config vitest.browser.motion.config.ts',
-  'verify:console-design': [
+  'verify:console-design:live': [
     'npm --prefix console run design:theme-parity',
     'npm --prefix console run design:token-drift',
     'npm --prefix console run design:contrast',
@@ -54,6 +54,9 @@ const requiredPackageScripts = {
     'npm --prefix console run design:font-assets',
     'npm --prefix console run design:brand-assets',
     'npm --prefix console run design:lint-fixtures',
+  ].join(' && '),
+  'verify:console-design': [
+    'npm run verify:console-design:live',
     'npm run test:design-guards',
   ].join(' && '),
   'verify:console-browser': [
@@ -128,7 +131,7 @@ const requiredPackageScripts = {
     'npm run typecheck:all',
     'npm run coverage:check -- --pool=forks --fileParallelism=false',
     'bash scripts/run-with-pinned-npm.sh --prefix console run build',
-    'npm run verify:console-design',
+    'npm run verify:console-design:live',
     'npm run verify:console-browser',
   ].join(' && '),
   'verify:publish': [
@@ -247,7 +250,7 @@ const requiredQualityWorkflow = [
   '      - name: Console build',
   '        run: npm --prefix console run build',
   '      - name: Console design verification',
-  '        run: npm run verify:console-design',
+  '        run: npm run verify:console-design:live',
   '      - name: Install Playwright system deps',
   '        timeout-minutes: 5',
   '        run: npx playwright install-deps chromium',
@@ -603,28 +606,28 @@ describe('safeguard diagnostics', () => {
   it('fails when the shared console design verification chain omits resilience coverage', () => {
     const fixture = makeRepo({
       scripts: {
-        'verify:console-design': requiredPackageScripts['verify:console-design']
+        'verify:console-design:live': requiredPackageScripts['verify:console-design:live']
           .replace(' && npm --prefix console run design:resilience', ''),
       },
     });
     const result = checkSafeguards(fixture);
 
     expect(result.ok).toBe(false);
-    expect(result.checks.find((check) => check.id === 'console-design-chain')?.evidence)
+    expect(result.checks.find((check) => check.id === 'console-design-live-chain')?.evidence)
       .toContain('missing npm --prefix console run design:resilience');
   });
 
   it('fails when the shared console design verification chain omits raw form-control inventory coverage', () => {
     const fixture = makeRepo({
       scripts: {
-        'verify:console-design': requiredPackageScripts['verify:console-design']
+        'verify:console-design:live': requiredPackageScripts['verify:console-design:live']
           .replace(' && npm --prefix console run design:raw-form-control-inventory', ''),
       },
     });
     const result = checkSafeguards(fixture);
 
     expect(result.ok).toBe(false);
-    expect(result.checks.find((check) => check.id === 'console-design-chain')?.evidence)
+    expect(result.checks.find((check) => check.id === 'console-design-live-chain')?.evidence)
       .toContain('missing npm --prefix console run design:raw-form-control-inventory');
   });
 
@@ -645,14 +648,14 @@ describe('safeguard diagnostics', () => {
   it('fails when the shared console design verification chain omits frozen shadow inventory coverage', () => {
     const fixture = makeRepo({
       scripts: {
-        'verify:console-design': requiredPackageScripts['verify:console-design']
+        'verify:console-design:live': requiredPackageScripts['verify:console-design:live']
           .replace(' && npm --prefix console run design:shadow-frozen-inventory', ''),
       },
     });
     const result = checkSafeguards(fixture);
 
     expect(result.ok).toBe(false);
-    expect(result.checks.find((check) => check.id === 'console-design-chain')?.evidence)
+    expect(result.checks.find((check) => check.id === 'console-design-live-chain')?.evidence)
       .toContain('missing npm --prefix console run design:shadow-frozen-inventory');
   });
 
@@ -844,14 +847,14 @@ describe('safeguard diagnostics', () => {
     const fixture = makeRepo({
       files: {
         '.github/workflows/quality.yml': requiredFiles['.github/workflows/quality.yml']
-          .replace('run: npm run verify:console-design', ''),
+          .replace('run: npm run verify:console-design:live', ''),
       },
     });
     const result = checkSafeguards(fixture);
 
     expect(result.ok).toBe(false);
     expect(result.checks.find((check) => check.id === 'quality-ci-console-design-chain'))
-      .toMatchObject({ status: 'fail', evidence: expect.arrayContaining(['run: npm run verify:console-design']) });
+      .toMatchObject({ status: 'fail', evidence: expect.arrayContaining(['run: npm run verify:console-design:live']) });
   });
 
   it('fails when local verification omits semantic shadow feedback', () => {

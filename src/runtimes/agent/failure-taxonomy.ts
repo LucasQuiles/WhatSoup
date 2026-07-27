@@ -22,6 +22,32 @@ export type AgentFailureClass =
   | 'config_or_capability_missing'
   | 'provider_unknown';
 
+const AGENT_FAILURE_CLASS_PRESENCE: Readonly<Record<AgentFailureClass, true>> = {
+  provider_usage_limit: true,
+  provider_rate_limit: true,
+  provider_server_error: true,
+  provider_context_overflow: true,
+  provider_model_unavailable: true,
+  provider_policy_block: true,
+  provider_cli_crash: true,
+  provider_timeout: true,
+  provider_network_error: true,
+  provider_silent_hang: true,
+  provider_stream_corrupt: true,
+  provider_auth_required: true,
+  provider_binary_missing: true,
+  provider_permission_denied: true,
+  provider_state_locked: true,
+  mcp_transport_failure: true,
+  tool_handler_exception: true,
+  config_or_capability_missing: true,
+  provider_unknown: true,
+};
+
+export const AGENT_FAILURE_CLASSES = Object.freeze(
+  Object.keys(AGENT_FAILURE_CLASS_PRESENCE),
+) as readonly AgentFailureClass[];
+
 export type AgentFailureSource =
   | 'provider_result'
   | 'provider_error'

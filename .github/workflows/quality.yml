@@ -353,7 +353,9 @@ jobs:
         run: npm --prefix console run build
 
       - name: Console design verification
-        run: npm run verify:console-design
+        # coverage:check above already ran every root design-guard test. Keep
+        # the live filesystem checks without rerunning the same 14 test files.
+        run: npm run verify:console-design:live
 
       - name: Cache Playwright browsers
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830  # v4.3.0

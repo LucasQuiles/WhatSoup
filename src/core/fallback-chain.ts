@@ -1,9 +1,11 @@
 import { asRecord } from '../lib/type-guards.ts';
 import { resolveAgentModel } from './agent-model.ts';
+import { isProviderDataPolicy, type ProviderDataPolicy } from './provider-data-policy.ts';
 
 export interface AgentFallbackEntry {
   provider: string;
   model?: string;
+  dataPolicy?: ProviderDataPolicy;
 }
 
 /**
@@ -50,7 +52,13 @@ export function normalizeFallbackEntriesFromAgentOptions(
       const provider = stringOrUndefined(item['provider']);
       if (!provider) continue;
       const model = stringOrUndefined(item['model']);
-      out.push(model ? { provider, model } : { provider });
+      const dataPolicyRaw = stringOrUndefined(item['dataPolicy']);
+      const dataPolicy = isProviderDataPolicy(dataPolicyRaw) ? dataPolicyRaw : undefined;
+      out.push({
+        provider,
+        ...(model ? { model } : {}),
+        ...(dataPolicy ? { dataPolicy } : {}),
+      });
     }
     return out;
   }
@@ -58,7 +66,13 @@ export function normalizeFallbackEntriesFromAgentOptions(
   const provider = stringOrUndefined(opts['fallbackProvider']);
   if (!provider) return [];
   const model = stringOrUndefined(opts['fallbackModel']);
-  return [model ? { provider, model } : { provider }];
+  const dataPolicyRaw = stringOrUndefined(opts['fallbackDataPolicy']);
+  const dataPolicy = isProviderDataPolicy(dataPolicyRaw) ? dataPolicyRaw : undefined;
+  return [{
+    provider,
+    ...(model ? { model } : {}),
+    ...(dataPolicy ? { dataPolicy } : {}),
+  }];
 }
 
 export function normalizeFallbackEntriesFromInstanceConfig(
