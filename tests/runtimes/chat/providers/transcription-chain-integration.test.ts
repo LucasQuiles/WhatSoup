@@ -21,9 +21,12 @@ vi.mock('node:fs', async () => {
   const actual = await vi.importActual<typeof import('node:fs')>('node:fs');
   return {
     ...actual,
-    existsSync: (path: Parameters<typeof actual.existsSync>[0]) => {
-      if (path === '/opt/homebrew/bin/ffmpeg') return true;
-      return actual.existsSync(path);
+    accessSync: (
+      path: Parameters<typeof actual.accessSync>[0],
+      mode?: Parameters<typeof actual.accessSync>[1],
+    ) => {
+      if (path === '/virtual/bin/ffmpeg' && mode === actual.constants.X_OK) return;
+      throw new Error('not executable');
     },
   };
 });
@@ -139,24 +142,31 @@ describe('transcription chain integration (CI-runnable, stub providers)', () => 
   it('drives withNormalizedAudioFile end-to-end with ffmpeg stubbed out', async () => {
     spawnMock.mockReset();
     spawnMock.mockImplementation(() => fakeSuccessfulChild());
+    const originalPath = process.env.PATH;
+    process.env.PATH = '/virtual/bin';
 
-    const buffer = actualFs.existsSync(FIXTURE_PATH)
-      ? await readFile(FIXTURE_PATH)
-      : Buffer.from('synthetic-audio-bytes');
+    try {
+      const buffer = actualFs.existsSync(FIXTURE_PATH)
+        ? await readFile(FIXTURE_PATH)
+        : Buffer.from('synthetic-audio-bytes');
 
-    const normalizing = normalizingStubProvider('normalizing', STUB_TRANSCRIPT);
-    const result = await transcribeAudioWithProviders(buffer, 'audio/ogg', [normalizing]);
+      const normalizing = normalizingStubProvider('normalizing', STUB_TRANSCRIPT);
+      const result = await transcribeAudioWithProviders(buffer, 'audio/ogg', [normalizing]);
 
-    expect(result).toBe(STUB_TRANSCRIPT);
-    // The stubbed ffmpeg invocation should have been called exactly once with
-    // the canonical normalization args (16kHz mono wav).
-    expect(spawnMock).toHaveBeenCalledOnce();
-    const [binary, args] = spawnMock.mock.calls[0] as [string, string[], unknown];
-    expect(binary).toBe('/opt/homebrew/bin/ffmpeg');
-    expect(args).toContain('-ar');
-    expect(args).toContain('16000');
-    expect(args).toContain('-ac');
-    expect(args).toContain('1');
+      expect(result).toBe(STUB_TRANSCRIPT);
+      // The stubbed ffmpeg invocation should have been called exactly once with
+      // the canonical normalization args (16kHz mono wav).
+      expect(spawnMock).toHaveBeenCalledOnce();
+      const [binary, args] = spawnMock.mock.calls[0] as [string, string[], unknown];
+      expect(binary).toBe('/virtual/bin/ffmpeg');
+      expect(args).toContain('-ar');
+      expect(args).toContain('16000');
+      expect(args).toContain('-ac');
+      expect(args).toContain('1');
+    } finally {
+      if (originalPath === undefined) delete process.env.PATH;
+      else process.env.PATH = originalPath;
+    }
   });
 
   it('returns the fallback text when every injected provider is unavailable or failing', async () => {

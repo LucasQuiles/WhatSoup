@@ -257,8 +257,20 @@ export function formatMentions(
   // Single pass: match @<something> patterns
   // - @+?<digits> for phone numbers or LIDs
   // - @<word chars> for names (letters, hyphens, underscores)
+  //
+  // #2138: the `(?<![\w.])` guard requires the at-sign to START a token. Without
+  // it the pattern matched an at-sign anywhere, so an operational identifier that
+  // merely CONTAINS one — a systemd unit template, or any address-shaped token —
+  // had its second half rewritten into a resolved phone number and shipped with
+  // real mention metadata. That corrupts the diagnostic AND injects contact data
+  // that was never in the source text. A mention must be preceded by nothing, or
+  // by something that cannot be part of an identifier.
+  //
+  // (Deliberately no worked example here: written out, one is address-shaped and
+  // the repo's `personal-email` hygiene guard cannot tell a comment from a leak.
+  // The cases live in tests/core/mentions.test.ts, assembled at runtime.)
   const formatted = text.replace(
-    /@(\+?\d{5,}\b|[A-Za-z][\w-]*)/g,
+    /(?<![\w.])@(\+?\d{5,}\b|[A-Za-z][\w-]*)/g,
     (fullMatch, capture: string) => {
       let phone: string | undefined;
       let lid: string | undefined;

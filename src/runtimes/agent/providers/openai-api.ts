@@ -167,8 +167,20 @@ export class OpenAIApiProvider implements ProviderSession {
     for (let i = 0; i < MAX_TOOL_ITERATIONS; i++) {
       const result = await this.callApi(turnModel);
 
-      lastInputTokens = result.inputTokens;
-      lastOutputTokens = result.outputTokens;
+      // #2182: carry usage forward across an iteration that reports none.
+      // Several terminal paths in callApi() deliberately omit counters — a
+      // connection failure, a non-success response after retry handling, a
+      // missing body. A plain assignment let one of those ERASE usage this turn
+      // had already measured in an earlier tool-loop iteration, and turn
+      // finalization only records usage when a counter is defined, so the
+      // measured tokens were lost outright.
+      //
+      // This is the form the sibling provider already uses
+      // (anthropic-api.ts:177-178). Note it is `x = new ?? x`, NOT `x ??= new`:
+      // the latter keeps only the FIRST value ever seen and would ignore every
+      // later update, which is a different bug in the opposite direction.
+      lastInputTokens = result.inputTokens ?? lastInputTokens;
+      lastOutputTokens = result.outputTokens ?? lastOutputTokens;
 
       if (result.terminalResultText !== undefined) {
         this.opts.onEvent({

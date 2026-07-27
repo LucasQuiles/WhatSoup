@@ -1,7 +1,7 @@
 // tests/fleet/silence-manager.test.ts
 // Verifies that silence-manager distinguishes missing files (silent) from corrupt
 // files (warn with path + error).
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -213,5 +213,29 @@ describe('silence-manager corrupt-file handling', () => {
     expect(isInstanceSilenced('primary-line')).toBe(true);
     expect(isInstanceSilenced('expired-line')).toBe(false);
     expect(isInstanceSilenced('missing-line')).toBe(false);
+  });
+
+  it('preserves the prior file when private permissions cannot be staged before publication', async () => {
+    mkdirSync(configDir(), { recursive: true });
+    const priorContents = '[{"instance":"prior-line"}]\n';
+    writeFileSync(silencesFile(), priorContents, { mode: 0o600 });
+    const chmodCalls: Array<{ target: string; mode: number }> = [];
+    const actualFs = await vi.importActual<typeof import('node:fs')>('node:fs');
+    vi.doMock('node:fs', () => ({
+      ...actualFs,
+      chmodSync: vi.fn((target: string, mode: number) => {
+        chmodCalls.push({ target, mode });
+        throw new Error('simulated chmod failure');
+      }),
+    }));
+    const { addSilence } = await importManager();
+
+    expect(() => addSilence('new-line', 5, 'test', 'operator')).toThrow('simulated chmod failure');
+
+    expect(chmodCalls).toHaveLength(1);
+    expect(chmodCalls[0]).toMatchObject({ mode: 0o600 });
+    expect(chmodCalls[0]?.target).toMatch(/\.fleet-silences\..+\.tmp$/);
+    expect(readFileSync(silencesFile(), 'utf-8')).toBe(priorContents);
+    expect(readdirSync(configDir()).filter((entry) => entry.endsWith('.tmp'))).toEqual([]);
   });
 });
