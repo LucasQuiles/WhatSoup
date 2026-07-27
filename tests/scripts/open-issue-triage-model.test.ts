@@ -294,7 +294,7 @@ describe("open issue registry schema", () => {
   });
 
   it("pins the exact live and addable label catalogues", () => {
-    expect(LIVE_LABELS).toHaveLength(37);
+    expect(LIVE_LABELS).toHaveLength(42);
     expect(LIVE_LABELS).toEqual([
       "bug",
       "documentation",
@@ -308,6 +308,11 @@ describe("open issue registry schema", () => {
       "reliability",
       "ops",
       "P0",
+      "P1",
+      "P2",
+      "P3",
+      "P4",
+      "P5",
       "transport",
       "alerts",
       "launchd",

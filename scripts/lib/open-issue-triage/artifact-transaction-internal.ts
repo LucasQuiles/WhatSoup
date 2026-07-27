@@ -32,6 +32,9 @@ import {
   type AcquireProcessLockOptions,
   type ProcessLockHandle,
 } from "../../../src/lib/process-lock.ts";
+import { isRecord } from "../../../src/lib/type-guards.ts";
+
+export { isRecord };
 
 export const SHA256_PATTERN = /^[0-9a-f]{64}$/;
 export const DEV_INO_PATTERN = /^\d+:\d+$/;
@@ -268,10 +271,6 @@ export function exactKeys(
     observed.length === sortedExpected.length &&
     observed.every((key, index) => key === sortedExpected[index])
   );
-}
-
-export function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 export function safeRelativePath(value: unknown, label: string): string[] {

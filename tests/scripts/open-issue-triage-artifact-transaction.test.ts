@@ -636,6 +636,8 @@ describe("recoverable open-issue artifact transaction", () => {
     (artifact) => {
       writeFileSync(join(root, "target.txt"), "before\n");
       let replacementPath = "";
+      let ownedIdentity = "";
+      let replacementIdentity = "";
 
       expectCode(
         () =>
@@ -657,12 +659,17 @@ describe("recoverable open-issue artifact transaction", () => {
                       name.endsWith(`.${artifact}`),
                     )!,
                   );
-                  unlinkSync(replacementPath);
+                  const ownedStat = lstatSync(replacementPath);
+                  ownedIdentity = `${ownedStat.dev}:${ownedStat.ino}`;
+                  const stagedReplacementPath = `${replacementPath}.replacement`;
                   writeFileSync(
-                    replacementPath,
+                    stagedReplacementPath,
                     artifact === "candidate" ? "after\n" : "before\n",
                     { flag: "wx" },
                   );
+                  const replacementStat = lstatSync(stagedReplacementPath);
+                  replacementIdentity = `${replacementStat.dev}:${replacementStat.ino}`;
+                  renameSync(stagedReplacementPath, replacementPath);
                 },
               },
             ),
@@ -670,6 +677,7 @@ describe("recoverable open-issue artifact transaction", () => {
         "candidate-invalid",
       );
 
+      expect(replacementIdentity).not.toBe(ownedIdentity);
       expect(existsSync(replacementPath)).toBe(true);
       expect(readFileSync(replacementPath, "utf8")).toBe(
         artifact === "candidate" ? "after\n" : "before\n",
