@@ -1,0 +1,89 @@
+{
+  "acceptance_criteria": [
+    "A failed or unparseable typing probe does not emit a synthetic typing-stop event or erase the last observed typing set.",
+    "The next successful unchanged observation after a failed probe emits no false typing-start event, while a successful empty observation retires prior typing state.",
+    "Repeated probe failures produce bounded episode-based diagnostics without logging one raw warning for every failed request.",
+    "A documented stale-entry policy transitions or retires typing state after a bounded unobserved interval, and removal of an instance retires its state immediately."
+  ],
+  "affected_paths": [
+    "src/fleet/http-proxy.ts",
+    "src/fleet/realtime-event-poller.ts",
+    "tests/fleet/http-proxy.test.ts",
+    "tests/fleet/realtime-event-poller.test.ts"
+  ],
+  "blast_radius": "Realtime typing indicators and fleet diagnostics across all instances; false stop/start events confuse operators, while unbounded retained state and repeated warnings can hide the true probe episode.",
+  "classification": "leaf",
+  "current_labels": [],
+  "decisive_source_paths": [
+    "src/fleet/http-proxy.ts",
+    "src/fleet/realtime-event-poller.ts"
+  ],
+  "decisive_test_paths": [
+    "tests/fleet/http-proxy.test.ts",
+    "tests/fleet/realtime-event-poller.test.ts"
+  ],
+  "dependency_issue_numbers": [],
+  "duplicate_of_issue_number": null,
+  "evidence_state": "partial",
+  "evidence_summary": "Merged PR #2423 fixed the central observation error on pinned main: failed and unparseable probes preserve the last observed typing set, valid empty observations retire it, and removed instances are retired; six focused #2137 tests encode those cases. The issue remains partial because the proxy still logs each failure individually and a perpetually present but unobserved instance can retain lastTyping without a time-bound stale-state transition. The fully paginated open-PR scan found no current owner or path overlap.",
+  "falsifier_or_remaining_gap": "The remaining claims are falsified if pinned-main code already rate-bounds proxy warnings by failure episode and enforces an explicit elapsed-time stale policy for a present but continuously unobserved instance. Those mechanisms were not found. The decisive poller and proxy tests were not run in this write-free lane because they create temporary state or listeners; their pinned source and assertions were inspected, so runtime execution remains required before completion.",
+  "impact": "The merged fix prevents false typing transitions, but prolonged outages can retain indefinitely stale typing state and flood diagnostics with repetitive proxy warnings.",
+  "implementation_after_issue_numbers": [],
+  "issue_node_id": "I_kwDOR1Sep88AAAABJ-eG4Q",
+  "issue_number": 2137,
+  "lead_verification_obligations": [
+    "Re-read issue #2137 immediately before publication and reject the record if its updated timestamp, title, labels, or body hash changed.",
+    "Run the poller and proxy suites in an isolated mutable harness and add elapsed-time stale-state plus bounded-warning episode coverage before claiming the residual fixed.",
+    "Re-scan open pull requests immediately before assigning ownership; no open owner or touched-path overlap existed in the pinned 39-PR inventory."
+  ],
+  "owner_boundary": "realtime-typing-observation-staleness",
+  "partial_findings": [
+    {
+      "disposition": "fixed",
+      "key": "failure-observation-semantics",
+      "related_issue_number": null,
+      "summary": "Merged PR #2423 preserves prior typing state on failed or unparseable observations and retires state on valid empty observations or fleet removal."
+    },
+    {
+      "disposition": "survives",
+      "key": "repeated-failure-diagnostics",
+      "related_issue_number": null,
+      "summary": "Proxy failures are still logged per request without an episode or rate bound."
+    },
+    {
+      "disposition": "survives",
+      "key": "stale-entry-policy",
+      "related_issue_number": null,
+      "summary": "A present instance that remains unobserved can carry its last typing set indefinitely because no elapsed-time stale policy exists."
+    }
+  ],
+  "pinned_revision": "a91f5301266fae2049cd1ae1b3c1b236a7ea2aa8",
+  "pre_review_body_sha256": "979b099fcff41f6e41da5695f0a3fedd5d4119fcdf7fab753566fa3333deaab3",
+  "proposed_cohort_id": null,
+  "pull_request_overlaps": [
+    {
+      "assessment": "partial",
+      "base_ref": "main",
+      "disposition": "merged",
+      "head_ref": "fix/typing-state-failed-probe-2137",
+      "is_draft": false,
+      "matched_by": ["issue-reference", "touched-path"],
+      "number": 2423,
+      "overlapping_paths": [
+        "src/fleet/realtime-event-poller.ts",
+        "tests/fleet/realtime-event-poller.test.ts"
+      ],
+      "title": "fix(fleet): stop treating a failed typing probe as an empty typing set (#2137)",
+      "updated_at": "2026-07-26T11:39:32Z",
+      "url": "https://github.com/LucasQuiles/WhatSoup/pull/2423"
+    }
+  ],
+  "pull_request_owner_pr_number": null,
+  "recommended_labels": ["audit", "bug", "fleet", "reliability"],
+  "recommended_title": null,
+  "review_confidence": "high",
+  "suggested_remediation": "Retain the corrected observation semantics, add a monotonic last-observed timestamp and explicit stale transition for continuously failing instances, and coalesce proxy warnings into bounded failure episodes with recovery summaries.",
+  "title": "Preserve typing state across failed instance probes",
+  "updated_at": "2026-07-26T23:47:23Z",
+  "url": "https://github.com/LucasQuiles/WhatSoup/issues/2137"
+}

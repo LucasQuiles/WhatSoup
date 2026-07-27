@@ -1,0 +1,135 @@
+{
+  "acceptance_criteria": [
+    "Action eligibility is derived from the newest authoritative incident state per instance before any UI filter or paused snapshot is applied.",
+    "Recovery, supersession, expiration, and stale snapshots disable restart and stop actions even when the recovery row is hidden by the active filter.",
+    "Restart and stop requests carry an incident fingerprint or generation and the server rejects stale or mismatched authorization.",
+    "Focused tests cover filter changes, pause and resume, delayed recovery, duplicate rows, superseded incidents, and server-side stale-action rejection."
+  ],
+  "affected_paths": [
+    "console/src/components/ActivityFeed.tsx",
+    "console/src/components/FeedCard.tsx",
+    "console/src/lib/api.ts",
+    "console/src/types.ts",
+    "src/fleet/routes/ops.ts",
+    "tests/console/activity-feed.test.tsx",
+    "tests/console/feed-card-actions.test.tsx",
+    "tests/console/feed-card-render.test.tsx",
+    "tests/fleet/routes/ops.test.ts"
+  ],
+  "blast_radius": "Destructive or disruptive fleet lifecycle actions exposed from the operator activity feed; stale authorization can restart or stop a recovered instance.",
+  "classification": "leaf",
+  "current_labels": [],
+  "decisive_source_paths": [
+    "console/src/components/ActivityFeed.tsx",
+    "console/src/components/FeedCard.tsx",
+    "console/src/lib/api.ts",
+    "src/fleet/routes/ops.ts"
+  ],
+  "decisive_test_paths": [
+    "tests/console/activity-feed.test.tsx",
+    "tests/console/feed-card-actions.test.tsx",
+    "tests/console/feed-card-render.test.tsx",
+    "tests/fleet/routes/ops.test.ts"
+  ],
+  "dependency_issue_numbers": [1882, 2447, 2475, 2476, 2517, 2519, 2523],
+  "duplicate_of_issue_number": null,
+  "evidence_state": "verified",
+  "evidence_summary": "Pinned ActivityFeed computes actionableKeys from the filtered display list, while pause freezes that list; a hidden or post-snapshot recovery therefore cannot revoke a visible incident action. Restart posts immediately, stop confirms only the instance name, and the shared ops route accepts no incident generation or expected fingerprint. The three focused console suites passed 36 of 36 tests but omit stale-recovery and server revalidation cases. The complete PR and issue scan found no owner; broad draft overlaps touch the same files without implementing this authorization contract.",
+  "falsifier_or_remaining_gap": "The finding is falsified if actionability is actually derived from an unfiltered authoritative incident state and the server validates an incident generation before mutation. Pinned source shows neither. The ops-route suite was not executed because it starts mutable route state in this write-free lane, so server rejection behavior was source-inspected rather than runtime-probed.",
+  "impact": "Filtering or pausing the feed can re-enable an action for an incident that has already recovered, allowing an operator to disrupt a healthy instance on stale evidence.",
+  "implementation_after_issue_numbers": [1882, 2519, 2523],
+  "issue_node_id": "I_kwDOR1Sep88AAAABKQLkdw",
+  "issue_number": 2524,
+  "lead_verification_obligations": [
+    "Re-read issue #2524 immediately before publication and reject the record if its updated timestamp, title, labels, or body hash changed.",
+    "Confirm ordering with durable transition history #1882, feed lineage #2519, and presentation contract #2523 before choosing the incident fingerprint.",
+    "Run the ops-route suite in an isolated mutable harness and add server-side stale-generation rejection tests before claiming completion.",
+    "Re-scan open pull requests immediately before ownership; PRs #2078, #2500, and #2501 are collision-only drafts and PR #2451 supplies taxonomy dependency work only."
+  ],
+  "owner_boundary": "feed-action-authorization",
+  "partial_findings": [],
+  "pinned_revision": "a91f5301266fae2049cd1ae1b3c1b236a7ea2aa8",
+  "pre_review_body_sha256": "6395a40e33ec12766f8ca584e541e4d535a4a176c53bc38a5d4792522ee0bdfd",
+  "proposed_cohort_id": null,
+  "pull_request_overlaps": [
+    {
+      "assessment": "collision-only",
+      "base_ref": "main",
+      "disposition": "open",
+      "head_ref": "takeover/console-successor-20260722",
+      "is_draft": true,
+      "matched_by": ["issue-reference", "touched-path"],
+      "number": 2078,
+      "overlapping_paths": [
+        "console/src/components/ActivityFeed.tsx",
+        "console/src/components/FeedCard.tsx",
+        "console/src/types.ts",
+        "src/fleet/routes/ops.ts",
+        "tests/console/feed-card-actions.test.tsx",
+        "tests/fleet/routes/ops.test.ts"
+      ],
+      "title": "chore: track transport and iMessage source for selective reconstruction",
+      "updated_at": "2026-07-25T03:24:03Z",
+      "url": "https://github.com/LucasQuiles/WhatSoup/pull/2078"
+    },
+    {
+      "assessment": "partial",
+      "base_ref": "main",
+      "disposition": "open",
+      "head_ref": "feat/taxonomy-cross-contract-2447",
+      "is_draft": true,
+      "matched_by": ["touched-path"],
+      "number": 2451,
+      "overlapping_paths": ["src/lib/fault-taxonomy-registry.json"],
+      "title": "feat(observability): add failure taxonomy cross-contract",
+      "updated_at": "2026-07-26T21:49:38Z",
+      "url": "https://github.com/LucasQuiles/WhatSoup/pull/2451"
+    },
+    {
+      "assessment": "collision-only",
+      "base_ref": "main",
+      "disposition": "open",
+      "head_ref": "takeover/console-consolidated-20260721",
+      "is_draft": true,
+      "matched_by": ["issue-reference", "touched-path"],
+      "number": 2500,
+      "overlapping_paths": [
+        "console/src/components/ActivityFeed.tsx",
+        "console/src/components/FeedCard.tsx",
+        "console/src/types.ts",
+        "src/fleet/routes/ops.ts",
+        "tests/fleet/routes/ops.test.ts"
+      ],
+      "title": "preserve: feat(console): add transport-aware line creation",
+      "updated_at": "2026-07-26T21:00:56Z",
+      "url": "https://github.com/LucasQuiles/WhatSoup/pull/2500"
+    },
+    {
+      "assessment": "collision-only",
+      "base_ref": "main",
+      "disposition": "open",
+      "head_ref": "takeover/console-live-main-20260722-2",
+      "is_draft": true,
+      "matched_by": ["issue-reference", "touched-path"],
+      "number": 2501,
+      "overlapping_paths": [
+        "console/src/components/ActivityFeed.tsx",
+        "console/src/components/FeedCard.tsx",
+        "console/src/types.ts",
+        "src/fleet/routes/ops.ts",
+        "tests/fleet/routes/ops.test.ts"
+      ],
+      "title": "preserve: merge: reconcile console successor with main",
+      "updated_at": "2026-07-26T21:00:57Z",
+      "url": "https://github.com/LucasQuiles/WhatSoup/pull/2501"
+    }
+  ],
+  "pull_request_owner_pr_number": null,
+  "recommended_labels": ["audit", "bug", "console", "security"],
+  "recommended_title": null,
+  "review_confidence": "high",
+  "suggested_remediation": "Separate authoritative incident authorization from feed presentation, key actions to a durable incident generation, derive eligibility before filters and snapshots, and require the server to compare the submitted generation immediately before restart or stop.",
+  "title": "safety(console): filters and pause can re-enable restart/stop for stale recovered incidents",
+  "updated_at": "2026-07-26T23:29:45Z",
+  "url": "https://github.com/LucasQuiles/WhatSoup/issues/2524"
+}

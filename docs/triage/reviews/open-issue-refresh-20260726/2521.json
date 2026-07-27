@@ -1,0 +1,139 @@
+{
+  "acceptance_criteria": [
+    "A client that stops answering pings transitions through a bounded unresponsive state and is removed or terminated within the declared monotonic deadline.",
+    "A pong received within the allowed deadline restores or preserves live state without flapping, duplicate recovery, or stale timer effects.",
+    "A client at or above the declared buffered-byte budget receives no additional application frame, and the grace, close, or termination policy remains deterministic at every threshold boundary.",
+    "Backpressured or unresponsive client handling does not interrupt delivery attempts and outcomes for healthy peers.",
+    "Every send attempt supplies an authoritative local completion path; an asynchronous completion failure removes or terminates only the affected client and increments one bounded classified outcome.",
+    "A synchronous send throw remains isolated, produces the same bounded failure taxonomy, and cannot abort the remaining broadcast loop.",
+    "Accepted, live, backpressured, draining, unresponsive, terminating, and closed client lifecycle states have explicit transitions, counts, ages, and recovery rules.",
+    "Broadcast attempted, local write accepted, local write completed, backpressured, failed, dropped, and client unresponsive remain distinct; none is projected as remote application receipt.",
+    "A failed or dropped sequenced frame integrates with #2519 by forcing bounded reconnect reconciliation, including replay unavailable and cursor-too-old outcomes.",
+    "Raw set size and OPEN readyState are never presented as live or deliverable coverage without lifecycle and backpressure breakdown.",
+    "Server shutdown clears heartbeat timers and client listeners, detaches the shared HTTP upgrade listener, prevents obsolete callbacks from changing state, and cannot retain the HTTP server or clients.",
+    "Heartbeat interval, missed-pong budget, buffered-byte threshold, drain grace, completion timeout, shutdown race, and reconnect boundaries have deterministic fake-clock and fault-injection tests.",
+    "Repeated failures form bounded count or rate episodes and cannot produce one log per frame, hide persistent loss, or clear without a fresh qualifying receipt.",
+    "Authorized health exposes only aggregate bounded lifecycle counts, ages, loop freshness, and recent outcome classes; tests and telemetry contain no remote address, URL, query, ticket, token, event payload, instance name, identity, raw socket error, credential, process, or topology data."
+  ],
+  "affected_paths": [
+    "console/src/hooks/use-websocket.tsx",
+    "console/src/lib/realtime-events.ts",
+    "src/fleet/index.ts",
+    "src/fleet/realtime-event-poller.ts",
+    "src/fleet/realtime-publisher.ts",
+    "src/fleet/websocket-server.ts",
+    "tests/console/use-websocket.test.tsx",
+    "tests/console/websocket-events.test.ts",
+    "tests/fleet/realtime-event-poller.test.ts",
+    "tests/fleet/realtime-publisher.test.ts",
+    "tests/fleet/websocket-server.test.ts",
+    "tests/fleet/websocket-upgrade-listener-leak.test.ts"
+  ],
+  "blast_radius": "Fleet WebSocket client lifecycle and shutdown, per-client memory and queued-byte bounds, realtime publisher outcome semantics, event-poller delivery integration, console reconnect reconciliation, authorized aggregate health, failure-episode logging, and every console invalidation consumer sharing the broadcaster.",
+  "classification": "leaf",
+  "current_labels": [],
+  "decisive_source_paths": [
+    "console/src/hooks/use-websocket.tsx",
+    "console/src/lib/realtime-events.ts",
+    "src/fleet/index.ts",
+    "src/fleet/realtime-event-poller.ts",
+    "src/fleet/realtime-publisher.ts",
+    "src/fleet/websocket-server.ts"
+  ],
+  "decisive_test_paths": [
+    "tests/console/use-websocket.test.tsx",
+    "tests/console/websocket-events.test.ts",
+    "tests/fleet/realtime-event-poller.test.ts",
+    "tests/fleet/realtime-publisher.test.ts",
+    "tests/fleet/websocket-server.test.ts",
+    "tests/fleet/websocket-upgrade-listener-leak.test.ts"
+  ],
+  "dependency_issue_numbers": [2447],
+  "duplicate_of_issue_number": null,
+  "evidence_state": "verified",
+  "evidence_summary": "Two identical GraphQL reads established the live issue node, title, exact body bytes and SHA-256, empty labels, URL, and timestamp. The local SSH tracking ref and exact SSH remote main both remained at the pinned revision, and all decisive source and test paths are unchanged from that pin. At the pin, FleetWebSocketServer adds each accepted connection to one Set, removes it only on close, error, or synchronous send throw, sends its initial connected frame without a callback, broadcasts solely when readyState is OPEN, invokes one-argument client.send inside try/catch, and reports the raw Set size as clientCount. The source never reads bufferedAmount, supplies a send completion callback, sends ping, observes pong, terminates a half-open client, records a lifecycle state, or owns a heartbeat timer. FleetRealtimePublisher returns void, while the event poller and console protocol have no delivery-outcome or acknowledgement contract. The pinned package lock and installed package both identify ws 8.21.0. Its implementation and type surface expose send completion callbacks, bufferedAmount, ping, pong, and terminate, and its packaged documentation gives ping/pong termination as the broken-connection detection pattern. A write-free in-memory canary invoked the real broadcaster without a listener: an OPEN fake received no completion callback, and another OPEN fake with 67,108,864 buffered bytes still received an application send. A separate fail-closed source and installed-package probe established raw membership, the OPEN-only gate, one-argument send, raw clientCount, zero heartbeat or backpressure signal use, and availability of the installed callback and heartbeat APIs. The existing WebSocket test was inspected and covers a synchronous throwing fake but has no callback-failure, queue-budget, missed-pong, or half-open case. A fully paginated all-state issue scan covered 518 issues in six pages and found no duplicate owner; #2519 owns stream sequencing and client reconciliation, #2520 owns producer observation truth, and #2522 owns aggregate event-poller cycle health. A fully paginated current open-pull-request scan covered 39 pull requests, 27 drafts, 43 changed-file pages, and 1,333 changed files. It found no direct #2521 reference, implementation owner, or path collision. Merged PR #183 validates browser frames, #1333 prevents overlapping poll cycles, and #2372 detaches the shared HTTP upgrade listener during shutdown; each is an issue-referenced narrower partial that does not implement client liveness, queued-byte bounds, or asynchronous delivery outcomes. No network listener, live client, production response, identity, message, credential, service, process, queue, or configuration surface was created, read, or mutated.",
+  "falsifier_or_remaining_gap": "An existing pinned implementation would falsify the finding if it tracked pong-qualified liveness, enforced a buffered-byte budget before enqueue, observed every local send completion, classified per-client outcomes, cleared heartbeat state on shutdown, and exposed bounded aggregate transport health without calling local completion remote receipt. Exact pinned-source assertions and the real-broadcaster in-memory canary disproved those conditions. The audit did not run the existing focused suites because their WebSocket tests create HTTP listeners, timers, clients, and mutable runtime surfaces prohibited by this record-only lane. It also did not execute a real asynchronous socket write failure, missed-pong deadline, drain race, or kernel-buffer pressure case. RED and GREEN fake-clock, callback-failure, peer-isolation, shutdown-race, sequence integration, compatibility, and bounded-resource tests therefore remain implementation obligations. Issue #2447 owns the shared outcome taxonomy; #2519 owns stream generation, replay, gap detection, and cache reconciliation; #2520 owns producer observation truth before publish; and #2522 owns event-poller cycle freshness and source coverage. They require coordinated contracts but do not duplicate this server-side client lifecycle and resource boundary.",
+  "impact": "A half-open client can remain counted as connected, a slow consumer can accumulate queued frames while broadcasts continue, and an asynchronous local write failure has no immediate classified outcome. Raw membership and OPEN state can therefore overclaim deliverability, memory pressure can grow during outages or reconnect storms, and future sequencing cannot deterministically distinguish a dropped client frame from healthy continuity without a bounded failure and reconciliation path.",
+  "implementation_after_issue_numbers": [2447],
+  "issue_node_id": "I_kwDOR1Sep88AAAABKQFX7A",
+  "issue_number": 2521,
+  "lead_verification_obligations": [
+    "Re-read the live issue node, title, exact body SHA without a synthetic newline, labels, timestamp, local SSH tracking ref, exact SSH remote main, installed ws version, and every open pull-request body, head, reference, and fully paginated file list immediately before registry integration or metadata mutation.",
+    "Approve one typed client lifecycle state machine, local delivery-outcome taxonomy, monotonic deadline model, bounded counter policy, and aggregate health projection before implementation.",
+    "Reconcile connection and delivery outcomes with issue #2447 and its current draft foundation without treating taxonomy work as ownership of WebSocket resource behavior.",
+    "Coordinate failed and dropped sequenced frames, reconnect, replay, cursor loss, and acknowledgement semantics with #2519 while keeping heartbeat success distinct from application-data currency.",
+    "Coordinate producer observation outcomes from #2520 and aggregate event-poller cycle health from #2522 without allowing a healthy producer cycle or open socket to imply successful client delivery.",
+    "Require RED and GREEN fake-clock tests for ping cadence, missed-pong boundaries, pong recovery, timer cleanup, obsolete-generation callbacks, graceful close, forced termination, and shutdown races.",
+    "Require RED and GREEN per-client backpressure tests below, at, and above the byte threshold; verify no extra frame is enqueued, grace and eviction are bounded, and healthy peers continue independently.",
+    "Require RED and GREEN synchronous-throw and asynchronous-completion-failure tests that classify one outcome, evict or terminate only the affected client, and never abort the remaining broadcast loop.",
+    "Verify accepted, local-write-completed, remote-application-acknowledged, failed, dropped, backpressured, and unresponsive outcomes remain distinct across publisher, event poller, protocol, console, metrics, logs, and recovery logic.",
+    "Verify repeated identical failures form bounded episodes with counts and one recovery, and that neither raw socket errors nor high-cardinality client fields cross logs, health, metrics, JSON, or WebSocket responses.",
+    "Verify close clears every timer and listener, detaches only the owned HTTP upgrade listener, rejects late callbacks from an obsolete generation, and leaves no retained client, server, or process handle.",
+    "Re-scan all open pull-request bodies, references, heads, and changed-file pages before assigning an implementation owner; the current open estate has no overlap or owner.",
+    "Keep live listeners, clients, network traffic, production identities, addresses, URLs, tickets, tokens, payloads, messages, credentials, services, processes, queues, deployment, and fleet rollout outside the draft implementation pull request."
+  ],
+  "owner_boundary": "fleet-websocket-client-lifecycle",
+  "partial_findings": [],
+  "pinned_revision": "a91f5301266fae2049cd1ae1b3c1b236a7ea2aa8",
+  "pre_review_body_sha256": "16ecd1949d660d17cf00ad03ab59f390d4da1fddcfc21a820322363d17963a89",
+  "proposed_cohort_id": null,
+  "pull_request_overlaps": [
+    {
+      "assessment": "partial",
+      "base_ref": "main",
+      "disposition": "merged",
+      "head_ref": "fix/console-ws-event-validation-20260507",
+      "is_draft": false,
+      "matched_by": ["issue-reference", "touched-path"],
+      "number": 183,
+      "overlapping_paths": [
+        "console/src/hooks/use-websocket.tsx",
+        "console/src/lib/realtime-events.ts",
+        "tests/console/websocket-events.test.ts"
+      ],
+      "title": "fix(console): validate websocket frames before cache updates",
+      "updated_at": "2026-05-07T17:42:48Z",
+      "url": "https://github.com/LucasQuiles/WhatSoup/pull/183"
+    },
+    {
+      "assessment": "historical-attempt",
+      "base_ref": "main",
+      "disposition": "merged",
+      "head_ref": "fix-1087-realtime-poller-guard",
+      "is_draft": false,
+      "matched_by": ["issue-reference", "touched-path"],
+      "number": 1333,
+      "overlapping_paths": [
+        "src/fleet/realtime-event-poller.ts",
+        "tests/fleet/realtime-event-poller.test.ts"
+      ],
+      "title": "fix(fleet): guard realtime poll overlap",
+      "updated_at": "2026-06-21T18:24:09Z",
+      "url": "https://github.com/LucasQuiles/WhatSoup/pull/1333"
+    },
+    {
+      "assessment": "partial",
+      "base_ref": "main",
+      "disposition": "merged",
+      "head_ref": "fix/ws-upgrade-listener-leak-2292",
+      "is_draft": false,
+      "matched_by": ["issue-reference", "touched-path"],
+      "number": 2372,
+      "overlapping_paths": [
+        "src/fleet/websocket-server.ts",
+        "tests/fleet/websocket-upgrade-listener-leak.test.ts"
+      ],
+      "title": "fix(fleet): detach the websocket upgrade listener on close",
+      "updated_at": "2026-07-25T14:37:39Z",
+      "url": "https://github.com/LucasQuiles/WhatSoup/pull/2372"
+    }
+  ],
+  "pull_request_owner_pr_number": null,
+  "recommended_labels": ["audit", "bug", "reliability"],
+  "recommended_title": null,
+  "review_confidence": "high",
+  "suggested_remediation": "Add a per-client monotonic lifecycle with pong-qualified liveness, a pre-enqueue buffered-byte budget, authoritative local send-completion outcomes, bounded episode counters, and complete shutdown cleanup; then integrate failed or dropped sequenced frames with #2519 without treating OPEN, heartbeat, or local write completion as remote application receipt.",
+  "title": "reliability(fleet): WebSocket broadcaster lacks heartbeat, backpressure, and async delivery outcomes",
+  "updated_at": "2026-07-26T23:01:27Z",
+  "url": "https://github.com/LucasQuiles/WhatSoup/issues/2521"
+}

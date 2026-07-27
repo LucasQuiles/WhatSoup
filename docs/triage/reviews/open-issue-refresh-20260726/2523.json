@@ -1,0 +1,136 @@
+{
+  "acceptance_criteria": [
+    "Health status, reason, confidence, evidence, and safe error detail cross the feed and line contracts without semantic loss.",
+    "Every console health surface renders canonical user-facing reason text and confidence consistently rather than exposing raw reason codes.",
+    "Unknown reason codes receive a safe deterministic fallback that preserves useful context without leaking raw internals.",
+    "Focused contract and rendering tests cover known reasons, unknown reasons, confidence levels, evidence, and safe error redaction."
+  ],
+  "affected_paths": [
+    "console/src/components/FeedCard.tsx",
+    "console/src/components/deploy/DeploymentCard.tsx",
+    "console/src/types.ts",
+    "src/fleet/routes/feed.ts",
+    "src/fleet/routes/lines.ts",
+    "tests/console/deployments-page.test.tsx",
+    "tests/console/feed-card-actions.test.tsx",
+    "tests/console/feed-card-render.test.tsx",
+    "tests/fleet/routes/feed.test.ts"
+  ],
+  "blast_radius": "All operator-facing health explanations in the activity feed and deployment views; inconsistent presentation can turn actionable cause and confidence into raw codes or generic unknown text.",
+  "classification": "leaf",
+  "current_labels": [],
+  "decisive_source_paths": [
+    "console/src/components/FeedCard.tsx",
+    "console/src/components/deploy/DeploymentCard.tsx",
+    "console/src/types.ts",
+    "src/fleet/routes/feed.ts",
+    "src/fleet/routes/lines.ts"
+  ],
+  "decisive_test_paths": [
+    "tests/console/deployments-page.test.tsx",
+    "tests/console/feed-card-actions.test.tsx",
+    "tests/console/feed-card-render.test.tsx",
+    "tests/fleet/routes/feed.test.ts"
+  ],
+  "dependency_issue_numbers": [2447, 2517],
+  "duplicate_of_issue_number": null,
+  "evidence_state": "verified",
+  "evidence_summary": "Pinned feed output already carries reason, confidence, evidence, and safe error fields, but FeedCard health presentation reads status and error while ignoring reason and confidence, DeploymentCard renders statusReason directly, and the line type leaves statusReason as free text. The local FeedCard reason map is partial rather than a canonical cross-surface contract. All four focused console suites passed 45 of 45 tests but do not assert this missing contract. The complete PR and issue scan found no owner; the broad draft PRs are collision-only and PR #2451 partially supplies the #2447 taxonomy dependency.",
+  "falsifier_or_remaining_gap": "The finding is falsified if a pinned-main canonical formatter can be shown to consume reason and confidence across both feed and deployment health surfaces with safe unknown-code behavior. No such shared formatter exists. The fleet feed-route suite was skipped because it creates temporary state, so server serialization was source-inspected rather than executed in this write-free lane.",
+  "impact": "Operators lose diagnostic cause and certainty precisely where they decide whether a degraded line needs intervention, and some views expose implementation codes instead of stable human text.",
+  "implementation_after_issue_numbers": [2447],
+  "issue_node_id": "I_kwDOR1Sep88AAAABKQKvVg",
+  "issue_number": 2523,
+  "lead_verification_obligations": [
+    "Re-read issue #2523 immediately before publication and reject the record if its updated timestamp, title, labels, or body hash changed.",
+    "Confirm the canonical vocabulary owned by #2447 and the safe error contract coordinated with #2517 before fixing console presentation.",
+    "Run the fleet feed-route suite in an isolated mutable harness and add cross-surface contract tests before claiming completion.",
+    "Re-scan open pull requests immediately before ownership; PRs #2078, #2500, and #2501 are broad collision-only drafts and PR #2451 is dependency work, not the issue owner."
+  ],
+  "owner_boundary": "console-health-presentation-contract",
+  "partial_findings": [],
+  "pinned_revision": "a91f5301266fae2049cd1ae1b3c1b236a7ea2aa8",
+  "pre_review_body_sha256": "3f01e1f5aed512e3490cec8af54972335752c5a72942025c378cd34c4dc686c9",
+  "proposed_cohort_id": null,
+  "pull_request_overlaps": [
+    {
+      "assessment": "collision-only",
+      "base_ref": "main",
+      "disposition": "open",
+      "head_ref": "takeover/console-successor-20260722",
+      "is_draft": true,
+      "matched_by": ["issue-reference", "touched-path"],
+      "number": 2078,
+      "overlapping_paths": [
+        "console/src/components/ActivityFeed.tsx",
+        "console/src/components/FeedCard.tsx",
+        "console/src/types.ts",
+        "src/fleet/routes/lines.ts",
+        "tests/console/feed-card-actions.test.tsx",
+        "tests/console/feed-card-render.test.tsx"
+      ],
+      "title": "chore: track transport and iMessage source for selective reconstruction",
+      "updated_at": "2026-07-25T03:24:03Z",
+      "url": "https://github.com/LucasQuiles/WhatSoup/pull/2078"
+    },
+    {
+      "assessment": "partial",
+      "base_ref": "main",
+      "disposition": "open",
+      "head_ref": "feat/taxonomy-cross-contract-2447",
+      "is_draft": true,
+      "matched_by": ["touched-path"],
+      "number": 2451,
+      "overlapping_paths": ["src/lib/fault-taxonomy-registry.json"],
+      "title": "feat(observability): add failure taxonomy cross-contract",
+      "updated_at": "2026-07-26T21:49:38Z",
+      "url": "https://github.com/LucasQuiles/WhatSoup/pull/2451"
+    },
+    {
+      "assessment": "collision-only",
+      "base_ref": "main",
+      "disposition": "open",
+      "head_ref": "takeover/console-consolidated-20260721",
+      "is_draft": true,
+      "matched_by": ["issue-reference", "touched-path"],
+      "number": 2500,
+      "overlapping_paths": [
+        "console/src/components/ActivityFeed.tsx",
+        "console/src/components/FeedCard.tsx",
+        "console/src/types.ts",
+        "src/fleet/routes/lines.ts",
+        "tests/console/feed-card-render.test.tsx"
+      ],
+      "title": "preserve: feat(console): add transport-aware line creation",
+      "updated_at": "2026-07-26T21:00:56Z",
+      "url": "https://github.com/LucasQuiles/WhatSoup/pull/2500"
+    },
+    {
+      "assessment": "collision-only",
+      "base_ref": "main",
+      "disposition": "open",
+      "head_ref": "takeover/console-live-main-20260722-2",
+      "is_draft": true,
+      "matched_by": ["issue-reference", "touched-path"],
+      "number": 2501,
+      "overlapping_paths": [
+        "console/src/components/ActivityFeed.tsx",
+        "console/src/components/FeedCard.tsx",
+        "console/src/types.ts",
+        "src/fleet/routes/lines.ts",
+        "tests/console/feed-card-render.test.tsx"
+      ],
+      "title": "preserve: merge: reconcile console successor with main",
+      "updated_at": "2026-07-26T21:00:57Z",
+      "url": "https://github.com/LucasQuiles/WhatSoup/pull/2501"
+    }
+  ],
+  "pull_request_owner_pr_number": null,
+  "recommended_labels": ["audit", "bug", "console", "reliability"],
+  "recommended_title": null,
+  "review_confidence": "high",
+  "suggested_remediation": "Define one typed health-presentation adapter backed by the #2447 canonical vocabulary and #2517 safe-detail rules, then make FeedCard and deployment views consume it with explicit confidence and unknown-code fallbacks.",
+  "title": "observability(console): health cause and confidence are discarded or rendered as raw codes",
+  "updated_at": "2026-07-26T23:51:38Z",
+  "url": "https://github.com/LucasQuiles/WhatSoup/issues/2523"
+}

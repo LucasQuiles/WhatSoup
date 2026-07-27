@@ -1,0 +1,124 @@
+{
+  "acceptance_criteria": [
+    "A numeric Unix-millisecond timestamp with a nonzero remainder preserves that supported precision in ISO projection, while the epoch-seconds message-storage boundary remains unchanged.",
+    "Equivalent numeric and ISO-string encodings of the same instant normalize to the same value, and equal-time records retain deterministic occurrence order.",
+    "Runs of one, two, three, four, and many identical parsed log records produce exact structured member counts with first and last observation times.",
+    "Aggregation comparison identity is immutable and independent of rendered text, literal multiplication-like suffixes remain source text, and time or source-generation boundaries are explicit.",
+    "The logs response reports parsed, aggregated, filtered, and returned counts without requiring consumers to parse display text."
+  ],
+  "affected_paths": [
+    "src/fleet/routes/data.ts",
+    "src/fleet/routes/feed.ts",
+    "src/fleet/routes/lines.ts",
+    "src/fleet/time-utils.ts",
+    "tests/fleet/routes/data.test.ts",
+    "tests/fleet/routes/feed-extended.test.ts",
+    "tests/fleet/routes/feed.test.ts",
+    "tests/fleet/time-utils.test.ts"
+  ],
+  "blast_radius": "Fleet log chronology, line activity projection, activity-feed ordering, and repeat-count evidence for every numeric-timestamp log producer; corruption can propagate into incident reconstruction and feed identity.",
+  "classification": "leaf",
+  "current_labels": [],
+  "decisive_source_paths": [
+    "src/fleet/routes/data.ts",
+    "src/fleet/time-utils.ts"
+  ],
+  "decisive_test_paths": [
+    "tests/fleet/routes/data.test.ts",
+    "tests/fleet/time-utils.test.ts"
+  ],
+  "dependency_issue_numbers": [2242, 2518],
+  "duplicate_of_issue_number": null,
+  "evidence_state": "verified",
+  "evidence_summary": "Pinned main routes generic numeric timestamps through toIsoFromUnix, which first floors millisecond values to stored epoch seconds; a write-free synthetic canary observed .676Z become .000Z. The logs route compares raw message, source, and level, then mutates that same message into a multiplication suffix, so the third identical input no longer matches the first aggregate. Existing time utility tests passed 7 of 7 but cover only whole-second millisecond values, and existing data tests pin two-record suffix behavior rather than exact structured aggregation. A complete 522-issue, 1,984-PR, and fully paginated 39-open-PR scan found no behavioral owner.",
+  "falsifier_or_remaining_gap": "The finding is falsified if pinned-main generic timestamp formatting preserves represented milliseconds independently of epoch-seconds storage and the logs reducer keeps an immutable comparison key with structured count and span. Source and the direct canary show the timestamp claim survives, while the reducer source shows key mutation. The data and feed suites were not run because they create temporary filesystem state in this record-only lane; three-member aggregation and downstream projections therefore still require isolated mutable test execution.",
+  "impact": "Valid records within one second can become artificially simultaneous, and runs of repeated diagnostics are split into pairs or encoded ambiguously in presentation text, corrupting chronology and occurrence counts.",
+  "implementation_after_issue_numbers": [2518],
+  "issue_node_id": "I_kwDOR1Sep88AAAABKQOr6w",
+  "issue_number": 2526,
+  "lead_verification_obligations": [
+    "Re-read issue #2526 immediately before publication and reject the record if its updated timestamp, title, labels, or body hash changed.",
+    "Coordinate the time-utility path move proposed by #2242 without coupling behavior correction to that refactor, and preserve #2518 parser completeness and provenance.",
+    "Update downstream #2525 ordering and identity design to consume corrected timestamps and structured aggregation without conflating occurrence identity with display projection.",
+    "Run the data and feed suites in an isolated mutable harness and add nonzero-millisecond, three-or-more-member, literal-suffix, time-boundary, and response-receipt tests before claiming completion.",
+    "Re-scan open pull requests immediately before ownership; PRs #2078, #2500, and #2501 are broad collision-only drafts and merged PR #828 is historical partial context, not an owner."
+  ],
+  "owner_boundary": "log-timestamp-aggregation-fidelity",
+  "partial_findings": [],
+  "pinned_revision": "a91f5301266fae2049cd1ae1b3c1b236a7ea2aa8",
+  "pre_review_body_sha256": "80eb43270989bd68f7ad5c11d0e56d23bc60fe0511521f12e75b9f060a3ed911",
+  "proposed_cohort_id": null,
+  "pull_request_overlaps": [
+    {
+      "assessment": "partial",
+      "base_ref": "main",
+      "disposition": "merged",
+      "head_ref": "fix/timestamp-unit-normalization-20260613",
+      "is_draft": false,
+      "matched_by": ["touched-path"],
+      "number": 828,
+      "overlapping_paths": [
+        "src/fleet/time-utils.ts",
+        "tests/fleet/time-utils.test.ts"
+      ],
+      "title": "fix(db): normalize message timestamp units",
+      "updated_at": "2026-06-14T03:26:36Z",
+      "url": "https://github.com/LucasQuiles/WhatSoup/pull/828"
+    },
+    {
+      "assessment": "collision-only",
+      "base_ref": "main",
+      "disposition": "open",
+      "head_ref": "takeover/console-successor-20260722",
+      "is_draft": true,
+      "matched_by": ["touched-path"],
+      "number": 2078,
+      "overlapping_paths": [
+        "src/fleet/routes/data.ts",
+        "src/fleet/routes/lines.ts",
+        "tests/fleet/routes/data.test.ts"
+      ],
+      "title": "chore: track transport and iMessage source for selective reconstruction",
+      "updated_at": "2026-07-25T03:24:03Z",
+      "url": "https://github.com/LucasQuiles/WhatSoup/pull/2078"
+    },
+    {
+      "assessment": "collision-only",
+      "base_ref": "main",
+      "disposition": "open",
+      "head_ref": "takeover/console-consolidated-20260721",
+      "is_draft": true,
+      "matched_by": ["touched-path"],
+      "number": 2500,
+      "overlapping_paths": ["src/fleet/routes/lines.ts"],
+      "title": "preserve: feat(console): add transport-aware line creation",
+      "updated_at": "2026-07-26T21:00:56Z",
+      "url": "https://github.com/LucasQuiles/WhatSoup/pull/2500"
+    },
+    {
+      "assessment": "collision-only",
+      "base_ref": "main",
+      "disposition": "open",
+      "head_ref": "takeover/console-live-main-20260722-2",
+      "is_draft": true,
+      "matched_by": ["touched-path"],
+      "number": 2501,
+      "overlapping_paths": [
+        "src/fleet/routes/data.ts",
+        "src/fleet/routes/lines.ts",
+        "tests/fleet/routes/data.test.ts"
+      ],
+      "title": "preserve: merge: reconcile console successor with main",
+      "updated_at": "2026-07-26T21:00:57Z",
+      "url": "https://github.com/LucasQuiles/WhatSoup/pull/2501"
+    }
+  ],
+  "pull_request_owner_pr_number": null,
+  "recommended_labels": ["audit", "bug", "fleet", "reliability"],
+  "recommended_title": null,
+  "review_confidence": "high",
+  "suggested_remediation": "Split exact instant formatting from epoch-seconds storage normalization, record unit and precision provenance, and replace display-text mutation with a structured reducer whose immutable fingerprint, member count, first and last times, source generation, policy version, and completeness are projected only after aggregation.",
+  "title": "observability(logs): millisecond truncation and mutable-text collapse corrupt chronology and counts",
+  "updated_at": "2026-07-26T23:45:00Z",
+  "url": "https://github.com/LucasQuiles/WhatSoup/issues/2526"
+}

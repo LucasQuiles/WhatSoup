@@ -1,0 +1,124 @@
+{
+  "acceptance_criteria": [
+    "Every feed occurrence has a server-assigned stable identity and deterministic total ordering independent of display text or minute buckets.",
+    "Deduplication removes only proven duplicate occurrences and never collapses distinct generic events that share text within a minute.",
+    "The console uses the server identity as its React key and retains distinct events whose legacy instance, time, type, direction, and chat fields collide.",
+    "Focused tests cover same-text same-minute occurrences, equal timestamps, reconnect replay, pagination boundaries, and client key uniqueness."
+  ],
+  "affected_paths": [
+    "console/src/components/ActivityFeed.tsx",
+    "console/src/types.ts",
+    "src/fleet/routes/feed.ts",
+    "tests/console/activity-feed.test.tsx",
+    "tests/console/feed-card-actions.test.tsx",
+    "tests/console/feed-card-render.test.tsx",
+    "tests/fleet/routes/feed-extended.test.ts",
+    "tests/fleet/routes/feed.test.ts"
+  ],
+  "blast_radius": "Fleet activity history, replay, pagination, and React rendering for all non-message and fallback feed events; collisions silently erase distinct occurrences.",
+  "classification": "leaf",
+  "current_labels": [],
+  "decisive_source_paths": [
+    "console/src/components/ActivityFeed.tsx",
+    "console/src/types.ts",
+    "src/fleet/routes/feed.ts"
+  ],
+  "decisive_test_paths": [
+    "tests/console/activity-feed.test.tsx",
+    "tests/console/feed-card-actions.test.tsx",
+    "tests/console/feed-card-render.test.tsx",
+    "tests/fleet/routes/feed-extended.test.ts",
+    "tests/fleet/routes/feed.test.ts"
+  ],
+  "dependency_issue_numbers": [1882, 2447, 2518, 2519],
+  "duplicate_of_issue_number": null,
+  "evidence_state": "verified",
+  "evidence_summary": "Pinned server and client FeedEvent contracts have no occurrence id, generation, sequence, or cursor. The feed route deduplicates generic rows by text plus minute and sorts only by time, while ActivityFeed derives a key from instance, timestamp, type, direction, and chat; distinct generic occurrences can therefore collapse server-side or collide client-side. The three focused console suites passed 36 of 36 tests but omit identity-collision cases. The complete PR and issue scan found no owner; broad draft overlaps touch ActivityFeed or types without supplying occurrence identity.",
+  "falsifier_or_remaining_gap": "The finding is falsified if pinned-main feed events already carry a stable occurrence identity through server serialization and console rendering, or if the fallback keys are proven injective for distinct occurrences. The inspected types and key functions show neither. Both feed-route suites were skipped because they create temporary state in this write-free lane, so collision behavior still needs an isolated mutable runtime test.",
+  "impact": "Distinct operational events can disappear from the activity record or reuse a React key, producing incomplete incident history and unstable rendering.",
+  "implementation_after_issue_numbers": [1882, 2447, 2518],
+  "issue_node_id": "I_kwDOR1Sep88AAAABKQMj_g",
+  "issue_number": 2525,
+  "lead_verification_obligations": [
+    "Re-read issue #2525 immediately before publication and reject the record if its updated timestamp, title, labels, or body hash changed.",
+    "Align occurrence identity with durable transition history #1882, taxonomy #2447, cursor contract #2518, and feed lineage #2519.",
+    "Run both feed-route suites in an isolated mutable harness and add same-minute, equal-time, replay, and pagination collision tests before claiming completion.",
+    "Re-scan open pull requests immediately before ownership; PRs #2078, #2500, and #2501 are collision-only drafts and PR #2451 is dependency work."
+  ],
+  "owner_boundary": "feed-occurrence-identity",
+  "partial_findings": [],
+  "pinned_revision": "a91f5301266fae2049cd1ae1b3c1b236a7ea2aa8",
+  "pre_review_body_sha256": "78884d0a2e91765a5f547ec047a16720eea14486dda69969e437402214c8d88b",
+  "proposed_cohort_id": null,
+  "pull_request_overlaps": [
+    {
+      "assessment": "collision-only",
+      "base_ref": "main",
+      "disposition": "open",
+      "head_ref": "takeover/console-successor-20260722",
+      "is_draft": true,
+      "matched_by": ["issue-reference", "touched-path"],
+      "number": 2078,
+      "overlapping_paths": [
+        "console/src/components/ActivityFeed.tsx",
+        "console/src/types.ts"
+      ],
+      "title": "chore: track transport and iMessage source for selective reconstruction",
+      "updated_at": "2026-07-25T03:24:03Z",
+      "url": "https://github.com/LucasQuiles/WhatSoup/pull/2078"
+    },
+    {
+      "assessment": "partial",
+      "base_ref": "main",
+      "disposition": "open",
+      "head_ref": "feat/taxonomy-cross-contract-2447",
+      "is_draft": true,
+      "matched_by": ["touched-path"],
+      "number": 2451,
+      "overlapping_paths": ["src/lib/fault-taxonomy-registry.json"],
+      "title": "feat(observability): add failure taxonomy cross-contract",
+      "updated_at": "2026-07-26T21:49:38Z",
+      "url": "https://github.com/LucasQuiles/WhatSoup/pull/2451"
+    },
+    {
+      "assessment": "collision-only",
+      "base_ref": "main",
+      "disposition": "open",
+      "head_ref": "takeover/console-consolidated-20260721",
+      "is_draft": true,
+      "matched_by": ["issue-reference", "touched-path"],
+      "number": 2500,
+      "overlapping_paths": [
+        "console/src/components/ActivityFeed.tsx",
+        "console/src/types.ts"
+      ],
+      "title": "preserve: feat(console): add transport-aware line creation",
+      "updated_at": "2026-07-26T21:00:56Z",
+      "url": "https://github.com/LucasQuiles/WhatSoup/pull/2500"
+    },
+    {
+      "assessment": "collision-only",
+      "base_ref": "main",
+      "disposition": "open",
+      "head_ref": "takeover/console-live-main-20260722-2",
+      "is_draft": true,
+      "matched_by": ["issue-reference", "touched-path"],
+      "number": 2501,
+      "overlapping_paths": [
+        "console/src/components/ActivityFeed.tsx",
+        "console/src/types.ts"
+      ],
+      "title": "preserve: merge: reconcile console successor with main",
+      "updated_at": "2026-07-26T21:00:57Z",
+      "url": "https://github.com/LucasQuiles/WhatSoup/pull/2501"
+    }
+  ],
+  "pull_request_owner_pr_number": null,
+  "recommended_labels": ["audit", "bug", "console", "reliability"],
+  "recommended_title": null,
+  "review_confidence": "high",
+  "suggested_remediation": "Assign each occurrence a stable server identity plus deterministic sequence or cursor, dedupe only on that identity, define a total order for equal timestamps, and require the console to key and reconcile rows by the same identity.",
+  "title": "observability(feed): minute-bucket dedupe drops occurrences and client event keys collide",
+  "updated_at": "2026-07-26T23:45:42Z",
+  "url": "https://github.com/LucasQuiles/WhatSoup/issues/2525"
+}

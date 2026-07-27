@@ -1,0 +1,177 @@
+{
+  "acceptance_criteria": [
+    "Probe failure, checkpoint-storage read failure, complete empty, and complete nonempty are mutually exclusive validated wire-result variants.",
+    "The wire validator rejects missing required fields, contradictory flags, and unknown availability or reason codes.",
+    "The Agents page renders storage-read unavailable without a numeric zero or a no-live-sessions claim, while preserving the existing honest probe-failure state.",
+    "Line detail explains unavailable live-process evidence, and query transport freshness remains distinct from source-result availability.",
+    "Recovery to a complete empty snapshot produces an explicit transition, and unavailable or stale evidence cannot authorize destructive actions."
+  ],
+  "affected_paths": [
+    "console/src/components/agents/panels.tsx",
+    "console/src/components/line-detail/CheckpointsTab.tsx",
+    "console/src/hooks/use-fleet.ts",
+    "console/src/lib/api.ts",
+    "console/src/pages/Agents.tsx",
+    "console/src/pages/LineDetail.tsx",
+    "console/src/types.ts",
+    "src/fleet/routes/live-sessions.ts",
+    "tests/console/agents.test.tsx",
+    "tests/console/components/line-detail/CheckpointsTab.test.tsx",
+    "tests/console/use-fleet.test.tsx",
+    "tests/fleet/routes/live-sessions.test.ts"
+  ],
+  "blast_radius": "Operator liveness decisions for per-chat agent sessions across the Agents and line-detail surfaces; a storage outage can otherwise masquerade as a fresh authoritative zero.",
+  "classification": "leaf",
+  "current_labels": [],
+  "decisive_source_paths": [
+    "console/src/components/agents/panels.tsx",
+    "console/src/components/line-detail/CheckpointsTab.tsx",
+    "console/src/hooks/use-fleet.ts",
+    "console/src/pages/Agents.tsx",
+    "console/src/types.ts",
+    "src/fleet/routes/live-sessions.ts"
+  ],
+  "decisive_test_paths": [
+    "tests/console/agents.test.tsx",
+    "tests/console/components/line-detail/CheckpointsTab.test.tsx",
+    "tests/console/use-fleet.test.tsx",
+    "tests/fleet/routes/live-sessions.test.ts"
+  ],
+  "dependency_issue_numbers": [2447, 2517, 2523, 2524],
+  "duplicate_of_issue_number": null,
+  "evidence_state": "verified",
+  "evidence_summary": "Pinned server code returns distinct HTTP-200 probeError and readError variants, but the console type requires success fields while allowing optional error flags, the query hook marks both variants freshly successful, Agents forwards only probeError, and InstancesPanel converts missing sessions to an empty list and a zero count. Three focused write-free console suites passed 141 of 141 tests but have no Agents readError case. A complete 523-issue, 1,984-PR, and fully paginated 39-open-PR scan found no owner; historical merged work is partial and current drafts only collide with adjacent paths.",
+  "falsifier_or_remaining_gap": "The finding is falsified if the pinned Agents flow preserves readError or a validated storage-unavailable variant through the hook and panel and suppresses empty-state claims. The inspected flow does not. The 10-test server route suite was not run because it creates temporary SQLite files in this record-only lane; its missing checkpoint-read-failure case and the complete runtime union still require isolated mutable validation.",
+  "impact": "Checkpoint-storage failure appears as zero live sessions with fresh query timing, concealing unavailable evidence when an operator assesses a stalled turn or future recovery action.",
+  "implementation_after_issue_numbers": [2447, 2523],
+  "issue_node_id": "I_kwDOR1Sep88AAAABKQP5Gg",
+  "issue_number": 2527,
+  "lead_verification_obligations": [
+    "Re-read issue #2527 immediately before publication and reject the record if its updated timestamp, title, labels, or body hash changed.",
+    "Use the #2447 vocabulary and #2523 presentation contract while preserving #2517 safe-detail boundaries and supplying #2524 action gates with explicit availability.",
+    "Run the live-session route suite in an isolated mutable harness and add direct checkpoint-read-failure coverage before claiming the server union complete.",
+    "Add Agents, hook, line-detail, accessibility, recovery-transition, contradictory-payload, and unavailable-action tests before completion.",
+    "Re-scan open pull requests immediately before ownership; PRs #2078, #2500, and #2501 are collision-only drafts, while merged PRs #1997, #2198, and #2364 are partial history."
+  ],
+  "owner_boundary": "live-session-availability-projection",
+  "partial_findings": [],
+  "pinned_revision": "a91f5301266fae2049cd1ae1b3c1b236a7ea2aa8",
+  "pre_review_body_sha256": "2c17b90062b43a36e02e6379357b5a3aaec37211b830fcf8a88ec9107764d7e9",
+  "proposed_cohort_id": null,
+  "pull_request_overlaps": [
+    {
+      "assessment": "partial",
+      "base_ref": "main",
+      "disposition": "merged",
+      "head_ref": "feat/live-session-inspector-clean-20260721",
+      "is_draft": false,
+      "matched_by": ["touched-path"],
+      "number": 1997,
+      "overlapping_paths": [
+        "console/src/components/line-detail/CheckpointsTab.tsx",
+        "console/src/hooks/use-fleet.ts",
+        "console/src/lib/api.ts",
+        "console/src/pages/LineDetail.tsx",
+        "console/src/types.ts",
+        "src/fleet/routes/live-sessions.ts",
+        "tests/console/components/line-detail/CheckpointsTab.test.tsx",
+        "tests/fleet/routes/live-sessions.test.ts"
+      ],
+      "title": "feat(fleet+console): live session inspector — ps-probe × checkpoint join (clean-history recreation of #1954)",
+      "updated_at": "2026-07-21T01:44:54Z",
+      "url": "https://github.com/LucasQuiles/WhatSoup/pull/1997"
+    },
+    {
+      "assessment": "collision-only",
+      "base_ref": "main",
+      "disposition": "open",
+      "head_ref": "takeover/console-successor-20260722",
+      "is_draft": true,
+      "matched_by": ["touched-path"],
+      "number": 2078,
+      "overlapping_paths": [
+        "console/src/components/line-detail/CheckpointsTab.tsx",
+        "console/src/pages/LineDetail.tsx",
+        "console/src/types.ts",
+        "tests/console/components/line-detail/CheckpointsTab.test.tsx"
+      ],
+      "title": "chore: track transport and iMessage source for selective reconstruction",
+      "updated_at": "2026-07-25T03:24:03Z",
+      "url": "https://github.com/LucasQuiles/WhatSoup/pull/2078"
+    },
+    {
+      "assessment": "partial",
+      "base_ref": "main",
+      "disposition": "merged",
+      "head_ref": "feat/console-v35-integration",
+      "is_draft": false,
+      "matched_by": ["touched-path"],
+      "number": 2198,
+      "overlapping_paths": [
+        "console/src/components/agents/panels.tsx",
+        "console/src/lib/api.ts",
+        "console/src/pages/Agents.tsx",
+        "tests/console/agents.test.tsx"
+      ],
+      "title": "feat(console): v3.5 console — integrated program (13 beads + harness fix), one merge",
+      "updated_at": "2026-07-25T02:19:04Z",
+      "url": "https://github.com/LucasQuiles/WhatSoup/pull/2198"
+    },
+    {
+      "assessment": "partial",
+      "base_ref": "main",
+      "disposition": "merged",
+      "head_ref": "fix/live-sessions-ps-portability-2360",
+      "is_draft": false,
+      "matched_by": ["touched-path"],
+      "number": 2364,
+      "overlapping_paths": [
+        "src/fleet/routes/live-sessions.ts",
+        "tests/fleet/routes/live-sessions.test.ts"
+      ],
+      "title": "fix(fleet): probe elapsed time with the portable ps field",
+      "updated_at": "2026-07-25T09:08:04Z",
+      "url": "https://github.com/LucasQuiles/WhatSoup/pull/2364"
+    },
+    {
+      "assessment": "collision-only",
+      "base_ref": "main",
+      "disposition": "open",
+      "head_ref": "takeover/console-consolidated-20260721",
+      "is_draft": true,
+      "matched_by": ["touched-path"],
+      "number": 2500,
+      "overlapping_paths": [
+        "console/src/pages/LineDetail.tsx",
+        "console/src/types.ts"
+      ],
+      "title": "preserve: feat(console): add transport-aware line creation",
+      "updated_at": "2026-07-26T21:00:56Z",
+      "url": "https://github.com/LucasQuiles/WhatSoup/pull/2500"
+    },
+    {
+      "assessment": "collision-only",
+      "base_ref": "main",
+      "disposition": "open",
+      "head_ref": "takeover/console-live-main-20260722-2",
+      "is_draft": true,
+      "matched_by": ["touched-path"],
+      "number": 2501,
+      "overlapping_paths": [
+        "console/src/pages/LineDetail.tsx",
+        "console/src/types.ts"
+      ],
+      "title": "preserve: merge: reconcile console successor with main",
+      "updated_at": "2026-07-26T21:00:57Z",
+      "url": "https://github.com/LucasQuiles/WhatSoup/pull/2501"
+    }
+  ],
+  "pull_request_owner_pr_number": null,
+  "recommended_labels": ["audit", "bug", "console", "reliability"],
+  "recommended_title": null,
+  "review_confidence": "high",
+  "suggested_remediation": "Replace optional error booleans on a success interface with a runtime-validated availability union, keep query freshness separate from source availability, project bounded reasons consistently in Agents and line detail, and allow zero only after a complete observed-empty snapshot.",
+  "title": "observability(console): live-session storage read failures render as no live sessions",
+  "updated_at": "2026-07-26T23:54:36Z",
+  "url": "https://github.com/LucasQuiles/WhatSoup/issues/2527"
+}
