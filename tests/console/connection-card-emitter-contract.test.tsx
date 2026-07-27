@@ -77,9 +77,9 @@ afterEach(() => cleanup())
 //  in tests/core/health.test.ts.
 // ---------------------------------------------------------------------------
 
-function httpGet(port: number, path: string): Promise<{ status: number; body: string }> {
+function httpGet(port: number, path: string, headers: Record<string, string> = {}): Promise<{ status: number; body: string }> {
   return new Promise((resolve, reject) => {
-    const req = request({ hostname: '127.0.0.1', port, path, method: 'GET' }, (res) => {
+    const req = request({ hostname: '127.0.0.1', port, path, method: 'GET', headers }, (res) => {
       let data = ''
       res.on('data', (chunk) => { data += chunk })
       res.on('end', () => resolve({ status: res.statusCode ?? 0, body: data }))
@@ -90,7 +90,9 @@ function httpGet(port: number, path: string): Promise<{ status: number; body: st
 }
 
 async function fetchRealHealthBody(): Promise<Record<string, unknown>> {
-  delete process.env.WHATSOUP_HEALTH_TOKEN
+  // #2515: diagnostic projection is bearer-gated; set a test token.
+  const HEALTH_TOKEN = 'emitter-test-health-token-2515'
+  process.env.WHATSOUP_HEALTH_TOKEN = HEALTH_TOKEN
   const { startHealthServer } = await import('../../src/core/health.ts')
 
   const db = new Database(':memory:')
@@ -126,11 +128,12 @@ async function fetchRealHealthBody(): Promise<Record<string, unknown>> {
   server.close()
 
   try {
-    const res = await httpGet(port, '/health')
+    const res = await httpGet(port, '/health', { Authorization: `Bearer ${HEALTH_TOKEN}` })
     expect(res.status).toBe(200)
     return JSON.parse(res.body) as Record<string, unknown>
   } finally {
-    await new Promise<void>((resolve) => started.close(() => resolve()))
+    delete process.env.WHATSOUP_HEALTH_TOKEN
+    await new Promise<string>((resolve) => started.close(() => resolve('')))
     db.close()
   }
 }

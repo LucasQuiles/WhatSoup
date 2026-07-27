@@ -91,10 +91,10 @@ describe('ProbeErrorThrottle (#1778 Defect B)', () => {
 // Integration — a missing table must degrade + bound the log, not storm it.
 // ---------------------------------------------------------------------------
 
-function httpGet(port: number, path: string): Promise<{ status: number; body: string }> {
+function httpGet(port: number, path: string, extraHeaders: Record<string, string> = {}): Promise<{ status: number; body: string }> {
   return new Promise((resolve, reject) => {
     const req = request(
-      { hostname: '127.0.0.1', port, path, method: 'GET', headers: { 'Content-Type': 'application/json' } },
+      { hostname: '127.0.0.1', port, path, method: 'GET', headers: { 'Content-Type': 'application/json', ...extraHeaders } },
       (res) => {
         let data = '';
         res.on('data', (c) => { data += c; });
@@ -148,6 +148,8 @@ describe('GET /health with a missing probe table (#1778 Defect B)', () => {
     mockHealthLogger.error.mockClear();
     db = new Database(':memory:');
     db.open();
+    // #2515: diagnostic projection is bearer-gated; set a test token.
+    process.env.WHATSOUP_HEALTH_TOKEN = 'storm-test-health-token-2515';
     // Simulate the observed drift AFTER open() self-heal, so the probe target is
     // genuinely absent for the duration of this test.
     db.raw.exec('DROP TABLE pending_polls');
@@ -155,6 +157,7 @@ describe('GET /health with a missing probe table (#1778 Defect B)', () => {
   });
 
   afterEach(async () => {
+    delete process.env.WHATSOUP_HEALTH_TOKEN;
     db.close();
     await new Promise<void>((resolve) => server.close(() => resolve()));
   });
@@ -162,7 +165,7 @@ describe('GET /health with a missing probe table (#1778 Defect B)', () => {
   it('latches degraded on every poll but bounds the error log to O(log N)', async () => {
     const POLLS = 16;
     for (let i = 0; i < POLLS; i += 1) {
-      const { body } = await httpGet(port, '/health');
+      const { body } = await httpGet(port, '/health', { Authorization: 'Bearer storm-test-health-token-2515' });
       const json = JSON.parse(body);
       // The degraded latch must survive on every poll — bounding the LOG must
       // not silence the SIGNAL.
