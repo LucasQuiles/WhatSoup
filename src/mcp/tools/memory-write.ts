@@ -17,15 +17,30 @@
 
 import { z } from 'zod';
 import { shortHash } from '../../lib/short-hash.ts';
-import { createChildLogger } from '../../logger.ts';
+import {
+  classifyMemoryOperationFailure,
+  createMemoryOperationContext,
+} from '../../runtimes/chat/memory/operation-telemetry.ts';
 import { PineconeMemory, type MemoryRecord } from '../../runtimes/chat/providers/pinecone.ts';
-import { conversationBoundKey, errorResult, type ToolDeclaration } from '../types.ts';
-
-const log = createChildLogger('memory-write');
+import {
+  conversationBoundKey,
+  errorResult,
+  toolError,
+  type ToolDeclaration,
+} from '../types.ts';
 
 /** Minimal writer seam so tests can inject a fake without constructing a live client. */
+export interface MemoryWriteOperationContext {
+  operationId?: string;
+  traceId?: string;
+  operation?: 'upsert' | 'memory_write';
+}
+
 export interface MemoryWriter {
-  upsert(records: MemoryRecord[]): Promise<void>;
+  upsert(
+    records: MemoryRecord[],
+    context?: MemoryWriteOperationContext,
+  ): Promise<void>;
 }
 
 const MEMORY_TYPES = ['user_fact', 'group_context', 'preference', 'correction', 'self_fact'] as const;
@@ -114,6 +129,11 @@ export function registerMemoryWriteTools(
         return errorResult('memory_write could not resolve a sender identity');
       }
 
+      const operation = createMemoryOperationContext({
+        operation: 'memory_write',
+        scopeKind: 'batch',
+        filterShape: 'none',
+      });
       const now = new Date().toISOString();
       const record: MemoryRecord = {
         id: stableId(rawChat, memoryType, p.text),
@@ -134,21 +154,25 @@ export function registerMemoryWriteTools(
       };
 
       try {
-        await getWriter().upsert([record]);
+        await getWriter().upsert([record], {
+          operationId: operation.operationId,
+          operation: 'memory_write',
+        });
       } catch (err) {
-        log.warn({ err, memoryType }, 'memory_write upsert failed');
-        return errorResult(`memory_write failed: ${err instanceof Error ? err.message : String(err)}`);
+        const failure = classifyMemoryOperationFailure(err);
+        return toolError({
+          error: 'memory_write failed',
+          code: failure.code,
+          retryable: failure.retryable,
+          operation_id: operation.operationId,
+        });
       }
 
-      // QR-006: success was previously silent (only failures logged) — emit a
-      // trace-grade success log carrying the written record id. NOTE: no
-      // traceId here — no traceId currently flows to MCP handlers, and
-      // threading a real one through the MCP session/handler is more than
-      // this observability-only change should take on (see report: MCP
-      // traceId plumbing is a follow-up).
-      log.info({ id: record.id, memoryType }, 'memory_write upsert complete');
-
-      return { id: record.id, status: 'written', memory_type: memoryType };
+      return {
+        operation_id: operation.operationId,
+        status: 'written',
+        memory_type: memoryType,
+      };
     },
   });
 }
