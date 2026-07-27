@@ -135,6 +135,7 @@ const SCOPE_MAP: Record<string, ScopeEntry> = {
 
   // ---- skip-immune: import.meta-rooted, CLI cannot be pointed elsewhere ----
   'lint:src': { class: 'skip-immune', reason: 'eslint-fitness CLI is locked to repoRoot (ignores argv); internal filesLinted===0 floor added this session + own unit test covers it' },
+  'catch-ratchet': { class: 'skip-immune', reason: 'generator is import.meta-rooted and ignores cwd; its zero-file scan fails closed and is covered by generate-catch-ratchet.test.ts' },
   'durability-writer': { class: 'skip-immune', reason: 'SCRIPT_DIR/REPO_ROOT-rooted (REPO_ROOT = SCRIPT_DIR/..); scans the real repo regardless of cwd (verified empty-cwd exit 0). Its discoveredTableCount===0 -> exit 2 non-vacuity floor + the paired durability-writer-guard.test.ts cover the empty/inconclusive case (#1789)' },
 
   // ---- skip-network: needs a live API, not offline-judgeable ----

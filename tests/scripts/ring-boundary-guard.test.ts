@@ -35,6 +35,7 @@ function makeFixture({ violation, baselineCount }: FixtureOptions): string {
   mkdirSync(path.join(dir, 'src', 'fleet'), { recursive: true });
   mkdirSync(path.join(dir, '.claude', 'fitness'), { recursive: true });
   mkdirSync(path.join(dir, 'docs', 'architecture'), { recursive: true });
+  mkdirSync(path.join(dir, 'eslint-rules'), { recursive: true });
   writeFileSync(path.join(dir, 'src', 'fleet', 'util.ts'), 'export const u = 1;\n', 'utf8');
   writeFileSync(
     path.join(dir, 'src', 'core', 'subject.ts'),
@@ -46,6 +47,14 @@ function makeFixture({ violation, baselineCount }: FixtureOptions): string {
   writeFileSync(
     path.join(dir, '.claude', 'fitness', 'baseline.json'),
     JSON.stringify({ rules: { [RING_RULE_ID]: { violationCount: baselineCount } } }),
+    'utf8',
+  );
+  // The shared fitness config also enables the catch ratchet on src/. These
+  // focused ring fixtures have no inherited catch debt, so make that separate
+  // fail-closed dependency explicit instead of weakening its missing-file rule.
+  writeFileSync(
+    path.join(dir, 'eslint-rules', 'catch-ratchet-baseline.json'),
+    '[]\n',
     'utf8',
   );
   writeFileSync(

@@ -1000,6 +1000,15 @@ describe('verify chain composition (package.json)', () => {
     expect(chain).toMatch(/\bnpm run guard:test-integrity\b/);
   });
 
+  it('runs the catch-ratchet drift gate in push, release, and CI paths', () => {
+    const push = packageJson.scripts['verify:push:branch'] ?? '';
+    const release = packageJson.scripts['verify:release'] ?? '';
+
+    expect(push).toMatch(/\bnpm run guard:catch-ratchet\b/);
+    expect(release).toMatch(/\bnpm run guard:catch-ratchet\b/);
+    expect(qualityWorkflow).toMatch(/\bnpm run guard:catch-ratchet\b/);
+  });
+
   it('verify:push:branch invokes the fast CI-only checks that drove local-green/CI-red (#1105)', () => {
     // Regression guard for #1105: verify:push:branch omitted console lint/build,
     // guard:design-system-hygiene, guard:harness-maintenance, and test:tokenomics —
