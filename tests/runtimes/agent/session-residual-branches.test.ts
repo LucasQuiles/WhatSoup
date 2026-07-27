@@ -223,7 +223,7 @@ describe('crashManagedProviderSession error/durability branches', () => {
     const db = makeDb();
     const { messenger } = makeMessenger();
     const upsertSessionCheckpoint = vi.fn();
-    const updateSessionCheckpointsStatusBySessionId = vi.fn(() => 1);
+    const updateExactSessionCheckpointStatus = vi.fn(() => 1);
     const onCrash = vi.fn();
     // Reject with a NON-Error value so `err instanceof Error` is false and the
     // `err === undefined ? undefined : String(err)` else-branch runs (String).
@@ -241,17 +241,18 @@ describe('crashManagedProviderSession error/durability branches', () => {
     sm.setDurability({
       beginFreshSessionCheckpoint: vi.fn(),
       upsertSessionCheckpoint,
-      updateSessionCheckpointsStatusBySessionId,
+      updateExactSessionCheckpointStatus,
     } as unknown as Parameters<typeof sm.setDurability>[0]);
 
     await sm.spawnSession();
-    updateSessionCheckpointsStatusBySessionId.mockClear();
+    updateExactSessionCheckpointStatus.mockClear();
     await expect(sm.sendTurn('boom')).rejects.toBe('string-failure');
 
-    expect(updateSessionCheckpointsStatusBySessionId).toHaveBeenCalledWith(
-      expect.stringMatching(/^openai-api-/),
-      'orphaned',
-    );
+    expect(updateExactSessionCheckpointStatus).toHaveBeenCalledWith({
+      providerSessionId: expect.stringMatching(/^openai-api-/),
+      conversationKey: '1555000099',
+      sessionStatus: 'orphaned',
+    });
     expect(onCrash).toHaveBeenCalledWith(
       expect.objectContaining({ exitCode: null, signal: null, dbRowId: 42 }),
     );
@@ -320,7 +321,7 @@ describe('persistent claude-cli exit/stderr residual branches', () => {
     // set this drives the `if (this.durability)` branch inside the isResumeFail
     // arm (distinct from the non-resume crash arm covered by the drain test).
     const upsertSessionCheckpoint = vi.fn();
-    const updateSessionCheckpointsStatusBySessionId = vi.fn(() => 1);
+    const updateExactSessionCheckpointStatus = vi.fn(() => 1);
     const onResumeFailed = vi.fn();
     const sm = new SessionManager({
       db: makeDb(),
@@ -331,18 +332,19 @@ describe('persistent claude-cli exit/stderr residual branches', () => {
     });
     sm.setDurability({
       upsertSessionCheckpoint,
-      updateSessionCheckpointsStatusBySessionId,
+      updateExactSessionCheckpointStatus,
     } as unknown as Parameters<typeof sm.setDurability>[0]);
     await sm.spawnSession('expired-session-id');
     upsertSessionCheckpoint.mockClear(); // drop the spawn-time 'active' checkpoint
-    updateSessionCheckpointsStatusBySessionId.mockClear();
+    updateExactSessionCheckpointStatus.mockClear();
 
     mockChild.emitExit(1, null); // resume attempt, code 1, init never received
     expect(onResumeFailed).toHaveBeenCalledTimes(1);
-    expect(updateSessionCheckpointsStatusBySessionId).toHaveBeenCalledWith(
-      'expired-session-id',
-      'orphaned',
-    );
+    expect(updateExactSessionCheckpointStatus).toHaveBeenCalledWith({
+      providerSessionId: 'expired-session-id',
+      conversationKey: '1555000099',
+      sessionStatus: 'orphaned',
+    });
   });
 
   it('drains buffered (non-newline-terminated) stdout before crash processing on exit', async () => {
