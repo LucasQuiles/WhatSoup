@@ -210,10 +210,16 @@ When a change would push a grandfathered file past its ceiling:
    PR #2563 (`runtime-presentation.ts`, 7 pure module-level functions, net −65). Prove the
    move is pure — moved bodies byte-identical modulo `export`, donor diff = deletions plus the
    new import — and run the file's behavioral suite.
-2. **If widening is genuinely unavoidable**, the guard's own remediation applies: *"Fix the
-   underlying violation instead of widening the baseline, or land the widening as its own
-   reviewed change that says why."* That is an exceptional, standalone, explicitly-reviewed
-   change — never a side effect of a feature branch.
+2. **If widening is genuinely unavoidable**, the reviewed-widening path is machine-checkable
+   via a **growth waiver** (`.claude/fitness/growth-waivers.json`): first land a standalone
+   PR adding an issue-linked waiver entry — that PR *is* the review — then the widening PR
+   passes `guard:baseline-growth` mechanically. Waivers are fail-closed by construction:
+   the guard reads them from the **merge base only** (a PR can never author its own
+   authorization), `maxWeight` is an **absolute cap** (self-spending — once the widening
+   lands, the cap equals the base and authorizes nothing further), they **expire**
+   (`expiresAt`), only numeric weight growth is waivable (identity introductions never
+   are), and a malformed waiver document is INCONCLUSIVE, not ignored. A widening remains
+   an exceptional, standalone act — never a side effect of a feature branch.
 
 Shrinking below a ceiling never auto-lowers it (only a WARN suggests it). Lowering the ceiling
 to match a shrink is itself a conscious act: it permanently donates the freed headroom, so time
