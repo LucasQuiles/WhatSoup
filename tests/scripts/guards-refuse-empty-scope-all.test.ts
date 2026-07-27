@@ -60,6 +60,7 @@ type ScopeClass =
   | 'probe-nonzero'
   | 'skip-diff-scoped'
   | 'skip-host-state'
+  | 'skip-repo-state'
   | 'skip-immune'
   | 'skip-alias'
   | 'skip-network'
@@ -117,6 +118,7 @@ const SCOPE_MAP: Record<string, ScopeEntry> = {
   'ring-boundary-ratchet': { class: 'probe-nonzero', reason: 'reads cwd ring config; "FAILED to run" ENOENT -> non-zero', probe: { via: 'cwd' } },
   'coverage-headroom': { class: 'probe-nonzero', reason: 'reads cwd coverage summary; ENOENT -> non-zero', probe: { via: 'cwd' } },
   'bot-errors-simulation-matrix': { class: 'probe-nonzero', reason: 'reads cwd simulation matrix; absent -> non-zero', probe: { via: 'cwd' } },
+  'branch-retirement': { class: 'probe-nonzero', reason: 'no live collector wired yet; predicate always refuses -> non-zero exit, no INCONCLUSIVE token', probe: { via: 'cwd' } },
 
   // ---- skip-diff-scoped: empty diff/index is legitimately nothing (not a whole-tree scan) ----
   'design-system-hygiene': { class: 'skip-diff-scoped', reason: 'scans STAGED files; empty index -> legitimately clean (exit 0), not vacuity' },
@@ -124,12 +126,16 @@ const SCOPE_MAP: Record<string, ScopeEntry> = {
   'pre-push': { class: 'skip-diff-scoped', reason: 'consumes stdin ref updates; no push context -> "delete-only" no-op, not a tree scan' },
   'semantic-quality': { class: 'skip-diff-scoped', reason: 'evaluates a push CANDIDATE receipt; candidate-unavailable -> no-op, not a tree scan' },
 
+  // ---- skip-repo-state: scans Git topology/refs/status, not files in the tracked tree ----
+  'git-estate': { class: 'skip-repo-state', reason: 'explicit snapshot/guard/baseline subcommands inspect registered Git worktrees, refs, status, and stashes; an empty tracked tree still has a real one-worktree estate, and fixture tests cover missing-baseline fail-closed behavior' },
+
   // ---- skip-host-state: roots off $HOME / the script location; cwd is irrelevant ----
   'unit-drift': { class: 'skip-host-state', reason: 'BASH_SOURCE-rooted; compares $HOME/.config systemd units to repo templates — empty cwd changes nothing' },
   'launchd-drift': { class: 'skip-host-state', reason: 'BASH_SOURCE-rooted; compares $HOME/Library launchd plists to templates — empty cwd changes nothing' },
 
   // ---- skip-immune: import.meta-rooted, CLI cannot be pointed elsewhere ----
   'lint:src': { class: 'skip-immune', reason: 'eslint-fitness CLI is locked to repoRoot (ignores argv); internal filesLinted===0 floor added this session + own unit test covers it' },
+  'catch-ratchet': { class: 'skip-immune', reason: 'generator is import.meta-rooted and ignores cwd; its zero-file scan fails closed and is covered by generate-catch-ratchet.test.ts' },
   'durability-writer': { class: 'skip-immune', reason: 'SCRIPT_DIR/REPO_ROOT-rooted (REPO_ROOT = SCRIPT_DIR/..); scans the real repo regardless of cwd (verified empty-cwd exit 0). Its discoveredTableCount===0 -> exit 2 non-vacuity floor + the paired durability-writer-guard.test.ts cover the empty/inconclusive case (#1789)' },
 
   // ---- skip-network: needs a live API, not offline-judgeable ----

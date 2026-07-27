@@ -1,6 +1,12 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 const mockListIndexes = vi.fn();
+const mockReadinessLogger = vi.hoisted(() => ({
+  info: vi.fn(),
+  warn: vi.fn(),
+  error: vi.fn(),
+  debug: vi.fn(),
+}));
 
 vi.mock('@pinecone-database/pinecone', () => {
   const MockPinecone = vi.fn();
@@ -22,12 +28,7 @@ vi.mock('../../../../src/config.ts', () => ({
 }));
 
 vi.mock('../../../../src/logger.ts', () => ({
-  createChildLogger: () => ({
-    info: vi.fn(),
-    warn: vi.fn(),
-    error: vi.fn(),
-    debug: vi.fn(),
-  }),
+  createChildLogger: () => mockReadinessLogger,
   default: {
     info: vi.fn(),
     warn: vi.fn(),
@@ -123,12 +124,27 @@ describe('getPineconeReadiness', () => {
     vi.mocked(Pinecone).mockImplementation(function (this: Record<string, unknown>) {
       this.listIndexes = mockListIndexes;
     } as unknown as () => Pinecone);
-    mockListIndexes.mockRejectedValueOnce(Object.assign(new Error('401 unauthorized'), { status: 401 }));
+    mockListIndexes.mockRejectedValueOnce(
+      Object.assign(new Error('SYNTHETIC_PRIVATE_AUTH_ERROR_MARKER'), {
+        status: 401,
+      }),
+    );
 
     await expect(getPineconeReadiness('mw-mind')).resolves.toEqual({
       state: 'auth_failed',
       index: 'mw-mind',
     });
+    expect(mockReadinessLogger.error).toHaveBeenCalledWith(
+      expect.objectContaining({
+        operation: 'readiness',
+        failure_code: 'auth_failed',
+        retryable: false,
+      }),
+      'memory_operation',
+    );
+    expect(JSON.stringify(mockReadinessLogger.error.mock.calls)).not.toContain(
+      'SYNTHETIC_PRIVATE_AUTH_ERROR_MARKER',
+    );
   });
 
   it('returns network_error when listing indexes fails due to connectivity', async () => {
@@ -136,13 +152,26 @@ describe('getPineconeReadiness', () => {
     vi.mocked(Pinecone).mockImplementation(function (this: Record<string, unknown>) {
       this.listIndexes = mockListIndexes;
     } as unknown as () => Pinecone);
-    mockListIndexes.mockRejectedValueOnce(Object.assign(new Error('connect refused'), {
-      cause: { code: 'ECONNREFUSED' },
-    }));
+    mockListIndexes.mockRejectedValueOnce(
+      Object.assign(new Error('SYNTHETIC_PRIVATE_NETWORK_ERROR_MARKER'), {
+        cause: { code: 'ECONNREFUSED' },
+      }),
+    );
 
     await expect(getPineconeReadiness('mw-mind')).resolves.toEqual({
       state: 'network_error',
       index: 'mw-mind',
     });
+    expect(mockReadinessLogger.error).toHaveBeenCalledWith(
+      expect.objectContaining({
+        operation: 'readiness',
+        failure_code: 'network_error',
+        retryable: true,
+      }),
+      'memory_operation',
+    );
+    expect(JSON.stringify(mockReadinessLogger.error.mock.calls)).not.toContain(
+      'SYNTHETIC_PRIVATE_NETWORK_ERROR_MARKER',
+    );
   });
 });

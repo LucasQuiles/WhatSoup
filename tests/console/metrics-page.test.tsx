@@ -1,8 +1,15 @@
 /**
- * Metrics page — behavior tests.
+ * Ops Metrics tab — behavior tests (T5 b-09a absorption).
  *
- * Renders the real Metrics destination under jsdom + Testing Library and
- * asserts on observable DOM. The page COMPOSES existing fleet pieces:
+ * DISPOSITION RECORD: this suite previously pinned the /metrics PAGE. The
+ * page's content was absorbed into the Ops surface as the Metrics tab
+ * (OpsMetrics) — /metrics now redirects to /ops?tab=metrics. Every pin
+ * below targets the same hooks + anatomy in the absorbed component; the
+ * only deletion is the page wrapper itself (the Operator tab shell and the
+ * redirect are pinned in ops-metrics-tab.test.tsx).
+ *
+ * Renders the real OpsMetrics destination under jsdom + Testing Library and
+ * asserts on observable DOM. The component COMPOSES existing fleet pieces:
  *   - KPI cells from useLines (computeKpis) + useFleetMetrics (msg/token totals)
  *   - FleetMetricsChart (message-volume bars) + FleetTokenChart (token donut),
  *     each framed in ChartPanel for loading / empty / error states.
@@ -81,7 +88,7 @@ afterEach(() => {
   vi.clearAllMocks();
 });
 
-import Metrics from '../../console/src/pages/Metrics';
+import { OpsMetrics } from '../../console/src/components/ops/OpsMetrics';
 import type { FleetMetrics, LineInstance } from '../../console/src/types';
 
 // ---------------------------------------------------------------------------
@@ -169,7 +176,7 @@ function renderPage(opts: RenderOptions = {}) {
 
   return render(
     <MemoryRouter>
-      <Metrics />
+      <OpsMetrics />
     </MemoryRouter>,
   );
 }
@@ -191,7 +198,7 @@ function kpiCard(label: string | RegExp): HTMLElement {
 // Tests
 // ---------------------------------------------------------------------------
 
-describe('Metrics page — KPI cells', () => {
+describe('Ops metrics tab — KPI cells', () => {
   it('renders the fleet KPI cells with aggregated values', () => {
     const lines = [
       makeLine({ name: 'a', status: 'online' }),
@@ -250,7 +257,7 @@ describe('Metrics page — KPI cells', () => {
   });
 });
 
-describe('Metrics page — charts', () => {
+describe('Ops metrics tab — charts', () => {
   it('renders both charts framed in panels when data is present', () => {
     renderPage({ lines: [makeLine()] });
 
@@ -300,7 +307,7 @@ describe('Metrics page — charts', () => {
   });
 });
 
-describe('Metrics page — freshness caption (GUI-5)', () => {
+describe('Ops metrics tab — freshness caption (GUI-5)', () => {
   it('labels carried fleet metrics with an amber stale caption', () => {
     renderPage({ metricsFreshness: { observedAt: Date.now() - 300_000, stale: true } });
     const marker = screen.getByText(/^stale · /);

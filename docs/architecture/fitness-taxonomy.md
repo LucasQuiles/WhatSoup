@@ -60,6 +60,7 @@ rules into hooks, and semantic or human rules into the SDLC review flow.
 | `arch.import-boundaries` | mechanical | block | guard, ci | Ratchet import direction between src/ layers so known violations can shrink but new cross-layer reach is blocked. |
 | `arch.approved-api-client` | ast | warn | eslint | Console network calls must go through the typed API client in `console/src/lib/api.ts`; direct fetch bypasses auth, timeouts, and the test surface. |
 | `arch.ring-boundaries` | ast | block‡ | eslint, guard | Backend ring dependency direction is an architectural invariant; lower rings must not import higher rings. Promoted 2026-07-19 to a guard-ring count ratchet (`scripts/ring-boundary-guard.ts`); the eslint ring stays a warn-only visibility mirror. |
+| `arch.sqlite-busy-timeout-ssot` | ast | warn | eslint | Numeric `PRAGMA busy_timeout` strings passed directly to SQLite `exec`/`prepare` sinks and `DatabaseSync` timeout options can drift across connections; active `src/` and `scripts/` code must use the shared constants from `src/lib/sqlite-constants.ts`. Unresolvable constructor options are findings, not silent passes. The zero-debt Vitest ratchet provides the blocking PR/CI backstop. |
 | `arch.ssot-lid-reads` | mechanical | block‡ | guard, ci | Raw `lid_mappings` SQL reads outside `src/core/lid-resolver.ts` fork the LID→phone resolution discipline `resolveLid()` centralizes. |
 | `arch.ssot-jid-construction` | mechanical | block‡ | guard, ci | Inline `${x}@s.whatsapp.net`-class template construction and literal `.endsWith('@lid')`-class predicates outside `src/core/jid-constants.ts` re-derive the JID domain grammar. |
 | `arch.ssot-name-ladder` | mechanical | block‡ | guard, ci | SQL touching the name columns of contacts/chats/groups/chat_aliases outside `src/core/chat-display-name.ts` forks the owner-facing name ladder. |
@@ -75,6 +76,46 @@ rules into hooks, and semantic or human rules into the SDLC review flow.
   The **eslint ring** mirrors it at `warn` severity only — an advisory copy per `meta.no-redundant-gates`.
   The ESLint warning identity set must not change, and the recorded ceilings must not be exceeded; both are
   enforced by `tests/scripts/fitness-file-size-warning-budget.test.ts`.
+
+### SQLite busy-timeout detector boundary
+
+`arch.sqlite-busy-timeout-ssot` resolves literals, template strings, `+`
+expressions, and same-scope `const` chains. Numeric SQLite syntax includes
+signed, decimal, exponent, and hexadecimal forms, including SQLite's
+single-quote, double-quote, backtick, and bracket value forms and numeric-prefix
+conversion inside a quoted value. The scanner splits SQL statements and removes
+comments only outside quoted regions, then recognizes unqualified,
+schema-qualified, or quoted `busy_timeout` pragma names at the start of a
+statement. A phrase embedded in a `SELECT` string literal or arbitrary prose is
+not treated as a pragma. For SQL, the rule inspects the first argument of any
+direct member call named `exec` or `prepare`; it does not prove that the receiver
+is a SQLite object. A numeric `PRAGMA busy_timeout` statement is a finding only
+when it reaches one of those method-name sinks.
+
+For the second `DatabaseSync` argument, the detector resolves inline object
+literals, same-scope `const` objects, and ordered object spreads. A `const`
+binding is not assumed to make an object immutable: member assignment, update,
+or deletion and `Object.assign`, `Object.defineProperty`,
+`Object.defineProperties`, `Object.setPrototypeOf`, or
+`Reflect.defineProperty` mutations through the binding or a same-scope `const`
+alias produce `unknownOptions`. Static numeric timeout values are findings. Only
+`SQLITE_BUSY_TIMEOUT_MS` imported from the canonical
+`src/lib/sqlite-constants.ts` is accepted as the timeout value. An imported or
+otherwise unresolvable options object, spread, computed property name, or
+timeout value, and any constructor argument spread that can affect the path or
+options positions, produces an explicit `unknownOptions` finding; the blocking
+zero-finding ratchet cannot mistake that state for compliance. An omitted
+options argument and a fully resolved object with no `timeout` property are valid,
+which covers the production `READ_ONLY_DATABASE_OPTIONS` pattern.
+
+`DatabaseSync` constructors are matched through named or namespace imports from
+`node:sqlite`, including local aliases, rather than by identifier spelling.
+This is deliberately intraprocedural. SQL returned by helpers, arbitrary
+imported SQL strings, detached or aliased `exec`/`prepare` methods, mutation
+hidden inside arbitrary helper calls, non-`const` aliases, and aliases stored
+through object properties or other containers are residual dataflow limits.
+Review remains responsible for those shapes until the rule grows symbol-aware
+interprocedural analysis; the rule does not claim to cover them.
 
 ## Invariant
 
@@ -109,6 +150,7 @@ rules into hooks, and semantic or human rules into the SDLC review flow.
 | `hygiene.no-wa-jid-literal-in-generic-ui` | mechanical | block | guard, ci | Block new WhatsApp JID literals (`@s.whatsapp.net`, `@g.us`) in generic UI/ops surfaces (console + deploy/scripts); existing occurrences ratchet-baselined. |
 | `hygiene.no-whatsapp-copy-in-generic-ui` | mechanical | block | guard, ci | Block new WhatsApp-presuming copy in generic console components; per-transport copy variants instead. |
 | `hygiene.no-health-whatsapp-key-read` | mechanical | block | guard, ci | Block new direct `health.whatsapp` key reads in console; reads go through the generic transport-health accessor with legacy fallback. |
+| `hygiene.catch-justification` | ast | warn | eslint | Flag catch blocks whose bodies only swallow/no-op unless they carry a reasoned justification; 127 inherited semantic identities are shrink-only ratchet debt. |
 
 ## Test
 
@@ -133,10 +175,11 @@ Current baseline measurements:
 
 | rule | path | lines | ceiling |
 |------|------|-------|---------|
-| `arch.file-size` | `src/runtimes/agent/runtime.ts` | 12131 | 12131 |
+| `arch.file-size` | `src/runtimes/agent/runtime.ts` | 12130 | 12500 |
 | `arch.file-size` | `tests/runtimes/agent/runtime.test.ts` | 16579 | 16579 |
 
-Intentional bump (both twins, per protocol): +105 lines in
+Historical bump (predates `guard:baseline-growth`; this path is now blocked — see
+"Growing past a ceiling" below): +105 lines in
 `src/runtimes/agent/runtime.ts` (12256 → 12361) for the D-4 v1.1 additions
 (boot-time `consumeQueuedPollDecisions` + the textFallback branch on
 `resolvePollDecisionFromConsole` — state-interleaved with the runtime's
@@ -151,18 +194,45 @@ ceiling — this blocks `coverage:check` and `verify:release` (both run the full
 past a grandfathered file's ceiling is no longer silently green. Shrinking below the ceiling never
 fails and never auto-lowers it; it only prints a non-blocking WARN suggesting a human lower it.
 
-### Bumping a ceiling (two-twin ceremony)
+### Growing past a ceiling (bumps are blocked; extract instead)
 
-A ceiling bump is a conscious, reviewed act, not an automatic side effect of a file growing. To bump
-one:
+Raising a ceiling is no longer an available routine procedure. `guard:baseline-growth`
+(`scripts/baseline-growth-guard.ts`, wired into `verify:push:branch`) weighs every registered
+baseline — including each `maxLines` ceiling in `.claude/fitness/baseline.json` — at the merge
+base and in the candidate, and **refuses any increase**: a baseline may only shrink. The
+two-twin bump ceremony this section used to describe is exactly the edit that guard blocks.
 
-1. Measure the file's real current line count on the branch that needs the bump (`wc -l <path>`).
-2. Edit **both** twins to that same number — a bump that touches only one is incomplete:
-   - `.claude/fitness/baseline.json` — update that measurement's `lines` and `maxLines`.
-   - This table — update the matching row.
-3. Before bumping, consider docs/architecture/fitness-taxonomy.md twin-handler slicing before bumping runtime.ts — i.e. whether the file can be split instead of grown further. This applies
-   most to `src/runtimes/agent/runtime.ts`, the largest grandfathered file and the original source
-   of this ratchet (see the rule's `source` evidence in the registry).
+When a change would push a grandfathered file past its ceiling:
+
+1. **Create headroom by extraction (the sanctioned path).** Move pure, self-contained code out
+   of the oversized file so the change fits under the unchanged ceiling. Precedents on
+   `src/runtimes/agent/runtime.ts`: `0af939b95` (runtime leaf collaborators, net −167) and
+   PR #2563 (`runtime-presentation.ts`, 7 pure module-level functions, net −65). Prove the
+   move is pure — moved bodies byte-identical modulo `export`, donor diff = deletions plus the
+   new import — and run the file's behavioral suite.
+2. **If widening is genuinely unavoidable**, the reviewed-widening path is machine-checkable
+   via a **growth waiver** (`.claude/fitness/growth-waivers.json`): first land a standalone
+   PR adding an issue-linked waiver entry — that PR *is* the review — then the widening PR
+   passes `guard:baseline-growth` mechanically. Waivers are fail-closed by construction:
+   the guard reads them from the **merge base only** (a PR can never author its own
+   authorization), `maxWeight` is an **absolute cap** (self-spending — once the widening
+   lands, the cap equals the base and authorizes nothing further), they **expire**
+   (`expiresAt`), only numeric weight growth is waivable (identity introductions never
+   are), and a malformed waiver document is INCONCLUSIVE, not ignored. A widening remains
+   an exceptional, standalone act — never a side effect of a feature branch.
+
+Shrinking below a ceiling never auto-lowers it (only a WARN suggests it). Lowering the ceiling
+to match a shrink is itself a conscious act: it permanently donates the freed headroom, so time
+it deliberately — e.g. don't lower immediately after an extraction made specifically to unwedge
+in-flight work.
+
+> **TEMPORARY ALLOWANCE (2026-07-27, owner-granted): `src/runtimes/agent/runtime.ts` ceiling
+> 12131 → 12500.** This is recorded debt, not room to grow. Granted via path 2 above (a
+> standalone reviewed widening) for the backlog-landing window: at grant time 12 open PRs
+> touched runtime.ts against 1 line of headroom. Payback is the #1977 decomposition program —
+> once the backlog lands and the file is decomposed, the ceiling returns below the original
+> 12131 and then ratchets down at each decomposition wave boundary. Retirement of this
+> allowance is tracked in issue #1977; it must not outlive the program.
 
 `arch.import-boundaries` grandfathered violations are tracked in `.claude/fitness/boundary-baseline.json`.
 Run `npm run guard:boundaries -- --report` to see the full edge list and `npm run guard:boundaries -- --baseline-save` to ratchet down after fixing violations.
@@ -191,9 +261,9 @@ disagree (`| rule | count |` rows below are machine-checked):
 | `arch.ssot-lid-reads` | 6 | `scripts/ssot-pattern-guard.ts` |
 | `arch.ssot-jid-construction` | 7 | `scripts/ssot-pattern-guard.ts` |
 | `arch.ssot-name-ladder` | 5 | `scripts/ssot-pattern-guard.ts` |
-| `arch.ssot-phone-shape` | 9 | `scripts/ssot-pattern-guard.ts` |
+| `arch.ssot-phone-shape` | 6 | `scripts/ssot-pattern-guard.ts` |
 | `arch.ssot-presentation-literals` | 0 | `scripts/ssot-pattern-guard.ts` (pure block) |
-| `arch.ring-boundaries` | 57 | `scripts/ring-boundary-guard.ts` (ratchet, not yet a pure block) |
+| `arch.ring-boundaries` | 56 | `scripts/ring-boundary-guard.ts` (ratchet, not yet a pure block) |
 
 ## ESLint Ring (live)
 
@@ -231,7 +301,8 @@ reasons:
    and checked by `tests/scripts/fitness-file-size-warning-budget.test.ts`, which
    blocks `coverage:check` and `verify:release` on growth past a grandfathered
    file's recorded ceiling. See the Ratchet Baseline section above for the
-   current ceilings and the two-twin bump ceremony.
+   current ceilings and the extraction path for growing past one (bumps are
+   blocked by `guard:baseline-growth`).
 
 Because the ring is warn-only, the known violations are intentionally **not**
 baseline-suppressed here — they stay visible in the lint output. Local runs use

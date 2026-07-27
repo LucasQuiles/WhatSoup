@@ -1,6 +1,10 @@
 import { DatabaseSync } from 'node:sqlite';
 import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync } from 'node:fs';
+import {
+  SQLITE_BUSY_TIMEOUT_MS,
+  SQLITE_BUSY_TIMEOUT_PRAGMA,
+} from '../lib/sqlite-constants.ts';
 import { dirname, resolve } from 'node:path';
 import { CURRENT_SCHEMA_MIGRATION } from './database-schema-version.ts';
 import {
@@ -33,6 +37,8 @@ import { runMigration41 as runMigration41Impl } from './database-migration-41.ts
 import { runMigration42 as runMigration42Impl } from './database-migration-42.ts';
 import { runMigration43 as runMigration43Impl } from './database-migration-43.ts';
 import { runMigration45 as runMigration45Impl } from './database-migration-45.ts';
+import { runMigration46 as runMigration46Impl } from './database-migration-46.ts';
+import { runMigration47 as runMigration47Impl } from './database-migration-47.ts';
 
 export { CURRENT_SCHEMA_MIGRATION } from './database-schema-version.ts';
 export {
@@ -778,6 +784,8 @@ const MIGRATIONS: Map<number, MigrationFn> = new Map([
   [43, runMigration43],
   [44, runMigration44],
   [45, runMigration45],
+  [46, runMigration46],
+  [47, runMigration47],
 ]);
 
 if (Math.max(...MIGRATIONS.keys()) !== CURRENT_SCHEMA_MIGRATION) {
@@ -1137,6 +1145,14 @@ function runMigration45(db: DatabaseSync): void {
   runMigration45Impl(db);
 }
 
+function runMigration46(db: DatabaseSync): void {
+  runMigration46Impl(db);
+}
+
+function runMigration47(db: DatabaseSync): void {
+  runMigration47Impl(db);
+}
+
 // #1774: total_input_tokens historically accumulated a turn's FULL
 // provider-reported input (base + cache_creation + cache_read_input_tokens).
 // cache_read is essentially the entire prior context re-read every turn, so
@@ -1398,7 +1414,7 @@ export class Database {
           sqliteFileUri(this.expectedIdentity.canonicalPath, 'ro'),
           {
             readOnly: true,
-            timeout: 5000,
+            timeout: SQLITE_BUSY_TIMEOUT_MS,
             enableForeignKeyConstraints: false,
           },
         );
@@ -1458,7 +1474,9 @@ export class Database {
       const writerPath = this.expectedIdentity
         ? sqliteFileUri(this.expectedIdentity.canonicalPath, 'rw')
         : dbPath;
-      this.db = new DatabaseSync(writerPath, { timeout: 5000 });
+      this.db = new DatabaseSync(writerPath, {
+        timeout: SQLITE_BUSY_TIMEOUT_MS,
+      });
       this.connectionClosed = false;
     } catch (err) {
       const rejection = databaseWriteCompatibilityError(this.dbPath, err);
@@ -1493,7 +1511,7 @@ export class Database {
     }
 
     try {
-      this.db.exec('PRAGMA busy_timeout = 5000');
+      this.db.exec(SQLITE_BUSY_TIMEOUT_PRAGMA);
       this.db.exec('PRAGMA foreign_keys = ON');
     } catch (err) {
       const rejection = databaseWriteCompatibilityError(this.dbPath, err);

@@ -1,11 +1,12 @@
 import { spawn } from 'node:child_process';
-import { existsSync } from 'node:fs';
+import { accessSync, constants } from 'node:fs';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { delimiter, join, resolve } from 'node:path';
 
 const DEFAULT_MAX_BUFFER_BYTES = 20 * 1024 * 1024;
 const KILL_GRACE_MS = 2_000;
+const DEFAULT_EXECUTABLE_PATH = ['/opt/homebrew/bin', '/usr/local/bin', '/usr/bin', '/bin'].join(delimiter);
 
 export function extensionForMimeType(mimeType: string): string {
   if (mimeType.includes('ogg')) return 'ogg';
@@ -16,11 +17,23 @@ export function extensionForMimeType(mimeType: string): string {
 }
 
 export function resolveBinaryPath(binary: string): string | null {
-  if (binary.includes('/')) return existsSync(binary) ? binary : null;
+  const isExecutable = (candidate: string): boolean => {
+    try {
+      accessSync(candidate, constants.X_OK);
+      return true;
+    } catch {
+      return false;
+    }
+  };
 
-  for (const dir of ['/opt/homebrew/bin', '/usr/local/bin', '/usr/bin', '/bin']) {
-    const candidate = join(dir, binary);
-    if (existsSync(candidate)) return candidate;
+  if (binary.includes('/')) {
+    const candidate = resolve(binary);
+    return isExecutable(candidate) ? candidate : null;
+  }
+
+  for (const dir of (process.env.PATH ?? DEFAULT_EXECUTABLE_PATH).split(delimiter)) {
+    const candidate = resolve(dir || '.', binary);
+    if (isExecutable(candidate)) return candidate;
   }
 
   return null;

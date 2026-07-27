@@ -26,8 +26,13 @@ import { fileURLToPath } from 'node:url';
 import {
   BASELINE_REGISTRY,
   type BaselineFinding,
+  GROWTH_WAIVERS_PATH,
+  type GrowthWaiver,
   type WeighedBaseline,
+  applyWaivers,
+  baselineIdentities,
   compareWeights,
+  parseWaiverDocument,
   weighBaseline,
 } from './lib/baseline-weight.ts';
 import { CliArgError, assertKnownFlag, isHelpFlag, takeValue } from './lib/cli-args.ts';
@@ -112,7 +117,7 @@ function resolveBase(explicit: string | null, repoRoot: string): string | null {
  * broken row loud instead of invisible.
  */
 type Weighing =
-  | { kind: 'weight'; value: number }
+  | { kind: 'weight'; value: number; identities?: string[] }
   | { kind: 'absent' }
   | { kind: 'error'; message: string };
 
@@ -139,7 +144,12 @@ function weighAt(revision: string | null, path: string, repoRoot: string): Weigh
   const entry = BASELINE_REGISTRY.find((b) => b.path === path);
   if (!entry) return { kind: 'error', message: `${path} is not in BASELINE_REGISTRY` };
   try {
-    return { kind: 'weight', value: weighBaseline(entry.shape, JSON.parse(text)) };
+    const document: unknown = JSON.parse(text);
+    return {
+      kind: 'weight',
+      value: weighBaseline(entry.shape, document),
+      identities: baselineIdentities(entry.shape, document),
+    };
   } catch (error) {
     return { kind: 'error', message: error instanceof Error ? error.message : String(error) };
   }
@@ -183,6 +193,17 @@ function main(): number {
   for (const entry of BASELINE_REGISTRY) {
     const atBase = weighAt(base, entry.path, repoRoot);
     const atHead = weighAt(null, entry.path, repoRoot);
+    if (
+      entry.initialWeight !== undefined
+      && (
+        !Number.isInteger(entry.initialWeight)
+        || entry.initialWeight < 0
+      )
+    ) {
+      shapeErrors.push(
+        `${entry.path} (registry): initialWeight must be a non-negative integer`,
+      );
+    }
 
     // A registry row that cannot be weighed is a BROKEN GUARD, not a clean baseline. It is
     // reported by path and message so it gets fixed, never dropped.
@@ -199,8 +220,21 @@ function main(): number {
     comparable.push({
       id: entry.id,
       path: entry.path,
-      base: atBase.kind === 'weight' ? atBase.value : null,
+      base:
+        atBase.kind === 'weight'
+          ? atBase.value
+          : (
+              atBase.kind === 'absent'
+              && atHead.kind === 'weight'
+              && entry.initialWeight !== undefined
+            )
+            ? entry.initialWeight
+            : null,
       head: atHead.kind === 'weight' ? atHead.value : null,
+      baseIdentities:
+        atBase.kind === 'weight' ? atBase.identities : undefined,
+      headIdentities:
+        atHead.kind === 'weight' ? atHead.identities : undefined,
     });
   }
 
@@ -224,21 +258,48 @@ function main(): number {
 
   const findings: BaselineFinding[] = compareWeights(comparable);
 
-  if (options.json) {
-    console.log(JSON.stringify({ base, examined: comparable.length, findings }, null, 2));
+  // Growth waivers are read from the MERGE BASE only. A candidate cannot author its own
+  // authorization: the waiver must already be on the base branch, i.e. it landed through
+  // its own reviewed PR. Absent file = no waivers. Malformed file = INCONCLUSIVE — an
+  // unreadable authorization must not fail open in either direction.
+  let waivers: GrowthWaiver[] = [];
+  try {
+    const waiverText = readGitTextAtRevision({ cwd: repoRoot, revision: base, path: GROWTH_WAIVERS_PATH });
+    waivers = parseWaiverDocument(JSON.parse(waiverText));
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (!/does not exist|exists on disk, but not in|path .* does not exist/i.test(message)) {
+      console.error(
+        `FAIL(inconclusive): ${GROWTH_WAIVERS_PATH} at the merge base could not be read or ` +
+          `validated, so waiver authority is unknown: ${message}`,
+      );
+      return EXIT_INCONCLUSIVE;
+    }
   }
 
-  const grew = findings.filter((f) => !f.inconclusive);
+  const todayIso = new Date().toISOString().slice(0, 10);
+  const growthFindings = findings.filter((f) => !f.inconclusive);
   const unknown = findings.filter((f) => f.inconclusive);
+  const { blocking: grew, waived } = applyWaivers(growthFindings, waivers, todayIso);
+
+  if (options.json) {
+    console.log(JSON.stringify({ base, examined: comparable.length, findings: [...grew, ...unknown], waived }, null, 2));
+  }
 
   if (!options.json) {
     for (const f of grew) console.error(`FAIL(baseline-growth): ${f.message}`);
+    for (const f of waived) {
+      console.error(
+        `WAIVED(baseline-growth): ${f.path} weight ${f.base} -> ${f.head} authorized up to ` +
+          `${f.waiver.maxWeight} by ${f.waiver.issue} until ${f.waiver.expiresAt} — ${f.waiver.reason}`,
+      );
+    }
     for (const f of unknown) console.error(`INCONCLUSIVE: ${f.message}`);
   }
 
   if (grew.length > 0) {
     console.error(
-      `\n${grew.length} baseline(s) grew against ${base}. Reproduce with:\n` +
+      `\n${grew.length} baseline(s) expanded or replaced debt against ${base}. Reproduce with:\n` +
         '  ./scripts/run-with-pinned-node.sh scripts/baseline-growth-guard.ts --json',
     );
     return EXIT_BLOCK;

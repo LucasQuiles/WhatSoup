@@ -206,6 +206,26 @@ describe('registerMediaTools', () => {
     media.stream.destroy();
   });
 
+  it('preserves ordinary paths in a trusted internal DM caption', async () => {
+    const filePath = writeFile('internal.jpg');
+    const trustedPeer = `${'15555550002'}@${'s.whatsapp.net'}`;
+    deps.internalPeerJids = new Set([trustedPeer]);
+    registry = new ToolRegistry();
+    registerMediaTools(registry, deps);
+    const session = chatSession('15555550002', trustedPeer, workspace);
+
+    const result = await registry.call(
+      'send_media',
+      { filePath, caption: 'artifact: /Users/testuser/LAB/qPhones/report.json' },
+      session,
+    );
+
+    expect(result.isError).toBeUndefined();
+    const media = mediaCalls[0].media as any;
+    expect(media.caption).toContain('/Users/testuser/LAB/qPhones/report.json');
+    media.stream.destroy();
+  });
+
   it('retries Baileys encrypted tmp ENOENT with a fresh stream for file sends', async () => {
     const filePath = writeFile('photo.jpg');
     const session = chatSession('15551234567', '15551234567@s.whatsapp.net', workspace);

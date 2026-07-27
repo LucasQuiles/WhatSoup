@@ -69,6 +69,7 @@ vi.mock('../../src/lib/emit-alert.ts', () => ({
 // ---------------------------------------------------------------------------
 
 import { CURRENT_SCHEMA_MIGRATION, Database } from '../../src/core/database.ts';
+import { recordContinuityGaps } from '../../src/core/continuity-gap-ledger.ts';
 import { DurabilityEngine } from '../../src/core/durability.ts';
 import { config } from '../../src/config.ts';
 import { emitHealReport, resetDeliveryUnavailableLatch } from '../../src/core/heal.ts';
@@ -1641,6 +1642,67 @@ describe('GET /health', () => {
     expect(json.sqlite.pending_polls_readable).toBe(true);
   });
 
+  it('keeps health degraded while external-history continuity gaps remain open', async () => {
+    recordContinuityGaps(db.raw, [
+      {
+        ordinal: 1,
+        classification: 'absent',
+        receiptFingerprint: 'a'.repeat(64),
+        destinationFingerprint: 'b'.repeat(64),
+        manifestFingerprint: 'c'.repeat(64),
+        evidenceFingerprint: 'd'.repeat(64),
+      },
+      {
+        ordinal: 2,
+        classification: 'ambiguous',
+        receiptFingerprint: 'e'.repeat(64),
+        destinationFingerprint: 'b'.repeat(64),
+        manifestFingerprint: 'c'.repeat(64),
+        evidenceFingerprint: 'd'.repeat(64),
+      },
+    ]);
+
+    const { status, body } = await httpReq(port, '/health', 'GET');
+    const json = JSON.parse(body);
+    expect(status).toBe(200);
+    expect(json.status).toBe('degraded');
+    expect(json.degradation_causes).toContain('continuity_gap_open');
+    expect(json.continuity).toEqual({
+      readable: true,
+      open: 2,
+      unresolved: 1,
+      ambiguous: 1,
+    });
+    expect(body).not.toContain('continuity-gap:v1:');
+    expect(body).not.toContain('a'.repeat(64));
+  });
+
+  it('fails health closed when reserved continuity state has a foreign owner', async () => {
+    db.raw.prepare(`
+      INSERT INTO recovery_plans (plan_id, origin, actor, summary)
+      VALUES ('foreign-continuity-state', 'operator', 'other_recovery_owner',
+              'Unrelated recovery work')
+    `).run();
+    db.raw.prepare(`
+      INSERT INTO recovery_runs (trigger, recovery_plan_id, status)
+      VALUES ('continuity_gap_absent', 'foreign-continuity-state', 'started')
+    `).run();
+
+    const { status, body } = await httpReq(port, '/health', 'GET');
+    const json = JSON.parse(body);
+    expect(status).toBe(200);
+    expect(json.status).toBe('degraded');
+    expect(json.degradation_causes).toContain('continuity_gap_unreadable');
+    expect(json.continuity).toEqual({
+      readable: false,
+      open: 0,
+      unresolved: 0,
+      ambiguous: 0,
+    });
+    expect(body).not.toContain('foreign-continuity-state');
+    expect(body).not.toContain('other_recovery_owner');
+  });
+
   it('degrades health when the applied migration version is behind the code-required schema', async () => {
     db.raw.prepare('DELETE FROM schema_migrations WHERE version = ?').run(CURRENT_SCHEMA_MIGRATION);
 
@@ -3090,10 +3152,13 @@ describe('health command endpoints — malformed bodies and side effects', () =>
     );
 
     expect(status).toBe(200);
+    // `remote` reaches the HTTP body because the handler serialises the result
+    // verbatim; no socket and no messages means there was no receipt to send.
     expect(JSON.parse(body)).toEqual({
       ok: true,
       jid: '15551234567@s.whatsapp.net',
       conversation_key: '15551234567',
+      remote: 'nothing_to_ack',
     });
     const row = db.raw
       .prepare('SELECT unread_count FROM chats WHERE conversation_key = ?')

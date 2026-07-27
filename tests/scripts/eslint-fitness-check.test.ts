@@ -6,11 +6,15 @@ import { afterAll, describe, expect, it, vi } from 'vitest';
 
 import { fitnessRules } from '../../scripts/lib/fitness/registry.ts';
 // @ts-expect-error -- flat config is a .mjs module with no type declarations; expires 2026-12-31
-import { eslintRingRuleIds as eslintRingRuleIdsRaw, enabledFitnessRuleNames as enabledFitnessRuleNamesRaw, eslintRingRuleNames as eslintRingRuleNamesRaw } from '../../eslint.config.fitness.mjs';
+import fitnessConfigRaw, { eslintRingRuleIds as eslintRingRuleIdsRaw, enabledFitnessRuleNames as enabledFitnessRuleNamesRaw, eslintRingRuleNames as eslintRingRuleNamesRaw } from '../../eslint.config.fitness.mjs';
 
 const eslintRingRuleIds = eslintRingRuleIdsRaw as string[];
 const enabledFitnessRuleNames = enabledFitnessRuleNamesRaw as string[];
 const eslintRingRuleNames = eslintRingRuleNamesRaw as string[];
+const fitnessConfig = fitnessConfigRaw as Array<{
+  files?: string[];
+  rules?: Record<string, unknown>;
+}>;
 
 describe('eslint fitness config — registry drift', () => {
   it('enforces exactly the registry rules whose rings include eslint', () => {
@@ -33,18 +37,28 @@ describe('eslint fitness config — registry drift', () => {
     expect(missing).toEqual([]);
   });
 
-  it('covers the nine known eslint-ring rules', () => {
+  it('covers the eleven known eslint-ring rules', () => {
     expect(eslintRingRuleIds).toEqual([
       'arch.approved-api-client',
       'arch.file-size',
       'arch.god-class',
       'arch.ring-boundaries',
+      'arch.sqlite-busy-timeout-ssot',
+      'hygiene.catch-justification',
       'invariant.fail-closed-scanner',
       'invariant.no-unsafe-type-escapes',
       'invariant.outbox-env-gated',
       'invariant.timer-rearm-without-clear',
       'test.skip-categorization',
     ]);
+  });
+
+  it('scopes catch-ratchet enforcement to the src tree its baseline scans', () => {
+    const catchBlocks = fitnessConfig.filter(
+      (block) => block.rules?.['fitness/require-catch-justification'] !== undefined,
+    );
+    expect(catchBlocks).toHaveLength(1);
+    expect(catchBlocks[0]?.files).toEqual(['src/**/*.ts']);
   });
 });
 

@@ -53,7 +53,7 @@ export const ChartPanel: FC<ChartPanelProps> = ({
       {isLoading ? (
         <div
           data-testid="chart-shimmer"
-          className="animate-shimmer rounded-sm bg-btn-neutral-bg"
+          className="skeleton-bar rounded-sm bg-btn-neutral-bg"
           style={{ height: panelHeight }}
         />
       ) : isError ? (

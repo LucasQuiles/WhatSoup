@@ -470,27 +470,35 @@ describe('keyring.ts uncovered-branch coverage', () => {
     it('deletes from macOS keychain and reports deleted=true', () => {
       Object.defineProperty(process, 'platform', { value: 'darwin' });
       mockedExecFileSync.mockReturnValueOnce(Buffer.from(''));
-      expect(deleteCredential('anthropic')).toEqual({ deleted: true, backend: 'macos-keychain' });
+      expect(deleteCredential('anthropic')).toEqual({ deleted: true, backend: 'macos-keychain', reason: 'deleted' });
     });
 
     it('returns deleted=false when macOS keychain delete throws', () => {
       Object.defineProperty(process, 'platform', { value: 'darwin' });
       mockedExecFileSync.mockImplementationOnce(() => { throw new Error('not found'); });
-      expect(deleteCredential('anthropic')).toEqual({ deleted: false, backend: 'macos-keychain' });
+      // An unclassifiable throw carries no errno and no stderr, so absence cannot be
+      // proven — it is reported as a backend failure, never as 'absent'.
+      expect(deleteCredential('anthropic')).toEqual({
+        deleted: false, backend: 'macos-keychain',
+        reason: 'backend_failed', errorCode: 'KEYRING_WRITE_FAILED',
+      });
     });
 
     it('deletes from secret-tool and reports deleted=true', () => {
       Object.defineProperty(process, 'platform', { value: 'linux' });
       mockedExecFileSync.mockReturnValueOnce(Buffer.from('')); // probe
       mockedExecFileSync.mockReturnValueOnce(Buffer.from(''));
-      expect(deleteCredential('anthropic')).toEqual({ deleted: true, backend: 'secret-tool' });
+      expect(deleteCredential('anthropic')).toEqual({ deleted: true, backend: 'secret-tool', reason: 'deleted' });
     });
 
     it('returns deleted=false when secret-tool clear throws', () => {
       Object.defineProperty(process, 'platform', { value: 'linux' });
       mockedExecFileSync.mockReturnValueOnce(Buffer.from('')); // probe
       mockedExecFileSync.mockImplementationOnce(() => { throw new Error('clear failed'); });
-      expect(deleteCredential('anthropic')).toEqual({ deleted: false, backend: 'secret-tool' });
+      expect(deleteCredential('anthropic')).toEqual({
+        deleted: false, backend: 'secret-tool',
+        reason: 'backend_failed', errorCode: 'KEYRING_WRITE_FAILED',
+      });
     });
 
     it('deletes the file-store entry on env-only backend', () => {
@@ -500,7 +508,7 @@ describe('keyring.ts uncovered-branch coverage', () => {
       fs.mkdirSync(tmpDir, { recursive: true });
       const file = path.join(tmpDir, 'anthropic.key');
       fs.writeFileSync(file, 'fake-secret-value', { mode: 0o600 });
-      expect(deleteCredential('anthropic')).toEqual({ deleted: true, backend: 'env-only' });
+      expect(deleteCredential('anthropic')).toEqual({ deleted: true, backend: 'env-only', reason: 'deleted' });
       expect(fs.existsSync(file)).toBe(false);
     });
 
@@ -508,7 +516,7 @@ describe('keyring.ts uncovered-branch coverage', () => {
       Object.defineProperty(process, 'platform', { value: 'linux' });
       const enoent = Object.assign(new Error('spawn ENOENT'), { code: 'ENOENT' });
       mockedExecFileSync.mockImplementationOnce(() => { throw enoent; });
-      expect(deleteCredential('anthropic')).toEqual({ deleted: false, backend: 'env-only' });
+      expect(deleteCredential('anthropic')).toEqual({ deleted: false, backend: 'env-only', reason: 'absent' });
     });
 
     it('honors explicit user option in macOS keychain delete', () => {

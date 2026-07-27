@@ -23,10 +23,28 @@ interface FaultClassRegistryEntry {
   tests: readonly string[];
 }
 
+interface FailureDomainRegistryEntry {
+  values: readonly string[];
+  owner: string;
+  test: string;
+}
+
 interface FaultTaxonomyRegistry {
-  schema: 'whatsoup-fault-taxonomy-registry-v1';
+  schema: 'whatsoup-fault-taxonomy-registry-v2';
   faultClasses: readonly FaultClassRegistryEntry[];
   authFailureClasses: readonly string[];
+  failureDomains: {
+    agentFailureClasses: FailureDomainRegistryEntry;
+    providerFailureKinds: FailureDomainRegistryEntry;
+    turnCapabilityErrorClasses: FailureDomainRegistryEntry;
+    healthTurnErrorClasses: FailureDomainRegistryEntry;
+    healthDegradationCauses: FailureDomainRegistryEntry;
+    terminalAttemptFailureClasses: FailureDomainRegistryEntry;
+    durableInboundFailureClasses: FailureDomainRegistryEntry;
+    admissionRejectClasses: FailureDomainRegistryEntry;
+    memoryOperationFailureCodes: FailureDomainRegistryEntry;
+  };
+  terminalAttemptToInboundFailureClass: Readonly<Record<string, string>>;
   failureClassDispositions: Record<string, unknown>;
   sourceDispositions: Record<string, unknown>;
 }

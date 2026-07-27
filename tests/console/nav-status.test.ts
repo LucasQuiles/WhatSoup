@@ -1,6 +1,6 @@
 /**
- * Nav + status indicators — structural tests.
- * Verifies Nav export, realtime hook, and format helpers.
+ * NavRail + status indicators — structural tests.
+ * Verifies the v3.5 chrome rail export, realtime hook, and format helpers.
  */
 import { describe, it, expect } from 'vitest';
 import { getFleetWebSocketUrl } from '../../console/src/lib/realtime-events';
@@ -9,9 +9,9 @@ import { getFleetWebSocketUrl } from '../../console/src/lib/realtime-events';
 // Nav component
 // ---------------------------------------------------------------------------
 
-describe('Nav component', () => {
+describe('NavRail component (v3.5 chrome, T5 b-02)', () => {
   it('is a default export', async () => {
-    const mod = await import('../../console/src/components/Nav');
+    const mod = await import('../../console/src/components/chrome/NavRail');
     expect(mod.default).toBeDefined();
     expect(typeof mod.default).toBe('function');
   });

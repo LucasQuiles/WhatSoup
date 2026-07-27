@@ -7,6 +7,7 @@ import {
   releaseProcessLock,
   type ProcessLockHandle,
 } from '../lib/process-lock.ts';
+import { SQLITE_BUSY_TIMEOUT_MS } from '../lib/sqlite-constants.ts';
 import {
   assertDatabaseIdentity,
   assertSchemaCeiling,
@@ -128,7 +129,7 @@ export function inspectExistingDatabaseForBootstrap(
     if (!expectedIdentity) return { outcome: 'ready' };
     db = new DatabaseSync(sqliteFileUri(expectedIdentity.canonicalPath, 'ro'), {
       readOnly: true,
-      timeout: 5000,
+      timeout: SQLITE_BUSY_TIMEOUT_MS,
       enableForeignKeyConstraints: false,
     });
     assertDatabaseIdentity(db, dbPath, expectedIdentity);

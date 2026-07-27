@@ -19,6 +19,7 @@ import { join, resolve } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { readFileSync, realpathSync, unlinkSync, existsSync } from 'node:fs';
 import { Database, CURRENT_SCHEMA_MIGRATION } from '../../src/core/database.ts';
+import { SQLITE_BUSY_TIMEOUT_MS } from '../../src/lib/sqlite-constants.ts';
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -41,7 +42,7 @@ function cleanup(...paths: string[]): void {
   }
 }
 
-const ALL_MIGRATION_VERSIONS = Array.from({ length: 45 }, (_, i) => i + 1);
+const ALL_MIGRATION_VERSIONS = Array.from({ length: 47 }, (_, i) => i + 1);
 
 /**
  * Raw migration 1 SQL — extracted verbatim from database.ts.
@@ -786,10 +787,11 @@ describe('Test 8 — fresh :memory: DB receives all migrations', () => {
         }
         // This isolated historical fixture contains only the messages surface.
         // It intentionally bypasses fail-closed durability migrations 41
-        // through 43, covered by the migration 43 upgrade and provenance suites.
+        // through 43 and 47, covered by their focused suites.
         raw.prepare('INSERT INTO schema_migrations (version) VALUES (41)').run();
         raw.prepare('INSERT INTO schema_migrations (version) VALUES (42)').run();
         raw.prepare('INSERT INTO schema_migrations (version) VALUES (43)').run();
+        raw.prepare('INSERT INTO schema_migrations (version) VALUES (47)').run();
         raw
           .prepare(
             `INSERT INTO messages
@@ -879,10 +881,11 @@ describe('Test 8 — fresh :memory: DB receives all migrations', () => {
         }
         // This isolated historical fixture contains only the messages surface.
         // It intentionally bypasses fail-closed durability migrations 41
-        // through 43, covered by the migration 43 upgrade and provenance suites.
+        // through 43 and 47, covered by their focused suites.
         raw.prepare('INSERT INTO schema_migrations (version) VALUES (41)').run();
         raw.prepare('INSERT INTO schema_migrations (version) VALUES (42)').run();
         raw.prepare('INSERT INTO schema_migrations (version) VALUES (43)').run();
+        raw.prepare('INSERT INTO schema_migrations (version) VALUES (47)').run();
         raw
           .prepare(
             `INSERT INTO messages
@@ -1030,11 +1033,12 @@ describe('scheduled_messages send-start migration contract', () => {
         insertVersion.run(version);
       }
       // This isolated historical fixture contains only scheduling state. It
-      // intentionally bypasses fail-closed durability migrations 41 through 43,
-      // covered by the migration 43 upgrade and provenance suites.
+      // intentionally bypasses fail-closed durability migrations 41 through 43
+      // and 47, covered by their focused suites.
       insertVersion.run(41);
       insertVersion.run(42);
       insertVersion.run(43);
+      insertVersion.run(47);
       raw
         .prepare(
           `INSERT INTO scheduled_messages (chat_jid, content_type, payload, scheduled_at, status)
@@ -1278,12 +1282,12 @@ describe('outbound_sends migration contract', () => {
           applied_at TEXT NOT NULL DEFAULT (datetime('now'))
         );
         -- This fixture isolates the historical outbound_sends surface. It
-        -- intentionally bypasses fail-closed durability migrations 41 through 43,
-        -- covered by the migration 43 upgrade and provenance suites.
+        -- intentionally bypasses fail-closed durability migrations 41 through 43
+        -- and 47, covered by their focused suites.
         INSERT INTO schema_migrations(version)
         VALUES (1), (2), (3), (4), (5), (6), (7), (8), (9), (10),
                (11), (12), (13), (14), (15), (16), (17), (18), (19), (20),
-               (21), (22), (23), (24), (25), (41), (42), (43);
+               (21), (22), (23), (24), (25), (41), (42), (43), (47);
 
         CREATE TABLE outbound_sends (
           id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1370,13 +1374,13 @@ describe('Test 10 — WAL mode and busy_timeout are set before migrations run', 
     db.close();
   });
 
-  it('busy_timeout is set to 5000ms', () => {
+  it('busy_timeout is set to the shared default', () => {
     dbPath = tmpFile();
     const db = new Database(dbPath);
     db.open();
 
     const row = db.raw.prepare('PRAGMA busy_timeout').get() as { timeout: number };
-    expect(row.timeout).toBe(5000);
+    expect(row.timeout).toBe(SQLITE_BUSY_TIMEOUT_MS);
 
     db.close();
   });

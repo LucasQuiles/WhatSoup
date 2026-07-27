@@ -9,6 +9,7 @@ import {
   type CloseOperatorCatchupRecoveryReceipt,
   type OperatorCatchupRecoveryInspection,
 } from '../src/core/recovery-catchup-closure.ts';
+import { SQLITE_BUSY_TIMEOUT_PRAGMA } from '../src/lib/sqlite-constants.ts';
 
 interface CliArgs {
   dbPath: string;
@@ -243,7 +244,7 @@ export function runCloseRecoveryCatchupCli(argv: string[]): number {
   assertSameDatabaseFile(identity, assertExistingRegularDatabase(args.dbPath));
   const raw = openExistingWritableDatabase(args.dbPath, identity);
   try {
-    raw.exec('PRAGMA busy_timeout = 5000');
+    raw.exec(SQLITE_BUSY_TIMEOUT_PRAGMA);
     raw.exec('PRAGMA foreign_keys = ON');
     const receipt = closeOperatorCatchupRecoveryRaw(raw, params, (transactionRaw) => {
       assertSameDatabaseFile(identity, assertExistingRegularDatabase(args.dbPath));

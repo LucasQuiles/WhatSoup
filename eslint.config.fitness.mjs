@@ -53,6 +53,15 @@ function ruleEntriesFor(id) {
       return { 'fitness/approved-api-client': 'warn' };
     case 'arch.ring-boundaries':
       return { 'fitness/ring-boundaries': 'warn' };
+    case 'arch.sqlite-busy-timeout-ssot':
+      return { 'fitness/no-magic-sqlite-pragma': 'warn' };
+    case 'hygiene.catch-justification':
+      return {
+        'fitness/require-catch-justification': [
+          'warn',
+          { baselinePath: rule.params?.baselinePath ?? 'eslint-rules/catch-ratchet-baseline.json' },
+        ],
+      };
     case 'invariant.no-unsafe-type-escapes':
       return { 'fitness/unsafe-type-escape': 'warn' };
     default:
@@ -77,9 +86,9 @@ const plugins = {
 // pre-existing inline rule-disable directives for rules that belong to a
 // different (general/console) config — `@typescript-eslint/no-explicit-any`,
 // `prefer-arrow-callback`, etc. Under this narrow config those directives
-// reference undefined rules and/or suppress nothing, which ESLint would surface
-// as errors. They are not fitness findings, so the fitness ring ignores inline
-// disable directives entirely (`reportUnusedDisableDirectives: 'off'`).
+// suppress nothing, so unused-directive reporting would add unrelated noise.
+// The standalone catch-ratchet scanner disables inline config and is the
+// authoritative suppression-resistant gate for that rule.
 const linterOptions = { reportUnusedDisableDirectives: 'off' };
 
 const config = [
@@ -99,8 +108,27 @@ const config = [
       ...ruleEntriesFor('invariant.fail-closed-scanner'),
       ...ruleEntriesFor('invariant.outbox-env-gated'),
       ...ruleEntriesFor('arch.ring-boundaries'),
+      ...ruleEntriesFor('arch.sqlite-busy-timeout-ssot'),
       ...ruleEntriesFor('invariant.no-unsafe-type-escapes'),
       ...ruleEntriesFor('invariant.timer-rearm-without-clear'),
+    },
+  },
+  {
+    // The catch ratchet's semantic baseline and generator both scan src/.
+    // Keep the configured rule on that exact scope so scripts/ cannot produce
+    // untracked warnings outside the shrink-only multiset.
+    files: ['src/**/*.ts'],
+    // The standalone shrink-only scanner is the authoritative suppression-
+    // resistant gate. Keep the broad fitness pass quiet for unrelated inline
+    // directives that belong to the repo's general ESLint configuration.
+    linterOptions,
+    languageOptions: {
+      parser: tseslint.parser,
+      parserOptions: { ecmaVersion: 2024, sourceType: 'module' },
+    },
+    plugins,
+    rules: {
+      ...ruleEntriesFor('hygiene.catch-justification'),
     },
   },
   {

@@ -69,6 +69,11 @@ function mockSseRes(): ServerResponse & { _chunks: string[]; _ended: boolean } {
       if (data) res._chunks.push(data);
       res._ended = true;
     },
+    // ServerResponse is an EventEmitter; createSSEWriter attaches an 'error'
+    // listener (#2292 L7), so a fake without `on` is an incomplete fake.
+    on() {
+      return res;
+    },
   };
   return res as unknown as ServerResponse & { _chunks: string[]; _ended: boolean };
 }

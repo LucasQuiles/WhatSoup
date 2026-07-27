@@ -88,7 +88,7 @@ describe('writeCredential — macos-keychain backend', () => {
     fs.writeFileSync(mirror, 'unscoped-value', { mode: 0o600 });
     execFileSyncMock.mockReturnValue(Buffer.from(''));
 
-    expect(deleteCredential('minimax')).toEqual({ deleted: true, backend: 'macos-keychain' });
+    expect(deleteCredential('minimax')).toEqual({ deleted: true, backend: 'macos-keychain', reason: 'deleted' });
     expect(fs.existsSync(mirror)).toBe(false);
     const [, , opts] = execFileSyncMock.mock.calls[0]!;
     expect(opts).toEqual(expect.objectContaining({
@@ -103,7 +103,7 @@ describe('writeCredential — macos-keychain backend', () => {
     fs.writeFileSync(mirror, 'unscoped-value', { mode: 0o600 });
     execFileSyncMock.mockReturnValue(Buffer.from(''));
 
-    expect(deleteCredential('minimax', { user: 'bot' })).toEqual({ deleted: true, backend: 'macos-keychain' });
+    expect(deleteCredential('minimax', { user: 'bot' })).toEqual({ deleted: true, backend: 'macos-keychain', reason: 'deleted' });
     expect(fs.readFileSync(mirror, 'utf-8')).toBe('unscoped-value');
   });
 
@@ -112,7 +112,10 @@ describe('writeCredential — macos-keychain backend', () => {
     fs.writeFileSync(mirror, 'unscoped-value', { mode: 0o600 });
     execFileSyncMock.mockImplementation(() => { throw new Error('keychain delete failed'); });
 
-    expect(deleteCredential('minimax')).toEqual({ deleted: false, backend: 'macos-keychain' });
+    expect(deleteCredential('minimax')).toEqual({
+      deleted: false, backend: 'macos-keychain',
+      reason: 'backend_failed', errorCode: 'KEYRING_WRITE_FAILED',
+    });
     expect(fs.existsSync(mirror)).toBe(false);
   });
 
@@ -125,7 +128,10 @@ describe('writeCredential — macos-keychain backend', () => {
     const result = deleteCredential('minimax');
     fs.chmodSync(dir, 0o700);
 
-    expect(result).toEqual({ deleted: false, backend: 'macos-keychain' });
+    expect(result).toEqual({
+      deleted: false, backend: 'macos-keychain',
+      reason: 'backend_failed', errorCode: 'KEYRING_WRITE_FAILED',
+    });
     expect(fs.existsSync(mirror)).toBe(true);
   });
 
@@ -185,7 +191,7 @@ describe('writeCredential — secret-tool backend', () => {
 
   it('bounds secret-tool deletion while preserving stdio', () => {
     const result = deleteCredential('minimax');
-    expect(result).toEqual({ deleted: true, backend: 'secret-tool' });
+    expect(result).toEqual({ deleted: true, backend: 'secret-tool', reason: 'deleted' });
     const clearCall = execFileSyncMock.mock.calls.find((c) => c[1]?.[0] === 'clear');
     expect(clearCall?.[2]).toEqual(expect.objectContaining({
       timeout: 3_000,
@@ -325,7 +331,7 @@ describe.each([
   });
 
   it.each(INVALID_SERVICES)('returns false for invalid delete %j without forwarding it to the backend', (service) => {
-    expect(deleteCredential(service, { user: 'bot' })).toEqual({ deleted: false, backend });
+    expect(deleteCredential(service, { user: 'bot' })).toEqual({ deleted: false, backend, reason: 'unknown_service' });
     if (platform === 'darwin') {
       expect(execFileSyncMock).not.toHaveBeenCalled();
     } else {

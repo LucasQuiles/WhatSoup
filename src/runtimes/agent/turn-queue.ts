@@ -10,6 +10,8 @@ const log = createChildLogger('turn-queue');
 export interface QueuedTurn {
   /** Stable journal/source message id captured at admission; never reconstructed at result time. */
   sourceMessageId: string;
+  /** Immutable original journal receipt time, in Unix epoch seconds. */
+  receivedAtUnixSeconds: number;
   /** Exact conversation key used when the inbound row was journaled. */
   conversationKey: string;
   chatJid: string;
@@ -38,12 +40,20 @@ export interface TurnQueueOpts {
   onProcessorError?: (turn: QueuedTurn, error: unknown) => void | Promise<void>;
 }
 
+export interface TurnQueueTeardownReceipt {
+  readonly pending: readonly QueuedTurn[];
+  readonly closeEpoch: number;
+  readonly wasAccepting: boolean;
+}
+
 export class TurnQueue {
   private queue: QueuedTurn[] = [];
   private processing = false;
   private active: QueuedTurn | null = null;
   private processor: ((turn: QueuedTurn) => Promise<void>) | null = null;
   private accepting = true;
+  private closeEpoch = 0;
+  private activeTeardownReceipt: TurnQueueTeardownReceipt | null = null;
   private halted = false;
   private haltError: unknown;
   private readonly maxDepth: number;
@@ -102,8 +112,86 @@ export class TurnQueue {
   }
 
   closeAndTakePendingTurns(): QueuedTurn[] {
+    if (this.activeTeardownReceipt) {
+      throw new Error('Cannot close TurnQueue while a teardown transaction is active');
+    }
     this.accepting = false;
+    this.closeEpoch += 1;
     return this.queue.splice(0);
+  }
+
+  beginTeardown(): TurnQueueTeardownReceipt {
+    if (this.activeTeardownReceipt) {
+      throw new Error('Cannot overlap TurnQueue teardown transactions');
+    }
+    const receipt: TurnQueueTeardownReceipt = Object.freeze({
+      pending: Object.freeze(this.queue.splice(0)),
+      closeEpoch: ++this.closeEpoch,
+      wasAccepting: this.accepting,
+    });
+    this.accepting = false;
+    this.activeTeardownReceipt = receipt;
+    return receipt;
+  }
+
+  commitTeardown(receipt: TurnQueueTeardownReceipt): void {
+    if (this.activeTeardownReceipt !== receipt || this.closeEpoch !== receipt.closeEpoch) {
+      throw new Error('TurnQueue teardown receipt is stale or already consumed');
+    }
+    this.activeTeardownReceipt = null;
+  }
+
+  rollbackFailedTeardown(
+    receipt: TurnQueueTeardownReceipt,
+    unresolved: readonly QueuedTurn[],
+    exactQueueOwned = true,
+  ): boolean {
+    if (
+      this.activeTeardownReceipt !== receipt
+      || this.closeEpoch !== receipt.closeEpoch
+      || !exactQueueOwned
+    ) {
+      throw new Error('TurnQueue teardown receipt is stale or already consumed');
+    }
+    const unresolvedCounts = new Map<QueuedTurn, number>();
+    for (const turn of unresolved) {
+      unresolvedCounts.set(turn, (unresolvedCounts.get(turn) ?? 0) + 1);
+    }
+    const restored: QueuedTurn[] = [];
+    for (const turn of receipt.pending) {
+      const count = unresolvedCounts.get(turn) ?? 0;
+      if (count === 0) continue;
+      restored.push(turn);
+      if (count === 1) unresolvedCounts.delete(turn);
+      else unresolvedCounts.set(turn, count - 1);
+    }
+    if (unresolvedCounts.size > 0 || restored.length !== unresolved.length) {
+      throw new Error('TurnQueue teardown rollback contains a turn outside its receipt');
+    }
+    if (restored.some((turn) => this.active === turn || this.queue.includes(turn))) {
+      throw new Error('TurnQueue teardown rollback would duplicate an owned turn');
+    }
+    this.activeTeardownReceipt = null;
+    this.queue.unshift(...restored);
+
+    const reopened = (
+      receipt.wasAccepting
+      && this.closeEpoch === receipt.closeEpoch
+    );
+    if (reopened) {
+      this.accepting = true;
+      if (!this.halted) void this.drain();
+    }
+    return reopened;
+  }
+
+  async awaitRetirementQuiescence(): Promise<void> {
+    while (this.processing) {
+      await new Promise<void>((resolve) => setTimeout(resolve, 1));
+    }
+    if (this.active !== null || this.queue.length > 0) {
+      throw new Error('Cannot retire a non-empty TurnQueue');
+    }
   }
 
   get haltedError(): unknown {

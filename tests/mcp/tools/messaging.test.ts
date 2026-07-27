@@ -234,6 +234,27 @@ describe('registerMessagingTools', () => {
       expect(body.text).not.toContain('/Users/testuser');
     });
 
+    it('preserves an ordinary path for an exact trusted internal DM peer while masking secrets', async () => {
+      const trustedPeer = `${'15555550002'}@${'s.whatsapp.net'}`;
+      deps.internalPeerJids = new Set([trustedPeer]);
+      deps.fallbackActive = () => true;
+      registry = new ToolRegistry();
+      registerMessagingTools(registry, deps);
+
+      const result = await registry.call(
+        'send_message',
+        {
+          text: `inspect /Users/testuser/LAB/qPhones and token=${'abc123def456ghi789jkl012'}`,
+        },
+        chatSession('15555550002', trustedPeer),
+      );
+
+      expect(result.isError).toBeUndefined();
+      const sent = JSON.parse(calls[0]).content.text as string;
+      expect(sent).toContain('/Users/testuser/LAB/qPhones');
+      expect(sent).not.toContain('abc123def456ghi789jkl012');
+    });
+
     it('diverts a false infra-block self-diagnosis to generic client text', async () => {
       const session = chatSession('main-chat', 'main-chat@s.whatsapp.net');
       await registry.call(

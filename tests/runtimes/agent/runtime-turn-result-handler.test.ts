@@ -1,4 +1,56 @@
+/**
+ * This suite pairs behavioral assertions with a static source invariant: the
+ * redaction property must hold at every log site, including the ones a driven
+ * classification never reaches. Reading production source is the only way to
+ * cover those without an invasive harness per failure path — the same rationale
+ * as logging-coverage.test.ts and runtime-structural-policy.test.ts.
+ *
+ * test-integrity: source-string-ok
+ */
+import { readFileSync } from 'node:fs';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import {
+  expectNoRawSecret,
+  expectPreviewRedacted,
+  providerErrorText,
+  secretFixtures,
+} from '../../fixtures/redaction-fixtures.ts';
+
+/**
+ * Capture structured log entries so the preview-redaction invariant can be
+ * asserted on real handler behavior rather than on the source text. The module
+ * under test only uses `createChildLogger`; the default export and the other
+ * named exports are stubbed so any transitive importer in the graph still loads.
+ */
+const logSink = vi.hoisted(
+  () => [] as Array<{ level: string; obj: Record<string, unknown>; msg: string }>,
+);
+vi.mock('../../../src/logger.ts', () => {
+  const record = (level: string) => (obj: unknown, msg?: unknown) => {
+    logSink.push({
+      level,
+      obj: (obj && typeof obj === 'object' ? obj : {}) as Record<string, unknown>,
+      msg: typeof msg === 'string' ? msg : '',
+    });
+  };
+  const stub = (): Record<string, unknown> => ({
+    trace: record('trace'),
+    debug: record('debug'),
+    info: record('info'),
+    warn: record('warn'),
+    error: record('error'),
+    fatal: record('fatal'),
+    level: 'error',
+    child: () => stub(),
+  });
+  return {
+    default: stub(),
+    createChildLogger: () => stub(),
+    flushLogger: async () => {},
+    errorLikeSerializers: {},
+  };
+});
+
 import type { IOutboundQueue } from '../../../src/runtimes/agent/outbound-queue.ts';
 import { createRuntimeTurnContext } from '../../../src/runtimes/agent/runtime-turn-context.ts';
 import {
@@ -64,6 +116,7 @@ function makeHarness(options: {
     },
     replay: {
       sourceMessageId: 'wamid-result-handler',
+      receivedAtUnixSeconds: 1_780_000_000,
       replaySafe: true,
       senderJid: '15550190050@s.whatsapp.net',
       senderName: null,
@@ -338,4 +391,91 @@ describe('journaled result without runtime turn context (invariant-violation pat
     expect(host.pendingTurnActorJid.get('15550190050')).toBe('user@s.whatsapp.net');
     expect(harness.session.completeProviderTurn).toHaveBeenCalledOnce();
   });
+});
+
+/**
+ * #2164 / #2208 — provider text reaching a structured log must be sanitized.
+ *
+ * These lines pair `chatJid` with a preview of arbitrary provider output, so an
+ * unsanitized preview publishes chat-linked secrets into the journal. Asserted on
+ * the value the handler actually logs, so a regression fails here and not only in
+ * the source scan below.
+ */
+describe('provider preview redaction in result logs', () => {
+  const fixtures = secretFixtures();
+  // Prefixed with a classifier token so the result routes down the same
+  // classified suppression path the redaction fix touches; the shared fixture
+  // body supplies one secret of every class the sanitizer masks. Total length
+  // stays under the 300-char preview window, so the full body reaches the log.
+  const TEXT = `API Error 429: rate limit exceeded\n${providerErrorText(fixtures)}`;
+
+  afterEach(() => {
+    logSink.length = 0;
+  });
+
+  for (const path of ['scoped', 'global'] as const) {
+    it(`${path}: logs a sanitized textPreview, never a raw secret`, () => {
+      const harness = makeHarness({ fallbackActivation: null, replayScheduled: false });
+
+      driveResult(path, harness, TEXT);
+
+      const entries = logSink.filter((entry) => typeof entry.obj['textPreview'] === 'string');
+      expect(entries.length).toBeGreaterThan(0);
+
+      for (const entry of entries) {
+        // Holds for EVERY preview: no secret of any class survives. Some previews
+        // carry a short classified error summary rather than the full provider
+        // text, so demanding a redaction marker in each would assert something
+        // that is not the security property.
+        expectNoRawSecret(String(entry.obj['textPreview']), fixtures);
+        // The preview stays chat-attributable — a sanitized log is only useful if
+        // it still says which conversation it came from.
+        expect(entry.obj['chatJid']).toBe('15550190050@s.whatsapp.net');
+      }
+
+      // At least one preview is built from the full secret-bearing text, which is
+      // what proves the sanitizer ran rather than the secret merely being absent.
+      const full = entries
+        .map((entry) => String(entry.obj['textPreview']))
+        .find((preview) => preview.includes('invalid_request_error'));
+      expect(full).toBeDefined();
+      expectPreviewRedacted(full as string, fixtures);
+    });
+  }
+});
+
+describe('provider preview redaction — source invariant (all sites)', () => {
+  // Both modules build provider-text previews for structured logs; the invariant
+  // is a property of that CLASS, not of one file. Scoping it to the file an issue
+  // happened to name is how seven identical sites in runtime.ts stayed unnoticed.
+  const MODULES = ['runtime-turn-result-handler.ts', 'runtime.ts'] as const;
+
+  for (const moduleName of MODULES) {
+    const SOURCE = readFileSync(
+      new URL(`../../../src/runtimes/agent/${moduleName}`, import.meta.url),
+      'utf8',
+    );
+
+    it(`${moduleName}: every textPreview value is built by the canonical sanitizer`, () => {
+      // Deliberately NOT conditioned on `.slice(` being present. An earlier version
+      // was, and a mutation run proved it let a STRICTLY WORSE defect through:
+      // `textPreview: event.text` logs the entire raw provider text unbounded and
+      // contains no `.slice(`, so it passed the scan cleanly. The property is
+      // "the value came from the sanitizer", not "the value was truncated".
+      const assignments = SOURCE.match(/textPreview:[^,\n}]*/g) ?? [];
+      expect(assignments.length).toBeGreaterThan(0);
+
+      const unsanitized = assignments.filter((line) => !line.includes('providerPreview('));
+      expect(unsanitized).toEqual([]);
+    });
+
+    it(`${moduleName}: any textPreview shorthand is bound to a sanitized local`, () => {
+      // `{ chatJid, textPreview }` shorthand carries no expression on its own line,
+      // so the assignment scan above cannot see it. Every `const textPreview = …`
+      // binding must therefore itself come from the sanitizer.
+      const bindings = SOURCE.match(/const textPreview =[^;]*/g) ?? [];
+      const unsanitized = bindings.filter((line) => !line.includes('providerPreview('));
+      expect(unsanitized).toEqual([]);
+    });
+  }
 });

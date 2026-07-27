@@ -21,7 +21,8 @@ const read = (p: string) => readFileSync(resolve(repoRoot, p), 'utf8')
 const primitives = read('console/src/styles/primitives.css')
 const summaryTab = read('console/src/components/line-detail/SummaryTab.tsx')
 const historyTab = read('console/src/components/line-detail/HistoryTab.tsx')
-const nav = read('console/src/components/Nav.tsx')
+const chrome = read('console/src/styles/chrome.css')
+const navRail = read('console/src/components/chrome/NavRail.tsx')
 
 describe('DD-18r side-panel fold law (non-Fleet surfaces)', () => {
   it('declares container-query roots for both split surfaces', () => {
@@ -56,28 +57,35 @@ describe('DD-18r side-panel fold law (non-Fleet surfaces)', () => {
   })
 })
 
-describe('DD-18r leg 1 — rail collapse + scroll-owner recipes (nav width pressure)', () => {
-  it('collapses the rail at the 760px breakpoint to the collapsed-width token', () => {
-    expect(primitives).toContain('@media (max-width: 760px)')
-    expect(primitives).toContain('width: var(--rail-w-collapsed);')
+describe('v3.5 rail collapse + scroll-owner recipes (T5 b-02, mockup ≤1100px)', () => {
+  it('collapses the rail at the 1100px breakpoint to the collapsed-width token', () => {
+    expect(chrome).toContain('@media (max-width: 1100px)')
+    expect(chrome).toContain('width: var(--rail-w-collapsed);')
   })
 
-  it('hides rail labels with the sr-only recipe inside the collapse', () => {
-    const collapseStart = primitives.indexOf('@media (max-width: 760px)')
+  it('drops rail labels out of layout inside the collapse (mockup SSOT)', () => {
+    const collapseStart = chrome.indexOf('@media (max-width: 1100px)')
     expect(collapseStart).toBeGreaterThan(-1)
-    const collapseBlock = primitives.slice(collapseStart, collapseStart + 2000)
-    expect(collapseBlock).toContain('.soup-rail__label {')
+    const collapseBlock = chrome.slice(collapseStart, collapseStart + 2000)
+    // Labels leave visual layout via the sr-only clip recipe — NOT display:none —
+    // so icon-only rows keep their content-computed accessible name (label +
+    // Inbox unread count) for screen readers (b-02 cross-review finding).
+    expect(collapseBlock).toContain('.chrome-nav-item__label {')
     expect(collapseBlock).toContain('clip: rect(0, 0, 0, 0);')
+    const labelRule = collapseBlock.slice(collapseBlock.indexOf('.chrome-nav-item__label {'))
+    expect(labelRule.slice(0, labelRule.indexOf('}'))).not.toContain('display: none;')
+    // Non-label chrome (sections, wordmark, ctx, host labels) still drops out.
+    expect(collapseBlock).toContain('display: none;')
   })
 
   it('owns the reduced-height scroll on the nav region (scroll-owner law)', () => {
-    expect(primitives).toContain('.soup-rail__scroll {')
-    expect(primitives).toContain('min-height: 0;')
-    expect(primitives).toContain('overflow-y: auto;')
+    expect(chrome).toContain('.chrome-nav {')
+    expect(chrome).toContain('min-height: 0;')
+    expect(chrome).toContain('overflow-y: auto;')
   })
 
-  it('Nav wires the scroll region and the collapse-target labels', () => {
-    expect(nav).toContain('className="soup-rail__scroll"')
-    expect(nav).toContain('soup-rail__label')
+  it('NavRail wires the scroll region and the collapse-target labels', () => {
+    expect(navRail).toContain('className="chrome-nav"')
+    expect(navRail).toContain('chrome-nav-item__label')
   })
 })

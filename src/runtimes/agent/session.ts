@@ -9,6 +9,11 @@ import { join } from 'node:path';
 import type { Database } from '../../core/database.ts';
 import type { Messenger } from '../../core/types.ts';
 import type { DurabilityEngine } from '../../core/durability.ts';
+import {
+  assertCheckpointRoutePolicyCompatible,
+  type ProviderCheckpointRoutePolicy,
+  type ProviderRoutePolicy,
+} from '../../core/provider-data-policy.ts';
 import type { SessionContext } from '../../mcp/types.ts';
 import { toConversationKey } from '../../core/conversation-key.ts';
 import { createChildLogger } from '../../logger.ts';
@@ -62,10 +67,18 @@ import type {
   ProviderExecutionLease,
 } from './provider-execution-gate.ts';
 import { shortHash } from '../../lib/short-hash.ts';
+import { assessTreeLiveness } from './tree-liveness.ts';
+import {
+  isStructuredProviderTurn,
+  type ProviderTurnInput,
+} from './provider-boundary-dispatch.ts';
 
 const log = createChildLogger('session-manager');
 
 const STDIN_WRITE_TIMEOUT_MS = 30_000;
+const OPENCODE_COMPACTION_CONTINUITY_GUIDANCE =
+  'After automatic context compaction, continue the original user request from the summary. ' +
+  'Do not answer the provider synthetic continuation prompt or ask whether to continue unless the original request genuinely requires new user input.';
 
 /** Cap on the retained no-newline stdout line (QR-064): a provider streaming a
  * large no-newline blob would grow `stdoutBufferStr` unbounded → parent OOM. The
@@ -88,6 +101,26 @@ export const WATCHDOG_HARD_MS  = 1_800_000; // 30 min — SIGKILL
 // Grace after a tool stalls before we SIGKILL the hung stream-json provider. Unlike
 // WATCHDOG_HARD_MS this is NOT reset by inbound messages (see recoverStalledOperation).
 export const STALLED_OP_KILL_GRACE_MS = 180_000; // 3 min after a tool stalls
+
+// ─── Long-operation liveness gate ───────────────────────────────────────────
+// Stream silence is NOT proof of a hang: long browser-automation, bash, and MCP
+// steps legitimately block the provider's event stream for many minutes while
+// the process tree underneath does real work. Before the stalled-op kill or the
+// hard watchdog terminates a child provider, its tree's CPU progress is assessed
+// (tree-liveness.ts); a working tree gets its deadline extended instead of a
+// SIGKILL. Extensions are bounded by LONG_OP_CEILING_MS from the first
+// stall/watchdog fire of the turn, so a spinning-but-CPU-burning tree still
+// cannot run forever. Ceiling is env-tunable per instance for automation-heavy
+// deployments (WHATSOUP_LONG_OP_CEILING_MS).
+function positiveIntEnv(name: string, fallback: number): number {
+  const raw = process.env[name];
+  if (!raw?.trim()) return fallback;
+  const n = Number.parseInt(raw, 10);
+  return Number.isFinite(n) && n > 0 ? n : fallback;
+}
+export const LONG_OP_CEILING_MS = positiveIntEnv('WHATSOUP_LONG_OP_CEILING_MS', 7_200_000); // 2 h
+/** Floor between successive "long step still running" chat notices. */
+export const LONG_OP_NOTICE_MIN_INTERVAL_MS = 600_000; // 10 min
 
 /** Human-readable display name for each supported provider. */
 export const PROVIDER_DISPLAY_NAMES: Record<string, string> = {
@@ -181,11 +214,14 @@ export interface SessionManagerOptions {
   onResumeFailed?: () => void;
   onCrash?: (info: SessionCrashInfo) => void;
   notifyUser?: (msg: string) => void;
+  /** Test seam: overrides the CPU-progress assessor used by the liveness-gated kill paths. */
+  treeLivenessAssessor?: typeof assessTreeLiveness;
   cwd?: string;
   configRoot?: string;
   configSystemPrompt?: string;
   instructionsPath?: string;
   model?: string;
+  routePolicy?: ProviderRoutePolicy;
   pluginDirs?: string[];
   allowM365Mutations?: boolean;
   provider?: string;
@@ -474,7 +510,21 @@ function resolveProviderParser(
     case 'claude-cli': return parseEvents;
     case 'codex-cli': return (line: string) => singleEventEnvelope(parseCodexEvent(line));
     case 'gemini-cli': return (line: string) => singleEventEnvelope(parseGeminiAcpEvent(line));
-    case 'opencode-cli': return (line: string) => singleEventEnvelope(openCodeParser.parse(line));
+    case 'opencode-cli': return (line: string) => {
+      const event = openCodeParser.parse(line);
+      if (event?.type === 'tool_result' && !event.isError && event.toolName) {
+        return [
+          {
+            type: 'tool_use',
+            toolName: event.toolName,
+            toolId: event.toolId,
+            toolInput: {},
+          },
+          event,
+        ];
+      }
+      return singleEventEnvelope(event);
+    };
     case 'openai-api':
     case 'anthropic-api':
       throw new Error(
@@ -546,6 +596,7 @@ export class SessionManager {
   private readonly configSystemPrompt: string | undefined;
   private readonly instructionsPath: string | undefined;
   private readonly model: string | undefined;
+  private readonly routePolicy: ProviderRoutePolicy | undefined;
   private readonly pluginDirs: string[];
   private readonly allowM365Mutations: boolean | undefined;
   private readonly provider: string;
@@ -615,6 +666,13 @@ export class SessionManager {
   private resumeAttemptId: string | null = null;
   /** Prevents cleanup shutdown from repainting an already-terminal durable lifecycle as resumable. */
   private durableFailureClosed = false;
+  /** Durable cleanup failed and an active lifecycle may still require operator reconciliation. */
+  private durableFailureInconclusive = false;
+  private durableFailureIdentity: {
+    providerSessionId: string | null;
+    agentSessionRowId: number;
+  } | null = null;
+  private durableFailureError: unknown = null;
   /** JSON-RPC request ID of the thread/start call when resuming a Codex thread.
    *  Used to detect error responses and trigger fallback to a fresh thread. */
   private codexResumeThreadStartReqId: string | null = null;
@@ -629,6 +687,12 @@ export class SessionManager {
    * falls back to a direct messenger.send call.
    */
   private readonly notifyUser: ((msg: string) => void) | undefined;
+  private readonly treeLivenessAssessor: typeof assessTreeLiveness;
+  /** Monotonic stream-progress token used to invalidate awaited liveness reads. */
+  private livenessProgressEpoch = 0;
+  /** First stall/watchdog fire of the current quiet stretch — anchors LONG_OP_CEILING_MS. */
+  private longOpGateStartedAt: number | null = null;
+  private longOpLastNoticeAt = 0;
 
   private lastCrashNotifiedAt: number | null = null;
   private static readonly CRASH_NOTIFY_COOLDOWN_MS = 60_000;
@@ -665,11 +729,13 @@ export class SessionManager {
     this.onResumeFailed = opts.onResumeFailed;
     this.onCrash = opts.onCrash;
     this.notifyUser = opts.notifyUser;
+    this.treeLivenessAssessor = opts.treeLivenessAssessor ?? assessTreeLiveness;
     this.configuredCwd = opts.cwd;
     this.configRoot = opts.configRoot;
     this.configSystemPrompt = opts.configSystemPrompt;
     this.instructionsPath = opts.instructionsPath;
     this.model = opts.model;
+    this.routePolicy = opts.routePolicy;
     this.pluginDirs = opts.pluginDirs ?? [];
     this.allowM365Mutations = opts.allowM365Mutations;
     this.provider = opts.provider ?? 'claude-cli';
@@ -682,6 +748,12 @@ export class SessionManager {
         `[session-manager] unknown provider id: ${JSON.stringify(this.provider)}. ` +
           `Valid: ${PROVIDER_IDS.join(', ')}.`,
       );
+    }
+    if (
+      this.routePolicy
+      && (this.routePolicy.provider !== this.provider || this.routePolicy.model !== this.model)
+    ) {
+      throw new Error('Session route policy provider/model must match the admitted provider route');
     }
     this.providerConfig = opts.providerConfig;
     this.mcpBridge = opts.mcpBridge;
@@ -704,6 +776,10 @@ export class SessionManager {
     if (this.mcpSessionContext) {
       this.mcpSessionContext.actorJid = actorJid;
     }
+  }
+
+  getRoutePolicy(): ProviderRoutePolicy | undefined {
+    return this.routePolicy;
   }
 
   // ─── Provider helpers ─────────────────────────────────────────────────────
@@ -748,6 +824,7 @@ export class SessionManager {
       `Working directory: ${cwd}`,
       POLL_DECISION_GUIDANCE,
       BACKGROUND_TASK_DELIVERY_GUIDANCE,
+      ...(this.provider === 'opencode-cli' ? [OPENCODE_COMPACTION_CONTINUITY_GUIDANCE] : []),
     ].join('\n');
     const sources = [transportPrelude];
 
@@ -1054,20 +1131,30 @@ export class SessionManager {
     log.warn({ method, id, chatJid: this.chatJid }, 'codex: unhandled server request');
   }
 
-  private buildSpawnPerTurnPrompt(text: string): string {
-    if (!this.systemPrompt) return text;
+  private buildSpawnPerTurnPrompt(input: ProviderTurnInput): string {
+    if (!isStructuredProviderTurn(input)) {
+      if (!this.systemPrompt) return input;
+      return [
+        'System instructions:',
+        this.systemPrompt,
+        '',
+        'User message:',
+        input,
+      ].join('\n');
+    }
 
-    return [
-      'System instructions:',
-      this.systemPrompt,
-      '',
-      'User message:',
-      text,
-    ].join('\n');
+    const sections = this.systemPrompt
+      ? ['System instructions:', this.systemPrompt, '']
+      : [];
+    for (const applicationContext of input.applicationContext) {
+      sections.push('Application context (runtime-provided):', applicationContext, '');
+    }
+    sections.push('User message:', input.userText);
+    return sections.join('\n');
   }
 
-  private buildSpawnPerTurnArgs(cwd: string, text: string): string[] {
-    const prompt = this.buildSpawnPerTurnPrompt(text);
+  private buildSpawnPerTurnArgs(cwd: string, input: ProviderTurnInput): string[] {
+    const prompt = this.buildSpawnPerTurnPrompt(input);
 
     switch (this.provider) {
       // codex-cli and gemini-cli are now persistent, not spawn-per-turn.
@@ -1132,12 +1219,13 @@ export class SessionManager {
     if (!this.durability) return;
     if (
       exactSessionId !== null
-      && typeof this.durability.updateSessionCheckpointsStatusBySessionId === 'function'
+      && typeof this.durability.updateExactSessionCheckpointStatus === 'function'
     ) {
-      this.durability.updateSessionCheckpointsStatusBySessionId(
-        exactSessionId,
+      this.durability.updateExactSessionCheckpointStatus({
+        providerSessionId: exactSessionId,
+        conversationKey: this.conversationKey,
         sessionStatus,
-      );
+      });
       return;
     }
     this.durability.upsertSessionCheckpoint(this.conversationKey, { sessionStatus });
@@ -1148,6 +1236,7 @@ export class SessionManager {
     cwd: string,
     resumeSessionId: string | undefined,
     existingRowId: number | undefined,
+    checkpointWatchdogState: string | undefined,
   ): number {
     if (
       this.durability
@@ -1161,6 +1250,7 @@ export class SessionManager {
         workspaceKey: this.conversationKey,
         provider: this.provider,
         conversationKey: this.conversationKey,
+        checkpointWatchdogState,
       });
     }
     if (
@@ -1168,11 +1258,17 @@ export class SessionManager {
       && resumeSessionId !== undefined
       && typeof this.durability.reactivateSessionLifecycle === 'function'
     ) {
+      if (existingRowId === undefined) {
+        throw new Error('Exact resumable agent row identity is required for lifecycle activation');
+      }
       return this.durability.reactivateSessionLifecycle({
-        ...(existingRowId === undefined ? {} : { agentSessionRowId: existingRowId }),
+        agentSessionRowId: existingRowId,
         providerSessionId: resumeSessionId,
         provider: this.provider,
         pid,
+        workspaceKey: this.conversationKey,
+        conversationKey: this.conversationKey,
+        checkpointWatchdogState,
       });
     }
 
@@ -1215,6 +1311,312 @@ export class SessionManager {
     return rowId;
   }
 
+  private routePolicyCheckpointState(
+    existing: Record<string, unknown> = this.readCheckpointWatchdogState(),
+  ): string | null {
+    if (!this.routePolicy) return null;
+    const committed = { ...existing };
+    delete committed['providerRoutePolicyAdmission'];
+    return JSON.stringify({
+      ...committed,
+      providerRoutePolicy: {
+        provider: this.routePolicy.provider,
+        model: this.routePolicy.model ?? null,
+        dataPolicy: this.routePolicy.dataPolicy,
+        policyVersion: this.routePolicy.policyVersion,
+      },
+    });
+  }
+
+  private routePolicyAdmissionCheckpointState(
+    existing: Record<string, unknown>,
+  ): string | undefined {
+    if (!this.routePolicy) return undefined;
+    return JSON.stringify({
+      ...existing,
+      providerRoutePolicyAdmission: {
+        state: 'pending',
+        provider: this.routePolicy.provider,
+        model: this.routePolicy.model ?? null,
+        dataPolicy: this.routePolicy.dataPolicy,
+        policyVersion: this.routePolicy.policyVersion,
+      },
+    });
+  }
+
+  private assertNoPendingRoutePolicyAdmission(
+    existing: Record<string, unknown>,
+  ): void {
+    const pending = existing['providerRoutePolicyAdmission'];
+    if (
+      typeof pending !== 'object'
+      || pending === null
+      || Array.isArray(pending)
+      || (pending as Record<string, unknown>)['state'] !== 'pending'
+    ) return;
+    const checkpoint = this.db.raw.prepare(
+      `SELECT session_id, session_status
+       FROM session_checkpoints
+       WHERE conversation_key = ?`,
+    ).get(this.conversationKey) as {
+      session_id: string | null;
+      session_status: string;
+    } | undefined;
+    const rows = checkpoint?.session_id === null
+      ? this.db.raw.prepare(
+          `SELECT provider, status
+           FROM agent_sessions
+           WHERE workspace_key = ? AND session_id IS NULL
+           ORDER BY id`,
+        ).all(this.conversationKey) as Array<{ provider: string | null; status: string }>
+      : checkpoint === undefined
+        ? []
+        : this.db.raw.prepare(
+            `SELECT provider, status
+             FROM agent_sessions
+             WHERE workspace_key = ? AND session_id = ?
+             ORDER BY id`,
+          ).all(
+            this.conversationKey,
+            checkpoint.session_id,
+          ) as Array<{ provider: string | null; status: string }>;
+    const expectedAgentStatus = checkpoint?.session_id === null
+      ? 'crashed'
+      : 'resume_failed';
+    const pendingProvider = (pending as Record<string, unknown>)['provider'];
+    if (
+      checkpoint?.session_status === 'orphaned'
+      && rows.length === 1
+      && rows[0]!.provider === pendingProvider
+      && rows[0]!.status === expectedAgentStatus
+    ) return;
+    throw new Error('Session admission blocked by unresolved active route-policy admission lifecycle');
+  }
+
+  private readCheckpointWatchdogState(): Record<string, unknown> {
+    const row = this.db.raw.prepare(
+      `SELECT watchdog_state
+       FROM session_checkpoints
+       WHERE conversation_key = ?`,
+    ).get(this.conversationKey) as { watchdog_state: string | null } | undefined;
+    if (!row?.watchdog_state) return {};
+    try {
+      const parsed = JSON.parse(row.watchdog_state) as unknown;
+      return typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)
+        ? parsed as Record<string, unknown>
+        : {};
+    } catch {
+      return {};
+    }
+  }
+
+  private persistRoutePolicyCheckpoint(existing?: Record<string, unknown>): void {
+    const watchdogState = this.routePolicyCheckpointState(existing);
+    if (watchdogState === null) return;
+    if (this.durability) {
+      this.durability.upsertSessionCheckpoint(this.conversationKey, { watchdogState });
+      return;
+    }
+    this.db.raw.prepare(
+      `UPDATE session_checkpoints
+       SET watchdog_state = ?, updated_at = datetime('now')
+       WHERE conversation_key = ?`,
+    ).run(watchdogState, this.conversationKey);
+  }
+
+  private compensateRoutePolicyPersistenceFailure(
+    providerSessionId: string | null,
+    agentSessionRowId: number,
+  ): void {
+    let inTransaction = false;
+    try {
+      this.db.raw.exec('BEGIN IMMEDIATE');
+      inTransaction = true;
+      const rowResult = providerSessionId === null
+        ? this.db.raw.prepare(
+            `UPDATE agent_sessions
+             SET status = 'crashed', ended_at = COALESCE(ended_at, datetime('now'))
+             WHERE id = ?
+               AND session_id IS NULL
+               AND provider = ?
+               AND status = 'active'`,
+          ).run(agentSessionRowId, this.provider)
+        : this.db.raw.prepare(
+            `UPDATE agent_sessions
+             SET status = 'resume_failed', ended_at = COALESCE(ended_at, datetime('now'))
+             WHERE id = ?
+               AND session_id = ?
+               AND provider = ?
+               AND status = 'active'`,
+          ).run(agentSessionRowId, providerSessionId, this.provider);
+      if (rowResult.changes !== 1) {
+        throw new Error('Exact route-policy agent lifecycle could not be compensated');
+      }
+      const checkpointResult = providerSessionId === null
+        ? this.db.raw.prepare(
+            `UPDATE session_checkpoints
+             SET session_status = 'orphaned',
+                 checkpoint_version = checkpoint_version + 1,
+                 updated_at = datetime('now')
+             WHERE conversation_key = ?
+               AND session_id IS NULL
+               AND session_status = 'active'`,
+          ).run(this.conversationKey)
+        : this.db.raw.prepare(
+            `UPDATE session_checkpoints
+             SET session_status = 'orphaned',
+                 checkpoint_version = checkpoint_version + 1,
+                 updated_at = datetime('now')
+             WHERE conversation_key = ?
+               AND session_id = ?
+               AND session_status = 'active'`,
+          ).run(this.conversationKey, providerSessionId);
+      if (checkpointResult.changes !== 1) {
+        throw new Error('Exact route-policy checkpoint lifecycle could not be compensated');
+      }
+      this.db.raw.exec('COMMIT');
+      inTransaction = false;
+      this.durableFailureClosed = true;
+      this.durableFailureInconclusive = false;
+      this.durableFailureIdentity = null;
+      this.durableFailureError = null;
+    } catch (err) {
+      if (inTransaction) {
+        try {
+          this.db.raw.exec('ROLLBACK');
+        } catch (rollbackError) {
+          log.warn({
+            err: rollbackError,
+            event: 'route-policy-metadata-compensation-rollback-failed',
+            provider: this.provider,
+            conversationKey: this.conversationKey,
+            rowId: agentSessionRowId,
+          }, 'route-policy metadata compensation rollback failed');
+        }
+      }
+      throw err;
+    }
+  }
+
+  private persistRoutePolicyCheckpointWithCompensation(
+    existing: Record<string, unknown>,
+    providerSessionId: string | null,
+    agentSessionRowId: number,
+  ): void {
+    try {
+      this.persistRoutePolicyCheckpoint(existing);
+    } catch (metadataError) {
+      let compensated = false;
+      try {
+        this.compensateRoutePolicyPersistenceFailure(providerSessionId, agentSessionRowId);
+        compensated = true;
+      } catch (compensationError) {
+        log.warn({
+          err: compensationError,
+          event: 'route-policy-metadata-compensation-failed',
+          provider: this.provider,
+          conversationKey: this.conversationKey,
+          rowId: agentSessionRowId,
+          isResume: providerSessionId !== null,
+        }, 'route-policy metadata compensation failed; preserving metadata error');
+      }
+      this.durableFailureClosed = compensated;
+      this.durableFailureInconclusive = !compensated;
+      this.durableFailureIdentity = compensated
+        ? null
+        : { providerSessionId, agentSessionRowId };
+      this.durableFailureError = compensated ? null : metadataError;
+      throw metadataError;
+    }
+  }
+
+  private assertDurableFailureReconciled(): void {
+    if (!this.durableFailureInconclusive) return;
+    const identity = this.durableFailureIdentity;
+    if (identity === null) {
+      throw this.durableFailureError
+        ?? new Error('Session admission blocked by inconclusive durable lifecycle');
+    }
+    const agentRow = identity.providerSessionId === null
+      ? this.db.raw.prepare(
+          `SELECT status
+           FROM agent_sessions
+           WHERE id = ?
+             AND session_id IS NULL
+             AND provider = ?
+             AND workspace_key = ?`,
+        ).get(
+          identity.agentSessionRowId,
+          this.provider,
+          this.conversationKey,
+        ) as { status: string } | undefined
+      : this.db.raw.prepare(
+          `SELECT status
+           FROM agent_sessions
+           WHERE id = ?
+             AND session_id = ?
+             AND provider = ?
+             AND workspace_key = ?`,
+        ).get(
+          identity.agentSessionRowId,
+          identity.providerSessionId,
+          this.provider,
+          this.conversationKey,
+        ) as { status: string } | undefined;
+    const checkpoint = identity.providerSessionId === null
+      ? this.db.raw.prepare(
+          `SELECT session_status
+           FROM session_checkpoints
+           WHERE conversation_key = ? AND session_id IS NULL`,
+        ).get(this.conversationKey) as { session_status: string } | undefined
+      : this.db.raw.prepare(
+          `SELECT session_status
+           FROM session_checkpoints
+           WHERE conversation_key = ? AND session_id = ?`,
+        ).get(
+          this.conversationKey,
+          identity.providerSessionId,
+        ) as { session_status: string } | undefined;
+    const expectedAgentStatus = identity.providerSessionId === null
+      ? 'crashed'
+      : 'resume_failed';
+    if (
+      agentRow?.status !== expectedAgentStatus
+      || checkpoint?.session_status !== 'orphaned'
+    ) {
+      throw this.durableFailureError
+        ?? new Error('Session admission blocked by inconclusive durable lifecycle');
+    }
+    this.durableFailureClosed = true;
+    this.durableFailureInconclusive = false;
+    this.durableFailureIdentity = null;
+    this.durableFailureError = null;
+  }
+
+  private markDurableLifecycleAdmitted(): void {
+    this.durableFailureClosed = false;
+    this.durableFailureInconclusive = false;
+    this.durableFailureIdentity = null;
+    this.durableFailureError = null;
+  }
+
+  private readCheckpointRoutePolicy(providerSessionId: string): ProviderCheckpointRoutePolicy | null {
+    const row = this.db.raw.prepare(
+      `SELECT watchdog_state
+       FROM session_checkpoints
+       WHERE conversation_key = ? AND session_id = ?`,
+    ).get(this.conversationKey, providerSessionId) as { watchdog_state: string | null } | undefined;
+    if (!row?.watchdog_state) return null;
+    try {
+      const parsed = JSON.parse(row.watchdog_state) as Record<string, unknown>;
+      const route = parsed['providerRoutePolicy'];
+      if (typeof route !== 'object' || route === null || Array.isArray(route)) return null;
+      return route as ProviderCheckpointRoutePolicy;
+    } catch {
+      return null;
+    }
+  }
+
   private resetFailedSessionStart(preservedChild: ReturnType<typeof spawn> | null = null): void {
     this.completeProviderTurn();
     this.active = false;
@@ -1241,27 +1643,103 @@ export class SessionManager {
   private retireUnsupportedResume(
     providerSessionId: string,
     existingRowId: number,
+    persistedProvider: string = this.provider,
   ): void {
     if (
       this.durability
-      && typeof this.durability.retireSessionLifecycle === 'function'
+      && typeof this.durability.retireExactSessionLifecycle === 'function'
     ) {
-      this.durability.retireSessionLifecycle({
+      this.durability.retireExactSessionLifecycle({
         agentSessionRowId: existingRowId,
         providerSessionId,
-        provider: this.provider,
+        provider: persistedProvider,
+        workspaceKey: this.conversationKey,
+        conversationKey: this.conversationKey,
       });
     } else {
       updateResumedSessionStatus(
         this.db,
         existingRowId,
         providerSessionId,
-        this.provider,
+        persistedProvider,
         'ended',
       );
       this.updateCheckpointStatus('ended', providerSessionId);
     }
     this.durableFailureClosed = true;
+    this.durableFailureInconclusive = false;
+    this.durableFailureIdentity = null;
+    this.durableFailureError = null;
+  }
+
+  private resumeRetirementEligibility(
+    providerSessionId: string,
+    existingRowId: number | undefined,
+    ownership: 'current' | 'foreign',
+  ): { rowId: number; provider: string } | null {
+    try {
+      const namespaces = this.db.raw.prepare(
+        `SELECT DISTINCT provider
+         FROM agent_sessions
+         WHERE session_id = ?`,
+      ).all(providerSessionId) as Array<{ provider: string | null }>;
+      if (
+        namespaces.length !== 1
+        || namespaces[0]!.provider === null
+      ) {
+        return null;
+      }
+      const persistedProvider = namespaces[0]!.provider;
+      const isForeign = persistedProvider !== this.provider;
+      if ((ownership === 'foreign') !== isForeign) return null;
+      const rows = this.db.raw.prepare(
+        `SELECT id, provider, workspace_key
+         FROM agent_sessions
+         WHERE session_id = ?
+           AND status IN ('active', 'suspended', 'orphaned', 'crashed')
+         ORDER BY id`,
+      ).all(providerSessionId) as Array<{
+        id: number;
+        provider: string | null;
+        workspace_key: string | null;
+      }>;
+      if (rows.length !== 1) return null;
+      const row = rows[0]!;
+      if (
+        row.provider !== persistedProvider
+        || row.workspace_key !== this.conversationKey
+        || (existingRowId !== undefined && row.id !== existingRowId)
+      ) {
+        return null;
+      }
+      const checkpoints = this.db.raw.prepare(
+        `SELECT conversation_key, session_status
+         FROM session_checkpoints
+         WHERE session_id = ?
+         ORDER BY id`,
+      ).all(providerSessionId) as Array<{
+        conversation_key: string;
+        session_status: string;
+      }>;
+      if (
+        checkpoints.length !== 1
+        || checkpoints[0]!.conversation_key !== this.conversationKey
+        || !['active', 'suspended', 'orphaned'].includes(checkpoints[0]!.session_status)
+      ) {
+        return null;
+      }
+      return { rowId: row.id, provider: persistedProvider };
+    } catch (err) {
+      log.warn({
+        err,
+        event: 'resume-retirement-eligibility-failed',
+        provider: this.provider,
+        conversationKey: this.conversationKey,
+        hasExplicitRowId: existingRowId !== undefined,
+        ownership,
+      }, 'resume retirement eligibility check failed closed');
+      return null;
+    }
   }
 
   private closeDurableFailureLifecycle(
@@ -1298,6 +1776,9 @@ export class SessionManager {
       this.updateCheckpointStatus('orphaned', exactSessionId);
     }
     this.durableFailureClosed = true;
+    this.durableFailureInconclusive = false;
+    this.durableFailureIdentity = null;
+    this.durableFailureError = null;
   }
 
   bindGenerationOwnership(resolve: () => SessionGenerationIdentity | null): void {
@@ -1364,22 +1845,86 @@ export class SessionManager {
     if (this.active && (this.child !== null || this.managedProviderSession !== null)) {
       return;
     }
+    this.assertDurableFailureReconciled();
     const provider = this.assertKnownProvider('spawnSession');
+    const checkpointWatchdogState = this.readCheckpointWatchdogState();
+    this.assertNoPendingRoutePolicyAdmission(checkpointWatchdogState);
+    const admissionWatchdogState = this.routePolicyAdmissionCheckpointState(
+      checkpointWatchdogState,
+    );
     let resolvedRowId = existingRowId;
     if (resumeSessionId !== undefined) {
-      resolvedRowId = resolveResumableAgentSession(this.db, {
+      const resumeIdentity = {
         provider,
         providerSessionId: resumeSessionId,
         ...(existingRowId === undefined ? {} : { agentSessionRowId: existingRowId }),
         workspaceKey: this.conversationKey,
-      }).id;
+      };
+      try {
+        resolvedRowId = resolveResumableAgentSession(this.db, resumeIdentity).id;
+      } catch (resolutionError) {
+        const eligibility = this.resumeRetirementEligibility(
+          resumeSessionId,
+          existingRowId,
+          'foreign',
+        );
+        if (eligibility !== null) {
+          try {
+            this.retireUnsupportedResume(
+              resumeSessionId,
+              eligibility.rowId,
+              eligibility.provider,
+            );
+          } catch (retirementError) {
+            log.warn({
+              err: retirementError,
+              event: 'foreign-resume-retirement-failed',
+              provider,
+              persistedProvider: eligibility.provider,
+              conversationKey: this.conversationKey,
+              rowId: eligibility.rowId,
+            }, 'foreign resume retirement failed; preserving canonical resolution error');
+          }
+        }
+        throw resolutionError;
+      }
+      if (this.routePolicy) {
+        try {
+          assertCheckpointRoutePolicyCompatible(
+            this.routePolicy,
+            this.readCheckpointRoutePolicy(resumeSessionId),
+          );
+        } catch (err) {
+          const eligibility = this.resumeRetirementEligibility(
+            resumeSessionId,
+            resolvedRowId,
+            'current',
+          );
+          if (eligibility !== null) {
+            try {
+              this.retireUnsupportedResume(
+                resumeSessionId,
+                eligibility.rowId,
+                eligibility.provider,
+              );
+            } catch (retirementError) {
+              log.warn({
+                err: retirementError,
+                event: 'route-policy-resume-retirement-failed',
+                provider,
+                conversationKey: this.conversationKey,
+                rowId: eligibility.rowId,
+              }, 'route-policy resume retirement failed; preserving policy error');
+            }
+          }
+          throw err;
+        }
+      }
     }
     if (resumeSessionId !== undefined && !providerSupportsResume(provider)) {
       this.retireUnsupportedResume(resumeSessionId, resolvedRowId!);
       throw new Error(`Provider '${provider}' does not support persisted session resume`);
     }
-    this.durableFailureClosed = false;
-
     const cwd = this.configuredCwd ?? homedir();
 
     const systemPrompt = this.buildSystemPrompt();
@@ -1406,7 +1951,14 @@ export class SessionManager {
           cwd,
           resumeSessionId,
           resolvedRowId,
+          admissionWatchdogState,
         );
+        this.persistRoutePolicyCheckpointWithCompensation(
+          checkpointWatchdogState,
+          resumeSessionId ?? null,
+          this.dbRowId,
+        );
+        this.markDurableLifecycleAdmitted();
       } catch (err) {
         log.error({ err, chatJid: this.chatJid, provider: this.provider }, 'session: failed to persist managed provider');
         this.resetFailedSessionStart();
@@ -1418,6 +1970,7 @@ export class SessionManager {
           cwd,
           systemPrompt,
           model: this.model,
+          routePolicy: this.routePolicy,
           pluginDirs: this.pluginDirs,
           allowM365Mutations: this.allowM365Mutations,
           instanceName: this.instanceName,
@@ -1503,7 +2056,14 @@ export class SessionManager {
           cwd,
           resumeSessionId,
           resolvedRowId,
+          admissionWatchdogState,
         );
+        this.persistRoutePolicyCheckpointWithCompensation(
+          checkpointWatchdogState,
+          resumeSessionId ?? null,
+          this.dbRowId,
+        );
+        this.markDurableLifecycleAdmitted();
       } catch (err) {
         log.error({ err, chatJid: this.chatJid, provider: this.provider }, 'session: failed to persist spawn-per-turn provider');
         this.resetFailedSessionStart();
@@ -1576,7 +2136,14 @@ export class SessionManager {
         cwd,
         resumeSessionId,
         resolvedRowId,
+        admissionWatchdogState,
       );
+      this.persistRoutePolicyCheckpointWithCompensation(
+        checkpointWatchdogState,
+        resumeSessionId ?? null,
+        this.dbRowId,
+      );
+      this.markDurableLifecycleAdmitted();
     } catch (err) {
       log.error({ err, pid, chatJid: this.chatJid, existingRowId: resolvedRowId ?? null }, 'session: failed to persist spawned child lifecycle');
       let cleanupError: unknown = null;
@@ -1949,7 +2516,11 @@ export class SessionManager {
    */
   tickWatchdog(): void {
     if (!this.active || (this.child === null && this.managedProviderSession === null)) return;
+    this.livenessProgressEpoch += 1;
     this.clearStalledOpKill(); // provider progress cancels the stalled-op kill (NOT cleared by inbound nudges)
+    // Real stream events also close the current quiet stretch: the long-op ceiling
+    // anchors to the NEXT stall/watchdog fire, not to one from a finished step.
+    this.longOpGateStartedAt = null;
     this.clearTurnWatchdog();
     this.armWatchdog();
   }
@@ -1981,22 +2552,99 @@ export class SessionManager {
   }
 
   /**
-   * SIGKILL a provider whose tool stalled past STALLED_OP_KILL_GRACE_MS. The exit handler
-   * then emits the crash notice and the runtime auto-respawns on the next message.
+   * SIGKILL a provider whose tool stalled past STALLED_OP_KILL_GRACE_MS — unless the
+   * provider's process tree shows CPU progress (long tool call, not a hang), in which
+   * case the kill timer re-arms for another grace window, bounded by LONG_OP_CEILING_MS.
+   * On a genuine kill the exit handler emits the crash notice and the runtime
+   * auto-respawns on the next message.
    */
   private handleStalledOpKill(toolId: string, toolName: string): void {
     this.stalledOpKill = null;
     if (!this.active || this.child === null) return;
-    log.warn(
-      { sessionId: this.sessionId, pid: this.child.pid, toolId, toolName, reason: 'stalled_operation' },
-      'stalled-operation kill fired — SIGKILL hung provider',
-    );
-    this.notifyUser?.('_A tool call stalled and was terminated. Send your message again to retry._');
     const child = this.child;
-    this.markIntentionalKill(child, 'SIGKILL', 'stalled_operation');
-    void this.killChildTree(child, 'SIGKILL').catch((err) => {
-      log.error({ err, pid: child.pid ?? null, chatJid: this.chatJid }, 'failed to reap stalled provider process tree');
+    void this.runLivenessGatedKill({
+      child,
+      reason: 'stalled_operation',
+      rearm: (maxDelayMs) => {
+        this.stalledOpKill = setTimeout(
+          () => this.handleStalledOpKill(toolId, toolName),
+          Math.min(STALLED_OP_KILL_GRACE_MS, maxDelayMs),
+        );
+      },
+      kill: () => {
+        log.warn(
+          { sessionId: this.sessionId, pid: child.pid, toolId, toolName, reason: 'stalled_operation' },
+          'stalled-operation kill fired — SIGKILL hung provider',
+        );
+        this.notifyUser?.('_A tool call stalled and was terminated. Send your message again to retry._');
+        this.markIntentionalKill(child, 'SIGKILL', 'stalled_operation');
+        void this.killChildTree(child, 'SIGKILL').catch((err) => {
+          log.error({ err, pid: child.pid ?? null, chatJid: this.chatJid }, 'failed to reap stalled provider process tree');
+        });
+      },
     });
+  }
+
+  /**
+   * Liveness gate shared by the stalled-op kill and the hard watchdog: a quiet event
+   * stream alone must not kill a provider whose process tree is demonstrably working
+   * (heavy browser automation / long shell / tool-protocol steps). Assessment
+   * failure (tree gone, `ps` unusable) is
+   * treated as no-exoneration: the kill proceeds exactly as before this gate existed.
+   */
+  private async runLivenessGatedKill(args: {
+    child: ReturnType<typeof spawn>;
+    reason: 'stalled_operation' | 'turn_watchdog';
+    rearm: (maxDelayMs: number) => void;
+    kill: () => void;
+  }): Promise<void> {
+    const assessmentStartedAt = Date.now();
+    if (this.longOpGateStartedAt === null) this.longOpGateStartedAt = assessmentStartedAt;
+    const gateStartedAt = this.longOpGateStartedAt;
+    const gateElapsed = assessmentStartedAt - gateStartedAt;
+    const rootPid = args.child.pid;
+    if (gateElapsed < LONG_OP_CEILING_MS && typeof rootPid === 'number') {
+      const assessmentEpoch = this.livenessProgressEpoch;
+      let verdict: Awaited<ReturnType<typeof assessTreeLiveness>> = null;
+      try {
+        verdict = await this.treeLivenessAssessor(rootPid);
+      } catch (err) {
+        log.debug({ err, rootPid, reason: args.reason }, 'tree liveness assessment failed — proceeding with kill');
+      }
+      // The assessment awaited: the world may have moved (turn completed, session
+      // recycled, a newer kill armed). Only act if this child is still the live one.
+      if (!this.active || this.child !== args.child) return;
+      if (this.livenessProgressEpoch !== assessmentEpoch) return;
+      const decisionAt = Date.now();
+      const decisionElapsed = decisionAt - gateStartedAt;
+      if (decisionElapsed >= LONG_OP_CEILING_MS) {
+        log.warn(
+          { rootPid, reason: args.reason, gateElapsedMs: decisionElapsed, ceilingMs: LONG_OP_CEILING_MS },
+          'long-operation ceiling reached — killing despite possible CPU progress',
+        );
+        args.kill();
+        return;
+      }
+      if (verdict?.alive) {
+        log.info(
+          { rootPid, reason: args.reason, gateElapsedMs: decisionElapsed, cpuDeltaMs: verdict.cpuDeltaMs, pidChurn: verdict.pidChurn, pidCount: verdict.pidCount },
+          'kill deferred — provider tree shows CPU progress (long-running step, not a hang)',
+        );
+        if (decisionAt - this.longOpLastNoticeAt >= LONG_OP_NOTICE_MIN_INTERVAL_MS) {
+          this.longOpLastNoticeAt = decisionAt;
+          const minutes = Math.max(1, Math.round(decisionElapsed / 60_000));
+          this.notifyUser?.(`_Long-running step still active (~${minutes} min in) — continuing. Send /new to interrupt._`);
+        }
+        args.rearm(LONG_OP_CEILING_MS - decisionElapsed);
+        return;
+      }
+    } else if (gateElapsed >= LONG_OP_CEILING_MS) {
+      log.warn(
+        { rootPid: rootPid ?? null, reason: args.reason, gateElapsedMs: gateElapsed, ceilingMs: LONG_OP_CEILING_MS },
+        'long-operation ceiling reached — killing despite possible CPU progress',
+      );
+    }
+    args.kill();
   }
 
   /** Record that this manager is about to kill `child` on purpose. Cleared by the exit handler. */
@@ -2042,13 +2690,14 @@ export class SessionManager {
   private armWatchdog(
     managedProviderSession = this.managedProviderSession,
     managedProviderGeneration = this.managedProviderGeneration,
+    delayMs = watchdogHardMsForProvider(this.provider),
   ): void {
     // Only the hard backstop remains — soft/warn probes are replaced by the operation tracker.
     // The timeout honors the provider's descriptor (API providers: 10 min; CLI providers: 30 min)
     // instead of a single hardcoded constant (L1-F1).
     const watchdog = setTimeout(
       () => this.handleWatchdogHard(managedProviderSession, managedProviderGeneration, watchdog),
-      watchdogHardMsForProvider(this.provider),
+      delayMs,
     );
     this.watchdogHard = watchdog;
   }
@@ -2082,14 +2731,25 @@ export class SessionManager {
     if (this.managedProviderSession !== null) return;
 
     if (this.child === null) return;
-    log.warn({ sessionId: this.sessionId, pid: this.child?.pid, reason: 'turn_watchdog' }, 'turn watchdog fired — killing stalled Claude process');
-    // This notice is the ONLY user-facing message for a reap: the intent marker below
-    // suppresses the generic crash notice (and the operator page) in the exit handler.
-    this.notifyUser?.(terminationNotice);
     const child = this.child;
-    this.markIntentionalKill(child, 'SIGKILL', 'idle_watchdog');
-    void this.killChildTree(child, 'SIGKILL').catch((err) => {
-      log.error({ err, pid: child.pid ?? null, chatJid: this.chatJid }, 'failed to reap watchdog provider process tree');
+    void this.runLivenessGatedKill({
+      child,
+      reason: 'turn_watchdog',
+      rearm: (maxDelayMs) => this.armWatchdog(
+        managedProviderSession,
+        managedProviderGeneration,
+        Math.min(watchdogHardMsForProvider(this.provider), maxDelayMs),
+      ),
+      kill: () => {
+        log.warn({ sessionId: this.sessionId, pid: child.pid, reason: 'turn_watchdog' }, 'turn watchdog fired — killing stalled Claude process');
+        // This notice is the ONLY user-facing message for a reap: the intent marker below
+        // suppresses the generic crash notice (and the operator page) in the exit handler.
+        this.notifyUser?.(terminationNotice);
+        this.markIntentionalKill(child, 'SIGKILL', 'idle_watchdog');
+        void this.killChildTree(child, 'SIGKILL').catch((err) => {
+          log.error({ err, pid: child.pid ?? null, chatJid: this.chatJid }, 'failed to reap watchdog provider process tree');
+        });
+      },
     });
   }
 
@@ -2172,8 +2832,8 @@ export class SessionManager {
   }
 
   /** Write a user message turn to the agent — via stdin (Claude) or spawn-per-turn (others). */
-  async sendTurn(text: string): Promise<void> {
-    return this.sendTurnAtProviderBoundary(text);
+  async sendTurn(input: ProviderTurnInput): Promise<void> {
+    return this.sendTurnAtProviderBoundary(input);
   }
 
   /**
@@ -2182,7 +2842,7 @@ export class SessionManager {
    * callers that do not publish runtime ownership evidence.
    */
   async sendTurnAtProviderBoundary(
-    text: string,
+    input: ProviderTurnInput,
     onProviderBoundaryReady?: () => void,
   ): Promise<void> {
     this.db.assertWritableCompatibility();
@@ -2248,10 +2908,16 @@ export class SessionManager {
       this.clearTurnWatchdog();
       this.armWatchdog(providerSession, generationIdentity);
       try {
+        const parts = isStructuredProviderTurn(input)
+          ? [
+              ...input.applicationContext.map((text) => ({ kind: 'text' as const, text })),
+              { kind: 'text' as const, text: input.userText },
+            ]
+          : [{ kind: 'text' as const, text: input }];
         await providerSession.sendTurn({
           role: 'user',
           conversationKey: this.conversationKey,
-          parts: [{ kind: 'text', text }],
+          parts,
           ...(this.model ? { model: this.model } : {}),
         });
       } catch (err) {
@@ -2340,7 +3006,7 @@ export class SessionManager {
       let binary: string;
       let parse: ProviderEventParser;
       try {
-        args = this.buildSpawnPerTurnArgs(cwd, text);
+        args = this.buildSpawnPerTurnArgs(cwd, input);
         binary = this.getProviderBinary();
         parse = this.getParser();
       } catch (err) {
@@ -2738,7 +3404,13 @@ export class SessionManager {
           this.completeProviderTurn();
           throw new Error('Session generation was superseded before turn dispatch.');
         }
-        payload = buildSessionPromptRequest(++this.geminiRequestSeq, this.geminiSessionId, text);
+        payload = buildSessionPromptRequest(
+          ++this.geminiRequestSeq,
+          this.geminiSessionId,
+          isStructuredProviderTurn(input)
+            ? [...input.applicationContext, input.userText]
+            : input,
+        );
       } else if (this.provider === 'codex-cli') {
         // Codex app-server: wait for threadId from thread/started response
         // (spawnSession sends initialize + thread/start, response arrives async on stdout)
@@ -2774,7 +3446,9 @@ export class SessionManager {
           method: 'turn/start',
           params: {
             threadId: this.codexThreadId,
-            input: [{ type: 'text', text, text_elements: [] }],
+            input: (isStructuredProviderTurn(input)
+              ? [...input.applicationContext, input.userText]
+              : [input]).map((text) => ({ type: 'text', text, text_elements: [] })),
           },
           id,
         });
@@ -2782,7 +3456,12 @@ export class SessionManager {
         // Claude-cli: stream-json user message
         payload = JSON.stringify({
           type: 'user',
-          message: { role: 'user', content: [{ type: 'text', text }] },
+          message: {
+            role: 'user',
+            content: (isStructuredProviderTurn(input)
+              ? [...input.applicationContext, input.userText]
+              : [input]).map((text) => ({ type: 'text', text })),
+          },
         });
       }
 
@@ -2866,6 +3545,7 @@ export class SessionManager {
     lastMessageAt: string | null;
     turnInFlight: boolean;
     durableFailureClosed: boolean;
+    durableFailureInconclusive: boolean;
   } {
     return {
       active: this.active,
@@ -2875,6 +3555,7 @@ export class SessionManager {
       messageCount: this.messageCount,
       lastMessageAt: this.lastMessageAt,
       durableFailureClosed: this.durableFailureClosed,
+      durableFailureInconclusive: this.durableFailureInconclusive,
       turnInFlight: this.providerTurnInFlight,
     };
   }

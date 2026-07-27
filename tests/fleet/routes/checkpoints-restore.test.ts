@@ -132,6 +132,35 @@ describe('POST /api/lines/:name/checkpoints/restore (handleRestoreCheckpoint)', 
 
   afterEach(() => { cleanup(dbPath); });
 
+  for (const name of ['a', 'agent-2', 'a'.repeat(30)]) {
+    it(`accepts valid instance name="${name}"`, async () => {
+      const deps = makeDeps(undefined, { getCheckpoints: vi.fn() });
+      const res = mockRes();
+      await handleRestoreCheckpoint(
+        mockReq({ method: 'POST', body: JSON.stringify({ conversationKey: 'conv-1' }) }),
+        res, deps, { name },
+      );
+      expect(res._status).toBe(404);
+      expect(JSON.parse(res._body)).toEqual({ error: `instance '${name}' not found` });
+    });
+  }
+
+  for (const name of ['UPPER', '1starts-with-digit', 'a'.repeat(31)]) {
+    it(`returns the shared 400 contract for invalid instance name="${name}"`, async () => {
+      const getCheckpoints = vi.fn();
+      const deps = makeDeps(fakeInstance(dbPath), { getCheckpoints });
+      const res = mockRes();
+      await handleRestoreCheckpoint(
+        mockReq({ method: 'POST', body: JSON.stringify({ conversationKey: 'conv-1' }) }),
+        res, deps, { name },
+      );
+      expect(res._status).toBe(400);
+      expect(JSON.parse(res._body)).toEqual({ error: 'invalid instance name' });
+      expect(getCheckpoints).not.toHaveBeenCalled();
+      expect(deps.serviceManager.stop).not.toHaveBeenCalled();
+    });
+  }
+
   it('404s for an unknown line', async () => {
     const deps = makeDeps(undefined, { getCheckpoints: vi.fn() });
     const res = mockRes();
