@@ -11,10 +11,12 @@
  * The second is the dangerous one: that string would have been handed to git as a ref.
  */
 import { execFileSync } from 'node:child_process';
+import { readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { describe, expect, it } from 'vitest';
+import ts from 'typescript';
 
 import {
   CliArgError,
@@ -107,32 +109,132 @@ describe('isHelpFlag', () => {
 /**
  * Warn-level ratchet on hand-rolled parsers.
  *
- * 32 scripts define their own `parseArgs`. Rewriting all of them is a large, low-value,
- * high-blast-radius change across many lanes, so this does NOT demand that. It pins the
- * count so the number cannot grow: existing debt is tolerated, new debt is blocked — the
- * same shape as the `arch.ssot-*` count ratchets.
+ * 33 scripts define their own `parseArgs` or `parseCommand`; 29 still hand-roll value
+ * parsing. Rewriting all of them is a large, high-blast-radius change across many lanes,
+ * so this does NOT demand that. It pins the hand-rolled count so it cannot grow: existing
+ * debt is tolerated, new debt is blocked — the same shape as the `arch.ssot-*` ratchets.
  *
  * Lowering the baseline as scripts migrate is expected and the assertion says so.
  */
 describe('hand-rolled parseArgs ratchet', () => {
-  const HAND_ROLLED_PARSEARGS_BASELINE = 32;
+  const HAND_ROLLED_PARSEARGS_BASELINE = 29;
 
-  const scriptsDefiningParseArgs = (): string[] =>
-    execFileSync('git', ['grep', '-l', 'function parseArgs', 'HEAD', '--', 'scripts/*.ts'], {
+  const isHandRolledParser = (source: string): boolean => {
+    const sourceFile = ts.createSourceFile(
+      'candidate.ts',
+      source,
+      ts.ScriptTarget.Latest,
+      true,
+      ts.ScriptKind.TS,
+    );
+    const options: ts.CompilerOptions = {
+      module: ts.ModuleKind.ESNext,
+      noLib: true,
+      noResolve: true,
+      target: ts.ScriptTarget.Latest,
+    };
+    const host = ts.createCompilerHost(options, true);
+    host.fileExists = (fileName) => fileName === sourceFile.fileName;
+    host.getSourceFile = (fileName) => fileName === sourceFile.fileName ? sourceFile : undefined;
+    host.readFile = (fileName) => fileName === sourceFile.fileName ? source : undefined;
+    host.writeFile = () => {};
+    const checker = ts.createProgram({
+      rootNames: [sourceFile.fileName],
+      options,
+      host,
+    }).getTypeChecker();
+    const sharedBindings = new Set<ts.Symbol>();
+
+    for (const statement of sourceFile.statements) {
+      if (
+        !ts.isImportDeclaration(statement)
+        || !ts.isStringLiteral(statement.moduleSpecifier)
+        || !/(?:^|\/)cli-args\.ts$/.test(statement.moduleSpecifier.text)
+      ) {
+        continue;
+      }
+      const bindings = statement.importClause?.namedBindings;
+      if (!bindings || !ts.isNamedImports(bindings)) continue;
+      for (const element of bindings.elements) {
+        if ((element.propertyName ?? element.name).text === 'takeValue') {
+          const symbol = checker.getSymbolAtLocation(element.name);
+          if (symbol) sharedBindings.add(symbol);
+        }
+      }
+    }
+
+    const functions = new Map<ts.Symbol, ts.FunctionLikeDeclaration>();
+    const parsers: ts.FunctionLikeDeclaration[] = [];
+    const collectFunctions = (node: ts.Node): void => {
+      if (ts.isFunctionDeclaration(node) && node.name) {
+        const symbol = checker.getSymbolAtLocation(node.name);
+        if (symbol) functions.set(symbol, node);
+        if (node.name.text === 'parseArgs' || node.name.text === 'parseCommand') {
+          parsers.push(node);
+        }
+      }
+      if (
+        ts.isVariableDeclaration(node)
+        && ts.isIdentifier(node.name)
+        && node.initializer
+        && (ts.isArrowFunction(node.initializer) || ts.isFunctionExpression(node.initializer))
+      ) {
+        const symbol = checker.getSymbolAtLocation(node.name);
+        if (symbol) functions.set(symbol, node.initializer);
+        if (node.name.text === 'parseArgs' || node.name.text === 'parseCommand') {
+          parsers.push(node.initializer);
+        }
+      }
+      ts.forEachChild(node, collectFunctions);
+    };
+    collectFunctions(sourceFile);
+
+    const callsSharedBinding = (
+      declaration: ts.FunctionLikeDeclaration,
+      visited = new Set<ts.FunctionLikeDeclaration>(),
+    ): boolean => {
+      if (visited.has(declaration)) return false;
+      visited.add(declaration);
+      let found = false;
+      const visit = (node: ts.Node): void => {
+        if (ts.isCallExpression(node) && ts.isIdentifier(node.expression)) {
+          const calledSymbol = checker.getSymbolAtLocation(node.expression);
+          if (calledSymbol && sharedBindings.has(calledSymbol)) {
+            found = true;
+            return;
+          }
+          const calledFunction = calledSymbol ? functions.get(calledSymbol) : undefined;
+          if (calledFunction && callsSharedBinding(calledFunction, visited)) {
+            found = true;
+            return;
+          }
+        }
+        if (!found) ts.forEachChild(node, visit);
+      };
+      if (declaration.body) visit(declaration.body);
+      return found;
+    };
+
+    return parsers.length > 0 && parsers.some((parser) => !callsSharedBinding(parser));
+  };
+
+  const scriptsDefiningHandRolledParsers = (): string[] =>
+    execFileSync('git', ['ls-files', '--', 'scripts/*.ts'], {
       cwd: repoRoot,
       encoding: 'utf8',
       maxBuffer: 16 * 1024 * 1024,
     })
       .split('\n')
-      .filter(Boolean);
+      .filter(Boolean)
+      .filter((path) => isHandRolledParser(readFileSync(resolve(repoRoot, path), 'utf8')));
 
   it('the scan is not vacuous — it really finds hand-rolled parsers', () => {
     // Without this, a git-grep that returned nothing would make the ratchet pass trivially.
-    expect(scriptsDefiningParseArgs().length).toBeGreaterThan(10);
+    expect(scriptsDefiningHandRolledParsers().length).toBeGreaterThan(10);
   });
 
   it('the number of hand-rolled parsers does not grow', () => {
-    const found = scriptsDefiningParseArgs();
+    const found = scriptsDefiningHandRolledParsers();
     expect(
       found.length,
       found.length > HAND_ROLLED_PARSEARGS_BASELINE
@@ -142,5 +244,62 @@ describe('hand-rolled parseArgs ratchet', () => {
         : `Baseline is stale: ${found.length} found, baseline ${HAND_ROLLED_PARSEARGS_BASELINE}. ` +
           `Scripts migrated — LOWER HAND_ROLLED_PARSEARGS_BASELINE to ${found.length} to lock in the gain.`,
     ).toBe(HAND_ROLLED_PARSEARGS_BASELINE);
+  });
+
+  it('does not let a renamed parser evade the shared-primitive requirement', () => {
+    expect(isHandRolledParser('export function parseCommand(argv: string[]) { return argv[1]; }'))
+      .toBe(true);
+    expect(isHandRolledParser(
+      'export const parseArgs = (argv: string[]) => argv[1];',
+    )).toBe(true);
+    expect(isHandRolledParser(
+      'export const parseCommand = function (argv: string[]) { return argv[1]; };',
+    )).toBe(true);
+    expect(isHandRolledParser(
+      "import { takeValue } from './lib/cli-args.ts';\n" +
+      'export function parseCommand(argv: string[]) { return takeValue(argv, 0).value; }',
+    )).toBe(false);
+  });
+
+  it('requires the imported primitive to be called inside the detected parser', () => {
+    const imported = "import { takeValue } from './lib/cli-args.ts';\n";
+
+    expect(isHandRolledParser(
+      imported +
+      '// takeValue(argv, 0)\n' +
+      'export function parseArgs(argv: string[]) { return argv[1]; }',
+    )).toBe(true);
+    expect(isHandRolledParser(
+      imported +
+      'const example = "takeValue(argv, 0)";\n' +
+      'export function parseArgs(argv: string[]) { return argv[1]; }',
+    )).toBe(true);
+    expect(isHandRolledParser(
+      imported +
+      'function helper(argv: string[]) { return takeValue(argv, 0).value; }\n' +
+      'export function parseArgs(argv: string[]) { return argv[1]; }',
+    )).toBe(true);
+    expect(isHandRolledParser(
+      imported +
+      'function helper(argv: string[]) { return takeValue(argv, 0).value; }\n' +
+      'export function parseArgs(argv: string[]) { return helper(argv); }',
+    )).toBe(false);
+    expect(isHandRolledParser(
+      imported +
+      'export function parseArgs(takeValue: Function, argv: string[]) {' +
+      ' return takeValue(argv, 0); }',
+    )).toBe(true);
+    expect(isHandRolledParser(
+      imported +
+      'export function parseArgs(argv: string[]) {' +
+      ' const takeValue = (args: string[]) => args[1]; return takeValue(argv); }',
+    )).toBe(true);
+    expect(isHandRolledParser(
+      imported +
+      'export function parseArgs(argv: string[]) {' +
+      ' function helper(args: string[]) { return args[1]; } return helper(argv); }\n' +
+      'function unrelated() {' +
+      ' function helper(args: string[]) { return takeValue(args, 0).value; } return helper; }',
+    )).toBe(true);
   });
 });
