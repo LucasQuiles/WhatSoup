@@ -15,4 +15,14 @@ for git_local_env_var in $git_local_env_vars; do
 done
 unset git_local_env_var git_local_env_vars
 
-bash scripts/run-with-pinned-node.sh scripts/pre-push-guard.ts
+set +e
+bash scripts/run-with-pinned-node.sh scripts/agent-lease.ts status
+lease_status=$?
+set -e
+if [ "$lease_status" -ne 0 ]; then
+  echo "pre-push hook: writer lease state is blocking or inconclusive" >&2
+  exit "$lease_status"
+fi
+unset lease_status
+
+bash scripts/run-with-pinned-node.sh scripts/pre-push-guard.ts "$@"
