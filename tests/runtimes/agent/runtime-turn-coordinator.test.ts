@@ -28,6 +28,7 @@ function context() {
     },
     replay: {
       sourceMessageId: 'wamid-bookkeeping-41',
+      receivedAtUnixSeconds: 1_780_000_000,
       replaySafe: true,
       senderJid: '15550190099@s.whatsapp.net',
       senderName: null,

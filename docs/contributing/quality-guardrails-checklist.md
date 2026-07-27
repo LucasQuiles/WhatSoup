@@ -48,18 +48,78 @@ is blocking (exit 1). Cleanup failures are never hidden with `|| true`.
 
 ## Layer 1.5 — Local pre-commit early-drift signal (warn-only)
 
-The `.husky/pre-commit` hook hard-runs `npm run guard:repo:staged` (and console
-`lint-staged` for `console/src` changes). It additionally emits a **warn-only**
-architectural-drift signal when a commit stages `*.ts`, `package.json`, `.nvmrc`,
-or `deploy/` files: it runs `guard:node-pin-consistency`, `guard:boundaries`, and
-`guard:lint:src` and prints a warning for any that fail, **without aborting the
-commit**. These same guards are hard-enforced at push by `verify:push:branch`
-(Layer 2); the pre-commit signal only surfaces drift earlier. Skip with
-`WHATSOUP_SKIP_DRIFT_WARN=1`.
+The `.husky/pre-commit` hook first runs the deterministic
+`npm run guard:git-estate -- guard --phase pre-commit` scan. It inventories every
+linked worktree, local branch/upstream state, stash object identity, and conflict
+identity without printing filenames or stash subjects. The commit-time scan is
+one estate-wide capture and is warn-only so an unrelated lane cannot block a
+local checkpoint; incomplete scans and estate growth remain visible warnings.
+Pre-push retains two independent captures for race detection and applies the
+same estate evaluation fail-closed.
+
+The hook then hard-runs `npm run guard:repo:staged` (and console `lint-staged` for
+`console/src` changes). It additionally emits a **warn-only** architectural-drift
+signal when a commit stages `*.ts`, `package.json`, `.nvmrc`, or `deploy/` files:
+it runs `guard:node-pin-consistency`, `guard:boundaries`, and `guard:lint:src` and
+prints a warning for any that fail, **without aborting the commit**. These same
+guards are hard-enforced at push by `verify:push:branch` (Layer 2); the
+architectural-drift signal only surfaces drift earlier. Skip only that signal
+with `WHATSOUP_SKIP_DRIFT_WARN=1`.
 
 ## Layer 2 — Local pre-push guards
 
-Pre-push hook routes through `scripts/pre-push-guard.ts`:
+Pre-push routes through `scripts/pre-push-guard.ts`. Before classifying any ref
+update—including delete-only pushes—it requires a complete Git-estate scan and
+compares it with the machine-local baseline under the repository's common Git
+directory. It blocks newly introduced conflict instances, prunable/detached/
+locked worktrees, stashes, gone-upstream branches, and new critical housekeeping
+debt. New registered worktree or local-branch identities are reported as
+**advisory only** and never block, in either phase — the current invoking
+worktree identity and its checked-out branch identity are still evaluated
+independently and exempted only when that exact branch appears in a non-delete
+pre-push ref update, so the reported growth reflects only genuinely new
+identities, but even unexempted growth no longer blocks. The ratchet is
+repo-global while several agents work the repo concurrently, so growth is
+routinely caused by an agent other than the pusher, who cannot clear it: growth
+is an ID set difference, and retiring unrelated work does not offset it.
+
+Pre-push ref updates accept object IDs at exactly the 40-character SHA-1 or
+64-character SHA-256 width. Intermediate widths are malformed, and an all-zero
+local object ID at either supported width is treated as a deletion. A normal
+`git push -u origin HEAD` maps symbolic `HEAD` to its branch destination before
+the exact invoking-lane comparison; pushing `HEAD` to a differently named
+destination does not exempt the differently named local branch. Missing or
+malformed baselines, malformed ref input or porcelain, Git command timeouts,
+and racing or incomplete scans are **INCONCLUSIVE** and fail closed. Worktree
+status scans use a four-worker bounded pool and every Git subprocess has a
+bounded timeout. Inherited critical debt, dirty worktrees, untracked files,
+missing upstreams, and ahead/behind/diverged branches remain explicit warnings
+so an unrelated in-flight lane is visible but does not become a working
+bottleneck. After reviewing the complete human snapshot, initialize or
+deliberately refresh the local ratchet with:
+
+```bash
+npm run guard:git-estate -- baseline write
+```
+
+The write is refused for incomplete or racing scans and atomically replaces only
+the machine-local v2 baseline; it does not clean, delete, prune, stash, or rewrite
+any repository state. The reader validates an exact canonical payload schema,
+safe integer counts, hashed identity shapes, sorted unique arrays, count/identity
+agreement, and a SHA-256 payload binding. This detects accidental or partial
+tampering; a same-user attacker who can rewrite both payload and digest is outside
+this local guard's threat boundary. Baseline acceptance is therefore an explicit
+owner action, not an automatic way to bless a newly observed conflict.
+
+Linked worktrees must use a worktree-relative hook path:
+
+```bash
+git config core.hooksPath .husky
+```
+
+Do not store an absolute primary-worktree path in `core.hooksPath`: Git shares
+that setting across linked worktrees, so an absolute value makes every lane run
+the primary worktree's potentially stale or in-flight hook bytes.
 
 | Push target | Composite script | Required checks |
 |---|---|---|
@@ -84,6 +144,7 @@ guards that `verify:push:branch` runs. Spelled out:
 
 | Guard | Command | Purpose | Also in CI (`quality.yml`)? |
 |---|---|---|---|
+| Git estate awareness | `npm run guard:git-estate -- guard --phase pre-push` | Snapshot all linked worktrees twice plus branch/upstream state, stash object identity, and conflict-instance identity; fail closed on malformed porcelain, timeouts, incomplete/racing scans, invalid v2 local baselines, new conflicts, and new critical housekeeping debt; new worktree/branch identities are reported advisory-only and never block — the ratchet is repo-global while several agents work the repo concurrently, so growth is routinely caused by an agent other than the pusher, who cannot clear it (growth is an ID set difference; retiring unrelated work does not offset it). | no (local estate only) |
 | Service unit validity | `npm run guard:service-units` | Validate launchd plists / systemd units (label == filename stem, no bare/`env` node, no unexpanded `${VAR}`, node-pin match, absolute well-formed paths, valid plist structure). | yes |
 | Instance config integrity | `npm run guard:instance-config` | Verify instance `config.json` files for memory-config integrity (non-empty `memory.pinecone.expectedHostSuffix`, no UUID-shaped `projectId` host trap) and per-host health-port map integrity. | yes |
 | Fail-closed gate | `npm run guard:fail-closed-gate` | Reject fail-open shell gate shapes: a probe that substitutes a sentinel on failure (`\|\| echo "000"`, `\|\| true`) then gates only on success, and the `grep -c ... \|\| echo 0` double-zero shape. | yes |
@@ -119,6 +180,7 @@ headroom above every enforced V8 threshold.
 `verify:push:branch` runs this targeted guard-test list:
 - `repo-hygiene-guard.test.ts`
 - `pre-push-guard.test.ts`
+- `git-estate-guard.test.ts`
 - `doc-drift-check.test.ts`
 - `public-surface-drift-check.test.ts`
 - `drift-skip-ci-gating.test.ts`

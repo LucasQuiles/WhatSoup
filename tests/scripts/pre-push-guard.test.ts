@@ -141,6 +141,38 @@ describe('pre-push guard classifier', () => {
     expect(classifyPrePushInput('')).toBe('branch');
     expect(commandsForDecision(classifyPrePushInput(''))).toEqual(['verify:push:branch']);
   });
+  it('accepts exact 64-character SHA-256 object IDs', () => {
+    expect(classifyPrePushLine(
+      `refs/heads/feature/example ${'a'.repeat(64)} refs/heads/feature/example ${'b'.repeat(64)}`,
+    )).toBe('branch');
+  });
+
+  it('classifies a 64-zero local object ID as a deletion', () => {
+    const zeroSha256 = '0'.repeat(64);
+    const input =
+      `refs/heads/old-sha256 ${zeroSha256} refs/heads/old-sha256 ${'a'.repeat(64)}`;
+    expect(classifyPrePushLine(input)).toBe('delete');
+    expect(classifyPrePushInput(input)).toBe('skip');
+  });
+
+  it.each(Array.from({ length: 23 }, (_, index) => index + 41))(
+    'rejects a %i-character local object ID between the supported SHA-1 and SHA-256 widths',
+    (width) => {
+      expect(() => classifyPrePushLine(
+        `refs/heads/feature/example ${'a'.repeat(width)} refs/heads/feature/example ${'b'.repeat(40)}`,
+      )).toThrow(/Invalid pre-push/);
+    },
+  );
+
+  it.each(Array.from({ length: 23 }, (_, index) => index + 41))(
+    'rejects a %i-character remote object ID between the supported SHA-1 and SHA-256 widths',
+    (width) => {
+      expect(() => classifyPrePushLine(
+        `refs/heads/feature/example ${'a'.repeat(40)} refs/heads/feature/example ${'b'.repeat(width)}`,
+      )).toThrow(/Invalid pre-push/);
+    },
+  );
+
 });
 
 describe('pre-push guard runtime — fail-closed on empty stdin', () => {
@@ -183,12 +215,15 @@ describe('pre-push guard runtime — fail-closed on empty stdin', () => {
           assertConsoleDependencies: () => {},
         });
         expect(decision).toBe('branch');
-        expect(readFileSync(callsLog, 'utf8').trim()).toBe('run verify:push:branch');
+        expect(readFileSync(callsLog, 'utf8').trim().split('\n')).toEqual([
+          'run guard:git-estate -- guard --phase pre-push',
+          'run verify:push:branch',
+        ]);
         expect(errors).toContain(
           'pre-push guard: no ref updates received on stdin — refusing to skip verification (fail-closed); genuine branch deletions still skip',
         );
         expect(errors).not.toContain(
-          'pre-push guard: delete-only ref update; running metadata verification',
+          'pre-push guard: delete-only ref update; estate verified; running metadata verification',
         );
       } finally {
         spy.mockRestore();
@@ -204,7 +239,10 @@ describe('pre-push guard runtime — fail-closed on empty stdin', () => {
           assertConsoleDependencies: () => {},
         });
         expect(decision).toBe('branch');
-        expect(readFileSync(callsLog, 'utf8').trim()).toBe('run verify:push:branch');
+        expect(readFileSync(callsLog, 'utf8').trim().split('\n')).toEqual([
+          'run guard:git-estate -- guard --phase pre-push',
+          'run verify:push:branch',
+        ]);
       } finally {
         spy.mockRestore();
       }
@@ -212,15 +250,24 @@ describe('pre-push guard runtime — fail-closed on empty stdin', () => {
   });
 
   it('fails before branch and release verification when required console executables are missing', () => {
-    for (const input of [
-      `refs/heads/feature/example 8d739e7582b068387411a1d89acca11e3fd31aa4 refs/heads/feature/example ${ZERO_SHA}`,
-      'refs/heads/main 8d739e7582b068387411a1d89acca11e3fd31aa4 refs/heads/main ec3ac431eb1811aeb7fa9851d658b27ae724cbb5',
+    for (const [input, expectedEstateCall] of [
+      [
+        `refs/heads/feature/example 8d739e7582b068387411a1d89acca11e3fd31aa4 refs/heads/feature/example ${ZERO_SHA}`,
+        'run guard:git-estate -- guard --phase pre-push --push-local-ref refs/heads/feature/example',
+      ],
+      [
+        'refs/heads/main 8d739e7582b068387411a1d89acca11e3fd31aa4 refs/heads/main ec3ac431eb1811aeb7fa9851d658b27ae724cbb5',
+        'run guard:git-estate -- guard --phase pre-push --push-local-ref refs/heads/main',
+      ],
     ]) {
       withStubNpm((callsLog, root) => {
         expect(() => runPrePushGuard(input, root)).toThrow(
           /missing required console executables: eslint, tsc, vite.*npm ci --prefix console/,
         );
-        expect(existsSync(callsLog)).toBe(false);
+        // The estate gate now runs before the console-dependency check, so the
+        // call log is no longer empty — it must contain ONLY the estate-gate
+        // invocation (the failed console check never reaches npm at all).
+        expect(readFileSync(callsLog, 'utf8').trim()).toBe(expectedEstateCall);
       });
     }
   });
@@ -341,7 +388,12 @@ describe('pre-push guard runtime — fail-closed on empty stdin', () => {
           'pre-push guard: console dependency tree is incomplete or invalid; run npm ci --prefix console before pushing',
         ),
       );
-      expect(existsSync(callsLog)).toBe(false);
+      // The estate gate now runs before the console-dependency check, so the
+      // call log is no longer empty — it must contain ONLY the estate-gate
+      // invocation (the broken tree throws before verify:push:branch runs).
+      expect(readFileSync(callsLog, 'utf8').trim()).toBe(
+        'run guard:git-estate -- guard --phase pre-push --push-local-ref refs/heads/feature/example',
+      );
       expect(existsSync(lifecycleMarker)).toBe(false);
     });
   });
@@ -351,7 +403,10 @@ describe('pre-push guard runtime — fail-closed on empty stdin', () => {
       const input = `refs/heads/feature/example 8d739e7582b068387411a1d89acca11e3fd31aa4 refs/heads/feature/example ${ZERO_SHA}`;
 
       expect(runPrePushGuard(input, root)).toBe('branch');
-      expect(readFileSync(callsLog, 'utf8').trim()).toBe('run verify:push:branch');
+      expect(readFileSync(callsLog, 'utf8').trim().split('\n')).toEqual([
+        'run guard:git-estate -- guard --phase pre-push --push-local-ref refs/heads/feature/example',
+        'run verify:push:branch',
+      ]);
       expect(existsSync(lifecycleMarker)).toBe(false);
     });
   });
@@ -360,6 +415,7 @@ describe('pre-push guard runtime — fail-closed on empty stdin', () => {
     const root = mkdtempSync(resolve(tmpdir(), 'whatsoup-pre-push-delete-runtime-'));
     const bin = resolve(root, 'bin');
     const callsLog = resolve(root, 'bash-calls.log');
+    const npmCallsLog = resolve(root, 'npm-calls.log');
     const originalPath = process.env['PATH'];
 
     try {
@@ -372,6 +428,16 @@ describe('pre-push guard runtime — fail-closed on empty stdin', () => {
         '',
       ].join('\n'));
       chmodSync(bashStub, 0o755);
+      // The estate gate now runs before the delete-only metadata scripts and
+      // invokes `npm` directly (not through bash), so it needs its own stub.
+      const npmStub = resolve(bin, 'npm');
+      writeFileSync(npmStub, [
+        '#!/bin/sh',
+        `printf "%s\\n" "$*" >> "${npmCallsLog}"`,
+        'exit 0',
+        '',
+      ].join('\n'));
+      chmodSync(npmStub, 0o755);
       process.env['PATH'] = `${bin}:${originalPath ?? ''}`;
 
       const errors: string[] = [];
@@ -382,13 +448,17 @@ describe('pre-push guard runtime — fail-closed on empty stdin', () => {
       try {
         const decision = runPrePushGuard(input, root);
         expect(decision).toBe('skip');
+        expect(readFileSync(npmCallsLog, 'utf8').trim()).toBe(
+          'run guard:git-estate -- guard --phase pre-push',
+        );
         expect(existsSync(callsLog)).toBe(true);
         expect(readFileSync(callsLog, 'utf8').trim().split('\n')).toEqual([
           'scripts/run-with-pinned-npm.sh --prefix console run design:metrics',
           'scripts/run-with-pinned-npm.sh --prefix console run design:burndown',
         ]);
         expect(errors).toEqual([
-          'pre-push guard: delete-only ref update; running metadata verification',
+          'pre-push guard: running deterministic Git estate gate',
+          'pre-push guard: delete-only ref update; estate verified; running metadata verification',
         ]);
       } finally {
         spy.mockRestore();
@@ -402,6 +472,202 @@ describe('pre-push guard runtime — fail-closed on empty stdin', () => {
       rmSync(root, { recursive: true, force: true });
     }
   });
+  it('passes the nondeleted local branch ref to the estate gate for lane exemption', () => {
+    withStubNpm((callsLog) => {
+      const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      try {
+        const input = `refs/heads/feature/example ${'a'.repeat(40)} refs/heads/feature/example ${ZERO_SHA}`;
+        // This test is scoped to the estate-gate ref-passing behaviour, not the
+        // console-dependency subprocess check (covered separately by the
+        // withConsoleTreeFixture broken/valid pair below) — stub it out so a
+        // real bash/npm resolution failure in the host environment can't leak
+        // into an assertion this test never claims to make.
+        const decision = runPrePushGuard(input, repoRoot, {
+          assertConsoleDependencies: () => {},
+        });
+        expect(decision).toBe('branch');
+        expect(readFileSync(callsLog, 'utf8').trim().split('\n')).toEqual([
+          'run guard:git-estate -- guard --phase pre-push --push-local-ref refs/heads/feature/example',
+          'run verify:push:branch',
+        ]);
+      } finally {
+        spy.mockRestore();
+      }
+    });
+  });
+
+  it('maps a symbolic HEAD push to its branch destination for lane exemption', () => {
+    withStubNpm((callsLog) => {
+      const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      try {
+        const input =
+          `HEAD ${'a'.repeat(40)} refs/heads/feature/example ${ZERO_SHA}`;
+        const decision = runPrePushGuard(input, repoRoot, {
+          assertConsoleDependencies: () => {},
+        });
+        expect(decision).toBe('branch');
+        expect(readFileSync(callsLog, 'utf8').trim().split('\n')).toEqual([
+          'run guard:git-estate -- guard --phase pre-push --push-local-ref refs/heads/feature/example',
+          'run verify:push:branch',
+        ]);
+      } finally {
+        spy.mockRestore();
+      }
+    });
+  });
+
+  it('genuine delete-only stdin still runs the estate gate before skipping content verification', () => {
+    withStubNpm((callsLog, root) => {
+      // Delete-only pushes now also run the metadata scripts (design:metrics,
+      // design:burndown) via bash after the estate gate; stub bash too so
+      // those real invocations are captured deterministically.
+      const bashCallsLog = resolve(root, 'bash-calls.log');
+      const bashStub = resolve(root, 'bin', 'bash');
+      writeFileSync(bashStub, [
+        '#!/bin/sh',
+        `printf "%s\\n" "$*" >> "${bashCallsLog}"`,
+        'exit 0',
+        '',
+      ].join('\n'));
+      chmodSync(bashStub, 0o755);
+
+      const errors: string[] = [];
+      const spy = vi.spyOn(console, 'error').mockImplementation((msg?: unknown) => {
+        errors.push(String(msg));
+      });
+      try {
+        const input = `refs/heads/old-a ${ZERO_SHA} refs/heads/old-a 1111111111111111111111111111111111111111`;
+        const decision = runPrePushGuard(input, repoRoot);
+        expect(decision).toBe('skip');
+        expect(readFileSync(callsLog, 'utf8').trim()).toBe(
+          'run guard:git-estate -- guard --phase pre-push',
+        );
+        expect(readFileSync(bashCallsLog, 'utf8').trim().split('\n')).toEqual([
+          'scripts/run-with-pinned-npm.sh --prefix console run design:metrics',
+          'scripts/run-with-pinned-npm.sh --prefix console run design:burndown',
+        ]);
+        expect(errors).toEqual([
+          'pre-push guard: running deterministic Git estate gate',
+          'pre-push guard: delete-only ref update; estate verified; running metadata verification',
+        ]);
+      } finally {
+        spy.mockRestore();
+      }
+    });
+  });
+
+  it('accepts exact 64-character object IDs and passes the pushed branch to the estate gate', () => {
+    withStubNpm((callsLog) => {
+      const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      try {
+        const input =
+          `refs/heads/feature/sha256 ${'a'.repeat(64)} refs/heads/feature/sha256 ${'b'.repeat(64)}`;
+        expect(runPrePushGuard(input, repoRoot, {
+          assertConsoleDependencies: () => {},
+        })).toBe('branch');
+        expect(readFileSync(callsLog, 'utf8').trim().split('\n')).toEqual([
+          'run guard:git-estate -- guard --phase pre-push --push-local-ref refs/heads/feature/sha256',
+          'run verify:push:branch',
+        ]);
+      } finally {
+        spy.mockRestore();
+      }
+    });
+  });
+
+  it('estate-gates a 64-zero delete-only update before skipping content verification', () => {
+    withStubNpm((callsLog, root) => {
+      // Delete-only pushes now also run the metadata scripts (design:metrics,
+      // design:burndown) via bash after the estate gate; stub bash too so
+      // those real invocations are captured deterministically.
+      const bashCallsLog = resolve(root, 'bash-calls.log');
+      const bashStub = resolve(root, 'bin', 'bash');
+      writeFileSync(bashStub, [
+        '#!/bin/sh',
+        `printf "%s\\n" "$*" >> "${bashCallsLog}"`,
+        'exit 0',
+        '',
+      ].join('\n'));
+      chmodSync(bashStub, 0o755);
+
+      const errors: string[] = [];
+      const spy = vi.spyOn(console, 'error').mockImplementation((msg?: unknown) => {
+        errors.push(String(msg));
+      });
+      try {
+        const input =
+          `refs/heads/old-sha256 ${'0'.repeat(64)} refs/heads/old-sha256 ${'a'.repeat(64)}`;
+        expect(runPrePushGuard(input, repoRoot)).toBe('skip');
+        expect(readFileSync(callsLog, 'utf8').trim()).toBe(
+          'run guard:git-estate -- guard --phase pre-push',
+        );
+        expect(readFileSync(bashCallsLog, 'utf8').trim().split('\n')).toEqual([
+          'scripts/run-with-pinned-npm.sh --prefix console run design:metrics',
+          'scripts/run-with-pinned-npm.sh --prefix console run design:burndown',
+        ]);
+        expect(errors).toEqual([
+          'pre-push guard: running deterministic Git estate gate',
+          'pre-push guard: delete-only ref update; estate verified; running metadata verification',
+        ]);
+      } finally {
+        spy.mockRestore();
+      }
+    });
+  });
+
+  it('runs the estate gate before rejecting malformed ref input', () => {
+    withStubNpm((callsLog) => {
+      expect(() => runPrePushGuard('malformed', repoRoot)).toThrow(/Invalid pre-push/);
+      expect(readFileSync(callsLog, 'utf8').trim()).toBe(
+        'run guard:git-estate -- guard --phase pre-push',
+      );
+    });
+  });
+
+  it('preserves the estate child exit code so INCONCLUSIVE is not flattened to a generic failure', () => {
+    const root = mkdtempSync(resolve(tmpdir(), 'whatsoup-pre-push-estate-exit-'));
+    const bin = resolve(root, 'bin');
+    const npmStub = resolve(bin, 'npm');
+    try {
+      mkdirSync(bin, { recursive: true });
+      writeFileSync(npmStub, '#!/bin/sh\nexit 2\n');
+      chmodSync(npmStub, 0o755);
+      const proc = spawnSync(
+        process.execPath,
+        [
+          '--disable-warning=ExperimentalWarning',
+          '--experimental-strip-types',
+          resolve(repoRoot, 'scripts/pre-push-guard.ts'),
+        ],
+        {
+          cwd: repoRoot,
+          encoding: 'utf8',
+          env: { ...process.env, PATH: `${bin}:${process.env['PATH'] ?? ''}` },
+          input: `refs/heads/feature/example ${'a'.repeat(40)} refs/heads/feature/example ${ZERO_SHA}\n`,
+        },
+      );
+
+      expect(proc.status, proc.stderr).toBe(2);
+      expect(proc.stderr).toContain('pre-push guard: running deterministic Git estate gate');
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it.each([41, 52, 63])(
+    'runs the estate gate before rejecting a %i-character object ID',
+    (width) => {
+      withStubNpm((callsLog) => {
+        const input =
+          `refs/heads/feature/example ${'a'.repeat(width)} refs/heads/feature/example ${'b'.repeat(40)}`;
+        expect(() => runPrePushGuard(input, repoRoot)).toThrow(/Invalid pre-push/);
+        expect(readFileSync(callsLog, 'utf8').trim()).toBe(
+          'run guard:git-estate -- guard --phase pre-push',
+        );
+      });
+    },
+  );
+
 });
 
 describe('pre-push hook runtime isolation', () => {
@@ -605,6 +871,15 @@ describe('verify chain composition (package.json)', () => {
     const chain = packageJson.scripts['verify:push:branch'];
     expect(chain, 'verify:push:branch script must exist').toBeDefined();
     expect(chain).toMatch(/\bnpm run guard:test-integrity\b/);
+  });
+
+  it('runs the catch-ratchet drift gate in push, release, and CI paths', () => {
+    const push = packageJson.scripts['verify:push:branch'] ?? '';
+    const release = packageJson.scripts['verify:release'] ?? '';
+
+    expect(push).toMatch(/\bnpm run guard:catch-ratchet\b/);
+    expect(release).toMatch(/\bnpm run guard:catch-ratchet\b/);
+    expect(qualityWorkflow).toMatch(/\bnpm run guard:catch-ratchet\b/);
   });
 
   it('verify:push:branch invokes the fast CI-only checks that drove local-green/CI-red (#1105)', () => {

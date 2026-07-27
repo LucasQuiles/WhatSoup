@@ -375,6 +375,19 @@ export const fitnessRules = [
     source: ['audit:2026-07-20-signal-imessage-surface-sweep#S17'],
   },
   {
+    id: 'hygiene.catch-justification',
+    title: 'Swallowed catch justification',
+    category: 'hygiene',
+    rationale:
+      'A catch whose body is empty or only performs syntactic no-ops silently swallows errors; binding an unused variable or adding a magic-word comment does not provide handling. New swallows must perform observable handling or carry a reasoned justification. The 127 inherited semantic identities are shrink-only ratchet debt.',
+    detect: 'ast',
+    rings: ['eslint'],
+    severity: 'warn',
+    ratchet: true,
+    params: { baselinePath: 'eslint-rules/catch-ratchet-baseline.json' },
+    source: ['issue:2190'],
+  },
+  {
     id: 'test.typecheck-all-required',
     title: 'Full typecheck required',
     category: 'test',
