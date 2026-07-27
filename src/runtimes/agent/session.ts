@@ -9,6 +9,11 @@ import { join } from 'node:path';
 import type { Database } from '../../core/database.ts';
 import type { Messenger } from '../../core/types.ts';
 import type { DurabilityEngine } from '../../core/durability.ts';
+import {
+  assertCheckpointRoutePolicyCompatible,
+  type ProviderCheckpointRoutePolicy,
+  type ProviderRoutePolicy,
+} from '../../core/provider-data-policy.ts';
 import type { SessionContext } from '../../mcp/types.ts';
 import { toConversationKey } from '../../core/conversation-key.ts';
 import { createChildLogger } from '../../logger.ts';
@@ -216,6 +221,7 @@ export interface SessionManagerOptions {
   configSystemPrompt?: string;
   instructionsPath?: string;
   model?: string;
+  routePolicy?: ProviderRoutePolicy;
   pluginDirs?: string[];
   allowM365Mutations?: boolean;
   provider?: string;
@@ -590,6 +596,7 @@ export class SessionManager {
   private readonly configSystemPrompt: string | undefined;
   private readonly instructionsPath: string | undefined;
   private readonly model: string | undefined;
+  private readonly routePolicy: ProviderRoutePolicy | undefined;
   private readonly pluginDirs: string[];
   private readonly allowM365Mutations: boolean | undefined;
   private readonly provider: string;
@@ -659,6 +666,13 @@ export class SessionManager {
   private resumeAttemptId: string | null = null;
   /** Prevents cleanup shutdown from repainting an already-terminal durable lifecycle as resumable. */
   private durableFailureClosed = false;
+  /** Durable cleanup failed and an active lifecycle may still require operator reconciliation. */
+  private durableFailureInconclusive = false;
+  private durableFailureIdentity: {
+    providerSessionId: string | null;
+    agentSessionRowId: number;
+  } | null = null;
+  private durableFailureError: unknown = null;
   /** JSON-RPC request ID of the thread/start call when resuming a Codex thread.
    *  Used to detect error responses and trigger fallback to a fresh thread. */
   private codexResumeThreadStartReqId: string | null = null;
@@ -721,6 +735,7 @@ export class SessionManager {
     this.configSystemPrompt = opts.configSystemPrompt;
     this.instructionsPath = opts.instructionsPath;
     this.model = opts.model;
+    this.routePolicy = opts.routePolicy;
     this.pluginDirs = opts.pluginDirs ?? [];
     this.allowM365Mutations = opts.allowM365Mutations;
     this.provider = opts.provider ?? 'claude-cli';
@@ -733,6 +748,12 @@ export class SessionManager {
         `[session-manager] unknown provider id: ${JSON.stringify(this.provider)}. ` +
           `Valid: ${PROVIDER_IDS.join(', ')}.`,
       );
+    }
+    if (
+      this.routePolicy
+      && (this.routePolicy.provider !== this.provider || this.routePolicy.model !== this.model)
+    ) {
+      throw new Error('Session route policy provider/model must match the admitted provider route');
     }
     this.providerConfig = opts.providerConfig;
     this.mcpBridge = opts.mcpBridge;
@@ -755,6 +776,10 @@ export class SessionManager {
     if (this.mcpSessionContext) {
       this.mcpSessionContext.actorJid = actorJid;
     }
+  }
+
+  getRoutePolicy(): ProviderRoutePolicy | undefined {
+    return this.routePolicy;
   }
 
   // ─── Provider helpers ─────────────────────────────────────────────────────
@@ -1194,12 +1219,13 @@ export class SessionManager {
     if (!this.durability) return;
     if (
       exactSessionId !== null
-      && typeof this.durability.updateSessionCheckpointsStatusBySessionId === 'function'
+      && typeof this.durability.updateExactSessionCheckpointStatus === 'function'
     ) {
-      this.durability.updateSessionCheckpointsStatusBySessionId(
-        exactSessionId,
+      this.durability.updateExactSessionCheckpointStatus({
+        providerSessionId: exactSessionId,
+        conversationKey: this.conversationKey,
         sessionStatus,
-      );
+      });
       return;
     }
     this.durability.upsertSessionCheckpoint(this.conversationKey, { sessionStatus });
@@ -1210,6 +1236,7 @@ export class SessionManager {
     cwd: string,
     resumeSessionId: string | undefined,
     existingRowId: number | undefined,
+    checkpointWatchdogState: string | undefined,
   ): number {
     if (
       this.durability
@@ -1223,6 +1250,7 @@ export class SessionManager {
         workspaceKey: this.conversationKey,
         provider: this.provider,
         conversationKey: this.conversationKey,
+        checkpointWatchdogState,
       });
     }
     if (
@@ -1230,11 +1258,17 @@ export class SessionManager {
       && resumeSessionId !== undefined
       && typeof this.durability.reactivateSessionLifecycle === 'function'
     ) {
+      if (existingRowId === undefined) {
+        throw new Error('Exact resumable agent row identity is required for lifecycle activation');
+      }
       return this.durability.reactivateSessionLifecycle({
-        ...(existingRowId === undefined ? {} : { agentSessionRowId: existingRowId }),
+        agentSessionRowId: existingRowId,
         providerSessionId: resumeSessionId,
         provider: this.provider,
         pid,
+        workspaceKey: this.conversationKey,
+        conversationKey: this.conversationKey,
+        checkpointWatchdogState,
       });
     }
 
@@ -1277,6 +1311,312 @@ export class SessionManager {
     return rowId;
   }
 
+  private routePolicyCheckpointState(
+    existing: Record<string, unknown> = this.readCheckpointWatchdogState(),
+  ): string | null {
+    if (!this.routePolicy) return null;
+    const committed = { ...existing };
+    delete committed['providerRoutePolicyAdmission'];
+    return JSON.stringify({
+      ...committed,
+      providerRoutePolicy: {
+        provider: this.routePolicy.provider,
+        model: this.routePolicy.model ?? null,
+        dataPolicy: this.routePolicy.dataPolicy,
+        policyVersion: this.routePolicy.policyVersion,
+      },
+    });
+  }
+
+  private routePolicyAdmissionCheckpointState(
+    existing: Record<string, unknown>,
+  ): string | undefined {
+    if (!this.routePolicy) return undefined;
+    return JSON.stringify({
+      ...existing,
+      providerRoutePolicyAdmission: {
+        state: 'pending',
+        provider: this.routePolicy.provider,
+        model: this.routePolicy.model ?? null,
+        dataPolicy: this.routePolicy.dataPolicy,
+        policyVersion: this.routePolicy.policyVersion,
+      },
+    });
+  }
+
+  private assertNoPendingRoutePolicyAdmission(
+    existing: Record<string, unknown>,
+  ): void {
+    const pending = existing['providerRoutePolicyAdmission'];
+    if (
+      typeof pending !== 'object'
+      || pending === null
+      || Array.isArray(pending)
+      || (pending as Record<string, unknown>)['state'] !== 'pending'
+    ) return;
+    const checkpoint = this.db.raw.prepare(
+      `SELECT session_id, session_status
+       FROM session_checkpoints
+       WHERE conversation_key = ?`,
+    ).get(this.conversationKey) as {
+      session_id: string | null;
+      session_status: string;
+    } | undefined;
+    const rows = checkpoint?.session_id === null
+      ? this.db.raw.prepare(
+          `SELECT provider, status
+           FROM agent_sessions
+           WHERE workspace_key = ? AND session_id IS NULL
+           ORDER BY id`,
+        ).all(this.conversationKey) as Array<{ provider: string | null; status: string }>
+      : checkpoint === undefined
+        ? []
+        : this.db.raw.prepare(
+            `SELECT provider, status
+             FROM agent_sessions
+             WHERE workspace_key = ? AND session_id = ?
+             ORDER BY id`,
+          ).all(
+            this.conversationKey,
+            checkpoint.session_id,
+          ) as Array<{ provider: string | null; status: string }>;
+    const expectedAgentStatus = checkpoint?.session_id === null
+      ? 'crashed'
+      : 'resume_failed';
+    const pendingProvider = (pending as Record<string, unknown>)['provider'];
+    if (
+      checkpoint?.session_status === 'orphaned'
+      && rows.length === 1
+      && rows[0]!.provider === pendingProvider
+      && rows[0]!.status === expectedAgentStatus
+    ) return;
+    throw new Error('Session admission blocked by unresolved active route-policy admission lifecycle');
+  }
+
+  private readCheckpointWatchdogState(): Record<string, unknown> {
+    const row = this.db.raw.prepare(
+      `SELECT watchdog_state
+       FROM session_checkpoints
+       WHERE conversation_key = ?`,
+    ).get(this.conversationKey) as { watchdog_state: string | null } | undefined;
+    if (!row?.watchdog_state) return {};
+    try {
+      const parsed = JSON.parse(row.watchdog_state) as unknown;
+      return typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)
+        ? parsed as Record<string, unknown>
+        : {};
+    } catch {
+      return {};
+    }
+  }
+
+  private persistRoutePolicyCheckpoint(existing?: Record<string, unknown>): void {
+    const watchdogState = this.routePolicyCheckpointState(existing);
+    if (watchdogState === null) return;
+    if (this.durability) {
+      this.durability.upsertSessionCheckpoint(this.conversationKey, { watchdogState });
+      return;
+    }
+    this.db.raw.prepare(
+      `UPDATE session_checkpoints
+       SET watchdog_state = ?, updated_at = datetime('now')
+       WHERE conversation_key = ?`,
+    ).run(watchdogState, this.conversationKey);
+  }
+
+  private compensateRoutePolicyPersistenceFailure(
+    providerSessionId: string | null,
+    agentSessionRowId: number,
+  ): void {
+    let inTransaction = false;
+    try {
+      this.db.raw.exec('BEGIN IMMEDIATE');
+      inTransaction = true;
+      const rowResult = providerSessionId === null
+        ? this.db.raw.prepare(
+            `UPDATE agent_sessions
+             SET status = 'crashed', ended_at = COALESCE(ended_at, datetime('now'))
+             WHERE id = ?
+               AND session_id IS NULL
+               AND provider = ?
+               AND status = 'active'`,
+          ).run(agentSessionRowId, this.provider)
+        : this.db.raw.prepare(
+            `UPDATE agent_sessions
+             SET status = 'resume_failed', ended_at = COALESCE(ended_at, datetime('now'))
+             WHERE id = ?
+               AND session_id = ?
+               AND provider = ?
+               AND status = 'active'`,
+          ).run(agentSessionRowId, providerSessionId, this.provider);
+      if (rowResult.changes !== 1) {
+        throw new Error('Exact route-policy agent lifecycle could not be compensated');
+      }
+      const checkpointResult = providerSessionId === null
+        ? this.db.raw.prepare(
+            `UPDATE session_checkpoints
+             SET session_status = 'orphaned',
+                 checkpoint_version = checkpoint_version + 1,
+                 updated_at = datetime('now')
+             WHERE conversation_key = ?
+               AND session_id IS NULL
+               AND session_status = 'active'`,
+          ).run(this.conversationKey)
+        : this.db.raw.prepare(
+            `UPDATE session_checkpoints
+             SET session_status = 'orphaned',
+                 checkpoint_version = checkpoint_version + 1,
+                 updated_at = datetime('now')
+             WHERE conversation_key = ?
+               AND session_id = ?
+               AND session_status = 'active'`,
+          ).run(this.conversationKey, providerSessionId);
+      if (checkpointResult.changes !== 1) {
+        throw new Error('Exact route-policy checkpoint lifecycle could not be compensated');
+      }
+      this.db.raw.exec('COMMIT');
+      inTransaction = false;
+      this.durableFailureClosed = true;
+      this.durableFailureInconclusive = false;
+      this.durableFailureIdentity = null;
+      this.durableFailureError = null;
+    } catch (err) {
+      if (inTransaction) {
+        try {
+          this.db.raw.exec('ROLLBACK');
+        } catch (rollbackError) {
+          log.warn({
+            err: rollbackError,
+            event: 'route-policy-metadata-compensation-rollback-failed',
+            provider: this.provider,
+            conversationKey: this.conversationKey,
+            rowId: agentSessionRowId,
+          }, 'route-policy metadata compensation rollback failed');
+        }
+      }
+      throw err;
+    }
+  }
+
+  private persistRoutePolicyCheckpointWithCompensation(
+    existing: Record<string, unknown>,
+    providerSessionId: string | null,
+    agentSessionRowId: number,
+  ): void {
+    try {
+      this.persistRoutePolicyCheckpoint(existing);
+    } catch (metadataError) {
+      let compensated = false;
+      try {
+        this.compensateRoutePolicyPersistenceFailure(providerSessionId, agentSessionRowId);
+        compensated = true;
+      } catch (compensationError) {
+        log.warn({
+          err: compensationError,
+          event: 'route-policy-metadata-compensation-failed',
+          provider: this.provider,
+          conversationKey: this.conversationKey,
+          rowId: agentSessionRowId,
+          isResume: providerSessionId !== null,
+        }, 'route-policy metadata compensation failed; preserving metadata error');
+      }
+      this.durableFailureClosed = compensated;
+      this.durableFailureInconclusive = !compensated;
+      this.durableFailureIdentity = compensated
+        ? null
+        : { providerSessionId, agentSessionRowId };
+      this.durableFailureError = compensated ? null : metadataError;
+      throw metadataError;
+    }
+  }
+
+  private assertDurableFailureReconciled(): void {
+    if (!this.durableFailureInconclusive) return;
+    const identity = this.durableFailureIdentity;
+    if (identity === null) {
+      throw this.durableFailureError
+        ?? new Error('Session admission blocked by inconclusive durable lifecycle');
+    }
+    const agentRow = identity.providerSessionId === null
+      ? this.db.raw.prepare(
+          `SELECT status
+           FROM agent_sessions
+           WHERE id = ?
+             AND session_id IS NULL
+             AND provider = ?
+             AND workspace_key = ?`,
+        ).get(
+          identity.agentSessionRowId,
+          this.provider,
+          this.conversationKey,
+        ) as { status: string } | undefined
+      : this.db.raw.prepare(
+          `SELECT status
+           FROM agent_sessions
+           WHERE id = ?
+             AND session_id = ?
+             AND provider = ?
+             AND workspace_key = ?`,
+        ).get(
+          identity.agentSessionRowId,
+          identity.providerSessionId,
+          this.provider,
+          this.conversationKey,
+        ) as { status: string } | undefined;
+    const checkpoint = identity.providerSessionId === null
+      ? this.db.raw.prepare(
+          `SELECT session_status
+           FROM session_checkpoints
+           WHERE conversation_key = ? AND session_id IS NULL`,
+        ).get(this.conversationKey) as { session_status: string } | undefined
+      : this.db.raw.prepare(
+          `SELECT session_status
+           FROM session_checkpoints
+           WHERE conversation_key = ? AND session_id = ?`,
+        ).get(
+          this.conversationKey,
+          identity.providerSessionId,
+        ) as { session_status: string } | undefined;
+    const expectedAgentStatus = identity.providerSessionId === null
+      ? 'crashed'
+      : 'resume_failed';
+    if (
+      agentRow?.status !== expectedAgentStatus
+      || checkpoint?.session_status !== 'orphaned'
+    ) {
+      throw this.durableFailureError
+        ?? new Error('Session admission blocked by inconclusive durable lifecycle');
+    }
+    this.durableFailureClosed = true;
+    this.durableFailureInconclusive = false;
+    this.durableFailureIdentity = null;
+    this.durableFailureError = null;
+  }
+
+  private markDurableLifecycleAdmitted(): void {
+    this.durableFailureClosed = false;
+    this.durableFailureInconclusive = false;
+    this.durableFailureIdentity = null;
+    this.durableFailureError = null;
+  }
+
+  private readCheckpointRoutePolicy(providerSessionId: string): ProviderCheckpointRoutePolicy | null {
+    const row = this.db.raw.prepare(
+      `SELECT watchdog_state
+       FROM session_checkpoints
+       WHERE conversation_key = ? AND session_id = ?`,
+    ).get(this.conversationKey, providerSessionId) as { watchdog_state: string | null } | undefined;
+    if (!row?.watchdog_state) return null;
+    try {
+      const parsed = JSON.parse(row.watchdog_state) as Record<string, unknown>;
+      const route = parsed['providerRoutePolicy'];
+      if (typeof route !== 'object' || route === null || Array.isArray(route)) return null;
+      return route as ProviderCheckpointRoutePolicy;
+    } catch {
+      return null;
+    }
+  }
+
   private resetFailedSessionStart(preservedChild: ReturnType<typeof spawn> | null = null): void {
     this.completeProviderTurn();
     this.active = false;
@@ -1303,27 +1643,103 @@ export class SessionManager {
   private retireUnsupportedResume(
     providerSessionId: string,
     existingRowId: number,
+    persistedProvider: string = this.provider,
   ): void {
     if (
       this.durability
-      && typeof this.durability.retireSessionLifecycle === 'function'
+      && typeof this.durability.retireExactSessionLifecycle === 'function'
     ) {
-      this.durability.retireSessionLifecycle({
+      this.durability.retireExactSessionLifecycle({
         agentSessionRowId: existingRowId,
         providerSessionId,
-        provider: this.provider,
+        provider: persistedProvider,
+        workspaceKey: this.conversationKey,
+        conversationKey: this.conversationKey,
       });
     } else {
       updateResumedSessionStatus(
         this.db,
         existingRowId,
         providerSessionId,
-        this.provider,
+        persistedProvider,
         'ended',
       );
       this.updateCheckpointStatus('ended', providerSessionId);
     }
     this.durableFailureClosed = true;
+    this.durableFailureInconclusive = false;
+    this.durableFailureIdentity = null;
+    this.durableFailureError = null;
+  }
+
+  private resumeRetirementEligibility(
+    providerSessionId: string,
+    existingRowId: number | undefined,
+    ownership: 'current' | 'foreign',
+  ): { rowId: number; provider: string } | null {
+    try {
+      const namespaces = this.db.raw.prepare(
+        `SELECT DISTINCT provider
+         FROM agent_sessions
+         WHERE session_id = ?`,
+      ).all(providerSessionId) as Array<{ provider: string | null }>;
+      if (
+        namespaces.length !== 1
+        || namespaces[0]!.provider === null
+      ) {
+        return null;
+      }
+      const persistedProvider = namespaces[0]!.provider;
+      const isForeign = persistedProvider !== this.provider;
+      if ((ownership === 'foreign') !== isForeign) return null;
+      const rows = this.db.raw.prepare(
+        `SELECT id, provider, workspace_key
+         FROM agent_sessions
+         WHERE session_id = ?
+           AND status IN ('active', 'suspended', 'orphaned', 'crashed')
+         ORDER BY id`,
+      ).all(providerSessionId) as Array<{
+        id: number;
+        provider: string | null;
+        workspace_key: string | null;
+      }>;
+      if (rows.length !== 1) return null;
+      const row = rows[0]!;
+      if (
+        row.provider !== persistedProvider
+        || row.workspace_key !== this.conversationKey
+        || (existingRowId !== undefined && row.id !== existingRowId)
+      ) {
+        return null;
+      }
+      const checkpoints = this.db.raw.prepare(
+        `SELECT conversation_key, session_status
+         FROM session_checkpoints
+         WHERE session_id = ?
+         ORDER BY id`,
+      ).all(providerSessionId) as Array<{
+        conversation_key: string;
+        session_status: string;
+      }>;
+      if (
+        checkpoints.length !== 1
+        || checkpoints[0]!.conversation_key !== this.conversationKey
+        || !['active', 'suspended', 'orphaned'].includes(checkpoints[0]!.session_status)
+      ) {
+        return null;
+      }
+      return { rowId: row.id, provider: persistedProvider };
+    } catch (err) {
+      log.warn({
+        err,
+        event: 'resume-retirement-eligibility-failed',
+        provider: this.provider,
+        conversationKey: this.conversationKey,
+        hasExplicitRowId: existingRowId !== undefined,
+        ownership,
+      }, 'resume retirement eligibility check failed closed');
+      return null;
+    }
   }
 
   private closeDurableFailureLifecycle(
@@ -1360,6 +1776,9 @@ export class SessionManager {
       this.updateCheckpointStatus('orphaned', exactSessionId);
     }
     this.durableFailureClosed = true;
+    this.durableFailureInconclusive = false;
+    this.durableFailureIdentity = null;
+    this.durableFailureError = null;
   }
 
   bindGenerationOwnership(resolve: () => SessionGenerationIdentity | null): void {
@@ -1426,22 +1845,86 @@ export class SessionManager {
     if (this.active && (this.child !== null || this.managedProviderSession !== null)) {
       return;
     }
+    this.assertDurableFailureReconciled();
     const provider = this.assertKnownProvider('spawnSession');
+    const checkpointWatchdogState = this.readCheckpointWatchdogState();
+    this.assertNoPendingRoutePolicyAdmission(checkpointWatchdogState);
+    const admissionWatchdogState = this.routePolicyAdmissionCheckpointState(
+      checkpointWatchdogState,
+    );
     let resolvedRowId = existingRowId;
     if (resumeSessionId !== undefined) {
-      resolvedRowId = resolveResumableAgentSession(this.db, {
+      const resumeIdentity = {
         provider,
         providerSessionId: resumeSessionId,
         ...(existingRowId === undefined ? {} : { agentSessionRowId: existingRowId }),
         workspaceKey: this.conversationKey,
-      }).id;
+      };
+      try {
+        resolvedRowId = resolveResumableAgentSession(this.db, resumeIdentity).id;
+      } catch (resolutionError) {
+        const eligibility = this.resumeRetirementEligibility(
+          resumeSessionId,
+          existingRowId,
+          'foreign',
+        );
+        if (eligibility !== null) {
+          try {
+            this.retireUnsupportedResume(
+              resumeSessionId,
+              eligibility.rowId,
+              eligibility.provider,
+            );
+          } catch (retirementError) {
+            log.warn({
+              err: retirementError,
+              event: 'foreign-resume-retirement-failed',
+              provider,
+              persistedProvider: eligibility.provider,
+              conversationKey: this.conversationKey,
+              rowId: eligibility.rowId,
+            }, 'foreign resume retirement failed; preserving canonical resolution error');
+          }
+        }
+        throw resolutionError;
+      }
+      if (this.routePolicy) {
+        try {
+          assertCheckpointRoutePolicyCompatible(
+            this.routePolicy,
+            this.readCheckpointRoutePolicy(resumeSessionId),
+          );
+        } catch (err) {
+          const eligibility = this.resumeRetirementEligibility(
+            resumeSessionId,
+            resolvedRowId,
+            'current',
+          );
+          if (eligibility !== null) {
+            try {
+              this.retireUnsupportedResume(
+                resumeSessionId,
+                eligibility.rowId,
+                eligibility.provider,
+              );
+            } catch (retirementError) {
+              log.warn({
+                err: retirementError,
+                event: 'route-policy-resume-retirement-failed',
+                provider,
+                conversationKey: this.conversationKey,
+                rowId: eligibility.rowId,
+              }, 'route-policy resume retirement failed; preserving policy error');
+            }
+          }
+          throw err;
+        }
+      }
     }
     if (resumeSessionId !== undefined && !providerSupportsResume(provider)) {
       this.retireUnsupportedResume(resumeSessionId, resolvedRowId!);
       throw new Error(`Provider '${provider}' does not support persisted session resume`);
     }
-    this.durableFailureClosed = false;
-
     const cwd = this.configuredCwd ?? homedir();
 
     const systemPrompt = this.buildSystemPrompt();
@@ -1468,7 +1951,14 @@ export class SessionManager {
           cwd,
           resumeSessionId,
           resolvedRowId,
+          admissionWatchdogState,
         );
+        this.persistRoutePolicyCheckpointWithCompensation(
+          checkpointWatchdogState,
+          resumeSessionId ?? null,
+          this.dbRowId,
+        );
+        this.markDurableLifecycleAdmitted();
       } catch (err) {
         log.error({ err, chatJid: this.chatJid, provider: this.provider }, 'session: failed to persist managed provider');
         this.resetFailedSessionStart();
@@ -1480,6 +1970,7 @@ export class SessionManager {
           cwd,
           systemPrompt,
           model: this.model,
+          routePolicy: this.routePolicy,
           pluginDirs: this.pluginDirs,
           allowM365Mutations: this.allowM365Mutations,
           instanceName: this.instanceName,
@@ -1565,7 +2056,14 @@ export class SessionManager {
           cwd,
           resumeSessionId,
           resolvedRowId,
+          admissionWatchdogState,
         );
+        this.persistRoutePolicyCheckpointWithCompensation(
+          checkpointWatchdogState,
+          resumeSessionId ?? null,
+          this.dbRowId,
+        );
+        this.markDurableLifecycleAdmitted();
       } catch (err) {
         log.error({ err, chatJid: this.chatJid, provider: this.provider }, 'session: failed to persist spawn-per-turn provider');
         this.resetFailedSessionStart();
@@ -1638,7 +2136,14 @@ export class SessionManager {
         cwd,
         resumeSessionId,
         resolvedRowId,
+        admissionWatchdogState,
       );
+      this.persistRoutePolicyCheckpointWithCompensation(
+        checkpointWatchdogState,
+        resumeSessionId ?? null,
+        this.dbRowId,
+      );
+      this.markDurableLifecycleAdmitted();
     } catch (err) {
       log.error({ err, pid, chatJid: this.chatJid, existingRowId: resolvedRowId ?? null }, 'session: failed to persist spawned child lifecycle');
       let cleanupError: unknown = null;
@@ -3040,6 +3545,7 @@ export class SessionManager {
     lastMessageAt: string | null;
     turnInFlight: boolean;
     durableFailureClosed: boolean;
+    durableFailureInconclusive: boolean;
   } {
     return {
       active: this.active,
@@ -3049,6 +3555,7 @@ export class SessionManager {
       messageCount: this.messageCount,
       lastMessageAt: this.lastMessageAt,
       durableFailureClosed: this.durableFailureClosed,
+      durableFailureInconclusive: this.durableFailureInconclusive,
       turnInFlight: this.providerTurnInFlight,
     };
   }

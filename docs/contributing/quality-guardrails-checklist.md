@@ -57,12 +57,19 @@ local checkpoint; incomplete scans and estate growth remain visible warnings.
 Pre-push retains two independent captures for race detection and applies the
 same estate evaluation fail-closed.
 
+The hook also reads the invoking worktree's atomic writer lease. Free or valid
+held state is reported without prompting the agent. A stale, malformed, or
+unreadable lease is warn-only at commit time and fail-closed at push time; the
+hook never steals, deletes, or silently renews a lease.
+
 The hook then hard-runs `npm run guard:repo:staged` (and console `lint-staged` for
 `console/src` changes). It additionally emits a **warn-only** architectural-drift
 signal when a commit stages `*.ts`, `package.json`, `.nvmrc`, or `deploy/` files:
-it runs `guard:node-pin-consistency`, `guard:boundaries`, and `guard:lint:src` and
-prints a warning for any that fail, **without aborting the commit**. These same
-guards are hard-enforced at push by `verify:push:branch` (Layer 2); the
+it runs `guard:boundaries` and `guard:lint:src` and prints a warning for either
+that fails, **without aborting the commit**. Node-pin consistency already ran
+once as an unconditional blocking pre-commit check, so the warning phase does
+not repeat it. These same guards are hard-enforced at push by
+`verify:push:branch` (Layer 2); the
 architectural-drift signal only surfaces drift earlier. Skip only that signal
 with `WHATSOUP_SKIP_DRIFT_WARN=1`.
 
@@ -88,8 +95,18 @@ Pre-push ref updates accept object IDs at exactly the 40-character SHA-1 or
 local object ID at either supported width is treated as a deletion. A normal
 `git push -u origin HEAD` maps symbolic `HEAD` to its branch destination before
 the exact invoking-lane comparison; pushing `HEAD` to a differently named
-destination does not exempt the differently named local branch. Missing or
-malformed baselines, malformed ref input or porcelain, Git command timeouts,
+destination does not exempt the differently named local branch.
+
+For every non-delete push, the hook also binds the verification run to one exact
+candidate commit. The invoking worktree must be clean, the pushed candidate must
+resolve to its current `HEAD`, the configured WhatSoup push URL must be SSH, and
+the candidate must contain the live remote `main` read with `git ls-remote`.
+After the branch or release composite finishes, the hook rechecks the configured
+remote, `HEAD`, worktree cleanliness, and live `main`. A mid-run main advance is
+a retryable **INCONCLUSIVE** result: fetch and rebase or merge the latest main,
+rerun the gate, then push. The hook never rebases, stashes, or rewrites work.
+
+Missing or malformed baselines, malformed ref input or porcelain, Git command timeouts,
 and racing or incomplete scans are **INCONCLUSIVE** and fail closed. Worktree
 status scans use a four-worker bounded pool and every Git subprocess has a
 bounded timeout. Inherited critical debt, dirty worktrees, untracked files,
@@ -179,6 +196,7 @@ headroom above every enforced V8 threshold.
 
 `verify:push:branch` runs this targeted guard-test list:
 - `repo-hygiene-guard.test.ts`
+- `pre-push-alignment.test.ts`
 - `pre-push-guard.test.ts`
 - `git-estate-guard.test.ts`
 - `doc-drift-check.test.ts`
