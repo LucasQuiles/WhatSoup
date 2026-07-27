@@ -809,6 +809,22 @@ describe('main bootstrap', () => {
     expect(h.connection.contactsDir.invalidateLidCache).toHaveBeenCalled();
   });
 
+  it('logs Pinecone bootstrap state without the configured index', async () => {
+    const h = await importMainWithMocks({ pineconeState: 'ready' });
+    const startupCall = h.logger.info.mock.calls.find(
+      (entry) => entry[1] === 'starting bot',
+    );
+    const readinessCall = h.logger.info.mock.calls.find(
+      (entry) => entry[1] === 'pinecone readiness',
+    );
+
+    expect(startupCall?.[0]).not.toHaveProperty('pineconeIndex');
+    expect(readinessCall?.[0]).toEqual({ pineconeReadiness: 'ready' });
+    expect(JSON.stringify({ startupCall, readinessCall })).not.toContain(
+      'mw-mind',
+    );
+  });
+
   it('imports a legacy q database on empty warm start', async () => {
     const h = await importMainWithMocks({
       instanceConfig: { name: 'q' },

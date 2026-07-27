@@ -138,7 +138,6 @@ function releaseLock(): void {
 
 log.info({
   botName: config.botName,
-  pineconeIndex: config.pineconeIndex,
   pineconeSearchMode: config.pineconeSearchMode,
   pineconeRerank: config.pineconeRerank,
   pineconeTopK: config.pineconeTopK,
@@ -193,7 +192,6 @@ const db = databaseStartup.db;
 
 const pineconeReadiness = await getPineconeReadiness(config.pineconeIndex);
 log.info({
-  pineconeIndex: pineconeReadiness.index,
   pineconeReadiness: pineconeReadiness.state,
 }, 'pinecone readiness');
 
