@@ -405,6 +405,22 @@ describe('Gemini ACP parser', () => {
         },
       });
     });
+
+    it('preserves separate runtime-context and user prompt blocks', () => {
+      expect(parseRequest(buildSessionPromptRequest(
+        4,
+        'session-4',
+        ['receipt=2026-05-28T20:26:40.000Z age=95', 'stop that flow now'],
+      ))).toMatchObject({
+        params: {
+          sessionId: 'session-4',
+          prompt: [
+            { type: 'text', text: 'receipt=2026-05-28T20:26:40.000Z age=95' },
+            { type: 'text', text: 'stop that flow now' },
+          ],
+        },
+      });
+    });
   });
 });
 

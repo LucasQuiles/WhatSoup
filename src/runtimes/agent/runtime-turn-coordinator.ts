@@ -38,12 +38,14 @@ import type { ReplyGuaranteeManager } from '../../core/reply-guarantee.ts';
 import type { SessionOwnershipRegistry } from './session-ownership.ts';
 import { createChildLogger } from '../../logger.ts';
 import { emitAlertChecked } from '../../lib/emit-alert.ts';
+import type { TurnDeliveryKind } from './turn-chronology.ts';
 
 const log = createChildLogger('agent-runtime');
 export const RUNTIME_TURN_SHUTDOWN_FINALIZATION_TIMEOUT_MS = 2_000;
 
 export interface RuntimeTurnSourceSnapshot {
   readonly sourceMessageId: string;
+  readonly receivedAtUnixSeconds: number;
   readonly conversationKey: string;
   readonly senderJid: string;
   readonly senderName: string | null;
@@ -61,6 +63,15 @@ export interface RuntimeTurnCompletion {
 
 export interface PerChatRuntimeScopeRef {
   value: string;
+}
+
+export interface ProviderFallbackReplayArgs {
+  chatJid: string;
+  mapKey?: string;
+  replayText: string;
+  actorJid?: string;
+  oldSession: SessionManager | null;
+  runtimeContext?: RuntimeTurnContext;
 }
 
 export interface RuntimeTurnPostEffects {
@@ -158,6 +169,23 @@ export interface RuntimeTurnCoordinatorPort {
     scopeRef?: PerChatRuntimeScopeRef,
     systemTurnLease?: SystemTurnLeaseToken,
     excludeJobId?: number,
+    deliveryKind?: TurnDeliveryKind,
+  ): Promise<void>;
+  deleteOwnedPerChatSession(mapKey: string, expected?: SessionManager): boolean;
+  recreatePerChatSessionForFallback(mapKey: string, chatJid: string, actorJid?: string): void;
+  recreateSingletonSessionForFallback(chatJid: string, actorJid?: string): void;
+  bindActiveGlobalMcpConversation(chatJid: string): void;
+  sendTurnToSession(
+    session: SessionManager,
+    chatJid: string,
+    text: string,
+    mapKey?: string,
+    actorJid?: string,
+    beforeUserSend?: () => void,
+    systemTurnLease?: SystemTurnLeaseToken,
+    dispatchAllowed?: () => boolean,
+    runtimeContext?: RuntimeTurnContext,
+    deliveryKind?: TurnDeliveryKind,
   ): Promise<void>;
   sendVoiceReply(chatJid: string, responseText: string): Promise<void>;
 }
@@ -348,6 +376,51 @@ finishRuntimeTurnContinuation(context: RuntimeTurnContext): void {
   this.continuationDeferrals.delete(context.identity.logicalTurnId);
 }
 
+isRuntimeTurnContinuation(context: RuntimeTurnContext): boolean {
+  return this.continuationDeferrals.has(context.identity.logicalTurnId);
+}
+
+async replayTurnOnFallback(args: ProviderFallbackReplayArgs): Promise<void> {
+  if (args.oldSession) await args.oldSession.shutdown(false);
+  if (args.mapKey !== undefined) {
+    // The fallback kills the child without onCrash; clear the prior executing
+    // actor before replay so it cannot remain at the head of the actor queue.
+    this.host.perChatExecActorQueue.delete(args.mapKey);
+    this.host.deleteOwnedPerChatSession(args.mapKey, args.oldSession ?? undefined);
+    this.host.recreatePerChatSessionForFallback(args.mapKey, args.chatJid, args.actorJid);
+    await this.host.sendTurnPerChat(
+      args.chatJid,
+      args.replayText,
+      args.mapKey,
+      args.actorJid,
+      args.runtimeContext,
+      undefined,
+      undefined,
+      undefined,
+      'recovery_replay',
+    );
+    return;
+  }
+  this.host.recreateSingletonSessionForFallback(args.chatJid, args.actorJid);
+  this.host.currentTurnChatJid = args.chatJid;
+  this.host.bindActiveGlobalMcpConversation(args.chatJid);
+  this.host.turnHadVisibleOutput = false;
+  this.host.currentTurnReplayText = args.replayText;
+  this.host.currentTurnReplayActorJid = args.actorJid;
+  await this.host.sendTurnToSession(
+    this.host.session!,
+    args.chatJid,
+    args.replayText,
+    undefined,
+    args.actorJid,
+    undefined,
+    undefined,
+    undefined,
+    args.runtimeContext,
+    args.runtimeContext === undefined ? 'live' : 'recovery_replay',
+  );
+}
+
 markRuntimeTurnDegraded(context: RuntimeTurnContext): void {
   this.host.runtimeTurnSupervisor.markDegraded(context);
 }
@@ -442,6 +515,7 @@ createRuntimeTurnForDispatch(args: {
     },
     replay: {
       sourceMessageId: args.source.sourceMessageId,
+      receivedAtUnixSeconds: args.source.receivedAtUnixSeconds,
       replaySafe: true,
       senderJid: args.source.senderJid,
       senderName: args.source.senderName,

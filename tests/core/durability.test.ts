@@ -32,6 +32,49 @@ describe('DurabilityEngine', () => {
       expect(row.routed_to).toBe('agent');
     });
 
+    it('reads the canonical durable receipt time for a journaled inbound', () => {
+      const seq = engine.journalInbound('msg-receipt', 'key-1', 'jid-1@s.whatsapp.net', 'agent');
+      const row = db.raw.prepare(
+        'SELECT unixepoch(received_at) AS received_at_unix_seconds FROM inbound_events WHERE seq = ?',
+      ).get(seq) as { received_at_unix_seconds: number };
+
+      expect(engine.getInboundReceivedAtUnixSeconds(seq)).toBe(row.received_at_unix_seconds);
+      expect(engine.getInboundReceivedAtUnixSeconds(seq + 1)).toBeUndefined();
+    });
+
+    it('round-trips the SQLite unixepoch ceiling and rejects larger receipts without inserting', () => {
+      const maxSqliteUnixSeconds = 253_402_300_799;
+      const seq = engine.journalInbound(
+        'msg-receipt-max',
+        'key-receipt-max',
+        'jid-receipt-max@s.whatsapp.net',
+        'agent',
+        maxSqliteUnixSeconds,
+      );
+      expect(engine.getInboundReceivedAtUnixSeconds(seq)).toBe(maxSqliteUnixSeconds);
+
+      expect(() => engine.journalInbound(
+        'msg-receipt-too-large',
+        'key-receipt-too-large',
+        'jid-receipt-too-large@s.whatsapp.net',
+        'agent',
+        maxSqliteUnixSeconds + 1,
+      )).toThrow(/receipt timestamp/i);
+      expect(() => engine.journalInbound(
+        'msg-receipt-unsafe-sqlite',
+        'key-receipt-unsafe-sqlite',
+        'jid-receipt-unsafe-sqlite@s.whatsapp.net',
+        'agent',
+        Number.MAX_SAFE_INTEGER,
+      )).toThrow(/receipt timestamp/i);
+      const rejectedRows = db.raw.prepare(
+        `SELECT COUNT(*) AS count
+         FROM inbound_events
+         WHERE message_id IN ('msg-receipt-too-large', 'msg-receipt-unsafe-sqlite')`,
+      ).get() as { count: number };
+      expect(rejectedRows.count).toBe(0);
+    });
+
     it('markTurnDone transitions processing → turn_done', () => {
       const seq = engine.journalInbound('msg-1', 'key-1', 'jid-1', 'agent');
       engine.markTurnDone(seq);
