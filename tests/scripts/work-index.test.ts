@@ -19,8 +19,12 @@ import {
 const WORK_INDEX_TEST_TIMEOUT_MS = 30_000;
 const repoRoot = fileURLToPath(new URL('../..', import.meta.url));
 
-function git(cwd: string, args: string[]): string {
-  return execFileSync('git', args, { cwd, encoding: 'utf8', env: cleanGitEnv() }).trim();
+function git(cwd: string, args: string[], extraEnv: NodeJS.ProcessEnv = {}): string {
+  return execFileSync('git', args, {
+    cwd,
+    encoding: 'utf8',
+    env: { ...cleanGitEnv(), ...extraEnv },
+  }).trim();
 }
 
 describe('work index scanner', () => {
@@ -180,5 +184,32 @@ describe('work index scanner', () => {
       ],
       ignoredCanonical: [],
     });
+  }, WORK_INDEX_TEST_TIMEOUT_MS);
+
+  it('ignores last_modified churn from a squash-merge re-dating unchanged content', () => {
+    const root = mkdtempSync(path.join(tmpdir(), 'whatsoup-work-index-redate-'));
+    const planFile = path.join(root, 'docs/superpowers/plans/2026-04-25-example-plan.md');
+
+    mkdirSync(path.dirname(planFile), { recursive: true });
+    writeFileSync(planFile, '# Example\n', 'utf8');
+    git(root, ['init']);
+    git(root, ['config', 'user.name', 'Work Index Test']);
+    git(root, ['config', 'user.email', 'work-index-test@users.noreply.github.com']);
+    git(root, ['add', '.']);
+    git(root, ['commit', '-m', 'seed docs'], { GIT_COMMITTER_DATE: '2026-04-25T12:00:00+0000' });
+
+    writeWorkIndex(root);
+    expect(findWorkIndexCheckIssues(root)).toEqual({ missing: [], stale: [], drift: [], ignoredCanonical: [] });
+
+    // A squash-merge re-commits byte-identical content under the merge date, so
+    // `%cs` (date-only) moves whenever a PR is authored on one UTC day and landed
+    // on the next. Without this normalisation the artifact a PR correctly
+    // regenerated goes stale the instant it lands, leaving main red.
+    git(root, ['commit', '--amend', '--no-edit'], { GIT_COMMITTER_DATE: '2026-04-26T12:00:00+0000' });
+    expect(git(root, ['log', '-1', '--format=%cs', '--', 'docs/superpowers/plans/2026-04-25-example-plan.md'])).toBe(
+      '2026-04-26',
+    );
+
+    expect(findWorkIndexCheckIssues(root)).toEqual({ missing: [], stale: [], drift: [], ignoredCanonical: [] });
   }, WORK_INDEX_TEST_TIMEOUT_MS);
 });
