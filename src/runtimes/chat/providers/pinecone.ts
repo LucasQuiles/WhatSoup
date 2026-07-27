@@ -23,6 +23,7 @@ import {
   type MemoryOperationContext,
   type MemoryOperationFailure,
   type MemoryOperationFailureCode,
+  type MemoryReadinessState,
 } from '../../../lib/memory-operation-telemetry.ts';
 
 const logger = createChildLogger('pinecone-provider');
@@ -95,13 +96,7 @@ function logMemoryOperation(
   }
 }
 
-export type PineconeReadinessState =
-  | 'disabled'
-  | 'auth_failed'
-  | 'index_missing'
-  | 'project_mismatch'
-  | 'network_error'
-  | 'ready';
+export type PineconeReadinessState = MemoryReadinessState;
 
 function classifyReadinessError(err: unknown): Extract<PineconeReadinessState, 'auth_failed' | 'network_error'> {
   const status = typeof err === 'object' && err !== null && 'status' in err
