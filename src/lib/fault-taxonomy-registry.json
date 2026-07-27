@@ -179,6 +179,22 @@
       ],
       "owner": "src/core/inbound-failure-class.ts",
       "test": "tests/core/failure-taxonomy-cross-contract.test.ts"
+    },
+    "memoryOperationFailureCodes": {
+      "values": [
+        "none",
+        "breaker_open",
+        "project_guard_failed",
+        "auth_failed",
+        "rate_limited",
+        "timeout",
+        "network_error",
+        "invalid_request",
+        "provider_unavailable",
+        "unknown"
+      ],
+      "owner": "src/runtimes/chat/memory/operation-telemetry.ts",
+      "test": "tests/runtimes/chat/memory/operation-telemetry.test.ts"
     }
   },
   "terminalAttemptToInboundFailureClass": {
