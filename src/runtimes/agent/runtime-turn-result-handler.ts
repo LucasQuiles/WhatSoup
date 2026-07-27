@@ -285,7 +285,7 @@ if (config.nlRouting) {
 }
 const compactScopeKey = mapKey ?? GLOBAL_TOOL_SCOPE_KEY;
 const hadCompactBoundary = host.consumeCompactBoundary(compactScopeKey);
-session?.completeProviderTurn();
+session?.completeProviderTurn(event.providerTurnOwnerToken);
 tracker?.onTurnComplete();
 // Turn-end choke point: clear the typing indicator unconditionally so no
 // early-break branch below can leave 'composing' asserted into the idle
@@ -836,7 +836,7 @@ if (config.nlRouting && host.currentTurnRouteMarkerHold !== null) {
   }
 }
 const hadCompactBoundary = host.consumeCompactBoundary(GLOBAL_TOOL_SCOPE_KEY);
-host.session?.completeProviderTurn();
+host.session?.completeProviderTurn(event.providerTurnOwnerToken);
 tracker?.onTurnComplete();
 // Turn-end choke point: clear the typing indicator unconditionally so no
 // early-break branch below can leave 'composing' asserted into the idle

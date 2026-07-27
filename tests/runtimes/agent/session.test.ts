@@ -157,6 +157,14 @@ function makeSseResponse(events: Array<Record<string, unknown> | string>): Respo
   });
 }
 
+function lastJsonRpcRequest(child: MockChild, method: string): Record<string, unknown> {
+  const request = child.stdin.write.mock.calls
+    .map((call) => JSON.parse(String(call[0])) as Record<string, unknown>)
+    .findLast((candidate) => candidate['method'] === method);
+  if (request === undefined) throw new Error(`missing ${method} request`);
+  return request;
+}
+
 // ─── DB mock helpers ──────────────────────────────────────────────────────────
 
 vi.mock('../../../src/runtimes/agent/session-db.ts', () => ({
@@ -2790,6 +2798,729 @@ describe('Event-driven provider ready signal', () => {
       expect.any(Function),
     );
   });
+
+  it('Codex stdout lifecycle captures and terminalizes the exact owned native turn', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const generation = { managerId: 'manager-a', generation: 7 } as const;
+    const events: AgentEvent[] = [];
+    let sm!: SessionManager;
+    sm = new SessionManager({
+      db,
+      messenger,
+      chatJid: CHAT_JID,
+      provider: 'codex-cli',
+      onEvent: (event) => {
+        events.push(event);
+        if (event.type === 'result') sm.completeProviderTurn();
+      },
+    });
+    sm.bindGenerationOwnership(() => generation);
+    await sm.spawnSession();
+
+    mockChild.stdout.emit('data', Buffer.from(JSON.stringify({
+      jsonrpc: '2.0',
+      id: 'rpc-2',
+      result: { id: 'thread-owned' },
+    }) + '\n'));
+    await sm.sendTurn('hello');
+    const turnRequest = lastJsonRpcRequest(mockChild, 'turn/start');
+    mockChild.stdout.emit('data', Buffer.from(JSON.stringify({
+      jsonrpc: '2.0',
+      id: turnRequest['id'],
+      result: { turn: { id: 'turn-owned', status: 'inProgress' } },
+    }) + '\n'));
+
+    mockChild.stdout.emit('data', Buffer.from(JSON.stringify({
+      jsonrpc: '2.0',
+      method: 'turn/started',
+      params: {
+        threadId: 'thread-owned',
+        turn: { id: 'turn-owned', status: 'inProgress' },
+      },
+    }) + '\n'));
+
+    expect(sm.getActiveProviderTurn()).toEqual({
+      provider: 'codex-cli',
+      identity: { sessionId: 'thread-owned', turnId: 'turn-owned' },
+      generation,
+      providerTurnToken: 1,
+    });
+
+    mockChild.stdout.emit('data', Buffer.from(JSON.stringify({
+      jsonrpc: '2.0',
+      method: 'turn/completed',
+      params: {
+        threadId: 'thread-owned',
+        turn: { id: 'turn-owned', status: 'completed' },
+      },
+    }) + '\n'));
+
+    expect(events).toContainEqual({
+      type: 'result',
+      text: null,
+      providerTurnOwnerToken: 1,
+      providerTurn: {
+        sessionId: 'thread-owned',
+        turnId: 'turn-owned',
+        status: 'completed',
+      },
+    });
+    expect(sm.getActiveProviderTurn()).toBeNull();
+  });
+
+  it.each([
+    {
+      name: 'wrong thread',
+      terminal: { sessionId: 'thread-other', turnId: 'turn-owned' },
+    },
+    {
+      name: 'wrong turn',
+      terminal: { sessionId: 'thread-owned', turnId: 'turn-other' },
+    },
+  ])('Codex quarantines a $name terminal without forwarding it', async ({ terminal }) => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const events: AgentEvent[] = [];
+    const sm = new SessionManager({
+      db,
+      messenger,
+      chatJid: CHAT_JID,
+      provider: 'codex-cli',
+      onEvent: (event) => events.push(event),
+    });
+    await sm.spawnSession();
+    mockChild.stdout.emit('data', Buffer.from(JSON.stringify({
+      jsonrpc: '2.0',
+      id: 'rpc-2',
+      result: { id: 'thread-owned' },
+    }) + '\n'));
+    await sm.sendTurn('hello');
+    const turnRequest = lastJsonRpcRequest(mockChild, 'turn/start');
+    mockChild.stdout.emit('data', Buffer.from(JSON.stringify({
+      jsonrpc: '2.0',
+      id: turnRequest['id'],
+      result: { turn: { id: 'turn-owned', status: 'inProgress' } },
+    }) + '\n'));
+    mockChild.stdout.emit('data', Buffer.from(JSON.stringify({
+      jsonrpc: '2.0',
+      method: 'turn/started',
+      params: {
+        threadId: 'thread-owned',
+        turn: { id: 'turn-owned', status: 'inProgress' },
+      },
+    }) + '\n'));
+    expect(sm.getActiveProviderTurn()).toMatchObject({
+      provider: 'codex-cli',
+      identity: { sessionId: 'thread-owned', turnId: 'turn-owned' },
+      generation: { managerId: expect.any(String), generation: 1 },
+      providerTurnToken: 1,
+    });
+
+    mockChild.stdout.emit('data', Buffer.from(JSON.stringify({
+      jsonrpc: '2.0',
+      method: 'turn/completed',
+      params: {
+        threadId: terminal.sessionId,
+        turn: { id: terminal.turnId, status: 'completed' },
+      },
+    }) + '\n'));
+
+    await vi.waitFor(() => expect(mockChild.kill).toHaveBeenCalledWith('SIGKILL'));
+    expect(events.filter((event) => event.type === 'result')).toEqual([]);
+    expect(sm.getActiveProviderTurn()).toBeNull();
+  });
+
+  it('Codex quarantines terminal-before-start and missing-identity notifications', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const events: AgentEvent[] = [];
+    const sm = new SessionManager({
+      db,
+      messenger,
+      chatJid: CHAT_JID,
+      provider: 'codex-cli',
+      onEvent: (event) => events.push(event),
+    });
+    await sm.spawnSession();
+    mockChild.stdout.emit('data', Buffer.from(JSON.stringify({
+      jsonrpc: '2.0',
+      id: 'rpc-2',
+      result: { id: 'thread-owned' },
+    }) + '\n'));
+    await sm.sendTurn('hello');
+
+    mockChild.stdout.emit('data', Buffer.from(JSON.stringify({
+      jsonrpc: '2.0',
+      method: 'turn/completed',
+      params: {
+        threadId: 'thread-owned',
+        turn: { id: 'turn-before-start', status: 'completed' },
+      },
+    }) + '\n'));
+    mockChild.stdout.emit('data', Buffer.from(JSON.stringify({
+      jsonrpc: '2.0',
+      method: 'turn/completed',
+      params: { turn: { status: 'completed' } },
+    }) + '\n'));
+
+    await vi.waitFor(() => expect(mockChild.kill).toHaveBeenCalledWith('SIGKILL'));
+    expect(events.filter((event) => event.type === 'result')).toEqual([]);
+  });
+
+  it('Codex drops same-chunk non-terminal output after a native identity violation', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const events: AgentEvent[] = [];
+    const sm = new SessionManager({
+      db,
+      messenger,
+      chatJid: CHAT_JID,
+      provider: 'codex-cli',
+      onEvent: (event) => events.push(event),
+    });
+    await sm.spawnSession();
+    mockChild.stdout.emit('data', Buffer.from(JSON.stringify({
+      jsonrpc: '2.0',
+      id: 'rpc-2',
+      result: { id: 'thread-owned' },
+    }) + '\n'));
+    await sm.sendTurn('hello');
+
+    const lines = [
+      {
+        jsonrpc: '2.0',
+        method: 'turn/completed',
+        params: {
+          threadId: 'thread-owned',
+          turn: { id: 'turn-unowned', status: 'completed' },
+        },
+      },
+      {
+        jsonrpc: '2.0',
+        method: 'item/agentMessage/delta',
+        params: { delta: 'must not escape quarantine', itemId: 'message-stale' },
+      },
+      {
+        jsonrpc: '2.0',
+        method: 'item/started',
+        params: {
+          item: {
+            id: 'tool-stale',
+            type: 'commandExecution',
+            command: 'pwd',
+            status: 'inProgress',
+          },
+        },
+      },
+    ];
+    mockChild.stdout.emit(
+      'data',
+      Buffer.from(`${lines.map((line) => JSON.stringify(line)).join('\n')}\n`),
+    );
+
+    expect(events.filter(
+      (event) => event.type === 'assistant_text' || event.type === 'tool_use',
+    )).toEqual([]);
+  });
+
+  it('Codex does not approve a same-chunk server request after quarantine', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const sm = new SessionManager({
+      db,
+      messenger,
+      chatJid: CHAT_JID,
+      provider: 'codex-cli',
+      onEvent: vi.fn(),
+    });
+    await sm.spawnSession();
+    mockChild.stdout.emit('data', Buffer.from(JSON.stringify({
+      jsonrpc: '2.0',
+      id: 'rpc-2',
+      result: { id: 'thread-owned' },
+    }) + '\n'));
+    await sm.sendTurn('hello');
+    mockChild.stdin.write.mockClear();
+
+    const lines = [
+      {
+        jsonrpc: '2.0',
+        method: 'turn/completed',
+        params: {
+          threadId: 'thread-owned',
+          turn: { id: 'turn-unowned', status: 'completed' },
+        },
+      },
+      {
+        jsonrpc: '2.0',
+        id: 'approval-stale',
+        method: 'item/commandExecution/requestApproval',
+        params: {},
+      },
+    ];
+    mockChild.stdout.emit(
+      'data',
+      Buffer.from(`${lines.map((line) => JSON.stringify(line)).join('\n')}\n`),
+    );
+
+    expect(mockChild.stdin.write).not.toHaveBeenCalled();
+  });
+
+  it('Codex drops a buffered partial event drained on exit after quarantine', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const events: AgentEvent[] = [];
+    const sm = new SessionManager({
+      db,
+      messenger,
+      chatJid: CHAT_JID,
+      provider: 'codex-cli',
+      onEvent: (event) => events.push(event),
+    });
+    await sm.spawnSession();
+    mockChild.stdout.emit('data', Buffer.from(JSON.stringify({
+      jsonrpc: '2.0',
+      id: 'rpc-2',
+      result: { id: 'thread-owned' },
+    }) + '\n'));
+    await sm.sendTurn('hello');
+
+    const violationLine = JSON.stringify({
+      jsonrpc: '2.0',
+      method: 'turn/completed',
+      params: {
+        threadId: 'thread-owned',
+        turn: { id: 'turn-unowned', status: 'completed' },
+      },
+    });
+    const bufferedPartialLine = JSON.stringify({
+      jsonrpc: '2.0',
+      method: 'item/agentMessage/delta',
+      params: { delta: 'must not drain after quarantine', itemId: 'message-stale' },
+    });
+    mockChild.stdout.emit(
+      'data',
+      Buffer.from(`${violationLine}\n${bufferedPartialLine}`),
+    );
+
+    const stdoutState = sm as unknown as {
+      stdoutChunks: Buffer[];
+      stdoutBufferStr: string;
+    };
+    expect(stdoutState.stdoutChunks).toEqual([]);
+    expect(stdoutState.stdoutBufferStr).toBe(bufferedPartialLine);
+
+    mockChild._exitCb?.(1, 'SIGKILL');
+
+    expect(events.filter((event) => event.type === 'assistant_text')).toEqual([]);
+    expect(stdoutState.stdoutChunks).toEqual([]);
+    expect(stdoutState.stdoutBufferStr).toBe('');
+    expect(sm.getStatus()).toMatchObject({
+      active: false,
+      pid: null,
+      turnInFlight: false,
+    });
+  });
+
+  it('Codex quarantine remains scoped to an exited child after replacement', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const childA = mockChild;
+    const childB = makeMockChild(23456);
+    const events: AgentEvent[] = [];
+    let generation = { managerId: 'codex-child-replacement', generation: 1 };
+    let sm!: SessionManager;
+    sm = new SessionManager({
+      db,
+      messenger,
+      chatJid: CHAT_JID,
+      provider: 'codex-cli',
+      onEvent: (event) => {
+        events.push(event);
+        if (event.type === 'result') sm.completeProviderTurn();
+      },
+    });
+    sm.bindGenerationOwnership(() => generation);
+
+    await sm.spawnSession();
+    childA.stdout.emit('data', Buffer.from(JSON.stringify({
+      jsonrpc: '2.0',
+      id: 'rpc-child-a',
+      result: { id: 'thread-child-a' },
+    }) + '\n'));
+    await sm.sendTurn('first child turn');
+
+    childA.stdout.emit('data', Buffer.from(JSON.stringify({
+      jsonrpc: '2.0',
+      method: 'turn/completed',
+      params: {
+        threadId: 'thread-child-a',
+        turn: { id: 'unowned-child-a-turn', status: 'completed' },
+      },
+    }) + '\n'));
+    childA._exitCb?.(1, 'SIGKILL');
+
+    expect(sm.getStatus()).toMatchObject({
+      active: false,
+      pid: null,
+      turnInFlight: false,
+    });
+
+    generation = { managerId: 'codex-child-replacement', generation: 2 };
+    (spawn as ReturnType<typeof vi.fn>).mockReturnValue(childB);
+    await sm.spawnSession();
+    childB.stdout.emit('data', Buffer.from(JSON.stringify({
+      jsonrpc: '2.0',
+      id: 'rpc-child-b',
+      result: { id: 'thread-child-b' },
+    }) + '\n'));
+    await sm.sendTurn('replacement child turn');
+    const childBTurnRequest = lastJsonRpcRequest(childB, 'turn/start');
+    childB.stdout.emit('data', Buffer.from([
+      JSON.stringify({
+        jsonrpc: '2.0',
+        id: childBTurnRequest['id'],
+        result: { turn: { id: 'turn-child-b', status: 'inProgress' } },
+      }),
+      JSON.stringify({
+        jsonrpc: '2.0',
+        method: 'turn/started',
+        params: {
+          threadId: 'thread-child-b',
+          turn: { id: 'turn-child-b', status: 'inProgress' },
+        },
+      }),
+      '',
+    ].join('\n')));
+
+    childB.stdin.write.mockClear();
+    childA.stdout.emit('data', Buffer.from([
+      JSON.stringify({
+        jsonrpc: '2.0',
+        method: 'item/agentMessage/delta',
+        params: {
+          delta: 'late-child-a-output',
+          itemId: 'late-child-a-message',
+        },
+      }),
+      JSON.stringify({
+        jsonrpc: '2.0',
+        id: 'late-child-a-approval',
+        method: 'item/commandExecution/requestApproval',
+        params: {},
+      }),
+      '',
+    ].join('\n')));
+    childA._exitCb?.(1, 'SIGKILL');
+
+    expect(
+      events.some(
+        (event) =>
+          event.type === 'assistant_text'
+          && event.text === 'late-child-a-output',
+      ),
+    ).toBe(false);
+    expect(childB.stdin.write).not.toHaveBeenCalled();
+    expect(sm.getStatus()).toMatchObject({
+      active: true,
+      pid: 23456,
+      turnInFlight: true,
+    });
+    expect(sm.getActiveProviderTurn()).toMatchObject({
+      provider: 'codex-cli',
+      identity: {
+        sessionId: 'thread-child-b',
+        turnId: 'turn-child-b',
+      },
+      generation,
+    });
+
+    childB.stdout.emit('data', Buffer.from(JSON.stringify({
+      jsonrpc: '2.0',
+      id: 'child-b-approval',
+      method: 'item/commandExecution/requestApproval',
+      params: {},
+    }) + '\n'));
+    expect(childB.stdin.write).toHaveBeenCalledTimes(1);
+    expect(childB.stdin.write).toHaveBeenCalledWith(
+      expect.stringContaining('"id":"child-b-approval"'),
+    );
+    expect(childB.stdin.write).toHaveBeenCalledWith(
+      expect.stringContaining('"decision":"approved"'),
+    );
+
+    childB.stdout.emit('data', Buffer.from(JSON.stringify({
+      jsonrpc: '2.0',
+      method: 'turn/completed',
+      params: {
+        threadId: 'thread-child-b',
+        turn: { id: 'turn-child-b', status: 'completed' },
+      },
+    }) + '\n'));
+    expect(events).toContainEqual(expect.objectContaining({
+      type: 'result',
+      providerTurn: {
+        sessionId: 'thread-child-b',
+        turnId: 'turn-child-b',
+        status: 'completed',
+      },
+    }));
+    expect(sm.getStatus()).toMatchObject({
+      active: true,
+      pid: 23456,
+      turnInFlight: false,
+    });
+  });
+
+  it('Codex invalidates an ambiguous second start identity and quarantines the source', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const events: AgentEvent[] = [];
+    const sm = new SessionManager({
+      db,
+      messenger,
+      chatJid: CHAT_JID,
+      provider: 'codex-cli',
+      onEvent: (event) => events.push(event),
+    });
+    await sm.spawnSession();
+    mockChild.stdout.emit('data', Buffer.from(JSON.stringify({
+      jsonrpc: '2.0',
+      id: 'rpc-2',
+      result: { id: 'thread-owned' },
+    }) + '\n'));
+    await sm.sendTurn('hello');
+    const turnRequest = lastJsonRpcRequest(mockChild, 'turn/start');
+    mockChild.stdout.emit('data', Buffer.from(JSON.stringify({
+      jsonrpc: '2.0',
+      id: turnRequest['id'],
+      result: { turn: { id: 'turn-first', status: 'inProgress' } },
+    }) + '\n'));
+    for (const turnId of ['turn-first', 'turn-conflict']) {
+      mockChild.stdout.emit('data', Buffer.from(JSON.stringify({
+        jsonrpc: '2.0',
+        method: 'turn/started',
+        params: {
+          threadId: 'thread-owned',
+          turn: { id: turnId, status: 'inProgress' },
+        },
+      }) + '\n'));
+    }
+
+    await vi.waitFor(() => expect(mockChild.kill).toHaveBeenCalledWith('SIGKILL'));
+    expect(sm.getActiveProviderTurn()).toBeNull();
+    expect(events.some((event) => event.type === 'provider_turn_started')).toBe(false);
+  });
+
+  it('Codex rejects a duplicate old completion after the next owned turn starts', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const results: Extract<AgentEvent, { type: 'result' }>[] = [];
+    let sm!: SessionManager;
+    sm = new SessionManager({
+      db,
+      messenger,
+      chatJid: CHAT_JID,
+      provider: 'codex-cli',
+      onEvent: (event) => {
+        if (event.type !== 'result') return;
+        results.push(event);
+        sm.completeProviderTurn(event.providerTurnOwnerToken);
+      },
+    });
+    await sm.spawnSession();
+    mockChild.stdout.emit('data', Buffer.from(JSON.stringify({
+      jsonrpc: '2.0',
+      id: 'rpc-2',
+      result: { id: 'thread-owned' },
+    }) + '\n'));
+
+    await sm.sendTurn('first');
+    const firstTurnRequest = lastJsonRpcRequest(mockChild, 'turn/start');
+    mockChild.stdout.emit('data', Buffer.from(JSON.stringify({
+      jsonrpc: '2.0',
+      id: firstTurnRequest['id'],
+      result: { turn: { id: 'turn-first', status: 'inProgress' } },
+    }) + '\n'));
+    for (const method of ['turn/started', 'turn/completed']) {
+      mockChild.stdout.emit('data', Buffer.from(JSON.stringify({
+        jsonrpc: '2.0',
+        method,
+        params: {
+          threadId: 'thread-owned',
+          turn: {
+            id: 'turn-first',
+            status: method === 'turn/started' ? 'inProgress' : 'completed',
+          },
+        },
+      }) + '\n'));
+    }
+    expect(results).toHaveLength(1);
+
+    await sm.sendTurn('second');
+    const secondTurnRequest = lastJsonRpcRequest(mockChild, 'turn/start');
+    mockChild.stdout.emit('data', Buffer.from(JSON.stringify({
+      jsonrpc: '2.0',
+      id: secondTurnRequest['id'],
+      result: { turn: { id: 'turn-second', status: 'inProgress' } },
+    }) + '\n'));
+    mockChild.stdout.emit('data', Buffer.from(JSON.stringify({
+      jsonrpc: '2.0',
+      method: 'turn/started',
+      params: {
+        threadId: 'thread-owned',
+        turn: { id: 'turn-second', status: 'inProgress' },
+      },
+    }) + '\n'));
+    mockChild.stdout.emit('data', Buffer.from(JSON.stringify({
+      jsonrpc: '2.0',
+      method: 'turn/completed',
+      params: {
+        threadId: 'thread-owned',
+        turn: { id: 'turn-first', status: 'completed' },
+      },
+    }) + '\n'));
+
+    await vi.waitFor(() => expect(mockChild.kill).toHaveBeenCalledWith('SIGKILL'));
+    expect(results).toHaveLength(1);
+    expect(sm.getActiveProviderTurn()).toBeNull();
+  });
+
+  it('Codex quarantines an identity-free legacy completion without clearing its owner', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const results: Extract<AgentEvent, { type: 'result' }>[] = [];
+    const sm = new SessionManager({
+      db,
+      messenger,
+      chatJid: CHAT_JID,
+      provider: 'codex-cli',
+      onEvent: (event) => {
+        if (event.type === 'result') results.push(event);
+      },
+    });
+    await sm.spawnSession();
+    mockChild.stdout.emit('data', Buffer.from(JSON.stringify({
+      jsonrpc: '2.0',
+      id: 'thread-request',
+      result: { id: 'thread-owned' },
+    }) + '\n'));
+    await sm.sendTurn('current');
+    const turnRequest = lastJsonRpcRequest(mockChild, 'turn/start');
+    mockChild.stdout.emit('data', Buffer.from(JSON.stringify({
+      jsonrpc: '2.0',
+      id: turnRequest['id'],
+      result: { turn: { id: 'turn-current', status: 'inProgress' } },
+    }) + '\n'));
+
+    mockChild.stdout.emit('data', Buffer.from(JSON.stringify({
+      type: 'turn.completed',
+      usage: { input_tokens: 7, output_tokens: 3 },
+    }) + '\n'));
+
+    await vi.waitFor(() => expect(mockChild.kill).toHaveBeenCalledWith('SIGKILL'));
+    expect(results).toEqual([]);
+    expect(sm.getActiveProviderTurn()).toBeNull();
+  });
+
+  it('Codex admits an exact turn-start request error with the owning token', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const results: Extract<AgentEvent, { type: 'result' }>[] = [];
+    let sm!: SessionManager;
+    sm = new SessionManager({
+      db,
+      messenger,
+      chatJid: CHAT_JID,
+      provider: 'codex-cli',
+      onEvent: (event) => {
+        if (event.type !== 'result') return;
+        results.push(event);
+        sm.completeProviderTurn(event.providerTurnOwnerToken);
+      },
+    });
+    await sm.spawnSession();
+    mockChild.stdout.emit('data', Buffer.from(JSON.stringify({
+      jsonrpc: '2.0',
+      id: 'rpc-2',
+      result: { id: 'thread-owned' },
+    }) + '\n'));
+    await sm.sendTurn('first');
+    const request = lastJsonRpcRequest(mockChild, 'turn/start');
+
+    mockChild.stdout.emit('data', Buffer.from(JSON.stringify({
+      jsonrpc: '2.0',
+      id: request['id'],
+      error: { code: -32600, message: 'request rejected' },
+    }) + '\n'));
+
+    expect(results).toContainEqual({
+      type: 'result',
+      text: 'Codex error: request rejected',
+      isError: true,
+      providerRequestId: request['id'],
+      providerTurnOwnerToken: 1,
+    });
+  });
+
+  it('Codex quarantines a stale turn-start request error after a later request owns the lane', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const results: Extract<AgentEvent, { type: 'result' }>[] = [];
+    let sm!: SessionManager;
+    sm = new SessionManager({
+      db,
+      messenger,
+      chatJid: CHAT_JID,
+      provider: 'codex-cli',
+      onEvent: (event) => {
+        if (event.type !== 'result') return;
+        results.push(event);
+        sm.completeProviderTurn(event.providerTurnOwnerToken);
+      },
+    });
+    await sm.spawnSession();
+    mockChild.stdout.emit('data', Buffer.from(JSON.stringify({
+      jsonrpc: '2.0',
+      id: 'rpc-2',
+      result: { id: 'thread-owned' },
+    }) + '\n'));
+
+    await sm.sendTurn('first');
+    const firstRequest = lastJsonRpcRequest(mockChild, 'turn/start');
+    mockChild.stdout.emit('data', Buffer.from(JSON.stringify({
+      jsonrpc: '2.0',
+      id: firstRequest['id'],
+      result: { turn: { id: 'turn-first', status: 'inProgress' } },
+    }) + '\n'));
+    mockChild.stdout.emit('data', Buffer.from(JSON.stringify({
+      jsonrpc: '2.0',
+      method: 'turn/started',
+      params: {
+        threadId: 'thread-owned',
+        turn: { id: 'turn-first', status: 'inProgress' },
+      },
+    }) + '\n'));
+    mockChild.stdout.emit('data', Buffer.from(JSON.stringify({
+      jsonrpc: '2.0',
+      method: 'turn/completed',
+      params: {
+        threadId: 'thread-owned',
+        turn: { id: 'turn-first', status: 'completed' },
+      },
+    }) + '\n'));
+
+    await sm.sendTurn('second');
+    mockChild.stdout.emit('data', Buffer.from(JSON.stringify({
+      jsonrpc: '2.0',
+      id: firstRequest['id'],
+      error: { code: -32600, message: 'stale request rejected' },
+    }) + '\n'));
+
+    await vi.waitFor(() => expect(mockChild.kill).toHaveBeenCalledWith('SIGKILL'));
+    expect(results).toHaveLength(1);
+  });
 });
 
 // ─── Codex session resume on crash tests ─────────────────────────────────────
@@ -3654,6 +4385,144 @@ describe('handleProviderEvent branch coverage', () => {
 
     expect((sm as unknown as { codexResumeThreadStartReqId: string | null }).codexResumeThreadStartReqId).toBeNull();
     expect(sm.getStatus().sessionId).toBe('thread_success_xyz');
+  });
+
+  it('captures an exact active provider turn only for the current request generation', () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const sm = new SessionManager({
+      db, messenger, chatJid: CHAT_JID, provider: 'codex-cli', onEvent: vi.fn(),
+    });
+    const generation = { managerId: 'manager-a', generation: 7 } as const;
+    sm.bindGenerationOwnership(() => generation);
+    Object.assign(sm as unknown as Record<string, unknown>, {
+      providerTurnInFlight: true,
+      activeProviderTurnToken: 23,
+      activeProviderTurnGeneration: generation,
+      codexThreadId: 'thread-current',
+      activeCodexTurnStartRequestId: 'request-current',
+    });
+    const handler = (
+      sm as unknown as { handleProviderEvent: (event: AgentEvent) => void }
+    ).handleProviderEvent.bind(sm);
+
+    handler({
+      type: 'provider_turn_accepted',
+      requestId: 'request-current',
+      turnId: 'turn-current',
+    });
+
+    expect(sm.getActiveProviderTurn()).toEqual({
+      provider: 'codex-cli',
+      identity: { sessionId: 'thread-current', turnId: 'turn-current' },
+      generation,
+      providerTurnToken: 23,
+    });
+
+    sm.completeProviderTurn(22);
+    expect(sm.getActiveProviderTurn()).not.toBeNull();
+    sm.completeProviderTurn(23);
+    expect(sm.getActiveProviderTurn()).toBeNull();
+  });
+
+  it('does not reacquire turn ownership after quarantining the request source', () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const sm = new SessionManager({
+      db, messenger, chatJid: CHAT_JID, provider: 'codex-cli', onEvent: vi.fn(),
+    });
+    const generation = { managerId: 'manager-a', generation: 7 } as const;
+    sm.bindGenerationOwnership(() => generation);
+    Object.assign(sm as unknown as Record<string, unknown>, {
+      providerTurnInFlight: true,
+      activeProviderTurnToken: 23,
+      activeProviderTurnGeneration: generation,
+      codexThreadId: 'thread-current',
+      activeCodexTurnStartRequestId: 'request-current',
+    });
+    const handler = (
+      sm as unknown as { handleProviderEvent: (event: AgentEvent) => void }
+    ).handleProviderEvent.bind(sm);
+
+    handler({
+      type: 'provider_turn_accepted',
+      requestId: 'request-stale',
+      turnId: 'turn-stale',
+    });
+    handler({
+      type: 'provider_turn_accepted',
+      requestId: 'request-current',
+      turnId: 'turn-replayed',
+    });
+
+    expect(sm.getActiveProviderTurn()).toBeNull();
+  });
+
+  it('rejects stale, mismatched, and unowned provider turn identities', () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const sm = new SessionManager({
+      db, messenger, chatJid: CHAT_JID, provider: 'codex-cli', onEvent: vi.fn(),
+    });
+    const generation = { managerId: 'manager-a', generation: 7 } as const;
+    let currentGeneration: { managerId: string; generation: number } = generation;
+    sm.bindGenerationOwnership(() => currentGeneration);
+    Object.assign(sm as unknown as Record<string, unknown>, {
+      providerTurnInFlight: true,
+      activeProviderTurnToken: 23,
+      activeProviderTurnGeneration: generation,
+      codexThreadId: 'thread-current',
+      activeCodexTurnStartRequestId: 'request-current',
+    });
+    const handler = (
+      sm as unknown as { handleProviderEvent: (event: AgentEvent) => void }
+    ).handleProviderEvent.bind(sm);
+
+    handler({
+      type: 'provider_turn_accepted',
+      requestId: 'request-stale',
+      turnId: 'turn-stale',
+    });
+    expect(sm.getActiveProviderTurn()).toBeNull();
+
+    currentGeneration = { managerId: 'manager-a', generation: 8 };
+    handler({
+      type: 'provider_turn_accepted',
+      requestId: 'request-current',
+      turnId: 'turn-superseded',
+    });
+    expect(sm.getActiveProviderTurn()).toBeNull();
+
+    Object.assign(sm as unknown as Record<string, unknown>, {
+      providerTurnInFlight: false,
+      activeProviderTurnToken: null,
+    });
+    handler({
+      type: 'provider_turn_accepted',
+      requestId: 'request-current',
+      turnId: 'turn-unowned',
+    });
+    expect(sm.getActiveProviderTurn()).toBeNull();
+  });
+
+  it('exposes the closed turn-control capability row for the configured provider', () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const sm = new SessionManager({
+      db, messenger, chatJid: CHAT_JID, provider: 'codex-cli', onEvent: vi.fn(),
+    });
+
+    expect(sm.getTurnControlCapabilities()).toEqual({
+      startTurn: true,
+      busyInput: 'queue_only',
+      interrupt: 'terminate_provider_session',
+      native: {
+        busyInput: 'steer_active_turn',
+        interrupt: 'interrupt_active_turn',
+        turnIdentity: 'required',
+        runtimeEnabled: false,
+      },
+    });
   });
 
   it('handleProviderEvent records token_usage events in budget', async () => {
