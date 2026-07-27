@@ -42,6 +42,7 @@ interface FaultTaxonomyRegistry {
     terminalAttemptFailureClasses: FailureDomainRegistryEntry;
     durableInboundFailureClasses: FailureDomainRegistryEntry;
     admissionRejectClasses: FailureDomainRegistryEntry;
+    memoryOperationFailureCodes: FailureDomainRegistryEntry;
   };
   terminalAttemptToInboundFailureClass: Readonly<Record<string, string>>;
   failureClassDispositions: Record<string, unknown>;

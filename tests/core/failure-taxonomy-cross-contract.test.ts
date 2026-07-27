@@ -22,6 +22,9 @@ import {
   type AttemptOutcome,
   type TurnTerminalResult,
 } from '../../src/runtimes/agent/turn-terminal.ts';
+import {
+  MEMORY_OPERATION_FAILURE_CODES,
+} from '../../src/lib/memory-operation-telemetry.ts';
 
 const sorted = (values: Iterable<string>): string[] => [...values].sort();
 
@@ -60,6 +63,8 @@ describe('failure taxonomy cross-contract', () => {
       .toEqual(sorted(INBOUND_FAILURE_CLASSES));
     expect(sorted(registry.failureDomains.admissionRejectClasses.values))
       .toEqual(sorted(ADMISSION_REJECT_CLASSES));
+    expect(sorted(registry.failureDomains.memoryOperationFailureCodes.values))
+      .toEqual(sorted(MEMORY_OPERATION_FAILURE_CODES));
   });
 
   it('covers and validates every terminal-attempt to inbound projection', () => {
