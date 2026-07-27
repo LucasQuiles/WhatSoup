@@ -243,9 +243,10 @@ const CONSOLE_DESIGN_CHAIN_EXEMPTIONS = new Set([
 ]);
 
 const QUALITY_CI_BROWSER_INSTALL_SCRIPT = [
+  'TIMEOUT_BIN="$(bash scripts/resolve-timeout-bin.sh)"',
   'for attempt in 1 2 3; do',
   '  echo "::group::Playwright chromium download attempt ${attempt}/3"',
-  '  if timeout 300 npx playwright install chromium; then',
+  '  if "$TIMEOUT_BIN" 300 npx playwright install chromium; then',
   '    echo "::endgroup::"',
   '    echo "Playwright chromium download succeeded on attempt ${attempt}"',
   '    exit 0',

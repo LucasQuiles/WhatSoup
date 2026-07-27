@@ -377,9 +377,10 @@ jobs:
         # so a hung attempt is killed and retried, rather than stalling the whole
         # job until the 60-minute cap. Fails only after 3 genuine failures.
         run: |
+          TIMEOUT_BIN="$(bash scripts/resolve-timeout-bin.sh)"
           for attempt in 1 2 3; do
             echo "::group::Playwright chromium download attempt ${attempt}/3"
-            if timeout 300 npx playwright install chromium; then
+            if "$TIMEOUT_BIN" 300 npx playwright install chromium; then
               echo "::endgroup::"
               echo "Playwright chromium download succeeded on attempt ${attempt}"
               exit 0
