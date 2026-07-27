@@ -249,6 +249,73 @@ describe('pre-push guard runtime — fail-closed on empty stdin', () => {
     });
   });
 
+  it('maps a symbolic HEAD push to its branch destination for lane exemption', () => {
+    withStubNpm((callsLog) => {
+      const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      try {
+        const input =
+          `HEAD ${'a'.repeat(40)} refs/heads/feature/example ${ZERO_SHA}`;
+        expect(
+          runPrePushGuard(input, repoRoot, {
+            assertConsoleDependencies: () => {},
+          }),
+        ).toBe('branch');
+        expect(readFileSync(callsLog, 'utf8').trim().split('\n')).toEqual([
+          'run guard:git-estate -- guard --phase pre-push --push-local-ref refs/heads/feature/example',
+          'run verify:push:branch',
+        ]);
+      } finally {
+        spy.mockRestore();
+      }
+    });
+  });
+
+  it('binds branch verification to the hook remote and exact pushed candidate before and after the composite', () => {
+    withStubNpm((callsLog) => {
+      const events: string[] = [];
+      const input =
+        `refs/heads/feature/example ${'a'.repeat(40)} refs/heads/feature/example ${ZERO_SHA}`;
+      const receipt = {
+        schemaVersion: 1 as const,
+        remoteName: 'origin',
+        remoteUrlDigest: 'd'.repeat(64),
+        candidateOid: 'a'.repeat(40),
+        headOid: 'a'.repeat(40),
+        remoteMainOid: 'b'.repeat(40),
+      };
+
+      expect(runPrePushGuard(
+        input,
+        repoRoot,
+        {
+          assertConsoleDependencies: () => events.push('console'),
+          verifyAlignmentBefore: (options) => {
+            events.push(`before:${options.remoteName}:${options.remoteUrl}:${options.candidateOids.join(',')}`);
+            return receipt;
+          },
+          verifyAlignmentAfter: (actualReceipt) => {
+            expect(actualReceipt).toEqual(receipt);
+            events.push('after');
+          },
+        },
+        {
+          remoteName: 'origin',
+          remoteUrl: 'git@github.com:LucasQuiles/WhatSoup.git',
+        },
+      )).toBe('branch');
+
+      expect(readFileSync(callsLog, 'utf8').trim().split('\n')).toEqual([
+        'run guard:git-estate -- guard --phase pre-push --push-local-ref refs/heads/feature/example',
+        'run verify:push:branch',
+      ]);
+      expect(events).toEqual([
+        `before:origin:git@github.com:LucasQuiles/WhatSoup.git:${'a'.repeat(40)}`,
+        'console',
+        'after',
+      ]);
+    });
+  });
+
   it('fails before branch and release verification when required console executables are missing', () => {
     for (const [input, expectedEstateCall] of [
       [
@@ -701,7 +768,7 @@ describe('pre-push hook runtime isolation', () => {
         '#!/bin/sh',
         'printf "bash %s\\n" "$*" >> "$HOOK_CALLS"',
         'printf "%s|%s|%s|%s\\n" "${GIT_DIR-unset}" "${GIT_WORK_TREE-unset}" "${GIT_INDEX_FILE-unset}" "${GIT_PREFIX-unset}" >> "$HOOK_ENVIRONMENTS"',
-        'if [ "$1" = "scripts/run-with-pinned-node.sh" ]; then',
+        'if [ "$1" = "scripts/run-with-pinned-node.sh" ] && [ "$2" = "scripts/pre-push-guard.ts" ]; then',
         '  IFS= read -r line || true',
         '  printf "%s\\n" "$line" >> "$HOOK_STDIN"',
         'fi',
@@ -717,7 +784,11 @@ describe('pre-push hook runtime isolation', () => {
         ].join('\n'));
       }
 
-      const result = spawnSync('sh', [prePushHook], {
+      const result = spawnSync('sh', [
+        prePushHook,
+        'origin',
+        'git@github.com:LucasQuiles/WhatSoup.git',
+      ], {
         cwd: repoRoot,
         encoding: 'utf8',
         input: `${refUpdate}\n`,
@@ -736,9 +807,11 @@ describe('pre-push hook runtime isolation', () => {
 
       expect(result.status, result.stderr || result.stdout).toBe(0);
       expect(readFileSync(calls, 'utf8').trim().split('\n')).toEqual([
-        'bash scripts/run-with-pinned-node.sh scripts/pre-push-guard.ts',
+        'bash scripts/run-with-pinned-node.sh scripts/agent-lease.ts status',
+        'bash scripts/run-with-pinned-node.sh scripts/pre-push-guard.ts origin git@github.com:LucasQuiles/WhatSoup.git',
       ]);
       expect(readFileSync(environments, 'utf8').trim().split('\n')).toEqual([
+        'unset|unset|unset|unset',
         'unset|unset|unset|unset',
       ]);
       expect(readFileSync(stdin, 'utf8').trim()).toBe(refUpdate);
@@ -783,6 +856,60 @@ describe('pre-push hook runtime isolation', () => {
       expect(result.status).toBe(2);
       expect(result.stderr).toContain('unable to resolve repository-local Git environment');
       expect(existsSync(calls)).toBe(false);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('preserves an inconclusive writer-lease exit and does not start push verification', () => {
+    const root = mkdtempSync(resolve(tmpdir(), 'whatsoup-pre-push-lease-failure-'));
+    const bin = resolve(root, 'bin');
+    const calls = resolve(root, 'calls.log');
+
+    try {
+      mkdirSync(bin, { recursive: true });
+      const git = resolve(bin, 'git');
+      writeFileSync(git, [
+        '#!/bin/sh',
+        'if [ "$1" = "rev-parse" ] && [ "$2" = "--local-env-vars" ]; then',
+        '  exit 0',
+        'fi',
+        'exit 97',
+        '',
+      ].join('\n'));
+      chmodSync(git, 0o755);
+      const bash = resolve(bin, 'bash');
+      writeFileSync(bash, [
+        '#!/bin/sh',
+        'printf "%s\\n" "$*" >> "$HOOK_CALLS"',
+        'if [ "$2" = "scripts/agent-lease.ts" ]; then exit 2; fi',
+        'exit 0',
+        '',
+      ].join('\n'));
+      chmodSync(bash, 0o755);
+
+      const result = spawnSync('sh', [
+        prePushHook,
+        'origin',
+        'git@github.com:LucasQuiles/WhatSoup.git',
+      ], {
+        cwd: repoRoot,
+        encoding: 'utf8',
+        input: `refs/heads/topic ${'a'.repeat(40)} refs/heads/topic ${ZERO_SHA}\n`,
+        env: {
+          PATH: `${bin}:/usr/bin:/bin`,
+          HOME: process.env['HOME'] ?? tmpdir(),
+          HOOK_CALLS: calls,
+        },
+      });
+
+      expect(result.status).toBe(2);
+      expect(result.stderr).toContain(
+        'pre-push hook: writer lease state is blocking or inconclusive',
+      );
+      expect(readFileSync(calls, 'utf8').trim().split('\n')).toEqual([
+        'scripts/run-with-pinned-node.sh scripts/agent-lease.ts status',
+      ]);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
@@ -939,11 +1066,31 @@ describe('verify chain composition (package.json)', () => {
   it('shared console design verification invokes design guard fixture tests', () => {
     const chain = packageJson.scripts['verify:console-design'];
     expect(chain, 'verify:console-design script must exist').toBeDefined();
+    expect(chain).toMatch(/\bnpm run verify:console-design:live\b/);
     expect(chain).toMatch(/\bnpm run test:design-guards\b/);
   });
 
+  it('does not rerun design guard tests after full-suite coverage in authority lanes', () => {
+    const live = packageJson.scripts['verify:console-design:live'];
+    expect(live, 'verify:console-design:live script must exist').toBeDefined();
+    expect(live).not.toMatch(/\bnpm (?:run )?test\b/);
+    expect(qualityWorkflow).toContain('run: npm run verify:console-design:live');
+    expect(qualityWorkflow).not.toContain('run: npm run verify:console-design\n');
+
+    const release = packageJson.scripts['verify:release'];
+    expect(release).toContain('npm run verify:console-design:live');
+    expect(release).not.toMatch(/\bnpm run verify:console-design(?:\s|$)/);
+  });
+
+  it('retains design guard tests where no full-suite coverage run precedes design checks', () => {
+    expect(packageJson.scripts['verify:push:branch']).toMatch(
+      /\bnpm run verify:console-design(?:\s|$)/,
+    );
+    expect(tagReleaseWorkflow).toContain('run: npm run verify:console-design');
+  });
+
   it('runs design metadata checks exactly once for branch and release verification', () => {
-    const sharedDesign = packageJson.scripts['verify:console-design'];
+    const sharedDesign = packageJson.scripts['verify:console-design:live'];
     const hookSource = readFileSync(prePushHook, 'utf8');
 
     for (const scriptName of ['design:metrics', 'design:burndown']) {

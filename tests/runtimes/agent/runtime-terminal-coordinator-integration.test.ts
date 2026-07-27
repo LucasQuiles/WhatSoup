@@ -1923,6 +1923,47 @@ describe('runtime terminal coordinator integration', () => {
     }
   });
 
+  it('does not repaint an inconclusive durable checkpoint as suspended', async () => {
+    const db = new Database(':memory:');
+    db.open();
+    try {
+      const { runtime, state } = makeRuntimeState(db);
+      const runtimeContext = context('singleton', '15550190014', 44, 'turn-inconclusive-checkpoint');
+      const queue = queueStub(runtimeContext.identity.deliveryJid);
+      const session = sessionStub();
+      session.getStatus.mockReturnValue({
+        active: false,
+        sessionId: null,
+        pid: null,
+        durableFailureClosed: false,
+        durableFailureInconclusive: true,
+      });
+      state.durability = durabilityMock();
+      state.replyGuarantee = replyGuaranteeMock();
+      state.currentRuntimeTurnContext = runtimeContext;
+      state.currentInboundSeq = 44;
+
+      await state.runtimeTurnCoordinator.finalizeRuntimeTurnContext({
+        context: runtimeContext,
+        queue,
+        attemptOutcome: { kind: 'failed', class: 'crash' },
+        session,
+      });
+
+      const call = state.durability.finalizeTurnTerminal.mock.calls[0]?.[0] as {
+        bookkeeping: { checkpoint: { fields: Record<string, unknown> } };
+      } | undefined;
+      expect(call).toBeDefined();
+      expect(call!.bookkeeping.checkpoint.fields).not.toHaveProperty('sessionStatus');
+      expect(call!.bookkeeping.checkpoint.fields).toMatchObject({
+        activeTurnId: null,
+        lastInboundSeq: 44,
+      });
+    } finally {
+      db.close();
+    }
+  });
+
   it('flushes a per-chat system result without consuming the user terminal owner', async () => {
     const db = new Database(':memory:');
     db.open();

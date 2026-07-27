@@ -168,7 +168,7 @@ vi.mock('../../../src/core/messages.ts', () => ({
   getRecentMessages: vi.fn(() => []),
 }));
 
-type ActiveSessionRow = { id: number; session_id: string | null; chat_jid: string | null; claude_pid: number; status: string; started_at: string; last_message_at: string | null; message_count: number } | null;
+type ActiveSessionRow = { id: number; session_id: string | null; chat_jid: string | null; workspace_key?: string | null; claude_pid: number; status: string; started_at: string; last_message_at: string | null; message_count: number } | null;
 const { mockGetActiveSession } = vi.hoisted(() => {
   return { mockGetActiveSession: vi.fn(() => null as ActiveSessionRow) };
 });
@@ -11682,14 +11682,16 @@ describe('AgentRuntime', () => {
       );
     });
 
-    it('stale session skipped — single mode, session older than 60 min', async () => {
+    it('retires only the exact stale lifecycle when another checkpoint shares its session ID', async () => {
       const db = makeDb();
       const { messenger } = makeMessenger();
+      const checkpointStatuses = new Map([['user', 'active'], ['other-user', 'active']]);
 
       mockGetActiveSession.mockReturnValue({
         id: 1,
         session_id: 'sess-stale',
         chat_jid: 'user@s.whatsapp.net',
+        workspace_key: 'user',
         claude_pid: 0,
         status: 'active',
         started_at: new Date(Date.now() - 120 * 60_000).toISOString(),
@@ -11709,7 +11711,13 @@ describe('AgentRuntime', () => {
           sessionId: 'sess-stale',
           updatedAt: new Date(Date.now() - 120 * 60_000).toISOString().replace('Z', ''),
         })),
-        retireSessionLifecycle: vi.fn(),
+        retireExactSessionLifecycle: vi.fn((params: { conversationKey: string }) => {
+          checkpointStatuses.set(params.conversationKey, 'ended');
+        }),
+        retireSessionLifecycle: vi.fn(() => {
+          checkpointStatuses.set('user', 'ended');
+          checkpointStatuses.set('other-user', 'ended');
+        }),
       };
       (runtime as unknown as { durability: unknown }).durability = mockDurability;
 
@@ -11717,11 +11725,18 @@ describe('AgentRuntime', () => {
 
       // Session too stale — should NOT spawn
       expect(mockSession.spawnSession).not.toHaveBeenCalled();
-      expect(mockDurability.retireSessionLifecycle).toHaveBeenCalledWith({
+      expect(mockDurability.retireExactSessionLifecycle).toHaveBeenCalledWith({
         agentSessionRowId: 1,
         provider: undefined,
         providerSessionId: 'sess-stale',
+        workspaceKey: 'user',
+        conversationKey: 'user',
       });
+      expect(mockDurability.retireSessionLifecycle).not.toHaveBeenCalled();
+      expect(checkpointStatuses).toEqual(new Map([
+        ['user', 'ended'],
+        ['other-user', 'active'],
+      ]));
     });
 
     it('shared mode group suppression — session spawned but no startup message', async () => {
@@ -16085,6 +16100,11 @@ describe('NL routing handlers (nlRouting flag)', () => {
 
   it('spawn fails OPEN to the default route when the pin-eligibility probe throws (R13)', async () => {
     const { runtime } = makeRoutingRuntime();
+    routingDb.raw
+      .prepare(`INSERT INTO chat_model_preference
+        (chat_jid, sender_jid, intent, requested_provider, scope, pin_strict, fallback_permitted, updated_at, expires_at)
+        VALUES (?, ?, 'provider_specific', 'codex-cli', 'sticky', 1, 0, ?, NULL)`)
+      .run(CHAT, SENDER_A, Date.now());
     // routablePinTargets does keyring I/O and was called OUTSIDE the pref-read
     // guard — a probe throw must degrade to the default route, never drop the turn.
     (runtime as unknown as { routablePinTargets: () => string[] }).routablePinTargets = () => {

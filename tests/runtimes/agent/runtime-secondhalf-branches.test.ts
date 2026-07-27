@@ -124,6 +124,20 @@ const { mockPrepareContentForAgent } = vi.hoisted(() => ({
   mockPrepareContentForAgent: vi.fn(async (msg: IncomingMessage) => msg.content ?? ''),
 }));
 
+const { mockGetActiveSession } = vi.hoisted(() => ({
+  mockGetActiveSession: vi.fn(() => null as {
+    id: number;
+    session_id: string | null;
+    chat_jid: string | null;
+    workspace_key?: string | null;
+    claude_pid: number;
+    status: string;
+    started_at: string;
+    last_message_at: string | null;
+    message_count: number;
+  } | null),
+}));
+
 // ─── Module mocks ───────────────────────────────────────────────────────────
 
 vi.mock('../../../src/logger.ts', () => ({
@@ -156,7 +170,7 @@ vi.mock('../../../src/runtimes/agent/session-db.ts', () => ({
   incrementMessageCount: vi.fn(),
   updateSessionId: vi.fn(),
   updateSessionStatus: vi.fn(),
-  getActiveSession: vi.fn(() => null),
+  getActiveSession: mockGetActiveSession,
   backfillWorkspaceKeys: vi.fn(),
   markOrphaned: vi.fn(),
   getResumableSessionForChat: vi.fn(() => null),
@@ -277,6 +291,36 @@ function makeMsg(overrides: Partial<IncomingMessage> = {}): IncomingMessage {
   };
 }
 
+function completedCheckpoint(args: {
+  conversationKey: string;
+  deliveryJid: string;
+  sessionId: string;
+  updatedAt: string;
+}) {
+  return {
+    id: 9,
+    conversation_key: args.conversationKey,
+    session_id: args.sessionId,
+    transcript_path: null,
+    active_turn_id: null,
+    last_inbound_seq: 1,
+    completed_inbound_seq: 1,
+    last_flushed_outbound_id: null,
+    watchdog_state: null,
+    workspace_path: null,
+    claude_pid: null,
+    session_status: 'active',
+    checkpoint_version: 1,
+    completed_delivery_jid: args.deliveryJid,
+    completed_delivery_namespace: 's.whatsapp.net',
+    completed_scope: 'singleton',
+    completed_logical_turn_id: 'turn-1',
+    completed_manager_id: 'resume-manager',
+    completed_generation: 1,
+    updated_at: args.updatedAt,
+  };
+}
+
 type CrashInfo = {
   exitCode: number | null;
   signal: NodeJS.Signals | null;
@@ -387,6 +431,7 @@ describe('AgentRuntime second-half: poll expiry + auto-respawn continuation', ()
     mockSession.sendTurn.mockResolvedValue(undefined);
     mockSession.getDbRowId.mockReturnValue(null);
     mockGetMessagesSince.mockReturnValue([]);
+    mockGetActiveSession.mockReturnValue(null);
   });
 
   afterEach(() => {
@@ -468,6 +513,45 @@ describe('AgentRuntime second-half: poll expiry + auto-respawn continuation', ()
       expect(db.assertWritableCompatibility).toHaveBeenCalledTimes(1);
       expect(mockSession.sendTurn).not.toHaveBeenCalled();
     });
+  });
+
+  it('leaves a stale lifecycle untouched when its workspace identity is unavailable', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const updatedAt = new Date(Date.now() - 120 * 60_000).toISOString().replace('Z', '');
+
+    mockGetActiveSession.mockReturnValue({
+      id: 9,
+      session_id: 'sess-stale-unscoped',
+      chat_jid: 'unscoped@s.whatsapp.net',
+      workspace_key: null,
+      claude_pid: 0,
+      status: 'active',
+      started_at: new Date(Date.now() - 120 * 60_000).toISOString(),
+      last_message_at: null,
+      message_count: 0,
+    });
+
+    const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'single' });
+    const mockDurability = {
+      getLatestCompletedCheckpointForSession: vi.fn(() => completedCheckpoint({
+        conversationKey: 'unscoped',
+        deliveryJid: 'unscoped@s.whatsapp.net',
+        sessionId: 'sess-stale-unscoped',
+        updatedAt,
+      })),
+      retireExactSessionLifecycle: vi.fn(),
+    };
+    (runtime as unknown as { durability: unknown }).durability = mockDurability;
+
+    await runtime.start();
+
+    expect(mockSession.spawnSession).not.toHaveBeenCalled();
+    expect(mockDurability.retireExactSessionLifecycle).not.toHaveBeenCalled();
+    expect(mockRuntimeLogger.warn).toHaveBeenCalledWith({
+      rowId: 9,
+      conversationKey: 'unscoped',
+    }, 'cannot retire stale shared/single resume without exact workspace identity');
   });
 
   it('capDedupeMap evicts oldest-first over an object-valued map (BEAD-050)', () => {

@@ -1,0 +1,13 @@
+{
+  "schemaVersion": 1,
+  "waivers": [
+    {
+      "path": ".claude/fitness/baseline.json",
+      "maxWeight": 29161,
+      "reason": "TEMPORARY runtime.ts ceiling allowance 12131->12500 for the backlog-landing window (12 wedged PRs vs 1 line of headroom at grant time); payback = the #1977 decomposition program, which returns the ceiling below the original 12131 and then ratchets it down",
+      "issue": "https://github.com/LucasQuiles/WhatSoup/issues/1977",
+      "grantedAt": "2026-07-27",
+      "expiresAt": "2026-08-10"
+    }
+  ]
+}
