@@ -175,7 +175,7 @@ Current baseline measurements:
 
 | rule | path | lines | ceiling |
 |------|------|-------|---------|
-| `arch.file-size` | `src/runtimes/agent/runtime.ts` | 12131 | 12131 |
+| `arch.file-size` | `src/runtimes/agent/runtime.ts` | 12130 | 12500 |
 | `arch.file-size` | `tests/runtimes/agent/runtime.test.ts` | 16579 | 16579 |
 
 Historical bump (predates `guard:baseline-growth`; this path is now blocked — see
@@ -225,6 +225,14 @@ Shrinking below a ceiling never auto-lowers it (only a WARN suggests it). Loweri
 to match a shrink is itself a conscious act: it permanently donates the freed headroom, so time
 it deliberately — e.g. don't lower immediately after an extraction made specifically to unwedge
 in-flight work.
+
+> **TEMPORARY ALLOWANCE (2026-07-27, owner-granted): `src/runtimes/agent/runtime.ts` ceiling
+> 12131 → 12500.** This is recorded debt, not room to grow. Granted via path 2 above (a
+> standalone reviewed widening) for the backlog-landing window: at grant time 12 open PRs
+> touched runtime.ts against 1 line of headroom. Payback is the #1977 decomposition program —
+> once the backlog lands and the file is decomposed, the ceiling returns below the original
+> 12131 and then ratchets down at each decomposition wave boundary. Retirement of this
+> allowance is tracked in issue #1977; it must not outlive the program.
 
 `arch.import-boundaries` grandfathered violations are tracked in `.claude/fitness/boundary-baseline.json`.
 Run `npm run guard:boundaries -- --report` to see the full edge list and `npm run guard:boundaries -- --baseline-save` to ratchet down after fixing violations.
