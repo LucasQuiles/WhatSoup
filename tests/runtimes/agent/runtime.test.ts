@@ -8215,7 +8215,7 @@ describe('AgentRuntime', () => {
           chatQueues: 1,
           outboundQueues: 1,
           workspaceResources: 1,
-          fdCount: 3,
+          fdCount: process.platform === 'linux' ? 3 : null,
           memoryUsage: expect.objectContaining({
             rss: expect.any(Number),
             heapTotal: expect.any(Number),
@@ -8239,6 +8239,20 @@ describe('AgentRuntime', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  // @skip-env this assertion applies only where Linux /proc is unavailable.
+  it.runIf(process.platform !== 'linux')('does not probe Linux /proc for file descriptors on non-Linux hosts', () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const runtime = new AgentRuntime(db, messenger, 'test');
+    const getOpenFileDescriptorCount = (
+      runtime as unknown as { getOpenFileDescriptorCount: () => number | null }
+    ).getOpenFileDescriptorCount.bind(runtime);
+    mockReaddirSync.mockClear();
+
+    expect(getOpenFileDescriptorCount()).toBe(null);
+    expect(mockReaddirSync).not.toHaveBeenCalled();
   });
 
   it('shared sweepIdleQueues evicts idle outbound queues and shuts them down', () => {

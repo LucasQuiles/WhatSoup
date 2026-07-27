@@ -219,8 +219,15 @@ export async function handleDeleteCredential(
   if (!check.ok) return;
   const { service } = check;
   if (throttle(res, mutationLastCall, MUTATION_COOLDOWN_MS, service, 'mutation cooldown')) return;
-  const { deleted } = deleteCredential(service);
+  const { deleted, reason, errorCode } = deleteCredential(service);
   const body = { ok: deleted, service, envShadowed: envShadowed(service), inUse: serviceInUse(deps, service) };
+  if (reason === 'backend_failed') {
+    // A store that could not be consulted is NOT a 404. Reporting "not found"
+    // here told an operator with a locked keychain that the credential did not
+    // exist, while it remained stored and readable (#2292 L8).
+    jsonResponse(res, 500, { ...body, error: 'credential store unavailable', errorCode });
+    return;
+  }
   jsonResponse(res, deleted ? 200 : 404, body);
 }
 

@@ -304,6 +304,37 @@ runtime manifest is not automatically a WhatSoup-owned producer. Resolve its
 host unit or external repository before assigning ownership or changing its
 clear policy.
 
+### Producer provenance (test-traffic backstop)
+
+Every producer stamps `runtime.provenance` so the dispatcher can tell verifier
+and falsifier traffic from a genuine incident. `is_test_provenance_event` in
+`bot-errors-dispatcher.py` screens on `runtime.provenance.test` being exactly
+`true`; a matching event is refused before ordinary incident processing, the
+original is retained in suppressed audit state, and one bounded meta-alert is
+emitted. This is a backstop, not the producer-authority boundary #2391 asks for.
+
+`test` is derived from **strong runner signals only** — `VITEST`,
+`VITEST_WORKER_ID`, `JEST_WORKER_ID`, `PYTEST_CURRENT_TEST`, plus
+`VITEST_POOL_ID` in the TypeScript producer, whose routing already honours it.
+`NODE_ENV=test` is recorded in `signals` but is deliberately **not** sufficient
+to mark an event as test traffic: an informational environment value must not be
+able to silence a production alert.
+
+| Producer | Stamps provenance |
+|----------|-------------------|
+| `src/lib/bot-errors-outbox.ts` (`producer: typescript-outbox`) | yes |
+| `deploy/hooks/post-tool-use-log.mjs` (`post-tool-use-hook`) | yes |
+| `deploy/scripts/bot-errors-emit.py` (`python-emit`) | yes |
+| `deploy/scripts/bot-errors-health-check.py` | yes |
+| `deploy/scripts/bot-errors-runner.py` | yes |
+| `deploy/scripts/bot-errors-collector.py` | **no** — relays remote events |
+| `deploy/scripts/bot-errors-heartbeat-watchdog.py` | **no** |
+
+The two unstamped producers are a known residual gap: traffic they originate
+cannot reach the dispatcher backstop. Adding a producer without a provenance
+stamp re-opens that hole silently, so stamp it at the shared event builder
+rather than per call site.
+
 ## Test suites + CI gates
 
 Two independent pytest-runner scripts gate `deploy/scripts/tests/` in `quality.yml`, and

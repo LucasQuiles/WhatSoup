@@ -145,6 +145,14 @@ describe('ssot-pattern-guard — arch.ssot-phone-shape', () => {
     expect(scanFileForRule(phoneRule, 'src/core/new-check.ts', src)).toHaveLength(1);
   });
 
+  it('FLAGS a planted duplicate of the canonical E.164 wire matcher', () => {
+    const src = 'export const E164_RE = /^\\+[1-9]\\d{6,14}$/;';
+    const findings = scanFileForRule(phoneRule, 'src/transport/new-provider/types.ts', src);
+    expect(findings).toHaveLength(1);
+    expect(findings[0]!.allowlisted).toBe(false);
+    expect(findings[0]!.detail).toContain('anchored phone-shape regex');
+  });
+
   it('FLAGS plus-formatting over a phone-named interpolation', () => {
     const src = 'const label = `+${digits}`;';
     expect(scanFileForRule(phoneRule, 'src/core/fmt.ts', src)).toHaveLength(1);
@@ -301,6 +309,14 @@ describe('ssot-pattern-guard — live tree (born green, exactly at baseline)', (
       expect(readBaselineCount(REPO_ROOT, spec.id), `${spec.id} baseline.json`).toBe(count);
       expect(readTaxonomyDocCount(REPO_ROOT, spec.id), `${spec.id} taxonomy doc row`).toBe(count);
     }
+  });
+
+  it('fails closed when a scanned source file cannot be read', () => {
+    const readFailure = (): string => {
+      throw new Error('planted source read failure');
+    };
+    expect(() => scanRepoForRule(REPO_ROOT, rule('arch.ssot-phone-shape'), readFailure))
+      .toThrow('planted source read failure');
   });
 
   it('no allowlist row is stale: each allowlisted file still bears the pattern, with a substantive reason', () => {
