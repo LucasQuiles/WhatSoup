@@ -234,6 +234,7 @@ type DurabilityStatements = {
   markContinuityCandidateIfUnownedAndNoTerminalOutbound: PreparedStatement;
   markInboundSkipped: PreparedStatement;
   selectInboundStatus: PreparedStatement;
+  selectInboundReceipt: PreparedStatement;
   recordTurnTerminal: PreparedStatement;
   getTurnTerminal: PreparedStatement;
   createOutboundOp: PreparedStatement;
@@ -298,8 +299,10 @@ export class DurabilityEngine {
     const prepare = db.raw.prepare.bind(db.raw);
     this.statements = {
       journalInbound: prepare(
-        `INSERT INTO inbound_events (message_id, conversation_key, chat_jid, routed_to, processing_status)
-         VALUES (?, ?, ?, ?, 'processing')`,
+        `INSERT INTO inbound_events (
+           message_id, conversation_key, chat_jid, routed_to, processing_status, received_at
+         )
+         VALUES (?, ?, ?, ?, 'processing', COALESCE(datetime(?, 'unixepoch'), datetime('now')))`,
       ),
       markTurnDone: prepare(`UPDATE inbound_events SET processing_status = 'turn_done' WHERE seq = ?`),
       markInboundComplete: prepare(
@@ -339,6 +342,10 @@ export class DurabilityEngine {
       ),
       selectInboundStatus: prepare(
         `SELECT processing_status, conversation_key, chat_jid, message_id
+         FROM inbound_events WHERE seq = ?`,
+      ),
+      selectInboundReceipt: prepare(
+        `SELECT unixepoch(received_at) AS received_at_unix_seconds
          FROM inbound_events WHERE seq = ?`,
       ),
       recordTurnTerminal: prepare(`
@@ -694,8 +701,14 @@ export class DurabilityEngine {
       getMaybeSentOutboundCount: prepare(
         `SELECT COUNT(*) as count FROM outbound_ops WHERE status = 'maybe_sent'`,
       ),
+      // Ambiguity-transition time, not queue time: a send that fails BEFORE
+      // markSubmitted() (null submitted_at — the BRICK-LAB job-1474 shape)
+      // must still age and page, not read as fresh. COALESCE mirrors the
+      // reconciliation query's fix (getLiveReconcileMaybeSent, #2079); this
+      // sibling health-staleness query was not covered by that fix and
+      // stayed null-blind exactly for the pre-submission failure case.
       getOldestMaybeSentSubmittedAt: prepare(
-        `SELECT MIN(submitted_at) as at FROM outbound_ops WHERE status = 'maybe_sent' AND submitted_at IS NOT NULL`,
+        `SELECT MIN(COALESCE(submitted_at, created_at)) as at FROM outbound_ops WHERE status = 'maybe_sent'`,
       ),
       getQuarantinedOutboundCount: prepare(
         `SELECT COUNT(*) as count FROM outbound_ops WHERE status = 'quarantined'`,
@@ -703,12 +716,19 @@ export class DurabilityEngine {
       getLastRecoveryRunCompletedAt: prepare(
         `SELECT completed_at FROM recovery_runs ORDER BY id DESC LIMIT 1`,
       ),
+      // #1789 companion fix: this INSERT sets completed_at at write time but
+      // (until now) never set status, so under migration 45's
+      // status DEFAULT 'started' a row born here was self-contradictory —
+      // already completed_at-stamped while reading status='started' forever.
+      // logRecoveryRun() is a synchronous, single-statement aggregate-stats
+      // log (no separate "start" phase to record), so 'completed' is correct
+      // at insert time, not a later transition.
       insertRecoveryRun: prepare(`
         INSERT INTO recovery_runs
           (trigger, inbound_replayed, outbound_reconciled, outbound_replayed,
            outbound_quarantined, tool_calls_recovered, tool_calls_replayed,
-           tool_calls_quarantined, sessions_restored, completed_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+           tool_calls_quarantined, sessions_restored, completed_at, status)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), 'completed')
       `),
       selectNow: prepare(`SELECT datetime('now') AS now`),
     };
@@ -904,11 +924,42 @@ export class DurabilityEngine {
   }
 
   // ── Inbound events ──
-  journalInbound(messageId: string, conversationKey: string, chatJid: string, routedTo: string): number {
-    const result = this.statements.journalInbound.run(messageId, conversationKey, chatJid, routedTo);
+  journalInbound(
+    messageId: string,
+    conversationKey: string,
+    chatJid: string,
+    routedTo: string,
+    receivedAtUnixSeconds?: number,
+  ): number {
+    if (
+      receivedAtUnixSeconds !== undefined
+      && (
+        !Number.isSafeInteger(receivedAtUnixSeconds)
+        || receivedAtUnixSeconds < 0
+        || receivedAtUnixSeconds > 253_402_300_799
+      )
+    ) {
+      throw new Error('Inbound receipt timestamp must be within the SQLite Unix timestamp range');
+    }
+    const result = this.statements.journalInbound.run(
+      messageId,
+      conversationKey,
+      chatJid,
+      routedTo,
+      receivedAtUnixSeconds ?? null,
+    );
     const seq = Number(result.lastInsertRowid);
     log.debug({ seq, messageId, routedTo }, 'journalInbound');
     return seq;
+  }
+
+  getInboundReceivedAtUnixSeconds(seq: number): number | undefined {
+    const row = this.statements.selectInboundReceipt.get(seq) as {
+      received_at_unix_seconds: number;
+    } | undefined;
+    return Number.isSafeInteger(row?.received_at_unix_seconds)
+      ? row?.received_at_unix_seconds
+      : undefined;
   }
 
   markTurnDone(seq: number): void {
@@ -1194,6 +1245,14 @@ export class DurabilityEngine {
     return this.turnRecovery.promoteBlockedTurnRecoveryJob(jobId, owner, fence, proof);
   }
 
+  getTurnRecoveryOriginalDeliveryStatus(jobId: number): { outboundStatus: string } | undefined {
+    return this.turnRecovery.getTurnRecoveryOriginalDeliveryStatus(jobId);
+  }
+
+  getTurnRecoverySourceProof(jobId: number): { processingStatus: string; outboundStatus: string } | undefined {
+    return this.turnRecovery.getTurnRecoverySourceProof(jobId);
+  }
+
   /**
    * Enumerates every pending or claimed job for one owner, including pending
    * backoff. Cursors are scoped to one scan cycle; after scanComplete, reset
@@ -1228,8 +1287,9 @@ export class DurabilityEngine {
   hasOutstandingTurnRecoveryForScope(
     scope: 'per_chat' | 'shared' | 'singleton',
     conversationKey: string,
+    options?: { excludeJobId?: number },
   ): boolean {
-    return this.turnRecovery.hasOutstandingTurnRecoveryForScope(scope, conversationKey);
+    return this.turnRecovery.hasOutstandingTurnRecoveryForScope(scope, conversationKey, options);
   }
 
   // ── Outbound ops ──

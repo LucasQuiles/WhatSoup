@@ -11,6 +11,11 @@ if [[ -z "${BASH_VERSION:-}" ]]; then
   exit 1
 fi
 
+# Credential-store probes must be bounded on BOTH platforms; `timeout(1)` is not
+# present on stock macOS (see deploy/lib/bounded-exec.sh).
+# shellcheck source=deploy/lib/bounded-exec.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/bounded-exec.sh"
+
 INSTANCES_DIR="${HOME}/.config/whatsoup/instances"
 MIRROR_KEYRING=0
 ROTATE=0
@@ -81,15 +86,23 @@ mirror_to_keyring() {
   case "$(uname -s)" in
     Darwin)
       command -v security >/dev/null 2>&1 || return 1
-      security add-generic-password \
-        -U \
-        -s "whatsoup-health-token" \
-        -a "$instance_name" \
-        -w "$token" >/dev/null
+      # CRED-1: never put the secret on argv — it is world-visible via `ps -ww`
+      # for the exec lifetime. `-w` as the LAST option makes `security` read the
+      # password from stdin instead; it asks twice (enter + retype), so the value
+      # is sent twice. Same invocation shape as src/lib/keyring.ts, which is
+      # integration-verified on macOS by round-trip readback. No target keychain
+      # is named because a positional keychain path after a bare `-w` would be
+      # consumed as the password.
+      printf '%s\n%s\n' "$token" "$token" \
+        | whatsoup_run_bounded 5 security add-generic-password \
+          -U \
+          -s "whatsoup-health-token" \
+          -a "$instance_name" \
+          -w >/dev/null
       ;;
     *)
       command -v secret-tool >/dev/null 2>&1 || return 1
-      printf '%s' "$token" | secret-tool store \
+      printf '%s' "$token" | whatsoup_run_bounded 5 secret-tool store \
         --label "WhatSoup Health Token ($instance_name)" \
         service "whatsoup-health-token" \
         user "$instance_name"

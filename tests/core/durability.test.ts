@@ -32,6 +32,49 @@ describe('DurabilityEngine', () => {
       expect(row.routed_to).toBe('agent');
     });
 
+    it('reads the canonical durable receipt time for a journaled inbound', () => {
+      const seq = engine.journalInbound('msg-receipt', 'key-1', 'jid-1@s.whatsapp.net', 'agent');
+      const row = db.raw.prepare(
+        'SELECT unixepoch(received_at) AS received_at_unix_seconds FROM inbound_events WHERE seq = ?',
+      ).get(seq) as { received_at_unix_seconds: number };
+
+      expect(engine.getInboundReceivedAtUnixSeconds(seq)).toBe(row.received_at_unix_seconds);
+      expect(engine.getInboundReceivedAtUnixSeconds(seq + 1)).toBeUndefined();
+    });
+
+    it('round-trips the SQLite unixepoch ceiling and rejects larger receipts without inserting', () => {
+      const maxSqliteUnixSeconds = 253_402_300_799;
+      const seq = engine.journalInbound(
+        'msg-receipt-max',
+        'key-receipt-max',
+        'jid-receipt-max@s.whatsapp.net',
+        'agent',
+        maxSqliteUnixSeconds,
+      );
+      expect(engine.getInboundReceivedAtUnixSeconds(seq)).toBe(maxSqliteUnixSeconds);
+
+      expect(() => engine.journalInbound(
+        'msg-receipt-too-large',
+        'key-receipt-too-large',
+        'jid-receipt-too-large@s.whatsapp.net',
+        'agent',
+        maxSqliteUnixSeconds + 1,
+      )).toThrow(/receipt timestamp/i);
+      expect(() => engine.journalInbound(
+        'msg-receipt-unsafe-sqlite',
+        'key-receipt-unsafe-sqlite',
+        'jid-receipt-unsafe-sqlite@s.whatsapp.net',
+        'agent',
+        Number.MAX_SAFE_INTEGER,
+      )).toThrow(/receipt timestamp/i);
+      const rejectedRows = db.raw.prepare(
+        `SELECT COUNT(*) AS count
+         FROM inbound_events
+         WHERE message_id IN ('msg-receipt-too-large', 'msg-receipt-unsafe-sqlite')`,
+      ).get() as { count: number };
+      expect(rejectedRows.count).toBe(0);
+    });
+
     it('markTurnDone transitions processing → turn_done', () => {
       const seq = engine.journalInbound('msg-1', 'key-1', 'jid-1', 'agent');
       engine.markTurnDone(seq);
@@ -174,6 +217,33 @@ describe('DurabilityEngine', () => {
 
       const stats = engine.getHealthStats();
       expect(stats.maybeSentOutbound).toBe(1);
+      expect(stats.oldestMaybeSentAt).not.toBeNull();
+      const ageMs = Date.now() - Date.parse((stats.oldestMaybeSentAt as string).replace(' ', 'T') + 'Z');
+      expect(ageMs).toBeGreaterThan(30 * 60 * 1000);
+    });
+
+    it('fails closed on a send that failed before markSubmitted: null submitted_at must still age via created_at, not read as fresh (PRESTAGE-T4)', () => {
+      const id = engine.createOutboundOp({ conversationKey: 'k', chatJid: 'j', opType: 'text', payload: '{}', replayPolicy: 'unsafe' });
+      engine.markSending(id);
+      // No markSubmitted() call: the transport attempt failed before a
+      // submission receipt existed (the BRICK-LAB job-1474 shape) — status
+      // goes straight sending -> maybe_sent with submitted_at left NULL.
+      engine.markMaybeSent(id, 'ECONNRESET');
+      const row = db.raw.prepare('SELECT status, submitted_at, created_at FROM outbound_ops WHERE id = ?').get(id) as any;
+      expect(row.status).toBe('maybe_sent');
+      expect(row.submitted_at).toBeNull();
+
+      // Back-date creation to one hour ago: the only ambiguity-transition
+      // signal available for a row that never reached markSubmitted.
+      db.raw
+        .prepare(`UPDATE outbound_ops SET created_at = datetime('now', '-3600 seconds') WHERE id = ?`)
+        .run(id);
+
+      const stats = engine.getHealthStats();
+      expect(stats.maybeSentOutbound).toBe(1);
+      // Before the fix this stayed null (MIN(submitted_at) excluded the
+      // null row entirely), silently hiding the age from health/alerts —
+      // a deterministic false negative, not merely a missing feature.
       expect(stats.oldestMaybeSentAt).not.toBeNull();
       const ageMs = Date.now() - Date.parse((stats.oldestMaybeSentAt as string).replace(' ', 'T') + 'Z');
       expect(ageMs).toBeGreaterThan(30 * 60 * 1000);
@@ -861,11 +931,15 @@ describe('durability.ts uncovered-branch coverage', () => {
       toolCallsRecovered: 5, toolCallsReplayed: 6, toolCallsQuarantined: 7, sessionsRestored: 8,
     });
     const row = db.raw.prepare(
-      'SELECT trigger, inbound_replayed, outbound_quarantined, sessions_restored FROM recovery_runs ORDER BY id DESC LIMIT 1',
+      'SELECT trigger, inbound_replayed, outbound_quarantined, sessions_restored, status, completed_at FROM recovery_runs ORDER BY id DESC LIMIT 1',
     ).get() as any;
     expect(row.trigger).toBe('unit_test');
     expect(row.inbound_replayed).toBe(1);
     expect(row.outbound_quarantined).toBe(4);
     expect(row.sessions_restored).toBe(8);
+    // #1789 companion fix: completed_at is stamped at insert, so status must
+    // agree — a 'started' row with completed_at already set is self-contradictory.
+    expect(row.status).toBe('completed');
+    expect(row.completed_at).not.toBeNull();
   });
 });

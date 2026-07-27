@@ -1302,11 +1302,12 @@ describe('database.ts uncovered-branch coverage', () => {
       insertVersion.run(version);
     }
     // This fixture exercises late optional-table no-ops. It intentionally
-    // bypasses fail-closed durability migrations 41 through 43, whose
-    // behavior is covered by the migration 43 upgrade and provenance suites.
+    // bypasses fail-closed durability migrations 41 through 43 and 47, whose
+    // behavior is covered by their dedicated upgrade and provenance suites.
     insertVersion.run(41);
     insertVersion.run(42);
     insertVersion.run(43);
+    insertVersion.run(47);
     raw.close();
 
     const db = new Database(path);
@@ -1392,11 +1393,12 @@ describe('database.ts uncovered-branch coverage', () => {
       insertVersion.run(version);
     }
     // This fixture isolates migration 26 against a partial legacy surface. It
-    // intentionally bypasses fail-closed durability migrations 41 through 43,
-    // covered by the migration 43 upgrade and provenance suites.
+    // intentionally bypasses fail-closed durability migrations 41 through 43
+    // and 47, covered by their dedicated upgrade and provenance suites.
     insertVersion.run(41);
     insertVersion.run(42);
     insertVersion.run(43);
+    insertVersion.run(47);
     raw.close();
 
     const db = new Database(path);

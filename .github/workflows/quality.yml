@@ -26,39 +26,32 @@ permissions:
 
 jobs:
   quality:
+    name: quality (24.x)
     runs-on: ubuntu-latest
     # Generous cap so it only kills a genuinely hung run, not a slow-but-live
-    # one (the quality job runs the full suite + coverage and can take ~40min).
+    # one (the authority job runs the full suite + coverage and can take ~40min).
     # Without this a hung run rides to the 6h GitHub default.
     timeout-minutes: 60
-    strategy:
-      fail-fast: false
-      matrix:
-        node: ['24.x', '25.x']
     steps:
       - name: Checkout
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
         with:
           fetch-depth: 0
 
-      # Free runner disk before the heavy steps. The full-history checkout +
-      # npm ci (root + console) + Vite build + Playwright chromium overflow the
-      # default ubuntu-latest free space (ENOSPC). Removing unused preinstalled
-      # toolchains (none used by this JS/Python pipeline) reclaims ~20+ GB.
-      # Runs before Setup Node so it can never touch the node toolcache.
-      - name: Free disk space
-        run: |
-          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android \
-            /usr/local/share/boost /opt/hostedtoolcache/CodeQL || true
-          sudo docker image prune --all --force || true
-          df -h /
+      # Measure before mutating. Runners already above the explicit budget skip
+      # cleanup; low-space runners reclaim only the helper's allowlisted,
+      # unused toolchains and Docker images, then fail closed if still short.
+      # Runs before Setup Node so it can never touch the selected node toolcache.
+      - name: Enforce CI disk budget
+        run: bash scripts/ci-disk-reclaim.sh
 
-      # Local dev uses .nvmrc (single version for fast iteration);
-      # CI runs a matrix to validate the engines range declared in package.json.
-      - name: Setup Node ${{ matrix.node }}
+      # Node 24 is the full enforcement authority. The explicit compatibility
+      # job below validates the supported Node 25 runtime without duplicating
+      # version-invariant guards, coverage, Python, design, or browser work.
+      - name: Setup Node 24
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020  # v4.4.0
         with:
-          node-version: ${{ matrix.node }}
+          node-version: '24.x'
           cache: npm
           # Include the console sub-package lockfile in the cache key so the warm
           # npm cache also covers `npm --prefix console ci` (the default key hashes
@@ -75,8 +68,13 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Refresh PR base snapshot
+        run: |
+          if [ -n "${GITHUB_BASE_REF:-}" ]; then
+            git fetch origin "$GITHUB_BASE_REF:refs/remotes/origin/$GITHUB_BASE_REF"
+          fi
+
       - name: Semantic quality (shadow)
-        if: matrix.node == '24.x'
         env:
           SEMANTIC_RECEIPT: ${{ runner.temp }}/semantic-quality.json
         run: |
@@ -88,28 +86,20 @@ jobs:
           npm run guard:semantic-quality -- --mode shadow --base "$base" --receipt "$SEMANTIC_RECEIPT"
           node -e 'const fs=require("fs"); const r=JSON.parse(fs.readFileSync(process.env.SEMANTIC_RECEIPT,"utf8")); process.stdout.write(`### Semantic quality (shadow)\n\nDecision: **${r.decision}**\n\nFindings: ${r.findings.length}\n`)' >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Install Python test dependencies
-        run: python3 -m pip install --user pytest pytest-cov
-
       # qSesh Python lane (tools/qsesh): pinned Ruff + ShellCheck, then the
       # lint/test package scripts. Requires the Setup Python 3.12 step above.
-      - name: Install qSesh Python quality tools
+      # ripgrep is also a hard requirement of the console design-regression gate.
+      - name: Install Python and Linux quality prerequisites
         run: |
-          python3 -m pip install --user ruff==0.15.10
-          sudo apt-get update && sudo apt-get install -y shellcheck
+          python3 -m pip install --user pytest pytest-cov hypothesis ruff==0.15.10
+          sudo apt-get update
+          sudo apt-get install -y shellcheck ripgrep
 
       - name: qSesh lint
         run: npm run lint:qsesh
 
       - name: qSesh tests
         run: npm run test:qsesh
-
-      # ripgrep is a hard requirement of console/scripts/design-regression.sh
-      # (the design:regression gate + tests/scripts/design-regression-guards).
-      # It is not on the default runner image, so install it explicitly;
-      # without it the script's counts go empty and the blocking checks fail.
-      - name: Install ripgrep
-        run: sudo apt-get update && sudo apt-get install -y ripgrep
 
       - name: Typecheck
         run: npm run typecheck
@@ -122,6 +112,9 @@ jobs:
 
       - name: Import boundary guard
         run: npm run guard:boundaries
+
+      - name: Durability writer invariant guard
+        run: npm run guard:durability-writer
 
       # Backs the three block-severity transport hygiene rules
       # (hygiene.no-wa-jid-literal-in-generic-ui, hygiene.no-whatsapp-copy-in-generic-ui,
@@ -140,35 +133,40 @@ jobs:
       - name: Repo hygiene branch diff
         run: |
           if [ -n "${GITHUB_BASE_REF:-}" ]; then
-            git fetch origin "$GITHUB_BASE_REF:refs/remotes/origin/$GITHUB_BASE_REF"
             npm run guard:repo:branch-diff -- --base "origin/$GITHUB_BASE_REF"
           else
             npm run guard:repo:branch-diff
           fi
 
       - name: Repo hygiene commit-author guard
-        run: |
-          if [ -n "${GITHUB_BASE_REF:-}" ]; then
-            git fetch origin "$GITHUB_BASE_REF:refs/remotes/origin/$GITHUB_BASE_REF"
-          fi
-          npm run guard:repo:commit-authors
+        run: npm run guard:repo:commit-authors
 
       - name: Install test-integrity plugin
         env:
           TEST_INTEGRITY_DEPLOY_KEY: ${{ secrets.TEST_INTEGRITY_DEPLOY_KEY }}
+          TEST_INTEGRITY_COMMIT: ea0b01a4e3d99dc58a9a475c57e22ee204b04a7c
         run: |
           if [ -z "$TEST_INTEGRITY_DEPLOY_KEY" ]; then
             echo "::error::TEST_INTEGRITY_DEPLOY_KEY secret is required to install the private LucasQuiles/test-integrity plugin"
             exit 2
           fi
-          mkdir -p "$HOME/.claude/plugins" "$HOME/.ssh"
+          plugin_dir="$HOME/.claude/plugins/test-integrity"
+          mkdir -p "$plugin_dir" "$HOME/.ssh"
           chmod 700 "$HOME/.ssh"
           printf '%s\n' "$TEST_INTEGRITY_DEPLOY_KEY" > "$HOME/.ssh/test_integrity_deploy"
           chmod 600 "$HOME/.ssh/test_integrity_deploy"
           trap 'rm -f "$HOME/.ssh/test_integrity_deploy"' EXIT
           ssh-keyscan -t ed25519 github.com >> "$HOME/.ssh/known_hosts" 2>/dev/null
+          git -C "$plugin_dir" init
+          git -C "$plugin_dir" remote add origin git@github.com:LucasQuiles/test-integrity.git
           GIT_SSH_COMMAND="ssh -i $HOME/.ssh/test_integrity_deploy -o IdentitiesOnly=yes -o UserKnownHostsFile=$HOME/.ssh/known_hosts" \
-            git clone --depth 1 git@github.com:LucasQuiles/test-integrity.git "$HOME/.claude/plugins/test-integrity"
+            git -C "$plugin_dir" fetch --depth 1 origin "$TEST_INTEGRITY_COMMIT"
+          git -C "$plugin_dir" switch --detach FETCH_HEAD
+          observed_commit="$(git -C "$plugin_dir" rev-parse HEAD)"
+          if [ "$observed_commit" != "$TEST_INTEGRITY_COMMIT" ]; then
+            echo "::error::test-integrity checkout mismatch: expected $TEST_INTEGRITY_COMMIT observed $observed_commit"
+            exit 2
+          fi
 
       - name: Test integrity baseline check
         env:
@@ -205,6 +203,9 @@ jobs:
       # tests/scripts/pre-push-guard.test.ts caught when this shipped push-gate-only.
       - name: Baseline growth guard
         run: npm run guard:baseline-growth
+
+      - name: Catch ratchet drift
+        run: npm run guard:catch-ratchet
 
       # `guard:boundaries` checks import DIRECTION; nothing checked for CYCLES. Ships with
       # an EMPTY baseline because src/ measured 433 modules / 1176 runtime edges / 0 cycles
@@ -271,6 +272,9 @@ jobs:
       - name: BOT ERRORS sentinel coverage and deployer mutation gate
         run: bash deploy/scripts/run-sentinel-tests.sh
 
+      - name: BOT ERRORS full behavioral suite gate
+        run: bash deploy/scripts/run-bot-errors-full-suite.sh
+
       - name: Harness maintenance manifest guard
         run: npm run guard:harness-maintenance
 
@@ -309,9 +313,6 @@ jobs:
 
       - name: BOT ERRORS critical surface guard
         run: npm run guard:bot-errors-critical-surface
-
-      - name: Repo hygiene tests
-        run: npm test -- tests/scripts/repo-hygiene-guard.test.ts --pool=forks
 
       - name: Secret-leak history scan (advisory)
         continue-on-error: true
@@ -358,11 +359,9 @@ jobs:
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830  # v4.3.0
         with:
           path: ~/.cache/ms-playwright
-          # Key on runner OS + Node major so the 24.x/25.x matrix lanes don't
-          # thrash a single shared entry; restore-keys allows a partial hit.
-          key: playwright-${{ runner.os }}-node${{ matrix.node }}-${{ hashFiles('package-lock.json') }}
+          key: playwright-${{ runner.os }}-node24-${{ hashFiles('package-lock.json') }}
           restore-keys: |
-            playwright-${{ runner.os }}-node${{ matrix.node }}-
+            playwright-${{ runner.os }}-node24-
             playwright-${{ runner.os }}-
 
       # System (apt) deps are installed ONCE, separately from the browser
@@ -381,9 +380,10 @@ jobs:
         # so a hung attempt is killed and retried, rather than stalling the whole
         # job until the 60-minute cap. Fails only after 3 genuine failures.
         run: |
+          TIMEOUT_BIN="$(bash scripts/resolve-timeout-bin.sh)"
           for attempt in 1 2 3; do
             echo "::group::Playwright chromium download attempt ${attempt}/3"
-            if timeout 300 npx playwright install chromium; then
+            if "$TIMEOUT_BIN" 300 npx playwright install chromium; then
               echo "::endgroup::"
               echo "Playwright chromium download succeeded on attempt ${attempt}"
               exit 0
@@ -405,11 +405,47 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
         if: failure()
         with:
-          name: browser-test-screenshots-${{ matrix.node }}
+          name: browser-test-screenshots-node24
           path: |
             tests/browser/__screenshots__
             tests/browser-motion/__screenshots__
           if-no-files-found: ignore
+
+  compatibility:
+    name: quality (25.x)
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node 25
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020  # v4.4.0
+        with:
+          node-version: '25.x'
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            console/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install console dependencies
+        run: npm --prefix console ci
+
+      - name: Install compatibility test prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ripgrep
+
+      - name: Full compatibility test suite
+        run: npm test -- --pool=forks
+
+      - name: Console compatibility build
+        run: npm --prefix console run build
 
   bot-errors-health-macos:
     runs-on: macos-14
@@ -434,3 +470,39 @@ jobs:
 
       - name: BOT ERRORS macOS health hermeticity
         run: npm run test:bot-errors-health:hermeticity
+
+      # The credential-probe boundedness suite runs on BOTH legs on purpose. The
+      # Linux leg exercises it with timeout(1) present and with PATH stripped to
+      # simulate Darwin; this leg runs the same assertions against a real macOS
+      # bash and a real `security` binary, so the platform the incident happened
+      # on is covered by the platform itself rather than by simulation.
+      - name: Credential-probe boundedness (real macOS)
+        run: npm run test:credential-probe-boundedness
+
+  # Perf lane (T5 b-12; 19-performance-budget §2). Report-only while the §1
+  # numbers await owner sign-off; PERF_LANE_ENFORCE=1 flips it blocking.
+  perf-lane:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    continue-on-error: true
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+
+      - name: Setup Node 24
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020  # v4.4.0
+        with:
+          node-version: '24.x'
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci && npm --prefix console ci
+
+      - name: Build console
+        run: npm --prefix console run build
+
+      - name: Install Playwright chromium
+        run: npx playwright install chromium --with-deps
+
+      - name: Perf lane (report-only)
+        run: npm --prefix console run perf:lane -- --json

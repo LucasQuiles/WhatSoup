@@ -1,7 +1,7 @@
 {
   "role": "central",
   "expectDispatcher": true,
-  "expectQLoop": true,
+  "expectQLoop": false,
   "expectFleetApi": true,
   "fleetApiUrl": "http://127.0.0.1:9099",
   "fleetApiTokenFile": "~/.config/whatsoup/fleet-tokens.json",

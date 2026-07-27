@@ -13,6 +13,7 @@
 
 import { WebSocketServer, WebSocket } from 'ws';
 import type { Server as HttpServer, IncomingMessage } from 'node:http';
+import type { Duplex } from 'node:stream';
 import { URL } from 'node:url';
 import { createChildLogger } from '../logger.ts';
 import type { TicketStore } from './ws-ticket.ts';
@@ -89,13 +90,24 @@ export class FleetWebSocketServer {
   private clients = new Set<WebSocket>();
   private authDeps: FleetWsAuthDeps;
   private legacyWarningEmitted = false;
+  /**
+   * Kept so `close()` can detach it (#2292 L6). The listener lives on the
+   * SHARED httpServer, which outlives this object: without a reference there
+   * is nothing to remove, so a closed server stayed subscribed to 'upgrade',
+   * retained `this` (clients set, auth deps) for the process lifetime, and a
+   * second instance on the same httpServer meant both handlers ran — the stale
+   * one calling handleUpgrade on an already-closed WebSocketServer.
+   */
+  private readonly httpServer: HttpServer;
+  private readonly onUpgrade: (req: IncomingMessage, socket: Duplex, head: Buffer) => void;
 
   constructor(httpServer: HttpServer, authDeps: FleetWsAuthDeps) {
     this.authDeps = authDeps;
+    this.httpServer = httpServer;
     this.wss = new WebSocketServer({ noServer: true });
 
     // Handle upgrade requests with auth
-    httpServer.on('upgrade', (req: IncomingMessage, socket, head) => {
+    this.onUpgrade = (req: IncomingMessage, socket: Duplex, head: Buffer) => {
       if (!this.authenticate(req)) {
         log.warn(describeAuthRejectUrl(req.url), 'ws_auth_rejected');
         socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
@@ -106,7 +118,8 @@ export class FleetWebSocketServer {
       this.wss.handleUpgrade(req, socket, head, (ws) => {
         this.wss.emit('connection', ws, req);
       });
-    });
+    };
+    httpServer.on('upgrade', this.onUpgrade);
 
     this.wss.on('connection', (ws: WebSocket) => {
       this.clients.add(ws);
@@ -150,6 +163,9 @@ export class FleetWebSocketServer {
 
   /** Gracefully close all connections. */
   close(): void {
+    // Detach FIRST: an upgrade arriving mid-close would otherwise be handed to
+    // a WebSocketServer that is about to be (or already is) closed.
+    this.httpServer.removeListener('upgrade', this.onUpgrade);
     for (const client of this.clients) {
       client.close(1001, 'server shutting down');
     }

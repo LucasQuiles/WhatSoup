@@ -108,7 +108,12 @@ export function startMediaBridge(
   messenger: Messenger,
   allowedRoot: string,
 ): MediaBridge {
-  // Canonicalization happens lazily inside isPathWithinAllowedRoot at the boundary check.
+  // isPathWithinAllowedRoot canonicalizes only the ROOT. The candidate path is
+  // canonicalized by this file, in handleRequest below, via
+  // `join(realpathSync(dirname(resolvedInput)), basename(resolvedInput))`.
+  // (This comment previously said canonicalization happened inside the helper;
+  // it does not, and the code here is only safe because it realpaths the
+  // candidate itself.)
 
   const MAX_BUF = 1_024 * 1_024; // 1 MB — match WhatSoupSocketServer's limit
   const activeSockets = new Set<Socket>();

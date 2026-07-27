@@ -15,6 +15,8 @@ import approvedApiClient from './approved-api-client.mjs';
 import ringBoundaries from './ring-boundaries.mjs';
 import unsafeTypeEscape from './unsafe-type-escape.mjs';
 import timerRearmWithoutClear from './timer-rearm-without-clear.mjs';
+import noMagicSqlitePragma from './no-magic-sqlite-pragma.mjs';
+import requireCatchJustification from './require-catch-justification.mjs';
 
 /** @type {import('eslint').ESLint.Plugin} */
 const plugin = {
@@ -28,6 +30,8 @@ const plugin = {
     'ring-boundaries': ringBoundaries,
     'unsafe-type-escape': unsafeTypeEscape,
     'timer-rearm-without-clear': timerRearmWithoutClear,
+    'no-magic-sqlite-pragma': noMagicSqlitePragma,
+    'require-catch-justification': requireCatchJustification,
   },
 };
 

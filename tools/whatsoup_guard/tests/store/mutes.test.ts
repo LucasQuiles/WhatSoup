@@ -9,6 +9,8 @@ import { MuteStore, type MuteCreateInput } from '../../src/store/mutes.ts';
 import { MuteSchema } from '../../src/types.ts';
 
 const NOW = new Date('2026-05-08T10:00:00.000Z');
+const SECOND = 1000;
+const MINUTE = 60 * SECOND;
 const HOUR = 60 * 60 * 1000;
 const dbs: Database[] = [];
 const dirs: string[] = [];
@@ -168,6 +170,39 @@ describe('MuteStore', () => {
     expect(() => store.create(input({ expires_at: NOW.toISOString() }))).toThrow(/future/);
     expect(() => store.create(input({ expires_at: new Date(NOW.getTime() - 1).toISOString() }))).toThrow(/future/);
     expect(() => store.create(input({ expires_at: new Date(NOW.getTime() + 3 * HOUR).toISOString() }))).toThrow(/maximum/);
+  });
+
+  it('reports the requested and maximum duration truthfully on rejection, never silently clamping', () => {
+    const store = freshStore({ maxDurationMs: 2 * HOUR });
+
+    expect(() => store.create(input({ expires_at: new Date(NOW.getTime() + 3 * HOUR).toISOString() })))
+      .toThrow('mute duration exceeds maximum (requested 3h, max 2h)');
+    expect(store.listActive(NOW.toISOString())).toHaveLength(0);
+  });
+
+  it('reports exact minute durations when neither value is a whole hour', () => {
+    const store = freshStore({ maxDurationMs: 90 * MINUTE });
+
+    expect(() => store.create(input({ expires_at: new Date(NOW.getTime() + 100 * MINUTE).toISOString() })))
+      .toThrow('mute duration exceeds maximum (requested 100m, max 90m)');
+    expect(store.listActive(NOW.toISOString())).toHaveLength(0);
+  });
+
+  it('reports exact second durations when neither value is a whole minute', () => {
+    const store = freshStore({ maxDurationMs: 90 * SECOND });
+
+    expect(() => store.create(input({ expires_at: new Date(NOW.getTime() + 100 * SECOND).toISOString() })))
+      .toThrow('mute duration exceeds maximum (requested 100s, max 90s)');
+    expect(store.listActive(NOW.toISOString())).toHaveLength(0);
+  });
+
+  it('accepts a policy-derived 72h maxDurationMs while a 24h store still rejects the same request', () => {
+    const permissive = freshStore({ maxDurationMs: 72 * HOUR });
+    const strict = freshStore({ maxDurationMs: 24 * HOUR });
+    const seventyTwoHours = input({ expires_at: new Date(NOW.getTime() + 72 * HOUR).toISOString() });
+
+    expect(permissive.create(seventyTwoHours)).toBeGreaterThan(0);
+    expect(() => strict.create(seventyTwoHours)).toThrow('mute duration exceeds maximum (requested 3d, max 1d)');
   });
 
   it('rejects forbidden domains by default', () => {

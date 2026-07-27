@@ -1,0 +1,42 @@
+/* ═══════════════════════════════════════════════════════════════════════════
+   v3.5 Motion system (T5 b-11) — 13-ceremony-motion.md §1/§3 formalized.
+   The complete set of motion classes:
+   1. AMBIENT — exactly one loop product-wide, on the live status disc only:
+      opacity 1→.35→1, 2400ms ease-in-out, looping per §1.
+   2. LIFT — interaction hover: translateY(-2px) + shadow rest→lift,
+      180ms ease-out (within the 160–200ms budget). Per-surface mockup
+      hovers consume the identical recipe inline (SSOT-driven); this class
+      is the canonical idiom for new code.
+   3. CEREMONY — hatch-only one-shot, lives in journey.css (13-§2 scope).
+   Reduced-motion law (§3): removal, not speed-up — the loop is removed and
+   lift becomes static.
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+/* ── 1. Ambient — the live status disc (Badge live shape) ── */
+@keyframes ambient-disc {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.35; }
+}
+.soup-shape--ok.soup-shape--live {
+  animation: ambient-disc 2400ms ease-in-out infinite;
+}
+
+/* ── 2. Lift — the shared interaction idiom (160–200ms budget) ── */
+.lift {
+  transition:
+    transform 180ms ease-out,
+    box-shadow 180ms ease-out;
+}
+.lift:hover {
+  transform: translateY(-2px);
+  box-shadow: var(--shadow-lift-v35);
+}
+
+/* ── 3. Reduced-motion law (13-§3): removal, never speed-up ── */
+@media (prefers-reduced-motion: reduce) {
+  .soup-shape--ok.soup-shape--live { animation: none; }
+  .lift, .lift:hover {
+    transition: none;
+    transform: none;
+  }
+}

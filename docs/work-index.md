@@ -18,15 +18,15 @@ The **Inconsistencies** section lists missing or stale index entries compared wi
 scoped markdown files currently on disk.
 
 **Repo:** `WhatSoup`
-**Total entries:** 76
+**Total entries:** 77
 
 ## Totals
 
 | Dimension | Breakdown |
 |---|---|
-| Kind | handoff=7, plan=38, review=3, spec=27, state=1 |
-| Status | active=14, closed=4, completed=32, deferred=7, pending=14, unknown=5 |
-| Status source | body-marker=72, fallback=3, state-md-status=1 |
+| Kind | handoff=7, plan=38, review=4, spec=27, state=1 |
+| Status | active=14, closed=4, completed=33, deferred=7, pending=14, unknown=5 |
+| Status source | body-marker=73, fallback=3, state-md-status=1 |
 
 ## Inconsistencies
 
@@ -158,13 +158,14 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 | `docs/superpowers/plans/2026-07-17-boundary-validator-ci-refactor.md` | plan | unknown | fallback | boundary-validator-ci-refactor | 2026-07-17 |  |
 | `docs/superpowers/plans/2026-07-17-macos-credential-durability.md` | plan | unknown | fallback | macos-credential-durability | 2026-07-17 |  |
 
-### docs/superpowers/reviews  _(3 entries)_
+### docs/superpowers/reviews  _(4 entries)_
 
 | Path | Kind | Status | Source | Topic | Last Mod | Supersedes |
 |------|------|--------|--------|-------|----------|------------|
 | `docs/superpowers/reviews/2026-04-07-anti-echo-review-handoff.md` | review | completed | body-marker | anti-echo-review-handoff | 2026-06-12 |  |
 | `docs/superpowers/reviews/2026-05-31-bot-errors-tool-call-audit.md` | review | completed | body-marker | bot-errors-tool-call-audit | 2026-06-20 |  |
 | `docs/superpowers/reviews/2026-07-09-wall-to-wall-audit-pr-briefs.md` | review | completed | body-marker | wall-to-wall-audit-pr-briefs | 2026-07-10 |  |
+| `docs/superpowers/reviews/2026-07-24-r13-r15-tech-debt-review-map.md` | review | completed | body-marker | r13-r15-tech-debt-review-map | 2026-07-24 |  |
 
 ### docs/superpowers/specs  _(21 entries)_
 
@@ -204,11 +205,11 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 
 | Path | Kind | Status | Source | Topic | Last Mod | Supersedes |
 |------|------|--------|--------|-------|----------|------------|
-| `docs/superpowers/specs/provider-event-lifecycle/design.md` | spec | active | body-marker | design | 2026-07-14 |  |
-| `docs/superpowers/specs/provider-event-lifecycle/requirements.md` | spec | active | body-marker | requirements | 2026-07-14 |  |
-| `docs/superpowers/specs/provider-event-lifecycle/tasks.md` | spec | active | body-marker | tasks | 2026-07-14 |  |
+| `docs/superpowers/specs/provider-event-lifecycle/design.md` | spec | active | body-marker | design | 2026-07-26 |  |
+| `docs/superpowers/specs/provider-event-lifecycle/requirements.md` | spec | active | body-marker | requirements | 2026-07-26 |  |
+| `docs/superpowers/specs/provider-event-lifecycle/tasks.md` | spec | active | body-marker | tasks | 2026-07-26 |  |
 
 ---
 
 - Derived from `docs/work-index.json`
-- Generated at 2026-07-20T15:25:53Z from commit `33fea0a16683c05be7ac1c90cd8a3f35c73c1dcb`
+- Generated at 2026-07-27T01:42:12Z from commit `9a1bd7b3d3c529b276c1ad764d2c312d7f3abfc3`

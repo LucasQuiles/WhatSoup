@@ -350,7 +350,7 @@ fi
 # ---------------------------------------------------------------------------
 # Check 13: Infinite animation allowlist
 # CSS-side: checks composites.css and tokens.*.css for 'infinite'
-# Allowed: breathe-ring (ok-breathing), breathe, typing-bounce, shimmer (waivered)
+# Allowed: ambient-disc ONLY (13-§1: exactly one loop product-wide, live disc)
 # ---------------------------------------------------------------------------
 check_start "13" "Infinite animation allowlist"
 CSS_FILES=$(find "$CONSOLE_SRC/styles" "$CONSOLE_SRC" -maxdepth 1 -name "*.css" 2>/dev/null)
@@ -361,7 +361,7 @@ C13_UNSANCTIONED_HITS=$(printf '%s\n' "$C13_ALL" | awk '
   /infinite/ {
     # Allowed names are exact animation identifiers. Counting totals is not enough:
     # a sanctioned line can disappear while an unsanctioned line keeps the same total.
-    if ($0 ~ /animation[[:space:]]*:[^;]*(^|[^[:alnum:]_-])(breathe-ring|typing-bounce|breathe|shimmer)([^[:alnum:]_-]|$)/) next;
+    if ($0 ~ /animation[[:space:]]*:[^;]*(^|[^[:alnum:]_-])(ambient-disc)([^[:alnum:]_-]|$)/) next;
     print;
   }
 ' || true)
@@ -373,8 +373,8 @@ echo "    'infinite' occurrences in CSS: $C13_COUNT"
 if [ -n "$C13_ALL" ]; then
   echo "$C13_ALL" | sed 's|'"$CONSOLE_SRC/"'||' | sed 's/^/    /'
 fi
-echo "    Sanctioned names: breathe-ring (ok-disc halo in composites+primitives), breathe, typing-bounce, shimmer"
-echo "    Waivered until P5: shimmer (WVR-005), typing-bounce (WVR-006)"
+echo "    Sanctioned names: ambient-disc ONLY (motion.css — the 13-§1 live-disc loop)"
+echo "    Retired at T5 b-11: breathe-ring, breathe, typing-bounce, shimmer (waivers WVR-005/006 closed)"
 echo "    Unsanctioned: any 'infinite' line whose animation name is not in the sanctioned set"
 if [ "$C13_UNSANCTIONED_COUNT" -gt 0 ]; then
   printf '%s\n' "$C13_UNSANCTIONED_HITS" | sed 's|'"$CONSOLE_SRC/"'||' | sed 's/^/    UNSANCTIONED /'
@@ -418,7 +418,14 @@ fi
 check_start "15" "Lint-suppression waiver registry sync"
 WAIVER_SYNC_OUTPUT=$(node "$CONSOLE_DIR/scripts/check-waiver-sync.mjs" 2>&1)
 WAIVER_SYNC_STATUS=$?
-C15_COUNT=$(printf '%s' "$WAIVER_SYNC_OUTPUT" | node -e 'const fs=require("fs"); try { const o=JSON.parse(fs.readFileSync(0,"utf8")); console.log(o.issue_count ?? 1); } catch { console.log(1); }' 2>/dev/null || echo 1)
+# Emit with process.stdout.write(String(...)), NOT console.log(<number>): console.log
+# formats a non-string argument through util.inspect, which colourises numbers whenever
+# FORCE_COLOR is set — even when stdout is a pipe rather than a TTY. That yields
+# $'\033[33m0\033[39m' here, and the `[ "$C15_COUNT" -eq 0 ]` test below then dies with
+# "integer expected" and falls through to the FAIL branch, hard-blocking every push from
+# such a machine while reporting a waiver mismatch that does not exist. CI never set the
+# variable, so this only ever failed locally. See #2449.
+C15_COUNT=$(printf '%s' "$WAIVER_SYNC_OUTPUT" | node -e 'const fs=require("fs"); try { const o=JSON.parse(fs.readFileSync(0,"utf8")); process.stdout.write(String(o.issue_count ?? 1)); } catch { process.stdout.write("1"); }' 2>/dev/null || echo 1)
 C15_COUNT=${C15_COUNT:-1}
 WAIVER_SYNC_SUMMARY=$(printf '%s' "$WAIVER_SYNC_OUTPUT" | node -e '
 const fs = require("fs");

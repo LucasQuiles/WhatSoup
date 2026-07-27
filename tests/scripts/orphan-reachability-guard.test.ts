@@ -113,6 +113,11 @@ const TRACKED_UNREACHABLE: readonly TrackedEntry[] = [
   // Other unwired modules surfaced by this guard's first run:
   { path: 'src/fleet/provider-parity.ts', issue: '#1867', reason: 'provider-parity report module is test-only-wired; parity guard undeployed (#1867)' },
   { path: 'src/core/recovery-catchup-closure.ts', issue: '#1871', reason: 'recovery-catchup closure is test-only-wired; not imported by any runtime recovery root — needs wiring or removal (surfaced by this guard)' },
+  // Durable background work (Work Ledger + Results Outbox). PR1a lands the schema
+  // and store DELIBERATELY unwired so it can be reviewed and verified on its own;
+  // PR1b adds the registration write-path at the worker spawn sites and the
+  // delivery daemon, and graduates this entry in the same PR.
+  { path: 'src/core/background-work-store.ts', issue: '#2279', reason: 'PR1a lands schema+store unwired by design; registration write-path and delivery daemon land in PR1b (#2279)' },
   { path: 'src/runtimes/chat/enrichment/contradiction.ts', issue: '#1871', reason: 'enrichment pipeline ported but never wired into a runtime chat root; unreachable island with upserter.ts' },
   { path: 'src/runtimes/chat/enrichment/upserter.ts', issue: '#1871', reason: 'enrichment pipeline ported but never wired into a runtime chat root; island head (imports contradiction.ts)' },
   // command-surface (/config) feature cluster in runtimes/agent: built but never

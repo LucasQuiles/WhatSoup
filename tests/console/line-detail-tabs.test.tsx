@@ -322,7 +322,7 @@ describe('LineDetail missing-line route state', () => {
       ({ container } = renderLineDetailRoute('loading-line'));
     });
 
-    expect(container.querySelectorAll('.animate-shimmer').length).toBeGreaterThan(0);
+    expect(container.querySelectorAll('.skeleton-bar').length).toBeGreaterThan(0);
     expect(screen.queryByRole('tablist', { name: 'Line detail tabs' })).toBeNull();
   });
 

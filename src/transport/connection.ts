@@ -189,6 +189,8 @@ export interface CredentialLifecycleAuthBondDigest {
     identityHash: string | null;
   };
   treeHash: string | null;
+  fileCount: number | null;
+  totalBytes: number | null;
   backup: Pick<
     AuthBondSnapshot['backup'],
     | 'root'
@@ -842,7 +844,6 @@ export class ConnectionManager extends EventEmitter implements Messenger {
       this.recordCredentialLifecycle('socket_created', { baileysVersion: this.latestBaileysVersion });
       this.registerEventHandlers(sock, async () => {
         await saveCredsAtomically();
-        this.captureAuthBondSnapshot('creds-update');
       });
     } catch (err) {
       this.log.error({ err }, 'Failed to create WhatsApp connection');
@@ -1232,6 +1233,8 @@ export class ConnectionManager extends EventEmitter implements Messenger {
         identityHash: snapshot.meHash,
       },
       treeHash: shortHashOrNull(snapshot.treeHash),
+      fileCount: snapshot.fileCount,
+      totalBytes: snapshot.totalBytes,
       backup: {
         rootHash: snapshot.backup.root ? shortHash(snapshot.backup.root, 20) : null,
         latestHash: snapshot.backup.latest ? shortHash(snapshot.backup.latest, 20) : null,
@@ -1380,6 +1383,8 @@ export class ConnectionManager extends EventEmitter implements Messenger {
         identityHash: snapshot.meHash,
       },
       treeHash: shortHashOrNull(snapshot.treeHash),
+      fileCount: snapshot.fileCount,
+      totalBytes: snapshot.totalBytes,
       backup: {
         root: snapshot.backup.root,
         latest: snapshot.backup.latest,
@@ -1587,6 +1592,8 @@ export class ConnectionManager extends EventEmitter implements Messenger {
         credsHash: shortHashOrNull(authBond.creds.sha256),
         identityHash: authBond.meHash,
         treeHash: shortHashOrNull(authBond.treeHash),
+        fileCount: authBond.fileCount,
+        totalBytes: authBond.totalBytes,
         latestBackupAt: authBond.backup.latestAt,
         latestBackupReason: authBond.backup.latestReason,
         lastCaptureAt: authBond.backup.lastCaptureAt,
@@ -1633,6 +1640,7 @@ export class ConnectionManager extends EventEmitter implements Messenger {
           this.recordCredentialLifecycle('creds_update_saved', { authBond: this.authBond.inspect() });
           this.persistConnectionRuntimeState('creds_update_saved');
           this.log.info('Credentials saved');
+          this.scheduleSettledAuthBondSnapshot('creds-update-settled');
         } catch (err) {
           this.lastCredsUpdateFailedAt = Date.now();
           this.recordCredentialLifecycle('creds_update_failed', {

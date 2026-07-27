@@ -2,12 +2,15 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { runCli } from '../../src/cli/index.ts';
 import { openDatabase } from '../../src/store/connection.ts';
 import { EventStore } from '../../src/store/events.ts';
 
 const NOW = new Date('2026-05-08T10:00:00.000Z');
 const dirs: string[] = [];
+const DEVELOPMENT_POLICY_PATH = fileURLToPath(new URL('../../src/policy/profiles/development.yaml', import.meta.url));
+const PRODUCTION_POLICY_PATH = fileURLToPath(new URL('../../src/policy/profiles/production.yaml', import.meta.url));
 
 afterEach(() => {
   for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
@@ -152,6 +155,97 @@ describe('mute/status/simulate CLI commands', () => {
 
     expect(result.code).toBe(2);
     expect(result.output).toMatch(/duration/i);
+  });
+
+  it('mute --policy allows a 72h duration under the development profile (default_max_duration: 72h)', async () => {
+    const stateDir = tempDir('wg-cli-mute-policy-');
+
+    const result = await invoke([
+      'mute',
+      '--state-dir',
+      stateDir,
+      '--host',
+      'scope-a',
+      '--domain',
+      'exposure',
+      '--duration',
+      '72h',
+      '--reason',
+      'owner-requested demotion',
+      '--policy',
+      DEVELOPMENT_POLICY_PATH,
+    ]);
+
+    expect(result.code).toBe(0);
+    expect(result.output).toContain('mute id=1');
+    const status = await invoke(['status', '--state-dir', stateDir]);
+    expect(status.output).toContain('scope-a');
+  });
+
+  it('mute --policy rejects a 72h duration under the production profile (default_max_duration: 8h) with a truthful error, not a silent clamp', async () => {
+    const stateDir = tempDir('wg-cli-mute-policy-');
+
+    const result = await invoke([
+      'mute',
+      '--state-dir',
+      stateDir,
+      '--host',
+      'scope-a',
+      '--domain',
+      'exposure',
+      '--duration',
+      '72h',
+      '--reason',
+      'owner-requested demotion',
+      '--policy',
+      PRODUCTION_POLICY_PATH,
+    ]);
+
+    expect(result.code).toBe(1);
+    expect(result.output).toMatch(/maximum/i);
+    expect(result.output).not.toContain('mute id=');
+    const status = await invoke(['status', '--state-dir', stateDir]);
+    expect(status.output).toBe('no active mutes\n');
+  });
+
+  it('mute without --policy keeps the pre-existing 24h hard cap (backward compatible default)', async () => {
+    const result = await invoke([
+      'mute',
+      '--state-dir',
+      tempDir('wg-cli-mute-policy-'),
+      '--host',
+      'scope-a',
+      '--domain',
+      'exposure',
+      '--duration',
+      '72h',
+      '--reason',
+      'no policy supplied',
+    ]);
+
+    expect(result.code).toBe(1);
+    expect(result.output).toMatch(/maximum/i);
+  });
+
+  it('mute --policy rejects an unreadable policy path with a truthful error, not a silent fallback', async () => {
+    const result = await invoke([
+      'mute',
+      '--state-dir',
+      tempDir('wg-cli-mute-policy-'),
+      '--host',
+      'scope-a',
+      '--domain',
+      'exposure',
+      '--duration',
+      '1h',
+      '--reason',
+      'planned change',
+      '--policy',
+      join(tempDir('wg-cli-mute-policy-missing-'), 'does-not-exist.yaml'),
+    ]);
+
+    expect(result.code).toBe(1);
+    expect(result.output).toContain('mute:');
   });
 
   it('simulate runs a fixture JSON file and prints drift, probe error, and total counts', async () => {

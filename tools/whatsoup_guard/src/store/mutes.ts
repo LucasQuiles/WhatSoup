@@ -1,4 +1,5 @@
 import type { Database } from 'better-sqlite3';
+import { formatDurationMsExact } from '../lib/duration.ts';
 import { MuteSchema, type Domain, type Mute } from '../types.ts';
 import type { EventStore } from './events.ts';
 
@@ -89,6 +90,7 @@ export class MuteStore {
         ts: nowIso,
         kind: 'mute_expire',
         domain: eventDomain(mute.domain),
+        severity: 'info',
         scope_id: mute.host,
         payload: {
           mute_id: mute.id,
@@ -122,7 +124,11 @@ export class MuteStore {
     if (!Number.isFinite(nowMs)) throw new Error('mute now clock is invalid');
     if (expiresAtMs <= nowMs) throw new Error('mute expires_at must be in the future');
     const maxDurationMs = this.options.maxDurationMs ?? DAY_MS;
-    if (expiresAtMs - nowMs > maxDurationMs) throw new Error('mute duration exceeds maximum');
+    if (expiresAtMs - nowMs > maxDurationMs) {
+      throw new Error(
+        `mute duration exceeds maximum (requested ${formatDurationMsExact(expiresAtMs - nowMs)}, max ${formatDurationMsExact(maxDurationMs)})`,
+      );
+    }
   }
 
   private rowsToMutes(rows: MuteRow[]): Mute[] {

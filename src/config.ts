@@ -1176,6 +1176,15 @@ export const config = {
   // Access control — rehydrate from instance (string[]) or use defaults
   adminPhones: new Set<string>(resolvedAdminPhones),
 
+  // Exact authenticated DM peers used for internal operator coordination.
+  // This is deliberately separate from adminPhones: audience classification
+  // must not widen inbound access-control authority.
+  internalPeerJids: new Set<string>(
+    (Array.isArray(instance?.internalPeerJids) ? instance.internalPeerJids : [])
+      .filter((jid: unknown): jid is string => typeof jid === 'string' && jid.trim() !== '')
+      .map((jid: string) => jid.trim()),
+  ),
+
   // Control peers — phones trusted to send self-healing control messages
   controlPeers: new Map<string, string>(
     Object.entries((instance?.controlPeers ?? {}) as Record<string, string>)

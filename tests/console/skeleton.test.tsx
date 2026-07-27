@@ -8,8 +8,8 @@ import Skeleton, { TableSkeleton } from '../../console/src/components/Skeleton'
 
 afterEach(() => cleanup())
 
-function shimmerPlaceholders(root: ParentNode): HTMLElement[] {
-  return Array.from(root.querySelectorAll<HTMLElement>('.animate-shimmer'))
+function skeletonPlaceholders(root: ParentNode): HTMLElement[] {
+  return Array.from(root.querySelectorAll<HTMLElement>('.skeleton-bar'))
 }
 
 function expectAccessibilityNeutral(container: HTMLElement) {
@@ -22,7 +22,7 @@ describe('Skeleton', () => {
     const { container } = render(<Skeleton />)
     const root = container.firstElementChild as HTMLElement
 
-    expect(shimmerPlaceholders(container)).toContain(root)
+    expect(skeletonPlaceholders(container)).toContain(root)
     expectAccessibilityNeutral(container)
   })
 
@@ -32,7 +32,7 @@ describe('Skeleton', () => {
     )
     const root = container.firstElementChild as HTMLElement
 
-    expect(root.classList.contains('animate-shimmer')).toBe(true)
+    expect(root.classList.contains('skeleton-bar')).toBe(true)
     expect(root.classList.contains('w-24')).toBe(true)
     expect(root.style.width).toBe('180px')
     expect(root.style.height).toBe('12px')
@@ -47,9 +47,9 @@ describe('TableSkeleton', () => {
 
     expect(rows.length).toBeGreaterThanOrEqual(3)
     expectAccessibilityNeutral(container)
-    expect(shimmerPlaceholders(outer).length).toBeGreaterThan(rows.length)
+    expect(skeletonPlaceholders(outer).length).toBeGreaterThan(rows.length)
     for (const row of rows) {
-      expect(shimmerPlaceholders(row).length).toBeGreaterThanOrEqual(3)
+      expect(skeletonPlaceholders(row).length).toBeGreaterThanOrEqual(3)
     }
   })
 
@@ -58,7 +58,7 @@ describe('TableSkeleton', () => {
     // Line placeholders carry token-based widths (calc(var(--config-key-col) …),
     // migrated off raw px). Collect inline widths regardless of unit and assert
     // they vary, so the table reads as loading rows of differing length.
-    const lineWidths = shimmerPlaceholders(container)
+    const lineWidths = skeletonPlaceholders(container)
       .map(placeholder => placeholder.style.width)
       .filter(Boolean)
 

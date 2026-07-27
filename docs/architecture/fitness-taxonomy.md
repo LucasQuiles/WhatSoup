@@ -60,6 +60,7 @@ rules into hooks, and semantic or human rules into the SDLC review flow.
 | `arch.import-boundaries` | mechanical | block | guard, ci | Ratchet import direction between src/ layers so known violations can shrink but new cross-layer reach is blocked. |
 | `arch.approved-api-client` | ast | warn | eslint | Console network calls must go through the typed API client in `console/src/lib/api.ts`; direct fetch bypasses auth, timeouts, and the test surface. |
 | `arch.ring-boundaries` | ast | block‡ | eslint, guard | Backend ring dependency direction is an architectural invariant; lower rings must not import higher rings. Promoted 2026-07-19 to a guard-ring count ratchet (`scripts/ring-boundary-guard.ts`); the eslint ring stays a warn-only visibility mirror. |
+| `arch.sqlite-busy-timeout-ssot` | ast | warn | eslint | Numeric `PRAGMA busy_timeout` strings passed directly to SQLite `exec`/`prepare` sinks and `DatabaseSync` timeout options can drift across connections; active `src/` and `scripts/` code must use the shared constants from `src/lib/sqlite-constants.ts`. Unresolvable constructor options are findings, not silent passes. The zero-debt Vitest ratchet provides the blocking PR/CI backstop. |
 | `arch.ssot-lid-reads` | mechanical | block‡ | guard, ci | Raw `lid_mappings` SQL reads outside `src/core/lid-resolver.ts` fork the LID→phone resolution discipline `resolveLid()` centralizes. |
 | `arch.ssot-jid-construction` | mechanical | block‡ | guard, ci | Inline `${x}@s.whatsapp.net`-class template construction and literal `.endsWith('@lid')`-class predicates outside `src/core/jid-constants.ts` re-derive the JID domain grammar. |
 | `arch.ssot-name-ladder` | mechanical | block‡ | guard, ci | SQL touching the name columns of contacts/chats/groups/chat_aliases outside `src/core/chat-display-name.ts` forks the owner-facing name ladder. |
@@ -75,6 +76,46 @@ rules into hooks, and semantic or human rules into the SDLC review flow.
   The **eslint ring** mirrors it at `warn` severity only — an advisory copy per `meta.no-redundant-gates`.
   The ESLint warning identity set must not change, and the recorded ceilings must not be exceeded; both are
   enforced by `tests/scripts/fitness-file-size-warning-budget.test.ts`.
+
+### SQLite busy-timeout detector boundary
+
+`arch.sqlite-busy-timeout-ssot` resolves literals, template strings, `+`
+expressions, and same-scope `const` chains. Numeric SQLite syntax includes
+signed, decimal, exponent, and hexadecimal forms, including SQLite's
+single-quote, double-quote, backtick, and bracket value forms and numeric-prefix
+conversion inside a quoted value. The scanner splits SQL statements and removes
+comments only outside quoted regions, then recognizes unqualified,
+schema-qualified, or quoted `busy_timeout` pragma names at the start of a
+statement. A phrase embedded in a `SELECT` string literal or arbitrary prose is
+not treated as a pragma. For SQL, the rule inspects the first argument of any
+direct member call named `exec` or `prepare`; it does not prove that the receiver
+is a SQLite object. A numeric `PRAGMA busy_timeout` statement is a finding only
+when it reaches one of those method-name sinks.
+
+For the second `DatabaseSync` argument, the detector resolves inline object
+literals, same-scope `const` objects, and ordered object spreads. A `const`
+binding is not assumed to make an object immutable: member assignment, update,
+or deletion and `Object.assign`, `Object.defineProperty`,
+`Object.defineProperties`, `Object.setPrototypeOf`, or
+`Reflect.defineProperty` mutations through the binding or a same-scope `const`
+alias produce `unknownOptions`. Static numeric timeout values are findings. Only
+`SQLITE_BUSY_TIMEOUT_MS` imported from the canonical
+`src/lib/sqlite-constants.ts` is accepted as the timeout value. An imported or
+otherwise unresolvable options object, spread, computed property name, or
+timeout value, and any constructor argument spread that can affect the path or
+options positions, produces an explicit `unknownOptions` finding; the blocking
+zero-finding ratchet cannot mistake that state for compliance. An omitted
+options argument and a fully resolved object with no `timeout` property are valid,
+which covers the production `READ_ONLY_DATABASE_OPTIONS` pattern.
+
+`DatabaseSync` constructors are matched through named or namespace imports from
+`node:sqlite`, including local aliases, rather than by identifier spelling.
+This is deliberately intraprocedural. SQL returned by helpers, arbitrary
+imported SQL strings, detached or aliased `exec`/`prepare` methods, mutation
+hidden inside arbitrary helper calls, non-`const` aliases, and aliases stored
+through object properties or other containers are residual dataflow limits.
+Review remains responsible for those shapes until the rule grows symbol-aware
+interprocedural analysis; the rule does not claim to cover them.
 
 ## Invariant
 
@@ -109,6 +150,7 @@ rules into hooks, and semantic or human rules into the SDLC review flow.
 | `hygiene.no-wa-jid-literal-in-generic-ui` | mechanical | block | guard, ci | Block new WhatsApp JID literals (`@s.whatsapp.net`, `@g.us`) in generic UI/ops surfaces (console + deploy/scripts); existing occurrences ratchet-baselined. |
 | `hygiene.no-whatsapp-copy-in-generic-ui` | mechanical | block | guard, ci | Block new WhatsApp-presuming copy in generic console components; per-transport copy variants instead. |
 | `hygiene.no-health-whatsapp-key-read` | mechanical | block | guard, ci | Block new direct `health.whatsapp` key reads in console; reads go through the generic transport-health accessor with legacy fallback. |
+| `hygiene.catch-justification` | ast | warn | eslint | Flag catch blocks whose bodies only swallow/no-op unless they carry a reasoned justification; 127 inherited semantic identities are shrink-only ratchet debt. |
 
 ## Test
 
@@ -133,7 +175,7 @@ Current baseline measurements:
 
 | rule | path | lines | ceiling |
 |------|------|-------|---------|
-| `arch.file-size` | `src/runtimes/agent/runtime.ts` | 12361 | 12361 |
+| `arch.file-size` | `src/runtimes/agent/runtime.ts` | 12131 | 12131 |
 | `arch.file-size` | `tests/runtimes/agent/runtime.test.ts` | 16579 | 16579 |
 
 Intentional bump (both twins, per protocol): +105 lines in
@@ -191,9 +233,9 @@ disagree (`| rule | count |` rows below are machine-checked):
 | `arch.ssot-lid-reads` | 6 | `scripts/ssot-pattern-guard.ts` |
 | `arch.ssot-jid-construction` | 7 | `scripts/ssot-pattern-guard.ts` |
 | `arch.ssot-name-ladder` | 5 | `scripts/ssot-pattern-guard.ts` |
-| `arch.ssot-phone-shape` | 9 | `scripts/ssot-pattern-guard.ts` |
+| `arch.ssot-phone-shape` | 6 | `scripts/ssot-pattern-guard.ts` |
 | `arch.ssot-presentation-literals` | 0 | `scripts/ssot-pattern-guard.ts` (pure block) |
-| `arch.ring-boundaries` | 57 | `scripts/ring-boundary-guard.ts` (ratchet, not yet a pure block) |
+| `arch.ring-boundaries` | 56 | `scripts/ring-boundary-guard.ts` (ratchet, not yet a pure block) |
 
 ## ESLint Ring (live)
 
@@ -239,3 +281,49 @@ baseline-suppressed here — they stay visible in the lint output. Local runs us
 authoritative via CI.
 
 The ESLint ring warning count for `arch.file-size` is ratcheted by `tests/scripts/fitness-file-size-warning-budget.test.ts`.
+
+## Non-Registry Guard: Durability-Writer Invariant (#1789)
+
+`scripts/durability-writer-guard.ts` is **not** a `scripts/lib/fitness/registry.ts` entry — it
+carries no row in the category tables above, so it does not appear under any rule id. It is
+recorded here on its own so the taxonomy doesn't silently omit a fail-closed guard wired into the
+push gate. Category: **invariant** (same shape as `invariant.fail-closed-gate` — a structural
+completeness check, not a code-quality or process rule). Ring: **guard** only, via
+`npm run guard:durability-writer`, wired into `verify:push:branch` next to the other guard
+invocations; its companion test, `tests/scripts/durability-writer-guard.test.ts`, is in the
+curated push-gate test list.
+
+**Defect class it prevents:** a status-bearing durability table can be structurally incapable of
+reporting bad news — the row exists, its vocabulary declares a terminal-failure value, but nothing
+in production `src/` ever writes it. `auth_loss_signal` was exactly this until #1786 wired a
+writer: the store, the controller, and the terminal-logout decision all existed, and none of them
+were connected. No test caught it because no test asserted the surface could FAIL. This guard,
+backed by the hand-curated registry `scripts/lib/durability-status-registry.ts`, makes that class
+of gap impossible to reship silently.
+
+**Checks:** (1) completeness — every table in the migrated schema snapshot classifies into exactly
+one of known-status / non-status / reserved; (1b) self-provisioned discovery — a bounded static
+scan for `CREATE TABLE` text under `src/**/*.ts` catches tables six `ensureXSchema`-style modules
+create outside the migration registry, closing the blind spot check (1) alone would have (each such
+table's DDL is also run through check (2b)'s anti-dodge regex); (2) reserved metadata — a declared
+reserved exemption must carry a non-empty reason and issue, or the exemption itself fails the
+guard; (2b) anti-dodge — a non-status table with a status/state/error/outcome/failed-shaped column
+must carry a truthful justification, or the guard fails closed; (3) per-table writer coverage —
+every status-bearing table's terminal-failure value(s) must be covered by a resolvable, non-test
+`src/` writer site or a well-formed declared exception (same reason+issue rule as check (2)).
+
+**Exit codes:** 0 pass, 1 violation, 2 inconclusive. Non-vacuity is enforced deliberately: an empty
+schema snapshot, or a throw anywhere inside the scan itself, maps to exit 2 — never a silent 0 and
+never an uncaught exception falling through to Node's default exit 1.
+
+**Completeness scope, stated honestly:** the total-completeness claim covers every table
+`migratedSchemaSnapshot()` returns, PLUS every table the check-1b discovery scan finds that is
+registered as `SELF_PROVISIONED` (6 tables created outside the migration registry by their own
+`ensureXSchema` functions) or `DISCOVERY_EXCLUSIONS` (`outbound_sends_v26`, a transient
+migration-26 create→copy→rename artifact that never persists under its own name) — not "every
+table" unconditionally.
+
+**Declared exceptions (both #1789-tracked):** `sweep_runs` (`TRACKED_RESERVED` — 0-ref reserved
+substrate table, no live sweep pipeline) and `beads`' `'failed'` value (`TRACKED_UNWIRED_TERMINAL`
+— `update_bead` is status-protected and `transition()`'s callers only ever pass
+`completed`/`cancelled`/`active`; no `fail_bead` tool exists).

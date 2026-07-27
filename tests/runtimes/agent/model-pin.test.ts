@@ -16,6 +16,7 @@ import type { IncomingMessage, Messenger } from '../../../src/core/types.ts';
 import type { AgentEvent } from '../../../src/runtimes/agent/stream-parser.ts';
 import type { IOutboundQueue } from '../../../src/runtimes/agent/outbound-queue.ts';
 import { createRuntimeTurnContext } from '../../../src/runtimes/agent/runtime-turn-context.ts';
+import { TurnQueue } from '../../../src/runtimes/agent/turn-queue.ts';
 import { createOpenCodeParser } from '../../../src/runtimes/agent/providers/opencode-parser.ts';
 import type {
   MarkSystemTurnInput,
@@ -477,7 +478,14 @@ void _mockQueueTypeCheck; // suppress unused-variable warning
 // ─── Import after mocks ───────────────────────────────────────────────────────
 
 import { AgentRuntime } from '../../../src/runtimes/agent/runtime.ts';
+import {
+  applyRouteChangeAndRecycle,
+  consumePendingRecycleIfIdle,
+  recycleLiveSession,
+  type ModelPinPort,
+} from '../../../src/runtimes/agent/model-pin.ts';
 import { __resetModelCatalogueCacheForTest } from '../../../src/runtimes/agent/model-catalogue-resolver.ts';
+import { providerConfigEffort } from '../../../src/runtimes/agent/reasoning-control.ts';
 import { Database as RealDatabase } from '../../../src/core/database.ts';
 import { DurabilityEngine } from '../../../src/core/durability.ts';
 
@@ -575,6 +583,7 @@ describe('NL routing handlers (nlRouting flag)', () => {
     capturedSessionManagerOptsRef.current = null;
     mockQueue.enqueueText.mockClear();
     mockSession.sendTurn.mockClear();
+    mockSession.shutdown.mockReset().mockResolvedValue(undefined);
     mockSession.getStatus.mockReturnValue({ active: false, pid: null, sessionId: null, startedAt: null, messageCount: 0, lastMessageAt: null });
     // Task G (D14): the shared mock SessionManager is one singleton object
     // reused across every constructor call, so its accessors must track the
@@ -589,6 +598,15 @@ describe('NL routing handlers (nlRouting flag)', () => {
     (mockSession as unknown as Record<string, unknown>).getProviderId = vi.fn(
       () => (capturedSessionManagerOptsRef.current as unknown as { provider?: string } | null)?.provider ?? 'claude-cli',
     );
+    // Slice 3: the recycle diff also reads the session's EFFECTIVE spawned
+    // effort. Like getModelRef/getProviderId above, the mock must report the
+    // LATEST construction opts. It calls the REAL providerConfigEffort rather
+    // than re-implementing its guard, so the double cannot silently drift from
+    // the production reader (which would make these tests verify the mock).
+    (mockSession as unknown as Record<string, unknown>).getSpawnedEffort = vi.fn(() => {
+      const pc = (capturedSessionManagerOptsRef.current as unknown as { providerConfig?: Record<string, unknown> } | null)?.providerConfig;
+      return providerConfigEffort(pc);
+    });
   });
 
   afterEach(async () => {
@@ -896,6 +914,80 @@ describe('NL routing handlers (nlRouting flag)', () => {
       expect(reply).not.toContain('new sessions still use claude-cli (haiku-fast)');
     });
 
+    // Slice 3 (layer 4 — apply). The menu Level-3 input path now ships too (its
+    // own tests live below); the one-shot `/model N M K` form is the remaining
+    // deferral. These isolate the apply seam both inputs drive:
+    // routeSessionProviderConfig folds a route's effort pin into the spawn
+    // config, and the recycle diff treats an effort-only change as a genuine
+    // change. RED-first: on the pre-Slice-3 code both the config carries no
+    // `effort` and the diff misses it (returns 'noop').
+    describe('Slice 3 — route effort applies to the spawn config + recycle diff', () => {
+      type RSPC = { routeSessionProviderConfig: (r: Record<string, unknown>) => Record<string, unknown> | undefined };
+      type ARCR = { applyRouteChangeAndRecycle: (c: string, s: string, m: string | undefined) => Promise<string> };
+
+      it('a claude-cli user-pin route carries its effort into providerConfig.effort', () => {
+        const { runtime } = makeRoutingRuntime({ model: 'claude-opus-4-8' });
+        const cfg = (runtime as unknown as RSPC).routeSessionProviderConfig({
+          provider: 'claude-cli', model: 'claude-opus-4-8', source: 'preference', reasonCode: 'user_pin', effort: 'low',
+        });
+        expect(cfg?.effort).toBe('low');
+      });
+
+      it('a route with NO effort override keeps the static providerConfig.effort (no forced harness default)', () => {
+        cfgAny().agentProviderConfig = { effort: 'high' };
+        const { runtime } = makeRoutingRuntime({ model: 'claude-opus-4-8' });
+        const cfg = (runtime as unknown as RSPC).routeSessionProviderConfig({
+          provider: 'claude-cli', model: 'claude-opus-4-8', source: 'default', reasonCode: 'no_preference',
+        });
+        expect(cfg?.effort).toBe('high');
+      });
+
+      it('a non-claude route never gets the pin effort applied (effort is claude-cli-only)', () => {
+        // A static effort is configured so the assertion is CONCRETE: the inherited
+        // static value must survive and the pin's 'low' must never be applied to a
+        // non-claude route (a bare toBeUndefined would not distinguish
+        // "not applied" from "no config at all").
+        cfgAny().agentProviderConfig = { effort: 'high' };
+        const { runtime } = makeRoutingRuntime({ model: 'claude-opus-4-8' });
+        const cfg = (runtime as unknown as RSPC).routeSessionProviderConfig({
+          provider: 'opencode-cli', model: 'kimi/kimi-k3', source: 'preference', reasonCode: 'user_pin', effort: 'low',
+        });
+        expect(cfg?.effort).not.toBe('low');
+        expect(cfg?.effort).toBe('high');
+      });
+
+      it('the recycle diff detects an effort-only change (same provider+model, different effective effort)', async () => {
+        cfgAny().agentProviderConfig = { effort: 'high' };
+        const { runtime } = makeRoutingRuntime({ model: 'claude-opus-4-8' });
+        // A live session spawned with effort 'high'.
+        capturedSessionManagerOptsRef.current = {
+          model: 'claude-opus-4-8', provider: 'claude-cli', providerConfig: { effort: 'high' },
+        } as unknown as typeof capturedSessionManagerOptsRef.current;
+        (runtime as unknown as { session: typeof mockSession }).session = mockSession;
+        // The next route pins the SAME model but a DIFFERENT effort.
+        (runtime as unknown as { resolveRouteForTurn: (c: string, s?: string) => unknown }).resolveRouteForTurn = () => ({
+          provider: 'claude-cli', model: 'claude-opus-4-8', source: 'preference', reasonCode: 'user_pin', effort: 'low', pinnedProvider: null,
+        });
+        const outcome = await (runtime as unknown as ARCR).applyRouteChangeAndRecycle(CHAT, SENDER_A, undefined);
+        expect(outcome).not.toBe('noop');
+      });
+
+      it('the recycle diff is a no-op when the effective effort is unchanged (no over-recycle, F3)', async () => {
+        cfgAny().agentProviderConfig = { effort: 'high' };
+        const { runtime } = makeRoutingRuntime({ model: 'claude-opus-4-8' });
+        capturedSessionManagerOptsRef.current = {
+          model: 'claude-opus-4-8', provider: 'claude-cli', providerConfig: { effort: 'high' },
+        } as unknown as typeof capturedSessionManagerOptsRef.current;
+        (runtime as unknown as { session: typeof mockSession }).session = mockSession;
+        // Same model AND the same EFFECTIVE effort (static 'high', no pin override).
+        (runtime as unknown as { resolveRouteForTurn: (c: string, s?: string) => unknown }).resolveRouteForTurn = () => ({
+          provider: 'claude-cli', model: 'claude-opus-4-8', source: 'default', reasonCode: 'no_preference', pinnedProvider: null,
+        });
+        const outcome = await (runtime as unknown as ARCR).applyRouteChangeAndRecycle(CHAT, SENDER_A, undefined);
+        expect(outcome).toBe('noop');
+      });
+    });
+
     it('keeps the live session marked active when fallback only controls the next session', async () => {
       cfgAny().agentFallbacks = [{ provider: 'claude-cli', model: 'haiku-fast' }];
       mockSession.getStatus.mockReturnValue({
@@ -1005,6 +1097,7 @@ describe('NL routing handlers (nlRouting flag)', () => {
       // test in this suite may ever touch (Task H guardrail).
       const listFn = vi.fn().mockResolvedValue({ status: 'ok', ids: ['kimi/kimi-k3'] });
       const { runtime, sentMessages } = makeRoutingRuntime({ model: 'claude-opus-4-8', modelCatalogueListFn: listFn });
+      (runtime as unknown as { routablePinTargets: () => string[] }).routablePinTargets = () => ['claude-cli', 'opencode-cli'];
       await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model list' }));
       await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model 2', messageId: 'msg-2' }));
       const rows = prefRows();
@@ -1020,7 +1113,7 @@ describe('NL routing handlers (nlRouting flag)', () => {
       expect(rows[0].model_pin_verified).toBe(1);
       expect(listFn).toHaveBeenCalledTimes(1);
       const reply = allReplies(sentMessages).join('\n');
-      expect(reply).toContain('Pinned kimi/kimi-k3 for 24h');
+      expect(reply).toContain('Now answering with kimi/kimi-k3. reply keep to make it permanent, /reset to undo.');
       expect(reply).toContain('reply keep to make it permanent, /reset to undo');
       // D10: the old deferral copy must never appear anywhere in this flow.
       expect(reply).not.toContain('applies from your next session');
@@ -1262,6 +1355,7 @@ describe('NL routing handlers (nlRouting flag)', () => {
     it('N-DEFAULT HIT: /model N default resolves the snapshot and pins the PROVIDER only (no model)', async () => {
       cfgAny().agentFallbacks = [{ provider: 'opencode-cli', model: 'kimi/kimi-k3' }];
       const { runtime, sentMessages } = makeRoutingRuntime({ model: 'claude-opus-4-8' });
+      (runtime as unknown as { routablePinTargets: () => string[] }).routablePinTargets = () => ['claude-cli', 'opencode-cli'];
       await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model list' }));
       await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model 2 default', messageId: 'msg-2' }));
       const rows = prefRows();
@@ -1273,7 +1367,7 @@ describe('NL routing handlers (nlRouting flag)', () => {
       expect(rows[0].validated_provider).toBeNull();
       expect(rows[0].model_pin_verified).toBeNull();
       const reply = allReplies(sentMessages).join('\n');
-      expect(reply).toContain('Pinned `opencode-cli` for 24h');
+      expect(reply).toContain('Now answering with `opencode-cli`. reply keep to make it permanent, /reset to undo.');
       expect(reply).not.toContain('applies from your next session');
     });
 
@@ -1358,6 +1452,229 @@ describe('NL routing handlers (nlRouting flag)', () => {
       const opts = capturedSessionManagerOptsRef.current as unknown as { provider?: string; model?: string };
       expect(opts?.provider).toBe('claude-cli');
       expect(opts?.model).toBe('claude-sonnet-5');
+    });
+
+    it('a per-chat route recycle proves shutdown before exact queue/session retirement and success', async () => {
+      const mapKey = CHAT;
+      const chatSessions = new Map([[mapKey, mockSession]]);
+      const chatQueues = new Map([[mapKey, mockQueue as IOutboundQueue]]);
+      const runtimeQueue = {};
+      const captureIdle = vi.fn(() => runtimeQueue);
+      const retireIdle = vi.fn();
+      const deleteOwnedPerChatSession = vi.fn(() => {
+        chatSessions.delete(mapKey);
+        return true;
+      });
+      const cleanupPerChatState = vi.fn();
+      const port = {
+        sessionScope: 'per_chat',
+        chatSessions,
+        chatQueues,
+        runtimeTurnCoordinator: {
+          captureIdlePerChatTurnQueueForRecycle: captureIdle,
+          retireIdlePerChatTurnQueueForRecycle: retireIdle,
+        },
+        deleteOwnedPerChatSession,
+        cleanupPerChatState,
+      } as unknown as ModelPinPort;
+
+      mockSession.shutdown.mockClear();
+      await recycleLiveSession(port, mapKey, mockSession as never);
+
+      expect(captureIdle).toHaveBeenCalledWith(mapKey);
+      expect(retireIdle).toHaveBeenCalledWith(mapKey, runtimeQueue);
+      expect(deleteOwnedPerChatSession).toHaveBeenCalledWith(mapKey, mockSession);
+      expect(cleanupPerChatState).toHaveBeenCalledWith(mapKey);
+      expect(chatQueues.has(mapKey)).toBe(false);
+      expect(mockSession.shutdown).toHaveBeenCalledWith(false);
+    });
+
+    it('a per-chat route recycle retains ownership and does not report success when idle proof fails', async () => {
+      const mapKey = CHAT;
+      const chatSessions = new Map([[mapKey, mockSession]]);
+      const chatQueues = new Map([[mapKey, mockQueue as IOutboundQueue]]);
+      const proofError = new Error('runtime queue is not idle');
+      const deleteOwnedPerChatSession = vi.fn(() => true);
+      const cleanupPerChatState = vi.fn();
+      const port = {
+        sessionScope: 'per_chat',
+        chatSessions,
+        chatQueues,
+        runtimeTurnCoordinator: {
+          captureIdlePerChatTurnQueueForRecycle: vi.fn(() => {
+            throw proofError;
+          }),
+          retireIdlePerChatTurnQueueForRecycle: vi.fn(),
+        },
+        deleteOwnedPerChatSession,
+        cleanupPerChatState,
+      } as unknown as ModelPinPort;
+
+      mockSession.shutdown.mockClear();
+
+      await expect(recycleLiveSession(port, mapKey, mockSession as never)).rejects.toThrow(proofError);
+      expect(chatSessions.get(mapKey)).toBe(mockSession);
+      expect(chatQueues.get(mapKey)).toBe(mockQueue);
+      expect(deleteOwnedPerChatSession).not.toHaveBeenCalled();
+      expect(cleanupPerChatState).not.toHaveBeenCalled();
+      expect(mockSession.shutdown).not.toHaveBeenCalled();
+    });
+
+    it('retains the exact per-chat owner and queue when process-tree shutdown fails', async () => {
+      const mapKey = CHAT;
+      const chatSessions = new Map([[mapKey, mockSession]]);
+      const chatQueues = new Map([[mapKey, mockQueue as IOutboundQueue]]);
+      const runtimeQueue = {};
+      const retireIdle = vi.fn();
+      const deleteOwnedPerChatSession = vi.fn(() => true);
+      const cleanupPerChatState = vi.fn();
+      const port = {
+        sessionScope: 'per_chat',
+        chatSessions,
+        chatQueues,
+        runtimeTurnCoordinator: {
+          captureIdlePerChatTurnQueueForRecycle: vi.fn(() => runtimeQueue),
+          retireIdlePerChatTurnQueueForRecycle: retireIdle,
+        },
+        deleteOwnedPerChatSession,
+        cleanupPerChatState,
+      } as unknown as ModelPinPort;
+      mockSession.shutdown.mockRejectedValueOnce(new Error('tree still live'));
+
+      await expect(recycleLiveSession(port, mapKey, mockSession as never))
+        .rejects.toThrow('tree still live');
+
+      expect(chatSessions.get(mapKey)).toBe(mockSession);
+      expect(chatQueues.get(mapKey)).toBe(mockQueue);
+      expect(retireIdle).not.toHaveBeenCalled();
+      expect(deleteOwnedPerChatSession).not.toHaveBeenCalled();
+      expect(cleanupPerChatState).not.toHaveBeenCalled();
+    });
+
+    it('retains global ownership when process-tree shutdown fails', async () => {
+      const cleanupGlobalAutoCompactState = vi.fn();
+      const operationTracker = { shutdown: vi.fn() };
+      const port = {
+        sessionScope: 'single',
+        session: mockSession,
+        queue: mockQueue,
+        activeChatJid: CHAT,
+        operationTracker,
+        getActiveQueue: () => mockQueue,
+        cleanupGlobalAutoCompactState,
+      } as unknown as ModelPinPort;
+      mockSession.shutdown.mockRejectedValueOnce(new Error('global tree still live'));
+
+      await expect(recycleLiveSession(port, undefined, mockSession as never))
+        .rejects.toThrow('global tree still live');
+
+      expect(port.session).toBe(mockSession);
+      expect(port.queue).toBe(mockQueue);
+      expect(port.activeChatJid).toBe(CHAT);
+      expect(port.operationTracker).toBe(operationTracker);
+      expect(operationTracker.shutdown).not.toHaveBeenCalled();
+      expect(cleanupGlobalAutoCompactState).not.toHaveBeenCalled();
+    });
+
+    it('makes the next inbound join an in-progress recycle instead of admitting a successor', async () => {
+      let releaseShutdown!: () => void;
+      const shutdownBlocked = new Promise<void>((resolve) => {
+        releaseShutdown = resolve;
+      });
+      mockSession.shutdown.mockImplementationOnce(async () => {
+        await shutdownBlocked;
+      });
+      const pendingRecycle = new Set<string>();
+      const recyclePromises = new Map<string, Promise<void>>();
+      const recycleOwners = new Map();
+      const recycleFailures = new Map();
+      const port = {
+        sessionScope: 'single',
+        session: mockSession,
+        queue: mockQueue,
+        activeChatJid: CHAT,
+        operationTracker: null,
+        pendingRecycle,
+        recyclePromises,
+        recycleOwners,
+        recycleFailures,
+        chatSessions: new Map(),
+        chatQueues: new Map(),
+        resolveRouteForTurn: () => ({
+          provider: 'claude-cli',
+          model: 'claude-sonnet-5',
+          pinnedProvider: null,
+        }),
+        routeSessionProviderConfig: () => undefined,
+        isTurnInFlight: () => false,
+        getActiveQueue: () => mockQueue,
+        cleanupGlobalAutoCompactState: vi.fn(),
+      } as unknown as ModelPinPort;
+
+      const pinRecycle = applyRouteChangeAndRecycle(port, CHAT, SENDER_A, undefined);
+      const nextInbound = consumePendingRecycleIfIdle(port, '__global__');
+      await Promise.resolve();
+
+      expect(mockSession.shutdown).toHaveBeenCalledTimes(1);
+      expect(port.session).toBe(mockSession);
+      expect(port.queue).toBe(mockQueue);
+      expect(pendingRecycle.has('__global__')).toBe(true);
+
+      releaseShutdown();
+      await expect(pinRecycle).resolves.toBe('recycled');
+      await expect(nextInbound).resolves.toBeUndefined();
+      expect({
+        session: port.session,
+        queue: port.queue,
+        pending: pendingRecycle.has('__global__'),
+        inProgress: recyclePromises.has('__global__'),
+        owner: recycleOwners.get('__global__') ?? null,
+        failure: recycleFailures.get('__global__') ?? null,
+      }).toEqual({
+        session: null,
+        queue: null,
+        pending: false,
+        inProgress: false,
+        owner: null,
+        failure: null,
+      });
+    });
+
+    it('does not clobber a successor installed by a stale per-chat callback during shutdown', async () => {
+      const mapKey = CHAT;
+      const replacementSession = { ...mockSession };
+      const replacementQueue = { ...mockQueue } as IOutboundQueue;
+      const chatSessions = new Map([[mapKey, mockSession]]);
+      const chatQueues = new Map([[mapKey, mockQueue as IOutboundQueue]]);
+      const runtimeQueue = {};
+      let releaseShutdown!: () => void;
+      mockSession.shutdown.mockImplementationOnce(() => new Promise<void>((resolve) => {
+        releaseShutdown = resolve;
+      }));
+      const deleteOwnedPerChatSession = vi.fn(() => true);
+      const cleanupPerChatState = vi.fn();
+      const port = {
+        sessionScope: 'per_chat',
+        chatSessions,
+        chatQueues,
+        runtimeTurnCoordinator: {
+          captureIdlePerChatTurnQueueForRecycle: vi.fn(() => runtimeQueue),
+          retireIdlePerChatTurnQueueForRecycle: vi.fn(),
+        },
+        deleteOwnedPerChatSession,
+        cleanupPerChatState,
+      } as unknown as ModelPinPort;
+
+      const recycle = recycleLiveSession(port, mapKey, mockSession as never);
+      chatSessions.set(mapKey, replacementSession as never);
+      chatQueues.set(mapKey, replacementQueue);
+      releaseShutdown();
+
+      await expect(recycle).rejects.toThrow(/ownership changed during route recycle/i);
+      expect(chatSessions.get(mapKey)).toBe(replacementSession);
+      expect(chatQueues.get(mapKey)).toBe(replacementQueue);
+      expect(deleteOwnedPerChatSession).not.toHaveBeenCalled();
+      expect(cleanupPerChatState).not.toHaveBeenCalled();
     });
 
     it('pinning the SAME route the live session is already on does not recycle (diff-gate no-op)', async () => {
@@ -1507,12 +1824,12 @@ describe('NL routing handlers (nlRouting flag)', () => {
       expect(opts?.model).toBe('claude-opus-4-8');
     });
 
-    it('no live session at pin time is a no-op — nothing to recycle, the next spawn reads the pin regardless', () => {
+    it('no live session at pin time is a no-op — nothing to recycle, the next spawn reads the pin regardless', async () => {
       const runtime = new AgentRuntime(routingDb, makeMessenger().messenger, 'test');
       const outcome = (runtime as unknown as {
-        applyRouteChangeAndRecycle: (chatJid: string, senderJid: string, mapKey: string | undefined) => string;
+        applyRouteChangeAndRecycle: (chatJid: string, senderJid: string, mapKey: string | undefined) => Promise<string>;
       }).applyRouteChangeAndRecycle(CHAT, SENDER_A, undefined);
-      expect(outcome).toBe('noop');
+      await expect(outcome).resolves.toBe('noop');
     });
 
     // IMPORTANT 1 (final-review): a group re-confirm's 'refreshed'/
@@ -2073,6 +2390,60 @@ describe('NL routing handlers (nlRouting flag)', () => {
       expect(rows[0].requested_model).toBe('kimi/kimi-k3');
       expect(rows[0].model_pin_verified).toBe(1);
       expect(allReplies(sentMessages).join('\n')).toContain('kimi/kimi-k3');
+    });
+
+    // Slice 3 — Level-3 reasoning-effort menu. claude-cli has native reasoning
+    // control (nativeReasoningControl), so a claude MODEL pick opens Level-3
+    // instead of pinning; opencode-cli has none, so its model pins directly (the
+    // Slice-2 test above, unchanged). RED-first: pre-Slice-3, picking the claude
+    // model writes a pref row immediately (no effort menu, no effort column).
+    it('picking a claude-cli MODEL at Level-2 opens Level-3 (the effort menu), not a pin', async () => {
+      const { runtime, sentMessages } = makeDrillRuntime();
+      await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model' }));
+      await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model 1', messageId: 'm2' })); // Claude brand → models
+      sentMessages.length = 0;
+      mockQueue.enqueueText.mockClear();
+      await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model 1', messageId: 'm3' })); // pick claude-opus-4-8
+      const reply = allReplies(sentMessages).join('\n');
+      expect(reply).toContain('reasoning effort:');
+      expect(reply).toContain('Highest');
+      expect(reply).toContain('Default (no override)');
+      expect(prefRows()).toHaveLength(0); // opened Level-3, did NOT pin
+    });
+
+    it('picking an effort level at Level-3 pins the model AT that effort and discloses it in the receipt', async () => {
+      const { runtime, sentMessages } = makeDrillRuntime();
+      await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model' }));
+      await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model 1', messageId: 'm2' }));
+      await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model 1', messageId: 'm3' })); // → Level-3
+      sentMessages.length = 0;
+      mockQueue.enqueueText.mockClear();
+      await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model 1', messageId: 'm4' })); // pick "Highest" (xhigh)
+      const rows = prefRows();
+      expect(rows).toHaveLength(1);
+      expect(rows[0].requested_provider).toBe('claude-cli');
+      expect(rows[0].requested_model).toBe('claude-opus-4-8');
+      expect(rows[0].requested_effort).toBe('xhigh');
+      expect(allReplies(sentMessages).join('\n').toLowerCase()).toContain('highest reasoning');
+    });
+
+    it('picking "Default (no override)" at Level-3 pins the model with a null effort (clears any override)', async () => {
+      const { runtime, sentMessages } = makeDrillRuntime();
+      await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model' }));
+      await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model 1', messageId: 'm2' }));
+      await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model 1', messageId: 'm3' })); // → Level-3 (5 rows)
+      sentMessages.length = 0;
+      mockQueue.enqueueText.mockClear();
+      await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model 5', messageId: 'm4' })); // "Default (no override)"
+      const rows = prefRows();
+      expect(rows).toHaveLength(1);
+      expect(rows[0].requested_model).toBe('claude-opus-4-8');
+      expect(rows[0].requested_effort).toBeNull();
+      // Terminal behavior assertion: a null effort echoes the model ALONE — the
+      // receipt must NOT claim a reasoning level it did not pin (charter #6).
+      const reply = allReplies(sentMessages).join('\n');
+      expect(reply).toContain('claude-opus-4-8');
+      expect(reply.toLowerCase()).not.toContain('reasoning');
     });
 
     it('RECENCY (drill wins): /model list → bare /model → /model 1 drills the DRILL brand, never a flat pin', async () => {

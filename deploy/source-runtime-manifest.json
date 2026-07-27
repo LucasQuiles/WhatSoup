@@ -5,7 +5,7 @@
   "entrypoints": [
     {
       "path": "src/main.ts",
-      "sha256": "e4e2466a371f745d2d2a47b8ecc8d0e4d52d95e71cf2a28f7d73c3ba1319d505",
+      "sha256": "c3b3a33aedbcde614965a31f5902d0779122c2942700da3acb1cc5e7a40a41f6",
       "mustContain": [
         "startHealthServer",
         "createConnection"
@@ -41,17 +41,18 @@
     },
     {
       "path": "src/transport/connection.ts",
-      "sha256": "9eb039f1dcf0299e5766b87c6388a15740f45029a76d8c6d06e0aae34878cac6",
+      "sha256": "23d36156578baa0aebe43776d5eb46ceab61679b6c041fd5bf66a06795316b95",
       "mustContain": [
         "decideDisconnectAction",
         "QR code received",
-        "Logged out"
+        "Logged out",
+        "scheduleSettledAuthBondSnapshot"
       ],
       "importGraph": true
     },
     {
       "path": "src/transport/auth.ts",
-      "sha256": "76c616e9126e46bd6a68bf3a6311baa86e16c44d597e4d3339b36688fd320667",
+      "sha256": "5072b5af6294199b0dc4878687fd0f8abc692784059239745b161f6a3a0b6341",
       "mustContain": [
         "useMultiFileAuthState",
         "decideDisconnectAction"
@@ -70,7 +71,7 @@
     },
     {
       "path": "src/runtimes/agent/session.ts",
-      "sha256": "1148ccfb86c10e0bfac35a4ef0e19a6fed6fcc429102f4a12232dc1d752e1b81",
+      "sha256": "30b0c887b1e4267e7589cba0fbe8a90d0c80a8eda5b915652a86d2a8068024d8",
       "mustContain": [
         "composeWithExactLineDedup"
       ],
@@ -78,7 +79,7 @@
     },
     {
       "path": "src/runtimes/agent/session-db.ts",
-      "sha256": "fd089d2199018596efa59f72f1b0059458134b71aa959ba2bf864a630e891c5c",
+      "sha256": "ca6f48bf7aa888296420e6990e2057fe5f60f5da48be939222a2dc27f2e97f42",
       "mustContain": [
         "getSessionTokenSnapshot"
       ],

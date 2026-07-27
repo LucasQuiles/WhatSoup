@@ -388,3 +388,94 @@
   --ease:     var(--ease-enter);
   --dur-norm: var(--dur-base);
 }
+
+/* --------------------------------------------------------------------------
+   v3.5 token addendum (docs/design-system/v35/16-tokens-v3-addendum.md)
+   ADDITIVE names (-v35 suffix + slot namespaces); v3 names above stay live for
+   current surfaces; v3.5 surface beads (b-03+) consume these per-surface.
+   §A gentle-warm ramp (L1) + refined accent (L2) — values verified WCAG in
+     09-design-language-decisions.md
+   §B channel-* structural slots (no hues by law)
+   §C agent-* identity slots (locked 8-hue avatar set, L3)
+   §D presence aliases (status channel + shape mandatory)
+   §E register namespaces (L4)
+   -------------------------------------------------------------------------- */
+
+:root,
+[data-theme="dark"] {
+  /* §A — gentle-warm ramp, dark */
+  --surface-base-v35:    #1E1A15;
+  --surface-raised-v35:  #27221C;
+  --surface-overlay-v35: #322D24;
+  --surface-inset-v35:   #171410;
+  --text-1-v35: #F1ECDF;  /* 14.67 AAA on base */
+  --text-2-v35: #CAC1AF;  /*  9.69 AAA */
+  --text-3-v35: #9A907E;  /*  5.49 AA  */
+  --border-hairline-v35: #383024;
+  --border-subtle-v35:   #473B2C;
+  --border-strong-v35:   #5A4C39;
+  --accent-v35:     #6BA6FF;  /* 7.02 AAA; brand mark unchanged */
+  --accent-fg-v35:  #0A0E14;
+  --accent-wash-v35: color-mix(in srgb, var(--accent-v35) 10%, transparent);
+  --shadow-rest-v35: 0 1px 2px rgb(0 0 0/.30);
+  --shadow-lift-v35: 0 1px 2px rgb(0 0 0/.30), 0 8px 24px rgb(0 0 0/.28);
+
+  /* §B — channel slots (shape-identified; no hues) */
+  --channel-glyph-dim: color-mix(in srgb, var(--text-2) 45%, transparent);
+}
+
+[data-theme="light"] {
+  /* §A — gentle-warm ramp, light */
+  --surface-base-v35:    #FAF6EE;
+  --surface-raised-v35:  #FDFAF3;
+  --surface-overlay-v35: #FFFFFF;
+  --surface-inset-v35:   #EDE5D5;
+  --text-1-v35: #221C12;
+  --text-2-v35: #524833;
+  --text-3-v35: #645849;
+  --border-hairline-v35: #DED4BF;
+  --border-subtle-v35:   #CDC2A9;
+  --border-strong-v35:   #B4A78C;
+  --accent-v35:     #2E66E4;  /* 4.71 AA on #FAF6EE (lifts #2563EB; #3B76F6 fails 3.81) */
+  --accent-fg-v35:  #FFFFFF;
+  --accent-wash-v35: color-mix(in srgb, var(--accent-v35) 10%, transparent);
+  --shadow-rest-v35: 0 1px 2px rgb(60 45 20/.10);
+  --shadow-lift-v35: 0 1px 2px rgb(60 45 20/.10), 0 10px 28px rgb(60 45 20/.14);
+
+  /* §B — channel slots, light */
+  --channel-glyph-dim: color-mix(in srgb, var(--text-2) 60%, transparent);
+}
+
+:root {
+  /* §B — channel slots, theme-independent */
+  --channel-glyph-ink: var(--text-2);
+  --channel-tag-bg: var(--status-ok-solid);
+  --channel-tag-keyline: var(--surface-raised);
+
+  /* §C — agent identity hues (L3; identity not state; avatar-only) */
+  --agent-hue-0: hsl(0, 38%, 34%);
+  --agent-hue-1: hsl(30, 38%, 34%);
+  --agent-hue-2: hsl(60, 38%, 34%);
+  --agent-hue-3: hsl(100, 38%, 34%);
+  --agent-hue-4: hsl(140, 38%, 34%);
+  --agent-hue-5: hsl(250, 38%, 34%);
+  --agent-hue-6: hsl(285, 38%, 34%);
+  --agent-hue-7: hsl(325, 38%, 34%);
+  --agent-avatar-ink: #FFFFFF;
+  --agent-dream: var(--mode-agent-solid);
+  --agent-ring-sel: var(--accent);
+
+  /* §D — presence aliases (color + shape both mandatory) */
+  --presence-live:        var(--status-ok-solid);   /* + disc */
+  --presence-paused:      var(--status-warn-solid); /* + diamond */
+  --presence-draft:       var(--text-2);            /* outline square, transparent fill */
+  --presence-deactivated: var(--text-3);            /* outline + slash, recessed */
+
+  /* §E — register namespaces (L4; per-surface consumption, lint-enforced) */
+  --r-console-sm: 4px;
+  --r-console-md: 6px;
+  --r-console-lg: 8px;
+  --r-journey-sm: 8px;
+  --r-journey-md: 12px;
+  --r-journey-lg: 16px;
+}

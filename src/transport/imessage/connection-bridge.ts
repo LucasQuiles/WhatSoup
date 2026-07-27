@@ -12,6 +12,7 @@
 // addresses raw identifiers; the bridge adds/strips the synthetic suffix at
 // the RuntimeConnection boundary, mirroring @sms/@signal.
 
+import { REQUIRES_WHATSAPP_DETAIL, UnsupportedTransportOperationError } from '../unsupported-operation.ts';
 import { EventEmitter } from 'node:events';
 import { createChildLogger } from '../../logger.ts';
 import type { InboundMessage as ContractInboundMessage } from '../contract/events.ts';
@@ -28,15 +29,13 @@ import { toImessageJid, fromImessageJid } from '../../core/jid-constants.ts';
 import type { ImessageAdapter } from './adapter.ts';
 
 /** Error thrown when an operation is not supported by the iMessage transport. */
-export class UnsupportedTransportOperationError extends Error {
-  readonly code = 'UNSUPPORTED_TRANSPORT_OPERATION';
-  constructor(operation: string) {
-    super(
-      `[ImessageConnection] "${operation}" is not supported on the iMessage transport. ` +
-      'This operation requires a WhatsApp connection.',
-    );
-    this.name = 'UnsupportedTransportOperationError';
-  }
+// #2202: the canonical error lives in transport/unsupported-operation.ts.
+// Re-exported here so existing importers of this module keep working.
+export { UnsupportedTransportOperationError };
+
+/** Build the iMessage-flavoured unsupported-operation error. */
+function unsupported(operation: string): UnsupportedTransportOperationError {
+  return new UnsupportedTransportOperationError('ImessageConnection', 'iMessage', operation, REQUIRES_WHATSAPP_DETAIL);
 }
 
 /**
@@ -220,7 +219,7 @@ export class ImessageConnection extends EventEmitter implements RuntimeConnectio
    */
   async sendMedia(_chatJid: string, _media: OutboundMedia): Promise<SubmissionReceipt> {
     return Promise.reject(
-      new UnsupportedTransportOperationError('sendMedia'),
+      unsupported('sendMedia'),
     );
   }
 
@@ -255,7 +254,7 @@ export class ImessageConnection extends EventEmitter implements RuntimeConnectio
    */
   async sendRaw(_chatJid: string, _content: Record<string, unknown>): Promise<SubmissionReceipt> {
     return Promise.reject(
-      new UnsupportedTransportOperationError('sendRaw'),
+      unsupported('sendRaw'),
     );
   }
 
@@ -270,7 +269,7 @@ export class ImessageConnection extends EventEmitter implements RuntimeConnectio
     _selectableCount: number,
   ): Promise<{ waMessageId: string | null; hasSecret: boolean }> {
     return Promise.reject(
-      new UnsupportedTransportOperationError('sendPollMessage'),
+      unsupported('sendPollMessage'),
     );
   }
 }

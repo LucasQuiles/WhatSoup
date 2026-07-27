@@ -10,12 +10,13 @@
  * 502; D4 declinedVia provenance is instance-side).
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { DatabaseSync } from 'node:sqlite';
+import { DatabaseSync, StatementSync } from 'node:sqlite';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { unlinkSync, existsSync } from 'node:fs';
 import { FleetDbReader } from '../../../src/fleet/db-reader.ts';
+import { SQLITE_BUSY_TIMEOUT_PRAGMA } from '../../../src/lib/sqlite-constants.ts';
 
 const proxyMock = vi.hoisted(() => vi.fn());
 vi.mock('../../../src/fleet/http-proxy.ts', () => ({
@@ -270,29 +271,78 @@ describe('POST /api/lines/:name/approvals/decision (handlePostApprovalDecision)'
     expect(JSON.parse(res._body).error).toMatch(/already resolved/);
   });
 
-  it('v1.1: on 502 the decision is QUEUED durably (write-while-down) — 202 decision_queued, row present', async () => {
-    proxyMock.mockResolvedValue({ status: 502, body: JSON.stringify({ error: 'proxy error: connect ECONNREFUSED' }) });
+  it('v1.1: configures lock waiting before every durable-queue write, then returns 202 with the row present', async () => {
     const queueDbPath = tmpFile();
-    const deps = makeDeps(fakeInstance({ dbPath: queueDbPath }), vi.fn());
+    const prepareSpy = vi.spyOn(DatabaseSync.prototype, 'prepare');
+    const execSpy = vi.spyOn(DatabaseSync.prototype, 'exec');
+    const runSpy = vi.spyOn(StatementSync.prototype, 'run');
+
+    try {
+      proxyMock.mockResolvedValue({ status: 502, body: JSON.stringify({ error: 'proxy error: connect ECONNREFUSED' }) });
+      const deps = makeDeps(fakeInstance({ dbPath: queueDbPath }), vi.fn());
+      const res = mockRes();
+      await handlePostApprovalDecision(
+        mockReq({ method: 'POST', body: JSON.stringify({ mapKey: 'agent:chat:1', questionIndex: 0, selectedOptions: ['Deploy now'] }) }),
+        res, deps, { name: 'agent-line' },
+      );
+
+      expect(res._status).toBe(202);
+      const body = JSON.parse(res._body);
+      expect(body.status).toBe('decision_queued');
+      expect(body.notice).toMatch(/next boot|queued/i);
+
+      expect(prepareSpy.mock.calls[0]?.[0]).toBe(SQLITE_BUSY_TIMEOUT_PRAGMA);
+      expect(prepareSpy.mock.calls[1]?.[0]).toMatch(/INSERT OR REPLACE INTO pending_poll_decisions/);
+      expect(prepareSpy.mock.invocationCallOrder[0]!)
+        .toBeLessThan(runSpy.mock.invocationCallOrder[0]!);
+      expect(runSpy.mock.invocationCallOrder[0]!)
+        .toBeLessThan(execSpy.mock.invocationCallOrder[0]!);
+      expect(execSpy.mock.invocationCallOrder[0]!)
+        .toBeLessThan(prepareSpy.mock.invocationCallOrder[1]!);
+      expect(prepareSpy.mock.invocationCallOrder[1]!)
+        .toBeLessThan(runSpy.mock.invocationCallOrder[1]!);
+
+      const db = new DatabaseSync(queueDbPath, { readOnly: true });
+      try {
+        const row = db.prepare(`SELECT map_key, question_index, selected_options, via FROM pending_poll_decisions WHERE map_key = ?`)
+          .get('agent:chat:1') as { map_key: string; question_index: number; selected_options: string; via: string } | undefined;
+        expect(row).toBeDefined();
+        expect(row!.question_index).toBe(0);
+        expect(JSON.parse(row!.selected_options)).toEqual(['Deploy now']);
+        expect(row!.via).toBe('console');
+      } finally {
+        db.close();
+      }
+    } finally {
+      runSpy.mockRestore();
+      execSpy.mockRestore();
+      prepareSpy.mockRestore();
+      cleanup(queueDbPath);
+    }
+  });
+
+  it('survives malformed 409 body without crashing the fleet server', async () => {
+    proxyMock.mockResolvedValue({ status: 409, body: 'not json!!!' });
+    const deps = makeDeps(fakeInstance(), vi.fn());
     const res = mockRes();
     await handlePostApprovalDecision(
       mockReq({ method: 'POST', body: JSON.stringify({ mapKey: 'agent:chat:1', questionIndex: 0, selectedOptions: ['Deploy now'] }) }),
       res, deps, { name: 'agent-line' },
     );
-    expect(res._status).toBe(202);
-    const body = JSON.parse(res._body);
-    expect(body.status).toBe('decision_queued');
-    expect(body.notice).toMatch(/next boot|queued/i);
-    // The durable row exists for the runtime's boot-time consumption
-    const db = new DatabaseSync(queueDbPath, { readOnly: true });
-    const row = db.prepare(`SELECT map_key, question_index, selected_options, via FROM pending_poll_decisions WHERE map_key = ?`)
-      .get('agent:chat:1') as { map_key: string; question_index: number; selected_options: string; via: string } | undefined;
-    db.close();
-    expect(row).toBeDefined();
-    expect(row!.question_index).toBe(0);
-    expect(JSON.parse(row!.selected_options)).toEqual(['Deploy now']);
-    expect(row!.via).toBe('console');
-    cleanup(queueDbPath);
+    expect(res._status).toBe(409);
+    expect(JSON.parse(res._body).error).toMatch(/unparseable/i);
+  });
+
+  it('survives malformed 4xx body without crashing the fleet server', async () => {
+    proxyMock.mockResolvedValue({ status: 403, body: '<html>nginx error</html>' });
+    const deps = makeDeps(fakeInstance(), vi.fn());
+    const res = mockRes();
+    await handlePostApprovalDecision(
+      mockReq({ method: 'POST', body: JSON.stringify({ mapKey: 'agent:chat:1', questionIndex: 0, selectedOptions: ['Deploy now'] }) }),
+      res, deps, { name: 'agent-line' },
+    );
+    expect(res._status).toBe(403);
+    expect(JSON.parse(res._body).error).toMatch(/unparseable/i);
   });
 
   it('v1.1: falls back to the honest 502 when the instance is unreachable AND the durable queue write fails', async () => {

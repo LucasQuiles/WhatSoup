@@ -608,3 +608,303 @@ replacement plan); no lint-suppression directive may be used inline without a wa
   use of `--type-data-lg`.
 - All 180 legacy tokens dispositioned in §6 (counts §6.15).
 - Light-theme AA failures and fixes: `color.md` §5.
+
+## 10. v3.5 addendum (docs/design-system/v35/16-tokens-v3-addendum.md, landed b-01)
+
+Additive names; v3 names stay live for current surfaces; v3.5 surface beads consume
+`-v35` per-surface (staged cutover, no global flip).
+
+- **§A gentle-warm ramp (L1) + refined accent (L2)** — per-theme literals under
+  `--{surface,text,border,accent,shadow}-*-v35` in `console/src/styles/tokens.semantic.css`
+  (dark base `#1E1A15`, light accent `#2E66E4`; WCAG values verified in
+  `docs/design-system/v35/09-design-language-decisions.md`).
+- **§B `channel-*` structural slots** — `--channel-glyph-ink/-dim`, `--channel-tag-bg/-keyline`;
+  channels identify by glyph shape only, no hues (gate: no `channel-*` token carries a hue).
+- **§C `agent-*` identity slots** — `--agent-hue-0..7` = `hsl(H,38%,34%)`, H ∈
+  {0,30,60,100,140,250,285,325} (L3), `--agent-avatar-ink #FFF`, `--agent-dream`,
+  `--agent-ring-sel`. Avatar-only; identity, not state.
+- **§D `--presence-*` aliases** — live/paused/draft/deactivated, each resolving to the
+  status channel with its shape mandatory (color-only presence is a violation).
+- **§E register namespaces (L4)** — `--r-console-{sm,md,lg}` 4/6/8px;
+  `--r-journey-{sm,md,lg}` 8/12/16px. Per-surface consumption; cross-register use is a
+  lint error (L4 broad enforcement).
+
+Theme-parity token count moves 123 → 139 (+16 v3.5 names in each scope).
+
+## 11. v3.5 chrome geometry (docs/design-system/v35/mockups/*.html, landed b-02)
+
+Component-tier dimension tokens in `console/src/styles/tokens.component.css`, single
+`:root` scope (theme-independent geometry; parity count unaffected). The mockup
+literals are the visual SSOT — they live here, dimension-allowlisted, so the chrome
+stylesheet (`console/src/styles/chrome.css`) consumes `var()` only: colors from the
+`-v35` semantic addendum (§A), radii from the console register (`--r-console-md`, L4).
+
+- **Rail** — `--chrome-rail-w` 212px (expanded), `--chrome-rail-pad`, `--chrome-rail-gap`;
+  collapse width stays `--rail-w-collapsed` 64px (breakpoint moves 760px → 1100px per
+  mockup `@media (max-width:1100px)`). Legacy `--rail-w` 220px retired.
+- **Nameplate/sections/items** — `--chrome-nameplate-pad`, `--chrome-sec-pad`,
+  `--chrome-item-pad`, `--chrome-item-gap`, `--chrome-icon` 16px (11-channel-glyphography
+  §1 floor), `--chrome-dot` 6px (inbox attention dot + host status dot).
+- **Hosts block** — `--chrome-hosts-pad-top`, `--chrome-hostchip-pad`.
+- **Header** — `--chrome-header-pad`, `--chrome-header-gap`, `--chrome-btn-pad`
+  (header button), `--tracking-chrome-title` −0.02em (Bricolage h1),
+  `--tracking-ctx` 0.18em (nameplate ctx caps), `--tracking-sec` 0.12em (rail section
+  caps).
+- **Shape details** — `--chrome-micro-radius` 1px (tick/dot/host-warn corner; badge.md
+  shape family), `--chrome-pill-radius` 99px + `--chrome-attn-pad` (header attn pill).
+
+## 12. v3.5 fleet geometry (docs/design-system/v35/mockups/fleet.html, landed b-03)
+
+Component-tier `--fleet-*` dimension + tracking tokens in
+`console/src/styles/tokens.component.css`, single `:root` scope (theme-independent
+geometry; parity count unaffected). The mockup literals are the visual SSOT — they
+live here, dimension-allowlisted, so the fleet stylesheet
+(`console/src/styles/fleet.css`) consumes `var()` only. Full trace table:
+`docs/design-system/v35/16-tokens-v3-addendum.md` §5.
+
+- **Layout** — `--fleet-pagerow-gap` 14px / `--fleet-pagerow-pad` 14px 22px 12px
+  (surface h1 row, mockup `header` literals — same rhythm as the global header,
+  independently owned so chrome changes cannot shift the surface), `--fleet-pad-x`
+  22px (content gutter), `--fleet-activity-w` 320px
+  (activity column; mockup `.content` grid stacks at `max-width:1100px`),
+  `--fleet-panelhead-pad`, `--fleet-panelhead-gap`. Shared *laws* stay under the
+  b-02 chrome prefix and are consumed by design: `--chrome-micro-radius`,
+  `--chrome-pill-radius` (badge.md shape family), `--chrome-icon` (glyph floor),
+  `--tracking-chrome-title` (h1 voice).
+- **KPI strip** — `--fleet-kpi-pad`, `--fleet-kpi-lift` 2px (hover lift),
+  `--fleet-kpi-d-mt`, `--tracking-kpi` 0.1em.
+- **Lines table** — `--fleet-row-pad`, `--fleet-head-pad`, `--fleet-lcell-maxw` 26ch,
+  `--tracking-fleet-head` 0.08em; `--fleet-chan-box` 22px + `--fleet-chan-tag-keyline`
+  2px + `--fleet-chan-tag-offset` (channel glyph + state tag, 11-channel-glyphography
+  §1), `--fleet-avatar-box` 22px, `--fleet-mode-gap`/`--fleet-mode-dot` 6px,
+  `--fleet-grant-box` 18px + `--fleet-grant-gap`, `--fleet-spark-h` 16px /
+  `--fleet-spark-w` 3px / `--fleet-spark-gap` (7d sparkbar),
+  `--fleet-badge-pad`/`--fleet-badge-gap` + `--tracking-badge` (state pill),
+  `--fleet-rowbtn-pad` (row action).
+- **Activity feed + heartbeat rail** — `--fleet-ev-pad`, `--fleet-hb-gap`,
+  `--fleet-hb-bar-gap`.
+- **Documented deviations (carried features, no mockup row)** —
+  `--fleet-current-edge` 3px (drawer-current row accent), `--fleet-select-inset` 6px
+  (bulk-select checkbox overlay), `--fleet-filterpop-pad` (filter popover search).
+
+Half-step tokens (`--sp-*h`, DD-9 retirement queue) are not consumed by the Fleet
+surface.
+
+## 13. v3.5 agents geometry (docs/design-system/v35/mockups/agents.html, landed b-04)
+
+Component-tier `--agents-*` dimension + tracking tokens in
+`console/src/styles/tokens.component.css`, single `:root` scope (theme-independent
+geometry; parity count unaffected). The mockup literals are the visual SSOT — they
+live here, dimension-allowlisted, so the agents stylesheet
+(`console/src/styles/agents.css`) consumes `var()` only.
+
+- **Page row** — `--agents-pagerow-gap` 14px / `--agents-pagerow-pad` 14px 22px 12px
+  (surface h1 row, mockup `header` literals — same rhythm as the global header,
+  independently owned), `--tracking-agents-crumb` 0.1em (ROSTER / NAME caps).
+- **Roster** — `--agents-roster-w` 300px + pad/gap; `.agents-acard` geometry
+  (`--agents-acard-pad/-radius/-gap/-meta-mt/-hover-lift`), search box
+  (`--agents-search-*`), kind caps `--tracking-agents-kind` 0.06em.
+- **Avatar slots (12-agent-identity §2)** — `--agents-avatar-md` 34px/8px radius
+  (roster card), `--agents-avatar-xl` 56px/14px radius (detail head),
+  `--agents-avatar-xs` 22px (instance-row floor); fills consume `--agent-hue-0..7`
+  (avatar fills only, §A gate).
+- **Presence (§4)** — `--agents-stat` 8px shape; live disc / paused diamond /
+  draft hollow square / deactivated recessed outline, colors from the
+  `--presence-*` aliases, never avatar fill.
+- **Detail** — `--agents-detail-pad`/`--agents-detail-gap`,
+  `--agents-dhead-gap(-sm)`, panel geometry (`--agents-panel-*`), kv/swapbar
+  (`--agents-swapbar-*`), tool toggle (`--agents-tgl-w/h/knob/inset`),
+  assigned-line rows + grant chip (`--agents-grant-box` 18px), instance rows
+  (`--agents-irow-who` 86px / `--agents-irow-ago` 46px / `--agents-ibtn-*`),
+  skills chips, memory stats (`--agents-mstat-*`, `--tracking-agents-mstat`),
+  `--agents-mrow-t-w` 38ch-class memory rows. Micro-geometry (burndown-class
+  literals, all mockup-traced): `--agents-crumb-mt`, `--agents-icon-search/-meta/
+  -line`, `--agents-search-icon-stroke`, `--agents-soul-mt`, `--agents-sub-mt`,
+  `--agents-dhead-actions-gap`, `--agents-pill-gap/-pad`, `--agents-kv-gap/-pad-y`,
+  `--agents-trow-pad-y`, `--agents-lrow-pad-y`, `--agents-irow-pad-y/-st`,
+  `--agents-tgl-travel` (knob travel = track − knob − 2×inset),
+  `--agents-integ-gap/-pad-y/-st`, `--agents-inote-mt`, `--agents-mstats-mb`,
+  `--agents-mstat-v-mt`, `--agents-empty-pad-y`, `--agents-roster-empty-pad`,
+  `--agents-presence-bw` 1.5px (§4 hollow-stroke floor). Font SIZES ride the
+  `--text-*` scale + `--type-display` composite (weight/leading raw, fleet
+  idiom); hairlines are `var(--bw)`; avatar ink is `--agent-avatar-ink`.
+- **Stacking breakpoint is the mockup's own** — agents.html `@media
+  (max-width:1000px)` stacks `.agents-wrap` and `.agents-grid`; NOT the
+  chrome/fleet 1100px idiom (pinned in viewport-matrix at 999/1000/1001).
+- **Shared laws consumed by design** (same ruling as b-03): `--chrome-micro-radius`
+  + `--chrome-pill-radius` (badge.md shape family), `--tracking-chrome-title`
+  (product h1 voice). Agents *layout* never reads chrome tokens.
+
+Half-step tokens (`--sp-*h`, DD-9 retirement queue) are not consumed by the Agents
+surface.
+
+## 14. v3.5 skills-hub geometry (docs/design-system/v35/mockups/skills-hub.html, landed b-05)
+
+Component-tier `--skills-*` dimension + tracking tokens in
+`console/src/styles/tokens.component.css`, single `:root` scope (theme-independent
+geometry; parity count unaffected). The mockup literals are the visual SSOT — they
+live here, dimension-allowlisted, so the skills stylesheet
+(`console/src/styles/skills.css`) consumes `var()` only.
+
+- **Page row** — `--skills-pagerow-gap` 14px / `--skills-pagerow-pad` 14px 22px 12px
+  (surface h1 row, mockup `header` literals — same rhythm as the global header,
+  independently owned).
+- **Hub mode toggle** — `--skills-modebar-gap/-pad/-radius` + button
+  `-btn-pad/-btn-radius`.
+- **Filters rail** — `--skills-filters-w` 196px + pad; `--skills-fsec-m`,
+  `--skills-fitem-pad/-gap/-radius`, `--tracking-skills-fsec` 0.1em,
+  `--skills-legend-lh` 1.8. Rail hides at the mockup's own `@media
+  (max-width:900px)` — NOT the chrome/fleet 1100px or agents 1000px idioms
+  (third distinct SSOT breakpoint, browser-pinned at 899/900/901).
+- **Results column** — `--skills-main-pad`, toolbar (`--skills-toolbar-gap/-mb`,
+  `--skills-search-*`, `--skills-icon-search` + stroke).
+- **Result cards** — `--skills-scard-pad/-mb/-radius/-gap/-hover-lift`,
+  `--skills-sicon` 34px + radius + 16px glyph, source badge
+  (`--skills-src-pad`, `--tracking-skills-src` 0.06em), `--skills-acts-gap`.
+- **Compat strip** — `--skills-compat-mt/-pad/-gap/-radius`,
+  `--tracking-skills-compat`; cells `--skills-cdot-h/minw/pad-x/radius` +
+  `--skills-cdot-warn-radius` (partial = rotated diamond per the shape law).
+- **Warn-note** — `--skills-warnnote-mt/-pad/-gap/-radius` (third-party
+  publisher caution block) + `--skills-warnnote-icon-mt`. Micro-geometry:
+  `--skills-desc-mt`, `--skills-empty-pad-y` (documented deviation).
+
+Font SIZES ride the `--text-*` scale (weight/leading raw, fleet idiom); hairlines
+are `var(--bw)`; compat-cell washes consume the status-channel color-mix idiom.
+Half-step tokens (`--sp-*h`, DD-9 retirement queue) are not consumed by the
+Skills Hub surface.
+
+## 15. v3.5 dream-lab geometry (docs/design-system/v35/mockups/dream-lab.html, landed b-06)
+
+Component-tier `--dream-*` dimension + tracking tokens in
+`console/src/styles/tokens.component.css`, single `:root` scope (theme-independent
+geometry; parity count unaffected). The mockup literals are the visual SSOT — they
+live here, dimension-allowlisted, so the dream stylesheet
+(`console/src/styles/dream.css`) consumes `var()` only.
+
+- **Page row** — `--dream-pagerow-gap/-pad` (mockup `header` literals, independently
+  owned) + queued pill (`--dream-qpill-gap/-pad`).
+- **Queue rail** — `--dream-queue-w` 340px + pad/gap; section heads
+  (`--dream-qhead-pad/-mt`, `--tracking-dream-qhead` 0.1em), filters strip
+  (`--dream-fstrip-*`), dream cards (`--dream-dcard-*`), type tag
+  (`--dream-dtag-pad`, `--tracking-dream-dtag`), history rows
+  (`--dream-hrow-*`, `--dream-hst-pad`, `--dream-hwhen-pad`).
+- **Avatar slots (12-agent-identity §2)** — `--dream-avatar-sm` 26px/7px radius
+  (queue card), `--dream-avatar-lg` 44px/11px radius (review head); fills consume
+  `--agent-hue-0..7` (avatar fills only, §A gate); the ✦ rationale accent is
+  `--agent-dream` (agent-mode channel, not identity).
+- **Review pane** — `--dream-review-pad/-gap`, rhead + meta, panels
+  (`--dream-panel-*`), rationale (`--dream-rationale-*`, quote capped 68ch),
+  **diff capped `--dream-diff-maxw` 72ch (acceptance item)** + line/section
+  geometry, impact columns, decision actions + tucked note. Micro-geometry:
+  `--dream-dcard-what-mt`, `--dream-hist-pad-y`, `--dream-impact-col-minw`
+  (documented deviation — wrap guard), `--dream-empty-pad-y` (deviation).
+- **Stacking breakpoint is the mockup's own** — dream-lab.html `@media
+  (max-width:980px)` stacks `.wrap`; the fourth distinct SSOT breakpoint
+  (chrome/fleet 1100px, agents 1000px, dream 980px, skills 900px), browser-pinned
+  at 979/980/981.
+
+Font SIZES ride the `--text-*` scale + `--type-title` composite (weight/leading
+raw, fleet idiom); hairlines are `var(--bw)`; diff del/add washes consume the
+status-channel color-mix idiom. Half-step tokens (`--sp-*h`, DD-9 retirement
+queue) are not consumed by the Dream Lab surface.
+
+## 16. v3.5 inbox geometry (docs/design-system/v35/mockups/inbox.html, landed b-07)
+
+Component-tier dimension tokens in `console/src/styles/tokens.component.css`, single
+`:root` scope (theme-independent geometry; parity count unaffected). Mockup literals
+are the visual SSOT — they live in the `--inbox-*` block once, so `inbox.css`
+consumes `var()` only. Colors from the `-v35` semantic addendum (§A), radii from the
+console register where the mockup matches it.
+
+- **Chips row** — `--inbox-chips-{gap,pad}`, `--inbox-chip-{gap,pad}` (channel filter
+  chips, radius `--chrome-pill-radius`).
+- **3-pane grid** — `--inbox-list-w` 300px / `--inbox-list-w-narrow` 280px /
+  `--inbox-ctx-w` 260px, `--inbox-wrap-mt`. Breakpoints are the mockup's own:
+  context pane hides ≤1100px (shared with chrome), list hides ≤760px — the fifth
+  distinct SSOT stacking breakpoint (chrome/fleet 1100, agents 1000, dream 980,
+  skills 900, inbox 760).
+- **List anatomy** — `--inbox-seg-*`, `--inbox-citem-*`, `--inbox-ava` 34px
+  (`--inbox-ava-radius` 9px direct / `--inbox-ava-grp-radius` 6px rooms),
+  `--inbox-ava-glyph` 12px channel badge with `--inbox-ava-glyph-off` −3px corner
+  offset, `--inbox-badges-*`, `--inbox-ub-pad` (unread + takeover badges).
+- **Thread anatomy** — `--inbox-thead-*`, takeover toggle `--inbox-tgl-{w,h,knob,
+  inset,travel}` (32×18px track, 14px knob, 14px travel), `--inbox-msgs-*`,
+  `--inbox-mrow-{gap,maxw}` (78% row cap), `--inbox-ma` 24px, `--inbox-bub-*`
+  (12px radius, 2px group-sender accent), `--inbox-sys-pad` (system pill).
+- **Composer** — `--inbox-composer-{gap,pad,h}` with **`--inbox-composer-h` 36px
+  the uniform control height (bead acceptance item)** consumed by caps, input,
+  and Send alike; `--inbox-cap-radius`, `--inbox-input-{radius,pad}`,
+  `--inbox-send-pad-x` (mockup .btn horizontal rhythm).
+- **Context pane** — `--inbox-ctx-{pad,h3-m}`, `--inbox-pcard-*`,
+  `--inbox-idrow-{gap,pad-y}`, `--inbox-agcard-*`, `--tracking-inbox-caps` 0.1em.
+- **Retired** — `--inbox-pane-chats` / `--inbox-pane-contact` (v3 pane widths):
+  the v3 inbox page they sized is replaced by this surface; the v3.5 grid owns
+  pane widths.
+
+## 17. v3.5 deployments geometry (docs/design-system/v35/mockups/deployments.html, landed b-08)
+
+Component-tier dimension tokens in `console/src/styles/tokens.component.css`, single
+`:root` scope (theme-independent geometry; parity count unaffected). Mockup literals
+are the visual SSOT — they live in the `--deploy-*` block once, so `deploy.css`
+consumes `var()` only. Colors from the `-v35` semantic addendum (§A); the state pills
+consume the shared status vocabulary with shape mandatory (●/◆/■).
+
+- **Page row** — `--deploy-pagerow-{gap,pad}`, `--deploy-admin-{gap,pad}` (admin-lane
+  pill), `--deploy-main-pad`.
+- **Summary strip** — `--deploy-sum-{gap,mb}`, `--deploy-kpi-{pad,radius,v-mt,d-mt}`;
+  4→2 columns at the mockup's own 1000px (shared with the agents surface).
+- **Deployment card** — `--deploy-dcard-{radius,mb}`, `--deploy-dhead-{gap,pad}`,
+  `--deploy-dicon{,-radius,-glyph}` (38px box, 18px glyph), `--deploy-acts-gap`,
+  `--deploy-dcell-pad`, `--deploy-mini-{gap,mt,pad,radius}` (channel/agent/issue
+  mini-tags), `--deploy-hub-{gap,pad,dot}` (org-hub row anatomy).
+- **Pair card** — `--deploy-pair-{pad,gap}`, `--deploy-pairrow-{gap,mt}`,
+  `--deploy-pi-maxw` 46ch (explainer measure), `--deploy-code-{pad,radius}` with
+  `--tracking-deploy-code` 0.3em.
+- **Tracking** — `--tracking-deploy-kpi` 0.1em, `--tracking-deploy-cell` 0.08em.
+
+## 18. v3.5 settings geometry (docs/design-system/v35/mockups/settings.html, landed b-09)
+
+Component-tier dimension tokens in `console/src/styles/tokens.component.css`, single
+`:root` scope (theme-independent geometry; parity count unaffected). Mockup literals
+are the visual SSOT — they live in the `--settings-*` block once, so `settings.css`
+consumes `var()` only. Form register per `17-settings-ia-spec.md` (airy rows,
+direct-edit controls, one danger area).
+
+- **Section nav** — `--settings-nav-w` 190px, `--settings-nav-{pad,item-gap,item-pad,
+  item-radius}`; goes horizontal-scroll at the mockup's own 800px — the sixth
+  distinct SSOT breakpoint (chrome/fleet 1100, agents 1000, dream 980, skills 900,
+  inbox 760, settings 800).
+- **Content column** — `--settings-main-{pad,maxw}` (1080px measure),
+  `--settings-{h2-mb,desc-mb}`, `--settings-panel-{radius,mb,b-pad}`,
+  `--settings-row-{gap,pad-y}`, `--settings-ctl-gap` (single right control column,
+  alignment law).
+- **Controls** — `--settings-input-{w,pad,radius}`, `--settings-tgl-{w,h,knob,inset,
+  travel}` (32×18px track, 14px knob/travel — shape-visible both states),
+  `--settings-sw*` (52px swatch, 18px/10px bands), `--settings-nchan-*`,
+  `--settings-opts-{minw,gap}` (120px fixed control zone), `--settings-tok-*`,
+  `--settings-acts-gap`, `--settings-sub-mt` (row sub tuck).
+
+## 19. v3.5 journey geometry (docs/design-system/v35/mockups/{splash,hatch}.html, landed b-10)
+
+Component-tier dimension tokens in `console/src/styles/tokens.component.css`, single
+`:root` scope (theme-independent geometry; parity count unaffected). Mockup literals
+are the visual SSOT — they live in the `--journey-*` block once, so `journey.css`
+consumes `var()` only. **Radii come from the JOURNEY register** (`--r-journey-{sm,
+md,lg}` = 8/12/16, L4) — the bead acceptance item; the console register is never
+consumed on journey surfaces.
+
+- **Frame** — `--journey-shell-w` 860px, crumb, step rail (`--journey-step-bar-*`;
+  done=✓ hairline, current=accent, upcoming=recessed per 14-onboarding §1),
+  `--journey-card-pad` 32px (card radius = `--r-journey-lg`).
+- **Steps** — kind cards, channel grid (`--journey-grid-{gap,min}` 88px tiles,
+  `--journey-ch-*`), agent step, link step; single accent primary per step,
+  ghost secondaries (14-onboarding §2).
+- **Ceremony** — `--journey-lockup` 120px, `--journey-glow-inset` −40px (radial
+  one-shot ≤800ms fading to 0 per 13-ceremony §2), `--journey-av` 72px,
+  eggshell dashed frame, beats row, name row, first-message bar
+  (radius = `--r-journey-md`), actions.
+- **Splash** — hero measure 640px, nameplate, CTAs, proof cards (780px,
+  stacking ≤700px), watermark glyph canvases + offsets (L7 imagery, opacity
+  0.04–0.05, pointer-events none).
+- **Buttons** — `--journey-btn-radius` 10px sits between register steps
+  (documented deviation; mockup literal).

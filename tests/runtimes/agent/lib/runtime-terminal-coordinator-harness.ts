@@ -146,6 +146,7 @@ export interface RuntimeState {
     actorJid: string,
     source: {
       sourceMessageId: string;
+      receivedAtUnixSeconds: number;
       conversationKey: string;
       senderJid: string;
       senderName: string | null;
@@ -161,6 +162,10 @@ export interface RuntimeState {
     mapKey?: string,
     actorJid?: string,
     beforeUserSend?: () => void,
+    systemTurnLease?: undefined,
+    dispatchAllowed?: () => boolean,
+    runtimeContext?: RuntimeTurnContext,
+    deliveryKind?: 'live' | 'queued' | 'recovery_replay',
   ): Promise<void>;
   ensureSessionAndQueueSync: ReturnType<typeof vi.fn>;
   handleEventWithContext(
@@ -211,6 +216,7 @@ export function context(
     },
     replay: {
       sourceMessageId: `wamid-${logicalTurnId}`,
+      receivedAtUnixSeconds: 1_780_000_000,
       replaySafe: true,
       senderJid: '15550190002@s.whatsapp.net',
       senderName: null,

@@ -6,6 +6,7 @@ import type { Messenger } from '../../../src/core/types.ts';
 import type { AgentEvent } from '../../../src/runtimes/agent/stream-parser.ts';
 import type { ProviderMcpBridge } from '../../../src/runtimes/agent/providers/types.ts';
 import { ProviderExecutionGate } from '../../../src/runtimes/agent/provider-execution-gate.ts';
+import { shortHash } from '../../../src/lib/short-hash.ts';
 import {
   CONFIG_ROOT_ISOLATION_FLAG,
   FAILCLOSED_FLAG,
@@ -118,7 +119,7 @@ import { spawn } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { killSessionTree } from '../../../src/runtimes/agent/process-tree.ts';
 import { toConversationKey } from '../../../src/core/conversation-key.ts';
-import { formatAge, TURN_WATCHDOG_MS, WATCHDOG_SOFT_MS, WATCHDOG_WARN_MS, WATCHDOG_HARD_MS, STALLED_OP_KILL_GRACE_MS, PROVIDER_DISPLAY_NAMES } from '../../../src/runtimes/agent/session.ts';
+import { formatAge, TURN_WATCHDOG_MS, WATCHDOG_SOFT_MS, WATCHDOG_WARN_MS, WATCHDOG_HARD_MS, STALLED_OP_KILL_GRACE_MS, LONG_OP_CEILING_MS, PROVIDER_DISPLAY_NAMES } from '../../../src/runtimes/agent/session.ts';
 import { OpenAIApiProvider } from '../../../src/runtimes/agent/providers/openai-api.ts';
 import { AnthropicApiProvider } from '../../../src/runtimes/agent/providers/anthropic-api.ts';
 
@@ -448,6 +449,30 @@ describe('SessionManager', () => {
     expect(parsed).toEqual({
       type: 'user',
       message: { role: 'user', content: [{ type: 'text', text: 'hello world' }] },
+    });
+  });
+
+  it('serializes runtime context and user text as distinct stream-json blocks', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const sm = new SessionManager({ db, messenger, chatJid: CHAT_JID, onEvent: vi.fn() });
+    await sm.spawnSession();
+
+    await sm.sendTurn({
+      applicationContext: ['receipt=2026-05-28T20:26:40.000Z age=95'],
+      userText: 'stop that flow now',
+    });
+
+    const written = (mockChild.stdin.write as ReturnType<typeof vi.fn>).mock.calls[0][0] as string;
+    expect(JSON.parse(written.trim())).toEqual({
+      type: 'user',
+      message: {
+        role: 'user',
+        content: [
+          { type: 'text', text: 'receipt=2026-05-28T20:26:40.000Z age=95' },
+          { type: 'text', text: 'stop that flow now' },
+        ],
+      },
     });
   });
 
@@ -1717,6 +1742,218 @@ describe('SessionManager', () => {
     vi.useRealTimers();
   });
 
+  it('provider progress during liveness assessment invalidates the stale kill decision', async () => {
+    vi.useFakeTimers();
+
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    let resolveAssessment!: (verdict: {
+      alive: boolean;
+      cpuDeltaMs: number;
+      pidChurn: number;
+      pidCount: number;
+    }) => void;
+    const treeLivenessAssessor = vi.fn(() => new Promise<{
+      alive: boolean;
+      cpuDeltaMs: number;
+      pidChurn: number;
+      pidCount: number;
+    }>((resolve) => {
+      resolveAssessment = resolve;
+    }));
+    const sm = new SessionManager({
+      db,
+      messenger,
+      chatJid: CHAT_JID,
+      onEvent: vi.fn(),
+      treeLivenessAssessor,
+    });
+    await sm.spawnSession();
+    await sm.sendTurn('long tool with delayed assessment');
+
+    sm.recoverStalledOperation('toolu_assessment_race', 'Bash');
+    await vi.advanceTimersByTimeAsync(STALLED_OP_KILL_GRACE_MS + 1);
+    expect(treeLivenessAssessor).toHaveBeenCalledOnce();
+
+    // Real provider output arrives while the two-sample assessor is awaiting.
+    // Its eventual "not alive" verdict describes the old quiet stretch.
+    sm.tickWatchdog();
+    resolveAssessment({ alive: false, cpuDeltaMs: 0, pidChurn: 0, pidCount: 2 });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(mockChild.kill).not.toHaveBeenCalledWith('SIGKILL');
+
+    vi.useRealTimers();
+  });
+
+  it('liveness gate: a CPU-active tree defers the stalled-op kill and re-arms the grace timer', async () => {
+    vi.useFakeTimers();
+
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const notifyUser = vi.fn();
+    // First assessment: tree is working (long browser step). Second: genuinely hung.
+    const treeLivenessAssessor = vi.fn()
+      .mockResolvedValueOnce({ alive: true, cpuDeltaMs: 1_500, pidChurn: 0, pidCount: 4 })
+      .mockResolvedValueOnce({ alive: false, cpuDeltaMs: 0, pidChurn: 0, pidCount: 4 });
+
+    const sm = new SessionManager({ db, messenger, chatJid: CHAT_JID, onEvent: vi.fn(), instanceName: 'personal', notifyUser, treeLivenessAssessor });
+    await sm.spawnSession();
+    await sm.sendTurn('run the long data export');
+
+    sm.recoverStalledOperation('toolu_browser_long', 'mcp__playwright__browser_navigate');
+    await vi.advanceTimersByTimeAsync(STALLED_OP_KILL_GRACE_MS + 1);
+
+    // Working tree → NO kill; user told the long step is still running; timer re-armed.
+    expect(mockChild.kill).not.toHaveBeenCalledWith('SIGKILL');
+    expect(notifyUser).toHaveBeenCalledWith(expect.stringContaining('Long-running step still active'));
+    expect((sm as unknown as { stalledOpKill: unknown }).stalledOpKill).not.toBeNull();
+
+    // Next grace window: assessment now reads hung → kill proceeds.
+    await vi.advanceTimersByTimeAsync(STALLED_OP_KILL_GRACE_MS + 1);
+    expect(treeLivenessAssessor).toHaveBeenCalledTimes(2);
+    expect(mockChild.kill).toHaveBeenCalledWith('SIGKILL');
+
+    vi.useRealTimers();
+  });
+
+  it('liveness gate: the hard watchdog defers for a CPU-active tree instead of killing it', async () => {
+    vi.useFakeTimers();
+
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const notifyUser = vi.fn();
+    const treeLivenessAssessor = vi.fn()
+      .mockResolvedValueOnce({ alive: true, cpuDeltaMs: 900, pidChurn: 1, pidCount: 5 })
+      .mockResolvedValueOnce({ alive: false, cpuDeltaMs: 0, pidChurn: 0, pidCount: 5 });
+
+    const sm = new SessionManager({ db, messenger, chatJid: CHAT_JID, onEvent: vi.fn(), instanceName: 'personal', notifyUser, treeLivenessAssessor });
+    await sm.spawnSession();
+    await sm.sendTurn('long quiet automation');
+
+    // First hard-watchdog expiry: tree alive → deferred, watchdog re-armed, no termination notice.
+    await vi.advanceTimersByTimeAsync(WATCHDOG_HARD_MS + 1);
+    expect(mockChild.kill).not.toHaveBeenCalledWith('SIGKILL');
+    expect(notifyUser).not.toHaveBeenCalledWith(expect.stringContaining('terminated'));
+
+    // Second expiry: tree hung → the original termination behavior runs.
+    await vi.advanceTimersByTimeAsync(WATCHDOG_HARD_MS + 1);
+    expect(treeLivenessAssessor).toHaveBeenCalledTimes(2);
+    expect(notifyUser).toHaveBeenCalledWith(expect.stringContaining('terminated'));
+    expect(mockChild.kill).toHaveBeenCalledWith('SIGKILL');
+
+    vi.useRealTimers();
+  });
+
+  it('liveness gate: LONG_OP_CEILING_MS bounds extensions — a CPU-active tree is still killed at the ceiling', async () => {
+    vi.useFakeTimers();
+
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const notifyUser = vi.fn();
+    // Always alive — only the ceiling can stop this tree.
+    const treeLivenessAssessor = vi.fn().mockResolvedValue({ alive: true, cpuDeltaMs: 2_000, pidChurn: 0, pidCount: 3 });
+
+    const sm = new SessionManager({ db, messenger, chatJid: CHAT_JID, onEvent: vi.fn(), instanceName: 'personal', notifyUser, treeLivenessAssessor });
+    await sm.spawnSession();
+    await sm.sendTurn('endless spinning automation');
+
+    sm.recoverStalledOperation('toolu_spin', 'Bash');
+    // Force the gate anchor past the ceiling, then let the pending grace timer fire.
+    (sm as unknown as { longOpGateStartedAt: number | null }).longOpGateStartedAt = Date.now() - LONG_OP_CEILING_MS - 1;
+    await vi.advanceTimersByTimeAsync(STALLED_OP_KILL_GRACE_MS + 1);
+
+    // Ceiling reached → kill despite the alive verdict (assessor not even consulted).
+    expect(mockChild.kill).toHaveBeenCalledWith('SIGKILL');
+    expect(notifyUser).toHaveBeenCalledWith(expect.stringContaining('stalled'));
+
+    vi.useRealTimers();
+  });
+
+  it('liveness gate: crossing LONG_OP_CEILING_MS during assessment kills without rearming', async () => {
+    vi.useFakeTimers();
+
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    let resolveAssessment!: (verdict: {
+      alive: boolean;
+      cpuDeltaMs: number;
+      pidChurn: number;
+      pidCount: number;
+    }) => void;
+    const treeLivenessAssessor = vi.fn(() => new Promise<{
+      alive: boolean;
+      cpuDeltaMs: number;
+      pidChurn: number;
+      pidCount: number;
+    }>((resolve) => {
+      resolveAssessment = resolve;
+    }));
+    const sm = new SessionManager({
+      db,
+      messenger,
+      chatJid: CHAT_JID,
+      onEvent: vi.fn(),
+      treeLivenessAssessor,
+    });
+    await sm.spawnSession();
+    await sm.sendTurn('assessment crosses the ceiling');
+
+    sm.recoverStalledOperation('toolu_cross_ceiling', 'Bash');
+    const firstKillAt = Date.now() + STALLED_OP_KILL_GRACE_MS;
+    (sm as unknown as { longOpGateStartedAt: number | null }).longOpGateStartedAt =
+      firstKillAt - (LONG_OP_CEILING_MS - 1_000);
+    await vi.advanceTimersByTimeAsync(STALLED_OP_KILL_GRACE_MS + 1);
+    expect(treeLivenessAssessor).toHaveBeenCalledOnce();
+    vi.setSystemTime(Date.now() + 2_000);
+    resolveAssessment({ alive: true, cpuDeltaMs: 1_000, pidChurn: 0, pidCount: 3 });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(mockChild.kill).toHaveBeenCalledWith('SIGKILL');
+    expect((sm as unknown as { stalledOpKill: unknown }).stalledOpKill).toBeNull();
+
+    vi.useRealTimers();
+  });
+
+  it('liveness gate: an alive verdict rearms only for the time remaining before the ceiling', async () => {
+    vi.useFakeTimers();
+
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const treeLivenessAssessor = vi.fn().mockResolvedValue({
+      alive: true,
+      cpuDeltaMs: 1_000,
+      pidChurn: 0,
+      pidCount: 3,
+    });
+    const sm = new SessionManager({
+      db,
+      messenger,
+      chatJid: CHAT_JID,
+      onEvent: vi.fn(),
+      treeLivenessAssessor,
+    });
+    await sm.spawnSession();
+    await sm.sendTurn('bounded long operation');
+
+    const remainingAtAssessment = 60_000;
+    sm.recoverStalledOperation('toolu_bounded_rearm', 'Bash');
+    const firstKillAt = Date.now() + STALLED_OP_KILL_GRACE_MS;
+    (sm as unknown as { longOpGateStartedAt: number | null }).longOpGateStartedAt =
+      firstKillAt - (LONG_OP_CEILING_MS - remainingAtAssessment);
+    await vi.advanceTimersByTimeAsync(STALLED_OP_KILL_GRACE_MS + 1);
+
+    expect(mockChild.kill).not.toHaveBeenCalledWith('SIGKILL');
+    await vi.advanceTimersByTimeAsync(remainingAtAssessment + 1);
+
+    expect(mockChild.kill).toHaveBeenCalledWith('SIGKILL');
+    expect(treeLivenessAssessor).toHaveBeenCalledOnce();
+
+    vi.useRealTimers();
+  });
+
   it('unexpected exit clears armed watchdog timers and pending tools', async () => {
     vi.useFakeTimers();
 
@@ -2393,6 +2630,47 @@ describe('Event-driven provider ready signal', () => {
     );
   });
 
+  it('Codex turn/start keeps runtime context separate from the user input item', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const sm = new SessionManager({
+      db,
+      messenger,
+      chatJid: CHAT_JID,
+      provider: 'codex-cli',
+      onEvent: vi.fn(),
+    });
+    await sm.spawnSession();
+    const threadStartRequest = (mockChild.stdin.write as ReturnType<typeof vi.fn>).mock.calls
+      .map((call) => JSON.parse(String(call[0]).trim()))
+      .find((value) => value.method === 'thread/start');
+    (mockChild.stdin.write as ReturnType<typeof vi.fn>).mockClear();
+
+    const sendPromise = sm.sendTurn({
+      applicationContext: ['receipt=2026-05-28T20:26:40.000Z age=95'],
+      userText: 'stop that flow now',
+    });
+    mockChild.stdout.emit('data', Buffer.from(`${JSON.stringify({
+      jsonrpc: '2.0',
+      id: threadStartRequest.id,
+      result: { id: 'thread_structured' },
+    })}\n`));
+    await sendPromise;
+
+    const wire = (mockChild.stdin.write as ReturnType<typeof vi.fn>).mock.calls
+      .map((call) => String(call[0]))
+      .find((value) => value.includes('"method":"turn/start"'));
+    expect(JSON.parse(wire!)).toMatchObject({
+      params: {
+        threadId: 'thread_structured',
+        input: [
+          { type: 'text', text: 'receipt=2026-05-28T20:26:40.000Z age=95' },
+          { type: 'text', text: 'stop that flow now' },
+        ],
+      },
+    });
+  });
+
   it('Codex sendTurn times out with clear error if init never fires', async () => {
     const db = makeDb();
     const { messenger } = makeMessenger();
@@ -2889,6 +3167,18 @@ describe('buildChildEnv', () => {
     }
   });
 
+  it('opencode-cli: forwards the Kimi credential selected by a Kimi model', () => {
+    const savedKimi = process.env.KIMI_API_KEY;
+    process.env.KIMI_API_KEY = 'kimi-api-key-for-test';
+    try {
+      const env = buildChildEnv('opencode-cli', undefined, 'kimi/kimi-k3');
+      expect(env.KIMI_API_KEY).toBe('kimi-api-key-for-test');
+    } finally {
+      if (savedKimi === undefined) delete process.env.KIMI_API_KEY;
+      else process.env.KIMI_API_KEY = savedKimi;
+    }
+  });
+
   it('opencode-cli: providerConfig.apiKeyService for a known service adds it to env forwarding', () => {
     // 'deepseek' is a known service in SERVICE_ENV_MAP -> DEEPSEEK_API_KEY
     const savedDeep = process.env.DEEPSEEK_API_KEY;
@@ -3096,6 +3386,32 @@ describe('buildSystemPrompt edge cases', () => {
 
   afterEach(() => {
     vi.restoreAllMocks();
+  });
+
+  it('instructs OpenCode to continue the original request after automatic compaction', () => {
+    const sm = new SessionManager({
+      db: makeDb(),
+      messenger: makeMessenger().messenger,
+      chatJid: CHAT_JID,
+      onEvent: vi.fn(),
+      provider: 'opencode-cli',
+    });
+
+    expect(sm.buildSystemPrompt()).toContain(
+      'After automatic context compaction, continue the original user request from the summary',
+    );
+  });
+
+  it('does not add OpenCode compaction guidance to other providers', () => {
+    const sm = new SessionManager({
+      db: makeDb(),
+      messenger: makeMessenger().messenger,
+      chatJid: CHAT_JID,
+      onEvent: vi.fn(),
+      provider: 'gemini-cli',
+    });
+
+    expect(sm.buildSystemPrompt()).not.toContain('After automatic context compaction');
   });
 
   it('includes handoffSystemBlock output when provided', async () => {
@@ -4165,6 +4481,30 @@ describe('opencode-cli session resume via sessionId', () => {
     expect(secondSpawnArgs).not.toContain('--session');
   });
 
+  it('places runtime application context before the separately labeled user message', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const sm = new SessionManager({
+      db, messenger, chatJid: CHAT_JID, onEvent: vi.fn(),
+      provider: 'opencode-cli',
+      model: 'glm/test-model',
+    });
+
+    await sm.spawnSession();
+    const turnChild = makeMockChild(22222);
+    (spawn as ReturnType<typeof vi.fn>).mockReturnValue(turnChild);
+    await sm.sendTurn({
+      applicationContext: ['receipt=2026-05-28T20:26:40.000Z age=95'],
+      userText: 'stop that flow now',
+    });
+
+    const args: string[] = (spawn as ReturnType<typeof vi.fn>).mock.calls.at(-1)?.[1] ?? [];
+    const prompt = args.at(-1) ?? '';
+    expect(prompt).toContain('Application context (runtime-provided):\nreceipt=2026-05-28T20:26:40.000Z age=95');
+    expect(prompt).toContain('User message:\nstop that flow now');
+    expect(prompt.indexOf('Application context')).toBeLessThan(prompt.indexOf('User message:'));
+  });
+
   it('opencode-cli includes model -m when model is set and no custom baseUrl', async () => {
     const db = makeDb();
     const { messenger } = makeMessenger();
@@ -5135,6 +5475,183 @@ describe('session.ts uncovered-branch coverage', () => {
     vi.useRealTimers();
   });
 
+  it('commits only the final OpenCode stop candidate after a clean process close', async () => {
+    const events: AgentEvent[] = [];
+    const sm = new SessionManager({
+      db: makeDb(),
+      messenger: makeMessenger().messenger,
+      chatJid: CHAT_JID,
+      onEvent: (event) => events.push(event),
+      provider: 'opencode-cli',
+      model: 'glm/test-model',
+    });
+    await sm.spawnSession();
+    events.length = 0;
+    await sm.sendTurn('run one tool and report the result');
+
+    const line = (value: unknown): string => `${JSON.stringify(value)}\n`;
+    mockChild.stdout.emit('data', Buffer.from([
+      line({ type: 'step_start', sessionID: 'ses_compaction', part: { type: 'step-start' } }),
+      line({ type: 'text', part: { text: 'intermediate compaction summary' } }),
+      line({
+        type: 'step_finish',
+        part: { type: 'step-finish', reason: 'stop', tokens: { input: 130_000, output: 50 } },
+      }),
+      line({ type: 'step_start', sessionID: 'ses_compaction', part: { type: 'step-start' } }),
+      line({ type: 'text', part: { text: 'verified final answer' } }),
+      line({
+        type: 'step_finish',
+        part: { type: 'step-finish', reason: 'stop', tokens: { input: 800, output: 12 } },
+      }),
+    ].join('')));
+
+    expect(events.filter((event) => event.type === 'assistant_text' || event.type === 'result')).toEqual([]);
+
+    mockChild._closeCb?.(0, null);
+
+    expect(events.filter((event) => event.type === 'assistant_text' || event.type === 'result')).toEqual([
+      { type: 'assistant_text', text: 'verified final answer' },
+      { type: 'result', text: null, inputTokens: 800, outputTokens: 12, costUsd: undefined },
+    ]);
+  });
+
+  it('surfaces bounded OpenCode tool activity while terminal text remains buffered', async () => {
+    const events: AgentEvent[] = [];
+    const sm = new SessionManager({
+      db: makeDb(),
+      messenger: makeMessenger().messenger,
+      chatJid: CHAT_JID,
+      onEvent: (event) => events.push(event),
+      provider: 'opencode-cli',
+      model: 'glm/test-model',
+    });
+    await sm.spawnSession();
+    events.length = 0;
+    await sm.sendTurn('run one tool and report the result');
+
+    const line = (value: unknown): string => `${JSON.stringify(value)}\n`;
+    mockChild.stdout.emit('data', Buffer.from([
+      line({
+        type: 'tool_use',
+        part: {
+          tool: 'bash',
+          callID: 'call-live-progress',
+          state: {
+            status: 'completed',
+            input: { command: 'sensitive command text' },
+            output: 'sensitive command output',
+          },
+        },
+      }),
+      line({ type: 'text', part: { text: 'terminal text must wait for process close' } }),
+    ].join('')));
+
+    const toolEvents = events.filter(
+      (event) => event.type === 'tool_use' || event.type === 'tool_result',
+    );
+    expect(toolEvents).toEqual([
+      {
+        type: 'tool_use',
+        toolName: 'bash',
+        toolId: 'call-live-progress',
+        toolInput: {},
+      },
+      {
+        type: 'tool_result',
+        isError: false,
+        toolId: 'call-live-progress',
+        toolName: 'bash',
+        content: 'sensitive command output',
+      },
+    ]);
+    expect(JSON.stringify(toolEvents[0])).not.toContain('sensitive command');
+    expect(events.filter((event) => event.type === 'assistant_text' || event.type === 'result')).toEqual([]);
+
+    mockChild.stdout.emit('data', Buffer.from(line({
+      type: 'step_finish',
+      part: { type: 'step-finish', reason: 'stop', tokens: { input: 800, output: 12 } },
+    })));
+    mockChild._closeCb?.(0, null);
+
+    expect(events.filter((event) => event.type === 'assistant_text' || event.type === 'result')).toEqual([
+      { type: 'assistant_text', text: 'terminal text must wait for process close' },
+      { type: 'result', text: null, inputTokens: 800, outputTokens: 12, costUsd: undefined },
+    ]);
+  });
+
+  it('discards repeated OpenCode stop candidates and bounds delivery to the final candidate', async () => {
+    const events: AgentEvent[] = [];
+    const sm = new SessionManager({
+      db: makeDb(),
+      messenger: makeMessenger().messenger,
+      chatJid: CHAT_JID,
+      onEvent: (event) => events.push(event),
+      provider: 'opencode-cli',
+      model: 'glm/test-model',
+    });
+    await sm.spawnSession();
+    events.length = 0;
+    await sm.sendTurn('stress compaction boundaries');
+
+    const records: string[] = [];
+    for (let index = 0; index < 25; index += 1) {
+      records.push(
+        JSON.stringify({ type: 'text', part: { text: `discard-${index}` } }),
+        JSON.stringify({ type: 'step_finish', part: { type: 'step-finish', reason: 'stop' } }),
+        JSON.stringify({ type: 'step_start', sessionID: 'ses_stress', part: { type: 'step-start' } }),
+      );
+    }
+    records.push(
+      JSON.stringify({ type: 'text', part: { text: 'keep-final' } }),
+      JSON.stringify({
+        type: 'step_finish',
+        part: { type: 'step-finish', reason: 'stop', tokens: { input: 900, output: 9 } },
+      }),
+    );
+    mockChild.stdout.emit('data', Buffer.from(`${records.join('\n')}\n`));
+    mockChild._closeCb?.(0, null);
+
+    expect(events.filter((event) => event.type === 'assistant_text' || event.type === 'result')).toEqual([
+      { type: 'assistant_text', text: 'keep-final' },
+      { type: 'result', text: null, inputTokens: 900, outputTokens: 9, costUsd: undefined },
+    ]);
+  });
+
+  it('fails closed when OpenCode continues after stop but exits without a final candidate', async () => {
+    const events: AgentEvent[] = [];
+    const onCrash = vi.fn();
+    const notifyUser = vi.fn();
+    const sm = new SessionManager({
+      db: makeDb(),
+      messenger: makeMessenger().messenger,
+      chatJid: CHAT_JID,
+      onEvent: (event) => events.push(event),
+      provider: 'opencode-cli',
+      model: 'glm/test-model',
+      onCrash,
+      notifyUser,
+    });
+    await sm.spawnSession();
+    events.length = 0;
+    await sm.sendTurn('incomplete compaction continuation');
+
+    mockChild.stdout.emit('data', Buffer.from([
+      JSON.stringify({ type: 'text', part: { text: 'discarded summary' } }),
+      JSON.stringify({ type: 'step_finish', part: { type: 'step-finish', reason: 'stop' } }),
+      JSON.stringify({ type: 'step_start', sessionID: 'ses_incomplete', part: { type: 'step-start' } }),
+      '',
+    ].join('\n')));
+    mockChild._closeCb?.(0, null);
+
+    expect(events.filter((event) => event.type === 'assistant_text' || event.type === 'result')).toEqual([]);
+    expect(onCrash).toHaveBeenCalledWith(expect.objectContaining({
+      exitCode: 0,
+      signal: null,
+      crashClass: 'provider_stream_corrupt',
+    }));
+    expect(notifyUser).toHaveBeenCalledWith(expect.stringMatching(/ended before completing the turn/i));
+  });
+
   it('serializes OpenCode process lifetimes across session managers sharing one execution gate', async () => {
     const firstChild = makeMockChild(12001);
     const secondChild = makeMockChild(12002);
@@ -5174,7 +5691,14 @@ describe('session.ts uncovered-branch coverage', () => {
     expect(secondStarted).toBe(false);
     expect(firstBoundary).toHaveBeenCalledTimes(1);
     expect(secondBoundary).not.toHaveBeenCalled();
-    expect(gate.snapshot()).toMatchObject({ active: true, pending: 1 });
+    expect(gate.snapshot()).toMatchObject({
+      active: true,
+      activeWorkKind: 'turn',
+      activeScopeHash: shortHash('first@s.whatsapp.net'),
+      pending: 1,
+      oldestPendingWorkKind: 'turn',
+      oldestPendingScopeHash: shortHash('second@s.whatsapp.net'),
+    });
 
     firstChild._closeCb?.(0, null);
     await secondTurn;
@@ -5184,6 +5708,80 @@ describe('session.ts uncovered-branch coverage', () => {
     expect(gate.snapshot()).toMatchObject({ active: true, pending: 0 });
 
     secondChild._closeCb?.(0, null);
+    expect(gate.snapshot()).toMatchObject({ active: false, pending: 0 });
+  });
+
+  it('reaps a completed same-session OpenCode child before waiting for its next execution lease', async () => {
+    const firstChild = makeMockChild(12005);
+    const secondChild = makeMockChild(12006);
+    vi.mocked(spawn)
+      .mockReturnValueOnce(firstChild as never)
+      .mockReturnValueOnce(secondChild as never);
+    const gate = new ProviderExecutionGate();
+    const session = new SessionManager({
+      db: makeDb(),
+      messenger: makeMessenger().messenger,
+      chatJid: 'same@s.whatsapp.net',
+      onEvent: vi.fn(),
+      provider: 'opencode-cli',
+      model: 'glm/test-model',
+      providerExecutionGate: gate,
+    });
+    await session.spawnSession();
+
+    await session.sendTurn('first');
+    session.completeProviderTurn();
+    const secondTurn = session.sendTurn('second');
+
+    await vi.waitFor(() => {
+      expect(killSessionTree).toHaveBeenCalledWith(
+        firstChild,
+        'SIGTERM',
+        expect.objectContaining({ generationMarker: expect.any(String) }),
+      );
+    });
+    await secondTurn;
+
+    expect(spawn).toHaveBeenCalledTimes(2);
+    expect(killSessionTree).toHaveBeenCalledTimes(1);
+    expect(gate.snapshot()).toMatchObject({ active: true, pending: 0, totalWaits: 0 });
+
+    secondChild._closeCb?.(0, null);
+    expect(gate.snapshot()).toMatchObject({ active: false, pending: 0 });
+  });
+
+  it('cycles repeated same-session OpenCode turns without self-queuing behind stale leases', async () => {
+    const children = Array.from({ length: 25 }, (_, index) => makeMockChild(12100 + index));
+    for (const child of children) vi.mocked(spawn).mockReturnValueOnce(child as never);
+    const gate = new ProviderExecutionGate();
+    const session = new SessionManager({
+      db: makeDb(),
+      messenger: makeMessenger().messenger,
+      chatJid: 'same-stress@s.whatsapp.net',
+      onEvent: vi.fn(),
+      provider: 'opencode-cli',
+      model: 'glm/test-model',
+      providerExecutionGate: gate,
+    });
+    await session.spawnSession();
+
+    for (let turn = 0; turn < children.length; turn += 1) {
+      await session.sendTurn(`turn-${turn}`);
+      session.completeProviderTurn();
+      expect(gate.snapshot()).toMatchObject({ active: true, pending: 0 });
+    }
+
+    expect(spawn).toHaveBeenCalledTimes(children.length);
+    expect(killSessionTree).toHaveBeenCalledTimes(children.length - 1);
+    expect(gate.snapshot()).toMatchObject({
+      active: true,
+      pending: 0,
+      totalWaits: 0,
+      maxPending: 0,
+      pressureActive: false,
+    });
+
+    children.at(-1)?._closeCb?.(0, null);
     expect(gate.snapshot()).toMatchObject({ active: false, pending: 0 });
   });
 

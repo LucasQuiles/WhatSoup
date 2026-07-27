@@ -399,6 +399,57 @@ export function updateResumedSessionStatus(
   }
 }
 
+export type ResidentSessionRestoreResult = 'restored' | 'already_active' | 'refused';
+
+/**
+ * Repair an orphan tombstone only when the durable checkpoint still proves
+ * that this exact resident provider session is authoritative.
+ */
+export function restoreOrphanedResidentSessionStatus(
+  db: Database,
+  rowId: number,
+  providerSessionId: string,
+  provider: string,
+  residentPid?: number,
+): ResidentSessionRestoreResult {
+  const pidPredicate = residentPid === undefined
+    ? ''
+    : ' AND agent_sessions.claude_pid = ? AND cp.claude_pid = ?';
+  const pidArgs = residentPid === undefined ? [] : [residentPid, residentPid];
+  const result = db.raw.prepare(
+    `UPDATE agent_sessions
+     SET status = 'active', ended_at = NULL
+     WHERE id = ?
+       AND session_id = ?
+       AND provider = ?
+       AND status = 'orphaned'
+       AND workspace_key IS NOT NULL
+       AND EXISTS (
+         SELECT 1
+         FROM session_checkpoints AS cp
+         WHERE cp.conversation_key = agent_sessions.workspace_key
+           AND cp.session_status = 'active'
+           AND cp.session_id = agent_sessions.session_id
+           ${pidPredicate}
+       )`,
+  ).run(rowId, providerSessionId, provider, ...pidArgs) as { changes: number | bigint };
+  if (Number(result.changes) === 1) return 'restored';
+
+  const compatible = db.raw.prepare(
+    `SELECT agent_sessions.status
+     FROM agent_sessions
+     JOIN session_checkpoints AS cp
+       ON cp.conversation_key = agent_sessions.workspace_key
+      AND cp.session_status = 'active'
+      AND cp.session_id = agent_sessions.session_id
+     WHERE agent_sessions.id = ?
+       AND agent_sessions.session_id = ?
+       AND agent_sessions.provider = ?
+       ${pidPredicate}`,
+  ).get(rowId, providerSessionId, provider, ...pidArgs) as { status: string } | undefined;
+  return compatible?.status === 'active' ? 'already_active' : 'refused';
+}
+
 /** Persist the local transcript file path on an existing session row. */
 export function updateTranscriptPath(db: Database, rowId: number, path: string): void {
   db.raw.prepare('UPDATE agent_sessions SET transcript_path = ? WHERE id = ?').run(path, rowId);

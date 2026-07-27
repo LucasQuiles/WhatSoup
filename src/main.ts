@@ -7,7 +7,6 @@ import { storeDecryptionFailure } from './core/database.ts';
 import { cleanupOldRateLimits, cleanupOldAttempts } from './runtimes/chat/rate-limits-db.ts';
 import { getMessagesBySender, getMessageCount, getUnprocessedCount } from './core/messages.ts';
 import { processHistoryBatch, type HistoryInput } from './core/history-sync.ts';
-import { execFileSync } from 'node:child_process';
 import { createConnection } from './transport/factory.ts';
 import { classifyStreamedProviderFailure } from './runtimes/agent/failure-taxonomy.ts';
 import type { RuntimeConnection } from './transport/runtime-connection.ts';
@@ -22,6 +21,7 @@ import { PineconeMemory, getPineconeReadiness } from './runtimes/chat/providers/
 import { createAnthropicProvider } from './runtimes/chat/providers/anthropic.ts';
 import { createOpenAIProvider } from './runtimes/chat/providers/openai.ts';
 import { withDatabaseCompatibility } from './runtimes/chat/providers/database-compatibility.ts';
+import { resolveBinaryPath } from './runtimes/chat/providers/transcription/local-audio.ts';
 import type { DatabaseCompatibilityError } from './core/database-compatibility.ts';
 import { MemoryConsolidationScheduler } from './memory/consolidation-scheduler.ts';
 import { startHealthServer } from './core/health.ts';
@@ -826,7 +826,13 @@ const healthServer = startHealthServer({
   getEnrichmentStats: () => {
     const snap = runtime.getHealthSnapshot();
     const lastRun = (snap.details as Record<string, unknown>)?.enrichmentLastRunAt as string | null ?? null;
-    const runtimeDegraded = snap.status === 'degraded' || snap.status === 'unhealthy';
+    // Agent runtime degradation has its own health causes (provider fallback,
+    // turn recovery, process pressure, and so on). Treating that aggregate
+    // status as an enrichment failure creates a circular false-positive on
+    // every otherwise-operational fallback turn. Only ChatRuntime owns the
+    // enrichment poller represented by this compatibility field.
+    const runtimeDegraded = instanceType === 'chat'
+      && (snap.status === 'degraded' || snap.status === 'unhealthy');
     let unprocessed = 0;
     try {
       unprocessed = getUnprocessedCount(db);
@@ -836,7 +842,7 @@ const healthServer = startHealthServer({
 });
 
 // 8. ffmpeg check
-try { execFileSync('which', ['ffmpeg']); } catch { log.warn('ffmpeg not found — video processing will fail'); }
+if (!resolveBinaryPath('ffmpeg')) log.warn('ffmpeg not found — video processing will fail');
 
 // 9. (#1445 QR-012) Messages/receipts retention no longer runs its own
 // standalone startup timeout — it is folded into the unified

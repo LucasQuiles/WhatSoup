@@ -1,18 +1,25 @@
 {
-  "role": "bot-host-blocked",
+  "role": "bot-host",
   "expectDispatcher": false,
   "expectQLoop": false,
   "expectPersonalSocket": false,
   "expectPersonalTools": false,
   "expectConfigInventory": true,
+  "expectAlertTarget": true,
+  "expectRuntimeManifest": true,
+  "requiredCredentialFiles": [
+    "fleet-tokens.json",
+    "instances/ar-bot/tokens.env"
+  ],
   "instances": [
     {
       "name": "ar-bot",
-      "expected": "blocked",
+      "expected": "always_on",
       "service": "com.whatsoup.ar-bot",
-      "reason": "Service is unloaded/down pending Lucas approval to bootstrap"
+      "healthPort": 9097,
+      "primaryPhoneOwner": "instance:ar-bot"
     }
   ],
-  "expectPrimaryPhoneVerification": false,
+  "expectPrimaryPhoneVerification": true,
   "requiredConfigMaxMode": "600"
 }

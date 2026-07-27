@@ -19,7 +19,12 @@ import { isBaileysEncryptedTmpEnoent, createMediaReadStream } from '../../transp
 import type { OutboundMedia } from '../../core/types.ts';
 import { destroyOutboundMediaStream } from '../../core/media-stream.ts';
 import { errorMessage } from '../../lib/error-message.ts';
-import { redactInternalArtifacts, resolveOutboundAudience, isOperatorDmPeer } from '../../core/outbound-message-safety.ts';
+import {
+  redactInternalArtifacts,
+  resolveOutboundAudience,
+  isOperatorDmPeer,
+  isTrustedInternalDmPeer,
+} from '../../core/outbound-message-safety.ts';
 import { isGroupJid } from '../../core/jid-constants.ts';
 
 const log = createChildLogger('mcp:media');
@@ -43,6 +48,8 @@ export interface MediaDeps {
    * (there is none in this codebase) would pass an empty Set — never elevates.
    */
   adminPhones: Set<string>;
+  /** Exact authenticated DM JIDs whose operator coordination text is internal. */
+  internalPeerJids?: ReadonlySet<string>;
   /**
    * T8-F2: query whether the runtime is currently in a fallback-provider
    * window. OPTIONAL — PassiveRuntime has no agent/fallback-provider concept
@@ -140,6 +147,11 @@ export function registerMediaTools(
       const captionAudience = resolveOutboundAudience(chatJid, {
         isGroup: captionIsGroup,
         peerIsAdmin: isOperatorDmPeer(chatJid, captionIsGroup, db, deps.adminPhones),
+        peerIsTrustedInternal: isTrustedInternalDmPeer(
+          chatJid,
+          captionIsGroup,
+          deps.internalPeerJids,
+        ),
         fallbackActive: deps.fallbackActive ? deps.fallbackActive() : true,
       });
       const caption = rawCaption !== undefined

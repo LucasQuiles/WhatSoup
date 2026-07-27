@@ -5,6 +5,7 @@ import { pathToFileURL } from 'node:url';
 import {
   git,
   isDocumentationEmailFixture,
+  isGitHubSshTransportPrincipal,
   isOperationalProtocolToken,
   normalizeRepoPath,
   operationalReleaseHygieneFiles,
@@ -55,11 +56,16 @@ interface GuardPattern {
   regex: RegExp;
 }
 
-const fixtureFiles = new Set([
+export const projectedFileSecretFixtureFiles = [
   'scripts/anonymize-private-literals.ts',
   'scripts/repo-hygiene-guard.ts',
   'tests/scripts/anonymize-private-literals.test.ts',
   'tests/scripts/repo-hygiene-guard.test.ts',
+] as const;
+const projectedFileSecretFixtureFileSet = new Set<string>(projectedFileSecretFixtureFiles);
+
+const fixtureFiles = new Set([
+  ...projectedFileSecretFixtureFiles,
   'tests/eslint-rules/categorized-skips.test.ts',
   // BEAD-052 redaction-parity corpus: intentionally secret-, email-, and
   // path-SHAPED inputs that exercise the bot-errors redactor on both the TS and
@@ -177,6 +183,7 @@ const disallowedCommitAuthorPatterns: GuardPattern[] = [
 export function isAllowedPatternMatch(filePath: string, code: string, token: string): boolean {
   if (allowedEnvVarNameToken.test(token)) return true;
   if (code === 'personal-email' && allowedMessagingAddressRhs.test(token)) return true;
+  if (code === 'personal-email' && isGitHubSshTransportPrincipal(token)) return true;
   // File content only. scanCommitMessage scans with an empty filePath, and a commit
   // message never legitimately carries an email fixture — so the documentation-domain
   // allowance must not reach it, or history text would silently gain an email escape.
@@ -217,7 +224,20 @@ const srcConsoleAllowedFiles = new Set([
   'src/config.ts',
   'src/fleet/standalone.ts',
   'src/transport/auth.ts',
+  // T5 b-12: the perf meter is itself the diagnostics surface (19-§2
+  // runtime instrumentation); its sampled notes go to the dev console by
+  // design, and the structured logger is server-side only.
+  'console/src/lib/perf.ts',
 ]);
+
+export const projectedFileSecretPatternCodes = [
+  'anthropic-key',
+  'openai-key',
+  'pinecone-key',
+  'private-key',
+  'supabase-secret',
+] as const;
+const projectedFileSecretPatternCodeSet = new Set<string>(projectedFileSecretPatternCodes);
 
 const addedLinePatterns: GuardPattern[] = [
   {
@@ -258,7 +278,7 @@ const addedLinePatterns: GuardPattern[] = [
   {
     code: 'personal-email',
     message: 'Public repo text must not include personal email addresses.',
-    regex: /\b[A-Z0-9._%+-]+@(?!(?:users\.noreply\.github\.com|github\.com|s\.whatsapp\.net|g\.us|heal\.internal)\b)[A-Z0-9.-]+\.[A-Z]{2,}\b/i,
+    regex: /\b[A-Z0-9._%+-]+@(?!(?:users\.noreply\.github\.com|s\.whatsapp\.net|g\.us|heal\.internal)\b)[A-Z0-9.-]+\.[A-Z]{2,}\b/i,
   },
   {
     code: 'local-home-path',
@@ -318,6 +338,11 @@ const addedLinePatterns: GuardPattern[] = [
     regex: /(?<![A-Za-z0-9_-])pcsk_[A-Za-z0-9_-]{12,}(?![A-Za-z0-9_-])/,
   },
   {
+    code: 'supabase-secret',
+    message: 'Public repo text must not include Supabase secret key shapes.',
+    regex: /(?<![A-Za-z0-9_-])sb_secret_[A-Za-z0-9_-]{16,}(?![A-Za-z0-9_-])/,
+  },
+  {
     code: 'twilio-account-sid',
     message: 'Public repo text must not include Twilio Account SID shapes.',
     // AC + 32 hex (case-insensitive). Charset-boundary avoids matching words like ACCOUNT.
@@ -365,6 +390,9 @@ const addedLinePatterns: GuardPattern[] = [
     regex: /\+[1-9]\d{9,14}(?!\d)/,
   },
 ];
+const projectedFileSecretPatterns = addedLinePatterns.filter((pattern) =>
+  projectedFileSecretPatternCodeSet.has(pattern.code),
+);
 
 const commitMessagePatterns: GuardPattern[] = [
   {
@@ -464,9 +492,15 @@ export function parseUnifiedDiffAddedLines(diff: string): AddedLine[] {
   return addedLines;
 }
 
-function findDisallowedMatch(filePath: string, pattern: GuardPattern, text: string): string | null {
+interface GuardPatternMatch {
+  token: string;
+  allowlistToken: string;
+}
+
+function patternMatches(pattern: GuardPattern, text: string): GuardPatternMatch[] {
   const flags = pattern.regex.flags.includes('g') ? pattern.regex.flags : `${pattern.regex.flags}g`;
   const regex = new RegExp(pattern.regex.source, flags);
+  const matches: GuardPatternMatch[] = [];
 
   for (const match of text.matchAll(regex)) {
     const token = match[0];
@@ -474,10 +508,18 @@ function findDisallowedMatch(filePath: string, pattern: GuardPattern, text: stri
     // must see only the RHS value — not the key NAME — so EXAMPLE_API_KEY=<real>
     // cannot be suppressed by the word "example" appearing in the key name.
     const allowlistToken = match.groups?.value ?? token;
-    if (!isAllowedPatternMatch(filePath, pattern.code, allowlistToken)) {
-      return token;
-    }
+    matches.push({ token, allowlistToken });
     if (token === '') break;
+  }
+
+  return matches;
+}
+
+function findDisallowedMatch(filePath: string, pattern: GuardPattern, text: string): string | null {
+  for (const match of patternMatches(pattern, text)) {
+    if (!isAllowedPatternMatch(filePath, pattern.code, match.allowlistToken)) {
+      return match.token;
+    }
   }
 
   return null;
@@ -488,6 +530,28 @@ function isPackageLockResolvedUrlLine(filePath: string, text: string): boolean {
     && /^\s*"resolved":\s*"https:\/\/registry\.npmjs\.org\//.test(text);
 }
 
+export function scanProjectedFileSecretLines(lines: AddedLine[]): GuardIssue[] {
+  const issues: GuardIssue[] = [];
+
+  for (const line of lines) {
+    const filePath = normalizeRepoPath(line.filePath);
+    if (!projectedFileSecretFixtureFileSet.has(filePath)) continue;
+
+    for (const pattern of projectedFileSecretPatterns) {
+      if (patternMatches(pattern, line.text).length === 0) continue;
+      issues.push({
+        code: pattern.code,
+        message:
+          'Synthetic secret fixtures in projected-file-scanned sources must be assembled at runtime.',
+        filePath: line.filePath,
+        line: line.line,
+      });
+    }
+  }
+
+  return issues;
+}
+
 export function scanAddedLines(lines: AddedLine[]): GuardIssue[] {
   const issues: GuardIssue[] = [];
 
@@ -495,7 +559,10 @@ export function scanAddedLines(lines: AddedLine[]): GuardIssue[] {
     const filePath = normalizeRepoPath(line.filePath);
     const productionCodePath = /^(?:src|scripts|deploy|console\/src)\//.test(filePath);
 
-    if (isFixtureFile(filePath)) continue;
+    if (isFixtureFile(filePath)) {
+      issues.push(...scanProjectedFileSecretLines([line]));
+      continue;
+    }
     if (
       /^(?:src|console\/src)\//.test(filePath)
       && !srcConsoleAllowedFiles.has(filePath)
@@ -682,6 +749,7 @@ const secretPatternCodes = new Set([
   'anthropic-key',
   'openai-key',
   'pinecone-key',
+  'supabase-secret',
   'twilio-account-sid',
   'slack-token',
   'private-key',

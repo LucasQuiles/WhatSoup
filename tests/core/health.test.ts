@@ -870,6 +870,8 @@ describe('GET /health', () => {
                 identityHash: 'b'.repeat(20),
               },
               treeHash: 'c'.repeat(20),
+              fileCount: 14,
+              totalBytes: 1234,
               backup: {
                 root: '/state/auth-bond-backups/test',
                 latest: '/state/auth-bond-backups/test/history/latest',
@@ -914,6 +916,8 @@ describe('GET /health', () => {
             creds: { path: '/auth/creds.json', exists: true, mode: '600', size: 512, mtime: '2026-06-09T12:00:00.000Z', sha256: 'a'.repeat(64) },
             meHash: 'b'.repeat(20),
             treeHash: 'c'.repeat(64),
+            fileCount: 14,
+            totalBytes: 1234,
             backup: {
               root: '/state/auth-bond-backups/test',
               latest: '/state/auth-bond-backups/test/history/latest',
@@ -942,6 +946,8 @@ describe('GET /health', () => {
       creds: { hash: 'a'.repeat(20), mode: '600', empty_hash: false },
       me_hash: 'b'.repeat(20),
       tree_hash: 'c'.repeat(20),
+      file_count: 14,
+      total_bytes: 1234,
       backup: {
         latest: '/state/auth-bond-backups/test/history/latest',
         latest_reason: 'connection-open',
@@ -959,6 +965,8 @@ describe('GET /health', () => {
       currentAuthBond: {
         status: 'present',
         creds: { hash: 'a'.repeat(20), identityHash: 'b'.repeat(20) },
+        fileCount: 14,
+        totalBytes: 1234,
       },
     });
     db2.close();
@@ -1298,6 +1306,105 @@ describe('GET /health', () => {
     expect(json.instance.fallbackTurnsServed).toBe(3);
     expect(json.instance.fallbackTurnsEmpty).toBe(1);
     expect(json.instance.lastFallbackTurnAt).toBe(1_000_000);
+    db2.close();
+  });
+
+  it('publishes exact degradation causes for an otherwise-operational fallback', async () => {
+    db.close();
+    const db2 = makeDb();
+    const activeUntil = Date.now() + 600_000;
+    let retainedRetries = 0;
+    let active: boolean | undefined;
+    let fallbackChainExhausted = false;
+    let failedEntryCount = 0;
+    let modelUsable: boolean | null = false;
+    let modelUsableStale = false;
+    const fakeAgentRuntime = {
+      getHealthSnapshot: () => ({
+        status: 'degraded',
+        details: {
+          recentCrashes: 0,
+          ...(active === undefined ? {} : { active }),
+          turnFinalizationRetainedRetries: retainedRetries,
+          turnFinalizationDegradedScopes: 0,
+          turnRecoveryOutstanding: 0,
+          turnRecoveryExhausted: 0,
+          turnRecoveryOpenRecoveries: 0,
+          turnRecoveryCorruptLinks: 0,
+          turnRecoveryEchoConflicts: 0,
+          providerExecution: { pressureActive: false },
+          turnCapability: {
+            modelUsable,
+            modelUsableStale,
+            modelUsabilityStatus: 'provider-unavailable',
+            lastSuccessfulTurnAt: Date.now() - 1_000,
+            lastTurnErrorClass: null,
+            lastTurnErrorAt: null,
+          },
+        },
+      }),
+      getFallbackState: () => ({
+        effectiveProvider: 'opencode-cli',
+        fallbackActiveUntil: activeUntil,
+        fallbackReason: 'usage-limit',
+        fallbackModel: 'configured/fallback',
+        fallbackChainExhausted,
+        failedEntryCount,
+      }),
+    };
+    const deps = makeDeps(db2, {
+      instanceType: 'agent',
+      runtime: fakeAgentRuntime as unknown as HealthDeps['runtime'],
+    });
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    ({ server, port } = await buildTestServer(deps));
+
+    const { status, body } = await httpReq(port, '/health', 'GET');
+    expect(status).toBe(200);
+    const json = JSON.parse(body);
+    expect(json.status).toBe('degraded');
+    expect(json.degradation_causes).toEqual([
+      'provider_fallback_active',
+      'primary_model_unusable',
+    ]);
+
+    retainedRetries = 1;
+    const withRetryDebt = JSON.parse((await httpReq(port, '/health', 'GET')).body);
+    expect(withRetryDebt.degradation_causes).toEqual([
+      'provider_fallback_active',
+      'primary_model_unusable',
+      'turn_finalization_degraded',
+    ]);
+
+    retainedRetries = 0;
+    active = false;
+    const withInactiveSession = JSON.parse((await httpReq(port, '/health', 'GET')).body);
+    expect(withInactiveSession.degradation_causes).toEqual([
+      'provider_fallback_active',
+      'primary_model_unusable',
+      'agent_session_inactive',
+    ]);
+
+    active = undefined;
+    fallbackChainExhausted = true;
+    failedEntryCount = 1;
+    const withFallbackFailures = JSON.parse((await httpReq(port, '/health', 'GET')).body);
+    expect(withFallbackFailures.degradation_causes).toEqual([
+      'provider_fallback_active',
+      'fallback_chain_exhausted',
+      'fallback_entry_failures',
+      'primary_model_unusable',
+    ]);
+
+    fallbackChainExhausted = false;
+    failedEntryCount = 0;
+    modelUsable = null;
+    modelUsableStale = true;
+    const withStalePrimaryEvidence = JSON.parse((await httpReq(port, '/health', 'GET')).body);
+    expect(withStalePrimaryEvidence.degradation_causes).toEqual([
+      'provider_fallback_active',
+      'primary_model_evidence_stale',
+    ]);
     db2.close();
   });
 
@@ -2983,10 +3090,13 @@ describe('health command endpoints — malformed bodies and side effects', () =>
     );
 
     expect(status).toBe(200);
+    // `remote` reaches the HTTP body because the handler serialises the result
+    // verbatim; no socket and no messages means there was no receipt to send.
     expect(JSON.parse(body)).toEqual({
       ok: true,
       jid: '15551234567@s.whatsapp.net',
       conversation_key: '15551234567',
+      remote: 'nothing_to_ack',
     });
     const row = db.raw
       .prepare('SELECT unread_count FROM chats WHERE conversation_key = ?')

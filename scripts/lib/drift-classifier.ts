@@ -11,8 +11,9 @@
  * it is exhaustively testable and cannot fail open on an IO fault. `scripts/drift-classify.ts`
  * is the CLI that feeds it a real path set.
  *
- * Built against what is on `main` today. It deliberately does NOT depend on
- * `scripts/lib/ci-control/`, which has never landed here.
+ * This path-only classifier deliberately remains independent of
+ * `scripts/lib/ci-control/`; exact-object evidence readers and drift classification
+ * are separate policy inputs.
  *
  * SCOPE OF THE CLAIM: this classifies drift by the PATHS that changed and reports which
  * evidence classes that invalidates. It does not verify that the invalidated evidence was
