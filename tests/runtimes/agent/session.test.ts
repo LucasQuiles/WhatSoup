@@ -711,7 +711,7 @@ describe('SessionManager', () => {
     const { messenger } = makeMessenger();
 
     const sm = new SessionManager({ db, messenger, chatJid: CHAT_JID, onEvent: vi.fn() });
-    expect(sm.getStatus()).toEqual({ active: false, pid: null, sessionId: null, startedAt: null, messageCount: 0, lastMessageAt: null, turnInFlight: false, durableFailureClosed: false });
+    expect(sm.getStatus()).toEqual({ active: false, pid: null, sessionId: null, startedAt: null, messageCount: 0, lastMessageAt: null, turnInFlight: false, durableFailureClosed: false, durableFailureInconclusive: false });
 
     await sm.spawnSession();
 
@@ -728,7 +728,7 @@ describe('SessionManager', () => {
     await sm.spawnSession();
     await sm.shutdown();
 
-    expect(sm.getStatus()).toEqual({ active: false, pid: null, sessionId: null, startedAt: null, messageCount: 0, lastMessageAt: null, turnInFlight: false, durableFailureClosed: false });
+    expect(sm.getStatus()).toEqual({ active: false, pid: null, sessionId: null, startedAt: null, messageCount: 0, lastMessageAt: null, turnInFlight: false, durableFailureClosed: false, durableFailureInconclusive: false });
   });
 
   it('watchdog rearming is separate from provider turn ownership', async () => {
@@ -902,6 +902,7 @@ describe('SessionManager', () => {
       lastMessageAt: null,
       turnInFlight: false,
       durableFailureClosed: false,
+      durableFailureInconclusive: false,
     });
   });
 
@@ -933,6 +934,7 @@ describe('SessionManager', () => {
       lastMessageAt: null,
       turnInFlight: false,
       durableFailureClosed: false,
+      durableFailureInconclusive: false,
     });
   });
 

@@ -567,7 +567,7 @@ describe('SessionManager durable error lifecycle', () => {
           sessionId: 'foreign-provider-resume',
           sessionStatus: 'suspended',
         });
-        return { rowId, sessionId: 'foreign-provider-resume' };
+        return { rowId, sessionId: 'foreign-provider-resume', retire: true };
       },
     },
     {
@@ -584,7 +584,7 @@ describe('SessionManager durable error lifecycle', () => {
           sessionId: 'legacy-provider-resume',
           sessionStatus: 'suspended',
         });
-        return { rowId, sessionId: 'legacy-provider-resume' };
+        return { rowId, sessionId: 'legacy-provider-resume', retire: false };
       },
     },
     {
@@ -608,7 +608,7 @@ describe('SessionManager durable error lifecycle', () => {
           sessionId: 'duplicate-provider-resume',
           sessionStatus: 'suspended',
         });
-        return { rowId, sessionId: 'duplicate-provider-resume' };
+        return { rowId, sessionId: 'duplicate-provider-resume', retire: false };
       },
     },
     {
@@ -625,7 +625,7 @@ describe('SessionManager durable error lifecycle', () => {
           sessionId: 'conversation-provider-resume',
           sessionStatus: 'suspended',
         });
-        return { rowId, sessionId: 'conversation-provider-resume' };
+        return { rowId, sessionId: 'conversation-provider-resume', retire: false };
       },
     },
     {
@@ -639,10 +639,11 @@ describe('SessionManager durable error lifecycle', () => {
           'claude-cli',
         ),
         sessionId: 'missing-checkpoint-resume',
+        retire: false,
       }),
     },
-  ])('rejects $name before child spawn and leaves persistence unchanged', async ({ setup }) => {
-    const { rowId, sessionId } = setup(db, durability);
+  ])('rejects $name before child spawn with the required lifecycle disposition', async ({ setup }) => {
+    const { rowId, sessionId, retire } = setup(db, durability);
     const before = resumeStateSnapshot(db);
     const child = makeChild(17120);
     vi.mocked(spawn).mockReturnValue(child as never);
@@ -665,7 +666,12 @@ describe('SessionManager durable error lifecycle', () => {
 
     expect(spawn).not.toHaveBeenCalled();
     expect(killSessionTree).not.toHaveBeenCalled();
-    expect(resumeStateSnapshot(db)).toEqual(before);
+    if (retire) {
+      expect(rowStatus(db, rowId)).toBe('ended');
+      expect(durability.getSessionCheckpoint(CONVERSATION_KEY)?.session_status).toBe('ended');
+    } else {
+      expect(resumeStateSnapshot(db)).toEqual(before);
+    }
     expect(sm.getStatus()).toMatchObject({ active: false, sessionId: null });
     expect(sm.getDbRowId()).toBeNull();
   });

@@ -35,12 +35,13 @@ describe('prepared statement caching', () => {
     // durability-debt diagnostics (#1865: the maybe_sent count + oldest-submitted-at
     // staleness probes that drive /health degradation), and the PR-C
     // supersedeOutstandingStatus statement (one outstanding status ping per chat),
-    // and the bounded live maybe_sent reconciliation scan.
+    // the bounded live maybe_sent reconciliation scan, and five
+    // conversation-scoped lifecycle proof/mutation statements.
     // Lifecycle methods must not prepare SQL per call.
-    // (+2 vs the historical 112: the E17/E22 idempotency probe
+    // (+7 vs the historical 112: the E17/E22 idempotency probe
     // agentSessionRowAlreadyInStatusForProvider — the true-repeat-only guard
     // that lets a duplicate lifecycle close no-op instead of throwing — plus
-    // the live maybe_sent scan above.)
+    // the live maybe_sent scan and five lifecycle statements above.)
     // (+1 vs 114, PRESTAGE-T4: getTurnRecoveryOriginalDeliveryStatus — the
     // pre-claim duplicate-send guard's read of the ORIGINAL selected
     // delivery's outbound status, called before a recovery job is claimed
@@ -51,7 +52,10 @@ describe('prepared statement caching', () => {
     // instead of adding its own, so it does not also bump this count.)
     // (+1 vs 115, #2332: selectInboundReceipt reads the durable receipt that
     // chronology must carry across queueing and recovery replay.)
-    expect(prepareSpy).toHaveBeenCalledTimes(116);
+    // (+5 vs 116, provider-route-policy task3: the five conversation-scoped
+    // lifecycle proof/mutation statements enumerated above — merge union of
+    // this branch's +5 with main's +2.)
+    expect(prepareSpy).toHaveBeenCalledTimes(121);
     prepareSpy.mockClear();
 
     const seq = engine.journalInbound('msg-1', 'conv-1', 'jid-1@s.whatsapp.net', 'agent');

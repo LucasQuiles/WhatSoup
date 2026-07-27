@@ -325,6 +325,7 @@ export function sessionStub() {
       sessionId: string | null;
       pid: number | null;
       durableFailureClosed?: boolean;
+      durableFailureInconclusive?: boolean;
     }>(() => ({ active: true, sessionId: 'session-41', pid: 4100 })),
   };
 }

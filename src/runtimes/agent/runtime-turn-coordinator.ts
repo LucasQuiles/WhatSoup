@@ -642,9 +642,13 @@ turnFinalizationBookkeeping(
       fields: {
         ...(status?.sessionId ? { sessionId: status.sessionId } : {}),
         ...(status?.pid ? { claudePid: status.pid } : {}),
-        ...(status?.active === undefined || status.durableFailureClosed === true
+        ...(
+          status?.active === undefined
+          || status.durableFailureClosed === true
+          || status.durableFailureInconclusive === true
           ? {}
-          : { sessionStatus: status.active ? 'active' : 'suspended' }),
+          : { sessionStatus: status.active ? 'active' : 'suspended' }
+        ),
         activeTurnId: null,
         ...(context.identity.inboundSeq === null
           ? {}

@@ -39,6 +39,12 @@ export interface AcquireProcessLockOptions {
   bootId?: string;
   isProcessAlive?: (pid: number) => boolean;
   /**
+   * Allow reclaiming a dead holder from the current, known boot. Keep false for
+   * split-brain-sensitive singleton services. Use only for short, retry-safe
+   * coordination lanes whose crashed owner cannot retain external ownership.
+   */
+  reclaimDeadSameBoot?: boolean;
+  /**
    * Test seam: invoked once immediately before the identity-checked unlink in
    * the reclaim path, to deterministically simulate a concurrent replacement of
    * the lock file between the read and the unlink. Production callers leave this
@@ -211,15 +217,19 @@ export function acquireProcessLock(lockPath: string, options: AcquireProcessLock
         // docs/runbook.md §5.6). Do not reorder this below the bootId check.
         if (isProcessAlive(existing.pid)) throw new ProcessLockError('active', lockPath, existing.pid);
 
-        // The holder pid is dead. Reclaim ONLY when both boot ids are known and
-        // differ — the lock was written before the last restart, so the holder
-        // cannot still be running. A dead pid within the same boot stays
-        // fail-closed (it may be a transiently-unsignalable holder, and a
-        // same-boot pid could be reused).
+        // The holder pid is dead. Singleton-service callers reclaim ONLY when
+        // both boot ids are known and differ. Short, retry-safe coordination
+        // lanes may explicitly opt into same-boot recovery; unknown boot
+        // identity remains fail-closed in both modes.
         const fromPreviousBoot = Boolean(existing.bootId)
           && Boolean(payload.bootId)
           && existing.bootId !== payload.bootId;
-        if (reclaimed || !fromPreviousBoot) {
+        const fromSameBoot = Boolean(existing.bootId)
+          && Boolean(payload.bootId)
+          && existing.bootId === payload.bootId;
+        const reclaimable = fromPreviousBoot
+          || (options.reclaimDeadSameBoot === true && fromSameBoot);
+        if (reclaimed || !reclaimable) {
           throw new ProcessLockError('stale', lockPath, existing.pid);
         }
 
@@ -235,7 +245,7 @@ export function acquireProcessLock(lockPath: string, options: AcquireProcessLock
         if (beforeUnlink && samePayloadIdentity(beforeUnlink, existing)) {
           try {
             unlinkSync(lockPath);
-            reclaimedPreviousBoot = true;
+            reclaimedPreviousBoot = fromPreviousBoot;
           } catch (unlinkErr) {
             if ((unlinkErr as NodeJS.ErrnoException).code !== 'ENOENT') throw unlinkErr;
           }

@@ -13,19 +13,37 @@ export interface BeginFreshSessionLifecycleParams {
   workspaceKey: string;
   provider: string;
   conversationKey: string;
+  checkpointWatchdogState?: string | null;
 }
 
 export interface ReactivateSessionLifecycleParams {
-  agentSessionRowId?: number;
+  agentSessionRowId: number;
   providerSessionId: string;
   provider: string;
   pid: number;
+  workspaceKey: string;
+  conversationKey: string;
+  checkpointWatchdogState?: string | null;
 }
 
 export interface RetireSessionLifecycleParams {
   agentSessionRowId?: number;
   providerSessionId: string;
   provider: string;
+}
+
+export interface RetireExactSessionLifecycleParams {
+  agentSessionRowId: number;
+  providerSessionId: string;
+  provider: string;
+  workspaceKey: string;
+  conversationKey: string;
+}
+
+export interface UpdateExactSessionCheckpointStatusParams {
+  providerSessionId: string;
+  conversationKey: string;
+  sessionStatus: string;
 }
 
 export interface CloseSessionLifecycleFailureParams {
@@ -48,10 +66,14 @@ interface LifecycleStatements {
   insertAgentSession: PreparedStatement;
   beginFreshCheckpoint: PreparedStatement;
   selectResumableRowsBySessionId: PreparedStatement;
+  selectExactResumableAgentSession: PreparedStatement;
+  selectExactResumableCheckpoint: PreparedStatement;
   reactivateExactAgentSession: PreparedStatement;
-  reactivateSessionCheckpoints: PreparedStatement;
+  reactivateExactSessionCheckpoint: PreparedStatement;
   retireExactAgentSession: PreparedStatement;
   retireSessionCheckpoints: PreparedStatement;
+  retireScopedAgentSession: PreparedStatement;
+  retireExactSessionCheckpoint: PreparedStatement;
   closeExactAgentFailure: PreparedStatement;
   closePreInitAgentFailure: PreparedStatement;
   orphanExactSessionCheckpoints: PreparedStatement;
@@ -64,6 +86,7 @@ interface LifecycleStatements {
   closePreInitCheckpoint: PreparedStatement;
   updateSessionCheckpointsStatusBySessionId: PreparedStatement;
   agentSessionRowAlreadyInStatusForProvider: PreparedStatement;
+  updateExactSessionCheckpointStatus: PreparedStatement;
 }
 
 function validateRowId(rowId: number): void {
@@ -78,6 +101,10 @@ function validateProviderSessionId(sessionId: string): void {
 
 function validateProvider(provider: string): void {
   if (provider.length === 0) throw new Error('Provider must not be empty');
+}
+
+function validateIdentityPart(value: string, label: string): void {
+  if (value.length === 0) throw new Error(`${label} must not be empty`);
 }
 
 function requireChanges(result: { changes: number | bigint }, message: string): void {
@@ -112,14 +139,14 @@ export class SessionLifecycleStore {
           completed_scope, completed_logical_turn_id, completed_manager_id,
           completed_generation
         )
-        VALUES (?, NULL, NULL, NULL, NULL, NULL, NULL, ?, 'active', NULL, NULL, NULL, NULL, NULL, NULL, NULL)
+        VALUES (?, NULL, NULL, NULL, NULL, NULL, ?, ?, 'active', NULL, NULL, NULL, NULL, NULL, NULL, NULL)
         ON CONFLICT(conversation_key) DO UPDATE SET
           session_id = NULL,
           transcript_path = NULL,
           active_turn_id = NULL,
           last_inbound_seq = NULL,
           last_flushed_outbound_id = NULL,
-          watchdog_state = NULL,
+          watchdog_state = excluded.watchdog_state,
           claude_pid = excluded.claude_pid,
           session_status = 'active',
           completed_inbound_seq = NULL,
@@ -139,21 +166,41 @@ export class SessionLifecycleStore {
           AND status IN ('active', 'suspended', 'orphaned', 'crashed')
         ORDER BY id
       `),
+      selectExactResumableAgentSession: prepare(`
+        SELECT id
+        FROM agent_sessions
+        WHERE id = ?
+          AND session_id = ?
+          AND provider = ?
+          AND workspace_key = ?
+          AND status IN ('active', 'suspended', 'orphaned', 'crashed')
+      `),
+      selectExactResumableCheckpoint: prepare(`
+        SELECT id
+        FROM session_checkpoints
+        WHERE conversation_key = ?
+          AND session_id = ?
+          AND session_status IN ('active', 'suspended', 'orphaned')
+      `),
       reactivateExactAgentSession: prepare(`
         UPDATE agent_sessions
         SET status = 'active', claude_pid = ?, ended_at = NULL
         WHERE id = ?
           AND session_id = ?
           AND provider = ?
+          AND workspace_key = ?
           AND status IN ('active', 'suspended', 'orphaned', 'crashed')
       `),
-      reactivateSessionCheckpoints: prepare(`
+      reactivateExactSessionCheckpoint: prepare(`
         UPDATE session_checkpoints
         SET session_status = 'active',
             claude_pid = ?,
+            watchdog_state = CASE WHEN ? = 1 THEN ? ELSE watchdog_state END,
             checkpoint_version = checkpoint_version + 1,
             updated_at = datetime('now')
-        WHERE session_id = ?
+        WHERE id = ?
+          AND conversation_key = ?
+          AND session_id = ?
           AND session_status IN ('active', 'suspended', 'orphaned')
       `),
       retireExactAgentSession: prepare(`
@@ -170,6 +217,25 @@ export class SessionLifecycleStore {
             checkpoint_version = checkpoint_version + 1,
             updated_at = datetime('now')
         WHERE session_id = ?
+      `),
+      retireScopedAgentSession: prepare(`
+        UPDATE agent_sessions
+        SET status = 'ended', ended_at = COALESCE(ended_at, datetime('now'))
+        WHERE id = ?
+          AND session_id = ?
+          AND provider = ?
+          AND workspace_key = ?
+          AND status IN ('active', 'suspended', 'orphaned', 'crashed')
+      `),
+      retireExactSessionCheckpoint: prepare(`
+        UPDATE session_checkpoints
+        SET session_status = 'ended',
+            checkpoint_version = checkpoint_version + 1,
+            updated_at = datetime('now')
+        WHERE id = ?
+          AND conversation_key = ?
+          AND session_id = ?
+          AND session_status IN ('active', 'suspended', 'orphaned')
       `),
       closeExactAgentFailure: prepare(`
         UPDATE agent_sessions
@@ -192,7 +258,7 @@ export class SessionLifecycleStore {
         SET session_status = 'orphaned',
             checkpoint_version = checkpoint_version + 1,
             updated_at = datetime('now')
-        WHERE session_id = ?
+        WHERE conversation_key = ? AND session_id = ?
       `),
       orphanPreInitCheckpoint: prepare(`
         UPDATE session_checkpoints
@@ -230,7 +296,7 @@ export class SessionLifecycleStore {
         SET session_status = ?,
             checkpoint_version = checkpoint_version + 1,
             updated_at = datetime('now')
-        WHERE session_id = ?
+        WHERE conversation_key = ? AND session_id = ?
       `),
       closePreInitCheckpoint: prepare(`
         UPDATE session_checkpoints
@@ -250,11 +316,20 @@ export class SessionLifecycleStore {
         SELECT 1 FROM agent_sessions
         WHERE id = ? AND provider = ? AND session_id IS ? AND status = ?
       `),
+      updateExactSessionCheckpointStatus: prepare(`
+        UPDATE session_checkpoints
+        SET session_status = ?,
+            checkpoint_version = checkpoint_version + 1,
+            updated_at = datetime('now')
+        WHERE id = ?
+           AND conversation_key = ?
+           AND session_id = ?
+      `),
     };
   }
 
   beginFreshCheckpoint(conversationKey: string, pid?: number): void {
-    this.statements.beginFreshCheckpoint.run(conversationKey, pid ?? null);
+    this.statements.beginFreshCheckpoint.run(conversationKey, null, pid ?? null);
   }
 
   beginFreshSessionLifecycle(params: BeginFreshSessionLifecycleParams): number {
@@ -269,7 +344,11 @@ export class SessionLifecycleStore {
       );
       const rowId = Number(result.lastInsertRowid);
       validateRowId(rowId);
-      this.statements.beginFreshCheckpoint.run(params.conversationKey, params.pid || null);
+      this.statements.beginFreshCheckpoint.run(
+        params.conversationKey,
+        params.checkpointWatchdogState ?? null,
+        params.pid || null,
+      );
       return rowId;
     });
   }
@@ -296,29 +375,50 @@ export class SessionLifecycleStore {
   }
 
   reactivateSessionLifecycle(params: ReactivateSessionLifecycleParams): number {
+    validateRowId(params.agentSessionRowId);
+    validateProviderSessionId(params.providerSessionId);
+    validateProvider(params.provider);
+    validateIdentityPart(params.workspaceKey, 'Workspace key');
+    validateIdentityPart(params.conversationKey, 'Conversation key');
     return this.transact(() => {
-      const rowId = this.resolveExactResumableRowId(
+      const row = this.statements.selectExactResumableAgentSession.get(
+        params.agentSessionRowId,
         params.providerSessionId,
         params.provider,
-        params.agentSessionRowId,
-      );
+        params.workspaceKey,
+      ) as { id: number } | undefined;
+      if (row === undefined) {
+        throw new Error('Exact resumable agent row does not match the provider and workspace identity');
+      }
+      const checkpoint = this.statements.selectExactResumableCheckpoint.get(
+        params.conversationKey,
+        params.providerSessionId,
+      ) as { id: number } | undefined;
+      if (checkpoint === undefined) {
+        throw new Error('Exact resumable checkpoint does not match the conversation identity');
+      }
       requireChanges(
         this.statements.reactivateExactAgentSession.run(
           params.pid,
-          rowId,
+          row.id,
           params.providerSessionId,
           params.provider,
+          params.workspaceKey,
         ),
         'Exact agent session row is not resumable or does not match the provider session ID',
       );
       requireChanges(
-        this.statements.reactivateSessionCheckpoints.run(
+        this.statements.reactivateExactSessionCheckpoint.run(
           params.pid || null,
+          params.checkpointWatchdogState === undefined ? 0 : 1,
+          params.checkpointWatchdogState ?? null,
+          checkpoint.id,
+          params.conversationKey,
           params.providerSessionId,
         ),
-        'No resumable checkpoint rows match the provider session ID',
+        'Exact resumable checkpoint changed during activation',
       );
-      return rowId;
+      return row.id;
     });
   }
 
@@ -342,6 +442,50 @@ export class SessionLifecycleStore {
         'No checkpoint rows match the provider session ID',
       );
       return rowId;
+    });
+  }
+
+  retireExactSessionLifecycle(params: RetireExactSessionLifecycleParams): number {
+    validateRowId(params.agentSessionRowId);
+    validateProviderSessionId(params.providerSessionId);
+    validateProvider(params.provider);
+    validateIdentityPart(params.workspaceKey, 'Workspace key');
+    validateIdentityPart(params.conversationKey, 'Conversation key');
+    return this.transact(() => {
+      const row = this.statements.selectExactResumableAgentSession.get(
+        params.agentSessionRowId,
+        params.providerSessionId,
+        params.provider,
+        params.workspaceKey,
+      ) as { id: number } | undefined;
+      if (row === undefined) {
+        throw new Error('Exact resumable agent row does not match the provider and workspace identity');
+      }
+      const checkpoint = this.statements.selectExactResumableCheckpoint.get(
+        params.conversationKey,
+        params.providerSessionId,
+      ) as { id: number } | undefined;
+      if (checkpoint === undefined) {
+        throw new Error('Exact resumable checkpoint does not match the conversation identity');
+      }
+      requireChanges(
+        this.statements.retireScopedAgentSession.run(
+          row.id,
+          params.providerSessionId,
+          params.provider,
+          params.workspaceKey,
+        ),
+        'Exact agent session row changed during retirement',
+      );
+      requireChanges(
+        this.statements.retireExactSessionCheckpoint.run(
+          checkpoint.id,
+          params.conversationKey,
+          params.providerSessionId,
+        ),
+        'Exact session checkpoint changed during retirement',
+      );
+      return row.id;
     });
   }
 
@@ -375,7 +519,10 @@ export class SessionLifecycleStore {
         'Exact agent session row does not match the failed provider session',
       );
       requireChanges(
-        this.statements.orphanExactSessionCheckpoints.run(params.providerSessionId),
+        this.statements.orphanExactSessionCheckpoints.run(
+          params.conversationKey,
+          params.providerSessionId,
+        ),
         'No checkpoint rows match the failed provider session',
       );
     });
@@ -433,6 +580,7 @@ export class SessionLifecycleStore {
         ? this.statements.closePreInitCheckpoint.run(params.status, params.conversationKey)
         : this.statements.closeExactSessionCheckpoints.run(
             params.status,
+            params.conversationKey,
             params.providerSessionId,
           );
       requireChanges(checkpointResult, 'Exact session checkpoint lifecycle could not be closed');
@@ -448,5 +596,31 @@ export class SessionLifecycleStore {
       sessionStatus,
       sessionId,
     ).changes);
+  }
+
+  updateExactSessionCheckpointStatus(
+    params: UpdateExactSessionCheckpointStatusParams,
+  ): number {
+    validateProviderSessionId(params.providerSessionId);
+    validateIdentityPart(params.conversationKey, 'Conversation key');
+    return this.transact(() => {
+      const checkpoint = this.statements.selectExactResumableCheckpoint.get(
+        params.conversationKey,
+        params.providerSessionId,
+      ) as { id: number } | undefined;
+      if (checkpoint === undefined) {
+        throw new Error('Exact resumable checkpoint does not match the conversation identity');
+      }
+      requireChanges(
+        this.statements.updateExactSessionCheckpointStatus.run(
+          params.sessionStatus,
+          checkpoint.id,
+          params.conversationKey,
+          params.providerSessionId,
+        ),
+        'Exact session checkpoint changed during status update',
+      );
+      return checkpoint.id;
+    });
   }
 }

@@ -26,9 +26,13 @@ import { fileURLToPath } from 'node:url';
 import {
   BASELINE_REGISTRY,
   type BaselineFinding,
+  GROWTH_WAIVERS_PATH,
+  type GrowthWaiver,
   type WeighedBaseline,
+  applyWaivers,
   baselineIdentities,
   compareWeights,
+  parseWaiverDocument,
   weighBaseline,
 } from './lib/baseline-weight.ts';
 import { CliArgError, assertKnownFlag, isHelpFlag, takeValue } from './lib/cli-args.ts';
@@ -254,15 +258,42 @@ function main(): number {
 
   const findings: BaselineFinding[] = compareWeights(comparable);
 
-  if (options.json) {
-    console.log(JSON.stringify({ base, examined: comparable.length, findings }, null, 2));
+  // Growth waivers are read from the MERGE BASE only. A candidate cannot author its own
+  // authorization: the waiver must already be on the base branch, i.e. it landed through
+  // its own reviewed PR. Absent file = no waivers. Malformed file = INCONCLUSIVE — an
+  // unreadable authorization must not fail open in either direction.
+  let waivers: GrowthWaiver[] = [];
+  try {
+    const waiverText = readGitTextAtRevision({ cwd: repoRoot, revision: base, path: GROWTH_WAIVERS_PATH });
+    waivers = parseWaiverDocument(JSON.parse(waiverText));
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (!/does not exist|exists on disk, but not in|path .* does not exist/i.test(message)) {
+      console.error(
+        `FAIL(inconclusive): ${GROWTH_WAIVERS_PATH} at the merge base could not be read or ` +
+          `validated, so waiver authority is unknown: ${message}`,
+      );
+      return EXIT_INCONCLUSIVE;
+    }
   }
 
-  const grew = findings.filter((f) => !f.inconclusive);
+  const todayIso = new Date().toISOString().slice(0, 10);
+  const growthFindings = findings.filter((f) => !f.inconclusive);
   const unknown = findings.filter((f) => f.inconclusive);
+  const { blocking: grew, waived } = applyWaivers(growthFindings, waivers, todayIso);
+
+  if (options.json) {
+    console.log(JSON.stringify({ base, examined: comparable.length, findings: [...grew, ...unknown], waived }, null, 2));
+  }
 
   if (!options.json) {
     for (const f of grew) console.error(`FAIL(baseline-growth): ${f.message}`);
+    for (const f of waived) {
+      console.error(
+        `WAIVED(baseline-growth): ${f.path} weight ${f.base} -> ${f.head} authorized up to ` +
+          `${f.waiver.maxWeight} by ${f.waiver.issue} until ${f.waiver.expiresAt} — ${f.waiver.reason}`,
+      );
+    }
     for (const f of unknown) console.error(`INCONCLUSIVE: ${f.message}`);
   }
 

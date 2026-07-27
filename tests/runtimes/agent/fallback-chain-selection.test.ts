@@ -72,6 +72,8 @@ import { AgentRuntime } from '../../../src/runtimes/agent/runtime.ts';
 import type { Database } from '../../../src/core/database.ts';
 import type { Messenger } from '../../../src/core/types.ts';
 import { emitAlert } from '../../../src/lib/emit-alert.ts';
+import { ProviderDataPolicyError } from '../../../src/core/provider-data-policy.ts';
+import type { ChatModelPreference } from '../../../src/runtimes/agent/chat-preference-db.ts';
 
 function mockConfigRef(): Record<string, unknown> {
   return (globalThis as Record<string, unknown>)['__fallbackChainTestConfig__'] as Record<string, unknown>;
@@ -94,7 +96,7 @@ function makeMessenger(): Messenger {
   } as unknown as Messenger;
 }
 
-type FallbackEntry = { provider: string; model?: string };
+type FallbackEntry = { provider: string; model?: string; dataPolicy?: 'trusted' | 'restricted' };
 type ProviderFallbackReason =
   | 'usage-limit'
   | 'rate-limit'
@@ -109,6 +111,9 @@ function makeRuntime(overrides: {
   agentFallbackModel?: string;
   agentFallbacks?: FallbackEntry[];
   model?: string;
+  providerDataPolicy?: 'trusted' | 'restricted' | null;
+  providerBoundaryMode?: 'shadow' | 'enforce';
+  nlRouting?: boolean;
 } = {}): AgentRuntime {
   const config = mockConfigRef();
   config['agentProvider'] = 'claude-cli';
@@ -116,6 +121,10 @@ function makeRuntime(overrides: {
   config['agentFallbackProvider'] = overrides.agentFallbackProvider;
   config['agentFallbackModel'] = overrides.agentFallbackModel;
   config['agentFallbacks'] = overrides.agentFallbacks;
+  config['agentProviderDataPolicy'] = overrides.providerDataPolicy ?? null;
+  config['agentProviderBoundaryMode'] = overrides.providerBoundaryMode ?? 'shadow';
+  config['nlRouting'] = overrides.nlRouting ?? false;
+  config['nlRoutingTiers'] = null;
   return new AgentRuntime(makeDb(), makeMessenger(), 'test', {
     model: overrides.model ?? 'claude-opus-4-8[1m]',
   });
@@ -145,6 +154,16 @@ type FallbackView = {
     activeFallbackEntry?: FallbackEntry | null;
     fallbackChain?: Array<FallbackEntry & { eligible: boolean | null }>;
   };
+  createSessionManager(opts: {
+    chatJid: string;
+    cwd: string | undefined;
+    actorJid?: string;
+    onEvent: () => void;
+    onCrash: () => void;
+    notifyUser: () => void;
+  }): unknown;
+  routablePinTargets(): string[];
+  loadSenderPreference(chatJid: string, senderJid: string): ChatModelPreference | null;
 };
 
 function view(runtime: AgentRuntime): FallbackView {
@@ -179,6 +198,76 @@ describe('fallback chain selection', () => {
       provider: 'opencode-cli',
       model: 'minimax/MiniMax-M2',
     });
+  });
+
+  it('retains dataPolicy through runtime fallback-window cloning and status snapshots', () => {
+    lookupCredentialMock.mockImplementation((svc) => svc === 'openai' ? 'oa-key' : null);
+    const runtime = makeRuntime({
+      agentFallbacks: [
+        { provider: 'openai-api', model: 'gpt-5', dataPolicy: 'restricted' },
+      ],
+    });
+
+    view(runtime).activateProviderFallback(null);
+
+    expect(view(runtime).getFallbackState().activeFallbackEntry).toEqual({
+      provider: 'openai-api',
+      model: 'gpt-5',
+      dataPolicy: 'restricted',
+    });
+    expect(view(runtime).getFallbackState().fallbackChain).toEqual([
+      { provider: 'openai-api', model: 'gpt-5', dataPolicy: 'restricted', eligible: true },
+    ]);
+  });
+
+  it('runs policy admission with NL routing disabled and rethrows typed enforcement errors', () => {
+    const runtime = makeRuntime({
+      providerDataPolicy: null,
+      providerBoundaryMode: 'enforce',
+      nlRouting: false,
+    });
+
+    expect(() => view(runtime).createSessionManager({
+      chatJid: '15550203@s.whatsapp.net',
+      cwd: undefined,
+      onEvent: vi.fn(),
+      onCrash: vi.fn(),
+      notifyUser: vi.fn(),
+    })).toThrow(ProviderDataPolicyError);
+  });
+
+  it('does not let a broad NL route fallback swallow policy enforcement', () => {
+    const runtime = makeRuntime({
+      providerDataPolicy: null,
+      providerBoundaryMode: 'enforce',
+      nlRouting: true,
+    });
+    vi.spyOn(view(runtime), 'routablePinTargets').mockImplementation(() => {
+      throw new Error('credential probe unavailable');
+    });
+    vi.spyOn(view(runtime), 'loadSenderPreference').mockReturnValue({
+      chatJid: '15550204@s.whatsapp.net',
+      senderJid: '15550205@s.whatsapp.net',
+      intent: 'provider_specific',
+      requestedProvider: 'codex-cli',
+      scope: 'this_thread',
+      pinStrict: true,
+      fallbackPermitted: false,
+      updatedAt: 1,
+      expiresAt: 2,
+      requestedModel: null,
+      validatedProvider: null,
+      modelPinVerified: null,
+    });
+
+    expect(() => view(runtime).createSessionManager({
+      chatJid: '15550204@s.whatsapp.net',
+      actorJid: '15550205@s.whatsapp.net',
+      cwd: undefined,
+      onEvent: vi.fn(),
+      onCrash: vi.fn(),
+      notifyUser: vi.fn(),
+    })).toThrow(ProviderDataPolicyError);
   });
 
   it('reports configured chain eligibility from credential presence before an arm-time selection pass', () => {
