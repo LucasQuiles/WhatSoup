@@ -49,7 +49,9 @@ describe('prepared statement caching', () => {
     // maybe_sent diagnostics above; getTurnRecoverySourceProof, added later
     // in the same packet, deliberately REUSES getTurnRecoverySourceInboundStatus
     // instead of adding its own, so it does not also bump this count.)
-    expect(prepareSpy).toHaveBeenCalledTimes(115);
+    // (+1 vs 115, #2332: selectInboundReceipt reads the durable receipt that
+    // chronology must carry across queueing and recovery replay.)
+    expect(prepareSpy).toHaveBeenCalledTimes(116);
     prepareSpy.mockClear();
 
     const seq = engine.journalInbound('msg-1', 'conv-1', 'jid-1@s.whatsapp.net', 'agent');

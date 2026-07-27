@@ -29,6 +29,7 @@ const requiredPackageScripts = {
   'guard:test-integrity': 'bash scripts/test-integrity-ci.sh',
   'guard:test-integrity:required': 'WHATSOUP_REQUIRE_TEST_INTEGRITY=1 npm run guard:test-integrity',
   'guard:lint:src': 'node scripts/eslint-fitness-check.ts',
+  'guard:catch-ratchet': 'node scripts/generate-catch-ratchet.mjs --check',
   'guard:claude-settings': 'node scripts/claude-settings-guard.ts --check',
   'guard:agent-decision-polls': 'node scripts/agent-decision-polls-guard.ts',
   'guard:semantic-quality': 'node scripts/semantic-quality-check.ts',
@@ -80,6 +81,7 @@ const requiredPackageScripts = {
     'npm run verify:semantic:shadow',
     'npm run guard:test-integrity',
     'npm run guard:boundaries',
+    'npm run guard:catch-ratchet',
     'npm run guard:lint:src',
     'npm run typecheck:all',
     'npm test',
@@ -111,6 +113,7 @@ const requiredPackageScripts = {
     'npm run guard:service-units',
     'npm run guard:insecure-tempfile',
     'npm run guard:no-destructive-git',
+    'npm run guard:catch-ratchet',
     'npm run guard:grant-resolver',
     'npm run guard:instance-config',
     'npm run guard:guard-test-coverage',
@@ -158,12 +161,13 @@ const requiredConsolePackageScripts = {
 
 const qualityCiJobTimeoutBlock = [
   'quality:',
+  '    name: quality (24.x)',
   '    runs-on: ubuntu-latest',
   '    # Generous cap so it only kills a genuinely hung run, not a slow-but-live',
   '    # one (the quality job runs the full suite + coverage and can take ~40min).',
   '    # Without this a hung run rides to the 6h GitHub default.',
   '    timeout-minutes: 60',
-  '    strategy:',
+  '    steps:',
 ].join('\n');
 
 const qualityCiSystemDepsTimeoutBlock = [
@@ -175,9 +179,10 @@ const qualityCiSystemDepsTimeoutBlock = [
 ].join('\n');
 
 const qualityCiBrowserInstallScript = [
+  'TIMEOUT_BIN="$(bash scripts/resolve-timeout-bin.sh)"',
   'for attempt in 1 2 3; do',
   '  echo "::group::Playwright chromium download attempt ${attempt}/3"',
-  '  if timeout 300 npx playwright install chromium; then',
+  '  if "$TIMEOUT_BIN" 300 npx playwright install chromium; then',
   '    echo "::endgroup::"',
   '    echo "Playwright chromium download succeeded on attempt ${attempt}"',
   '    exit 0',
@@ -198,18 +203,20 @@ const requiredQualityWorkflow = [
   '  contents: read',
   'jobs:',
   '  quality:',
+  '    name: quality (24.x)',
   '    runs-on: ubuntu-latest',
   '    # Generous cap so it only kills a genuinely hung run, not a slow-but-live',
   '    # one (the quality job runs the full suite + coverage and can take ~40min).',
   '    # Without this a hung run rides to the 6h GitHub default.',
   '    timeout-minutes: 60',
-  '    strategy:',
-  '      fail-fast: false',
-  '      matrix:',
-  "        node: ['24.x', '25.x']",
   '    steps:',
+  '      - name: Setup Node 24',
+  '        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020',
+  '        with:',
+  "          node-version: '24.x'",
+  '      - name: Enforce CI disk budget',
+  '        run: bash scripts/ci-disk-reclaim.sh',
   '      - name: Semantic quality (shadow)',
-  "        if: matrix.node == '24.x'",
   '        env:',
   '          SEMANTIC_RECEIPT: ${{ runner.temp }}/semantic-quality.json',
   '        run: |',
@@ -221,7 +228,16 @@ const requiredQualityWorkflow = [
   '          npm run guard:semantic-quality -- --mode shadow --base "$base" --receipt "$SEMANTIC_RECEIPT"',
   '          node -e \'const fs=require("fs"); const r=JSON.parse(fs.readFileSync(process.env.SEMANTIC_RECEIPT,"utf8")); process.stdout.write(`### Semantic quality (shadow)\\n\\nDecision: **${r.decision}**\\n\\nFindings: ${r.findings.length}\\n`)\' >> "$GITHUB_STEP_SUMMARY"',
   '      - name: Install test-integrity plugin',
-  '        run: install-test-integrity',
+  '        env:',
+  '          TEST_INTEGRITY_COMMIT: ea0b01a4e3d99dc58a9a475c57e22ee204b04a7c',
+  '        run: |',
+  '          mkdir -p "$plugin_dir" "$HOME/.ssh"',
+  '          git -C "$plugin_dir" fetch --depth 1 origin "$TEST_INTEGRITY_COMMIT"',
+  '          git -C "$plugin_dir" switch --detach FETCH_HEAD',
+  '          observed_commit="$(git -C "$plugin_dir" rev-parse HEAD)"',
+  '          if [ "$observed_commit" != "$TEST_INTEGRITY_COMMIT" ]; then',
+  '            exit 2',
+  '          fi',
   '      - name: Test integrity baseline check',
   '        run: npm run guard:test-integrity',
   '      - name: Install console dependencies',
@@ -251,6 +267,23 @@ const requiredQualityWorkflow = [
   '          path: |',
   '            tests/browser/__screenshots__',
   '            tests/browser-motion/__screenshots__',
+  '  compatibility:',
+  '    name: quality (25.x)',
+  '    runs-on: ubuntu-latest',
+  '    timeout-minutes: 40',
+  '    steps:',
+  '      - name: Setup Node 25',
+  '        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020',
+  '        with:',
+  "          node-version: '25.x'",
+  '      - name: Install dependencies',
+  '        run: npm ci',
+  '      - name: Install console dependencies',
+  '        run: npm --prefix console ci',
+  '      - name: Full compatibility test suite',
+  '        run: npm test -- --pool=forks',
+  '      - name: Console compatibility build',
+  '        run: npm --prefix console run build',
 ].join('\n');
 
 const requiredTagReleaseWorkflow = [
@@ -881,16 +914,75 @@ describe('safeguard diagnostics', () => {
       .toMatchObject({ status: 'fail', evidence: expect.arrayContaining([evidence]) });
   });
 
+  it.each([
+    {
+      name: 'renames the Node 25 required context',
+      mutate: (workflow: string) => workflow.replace('name: quality (25.x)', 'name: compatibility (25.x)'),
+      evidence: 'jobs.compatibility name must be exactly quality (25.x)',
+    },
+    {
+      name: 'duplicates coverage in the Node 25 lane',
+      mutate: (workflow: string) => workflow.replace(
+        '      - name: Full compatibility test suite',
+        '      - name: Compatibility coverage\n        run: npm run coverage:check -- --pool=forks\n      - name: Full compatibility test suite',
+      ),
+      evidence: 'quality (25.x) must not duplicate coverage:check',
+    },
+    {
+      name: 'makes the Node 25 lane advisory',
+      mutate: (workflow: string) => workflow.replace(
+        '    timeout-minutes: 40\n    steps:',
+        '    timeout-minutes: 40\n    continue-on-error: true\n    steps:',
+      ),
+      evidence: 'quality (25.x) compatibility job must be blocking',
+    },
+    {
+      name: 'conditions the Node 25 full suite',
+      mutate: (workflow: string) => workflow.replace(
+        '        run: npm test -- --pool=forks',
+        '        if: github.ref == \'refs/heads/main\'\n        run: npm test -- --pool=forks',
+      ),
+      evidence: 'quality (25.x) required step must be unconditional and blocking: npm test -- --pool=forks',
+    },
+    {
+      name: 'floats the Test Integrity revision',
+      mutate: (workflow: string) => workflow.replace(
+        'TEST_INTEGRITY_COMMIT: ea0b01a4e3d99dc58a9a475c57e22ee204b04a7c',
+        'TEST_INTEGRITY_COMMIT: main',
+      ),
+      evidence: 'Test Integrity commit pin must match the reviewed 40-hex object',
+    },
+    {
+      name: 'restores masked unconditional disk cleanup',
+      mutate: (workflow: string) => workflow.replace(
+        '        run: bash scripts/ci-disk-reclaim.sh',
+        '        run: sudo rm -rf /usr/share/dotnet || true',
+      ),
+      evidence: 'quality workflow must not retain masked unconditional disk cleanup',
+    },
+  ])('fails when Quality $name', ({ mutate, evidence }) => {
+    const workflow = requiredFiles['.github/workflows/quality.yml'];
+    const mutated = mutate(workflow);
+    expect(mutated).not.toBe(workflow);
+    const fixture = makeRepo({ files: { '.github/workflows/quality.yml': mutated } });
+    const result = checkSafeguards(fixture);
+
+    expect(result.ok).toBe(false);
+    expect(result.checks.find((check) => check.id === 'quality-ci-lane-partition'))
+      .toMatchObject({ status: 'fail', evidence: expect.arrayContaining([evidence]) });
+  });
+
   it('fails when the quality job loses its bounded timeout', () => {
     const workflow = requiredFiles['.github/workflows/quality.yml'];
     const mutated = workflow.replace(qualityCiJobTimeoutBlock, [
       'quality:',
+      '    name: quality (24.x)',
       '    runs-on: ubuntu-latest',
       '    # Generous cap so it only kills a genuinely hung run, not a slow-but-live',
       '    # one (the quality job runs the full suite + coverage and can take ~40min).',
       '    # Without this a hung run rides to the 6h GitHub default.',
       '    timeout-minutes: 360',
-      '    strategy:',
+      '    steps:',
     ].join('\n'));
     expect(mutated).not.toBe(workflow);
     const fixture = makeRepo({
@@ -923,8 +1015,8 @@ describe('safeguard diagnostics', () => {
   it('accepts explicit false advisory settings on the quality job and bounded step', () => {
     const workflow = requiredFiles['.github/workflows/quality.yml'];
     const jobExplicit = workflow.replace(
-      "        node: ['24.x', '25.x']\n    steps:",
-      "        node: ['24.x', '25.x']\n    continue-on-error: false\n    steps:",
+      '    timeout-minutes: 60\n    steps:',
+      '    timeout-minutes: 60\n    continue-on-error: false\n    steps:',
     );
     expect(jobExplicit).not.toBe(workflow);
     const mutated = jobExplicit.replace(
@@ -1035,8 +1127,8 @@ describe('safeguard diagnostics', () => {
   it('fails when quoted YAML makes the quality job advisory', () => {
     const workflow = requiredFiles['.github/workflows/quality.yml'];
     const mutated = workflow.replace(
-      "        node: ['24.x', '25.x']\n    steps:",
-      "        node: ['24.x', '25.x']\n    \"continue-on-error\": true\n    steps:",
+      '    timeout-minutes: 60\n    steps:',
+      '    timeout-minutes: 60\n    "continue-on-error": true\n    steps:',
     );
     expect(mutated).not.toBe(workflow);
     const fixture = makeRepo({ files: { '.github/workflows/quality.yml': mutated } });
@@ -1073,8 +1165,8 @@ describe('safeguard diagnostics', () => {
   it('fails when the browser retry reintroduces Playwright system-dependency installation', () => {
     const workflow = requiredFiles['.github/workflows/quality.yml'];
     const mutated = workflow.replace(
-      'timeout 300 npx playwright install chromium',
-      'timeout 300 npx playwright install chromium --with-deps',
+      '"$TIMEOUT_BIN" 300 npx playwright install chromium',
+      '"$TIMEOUT_BIN" 300 npx playwright install chromium --with-deps',
     );
     expect(mutated).not.toBe(workflow);
     const fixture = makeRepo({ files: { '.github/workflows/quality.yml': mutated } });
@@ -1113,12 +1205,12 @@ describe('safeguard diagnostics', () => {
 
   it('fails when quality-job run defaults can suppress command execution', () => {
     const workflow = requiredFiles['.github/workflows/quality.yml'];
-    const mutated = workflow.replace('    timeout-minutes: 60\n    strategy:', [
+    const mutated = workflow.replace('    timeout-minutes: 60\n    steps:', [
       '    timeout-minutes: 60',
       '    defaults:',
       '      run:',
       '        shell: bash -n {0}',
-      '    strategy:',
+      '    steps:',
     ].join('\n'));
     expect(mutated).not.toBe(workflow);
     const fixture = makeRepo({ files: { '.github/workflows/quality.yml': mutated } });
@@ -1185,7 +1277,10 @@ describe('safeguard diagnostics', () => {
 
   it('fails when the quality workflow uses an unsupported merge key', () => {
     const workflow = requiredFiles['.github/workflows/quality.yml'];
-    const mutated = workflow.replace('  quality:\n    runs-on:', '  quality:\n    <<: {}\n    runs-on:');
+    const mutated = workflow.replace(
+      '  quality:\n    name: quality (24.x)',
+      '  quality:\n    <<: {}\n    name: quality (24.x)',
+    );
     expect(mutated).not.toBe(workflow);
     const fixture = makeRepo({ files: { '.github/workflows/quality.yml': mutated } });
     const result = checkSafeguards(fixture);
@@ -1201,8 +1296,8 @@ describe('safeguard diagnostics', () => {
   it('fails when the browser retry only echoes the required install command', () => {
     const workflow = requiredFiles['.github/workflows/quality.yml'];
     const mutated = workflow.replace(
-      'if timeout 300 npx playwright install chromium; then',
-      'if echo "timeout 300 npx playwright install chromium"; then',
+      'if "$TIMEOUT_BIN" 300 npx playwright install chromium; then',
+      'if echo "$TIMEOUT_BIN" 300 npx playwright install chromium; then',
     );
     expect(mutated).not.toBe(workflow);
     const fixture = makeRepo({ files: { '.github/workflows/quality.yml': mutated } });
@@ -1221,8 +1316,8 @@ describe('safeguard diagnostics', () => {
   it('fails when the quality job becomes advisory', () => {
     const workflow = requiredFiles['.github/workflows/quality.yml'];
     const mutated = workflow.replace(
-      "        node: ['24.x', '25.x']\n    steps:",
-      "        node: ['24.x', '25.x']\n    continue-on-error: true\n    steps:",
+      '    timeout-minutes: 60\n    steps:',
+      '    timeout-minutes: 60\n    continue-on-error: true\n    steps:',
     );
     expect(mutated).not.toBe(workflow);
     const fixture = makeRepo({
@@ -1243,8 +1338,8 @@ describe('safeguard diagnostics', () => {
   it('fails when the quality job becomes conditional', () => {
     const workflow = requiredFiles['.github/workflows/quality.yml'];
     const mutated = workflow.replace(
-      "        node: ['24.x', '25.x']\n    steps:",
-      "        node: ['24.x', '25.x']\n    if: github.ref == 'refs/heads/main'\n    steps:",
+      '    timeout-minutes: 60\n    steps:',
+      "    timeout-minutes: 60\n    if: github.ref == 'refs/heads/main'\n    steps:",
     );
     expect(mutated).not.toBe(workflow);
     const fixture = makeRepo({ files: { '.github/workflows/quality.yml': mutated } });
@@ -1261,8 +1356,8 @@ describe('safeguard diagnostics', () => {
   it('fails when a later quality-job timeout overrides the bounded timeout', () => {
     const workflow = requiredFiles['.github/workflows/quality.yml'];
     const mutated = workflow.replace(
-      "        node: ['24.x', '25.x']\n    steps:",
-      "        node: ['24.x', '25.x']\n    timeout-minutes: 360\n    steps:",
+      '    timeout-minutes: 60\n    steps:',
+      '    timeout-minutes: 60\n    timeout-minutes: 360\n    steps:',
     );
     expect(mutated).not.toBe(workflow);
     const fixture = makeRepo({ files: { '.github/workflows/quality.yml': mutated } });

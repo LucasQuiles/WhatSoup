@@ -1006,10 +1006,13 @@ describe('fresh-spawn context preamble (P4 — effect-free by construction)', ()
     // only at the provider boundary.
     expect(state.currentTurnReplayText).toBeNull();
     expect(mockSession.sendTurn).toHaveBeenCalledTimes(1);
-    const sent = (vi.mocked(mockSession.sendTurn).mock.calls[0] as unknown as [string])[0];
-    expect(sent).toMatch(/^\[Recent chat context — read before responding\]\n/);
-    expect(sent).toContain('earlier message one');
-    expect(sent).toMatch(/\n\n\[Current message\]\nContinue$/);
+    const sent = (vi.mocked(mockSession.sendTurn).mock.calls[0] as unknown as [{
+      applicationContext: string[];
+      userText: string;
+    }])[0];
+    expect(sent.applicationContext[0]).toMatch(/^\[Recent chat context — read before responding\]\n/);
+    expect(sent.applicationContext[0]).toContain('earlier message one');
+    expect(sent.userText).toBe('Continue');
   });
 
   it('sends the plain user text when no recent history exists', async () => {

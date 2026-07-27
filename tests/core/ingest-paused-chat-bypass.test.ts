@@ -121,6 +121,7 @@ function makeIngest(opts?: { durability?: Record<string, unknown> }) {
 function makeDurability() {
   return {
     journalInbound: vi.fn().mockReturnValue(42),
+    getInboundReceivedAtUnixSeconds: vi.fn().mockReturnValue(1_780_000_000),
     markInboundSkipped: vi.fn(),
     markInboundFailed: vi.fn(),
     matchEcho: vi.fn(),

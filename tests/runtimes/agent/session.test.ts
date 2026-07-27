@@ -452,6 +452,30 @@ describe('SessionManager', () => {
     });
   });
 
+  it('serializes runtime context and user text as distinct stream-json blocks', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const sm = new SessionManager({ db, messenger, chatJid: CHAT_JID, onEvent: vi.fn() });
+    await sm.spawnSession();
+
+    await sm.sendTurn({
+      applicationContext: ['receipt=2026-05-28T20:26:40.000Z age=95'],
+      userText: 'stop that flow now',
+    });
+
+    const written = (mockChild.stdin.write as ReturnType<typeof vi.fn>).mock.calls[0][0] as string;
+    expect(JSON.parse(written.trim())).toEqual({
+      type: 'user',
+      message: {
+        role: 'user',
+        content: [
+          { type: 'text', text: 'receipt=2026-05-28T20:26:40.000Z age=95' },
+          { type: 'text', text: 'stop that flow now' },
+        ],
+      },
+    });
+  });
+
   it('rejects a second provider request until the accepted terminal result clears the first owner', async () => {
     const db = makeDb();
     const { messenger } = makeMessenger();
@@ -2604,6 +2628,47 @@ describe('Event-driven provider ready signal', () => {
     );
   });
 
+  it('Codex turn/start keeps runtime context separate from the user input item', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const sm = new SessionManager({
+      db,
+      messenger,
+      chatJid: CHAT_JID,
+      provider: 'codex-cli',
+      onEvent: vi.fn(),
+    });
+    await sm.spawnSession();
+    const threadStartRequest = (mockChild.stdin.write as ReturnType<typeof vi.fn>).mock.calls
+      .map((call) => JSON.parse(String(call[0]).trim()))
+      .find((value) => value.method === 'thread/start');
+    (mockChild.stdin.write as ReturnType<typeof vi.fn>).mockClear();
+
+    const sendPromise = sm.sendTurn({
+      applicationContext: ['receipt=2026-05-28T20:26:40.000Z age=95'],
+      userText: 'stop that flow now',
+    });
+    mockChild.stdout.emit('data', Buffer.from(`${JSON.stringify({
+      jsonrpc: '2.0',
+      id: threadStartRequest.id,
+      result: { id: 'thread_structured' },
+    })}\n`));
+    await sendPromise;
+
+    const wire = (mockChild.stdin.write as ReturnType<typeof vi.fn>).mock.calls
+      .map((call) => String(call[0]))
+      .find((value) => value.includes('"method":"turn/start"'));
+    expect(JSON.parse(wire!)).toMatchObject({
+      params: {
+        threadId: 'thread_structured',
+        input: [
+          { type: 'text', text: 'receipt=2026-05-28T20:26:40.000Z age=95' },
+          { type: 'text', text: 'stop that flow now' },
+        ],
+      },
+    });
+  });
+
   it('Codex sendTurn times out with clear error if init never fires', async () => {
     const db = makeDb();
     const { messenger } = makeMessenger();
@@ -4412,6 +4477,30 @@ describe('opencode-cli session resume via sessionId', () => {
 
     const secondSpawnArgs: string[] = (spawn as ReturnType<typeof vi.fn>).mock.calls.at(-1)?.[1] ?? [];
     expect(secondSpawnArgs).not.toContain('--session');
+  });
+
+  it('places runtime application context before the separately labeled user message', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const sm = new SessionManager({
+      db, messenger, chatJid: CHAT_JID, onEvent: vi.fn(),
+      provider: 'opencode-cli',
+      model: 'glm/test-model',
+    });
+
+    await sm.spawnSession();
+    const turnChild = makeMockChild(22222);
+    (spawn as ReturnType<typeof vi.fn>).mockReturnValue(turnChild);
+    await sm.sendTurn({
+      applicationContext: ['receipt=2026-05-28T20:26:40.000Z age=95'],
+      userText: 'stop that flow now',
+    });
+
+    const args: string[] = (spawn as ReturnType<typeof vi.fn>).mock.calls.at(-1)?.[1] ?? [];
+    const prompt = args.at(-1) ?? '';
+    expect(prompt).toContain('Application context (runtime-provided):\nreceipt=2026-05-28T20:26:40.000Z age=95');
+    expect(prompt).toContain('User message:\nstop that flow now');
+    expect(prompt.indexOf('Application context')).toBeLessThan(prompt.indexOf('User message:'));
   });
 
   it('opencode-cli includes model -m when model is set and no custom baseUrl', async () => {

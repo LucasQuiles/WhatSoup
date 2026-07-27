@@ -86,6 +86,7 @@ function context(inboundSeq: number, logicalTurnId: string): RuntimeTurnContext 
     },
     replay: {
       sourceMessageId: `wamid-${logicalTurnId}`,
+      receivedAtUnixSeconds: 1_780_000_000,
       replaySafe: true,
       senderJid: '15550180002@s.whatsapp.net',
       senderName: null,
@@ -100,6 +101,7 @@ function context(inboundSeq: number, logicalTurnId: string): RuntimeTurnContext 
 function turn(runtimeContext: RuntimeTurnContext): QueuedTurn {
   return {
     sourceMessageId: runtimeContext.replay.sourceMessageId,
+    receivedAtUnixSeconds: runtimeContext.replay.receivedAtUnixSeconds,
     conversationKey: runtimeContext.identity.conversationKey,
     chatJid: runtimeContext.identity.deliveryJid,
     senderJid: runtimeContext.replay.senderJid,

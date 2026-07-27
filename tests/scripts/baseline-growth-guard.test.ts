@@ -130,6 +130,26 @@ describe('baseline growth guard — the red proof', () => {
     expect(status, out).toBe(0);
   });
 
+  it('BLOCKS constant-count replacement of a baseline identity', () => {
+    const dir = makeRepo(1);
+    const replacement = [{
+      file: 'src/core/replacement.ts',
+      line: 99,
+      specifier: '../runtimes/types.ts',
+      fromLayer: 'core',
+      toLayer: 'runtimes',
+    }];
+    writeFileSync(
+      join(dir, '.claude/fitness/boundary-baseline.json'),
+      `${JSON.stringify(replacement, null, 2)}\n`,
+    );
+
+    const { status, out } = runGuard(['--repo', dir, '--base', 'HEAD']);
+    expect(status, out).toBe(1);
+    expect(out).toMatch(/boundary-baseline\.json/);
+    expect(out).toMatch(/new|identity|subset/i);
+  });
+
   it('is INCONCLUSIVE (exit 2), never a pass, when the baseline becomes unparseable', () => {
     // A truncated/corrupt baseline weighs as nothing. Since shrinking is allowed, treating
     // an unweighable document as 0 would sail through as an improvement.
@@ -188,6 +208,32 @@ describe('baseline growth guard — the red proof', () => {
     const { status, out } = runGuard(['--repoo', '/tmp']);
     expect(status).toBe(2);
     expect(out).toMatch(/Unknown argument/);
+  });
+
+  it('BLOCKS an introduced baseline above its audited initial ceiling', () => {
+    const dir = makeRepo(2);
+    mkdirSync(join(dir, 'eslint-rules'), { recursive: true });
+    writeFileSync(
+      join(dir, 'eslint-rules/catch-ratchet-baseline.json'),
+      JSON.stringify(Array.from({ length: 128 }, (_, index) => `entry-${index}`)),
+    );
+
+    const { status, out } = runGuard(['--repo', dir, '--base', 'HEAD']);
+    expect(status, out).toBe(1);
+    expect(out).toMatch(/catch-ratchet-baseline\.json/);
+    expect(out).toMatch(/127 -> 128/);
+  });
+
+  it('permits an introduced baseline at or below its audited initial ceiling', () => {
+    const dir = makeRepo(2);
+    mkdirSync(join(dir, 'eslint-rules'), { recursive: true });
+    writeFileSync(
+      join(dir, 'eslint-rules/catch-ratchet-baseline.json'),
+      JSON.stringify(Array.from({ length: 127 }, (_, index) => `entry-${index}`)),
+    );
+
+    const { status, out } = runGuard(['--repo', dir, '--base', 'HEAD']);
+    expect(status, out).toBe(0);
   });
 });
 

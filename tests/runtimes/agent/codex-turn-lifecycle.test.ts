@@ -370,6 +370,7 @@ function runtimeContext(
     },
     replay: {
       sourceMessageId: `wamid-${inboundSeq}`,
+      receivedAtUnixSeconds: 1_780_000_000,
       replaySafe: true,
       senderJid: '1234@s.whatsapp.net',
       senderName: 'Test User',

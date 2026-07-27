@@ -694,6 +694,36 @@ Contact dev@example.net for help.
     expect(personalIssues.map((issue) => issue.code)).toEqual(['personal-email']);
   });
 
+  it('allows the exact GitHub SSH transport principal while preserving mailbox detection', () => {
+    const sshPrincipal = ['git', 'github.com'].join('@');
+    const sshIssues = scanAddedLines([
+      {
+        filePath: '.github/workflows/quality.yml',
+        line: 1,
+        text: `git remote add origin ${sshPrincipal}:LucasQuiles/test-integrity.git`,
+      },
+    ]);
+    const githubMailbox = ['operator', 'github.com'].join('@');
+    const githubMailboxIssues = scanAddedLines([
+      {
+        filePath: '.github/workflows/quality.yml',
+        line: 2,
+        text: `contact ${githubMailbox}`,
+      },
+    ]);
+    const mixedIssues = scanAddedLines([
+      {
+        filePath: '.github/workflows/quality.yml',
+        line: 3,
+        text: `${sshPrincipal}:LucasQuiles/test-integrity.git contact ${githubMailbox}`,
+      },
+    ]);
+
+    expect(sshIssues).toEqual([]);
+    expect(githubMailboxIssues.map((issue) => issue.code)).toEqual(['personal-email']);
+    expect(mixedIssues.map((issue) => issue.code)).toEqual(['personal-email']);
+  });
+
   it('allows synthetic group JIDs in commit messages while blocking real-shaped ones', () => {
     const syntheticIssues = scanCommitMessage(`fix(guard): allow synthetic group examples
 
