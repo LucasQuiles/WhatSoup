@@ -251,7 +251,12 @@ export function recordContinuityGaps(
         } else {
           rollback?.run();
         }
-      } catch { /* best-effort rollback */ }
+      } catch (rollbackError) {
+        throw new AggregateError(
+          [error, rollbackError],
+          'Continuity gap recording failed and rollback did not complete',
+        );
+      }
     }
     throw error;
   }

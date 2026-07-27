@@ -189,4 +189,53 @@ describe('continuity gap ledger', () => {
     expect(() => readContinuityGapHealth(db.raw))
       .toThrow('continuity gap ledger contains malformed plan ownership');
   });
+
+  it('preserves both the write failure and a rollback failure', () => {
+    const value = observation(1, 'absent');
+    const identity = durableIdentity(value);
+    db.raw.prepare(`
+      INSERT INTO recovery_plans (plan_id, origin, actor, summary, evidence_ref)
+      VALUES (?, 'operator', 'continuity_manifest_recorder',
+              'Conflicting recovery contract', ?)
+    `).run(identity.planId, identity.evidenceRef);
+
+    const rollbackFailure = new Error('synthetic rollback failure');
+    const raw = new Proxy(db.raw, {
+      get(target, property) {
+        if (property === 'prepare') {
+          return (sql: string) => {
+            if (sql === 'ROLLBACK') {
+              return {
+                run() {
+                  throw rollbackFailure;
+                },
+              };
+            }
+            return target.prepare(sql);
+          };
+        }
+        const value = Reflect.get(target, property, target);
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    });
+
+    let thrown: unknown;
+    try {
+      recordContinuityGaps(raw, [value]);
+    } catch (error) {
+      thrown = error;
+    } finally {
+      db.raw.exec('ROLLBACK');
+    }
+
+    expect(thrown).toBeInstanceOf(AggregateError);
+    expect((thrown as AggregateError).message)
+      .toBe('Continuity gap recording failed and rollback did not complete');
+    expect((thrown as AggregateError).errors).toEqual([
+      expect.objectContaining({
+        message: 'Continuity gap plan conflicts with existing durable evidence',
+      }),
+      rollbackFailure,
+    ]);
+  });
 });
