@@ -330,18 +330,28 @@ describe('durable recovery evidence ordering', () => {
 
     expect(recover).toThrow('recovery finalization denied');
     const run = db.raw.prepare(`
-      SELECT completed_at, notes
+      SELECT completed_at, notes, error_kind, error_message
       FROM recovery_runs
       WHERE trigger = ?
       ORDER BY id DESC
       LIMIT 1
-    `).get(trigger) as { completed_at: string | null; notes: string | null };
+    `).get(trigger) as {
+      completed_at: string | null;
+      notes: string | null;
+      error_kind: string | null;
+      error_message: string | null;
+    };
     expect(run.completed_at).toBeNull();
     expect(JSON.parse(run.notes ?? 'null')).toEqual({
       status: 'incomplete',
       failedPhases: ['finalize_recovery_run'],
       openRecoveries: 0,
     });
+    // #1786 salvage (migration 46): the durable, queryable failure-context
+    // columns — error_kind = the failing phase, error_message = the error text.
+    // Distinct from the free-text notes JSON above.
+    expect(run.error_kind).toBe('finalize_recovery_run');
+    expect(run.error_message).toContain('recovery finalization denied');
   });
 
   it('starts the sweep plan/run before terminalization and uses its outer transaction', () => {
