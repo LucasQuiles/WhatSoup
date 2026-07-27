@@ -22,6 +22,7 @@
     "backfill-enrichment": "bash scripts/run-with-pinned-node.sh scripts/backfill-enrichment.ts",
     "token-window": "bash scripts/run-with-pinned-node.sh scripts/token-window.ts",
     "audit-continuity-manifest": "bash scripts/run-with-pinned-node.sh scripts/audit-continuity-manifest.ts",
+    "record-continuity-manifest": "bash scripts/run-with-pinned-node.sh scripts/record-continuity-manifest.ts",
     "close-recovery-catchup": "bash scripts/run-with-pinned-node.sh scripts/close-recovery-catchup.ts",
     "triage:issues": "bash scripts/run-with-pinned-node.sh scripts/open-issue-triage.ts",
     "guard:publication": "bash scripts/run-with-pinned-node.sh scripts/publication-guard.ts",
