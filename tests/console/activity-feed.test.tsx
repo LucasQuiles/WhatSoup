@@ -379,3 +379,87 @@ describe('ActivityFeed actions', () => {
     expect(screen.queryByRole('button', { name: 'Stop line-health instance' })).toBeNull()
   })
 })
+
+describe('ActivityFeed #2524 — display state cannot authorize mutations', () => {
+  // Reproduces the two deterministic falsifiers from #2524. Display state
+  // (filter, pause, error) must never be the source of restart/stop authority.
+  // Eligibility is derived from the complete live current-state observation
+  // only. All fixtures use reserved synthetic values; no live identity, path,
+  // credential, or topology detail is referenced.
+
+  it('a filter cannot resurrect restart/stop on a superseded incident (errors filter hides the recovery)', () => {
+    // Default view: an online recovery row supersedes an older logged-out row
+    // for the same instance. The resolved row correctly has no actions.
+    // Selecting the `errors` filter hides the recovery row from DISPLAY, but
+    // must NOT re-enable actions on the resolved incident — eligibility scans
+    // the complete live observation, not the filtered presentation.
+    renderFeed([
+      event({
+        time: '2026-06-14T12:00:01.000Z',
+        instance: 'line-synthetic-resurrect',
+        isError: true,
+        detail: { type: 'connection', statusCode: 428, reason: 'connectionLost' },
+      }),
+      event({
+        time: '2026-06-14T12:00:02.000Z',
+        instance: 'line-synthetic-resurrect',
+        detail: { type: 'connection', state: 'connected' },
+      }),
+    ])
+
+    // Default view: recovery supersedes the incident — no actions.
+    expect(screen.queryByRole('button', { name: 'Restart line-synthetic-resurrect' })).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Stop line-synthetic-resurrect instance' })).toBeNull()
+
+    // Selecting the errors filter hides the recovery row from the display list
+    // but MUST NOT re-enable actions on the superseded incident.
+    fireEvent.click(filterPill('errors'))
+
+    // The superseding recovery is still authoritative for eligibility even
+    // though it is no longer rendered. The incident stays resolved.
+    expect(screen.queryByRole('button', { name: 'Restart line-synthetic-resurrect' })).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Stop line-synthetic-resurrect instance' })).toBeNull()
+  })
+
+  it('pausing the feed disables destructive actions (frozen history is not current state)', () => {
+    // A critical health row would normally authorize restart/stop. After
+    // pausing, the feed is a frozen historical snapshot — not a current
+    // observation — and must not remain a live control surface.
+    renderFeed([
+      event({
+        instance: 'line-synthetic-pause',
+        isError: true,
+        detail: { type: 'connection', statusCode: 428, reason: 'connectionLost' },
+      }),
+    ])
+
+    // Before pause: the incident is actionable.
+    expect(screen.getByRole('button', { name: 'Restart line-synthetic-pause' })).toBeDefined()
+    expect(screen.getByRole('button', { name: 'Stop line-synthetic-pause instance' })).toBeDefined()
+
+    // Pause freezes the view. Destructive actions must be disabled because the
+    // source observation is intentionally no longer current.
+    fireEvent.click(screen.getByRole('button', { name: 'pause' }))
+
+    expect(screen.queryByRole('button', { name: 'Restart line-synthetic-pause' })).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Stop line-synthetic-pause instance' })).toBeNull()
+
+    // Resuming restores live eligibility.
+    fireEvent.click(screen.getByRole('button', { name: 'resume' }))
+    expect(screen.getByRole('button', { name: 'Restart line-synthetic-pause' })).toBeDefined()
+    expect(screen.getByRole('button', { name: 'Stop line-synthetic-pause instance' })).toBeDefined()
+  })
+
+  it('an unavailable feed (error state) exposes no mutations', () => {
+    // When the feed itself is unavailable, there is no current observation and
+    // no actions can be authorized. The eligibility set must be empty.
+    render(
+      <ToastContext.Provider value={toastValue()}>
+        <ActivityFeed events={[]} error="synthetic feed unavailable" />
+      </ToastContext.Provider>,
+    )
+
+    expect(screen.queryByRole('button', { name: /^Restart / })).toBeNull()
+    expect(screen.queryByRole('button', { name: /^Stop .* instance$/ })).toBeNull()
+  })
+})
