@@ -47,17 +47,17 @@ function countLines(absolutePath: string): number {
 }
 
 const REQUIRED_BUMP_HINT =
-  'consider docs/architecture/fitness-taxonomy.md twin-handler slicing before bumping runtime.ts';
+  'see "Growing past a ceiling" in docs/architecture/fitness-taxonomy.md: extract pure code ' +
+  'out of the file to create headroom (precedents 0af939b95, PR #2563)';
 
 function ceilingBumpMessage(measurement: FileSizeMeasurement, actualLines: number): string {
   return [
     `${measurement.filePath} grew to ${actualLines} lines, exceeding the recorded ceiling of ` +
       `${measurement.maxLines} in .claude/fitness/baseline.json.`,
-    'To bump this ceiling intentionally, edit BOTH twins together:',
-    '  1. .claude/fitness/baseline.json -- set the "lines" and "maxLines" fields for this' +
-      ' measurement to the freshly measured wc -l count.',
-    '  2. docs/architecture/fitness-taxonomy.md -- update the Ratchet Baseline table entry to match.',
-    `Before bumping, ${REQUIRED_BUMP_HINT}.`,
+    'Raising the ceiling is blocked: guard:baseline-growth refuses any baseline increase ' +
+      '(a baseline may only shrink).',
+    `To land this change, ${REQUIRED_BUMP_HINT}.`,
+    'If widening is genuinely unavoidable, land it as its own reviewed change that says why.',
   ].join('\n');
 }
 
@@ -144,8 +144,8 @@ function collectOverBudget(
   return overBudget;
 }
 
-// Enumerates the full set of over-ceiling files (each with the two-twin bump
-// ceremony) so the single failing assertion documents every violation, not
+// Enumerates the full set of over-ceiling files (each with the extraction
+// remediation) so the single failing assertion documents every violation, not
 // just the first.
 function formatOverBudgetFailure(overBudget: OverBudgetEntry[]): string {
   return [
@@ -171,9 +171,12 @@ describe('arch.file-size warning budget', () => {
     // durable headroom without masking a genuine hang.
   }, 300_000);
 
-  it('the ceiling-bump failure message documents the two-twin bump ceremony', () => {
+  it('the over-ceiling failure message documents the extraction remediation, not a bump', () => {
     // This pins requirement wording so the remediation text stays intact even
-    // if the growth-ceiling assertion below never fails in CI.
+    // if the growth-ceiling assertion below never fails in CI. The message must
+    // agree with guard:baseline-growth: ceilings cannot be raised, so it must
+    // point at extraction and must NOT resurrect the retired two-twin bump
+    // ceremony (the doc-contradicts-guard defect filed in PR #2563).
     const message = ceilingBumpMessage(
       { filePath: 'src/runtimes/agent/runtime.ts', lines: 1, maxLines: 1 },
       2,
@@ -181,7 +184,9 @@ describe('arch.file-size warning budget', () => {
 
     expect(message).toContain('.claude/fitness/baseline.json');
     expect(message).toContain('docs/architecture/fitness-taxonomy.md');
+    expect(message).toContain('guard:baseline-growth');
     expect(message).toContain(REQUIRED_BUMP_HINT);
+    expect(message).not.toContain('edit BOTH twins');
   });
 
   it('grandfathered arch.file-size files must not grow past their recorded ceiling', () => {
