@@ -122,6 +122,7 @@ function crashOneSourceTurn(
   const finalResult: TurnTerminalResult = { ...result, deliveryEvidence: { kind: 'enqueued', opId: deliveryOpId } };
   const envelope: TurnRecoveryReplayEnvelope = {
     sourceMessageId: `wamid-live-${suffix}`,
+    receivedAtUnixSeconds: 1_780_000_000,
     replaySafe: true,
     senderJid: '15550100002:9@s.whatsapp.net',
     senderName: 'Live Wiring Sender',
@@ -362,7 +363,9 @@ describe('AgentRuntime.dispatchTurnRecoveryReplay — live wiring (PRESTAGE-T4 P
     };
     const OWNER2: RecoveryOwnerIdentity = { logicalTurnId: 'live-wiring-j2-owner', managerId: 'manager-j2', generation: 1 };
     const j2Envelope: TurnRecoveryReplayEnvelope = {
-      sourceMessageId: 'wamid-live-j-defers', replaySafe: true,
+      sourceMessageId: 'wamid-live-j-defers',
+      receivedAtUnixSeconds: 1_780_000_000,
+      replaySafe: true,
       senderJid: '15550100002:9@s.whatsapp.net', senderName: 'Live Wiring Sender',
       text: 'Live wiring replay text', isGroup: false,
     };

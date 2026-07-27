@@ -6,6 +6,15 @@ set -e
 # the commit object is written. Self-contained — see .husky/check-commit-identity.sh.
 ./.husky/check-commit-identity.sh
 
+# Estate awareness is unconditional but warn-only at commit time. Pre-push runs
+# the same scanner fail-closed against the machine-local conflict ratchet.
+if ! npm run guard:git-estate -- guard --phase pre-commit; then
+  echo "git estate scan was inconclusive (warn-only); pre-push will require a complete scan" >&2
+fi
+if ! bash scripts/run-with-pinned-node.sh scripts/agent-lease.ts status; then
+  echo "agent writer lease is stale or malformed (warn-only); pre-push will require valid lease state" >&2
+fi
+
 npm run guard:repo:staged
 
 # Sub-second deterministic guards — no console deps required, always run.
@@ -48,7 +57,6 @@ if [ -z "$WHATSOUP_SKIP_DRIFT_WARN" ] && \
     fi
   }
   printf '── architectural-drift check (warn-only) ──\n' >&2
-  drift_warn guard:node-pin-consistency 'node-pin'
   drift_warn guard:boundaries 'ring-boundary'
   drift_warn guard:lint:src 'fitness/emitter'
 fi

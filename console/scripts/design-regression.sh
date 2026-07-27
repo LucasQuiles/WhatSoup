@@ -418,7 +418,14 @@ fi
 check_start "15" "Lint-suppression waiver registry sync"
 WAIVER_SYNC_OUTPUT=$(node "$CONSOLE_DIR/scripts/check-waiver-sync.mjs" 2>&1)
 WAIVER_SYNC_STATUS=$?
-C15_COUNT=$(printf '%s' "$WAIVER_SYNC_OUTPUT" | node -e 'const fs=require("fs"); try { const o=JSON.parse(fs.readFileSync(0,"utf8")); console.log(o.issue_count ?? 1); } catch { console.log(1); }' 2>/dev/null || echo 1)
+# Emit with process.stdout.write(String(...)), NOT console.log(<number>): console.log
+# formats a non-string argument through util.inspect, which colourises numbers whenever
+# FORCE_COLOR is set — even when stdout is a pipe rather than a TTY. That yields
+# $'\033[33m0\033[39m' here, and the `[ "$C15_COUNT" -eq 0 ]` test below then dies with
+# "integer expected" and falls through to the FAIL branch, hard-blocking every push from
+# such a machine while reporting a waiver mismatch that does not exist. CI never set the
+# variable, so this only ever failed locally. See #2449.
+C15_COUNT=$(printf '%s' "$WAIVER_SYNC_OUTPUT" | node -e 'const fs=require("fs"); try { const o=JSON.parse(fs.readFileSync(0,"utf8")); process.stdout.write(String(o.issue_count ?? 1)); } catch { process.stdout.write("1"); }' 2>/dev/null || echo 1)
 C15_COUNT=${C15_COUNT:-1}
 WAIVER_SYNC_SUMMARY=$(printf '%s' "$WAIVER_SYNC_OUTPUT" | node -e '
 const fs = require("fs");

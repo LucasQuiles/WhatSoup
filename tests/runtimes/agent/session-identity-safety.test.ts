@@ -100,7 +100,7 @@ describe('SessionManager immutable checkpoint identity', () => {
     expect(durability.getResumableCheckpoints()).toEqual([]);
   });
 
-  it('suspends every shared checkpoint row by the exact provider session ID', async () => {
+  it('suspends only the current conversation checkpoint for a shared provider session ID', async () => {
     durability.upsertSessionCheckpoint('15550131', {
       sessionId: 'shared-provider-session',
       sessionStatus: 'active',
@@ -125,11 +125,11 @@ describe('SessionManager immutable checkpoint identity', () => {
     await sm.shutdown(true);
 
     expect(durability.getSessionCheckpoint('15550131')?.session_status).toBe('suspended');
-    expect(durability.getSessionCheckpoint('15550132')?.session_status).toBe('suspended');
+    expect(durability.getSessionCheckpoint('15550132')?.session_status).toBe('active');
     expect(durability.getSessionCheckpoint('15550133')?.session_status).toBe('active');
   });
 
-  it('ends resumed checkpoints by the attempted session ID before init arrives', async () => {
+  it('ends only the current conversation checkpoint for an attempted resume', async () => {
     durability.upsertSessionCheckpoint('15550141', {
       sessionId: 'resume-provider-session',
       sessionStatus: 'active',
@@ -150,10 +150,10 @@ describe('SessionManager immutable checkpoint identity', () => {
     await sm.shutdown(false);
 
     expect(durability.getSessionCheckpoint('15550141')?.session_status).toBe('ended');
-    expect(durability.getSessionCheckpoint('15550142')?.session_status).toBe('ended');
+    expect(durability.getSessionCheckpoint('15550142')?.session_status).toBe('active');
   });
 
-  it('orphans every shared checkpoint when a managed provider reports a crash', async () => {
+  it('orphans only the current conversation checkpoint when a managed provider reports a crash', async () => {
     const providerSessionId = 'managed-provider-session';
     durability.upsertSessionCheckpoint('15550151', {
       sessionId: providerSessionId,
@@ -183,7 +183,7 @@ describe('SessionManager immutable checkpoint identity', () => {
     capturedCrash({ exitCode: 1, signal: null, provider: 'openai-api' });
 
     expect(durability.getSessionCheckpoint('15550151')?.session_status).toBe('orphaned');
-    expect(durability.getSessionCheckpoint('15550152')?.session_status).toBe('orphaned');
+    expect(durability.getSessionCheckpoint('15550152')?.session_status).toBe('active');
 
     const rowId = sm.getDbRowId();
     if (rowId === null) throw new Error('managed provider session row was not created');
@@ -192,7 +192,7 @@ describe('SessionManager immutable checkpoint identity', () => {
     expect((db.raw.prepare('SELECT status FROM agent_sessions WHERE id = ?').get(rowId) as
       { status: string }).status).toBe('crashed');
     expect(durability.getSessionCheckpoint('15550151')?.session_status).toBe('orphaned');
-    expect(durability.getSessionCheckpoint('15550152')?.session_status).toBe('orphaned');
+    expect(durability.getSessionCheckpoint('15550152')?.session_status).toBe('active');
   });
 
   it('atomically orphans the pre-init lifecycle when managed initialization fails', async () => {

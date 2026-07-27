@@ -168,7 +168,7 @@ vi.mock('../../../src/core/messages.ts', () => ({
   getRecentMessages: vi.fn(() => []),
 }));
 
-type ActiveSessionRow = { id: number; session_id: string | null; chat_jid: string | null; claude_pid: number; status: string; started_at: string; last_message_at: string | null; message_count: number } | null;
+type ActiveSessionRow = { id: number; session_id: string | null; chat_jid: string | null; workspace_key?: string | null; claude_pid: number; status: string; started_at: string; last_message_at: string | null; message_count: number } | null;
 const { mockGetActiveSession } = vi.hoisted(() => {
   return { mockGetActiveSession: vi.fn(() => null as ActiveSessionRow) };
 });
@@ -860,6 +860,7 @@ function makeRuntimeTurnContext(
     },
     replay: {
       sourceMessageId: `wamid-${logicalTurnId}`,
+      receivedAtUnixSeconds: 1_780_000_000,
       replaySafe: true,
       senderJid: '15550009999@s.whatsapp.net',
       senderName: null,
@@ -6616,6 +6617,7 @@ describe('AgentRuntime', () => {
       },
       replay: {
         sourceMessageId: 'wamid-source-b',
+        receivedAtUnixSeconds: 1_780_000_000,
         replaySafe: true,
         senderJid: mapKey,
         senderName: null,
@@ -6935,10 +6937,13 @@ describe('AgentRuntime', () => {
     );
     // The single provider send carries the context preamble plus the user text.
     expect(mockSession.sendTurn).toHaveBeenCalledTimes(1);
-    const sent = (vi.mocked(mockSession.sendTurn).mock.calls[0] as unknown as [string])[0];
-    expect(sent).toMatch(/^\[Recent chat context — read before responding\]\n/);
-    expect(sent).toContain('earlier message');
-    expect(sent).toMatch(/\n\n\[Current message\]\nhello$/);
+    const sent = (vi.mocked(mockSession.sendTurn).mock.calls[0] as unknown as [{
+      applicationContext: string[];
+      userText: string;
+    }])[0];
+    expect(sent.applicationContext[0]).toMatch(/^\[Recent chat context — read before responding\]\n/);
+    expect(sent.applicationContext[0]).toContain('earlier message');
+    expect(sent.userText).toBe('hello');
 
     // Complete the (single) user turn so the queued test work does not outlive
     // this test.
@@ -8215,7 +8220,7 @@ describe('AgentRuntime', () => {
           chatQueues: 1,
           outboundQueues: 1,
           workspaceResources: 1,
-          fdCount: 3,
+          fdCount: process.platform === 'linux' ? 3 : null,
           memoryUsage: expect.objectContaining({
             rss: expect.any(Number),
             heapTotal: expect.any(Number),
@@ -8239,6 +8244,20 @@ describe('AgentRuntime', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  // @skip-env this assertion applies only where Linux /proc is unavailable.
+  it.runIf(process.platform !== 'linux')('does not probe Linux /proc for file descriptors on non-Linux hosts', () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const runtime = new AgentRuntime(db, messenger, 'test');
+    const getOpenFileDescriptorCount = (
+      runtime as unknown as { getOpenFileDescriptorCount: () => number | null }
+    ).getOpenFileDescriptorCount.bind(runtime);
+    mockReaddirSync.mockClear();
+
+    expect(getOpenFileDescriptorCount()).toBe(null);
+    expect(mockReaddirSync).not.toHaveBeenCalled();
   });
 
   it('shared sweepIdleQueues evicts idle outbound queues and shuts them down', () => {
@@ -8323,11 +8342,12 @@ describe('AgentRuntime', () => {
     expect(MockOutboundQueueCtor).toHaveBeenCalledWith(
       messenger,
       'recreated@s.whatsapp.net',
-      // T8-F1+F2: createOutboundQueue also injects the admin-peer + fallback
-      // callbacks (peerIsAdmin/fallbackActive) — asserted by identity below.
+      // createOutboundQueue injects exact admin/internal-peer audience
+      // predicates plus the fallback-window callback.
       {
         conversationKey: 'recreated',
         peerIsAdmin: expect.any(Function),
+        peerIsTrustedInternal: expect.any(Function),
         fallbackActive: expect.any(Function),
       },
     );
@@ -8358,6 +8378,7 @@ describe('AgentRuntime', () => {
       {
         conversationKey: 'mapped-phone',
         peerIsAdmin: expect.any(Function),
+        peerIsTrustedInternal: expect.any(Function),
         fallbackActive: expect.any(Function),
       },
     );
@@ -8391,6 +8412,7 @@ describe('AgentRuntime', () => {
         conversationKey: 'inherit',
         senderToken: priorToken,
         peerIsAdmin: expect.any(Function),
+        peerIsTrustedInternal: expect.any(Function),
         fallbackActive: expect.any(Function),
       },
     );
@@ -8972,12 +8994,12 @@ describe('AgentRuntime', () => {
       isGroup: true,
     }))).resolves.toBeUndefined();
 
-    expect(mockSession.sendTurn).toHaveBeenCalledWith(
-      expect.stringContaining('[Group: chat-timeout@g.us — Taylor]'),
-    );
-    expect(mockSession.sendTurn).toHaveBeenCalledWith(
-      expect.stringContaining('wake up'),
-    );
+    expect(mockSession.sendTurn).toHaveBeenCalledWith({
+      applicationContext: [
+        expect.stringContaining('"displayName":"Taylor"'),
+      ],
+      userText: 'wake up',
+    });
     expect(mockRuntimeLogger.warn).toHaveBeenCalledWith(
       expect.objectContaining({
         chatJid: 'chat-timeout@g.us',
@@ -9070,7 +9092,7 @@ describe('AgentRuntime', () => {
 
   // @check CHK-064
 // @traces REQ-012.AC-02
-  it('shared: DM turn prefixed with [DM from <name> (<phone>)]', async () => {
+  it('shared: DM metadata is application context and userText stays exact', async () => {
     const db = makeDb();
     const { messenger } = makeMessenger();
 
@@ -9086,17 +9108,17 @@ describe('AgentRuntime', () => {
       isGroup: false,
     }));
 
-    expect(mockSession.sendTurn).toHaveBeenCalledWith(
-      expect.stringContaining('[DM from Jason (15550100001)]'),
-    );
-    expect(mockSession.sendTurn).toHaveBeenCalledWith(
-      expect.stringContaining('test message'),
-    );
+    expect(mockSession.sendTurn).toHaveBeenCalledWith({
+      applicationContext: [
+        expect.stringContaining('"kind":"direct"'),
+      ],
+      userText: 'test message',
+    });
   });
 
   // @check CHK-064
 // @traces REQ-012.AC-02
-  it('shared: group turn prefixed with [Group: <chatJid> — <senderName>]', async () => {
+  it('shared: group metadata is application context and userText stays exact', async () => {
     const db = makeDb();
     const { messenger } = makeMessenger();
 
@@ -9112,12 +9134,12 @@ describe('AgentRuntime', () => {
       isGroup: true,
     }));
 
-    expect(mockSession.sendTurn).toHaveBeenCalledWith(
-      expect.stringContaining('[Group: the-group@g.us — Jason]'),
-    );
-    expect(mockSession.sendTurn).toHaveBeenCalledWith(
-      expect.stringContaining('group message'),
-    );
+    expect(mockSession.sendTurn).toHaveBeenCalledWith({
+      applicationContext: [
+        expect.stringContaining('"kind":"group"'),
+      ],
+      userText: 'group message',
+    });
   });
 
   // @check CHK-065
@@ -11660,14 +11682,16 @@ describe('AgentRuntime', () => {
       );
     });
 
-    it('stale session skipped — single mode, session older than 60 min', async () => {
+    it('retires only the exact stale lifecycle when another checkpoint shares its session ID', async () => {
       const db = makeDb();
       const { messenger } = makeMessenger();
+      const checkpointStatuses = new Map([['user', 'active'], ['other-user', 'active']]);
 
       mockGetActiveSession.mockReturnValue({
         id: 1,
         session_id: 'sess-stale',
         chat_jid: 'user@s.whatsapp.net',
+        workspace_key: 'user',
         claude_pid: 0,
         status: 'active',
         started_at: new Date(Date.now() - 120 * 60_000).toISOString(),
@@ -11687,7 +11711,13 @@ describe('AgentRuntime', () => {
           sessionId: 'sess-stale',
           updatedAt: new Date(Date.now() - 120 * 60_000).toISOString().replace('Z', ''),
         })),
-        retireSessionLifecycle: vi.fn(),
+        retireExactSessionLifecycle: vi.fn((params: { conversationKey: string }) => {
+          checkpointStatuses.set(params.conversationKey, 'ended');
+        }),
+        retireSessionLifecycle: vi.fn(() => {
+          checkpointStatuses.set('user', 'ended');
+          checkpointStatuses.set('other-user', 'ended');
+        }),
       };
       (runtime as unknown as { durability: unknown }).durability = mockDurability;
 
@@ -11695,11 +11725,18 @@ describe('AgentRuntime', () => {
 
       // Session too stale — should NOT spawn
       expect(mockSession.spawnSession).not.toHaveBeenCalled();
-      expect(mockDurability.retireSessionLifecycle).toHaveBeenCalledWith({
+      expect(mockDurability.retireExactSessionLifecycle).toHaveBeenCalledWith({
         agentSessionRowId: 1,
         provider: undefined,
         providerSessionId: 'sess-stale',
+        workspaceKey: 'user',
+        conversationKey: 'user',
       });
+      expect(mockDurability.retireSessionLifecycle).not.toHaveBeenCalled();
+      expect(checkpointStatuses).toEqual(new Map([
+        ['user', 'ended'],
+        ['other-user', 'active'],
+      ]));
     });
 
     it('shared mode group suppression — session spawned but no startup message', async () => {
@@ -16063,6 +16100,11 @@ describe('NL routing handlers (nlRouting flag)', () => {
 
   it('spawn fails OPEN to the default route when the pin-eligibility probe throws (R13)', async () => {
     const { runtime } = makeRoutingRuntime();
+    routingDb.raw
+      .prepare(`INSERT INTO chat_model_preference
+        (chat_jid, sender_jid, intent, requested_provider, scope, pin_strict, fallback_permitted, updated_at, expires_at)
+        VALUES (?, ?, 'provider_specific', 'codex-cli', 'sticky', 1, 0, ?, NULL)`)
+      .run(CHAT, SENDER_A, Date.now());
     // routablePinTargets does keyring I/O and was called OUTSIDE the pref-read
     // guard — a probe throw must degrade to the default route, never drop the turn.
     (runtime as unknown as { routablePinTargets: () => string[] }).routablePinTargets = () => {

@@ -150,6 +150,7 @@ interprocedural analysis; the rule does not claim to cover them.
 | `hygiene.no-wa-jid-literal-in-generic-ui` | mechanical | block | guard, ci | Block new WhatsApp JID literals (`@s.whatsapp.net`, `@g.us`) in generic UI/ops surfaces (console + deploy/scripts); existing occurrences ratchet-baselined. |
 | `hygiene.no-whatsapp-copy-in-generic-ui` | mechanical | block | guard, ci | Block new WhatsApp-presuming copy in generic console components; per-transport copy variants instead. |
 | `hygiene.no-health-whatsapp-key-read` | mechanical | block | guard, ci | Block new direct `health.whatsapp` key reads in console; reads go through the generic transport-health accessor with legacy fallback. |
+| `hygiene.catch-justification` | ast | warn | eslint | Flag catch blocks whose bodies only swallow/no-op unless they carry a reasoned justification; 127 inherited semantic identities are shrink-only ratchet debt. |
 
 ## Test
 
@@ -174,10 +175,11 @@ Current baseline measurements:
 
 | rule | path | lines | ceiling |
 |------|------|-------|---------|
-| `arch.file-size` | `src/runtimes/agent/runtime.ts` | 12131 | 12131 |
+| `arch.file-size` | `src/runtimes/agent/runtime.ts` | 12130 | 12500 |
 | `arch.file-size` | `tests/runtimes/agent/runtime.test.ts` | 16579 | 16579 |
 
-Intentional bump (both twins, per protocol): +105 lines in
+Historical bump (predates `guard:baseline-growth`; this path is now blocked — see
+"Growing past a ceiling" below): +105 lines in
 `src/runtimes/agent/runtime.ts` (12256 → 12361) for the D-4 v1.1 additions
 (boot-time `consumeQueuedPollDecisions` + the textFallback branch on
 `resolvePollDecisionFromConsole` — state-interleaved with the runtime's
@@ -192,18 +194,45 @@ ceiling — this blocks `coverage:check` and `verify:release` (both run the full
 past a grandfathered file's ceiling is no longer silently green. Shrinking below the ceiling never
 fails and never auto-lowers it; it only prints a non-blocking WARN suggesting a human lower it.
 
-### Bumping a ceiling (two-twin ceremony)
+### Growing past a ceiling (bumps are blocked; extract instead)
 
-A ceiling bump is a conscious, reviewed act, not an automatic side effect of a file growing. To bump
-one:
+Raising a ceiling is no longer an available routine procedure. `guard:baseline-growth`
+(`scripts/baseline-growth-guard.ts`, wired into `verify:push:branch`) weighs every registered
+baseline — including each `maxLines` ceiling in `.claude/fitness/baseline.json` — at the merge
+base and in the candidate, and **refuses any increase**: a baseline may only shrink. The
+two-twin bump ceremony this section used to describe is exactly the edit that guard blocks.
 
-1. Measure the file's real current line count on the branch that needs the bump (`wc -l <path>`).
-2. Edit **both** twins to that same number — a bump that touches only one is incomplete:
-   - `.claude/fitness/baseline.json` — update that measurement's `lines` and `maxLines`.
-   - This table — update the matching row.
-3. Before bumping, consider docs/architecture/fitness-taxonomy.md twin-handler slicing before bumping runtime.ts — i.e. whether the file can be split instead of grown further. This applies
-   most to `src/runtimes/agent/runtime.ts`, the largest grandfathered file and the original source
-   of this ratchet (see the rule's `source` evidence in the registry).
+When a change would push a grandfathered file past its ceiling:
+
+1. **Create headroom by extraction (the sanctioned path).** Move pure, self-contained code out
+   of the oversized file so the change fits under the unchanged ceiling. Precedents on
+   `src/runtimes/agent/runtime.ts`: `0af939b95` (runtime leaf collaborators, net −167) and
+   PR #2563 (`runtime-presentation.ts`, 7 pure module-level functions, net −65). Prove the
+   move is pure — moved bodies byte-identical modulo `export`, donor diff = deletions plus the
+   new import — and run the file's behavioral suite.
+2. **If widening is genuinely unavoidable**, the reviewed-widening path is machine-checkable
+   via a **growth waiver** (`.claude/fitness/growth-waivers.json`): first land a standalone
+   PR adding an issue-linked waiver entry — that PR *is* the review — then the widening PR
+   passes `guard:baseline-growth` mechanically. Waivers are fail-closed by construction:
+   the guard reads them from the **merge base only** (a PR can never author its own
+   authorization), `maxWeight` is an **absolute cap** (self-spending — once the widening
+   lands, the cap equals the base and authorizes nothing further), they **expire**
+   (`expiresAt`), only numeric weight growth is waivable (identity introductions never
+   are), and a malformed waiver document is INCONCLUSIVE, not ignored. A widening remains
+   an exceptional, standalone act — never a side effect of a feature branch.
+
+Shrinking below a ceiling never auto-lowers it (only a WARN suggests it). Lowering the ceiling
+to match a shrink is itself a conscious act: it permanently donates the freed headroom, so time
+it deliberately — e.g. don't lower immediately after an extraction made specifically to unwedge
+in-flight work.
+
+> **TEMPORARY ALLOWANCE (2026-07-27, owner-granted): `src/runtimes/agent/runtime.ts` ceiling
+> 12131 → 12500.** This is recorded debt, not room to grow. Granted via path 2 above (a
+> standalone reviewed widening) for the backlog-landing window: at grant time 12 open PRs
+> touched runtime.ts against 1 line of headroom. Payback is the #1977 decomposition program —
+> once the backlog lands and the file is decomposed, the ceiling returns below the original
+> 12131 and then ratchets down at each decomposition wave boundary. Retirement of this
+> allowance is tracked in issue #1977; it must not outlive the program.
 
 `arch.import-boundaries` grandfathered violations are tracked in `.claude/fitness/boundary-baseline.json`.
 Run `npm run guard:boundaries -- --report` to see the full edge list and `npm run guard:boundaries -- --baseline-save` to ratchet down after fixing violations.
@@ -272,7 +301,8 @@ reasons:
    and checked by `tests/scripts/fitness-file-size-warning-budget.test.ts`, which
    blocks `coverage:check` and `verify:release` on growth past a grandfathered
    file's recorded ceiling. See the Ratchet Baseline section above for the
-   current ceilings and the two-twin bump ceremony.
+   current ceilings and the extraction path for growing past one (bumps are
+   blocked by `guard:baseline-growth`).
 
 Because the ring is warn-only, the known violations are intentionally **not**
 baseline-suppressed here — they stay visible in the lint output. Local runs use

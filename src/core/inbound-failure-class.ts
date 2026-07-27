@@ -43,25 +43,29 @@ export type InboundFailureClass =
   | 'processor_throw'
   | 'unknown';
 
-export const INBOUND_FAILURE_CLASSES: ReadonlySet<string> = new Set<string>([
-  'provider_failure',
-  'transport_send_failed',
-  'transport_disconnected',
-  'timeout',
-  'db_error',
-  'session_crash',
-  'session_spawn_failed',
-  'crash_recovery',
-  'stale_reclaim',
-  'queue_full',
-  'queue_halted',
-  'queue_closed',
-  'pre_dispatch_error',
-  'scope_blocked_recovery',
-  'recovery_owner_reclaimed',
-  'processor_throw',
-  'unknown',
-]);
+const INBOUND_FAILURE_CLASS_PRESENCE: Readonly<Record<InboundFailureClass, true>> = {
+  provider_failure: true,
+  transport_send_failed: true,
+  transport_disconnected: true,
+  timeout: true,
+  db_error: true,
+  session_crash: true,
+  session_spawn_failed: true,
+  crash_recovery: true,
+  stale_reclaim: true,
+  queue_full: true,
+  queue_halted: true,
+  queue_closed: true,
+  pre_dispatch_error: true,
+  scope_blocked_recovery: true,
+  recovery_owner_reclaimed: true,
+  processor_throw: true,
+  unknown: true,
+};
+
+export const INBOUND_FAILURE_CLASSES: ReadonlySet<string> = new Set(
+  Object.keys(INBOUND_FAILURE_CLASS_PRESENCE),
+);
 
 /**
  * Distinct reasons an admitted turn can be rejected before dispatch (#1750).
@@ -77,13 +81,17 @@ export type AdmissionRejectClass =
   | 'pre_dispatch_error'
   | 'scope_blocked_recovery';
 
-export const ADMISSION_REJECT_CLASSES: ReadonlySet<string> = new Set<string>([
-  'queue_full',
-  'queue_halted',
-  'queue_closed',
-  'pre_dispatch_error',
-  'scope_blocked_recovery',
-]);
+const ADMISSION_REJECT_CLASS_PRESENCE: Readonly<Record<AdmissionRejectClass, true>> = {
+  queue_full: true,
+  queue_halted: true,
+  queue_closed: true,
+  pre_dispatch_error: true,
+  scope_blocked_recovery: true,
+};
+
+export const ADMISSION_REJECT_CLASSES: ReadonlySet<string> = new Set(
+  Object.keys(ADMISSION_REJECT_CLASS_PRESENCE),
+);
 
 /**
  * Shared lockstep mapping from an admission-rejection subclass (as carried on

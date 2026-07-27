@@ -55,6 +55,8 @@ export interface OutboundQueueOptions {
    * `db` and `config.adminPhones`, computes this.
    */
   readonly peerIsAdmin?: (chatJid: string) => boolean;
+  /** Exact authenticated internal-DM predicate injected by the runtime. */
+  readonly peerIsTrustedInternal?: (chatJid: string) => boolean;
 }
 
 interface MutableTurnDeliveryEvidence {
@@ -482,6 +484,7 @@ export class OutboundQueue implements IOutboundQueue {
   private readonly fallbackActiveFn: (() => boolean) | undefined;
   /** T8-F1: injected admin-peer resolver (see OutboundQueueOptions). */
   private readonly peerIsAdminFn: ((chatJid: string) => boolean) | undefined;
+  private readonly peerIsTrustedInternalFn: ((chatJid: string) => boolean) | undefined;
 
   constructor(
     messenger: Messenger,
@@ -501,6 +504,7 @@ export class OutboundQueue implements IOutboundQueue {
     this.senderToken = options?.senderToken ?? crypto.randomUUID();
     this.fallbackActiveFn = options?.fallbackActive;
     this.peerIsAdminFn = options?.peerIsAdmin;
+    this.peerIsTrustedInternalFn = options?.peerIsTrustedInternal;
   }
 
   /** The echo-guard token for this queue (QR-069: inherited by a replacement). */
@@ -766,10 +770,12 @@ export class OutboundQueue implements IOutboundQueue {
     // treated as active ⇒ full scrub) so an un-injected queue never silently
     // elevates.
     const isGroup = isGroupJid(attribution.chatJid);
-    const ctx = this.peerIsAdminFn
+    const ctx = this.peerIsAdminFn || this.peerIsTrustedInternalFn
       ? {
           isGroup,
-          peerIsAdmin: this.peerIsAdminFn(attribution.chatJid),
+          peerIsAdmin: this.peerIsAdminFn?.(attribution.chatJid) ?? false,
+          peerIsTrustedInternal:
+            this.peerIsTrustedInternalFn?.(attribution.chatJid) ?? false,
           fallbackActive: this.fallbackActiveFn ? this.fallbackActiveFn() : true,
         }
       : undefined;

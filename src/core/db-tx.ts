@@ -72,7 +72,7 @@ export function getTransactionRunner(db: Database): TransactionRunner {
         try {
           db.raw.exec(`ROLLBACK TO ${SAVEPOINT_NAME}`);
           db.raw.exec(`RELEASE ${SAVEPOINT_NAME}`);
-        } catch { /* best-effort unwind */ }
+        } catch { /* intentional: the savepoint unwind is best-effort and the original error is rethrown below */ }
         throw err;
       }
     }

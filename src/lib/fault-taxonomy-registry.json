@@ -1,5 +1,5 @@
 {
-  "schema": "whatsoup-fault-taxonomy-registry-v1",
+  "schema": "whatsoup-fault-taxonomy-registry-v2",
   "faultClasses": [
     {
       "id": "auth_terminal",
@@ -23,6 +23,194 @@
     "pairing_required",
     "serverside_logout_irreversible"
   ],
+  "failureDomains": {
+    "agentFailureClasses": {
+      "values": [
+        "provider_usage_limit",
+        "provider_rate_limit",
+        "provider_server_error",
+        "provider_context_overflow",
+        "provider_model_unavailable",
+        "provider_policy_block",
+        "provider_cli_crash",
+        "provider_timeout",
+        "provider_network_error",
+        "provider_silent_hang",
+        "provider_stream_corrupt",
+        "provider_auth_required",
+        "provider_binary_missing",
+        "provider_permission_denied",
+        "provider_state_locked",
+        "mcp_transport_failure",
+        "tool_handler_exception",
+        "config_or_capability_missing",
+        "provider_unknown"
+      ],
+      "owner": "src/runtimes/agent/failure-taxonomy.ts",
+      "test": "tests/core/failure-taxonomy-cross-contract.test.ts"
+    },
+    "providerFailureKinds": {
+      "values": [
+        "usage-limit",
+        "rate-limit",
+        "auth-required",
+        "model-unavailable",
+        "policy-block",
+        "context-overflow",
+        "server-error",
+        "transient-network"
+      ],
+      "owner": "src/runtimes/agent/failure-taxonomy.ts",
+      "test": "tests/core/failure-taxonomy-cross-contract.test.ts"
+    },
+    "turnCapabilityErrorClasses": {
+      "values": [
+        "usage-limit",
+        "rate-limit",
+        "auth-required",
+        "model-unavailable",
+        "policy-block",
+        "context-overflow",
+        "server-error",
+        "transient-network",
+        "unknown-terminal",
+        "empty-output"
+      ],
+      "owner": "src/runtimes/agent/turn-capability-tracker.ts",
+      "test": "tests/core/failure-taxonomy-cross-contract.test.ts"
+    },
+    "healthTurnErrorClasses": {
+      "values": [
+        "usage-limit",
+        "rate-limit",
+        "auth-required",
+        "model-unavailable",
+        "policy-block",
+        "context-overflow",
+        "server-error",
+        "transient-network",
+        "unknown-terminal",
+        "empty-output"
+      ],
+      "owner": "src/core/health.ts",
+      "test": "tests/core/failure-taxonomy-cross-contract.test.ts"
+    },
+    "healthDegradationCauses": {
+      "values": [
+        "provider_fallback_active",
+        "fallback_chain_exhausted",
+        "fallback_entry_failures",
+        "primary_model_unusable",
+        "model_unusable",
+        "turn_capability_error",
+        "primary_model_evidence_stale",
+        "turn_capability_evidence_stale",
+        "auth_bond_degraded",
+        "transport_disconnected",
+        "enrichment_stale",
+        "enrichment_runtime_degraded",
+        "connection_churn",
+        "outbound_flood",
+        "event_loop_starved",
+        "durability_debt",
+        "schema_future",
+        "schema_not_ready",
+        "pending_polls_unreadable",
+        "agent_recent_crashes",
+        "agent_session_inactive",
+        "turn_finalization_degraded",
+        "turn_recovery_degraded",
+        "provider_execution_pressure",
+        "agent_runtime_degraded_unclassified",
+        "agent_runtime_unhealthy",
+        "unclassified"
+      ],
+      "owner": "src/core/health.ts",
+      "test": "tests/core/failure-taxonomy-cross-contract.test.ts"
+    },
+    "terminalAttemptFailureClasses": {
+      "values": [
+        "usage-limit",
+        "rate-limit",
+        "auth-required",
+        "model-unavailable",
+        "policy-block",
+        "context-overflow",
+        "server-error",
+        "transient-network",
+        "crash",
+        "processor_throw",
+        "unknown_terminal",
+        "provider_stream_corrupt"
+      ],
+      "owner": "src/runtimes/agent/turn-terminal.ts",
+      "test": "tests/core/failure-taxonomy-cross-contract.test.ts"
+    },
+    "durableInboundFailureClasses": {
+      "values": [
+        "provider_failure",
+        "transport_send_failed",
+        "transport_disconnected",
+        "timeout",
+        "db_error",
+        "session_crash",
+        "session_spawn_failed",
+        "crash_recovery",
+        "stale_reclaim",
+        "queue_full",
+        "queue_halted",
+        "queue_closed",
+        "pre_dispatch_error",
+        "scope_blocked_recovery",
+        "recovery_owner_reclaimed",
+        "processor_throw",
+        "unknown"
+      ],
+      "owner": "src/core/inbound-failure-class.ts",
+      "test": "tests/core/failure-taxonomy-cross-contract.test.ts"
+    },
+    "admissionRejectClasses": {
+      "values": [
+        "queue_full",
+        "queue_halted",
+        "queue_closed",
+        "pre_dispatch_error",
+        "scope_blocked_recovery"
+      ],
+      "owner": "src/core/inbound-failure-class.ts",
+      "test": "tests/core/failure-taxonomy-cross-contract.test.ts"
+    },
+    "memoryOperationFailureCodes": {
+      "values": [
+        "none",
+        "breaker_open",
+        "project_guard_failed",
+        "auth_failed",
+        "rate_limited",
+        "timeout",
+        "network_error",
+        "invalid_request",
+        "provider_unavailable",
+        "unknown"
+      ],
+      "owner": "src/lib/memory-operation-telemetry.ts",
+      "test": "tests/runtimes/chat/memory/operation-telemetry.test.ts"
+    }
+  },
+  "terminalAttemptToInboundFailureClass": {
+    "usage-limit": "provider_failure",
+    "rate-limit": "provider_failure",
+    "auth-required": "provider_failure",
+    "model-unavailable": "provider_failure",
+    "policy-block": "provider_failure",
+    "context-overflow": "provider_failure",
+    "server-error": "provider_failure",
+    "transient-network": "provider_failure",
+    "crash": "session_crash",
+    "processor_throw": "processor_throw",
+    "unknown_terminal": "unknown",
+    "provider_stream_corrupt": "provider_failure"
+  },
   "failureClassDispositions": {
     "git_remote_auth_failed": {
       "disposition": "operator_recoverable",

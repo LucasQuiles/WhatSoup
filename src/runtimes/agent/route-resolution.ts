@@ -4,6 +4,13 @@ import {
   FALLBACK_MODEL_REQUIRED_PROVIDER_IDS,
   type AgentFallbackEntry,
 } from '../../core/fallback-chain.ts';
+import {
+  providerRoutePolicyKey,
+  resolveProviderRoutePolicy,
+  type ProviderBoundaryMode,
+  type ProviderDataPolicy,
+  type ProviderRoutePolicy,
+} from '../../core/provider-data-policy.ts';
 
 /**
  * Pure route-resolution core (owner-approved PR-plan v2, slice 2).
@@ -26,7 +33,7 @@ export interface RouteInputs {
   agentProvider: string;
   effectiveModel: string | undefined;
   /** Active-window fallback entry only (null when no window is armed). */
-  fallbackEntry: { provider: string; model?: string } | null;
+  fallbackEntry: AgentFallbackEntry | null;
   /** Canonical-keyed, unexpired preference (or null). */
   pref: ChatModelPreference | null;
   /** Instance-routable probe result for the pinned provider (F07 semantics). */
@@ -56,6 +63,12 @@ export interface RouteInputs {
    * of discarding it to `undefined`.
    */
   configuredModelByProvider: Readonly<Record<string, string | undefined>>;
+  /** Primary provider policy from agentOptions.providerDataPolicy. */
+  agentDataPolicy: ProviderDataPolicy | null;
+  /** Compatibility defaults to shadow; enforce rejects unresolved routes. */
+  boundaryMode: ProviderBoundaryMode;
+  /** Exact provider/model route key to the policy carried by that config entry. */
+  configuredDataPolicyByRoute: Readonly<Record<string, ProviderDataPolicy | undefined>>;
 }
 
 /**
@@ -76,9 +89,7 @@ function targetModel(provider: string, configuredModelByProvider: Readonly<Recor
   return FALLBACK_MODEL_REQUIRED_PROVIDER_IDS.has(provider) ? configuredModelByProvider[provider] : undefined;
 }
 
-export interface RouteDecision {
-  provider: string;
-  model: string | undefined;
+export interface RouteDecision extends ProviderRoutePolicy {
   source: 'default' | 'preference' | 'fallback' | 'pin_blocked_default' | 'tier_unconfigured_default';
   /** Machine-readable; feeds ModelRouteEvent and the /why receipt. */
   reasonCode: string;
@@ -92,6 +103,7 @@ export interface RouteDecision {
 }
 
 export function resolveRoute(i: RouteInputs): RouteDecision {
+  let decision: Pick<RouteDecision, 'provider' | 'model' | 'source' | 'reasonCode' | 'effort'>;
   if (i.fallbackEntry) {
     const pinnedModel = i.pref?.intent === 'provider_specific' &&
       i.pref.requestedProvider === i.fallbackEntry.provider &&
@@ -99,24 +111,22 @@ export function resolveRoute(i: RouteInputs): RouteDecision {
       i.pref.modelPinVerified === true && i.pinnedModelEligible
       ? i.pref.requestedModel
       : null;
-    return {
+    decision = {
       provider: i.fallbackEntry.provider,
       model: pinnedModel ?? i.fallbackEntry.model ?? i.effectiveModel,
       source: 'fallback',
       reasonCode: pinnedModel ? 'fallback_window_active_model_pin' : 'fallback_window_active',
     };
-  }
-  if (!i.pref) {
-    return {
+  } else if (!i.pref) {
+    decision = {
       provider: i.agentProvider,
       model: i.effectiveModel,
       source: 'default',
       reasonCode: 'no_preference',
     };
-  }
-  if (i.pref.intent === 'provider_specific' && i.pref.requestedProvider) {
+  } else if (i.pref.intent === 'provider_specific' && i.pref.requestedProvider) {
     if (i.pinnedProviderEligible) {
-      return {
+      decision = {
         provider: i.pref.requestedProvider,
         // Pinning the instance's own primary keeps the operator-configured
         // model; a genuine provider change drops to the provider default —
@@ -133,49 +143,65 @@ export function resolveRoute(i: RouteInputs): RouteDecision {
         // null for a cross-provider pin, so this is null there too.
         effort: i.pref.requestedEffort ?? null,
       };
-    }
-    return {
-      provider: i.agentProvider,
-      model: i.effectiveModel,
-      source: 'pin_blocked_default',
-      reasonCode: 'user_pin_unreachable',
-    };
-  }
-  const tier =
-    i.pref.intent === 'strongest' ? i.tierMap?.strongest
-    : i.pref.intent === 'fastest' ? i.tierMap?.fastest
-    : undefined;
-  if (tier) {
-    if (i.tierProviderEligible) {
-      return {
-        provider: tier,
-        // Same rule as the pin branch above: a tier that (unusually) maps
-        // back to the instance's own primary keeps the operator-configured
-        // model; a tier pointing at a required-model provider (opencode-cli
-        // et al.) threads that provider's validated config model instead of
-        // discarding it (Finding 2) — every other tier target keeps
-        // `undefined` and resolves its own provider default.
-        model: tier === i.agentProvider ? i.effectiveModel : targetModel(tier, i.configuredModelByProvider),
-        source: 'preference',
-        reasonCode: `intent_${i.pref.intent}`,
+    } else {
+      decision = {
+        provider: i.agentProvider,
+        model: i.effectiveModel,
+        source: 'pin_blocked_default',
+        reasonCode: 'user_pin_unreachable',
       };
     }
-    // Tier IS configured but its provider is not routable on this instance —
-    // degrade to the default route honestly (never a keyless session). The
-    // distinct reasonCode lets /why tell "unreachable" from "unconfigured".
-    return {
-      provider: i.agentProvider,
-      model: i.effectiveModel,
-      source: 'tier_unconfigured_default',
-      reasonCode: `intent_${i.pref.intent}_unreachable`,
-    };
+  } else {
+    const tier =
+      i.pref.intent === 'strongest' ? i.tierMap?.strongest
+      : i.pref.intent === 'fastest' ? i.tierMap?.fastest
+      : undefined;
+    if (tier) {
+      if (i.tierProviderEligible) {
+        decision = {
+          provider: tier,
+          // Same rule as the pin branch above: a tier that (unusually) maps
+          // back to the instance's own primary keeps the operator-configured
+          // model; a tier pointing at a required-model provider (opencode-cli
+          // et al.) threads that provider's validated config model instead of
+          // discarding it (Finding 2) — every other tier target keeps
+          // `undefined` and resolves its own provider default.
+          model: tier === i.agentProvider ? i.effectiveModel : targetModel(tier, i.configuredModelByProvider),
+          source: 'preference',
+          reasonCode: `intent_${i.pref.intent}`,
+        };
+      } else {
+        // Tier IS configured but its provider is not routable on this instance —
+        // degrade to the default route honestly (never a keyless session).
+        decision = {
+          provider: i.agentProvider,
+          model: i.effectiveModel,
+          source: 'tier_unconfigured_default',
+          reasonCode: `intent_${i.pref.intent}_unreachable`,
+        };
+      }
+    } else {
+      decision = {
+        provider: i.agentProvider,
+        model: i.effectiveModel,
+        source: 'tier_unconfigured_default',
+        reasonCode: `intent_${i.pref.intent}_unmapped`,
+      };
+    }
   }
-  return {
-    provider: i.agentProvider,
-    model: i.effectiveModel,
-    source: 'tier_unconfigured_default',
-    reasonCode: `intent_${i.pref.intent}_unmapped`,
-  };
+
+  const dataPolicy = decision.source === 'fallback'
+    ? i.fallbackEntry?.dataPolicy ?? null
+    : decision.provider === i.agentProvider && decision.model === i.effectiveModel
+      ? i.agentDataPolicy
+      : i.configuredDataPolicyByRoute[providerRoutePolicyKey(decision.provider, decision.model)] ?? null;
+  const policy = resolveProviderRoutePolicy({
+    provider: decision.provider,
+    model: decision.model,
+    dataPolicy,
+    boundaryMode: i.boundaryMode,
+  });
+  return Object.freeze({ ...decision, ...policy });
 }
 
 /**

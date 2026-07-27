@@ -54,6 +54,13 @@ import {
   type AgentFallbackEntry,
 } from '../../core/fallback-chain.ts';
 import {
+  ProviderDataPolicyError,
+  providerRoutePolicyKey,
+  resolveProviderRoutePolicy,
+  type ProviderBoundaryMode,
+  type ProviderDataPolicy,
+} from '../../core/provider-data-policy.ts';
+import {
   createReplyGuaranteeLivenessSender,
   DEFAULT_REPLY_GUARANTEE_TIMEOUT_MS,
   ReplyGuaranteeManager,
@@ -94,7 +101,10 @@ import {
   type SessionCrashInfo,
 } from './session.ts';
 import { createProviderExecutionGate, ProviderExecutionGate } from './provider-execution-gate.ts';
-import { dispatchProviderTurn } from './provider-boundary-dispatch.ts';
+import { dispatchProviderTurn, withProviderApplicationContext } from './provider-boundary-dispatch.ts';
+import { TurnChronologyTracker, type TurnDeliveryKind } from './turn-chronology.ts';
+import { receivedAtUnixSeconds, renderPendingReplay, renderUserTurnForProvider,
+  sharedReplayApplicationContext, sharedRuntimeApplicationContext } from './turn-provider-text.ts';
 import { markDeferredSystemTurn, requireSystemTurnProviderBoundary } from './system-turn-deadline.ts';
 import {
   OutboundQueue,
@@ -197,6 +207,7 @@ import {
   RuntimeTurnCoordinator,
   RUNTIME_TURN_SHUTDOWN_FINALIZATION_TIMEOUT_MS,
   type PerChatRuntimeScopeRef,
+  type ProviderFallbackReplayArgs,
   type RuntimeTurnAfterTerminalAction,
   type RuntimeTurnCompletion,
   type RuntimeTurnCoordinatorPort,
@@ -245,6 +256,15 @@ import {
   fallbackRequiresIndependentProbe,
   oneMessageHandoffEnabled,
 } from './fallback-config.ts';
+import {
+  fallbackRequiresPrimaryProbe,
+  formatClockForUser,
+  formatTokenCount,
+  isProviderFallbackReason,
+  modelCardLabel,
+  providerDisplayName,
+  templateForFallbackReason,
+} from './runtime-presentation.ts';
 import { makeIdleEligibilityResolver } from './fallback-eligibility-cache.ts';
 import {
   createProviderMcpBridge,
@@ -393,17 +413,6 @@ const HANDOFF_STALE_MS = 120_000;
  * is hours out of date. See RCA 2026-06-24 (rb-bot stale-`modelUsable` gap).
  */
 const MODEL_USABILITY_FRESHNESS_MS = 30 * 60_000;
-// ── Background handoff-distiller sweep tuning (all gated behind the flag) ──────
-// One periodic sweep enumerates active conversations and asks the runner to
-// (maybe) distill each. The runner+gate own growth/budget/breaker/concurrency,
-// so the interval only sets how often that machinery is consulted.
-/** Narrow an arbitrary (possibly null) string to a ProviderFallbackReason. */
-function isProviderFallbackReason(value: unknown): value is ProviderFallbackReason {
-  return value === 'usage-limit' || value === 'rate-limit'
-    || value === 'auth-required' || value === 'model-unavailable'
-    || value === 'server-error' || value === 'empty-output'
-    || value === 'probe-unusable' || value === 'unknown-terminal-repeated';
-}
 
 /**
  * Consecutive empty PRIMARY-provider user turns that force a provider fallback
@@ -645,7 +654,12 @@ import {
   type AskUserQuestion,
   type AskUserOption,
 } from './poll-resolution.ts';
-import { resolveOutboundAudience, isOperatorDmPeer, type OutboundAudience } from '../../core/outbound-message-safety.ts';
+import {
+  resolveOutboundAudience,
+  isOperatorDmPeer,
+  isTrustedInternalDmPeer,
+  type OutboundAudience,
+} from '../../core/outbound-message-safety.ts';
 
 // Tool_use → ToolUpdate formatting, tool-error classification, and operator-alert
 // gating extracted to ./tool-update.ts (module-level FILE-reduction slice). Re-exported
@@ -679,58 +693,10 @@ export {
 } from './failure-taxonomy.ts';
 import { errorMessage } from '../../lib/error-message.ts';
 
-function providerDisplayName(provider: string): string {
-  switch (provider) {
-    case 'claude-cli': return 'Claude';
-    case 'codex-cli': return 'Codex';
-    case 'gemini-cli': return 'Gemini';
-    case 'opencode-cli': return 'OpenCode';
-    case 'openai-api': return 'OpenAI';
-    case 'anthropic-api': return 'Anthropic';
-    default: return provider;
-  }
-}
 
-function modelCardLabel(provider: string, model: string | undefined): string {
-  const providerName = providerDisplayName(provider);
-  return model && model.trim() ? `${providerName} / ${model.trim()}` : providerName;
-}
 
-function formatClockForUser(epochMs: number): string {
-  return new Date(epochMs).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
-}
 
-/**
- * B26 human-scaled token count: 96_200 → '96.2k', 150_000 → '150k', 500 → '500'.
- * Same >1000 → one-decimal 'k' formula the /sessions handler inlines, plus a
- * trailing-'.0' strip so round budgets render '150k', not '150.0k'. The
- * /sessions inline sites keep their exact pre-B26 output ('2.0k') — do not
- * swap them onto this helper without updating their pinned renders.
- */
-function formatTokenCount(count: number): string {
-  return count > 1000 ? `${(count / 1000).toFixed(1).replace(/\.0$/, '')}k` : String(count);
-}
 
-function fallbackRequiresPrimaryProbe(reason: ProviderFallbackReason): boolean {
-  // Recovery-probe gating is intentionally BROADER than independent-provider
-  // routing (`fallbackRequiresIndependentProbe`, used at the routing call-site).
-  // Usage/rate limits carry an unreliable reset estimate — e.g. a weekly limit's
-  // "resets 9am" is parsed as a daily clock time — so we must re-probe the
-  // primary and revert the moment it recovers rather than blind-waiting for the
-  // window to elapse. Routing semantics are unchanged; only the recovery path widens.
-  //
-  // unknown-terminal-repeated joins the recovery-probe set (NOT the
-  // independent-probe set): an unclassified terminal error has NO parseable
-  // reset estimate, so without a recovery probe the window blind-waits. It is
-  // deliberately kept OUT of fallbackRequiresIndependentProbe so an operator's
-  // same-provider downgrade rung (e.g. claude-cli/opus) stays selectable.
-  return (
-    fallbackRequiresIndependentProbe(reason) ||
-    reason === 'usage-limit' ||
-    reason === 'rate-limit' ||
-    reason === 'unknown-terminal-repeated'
-  );
-}
 
 
 /**
@@ -809,21 +775,6 @@ export function extractUsageLimitResetTime(text: string, now: Date = new Date())
 
 // `isPromptTooLongMessage` lives in `./failure-taxonomy.ts` (imported + re-exported above).
 
-function templateForFallbackReason(reason: ProviderFallbackReason): UserTemplateId {
-  // empty-output / probe-unusable / unknown-terminal-repeated are transient
-  // primary failovers from the user's perspective (no hard auth/usage fault) —
-  // they reuse the existing 'transient' user copy rather than minting new
-  // user-facing templates (#1421).
-  if (
-    reason === 'server-error'
-    || reason === 'empty-output'
-    || reason === 'probe-unusable'
-    || reason === 'unknown-terminal-repeated'
-  ) {
-    return 'transient';
-  }
-  return reason;
-}
 
 export class AgentRuntime implements Runtime {
 
@@ -859,6 +810,8 @@ export class AgentRuntime implements Runtime {
   private readonly autoCompactInputTokens: number | undefined;
   private readonly agentProvider: string;
   private readonly agentProviderConfig: Record<string, unknown> | undefined;
+  private readonly agentDataPolicy: ProviderDataPolicy | null;
+  private readonly providerBoundaryMode: ProviderBoundaryMode;
   // Automatic provider fallback (claude-cli → opencode-cli etc.) on usage limit.
   // The legacy scalar pair is normalized as entry zero for compatibility.
   private readonly agentFallbacks: AgentFallbackEntry[];
@@ -910,6 +863,7 @@ export class AgentRuntime implements Runtime {
   // (captured at the top of start()); consumed by the startup resume gate.
   private restartLoopInterruptedBoot = false;
   private unownedProviderEventRejects = 0;
+  private readonly turnChronology = new TurnChronologyTracker();
   private readonly providerEventRejectReasonCounts = new Map<string, number>();
   /**
    * Explicit source-bound ownership for turns admitted without a durability
@@ -1474,6 +1428,7 @@ export class AgentRuntime implements Runtime {
   }
 
   private getOpenFileDescriptorCount(): number | null {
+    if (process.platform !== 'linux') return null;
     try {
       return readdirSync('/proc/self/fd').length;
     } catch (err) {
@@ -2135,6 +2090,7 @@ export class AgentRuntime implements Runtime {
       if (!session) throw new Error(`Coalesced image turn has no session for "${mapKey}"`);
       const source: RuntimeTurnSourceSnapshot = {
         sourceMessageId: msg.messageId,
+        receivedAtUnixSeconds: receivedAtUnixSeconds(msg),
         conversationKey: canonicalConversationKey(chatJid, this.db),
         senderJid: msg.senderJid,
         senderName: msg.senderName,
@@ -2154,6 +2110,7 @@ export class AgentRuntime implements Runtime {
       });
       this.enqueuePerChatRuntimeTurn(mapKey, {
         sourceMessageId: source.sourceMessageId,
+        receivedAtUnixSeconds: source.receivedAtUnixSeconds,
         conversationKey: source.conversationKey,
         chatJid,
         senderJid: source.senderJid,
@@ -2413,15 +2370,16 @@ export class AgentRuntime implements Runtime {
     this.replyGuaranteeTimeoutMs = options?.replyGuaranteeTimeoutMs ?? DEFAULT_REPLY_GUARANTEE_TIMEOUT_MS;
     this.agentProvider = config.agentProvider;
     this.agentProviderConfig = config.agentProviderConfig;
+    this.agentDataPolicy = config.agentProviderDataPolicy ?? null;
+    this.providerBoundaryMode = config.agentProviderBoundaryMode ?? 'shadow';
     const configuredFallbacks = Array.isArray(config.agentFallbacks)
       ? config.agentFallbacks
       : normalizeFallbackEntriesFromAgentOptions({
           fallbackProvider: config.agentFallbackProvider,
           fallbackModel: config.agentFallbackModel,
+          fallbackDataPolicy: config.agentFallbackDataPolicy,
         });
-    this.agentFallbacks = configuredFallbacks.map((entry) =>
-      entry.model ? { provider: entry.provider, model: entry.model } : { provider: entry.provider },
-    );
+    this.agentFallbacks = configuredFallbacks.map((entry) => ({ ...entry }));
     this.registry = new ToolRegistry();
     this.registerAllTools();
     this.catalogueSnapshot = createCatalogueSnapshotCache();
@@ -2682,8 +2640,13 @@ export class AgentRuntime implements Runtime {
       isShuttingDown: () => runtime.shutdownRequested,
       getActiveQueue: () => runtime.getActiveQueue(),
       getQueueForChat: (chatJid, mapKey) => runtime.getQueueForChat(chatJid, mapKey),
-      sendTurnPerChat: (chatJid, text, mapKey, actorJid, context, scopeRef, systemTurnLease, excludeJobId) =>
-        runtime.sendTurnPerChat(chatJid, text, mapKey, actorJid, context, scopeRef, systemTurnLease, excludeJobId),
+      sendTurnPerChat: (chatJid, text, mapKey, actorJid, context, scopeRef, systemTurnLease, excludeJobId, deliveryKind) =>
+        runtime.sendTurnPerChat(chatJid, text, mapKey, actorJid, context, scopeRef, systemTurnLease, excludeJobId, deliveryKind),
+      deleteOwnedPerChatSession: (mapKey, expected) => runtime.deleteOwnedPerChatSession(mapKey, expected),
+      recreatePerChatSessionForFallback: (mapKey, chatJid, actorJid) => runtime.recreatePerChatSessionForFallback(mapKey, chatJid, actorJid),
+      recreateSingletonSessionForFallback: (chatJid, actorJid) => runtime.recreateSingletonSessionForFallback(chatJid, actorJid),
+      bindActiveGlobalMcpConversation: (chatJid) => runtime.bindActiveGlobalMcpConversation(chatJid),
+      sendTurnToSession: (...args) => runtime.sendTurnToSession(...args),
       sendVoiceReply: (chatJid, responseText) => runtime._sendVoiceReply(chatJid, responseText),
       isSilentCompact: (scopeKey) => runtime.isSilentCompact(scopeKey),
       clearSilentCompact: (scopeKey) => runtime.clearSilentCompact(scopeKey),
@@ -2763,6 +2726,8 @@ export class AgentRuntime implements Runtime {
     const q = new OutboundQueue(this.messenger, chatJid, { // T8-F1+F2: inject admin-peer + fallback-window queries
       conversationKey, ...(priorToken === undefined ? {} : { senderToken: priorToken }),
       peerIsAdmin: (jid) => isOperatorDmPeer(jid, isGroupJid(jid), this.db, config.adminPhones),
+      peerIsTrustedInternal: (jid) =>
+        isTrustedInternalDmPeer(jid, isGroupJid(jid), config.internalPeerJids),
       fallbackActive: () => this.isFallbackWindowActive,
     });
     if (this.durability) q.setDurability(this.durability);
@@ -3534,11 +3499,20 @@ export class AgentRuntime implements Runtime {
         if (ageMs > 60 * 60 * 1000) {
           log.info({ chatJid: priorResumeIdentity.deliveryJid, ageMinutes: Math.round(ageMs / 60_000) },
             'skipping shared/single resume — session too stale');
-          this.durability!.retireSessionLifecycle({
-            agentSessionRowId: priorSession.id,
-            providerSessionId: priorSession.session_id!,
-            provider: this.effectiveProvider,
-          });
+          if (priorSession.workspace_key === null) {
+            log.warn({
+              rowId: priorSession.id,
+              conversationKey: checkpoint.conversation_key,
+            }, 'cannot retire stale shared/single resume without exact workspace identity');
+          } else {
+            this.durability!.retireExactSessionLifecycle({
+              agentSessionRowId: priorSession.id,
+              providerSessionId: priorSession.session_id!,
+              provider: this.effectiveProvider,
+              workspaceKey: priorSession.workspace_key,
+              conversationKey: checkpoint.conversation_key,
+            });
+          }
           priorSession = null;
           priorResumeIdentity = null;
         }
@@ -4320,20 +4294,14 @@ export class AgentRuntime implements Runtime {
       this.currentTurnSourceMessageId = msg.messageId;
       this.currentTurnAssistantText = '';
       this.currentTurnAssistantItemText.clear();
-      const prefixedText = this.sharedRuntimeTurnText({
-        chatJid,
-        senderJid: msg.senderJid,
-        senderName: msg.senderName,
-        text,
-        isGroup: msg.isGroup,
-      });
       const runtimeContext = this.runtimeTurnCoordinator.createRuntimeTurnForDispatch({
         scope: 'shared',
         chatJid,
-        text: prefixedText,
+        text,
         inboundSeq: msg.inboundSeq,
         source: {
           sourceMessageId: msg.messageId,
+          receivedAtUnixSeconds: receivedAtUnixSeconds(msg),
           conversationKey: journalConversationKey,
           senderJid: msg.senderJid,
           senderName: msg.senderName,
@@ -4346,6 +4314,7 @@ export class AgentRuntime implements Runtime {
       });
       this.turnQueue.enqueue({
         sourceMessageId: msg.messageId,
+        receivedAtUnixSeconds: receivedAtUnixSeconds(msg),
         conversationKey: journalConversationKey,
         chatJid,
         senderJid: msg.senderJid,
@@ -4379,6 +4348,7 @@ export class AgentRuntime implements Runtime {
           inboundSeq: msg.inboundSeq,
           source: {
             sourceMessageId: msg.messageId,
+            receivedAtUnixSeconds: receivedAtUnixSeconds(msg),
             conversationKey: journalConversationKey,
             senderJid: msg.senderJid,
             senderName: msg.senderName,
@@ -4393,6 +4363,7 @@ export class AgentRuntime implements Runtime {
 
         this.enqueuePerChatRuntimeTurn(mapKey, {
           sourceMessageId: msg.messageId,
+          receivedAtUnixSeconds: receivedAtUnixSeconds(msg),
           conversationKey: journalConversationKey,
           chatJid,
           senderJid: msg.senderJid,
@@ -4420,6 +4391,7 @@ export class AgentRuntime implements Runtime {
       this.currentTurnRouteMarkerHold = config.nlRouting ? '' : null;
       await this.sendTurnNonShared(chatJid, text, msg.senderJid, {
         sourceMessageId: msg.messageId,
+        receivedAtUnixSeconds: receivedAtUnixSeconds(msg),
         conversationKey: journalConversationKey,
         senderJid: msg.senderJid,
         senderName: msg.senderName,
@@ -4428,15 +4400,6 @@ export class AgentRuntime implements Runtime {
         ...(msg.isGroup ? { groupName: chatJid } : {}),
       }, msg.inboundSeq);
     }
-  }
-
-  private sharedRuntimeTurnText(turn: Pick<QueuedTurn, 'chatJid' | 'senderJid' | 'senderName' | 'text' | 'isGroup'>): string {
-    const phone = resolvePhoneFromJid(turn.senderJid, this.db);
-    const displayName = turn.senderName ?? phone;
-    const prefix = turn.isGroup
-      ? `[Group: ${turn.chatJid} — ${displayName}]`
-      : `[DM from ${displayName} (${phone})]`;
-    return `${prefix}\n${turn.text}`;
   }
 
   private enqueuePerChatRuntimeTurn(mapKey: string, turn: QueuedTurn): boolean {
@@ -4492,7 +4455,8 @@ export class AgentRuntime implements Runtime {
     // The journal-backed context was minted at admission so queue rejection and
     // processor failure use the same immutable identity. Legacy unjournaled
     // test/system turns still derive only their display text here.
-    const prefixedText = turn.runtimeContext?.replay.text ?? this.sharedRuntimeTurnText(turn);
+    const exactText = turn.runtimeContext?.replay.text ?? text;
+    const participantContext = sharedRuntimeApplicationContext(turn, this.db);
 
     // Track which chat this turn belongs to for event routing
     // @check CHK-065 // @traces REQ-012.AC-03
@@ -4503,7 +4467,7 @@ export class AgentRuntime implements Runtime {
     this.turnHadSuppressedReplySatisfaction = false;
     // Arm the R1 first-line marker scan for this shared turn (flag-gated).
     this.currentTurnRouteMarkerHold = config.nlRouting ? '' : null;
-    this.currentTurnReplayText = prefixedText;
+    this.currentTurnReplayText = exactText;
     this.currentTurnReplayActorJid = senderJid;
     this.replyGuarantee?.arm({ inboundSeq: turn.inboundSeq, chatJid });
 
@@ -4536,7 +4500,10 @@ export class AgentRuntime implements Runtime {
       : null;
     try {
       this.updateSessionActorJid(this.session!, senderJid);
-      await this.session!.sendTurn(prefixedText);
+      await this.session!.sendTurn(withProviderApplicationContext(
+        renderUserTurnForProvider(this.turnChronology, exactText, context, 'live'),
+        participantContext,
+      ));
     } catch (err) {
       if (legacyOwner) {
         this.clearLegacyProviderTurn(GLOBAL_TOOL_SCOPE_KEY, legacyOwner);
@@ -4572,6 +4539,8 @@ export class AgentRuntime implements Runtime {
     beforeUserSend?: () => void,
     systemTurnLease?: SystemTurnLeaseToken,
     dispatchAllowed?: () => boolean,
+    runtimeContext?: RuntimeTurnContext,
+    deliveryKind: TurnDeliveryKind = 'live',
   ): Promise<void> {
     let effectiveMapKey = mapKey;
     let spawnedForTurn = false;
@@ -4706,8 +4675,14 @@ export class AgentRuntime implements Runtime {
       if (queue) queue.indicateTyping();
     };
     try {
-      const turnText = contextPreamble === null ? text : `${contextPreamble}\n\n[Current message]\n${text}`;
-      await dispatchProviderTurn(session, turnText, onProviderBoundaryReady);
+      const userTurnText = renderUserTurnForProvider(
+        this.turnChronology, text, runtimeContext ?? null, deliveryKind,
+        sharedReplayApplicationContext(runtimeContext, this.db),
+      );
+      const turnInput = contextPreamble === null
+        ? userTurnText
+        : withProviderApplicationContext(userTurnText, contextPreamble);
+      await dispatchProviderTurn(session, turnInput, onProviderBoundaryReady);
     } catch (err) {
       if (actorPushed && effectiveMapKey !== undefined) {
         this.removeFailedExecutingActor(effectiveMapKey, actorJid, systemTurnLease);
@@ -4780,7 +4755,7 @@ export class AgentRuntime implements Runtime {
       }, undefined, () => (
         !this.shutdownRequested
         && (context === null || !this.runtimeTurnCoordinator.isUndispatchedRuntimeTurnCancelled(context))
-      ));
+      ), context ?? undefined);
       if (context && completion.value === null) {
         if (!this.runtimeTurnCoordinator.isUndispatchedRuntimeTurnCancelled(context)) {
           this.runtimeTurnCoordinator.terminalizeUndispatchedRuntimeCrash(context);
@@ -4813,11 +4788,22 @@ export class AgentRuntime implements Runtime {
     scopeRef?: PerChatRuntimeScopeRef,
     systemTurnLease?: SystemTurnLeaseToken,
     excludeJobId?: number, // PRESTAGE-T4: set only by the recovery supervisor's own replay; see beginRuntimeTurnEvidence
+    requestedDeliveryKind?: TurnDeliveryKind,
   ): Promise<void> {
     mapKey = scopeRef?.value ?? mapKey;
     const dispatchAllowed = runtimeContext === undefined
       ? undefined
       : () => !this.runtimeTurnCoordinator.isUndispatchedRuntimeTurnCancelled(runtimeContext);
+    const continuationContext = runtimeContext === undefined
+      ? this.perChatRuntimeTurnContexts.get(mapKey)?.[0]
+      : undefined;
+    const providerTurnContext = runtimeContext ?? continuationContext;
+    const providerDeliveryKind = requestedDeliveryKind ?? (
+      excludeJobId === undefined && (continuationContext === undefined
+        || !this.runtimeTurnCoordinator.isRuntimeTurnContinuation(continuationContext))
+        ? 'live'
+        : 'recovery_replay'
+    );
     // AskUserQuestion → Poll bridge: if a poll question is pending for this
     // chat and the user sends a text reply, resolve it as an option number,
     // label, description match, or free-text answer and inject it back.
@@ -4975,7 +4961,7 @@ export class AgentRuntime implements Runtime {
             retrySession,
             scopeRef?.value ?? currentMapKey,
           );
-        }, systemTurnLease, dispatchAllowed);
+        }, systemTurnLease, dispatchAllowed, providerTurnContext, providerDeliveryKind);
       } catch (err) {
         if (legacyOwner.value) {
           this.clearLegacyProviderTurn(currentMapKey, legacyOwner.value);
@@ -4992,7 +4978,7 @@ export class AgentRuntime implements Runtime {
           session,
           scopeRef?.value ?? mapKey,
         );
-      }, systemTurnLease, dispatchAllowed);
+      }, systemTurnLease, dispatchAllowed, providerTurnContext, providerDeliveryKind);
     } catch (err) {
       if (legacyOwner.value) {
         this.clearLegacyProviderTurn(scopeRef?.value ?? mapKey, legacyOwner.value);
@@ -5920,7 +5906,17 @@ export class AgentRuntime implements Runtime {
   /** T8-F1+F2: shared operator-DM elevation ctx for direct sends/polls. */
   private resolveSendAudience(chatJid: string, isGroup: boolean): OutboundAudience {
     const peerIsAdmin = isOperatorDmPeer(chatJid, isGroup, this.db, config.adminPhones);
-    return resolveOutboundAudience(chatJid, { isGroup, peerIsAdmin, fallbackActive: this.isFallbackWindowActive });
+    const peerIsTrustedInternal = isTrustedInternalDmPeer(
+      chatJid,
+      isGroup,
+      config.internalPeerJids,
+    );
+    return resolveOutboundAudience(chatJid, {
+      isGroup,
+      peerIsAdmin,
+      peerIsTrustedInternal,
+      fallbackActive: this.isFallbackWindowActive,
+    });
   }
 
   private sendUnansweredPollTextFallback(
@@ -6988,6 +6984,7 @@ export class AgentRuntime implements Runtime {
             ),
           },
           unownedProviderEventRejects: this.unownedProviderEventRejects,
+          ...this.turnChronology.healthDetails(),
           providerExecution,
           turnFinalizationRetainedRetries: finalizationHealth.retainedRetries,
           turnFinalizationDegradedScopes: finalizationHealth.degradedScopes,
@@ -7029,6 +7026,7 @@ export class AgentRuntime implements Runtime {
           ),
         },
         unownedProviderEventRejects: this.unownedProviderEventRejects,
+        ...this.turnChronology.healthDetails(),
         providerExecution,
         turnFinalizationRetainedRetries: finalizationHealth.retainedRetries,
         turnFinalizationDegradedScopes: finalizationHealth.degradedScopes,
@@ -8206,7 +8204,9 @@ export class AgentRuntime implements Runtime {
     // resolution failure must degrade to the default route and NEVER drop a
     // turn — so the pin probe is inside this guard, not just the pref read.
     try {
-      const pref = actorJid ? this.loadSenderPreference(chatJid, actorJid) : null;
+      const pref = this.nlRoutingEnabled && actorJid
+        ? this.loadSenderPreference(chatJid, actorJid)
+        : null;
       const pinned = pref?.intent === 'provider_specific' ? pref.requestedProvider : null;
       // The tier provider this pref maps to (if any) is probed for routability
       // the same way a pin is — an ineligible tier degrades to the default
@@ -8215,11 +8215,17 @@ export class AgentRuntime implements Runtime {
         pref?.intent === 'strongest' ? config.nlRoutingTiers?.strongest
         : pref?.intent === 'fastest' ? config.nlRoutingTiers?.fastest
         : undefined;
-      const routable = this.routablePinTargets();
-      const decision = resolveRoute({
+      const fallbackEntry = this.effectiveFallbackEntry;
+      // Health-window fallback and unconfigured/NL-disabled routes do not need
+      // a credential probe. Avoid making an unrelated probe a prerequisite for
+      // selecting the already-known exact route.
+      const routable = fallbackEntry === null && pref !== null
+        ? this.routablePinTargets()
+        : [this.agentProvider];
+      let decision = resolveRoute({
         agentProvider: this.agentProvider,
         effectiveModel: this.effectiveModel,
-        fallbackEntry: this.effectiveFallbackEntry,
+        fallbackEntry,
         pref,
         pinnedProviderEligible: pinned !== null && routable.includes(pinned),
         pinnedModelEligible: isPinnedModelEligible(
@@ -8227,7 +8233,7 @@ export class AgentRuntime implements Runtime {
           this.agentFallbacks,
           (entry) => this.isEntryCredentialed(entry),
         ),
-        tierMap: config.nlRoutingTiers,
+        tierMap: this.nlRoutingEnabled ? config.nlRoutingTiers : null,
         tierProviderEligible: tierProvider !== undefined && routable.includes(tierProvider),
         // Finding 2 fix: the same agentFallbacks entries that
         // routablePinTargets/isEntryCredentialed just read to prove a pin/tier
@@ -8237,6 +8243,9 @@ export class AgentRuntime implements Runtime {
         // `undefined`. First entry wins per provider, matching
         // routablePinTargets' own dedup.
         configuredModelByProvider: this.configuredModelByProvider(),
+        agentDataPolicy: this.agentDataPolicy,
+        boundaryMode: this.providerBoundaryMode,
+        configuredDataPolicyByRoute: this.configuredDataPolicyByRoute(),
       });
       // Task H — sync consumption of a verified model pin (decideModelPinResolution's
       // hot path: verified + same provider needs no catalogue, so this stays
@@ -8257,19 +8266,25 @@ export class AgentRuntime implements Runtime {
           decision.provider,
         );
         if (modelPinDecision.action === 'use') {
-          decision.model = modelPinDecision.modelId;
+          decision = Object.freeze({ ...decision, model: modelPinDecision.modelId });
         }
       }
-      return { ...decision, pinnedProvider: pinned };
+      return Object.freeze({ ...decision, pinnedProvider: pinned });
     } catch (err) {
+      if (err instanceof ProviderDataPolicyError) throw err;
       log.warn({ err, instance: this.instanceName }, 'route resolution failed - routing on default');
-      return {
+      const policy = resolveProviderRoutePolicy({
         provider: this.agentProvider,
-        model: this.effectiveModel,
+        model: this.model,
+        dataPolicy: this.agentDataPolicy,
+        boundaryMode: this.providerBoundaryMode,
+      });
+      return Object.freeze({
+        ...policy,
         source: 'default',
         reasonCode: 'route_resolution_failed',
         pinnedProvider: null,
-      };
+      });
     }
   }
 
@@ -8418,6 +8433,16 @@ export class AgentRuntime implements Runtime {
       models[entry.provider] = entry.model;
     }
     return models;
+  }
+
+  private configuredDataPolicyByRoute(): Record<string, ProviderDataPolicy | undefined> {
+    const policies: Record<string, ProviderDataPolicy | undefined> = {};
+    for (const entry of this.agentFallbacks) {
+      const key = providerRoutePolicyKey(entry.provider, entry.model);
+      if (key in policies) continue;
+      policies[key] = entry.dataPolicy;
+    }
+    return policies;
   }
 
   /**
@@ -10488,6 +10513,17 @@ export class AgentRuntime implements Runtime {
       ? this.perChatRuntimeTurnContexts.get(args.mapKey)?.[0]
       : this.currentRuntimeTurnContext;
     if (runtimeContext) {
+      if (
+        runtimeContext.replay.text !== replayText
+        || runtimeContext.identity.deliveryJid !== args.chatJid
+      ) {
+        log.error({
+          chatJid: args.chatJid,
+          mapKey: args.mapKey,
+          logicalTurnId: runtimeContext.identity.logicalTurnId,
+        }, 'refusing fallback replay with mismatched captured turn context');
+        return false;
+      }
       const scopeRef = args.mapKey === undefined
         ? undefined
         : this.perChatRuntimeTurnScopeRefs.get(runtimeContext.identity.logicalTurnId)
@@ -10505,7 +10541,10 @@ export class AgentRuntime implements Runtime {
         );
       });
       void this.dispatchFallbackReplay(
-        scopeRef === undefined ? args : { ...args, mapKey: scopeRef.value },
+        {
+          ...(scopeRef === undefined ? args : { ...args, mapKey: scopeRef.value }),
+          runtimeContext,
+        },
         replayText,
         actorJid,
       ).catch((err) => this.finalizeFailedFallbackContinuation(
@@ -10544,6 +10583,7 @@ export class AgentRuntime implements Runtime {
       chatJid: string;
       mapKey?: string;
       oldSession: SessionManager | null;
+      runtimeContext?: RuntimeTurnContext;
     },
     replayText: string,
     actorJid: string | undefined,
@@ -10554,6 +10594,7 @@ export class AgentRuntime implements Runtime {
       replayText,
       actorJid,
       oldSession: args.oldSession,
+      runtimeContext: args.runtimeContext,
     });
   }
 
@@ -10605,34 +10646,8 @@ export class AgentRuntime implements Runtime {
     });
   }
 
-  private async replayTurnOnFallback(args: {
-    chatJid: string;
-    mapKey?: string;
-    replayText: string;
-    actorJid?: string;
-    oldSession: SessionManager | null;
-  }): Promise<void> {
-    if (args.oldSession) {
-      await args.oldSession.shutdown(false);
-    }
-    if (args.mapKey !== undefined) {
-      // F-STICKY-ACTOR (QR-247): the fallback kills the child (active=false, so
-      // onCrash never fires) and replays on a fresh session. Clear the executing-actor
-      // queue so the old in-flight turn's actor cannot linger as HEAD; the replay
-      // re-pushes via sendTurnPerChat -> sendTurnToSession.
-      this.perChatExecActorQueue.delete(args.mapKey);
-      this.deleteOwnedPerChatSession(args.mapKey, args.oldSession ?? undefined);
-      this.recreatePerChatSessionForFallback(args.mapKey, args.chatJid, args.actorJid);
-      await this.sendTurnPerChat(args.chatJid, args.replayText, args.mapKey, args.actorJid);
-      return;
-    }
-    this.recreateSingletonSessionForFallback(args.chatJid, args.actorJid);
-    this.currentTurnChatJid = args.chatJid;
-    this.bindActiveGlobalMcpConversation(args.chatJid);
-    this.turnHadVisibleOutput = false;
-    this.currentTurnReplayText = args.replayText;
-    this.currentTurnReplayActorJid = args.actorJid;
-    await this.sendTurnToSession(this.session!, args.chatJid, args.replayText, undefined, args.actorJid);
+  private replayTurnOnFallback(args: ProviderFallbackReplayArgs): Promise<void> {
+    return this.runtimeTurnCoordinator.replayTurnOnFallback(args);
   }
 
   /**
@@ -10728,15 +10743,15 @@ export class AgentRuntime implements Runtime {
     eventToolScopeKey?: string;
   }): SessionManager {
     const conversationKey = toConversationKey(opts.chatJid);
-    // Slice-2 routing wiring (flag-gated): preferences steer the session being
-    // spawned; flag off keeps the exact base expressions below.
-    const route = config.nlRouting ? this.resolveRouteForTurn(opts.chatJid, opts.actorJid) : null;
-    if (route) this.noteRouteAtSpawn(opts.chatJid, conversationKey, route);
+    // Resolve the provider/model/policy tuple for every session. NL preferences
+    // remain flag-gated inside resolveRouteForTurn; policy admission does not.
+    const route = this.resolveRouteForTurn(opts.chatJid, opts.actorJid);
+    if (this.nlRoutingEnabled) this.noteRouteAtSpawn(opts.chatJid, conversationKey, route);
     // F-STICKY-ACTOR (QR-247 hardening): wire the per-chat actor socket HERE — the
     // single choke point every spawn path (ensure / proactive-resume / provider-
     // fallback) flows through — keyed on the session's ACTUAL provider, not the
     // instance-global one. A fallback to a non-claude provider tears the socket down.
-    const sessionProvider = route ? route.provider : this.effectiveProvider;
+    const sessionProvider = route.provider;
     const perChatWire = this.wirePerChatActorSocket(opts.chatJid, sessionProvider);
     const mcpSocketPath = opts.mcpSocketPath ?? perChatWire?.mcpSocketPath;
     const providerConfigOverride = opts.providerConfigOverride ?? perChatWire?.providerConfigOverride;
@@ -10777,19 +10792,20 @@ export class AgentRuntime implements Runtime {
       configRoot: this.sandboxPerChat && opts.cwd ? join(opts.cwd, '.agent-home') : undefined,
       configSystemPrompt: this.configSystemPrompt,
       instructionsPath: this.instructionsPath,
-      model: route ? route.model : this.effectiveModel,
+      model: route.model,
       pluginDirs: this.pluginDirs,
       allowM365Mutations: this.allowM365Mutations,
-      provider: route ? route.provider : this.effectiveProvider,
+      provider: route.provider,
       providerConfig: providerConfigOverride
-        ? { ...(route ? this.routeSessionProviderConfig(route) : this.sessionProviderConfig()), ...providerConfigOverride }
-        : (route ? this.routeSessionProviderConfig(route) : this.sessionProviderConfig()),
+        ? { ...this.routeSessionProviderConfig(route), ...providerConfigOverride }
+        : this.routeSessionProviderConfig(route),
       mcpBridge: createProviderMcpBridge(this.registry, providerToolSession),
       mcpSessionContext: providerToolSession,
       whatsoupInstance: this.instanceName,
       whatsoupMcpSocket: mcpSocketPath ?? this.globalMcpSocketPath ?? undefined,
-      handoffSystemBlock: this.buildHandoffSystemBlock(conversationKey, route ? route.provider : this.effectiveProvider),
-      routingSystemBlock: config.nlRouting ? () => this.buildRoutingContractBlock(route ? route.provider : this.effectiveProvider) : undefined,
+      routePolicy: route,
+      handoffSystemBlock: this.buildHandoffSystemBlock(conversationKey, route.provider),
+      routingSystemBlock: this.nlRoutingEnabled ? () => this.buildRoutingContractBlock(route.provider) : undefined,
       egressProxyPort: this.egressProxy?.port,
       providerExecutionGate: this.providerExecutionGate,
     });
@@ -11709,12 +11725,12 @@ export class AgentRuntime implements Runtime {
               err,
             );
           }
-
           // Replay the pending turn that was lost during the failed resume
           if (pendingText && mapKey) {
             log.info({ chatJid, mapKey, textPreview: providerPreview(pendingText, 80) }, 'replaying pending turn after resume failure');
             try {
-              await session.sendTurn(pendingText);
+              await session.sendTurn(renderPendingReplay(this.turnChronology, pendingText,
+                this.perChatRuntimeTurnContexts.get(mapKey)?.[0], this.perChatTurnQueues.get(mapKey)?.activeTurn ?? null));
             } catch (err) {
               log.warn({ err, chatJid }, 'pending turn replay failed');
               // Retain the replay evidence. A failed or ambiguously accepted

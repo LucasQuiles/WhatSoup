@@ -47,7 +47,9 @@ import {
   type CloseSessionLifecycleFailureParams,
   type CloseSessionLifecycleParams,
   type ReactivateSessionLifecycleParams,
+  type RetireExactSessionLifecycleParams,
   type RetireSessionLifecycleParams,
+  type UpdateExactSessionCheckpointStatusParams,
 } from './session-lifecycle-store.ts';
 import type {
   ClaimTurnRecoveryJobOptions,
@@ -232,6 +234,7 @@ type DurabilityStatements = {
   markContinuityCandidateIfUnownedAndNoTerminalOutbound: PreparedStatement;
   markInboundSkipped: PreparedStatement;
   selectInboundStatus: PreparedStatement;
+  selectInboundReceipt: PreparedStatement;
   recordTurnTerminal: PreparedStatement;
   getTurnTerminal: PreparedStatement;
   createOutboundOp: PreparedStatement;
@@ -296,8 +299,10 @@ export class DurabilityEngine {
     const prepare = db.raw.prepare.bind(db.raw);
     this.statements = {
       journalInbound: prepare(
-        `INSERT INTO inbound_events (message_id, conversation_key, chat_jid, routed_to, processing_status)
-         VALUES (?, ?, ?, ?, 'processing')`,
+        `INSERT INTO inbound_events (
+           message_id, conversation_key, chat_jid, routed_to, processing_status, received_at
+         )
+         VALUES (?, ?, ?, ?, 'processing', COALESCE(datetime(?, 'unixepoch'), datetime('now')))`,
       ),
       markTurnDone: prepare(`UPDATE inbound_events SET processing_status = 'turn_done' WHERE seq = ?`),
       markInboundComplete: prepare(
@@ -337,6 +342,10 @@ export class DurabilityEngine {
       ),
       selectInboundStatus: prepare(
         `SELECT processing_status, conversation_key, chat_jid, message_id
+         FROM inbound_events WHERE seq = ?`,
+      ),
+      selectInboundReceipt: prepare(
+        `SELECT unixepoch(received_at) AS received_at_unix_seconds
          FROM inbound_events WHERE seq = ?`,
       ),
       recordTurnTerminal: prepare(`
@@ -915,11 +924,42 @@ export class DurabilityEngine {
   }
 
   // ── Inbound events ──
-  journalInbound(messageId: string, conversationKey: string, chatJid: string, routedTo: string): number {
-    const result = this.statements.journalInbound.run(messageId, conversationKey, chatJid, routedTo);
+  journalInbound(
+    messageId: string,
+    conversationKey: string,
+    chatJid: string,
+    routedTo: string,
+    receivedAtUnixSeconds?: number,
+  ): number {
+    if (
+      receivedAtUnixSeconds !== undefined
+      && (
+        !Number.isSafeInteger(receivedAtUnixSeconds)
+        || receivedAtUnixSeconds < 0
+        || receivedAtUnixSeconds > 253_402_300_799
+      )
+    ) {
+      throw new Error('Inbound receipt timestamp must be within the SQLite Unix timestamp range');
+    }
+    const result = this.statements.journalInbound.run(
+      messageId,
+      conversationKey,
+      chatJid,
+      routedTo,
+      receivedAtUnixSeconds ?? null,
+    );
     const seq = Number(result.lastInsertRowid);
     log.debug({ seq, messageId, routedTo }, 'journalInbound');
     return seq;
+  }
+
+  getInboundReceivedAtUnixSeconds(seq: number): number | undefined {
+    const row = this.statements.selectInboundReceipt.get(seq) as {
+      received_at_unix_seconds: number;
+    } | undefined;
+    return Number.isSafeInteger(row?.received_at_unix_seconds)
+      ? row?.received_at_unix_seconds
+      : undefined;
   }
 
   markTurnDone(seq: number): void {
@@ -1445,6 +1485,10 @@ export class DurabilityEngine {
     return this.sessionLifecycle.retireSessionLifecycle(params);
   }
 
+  retireExactSessionLifecycle(params: RetireExactSessionLifecycleParams): number {
+    return this.sessionLifecycle.retireExactSessionLifecycle(params);
+  }
+
   closeSessionLifecycleFailure(params: CloseSessionLifecycleFailureParams): void {
     this.sessionLifecycle.closeSessionLifecycleFailure(params);
   }
@@ -1458,6 +1502,10 @@ export class DurabilityEngine {
       sessionId,
       sessionStatus,
     );
+  }
+
+  updateExactSessionCheckpointStatus(params: UpdateExactSessionCheckpointStatusParams): number {
+    return this.sessionLifecycle.updateExactSessionCheckpointStatus(params);
   }
 
   getAllActiveCheckpoints(): ActiveSessionCheckpointRow[] {

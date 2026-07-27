@@ -167,3 +167,52 @@ describe('HTTP providers honor apiKeyService (issue #363)', () => {
     });
   });
 });
+
+describe('HTTP provider structured runtime context', () => {
+  let fetchMock: ReturnType<typeof installFetchMock>;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    process.env.OPENAI_API_KEY = 'test-key';
+    process.env.ANTHROPIC_API_KEY = 'test-key';
+    mockedLookup.mockReturnValue(null);
+    fetchMock = installFetchMock();
+  });
+
+  afterEach(() => {
+    fetchMock.restore();
+    delete process.env.OPENAI_API_KEY;
+    delete process.env.ANTHROPIC_API_KEY;
+  });
+
+  it.each([
+    ['openai', () => new OpenAIApiProvider()],
+    ['anthropic', () => new AnthropicApiProvider()],
+  ])('%s keeps application context and user text in distinct content blocks', async (_label, makeProvider) => {
+    const provider = makeProvider();
+    await provider.initialize({
+      sessionId: 'structured-session',
+      systemPrompt: 'sys',
+      workingDirectory: process.cwd(),
+      onEvent: () => {},
+      onError: () => {},
+      onIdle: () => {},
+      mcpBridge: { listTools: () => [], callTool: async () => ({ result: '' }) } as never,
+    } as never);
+
+    await provider.sendTurn({
+      role: 'user',
+      conversationKey: 'structured-context',
+      parts: [
+        { kind: 'text', text: 'receipt=2026-05-28T20:26:40.000Z age=95' },
+        { kind: 'text', text: 'stop that flow now' },
+      ],
+    });
+
+    const body = JSON.parse(fetchMock.captured[0]!.init.body!);
+    expect(body.messages.at(-1).content).toEqual([
+      { type: 'text', text: 'receipt=2026-05-28T20:26:40.000Z age=95' },
+      { type: 'text', text: 'stop that flow now' },
+    ]);
+  });
+});

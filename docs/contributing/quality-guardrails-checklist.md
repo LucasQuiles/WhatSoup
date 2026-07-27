@@ -6,7 +6,20 @@
 
 > **This table is a curated subset.** As of 2026-07-21 the live `quality.yml` runs ~40+ steps: the full `guard:*` family, coverage (`coverage:check`), browser/Playwright suites, console design checks, mutation via `deploy/scripts/run-sentinel-tests.sh` (pytest `--cov-fail-under=98` + deployer mutation drill — note `stryker.conf.json` is dormant/unwired), and tokenomics/drills. Blocking authority for the 36-rule architectural-fitness registry (`scripts/lib/fitness/registry.ts`) lives in the **guard ring** (`verify:push:branch`), not the ESLint ring, which is warn-only. Semantic-quality (`semantic-quality-check.ts`) runs in **shadow mode** (exit 0) everywhere it is wired; its enforce path is unwired/on-demand.
 
-The `Quality` workflow (`.github/workflows/quality.yml`) runs all of these on every PR and on every push to `main`:
+The `Quality` workflow (`.github/workflows/quality.yml`) runs on every PR and
+every push to `main`, with two explicit required-context jobs:
+
+- `quality (24.x)` is the full enforcement authority. It owns all static,
+  Python, guard, coverage, console-design, and browser checks listed below.
+- `quality (25.x)` is the compatibility lane. It performs clean root and
+  console installs, the complete non-coverage Vitest suite, and the console
+  production build. It intentionally does not duplicate version-invariant
+  guards, coverage, Python, lint/design, or browser work.
+
+This split preserves both required context names while removing roughly
+6.7 duplicated runner-minutes per workflow run across five recent successful
+main runs. It primarily frees runner capacity; Node 24 remains the critical
+path, and exact savings vary with runner scheduling and step duration.
 
 | Step | Command | Purpose |
 |---|---|---|
@@ -21,41 +34,139 @@ The `Quality` workflow (`.github/workflows/quality.yml`) runs all of these on ev
 | Work index coverage | `npm run guard:work-index` | docs/work-index.json completeness |
 | AskUser poll protocol guard | `npm run guard:agent-decision-polls` | Verifies the WhatsApp poll decision protocol remains wired across prompt guidance, MCP schema descriptions, sandbox diagnostics, docs, and release gates. |
 | Safeguard diagnostics | `npm run guard:safeguard-diagnostics` | Deterministic readout of guard-chain wiring, sensitive-publication anchors, runtime-boundary anchors, public-exposure guards, and portability blockers. |
-| **Test integrity baseline check** | `npm run guard:test-integrity` | Runs the baseline check for tautologies, weak assertions, raw sleeps, and assertion-free tests when the plugin is installed; skips missing-plugin cases only outside CI and when `WHATSOUP_REQUIRE_TEST_INTEGRITY` is not set. GitHub Actions installs the private `LucasQuiles/test-integrity` plugin over SSH using the `TEST_INTEGRITY_DEPLOY_KEY` secret (read-only deploy key on `LucasQuiles/test-integrity`) before running this gate. |
+| **Test integrity baseline check** | `npm run guard:test-integrity` | Runs the baseline check for tautologies, weak assertions, raw sleeps, and assertion-free tests when the plugin is installed; skips missing-plugin cases only outside CI and when `WHATSOUP_REQUIRE_TEST_INTEGRITY` is not set. The Node 24 job installs the private `LucasQuiles/test-integrity` plugin over SSH using the read-only `TEST_INTEGRITY_DEPLOY_KEY`, fetches the exact `TEST_INTEGRITY_COMMIT`, detaches at that object, and verifies `HEAD` byte-for-byte. Pin updates are reviewed repository changes; CI never pushes or publishes plugin state. |
 | Repo-hygiene tests | `npm test -- tests/scripts/repo-hygiene-guard.test.ts` | tests that the hygiene-guard itself works |
-| Full test suite | `npm test -- --pool=forks` | vitest with --pool=forks for stability |
+| Full test suite + coverage | `npm run coverage:check -- --pool=forks` | Node 24 runs the entire Vitest suite under V8 coverage and enforces thresholds. Node 25 separately runs `npm test -- --pool=forks` without duplicating coverage. |
 | Console build | `npm --prefix console run build` | Vite production build smoke |
+
+Before the Node 24 toolchain setup, `scripts/ci-disk-reclaim.sh` records free
+space and enforces a 30 GiB budget. Sufficient runners skip mutation with a
+structured receipt. Low-space runners remove only the allowlisted unused
+toolchains and Docker images, report every action, and re-measure. Malformed
+disk observations are inconclusive (exit 2); a measured post-reclaim shortfall
+is blocking (exit 1). Cleanup failures are never hidden with `|| true`.
 
 ## Layer 1.5 — Local pre-commit early-drift signal (warn-only)
 
-The `.husky/pre-commit` hook hard-runs `npm run guard:repo:staged` (and console
-`lint-staged` for `console/src` changes). It additionally emits a **warn-only**
-architectural-drift signal when a commit stages `*.ts`, `package.json`, `.nvmrc`,
-or `deploy/` files: it runs `guard:node-pin-consistency`, `guard:boundaries`, and
-`guard:lint:src` and prints a warning for any that fail, **without aborting the
-commit**. These same guards are hard-enforced at push by `verify:push:branch`
-(Layer 2); the pre-commit signal only surfaces drift earlier. Skip with
-`WHATSOUP_SKIP_DRIFT_WARN=1`.
+The `.husky/pre-commit` hook first runs the deterministic
+`npm run guard:git-estate -- guard --phase pre-commit` scan. It inventories every
+linked worktree, local branch/upstream state, stash object identity, and conflict
+identity without printing filenames or stash subjects. The commit-time scan is
+one estate-wide capture and is warn-only so an unrelated lane cannot block a
+local checkpoint; incomplete scans and estate growth remain visible warnings.
+Pre-push retains two independent captures for race detection and applies the
+same estate evaluation fail-closed.
+
+The hook also reads the invoking worktree's atomic writer lease. Free or valid
+held state is reported without prompting the agent. A stale, malformed, or
+unreadable lease is warn-only at commit time and fail-closed at push time; the
+hook never steals, deletes, or silently renews a lease.
+
+The hook then hard-runs `npm run guard:repo:staged` (and console `lint-staged` for
+`console/src` changes). It additionally emits a **warn-only** architectural-drift
+signal when a commit stages `*.ts`, `package.json`, `.nvmrc`, or `deploy/` files:
+it runs `guard:boundaries` and `guard:lint:src` and prints a warning for either
+that fails, **without aborting the commit**. Node-pin consistency already ran
+once as an unconditional blocking pre-commit check, so the warning phase does
+not repeat it. These same guards are hard-enforced at push by
+`verify:push:branch` (Layer 2); the
+architectural-drift signal only surfaces drift earlier. Skip only that signal
+with `WHATSOUP_SKIP_DRIFT_WARN=1`.
 
 ## Layer 2 — Local pre-push guards
 
-Pre-push hook routes through `scripts/pre-push-guard.ts`:
+Pre-push routes through `scripts/pre-push-guard.ts`. Before classifying any ref
+update—including delete-only pushes—it requires a complete Git-estate scan and
+compares it with the machine-local baseline under the repository's common Git
+directory. It blocks newly introduced conflict instances, prunable/detached/
+locked worktrees, stashes, gone-upstream branches, and new critical housekeeping
+debt. New registered worktree or local-branch identities are reported as
+**advisory only** and never block, in either phase — the current invoking
+worktree identity and its checked-out branch identity are still evaluated
+independently and exempted only when that exact branch appears in a non-delete
+pre-push ref update, so the reported growth reflects only genuinely new
+identities, but even unexempted growth no longer blocks. The ratchet is
+repo-global while several agents work the repo concurrently, so growth is
+routinely caused by an agent other than the pusher, who cannot clear it: growth
+is an ID set difference, and retiring unrelated work does not offset it.
+
+Pre-push ref updates accept object IDs at exactly the 40-character SHA-1 or
+64-character SHA-256 width. Intermediate widths are malformed, and an all-zero
+local object ID at either supported width is treated as a deletion. A normal
+`git push -u origin HEAD` maps symbolic `HEAD` to its branch destination before
+the exact invoking-lane comparison; pushing `HEAD` to a differently named
+destination does not exempt the differently named local branch.
+
+For every non-delete push, the hook also binds the verification run to one exact
+candidate commit. The invoking worktree must be clean, the pushed candidate must
+resolve to its current `HEAD`, the configured WhatSoup push URL must be SSH, and
+the candidate must contain the live remote `main` read with `git ls-remote`.
+After the branch or release composite finishes, the hook rechecks the configured
+remote, `HEAD`, worktree cleanliness, and live `main`. A mid-run main advance is
+a retryable **INCONCLUSIVE** result: fetch and rebase or merge the latest main,
+rerun the gate, then push. The hook never rebases, stashes, or rewrites work.
+
+Missing or malformed baselines, malformed ref input or porcelain, Git command timeouts,
+and racing or incomplete scans are **INCONCLUSIVE** and fail closed. Worktree
+status scans use a four-worker bounded pool and every Git subprocess has a
+bounded timeout. Inherited critical debt, dirty worktrees, untracked files,
+missing upstreams, and ahead/behind/diverged branches remain explicit warnings
+so an unrelated in-flight lane is visible but does not become a working
+bottleneck. After reviewing the complete human snapshot, initialize or
+deliberately refresh the local ratchet with:
+
+```bash
+npm run guard:git-estate -- baseline write
+```
+
+The write is refused for incomplete or racing scans and atomically replaces only
+the machine-local v2 baseline; it does not clean, delete, prune, stash, or rewrite
+any repository state. The reader validates an exact canonical payload schema,
+safe integer counts, hashed identity shapes, sorted unique arrays, count/identity
+agreement, and a SHA-256 payload binding. This detects accidental or partial
+tampering; a same-user attacker who can rewrite both payload and digest is outside
+this local guard's threat boundary. Baseline acceptance is therefore an explicit
+owner action, not an automatic way to bless a newly observed conflict.
+
+Linked worktrees must use a worktree-relative hook path:
+
+```bash
+git config core.hooksPath .husky
+```
+
+Do not store an absolute primary-worktree path in `core.hooksPath`: Git shares
+that setting across linked worktrees, so an absolute value makes every lane run
+the primary worktree's potentially stale or in-flight hook bytes.
 
 | Push target | Composite script | Required checks |
 |---|---|---|
 | Branch push | `npm run verify:push:branch` | repo hygiene staged smoke, repo hygiene branch/base diff, publication staged guard, doc drift guard, public-surface drift guard, work-index guard, node-pin guard, source-runtime drift guard, BOT ERRORS runtime-manifest guard, simulation matrix guard, Claude settings guard, AskUser poll protocol guard, safeguard diagnostics, test-integrity baseline, ring/boundary/service/config guards, `npm run typecheck:all`, the targeted guard test list below, design-system hygiene guard, harness-maintenance manifest guard, tokenomics Python tests, and console lint + build (#1105: these last four mirror blocking CI quality-job steps so console strict-tsconfig/design-system/tokenomics violations fail fast locally; the slow coverage/drills/browser tail stays in `verify:release` and CI) |
 | `main` or release tag push | `npm run verify:release` | release repo hygiene, full publication audit, doc drift guard, public-surface drift guard, work-index guard, node-pin guard, source-runtime drift guard, BOT ERRORS runtime-manifest guard, simulation matrix guard, Claude settings guard, AskUser poll protocol guard, safeguard diagnostics, test-integrity baseline, ring/boundary/service/config guards, tokenomics/drills, `tools/whatsoup_guard` install/typecheck/test, console dependency install/lint/build, `npm run typecheck:all`, full Vitest suite with `--pool=forks --fileParallelism=false`, and coverage thresholds |
+| Delete-only push | metadata-only dispatcher path | `design:metrics` and `design:burndown`, each once through the pinned npm wrapper; content verification and console dependency prerequisites are skipped |
+
+Before branch or release verification starts, the dispatcher checks that the
+installed console package exposes executable `eslint`, `tsc`, and `vite`
+entrypoints, then uses the pinned npm wrapper to validate the complete installed
+package graph in offline, lifecycle-script-disabled mode. A missing or invalid
+package, plugin, or transitive dependency fails before the expensive composite
+with the remediation `npm ci --prefix console`. Child output is suppressed so
+the diagnostic stays bounded and cannot echo package-manager configuration.
+Delete-only pushes bypass this prerequisite so the file-based metadata checks
+remain runnable without console dependencies. Branch and release composites
+already include those metadata checks through `verify:console-design`; the hook
+does not repeat them.
 
 The "ring/boundary/service/config guards" phrasing above folds in several named
 guards that `verify:push:branch` runs. Spelled out:
 
 | Guard | Command | Purpose | Also in CI (`quality.yml`)? |
 |---|---|---|---|
+| Git estate awareness | `npm run guard:git-estate -- guard --phase pre-push` | Snapshot all linked worktrees twice plus branch/upstream state, stash object identity, and conflict-instance identity; fail closed on malformed porcelain, timeouts, incomplete/racing scans, invalid v2 local baselines, new conflicts, and new critical housekeeping debt; new worktree/branch identities are reported advisory-only and never block — the ratchet is repo-global while several agents work the repo concurrently, so growth is routinely caused by an agent other than the pusher, who cannot clear it (growth is an ID set difference; retiring unrelated work does not offset it). | no (local estate only) |
 | Service unit validity | `npm run guard:service-units` | Validate launchd plists / systemd units (label == filename stem, no bare/`env` node, no unexpanded `${VAR}`, node-pin match, absolute well-formed paths, valid plist structure). | yes |
 | Instance config integrity | `npm run guard:instance-config` | Verify instance `config.json` files for memory-config integrity (non-empty `memory.pinecone.expectedHostSuffix`, no UUID-shaped `projectId` host trap) and per-host health-port map integrity. | yes |
 | Fail-closed gate | `npm run guard:fail-closed-gate` | Reject fail-open shell gate shapes: a probe that substitutes a sentinel on failure (`\|\| echo "000"`, `\|\| true`) then gates only on success, and the `grep -c ... \|\| echo 0` double-zero shape. | yes |
 | Fleet bot-hardening parity | `npm run guard:fleet-bot-hardening-parity` | Verify the redacted fleet bot-hardening parity manifest and its source anchors stay aligned with the A–D provider-resilience standard. | yes |
-| ARC binding drift | `npm run guard:arc-binding-drift` | Verify the tracked `.arc/` shim. Always-on vendored-pin check (`.arc/.canonical-sha` vs the payload sha in `arc.toml`/`ARC_BINDING.md`) hard-blocks a stale `.arc/` even in CI without the sibling repo; when the sibling agent-runtime-protocol is reachable (via `ARC_REPO_DIR`), additionally runs the full byte-for-byte adopt-generator comparison and cross-checks the pin against the live sha. | no (pre-push only) |
+| ARC binding drift | `npm run guard:arc-binding-drift` | Verify the tracked `.arc/` shim. Always-on vendored-pin check (`.arc/.canonical-sha` vs the payload sha in `arc.toml`/`ARC_BINDING.md`) hard-blocks a stale `.arc/` even in CI without the sibling repo; when the sibling agent-runtime-protocol is reachable (via `ARC_REPO_DIR`), additionally runs the full byte-for-byte adopt-generator comparison and cross-checks the pin against the live sha. | yes |
 | Guard test coverage (meta-guard) | `npm run guard:guard-test-coverage` | Meta-guard: every guard-family script (`scripts/*guard*.ts`, `scripts/check-*.ts`) must ship a companion test wired into `verify:push:branch`, or carry a `// meta-guard:no-test <reason>` opt-out. | no (pre-push only) |
 
 ### Regenerating the ARC binding shim (`.arc/`)
@@ -85,7 +196,9 @@ headroom above every enforced V8 threshold.
 
 `verify:push:branch` runs this targeted guard-test list:
 - `repo-hygiene-guard.test.ts`
+- `pre-push-alignment.test.ts`
 - `pre-push-guard.test.ts`
+- `git-estate-guard.test.ts`
 - `doc-drift-check.test.ts`
 - `public-surface-drift-check.test.ts`
 - `drift-skip-ci-gating.test.ts`
