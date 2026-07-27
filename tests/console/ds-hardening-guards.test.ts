@@ -107,26 +107,25 @@ describe('freshness contract — data hooks carry queryFreshness (#1925/#1934)',
 // ---------------------------------------------------------------------------
 
 /** Frozen inventory of permitted infinite animations: name → the exact
- *  files allowed to declare/consume it. breathe + breathe-ring = the
- *  sanctioned ok-breathing family (the ONE ambient class); typing-bounce +
- *  shimmer = loading choreography (waivered WVR-005/006). */
+ *  files allowed to declare/consume it. T5 b-11 (13-ceremony-motion §1):
+ *  EXACTLY ONE loop product-wide — ambient-disc, on the live status disc,
+ *  declared only in motion.css. The v3 family (breathe-ring, breathe,
+ *  typing-bounce, shimmer) is retired. */
 const PERMITTED_LOOPS: Record<string, Set<string>> = {
-  'breathe-ring': new Set([
-    'console/src/styles/composites.css',
-    'console/src/styles/primitives.css',
-  ]),
-  'breathe': new Set(['console/src/styles/composites.css']),
-  'typing-bounce': new Set(['console/src/styles/composites.css']),
-  'shimmer': new Set(['console/src/styles/composites.css']),
+  'ambient-disc': new Set(['console/src/styles/motion.css']),
 }
 
 describe('ambient-loop budget — no new infinite animations without a G-gate (motion.md §8)', () => {
-  const cssFiles = ['console/src/styles/composites.css', 'console/src/styles/primitives.css']
+  const cssFiles = [
+    'console/src/styles/composites.css',
+    'console/src/styles/primitives.css',
+    'console/src/styles/motion.css',
+  ]
   const animRe = /animation:\s*([\w-]+)[^;]*\binfinite\b/g
 
-  it('finds the permitted loops (anti-empty-glob — proves the scan is real)', () => {
+  it('finds the permitted loop (anti-empty-glob — proves the scan is real)', () => {
     const hits = cssFiles.flatMap((f) => Array.from(read(f).matchAll(animRe)))
-    expect(hits.length).toBeGreaterThanOrEqual(4)
+    expect(hits.length).toBeGreaterThanOrEqual(1)
   })
 
   it('every infinite animation is a permitted loop in its permitted file', () => {

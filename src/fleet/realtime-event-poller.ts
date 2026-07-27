@@ -170,6 +170,14 @@ export class FleetRealtimeEventPoller {
 
   private async pollTyping(instances: Map<string, any>): Promise<void> {
     const currentTyping = new Map<string, number>();
+    // #2137: failure-to-observe and observed-empty are different states. A probe
+    // that times out or returns non-200 tells us nothing about that instance's
+    // typing set, but the old code let its absence from `currentTyping` look
+    // identical to "the instance reported nobody is typing" — publishing a false
+    // `composing: false` for every prior key and then overwriting `lastTyping`
+    // with the partial map. Only instances that answered are eligible to have
+    // their entries retired.
+    const observed = new Set<string>();
 
     const promises = Array.from(instances.values()).map(async (inst) => {
       if (!inst.healthPort) return;
@@ -177,6 +185,9 @@ export class FleetRealtimeEventPoller {
         const result = await proxyToInstance(inst.healthPort, '/typing', 'GET', null, inst.healthToken, 2000);
         if (result.status !== 200) return;
         const data = JSON.parse(result.body);
+        // Marked observed only after a parseable 200: a body that throws below
+        // is as uninformative as a timeout.
+        observed.add(inst.name);
         if (Array.isArray(data.composing)) {
           for (const entry of data.composing) {
             if (!isTypingHealthEntry(entry)) continue;
@@ -184,7 +195,7 @@ export class FleetRealtimeEventPoller {
             currentTyping.set(key, entry.since);
           }
         }
-      } catch { /* skip */ }
+      } catch { /* intentional: one unreachable instance simply stays unobserved for this poll cycle */ }
     });
 
     await Promise.all(promises);
@@ -198,14 +209,28 @@ export class FleetRealtimeEventPoller {
       }
     }
 
-    // Emit typing_update (composing=false) for entries that disappeared
-    for (const [key] of this.lastTyping) {
-      if (!currentTyping.has(key)) {
-        const [instance, jid] = key.split('|');
-        publishTypingUpdate(this.deps.realtime, instance, jid, false);
+    // Emit typing_update (composing=false) for entries that disappeared — but
+    // only for instances we actually heard from this cycle (#2137).
+    const next = new Map(currentTyping);
+    for (const [key, since] of this.lastTyping) {
+      if (currentTyping.has(key)) continue;
+      // Split on the FIRST separator: the instance name is the prefix, and a JID
+      // may legitimately contain further ones.
+      const sep = key.indexOf('|');
+      const instance = key.slice(0, sep);
+      if (!observed.has(instance)) {
+        // Unobserved: make no claim either way, and carry the prior entry
+        // forward so the next successful probe compares against real history
+        // instead of an empty map. An instance that has left the fleet is NOT
+        // carried — it can never be observed again, and holding its keys would
+        // leak them forever.
+        if (instances.has(instance)) next.set(key, since);
+        else publishTypingUpdate(this.deps.realtime, instance, key.slice(sep + 1), false);
+        continue;
       }
+      publishTypingUpdate(this.deps.realtime, instance, key.slice(sep + 1), false);
     }
 
-    this.lastTyping = currentTyping;
+    this.lastTyping = next;
   }
 }

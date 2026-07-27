@@ -69,6 +69,7 @@ vi.mock('../../src/lib/emit-alert.ts', () => ({
 // ---------------------------------------------------------------------------
 
 import { CURRENT_SCHEMA_MIGRATION, Database } from '../../src/core/database.ts';
+import { recordContinuityGaps } from '../../src/core/continuity-gap-ledger.ts';
 import { DurabilityEngine } from '../../src/core/durability.ts';
 import { config } from '../../src/config.ts';
 import { emitHealReport, resetDeliveryUnavailableLatch } from '../../src/core/heal.ts';
@@ -870,6 +871,8 @@ describe('GET /health', () => {
                 identityHash: 'b'.repeat(20),
               },
               treeHash: 'c'.repeat(20),
+              fileCount: 14,
+              totalBytes: 1234,
               backup: {
                 root: '/state/auth-bond-backups/test',
                 latest: '/state/auth-bond-backups/test/history/latest',
@@ -914,6 +917,8 @@ describe('GET /health', () => {
             creds: { path: '/auth/creds.json', exists: true, mode: '600', size: 512, mtime: '2026-06-09T12:00:00.000Z', sha256: 'a'.repeat(64) },
             meHash: 'b'.repeat(20),
             treeHash: 'c'.repeat(64),
+            fileCount: 14,
+            totalBytes: 1234,
             backup: {
               root: '/state/auth-bond-backups/test',
               latest: '/state/auth-bond-backups/test/history/latest',
@@ -942,6 +947,8 @@ describe('GET /health', () => {
       creds: { hash: 'a'.repeat(20), mode: '600', empty_hash: false },
       me_hash: 'b'.repeat(20),
       tree_hash: 'c'.repeat(20),
+      file_count: 14,
+      total_bytes: 1234,
       backup: {
         latest: '/state/auth-bond-backups/test/history/latest',
         latest_reason: 'connection-open',
@@ -959,6 +966,8 @@ describe('GET /health', () => {
       currentAuthBond: {
         status: 'present',
         creds: { hash: 'a'.repeat(20), identityHash: 'b'.repeat(20) },
+        fileCount: 14,
+        totalBytes: 1234,
       },
     });
     db2.close();
@@ -1301,6 +1310,105 @@ describe('GET /health', () => {
     db2.close();
   });
 
+  it('publishes exact degradation causes for an otherwise-operational fallback', async () => {
+    db.close();
+    const db2 = makeDb();
+    const activeUntil = Date.now() + 600_000;
+    let retainedRetries = 0;
+    let active: boolean | undefined;
+    let fallbackChainExhausted = false;
+    let failedEntryCount = 0;
+    let modelUsable: boolean | null = false;
+    let modelUsableStale = false;
+    const fakeAgentRuntime = {
+      getHealthSnapshot: () => ({
+        status: 'degraded',
+        details: {
+          recentCrashes: 0,
+          ...(active === undefined ? {} : { active }),
+          turnFinalizationRetainedRetries: retainedRetries,
+          turnFinalizationDegradedScopes: 0,
+          turnRecoveryOutstanding: 0,
+          turnRecoveryExhausted: 0,
+          turnRecoveryOpenRecoveries: 0,
+          turnRecoveryCorruptLinks: 0,
+          turnRecoveryEchoConflicts: 0,
+          providerExecution: { pressureActive: false },
+          turnCapability: {
+            modelUsable,
+            modelUsableStale,
+            modelUsabilityStatus: 'provider-unavailable',
+            lastSuccessfulTurnAt: Date.now() - 1_000,
+            lastTurnErrorClass: null,
+            lastTurnErrorAt: null,
+          },
+        },
+      }),
+      getFallbackState: () => ({
+        effectiveProvider: 'opencode-cli',
+        fallbackActiveUntil: activeUntil,
+        fallbackReason: 'usage-limit',
+        fallbackModel: 'configured/fallback',
+        fallbackChainExhausted,
+        failedEntryCount,
+      }),
+    };
+    const deps = makeDeps(db2, {
+      instanceType: 'agent',
+      runtime: fakeAgentRuntime as unknown as HealthDeps['runtime'],
+    });
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    ({ server, port } = await buildTestServer(deps));
+
+    const { status, body } = await httpReq(port, '/health', 'GET');
+    expect(status).toBe(200);
+    const json = JSON.parse(body);
+    expect(json.status).toBe('degraded');
+    expect(json.degradation_causes).toEqual([
+      'provider_fallback_active',
+      'primary_model_unusable',
+    ]);
+
+    retainedRetries = 1;
+    const withRetryDebt = JSON.parse((await httpReq(port, '/health', 'GET')).body);
+    expect(withRetryDebt.degradation_causes).toEqual([
+      'provider_fallback_active',
+      'primary_model_unusable',
+      'turn_finalization_degraded',
+    ]);
+
+    retainedRetries = 0;
+    active = false;
+    const withInactiveSession = JSON.parse((await httpReq(port, '/health', 'GET')).body);
+    expect(withInactiveSession.degradation_causes).toEqual([
+      'provider_fallback_active',
+      'primary_model_unusable',
+      'agent_session_inactive',
+    ]);
+
+    active = undefined;
+    fallbackChainExhausted = true;
+    failedEntryCount = 1;
+    const withFallbackFailures = JSON.parse((await httpReq(port, '/health', 'GET')).body);
+    expect(withFallbackFailures.degradation_causes).toEqual([
+      'provider_fallback_active',
+      'fallback_chain_exhausted',
+      'fallback_entry_failures',
+      'primary_model_unusable',
+    ]);
+
+    fallbackChainExhausted = false;
+    failedEntryCount = 0;
+    modelUsable = null;
+    modelUsableStale = true;
+    const withStalePrimaryEvidence = JSON.parse((await httpReq(port, '/health', 'GET')).body);
+    expect(withStalePrimaryEvidence.degradation_causes).toEqual([
+      'provider_fallback_active',
+      'primary_model_evidence_stale',
+    ]);
+    db2.close();
+  });
+
   it('threads #1392 modelUsableStale/modelUsableCheckedAt into runtime.agent and top-level turn_capability (F1)', async () => {
     // Regression for the half-deployed #1392: the freshness fields were exposed on
     // instance.turnCapability (via getFallbackState) but dropped from the core/health.ts
@@ -1532,6 +1640,67 @@ describe('GET /health', () => {
     expect(json.sqlite.schema_migration_latest).toBe(CURRENT_SCHEMA_MIGRATION);
     expect(json.sqlite.schema_ready).toBe(true);
     expect(json.sqlite.pending_polls_readable).toBe(true);
+  });
+
+  it('keeps health degraded while external-history continuity gaps remain open', async () => {
+    recordContinuityGaps(db.raw, [
+      {
+        ordinal: 1,
+        classification: 'absent',
+        receiptFingerprint: 'a'.repeat(64),
+        destinationFingerprint: 'b'.repeat(64),
+        manifestFingerprint: 'c'.repeat(64),
+        evidenceFingerprint: 'd'.repeat(64),
+      },
+      {
+        ordinal: 2,
+        classification: 'ambiguous',
+        receiptFingerprint: 'e'.repeat(64),
+        destinationFingerprint: 'b'.repeat(64),
+        manifestFingerprint: 'c'.repeat(64),
+        evidenceFingerprint: 'd'.repeat(64),
+      },
+    ]);
+
+    const { status, body } = await httpReq(port, '/health', 'GET');
+    const json = JSON.parse(body);
+    expect(status).toBe(200);
+    expect(json.status).toBe('degraded');
+    expect(json.degradation_causes).toContain('continuity_gap_open');
+    expect(json.continuity).toEqual({
+      readable: true,
+      open: 2,
+      unresolved: 1,
+      ambiguous: 1,
+    });
+    expect(body).not.toContain('continuity-gap:v1:');
+    expect(body).not.toContain('a'.repeat(64));
+  });
+
+  it('fails health closed when reserved continuity state has a foreign owner', async () => {
+    db.raw.prepare(`
+      INSERT INTO recovery_plans (plan_id, origin, actor, summary)
+      VALUES ('foreign-continuity-state', 'operator', 'other_recovery_owner',
+              'Unrelated recovery work')
+    `).run();
+    db.raw.prepare(`
+      INSERT INTO recovery_runs (trigger, recovery_plan_id, status)
+      VALUES ('continuity_gap_absent', 'foreign-continuity-state', 'started')
+    `).run();
+
+    const { status, body } = await httpReq(port, '/health', 'GET');
+    const json = JSON.parse(body);
+    expect(status).toBe(200);
+    expect(json.status).toBe('degraded');
+    expect(json.degradation_causes).toContain('continuity_gap_unreadable');
+    expect(json.continuity).toEqual({
+      readable: false,
+      open: 0,
+      unresolved: 0,
+      ambiguous: 0,
+    });
+    expect(body).not.toContain('foreign-continuity-state');
+    expect(body).not.toContain('other_recovery_owner');
   });
 
   it('degrades health when the applied migration version is behind the code-required schema', async () => {
@@ -2983,10 +3152,13 @@ describe('health command endpoints — malformed bodies and side effects', () =>
     );
 
     expect(status).toBe(200);
+    // `remote` reaches the HTTP body because the handler serialises the result
+    // verbatim; no socket and no messages means there was no receipt to send.
     expect(JSON.parse(body)).toEqual({
       ok: true,
       jid: '15551234567@s.whatsapp.net',
       conversation_key: '15551234567',
+      remote: 'nothing_to_ack',
     });
     const row = db.raw
       .prepare('SELECT unread_count FROM chats WHERE conversation_key = ?')

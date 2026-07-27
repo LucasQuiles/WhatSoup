@@ -1,185 +1,90 @@
 /**
- * Landing.tsx — the SOUP splash / landing page (showcase §view-brand reproduction).
- *
- * Faithful reproduction of the showcase brand/hero in v3 design-system vocabulary:
- *   - the SOUP nameplate (teal tick + spaced-caps mark), rendered inline per brand.md §1
- *     (the shared Nameplate component is not yet on main);
- *   - the "Run your agents like a fleet." hero with the electric-blue accent on "fleet.";
- *   - the three value-prop cards — Spin up a Line / Watch it breathe / Heal before it hurts —
- *     each with its index overline, supporting copy, and a shape-driven glyph;
- *   - a primary CTA into the console ("Open the Fleet" → navigate to /).
- *
- * Layout follows layout-density.md composition: a Container caps the measure; every gap is
- * owned by the parent (no margins between siblings). Type stays inside the v3 closed ramp —
- * brand.md §1.4 sanctions a round, tightly-tracked display read for the landing surface, but
- * the named ramp (largest sans tier) carries it; no marketing-scale raw font sizes.
- *
- * Motion: entrance fade/rise honours prefers-reduced-motion via the page-local
- * MotionConfig reducedMotion="user" (motion.md reduced-motion contract).
+ * Landing (welcome splash) — v3.5 first-run surface (T5 b-10; mockup
+ * splash.html SSOT). Hero + proof triptych + glyph watermarks (L7 imagery:
+ * abstract glyph geometry, opacity 0.04–0.05, pointer-events none).
+ * Journey register throughout; theme toggle is real (useTheme).
  */
-import { type FC, type ReactNode } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { MotionConfig, motion } from 'framer-motion'
-import { Card, Button } from '../components/primitives'
+import type { FC } from 'react'
+import { useTheme } from '../hooks/use-theme'
+import { Button } from '../components/primitives/Button'
 
-// motion.md easing — the standard entrance curve; reduced-motion strips it at MotionConfig.
-const EASE = [0.22, 1, 0.36, 1] as const
-
-// ---------------------------------------------------------------------------
-// SOUP wordmark (brand.md §1) — the shared .soup-nameplate lockup: teal tick +
-// the Bricolage display brand wordmark with the accent "U" (SO·U·P). Same classes
-// as the Nav rail so the mark stays identical everywhere it appears.
-// ---------------------------------------------------------------------------
-const Nameplate: FC = () => (
-  <span className="soup-nameplate" aria-label="SOUP">
-    <span aria-hidden="true" className="soup-nameplate__tick" />
-    <span aria-hidden="true" className="soup-nameplate__wm">
-      SO<span className="soup-nameplate__accent">U</span>P
-    </span>
-  </span>
-)
-
-// ---------------------------------------------------------------------------
-// Value-prop glyphs — shape-driven (color.md §6: shape, not colour alone), drawn in
-// accent ink at low opacity to echo the showcase triptych without a second hue.
-// ---------------------------------------------------------------------------
-const ProvisionGlyph: FC = () => (
-  <svg width="56" height="56" viewBox="0 0 32 32" aria-hidden="true" focusable="false">
-    <rect x="8" y="9" width="16" height="3" rx="1.5" fill="var(--accent)" opacity="0.20" />
-    <rect x="8" y="14" width="11" height="3" rx="1.5" fill="var(--accent)" opacity="0.14" />
-    <rect x="8" y="19" width="14" height="3" rx="1.5" fill="var(--accent)" opacity="0.09" />
-  </svg>
-)
-const MonitorGlyph: FC = () => (
-  <svg width="56" height="56" viewBox="0 0 32 32" aria-hidden="true" focusable="false">
-    <circle cx="16" cy="16" r="7" fill="none" stroke="var(--accent)" strokeWidth="2" opacity="0.18" />
-    <circle cx="16" cy="16" r="2.5" fill="var(--accent)" opacity="0.18" />
-  </svg>
-)
-const RecoverGlyph: FC = () => (
-  <svg width="56" height="56" viewBox="0 0 32 32" aria-hidden="true" focusable="false">
-    <path d="M16 7 A9 9 0 1 1 7 16" fill="none" stroke="var(--accent)" strokeWidth="2" opacity="0.18" strokeLinecap="round" />
-    <path d="M16 4 l3 3 -3 3" fill="none" stroke="var(--accent)" strokeWidth="2" opacity="0.18" strokeLinecap="round" strokeLinejoin="round" />
-  </svg>
-)
-
-interface ValueProp {
-  index: string
-  glyph: ReactNode
-  title: string
-  copy: string
-}
-
-// Showcase §view-brand triptych copy — locked vocabulary (Line, not WhatsApp).
-const VALUE_PROPS: ValueProp[] = [
+const PROPS = [
   {
-    index: '01 / Provision',
-    glyph: <ProvisionGlyph />,
-    title: 'Spin up a Line',
-    copy: 'Name it, link it, pick a mode — agent, chat, or passive. The wizard provisions a workspace and a scoped MCP socket in one pass.',
+    n: '01 — Hatch',
+    h: 'An agent in minutes',
+    p: 'Pick a kind, link a channel, watch it come alive. Persona, brain and permissions included.',
   },
   {
-    index: '02 / Monitor',
-    glyph: <MonitorGlyph />,
-    title: 'Watch it breathe',
-    copy: 'Live heartbeats, neutral traffic counters, and per-provider token spend. Attention is a metric, not a vibe.',
+    n: '02 — Command',
+    h: 'Every line in view',
+    p: 'Real-time fleet across all your channels and deployments. Attention finds you, not the reverse.',
   },
   {
-    index: '03 / Recover',
-    glyph: <RecoverGlyph />,
-    title: 'Heal before it hurts',
-    copy: 'The durability engine catches dead-letters and runtime skew, then restarts the right unit — before the chat goes quiet.',
+    n: '03 — Trust',
+    h: 'You stay in charge',
+    p: 'Grants decide what agents can see and do. Every self-suggested change waits for your approval.',
   },
-]
+] as const
 
 const Landing: FC = () => {
   const navigate = useNavigate()
+  const { theme, toggleTheme } = useTheme()
 
   return (
-    <MotionConfig reducedMotion="user">
-      <main
-        aria-labelledby="landing-hero-title"
-        // The splash is its own top-level scroll owner; min-h-0 proves the axis floor
-        // so the content lane can shrink-and-scroll rather than overflow its parent.
-        className="h-dvh min-h-0 overflow-y-auto bg-surface-base text-text-1"
+    <main className="journey-splash" aria-labelledby="splash-h1">
+      <Button
+        variant="ghost"
+        className="journey-theme-toggle"
+        onClick={toggleTheme}
+        aria-label={`Switch to ${theme === 'dark' ? 'light' : 'dark'} theme`}
       >
-        {/* Container — caps the measure, owns vertical rhythm via gap (no sibling margins). */}
-        <div className="flex flex-col gap-[var(--sp-12)] mx-auto max-w-[var(--landing-max-w)] w-full py-[var(--sp-12)] px-[var(--sp-6)] sm:px-[var(--sp-8)]">
-          {/* Brand row — the nameplate sits alone at the top of the splash. */}
-          <motion.div
-            initial={{ opacity: 0, y: 8 }}
-            animate={{ opacity: 1, y: 0 }}
-            transition={{ duration: 0.4, ease: EASE }}
-          >
-            <Nameplate />
-          </motion.div>
+        theme
+      </Button>
+      {/* L7 watermarks — abstract glyph geometry, decorative only */}
+      <svg className="journey-wm-glyph journey-wm-glyph--g1" viewBox="0 0 16 16" aria-hidden="true">
+        <path d="M8 1a7 7 0 0 0-6 10.5L1 15l3.6-1A7 7 0 1 0 8 1z" />
+      </svg>
+      <svg className="journey-wm-glyph journey-wm-glyph--g2" viewBox="0 0 16 16" aria-hidden="true">
+        <path d="M8 1.5 14 5v6l-6 3.5L2 11V5z" />
+      </svg>
 
-          {/* Hero — the headline + supporting copy + CTA, stacked with owned gap. */}
-          <motion.section
-            className="flex flex-col gap-[var(--sp-6)]"
-            initial={{ opacity: 0, y: 12 }}
-            animate={{ opacity: 1, y: 0 }}
-            transition={{ duration: 0.5, ease: EASE, delay: 0.05 }}
-          >
-            <p className="font-mono uppercase text-accent text-sm tracking-[var(--tracking-wide)]">
-              Multi-channel agent infrastructure
-            </p>
-            <h1
-              id="landing-hero-title"
-              className="font-[family-name:var(--font-display)] font-black text-text-1 text-4xl tracking-[var(--tracking-tighter)] max-w-[var(--landing-hero-measure)]"
-            >
-              Run your agents like a <span className="text-accent">fleet.</span>
-            </h1>
-            <p className="font-sans text-text-2 text-lg leading-relaxed max-w-[var(--landing-prose-measure)]">
-              SOUP is the operations console for conversational agents — provision a Line on any
-              channel, watch it breathe, and recover it before anyone notices. No drift, no
-              guesswork, no sterile dashboards.
-            </p>
-            <div className="flex items-center gap-[var(--sp-3)] flex-wrap">
-              <Button
-                variant="primary"
-                onClick={() => navigate('/')}
-                iconEnd={<span aria-hidden="true">&rarr;</span>}
-              >
-                Open the Fleet
-              </Button>
-            </div>
-          </motion.section>
-
-          {/* Value-prop triptych — three cards; the grid owns the gutter via gap. */}
-          <motion.section
-            aria-label="What SOUP does"
-            className="grid grid-cols-1 gap-[var(--sp-4)] md:grid-cols-3"
-            initial={{ opacity: 0, y: 12 }}
-            animate={{ opacity: 1, y: 0 }}
-            transition={{ duration: 0.5, ease: EASE, delay: 0.1 }}
-          >
-            {VALUE_PROPS.map((vp) => (
-              <Card key={vp.title} className="flex flex-col gap-[var(--sp-3)] p-[var(--sp-6)]">
-                <span aria-hidden="true">{vp.glyph}</span>
-                <span className="font-mono uppercase text-accent text-sm tracking-[var(--tracking-label)]">
-                  {vp.index}
-                </span>
-                <h2 className="font-[family-name:var(--font-display)] font-semibold text-text-1 text-xl tracking-[var(--tracking-tight)]">
-                  {vp.title}
-                </h2>
-                <p className="font-sans text-text-2 text-body leading-relaxed">{vp.copy}</p>
-              </Card>
-            ))}
-          </motion.section>
-
-          {/* Closing line — echoes the showcase sign-off; the accent carries identity only. */}
-          <motion.p
-            className="font-mono text-text-3 text-sm tracking-[var(--tracking-pill)]"
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            transition={{ duration: 0.4, ease: EASE, delay: 0.18 }}
-          >
-            SOUP — fleet operations for conversational agents
-          </motion.p>
+      <div className="journey-hero">
+        <div className="journey-hero__plate">
+          <span className="journey-hero__tick" />
+          <span className="journey-wm journey-wm--hero">
+            SO<b>U</b>P
+          </span>
         </div>
-      </main>
-    </MotionConfig>
+        <h1 id="splash-h1">
+          Run your agents
+          <br />
+          like a <span className="journey-accent">fleet.</span>
+        </h1>
+        <p className="journey-splash-sub">
+          One calm console for every channel — WhatsApp, Signal, iMessage, socials and more. Hatch
+          an agent, give it a line, and watch it work.
+        </p>
+        <div className="journey-cta">
+          <Button variant="primary" className="journey-splash__primary" onClick={() => navigate('/hatch')}>
+            Hatch your first agent →
+          </Button>
+          <Button variant="ghost" className="journey-splash__ghost" onClick={() => navigate('/')}>
+            Open the Fleet
+          </Button>
+        </div>
+      </div>
+
+      <div className="journey-props">
+        {PROPS.map((prop) => (
+          <div key={prop.n} className="journey-prop">
+            <div className="journey-prop__n">{prop.n}</div>
+            <h2>{prop.h}</h2>
+            <p>{prop.p}</p>
+          </div>
+        ))}
+      </div>
+    </main>
   )
 }
 

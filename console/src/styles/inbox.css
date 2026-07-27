@@ -1,0 +1,538 @@
+/* ═══════════════════════════════════════════════════════════════════════════
+   v3.5 Inbox surface (T5 b-07) — mockup inbox.html SSOT.
+   Consumes the --inbox-* component geometry (tokens.component.css) and the
+   -v35 semantic color register only; raw mockup dimensions never land here.
+   Font SIZES come from the --text-* and --type-* scales (weight + leading
+   raw, the b-03 fleet idiom); 1px hairlines are var(--bw).
+   Layout notes: the mockup's own breakpoints — context pane hides
+   ≤1100px (list narrows to --inbox-list-w-narrow), the list collapses into
+   a CSS-only master-detail switch ≤760px (fifth distinct SSOT breakpoint;
+   data-mobile-detail mirrors the retired v3 band's ethos: selection state
+   stays the React source of truth, CSS picks the visible pane).
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+/* ── Page root: owns its column; panes scroll internally ── */
+.inbox-page {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+}
+
+/* Single-h1 law: chrome's header title is an aria-hidden span, so the surface
+   owns the document h1 — visually hidden (sr-only clip, --bw idiom). */
+.inbox-sr-h1 {
+  position: absolute;
+  width: var(--bw);
+  height: var(--bw);
+  padding: 0;
+  margin: calc(-1 * var(--bw));
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* ── Channel chips (mockup .chips / .chip) ── */
+.inbox-chips {
+  display: flex;
+  gap: var(--inbox-chips-gap);
+  padding: var(--inbox-chips-pad);
+  flex-wrap: wrap;
+}
+.inbox-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--inbox-chip-gap);
+  padding: var(--inbox-chip-pad);
+  border-radius: var(--chrome-pill-radius);
+  border: var(--bw) solid var(--border-hairline-v35);
+  background: var(--surface-raised-v35);
+  color: var(--text-2-v35);
+  font: 500 var(--text-sm) / 1.3 var(--font-mono);
+  cursor: pointer;
+  height: auto; /* release the soup-btn md height — mockup chips are padding-defined */
+}
+.inbox-chip:hover { color: var(--text-1-v35); }
+.inbox-chip--on {
+  border-color: var(--accent-v35);
+  color: var(--text-1-v35);
+  background: color-mix(in srgb, var(--accent-v35) 10%, transparent);
+}
+.inbox-chip__glyph { width: var(--inbox-ava-glyph); height: var(--inbox-ava-glyph); fill: currentColor; }
+.inbox-chip__c { color: var(--text-3-v35); }
+
+/* ── 3-pane wrap (mockup .wrap) ── */
+.inbox-wrap {
+  flex: 1;
+  display: grid;
+  grid-template-columns: var(--inbox-list-w) 1fr var(--inbox-ctx-w);
+  min-height: 0;
+  margin-top: var(--inbox-wrap-mt);
+  border-top: var(--bw) solid var(--border-hairline-v35);
+}
+
+/* ── Conversation list (mockup .list) ── */
+.inbox-list {
+  border-right: var(--bw) solid var(--border-hairline-v35);
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+.inbox-list__scroll { flex: 1; overflow: auto; min-height: 0; }
+.inbox-list__lane { position: relative; }
+.inbox-list__row { position: absolute; top: 0; left: 0; width: 100%; }
+.inbox-list__empty {
+  color: var(--text-3-v35);
+  font: 400 var(--text-data) / 1.35 var(--font-body);
+  padding: var(--inbox-citem-pad);
+}
+
+/* seg control (mockup .seg) */
+.inbox-seg { display: flex; gap: var(--inbox-seg-gap); padding: var(--inbox-seg-pad); }
+.inbox-seg button {
+  flex: 1;
+  border: none;
+  background: var(--surface-inset-v35);
+  color: var(--text-3-v35);
+  font: 600 var(--text-sm) / 1.3 var(--font-mono);
+  padding: var(--inbox-seg-btn-pad-y) 0;
+  border-radius: var(--inbox-seg-btn-radius);
+  cursor: pointer;
+  height: auto; /* release the soup-btn md height — mockup seg is padding-defined */
+}
+.inbox-seg button.on {
+  background: color-mix(in srgb, var(--accent-v35) 12%, transparent);
+  color: var(--text-1-v35);
+  box-shadow: inset 0 0 0 var(--bw) color-mix(in srgb, var(--accent-v35) 45%, transparent);
+}
+
+/* conversation item (mockup .citem) */
+.inbox-citem {
+  display: flex;
+  gap: var(--inbox-citem-gap);
+  padding: var(--inbox-citem-pad);
+  cursor: pointer;
+  border-left: var(--inbox-citem-border-w) solid transparent;
+}
+.inbox-citem:hover { background: var(--surface-raised-v35); }
+.inbox-citem--sel {
+  background: var(--surface-raised-v35);
+  border-left-color: var(--accent-v35);
+}
+.inbox-citem__mid { flex: 1; min-width: 0; }
+.inbox-citem__row1 { display: flex; align-items: center; gap: var(--inbox-chips-gap); }
+.inbox-citem__nm {
+  font-weight: 600;
+  font-size: var(--text-data);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--text-1-v35);
+}
+.inbox-citem__tm {
+  margin-left: auto;
+  font: 400 var(--text-sm) / 1.3 var(--font-mono);
+  color: var(--text-3-v35);
+  flex: none;
+}
+.inbox-citem__pv {
+  color: var(--text-3-v35);
+  font-size: var(--text-sm);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  margin-top: var(--inbox-citem-pv-mt);
+}
+.inbox-citem__badges { display: flex; gap: var(--inbox-badges-gap); margin-top: var(--inbox-badges-mt); }
+.inbox-citem__badges .inbox-ub { margin-left: auto; }
+
+/* avatar anatomy (mockup .ava) — 12-agent-identity: initials, shape per kind */
+.inbox-ava {
+  width: var(--inbox-ava);
+  height: var(--inbox-ava);
+  border-radius: var(--inbox-ava-radius);
+  background: var(--surface-overlay-v35);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font: 700 var(--text-data) / 1 var(--font-body);
+  color: var(--text-2-v35);
+  flex: none;
+  position: relative;
+}
+.inbox-ava--grp { border-radius: var(--inbox-ava-grp-radius); }
+.inbox-ava__glyph {
+  width: var(--inbox-ava-glyph);
+  height: var(--inbox-ava-glyph);
+  fill: var(--text-3-v35);
+  position: absolute;
+  right: var(--inbox-ava-glyph-off);
+  bottom: var(--inbox-ava-glyph-off);
+  background: var(--surface-base-v35);
+  border-radius: 50%;
+  padding: var(--bw);
+}
+.inbox-ava--thead { width: var(--inbox-thead-ava); height: var(--inbox-thead-ava); }
+.inbox-ava--pcard {
+  width: var(--inbox-pcard-ava);
+  height: var(--inbox-pcard-ava);
+  border-radius: var(--inbox-pcard-ava-radius);
+  font-size: var(--text-body);
+}
+
+/* unread + takeover badges (mockup .ub / .take) */
+.inbox-ub {
+  font: 700 var(--text-sm) / 1.2 var(--font-mono);
+  padding: var(--inbox-ub-pad);
+  border-radius: var(--chrome-pill-radius);
+  background: var(--surface-overlay-v35);
+  border: var(--bw) solid var(--border-strong-v35);
+  color: var(--text-1-v35);
+}
+.inbox-take {
+  font: 700 var(--text-sm) / 1.2 var(--font-mono);
+  padding: var(--inbox-ub-pad);
+  border-radius: var(--chrome-pill-radius);
+  background: color-mix(in srgb, var(--status-warn-solid) 14%, transparent);
+  color: var(--status-warn-fg);
+}
+.inbox-take::before { content: "◆ "; }
+
+/* ── Thread (mockup .thread) ── */
+.inbox-thread { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+.inbox-thread__empty {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+/* thread header (mockup .thead) */
+.inbox-thead {
+  display: flex;
+  align-items: center;
+  gap: var(--inbox-thead-gap);
+  padding: var(--inbox-thead-pad);
+  border-bottom: var(--bw) solid var(--border-hairline-v35);
+}
+.inbox-thead__id { min-width: 0; }
+.inbox-thead__nm {
+  font: 700 var(--text-body) / 1.3 var(--font-display);
+  color: var(--text-1-v35);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.inbox-thead__sub {
+  font: 400 var(--text-sm) / 1.3 var(--font-mono);
+  color: var(--text-3-v35);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.inbox-takeover {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: var(--inbox-takeover-gap);
+  font: 600 var(--text-sm) / 1.3 var(--font-mono);
+  color: var(--text-3-v35);
+  flex: none;
+}
+
+/* takeover toggle (mockup .tgl) */
+.inbox-tgl {
+  width: var(--inbox-tgl-w);
+  height: var(--inbox-tgl-h);
+  border-radius: var(--chrome-pill-radius);
+  background: var(--border-strong-v35);
+  position: relative;
+  cursor: pointer;
+  flex: none;
+  box-shadow: inset 0 0 0 var(--bw) var(--border-strong-v35);
+}
+.inbox-tgl::after {
+  content: "";
+  position: absolute;
+  left: var(--inbox-tgl-inset);
+  top: var(--inbox-tgl-inset);
+  width: var(--inbox-tgl-knob);
+  height: var(--inbox-tgl-knob);
+  border-radius: 50%;
+  background: var(--text-2-v35);
+}
+.inbox-tgl--on { background: var(--accent-v35); }
+.inbox-tgl--on::after {
+  transform: translateX(var(--inbox-tgl-travel));
+  background: var(--accent-fg-v35);
+}
+
+/* message lane (mockup .msgs) — bottom-anchored via auto margin on the first
+   child (flex-end would clip scrollback under overflow) */
+.inbox-msgs {
+  flex: 1;
+  overflow: auto;
+  padding: var(--inbox-msgs-pad);
+  display: flex;
+  flex-direction: column;
+  gap: var(--inbox-msgs-gap);
+  min-height: 0;
+  position: relative;
+}
+.inbox-msgs > :first-child { margin-top: auto; }
+.inbox-msgs__lane { position: relative; width: 100%; }
+.inbox-msgs__row { position: absolute; left: 0; top: 0; width: 100%; display: flex; flex-direction: column; }
+.inbox-msgs__empty {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.inbox-older {
+  align-self: center;
+  border: var(--bw) solid var(--border-hairline-v35);
+  background: var(--surface-raised-v35);
+  color: var(--text-2-v35);
+  font: 500 var(--text-sm) / 1.3 var(--font-mono);
+  padding: var(--inbox-sys-pad);
+  border-radius: var(--chrome-pill-radius);
+  cursor: pointer;
+  height: auto; /* release the soup-btn md height — pill anatomy */
+}
+.inbox-older:hover { color: var(--text-1-v35); }
+.inbox-older:disabled { opacity: var(--opacity-disabled); cursor: default; }
+.inbox-jump {
+  position: sticky;
+  bottom: 0;
+  align-self: center;
+  border: var(--bw) solid var(--border-strong-v35);
+  background: var(--surface-overlay-v35);
+  color: var(--text-1-v35);
+  font: 600 var(--text-sm) / 1.3 var(--font-mono);
+  padding: var(--inbox-sys-pad);
+  border-radius: var(--chrome-pill-radius);
+  cursor: pointer;
+  box-shadow: var(--shadow-lift-v35);
+  height: auto; /* release the soup-btn md height — pill anatomy */
+}
+
+/* message rows (mockup .mrow / .ma / .bub) */
+.inbox-mrow { display: flex; gap: var(--inbox-mrow-gap); max-width: var(--inbox-mrow-maxw); }
+.inbox-mrow--me { align-self: flex-end; flex-direction: row-reverse; }
+.inbox-msgs__row .inbox-mrow:not(.inbox-mrow--me) { align-self: flex-start; }
+.inbox-ma {
+  width: var(--inbox-ma);
+  height: var(--inbox-ma);
+  border-radius: var(--inbox-ma-radius);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font: 700 var(--text-sm) / 1 var(--font-body);
+  color: var(--text-2-v35);
+  background: var(--surface-overlay-v35);
+  flex: none;
+  align-self: flex-end;
+}
+.inbox-bub {
+  background: var(--surface-raised-v35);
+  border: var(--bw) solid var(--border-hairline-v35);
+  border-radius: var(--inbox-bub-radius);
+  padding: var(--inbox-bub-pad);
+  font-size: var(--text-data);
+  color: var(--text-1-v35);
+  overflow-wrap: break-word;
+  min-width: 0;
+}
+.inbox-mrow--me .inbox-bub {
+  background: var(--surface-overlay-v35);
+  border-color: var(--border-strong-v35);
+}
+.inbox-bub__who {
+  font: 600 var(--text-sm) / 1.3 var(--font-mono);
+  color: var(--text-2-v35);
+  margin-bottom: var(--inbox-badges-mt);
+}
+.inbox-bub__tm {
+  font: 400 var(--text-sm) / 1.3 var(--font-mono);
+  color: var(--text-3-v35);
+  margin-top: var(--inbox-bub-tm-mt);
+  text-align: right;
+}
+
+/* system pill (mockup .sys) */
+.inbox-sys {
+  align-self: center;
+  font: 500 var(--text-sm) / 1.3 var(--font-mono);
+  color: var(--text-3-v35);
+  background: var(--surface-inset-v35);
+  border: var(--bw) solid var(--border-hairline-v35);
+  border-radius: var(--chrome-pill-radius);
+  padding: var(--inbox-sys-pad);
+}
+
+/* ── Composer (mockup .composer) — uniform 36px control height (acceptance) ── */
+.inbox-composer {
+  display: flex;
+  gap: var(--inbox-composer-gap);
+  padding: var(--inbox-composer-pad);
+  border-top: var(--bw) solid var(--border-hairline-v35);
+  align-items: center;
+}
+.inbox-caps { display: flex; gap: var(--inbox-caps-gap); }
+.inbox-cap {
+  width: var(--inbox-composer-h);
+  height: var(--inbox-composer-h);
+  border-radius: var(--inbox-cap-radius);
+  border: var(--bw) solid var(--border-strong-v35);
+  background: var(--surface-raised-v35);
+  color: var(--text-2-v35);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+}
+.inbox-cap:hover:not(:disabled) { color: var(--text-1-v35); }
+.inbox-cap:disabled { opacity: var(--opacity-disabled); cursor: not-allowed; }
+.inbox-input {
+  flex: 1;
+  background: var(--surface-inset-v35);
+  border: var(--bw) solid var(--border-hairline-v35);
+  border-radius: var(--inbox-input-radius);
+  padding: var(--inbox-input-pad);
+  height: var(--inbox-composer-h);
+  color: var(--text-1-v35);
+  font: inherit;
+  min-width: 0;
+}
+.inbox-input::placeholder { color: var(--text-3-v35); }
+.inbox-input:focus { border-color: var(--accent-v35); }
+/* Focus ring — the design language's global idiom; never suppressed. */
+.inbox-input:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+.inbox-send {
+  height: var(--inbox-composer-h);
+  padding: 0 var(--inbox-send-pad-x);
+  border-radius: var(--inbox-cap-radius);
+  border: var(--bw) solid transparent;
+  background: var(--accent-v35);
+  color: var(--accent-fg-v35);
+  font: 600 var(--text-data) / 1.3 var(--font-body);
+  cursor: pointer;
+  flex: none;
+}
+.inbox-send:disabled { opacity: var(--opacity-disabled); cursor: default; }
+
+/* ── Context pane (mockup .ctx) ── */
+.inbox-ctx {
+  border-left: var(--bw) solid var(--border-hairline-v35);
+  overflow: auto;
+  padding: var(--inbox-ctx-pad);
+  min-height: 0;
+}
+.inbox-ctx h3 {
+  font: 600 var(--text-sm) / 1.3 var(--font-mono);
+  letter-spacing: var(--tracking-inbox-caps);
+  color: var(--text-3-v35);
+  text-transform: uppercase;
+  margin: var(--inbox-ctx-h3-m);
+}
+.inbox-ctx h3:first-child { margin-top: 0; }
+.inbox-ctx__empty {
+  color: var(--text-3-v35);
+  font: 400 var(--text-data) / 1.35 var(--font-body);
+  padding: var(--inbox-ctx-pad) 0;
+}
+.inbox-pcard {
+  background: var(--surface-raised-v35);
+  border: var(--bw) solid var(--border-hairline-v35);
+  border-radius: var(--inbox-pcard-radius);
+  padding: var(--inbox-pcard-pad);
+}
+.inbox-pcard__top { display: flex; align-items: center; gap: var(--inbox-pcard-gap); }
+.inbox-pcard__nm {
+  font: 700 var(--text-body) / 1.3 var(--font-display);
+  color: var(--text-1-v35);
+}
+.inbox-pcard__sub { font: 400 var(--text-sm) / 1.3 var(--font-mono); color: var(--text-3-v35); }
+.inbox-idrow {
+  display: flex;
+  align-items: center;
+  gap: var(--inbox-idrow-gap);
+  padding: var(--inbox-idrow-pad-y) 0;
+  font-size: var(--text-data);
+  min-width: 0;
+}
+.inbox-idrow__glyph { width: var(--inbox-ava-glyph); height: var(--inbox-ava-glyph); fill: var(--text-3-v35); flex: none; }
+.inbox-idrow__h { font: 500 var(--text-sm) / 1.3 var(--font-mono); color: var(--text-2-v35); }
+.inbox-idrow__h--strong { color: var(--text-1-v35); font-weight: 600; }
+.inbox-idrow__v {
+  margin-left: auto;
+  color: var(--text-3-v35);
+  font: 400 var(--text-sm) / 1.3 var(--font-mono);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+.inbox-agcard {
+  display: flex;
+  align-items: center;
+  gap: var(--inbox-agcard-gap);
+  background: var(--surface-raised-v35);
+  border: var(--bw) solid var(--border-hairline-v35);
+  border-radius: var(--inbox-agcard-radius);
+  padding: var(--inbox-agcard-pad);
+}
+.inbox-agcard__nm { font-weight: 600; font-size: var(--text-data); color: var(--text-1-v35); }
+.inbox-agcard__sub { font: 400 var(--text-sm) / 1.3 var(--font-mono); color: var(--text-2-v35); }
+
+/* status pill (shared status vocabulary, mockup .badge.live) */
+.inbox-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--inbox-chips-gap);
+  padding: var(--inbox-ub-pad);
+  border-radius: var(--chrome-pill-radius);
+  font: 600 var(--text-sm) / 1.3 var(--font-mono);
+  background: var(--surface-overlay-v35);
+  color: var(--text-3-v35);
+}
+.inbox-badge--live {
+  background: color-mix(in srgb, var(--status-ok-solid) 12%, transparent);
+  color: var(--status-ok-fg);
+}
+.inbox-badge--live::before { content: "● "; font-size: var(--text-sm); }
+
+/* mobile back affordance — visible only ≤760px (CSS-only master-detail switch) */
+.inbox-back {
+  display: none;
+  border: none;
+  background: transparent;
+  color: var(--text-2-v35);
+  font: 600 var(--text-body) / 1 var(--font-body);
+  cursor: pointer;
+  padding: 0;
+  height: auto; /* ghost affordance — no fixed height */
+}
+
+/* ── Mockup breakpoints (SSOT @media) ── */
+@media (max-width: 1100px) {
+  .inbox-ctx { display: none; }
+  .inbox-wrap { grid-template-columns: var(--inbox-list-w-narrow) 1fr; }
+}
+@media (max-width: 760px) {
+  .inbox-wrap { grid-template-columns: 1fr; }
+  .inbox-page[data-mobile-detail="list"] .inbox-thread { display: none; }
+  .inbox-page[data-mobile-detail="thread"] .inbox-list { display: none; }
+  .inbox-page[data-mobile-detail="thread"] .inbox-back { display: inline-flex; }
+}
+
+/* ── Light presence: card separation per the locked token consumption ── */
+[data-theme="light"] .inbox-pcard,
+[data-theme="light"] .inbox-agcard,
+[data-theme="light"] .inbox-bub { box-shadow: var(--shadow-rest-v35); }

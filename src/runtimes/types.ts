@@ -72,6 +72,8 @@ export interface Runtime {
     turnCapability?: RuntimeTurnCapabilityHealth;
     activeFallbackEntry?: AgentFallbackEntry | null;
     fallbackChain?: Array<AgentFallbackEntry & { eligible: boolean | null }>;
+    fallbackChainExhausted?: boolean;
+    failedEntryCount?: number;
   };
   /** Admin override: force a fallback window of the given duration (or the default). */
   forceFallback?(durationMs?: number): { ok: true; activeUntil: number; clamped: boolean } | { ok: false; reason: string };

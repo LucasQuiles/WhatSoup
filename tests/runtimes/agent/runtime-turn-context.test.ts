@@ -24,6 +24,7 @@ describe('runtime turn context', () => {
       },
       replay: {
         sourceMessageId: 'wamid-71',
+        receivedAtUnixSeconds: 1_780_000_071,
         replaySafe: true,
         senderJid: '15551111111@s.whatsapp.net',
         senderName: 'Q',
@@ -40,6 +41,7 @@ describe('runtime turn context', () => {
 
     expect(context.identity.deliveryJid).toBe('15550000000@s.whatsapp.net');
     expect(context.replay.text).toBe('[DM from Q]\n[image: already transformed]');
+    expect(context.replay.receivedAtUnixSeconds).toBe(1_780_000_071);
     expect(context.contentType).toBe('image');
     expect(Object.isFrozen(context)).toBe(true);
     expect(Object.isFrozen(context.identity)).toBe(true);
@@ -65,6 +67,7 @@ describe('runtime turn context', () => {
       },
       replay: {
         sourceMessageId: 'wamid-72',
+        receivedAtUnixSeconds: 1_780_000_072,
         replaySafe: true,
         senderJid: '15551111111@s.whatsapp.net',
         senderName: null,
@@ -105,6 +108,7 @@ describe('runtime turn context', () => {
       },
       replay: {
         sourceMessageId: 'wamid-73',
+        receivedAtUnixSeconds: 1_780_000_073,
         replaySafe: true,
         senderJid: '15551111111@s.whatsapp.net',
         senderName: null,

@@ -1,4 +1,5 @@
 import { DatabaseSync } from 'node:sqlite';
+import { SQLITE_BUSY_TIMEOUT_PRAGMA } from '../lib/sqlite-constants.ts';
 import { createChildLogger } from '../logger.ts';
 
 const log = createChildLogger('fleet:db-reader');
@@ -213,7 +214,7 @@ export class FleetDbReader {
       db = new DatabaseSync(dbPath);
       // busy_timeout for safe concurrent access — WAL mode is already set by the
       // running instance at startup (database.ts), we just need patience for locks.
-      db.prepare('PRAGMA busy_timeout = 5000').run();
+      db.prepare(SQLITE_BUSY_TIMEOUT_PRAGMA).run();
       const result = fn(db);
       return { ok: true, data: result };
     } catch (err) {

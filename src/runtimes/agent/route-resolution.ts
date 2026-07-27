@@ -1,8 +1,16 @@
 import type { ChatModelPreference } from './chat-preference-db.ts';
+import { providerConfigEffort, providerHasNativeReasoningControl } from './reasoning-control.ts';
 import {
   FALLBACK_MODEL_REQUIRED_PROVIDER_IDS,
   type AgentFallbackEntry,
 } from '../../core/fallback-chain.ts';
+import {
+  providerRoutePolicyKey,
+  resolveProviderRoutePolicy,
+  type ProviderBoundaryMode,
+  type ProviderDataPolicy,
+  type ProviderRoutePolicy,
+} from '../../core/provider-data-policy.ts';
 
 /**
  * Pure route-resolution core (owner-approved PR-plan v2, slice 2).
@@ -25,7 +33,7 @@ export interface RouteInputs {
   agentProvider: string;
   effectiveModel: string | undefined;
   /** Active-window fallback entry only (null when no window is armed). */
-  fallbackEntry: { provider: string; model?: string } | null;
+  fallbackEntry: AgentFallbackEntry | null;
   /** Canonical-keyed, unexpired preference (or null). */
   pref: ChatModelPreference | null;
   /** Instance-routable probe result for the pinned provider (F07 semantics). */
@@ -55,6 +63,12 @@ export interface RouteInputs {
    * of discarding it to `undefined`.
    */
   configuredModelByProvider: Readonly<Record<string, string | undefined>>;
+  /** Primary provider policy from agentOptions.providerDataPolicy. */
+  agentDataPolicy: ProviderDataPolicy | null;
+  /** Compatibility defaults to shadow; enforce rejects unresolved routes. */
+  boundaryMode: ProviderBoundaryMode;
+  /** Exact provider/model route key to the policy carried by that config entry. */
+  configuredDataPolicyByRoute: Readonly<Record<string, ProviderDataPolicy | undefined>>;
 }
 
 /**
@@ -75,15 +89,21 @@ function targetModel(provider: string, configuredModelByProvider: Readonly<Recor
   return FALLBACK_MODEL_REQUIRED_PROVIDER_IDS.has(provider) ? configuredModelByProvider[provider] : undefined;
 }
 
-export interface RouteDecision {
-  provider: string;
-  model: string | undefined;
+export interface RouteDecision extends ProviderRoutePolicy {
   source: 'default' | 'preference' | 'fallback' | 'pin_blocked_default' | 'tier_unconfigured_default';
   /** Machine-readable; feeds ModelRouteEvent and the /why receipt. */
   reasonCode: string;
+  /**
+   * Slice 3: the per-chat reasoning-effort override to carry to spawn (only a
+   * user model pin sets it; undefined on every other route). Consumed by
+   * {@link applyRouteEffort} → providerConfig.effort → claude-cli `--effort`.
+   * A cross-provider pin leaves it null (only claude-cli consumes effort).
+   */
+  effort?: string | null;
 }
 
 export function resolveRoute(i: RouteInputs): RouteDecision {
+  let decision: Pick<RouteDecision, 'provider' | 'model' | 'source' | 'reasonCode' | 'effort'>;
   if (i.fallbackEntry) {
     const pinnedModel = i.pref?.intent === 'provider_specific' &&
       i.pref.requestedProvider === i.fallbackEntry.provider &&
@@ -91,24 +111,22 @@ export function resolveRoute(i: RouteInputs): RouteDecision {
       i.pref.modelPinVerified === true && i.pinnedModelEligible
       ? i.pref.requestedModel
       : null;
-    return {
+    decision = {
       provider: i.fallbackEntry.provider,
       model: pinnedModel ?? i.fallbackEntry.model ?? i.effectiveModel,
       source: 'fallback',
       reasonCode: pinnedModel ? 'fallback_window_active_model_pin' : 'fallback_window_active',
     };
-  }
-  if (!i.pref) {
-    return {
+  } else if (!i.pref) {
+    decision = {
       provider: i.agentProvider,
       model: i.effectiveModel,
       source: 'default',
       reasonCode: 'no_preference',
     };
-  }
-  if (i.pref.intent === 'provider_specific' && i.pref.requestedProvider) {
+  } else if (i.pref.intent === 'provider_specific' && i.pref.requestedProvider) {
     if (i.pinnedProviderEligible) {
-      return {
+      decision = {
         provider: i.pref.requestedProvider,
         // Pinning the instance's own primary keeps the operator-configured
         // model; a genuine provider change drops to the provider default —
@@ -120,50 +138,102 @@ export function resolveRoute(i: RouteInputs): RouteDecision {
           : targetModel(i.pref.requestedProvider, i.configuredModelByProvider),
         source: 'preference',
         reasonCode: 'user_pin',
+        // Slice 3: carry the pin's reasoning-effort override. Meaningful only
+        // for claude-cli (the sole `--effort` consumer); requestedEffort is
+        // null for a cross-provider pin, so this is null there too.
+        effort: i.pref.requestedEffort ?? null,
+      };
+    } else {
+      decision = {
+        provider: i.agentProvider,
+        model: i.effectiveModel,
+        source: 'pin_blocked_default',
+        reasonCode: 'user_pin_unreachable',
       };
     }
-    return {
-      provider: i.agentProvider,
-      model: i.effectiveModel,
-      source: 'pin_blocked_default',
-      reasonCode: 'user_pin_unreachable',
-    };
-  }
-  const tier =
-    i.pref.intent === 'strongest' ? i.tierMap?.strongest
-    : i.pref.intent === 'fastest' ? i.tierMap?.fastest
-    : undefined;
-  if (tier) {
-    if (i.tierProviderEligible) {
-      return {
-        provider: tier,
-        // Same rule as the pin branch above: a tier that (unusually) maps
-        // back to the instance's own primary keeps the operator-configured
-        // model; a tier pointing at a required-model provider (opencode-cli
-        // et al.) threads that provider's validated config model instead of
-        // discarding it (Finding 2) — every other tier target keeps
-        // `undefined` and resolves its own provider default.
-        model: tier === i.agentProvider ? i.effectiveModel : targetModel(tier, i.configuredModelByProvider),
-        source: 'preference',
-        reasonCode: `intent_${i.pref.intent}`,
+  } else {
+    const tier =
+      i.pref.intent === 'strongest' ? i.tierMap?.strongest
+      : i.pref.intent === 'fastest' ? i.tierMap?.fastest
+      : undefined;
+    if (tier) {
+      if (i.tierProviderEligible) {
+        decision = {
+          provider: tier,
+          // Same rule as the pin branch above: a tier that (unusually) maps
+          // back to the instance's own primary keeps the operator-configured
+          // model; a tier pointing at a required-model provider (opencode-cli
+          // et al.) threads that provider's validated config model instead of
+          // discarding it (Finding 2) — every other tier target keeps
+          // `undefined` and resolves its own provider default.
+          model: tier === i.agentProvider ? i.effectiveModel : targetModel(tier, i.configuredModelByProvider),
+          source: 'preference',
+          reasonCode: `intent_${i.pref.intent}`,
+        };
+      } else {
+        // Tier IS configured but its provider is not routable on this instance —
+        // degrade to the default route honestly (never a keyless session).
+        decision = {
+          provider: i.agentProvider,
+          model: i.effectiveModel,
+          source: 'tier_unconfigured_default',
+          reasonCode: `intent_${i.pref.intent}_unreachable`,
+        };
+      }
+    } else {
+      decision = {
+        provider: i.agentProvider,
+        model: i.effectiveModel,
+        source: 'tier_unconfigured_default',
+        reasonCode: `intent_${i.pref.intent}_unmapped`,
       };
     }
-    // Tier IS configured but its provider is not routable on this instance —
-    // degrade to the default route honestly (never a keyless session). The
-    // distinct reasonCode lets /why tell "unreachable" from "unconfigured".
-    return {
-      provider: i.agentProvider,
-      model: i.effectiveModel,
-      source: 'tier_unconfigured_default',
-      reasonCode: `intent_${i.pref.intent}_unreachable`,
-    };
   }
-  return {
-    provider: i.agentProvider,
-    model: i.effectiveModel,
-    source: 'tier_unconfigured_default',
-    reasonCode: `intent_${i.pref.intent}_unmapped`,
-  };
+
+  const dataPolicy = decision.source === 'fallback'
+    ? i.fallbackEntry?.dataPolicy ?? null
+    : decision.provider === i.agentProvider && decision.model === i.effectiveModel
+      ? i.agentDataPolicy
+      : i.configuredDataPolicyByRoute[providerRoutePolicyKey(decision.provider, decision.model)] ?? null;
+  const policy = resolveProviderRoutePolicy({
+    provider: decision.provider,
+    model: decision.model,
+    dataPolicy,
+    boundaryMode: i.boundaryMode,
+  });
+  return Object.freeze({ ...decision, ...policy });
+}
+
+/**
+ * Slice 3 — thread a route's reasoning-effort override into the provider
+ * config the session spawns with. Only a provider with native reasoning control
+ * consumes an effort flag (claude-cli's `--effort`, read by session.ts
+ * resolveProviderArgs); every other provider ignores it, so the base is
+ * returned untouched. The provider set is NOT re-tested here — it is read from
+ * reasoning-control.ts, the same predicate the Level-3 menu gates on. That
+ * removes one of two duplicate encodings, not all of them: writing the key here
+ * does not mean the child receives a flag, which is session.ts's per-provider
+ * argv switch (see providerHasNativeReasoningControl for the remaining gap).
+ *
+ * A per-chat effort PIN (a non-empty `route.effort`) OVERRIDES the static
+ * `providerConfig.effort` for that spawn. A route with no effort override
+ * (undefined, or the FW-7 "Default (no override)" pick = null) keeps whatever
+ * the base config carries — matching the hybrid's semantics: a null/absent
+ * effort is "no override", not "force the harness default over a configured
+ * static effort". Pure; never mutates `base`.
+ */
+export function applyRouteEffort(
+  base: Record<string, unknown> | undefined,
+  route: Pick<RouteDecision, 'provider' | 'effort'>,
+): Record<string, unknown> | undefined {
+  if (!providerHasNativeReasoningControl(route.provider)) return base;
+  // Validate the WRITE through the same reader the spawn path reads with, so the
+  // guard is symmetric by construction. It also keeps the safe direction: a
+  // malformed (non-string) effort yields null and returns `base` untouched,
+  // rather than clobbering a valid operator-configured static effort with
+  // garbage that the reader would then report as absent.
+  const level = providerConfigEffort({ effort: route.effort });
+  return level ? { ...(base ?? {}), effort: level } : base;
 }
 
 export function isPinnedModelEligible(

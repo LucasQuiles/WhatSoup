@@ -14,7 +14,7 @@ const TABLE_SKELETON_WIDTHS = [
 ] as const;
 
 const Skeleton: FC<SkeletonProps> = ({ className = '', style }) => (
-  <div className={`animate-shimmer ${className}`} style={style} />
+  <div className={`skeleton-bar ${className}`} style={style} />
 );
 
 export function TableSkeleton() {

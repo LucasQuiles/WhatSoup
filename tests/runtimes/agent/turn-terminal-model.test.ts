@@ -108,6 +108,20 @@ describe('turn-finalization persistence mapping', () => {
     },
   );
 
+  it('round-trips provider stream corruption through the core finalization contract', () => {
+    const persistence = toTurnFinalizationPersistence(terminal({
+      attemptOutcome: { kind: 'failed', class: 'provider_stream_corrupt' },
+      inboundDisposition: 'failed_terminal',
+    }));
+
+    expect(() => normalizeFinalizeTurnTerminalParams(persistence)).not.toThrow();
+    expect(persistence.inbound).toEqual({
+      kind: 'failed',
+      seq: 41,
+      failureClass: 'provider_failure',
+    });
+  });
+
   it('retains admission rejection and maps bounded unknown inbound', () => {
     const persistence = toTurnFinalizationPersistence(terminal({
       attemptOutcome: { kind: 'admission_rejected' },

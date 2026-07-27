@@ -416,6 +416,7 @@ describe('durable recovery evidence ordering', () => {
       ...toTurnFinalizationPersistence(result, owner),
       recoveryJob: toTurnRecoveryJobPersistence(result, owner, {
         sourceMessageId: 'incident-source',
+        receivedAtUnixSeconds: 1_780_000_000,
         replaySafe: false,
         senderJid: '15550100000@s.whatsapp.net',
         senderName: 'Operator',

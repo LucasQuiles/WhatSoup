@@ -2,9 +2,8 @@ import { describe, it, expect, vi } from 'vitest';
 import { isToolErrorPayload } from '../../../src/mcp/types.ts';
 import { PineconeMemory, type MemoryRecord } from '../../../src/runtimes/chat/providers/pinecone.ts';
 
-// Hoisted so the SAME mock object backs every createChildLogger() call —
-// memory-write.ts calls it once at module load, and QR-006 tests need a
-// stable reference to assert on the log calls it captures.
+// Kept as a sentinel: memory_write must leave provider operation logging to
+// PineconeMemory and must not create a second tool-local event.
 const mockMemoryWriteLogger = vi.hoisted(() => ({
   info: vi.fn(),
   warn: vi.fn(),
@@ -19,7 +18,7 @@ vi.mock('../../../src/logger.ts', () => ({
 import { registerMemoryWriteTools, type MemoryWriter } from '../../../src/mcp/tools/memory-write.ts';
 import type { ToolDeclaration, SessionContext } from '../../../src/mcp/types.ts';
 
-function setup(opts: { upsert?: (r: MemoryRecord[]) => Promise<void> } = {}) {
+function setup(opts: { upsert?: MemoryWriter['upsert'] } = {}) {
   const tools: ToolDeclaration[] = [];
   const register = (t: ToolDeclaration) => tools.push(t);
   const upsert = vi.fn(opts.upsert ?? (async () => {}));
@@ -63,7 +62,16 @@ describe('memory_write tool', () => {
     expect(r.confidence).toBe(0.8); // default
     expect(r.superseded).toBe('false');
     expect(typeof r.createdAt).toBe('string');
-    expect(res).toMatchObject({ status: 'written', memory_type: 'preference' });
+    expect(res).toEqual({
+      operation_id: expect.stringMatching(/^[a-f0-9]{32}$/),
+      status: 'written',
+      memory_type: 'preference',
+    });
+    expect(res).not.toHaveProperty('id');
+    expect(upsert.mock.calls[0]?.[1]).toEqual({
+      operationId: (res as { operation_id: string }).operation_id,
+      operation: 'memory_write',
+    });
   });
 
   it('QR-082: REJECTS a self_fact write from a chat-scoped session (global-identity poisoning guard)', async () => {
@@ -145,7 +153,12 @@ describe('memory_write tool', () => {
       contradicts: 'Use home address',
     });
     expect(r.id.startsWith('correction_')).toBe(true);
-    expect(res).toMatchObject({ id: r.id, status: 'written', memory_type: 'correction' });
+    expect(res).toMatchObject({
+      operation_id: expect.stringMatching(/^[a-f0-9]{32}$/),
+      status: 'written',
+      memory_type: 'correction',
+    });
+    expect(res).not.toHaveProperty('id');
   });
 
   it('errors without a conversation context', async () => {
@@ -179,7 +192,13 @@ describe('memory_write tool', () => {
     );
     expect(upsert).toHaveBeenCalledTimes(1);
     expect(isToolErrorPayload(res)).toBe(true);
-    expect(res).toMatchObject({ error: 'memory_write failed: PINECONE_STRING_FAILURE' });
+    expect(res).toMatchObject({
+      error: 'memory_write failed',
+      code: 'unknown',
+      retryable: true,
+      operation_id: expect.stringMatching(/^[a-f0-9]{32}$/),
+    });
+    expect(JSON.stringify(res)).not.toContain('PINECONE_STRING_FAILURE');
   });
 
   it('uses the default Pinecone writer factory when no test writer is injected', async () => {
@@ -197,14 +216,26 @@ describe('memory_write tool', () => {
       );
 
       expect(upsertSpy).toHaveBeenCalledTimes(1);
-      const [records] = upsertSpy.mock.calls[0] as [MemoryRecord[]];
+      const [records, operation] = upsertSpy.mock.calls[0] as [
+        MemoryRecord[],
+        { operationId: string; operation: 'memory_write' },
+      ];
       expect(records[0]).toMatchObject({
         chatJid: '12345@s.whatsapp.net',
         senderJid: 'phil@s.whatsapp.net',
         text: 'default writer path',
         memoryType: 'user_fact',
       });
-      expect(res).toMatchObject({ status: 'written', memory_type: 'user_fact' });
+      expect(operation).toEqual({
+        operationId: (res as { operation_id: string }).operation_id,
+        operation: 'memory_write',
+      });
+      expect(res).toMatchObject({
+        operation_id: expect.stringMatching(/^[a-f0-9]{32}$/),
+        status: 'written',
+        memory_type: 'user_fact',
+      });
+      expect(res).not.toHaveProperty('id');
     } finally {
       upsertSpy.mockRestore();
       if (originalApiKey === undefined) {
@@ -215,14 +246,35 @@ describe('memory_write tool', () => {
     }
   });
 
-  it('REJECTS a global session even with a caller-supplied chatJid (no cross-conversation write)', async () => {
+  it('REJECTS an unbound global session with no pinned conversation key', async () => {
     const { tool, upsert } = setup();
     const res = await tool.handler(
       { chatJid: '999', text: 'sneaky', memory_type: 'user_fact' },
-      { tier: 'global' }, // global session: registry would accept caller chatJid
+      { tier: 'global' },
     );
     expect(isToolErrorPayload(res)).toBe(true);
     expect(upsert).not.toHaveBeenCalled();
+  });
+
+  it('ACCEPTS a global per-chat actor session with a pinned conversation key and ignores the caller target', async () => {
+    const { tool, upsert } = setup();
+    const res = await tool.handler(
+      { chatJid: '999@evil', text: 'operational marker', memory_type: 'group_context' },
+      {
+        tier: 'global',
+        conversationKey: '12345',
+        actorJid: 'phil@s.whatsapp.net',
+      },
+    );
+
+    expect(isToolErrorPayload(res)).toBe(false);
+    const [records] = upsert.mock.calls[0] as [MemoryRecord[]];
+    expect(records[0]).toMatchObject({
+      chatJid: '12345',
+      senderJid: 'phil@s.whatsapp.net',
+      text: 'operational marker',
+      memoryType: 'group_context',
+    });
   });
 
   it('REJECTS a chat-scoped session with no bound conversationKey', async () => {
@@ -307,8 +359,8 @@ describe('memory_write — conversation-bound sessions (per-chat actor socket)',
   });
 });
 
-describe('memory_write tool — trace-grade logging (QR-006)', () => {
-  it('logs a success entry with the written record id after upsert succeeds', async () => {
+describe('memory_write tool — provider-owned operation telemetry', () => {
+  it('does not duplicate provider success telemetry or expose the record id', async () => {
     mockMemoryWriteLogger.info.mockClear();
     const { tool } = setup();
 
@@ -316,18 +368,25 @@ describe('memory_write tool — trace-grade logging (QR-006)', () => {
       { chatJid: '12345@s.whatsapp.net', text: 'Phil prefers email over calls', memory_type: 'preference' },
       chatSession(),
     );
-    const writtenId = (res as { id: string }).id;
 
-    expect(mockMemoryWriteLogger.info).toHaveBeenCalledWith(
-      expect.objectContaining({ id: writtenId }),
-      expect.stringContaining('memory_write'),
+    expect(mockMemoryWriteLogger.info).not.toHaveBeenCalled();
+    expect(res).not.toHaveProperty('id');
+    expect(res).toHaveProperty(
+      'operation_id',
+      expect.stringMatching(/^[a-f0-9]{32}$/),
     );
   });
 
-  it('does NOT emit a success log when the upsert fails (failure path still only warns)', async () => {
+  it('does not duplicate provider failure telemetry or serialize exception prose', async () => {
     mockMemoryWriteLogger.info.mockClear();
     mockMemoryWriteLogger.warn.mockClear();
-    const { tool } = setup({ upsert: async () => { throw new Error('boom'); } });
+    const { tool } = setup({
+      upsert: async () => {
+        throw Object.assign(new Error('SYNTHETIC_PRIVATE_FAILURE_MARKER'), {
+          code: 'PINECONE_UNAVAILABLE',
+        });
+      },
+    });
 
     const res = await tool.handler(
       { chatJid: '12345@s.whatsapp.net', text: 'x', memory_type: 'user_fact' },
@@ -336,6 +395,15 @@ describe('memory_write tool — trace-grade logging (QR-006)', () => {
 
     expect(isToolErrorPayload(res)).toBe(true);
     expect(mockMemoryWriteLogger.info).not.toHaveBeenCalled();
-    expect(mockMemoryWriteLogger.warn).toHaveBeenCalled();
+    expect(mockMemoryWriteLogger.warn).not.toHaveBeenCalled();
+    expect(res).toMatchObject({
+      error: 'memory_write failed',
+      code: 'provider_unavailable',
+      retryable: true,
+      operation_id: expect.stringMatching(/^[a-f0-9]{32}$/),
+    });
+    expect(JSON.stringify(res)).not.toContain(
+      'SYNTHETIC_PRIVATE_FAILURE_MARKER',
+    );
   });
 });

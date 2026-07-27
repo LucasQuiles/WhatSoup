@@ -79,4 +79,34 @@ describe('stream-parser observability (id-only)', () => {
     parseEvents(JSON.stringify({ type: 'system', subtype: 'init', session_id: 's1' }));
     expect(warnSpy).not.toHaveBeenCalled();
   });
+
+  it('does NOT warn for current Claude informational event shapes', () => {
+    parseEvents(JSON.stringify({
+      type: 'rate_limit_event',
+      rate_limit_info: { status: 'allowed' },
+      session_id: 'sanitized-session',
+    }));
+    parseEvents(JSON.stringify({
+      type: 'system',
+      subtype: 'thinking_tokens',
+      estimated_tokens: 12,
+      estimated_tokens_delta: 3,
+      session_id: 'sanitized-session',
+    }));
+    parseEvents(JSON.stringify({
+      type: 'user',
+      message: {
+        content: [{
+          type: 'tool_result',
+          tool_use_id: 'sanitized-tool-use',
+          content: [{
+            type: 'tool_reference',
+            tool_name: 'mcp__sanitized__read_tool',
+          }],
+        }],
+      },
+    }));
+
+    expect(warnSpy).not.toHaveBeenCalled();
+  });
 });

@@ -26,11 +26,13 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { DatabaseSync } from 'node:sqlite';
 import { jsonResponse, readBody, requireInstance } from '../../lib/http.ts';
+import { errorMessage } from '../../lib/error-message.ts';
 import { publishFeedEvent, publishInstanceStatus } from '../realtime-publisher.ts';
 import type { FleetDiscovery } from '../discovery.ts';
 import type { FleetDbReader } from '../db-reader.ts';
 import type { ServiceManager } from '../platform.ts';
 import type { FleetRealtimePublisher } from '../realtime-publisher.ts';
+import { validateInstanceName } from './instance-name.ts';
 
 export interface CheckpointsDeps {
   discovery: FleetDiscovery;
@@ -40,18 +42,6 @@ export interface CheckpointsDeps {
 export interface RestoreCheckpointDeps extends CheckpointsDeps {
   serviceManager: ServiceManager;
   realtime: FleetRealtimePublisher;
-}
-
-/** Valid instance name pattern — mirrors ops.ts NAME_RE (mutation routes
- *  validate before the name reaches service-manager / path construction). */
-const NAME_RE = /^[a-z][a-z0-9-]*$/;
-
-function validateInstanceName(name: string, res: ServerResponse): boolean {
-  if (!NAME_RE.test(name) || name.length < 1 || name.length > 30) {
-    jsonResponse(res, 400, { error: 'invalid instance name' });
-    return false;
-  }
-  return true;
 }
 
 export async function handleGetLineCheckpoints(
@@ -130,23 +120,28 @@ export async function handleRestoreCheckpoint(
     await deps.serviceManager.stop(instance.name);
   } catch (err) {
     jsonResponse(res, 500, {
-      error: `restore failed at stop: ${(err as Error).message}`,
+      error: `restore failed at stop: ${errorMessage(err)}`,
       instance: instance.name,
       conversationKey,
     });
     return;
   }
 
+  // The UPDATE's own verdict, not the advisory read's. Zero matched rows means
+  // the SQL preconditions were NOT met at write time — the checkpoint changed
+  // under us during the stop window — and nothing was restored (#2292 L10).
+  let changedRows = 0;
   try {
     const db = new DatabaseSync(instance.dbPath);
     try {
-      db.prepare(`
+      const result = db.prepare(`
         UPDATE session_checkpoints
         SET session_status = 'suspended', updated_at = datetime('now')
         WHERE conversation_key = ?
           AND session_id IS NOT NULL
           AND session_status NOT IN ('active', 'suspended')
       `).run(conversationKey);
+      changedRows = Number(result.changes);
     } finally {
       db.close();
     }
@@ -157,7 +152,7 @@ export async function handleRestoreCheckpoint(
       restartAttempted = true;
     } catch { /* start failure reported below as part of the same 500 */ }
     jsonResponse(res, 500, {
-      error: `restore failed at write: ${(err as Error).message}`,
+      error: `restore failed at write: ${errorMessage(err)}`,
       instance: instance.name,
       conversationKey,
       restartAttempted,
@@ -169,10 +164,25 @@ export async function handleRestoreCheckpoint(
     await deps.serviceManager.start(instance.name);
   } catch (err) {
     jsonResponse(res, 500, {
-      error: `restore write landed but start failed — instance is down: ${(err as Error).message}`,
+      error: `restore write landed but start failed — instance is down: ${errorMessage(err)}`,
       instance: instance.name,
       conversationKey,
       instanceDown: true,
+    });
+    return;
+  }
+
+  // Reported only AFTER the restart above, so a no-op never leaves the instance
+  // down. The stop/start still happened — that is real disruption the operator
+  // needs to know about — but no checkpoint was made resumable, so this is not
+  // a 202. Previously this path returned 'restore_requested' and the operator
+  // had no way to tell a restore from a stop/start that changed nothing.
+  if (changedRows === 0) {
+    jsonResponse(res, 409, {
+      error: 'restore matched no checkpoint — it changed state during the restart window',
+      instance: instance.name,
+      conversationKey,
+      instanceRestarted: true,
     });
     return;
   }

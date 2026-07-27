@@ -1652,4 +1652,116 @@ describe('WHATSOUP_ALERT_SINK dry-run capture', () => {
     const raw = readFileSync(sinkPath, 'utf8');
     expect(raw).not.toContain(AWS_KEY_SAMPLE);
   });
+
+  // ── #2287: an unwritable sink must not take the instance down ─────────────
+  //
+  // captureToAlertSink used to call appendFileSync bare. Both emitAlert and
+  // clearAlertSource return through it BEFORE their own try/catch, so a sink
+  // write failure (disk full, EACCES, path invalidated by a config reload)
+  // escaped the whole emission path. Those are reached from `void`-ed async
+  // paths, so the throw lands as an unhandled rejection and main.ts shuts the
+  // instance down — the alerting path killing the host it exists to report on.
+  describe('unwritable sink (#2287)', () => {
+    // A sink under a directory that does not exist: appendFileSync raises
+    // ENOENT. Deterministic and needs no fs mocking, so it exercises the real
+    // failure path rather than a simulated one.
+    function pointSinkAtUnwritablePath(): void {
+      process.env['WHATSOUP_ALERT_SINK'] = join(sinkDir, 'missing-dir', 'alerts.jsonl');
+    }
+
+    it('does not throw, and reports the failure without paging', () => {
+      pointSinkAtUnwritablePath();
+
+      expect(() => emitAlert('whatsoup-prod', 'connection_exhausted', 'sum', 'evidence')).not.toThrow();
+
+      const result = emitAlert('whatsoup-prod', 'connection_exhausted', 'sum2', 'evidence2');
+      expect(result.ok).toBe(false);
+      expect(result.channel).toBe('sink');
+      expect(result.status).toBe('failed');
+
+      // The load-bearing assertion. Sink mode's contract is that NOTHING is
+      // paged; falling through to the outbox on a write failure would turn an
+      // unwritable dry-run sink into a real operator page — the exact thing the
+      // sink exists to prevent.
+      expect(readdirSync(outboxDir)).toHaveLength(0);
+      expect(spawn).not.toHaveBeenCalled();
+    });
+
+    it('does not throw on the CLEAR path either, and also does not page', () => {
+      // clearAlertSource shares captureToAlertSink and had the identical
+      // defect; #2287's write-up only named emitAlert.
+      pointSinkAtUnwritablePath();
+
+      expect(() => clearAlertSource('whatsoup-prod', 'connection_exhausted')).not.toThrow();
+
+      const result = clearAlertSource('whatsoup-prod', 'connection_exhausted');
+      expect(result.ok).toBe(false);
+      expect(result.channel).toBe('sink');
+      expect(readdirSync(outboxDir)).toHaveLength(0);
+      expect(spawn).not.toHaveBeenCalled();
+    });
+
+    it('warns about the failed sink write rather than failing silently', () => {
+      pointSinkAtUnwritablePath();
+      loggerWarn.mockClear();
+
+      emitAlert('whatsoup-prod', 'connection_exhausted', 'sum', 'evidence');
+
+      const warned = loggerWarn.mock.calls.some(
+        (call) => typeof call[1] === 'string' && call[1].includes('alert sink capture failed'),
+      );
+      expect(warned).toBe(true);
+    });
+
+    // The production callers are the *Checked wrappers, not the bare functions.
+    // A wrapper that reported success on a failed capture would be exactly the
+    // silent-success mode this fix exists to prevent, so the contract is
+    // asserted at the layer production actually calls.
+    it('reports failure through emitAlertChecked/clearAlertSourceChecked', () => {
+      pointSinkAtUnwritablePath();
+
+      expect(emitAlertChecked('whatsoup-prod', 'connection_exhausted', 'sum', 'evidence')).toBe(false);
+      expect(clearAlertSourceChecked('whatsoup-prod', 'connection_exhausted', 'evidence')).toBe(false);
+      expect(readdirSync(outboxDir)).toHaveLength(0);
+    });
+
+    it('still prefers the sink when it IS writable, and reports success', () => {
+      // Over-correction guard: catching the capture error must not turn the
+      // sink branch into a no-op. Asserting through emitAlertChecked covers the
+      // success half of the same contract the failure case asserts above — the
+      // earlier form of this test only re-asserted what the writable-sink tests
+      // above already prove, so it passed with or without the fix.
+      expect(emitAlertChecked('whatsoup-prod', 'connection_exhausted', 'sum', 'evidence')).toBe(true);
+
+      expect(readFileSync(sinkPath, 'utf8').trim().split('\n')).toHaveLength(1);
+      expect(readdirSync(outboxDir)).toHaveLength(0);
+    });
+
+    // The guard has to cover event CONSTRUCTION, not just the write.
+    // buildBotErrorsEvent reads ambient process state — process.cwd() throws
+    // ENOENT outright once the working directory is deleted out from under a
+    // long-lived instance. Built above the try, that throw escapes on the same
+    // `void`-ed async path and kills the instance, which is the precise failure
+    // this fix claims to prevent.
+    it('survives the event itself failing to build (deleted cwd)', () => {
+      const cwdSpy = vi.spyOn(process, 'cwd').mockImplementation(() => {
+        throw Object.assign(new Error('ENOENT: process.cwd failed'), { code: 'ENOENT' });
+      });
+
+      try {
+        expect(() => emitAlert('whatsoup-prod', 'connection_exhausted', 'sum', 'evidence')).not.toThrow();
+
+        const result = emitAlert('whatsoup-prod', 'connection_exhausted', 'sum2', 'evidence2');
+        expect(result.ok).toBe(false);
+        expect(result.channel).toBe('sink');
+        expect(result.status).toBe('failed');
+
+        // Still must not page: a construction failure is not a licence to fall
+        // through to the outbox ladder any more than a write failure is.
+        expect(readdirSync(outboxDir)).toHaveLength(0);
+      } finally {
+        cwdSpy.mockRestore();
+      }
+    });
+  });
 });

@@ -291,7 +291,11 @@ function expectedProviderExecutionDetails(): Record<string, unknown> {
   return {
     providerExecution: {
       active: false,
+      activeWorkKind: null,
+      activeScopeHash: null,
       pending: 0,
+      oldestPendingWorkKind: null,
+      oldestPendingScopeHash: null,
       oldestWaitMs: 0,
       totalWaits: 0,
       maxPending: 0,
@@ -357,6 +361,9 @@ describe('AgentRuntime.getHealthSnapshot — per_chat shape', () => {
         proactiveResumeIdentityRejects: 0,
         restartLoopGuard: { enabled: true, bootsInWindow: 0, tripped: false, lastTripAt: null, windowMs: 300_000, bootsTotal: 0, checksPerformed: 0, lastCheckAt: null },
         unownedProviderEventRejects: 0,
+        chronologyDelayedDispatches: 0,
+        chronologyRecoveryReplayDispatches: 0,
+        chronologyMaxQueueAgeSeconds: 0,
         turnFinalizationRetainedRetries: 0,
         turnFinalizationDegradedScopes: 0,
         turnFinalizationRetryAttempts: 0,
@@ -387,6 +394,9 @@ describe('AgentRuntime.getHealthSnapshot — per_chat shape', () => {
         proactiveResumeIdentityRejects: 0,
         restartLoopGuard: { enabled: true, bootsInWindow: 0, tripped: false, lastTripAt: null, windowMs: 300_000, bootsTotal: 0, checksPerformed: 0, lastCheckAt: null },
         unownedProviderEventRejects: 0,
+        chronologyDelayedDispatches: 0,
+        chronologyRecoveryReplayDispatches: 0,
+        chronologyMaxQueueAgeSeconds: 0,
         turnFinalizationRetainedRetries: 0,
         turnFinalizationDegradedScopes: 0,
         turnFinalizationRetryAttempts: 0,
@@ -407,6 +417,9 @@ describe('AgentRuntime.getHealthSnapshot — per_chat shape', () => {
   it('degrades only while provider execution pressure is active', async () => {
     vi.useFakeTimers();
     try {
+      runtime = new AgentRuntime(makeDb(), makeMessenger(), 'test', {
+        sessionScope: 'per_chat',
+      });
       const gate = (runtime as unknown as { providerExecutionGate: ProviderExecutionGate }).providerExecutionGate;
       const first = await gate.acquire();
       const secondPromise = gate.acquire();
@@ -493,6 +506,9 @@ describe('AgentRuntime.getHealthSnapshot — single-session shape', () => {
         proactiveResumeIdentityRejects: 0,
         restartLoopGuard: { enabled: true, bootsInWindow: 0, tripped: false, lastTripAt: null, windowMs: 300_000, bootsTotal: 0, checksPerformed: 0, lastCheckAt: null },
         unownedProviderEventRejects: 0,
+        chronologyDelayedDispatches: 0,
+        chronologyRecoveryReplayDispatches: 0,
+        chronologyMaxQueueAgeSeconds: 0,
         turnFinalizationRetainedRetries: 0,
         turnFinalizationDegradedScopes: 0,
         turnFinalizationRetryAttempts: 0,

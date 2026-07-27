@@ -335,10 +335,11 @@ export function buildSessionNewRequest(
 export function buildSessionPromptRequest(
   id: number,
   sessionId: string,
-  text: string,
+  text: string | readonly string[],
 ): string {
   return buildAcpRequest(id, 'session/prompt', {
     sessionId,
-    prompt: [{ type: 'text', text }],
+    prompt: (typeof text === 'string' ? [text] : text)
+      .map((part) => ({ type: 'text', text: part })),
   });
 }

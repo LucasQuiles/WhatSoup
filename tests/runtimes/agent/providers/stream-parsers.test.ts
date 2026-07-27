@@ -50,6 +50,7 @@ describe('Codex stream parser', () => {
         text: null,
         inputTokens: 38365,
         outputTokens: 564,
+        providerTurnProtocolError: 'missing_identity',
       });
     });
 
@@ -149,6 +150,7 @@ describe('Codex stream parser', () => {
         text: null,
         inputTokens: 100392,
         outputTokens: 2102,
+        providerTurnProtocolError: 'missing_identity',
       });
     });
   });
@@ -283,7 +285,12 @@ describe('Codex stream parser', () => {
         usage: { input_tokens: 100, output_tokens: 5 },
       });
       const event = parseCodexEvent(line);
-      expect(event).toMatchObject({ type: 'result', inputTokens: 100, outputTokens: 5 });
+      expect(event).toMatchObject({
+        type: 'result',
+        inputTokens: 100,
+        outputTokens: 5,
+        providerTurnProtocolError: 'missing_identity',
+      });
       const result = event as { type: 'result'; text: string | null };
       expect(result.text).toBeTruthy();
       expect(result.text).toContain('context window exceeded');
@@ -292,7 +299,10 @@ describe('Codex stream parser', () => {
     it('parses turn.failed with no error fields → fallback text', () => {
       const line = JSON.stringify({ type: 'turn.failed' });
       const event = parseCodexEvent(line);
-      expect(event).toMatchObject({ type: 'result' });
+      expect(event).toMatchObject({
+        type: 'result',
+        providerTurnProtocolError: 'missing_identity',
+      });
       const result = event as { type: 'result'; text: string | null };
       expect(result.text).toBe('Codex CLI turn failed');
     });
@@ -328,9 +338,15 @@ describe('Codex app-server parser (JSON-RPC)', () => {
       });
     });
 
-    it('parses turn/started → ignored', () => {
+    it('parses turn/started with its exact native identity', () => {
       const event = parseCodexEvent(lines[3]!);
-      expect(event).toEqual({ type: 'ignored' });
+      expect(event).toEqual({
+        type: 'provider_turn_started',
+        identity: {
+          sessionId: '019d572a-d8da-7fa3-8c55-6bad7ff0f8b9',
+          turnId: 'turn-1',
+        },
+      });
     });
 
     it('parses item/agentMessage/delta → assistant_text with delta text', () => {
@@ -343,9 +359,17 @@ describe('Codex app-server parser (JSON-RPC)', () => {
       expect(event).toEqual({ type: 'ignored' });
     });
 
-    it('parses turn/completed → result with null text', () => {
+    it('parses turn/completed with exact identity and terminal status', () => {
       const event = parseCodexEvent(lines[6]!);
-      expect(event).toEqual({ type: 'result', text: null });
+      expect(event).toEqual({
+        type: 'result',
+        text: null,
+        providerTurn: {
+          sessionId: '019d572a-d8da-7fa3-8c55-6bad7ff0f8b9',
+          turnId: 'turn-1',
+          status: 'completed',
+        },
+      });
     });
   });
 
@@ -404,7 +428,15 @@ describe('Codex app-server parser (JSON-RPC)', () => {
 
     it('parses final turn/completed → result', () => {
       const event = parseCodexEvent(lines[8]!);
-      expect(event).toEqual({ type: 'result', text: null });
+      expect(event).toEqual({
+        type: 'result',
+        text: null,
+        providerTurn: {
+          sessionId: '019d572a-d8da-7fa3-8c55-6bad7ff0f8b9',
+          turnId: 'turn-2',
+          status: 'completed',
+        },
+      });
     });
   });
 
@@ -419,9 +451,39 @@ describe('Codex app-server parser (JSON-RPC)', () => {
         },
       });
       const event = parseCodexEvent(line);
-      expect(event).toMatchObject({ type: 'result' });
+      expect(event).toMatchObject({
+        type: 'result',
+        isError: true,
+        providerTurn: {
+          sessionId: 'test-thread',
+          turnId: 'turn-1',
+          status: 'failed',
+        },
+      });
       const result = event as { type: 'result'; text: string | null };
       expect(result.text).toContain('context window exceeded');
+    });
+
+    it('keeps interrupted distinct and fail-closed instead of reporting success', () => {
+      const event = parseCodexEvent(JSON.stringify({
+        jsonrpc: '2.0',
+        method: 'turn/completed',
+        params: {
+          threadId: 'test-thread',
+          turn: { id: 'turn-2', status: 'interrupted', error: null },
+        },
+      }));
+
+      expect(event).toEqual({
+        type: 'result',
+        text: null,
+        isError: true,
+        providerTurn: {
+          sessionId: 'test-thread',
+          turnId: 'turn-2',
+          status: 'interrupted',
+        },
+      });
     });
 
     it('parses error response → result with error text', () => {
@@ -431,7 +493,7 @@ describe('Codex app-server parser (JSON-RPC)', () => {
         error: { code: -32600, message: 'Invalid Request' },
       });
       const event = parseCodexEvent(line);
-      expect(event).toMatchObject({ type: 'result' });
+      expect(event).toMatchObject({ type: 'result', providerRequestId: expect.any(String) });
       const result = event as { type: 'result'; text: string | null };
       expect(result.text).toContain('Invalid Request');
     });

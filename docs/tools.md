@@ -14,7 +14,7 @@ Complete reference for all 165 MCP tools exposed by WhatSoup. Tools are grouped 
 >
 > The initial gate lives in `src/mcp/register-all.ts` (the `Knowledge search — only when instance config specifies allowed indexes` block), and the credential/profile gate lives in `src/mcp/tools/knowledge.ts`.
 >
-> **`emit_heal_result`** is registered only when all of the following hold (see `src/runtimes/agent/runtime.ts`):
+> **`emit_heal_result`** is registered only when all of the following hold (declared in `src/runtimes/agent/runtime-tool-registrations.ts`, wired from `AgentRuntime.start()`):
 >
 > - `config.controlPeers.size > 0` — the instance has at least one configured control-plane peer (e.g. `loops`), and
 > - the runtime is not in `sandboxPerChat` mode, and
@@ -77,7 +77,7 @@ Complete reference for all 165 MCP tools exposed by WhatSoup. Tools are grouped 
 | [memory-write.ts](#memory-writets) | 1 |
 | **Total** | **165** |
 
-> The total above (`165`) reflects the full canonical surface — `164` tools registered from the per-module `src/mcp/tools/*.ts` factories plus `1` (`emit_heal_result`) registered inline from `src/runtimes/agent/runtime.ts`. The inline registration is documented below under [runtime.ts (inline)](#runtimets-inline); it is intentionally absent from the module breakdown because it does not live under `src/mcp/tools/`.
+> The total above (`165`) reflects the full canonical surface — `164` tools registered from the per-module `src/mcp/tools/*.ts` factories plus `1` (`emit_heal_result`) registered inline (declared in `src/runtimes/agent/runtime-tool-registrations.ts`, wired from `AgentRuntime.start()`). The inline registration is documented below under [runtime-tool-registrations.ts (inline)](#runtime-tool-registrationsts-inline); it is intentionally absent from the module breakdown because it does not live under `src/mcp/tools/`.
 
 ---
 
@@ -3172,7 +3172,7 @@ Search company knowledge bases using natural language queries. Results are pre-f
 | top_k | number | optional | Number of results (1-20) |
 | namespace | string | optional | Override default namespace(s) |
 
-**Returns:** Formatted search results with relevance scores. Available indexes are dynamically configured per instance.
+**Returns:** `index`, `query`, `results_count`, a structured `results` array containing each result's `id`, numeric `score`, and `entity_type`, plus a human-readable `formatted` summary. Available indexes are dynamically configured per instance. When an index profile defines `minScore`, lower-scoring hits are omitted and an all-low-score search returns zero results.
 
 ---
 
@@ -3206,7 +3206,9 @@ Persist a durable memory about the current conversation into the instance's conf
 | warrant | string | optional | Toulmin warrant |
 | contradicts | string | optional | id of a superseded memory |
 
-**Returns:** `{ id, status: "written", memory_type }`. The conversation and speaker are derived from the session, never caller-supplied.
+**Returns on success:** `{ operation_id, status: "written", memory_type }`, where `operation_id` is an opaque correlation reference. The internal record ID is not returned.
+
+**Returns on provider failure:** `{ error: "memory_write failed", code, retryable, operation_id }`, where `code` is a stable memory-operation failure code and no provider exception prose is exposed. The conversation and speaker are derived from the session, never caller-supplied.
 
 ---
 
@@ -3465,9 +3467,9 @@ Update a pending scheduled message. Can change time, text, or recurrence.
 
 ---
 
-## runtime.ts (inline)
+## runtime-tool-registrations.ts (inline)
 
-Control-plane repair tooling registered directly from `src/runtimes/agent/runtime.ts` rather than under `src/mcp/tools/`. Conditional registration: only the repair-issuing role (non-sandboxed Q with at least one configured control peer) exposes this surface; sandboxed repair targets (Loops) do not.
+Control-plane repair tooling declared in `src/runtimes/agent/runtime-tool-registrations.ts` and registered from `AgentRuntime.start()` rather than under `src/mcp/tools/`. Conditional registration: only the repair-issuing role (non-sandboxed Q with at least one configured control peer) exposes this surface; sandboxed repair targets (Loops) do not.
 
 > Uses `scope: global` and `targetMode: caller-supplied`. Tagged `core: false` so absence on instances that fail the gate is tolerated rather than fatal.
 
@@ -3477,7 +3479,7 @@ Control-plane repair tooling registered directly from `src/runtimes/agent/runtim
 
 Signal completion of a repair cycle. Only callable during an active repair session — the call validates that `reportId` matches the runtime's active control report and that a control queue is wired. On `result: 'fixed'` the runtime emits a `HEAL_COMPLETE` control message to the configured `loops` peer; on `result: 'escalate'` it emits `HEAL_ESCALATE` (with the supplied `diagnosis`) instead. The schema lives in [`src/core/heal-protocol.ts`](../src/core/heal-protocol.ts) as `EmitHealResultSchema`.
 
-> **Conditional registration.** Registered only when all of the following hold (gated at the call site in `src/runtimes/agent/runtime.ts`):
+> **Conditional registration.** Registered only when all of the following hold (gated in `registerRuntimeInlineTools`, `src/runtimes/agent/runtime-tool-registrations.ts`):
 >
 > - `config.controlPeers.size > 0` — the instance has at least one configured control-plane peer, and
 > - the runtime is not in `sandboxPerChat` mode, and

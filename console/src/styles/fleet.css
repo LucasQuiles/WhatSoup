@@ -1,0 +1,480 @@
+/* --------------------------------------------------------------------------
+   v3.5 FLEET surface (T5 b-03) — mockup fleet.html is the visual SSOT.
+
+   Anatomy: page h1 + actions row, KPI strip (5 cards), content grid
+   (Lines panel 1fr + Activity panel --fleet-activity-w), heartbeat rail
+   under the activity feed. Consumes only tokens (v35 ramp, status/mode
+   channels, --fleet-* geometry); raw mockup dimensions live once in
+   tokens.component.css (16-tokens-v3-addendum §5).
+   -------------------------------------------------------------------------- */
+
+.fleet {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding-bottom: var(--sp-3);
+  gap: var(--sp-3);
+}
+
+/* ── Page row: surface-owned h1 (single-h1 law) + primary action ── */
+.fleet-pagerow {
+  display: flex;
+  align-items: center;
+  gap: var(--fleet-pagerow-gap);
+  padding: var(--fleet-pagerow-pad);
+  padding-bottom: 0;
+}
+.fleet-pagerow h1 {
+  font: 700 var(--text-lg) / 1.35 var(--font-display);
+  letter-spacing: var(--tracking-chrome-title);
+  color: var(--text-1-v35);
+  margin: 0;
+}
+.fleet-pagerow .spacer { flex: 1; }
+
+/* ── KPI strip (mockup .kpis — 5-up, 2-up ≤1100px) ── */
+.fleet-kpis {
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  gap: var(--sp-3);
+  padding: var(--sp-3) var(--fleet-pad-x) 0;
+}
+.fleet-kpi {
+  background: var(--surface-raised-v35);
+  border: var(--bw) solid var(--border-hairline-v35);
+  border-radius: var(--r-console-lg);
+  padding: var(--fleet-kpi-pad);
+  transition: transform var(--dur-base) var(--ease-enter), box-shadow var(--dur-base) var(--ease-enter);
+}
+.fleet-kpi:hover {
+  transform: translateY(calc(-1 * var(--fleet-kpi-lift)));
+  box-shadow: var(--shadow-lift-v35);
+}
+.fleet-kpi__k {
+  font: 500 var(--text-sm) / 1.4 var(--font-mono);
+  letter-spacing: var(--tracking-kpi);
+  color: var(--text-3-v35);
+  text-transform: uppercase;
+}
+.fleet-kpi__v {
+  font: 700 var(--text-xl) / 1.2 var(--font-display);
+  color: var(--text-1-v35);
+  margin-top: var(--sp-1);
+}
+.fleet-kpi__v small {
+  color: var(--text-3-v35);
+  font-size: var(--text-body);
+  font-weight: 700;
+}
+.fleet-kpi__d {
+  font: 500 var(--text-sm) / 1.4 var(--font-mono);
+  color: var(--text-3-v35);
+  margin-top: var(--fleet-kpi-d-mt);
+}
+.fleet-kpi__d.up { color: var(--status-ok-fg); }
+.fleet-kpi__d.dn { color: var(--status-crit-fg); }
+
+/* Coverage meta row — carried #1881/#1879/#1762 honesty counters under the
+   mockup strip (see PR: deviation record). Mono t3 register, mockup .kpi .d
+   family. */
+.fleet-kpis-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-1) var(--sp-4);
+  padding: var(--sp-1) var(--fleet-pad-x) 0;
+  font: 500 var(--text-sm) / 1.4 var(--font-mono);
+  color: var(--text-3-v35);
+}
+.fleet-kpis-meta .warn { color: var(--status-warn-fg); }
+
+/* ── Content grid (mockup .content — Lines 1fr + Activity panel) ── */
+.fleet-content {
+  flex: 1;
+  display: grid;
+  grid-template-columns: 1fr var(--fleet-activity-w);
+  gap: var(--sp-4);
+  padding: var(--sp-1) var(--fleet-pad-x) 0;
+  min-height: 0;
+}
+.fleet-panel {
+  background: var(--surface-raised-v35);
+  border: var(--bw) solid var(--border-hairline-v35);
+  border-radius: var(--r-console-lg);
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  min-width: 0;
+  overflow: hidden;
+}
+.fleet-panel__h {
+  display: flex;
+  align-items: center;
+  gap: var(--fleet-panelhead-gap);
+  padding: var(--fleet-panelhead-pad);
+  border-bottom: var(--bw) solid var(--border-hairline-v35);
+  flex: none;
+}
+.fleet-panel__h h2 {
+  font: 600 var(--text-heading) / 1.4 inherit;
+  color: var(--text-1-v35);
+  margin: 0;
+}
+.fleet-panel__count {
+  font: 500 var(--text-sm) / 1.4 var(--font-mono);
+  color: var(--text-3-v35);
+}
+.fleet-panel__h .spacer { flex: 1; }
+
+/* ── Lines table (mockup table) — rows scroll region owns overflow ── */
+/* The Table primitive's wrapper brings its own v3 frame (background, border,
+   radius, shadow, x-scroll) — inside the fleet panel the panel owns the frame
+   and .fleet-rows owns the scroll, so the wrapper renders transparent. */
+.fleet-rows .soup-tblwrap {
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+  overflow-x: visible;
+}
+.fleet-rows {
+  overflow: auto;
+  min-height: 0;
+  flex: 1;
+}
+.fleet-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--text-body);
+  color: var(--text-2-v35);
+}
+.fleet-table th {
+  text-align: left;
+  font: 600 var(--text-sm) / 1.4 var(--font-mono);
+  letter-spacing: var(--tracking-fleet-head);
+  color: var(--text-3-v35);
+  text-transform: uppercase;
+  padding: var(--fleet-head-pad);
+  border-bottom: var(--bw) solid var(--border-hairline-v35);
+  position: sticky;
+  top: 0;
+  background: var(--surface-raised-v35);
+  z-index: 1;
+}
+.fleet-table td {
+  padding: var(--fleet-row-pad);
+  border-bottom: var(--bw) solid var(--border-hairline-v35);
+  vertical-align: middle;
+}
+.fleet-table tbody tr {
+  cursor: pointer;
+  transition: background var(--dur-fast);
+}
+.fleet-table tbody tr:hover { background: var(--surface-overlay-v35); }
+.fleet-table tbody tr[aria-current="true"] {
+  background: var(--accent-wash-v35);
+  box-shadow: inset var(--fleet-current-edge) 0 0 var(--accent-v35);
+}
+/* Bulk-selected row — distinct from the drawer-current accent edge: a plain
+   wash so both states can coexist on one row. */
+.fleet-table tbody tr.fleet-row--selected { background: var(--surface-overlay-v35); }
+
+/* Status shape cell doubles as the bulk-select reveal on hover/focus
+   (progressive disclosure — carried bulk-ops feature, mockup has no
+   checkbox column; documented deviation). */
+/* Status shape (badge.md shape law: state = color + shape). Geometry mirrors
+   the legacy StatusCell; local classes keep the row off v3 table idioms. */
+.fleet-shape {
+  width: var(--dot-table);
+  height: var(--dot-table);
+  display: inline-block;
+  flex: none;
+}
+.fleet-shape--disc { border-radius: 50%; background: var(--status-ok-solid); }
+.fleet-shape--diamond {
+  background: var(--status-warn-solid);
+  transform: rotate(45deg);
+  border-radius: var(--chrome-micro-radius);
+}
+.fleet-shape--square {
+  background: var(--status-crit-solid);
+  border-radius: var(--chrome-micro-radius);
+}
+.fleet-shape--outline {
+  border: var(--fleet-chan-tag-keyline) solid var(--text-3-v35);
+  border-radius: var(--chrome-micro-radius);
+  background: transparent;
+}
+.fleet-shapewrap { position: relative; width: var(--dot-table); height: var(--dot-table); }
+.fleet-shapewrap .fleet-select {
+  position: absolute;
+  inset: calc(-1 * var(--fleet-select-inset));
+  display: none;
+  align-items: center;
+  justify-content: center;
+}
+.fleet-table tr:hover .fleet-select,
+.fleet-table tr:focus-within .fleet-select,
+.fleet-select--on { display: inline-flex; }
+.fleet-table tr:hover .fleet-shapewrap .fleet-shape,
+.fleet-table tr:focus-within .fleet-shapewrap .fleet-shape { visibility: hidden; }
+.fleet-select--on .fleet-shapewrap .fleet-shape { visibility: hidden; }
+
+/* Line identity cell */
+.fleet-lcell {
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-2);
+  white-space: nowrap;
+  min-width: 0;
+  max-width: var(--fleet-lcell-maxw);
+  overflow: hidden;
+}
+.fleet-lname { font-weight: 600; color: var(--text-1-v35); }
+.fleet-lid {
+  font: 400 var(--text-sm) / 1.4 var(--font-mono);
+  color: var(--text-3-v35);
+}
+.fleet-obs {
+  font: 400 var(--text-sm) / 1.4 var(--font-mono);
+  color: var(--text-3-v35);
+}
+.fleet-obs.warn { color: var(--status-warn-fg); }
+
+/* Channel glyph + state tag (11-channel-glyphography §1 anatomy) */
+.fleet-chan {
+  position: relative;
+  width: var(--fleet-chan-box);
+  height: var(--fleet-chan-box);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-2-v35);
+}
+.fleet-chan svg { width: var(--chrome-icon); height: var(--chrome-icon); fill: currentColor; }
+.fleet-chan--dim svg { color: var(--text-3-v35); opacity: 0.45; }
+[data-theme="light"] .fleet-chan--dim svg { opacity: 0.6; }
+.fleet-chan__tag {
+  position: absolute;
+  right: calc(-1 * var(--fleet-chan-tag-offset));
+  bottom: calc(-1 * var(--fleet-chan-tag-offset));
+  width: var(--dot-table);
+  height: var(--dot-table);
+  border: var(--fleet-chan-tag-keyline) solid var(--surface-raised-v35);
+  border-radius: 50%;
+  background: var(--status-ok-solid);
+}
+.fleet-chan__tag--warn {
+  background: var(--status-warn-solid);
+  border-radius: var(--chrome-micro-radius);
+  transform: rotate(45deg) scale(0.85);
+}
+.fleet-chan__tag--crit {
+  background: var(--status-crit-solid);
+  border-radius: var(--chrome-micro-radius);
+}
+.fleet-chan__tag--off {
+  background: transparent;
+  border: var(--fleet-chan-tag-keyline) solid var(--text-3-v35);
+  border-radius: var(--chrome-micro-radius);
+}
+
+/* Agent cell — avatar + name, or honest "unassigned" (mockup .noagent) */
+.fleet-agent { display: flex; align-items: center; gap: var(--sp-2); }
+.fleet-agent__av {
+  width: var(--fleet-avatar-box);
+  height: var(--fleet-avatar-box);
+  border-radius: var(--r-console-md);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font: 700 var(--text-sm) / 1 "Hanken Grotesk", sans-serif;
+  color: var(--agent-avatar-ink);
+  flex: none;
+}
+.fleet-noagent {
+  color: var(--text-3-v35);
+  font-style: italic;
+  font-size: var(--text-data);
+}
+
+/* Mode cell (mockup .mode — channel square + mono label) */
+.fleet-mode {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--fleet-mode-gap);
+  font: 500 var(--text-sm) / 1.4 var(--font-mono);
+}
+.fleet-mode i {
+  width: var(--fleet-mode-dot);
+  height: var(--fleet-mode-dot);
+  border-radius: var(--chrome-micro-radius);
+  background: currentColor;
+}
+.fleet-mode--passive { color: var(--mode-passive-fg); }
+.fleet-mode--chat { color: var(--mode-chat-fg); }
+.fleet-mode--agent { color: var(--mode-agent-fg); }
+
+/* State pill (mockup .badge) */
+.fleet-state {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--fleet-badge-gap);
+  padding: var(--fleet-badge-pad);
+  border-radius: var(--chrome-pill-radius);
+  font: 600 var(--text-sm) / 1.4 var(--font-mono);
+  letter-spacing: var(--tracking-badge);
+}
+.fleet-state--live {
+  background: var(--status-ok-wash);
+  color: var(--status-ok-fg);
+}
+.fleet-state--warn {
+  background: var(--status-warn-wash);
+  color: var(--status-warn-fg);
+}
+.fleet-state--crit {
+  background: var(--status-crit-wash);
+  color: var(--status-crit-fg);
+}
+.fleet-state--off {
+  background: transparent;
+  border: var(--bw) solid var(--border-subtle-v35);
+  color: var(--text-3-v35);
+}
+
+/* Grant chips (mockup .grants/.g) — R3-13 hidden-by-default until the Grant
+   API lands (b-04 track); documented derivation. */
+.fleet-grants { display: flex; gap: var(--fleet-grant-gap); }
+.fleet-grant {
+  width: var(--fleet-grant-box);
+  height: var(--fleet-grant-box);
+  border-radius: var(--r-console-sm);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font: 700 var(--text-sm) / 1 var(--font-mono);
+}
+.fleet-grant--see {
+  background: var(--surface-inset-v35);
+  border: var(--bw) solid var(--border-subtle-v35);
+  color: var(--text-2-v35);
+}
+.fleet-grant--part {
+  background: var(--surface-overlay-v35);
+  border: var(--bw) solid var(--border-strong-v35);
+  color: var(--text-1-v35);
+}
+.fleet-grant--hid {
+  border: var(--bw) dashed var(--border-strong-v35);
+  color: var(--text-3-v35);
+}
+
+/* Sparkbars (mockup .spark) */
+.fleet-spark {
+  display: flex;
+  gap: var(--fleet-spark-gap);
+  align-items: flex-end;
+  height: var(--fleet-spark-h);
+}
+.fleet-spark i {
+  width: var(--fleet-spark-w);
+  background: var(--text-3-v35);
+  border-radius: var(--chrome-micro-radius);
+  opacity: 0.6;
+}
+.fleet-spark i.hi { background: var(--text-1-v35); opacity: 0.9; }
+
+/* Row action button (mockup .rowbtn) */
+.fleet-rowbtn {
+  padding: var(--fleet-rowbtn-pad);
+  border-radius: var(--r-console-md);
+  font: 600 var(--text-heading) / 1 var(--font-mono);
+}
+
+/* Header select-all: revealed on panel hover/focus or once any selection
+   exists (same progressive-disclosure law as the row-level reveal). */
+.fleet-select--all {
+  display: none;
+  align-items: center;
+  justify-content: center;
+}
+.fleet-panel:hover .fleet-select--all,
+.fleet-panel:focus-within .fleet-select--all,
+.fleet-select--all.fleet-select--on { display: inline-flex; }
+
+/* Filter popover content (panel-h filter ghost button) */
+.fleet-filterpop {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  padding: var(--sp-2);
+  min-width: var(--tooltip-min-w);
+}
+.fleet-filterpop__modes {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-1);
+}
+.fleet-filterpop__search {
+  background: var(--surface-inset-v35);
+  border: var(--bw) solid var(--border-subtle-v35);
+  border-radius: var(--r-console-md);
+  color: var(--text-1-v35);
+  font: 400 var(--text-body) / 1.5 var(--font-sans);
+  padding: var(--fleet-filterpop-pad);
+}
+.fleet-filterpop__search::placeholder { color: var(--text-3-v35); }
+.fleet-filterpop__search:focus-visible {
+  outline: var(--fleet-chan-tag-keyline) solid var(--accent-v35);
+  outline-offset: var(--bw);
+}
+
+/* ── Activity panel — feed + heartbeat rail (mockup .feed/.hbw) ── */
+.fleet-feed {
+  overflow: auto;
+  min-height: 0;
+  flex: 1;
+  padding: var(--sp-2) 0;
+}
+.fleet-hb {
+  display: flex;
+  align-items: center;
+  gap: var(--fleet-hb-gap);
+  padding: var(--fleet-ev-pad);
+  border-top: var(--bw) solid var(--border-hairline-v35);
+  flex: none;
+}
+.fleet-hb__label {
+  font: 500 var(--text-label) / 1.4 var(--font-mono);
+  letter-spacing: var(--tracking-fleet-head);
+  color: var(--text-3-v35);
+  text-transform: uppercase;
+  flex: none;
+}
+.fleet-hb__bars { display: flex; gap: var(--fleet-hb-bar-gap); flex: 1; }
+.fleet-hb__bars i {
+  flex: 1;
+  height: var(--sp-1);
+  border-radius: var(--chrome-micro-radius);
+  background: var(--status-ok-solid);
+  opacity: 0.8;
+}
+.fleet-hb__bars i.slow {
+  background: var(--status-warn-solid);
+  transform: rotate(45deg) scale(0.85);
+}
+.fleet-hb__bars i.down {
+  background: var(--status-crit-solid);
+  opacity: 0.9;
+  border-radius: 0;
+}
+.fleet-hb__bars i.idle { background: var(--border-subtle-v35); }
+
+/* ── Collapse ≤1100px (mockup @media): content stacks, KPIs 2-up ── */
+@media (max-width: 1100px) {
+  .fleet-content { grid-template-columns: 1fr; }
+  .fleet-kpis { grid-template-columns: repeat(2, 1fr); }
+}

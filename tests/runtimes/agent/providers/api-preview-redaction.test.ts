@@ -1,4 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import {
+  expectPreviewRedacted,
+  providerErrorText,
+  secretFixtures,
+  type SecretFixtures,
+} from '../../../fixtures/redaction-fixtures.ts';
 import type { Mock } from 'vitest';
 
 import type { AgentEvent } from '../../../../src/runtimes/agent/stream-parser.ts';
@@ -20,32 +26,6 @@ vi.mock('../../../../src/logger.ts', () => ({
     warn: warnMock,
   }),
 }));
-
-interface SecretFixtures {
-  bearer: string;
-  keyed: string;
-  email: string;
-  github: string;
-}
-
-function secretFixtures(): SecretFixtures {
-  return {
-    bearer: ['sk', 'live', 'a'.repeat(26)].join('-'),
-    keyed: ['token', 'b'.repeat(26)].join('-'),
-    email: `operator${'@'}example.com`,
-    github: `ghp_${'c'.repeat(26)}`,
-  };
-}
-
-function providerErrorText(fixtures = secretFixtures()): string {
-  return [
-    'invalid_request_error: upstream rejected request',
-    `Authorization: Bearer ${fixtures.bearer}`,
-    `api_key=${fixtures.keyed}`,
-    `account=${fixtures.email}`,
-    `github=${fixtures.github}`,
-  ].join('\n');
-}
 
 function providerErrorSseLine(fixtures = secretFixtures()): string {
   return providerErrorText(fixtures).replace(/\n/g, ' ');
@@ -85,17 +65,6 @@ function previewFrom(mock: Mock, fieldName: 'errPreview' | 'dataPreview'): strin
     }
   }
   throw new Error(`missing ${fieldName} log field`);
-}
-
-function expectPreviewRedacted(preview: string, fixtures: SecretFixtures): void {
-  expect(preview).toContain('invalid_request_error');
-  expect(preview).toContain('Bearer [REDACTED]');
-  expect(preview).toContain('api_key=[REDACTED]');
-  expect(preview).toContain('[REDACTED_EMAIL]');
-  expect(preview).not.toContain(fixtures.bearer);
-  expect(preview).not.toContain(fixtures.keyed);
-  expect(preview).not.toContain(fixtures.email);
-  expect(preview).not.toContain(fixtures.github);
 }
 
 describe('provider API preview redaction', () => {

@@ -224,6 +224,51 @@ describe('search tools', () => {
       const data = JSON.parse(result.content[0].text) as { results: unknown[] };
       expect(data.results).toHaveLength(0);
     });
+
+    // --- SQL LIKE wildcard escaping (issue #2177) ---
+    // `%`, `_`, and `\` in the caller's query must be treated as literal
+    // characters, not as LIKE pattern metacharacters. All four searched fields
+    // share a single escaped parameter, so exercising display_name covers the
+    // shared code path.
+
+    it('treats an underscore query as a literal character, not a single-char wildcard', async () => {
+      db.raw.exec(
+        `INSERT INTO contacts (jid, canonical_phone, display_name, notify_name)
+         VALUES ('333@s.whatsapp.net', '333', 'Anna_Bell', 'Anna')`,
+      );
+      const result = await registry.call('search_contacts', { query: '_' }, globalSession());
+      const data = JSON.parse(result.content[0].text) as { results: Array<{ jid: string }> };
+      const jids = data.results.map((r) => r.jid);
+      // Only the contact with a literal underscore matches.
+      expect(jids).toContain('333@s.whatsapp.net');
+      expect(jids).not.toContain('111@s.whatsapp.net'); // 'Alice Smith' has no underscore
+      expect(jids).not.toContain('222@s.whatsapp.net'); // 'Bob Jones' has no underscore
+    });
+
+    it('treats a percent query as a literal character, not a multi-char wildcard', async () => {
+      db.raw.exec(
+        `INSERT INTO contacts (jid, canonical_phone, display_name, notify_name)
+         VALUES ('444@s.whatsapp.net', '444', 'Sale 100%', 'Sale')`,
+      );
+      const result = await registry.call('search_contacts', { query: '%' }, globalSession());
+      const data = JSON.parse(result.content[0].text) as { results: Array<{ jid: string }> };
+      const jids = data.results.map((r) => r.jid);
+      // Only the contact with a literal percent matches.
+      expect(jids).toContain('444@s.whatsapp.net');
+      expect(jids).not.toContain('111@s.whatsapp.net');
+      expect(jids).not.toContain('222@s.whatsapp.net');
+    });
+
+    it('treats a backslash query as a literal character under the ESCAPE clause', async () => {
+      db.raw.exec(
+        `INSERT INTO contacts (jid, canonical_phone, display_name, notify_name)
+         VALUES ('555@s.whatsapp.net', '555', 'a\\b', 'slash')`,
+      );
+      const result = await registry.call('search_contacts', { query: 'a\\b' }, globalSession());
+      const data = JSON.parse(result.content[0].text) as { results: Array<{ jid: string }> };
+      const jids = data.results.map((r) => r.jid);
+      expect(jids).toContain('555@s.whatsapp.net');
+    });
   });
 
   // --- search_messages_advanced ---

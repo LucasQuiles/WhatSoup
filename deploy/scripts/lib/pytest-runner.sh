@@ -1,5 +1,24 @@
 #!/usr/bin/env bash
 
+# The curated 98%-branch-coverage-floor suite: every deploy/scripts/tests/
+# file that run-sentinel-tests.sh gives its own dedicated pytest invocation
+# (with or without a --cov floor). Single source of truth, sourced by both
+# run-sentinel-tests.sh (which pytest-invokes each of these individually) and
+# run-bot-errors-full-suite.sh (which --ignore's every one of these, so the
+# curated coverage-floor gate stays the sole authority for them and they
+# never run twice per matrix leg). Edit this array to add/remove/rename a
+# curated file; both scripts pick up the change with no separate edit and no
+# sync-guard test is needed -- drift between the two consumers becomes
+# structurally impossible.
+CURATED_SENTINEL_TEST_FILES=(
+  deploy/scripts/tests/test_sentinel_pin.py
+  deploy/scripts/tests/test_bot_errors_selfcheck.py
+  deploy/scripts/tests/test_bot_errors_sentinel.py
+  deploy/scripts/tests/test_bot_errors_heartbeat_watchdog_auth.py
+  deploy/scripts/tests/test_bot_errors_redaction_parity.py
+  deploy/scripts/tests/test_bot_errors_gui_session_monitor.py
+)
+
 # Resolve a pytest-capable command into PYTEST_CMD.
 #
 # Usage:

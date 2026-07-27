@@ -108,6 +108,29 @@ function writeRecoveryEvent(root: string, index: number, overrides: Record<strin
   writeFileSync(join(outbox, `${created}.Loops.${eventId}.json`), `${JSON.stringify(event, null, 2)}\n`, { mode: 0o600 });
 }
 
+function dispatchCaptured(root: string, capturePath: string): {
+  processed: number;
+  sent: number;
+  suppressed: number;
+  failed: number;
+  recoveredBeforeDelivery?: number;
+} {
+  return JSON.parse(execFileSync(
+    'python3',
+    ['deploy/scripts/bot-errors-dispatcher.py', '--once'],
+    {
+      cwd: process.cwd(),
+      env: {
+        ...process.env,
+        BOT_ERRORS_STATE_DIR: root,
+        BOT_ERRORS_DRY_SEND_CAPTURE: capturePath,
+        BOT_ERRORS_INLINE_LOG_TAIL: '0',
+      },
+      encoding: 'utf8',
+    },
+  ));
+}
+
 // Seed an already-open incident into the durable incident-state, standing in for
 // the alert a prior dispatcher run would have surfaced. A clear/recovery only
 // surfaces when it closes an open incident of the same key; a clear with no open
@@ -891,6 +914,189 @@ describe('bot-errors-dispatcher', () => {
     const rendered = readFileSync(capturePath, 'utf8');
     expect(rendered.match(/BOT RECOVERY/g)).toHaveLength(2);
     expect(rendered).toContain('BOT ERROR - flapping source restored');
+  });
+
+  it('retires a retrying alert when its later clear arrives before delivery', () => {
+    tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-dispatcher-'));
+    const capturePath = join(tmpRoot, 'sent-message.txt');
+    const dispatchLog = join(tmpRoot, 'logs', 'dispatch.jsonl');
+
+    writeRecoveryEvent(tmpRoot, 0, {
+      id: 'retrying-alert-before-clear',
+      eventType: 'alert',
+      severity: 'critical',
+      createdAt: '2026-07-22T21:31:08Z',
+      machine: 'HOST-A',
+      instance: 'personal',
+      source: 'instance_unreachable',
+      summary: 'service unreachable',
+    });
+
+    spawnSync('python3', ['deploy/scripts/bot-errors-dispatcher.py', '--once'], {
+      cwd: process.cwd(),
+      env: {
+        ...process.env,
+        BOT_ERRORS_STATE_DIR: tmpRoot,
+        BOT_ERRORS_DRY_SEND_FAIL: 'WhatsApp is temporarily disconnected. Try again in a moment.',
+      },
+      encoding: 'utf8',
+    });
+    expect(readdirSync(join(tmpRoot, 'outbox'))).toHaveLength(1);
+    expect(readFileSync(dispatchLog, 'utf8')).toContain('send_deferred_transient');
+
+    writeRecoveryEvent(tmpRoot, 1, {
+      id: 'clear-after-recovery',
+      createdAt: '2026-07-22T21:32:32Z',
+      machine: 'HOST-A',
+      instance: 'personal',
+      source: 'instance_unreachable',
+      summary: 'alert source cleared: instance_unreachable',
+    });
+
+    const first = dispatchCaptured(tmpRoot, capturePath);
+
+    expect(first).toMatchObject({ sent: 0, failed: 0 });
+    expect(readdirSync(join(tmpRoot, 'outbox'))).toHaveLength(0);
+    expect(existsSync(capturePath)).toBe(false);
+    expect(readFileSync(dispatchLog, 'utf8')).toContain('recovered_before_delivery');
+
+    const second = dispatchCaptured(tmpRoot, capturePath);
+    expect(second).toMatchObject({ processed: 0, sent: 0 });
+    expect(existsSync(capturePath)).toBe(false);
+  });
+
+  it('closes an open incident while retiring its undelivered duplicate alert', () => {
+    tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-dispatcher-'));
+    const capturePath = join(tmpRoot, 'sent-message.txt');
+    const pendingUntil = Math.floor(Date.now() / 1000) + 3_600;
+    seedOpenIncident(tmpRoot, 'HOST-A|personal|instance_unreachable');
+
+    writeRecoveryEvent(tmpRoot, 0, {
+      id: 'retrying-duplicate-alert',
+      eventType: 'alert',
+      severity: 'critical',
+      createdAt: '2026-07-22T21:31:08Z',
+      machine: 'HOST-A',
+      instance: 'personal',
+      source: 'instance_unreachable',
+      summary: 'service unreachable',
+      delivery: {
+        attempts: 1,
+        status: 'retrying',
+        nextAttemptAtEpoch: pendingUntil,
+        lastError: 'transport temporarily disconnected',
+      },
+    });
+    writeRecoveryEvent(tmpRoot, 1, {
+      id: 'clear-visible-incident',
+      createdAt: '2026-07-22T21:32:32Z',
+      machine: 'HOST-A',
+      instance: 'personal',
+      source: 'instance_unreachable',
+      summary: 'alert source cleared: instance_unreachable',
+    });
+
+    const result = dispatchCaptured(tmpRoot, capturePath);
+
+    expect(result).toMatchObject({
+      sent: 1,
+      suppressed: 1,
+      failed: 0,
+      recoveredBeforeDelivery: 1,
+    });
+    expect(readdirSync(join(tmpRoot, 'outbox'))).toHaveLength(0);
+    const rendered = readFileSync(capturePath, 'utf8');
+    expect(rendered).toContain('BOT RECOVERY');
+    expect(rendered).not.toContain('BOT ERROR');
+  });
+
+  it('keeps a qualified recovery visible for a legacy-unqualified open incident', () => {
+    tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-dispatcher-'));
+    const capturePath = join(tmpRoot, 'sent-message.txt');
+    const pendingUntil = Math.floor(Date.now() / 1000) + 3_600;
+    seedOpenIncident(tmpRoot, 'HOST-A|bot-errors-heartbeat|heartbeat-watchdog');
+
+    writeRecoveryEvent(tmpRoot, 0, {
+      id: 'retrying-qualified-watchdog-alert',
+      eventType: 'alert',
+      severity: 'critical',
+      createdAt: '2026-07-22T21:31:08Z',
+      machine: 'HOST-A',
+      instance: 'bot-errors-heartbeat',
+      source: 'heartbeat-watchdog',
+      alertSource: 'daily_health',
+      summary: 'daily health cadence stale',
+      delivery: {
+        attempts: 1,
+        status: 'retrying',
+        nextAttemptAtEpoch: pendingUntil,
+        lastError: 'transport temporarily disconnected',
+      },
+    });
+    writeRecoveryEvent(tmpRoot, 1, {
+      id: 'qualified-watchdog-clear',
+      createdAt: '2026-07-22T21:32:32Z',
+      machine: 'HOST-A',
+      instance: 'bot-errors-heartbeat',
+      source: 'heartbeat-watchdog',
+      alertSource: 'daily_health',
+      summary: 'daily health cadence recovered',
+    });
+
+    const result = dispatchCaptured(tmpRoot, capturePath);
+
+    expect(result).toMatchObject({
+      sent: 1,
+      suppressed: 1,
+      failed: 0,
+      recoveredBeforeDelivery: 1,
+    });
+    expect(readdirSync(join(tmpRoot, 'outbox'))).toHaveLength(0);
+    const rendered = readFileSync(capturePath, 'utf8');
+    expect(rendered).toContain('BOT RECOVERY');
+    expect(rendered).not.toContain('BOT ERROR');
+  });
+
+  it('does not retire a retrying alert created after an older orphan clear', () => {
+    tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-dispatcher-'));
+    const capturePath = join(tmpRoot, 'sent-message.txt');
+    const pendingUntil = Math.floor(Date.now() / 1000) + 3_600;
+
+    writeRecoveryEvent(tmpRoot, 0, {
+      id: 'older-orphan-clear',
+      createdAt: '2026-07-22T21:31:08Z',
+      machine: 'HOST-A',
+      instance: 'personal',
+      source: 'instance_unreachable',
+      summary: 'alert source cleared: instance_unreachable',
+    });
+    writeRecoveryEvent(tmpRoot, 1, {
+      id: 'newer-retrying-alert',
+      eventType: 'alert',
+      severity: 'critical',
+      createdAt: '2026-07-22T21:32:32Z',
+      machine: 'HOST-A',
+      instance: 'personal',
+      source: 'instance_unreachable',
+      summary: 'new outage started',
+      delivery: {
+        attempts: 1,
+        status: 'retrying',
+        nextAttemptAtEpoch: pendingUntil,
+        lastError: 'transport temporarily disconnected',
+      },
+    });
+
+    const result = dispatchCaptured(tmpRoot, capturePath);
+
+    expect(result).toMatchObject({
+      sent: 0,
+      suppressed: 1,
+      failed: 0,
+      recoveredBeforeDelivery: 0,
+    });
+    expect(readdirSync(join(tmpRoot, 'outbox'))).toHaveLength(1);
+    expect(existsSync(capturePath)).toBe(false);
   });
 
   it('prune_suppressed uses delivery.suppressedAt from event JSON, not file mtime, to determine oldest', () => {

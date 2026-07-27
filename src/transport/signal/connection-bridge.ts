@@ -1,3 +1,4 @@
+import { UnsupportedTransportOperationError } from '../unsupported-operation.ts';
 import { EventEmitter } from 'node:events';
 import type { IncomingMessage, OutboundMedia, SubmissionReceipt, TypingState } from '../../core/types.ts';
 import { ContactsDirectory } from '../../core/mentions.ts';
@@ -18,13 +19,13 @@ interface DisposableSignalPort {
   dispose(): void;
 }
 
-export class UnsupportedTransportOperationError extends Error {
-  readonly code = 'UNSUPPORTED_TRANSPORT_OPERATION';
+// #2202: the canonical error lives in transport/unsupported-operation.ts.
+// Re-exported here so existing importers of this module keep working.
+export { UnsupportedTransportOperationError };
 
-  constructor(operation: string) {
-    super(`[SignalConnection] "${operation}" is not supported on the Signal transport`);
-    this.name = 'UnsupportedTransportOperationError';
-  }
+/** Build the Signal-flavoured unsupported-operation error. */
+function unsupported(operation: string): UnsupportedTransportOperationError {
+  return new UnsupportedTransportOperationError('SignalConnection', 'Signal', operation);
 }
 
 function contractToIncoming(message: ContractInboundMessage, isGroup: boolean): IncomingMessage {
@@ -185,7 +186,7 @@ export class SignalConnection extends EventEmitter implements RuntimeConnection 
   }
 
   async sendMedia(_chatJid: string, _media: OutboundMedia): Promise<SubmissionReceipt> {
-    throw new UnsupportedTransportOperationError('sendMedia');
+    throw unsupported('sendMedia');
   }
 
   getSocket(): WhatsAppSocket | null {
@@ -205,7 +206,7 @@ export class SignalConnection extends EventEmitter implements RuntimeConnection 
     _chatJid: string,
     _content: Record<string, unknown>,
   ): Promise<SubmissionReceipt> {
-    throw new UnsupportedTransportOperationError('sendRaw');
+    throw unsupported('sendRaw');
   }
 
   async sendPollMessage(
@@ -214,6 +215,6 @@ export class SignalConnection extends EventEmitter implements RuntimeConnection 
     _values: string[],
     _selectableCount: number,
   ): Promise<{ waMessageId: string | null; hasSecret: boolean }> {
-    throw new UnsupportedTransportOperationError('sendPollMessage');
+    throw unsupported('sendPollMessage');
   }
 }

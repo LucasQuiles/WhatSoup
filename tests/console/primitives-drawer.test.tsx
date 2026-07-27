@@ -813,11 +813,11 @@ describe('Drawer — exit presence: closing phase with stubbed duration', () => 
 
     await act(async () => {})
 
+    const closingShell = document.querySelector('.soup-drawer')
+    expect(closingShell).not.toBeNull()
+    expect(closingShell!.getAttribute('data-state')).toBe('closing')
     await act(async () => {
-      const closingShell = document.querySelector('.soup-drawer')
-      if (closingShell) {
-        fireEvent.animationEnd(closingShell, { animationName: 'soup-drawer-out' })
-      }
+      fireEvent.animationEnd(closingShell!, { animationName: 'soup-drawer-out' })
     })
 
     await act(async () => {})
@@ -840,6 +840,10 @@ describe('Drawer — exit presence: closing phase with stubbed duration', () => 
       </Drawer>
     )
     await act(async () => {})
+
+    const closingShell = document.querySelector('.soup-drawer')
+    expect(closingShell).not.toBeNull()
+    expect(closingShell!.getAttribute('data-state')).toBe('closing')
 
     // Re-open
     rerender(

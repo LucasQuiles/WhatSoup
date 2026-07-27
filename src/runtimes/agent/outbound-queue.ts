@@ -55,6 +55,8 @@ export interface OutboundQueueOptions {
    * `db` and `config.adminPhones`, computes this.
    */
   readonly peerIsAdmin?: (chatJid: string) => boolean;
+  /** Exact authenticated internal-DM predicate injected by the runtime. */
+  readonly peerIsTrustedInternal?: (chatJid: string) => boolean;
 }
 
 interface MutableTurnDeliveryEvidence {
@@ -482,6 +484,7 @@ export class OutboundQueue implements IOutboundQueue {
   private readonly fallbackActiveFn: (() => boolean) | undefined;
   /** T8-F1: injected admin-peer resolver (see OutboundQueueOptions). */
   private readonly peerIsAdminFn: ((chatJid: string) => boolean) | undefined;
+  private readonly peerIsTrustedInternalFn: ((chatJid: string) => boolean) | undefined;
 
   constructor(
     messenger: Messenger,
@@ -501,6 +504,7 @@ export class OutboundQueue implements IOutboundQueue {
     this.senderToken = options?.senderToken ?? crypto.randomUUID();
     this.fallbackActiveFn = options?.fallbackActive;
     this.peerIsAdminFn = options?.peerIsAdmin;
+    this.peerIsTrustedInternalFn = options?.peerIsTrustedInternal;
   }
 
   /** The echo-guard token for this queue (QR-069: inherited by a replacement). */
@@ -521,51 +525,6 @@ export class OutboundQueue implements IOutboundQueue {
     if (Number.isFinite(ms) && ms > 0) {
       this.textAggregateDelayMs = ms;
     }
-  }
-
-  /**
-   * In minimal mode, decide whether a tool update should be shown to the user.
-   * Only friendly, non-technical updates pass through. Everything else is suppressed
-   * but the typing indicator stays active so the user knows work is happening.
-   */
-  private shouldShowMinimal(update: ToolUpdate): boolean {
-    // Always suppress technical noise
-    switch (update.category) {
-      case 'skill':      // ToolSearch/Skill lookups — pure internal mechanics
-      case 'planning':   // TaskCreate/TodoWrite — internal work tracking
-      case 'blocked':    // Hook denials — internal safety system
-      case 'cancelled':  // Cancelled tool calls
-      case 'reading':    // File reads — internal
-      case 'modifying':  // File writes — internal
-        return false;
-
-      case 'error':
-        // Only show errors that are genuinely user-facing (not retries or hook blocks)
-        return false;
-
-      case 'searching':
-        // Show if it's a friendly knowledge search or web search
-        if (update.detail.startsWith('Checking my notes')) return true;
-        return false;
-
-      case 'fetching':
-        // Web searches/fetches get a friendly label
-        return true;
-
-      case 'agent':
-        // Subagent dispatches — suppress
-        return false;
-
-      case 'running':
-        // Bash commands — suppress
-        return false;
-
-      case 'other':
-        // MCP tools — suppress raw tool names
-        return false;
-    }
-
-    return false;
   }
 
   /** Attach an optional DurabilityEngine to track outbound ops. */
@@ -766,10 +725,12 @@ export class OutboundQueue implements IOutboundQueue {
     // treated as active ⇒ full scrub) so an un-injected queue never silently
     // elevates.
     const isGroup = isGroupJid(attribution.chatJid);
-    const ctx = this.peerIsAdminFn
+    const ctx = this.peerIsAdminFn || this.peerIsTrustedInternalFn
       ? {
           isGroup,
-          peerIsAdmin: this.peerIsAdminFn(attribution.chatJid),
+          peerIsAdmin: this.peerIsAdminFn?.(attribution.chatJid) ?? false,
+          peerIsTrustedInternal:
+            this.peerIsTrustedInternalFn?.(attribution.chatJid) ?? false,
           fallbackActive: this.fallbackActiveFn ? this.fallbackActiveFn() : true,
         }
       : undefined;
@@ -845,17 +806,13 @@ export class OutboundQueue implements IOutboundQueue {
    * 3-second idle gap between tool calls, or after 30 seconds maximum —
    * whichever comes first. This prevents silent gaps during long tool chains.
    *
-   * In minimal mode, most updates are suppressed to keep the user experience
-   * clean for non-technical users. Only curated friendly updates pass through.
+   * In minimal mode, updates are suppressed to keep the user experience clean.
+   * The typing indicator remains active while work is in progress.
    */
   enqueueToolUpdate(update: ToolUpdate): void {
     if (this.toolUpdateMode === 'minimal') {
-      // Only pass through updates that are meaningful to a non-technical user
-      const pass = this.shouldShowMinimal(update);
-      if (!pass) {
-        this.startTyping();
-        return;
-      }
+      this.startTyping();
+      return;
     }
     // Friendly mode: let everything through (no filtering), but skip internal noise
     // that adds no user value (skill lookups, cancelled ops).
@@ -869,11 +826,8 @@ export class OutboundQueue implements IOutboundQueue {
     this.startTyping();
 
     // Idle timer: reset on each new tool call, fires after a pause in tool activity.
-    // Minimal mode uses a shorter delay (1.5s) so the first status reaches the user
-    // before the answer — avoids status arriving after/alongside the answer text.
-    const delay = this.toolUpdateMode === 'minimal' ? 1_500 : TOOL_BATCH_DELAY_MS;
     if (this.toolTimer !== null) clearTimeout(this.toolTimer);
-    this.toolTimer = setTimeout(() => this.flushToolBuffer(), delay);
+    this.toolTimer = setTimeout(() => this.flushToolBuffer(), TOOL_BATCH_DELAY_MS);
 
     // Max-age timer: set once when the buffer first fills, never reset
     if (this.toolMaxAgeTimer === null) {

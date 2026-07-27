@@ -74,7 +74,7 @@ function runKeyringLookupProbe(
   writeExecutable(path.join(binDir, 'secret-tool'), `#!/usr/bin/env bash\nprintf 'secret-tool %s\\n' "$*" >> "$LOG_PATH"\nif [ "$SCENARIO" = "canonical-hit" ] && [ "$1" = "lookup" ] && [ "$3" = "whatsoup-health-token" ] && [ "$4" = "user" ] && [ "$5" = "test-instance" ]; then\n  printf 'canonical-secret\\n'\n  exit 0\nfi\nif [ "$SCENARIO" = "canonical-miss-legacy-hit" ] && [ "$1" = "lookup" ] && [ "$3" = "whatsoup_health" ]; then\n  printf 'legacy-keyring-token\\n'\n  exit 0\nfi\nexit 1\n`);
 
   const scriptPath = path.join(tmpDir, 'probe.sh');
-  fs.writeFileSync(scriptPath, `#!/usr/bin/env bash\nset -euo pipefail\nPATH="${binDir}:$PATH"\nexport LOG_PATH="${logPath}"\nexport SCENARIO="${scenario}"\nUSER=local-user\nNODE="${process.execPath}"\nSCRIPT_DIR="${path.resolve('deploy')}"\nWHATSOUP_HEALTH_TOKEN=shared-env-token\n${extractKeyringLookup(source)}\nTOKEN="$(keyring_lookup whatsoup-health-token "" user test-instance)"\nif [ -z "$TOKEN" ]; then\n  TOKEN="$(keyring_lookup whatsoup_health WHATSOUP_HEALTH_TOKEN)"\nfi\nprintf '%s\\n' "$TOKEN"\n`, 'utf8');
+  fs.writeFileSync(scriptPath, `#!/usr/bin/env bash\nset -euo pipefail\nPATH="${binDir}:$PATH"\nexport LOG_PATH="${logPath}"\nexport SCENARIO="${scenario}"\nUSER=local-user\nNODE="${process.execPath}"\nSCRIPT_DIR="${path.resolve('deploy')}"\nWHATSOUP_HEALTH_TOKEN=shared-env-token\n. "${path.resolve('deploy/lib/bounded-exec.sh')}"\n${extractKeyringLookup(source)}\nTOKEN="$(keyring_lookup whatsoup-health-token "" user test-instance)"\nif [ -z "$TOKEN" ]; then\n  TOKEN="$(keyring_lookup whatsoup_health WHATSOUP_HEALTH_TOKEN)"\nfi\nprintf '%s\\n' "$TOKEN"\n`, 'utf8');
   fs.chmodSync(scriptPath, 0o700);
 
   const stdout = execFileSync('bash', [scriptPath], { encoding: 'utf8' }).trim();
@@ -203,6 +203,7 @@ export SCENARIO="${scenario}"
 export TEST_UID="$(id -u)"
 export TOKEN_PATH="${tokenPath}"
 export RACE_TARGET_PATH="${raceTargetPath}"
+. "${path.resolve('deploy/lib/bounded-exec.sh')}"
 ${extractKeyringLookup(source)}
 ${extractHealthTokenFileReader(source)}
 ${extractHealthTokenBlock(source)}
