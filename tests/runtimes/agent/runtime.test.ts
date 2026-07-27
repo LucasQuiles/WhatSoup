@@ -5872,6 +5872,10 @@ describe('AgentRuntime', () => {
     const fallbackState = runtime.getFallbackState();
     expect(fallbackState.fallbackReason).toBe('server-error');
     expect(fallbackState.effectiveProvider).toBe('opencode-cli');
+    expect(runtime.getHealthSnapshot()).toMatchObject({
+      status: 'degraded',
+      details: { degradedReasons: expect.arrayContaining(['provider_fallback_active']) },
+    });
 
     const forwardedRaw = mockQueue.enqueueResultText.mock.calls.map((a) => a[0] as string);
     expect(forwardedRaw).not.toContain(raw);

@@ -321,6 +321,11 @@
       "owner": "deploy/scripts/bot-errors-dispatcher.py",
       "test": "deploy/scripts/tests/test_bot_errors_transient_tiering.py"
     },
+    "provider_fallback_capacity": {
+      "disposition": "non_paging_while_fallback_is_proven_serving",
+      "owner": "src/fleet/health-poller.ts",
+      "test": "tests/fleet/health-poller.test.ts"
+    },
     "health_probe_auth_failed": {
       "disposition": "suppressed_by_auth_root_when_present",
       "owner": "deploy/scripts/bot-errors-dispatcher.py",

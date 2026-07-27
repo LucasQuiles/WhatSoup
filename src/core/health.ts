@@ -334,6 +334,26 @@ function normalizeAgentTurnCapability(details: Record<string, unknown> | null): 
   };
 }
 
+function runtimeDegradedReasons(details: Record<string, unknown> | null): string[] {
+  if (!details || !Array.isArray(details.degradedReasons)) return [];
+  return details.degradedReasons.filter(
+    (reason): reason is string => typeof reason === 'string' && /^[a-z0-9_]+$/.test(reason),
+  );
+}
+
+type HealthFallbackState = ReturnType<
+  NonNullable<NonNullable<HealthDeps['runtime']>['getFallbackState']>
+>;
+
+function isHealthyProviderFallbackCapacity(fallbackState: HealthFallbackState | null): boolean {
+  return fallbackState?.fallbackActiveUntil !== null
+    && fallbackState?.fallbackActiveUntil !== undefined
+    && (fallbackState.fallbackTurnsServed ?? 0) > 0
+    && (fallbackState.fallbackTurnsEmpty ?? 0) === 0
+    && fallbackState.fallbackChainExhausted === false
+    && (fallbackState.failedEntryCount ?? 0) === 0;
+}
+
 function agentRuntimeDetailsForHealth(
   details: Record<string, unknown>,
   turnCapability: HealthTurnCapability | null,
@@ -1338,6 +1358,8 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
         : null;
       const runtimeSnapshot = deps.runtime ? deps.runtime.getHealthSnapshot() : null;
       const agentRuntimeStatus = deps.instanceType === 'agent' ? runtimeSnapshot?.status ?? null : null;
+      const fallbackState = deps.runtime?.getFallbackState?.() ?? null;
+      const healthyProviderFallbackCapacity = isHealthyProviderFallbackCapacity(fallbackState);
       const turnCapability = deps.instanceType === 'agent'
         ? normalizeAgentTurnCapability(runtimeSnapshot?.details ?? null)
         : null;
@@ -1393,7 +1415,7 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
         turnCapability !== null &&
         (turnCapability.model_usable === false
           || turnCapabilityErrorIsDegraded
-          || modelEvidenceStaleWhileRelied(turnCapability, Date.now()));
+          || (modelEvidenceStaleWhileRelied(turnCapability, Date.now()) && !healthyProviderFallbackCapacity));
 
       // Determine health status.
       // Enrichment staleness only matters if enrichment has actually run before
@@ -1434,28 +1456,33 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
       const continuityIsDegraded = !continuity.readable || continuity.open > 0;
 
       let status: 'healthy' | 'degraded' | 'unhealthy';
+      let statusReasons: string[] = [];
       if (authFailureIsUnhealthy) {
         status = 'unhealthy';
+        statusReasons = [`auth_failure.${authFailureClass}`];
       } else if (!isConnected) {
         status = isRecoveringConnection ? 'degraded' : 'unhealthy';
+        statusReasons = [isRecoveringConnection ? 'connection_recovering' : 'connection_disconnected'];
       } else if (agentRuntimeStatus === 'unhealthy') {
         status = 'unhealthy';
-      } else if (authFailureIsDegraded) {
-        status = 'degraded';
-      } else if (
-        enrichmentIsStale ||
-        enrichmentStats.runtimeDegraded ||
-        connectionChurnIsDegraded ||
-        outboundFloodIsDegraded ||
-        agentRuntimeStatus === 'degraded' ||
-        turnCapabilityIsDegraded ||
-        loopLag.locallyStarved ||
-        durabilityDebtIsDegraded ||
-        continuityIsDegraded
-      ) {
-        status = 'degraded';
+        statusReasons = ['agent_runtime_unhealthy'];
       } else {
-        status = 'healthy';
+        if (authFailureIsDegraded) statusReasons.push(`auth_failure.${authFailureClass}`);
+        if (enrichmentIsStale) statusReasons.push('enrichment_stale');
+        if (enrichmentStats.runtimeDegraded) statusReasons.push('enrichment_runtime_degraded');
+        if (connectionChurnIsDegraded) statusReasons.push('connection_churn');
+        if (outboundFloodIsDegraded) statusReasons.push('outbound_flood');
+        if (agentRuntimeStatus === 'degraded') {
+          const reasons = runtimeDegradedReasons(runtimeSnapshot?.details ?? null);
+          statusReasons.push(...(reasons.length > 0 ? reasons.map((reason) => `runtime.${reason}`) : ['agent_runtime_degraded']));
+        }
+        if (turnCapabilityIsDegraded) statusReasons.push('turn_capability_degraded');
+        if (loopLag.locallyStarved) statusReasons.push('event_loop_starvation');
+        if (durabilityDebtIsDegraded) statusReasons.push('durability_delivery_debt');
+        if (continuityIsDegraded) {
+          statusReasons.push(continuity.readable ? 'continuity_gap_open' : 'continuity_gap_unreadable');
+        }
+        status = statusReasons.length > 0 ? 'degraded' : 'healthy';
       }
 
       const messagesTotal = safeDbQuery(
@@ -1508,8 +1535,11 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
 
       if (schemaIsFuture) {
         status = 'unhealthy';
-      } else if (status === 'healthy' && (!schemaReady || !pendingPollsReadable)) {
-        status = 'degraded';
+        statusReasons = ['schema_future'];
+      } else if (!schemaReady || !pendingPollsReadable) {
+        if (status === 'healthy') status = 'degraded';
+        if (!schemaReady) statusReasons.push('schema_not_ready');
+        if (!pendingPollsReadable) statusReasons.push('pending_polls_unreadable');
       }
 
       // #1765 — surface the past-due liveness gauge (active triggers >grace past
@@ -1523,8 +1553,6 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
       // Provider-fallback observability (agent runtimes only). Surfaced in the
       // instance block so operators can see when a bot is running on its
       // fallback provider and when that window expires.
-      const fallbackState = deps.runtime?.getFallbackState?.() ?? null;
-
       const controlPeerWiring = getControlPeerWiring();
 
       // Mode-specific runtime block for control-plane
@@ -1533,8 +1561,10 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
         const snap = runtimeSnapshot;
         if (snap.status === 'unhealthy') {
           status = 'unhealthy';
-        } else if (snap.status === 'degraded' && status === 'healthy') {
-          status = 'degraded';
+          if (!statusReasons.includes('agent_runtime_unhealthy')) statusReasons.push('runtime_unhealthy');
+        } else if (snap.status === 'degraded' && deps.instanceType !== 'agent') {
+          if (status === 'healthy') status = 'degraded';
+          statusReasons.push('runtime_degraded');
         }
         if (deps.instanceType === 'passive') {
           runtimeBlock = { passive: snap.details };
@@ -1660,6 +1690,7 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
       const body = JSON.stringify({
         status,
         degradation_causes: degradationCauses,
+        status_reasons: [...new Set(statusReasons)],
         generated_at: new Date().toISOString(),
         uptime_seconds: Math.floor((Date.now() - deps.startedAt) / 1000),
         arc: readArcBindingHealth(resolveArcRepoRoot()),

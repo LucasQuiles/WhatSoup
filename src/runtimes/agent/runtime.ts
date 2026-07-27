@@ -6944,23 +6944,19 @@ export class AgentRuntime implements Runtime {
           }
         }
       }
-      let healthStatus: RuntimeHealth['status'] = 'healthy';
+      const degradedReasons: string[] = [];
       // Idle per-chat sessions are normal; recent crashes degrade even after map cleanup.
       const recentCrashCount = this.getRecentCrashCount();
-      if (recentCrashCount > 0 && healthStatus === 'healthy') {
-        healthStatus = 'degraded';
-      }
-      if (fallbackState.fallbackActiveUntil !== null && healthStatus === 'healthy') {
-        healthStatus = 'degraded';
-      }
-      if (finalizationDegraded && healthStatus === 'healthy') {
-        healthStatus = 'degraded';
-      }
-      if (turnQueueHealth.turnQueueHalted && healthStatus === 'healthy') healthStatus = 'degraded';
-      if (providerExecution.pressureActive && healthStatus === 'healthy') healthStatus = 'degraded';
+      if (recentCrashCount > 0) degradedReasons.push('recent_crashes');
+      if (fallbackState.fallbackActiveUntil !== null) degradedReasons.push('provider_fallback_active');
+      if (finalizationDegraded) degradedReasons.push('turn_finalization_debt');
+      if (turnQueueHealth.turnQueueHalted) degradedReasons.push('turn_queue_halted');
+      if (providerExecution.pressureActive) degradedReasons.push('provider_execution_pressure');
+      const healthStatus: RuntimeHealth['status'] = degradedReasons.length > 0 ? 'degraded' : 'healthy';
       return {
         status: healthStatus,
         details: {
+          degradedReasons,
           activeSessions,
           lastSessionStatus,
           lastSessionStartedAt,
@@ -6996,19 +6992,24 @@ export class AgentRuntime implements Runtime {
 
     const status = this.session?.getStatus();
     // If a session exists but its child process is not active, it has crashed
+    const degradedReasons: string[] = [];
+    if (this.session !== null && status?.active === false) degradedReasons.push('session_inactive');
+    if (fallbackState.fallbackActiveUntil !== null) degradedReasons.push('provider_fallback_active');
+    if (finalizationDegraded) degradedReasons.push('turn_finalization_debt');
+    if (providerExecution.pressureActive) degradedReasons.push('provider_execution_pressure');
+    if (turnQueueHealth.turnQueueHalted) degradedReasons.push('turn_queue_halted');
+    // A halted single/shared queue is the active admission path — unhealthy/503,
+    // matching the public-surface contract; every other reason degrades only.
     const healthStatus: RuntimeHealth['status'] =
       turnQueueHealth.turnQueueHalted
         ? 'unhealthy'
-        : this.session !== null && status?.active === false
-        ? 'degraded'
-        : fallbackState.fallbackActiveUntil !== null
+        : degradedReasons.length > 0
           ? 'degraded'
-          : finalizationDegraded || providerExecution.pressureActive
-            ? 'degraded'
-            : 'healthy';
+          : 'healthy';
     return {
       status: healthStatus,
       details: {
+        degradedReasons,
         active: status?.active ?? false,
         pid: status?.pid ?? null,
         sessionId: status?.sessionId ?? null,
