@@ -706,6 +706,14 @@ disconnect. The read-only `audit-continuity-manifest` operator command compares 
 manifest from an independent participant history against exact local message, admission, and
 delivery-proof state before any catch-up action. It separates already-admitted unanswered work from
 work that requires provenance-labeled operator catch-up and emits no identifiers or content.
+After that dry run, `record-continuity-manifest --confirm-record` can persist only the
+`absent`, `observed_not_admitted`, and `ambiguous` classifications in the existing recovery
+ledger. Durable identities and evidence are SHA-256 fingerprints; no raw receipt, destination,
+manifest, or evidence value is written. Repeated recording is idempotent. `/health` exposes only
+open/unresolved/ambiguous counts and remains degraded with `continuity_gap_open`; malformed or
+unreadable ledger evidence degrades with `continuity_gap_unreadable`. The recorder does not send,
+replay, admit, or close work. A later proof-bound catch-up lane must close these rows only after an
+exact provenance link and terminal delivery proof exist.
 Admission blocks only `pending` or `claimed` jobs plus orphan transfers, and only on the affected
 per-chat or global scope. When the selected delivery is provably dead (`failed_permanent`/
 `quarantined`) the job can never echo-settle, so the stuck-inbound reclaim (§4.7) drives a

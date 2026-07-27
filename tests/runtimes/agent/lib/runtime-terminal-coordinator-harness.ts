@@ -91,6 +91,7 @@ export interface RuntimeState {
     beginRuntimeTurnEvidence(queue: IOutboundQueue, context: RuntimeTurnContext): void;
     consumeRuntimeTurnContinuationDeferral(context: RuntimeTurnContext): boolean;
     enqueuePerChatRuntimeTurn(mapKey: string, turn: QueuedTurn): boolean;
+    terminalizePerChatTurnQueueForKill(mapKey: string): Promise<void>;
     finalizeRejectedRuntimeTurn(turn: QueuedTurn): void;
     awaitRejectedRuntimeTurnFinalizations(): Promise<void>;
     retryRuntimeTurnFinalizations(): Promise<{

@@ -5,7 +5,11 @@ import { safeStringEqual } from '../lib/safe-compare.ts';
 import { lookupCredential } from '../lib/keyring.ts';
 import { createChildLogger } from '../logger.ts';
 import { CURRENT_SCHEMA_MIGRATION, type Database } from './database.ts';
-import { readArcBindingHealth } from './arc-binding-health.ts';
+import { readArcBindingHealth, resolveArcRepoRoot } from './arc-binding-health.ts';
+import {
+  readContinuityGapHealth,
+  type ContinuityGapHealth,
+} from './continuity-gap-ledger.ts';
 import { assertSafeHealthBind } from './health-bind-guard.ts';
 import { getMessageCount } from './messages.ts';
 import { getPendingCount, upsertAccess } from './access-list.ts';
@@ -93,6 +97,8 @@ export interface HealthDeps {
    * Injectable for tests; defaults to a real sampler in production.
    */
   loopLagSampler?: LoopLagSampler;
+  /** Monotonic clock for starvation-warning suppression; injectable for tests. */
+  loopLagWarningNow?: () => number;
 }
 
 /**
@@ -228,6 +234,8 @@ export type HealthDegradationCause =
   | 'outbound_flood'
   | 'event_loop_starved'
   | 'durability_debt'
+  | 'continuity_gap_unreadable'
+  | 'continuity_gap_open'
   | 'schema_future'
   | 'schema_not_ready'
   | 'pending_polls_unreadable'
@@ -257,6 +265,8 @@ const HEALTH_DEGRADATION_CAUSE_PRESENCE: Readonly<Record<HealthDegradationCause,
   outbound_flood: true,
   event_loop_starved: true,
   durability_debt: true,
+  continuity_gap_unreadable: true,
+  continuity_gap_open: true,
   schema_future: true,
   schema_not_ready: true,
   pending_polls_unreadable: true,
@@ -694,6 +704,10 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
   // lag between now and the first /health request, not just lag that happens
   // to occur while a request is in flight.
   const loopLagSampler = deps.loopLagSampler ?? new LoopLagSampler();
+  const loopLagWarningNow = deps.loopLagWarningNow ?? (() => performance.now());
+  const loopLagWarningRepeatMs = 5 * 60 * 1_000;
+  let loopLagWasStarved = false;
+  let lastLoopLagWarningAtMs: number | null = null;
   loopLagSampler.start();
   const server = createServer((req: IncomingMessage, res: ServerResponse) => {
     // ── POST /poll-decision — D-4 console approval queue: deliver a decision
@@ -1283,11 +1297,22 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
       // lag this handler's own (synchronous) work might introduce.
       const loopLag = loopLagSampler.snapshot();
       if (loopLag.locallyStarved) {
-        log.warn({
-          p95LagMs: loopLag.p95LagMs,
-          sampleCount: loopLag.sampleCount,
-          thresholdMs: LOOP_LAG_STARVATION_THRESHOLD_MS,
-        }, 'event loop starvation detected during health check');
+        const warningNowMs = loopLagWarningNow();
+        if (
+          !loopLagWasStarved
+          || lastLoopLagWarningAtMs === null
+          || warningNowMs - lastLoopLagWarningAtMs >= loopLagWarningRepeatMs
+        ) {
+          log.warn({
+            p95LagMs: loopLag.p95LagMs,
+            sampleCount: loopLag.sampleCount,
+            thresholdMs: LOOP_LAG_STARVATION_THRESHOLD_MS,
+          }, 'event loop starvation detected during health check');
+          lastLoopLagWarningAtMs = warningNowMs;
+        }
+        loopLagWasStarved = true;
+      } else {
+        loopLagWasStarved = false;
       }
 
       const enrichmentStats = deps.getEnrichmentStats();
@@ -1391,6 +1416,22 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
       const durabilityDebtIsDegraded =
         Number.isFinite(oldestMaybeSentMs)
         && Date.now() - oldestMaybeSentMs > DURABILITY_STALE_MAYBE_SENT_MS;
+      const continuity = safeDbQuery<ContinuityGapHealth | {
+        readable: false;
+        open: number;
+        unresolved: number;
+        ambiguous: number;
+      }>(
+        () => readContinuityGapHealth(deps.db.raw),
+        {
+          readable: false as const,
+          open: 0,
+          unresolved: 0,
+          ambiguous: 0,
+        },
+        'failed to read continuity gap ledger',
+      );
+      const continuityIsDegraded = !continuity.readable || continuity.open > 0;
 
       let status: 'healthy' | 'degraded' | 'unhealthy';
       if (authFailureIsUnhealthy) {
@@ -1409,7 +1450,8 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
         agentRuntimeStatus === 'degraded' ||
         turnCapabilityIsDegraded ||
         loopLag.locallyStarved ||
-        durabilityDebtIsDegraded
+        durabilityDebtIsDegraded ||
+        continuityIsDegraded
       ) {
         status = 'degraded';
       } else {
@@ -1565,6 +1607,8 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
       if (outboundFloodIsDegraded) addDegradationCause('outbound_flood');
       if (loopLag.locallyStarved) addDegradationCause('event_loop_starved');
       if (durabilityDebtIsDegraded) addDegradationCause('durability_debt');
+      if (!continuity.readable) addDegradationCause('continuity_gap_unreadable');
+      else if (continuity.open > 0) addDegradationCause('continuity_gap_open');
       if (schemaIsFuture) addDegradationCause('schema_future');
       else if (!schemaReady) addDegradationCause('schema_not_ready');
       if (!pendingPollsReadable) addDegradationCause('pending_polls_unreadable');
@@ -1618,7 +1662,7 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
         degradation_causes: degradationCauses,
         generated_at: new Date().toISOString(),
         uptime_seconds: Math.floor((Date.now() - deps.startedAt) / 1000),
-        arc: readArcBindingHealth(process.env.WHATSOUP_REPO_ROOT ?? process.cwd()),
+        arc: readArcBindingHealth(resolveArcRepoRoot()),
         instance: {
           name: deps.instanceName,
           mode: deps.instanceType,
@@ -1724,6 +1768,7 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
         },
         model_advisories: getModelAdvisories(),
         durability: durabilityStats,
+        continuity,
         // Q control-peer wiring. The heal_delivery_unavailable critical latches
         // to one emission per process; this counter is where the suppressed
         // occurrences are visible afterward (see emitHealReport in heal.ts).
@@ -1738,6 +1783,7 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
           sample_count: loopLag.sampleCount,
           locally_starved: loopLag.locallyStarved,
           starvation_threshold_ms: LOOP_LAG_STARVATION_THRESHOLD_MS,
+          discontinuity_count: loopLag.discontinuityCount,
         },
         mcp_liveness: mcpLiveness
           ? {

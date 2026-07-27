@@ -12,7 +12,7 @@ function makeAdapter(port: MockImessagePort = new MockImessagePort()) {
 describe('ImessageAdapter — sendText happy path', () => {
   it('sends to an AppleID email recipient and returns a MessageRef with the port guid', async () => {
     const { adapter, port, channelId } = makeAdapter();
-    const recipient = ['user', 'icloud.com'].join('@');
+    const recipient = ['user', 'example.com'].join('@');
     const target = peerConversationRef(channelId, recipient);
 
     const ref = await adapter.sendText(target, 'hello');
@@ -75,6 +75,28 @@ describe('ImessageAdapter — sendText validation', () => {
 });
 
 describe('ImessageAdapter — sendText port-error mapping', () => {
+  it('maps an acknowledged imsg send without an identifier to SendAmbiguousError', async () => {
+    const port = new MockImessagePort({
+      sendError: Object.assign(new Error('accepted without id'), {
+        code: 'SendAcceptedWithoutId',
+        phase: 'ack_received',
+      }),
+    });
+    const { adapter, channelId } = makeAdapter(port);
+    const error = await adapter.sendText(
+      peerConversationRef(channelId, 'u@example.com'),
+      'hi',
+    ).catch((caught: unknown) => caught);
+
+    expect(error).toMatchObject({
+      payload: {
+        code: 'transport.send_ambiguous',
+        retryable: false,
+        phase: 'ack_received',
+      },
+    });
+  });
+
   it('maps a 401 to AuthRequiredError', async () => {
     const port = new MockImessagePort({
       sendError: Object.assign(new Error('Unauthorized'), { status: 401, code: 'Unauthorized' }),
@@ -109,5 +131,31 @@ describe('ImessageAdapter — sendText port-error mapping', () => {
     const { adapter, channelId } = makeAdapter(port);
     await expect(adapter.sendText(peerConversationRef(channelId, 'u@example.com'), 'hi'))
       .rejects.toThrow(/iMessage provider error/);
+  });
+});
+
+describe('ImessageAdapter — extension error mapping', () => {
+  it('maps an unavailable imsg bridge method to a non-retryable provider error', async () => {
+    const port = new MockImessagePort();
+    port.sendTypingIndicator = async () => {
+      throw Object.assign(new Error('method not found'), {
+        code: 'UnsupportedMethod',
+        status: 501,
+      });
+    };
+    const { adapter, channelId } = makeAdapter(port);
+
+    const error = await adapter.setTyping(
+      peerConversationRef(channelId, 'u@example.com'),
+      true,
+    ).catch((caught: unknown) => caught);
+
+    expect(error).toMatchObject({
+      payload: {
+        code: 'transport.permanent_provider',
+        retryable: false,
+        providerCode: 'UnsupportedMethod',
+      },
+    });
   });
 });

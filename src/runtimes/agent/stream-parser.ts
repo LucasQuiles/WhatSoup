@@ -34,6 +34,9 @@ function observeUnclassified(
 export const IGNORED_BLOCK_REASONS = {
   thinking: 'model-internal, no side effects',
   redacted_thinking: 'model-internal redacted reasoning, no side effects',
+  thinking_tokens: 'model-internal token estimate, no runtime side effects',
+  rate_limit_event: 'provider rate-limit telemetry, no runtime side effects',
+  tool_reference: 'tool-discovery metadata, no runtime side effects',
   text: 'user-originated context, no provider output side effects',
   image: 'user-originated media, no provider output side effects',
   document: 'user-originated document, no provider output side effects',
@@ -42,8 +45,25 @@ export const IGNORED_BLOCK_REASONS = {
 type IgnoredBlockReason =
   (typeof IGNORED_BLOCK_REASONS)[keyof typeof IGNORED_BLOCK_REASONS];
 
+export interface ProviderTurnIdentity {
+  readonly sessionId: string;
+  readonly turnId: string;
+}
+
+export type ProviderTurnTerminalStatus =
+  | 'completed'
+  | 'failed'
+  | 'interrupted'
+  | 'unknown';
+
+export interface ProviderTurnTerminalIdentity extends ProviderTurnIdentity {
+  readonly status: ProviderTurnTerminalStatus;
+}
+
 export type AgentEvent =
   | { type: 'init'; sessionId: string }
+  | { type: 'provider_turn_accepted'; requestId: string | number; turnId: string }
+  | { type: 'provider_turn_started'; identity: ProviderTurnIdentity }
   | { type: 'compact_boundary' }
   | { type: 'assistant_text'; text: string; itemId?: string; complete?: boolean }
   | { type: 'tool_use'; toolName: string; toolId: string; toolInput: Record<string, unknown> }
@@ -64,6 +84,14 @@ export type AgentEvent =
        */
       cacheReadTokens?: number;
       costUsd?: number;
+      /** Exact native identity and terminal status when the provider exposes it. */
+      providerTurn?: ProviderTurnTerminalIdentity;
+      /** Session-owned request token attached only after exact native terminal admission. */
+      providerTurnOwnerToken?: number;
+      /** Exact JSON-RPC request identity when a request fails before native turn creation. */
+      providerRequestId?: string | number;
+      /** Native terminal notification could not establish the identity required for admission. */
+      providerTurnProtocolError?: 'missing_identity' | 'missing_request_identity';
     }
   | { type: 'token_usage'; inputTokens?: number; outputTokens?: number; cacheReadTokens?: number }
   | { type: 'ignored' }
@@ -196,6 +224,11 @@ function parseToolResultContent(value: unknown): ParsedToolResultContent | null 
         break;
       case 'document':
         nestedEvents.push(ignoredBlock('document', 'document'));
+        break;
+      case 'tool_reference':
+        nestedEvents.push(isNonEmptyString(record['tool_name'])
+          ? ignoredBlock('tool_reference', 'tool_reference')
+          : unknownBlock(item));
         break;
       default:
         nestedEvents.push(unknownBlock(item));
@@ -334,6 +367,13 @@ export function parseEvents(line: string): AgentEvent[] {
       return [{ type: 'init', sessionId: String(event['session_id'] ?? '') }];
     }
     if (subtype === 'compact_boundary') return [{ type: 'compact_boundary' }];
+    if (
+      subtype === 'thinking_tokens'
+      && typeof event['estimated_tokens'] === 'number'
+      && typeof event['estimated_tokens_delta'] === 'number'
+    ) {
+      return [ignoredBlock('thinking_tokens', 'thinking_tokens')];
+    }
     if (typeof subtype === 'string' && subtype.startsWith('hook')) {
       return [{ type: 'ignored' }];
     }
@@ -366,6 +406,12 @@ export function parseEvents(line: string): AgentEvent[] {
   }
 
   if (topType === 'result') return [resultEvent(event)];
+  if (topType === 'rate_limit_event') {
+    const rateLimitInfo = asRecord(event['rate_limit_info']);
+    return rateLimitInfo?.['status'] === 'allowed'
+      ? [ignoredBlock('rate_limit_event', 'rate_limit_event')]
+      : [unknownEvent(parsed)];
+  }
 
   return [unknownEvent(parsed)];
 }

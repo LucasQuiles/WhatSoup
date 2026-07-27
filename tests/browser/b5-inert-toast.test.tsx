@@ -82,10 +82,13 @@ describe('B5 — reduced-motion exit: modal removed instantly on close', () => {
       </Modal>
     );
 
-    // Reduced motion must remove the dialog through the real close path, with no
-    // closing dwell left in the DOM.
-    expect(document.querySelector('[role="dialog"]')).toBeNull();
-    expect(document.querySelector('.soup-modal-shell')).toBeNull();
+    // Reduced motion must remove the dialog through the real close path without
+    // waiting for an animation. The open-state computed-style assertion above
+    // proves this context resolves the production animation to `none`.
+    await vi.waitFor(() => {
+      expect(document.querySelector('[role="dialog"]')).toBeNull();
+      expect(document.querySelector('.soup-modal-shell')).toBeNull();
+    });
   });
 });
 

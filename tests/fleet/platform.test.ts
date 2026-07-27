@@ -8,6 +8,7 @@ import {
   DockerSupervisorServiceManager,
   _resetPlatformCache,
 } from '../../src/fleet/platform.ts';
+import { repoRoot } from '../../src/fleet/paths.ts';
 
 describe('platform', () => {
   describe('escapeXml', () => {
@@ -86,6 +87,14 @@ describe('platform', () => {
       const plist = buildPlist('myapp');
       expect(plist).toContain('stdout.log');
       expect(plist).toContain('stderr.log');
+    });
+
+    it('sets WorkingDirectory to the deterministic reviewed repository root', () => {
+      const plist = buildPlist('working-directory');
+      expect(plist).toContain([
+        '  <key>WorkingDirectory</key>',
+        `  <string>${escapeXml(repoRoot)}</string>`,
+      ].join('\n'));
     });
 
     it('pins TMPDIR to the instance media tmp directory', () => {

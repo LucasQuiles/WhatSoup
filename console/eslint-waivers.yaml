@@ -153,9 +153,10 @@ waivers:
     rule: react-hooks/set-state-in-effect
     owner: console-maintainer
     reason: >
-      On re-open, useExitPresence must clear the stale closingActive dwell bit
-      after the prior close cleanup cancels callbacks, or the next zero-duration
-      close can remain mounted.
+      useExitPresence retains the previously open shell through the controlled
+      falling edge so its layout effect can inspect the real exit animation.
+      Re-open must record presence for the next close after prior callbacks have
+      been cancelled.
     scope: console/src/hooks/use-exit-presence.ts:93
     expiry: 2026-12-31
     replacement_plan: >
@@ -163,8 +164,8 @@ waivers:
       animation contract moves to a reducer/primitive that can represent closing
       and reopen cancellation without effect-state reset writes.
     safer_alternative_considered: >
-      Leaving stale closingActive until a later close is rejected because instant-path
-      closes would keep the shell mounted.
+      Deriving presence from open alone is rejected because React clears shellRef
+      before the close effect can inspect the authored exit duration.
     status: temporary
     expiration_phase: D-series-close
     cleanup_trigger: modal/drawer presence primitive rewrite or React hook guidance change

@@ -143,7 +143,10 @@ export class WhatSoupSocketServer {
           try {
             req = JSON.parse(trimmed) as JsonRpcRequest;
           } catch {
-            log.warn({ line: trimmed }, 'failed to parse JSON-RPC message');
+            log.warn(
+              { clientId, category: 'invalid_json', frameLength: trimmed.length },
+              'failed to parse JSON-RPC message',
+            );
             const response: JsonRpcResponse = {
               jsonrpc: '2.0',
               id: null,

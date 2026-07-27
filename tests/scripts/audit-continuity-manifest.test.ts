@@ -16,6 +16,10 @@ import {
   parseAuditContinuityManifestArgs,
   runAuditContinuityManifestCli,
 } from '../../scripts/audit-continuity-manifest.ts';
+import {
+  parseRecordContinuityManifestArgs,
+  runRecordContinuityManifestCli,
+} from '../../scripts/record-continuity-manifest.ts';
 
 const packageJson = JSON.parse(readFileSync(
   new URL('../../package.json', import.meta.url),
@@ -414,5 +418,97 @@ describe('audit-continuity-manifest CLI', () => {
     expect(check.prepare('SELECT version FROM schema_migrations WHERE version = 43').get())
       .toBeUndefined();
     check.close();
+  });
+});
+
+describe('record-continuity-manifest CLI', () => {
+  it('requires an explicit recording confirmation and keeps the audit command read-only', () => {
+    const fixture = installFixture();
+    expect(packageJson.scripts['record-continuity-manifest']).toBe(
+      'bash scripts/run-with-pinned-node.sh scripts/record-continuity-manifest.ts',
+    );
+    expect(() => parseRecordContinuityManifestArgs(argsFor(fixture)))
+      .toThrow('--confirm-record is required exactly once');
+    expect(parseRecordContinuityManifestArgs([
+      ...argsFor(fixture),
+      '--confirm-record',
+    ])).toEqual({
+      dbPath: fixture.dbPath,
+      manifestPath: fixture.manifestPath,
+    });
+    expect(() => parseAuditContinuityManifestArgs([
+      ...argsFor(fixture),
+      '--confirm-record',
+    ])).toThrow('Unknown argument: --confirm-record');
+
+    const raw = new DatabaseSync(fixture.dbPath, { readOnly: true });
+    expect(raw.prepare(`
+      SELECT COUNT(*) AS count
+      FROM recovery_plans
+      WHERE actor = 'continuity_manifest_recorder'
+    `).get()).toEqual({ count: 0 });
+    raw.close();
+  });
+
+  it('records only missing or ambiguous receipts with idempotent content-free output', () => {
+    const fixture = installFixture();
+    const argv = [...argsFor(fixture), '--confirm-record'];
+    const write = vi.spyOn(process.stdout, 'write')
+      .mockImplementation((() => true) as typeof process.stdout.write);
+    let firstText: string;
+    let secondText: string;
+    try {
+      expect(runRecordContinuityManifestCli(argv)).toBe(2);
+      firstText = write.mock.calls.map(([chunk]) => String(chunk)).join('');
+      write.mockClear();
+      expect(runRecordContinuityManifestCli(argv)).toBe(2);
+      secondText = write.mock.calls.map(([chunk]) => String(chunk)).join('');
+    } finally {
+      write.mockRestore();
+    }
+
+    expect(JSON.parse(firstText)).toMatchObject({
+      ok: true,
+      recorded: true,
+      ledger: {
+        created: 3,
+        existing: 0,
+        unresolved: 2,
+        ambiguous: 1,
+      },
+    });
+    expect(JSON.parse(secondText)).toMatchObject({
+      ok: true,
+      recorded: true,
+      ledger: {
+        created: 0,
+        existing: 3,
+        unresolved: 2,
+        ambiguous: 1,
+      },
+    });
+    for (const text of [firstText, secondText]) {
+      expect(text).not.toContain(fixture.input.manifestId);
+      expect(text).not.toContain(fixture.input.evidenceRef);
+      expect(text).not.toContain(fixture.input.destination.conversationKey);
+      for (const row of fixture.input.receipts) {
+        expect(text).not.toContain(row.messageId);
+        expect(text).not.toContain(row.senderFingerprint);
+        expect(text).not.toContain(row.contentHash);
+      }
+    }
+
+    const raw = new DatabaseSync(fixture.dbPath, { readOnly: true });
+    expect(raw.prepare(`
+      SELECT COUNT(*) AS count
+      FROM recovery_plans
+      WHERE actor = 'continuity_manifest_recorder'
+    `).get()).toEqual({ count: 3 });
+    expect(raw.prepare(`
+      SELECT COUNT(*) AS count
+      FROM recovery_runs
+      WHERE trigger LIKE 'continuity_gap_%'
+    `).get()).toEqual({ count: 3 });
+    raw.close();
   });
 });

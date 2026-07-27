@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import {
+  extractNpmScriptName,
   findPublicSurfaceDrift,
   run,
 } from '../../scripts/public-surface-drift-check.ts';
@@ -84,6 +85,11 @@ describe('public surface drift check', () => {
     expect(findPublicSurfaceDrift({ cwd: root })).toEqual([]);
   });
 
+  it('recognizes normal and silent npm script registry commands', () => {
+    expect(extractNpmScriptName('`npm run start`')).toBe('start');
+    expect(extractNpmScriptName('`npm --silent run start`')).toBe('start');
+  });
+
   it('passes for the live repository registry', () => {
     expect(findPublicSurfaceDrift({ cwd: repoRoot })).toEqual([]);
   });
@@ -107,7 +113,7 @@ describe('public surface drift check', () => {
 
     expect(normalizedHealthSection).toContain('Inspection-only startup binds to `127.0.0.1`');
     expect(normalizedHealthSection).toContain('canonical instance `healthPort`');
-    expect(healthStatusRow).toContain('`src/core/health.ts:1274`');
+    expect(healthStatusRow).toContain('`src/core/health.ts:1288`');
     expect(healthStatusRow).toContain('`src/core/database-compatibility-early.ts:166`');
     expect(healthStatusRow).toContain('`service_mode: "inspection_only"`');
     expect(healthStatusRow).toContain('`startup_block`');

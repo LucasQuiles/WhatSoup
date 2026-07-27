@@ -56,6 +56,25 @@ export interface RuntimeTurnSupervisorHealth {
   readonly retryExhaustions: number;
 }
 
+export function runtimeTurnRecoveryIsDegraded(
+  finalization: RuntimeTurnSupervisorHealth,
+  recovery: {
+    turnRecoveryOutstanding: number;
+    turnRecoveryExhausted: number;
+    turnRecoveryOpenRecoveries: number;
+    turnRecoveryCorruptLinks: number;
+    turnRecoveryEchoConflicts: number;
+  },
+): boolean {
+  return finalization.retainedRetries > 0
+    || finalization.degradedScopes > 0
+    || recovery.turnRecoveryOutstanding > 0
+    || recovery.turnRecoveryExhausted > 0
+    || recovery.turnRecoveryOpenRecoveries > 0
+    || recovery.turnRecoveryCorruptLinks > 0
+    || recovery.turnRecoveryEchoConflicts > 0;
+}
+
 interface RecoveryWaiter {
   readonly promise: Promise<void>;
   readonly resolve: () => void;
