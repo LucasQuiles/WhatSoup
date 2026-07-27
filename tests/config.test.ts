@@ -1739,6 +1739,7 @@ describe('config — mergeKnowledgeProfiles edge cases', () => {
               rerank: true,
               topK: 15,
               rerankTopN: 4,
+              minScore: 0.3,
               description: 'My custom index',
             },
           },
@@ -1753,6 +1754,7 @@ describe('config — mergeKnowledgeProfiles edge cases', () => {
     expect(profile.rerank).toBe(true);
     expect(profile.topK).toBe(15);
     expect(profile.rerankTopN).toBe(4);
+    expect(profile.minScore).toBe(0.3);
     expect(profile.description).toBe('My custom index');
   });
 

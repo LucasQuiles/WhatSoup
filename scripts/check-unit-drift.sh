@@ -121,7 +121,7 @@ for unit in "${UNITS[@]}"; do
   fi
 done
 
-for entry in "${WRAPPERS[@]}"; do
+for entry in ${WRAPPERS[@]+"${WRAPPERS[@]}"}; do
   name="${entry%%:*}"
   rel="${entry#*:}"
   repo_wrapper="$REPO_ROOT/$rel"

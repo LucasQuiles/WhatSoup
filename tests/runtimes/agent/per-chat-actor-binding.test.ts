@@ -727,6 +727,24 @@ describe('#1785 rec-3: createPerChatActorSocket binds conversationKey (closes th
     // Exact #1785 rec-3 shape — no binding, no deliveryJid, nothing else.
     expect(sessionArg).toEqual({ tier: 'global', allowedRoot: expect.any(String), conversationKey: CHAT });
   });
+
+  it('pins the canonical map key when an inbound LID is an alias for a phone JID', () => {
+    const inboundLid = 'delivery-alias@lid';
+    const canonicalJid = 'canonical-user@s.whatsapp.net';
+    vi.spyOn(
+      runtime as unknown as { resolvePerChatMapKey(chatJid: string): string },
+      'resolvePerChatMapKey',
+    ).mockReturnValue(canonicalJid);
+
+    priv().wirePerChatActorSocket(inboundLid, 'claude-cli');
+
+    const sessionArg = (WhatSoupSocketServer as unknown as ReturnType<typeof vi.fn>).mock.calls[0][2];
+    expect(sessionArg).toEqual({
+      tier: 'global',
+      allowedRoot: expect.any(String),
+      conversationKey: canonicalJid,
+    });
+  });
 });
 
 // ── perChatConversationBound: opt-in conversation-bound actor socket ────────

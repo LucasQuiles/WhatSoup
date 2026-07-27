@@ -34,6 +34,9 @@ function observeUnclassified(
 export const IGNORED_BLOCK_REASONS = {
   thinking: 'model-internal, no side effects',
   redacted_thinking: 'model-internal redacted reasoning, no side effects',
+  thinking_tokens: 'model-internal token estimate, no runtime side effects',
+  rate_limit_event: 'provider rate-limit telemetry, no runtime side effects',
+  tool_reference: 'tool-discovery metadata, no runtime side effects',
   text: 'user-originated context, no provider output side effects',
   image: 'user-originated media, no provider output side effects',
   document: 'user-originated document, no provider output side effects',
@@ -197,6 +200,11 @@ function parseToolResultContent(value: unknown): ParsedToolResultContent | null 
       case 'document':
         nestedEvents.push(ignoredBlock('document', 'document'));
         break;
+      case 'tool_reference':
+        nestedEvents.push(isNonEmptyString(record['tool_name'])
+          ? ignoredBlock('tool_reference', 'tool_reference')
+          : unknownBlock(item));
+        break;
       default:
         nestedEvents.push(unknownBlock(item));
         break;
@@ -334,6 +342,13 @@ export function parseEvents(line: string): AgentEvent[] {
       return [{ type: 'init', sessionId: String(event['session_id'] ?? '') }];
     }
     if (subtype === 'compact_boundary') return [{ type: 'compact_boundary' }];
+    if (
+      subtype === 'thinking_tokens'
+      && typeof event['estimated_tokens'] === 'number'
+      && typeof event['estimated_tokens_delta'] === 'number'
+    ) {
+      return [ignoredBlock('thinking_tokens', 'thinking_tokens')];
+    }
     if (typeof subtype === 'string' && subtype.startsWith('hook')) {
       return [{ type: 'ignored' }];
     }
@@ -366,6 +381,12 @@ export function parseEvents(line: string): AgentEvent[] {
   }
 
   if (topType === 'result') return [resultEvent(event)];
+  if (topType === 'rate_limit_event') {
+    const rateLimitInfo = asRecord(event['rate_limit_info']);
+    return rateLimitInfo?.['status'] === 'allowed'
+      ? [ignoredBlock('rate_limit_event', 'rate_limit_event')]
+      : [unknownEvent(parsed)];
+  }
 
   return [unknownEvent(parsed)];
 }
