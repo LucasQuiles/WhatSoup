@@ -103,7 +103,7 @@ export interface RouteDecision extends ProviderRoutePolicy {
 }
 
 export function resolveRoute(i: RouteInputs): RouteDecision {
-  let decision: Pick<RouteDecision, 'provider' | 'model' | 'source' | 'reasonCode'>;
+  let decision: Pick<RouteDecision, 'provider' | 'model' | 'source' | 'reasonCode' | 'effort'>;
   if (i.fallbackEntry) {
     const pinnedModel = i.pref?.intent === 'provider_specific' &&
       i.pref.requestedProvider === i.fallbackEntry.provider &&
