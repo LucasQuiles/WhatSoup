@@ -46,3 +46,14 @@ export function normalizeTimestamp(ts: unknown): string | null {
   const d = new Date(ts.replace(' ', 'T') + 'Z');
   return isNaN(d.getTime()) ? null : d.toISOString();
 }
+
+/**
+ * Strict ISO-8601 UTC check: the value must round-trip exactly through
+ * Date#toISOString (millisecond precision, trailing Z). This is the same
+ * round-trip rule the fleet artifact contracts apply; date-only strings and
+ * non-UTC offsets are rejected.
+ */
+export function isStrictIsoUtcTimestamp(value: string): boolean {
+  const ms = Date.parse(value);
+  return Number.isFinite(ms) && new Date(ms).toISOString() === value;
+}
