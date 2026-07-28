@@ -26,11 +26,18 @@ if str(SCRIPT_DIR) not in sys.path:
 from lib.bot_errors_daily_health import daily_health_host_from_payload, normalize_hub_host
 from lib.bot_errors_redaction import redact_bot_errors_text, redact_json_value as redact_shared_json_value
 from lib.bot_errors_roster import RosterError, load_roster  # noqa: E402
+from lib.controller_log import (
+    ControllerLogContext,
+    controller_cycle,
+    metadata_only_controller_details,
+    write_controller_log,
+)
 
 
 DEFAULT_CHECKS = "q_loop,dispatcher,collector,daily_health,queue_backlog,local_services,local_instance_health,browser_debug"
 REPO_ROOT = Path(__file__).resolve().parents[2]
 TERMINAL_AUTH_FAILURE_CLASSES = {"pairing_required", "serverside_logout_irreversible"}
+CONTROLLER_LOG_CONTEXT = ControllerLogContext("heartbeat_watchdog")
 
 
 class QueueDirectoryError(RuntimeError):
@@ -333,12 +340,36 @@ def redacted_watchdog_payload(value: Any) -> Any:
     return redact_shared_json_value(value, redact_watchdog_text)
 
 
-def append_log(kind: str, payload: dict[str, Any]) -> None:
+def persist_controller_log_health(record: dict[str, Any]) -> None:
+    atomic_write_json(
+        state_root() / "controller-log-health" / "heartbeat-watchdog.json",
+        record,
+    )
+
+
+def controller_log_fallback(line: str) -> None:
+    print(line, file=sys.stderr, flush=True)
+
+
+def append_log(
+    kind: str,
+    payload: dict[str, Any],
+    *,
+    level: str = "info",
+    outcome: str = "observed",
+) -> str:
     path = state_root() / "logs" / "heartbeat-watchdog.jsonl"
-    try:
-        append_private_jsonl(path, {"time": now_iso(), "kind": kind, **redacted_watchdog_payload(payload)})
-    except Exception:  # noqa: BLE001 - diagnostic log failure must not block alerts or state updates.
-        pass
+    return write_controller_log(
+        context=CONTROLLER_LOG_CONTEXT,
+        record_kind=kind,
+        level=level,
+        outcome=outcome,
+        durability_class="diagnostic_best_effort",
+        details=metadata_only_controller_details(redacted_watchdog_payload(payload)),
+        append_record=lambda record: append_private_jsonl(path, record),
+        persist_health=persist_controller_log_health,
+        emit_fallback=controller_log_fallback,
+    )
 
 
 def critical_file_problem(path: Path) -> str | None:
@@ -2204,6 +2235,15 @@ def reconcile(problems: dict[str, str], active_prefixes: list[str]) -> list[Path
     return written
 
 
+@controller_cycle(
+    CONTROLLER_LOG_CONTEXT,
+    lambda kind, details, level, outcome: append_log(
+        kind,
+        details,
+        level=level,
+        outcome=outcome,
+    ),
+)
 def run_once(args: argparse.Namespace) -> int:
     validate_thresholds()
     checks = configured_checks()

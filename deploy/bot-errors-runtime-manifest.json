@@ -1,12 +1,12 @@
 {
   "schemaVersion": 1,
-  "generatedAt": "2026-06-23T01:40:11Z",
+  "generatedAt": "2026-07-28T12:38:40Z",
   "scope": "bot-errors-runtime-scripts",
   "expectedHeadShaPolicy": "populated at deploy time by deploy step; absent here so committed state is observability-only",
   "files": [
     {
       "path": "deploy/scripts/bot-errors-collector.py",
-      "sha256": "affa51f4f6c6dee66d9187307b2f5599f8475f63ce7260c0261e072ee3eb9459",
+      "sha256": "728b4a920bc4c782560a37a0da4626626637efcda43ff8fe52ad157e2635752c",
       "mustContain": [
         "append_private_jsonl",
         "refusing to use private directory through symlink",
@@ -28,7 +28,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-dispatcher.py",
-      "sha256": "c60d8cf1ccd51a22a1ff5fdfe28c8d4d562865e52ea5f223aa9ab02799185061",
+      "sha256": "118436f9f1cfcedb793ddd8e58cc788ea2ea62031d2b737a9a6d9d0fbdbee684",
       "mustContain": [
         "append_private_jsonl",
         "refusing to use private directory through symlink",
@@ -75,7 +75,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-health-check.py",
-      "sha256": "53c50903327e9d27018dc2c571bdfc87dbc29cc602771e005ae9aa96911625f2",
+      "sha256": "fcd1b825fedd9db29307cd086e03afe7d932c2bcf1072e16cfa36b25f3ed7a09",
       "mustContain": [
         "critical_file_problem",
         "mustContain",
@@ -143,7 +143,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-heartbeat-watchdog.py",
-      "sha256": "fcafec6acde3c9ab1ed5fcc009e7f9020d2c0fd9ffbeee77ab19caaac84d45bc",
+      "sha256": "22be25ac5ab4b00c459b33252cc486abe28320731d77640005fd082be630f9e8",
       "mustContain": [
         "BOT_ERRORS_Q_LOOP_STATE_DIR",
         "BOT_ERRORS_FLEET_SENTINEL_HEARTBEAT",
@@ -158,7 +158,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-q-loop.py",
-      "sha256": "d0924a67effb160fdeff2963212bd598a375dbd8a5c33d6ed5b3706a5f9125d5",
+      "sha256": "c906d987a653d581916dcf709536d5c61000d2f012972a5f218d315ce6264f4b",
       "mustContain": [
         "q_unavailable_reason",
         "session_limit",
@@ -189,7 +189,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-runtime-staleness.py",
-      "sha256": "86ddbd4a273afef50d770c466b3a9d83fd023fef65fa52a84a34f38a9c7a08ea",
+      "sha256": "1c9c6b94542d477e2eede4489881dacf03b34ab86eb9ce9eb76620eb6b9d890f",
       "mustContain": [
         "Runtime code-staleness monitor",
         "runtime_stale"
@@ -279,6 +279,17 @@
         "AUTHORIZATION_KEYED_RE",
         "WHATSAPP_SERVICE_UNIT_RE",
         "PEM_PRIVATE_KEY_RE"
+      ]
+    },
+    {
+      "path": "deploy/scripts/lib/controller_log.py",
+      "sha256": "a944c375c190ec25686fcc8ece7431803818d2ee474deaa62d5afd1e920958be",
+      "mustContain": [
+        "ControllerLogContext",
+        "diagnostic_best_effort",
+        "controller_cycle",
+        "metadata_only_controller_details",
+        "write_controller_log"
       ]
     },
     {

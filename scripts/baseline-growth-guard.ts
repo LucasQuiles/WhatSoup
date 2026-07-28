@@ -12,6 +12,13 @@
  * WHAT IT DOES. For each registered baseline, weigh the tolerated debt (see
  * `lib/baseline-weight.ts`) at the merge base and in the candidate, and refuse any increase.
  *
+ * WHICH REVISIONS. The candidate defaults to the WORKING TREE so a local run catches growth
+ * in uncommitted edits. `--candidate <rev>` pins the exact object weighed instead, and CI
+ * passes the run's own SHA: a guard that weighs "whatever is checked out" cannot prove WHICH
+ * commit it cleared, and its verdict is not reproducible after the checkout moves. When a
+ * candidate is pinned, the base/candidate pair is also checked for relations that cannot
+ * express growth at all — see `baseRelationError`.
+ *
  * EXIT CODES — the repo's three-outcome discipline:
  *   0  every baseline shrank or held
  *   1  at least one baseline grew
@@ -45,10 +52,26 @@ const EXIT_INCONCLUSIVE = 2;
 
 const defaultRepoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
-const KNOWN_FLAGS = ['--base', '--repo', '--json', '--help', '-h'] as const;
+const KNOWN_FLAGS = ['--base', '--candidate', '--repo', '--json', '--help', '-h'] as const;
+
+/**
+ * GitHub reports an all-zero OID for "there is no such commit" — the `before` of a branch
+ * creation, and of the first push to a new ref. It is a sentinel, not a revision, and
+ * resolving it always fails. Treated as "no explicit base was given" so the guard falls
+ * back to merge-base inference instead of reporting INCONCLUSIVE on a legitimate push.
+ */
+const NULL_OID = /^0{40}$/;
 
 interface Options {
   base: string | null;
+  /**
+   * The revision to weigh as the candidate. `null` means the WORKING TREE, which stays the
+   * default so local runs keep catching growth in uncommitted edits — a pre-push gate that
+   * only weighed HEAD would pass a working tree that is about to be committed and pushed.
+   * Passing an explicit revision is what makes a CI run reproducible: it pins the exact
+   * object weighed instead of trusting that the checkout happens to be the intended commit.
+   */
+  candidate: string | null;
   /**
    * Test seam. Overrides the repo scanned, so the growth path can be proven against a
    * throwaway git repo instead of by mutating this one. Same seam idiom as
@@ -60,14 +83,18 @@ interface Options {
 }
 
 function parseOptions(argv: readonly string[]): Options | 'help' {
-  const options: Options = { base: null, repo: defaultRepoRoot, json: false };
+  const options: Options = { base: null, candidate: null, repo: defaultRepoRoot, json: false };
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i]!;
     if (isHelpFlag(arg)) return 'help';
     assertKnownFlag(arg, KNOWN_FLAGS);
     if (arg === '--base') {
       const taken = takeValue(argv, i);
-      options.base = taken.value;
+      options.base = NULL_OID.test(taken.value) ? null : taken.value;
+      i = taken.index;
+    } else if (arg === '--candidate') {
+      const taken = takeValue(argv, i);
+      options.candidate = taken.value;
       i = taken.index;
     } else if (arg === '--repo') {
       const taken = takeValue(argv, i);
@@ -87,11 +114,15 @@ function parseOptions(argv: readonly string[]): Options | 'help' {
  * that silently compares against the wrong revision is worse than one that says it could
  * not determine the answer.
  */
-function resolveBase(explicit: string | null, repoRoot: string): string | null {
+function resolveBase(
+  explicit: string | null,
+  repoRoot: string,
+  candidateRevision: string,
+): string | null {
   if (explicit) return explicit;
-  for (const candidate of ['origin/main', 'main']) {
+  for (const baseRef of ['origin/main', 'main']) {
     try {
-      const out = execFileSync('git', ['merge-base', candidate, 'HEAD'], {
+      const out = execFileSync('git', ['merge-base', baseRef, candidateRevision], {
         cwd: repoRoot,
         encoding: 'utf8',
         env: cleanGitEnv(),
@@ -100,10 +131,64 @@ function resolveBase(explicit: string | null, repoRoot: string): string | null {
       const oid = out.trim();
       if (oid) return oid;
     } catch {
-      // try the next candidate
+      // try the next base ref
     }
   }
   return null;
+}
+
+/**
+ * Resolve a user-supplied revision to a concrete commit OID.
+ *
+ * Returns `null` when it does not resolve. Reporting an unresolvable revision as
+ * INCONCLUSIVE is the point: a guard handed a typo'd or unfetched ref must say it could not
+ * look, never silently weigh something else.
+ */
+function resolveCommit(revision: string, repoRoot: string): string | null {
+  try {
+    const out = execFileSync('git', ['rev-parse', '--verify', `${revision}^{commit}`], {
+      cwd: repoRoot,
+      encoding: 'utf8',
+      env: cleanGitEnv(),
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    const oid = out.trim();
+    return oid === '' ? null : oid;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Reject base/candidate pairs that cannot express growth.
+ *
+ * Two failures are silent-green today and both are reachable from CI wiring:
+ *   - base === candidate: comparing a revision with itself always weighs equal, so the
+ *     guard reports a clean pass having proven nothing. A merge_group or re-run that
+ *     resolves both sides to the same OID would be permanently, invisibly vacuous.
+ *   - base not an ancestor of candidate: the weights are then from divergent histories, so
+ *     an "increase" may be someone else's work and a "decrease" may hide real growth.
+ *
+ * Only checkable when the candidate is an explicit revision; a working-tree candidate has
+ * no OID to relate, and its base is a merge base by construction.
+ */
+function baseRelationError(baseOid: string, candidateOid: string, repoRoot: string): string | null {
+  if (baseOid === candidateOid) {
+    return `base and candidate are the same commit (${baseOid}); comparing a revision with `
+      + 'itself cannot detect growth';
+  }
+  try {
+    execFileSync('git', ['merge-base', '--is-ancestor', baseOid, candidateOid], {
+      cwd: repoRoot,
+      env: cleanGitEnv(),
+      stdio: ['ignore', 'ignore', 'pipe'],
+    });
+    return null;
+  } catch {
+    return `base ${baseOid} is not an ancestor of candidate ${candidateOid}, so their `
+      + 'baseline weights come from divergent histories and a difference between them is '
+      + 'not evidence of growth in this change';
+  }
 }
 
 /**
@@ -169,7 +254,9 @@ function main(): number {
 
   if (options === 'help') {
     console.log(
-      'Usage: baseline-growth-guard.ts [--base <rev>] [--json]\n\n' +
+      'Usage: baseline-growth-guard.ts [--base <rev>] [--candidate <rev>] [--json]\n\n' +
+        'Without --candidate the WORKING TREE is weighed, so uncommitted growth is caught.\n' +
+        'Pass --candidate <rev> to pin the exact object weighed (CI passes the run SHA).\n' +
         'Refuses any increase in the tolerated-debt weight of a committed baseline file.\n' +
         'Exit 0 = all baselines shrank or held, 1 = a baseline grew, 2 = inconclusive.',
     );
@@ -177,7 +264,23 @@ function main(): number {
   }
 
   const repoRoot = options.repo;
-  const base = resolveBase(options.base, repoRoot);
+
+  // Resolve the candidate FIRST: the base is a merge base against it, so an unresolvable
+  // candidate must not be reported as a base-resolution failure.
+  let candidateOid: string | null = null;
+  if (options.candidate !== null) {
+    candidateOid = resolveCommit(options.candidate, repoRoot);
+    if (candidateOid === null) {
+      console.error(
+        `FAIL(inconclusive): candidate revision ${options.candidate} could not be resolved to a ` +
+          'commit, so baseline growth cannot be ruled out. Fetch it and re-run (CI needs ' +
+          'fetch-depth: 0), or omit --candidate to weigh the working tree.',
+      );
+      return EXIT_INCONCLUSIVE;
+    }
+  }
+
+  const base = resolveBase(options.base, repoRoot, candidateOid ?? 'HEAD');
   if (base === null) {
     console.error(
       'FAIL(inconclusive): could not resolve a merge base against origin/main or main, so ' +
@@ -187,12 +290,29 @@ function main(): number {
     return EXIT_INCONCLUSIVE;
   }
 
+  // Only meaningful for an explicit candidate — see baseRelationError.
+  if (candidateOid !== null) {
+    const baseOid = resolveCommit(base, repoRoot);
+    if (baseOid === null) {
+      console.error(
+        `FAIL(inconclusive): base revision ${base} could not be resolved to a commit, so ` +
+          'baseline growth cannot be ruled out.',
+      );
+      return EXIT_INCONCLUSIVE;
+    }
+    const relationError = baseRelationError(baseOid, candidateOid, repoRoot);
+    if (relationError !== null) {
+      console.error(`FAIL(inconclusive): ${relationError}.`);
+      return EXIT_INCONCLUSIVE;
+    }
+  }
+
   const shapeErrors: string[] = [];
   const comparable: WeighedBaseline[] = [];
 
   for (const entry of BASELINE_REGISTRY) {
     const atBase = weighAt(base, entry.path, repoRoot);
-    const atHead = weighAt(null, entry.path, repoRoot);
+    const atHead = weighAt(candidateOid, entry.path, repoRoot);
     if (
       entry.initialWeight !== undefined
       && (
@@ -283,7 +403,15 @@ function main(): number {
   const { blocking: grew, waived } = applyWaivers(growthFindings, waivers, todayIso);
 
   if (options.json) {
-    console.log(JSON.stringify({ base, examined: comparable.length, findings: [...grew, ...unknown], waived }, null, 2));
+    console.log(JSON.stringify({
+      base,
+      // The exact object weighed, so a receipt names what was measured rather than implying
+      // it. 'working-tree' is reported literally — it is not reproducible from a SHA.
+      candidate: candidateOid ?? 'working-tree',
+      examined: comparable.length,
+      findings: [...grew, ...unknown],
+      waived,
+    }, null, 2));
   }
 
   if (!options.json) {
@@ -300,7 +428,10 @@ function main(): number {
   if (grew.length > 0) {
     console.error(
       `\n${grew.length} baseline(s) expanded or replaced debt against ${base}. Reproduce with:\n` +
-        '  ./scripts/run-with-pinned-node.sh scripts/baseline-growth-guard.ts --json',
+        '  ./scripts/run-with-pinned-node.sh scripts/baseline-growth-guard.ts --json' +
+        // Name the exact revisions when they were pinned. A CI failure reproduced against a
+        // moving HEAD is a different measurement than the one that failed.
+        (candidateOid !== null ? ` --base ${base} --candidate ${candidateOid}` : ''),
     );
     return EXIT_BLOCK;
   }
