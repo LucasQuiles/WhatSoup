@@ -248,7 +248,7 @@ describe('WS-A06 negative canary', () => {
 
     // Simulate the hook behavior
     const payload = { password: MARKERS.sensitive, textPreview: MARKERS.textPreview };
-    const args = [payload];
+    const args: unknown[] = [payload];
     if (args.length > 0 && typeof args[0] === 'object' && args[0] !== null) {
       args[0] = sanitizeLogValue(args[0]);
     }
