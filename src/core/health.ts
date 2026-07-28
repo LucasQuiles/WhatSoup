@@ -240,6 +240,7 @@ export type HealthDegradationCause =
   | 'schema_not_ready'
   | 'pending_polls_unreadable'
   | 'agent_recent_crashes'
+  | 'agent_auto_compact_backoff'
   | 'agent_session_inactive'
   | 'turn_finalization_degraded'
   | 'turn_recovery_degraded'
@@ -271,6 +272,7 @@ const HEALTH_DEGRADATION_CAUSE_PRESENCE: Readonly<Record<HealthDegradationCause,
   schema_not_ready: true,
   pending_polls_unreadable: true,
   agent_recent_crashes: true,
+  agent_auto_compact_backoff: true,
   agent_session_inactive: true,
   turn_finalization_degraded: true,
   turn_recovery_degraded: true,
@@ -1716,6 +1718,9 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
         return typeof value === 'number' && Number.isFinite(value) && value > 0;
       };
       if (positiveRuntimeCounter('recentCrashes')) addDegradationCause('agent_recent_crashes');
+      if (positiveRuntimeCounter('autoCompactActiveBackoffScopes')) {
+        addDegradationCause('agent_auto_compact_backoff');
+      }
       if (agentRuntimeStatus === 'degraded' && runtimeDetails?.['active'] === false) {
         addDegradationCause('agent_session_inactive');
       }
