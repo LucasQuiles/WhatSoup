@@ -378,6 +378,17 @@ const TRANSIENT_TURN_ERROR_STALE_MS = 15 * 60 * 1000; // 15 minutes
 // (#1865). Generous enough not to flap on transient reconciliation.
 const DURABILITY_STALE_MAYBE_SENT_MS = 30 * 60 * 1000; // 30 minutes
 
+/**
+ * #2515 — Schema version stamped on the public liveness envelope returned to
+ * unauthenticated `GET /health` callers. The public envelope carries only
+ * `schema_version`, `status`, and `generated_at`; the diagnostic projection
+ * (identity, location, lifecycle, exception, recent-event, credential, and
+ * topology fields) requires a bearer token. Fleet pollers that consume the
+ * diagnostic must reject unexpected schema/projection versions rather than
+ * silently downgrading authorization.
+ */
+const HEALTH_PUBLIC_SCHEMA_VERSION = 'health.public.v1';
+
 // S-04a — stale model-usability evidence must not read as a healthy green.
 // A bot whose usability probe went stale WHILE it was actively turning has a
 // genuine probe-refresh failure and should degrade. A legitimately idle bot,
@@ -671,6 +682,24 @@ function requireAuth(req: IncomingMessage, res: ServerResponse): boolean {
     return false;
   }
   return true;
+}
+
+/**
+ * #2515 — Auth predicate without the 401 side effect of {@link requireAuth}.
+ *
+ * `GET /health` is intentionally reachable without a token so external liveness
+ * monitors and fleet pollers can probe it, but the full diagnostic projection
+ * exposes privileged identity, location, lifecycle, exception, recent-event, and
+ * credential fields. Unauthenticated callers receive a minimal versioned public
+ * liveness envelope (see {@link HEALTH_PUBLIC_SCHEMA_VERSION}); only callers with
+ * a valid bearer token proceed to the diagnostic body. This predicate keeps the
+ * credential-resolution path identical to {@link requireAuth} without writing a
+ * 401, so the `/health` handler can emit the public envelope on the same wire.
+ */
+function hasHealthAuth(req: IncomingMessage): boolean {
+  const authHeader = (req.headers as Record<string, string | undefined>)['authorization'];
+  const expectedToken = lookupCredential('whatsoup-health-token') ?? undefined;
+  return verifyBearer(authHeader, expectedToken);
 }
 
 function agentCommandStatus(err: unknown): number {
@@ -1292,6 +1321,43 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
     }
 
     try {
+      // #2515 — Public/private health split.
+      //
+      // GET /health is intentionally reachable without a bearer token (external
+      // liveness monitors and fleet pollers depend on a 200/503 signal), but
+      // the full diagnostic projection exposes privileged identity, location,
+      // lifecycle, exception, recent-event, and credential fields. Gate the
+      // diagnostic body behind hasHealthAuth and return a minimal versioned
+      // public liveness envelope — computed from transport connection state
+      // only — to unauthenticated callers. No DB reads, no enrichment stats,
+      // no auth-bond formatting, and no privileged fields touch the public
+      // bytes. Authenticated callers proceed to the full diagnostic below.
+      if (!hasHealthAuth(req)) {
+        const cs = getConnectionState(deps.connectionManager);
+        const publicConnected = cs.connected && cs.state === 'connected';
+        const publicRecovering =
+          cs.state === 'connecting'
+          || cs.state === 'reconnecting'
+          || cs.state === 'cooldown';
+        const publicStatus: 'healthy' | 'degraded' | 'unhealthy' = publicConnected
+          ? 'healthy'
+          : publicRecovering
+            ? 'degraded'
+            : 'unhealthy';
+        const publicBody = JSON.stringify({
+          schema_version: HEALTH_PUBLIC_SCHEMA_VERSION,
+          status: publicStatus,
+          generated_at: new Date().toISOString(),
+        });
+        // 'degraded' returns 200: a recovering transport is a warning, not a
+        // hard outage. Only a fully disconnected/non-recovering state warrants
+        // 503, matching the diagnostic handler's HTTP status contract.
+        const publicHttpStatus = publicStatus === 'unhealthy' ? 503 : 200;
+        res.writeHead(publicHttpStatus, { 'Content-Type': 'application/json' });
+        res.end(publicBody);
+        return;
+      }
+
       // #1753 rem-1: snapshot BEFORE the rest of the handler's own work runs, so
       // this reflects lag accumulated up to the moment the request arrived, not
       // lag this handler's own (synchronous) work might introduce.
