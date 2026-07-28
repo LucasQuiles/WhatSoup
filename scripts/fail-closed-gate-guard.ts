@@ -108,8 +108,35 @@ function stripComment(blanked: string): string {
 /** A real pipeline: a single `|` that is not part of `||` and not the `|&` redirect form. */
 const PIPELINE_RE = /(?<!\|)\|(?!\||&)/;
 
-/** `set -o pipefail`, or a combined short-flag form such as `set -euo pipefail`. */
-const PIPEFAIL_RE = /\bset\s+(?:-[A-Za-z]+\s+)*-o\s+pipefail\b|\bset\s+-[A-Za-z]*o[A-Za-z]*\s+pipefail\b/;
+interface PipefailToggle {
+  enabled: boolean;
+  index: number;
+}
+
+/**
+ * Find positional `pipefail` state changes, including the `+o` disable form.
+ * Bash accepts both `set -o pipefail` and combined flags such as
+ * `set -euo pipefail`; the same shapes with `+` disable the option.
+ */
+function pipefailToggles(code: string): PipefailToggle[] {
+  const toggles: PipefailToggle[] = [];
+  const patterns = [
+    /\bset\s+(?:[-+][A-Za-z]+\s+)*(?<flag>[-+]o)\s+pipefail\b/g,
+    /\bset\s+(?<flag>[-+][A-Za-z]*o[A-Za-z]*)\s+pipefail\b/g,
+  ];
+  const seen = new Set<string>();
+  for (const pattern of patterns) {
+    for (const match of code.matchAll(pattern)) {
+      const flag = match.groups?.flag;
+      if (!flag || match.index === undefined) continue;
+      const key = `${match.index}:${match[0].length}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      toggles.push({ enabled: flag.startsWith('-'), index: match.index });
+    }
+  }
+  return toggles.sort((a, b) => a.index - b.index);
+}
 
 /** Status-consuming positions: `if`/`while`/`until`/`elif` conditions. */
 const CONDITION_RE = /^\s*(?:if|elif|while|until)\s+/;
@@ -148,20 +175,85 @@ function pipelineSegments(code: string): string[] {
   return segments;
 }
 
+/** Split a shell command into enough words to distinguish stdin grep from grep-with-files. */
+function shellWords(command: string): string[] {
+  const words: string[] = [];
+  let word = '';
+  let quote: "'" | '"' | null = null;
+  let escaped = false;
+  const push = () => {
+    if (!word) return;
+    words.push(word);
+    word = '';
+  };
+
+  for (let i = 0; i < command.length; i++) {
+    const char = command[i];
+    if (escaped) {
+      word += char;
+      escaped = false;
+      continue;
+    }
+    if (char === '\\' && quote !== "'") {
+      escaped = true;
+      continue;
+    }
+    if (quote) {
+      if (char === quote) quote = null;
+      else word += char;
+      continue;
+    }
+    if (char === "'" || char === '"') {
+      quote = char;
+      continue;
+    }
+    if (/\s/.test(char)) {
+      push();
+      continue;
+    }
+    if (char === ';' || char === '&') {
+      push();
+      break;
+    }
+    word += char;
+  }
+  push();
+  return words;
+}
+
 /**
- * The pipeline's LAST command is itself the predicate being tested — `grep -q`, `grep -c`,
- * `test`, `[`.
- *
- * These pipelines are already fail-closed, which is why the idiom is everywhere: if the
- * head command fails it produces no output, the predicate finds nothing, and the condition
- * is FALSE. `if ! printf '%s' "$v" | grep -qE '^[0-9]'` rejects a broken `printf` exactly as
- * it rejects a non-numeric version.
- *
- * That is the opposite of the hazard. `git push | tail -5` degrades the other way: a failed
- * push simply prints nothing and `tail` exits 0, so the gate passes. The distinction is not
- * "does it contain a pipe" but "which way does the pipeline fail when the head dies".
+ * Return true only for the narrow predicate exemption that actually consumes stdin:
+ * `producer | grep -q pattern` / `producer | grep -c pattern` (and rg/egrep forms).
+ * `test`, `[`, and `grep -q pattern file` ignore the pipe and can mask producer failure.
  */
-const PREDICATE_TAIL_RE = /^\s*!?\s*(?:grep|egrep|rg)\b[^|]*\s-[A-Za-z]*[qc][A-Za-z]*\b|^\s*!?\s*(?:test|\[)\s/;
+function isStdinPredicateTail(tail: string): boolean {
+  const words = shellWords(tail);
+  if (words[0] === '!') words.shift();
+  const command = words.shift();
+  if (!command || !['grep', 'egrep', 'rg'].includes(path.basename(command))) return false;
+
+  const hasPredicateFlag = words.some(
+    (word) => /^-[A-Za-z]*[qc][A-Za-z]*$/.test(word) || word === '--quiet' || word === '--count',
+  );
+  if (!hasPredicateFlag) return false;
+
+  const positional = words.filter((word) => word !== '--' && !word.startsWith('-'));
+  return positional.length === 1;
+}
+
+function lastPipelineIndex(code: string): number {
+  let index = -1;
+  for (let i = 0; i < code.length; i++) {
+    if (code[i] !== '|') continue;
+    if (code[i + 1] === '|' || code[i + 1] === '&') {
+      i += 1;
+      continue;
+    }
+    if (i > 0 && code[i - 1] === '|') continue;
+    index = i;
+  }
+  return index;
+}
 
 /**
  * Flag pipelines whose exit status is CONSUMED while `pipefail` is not yet in effect.
@@ -181,7 +273,7 @@ const PREDICATE_TAIL_RE = /^\s*!?\s*(?:grep|egrep|rg)\b[^|]*\s-[A-Za-z]*[qc][A-Z
  */
 function scanMaskedPipelines(relPath: string, lines: string[]): GateFinding[] {
   const findings: GateFinding[] = [];
-  let pipefailActive = false;
+  const pipefailScopes = [false];
 
   // Index of the next line that actually runs, so `$?` on the following line is attributed
   // to this pipeline rather than to a blank or a comment in between.
@@ -200,16 +292,35 @@ function scanMaskedPipelines(relPath: string, lines: string[]): GateFinding[] {
     if (!trimmed || trimmed.startsWith('#')) continue;
 
     const code = stripComment(blankQuotedSpans(raw));
-    if (PIPEFAIL_RE.test(code)) {
-      pipefailActive = true;
+    if (/^\s*\(\s*$/.test(code)) {
+      pipefailScopes.push(pipefailScopes[pipefailScopes.length - 1] ?? false);
       continue;
     }
-    if (pipefailActive) continue;
-    if (!PIPELINE_RE.test(code)) continue;
+    if (/^\s*\)\s*;?\s*$/.test(code)) {
+      if (pipefailScopes.length > 1) pipefailScopes.pop();
+      continue;
+    }
 
-    const segments = pipelineSegments(code);
-    const tail = segments[segments.length - 1] ?? '';
-    if (PREDICATE_TAIL_RE.test(tail)) continue; // already fails closed — see PREDICATE_TAIL_RE
+    const scopeIndex = pipefailScopes.length - 1;
+    let pipefailActive = pipefailScopes[scopeIndex] ?? false;
+    const toggles = pipefailToggles(code);
+    const pipelineIndex = lastPipelineIndex(code);
+    for (const toggle of toggles) {
+      if (pipelineIndex !== -1 && toggle.index > pipelineIndex) break;
+      pipefailActive = toggle.enabled;
+    }
+
+    if (pipelineIndex === -1) {
+      if (toggles.length > 0) pipefailScopes[scopeIndex] = toggles[toggles.length - 1].enabled;
+      continue;
+    }
+    if (pipefailActive) {
+      pipefailScopes[scopeIndex] = toggles.at(-1)?.enabled ?? pipefailActive;
+      continue;
+    }
+
+    const tail = raw.slice(pipelineIndex + 1);
+    if (isStdinPredicateTail(tail)) continue;
 
     const consumedInline =
       CONDITION_RE.test(code) || (INLINE_STATUS_TEST_RE.test(code) && !STATUS_DISCARD_RE.test(code));
@@ -227,6 +338,8 @@ function scanMaskedPipelines(relPath: string, lines: string[]): GateFinding[] {
         '(`git push ... | tail` exits 0 for a rejected push). Add `set -o pipefail` before it, ' +
         'or read `${PIPESTATUS[0]}` instead of `$?`.',
     });
+
+    pipefailScopes[scopeIndex] = toggles.at(-1)?.enabled ?? pipefailActive;
   }
   return findings;
 }
