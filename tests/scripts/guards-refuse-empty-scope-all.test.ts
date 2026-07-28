@@ -92,6 +92,7 @@ const SCOPE_MAP: Record<string, ScopeEntry> = {
   'baseline-growth': { class: 'probe-refuse', reason: 'import.meta-rooted but takes --repo; refuses "could not resolve a merge base"', probe: { via: 'flag', flag: '--repo' } },
   'import-cycle': { class: 'probe-refuse', reason: 'import.meta-rooted but takes --repo; refuses "no tsconfig.json"', probe: { via: 'flag', flag: '--repo' } },
   'phantom-deps': { class: 'probe-refuse', reason: 'import.meta-rooted but takes --repo; refuses "implausibly small" (floors 200/300)', probe: { via: 'flag', flag: '--repo' } },
+  'hooks-installed': { class: 'probe-refuse', reason: 'resolves cwd git config core.hooksPath and the checked-out hook objects; refuses ci.hooks.evidence-unavailable (exit 2) when neither a repo nor hooks resolve', probe: { via: 'cwd' } },
   'transport-patterns': { class: 'probe-refuse', reason: 'walks glob roots; takes --root; floor added this session — refuses "matched 0 files"', probe: { via: 'flag', flag: '--root' } },
 
   // ---- probe-nonzero: cwd-relative fixed-artifact guards that fail closed on an empty tree ----
