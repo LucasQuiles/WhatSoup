@@ -462,7 +462,7 @@ describe('durability-writer-guard — self-provisioned discovery (completeness b
     ).toHaveLength(0);
   });
 
-  it('the real SELF_PROVISIONED registry (all 10 tables) passes clean against the real repo', async () => {
+  it('the real SELF_PROVISIONED registry (all 11 tables) passes clean against the real repo', async () => {
     const snapshot = await loadRealSnapshot();
     const result = scanDurabilityWriterInvariant(snapshot, repoRoot, { registry: [], trackedReserved: [], trackedUnwiredTerminal: [] });
     const selfProvisionedFindings = result.findings.filter((f) =>
@@ -488,7 +488,7 @@ describe('durability-writer-guard — self-provisioned discovery (completeness b
     expect(result.discoveredTableCount).toBeGreaterThan(0);
   });
 
-  it('SELF_PROVISIONED declares exactly the ten known self-provisioned tables', () => {
+  it('SELF_PROVISIONED declares exactly the eleven known self-provisioned tables', () => {
     const tables = SELF_PROVISIONED.map((e) => e.table).sort();
     expect(tables).toEqual(
       [
@@ -500,6 +500,7 @@ describe('durability-writer-guard — self-provisioned discovery (completeness b
         'incidents',
         'meta',
         'pending_poll_decisions',
+        'producers',
         'standby_notice',
         'transitions',
       ].sort(),

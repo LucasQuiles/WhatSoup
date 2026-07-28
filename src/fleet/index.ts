@@ -10,6 +10,11 @@ import { HealthPoller } from './health-poller.ts';
 import { FleetDbReader } from './db-reader.ts';
 import { createStaticHandler } from './static.ts';
 import { createLivenessHandler } from './livez.ts';
+import { defaultIncidentDbPath, openIncidentDb } from './incidents/db.ts';
+import { IncidentStore } from './incidents/store.ts';
+import { ProducerStore } from './incidents/producers.ts';
+import { createSignalsHandlers } from './routes/signals.ts';
+import { errorMessage } from '../lib/error-message.ts';
 import { handleGetLines, handleGetLine, handleGetLineProviderStatus } from './routes/lines.ts';
 import { handleGetLineCheckpoints, handleRestoreCheckpoint } from './routes/checkpoints.ts';
 import { handleGetLiveSessions } from './routes/live-sessions.ts';
@@ -798,6 +803,32 @@ export function createFleetServer(deps: FleetDeps) {
     if (!candidate) return false;
     return verifyFleetTokenImpl(candidate, getTokenSet());
   }
+  // ---- Incident ingestion stores (lazy, fail-closed) --------------------
+  // Lazy so constructing a fleet server (including in tests) never creates
+  // the incident database as a side effect. A failed open is cached: the
+  // ingestion routes answer 503 and state_recovery_required needs an
+  // operator restart by design (spec §1 degraded mode).
+  let incidentStores: { incident: IncidentStore; producer: ProducerStore } | null | undefined;
+  function getIncidentStores(): { incident: IncidentStore; producer: ProducerStore } | null {
+    if (incidentStores !== undefined) return incidentStores;
+    try {
+      const incidentDb = openIncidentDb(defaultIncidentDbPath());
+      incidentStores = { incident: new IncidentStore(incidentDb), producer: new ProducerStore(incidentDb) };
+    } catch (err) {
+      log.error(
+        { event: 'incident_store_unavailable', reason: errorMessage(err) },
+        'incident store failed to open; signal ingestion degraded',
+      );
+      incidentStores = null;
+    }
+    return incidentStores;
+  }
+  const signalsHandlers = createSignalsHandlers({
+    getIncidentStore: () => getIncidentStores()?.incident ?? null,
+    getProducerStore: () => getIncidentStores()?.producer ?? null,
+    verifyRootToken: (req) => verifyToken(extractBearer(req)),
+  });
+
   const ticketStore: TicketStore = createWsTicketStore();
   // Audience-scoped store for HTTP and SSE tickets (#313). The WS path keeps
   // using `ticketStore` above so call sites do not need to care about the
@@ -976,6 +1007,34 @@ export function createFleetServer(deps: FleetDeps) {
         const { ticket, expiresIn } = ticketStore.issue(getTokenSet().active);
         jsonResponse(res, 200, { ticket, expiresIn });
         return;
+      }
+
+      // Incident ingestion + producer enrollment authenticate with producer
+      // credentials (or their own root checks inside the handlers) — they must
+      // NOT pass the fleet root/ticket gate: an api-audience ticket does not
+      // authorize signal production, and producer credentials are not fleet
+      // tokens. Explicit pre-gate carve-outs, same pattern as the ticket mints.
+      if (pathname === '/api/signals' && method === 'POST') {
+        await signalsHandlers.postSignal(req, res);
+        return;
+      }
+      if (pathname === '/api/producers' && method === 'POST') {
+        await signalsHandlers.postProducer(req, res);
+        return;
+      }
+      {
+        const producerCredential = pathname.match(/^\/api\/producers\/(?<id>[^/]+)\/credential$/);
+        const id = producerCredential?.groups?.id;
+        if (typeof id === 'string') {
+          if (method === 'POST') {
+            await signalsHandlers.postProducerCredential(req, res, { id });
+            return;
+          }
+          if (method === 'DELETE') {
+            await signalsHandlers.deleteProducerCredential(req, res, { id });
+            return;
+          }
+        }
       }
 
       const audience = audienceForPath(pathname);

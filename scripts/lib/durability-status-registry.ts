@@ -460,6 +460,13 @@ export const SELF_PROVISIONED: SelfProvisionedEntry[] = [
       'two-column key/value schema-version marker; matches the status regex only via incidental DDL text in the same module, carries no lifecycle semantics.',
   },
   {
+    table: 'producers',
+    module: 'src/fleet/incidents/schema.ts',
+    reason: 'incident control plane producer registry (migration v2 of the dedicated fleet incident database); provisioned by openIncidentDb, not the instance message DB migration ledger.',
+    justification:
+      'status is an admin enable/revoke flag whose transitions are root-gated operator actions (audited by the Plan-4 surface), not a #1789 lifecycle column with a terminal-failure value some writer must prove.',
+  },
+  {
     table: 'pending_poll_decisions',
     module: 'src/fleet/routes/approvals.ts',
     reason: 'offline durable fallback queue for poll decisions when the fleet proxy returns 502 (v1.1 design D2(b)); created lazily inline at the write site, not a numbered global migration.',
