@@ -149,6 +149,6 @@ def test_matching_files_still_emit_match_not_sha_error(tmp_path: Path):
     )
     # Every managed file should be MATCH
     match_lines = [l for l in stdout.splitlines() if "MATCH" in l]
-    assert len(match_lines) == 12, (
-        f"Expected 12 MATCH lines for clean repo root, got {len(match_lines)}:\n{stdout}"
+    assert len(match_lines) == 13, (
+        f"Expected 13 MATCH lines for clean repo root, got {len(match_lines)}:\n{stdout}"
     )
