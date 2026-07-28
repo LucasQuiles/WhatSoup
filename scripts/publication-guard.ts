@@ -1,5 +1,6 @@
 #!/usr/bin/env node
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { buildCanonicalAudit } from './lib/publication-audit-write.ts';
 import { createHash } from 'node:crypto';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -52,6 +53,17 @@ export interface ParsedAudit {
   duplicates: string[];
   summaryCounts: Partial<Record<PublicationClass | 'Total', number>>;
   declaredTotal: number | undefined;
+  /**
+   * How many `**Total classification rows:** N` lines the document carries.
+   *
+   * More than one is a split-brain hazard of the #1524 class, and it is NOT
+   * cosmetic: `declaredTotal` above is assigned on every match, so the LAST
+   * line wins and every earlier line is validated by nothing. A merge that
+   * updates only the trailing copy leaves a stale count rendered at the top of
+   * the document while this guard passes — a doc that lies to a human reader
+   * with a green check. Reported by `validatePublicationAudit`.
+   */
+  declaredTotalLines: number;
 }
 
 export interface GuardIssue {
@@ -66,6 +78,13 @@ interface ParsedArgs {
   mode: PublicationMode;
   json: boolean;
   help: boolean;
+  /**
+   * Rewrite `docs/publication-audit.md` into canonical form instead of
+   * validating it. Deliberately a separate flag rather than a `PublicationMode`
+   * member: no validation path may reach it. A validator that silently rewrites
+   * the file it validates turns a red check green by mutation.
+   */
+  write: boolean;
 }
 
 interface PrivatePattern {
@@ -184,11 +203,13 @@ export function parsePublicationAudit(markdown: string): ParsedAudit {
   const duplicates: string[] = [];
   const summaryCounts: Partial<Record<PublicationClass | 'Total', number>> = {};
   let declaredTotal: number | undefined;
+  let declaredTotalLines = 0;
 
   for (const line of markdown.split(/\r?\n/)) {
     const totalLine = line.match(/^\*\*Total classification rows:\*\*\s+(\d+)\s*$/);
     if (totalLine) {
       declaredTotal = Number(totalLine[1]);
+      declaredTotalLines += 1;
       continue;
     }
 
@@ -205,11 +226,12 @@ export function parsePublicationAudit(markdown: string): ParsedAudit {
     if (summary) summaryCounts[summary[1] as PublicationClass | 'Total'] = Number(summary[2]);
   }
 
-  return { rows, duplicates, summaryCounts, declaredTotal };
+  return { rows, duplicates, summaryCounts, declaredTotal, declaredTotalLines };
 }
 
+/** One audit table row, including the hand-authored rationale prose. */
 export function parseArgs(argv: string[]): ParsedArgs {
-  const args: ParsedArgs = { mode: 'all', json: false, help: false };
+  const args: ParsedArgs = { mode: 'all', json: false, help: false, write: false };
 
   for (const arg of argv) {
     if (arg === '--help' || arg === '-h') {
@@ -222,6 +244,8 @@ export function parseArgs(argv: string[]): ParsedArgs {
       args.mode = 'staged';
     } else if (arg === '--json') {
       args.json = true;
+    } else if (arg === '--write') {
+      args.write = true;
     } else {
       throw new Error(`Unknown argument: ${arg}`);
     }
@@ -388,6 +412,23 @@ export function validatePublicationAudit(
       severity: 'error',
       code: 'publication-audit-total-mismatch',
       message: `Publication audit declares Total classification rows=${parsed.declaredTotal}, but table has ${parsed.rows.length} rows.`,
+    });
+  }
+
+  // A second declared-count line is unvalidated by construction: the parser
+  // above assigns `declaredTotal` on every match, so only the LAST line is ever
+  // compared against the table. Demonstrated: with a stale count first and a
+  // correct count last, this guard returns ZERO issues while the top of the
+  // document renders the wrong number to a human reader. That is the #1524
+  // split-brain class surviving inside the very file that motivated it.
+  if (parsed.declaredTotalLines > 1) {
+    issues.push({
+      severity: 'error',
+      code: 'publication-audit-duplicate-total-line',
+      filePath: 'docs/publication-audit.md',
+      message:
+        `Publication audit declares the total ${parsed.declaredTotalLines} times; only the last is validated, ` +
+        'so any earlier copy can silently render a stale count. Run `npm run guard:publication:write` to canonicalize.',
     });
   }
 
@@ -587,14 +628,38 @@ function printIssues(issues: GuardIssue[]): void {
   }
 }
 
+/**
+ * Rewrite `docs/publication-audit.md` into canonical form.
+ *
+ * Rows are derived from `git ls-files` filtered by `isInternalPublicationPath`
+ * — the same enumerator validation uses, so a written file passes `--all` by
+ * construction. Existing classification and rationale are preserved verbatim;
+ * a newly tracked doc gets PRIVATE-ARCHIVE plus `DEFAULT_RATIONALE`, which is
+ * the fail-safe direction (never auto-publishes). Rows for files no longer
+ * tracked are dropped, which is what `audit-tracked-count-mismatch` demands.
+ *
+ * Returns whether the file changed, so callers can report a no-op honestly
+ * instead of implying work happened.
+ */
+export function writePublicationAudit(cwd: string): { changed: boolean; rows: number; added: string[]; removed: string[] } {
+  const auditPath = path.join(cwd, 'docs/publication-audit.md');
+  const before = readFileSync(auditPath, 'utf8');
+  const built = buildCanonicalAudit(before, listTrackedInternalDocs(cwd));
+  const changed = built.text !== before;
+  if (changed) writeFileSync(auditPath, built.text);
+  return { changed, rows: built.rows, added: built.added, removed: built.removed };
+}
+
 function printHelp(): void {
   console.log(`Usage: npm run guard:publication -- [--all|--staged|--release] [--json]
+       npm run guard:publication:write
 
 Checks:
   --all      Validate tracked publication audit state.
   --staged   Validate the same deterministic publication audit state before commit.
   --release  Require every tracked internal doc to be PUBLIC-clean before publication.
   --json     Print machine-readable results.
+  --write    Rewrite docs/publication-audit.md into canonical form (does NOT validate).
   --help     Show this help.`);
 }
 
@@ -609,6 +674,25 @@ export function runPublicationGuard(argv = process.argv.slice(2), cwd = process.
 
   if (args.help) {
     printHelp();
+    return 0;
+  }
+
+  // --write returns BEFORE any validation branch. This is the whole point of
+  // keeping it off `PublicationMode`: a validator that rewrites the file it is
+  // checking would convert a red result into a green one by mutation.
+  if (args.write) {
+    const result = writePublicationAudit(cwd);
+    if (!result.changed) {
+      console.log(`publication-guard --write: already canonical (${result.rows} rows); no change.`);
+      return 0;
+    }
+    console.log(
+      `publication-guard --write: docs/publication-audit.md rewritten — ${result.rows} rows` +
+        `${result.added.length ? `, +${result.added.length} added` : ''}` +
+        `${result.removed.length ? `, -${result.removed.length} removed` : ''}.`,
+    );
+    for (const filePath of result.added) console.log(`  + ${filePath} (PRIVATE-ARCHIVE, default rationale — refine if warranted)`);
+    for (const filePath of result.removed) console.log(`  - ${filePath} (no longer tracked)`);
     return 0;
   }
 

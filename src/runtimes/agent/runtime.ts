@@ -7010,6 +7010,7 @@ export class AgentRuntime implements Runtime {
 
   getHealthSnapshot(): RuntimeHealth {
     const fallbackState = this.getFallbackState();
+    const autoCompactHealth = this.autoCompact.healthSnapshot();
     const providerExecution = this.providerExecutionGate.snapshot();
     const finalizationHealth = this.runtimeTurnSupervisor.health();
     const recoveryHealth = getTurnRecoveryHealthDetails(this.durability);
@@ -7038,6 +7039,7 @@ export class AgentRuntime implements Runtime {
       // Idle per-chat sessions are normal; recent crashes degrade even after map cleanup.
       const recentCrashCount = this.getRecentCrashCount();
       if (recentCrashCount > 0) degradedReasons.push('recent_crashes');
+      if (autoCompactHealth.activeBackoffScopes > 0) degradedReasons.push('auto_compact_backoff');
       if (fallbackState.fallbackActiveUntil !== null) degradedReasons.push('provider_fallback_active');
       if (finalizationDegraded) degradedReasons.push('turn_finalization_debt');
       if (turnQueueHealth.turnQueueHalted) degradedReasons.push('turn_queue_halted');
@@ -7057,6 +7059,9 @@ export class AgentRuntime implements Runtime {
           autoCompactIneffective: this.autoCompact.ineffective,
           autoCompactConsecutiveRapidRearmsMax: this.autoCompact.consecutiveRapidRearmsMax,
           autoCompactNextTurnOverThreshold: this.autoCompact.nextTurnOverThreshold,
+          autoCompactState: autoCompactHealth.state,
+          autoCompactActiveBackoffScopes: autoCompactHealth.activeBackoffScopes,
+          autoCompactWorstCurrentBackoffTier: autoCompactHealth.worstCurrentBackoffTier,
           proactiveResumeIdentityRejects: this.proactiveResumeIdentityRejects,
           restartLoopGuard: {
             enabled: config.restartLoopGuard.enabled,
@@ -7084,6 +7089,7 @@ export class AgentRuntime implements Runtime {
     // If a session exists but its child process is not active, it has crashed
     const degradedReasons: string[] = [];
     if (this.session !== null && status?.active === false) degradedReasons.push('session_inactive');
+    if (autoCompactHealth.activeBackoffScopes > 0) degradedReasons.push('auto_compact_backoff');
     if (fallbackState.fallbackActiveUntil !== null) degradedReasons.push('provider_fallback_active');
     if (finalizationDegraded) degradedReasons.push('turn_finalization_debt');
     if (providerExecution.pressureActive) degradedReasons.push('provider_execution_pressure');
@@ -7107,6 +7113,9 @@ export class AgentRuntime implements Runtime {
         autoCompactIneffective: this.autoCompact.ineffective,
         autoCompactConsecutiveRapidRearmsMax: this.autoCompact.consecutiveRapidRearmsMax,
         autoCompactNextTurnOverThreshold: this.autoCompact.nextTurnOverThreshold,
+        autoCompactState: autoCompactHealth.state,
+        autoCompactActiveBackoffScopes: autoCompactHealth.activeBackoffScopes,
+        autoCompactWorstCurrentBackoffTier: autoCompactHealth.worstCurrentBackoffTier,
         proactiveResumeIdentityRejects: this.proactiveResumeIdentityRejects,
         restartLoopGuard: {
           enabled: config.restartLoopGuard.enabled,

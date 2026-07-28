@@ -9,6 +9,33 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[3]
 REGISTRY = ROOT / "src" / "lib" / "fault-taxonomy-registry.json"
+EXPECTED_RUNTIME_AGENT_NUMERIC_HEALTH_FIELDS = (
+    "activeSessions",
+    "sessionCount",
+    "recentCrashes",
+    "pollPersistenceErrors",
+    "autoCompactIneffective",
+    "autoCompactConsecutiveRapidRearmsMax",
+    "autoCompactNextTurnOverThreshold",
+    "autoCompactActiveBackoffScopes",
+    "autoCompactWorstCurrentBackoffTier",
+    "turnFinalizationDegradedScopes",
+    "turnRecoveryOutstanding",
+    "turnRecoveryPending",
+    "turnRecoveryExpiredClaimed",
+    "turnRecoveryBlockedUnsafe",
+    "turnRecoveryExhausted",
+    "turnRecoveryOpenRecoveries",
+    "turnRecoveryQuarantinedDelivery",
+    "turnRecoveryCorruptLinks",
+    "turnRecoveryOrphanTransfers",
+    "turnRecoveryEchoConflicts",
+    "turnFinalizationRetainedRetries",
+    "turnFinalizationRetryAttempts",
+    "turnFinalizationRetryRecoveries",
+    "turnFinalizationRetryExhaustions",
+    "turnRecoveryLiveClaimed",
+)
 
 
 def _load_registry() -> dict:
@@ -30,6 +57,31 @@ def _non_null(values: list[str | None]) -> set[str]:
 
 
 class FaultTaxonomyRegistryTest(unittest.TestCase):
+    def test_runtime_agent_health_signals_cover_checker_inventory(self):
+        registry = _load_registry()
+        signals = registry["runtimeAgentHealthSignals"]
+        fields = [entry["field"] for entry in signals]
+        labels = [entry["label"] for entry in signals]
+
+        self.assertEqual(registry["schema"], "whatsoup-fault-taxonomy-registry-v3")
+        self.assertEqual(fields, list(EXPECTED_RUNTIME_AGENT_NUMERIC_HEALTH_FIELDS))
+        self.assertEqual(len(fields), len(set(fields)))
+        self.assertEqual(len(labels), len(set(labels)))
+        self.assertEqual(
+            {entry["kind"] for entry in signals},
+            {
+                "current_gauge",
+                "active_episode_count",
+                "terminal_audit_count",
+                "cumulative_total",
+                "historical_maximum",
+            },
+        )
+        self.assertEqual(
+            {entry["currentHealthEffect"] for entry in signals},
+            {"positive_is_risk", "diagnostic_only"},
+        )
+
     def test_terminal_auth_failure_classes_are_registered_and_aligned(self):
         registry = _load_registry()
         expected = set(registry["authFailureClasses"])
@@ -112,6 +164,18 @@ class FaultTaxonomyRegistryTest(unittest.TestCase):
                 missing.append(f"failureDomains.{key}.owner={entry['owner']}")
             if not test_path.exists():
                 missing.append(f"failureDomains.{key}.test={entry['test']}")
+
+        for entry in registry["runtimeAgentHealthSignals"]:
+            owner = ROOT / entry["owner"]
+            test_path = ROOT / entry["test"]
+            if not owner.exists():
+                missing.append(
+                    f"runtimeAgentHealthSignals.{entry['field']}.owner={entry['owner']}"
+                )
+            if not test_path.exists():
+                missing.append(
+                    f"runtimeAgentHealthSignals.{entry['field']}.test={entry['test']}"
+                )
 
         for section in ("failureClassDispositions", "sourceDispositions"):
             for key, entry in registry[section].items():
