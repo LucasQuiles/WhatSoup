@@ -79,6 +79,28 @@ export const MIGRATIONS: readonly IncidentMigration[] = [
       `CREATE INDEX idx_transitions_incident ON transitions (incident_id)`,
     ],
   },
+  {
+    version: 2,
+    statements: [
+      `CREATE TABLE producers (
+         producer_id TEXT PRIMARY KEY,
+         producer_domain_id TEXT NOT NULL,
+         allowed_kinds TEXT NOT NULL,
+         allowed_condition_classes TEXT NOT NULL,
+         allowed_subjects TEXT NOT NULL,
+         status TEXT NOT NULL CHECK (status IN ('enabled', 'revoked')),
+         credential_hash TEXT,
+         credential_expires_at TEXT,
+         prev_credential_hash TEXT,
+         prev_expires_at TEXT,
+         enrollment_secret_hash TEXT,
+         enrollment_secret_expires_at TEXT,
+         enrollment_mismatches INTEGER NOT NULL DEFAULT 0,
+         created_at TEXT NOT NULL
+       ) STRICT`,
+      `CREATE INDEX idx_producers_credential ON producers (credential_hash)`,
+    ],
+  },
 ];
 
 export const INCIDENT_SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1]!.version;
