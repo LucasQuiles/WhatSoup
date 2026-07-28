@@ -1023,6 +1023,7 @@ export function createFleetServer(deps: FleetDeps) {
         return;
       }
       {
+        // POST/DELETE /api/producers/:id/credential
         const producerCredential = pathname.match(/^\/api\/producers\/(?<id>[^/]+)\/credential$/);
         const id = producerCredential?.groups?.id;
         if (typeof id === 'string') {
