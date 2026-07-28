@@ -313,7 +313,7 @@ _VERIFIED_PROBE = (
 def _suppressed_log_entries(mod):
     log_path = mod.state_paths()["logs"] / "dispatch.jsonl"
     return [
-        json.loads(l)
+        json.loads(l).get("details", {})
         for l in log_path.read_text().splitlines()
         if l.strip() and json.loads(l).get("type") == "stale_renotify_suppressed"
     ]

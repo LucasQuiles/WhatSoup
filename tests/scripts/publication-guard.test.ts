@@ -27,7 +27,11 @@ import {
   runPublicationGuard,
   scanTextForPrivateLiterals,
   validatePublicationExactRangeArtifact,
+  parsePublicationAudit,
+  validatePublicationAudit,
+  writePublicationAudit,
 } from '../../scripts/publication-guard.ts';
+import { DEFAULT_RATIONALE, parsePublicationAuditEntries } from '../../scripts/lib/publication-audit-write.ts';
 
 const internalDocPath = 'docs/sdlc/closed/example/state.md';
 
@@ -1550,5 +1554,156 @@ describe('publication guard exact-range native receipt', () => {
     const error = vi.spyOn(console, 'error').mockImplementation(() => undefined);
     expect(runPublicationGuard(['--exact-range'], process.cwd())).toBe(1);
     expect(error.mock.calls.join('\n')).toContain('Unknown argument: --exact-range');
+  });
+});
+
+/**
+ * `--write` canonicalization (publication-audit churn fix).
+ *
+ * Context: docs/publication-audit.md is edited by every doc-bearing PR, so each
+ * landing re-conflicts every other open PR. work-index has a regenerator; this
+ * file had none, which is why its conflicts had to be hand-merged every time.
+ */
+describe('publication audit --write canonicalization', () => {
+  /** Repo with two internal docs, an audit missing one of them, and a duplicated header. */
+  function makeWriteRepo(auditBody: string, extraDocs: string[] = []): string {
+    const repo = mkdtempSync(join(tmpdir(), 'publication-guard-write-'));
+    repos.push(repo);
+    mkdirSync(join(repo, 'docs/sdlc/closed/example'), { recursive: true });
+    writeFileSync(join(repo, internalDocPath), '# clean fixture doc\n');
+    for (const doc of extraDocs) {
+      mkdirSync(join(repo, doc.split('/').slice(0, -1).join('/')), { recursive: true });
+      writeFileSync(join(repo, doc), '# clean fixture doc\n');
+    }
+    writeFileSync(join(repo, 'docs/publication-audit.md'), auditBody);
+    git(repo, ['init']);
+    git(repo, ['add', 'docs/publication-audit.md', internalDocPath, ...extraDocs]);
+    return repo;
+  }
+
+  const auditWith = (rows: string, total: number, pub: number, priv: number) => `# Publication Audit
+
+Preamble prose that must survive verbatim.
+
+**Total classification rows:** ${total}
+
+| Classification | Count |
+|---|---:|
+| PUBLIC | ${pub} |
+| PRIVATE-ARCHIVE | ${priv} |
+| SANITIZE | 0 |
+| DELETE | 0 |
+| Total | ${total} |
+
+| Path | Classification | Rationale |
+|---|---|---|
+${rows}
+`;
+
+  it('is a fixed point: a second write changes nothing', () => {
+    const repo = makeWriteRepo(auditWith(`| \`${internalDocPath}\` | PRIVATE-ARCHIVE | Curated rationale. |`, 1, 0, 1));
+    const first = writePublicationAudit(repo);
+    const afterFirst = readFileSync(join(repo, 'docs/publication-audit.md'), 'utf8');
+    const second = writePublicationAudit(repo);
+    const afterSecond = readFileSync(join(repo, 'docs/publication-audit.md'), 'utf8');
+
+    expect(second.changed).toBe(false);
+    expect(afterSecond).toBe(afterFirst);
+    expect(first.rows).toBe(1);
+  });
+
+  it('preserves hand-authored rationales verbatim rather than replacing them with the default', () => {
+    const curated = 'Sanitized provider schema/correlation evidence; retained for internal conformance review.';
+    const repo = makeWriteRepo(auditWith(`| \`${internalDocPath}\` | PUBLIC | ${curated} |`, 1, 1, 0));
+
+    writePublicationAudit(repo);
+    const { entries } = parsePublicationAuditEntries(readFileSync(join(repo, 'docs/publication-audit.md'), 'utf8'));
+
+    // Both fields survive: losing either would silently overwrite curated prose.
+    expect(entries.get(internalDocPath)?.rationale).toBe(curated);
+    expect(entries.get(internalDocPath)?.classification).toBe('PUBLIC');
+  });
+
+  it('adds a row for a newly tracked doc, defaulting to PRIVATE-ARCHIVE (never auto-publishes)', () => {
+    const extra = 'docs/sdlc/closed/example/added.md';
+    const repo = makeWriteRepo(auditWith(`| \`${internalDocPath}\` | PRIVATE-ARCHIVE | Curated rationale. |`, 1, 0, 1), [extra]);
+
+    const result = writePublicationAudit(repo);
+    const { entries } = parsePublicationAuditEntries(readFileSync(join(repo, 'docs/publication-audit.md'), 'utf8'));
+
+    expect(result.added).toEqual([extra]);
+    expect(entries.get(extra)).toEqual({ classification: 'PRIVATE-ARCHIVE', rationale: DEFAULT_RATIONALE });
+    // The pre-existing row is untouched by the insertion.
+    expect(entries.get(internalDocPath)?.rationale).toBe('Curated rationale.');
+  });
+
+  it('drops rows for files git no longer tracks', () => {
+    const stale = 'docs/sdlc/closed/example/deleted.md';
+    const repo = makeWriteRepo(
+      auditWith(
+        `| \`${internalDocPath}\` | PRIVATE-ARCHIVE | Curated rationale. |\n| \`${stale}\` | PRIVATE-ARCHIVE | Row for a file that is gone. |`,
+        2,
+        0,
+        2,
+      ),
+    );
+
+    const result = writePublicationAudit(repo);
+    expect(result.removed).toEqual([stale]);
+    expect(readFileSync(join(repo, 'docs/publication-audit.md'), 'utf8')).not.toContain(stale);
+  });
+
+  it('produces output that passes --all, so writing cannot create an invalid document', () => {
+    const extra = 'docs/sdlc/closed/example/added.md';
+    const repo = makeWriteRepo(auditWith(`| \`${internalDocPath}\` | PRIVATE-ARCHIVE | Curated rationale. |`, 1, 0, 1), [extra]);
+
+    writePublicationAudit(repo);
+    expect(runPublicationGuard(['--all'], repo)).toBe(0);
+  });
+});
+
+describe('publication audit duplicate declared-count line', () => {
+  const dupAudit = (firstTotal: number, lastTotal: number) => `# Publication Audit
+
+**Total classification rows:** ${firstTotal}
+**Total classification rows:** ${lastTotal}
+
+| Classification | Count |
+|---|---:|
+| PUBLIC | 0 |
+| PRIVATE-ARCHIVE | 1 |
+| SANITIZE | 0 |
+| DELETE | 0 |
+| Total | ${lastTotal} |
+
+| Path | Classification | Rationale |
+|---|---|---|
+| \`${internalDocPath}\` | PRIVATE-ARCHIVE | Fixture row. |
+`;
+
+  it('counts every declared-total line, not just the last', () => {
+    expect(parsePublicationAudit(dupAudit(1, 1)).declaredTotalLines).toBe(2);
+  });
+
+  it('flags a stale-first/correct-last skew that every other check reads as clean', () => {
+    // The load-bearing case: declaredTotal is assigned on each match, so the
+    // guard validates only the LAST line (1, correct). The FIRST line renders
+    // 999 to a human reader and, without this check, nothing objects.
+    const parsed = parsePublicationAudit(dupAudit(999, 1));
+    expect(parsed.declaredTotal).toBe(1);
+
+    const issues = validatePublicationAudit(parsed, [internalDocPath], () => 'clean');
+    const codes = issues.map((issue) => issue.code);
+
+    expect(codes).toContain('publication-audit-duplicate-total-line');
+    // Proof this is the ONLY thing that objects: no count/total/tracked check
+    // fires, which is exactly why the skew was previously invisible.
+    expect(codes.filter((code) => code !== 'publication-audit-duplicate-total-line')).toEqual([]);
+  });
+
+  it('stays silent when the document declares its total exactly once', () => {
+    const single = dupAudit(1, 1).replace('**Total classification rows:** 1\n**Total classification rows:** 1', '**Total classification rows:** 1');
+    const issues = validatePublicationAudit(parsePublicationAudit(single), [internalDocPath], () => 'clean');
+    expect(issues.map((issue) => issue.code)).toEqual([]);
   });
 });

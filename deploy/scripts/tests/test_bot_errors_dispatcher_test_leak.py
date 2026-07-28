@@ -596,9 +596,12 @@ class TestProcessOneDrop:
         leak_records = [r for r in records if r.get("type") == "test_leak_dropped"]
         assert len(leak_records) >= 1, "dispatch log must have a test_leak_dropped entry"
         entry = leak_records[0]
-        assert "eventId" in entry, "entry must include eventId"
-        assert "matchedPattern" in entry, "entry must include matchedPattern"
-        assert "source" in entry, "entry must include source"
+        assert entry["schemaVersion"] == 1
+        assert entry["component"] == "dispatcher"
+        assert entry["recordKind"] == "test_leak_dropped"
+        assert "eventId" not in entry["details"]
+        assert "matchedPattern" not in entry["details"]
+        assert "source" not in entry["details"]
 
 
 # ===========================================================================
