@@ -407,6 +407,193 @@ OID and make the regression select the historical merge's first parent before bu
 fixture. Then create new observation and reconciliation run IDs; no result from the failed run may
 be promoted or overwritten.
 
+## 2026-07-17 executable-marker recovery
+
+Fresh run `bcf00-observation-ccfec077-20260717a` preserved a zero-exit validator child with 58
+passing assertions and identical pre/post snapshots, then correctly remained Inconclusive because
+structured admission found reserved marker `[BCF00-S01]` outside the frozen 33-marker registry. The
+marker was introduced by the later exit-parser regression; expanding the registry would contradict
+the approved contract. Preserve the failed run. The corrective commit keeps that regression
+unmarked and adds a bounded executable-roster check through `vitest list`. Its focused RED showed
+only the extra marker, and its focused GREEN passed all 59 assertions. A fresh observation must
+re-run the suite and typecheck after the corrective commit; the failed run is never retried or
+promoted.
+
+## 2026-07-17 work-index gate recovery
+
+Reconciliation run `bcf00-reconciliation-3e4b6bf21-20260717a` created the exact helper-owned merge
+`25a18f7b7eb0147daad946c321144f1dfb229320` with corrective commit
+`3e4b6bf21a195867d5e53a0e9ae2c5a8b620831d` first and pinned upstream
+`2862bc0e6bd4157449503bd9c405e67d34cf0256` second. Postmerge validator admission, both typechecks,
+the focused predecessor suites, and the 13/40, 39/40, and 18/18 evaluator predicates passed. The
+required branch gate exited 1 at `guard:work-index`: scanner comparison found only the handoff row's
+checked-in `last_modified: 2026-07-16` versus Git-derived `2026-07-17`. This occurred because the
+index was regenerated before the documentation commit that advanced that date. Preserve the run,
+gate logs, merge, and original branch as Inconclusive. Recovery starts from `3e4b6bf21a195867d5e53a0e9ae2c5a8b620831d`
+on a distinct branch, commits this amendment with newly generated index artifacts, verifies the
+index after commit, and uses new observation/reconciliation IDs. No prior Pass attempt substitutes
+for the failed required gate.
+
+## 2026-07-17 nested-console capability recovery
+
+Reconciliation run `bcf00-reconciliation-02c955ca4-20260717a` created helper-owned merge
+`9abc8d11aadce6e1ad621b8c912fdeaeb2177035` and passed the corrected work-index check, postmerge
+validator admission, focused suites, typechecks, and locked evaluator predicates. Its required
+branch gate later exited 1 when `console` shadow lint could not resolve
+`eslint-plugin-react-hooks`. Root dependency installation does not materialize the separate
+`console/package-lock.json` tree. Preserve that run, merge, logs, and branch as Inconclusive.
+Recovery starts from `02c955ca41444ca6a1d616abda4bb5607e00c61b` on another branch, installs
+both root and console lockfiles through the pinned wrapper before run initialization, and verifies
+the missing package is readable. Those setup checks are not BCF Pass evidence. The full immutable
+observation/reconciliation and branch gate must run again under new IDs.
+
+## 2026-07-17 predecessor-closure alias recovery
+
+Fresh reconciliation run `bcf00-reconciliation-75e3290bc-20260717a` finalized Pass at merge
+`303ff8dbcc3194219a10e3cfff9ef0dc78a88c1c` after all required validator, typecheck, focused,
+evaluator, branch-gate, readiness, lifecycle, lock, and verification checks passed. That exact head
+was pushed on `experiment/jul17-boundary-contract-feedback-hardening-recovery2`. The first BCF-01
+`init` correctly created no successor run, but rejected predecessor admission because its closure
+contained the same `readiness.json` physical file through two congruent manifest roles: the
+`readiness-check` structured result and its registered artifact. Both records have the same
+producer, path, SHA-256, and byte count; the current closure builder nevertheless reports a
+duplicate logical path.
+
+Preserve the finalized BCF-00 run and pushed branch. Recovery starts from pre-merge documentation
+commit `75e3290bc94e88f5ef75f9d1f5783883c5e34d76` on a new branch, after replaying both pinned root
+and console dependency installations. Add a focused RED/GREEN regression and permit only an exact
+same-producer structured-result/artifact alias to contribute one closure row. Different producers,
+digests, byte counts, or any unrelated repeated path remain fail-closed. Then rerun the complete
+BCF-00 observation/reconciliation chain under fresh IDs before another BCF-01 initialization.
+
+## 2026-07-17 structured-stream alias recovery
+
+Recovery3 finalized BCF-00 Pass at merge `247e0eaf2297f0caa5dbfe8355f84dd5f21efc94` and pushed
+`experiment/jul17-boundary-contract-feedback-hardening-recovery3`. Its first BCF-01 initialization
+again created no successor run. The corrected closure admitted `readiness.json`, then reported the
+remaining duplicate paths at the baseline, candidate, and holdout evaluator stdout logs. Each
+evaluator's closed contract uses the exact JSON stdout stream as its structured result; path,
+SHA-256, byte count, and producing attempt all agree.
+
+Preserve the finalized run and pushed branch. Recovery4 starts from pre-merge validator commit
+`96c81767bd392319ec8e3278d17a326640bd7b42` with both dependency preflights replayed. The next
+focused regression admits only an attempt's exact own-stdout/structured-result alias as one closure
+row. Any mismatched digest or byte count, a structured result that aliases another attempt's stream,
+or an unrelated duplicate path remains fail-closed. A fresh observation/reconciliation chain is
+required before the next BCF-01 import attempt.
+
+## 2026-07-17 profile-owned work-transition recovery
+
+Recovery4 finalized BCF-00 Pass at merge `b17f65e2c39b7c79d0a6ec172717185c2dc8218e` and pushed
+`experiment/jul17-boundary-contract-feedback-hardening-recovery4`. The first BCF-01 initialization
+successfully imported that predecessor. After the profile-owned parser tests were edited, the
+reserved `parser-red` command was rejected before spawn as `attempt-pre-snapshot-drift`. A second
+initialization after the edit correctly rejected the finalized predecessor because read-only
+source verification observed the live edit. Together those results prove the documented
+clean-init, edit, RED-command sequence is unreachable under exact pre-snapshot equality; the same
+equality would also reject the later unstaged-to-staged representation change before commit.
+
+Preserve recovery4, its finalized BCF-00 evidence, the failed successor evidence, and its local RED
+test tranche. Recovery5 starts from `26468adb50fac15ab52e3a8addd0f23ecc5aeb16`. Predecessor
+verification remains exact. The bounded correction admits only profile-owned unstaged tracked
+deltas before commands and only a hash-identical unstaged-to-staged transfer before commit.
+Regressions must reject foreign tracked paths, index drift before commands, owner/untracked drift,
+and any staged bytes that differ from the last accepted unstaged snapshot. A fresh immutable
+BCF-00 chain is required before BCF-01 is recreated.
+
+## 2026-07-17 loadgate-capacity recovery
+
+Recovery5 merged at `92614ea365c2dd5820d7093fca864a1be41fef26` after the validator and all
+focused, typecheck, and evaluator attempts passed. The required branch gate itself never started:
+its strict loadgate measured load1 54.48 above the 28 ceiling, waited the full 120 seconds, then
+still measured 37.28 and exited 75. The helper recorded empty stdout, the bounded refusal on
+stderr, raw exit 75, and identical pre/post snapshots. The run now has a deferred/inconclusive/current
+lifecycle and verifies as Inconclusive; Pass-only finalization correctly rejected it.
+
+The same merge later passed the repository pre-push gate once capacity eased and was pushed on
+`experiment/jul17-boundary-contract-feedback-hardening-recovery5`. That is useful root-cause
+corroboration, not substitute BCF evidence. Recovery6 starts from
+`19b75bb7871b313e4bdcab9af01bfab55cb67427`, replays both pinned dependency installs, and requires
+a strict setup-only load canary before creating new observation/reconciliation IDs. No threshold,
+timeout, required-attempt set, or failed-run record is edited.
+
+## 2026-07-17 RED-selection predicate recovery
+
+Recovery6 finalized and verified BCF-00 Pass at merge
+`a1a7bb027f1dcd368bd62ee31bbf1793ae0f96fc`, then pushed
+`experiment/jul17-boundary-contract-feedback-hardening-recovery6`. Its BCF-01 successor imported
+that exact predecessor. A raw focused preflight proved six exact unsafe sentinel failures and one
+passing safe control, but the helper-owned `parser-red` attempt classified 41 assertions excluded
+by its own `--testNamePattern` as selected pending/unregistered failures. Vitest's JSON report keeps
+those unselected legacy and neighbor assertions as `skipped` rows and counts them as pending, so
+the current predicate makes every planned RED attempt unreachable.
+
+Preserve the failed attempt and active Inconclusive successor; its lifecycle cannot be closed
+without the profile-owned commit transition. Recovery7 starts from
+`19b75bb7871b313e4bdcab9af01bfab55cb67427`, carries forward the loadgate amendment, and binds RED
+validation to selected U/S assertions while still rejecting a selected skip/todo, an unknown BCF
+marker, or any report-count mismatch. GREEN remains strict over every collected assertion. The
+BCF-01 test tranche is preserved in the named stash
+`bcf01 markers after red predicate failure` until a fresh finalized BCF-00 chain can import it.
+
+## 2026-07-17 versionless capability recovery
+
+Recovery7 finalized and pushed BCF-00 Pass at
+`4b56d9a7d51e8cfbb30b46a5700e4376a1d4ce7d`, then completed, finalized, verified, and pushed
+BCF-01 at `2f0eabe49f9ef0aaac17c1dcc5db0c0c6fc5f045`. BCF-02 initialization failed before a run was
+created because the helper resolves its required `tr` capability by invoking `--version`.
+macOS `/usr/bin/tr` rejects that GNU-only option; `/usr/bin/wc`, `/usr/bin/test`, and
+`/usr/bin/kill` have the same portability boundary for later closed profiles.
+
+Recovery8 starts from pre-merge validator commit
+`56b1e28e5cb1eca817fb0704a5bb189daacb5b36`. The correction keeps realpath and complete executable
+SHA-256 binding for every tool. Only `kill`, `test`, `tr`, and `wc` may use the deterministic
+`content-sha256:<digest>` version surrogate after a nonzero or empty version probe; all other tools
+still require a successful nonempty version string, and GNU timeout identity remains mandatory.
+Fresh BCF-00 and BCF-01 chains are required before BCF-02 can be initialized again.
+
+## 2026-07-17 capability-test integrity recovery
+
+Recovery8 merged at `669e6b42856bb6f0ccb237ad42d56c71e184e8bc` after the committed validator,
+focused semantic suites, both typechecks, and all evaluator predicates passed. The required branch
+gate failed at the unfiltered test-integrity check because the expanded `[BCF00-N06]` case produced
+one new `js-no-expect` finding. The case contains direct expectations and passes focused Vitest, but
+its absolute-path `expect.stringMatching` regex contains adjacent slash delimiters that the scanner's
+balanced-parenthesis heuristic treats as a line comment and truncates before the first expectation.
+The run is preserved as
+deferred/inconclusive/current and Pass-only finalization was rejected as the intended negative
+control; that rejected command is not positive evidence.
+
+Recovery9 starts from `7ce846e1f0c5dbfbb6bd6c7eb3554ad299287c7c`. It keeps the marker-owned
+capability checks small, replaces the scanner-ambiguous regex with `path.isAbsolute`, and moves
+fake-executable fallback/rejection checks into a dedicated test with direct assertions. The
+test-integrity baseline is not changed. A fresh unfiltered integrity
+scan and complete BCF-00/01 replay are required before BCF-02 resumes.
+
+## 2026-07-17 cumulative marker recovery
+
+Recovery15 finalized and pushed BCF-00 through BCF-03, ending at
+`04134aaec9366c2e47e2e761f4dc533467505518`. BCF-04 then exposed an impossible helper contract:
+Vitest reports prior-task markers from cumulative files, RED rejected their reporter-generated skips
+as foreign, and GREEN counted them while also requiring their exact entry titles to remain. The
+failed run and its scaffold stash are preserved. Recovery16 fixes only marker admission: exact
+entry-roster predecessor tests remain mandatory, while only current registered markers satisfy the
+current predicate. A foreign or renamed marker still fails.
+
+## 2026-07-17 readiness-order recovery
+
+Recovery16 committed and pushed the cumulative-marker correction at `c30b3b805`, then preserved an
+observation invocation rejected for declaring `merge-preview` exit `0` instead of `0,1`. Its fresh
+observation finalized Pass. Reconciliation merge `953259363` passed every external validator,
+typecheck, evaluator, and branch-gate attempt, but readiness was invoked while lifecycle remained
+`active/not-run/not-applicable`; the internal check correctly returned `Not Ready`. Because a failed
+required attempt is single-use, later lifecycle mutation could not promote the run. The merge and
+failed evidence remain preserved on the pushed Recovery16 branch.
+
+Recovery17 restarts from `c30b3b805` with no helper or product change. It must use new run IDs and
+the plan's existing Step 7 order: `set-lifecycle completed/pass/current`, then the one
+`readiness-check`, then finalization and read-only verification.
+
 ## Authorization Boundary
 
 The planning packet's initial approval authorized writing and committing the local specification,
