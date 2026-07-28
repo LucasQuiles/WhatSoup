@@ -1,4 +1,5 @@
 import { execFileSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -7,7 +8,11 @@ import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { cleanGitEnv } from '../../scripts/lib/guard-core.ts';
+import { canonicalizeBoundaryRun } from '../../scripts/lib/verification/boundary-run/shared.ts';
+import * as repoHygieneGuardModule from '../../scripts/repo-hygiene-guard.ts';
 import {
+  createRepoHygieneExactRangeArtifact,
+  currentRepoHygienePolicyDigest,
   isAllowedPatternMatch,
   isTrackedSensitiveArtifact,
   parseArgs,
@@ -22,10 +27,12 @@ import {
   scanCommitAuthors,
   scanContentLines,
   scanProjectedFileSecretLines,
+  validateRepoHygieneExactRangeArtifact,
 } from '../../scripts/repo-hygiene-guard.ts';
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const tempRepos: string[] = [];
+const githubTokenFixture = ['ghp', 'RealLookingToken1234567890'].join('_');
 const privateHostLabelFixture = ['nuc', 'les'].join('');
 const privateHostDomainFixture = `${privateHostLabelFixture}.${['qui', 'les'].join('')}.${['stu', 'dio'].join('')}`;
 const privateTailnetIpFixture = ['100', '91', '13', '7'].join('.');
@@ -33,6 +40,72 @@ const privateInstanceDbFixture = ['instances', 'personal', 'bot.db'].join('/');
 
 function git(cwd: string, args: string[]): void {
   execFileSync('git', args, { cwd, stdio: 'ignore', env: cleanGitEnv() });
+}
+
+function gitOutput(cwd: string, args: string[]): string {
+  return execFileSync('git', args, {
+    cwd,
+    encoding: 'utf8',
+    env: cleanGitEnv(),
+    stdio: ['ignore', 'pipe', 'ignore'],
+  }).trim();
+}
+
+function commitAll(cwd: string, message: string): string {
+  git(cwd, ['add', '-A']);
+  git(cwd, ['commit', '-m', message]);
+  return gitOutput(cwd, ['rev-parse', 'HEAD']);
+}
+
+function requireExactRangeArtifact(
+  result: ReturnType<typeof createRepoHygieneExactRangeArtifact>,
+) {
+  expect(result.ok).toBe(true);
+  if (!result.ok) throw new Error(result.error.code);
+  return result.artifact;
+}
+
+function exactRangePayload(
+  result: ReturnType<typeof createRepoHygieneExactRangeArtifact>,
+): Record<string, unknown> {
+  const artifact = requireExactRangeArtifact(result);
+  return JSON.parse(Buffer.from(artifact.payloadBytes).toString('utf8')) as Record<string, unknown>;
+}
+
+function artifactForPayload(
+  payload: unknown,
+): ReturnType<typeof requireExactRangeArtifact> {
+  const payloadBytes = Uint8Array.from(Buffer.from(canonicalizeBoundaryRun(payload), 'utf8'));
+  return {
+    payloadBytes,
+    binding: {
+      schemaVersion: 1,
+      detectorId: 'repo-hygiene-guard',
+      payloadByteLength: payloadBytes.byteLength,
+      payloadSha256: `sha256:${createHash('sha256').update(payloadBytes).digest('hex')}`,
+    },
+  };
+}
+
+function expectedForArtifact(
+  artifact: ReturnType<typeof requireExactRangeArtifact>,
+  payload: { toolDigest: string; policyDigest: string },
+  lineage: { baseOid: string; remoteOid: string | null; localOid: string },
+) {
+  return {
+    ...lineage,
+    currentToolDigest: payload.toolDigest,
+    currentPolicyDigest: payload.policyDigest,
+    expectedPayloadByteLength: artifact.binding.payloadByteLength,
+    expectedPayloadSha256: artifact.binding.payloadSha256,
+  };
+}
+
+function requireArtifactBindingFields(payload: unknown): { toolDigest: string; policyDigest: string } {
+  if (payload === null || typeof payload !== 'object' || Array.isArray(payload)) throw new Error('artifact payload must be an object');
+  const { toolDigest, policyDigest } = payload as Record<string, unknown>;
+  if (typeof toolDigest !== 'string' || !/^sha256:[0-9a-f]{64}$/.test(toolDigest) || typeof policyDigest !== 'string' || !/^sha256:[0-9a-f]{64}$/.test(policyDigest)) throw new Error('artifact binding digests are invalid');
+  return { toolDigest, policyDigest };
 }
 
 function makeBranchRepo(): string {
@@ -59,6 +132,7 @@ function makeEmptyRepo(): string {
 
 afterEach(() => {
   vi.restoreAllMocks();
+  vi.useRealTimers();
   for (const repo of tempRepos.splice(0)) {
     rmSync(repo, { recursive: true, force: true });
   }
@@ -649,6 +723,34 @@ Co-Authored-By: Person <person@example.com>
     expect(issues.some((issue) => issue.line === 6)).toBe(false);
   });
 
+  it('exempts inert markdown prose while retaining suppression checks for MDX and tests', () => {
+    const suppressionToken = ['@ts', 'ignore'].join('-');
+    const issues = scanAddedLines([
+      { filePath: 'docs/plan.md', line: 10, text: `The policy prohibits ${suppressionToken} in production code.` },
+      { filePath: 'README.markdown', line: 20, text: `Do not add ${suppressionToken} to bypass type checking.` },
+      {
+        filePath: 'docs/example.mdx',
+        line: 30,
+        text: `{/* ${suppressionToken} */}`,
+      },
+      { filePath: 'tests/example.test.ts', line: 40, text: `// ${suppressionToken}` },
+    ]);
+    expect(issues).toEqual([
+      {
+        code: 'unbounded-suppression',
+        message: 'Lint/type suppressions must include a rationale and an expires YYYY-MM-DD marker.',
+        filePath: 'docs/example.mdx',
+        line: 30,
+      },
+      {
+        code: 'unbounded-suppression',
+        message: 'Lint/type suppressions must include a rationale and an expires YYYY-MM-DD marker.',
+        filePath: 'tests/example.test.ts',
+        line: 40,
+      },
+    ]);
+  });
+
   it('classifies staged runtime artifacts as sensitive without blocking tracked settings template', () => {
     expect(isTrackedSensitiveArtifact('.env')).toBe(true);
     expect(isTrackedSensitiveArtifact('.env.local')).toBe(true);
@@ -844,6 +946,916 @@ The migrated group was 1203631234567890@g.us.
 
     expect(issues.map((issue) => issue.code)).toEqual(['branch-history-sensitive-artifact']);
     expect(issues[0].message).toContain('branch history');
+  });
+
+  describe('exact-range native receipt', () => {
+    it('blocks the exact outgoing commit even when ambient HEAD is safe', () => {
+      const repo = makeBranchRepo();
+      const baseOid = gitOutput(repo, ['rev-parse', 'main']);
+      mkdirSync(join(repo, 'src'), { recursive: true });
+      writeFileSync(join(repo, 'src', 'outgoing.ts'), `export const token = '${githubTokenFixture}';\n`);
+      const localOid = commitAll(repo, 'test: exact outgoing fixture');
+      git(repo, ['checkout', 'main']);
+
+      const payload = exactRangePayload(createRepoHygieneExactRangeArtifact(repo, {
+        baseOid,
+        remoteOid: null,
+        localOid,
+      }));
+
+      expect(payload.outcome).toBe('block');
+      expect(payload.localOid).toBe(localOid);
+      expect(payload.rangeStartOid).toBe(baseOid);
+      expect(payload.nativeCauses).toEqual(['github-token']);
+      expect(JSON.stringify(payload)).not.toContain('RealLookingToken');
+    });
+
+    it('reports transient secret and sensitive-artifact history without applying all rules historically', () => {
+      const repo = makeBranchRepo();
+      const baseOid = gitOutput(repo, ['rev-parse', 'main']);
+      mkdirSync(join(repo, 'src'), { recursive: true });
+      writeFileSync(join(repo, 'src', 'transient.ts'), 'WEBHOOK_SECRET=a3f1c9d2e84b076f5a192c3e7d408b1f\n');
+      writeFileSync(join(repo, '.env.local'), 'fixture\n');
+      commitAll(repo, 'test: transient exact evidence');
+      git(repo, ['rm', 'src/transient.ts', '.env.local']);
+      const localOid = commitAll(repo, 'test: remove exact evidence');
+
+      const payload = exactRangePayload(createRepoHygieneExactRangeArtifact(repo, {
+        baseOid,
+        remoteOid: null,
+        localOid,
+      }));
+
+      expect(payload.outcome).toBe('block');
+      expect(payload.nativeCauses).toEqual([
+        'branch-history-sensitive-artifact',
+        'secret-assignment',
+      ]);
+      const findings = payload.findings as Array<Record<string, unknown>>;
+      expect(findings.some((finding) => finding.observationKind === 'history-added-line')).toBe(true);
+      expect(findings.some((finding) => finding.observationKind === 'history-sensitive-artifact')).toBe(true);
+    });
+
+    it('binds exact author and full commit-message findings structurally to the commit', () => {
+      const repo = makeBranchRepo();
+      const baseOid = gitOutput(repo, ['rev-parse', 'main']);
+      writeFileSync(join(repo, 'author.txt'), 'fixture\n');
+      git(repo, ['add', 'author.txt']);
+      execFileSync('git', [
+        '-c', 'user.name=WhatSoup Test',
+        '-c', 'user.email=test@example.invalid',
+        'commit', '-m', 'test: bad author', '-m', 'Co-Authored-By: Example <example@example.invalid>',
+      ], { cwd: repo, env: cleanGitEnv(), stdio: 'ignore' });
+      const localOid = gitOutput(repo, ['rev-parse', 'HEAD']);
+
+      const payload = exactRangePayload(createRepoHygieneExactRangeArtifact(repo, {
+        baseOid,
+        remoteOid: null,
+        localOid,
+      }));
+      const findings = payload.findings as Array<Record<string, unknown>>;
+
+      expect(payload.nativeCauses).toEqual([
+        'commit-coauthor-trailer',
+        'personal-email',
+        'placeholder-commit-author',
+      ]);
+      expect(findings.every((finding) => finding.commitOid === localOid)).toBe(true);
+      expect(findings.every((finding) => finding.path === null)).toBe(true);
+    });
+
+    it('passes reserved fixtures and discloses changed-content-only scope', () => {
+      const repo = makeBranchRepo();
+      const baseOid = gitOutput(repo, ['rev-parse', 'main']);
+      mkdirSync(join(repo, 'docs'), { recursive: true });
+      writeFileSync(join(repo, 'docs', 'safe.md'), 'Call +1 415 555 0100 or fixture@example.com.\n');
+      const localOid = commitAll(repo, 'docs: safe exact fixture');
+
+      const payload = exactRangePayload(createRepoHygieneExactRangeArtifact(repo, {
+        baseOid,
+        remoteOid: null,
+        localOid,
+      }));
+
+      expect(payload.outcome).toBe('pass');
+      expect(payload.exitCode).toBe(0);
+      expect(payload.nativeCauses).toEqual([]);
+      expect(payload.limitations).toContain('changed-content-only');
+    });
+
+    it('returns no payload and only a sanitized code for malformed or unavailable lineage', () => {
+      const repo = makeBranchRepo();
+      const baseOid = gitOutput(repo, ['rev-parse', 'main']);
+      const malformed = createRepoHygieneExactRangeArtifact(repo, {
+        baseOid: 'main',
+        remoteOid: null,
+        localOid: gitOutput(repo, ['rev-parse', 'HEAD']),
+      } as never);
+      expect(malformed).toEqual({
+        ok: false,
+        error: { code: 'repo-hygiene.exact-range.input-malformed' },
+      });
+      expect(JSON.stringify(malformed)).not.toContain(repo);
+
+      const missing = createRepoHygieneExactRangeArtifact(repo, {
+        baseOid,
+        remoteOid: null,
+        localOid: 'f'.repeat(40),
+      });
+      expect(missing.ok).toBe(false);
+      expect(missing).not.toHaveProperty('artifact');
+      expect(JSON.stringify(missing)).not.toContain('fatal:');
+
+      let accessorInvoked = false;
+      const accessorInput = Object.defineProperty({
+        remoteOid: null,
+        localOid: gitOutput(repo, ['rev-parse', 'HEAD']),
+      }, 'baseOid', {
+        enumerable: true,
+        get() {
+          accessorInvoked = true;
+          return baseOid;
+        },
+      });
+      expect(createRepoHygieneExactRangeArtifact(repo, accessorInput as never)).toEqual({
+        ok: false,
+        error: { code: 'repo-hygiene.exact-range.input-malformed' },
+      });
+      expect(accessorInvoked).toBe(false);
+      expect(createRepoHygieneExactRangeArtifact(repo, new Proxy({
+        baseOid,
+        remoteOid: null,
+        localOid: gitOutput(repo, ['rev-parse', 'HEAD']),
+      }, {}) as never).ok).toBe(false);
+
+      writeFileSync(join(repo, 'feature.txt'), 'feature\n');
+      const featureOid = commitAll(repo, 'test: nonancestor feature');
+      const nonancestor = createRepoHygieneExactRangeArtifact(repo, {
+        baseOid: featureOid,
+        remoteOid: null,
+        localOid: baseOid,
+      });
+      expect(nonancestor.ok).toBe(false);
+      expect(nonancestor).not.toHaveProperty('artifact');
+    });
+
+    it('creates one canonical externally bound artifact and rejects byte, digest, and freshness mutations', () => {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date('2026-07-21T12:00:00.000Z'));
+      const repo = makeBranchRepo();
+      const baseOid = gitOutput(repo, ['rev-parse', 'main']);
+      writeFileSync(join(repo, 'safe.txt'), 'safe\n');
+      const localOid = commitAll(repo, 'test: canonical receipt');
+      const artifact = requireExactRangeArtifact(createRepoHygieneExactRangeArtifact(repo, {
+        baseOid,
+        remoteOid: null,
+        localOid,
+      }));
+      const parsedPayload = JSON.parse(Buffer.from(artifact.payloadBytes).toString('utf8')) as {
+        toolDigest: string;
+        policyDigest: string;
+      };
+      const expected = expectedForArtifact(artifact, parsedPayload, {
+        baseOid, remoteOid: null, localOid,
+      });
+
+      const valid = validateRepoHygieneExactRangeArtifact(artifact, expected);
+      expect(valid.ok).toBe(true);
+      if (valid.ok) {
+        expect(Object.isFrozen(valid.receipt)).toBe(true);
+        expect(Object.isFrozen(valid.receipt.budget.remaining)).toBe(true);
+      }
+
+      const changedBytes = Uint8Array.from(artifact.payloadBytes);
+      changedBytes[changedBytes.length - 2] ^= 1;
+      expect(validateRepoHygieneExactRangeArtifact({
+        ...artifact,
+        payloadBytes: changedBytes,
+      }, expected)).toEqual({
+        ok: false,
+        error: { code: 'repo-hygiene.exact-range.receipt-invalid' },
+      });
+      expect(validateRepoHygieneExactRangeArtifact({
+        ...artifact,
+        binding: { ...artifact.binding, payloadSha256: `sha256:${'0'.repeat(64)}` },
+      }, expected).ok).toBe(false);
+
+      vi.setSystemTime(new Date('2026-07-21T12:05:00.000Z'));
+      expect(validateRepoHygieneExactRangeArtifact(artifact, expected).ok).toBe(true);
+      vi.setSystemTime(new Date('2026-07-21T12:05:00.001Z'));
+      expect(validateRepoHygieneExactRangeArtifact(artifact, expected)).toEqual({
+        ok: false,
+        error: { code: 'repo-hygiene.exact-range.receipt-stale' },
+      });
+
+      const partialBytes = artifact.payloadBytes.slice(0, -1);
+      expect(validateRepoHygieneExactRangeArtifact({
+        payloadBytes: partialBytes,
+        binding: {
+          ...artifact.binding,
+          payloadByteLength: partialBytes.byteLength,
+          payloadSha256: `sha256:${createHash('sha256').update(partialBytes).digest('hex')}`,
+        },
+      }, expected).ok).toBe(false);
+    });
+
+    it('rejects reconstructed equivalent, duplicate-key, unknown-key, and expected-binding substitutions', () => {
+      const repo = makeBranchRepo();
+      const baseOid = gitOutput(repo, ['rev-parse', 'main']);
+      writeFileSync(join(repo, 'safe.txt'), 'safe\n');
+      const localOid = commitAll(repo, 'test: strict receipt');
+      const artifact = requireExactRangeArtifact(createRepoHygieneExactRangeArtifact(repo, {
+        baseOid,
+        remoteOid: null,
+        localOid,
+      }));
+      const payload = JSON.parse(Buffer.from(artifact.payloadBytes).toString('utf8')) as {
+        toolDigest: string;
+        policyDigest: string;
+      };
+      const expected = expectedForArtifact(artifact, payload, {
+        baseOid, remoteOid: null, localOid,
+      });
+      const reconstructed = Uint8Array.from(Buffer.from(JSON.stringify(payload)));
+      expect(validateRepoHygieneExactRangeArtifact({
+        payloadBytes: reconstructed,
+        binding: {
+          ...artifact.binding,
+          payloadByteLength: reconstructed.byteLength,
+          payloadSha256: artifact.binding.payloadSha256,
+        },
+      }, expected).ok).toBe(false);
+      expect(validateRepoHygieneExactRangeArtifact(artifact, {
+        ...expected,
+        localOid: 'e'.repeat(40),
+      }).ok).toBe(false);
+      expect(validateRepoHygieneExactRangeArtifact(artifact, {
+        ...expected,
+        currentPolicyDigest: `sha256:${'0'.repeat(64)}`,
+      })).toEqual({
+        ok: false,
+        error: { code: 'repo-hygiene.exact-range.policy-mismatch' },
+      });
+      expect(validateRepoHygieneExactRangeArtifact(artifact, {
+        ...expected,
+        currentToolDigest: `sha256:${'0'.repeat(64)}`,
+      })).toEqual({
+        ok: false,
+        error: { code: 'repo-hygiene.exact-range.tool-mismatch' },
+      });
+
+      const otherDigest = `sha256:${'0'.repeat(64)}`;
+      for (const field of ['toolDigest', 'policyDigest'] as const) {
+        const colludingPayload = { ...payload, [field]: otherDigest };
+        const colludingArtifact = artifactForPayload(colludingPayload);
+        const colludingExpected = expectedForArtifact(
+          colludingArtifact,
+          requireArtifactBindingFields(colludingPayload),
+          { baseOid, remoteOid: null, localOid },
+        );
+        expect(validateRepoHygieneExactRangeArtifact(colludingArtifact, colludingExpected)).toEqual({
+          ok: false,
+          error: { code: `repo-hygiene.exact-range.${field === 'toolDigest' ? 'tool' : 'policy'}-mismatch` },
+        });
+      }
+
+      const unknown = { ...payload, unexpected: true };
+      expect(validateRepoHygieneExactRangeArtifact(artifactForPayload(unknown), expected).ok).toBe(false);
+
+      const noncanonicalBytes = Uint8Array.from(Buffer.from(JSON.stringify(payload), 'utf8'));
+      const noncanonical = {
+        payloadBytes: noncanonicalBytes,
+        binding: {
+          schemaVersion: 1 as const,
+          detectorId: 'repo-hygiene-guard' as const,
+          payloadByteLength: noncanonicalBytes.byteLength,
+          payloadSha256: `sha256:${createHash('sha256').update(noncanonicalBytes).digest('hex')}` as const,
+        },
+      };
+      expect(validateRepoHygieneExactRangeArtifact(noncanonical, expected).ok).toBe(false);
+
+      const canonicalText = Buffer.from(artifact.payloadBytes).toString('utf8');
+      const duplicateBytes = Uint8Array.from(Buffer.from(
+        canonicalText.replace('{', '{"schemaVersion":1,'),
+        'utf8',
+      ));
+      expect(validateRepoHygieneExactRangeArtifact({
+        payloadBytes: duplicateBytes,
+        binding: {
+          schemaVersion: 1,
+          detectorId: 'repo-hygiene-guard',
+          payloadByteLength: duplicateBytes.byteLength,
+          payloadSha256: `sha256:${createHash('sha256').update(duplicateBytes).digest('hex')}`,
+        },
+      }, expected).ok).toBe(false);
+    });
+
+    it('suppresses only byte-identical base lines on merge re-exposure and blocks a new neighbor', () => {
+      const repo = makeBranchRepo();
+      const baseOid = gitOutput(repo, ['rev-parse', 'main']);
+      writeFileSync(join(repo, 'feature.txt'), 'feature\n');
+      commitAll(repo, 'test: feature before base advance');
+
+      git(repo, ['checkout', 'main']);
+      mkdirSync(join(repo, 'tests', 'drills'), { recursive: true });
+      writeFileSync(
+        join(repo, 'tests', 'drills', 'base.sh'),
+        'WEBHOOK_SECRET=a3f1c9d2e84b076f5a192c3e7d408b1f\r\n',
+      );
+      const remoteOid = commitAll(repo, 'test: base sentinel');
+      git(repo, ['checkout', 'feature']);
+      git(repo, ['merge', 'main', '--no-edit']);
+      const mergeOid = gitOutput(repo, ['rev-parse', 'HEAD']);
+
+      const mergePayload = exactRangePayload(createRepoHygieneExactRangeArtifact(repo, {
+        baseOid,
+        remoteOid,
+        localOid: mergeOid,
+      }));
+      expect(mergePayload.outcome).toBe('pass');
+
+      writeFileSync(
+        join(repo, 'tests', 'drills', 'neighbor.sh'),
+        'WEBHOOK_SECRET=b4e2d8c1f73a086e5b291d4e8c509a2f\n',
+      );
+      const localOid = commitAll(repo, 'test: new secret neighbor');
+      const neighborPayload = exactRangePayload(createRepoHygieneExactRangeArtifact(repo, {
+        baseOid,
+        remoteOid,
+        localOid,
+      }));
+      expect(neighborPayload.nativeCauses).toEqual(['secret-assignment']);
+    });
+
+    it('returns no payload for binary and gitlink exact changes', () => {
+      const binaryRepo = makeBranchRepo();
+      const binaryBase = gitOutput(binaryRepo, ['rev-parse', 'main']);
+      writeFileSync(join(binaryRepo, 'binary.bin'), Buffer.from([0, 1, 2]));
+      const binaryLocal = commitAll(binaryRepo, 'test: binary exact input');
+      const binary = createRepoHygieneExactRangeArtifact(binaryRepo, {
+        baseOid: binaryBase,
+        remoteOid: null,
+        localOid: binaryLocal,
+      });
+      expect(binary.ok).toBe(false);
+      expect(binary).not.toHaveProperty('artifact');
+
+      const gitlinkRepo = makeBranchRepo();
+      const gitlinkBase = gitOutput(gitlinkRepo, ['rev-parse', 'main']);
+      git(gitlinkRepo, ['update-index', '--add', '--cacheinfo', `160000,${gitlinkBase},vendor/dependency`]);
+      git(gitlinkRepo, ['commit', '-m', 'test: gitlink exact input']);
+      const gitlinkLocal = gitOutput(gitlinkRepo, ['rev-parse', 'HEAD']);
+      const gitlink = createRepoHygieneExactRangeArtifact(gitlinkRepo, {
+        baseOid: gitlinkBase,
+        remoteOid: null,
+        localOid: gitlinkLocal,
+      });
+      expect(gitlink.ok).toBe(false);
+      expect(gitlink).not.toHaveProperty('artifact');
+    });
+
+    it('spends one cumulative change ledger across net and every parent edge', { timeout: 90_000 }, () => {
+      const repo = makeBranchRepo();
+      const baseOid = gitOutput(repo, ['rev-parse', 'main']);
+      const files = join(repo, 'many');
+      mkdirSync(files);
+      for (let index = 0; index < 1_366; index += 1) {
+        writeFileSync(join(files, `${index}.txt`), 'a\n');
+      }
+      commitAll(repo, 'test: first cumulative edge');
+      for (let index = 0; index < 1_366; index += 1) {
+        writeFileSync(join(files, `${index}.txt`), 'b\n');
+      }
+      const localOid = commitAll(repo, 'test: second cumulative edge');
+
+      const result = createRepoHygieneExactRangeArtifact(repo, {
+        baseOid,
+        remoteOid: null,
+        localOid,
+      });
+
+      expect(result).toEqual({
+        ok: false,
+        error: { code: 'repo-hygiene.exact-range.budget' },
+      });
+      expect(result).not.toHaveProperty('artifact');
+    });
+
+    it('bounds raw finding keys even when public projection coalesces them', { timeout: 90_000 }, () => {
+      const repo = makeBranchRepo();
+      const baseOid = gitOutput(repo, ['rev-parse', 'main']);
+      const content = 'console.log(eval("x")); spawn("x", [], { env: process.env, shell: true }); // @ts-ignore\n';
+      for (let index = 0; index < 684; index += 1) {
+        const directory = join(repo, 'src', 'many', String(index));
+        mkdirSync(directory, { recursive: true });
+        writeFileSync(join(directory, 'auth_info'), content);
+      }
+      const localOid = commitAll(repo, 'test: raw finding key budget');
+
+      const result = createRepoHygieneExactRangeArtifact(repo, {
+        baseOid,
+        remoteOid: null,
+        localOid,
+      });
+
+      expect(result).toEqual({
+        ok: false,
+        error: { code: 'repo-hygiene.exact-range.budget' },
+      });
+      expect(result).not.toHaveProperty('artifact');
+    });
+
+    it('rejects removal provenance and semantic receipt mutations after rebinding bytes', () => {
+      const repo = makeBranchRepo();
+      const baseOid = gitOutput(repo, ['rev-parse', 'main']);
+      writeFileSync(join(repo, 'safe.txt'), 'safe\n');
+      const localOid = commitAll(repo, 'test: semantic mutation');
+      const artifact = requireExactRangeArtifact(createRepoHygieneExactRangeArtifact(repo, {
+        baseOid,
+        remoteOid: null,
+        localOid,
+      }));
+      const payload = JSON.parse(Buffer.from(artifact.payloadBytes).toString('utf8')) as Record<string, any>;
+      const expected = expectedForArtifact(artifact, requireArtifactBindingFields(payload), { baseOid, remoteOid: null, localOid });
+
+      const removedBinding = structuredClone(payload);
+      removedBinding.commitBindings = [];
+      removedBinding.observedScope.commitCount = 0;
+      expect(validateRepoHygieneExactRangeArtifact(
+        artifactForPayload(removedBinding),
+        expected,
+      ).ok).toBe(false);
+
+      const badConservation = structuredClone(payload);
+      badConservation.budget.remaining.changeCount += 1;
+      expect(validateRepoHygieneExactRangeArtifact(
+        artifactForPayload(badConservation),
+        expected,
+      ).ok).toBe(false);
+
+      const falsePass = structuredClone(payload);
+      falsePass.outcome = 'block';
+      falsePass.exitCode = 1;
+      expect(validateRepoHygieneExactRangeArtifact(
+        artifactForPayload(falsePass),
+        expected,
+      ).ok).toBe(false);
+    });
+
+    it('returns the exact receipt shape and copy-isolated frozen validation objects', () => {
+      const repo = makeBranchRepo();
+      const baseOid = gitOutput(repo, ['rev-parse', 'main']);
+      writeFileSync(join(repo, 'safe.txt'), 'safe\n');
+      const localOid = commitAll(repo, 'test: exact shape');
+      const artifact = requireExactRangeArtifact(createRepoHygieneExactRangeArtifact(repo, {
+        baseOid,
+        remoteOid: null,
+        localOid,
+      }));
+      const payload = JSON.parse(Buffer.from(artifact.payloadBytes).toString('utf8')) as Record<string, any>;
+      expect(Object.keys(payload).sort()).toEqual([
+        'authorization', 'baseOid', 'budget', 'claimedScope', 'commitBindings',
+        'commitRangeDigest', 'completeness', 'createdAt', 'decisionOwner', 'detectorId',
+        'exitCode', 'findings', 'limitations', 'localOid', 'metadataDigest', 'nativeCauses',
+        'observedBlobOidDigest', 'observedPathDigest', 'observedPathDisclosure', 'observedScope', 'outcome', 'policyDigest',
+        'rangeStartOid', 'remoteOid', 'schemaVersion', 'toolDigest', 'validUntil',
+      ].sort());
+      const validated = validateRepoHygieneExactRangeArtifact(
+        artifact,
+        expectedForArtifact(artifact, requireArtifactBindingFields(payload), { baseOid, remoteOid: null, localOid }),
+      );
+      expect(validated.ok).toBe(true);
+      if (!validated.ok) return;
+      const originalOutcome = validated.receipt.outcome;
+      artifact.payloadBytes[0] ^= 1;
+      expect(validated.receipt.outcome).toBe(originalOutcome);
+      expect(Object.isFrozen(validated.receipt.commitBindings)).toBe(true);
+      expect(Object.isFrozen(validated.receipt.claimedScope)).toBe(true);
+    });
+
+    it('requires the independently frozen original byte binding for canonically rebound mutations', () => {
+      const repo = makeBranchRepo();
+      const baseOid = gitOutput(repo, ['rev-parse', 'main']);
+      writeFileSync(join(repo, 'first.txt'), 'safe\n');
+      commitAll(repo, 'test: nonterminal safe binding');
+      writeFileSync(join(repo, 'unsafe.txt'), `export const token = '${githubTokenFixture}';\n`);
+      const localOid = commitAll(repo, 'test: terminal unsafe binding');
+      const artifact = requireExactRangeArtifact(createRepoHygieneExactRangeArtifact(repo, {
+        baseOid,
+        remoteOid: null,
+        localOid,
+      }));
+      const payload = JSON.parse(Buffer.from(artifact.payloadBytes).toString('utf8')) as Record<string, any>;
+      const expected = expectedForArtifact(artifact, requireArtifactBindingFields(payload), { baseOid, remoteOid: null, localOid });
+
+      const removedNonterminal = structuredClone(payload);
+      const [removed] = removedNonterminal.commitBindings.splice(0, 1);
+      removedNonterminal.observedScope.commitCount -= 1;
+      removedNonterminal.observedScope.parentEdgeCount -= removed.parentOids.length;
+      const reconstructedRange = {
+        baseOid: removedNonterminal.baseOid,
+        remoteOid: removedNonterminal.remoteOid,
+        rangeStartOid: removedNonterminal.rangeStartOid,
+        localOid: removedNonterminal.localOid,
+        commits: removedNonterminal.commitBindings.map((binding: Record<string, any>) => ({
+          oid: binding.oid,
+          parentOids: binding.parentOids,
+          firstParentOid: binding.parentOids[0],
+        })),
+      };
+      removedNonterminal.commitRangeDigest = `sha256:${createHash('sha256')
+        .update(canonicalizeBoundaryRun(reconstructedRange)).digest('hex')}`;
+      removedNonterminal.metadataDigest = `sha256:${createHash('sha256')
+        .update(canonicalizeBoundaryRun(removedNonterminal.commitBindings)).digest('hex')}`;
+      expect(validateRepoHygieneExactRangeArtifact(
+        artifactForPayload(removedNonterminal),
+        expected,
+      ).ok).toBe(false);
+
+      const changedObservation = structuredClone(payload);
+      changedObservation.observedBlobOidDigest = `sha256:${'a'.repeat(64)}`;
+      expect(validateRepoHygieneExactRangeArtifact(
+        artifactForPayload(changedObservation),
+        expected,
+      ).ok).toBe(false);
+
+      const strippedBlock = structuredClone(payload);
+      strippedBlock.findings = [];
+      strippedBlock.nativeCauses = [];
+      strippedBlock.outcome = 'pass';
+      strippedBlock.exitCode = 0;
+      expect(validateRepoHygieneExactRangeArtifact(
+        artifactForPayload(strippedBlock),
+        expected,
+      ).ok).toBe(false);
+    });
+
+    it('exposes independently hashable policy bytes bound to exact guard-core bytes and the receipt', () => {
+      const canonicalProjection = (repoHygieneGuardModule as unknown as Record<string, unknown>)
+        .canonicalRepoHygienePolicyProjection;
+      expect(typeof canonicalProjection).toBe('function');
+      if (typeof canonicalProjection !== 'function') return;
+      const projectionText = canonicalProjection();
+      expect(typeof projectionText).toBe('string');
+      if (typeof projectionText !== 'string') return;
+
+      const independentPolicyDigest = `sha256:${createHash('sha256')
+        .update(Buffer.from(projectionText, 'utf8')).digest('hex')}`;
+      const projection = JSON.parse(projectionText) as Record<string, unknown>;
+      const guardCoreBytes = readFileSync(join(process.cwd(), 'scripts', 'lib', 'guard-core.ts'));
+      const independentGuardCoreDigest = `sha256:${createHash('sha256').update(guardCoreBytes).digest('hex')}`;
+      expect(projection.guardCoreDigest).toBe(independentGuardCoreDigest);
+      expect(currentRepoHygienePolicyDigest()).toBe(independentPolicyDigest);
+
+      const repo = makeBranchRepo();
+      const baseOid = gitOutput(repo, ['rev-parse', 'main']);
+      writeFileSync(join(repo, 'safe.txt'), 'safe\n');
+      const localOid = commitAll(repo, 'test: independent policy binding');
+      const payload = exactRangePayload(createRepoHygieneExactRangeArtifact(repo, {
+        baseOid,
+        remoteOid: null,
+        localOid,
+      }));
+      expect(payload.policyDigest).toBe(independentPolicyDigest);
+    });
+
+    it.each([
+      ['src-console-call', 'console.log("unsafe");'],
+      ['process-env-inheritance', 'spawn("x", [], { env: process.env });'],
+      ['child-process-shell-true', 'spawn("x", [], { shell: true });'],
+      ['dynamic-code-execution', 'eval("unsafe");'],
+      ['unbounded-suppression', '// @ts-ignore'],
+    ])('round-trips direct scan cause %s through the closed validator', (cause, line) => {
+      const repo = makeBranchRepo();
+      const baseOid = gitOutput(repo, ['rev-parse', 'main']);
+      mkdirSync(join(repo, 'src'), { recursive: true });
+      writeFileSync(join(repo, 'src', 'unsafe.ts'), `${line}\n`);
+      const localOid = commitAll(repo, `test: ${cause} receipt`);
+      const artifact = requireExactRangeArtifact(createRepoHygieneExactRangeArtifact(repo, {
+        baseOid,
+        remoteOid: null,
+        localOid,
+      }));
+      const payload = JSON.parse(Buffer.from(artifact.payloadBytes).toString('utf8')) as Record<string, any>;
+
+      expect(payload.nativeCauses).toContain(cause);
+      expect(validateRepoHygieneExactRangeArtifact(
+        artifact,
+        expectedForArtifact(artifact, requireArtifactBindingFields(payload), { baseOid, remoteOid: null, localOid }),
+      ).ok).toBe(true);
+    });
+
+    it('withholds sensitive repository paths and exposes no reversible path fingerprint', () => {
+      const repo = makeBranchRepo();
+      const baseOid = gitOutput(repo, ['rev-parse', 'main']);
+      const unsafePath = 'users/private-id/auth_info-secret-token.txt';
+      mkdirSync(join(repo, 'users', 'private-id'), { recursive: true });
+      writeFileSync(join(repo, unsafePath), `const token = '${githubTokenFixture}';\n`);
+      const localOid = commitAll(repo, 'test: sensitive path receipt');
+      const payload = exactRangePayload(createRepoHygieneExactRangeArtifact(repo, {
+        baseOid,
+        remoteOid: null,
+        localOid,
+      }));
+      const serialized = JSON.stringify(payload);
+      const rawPathHash = createHash('sha256').update(unsafePath).digest('hex');
+
+      expect(serialized).not.toContain(unsafePath);
+      expect(serialized).not.toContain(rawPathHash);
+      expect(payload.observedPathDisclosure).toBe('all-redacted');
+      expect(payload.observedPathDigest).toMatch(/^sha256:[0-9a-f]{64}$/);
+      expect(payload.observedPathDigest).toBe(`sha256:${createHash('sha256')
+        .update(canonicalizeBoundaryRun({
+          schemaVersion: 1,
+          disclosure: 'all-redacted',
+          count: (payload.observedScope as { observedPathCount: number }).observedPathCount,
+        })).digest('hex')}`);
+      expect((payload.findings as Array<Record<string, unknown>>)
+        .every((finding) => finding.path === null)).toBe(true);
+    });
+
+    it('discloses every unavailable assurance family in static limitations', () => {
+      const repo = makeBranchRepo();
+      const baseOid = gitOutput(repo, ['rev-parse', 'main']);
+      writeFileSync(join(repo, 'safe.txt'), 'safe\n');
+      const localOid = commitAll(repo, 'test: limitation contract');
+      const payload = exactRangePayload(createRepoHygieneExactRangeArtifact(repo, {
+        baseOid,
+        remoteOid: null,
+        localOid,
+      }));
+      expect(payload.limitations).toEqual([
+        'aggregate-authorization-unavailable',
+        'changed-content-only',
+        'executor-platform-unavailable',
+        'finding-fingerprint-unavailable',
+        'precondition-receipt-unavailable',
+        'producer-authentication-unavailable',
+        'report-only',
+        'terminal-attempt-process-group-unavailable',
+      ]);
+    });
+
+    it('scans unsafe metadata before a later safe tip and accounts all six budget fields', () => {
+      const repo = makeBranchRepo();
+      const baseOid = gitOutput(repo, ['rev-parse', 'main']);
+      writeFileSync(join(repo, 'README.md'), '# fixture\nfirst\n');
+      git(repo, ['add', 'README.md']);
+      execFileSync('git', [
+        '-c', 'user.name=WhatSoup Test',
+        '-c', 'user.email=test@example.invalid',
+        'commit', '-m', 'test: unsafe metadata', '-m', 'Co-Authored-By: Example <example@example.invalid>',
+      ], { cwd: repo, env: cleanGitEnv(), stdio: 'ignore' });
+      const unsafeCommitOid = gitOutput(repo, ['rev-parse', 'HEAD']);
+      writeFileSync(join(repo, 'tip.txt'), 'safe tip\n');
+      const localOid = commitAll(repo, 'test: later safe tip');
+      const payload = exactRangePayload(createRepoHygieneExactRangeArtifact(repo, {
+        baseOid,
+        remoteOid: null,
+        localOid,
+      })) as Record<string, any>;
+
+      expect(payload.nativeCauses).toEqual([
+        'commit-coauthor-trailer',
+        'personal-email',
+        'placeholder-commit-author',
+      ]);
+      const budgetKeys = [
+        'addedLineCount', 'addedTextBytes', 'changeCount',
+        'patchBytes', 'sourceBlobBytes', 'sourceLineCount',
+      ];
+      expect(Object.keys(payload.budget.limit).sort()).toEqual(budgetKeys);
+      for (const key of budgetKeys) {
+        expect(payload.budget.consumed[key], key).toBeGreaterThan(0);
+        expect(payload.budget.consumed[key] + payload.budget.remaining[key])
+          .toBe(payload.budget.limit[key]);
+      }
+      const metadataFindings = payload.findings.filter(
+        (finding: Record<string, unknown>) => finding.observationKind === 'commit-metadata',
+      );
+      expect(metadataFindings).not.toHaveLength(0);
+      expect(metadataFindings.every(
+        (finding: Record<string, unknown>) => finding.commitOid === unsafeCommitOid,
+      )).toBe(true);
+      expect(metadataFindings.every(
+        (finding: Record<string, unknown>) => finding.commitOid !== localOid,
+      )).toBe(true);
+    });
+
+    it('finds second-parent-only transient secret and artifact evidence', () => {
+      const repo = makeBranchRepo();
+      const baseOid = gitOutput(repo, ['rev-parse', 'main']);
+      writeFileSync(join(repo, 'feature.txt'), 'feature\n');
+      commitAll(repo, 'test: first parent safe');
+      git(repo, ['checkout', '-b', 'side', 'main']);
+      mkdirSync(join(repo, 'src'), { recursive: true });
+      writeFileSync(join(repo, 'src', 'side.ts'), 'WEBHOOK_SECRET=a3f1c9d2e84b076f5a192c3e7d408b1f\n');
+      writeFileSync(join(repo, '.env.local'), 'fixture\n');
+      commitAll(repo, 'test: second parent transient evidence');
+      git(repo, ['rm', 'src/side.ts', '.env.local']);
+      commitAll(repo, 'test: second parent removes evidence');
+      git(repo, ['checkout', 'feature']);
+      git(repo, ['merge', 'side', '--no-edit']);
+      const localOid = gitOutput(repo, ['rev-parse', 'HEAD']);
+
+      const payload = exactRangePayload(createRepoHygieneExactRangeArtifact(repo, {
+        baseOid,
+        remoteOid: null,
+        localOid,
+      }));
+      expect(payload.nativeCauses).toEqual([
+        'branch-history-sensitive-artifact',
+        'secret-assignment',
+      ]);
+      expect((payload.findings as Array<Record<string, unknown>>)
+        .every((finding) => String(finding.observationKind).startsWith('history-'))).toBe(true);
+      const commitBindings = payload.commitBindings as Array<{ parentOids: string[] }>;
+      const expectedParentEdgeCount = commitBindings.reduce(
+        (count, binding) => count + binding.parentOids.length,
+        0,
+      );
+      expect(commitBindings.some((binding) => binding.parentOids.length >= 2)).toBe(true);
+      expect(expectedParentEdgeCount).toBeGreaterThanOrEqual(2);
+      expect((payload.observedScope as { parentEdgeCount: number }).parentEdgeCount)
+        .toBe(expectedParentEdgeCount);
+    });
+
+    it('blocks a new history-only neighbor after suppressing byte-identical base re-exposure', () => {
+      const repo = makeBranchRepo();
+      const baseOid = gitOutput(repo, ['rev-parse', 'main']);
+      writeFileSync(join(repo, 'feature.txt'), 'feature\n');
+      commitAll(repo, 'test: feature before history-only neighbor');
+
+      git(repo, ['checkout', 'main']);
+      mkdirSync(join(repo, 'tests', 'drills'), { recursive: true });
+      writeFileSync(
+        join(repo, 'tests', 'drills', 'base.sh'),
+        'WEBHOOK_SECRET=a3f1c9d2e84b076f5a192c3e7d408b1f\r\n',
+      );
+      const remoteOid = commitAll(repo, 'test: base sentinel for history-only neighbor');
+      git(repo, ['checkout', 'feature']);
+      git(repo, ['merge', 'main', '--no-edit']);
+
+      mkdirSync(join(repo, 'src'), { recursive: true });
+      writeFileSync(
+        join(repo, 'src', 'transient.ts'),
+        `export const token = '${githubTokenFixture}';\n`,
+      );
+      commitAll(repo, 'test: add history-only neighbor');
+      git(repo, ['rm', 'src/transient.ts']);
+      const localOid = commitAll(repo, 'test: remove history-only neighbor');
+
+      const payload = exactRangePayload(createRepoHygieneExactRangeArtifact(repo, {
+        baseOid,
+        remoteOid,
+        localOid,
+      }));
+      expect(payload.outcome).toBe('block');
+      expect(payload.nativeCauses).toEqual(['github-token']);
+      expect((payload.findings as Array<Record<string, unknown>>)).toEqual([
+        expect.objectContaining({
+          cause: 'github-token',
+          observationKind: 'history-added-line',
+        }),
+      ]);
+    });
+
+    it('does not suppress byte-identical history evidence from a different base path', () => {
+      const repo = makeBranchRepo();
+      mkdirSync(join(repo, 'base'), { recursive: true });
+      const unsafeContent = 'WEBHOOK_SECRET=a3f1c9d2e84b076f5a192c3e7d408b1f\n';
+      writeFileSync(join(repo, 'base', 'path-a.sh'), unsafeContent);
+      const baseOid = commitAll(repo, 'test: unsafe text at base path A');
+
+      mkdirSync(join(repo, 'outgoing'), { recursive: true });
+      const safePrefix = Array.from({ length: 10 }, (_, index) => `safe header ${index}`).join('\n');
+      writeFileSync(join(repo, 'outgoing', 'path-b.sh'), `${safePrefix}\n${unsafeContent}`);
+      const unsafeCommitOid = commitAll(repo, 'test: same unsafe text at outgoing path B');
+      git(repo, ['rm', 'outgoing/path-b.sh']);
+      const localOid = commitAll(repo, 'test: remove outgoing path B');
+
+      const payload = exactRangePayload(createRepoHygieneExactRangeArtifact(repo, {
+        baseOid,
+        remoteOid: null,
+        localOid,
+      }));
+      expect(payload.outcome).toBe('block');
+      expect(payload.nativeCauses).toEqual(['secret-assignment']);
+      expect(payload.findings).toEqual([
+        expect.objectContaining({
+          cause: 'secret-assignment',
+          observationKind: 'history-added-line',
+          commitOid: unsafeCommitOid,
+        }),
+      ]);
+    });
+
+    it('does not promote transient focused-test or console findings into history causes', () => {
+      const repo = makeBranchRepo();
+      const baseOid = gitOutput(repo, ['rev-parse', 'main']);
+      mkdirSync(join(repo, 'src'), { recursive: true });
+      mkdirSync(join(repo, 'tests'), { recursive: true });
+      writeFileSync(join(repo, 'src', 'transient.ts'), 'console.log("temporary");\n');
+      writeFileSync(join(repo, 'tests', 'transient.test.ts'), 'it.only("temporary", () => {});\n');
+      commitAll(repo, 'test: transient non-secret hygiene');
+      git(repo, ['rm', 'src/transient.ts', 'tests/transient.test.ts']);
+      const localOid = commitAll(repo, 'test: remove transient non-secret hygiene');
+
+      const payload = exactRangePayload(createRepoHygieneExactRangeArtifact(repo, {
+        baseOid,
+        remoteOid: null,
+        localOid,
+      }));
+      expect(payload.outcome).toBe('pass');
+      expect(payload.nativeCauses).toEqual([]);
+    });
+
+    it('prefers exact net findings over duplicate history secret and artifact observations', () => {
+      const repo = makeBranchRepo();
+      const baseOid = gitOutput(repo, ['rev-parse', 'main']);
+      writeFileSync(join(repo, '.env.local'), `const token = '${githubTokenFixture}';\n`);
+      const localOid = commitAll(repo, 'test: final duplicate evidence');
+
+      const payload = exactRangePayload(createRepoHygieneExactRangeArtifact(repo, {
+        baseOid,
+        remoteOid: null,
+        localOid,
+      }));
+      const findings = payload.findings as Array<Record<string, unknown>>;
+      expect(findings.filter((finding) => finding.cause === 'github-token')).toHaveLength(1);
+      expect(findings.filter((finding) => finding.cause === 'branch-sensitive-artifact')).toHaveLength(1);
+      expect(findings.filter((finding) => String(finding.observationKind).startsWith('history-')))
+        .toHaveLength(0);
+    });
+
+    it('coalesces identical public findings from distinct exact paths without losing the block', () => {
+      const repo = makeBranchRepo();
+      const baseOid = gitOutput(repo, ['rev-parse', 'main']);
+      mkdirSync(join(repo, 'src'), { recursive: true });
+      const unsafeContent = `export const token = '${githubTokenFixture}';\n`;
+      writeFileSync(join(repo, 'src', 'first.ts'), unsafeContent);
+      writeFileSync(join(repo, 'src', 'second.ts'), unsafeContent);
+      const localOid = commitAll(repo, 'test: identical projected findings');
+      const artifact = requireExactRangeArtifact(createRepoHygieneExactRangeArtifact(repo, {
+        baseOid,
+        remoteOid: null,
+        localOid,
+      }));
+      const payload = JSON.parse(Buffer.from(artifact.payloadBytes).toString('utf8')) as Record<string, any>;
+
+      expect(payload.outcome).toBe('block');
+      expect(payload.nativeCauses).toEqual(['github-token']);
+      expect(payload.findings).toHaveLength(1);
+      expect(payload.observedScope.observedPathCount).toBe(2);
+      expect(validateRepoHygieneExactRangeArtifact(
+        artifact,
+        expectedForArtifact(artifact, requireArtifactBindingFields(payload), { baseOid, remoteOid: null, localOid }),
+      ).ok).toBe(true);
+    });
+
+    it('rejects unknown native causes and unsafe structural paths after trusted rebinding', () => {
+      const repo = makeBranchRepo();
+      const baseOid = gitOutput(repo, ['rev-parse', 'main']);
+      writeFileSync(join(repo, 'unsafe.ts'), `export const token = '${githubTokenFixture}';\n`);
+      const localOid = commitAll(repo, 'test: semantic receipt validation');
+      const original = requireExactRangeArtifact(createRepoHygieneExactRangeArtifact(repo, {
+        baseOid,
+        remoteOid: null,
+        localOid,
+      }));
+      const payload = JSON.parse(Buffer.from(original.payloadBytes).toString('utf8')) as Record<string, any>;
+      expect(() => requireArtifactBindingFields({ ...payload, toolDigest: null })).toThrow(/binding digest/i);
+
+      const unknownCause = structuredClone(payload);
+      unknownCause.findings[0].cause = 'injected-unknown-cause';
+      unknownCause.nativeCauses = ['injected-unknown-cause'];
+      const unknownArtifact = artifactForPayload(unknownCause);
+      expect(validateRepoHygieneExactRangeArtifact(
+        unknownArtifact,
+        expectedForArtifact(unknownArtifact, requireArtifactBindingFields(unknownCause), { baseOid, remoteOid: null, localOid }),
+      ).ok).toBe(false);
+
+      const unsafePath = structuredClone(payload);
+      unsafePath.findings[0].path = '../private';
+      const unsafeArtifact = artifactForPayload(unsafePath);
+      expect(validateRepoHygieneExactRangeArtifact(
+        unsafeArtifact,
+        expectedForArtifact(unsafeArtifact, requireArtifactBindingFields(unsafePath), { baseOid, remoteOid: null, localOid }),
+      ).ok).toBe(false);
+    });
+
+    it('keeps current branch-diff and argument entrypoints unchanged', () => {
+      const repo = makeBranchRepo();
+      writeFileSync(join(repo, 'safe.txt'), 'safe\n');
+      commitAll(repo, 'test: legacy entrypoint');
+
+      expect(scanBranchDiff(repo, 'main')).toEqual([]);
+      expect(parseArgs(['--branch-diff', '--base', 'main'])).toEqual({
+        mode: 'branch-diff',
+        baseRef: 'main',
+        help: false,
+      });
+    });
   });
 
   it('parses scan-history mode with optional depth and rejects bad depth', () => {
