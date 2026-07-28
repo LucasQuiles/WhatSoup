@@ -191,6 +191,10 @@ const PATH_RULES: ReadonlyArray<{ test: (p: string) => boolean; drift: DriftClas
       p === 'stryker.conf.json' ||
       p.startsWith('.claude/') ||
       p.startsWith('.arc/') ||
+      // The canonical control inventory: which controls exist, their stages, trust
+      // classes, failure policies, and remediation. Editing it changes how every
+      // downstream verdict is reached, so it is policy drift, not data drift.
+      p.startsWith('controls/') ||
       p.startsWith('tools/whatsoup_guard/'),
   },
   {
