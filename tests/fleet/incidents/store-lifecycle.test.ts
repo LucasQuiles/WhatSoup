@@ -59,4 +59,20 @@ describe('condition_observed lifecycle', () => {
     if (result.outcome !== 'accepted') return;
     expect(result.receipt.disposition).toBe('stored_stale_observation');
   });
+
+  it('supersedes the prior open episode when a newer occurrence opens', () => {
+    const first = store.acceptSignal(observed('sig-1', 'occ-1', 1), PRODUCER, NOW);
+    const second = store.acceptSignal(observed('sig-9', 'occ-2', 1), PRODUCER, NOW);
+    expect(second.outcome).toBe('accepted');
+    if (first.outcome !== 'accepted' || second.outcome !== 'accepted') return;
+
+    expect(second.receipt.disposition).toBe('incident_opened');
+    expect(second.receipt.incidentId).not.toBe(first.receipt.incidentId);
+
+    const prior = store.getIncident(first.receipt.incidentId as number);
+    expect(prior?.conditionState).toBe('superseded');
+    const priorTransitions = store.listTransitions(first.receipt.incidentId as number);
+    expect(priorTransitions.map((t) => t.toState)).toEqual(['open', 'superseded']);
+    expect(priorTransitions[1]?.reasonCode).toBe('newer_occurrence');
+  });
 });

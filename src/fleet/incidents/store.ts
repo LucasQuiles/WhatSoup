@@ -65,6 +65,20 @@ export class IncidentStore {
     this.db.close();
   }
 
+  getIncident(incidentId: number): IncidentProjection | null {
+    const row = this.db
+      .prepare(`SELECT * FROM incidents WHERE incident_id = ?`)
+      .get(incidentId) as Record<string, unknown> | undefined;
+    return row ? projectIncident(row) : null;
+  }
+
+  listTransitions(incidentId: number): TransitionRecord[] {
+    const rows = this.db
+      .prepare(`SELECT * FROM transitions WHERE incident_id = ? ORDER BY transition_id`)
+      .all(incidentId) as Array<Record<string, unknown>>;
+    return rows.map(projectTransition);
+  }
+
   acceptSignal(rawBody: string, producer: ProducerContext, now: Date): AcceptResult {
     const payloadDigest = `sha256:${createHash('sha256').update(rawBody, 'utf-8').digest('hex')}`;
 
@@ -226,6 +240,33 @@ export class IncidentStore {
       return { disposition: 'incident_updated', incidentId: episode.incident_id, transitionId: null };
     }
 
+    const openOnKey = this.db
+      .prepare(
+        `SELECT incident_id FROM incidents
+          WHERE producer_domain_id = ? AND subject = ? AND condition_class = ?
+            AND condition_state = 'open' AND occurrence_id != ?`,
+      )
+      .all(producer.producerDomainId, envelope.subject, conditionClass, occurrenceId) as Array<{
+      incident_id: number;
+    }>;
+
+    for (const stale of openOnKey) {
+      this.db
+        .prepare(
+          `UPDATE incidents
+              SET condition_state = 'superseded', projection_version = projection_version + 1
+            WHERE incident_id = ?`,
+        )
+        .run(stale.incident_id);
+      this.db
+        .prepare(
+          `INSERT INTO transitions (
+             incident_id, from_state, to_state, actor_type, cause_event_id, reason_code, created_at)
+           VALUES (?, 'open', 'superseded', 'evaluator', ?, 'newer_occurrence', ?)`,
+        )
+        .run(stale.incident_id, eventId, receivedAt);
+    }
+
     const openedIncident = this.db
       .prepare(
         `INSERT INTO incidents (
@@ -259,6 +300,60 @@ export class IncidentStore {
       transitionId: Number(transition.lastInsertRowid),
     };
   }
+}
+
+export interface IncidentProjection {
+  incidentId: number;
+  producerDomainId: string;
+  subject: string;
+  conditionClass: string;
+  occurrenceId: string;
+  conditionState: 'open' | 'resolved' | 'superseded' | 'orphaned' | 'closed_by_override';
+  severity: string | null;
+  openedEventId: number;
+  lastObservedAt: string;
+  lastOccurrenceSeq: number;
+  projectionVersion: number;
+}
+
+export interface TransitionRecord {
+  transitionId: number;
+  incidentId: number;
+  fromState: string | null;
+  toState: string;
+  actorType: 'evaluator' | 'operator' | 'override';
+  causeEventId: number | null;
+  reasonCode: string;
+  createdAt: string;
+}
+
+function projectIncident(row: Record<string, unknown>): IncidentProjection {
+  return {
+    incidentId: row.incident_id as number,
+    producerDomainId: row.producer_domain_id as string,
+    subject: row.subject as string,
+    conditionClass: row.condition_class as string,
+    occurrenceId: row.occurrence_id as string,
+    conditionState: row.condition_state as IncidentProjection['conditionState'],
+    severity: (row.severity as string | null) ?? null,
+    openedEventId: row.opened_event_id as number,
+    lastObservedAt: row.last_observed_at as string,
+    lastOccurrenceSeq: row.last_occurrence_seq as number,
+    projectionVersion: row.projection_version as number,
+  };
+}
+
+function projectTransition(row: Record<string, unknown>): TransitionRecord {
+  return {
+    transitionId: row.transition_id as number,
+    incidentId: row.incident_id as number,
+    fromState: (row.from_state as string | null) ?? null,
+    toState: row.to_state as string,
+    actorType: row.actor_type as TransitionRecord['actorType'],
+    causeEventId: (row.cause_event_id as number | null) ?? null,
+    reasonCode: row.reason_code as string,
+    createdAt: row.created_at as string,
+  };
 }
 
 function extractSignalId(rawBody: string): string | null {
