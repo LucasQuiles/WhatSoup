@@ -4,15 +4,15 @@
 
 Internal publication roots covered by the guard: `docs/runbooks/`, `docs/sdlc/`, `docs/superpowers/`, `docs/plans/`, `docs/cutover/`, `docs/research/`, `docs/triage/`, `docs/specs/` (selected), `docs/work-index*`, `docs/current-program.md`, `docs/handoff-*.md`, `HANDOFF-*.md`, `docs/project-status-*.md`, `docs/audit-*.md`, `tmp/`.
 
-**Total classification rows:** 138
+**Total classification rows:** 139
 
 | Classification | Count |
 |---|---:|
 | PUBLIC | 3 |
-| PRIVATE-ARCHIVE | 135 |
+| PRIVATE-ARCHIVE | 136 |
 | SANITIZE | 0 |
 | DELETE | 0 |
-| Total | 138 |
+| Total | 139 |
 
 | Path | Classification | Rationale |
 |---|---|---|
@@ -109,6 +109,7 @@ Internal publication roots covered by the guard: `docs/runbooks/`, `docs/sdlc/`,
 | `docs/superpowers/plans/2026-07-20-cicd-workflow-portability.md` | PRIVATE-ARCHIVE | Internal planning or operational documentation; retained in the repository but excluded from public publication by default. |
 | `docs/superpowers/plans/2026-07-23-agent-reliability-remediation-implementation.md` | PRIVATE-ARCHIVE | Internal agent reliability and host-remediation implementation plan; retained in the repository but excluded from public publication by default. |
 | `docs/superpowers/plans/2026-07-26-open-issue-triage-tooling.md` | PRIVATE-ARCHIVE | Internal issue-triage tooling implementation plan; retained in the repository but excluded from public publication by default. |
+| `docs/superpowers/plans/2026-07-28-incident-ingestion-surface.md` | PRIVATE-ARCHIVE | Internal Plan 2 ingestion-surface implementation plan; retained in the repository but excluded from public publication by default. |
 | `docs/superpowers/plans/2026-07-28-incident-store-core.md` | PRIVATE-ARCHIVE | Internal incident-store implementation plan (Plan 1 of the incident control plane series); sanitized fixture identifiers only; retained in the repository but excluded from public publication by default. |
 | `docs/superpowers/reviews/2026-04-07-anti-echo-review-handoff.md` | PRIVATE-ARCHIVE | Internal planning or operational documentation; retained in the repository but excluded from public publication by default. |
 | `docs/superpowers/reviews/2026-05-31-bot-errors-tool-call-audit.md` | PRIVATE-ARCHIVE | Internal planning or operational documentation; retained in the repository but excluded from public publication by default. |

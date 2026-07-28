@@ -18,15 +18,15 @@ The **Inconsistencies** section lists missing or stale index entries compared wi
 scoped markdown files currently on disk.
 
 **Repo:** `WhatSoup`
-**Total entries:** 89
+**Total entries:** 90
 
 ## Totals
 
 | Dimension | Breakdown |
 |---|---|
-| Kind | handoff=8, plan=44, review=4, spec=32, state=1 |
-| Status | active=19, closed=4, completed=33, deferred=7, pending=15, unknown=11 |
-| Status source | body-marker=82, fallback=6, state-md-status=1 |
+| Kind | handoff=8, plan=45, review=4, spec=32, state=1 |
+| Status | active=19, closed=4, completed=33, deferred=7, pending=15, unknown=12 |
+| Status source | body-marker=82, fallback=7, state-md-status=1 |
 
 ## Inconsistencies
 
@@ -58,7 +58,7 @@ scoped markdown files currently on disk.
 | `docs/superpowers/specs/provider-event-lifecycle/requirements.md` | spec | requirements | body-marker |
 | `docs/superpowers/specs/provider-event-lifecycle/tasks.md` | spec | tasks | body-marker |
 
-### Unknown-status — triage needed (11)
+### Unknown-status — triage needed (12)
 
 | Path | Kind | Topic | Last Mod |
 |------|------|-------|----------|
@@ -67,6 +67,7 @@ scoped markdown files currently on disk.
 | `docs/superpowers/plans/2026-07-17-boundary-validator-ci-refactor.md` | plan | boundary-validator-ci-refactor | 2026-07-17 |
 | `docs/superpowers/plans/2026-07-17-macos-credential-durability.md` | plan | macos-credential-durability | 2026-07-17 |
 | `docs/superpowers/plans/2026-07-23-agent-reliability-remediation-implementation.md` | plan | agent-reliability-remediation-implementation | 2026-07-27 |
+| `docs/superpowers/plans/2026-07-28-incident-ingestion-surface.md` | plan | incident-ingestion-surface | 2026-07-28 |
 | `docs/superpowers/plans/2026-07-28-incident-store-core.md` | plan | incident-store-core | 2026-07-28 |
 | `docs/superpowers/specs/2026-07-11-turn-lifecycle-fitness-extraction-design.md` | spec | turn-lifecycle-fitness-extraction-design | 2026-07-11 |
 | `docs/superpowers/specs/2026-07-17-macos-credential-durability-design.md` | spec | macos-credential-durability-design | 2026-07-17 |
@@ -127,7 +128,7 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 | `docs/superpowers/handoffs/2026-07-16-boundary-core-history-mining.md` | handoff | pending | body-marker | boundary-core-history-mining | 2026-07-16 |  |
 | `docs/superpowers/handoffs/2026-07-28-incident-control-plane-finder-report.md` | handoff | unknown | fallback | incident-control-plane-finder-report | 2026-07-28 |  |
 
-### docs/superpowers/plans  _(44 entries)_
+### docs/superpowers/plans  _(45 entries)_
 
 | Path | Kind | Status | Source | Topic | Last Mod | Supersedes |
 |------|------|--------|--------|-------|----------|------------|
@@ -174,6 +175,7 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 | `docs/superpowers/plans/2026-07-20-cicd-workflow-portability.md` | plan | pending | body-marker | cicd-workflow-portability | 2026-07-28 |  |
 | `docs/superpowers/plans/2026-07-23-agent-reliability-remediation-implementation.md` | plan | unknown | fallback | agent-reliability-remediation-implementation | 2026-07-27 |  |
 | `docs/superpowers/plans/2026-07-26-open-issue-triage-tooling.md` | plan | active | body-marker | open-issue-triage-tooling | 2026-07-27 |  |
+| `docs/superpowers/plans/2026-07-28-incident-ingestion-surface.md` | plan | unknown | fallback | incident-ingestion-surface | 2026-07-28 |  |
 | `docs/superpowers/plans/2026-07-28-incident-store-core.md` | plan | unknown | fallback | incident-store-core | 2026-07-28 |  |
 
 ### docs/superpowers/reviews  _(4 entries)_
@@ -235,4 +237,4 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 ---
 
 - Derived from `docs/work-index.json`
-- Generated at 2026-07-28T18:27:42Z from commit `b7a4906a71f121e176448797a3137e76c5be02fc`
+- Generated at 2026-07-28T18:29:59Z from commit `68b45c89ce6972d2ace721fdfaee0d547b506e28`
