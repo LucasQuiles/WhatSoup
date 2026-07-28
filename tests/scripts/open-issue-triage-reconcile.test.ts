@@ -101,7 +101,7 @@ function pullRequest(updatedAt = "2026-07-26T12:00:00Z"): RefreshPullRequest {
   return {
     number: 88,
     title: "Registry publication",
-    body: "Tracks issue #101.",
+    referenceNumbers: [101],
     url: "https://github.com/LucasQuiles/WhatSoup/pull/88",
     updatedAt,
     disposition: "open",
@@ -156,7 +156,7 @@ describe("open issue pull-request overlap reconciliation", () => {
     pull.number = 90;
     pull.title = "Draft PRs #2520 through #2522";
     pull.url = "https://github.com/LucasQuiles/WhatSoup/pull/90";
-    pull.body = "Foreign: https://github.com/Other/Repo/issues/2521";
+    pull.referenceNumbers = [2520, 2521, 2522];
     pull.changedPaths = ["src/shared.ts"];
 
     expect(
@@ -220,7 +220,7 @@ describe("open issue pull-request overlap reconciliation", () => {
     const issue = issueRecord();
     issue.pull_request_overlaps[0]!.assessment = "partial";
     const pull = pullRequest();
-    pull.body = "";
+    pull.referenceNumbers = [];
     expect(() =>
       reconcilePullRequestOverlaps({
         issue,
@@ -745,7 +745,7 @@ describe("complete registry reconciliation", () => {
       labels: ["bug"],
     };
     const pull = pullRequest("2026-07-26T13:00:00Z");
-    pull.body = "";
+    pull.referenceNumbers = [];
     const result = reconcileRegistry({
       oldRegistry,
       reviewBatch: {
