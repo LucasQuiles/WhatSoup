@@ -121,6 +121,149 @@ describe('PineconeMemory', () => {
   // ── search ────────────────────────────────────────────────────────────────
 
   describe('search', () => {
+    it('binds a caller signal to transport fetch without leaking it to another operation', async () => {
+      const MockPinecone = vi.mocked(Pinecone);
+      const clientConfig = MockPinecone.mock.calls[0][0] as {
+        fetchApi?: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
+      };
+      expect(clientConfig.fetchApi).toBeTypeOf('function');
+
+      const observedSignals: Array<AbortSignal | null | undefined> = [];
+      const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(
+        async (_input, init) => {
+          observedSignals.push(init?.signal);
+          return new Response('{}', { status: 200 });
+        },
+      );
+      mockSearchRecords
+        .mockImplementationOnce(async () => {
+          await clientConfig.fetchApi?.('https://example.invalid/search');
+          return { result: { hits: [] } };
+        })
+        .mockImplementationOnce(async () => {
+          await clientConfig.fetchApi?.('https://example.invalid/search');
+          return { result: { hits: [] } };
+        });
+
+      const caller = new AbortController();
+      await memory.searchDetailed('first', {}, 1, undefined, caller.signal);
+      expect(observedSignals[0]?.aborted).toBe(false);
+      caller.abort();
+      expect(observedSignals[0]?.aborted).toBe(true);
+
+      await memory.searchDetailed('second', {}, 1);
+      expect(observedSignals[1]).toBeUndefined();
+      fetchSpy.mockRestore();
+    });
+
+    it('retries project-guard initialization after a cancelled first check', async () => {
+      const mutableConfig = configModule.config as unknown as Record<string, unknown>;
+      const previousMemory = mutableConfig.memory;
+      const previousBotName = mutableConfig.botName;
+      mutableConfig.botName = 'guarded-instance';
+      mutableConfig.memory = {
+        pinecone: {
+          apiKeyEnv: 'PINECONE_API_KEY',
+          expectedHostSuffix: '.pinecone.io',
+        },
+      };
+      const listIndexes = vi.fn()
+        .mockRejectedValueOnce(new DOMException('cancelled', 'AbortError'))
+        .mockResolvedValueOnce({
+          indexes: [{
+            name: 'test-index',
+            host: 'test-index.svc.pinecone.io',
+          }],
+        });
+      const MockPinecone = vi.mocked(Pinecone);
+      MockPinecone.mockImplementation(function (this: Record<string, unknown>) {
+        this.index = vi.fn().mockReturnValue(mockIndex);
+        this.inference = { rerank: mockRerank };
+        this.listIndexes = listIndexes;
+      } as unknown as () => InstanceType<typeof Pinecone>);
+      memory = new PineconeMemory();
+      mockSearchRecords.mockResolvedValueOnce({ result: { hits: [] } });
+
+      try {
+        await expect(memory.searchDetailed('first', {}, 1)).rejects.toThrow();
+        await expect(memory.searchDetailed('second', {}, 1)).resolves.toMatchObject({
+          status: 'ok',
+          results: [],
+        });
+        expect(listIndexes).toHaveBeenCalledTimes(2);
+      } finally {
+        mockSearchRecords.mockReset();
+        mutableConfig.memory = previousMemory;
+        if (previousBotName === undefined) delete mutableConfig.botName;
+        else mutableConfig.botName = previousBotName;
+      }
+    });
+
+    it('times out and replaces a project guard whose transport ignores abort', async () => {
+      const nativeSetTimeout = globalThis.setTimeout;
+      let guardTimeouts = 0;
+      const timeoutSpy = vi.spyOn(globalThis, 'setTimeout').mockImplementation(
+        ((callback: (...args: unknown[]) => void, delay?: number, ...args: unknown[]) => {
+          if (delay === 30_000 && guardTimeouts++ === 0) {
+            queueMicrotask(() => callback(...args));
+            return 1 as unknown as ReturnType<typeof setTimeout>;
+          }
+          return nativeSetTimeout(callback, delay, ...args);
+        }) as typeof setTimeout,
+      );
+      const mutableConfig = configModule.config as unknown as Record<string, unknown>;
+      const previousMemory = mutableConfig.memory;
+      const previousBotName = mutableConfig.botName;
+      mutableConfig.botName = 'guarded-instance';
+      mutableConfig.memory = {
+        pinecone: {
+          apiKeyEnv: 'PINECONE_API_KEY',
+          expectedHostSuffix: '.pinecone.io',
+        },
+      };
+      const listIndexes = vi.fn()
+        .mockReturnValueOnce(new Promise(() => {}))
+        .mockResolvedValueOnce({
+          indexes: [{
+            name: 'test-index',
+            host: 'test-index.svc.pinecone.io',
+          }],
+        });
+      const MockPinecone = vi.mocked(Pinecone);
+      MockPinecone.mockImplementation(function (this: Record<string, unknown>) {
+        this.index = vi.fn().mockReturnValue(mockIndex);
+        this.inference = { rerank: mockRerank };
+        this.listIndexes = listIndexes;
+      } as unknown as () => InstanceType<typeof Pinecone>);
+      memory = new PineconeMemory();
+      mockSearchRecords.mockResolvedValueOnce({ result: { hits: [] } });
+
+      try {
+        const first = memory.searchDetailed('first', {}, 1);
+        const firstOutcome = await Promise.race([
+          first.then(
+            () => 'resolved' as const,
+            () => 'rejected' as const,
+          ),
+          new Promise<'hung'>((resolve) => {
+            nativeSetTimeout(() => resolve('hung'), 50);
+          }),
+        ]);
+        expect(firstOutcome).toBe('rejected');
+        await expect(memory.searchDetailed('second', {}, 1)).resolves.toMatchObject({
+          status: 'ok',
+          results: [],
+        });
+        expect(listIndexes).toHaveBeenCalledTimes(2);
+      } finally {
+        mockSearchRecords.mockReset();
+        mutableConfig.memory = previousMemory;
+        if (previousBotName === undefined) delete mutableConfig.botName;
+        else mutableConfig.botName = previousBotName;
+        timeoutSpy.mockRestore();
+      }
+    });
+
     it('returns SearchResult array with correct mapping', async () => {
       mockSearchRecords.mockResolvedValueOnce({
         result: {

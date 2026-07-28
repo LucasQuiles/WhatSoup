@@ -9,6 +9,7 @@ export interface GenerateRequest {
   maxTokens: number;
   systemPrompt: string;
   messages: ChatMessage[];
+  signal?: AbortSignal;
 }
 
 export interface GenerateResponse {

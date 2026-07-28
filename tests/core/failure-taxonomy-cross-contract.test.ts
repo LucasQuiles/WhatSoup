@@ -25,6 +25,9 @@ import {
 import {
   MEMORY_OPERATION_FAILURE_CODES,
 } from '../../src/lib/memory-operation-telemetry.ts';
+import {
+  CONSOLIDATION_FAILURE_CODES,
+} from '../../src/core/memory-consolidation-contract.ts';
 
 const sorted = (values: Iterable<string>): string[] => [...values].sort();
 
@@ -65,6 +68,8 @@ describe('failure taxonomy cross-contract', () => {
       .toEqual(sorted(ADMISSION_REJECT_CLASSES));
     expect(sorted(registry.failureDomains.memoryOperationFailureCodes.values))
       .toEqual(sorted(MEMORY_OPERATION_FAILURE_CODES));
+    expect(sorted(registry.failureDomains.consolidationFailureCodes.values))
+      .toEqual(sorted(CONSOLIDATION_FAILURE_CODES));
   });
 
   it('covers and validates every terminal-attempt to inbound projection', () => {

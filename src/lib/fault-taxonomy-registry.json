@@ -109,6 +109,7 @@
         "transport_disconnected",
         "enrichment_stale",
         "enrichment_runtime_degraded",
+        "memory_consolidation_degraded",
         "connection_churn",
         "outbound_flood",
         "event_loop_starved",
@@ -197,6 +198,29 @@
       ],
       "owner": "src/lib/memory-operation-telemetry.ts",
       "test": "tests/runtimes/chat/memory/operation-telemetry.test.ts"
+    },
+    "consolidationFailureCodes": {
+      "values": [
+        "none",
+        "breaker_open",
+        "project_guard_failed",
+        "auth_failed",
+        "rate_limited",
+        "timeout",
+        "network_error",
+        "invalid_request",
+        "provider_unavailable",
+        "unknown",
+        "output_invalid",
+        "scope_invalid",
+        "write_failed",
+        "cancelled",
+        "already_running",
+        "restart_abandoned",
+        "observation_failed"
+      ],
+      "owner": "src/core/memory-consolidation-contract.ts",
+      "test": "tests/core/failure-taxonomy-cross-contract.test.ts"
     }
   },
   "terminalAttemptToInboundFailureClass": {

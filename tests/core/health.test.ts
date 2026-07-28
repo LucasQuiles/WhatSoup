@@ -270,6 +270,107 @@ describe('GET /health', () => {
     expect(generatedAt).toBeLessThanOrEqual(receivedAt);
   });
 
+  it('projects content-free consolidation failure health only to authenticated diagnostics', async () => {
+    const consolidationHealth = {
+      schema_version: 1 as const,
+      readable: true,
+      state: 'failed' as const,
+      mode: 'live' as const,
+      latest_status: 'failed' as const,
+      latest_stage: 'write' as const,
+      failure_code: 'network_error' as const,
+      retryable: true,
+      evidence_coverage: 'provider_error' as const,
+      latest_attempt_at: 1_785_240_000_000,
+      latest_success_at: null,
+      active_age_ms: null,
+      skipped_ticks: 2,
+      counters: {
+        recordsObserved: 3,
+        clustersAttempted: 1,
+        clustersCompleted: 0,
+        wouldPromote: 0,
+        writeAttempted: 1,
+        writeConfirmed: 0,
+        discarded: 0,
+        failed: 1,
+        skipped: 2,
+      },
+    };
+    const { server: server2, port: port2 } = await buildTestServer(makeDeps(db, {
+      getMemoryConsolidationHealth: () => consolidationHealth,
+    }));
+    try {
+      const diagnostic = await healthReq(port2);
+      expect(diagnostic.status).toBe(200);
+      const json = JSON.parse(diagnostic.body);
+      expect(json.status).toBe('degraded');
+      expect(json.degradation_causes).toContain('memory_consolidation_degraded');
+      expect(json.memory.consolidation).toEqual(consolidationHealth);
+
+      for (const forbidden of [
+        'private-memory-text',
+        'private-claim',
+        'private-source-id',
+        'private-chat-id',
+        'private-sender-id',
+        'private-model-output',
+        'private-raw-exception',
+        'private-content-hash',
+        'private-credential',
+      ]) {
+        expect(diagnostic.body).not.toContain(forbidden);
+      }
+
+      const publicResponse = await httpReq(port2, '/health', 'GET');
+      expect(JSON.parse(publicResponse.body)).not.toHaveProperty('memory');
+    } finally {
+      await new Promise<void>((resolve) => server2.close(() => resolve()));
+    }
+  });
+
+  it('degrades authenticated health when consolidation is enabled but has not started', async () => {
+    const consolidationHealth = {
+      schema_version: 1 as const,
+      readable: true,
+      state: 'not_started' as const,
+      mode: null,
+      latest_status: null,
+      latest_stage: null,
+      failure_code: 'none' as const,
+      retryable: false,
+      evidence_coverage: 'not_observed' as const,
+      latest_attempt_at: null,
+      latest_success_at: null,
+      active_age_ms: null,
+      skipped_ticks: 0,
+      counters: {
+        recordsObserved: 0,
+        clustersAttempted: 0,
+        clustersCompleted: 0,
+        wouldPromote: 0,
+        writeAttempted: 0,
+        writeConfirmed: 0,
+        discarded: 0,
+        failed: 0,
+        skipped: 0,
+      },
+    };
+    const { server: server2, port: port2 } = await buildTestServer(makeDeps(db, {
+      getMemoryConsolidationHealth: () => consolidationHealth,
+    }));
+    try {
+      const diagnostic = await healthReq(port2);
+      const json = JSON.parse(diagnostic.body);
+      expect(diagnostic.status).toBe(200);
+      expect(json.status).toBe('degraded');
+      expect(json.degradation_causes).toContain('memory_consolidation_degraded');
+      expect(json.memory.consolidation).toEqual(consolidationHealth);
+    } finally {
+      await new Promise<void>((resolve) => server2.close(() => resolve()));
+    }
+  });
+
   it('degrades and surfaces durability debt when an outbound delivery is stuck in maybe_sent past the stale window (#1865)', async () => {
     const db2 = makeDb();
     const durability = new DurabilityEngine(db2);

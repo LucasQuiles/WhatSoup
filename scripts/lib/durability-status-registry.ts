@@ -295,6 +295,23 @@ export const REGISTRY: DurabilityStatusEntry[] = [
     terminalFailureValues: ['failed'],
     writerSites: ['src/core/background-work-store.ts'], // releaseWorkResultDelivery(retryable=false)
   },
+  {
+    table: 'memory_consolidation_runs',
+    statusColumn: 'status',
+    vocabulary: [
+      'running',
+      'cancelling',
+      'no_work',
+      'completed',
+      'partial',
+      'failed',
+      'cancelled',
+      'abandoned',
+    ],
+    vocabularySource: 'sql-check',
+    terminalFailureValues: ['partial', 'failed', 'cancelled', 'abandoned'],
+    writerSites: ['src/memory/consolidation-run-store.ts'],
+  },
 ];
 
 /**
