@@ -115,6 +115,21 @@ function httpReq(
 }
 
 // ---------------------------------------------------------------------------
+// #2515 — Authenticated health-request helper.
+//
+// GET /health now splits a public liveness envelope (unauthenticated) from the
+// full diagnostic projection (bearer-token gated). Existing diagnostic tests
+// must present a valid token to reach the diagnostic body. The token is set in
+// beforeEach via WHATSOUP_HEALTH_TOKEN and mirrored here.
+// ---------------------------------------------------------------------------
+
+const TEST_HEALTH_TOKEN = 'test-health-token-2515';
+
+function healthReq(p: number): Promise<{ status: number; body: string }> {
+  return httpReq(p, '/health', 'GET', undefined, { Authorization: `Bearer ${TEST_HEALTH_TOKEN}` });
+}
+
+// ---------------------------------------------------------------------------
 // Build a real HTTP server using the health handler but on an ephemeral port.
 // We do this by extracting the handler from startHealthServer and mounting it
 // on a test server with port=0.
@@ -222,13 +237,17 @@ describe('GET /health', () => {
     delete process.env.WHATSOUP_GIT_SHA;
     delete process.env.WHATSOUP_GIT_BRANCH;
     db = makeDb();
-    delete process.env.WHATSOUP_HEALTH_TOKEN;
+    // #2515: the diagnostic projection is now bearer-gated; set a test token so
+    // existing diagnostic tests can reach it via healthReq(). Unauthenticated
+    // callers get only the public liveness envelope (canaries below).
+    process.env.WHATSOUP_HEALTH_TOKEN = TEST_HEALTH_TOKEN;
     ({ server, port } = await buildTestServer(makeDeps(db)));
   });
 
   afterEach(async () => {
     db.close();
     await new Promise<void>((resolve) => server.close(() => resolve()));
+    delete process.env.WHATSOUP_HEALTH_TOKEN;
     if (prevGitSha === undefined) delete process.env.WHATSOUP_GIT_SHA;
     else process.env.WHATSOUP_GIT_SHA = prevGitSha;
     if (prevGitBranch === undefined) delete process.env.WHATSOUP_GIT_BRANCH;
@@ -237,7 +256,7 @@ describe('GET /health', () => {
 
   it('returns 200 with healthy status when connected', async () => {
     const requestedAt = Date.now();
-    const { status, body } = await httpReq(port, '/health', 'GET');
+    const { status, body } = await healthReq(port);
     const receivedAt = Date.now();
     expect(status).toBe(200);
     const json = JSON.parse(body);
@@ -265,7 +284,7 @@ describe('GET /health', () => {
 
     const { server: server2, port: port2 } = await buildTestServer(makeDeps(db2, { durability }));
     try {
-      const { status, body } = await httpReq(port2, '/health', 'GET');
+      const { status, body } = await healthReq(port2);
       const json = JSON.parse(body);
       // A connected instance is otherwise healthy; the stale maybe_sent must degrade it
       // rather than read green (#1865). Degraded still returns 200.
@@ -280,7 +299,7 @@ describe('GET /health', () => {
   });
 
   it('surfaces control-peer wiring under control_peer when the Q peer is configured', async () => {
-    const { status, body } = await httpReq(port, '/health', 'GET');
+    const { status, body } = await healthReq(port);
     expect(status).toBe(200);
     const json = JSON.parse(body);
     expect(json.control_peer).toEqual({
@@ -302,7 +321,7 @@ describe('GET /health', () => {
       emitHealReport(db, messenger, null, { type: 'crash', stderr: 'HealthLatchA: boom' });
       emitHealReport(db, messenger, null, { type: 'crash', stderr: 'HealthLatchB: boom' });
 
-      const { status, body } = await httpReq(port, '/health', 'GET');
+      const { status, body } = await healthReq(port);
       expect(status).toBe(200);
       const json = JSON.parse(body);
       expect(json.control_peer).toEqual({
@@ -320,14 +339,14 @@ describe('GET /health', () => {
     const prev = process.env.WHATSOUP_REPO_ROOT;
     process.env.WHATSOUP_REPO_ROOT = repoRoot;
     try {
-      const mismatch = await httpReq(port, '/health', 'GET');
+      const mismatch = await healthReq(port);
       expect(JSON.parse(mismatch.body).arc).toEqual({
         loaded: false,
         reason: 'repository root invalid',
       });
 
       delete process.env.WHATSOUP_REPO_ROOT;
-      const sourceAnchored = await httpReq(port, '/health', 'GET');
+      const sourceAnchored = await healthReq(port);
       expect(sourceAnchored.status).toBe(200);
       expect(JSON.parse(sourceAnchored.body).arc).toMatchObject({
         loaded: true,
@@ -368,7 +387,7 @@ describe('GET /health', () => {
       } as unknown as ConnectionManager,
     })));
 
-    const { status, body } = await httpReq(port, '/health', 'GET');
+    const { status, body } = await healthReq(port);
     expect(status).toBe(200);
     const json = JSON.parse(body);
     expect(json.status).toBe('healthy');
@@ -414,7 +433,7 @@ describe('GET /health', () => {
       } as unknown as ConnectionManager,
     })));
 
-    const { status, body } = await httpReq(port, '/health', 'GET');
+    const { status, body } = await healthReq(port);
     expect(status).toBe(200);
     const json = JSON.parse(body);
     expect(json.status).toBe('degraded');
@@ -475,7 +494,7 @@ describe('GET /health', () => {
       } as unknown as ConnectionManager,
     })));
 
-    const { status, body } = await httpReq(port, '/health', 'GET');
+    const { status, body } = await healthReq(port);
     expect(status).toBe(200);
     const json = JSON.parse(body);
     expect(json.status).toBe('degraded'); // the active flood degrades health
@@ -491,7 +510,7 @@ describe('GET /health', () => {
 
   it('reports pending_polls_total reflecting live rows in the pending_polls table', async () => {
     // Empty table → 0
-    const empty = await httpReq(port, '/health', 'GET');
+    const empty = await healthReq(port);
     expect(JSON.parse(empty.body).sqlite.pending_polls_total).toBe(0);
 
     // Insert two live polls
@@ -503,13 +522,13 @@ describe('GET /health', () => {
     insert.run('send_poll:p1', 'chatA@g.us', 'send_poll:p1', 'send_poll', 'first-vote-wins', '{}', now, now + 60_000, now + 120_000);
     insert.run('send_poll:p2', 'chatB@g.us', 'send_poll:p2', 'send_poll', 'admin-only', '{}', now, now + 60_000, now + 120_000);
 
-    const after = await httpReq(port, '/health', 'GET');
+    const after = await healthReq(port);
     expect(after.status).toBe(200);
     expect(JSON.parse(after.body).sqlite.pending_polls_total).toBe(2);
 
     // Deleting one decrements the reported count
     db.raw.prepare('DELETE FROM pending_polls WHERE map_key = ?').run('send_poll:p1');
-    const afterDelete = await httpReq(port, '/health', 'GET');
+    const afterDelete = await healthReq(port);
     expect(JSON.parse(afterDelete.body).sqlite.pending_polls_total).toBe(1);
   });
 
@@ -529,7 +548,7 @@ describe('GET /health', () => {
     await new Promise<void>((resolve) => server.close(() => resolve()));
     ({ server, port } = await buildTestServer(deps));
 
-    const { status, body } = await httpReq(port, '/health', 'GET');
+    const { status, body } = await healthReq(port);
     expect(status).toBe(503);
     const json = JSON.parse(body);
     expect(json.status).toBe('unhealthy');
@@ -560,7 +579,7 @@ describe('GET /health', () => {
     await new Promise<void>((resolve) => server.close(() => resolve()));
     ({ server, port } = await buildTestServer(deps));
 
-    const { status, body } = await httpReq(port, '/health', 'GET');
+    const { status, body } = await healthReq(port);
     expect(status).toBe(200);
     const json = JSON.parse(body);
     expect(json.status).toBe('degraded');
@@ -607,7 +626,7 @@ describe('GET /health', () => {
     await new Promise<void>((resolve) => server.close(() => resolve()));
     ({ server, port } = await buildTestServer(deps));
 
-    const { status, body } = await httpReq(port, '/health', 'GET');
+    const { status, body } = await healthReq(port);
     expect(status).toBe(503);
     const json = JSON.parse(body);
     expect(json.status).toBe('unhealthy');
@@ -654,7 +673,7 @@ describe('GET /health', () => {
     await new Promise<void>((resolve) => server.close(() => resolve()));
     ({ server, port } = await buildTestServer(deps));
 
-    const { status, body } = await httpReq(port, '/health', 'GET');
+    const { status, body } = await healthReq(port);
     expect(status).toBe(503);
     const json = JSON.parse(body);
     expect(json.status).toBe('unhealthy');
@@ -700,7 +719,7 @@ describe('GET /health', () => {
     await new Promise<void>((resolve) => server.close(() => resolve()));
     ({ server, port } = await buildTestServer(deps));
 
-    const { status, body } = await httpReq(port, '/health', 'GET');
+    const { status, body } = await healthReq(port);
     expect(status).toBe(200);
     const json = JSON.parse(body);
     expect(json.status).toBe('degraded');
@@ -748,7 +767,7 @@ describe('GET /health', () => {
     await new Promise<void>((resolve) => server.close(() => resolve()));
     ({ server, port } = await buildTestServer(deps));
 
-    const { status, body } = await httpReq(port, '/health', 'GET');
+    const { status, body } = await healthReq(port);
     expect(status).toBe(200);
     const json = JSON.parse(body);
     expect(json.status).toBe('degraded');
@@ -790,7 +809,7 @@ describe('GET /health', () => {
     await new Promise<void>((resolve) => server.close(() => resolve()));
     ({ server, port } = await buildTestServer(deps));
 
-    const { status, body } = await httpReq(port, '/health', 'GET');
+    const { status, body } = await healthReq(port);
     expect(status).toBe(503);
     const json = JSON.parse(body);
     expect(json.status).toBe('unhealthy');
@@ -928,7 +947,7 @@ describe('GET /health', () => {
     await new Promise<void>((resolve) => server.close(() => resolve()));
     ({ server, port } = await buildTestServer(deps));
 
-    const { status, body } = await httpReq(port, '/health', 'GET');
+    const { status, body } = await healthReq(port);
     expect(status).toBe(200);
     const json = JSON.parse(body);
     expect(json.whatsapp.auth_bond).toMatchObject({
@@ -1010,7 +1029,7 @@ describe('GET /health', () => {
     await new Promise<void>((resolve) => server.close(() => resolve()));
     ({ server, port } = await buildTestServer(deps));
 
-    const { status, body } = await httpReq(port, '/health', 'GET');
+    const { status, body } = await healthReq(port);
     expect(status).toBe(503);
     const json = JSON.parse(body);
     expect(json.whatsapp.connection.disconnect_class).toBe('serverside_logout_irreversible');
@@ -1062,7 +1081,7 @@ describe('GET /health', () => {
     await new Promise<void>((resolve) => server.close(() => resolve()));
     ({ server, port } = await buildTestServer(deps));
 
-    let response = await httpReq(port, '/health', 'GET');
+    let response = await healthReq(port);
     expect(response.status).toBe(200);
     expect(JSON.parse(response.body)).toMatchObject({
       status: 'degraded',
@@ -1080,7 +1099,7 @@ describe('GET /health', () => {
       }),
     });
 
-    response = await httpReq(port, '/health', 'GET');
+    response = await healthReq(port);
     expect(response.status).toBe(503);
     expect(JSON.parse(response.body)).toMatchObject({
       status: 'unhealthy',
@@ -1139,7 +1158,7 @@ describe('GET /health', () => {
       await new Promise<void>((resolve) => server.close(() => resolve()));
       ({ server, port } = await buildTestServer(deps));
 
-      const response = await httpReq(port, '/health', 'GET');
+      const response = await healthReq(port);
       const json = JSON.parse(response.body);
 
       expect(response.status).toBe(200);
@@ -1194,7 +1213,7 @@ describe('GET /health', () => {
     await new Promise<void>((resolve) => server.close(() => resolve()));
     ({ server, port } = await buildTestServer(deps));
 
-    const { status, body } = await httpReq(port, '/health', 'GET');
+    const { status, body } = await healthReq(port);
     const json = JSON.parse(body);
     expect(status).toBe(200);
     expect(json.status).toBe('degraded');
@@ -1238,7 +1257,7 @@ describe('GET /health', () => {
       lastDisconnectReason: 'connectionClosed',
       lastStatusCode: 428,
     });
-    let response = await httpReq(port, '/health', 'GET');
+    let response = await healthReq(port);
     expect(response.status).toBe(200);
     expect(JSON.parse(response.body).whatsapp.connection.disconnect_class).toBe('transient_reconnect');
 
@@ -1247,7 +1266,7 @@ describe('GET /health', () => {
       lastDisconnectReason: 'unexpected',
       lastStatusCode: 999,
     });
-    response = await httpReq(port, '/health', 'GET');
+    response = await healthReq(port);
     expect(response.status).toBe(200);
     expect(JSON.parse(response.body).whatsapp.connection.disconnect_class).toBe('unknown_reconnect');
     db2.close();
@@ -1284,7 +1303,7 @@ describe('GET /health', () => {
     await new Promise<void>((resolve) => server.close(() => resolve()));
     ({ server, port } = await buildTestServer(deps));
 
-    const { status, body } = await httpReq(port, '/health', 'GET');
+    const { status, body } = await healthReq(port);
     expect(status).toBe(200);
     const json = JSON.parse(body);
     expect(json.instance.effectiveProvider).toBe('openai-api');
@@ -1349,7 +1368,7 @@ describe('GET /health', () => {
     await new Promise<void>((resolve) => server.close(() => resolve()));
     ({ server, port } = await buildTestServer(deps));
 
-    const { status, body } = await httpReq(port, '/health', 'GET');
+    const { status, body } = await healthReq(port);
     expect(status).toBe(200);
     const json = JSON.parse(body);
     expect(json.status).toBe('degraded');
@@ -1359,7 +1378,7 @@ describe('GET /health', () => {
     ]);
 
     retainedRetries = 1;
-    const withRetryDebt = JSON.parse((await httpReq(port, '/health', 'GET')).body);
+    const withRetryDebt = JSON.parse((await healthReq(port)).body);
     expect(withRetryDebt.degradation_causes).toEqual([
       'provider_fallback_active',
       'primary_model_unusable',
@@ -1368,7 +1387,7 @@ describe('GET /health', () => {
 
     retainedRetries = 0;
     active = false;
-    const withInactiveSession = JSON.parse((await httpReq(port, '/health', 'GET')).body);
+    const withInactiveSession = JSON.parse((await healthReq(port)).body);
     expect(withInactiveSession.degradation_causes).toEqual([
       'provider_fallback_active',
       'primary_model_unusable',
@@ -1378,7 +1397,7 @@ describe('GET /health', () => {
     active = undefined;
     fallbackChainExhausted = true;
     failedEntryCount = 1;
-    const withFallbackFailures = JSON.parse((await httpReq(port, '/health', 'GET')).body);
+    const withFallbackFailures = JSON.parse((await healthReq(port)).body);
     expect(withFallbackFailures.degradation_causes).toEqual([
       'provider_fallback_active',
       'fallback_chain_exhausted',
@@ -1390,7 +1409,7 @@ describe('GET /health', () => {
     failedEntryCount = 0;
     modelUsable = null;
     modelUsableStale = true;
-    const withStalePrimaryEvidence = JSON.parse((await httpReq(port, '/health', 'GET')).body);
+    const withStalePrimaryEvidence = JSON.parse((await healthReq(port)).body);
     expect(withStalePrimaryEvidence.degradation_causes).toEqual([
       'provider_fallback_active',
       'primary_model_evidence_stale',
@@ -1432,7 +1451,7 @@ describe('GET /health', () => {
     await new Promise<void>((resolve) => server.close(() => resolve()));
     ({ server, port } = await buildTestServer(deps));
 
-    const { status, body } = await httpReq(port, '/health', 'GET');
+    const { status, body } = await healthReq(port);
     expect(status).toBe(200);
     const json = JSON.parse(body);
     // runtime.agent.turnCapability (camelCase) must carry the freshness fields
@@ -1478,7 +1497,7 @@ describe('GET /health', () => {
     await new Promise<void>((resolve) => server.close(() => resolve()));
     ({ server, port } = await buildTestServer(deps));
 
-    const { status, body } = await httpReq(port, '/health', 'GET');
+    const { status, body } = await healthReq(port);
     expect(status).toBe(200);
     const json = JSON.parse(body);
     expect(json.status).toBe('degraded');
@@ -1525,7 +1544,9 @@ describe('GET /health', () => {
     await new Promise<void>((resolve) => server.close(() => resolve()));
     ({ server, port } = await buildTestServer(deps));
 
-    const { status, body } = await httpReq(port, '/health', 'GET');
+    // #2515 landed mid-lane: the diagnostic projection is bearer-gated, so this
+    // classification proof must request it through the authed helper.
+    const { status, body } = await healthReq(port);
     expect(status).toBe(200);
     const json = JSON.parse(body);
     expect(json.status).toBe('degraded');
@@ -1558,7 +1579,7 @@ describe('GET /health', () => {
     await new Promise<void>((resolve) => server.close(() => resolve()));
     ({ server, port } = await buildTestServer(deps));
 
-    const { status, body } = await httpReq(port, '/health', 'GET');
+    const { status, body } = await healthReq(port);
     expect(status).toBe(200);
     const json = JSON.parse(body);
     expect(json.status).toBe('degraded');
@@ -1594,7 +1615,7 @@ describe('GET /health', () => {
     await new Promise<void>((resolve) => server.close(() => resolve()));
     ({ server, port } = await buildTestServer(deps));
 
-    const { status, body } = await httpReq(port, '/health', 'GET');
+    const { status, body } = await healthReq(port);
     expect(status).toBe(200);
     const json = JSON.parse(body);
     expect(json.status).toBe('degraded');
@@ -1624,7 +1645,7 @@ describe('GET /health', () => {
     await new Promise<void>((resolve) => server.close(() => resolve()));
     ({ server, port } = await buildTestServer(deps));
 
-    const { status, body } = await httpReq(port, '/health', 'GET');
+    const { status, body } = await healthReq(port);
     expect(status).toBe(503);
     const json = JSON.parse(body);
     expect(json.status).toBe('unhealthy');
@@ -1638,7 +1659,7 @@ describe('GET /health', () => {
     process.env.WHATSOUP_GIT_SHA = 'a'.repeat(40);
     process.env.WHATSOUP_GIT_BRANCH = 'main';
 
-    const { status, body } = await httpReq(port, '/health', 'GET');
+    const { status, body } = await healthReq(port);
     expect(status).toBe(200);
     const json = JSON.parse(body);
     expect(json.instance).toBeDefined();
@@ -1651,7 +1672,7 @@ describe('GET /health', () => {
   });
 
   it('returns instance.socketPath as null when not provided', async () => {
-    const { status, body } = await httpReq(port, '/health', 'GET');
+    const { status, body } = await healthReq(port);
     expect(status).toBe(200);
     expect(JSON.parse(body).instance).toEqual({
       name: 'WhatSoup',
@@ -1671,14 +1692,14 @@ describe('GET /health', () => {
     await new Promise<void>((resolve) => server.close(() => resolve()));
     ({ server, port } = await buildTestServer(deps));
 
-    const { body } = await httpReq(port, '/health', 'GET');
+    const { body } = await healthReq(port);
     const json = JSON.parse(body);
     expect(json.instance.socketPath).toBe('/run/whatsoup/test.sock');
     db2.close();
   });
 
   it('returns sqlite.schema_version as a number >= 0', async () => {
-    const { body } = await httpReq(port, '/health', 'GET');
+    const { body } = await healthReq(port);
     const json = JSON.parse(body);
     expect(typeof json.sqlite.schema_version).toBe('number');
     expect(json.sqlite.schema_version).toBeGreaterThanOrEqual(0);
@@ -1708,7 +1729,7 @@ describe('GET /health', () => {
       },
     ]);
 
-    const { status, body } = await httpReq(port, '/health', 'GET');
+    const { status, body } = await healthReq(port);
     const json = JSON.parse(body);
     expect(status).toBe(200);
     expect(json.status).toBe('degraded');
@@ -1734,7 +1755,7 @@ describe('GET /health', () => {
       VALUES ('continuity_gap_absent', 'foreign-continuity-state', 'started')
     `).run();
 
-    const { status, body } = await httpReq(port, '/health', 'GET');
+    const { status, body } = await healthReq(port);
     const json = JSON.parse(body);
     expect(status).toBe(200);
     expect(json.status).toBe('degraded');
@@ -1752,7 +1773,7 @@ describe('GET /health', () => {
   it('degrades health when the applied migration version is behind the code-required schema', async () => {
     db.raw.prepare('DELETE FROM schema_migrations WHERE version = ?').run(CURRENT_SCHEMA_MIGRATION);
 
-    const { status, body } = await httpReq(port, '/health', 'GET');
+    const { status, body } = await healthReq(port);
     const json = JSON.parse(body);
     expect(status).toBe(200);
     expect(json.status).toBe('degraded');
@@ -1766,7 +1787,7 @@ describe('GET /health', () => {
     db.raw.prepare('INSERT INTO schema_migrations(version) VALUES (?)')
       .run(CURRENT_SCHEMA_MIGRATION + 1);
 
-    const { status, body } = await httpReq(port, '/health', 'GET');
+    const { status, body } = await healthReq(port);
     const json = JSON.parse(body);
     expect(status).toBe(503);
     expect(json.status).toBe('unhealthy');
@@ -1799,7 +1820,7 @@ describe('GET /health', () => {
     await new Promise<void>((resolve) => server.close(() => resolve()));
     ({ server, port } = await buildTestServer(deps));
 
-    const { status, body } = await httpReq(port, '/health', 'GET');
+    const { status, body } = await healthReq(port);
     const json = JSON.parse(body);
     expect(status).toBe(503);
     expect(json.status).toBe('unhealthy');
@@ -1817,7 +1838,7 @@ describe('GET /health', () => {
   it('degrades health when pending_polls is unreadable instead of masking schema drift', async () => {
     db.raw.exec('DROP TABLE pending_polls');
 
-    const { status, body } = await httpReq(port, '/health', 'GET');
+    const { status, body } = await healthReq(port);
     const json = JSON.parse(body);
     expect(status).toBe(200);
     expect(json.status).toBe('degraded');
@@ -1846,7 +1867,7 @@ describe('GET /health', () => {
     await new Promise<void>((resolve) => server.close(() => resolve()));
     ({ server, port } = await buildTestServer(deps));
 
-    const { status, body } = await httpReq(port, '/health', 'GET');
+    const { status, body } = await healthReq(port);
     const json = JSON.parse(body);
     expect(status).toBe(200);
     expect(json.status).toBe('degraded');
@@ -1870,7 +1891,7 @@ describe('GET /health', () => {
     await new Promise<void>((resolve) => server.close(() => resolve()));
     ({ server, port } = await buildTestServer(deps));
 
-    const { status, body } = await httpReq(port, '/health', 'GET');
+    const { status, body } = await healthReq(port);
     expect(status).toBe(200);
     expect(JSON.parse(body).runtime).toEqual({
       passive: { socket: 'ready', tools: 160 },
@@ -1893,7 +1914,7 @@ describe('GET /health', () => {
     await new Promise<void>((resolve) => server.close(() => resolve()));
     ({ server, port } = await buildTestServer(deps));
 
-    const { status, body } = await httpReq(port, '/health', 'GET');
+    const { status, body } = await healthReq(port);
     expect(status).toBe(200);
     const json = JSON.parse(body);
     expect(json.status).toBe('degraded');
@@ -1926,7 +1947,7 @@ describe('GET /health', () => {
     await new Promise<void>((resolve) => server.close(() => resolve()));
     ({ server, port } = await buildTestServer(deps));
 
-    const { status, body } = await httpReq(port, '/health', 'GET');
+    const { status, body } = await healthReq(port);
     const json = JSON.parse(body);
     expect(status).toBe(200);
     expect(json.status).toBe('degraded');
@@ -1965,7 +1986,7 @@ describe('GET /health', () => {
     await new Promise<void>((resolve) => server.close(() => resolve()));
     ({ server, port } = await buildTestServer(deps));
 
-    const { status, body } = await httpReq(port, '/health', 'GET');
+    const { status, body } = await healthReq(port);
     const json = JSON.parse(body);
     expect(status).toBe(200);
     expect(json.status).toBe('healthy');
@@ -2010,7 +2031,7 @@ describe('GET /health', () => {
     await new Promise<void>((resolve) => server.close(() => resolve()));
     ({ server, port } = await buildTestServer(deps));
 
-    const { status, body } = await httpReq(port, '/health', 'GET');
+    const { status, body } = await healthReq(port);
     const json = JSON.parse(body);
     expect(status).toBe(200);
     expect(json.status).toBe('healthy');
@@ -2052,7 +2073,7 @@ describe('GET /health', () => {
     await new Promise<void>((resolve) => server.close(() => resolve()));
     ({ server, port } = await buildTestServer(deps));
 
-    const { status, body } = await httpReq(port, '/health', 'GET');
+    const { status, body } = await healthReq(port);
     const json = JSON.parse(body);
     expect(status).toBe(200);
     expect(json.status).toBe('degraded');
@@ -2088,7 +2109,7 @@ describe('GET /health', () => {
     await new Promise<void>((resolve) => server.close(() => resolve()));
     ({ server, port } = await buildTestServer(deps));
 
-    const { status, body } = await httpReq(port, '/health', 'GET');
+    const { status, body } = await healthReq(port);
     const json = JSON.parse(body);
     expect(status).toBe(200);
     expect(json.status).toBe('healthy');
@@ -2121,7 +2142,7 @@ describe('GET /health', () => {
     await new Promise<void>((resolve) => server.close(() => resolve()));
     ({ server, port } = await buildTestServer(deps));
 
-    const { status, body } = await httpReq(port, '/health', 'GET');
+    const { status, body } = await healthReq(port);
     const json = JSON.parse(body);
     expect(status).toBe(200);
     expect(json.status).toBe('healthy');
@@ -2154,7 +2175,7 @@ describe('GET /health', () => {
     await new Promise<void>((resolve) => server.close(() => resolve()));
     ({ server, port } = await buildTestServer(deps));
 
-    const { status, body } = await httpReq(port, '/health', 'GET');
+    const { status, body } = await healthReq(port);
     const json = JSON.parse(body);
     expect(status).toBe(200);
     expect(json.status).toBe('healthy');
@@ -2190,7 +2211,7 @@ describe('GET /health', () => {
     await new Promise<void>((resolve) => server.close(() => resolve()));
     ({ server, port } = await buildTestServer(deps));
 
-    const { status, body } = await httpReq(port, '/health', 'GET');
+    const { status, body } = await healthReq(port);
     const json = JSON.parse(body);
     expect(status).toBe(200);
     expect(json.status).toBe('healthy');
@@ -2225,7 +2246,7 @@ describe('GET /health', () => {
     await new Promise<void>((resolve) => server.close(() => resolve()));
     ({ server, port } = await buildTestServer(deps));
 
-    const { status, body } = await httpReq(port, '/health', 'GET');
+    const { status, body } = await healthReq(port);
     const json = JSON.parse(body);
     expect(status).toBe(200);
     expect(json.status).toBe('healthy');
@@ -2260,7 +2281,7 @@ describe('GET /health', () => {
     await new Promise<void>((resolve) => server.close(() => resolve()));
     ({ server, port } = await buildTestServer(deps));
 
-    const { status, body } = await httpReq(port, '/health', 'GET');
+    const { status, body } = await healthReq(port);
     const json = JSON.parse(body);
     expect(status).toBe(200);
     expect(json.status).toBe('degraded');
@@ -2293,7 +2314,7 @@ describe('GET /health', () => {
     await new Promise<void>((resolve) => server.close(() => resolve()));
     ({ server, port } = await buildTestServer(deps));
 
-    const { status, body } = await httpReq(port, '/health', 'GET');
+    const { status, body } = await healthReq(port);
     const json = JSON.parse(body);
     expect(status).toBe(200);
     expect(json.status).toBe('healthy');
@@ -2326,7 +2347,7 @@ describe('GET /health', () => {
     await new Promise<void>((resolve) => server.close(() => resolve()));
     ({ server, port } = await buildTestServer(deps));
 
-    const { status, body } = await httpReq(port, '/health', 'GET');
+    const { status, body } = await healthReq(port);
     const json = JSON.parse(body);
     expect(status).toBe(200);
     expect(json.status).toBe('degraded');
@@ -2357,7 +2378,7 @@ describe('GET /health', () => {
     await new Promise<void>((resolve) => server.close(() => resolve()));
     ({ server, port } = await buildTestServer(deps));
 
-    const { status, body } = await httpReq(port, '/health', 'GET');
+    const { status, body } = await healthReq(port);
     const json = JSON.parse(body);
     expect(status).toBe(200);
     expect(json.turn_capability).toEqual({
@@ -2396,10 +2417,133 @@ describe('GET /health', () => {
     await new Promise<void>((resolve) => server.close(() => resolve()));
     ({ server, port } = await buildTestServer(deps));
 
-    const { status, body } = await httpReq(port, '/health', 'GET');
+    const { status, body } = await healthReq(port);
     expect(status).toBe(500);
     expect(JSON.parse(body)).toEqual({ status: 'error' });
     db2.close();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// #2515 — Public/private health split canaries.
+//
+// GET /health returns a minimal versioned liveness envelope to unauthenticated
+// callers (no identity, location, lifecycle, exception, recent-event, or
+// credential fields) and the full diagnostic projection only to authenticated
+// callers. These canaries fail open: if a privileged field ever leaks into the
+// public bytes, the assertion on the synthetic marker catches it.
+// ---------------------------------------------------------------------------
+
+describe('GET /health — #2515 public/private liveness split', () => {
+  let db: Database;
+  let server: ReturnType<typeof createServer>;
+  let port: number;
+
+  beforeEach(async () => {
+    db = makeDb();
+    process.env.WHATSOUP_HEALTH_TOKEN = TEST_HEALTH_TOKEN;
+    ({ server, port } = await buildTestServer(makeDeps(db, {
+      connectionManager: {
+        botJid: 'synthetic-bot-jid-marker-2515@s.whatsapp.net',
+        botLid: 'synthetic-bot-lid-marker-2515',
+        sendMessage: vi.fn().mockResolvedValue({ waMessageId: null }),
+        sendMedia: vi.fn().mockResolvedValue({ waMessageId: null }),
+        connect: vi.fn().mockResolvedValue(undefined),
+        disconnect: vi.fn().mockResolvedValue(undefined),
+      } as unknown as ConnectionManager,
+      instanceName: 'synthetic-instance-name-marker-2515',
+    })));
+  });
+
+  afterEach(async () => {
+    db.close();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    delete process.env.WHATSOUP_HEALTH_TOKEN;
+  });
+
+  it('returns a minimal versioned public envelope with no privileged fields to unauthenticated callers', async () => {
+    // No Authorization header — this is the public liveness path.
+    const { status, body } = await httpReq(port, '/health', 'GET');
+    expect(status).toBe(200);
+    const json = JSON.parse(body);
+
+    // The public envelope carries exactly three fields.
+    expect(json).toEqual({
+      schema_version: 'health.public.v1',
+      status: 'healthy',
+      generated_at: expect.any(String),
+    });
+
+    // Fail-open canaries: if ANY privileged field leaks into the public bytes,
+    // the synthetic markers placed in the test deps surface immediately.
+    // Identity, location, lifecycle, exception, recent-event, and credential
+    // fields must be absent.
+    const bodyText = body;
+    expect(bodyText).not.toContain('synthetic-bot-jid-marker-2515');
+    expect(bodyText).not.toContain('synthetic-bot-lid-marker-2515');
+    expect(bodyText).not.toContain('synthetic-instance-name-marker-2515');
+    expect(bodyText).not.toContain('instance');
+    expect(bodyText).not.toContain('whatsapp');
+    expect(bodyText).not.toContain('transport');
+    expect(bodyText).not.toContain('uptime');
+    expect(bodyText).not.toContain('arc');
+    expect(bodyText).not.toContain('provider');
+    expect(bodyText).not.toContain('commit');
+    expect(bodyText).not.toContain('degradation_causes');
+  });
+
+  it('returns 503 in the public envelope when transport is disconnected and not recovering', async () => {
+    // Rebuild with a disconnected transport.
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    ({ server, port } = await buildTestServer(makeDeps(db, {
+      connectionManager: {
+        botJid: null,
+        botLid: null,
+        connected: false,
+        state: 'disconnected',
+        sendMessage: vi.fn(),
+        sendMedia: vi.fn(),
+        connect: vi.fn(),
+        disconnect: vi.fn(),
+      } as unknown as ConnectionManager,
+    })));
+
+    const { status, body } = await httpReq(port, '/health', 'GET');
+    expect(status).toBe(503);
+    const json = JSON.parse(body);
+    expect(json.schema_version).toBe('health.public.v1');
+    expect(json.status).toBe('unhealthy');
+    // No privileged fields.
+    expect(body).not.toContain('instance');
+    expect(body).not.toContain('whatsapp');
+  });
+
+  it('returns the full diagnostic projection to authenticated callers', async () => {
+    const { status, body } = await healthReq(port);
+    expect(status).toBe(200);
+    const json = JSON.parse(body);
+
+    // The authenticated path returns the full diagnostic — privileged fields
+    // are present and visible. This proves the split does not silently degrade
+    // the diagnostic for authorized callers.
+    expect(json.status).toBe('healthy');
+    expect(json.whatsapp).toBeDefined();
+    expect(json.instance).toBeDefined();
+    expect(json.instance.name).toBe('synthetic-instance-name-marker-2515');
+    expect(json.degradation_causes).toBeDefined();
+    expect(typeof json.uptime_seconds).toBe('number');
+  });
+
+  it('rejects an invalid bearer token with the public envelope, not the diagnostic', async () => {
+    const { status, body } = await httpReq(port, '/health', 'GET', undefined, {
+      Authorization: 'Bearer wrong-token-2515',
+    });
+    // Invalid token is treated as unauthenticated — public envelope only.
+    expect(status).toBe(200);
+    const json = JSON.parse(body);
+    expect(json.schema_version).toBe('health.public.v1');
+    expect(body).not.toContain('synthetic-instance-name-marker-2515');
+    expect(body).not.toContain('whatsapp');
   });
 });
 
@@ -2428,7 +2572,7 @@ describe('POST /send — Authorization header check', () => {
   });
 
   it('returns 401 when WHATSOUP_HEALTH_TOKEN is set and Authorization header is missing', async () => {
-    process.env.WHATSOUP_HEALTH_TOKEN = 'secret-token';
+    process.env.WHATSOUP_HEALTH_TOKEN = 'test-health-token-2515';
     const payload = JSON.stringify({ chatJid: '15550100001@s.whatsapp.net', text: 'hi' });
     const { status, body } = await httpReq(port, '/send', 'POST', payload);
     expect(status).toBe(401);
@@ -2436,7 +2580,7 @@ describe('POST /send — Authorization header check', () => {
   });
 
   it('returns 401 when Bearer token does not match', async () => {
-    process.env.WHATSOUP_HEALTH_TOKEN = 'secret-token';
+    process.env.WHATSOUP_HEALTH_TOKEN = 'test-health-token-2515';
     const payload = JSON.stringify({ chatJid: '15550100001@s.whatsapp.net', text: 'hi' });
     const { status } = await httpReq(port, '/send', 'POST', payload, {
       authorization: 'Bearer wrong-token',
@@ -2455,21 +2599,21 @@ describe('POST /send — Authorization header check', () => {
   });
 
   it('proceeds (200) when correct Bearer token is provided', async () => {
-    process.env.WHATSOUP_HEALTH_TOKEN = 'secret-token';
+    process.env.WHATSOUP_HEALTH_TOKEN = 'test-health-token-2515';
     const payload = JSON.stringify({ chatJid: '15550100001@s.whatsapp.net', text: 'hello' });
     const { status, body } = await httpReq(port, '/send', 'POST', payload, {
-      authorization: 'Bearer secret-token',
+      authorization: 'Bearer test-health-token-2515',
     });
     expect(status).toBe(200);
     expect(JSON.parse(body).ok).toBe(true);
   });
 
   it('audits a successful health send exactly once', async () => {
-    process.env.WHATSOUP_HEALTH_TOKEN = 'secret-token';
+    process.env.WHATSOUP_HEALTH_TOKEN = 'test-health-token-2515';
     const payload = JSON.stringify({ chatJid: '15550100001@s.whatsapp.net', text: 'hello audit' });
 
     const { status, body } = await httpReq(port, '/send', 'POST', payload, {
-      authorization: 'Bearer secret-token',
+      authorization: 'Bearer test-health-token-2515',
     });
 
     expect(status).toBe(200);
@@ -2488,15 +2632,15 @@ describe('POST /send — Authorization header check', () => {
   });
 
   it('surfaces the latest confirmed outbound send in health', async () => {
-    process.env.WHATSOUP_HEALTH_TOKEN = 'secret-token';
+    process.env.WHATSOUP_HEALTH_TOKEN = TEST_HEALTH_TOKEN;
     const payload = JSON.stringify({ chatJid: '15550100001@s.whatsapp.net', text: 'hello health proof' });
 
     const send = await httpReq(port, '/send', 'POST', payload, {
-      authorization: 'Bearer secret-token',
+      authorization: `Bearer ${TEST_HEALTH_TOKEN}`,
     });
     expect(send.status).toBe(200);
 
-    const { status, body } = await httpReq(port, '/health', 'GET');
+    const { status, body } = await healthReq(port);
     expect(status).toBe(200);
     const json = JSON.parse(body);
     expect(json.outbound_sends).toEqual({
@@ -2506,12 +2650,12 @@ describe('POST /send — Authorization header check', () => {
   });
 
   it('audits a failed health send exactly once', async () => {
-    process.env.WHATSOUP_HEALTH_TOKEN = 'secret-token';
+    process.env.WHATSOUP_HEALTH_TOKEN = 'test-health-token-2515';
     vi.mocked(deps.connectionManager.sendMessage).mockRejectedValueOnce(new Error('transport unavailable'));
     const payload = JSON.stringify({ chatJid: '15550100001@s.whatsapp.net', text: 'will fail' });
 
     const { status, body } = await httpReq(port, '/send', 'POST', payload, {
-      authorization: 'Bearer secret-token',
+      authorization: 'Bearer test-health-token-2515',
     });
 
     expect(status).toBe(500);
@@ -2537,31 +2681,31 @@ describe('POST /send — Authorization header check', () => {
   });
 
   it('returns 400 when chatJid or text is missing', async () => {
-    process.env.WHATSOUP_HEALTH_TOKEN = 'secret-token';
+    process.env.WHATSOUP_HEALTH_TOKEN = 'test-health-token-2515';
     const payload = JSON.stringify({ chatJid: '15550100001@s.whatsapp.net' });
     const { status, body } = await httpReq(port, '/send', 'POST', payload, {
-      authorization: 'Bearer secret-token',
+      authorization: 'Bearer test-health-token-2515',
     });
     expect(status).toBe(400);
     expect(JSON.parse(body).ok).toBe(false);
   });
 
   it('returns 400 for invalid JSON body', async () => {
-    process.env.WHATSOUP_HEALTH_TOKEN = 'secret-token';
+    process.env.WHATSOUP_HEALTH_TOKEN = 'test-health-token-2515';
     const { status } = await httpReq(port, '/send', 'POST', 'not-json', {
-      authorization: 'Bearer secret-token',
+      authorization: 'Bearer test-health-token-2515',
     });
     expect(status).toBe(400);
   });
 
   it('rejects oversized /send bodies before parsing or dispatching', async () => {
-    process.env.WHATSOUP_HEALTH_TOKEN = 'secret-token';
+    process.env.WHATSOUP_HEALTH_TOKEN = 'test-health-token-2515';
 
     const { status, body } = await httpReq(port, '/send', 'POST', JSON.stringify({
       chatJid: '15550100001@s.whatsapp.net',
       text: 'x'.repeat(70_000),
     }), {
-      authorization: 'Bearer secret-token',
+      authorization: 'Bearer test-health-token-2515',
     });
 
     expect(status).toBe(413);
@@ -2570,12 +2714,12 @@ describe('POST /send — Authorization header check', () => {
   });
 
   it('resolves aliases through the send pipeline before sending', async () => {
-    process.env.WHATSOUP_HEALTH_TOKEN = 'secret-token';
+    process.env.WHATSOUP_HEALTH_TOKEN = 'test-health-token-2515';
     seedChatAliases(db.raw, { ops: '15550100002@s.whatsapp.net' });
     const payload = JSON.stringify({ to: 'ops', text: 'hello alias' });
 
     const { status, body } = await httpReq(port, '/send', 'POST', payload, {
-      authorization: 'Bearer secret-token',
+      authorization: 'Bearer test-health-token-2515',
     });
 
     expect(status).toBe(200);
@@ -2588,7 +2732,7 @@ describe('POST /send — Authorization header check', () => {
   });
 
   it('applies a named profile before sending', async () => {
-    process.env.WHATSOUP_HEALTH_TOKEN = 'secret-token';
+    process.env.WHATSOUP_HEALTH_TOKEN = 'test-health-token-2515';
     const payload = JSON.stringify({
       chatJid: '15550100001@s.whatsapp.net',
       text: 'hello',
@@ -2596,7 +2740,7 @@ describe('POST /send — Authorization header check', () => {
     });
 
     const { status, body } = await httpReq(port, '/send', 'POST', payload, {
-      authorization: 'Bearer secret-token',
+      authorization: 'Bearer test-health-token-2515',
     });
 
     expect(status).toBe(200);
@@ -2609,7 +2753,7 @@ describe('POST /send — Authorization header check', () => {
   });
 
   it('returns unknown profile without sending', async () => {
-    process.env.WHATSOUP_HEALTH_TOKEN = 'secret-token';
+    process.env.WHATSOUP_HEALTH_TOKEN = 'test-health-token-2515';
     const payload = JSON.stringify({
       chatJid: '15550100001@s.whatsapp.net',
       text: 'hello',
@@ -2617,7 +2761,7 @@ describe('POST /send — Authorization header check', () => {
     });
 
     const { status, body } = await httpReq(port, '/send', 'POST', payload, {
-      authorization: 'Bearer secret-token',
+      authorization: 'Bearer test-health-token-2515',
     });
 
     expect(status).toBe(400);
@@ -2626,7 +2770,7 @@ describe('POST /send — Authorization header check', () => {
   });
 
   it('rejects both chatJid and to without sending', async () => {
-    process.env.WHATSOUP_HEALTH_TOKEN = 'secret-token';
+    process.env.WHATSOUP_HEALTH_TOKEN = 'test-health-token-2515';
     seedChatAliases(db.raw, { ops: '15550100002@s.whatsapp.net' });
     const payload = JSON.stringify({
       chatJid: '15550100001@s.whatsapp.net',
@@ -2635,7 +2779,7 @@ describe('POST /send — Authorization header check', () => {
     });
 
     const { status, body } = await httpReq(port, '/send', 'POST', payload, {
-      authorization: 'Bearer secret-token',
+      authorization: 'Bearer test-health-token-2515',
     });
 
     expect(status).toBe(400);
@@ -2651,7 +2795,7 @@ describe('POST /agent/compact', () => {
 
   beforeEach(async () => {
     db = makeDb();
-    process.env.WHATSOUP_HEALTH_TOKEN = 'secret-token';
+    process.env.WHATSOUP_HEALTH_TOKEN = 'test-health-token-2515';
   });
 
   afterEach(async () => {
@@ -2693,7 +2837,7 @@ describe('POST /agent/compact', () => {
       '/agent/compact',
       'POST',
       JSON.stringify({ chatJid: '120363555555555003@g.us' }),
-      { authorization: 'Bearer secret-token' },
+      { authorization: 'Bearer test-health-token-2515' },
     );
 
     expect(status).toBe(200);
@@ -2729,7 +2873,7 @@ describe('POST /agent/compact', () => {
       '/agent/compact',
       'POST',
       JSON.stringify({ chatJid: '120363555555555003@g.us', silent: false }),
-      { authorization: 'Bearer secret-token' },
+      { authorization: 'Bearer test-health-token-2515' },
     );
 
     expect(status).toBe(200);
@@ -2744,7 +2888,7 @@ describe('POST /agent/compact', () => {
     ({ server, port } = await buildTestServer(makeDeps(db)));
 
     const { status, body } = await httpReq(port, '/agent/compact', 'POST', '{}', {
-      authorization: 'Bearer secret-token',
+      authorization: 'Bearer test-health-token-2515',
     });
 
     expect(status).toBe(409);
@@ -2768,7 +2912,7 @@ describe('POST /agent/compact', () => {
     })));
 
     const { status, body } = await httpReq(port, '/agent/compact', 'POST', '{}', {
-      authorization: 'Bearer secret-token',
+      authorization: 'Bearer test-health-token-2515',
     });
 
     expect(status).toBe(409);
@@ -2793,7 +2937,7 @@ describe('POST /agent/compact', () => {
       '/agent/compact',
       'POST',
       JSON.stringify({ chatJid: 123 }),
-      { authorization: 'Bearer secret-token' },
+      { authorization: 'Bearer test-health-token-2515' },
     );
 
     expect(status).toBe(400);
@@ -2815,7 +2959,7 @@ describe('POST /agent/compact', () => {
       '/agent/compact',
       'POST',
       'null',
-      { authorization: 'Bearer secret-token' },
+      { authorization: 'Bearer test-health-token-2515' },
     );
 
     expect(status).toBe(400);
@@ -2833,7 +2977,7 @@ describe('POST /agent/compact', () => {
     })));
 
     const { status, body } = await httpReq(port, '/agent/compact', 'POST', '{', {
-      authorization: 'Bearer secret-token',
+      authorization: 'Bearer test-health-token-2515',
     });
 
     expect(status).toBe(400);
@@ -2851,7 +2995,7 @@ describe('POST /agent/compact', () => {
     })));
 
     const { status, body } = await httpReq(port, '/agent/compact', 'POST', JSON.stringify({ pad: 'x'.repeat(70_000) }), {
-      authorization: 'Bearer secret-token',
+      authorization: 'Bearer test-health-token-2515',
     });
 
     expect(status).toBe(413);
@@ -2873,7 +3017,7 @@ describe('POST /agent/compact', () => {
       '/agent/compact',
       'POST',
       JSON.stringify({ silent: 'false' }),
-      { authorization: 'Bearer secret-token' },
+      { authorization: 'Bearer test-health-token-2515' },
     );
 
     expect(status).toBe(400);
@@ -2895,7 +3039,7 @@ describe('POST /agent/compact', () => {
     })));
 
     const { status, body } = await httpReq(port, '/agent/compact', 'POST', '{}', {
-      authorization: 'Bearer secret-token',
+      authorization: 'Bearer test-health-token-2515',
     });
 
     expect(status).toBe(500);
@@ -2910,7 +3054,7 @@ describe('health command endpoints — malformed bodies and side effects', () =>
 
   beforeEach(async () => {
     db = makeDb();
-    process.env.WHATSOUP_HEALTH_TOKEN = 'secret-token';
+    process.env.WHATSOUP_HEALTH_TOKEN = 'test-health-token-2515';
   });
 
   afterEach(async () => {
@@ -2923,7 +3067,7 @@ describe('health command endpoints — malformed bodies and side effects', () =>
     ({ server, port } = await buildTestServer(makeDeps(db)));
 
     const { status, body } = await httpReq(port, '/heal', 'POST', 'null', {
-      authorization: 'Bearer secret-token',
+      authorization: 'Bearer test-health-token-2515',
     });
 
     expect(status).toBe(400);
@@ -2934,13 +3078,13 @@ describe('health command endpoints — malformed bodies and side effects', () =>
     ({ server, port } = await buildTestServer(makeDeps(db)));
 
     const malformed = await httpReq(port, '/heal', 'POST', '{', {
-      authorization: 'Bearer secret-token',
+      authorization: 'Bearer test-health-token-2515',
     });
     const missingType = await httpReq(port, '/heal', 'POST', '{}', {
-      authorization: 'Bearer secret-token',
+      authorization: 'Bearer test-health-token-2515',
     });
     const oversized = await httpReq(port, '/heal', 'POST', JSON.stringify({ type: 'service_crash', pad: 'x'.repeat(70_000) }), {
-      authorization: 'Bearer secret-token',
+      authorization: 'Bearer test-health-token-2515',
     });
 
     expect(malformed.status).toBe(400);
@@ -2955,7 +3099,7 @@ describe('health command endpoints — malformed bodies and side effects', () =>
     ({ server, port } = await buildTestServer(makeDeps(db)));
 
     const { status, body } = await httpReq(port, '/heal', 'POST', JSON.stringify({ type: 123 }), {
-      authorization: 'Bearer secret-token',
+      authorization: 'Bearer test-health-token-2515',
     });
 
     expect(status).toBe(400);
@@ -2974,10 +3118,10 @@ describe('health command endpoints — malformed bodies and side effects', () =>
     });
 
     const first = await httpReq(port, '/heal', 'POST', payload, {
-      authorization: 'Bearer secret-token',
+      authorization: 'Bearer test-health-token-2515',
     });
     const second = await httpReq(port, '/heal', 'POST', payload, {
-      authorization: 'Bearer secret-token',
+      authorization: 'Bearer test-health-token-2515',
     });
 
     expect(first.status).toBe(202);
@@ -3004,7 +3148,7 @@ describe('health command endpoints — malformed bodies and side effects', () =>
       '/heal',
       'POST',
       JSON.stringify({ reportId: 'report-db-failure', type: 'service_crash' }),
-      { authorization: 'Bearer secret-token' },
+      { authorization: 'Bearer test-health-token-2515' },
     );
 
     expect(status).toBe(500);
@@ -3015,14 +3159,14 @@ describe('health command endpoints — malformed bodies and side effects', () =>
     ({ server, port } = await buildTestServer(makeDeps(db)));
 
     const nonObject = await httpReq(port, '/access', 'POST', 'null', {
-      authorization: 'Bearer secret-token',
+      authorization: 'Bearer test-health-token-2515',
     });
     const scalarSubject = await httpReq(
       port,
       '/access',
       'POST',
       JSON.stringify({ subjectType: 'phone', subjectId: 123, action: 'allow' }),
-      { authorization: 'Bearer secret-token' },
+      { authorization: 'Bearer test-health-token-2515' },
     );
 
     expect(nonObject.status).toBe(400);
@@ -3035,7 +3179,7 @@ describe('health command endpoints — malformed bodies and side effects', () =>
     ({ server, port } = await buildTestServer(makeDeps(db)));
 
     const malformed = await httpReq(port, '/access', 'POST', '{', {
-      authorization: 'Bearer secret-token',
+      authorization: 'Bearer test-health-token-2515',
     });
     const oversized = await httpReq(port, '/access', 'POST', JSON.stringify({
       subjectType: 'phone',
@@ -3043,7 +3187,7 @@ describe('health command endpoints — malformed bodies and side effects', () =>
       action: 'allow',
       pad: 'x'.repeat(70_000),
     }), {
-      authorization: 'Bearer secret-token',
+      authorization: 'Bearer test-health-token-2515',
     });
 
     expect(malformed.status).toBe(400);
@@ -3061,14 +3205,14 @@ describe('health command endpoints — malformed bodies and side effects', () =>
       '/access',
       'POST',
       JSON.stringify({ subjectType: 'channel', subjectId: '15551234567', action: 'allow' }),
-      { authorization: 'Bearer secret-token' },
+      { authorization: 'Bearer test-health-token-2515' },
     );
     const invalidAction = await httpReq(
       port,
       '/access',
       'POST',
       JSON.stringify({ subjectType: 'phone', subjectId: '15551234567', action: 'mute' }),
-      { authorization: 'Bearer secret-token' },
+      { authorization: 'Bearer test-health-token-2515' },
     );
 
     expect(invalidSubjectType.status).toBe(400);
@@ -3086,7 +3230,7 @@ describe('health command endpoints — malformed bodies and side effects', () =>
       '/access',
       'POST',
       JSON.stringify({ subjectType: 'phone', subjectId: '15551234567', action: 'allow' }),
-      { authorization: 'Bearer secret-token' },
+      { authorization: 'Bearer test-health-token-2515' },
     );
 
     expect(status).toBe(200);
@@ -3114,7 +3258,7 @@ describe('health command endpoints — malformed bodies and side effects', () =>
       '/access',
       'POST',
       JSON.stringify({ subjectType: 'phone', subjectId: '15551234567', action: 'allow' }),
-      { authorization: 'Bearer secret-token' },
+      { authorization: 'Bearer test-health-token-2515' },
     );
 
     expect(status).toBe(500);
@@ -3126,10 +3270,10 @@ describe('health command endpoints — malformed bodies and side effects', () =>
     ({ server, port } = await buildTestServer(makeDeps(db)));
 
     const nonObject = await httpReq(port, '/mark-read', 'POST', 'null', {
-      authorization: 'Bearer secret-token',
+      authorization: 'Bearer test-health-token-2515',
     });
     const missingKey = await httpReq(port, '/mark-read', 'POST', '{}', {
-      authorization: 'Bearer secret-token',
+      authorization: 'Bearer test-health-token-2515',
     });
 
     expect(nonObject.status).toBe(400);
@@ -3142,7 +3286,7 @@ describe('health command endpoints — malformed bodies and side effects', () =>
     ({ server, port } = await buildTestServer(makeDeps(db)));
 
     const { status, body } = await httpReq(port, '/mark-read', 'POST', '{', {
-      authorization: 'Bearer secret-token',
+      authorization: 'Bearer test-health-token-2515',
     });
 
     expect(status).toBe(400);
@@ -3156,7 +3300,7 @@ describe('health command endpoints — malformed bodies and side effects', () =>
       conversation_key: '15551234567',
       pad: 'x'.repeat(70_000),
     }), {
-      authorization: 'Bearer secret-token',
+      authorization: 'Bearer test-health-token-2515',
     });
 
     expect(status).toBe(413);
@@ -3171,7 +3315,7 @@ describe('health command endpoints — malformed bodies and side effects', () =>
       '/mark-read',
       'POST',
       JSON.stringify({ conversation_key: 'missing-chat' }),
-      { authorization: 'Bearer secret-token' },
+      { authorization: 'Bearer test-health-token-2515' },
     );
 
     expect(status).toBe(404);
@@ -3194,7 +3338,7 @@ describe('health command endpoints — malformed bodies and side effects', () =>
       '/mark-read',
       'POST',
       JSON.stringify({ conversation_key: '15551234567' }),
-      { authorization: 'Bearer secret-token' },
+      { authorization: 'Bearer test-health-token-2515' },
     );
 
     expect(status).toBe(200);
@@ -3221,7 +3365,7 @@ describe('health command endpoints — malformed bodies and side effects', () =>
       '/mark-read',
       'POST',
       JSON.stringify({ conversation_key: '15551234567' }),
-      { authorization: 'Bearer secret-token' },
+      { authorization: 'Bearer test-health-token-2515' },
     );
 
     expect(status).toBe(500);
@@ -3268,14 +3412,14 @@ describe('GET /typing — Authorization header check', () => {
   });
 
   it('returns 401 when WHATSOUP_HEALTH_TOKEN is set and Authorization header is missing', async () => {
-    process.env.WHATSOUP_HEALTH_TOKEN = 'secret-token';
+    process.env.WHATSOUP_HEALTH_TOKEN = 'test-health-token-2515';
     const { status, body } = await httpReq(port, '/typing', 'GET');
     expect(status).toBe(401);
     expect(JSON.parse(body)).toMatchObject({ error: 'Unauthorized' });
   });
 
   it('returns 401 when Bearer token does not match', async () => {
-    process.env.WHATSOUP_HEALTH_TOKEN = 'secret-token';
+    process.env.WHATSOUP_HEALTH_TOKEN = 'test-health-token-2515';
     const { status } = await httpReq(port, '/typing', 'GET', undefined, {
       authorization: 'Bearer wrong-token',
     });
@@ -3291,9 +3435,9 @@ describe('GET /typing — Authorization header check', () => {
   });
 
   it('returns 200 with composing payload when Bearer token matches', async () => {
-    process.env.WHATSOUP_HEALTH_TOKEN = 'secret-token';
+    process.env.WHATSOUP_HEALTH_TOKEN = 'test-health-token-2515';
     const { status, body } = await httpReq(port, '/typing', 'GET', undefined, {
-      authorization: 'Bearer secret-token',
+      authorization: 'Bearer test-health-token-2515',
     });
     expect(status).toBe(200);
     const json = JSON.parse(body);
@@ -3366,10 +3510,11 @@ describe('GET /health — branch coverage: empty-body safeDbQuery fallbacks and 
 
   beforeEach(async () => {
     db = makeDb();
-    delete process.env.WHATSOUP_HEALTH_TOKEN;
+    process.env.WHATSOUP_HEALTH_TOKEN = TEST_HEALTH_TOKEN;
   });
 
   afterEach(async () => {
+    delete process.env.WHATSOUP_HEALTH_TOKEN;
     if (db) db.close();
     if (server) await new Promise<void>((resolve) => server.close(() => resolve()));
   });
@@ -3379,7 +3524,7 @@ describe('GET /health — branch coverage: empty-body safeDbQuery fallbacks and 
     db.raw.exec('DROP TABLE messages');
     ({ server, port } = await buildTestServer(makeDeps(db)));
 
-    const { status, body } = await httpReq(port, '/health', 'GET');
+    const { status, body } = await healthReq(port);
     // Doesn't crash — returns fallback 0 for messages_total
     expect(status).toBe(200);
     const json = JSON.parse(body);
@@ -3390,7 +3535,7 @@ describe('GET /health — branch coverage: empty-body safeDbQuery fallbacks and 
     // db is intact, just no messages
     ({ server, port } = await buildTestServer(makeDeps(db)));
 
-    const { status, body } = await httpReq(port, '/health', 'GET');
+    const { status, body } = await healthReq(port);
     expect(status).toBe(200);
     expect(JSON.parse(body).sqlite.messages_total).toBe(0);
   });
@@ -3431,7 +3576,7 @@ describe('GET /health — branch coverage: empty-body safeDbQuery fallbacks and 
     } as any);
     ({ server, port } = await buildTestServer(deps));
 
-    const { status, body } = await httpReq(port, '/health', 'GET');
+    const { status, body } = await healthReq(port);
     expect(status).toBe(200);
     expect(JSON.parse(body).status).toBe('degraded');
     expect(JSON.parse(body).whatsapp.connection.state).toBe('cooldown');
@@ -3474,7 +3619,7 @@ describe('GET /health — branch coverage: empty-body safeDbQuery fallbacks and 
     } as any);
     ({ server, port } = await buildTestServer(deps));
 
-    const { status, body } = await httpReq(port, '/health', 'GET');
+    const { status, body } = await healthReq(port);
     expect(status).toBe(503);
     const json = JSON.parse(body);
     expect(json.status).toBe('unhealthy');
@@ -3514,7 +3659,7 @@ describe('GET /health — branch coverage: empty-body safeDbQuery fallbacks and 
     } as any);
     ({ server, port } = await buildTestServer(deps));
 
-    const { status, body } = await httpReq(port, '/health', 'GET');
+    const { status, body } = await healthReq(port);
     expect(status).toBe(200);
     const json = JSON.parse(body);
     expect(json.status).toBe('degraded');
@@ -3561,7 +3706,7 @@ describe('GET /health — branch coverage: empty-body safeDbQuery fallbacks and 
     } as any);
     ({ server, port } = await buildTestServer(deps));
 
-    const { status, body } = await httpReq(port, '/health', 'GET');
+    const { status, body } = await healthReq(port);
     expect(status).toBe(200);
     const json = JSON.parse(body);
     expect(json.whatsapp.auth_bond.creds.empty_hash).toBe(true);
@@ -3610,7 +3755,7 @@ describe('GET /health — branch coverage: empty-body safeDbQuery fallbacks and 
       } as any);
       ({ server, port } = await buildTestServer(deps));
 
-      const { status, body } = await httpReq(port, '/health', 'GET');
+      const { status, body } = await healthReq(port);
       const json = JSON.parse(body);
       // Not in grace window → classified as local_corruption (backup present → restorable)
       expect(status).toBe(200);
@@ -3663,7 +3808,7 @@ describe('GET /health — branch coverage: empty-body safeDbQuery fallbacks and 
       } as any);
       ({ server, port } = await buildTestServer(deps));
 
-      const { status, body } = await httpReq(port, '/health', 'GET');
+      const { status, body } = await healthReq(port);
       const json = JSON.parse(body);
       // Non-finite mtime → not in grace window → local_corruption
       expect(status).toBe(200);
@@ -3692,7 +3837,7 @@ describe('GET /health — branch coverage: empty-body safeDbQuery fallbacks and 
     });
     ({ server, port } = await buildTestServer(deps));
 
-    const { status, body } = await httpReq(port, '/health', 'GET');
+    const { status, body } = await healthReq(port);
     expect(status).toBe(200);
     const json = JSON.parse(body);
     // No turnCapability → null
@@ -3721,7 +3866,7 @@ describe('GET /health — branch coverage: empty-body safeDbQuery fallbacks and 
     });
     ({ server, port } = await buildTestServer(deps));
 
-    const { status, body } = await httpReq(port, '/health', 'GET');
+    const { status, body } = await healthReq(port);
     expect(status).toBe(200);
     const json = JSON.parse(body);
     expect(json.turn_capability).toBeNull();
@@ -3752,7 +3897,7 @@ describe('GET /health — branch coverage: empty-body safeDbQuery fallbacks and 
     });
     ({ server, port } = await buildTestServer(deps));
 
-    const { status, body } = await httpReq(port, '/health', 'GET');
+    const { status, body } = await healthReq(port);
     expect(status).toBe(200);
     expect(JSON.parse(body).status).toBe('degraded');
     db2.close();
@@ -3774,7 +3919,7 @@ describe('GET /health — branch coverage: empty-body safeDbQuery fallbacks and 
     });
     ({ server, port } = await buildTestServer(deps));
 
-    const { status, body } = await httpReq(port, '/health', 'GET');
+    const { status, body } = await healthReq(port);
     expect(status).toBe(200);
     const json = JSON.parse(body);
     expect(json.runtime.chat.queueDepth).toBe(0);
@@ -3803,7 +3948,7 @@ describe('GET /health — branch coverage: empty-body safeDbQuery fallbacks and 
     });
     ({ server, port } = await buildTestServer(deps));
 
-    const { status, body } = await httpReq(port, '/health', 'GET');
+    const { status, body } = await healthReq(port);
     expect(status).toBe(200);
     const json = JSON.parse(body);
     expect(json.instance.effectiveProvider).toBe('claude');
@@ -3875,7 +4020,7 @@ describe('POST /agent/compact — empty body treated as {}', () => {
 
   beforeEach(async () => {
     db = makeDb();
-    process.env.WHATSOUP_HEALTH_TOKEN = 'secret-token';
+    process.env.WHATSOUP_HEALTH_TOKEN = 'test-health-token-2515';
   });
 
   afterEach(async () => {
@@ -3900,7 +4045,7 @@ describe('POST /agent/compact — empty body treated as {}', () => {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'authorization': 'Bearer secret-token',
+          'authorization': 'Bearer test-health-token-2515',
           'Content-Length': '0',
         },
       }, (res) => {
@@ -3924,7 +4069,7 @@ describe('POST /heal — readBody error path', () => {
 
   beforeEach(async () => {
     db = makeDb();
-    process.env.WHATSOUP_HEALTH_TOKEN = 'secret-token';
+    process.env.WHATSOUP_HEALTH_TOKEN = 'test-health-token-2515';
   });
 
   afterEach(async () => {
@@ -3941,7 +4086,7 @@ describe('POST /heal — readBody error path', () => {
       '/heal',
       'POST',
       JSON.stringify({ type: 'service_crash', pad: 'x'.repeat(70_000) }),
-      { authorization: 'Bearer secret-token' },
+      { authorization: 'Bearer test-health-token-2515' },
     );
 
     expect(status).toBe(413);
@@ -3956,7 +4101,7 @@ describe('POST /heal — readBody error path', () => {
       '/heal',
       'POST',
       JSON.stringify({ type: 'service_crash', context: 'systemd-restart' }),
-      { authorization: 'Bearer secret-token' },
+      { authorization: 'Bearer test-health-token-2515' },
     );
 
     expect(status).toBe(202);
@@ -3973,7 +4118,7 @@ describe('POST /heal — readBody error path', () => {
       '/heal',
       'POST',
       JSON.stringify({ type: 'service_crash' }),
-      { authorization: 'Bearer secret-token' },
+      { authorization: 'Bearer test-health-token-2515' },
     );
 
     expect(status).toBe(202);
@@ -3990,10 +4135,11 @@ describe('GET /health — normalizeBooleanOrNull and normalizeNumberOrNull non-t
 
   beforeEach(async () => {
     db = makeDb();
-    delete process.env.WHATSOUP_HEALTH_TOKEN;
+    process.env.WHATSOUP_HEALTH_TOKEN = TEST_HEALTH_TOKEN;
   });
 
   afterEach(async () => {
+    delete process.env.WHATSOUP_HEALTH_TOKEN;
     if (db) db.close();
     if (server) await new Promise<void>((resolve) => server.close(() => resolve()));
   });
@@ -4021,7 +4167,7 @@ describe('GET /health — normalizeBooleanOrNull and normalizeNumberOrNull non-t
     });
     ({ server, port } = await buildTestServer(deps));
 
-    const { status, body } = await httpReq(port, '/health', 'GET');
+    const { status, body } = await healthReq(port);
     expect(status).toBe(200);
     const json = JSON.parse(body);
     expect(json.turn_capability).toEqual({
@@ -4048,10 +4194,11 @@ describe('health.ts lower-branch coverage (74-549)', () => {
 
   beforeEach(async () => {
     db = makeDb();
-    delete process.env.WHATSOUP_HEALTH_TOKEN;
+    process.env.WHATSOUP_HEALTH_TOKEN = TEST_HEALTH_TOKEN;
   });
 
   afterEach(async () => {
+    delete process.env.WHATSOUP_HEALTH_TOKEN;
     if (db) db.close();
     if (server) await new Promise<void>((resolve) => server.close(() => resolve()));
   });
@@ -4064,7 +4211,7 @@ describe('health.ts lower-branch coverage (74-549)', () => {
     const deps = makeDeps(db);
     ({ server, port } = await buildTestServer(deps));
 
-    const { status, body } = await httpReq(port, '/health', 'GET');
+    const { status, body } = await healthReq(port);
     expect(status).toBe(200);
     const json = JSON.parse(body);
     // currentAuthBond is nested under credential_lifecycle in the synthetic snapshot.
@@ -4112,7 +4259,7 @@ describe('health.ts lower-branch coverage (74-549)', () => {
     } as any);
     ({ server, port } = await buildTestServer(deps));
 
-    const { status, body } = await httpReq(port, '/health', 'GET');
+    const { status, body } = await healthReq(port);
     expect(status).toBe(200);
     const json = JSON.parse(body);
     // Line 335 false branch: `authBond.creds.sha256?.slice(0, 20) ?? null` → null.
@@ -4133,7 +4280,7 @@ describe('health.ts lower-branch coverage (74-549)', () => {
     });
     ({ server, port } = await buildTestServer(deps));
 
-    const { status, body } = await httpReq(port, '/health', 'GET');
+    const { status, body } = await healthReq(port);
     expect(status).toBe(200);
     const json = JSON.parse(body);
     // turnCapability is null → not degraded, and the field surfaces as null.
@@ -4182,7 +4329,7 @@ describe('health.ts lower-branch coverage (74-549)', () => {
     } as any);
     ({ server, port } = await buildTestServer(deps));
 
-    const { status, body } = await httpReq(port, '/health', 'GET');
+    const { status, body } = await healthReq(port);
     expect(status).toBe(200);
     const json = JSON.parse(body);
     // Line 427 (action.type === 'reconnect') entered; line 430 (restart-required) returns.
@@ -4202,8 +4349,8 @@ describe('health.ts upper-branch coverage (624-1020)', () => {
   beforeEach(async () => {
     db = makeDb();
     // Token is set so requireAuth() runs; each test chooses whether to send
-    // the Authorization header.
-    process.env.WHATSOUP_HEALTH_TOKEN = 'secret-token';
+    // the Authorization header. healthReq() sends Bearer TEST_HEALTH_TOKEN.
+    process.env.WHATSOUP_HEALTH_TOKEN = TEST_HEALTH_TOKEN;
   });
 
   afterEach(async () => {
@@ -4278,7 +4425,7 @@ describe('health.ts upper-branch coverage (624-1020)', () => {
       '/access',
       'POST',
       JSON.stringify({ subjectType: 'group', subjectId: '1111111000000000@g.us', action: 'block' }),
-      { authorization: 'Bearer secret-token' },
+      { authorization: 'Bearer test-health-token-2515' },
     );
 
     expect(status).toBe(200);
@@ -4326,7 +4473,7 @@ describe('health.ts upper-branch coverage (624-1020)', () => {
     });
     ({ server, port } = await buildTestServer(deps));
 
-    const { status, body } = await httpReq(port, '/health', 'GET');
+    const { status, body } = await healthReq(port);
     expect(status).toBe(200);
     const json = JSON.parse(body);
 
@@ -4402,7 +4549,7 @@ describe('health.ts upper-branch coverage (624-1020)', () => {
     });
     ({ server, port } = await buildTestServer(deps));
 
-    const { status, body } = await httpReq(port, '/health', 'GET');
+    const { status, body } = await healthReq(port);
     // 'degraded' is a 200, not a 503.
     expect(status).toBe(200);
     const json = JSON.parse(body);
@@ -4429,7 +4576,7 @@ describe('health.ts upper-branch coverage (624-1020)', () => {
     });
     ({ server, port } = await buildTestServer(deps));
 
-    const { status, body } = await httpReq(port, '/health', 'GET');
+    const { status, body } = await healthReq(port);
     expect(status).toBe(200);
     const json = JSON.parse(body);
     // None of passive/chat/agent matched, so runtime stays an empty object.
@@ -4466,7 +4613,7 @@ describe('health.ts upper-branch coverage (624-1020)', () => {
     it('exposes a well-shaped event_loop block with the real sampler by default', async () => {
       ({ server, port } = await buildTestServer(makeDeps(db)));
 
-      const { status, body } = await httpReq(port, '/health', 'GET');
+      const { status, body } = await healthReq(port);
       expect(status).toBe(200);
       const json = JSON.parse(body);
       expect(json.event_loop).toMatchObject({
@@ -4488,7 +4635,7 @@ describe('health.ts upper-branch coverage (624-1020)', () => {
       const deps = makeDeps(db, { loopLagSampler: sampler as any });
       ({ server, port } = await buildTestServer(deps));
 
-      const { status, body } = await httpReq(port, '/health', 'GET');
+      const { status, body } = await healthReq(port);
       const json = JSON.parse(body);
       expect(status).toBe(200); // degraded, not unhealthy — the connection itself is fine
       expect(json.status).toBe('degraded');
@@ -4511,7 +4658,7 @@ describe('health.ts upper-branch coverage (624-1020)', () => {
       const deps = makeDeps(db, { loopLagSampler: sampler as any });
       ({ server, port } = await buildTestServer(deps));
 
-      await httpReq(port, '/health', 'GET');
+      await healthReq(port);
       expect(mockHealthLogger.warn).toHaveBeenCalledWith(
         expect.objectContaining({ p95LagMs: 500, sampleCount: 20, thresholdMs: 250 }),
         'event loop starvation detected during health check',
@@ -4532,16 +4679,16 @@ describe('health.ts upper-branch coverage (624-1020)', () => {
       });
       ({ server, port } = await buildTestServer(deps));
 
-      const first = JSON.parse((await httpReq(port, '/health', 'GET')).body);
+      const first = JSON.parse((await healthReq(port)).body);
       nowMs += 299_999;
-      const suppressed = JSON.parse((await httpReq(port, '/health', 'GET')).body);
+      const suppressed = JSON.parse((await healthReq(port)).body);
       expect(first.status).toBe('degraded');
       expect(suppressed.status).toBe('degraded');
       expect(suppressed.event_loop.discontinuity_count).toBe(2);
       expect(mockHealthLogger.warn).toHaveBeenCalledTimes(1);
 
       nowMs += 1;
-      await httpReq(port, '/health', 'GET');
+      await healthReq(port);
       expect(mockHealthLogger.warn).toHaveBeenCalledTimes(2);
     });
 
@@ -4560,17 +4707,17 @@ describe('health.ts upper-branch coverage (624-1020)', () => {
       });
       ({ server, port } = await buildTestServer(deps));
 
-      await httpReq(port, '/health', 'GET');
+      await healthReq(port);
       sampler.snapshot.mockReturnValue({
         ...snapshot,
         p95LagMs: 0,
         locallyStarved: false,
       });
       nowMs += 1;
-      await httpReq(port, '/health', 'GET');
+      await healthReq(port);
       sampler.snapshot.mockReturnValue(snapshot);
       nowMs += 1;
-      await httpReq(port, '/health', 'GET');
+      await healthReq(port);
 
       expect(mockHealthLogger.warn).toHaveBeenCalledTimes(2);
     });
@@ -4585,7 +4732,7 @@ describe('health.ts upper-branch coverage (624-1020)', () => {
       const deps = makeDeps(db, { loopLagSampler: sampler as any });
       ({ server, port } = await buildTestServer(deps));
 
-      await httpReq(port, '/health', 'GET');
+      await healthReq(port);
       expect(mockHealthLogger.warn).not.toHaveBeenCalledWith(
         expect.anything(),
         'event loop starvation detected during health check',
@@ -4615,7 +4762,7 @@ describe('health.ts upper-branch coverage (624-1020)', () => {
     it('exposes mcp_liveness as null for a non-agent instance', async () => {
       ({ server, port } = await buildTestServer(makeDeps(db)));
 
-      const { status, body } = await httpReq(port, '/health', 'GET');
+      const { status, body } = await healthReq(port);
       expect(status).toBe(200);
       expect(JSON.parse(body).mcp_liveness).toBeNull();
     });
@@ -4629,7 +4776,7 @@ describe('health.ts upper-branch coverage (624-1020)', () => {
       });
       ({ server, port } = await buildTestServer(deps));
 
-      const { body } = await httpReq(port, '/health', 'GET');
+      const { body } = await healthReq(port);
       expect(JSON.parse(body).mcp_liveness).toBeNull();
     });
 
@@ -4647,7 +4794,7 @@ describe('health.ts upper-branch coverage (624-1020)', () => {
       });
       ({ server, port } = await buildTestServer(deps));
 
-      const { status, body } = await httpReq(port, '/health', 'GET');
+      const { status, body } = await healthReq(port);
       const json = JSON.parse(body);
       expect(status).toBe(200);
       expect(json.status).toBe('healthy');
@@ -4672,7 +4819,7 @@ describe('health.ts upper-branch coverage (624-1020)', () => {
       });
       ({ server, port } = await buildTestServer(deps));
 
-      const { body } = await httpReq(port, '/health', 'GET');
+      const { body } = await healthReq(port);
       expect(JSON.parse(body).status).toBe('healthy');
     });
   });

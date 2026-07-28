@@ -51,11 +51,14 @@ type HealthDeps = import('../../src/core/health.ts').HealthDeps;
 // HTTP helper
 // ---------------------------------------------------------------------------
 
+const CONTRACTS_HEALTH_TOKEN = 'contracts-test-health-token-2515';
+
 async function httpRequest(
   url: string,
   method = 'GET',
+  headers: Record<string, string> = {},
 ): Promise<{ status: number; body: string }> {
-  const res = await fetch(url, { method });
+  const res = await fetch(url, { method, headers });
   const body = await res.text();
   return { status: res.status, body };
 }
@@ -232,6 +235,10 @@ describe('Health endpoint contract', () => {
   };
 
   beforeAll(async () => {
+    // #2515: diagnostic projection is bearer-gated; set a test token so
+    // contract tests can reach the full body. Unauthenticated callers get
+    // only the public liveness envelope.
+    process.env.WHATSOUP_HEALTH_TOKEN = CONTRACTS_HEALTH_TOKEN;
     server = startHealthServer(deps);
     await new Promise<void>((resolve, reject) => {
       if (server.listening) {
@@ -248,6 +255,7 @@ describe('Health endpoint contract', () => {
 
   afterAll(async () => {
     await new Promise<void>((resolve) => server.close(() => resolve()));
+    delete process.env.WHATSOUP_HEALTH_TOKEN;
   });
 
   it('GET /health returns 200', async () => {
@@ -256,7 +264,9 @@ describe('Health endpoint contract', () => {
   });
 
   it('GET /health returns JSON with exact shape', async () => {
-    const { status, body } = await httpRequest(`${baseUrl}/health`);
+    const { status, body } = await httpRequest(`${baseUrl}/health`, 'GET', {
+      Authorization: `Bearer ${CONTRACTS_HEALTH_TOKEN}`,
+    });
     expect(status).toBe(200);
 
     const data = JSON.parse(body) as Record<string, unknown>;
@@ -343,7 +353,9 @@ describe('Health endpoint contract', () => {
     });
 
     try {
-      const { status, body } = await httpRequest(`http://127.0.0.1:${brokenPort}/health`);
+      const { status, body } = await httpRequest(`http://127.0.0.1:${brokenPort}/health`, 'GET', {
+        Authorization: `Bearer ${CONTRACTS_HEALTH_TOKEN}`,
+      });
       expect(status).toBe(500);
       const parsed = JSON.parse(body) as Record<string, unknown>;
       expect(parsed['status']).toBe('error');
@@ -353,7 +365,9 @@ describe('Health endpoint contract', () => {
   });
 
   it('unprocessed MUST NOT return -1 (sentinel eliminated)', async () => {
-    const { body } = await httpRequest(`${baseUrl}/health`);
+    const { body } = await httpRequest(`${baseUrl}/health`, 'GET', {
+      Authorization: `Bearer ${CONTRACTS_HEALTH_TOKEN}`,
+    });
     const data = JSON.parse(body) as Record<string, unknown>;
     const sq = data['sqlite'] as Record<string, unknown>;
     expect(sq['unprocessed']).not.toBe(-1);
@@ -361,7 +375,9 @@ describe('Health endpoint contract', () => {
 
   it('last_run is null when no enrichment run has occurred', async () => {
     lastRun = null;
-    const { status, body } = await httpRequest(`${baseUrl}/health`);
+    const { status, body } = await httpRequest(`${baseUrl}/health`, 'GET', {
+      Authorization: `Bearer ${CONTRACTS_HEALTH_TOKEN}`,
+    });
     expect(status).toBe(200);
     const data = JSON.parse(body) as Record<string, unknown>;
     const en = data['enrichment'] as Record<string, unknown>;
@@ -371,7 +387,9 @@ describe('Health endpoint contract', () => {
   it('last_run reflects ISO string when enrichment run has occurred', async () => {
     const iso = new Date().toISOString();
     lastRun = iso;
-    const { body } = await httpRequest(`${baseUrl}/health`);
+    const { body } = await httpRequest(`${baseUrl}/health`, 'GET', {
+      Authorization: `Bearer ${CONTRACTS_HEALTH_TOKEN}`,
+    });
     const data = JSON.parse(body) as Record<string, unknown>;
     const en = data['enrichment'] as Record<string, unknown>;
     expect(en['last_run']).toBe(iso);
@@ -384,7 +402,9 @@ describe('Health endpoint contract', () => {
        VALUES ('phone', '19995550001', 'pending', 'Test User', datetime('now'))`,
     );
 
-    const { body } = await httpRequest(`${baseUrl}/health`);
+    const { body } = await httpRequest(`${baseUrl}/health`, 'GET', {
+      Authorization: `Bearer ${CONTRACTS_HEALTH_TOKEN}`,
+    });
     const data = JSON.parse(body) as Record<string, unknown>;
     const ac = data['access_control'] as Record<string, unknown>;
     expect(ac['pending_count'] as number).toBeGreaterThanOrEqual(1);
@@ -396,7 +416,9 @@ describe('Health endpoint contract', () => {
     const savedJid = connectionManager.botJid;
     connectionManager.botJid = null;
 
-    const { status, body } = await httpRequest(`${baseUrl}/health`);
+    const { status, body } = await httpRequest(`${baseUrl}/health`, 'GET', {
+      Authorization: `Bearer ${CONTRACTS_HEALTH_TOKEN}`,
+    });
     expect(status).toBe(503);
     const data = JSON.parse(body) as Record<string, unknown>;
     expect(data['status']).toBe('unhealthy');

@@ -723,9 +723,9 @@ describe('B22 group 4: turn-error class degrade contract', () => {
   const DEBOUNCE_MS = 60 * 1000; // TRANSIENT_TURN_ERROR_DEGRADE_DEBOUNCE_MS
   const STALE_MS = 15 * 60 * 1000; // TRANSIENT_TURN_ERROR_STALE_MS
 
-  function httpGet(port: number, path: string): Promise<{ status: number; body: string }> {
+  function httpGet(port: number, path: string, headers: Record<string, string> = {}): Promise<{ status: number; body: string }> {
     return new Promise((resolve, reject) => {
-      const req = request({ hostname: '127.0.0.1', port, path, method: 'GET' }, (res) => {
+      const req = request({ hostname: '127.0.0.1', port, path, method: 'GET', headers }, (res) => {
         let data = '';
         res.on('data', (chunk) => { data += chunk; });
         res.on('end', () => resolve({ status: res.statusCode ?? 0, body: data }));
@@ -737,6 +737,12 @@ describe('B22 group 4: turn-error class degrade contract', () => {
 
   /** Spin the real health server (ephemeral port), read /health, tear down. */
   async function healthStatusFor(turnCapability: Record<string, unknown>): Promise<string> {
+    // #2515: the diagnostic projection is bearer-gated; set a test token and
+    // pass it in the Authorization header so healthStatusFor reads the full
+    // diagnostic status (including turn-capability degrade), not just the
+    // public liveness envelope.
+    const HEALTH_TOKEN = 'contract-test-health-token-2515';
+    process.env.WHATSOUP_HEALTH_TOKEN = HEALTH_TOKEN;
     const hdb = new RealDatabase(':memory:');
     hdb.open();
     const deps: HealthDeps = {
@@ -768,10 +774,13 @@ describe('B22 group 4: turn-error class degrade contract', () => {
           else reject(new Error('health server bound without a port'));
         });
       });
-      const { status, body } = await httpGet(port, '/health');
+      const { status, body } = await httpGet(port, '/health', {
+        Authorization: `Bearer ${HEALTH_TOKEN}`,
+      });
       expect(status).toBe(200);
       return (JSON.parse(body) as { status: string }).status;
     } finally {
+      delete process.env.WHATSOUP_HEALTH_TOKEN;
       await new Promise<void>((resolve) => server.close(() => resolve()));
       hdb.close();
     }

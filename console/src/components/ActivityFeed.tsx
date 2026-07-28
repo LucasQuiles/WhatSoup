@@ -87,11 +87,19 @@ const ActivityFeed: FC<ActivityFeedProps> = ({ events, error, onRetry }) => {
     return counts;
   }, [displayEvents]);
 
-  // Only the newest unresolved connection/health error per instance gets restart/stop
+  // #2524: display state must never be the source of mutation authority.
+  // Eligibility is derived from the COMPLETE LIVE current-state observation,
+  // independent of filter, sort, pagination, pause, or error. A paused snapshot
+  // is frozen history; an error/unavailable feed has no current observation.
+  // Filtering and sorting are pure presentation operations and cannot change
+  // which actions are eligible. A recovery row that supersedes an older
+  // incident remains visible to the eligibility scan even when hidden by a
+  // filter (e.g. `errors`), so the resolved incident cannot be resurrected.
   const actionableKeys = useMemo(() => {
+    if (paused || error) return new Set<string>();
     const seen = new Set<string>();
     const keys = new Set<string>();
-    for (const event of filtered) {
+    for (const event of events) {
       const inst = event.instance;
       const d = event.detail;
       if (!inst || seen.has(inst)) continue;
@@ -105,7 +113,7 @@ const ActivityFeed: FC<ActivityFeedProps> = ({ events, error, onRetry }) => {
       }
     }
     return keys;
-  }, [filtered]);
+  }, [events, paused, error]);
 
   // Per-instance pending lock
   const [pendingInstances, setPendingInstances] = useState<Set<string>>(new Set());
