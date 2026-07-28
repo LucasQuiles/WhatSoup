@@ -18,15 +18,15 @@ The **Inconsistencies** section lists missing or stale index entries compared wi
 scoped markdown files currently on disk.
 
 **Repo:** `WhatSoup`
-**Total entries:** 87
+**Total entries:** 88
 
 ## Totals
 
 | Dimension | Breakdown |
 |---|---|
-| Kind | handoff=7, plan=44, review=4, spec=31, state=1 |
-| Status | active=19, closed=4, completed=33, deferred=7, pending=15, unknown=9 |
-| Status source | body-marker=81, fallback=5, state-md-status=1 |
+| Kind | handoff=8, plan=44, review=4, spec=31, state=1 |
+| Status | active=19, closed=4, completed=33, deferred=7, pending=15, unknown=10 |
+| Status source | body-marker=81, fallback=6, state-md-status=1 |
 
 ## Inconsistencies
 
@@ -58,10 +58,11 @@ scoped markdown files currently on disk.
 | `docs/superpowers/specs/provider-event-lifecycle/requirements.md` | spec | requirements | body-marker |
 | `docs/superpowers/specs/provider-event-lifecycle/tasks.md` | spec | tasks | body-marker |
 
-### Unknown-status — triage needed (9)
+### Unknown-status — triage needed (10)
 
 | Path | Kind | Topic | Last Mod |
 |------|------|-------|----------|
+| `docs/superpowers/handoffs/2026-07-28-incident-control-plane-finder-report.md` | handoff | incident-control-plane-finder-report | 2026-07-28 |
 | `docs/superpowers/plans/2026-07-15-headless-fallback-runtime-alignment.md` | plan | headless-fallback-runtime-alignment | 2026-07-15 |
 | `docs/superpowers/plans/2026-07-17-boundary-validator-ci-refactor.md` | plan | boundary-validator-ci-refactor | 2026-07-17 |
 | `docs/superpowers/plans/2026-07-17-macos-credential-durability.md` | plan | macos-credential-durability | 2026-07-17 |
@@ -112,7 +113,7 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 |------|------|--------|--------|-------|----------|------------|
 | `docs/sdlc/closed/fleet-charts-20260407/state.md` | state | deferred | state-md-status | fleet-charts | 2026-04-23 |  |
 
-### docs/superpowers/handoffs  _(7 entries)_
+### docs/superpowers/handoffs  _(8 entries)_
 
 | Path | Kind | Status | Source | Topic | Last Mod | Supersedes |
 |------|------|--------|--------|-------|----------|------------|
@@ -123,6 +124,7 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 | `docs/superpowers/handoffs/2026-07-15-semantic-boundary-hygiene-implementation-notes.md` | handoff | completed | body-marker | semantic-boundary-hygiene-implementation-notes | 2026-07-16 |  |
 | `docs/superpowers/handoffs/2026-07-16-boundary-contract-feedback-implementation-notes.md` | handoff | active | body-marker | boundary-contract-feedback-implementation-notes | 2026-07-28 |  |
 | `docs/superpowers/handoffs/2026-07-16-boundary-core-history-mining.md` | handoff | pending | body-marker | boundary-core-history-mining | 2026-07-16 |  |
+| `docs/superpowers/handoffs/2026-07-28-incident-control-plane-finder-report.md` | handoff | unknown | fallback | incident-control-plane-finder-report | 2026-07-28 |  |
 
 ### docs/superpowers/plans  _(44 entries)_
 
@@ -231,4 +233,4 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 ---
 
 - Derived from `docs/work-index.json`
-- Generated at 2026-07-28T16:48:04Z from commit `4a6f1e72af7b7a53487ed908376b5287bbda98b5`
+- Generated at 2026-07-28T17:13:05Z from commit `fa25166b21820a4b9efb82403483dd7307730530`
