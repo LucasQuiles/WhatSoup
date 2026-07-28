@@ -21,11 +21,18 @@ if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
 from lib.bot_errors_redaction import redact_bot_errors_text, redact_json_value as redact_shared_json_value
+from lib.controller_log import (
+    ControllerLogContext,
+    controller_cycle,
+    metadata_only_controller_details,
+    write_controller_log,
+)
 
 
 TAILSCALE_STATUS_CACHE: dict[str, Any] | None = None
 TAILSCALE_STATUS_ERROR: str | None = None
 REMOTE_HOST_TARGETS_CACHE: dict[str, list[str]] = {}
+CONTROLLER_LOG_CONTEXT = ControllerLogContext("collector")
 
 
 def reset_tailscale_cache() -> None:
@@ -598,9 +605,40 @@ def redacted_collector_payload(value: Any) -> Any:
     return redact_shared_json_value(value, redact_collector_text)
 
 
-def append_log(payload: dict[str, Any]) -> None:
+def persist_controller_log_health(record: dict[str, Any]) -> None:
+    atomic_write_json(
+        state_root() / "controller-log-health" / "collector.json",
+        record,
+    )
+
+
+def controller_log_fallback(line: str) -> None:
+    print(line, file=sys.stderr, flush=True)
+
+
+def append_log(
+    payload: dict[str, Any],
+    *,
+    level: str = "info",
+    outcome: str = "observed",
+) -> str:
     path = state_root() / "logs" / "collector.jsonl"
-    append_private_jsonl(path, {"time": now_iso(), "pid": os.getpid(), **redacted_collector_payload(payload)})
+    redacted = redacted_collector_payload(payload)
+    record_kind = redacted.get("type") if isinstance(redacted, dict) else None
+    if not isinstance(record_kind, str):
+        raise ValueError("collector controller log requires a bounded type")
+    details = {key: value for key, value in redacted.items() if key != "type"}
+    return write_controller_log(
+        context=CONTROLLER_LOG_CONTEXT,
+        record_kind=record_kind,
+        level=level,
+        outcome=outcome,
+        durability_class="diagnostic_best_effort",
+        details=metadata_only_controller_details(details),
+        append_record=lambda record: append_private_jsonl(path, record),
+        persist_health=persist_controller_log_health,
+        emit_fallback=controller_log_fallback,
+    )
 
 
 def state_path() -> Path:
@@ -2041,6 +2079,14 @@ def emit_collector_capture_escalation_event(
     )
 
 
+@controller_cycle(
+    CONTROLLER_LOG_CONTEXT,
+    lambda kind, details, level, outcome: append_log(
+        {"type": kind, **details},
+        level=level,
+        outcome=outcome,
+    ),
+)
 def run_once(
     remotes: list[str],
     best_effort_remotes: set[str],

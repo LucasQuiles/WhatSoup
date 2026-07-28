@@ -30,11 +30,18 @@ if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
 from lib.bot_errors_daily_health import daily_health_host_from_payload
-from lib.bot_errors_redaction import redact_bot_errors_text
+from lib.bot_errors_redaction import redact_bot_errors_text, redact_json_value as redact_shared_json_value
+from lib.controller_log import (
+    ControllerLogContext,
+    controller_cycle,
+    metadata_only_controller_details,
+    write_controller_log,
+)
 
 
 BOT_ERRORS_JID = os.environ.get("BOT_ERRORS_JID", "").strip()
 BOT_ERRORS_EXPECTED_JID = os.environ.get("BOT_ERRORS_EXPECTED_JID", "").strip()
+CONTROLLER_LOG_CONTEXT = ControllerLogContext("dispatcher")
 DEFAULT_SOCKET = os.environ.get(
     "BOT_ERRORS_SOCKET_PATH",
     "",
@@ -645,10 +652,38 @@ def env_int(name: str, default: int) -> int:
         return default
 
 
-def append_dispatch_log(paths: dict[str, Path], payload: dict[str, Any]) -> None:
+def persist_controller_log_health(paths: dict[str, Path], record: dict[str, Any]) -> None:
+    atomic_write_json(paths["root"] / "controller-log-health" / "dispatcher.json", record)
+
+
+def controller_log_fallback(line: str) -> None:
+    print(line, file=sys.stderr, flush=True)
+
+
+def append_dispatch_log(
+    paths: dict[str, Path],
+    payload: dict[str, Any],
+    *,
+    level: str = "info",
+    outcome: str = "observed",
+) -> str:
     log_path = paths["logs"] / "dispatch.jsonl"
-    record = {"time": now_iso(), "pid": os.getpid(), **payload}
-    append_private_jsonl(log_path, record)
+    redacted = redact_shared_json_value(payload, redact)
+    record_kind = redacted.get("type") if isinstance(redacted, dict) else None
+    if not isinstance(record_kind, str):
+        raise ValueError("dispatcher controller log requires a bounded type")
+    details = {key: value for key, value in redacted.items() if key != "type"}
+    return write_controller_log(
+        context=CONTROLLER_LOG_CONTEXT,
+        record_kind=record_kind,
+        level=level,
+        outcome=outcome,
+        durability_class="diagnostic_best_effort",
+        details=metadata_only_controller_details(details),
+        append_record=lambda record: append_private_jsonl(log_path, record),
+        persist_health=lambda record: persist_controller_log_health(paths, record),
+        emit_fallback=controller_log_fallback,
+    )
 
 
 def read_json(path: Path) -> dict[str, Any]:
@@ -4897,6 +4932,15 @@ def process_one(path: Path, paths: dict[str, Path]) -> tuple[bool, str]:
     return True, "sent"
 
 
+@controller_cycle(
+    CONTROLLER_LOG_CONTEXT,
+    lambda kind, details, level, outcome: append_dispatch_log(
+        state_paths(),
+        {"type": kind, **details},
+        level=level,
+        outcome=outcome,
+    ),
+)
 def run_once(max_events: int) -> dict[str, Any]:
     paths = setup_dirs()
     lock_path = paths["locks"] / "dispatcher.lock"
