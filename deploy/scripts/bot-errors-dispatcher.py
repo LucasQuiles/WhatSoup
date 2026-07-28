@@ -588,6 +588,12 @@ def setup_dirs() -> dict[str, Path]:
 
 
 def atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
+    # Create the parent 0700 before opening the temp file, matching the
+    # collector's writer. Without this the O_CREAT|O_EXCL below raises
+    # FileNotFoundError for any path whose directory setup_dirs() does not
+    # pre-create — which is every controller-log-health receipt, since that
+    # directory appears nowhere in the setup list.
+    ensure_private_dir(path.parent)
     tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
     data = (json.dumps(payload, indent=2, sort_keys=True) + "\n").encode("utf-8")
     fd = os.open(

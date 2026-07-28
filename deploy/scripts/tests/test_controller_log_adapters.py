@@ -231,3 +231,43 @@ def test_identical_append_failure_policy_across_all_five_adapters(
     assert health[-1]["status"] == "degraded"
     assert health[-1]["failureClass"] == "permission_denied"
     assert len(fallback) == 1
+
+
+def test_dispatcher_sink_health_receipt_lands_on_a_real_filesystem(tmp_path: Path) -> None:
+    """The dispatcher's sink-health receipt must actually be writable.
+
+    Regression: `persist_controller_log_health` writes into a
+    `controller-log-health/` directory that `setup_dirs()` does not create, and
+    the dispatcher's `atomic_write_json` opened the temp file with
+    O_CREAT|O_EXCL without first ensuring the parent — so every receipt raised
+    FileNotFoundError and the compensating control silently did not exist.
+
+    This test deliberately does NOT monkeypatch the writer. The sibling tests in
+    this file patch `append_private_jsonl`, which is why they stayed green while
+    the real write path could not run. Exercising the real filesystem is the
+    whole point.
+    """
+    dispatcher = load_script("bot-errors-dispatcher.py")
+
+    # Exactly the directories setup_dirs() pre-creates — controller-log-health
+    # is deliberately absent, which is the production shape.
+    for name in (
+        "quarantine",
+        "testleak",
+        "writefail_recovered",
+        "writefail_quarantine",
+        "locks",
+        "logs",
+        "dead_letter",
+    ):
+        (tmp_path / name).mkdir(parents=True, exist_ok=True)
+
+    receipt = tmp_path / "controller-log-health" / "dispatcher.json"
+    assert not receipt.parent.exists()
+
+    dispatcher.persist_controller_log_health({"root": tmp_path}, {"ok": True})
+
+    assert receipt.exists(), "sink-health receipt was not written"
+    # The private-mode contract must hold for the directory this now creates.
+    assert oct(receipt.parent.stat().st_mode & 0o777) == "0o700"
+    assert oct(receipt.stat().st_mode & 0o777) == "0o600"
