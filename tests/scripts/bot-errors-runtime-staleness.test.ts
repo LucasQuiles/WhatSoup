@@ -11,7 +11,15 @@
 //   FRESH   => --clear emitted
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, writeFileSync, chmodSync, rmSync } from 'node:fs';
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  rmSync,
+  utimesSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -20,6 +28,12 @@ const SCRIPT = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
   '../../deploy/scripts/bot-errors-runtime-staleness.py',
 );
+const CRITICAL_SUFFIXES = [
+  'src/runtimes/agent/failure-taxonomy.ts',
+  'src/runtimes/agent/runtime.ts',
+  'src/runtimes/agent/fallback-empty-advance.ts',
+  'src/core/health.ts',
+];
 
 // ---------------------------------------------------------------------------
 // Fake binaries
@@ -32,6 +46,9 @@ const FAKE_SYSTEMCTL = [
   // printf with %s keeps the literal off the email/private-label shape patterns.
   '  *list-units*)',
   '    if [ -n "${FAKE_DISCOVERY_EMPTY:-}" ]; then exit 0; fi',
+  '    if [ -n "${FAKE_DISCOVERY_MALFORMED:-}" ]; then echo "invalid"; exit 0; fi',
+  '    if [ -n "${FAKE_DISCOVERY_MIXED:-}" ]; then',
+  '      printf "whatsoup@%s.service loaded active running\\ninvalid\\n" demo; exit 0; fi',
   '    printf "whatsoup@%s.service  loaded active running WhatSoup %s\\n" demo demo ;;',
   // Plain "-" (not ":-") so an explicitly-empty override (FAKE_MAINPID='')
   // echoes truly empty output instead of falling back to the default —
@@ -44,13 +61,17 @@ const FAKE_SYSTEMCTL = [
 const FAKE_PS = [
   '#!/usr/bin/env bash',
   'if [ -n "${FAKE_PS_RC:-}" ]; then exit "${FAKE_PS_RC}"; fi',
-  'echo "${FAKE_ETIMES:-100}"',
+  'if [ -n "${FAKE_PS_SLEEP:-}" ]; then sleep "${FAKE_PS_SLEEP}"; fi',
+  'echo "${FAKE_ETIMES-100}"',
 ].join('\n');
 
 const FAKE_FIND = [
   '#!/usr/bin/env bash',
   'if [ -n "${FAKE_FIND_RC:-}" ]; then exit "${FAKE_FIND_RC}"; fi',
   'if [ -n "${FAKE_FIND_EMPTY:-}" ]; then exit 0; fi',
+  'if [ -n "${FAKE_FIND_MALFORMED:-}" ]; then echo "invalid"; exit 0; fi',
+  'if [ -n "${FAKE_FIND_MIXED:-}" ]; then printf "1000000000\\t/repo/src/foo.ts\\ninvalid\\n"; exit 0; fi',
+  'if [ -n "${FAKE_FIND_NONFINITE:-}" ]; then printf "inf\\t/repo/src/foo.ts\\n"; exit 0; fi',
   'printf "%s\\t%s\\n" "${FAKE_SRC_EPOCH:-1000000000}" "${FAKE_SRC_FILE:-/repo/src/foo.ts}"',
 ].join('\n');
 
@@ -58,6 +79,10 @@ const FAKE_FIND = [
 const FAKE_EMIT_PY = [
   '#!/usr/bin/env python3',
   'import os, sys',
+  'ledger = os.environ.get("FAKE_EMIT_LEDGER", "")',
+  'if ledger:',
+  '    with open(ledger, "a", encoding="utf-8") as fh:',
+  '        fh.write("invoked\\n")',
   'rc = os.environ.get("FAKE_EMIT_RC", "")',
   'if rc:',
   '    sys.exit(int(rc))',
@@ -83,11 +108,34 @@ const FAKE_EMIT_PY = [
 
 let binDir: string;
 let emitScript: string;
+let emitLedger: string;
+let procRoot: string;
 
 function writeFake(name: string, body: string): void {
   const p = path.join(binDir, name);
   writeFileSync(p, body, 'utf8');
   chmodSync(p, 0o755);
+}
+
+function setProcessRoot(repoRoot: string, pid = '999999'): void {
+  const pidRoot = path.join(procRoot, pid);
+  mkdirSync(pidRoot, { recursive: true });
+  writeFileSync(
+    path.join(pidRoot, 'cmdline'),
+    `node\0${path.join(repoRoot, 'src/bootstrap.ts')}\0demo\0`,
+    'latin1',
+  );
+}
+
+function makeRuntimeRoot(): string {
+  const root = mkdtempSync(path.join(tmpdir(), 'brs-runtime-'));
+  for (const suffix of CRITICAL_SUFFIXES) {
+    const file = path.join(root, suffix);
+    mkdirSync(path.dirname(file), { recursive: true });
+    writeFileSync(file, 'fixture\n', 'utf8');
+    utimesSync(file, 1_000_000_000, 1_000_000_000);
+  }
+  return root;
 }
 
 function run(
@@ -102,10 +150,10 @@ function run(
       // Default every run at the stub emitter so non-dry-run cases NEVER touch
       // the real outbox. A test may still override via fakeEnv.
       BOT_ERRORS_STALENESS_EMIT_SCRIPT: emitScript,
-      // Deterministic repo root so the script never needs its (removed)
-      // script-anchor fallback. Placed before the fakeEnv spread so a test
-      // can override it (including to '' to simulate absence).
-      BOT_ERRORS_STALENESS_REPO_ROOT: process.cwd(),
+      FAKE_EMIT_LEDGER: emitLedger,
+      // Bind the source root to a synthetic target-process cmdline rather than
+      // accepting a configured checkout fallback.
+      BOT_ERRORS_STALENESS_PROC_ROOT: procRoot,
       ...fakeEnv,
       PATH: `${binDir}:${process.env.PATH ?? '/usr/bin:/bin'}`,
     },
@@ -125,14 +173,21 @@ beforeEach(() => {
 
   const emitDir = mkdtempSync(path.join(tmpdir(), 'brs-emit-'));
   emitScript = path.join(emitDir, 'bot-errors-emit.py');
+  emitLedger = path.join(emitDir, 'invocations.log');
   writeFileSync(emitScript, FAKE_EMIT_PY, 'utf8');
   chmodSync(emitScript, 0o644);
+
+  procRoot = mkdtempSync(path.join(tmpdir(), 'brs-proc-'));
+  setProcessRoot(process.cwd());
 });
 
 afterEach(() => {
   rmSync(binDir, { recursive: true, force: true });
   if (emitScript) {
     rmSync(path.dirname(emitScript), { recursive: true, force: true });
+  }
+  if (procRoot) {
+    rmSync(procRoot, { recursive: true, force: true });
   }
 });
 
@@ -283,6 +338,7 @@ describe('--config-check', () => {
     const r = run(['--config-check']);
     expect(r.status).toBe(0);
     expect(r.stdout).toContain('config ok');
+    expect(r.stdout).not.toContain(emitScript);
   });
 });
 
@@ -309,7 +365,7 @@ describe('probe honesty (B1)', () => {
   it('malformed MainPID output → exit 2, distinct from not-running', () => {
     const res = run(['--instance', 'demo'], { FAKE_MAINPID: 'garbage' });
     expect(res.status).toBe(2);
-    expect(res.stderr).toContain('malformed MainPID');
+    expect(res.stderr).toContain('malformed');
     expect(res.stdout).not.toContain('ALERT');
     expect(res.stdout).not.toContain('CLEAR');
   });
@@ -343,13 +399,271 @@ describe('probe honesty (B1)', () => {
     expect(res.stdout).not.toContain('CLEAR');
   });
 
-  it('unresolvable repo root (no /proc match, no env) → exit 2', () => {
+  it('unresolvable process source identity → exit 2', () => {
     const res = run(['--instance', 'demo'], {
       FAKE_MAINPID: '4194000',
-      BOT_ERRORS_STALENESS_REPO_ROOT: '',
     });
     expect(res.status).toBe(2);
-    expect(res.stderr).toContain('repo root');
+    expect(res.stderr).toContain('missing');
+  });
+
+  it('observation-only JSON reports current with exit 0 and never emits', () => {
+    const res = run(['--observe-only', '--json', '--instance', 'private-json-canary'], {
+      FAKE_SRC_EPOCH: '1000000000',
+      FAKE_EMIT_RC: '9',
+    });
+    expect(res.status).toBe(0);
+    const report = JSON.parse(res.stdout);
+    expect(report).toEqual({
+      schemaVersion: 1,
+      check: 'runtime-code-staleness',
+      executionStatus: 'completed',
+      status: 'current',
+      evidenceComplete: true,
+      inventoryStatus: 'not_requested',
+      criterion: 'all_source',
+      counts: {
+        total: 1,
+        current: 1,
+        stale: 0,
+        notRunning: 0,
+        unknown: 0,
+      },
+      failureCounts: {
+        missing: 0,
+        malformed: 0,
+        timeout: 0,
+        permissionError: 0,
+        commandError: 0,
+      },
+    });
+    expect(res.stdout).not.toContain('CLEAR');
+    expect(res.stdout).not.toContain('ALERT');
+    expect(res.stdout).not.toContain('demo');
+    expect(res.stdout).not.toContain('private-json-canary');
+    expect(res.stderr).toBe('');
+    expect(existsSync(emitLedger)).toBe(false);
+  });
+
+  it('observation-only JSON reports stale with exit 1 and never emits', () => {
+    const res = run(['--observe-only', '--json', '--instance', 'demo'], {
+      FAKE_SRC_EPOCH: String(Math.floor(Date.now() / 1000) + 3600),
+      FAKE_EMIT_RC: '9',
+    });
+    expect(res.status).toBe(1);
+    expect(JSON.parse(res.stdout)).toMatchObject({
+      schemaVersion: 1,
+      check: 'runtime-code-staleness',
+      status: 'stale',
+      evidenceComplete: true,
+      counts: { total: 1, current: 0, stale: 1, notRunning: 0, unknown: 0 },
+    });
+    expect(res.stdout).not.toContain('demo');
+    expect(res.stdout).not.toContain('ALERT');
+    expect(res.stderr).toBe('');
+    expect(existsSync(emitLedger)).toBe(false);
+  });
+
+  it('observation-only JSON distinguishes exact not-running with exit 0', () => {
+    const res = run(['--observe-only', '--json', '--instance', 'demo'], {
+      FAKE_MAINPID: '0',
+      FAKE_EMIT_RC: '9',
+    });
+    expect(res.status).toBe(0);
+    expect(JSON.parse(res.stdout)).toMatchObject({
+      status: 'not_running',
+      evidenceComplete: true,
+      counts: { total: 1, current: 0, stale: 0, notRunning: 1, unknown: 0 },
+    });
+    expect(res.stdout).not.toContain('demo');
+    expect(res.stderr).toBe('');
+    expect(existsSync(emitLedger)).toBe(false);
+  });
+
+  it('observation-only human output derives from the same bounded result', () => {
+    const res = run(['--observe-only', '--instance', 'private-canary'], {
+      FAKE_MAINPID: '0',
+      FAKE_EMIT_RC: '9',
+    });
+    expect(res.status).toBe(0);
+    expect(res.stdout).toBe(
+      'runtime-code-staleness: status=not_running execution_status=completed ' +
+      'evidence_complete=true inventory_status=not_requested criterion=all_source ' +
+      'total=1 current=0 stale=0 not_running=1 unknown=0\n',
+    );
+    expect(res.stdout).not.toContain('private-canary');
+    expect(existsSync(emitLedger)).toBe(false);
+  });
+
+  it('--json without --observe-only fails closed', () => {
+    const res = run(['--json', '--instance', 'demo']);
+    expect(res.status).toBe(2);
+    expect(res.stdout).toBe('');
+    expect(res.stderr).toContain('--json requires --observe-only');
+  });
+
+  it('--config-check cannot bypass observation JSON validation', () => {
+    const res = run(['--config-check', '--json']);
+    expect(res.status).toBe(2);
+    expect(res.stdout).toBe('');
+    expect(res.stderr).toContain('--json requires --observe-only');
+    expect(res.stderr).not.toContain(emitScript);
+  });
+
+  it('--critical requires the complete critical set before reporting current', () => {
+    const root = makeRuntimeRoot();
+    try {
+      const future = Math.floor(Date.now() / 1000) + 3600;
+      utimesSync(path.join(root, CRITICAL_SUFFIXES[0]), future, future);
+      rmSync(path.join(root, CRITICAL_SUFFIXES[1]));
+      setProcessRoot(root);
+      const res = run(['--observe-only', '--json', '--critical', '--instance', 'demo'], {
+        FAKE_SRC_EPOCH: '1000000000',
+      });
+      expect(res.status).toBe(2);
+      expect(JSON.parse(res.stdout)).toMatchObject({
+        status: 'unknown',
+        evidenceComplete: false,
+        failureCounts: { missing: 1 },
+      });
+      expect(existsSync(emitLedger)).toBe(false);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('--critical observes later unreadable entries even after finding staleness', () => {
+    const root = makeRuntimeRoot();
+    try {
+      const future = Math.floor(Date.now() / 1000) + 3600;
+      utimesSync(path.join(root, CRITICAL_SUFFIXES[0]), future, future);
+      const code = [
+        'import builtins, importlib.util',
+        `spec = importlib.util.spec_from_file_location("runtime_staleness", ${JSON.stringify(SCRIPT)})`,
+        'module = importlib.util.module_from_spec(spec)',
+        'spec.loader.exec_module(module)',
+        'real_open = builtins.open',
+        'def controlled_open(file, *args, **kwargs):',
+        `    if str(file).endswith(${JSON.stringify(CRITICAL_SUFFIXES[1])}):`,
+        '        raise PermissionError()',
+        '    return real_open(file, *args, **kwargs)',
+        'module.open = controlled_open',
+        'try:',
+        `    module.is_critical_stale(1, 2, ${JSON.stringify(root)})`,
+        'except module.ProbeError as exc:',
+        '    print(exc.kind)',
+        '    raise SystemExit(0)',
+        'raise SystemExit(1)',
+      ].join('\n');
+      const res = spawnSync('python3', ['-c', code], { encoding: 'utf8' });
+      expect(res.status).toBe(0);
+      expect(res.stdout).toBe('permission_error\n');
+      expect(res.stderr).toBe('');
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('--critical classifies from the canonical complete critical observation', () => {
+    const root = makeRuntimeRoot();
+    try {
+      setProcessRoot(root);
+      const current = run(['--observe-only', '--json', '--critical', '--instance', 'demo'], {
+        FAKE_SRC_EPOCH: '1000000000',
+      });
+      expect(current.status).toBe(0);
+      expect(JSON.parse(current.stdout)).toMatchObject({
+        status: 'current',
+        criterion: 'critical',
+      });
+
+      const future = Math.floor(Date.now() / 1000) + 3600;
+      utimesSync(path.join(root, CRITICAL_SUFFIXES[0]), future, future);
+      const stale = run(['--observe-only', '--json', '--critical', '--instance', 'demo'], {
+        FAKE_SRC_EPOCH: '1000000000',
+      });
+      expect(stale.status).toBe(1);
+      expect(JSON.parse(stale.stdout).status).toBe('stale');
+      expect(existsSync(emitLedger)).toBe(false);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it.each([
+    ['discovery failure', [], { FAKE_SYSTEMCTL_RC: '1' }, 'commandError', 'commandError'],
+    ['empty discovery', [], { FAKE_DISCOVERY_EMPTY: '1' }, 'missing', 'missing'],
+    ['malformed discovery', [], { FAKE_DISCOVERY_MALFORMED: '1' }, 'malformed', 'malformed'],
+    ['mixed discovery', [], { FAKE_DISCOVERY_MIXED: '1' }, 'malformed', 'malformed'],
+    ['PID failure', ['--instance', 'demo'], { FAKE_SYSTEMCTL_RC: '1' }, 'commandError', 'not_requested'],
+    ['empty PID', ['--instance', 'demo'], { FAKE_MAINPID: '' }, 'missing', 'not_requested'],
+    ['malformed PID', ['--instance', 'demo'], { FAKE_MAINPID: 'invalid' }, 'malformed', 'not_requested'],
+    ['elapsed-time failure', ['--instance', 'demo'], { FAKE_PS_RC: '1' }, 'commandError', 'not_requested'],
+    ['empty elapsed time', ['--instance', 'demo'], { FAKE_ETIMES: '' }, 'missing', 'not_requested'],
+    ['malformed elapsed time', ['--instance', 'demo'], { FAKE_ETIMES: 'invalid' }, 'malformed', 'not_requested'],
+    ['source scan failure', ['--instance', 'demo'], { FAKE_FIND_RC: '1' }, 'commandError', 'not_requested'],
+    ['empty source scan', ['--instance', 'demo'], { FAKE_FIND_EMPTY: '1' }, 'missing', 'not_requested'],
+    ['malformed source scan', ['--instance', 'demo'], { FAKE_FIND_MALFORMED: '1' }, 'malformed', 'not_requested'],
+    ['mixed source scan', ['--instance', 'demo'], { FAKE_FIND_MIXED: '1' }, 'malformed', 'not_requested'],
+    ['non-finite source time', ['--instance', 'demo'], { FAKE_FIND_NONFINITE: '1' }, 'malformed', 'not_requested'],
+  ])('observation-only JSON makes %s typed unknown with exit 2', (_name, args, env, failureKey, inventoryStatus) => {
+    const res = run(['--observe-only', '--json', ...args], {
+      ...env,
+      FAKE_EMIT_RC: '9',
+    });
+    expect(res.status).toBe(2);
+    expect(JSON.parse(res.stdout)).toMatchObject({
+      schemaVersion: 1,
+      check: 'runtime-code-staleness',
+      executionStatus: 'incomplete',
+      status: 'unknown',
+      evidenceComplete: false,
+    });
+    const report = JSON.parse(res.stdout);
+    expect(report.failureCounts[failureKey]).toBe(1);
+    expect(report.inventoryStatus).toBe(inventoryStatus);
+    expect(
+      report.counts.current +
+      report.counts.stale +
+      report.counts.notRunning +
+      report.counts.unknown,
+    ).toBe(report.counts.total);
+    expect(res.stdout).not.toContain('demo');
+    expect(res.stdout).not.toContain('CLEAR');
+    expect(res.stdout).not.toContain('ALERT');
+    expect(res.stderr).toBe('');
+    expect(existsSync(emitLedger)).toBe(false);
+  });
+
+  it('observation-only JSON preserves timeout as a bounded failure class', () => {
+    const res = run(['--observe-only', '--json', '--instance', 'demo'], {
+      FAKE_PS_SLEEP: '1',
+      BOT_ERRORS_STALENESS_PROBE_TIMEOUT_SECONDS: '0.05',
+    });
+    expect(res.status).toBe(2);
+    expect(JSON.parse(res.stdout).failureCounts.timeout).toBe(1);
+    expect(res.stderr).toBe('');
+    expect(existsSync(emitLedger)).toBe(false);
+  });
+
+  it('observation-only JSON preserves permission failure as a bounded class', () => {
+    const code = [
+      'import importlib.util',
+      `spec = importlib.util.spec_from_file_location("runtime_staleness", ${JSON.stringify(SCRIPT)})`,
+      'module = importlib.util.module_from_spec(spec)',
+      'spec.loader.exec_module(module)',
+      'def deny(*args, **kwargs):',
+      '    raise PermissionError()',
+      'module.subprocess.run = deny',
+      'raise SystemExit(module.observe_once(instances=None, json_output=True, critical_only=False))',
+    ].join('\n');
+    const res = spawnSync('python3', ['-c', code], { encoding: 'utf8' });
+    expect(res.status).toBe(2);
+    expect(JSON.parse(res.stdout)).toMatchObject({
+      inventoryStatus: 'permissionError',
+      failureCounts: { permissionError: 1 },
+    });
+    expect(res.stderr).toBe('');
   });
 
   it('emit script failure → exit 1', () => {

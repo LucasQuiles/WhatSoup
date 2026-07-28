@@ -10,7 +10,8 @@ process keeps running the OLD in-memory code until it is restarted.
 
 This monitor detects instances whose running process is executing stale code
 relative to the source tree on disk and emits low-noise BOT ERRORS events.
-It is the deployed twin of ``scripts/process-code-staleness.ts``.
+It is the canonical runtime-staleness observation engine. Its observation-only
+mode provides the supported manual and machine-readable diagnostic surface.
 
 Verdict logic (deterministic, conservative)
 -------------------------------------------
@@ -34,18 +35,27 @@ whatsoup@ instances is also treated as a probe error, not an empty healthy
 fleet, since a discovery command that silently stops matching real units
 looks identical to zero instances.
 
+Observation-only reports retain bounded failure classes (`missing`,
+`malformed`, `timeout`, `permissionError`, and `commandError`) while omitting
+raw command output, paths, process identifiers, and instance labels.
+
 Exit codes
 ----------
-  0  Successful monitor run (regardless of staleness).
-  1  One or more emit() calls failed.
-  2  Probe/configuration error that prevented the run. Probe error dominates:
-     if any instance fails to probe, the run exits 2 even if other instances
-     probed and emitted successfully.
+  Scheduled emit mode:
+    0  Successful monitor run (regardless of staleness).
+    1  One or more emit() calls failed.
+    2  Probe/configuration error that prevented the run.
+
+  Observation-only mode:
+    0  Complete current/not-running observation.
+    1  Complete observation with one or more stale instances.
+    2  Incomplete or failed observation.
 """
 
 from __future__ import annotations
 
 import argparse
+import json
 import math
 import os
 import subprocess
@@ -71,14 +81,30 @@ class ProbeError(Exception):
 
     Unknown observations must never be converted to fresh/stale state (spec B1)."""
 
-# Files whose staleness is behaviourally load-bearing. Ported verbatim from
-# scripts/process-code-staleness.ts (CRITICAL_SUFFIXES).
+    KINDS = {
+        "missing",
+        "malformed",
+        "timeout",
+        "permission_error",
+        "command_error",
+    }
+
+    def __init__(self, kind: str):
+        if kind not in self.KINDS:
+            raise ValueError("unsupported probe error kind")
+        self.kind = kind
+        super().__init__(kind)
+
+
+# Files whose staleness is behaviourally load-bearing.
 CRITICAL_SUFFIXES: list[str] = [
     "src/runtimes/agent/failure-taxonomy.ts",
     "src/runtimes/agent/runtime.ts",
     "src/runtimes/agent/fallback-empty-advance.ts",
     "src/core/health.ts",
 ]
+OBSERVATION_SCHEMA_VERSION = 1
+OBSERVATION_CHECK = "runtime-code-staleness"
 
 
 # ---------------------------------------------------------------------------
@@ -119,21 +145,30 @@ def compute_boot_epoch(etimes: int, now_epoch: int) -> int:
 def parse_find_output(find_output: str) -> tuple[str | None, int | None]:
     """Parse ``find ... -printf '%T@\t%p\n'`` output; return (file, max_epoch).
 
-    Returns (None, None) when the output is empty or unparseable.
+    Returns (None, None) when output is empty. Any malformed row makes the
+    entire source observation unknown; partial parse success is not evidence
+    completeness.
     """
     best_epoch: int = -1
     best_file: str | None = None
     for line in find_output.splitlines():
-        tab = line.find("\t")
-        if tab < 0:
+        if not line:
             continue
+        if line.count("\t") != 1:
+            raise ProbeError("malformed")
+        epoch_text, file_path = line.split("\t", 1)
+        if not file_path:
+            raise ProbeError("malformed")
         try:
-            epoch = math.floor(float(line[:tab]))
-        except ValueError:
-            continue
+            epoch_float = float(epoch_text)
+            if not math.isfinite(epoch_float):
+                raise ProbeError("malformed")
+            epoch = math.floor(epoch_float)
+        except (ValueError, OverflowError) as exc:
+            raise ProbeError("malformed") from exc
         if epoch > best_epoch:
             best_epoch = epoch
-            best_file = line[tab + 1 :]
+            best_file = file_path
     if best_file is None:
         return None, None
     return best_file, best_epoch
@@ -151,18 +186,29 @@ def is_critical_stale(
     newest_src_epoch: int | None,
     repo_root: str,
 ) -> bool:
-    """Return True when any CRITICAL_SUFFIXES file changed since boot."""
+    """Return True when any required critical file changed since boot.
+
+    The complete critical set must be readable. Missing or unreadable entries
+    are unknown evidence, never an affirmative non-stale result.
+    """
     if boot_epoch is None:
         return False
+    critical_stale = False
     for suffix in CRITICAL_SUFFIXES:
         abs_path = os.path.join(repo_root, suffix)
         try:
+            with open(abs_path, "rb") as fh:
+                fh.read(1)
             mtime = math.floor(os.stat(abs_path).st_mtime)
-        except OSError:
-            continue
+        except FileNotFoundError as exc:
+            raise ProbeError("missing") from exc
+        except PermissionError as exc:
+            raise ProbeError("permission_error") from exc
+        except OSError as exc:
+            raise ProbeError("command_error") from exc
         if mtime > boot_epoch:
-            return True
-    return False
+            critical_stale = True
+    return critical_stale
 
 
 def build_emit_argv(
@@ -216,20 +262,38 @@ def build_clear_argv(*, instance: str) -> list[str]:
 # ---------------------------------------------------------------------------
 
 
-def _run(args: list[str], *, timeout: float = 15.0) -> tuple[int, str]:
-    """Run a subprocess; return (returncode, stdout). Never raises."""
+def _probe_timeout_seconds() -> float:
+    """Return the bounded probe timeout, with a narrow test/deploy override."""
+    raw = os.environ.get("BOT_ERRORS_STALENESS_PROBE_TIMEOUT_SECONDS", "15")
+    try:
+        value = float(raw)
+    except ValueError as exc:
+        raise ProbeError("malformed") from exc
+    if not 0.01 <= value <= 60:
+        raise ProbeError("malformed")
+    return value
+
+
+def _run(args: list[str]) -> str:
+    """Run a probe command and return stdout or a bounded typed failure."""
     try:
         proc = subprocess.run(
             args,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
-            timeout=timeout,
+            timeout=_probe_timeout_seconds(),
             check=False,
         )
-        return proc.returncode, proc.stdout
-    except (OSError, subprocess.SubprocessError):
-        return -1, ""
+    except subprocess.TimeoutExpired as exc:
+        raise ProbeError("timeout") from exc
+    except PermissionError as exc:
+        raise ProbeError("permission_error") from exc
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise ProbeError("command_error") from exc
+    if proc.returncode != 0:
+        raise ProbeError("command_error")
+    return proc.stdout
 
 
 def discover_instances() -> list[str]:
@@ -238,7 +302,7 @@ def discover_instances() -> list[str]:
     Raises ProbeError when the discovery command itself fails; an empty
     result is returned to the caller, which treats it as a probe error too.
     """
-    rc, out = _run(
+    out = _run(
         [
             "systemctl",
             "--user",
@@ -249,17 +313,19 @@ def discover_instances() -> list[str]:
             "--plain",
         ]
     )
-    if rc != 0:
-        raise ProbeError(f"instance discovery failed: systemctl list-units rc={rc}")
     names: list[str] = []
     for line in out.splitlines():
         stripped = line.strip()
+        if not stripped:
+            continue
         # Match a systemd unit line for a whatsoup instance and take its unit token.
-        if stripped.startswith("whatsoup@") and ".service" in stripped:
-            token = stripped.split()[0]  # the unit token, e.g. the instance unit
-            name = token.removeprefix("whatsoup@").removesuffix(".service")
-            if name:
-                names.append(name)
+        token = stripped.split()[0]
+        if not token.startswith("whatsoup@") or not token.endswith(".service"):
+            raise ProbeError("malformed")
+        name = token.removeprefix("whatsoup@").removesuffix(".service")
+        if not name:
+            raise ProbeError("malformed")
+        names.append(name)
     return names
 
 
@@ -281,7 +347,7 @@ def probe_instance(instance: str) -> dict:
     now_epoch = math.floor(time.time())
 
     # 1. MainPID
-    rc, pid_out = _run(
+    pid_out = _run(
         [
             "systemctl",
             "--user",
@@ -292,8 +358,6 @@ def probe_instance(instance: str) -> dict:
             "--value",
         ]
     )
-    if rc != 0:
-        raise ProbeError(f"whatsoup@{instance}: MainPID probe failed rc={rc}")
     pid_text = pid_out.strip()
     if pid_text == "0":
         return {
@@ -310,44 +374,29 @@ def probe_instance(instance: str) -> dict:
         }
     pid = parse_main_pid(pid_out)
     if pid is None:
-        raise ProbeError(
-            f"whatsoup@{instance}: malformed MainPID output {pid_text[:40]!r}"
-        )
+        raise ProbeError("missing" if not pid_text else "malformed")
 
     # 2. Boot epoch via elapsed seconds
-    rc, ps_out = _run(["ps", "-o", "etimes=", "-p", str(pid)])
-    if rc != 0:
-        raise ProbeError(f"whatsoup@{instance}: ps elapsed-time probe failed rc={rc}")
+    ps_out = _run(["ps", "-o", "etimes=", "-p", str(pid)])
     etimes = parse_etimes(ps_out)
     if etimes is None:
-        raise ProbeError(
-            f"whatsoup@{instance}: malformed ps etimes output {ps_out.strip()[:40]!r}"
-        )
+        raise ProbeError("missing" if not ps_out.strip() else "malformed")
     boot_epoch = compute_boot_epoch(etimes, now_epoch)
 
-    # 3. Repo root from /proc/<pid>/cmdline, fall back to env var.
+    # 3. Repo root bound to the target process's own /proc cmdline.
     repo_root = _repo_root_from_pid(pid)
     if repo_root is None:
-        raise ProbeError(
-            f"whatsoup@{instance}: repo root unresolved "
-            "(no bootstrap.ts in /proc cmdline and BOT_ERRORS_STALENESS_REPO_ROOT unset)"
-        )
+        raise ProbeError("missing")
 
     # 4. Newest src/*.ts mtime via find
     src_dir = os.path.join(repo_root, "src")
-    rc, find_out = _run(["find", src_dir, "-name", "*.ts", "-printf", "%T@\t%p\n"])
-    if rc != 0:
-        raise ProbeError(f"whatsoup@{instance}: source mtime probe failed rc={rc}")
+    find_out = _run(["find", src_dir, "-name", "*.ts", "-printf", "%T@\t%p\n"])
     src_file, src_epoch = parse_find_output(find_out)
     if src_epoch is None:
-        raise ProbeError(
-            f"whatsoup@{instance}: no parseable src/*.ts mtimes under source tree"
-        )
+        raise ProbeError("missing" if not find_out.strip() else "malformed")
 
     stale = is_stale(boot_epoch, src_epoch)
-    critical = (
-        is_critical_stale(boot_epoch, src_epoch, repo_root or "") if stale else False
-    )
+    critical = is_critical_stale(boot_epoch, src_epoch, repo_root)
     lag = (
         (src_epoch - boot_epoch)
         if (stale and src_epoch is not None and boot_epoch is not None)
@@ -369,30 +418,23 @@ def probe_instance(instance: str) -> dict:
 
 
 def _repo_root_from_pid(pid: int) -> str | None:
-    """Derive repo root from /proc/<pid>/cmdline (bootstrap.ts -> dirname/..).
-
-    Falls back to BOT_ERRORS_STALENESS_REPO_ROOT env var when /proc is
-    unavailable or the cmdline does not contain bootstrap.ts.
-    """
-    cmdline_path = f"/proc/{pid}/cmdline"
+    """Derive repo root only from the target process's own bootstrap argv."""
+    proc_root = os.environ.get("BOT_ERRORS_STALENESS_PROC_ROOT", "/proc")
+    cmdline_path = os.path.join(proc_root, str(pid), "cmdline")
     try:
         with open(cmdline_path, "rb") as fh:
             raw = fh.read().decode("latin-1")
         argv = [a for a in raw.split("\0") if a]
         boot = next((a for a in argv if a.endswith("bootstrap.ts")), None)
-        if boot:
+        if boot and os.path.isabs(boot):
             # <root>/src/bootstrap.ts -> <root>
             return str(Path(boot).resolve().parent.parent)
-    except OSError:
-        pass
-
-    env_root = os.environ.get("BOT_ERRORS_STALENESS_REPO_ROOT", "").strip()
-    if env_root:
-        return env_root
-
-    # No silent last resort: when this script runs from the release-proof
-    # bundle the script anchor points at the bundle, not the app checkout,
-    # and a wrong root silently yields a false-fresh verdict.
+    except FileNotFoundError:
+        return None
+    except PermissionError as exc:
+        raise ProbeError("permission_error") from exc
+    except OSError as exc:
+        raise ProbeError("command_error") from exc
     return None
 
 
@@ -470,12 +512,156 @@ def run_once(*, instances: list[str] | None, dry_run: bool) -> int:
     return 0
 
 
+def _observation_report(
+    *,
+    current: int,
+    stale: int,
+    not_running: int,
+    unknown: int,
+    total: int,
+    inventory_status: str,
+    failure_counts: dict[str, int],
+    criterion: str,
+) -> dict[str, object]:
+    """Build the bounded aggregate observation shared by human and JSON output."""
+    if current + stale + not_running + unknown != total:
+        raise ValueError("observation count invariant violated")
+    if inventory_status not in {
+        "observed",
+        "not_requested",
+        "missing",
+        "malformed",
+        "timeout",
+        "permissionError",
+        "commandError",
+    }:
+        raise ValueError("unsupported inventory status")
+    if criterion not in {"all_source", "critical"}:
+        raise ValueError("unsupported observation criterion")
+    evidence_complete = (
+        inventory_status in {"observed", "not_requested"}
+        and unknown == 0
+        and total > 0
+    )
+    if not evidence_complete:
+        status = "unknown"
+    elif stale > 0:
+        status = "stale"
+    elif not_running == total:
+        status = "not_running"
+    elif current == total:
+        status = "current"
+    else:
+        status = "mixed"
+    return {
+        "schemaVersion": OBSERVATION_SCHEMA_VERSION,
+        "check": OBSERVATION_CHECK,
+        "executionStatus": "completed" if evidence_complete else "incomplete",
+        "status": status,
+        "evidenceComplete": evidence_complete,
+        "inventoryStatus": inventory_status,
+        "criterion": criterion,
+        "counts": {
+            "total": total,
+            "current": current,
+            "stale": stale,
+            "notRunning": not_running,
+            "unknown": unknown,
+        },
+        "failureCounts": failure_counts,
+    }
+
+
+def observe_once(
+    *,
+    instances: list[str] | None,
+    json_output: bool,
+    critical_only: bool,
+) -> int:
+    """Probe without emitting and render one privacy-bounded aggregate report."""
+    failure_counts = {
+        "missing": 0,
+        "malformed": 0,
+        "timeout": 0,
+        "permissionError": 0,
+        "commandError": 0,
+    }
+    failure_keys = {
+        "missing": "missing",
+        "malformed": "malformed",
+        "timeout": "timeout",
+        "permission_error": "permissionError",
+        "command_error": "commandError",
+    }
+    inventory_status = "not_requested"
+    if instances is None:
+        try:
+            instances = discover_instances()
+            inventory_status = "observed"
+        except ProbeError as exc:
+            instances = []
+            inventory_status = failure_keys[exc.kind]
+            failure_counts[failure_keys[exc.kind]] += 1
+        if not instances:
+            if inventory_status == "observed":
+                inventory_status = "missing"
+                failure_counts["missing"] += 1
+
+    current = 0
+    stale = 0
+    not_running = 0
+    unknown = 0
+    for inst in instances:
+        try:
+            result = probe_instance(inst)
+        except ProbeError as exc:
+            unknown += 1
+            failure_counts[failure_keys[exc.kind]] += 1
+            continue
+        if not result["running"]:
+            not_running += 1
+        elif result["critical"] if critical_only else result["stale"]:
+            stale += 1
+        else:
+            current += 1
+
+    report = _observation_report(
+        current=current,
+        stale=stale,
+        not_running=not_running,
+        unknown=unknown,
+        total=len(instances),
+        inventory_status=inventory_status,
+        failure_counts=failure_counts,
+        criterion="critical" if critical_only else "all_source",
+    )
+    if json_output:
+        print(json.dumps(report, separators=(",", ":"), sort_keys=True))
+    else:
+        counts = report["counts"]
+        assert isinstance(counts, dict)
+        print(
+            f"{OBSERVATION_CHECK}: status={report['status']} "
+            f"execution_status={report['executionStatus']} "
+            f"evidence_complete={str(report['evidenceComplete']).lower()} "
+            f"inventory_status={report['inventoryStatus']} "
+            f"criterion={report['criterion']} "
+            f"total={counts['total']} current={counts['current']} "
+            f"stale={counts['stale']} not_running={counts['notRunning']} "
+            f"unknown={counts['unknown']}"
+        )
+
+    if not report["evidenceComplete"]:
+        return 2
+    return 1 if stale > 0 else 0
+
+
 def config_check() -> int:
     """Validate monitor configuration without probing any instance."""
     if not EMIT_SCRIPT.exists():
-        print(f"emit script not found: {EMIT_SCRIPT}", file=sys.stderr)
+        print("runtime-staleness-monitor config error: emit_script_missing", file=sys.stderr)
         return 2
-    print(f"runtime-staleness-monitor config ok: emit_script={EMIT_SCRIPT}")
+    print("runtime-staleness-monitor config ok")
     return 0
 
 
@@ -503,14 +689,54 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         metavar="NAME",
         help="Monitor a single instance by name instead of auto-discovering all.",
     )
+    parser.add_argument(
+        "--observe-only",
+        action="store_true",
+        help="Probe and report without emitting any alert or clear.",
+    )
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        help="With --observe-only, emit the versioned aggregate JSON report.",
+    )
+    parser.add_argument(
+        "--critical",
+        action="store_true",
+        help="With --observe-only, classify against the complete critical-file set.",
+    )
     return parser.parse_args(argv)
 
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv if argv is not None else sys.argv[1:])
+    if args.json and not args.observe_only:
+        print("configuration error: --json requires --observe-only", file=sys.stderr)
+        return 2
+    if args.critical and not args.observe_only:
+        print("configuration error: --critical requires --observe-only", file=sys.stderr)
+        return 2
+    if args.config_check and (
+        args.observe_only
+        or args.json
+        or args.critical
+        or args.instance
+        or args.dry_run
+        or args.once
+    ):
+        print("configuration error: --config-check cannot be combined", file=sys.stderr)
+        return 2
+    if args.observe_only and args.dry_run:
+        print("configuration error: --observe-only cannot combine with --dry-run", file=sys.stderr)
+        return 2
     if args.config_check:
         return config_check()
     instances = [args.instance] if args.instance else None
+    if args.observe_only:
+        return observe_once(
+            instances=instances,
+            json_output=args.json,
+            critical_only=args.critical,
+        )
     return run_once(instances=instances, dry_run=args.dry_run)
 
 
