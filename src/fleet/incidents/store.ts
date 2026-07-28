@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import type { DatabaseSync } from 'node:sqlite';
-import { parseSignalEnvelope, type SignalEnvelope } from './envelope.ts';
+import { parseSignalEnvelope, type SignalEnvelope, type SignalKind } from './envelope.ts';
 
 export interface ProducerContext {
   producerId: string;
@@ -77,6 +77,59 @@ export class IncidentStore {
       .prepare(`SELECT * FROM transitions WHERE incident_id = ? ORDER BY transition_id`)
       .all(incidentId) as Array<Record<string, unknown>>;
     return rows.map(projectTransition);
+  }
+
+  listIncidents(filter?: {
+    subject?: string;
+    conditionState?: IncidentProjection['conditionState'];
+    conditionClass?: string;
+    producerDomainId?: string;
+    afterIncidentId?: number;
+    limit?: number;
+  }): IncidentProjection[] {
+    const clauses: string[] = [];
+    const params: Array<string | number> = [];
+    if (filter?.subject) { clauses.push('subject = ?'); params.push(filter.subject); }
+    if (filter?.conditionState) { clauses.push('condition_state = ?'); params.push(filter.conditionState); }
+    if (filter?.conditionClass) { clauses.push('condition_class = ?'); params.push(filter.conditionClass); }
+    if (filter?.producerDomainId) { clauses.push('producer_domain_id = ?'); params.push(filter.producerDomainId); }
+    if (filter?.afterIncidentId !== undefined) { clauses.push('incident_id > ?'); params.push(filter.afterIncidentId); }
+
+    const limit = Math.min(Math.max(filter?.limit ?? 200, 1), 200);
+    const where = clauses.length > 0 ? `WHERE ${clauses.join(' AND ')}` : '';
+    const rows = this.db
+      .prepare(`SELECT * FROM incidents ${where} ORDER BY incident_id LIMIT ?`)
+      .all(...params, limit) as Array<Record<string, unknown>>;
+    return rows.map(projectIncident);
+  }
+
+  getEvent(eventId: number): StoredEvent | null {
+    const row = this.db
+      .prepare(
+        `SELECT event_id, producer_id, producer_domain_id, signal_id, payload_digest,
+                kind, subject, condition_class, occurrence_id, occurrence_seq,
+                observed_at, received_at, disposition, incident_id, transition_id
+           FROM events WHERE event_id = ?`,
+      )
+      .get(eventId) as Record<string, unknown> | undefined;
+    if (!row) return null;
+    return {
+      eventId: row.event_id as number,
+      producerId: row.producer_id as string,
+      producerDomainId: row.producer_domain_id as string,
+      signalId: row.signal_id as string,
+      payloadDigest: row.payload_digest as string,
+      kind: row.kind as StoredEvent['kind'],
+      subject: row.subject as string,
+      conditionClass: (row.condition_class as string | null) ?? null,
+      occurrenceId: (row.occurrence_id as string | null) ?? null,
+      occurrenceSeq: (row.occurrence_seq as number | null) ?? null,
+      observedAt: row.observed_at as string,
+      receivedAt: row.received_at as string,
+      disposition: row.disposition as Disposition,
+      incidentId: (row.incident_id as number | null) ?? null,
+      transitionId: (row.transition_id as number | null) ?? null,
+    };
   }
 
   acceptSignal(rawBody: string, producer: ProducerContext, now: Date): AcceptResult {
@@ -357,6 +410,24 @@ export interface IncidentProjection {
   lastObservedAt: string;
   lastOccurrenceSeq: number;
   projectionVersion: number;
+}
+
+export interface StoredEvent {
+  eventId: number;
+  producerId: string;
+  producerDomainId: string;
+  signalId: string;
+  payloadDigest: string;
+  kind: SignalKind;
+  subject: string;
+  conditionClass: string | null;
+  occurrenceId: string | null;
+  occurrenceSeq: number | null;
+  observedAt: string;
+  receivedAt: string;
+  disposition: Disposition;
+  incidentId: number | null;
+  transitionId: number | null;
 }
 
 export interface TransitionRecord {
