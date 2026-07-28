@@ -6,11 +6,11 @@ import {
   parseBoundaryReceiptBytes,
   validateBoundaryReceipt,
 } from '../../scripts/lib/semantic-quality/receipt.ts';
-
-// Receipt-layer scope only: the adapter-side assertions (adaptSemanticQuality)
-// require scripts/lib/ci-control/native-adapter.ts and land with that module.
+import { adaptSemanticQuality } from '../../scripts/lib/ci-control/native-adapter.ts';
+import { sha256Bytes } from '../../scripts/lib/verification/boundary-run/shared.ts';
 
 const OID = '0123456789abcdef0123456789abcdef01234567';
+const DIGEST = `sha256:${'a'.repeat(64)}`;
 
 function finding(overrides: Record<string, unknown> = {}) {
   return {
@@ -43,12 +43,46 @@ function receipt() {
   });
 }
 
+function binding(bytes: Uint8Array) {
+  return {
+    detectorId: 'semantic-quality' as const,
+    schemaVersion: 1 as const,
+    evidenceDigest: `sha256:${sha256Bytes(bytes)}`,
+    policyDigest: DIGEST,
+    candidateOid: OID,
+    baseOid: OID,
+    mergeBaseOid: OID,
+    producer: {
+      appId: 'expected-app',
+      workflowRef: 'owner/repo/.github/workflows/policy.yml@refs/heads/main',
+      workflowSha: OID,
+      runId: 'run-1',
+      attempt: 1,
+    },
+    platform: { architecture: 'x64', os: 'linux' },
+  };
+}
+
 describe('canonical semantic receipt validation', () => {
-  it('admits exact canonical bytes and round-trips them losslessly', () => {
+  it('admits exact canonical bytes and keeps the native adapter semantically thin', () => {
     const built = receipt();
     const bytes = canonicalBoundaryReceiptBytes(validateBoundaryReceipt(built));
 
     expect(parseBoundaryReceiptBytes(bytes)).toEqual(built);
+    expect(adaptSemanticQuality(bytes, binding(bytes))).toMatchObject({
+      outcome: 'block',
+      code: 'ci.native.semantic-quality',
+      nativeCauseCodes: ['semantic.synthetic'],
+      nativeEvidence: {
+        detectorId: 'semantic-quality',
+        schemaVersion: 1,
+        evidenceDigest: `sha256:${sha256Bytes(bytes)}`,
+        nativeCauseCodes: ['semantic.synthetic'],
+        policyDigest: DIGEST,
+        producer: binding(bytes).producer,
+        platform: binding(bytes).platform,
+      },
+    });
   });
 
   it('rejects invalid receipt and finding enums instead of collapsing them to pass', () => {
@@ -69,7 +103,7 @@ describe('canonical semantic receipt validation', () => {
     })).toThrow(/decision/i);
   });
 
-  it('rejects unknown nested keys instead of authorizing the receipt', () => {
+  it('rejects unknown nested keys before the adapter can authorize the receipt', () => {
     const built = receipt();
     const unsafe = {
       ...built,
@@ -78,6 +112,11 @@ describe('canonical semantic receipt validation', () => {
     };
 
     expect(() => validateBoundaryReceipt(unsafe)).toThrow(/finding.*keys|keys.*finding/i);
+    const bytes = Buffer.from(`${JSON.stringify(unsafe, null, 2)}\n`, 'utf8');
+    expect(adaptSemanticQuality(bytes, binding(bytes))).toMatchObject({
+      outcome: 'inconclusive',
+      code: 'ci.native.receipt-unavailable',
+    });
   });
 
   it('rejects valid semantic content transported with noncanonical bytes', () => {
@@ -85,5 +124,9 @@ describe('canonical semantic receipt validation', () => {
     const compact = Buffer.from(JSON.stringify(built), 'utf8');
 
     expect(() => parseBoundaryReceiptBytes(compact)).toThrow(/noncanonical/i);
+    expect(adaptSemanticQuality(compact, binding(compact))).toMatchObject({
+      outcome: 'inconclusive',
+      code: 'ci.native.receipt-unavailable',
+    });
   });
 });
