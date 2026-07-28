@@ -207,7 +207,12 @@ describe('TwilioSmsAdapter sendText', () => {
     // Twilio may have accepted the message; callers must not blind-retry).
     await expect(
       adapter.sendText({ channel, id: '+15551230000' }, 'hello'),
-    ).rejects.toBeInstanceOf(TransientProviderError);
+    ).rejects.toMatchObject({
+      payload: {
+        code: 'transport.transient_provider',
+        phase: 'provider_call_started',
+      },
+    });
 
     expect(port.sent).toHaveLength(0);
   });

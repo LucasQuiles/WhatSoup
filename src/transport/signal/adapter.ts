@@ -120,7 +120,13 @@ function mapPortError(
   correlationId: string,
   scope: 'request' | 'channel',
 ): TransportError {
-  const base = { channelId, operation, correlationId, scope };
+  const base = {
+    channelId,
+    operation,
+    correlationId,
+    scope,
+    phase: 'provider_call_started' as const,
+  };
   const pe = err as PortErrorLike;
   const msg = (typeof pe?.message === 'string' && pe.message) ? pe.message : String(err);
 
@@ -697,6 +703,7 @@ export class SignalAdapter
         operation: 'sendText',
         correlationId,
         scope: 'conversation',
+        phase: 'not_started',
         retryAfterMs,
         message: 'Signal local rate limit reached for this conversation',
       });

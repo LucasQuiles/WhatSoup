@@ -14,6 +14,11 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type { IncomingMessage, Messenger } from '../../../src/core/types.ts';
 import { OUTBOUND_GOVERNOR_SHED_LOG } from '../../../src/transport/outbound-governor.ts';
+import {
+  AuthRequiredError,
+  RateLimitedError,
+} from '../../../src/transport/contract/errors.ts';
+import { makeChannelId } from '../../../src/core/transport-refs.ts';
 import type { LLMProvider } from '../../../src/runtimes/chat/providers/types.ts';
 import type { Database } from '../../../src/core/database.ts';
 import { DatabaseCompatibilityError } from '../../../src/core/database-compatibility.ts';
@@ -1324,7 +1329,7 @@ describe('Send retry with exponential backoff (B02)', () => {
     expect(mockRecordResponse).toHaveBeenCalledOnce();
   });
 
-  it('all 3 send attempts fail → error logged with responseText for recovery', async () => {
+  it('all 3 send attempts fail → bounded evidence is logged without response content', async () => {
     vi.useFakeTimers();
     const { handler, messenger } = makeHandler();
     messenger.sendMessage.mockRejectedValue(new Error('permanent failure'));
@@ -1333,13 +1338,19 @@ describe('Send retry with exponential backoff (B02)', () => {
     await vi.runAllTimersAsync();
     await drainQueue();
 
-    // 3 send attempts + 1 best-effort failure notification
-    expect(messenger.sendMessage).toHaveBeenCalledTimes(4);
-    // The error log must include responseText so the response is recoverable
+    expect(messenger.sendMessage).toHaveBeenCalledTimes(3);
     expect(mockLogError()).toHaveBeenCalledWith(
-      expect.objectContaining({ responseText: 'hey whats up' }),
-      expect.stringContaining('all send attempts failed'),
+      expect.objectContaining({
+        attempts: 3,
+        providerSubmissions: 3,
+        failureCode: 'outbound.unknown_failure',
+        mutationState: 'ambiguous',
+      }),
+      expect.stringContaining('bounded failure disposition'),
     );
+    const [metadata] = mockLogError().mock.calls.at(-1)!;
+    expect(metadata).not.toHaveProperty('responseText');
+    expect(metadata).not.toHaveProperty('err');
   });
 
   it('all 3 send attempts fail → rate limit NOT charged, reply NOT stored', async () => {
@@ -1372,6 +1383,63 @@ describe('Send retry with exponential backoff (B02)', () => {
       (c: unknown[]) => typeof c[1] === 'string' && c[1].includes('send_retry'),
     );
     expect(warnCalls).toHaveLength(2);
+  });
+
+  it('typed retryable=false rejection stops after one attempt with definitive evidence', async () => {
+    const { handler, messenger } = makeHandler();
+    const durability = makeDurability();
+    handler.setDurability(durability);
+    messenger.sendMessage.mockRejectedValue(new AuthRequiredError({
+      channelId: makeChannelId('signal', 'test'),
+      operation: 'sendText',
+      correlationId: 'synthetic-auth-reject',
+      scope: 'provider',
+      message: 'synthetic',
+      phase: 'provider_call_started',
+    }));
+
+    await handleAndDrain(handler, makeIncomingMessage({ inboundSeq: 99 }));
+
+    expect(messenger.sendMessage).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(durability.markFailedPermanent)).toHaveBeenCalledWith(
+      42,
+      expect.objectContaining({
+        failure_code: 'transport.auth_required',
+        mutation_state: 'rejected',
+        logical_attempt_count: 1,
+        provider_submission_count: 1,
+      }),
+    );
+  });
+
+  it('typed local producer floor transfers to the durable drainer without retrying', async () => {
+    const { handler, messenger } = makeHandler();
+    const durability = makeDurability();
+    handler.setDurability(durability);
+    messenger.sendMessage.mockRejectedValue(new RateLimitedError({
+      channelId: makeChannelId('signal', 'test'),
+      operation: 'sendText',
+      correlationId: 'synthetic-local-limit',
+      scope: 'conversation',
+      message: 'synthetic',
+      phase: 'not_started',
+      retryAfterMs: 60_000,
+    }));
+
+    await handleAndDrain(handler, makeIncomingMessage({ inboundSeq: 99 }));
+
+    expect(messenger.sendMessage).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(durability.markDeferred)).toHaveBeenCalledWith(
+      42,
+      expect.objectContaining({
+        failure_code: 'transport.rate_limited',
+        mutation_state: 'not_started',
+        retry_decision: 'retry_not_before',
+        retry_owner: 'pending_drainer',
+        provider_submission_count: 0,
+      }),
+    );
+    expect(vi.mocked(durability.markInboundFailed)).not.toHaveBeenCalled();
   });
 });
 
@@ -1875,6 +1943,7 @@ function makeDurability() {
     markSubmitted: vi.fn(),
     markMaybeSent: vi.fn(),
     markFailedPermanent: vi.fn(),
+    markDeferred: vi.fn(),
     markInboundSkipped: vi.fn(),
     markInboundFailed: vi.fn(),
     completeInbound: vi.fn(),
@@ -1891,7 +1960,7 @@ describe('DurabilityEngine integration', () => {
 
     expect(vi.mocked(durability.createOutboundOp)).toHaveBeenCalledOnce();
     expect(vi.mocked(durability.markSending)).toHaveBeenCalledWith(42);
-    expect(vi.mocked(durability.markSubmitted)).toHaveBeenCalledWith(42, null);
+    expect(vi.mocked(durability.markSubmitted)).toHaveBeenCalledWith(42, null, 1);
     expect(messenger.sendMessage).toHaveBeenCalledWith(expect.any(String), 'hey whats up');
   });
 
@@ -1927,7 +1996,7 @@ describe('DurabilityEngine integration', () => {
       '⚠️ My last response may not have been delivered. Please ask me again.',
     );
     expect(vi.mocked(durability.markSubmitted)).toHaveBeenCalledTimes(1);
-    expect(vi.mocked(durability.markSubmitted)).toHaveBeenCalledWith(42, 'wamid.confirmed');
+    expect(vi.mocked(durability.markSubmitted)).toHaveBeenCalledWith(42, 'wamid.confirmed', 1);
     expect(mockLogWarn().mock.calls.filter(
       (c: unknown[]) => typeof c[1] === 'string' && c[1] === 'send_retry',
     )).toHaveLength(0);
@@ -1967,7 +2036,7 @@ describe('DurabilityEngine integration', () => {
 
     expect(messenger.sendMessage).toHaveBeenCalledTimes(2);
     expect(vi.mocked(durability.markSubmitted)).toHaveBeenCalledTimes(1);
-    expect(vi.mocked(durability.markSubmitted)).toHaveBeenCalledWith(42, 'wamid.after-retry');
+    expect(vi.mocked(durability.markSubmitted)).toHaveBeenCalledWith(42, 'wamid.after-retry', 2);
     expect(vi.mocked(durability.markMaybeSent)).not.toHaveBeenCalled();
     expect(vi.mocked(durability.completeInbound)).toHaveBeenCalledWith(8, 'response_sent');
     expect(mockRecordResponse).toHaveBeenCalledOnce();
@@ -1984,7 +2053,7 @@ describe('DurabilityEngine integration', () => {
     expect(vi.mocked(durability.completeInbound)).not.toHaveBeenCalled();
   });
 
-  it('send failure: markMaybeSent called with error message, markInboundFailed called with inboundSeq', async () => {
+  it('send failure: markMaybeSent receives bounded evidence and inbound failure is recorded', async () => {
     vi.useFakeTimers();
     const { handler, messenger } = makeHandler();
     const durability = makeDurability();
@@ -1996,7 +2065,16 @@ describe('DurabilityEngine integration', () => {
     await vi.runAllTimersAsync();
     await drainQueue();
 
-    expect(vi.mocked(durability.markMaybeSent)).toHaveBeenCalledWith(42, 'permanent send failure');
+    expect(vi.mocked(durability.markMaybeSent)).toHaveBeenCalledWith(
+      42,
+      expect.objectContaining({
+        failure_code: 'outbound.unknown_failure',
+        mutation_state: 'ambiguous',
+        logical_attempt_count: 3,
+        provider_submission_count: 3,
+      }),
+      undefined,
+    );
     // Send exhaustion is a transport send failure.
     expect(vi.mocked(durability.markInboundFailed)).toHaveBeenCalledWith(99, 'transport_send_failed');
   });
@@ -2017,7 +2095,16 @@ describe('DurabilityEngine integration', () => {
     await vi.runAllTimersAsync();
     await drainQueue();
 
-    expect(vi.mocked(durability.markFailedPermanent)).toHaveBeenCalledWith(42, OUTBOUND_GOVERNOR_SHED_LOG);
+    expect(vi.mocked(durability.markFailedPermanent)).toHaveBeenCalledWith(
+      42,
+      expect.objectContaining({
+        failure_code: 'outbound.governor_shed',
+        stage: 'admission',
+        mutation_state: 'not_started',
+        logical_attempt_count: 1,
+        provider_submission_count: 0,
+      }),
+    );
     expect(vi.mocked(durability.markMaybeSent)).not.toHaveBeenCalled();
   });
 
@@ -2383,15 +2470,17 @@ describe("?? 'unknown' fallback in log calls (non-Error thrown values)", () => {
       (c: unknown[]) => typeof c[1] === 'string' && (c[1] as string) === 'send_retry',
     );
     expect(warnCalls).toHaveLength(1);
-    // error field in the log object should be 'unknown' (thrown value was a plain string)
     const warnMeta = warnCalls[0][0] as Record<string, unknown>;
-    expect(warnMeta.error).toBe('unknown');
+    expect(warnMeta).toMatchObject({
+      failureCode: 'outbound.unknown_failure',
+      mutationState: 'ambiguous',
+    });
+    expect(warnMeta).not.toHaveProperty('error');
     // Send eventually succeeded on attempt 2
     expect(mockRecordResponse).toHaveBeenCalledOnce();
   });
 
-  // Branch #40 line 440: markMaybeSent receives ?? 'send_retry_failed' when lastSendErr has no .message.
-  it('all 3 sends fail with non-Error throw → markMaybeSent called with "send_retry_failed"', async () => {
+  it('all 3 sends fail with non-Error throw → bounded unknown evidence is persisted', async () => {
     vi.useFakeTimers();
     const { handler, messenger } = makeHandler();
     const durability = makeDurability();
@@ -2403,7 +2492,15 @@ describe("?? 'unknown' fallback in log calls (non-Error thrown values)", () => {
     await vi.runAllTimersAsync();
     await drainQueue();
 
-    // markMaybeSent must be called with the fallback string 'send_retry_failed'
-    expect(vi.mocked(durability.markMaybeSent)).toHaveBeenCalledWith(42, 'send_retry_failed');
+    expect(vi.mocked(durability.markMaybeSent)).toHaveBeenCalledWith(
+      42,
+      expect.objectContaining({
+        failure_code: 'outbound.unknown_failure',
+        evidence_coverage: 'partial',
+        logical_attempt_count: 3,
+        provider_submission_count: 3,
+      }),
+      undefined,
+    );
   });
 });

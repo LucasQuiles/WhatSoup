@@ -80,7 +80,7 @@ describe('DurabilityEngine edge coverage', () => {
     expect(skippedRow).toMatchObject({ processing_status: 'complete', terminal_reason: 'duplicate' });
   });
 
-  it('marks failed permanent and records null maybe_sent errors when no error is provided', () => {
+  it('marks failed permanent and records structured maybe_sent evidence', () => {
     const failed = engine.createOutboundOp({
       conversationKey: 'key-failed',
       chatJid: 'jid-failed',
@@ -89,7 +89,12 @@ describe('DurabilityEngine edge coverage', () => {
       replayPolicy: 'unsafe',
     });
     engine.markFailedPermanent(failed, 'not retriable');
-    expect(getOutbound(db, failed)).toMatchObject({ status: 'failed_permanent', error: 'not retriable' });
+    const failedRow = getOutbound(db, failed);
+    expect(failedRow['status']).toBe('failed_permanent');
+    expect(JSON.parse(failedRow['error'] as string)).toMatchObject({
+      failure_code: 'outbound.unknown_failure',
+      mutation_state: 'rejected',
+    });
 
     const maybe = engine.createOutboundOp({
       conversationKey: 'key-maybe',
@@ -99,7 +104,12 @@ describe('DurabilityEngine edge coverage', () => {
       replayPolicy: 'safe',
     });
     engine.markMaybeSent(maybe);
-    expect(getOutbound(db, maybe)).toMatchObject({ status: 'maybe_sent', error: null });
+    const maybeRow = getOutbound(db, maybe);
+    expect(maybeRow['status']).toBe('maybe_sent');
+    expect(JSON.parse(maybeRow['error'] as string)).toMatchObject({
+      failure_code: 'outbound.unknown_failure',
+      mutation_state: 'ambiguous',
+    });
   });
 
   it('matchEcho returns true and marks the matching submitted outbound echoed', () => {
@@ -457,7 +467,11 @@ describe('DurabilityEngine edge coverage', () => {
       );
 
     const row = db.raw.prepare('SELECT status, error FROM outbound_ops ORDER BY id DESC LIMIT 1').get() as Record<string, unknown>;
-    expect(row).toMatchObject({ status: 'maybe_sent', error: 'send_failed' });
+    expect(row['status']).toBe('maybe_sent');
+    expect(JSON.parse(row['error'] as string)).toMatchObject({
+      failure_code: 'outbound.unknown_failure',
+      mutation_state: 'ambiguous',
+    });
   });
 
   it('sendTracked rethrows send failures when durability tracking is disabled', async () => {
@@ -499,7 +513,12 @@ describe('DurabilityEngine edge coverage', () => {
     const messenger = makeMessenger(async () => Promise.reject(null));
 
     expect((await drainPendingOutbound(messenger, engine)).resent).toBe(0);
-    expect(getOutbound(db, id)).toMatchObject({ status: 'maybe_sent', error: 'replay_failed' });
+    const row = getOutbound(db, id);
+    expect(row['status']).toBe('maybe_sent');
+    expect(JSON.parse(row['error'] as string)).toMatchObject({
+      failure_code: 'outbound.unknown_failure',
+      mutation_state: 'ambiguous',
+    });
   });
 
   it('drainPendingOutbound keeps draining after an unexpected per-op failure', async () => {

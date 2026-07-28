@@ -75,7 +75,13 @@ function mapPortError(
   correlationId: string,
   scope: 'request' | 'channel',
 ): TransportError {
-  const base = { channelId, operation, correlationId, scope };
+  const base = {
+    channelId,
+    operation,
+    correlationId,
+    scope,
+    phase: 'provider_call_started' as const,
+  };
 
   // Narrow to duck-typed shape
   const pe = err as PortErrorLike;

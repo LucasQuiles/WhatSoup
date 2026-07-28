@@ -115,7 +115,12 @@ describe('SignalAdapter — sendText port-error mapping', () => {
     const { adapter, channelId } = makeAdapter(port);
     const target = peerConversationRef(channelId, '+15559990000');
 
-    await expect(adapter.sendText(target, 'hi')).rejects.toThrow(/Signal rate limit/);
+    await expect(adapter.sendText(target, 'hi')).rejects.toMatchObject({
+      payload: {
+        code: 'transport.rate_limited',
+        phase: 'provider_call_started',
+      },
+    });
   });
 
   it('maps a 5xx to TransientProviderError', async () => {
@@ -205,7 +210,11 @@ describe('SignalAdapter — local rate limit', () => {
 
     await adapter.sendText(target, 'one');
     await expect(adapter.sendText(target, 'two')).rejects.toMatchObject({
-      payload: { code: 'transport.rate_limited', retryAfterMs: 60000 },
+      payload: {
+        code: 'transport.rate_limited',
+        phase: 'not_started',
+        retryAfterMs: 60000,
+      },
     });
     expect(port.sent).toHaveLength(1);
 

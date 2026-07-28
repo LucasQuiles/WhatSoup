@@ -112,7 +112,12 @@ describe('ImessageAdapter — sendText port-error mapping', () => {
     });
     const { adapter, channelId } = makeAdapter(port);
     await expect(adapter.sendText(peerConversationRef(channelId, 'u@example.com'), 'hi'))
-      .rejects.toThrow(/iMessage rate limit/);
+      .rejects.toMatchObject({
+        payload: {
+          code: 'transport.rate_limited',
+          phase: 'provider_call_started',
+        },
+      });
   });
 
   it('maps a 5xx to TransientProviderError', async () => {
