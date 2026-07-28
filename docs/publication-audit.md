@@ -4,26 +4,15 @@
 
 Internal publication roots covered by the guard: `docs/runbooks/`, `docs/sdlc/`, `docs/superpowers/`, `docs/plans/`, `docs/cutover/`, `docs/research/`, `docs/triage/`, `docs/specs/` (selected), `docs/work-index*`, `docs/current-program.md`, `docs/handoff-*.md`, `HANDOFF-*.md`, `docs/project-status-*.md`, `docs/audit-*.md`, `tmp/`.
 
-**Regenerate, do not hand-merge.** Run `npm run guard:publication:write` to rewrite this file
-into canonical form: rows derived from `git ls-files`, sorted, with exactly one declared-count
-line and one summary block. Existing classifications and rationales are preserved verbatim; a
-newly tracked doc is added as `PRIVATE-ARCHIVE` with a default rationale for you to refine.
-
-This matters on merges. Every doc-bearing PR edits the counter lines here, so any landing
-conflicts every other open PR on this file. When that happens, take either side to clear the
-markers and re-run the command — the result is a fixed point, so the resolution is mechanical
-rather than a hand-count. `docs/work-index.{json,md}` has the same property via
-`npm run work-index:regen`.
-
-**Total classification rows:** 137
+**Total classification rows:** 138
 
 | Classification | Count |
 |---|---:|
 | PUBLIC | 3 |
-| PRIVATE-ARCHIVE | 134 |
+| PRIVATE-ARCHIVE | 135 |
 | SANITIZE | 0 |
 | DELETE | 0 |
-| Total | 137 |
+| Total | 138 |
 
 | Path | Classification | Rationale |
 |---|---|---|
@@ -150,6 +139,7 @@ rather than a hand-count. `docs/work-index.{json,md}` has the same property via
 | `docs/superpowers/specs/2026-07-23-agent-reliability-remediation-design.md` | PRIVATE-ARCHIVE | Internal reliability and host-remediation design; sanitized of private fleet identifiers and excluded from public publication by default. |
 | `docs/superpowers/specs/2026-07-26-open-issue-triage-and-cohort-pr-design.md` | PRIVATE-ARCHIVE | Internal issue-triage, evidence, and cohort-publication design; retained in the repository but excluded from public publication by default. |
 | `docs/superpowers/specs/2026-07-28-incident-control-plane-design.md` | PRIVATE-ARCHIVE | Internal incident control plane architecture design (locked sections 1-6 plus assembled migration section); retained in the repository but excluded from public publication by default. |
+| `docs/superpowers/specs/2026-07-28-incident-ingestion-surface-design.md` | PRIVATE-ARCHIVE | Internal Plan 2 ingestion-surface design (bead-zero migrations, producer registry/enrollment, route mapping); retained in the repository but excluded from public publication by default. |
 | `docs/superpowers/specs/kill-session-transactional-cancellation/design.md` | PRIVATE-ARCHIVE | Internal targeted-cancellation protocol design; retained in the repository but excluded from public publication by default. |
 | `docs/superpowers/specs/kill-session-transactional-cancellation/requirements.md` | PRIVATE-ARCHIVE | Internal targeted-cancellation protocol requirements; retained in the repository but excluded from public publication by default. |
 | `docs/superpowers/specs/kill-session-transactional-cancellation/tasks.md` | PRIVATE-ARCHIVE | Internal targeted-cancellation implementation plan; retained in the repository but excluded from public publication by default. |

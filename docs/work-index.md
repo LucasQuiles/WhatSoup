@@ -18,15 +18,15 @@ The **Inconsistencies** section lists missing or stale index entries compared wi
 scoped markdown files currently on disk.
 
 **Repo:** `WhatSoup`
-**Total entries:** 88
+**Total entries:** 89
 
 ## Totals
 
 | Dimension | Breakdown |
 |---|---|
-| Kind | handoff=8, plan=44, review=4, spec=31, state=1 |
-| Status | active=19, closed=4, completed=33, deferred=7, pending=15, unknown=10 |
-| Status source | body-marker=81, fallback=6, state-md-status=1 |
+| Kind | handoff=8, plan=44, review=4, spec=32, state=1 |
+| Status | active=19, closed=4, completed=33, deferred=7, pending=15, unknown=11 |
+| Status source | body-marker=82, fallback=6, state-md-status=1 |
 
 ## Inconsistencies
 
@@ -58,7 +58,7 @@ scoped markdown files currently on disk.
 | `docs/superpowers/specs/provider-event-lifecycle/requirements.md` | spec | requirements | body-marker |
 | `docs/superpowers/specs/provider-event-lifecycle/tasks.md` | spec | tasks | body-marker |
 
-### Unknown-status — triage needed (10)
+### Unknown-status — triage needed (11)
 
 | Path | Kind | Topic | Last Mod |
 |------|------|-------|----------|
@@ -72,6 +72,7 @@ scoped markdown files currently on disk.
 | `docs/superpowers/specs/2026-07-17-macos-credential-durability-design.md` | spec | macos-credential-durability-design | 2026-07-17 |
 | `docs/superpowers/specs/2026-07-23-agent-reliability-remediation-design.md` | spec | agent-reliability-remediation-design | 2026-07-27 |
 | `docs/superpowers/specs/2026-07-28-incident-control-plane-design.md` | spec | incident-control-plane-design | 2026-07-28 |
+| `docs/superpowers/specs/2026-07-28-incident-ingestion-surface-design.md` | spec | incident-ingestion-surface-design | 2026-07-28 |
 
 ### Cross-tree topic clusters (4)
 
@@ -184,7 +185,7 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 | `docs/superpowers/reviews/2026-07-09-wall-to-wall-audit-pr-briefs.md` | review | completed | body-marker | wall-to-wall-audit-pr-briefs | 2026-07-10 |  |
 | `docs/superpowers/reviews/2026-07-24-r13-r15-tech-debt-review-map.md` | review | completed | body-marker | r13-r15-tech-debt-review-map | 2026-07-24 |  |
 
-### docs/superpowers/specs  _(25 entries)_
+### docs/superpowers/specs  _(26 entries)_
 
 | Path | Kind | Status | Source | Topic | Last Mod | Supersedes |
 |------|------|--------|--------|-------|----------|------------|
@@ -213,6 +214,7 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 | `docs/superpowers/specs/2026-07-23-agent-reliability-remediation-design.md` | spec | unknown | body-marker | agent-reliability-remediation-design | 2026-07-27 |  |
 | `docs/superpowers/specs/2026-07-26-open-issue-triage-and-cohort-pr-design.md` | spec | active | body-marker | open-issue-triage-and-cohort-pr-design | 2026-07-27 |  |
 | `docs/superpowers/specs/2026-07-28-incident-control-plane-design.md` | spec | unknown | body-marker | incident-control-plane-design | 2026-07-28 | BOT ERRORS WhatsApp-transport-centric delivery (dispatcher/collector file+SSH architecture) as the canonical incident path. |
+| `docs/superpowers/specs/2026-07-28-incident-ingestion-surface-design.md` | spec | unknown | body-marker | incident-ingestion-surface-design | 2026-07-28 |  |
 
 ### docs/superpowers/specs/kill-session-transactional-cancellation  _(3 entries)_
 
@@ -233,4 +235,4 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 ---
 
 - Derived from `docs/work-index.json`
-- Generated at 2026-07-28T17:13:05Z from commit `fa25166b21820a4b9efb82403483dd7307730530`
+- Generated at 2026-07-28T18:27:42Z from commit `b7a4906a71f121e176448797a3137e76c5be02fc`
