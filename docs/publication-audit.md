@@ -4,6 +4,17 @@
 
 Internal publication roots covered by the guard: `docs/runbooks/`, `docs/sdlc/`, `docs/superpowers/`, `docs/plans/`, `docs/cutover/`, `docs/research/`, `docs/triage/`, `docs/specs/` (selected), `docs/work-index*`, `docs/current-program.md`, `docs/handoff-*.md`, `HANDOFF-*.md`, `docs/project-status-*.md`, `docs/audit-*.md`, `tmp/`.
 
+**Regenerate, do not hand-merge.** Run `npm run guard:publication:write` to rewrite this file
+into canonical form: rows derived from `git ls-files`, sorted, with exactly one declared-count
+line and one summary block. Existing classifications and rationales are preserved verbatim; a
+newly tracked doc is added as `PRIVATE-ARCHIVE` with a default rationale for you to refine.
+
+This matters on merges. Every doc-bearing PR edits the counter lines here, so any landing
+conflicts every other open PR on this file. When that happens, take either side to clear the
+markers and re-run the command — the result is a fixed point, so the resolution is mechanical
+rather than a hand-count. `docs/work-index.{json,md}` has the same property via
+`npm run work-index:regen`.
+
 **Total classification rows:** 137
 
 | Classification | Count |
@@ -63,8 +74,8 @@ Internal publication roots covered by the guard: `docs/runbooks/`, `docs/sdlc/`,
 | `docs/superpowers/handoffs/2026-04-07-fleet-charts-project-statement.md` | PRIVATE-ARCHIVE | Internal planning or operational documentation; retained in the repository but excluded from public publication by default. |
 | `docs/superpowers/handoffs/2026-04-07-fleet-charts-sop.md` | PRIVATE-ARCHIVE | Internal planning or operational documentation; retained in the repository but excluded from public publication by default. |
 | `docs/superpowers/handoffs/2026-07-15-semantic-boundary-hygiene-implementation-notes.md` | PRIVATE-ARCHIVE | Internal semantic-boundary measurements, implementation evidence, limitations, and promotion decision; retained in the repository but excluded from public publication by default. |
-| `docs/superpowers/handoffs/2026-07-16-boundary-core-history-mining.md` | PRIVATE-ARCHIVE | Internal boundary-core GitHub and Git-history evidence, implementation notes, limitations, and rollout boundary; retained in the repository but excluded from public publication by default. |
 | `docs/superpowers/handoffs/2026-07-16-boundary-contract-feedback-implementation-notes.md` | PRIVATE-ARCHIVE | Internal boundary-contract falsifiers, implementation ledger, output measurements, limitations, and authorization boundary; retained in the repository but excluded from public publication by default. |
+| `docs/superpowers/handoffs/2026-07-16-boundary-core-history-mining.md` | PRIVATE-ARCHIVE | Internal boundary-core GitHub and Git-history evidence, implementation notes, limitations, and rollout boundary; retained in the repository but excluded from public publication by default. |
 | `docs/superpowers/handoffs/2026-07-28-incident-control-plane-finder-report.md` | PRIVATE-ARCHIVE | Internal Plans 2-7 completeness map for the incident control plane (requirement classification, reuse anchors, sequencing constraints); retained in the repository but excluded from public publication by default. |
 | `docs/superpowers/plans/2026-04-04-colony-orchestration-phase1.md` | PRIVATE-ARCHIVE | Internal planning or operational documentation; retained in the repository but excluded from public publication by default. |
 | `docs/superpowers/plans/2026-04-05-phase4-m2-websocket-console.md` | PRIVATE-ARCHIVE | Internal planning or operational documentation; retained in the repository but excluded from public publication by default. |
@@ -104,6 +115,9 @@ Internal publication roots covered by the guard: `docs/runbooks/`, `docs/sdlc/`,
 | `docs/superpowers/plans/2026-07-17-boundary-exit-parser-codeql-hardening.md` | PRIVATE-ARCHIVE | Internal security remediation implementation plan; retained in the repository but excluded from public publication by default. |
 | `docs/superpowers/plans/2026-07-17-boundary-validator-ci-refactor.md` | PRIVATE-ARCHIVE | Internal behavior-preserving CI and fitness remediation implementation plan; retained in the repository but excluded from public publication by default. |
 | `docs/superpowers/plans/2026-07-17-macos-credential-durability.md` | PRIVATE-ARCHIVE | Internal credential durability implementation plan; retained in the repository but excluded from public publication by default. |
+| `docs/superpowers/plans/2026-07-20-cicd-control-foundation.md` | PRIVATE-ARCHIVE | Internal planning or operational documentation; retained in the repository but excluded from public publication by default. |
+| `docs/superpowers/plans/2026-07-20-cicd-enforcement-control-plane-program.md` | PRIVATE-ARCHIVE | Internal planning or operational documentation; retained in the repository but excluded from public publication by default. |
+| `docs/superpowers/plans/2026-07-20-cicd-workflow-portability.md` | PRIVATE-ARCHIVE | Internal planning or operational documentation; retained in the repository but excluded from public publication by default. |
 | `docs/superpowers/plans/2026-07-23-agent-reliability-remediation-implementation.md` | PRIVATE-ARCHIVE | Internal agent reliability and host-remediation implementation plan; retained in the repository but excluded from public publication by default. |
 | `docs/superpowers/plans/2026-07-26-open-issue-triage-tooling.md` | PRIVATE-ARCHIVE | Internal issue-triage tooling implementation plan; retained in the repository but excluded from public publication by default. |
 | `docs/superpowers/plans/2026-07-28-incident-store-core.md` | PRIVATE-ARCHIVE | Internal incident-store implementation plan (Plan 1 of the incident control plane series); sanitized fixture identifiers only; retained in the repository but excluded from public publication by default. |
@@ -132,6 +146,7 @@ Internal publication roots covered by the guard: `docs/runbooks/`, `docs/sdlc/`,
 | `docs/superpowers/specs/2026-07-17-boundary-exit-parser-codeql-hardening-design.md` | PRIVATE-ARCHIVE | Internal security remediation design; retained in the repository but excluded from public publication by default. |
 | `docs/superpowers/specs/2026-07-17-boundary-validator-ci-refactor-design.md` | PRIVATE-ARCHIVE | Internal behavior-preserving CI and fitness remediation design; retained in the repository but excluded from public publication by default. |
 | `docs/superpowers/specs/2026-07-17-macos-credential-durability-design.md` | PRIVATE-ARCHIVE | Internal credential durability design; retained in the repository but excluded from public publication by default. |
+| `docs/superpowers/specs/2026-07-20-cicd-enforcement-control-plane-design.md` | PRIVATE-ARCHIVE | Internal planning or operational documentation; retained in the repository but excluded from public publication by default. |
 | `docs/superpowers/specs/2026-07-23-agent-reliability-remediation-design.md` | PRIVATE-ARCHIVE | Internal reliability and host-remediation design; sanitized of private fleet identifiers and excluded from public publication by default. |
 | `docs/superpowers/specs/2026-07-26-open-issue-triage-and-cohort-pr-design.md` | PRIVATE-ARCHIVE | Internal issue-triage, evidence, and cohort-publication design; retained in the repository but excluded from public publication by default. |
 | `docs/superpowers/specs/2026-07-28-incident-control-plane-design.md` | PRIVATE-ARCHIVE | Internal incident control plane architecture design (locked sections 1-6 plus assembled migration section); retained in the repository but excluded from public publication by default. |
@@ -143,10 +158,6 @@ Internal publication roots covered by the guard: `docs/runbooks/`, `docs/sdlc/`,
 | `docs/superpowers/specs/provider-event-lifecycle/provider-contract-claude-code-2.1.207.json` | PRIVATE-ARCHIVE | Sanitized provider schema/correlation evidence; retained for internal conformance review and excluded from public publication by default. |
 | `docs/superpowers/specs/provider-event-lifecycle/requirements.md` | PRIVATE-ARCHIVE | Internal protocol requirements; retained in the repository but excluded from public publication by default. |
 | `docs/superpowers/specs/provider-event-lifecycle/tasks.md` | PRIVATE-ARCHIVE | Internal implementation plan; retained in the repository but excluded from public publication by default. |
-| `docs/superpowers/plans/2026-07-20-cicd-control-foundation.md` | PRIVATE-ARCHIVE | Internal planning or operational documentation; retained in the repository but excluded from public publication by default. |
-| `docs/superpowers/plans/2026-07-20-cicd-enforcement-control-plane-program.md` | PRIVATE-ARCHIVE | Internal planning or operational documentation; retained in the repository but excluded from public publication by default. |
-| `docs/superpowers/plans/2026-07-20-cicd-workflow-portability.md` | PRIVATE-ARCHIVE | Internal planning or operational documentation; retained in the repository but excluded from public publication by default. |
-| `docs/superpowers/specs/2026-07-20-cicd-enforcement-control-plane-design.md` | PRIVATE-ARCHIVE | Internal planning or operational documentation; retained in the repository but excluded from public publication by default. |
 | `docs/triage/README.md` | PUBLIC | Sanitized operator contract for deterministic issue evidence, dry-run, confirmation, and recovery; complete issue bodies and private runtime identifiers are forbidden. |
 | `docs/triage/open-issue-review-ledger.jsonl` | PUBLIC | Body-free append-only mutation receipts containing only public issue metadata, repository-relative paths, hashes, and sanitized diagnostics. |
 | `docs/work-index-repair-matrix.md` | PRIVATE-ARCHIVE | Internal planning or operational documentation; retained in the repository but excluded from public publication by default. |
