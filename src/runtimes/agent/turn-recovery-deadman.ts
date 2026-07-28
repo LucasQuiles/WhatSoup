@@ -40,7 +40,10 @@ export interface TurnRecoveryDeadmanDeps {
 export interface TurnRecoveryDeadmanHealth {
   readonly running: boolean;
   readonly incidentActive: boolean;
-  readonly lastVerdictReason: TurnRecoverySupervisorHeartbeatVerdict['reason'] | null;
+  readonly lastVerdictReason:
+    | TurnRecoverySupervisorHeartbeatVerdict['reason']
+    | 'health_unavailable'
+    | null;
   readonly lastScanFailureReason: TurnRecoveryScanFailureReason | null;
 }
 
@@ -55,7 +58,10 @@ export class TurnRecoveryDeadman {
   private timer: ReturnType<typeof setInterval> | null = null;
   private startedAt: number | null = null;
   private incidentActive = false;
-  private lastVerdictReason: TurnRecoverySupervisorHeartbeatVerdict['reason'] | null = null;
+  private lastVerdictReason:
+    | TurnRecoverySupervisorHeartbeatVerdict['reason']
+    | 'health_unavailable'
+    | null = null;
   private lastScanFailureReason: TurnRecoveryScanFailureReason | null = null;
 
   constructor(deps: TurnRecoveryDeadmanDeps) {
@@ -95,7 +101,23 @@ export class TurnRecoveryDeadman {
     const now = this.now();
     if (this.startedAt !== null && now - this.startedAt < this.startupGraceMs) return;
 
-    const snapshot = this.deps.health();
+    let snapshot: TurnRecoverySupervisorHealth;
+    try {
+      snapshot = this.deps.health();
+    } catch {
+      this.lastVerdictReason = 'health_unavailable';
+      this.lastScanFailureReason = null;
+      if (this.incidentActive) return;
+      const emitted = this.deps.emitAlert(
+        this.deps.instanceName,
+        TURN_RECOVERY_SUPERVISOR_ALERT_SOURCE,
+        'Turn-recovery supervisor unavailable',
+        'reason=health_unavailable',
+        'critical',
+      );
+      if (emitted) this.incidentActive = true;
+      return;
+    }
     const verdict = evaluateTurnRecoverySupervisorHeartbeat(snapshot, {
       nowMs: now,
       staleAfterMs: this.staleAfterMs,

@@ -244,4 +244,46 @@ describe('TurnRecoveryDeadman', () => {
     expect(deadman.health().incidentActive).toBe(false);
     deadman.stop();
   });
+
+  it('fails closed when the supervisor health snapshot throws and clears after recovery', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(4_000_000);
+    let healthAvailable = false;
+    const emitAlert = vi.fn(() => true);
+    const clearAlert = vi.fn(() => true);
+    const deadman = new TurnRecoveryDeadman(createDeps({
+      startupGraceMs: 0,
+      health: () => {
+        if (!healthAvailable) throw new Error('store implementation detail');
+        return health({
+          lastScanAt: Date.now(),
+          lastScanAttemptAt: Date.now(),
+          lastSuccessfulScanAt: Date.now(),
+          scans: 1,
+        });
+      },
+      emitAlert,
+      clearAlert,
+    }));
+
+    deadman.start();
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(emitAlert).toHaveBeenCalledWith(
+      'test-instance',
+      'turn_recovery_supervisor_unavailable',
+      'Turn-recovery supervisor unavailable',
+      'reason=health_unavailable',
+      'critical',
+    );
+    expect(deadman.health().lastVerdictReason).toBe('health_unavailable');
+
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(emitAlert).toHaveBeenCalledTimes(1);
+
+    healthAvailable = true;
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(clearAlert).toHaveBeenCalledTimes(1);
+    expect(deadman.health().incidentActive).toBe(false);
+    deadman.stop();
+  });
 });
