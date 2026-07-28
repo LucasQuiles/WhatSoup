@@ -180,13 +180,15 @@ export function registeredClientSafeMessage(text: string): RegisteredClientSafeM
 }
 
 function isRegisteredClientSafeMessage(v: unknown): v is RegisteredClientSafeMessage {
-  return (
-    typeof v === 'object' &&
-    v !== null &&
-    CLIENT_SAFE_MARKER in v &&
-    (v as Record<symbol, unknown>)[CLIENT_SAFE_MARKER] === true &&
-    typeof (v as { text: unknown }).text === 'string'
-  );
+  if (
+    typeof v !== 'object' ||
+    v === null ||
+    !(CLIENT_SAFE_MARKER in v) ||
+    (v as Record<symbol, unknown>)[CLIENT_SAFE_MARKER] !== true
+  ) {
+    return false;
+  }
+  return typeof (v as { text?: unknown }).text === 'string';
 }
 
 // ─────────────────────────────────────────────────────────────────────────
