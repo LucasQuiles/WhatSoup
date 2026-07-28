@@ -1389,9 +1389,9 @@ describe('ingest.ts uncovered-branch coverage', () => {
 
     // Capture the dispatch callback handleAdminCommand receives, then invoke it
     // with a synthetic message to exercise the `(m) => runtime.handleMessage(m)` body.
-    let captured: ((m: IncomingMessage) => Promise<void>) | undefined;
+    let captured: Runtime['handleMessage'] | undefined;
     mockHandleAdminCommand.mockImplementation(
-      async (_db, _ms, _action, _st, _sid, _chat, dispatch: (m: IncomingMessage) => Promise<void>) => {
+      async (_db, _ms, _action, _st, _sid, _chat, dispatch: Runtime['handleMessage']) => {
         captured = dispatch;
       },
     );
@@ -1404,7 +1404,8 @@ describe('ingest.ts uncovered-branch coverage', () => {
 
     expect(captured).toBeDefined();
     const probe = makeIncomingMessage({ messageId: 'probe-via-callback' });
-    await captured!(probe);
+    vi.mocked(runtime.handleMessage).mockResolvedValue({ status: 'accepted' });
+    await expect(captured!(probe)).resolves.toEqual({ status: 'accepted' });
     expect(vi.mocked(runtime.handleMessage)).toHaveBeenCalledWith(probe);
   });
 

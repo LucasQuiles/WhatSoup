@@ -99,7 +99,7 @@ export async function handleAdminCommand(
   subjectType: SubjectType,
   subjectId: string,
   adminChatJid: string,
-  handleMessageFn: (msg: IncomingMessage) => Promise<void>,
+  handleMessageFn: Runtime['handleMessage'],
   durability?: DurabilityEngine,
 ): Promise<void> {
   if (action === 'allow') {

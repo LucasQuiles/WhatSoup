@@ -87,10 +87,12 @@ identifier-free degraded health evidence.
    discards the queue result and does not terminalize the inbound.
 5. Add an optional `chatQueue` dependency to `ChatRuntimeOptions` for the real
    queue fixture, defaulting to the existing `new ChatQueue(3)`.
-6. Await `enqueue()`. On linked rejection, await
-   `durability.markInboundFailed(seq, 'queue_full')` before returning the
-   rejected receipt.
-7. Re-run the test to green.
+6. Await `enqueue()`. On linked rejection, compare and set the matching
+   `processing` inbound by sequence, message ID, and chat JID to `queue_full`
+   before returning the rejected receipt.
+7. Fail closed on zero-row, mismatched, already-terminal, or write-failed
+   terminalization; increment unowned health and return no false receipt.
+8. Re-run the test to green.
 
 ## Task 4: Prove accepted admission does not await task completion
 
@@ -101,12 +103,15 @@ identifier-free degraded health evidence.
 
 **Steps:**
 
-1. Add a real-queue test whose provider turn is deliberately blocked.
+1. Add a production-valid real-queue test whose provider turn is deliberately
+   blocked.
 2. Assert `handleMessage()` promptly returns `{ status: 'accepted' }` while the
    queued task remains unfinished.
 3. Observe the failing receipt assertion.
 4. Return the accepted receipt immediately after `enqueue()` reports `true`.
-5. Release the blocked work during fixture cleanup and re-run to green.
+5. Release the provider, then prove reply submission, durable inbound
+   completion, and queue drain before cleanup.
+6. Re-run to green.
 
 ## Task 5: Surface unowned rejection health
 

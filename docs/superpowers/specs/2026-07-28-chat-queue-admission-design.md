@@ -76,12 +76,18 @@ For ChatRuntime:
    admission decision represented by its `Promise<boolean>`; it does not await
    the queued task.
 2. If admitted, return `{ status: 'accepted' }`.
-3. If rejected and both durability plus `inboundSeq` are present, mark the
-   inbound failed with `queue_full`, then return a rejected receipt whose
+3. If rejected and both durability plus `inboundSeq` are present, compare and
+   set the matching `processing` row by sequence, message ID, and chat JID to
+   failed with `queue_full`, then return a rejected receipt whose
    `durableDisposition` is `failed`.
 4. If rejected without a durable inbound identity, return a rejected receipt
    whose disposition is `unowned` and increment a bounded aggregate health
    counter. Do not fabricate a durable owner.
+
+A missing, stale, mismatched, or already-terminal sequence changes zero rows,
+increments the unowned counter, and rejects `handleMessage()`. A terminal-write
+exception follows the same health path and is rethrown. Neither case returns a
+false durable receipt or overwrites another terminal disposition.
 
 The user-facing overload policy is intentionally no automatic reply. Sending a
 new message outside the bounded queue would amplify load and could itself fail.
@@ -94,11 +100,12 @@ ChatRuntime health exposes only aggregate, identifier-free evidence:
 
 - `queue.droppedCount`: cumulative real queue rejections since process start;
 - `queueAdmission.rejectedTotal`: the same cumulative rejection count;
-- `queueAdmission.unownedTotal`: rejected calls that had no journaled inbound
-  identity and therefore could not be durably terminalized.
+- `queueAdmission.unownedTotal`: rejected calls that could not be proven
+  durably terminalized because identity was absent or invalid, the row was no
+  longer processing, or the terminal write failed.
 
 Any positive `unownedTotal` degrades runtime health because it proves a caller
-used ChatRuntime without a durable rejection owner. A terminalized
+left a ChatRuntime rejection without a proven durable owner. A terminalized
 `queue_full` rejection does not keep runtime health degraded indefinitely; its
 cumulative count remains observable.
 
@@ -111,10 +118,11 @@ data appears in the receipt or health projection.
   single durable classification; no migration or new taxonomy is added.
 - ChatRuntime owns the capacity-rejection terminal write because it alone
   observes the queue result and already receives the DurabilityEngine.
-- The receipt is returned only after that terminal write completes.
-- A terminal-write exception rejects `handleMessage()` and is handled by the
-  existing ingest error path; the runtime must not return a false durable
-  receipt.
+- The receipt is returned only after exactly one matching `processing` row
+  transitions.
+- A zero-row transition or terminal-write exception increments unowned health,
+  rejects `handleMessage()`, and is handled by the existing ingest error path;
+  the runtime must not return a false durable receipt.
 - Repeated rejections never enqueue work, bypass the cap, or produce replies.
 
 ## Test Strategy
@@ -130,9 +138,13 @@ Tests use a real `ChatQueue`, real SQLite-backed `Database`, and real
    failure class `queue_full`.
 4. Reject a message without `inboundSeq`; assert `unowned` receipt and degraded,
    identifier-free health evidence.
-5. Admit a message below capacity; assert an `accepted` receipt is returned
-   without waiting for task completion.
-6. Retain the existing ChatQueue memory-bound and cross-chat fairness suite.
+5. Supply a missing, stale, mismatched, or already-terminal sequence; assert no
+   durable receipt is returned, no other row is overwritten, and health
+   degrades.
+6. Admit a message below capacity; assert an `accepted` receipt is returned
+   before provider completion, then release the provider and prove reply,
+   durable completion, and queue drain.
+7. Retain the existing ChatQueue memory-bound and cross-chat fairness suite.
 
 Focused verification includes ChatQueue, ChatRuntime admission, ChatRuntime
 health, ingest, durability, and typechecking. The final draft PR also runs the
