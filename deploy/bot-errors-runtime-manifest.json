@@ -290,14 +290,18 @@
     },
     {
       "path": "deploy/scripts/lib/sentinel_pin.py",
-      "sha256": "702082cf33ea9bf19dd72db68b586324e32724e8f375f6c3bed15ca5e0a3b0cd",
+      "sha256": "4edd3c96fa28128567a01d698dc6a8e72a738d681a04269457c4ebb3e593b0b6",
       "mustContain": [
-        "class PinLoadError(Exception):",
-        "class Pin:",
+        "O_NOFOLLOW",
+        "_classify_open_failure",
         "_open_confined_leaf",
         "_sha256_fd",
-        "_classify_open_failure",
-        "O_NOFOLLOW"
+        "approved_manifest_digests",
+        "class Pin:",
+        "class PinLoadError(Exception):",
+        "def compute_manifest_digest(",
+        "def load_approved_manifest_digests(",
+        "manifest_digest"
       ]
     },
     {
