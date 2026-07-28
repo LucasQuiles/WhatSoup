@@ -410,6 +410,7 @@ def test_metadata_projection_drops_identity_content_and_raw_prose() -> None:
             "error": "raw provider prose",
             "body": "message content",
             "remote": "private-host",
+            "remoteAckDegraded": True,
             "count": 4,
             "attempts": 2,
             "status": "recovered",
@@ -426,6 +427,11 @@ def test_metadata_projection_drops_identity_content_and_raw_prose() -> None:
         "attempts": 2,
         "count": 4,
         "nested": {"failed": 1, "verdict": "completed"},
+        "remoteAckDegraded": True,
         "status": "recovered",
     }
     assert "private-host-shaped-token" not in json.dumps(projected)
+
+
+def test_metadata_projection_requires_boolean_remote_ack_degradation() -> None:
+    assert metadata_only_controller_details({"remoteAckDegraded": "healthy"}) == {}

@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "generatedAt": "2026-07-28T12:00:00Z",
+  "generatedAt": "2026-07-28T12:38:40Z",
   "scope": "bot-errors-runtime-scripts",
   "expectedHeadShaPolicy": "populated at deploy time by deploy step; absent here so committed state is observability-only",
   "files": [
@@ -283,7 +283,7 @@
     },
     {
       "path": "deploy/scripts/lib/controller_log.py",
-      "sha256": "4397ea8c6fcb7b49d241100cf4bcecf88425942ff479b9abfa63772388852615",
+      "sha256": "a944c375c190ec25686fcc8ece7431803818d2ee474deaa62d5afd1e920958be",
       "mustContain": [
         "ControllerLogContext",
         "diagnostic_best_effort",

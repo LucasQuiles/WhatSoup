@@ -100,7 +100,10 @@ _SENSITIVE_DETAIL_KEY_PARTS = (
     "text",
     "token",
 )
-_SAFE_DERIVED_DETAIL_KEYS = frozenset({"bodyLengthBucket", "reason"})
+_SAFE_BOOLEAN_DETAIL_KEYS = frozenset({"remoteAckDegraded"})
+_SAFE_DERIVED_DETAIL_KEYS = frozenset({"bodyLengthBucket", "reason"}).union(
+    _SAFE_BOOLEAN_DETAIL_KEYS
+)
 
 _CORE_FIELDS = frozenset(
     {
@@ -201,6 +204,8 @@ def metadata_only_controller_details(value: Mapping[str, Any]) -> dict[str, Any]
             projected: dict[str, Any] = {}
             for key in sorted(item):
                 if not isinstance(key, str) or not _DETAIL_KEY_RE.fullmatch(key):
+                    continue
+                if key in _SAFE_BOOLEAN_DETAIL_KEYS and not isinstance(item[key], bool):
                     continue
                 folded = key.casefold().replace("-", "").replace("_", "")
                 if (
