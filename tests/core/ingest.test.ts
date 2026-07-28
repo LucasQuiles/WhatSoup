@@ -66,7 +66,10 @@ import { Database } from '../../src/core/database.ts';
 import { createIngestHandler, getIngestStats } from '../../src/core/ingest.ts';
 import { drainIngest } from './_helpers/ingest-drain.ts';
 import { DurabilityEngine } from '../../src/core/durability.ts';
-import { QueueAdmissionTerminalizationError } from '../../src/core/inbound-failure-class.ts';
+import { ChatQueue } from '../../src/runtimes/chat/queue.ts';
+import { ChatRuntime } from '../../src/runtimes/chat/runtime.ts';
+import type { LLMProvider } from '../../src/runtimes/chat/providers/types.ts';
+import type { PineconeMemory } from '../../src/runtimes/chat/providers/pinecone.ts';
 import { isAdminMessage, parseAdminCommand } from '../../src/core/command-router.ts';
 import { handleAdminCommand, handleFallbackCommand, sendApprovalRequest } from '../../src/core/admin.ts';
 import { shouldRespond } from '../../src/core/access-policy.ts';
@@ -944,22 +947,42 @@ describe('Inbound journaling: durabilityEngine.journalInbound', () => {
     });
   });
 
-  it('retries a queue-rejection terminal write with the bounded queue_full class', async () => {
+  it('retries a real ChatRuntime queue terminal write with the bounded queue_full class', async () => {
     const db = makeTempDb();
     const messenger = makeMessenger();
-    const runtime = makeRuntime();
     const durability = new DurabilityEngine(db);
-    const msg = makeIncomingMessage({ messageId: 'queue-terminal-write-retry' });
-
-    vi.mocked(runtime.handleMessage).mockRejectedValue(
-      new QueueAdmissionTerminalizationError(
-        new Error('queue rejection terminalization failed'),
-      ),
+    const msg = makeIncomingMessage({
+      messageId: 'queue-terminal-write-retry',
+      chatJid: '15551230009@s.whatsapp.net',
+      senderJid: '15551230009@s.whatsapp.net',
+    });
+    const queue = new ChatQueue(1, 1);
+    await queue.enqueue(msg.chatJid, () => new Promise<void>(() => {}));
+    const provider: LLMProvider = {
+      name: 'unused-provider',
+      generate: vi.fn(),
+    };
+    const runtime = new ChatRuntime(
+      db,
+      messenger,
+      {} as PineconeMemory,
+      provider,
+      provider,
+      { enableEnrichment: false, chatQueue: queue },
     );
+    runtime.setDurability(durability);
+    const markInboundFailedIfProcessing =
+      durability.markInboundFailedIfProcessing.bind(durability);
+    const fencedWrite = vi.spyOn(durability, 'markInboundFailedIfProcessing')
+      .mockImplementationOnce(() => {
+        throw new Error('queue rejection terminalization failed');
+      })
+      .mockImplementation((...args) => markInboundFailedIfProcessing(...args));
 
     const handler = makeIngest(db, messenger, runtime, BOT_JID, BOT_LID, durability);
     await runIngest(handler, msg);
 
+    expect(fencedWrite).toHaveBeenCalledTimes(2);
     const row = db.raw.prepare(
       `SELECT processing_status, terminal_reason, failure_class
        FROM inbound_events
@@ -970,6 +993,18 @@ describe('Inbound journaling: durabilityEngine.journalInbound', () => {
       terminal_reason: 'error',
       failure_class: 'queue_full',
     });
+    expect(runtime.getHealthSnapshot()).toMatchObject({
+      status: 'degraded',
+      details: {
+        queueAdmission: {
+          rejectedTotal: 1,
+          unownedTotal: 1,
+        },
+      },
+    });
+    expect(provider.generate).not.toHaveBeenCalled();
+    expect(messenger.sendMessage).not.toHaveBeenCalled();
+    expect(messenger.sendMedia).not.toHaveBeenCalled();
   });
 
   it('no durability engine — existing behaviour unchanged', async () => {

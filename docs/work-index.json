@@ -1,7 +1,7 @@
 {
-  "generated_at": "2026-07-29T11:55:03Z",
+  "generated_at": "2026-07-29T11:56:03Z",
   "repo": "WhatSoup",
-  "git_head": "c7c950d3b16c8a202570e9279b6cb339a897e165",
+  "git_head": "6060f6d5c28c15681f580f1a2f71418599619815",
   "git_head_note": "git_head is captured at scan time, so it reflects the branch HEAD at the moment `build-work-index` ran — NOT the commit that carries this index. Expect divergence in two cases: (1) intra-branch, when the regenerated index is committed after further content changes are staged; (2) post-squash-merge, when the landed main SHA differs from the pre-merge branch SHA. The row data and inconsistency detection remain accurate regardless of git_head freshness.",
   "total": 92,
   "schema_version": 5,
@@ -1012,7 +1012,7 @@
       "canonical_parent": "docs/superpowers/specs",
       "supersedes_hint": null,
       "last_modified": "2026-07-29",
-      "size_bytes": 7052
+      "size_bytes": 7312
     },
     {
       "path": "docs/superpowers/specs/2026-07-28-incident-control-plane-design.md",

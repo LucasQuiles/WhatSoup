@@ -503,8 +503,9 @@ curl -s http://127.0.0.1:9091/health | python3 -m json.tool
 
 # 3. Check runtime.chat.queue_admission on chat instances
 # rejected_total counts capacity-shed messages since process start.
-# unowned_total > 0 degrades health because at least one rejection could not be
-# matched to and terminalized against its processing inbound row.
+# unowned_total counts rejections ChatRuntime could not prove terminalized at
+# the admission boundary. It stays positive until restart even if ingest later
+# recovers the row through its identity/state-fenced fallback.
 
 # 4. Check durability quarantine count
 # If durability.quarantinedOutbound > 0, messages were lost — investigate.
@@ -517,9 +518,10 @@ journalctl --user -u whatsoup@chat-bot -n 100 | grep -i enrich
 - Anthropic/OpenAI API key expired or rate-limited
 - Network connectivity issue
 - `enrichment_retries` maxed out on many messages (run `reset_enrichment_errors` MCP tool)
-- `runtime.chat.queue_admission.unowned_total > 0` — queue capacity rejected work
-  that lacked a matching processing inbound owner; inspect the durable inbound
-  ledger and restart only after preserving the failure evidence
+- `runtime.chat.queue_admission.unowned_total > 0` — ChatRuntime failed to prove
+  queue-rejection ownership at admission time; inspect the durable inbound
+  ledger because ingest may subsequently have recovered the row as
+  `queue_full`, and restart only after preserving the failure evidence
 
 **Common causes for agent instances:**
 - Recent session crashes — check `durability.quarantinedOutbound` and `recentCrashCount` in the health JSON

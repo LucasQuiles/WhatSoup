@@ -100,14 +100,18 @@ ChatRuntime health exposes only aggregate, identifier-free evidence:
 
 - `queue.droppedCount`: cumulative real queue rejections since process start;
 - `queueAdmission.rejectedTotal`: the same cumulative rejection count;
-- `queueAdmission.unownedTotal`: rejected calls that could not be proven
-  durably terminalized because identity was absent or invalid, the row was no
-  longer processing, or the terminal write failed.
+- `queueAdmission.unownedTotal`: rejected calls that ChatRuntime could not
+  prove durably terminalized at the admission boundary because identity was
+  absent or invalid, the row was no longer processing, or the terminal write
+  failed. The counter remains cumulative if ingest later recovers the row
+  through the same identity/state fence.
 
-Any positive `unownedTotal` degrades runtime health because it proves a caller
-left a ChatRuntime rejection without a proven durable owner. A terminalized
-`queue_full` rejection does not keep runtime health degraded indefinitely; its
-cumulative count remains observable.
+Any positive `unownedTotal` degrades runtime health because it proves
+ChatRuntime crossed an admission boundary without a proven durable owner. The
+historical evidence remains sticky until restart even when ingest later
+recovers the row. A `queue_full` rejection terminalized directly by ChatRuntime
+does not keep runtime health degraded; its cumulative rejection count remains
+observable.
 
 No message, chat, sender, destination, host, process, filesystem, or exception
 data appears in the receipt or health projection.

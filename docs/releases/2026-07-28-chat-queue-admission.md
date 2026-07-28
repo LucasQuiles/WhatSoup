@@ -5,9 +5,10 @@
 - Chat `GET /health` responses now include
   `runtime.chat.queue_admission.rejected_total` and `unowned_total`.
   Both values are identifier-free, process-local cumulative counters that reset
-  on restart. `unowned_total > 0` degrades health because at least one
-  capacity rejection could not be matched to and terminalized against its
-  processing inbound row.
+  on restart. `unowned_total > 0` degrades health because ChatRuntime could not
+  prove at least one capacity rejection terminalized at the admission boundary.
+  The historical count remains positive even if ingest later recovers that row
+  through its identity/state-fenced fallback.
 
 ## Behavioral changes
 
