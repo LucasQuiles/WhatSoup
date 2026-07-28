@@ -12,6 +12,8 @@ export interface SignalsDeps {
   getProducerStore: () => ProducerStore | null;
   now?: () => Date;
   rateLimit?: { windowMs: number; maxPerWindow: number };
+  /** Root fleet-token check for the producer admin routes (wired by index.ts). */
+  verifyRootToken?: (req: IncomingMessage) => boolean;
 }
 
 interface RateWindow {
@@ -33,6 +35,9 @@ function isSqliteFull(err: unknown): boolean {
 
 export function createSignalsHandlers(deps: SignalsDeps): {
   postSignal(req: IncomingMessage, res: ServerResponse): Promise<void>;
+  postProducer(req: IncomingMessage, res: ServerResponse): Promise<void>;
+  postProducerCredential(req: IncomingMessage, res: ServerResponse, params: { id: string }): Promise<void>;
+  deleteProducerCredential(req: IncomingMessage, res: ServerResponse, params: { id: string }): Promise<void>;
 } {
   const now = deps.now ?? ((): Date => new Date());
   const rateLimit = deps.rateLimit ?? { windowMs: 60_000, maxPerWindow: 60 };
@@ -162,5 +167,130 @@ export function createSignalsHandlers(deps: SignalsDeps): {
     }
   }
 
-  return { postSignal };
+  function requireStores(res: ServerResponse): ProducerStore | null {
+    const producerStore = deps.getProducerStore();
+    if (!producerStore) {
+      jsonResponse(res, 503, errorBody('incident_store_unavailable', true, 'incident store is unavailable'));
+      return null;
+    }
+    return producerStore;
+  }
+
+  function requireRoot(req: IncomingMessage, res: ServerResponse): boolean {
+    if (!deps.verifyRootToken || !deps.verifyRootToken(req)) {
+      jsonResponse(res, 401, errorBody('root_token_required', false, 'fleet root token required'));
+      return false;
+    }
+    return true;
+  }
+
+  async function readJsonBody(req: IncomingMessage, res: ServerResponse): Promise<unknown | undefined> {
+    let raw: string;
+    try {
+      raw = await readBody(req, SIGNALS_BODY_LIMIT_BYTES);
+    } catch {
+      jsonResponse(res, 413, errorBody('body_too_large', false, 'body exceeds the 32 KiB limit'));
+      return undefined;
+    }
+    if (raw.trim() === '') return {};
+    try {
+      return JSON.parse(raw);
+    } catch {
+      jsonResponse(res, 400, errorBody('malformed_request', false, 'body is not valid JSON'));
+      return undefined;
+    }
+  }
+
+  async function postProducer(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    const producerStore = requireStores(res);
+    if (!producerStore) return;
+    if (!requireRoot(req, res)) return;
+    const body = await readJsonBody(req, res);
+    if (body === undefined) return;
+
+    const input = body as {
+      producerId?: unknown;
+      producerDomainId?: unknown;
+      allowedKinds?: unknown;
+      allowedConditionClasses?: unknown;
+      allowedSubjects?: unknown;
+      enrollmentTtlMs?: unknown;
+      credentialTtlMs?: unknown;
+    };
+    const result = producerStore.register(
+      input as Parameters<ProducerStore['register']>[0],
+      now(),
+    );
+    if (!result.ok) {
+      if (result.reason === 'producer_exists') {
+        jsonResponse(res, 409, errorBody('producer_exists', false, 'producer is already registered'));
+      } else {
+        jsonResponse(res, 422, errorBody('invalid_registration', false, 'registration failed validation'));
+      }
+      return;
+    }
+    jsonResponse(res, 201, {
+      producerId: String((body as { producerId: string }).producerId),
+      enrollmentSecret: result.enrollmentSecret,
+      enrollmentSecretExpiresAt: result.enrollmentSecretExpiresAt,
+    });
+  }
+
+  async function postProducerCredential(
+    req: IncomingMessage,
+    res: ServerResponse,
+    params: { id: string },
+  ): Promise<void> {
+    const producerStore = requireStores(res);
+    if (!producerStore) return;
+    const body = await readJsonBody(req, res);
+    if (body === undefined) return;
+
+    const at = now();
+    const secret = (body as { enrollmentSecret?: unknown }).enrollmentSecret;
+    if (typeof secret === 'string' && secret.length > 0) {
+      const exchanged = producerStore.exchangeEnrollmentSecret(params.id, secret, at);
+      if (!exchanged.ok) {
+        jsonResponse(res, 401, errorBody('enrollment_rejected', false, 'enrollment was not accepted'));
+        return;
+      }
+      jsonResponse(res, 201, {
+        producerId: params.id,
+        credential: exchanged.credential,
+        credentialExpiresAt: exchanged.credentialExpiresAt,
+      });
+      return;
+    }
+
+    const bearer = extractBearer(req);
+    if (bearer === null) {
+      jsonResponse(res, 401, errorBody('credential_required', false, 'enrollment secret or current credential required'));
+      return;
+    }
+    const rotated = producerStore.rotateCredential(params.id, bearer, at);
+    if (!rotated.ok) {
+      jsonResponse(res, 401, errorBody('credential_invalid', false, 'producer credential rejected'));
+      return;
+    }
+    jsonResponse(res, 201, {
+      producerId: params.id,
+      credential: rotated.credential,
+      credentialExpiresAt: rotated.credentialExpiresAt,
+    });
+  }
+
+  async function deleteProducerCredential(
+    req: IncomingMessage,
+    res: ServerResponse,
+    params: { id: string },
+  ): Promise<void> {
+    const producerStore = requireStores(res);
+    if (!producerStore) return;
+    if (!requireRoot(req, res)) return;
+    producerStore.revoke(params.id);
+    res.writeHead(204);
+    res.end();
+  }
+
+  return { postSignal, postProducer, postProducerCredential, deleteProducerCredential };
 }
