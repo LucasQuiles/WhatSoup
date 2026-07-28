@@ -18,15 +18,15 @@ The **Inconsistencies** section lists missing or stale index entries compared wi
 scoped markdown files currently on disk.
 
 **Repo:** `WhatSoup`
-**Total entries:** 85
+**Total entries:** 87
 
 ## Totals
 
 | Dimension | Breakdown |
 |---|---|
-| Kind | handoff=7, plan=43, review=4, spec=30, state=1 |
-| Status | active=19, closed=4, completed=33, deferred=7, pending=15, unknown=7 |
-| Status source | body-marker=80, fallback=4, state-md-status=1 |
+| Kind | handoff=7, plan=44, review=4, spec=31, state=1 |
+| Status | active=19, closed=4, completed=33, deferred=7, pending=15, unknown=9 |
+| Status source | body-marker=81, fallback=5, state-md-status=1 |
 
 ## Inconsistencies
 
@@ -58,7 +58,7 @@ scoped markdown files currently on disk.
 | `docs/superpowers/specs/provider-event-lifecycle/requirements.md` | spec | requirements | body-marker |
 | `docs/superpowers/specs/provider-event-lifecycle/tasks.md` | spec | tasks | body-marker |
 
-### Unknown-status — triage needed (7)
+### Unknown-status — triage needed (9)
 
 | Path | Kind | Topic | Last Mod |
 |------|------|-------|----------|
@@ -66,9 +66,11 @@ scoped markdown files currently on disk.
 | `docs/superpowers/plans/2026-07-17-boundary-validator-ci-refactor.md` | plan | boundary-validator-ci-refactor | 2026-07-17 |
 | `docs/superpowers/plans/2026-07-17-macos-credential-durability.md` | plan | macos-credential-durability | 2026-07-17 |
 | `docs/superpowers/plans/2026-07-23-agent-reliability-remediation-implementation.md` | plan | agent-reliability-remediation-implementation | 2026-07-27 |
+| `docs/superpowers/plans/2026-07-28-incident-store-core.md` | plan | incident-store-core | 2026-07-28 |
 | `docs/superpowers/specs/2026-07-11-turn-lifecycle-fitness-extraction-design.md` | spec | turn-lifecycle-fitness-extraction-design | 2026-07-11 |
 | `docs/superpowers/specs/2026-07-17-macos-credential-durability-design.md` | spec | macos-credential-durability-design | 2026-07-17 |
 | `docs/superpowers/specs/2026-07-23-agent-reliability-remediation-design.md` | spec | agent-reliability-remediation-design | 2026-07-27 |
+| `docs/superpowers/specs/2026-07-28-incident-control-plane-design.md` | spec | incident-control-plane-design | 2026-07-28 |
 
 ### Cross-tree topic clusters (4)
 
@@ -122,7 +124,7 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 | `docs/superpowers/handoffs/2026-07-16-boundary-contract-feedback-implementation-notes.md` | handoff | active | body-marker | boundary-contract-feedback-implementation-notes | 2026-07-28 |  |
 | `docs/superpowers/handoffs/2026-07-16-boundary-core-history-mining.md` | handoff | pending | body-marker | boundary-core-history-mining | 2026-07-16 |  |
 
-### docs/superpowers/plans  _(43 entries)_
+### docs/superpowers/plans  _(44 entries)_
 
 | Path | Kind | Status | Source | Topic | Last Mod | Supersedes |
 |------|------|--------|--------|-------|----------|------------|
@@ -169,6 +171,7 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 | `docs/superpowers/plans/2026-07-20-cicd-workflow-portability.md` | plan | pending | body-marker | cicd-workflow-portability | 2026-07-28 |  |
 | `docs/superpowers/plans/2026-07-23-agent-reliability-remediation-implementation.md` | plan | unknown | fallback | agent-reliability-remediation-implementation | 2026-07-27 |  |
 | `docs/superpowers/plans/2026-07-26-open-issue-triage-tooling.md` | plan | active | body-marker | open-issue-triage-tooling | 2026-07-27 |  |
+| `docs/superpowers/plans/2026-07-28-incident-store-core.md` | plan | unknown | fallback | incident-store-core | 2026-07-28 |  |
 
 ### docs/superpowers/reviews  _(4 entries)_
 
@@ -179,7 +182,7 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 | `docs/superpowers/reviews/2026-07-09-wall-to-wall-audit-pr-briefs.md` | review | completed | body-marker | wall-to-wall-audit-pr-briefs | 2026-07-10 |  |
 | `docs/superpowers/reviews/2026-07-24-r13-r15-tech-debt-review-map.md` | review | completed | body-marker | r13-r15-tech-debt-review-map | 2026-07-24 |  |
 
-### docs/superpowers/specs  _(24 entries)_
+### docs/superpowers/specs  _(25 entries)_
 
 | Path | Kind | Status | Source | Topic | Last Mod | Supersedes |
 |------|------|--------|--------|-------|----------|------------|
@@ -207,6 +210,7 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 | `docs/superpowers/specs/2026-07-20-cicd-enforcement-control-plane-design.md` | spec | active | body-marker | cicd-enforcement-control-plane-design | 2026-07-28 |  |
 | `docs/superpowers/specs/2026-07-23-agent-reliability-remediation-design.md` | spec | unknown | body-marker | agent-reliability-remediation-design | 2026-07-27 |  |
 | `docs/superpowers/specs/2026-07-26-open-issue-triage-and-cohort-pr-design.md` | spec | active | body-marker | open-issue-triage-and-cohort-pr-design | 2026-07-27 |  |
+| `docs/superpowers/specs/2026-07-28-incident-control-plane-design.md` | spec | unknown | body-marker | incident-control-plane-design | 2026-07-28 | BOT ERRORS WhatsApp-transport-centric delivery (dispatcher/collector file+SSH architecture) as the canonical incident path. |
 
 ### docs/superpowers/specs/kill-session-transactional-cancellation  _(3 entries)_
 
@@ -220,11 +224,11 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 
 | Path | Kind | Status | Source | Topic | Last Mod | Supersedes |
 |------|------|--------|--------|-------|----------|------------|
-| `docs/superpowers/specs/provider-event-lifecycle/design.md` | spec | active | body-marker | design | 2026-07-27 |  |
-| `docs/superpowers/specs/provider-event-lifecycle/requirements.md` | spec | active | body-marker | requirements | 2026-07-27 |  |
-| `docs/superpowers/specs/provider-event-lifecycle/tasks.md` | spec | active | body-marker | tasks | 2026-07-27 |  |
+| `docs/superpowers/specs/provider-event-lifecycle/design.md` | spec | active | body-marker | design | 2026-07-28 |  |
+| `docs/superpowers/specs/provider-event-lifecycle/requirements.md` | spec | active | body-marker | requirements | 2026-07-28 |  |
+| `docs/superpowers/specs/provider-event-lifecycle/tasks.md` | spec | active | body-marker | tasks | 2026-07-28 |  |
 
 ---
 
 - Derived from `docs/work-index.json`
-- Generated at 2026-07-28T10:59:57Z from commit `a079b5bc63168c22e9fae012f15590cdf8c04c22`
+- Generated at 2026-07-28T17:24:43Z from commit `61f04ac77e515f8d3de7ec66c0ab515260f629d9`
