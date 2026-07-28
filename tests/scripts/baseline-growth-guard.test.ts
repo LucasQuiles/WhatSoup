@@ -11,7 +11,7 @@
  * revision resolution, weighing, and comparison are all the production code path.
  */
 import { execFileSync, spawnSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -415,5 +415,230 @@ describe('growth waivers — the reviewed-widening escape valve, fail-closed', (
     expect(GROWTH_WAIVERS_PATH).toBe('.claude/fitness/growth-waivers.json');
     expect(/baseline.*\.json$/.test(GROWTH_WAIVERS_PATH)).toBe(false);
     expect(/-baseline\.json$/.test(GROWTH_WAIVERS_PATH)).toBe(false);
+  });
+});
+
+/**
+ * The candidate side used to be hardcoded to the working tree, so a CI run could not name
+ * WHICH commit it cleared and its verdict was unreproducible once the checkout moved. These
+ * cover the pinned-revision surface and, more importantly, the base/candidate relations that
+ * weigh equal and would otherwise pass having proven nothing.
+ */
+describe('exact-revision pinning — the verdict must name what it measured', () => {
+  it('weighs the pinned candidate revision, NOT the working tree', () => {
+    // The working tree and the pinned candidate must disagree in OPPOSITE directions, or
+    // the test cannot tell the two apart. Base holds 2 entries; the committed candidate
+    // SHRINKS to 1 (a pass) while the working tree GROWS to 40 (a block). Honouring
+    // --candidate therefore exits 0 and ignoring it exits 1 — the assertion below fails
+    // under either mistake. (Verified by mutation: reverting to weighAt(null, ...) turns
+    // this red. An earlier version of this test pinned base === candidate, which
+    // short-circuited on the relation check and passed even when --candidate was ignored.)
+    const dir = makeRepo(2);
+    const base = git(dir, ['rev-parse', 'HEAD']).trim();
+    git(dir, ['checkout', '-q', '-b', 'candidate-branch']);
+    writeBoundary(dir, 1);
+    git(dir, ['add', '-A']);
+    git(dir, ['commit', '-qm', 'committed shrink']);
+    const candidate = git(dir, ['rev-parse', 'HEAD']).trim();
+    writeBoundary(dir, 40); // uncommitted growth, present ONLY in the working tree
+
+    const { status, out } = runGuard([
+      '--repo', dir, '--base', base, '--candidate', candidate, '--json',
+    ]);
+    if (status !== 0) console.error(`guard exited ${status}, expected 0:\n${out}`);
+    expect(status).toBe(0);
+    const receipt: unknown = JSON.parse(out.slice(out.indexOf('{')));
+    expect((receipt as { findings: unknown[] }).findings).toEqual([]);
+  });
+
+  it('still weighs the working tree when no candidate is pinned (local strictness held)', () => {
+    // The mirror of the above: the SAME uncommitted growth must still block by default,
+    // or making the candidate pinnable would have quietly disarmed the pre-push gate.
+    const dir = makeRepo(2);
+    const base = git(dir, ['rev-parse', 'HEAD']).trim();
+    git(dir, ['checkout', '-q', '-b', 'candidate-branch']);
+    writeBoundary(dir, 1);
+    git(dir, ['add', '-A']);
+    git(dir, ['commit', '-qm', 'committed shrink']);
+    writeBoundary(dir, 40); // uncommitted growth
+
+    const result = spawnSync(
+      process.execPath,
+      [
+        '--experimental-strip-types',
+        resolve(repoRoot, 'scripts/baseline-growth-guard.ts'),
+        '--repo', dir, '--base', base,
+      ],
+      { cwd: repoRoot, encoding: 'utf8', timeout: 60_000 },
+    );
+    const out = `${result.stdout ?? ''}${result.stderr ?? ''}`;
+    if (result.status !== 1) console.error(`guard exited ${result.status}, expected 1:\n${out}`);
+    expect(result.status).toBe(1);
+    expect(out).toMatch(/2 -> 40/);
+  });
+
+  it('reports the exact candidate OID in the receipt, not a label', () => {
+    const dir = makeRepo(2);
+    const base = git(dir, ['rev-parse', 'HEAD']).trim();
+    writeBoundary(dir, 1); // shrink, so the run is a clean pass
+    git(dir, ['add', '-A']);
+    git(dir, ['commit', '-qm', 'shrink']);
+    const candidate = git(dir, ['rev-parse', 'HEAD']).trim();
+    const { status, out } = runGuard(['--repo', dir, '--base', base, '--candidate', candidate, '--json']);
+    expect(status, out).toBe(0);
+    const receipt: unknown = JSON.parse(out.slice(out.indexOf('{')));
+    expect((receipt as { candidate: string }).candidate).toBe(candidate);
+    expect((receipt as { base: string }).base).toBe(base);
+  });
+
+  it('reports working-tree literally when no candidate is pinned', () => {
+    const dir = makeRepo(2);
+    writeBoundary(dir, 1);
+    const { status, out } = runGuard(['--repo', dir, '--base', 'HEAD', '--json']);
+    expect(status, out).toBe(0);
+    const receipt: unknown = JSON.parse(out.slice(out.indexOf('{')));
+    // Not a SHA: a working-tree weighing is genuinely not reproducible from an OID, and
+    // saying so is more honest than printing the HEAD it did not actually weigh.
+    expect((receipt as { candidate: string }).candidate).toBe('working-tree');
+  });
+
+  it('is INCONCLUSIVE (exit 2), never a pass, when base and candidate are the same commit', () => {
+    // The vacuous case: identical revisions always weigh equal, so a green here would mean
+    // "proved nothing" was reported as "proved clean". Reachable from a merge_group whose
+    // base and head resolve alike.
+    const dir = makeRepo(3);
+    const oid = git(dir, ['rev-parse', 'HEAD']).trim();
+    const result = spawnSync(
+      process.execPath,
+      [
+        '--experimental-strip-types',
+        resolve(repoRoot, 'scripts/baseline-growth-guard.ts'),
+        '--repo', dir, '--base', oid, '--candidate', oid,
+      ],
+      { cwd: repoRoot, encoding: 'utf8', timeout: 60_000 },
+    );
+    const out = `${result.stdout ?? ''}${result.stderr ?? ''}`;
+    if (result.status !== 2) console.error(`guard exited ${result.status}, expected 2:\n${out}`);
+    expect(result.status).toBe(2);
+    expect(out).toMatch(/cannot detect growth/);
+  });
+
+  it('is INCONCLUSIVE (exit 2) when the base is not an ancestor of the candidate', () => {
+    // Divergent histories: a weight difference is then someone else's work, in either
+    // direction, so neither a pass nor a block would be evidence about THIS change.
+    const dir = makeRepo(2);
+    const root = git(dir, ['rev-parse', 'HEAD']).trim();
+    git(dir, ['checkout', '-q', '-b', 'other']);
+    writeBoundary(dir, 4);
+    git(dir, ['add', '-A']);
+    git(dir, ['commit', '-qm', 'divergent']);
+    const other = git(dir, ['rev-parse', 'HEAD']).trim();
+    git(dir, ['checkout', '-q', 'main']);
+    writeBoundary(dir, 3);
+    git(dir, ['add', '-A']);
+    git(dir, ['commit', '-qm', 'mainline']);
+    const mainline = git(dir, ['rev-parse', 'HEAD']).trim();
+    expect(other).not.toBe(mainline);
+    expect(root).not.toBe(mainline);
+
+    const result = spawnSync(
+      process.execPath,
+      [
+        '--experimental-strip-types',
+        resolve(repoRoot, 'scripts/baseline-growth-guard.ts'),
+        '--repo', dir, '--base', other, '--candidate', mainline,
+      ],
+      { cwd: repoRoot, encoding: 'utf8', timeout: 60_000 },
+    );
+    const out = `${result.stdout ?? ''}${result.stderr ?? ''}`;
+    if (result.status !== 2) console.error(`guard exited ${result.status}, expected 2:\n${out}`);
+    expect(result.status).toBe(2);
+    expect(out).toMatch(/not an ancestor/);
+  });
+
+  it('is INCONCLUSIVE (exit 2) when the candidate revision cannot be resolved', () => {
+    const dir = makeRepo(2);
+    const result = spawnSync(
+      process.execPath,
+      [
+        '--experimental-strip-types',
+        resolve(repoRoot, 'scripts/baseline-growth-guard.ts'),
+        '--repo', dir, '--base', 'HEAD',
+        '--candidate', 'deadbeefdeadbeefdeadbeefdeadbeefdeadbeef',
+      ],
+      { cwd: repoRoot, encoding: 'utf8', timeout: 60_000 },
+    );
+    const out = `${result.stdout ?? ''}${result.stderr ?? ''}`;
+    if (result.status !== 2) console.error(`guard exited ${result.status}, expected 2:\n${out}`);
+    expect(result.status).toBe(2);
+    expect(out).toMatch(/could not be resolved/);
+  });
+
+  it('treats the all-zero base OID as "no base given" and infers instead', () => {
+    // GitHub reports 0{40} as the `before` of a branch creation. Resolving it always fails,
+    // so passing it through verbatim would turn every such push INCONCLUSIVE. It must fall
+    // back to inference — proven by the run succeeding against an inferred base.
+    const dir = makeRepo(4);
+    // The candidate must be AHEAD of main, not main itself: inference resolves
+    // merge-base(main, candidate), which for main's own tip is that tip — a vacuous pair
+    // the guard correctly refuses. Branching is what makes the inferred base a real
+    // predecessor, and it mirrors the branch-creation push this sentinel comes from.
+    git(dir, ['checkout', '-q', '-b', 'created-branch']);
+    writeBoundary(dir, 1);
+    git(dir, ['add', '-A']);
+    git(dir, ['commit', '-qm', 'shrink']);
+    const candidate = git(dir, ['rev-parse', 'HEAD']).trim();
+    const { status, out } = runGuard([
+      '--repo', dir, '--base', '0'.repeat(40), '--candidate', candidate, '--json',
+    ]);
+    expect(status, out).toBe(0);
+    const receipt: unknown = JSON.parse(out.slice(out.indexOf('{')));
+    // The inferred base is a real commit, never the zero sentinel.
+    expect((receipt as { base: string }).base).not.toMatch(/^0{40}$/);
+  });
+
+  it('rejects a flag-shaped value for --candidate instead of using it as a revision', () => {
+    const { status, out } = runGuard(['--base', 'HEAD', '--candidate', '--json']);
+    expect(status, out).toBe(2);
+  });
+
+  it('names both pinned revisions in the reproduce hint', () => {
+    const dir = makeRepo(1);
+    const base = git(dir, ['rev-parse', 'HEAD']).trim();
+    writeBoundary(dir, 6); // grow
+    git(dir, ['add', '-A']);
+    git(dir, ['commit', '-qm', 'grow']);
+    const candidate = git(dir, ['rev-parse', 'HEAD']).trim();
+    const result = spawnSync(
+      process.execPath,
+      [
+        '--experimental-strip-types',
+        resolve(repoRoot, 'scripts/baseline-growth-guard.ts'),
+        '--repo', dir, '--base', base, '--candidate', candidate,
+      ],
+      { cwd: repoRoot, encoding: 'utf8', timeout: 60_000 },
+    );
+    const out = `${result.stdout ?? ''}${result.stderr ?? ''}`;
+    if (result.status !== 1) console.error(`guard exited ${result.status}, expected 1:\n${out}`);
+    expect(result.status).toBe(1);
+    // A reproduce line that omits the revisions reproduces a DIFFERENT measurement.
+    expect(out).toMatch(new RegExp(`--base ${base} --candidate ${candidate}`));
+  });
+});
+
+describe('CI wiring — the guard must be invoked with pinned revisions', () => {
+  it('quality.yml passes both --base and --candidate from event OIDs', () => {
+    const workflow = readFileSync(resolve(repoRoot, '.github/workflows/quality.yml'), 'utf8');
+    const step = workflow.slice(workflow.indexOf('- name: Baseline growth guard'));
+    const invocation = step.slice(0, step.indexOf('- name: Catch ratchet drift'));
+    // Env indirection, not inline ${{ }} in run: — the repo's workflow-injection rule.
+    expect(invocation).toMatch(/BASELINE_BASE_OID:/);
+    expect(invocation).toMatch(/--base "\$BASELINE_BASE_OID"/);
+    expect(invocation).toMatch(/--candidate "\$GITHUB_SHA"/);
+    // Every trigger the workflow declares must supply a base, or that lane silently
+    // degrades to inference while looking pinned.
+    expect(invocation).toMatch(/github\.event\.before/);
+    expect(invocation).toMatch(/pull_request\.base\.sha/);
+    expect(invocation).toMatch(/merge_group\.base_sha/);
   });
 });
