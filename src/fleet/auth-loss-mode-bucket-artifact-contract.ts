@@ -1,3 +1,5 @@
+import { isStrictIsoUtcTimestamp } from './time-utils.ts';
+
 const artifactName = 'auth-loss-mode-bucket-producer-dry-run';
 const proofName = 'auth-loss-mode-bucket-artifact-contract-proof';
 
@@ -261,7 +263,7 @@ function assertKnown(value: unknown, allowed: Set<string>, label: string): void 
 }
 
 function assertIsoTimestamp(value: string): void {
-  if (Number.isNaN(Date.parse(value)) || new Date(value).toISOString() !== value) {
+  if (!isStrictIsoUtcTimestamp(value)) {
     throw new Error(`invalid generatedAt timestamp: ${value}`);
   }
 }
