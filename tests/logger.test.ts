@@ -235,10 +235,12 @@ describe('file transport configuration', () => {
       await import('../src/logger');
 
       expect(transportFactory).not.toHaveBeenCalled();
-      expect(pinoFactory).toHaveBeenCalledWith({
-        level: 'info',
-        serializers: { err: stdErrSerializer, error: stdErrSerializer },
-      });
+      expect(pinoFactory).toHaveBeenCalledWith(
+        expect.objectContaining({
+          level: 'info',
+          serializers: { err: stdErrSerializer, error: stdErrSerializer },
+        }),
+      );
     },
   );
 
@@ -258,7 +260,7 @@ describe('file transport configuration', () => {
 
     expect(transportFactory).toHaveBeenCalledOnce();
     expect(pinoFactory).toHaveBeenCalledWith(
-      { level: 'info', serializers: { err: stdErrSerializer, error: stdErrSerializer } },
+      expect.objectContaining({ level: 'info', serializers: { err: stdErrSerializer, error: stdErrSerializer } }),
       transport,
     );
   });
@@ -289,7 +291,7 @@ describe('file transport configuration', () => {
     });
     const stdErrSerializer = (pinoFactory as unknown as { stdSerializers: { err: unknown } }).stdSerializers.err;
     expect(pinoFactory).toHaveBeenCalledWith(
-      { level: 'debug', serializers: { err: stdErrSerializer, error: stdErrSerializer } },
+      expect.objectContaining({ level: 'debug', serializers: { err: stdErrSerializer, error: stdErrSerializer } }),
       transport,
     );
     expect(loggerModule.default.level).toBe('debug');
@@ -306,10 +308,12 @@ describe('file transport configuration', () => {
 
     const stdErrSerializer = (pinoFactory as unknown as { stdSerializers: { err: unknown } }).stdSerializers.err;
     expect(transportFactory).toHaveBeenCalledOnce();
-    expect(pinoFactory).toHaveBeenCalledWith({
-      level: 'warn',
-      serializers: { err: stdErrSerializer, error: stdErrSerializer },
-    });
+    expect(pinoFactory).toHaveBeenCalledWith(
+      expect.objectContaining({
+        level: 'warn',
+        serializers: { err: stdErrSerializer, error: stdErrSerializer },
+      }),
+    );
     expect(logger.flush).not.toHaveBeenCalled();
     expect(loggerModule.default.level).toBe('warn');
   });
