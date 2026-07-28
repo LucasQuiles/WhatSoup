@@ -18,15 +18,15 @@ The **Inconsistencies** section lists missing or stale index entries compared wi
 scoped markdown files currently on disk.
 
 **Repo:** `WhatSoup`
-**Total entries:** 81
+**Total entries:** 85
 
 ## Totals
 
 | Dimension | Breakdown |
 |---|---|
-| Kind | handoff=7, plan=40, review=4, spec=29, state=1 |
-| Status | active=16, closed=4, completed=33, deferred=7, pending=14, unknown=7 |
-| Status source | body-marker=76, fallback=4, state-md-status=1 |
+| Kind | handoff=7, plan=43, review=4, spec=30, state=1 |
+| Status | active=19, closed=4, completed=33, deferred=7, pending=15, unknown=7 |
+| Status source | body-marker=80, fallback=4, state-md-status=1 |
 
 ## Inconsistencies
 
@@ -34,13 +34,15 @@ scoped markdown files currently on disk.
 
 ## Synthesis
 
-### Active (16)
+### Active (19)
 
 | Path | Kind | Topic | Status source |
 |------|------|-------|---------------|
 | `docs/superpowers/handoffs/2026-07-16-boundary-contract-feedback-implementation-notes.md` | handoff | boundary-contract-feedback-implementation-notes | body-marker |
 | `docs/superpowers/plans/2026-07-11-central-hub-release-proof-pilot.md` | plan | central-hub-release-proof-pilot | body-marker |
 | `docs/superpowers/plans/2026-07-17-boundary-exit-parser-codeql-hardening.md` | plan | boundary-exit-parser-codeql-hardening | body-marker |
+| `docs/superpowers/plans/2026-07-20-cicd-control-foundation.md` | plan | cicd-control-foundation | body-marker |
+| `docs/superpowers/plans/2026-07-20-cicd-enforcement-control-plane-program.md` | plan | cicd-enforcement-control-plane-program | body-marker |
 | `docs/superpowers/plans/2026-07-26-open-issue-triage-tooling.md` | plan | open-issue-triage-tooling | body-marker |
 | `docs/superpowers/specs/2026-07-09-wall-to-wall-audit-remediation-design.md` | spec | wall-to-wall-audit-remediation-design | body-marker |
 | `docs/superpowers/specs/2026-07-11-central-hub-release-proof-pilot-design.md` | spec | central-hub-release-proof-pilot-design | body-marker |
@@ -48,6 +50,7 @@ scoped markdown files currently on disk.
 | `docs/superpowers/specs/2026-07-15-semantic-boundary-hygiene-design.md` | spec | semantic-boundary-hygiene-design | body-marker |
 | `docs/superpowers/specs/2026-07-17-boundary-exit-parser-codeql-hardening-design.md` | spec | boundary-exit-parser-codeql-hardening-design | body-marker |
 | `docs/superpowers/specs/2026-07-17-boundary-validator-ci-refactor-design.md` | spec | boundary-validator-ci-refactor-design | body-marker |
+| `docs/superpowers/specs/2026-07-20-cicd-enforcement-control-plane-design.md` | spec | cicd-enforcement-control-plane-design | body-marker |
 | `docs/superpowers/specs/2026-07-26-open-issue-triage-and-cohort-pr-design.md` | spec | open-issue-triage-and-cohort-pr-design | body-marker |
 | `docs/superpowers/specs/kill-session-transactional-cancellation/design.md` | spec | design | body-marker |
 | `docs/superpowers/specs/kill-session-transactional-cancellation/requirements.md` | spec | requirements | body-marker |
@@ -116,10 +119,10 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 | `docs/superpowers/handoffs/2026-04-07-fleet-charts-project-statement.md` | handoff | deferred | body-marker | fleet-charts-project-statement | 2026-04-24 |  |
 | `docs/superpowers/handoffs/2026-04-07-fleet-charts-sop.md` | handoff | deferred | body-marker | fleet-charts-sop | 2026-05-12 |  |
 | `docs/superpowers/handoffs/2026-07-15-semantic-boundary-hygiene-implementation-notes.md` | handoff | completed | body-marker | semantic-boundary-hygiene-implementation-notes | 2026-07-16 |  |
-| `docs/superpowers/handoffs/2026-07-16-boundary-contract-feedback-implementation-notes.md` | handoff | active | body-marker | boundary-contract-feedback-implementation-notes | 2026-07-16 |  |
+| `docs/superpowers/handoffs/2026-07-16-boundary-contract-feedback-implementation-notes.md` | handoff | active | body-marker | boundary-contract-feedback-implementation-notes | 2026-07-28 |  |
 | `docs/superpowers/handoffs/2026-07-16-boundary-core-history-mining.md` | handoff | pending | body-marker | boundary-core-history-mining | 2026-07-16 |  |
 
-### docs/superpowers/plans  _(40 entries)_
+### docs/superpowers/plans  _(43 entries)_
 
 | Path | Kind | Status | Source | Topic | Last Mod | Supersedes |
 |------|------|--------|--------|-------|----------|------------|
@@ -161,6 +164,9 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 | `docs/superpowers/plans/2026-07-17-boundary-exit-parser-codeql-hardening.md` | plan | active | body-marker | boundary-exit-parser-codeql-hardening | 2026-07-17 |  |
 | `docs/superpowers/plans/2026-07-17-boundary-validator-ci-refactor.md` | plan | unknown | fallback | boundary-validator-ci-refactor | 2026-07-17 |  |
 | `docs/superpowers/plans/2026-07-17-macos-credential-durability.md` | plan | unknown | fallback | macos-credential-durability | 2026-07-17 |  |
+| `docs/superpowers/plans/2026-07-20-cicd-control-foundation.md` | plan | active | body-marker | cicd-control-foundation | 2026-07-28 |  |
+| `docs/superpowers/plans/2026-07-20-cicd-enforcement-control-plane-program.md` | plan | active | body-marker | cicd-enforcement-control-plane-program | 2026-07-28 |  |
+| `docs/superpowers/plans/2026-07-20-cicd-workflow-portability.md` | plan | pending | body-marker | cicd-workflow-portability | 2026-07-28 |  |
 | `docs/superpowers/plans/2026-07-23-agent-reliability-remediation-implementation.md` | plan | unknown | fallback | agent-reliability-remediation-implementation | 2026-07-27 |  |
 | `docs/superpowers/plans/2026-07-26-open-issue-triage-tooling.md` | plan | active | body-marker | open-issue-triage-tooling | 2026-07-27 |  |
 
@@ -173,7 +179,7 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 | `docs/superpowers/reviews/2026-07-09-wall-to-wall-audit-pr-briefs.md` | review | completed | body-marker | wall-to-wall-audit-pr-briefs | 2026-07-10 |  |
 | `docs/superpowers/reviews/2026-07-24-r13-r15-tech-debt-review-map.md` | review | completed | body-marker | r13-r15-tech-debt-review-map | 2026-07-24 |  |
 
-### docs/superpowers/specs  _(23 entries)_
+### docs/superpowers/specs  _(24 entries)_
 
 | Path | Kind | Status | Source | Topic | Last Mod | Supersedes |
 |------|------|--------|--------|-------|----------|------------|
@@ -198,6 +204,7 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 | `docs/superpowers/specs/2026-07-17-boundary-exit-parser-codeql-hardening-design.md` | spec | active | body-marker | boundary-exit-parser-codeql-hardening-design | 2026-07-17 |  |
 | `docs/superpowers/specs/2026-07-17-boundary-validator-ci-refactor-design.md` | spec | active | body-marker | boundary-validator-ci-refactor-design | 2026-07-17 |  |
 | `docs/superpowers/specs/2026-07-17-macos-credential-durability-design.md` | spec | unknown | fallback | macos-credential-durability-design | 2026-07-17 |  |
+| `docs/superpowers/specs/2026-07-20-cicd-enforcement-control-plane-design.md` | spec | active | body-marker | cicd-enforcement-control-plane-design | 2026-07-28 |  |
 | `docs/superpowers/specs/2026-07-23-agent-reliability-remediation-design.md` | spec | unknown | body-marker | agent-reliability-remediation-design | 2026-07-27 |  |
 | `docs/superpowers/specs/2026-07-26-open-issue-triage-and-cohort-pr-design.md` | spec | active | body-marker | open-issue-triage-and-cohort-pr-design | 2026-07-27 |  |
 
@@ -220,4 +227,4 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 ---
 
 - Derived from `docs/work-index.json`
-- Generated at 2026-07-28T04:21:27Z from commit `46c3297ca8aedeb33c8b9e8555bb3820bd710301`
+- Generated at 2026-07-28T10:24:10Z from commit `ec1cd2ae5ed766ea78850936b6b7a7360f02bba1`
