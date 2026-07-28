@@ -290,7 +290,7 @@
     },
     {
       "path": "deploy/scripts/lib/sentinel_pin.py",
-      "sha256": "2819b946e255b8e18f31ec65510bcf5316a2c0d4c5adc9c9180305a10fdde86c",
+      "sha256": "4e3a3c41d4b3cddc79756d05582108181ddfba8bc7c27273537c29e2c72e2685",
       "mustContain": [
         "class PinLoadError(Exception):",
         "class Pin:",

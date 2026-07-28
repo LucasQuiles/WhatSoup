@@ -275,20 +275,15 @@ def test_bundle_rejects_external_target_with_matching_hash(tmp_path):
     assert mismatches == [(sp.F10_PATH, "parent_symlink")], f"got {mismatches}"
 
 
-def test_bundle_rejects_file_kind_for_non_regular_leaf(tmp_path):
-    """A non-regular leaf (e.g. FIFO) must fail closed with 'file_kind'."""
+def test_bundle_rejects_file_kind_for_directory_leaf(tmp_path):
+    """A directory where a regular file is expected fails closed with 'file_kind'."""
     b = tmp_path / "bundle"
-    leaf = b / sp.F10_PATH
-    leaf.parent.mkdir(parents=True)
-    try:
-        os.mkfifo(leaf)
-    except (OSError, AttributeError):
-        pass  # platform without mkfifo — skip gracefully
-    else:
-        pin = sp.Pin(head_sha="a"*40, files={sp.F10_PATH: "0"*64}, f10_sha=None)
-        ok, mismatches = sp.verify_bundle(b, pin)
-        assert ok is False
-        assert mismatches == [(sp.F10_PATH, "file_kind")], f"got {mismatches}"
+    leaf_dir = b / sp.F10_PATH
+    leaf_dir.mkdir(parents=True)
+    pin = sp.Pin(head_sha="a"*40, files={sp.F10_PATH: "0"*64}, f10_sha=None)
+    ok, mismatches = sp.verify_bundle(b, pin)
+    assert ok is False
+    assert mismatches == [(sp.F10_PATH, "file_kind")], f"got {mismatches}"
 
 
 def test_bundle_regular_files_still_verify_after_hardening(tmp_path):

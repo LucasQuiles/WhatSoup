@@ -217,8 +217,10 @@ def _open_confined_leaf(bundle_dir: str, rel_path: str):
                 return None, "file_kind"
 
         # --- Open the final leaf with O_NOFOLLOW ---
+        # O_NONBLOCK prevents blocking on FIFOs/socket files so the verifier
+        # cannot hang on a non-regular leaf planted as a denial-of-service.
         try:
-            leaf_fd = os.open(parts[-1], os.O_RDONLY | os.O_NOFOLLOW, dir_fd=parent_fd)
+            leaf_fd = os.open(parts[-1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent_fd)
         except OSError:
             return None, _classify_open_failure(parts[-1], parent_fd, "symlink", "missing")
 
