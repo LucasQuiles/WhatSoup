@@ -121,6 +121,16 @@ describe('condition_observed lifecycle', () => {
     expect(late.receipt.disposition).toBe('stored_no_state_change');
   });
 
+  it('stores an observation against a concluded occurrence as stored_no_state_change', () => {
+    store.acceptSignal(observed('sig-1', 'occ-1', 1), PRODUCER, NOW);
+    store.acceptSignal(recovered('sig-r1', 'occ-1', 2), PRODUCER, NOW);
+    const late = store.acceptSignal(observed('sig-post', 'occ-1', 3), PRODUCER, NOW);
+    expect(late.outcome).toBe('accepted');
+    if (late.outcome !== 'accepted') return;
+    expect(late.receipt.disposition).toBe('stored_no_state_change');
+    expect(late.receipt.incidentId).toBeNull();
+  });
+
   it('quarantines future-skewed condition observations without lifecycle effects', () => {
     const future = JSON.stringify({
       schemaVersion: 1,

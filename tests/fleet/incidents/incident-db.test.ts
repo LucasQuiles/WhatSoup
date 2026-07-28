@@ -2,7 +2,11 @@ import { mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { openIncidentDb, IncidentStoreCorruptError } from '../../../src/fleet/incidents/db.ts';
+import {
+  defaultIncidentDbPath,
+  openIncidentDb,
+  IncidentStoreCorruptError,
+} from '../../../src/fleet/incidents/db.ts';
 import { INCIDENT_SCHEMA_VERSION } from '../../../src/fleet/incidents/schema.ts';
 
 let dir: string;
@@ -60,6 +64,10 @@ describe('openIncidentDb', () => {
 
     expect(() => openIncidentDb(dbPath())).toThrow(IncidentStoreCorruptError);
     expect(() => openIncidentDb(dbPath())).toThrow(/state_recovery_required/);
+  });
+
+  it('resolves the default database path under the fleet XDG data root', () => {
+    expect(defaultIncidentDbPath().endsWith(join('whatsoup', 'fleet', 'incidents.db'))).toBe(true);
   });
 
   it('fails closed on an unknown schema version', () => {

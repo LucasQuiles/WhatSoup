@@ -1,4 +1,6 @@
 import { z } from 'zod';
+import { isRecord } from '../../lib/type-guards.ts';
+import { isStrictIsoUtcTimestamp } from '../time-utils.ts';
 
 export const SIGNAL_KINDS = [
   'condition_observed',
@@ -19,7 +21,7 @@ const boundedId = z.string().min(1).max(MAX_ID_LENGTH);
 const isoUtcTimestamp = z
   .string()
   .max(64)
-  .refine((value) => Number.isFinite(Date.parse(value)), 'observedAt must be an ISO-8601 timestamp');
+  .refine(isStrictIsoUtcTimestamp, 'must be a strict ISO-8601 UTC timestamp');
 
 const attributeValue = z.union([
   z.string().max(MAX_ATTRIBUTE_STRING_LENGTH),
@@ -34,61 +36,45 @@ const attributes = z
     `attributes may not exceed ${MAX_ATTRIBUTE_KEYS} keys`,
   );
 
-const envelopeSchema = z
-  .object({
-    schemaVersion: z.literal(1),
-    signalId: boundedId,
-    kind: z.enum(SIGNAL_KINDS),
-    subject: boundedId,
-    conditionClass: boundedId.optional(),
-    occurrenceId: boundedId.optional(),
-    occurrenceSeq: z.number().int().nonnegative().optional(),
-    observedAt: isoUtcTimestamp,
-    attributes: attributes.optional(),
-    recoveryProofClass: boundedId.optional(),
-  })
-  .strict()
-  .superRefine((value, ctx) => {
-    const isConditionKind =
-      value.kind === 'condition_observed' || value.kind === 'condition_recovered';
-    if (isConditionKind) {
-      if (!value.conditionClass) {
-        ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'conditionClass required for condition kinds' });
-      }
-      if (!value.occurrenceId) {
-        ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'occurrenceId required for condition kinds' });
-      }
-      if (value.occurrenceSeq === undefined) {
-        ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'occurrenceSeq required for condition kinds' });
-      }
-    }
-  });
+const commonFields = {
+  schemaVersion: z.literal(1),
+  signalId: boundedId,
+  subject: boundedId,
+  observedAt: isoUtcTimestamp,
+  attributes: attributes.optional(),
+};
 
-export interface SignalEnvelope {
-  schemaVersion: 1;
-  signalId: string;
-  kind: SignalKind;
-  subject: string;
-  conditionClass?: string;
-  occurrenceId?: string;
-  occurrenceSeq?: number;
-  observedAt: string;
-  attributes?: Record<string, string | number | boolean>;
-  recoveryProofClass?: string;
-}
+const occurrenceFields = {
+  conditionClass: boundedId,
+  occurrenceId: boundedId,
+  occurrenceSeq: z.number().int().nonnegative(),
+};
+
+const envelopeSchema = z.discriminatedUnion('kind', [
+  z
+    .object({ ...commonFields, kind: z.literal('condition_observed'), ...occurrenceFields })
+    .strict(),
+  z
+    .object({
+      ...commonFields,
+      kind: z.literal('condition_recovered'),
+      ...occurrenceFields,
+      recoveryProofClass: boundedId.optional(),
+    })
+    .strict(),
+  z.object({ ...commonFields, kind: z.literal('heartbeat_observed') }).strict(),
+  z.object({ ...commonFields, kind: z.literal('notice_recorded') }).strict(),
+]);
+
+export type SignalEnvelope = z.infer<typeof envelopeSchema>;
+export type ConditionObservedEnvelope = Extract<SignalEnvelope, { kind: 'condition_observed' }>;
+export type ConditionRecoveredEnvelope = Extract<SignalEnvelope, { kind: 'condition_recovered' }>;
 
 export type EnvelopeResult =
   | { ok: true; envelope: SignalEnvelope }
   | { ok: false; errors: string[] };
 
-export function parseSignalEnvelope(rawJsonText: string): EnvelopeResult {
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(rawJsonText);
-  } catch {
-    return { ok: false, errors: ['body is not valid JSON'] };
-  }
-
+export function parseSignalEnvelopeValue(parsed: unknown): EnvelopeResult {
   const result = envelopeSchema.safeParse(parsed);
   if (!result.success) {
     return {
@@ -97,4 +83,25 @@ export function parseSignalEnvelope(rawJsonText: string): EnvelopeResult {
     };
   }
   return { ok: true, envelope: result.data };
+}
+
+export function parseSignalEnvelope(rawJsonText: string): EnvelopeResult {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(rawJsonText);
+  } catch {
+    return { ok: false, errors: ['body is not valid JSON'] };
+  }
+  return parseSignalEnvelopeValue(parsed);
+}
+
+/**
+ * Extract the producer-declared signal identity from an already-parsed body.
+ * Identity must be resolvable before full validation so idempotent replays and
+ * identity conflicts can be answered even for bodies that fail later checks.
+ */
+export function extractSignalId(parsed: unknown): string | null {
+  if (!isRecord(parsed)) return null;
+  const candidate = parsed.signalId;
+  return typeof candidate === 'string' && candidate.length > 0 ? candidate : null;
 }

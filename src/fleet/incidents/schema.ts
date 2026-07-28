@@ -1,5 +1,18 @@
 export const INCIDENT_SCHEMA_VERSION = 1;
 
+export const DISPOSITIONS = [
+  'incident_opened',
+  'incident_updated',
+  'incident_resolved',
+  'heartbeat_recorded',
+  'notice_recorded',
+  'stored_no_state_change',
+  'stored_stale_observation',
+  'stored_quarantined_observation',
+] as const;
+
+export type Disposition = (typeof DISPOSITIONS)[number];
+
 export const SCHEMA_STATEMENTS: readonly string[] = [
   `CREATE TABLE meta (
      key TEXT PRIMARY KEY,
@@ -21,7 +34,10 @@ export const SCHEMA_STATEMENTS: readonly string[] = [
      occurrence_seq INTEGER,
      observed_at TEXT NOT NULL,
      received_at TEXT NOT NULL,
-     disposition TEXT NOT NULL,
+     disposition TEXT NOT NULL CHECK (disposition IN (
+       'incident_opened', 'incident_updated', 'incident_resolved',
+       'heartbeat_recorded', 'notice_recorded', 'stored_no_state_change',
+       'stored_stale_observation', 'stored_quarantined_observation')),
      incident_id INTEGER,
      transition_id INTEGER,
      UNIQUE (producer_id, signal_id)

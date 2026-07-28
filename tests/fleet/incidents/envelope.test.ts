@@ -19,9 +19,10 @@ describe('parseSignalEnvelope', () => {
   it('accepts a well-formed condition_observed envelope', () => {
     const result = parseSignalEnvelope(base());
     expect(result.ok).toBe(true);
-    if (result.ok) {
-      expect(result.envelope.kind).toBe('condition_observed');
+    if (result.ok && result.envelope.kind === 'condition_observed') {
       expect(result.envelope.occurrenceId).toBe('occ-001');
+    } else {
+      throw new Error('expected a condition_observed envelope');
     }
   });
 
@@ -72,5 +73,25 @@ describe('parseSignalEnvelope', () => {
   it('rejects non-JSON input without throwing', () => {
     const result = parseSignalEnvelope('{not json');
     expect(result.ok).toBe(false);
+  });
+
+  it('rejects occurrence fields on non-condition kinds', () => {
+    const result = parseSignalEnvelope(
+      JSON.stringify({
+        schemaVersion: 1,
+        signalId: 'hb-002',
+        kind: 'heartbeat_observed',
+        subject: 'host:alpha',
+        occurrenceId: 'occ-smuggled',
+        occurrenceSeq: 1,
+        observedAt: '2026-07-28T12:00:00.000Z',
+      }),
+    );
+    expect(result.ok).toBe(false);
+  });
+
+  it('rejects date-only and non-UTC observedAt timestamps', () => {
+    expect(parseSignalEnvelope(base({ observedAt: '2026-07-28' })).ok).toBe(false);
+    expect(parseSignalEnvelope(base({ observedAt: '2026-07-28T12:00:00+02:00' })).ok).toBe(false);
   });
 });

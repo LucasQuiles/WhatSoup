@@ -1,6 +1,8 @@
-import { chmodSync, existsSync, mkdirSync, statSync } from 'node:fs';
+import { chmodSync, existsSync, statSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
+import { forceEnsurePrivateDirectorySync } from '../../lib/private-fs.ts';
+import { SQLITE_BUSY_TIMEOUT_PRAGMA } from '../../lib/sqlite-constants.ts';
 import { xdgDir } from '../paths.ts';
 import { INCIDENT_SCHEMA_VERSION, SCHEMA_STATEMENTS } from './schema.ts';
 
@@ -38,28 +40,21 @@ function initializeSchema(db: DatabaseSync): void {
 }
 
 function validateExisting(db: DatabaseSync): void {
-  let versionRow: unknown;
-  try {
-    const check = db.prepare('PRAGMA quick_check').get() as { quick_check?: string } | undefined;
-    if (!check || check.quick_check !== 'ok') {
-      throw new IncidentStoreCorruptError('quick_check failed');
-    }
-    versionRow = db.prepare(`SELECT value FROM meta WHERE key = 'schema_version'`).get();
-  } catch (err) {
-    if (err instanceof IncidentStoreCorruptError) throw err;
-    throw new IncidentStoreCorruptError('database unreadable');
+  const check = db.prepare('PRAGMA quick_check').get() as { quick_check?: string } | undefined;
+  if (!check || check.quick_check !== 'ok') {
+    throw new IncidentStoreCorruptError('quick_check failed');
   }
-  const value =
-    versionRow && typeof (versionRow as { value?: unknown }).value === 'string'
-      ? (versionRow as { value: string }).value
-      : null;
+  const row = db.prepare(`SELECT value FROM meta WHERE key = 'schema_version'`).get() as
+    | { value?: unknown }
+    | undefined;
+  const value = typeof row?.value === 'string' ? row.value : null;
   if (value !== String(INCIDENT_SCHEMA_VERSION)) {
     throw new IncidentStoreCorruptError(`unsupported schema_version ${value ?? 'missing'}`);
   }
 }
 
 export function openIncidentDb(dbPath: string): DatabaseSync {
-  mkdirSync(dirname(dbPath), { recursive: true, mode: 0o700 });
+  forceEnsurePrivateDirectorySync(dirname(dbPath), 'incident store directory');
   const fresh = isFreshTarget(dbPath);
 
   let db: DatabaseSync;
@@ -71,6 +66,10 @@ export function openIncidentDb(dbPath: string): DatabaseSync {
 
   try {
     db.exec('PRAGMA journal_mode = WAL');
+    // Receipts promise "a response lost after commit is safe" (spec §3), so
+    // commits must survive power loss — WAL's default NORMAL does not.
+    db.exec('PRAGMA synchronous = FULL');
+    db.exec(SQLITE_BUSY_TIMEOUT_PRAGMA);
     db.exec('PRAGMA foreign_keys = ON');
     if (fresh) {
       initializeSchema(db);
