@@ -120,4 +120,63 @@ describe('condition_observed lifecycle', () => {
     if (late.outcome !== 'accepted') return;
     expect(late.receipt.disposition).toBe('stored_no_state_change');
   });
+
+  it('quarantines future-skewed condition observations without lifecycle effects', () => {
+    const future = JSON.stringify({
+      schemaVersion: 1,
+      signalId: 'sig-future',
+      kind: 'condition_observed',
+      subject: 'host:alpha',
+      conditionClass: 'selfcheck_drift',
+      occurrenceId: 'occ-f',
+      occurrenceSeq: 1,
+      observedAt: '2026-07-28T13:00:00.000Z', // ~1h ahead of NOW
+    });
+    const result = store.acceptSignal(future, PRODUCER, NOW);
+    expect(result.outcome).toBe('accepted');
+    if (result.outcome !== 'accepted') return;
+    expect(result.receipt.disposition).toBe('stored_quarantined_observation');
+    expect(result.receipt.incidentId).toBeNull();
+    expect(result.receipt.transitionId).toBeNull();
+  });
+
+  it('accepts observations within the permitted skew window normally', () => {
+    const slightlyAhead = JSON.stringify({
+      schemaVersion: 1,
+      signalId: 'sig-skew-ok',
+      kind: 'heartbeat_observed',
+      subject: 'host:alpha',
+      observedAt: '2026-07-28T12:02:00.000Z', // < 5 min ahead of NOW
+    });
+    const result = store.acceptSignal(slightlyAhead, PRODUCER, NOW);
+    expect(result.outcome).toBe('accepted');
+    if (result.outcome !== 'accepted') return;
+    expect(result.receipt.disposition).toBe('heartbeat_recorded');
+  });
+
+  it('honors a configured maxFutureSkewMs', () => {
+    const strictDir = mkdtempSync(join(tmpdir(), 'whatsoup-incident-strict-'));
+    const strict = new IncidentStore(openIncidentDb(join(strictDir, 'incidents.db')), {
+      maxFutureSkewMs: 0,
+    });
+    try {
+      const result = strict.acceptSignal(
+        JSON.stringify({
+          schemaVersion: 1,
+          signalId: 'hb-strict',
+          kind: 'heartbeat_observed',
+          subject: 'host:alpha',
+          observedAt: '2026-07-28T12:00:06.000Z', // 1s ahead of NOW
+        }),
+        PRODUCER,
+        NOW,
+      );
+      expect(result.outcome).toBe('accepted');
+      if (result.outcome !== 'accepted') return;
+      expect(result.receipt.disposition).toBe('stored_quarantined_observation');
+    } finally {
+      strict.close();
+      rmSync(strictDir, { recursive: true, force: true });
+    }
+  });
 });
