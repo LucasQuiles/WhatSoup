@@ -207,6 +207,165 @@ def test_bundle_rejects_symlinked_file(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# Increment 3b — descriptor-confined observation (#2479)
+# Intermediate parent symlinks, symlinked root, and external-target
+# confinement are now rejected at every path component.
+# ---------------------------------------------------------------------------
+
+def test_bundle_rejects_intermediate_parent_symlink(tmp_path):
+    """A symlink in any intermediate directory component must fail closed
+    with 'parent_symlink', even when the final leaf is a regular file with
+    the expected hash living outside the bundle root."""
+    b = tmp_path / "bundle"
+    outside = tmp_path / "outside_tree"
+    # Create the real directory structure outside the bundle
+    real_dir = outside / "deploy" / "scripts" / "lib"
+    real_dir.mkdir(parents=True)
+    content = b"redact\n"
+    real_file = real_dir / "bot_errors_redaction.py"
+    real_file.write_bytes(content)
+    expected_sha = hashlib.sha256(content).hexdigest()
+
+    # Create bundle root with deploy/scripts/ as a symlink to the outside tree
+    (b / "deploy" / "scripts").mkdir(parents=True)
+    os.symlink(outside / "deploy" / "scripts" / "lib", b / "deploy" / "scripts" / "lib")
+
+    pin = sp.Pin(head_sha="a"*40, files={sp.F10_PATH: expected_sha}, f10_sha=None)
+    ok, mismatches = sp.verify_bundle(b, pin)
+    assert ok is False
+    assert mismatches == [(sp.F10_PATH, "parent_symlink")], f"got {mismatches}"
+
+
+def test_bundle_rejects_symlinked_root(tmp_path):
+    """A bundle root that is itself a symlink must fail closed with 'root_symlink'."""
+    real_root = tmp_path / "real_root"
+    real_dir = real_root / sp.F10_PATH
+    real_dir.parent.mkdir(parents=True)
+    content = b"redact\n"
+    real_dir.write_bytes(content)
+    expected_sha = hashlib.sha256(content).hexdigest()
+
+    linked_root = tmp_path / "linked_root"
+    os.symlink(real_root, linked_root)
+
+    pin = sp.Pin(head_sha="a"*40, files={sp.F10_PATH: expected_sha}, f10_sha=None)
+    ok, mismatches = sp.verify_bundle(linked_root, pin)
+    assert ok is False
+    assert mismatches == [(sp.F10_PATH, "root_symlink")], f"got {mismatches}"
+
+
+def test_bundle_rejects_external_target_with_matching_hash(tmp_path):
+    """A canonical target outside the trusted root cannot pass even when its
+    bytes have the expected hash (verified via the descriptor-confined path)."""
+    b = tmp_path / "bundle"
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    content = b"redact\n"
+    outside_file = outside / "bot_errors_redaction.py"
+    outside_file.write_bytes(content)
+    expected_sha = hashlib.sha256(content).hexdigest()
+
+    # Create intermediate symlink so the manifest path resolves outside
+    (b / "deploy" / "scripts").mkdir(parents=True)
+    os.symlink(outside, b / "deploy" / "scripts" / "lib")
+
+    pin = sp.Pin(head_sha="a"*40, files={sp.F10_PATH: expected_sha}, f10_sha=None)
+    ok, mismatches = sp.verify_bundle(b, pin)
+    assert ok is False
+    assert mismatches == [(sp.F10_PATH, "parent_symlink")], f"got {mismatches}"
+
+
+def test_bundle_rejects_file_kind_for_directory_leaf(tmp_path):
+    """A directory where a regular file is expected fails closed with 'file_kind'."""
+    b = tmp_path / "bundle"
+    leaf_dir = b / sp.F10_PATH
+    leaf_dir.mkdir(parents=True)
+    pin = sp.Pin(head_sha="a"*40, files={sp.F10_PATH: "0"*64}, f10_sha=None)
+    ok, mismatches = sp.verify_bundle(b, pin)
+    assert ok is False
+    assert mismatches == [(sp.F10_PATH, "file_kind")], f"got {mismatches}"
+
+
+def test_bundle_regular_files_still_verify_after_hardening(tmp_path):
+    """Regression guard: regular in-root files at multiple directory depths
+    still verify successfully with the descriptor-confined traversal."""
+    b = tmp_path / "bundle"
+    s1 = _write(b / "deploy/scripts/bot-errors-emit.py", b"emit\n")
+    s2 = _write(b / sp.F10_PATH, b"redact\n")
+    s3 = _write(b / "deploy/scripts/bot-errors-runner.py", b"runner\n")
+    pin = sp.Pin(
+        head_sha="a"*40,
+        files={
+            "deploy/scripts/bot-errors-emit.py": s1,
+            sp.F10_PATH: s2,
+            "deploy/scripts/bot-errors-runner.py": s3,
+        },
+        f10_sha=s2,
+    )
+    ok, mismatches = sp.verify_bundle(b, pin)
+    assert ok is True and mismatches == [], f"got {ok} {mismatches}"
+
+
+def test_bundle_rejects_non_directory_root(tmp_path):
+    """A bundle root that is a regular file (not a directory) fails closed."""
+    fake_root = tmp_path / "not_a_dir"
+    fake_root.write_text("i am a file, not a directory")
+    pin = sp.Pin(head_sha="a"*40, files={sp.F10_PATH: "0"*64}, f10_sha=None)
+    ok, mismatches = sp.verify_bundle(fake_root, pin)
+    assert ok is False
+    assert mismatches == [(sp.F10_PATH, "read_failed")], f"got {mismatches}"
+
+
+def test_bundle_rejects_missing_root(tmp_path):
+    """A bundle root that does not exist fails closed with read_failed."""
+    missing_root = tmp_path / "does_not_exist"
+    pin = sp.Pin(head_sha="a"*40, files={sp.F10_PATH: "0"*64}, f10_sha=None)
+    ok, mismatches = sp.verify_bundle(missing_root, pin)
+    assert ok is False
+    assert mismatches == [(sp.F10_PATH, "read_failed")], f"got {mismatches}"
+
+
+def test_bundle_rejects_missing_intermediate_directory(tmp_path):
+    """An intermediate directory component that does not exist fails closed."""
+    b = tmp_path / "bundle"
+    b.mkdir()
+    pin = sp.Pin(
+        head_sha="a"*40,
+        files={"nonexistent_dir/deep/path.py": "0"*64},
+        f10_sha=None,
+    )
+    ok, mismatches = sp.verify_bundle(b, pin)
+    assert ok is False
+    assert mismatches == [("nonexistent_dir/deep/path.py", "missing")], f"got {mismatches}"
+
+
+def test_bundle_rejects_file_as_intermediate(tmp_path):
+    """A file where an intermediate directory is expected fails closed with file_kind."""
+    b = tmp_path / "bundle"
+    # Create a file at deploy/scripts (so it's a file, not a directory)
+    (b / "deploy").mkdir(parents=True)
+    (b / "deploy" / "scripts").write_text("i am a file, not a dir")
+    pin = sp.Pin(
+        head_sha="a"*40,
+        files={"deploy/scripts/lib/bot_errors_redaction.py": "0"*64},
+        f10_sha=None,
+    )
+    ok, mismatches = sp.verify_bundle(b, pin)
+    assert ok is False
+    assert mismatches == [("deploy/scripts/lib/bot_errors_redaction.py", "file_kind")], f"got {mismatches}"
+
+
+def test_bundle_rejects_single_component_missing(tmp_path):
+    """A single-component leaf path that doesn't exist fails closed with missing."""
+    b = tmp_path / "bundle"
+    b.mkdir()
+    pin = sp.Pin(head_sha="a"*40, files={"missing.py": "0"*64}, f10_sha=None)
+    ok, mismatches = sp.verify_bundle(b, pin)
+    assert ok is False
+    assert mismatches == [("missing.py", "missing")], f"got {mismatches}"
+
+
+# ---------------------------------------------------------------------------
 # Increment 4 — edge cases for coverage >= 98%
 # ---------------------------------------------------------------------------
 
