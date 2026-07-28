@@ -1,5 +1,6 @@
 import pino from 'pino';
 import { join } from 'node:path';
+import { sanitizingLogHook } from './lib/log-sanitizer';
 
 const level = process.env.LOG_LEVEL ?? 'info';
 
@@ -54,9 +55,21 @@ if (logDir && fileTransportEnabled) {
   }
 }
 
+// WS-A06: the same recursive pre-sink sanitizer applies to both construction
+// paths so every sink (stdout, rolling-file, third-party child logger) receives
+// sanitized payloads. The hook intercepts at the API boundary, before Pino's
+// serialization pipeline.
+const baseOptions: pino.LoggerOptions = {
+  level,
+  serializers: errorLikeSerializers,
+  hooks: {
+    logMethod: sanitizingLogHook,
+  } as pino.LoggerOptions['hooks'],
+};
+
 const logger = transport
-  ? pino({ level, serializers: errorLikeSerializers }, transport)
-  : pino({ level, serializers: errorLikeSerializers });
+  ? pino(baseOptions, transport)
+  : pino(baseOptions);
 
 export default logger;
 
