@@ -31,6 +31,7 @@
     "guard:publication:all": "npm run guard:publication -- --all",
     "guard:publication:release": "npm run guard:publication -- --release",
     "guard:publication:staged": "npm run guard:publication -- --staged",
+    "guard:publication:write": "npm run guard:publication -- --write",
     "guard:git-estate": "bash scripts/run-with-pinned-node.sh scripts/git-estate-guard.ts",
     "guard:pre-push": "bash scripts/run-with-pinned-node.sh scripts/pre-push-guard.ts",
     "guard:hooks-installed": "bash scripts/run-with-pinned-node.sh scripts/hooks-installed-guard.ts --json",

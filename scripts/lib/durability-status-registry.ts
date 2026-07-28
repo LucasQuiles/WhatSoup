@@ -429,9 +429,10 @@ export const NON_STATUS_JUSTIFICATIONS: Record<string, string> = {
  * `src/core/database.ts`) — invisible to `migratedSchemaSnapshot()`, which
  * only replays that migration registry. Verified directly against this
  * worktree: each module below is read by the guard's discovery-scan
- * anti-dodge extension (check 1b), which also confirms none of their DDL
- * text matches the status-shaped-column regex today (so `justification` is
- * unset on all six; it becomes required the day one does).
+ * anti-dodge extension (check 1b), which requires a truthful `justification`
+ * on any entry whose DDL text matches the status-shaped-column regex — the
+ * four incident-plane tables (events/incidents/meta/transitions) carry one
+ * for exactly that reason; the remaining entries do not match today.
  */
 export const SELF_PROVISIONED: SelfProvisionedEntry[] = [
   {

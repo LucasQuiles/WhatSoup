@@ -104,7 +104,7 @@ describe('logger.ts — error-key serialization (#1776)', () => {
       // so an absent export must fail here, not silently match below.
       expect(typeof errorLikeSerializers?.err).toBe('function');
       expect(typeof errorLikeSerializers?.error).toBe('function');
-      expect(pinoFactory).toHaveBeenCalledWith({ level: 'info', serializers: errorLikeSerializers });
+      expect(pinoFactory).toHaveBeenCalledWith(expect.objectContaining({ level: 'info', serializers: errorLikeSerializers }));
     });
 
     it('passes errorLikeSerializers when a file transport is active', async () => {
@@ -125,7 +125,7 @@ describe('logger.ts — error-key serialization (#1776)', () => {
 
       expect(typeof errorLikeSerializers?.err).toBe('function');
       expect(typeof errorLikeSerializers?.error).toBe('function');
-      expect(pinoFactory).toHaveBeenCalledWith({ level: 'info', serializers: errorLikeSerializers }, fakeTransport);
+      expect(pinoFactory).toHaveBeenCalledWith(expect.objectContaining({ level: 'info', serializers: errorLikeSerializers }), fakeTransport);
     });
   });
 

@@ -74,6 +74,7 @@ export const SUPPRESSED_RUNTIME_PATHS: ReadonlySet<string> = new Set([
 // Runtime files that must be pinned but are not covered by the deploy/scripts python glob.
 export const EXPLICIT_REQUIRED_RUNTIME_PATHS = [
   'src/lib/bot-errors-outbox.ts',
+  'src/lib/fault-taxonomy-registry.json',
   'deploy/scripts/install-bot-errors-gui-monitor-launchd.sh',
   'deploy/scripts/bot-errors-release-proof-run.sh',
   'deploy/scripts/install-bot-errors-release-proof.sh',

@@ -527,6 +527,7 @@ const ANCHOR_REQUIREMENTS: AnchorRequirement[] = [
       'deploy/scripts/bot-errors-health-check.py',
       'deploy/scripts/bot-errors-emit.py',
       'src/lib/bot-errors-outbox.ts',
+      'src/lib/fault-taxonomy-registry.json',
     ],
     remediation: 'Restore required BOT ERRORS runtime manifest path enforcement before deploying runtime scripts.',
   },

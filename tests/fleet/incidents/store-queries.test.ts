@@ -63,8 +63,8 @@ describe('incident store read queries', () => {
     const event = store.getEvent(accepted.receipt.eventId);
     expect(event?.signalId).toBe('sig-a');
     expect(event?.disposition).toBe('incident_opened');
-    expect(event as unknown as Record<string, unknown>).not.toHaveProperty('payloadJson');
-    expect(event as unknown as Record<string, unknown>).not.toHaveProperty('payload_json');
+    expect(event).not.toHaveProperty('payloadJson');
+    expect(event).not.toHaveProperty('payload_json');
   });
 
   it('returns null for unknown ids', () => {

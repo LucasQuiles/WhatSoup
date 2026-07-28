@@ -4,6 +4,7 @@ import {
   type AuthLossModeProducerInput,
   type AuthLossModeProducerSignal,
 } from './auth-loss-mode-bucket-producer.ts';
+import { isStrictIsoUtcTimestamp } from './time-utils.ts';
 
 const sampleIdPattern = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,119}$/;
 const unsafePatterns = [
@@ -90,7 +91,7 @@ export function buildAuthLossModeProducerArtifact(
 }
 
 function assertIsoTimestamp(value: string): void {
-  if (Number.isNaN(Date.parse(value)) || new Date(value).toISOString() !== value) {
+  if (!isStrictIsoUtcTimestamp(value)) {
     throw new Error(`invalid generatedAt timestamp: ${value}`);
   }
 }
