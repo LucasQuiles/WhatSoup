@@ -17,6 +17,13 @@ import path from 'node:path';
 import { assertNoSecretLike } from '../../artifact-redaction.ts';
 import { cleanGitEnv } from '../../../src/lib/git-env.ts';
 import { fsyncDirectory, privateWriteError } from '../../../src/lib/private-fs.ts';
+import { parseBoundaryJsonBytes } from '../verification/boundary-run/schema.ts';
+import {
+  canonicalizeBoundaryRun,
+  hasExactKeys,
+  isBoundedText,
+  isRecord,
+} from '../verification/boundary-run/shared.ts';
 import type {
   BoundaryAction,
   BoundaryArtifact,
@@ -70,6 +77,169 @@ export interface BuildSemanticReceiptInput {
   enforcementMode: EnforcementMode;
   evidenceSource: string;
   limitations?: string[];
+}
+
+export type ValidatedBoundaryReceipt = BoundaryReceipt & {
+  action: BoundaryAction;
+  correlationIdSha256: string;
+};
+
+const MAX_BOUNDARY_RECEIPT_BYTES = 256 * 1_024;
+const MAX_BOUNDARY_RECEIPT_ITEMS = 512;
+const BOUNDARY_ACTIONS = new Set<BoundaryAction>([
+  'commit',
+  'push',
+  'open-pr',
+  'reopen-pr',
+  'open-issue',
+]);
+const BOUNDARY_DECISIONS = new Set<BoundaryDecision>([
+  'pass',
+  'warn',
+  'block',
+  'inconclusive',
+]);
+const FINDING_DECISIONS = new Set<BoundaryFinding['decision']>([
+  'warn',
+  'block',
+  'inconclusive',
+]);
+const ENFORCEMENT_MODES = new Set<EnforcementMode>(['shadow', 'enforce']);
+const ARTIFACT_KINDS = new Set<BoundaryArtifact['kind']>([
+  'pull-request',
+  'issue',
+  'commit',
+  'path',
+]);
+const RECEIPT_KEYS = [
+  'action',
+  'base',
+  'correlationIdSha256',
+  'decision',
+  'enforcementMode',
+  'findings',
+  'fingerprints',
+  'invocation',
+  'limitations',
+  'repository',
+  'schemaVersion',
+] as const;
+const BASE_KEYS = ['baseOid', 'evidenceSource', 'headOid', 'mergeBaseOid'] as const;
+const FINDING_KEYS = [
+  'action',
+  'correction',
+  'decision',
+  'matchedArtifacts',
+  'observed',
+  'rerun',
+  'ruleId',
+  'sourceRefs',
+  'summary',
+  'why',
+] as const;
+const EVIDENCE_KEYS = ['label', 'value'] as const;
+const ARTIFACT_REQUIRED_KEYS = ['id', 'kind', 'repository'] as const;
+const ARTIFACT_OPTIONAL_KEYS = ['fingerprintSha256', 'state', 'url'] as const;
+const IDENTITY = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
+
+function requireExactDataObject(
+  value: unknown,
+  keys: readonly string[],
+  label: string,
+): asserts value is Record<string, unknown> {
+  if (!isRecord(value) || Object.getPrototypeOf(value) !== Object.prototype || !hasExactKeys(value, keys)) {
+    throw new Error(`boundary receipt ${label} keys are invalid`);
+  }
+  for (const key of keys) {
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    if (descriptor === undefined || !descriptor.enumerable || !('value' in descriptor)) {
+      throw new Error(`boundary receipt ${label} field ${key} is not plain data`);
+    }
+  }
+}
+
+function requireArtifactDataObject(
+  value: unknown,
+  label: string,
+): asserts value is Record<string, unknown> {
+  if (!isRecord(value) || Object.getPrototypeOf(value) !== Object.prototype) {
+    throw new Error(`boundary receipt ${label} must be a plain object`);
+  }
+  const allowed = new Set<string>([...ARTIFACT_REQUIRED_KEYS, ...ARTIFACT_OPTIONAL_KEYS]);
+  const keys = Object.keys(value);
+  if (
+    !ARTIFACT_REQUIRED_KEYS.every((key) => keys.includes(key))
+    || keys.some((key) => !allowed.has(key))
+  ) {
+    throw new Error(`boundary receipt ${label} keys are invalid`);
+  }
+  for (const key of keys) {
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    if (descriptor === undefined || !descriptor.enumerable || !('value' in descriptor)) {
+      throw new Error(`boundary receipt ${label} field ${key} is not plain data`);
+    }
+  }
+}
+
+function requireBoundedString(value: unknown, label: string): asserts value is string {
+  if (!isBoundedText(value, 4_096)) {
+    throw new Error(`boundary receipt ${label} must be bounded nonempty text`);
+  }
+}
+
+function requireStringArray(value: unknown, label: string, allowEmpty = false): asserts value is string[] {
+  if (
+    !Array.isArray(value)
+    || value.length > MAX_BOUNDARY_RECEIPT_ITEMS
+    || (!allowEmpty && value.length === 0)
+  ) {
+    throw new Error(`boundary receipt ${label} must be a bounded array`);
+  }
+  for (const [index, item] of value.entries()) {
+    requireBoundedString(item, `${label}[${index}]`);
+  }
+}
+
+function requireBoundaryFinding(value: unknown, index: number): asserts value is BoundaryFinding {
+  requireExactDataObject(value, FINDING_KEYS, `finding[${index}]`);
+  if (!FINDING_DECISIONS.has(value.decision as BoundaryFinding['decision'])) {
+    throw new Error(`boundary receipt finding[${index}] decision is invalid`);
+  }
+  if (!BOUNDARY_ACTIONS.has(value.action as BoundaryAction)) {
+    throw new Error(`boundary receipt finding[${index}] action is invalid`);
+  }
+  requireBoundedString(value.ruleId, `finding[${index}].ruleId`);
+  requireBoundedString(value.summary, `finding[${index}].summary`);
+  requireBoundedString(value.why, `finding[${index}].why`);
+  requireBoundedString(value.rerun, `finding[${index}].rerun`);
+  requireStringArray(value.correction, `finding[${index}].correction`);
+  requireStringArray(value.sourceRefs, `finding[${index}].sourceRefs`);
+
+  if (!Array.isArray(value.observed) || value.observed.length === 0 || value.observed.length > MAX_BOUNDARY_RECEIPT_ITEMS) {
+    throw new Error(`boundary receipt finding[${index}].observed must be a bounded array`);
+  }
+  for (const [evidenceIndex, evidence] of value.observed.entries()) {
+    requireExactDataObject(evidence, EVIDENCE_KEYS, `finding[${index}].observed[${evidenceIndex}]`);
+    requireBoundedString(evidence.label, `finding[${index}].observed[${evidenceIndex}].label`);
+    requireBoundedString(evidence.value, `finding[${index}].observed[${evidenceIndex}].value`);
+  }
+
+  if (!Array.isArray(value.matchedArtifacts) || value.matchedArtifacts.length > MAX_BOUNDARY_RECEIPT_ITEMS) {
+    throw new Error(`boundary receipt finding[${index}].matchedArtifacts must be a bounded array`);
+  }
+  for (const [artifactIndex, artifact] of value.matchedArtifacts.entries()) {
+    requireArtifactDataObject(artifact, `finding[${index}].matchedArtifacts[${artifactIndex}]`);
+    if (!ARTIFACT_KINDS.has(artifact.kind as BoundaryArtifact['kind'])) {
+      throw new Error(`boundary receipt finding[${index}] artifact kind is invalid`);
+    }
+    requireBoundedString(artifact.repository, `finding[${index}].matchedArtifacts[${artifactIndex}].repository`);
+    requireBoundedString(artifact.id, `finding[${index}].matchedArtifacts[${artifactIndex}].id`);
+    for (const key of ARTIFACT_OPTIONAL_KEYS) {
+      if (artifact[key] !== undefined) {
+        requireBoundedString(artifact[key], `finding[${index}].matchedArtifacts[${artifactIndex}].${key}`);
+      }
+    }
+  }
 }
 
 interface FindingLanguage {
@@ -329,7 +499,17 @@ export function buildBoundaryReceipt(input: BuildBoundaryReceiptInput): Boundary
   if (typeof input.invocation !== 'string' || input.invocation.trim().length === 0) {
     throw new Error('boundary receipt invocation is required');
   }
-  for (const item of input.findings) {
+  if (!BOUNDARY_ACTIONS.has(input.action)) {
+    throw new Error('boundary receipt action is invalid');
+  }
+  if (!ENFORCEMENT_MODES.has(input.enforcementMode)) {
+    throw new Error('boundary receipt enforcement mode is invalid');
+  }
+  if (!Array.isArray(input.findings) || input.findings.length > MAX_BOUNDARY_RECEIPT_ITEMS) {
+    throw new Error('boundary receipt findings must be a bounded array');
+  }
+  for (const [index, item] of input.findings.entries()) {
+    requireBoundaryFinding(item, index);
     if (item.action !== input.action) {
       throw new Error(
         `boundary finding action ${item.action} does not match receipt action ${input.action}`,
@@ -373,6 +553,100 @@ export function buildBoundaryReceipt(input: BuildBoundaryReceiptInput): Boundary
     findings,
     limitations,
   };
+}
+
+export function validateBoundaryReceipt(value: unknown): ValidatedBoundaryReceipt {
+  requireExactDataObject(value, RECEIPT_KEYS, 'top-level');
+  if (value.schemaVersion !== 1 || value.repository !== 'LucasQuiles/WhatSoup') {
+    throw new Error('boundary receipt identity is invalid');
+  }
+  requireBoundedString(value.invocation, 'invocation');
+  if (!BOUNDARY_ACTIONS.has(value.action as BoundaryAction)) {
+    throw new Error('boundary receipt action is invalid');
+  }
+  if (!ENFORCEMENT_MODES.has(value.enforcementMode as EnforcementMode)) {
+    throw new Error('boundary receipt enforcement mode is invalid');
+  }
+  if (!BOUNDARY_DECISIONS.has(value.decision as BoundaryDecision)) {
+    throw new Error('boundary receipt decision is invalid');
+  }
+  if (typeof value.correlationIdSha256 !== 'string' || !/^[0-9a-f]{64}$/.test(value.correlationIdSha256)) {
+    throw new Error('boundary receipt correlation identity is invalid');
+  }
+
+  requireExactDataObject(value.base, BASE_KEYS, 'base');
+  for (const key of ['headOid', 'baseOid', 'mergeBaseOid'] as const) {
+    if (value.base[key] !== null && (typeof value.base[key] !== 'string' || !IDENTITY.test(value.base[key]))) {
+      throw new Error(`boundary receipt base.${key} identity is invalid`);
+    }
+  }
+  requireBoundedString(value.base.evidenceSource, 'base.evidenceSource');
+
+  if (!isRecord(value.fingerprints) || Object.getPrototypeOf(value.fingerprints) !== Object.prototype) {
+    throw new Error('boundary receipt fingerprints must be a plain object');
+  }
+  const fingerprintEntries = Object.entries(value.fingerprints);
+  if (fingerprintEntries.length > MAX_BOUNDARY_RECEIPT_ITEMS) {
+    throw new Error('boundary receipt fingerprints exceed the item limit');
+  }
+  for (const [key, fingerprint] of fingerprintEntries) {
+    requireBoundedString(key, 'fingerprint key');
+    const descriptor = Object.getOwnPropertyDescriptor(value.fingerprints, key);
+    if (descriptor === undefined || !descriptor.enumerable || !('value' in descriptor)) {
+      throw new Error('boundary receipt fingerprint is not plain data');
+    }
+    if (fingerprint !== null) requireBoundedString(fingerprint, `fingerprint ${key}`);
+  }
+
+  if (!Array.isArray(value.findings) || value.findings.length > MAX_BOUNDARY_RECEIPT_ITEMS) {
+    throw new Error('boundary receipt findings must be a bounded array');
+  }
+  for (const [index, finding] of value.findings.entries()) {
+    requireBoundaryFinding(finding, index);
+    if (finding.action !== value.action) {
+      throw new Error(`boundary receipt finding[${index}] action does not match receipt action`);
+    }
+  }
+  requireStringArray(value.limitations, 'limitations', true);
+
+  const rebuilt = buildBoundaryReceipt({
+    invocation: value.invocation,
+    action: value.action as BoundaryAction,
+    enforcementMode: value.enforcementMode as EnforcementMode,
+    base: value.base as unknown as BoundaryReceipt['base'],
+    fingerprints: value.fingerprints as Record<string, string | null>,
+    findings: value.findings as BoundaryFinding[],
+    limitations: value.limitations,
+  });
+  if (
+    rebuilt.decision !== value.decision
+    || rebuilt.correlationIdSha256 !== value.correlationIdSha256
+    || canonicalizeBoundaryRun(rebuilt) !== canonicalizeBoundaryRun(value)
+  ) {
+    throw new Error('boundary receipt content is not canonical');
+  }
+  return rebuilt as ValidatedBoundaryReceipt;
+}
+
+export function canonicalBoundaryReceiptBytes(receipt: BoundaryReceipt): Uint8Array {
+  const validated = validateBoundaryReceipt(receipt);
+  return Buffer.from(`${JSON.stringify(validated, null, 2)}\n`, 'utf8');
+}
+
+export function parseBoundaryReceiptBytes(bytes: Uint8Array): ValidatedBoundaryReceipt {
+  if (bytes.byteLength > MAX_BOUNDARY_RECEIPT_BYTES) {
+    throw new Error('boundary receipt bytes exceed the admission limit');
+  }
+  const parsed = parseBoundaryJsonBytes(bytes);
+  if (!parsed.result.ok || parsed.value === null) {
+    throw new Error('boundary receipt JSON is invalid');
+  }
+  const receipt = validateBoundaryReceipt(parsed.value);
+  const canonical = canonicalBoundaryReceiptBytes(receipt);
+  if (!Buffer.from(bytes).equals(Buffer.from(canonical))) {
+    throw new Error('boundary receipt bytes are noncanonical');
+  }
+  return receipt;
 }
 
 export function aggregateBoundaryDecision(
@@ -516,7 +790,7 @@ export function writeSemanticReceipt(filePath: string, receipt: BoundaryReceipt)
       0o600,
     );
     fchmodSync(descriptor, 0o600);
-    writeFileSync(descriptor, `${JSON.stringify(receipt, null, 2)}\n`, 'utf8');
+    writeFileSync(descriptor, canonicalBoundaryReceiptBytes(receipt));
     fsyncSync(descriptor);
     closeSync(descriptor);
     descriptor = null;

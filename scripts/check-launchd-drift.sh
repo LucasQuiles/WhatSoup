@@ -14,8 +14,9 @@ set -euo pipefail
 # /usr/bin/env-node incident class). Diff bodies for repo-shaped surfaces are
 # opt-in via --show-diff.
 #
-# Exit: 0 all ok · 1 drift/missing · 2 usage or unsubstituted placeholder ·
-#       3 LaunchAgents dir absent (0 with --allow-missing-launchd-dir).
+# Exit: 0 all ok · 1 drift/missing · 2 usage, invalid runtime precondition, or
+#       unsubstituted placeholder · 3 LaunchAgents dir absent
+#       (0 with --allow-missing-launchd-dir).
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 LAUNCHD_DIR="$HOME/Library/LaunchAgents"
@@ -38,10 +39,12 @@ Usage: check-launchd-drift.sh [--repo-root PATH] [--launchd-dir PATH]
 
 Compare installed com.whatsoup.* LaunchAgents with their checked-in templates
 (substitute-then-compare). Exits 0 when all managed surfaces match, 1 on
-drift/missing, 2 on usage error or a placeholder surviving substitution, 3 when
-the LaunchAgents directory is absent (unless --allow-missing-launchd-dir, which
-exits 0 with a skip message). Secret-bearing per-bot plist content is never
-printed.
+drift/missing, 2 on usage error, invalid plist-parser preconditions, or a
+placeholder surviving substitution, and 3 when the LaunchAgents directory is
+absent (unless --allow-missing-launchd-dir, which exits 0 with a skip message).
+Secret-bearing per-bot plist content is never printed. LAUNCHD_DRIFT_PYTHON may
+select one Python executable; an explicitly empty or invalid selection fails
+closed without falling back.
 USAGE
 }
 
@@ -80,6 +83,42 @@ if [ ! -d "$LAUNCHD_DIR" ]; then
 fi
 
 failures=0
+PLIST_PYTHON=""
+
+resolve_plist_python() {
+  local selected="" resolved="" status=0
+  if [ "${LAUNCHD_DRIFT_PYTHON+x}" = x ]; then
+    selected="$LAUNCHD_DRIFT_PYTHON"
+  else
+    case "${OSTYPE:-}" in
+      darwin*) selected="/usr/bin/python3" ;;
+      *) selected="python3" ;;
+    esac
+  fi
+
+  if [ -z "$selected" ]; then
+    echo "plist parser precondition unavailable: selected Python executable is empty" >&2
+    exit 2
+  fi
+  case "$selected" in
+    /*) resolved="$selected" ;;
+    *) resolved="$(command -v "$selected" 2>/dev/null || true)" ;;
+  esac
+  if [ -z "$resolved" ] || [ ! -x "$resolved" ]; then
+    echo "plist parser precondition unavailable: selected Python executable is missing or not executable" >&2
+    exit 2
+  fi
+
+  if "$resolved" -c 'import plistlib; p = plistlib.loads(b"<plist><dict><key>Label</key><string>probe</string><key>ProgramArguments</key><array><string>/probe</string></array></dict></plist>"); raise SystemExit(0 if p.get("Label") == "probe" and p.get("ProgramArguments") == ["/probe"] else 1)' >/dev/null 2>&1; then
+    PLIST_PYTHON="$resolved"
+  else
+    status=$?
+    echo "plist parser precondition unavailable: selected Python failed capability probe (status $status)" >&2
+    exit 2
+  fi
+}
+
+resolve_plist_python
 
 subst_render() { # TEMPLATE_ABS DEST BOT(optional)
   local template="$1" dest="$2" bot="${3:-}"
@@ -188,16 +227,31 @@ check_release_drift_surface() { # host-level; uses INSTANCES
 }
 
 check_watchdog_script() { # BOT
-  local bot="$1" script="$BIN_DIR/$bot-watchdog"
+  local bot="$1" status=0
+  local script="$BIN_DIR/$bot-watchdog" verifier="$REPO_ROOT/deploy/scripts/render-watchdog.py"
   if [ ! -x "$script" ]; then
     echo "missing installed watchdog script: $script" >&2
     failures=$((failures + 1)); return 0
   fi
-  if python3 "$REPO_ROOT/deploy/scripts/render-watchdog.py" verify --script "$script" >/dev/null 2>&1; then
+  if [ ! -f "$verifier" ]; then
+    echo "missing repo verifier: deploy/scripts/render-watchdog.py" >&2
+    failures=$((failures + 1)); return 0
+  fi
+  if [ ! -r "$verifier" ]; then
+    echo "watchdog verification evidence unavailable: canonical verifier is unreadable" >&2
+    exit 2
+  fi
+  if "$PLIST_PYTHON" "$verifier" verify --script "$script" >/dev/null 2>&1; then
     echo "ok: $bot-watchdog script (no surviving placeholders)"
   else
-    echo "drift: $bot-watchdog script failed render-watchdog verify" >&2
-    failures=$((failures + 1))
+    status=$?
+    if [ "$status" -eq 2 ]; then
+      echo "drift: $bot-watchdog script has surviving placeholders" >&2
+      failures=$((failures + 1))
+    else
+      echo "watchdog verification evidence unavailable: verifier failed (status $status)" >&2
+      exit 2
+    fi
   fi
 }
 
@@ -218,8 +272,8 @@ check_ms365_script() {
   fi
 }
 
-plist_key() { # PLIST_ABS Label|Prog0  (python3 plistlib: cross-platform; values printed are structural keys only, never EnvironmentVariables)
-  python3 - "$1" "$2" <<'PY'
+plist_key() { # PLIST_ABS Label|Prog0  (plistlib: cross-platform; values printed are structural keys only, never EnvironmentVariables)
+  "$PLIST_PYTHON" - "$1" "$2" <<'PY'
 import plistlib, sys
 with open(sys.argv[1], 'rb') as f:
     p = plistlib.load(f)
@@ -232,15 +286,24 @@ PY
 }
 
 check_bot_plist_structural() { # BOT — content is NEVER printed or diffed (live credentials in EnvironmentVariables)
-  local bot="$1" plist="$LAUNCHD_DIR/com.whatsoup.$bot.plist"
+  local bot="$1"
+  local plist="$LAUNCHD_DIR/com.whatsoup.$bot.plist"
   if [ ! -f "$plist" ]; then
     echo "missing installed: $bot plist" >&2
     failures=$((failures + 1))
     return 0
   fi
-  local label prog0 ok=1
-  label="$(plist_key "$plist" Label 2>/dev/null || echo "")"
-  prog0="$(plist_key "$plist" Prog0 2>/dev/null || echo "")"
+  local label prog0 ok=1 status=0
+  if label="$(plist_key "$plist" Label 2>/dev/null)"; then :; else
+    status=$?
+    echo "plist field evidence unavailable: $bot Label could not be read (parser status $status)" >&2
+    exit 2
+  fi
+  if prog0="$(plist_key "$plist" Prog0 2>/dev/null)"; then :; else
+    status=$?
+    echo "plist field evidence unavailable: $bot ProgramArguments[0] could not be read (parser status $status)" >&2
+    exit 2
+  fi
   if [ "$label" != "com.whatsoup.$bot" ]; then
     echo "structural: $bot Label mismatch (expected com.whatsoup.$bot, got ${label:-unreadable})" >&2
     ok=0
@@ -270,8 +333,12 @@ check_fleet_console_structural() {
     echo "skip: whatsoup-fleet (not installed on this host)"
     return 0
   fi
-  local label
-  label="$(plist_key "$plist" Label 2>/dev/null || echo "")"
+  local label status=0
+  if label="$(plist_key "$plist" Label 2>/dev/null)"; then :; else
+    status=$?
+    echo "plist field evidence unavailable: whatsoup-fleet Label could not be read (parser status $status)" >&2
+    exit 2
+  fi
   if [ "$label" = "com.whatsoup.whatsoup-fleet" ]; then
     echo "ok: whatsoup-fleet plist structural (content not inspected)"
   else

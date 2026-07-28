@@ -23,6 +23,7 @@ import {
   assertKnownFlag,
   isFlagToken,
   isHelpFlag,
+  parseClosedOptions,
   takeNumber,
   takeValue,
 } from '../../scripts/lib/cli-args.ts';
@@ -103,6 +104,36 @@ describe('isHelpFlag', () => {
     expect(isHelpFlag('--help')).toBe(true);
     expect(isHelpFlag('-h')).toBe(true);
     expect(isHelpFlag('--helpful')).toBe(false);
+  });
+});
+
+describe('parseClosedOptions', () => {
+  const schema = {
+    booleanOptions: ['--json'] as const,
+    valueOptions: ['--base', '--candidate'] as const,
+  };
+
+  it('parses only the declared boolean and value options', () => {
+    const parsed = parseClosedOptions(
+      ['--base', 'a'.repeat(40), '--json', '--candidate', 'b'.repeat(40)],
+      schema,
+    );
+    expect(parsed.error).toBeNull();
+    expect([...parsed.flags]).toEqual(['--json']);
+    expect([...parsed.values]).toEqual([
+      ['--base', 'a'.repeat(40)],
+      ['--candidate', 'b'.repeat(40)],
+    ]);
+  });
+
+  it.each([
+    [['--unknown'], 'ci.input.option-unknown'],
+    [['--json', '--json'], 'ci.input.duplicate-option'],
+    [['--base', 'one', '--base', 'two'], 'ci.input.duplicate-option'],
+    [['--base'], 'ci.input.option-value-missing'],
+    [['--base', '--json'], 'ci.input.option-value-missing'],
+  ] as const)('fails closed for %j', (args, code) => {
+    expect(parseClosedOptions(args, schema).error).toBe(code);
   });
 });
 
