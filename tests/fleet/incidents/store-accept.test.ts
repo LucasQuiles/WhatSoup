@@ -93,5 +93,6 @@ describe('IncidentStore.acceptSignal — acceptance core', () => {
     if (result.outcome !== 'accepted') return;
     expect(result.receipt.disposition).toBe('notice_recorded');
     expect(result.receipt.incidentId).toBeNull();
+    expect(store.listIncidents()).toEqual([]);
   });
 });

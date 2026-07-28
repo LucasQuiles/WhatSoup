@@ -110,6 +110,7 @@ describe('condition_observed lifecycle', () => {
     if (result.outcome !== 'accepted') return;
     expect(result.receipt.disposition).toBe('stored_no_state_change');
     expect(result.receipt.incidentId).toBeNull();
+    expect(store.listIncidents()).toEqual([]);
   });
 
   it('does not re-resolve or reopen an already-resolved occurrence', () => {
@@ -122,13 +123,14 @@ describe('condition_observed lifecycle', () => {
   });
 
   it('stores an observation against a concluded occurrence as stored_no_state_change', () => {
-    store.acceptSignal(observed('sig-1', 'occ-1', 1), PRODUCER, NOW);
+    const opened = store.acceptSignal(observed('sig-1', 'occ-1', 1), PRODUCER, NOW);
     store.acceptSignal(recovered('sig-r1', 'occ-1', 2), PRODUCER, NOW);
     const late = store.acceptSignal(observed('sig-post', 'occ-1', 3), PRODUCER, NOW);
     expect(late.outcome).toBe('accepted');
-    if (late.outcome !== 'accepted') return;
+    if (opened.outcome !== 'accepted' || late.outcome !== 'accepted') return;
     expect(late.receipt.disposition).toBe('stored_no_state_change');
     expect(late.receipt.incidentId).toBeNull();
+    expect(store.getIncident(opened.receipt.incidentId as number)?.conditionState).toBe('resolved');
   });
 
   it('quarantines future-skewed condition observations without lifecycle effects', () => {
@@ -148,6 +150,7 @@ describe('condition_observed lifecycle', () => {
     expect(result.receipt.disposition).toBe('stored_quarantined_observation');
     expect(result.receipt.incidentId).toBeNull();
     expect(result.receipt.transitionId).toBeNull();
+    expect(store.listIncidents()).toEqual([]);
   });
 
   it('accepts observations within the permitted skew window normally', () => {
