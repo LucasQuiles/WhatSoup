@@ -175,9 +175,9 @@ export class IncidentStore {
 
   private applyLifecycle(
     envelope: SignalEnvelope,
-    _producer: ProducerContext,
-    _eventId: number,
-    _receivedAt: string,
+    producer: ProducerContext,
+    eventId: number,
+    receivedAt: string,
   ): LifecycleEffect {
     switch (envelope.kind) {
       case 'heartbeat_observed':
@@ -185,10 +185,79 @@ export class IncidentStore {
       case 'notice_recorded':
         return { disposition: 'notice_recorded', incidentId: null, transitionId: null };
       case 'condition_observed':
+        return this.applyConditionObserved(envelope, producer, eventId, receivedAt);
       case 'condition_recovered':
-        // Episode lifecycle lands in the next increments (plan Tasks 4-6).
+        // Recovery lifecycle lands in the next increment (plan Task 6).
         return { disposition: 'stored_no_state_change', incidentId: null, transitionId: null };
     }
+  }
+
+  private applyConditionObserved(
+    envelope: SignalEnvelope,
+    producer: ProducerContext,
+    eventId: number,
+    receivedAt: string,
+  ): LifecycleEffect {
+    const conditionClass = envelope.conditionClass as string;
+    const occurrenceId = envelope.occurrenceId as string;
+    const occurrenceSeq = envelope.occurrenceSeq as number;
+
+    const episode = this.db
+      .prepare(
+        `SELECT incident_id, condition_state, last_occurrence_seq, projection_version
+           FROM incidents
+          WHERE producer_domain_id = ? AND subject = ? AND condition_class = ? AND occurrence_id = ?`,
+      )
+      .get(producer.producerDomainId, envelope.subject, conditionClass, occurrenceId) as
+      | { incident_id: number; condition_state: string; last_occurrence_seq: number; projection_version: number }
+      | undefined;
+
+    if (episode) {
+      if (episode.condition_state !== 'open' || occurrenceSeq <= episode.last_occurrence_seq) {
+        return { disposition: 'stored_stale_observation', incidentId: episode.incident_id, transitionId: null };
+      }
+      this.db
+        .prepare(
+          `UPDATE incidents
+              SET last_observed_at = ?, last_occurrence_seq = ?, projection_version = projection_version + 1
+            WHERE incident_id = ?`,
+        )
+        .run(envelope.observedAt, occurrenceSeq, episode.incident_id);
+      return { disposition: 'incident_updated', incidentId: episode.incident_id, transitionId: null };
+    }
+
+    const openedIncident = this.db
+      .prepare(
+        `INSERT INTO incidents (
+           producer_domain_id, subject, condition_class, occurrence_id,
+           condition_state, severity, opened_event_id, last_observed_at,
+           last_occurrence_seq, projection_version)
+         VALUES (?, ?, ?, ?, 'open', NULL, ?, ?, ?, 1)`,
+      )
+      .run(
+        producer.producerDomainId,
+        envelope.subject,
+        conditionClass,
+        occurrenceId,
+        eventId,
+        envelope.observedAt,
+        occurrenceSeq,
+      );
+    const incidentId = Number(openedIncident.lastInsertRowid);
+
+    const transition = this.db
+      .prepare(
+        `INSERT INTO transitions (
+           incident_id, from_state, to_state, actor_type, cause_event_id, reason_code, created_at)
+         VALUES (?, NULL, 'open', 'evaluator', ?, 'condition_observed', ?)`,
+      )
+      .run(incidentId, eventId, receivedAt);
+
+    return {
+      disposition: 'incident_opened',
+      incidentId,
+      transitionId: Number(transition.lastInsertRowid),
+    };
   }
 }
 
