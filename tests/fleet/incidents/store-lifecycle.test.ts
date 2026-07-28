@@ -75,4 +75,49 @@ describe('condition_observed lifecycle', () => {
     expect(priorTransitions.map((t) => t.toState)).toEqual(['open', 'superseded']);
     expect(priorTransitions[1]?.reasonCode).toBe('newer_occurrence');
   });
+
+  function recovered(signalId: string, occurrenceId: string, occurrenceSeq: number): string {
+    return JSON.stringify({
+      schemaVersion: 1,
+      signalId,
+      kind: 'condition_recovered',
+      subject: 'host:alpha',
+      conditionClass: 'selfcheck_drift',
+      occurrenceId,
+      occurrenceSeq,
+      observedAt: '2026-07-28T12:01:00.000Z',
+      recoveryProofClass: 'runtime_reverified',
+    });
+  }
+
+  it('resolves the matching open occurrence with a verified_recovery transition', () => {
+    const opened = store.acceptSignal(observed('sig-1', 'occ-1', 1), PRODUCER, NOW);
+    const result = store.acceptSignal(recovered('sig-r1', 'occ-1', 2), PRODUCER, NOW);
+    expect(result.outcome).toBe('accepted');
+    if (opened.outcome !== 'accepted' || result.outcome !== 'accepted') return;
+
+    expect(result.receipt.disposition).toBe('incident_resolved');
+    expect(result.receipt.incidentId).toBe(opened.receipt.incidentId);
+    const projection = store.getIncident(opened.receipt.incidentId as number);
+    expect(projection?.conditionState).toBe('resolved');
+    const transitions = store.listTransitions(opened.receipt.incidentId as number);
+    expect(transitions.at(-1)?.reasonCode).toBe('verified_recovery');
+  });
+
+  it('stores an unmatched recovery without altering any state', () => {
+    const result = store.acceptSignal(recovered('sig-r2', 'occ-unknown', 1), PRODUCER, NOW);
+    expect(result.outcome).toBe('accepted');
+    if (result.outcome !== 'accepted') return;
+    expect(result.receipt.disposition).toBe('stored_no_state_change');
+    expect(result.receipt.incidentId).toBeNull();
+  });
+
+  it('does not re-resolve or reopen an already-resolved occurrence', () => {
+    store.acceptSignal(observed('sig-1', 'occ-1', 1), PRODUCER, NOW);
+    store.acceptSignal(recovered('sig-r1', 'occ-1', 2), PRODUCER, NOW);
+    const late = store.acceptSignal(recovered('sig-r3', 'occ-1', 3), PRODUCER, NOW);
+    expect(late.outcome).toBe('accepted');
+    if (late.outcome !== 'accepted') return;
+    expect(late.receipt.disposition).toBe('stored_no_state_change');
+  });
 });

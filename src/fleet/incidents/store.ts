@@ -201,9 +201,52 @@ export class IncidentStore {
       case 'condition_observed':
         return this.applyConditionObserved(envelope, producer, eventId, receivedAt);
       case 'condition_recovered':
-        // Recovery lifecycle lands in the next increment (plan Task 6).
-        return { disposition: 'stored_no_state_change', incidentId: null, transitionId: null };
+        return this.applyConditionRecovered(envelope, producer, eventId, receivedAt);
     }
+  }
+
+  private applyConditionRecovered(
+    envelope: SignalEnvelope,
+    producer: ProducerContext,
+    eventId: number,
+    receivedAt: string,
+  ): LifecycleEffect {
+    const episode = this.db
+      .prepare(
+        `SELECT incident_id, condition_state FROM incidents
+          WHERE producer_domain_id = ? AND subject = ? AND condition_class = ? AND occurrence_id = ?`,
+      )
+      .get(
+        producer.producerDomainId,
+        envelope.subject,
+        envelope.conditionClass as string,
+        envelope.occurrenceId as string,
+      ) as { incident_id: number; condition_state: string } | undefined;
+
+    if (!episode || episode.condition_state !== 'open') {
+      return { disposition: 'stored_no_state_change', incidentId: null, transitionId: null };
+    }
+
+    this.db
+      .prepare(
+        `UPDATE incidents
+            SET condition_state = 'resolved', projection_version = projection_version + 1
+          WHERE incident_id = ?`,
+      )
+      .run(episode.incident_id);
+    const transition = this.db
+      .prepare(
+        `INSERT INTO transitions (
+           incident_id, from_state, to_state, actor_type, cause_event_id, reason_code, created_at)
+         VALUES (?, 'open', 'resolved', 'evaluator', ?, 'verified_recovery', ?)`,
+      )
+      .run(episode.incident_id, eventId, receivedAt);
+
+    return {
+      disposition: 'incident_resolved',
+      incidentId: episode.incident_id,
+      transitionId: Number(transition.lastInsertRowid),
+    };
   }
 
   private applyConditionObserved(
