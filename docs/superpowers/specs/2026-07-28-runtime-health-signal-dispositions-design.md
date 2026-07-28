@@ -1,6 +1,6 @@
 # Runtime Health Signal Dispositions Design
 
-**Status:** implementation-ready
+**Status:** active
 **Issues:** #2541, #2544
 **Related boundary:** #2447 remains the broader cross-contract owner
 

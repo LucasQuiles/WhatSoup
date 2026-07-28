@@ -3,6 +3,8 @@
 > Execute in the isolated branch
 > `fix/runtime-health-signal-dispositions-2541-2544-20260728`.
 
+**Status:** active
+
 **Goal:** Remove sticky runtime-health warnings caused by historical/audit
 counters while preserving genuine current-risk signals and adding bounded
 current auto-compaction evidence.
