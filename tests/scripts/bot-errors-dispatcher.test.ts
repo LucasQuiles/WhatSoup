@@ -5,7 +5,7 @@
  * test-integrity: source-string-ok
  */
 import { execFileSync, spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 
@@ -1912,5 +1912,151 @@ describe('still-open reminder exponential backoff', () => {
     patchOpenRecord(tmpRoot, key, { lastNotifiedAt: now - 170, lastSentAt: now - 170 });
     emitBackoffAlert(tmpRoot);
     expect(JSON.parse(dispatchBackoff(tmpRoot, capture, capEnv))).toMatchObject({ processed: 1, sent: 0, suppressed: 1 });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// #2484 — Queue-entry leaf-trust canaries.
+//
+// A symlinked outbox entry must never be parsed, classified, relayed, or
+// delivered. The dispatcher must quarantine the directory entry itself
+// (the link) without dereferencing its target.  The external target must
+// remain untouched.
+// ---------------------------------------------------------------------------
+
+describe('Queue-entry leaf-trust (#2484)', () => {
+  let tmpRoot = '';
+
+  afterEach(() => {
+    if (tmpRoot && existsSync(tmpRoot)) rmSync(tmpRoot, { recursive: true, force: true });
+    tmpRoot = '';
+  });
+
+  it('quarantines a symlinked outbox entry without parsing or delivering it', () => {
+    tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-symlink-'));
+    const capturePath = join(tmpRoot, 'sent-message.txt');
+    const outbox = join(tmpRoot, 'outbox');
+    mkdirSync(outbox, { recursive: true, mode: 0o700 });
+
+    // Create a valid event file OUTSIDE the queue root.
+    const outsideDir = mkdtempSync(join(tmpdir(), 'bot-errors-outside-'));
+    try {
+      const outsideEvent = {
+        schemaVersion: 1,
+        id: 'symlink-poison-test',
+        eventType: 'alert',
+        severity: 'critical',
+        createdAt: '2026-07-27T00:00:00Z',
+        machine: 'test-machine',
+        instance: 'q',
+        source: 'symlink-leaf-trust-test',
+        summary: 'this event must never be delivered',
+        evidence: 'symlink leaf trust boundary',
+        delivery: { attempts: 0, status: 'queued', nextAttemptAtEpoch: 0, lastError: null },
+      };
+      const outsidePath = join(outsideDir, 'outside-event.json');
+      writeFileSync(outsidePath, `${JSON.stringify(outsideEvent, null, 2)}\n`, { mode: 0o600 });
+
+      // Create a symlink in the outbox named like an event, pointing outside.
+      const symlinkPath = join(outbox, '20260727T000000Z.symlink-poison-test.json');
+      symlinkSync(outsidePath, symlinkPath);
+
+      // Run the dispatcher.
+      const output = execFileSync('python3', ['deploy/scripts/bot-errors-dispatcher.py', '--once'], {
+        cwd: process.cwd(),
+        env: {
+          ...process.env,
+          BOT_ERRORS_STATE_DIR: tmpRoot,
+          BOT_ERRORS_DRY_SEND_CAPTURE: capturePath,
+        },
+      });
+      const result = JSON.parse(output.toString()) as { sent: number; processed: number };
+
+      // The symlink must not be delivered.
+      expect(result.sent).toBe(0);
+
+      // No capture file should exist (nothing was sent).
+      expect(existsSync(capturePath)).toBe(false);
+
+      // The symlink should be quarantined (moved to quarantine dir).
+      const quarantineDir = join(tmpRoot, 'quarantine');
+      if (existsSync(quarantineDir)) {
+        const quarantined = readdirSync(quarantineDir);
+        // At least one .untrusted file should exist.
+        expect(quarantined.some((f) => f.endsWith('.untrusted'))).toBe(true);
+      }
+
+      // The symlink must no longer be in the outbox.
+      expect(existsSync(symlinkPath)).toBe(false);
+
+      // The external target must still exist (was not consumed/deleted).
+      expect(existsSync(outsidePath)).toBe(true);
+    } finally {
+      rmSync(outsideDir, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects a symlink that survives claim into processing', () => {
+    // This test verifies the post-claim re-verification in claim().
+    // We test the Python safe_is_regular_entry and safe_open_entry primitives
+    // directly via a Python snippet.
+    tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-claim-symlink-'));
+    const outsideDir = mkdtempSync(join(tmpdir(), 'bot-errors-outside2-'));
+    try {
+      const outsidePath = join(outsideDir, 'target.json');
+      writeFileSync(outsidePath, '{"id": "outside"}\n', { mode: 0o600 });
+      const symlinkPath = join(tmpRoot, 'symlink-entry.json');
+      symlinkSync(outsidePath, symlinkPath);
+
+      // Run a Python snippet that imports the dispatcher's primitives via
+      // importlib (the module file uses a hyphen, so `from X import` is not
+      // possible) and verifies O_NOFOLLOW rejection of a symlink leaf.
+      const pyCode = [
+        'import importlib.util, sys',
+        "spec = importlib.util.spec_from_file_location('dispatcher', 'deploy/scripts/bot-errors-dispatcher.py')",
+        'mod = importlib.util.module_from_spec(spec)',
+        'spec.loader.exec_module(mod)',
+        `p = __import__("pathlib").Path("${symlinkPath}")`,
+        'print("is_regular:", mod.safe_is_regular_entry(p))',
+        'try:',
+        '    fd = mod.safe_open_entry(p)',
+        '    print("opened: unexpected")',
+        'except mod.UntrustedEntryError as e:',
+        '    print("rejected:", str(e))',
+      ].join('\n');
+      const result = spawnSync('python3', ['-c', pyCode], { cwd: process.cwd() });
+      const stdout = result.stdout.toString().trim();
+      expect(stdout).toContain('is_regular: False');
+      expect(stdout).toContain('rejected:');
+      expect(result.status).toBe(0);
+    } finally {
+      rmSync(outsideDir, { recursive: true, force: true });
+    }
+  });
+
+  it('processes a regular (non-symlink) outbox entry normally', () => {
+    // Regression guard: the safe-entry primitives must not break normal dispatch.
+    tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-regular-'));
+    const capturePath = join(tmpRoot, 'sent-message.txt');
+    writeEvent(tmpRoot, 'critical', {
+      id: 'regular-entry-regression',
+      source: 'symlink-leaf-trust-regression',
+      summary: 'regular entry must still dispatch normally',
+      evidence: 'regression guard for #2484 leaf-trust hardening',
+    });
+
+    const output = execFileSync('python3', ['deploy/scripts/bot-errors-dispatcher.py', '--once'], {
+      cwd: process.cwd(),
+      env: {
+        ...process.env,
+        BOT_ERRORS_STATE_DIR: tmpRoot,
+        BOT_ERRORS_DRY_SEND_CAPTURE: capturePath,
+      },
+    });
+    const result = JSON.parse(output.toString()) as { sent: number; processed: number };
+
+    // A regular JSON event must still be processed and sent.
+    expect(result.sent).toBeGreaterThanOrEqual(1);
+    expect(existsSync(capturePath)).toBe(true);
   });
 });

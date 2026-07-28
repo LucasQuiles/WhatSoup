@@ -19,6 +19,7 @@ from pathlib import Path
 import re
 import shutil
 import socket
+import stat
 import subprocess
 import sys
 import time
@@ -656,6 +657,103 @@ def read_json(path: Path) -> dict[str, Any]:
     if not isinstance(data, dict):
         raise ValueError("event JSON root must be an object")
     return data
+
+
+# ---------------------------------------------------------------------------
+# #2484 — Queue-entry leaf-trust primitives.
+#
+# Queue consumers (dispatcher, collector, health, watchdog) must not follow
+# symlink leaves into targets outside the declared queue root.  The functions
+# below inspect the leaf WITHOUT following it, open the leaf with O_NOFOLLOW,
+# and verify the opened descriptor is a regular file via fstat.  Parsing
+# happens from the already-open descriptor so a pathname reopen cannot be
+# substituted between the trust check and the read.
+# ---------------------------------------------------------------------------
+
+
+class UntrustedEntryError(Exception):
+    """A queue leaf entry is not a trusted regular file (symlink, dir, device, socket, FIFO)."""
+
+
+def safe_open_entry(path: Path) -> int:
+    """Open a queue-entry leaf without following symlinks.
+
+    Uses ``O_NOFOLLOW`` to reject symlink leaves at the kernel level, then
+    verifies the opened descriptor is a regular file via ``fstat``.
+    Returns the file descriptor.  Raises :class:`UntrustedEntryError` for
+    symlinks, directories, devices, sockets, FIFOs, or other non-regular
+    entries.
+    """
+    try:
+        fd = os.open(str(path), os.O_RDONLY | os.O_NOFOLLOW)
+    except OSError as exc:
+        # O_NOFOLLOW raises ELOOP (Linux) or ENOTSUP/EMLINK (macOS) when the
+        # final path component is a symlink.  Any other OSError (EACCES,
+        # ENOENT, etc.) is also treated as an untrusted/unreadable entry.
+        raise UntrustedEntryError(f"entry is not a regular file: {exc}") from exc
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            os.close(fd)
+            raise UntrustedEntryError("entry is not a regular file")
+        return fd
+    except UntrustedEntryError:
+        raise
+    except Exception:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+        raise
+
+
+def safe_read_json(path: Path) -> dict[str, Any]:
+    """Read JSON from a queue entry without following symlinks.
+
+    Opens the leaf with ``O_NOFOLLOW``, verifies it is a regular file, then
+    parses from the open descriptor.  Raises :class:`UntrustedEntryError` for
+    non-regular entries; :class:`ValueError` if the root is not a JSON object.
+    """
+    fd = safe_open_entry(path)
+    try:
+        with os.fdopen(fd, "r", encoding="utf-8", closefd=True) as handle:
+            data = json.load(handle)
+        if not isinstance(data, dict):
+            raise ValueError("event JSON root must be an object")
+        return data
+    except UntrustedEntryError:
+        raise
+    except Exception:
+        raise
+
+
+def safe_is_regular_entry(path: Path) -> bool:
+    """Check whether a path is a regular file, without following symlinks.
+
+    Uses ``lstat`` to inspect the leaf itself.  Returns ``True`` only for
+    regular files (not symlinks, directories, devices, sockets, or FIFOs).
+    """
+    try:
+        st = path.lstat()
+        return stat.S_ISREG(st.st_mode)
+    except (OSError, ValueError):
+        return False
+
+
+def quarantine_untrusted_entry(path: Path, quarantine_dir: Path, reason: str) -> Path:
+    """Quarantine an untrusted queue entry without dereferencing its target.
+
+    Moves the directory entry itself (the link, not the target) into the
+    quarantine directory.  Never reads, copies, or opens the target bytes.
+    """
+    ensure_private_dir(quarantine_dir)
+    dest = quarantine_dir / f"{path.name}.{int(time.time())}.{os.getpid()}.untrusted"
+    try:
+        # shutil.move on a symlink moves the link itself, not the target.
+        shutil.move(str(path), str(dest))
+    except FileNotFoundError:
+        pass
+    return dest
 
 
 def load_incident_state(paths: dict[str, Path]) -> dict[str, Any]:
@@ -2147,7 +2245,7 @@ def queue_dead_letter_meta_alert(paths: dict[str, Path], now: int) -> int:
     dl_dir = paths["dead_letter"]
     if not dl_dir.exists():
         return 0
-    dl_files = [f for f in dl_dir.glob("*.json") if f.is_file()]
+    dl_files = [f for f in dl_dir.glob("*.json") if safe_is_regular_entry(f)]
     if not dl_files:
         return 0
 
@@ -3064,7 +3162,7 @@ def flap_scan_outbox(paths: dict[str, Path]) -> int:
         try:
             if not ready(path, paths["quarantine"]):
                 continue
-            event = read_json(path)
+            event = safe_read_json(path)
         except Exception:  # noqa: BLE001 - skip unreadable, process_one will quarantine
             continue
         if not is_incident_alert(event) or is_incident_clear(event):
@@ -3552,10 +3650,10 @@ def find_event_path_by_id(event_id: str, paths: dict[str, Path], keys: tuple[str
         if not directory.exists():
             continue
         for path in directory.glob("*"):
-            if not path.is_file():
+            if not safe_is_regular_entry(path):
                 continue
             try:
-                if read_json(path).get("id") == event_id:
+                if safe_read_json(path).get("id") == event_id:
                     return path
             except Exception:
                 continue
@@ -3914,7 +4012,7 @@ def collapse_ready_storms(paths: dict[str, Path]) -> int:
         if not ready(path, paths["quarantine"]):
             continue
         try:
-            event = read_json(path)
+            event = safe_read_json(path)
         except Exception:
             continue
         if not is_storm_candidate(event):
@@ -4007,7 +4105,7 @@ def suppress_alerts_recovered_before_delivery(paths: dict[str, Path]) -> int:
     clears: list[tuple[Path, dict[str, Any], int]] = []
     for path in sorted(paths["outbox"].glob("*.json")):
         try:
-            event = read_json(path)
+            event = safe_read_json(path)
         except Exception:
             continue
         epoch = event_created_epoch(event)
@@ -4076,7 +4174,7 @@ def suppress_ready_recovery_duplicates(paths: dict[str, Path]) -> int:
         if not ready(path, paths["quarantine"]):
             continue
         try:
-            event = read_json(path)
+            event = safe_read_json(path)
         except Exception:
             continue
         if not is_recovery_dedupe_candidate(event) and not is_recovery_episode_barrier(event):
@@ -4159,7 +4257,7 @@ def suppress_ready_recovery_duplicates(paths: dict[str, Path]) -> int:
 
 def prune_suppressed(paths: dict[str, Path]) -> int:
     cap = suppressed_max_files()
-    files = [path for path in paths["suppressed"].glob("*") if path.is_file()]
+    files = [path for path in paths["suppressed"].glob("*") if safe_is_regular_entry(path)]
     if len(files) <= cap:
         return 0
 
@@ -4270,7 +4368,7 @@ def suppress_test_provenance_events(paths: dict[str, Path]) -> tuple[int, int]:
         if not ready(path, paths["quarantine"]):
             continue
         try:
-            event = read_json(path)
+            event = safe_read_json(path)
         except Exception:
             continue
         if not is_test_provenance_event(event):
@@ -4288,8 +4386,16 @@ def suppress_test_provenance_events(paths: dict[str, Path]) -> tuple[int, int]:
 
 
 def ready(path: Path, quarantine_dir: Path) -> bool:
+    # #2484: reject symlink and non-regular leaves before reading.  Quarantine
+    # the directory entry itself without dereferencing its target.
+    if not safe_is_regular_entry(path):
+        quarantine_untrusted_entry(path, quarantine_dir, "untrusted leaf entry")
+        return False
     try:
-        event = read_json(path)
+        event = safe_read_json(path)
+    except UntrustedEntryError:
+        quarantine_untrusted_entry(path, quarantine_dir, "untrusted leaf entry after open")
+        return False
     except Exception as exc:
         quarantine_poison(path, quarantine_dir, f"invalid JSON before claim: {exc}")
         return False
@@ -4407,10 +4513,10 @@ def build_known_event_index(paths: dict[str, Path]) -> dict[str, dict[str, Any]]
         if not directory.exists():
             continue
         for path in directory.glob("*"):
-            if not path.is_file():
+            if not safe_is_regular_entry(path):
                 continue
             try:
-                existing = read_json(path)
+                existing = safe_read_json(path)
             except Exception:
                 continue
             remember_known_event(index, existing)
@@ -4474,8 +4580,10 @@ def recover_writefail_breadcrumbs(paths: dict[str, Path], limit: int = 25) -> in
             if scanned >= limit:
                 return recovered
             scanned += 1
+            if not safe_is_regular_entry(path):
+                continue
             try:
-                crumb = read_json(path)
+                crumb = safe_read_json(path)
                 if crumb.get("kind") != "outbox_write_failure":
                     raise ValueError("writefail breadcrumb kind is not outbox_write_failure")
                 event = crumb.get("event")
@@ -4553,6 +4661,12 @@ def claim(path: Path, processing_dir: Path) -> Path:
     dest = safe_child_path(processing_dir, f"{path.name}.{os.getpid()}.processing", 240)
     os.replace(path, dest)
     fsync_parent(dest)
+    # #2484: re-establish the no-follow regular-file invariant AFTER the move.
+    # os.replace moves the directory entry itself; if the original was a
+    # symlink the claimed path is still a symlink pointing outside the queue.
+    if not safe_is_regular_entry(dest):
+        quarantine_untrusted_entry(dest, processing_dir.parent / "quarantine", "untrusted entry survived claim")
+        raise UntrustedEntryError("claimed entry is not a regular file")
     return dest
 
 
@@ -4569,7 +4683,7 @@ def original_name_from_processing(path: Path) -> str:
 def reclaim_processing(paths: dict[str, Path]) -> int:
     reclaimed = 0
     for path in sorted(paths["processing"].glob("*")):
-        if not path.is_file():
+        if not safe_is_regular_entry(path):
             continue
         target = safe_child_path(paths["outbox"], original_name_from_processing(path))
         os.replace(path, target)
@@ -4581,16 +4695,16 @@ def reclaim_processing(paths: dict[str, Path]) -> int:
 
 def record_state(paths: dict[str, Path], **updates: Any) -> None:
     counts = {
-        "outbox": len(list(paths["outbox"].glob("*.json"))),
-        "processing": len(list(paths["processing"].glob("*"))),
-        "sent": len(list(paths["sent"].glob("*"))),
-        "stormCollapsed": len(list(paths["storm_collapsed"].glob("*"))),
-        "stormManifests": len(list(paths["storm_manifests"].glob("*"))),
-        "suppressed": len(list(paths["suppressed"].glob("*"))),
-        "quarantine": len(list(paths["quarantine"].glob("*"))),
-        "writefail": sum(len(list(path.glob("*.writefail"))) for path in writefail_dirs() if path.exists()),
-        "writefailRecovered": len(list(paths["writefail_recovered"].glob("*"))),
-        "writefailQuarantine": len(list(paths["writefail_quarantine"].glob("*"))),
+        "outbox": sum(1 for p in paths["outbox"].glob("*.json") if safe_is_regular_entry(p)),
+        "processing": sum(1 for p in paths["processing"].glob("*") if safe_is_regular_entry(p)),
+        "sent": sum(1 for p in paths["sent"].glob("*") if safe_is_regular_entry(p)),
+        "stormCollapsed": sum(1 for p in paths["storm_collapsed"].glob("*") if safe_is_regular_entry(p)),
+        "stormManifests": sum(1 for p in paths["storm_manifests"].glob("*") if safe_is_regular_entry(p)),
+        "suppressed": sum(1 for p in paths["suppressed"].glob("*") if safe_is_regular_entry(p)),
+        "quarantine": sum(1 for p in paths["quarantine"].glob("*") if safe_is_regular_entry(p)),
+        "writefail": sum(sum(1 for p in path.glob("*.writefail") if safe_is_regular_entry(p)) for path in writefail_dirs() if path.exists()),
+        "writefailRecovered": sum(1 for p in paths["writefail_recovered"].glob("*") if safe_is_regular_entry(p)),
+        "writefailQuarantine": sum(1 for p in paths["writefail_quarantine"].glob("*") if safe_is_regular_entry(p)),
     }
     state = {
         "updatedAt": now_iso(),
@@ -4603,9 +4717,17 @@ def record_state(paths: dict[str, Path], **updates: Any) -> None:
 
 
 def process_one(path: Path, paths: dict[str, Path]) -> tuple[bool, str]:
-    claimed = claim(path, paths["processing"])
+    # #2484: ready() already verified the leaf is regular and readable, but
+    # claim() renames it — re-verify the claimed path before parsing.
     try:
-        event = read_json(claimed)
+        claimed = claim(path, paths["processing"])
+    except UntrustedEntryError:
+        return False, "untrusted"
+    try:
+        event = safe_read_json(claimed)
+    except UntrustedEntryError:
+        quarantine_untrusted_entry(claimed, paths["quarantine"], "untrusted entry after claim")
+        return False, "untrusted"
     except Exception as exc:
         quarantine_poison(claimed, paths["quarantine"], f"invalid JSON after claim: {exc}")
         return False, "poison"
@@ -4803,7 +4925,7 @@ def run_once(max_events: int) -> dict[str, Any]:
             if not ready(path, paths["quarantine"]):
                 continue
             try:
-                preview = read_json(path)
+                preview = safe_read_json(path)
                 if is_incident_alert(preview) or is_incident_clear(preview):
                     touched_incident_keys.add(incident_key(preview))
             except Exception:
