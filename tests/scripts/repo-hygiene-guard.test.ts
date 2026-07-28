@@ -1235,8 +1235,11 @@ The migrated group was 1203631234567890@g.us.
       expect(validateRepoHygieneExactRangeArtifact(noncanonical, expected).ok).toBe(false);
 
       const canonicalText = Buffer.from(artifact.payloadBytes).toString('utf8');
+      // Corrupt the canonical payload by injecting a duplicate key right after
+      // the opening brace (slice, not replace: the injection targets exactly the
+      // first byte by construction).
       const duplicateBytes = Uint8Array.from(Buffer.from(
-        canonicalText.replace('{', '{"schemaVersion":1,'),
+        `{"schemaVersion":1,${canonicalText.slice(1)}`,
         'utf8',
       ));
       expect(validateRepoHygieneExactRangeArtifact({
