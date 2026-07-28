@@ -18,7 +18,8 @@ turn-recovery work.
 
 ## Observed Failure Boundaries
 
-Current main contains four related but distinct problems:
+Audit revision `ec1cd2ae5ed766ea78850936b6b7a7360f02bba1` contains four
+related but distinct problems:
 
 1. Nine principal atomic JSON writers can publish a renamed target and then
    silently report ordinary success when opening the parent directory for
@@ -31,6 +32,14 @@ Current main contains four related but distinct problems:
 4. Multiple controller-state loaders replace unreadable truth with empty
    defaults and later overwrite the evidence, allowing corruption to appear
    healed.
+
+Decisive source anchors are the inline atomic writers and parent-sync helpers
+in the nine principal `deploy/scripts/bot-errors-*.py` components, the
+collector embedded acknowledgement scripts, and the maintenance, GUI-session,
+tree-provenance, and cutover utility surfaces. The implementation plan turns
+these observations into executable call-site inventory and fault-injection
+evidence; until that checked inventory exists, these are audit findings rather
+than closure proof.
 
 These failures share a persistence boundary, but they do not share one safe
 implementation commit.
@@ -72,9 +81,11 @@ implementation commit.
 
 ### Draft 1: Durable writer outcomes
 
-**Issues:** closes #2485 only after all nine writers prove stable operation
+**Issues:** advances #2485 after all nine writers prove stable operation
 identity, event/state-specific concurrency fencing, and fail-closed caller
-handling; advances the bounded durable-publication slice of #2464.
+handling; advances the bounded durable-publication slice of #2464. It does not
+close #2485 while embedded cross-directory false-success paths remain for
+Draft 3.
 
 Draft 1 introduces a shared module under `deploy/scripts/lib/` and migrates the
 nine principal writer components:
@@ -89,11 +100,21 @@ nine principal writer components:
 - selfcheck; and
 - sentinel.
 
+Draft 1 will produce a checked inventory covering every cooperating local
+publisher into the same protected roots. It migrates the maintenance CLI, GUI session
+monitor, tree-provenance outbox publisher, emitter/runner replayable
+write-failure publishers, emitter evidence-sidecar publisher, and the cutover
+repair consumer of the watchdog writer. Embedded
+remote acknowledgement journals are inventoried explicitly: their JSON
+publication adopts the shared fence in Draft 1, while their cross-directory
+lifecycle movement remains Draft 3.
+
 It establishes the shared result and reconciliation contract used by the later
 drafts. If any writer cannot meet the operation-identity or concurrency-fence
-contract in this slice, #2485 remains `IN PROGRESS`; the primitive alone is not
-closure evidence. The PR must not use `Fixes #2464`, and #2464 remains
-`IN PROGRESS` after the draft is complete.
+contract in this slice, the draft is incomplete. Even after Draft 1 is
+complete, #2485 remains `IN PROGRESS` until Draft 3 removes the embedded
+cross-parent false-success residual and proves the complete acceptance
+boundary. The PR must not use closing keywords for #2485 or #2464.
 
 ### Draft 2: Stable lifecycle identity
 
@@ -107,7 +128,8 @@ implementation.
 
 ### Draft 3: Durable lifecycle transitions
 
-**Issue:** #2482.
+**Issues:** closes #2482 and, only after the Draft 1 writer contract plus every
+embedded parent-barrier residual is proven, closes #2485.
 
 Draft 3 introduces a lifecycle-transition API distinct from atomic JSON
 publication. It migrates collector, dispatcher, and embedded remote scripts,
@@ -128,27 +150,40 @@ lifecycle progress or overwriting the only evidence.
 configuration and roster-retirement disposition. Draft 4 must not close #2429
 unless that residual is separately implemented and tested.
 
-## Open Pull-Request Collision
+## Open Pull-Request Collisions
 
-Open draft PR #2603 at reviewed head
+At the 2026-07-28 planning observation, open draft PR #2603 was at reviewed head
 `615dd194f01f3440b27dd556a0e0a21e5d43e9bf` owns controller-log envelope and
 diagnostic sink policy for #2508 and #2509. Its body explicitly leaves the
 low-level durability primitive to #2464, so it is not an issue-ownership
 collision. It is a material path collision: manifest, deployer, collector,
 dispatcher, health-check, watchdog, q-loop, and related tests overlap Draft 1.
 
+At the same planning observation, open draft PR #2604 was at reviewed head
+`8b5dec468f2e1ce7bb134b05454443535475e0d3` owns runtime-health signal
+dispositions for #2541 and #2544. It is not an issue-ownership collision, but
+it materially overlaps the health-check adapter, runtime manifest and checker,
+deployer, documentation, and focused tests. #2603 and #2604 are sibling
+branches, so neither reviewed head contains the other's behavior.
+
 Implementation must not proceed from the stale pre-#2603 base as though those
 changes do not exist. Immediately before planning and again before opening
 Draft 1:
 
-- re-read #2603 state, exact head, files, checks, and semantic boundaries;
-- if merged, base Draft 1 on the exact main commit containing it;
-- if still open and accepted as a dependency, stack Draft 1 on its exact
-  reviewed head and use #2603's branch as the draft base;
+- re-read #2603 and #2604 state, exact heads, files, checks, and semantic
+  boundaries;
+- if both are merged, base Draft 1 on the exact main commit containing both;
+- if either remains open, do not choose one sibling and mechanically discard
+  the other; first establish one explicit combined dependency head by a
+  reviewed stack or integration branch, record both exact parents, and run the
+  combined semantic tests;
+- treat a private synthetic integration branch as local implementation evidence
+  only; Draft 1 publication waits for exact main containing both or a public
+  dependency-owner stack containing both;
 - if superseded or changed, use `git range-diff` and `git cherry -v` to prove
   which behavior survives before selecting a new base; and
-- rerun the controller-log, manifest, deployer, durability, and full BOT ERRORS
-  suites on the combined exact head.
+- rerun the controller-log, runtime-health, manifest, deployer, durability, and
+  full BOT ERRORS suites on the combined exact head.
 
 No issue lifecycle label changes merely because of this path collision.
 
@@ -295,18 +330,22 @@ validation through the final namespace barrier and recovery-record update.
 Kernel crash/exit releases the advisory lock; durable operation identity and
 reconciliation handle the unfinished transaction.
 
-All writers capable of mutating these private roots are included in the
-structural inventory and must use the fence. Trusted-directory ownership and
-mode exclude non-cooperating untrusted writers. If `fcntl`, descriptor-relative
-hard-link publication, no-follow traversal, or directory sync is unavailable,
-capability detection returns a typed pre-mutation inconclusive/failure result;
-there is no pathname or unfenced fallback. Platform tests run the same
-concurrency contract on Darwin and Linux.
+All cooperating writers capable of mutating these private roots are included
+in the structural inventory and must use the fence. The nine principal
+components are the #2485 acceptance boundary, but that boundary does not exempt
+utility publishers into the same roots. Each embedded remote publisher has an
+explicit inventory row separating Draft 1 JSON publication from Draft 3
+lifecycle movement. Trusted-directory ownership and mode exclude
+non-cooperating untrusted writers. If `fcntl`, descriptor-relative hard-link
+publication, no-follow traversal, or directory sync is unavailable, capability
+detection returns a typed pre-mutation inconclusive/failure result; there is no
+pathname or unfenced fallback. Platform tests run the same concurrency
+contract on Darwin and Linux.
 
 Exclusive sibling temporary creation is necessary but is not treated as a
 destination collision fence. Draft 1 inventories and classifies every one of
 the nine writers as event or state publication, then proves the corresponding
-fence before #2485 can close.
+fence before Draft 3 may attempt #2485 closure.
 
 ### Post-publication ambiguity
 
@@ -509,7 +548,9 @@ failure become RED-first fault tests before production changes.
 
 ### Draft 1 fault matrix
 
-For all nine writers:
+The shared helper runs the complete matrix below. Each of the nine principal
+writers and every cooperating adapter runs the serialization, ambiguity, and
+caller-specific no-advance vectors for its inventory classification:
 
 - stable operation-ID replay and expected-generation serialization;
 - exclusive temporary-create collision and destination collision;
@@ -638,9 +679,9 @@ When a draft is complete and reproducibly validated:
 
 | Draft | Only issue eligible for `PATCH READY` | Non-closing references |
 |---|---|---|
-| 1 | #2485, only if all nine caller fences are proven | #2464 remains `IN PROGRESS` |
+| 1 | none; #2485 remains `IN PROGRESS` pending Draft 3 | #2485 and #2464 remain non-closing |
 | 2 | #2427 | none |
-| 3 | #2482 | none |
+| 3 | #2482 and #2485, only if the full embedded parent-barrier residual is proven | none |
 | 4 | #2463 | #2429 remains open and non-closing |
 
 No primitive-only draft may transition #2485. Each eligible issue remains
