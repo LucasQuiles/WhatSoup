@@ -26,8 +26,8 @@
  * chain could not be read). An unscannable tree is never a pass.
  */
 import { execFileSync } from 'node:child_process';
-import { existsSync, readFileSync } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
+import { lstatSync, readFileSync } from 'node:fs';
+import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import ts from 'typescript';
@@ -62,6 +62,21 @@ interface Options {
   json: boolean;
 }
 
+type ManifestDeclarations =
+  | { state: 'absent' }
+  | { state: 'readable'; declarations: Set<string> }
+  | { state: 'unreadable' };
+
+interface DeclarationResolution {
+  declarations: Set<string> | null;
+  unreadableManifests: string[];
+}
+
+interface ImportCollection {
+  sites: ImportSite[];
+  unreadableFiles: string[];
+}
+
 function parseOptions(argv: readonly string[]): Options | 'help' {
   const options: Options = { repo: defaultRepoRoot, json: false };
   for (let i = 0; i < argv.length; i++) {
@@ -79,28 +94,89 @@ function parseOptions(argv: readonly string[]): Options | 'help' {
   return options;
 }
 
-/** Dependency names declared by one `package.json`, or `null` if it is absent/unreadable. */
-function declaredAt(dir: string, cache: Map<string, Set<string> | null>): Set<string> | null {
+/** Escape control and formatting characters that can reshape or visually reorder output. */
+function escapeUnsafeUnicode(value: string): string {
+  return value.replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu, (character) => {
+    let escaped = '';
+    for (let index = 0; index < character.length; index++) {
+      escaped += `\\u${character.charCodeAt(index).toString(16).padStart(4, '0')}`;
+    }
+    return escaped;
+  });
+}
+
+function safeScalar(value: string): string {
+  return escapeUnsafeUnicode(JSON.stringify(value).slice(1, -1));
+}
+
+function safeJson(value: unknown): string {
+  return escapeUnsafeUnicode(JSON.stringify(value));
+}
+
+/** Require an in-repository regular file with no symlinked ancestor below the repo root. */
+function isRegularRepoFile(repoRoot: string, file: string): boolean {
+  const repoRelative = relative(repoRoot, file);
+  if (
+    repoRelative.length === 0 ||
+    repoRelative === '..' ||
+    repoRelative.startsWith(`..${sep}`) ||
+    isAbsolute(repoRelative)
+  ) {
+    return false;
+  }
+
+  const components = repoRelative.split(sep);
+  let current = repoRoot;
+  for (let index = 0; index < components.length; index++) {
+    current = join(current, components[index]!);
+    const stat = lstatSync(current);
+    if (index === components.length - 1 ? !stat.isFile() : !stat.isDirectory()) return false;
+  }
+  return true;
+}
+
+/** Distinguish an absent manifest from one that exists but cannot be trusted. */
+function declaredAt(
+  dir: string,
+  repoRoot: string,
+  cache: Map<string, ManifestDeclarations>,
+): ManifestDeclarations {
   const cached = cache.get(dir);
   if (cached !== undefined) return cached;
 
   const manifest = join(dir, 'package.json');
-  let result: Set<string> | null = null;
-  if (existsSync(manifest)) {
-    try {
-      const parsed = JSON.parse(readFileSync(manifest, 'utf8')) as Record<
-        string,
-        Record<string, string> | undefined
-      >;
-      result = new Set([
+  let result: ManifestDeclarations;
+  try {
+    if (!isRegularRepoFile(repoRoot, manifest)) {
+      result = { state: 'unreadable' };
+      cache.set(dir, result);
+      return result;
+    }
+  } catch (error) {
+    result =
+      (error as NodeJS.ErrnoException).code === 'ENOENT'
+        ? { state: 'absent' }
+        : { state: 'unreadable' };
+    cache.set(dir, result);
+    return result;
+  }
+
+  try {
+    const parsed = JSON.parse(readFileSync(manifest, 'utf8')) as Record<
+      string,
+      Record<string, string> | undefined
+    >;
+    result = {
+      state: 'readable',
+      declarations: new Set([
         ...Object.keys(parsed.dependencies ?? {}),
         ...Object.keys(parsed.devDependencies ?? {}),
         ...Object.keys(parsed.optionalDependencies ?? {}),
         ...Object.keys(parsed.peerDependencies ?? {}),
-      ]);
-    } catch {
-      result = null; // unreadable manifest -> unverifiable, never "declares nothing"
-    }
+      ]),
+    };
+  } catch {
+    result = { state: 'unreadable' };
   }
   cache.set(dir, result);
   return result;
@@ -109,37 +185,50 @@ function declaredAt(dir: string, cache: Map<string, Set<string> | null>): Set<st
 /**
  * Union of declarations from the file's directory up to the repo root.
  *
- * Returns `null` when NO manifest was found anywhere in the chain — that is "could not
- * check", which the caller reports as INCONCLUSIVE rather than as a clean file.
+ * Separately reports an unreadable manifest and a chain with no manifest. Both are
+ * inconclusive, while absent intermediate manifests remain valid.
  */
 function declaredFor(
   file: string,
   repoRoot: string,
-  cache: Map<string, Set<string> | null>,
-): Set<string> | null {
+  cache: Map<string, ManifestDeclarations>,
+): DeclarationResolution {
   const union = new Set<string>();
+  const unreadableManifests: string[] = [];
   let found = false;
   let dir = dirname(resolve(repoRoot, file));
 
   for (;;) {
-    const declared = declaredAt(dir, cache);
-    if (declared) {
+    const manifest = declaredAt(dir, repoRoot, cache);
+    if (manifest.state === 'readable') {
       found = true;
-      for (const name of declared) union.add(name);
+      for (const name of manifest.declarations) union.add(name);
+    } else if (manifest.state === 'unreadable') {
+      unreadableManifests.push(relative(repoRoot, join(dir, 'package.json')));
     }
     if (dir === repoRoot || dir === dirname(dir)) break;
     dir = dirname(dir);
   }
-  return found ? union : null;
+  return {
+    declarations: unreadableManifests.length === 0 && found ? union : null,
+    unreadableManifests,
+  };
 }
 
-function collectImportSites(repoRoot: string, files: readonly string[]): ImportSite[] {
+function collectImportSites(repoRoot: string, files: readonly string[]): ImportCollection {
   const sites: ImportSite[] = [];
+  const unreadableFiles: string[] = [];
   for (const file of files) {
     let text: string;
     try {
-      text = readFileSync(join(repoRoot, file), 'utf8');
+      const source = join(repoRoot, file);
+      if (!isRegularRepoFile(repoRoot, source)) {
+        unreadableFiles.push(file);
+        continue;
+      }
+      text = readFileSync(source, 'utf8');
     } catch {
+      unreadableFiles.push(file);
       continue;
     }
     const sourceFile = ts.createSourceFile(file, text, ts.ScriptTarget.Latest, true);
@@ -161,7 +250,7 @@ function collectImportSites(repoRoot: string, files: readonly string[]): ImportS
     };
     visit(sourceFile);
   }
-  return sites;
+  return { sites, unreadableFiles };
 }
 
 function main(): number {
@@ -188,23 +277,44 @@ function main(): number {
   const repoRoot = options.repo;
   let files: string[];
   try {
-    files = execFileSync('git', ['ls-files'], {
+    files = execFileSync('git', ['ls-files', '-z'], {
       cwd: repoRoot,
       encoding: 'utf8',
       maxBuffer: 64 * 1024 * 1024,
     })
-      .split('\n')
-      .filter((file) => SOURCE_FILE.test(file) && !file.includes('node_modules'));
-  } catch (error) {
+      .split('\0')
+      .filter((file) => SOURCE_FILE.test(file));
+  } catch {
     console.error(
-      `FAIL(inconclusive): could not list tracked files in ${repoRoot} — ` +
-        `${error instanceof Error ? error.message : String(error)}. A tree that could not be ` +
+      'FAIL(inconclusive): could not list tracked source files. A tree that could not be ' +
         'enumerated contains no phantoms trivially, which is not a pass.',
     );
     return EXIT_INCONCLUSIVE;
   }
 
-  const sites = collectImportSites(repoRoot, files);
+  const { sites, unreadableFiles } = collectImportSites(repoRoot, files);
+
+  if (unreadableFiles.length > 0) {
+    if (options.json) {
+      console.log(
+        safeJson({
+          files: files.length,
+          importSites: sites.length,
+          phantoms: [],
+          unverifiable: [],
+          unreadableFiles,
+          unreadableManifests: [],
+        }),
+      );
+    } else {
+      console.error(
+        `FAIL(inconclusive): ${unreadableFiles.length} tracked source file(s) could not be ` +
+          'read, so the import set is incomplete:',
+      );
+      for (const file of unreadableFiles) console.error(`  ${safeScalar(file)}`);
+    }
+    return EXIT_INCONCLUSIVE;
+  }
 
   if (files.length < MIN_FILES || sites.length < MIN_IMPORT_SITES) {
     console.error(
@@ -215,11 +325,36 @@ function main(): number {
     return EXIT_INCONCLUSIVE;
   }
 
-  const cache = new Map<string, Set<string> | null>();
+  const cache = new Map<string, ManifestDeclarations>();
   const declaredByFile = new Map<string, ReadonlySet<string>>();
+  const unreadableManifests = new Set<string>();
   for (const file of new Set(sites.map((site) => site.file))) {
-    const declared = declaredFor(file, repoRoot, cache);
-    if (declared) declaredByFile.set(file, declared);
+    const resolution = declaredFor(file, repoRoot, cache);
+    for (const manifest of resolution.unreadableManifests) unreadableManifests.add(manifest);
+    if (resolution.declarations) declaredByFile.set(file, resolution.declarations);
+  }
+
+  if (unreadableManifests.size > 0) {
+    const manifests = [...unreadableManifests].sort();
+    if (options.json) {
+      console.log(
+        safeJson({
+          files: files.length,
+          importSites: sites.length,
+          phantoms: [],
+          unverifiable: [],
+          unreadableFiles: [],
+          unreadableManifests: manifests,
+        }),
+      );
+    } else {
+      console.error(
+        `FAIL(inconclusive): ${manifests.length} package.json file(s) in an importer's ` +
+          'declaration chain could not be read or parsed:',
+      );
+      for (const manifest of manifests) console.error(`  ${safeScalar(manifest)}`);
+    }
+    return EXIT_INCONCLUSIVE;
   }
 
   const findings: PhantomFinding[] = findPhantomDependencies(sites, declaredByFile);
@@ -228,11 +363,7 @@ function main(): number {
 
   if (options.json) {
     console.log(
-      JSON.stringify(
-        { files: files.length, importSites: sites.length, phantoms, unverifiable },
-        null,
-        2,
-      ),
+      safeJson({ files: files.length, importSites: sites.length, phantoms, unverifiable }),
     );
   }
 
@@ -244,7 +375,9 @@ function main(): number {
           'be checked:',
       );
       for (const finding of unverifiable) {
-        console.error(`  ${finding.packageName} — e.g. ${finding.files[0]}`);
+        console.error(
+          `  ${safeScalar(finding.packageName)} — e.g. ${safeScalar(finding.files[0]!)}`,
+        );
       }
     }
     return EXIT_INCONCLUSIVE;
@@ -254,8 +387,10 @@ function main(): number {
     if (!options.json) {
       console.error(`FAIL(phantom-dependency): ${phantoms.length} undeclared package(s):`);
       for (const finding of phantoms) {
-        console.error(`\n  ${finding.packageName} — imported by ${finding.files.length} file(s):`);
-        for (const file of finding.files.slice(0, 5)) console.error(`    ${file}`);
+        console.error(
+          `\n  ${safeScalar(finding.packageName)} — imported by ${finding.files.length} file(s):`,
+        );
+        for (const file of finding.files.slice(0, 5)) console.error(`    ${safeScalar(file)}`);
       }
       console.error(
         '\nThese resolve today only because something else hoisted them into node_modules; ' +

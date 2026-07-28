@@ -13,7 +13,7 @@ import { open as openFileHandle } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   EXIT_BLOCK,
   EXIT_INCONCLUSIVE,
@@ -23,7 +23,9 @@ import {
   acquireLease,
   acquireLeaseAsync,
   checkAllowedPaths,
+  executeCli,
   exitCodeFor,
+  formatUnexpectedFailure,
   heartbeatLease,
   parseLeaseRecord,
   processIdentityString,
@@ -664,6 +666,36 @@ describe('agent-lease takeover', () => {
     expect(live.record.leaseId).toBe(result.record.leaseId);
   });
 
+  it('preserves the predecessor scope when takeover allowedPaths are omitted', () => {
+    const repo = initRepo();
+    makeAbandonable(repo, acquireOk(repo, 'session-a', { allowedPaths: ['src'] }));
+
+    const result = takeoverLease({ cwd: repo, taskId: 'task-2', sessionId: 'session-b', toolIdentity: 'vitest' });
+    expect(result.kind).toBe('ok');
+    if (result.kind !== 'ok') throw new Error(`${result.reason}: ${result.message}`);
+
+    expect(result.record.allowedPaths).toEqual(['src']);
+    expect(checkAllowedPaths(result.record, ['src/core/db.ts', 'docs/runbook.md'])).toEqual(['docs/runbook.md']);
+  });
+
+  it('preserves explicit whole-repository takeover scope for compatibility', () => {
+    const repo = initRepo();
+    makeAbandonable(repo, acquireOk(repo, 'session-a', { allowedPaths: ['src'] }));
+
+    const result = takeoverLease({
+      cwd: repo,
+      taskId: 'task-2',
+      sessionId: 'session-b',
+      toolIdentity: 'vitest',
+      allowedPaths: ['.'],
+    });
+    expect(result.kind).toBe('ok');
+    if (result.kind !== 'ok') throw new Error(`${result.reason}: ${result.message}`);
+
+    expect(result.record.allowedPaths).toEqual(['.']);
+    expect(checkAllowedPaths(result.record, ['src/core/db.ts'])).toEqual([]);
+  });
+
   it('reports every one of the seven rider steps on the successful result', () => {
     const repo = initRepo();
     makeAbandonable(repo, acquireOk(repo, 'session-a'));
@@ -823,9 +855,25 @@ describe('agent-lease allowedPaths', () => {
     expect(checkAllowedPaths(record, ['src/core/db.ts'])).toEqual(['src/core/db.ts']);
   });
 
-  it('treats "." as a whole-repository allowlist', () => {
+  it('preserves the established whole-repository default when allowedPaths are omitted', () => {
     const repo = initRepo();
     const record = acquireOk(repo, 'session-a');
+    expect(record.allowedPaths).toEqual(['.']);
+    expect(checkAllowedPaths(record, ['src/core/db.ts'])).toEqual([]);
+  });
+
+  it('preserves the whole-repository default through the public CLI', () => {
+    const repo = initRepo();
+    const cli = runCli(repo, ['acquire', '--task', 't', '--session', 's', '--tool', 'vitest']);
+    expect(cli.code).toBe(0);
+    const parsed = parseLeaseRecord(readLeaseRaw(repo));
+    if (!parsed.valid) throw new Error(parsed.problem);
+    expect(parsed.record.allowedPaths).toEqual(['.']);
+  });
+
+  it('treats "." as a whole-repository allowlist', () => {
+    const repo = initRepo();
+    const record = acquireOk(repo, 'session-a', { allowedPaths: ['.'] });
     expect(record.allowedPaths).toEqual(['.']);
     expect(checkAllowedPaths(record, ['src/core/db.ts', 'docs/runbook.md'])).toEqual([]);
   });
@@ -842,6 +890,34 @@ describe('agent-lease allowedPaths', () => {
 
 // ── Taxonomy and process identity primitives ────────────────────────────────
 describe('agent-lease taxonomy and identity', () => {
+  it('sanitizes unexpected failures without exposing raw exception text or absolute paths', () => {
+    const localHomePrefix = ['', 'Users', 'example', 'private', 'repository.ts:10'].join('/');
+    const rendered = formatUnexpectedFailure(
+      new Error(`token=protected-value at ${localHomePrefix}`),
+    );
+    expect(rendered).toBe(
+      '[agent-lease] git.worktree.unaccounted-state (INCONCLUSIVE) internal execution failed; reconcile the worktree and start a new attempt',
+    );
+    expect(rendered).not.toContain('protected-value');
+    expect(rendered).not.toContain(['', 'Users', ''].join('/'));
+  });
+
+  it('keeps the CLI catch boundary inconclusive and sanitized when main throws', () => {
+    const localHomePrefix = ['', 'Users', 'example', 'private', 'repository.ts:10'].join('/');
+    const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+
+    const code = executeCli([], () => {
+      throw new Error(`token=protected-value at ${localHomePrefix}`);
+    });
+
+    expect(code).toBe(EXIT_INCONCLUSIVE);
+    expect(stderr).toHaveBeenCalledTimes(1);
+    const rendered = String(stderr.mock.calls[0]?.[0]);
+    expect(rendered).toBe(`${formatUnexpectedFailure(undefined)}\n`);
+    expect(rendered).not.toContain('protected-value');
+    expect(rendered).not.toContain(['', 'Users', ''].join('/'));
+    stderr.mockRestore();
+  });
   it('maps the rider reason codes to the rider outcomes', () => {
     expect(REASON_OUTCOMES['git.lease.writer-conflict']).toBe('block');
     expect(REASON_OUTCOMES['git.lease.expired-unreconciled']).toBe('inconclusive');

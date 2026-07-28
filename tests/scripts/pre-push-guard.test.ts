@@ -917,7 +917,7 @@ describe('pre-push hook runtime isolation', () => {
 });
 
 describe('verify chain composition (package.json)', () => {
-  it('exposes one production semantic command with explicit enforce and shadow adapters', () => {
+  it('exposes one production semantic command with enforce and byte-validating shadow adapters', () => {
     expect(packageJson.scripts['guard:semantic-quality']).toBe(
       'bash scripts/run-with-pinned-node.sh scripts/semantic-quality-check.ts',
     );
@@ -925,7 +925,7 @@ describe('verify chain composition (package.json)', () => {
       'npm run guard:semantic-quality -- --mode enforce',
     );
     expect(packageJson.scripts['verify:semantic:shadow']).toBe(
-      'npm run guard:semantic-quality -- --mode shadow',
+      'npm run guard:semantic-quality -- --mode shadow && npm test -- tests/scripts/semantic-quality-receipt-validation.test.ts --pool=forks --fileParallelism=false --retry=0',
     );
   });
 

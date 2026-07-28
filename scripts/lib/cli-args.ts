@@ -20,8 +20,10 @@
  * `base: "--json"` — which would then have been handed to git as a ref. Some scripts
  * (`design-system-hygiene-guard.ts`) already guard against this by hand; most do not.
  *
- * `takeValue` makes the correct behaviour the easy one. Adopt incrementally: no existing
- * script is required to migrate, and `tests/scripts/cli-args-ratchet.test.ts` stops the
+ * `takeValue` makes the correct behaviour the easy one. `parseClosedOptions` composes the
+ * same primitive for small CLIs whose option sets fit a closed boolean/value schema. Adopt
+ * incrementally: no existing
+ * script is required to migrate, and `tests/scripts/cli-args.test.ts` stops the
  * hand-rolled count from GROWING without forcing a 32-file rewrite.
  */
 
@@ -71,6 +73,56 @@ export function takeValue(argv: readonly string[], index: number, flag = argv[in
     );
   }
   return { value, index: index + 1 };
+}
+
+export type ClosedOptionError =
+  | 'ci.input.duplicate-option'
+  | 'ci.input.option-unknown'
+  | 'ci.input.option-value-missing';
+
+export interface ClosedOptionSchema {
+  booleanOptions: readonly string[];
+  valueOptions: readonly string[];
+}
+
+export interface ClosedOptionResult {
+  flags: ReadonlySet<string>;
+  values: ReadonlyMap<string, string>;
+  error: ClosedOptionError | null;
+}
+
+/** Parse a closed set of boolean and single-value options without accepting positionals. */
+export function parseClosedOptions(
+  argv: readonly string[],
+  schema: ClosedOptionSchema,
+): ClosedOptionResult {
+  const booleanOptions = new Set(schema.booleanOptions);
+  const valueOptions = new Set(schema.valueOptions);
+  const flags = new Set<string>();
+  const values = new Map<string, string>();
+
+  for (let index = 0; index < argv.length; index += 1) {
+    const option = argv[index]!;
+    if (flags.has(option) || values.has(option)) {
+      return { flags, values, error: 'ci.input.duplicate-option' };
+    }
+    if (booleanOptions.has(option)) {
+      flags.add(option);
+      continue;
+    }
+    if (!valueOptions.has(option)) {
+      return { flags, values, error: 'ci.input.option-unknown' };
+    }
+    try {
+      const taken = takeValue(argv, index, option);
+      values.set(option, taken.value);
+      index = taken.index;
+    } catch (error) {
+      if (!(error instanceof CliArgError)) throw error;
+      return { flags, values, error: 'ci.input.option-value-missing' };
+    }
+  }
+  return { flags, values, error: null };
 }
 
 /**
