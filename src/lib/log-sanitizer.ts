@@ -162,12 +162,12 @@ export function sanitizeLogValue(
 // eslint-disable-next-line @typescript-eslint/no-explicit-any -- Pino's hook signature uses any for args/method; our runtime type guard on args[0] is the security boundary. expires 2026-12-31
 export function sanitizingLogHook(
   this: unknown,
-  args: any[],
-  method: (...args: any[]) => void,
+  args: unknown[],
+  method: (...a: unknown[]) => void,
   _level: number,
 ): void {
   if (args.length > 0 && typeof args[0] === 'object' && args[0] !== null) {
-    args[0] = sanitizeLogValue(args[0]) as Record<string, unknown>;
+    args[0] = sanitizeLogValue(args[0]);
   }
   return method.apply(this, args);
 }
