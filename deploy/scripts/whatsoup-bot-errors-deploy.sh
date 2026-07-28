@@ -43,6 +43,7 @@ FILES=(
   "deploy/scripts/bot-errors-heartbeat-watchdog.py"
   "deploy/scripts/bot-errors-q-loop.py"
   "src/lib/bot-errors-outbox.ts"
+  "src/lib/fault-taxonomy-registry.json"
   "deploy/scripts/bot-errors-collector.py"
   "deploy/scripts/bot-errors-emit.py"
   "deploy/scripts/bot-errors-runner.py"

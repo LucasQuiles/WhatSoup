@@ -51,6 +51,21 @@ DEFAULT_Q_LOOP_SERVICE = "com.bot-errors.q-loop" if HOST_PLATFORM == "darwin" el
 DISPATCHER_SERVICE = os.environ.get("BOT_ERRORS_DISPATCHER_SERVICE", DEFAULT_DISPATCHER_SERVICE)
 Q_LOOP_SERVICE = os.environ.get("BOT_ERRORS_Q_LOOP_SERVICE", DEFAULT_Q_LOOP_SERVICE)
 REPO_ROOT = Path(__file__).resolve().parents[2]
+RUNTIME_AGENT_HEALTH_SIGNAL_REGISTRY_PATH = (
+    REPO_ROOT / "src" / "lib" / "fault-taxonomy-registry.json"
+)
+RUNTIME_AGENT_HEALTH_SIGNAL_KINDS = {
+    "current_gauge",
+    "active_episode_count",
+    "terminal_audit_count",
+    "cumulative_total",
+    "historical_maximum",
+}
+RUNTIME_AGENT_CURRENT_HEALTH_EFFECTS = {
+    "positive_is_risk",
+    "diagnostic_only",
+}
+RUNTIME_AGENT_AUTO_COMPACT_STATES = {"idle", "backoff"}
 DEFAULT_HEALTH_PROFILE = {
     "role": "central",
     "expectDispatcher": True,
@@ -89,6 +104,65 @@ SERVICE_ENV_MAP = {
 TERMINAL_AUTH_FAILURE_CLASSES = {"pairing_required", "serverside_logout_irreversible"}
 LOGGED_OUT_STATUS_CODE = 401
 LOGGED_OUT_REASON_KEY = "loggedout"
+
+
+def load_runtime_agent_health_signals() -> tuple[list[dict[str, str]] | None, str | None]:
+    try:
+        with RUNTIME_AGENT_HEALTH_SIGNAL_REGISTRY_PATH.open("r", encoding="utf-8") as handle:
+            registry = json.load(handle)
+    except FileNotFoundError:
+        return None, "missing"
+    except json.JSONDecodeError:
+        return None, "malformed_json"
+    except OSError:
+        return None, "unreadable"
+
+    if not isinstance(registry, dict):
+        return None, "invalid_contract"
+    if registry.get("schema") != "whatsoup-fault-taxonomy-registry-v3":
+        return None, "invalid_schema"
+    raw_signals = registry.get("runtimeAgentHealthSignals")
+    if not isinstance(raw_signals, list):
+        return None, "invalid_contract"
+
+    fields: set[str] = set()
+    labels: set[str] = set()
+    signals: list[dict[str, str]] = []
+    for raw_signal in raw_signals:
+        if not isinstance(raw_signal, dict):
+            return None, "invalid_contract"
+        field = raw_signal.get("field")
+        label = raw_signal.get("label")
+        kind = raw_signal.get("kind")
+        effect = raw_signal.get("currentHealthEffect")
+        owner = raw_signal.get("owner")
+        test = raw_signal.get("test")
+        if (
+            not isinstance(field, str)
+            or re.fullmatch(r"[A-Za-z][A-Za-z0-9]*", field) is None
+            or field in fields
+            or not isinstance(label, str)
+            or re.fullmatch(r"runtime_agent_[a-z0-9_]+", label) is None
+            or label in labels
+            or not isinstance(kind, str)
+            or kind not in RUNTIME_AGENT_HEALTH_SIGNAL_KINDS
+            or not isinstance(effect, str)
+            or effect not in RUNTIME_AGENT_CURRENT_HEALTH_EFFECTS
+            or not isinstance(owner, str)
+            or not owner
+            or not isinstance(test, str)
+            or not test
+        ):
+            return None, "invalid_contract"
+        fields.add(field)
+        labels.add(label)
+        signals.append({
+            "field": field,
+            "label": label,
+            "kind": kind,
+            "currentHealthEffect": effect,
+        })
+    return signals, None
 
 
 def normalized_signal_key(value: Any) -> str | None:
@@ -2718,8 +2792,6 @@ def health_probe_details(status: int, body: str, expected_name: str | None = Non
         if provider_fallback_active(runtime_primary_provider, runtime_effective_provider, runtime_fallback_active_until):
             add_marker("runtime_agent_fallback_active")
         for key, label in [
-            ("activeSessions", "runtime_agent_active_sessions"),
-            ("sessionCount", "runtime_agent_session_count"),
             ("lastSessionStatus", "runtime_agent_last_session_status"),
             ("lastSessionStartedAt", "runtime_agent_last_session_started_at"),
             ("sessionScope", "runtime_agent_session_scope"),
@@ -2731,57 +2803,30 @@ def health_probe_details(status: int, body: str, expected_name: str | None = Non
             ("fallbackResetAt", "runtime_agent_fallback_reset_at"),
             ("fallbackRecoveryProbeRequired", "runtime_agent_fallback_recovery_probe_required"),
             ("agentProvider", "runtime_agent_agent_provider"),
-            ("recentCrashes", "runtime_agent_recent_crashes"),
-            ("recentResumeFailures", "runtime_agent_recent_resume_failures"),
-            ("pollPersistenceErrors", "runtime_agent_poll_persistence_errors"),
-            ("autoCompactIneffective", "runtime_agent_auto_compact_ineffective"),
-            ("autoCompactConsecutiveRapidRearmsMax", "runtime_agent_auto_compact_rapid_rearms_max"),
-            ("autoCompactNextTurnOverThreshold", "runtime_agent_auto_compact_next_turn_over_threshold"),
-            ("turnFinalizationDegradedScopes", "runtime_agent_turn_finalization_degraded_scopes"),
-            ("turnRecoveryOutstanding", "runtime_agent_turn_recovery_outstanding"),
-            ("turnRecoveryPending", "runtime_agent_turn_recovery_pending"),
-            ("turnRecoveryExpiredClaimed", "runtime_agent_turn_recovery_expired_claimed"),
-            ("turnRecoveryBlockedUnsafe", "runtime_agent_turn_recovery_blocked_unsafe"),
-            ("turnRecoveryExhausted", "runtime_agent_turn_recovery_exhausted"),
-            ("turnRecoveryOpenRecoveries", "runtime_agent_turn_recovery_open_recoveries"),
-            ("turnRecoveryQuarantinedDelivery", "runtime_agent_turn_recovery_quarantined_delivery"),
-            ("turnRecoveryCorruptLinks", "runtime_agent_turn_recovery_corrupt_links"),
-            ("turnRecoveryOrphanTransfers", "runtime_agent_turn_recovery_orphan_transfers"),
-            ("turnRecoveryEchoConflicts", "runtime_agent_turn_recovery_echo_conflicts"),
         ]:
             value = agent.get(key)
-            if key in {
-                "lastSessionStatus",
-                "lastSessionStartedAt",
-                "sessionScope",
-                "primaryProvider",
-                "effectiveProvider",
-                "fallbackActiveUntil",
-                "fallbackReason",
-                "fallbackModel",
-                "fallbackResetAt",
-                "fallbackRecoveryProbeRequired",
-                "agentProvider",
-            }:
-                append_evidence_field(details, label, value)
-                continue
-            number = read_int(value)
-            if number is None:
-                continue
-            if number != 0 or key in {"activeSessions", "sessionCount"}:
-                details.append(f"{label}={number}")
-            if key not in {"activeSessions", "sessionCount"} and number > 0:
-                add_marker("runtime_agent_at_risk")
-        for key, label in [
-            ("turnFinalizationRetainedRetries", "runtime_agent_turn_finalization_retained_retries"),
-            ("turnFinalizationRetryAttempts", "runtime_agent_turn_finalization_retry_attempts"),
-            ("turnFinalizationRetryRecoveries", "runtime_agent_turn_finalization_retry_recoveries"),
-            ("turnFinalizationRetryExhaustions", "runtime_agent_turn_finalization_retry_exhaustions"),
-            ("turnRecoveryLiveClaimed", "runtime_agent_turn_recovery_live_claimed"),
-        ]:
-            number = read_int(agent.get(key))
-            if number is not None and number != 0:
-                details.append(f"{label}={number}")
+            append_evidence_field(details, label, value)
+        health_signals, registry_error = load_runtime_agent_health_signals()
+        if registry_error is not None:
+            add_marker("runtime_agent_health_signal_registry_invalid")
+            details.append(
+                f"runtime_agent_health_signal_registry_error={registry_error}"
+            )
+        elif health_signals is not None:
+            for signal in health_signals:
+                key = signal["field"]
+                number = read_int(agent.get(key))
+                if number is None:
+                    continue
+                if number != 0 or key in {"activeSessions", "sessionCount"}:
+                    details.append(f"{signal['label']}={number}")
+                if signal["currentHealthEffect"] == "positive_is_risk" and number > 0:
+                    add_marker("runtime_agent_at_risk")
+            auto_compact_state = agent.get("autoCompactState")
+            if auto_compact_state in RUNTIME_AGENT_AUTO_COMPACT_STATES:
+                details.append(
+                    f"runtime_agent_auto_compact_state={auto_compact_state}"
+                )
         last_crash_at = agent.get("lastCrashAt")
         if isinstance(last_crash_at, str) and last_crash_at:
             details.append(f"runtime_agent_last_crash_at={last_crash_at}")
@@ -2816,6 +2861,7 @@ def format_health_probe(url: str, status: int, body: str = "", expected_name: st
         or "health_generated_at_missing" in details
         or "health_generated_at_unparseable" in details
         or "runtime_agent_at_risk" in details
+        or "runtime_agent_health_signal_registry_invalid" in details
         or "runtime_agent_fallback_active" in details
         or "auth_bond_restore_canary_failed" in details
         or "auth_bond_backup_age_warning" in details

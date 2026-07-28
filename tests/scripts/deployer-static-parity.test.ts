@@ -67,6 +67,7 @@ describe('deployer-static parity (BEAD-039)', () => {
   it('parses a non-empty pin list from the deployer FILES=() array', () => {
     const pinPaths = parseDeployPinPaths(scriptText);
     expect(pinPaths.length).toBeGreaterThan(0);
+    expect(pinPaths).toContain('src/lib/fault-taxonomy-registry.json');
     // Sanity: every pin is a repo-relative path with a recognizable surface.
     for (const p of pinPaths) {
       expect(p).toMatch(/^(deploy|src)\//);

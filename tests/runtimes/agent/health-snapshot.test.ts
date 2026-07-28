@@ -8,6 +8,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import type { AgentEvent } from '../../../src/runtimes/agent/stream-parser.ts';
 import type { ProviderExecutionGate } from '../../../src/runtimes/agent/provider-execution-gate.ts';
+import type { AutoCompactController } from '../../../src/runtimes/agent/auto-compact-controller.ts';
 
 // ── Hoisted mocks ───────────────────────────────────────────────────────────
 
@@ -412,6 +413,9 @@ describe('AgentRuntime.getHealthSnapshot — per_chat shape', () => {
         autoCompactIneffective: 0,
         autoCompactConsecutiveRapidRearmsMax: 0,
         autoCompactNextTurnOverThreshold: 0,
+        autoCompactState: 'idle',
+        autoCompactActiveBackoffScopes: 0,
+        autoCompactWorstCurrentBackoffTier: 0,
         proactiveResumeIdentityRejects: 0,
         restartLoopGuard: { enabled: true, bootsInWindow: 0, tripped: false, lastTripAt: null, windowMs: 300_000, bootsTotal: 0, checksPerformed: 0, lastCheckAt: null },
         unownedProviderEventRejects: 0,
@@ -447,6 +451,9 @@ describe('AgentRuntime.getHealthSnapshot — per_chat shape', () => {
         autoCompactIneffective: 0,
         autoCompactConsecutiveRapidRearmsMax: 0,
         autoCompactNextTurnOverThreshold: 0,
+        autoCompactState: 'idle',
+        autoCompactActiveBackoffScopes: 0,
+        autoCompactWorstCurrentBackoffTier: 0,
         proactiveResumeIdentityRejects: 0,
         restartLoopGuard: { enabled: true, bootsInWindow: 0, tripped: false, lastTripAt: null, windowMs: 300_000, bootsTotal: 0, checksPerformed: 0, lastCheckAt: null },
         unownedProviderEventRejects: 0,
@@ -489,6 +496,46 @@ describe('AgentRuntime.getHealthSnapshot — per_chat shape', () => {
       const second = await secondPromise;
       second.release();
       expect(runtime.getHealthSnapshot().status).toBe('healthy');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('degrades only while aggregate auto-compact backoff is active', () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date(1_000));
+      const autoCompact = (runtime as unknown as {
+        autoCompact: AutoCompactController;
+      }).autoCompact;
+      autoCompact.recordAutoCompactRapidRearm('private-scope', 100, Date.now());
+
+      expect(runtime.getHealthSnapshot()).toMatchObject({
+        status: 'degraded',
+        details: {
+          degradedReasons: ['auto_compact_backoff'],
+          autoCompactState: 'backoff',
+          autoCompactActiveBackoffScopes: 1,
+          autoCompactWorstCurrentBackoffTier: 1,
+          autoCompactIneffective: 1,
+          autoCompactConsecutiveRapidRearmsMax: 1,
+        },
+      });
+      expect(JSON.stringify(runtime.getHealthSnapshot().details)).not.toContain('private-scope');
+
+      vi.setSystemTime(new Date(1_000 + 15 * 60_000));
+
+      expect(runtime.getHealthSnapshot()).toMatchObject({
+        status: 'healthy',
+        details: {
+          degradedReasons: [],
+          autoCompactState: 'idle',
+          autoCompactActiveBackoffScopes: 0,
+          autoCompactWorstCurrentBackoffTier: 0,
+          autoCompactIneffective: 1,
+          autoCompactConsecutiveRapidRearmsMax: 1,
+        },
+      });
     } finally {
       vi.useRealTimers();
     }
@@ -611,6 +658,9 @@ describe('AgentRuntime.getHealthSnapshot — single-session shape', () => {
         autoCompactIneffective: 0,
         autoCompactConsecutiveRapidRearmsMax: 0,
         autoCompactNextTurnOverThreshold: 0,
+        autoCompactState: 'idle',
+        autoCompactActiveBackoffScopes: 0,
+        autoCompactWorstCurrentBackoffTier: 0,
         proactiveResumeIdentityRejects: 0,
         restartLoopGuard: { enabled: true, bootsInWindow: 0, tripped: false, lastTripAt: null, windowMs: 300_000, bootsTotal: 0, checksPerformed: 0, lastCheckAt: null },
         unownedProviderEventRejects: 0,

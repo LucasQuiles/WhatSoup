@@ -44,7 +44,7 @@ def test_sha_tool_failure_emits_sha_error_not_drift(tmp_path: Path):
     target_dir.mkdir(parents=True)
 
     # Create bot_errors_redaction.py as a readable file (needed for smoke_redaction skipped by verify)
-    # We need all 10 FILES entries present, but only need one to be unreadable.
+    # We need every FILES entry present, but only need one to be unreadable.
     # Easiest: populate all files from repo, then chmod one to 0o000.
     files_in_deployer = [
         "deploy/scripts/bot-errors-dispatcher.py",
@@ -52,11 +52,14 @@ def test_sha_tool_failure_emits_sha_error_not_drift(tmp_path: Path):
         "deploy/scripts/bot-errors-heartbeat-watchdog.py",
         "deploy/scripts/bot-errors-q-loop.py",
         "src/lib/bot-errors-outbox.ts",
+        "src/lib/fault-taxonomy-registry.json",
         "deploy/scripts/bot-errors-collector.py",
         "deploy/scripts/bot-errors-emit.py",
         "deploy/scripts/bot-errors-runner.py",
         "deploy/scripts/lib/__init__.py",
         "deploy/scripts/lib/bot_errors_redaction.py",
+        "deploy/scripts/lib/bot_errors_daily_health.py",
+        "deploy/scripts/lib/bot_errors_roster.py",
     ]
 
     # Copy real files from repo root so the structure is valid,
@@ -106,11 +109,14 @@ def test_sha_tool_failure_sets_nonzero_exit(tmp_path: Path):
         "deploy/scripts/bot-errors-heartbeat-watchdog.py",
         "deploy/scripts/bot-errors-q-loop.py",
         "src/lib/bot-errors-outbox.ts",
+        "src/lib/fault-taxonomy-registry.json",
         "deploy/scripts/bot-errors-collector.py",
         "deploy/scripts/bot-errors-emit.py",
         "deploy/scripts/bot-errors-runner.py",
         "deploy/scripts/lib/__init__.py",
         "deploy/scripts/lib/bot_errors_redaction.py",
+        "deploy/scripts/lib/bot_errors_daily_health.py",
+        "deploy/scripts/lib/bot_errors_roster.py",
     ]
     for rel in files_in_deployer:
         src = _REPO_ROOT / rel
@@ -149,6 +155,6 @@ def test_matching_files_still_emit_match_not_sha_error(tmp_path: Path):
     )
     # Every managed file should be MATCH
     match_lines = [l for l in stdout.splitlines() if "MATCH" in l]
-    assert len(match_lines) == 12, (
-        f"Expected 12 MATCH lines for clean repo root, got {len(match_lines)}:\n{stdout}"
+    assert len(match_lines) == 13, (
+        f"Expected 13 MATCH lines for clean repo root, got {len(match_lines)}:\n{stdout}"
     )

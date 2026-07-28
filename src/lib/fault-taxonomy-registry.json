@@ -1,5 +1,5 @@
 {
-  "schema": "whatsoup-fault-taxonomy-registry-v2",
+  "schema": "whatsoup-fault-taxonomy-registry-v3",
   "faultClasses": [
     {
       "id": "auth_terminal",
@@ -119,6 +119,7 @@
         "schema_not_ready",
         "pending_polls_unreadable",
         "agent_recent_crashes",
+        "agent_auto_compact_backoff",
         "agent_session_inactive",
         "turn_finalization_degraded",
         "turn_recovery_degraded",
@@ -199,6 +200,216 @@
       "test": "tests/runtimes/chat/memory/operation-telemetry.test.ts"
     }
   },
+  "runtimeAgentHealthSignals": [
+    {
+      "field": "activeSessions",
+      "label": "runtime_agent_active_sessions",
+      "kind": "current_gauge",
+      "currentHealthEffect": "diagnostic_only",
+      "owner": "src/runtimes/agent/runtime.ts",
+      "test": "tests/runtimes/agent/health-snapshot.test.ts"
+    },
+    {
+      "field": "sessionCount",
+      "label": "runtime_agent_session_count",
+      "kind": "current_gauge",
+      "currentHealthEffect": "diagnostic_only",
+      "owner": "src/runtimes/agent/runtime.ts",
+      "test": "tests/runtimes/agent/health-snapshot.test.ts"
+    },
+    {
+      "field": "recentCrashes",
+      "label": "runtime_agent_recent_crashes",
+      "kind": "current_gauge",
+      "currentHealthEffect": "positive_is_risk",
+      "owner": "src/runtimes/agent/runtime.ts",
+      "test": "tests/runtimes/agent/health-snapshot.test.ts"
+    },
+    {
+      "field": "recentResumeFailures",
+      "label": "runtime_agent_recent_resume_failures",
+      "kind": "current_gauge",
+      "currentHealthEffect": "positive_is_risk",
+      "owner": "deploy/scripts/bot-errors-health-check.py",
+      "test": "tests/scripts/bot-errors-health-check.test.ts"
+    },
+    {
+      "field": "pollPersistenceErrors",
+      "label": "runtime_agent_poll_persistence_errors",
+      "kind": "cumulative_total",
+      "currentHealthEffect": "diagnostic_only",
+      "owner": "src/runtimes/agent/runtime.ts",
+      "test": "tests/runtimes/agent/runtime.test.ts"
+    },
+    {
+      "field": "autoCompactIneffective",
+      "label": "runtime_agent_auto_compact_ineffective",
+      "kind": "cumulative_total",
+      "currentHealthEffect": "diagnostic_only",
+      "owner": "src/runtimes/agent/auto-compact-controller.ts",
+      "test": "tests/runtimes/agent/auto-compact-controller.test.ts"
+    },
+    {
+      "field": "autoCompactConsecutiveRapidRearmsMax",
+      "label": "runtime_agent_auto_compact_rapid_rearms_max",
+      "kind": "historical_maximum",
+      "currentHealthEffect": "diagnostic_only",
+      "owner": "src/runtimes/agent/auto-compact-controller.ts",
+      "test": "tests/runtimes/agent/auto-compact-controller.test.ts"
+    },
+    {
+      "field": "autoCompactNextTurnOverThreshold",
+      "label": "runtime_agent_auto_compact_next_turn_over_threshold",
+      "kind": "cumulative_total",
+      "currentHealthEffect": "diagnostic_only",
+      "owner": "src/runtimes/agent/auto-compact-controller.ts",
+      "test": "tests/runtimes/agent/auto-compact-controller.test.ts"
+    },
+    {
+      "field": "autoCompactActiveBackoffScopes",
+      "label": "runtime_agent_auto_compact_active_backoff_scopes",
+      "kind": "active_episode_count",
+      "currentHealthEffect": "positive_is_risk",
+      "owner": "src/runtimes/agent/auto-compact-controller.ts",
+      "test": "tests/runtimes/agent/auto-compact-controller.test.ts"
+    },
+    {
+      "field": "autoCompactWorstCurrentBackoffTier",
+      "label": "runtime_agent_auto_compact_worst_current_backoff_tier",
+      "kind": "current_gauge",
+      "currentHealthEffect": "diagnostic_only",
+      "owner": "src/runtimes/agent/auto-compact-controller.ts",
+      "test": "tests/runtimes/agent/auto-compact-controller.test.ts"
+    },
+    {
+      "field": "turnFinalizationDegradedScopes",
+      "label": "runtime_agent_turn_finalization_degraded_scopes",
+      "kind": "active_episode_count",
+      "currentHealthEffect": "positive_is_risk",
+      "owner": "src/runtimes/agent/runtime.ts",
+      "test": "tests/runtimes/agent/runtime-turn-recovery-health.test.ts"
+    },
+    {
+      "field": "turnRecoveryOutstanding",
+      "label": "runtime_agent_turn_recovery_outstanding",
+      "kind": "active_episode_count",
+      "currentHealthEffect": "positive_is_risk",
+      "owner": "src/runtimes/agent/turn-recovery-dispatch.ts",
+      "test": "tests/runtimes/agent/runtime-turn-recovery-health.test.ts"
+    },
+    {
+      "field": "turnRecoveryPending",
+      "label": "runtime_agent_turn_recovery_pending",
+      "kind": "current_gauge",
+      "currentHealthEffect": "diagnostic_only",
+      "owner": "src/runtimes/agent/turn-recovery-dispatch.ts",
+      "test": "tests/runtimes/agent/runtime-turn-recovery-health.test.ts"
+    },
+    {
+      "field": "turnRecoveryExpiredClaimed",
+      "label": "runtime_agent_turn_recovery_expired_claimed",
+      "kind": "current_gauge",
+      "currentHealthEffect": "diagnostic_only",
+      "owner": "src/runtimes/agent/turn-recovery-dispatch.ts",
+      "test": "tests/runtimes/agent/runtime-turn-recovery-health.test.ts"
+    },
+    {
+      "field": "turnRecoveryBlockedUnsafe",
+      "label": "runtime_agent_turn_recovery_blocked_unsafe",
+      "kind": "terminal_audit_count",
+      "currentHealthEffect": "diagnostic_only",
+      "owner": "src/runtimes/agent/turn-recovery-dispatch.ts",
+      "test": "tests/runtimes/agent/runtime-turn-recovery-health.test.ts"
+    },
+    {
+      "field": "turnRecoveryExhausted",
+      "label": "runtime_agent_turn_recovery_exhausted",
+      "kind": "active_episode_count",
+      "currentHealthEffect": "positive_is_risk",
+      "owner": "src/runtimes/agent/turn-recovery-dispatch.ts",
+      "test": "tests/runtimes/agent/runtime-turn-recovery-health.test.ts"
+    },
+    {
+      "field": "turnRecoveryOpenRecoveries",
+      "label": "runtime_agent_turn_recovery_open_recoveries",
+      "kind": "active_episode_count",
+      "currentHealthEffect": "positive_is_risk",
+      "owner": "src/runtimes/agent/turn-recovery-dispatch.ts",
+      "test": "tests/runtimes/agent/runtime-turn-recovery-health.test.ts"
+    },
+    {
+      "field": "turnRecoveryQuarantinedDelivery",
+      "label": "runtime_agent_turn_recovery_quarantined_delivery",
+      "kind": "terminal_audit_count",
+      "currentHealthEffect": "diagnostic_only",
+      "owner": "src/runtimes/agent/turn-recovery-dispatch.ts",
+      "test": "tests/runtimes/agent/runtime-turn-recovery-health.test.ts"
+    },
+    {
+      "field": "turnRecoveryCorruptLinks",
+      "label": "runtime_agent_turn_recovery_corrupt_links",
+      "kind": "active_episode_count",
+      "currentHealthEffect": "positive_is_risk",
+      "owner": "src/runtimes/agent/turn-recovery-dispatch.ts",
+      "test": "tests/runtimes/agent/runtime-turn-recovery-health.test.ts"
+    },
+    {
+      "field": "turnRecoveryOrphanTransfers",
+      "label": "runtime_agent_turn_recovery_orphan_transfers",
+      "kind": "terminal_audit_count",
+      "currentHealthEffect": "diagnostic_only",
+      "owner": "src/runtimes/agent/turn-recovery-dispatch.ts",
+      "test": "tests/runtimes/agent/runtime-turn-recovery-health.test.ts"
+    },
+    {
+      "field": "turnRecoveryEchoConflicts",
+      "label": "runtime_agent_turn_recovery_echo_conflicts",
+      "kind": "active_episode_count",
+      "currentHealthEffect": "positive_is_risk",
+      "owner": "src/runtimes/agent/turn-recovery-dispatch.ts",
+      "test": "tests/runtimes/agent/runtime-turn-recovery-health.test.ts"
+    },
+    {
+      "field": "turnFinalizationRetainedRetries",
+      "label": "runtime_agent_turn_finalization_retained_retries",
+      "kind": "active_episode_count",
+      "currentHealthEffect": "positive_is_risk",
+      "owner": "src/runtimes/agent/runtime.ts",
+      "test": "tests/runtimes/agent/runtime-turn-recovery-health.test.ts"
+    },
+    {
+      "field": "turnFinalizationRetryAttempts",
+      "label": "runtime_agent_turn_finalization_retry_attempts",
+      "kind": "cumulative_total",
+      "currentHealthEffect": "diagnostic_only",
+      "owner": "src/runtimes/agent/runtime.ts",
+      "test": "tests/runtimes/agent/runtime-turn-recovery-health.test.ts"
+    },
+    {
+      "field": "turnFinalizationRetryRecoveries",
+      "label": "runtime_agent_turn_finalization_retry_recoveries",
+      "kind": "cumulative_total",
+      "currentHealthEffect": "diagnostic_only",
+      "owner": "src/runtimes/agent/runtime.ts",
+      "test": "tests/runtimes/agent/runtime-turn-recovery-health.test.ts"
+    },
+    {
+      "field": "turnFinalizationRetryExhaustions",
+      "label": "runtime_agent_turn_finalization_retry_exhaustions",
+      "kind": "cumulative_total",
+      "currentHealthEffect": "diagnostic_only",
+      "owner": "src/runtimes/agent/runtime.ts",
+      "test": "tests/runtimes/agent/runtime-turn-recovery-health.test.ts"
+    },
+    {
+      "field": "turnRecoveryLiveClaimed",
+      "label": "runtime_agent_turn_recovery_live_claimed",
+      "kind": "current_gauge",
+      "currentHealthEffect": "diagnostic_only",
+      "owner": "src/runtimes/agent/turn-recovery-dispatch.ts",
+      "test": "tests/runtimes/agent/runtime-turn-recovery-health.test.ts"
+    }
+  ],
   "terminalAttemptToInboundFailureClass": {
     "usage-limit": "provider_failure",
     "rate-limit": "provider_failure",

@@ -75,7 +75,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-health-check.py",
-      "sha256": "53c50903327e9d27018dc2c571bdfc87dbc29cc602771e005ae9aa96911625f2",
+      "sha256": "c7bf37bd8feead6ebad8c1a0818750c96d81261a6dc51cc45baf023070740ff2",
       "mustContain": [
         "critical_file_problem",
         "mustContain",
@@ -100,7 +100,6 @@
         "primary_phone_unknown_severity",
         "verification_proof=missing",
         "record-primary-phone-verification",
-        "runtime_agent_recent_resume_failures",
         "expectSourceUpdateAccess",
         "sourceUpdateAccessMode",
         "source_update_blocked",
@@ -137,6 +136,8 @@
         "health_generated_at_stale",
         "health_generated_at_future_skew",
         "health_identity_missing",
+        "load_runtime_agent_health_signals",
+        "runtime_agent_health_signal_registry_invalid",
         "BOT_ERRORS_HEALTH_BODY_MAX_AGE_SECONDS",
         "BOT_ERRORS_HEALTH_BODY_MAX_FUTURE_SKEW_SECONDS"
       ]
@@ -325,6 +326,16 @@
         "constants.O_NOFOLLOW",
         "redactOutboxValue(event)",
         "recordBotErrorsWritefail"
+      ]
+    },
+    {
+      "path": "src/lib/fault-taxonomy-registry.json",
+      "sha256": "dccac8c6571f1b3f3fc84aef92c95677e04b100484d794c1bf0d6b6c1feac282",
+      "mustContain": [
+        "whatsoup-fault-taxonomy-registry-v3",
+        "runtimeAgentHealthSignals",
+        "turnRecoveryBlockedUnsafe",
+        "autoCompactActiveBackoffScopes"
       ]
     },
     {

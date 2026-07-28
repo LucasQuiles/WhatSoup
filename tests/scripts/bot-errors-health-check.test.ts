@@ -4726,6 +4726,115 @@ print(m.probe_health(9092))
     expect(Object.hasOwn(event, 'criticalAsset')).toBe(false);
   });
 
+  describe('runtime-agent signal dispositions', () => {
+    function probeRuntimeAgent(
+      agent: Record<string, unknown>,
+      registryPath?: string,
+    ): string {
+      const body = JSON.stringify({
+        status: 'healthy',
+        generated_at: new Date().toISOString(),
+        instance: { name: 'synthetic-bot' },
+        whatsapp: { connected: true },
+        runtime: { agent },
+      });
+      return python([
+        importHealthModulePrelude(),
+        ...(registryPath === undefined
+          ? []
+          : [`m.RUNTIME_AGENT_HEALTH_SIGNAL_REGISTRY_PATH = Path(${JSON.stringify(registryPath)})`]),
+        `print(m.format_health_probe('http://127.0.0.1:9090/health', 200, ${JSON.stringify(body)}, 'synthetic-bot'))`,
+      ].join('\n'));
+    }
+
+    it('keeps lifetime totals, historical maxima, and terminal audit counts diagnostic', () => {
+      const line = probeRuntimeAgent({
+        activeSessions: 1,
+        sessionCount: 2,
+        pollPersistenceErrors: 4,
+        autoCompactIneffective: 5,
+        autoCompactConsecutiveRapidRearmsMax: 3,
+        autoCompactNextTurnOverThreshold: 7,
+        turnRecoveryBlockedUnsafe: 6,
+        turnRecoveryQuarantinedDelivery: 2,
+        turnRecoveryOrphanTransfers: 1,
+        turnFinalizationRetryAttempts: 8,
+        turnFinalizationRetryRecoveries: 5,
+        turnFinalizationRetryExhaustions: 3,
+      });
+
+      expect(line).toMatch(/^200 /);
+      expect(line).not.toContain('runtime_agent_at_risk');
+      expect(line).toContain('runtime_agent_auto_compact_ineffective=5');
+      expect(line).toContain('runtime_agent_auto_compact_rapid_rearms_max=3');
+      expect(line).toContain('runtime_agent_turn_recovery_blocked_unsafe=6');
+      expect(line).toContain('runtime_agent_turn_finalization_retry_exhaustions=3');
+    });
+
+    it('warns for declared current-risk signals and renders bounded backoff state', () => {
+      const backoff = probeRuntimeAgent({
+        autoCompactState: 'backoff',
+        autoCompactActiveBackoffScopes: 2,
+        autoCompactWorstCurrentBackoffTier: 3,
+      });
+      expect(backoff).toMatch(/^WARN 200 /);
+      expect(backoff).toContain('runtime_agent_at_risk');
+      expect(backoff).toContain('runtime_agent_auto_compact_state=backoff');
+      expect(backoff).toContain('runtime_agent_auto_compact_active_backoff_scopes=2');
+      expect(backoff).toContain('runtime_agent_auto_compact_worst_current_backoff_tier=3');
+
+      const recovery = probeRuntimeAgent({
+        turnRecoveryOutstanding: 1,
+        turnRecoveryOpenRecoveries: 1,
+        turnRecoveryCorruptLinks: 1,
+        turnRecoveryEchoConflicts: 1,
+      });
+      expect(recovery).toMatch(/^WARN 200 /);
+      expect(recovery).toContain('runtime_agent_at_risk');
+    });
+
+    it('warns visibly without inferring field severity when the registry is unavailable', () => {
+      tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-health-registry-'));
+      const missingPath = join(tmpRoot, 'missing-registry.json');
+      const malformedPath = join(tmpRoot, 'malformed-registry.json');
+      const wrongSchemaPath = join(tmpRoot, 'wrong-schema-registry.json');
+      const invalidContractPath = join(tmpRoot, 'invalid-contract-registry.json');
+      writeFileSync(malformedPath, '{not json');
+      writeFileSync(wrongSchemaPath, JSON.stringify({
+        schema: 'whatsoup-fault-taxonomy-registry-v2',
+        runtimeAgentHealthSignals: [],
+      }));
+      writeFileSync(invalidContractPath, JSON.stringify({
+        schema: 'whatsoup-fault-taxonomy-registry-v3',
+        runtimeAgentHealthSignals: [{
+          field: 'turnRecoveryOutstanding',
+          label: 'runtime_agent_turn_recovery_outstanding',
+          kind: [],
+          currentHealthEffect: 'positive_is_risk',
+          owner: 'bounded-owner',
+          test: 'bounded-test',
+        }],
+      }));
+
+      for (const [registryPath, errorClass] of [
+        [missingPath, 'missing'],
+        [malformedPath, 'malformed_json'],
+        [wrongSchemaPath, 'invalid_schema'],
+        [invalidContractPath, 'invalid_contract'],
+      ] as const) {
+        const line = probeRuntimeAgent({
+          turnRecoveryOutstanding: 1,
+          turnRecoveryBlockedUnsafe: 4,
+        }, registryPath);
+        expect(line).toMatch(/^WARN 200 /);
+        expect(line).toContain('runtime_agent_health_signal_registry_invalid');
+        expect(line).toContain(`runtime_agent_health_signal_registry_error=${errorClass}`);
+        expect(line).not.toContain('runtime_agent_at_risk');
+        expect(line).not.toContain('runtime_agent_turn_recovery_outstanding');
+      }
+    });
+  });
+
   it('fails daily health when an opt-in provider probe hits a Claude session limit', () => {
     tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-health-'));
     const configDir = join(tmpRoot, '.config', 'whatsoup', 'instances', 'q');
