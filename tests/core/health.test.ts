@@ -1328,11 +1328,13 @@ describe('GET /health', () => {
     let failedEntryCount = 0;
     let modelUsable: boolean | null = false;
     let modelUsableStale = false;
+    let autoCompactActiveBackoffScopes = 0;
     const fakeAgentRuntime = {
       getHealthSnapshot: () => ({
         status: 'degraded',
         details: {
           recentCrashes: 0,
+          autoCompactActiveBackoffScopes,
           ...(active === undefined ? {} : { active }),
           turnFinalizationRetainedRetries: retainedRetries,
           turnFinalizationDegradedScopes: 0,
@@ -1413,6 +1415,15 @@ describe('GET /health', () => {
     expect(withStalePrimaryEvidence.degradation_causes).toEqual([
       'provider_fallback_active',
       'primary_model_evidence_stale',
+    ]);
+
+    modelUsable = true;
+    modelUsableStale = false;
+    autoCompactActiveBackoffScopes = 1;
+    const withAutoCompactBackoff = JSON.parse((await healthReq(port)).body);
+    expect(withAutoCompactBackoff.degradation_causes).toEqual([
+      'provider_fallback_active',
+      'agent_auto_compact_backoff',
     ]);
     db2.close();
   });

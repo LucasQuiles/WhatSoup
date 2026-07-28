@@ -244,6 +244,25 @@ and end with an alphanumeric character. Exit code 2 on violation.
 | `bot-errors-q-loop.py` | The hub's agent loop driver. |
 | `retire-outbound-quarantine.py` | Operator tool: retires one reviewed `quarantined` row in an instance's `outbound_ops` table (`--db`, `--instance`, `--op-id`, `--reason`), backing up the DB first and flipping the op to `failed_permanent`/`is_terminal=1`. When that was the last quarantined op it shells out to `bot-errors-emit.py` to emit a BOT ERRORS clear event. Supports `--dry-run` (no writes, reports whether a clear would fire), `--no-backup`, `--no-emit`, and `--emit-script`. |
 
+### Controller diagnostic envelope
+
+The q-loop, collector, dispatcher, heartbeat watchdog, and deadman write new
+diagnostic records through `lib/controller_log.py`. Each record uses the
+versioned controller-log envelope documented in
+[`docs/architecture/controller-log-envelope-v1.md`](../../docs/architecture/controller-log-envelope-v1.md):
+canonical UTC observation time, component and record kind, level/outcome,
+process run identity, per-iteration cycle identity, process-local sequence,
+explicit durability class, and metadata-only details.
+
+These JSONL streams are `diagnostic_best_effort`; controller state, queues, and
+outboxes remain authoritative. A diagnostic append failure cannot replace a
+domain result or replay completed work. Instead, the writer atomically replaces
+a bounded sink-health receipt under the controller state root and emits
+coalesced metadata-only stderr at the first and power-of-two consecutive
+failures. A later successful append records one recovery receipt. Existing
+legacy JSONL is retained and classified `legacy_unversioned`; it is not
+rewritten or assigned invented correlation fields.
+
 ### Collector capture-failure escalation: per-transition semantics
 
 `collector_remote_unreachable` (alert at `consecutiveFailures >= BOT_ERRORS_COLLECTOR_FAILURE_ESCALATE_THRESHOLD`,
@@ -334,6 +353,24 @@ The two unstamped producers are a known residual gap: traffic they originate
 cannot reach the dispatcher backstop. Adding a producer without a provenance
 stamp re-opens that hole silently, so stamp it at the shared event builder
 rather than per call site.
+
+## Runtime-agent health signal dispositions
+
+The scheduled health checker reads
+`src/lib/fault-taxonomy-registry.json` for its ordered runtime-agent numeric
+field contract. Each registered field declares its evidence label, signal kind,
+and whether a positive value represents current risk or diagnostic evidence.
+The checker does not infer severity from numeric type.
+
+Cumulative totals, historical maxima, and terminal audit counts remain visible
+without independently adding `runtime_agent_at_risk`. Active episode counts and
+declared current gauges still add that marker. If the registry is missing,
+malformed, or uses an unsupported schema or disposition, the health line warns
+with a bounded registry error class and does not invent per-field severity.
+
+The registry is both deployer-managed and SHA-pinned in
+`deploy/bot-errors-runtime-manifest.json`; changing the checker contract without
+shipping the matching registry fails the local manifest and deployer guards.
 
 ## Test suites + CI gates
 
@@ -634,6 +671,13 @@ the in-place-git central pilot host. Design:
   `OnUnitInactiveSec` cadence with distinct bootstrap offsets, resource-capped
   (`MemoryMax=128M`, `TasksMax=32`), sandboxed, and forbidden from naming any
   application/fleet/dispatcher unit.
+- `python3 deploy/scripts/bot-errors-runtime-staleness.py --observe-only
+  [--json] [--critical]` — canonical non-emitting manual diagnostic. Its
+  versioned JSON report contains only bounded execution, inventory, verdict,
+  count, and failure-class fields. Exit `0` means a complete current or
+  not-running observation, `1` means complete with staleness, and `2` means
+  evidence was incomplete or a probe failed. `--critical` requires an
+  affirmative observation of the complete critical-file set.
 
 ### Single tree producer (B3)
 

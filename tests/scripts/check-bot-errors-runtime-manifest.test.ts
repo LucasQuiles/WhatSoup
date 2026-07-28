@@ -41,6 +41,11 @@ afterEach(() => {
 });
 
 describe('check-bot-errors-runtime-manifest guard', () => {
+  it('requires the runtime health signal registry as an integrity-pinned dependency', () => {
+    expect(computeRequiredRuntimePaths(repoRoot))
+      .toContain('src/lib/fault-taxonomy-registry.json');
+  });
+
   it('keeps the checked-in BOT ERRORS runtime manifest aligned with scripts and markers', () => {
     const result = checkBotErrorsRuntimeManifest(repoRoot);
 
