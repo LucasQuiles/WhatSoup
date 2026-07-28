@@ -40,7 +40,14 @@ import type { SessionOwnershipRegistry } from './session-ownership.ts';
 import { createChildLogger } from '../../logger.ts';
 import { emitAlertChecked } from '../../lib/emit-alert.ts';
 import type { TurnDeliveryKind } from './turn-chronology.ts';
+import {
+  createRuntimeTurnCompletionValue,
+  rejectRuntimeTurnCompletionValue,
+  type RuntimeTurnCompletion,
+} from './runtime-turn-completion.ts';
+import { discardCancelledPreBoundaryPerChatTurn } from './runtime-turn-pre-boundary-cancellation.ts';
 
+export type { RuntimeTurnCompletion } from './runtime-turn-completion.ts';
 const log = createChildLogger('agent-runtime');
 export const RUNTIME_TURN_SHUTDOWN_FINALIZATION_TIMEOUT_MS = 2_000;
 
@@ -53,13 +60,6 @@ export interface RuntimeTurnSourceSnapshot {
   readonly contentType: ContentType;
   readonly isGroup: boolean;
   readonly groupName?: string;
-}
-
-export interface RuntimeTurnCompletion {
-  readonly context: RuntimeTurnContext;
-  readonly promise: Promise<void>;
-  readonly resolve: () => void;
-  readonly reject: (error: unknown) => void;
 }
 
 export interface PerChatRuntimeScopeRef {
@@ -441,16 +441,7 @@ rejectRuntimeTurnCompletion(
   mapKey?: string,
   expectedContext?: RuntimeTurnContext,
 ): boolean {
-  const completion = mapKey === undefined
-    ? this.host.currentRuntimeTurnCompletion
-    : this.host.perChatRuntimeTurnCompletions.get(mapKey);
-  if (!completion) return false;
-  if (
-    expectedContext
-    && completion.context.identity.logicalTurnId !== expectedContext.identity.logicalTurnId
-  ) return false;
-  completion.reject(error);
-  return true;
+  return rejectRuntimeTurnCompletionValue(this.host, error, mapKey, expectedContext);
 }
 
 runtimeTurnScopeKey(context: RuntimeTurnContext): string {
@@ -458,13 +449,7 @@ runtimeTurnScopeKey(context: RuntimeTurnContext): string {
 }
 
 createRuntimeTurnCompletion(context: RuntimeTurnContext): RuntimeTurnCompletion {
-  let resolve!: () => void;
-  let reject!: (error: unknown) => void;
-  const promise = new Promise<void>((resolvePromise, rejectPromise) => {
-    resolve = resolvePromise;
-    reject = rejectPromise;
-  });
-  return { context, promise, resolve, reject };
+  return createRuntimeTurnCompletionValue(context);
 }
 
 createRuntimeTurnPostEffects(
@@ -1997,7 +1982,7 @@ async processPerChatTurn(
     dispatchError = err;
   }
   if (!providerBoundaryCrossed && dispatchAllowed?.() === false) {
-    this.discardCancelledPreBoundaryPerChatTurn(mapKey, turn);
+    discardCancelledPreBoundaryPerChatTurn(this.host, mapKey, turn);
     return;
   }
   if (turn.runtimeContext) {
@@ -2010,27 +1995,6 @@ async processPerChatTurn(
     this.clearUndispatchedRuntimeTurnCancellation(turn.runtimeContext);
   }
   if (dispatchFailed) throw dispatchError;
-}
-
-private discardCancelledPreBoundaryPerChatTurn(mapKey: string, turn: QueuedTurn): void {
-  if (this.host.perChatTurnSourceMessageId.get(mapKey) !== turn.sourceMessageId) return;
-
-  const seqs = this.host.perChatInboundSeqQueue.get(mapKey);
-  if (turn.inboundSeq !== undefined && seqs) {
-    const index = seqs.lastIndexOf(turn.inboundSeq);
-    if (index >= 0) seqs.splice(index, 1);
-    if (seqs.length === 0) this.host.perChatInboundSeqQueue.delete(mapKey);
-    this.host.getQueueForChat(turn.chatJid, mapKey)?.setInboundSeq(seqs[0]);
-    this.host.replyGuarantee?.disarm(turn.inboundSeq);
-  }
-  this.host.perChatTurnSourceMessageId.delete(mapKey);
-  this.host.perChatTurnContentType.delete(mapKey);
-  this.host.perChatTurnText.delete(mapKey);
-  this.host.perChatTurnSuppressedReplySatisfaction.delete(mapKey);
-  this.host.perChatAssistantItemText.delete(mapKey);
-  this.host.perChatRouteMarkerHold.delete(mapKey);
-  this.host.pendingTurnText.delete(mapKey);
-  this.host.pendingTurnActorJid.delete(mapKey);
 }
 
 }

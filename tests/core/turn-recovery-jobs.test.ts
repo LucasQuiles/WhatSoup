@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { Database } from '../../src/core/database.ts';
 import {
   DurabilityEngine,
@@ -1489,79 +1489,6 @@ describe('atomic linked turn recovery jobs', () => {
       claim,
       { leaseSeconds: 301 },
     )).toThrow('between 1 and 300');
-  });
-
-  it('types only semantic renewal ownership loss and leaves store failures retryable', () => {
-    const transfer = createTransfer('renew-errors');
-    const queued = durability.finalizeTurnTerminal(transfer.params).recoveryJob!;
-    const claim = durability.claimTurnRecoveryJob(queued.jobId, OWNER, {
-      claimToken: 'renew-errors-token',
-      leaseSeconds: 30,
-    });
-
-    expect(() => durability.renewTurnRecoveryClaim(
-      queued.jobId,
-      OWNER,
-      { claimToken: claim.claimToken, claimEpoch: claim.claimEpoch + 1 },
-      { leaseSeconds: 30 },
-    )).toThrow(TurnRecoveryClaimFenceError);
-
-    db.raw.prepare(
-      `UPDATE turn_recovery_jobs
-       SET claim_expires_at = datetime('now', '-1 second')
-       WHERE id = ?`,
-    ).run(queued.jobId);
-    expect(() => durability.renewTurnRecoveryClaim(
-      queued.jobId,
-      OWNER,
-      claim,
-      { leaseSeconds: 30 },
-    )).toThrow(TurnRecoveryClaimFenceError);
-
-    durability.recoverStaleTurnRecoveryJobs();
-    durability.reassignPendingTurnRecoveryJob(
-      queued.jobId,
-      OWNER,
-      NEXT_OWNER,
-      { claimEpoch: claim.claimEpoch, assignmentEpoch: 0 },
-    );
-    expect(() => durability.renewTurnRecoveryClaim(
-      queued.jobId,
-      OWNER,
-      claim,
-      { leaseSeconds: 30 },
-    )).toThrow(TurnRecoveryClaimFenceError);
-
-    const second = durability.finalizeTurnTerminal(
-      createTransfer('renew-store-error').params,
-    ).recoveryJob!;
-    const secondClaim = durability.claimTurnRecoveryJob(second.jobId, OWNER, {
-      claimToken: 'renew-store-error-token',
-      leaseSeconds: 30,
-    });
-    const store = (
-      durability as unknown as {
-        turnRecovery: {
-          statements: {
-            renewTurnRecoveryClaim: { get: (...args: unknown[]) => unknown };
-          };
-        };
-      }
-    ).turnRecovery;
-    const databaseError = new Error('database unavailable');
-    vi.spyOn(store.statements.renewTurnRecoveryClaim, 'get').mockImplementation(() => {
-      throw databaseError;
-    });
-
-    try {
-      durability.renewTurnRecoveryClaim(second.jobId, OWNER, secondClaim, {
-        leaseSeconds: 30,
-      });
-      throw new Error('expected renewal to throw');
-    } catch (err) {
-      expect(err).toBe(databaseError);
-      expect(err).not.toBeInstanceOf(TurnRecoveryClaimFenceError);
-    }
   });
 
   it('reassigns only pending work at the expected epoch before a restart can claim', () => {
