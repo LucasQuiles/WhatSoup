@@ -4,19 +4,19 @@
 
 Internal publication roots covered by the guard: `docs/runbooks/`, `docs/sdlc/`, `docs/superpowers/`, `docs/plans/`, `docs/cutover/`, `docs/research/`, `docs/triage/`, `docs/specs/` (selected), `docs/work-index*`, `docs/current-program.md`, `docs/handoff-*.md`, `HANDOFF-*.md`, `docs/project-status-*.md`, `docs/audit-*.md`, `tmp/`.
 
-**Total classification rows:** 136
-**Total classification rows:** 136
+**Total classification rows:** 137
+**Total classification rows:** 137
 
 | Classification | Count |
 |---|---:|
 | PUBLIC | 3 |
-| PRIVATE-ARCHIVE | 133 |
+| PRIVATE-ARCHIVE | 134 |
 | PUBLIC | 3 |
-| PRIVATE-ARCHIVE | 133 |
+| PRIVATE-ARCHIVE | 134 |
 | SANITIZE | 0 |
 | DELETE | 0 |
-| Total | 136 |
-| Total | 136 |
+| Total | 137 |
+| Total | 137 |
 
 | Path | Classification | Rationale |
 |---|---|---|
@@ -69,6 +69,7 @@ Internal publication roots covered by the guard: `docs/runbooks/`, `docs/sdlc/`,
 | `docs/superpowers/handoffs/2026-07-15-semantic-boundary-hygiene-implementation-notes.md` | PRIVATE-ARCHIVE | Internal semantic-boundary measurements, implementation evidence, limitations, and promotion decision; retained in the repository but excluded from public publication by default. |
 | `docs/superpowers/handoffs/2026-07-16-boundary-core-history-mining.md` | PRIVATE-ARCHIVE | Internal boundary-core GitHub and Git-history evidence, implementation notes, limitations, and rollout boundary; retained in the repository but excluded from public publication by default. |
 | `docs/superpowers/handoffs/2026-07-16-boundary-contract-feedback-implementation-notes.md` | PRIVATE-ARCHIVE | Internal boundary-contract falsifiers, implementation ledger, output measurements, limitations, and authorization boundary; retained in the repository but excluded from public publication by default. |
+| `docs/superpowers/handoffs/2026-07-28-incident-control-plane-finder-report.md` | PRIVATE-ARCHIVE | Internal Plans 2-7 completeness map for the incident control plane (requirement classification, reuse anchors, sequencing constraints); retained in the repository but excluded from public publication by default. |
 | `docs/superpowers/plans/2026-04-04-colony-orchestration-phase1.md` | PRIVATE-ARCHIVE | Internal planning or operational documentation; retained in the repository but excluded from public publication by default. |
 | `docs/superpowers/plans/2026-04-05-phase4-m2-websocket-console.md` | PRIVATE-ARCHIVE | Internal planning or operational documentation; retained in the repository but excluded from public publication by default. |
 | `docs/superpowers/plans/2026-04-05-phase4-realtime-performance.md` | PRIVATE-ARCHIVE | Internal planning or operational documentation; retained in the repository but excluded from public publication by default. |
