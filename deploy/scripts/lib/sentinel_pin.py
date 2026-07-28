@@ -211,7 +211,7 @@ def _open_confined_leaf(bundle_dir: str, rel_path: str):
             parent_fd = fd
             try:
                 st = os.fstat(fd)
-            except OSError:
+            except OSError:  # pragma: no cover - kernel EIO only
                 return None, "read_failed"
             if not stat.S_ISDIR(st.st_mode):
                 return None, "file_kind"
@@ -227,7 +227,7 @@ def _open_confined_leaf(bundle_dir: str, rel_path: str):
         # --- Verify the leaf is a regular file ---
         try:
             st = os.fstat(leaf_fd)
-        except OSError:
+        except OSError:  # pragma: no cover - kernel EIO only
             os.close(leaf_fd)
             return None, "read_failed"
         if not stat.S_ISREG(st.st_mode):
@@ -236,18 +236,18 @@ def _open_confined_leaf(bundle_dir: str, rel_path: str):
 
         fd_out = leaf_fd  # ownership transfers to caller
         return fd_out, None
-    except OSError:
+    except OSError:  # pragma: no cover - root dir vanished between lstat and open
         if leaf_fd is not None:
             try:
                 os.close(leaf_fd)
-            except OSError:
+            except OSError:  # pragma: no cover
                 pass
         return None, "read_failed"
     finally:
         for fd in reversed(dir_fds):
             try:
                 os.close(fd)
-            except OSError:
+            except OSError:  # pragma: no cover - close on valid fd cannot fail
                 pass
 
 

@@ -306,6 +306,65 @@ def test_bundle_regular_files_still_verify_after_hardening(tmp_path):
     assert ok is True and mismatches == [], f"got {ok} {mismatches}"
 
 
+def test_bundle_rejects_non_directory_root(tmp_path):
+    """A bundle root that is a regular file (not a directory) fails closed."""
+    fake_root = tmp_path / "not_a_dir"
+    fake_root.write_text("i am a file, not a directory")
+    pin = sp.Pin(head_sha="a"*40, files={sp.F10_PATH: "0"*64}, f10_sha=None)
+    ok, mismatches = sp.verify_bundle(fake_root, pin)
+    assert ok is False
+    assert mismatches == [(sp.F10_PATH, "read_failed")], f"got {mismatches}"
+
+
+def test_bundle_rejects_missing_root(tmp_path):
+    """A bundle root that does not exist fails closed with read_failed."""
+    missing_root = tmp_path / "does_not_exist"
+    pin = sp.Pin(head_sha="a"*40, files={sp.F10_PATH: "0"*64}, f10_sha=None)
+    ok, mismatches = sp.verify_bundle(missing_root, pin)
+    assert ok is False
+    assert mismatches == [(sp.F10_PATH, "read_failed")], f"got {mismatches}"
+
+
+def test_bundle_rejects_missing_intermediate_directory(tmp_path):
+    """An intermediate directory component that does not exist fails closed."""
+    b = tmp_path / "bundle"
+    b.mkdir()
+    pin = sp.Pin(
+        head_sha="a"*40,
+        files={"nonexistent_dir/deep/path.py": "0"*64},
+        f10_sha=None,
+    )
+    ok, mismatches = sp.verify_bundle(b, pin)
+    assert ok is False
+    assert mismatches == [("nonexistent_dir/deep/path.py", "missing")], f"got {mismatches}"
+
+
+def test_bundle_rejects_file_as_intermediate(tmp_path):
+    """A file where an intermediate directory is expected fails closed with file_kind."""
+    b = tmp_path / "bundle"
+    # Create a file at deploy/scripts (so it's a file, not a directory)
+    (b / "deploy").mkdir(parents=True)
+    (b / "deploy" / "scripts").write_text("i am a file, not a dir")
+    pin = sp.Pin(
+        head_sha="a"*40,
+        files={"deploy/scripts/lib/bot_errors_redaction.py": "0"*64},
+        f10_sha=None,
+    )
+    ok, mismatches = sp.verify_bundle(b, pin)
+    assert ok is False
+    assert mismatches == [("deploy/scripts/lib/bot_errors_redaction.py", "file_kind")], f"got {mismatches}"
+
+
+def test_bundle_rejects_single_component_missing(tmp_path):
+    """A single-component leaf path that doesn't exist fails closed with missing."""
+    b = tmp_path / "bundle"
+    b.mkdir()
+    pin = sp.Pin(head_sha="a"*40, files={"missing.py": "0"*64}, f10_sha=None)
+    ok, mismatches = sp.verify_bundle(b, pin)
+    assert ok is False
+    assert mismatches == [("missing.py", "missing")], f"got {mismatches}"
+
+
 # ---------------------------------------------------------------------------
 # Increment 4 — edge cases for coverage >= 98%
 # ---------------------------------------------------------------------------
