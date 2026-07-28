@@ -33,7 +33,7 @@ export type AcceptResult =
   | { outcome: 'accepted'; receipt: SignalReceipt }
   | { outcome: 'idempotent_replay'; receipt: SignalReceipt }
   | { outcome: 'identity_conflict'; existingDigest: string }
-  | { outcome: 'invalid'; errors: string[] };
+  | { outcome: 'invalid'; malformedJson: boolean; errors: string[] };
 
 const DEFAULT_MAX_FUTURE_SKEW_MS = 5 * 60 * 1000;
 const MAX_LIST_LIMIT = 200;
@@ -75,10 +75,12 @@ export class IncidentStore {
 
   acceptSignal(rawBody: string, producer: ProducerContext, now: Date): AcceptResult {
     let parsedBody: unknown;
+    let malformedJson = false;
     try {
       parsedBody = JSON.parse(rawBody);
     } catch {
       parsedBody = undefined;
+      malformedJson = true;
     }
 
     // Replays and conflicts are answered before validation: a stored signal's
@@ -98,9 +100,12 @@ export class IncidentStore {
       }
     }
 
+    if (malformedJson) {
+      return { outcome: 'invalid', malformedJson: true, errors: ['body is not valid JSON'] };
+    }
     const parsed = parseSignalEnvelopeValue(parsedBody);
     if (!parsed.ok) {
-      return { outcome: 'invalid', errors: parsed.errors };
+      return { outcome: 'invalid', malformedJson: false, errors: parsed.errors };
     }
     const envelope = parsed.envelope;
 

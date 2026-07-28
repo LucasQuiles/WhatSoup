@@ -79,6 +79,18 @@ describe('IncidentStore.acceptSignal — acceptance core', () => {
     expect(replay.outcome).toBe('accepted');
   });
 
+  it('marks unparseable bodies as malformedJson and schema violations as not', () => {
+    const malformed = store.acceptSignal('{not json', PRODUCER, NOW);
+    expect(malformed.outcome).toBe('invalid');
+    if (malformed.outcome !== 'invalid') return;
+    expect(malformed.malformedJson).toBe(true);
+
+    const schemaViolation = store.acceptSignal('{"nope": true}', PRODUCER, NOW);
+    expect(schemaViolation.outcome).toBe('invalid');
+    if (schemaViolation.outcome !== 'invalid') return;
+    expect(schemaViolation.malformedJson).toBe(false);
+  });
+
   it('records notice_recorded without opening an incident', () => {
     const body = JSON.stringify({
       schemaVersion: 1,
