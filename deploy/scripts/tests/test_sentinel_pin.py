@@ -377,3 +377,134 @@ def test_sha256_file_large_chunked(tmp_path):
 def test_trust_reason_when_f10_none():
     ok, reason = sp.verify_pin_trust(sp.Pin(head_sha="a"*40, files={}, f10_sha=None), approved_f10={"x"}, commit_exists=lambda s: True)
     assert ok is False and "none" in reason
+
+
+# ---------------------------------------------------------------------------
+# Increment 5 — full-manifest digest binding (#2478)
+# The pin trust check now binds the COMPLETE file table to the approved
+# revision, not just the core F10 hash. Two manifests with the same revision
+# and same approved F10 but different non-core entries produce different
+# manifest digests; only approved digests pass trust.
+# ---------------------------------------------------------------------------
+
+def test_compute_manifest_digest_is_deterministic_and_sorted():
+    """Same files in different insertion order produce the same digest."""
+    f10 = "a" * 64
+    d1 = sp.compute_manifest_digest({sp.F10_PATH: f10, "deploy/scripts/x.py": "b" * 64})
+    d2 = sp.compute_manifest_digest({"deploy/scripts/x.py": "b" * 64, sp.F10_PATH: f10})
+    assert d1 == d2
+    assert _is_lower_hex_64(d1)
+
+
+def _is_lower_hex_64(v):
+    return isinstance(v, str) and len(v) == 64 and all(c in "0123456789abcdef" for c in v)
+
+
+def test_compute_manifest_digest_differs_for_different_file_tables():
+    """Two manifests with same F10 but different non-core hashes differ."""
+    f10 = "a" * 64
+    d1 = sp.compute_manifest_digest({sp.F10_PATH: f10, "deploy/scripts/x.py": "b" * 64})
+    d2 = sp.compute_manifest_digest({sp.F10_PATH: f10, "deploy/scripts/x.py": "c" * 64})
+    assert d1 != d2
+
+
+def test_compute_manifest_digest_differs_for_different_path_sets():
+    """Adding or removing a path changes the digest even if all existing hashes are the same."""
+    f10 = "a" * 64
+    d1 = sp.compute_manifest_digest({sp.F10_PATH: f10})
+    d2 = sp.compute_manifest_digest({sp.F10_PATH: f10, "deploy/scripts/x.py": "b" * 64})
+    assert d1 != d2
+
+
+def test_trust_rejects_unapproved_manifest_digest():
+    """When the ledger carries approved manifest digests, an unapproved file
+    table is rejected even with a valid revision and approved F10."""
+    f10 = "a" * 64
+    files_good = {sp.F10_PATH: f10, "deploy/scripts/x.py": "b" * 64}
+    files_evil = {sp.F10_PATH: f10, "deploy/scripts/x.py": "c" * 64}
+    digest_good = sp.compute_manifest_digest(files_good)
+    digest_evil = sp.compute_manifest_digest(files_evil)
+
+    pin_good = sp.Pin(head_sha="1" * 40, files=files_good, f10_sha=f10, manifest_digest=digest_good)
+    pin_evil = sp.Pin(head_sha="1" * 40, files=files_evil, f10_sha=f10, manifest_digest=digest_evil)
+
+    ok_g, _ = sp.verify_pin_trust(
+        pin_good, approved_f10={f10}, commit_exists=lambda s: True,
+        approved_manifest_digests={digest_good},
+    )
+    ok_e, reason_e = sp.verify_pin_trust(
+        pin_evil, approved_f10={f10}, commit_exists=lambda s: True,
+        approved_manifest_digests={digest_good},
+    )
+    assert ok_g is True
+    assert ok_e is False and "manifest digest" in reason_e
+
+
+def test_trust_backward_compat_without_manifest_digests_in_ledger():
+    """When approved_manifest_digests is None or empty, the check is skipped
+    (backward-compatible with pre-hardening ledgers)."""
+    f10 = "a" * 64
+    files = {sp.F10_PATH: f10, "deploy/scripts/x.py": "b" * 64}
+    pin = sp.Pin(head_sha="1" * 40, files=files, f10_sha=f10,
+                 manifest_digest=sp.compute_manifest_digest(files))
+
+    # None
+    ok1, _ = sp.verify_pin_trust(pin, approved_f10={f10}, commit_exists=lambda s: True,
+                                  approved_manifest_digests=None)
+    assert ok1 is True
+
+    # Empty set
+    ok2, _ = sp.verify_pin_trust(pin, approved_f10={f10}, commit_exists=lambda s: True,
+                                  approved_manifest_digests=set())
+    assert ok2 is True
+
+
+def test_trust_rejects_pin_without_manifest_digest_when_ledger_enforces():
+    """A pin missing manifest_digest (constructed directly, not via load_pin)
+    is rejected when the ledger enforces manifest binding."""
+    f10 = "a" * 64
+    pin = sp.Pin(head_sha="1" * 40, files={sp.F10_PATH: f10}, f10_sha=f10, manifest_digest=None)
+    ok, reason = sp.verify_pin_trust(
+        pin, approved_f10={f10}, commit_exists=lambda s: True,
+        approved_manifest_digests={"some_digest"},
+    )
+    assert ok is False and "manifest digest absent" in reason
+
+
+def test_load_pin_computes_manifest_digest(tmp_path):
+    """load_pin must populate manifest_digest so pins loaded from disk carry it."""
+    f10 = "a" * 64
+    files = [
+        {"path": sp.F10_PATH, "sha256": f10},
+        {"path": "deploy/scripts/x.py", "sha256": "b" * 64},
+    ]
+    pin = sp.load_pin(_manifest(tmp_path, files, head="1" * 40))
+    expected = sp.compute_manifest_digest({sp.F10_PATH: f10, "deploy/scripts/x.py": "b" * 64})
+    assert pin.manifest_digest == expected
+
+
+def test_load_approved_manifest_digests_reads_ledger(tmp_path):
+    d = "a" * 64
+    led = tmp_path / "ledger.json"
+    led.write_text(json.dumps({"approved_f10": ["x" * 64], "approved_manifest_digests": [d]}))
+    assert sp.load_approved_manifest_digests(led) == {d}
+
+
+def test_load_approved_manifest_digests_missing_field_defaults_empty(tmp_path):
+    led = tmp_path / "ledger.json"
+    led.write_text(json.dumps({"approved_f10": ["x" * 64]}))
+    assert sp.load_approved_manifest_digests(led) == set()
+
+
+def test_load_approved_manifest_digests_rejects_bad_entry(tmp_path):
+    led = tmp_path / "ledger.json"
+    led.write_text(json.dumps({"approved_f10": ["x" * 64], "approved_manifest_digests": ["not-a-sha"]}))
+    with pytest.raises(sp.PinLoadError):
+        sp.load_approved_manifest_digests(led)
+
+
+def test_load_approved_manifest_digests_rejects_non_list(tmp_path):
+    led = tmp_path / "ledger.json"
+    led.write_text(json.dumps({"approved_f10": ["x" * 64], "approved_manifest_digests": "bad"}))
+    with pytest.raises(sp.PinLoadError):
+        sp.load_approved_manifest_digests(led)
