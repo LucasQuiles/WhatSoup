@@ -9,8 +9,14 @@ import type {
   SessionCheckpointRow,
 } from '../../core/durability.ts';
 import type { TurnRecoveryClaimFence, TurnRecoveryJobRow } from '../../core/turn-recovery-store.ts';
-import type { TurnRecoverySupervisor, TurnRecoveryReplayDispatchResult } from './turn-recovery-supervisor.ts';
+import type {
+  TurnRecoveryDispatchTarget,
+  TurnRecoveryReplayAbortControl,
+  TurnRecoverySupervisor,
+  TurnRecoveryReplayDispatchResult,
+} from './turn-recovery-supervisor.ts';
 import { createTurnRecoverySupervisorForRuntime, dispatchTurnRecoveryReplayForJob, shutdownTurnRecoverySupervisorSafely, getTurnRecoveryHealthDetails } from './turn-recovery-dispatch.ts';
+import { TurnRecoveryDeadman } from './turn-recovery-deadman.ts';
 import { splitInputTokenUsage, type AgentEvent } from './stream-parser.ts';
 import {
   classifyProviderFailure,
@@ -1807,6 +1813,7 @@ export class AgentRuntime implements Runtime {
   /** Owns bounded terminal retries and sticky affected-scope degradation. */
   private readonly runtimeTurnSupervisor: RuntimeTurnSupervisor<RuntimeTurnPostEffects>;
   private readonly turnRecoverySupervisor: TurnRecoverySupervisor;
+  private readonly turnRecoveryDeadman: TurnRecoveryDeadman;
   private readonly runtimeTurnHost: RuntimeTurnCoordinatorPort & RuntimeResultHandlerPort;
   private readonly runtimeTurnCoordinator: RuntimeTurnCoordinator;
   private readonly modelPinHost: ModelPinPort;
@@ -2330,9 +2337,18 @@ export class AgentRuntime implements Runtime {
     );
     this.turnRecoverySupervisor = createTurnRecoverySupervisorForRuntime({ // started in setDurability, stopped at shutdown
       instanceName: this.instanceName, getDurability: () => this.durability,
-      dispatchReplay: (job, fence) => this.dispatchTurnRecoveryReplay(job, fence),
+      dispatchReplay: (job, fence, target, abortControl) => (
+        this.dispatchTurnRecoveryReplay(job, fence, target, abortControl)
+      ),
       recoveryManagerId: this.recoveryManagerId, nextRecoveryGeneration: () => ++this.recoveryGeneration,
-      hasSessionForChat: (deliveryJid) => this.chatSessions.has(this.resolvePerChatMapKey(deliveryJid)),
+      resolveDispatchTarget: (job) => this.resolveTurnRecoveryDispatchTarget(job),
+    });
+    this.turnRecoveryDeadman = new TurnRecoveryDeadman({
+      instanceName: this.instanceName,
+      enabled: () => this.sessionScope === 'per_chat' && this.durability !== null,
+      health: () => this.turnRecoverySupervisor.health(),
+      emitAlert: emitAlertChecked,
+      clearAlert: clearAlertSourceChecked,
     });
     this.handoffDistill = new HandoffDistillCoordinator({
       db,
@@ -2640,8 +2656,8 @@ export class AgentRuntime implements Runtime {
       isShuttingDown: () => runtime.shutdownRequested,
       getActiveQueue: () => runtime.getActiveQueue(),
       getQueueForChat: (chatJid, mapKey) => runtime.getQueueForChat(chatJid, mapKey),
-      sendTurnPerChat: (chatJid, text, mapKey, actorJid, context, scopeRef, systemTurnLease, excludeJobId, deliveryKind) =>
-        runtime.sendTurnPerChat(chatJid, text, mapKey, actorJid, context, scopeRef, systemTurnLease, excludeJobId, deliveryKind),
+      sendTurnPerChat: (chatJid, text, mapKey, actorJid, context, scopeRef, systemTurnLease, excludeJobId, deliveryKind, dispatchAllowed, onProviderBoundary) =>
+        runtime.sendTurnPerChat(chatJid, text, mapKey, actorJid, context, scopeRef, systemTurnLease, excludeJobId, deliveryKind, dispatchAllowed, onProviderBoundary),
       deleteOwnedPerChatSession: (mapKey, expected) => runtime.deleteOwnedPerChatSession(mapKey, expected),
       recreatePerChatSessionForFallback: (mapKey, chatJid, actorJid) => runtime.recreatePerChatSessionForFallback(mapKey, chatJid, actorJid),
       recreateSingletonSessionForFallback: (chatJid, actorJid) => runtime.recreateSingletonSessionForFallback(chatJid, actorJid),
@@ -2762,6 +2778,7 @@ export class AgentRuntime implements Runtime {
     for (const q of this.outboundQueues.values()) q.setDurability(engine);
     for (const q of this.chatQueues.values()) q.setDurability(engine);
     this.turnRecoverySupervisor.start(); // PRESTAGE-T4; idempotent
+    this.turnRecoveryDeadman.start();
   }
 
   /**
@@ -4656,6 +4673,9 @@ export class AgentRuntime implements Runtime {
     }
     let actorPushed = false;
     const onProviderBoundaryReady = (): void => {
+      if (dispatchCancelled()) {
+        throw new Error('TURN_RECOVERY_DISPATCH_TARGET_SUPERSEDED');
+      }
       if (systemTurnLease) this.requireSystemTurnProviderBoundary(systemTurnLease);
       beforeUserSend?.();
       // Publish actor and typing evidence only when provider execution begins.
@@ -4790,11 +4810,17 @@ export class AgentRuntime implements Runtime {
     systemTurnLease?: SystemTurnLeaseToken,
     excludeJobId?: number, // PRESTAGE-T4: set only by the recovery supervisor's own replay; see beginRuntimeTurnEvidence
     requestedDeliveryKind?: TurnDeliveryKind,
+    targetDispatchAllowed?: () => boolean,
+    onProviderBoundary?: () => void,
   ): Promise<void> {
     mapKey = scopeRef?.value ?? mapKey;
-    const dispatchAllowed = runtimeContext === undefined
+    const dispatchAllowed = runtimeContext === undefined && targetDispatchAllowed === undefined
       ? undefined
-      : () => !this.runtimeTurnCoordinator.isUndispatchedRuntimeTurnCancelled(runtimeContext);
+      : () => (
+        (runtimeContext === undefined
+          || !this.runtimeTurnCoordinator.isUndispatchedRuntimeTurnCancelled(runtimeContext))
+        && targetDispatchAllowed?.() !== false
+      );
     const continuationContext = runtimeContext === undefined
       ? this.perChatRuntimeTurnContexts.get(mapKey)?.[0]
       : undefined;
@@ -4962,6 +4988,7 @@ export class AgentRuntime implements Runtime {
             retrySession,
             scopeRef?.value ?? currentMapKey,
           );
+          onProviderBoundary?.();
         }, systemTurnLease, dispatchAllowed, providerTurnContext, providerDeliveryKind);
       } catch (err) {
         if (legacyOwner.value) {
@@ -4979,6 +5006,7 @@ export class AgentRuntime implements Runtime {
           session,
           scopeRef?.value ?? mapKey,
         );
+        onProviderBoundary?.();
       }, systemTurnLease, dispatchAllowed, providerTurnContext, providerDeliveryKind);
     } catch (err) {
       if (legacyOwner.value) {
@@ -5018,10 +5046,72 @@ export class AgentRuntime implements Runtime {
     return completion;
   }
 
-  private async dispatchTurnRecoveryReplay(job: TurnRecoveryJobRow, _fence: TurnRecoveryClaimFence): Promise<TurnRecoveryReplayDispatchResult> { // real dispatcher body in turn-recovery-dispatch.ts
+  private resolveTurnRecoveryDispatchTarget(job: TurnRecoveryJobRow): TurnRecoveryDispatchTarget | null {
+    if (job.scope !== 'per_chat') return null;
+    const mapKey = this.resolvePerChatMapKey(job.delivery_jid);
+    const session = this.chatSessions.get(mapKey);
+    if (!session?.getStatus().active) return null;
+    const managerId = this.sessionManagerIds.get(session);
+    const owner = managerId ? this.sessionOwnership.get(mapKey) : undefined;
+    if (
+      !managerId
+      || owner?.state !== 'active'
+      || !this.sessionOwnership.isCurrent(mapKey, managerId, owner.generation)
+    ) {
+      return null;
+    }
+    return { scope: 'per_chat', mapKey, managerId, generation: owner.generation, session };
+  }
+
+  private isTurnRecoveryDispatchTargetCurrent(target: TurnRecoveryDispatchTarget): boolean {
+    const session = target.session as SessionManager;
+    const owner = this.sessionOwnership.get(target.mapKey);
+    return this.chatSessions.get(target.mapKey) === session
+      && this.sessionManagerIds.get(session) === target.managerId
+      && session.getStatus().active
+      && owner?.state === 'active'
+      && this.sessionOwnership.isCurrent(target.mapKey, target.managerId, target.generation);
+  }
+
+  private async abortTurnRecoveryReplay(
+    target: TurnRecoveryDispatchTarget,
+    context: RuntimeTurnContext,
+  ): Promise<boolean> {
+    const session = target.session as SessionManager;
+    if (!this.isTurnRecoveryDispatchTargetCurrent(target)) {
+      const status = session.getStatus();
+      return !status.active && status.pid === null && status.turnInFlight !== true;
+    }
+    const queue = this.chatQueues.get(target.mapKey) ?? null;
+    this.runtimeTurnCoordinator.rejectRuntimeTurnCompletion(
+      new Error('TURN_RECOVERY_REPLAY_ABORTED'),
+      target.mapKey,
+      context,
+    );
+    this.runtimeTurnCoordinator.finalizeRuntimeCrash(context, queue, session, target.mapKey);
+    try {
+      await session.shutdown(false);
+    } catch (err) {
+      log.error({ err }, 'turn recovery replay exact-generation shutdown failed');
+      return false;
+    }
+    const status = session.getStatus();
+    return !status.active && status.pid === null && status.turnInFlight !== true;
+  }
+
+  private async dispatchTurnRecoveryReplay(
+    job: TurnRecoveryJobRow,
+    _fence: TurnRecoveryClaimFence,
+    target?: TurnRecoveryDispatchTarget,
+    abortControl?: TurnRecoveryReplayAbortControl,
+  ): Promise<TurnRecoveryReplayDispatchResult> { // real dispatcher body in turn-recovery-dispatch.ts
+    const dispatchTarget = target ?? this.resolveTurnRecoveryDispatchTarget(job) ?? undefined;
     return dispatchTurnRecoveryReplayForJob(
       this.runtimeTurnCoordinator, (jid) => this.resolvePerChatMapKey(jid),
-      (mapKey) => this.chatSessions.get(mapKey), (s) => this.requireSessionToolScopeKey(s), job,
+      (mapKey) => this.chatSessions.get(mapKey), (s) => this.requireSessionToolScopeKey(s),
+      (candidate) => this.isTurnRecoveryDispatchTargetCurrent(candidate),
+      (candidate, context) => this.abortTurnRecoveryReplay(candidate, context),
+      job, dispatchTarget, abortControl,
     );
   }
 
@@ -7359,6 +7449,7 @@ export class AgentRuntime implements Runtime {
       this.healthStatsTimer = null;
     }
     this.workspaceSweeper.stop();
+    this.turnRecoveryDeadman.stop();
     // H2: quiesce the recovery scan loop FIRST, before any per-chat teardown
     // below -- stop() clears the scan timer synchronously and blocks
     // scheduleScan from re-arming it, so a scan cannot fire mid-shutdown and

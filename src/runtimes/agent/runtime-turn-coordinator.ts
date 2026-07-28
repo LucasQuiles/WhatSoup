@@ -171,6 +171,8 @@ export interface RuntimeTurnCoordinatorPort {
     systemTurnLease?: SystemTurnLeaseToken,
     excludeJobId?: number,
     deliveryKind?: TurnDeliveryKind,
+    dispatchAllowed?: () => boolean,
+    onProviderBoundary?: () => void,
   ): Promise<void>;
   deleteOwnedPerChatSession(mapKey: string, expected?: SessionManager): boolean;
   recreatePerChatSessionForFallback(mapKey: string, chatJid: string, actorJid?: string): void;
@@ -1953,6 +1955,8 @@ async processPerChatTurn(
   // directly (not via the live-message queue path) to dispatch a claimed
   // job's replay — see beginRuntimeTurnEvidence's doc comment for why.
   excludeJobId?: number,
+  dispatchAllowed?: () => boolean,
+  onProviderBoundary?: () => void,
 ): Promise<void> {
   const mapKey = scopeRef.value;
   const seqQueue = this.host.perChatInboundSeqQueue.get(mapKey) ?? [];
@@ -1970,6 +1974,7 @@ async processPerChatTurn(
 
   let dispatchError: unknown;
   let dispatchFailed = false;
+  let providerBoundaryCrossed = false;
   try {
     await this.host.sendTurnPerChat(
       turn.chatJid,
@@ -1980,10 +1985,20 @@ async processPerChatTurn(
       scopeRef,
       undefined,
       excludeJobId,
+      undefined,
+      dispatchAllowed,
+      () => {
+        providerBoundaryCrossed = true;
+        onProviderBoundary?.();
+      },
     );
   } catch (err) {
     dispatchFailed = true;
     dispatchError = err;
+  }
+  if (!providerBoundaryCrossed && dispatchAllowed?.() === false) {
+    this.discardCancelledPreBoundaryPerChatTurn(mapKey, turn);
+    return;
   }
   if (turn.runtimeContext) {
     const cancelled = this.isUndispatchedRuntimeTurnCancelled(turn.runtimeContext);
@@ -1995,6 +2010,27 @@ async processPerChatTurn(
     this.clearUndispatchedRuntimeTurnCancellation(turn.runtimeContext);
   }
   if (dispatchFailed) throw dispatchError;
+}
+
+private discardCancelledPreBoundaryPerChatTurn(mapKey: string, turn: QueuedTurn): void {
+  if (this.host.perChatTurnSourceMessageId.get(mapKey) !== turn.sourceMessageId) return;
+
+  const seqs = this.host.perChatInboundSeqQueue.get(mapKey);
+  if (turn.inboundSeq !== undefined && seqs) {
+    const index = seqs.lastIndexOf(turn.inboundSeq);
+    if (index >= 0) seqs.splice(index, 1);
+    if (seqs.length === 0) this.host.perChatInboundSeqQueue.delete(mapKey);
+    this.host.getQueueForChat(turn.chatJid, mapKey)?.setInboundSeq(seqs[0]);
+    this.host.replyGuarantee?.disarm(turn.inboundSeq);
+  }
+  this.host.perChatTurnSourceMessageId.delete(mapKey);
+  this.host.perChatTurnContentType.delete(mapKey);
+  this.host.perChatTurnText.delete(mapKey);
+  this.host.perChatTurnSuppressedReplySatisfaction.delete(mapKey);
+  this.host.perChatAssistantItemText.delete(mapKey);
+  this.host.perChatRouteMarkerHold.delete(mapKey);
+  this.host.pendingTurnText.delete(mapKey);
+  this.host.pendingTurnActorJid.delete(mapKey);
 }
 
 }

@@ -32,10 +32,10 @@ outbox alerts.
 
 ## Task 1: Publish the reviewed contract
 
-- [ ] Add the design and this plan.
-- [ ] Classify both documents in `docs/publication-audit.md`.
-- [ ] Regenerate `docs/work-index.json` and `docs/work-index.md`.
-- [ ] Run publication, tally, and work-index guards.
+- [x] Add the design and this plan.
+- [x] Classify both documents in `docs/publication-audit.md`.
+- [x] Regenerate `docs/work-index.json` and `docs/work-index.md`.
+- [x] Run publication, tally, and work-index guards.
 
 ## Task 2: Make scan health success-based
 
@@ -44,15 +44,15 @@ outbox alerts.
 - Modify: `src/runtimes/agent/turn-recovery-supervisor.ts`
 - Modify: `tests/runtimes/agent/turn-recovery-supervisor.test.ts`
 
-- [ ] RED: prove an enumeration exception leaves the success watermark
+- [x] RED: prove an enumeration exception leaves the success watermark
   unchanged and records a bounded failure reason.
-- [ ] RED: prove a stale-claim sweep exception cannot report a successful scan.
-- [ ] RED: prove a later fully successful scan advances success and clears the
+- [x] RED: prove a stale-claim sweep exception cannot report a successful scan.
+- [x] RED: prove a later fully successful scan advances success and clears the
   consecutive failure state.
-- [ ] Implement separate attempt/success timestamps and bounded failure state.
-- [ ] Update the pure heartbeat evaluator for never-successful, stale-success,
+- [x] Implement separate attempt/success timestamps and bounded failure state.
+- [x] Update the pure heartbeat evaluator for never-successful, stale-success,
   and repeated-failure verdicts.
-- [ ] Run the focused supervisor suite.
+- [x] Run the focused supervisor suite.
 
 ## Task 3: Wire the independent deadman
 
@@ -65,16 +65,16 @@ outbox alerts.
 - Modify: `deploy/scripts/README-bot-errors.md`
 - Modify: `deploy/scripts/tests/test_bot_errors_fault_taxonomy_registry.py`
 
-- [ ] RED: advance the real cadence past startup grace and assert one checked
+- [x] RED: advance the real cadence past startup grace and assert one checked
   alert for a never-successful enabled supervisor.
-- [ ] RED: repeat unhealthy checks and assert no alert storm.
-- [ ] RED: record a successful scan and assert exactly one matching clear.
-- [ ] RED: prove disabled scope remains quiet.
-- [ ] Implement the timer owner with injected clock, alert, and clear ports.
-- [ ] Start it with enabled per-chat durability and stop it before supervisor
+- [x] RED: repeat unhealthy checks and assert no alert storm.
+- [x] RED: record a successful scan and assert exactly one matching clear.
+- [x] RED: prove disabled scope remains quiet.
+- [x] Implement the timer owner with injected clock, alert, and clear ports.
+- [x] Start it with enabled per-chat durability and stop it before supervisor
   teardown.
-- [ ] Register source owner, disposition, cadence, and semantic test.
-- [ ] Run deadman, registry, and runtime shutdown tests.
+- [x] Register source owner, disposition, cadence, and semantic test.
+- [x] Run deadman, registry, and runtime shutdown tests.
 
 ## Task 4: Type semantic claim-fence loss
 
@@ -83,12 +83,12 @@ outbox alerts.
 - Modify: `src/core/turn-recovery-store.ts`
 - Modify: `tests/core/turn-recovery-jobs.test.ts`
 
-- [ ] RED: stale token, stale epoch, expired claim, and reassigned owner throw
+- [x] RED: stale token, stale epoch, expired claim, and reassigned owner throw
   the exported typed ownership-loss error from renewal.
-- [ ] RED: an injected database exception remains an ordinary retryable error.
-- [ ] Add the narrow error class without reclassifying validation or database
+- [x] RED: an injected database exception remains an ordinary retryable error.
+- [x] Add the narrow error class without reclassifying validation or database
   availability failures.
-- [ ] Run the focused store suite.
+- [x] Run the focused store suite.
 
 ## Task 5: Bind admission to one active generation
 
@@ -101,15 +101,15 @@ outbox alerts.
 - Modify: `tests/runtimes/agent/turn-recovery-live-wiring.test.ts`
 - Modify: `tests/runtimes/agent/turn-recovery-supervisor.test.ts`
 
-- [ ] RED: mapped inactive and non-active ownership states remain unclaimed
+- [x] RED: mapped inactive and non-active ownership states remain unclaimed
   with no attempt consumed.
-- [ ] RED: a replaced generation between admission and provider boundary
+- [x] RED: a replaced generation between admission and provider boundary
   produces no provider write.
-- [ ] RED: the matching active generation dispatches on the next scan.
-- [ ] Replace production boolean admission with an immutable dispatch permit.
-- [ ] Thread its validation through every wait to the exact provider callback.
-- [ ] Preserve optional test construction without weakening production wiring.
-- [ ] Run live-wiring, supervisor, runtime-coordinator, and provider-boundary
+- [x] RED: the matching active generation dispatches on the next scan.
+- [x] Replace production boolean admission with an immutable dispatch permit.
+- [x] Thread its validation through every wait to the exact provider callback.
+- [x] Preserve optional test construction without weakening production wiring.
+- [x] Run live-wiring, supervisor, runtime-coordinator, and provider-boundary
   tests.
 
 ## Task 6: Retry renewal and abort before expiry
@@ -122,27 +122,27 @@ outbox alerts.
 - Modify: `tests/runtimes/agent/turn-recovery-supervisor.test.ts`
 - Modify: `tests/runtimes/agent/turn-recovery-live-wiring.test.ts`
 
-- [ ] RED: one transient renewal exception is followed by a successful renewal
+- [x] RED: one transient renewal exception is followed by a successful renewal
   while dispatch remains pending.
-- [ ] RED: confirmed ownership loss aborts the exact replay and prevents stale
+- [x] RED: confirmed ownership loss aborts the exact replay and prevents stale
   completion or requeue.
-- [ ] RED: repeated transient errors invoke abort before expiry, prove the
+- [x] RED: repeated transient errors invoke abort before expiry, prove the
   provider generation stopped, and prevent successor overlap.
-- [ ] RED: abort failure increments a distinct visible counter and is never
+- [x] RED: abort failure increments a distinct visible counter and is never
   reported as proven safe.
-- [ ] Implement the cooperative abort control and one-shot renewal scheduler.
-- [ ] Requeue after a transient fail-closed abort only through the original
+- [x] Implement the cooperative abort control and one-shot renewal scheduler.
+- [x] Requeue after a transient fail-closed abort only through the original
   still-valid fence.
-- [ ] Run supervisor, live-wiring, store, shutdown, and exactly-once suites.
+- [x] Run supervisor, live-wiring, store, shutdown, and exactly-once suites.
 
 ## Task 7: Review blast radius and regressions
 
-- [ ] Search all supervisor constructors, dispatcher call sites, health
+- [x] Search all supervisor constructors, dispatcher call sites, health
   snapshots, alert-source registries, and session lifecycle transitions.
-- [ ] Compare the branch with merged PR #2123 and safe replay PR #2071.
-- [ ] Confirm #2169 and #2170 behavior is unchanged.
-- [ ] Run duplication, architecture fitness, and public-surface scans.
-- [ ] Obtain an independent implementation review and verify every accepted
+- [x] Compare the branch with merged PR #2123 and safe replay PR #2071.
+- [x] Confirm #2169 and #2170 behavior is unchanged.
+- [x] Run duplication, architecture fitness, and public-surface scans.
+- [x] Obtain an independent implementation review and verify every accepted
   finding against source and tests.
 
 ## Task 8: Verify and publish the draft
