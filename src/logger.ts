@@ -1,6 +1,6 @@
 import pino from 'pino';
 import { join } from 'node:path';
-import { sanitizingLogHook } from './lib/log-sanitizer';
+import { sanitizingLogHook } from './lib/log-sanitizer.ts';
 
 const level = process.env.LOG_LEVEL ?? 'info';
 

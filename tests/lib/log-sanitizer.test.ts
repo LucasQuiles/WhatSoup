@@ -9,7 +9,7 @@
  * (event type, stage, counts) remains.
  */
 import { describe, expect, it } from 'vitest';
-import { sanitizeLogValue } from '../../src/lib/log-sanitizer';
+import { sanitizeLogValue } from '../../src/lib/log-sanitizer.ts';
 
 // ─── Unique synthetic markers (never real data) ─────────────────────────────
 
