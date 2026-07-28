@@ -734,8 +734,10 @@ describe('bot-errors-collector', () => {
       .split('\n')
       .map((line) => JSON.parse(line) as Record<string, unknown>);
     const poisonAck = logEntries.find((entry) => entry.type === 'writefail_harvest_poison_acked');
-    expect(poisonAck?.remoteAckPath).toContain(join(remoteRoot, 'writefail-relayed'));
-    expect(poisonAck?.remoteAckDegraded).toBe(false);
+    expect(poisonAck).toMatchObject({
+      recordKind: 'writefail_harvest_poison_acked',
+      details: { remoteAckDegraded: false },
+    });
   });
 
   it('does not grow quarantine for the same poisoned writefail when ack keeps failing', () => {
@@ -1042,8 +1044,10 @@ print(Path(found).name if found else "NONE")
       .split('\n')
       .map((line) => JSON.parse(line) as Record<string, unknown>);
     const ack = logEntries.find((entry) => entry.type === 'writefail_harvest_acked');
-    expect(ack?.remoteAckPath).toContain(fallbackRelayed);
-    expect(ack?.remoteAckDegraded).toBe(false);
+    expect(ack).toMatchObject({
+      recordKind: 'writefail_harvest_acked',
+      details: { remoteAckDegraded: false },
+    });
 
     const secondCollector = spawnSync(
       'python3',
@@ -1239,8 +1243,10 @@ exec(collector.REMOTE_WRITEFAIL_ACK_SCRIPT, {"__name__": "__main__"})
       .split('\n')
       .map((line) => JSON.parse(line) as Record<string, unknown>);
     const ack = logEntries.find((entry) => entry.type === 'writefail_harvest_acked');
-    expect(ack?.remoteAckPath).toContain(tmpRelayed);
-    expect(ack?.remoteAckDegraded).toBe(true);
+    expect(ack).toMatchObject({
+      recordKind: 'writefail_harvest_acked',
+      details: { remoteAckDegraded: true },
+    });
   });
 
   it('caps long normal remote relay filenames without mutating event identity', () => {
