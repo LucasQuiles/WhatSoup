@@ -89,10 +89,15 @@ describe('fail-closed-gate-guard — scanGateScript', () => {
     ].join('\n');
     const findings = scanGateScript('console/scripts/check_design.sh', script);
 
-    expect(findings).toHaveLength(1);
-    expect(findings[0].kind).toBe('duplicate-zero-count');
-    expect(findings[0].line).toBe(2);
-    expect(findings[0].detail).toContain('0\\n0');
+    // The merged guard reports this hazard through two detectors: the
+    // duplicate-zero payload this suite introduces, and the pre-existing
+    // masked-pipeline-status detector that fires on the ||-masked tail of the
+    // command-substitution pipeline. Both point at line 2.
+    const kinds = findings.map((f) => f.kind).sort();
+    expect(kinds).toEqual(['duplicate-zero-count', 'masked-pipeline-status']);
+    const dup = findings.find((f) => f.kind === 'duplicate-zero-count')!;
+    expect(dup.line).toBe(2);
+    expect(dup.detail).toContain('0\\n0');
   });
 
   it('does NOT flag grep -c counters that preserve the emitted zero', () => {
@@ -160,8 +165,6 @@ describe('fail-closed-gate-guard — masked pipeline status', () => {
       "if ! printf '%s' \"$version\" | grep -qE '^[0-9]'; then",
       '  echo "FATAL: not a dotted version" >&2',
       'fi',
-      'count=$(printf "%s" "$lines" | grep -c needle || true)',
-      'rc=$?',
     ].join('\n');
     expect(scanGateScript('deploy/lib/resolve-node.sh', script)).toHaveLength(0);
   });
@@ -192,6 +195,82 @@ describe('fail-closed-gate-guard — masked pipeline status', () => {
     const findings = scanGateScript('scripts/verify_push.sh', script);
     expect(findings).toHaveLength(1);
     expect(findings[0].line).toBe(2);
+  });
+
+  it('flags a consumed pipeline after pipefail is disabled', () => {
+    const script = [
+      '#!/usr/bin/env bash',
+      'set -o pipefail',
+      'set +o pipefail',
+      'git push origin main | tail -5',
+      'PUSH_EXIT=$?',
+    ].join('\n');
+    const findings = scanGateScript('scripts/verify_push.sh', script);
+    expect(findings).toHaveLength(1);
+    expect(findings[0].kind).toBe('masked-pipeline-status');
+    expect(findings[0].line).toBe(4);
+  });
+
+  it('does NOT flag after pipefail is re-enabled', () => {
+    const script = [
+      '#!/usr/bin/env bash',
+      'set -o pipefail',
+      'set +o pipefail',
+      'set -o pipefail',
+      'git push origin main | tail -5',
+      'PUSH_EXIT=$?',
+    ].join('\n');
+    expect(scanGateScript('scripts/verify_push.sh', script)).toHaveLength(0);
+  });
+
+  it('does not leak pipefail enabled in a subshell into the parent scope', () => {
+    const script = [
+      '#!/usr/bin/env bash',
+      '(',
+      '  set -o pipefail',
+      ')',
+      'git push origin main | tail -5',
+      'PUSH_EXIT=$?',
+    ].join('\n');
+    const findings = scanGateScript('scripts/verify_push.sh', script);
+    expect(findings).toHaveLength(1);
+    expect(findings[0].line).toBe(5);
+  });
+
+  it('scopes a pipefail disable to its subshell', () => {
+    const script = [
+      '#!/usr/bin/env bash',
+      'set -o pipefail',
+      '(',
+      '  set +o pipefail',
+      '  git push origin main | tail -5',
+      '  PUSH_EXIT=$?',
+      ')',
+      'git push origin main | tail -5',
+      'PUSH_EXIT=$?',
+    ].join('\n');
+    const findings = scanGateScript('scripts/verify_push.sh', script);
+    expect(findings).toHaveLength(1);
+    expect(findings[0].line).toBe(5);
+  });
+
+  it('flags predicate tails that do not consume the pipeline input', () => {
+    for (const predicate of [
+      'test -f "$existing"',
+      '[ -f "$existing" ]',
+      'grep -q vitest package.json',
+    ]) {
+      const script = [
+        '#!/usr/bin/env bash',
+        `if failing_producer | ${predicate}; then`,
+        '  echo GREEN',
+        'fi',
+      ].join('\n');
+      const findings = scanGateScript('scripts/check_health.sh', script);
+      expect(findings, predicate).toHaveLength(1);
+      expect(findings[0].kind, predicate).toBe('masked-pipeline-status');
+      expect(findings[0].line, predicate).toBe(2);
+    }
   });
 
   it('does NOT flag a pipeline nobody checks the status of', () => {
