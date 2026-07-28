@@ -120,9 +120,11 @@ data appears in the receipt or health projection.
   observes the queue result and already receives the DurabilityEngine.
 - The receipt is returned only after exactly one matching `processing` row
   transitions.
-- A zero-row transition or terminal-write exception increments unowned health,
-  rejects `handleMessage()`, and is handled by the existing ingest error path;
-  the runtime must not return a false durable receipt.
+- A zero-row transition or terminal-write exception increments unowned health
+  and rejects `handleMessage()`. The ingest error path uses the same sequence,
+  message ID, chat JID, and `processing` fence; a retryable queue terminal-write
+  failure preserves `queue_full`, while an already-terminal or mismatched row
+  remains unchanged.
 - Repeated rejections never enqueue work, bypass the cap, or produce replies.
 
 ## Test Strategy
@@ -144,7 +146,10 @@ Tests use a real `ChatQueue`, real SQLite-backed `Database`, and real
 6. Admit a message below capacity; assert an `accepted` receipt is returned
    before provider completion, then release the provider and prove reply,
    durable completion, and queue drain.
-7. Retain the existing ChatQueue memory-bound and cross-chat fairness suite.
+7. Exercise the ingest caller path; assert its error fallback cannot overwrite
+   an already-terminal row and retries a transient queue terminal write only
+   through the identity/state fence with `queue_full`.
+8. Retain the existing ChatQueue memory-bound and cross-chat fairness suite.
 
 Focused verification includes ChatQueue, ChatRuntime admission, ChatRuntime
 health, ingest, durability, and typechecking. The final draft PR also runs the

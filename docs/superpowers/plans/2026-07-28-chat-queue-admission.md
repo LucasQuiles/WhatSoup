@@ -170,9 +170,12 @@ identifier-free degraded health evidence.
 2. Run the complete ChatRuntime suite to detect any scheduling regressions from
    awaiting the admission promise.
 3. Run the real ChatQueue memory-bound and cross-chat fairness suite unchanged.
-4. Run ingest tests to prove current callers may ignore the optional receipt
-   without changing success or thrown-error behavior.
-5. Run full test typechecking.
+4. Run ingest tests to prove current callers may ignore the optional receipt,
+   runtime errors use the same identity/state-fenced failure transition, and an
+   already-terminal row cannot be overwritten by the catch path.
+5. Prove a retryable queue terminal-write error retains the bounded
+   `queue_full` failure class.
+6. Run full test typechecking.
 
 ## Task 8: Review, verify, and publish the draft
 

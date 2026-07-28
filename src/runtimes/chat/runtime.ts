@@ -46,6 +46,7 @@ import { downloadMediaMessage } from '@whiskeysockets/baileys';
 import { jitteredDelay, sleep } from '../../core/retry.ts';
 import { WhatSoupError } from '../../errors.ts';
 import { DatabaseCompatibilityError } from '../../core/database-compatibility.ts';
+import { QueueAdmissionTerminalizationError } from '../../core/inbound-failure-class.ts';
 import { emitAlertChecked, clearAlertSourceChecked } from '../../lib/emit-alert.ts';
 import { resolveModelRole } from '../../lib/model-advisor.ts';
 
@@ -231,7 +232,7 @@ export class ChatRuntime implements Runtime {
         }
       } catch (err) {
         this.recordUnownedQueueRejection();
-        throw err;
+        throw new QueueAdmissionTerminalizationError(err);
       }
       return {
         status: 'rejected',

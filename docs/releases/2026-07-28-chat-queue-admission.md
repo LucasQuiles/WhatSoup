@@ -19,6 +19,9 @@
   `queue_full` before the runtime returns `durableDisposition: "failed"`.
   Missing, stale, mismatched, already-terminal, or write-failed inbound
   ownership fails closed and degrades Chat runtime health.
+- Runtime-error finalization uses the same sequence, message ID, chat JID, and
+  processing-state fence, so its catch path cannot overwrite a row that another
+  owner already terminalized.
 - Capacity shedding still sends no automatic overload reply and does not retry
   inside the saturated queue. The existing per-chat memory bound and cross-chat
   fairness remain unchanged.
