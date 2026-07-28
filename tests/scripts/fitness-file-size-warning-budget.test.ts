@@ -119,6 +119,7 @@ const EXPECTED_FILE_SIZE_WARNING_FILES = [
   // extracting them would duplicate that setup; grandfathered per the project
   // norm for large cohesive test files (cf. the agent runtime/session twins).
   'tests/runtimes/chat/runtime.test.ts',
+  'tests/scripts/bot-errors-dispatcher.test.ts',
   'tests/scripts/bot-errors-health-check.test.ts',
   'tests/transport/reconnect.test.ts',
 ].sort();

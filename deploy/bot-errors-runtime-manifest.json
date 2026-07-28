@@ -28,7 +28,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-dispatcher.py",
-      "sha256": "b8712ed75fde6d437291a163ed879e13ed6c93a743df4d6d69daf36e0d9b070a",
+      "sha256": "c60d8cf1ccd51a22a1ff5fdfe28c8d4d562865e52ea5f223aa9ab02799185061",
       "mustContain": [
         "append_private_jsonl",
         "refusing to use private directory through symlink",
@@ -37,7 +37,12 @@
         "event_line(\"incident_key\", incident_key(event))",
         "redacted_state_text",
         "suppress_alerts_recovered_before_delivery",
-        "recovered_before_delivery"
+        "recovered_before_delivery",
+        "UntrustedEntryError",
+        "safe_open_entry",
+        "safe_read_json",
+        "safe_is_regular_entry",
+        "quarantine_untrusted_entry"
       ]
     },
     {

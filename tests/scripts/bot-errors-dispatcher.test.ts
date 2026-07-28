@@ -2008,18 +2008,20 @@ describe('Queue-entry leaf-trust (#2484)', () => {
       const symlinkPath = join(tmpRoot, 'symlink-entry.json');
       symlinkSync(outsidePath, symlinkPath);
 
-      // Run a Python snippet that imports the dispatcher's primitives and
-      // verifies O_NOFOLLOW rejection.
+      // Run a Python snippet that imports the dispatcher's primitives via
+      // importlib (the module file uses a hyphen, so `from X import` is not
+      // possible) and verifies O_NOFOLLOW rejection of a symlink leaf.
       const pyCode = [
-        'import os, sys, stat',
-        'sys.path.insert(0, "deploy/scripts")',
-        'from bot_errors_dispatcher import safe_open_entry, safe_is_regular_entry, UntrustedEntryError',
-        `p = "${symlinkPath}"`,
-        'print("is_regular:", safe_is_regular_entry(__import__("pathlib").Path(p)))',
+        'import importlib.util, sys',
+        "spec = importlib.util.spec_from_file_location('dispatcher', 'deploy/scripts/bot-errors-dispatcher.py')",
+        'mod = importlib.util.module_from_spec(spec)',
+        'spec.loader.exec_module(mod)',
+        `p = __import__("pathlib").Path("${symlinkPath}")`,
+        'print("is_regular:", mod.safe_is_regular_entry(p))',
         'try:',
-        '    fd = safe_open_entry(__import__("pathlib").Path(p))',
+        '    fd = mod.safe_open_entry(p)',
         '    print("opened: unexpected")',
-        'except UntrustedEntryError as e:',
+        'except mod.UntrustedEntryError as e:',
         '    print("rejected:", str(e))',
       ].join('\n');
       const result = spawnSync('python3', ['-c', pyCode], { cwd: process.cwd() });
