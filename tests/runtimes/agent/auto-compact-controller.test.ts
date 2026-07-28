@@ -105,6 +105,74 @@ describe('AutoCompactController — construction', () => {
   });
 });
 
+describe('AutoCompactController — healthSnapshot', () => {
+  it('reports idle with no active scopes', () => {
+    const c = new AutoCompactController(1000);
+
+    expect(c.healthSnapshot()).toEqual({
+      state: 'idle',
+      activeBackoffScopes: 0,
+      worstCurrentBackoffTier: 0,
+    });
+  });
+
+  it('aggregates active scopes and caps the worst current tier without exposing identities', () => {
+    const c = new AutoCompactController(1000);
+    c.consecutiveRapidRearms.set('scope-a', 1);
+    c.cooldownUntil.set('scope-a', 10_000);
+    c.consecutiveRapidRearms.set('scope-b', AUTO_COMPACT_BACKOFF_TIERS_MS.length + 8);
+    c.cooldownUntil.set('scope-b', 20_000);
+
+    const snapshot = c.healthSnapshot(5_000);
+
+    expect(snapshot).toEqual({
+      state: 'backoff',
+      activeBackoffScopes: 2,
+      worstCurrentBackoffTier: AUTO_COMPACT_BACKOFF_TIERS_MS.length - 1,
+    });
+    expect(JSON.stringify(snapshot)).not.toContain('scope-');
+  });
+
+  it('ignores zero-count, missing-cooldown, and expired scopes', () => {
+    const c = new AutoCompactController(1000);
+    c.consecutiveRapidRearms.set('zero-count', 0);
+    c.cooldownUntil.set('zero-count', 10_000);
+    c.consecutiveRapidRearms.set('missing-cooldown', 2);
+    c.consecutiveRapidRearms.set('expired', 3);
+    c.cooldownUntil.set('expired', 5_000);
+
+    expect(c.healthSnapshot(5_000)).toEqual({
+      state: 'idle',
+      activeBackoffScopes: 0,
+      worstCurrentBackoffTier: 0,
+    });
+  });
+
+  it('clears current state on scope cleanup while preserving lifetime counters', () => {
+    const c = new AutoCompactController(1000);
+    c.recordAutoCompactRapidRearm('scope-a', 100, 1_000);
+    expect(c.healthSnapshot(2_000).state).toBe('backoff');
+
+    c.cleanupScope('scope-a');
+
+    expect(c.healthSnapshot(2_000).state).toBe('idle');
+    expect(c.ineffective).toBe(1);
+    expect(c.consecutiveRapidRearmsMax).toBe(1);
+  });
+
+  it('clears current state on shutdown while preserving lifetime counters', () => {
+    const c = new AutoCompactController(1000);
+    c.recordAutoCompactRapidRearm('scope-a', 100, 1_000);
+    expect(c.healthSnapshot(2_000).state).toBe('backoff');
+
+    c.shutdown();
+
+    expect(c.healthSnapshot(2_000).state).toBe('idle');
+    expect(c.ineffective).toBe(1);
+    expect(c.consecutiveRapidRearmsMax).toBe(1);
+  });
+});
+
 // ─── silent-compact: begin / is / clear ──────────────────────────────────────
 
 describe('AutoCompactController — silent compact', () => {

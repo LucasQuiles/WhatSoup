@@ -354,6 +354,24 @@ cannot reach the dispatcher backstop. Adding a producer without a provenance
 stamp re-opens that hole silently, so stamp it at the shared event builder
 rather than per call site.
 
+## Runtime-agent health signal dispositions
+
+The scheduled health checker reads
+`src/lib/fault-taxonomy-registry.json` for its ordered runtime-agent numeric
+field contract. Each registered field declares its evidence label, signal kind,
+and whether a positive value represents current risk or diagnostic evidence.
+The checker does not infer severity from numeric type.
+
+Cumulative totals, historical maxima, and terminal audit counts remain visible
+without independently adding `runtime_agent_at_risk`. Active episode counts and
+declared current gauges still add that marker. If the registry is missing,
+malformed, or uses an unsupported schema or disposition, the health line warns
+with a bounded registry error class and does not invent per-field severity.
+
+The registry is both deployer-managed and SHA-pinned in
+`deploy/bot-errors-runtime-manifest.json`; changing the checker contract without
+shipping the matching registry fails the local manifest and deployer guards.
+
 ## Test suites + CI gates
 
 Two independent pytest-runner scripts gate `deploy/scripts/tests/` in `quality.yml`, and

@@ -51,6 +51,12 @@ interface AutoCompactWaiter {
   timer: ReturnType<typeof setTimeout>;
 }
 
+export interface AutoCompactHealthSnapshot {
+  readonly state: 'idle' | 'backoff';
+  readonly activeBackoffScopes: number;
+  readonly worstCurrentBackoffTier: number;
+}
+
 export class AutoCompactController {
   /** Scopes currently inside a silent-compact suppression window → its TTL timer. */
   readonly silentCompactScopes = new Map<string, ReturnType<typeof setTimeout>>();
@@ -84,6 +90,36 @@ export class AutoCompactController {
 
   constructor(inputTokens: number | undefined) {
     this.inputTokens = inputTokens;
+  }
+
+  healthSnapshot(now = Date.now()): AutoCompactHealthSnapshot {
+    let activeBackoffScopes = 0;
+    let worstCurrentBackoffTier = 0;
+    for (const [scopeKey, consecutiveRapidRearms] of this.consecutiveRapidRearms) {
+      const cooldownUntil = this.cooldownUntil.get(scopeKey);
+      if (
+        !Number.isFinite(consecutiveRapidRearms)
+        || consecutiveRapidRearms <= 0
+        || cooldownUntil === undefined
+        || !Number.isFinite(cooldownUntil)
+        || cooldownUntil <= now
+      ) {
+        continue;
+      }
+      activeBackoffScopes += 1;
+      worstCurrentBackoffTier = Math.max(
+        worstCurrentBackoffTier,
+        Math.min(
+          Math.floor(consecutiveRapidRearms),
+          AUTO_COMPACT_BACKOFF_TIERS_MS.length - 1,
+        ),
+      );
+    }
+    return {
+      state: activeBackoffScopes > 0 ? 'backoff' : 'idle',
+      activeBackoffScopes,
+      worstCurrentBackoffTier,
+    };
   }
 
   beginSilentCompact(scopeKey: string): void {
