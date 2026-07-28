@@ -1748,15 +1748,28 @@ describe('release-proof drill: two-run alert/clear traversal', () => {
     // real observable (see should_suppress_send in
     // deploy/scripts/bot-errors-dispatcher.py) is the "incident already open
     // for {key}; duplicate suppressed" branch: the event is archived to
-    // suppressed/, dispatch.jsonl logs a "suppressed" entry carrying that
-    // reason, and — unlike the renotify-after-INCIDENT_RENOTIFY_SECONDS path —
+    // suppressed/, dispatch.jsonl logs a metadata-only "suppressed" record,
+    // and — unlike the renotify-after-INCIDENT_RENOTIFY_SECONDS path —
     // no new line lands in capture.jsonl, since these two runs happen well
     // inside the (6h default) renotify window.
     emitDrill(tmpRoot, alertArgs);
     const duplicateRun = dispatchOnce(tmpRoot, capture);
     expect(JSON.parse(duplicateRun)).toMatchObject({ processed: 1, sent: 0, suppressed: 1, failed: 0 });
     expect(dirCount(tmpRoot, 'outbox')).toBe(0);
-    expect(readFileSync(dispatchLog, 'utf8')).toContain('duplicate suppressed');
+    const dispatchEntries = readFileSync(dispatchLog, 'utf8')
+      .trim()
+      .split('\n')
+      .map((line) => JSON.parse(line) as Record<string, unknown>);
+    expect(dispatchEntries.some((entry) => entry.recordKind === 'suppressed')).toBe(true);
+    const suppressedEvents = readdirSync(join(tmpRoot, 'suppressed')).map(
+      (file) =>
+        JSON.parse(readFileSync(join(tmpRoot, 'suppressed', file), 'utf8')) as {
+          delivery?: { suppressedReason?: string };
+        },
+    );
+    expect(
+      suppressedEvents.some((event) => event.delivery?.suppressedReason?.includes('duplicate suppressed')),
+    ).toBe(true);
     const alertMessagesAfterDuplicate = captureMessages(capture).filter((text) => text.includes('release-proof drill alert'));
     expect(alertMessagesAfterDuplicate).toHaveLength(1);
 
@@ -1776,12 +1789,20 @@ describe('release-proof drill: two-run alert/clear traversal', () => {
     // Orphan clear: the incident is already closed, so this clear has no open
     // incident to recover. should_suppress_send's "clear has no open incident
     // for {key}; stale recovery suppressed" branch fires — the same "no open
-    // incident" wording asserted in
+    // incident" disposition is retained on the archived event asserted in
     // deploy/scripts/tests/test_bot_errors_orphan_clear_suppression.py.
     emitDrill(tmpRoot, clearArgs);
     const orphanRun = dispatchOnce(tmpRoot, capture);
     expect(JSON.parse(orphanRun)).toMatchObject({ processed: 1, sent: 0, suppressed: 1, failed: 0 });
-    expect(readFileSync(dispatchLog, 'utf8')).toContain('no open incident');
+    const archivedAfterOrphan = readdirSync(join(tmpRoot, 'suppressed')).map(
+      (file) =>
+        JSON.parse(readFileSync(join(tmpRoot, 'suppressed', file), 'utf8')) as {
+          delivery?: { suppressedReason?: string };
+        },
+    );
+    expect(
+      archivedAfterOrphan.some((event) => event.delivery?.suppressedReason?.includes('no open incident')),
+    ).toBe(true);
 
     for (const queue of ['outbox', 'processing', 'writefail', 'dead-letter', 'quarantine']) {
       expect(dirCount(tmpRoot, queue), `${queue} not drained`).toBe(0);

@@ -31,6 +31,12 @@ from lib.bot_errors_redaction import (
     redact_bot_errors_text,
     redact_json_value as redact_shared_json_value,
 )
+from lib.controller_log import (
+    ControllerLogContext,
+    controller_cycle,
+    metadata_only_controller_details,
+    write_controller_log,
+)
 
 
 BOT_ERRORS_JID = os.environ.get("BOT_ERRORS_JID", "").strip()
@@ -49,6 +55,7 @@ STATE_FILE = STATE_DIR / "state.json"
 EVENT_LOG = STATE_DIR / "events.jsonl"
 ACTIVITY_LOG = STATE_DIR / "activity.jsonl"
 LOCK_FILE = STATE_DIR / "loop.lock"
+CONTROLLER_LOG_CONTEXT = ControllerLogContext("q_loop")
 
 REQUIRED_MESSAGE_COLUMNS = {
     "pk",
@@ -298,14 +305,61 @@ def save_state(state: dict[str, Any]) -> None:
     atomic_write_json(STATE_FILE, redact_json_value(state))
 
 
-def log_event(kind: str, data: dict[str, Any]) -> None:
-    record = {"ts": now(), "time": iso(), "kind": kind, **redact_json_value(data)}
-    append_private_jsonl(EVENT_LOG, record)
+def persist_controller_log_health(record: dict[str, Any]) -> None:
+    atomic_write_json(STATE_DIR / "controller-log-health.json", record)
 
 
-def append_activity(record: dict[str, Any]) -> None:
-    append_private_jsonl(
-        ACTIVITY_LOG, {"ts": now(), "time": iso(), **redact_json_value(record)}
+def controller_log_fallback(line: str) -> None:
+    print(line, file=sys.stderr, flush=True)
+
+
+def log_event(
+    kind: str,
+    data: dict[str, Any],
+    *,
+    level: str = "info",
+    outcome: str = "observed",
+) -> str:
+    return write_controller_log(
+        context=CONTROLLER_LOG_CONTEXT,
+        record_kind=kind,
+        level=level,
+        outcome=outcome,
+        durability_class="diagnostic_best_effort",
+        details=metadata_only_controller_details(redact_json_value(data)),
+        append_record=lambda record: append_private_jsonl(EVENT_LOG, record),
+        persist_health=persist_controller_log_health,
+        emit_fallback=controller_log_fallback,
+    )
+
+
+def append_activity(record: dict[str, Any]) -> str:
+    body_length = len(str(record.get("body") or ""))
+    if body_length == 0:
+        body_length_bucket = "empty"
+    elif body_length <= 64:
+        body_length_bucket = "1_64"
+    elif body_length <= 256:
+        body_length_bucket = "65_256"
+    elif body_length <= 1_024:
+        body_length_bucket = "257_1024"
+    else:
+        body_length_bucket = "over_1024"
+    return write_controller_log(
+        context=CONTROLLER_LOG_CONTEXT,
+        record_kind="activity_observed",
+        level="info",
+        outcome="observed",
+        durability_class="diagnostic_best_effort",
+        details=metadata_only_controller_details(
+            {
+                "role": str(record.get("role") or "unknown"),
+                "bodyLengthBucket": body_length_bucket,
+            }
+        ),
+        append_record=lambda envelope: append_private_jsonl(ACTIVITY_LOG, envelope),
+        persist_health=persist_controller_log_health,
+        emit_fallback=controller_log_fallback,
     )
 
 
@@ -885,6 +939,15 @@ def compute_wait(state: dict[str, Any], had_activity: bool, sent_message: bool) 
     return min(MAX_IDLE_WAIT_SECONDS, IDLE_WAIT_SECONDS + (state["idle_cycles"] * 60))
 
 
+@controller_cycle(
+    CONTROLLER_LOG_CONTEXT,
+    lambda kind, details, level, outcome: log_event(
+        kind,
+        details,
+        level=level,
+        outcome=outcome,
+    ),
+)
 def run_once(args: argparse.Namespace) -> int:
     ensure_private_dir(STATE_DIR)
     first_start = not STATE_FILE.exists()

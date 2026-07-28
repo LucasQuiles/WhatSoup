@@ -30,6 +30,12 @@ if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
 from lib.bot_errors_redaction import redact_bot_errors_text, redact_json_value as redact_shared_json_value
+from lib.controller_log import (
+    ControllerLogContext,
+    controller_cycle,
+    metadata_only_controller_details,
+    write_controller_log,
+)
 
 
 BOT_ERRORS_JID = os.environ.get("BOT_ERRORS_JID", "").strip()
@@ -262,6 +268,7 @@ def state_root() -> Path:
 
 
 STRONG_TEST_SIGNAL_KEYS = ("VITEST", "VITEST_WORKER_ID", "JEST_WORKER_ID", "PYTEST_CURRENT_TEST")
+CONTROLLER_LOG_CONTEXT = ControllerLogContext("deadman")
 
 
 def env_value(key: str) -> str | None:
@@ -1239,7 +1246,11 @@ def assert_regular_or_missing(path: Path) -> None:
 def append_private_jsonl(path: Path, payload: dict[str, Any]) -> None:
     ensure_private_dir(path.parent)
     assert_regular_or_missing(path)
-    data = (json.dumps(redact_json_value({"time": now_iso(), "pid": os.getpid(), **payload}), sort_keys=True) + "\n").encode("utf-8")
+    if payload.get("schemaVersion") == 1 and payload.get("component") == "deadman":
+        record = payload
+    else:
+        record = redact_json_value({"time": now_iso(), "pid": os.getpid(), **payload})
+    data = (json.dumps(record, sort_keys=True) + "\n").encode("utf-8")
     fd = os.open(
         path,
         os.O_CREAT | os.O_APPEND | os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0),
@@ -1259,9 +1270,40 @@ def append_private_jsonl(path: Path, payload: dict[str, Any]) -> None:
         raise
 
 
-def append_deadman_log(payload: dict[str, Any]) -> None:
+def persist_controller_log_health(record: dict[str, Any]) -> None:
+    atomic_write_json(
+        state_root() / "controller-log-health" / "deadman.json",
+        record,
+    )
+
+
+def controller_log_fallback(line: str) -> None:
+    print(line, file=sys.stderr, flush=True)
+
+
+def append_deadman_log(
+    payload: dict[str, Any],
+    *,
+    level: str = "info",
+    outcome: str = "observed",
+) -> str:
     logs = state_root() / "logs"
-    append_private_jsonl(logs / "deadman.jsonl", payload)
+    redacted = redact_json_value(payload)
+    record_kind = redacted.get("type") if isinstance(redacted, dict) else None
+    if not isinstance(record_kind, str):
+        raise ValueError("deadman controller log requires a bounded type")
+    details = {key: value for key, value in redacted.items() if key != "type"}
+    return write_controller_log(
+        context=CONTROLLER_LOG_CONTEXT,
+        record_kind=record_kind,
+        level=level,
+        outcome=outcome,
+        durability_class="diagnostic_best_effort",
+        details=metadata_only_controller_details(details),
+        append_record=lambda record: append_private_jsonl(logs / "deadman.jsonl", record),
+        persist_health=persist_controller_log_health,
+        emit_fallback=controller_log_fallback,
+    )
 
 
 def deadman_state_path() -> Path:
@@ -5822,6 +5864,14 @@ def daily() -> int:
     return 0
 
 
+@controller_cycle(
+    CONTROLLER_LOG_CONTEXT,
+    lambda kind, details, level, outcome: append_deadman_log(
+        {"type": kind, **details},
+        level=level,
+        outcome=outcome,
+    ),
+)
 def deadman(max_state_age: int, restart_grace: int, cooldown_seconds: int) -> int:
     root = state_root()
     state = root / "dispatcher-state.json"
@@ -5861,6 +5911,7 @@ def deadman(max_state_age: int, restart_grace: int, cooldown_seconds: int) -> in
             for key, record in incidents.items()
             if isinstance(record, dict) and record.get("status") == "open"
         ]
+        recovery_outcomes: list[dict[str, Any]] = []
         for key, record in open_incidents:
             suppressed = int_or_none(record.get("suppressed")) or 0
             prior_problems = record.get("problems") if isinstance(record.get("problems"), list) else []
@@ -5895,9 +5946,11 @@ def deadman(max_state_age: int, restart_grace: int, cooldown_seconds: int) -> in
             record["resolvedAtEpoch"] = current_epoch()
             record["resolvedAt"] = epoch_to_iso(record["resolvedAtEpoch"])
             record["lastRecoveryStatus"] = outcome
-            append_deadman_log(outcome)
+            recovery_outcomes.append(dict(outcome))
         if open_incidents:
             save_deadman_state(deadman_state)
+            for outcome in recovery_outcomes:
+                append_deadman_log(outcome)
         if grace_reason:
             state_detail = state_age if state_age is not None else "missing"
             print(f"deadman grace ok: service={service_status} {grace_reason} dispatcher_state_age_seconds={state_detail}")
