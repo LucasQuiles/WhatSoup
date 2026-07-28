@@ -4,7 +4,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { forceEnsurePrivateDirectorySync } from '../../lib/private-fs.ts';
 import { SQLITE_BUSY_TIMEOUT_PRAGMA } from '../../lib/sqlite-constants.ts';
 import { xdgDir } from '../paths.ts';
-import { INCIDENT_SCHEMA_VERSION, SCHEMA_STATEMENTS } from './schema.ts';
+import { INCIDENT_SCHEMA_VERSION, MIGRATIONS } from './schema.ts';
 
 export class IncidentStoreCorruptError extends Error {
   readonly reason: string;
@@ -25,21 +25,25 @@ function isFreshTarget(dbPath: string): boolean {
   return statSync(dbPath).size === 0;
 }
 
-function initializeSchema(db: DatabaseSync): void {
-  db.exec('BEGIN IMMEDIATE');
-  try {
-    for (const statement of SCHEMA_STATEMENTS) db.exec(statement);
-    db.prepare(`INSERT INTO meta (key, value) VALUES ('schema_version', ?)`).run(
-      String(INCIDENT_SCHEMA_VERSION),
-    );
-    db.exec('COMMIT');
-  } catch (err) {
-    db.exec('ROLLBACK');
-    throw err;
+function applyMigrations(db: DatabaseSync, fromVersion: number): void {
+  for (const migration of MIGRATIONS) {
+    if (migration.version <= fromVersion) continue;
+    db.exec('BEGIN IMMEDIATE');
+    try {
+      for (const statement of migration.statements) db.exec(statement);
+      db.prepare(
+        `INSERT INTO meta (key, value) VALUES ('schema_version', ?)
+           ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+      ).run(String(migration.version));
+      db.exec('COMMIT');
+    } catch (err) {
+      db.exec('ROLLBACK');
+      throw err;
+    }
   }
 }
 
-function validateExisting(db: DatabaseSync): void {
+function readExistingVersion(db: DatabaseSync): number {
   const check = db.prepare('PRAGMA quick_check').get() as { quick_check?: string } | undefined;
   if (!check || check.quick_check !== 'ok') {
     throw new IncidentStoreCorruptError('quick_check failed');
@@ -47,10 +51,14 @@ function validateExisting(db: DatabaseSync): void {
   const row = db.prepare(`SELECT value FROM meta WHERE key = 'schema_version'`).get() as
     | { value?: unknown }
     | undefined;
-  const value = typeof row?.value === 'string' ? row.value : null;
-  if (value !== String(INCIDENT_SCHEMA_VERSION)) {
-    throw new IncidentStoreCorruptError(`unsupported schema_version ${value ?? 'missing'}`);
+  const value = typeof row?.value === 'string' ? Number.parseInt(row.value, 10) : NaN;
+  if (!Number.isInteger(value) || value < 1) {
+    throw new IncidentStoreCorruptError('unsupported schema_version missing');
   }
+  if (value > INCIDENT_SCHEMA_VERSION) {
+    throw new IncidentStoreCorruptError(`unsupported schema_version ${value}`);
+  }
+  return value;
 }
 
 export function openIncidentDb(dbPath: string): DatabaseSync {
@@ -72,9 +80,9 @@ export function openIncidentDb(dbPath: string): DatabaseSync {
     db.exec(SQLITE_BUSY_TIMEOUT_PRAGMA);
     db.exec('PRAGMA foreign_keys = ON');
     if (fresh) {
-      initializeSchema(db);
+      applyMigrations(db, 0);
     } else {
-      validateExisting(db);
+      applyMigrations(db, readExistingVersion(db));
     }
   } catch (err) {
     db.close();
