@@ -34,9 +34,9 @@ export interface DiagnosticProbeBuilderDeps {
   /** Parse a usage-limit reset time (epoch ms) from the result text, or null. */
   parseUsageLimitReset: (text: string) => number | null;
   /** Probe whether the primary model is currently usable. */
-  runPrimaryModelUsability: () => Promise<PrimaryModelUsabilityResult>;
+  runPrimaryModelUsability: (signal?: AbortSignal) => Promise<PrimaryModelUsabilityResult>;
   /** Probe whether the primary provider's auth has recovered. */
-  runPrimaryRecoveryProbe: () => Promise<boolean>;
+  runPrimaryRecoveryProbe: (signal?: AbortSignal) => Promise<boolean>;
   /** Dependencies for the account/auth-status probe. */
   accountAuthDeps: AccountAuthStatusDeps;
 }
@@ -86,11 +86,11 @@ export function buildDiagnosticProbes(deps: DiagnosticProbeBuilderDeps): Diagnos
       : { ok: true, confidence: 'confirmed', summary: 'usage-limit reset time parsed', resetAt, data: { resetAt } };
   };
 
-  const primaryModelUsability: DiagnosticProbe = async () =>
-    mapPrimaryModelUsability(await deps.runPrimaryModelUsability());
+  const primaryModelUsability: DiagnosticProbe = async (signal) =>
+    mapPrimaryModelUsability(await deps.runPrimaryModelUsability(signal));
 
-  const primaryRecoveryProbe: DiagnosticProbe = async () => {
-    const recovered = await deps.runPrimaryRecoveryProbe();
+  const primaryRecoveryProbe: DiagnosticProbe = async (signal) => {
+    const recovered = await deps.runPrimaryRecoveryProbe(signal);
     return recovered
       ? { ok: true, confidence: 'probable', summary: 'primary provider recovered', data: { recovered } }
       : { ok: false, confidence: 'probable', summary: 'primary provider not yet recovered', data: { recovered } };
