@@ -5,17 +5,13 @@
 Internal publication roots covered by the guard: `docs/runbooks/`, `docs/sdlc/`, `docs/superpowers/`, `docs/plans/`, `docs/cutover/`, `docs/research/`, `docs/triage/`, `docs/specs/` (selected), `docs/work-index*`, `docs/current-program.md`, `docs/handoff-*.md`, `HANDOFF-*.md`, `docs/project-status-*.md`, `docs/audit-*.md`, `tmp/`.
 
 **Total classification rows:** 130
-**Total classification rows:** 130
 
 | Classification | Count |
 |---|---:|
 | PUBLIC | 3 |
 | PRIVATE-ARCHIVE | 127 |
-| PUBLIC | 3 |
-| PRIVATE-ARCHIVE | 127 |
 | SANITIZE | 0 |
 | DELETE | 0 |
-| Total | 130 |
 | Total | 130 |
 
 | Path | Classification | Rationale |
