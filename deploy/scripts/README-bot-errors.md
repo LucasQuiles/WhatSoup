@@ -634,6 +634,13 @@ the in-place-git central pilot host. Design:
   `OnUnitInactiveSec` cadence with distinct bootstrap offsets, resource-capped
   (`MemoryMax=128M`, `TasksMax=32`), sandboxed, and forbidden from naming any
   application/fleet/dispatcher unit.
+- `python3 deploy/scripts/bot-errors-runtime-staleness.py --observe-only
+  [--json] [--critical]` — canonical non-emitting manual diagnostic. Its
+  versioned JSON report contains only bounded execution, inventory, verdict,
+  count, and failure-class fields. Exit `0` means a complete current or
+  not-running observation, `1` means complete with staleness, and `2` means
+  evidence was incomplete or a probe failed. `--critical` requires an
+  affirmative observation of the complete critical-file set.
 
 ### Single tree producer (B3)
 
