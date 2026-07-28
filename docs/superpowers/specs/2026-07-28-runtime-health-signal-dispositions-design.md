@@ -106,8 +106,10 @@ Diagnostic-only entries include:
 
 Current-risk entries preserve existing producer semantics:
 
-- recent crashes and recent resume failures;
+- recent crashes;
 - finalization degraded scopes;
+- retained finalization retries, which core health already treats as current
+  finalization debt;
 - `turnRecoveryOutstanding`;
 - exhausted recovery work, open recoveries, corrupt links, and echo conflicts;
 - the new `autoCompactActiveBackoffScopes` current gauge.

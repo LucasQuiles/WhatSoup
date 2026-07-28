@@ -226,14 +226,6 @@
       "test": "tests/runtimes/agent/health-snapshot.test.ts"
     },
     {
-      "field": "recentResumeFailures",
-      "label": "runtime_agent_recent_resume_failures",
-      "kind": "current_gauge",
-      "currentHealthEffect": "positive_is_risk",
-      "owner": "deploy/scripts/bot-errors-health-check.py",
-      "test": "tests/scripts/bot-errors-health-check.test.ts"
-    },
-    {
       "field": "pollPersistenceErrors",
       "label": "runtime_agent_poll_persistence_errors",
       "kind": "cumulative_total",

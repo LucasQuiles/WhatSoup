@@ -13,7 +13,6 @@ EXPECTED_RUNTIME_AGENT_NUMERIC_HEALTH_FIELDS = (
     "activeSessions",
     "sessionCount",
     "recentCrashes",
-    "recentResumeFailures",
     "pollPersistenceErrors",
     "autoCompactIneffective",
     "autoCompactConsecutiveRapidRearmsMax",

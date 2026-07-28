@@ -4647,16 +4647,16 @@ print(m.probe_health(9092))
     expect(event.evidence).toContain('runtime_agent_turn_recovery_quarantined_delivery=1');
   });
 
-  it('warns on recent provider resume failures without classifying them as auth loss', () => {
+  it('does not invent risk for unregistered legacy resume-failure fields', () => {
     tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-health-'));
     const configDir = join(tmpRoot, '.config', 'whatsoup', 'instances', 'eh-bot');
     const authDir = join(configDir, 'auth');
     mkdirSync(configDir, { recursive: true });
-    writeFileSync(join(configDir, 'config.json'), JSON.stringify({
+    writePrivateJson(join(configDir, 'config.json'), {
       type: 'agent',
       enabled: true,
       healthPort: 9096,
-    }));
+    });
     writeSecureCreds(authDir, {
       me: { id: 'eh-bot@s.whatsapp.net', lid: 'eh-bot@lid' },
       registrationId: 2,
@@ -4716,9 +4716,9 @@ print(m.probe_health(9092))
       alertSource?: string;
       criticalAsset?: unknown;
     };
-    expect(event.severity).toBe('warning');
-    expect(event.evidence).toContain('health eh-bot: WARN 200 http://127.0.0.1:9096/health');
-    expect(event.evidence).toContain('runtime_agent_recent_resume_failures=1');
+    expect(event.severity).toBe('info');
+    expect(event.evidence).toContain('health eh-bot: 200 http://127.0.0.1:9096/health');
+    expect(event.evidence).not.toContain('runtime_agent_recent_resume_failures');
     expect(event.evidence).toContain('runtime_agent_last_resume_failed_at=2026-06-12T04:42:52Z');
     expect(event.evidence).toContain('runtime_agent_last_session_status=idle');
     expect(event.evidence).not.toContain('provider_auth_required');
@@ -4816,12 +4816,7 @@ print(m.probe_health(9092))
         }],
       }));
 
-      for (const [registryPath, errorClass] of [
-        [missingPath, 'missing'],
-        [malformedPath, 'malformed_json'],
-        [wrongSchemaPath, 'invalid_schema'],
-        [invalidContractPath, 'invalid_contract'],
-      ] as const) {
+      const expectInvalidRegistry = (registryPath: string, errorClass: string): void => {
         const line = probeRuntimeAgent({
           turnRecoveryOutstanding: 1,
           turnRecoveryBlockedUnsafe: 4,
@@ -4831,6 +4826,41 @@ print(m.probe_health(9092))
         expect(line).toContain(`runtime_agent_health_signal_registry_error=${errorClass}`);
         expect(line).not.toContain('runtime_agent_at_risk');
         expect(line).not.toContain('runtime_agent_turn_recovery_outstanding');
+      };
+
+      for (const [registryPath, errorClass] of [
+        [missingPath, 'missing'],
+        [malformedPath, 'malformed_json'],
+        [wrongSchemaPath, 'invalid_schema'],
+        [invalidContractPath, 'invalid_contract'],
+      ] as const) {
+        expectInvalidRegistry(registryPath, errorClass);
+      }
+
+      const validSignal = {
+        field: 'turnRecoveryOutstanding',
+        label: 'runtime_agent_turn_recovery_outstanding',
+        kind: 'active_episode_count',
+        currentHealthEffect: 'positive_is_risk',
+        owner: 'bounded-owner',
+        test: 'bounded-test',
+      };
+      const invalidContracts = [
+        [{ ...validSignal, field: 'turn-recovery-outstanding' }],
+        [{ ...validSignal, label: 'runtime-agent-invalid' }],
+        [{ ...validSignal }, { ...validSignal }],
+        [{ ...validSignal }, { ...validSignal, field: 'otherField' }],
+        [{ ...validSignal, owner: '' }],
+        [{ ...validSignal, test: '' }],
+        [{ ...validSignal, currentHealthEffect: [] }],
+      ];
+      for (const [index, runtimeAgentHealthSignals] of invalidContracts.entries()) {
+        const registryPath = join(tmpRoot, `invalid-contract-${index}.json`);
+        writeFileSync(registryPath, JSON.stringify({
+          schema: 'whatsoup-fault-taxonomy-registry-v3',
+          runtimeAgentHealthSignals,
+        }));
+        expectInvalidRegistry(registryPath, 'invalid_contract');
       }
     });
   });

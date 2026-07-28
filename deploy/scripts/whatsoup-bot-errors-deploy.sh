@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# whatsoup-bot-errors-deploy.sh — reversible materialize of the 12 bot-errors runtime
+# whatsoup-bot-errors-deploy.sh — reversible materialize of the 13 bot-errors runtime
 # files into a host's TRUE bot-errors root. Expected per-file hashes are resolved at
 # startup from deploy/bot-errors-runtime-manifest.json (the single source of truth) --
 # not embedded in this script.

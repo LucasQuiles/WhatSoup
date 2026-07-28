@@ -636,6 +636,40 @@ describe('AgentRuntime.getHealthSnapshot — per_chat shape', () => {
 });
 
 describe('AgentRuntime.getHealthSnapshot — single-session shape', () => {
+  it('degrades only while aggregate auto-compact backoff is active', () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date(1_000));
+      const runtime = new AgentRuntime(makeDb(), makeMessenger(), 'test');
+      const autoCompact = (runtime as unknown as {
+        autoCompact: AutoCompactController;
+      }).autoCompact;
+      autoCompact.recordAutoCompactRapidRearm('private-scope', 100, Date.now());
+
+      expect(runtime.getHealthSnapshot()).toMatchObject({
+        status: 'degraded',
+        details: {
+          degradedReasons: ['auto_compact_backoff'],
+          autoCompactState: 'backoff',
+          autoCompactActiveBackoffScopes: 1,
+        },
+      });
+
+      vi.setSystemTime(new Date(1_000 + 15 * 60_000));
+
+      expect(runtime.getHealthSnapshot()).toMatchObject({
+        status: 'healthy',
+        details: {
+          degradedReasons: [],
+          autoCompactState: 'idle',
+          autoCompactActiveBackoffScopes: 0,
+        },
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('includes auto-compact counters in the non-per-chat branch', () => {
     mockSession.getStatus.mockReturnValue({
       active: false,

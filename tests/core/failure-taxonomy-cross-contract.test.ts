@@ -55,7 +55,6 @@ describe('failure taxonomy cross-contract', () => {
       'activeSessions',
       'sessionCount',
       'recentCrashes',
-      'recentResumeFailures',
       'pollPersistenceErrors',
       'autoCompactIneffective',
       'autoCompactConsecutiveRapidRearmsMax',
