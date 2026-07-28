@@ -62,6 +62,12 @@ function ceilingBumpMessage(measurement: FileSizeMeasurement, actualLines: numbe
 }
 
 const EXPECTED_FILE_SIZE_WARNING_FILES = [
+  // The #2084 P3b RepoHygieneExactRange receipt block took this guard to ~2033
+  // lines (the pattern/allowlist tables moved out to lib/repo-hygiene-policy.ts
+  // in the same change; the receipt surface is cohesive with the guard's scan
+  // routes it binds). Grandfathered per the project norm for large cohesive
+  // guard files; a receipts-module slice is a separate follow-up.
+  'scripts/repo-hygiene-guard.ts',
   // The q-partition-recovery-bridge merge re-added migratedSchemaSnapshot to
   // this core database module, taking it to 2069 lines — just over the
   // 2000-line arch.file-size warn budget. Grandfathered per the project norm
@@ -121,6 +127,10 @@ const EXPECTED_FILE_SIZE_WARNING_FILES = [
   'tests/runtimes/chat/runtime.test.ts',
   'tests/scripts/bot-errors-dispatcher.test.ts',
   'tests/scripts/bot-errors-health-check.test.ts',
+  // The #2084 P3b ExactRange receipt cases (+~1,000 lines) reuse this suite's
+  // shared temp-repo/commitAll harness; extracting them would duplicate that
+  // git-fixture setup, so the cohesive suite is grandfathered (~2107 lines).
+  'tests/scripts/repo-hygiene-guard.test.ts',
   'tests/transport/reconnect.test.ts',
 ].sort();
 

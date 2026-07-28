@@ -292,7 +292,7 @@ const ANCHOR_REQUIREMENTS: AnchorRequirement[] = [
   {
     id: 'repo-hygiene-sensitive-patterns',
     category: 'secret-surface',
-    file: 'scripts/repo-hygiene-guard.ts',
+    file: 'scripts/lib/repo-hygiene-policy.ts',
     anchors: [
       'model-attribution',
       'private-instance-label',
@@ -303,10 +303,18 @@ const ANCHOR_REQUIREMENTS: AnchorRequirement[] = [
       'pinecone-key',
       'private-key',
       'Co-Authored-By:',
+    ],
+    remediation: 'Restore repo-hygiene policy patterns before publishing changes.',
+  },
+  {
+    id: 'repo-hygiene-entrypoints',
+    category: 'secret-surface',
+    file: 'scripts/repo-hygiene-guard.ts',
+    anchors: [
       '--commit-authors',
       'scanCommitMessage(commit.message',
     ],
-    remediation: 'Restore repo-hygiene patterns before publishing changes.',
+    remediation: 'Restore repo-hygiene entrypoint wiring before publishing changes.',
   },
   {
     id: 'publication-sensitive-patterns',

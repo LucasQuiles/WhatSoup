@@ -1,7 +1,9 @@
 import { execFileSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
-import { pathToFileURL } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+import { TextDecoder, types as utilTypes } from 'node:util';
 import {
   git,
   isDocumentationEmailFixture,
@@ -10,6 +12,64 @@ import {
   normalizeRepoPath,
   operationalReleaseHygieneFiles,
 } from './lib/guard-core.ts';
+import {
+  ExactGitInputError,
+  MAX_EXACT_ADDED_LINE_BUDGET_V1,
+  MAX_EXACT_TREE_ENTRY_PATH_COUNT,
+  readExactAddedLinesWithinBudget,
+  readExactBlobs,
+  readExactCommitMetadata,
+  readExactCommitRange,
+  readExactTreeEntries,
+  type ExactAddedLineBudgetAccountingV1,
+  type ExactAddedLineBudgetV1,
+  type ExactAddedLineV1,
+  type ExactChangeWithAddedLinesV1,
+  type ExactCommitMetadataV1,
+} from './lib/ci-control/git-input.ts';
+import { canonicalizeBoundaryRun } from './lib/verification/boundary-run/shared.ts';
+import { parseBoundaryJsonBytes } from './lib/verification/boundary-run/schema.ts';
+import { validateExactRangeProvenance } from './lib/ci-control/exact-range-provenance.ts';
+import {
+  addedLinePatterns,
+  allowedEnvVarNameToken,
+  allowedMessagingAddressRhs,
+  allowedPhoneFixture,
+  allowedProviderKeyFixture,
+  allowedSecretAssignmentValue,
+  allowedTwilioSidFixture,
+  commitMessagePatterns,
+  disallowedCommitAuthorPatterns,
+  findDisallowedMatch,
+  fixtureFiles,
+  isAllowedPatternMatch,
+  isChildProcessShellTrue,
+  isDynamicCodeExecution,
+  isFixtureFile,
+  isPackageLockResolvedUrlLine,
+  isProcessEnvInheritance,
+  isProductionCodePath,
+  isSourceConsoleCall,
+  patternMatches,
+  projectedFileSecretFixtureFileSet,
+  projectedFileSecretFixtureFiles,
+  projectedFileSecretPatterns,
+  releaseHygieneFiles,
+  selfReferentialAllowedCodes,
+  selfReferentialAllowlistFiles,
+  srcConsoleAllowedFiles,
+  trackedSensitiveAllowlist,
+  trackedSensitiveArtifactPatterns,
+  type GuardPattern,
+} from './lib/repo-hygiene-policy.ts';
+
+export {
+  privateHostLabels,
+  isAllowedPatternMatch,
+  projectedFileSecretFixtureFiles,
+  projectedFileSecretPatternCodes,
+} from './lib/repo-hygiene-policy.ts';
+
 
 export { normalizeRepoPath } from './lib/guard-core.ts';
 
@@ -49,359 +109,6 @@ export interface CommitAuthor {
   subject: string;
   message?: string;
 }
-
-interface GuardPattern {
-  code: string;
-  message: string;
-  regex: RegExp;
-}
-
-export const projectedFileSecretFixtureFiles = [
-  'scripts/anonymize-private-literals.ts',
-  'scripts/repo-hygiene-guard.ts',
-  'tests/scripts/anonymize-private-literals.test.ts',
-  'tests/scripts/repo-hygiene-guard.test.ts',
-] as const;
-const projectedFileSecretFixtureFileSet = new Set<string>(projectedFileSecretFixtureFiles);
-
-const fixtureFiles = new Set([
-  ...projectedFileSecretFixtureFiles,
-  'tests/eslint-rules/categorized-skips.test.ts',
-  // BEAD-052 redaction-parity corpus: intentionally secret-, email-, and
-  // path-SHAPED inputs that exercise the bot-errors redactor on both the TS and
-  // Python sides. NOTE: no external secret scanner backstops this repo (the
-  // repo hooksPath shadows the global git hooks; CI runs none) - keep this
-  // blanket set minimal and prefer the code-scoped
-  // selfReferentialAllowlistFiles mechanism below.
-  'tests/fixtures/redaction-parity-corpus.jsonl',
-]);
-
-// The CAPE agent-runtime probe suite (tools/agent-runtime-probes/) is security/masking tooling:
-// its corpus is intentionally secret-, email-, and path-SHAPED test fixtures. Treat the whole
-// subtree as fixtures for these hygiene SHAPE patterns; the suite's own corpus_guard /
-// sensitive_pattern_loader covers its corpus. NOTE: no external secret scanner backstops this
-// repo (the repo hooksPath shadows the global git hooks) - keep exemptions minimal.
-const isFixtureFile = (filePath: string): boolean =>
-  fixtureFiles.has(filePath)
-  || filePath.startsWith('tools/agent-runtime-probes/');
-
-// Files that necessarily contain the operational allowlist's own private-SHAPED
-// literals: the shared allowlist source in lib, and the publication-guard test
-// that exercises those literals. Exempt ONLY the codes their own content
-// legitimately trips - every other pattern class (keys, secrets, phones,
-// tailnet IPs, JIDs) stays fully enforced on them, unlike blanket fixtureFiles
-// membership.
-const selfReferentialAllowlistFiles = new Set([
-  'scripts/lib/guard-core.ts',
-  'tests/scripts/publication-guard.test.ts',
-]);
-const selfReferentialAllowedCodes = new Set([
-  'personal-email',
-  'private-instance-label',
-  'private-host-label',
-]);
-
-const releaseHygieneFiles = [
-  'scripts/cutover.sh',
-  'scripts/migrate-namespace.sh',
-  'scripts/soak-check.sh',
-  'src/runtimes/agent/providers/child-env.ts',
-  'src/transport/contract/capabilities.ts',
-];
-
-const allowedEnvVarNameToken = /^[A-Z][A-Z0-9_]+_(?:MUTATIONS|TOKEN|KEY|URL|PATH)$/;
-const allowedMessagingAddressRhs = /@(?:s\.whatsapp\.net|c\.us|lid)$/i;
-
-// Reserved documentation-domain fixtures are defined once in guard-core so this
-// guard and publication-guard cannot disagree about the same token.
-
-// SSOT for the fleet private-host labels: the publication detection rule below,
-// and consumers like the bot-errors collector-unit hygiene test, import this.
-export const privateHostLabels = [
-  ['mw', 'lab'],
-  ['nuc', 'les'],
-  ['ana', 'bot'],
-  ['mac', 'lab'],
-].map((parts) => parts.join(''));
-const privateTailnetIps = [
-  ['100', '91', '13', '7'],
-  ['100', '84', '79', '77'],
-].map((parts) => parts.join('.'));
-
-const trackedSensitiveAllowlist = new Set(['.env.example', '.claude/settings.json']);
-
-// Reserved/fictional phone ranges that are safe as test fixtures and documentation:
-//   - North American 555-line numbers (NANP reserved-for-fiction, e.g. +1 415 555 0100)
-//   - Repo synthetic fixtures: 1555*, 1111111*, 1000000000* (console/test fixtures)
-//   - Obvious placeholders: +1234567890, +0...
-//   - UK Ofcom drama range +447700 9xxxxx
-//   - 15551230008 / 15551230006: repo-wide canonical synthetic test fixtures
-//     (used as conversationKey/JID fixtures across tests/core/*; not a real line).
-const allowedPhoneFixture = /^\+(?:1?(?:\d{3})?555\d{4}|1555\d+|1111111\d*|1?0{6,}\d*|1234567890|0+|44770[09]\d{6}|99990{0,4}\d+|1415555\d+|1999900\d+|1?5551230008|1?5551230006)$/;
-// Twilio Account SID fixtures: all-zero / repeated-char placeholder bodies.
-const allowedTwilioSidFixture = /^AC(?:0{32}|x{32}|X{32}|(?:0123456789abcdef){2})$/;
-// Provider-key fixtures: explicit test/mock/fake/example markers within the token.
-// Markers are delimiter-anchored so a real key body that merely CONTAINS the
-// substring "sample"/"dummy" (e.g. base64 ...Sample...) is not allowlisted.
-const allowedProviderKeyFixture = /(?:[_-]test[_-]|^sk-test|^pcsk_test|[_-](?:mock|fake|fixture|example|placeholder|redacted|dummy|sample)(?:[_-]|$))/i;
-// Obvious non-secret values for the high-entropy secret-assignment pattern:
-// redaction markers, placeholders, and low-entropy/repeated fixtures. Provider
-// prefixed keys (sk-ant-, pcsk_, ghp_, AC...) are caught by their dedicated
-// value-shape patterns, so secret-assignment only needs the keyword-bound
-// high-entropy residual class.
-const allowedSecretAssignmentValue = /(?:redacted|placeholder|example|changeme|your[_-]|dummy|fake|sample|notarealkey|should-be-overridden|0{8,}|(?:0123456789){2}|abcdefabcdef)/i;
-
-const disallowedCommitAuthorPatterns: GuardPattern[] = [
-  {
-    code: 'placeholder-commit-author',
-    message: 'Commit author uses a placeholder identity; amend before publishing.',
-    regex: /\b(?:whatsoup-test|test|example)\.invalid\b/i,
-  },
-  {
-    code: 'placeholder-commit-author',
-    message: 'Commit author uses a placeholder identity; amend before publishing.',
-    regex: /\bWhatSoup Test\b/i,
-  },
-  // Ad-hoc automation identities. The commit-time allowlist in
-  // .husky/check-commit-identity.sh prevents these at creation; this denylist is
-  // defense-in-depth so a --no-verify bypass is still caught by the CI range
-  // scan. Sanctioned automation commits as SoupBot <soupbot@users.noreply.github.com>.
-  {
-    code: 'ad-hoc-bot-author',
-    message:
-      'Commit author uses a retired/ad-hoc automation identity; use SoupBot <soupbot@users.noreply.github.com>.',
-    regex: /\bwhatsoup-bot\b|\bbot@users\.noreply\.github\.com\b/i,
-  },
-  {
-    code: 'ad-hoc-bot-author',
-    message:
-      'Commit author uses a retired/ad-hoc automation identity; use SoupBot <soupbot@users.noreply.github.com>.',
-    regex: /@(?:local|codex\.local)\b/i,
-  },
-];
-
-export function isAllowedPatternMatch(filePath: string, code: string, token: string): boolean {
-  if (allowedEnvVarNameToken.test(token)) return true;
-  if (code === 'personal-email' && allowedMessagingAddressRhs.test(token)) return true;
-  if (code === 'personal-email' && isGitHubSshTransportPrincipal(token)) return true;
-  // File content only. scanCommitMessage scans with an empty filePath, and a commit
-  // message never legitimately carries an email fixture — so the documentation-domain
-  // allowance must not reach it, or history text would silently gain an email escape.
-  if (code === 'personal-email' && filePath !== '' && isDocumentationEmailFixture(token)) return true;
-  if (code === 'operator-phone') {
-    return allowedPhoneFixture.test(token.replace(/[\s().-]/g, ''));
-  }
-  if (code === 'twilio-account-sid') {
-    return allowedTwilioSidFixture.test(token);
-  }
-  if (code === 'openai-key' || code === 'anthropic-key' || code === 'pinecone-key') {
-    return allowedProviderKeyFixture.test(token);
-  }
-  if (code === 'secret-assignment') {
-    return allowedSecretAssignmentValue.test(token);
-  }
-  if (selfReferentialAllowlistFiles.has(filePath) && selfReferentialAllowedCodes.has(code)) {
-    return true;
-  }
-  // Operational health-profile / fleet-manifest files legitimately reference
-  // real systemd template-unit names, which the email-shape regex matches.
-  // The shared guard-core helper tolerates the trailing ".service" suffix.
-  // Code-gated: this bypass exists only for the email and instance-label
-  // shapes those unit names produce, never for key/secret/phone/IP classes.
-  if (
-    (code === 'personal-email' || code === 'private-instance-label')
-    && operationalReleaseHygieneFiles.has(filePath)
-    && isOperationalProtocolToken(token)
-  ) {
-    return true;
-  }
-  return false;
-}
-
-const srcConsoleAllowedFiles = new Set([
-  'src/bootstrap.ts',
-  'src/bootstrap-auth.ts',
-  'src/config.ts',
-  'src/fleet/standalone.ts',
-  'src/transport/auth.ts',
-  // T5 b-12: the perf meter is itself the diagnostics surface (19-§2
-  // runtime instrumentation); its sampled notes go to the dev console by
-  // design, and the structured logger is server-side only.
-  'console/src/lib/perf.ts',
-]);
-
-export const projectedFileSecretPatternCodes = [
-  'anthropic-key',
-  'openai-key',
-  'pinecone-key',
-  'private-key',
-  'supabase-secret',
-] as const;
-const projectedFileSecretPatternCodeSet = new Set<string>(projectedFileSecretPatternCodes);
-
-const addedLinePatterns: GuardPattern[] = [
-  {
-    code: 'merge-conflict-marker',
-    message: 'Line looks like an unresolved merge conflict marker.',
-    regex: /^\s*(?:<{7}|>{7}|={7})/,
-  },
-  {
-    code: 'focused-test',
-    message: 'Focused tests must not be committed.',
-    regex: /\b(?:describe|it|test)\.only(?:\s*\(|\.)/,
-  },
-  {
-    code: 'skipped-test',
-    message: 'Skipped tests must not be committed without an explicit tracked exception.',
-    regex: /\b(?:describe|it|test)\.skip(?:\s*\(|\.)/,
-  },
-  {
-    code: 'todo-test',
-    message: 'Todo tests must not be committed.',
-    regex: /\b(?:describe|it|test)\.todo(?:\s*\(|\.)/,
-  },
-  {
-    code: 'debugger-statement',
-    message: 'debugger statements must not be committed.',
-    regex: /\bdebugger\b/,
-  },
-  {
-    code: 'model-attribution',
-    message: 'Public repo text must not include model or generated-by attribution.',
-    regex: /\b(?:Claude\s+(?:Code|Opus|Sonnet|Haiku)|Generated\s+(?:with|by)\s+(?:Claude|Codex|GPT)|Authored\s+(?:with|by)\s+(?:Claude|Codex|GPT)|Written\s+(?:with|by)\s+(?:Claude|Codex|GPT)|noreply@anthropic\.com)\b/i,
-  },
-  {
-    code: 'internal-workstream-label',
-    message: 'Public repo text must not include internal planning labels.',
-    regex: /\b(?:Phase\s+\d|WS-\d|B-\d|P1-[A-Z]|FF-\d{3}|TW-|typed-walrus|planprompt)\b/i,
-  },
-  {
-    code: 'personal-email',
-    message: 'Public repo text must not include personal email addresses.',
-    regex: /\b[A-Z0-9._%+-]+@(?!(?:users\.noreply\.github\.com|s\.whatsapp\.net|g\.us|heal\.internal)\b)[A-Z0-9.-]+\.[A-Z]{2,}\b/i,
-  },
-  {
-    code: 'local-home-path',
-    message: 'Public repo text must not include operator-local home paths.',
-    regex: /\/(?:Users|home)\/(?!runner(?:\/|$)|testuser(?:\/|$)|whatsoup(?:\/|$))[A-Za-z0-9._-]+(?:\/|$)/,
-  },
-  {
-    code: 'private-instance-label',
-    message: 'Public repo text must not include private instance labels.',
-    regex: /\b(?:BES Bot|Loops-managed|mw-bot|whatsapp:mw-bot|whatsapp-bot@(?:personal|loops|besbot)|whatsoup@(?:q|loops|besbot|personal)|whatsoup-personal|Q's (?:number|WhatsApp number))\b|instances\/personal\/(?:whatsoup\.sock|bot\.db)|\/home\/q\//,
-  },
-  {
-    code: 'private-host-label',
-    message: 'Public repo text must not include private host labels.',
-    regex: new RegExp(`\\b(?:${privateHostLabels.join('|')})\\b`, 'i'),
-  },
-  {
-    code: 'private-tailnet-ip',
-    message: 'Public repo text must not include private tailnet IPs.',
-    regex: new RegExp(`\\b(?:${privateTailnetIps.map((ip) => ip.replaceAll('.', '\\.')).join('|')})\\b`),
-  },
-  {
-    code: 'whatsapp-group-jid',
-    message: 'Public repo text must not include real-shaped WhatsApp group JIDs.',
-    regex: /\b(?!12036355555555[0-9]{4}@g\.us\b)120363\d{6,}@g\.us\b/,
-  },
-  {
-    code: 'whatsapp-user-jid',
-    message: 'Public repo text must not include real-shaped WhatsApp user JIDs.',
-    regex: /\b(?!(?:1555\d{4,}|1111111\d+|81536414179\d+)@(s\.whatsapp\.net|lid)\b)\d{8,}@(s\.whatsapp\.net|lid)\b/,
-  },
-  {
-    code: 'github-token',
-    message: 'Public repo text must not include GitHub token shapes.',
-    // Charset-boundary (not \b): catches GH=ghp_... and "token":"ghp_..." forms.
-    // Covers classic prefixes (ghp_/gho_/ghu_/ghs_/ghr_) and fine-grained PATs
-    // (github_pat_...).
-    regex: /(?<![A-Za-z0-9_-])(?:gh[pousr]_[A-Za-z0-9_]{12,}|github_pat_[A-Za-z0-9_]{20,})(?![A-Za-z0-9_-])/,
-  },
-  {
-    code: 'anthropic-key',
-    message: 'Public repo text must not include Anthropic API key shapes.',
-    // Covers sk-ant-api03-..., sk-ant-admin01-..., etc. Charset-boundary so
-    // ANTHROPIC_API_KEY=sk-ant-... and {"apiKey":"sk-ant-..."} are caught.
-    regex: /(?<![A-Za-z0-9_-])sk-ant-[A-Za-z0-9-]{12,}(?![A-Za-z0-9_-])/,
-  },
-  {
-    code: 'openai-key',
-    message: 'Public repo text must not include OpenAI key shapes.',
-    // Excludes sk-ant- (handled by the dedicated anthropic-key pattern) so each
-    // key matches exactly one code.
-    regex: /(?<![A-Za-z0-9_-])sk-(?!ant-)(?:proj-)?[A-Za-z0-9_-]{16,}(?![A-Za-z0-9_-])/,
-  },
-  {
-    code: 'pinecone-key',
-    message: 'Public repo text must not include Pinecone key shapes.',
-    regex: /(?<![A-Za-z0-9_-])pcsk_[A-Za-z0-9_-]{12,}(?![A-Za-z0-9_-])/,
-  },
-  {
-    code: 'supabase-secret',
-    message: 'Public repo text must not include Supabase secret key shapes.',
-    regex: /(?<![A-Za-z0-9_-])sb_secret_[A-Za-z0-9_-]{16,}(?![A-Za-z0-9_-])/,
-  },
-  {
-    code: 'twilio-account-sid',
-    message: 'Public repo text must not include Twilio Account SID shapes.',
-    // AC + 32 hex (case-insensitive). Charset-boundary avoids matching words like ACCOUNT.
-    regex: /(?<![A-Za-z0-9])AC[0-9a-fA-F]{32}(?![A-Za-z0-9])/,
-  },
-  {
-    code: 'slack-token',
-    message: 'Public repo text must not include Slack token shapes.',
-    regex: /(?<![A-Za-z0-9_-])xox[baprs]-[A-Za-z0-9-]{12,}(?![A-Za-z0-9_-])/,
-  },
-  {
-    code: 'private-key',
-    message: 'Public repo text must not include private key material.',
-    // Full-block match (header AND body/footer) so a single-line PEM literal is
-    // caught in its entirety; header-only fallback for multi-line diffs where only
-    // the BEGIN line is on an added line. See feedback-secret-scan-word-boundary.
-    regex: /-{5}BEGIN (?:RSA |DSA |EC |OPENSSH |PGP |ENCRYPTED )?PRIVATE KEY-{5}/,
-  },
-  {
-    code: 'secret-assignment',
-    message: 'Public repo text must not include secret-bearing assignments.',
-    // Keyword-based assignment WITHOUT a leading \b. The historical false-negative
-    // (feedback-secret-scan-word-boundary-false-negative) is that \b never fires
-    // between two word chars, so ANTHROPIC_API_KEY=, PINECONE_API_KEY=, MY_SECRET=,
-    // and JSON "apiKey":"..." were silently missed. We anchor on the END of the
-    // keyword instead and require a QUOTED, HIGH-ENTROPY string literal (>=20
-    // chars with a digit and mixed case) — the form a real hardcoded secret takes.
-    // Bare-identifier RHS (apiKey: config.apiKey) is variable indirection, and
-    // short lowercase dummy fixtures (apiKey: 'sk-ant-secret') stay below the
-    // entropy floor. Provider-prefixed keys are independently caught by the
-    // dedicated value-shape patterns. allowedSecretAssignmentValue filters the
-    // residual placeholder/repeated-char cases (fail-closed default).
-    // Value is captured in the `value` group so allowlist checks see only the RHS
-    // (not the key NAME) — closes the EXAMPLE_API_KEY=<real> bypass. Two value
-    // forms qualify as high-entropy: (a) >=20 chars with a digit AND a letter of
-    // each case OR a special char, (b) a >=20-char all-lowercase/upper hex blob
-    // (HMAC/webhook secrets that carry no case signal).
-    regex: /(?:[Aa][Pp][Ii][_-]?[Kk][Ee][Yy]|[Aa][Cc][Cc][Ee][Ss][Ss][_-]?[Tt][Oo][Kk][Ee][Nn]|[Aa][Uu][Tt][Hh][_-]?[Tt][Oo][Kk][Ee][Nn]|(?<![A-Za-z])[Ss][Ee][Cc][Rr][Ee][Tt](?:[_-]?[Kk][Ee][Yy])?|(?<![A-Za-z])[Pp][Aa][Ss][Ss][Ww][Oo][Rr][Dd]|(?<![A-Za-z])[Pp][Aa][Ss][Ss][Ww][Dd])["']?\s*[:=]\s*["']?(?<value>(?:(?=[A-Za-z0-9_\-./+!@#$%^&*]{20})[A-Za-z0-9_\-./+!@#$%^&*]*[A-Z][A-Za-z0-9_\-./+!@#$%^&*]*[0-9][A-Za-z0-9_\-./+!@#$%^&*]*|(?=[A-Za-z0-9_\-./+!@#$%^&*]{20})[A-Za-z0-9_\-./+!@#$%^&*]*[a-z][A-Za-z0-9_\-./+!@#$%^&*]*[0-9][A-Za-z0-9_\-./+!@#$%^&*]*|[0-9a-fA-F]{32,}))/,
-  },
-  {
-    code: 'operator-phone',
-    message: 'Public repo text must not include real-shaped operator phone numbers.',
-    // E.164 with explicit +; fixture-reserved ranges are allowlisted in
-    // isAllowedPatternMatch (555-line, +1234567890, 1555*, 1111111*, UK +447700).
-    regex: /\+[1-9]\d{9,14}(?!\d)/,
-  },
-];
-const projectedFileSecretPatterns = addedLinePatterns.filter((pattern) =>
-  projectedFileSecretPatternCodeSet.has(pattern.code),
-);
-
-const commitMessagePatterns: GuardPattern[] = [
-  {
-    code: 'commit-coauthor-trailer',
-    message: 'Public commits must not include Co-Authored-By trailers.',
-    regex: /^Co-Authored-By:/i,
-  },
-  ...addedLinePatterns.filter((pattern) => pattern.code !== 'merge-conflict-marker'),
-];
 
 export function parseArgs(argv: string[]): ParsedArgs {
   const args: ParsedArgs = { mode: 'staged', help: false };
@@ -492,42 +199,9 @@ export function parseUnifiedDiffAddedLines(diff: string): AddedLine[] {
   return addedLines;
 }
 
-interface GuardPatternMatch {
-  token: string;
-  allowlistToken: string;
-}
 
-function patternMatches(pattern: GuardPattern, text: string): GuardPatternMatch[] {
-  const flags = pattern.regex.flags.includes('g') ? pattern.regex.flags : `${pattern.regex.flags}g`;
-  const regex = new RegExp(pattern.regex.source, flags);
-  const matches: GuardPatternMatch[] = [];
-
-  for (const match of text.matchAll(regex)) {
-    const token = match[0];
-    // For patterns that capture a `value` group (secret-assignment), the allowlist
-    // must see only the RHS value — not the key NAME — so EXAMPLE_API_KEY=<real>
-    // cannot be suppressed by the word "example" appearing in the key name.
-    const allowlistToken = match.groups?.value ?? token;
-    matches.push({ token, allowlistToken });
-    if (token === '') break;
-  }
-
-  return matches;
-}
-
-function findDisallowedMatch(filePath: string, pattern: GuardPattern, text: string): string | null {
-  for (const match of patternMatches(pattern, text)) {
-    if (!isAllowedPatternMatch(filePath, pattern.code, match.allowlistToken)) {
-      return match.token;
-    }
-  }
-
-  return null;
-}
-
-function isPackageLockResolvedUrlLine(filePath: string, text: string): boolean {
-  return normalizeRepoPath(filePath) === 'package-lock.json'
-    && /^\s*"resolved":\s*"https:\/\/registry\.npmjs\.org\//.test(text);
+function isInertMarkdownPath(filePath: string): boolean {
+  return /\.(?:md|markdown)$/i.test(filePath);
 }
 
 export function scanProjectedFileSecretLines(lines: AddedLine[]): GuardIssue[] {
@@ -557,17 +231,13 @@ export function scanAddedLines(lines: AddedLine[]): GuardIssue[] {
 
   for (const line of lines) {
     const filePath = normalizeRepoPath(line.filePath);
-    const productionCodePath = /^(?:src|scripts|deploy|console\/src)\//.test(filePath);
+    const productionCodePath = isProductionCodePath(filePath);
 
     if (isFixtureFile(filePath)) {
       issues.push(...scanProjectedFileSecretLines([line]));
       continue;
     }
-    if (
-      /^(?:src|console\/src)\//.test(filePath)
-      && !srcConsoleAllowedFiles.has(filePath)
-      && /\bconsole\.(?:debug|error|info|log|warn)\s*\(/.test(line.text)
-    ) {
+    if (isSourceConsoleCall(filePath, line.text)) {
       issues.push({
         code: 'src-console-call',
         message: 'Production source should use the structured logger instead of ad-hoc console calls.',
@@ -575,7 +245,7 @@ export function scanAddedLines(lines: AddedLine[]): GuardIssue[] {
         line: line.line,
       });
     }
-    if (productionCodePath && /(?:\benv\s*:\s*process\.env|\.{3}process\.env\b)/.test(line.text)) {
+    if (productionCodePath && isProcessEnvInheritance(line.text)) {
       issues.push({
         code: 'process-env-inheritance',
         message: 'Child processes must use an explicit allowlisted env instead of inheriting process.env.',
@@ -583,7 +253,7 @@ export function scanAddedLines(lines: AddedLine[]): GuardIssue[] {
         line: line.line,
       });
     }
-    if (productionCodePath && /\bshell\s*:\s*true\b/.test(line.text)) {
+    if (productionCodePath && isChildProcessShellTrue(line.text)) {
       issues.push({
         code: 'child-process-shell-true',
         message: 'Child process shell mode must not be introduced without an explicit reviewed exception.',
@@ -591,7 +261,7 @@ export function scanAddedLines(lines: AddedLine[]): GuardIssue[] {
         line: line.line,
       });
     }
-    if (productionCodePath && /\b(?:eval\s*\(|(?:new\s+)?Function\s*\()/.test(line.text)) {
+    if (productionCodePath && isDynamicCodeExecution(line.text)) {
       issues.push({
         code: 'dynamic-code-execution',
         message: 'Dynamic code execution must not be introduced in source, scripts, or deploy code.',
@@ -599,7 +269,11 @@ export function scanAddedLines(lines: AddedLine[]): GuardIssue[] {
         line: line.line,
       });
     }
-    if (isSuppressionComment(line.text) && !hasSuppressionRationaleAndExpiry(line.text)) {
+    if (
+      !isInertMarkdownPath(filePath)
+      && isSuppressionComment(line.text)
+      && !hasSuppressionRationaleAndExpiry(line.text)
+    ) {
       issues.push({
         code: 'unbounded-suppression',
         message: 'Lint/type suppressions must include a rationale and an expires YYYY-MM-DD marker.',
@@ -674,14 +348,8 @@ function trackedFiles(cwd: string, filePaths: readonly string[]): string[] {
 export function isTrackedSensitiveArtifact(filePath: string): boolean {
   const normalized = normalizeRepoPath(filePath);
   if (trackedSensitiveAllowlist.has(normalized)) return false;
-  if (/^\.env(?:\.|$)/.test(normalized)) return true;
-  if (/(^|\/)auth_info/.test(normalized)) return true;
-  if (/\.(?:db|db-wal|db-shm)$/.test(normalized)) return true;
-  if (/\.(?:pem|key)$/.test(normalized)) return true;
-  if (/^(?:\.codex|\.tmup-artifacts|artifacts)(?:\/|$)/.test(normalized)) return true;
+  if (trackedSensitiveArtifactPatterns.some((pattern) => pattern.test(normalized))) return true;
   if (normalized === '.mcp.json') return true;
-  if (/^instances\/[^/]+\/instance\.json$/.test(normalized)) return true;
-  if (/^(?:users|groups|\.sweep)\//.test(normalized)) return true;
   return false;
 }
 
@@ -1091,6 +759,1176 @@ export function readCommitAuthors(cwd: string): CommitAuthor[] {
     cwd,
   );
   return parseCommitAuthorLog(log);
+}
+
+const REPO_HYGIENE_EXACT_RANGE_DETECTOR = 'repo-hygiene-guard';
+const REPO_HYGIENE_EXACT_RANGE_OWNER = 'repository-hygiene-decision-owner';
+const REPO_HYGIENE_EXACT_RANGE_VALIDITY_MS = 5 * 60 * 1000;
+const MAX_REPO_HYGIENE_EXACT_RANGE_FINDINGS = 4_096;
+const FULL_OID = /^[0-9a-f]{40}$/;
+const SHA256 = /^sha256:[0-9a-f]{64}$/;
+const UTF8_FATAL = new TextDecoder('utf-8', { fatal: true });
+const MODULE_PATH = fileURLToPath(import.meta.url);
+const GUARD_CORE_MODULE_PATH = fileURLToPath(new URL('./lib/guard-core.ts', import.meta.url));
+const REPO_HYGIENE_POLICY_MODULE_PATH = fileURLToPath(
+  new URL('./lib/repo-hygiene-policy.ts', import.meta.url),
+);
+const EXACT_RANGE_PROVENANCE_MODULE_PATH = fileURLToPath(
+  new URL('./lib/ci-control/exact-range-provenance.ts', import.meta.url),
+);
+const REPO_HYGIENE_POLICY_PROJECTION_COVERAGE = Object.freeze([
+  'base-line-sets',
+  'child-process-shell-true',
+  'dynamic-code-execution',
+  'find-disallowed-match',
+  'fixture-file-routing',
+  'normalize-repo-path',
+  'package-lock-resolved-url-exception',
+  'pattern-allowlist-routing',
+  'process-env-inheritance',
+  'production-code-path-routing',
+  'scan-added-lines',
+  'scan-commit-authors',
+  'scan-commit-message',
+  'secret-history-subset',
+  'source-console-routing',
+  'suppression-comment-routing',
+  'suppression-rationale-expiry',
+  'tracked-sensitive-artifact-routing',
+] as const);
+const REPO_HYGIENE_EXACT_RANGE_LIMITATIONS = Object.freeze([
+  'aggregate-authorization-unavailable',
+  'changed-content-only',
+  'executor-platform-unavailable',
+  'finding-fingerprint-unavailable',
+  'precondition-receipt-unavailable',
+  'producer-authentication-unavailable',
+  'report-only',
+  'terminal-attempt-process-group-unavailable',
+] as const);
+
+export interface RepoHygieneExactRangeInputV1 {
+  baseOid: string;
+  remoteOid: string | null;
+  localOid: string;
+}
+
+export interface RepoHygieneExactRangeFindingV1 {
+  cause: string;
+  observationKind:
+    | 'net-added-line'
+    | 'net-sensitive-artifact'
+    | 'history-added-line'
+    | 'history-sensitive-artifact'
+    | 'commit-metadata';
+  commitOid: string;
+  parentOid: string | null;
+  path: string | null;
+  pathDisclosure: 'redacted' | 'not-applicable';
+  line: number | null;
+  blobOid: string | null;
+}
+
+export interface RepoHygieneExactRangeCommitBindingV1 {
+  oid: string;
+  parentOids: string[];
+  treeOid: string;
+  metadataSha256: `sha256:${string}`;
+}
+
+export interface RepoHygieneExactRangeReceiptV1 {
+  schemaVersion: 1;
+  detectorId: typeof REPO_HYGIENE_EXACT_RANGE_DETECTOR;
+  decisionOwner: typeof REPO_HYGIENE_EXACT_RANGE_OWNER;
+  authorization: 'report-only';
+  outcome: 'pass' | 'block';
+  exitCode: 0 | 1;
+  completeness: 'complete';
+  baseOid: string;
+  remoteOid: string | null;
+  rangeStartOid: string;
+  localOid: string;
+  toolDigest: `sha256:${string}`;
+  policyDigest: `sha256:${string}`;
+  commitBindings: RepoHygieneExactRangeCommitBindingV1[];
+  commitRangeDigest: `sha256:${string}`;
+  metadataDigest: `sha256:${string}`;
+  observedPathDisclosure: 'all-redacted';
+  observedPathDigest: `sha256:${string}`;
+  observedBlobOidDigest: `sha256:${string}`;
+  budget: ExactAddedLineBudgetAccountingV1;
+  claimedScope: {
+    content: 'net-range-all-rules';
+    history: 'per-parent-secret-and-sensitive-artifact';
+    metadata: 'all-ordered-outgoing-commits';
+  };
+  observedScope: {
+    commitCount: number;
+    parentEdgeCount: number;
+    changeCount: number;
+    observedPathCount: number;
+  };
+  nativeCauses: string[];
+  findings: RepoHygieneExactRangeFindingV1[];
+  limitations: string[];
+  createdAt: string;
+  validUntil: string;
+}
+
+export interface RepoHygieneExactRangeArtifactV1 {
+  payloadBytes: Uint8Array;
+  binding: {
+    schemaVersion: 1;
+    detectorId: typeof REPO_HYGIENE_EXACT_RANGE_DETECTOR;
+    payloadByteLength: number;
+    payloadSha256: `sha256:${string}`;
+  };
+}
+
+export interface RepoHygieneExactRangeExpectedV1 extends RepoHygieneExactRangeInputV1 {
+  currentToolDigest: string;
+  currentPolicyDigest: string;
+  expectedPayloadByteLength: number;
+  expectedPayloadSha256: string;
+}
+
+export type RepoHygieneExactRangeErrorCode =
+  | 'repo-hygiene.exact-range.input-malformed'
+  | 'repo-hygiene.exact-range.evidence-unavailable'
+  | 'repo-hygiene.exact-range.budget'
+  | 'repo-hygiene.exact-range.identity-mismatch'
+  | 'repo-hygiene.exact-range.tool-drift'
+  | 'repo-hygiene.exact-range.policy-drift'
+  | 'repo-hygiene.exact-range.receipt-invalid'
+  | 'repo-hygiene.exact-range.receipt-binding-mismatch'
+  | 'repo-hygiene.exact-range.receipt-stale'
+  | 'repo-hygiene.exact-range.tool-mismatch'
+  | 'repo-hygiene.exact-range.policy-mismatch';
+
+export type RepoHygieneExactRangeBuildResultV1 =
+  | { ok: true; artifact: RepoHygieneExactRangeArtifactV1 }
+  | { ok: false; error: { code: RepoHygieneExactRangeErrorCode } };
+
+export type RepoHygieneExactRangeValidationResultV1 =
+  | { ok: true; receipt: RepoHygieneExactRangeReceiptV1 }
+  | { ok: false; error: { code: RepoHygieneExactRangeErrorCode } };
+
+function exactRangeFailure(
+  code: RepoHygieneExactRangeErrorCode,
+): { ok: false; error: { code: RepoHygieneExactRangeErrorCode } } {
+  return { ok: false, error: { code } };
+}
+
+function strictRecord(value: unknown, expectedKeys: readonly string[]): Record<string, unknown> | null {
+  try {
+    if (
+      typeof value !== 'object'
+      || value === null
+      || Array.isArray(value)
+      || utilTypes.isProxy(value)
+      || Object.getPrototypeOf(value) !== Object.prototype
+    ) return null;
+    const keys = Reflect.ownKeys(value);
+    if (keys.some((key) => typeof key !== 'string') || keys.length !== expectedKeys.length) return null;
+    const sorted = [...keys].sort();
+    if (sorted.some((key, index) => key !== [...expectedKeys].sort()[index])) return null;
+    const descriptors = Object.getOwnPropertyDescriptors(value);
+    for (const key of expectedKeys) {
+      const descriptor = descriptors[key];
+      if (
+        descriptor === undefined
+        || !('value' in descriptor)
+        || descriptor.enumerable !== true
+      ) return null;
+    }
+    return value as Record<string, unknown>;
+  } catch {
+    return null;
+  }
+}
+
+function validateExactRangeInput(value: unknown): RepoHygieneExactRangeInputV1 | null {
+  const record = strictRecord(value, ['baseOid', 'remoteOid', 'localOid']);
+  if (
+    record === null
+    || typeof record.baseOid !== 'string'
+    || !FULL_OID.test(record.baseOid)
+    || (record.remoteOid !== null && (typeof record.remoteOid !== 'string' || !FULL_OID.test(record.remoteOid)))
+    || typeof record.localOid !== 'string'
+    || !FULL_OID.test(record.localOid)
+  ) return null;
+  return {
+    baseOid: record.baseOid,
+    remoteOid: record.remoteOid as string | null,
+    localOid: record.localOid,
+  };
+}
+
+function sha256Bytes(bytes: Uint8Array): `sha256:${string}` {
+  return `sha256:${createHash('sha256').update(bytes).digest('hex')}`;
+}
+
+function sha256Canonical(value: unknown): `sha256:${string}` {
+  return sha256Bytes(Buffer.from(canonicalizeBoundaryRun(value), 'utf8'));
+}
+
+function readToolBytes(): Buffer {
+  const sources = [
+    { id: 'scripts/repo-hygiene-guard.ts', bytes: readFileSync(MODULE_PATH) },
+    { id: 'scripts/lib/repo-hygiene-policy.ts', bytes: readFileSync(REPO_HYGIENE_POLICY_MODULE_PATH) },
+    { id: 'scripts/lib/ci-control/exact-range-provenance.ts', bytes: readFileSync(EXACT_RANGE_PROVENANCE_MODULE_PATH) },
+  ];
+  const chunks: Buffer[] = [Buffer.from('repo-hygiene-tool-v1\0', 'utf8')];
+  for (const source of sources) {
+    const id = Buffer.from(source.id, 'utf8');
+    chunks.push(
+      Buffer.from(`${id.byteLength}:${source.bytes.byteLength}:`, 'ascii'),
+      id,
+      source.bytes,
+    );
+  }
+  return Buffer.concat(chunks);
+}
+
+function repoHygienePolicyProjection(): unknown {
+  const project = (patterns: readonly GuardPattern[]) => patterns.map((pattern) => ({
+    code: pattern.code,
+    message: pattern.message,
+    source: pattern.regex.source,
+    flags: pattern.regex.flags,
+  }));
+  return {
+    schemaVersion: 1,
+    guardCoreDigest: sha256Bytes(readFileSync(GUARD_CORE_MODULE_PATH)),
+    addedLinePatterns: project(addedLinePatterns),
+    commitMessagePatterns: project(commitMessagePatterns),
+    disallowedCommitAuthorPatterns: project(disallowedCommitAuthorPatterns),
+    secretPatternCodes: [...secretPatternCodes].sort(),
+    fixtureFiles: [...fixtureFiles].sort(),
+    selfReferentialAllowlistFiles: [...selfReferentialAllowlistFiles].sort(),
+    selfReferentialAllowedCodes: [...selfReferentialAllowedCodes].sort(),
+    trackedSensitiveAllowlist: [...trackedSensitiveAllowlist].sort(),
+    trackedSensitiveArtifactPatterns: trackedSensitiveArtifactPatterns.map((pattern) => ({
+      source: pattern.source,
+      flags: pattern.flags,
+    })),
+    trackedSensitiveArtifactExactPaths: ['.mcp.json'],
+    allowedMatchPolicies: {
+      allowedEnvVarNameToken: { source: allowedEnvVarNameToken.source, flags: allowedEnvVarNameToken.flags },
+      allowedMessagingAddressRhs: { source: allowedMessagingAddressRhs.source, flags: allowedMessagingAddressRhs.flags },
+      allowedPhoneFixture: { source: allowedPhoneFixture.source, flags: allowedPhoneFixture.flags },
+      allowedTwilioSidFixture: { source: allowedTwilioSidFixture.source, flags: allowedTwilioSidFixture.flags },
+      allowedProviderKeyFixture: { source: allowedProviderKeyFixture.source, flags: allowedProviderKeyFixture.flags },
+      allowedSecretAssignmentValue: { source: allowedSecretAssignmentValue.source, flags: allowedSecretAssignmentValue.flags },
+      documentationEmailFixtureImplementation: isDocumentationEmailFixture.toString(),
+      operationalProtocolTokenImplementation: isOperationalProtocolToken.toString(),
+      operationalReleaseHygieneFiles: [...operationalReleaseHygieneFiles].sort(),
+    },
+    sourceConsoleAllowedFiles: [...srcConsoleAllowedFiles].sort(),
+    historyPolicy: {
+      patterns: [...secretPatternCodes].sort(),
+      baselineSuppression: 'range-start-same-path-byte-identical-crlf-line',
+      sensitiveArtifacts: true,
+    },
+    liveRouteCoverage: [...REPO_HYGIENE_POLICY_PROJECTION_COVERAGE],
+    liveRouteImplementations: {
+      baseLineSets: baseLineSets.toString(),
+      childProcessShellTrue: isChildProcessShellTrue.toString(),
+      dynamicCodeExecution: isDynamicCodeExecution.toString(),
+      findDisallowedMatch: findDisallowedMatch.toString(),
+      fixtureFileRouting: isFixtureFile.toString(),
+      normalizeRepoPath: normalizeRepoPath.toString(),
+      packageLockResolvedUrlException: isPackageLockResolvedUrlLine.toString(),
+      patternAllowlistRouting: isAllowedPatternMatch.toString(),
+      processEnvInheritance: isProcessEnvInheritance.toString(),
+      productionCodePathRouting: isProductionCodePath.toString(),
+      scanAddedLines: scanAddedLines.toString(),
+      scanCommitAuthors: scanCommitAuthors.toString(),
+      scanCommitMessage: scanCommitMessage.toString(),
+      secretHistorySubset: secretCauses.toString(),
+      sourceConsoleRouting: isSourceConsoleCall.toString(),
+      suppressionCommentRouting: isSuppressionComment.toString(),
+      suppressionRationaleExpiry: hasSuppressionRationaleAndExpiry.toString(),
+      trackedSensitiveArtifactRouting: isTrackedSensitiveArtifact.toString(),
+    },
+  };
+}
+
+export function canonicalRepoHygienePolicyProjection(): string {
+  return canonicalizeBoundaryRun(repoHygienePolicyProjection());
+}
+
+function policyDigest(): `sha256:${string}` {
+  return sha256Bytes(Buffer.from(canonicalRepoHygienePolicyProjection(), 'utf8'));
+}
+
+export function currentRepoHygieneToolDigest(): `sha256:${string}` {
+  return sha256Bytes(readToolBytes());
+}
+
+export function currentRepoHygienePolicyDigest(): `sha256:${string}` {
+  return policyDigest();
+}
+
+export function repoHygienePolicyProjectionCoverage(): string[] {
+  return [...REPO_HYGIENE_POLICY_PROJECTION_COVERAGE];
+}
+
+function mapExactRangeError(error: unknown): RepoHygieneExactRangeErrorCode {
+  if (error instanceof ExactGitInputError) {
+    if (error.code.endsWith('-budget') || error.code.endsWith('.budget')) {
+      return 'repo-hygiene.exact-range.budget';
+    }
+    if (error.code.endsWith('-identity-mismatch') || error.code.endsWith('.identity-mismatch')) {
+      return 'repo-hygiene.exact-range.identity-mismatch';
+    }
+    if (error.code.endsWith('-malformed') || error.code.endsWith('.input-malformed')) {
+      return 'repo-hygiene.exact-range.input-malformed';
+    }
+  }
+  return 'repo-hygiene.exact-range.evidence-unavailable';
+}
+
+function copyBudget(budget: ExactAddedLineBudgetV1): ExactAddedLineBudgetV1 {
+  return {
+    changeCount: budget.changeCount,
+    sourceBlobBytes: budget.sourceBlobBytes,
+    sourceLineCount: budget.sourceLineCount,
+    patchBytes: budget.patchBytes,
+    addedLineCount: budget.addedLineCount,
+    addedTextBytes: budget.addedTextBytes,
+  };
+}
+
+function budgetAccounting(
+  limit: ExactAddedLineBudgetV1,
+  remaining: ExactAddedLineBudgetV1,
+): ExactAddedLineBudgetAccountingV1 {
+  const consumed = {} as ExactAddedLineBudgetV1;
+  for (const key of Object.keys(limit) as Array<keyof ExactAddedLineBudgetV1>) {
+    consumed[key] = limit[key] - remaining[key];
+  }
+  return { limit: copyBudget(limit), consumed, remaining: copyBudget(remaining) };
+}
+
+interface HistoryLineCandidate {
+  cause: string;
+  commitOid: string;
+  parentOid: string;
+  path: string;
+  line: number;
+  blobOid: string;
+  text: string;
+}
+
+function secretCauses(line: ExactAddedLineV1): string[] {
+  if (isFixtureFile(normalizeRepoPath(line.path))) return [];
+  return secretPatterns
+    .filter((pattern) => findDisallowedMatch(normalizeRepoPath(line.path), pattern, line.text) !== null)
+    .map((pattern) => pattern.code);
+}
+
+function baseLineSets(
+  cwd: string,
+  rangeStartOid: string,
+  paths: readonly string[],
+): Map<string, Set<string>> {
+  if (paths.length > MAX_EXACT_TREE_ENTRY_PATH_COUNT) {
+    throw new ExactGitInputError('ci.input.tree-entry-budget', 'ci.input.tree-entry-budget');
+  }
+  const result = new Map<string, Set<string>>();
+  if (paths.length === 0) return result;
+  const entries = readExactTreeEntries(cwd, { candidateOid: rangeStartOid, paths });
+  const objectOids = entries.entries
+    .filter((entry) => entry.presence === 'present')
+    .map((entry) => {
+      if (entry.objectOid === null || entry.objectType === 'tree' || entry.objectType === 'gitlink') {
+        throw new ExactGitInputError('ci.input.tree-entry-malformed', 'ci.input.tree-entry-malformed');
+      }
+      return entry.objectOid;
+    });
+  const blobs = new Map(readExactBlobs(cwd, objectOids).map((blob) => [blob.oid, blob]));
+  for (const entry of entries.entries) {
+    if (entry.presence === 'absent') {
+      result.set(entry.path, new Set());
+      continue;
+    }
+    const blob = blobs.get(entry.objectOid!);
+    if (blob === undefined || blob.bytes.includes(0)) {
+      throw new ExactGitInputError('ci.input.blob-set-malformed', 'ci.input.blob-set-malformed');
+    }
+    let decoded: string;
+    try {
+      decoded = UTF8_FATAL.decode(blob.bytes);
+    } catch {
+      throw new ExactGitInputError('ci.input.added-lines.invalid-utf8', 'ci.input.added-lines.invalid-utf8');
+    }
+    const rows = decoded === '' ? [] : decoded.split('\n');
+    if (decoded.endsWith('\n')) rows.pop();
+    result.set(entry.path, new Set(rows.map((row, index) => (
+      (index < rows.length - 1 || decoded.endsWith('\n')) && row.endsWith('\r') ? row.slice(0, -1) : row
+    ))));
+  }
+  return result;
+}
+
+function compareFindings(
+  left: RepoHygieneExactRangeFindingV1,
+  right: RepoHygieneExactRangeFindingV1,
+): number {
+  return [left.cause, left.observationKind, left.commitOid, left.parentOid ?? '', left.path ?? '', String(left.line ?? 0)]
+    .join('\0')
+    .localeCompare([right.cause, right.observationKind, right.commitOid, right.parentOid ?? '', right.path ?? '', String(right.line ?? 0)].join('\0'));
+}
+
+function nativeCauseCodes(): ReadonlySet<string> {
+  return new Set([
+    ...addedLinePatterns.map((pattern) => pattern.code),
+    ...commitMessagePatterns.map((pattern) => pattern.code),
+    ...disallowedCommitAuthorPatterns.map((pattern) => pattern.code),
+    'src-console-call',
+    'process-env-inheritance',
+    'child-process-shell-true',
+    'dynamic-code-execution',
+    'unbounded-suppression',
+    'branch-sensitive-artifact',
+    'branch-history-sensitive-artifact',
+  ]);
+}
+
+function appendExactRangeFinding(
+  findings: RepoHygieneExactRangeFindingV1[],
+  projectedFindingKeys: Set<string>,
+  finding: RepoHygieneExactRangeFindingV1,
+): void {
+  const projectedKey = canonicalizeBoundaryRun(finding);
+  if (projectedFindingKeys.has(projectedKey)) return;
+  if (findings.length >= MAX_REPO_HYGIENE_EXACT_RANGE_FINDINGS) {
+    throw new ExactGitInputError('ci.input.added-lines.budget', 'ci.input.added-lines.budget');
+  }
+  projectedFindingKeys.add(projectedKey);
+  findings.push(finding);
+}
+
+function appendRawFindingKey(rawFindingKeys: Set<string>, key: string): boolean {
+  if (rawFindingKeys.has(key)) return false;
+  if (rawFindingKeys.size >= MAX_REPO_HYGIENE_EXACT_RANGE_FINDINGS) {
+    throw new ExactGitInputError('ci.input.added-lines.budget', 'ci.input.added-lines.budget');
+  }
+  rawFindingKeys.add(key);
+  return true;
+}
+
+function scanNetAddedLineFindingsIncrementally(
+  changes: readonly ExactChangeWithAddedLinesV1[],
+  commitOid: string,
+  parentOid: string,
+  findings: RepoHygieneExactRangeFindingV1[],
+  projectedFindingKeys: Set<string>,
+  rawFindingKeys: Set<string>,
+): void {
+  for (const change of changes) {
+    for (const exactLine of change.addedLines) {
+      for (const issue of scanAddedLines([{
+        filePath: exactLine.path,
+        line: exactLine.newLineNumber,
+        text: exactLine.text,
+      }])) {
+        const finding: RepoHygieneExactRangeFindingV1 = {
+          cause: issue.code,
+          observationKind: 'net-added-line',
+          commitOid,
+          parentOid,
+          path: null,
+          pathDisclosure: issue.filePath === undefined ? 'not-applicable' : 'redacted',
+          line: issue.line ?? null,
+          blobOid: issue.filePath === exactLine.path && issue.line === exactLine.newLineNumber
+            ? exactLine.newBlobOid
+            : null,
+        };
+        appendExactRangeFinding(findings, projectedFindingKeys, finding);
+        appendRawFindingKey(
+          rawFindingKeys,
+          `${finding.cause}\0${issue.filePath ?? ''}\0${finding.line ?? 0}`,
+        );
+      }
+    }
+  }
+}
+
+function appendHistoryLineCandidate(
+  historyLines: HistoryLineCandidate[],
+  historyArtifactCount: number,
+  candidate: HistoryLineCandidate,
+): void {
+  if (historyLines.length + historyArtifactCount >= MAX_REPO_HYGIENE_EXACT_RANGE_FINDINGS) {
+    throw new ExactGitInputError('ci.input.added-lines.budget', 'ci.input.added-lines.budget');
+  }
+  historyLines.push(candidate);
+}
+
+function appendHistoryArtifactCandidate(
+  historyArtifacts: Array<{
+    rawPath: string;
+    finding: RepoHygieneExactRangeFindingV1;
+  }>,
+  historyLineCount: number,
+  candidate: {
+    rawPath: string;
+    finding: RepoHygieneExactRangeFindingV1;
+  },
+): void {
+  if (historyArtifacts.length + historyLineCount >= MAX_REPO_HYGIENE_EXACT_RANGE_FINDINGS) {
+    throw new ExactGitInputError('ci.input.added-lines.budget', 'ci.input.added-lines.budget');
+  }
+  historyArtifacts.push(candidate);
+}
+
+function deepFreeze<T>(value: T): T {
+  if (typeof value !== 'object' || value === null || ArrayBuffer.isView(value)) return value;
+  for (const nested of Object.values(value as Record<string, unknown>)) deepFreeze(nested);
+  return Object.freeze(value);
+}
+
+export function createRepoHygieneExactRangeArtifact(
+  cwd: string,
+  input: RepoHygieneExactRangeInputV1,
+): RepoHygieneExactRangeBuildResultV1 {
+  const validated = validateExactRangeInput(input);
+  if (validated === null) return exactRangeFailure('repo-hygiene.exact-range.input-malformed');
+
+  try {
+    const initialToolBytes = readToolBytes();
+    const initialPolicyDigest = policyDigest();
+    const range = readExactCommitRange(cwd, validated);
+    const metadataByOid = new Map(
+      readExactCommitMetadata(cwd, range.commits.map((commit) => commit.oid).sort())
+        .map((metadata) => [metadata.oid, metadata]),
+    );
+    const commitBindings: RepoHygieneExactRangeCommitBindingV1[] = [];
+    for (const commit of range.commits) {
+      const metadata = metadataByOid.get(commit.oid);
+      if (
+        metadata === undefined
+        || metadata.parentOids.length !== commit.parentOids.length
+        || metadata.parentOids.some((parentOid, index) => parentOid !== commit.parentOids[index])
+      ) {
+        return exactRangeFailure('repo-hygiene.exact-range.identity-mismatch');
+      }
+      commitBindings.push({
+        oid: commit.oid,
+        parentOids: [...commit.parentOids],
+        treeOid: metadata.treeOid,
+        metadataSha256: metadata.contentSha256,
+      });
+    }
+
+    const limit = copyBudget(MAX_EXACT_ADDED_LINE_BUDGET_V1);
+    let remaining = copyBudget(limit);
+    const observedPaths = new Set<string>();
+    const observedBlobOids = new Set<string>();
+    let totalChangeCount = 0;
+    let parentEdgeCount = 0;
+    const findings: RepoHygieneExactRangeFindingV1[] = [];
+    const projectedFindingKeys = new Set<string>();
+    const finalArtifactPaths = new Set<string>();
+    const rawFindingKeys = new Set<string>();
+
+    const net = readExactAddedLinesWithinBudget(cwd, {
+      baseOid: range.rangeStartOid,
+      candidateOid: range.localOid,
+      budget: remaining,
+    });
+    remaining = copyBudget(net.accounting.remaining);
+    totalChangeCount += net.changes.length;
+    for (const change of net.changes) {
+      observedPaths.add(change.path);
+      if (change.oldPath !== null) observedPaths.add(change.oldPath);
+      if (change.oldOid !== '0'.repeat(40)) observedBlobOids.add(change.oldOid);
+      if (change.newOid !== '0'.repeat(40)) observedBlobOids.add(change.newOid);
+      if (change.status !== 'deleted' && isTrackedSensitiveArtifact(change.path)) {
+        finalArtifactPaths.add(change.path);
+        const finding: RepoHygieneExactRangeFindingV1 = {
+          cause: 'branch-sensitive-artifact',
+          observationKind: 'net-sensitive-artifact',
+          commitOid: range.localOid,
+          parentOid: range.rangeStartOid,
+          path: null,
+          pathDisclosure: 'redacted',
+          line: null,
+          blobOid: change.newOid === '0'.repeat(40) ? null : change.newOid,
+        };
+        appendExactRangeFinding(findings, projectedFindingKeys, finding);
+        appendRawFindingKey(
+          rawFindingKeys,
+          `${finding.cause}\0${change.path}\0${finding.line ?? 0}`,
+        );
+      }
+    }
+    scanNetAddedLineFindingsIncrementally(
+      net.changes,
+      range.localOid,
+      range.rangeStartOid,
+      findings,
+      projectedFindingKeys,
+      rawFindingKeys,
+    );
+
+    const historyLines: HistoryLineCandidate[] = [];
+    const historyArtifacts: Array<{
+      rawPath: string;
+      finding: RepoHygieneExactRangeFindingV1;
+    }> = [];
+    for (const commit of range.commits) {
+      for (const parentOid of commit.parentOids) {
+        parentEdgeCount += 1;
+        const edge = readExactAddedLinesWithinBudget(cwd, {
+          baseOid: parentOid,
+          candidateOid: commit.oid,
+          budget: remaining,
+        });
+        remaining = copyBudget(edge.accounting.remaining);
+        totalChangeCount += edge.changes.length;
+        for (const change of edge.changes) {
+          observedPaths.add(change.path);
+          if (change.oldPath !== null) observedPaths.add(change.oldPath);
+          if (change.oldOid !== '0'.repeat(40)) observedBlobOids.add(change.oldOid);
+          if (change.newOid !== '0'.repeat(40)) observedBlobOids.add(change.newOid);
+          for (const line of change.addedLines) {
+            for (const cause of secretCauses(line)) {
+              appendHistoryLineCandidate(historyLines, historyArtifacts.length, {
+                cause,
+                commitOid: commit.oid,
+                parentOid,
+                path: line.path,
+                line: line.newLineNumber,
+                blobOid: line.newBlobOid,
+                text: line.text,
+              });
+            }
+          }
+          if (
+            change.status !== 'deleted'
+            && isTrackedSensitiveArtifact(change.path)
+            && !finalArtifactPaths.has(change.path)
+          ) {
+            appendHistoryArtifactCandidate(historyArtifacts, historyLines.length, {
+              rawPath: change.path,
+              finding: {
+                cause: 'branch-history-sensitive-artifact',
+                observationKind: 'history-sensitive-artifact',
+                commitOid: commit.oid,
+                parentOid,
+                path: null,
+                pathDisclosure: 'redacted',
+                line: null,
+                blobOid: change.newOid === '0'.repeat(40) ? null : change.newOid,
+              },
+            });
+          }
+        }
+      }
+    }
+
+    const baselinePaths = [...new Set(historyLines.map((candidate) => candidate.path))].sort();
+    const baselines = baseLineSets(cwd, range.rangeStartOid, baselinePaths);
+    for (const candidate of historyLines) {
+      if (baselines.get(candidate.path)?.has(candidate.text)) continue;
+      const key = `${candidate.cause}\0${candidate.path}\0${candidate.line}`;
+      if (!appendRawFindingKey(rawFindingKeys, key)) continue;
+      appendExactRangeFinding(findings, projectedFindingKeys, {
+        cause: candidate.cause,
+        observationKind: 'history-added-line',
+        commitOid: candidate.commitOid,
+        parentOid: candidate.parentOid,
+        path: null,
+        pathDisclosure: 'redacted',
+        line: candidate.line,
+        blobOid: candidate.blobOid,
+      });
+    }
+    for (const { rawPath, finding } of historyArtifacts) {
+      const key = `${finding.cause}\0${rawPath}\0${finding.line ?? 0}`;
+      if (!appendRawFindingKey(rawFindingKeys, key)) continue;
+      appendExactRangeFinding(findings, projectedFindingKeys, finding);
+    }
+
+    for (const commit of range.commits) {
+      const metadata = metadataByOid.get(commit.oid)!;
+      for (const issue of scanCommitAuthors([{
+        sha: commit.oid,
+        name: metadata.authorName,
+        email: metadata.authorEmail,
+        subject: metadata.subject,
+        message: metadata.message,
+      }])) {
+        appendExactRangeFinding(findings, projectedFindingKeys, {
+          cause: issue.code,
+          observationKind: 'commit-metadata',
+          commitOid: commit.oid,
+          parentOid: null,
+          path: null,
+          pathDisclosure: 'not-applicable',
+          line: issue.line ?? null,
+          blobOid: null,
+        });
+      }
+    }
+    if (findings.length > MAX_REPO_HYGIENE_EXACT_RANGE_FINDINGS) {
+      return exactRangeFailure('repo-hygiene.exact-range.budget');
+    }
+    findings.sort(compareFindings);
+
+    const terminalToolBytes = readToolBytes();
+    if (!initialToolBytes.equals(terminalToolBytes)) {
+      return exactRangeFailure('repo-hygiene.exact-range.tool-drift');
+    }
+    const terminalPolicyDigest = policyDigest();
+    if (terminalPolicyDigest !== initialPolicyDigest) {
+      return exactRangeFailure('repo-hygiene.exact-range.policy-drift');
+    }
+    const created = Date.now();
+    const nativeCauses = [...new Set(findings.map((finding) => finding.cause))].sort();
+    const payload: RepoHygieneExactRangeReceiptV1 = {
+      schemaVersion: 1,
+      detectorId: REPO_HYGIENE_EXACT_RANGE_DETECTOR,
+      decisionOwner: REPO_HYGIENE_EXACT_RANGE_OWNER,
+      authorization: 'report-only',
+      outcome: findings.length === 0 ? 'pass' : 'block',
+      exitCode: findings.length === 0 ? 0 : 1,
+      completeness: 'complete',
+      baseOid: range.baseOid,
+      remoteOid: range.remoteOid,
+      rangeStartOid: range.rangeStartOid,
+      localOid: range.localOid,
+      toolDigest: sha256Bytes(initialToolBytes),
+      policyDigest: initialPolicyDigest,
+      commitBindings,
+      commitRangeDigest: sha256Canonical(range),
+      metadataDigest: sha256Canonical(commitBindings),
+      observedPathDisclosure: 'all-redacted',
+      observedPathDigest: sha256Canonical({
+        schemaVersion: 1,
+        disclosure: 'all-redacted',
+        count: observedPaths.size,
+      }),
+      observedBlobOidDigest: sha256Canonical([...observedBlobOids].sort()),
+      budget: budgetAccounting(limit, remaining),
+      claimedScope: {
+        content: 'net-range-all-rules',
+        history: 'per-parent-secret-and-sensitive-artifact',
+        metadata: 'all-ordered-outgoing-commits',
+      },
+      observedScope: {
+        commitCount: range.commits.length,
+        parentEdgeCount,
+        changeCount: totalChangeCount,
+        observedPathCount: observedPaths.size,
+      },
+      nativeCauses,
+      findings,
+      limitations: [...REPO_HYGIENE_EXACT_RANGE_LIMITATIONS],
+      createdAt: new Date(created).toISOString(),
+      validUntil: new Date(created + REPO_HYGIENE_EXACT_RANGE_VALIDITY_MS).toISOString(),
+    };
+    const serialized = canonicalizeBoundaryRun(payload);
+    const payloadBytes = Uint8Array.from(Buffer.from(serialized, 'utf8'));
+    const binding: RepoHygieneExactRangeArtifactV1['binding'] = {
+      schemaVersion: 1 as const,
+      detectorId: REPO_HYGIENE_EXACT_RANGE_DETECTOR,
+      payloadByteLength: payloadBytes.byteLength,
+      payloadSha256: sha256Bytes(payloadBytes),
+    };
+    return {
+      ok: true,
+      artifact: {
+        payloadBytes: Uint8Array.from(payloadBytes),
+        binding: Object.freeze({ ...binding }),
+      },
+    };
+  } catch (error) {
+    return exactRangeFailure(mapExactRangeError(error));
+  }
+}
+
+function strictArray(value: unknown, maxLength: number): unknown[] | null {
+  try {
+    if (
+      !Array.isArray(value)
+      || utilTypes.isProxy(value)
+      || Object.getPrototypeOf(value) !== Array.prototype
+      || value.length > maxLength
+    ) return null;
+    const keys = Reflect.ownKeys(value);
+    if (keys.length !== value.length + 1 || !keys.includes('length')) return null;
+    for (let index = 0; index < value.length; index += 1) {
+      const descriptor = Object.getOwnPropertyDescriptor(value, String(index));
+      if (descriptor === undefined || !('value' in descriptor) || descriptor.enumerable !== true) return null;
+    }
+    return value;
+  } catch {
+    return null;
+  }
+}
+
+function safeInteger(value: unknown, max = Number.MAX_SAFE_INTEGER): value is number {
+  return typeof value === 'number'
+    && Number.isSafeInteger(value)
+    && !Object.is(value, -0)
+    && value >= 0
+    && value <= max;
+}
+
+function validateBudgetRecord(value: unknown): ExactAddedLineBudgetV1 | null {
+  const keys: Array<keyof ExactAddedLineBudgetV1> = [
+    'changeCount',
+    'sourceBlobBytes',
+    'sourceLineCount',
+    'patchBytes',
+    'addedLineCount',
+    'addedTextBytes',
+  ];
+  const record = strictRecord(value, keys);
+  if (record === null) return null;
+  const result = {} as ExactAddedLineBudgetV1;
+  for (const key of keys) {
+    if (!safeInteger(record[key], MAX_EXACT_ADDED_LINE_BUDGET_V1[key])) return null;
+    result[key] = record[key];
+  }
+  return result;
+}
+
+function validateBudgetAccounting(value: unknown): ExactAddedLineBudgetAccountingV1 | null {
+  const record = strictRecord(value, ['limit', 'consumed', 'remaining']);
+  if (record === null) return null;
+  const limit = validateBudgetRecord(record.limit);
+  const consumed = validateBudgetRecord(record.consumed);
+  const remaining = validateBudgetRecord(record.remaining);
+  if (limit === null || consumed === null || remaining === null) return null;
+  for (const key of Object.keys(limit) as Array<keyof ExactAddedLineBudgetV1>) {
+    if (
+      limit[key] !== MAX_EXACT_ADDED_LINE_BUDGET_V1[key]
+      || consumed[key] + remaining[key] !== limit[key]
+    ) return null;
+  }
+  return { limit, consumed, remaining };
+}
+
+function validateStringArray(value: unknown, maxLength: number): string[] | null {
+  const array = strictArray(value, maxLength);
+  if (array === null || array.some((item) => typeof item !== 'string')) return null;
+  const strings = array as string[];
+  if (strings.some((item, index) => index > 0 && strings[index - 1]! >= item)) return null;
+  return strings;
+}
+
+function validateCommitBindings(value: unknown): RepoHygieneExactRangeCommitBindingV1[] | null {
+  const array = strictArray(value, 4_096);
+  if (array === null) return null;
+  const result: RepoHygieneExactRangeCommitBindingV1[] = [];
+  const seen = new Set<string>();
+  for (const item of array) {
+    const record = strictRecord(item, ['oid', 'parentOids', 'treeOid', 'metadataSha256']);
+    const parents = record === null ? null : strictArray(record.parentOids, 8_192);
+    if (
+      record === null
+      || typeof record.oid !== 'string'
+      || !FULL_OID.test(record.oid)
+      || seen.has(record.oid)
+      || typeof record.treeOid !== 'string'
+      || !FULL_OID.test(record.treeOid)
+      || typeof record.metadataSha256 !== 'string'
+      || !SHA256.test(record.metadataSha256)
+      || parents === null
+      || parents.some((parent) => typeof parent !== 'string' || !FULL_OID.test(parent))
+      || new Set(parents as string[]).size !== parents.length
+    ) return null;
+    seen.add(record.oid);
+    result.push({
+      oid: record.oid,
+      parentOids: [...parents] as string[],
+      treeOid: record.treeOid,
+      metadataSha256: record.metadataSha256 as `sha256:${string}`,
+    });
+  }
+  return result;
+}
+
+function validateFindings(value: unknown): RepoHygieneExactRangeFindingV1[] | null {
+  const array = strictArray(value, MAX_REPO_HYGIENE_EXACT_RANGE_FINDINGS);
+  if (array === null) return null;
+  const kinds = new Set([
+    'net-added-line',
+    'net-sensitive-artifact',
+    'history-added-line',
+    'history-sensitive-artifact',
+    'commit-metadata',
+  ]);
+  const result: RepoHygieneExactRangeFindingV1[] = [];
+  for (const item of array) {
+    const record = strictRecord(item, [
+      'cause', 'observationKind', 'commitOid', 'parentOid', 'path', 'pathDisclosure', 'line', 'blobOid',
+    ]);
+    if (
+      record === null
+      || typeof record.cause !== 'string'
+      || record.cause.length === 0
+      || record.cause.length > 128
+      || !nativeCauseCodes().has(record.cause)
+      || typeof record.observationKind !== 'string'
+      || !kinds.has(record.observationKind)
+      || typeof record.commitOid !== 'string'
+      || !FULL_OID.test(record.commitOid)
+      || (record.parentOid !== null && (typeof record.parentOid !== 'string' || !FULL_OID.test(record.parentOid)))
+      || record.path !== null
+      || (record.pathDisclosure !== 'redacted' && record.pathDisclosure !== 'not-applicable')
+      || (record.line !== null && (!safeInteger(record.line) || record.line < 1))
+      || (record.blobOid !== null && (typeof record.blobOid !== 'string' || !FULL_OID.test(record.blobOid)))
+    ) return null;
+    result.push(record as unknown as RepoHygieneExactRangeFindingV1);
+  }
+  const sorted = [...result].sort(compareFindings);
+  if (result.some((finding, index) => compareFindings(finding, sorted[index]!) !== 0)) return null;
+  return result;
+}
+
+function validateExactRangeReceipt(value: unknown): RepoHygieneExactRangeReceiptV1 | null {
+  const record = strictRecord(value, [
+    'schemaVersion', 'detectorId', 'decisionOwner', 'authorization', 'outcome', 'exitCode',
+    'completeness', 'baseOid', 'remoteOid', 'rangeStartOid', 'localOid', 'toolDigest',
+    'policyDigest', 'commitBindings', 'commitRangeDigest', 'metadataDigest',
+    'observedPathDisclosure', 'observedPathDigest', 'observedBlobOidDigest', 'budget', 'claimedScope', 'observedScope',
+    'nativeCauses', 'findings', 'limitations', 'createdAt', 'validUntil',
+  ]);
+  if (record === null) return null;
+  const commitBindings = validateCommitBindings(record.commitBindings);
+  const findings = validateFindings(record.findings);
+  const nativeCauses = validateStringArray(record.nativeCauses, MAX_REPO_HYGIENE_EXACT_RANGE_FINDINGS);
+  const budget = validateBudgetAccounting(record.budget);
+  const claimedScope = strictRecord(record.claimedScope, ['content', 'history', 'metadata']);
+  const observedScope = strictRecord(record.observedScope, [
+    'commitCount', 'parentEdgeCount', 'changeCount', 'observedPathCount',
+  ]);
+  const limitations = strictArray(
+    record.limitations,
+    REPO_HYGIENE_EXACT_RANGE_LIMITATIONS.length,
+  );
+  if (
+    record.schemaVersion !== 1
+    || record.detectorId !== REPO_HYGIENE_EXACT_RANGE_DETECTOR
+    || record.decisionOwner !== REPO_HYGIENE_EXACT_RANGE_OWNER
+    || record.authorization !== 'report-only'
+    || (record.outcome !== 'pass' && record.outcome !== 'block')
+    || (record.exitCode !== 0 && record.exitCode !== 1)
+    || (record.outcome === 'pass') !== (record.exitCode === 0)
+    || record.completeness !== 'complete'
+    || typeof record.baseOid !== 'string'
+    || !FULL_OID.test(record.baseOid)
+    || (record.remoteOid !== null && (typeof record.remoteOid !== 'string' || !FULL_OID.test(record.remoteOid)))
+    || typeof record.rangeStartOid !== 'string'
+    || !FULL_OID.test(record.rangeStartOid)
+    || record.rangeStartOid !== (record.remoteOid ?? record.baseOid)
+    || typeof record.localOid !== 'string'
+    || !FULL_OID.test(record.localOid)
+    || typeof record.toolDigest !== 'string'
+    || !SHA256.test(record.toolDigest)
+    || typeof record.policyDigest !== 'string'
+    || !SHA256.test(record.policyDigest)
+    || typeof record.commitRangeDigest !== 'string'
+    || !SHA256.test(record.commitRangeDigest)
+    || typeof record.metadataDigest !== 'string'
+    || !SHA256.test(record.metadataDigest)
+    || record.observedPathDisclosure !== 'all-redacted'
+    || typeof record.observedPathDigest !== 'string'
+    || !SHA256.test(record.observedPathDigest)
+    || typeof record.observedBlobOidDigest !== 'string'
+    || !SHA256.test(record.observedBlobOidDigest)
+    || commitBindings === null
+    || findings === null
+    || nativeCauses === null
+    || budget === null
+    || claimedScope === null
+    || claimedScope.content !== 'net-range-all-rules'
+    || claimedScope.history !== 'per-parent-secret-and-sensitive-artifact'
+    || claimedScope.metadata !== 'all-ordered-outgoing-commits'
+    || observedScope === null
+    || !safeInteger(observedScope.commitCount, 4_096)
+    || !safeInteger(observedScope.parentEdgeCount, 8_192)
+    || !safeInteger(observedScope.changeCount, MAX_EXACT_ADDED_LINE_BUDGET_V1.changeCount)
+    || !safeInteger(observedScope.observedPathCount, MAX_EXACT_ADDED_LINE_BUDGET_V1.changeCount * 2)
+    || observedScope.commitCount !== commitBindings.length
+    || limitations === null
+    || limitations.length !== REPO_HYGIENE_EXACT_RANGE_LIMITATIONS.length
+    || limitations.some((limitation, index) => limitation !== REPO_HYGIENE_EXACT_RANGE_LIMITATIONS[index])
+    || typeof record.createdAt !== 'string'
+    || typeof record.validUntil !== 'string'
+  ) return null;
+  if (record.observedPathDigest !== sha256Canonical({
+    schemaVersion: 1,
+    disclosure: 'all-redacted',
+    count: observedScope.observedPathCount,
+  })) return null;
+  const causes = [...new Set(findings.map((finding) => finding.cause))].sort();
+  if (
+    nativeCauses.length !== causes.length
+    || nativeCauses.some((cause, index) => cause !== causes[index])
+    || (findings.length === 0) !== (record.outcome === 'pass')
+    || observedScope.changeCount !== budget.consumed.changeCount
+    || observedScope.parentEdgeCount !== commitBindings.reduce(
+      (total, binding) => total + binding.parentOids.length,
+      0,
+    )
+  ) return null;
+  if (
+    (commitBindings.length === 0 && record.localOid !== record.rangeStartOid)
+    || (commitBindings.length > 0 && commitBindings.at(-1)?.oid !== record.localOid)
+    || commitBindings.some((binding) => binding.parentOids.length === 0)
+  ) return null;
+  const commitIndexes = new Map(commitBindings.map((binding, index) => [binding.oid, index]));
+  if (commitBindings.some((binding, index) => binding.parentOids.some((parentOid) => {
+    const parentIndex = commitIndexes.get(parentOid);
+    return parentIndex !== undefined && parentIndex >= index;
+  }))) return null;
+  const bindingByOid = new Map(commitBindings.map((binding) => [binding.oid, binding]));
+  const findingKeys = new Set<string>();
+  for (const finding of findings) {
+    const key = canonicalizeBoundaryRun(finding);
+    if (findingKeys.has(key)) return null;
+    findingKeys.add(key);
+    if (finding.observationKind === 'commit-metadata') {
+      if (
+        !bindingByOid.has(finding.commitOid)
+        || finding.parentOid !== null
+        || finding.path !== null
+        || finding.pathDisclosure !== 'not-applicable'
+        || finding.blobOid !== null
+      ) return null;
+      continue;
+    }
+    if (finding.path !== null || finding.pathDisclosure !== 'redacted') return null;
+    if (finding.observationKind.startsWith('net-')) {
+      if (finding.commitOid !== record.localOid || finding.parentOid !== record.rangeStartOid) return null;
+    } else {
+      const binding = bindingByOid.get(finding.commitOid);
+      if (binding === undefined || finding.parentOid === null || !binding.parentOids.includes(finding.parentOid)) {
+        return null;
+      }
+    }
+    const addedLine = finding.observationKind.endsWith('added-line');
+    if (addedLine && (finding.line === null || finding.blobOid === null)) return null;
+    if (!addedLine && finding.line !== null) return null;
+  }
+  const reconstructedRange = {
+    baseOid: record.baseOid,
+    remoteOid: record.remoteOid,
+    rangeStartOid: record.rangeStartOid,
+    localOid: record.localOid,
+    commits: commitBindings.map((binding) => ({
+      oid: binding.oid,
+      parentOids: binding.parentOids,
+      firstParentOid: binding.parentOids[0],
+    })),
+  };
+  if (sha256Canonical(reconstructedRange) !== record.commitRangeDigest) return null;
+  if (sha256Canonical(commitBindings) !== record.metadataDigest) return null;
+  const created = Date.parse(record.createdAt);
+  const validUntil = Date.parse(record.validUntil);
+  if (
+    !Number.isSafeInteger(created)
+    || !Number.isSafeInteger(validUntil)
+    || validUntil - created !== REPO_HYGIENE_EXACT_RANGE_VALIDITY_MS
+    || new Date(created).toISOString() !== record.createdAt
+    || new Date(validUntil).toISOString() !== record.validUntil
+  ) return null;
+  return record as unknown as RepoHygieneExactRangeReceiptV1;
+}
+
+export function validateRepoHygieneExactRangeArtifact(
+  artifact: RepoHygieneExactRangeArtifactV1,
+  expected: RepoHygieneExactRangeExpectedV1,
+): RepoHygieneExactRangeValidationResultV1 {
+  try {
+    const artifactRecord = strictRecord(artifact, ['payloadBytes', 'binding']);
+    const expectedRecord = strictRecord(expected, [
+      'baseOid', 'remoteOid', 'localOid', 'currentToolDigest', 'currentPolicyDigest',
+      'expectedPayloadByteLength', 'expectedPayloadSha256',
+    ]);
+    const expectedLineage = expectedRecord === null ? null : validateExactRangeInput({
+      baseOid: expectedRecord.baseOid,
+      remoteOid: expectedRecord.remoteOid,
+      localOid: expectedRecord.localOid,
+    });
+    const binding = artifactRecord === null
+      ? null
+      : strictRecord(artifactRecord.binding, [
+        'schemaVersion', 'detectorId', 'payloadByteLength', 'payloadSha256',
+      ]);
+    const bytes = artifactRecord?.payloadBytes;
+    const provenance = expectedRecord === null
+      ? 'receipt-invalid'
+      : validateExactRangeProvenance(
+        expectedRecord.currentToolDigest,
+        expectedRecord.currentPolicyDigest,
+        currentRepoHygieneToolDigest(),
+        currentRepoHygienePolicyDigest(),
+      );
+    if (
+      artifactRecord === null
+      || expectedRecord === null
+      || expectedLineage === null
+      || !safeInteger(expectedRecord.expectedPayloadByteLength, 4 * 1024 * 1024)
+      || typeof expectedRecord.expectedPayloadSha256 !== 'string'
+      || !SHA256.test(expectedRecord.expectedPayloadSha256)
+      || binding === null
+      || binding.schemaVersion !== 1
+      || binding.detectorId !== REPO_HYGIENE_EXACT_RANGE_DETECTOR
+      || !safeInteger(binding.payloadByteLength, 4 * 1024 * 1024)
+      || typeof binding.payloadSha256 !== 'string'
+      || !SHA256.test(binding.payloadSha256)
+    ) return exactRangeFailure('repo-hygiene.exact-range.receipt-invalid');
+    if (provenance !== 'valid') {
+      return exactRangeFailure(`repo-hygiene.exact-range.${provenance}`);
+    }
+    if (
+      binding.payloadByteLength !== expectedRecord.expectedPayloadByteLength
+      || binding.payloadSha256 !== expectedRecord.expectedPayloadSha256
+    ) return exactRangeFailure('repo-hygiene.exact-range.receipt-binding-mismatch');
+    if (
+      !(bytes instanceof Uint8Array)
+      || utilTypes.isProxy(bytes)
+      || bytes.byteLength !== binding.payloadByteLength
+      || bytes.byteLength === 0
+      || sha256Bytes(bytes) !== binding.payloadSha256
+    ) return exactRangeFailure('repo-hygiene.exact-range.receipt-invalid');
+
+    const parsed = parseBoundaryJsonBytes(bytes);
+    if (!parsed.result.ok || parsed.value === null || parsed.text === null) {
+      return exactRangeFailure('repo-hygiene.exact-range.receipt-invalid');
+    }
+    if (parsed.text !== canonicalizeBoundaryRun(parsed.value)) {
+      return exactRangeFailure('repo-hygiene.exact-range.receipt-invalid');
+    }
+    const receipt = validateExactRangeReceipt(parsed.value);
+    if (receipt === null) return exactRangeFailure('repo-hygiene.exact-range.receipt-invalid');
+    if (
+      receipt.baseOid !== expectedLineage.baseOid
+      || receipt.remoteOid !== expectedLineage.remoteOid
+      || receipt.localOid !== expectedLineage.localOid
+    ) return exactRangeFailure('repo-hygiene.exact-range.identity-mismatch');
+    if (receipt.toolDigest !== expectedRecord.currentToolDigest) {
+      return exactRangeFailure('repo-hygiene.exact-range.tool-mismatch');
+    }
+    if (receipt.policyDigest !== expectedRecord.currentPolicyDigest) {
+      return exactRangeFailure('repo-hygiene.exact-range.policy-mismatch');
+    }
+    const now = Date.now();
+    if (now < Date.parse(receipt.createdAt) || now > Date.parse(receipt.validUntil)) {
+      return exactRangeFailure('repo-hygiene.exact-range.receipt-stale');
+    }
+    return { ok: true, receipt: deepFreeze(receipt) };
+  } catch {
+    return exactRangeFailure('repo-hygiene.exact-range.receipt-invalid');
+  }
 }
 
 function printIssues(issues: GuardIssue[]): void {

@@ -321,7 +321,7 @@ const requiredTagReleaseWorkflow = [
 ].join('\n');
 
 const requiredFiles: Record<string, string> = {
-  'scripts/repo-hygiene-guard.ts': [
+  'scripts/lib/repo-hygiene-policy.ts': [
     'model-attribution',
     'private-instance-label',
     'whatsapp-group-jid',
@@ -331,6 +331,8 @@ const requiredFiles: Record<string, string> = {
     'pinecone-key',
     'private-key',
     'Co-Authored-By:',
+  ].join('\n'),
+  'scripts/repo-hygiene-guard.ts': [
     '--commit-authors',
     'scanCommitMessage(commit.message',
   ].join('\n'),
@@ -1671,7 +1673,7 @@ describe('safeguard diagnostics', () => {
   it('fails when a sensitive-surface anchor is removed', () => {
     const fixture = makeRepo({
       files: {
-        'scripts/repo-hygiene-guard.ts': requiredFiles['scripts/repo-hygiene-guard.ts']
+        'scripts/lib/repo-hygiene-policy.ts': requiredFiles['scripts/lib/repo-hygiene-policy.ts']
           .replace('private-instance-label\n', ''),
       },
     });
