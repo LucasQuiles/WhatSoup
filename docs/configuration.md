@@ -274,7 +274,7 @@ world-writable.
 | `WHATSOUP_GIT_BRANCH` | string | `null` in `/health` | Git branch for the running checkout, normally exported by `deploy/whatsoup` after restart preflight and surfaced as `/health.instance.branch`. Detached checkouts are reported as `HEAD-detached`; non-git/content-streamed hosts leave the field `null` with a wrapper warning. |
 | `WHATSOUP_INSTANCE_UNREACHABLE_ALERT_DWELL_MS` | integer (ms) | `30000` | Fleet health-poller (`src/fleet/health-poller.ts:23`): minimum time an instance must stay continuously unreachable before an `instance_unreachable` alert fires — debounces transient probe failures. |
 | `WHATSOUP_HEALTH_BODY_DEGRADED_ALERT_POLLS` | integer | `2` | Fleet health-poller (`src/fleet/health-poller.ts:27`): consecutive degraded `GET /health` body polls required before a `health_body_degraded` alert fires. Floored to a minimum of `1`. |
-| `WHATSOUP_HEALTH_BODY_DEGRADED_ALERT_DWELL_MS` | integer (ms) | `10000` | Fleet health-poller (`src/fleet/health-poller.ts:31`): minimum dwell time in the degraded state (applied alongside `WHATSOUP_HEALTH_BODY_DEGRADED_ALERT_POLLS`) before a `health_body_degraded` alert fires. |
+| `WHATSOUP_HEALTH_BODY_DEGRADED_ALERT_DWELL_MS` | integer (ms) | `10000` | Fleet health-poller (`src/fleet/health-poller.ts:31`): minimum dwell time in the degraded state (applied alongside `WHATSOUP_HEALTH_BODY_DEGRADED_ALERT_POLLS`) before a health-body alert fires. A sole, proven-working usage/rate/session-limit fallback is emitted as non-paging `provider_fallback_capacity`; mixed, exhausted, empty, crashed, or otherwise unproven degradation remains fail-closed as `health_body_degraded`. |
 
 #### Agent compact endpoint
 

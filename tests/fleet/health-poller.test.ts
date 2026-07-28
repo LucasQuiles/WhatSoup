@@ -802,6 +802,205 @@ describe('HealthPoller', () => {
     poller.stop();
   });
 
+  it('routes a sole healthy provider fallback as non-paging capacity with diagnostics', async () => {
+    alertThrottleStore.loadAlertThrottleDetailed.mockReturnValue({
+      entries: new Map([['remote-1:health_body_degraded', '2026-05-20T11:55:00.000Z']]),
+      loadError: null,
+    });
+    mockFetch.mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve({
+        status: 'degraded',
+        status_reasons: ['runtime.provider_fallback_active'],
+        instance: {
+          effectiveProvider: 'opencode-cli',
+          fallbackActiveUntil: Date.now() + 600_000,
+          fallbackReason: 'usage-limit',
+          fallbackTurnsServed: 88,
+          fallbackTurnsEmpty: 0,
+          fallbackRecoveryProbeRequired: true,
+        },
+        runtime: {
+          agent: {
+            fallbackChainExhausted: false,
+            failedEntryCount: 0,
+            recentCrashes: 0,
+            turnFinalizationDegradedScopes: 0,
+            turnRecoveryOutstanding: 0,
+          },
+        },
+        whatsapp: { connected: true, connection: { state: 'connected' } },
+      }),
+    });
+
+    const instances = makeInstances(
+      ['remote-1', makeInstance({ name: 'remote-1', healthPort: 9100 })],
+    );
+    const poller = new HealthPoller(() => instances, 'self', vi.fn().mockReturnValue({}), 5_000);
+    poller.start();
+    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(5_000);
+    await vi.advanceTimersByTimeAsync(5_000);
+
+    expect(alertFns.emitAlert).toHaveBeenCalledWith(
+      'remote-1',
+      'provider_fallback_capacity',
+      'whatsoup@remote-1 is serving on fallback capacity',
+      expect.stringContaining('fallback_turns_served=88'),
+      'warning',
+      undefined,
+    );
+    expect(alertFns.emitAlert).not.toHaveBeenCalledWith(
+      'remote-1',
+      'health_body_degraded',
+      expect.any(String),
+      expect.any(String),
+      'critical',
+      expect.anything(),
+    );
+    expect(alertFns.clearAlertSource).toHaveBeenCalledTimes(1);
+    expect(alertFns.clearAlertSource).toHaveBeenCalledWith(
+      'remote-1',
+      'health_body_degraded',
+      'health_alert_reclassified target_source=provider_fallback_capacity',
+    );
+
+    poller.stop();
+  });
+
+  it('keeps mixed provider fallback degradation on the critical generic path', async () => {
+    mockFetch.mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve({
+        status: 'degraded',
+        status_reasons: ['runtime.provider_fallback_active', 'event_loop_starvation'],
+        instance: { effectiveProvider: 'opencode-cli', fallbackReason: 'usage-limit' },
+        whatsapp: { connected: true, connection: { state: 'connected' } },
+      }),
+    });
+
+    const instances = makeInstances(
+      ['remote-1', makeInstance({ name: 'remote-1', healthPort: 9100 })],
+    );
+    const poller = new HealthPoller(() => instances, 'self', vi.fn().mockReturnValue({}), 5_000);
+    poller.start();
+    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(5_000);
+    await vi.advanceTimersByTimeAsync(5_000);
+
+    expect(alertFns.emitAlert).toHaveBeenCalledWith(
+      'remote-1',
+      'health_body_degraded',
+      'whatsoup@remote-1 health is degraded',
+      expect.stringContaining('status_reasons=runtime.provider_fallback_active,event_loop_starvation'),
+      'critical',
+      undefined,
+    );
+    expect(alertFns.emitAlert).not.toHaveBeenCalledWith(
+      'remote-1',
+      'provider_fallback_capacity',
+      expect.any(String),
+      expect.any(String),
+      expect.any(String),
+      expect.anything(),
+    );
+
+    poller.stop();
+  });
+
+  it('fails closed when fallback-capacity proof is incomplete', async () => {
+    mockFetch.mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve({
+        status: 'degraded',
+        status_reasons: ['runtime.provider_fallback_active'],
+        instance: {
+          effectiveProvider: 'opencode-cli',
+          fallbackActiveUntil: Date.now() + 600_000,
+          fallbackReason: 'usage-limit',
+          fallbackTurnsServed: 8,
+          fallbackTurnsEmpty: 0,
+        },
+        runtime: { agent: { fallbackChainExhausted: false } },
+        whatsapp: { connected: true, connection: { state: 'connected' } },
+      }),
+    });
+
+    const instances = makeInstances(
+      ['remote-1', makeInstance({ name: 'remote-1', healthPort: 9100 })],
+    );
+    const poller = new HealthPoller(() => instances, 'self', vi.fn().mockReturnValue({}), 5_000);
+    poller.start();
+    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(10_000);
+
+    expect(
+      (alertFns.emitAlert.mock.calls as unknown as AlertMockCall[]).some(
+        ([instance, source]) => instance === 'remote-1' && source === 'health_body_degraded',
+      ),
+    ).toBe(true);
+    expectEmitAlertSourceNotCalled('remote-1', 'provider_fallback_capacity');
+
+    poller.stop();
+  });
+
+  it('deduplicates sustained capacity and safely transitions through mixed degradation to recovery', async () => {
+    let health: Record<string, unknown> = {
+      status: 'degraded',
+      status_reasons: ['runtime.provider_fallback_active'],
+      instance: {
+        effectiveProvider: 'opencode-cli',
+        fallbackActiveUntil: Date.now() + 600_000,
+        fallbackReason: 'usage-limit',
+        fallbackTurnsServed: 20,
+        fallbackTurnsEmpty: 0,
+      },
+      runtime: {
+        agent: {
+          fallbackChainExhausted: false,
+          failedEntryCount: 0,
+          recentCrashes: 0,
+          turnFinalizationDegradedScopes: 0,
+          turnRecoveryOutstanding: 0,
+        },
+      },
+      whatsapp: { connected: true, connection: { state: 'connected' } },
+    };
+    mockFetch.mockImplementation(() => Promise.resolve({
+      ok: true,
+      json: () => Promise.resolve(health),
+    }));
+
+    const instances = makeInstances(
+      ['remote-1', makeInstance({ name: 'remote-1', healthPort: 9100 })],
+    );
+    const poller = new HealthPoller(() => instances, 'self', vi.fn().mockReturnValue({}), 5_000);
+    poller.start();
+    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(24 * 5_000);
+
+    expect((alertFns.emitAlert.mock.calls as unknown as AlertMockCall[]).filter(
+      ([, source]) => source === 'provider_fallback_capacity',
+    )).toHaveLength(1);
+
+    health = {
+      ...health,
+      status_reasons: ['runtime.provider_fallback_active', 'event_loop_starvation'],
+    };
+    await vi.advanceTimersByTimeAsync(5_000);
+    expectClearAlertSourceCalled('remote-1', 'provider_fallback_capacity');
+    expect((alertFns.emitAlert.mock.calls as unknown as AlertMockCall[]).filter(
+      ([, source]) => source === 'health_body_degraded',
+    )).toHaveLength(1);
+
+    health = makeOnlineHealth();
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(poller.getStatus('remote-1')!.status).toBe('online');
+    expectClearAlertSourceCalled('remote-1', 'health_body_degraded');
+
+    poller.stop();
+  });
+
   it('clears only health_body_degraded when degraded health recovers', async () => {
     mockFetch
       .mockResolvedValueOnce({

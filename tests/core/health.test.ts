@@ -1505,6 +1505,55 @@ describe('GET /health', () => {
     db2.close();
   });
 
+  it('does not double-classify stale primary evidence while a proven fallback is serving', async () => {
+    db.close();
+    const db2 = makeDb();
+    const activeUntil = Date.now() + 600_000;
+    const fakeAgentRuntime = {
+      getHealthSnapshot: () => ({
+        status: 'degraded',
+        details: {
+          activeSessions: 1,
+          degradedReasons: ['provider_fallback_active'],
+          turnCapability: {
+            modelUsable: null,
+            modelUsableStale: true,
+            modelUsableCheckedAt: Date.now() - 60 * 60 * 1000,
+            modelUsabilityStatus: 'usable',
+            lastSuccessfulTurnAt: Date.now() - 60_000,
+            lastTurnErrorClass: null,
+            lastTurnErrorAt: null,
+          },
+        },
+      }),
+      getFallbackState: () => ({
+        effectiveProvider: 'opencode-cli',
+        fallbackActiveUntil: activeUntil,
+        fallbackReason: 'usage-limit',
+        fallbackTurnsServed: 12,
+        fallbackTurnsEmpty: 0,
+        lastFallbackTurnAt: Date.now() - 60_000,
+        fallbackChainExhausted: false,
+        failedEntryCount: 0,
+      }),
+    };
+    const deps = makeDeps(db2, {
+      instanceType: 'agent',
+      runtime: fakeAgentRuntime as unknown as HealthDeps['runtime'],
+    });
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    ({ server, port } = await buildTestServer(deps));
+
+    // #2515 landed mid-lane: the diagnostic projection is bearer-gated, so this
+    // classification proof must request it through the authed helper.
+    const { status, body } = await healthReq(port);
+    expect(status).toBe(200);
+    const json = JSON.parse(body);
+    expect(json.status).toBe('degraded');
+    expect(json.status_reasons).toEqual(['runtime.provider_fallback_active']);
+    db2.close();
+  });
+
   it('propagates degraded runtime snapshots to the top-level health status', async () => {
     db.close();
     const db2 = makeDb();
@@ -1518,6 +1567,7 @@ describe('GET /health', () => {
           fallbackReason: 'usage-limit',
           turnQueueHalted: true,
           turnQueueHaltedScopes: 2,
+          degradedReasons: ['provider_fallback_active'],
         },
       }),
       getFallbackState: () => null,
@@ -1533,6 +1583,7 @@ describe('GET /health', () => {
     expect(status).toBe(200);
     const json = JSON.parse(body);
     expect(json.status).toBe('degraded');
+    expect(json.status_reasons).toEqual(['runtime.provider_fallback_active']);
     expect(json.runtime.agent.effectiveProvider).toBe('openai-api');
     expect(json.runtime.agent.turnQueueHalted).toBe(true);
     expect(json.runtime.agent.turnQueueHaltedScopes).toBe(2);
