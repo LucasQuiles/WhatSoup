@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import stat
 from dataclasses import dataclass
 from typing import Optional
 
@@ -136,8 +137,128 @@ def _sha256_file(path) -> str:
     return h.hexdigest()
 
 
+def _sha256_fd(fd: int) -> str:
+    """Hash bytes from an already-open file descriptor. The caller transfers
+    ownership of the fd; it is closed when the hash completes."""
+    h = hashlib.sha256()
+    with os.fdopen(fd, "rb", closefd=True) as fh:
+        for chunk in iter(lambda: fh.read(65536), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _classify_open_failure(name: str, dir_fd: int, symlink_taxonomy: str, default_taxonomy: str) -> str:
+    """Classify an ``O_NOFOLLOW`` open failure by checking if the target is a
+    symlink.  Returns ``symlink_taxonomy`` when the leaf/intermediate is a
+    symlink, otherwise ``default_taxonomy`` (typically ``"missing"``)."""
+    try:
+        st = os.lstat(name, dir_fd=dir_fd)
+        if stat.S_ISLNK(st.st_mode):
+            return symlink_taxonomy
+    except OSError:
+        pass
+    return default_taxonomy
+
+
+def _open_confined_leaf(bundle_dir: str, rel_path: str):
+    """Open a manifest-tracked file under *bundle_dir*, rejecting symlinks at
+    **every** path component — the root, every intermediate directory, and the
+    final leaf — and verifying the leaf is a regular file.
+
+    Uses descriptor-relative traversal (``openat``) so each component is opened
+    relative to its already-verified parent descriptor.  This eliminates root
+    escapes via parent symlinks and pathname TOCTOU races: once a directory fd
+    is opened, swapping the filesystem name does not redirect the descriptor.
+
+    Returns ``(fd, None)`` on success — the caller owns and must close/hashing
+    the fd — or ``(None, taxonomy)`` where *taxonomy* is one of:
+
+    ``root_symlink``   — *bundle_dir* itself is a symlink.
+    ``parent_symlink`` — an intermediate directory component is a symlink.
+    ``symlink``        — the final leaf component is a symlink.
+    ``missing``        — the leaf or an intermediate component does not exist.
+    ``file_kind``      — an intermediate is not a directory, or the leaf is not
+                         a regular file (e.g. FIFO, socket, device).
+    ``read_failed``    — ``lstat``/``open``/``fstat`` raised an unexpected error.
+    """
+    parts = rel_path.split("/")
+
+    # --- Verify bundle root is a real directory, not a symlink ---
+    try:
+        root_st = os.lstat(bundle_dir)
+    except OSError:
+        return None, "read_failed"
+    if stat.S_ISLNK(root_st.st_mode):
+        return None, "root_symlink"
+    if not stat.S_ISDIR(root_st.st_mode):
+        return None, "read_failed"
+
+    # --- Open root directory descriptor ---
+    dir_fds: list[int] = []
+    leaf_fd: int | None = None
+    try:
+        root_fd = os.open(bundle_dir, os.O_RDONLY)
+        dir_fds.append(root_fd)
+        parent_fd = root_fd
+
+        # --- Walk intermediate directory components ---
+        for component in parts[:-1]:
+            try:
+                fd = os.open(component, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=parent_fd)
+            except OSError:
+                return None, _classify_open_failure(component, parent_fd, "parent_symlink", "missing")
+            dir_fds.append(fd)
+            parent_fd = fd
+            try:
+                st = os.fstat(fd)
+            except OSError:  # pragma: no cover - kernel EIO only
+                return None, "read_failed"
+            if not stat.S_ISDIR(st.st_mode):
+                return None, "file_kind"
+
+        # --- Open the final leaf with O_NOFOLLOW ---
+        # O_NONBLOCK prevents blocking on FIFOs/socket files so the verifier
+        # cannot hang on a non-regular leaf planted as a denial-of-service.
+        try:
+            leaf_fd = os.open(parts[-1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent_fd)
+        except OSError:
+            return None, _classify_open_failure(parts[-1], parent_fd, "symlink", "missing")
+
+        # --- Verify the leaf is a regular file ---
+        try:
+            st = os.fstat(leaf_fd)
+        except OSError:  # pragma: no cover - kernel EIO only
+            os.close(leaf_fd)
+            return None, "read_failed"
+        if not stat.S_ISREG(st.st_mode):
+            os.close(leaf_fd)
+            return None, "file_kind"
+
+        fd_out = leaf_fd  # ownership transfers to caller
+        return fd_out, None
+    except OSError:  # pragma: no cover - root dir vanished between lstat and open
+        if leaf_fd is not None:
+            try:
+                os.close(leaf_fd)
+            except OSError:  # pragma: no cover
+                pass
+        return None, "read_failed"
+    finally:
+        for fd in reversed(dir_fds):
+            try:
+                os.close(fd)
+            except OSError:  # pragma: no cover - close on valid fd cannot fail
+                pass
+
+
 def verify_bundle(bundle_dir, pin: Pin) -> tuple[bool, list]:
-    """Every pinned file must be safe, regular, present in the bundle, and match its sha."""
+    """Every pinned file must be safe, regular, present in the bundle,
+    **confined** to the bundle root (no symlinks at any path component — root,
+    intermediate, or leaf), and match its sha256.
+
+    File bytes are hashed from an already-validated descriptor opened via
+    ``O_NOFOLLOW`` at every component, so a parent symlink cannot redirect
+    verification to bytes outside the claimed root."""
     mismatches = []
     for path, want in pin.files.items():
         try:
@@ -146,13 +267,10 @@ def verify_bundle(bundle_dir, pin: Pin) -> tuple[bool, list]:
         except PinLoadError:
             mismatches.append((path, "unsafe_path"))
             continue
-        fp = os.path.join(bundle_dir, path)
-        if os.path.islink(fp):
-            mismatches.append((path, "symlink"))
+        fd, err = _open_confined_leaf(bundle_dir, path)
+        if err is not None:
+            mismatches.append((path, err))
             continue
-        if not os.path.isfile(fp):
-            mismatches.append((path, "missing"))
-            continue
-        if _sha256_file(fp) != want:
+        if _sha256_fd(fd) != want:
             mismatches.append((path, "sha"))
     return (not mismatches), mismatches
