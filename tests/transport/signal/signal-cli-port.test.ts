@@ -10,6 +10,8 @@ import {
 } from '../../../src/transport/signal/signal-cli-port.ts';
 import { DEFAULT_SIGNAL, type SignalConfig } from '../../../src/transport/signal/types.ts';
 import type { SignalPortError } from '../../../src/transport/signal/port.ts';
+import { SignalAdapter } from '../../../src/transport/signal/adapter.ts';
+import { makeChannelId } from '../../../src/core/transport-refs.ts';
 
 interface RpcFrame {
   id: number;
@@ -416,6 +418,15 @@ describe('signal-cli UNIX socket lifecycle', () => {
     expect(settled.every((result) =>
       result.status === 'rejected' && (result.reason as SignalPortError).code === 'Closed'))
       .toBe(true);
+    // Pinning test (behavior already correct, no RED phase): the connection
+    // reached the server and only failed AFTER 'connect' fired — contact
+    // cannot be disproven for whichever request was mid-flight, so phase
+    // must stay absent (the adapter's provider_call_started default then
+    // applies), never over-corrected to not_started just because the peer
+    // vanished.
+    expect(settled.every((result) =>
+      result.status === 'rejected' && !('phase' in (result.reason as SignalPortError))))
+      .toBe(true);
   });
 
   it('rejects a pending request on a socket connection error', async () => {
@@ -423,6 +434,30 @@ describe('signal-cli UNIX socket lifecycle', () => {
     await expect(connection.request('version')).rejects.toMatchObject({
       code: 'SocketError',
       status: 503,
+      // No server is listening on socketPath, so this is a provable
+      // pre-write failure: 'error' fires before 'connect' ever could, and
+      // Node buffers (never transmits) any write() issued on an unconnected
+      // socket. This is the RED case for GAP 1 — currently phase is absent.
+      phase: 'not_started',
+    });
+  });
+
+  it('sends phase not_started end-to-end through SignalAdapter on connection refusal', async () => {
+    // No server listening on socketPath — sendText's underlying connection
+    // attempt is provably refused before any request byte leaves the
+    // process. The adapter must surface that as phase 'not_started' in the
+    // typed payload, not the provider_call_started default.
+    const port = new SignalCliPort(config({ socketPath }));
+    const adapter = new SignalAdapter(config({ socketPath }), port);
+    const channelId = makeChannelId('signal', 'test');
+
+    await expect(
+      adapter.sendText({ channel: channelId, id: '+15559990000' }, 'hi'),
+    ).rejects.toMatchObject({
+      payload: {
+        code: 'transport.transient_provider',
+        phase: 'not_started',
+      },
     });
   });
 

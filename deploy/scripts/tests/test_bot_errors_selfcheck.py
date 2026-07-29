@@ -357,10 +357,15 @@ def test_long_stale_central_ack_writes_central_down_alert(tmp_path: Path, monkey
     }
     alert = json.loads(config.central_down_alert_path.read_text(encoding="utf-8"))
     assert alert["kind"] == "bot-errors-selfcheck-central-down-alert"
-    assert alert["host"] == "test-host"
+    # Issue #2470: alert must use digests, not raw host/root.
+    assert alert["hostDigest"] == _mod._telemetry_digest("host", "test-host")
+    assert "host" not in alert
+    assert alert["rootDigest"] == _mod._telemetry_digest("root", str(config.root))
+    assert "root" not in alert
     assert alert["action"] == "central_down_suspected"
     assert alert["tier"] == "tier3"
     assert alert["centralAck"]["status"] == "stale"
+    assert "path" not in alert["centralAck"]
     heartbeat = json.loads(config.heartbeat_path.read_text(encoding="utf-8"))
     assert heartbeat["centralDownAlert"]["ok"] is True
     assert calls == []
@@ -1720,3 +1725,206 @@ def test_stable_pin_still_heals(tmp_path: Path):
     status = _mod.run_selfcheck(config, deps)
     assert status["action"] == "healed", f"stable pin must still heal, got {status['action']}"
     assert len(calls) == 1
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# Issue #2470: central telemetry boundary canary tests.
+#
+# These prove that central_telemetry_payload() and publish_central_down_alert()
+# never carry raw host identity, absolute paths, free-form problem text,
+# file-level mismatch tuples, unit labels, freshness names/paths, raw verifier
+# output, or configured ack paths.
+# ─────────────────────────────────────────────────────────────────────────
+
+def test_central_telemetry_payload_omits_raw_identity_and_paths():
+    """The telemetry payload must not carry raw host, root, or paths."""
+    status = {
+        "schemaVersion": 1,
+        "host": "production-web-01.example.com",
+        "checkedAt": "2026-07-29T00:00:00Z",
+        "root": "/var/lib/bot-errors/production",
+        "healthy": False,
+        "class": "runtime_verify_failed",
+        "action": "escalate",
+        "problems": ["bundle path /var/lib/bot-errors/abc123 missing", "unit bot-errors-worker status=failed"],
+        "consecutive": 3,
+        "pin": {"headSha": "a" * 40, "f10Sha": "b" * 40, "trust": "approved", "headApproved": "true"},
+        "bundle": "abc123def456",
+        "runtimeMismatches": [("/var/lib/bot-errors/src/main.py", "content"), ("/var/lib/bot-errors/src/util.py", "missing")],
+        "bundleMismatches": [("/opt/bundle/src/lib.ts", "content")],
+        "unitStatuses": [{"unit": "bot-errors-worker", "expected": "active", "status": "failed", "ok": "false"}],
+        "freshness": [{"name": "ingest-log", "path": "/var/log/bot-errors/ingest.log", "ageSeconds": 999, "ok": "false"}],
+        "runtimeVerify": {"rc": 1, "output": "Error: Cannot find module '/var/lib/bot-errors/src/main.js'\n    at Object.<anonymous>"},
+        "centralAck": {"configured": True, "mode": "local_only", "status": "stale", "path": "/var/lib/bot-errors/central-ack.json", "ageSeconds": 900, "maxAgeSeconds": 60},
+    }
+    payload = _mod.central_telemetry_payload(status)
+
+    # Bounded metadata IS present.
+    assert payload["schemaVersion"] == 2
+    assert payload["healthy"] is False
+    assert payload["class"] == "runtime_verify_failed"
+    assert payload["action"] == "escalate"
+    assert payload["consecutive"] == 3
+    assert payload["problemCount"] == 2
+    assert payload["pin"]["headSha"] == "a" * 40
+    assert payload["bundle"] == "abc123def456"
+    assert payload["runtimeMismatchCount"] == 2
+    assert payload["runtimeMismatchKinds"] == {"content": 1, "missing": 1}
+    assert payload["bundleMismatchCount"] == 1
+    assert payload["bundleMismatchKinds"] == {"content": 1}
+    assert payload["unitAggregate"] == {"total": 1, "ok": 0, "bad": 1}
+    assert payload["freshnessAggregate"] == {"total": 1, "ok": 0, "bad": 1}
+    assert payload["runtimeVerifyRc"] == 1
+    assert payload["centralAck"]["status"] == "stale"
+    assert payload["centralAck"]["configured"] is True
+
+    # Raw identity and paths are ABSENT.
+    assert "host" not in payload
+    assert "root" not in payload
+    assert "problems" not in payload
+    assert "runtimeMismatches" not in payload
+    assert "bundleMismatches" not in payload
+    assert "unitStatuses" not in payload
+    assert "freshness" not in payload
+    assert "runtimeVerify" not in payload
+    assert "path" not in payload.get("centralAck", {})
+
+    # Raw values must not appear anywhere in the serialized payload.
+    serialized = json.dumps(payload, sort_keys=True)
+    assert "production-web-01" not in serialized
+    assert "/var/lib/bot-errors" not in serialized
+    assert "bot-errors-worker" not in serialized
+    assert "ingest-log" not in serialized
+    assert "/var/log/bot-errors" not in serialized
+    assert "Cannot find module" not in serialized
+    assert "bundle path" not in serialized
+    assert "/opt/bundle" not in serialized
+
+
+def test_central_telemetry_payload_omits_raw_output_on_healthy():
+    """Healthy status with runtime verify output must not leak output text."""
+    status = {
+        "schemaVersion": 1,
+        "host": "my-host",
+        "checkedAt": "2026-07-29T00:00:00Z",
+        "root": "/srv/app",
+        "healthy": True,
+        "class": "healthy",
+        "action": "noop",
+        "consecutive": 0,
+        "runtimeVerify": {"rc": 0, "output": "All checks passed. Config at /srv/app/config.json"},
+    }
+    payload = _mod.central_telemetry_payload(status)
+    serialized = json.dumps(payload, sort_keys=True)
+    assert payload["runtimeVerifyRc"] == 0
+    assert "All checks passed" not in serialized
+    assert "/srv/app/config.json" not in serialized
+    assert "runtimeVerify" not in payload
+
+
+def test_central_telemetry_digest_properties():
+    """Digests must be deterministic, domain-separated, and non-reversible."""
+    h1 = _mod._telemetry_digest("host", "web-01")
+    h2 = _mod._telemetry_digest("host", "web-01")
+    assert h1 == h2  # deterministic
+    assert len(h1) == 16  # 16-char hex
+
+    # Domain separation: same value in different domains must differ.
+    assert _mod._telemetry_digest("host", "shared") != _mod._telemetry_digest("root", "shared")
+
+    # Non-reversibility: digest must not contain the raw value.
+    d = _mod._telemetry_digest("host", "SECRET-HOSTNAME-12345")
+    assert "SECRET" not in d
+    assert "HOSTNAME" not in d
+
+
+def test_central_telemetry_mismatch_kind_counts_collapses_paths():
+    """Mismatch tuples must collapse to kind counts — no paths."""
+    mismatches = [
+        ("/secret/path/a.py", "content"),
+        ("/secret/path/b.py", "content"),
+        ("/secret/path/c.py", "missing"),
+    ]
+    counts = _mod._mismatch_kind_counts(mismatches)
+    assert counts == {"content": 2, "missing": 1}
+    serialized = json.dumps(counts)
+    assert "/secret" not in serialized
+    assert "a.py" not in serialized
+
+
+def test_publish_heartbeat_pushes_telemetry_not_full_payload(tmp_path: Path):
+    """The push must receive the bounded telemetry payload, not the full local payload."""
+    config, deps, calls, _head = _fixture(tmp_path)
+    pushed: list[dict] = []
+
+    def push_heartbeat(payload: dict) -> dict:
+        pushed.append(payload)
+        return {"attempted": True, "ok": True, "status": 202}
+
+    deps = _mod.SelfcheckDeps(
+        commit_exists=deps.commit_exists,
+        deploy=deps.deploy,
+        runtime_verify=deps.runtime_verify,
+        push_heartbeat=push_heartbeat,
+        now_epoch=deps.now_epoch,
+        hostname=deps.hostname,
+        service_status=deps.service_status,
+    )
+    status = _mod.run_selfcheck(config, deps)
+    assert status["healthy"] is True
+
+    # Push received telemetry shape (schemaVersion 2).
+    assert len(pushed) == 1
+    assert pushed[0]["schemaVersion"] == 2
+    assert "host" not in pushed[0]
+    assert "root" not in pushed[0]
+    assert "problems" not in pushed[0]
+    assert pushed[0]["hostDigest"] == _mod._telemetry_digest("host", "test-host")
+
+    # Local heartbeat file still has full forensic detail (schemaVersion 1).
+    local = json.loads(config.heartbeat_path.read_text(encoding="utf-8"))
+    assert local["host"] == "test-host"
+    assert "root" in local
+
+
+def test_central_down_alert_uses_digests_not_raw_identity(tmp_path: Path, monkeypatch):
+    """Central-down alert artifact must use digests, not raw host/root/path."""
+    ack = tmp_path / "central-ack.json"
+    ack.write_text("{}", encoding="utf-8")
+    os.utime(ack, (100.0, 100.0))
+    monkeypatch.setenv("BOT_ERRORS_SELFCHECK_CENTRAL_ACK_MAX_AGE_SECONDS", "60")
+    monkeypatch.setenv("BOT_ERRORS_SELFCHECK_CENTRAL_DOWN_MAX_AGE_SECONDS", "600")
+    config, deps, calls, _head = _fixture(tmp_path, central_ack_path=ack)
+    status = _mod.run_selfcheck(config, deps)
+    assert status["centralDownAlert"]["ok"] is True
+
+    alert = json.loads(config.central_down_alert_path.read_text(encoding="utf-8"))
+    assert alert["schemaVersion"] == 2
+    assert "host" not in alert
+    assert "root" not in alert
+    assert alert["hostDigest"] is not None
+    assert alert["rootDigest"] is not None
+    assert "path" not in alert["centralAck"]
+
+    serialized = json.dumps(alert, sort_keys=True)
+    assert "test-host" not in serialized
+    assert str(config.root) not in serialized
+
+
+def test_central_telemetry_rejects_unknown_fields():
+    """Unknown status fields must not appear in the telemetry payload."""
+    status = {
+        "schemaVersion": 1,
+        "host": "h",
+        "healthy": True,
+        "class": "healthy",
+        "customSecretField": "leaked-data",
+        "deployerOutput": "rc=0 some output",
+        "healDiskPreflight": {"ok": True},
+    }
+    payload = _mod.central_telemetry_payload(status)
+    serialized = json.dumps(payload, sort_keys=True)
+    assert "customSecretField" not in serialized
+    assert "deployerOutput" not in serialized
+    assert "healDiskPreflight" not in serialized
+    assert "leaked-data" not in serialized

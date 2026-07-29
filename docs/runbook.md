@@ -501,10 +501,16 @@ curl -s http://127.0.0.1:9091/health | python3 -m json.tool
 # Enrichment only runs on ChatRuntime (chat-bot). AgentRuntime and PassiveRuntime
 # report degraded only if the runtime itself flags an issue.
 
-# 3. Check durability quarantine count
+# 3. Check runtime.chat.queue_admission on chat instances
+# rejected_total counts capacity-shed messages since process start.
+# unowned_total counts rejections ChatRuntime could not prove terminalized at
+# the admission boundary. It stays positive until restart even if ingest later
+# recovers the row through its identity/state-fenced fallback.
+
+# 4. Check durability quarantine count
 # If durability.quarantinedOutbound > 0, messages were lost — investigate.
 
-# 4. Check logs for enrichment errors (chat-bot only)
+# 5. Check logs for enrichment errors (chat-bot only)
 journalctl --user -u whatsoup@chat-bot -n 100 | grep -i enrich
 ```
 
@@ -512,6 +518,10 @@ journalctl --user -u whatsoup@chat-bot -n 100 | grep -i enrich
 - Anthropic/OpenAI API key expired or rate-limited
 - Network connectivity issue
 - `enrichment_retries` maxed out on many messages (run `reset_enrichment_errors` MCP tool)
+- `runtime.chat.queue_admission.unowned_total > 0` — ChatRuntime failed to prove
+  queue-rejection ownership at admission time; inspect the durable inbound
+  ledger because ingest may subsequently have recovered the row as
+  `queue_full`, and restart only after preserving the failure evidence
 
 **Common causes for agent instances:**
 - Recent session crashes — check `durability.quarantinedOutbound` and `recentCrashCount` in the health JSON
@@ -687,7 +697,11 @@ systemctl --user start whatsoup@sandbox-agent
 ```bash
 # 1. Check outbound_ops for stuck or quarantined operations
 sqlite3 ~/.local/share/whatsoup/instances/sandbox-agent/bot.db \
-  "SELECT id, status, op_type, replay_policy, submitted_at, error
+  "SELECT id, status, op_type, replay_policy, retry_count, submitted_at,
+          CASE WHEN json_valid(error) THEN json_extract(error, '$.failure_code')
+               ELSE 'outbound.legacy_unclassified' END AS failure_code,
+          CASE WHEN json_valid(error) THEN json_extract(error, '$.stage')
+               ELSE 'legacy_unclassified' END AS failure_stage
    FROM outbound_ops
    WHERE status NOT IN ('echoed', 'failed_permanent')
    ORDER BY id DESC LIMIT 20;"
@@ -698,7 +712,7 @@ sqlite3 ~/.local/share/whatsoup/instances/sandbox-agent/bot.db \
 
 # 3. Check health for durability stats
 curl -s http://127.0.0.1:9091/health | python3 -c \
-  "import sys,json; d=json.load(sys.stdin); print('pending:', d['durability']['pendingOutbound'], '| quarantined:', d['durability']['quarantinedOutbound'])"
+  "import sys,json; d=json.load(sys.stdin)['durability']; print('pending:', d['pendingOutbound'], '| quarantined:', d['quarantinedOutbound'], '| failures:', d['outboundFailureEvidence'])"
 
 # 4. Check WhatsApp is connected
 curl -s http://127.0.0.1:9091/health | python3 -c \
@@ -707,6 +721,8 @@ curl -s http://127.0.0.1:9091/health | python3 -c \
 
 **Status meanings for `outbound_ops.status`:**
 - `pending` — waiting to send (normal during queue flush)
+- `pending` with a future `retry_not_before` — producer-requested defer; the
+  pending drainer owns the retry and will not send before the deadline
 - `sending` — send in progress
 - `submitted` — sent to WhatsApp, waiting for echo confirmation
 - `echoed` — confirmed delivered (normal terminal state)
@@ -880,7 +896,12 @@ OP_ID=123 # replace with the quarantined op under review
 
 # 1. Inspect quarantined operation metadata without printing message bodies.
 sqlite3 $DB \
-  "SELECT id, conversation_key, payload_hash, source_inbound_seq, error, submitted_at
+  "SELECT id, conversation_key, payload_hash, source_inbound_seq,
+          CASE WHEN json_valid(error) THEN json_extract(error, '$.failure_code')
+               ELSE 'outbound.legacy_unclassified' END AS failure_code,
+          CASE WHEN json_valid(error) THEN json_extract(error, '$.stage')
+               ELSE 'legacy_unclassified' END AS failure_stage,
+          retry_count, submitted_at
    FROM outbound_ops WHERE status = 'quarantined'
    ORDER BY id DESC;"
 
@@ -1244,8 +1265,23 @@ npm run close-recovery-catchup -- \
   --evidence-ref evidence:REFERENCE
 ```
 
-A successful dry run emits a redacted `ready: true` inspection and changes no rows. Confirm only after
-the exact source set, target sequence, actor, and evidence reference have been independently reviewed:
+A successful dry run emits a redacted `ready: true` inspection and changes no rows. It contains
+exactly these keys — no raw plan ID, conversation key, source/catch-up sequence, or any other private
+identifier ever appears in this or the confirmed output:
+
+```
+ok, dryRun, ready, planFingerprint, conversationFingerprint, nSourceSeqs,
+catchupSeqFingerprint, evidenceBasis, wouldInsert, idempotent, openBefore, openAfter
+```
+
+`planFingerprint`, `conversationFingerprint`, and `catchupSeqFingerprint` are 12-character hex handles —
+HMAC-SHA256 keyed by a per-database salt (see below), domain-separated so the same raw value in a
+different field never produces the same handle. They are stable across dry-run and confirmed output for
+the same database, so an operator can correlate a dry-run preview against a later confirmed receipt (or
+a later error) by comparing these handles, without ever seeing the raw identifier.
+
+Confirm only after the exact source set, target sequence, actor, and evidence reference have been
+independently reviewed:
 
 ```bash
 npm run close-recovery-catchup -- \
@@ -1264,6 +1300,38 @@ that same transaction, and either appends the full closure plus immutable witnes
 It fails on a busy writer, a changed database file, schema drift, a partial source set, ambiguous proof,
 or a later-only corroborated delivery. Coordinate against a live writer rather than retrying blindly.
 An exact repeated invocation is idempotent; changed evidence is rejected.
+
+The confirmed receipt contains exactly these keys:
+
+```
+ok, dryRun, receipt: {
+  planFingerprint, conversationFingerprint, nSourceSeqs, catchupSeqFingerprint,
+  evidenceBasis, inserted, idempotent, openBefore, openAfter
+}
+```
+
+On failure (either path), the command prints the raw error message to stderr (a plain line, for operator
+debuggability at the terminal — this text may describe a code path but never interpolates a raw plan ID,
+conversation key, actor, or evidence reference), followed by a bounded, machine-parseable JSON line:
+
+```
+ok: false, errorCode, correlation?: { planFingerprint, conversationFingerprint }
+```
+
+`errorCode` is one of `invalid_args`, `invalid_proof`, `changed_evidence`, `busy_writer`, `changed_file`,
+`io`, or `unknown`. `correlation` carries the same fingerprints as the dry-run/receipt output (so a
+failure can be matched against a prior preview) and is present whenever the command-line arguments parsed
+far enough to identify the target database and plan; it is omitted, never fabricated, when that
+information isn't available.
+
+**Redaction salt file.** On first use against a given database, the command creates
+`${DB}.redaction-salt` (32 random bytes, file mode `0600`) alongside it and reuses that file on every
+later invocation — including a dry run, which is otherwise non-mutating with respect to the target
+database's own rows. Losing or rotating this file changes every fingerprint the command emits for that
+database (dry-run previews taken before the loss will no longer match confirmed receipts taken after);
+back it up alongside the database if you rely on cross-run fingerprint correlation. It contains no
+identifying information by itself and only lets past/future runs against the SAME database correlate —
+it does not need to be treated as a credential, but if it changes, expect fingerprints to change with it.
 
 ### 7.7 Useful SQL Queries
 
@@ -1418,7 +1486,7 @@ If a profile has `linkPreview` and a request also sends `link_preview`, the requ
 
 ### Read Outbound Send Audit
 
-Every MCP `send_message`, health `/send`, and Reply Guarantee Protocol fallback attempt creates one row in the instance-local `outbound_sends` table. The public read surface is the global MCP `read_outbound_sends` tool.
+Every MCP `send_message`, health `/send`, and Reply Guarantee Protocol fallback attempt creates one metadata-only row in the instance-local `outbound_sends` table. The global `read_outbound_sends` tool reads bounded projections; the sensitive global `maintain_outbound_audit` tool previews or applies terminal-row retention.
 
 Query recent rows through the global MCP socket:
 
@@ -1432,16 +1500,16 @@ printf '%s\n%s\n' \
   | WHATSOUP_SOCKET="$SOCKET" node --experimental-strip-types deploy/mcp/whatsoup-proxy.ts
 ```
 
-Filter by exact raw JID when needed. Aliases are not resolved on audit reads:
+Filter by the exact opaque receipt returned by `send_message`:
 
 ```json
 {
   "limit": 25,
-  "chatJid": "EXAMPLE_JID@s.whatsapp.net"
+  "auditReceipt": "0123456789abcdef0123456789abcdef"
 }
 ```
 
-The tool returns `{ "outbound_sends": [...] }`. Rows expose `id`, `chat_jid`, `text_hash`, `text_length`, `status`, `created_at`, and optional `profile`, `transport_id`, `error_text`, and `sent_at`; optional fields are omitted when the DB value is null. Message bodies are never returned.
+The tool returns `{ "outbound_sends": [...] }`. Rows expose the receipt, caller and target-kind classes, closed outcome/failure/mutation evidence, bounded counters, evidence coverage, and timestamps. `submitted` means provider acknowledgement, not recipient delivery. Destinations, aliases, profiles, message content/fingerprints/lengths, provider IDs, and error prose are never stored or returned.
 
 For deeper history than the MCP cap of 100 rows, query the instance DB directly:
 
@@ -1450,31 +1518,34 @@ INSTANCE=primary-line
 DB=~/.local/share/whatsoup/instances/$INSTANCE/bot.db
 
 sqlite3 "$DB" \
-  "SELECT id, chat_jid, status, profile, transport_message_id, error, created_at, completed_at
+  "SELECT id, audit_receipt, caller, target_kind, outcome_code,
+          failure_code, failure_stage, mutation_state, retryable,
+          evidence_coverage, created_at, completed_at
      FROM outbound_sends
     ORDER BY created_at DESC, id DESC
     LIMIT 200;"
 ```
 
-The direct SQL columns are the raw schema names. The MCP API aliases `transport_message_id` to `transport_id`, `completed_at` to `sent_at`, and `error` to `error_text`.
-
 Common operator queries:
 
 ```bash
-# Failed sends in the last hour
+# Failure and ambiguity evidence in the last hour
 sqlite3 "$DB" \
-  "SELECT id, chat_jid, profile, error, created_at, completed_at
+  "SELECT outcome_code, failure_code, failure_stage, mutation_state,
+          retryable, evidence_coverage, COUNT(*) AS count
      FROM outbound_sends
-    WHERE status = 'failed'
+    WHERE outcome_code IN ('failed_not_sent', 'ambiguous', 'legacy_unclassified')
       AND created_at >= datetime('now', '-1 hour')
-    ORDER BY created_at DESC;"
+    GROUP BY outcome_code, failure_code, failure_stage, mutation_state,
+             retryable, evidence_coverage
+    ORDER BY outcome_code, failure_code;"
 
-# Sends grouped by profile and status
+# Attempts grouped by caller, target kind, and outcome
 sqlite3 "$DB" \
-  "SELECT COALESCE(profile, '(none)') AS profile, status, COUNT(*) AS count
+  "SELECT caller, target_kind, outcome_code, COUNT(*) AS count
      FROM outbound_sends
-    GROUP BY profile, status
-    ORDER BY profile, status;"
+    GROUP BY caller, target_kind, outcome_code
+    ORDER BY caller, target_kind, outcome_code;"
 
 # Hourly audit row growth for the last day
 sqlite3 "$DB" \
@@ -1484,10 +1555,19 @@ sqlite3 "$DB" \
     GROUP BY hour
     ORDER BY hour DESC;"
 
-# Optional manual prune after backup; retention is currently unbounded.
-sqlite3 "$DB" \
-  "DELETE FROM outbound_sends WHERE created_at < datetime('now', '-30 days');"
+# Preview supported terminal retention (no mutation).
+printf '%s\n%s\n' \
+  '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"ops-runbook","version":"1.0.0"}}}' \
+  '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"maintain_outbound_audit","arguments":{"dry_run":true}}}' \
+  | WHATSOUP_SOCKET="$SOCKET" node --experimental-strip-types deploy/mcp/whatsoup-proxy.ts
 ```
+
+The automatic and manual paths use the same fixed 30-day/10,000-terminal-row policy;
+callers cannot override its age or capacity bounds. Unresolved `intent` rows are never
+age- or cap-pruned. Use `dry_run:false` only after reviewing the preview. Do not replace
+this contract with direct ad hoc deletes.
+
+Migration 51 removes old raw columns from the live schema, but migration success alone is not forensic erasure. SQLite free pages, WAL files, backups, and snapshots may retain prior bytes; schedule any `VACUUM`, `secure_delete` policy, or backup retirement separately under the deployment's maintenance controls.
 
 ---
 
@@ -1502,9 +1582,18 @@ sqlite3 "$DB" \
 | Enrichment staleness | `health.enrichment.last_run` | Null or >15 min ago (chat instances only) |
 | Quarantined messages | `health.durability.quarantinedOutbound` | >0 (means message was lost) |
 | Pending outbound | `health.durability.pendingOutbound` | >50 (queue buildup) |
+| Outbound audit readable | `health.outbound_sends.readable` | `false` |
+| Tool evidence readable | `health.tool_durability.readable` | `false` |
+| Tool evidence write loss | `health.tool_durability.runtime_write_losses.totalWriteLosses` | >0 |
+| Database retention | `health.retention.database.state` / `consecutiveFailures` / `failureCode` | `state=failed` (`failureCode=retention_failed`) |
 | Access list backlog | `health.access_control.pending_count` | >10 (new users queued) |
 | Service restarts | `systemctl status` / journald | Restarted >3 times in 10 min |
 | Disk space | Log directory size | >500MB (10 rolling files) |
+
+If either durability ledger cannot be read, authenticated health reports null aggregates,
+sets `status=degraded`, and includes `durability_evidence_unreadable`. A failed retention
+sweep remains degraded with `database_retention_failed` until a later successful sweep
+resets the consecutive-failure count.
 
 ### BOT ERRORS Source Ownership
 

@@ -72,7 +72,7 @@ export function handleApiError(
   const errorType = classifyApiError(err);
   const statusCode = extractStatusCode(err);
   logger.error(
-    { errorType, statusCode, provider: providerName, model, elapsed_ms, err },
+    { errorType, statusCode, provider: providerName, model, elapsed_ms },
     'llm_api_error',
   );
   if (errorType === 'bad_request') {

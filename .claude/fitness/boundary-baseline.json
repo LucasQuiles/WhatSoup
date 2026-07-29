@@ -183,13 +183,6 @@
   },
   {
     "file": "src/memory/consolidation-scheduler.ts",
-    "line": 2,
-    "specifier": "../runtimes/chat/providers/pinecone.ts",
-    "fromLayer": "memory",
-    "toLayer": "runtimes"
-  },
-  {
-    "file": "src/memory/consolidation-scheduler.ts",
     "line": 3,
     "specifier": "../runtimes/chat/providers/types.ts",
     "fromLayer": "memory",

@@ -1551,9 +1551,6 @@ print(json.dumps(samples, sort_keys=True))
       me: { id: 'personal@s.whatsapp.net', lid: 'personal@lid' },
       registrationId: 2,
     });
-    const outboundTransportId = 'wamid.raw-transport-id-should-not-leak';
-    const outboundTransportHash = createHash('sha256').update(outboundTransportId).digest('hex').slice(0, 20);
-
     execFileSync('python3', ['deploy/scripts/bot-errors-health-check.py', '--daily'], {
       cwd: process.cwd(),
       env: {
@@ -1579,7 +1576,8 @@ print(json.dumps(samples, sort_keys=True))
           },
           outbound_sends: {
             latest_successful_send_at: '2026-06-11T10:00:00.000Z',
-            latest_successful_transport_id: outboundTransportId,
+            readable: true,
+            submitted: 1,
           },
         }),
         BOT_ERRORS_HEALTH_PROFILE_JSON: JSON.stringify({
@@ -1614,9 +1612,8 @@ print(json.dumps(samples, sort_keys=True))
     expect(event.evidence).toContain('service personal: active_process_fallback (com.whatsoup.personal-dry-fallback)');
     expect(event.evidence).not.toContain('FAIL service personal');
     expect(event.evidence).toContain('outbound_success_at=2026-06-11T10:00:00.000Z');
-    expect(event.evidence).toContain('outbound_success_transport_present=true');
-    expect(event.evidence).toContain(`outbound_success_transport_hash=${outboundTransportHash}`);
-    expect(event.evidence).not.toContain(outboundTransportId);
+    expect(event.evidence).toContain('outbound_success_evidence=provider_acknowledged_or_better');
+    expect(event.evidence).not.toContain('latest_successful_transport_id');
     expect(event.evidence).not.toContain('personal@s.whatsapp.net');
   });
 

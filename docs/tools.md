@@ -1,8 +1,8 @@
 # WhatSoup MCP Tool API Reference
 
-Complete reference for all 165 MCP tools exposed by WhatSoup. Tools are grouped by module. Each tool lists its scope, replay policy, and parameters extracted from the Zod schema.
+Complete reference for all 166 MCP tools exposed by WhatSoup. Tools are grouped by module. Each tool lists its scope, replay policy, and parameters extracted from the Zod schema.
 
-> **Conditionally-registered tools.** Of the 165 documented tools, 162 are always registered at startup and 3 are conditionally registered. Conditional tools are tagged `core: false` in their `ToolDeclaration` so that absence on an instance which does not meet the gate is tolerated rather than fatal (see `src/mcp/types.ts`).
+> **Conditionally-registered tools.** Of the 166 documented tools, 163 are always registered at startup and 3 are conditionally registered. Conditional tools are tagged `core: false` in their `ToolDeclaration` so that absence on an instance which does not meet the gate is tolerated rather than fatal (see `src/mcp/types.ts`).
 >
 > **`knowledge_search`** is registered only when all of the following hold:
 >
@@ -72,12 +72,12 @@ Complete reference for all 165 MCP tools exposed by WhatSoup. Tools are grouped 
 | [retention.ts](#retentionts) | 1 |
 | [status.ts](#statusts) | 2 |
 | [scheduling.ts](#schedulingts) | 5 |
-| [audit.ts](#auditts) | 1 |
+| [audit.ts](#auditts) | 2 |
 | [substrate.ts](#substratets) | 21 |
 | [memory-write.ts](#memory-writets) | 1 |
-| **Total** | **165** |
+| **Total** | **166** |
 
-> The total above (`165`) reflects the full canonical surface — `164` tools registered from the per-module `src/mcp/tools/*.ts` factories plus `1` (`emit_heal_result`) registered inline (declared in `src/runtimes/agent/runtime-tool-registrations.ts`, wired from `AgentRuntime.start()`). The inline registration is documented below under [runtime-tool-registrations.ts (inline)](#runtime-tool-registrationsts-inline); it is intentionally absent from the module breakdown because it does not live under `src/mcp/tools/`.
+> The total above (`166`) reflects the full canonical surface — `165` tools registered from the per-module `src/mcp/tools/*.ts` factories plus `1` (`emit_heal_result`) registered inline (declared in `src/runtimes/agent/runtime-tool-registrations.ts`, wired from `AgentRuntime.start()`). The inline registration is documented below under [runtime-tool-registrations.ts (inline)](#runtime-tool-registrationsts-inline); it is intentionally absent from the module breakdown because it does not live under `src/mcp/tools/`.
 
 ---
 
@@ -113,7 +113,7 @@ Send a text message. In chat-scoped sessions the current chat is injected. In gl
 
 **Target/profile errors:** `chatJid` + `to` returns `chatJid and to are mutually exclusive; provide exactly one`; neither target returns `request body must contain chatJid (raw JID) or to (alias)`; an unknown alias returns `alias not found: <alias>`; an unknown profile returns `unknown profile: <profile>`. MCP returns these as tool error envelopes. The health `/send` route maps the same request errors to HTTP 400.
 
-**Outbound audit:** `send_message` creates one `outbound_sends` intent row after target/profile preparation and finalizes that row as `sent` or `failed` after transport returns. Reply Guarantee Protocol fallbacks and health `/send` attempts use the same audit table. Use [`read_outbound_sends`](#read_outbound_sends) to inspect recent rows; message bodies are not stored or returned.
+**Outbound audit:** `send_message` creates one metadata-only `outbound_sends` intent after target/profile preparation, returns its opaque audit receipt, and finalizes the row from typed transport evidence. A normal provider acknowledgement is `submitted`; it is not a recipient-delivery claim. Reply Guarantee Protocol fallbacks and health `/send` attempts use the same table. Use [`read_outbound_sends`](#read_outbound_sends) to inspect recent rows by receipt; destinations, message bodies, fingerprints, exact lengths, provider IDs, and error prose are not stored or returned.
 
 ---
 
@@ -289,7 +289,7 @@ Read recent outbound send audit rows without returning message text.
 | Name | Type | Required | Description |
 |------|------|----------|-------------|
 | limit | number | optional | Maximum rows to return. Defaults to `50`; values above `100` are clamped to `100`; values below `1` are rejected. |
-| chatJid | string | optional | Exact raw WhatsApp JID filter. Aliases are not resolved at read time. |
+| auditReceipt | string | optional | Exact opaque receipt: 32 lowercase hexadecimal characters. |
 
 **Return shape**
 
@@ -298,22 +298,46 @@ Read recent outbound send audit rows without returning message text.
   "outbound_sends": [
     {
       "id": 1,
-      "chat_jid": "EXAMPLE_JID@s.whatsapp.net",
-      "text_hash": "SHA256_HEX",
-      "text_length": 12,
-      "status": "sent",
-      "profile": "notify",
-      "transport_id": "TRANSPORT_MESSAGE_ID",
+      "audit_receipt": "0123456789abcdef0123456789abcdef",
+      "schema_version": 1,
+      "caller": "mcp",
+      "target_kind": "alias",
+      "outcome_code": "submitted",
+      "failure_stage": "ack_received",
+      "mutation_state": "acknowledged",
+      "evidence_coverage": "typed",
+      "logical_attempt_count": 1,
+      "provider_submission_count": 1,
       "created_at": "2026-04-26 20:30:00",
-      "sent_at": "2026-04-26 20:30:01"
+      "completed_at": "2026-04-26 20:30:01"
     }
   ]
 }
 ```
 
-Rows include `id`, `chat_jid`, `text_hash`, `text_length`, `status`, `created_at`, and optional `profile`, `transport_id`, `error_text`, and `sent_at`. Optional fields are omitted when the underlying DB value is null.
+Rows use closed outcome, failure-stage, mutation-state, retryability, and evidence-coverage vocabularies. Nullable failure and counter fields are omitted from the MCP projection when the database value is null.
 
-**No-text invariant:** the audit table stores and returns only `text_hash` (SHA-256 of the final send text) and `text_length`. Message bodies are never returned.
+**Non-disclosure invariant:** the audit table stores neither destinations nor content-derived values. The receipt is random per logical attempt and is not derived from the destination, body, alias, profile, provider response, or error.
+
+---
+
+### maintain_outbound_audit
+
+Preview or apply bounded retention to terminal metadata-only outbound audit rows.
+
+| | |
+|---|---|
+| **Scope** | `global` |
+| **Replay Policy** | `unsafe` |
+| **Sensitive** | yes |
+
+| Name | Type | Required | Description |
+|------|------|----------|-------------|
+| dry_run | boolean | required | `true` reports eligible rows without deleting; `false` applies the configured retention policy. |
+
+The caller cannot override the configured 30-day/10,000-terminal-row policy. The result
+reports `dry_run`, `retention_days`, `eligible`, and `deleted`. Unresolved `intent` rows
+are never eligible for age or capacity pruning.
 
 ---
 

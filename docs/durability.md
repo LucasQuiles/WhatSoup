@@ -38,6 +38,11 @@ Every message the bot sends is journaled in `outbound_ops` before the network ca
 - `replay_policy` — governs what happens if the op is found undelivered after a crash (see §2.4).
 - `source_inbound_seq` — links the outbound op back to the inbound event that caused it.
 - `is_terminal` — marks the op as the "final reply" for a conversation turn. When a terminal op reaches `echoed`, the linked inbound event is automatically advanced to `complete`.
+- `error` — for failed, ambiguous, or deferred operations, a bounded
+  `whatsoup-outbound-failure-v1` JSON envelope. It records a stable failure
+  code, stage, mutation certainty, retry decision/owner/deadline, attempt
+  counts, timestamps, and evidence coverage. It never stores thrown provider
+  prose. Pre-envelope values decode as `legacy_unclassified`.
 
 ### 2.3 Echo Correlation
 
@@ -154,7 +159,9 @@ Note: `completeInbound()` is a guarded helper — if the row is still `processin
 
   sending ─── process crash ──► maybe_sent  (pre-connect recovery)
 
-  pending ─── send() throws ──► maybe_sent  (sendTracked error path)
+  pending ─── send() rejects before provider call ──► failed_permanent
+  pending ─── send() returns a positive retry floor ──► pending
+  pending ─── send() fails after provider call starts ──► maybe_sent
 
                          failed_permanent  (hard failures, not retried)
 ```
@@ -181,7 +188,10 @@ Iterates `session_checkpoints` rows with `session_status = 'active'`. For each, 
 
 **Step 2 — Promote `sending` → `maybe_sent`**
 
-Any outbound op in `sending` status at startup means the process crashed between `markSending()` and `markSubmitted()` — the network call may or may not have executed. All such ops are promoted to `maybe_sent` with `error = 'crash-in-flight'` so they are resolved by post-connect recovery.
+Any outbound op in `sending` status at startup means the process crashed between
+`markSending()` and `markSubmitted()` — the network call may or may not have
+executed. All such ops are promoted to `maybe_sent` with structured
+`outbound.crash_in_flight` evidence so they are resolved by post-connect recovery.
 
 **Step 3 — Recover tool calls**
 
@@ -225,7 +235,12 @@ The 10-second grace period is critical: it allows WhatsApp to deliver history sy
 
 **Step 1 — Promote stale `submitted` → `maybe_sent`**
 
-Any op in `submitted` with `submitted_at < now() - 30 seconds` is promoted to `maybe_sent` with `error = 'stale-submitted-no-echo'`. This handles ops that were submitted in a previous session and whose echo arrived (or didn't) during the grace period — if the echo arrived, it would have triggered `matchEcho()` and the op would already be `echoed`. Remaining `submitted` ops are definitively stale.
+Any op in `submitted` with `submitted_at < now() - 30 seconds` is promoted
+to `maybe_sent` with structured `outbound.echo_timeout` evidence. This handles
+ops that were submitted in a previous session and whose echo arrived (or
+didn't) during the grace period — if the echo arrived, it would have triggered
+`matchEcho()` and the op would already be `echoed`. Remaining `submitted` ops
+are definitively stale.
 
 These newly promoted ops are immediately eligible for Step 2.
 
@@ -276,7 +291,19 @@ setInterval(() => {
 }, 10_000)
 ```
 
-Promotes any `submitted` op with `submitted_at < now() - 30 seconds` to `maybe_sent` with `error = 'echo_timeout'`. This catches ops whose echo was permanently lost during a live session (not just crash recovery). The same interval reconciles `maybe_sent` debt created after the one-time post-connect pass, after preserving a 30-second late-echo grace period. Each pass selects the oldest 200 eligible rows so a large backlog cannot monopolize the maintenance tick: confirmed echoes settle, `safe`/`read_only` ops reset to `pending`, and non-safe ops quarantine. Corroborated selected-delivery proof is excluded before applying the page limit so intentionally preserved rows neither create repeated recovery evidence nor starve actionable debt. An empty scan creates no recovery plan or run. The `pending` stage is then re-sent by the drainer (§4.4), which runs both on this same interval and immediately after each recovery pass.
+Promotes any `submitted` op with `submitted_at < now() - 30 seconds` to
+`maybe_sent` with structured `outbound.echo_timeout` evidence. This catches ops
+whose echo was permanently lost during a live session (not just crash
+recovery). The same interval reconciles `maybe_sent` debt created after the
+one-time post-connect pass, after preserving a 30-second late-echo grace
+period. Each pass selects the oldest 200 eligible rows so a large backlog
+cannot monopolize the maintenance tick: confirmed echoes settle,
+`safe`/`read_only` ops reset to `pending`, and non-safe ops quarantine.
+Corroborated selected-delivery proof is excluded before applying the page limit
+so intentionally preserved rows neither create repeated recovery evidence nor
+starve actionable debt. An empty scan creates no recovery plan or run. The
+`pending` stage is then re-sent by the drainer (§4.4), which runs both on this
+same interval and immediately after each recovery pass.
 
 **Why 30 seconds?** WhatsApp echo latency is typically under 2 seconds on a healthy connection. 30 seconds provides a large margin for slow connections, QoS throttling, and brief disconnects while still being short enough that stuck ops don't silently accumulate for hours.
 
@@ -287,8 +314,11 @@ alone does not re-deliver them. `drainPendingOutbound(messenger, durability)` is
 that re-sends them. It is wired in two places (`main.ts`):
 
 1. **Post-connect recover callback** — immediately after each `postConnectRecovery()`.
-2. **Echo-timeout interval** (every 10 s, alongside `sweepStaleSubmitted()`) — drains any op
-   that lands in `pending` between reconnects, without waiting for a restart.
+2. **Echo-timeout interval** (every 10 s, alongside `sweepStaleSubmitted()`) — drains ops
+   that land in `pending` between reconnects, without waiting for a restart,
+   only when their structured retry deadline is absent or due. A future
+   `retry_not_before` remains `pending`; the drainer never consumes producer
+   retry floors early.
 
 For each op in `status='pending'`:
 
@@ -300,9 +330,10 @@ For each op in `status='pending'`:
 - **Reconstructable text op** — `op_type === 'text'` or `'status_ping'` and `payload` parses
   to `{ text: string }` (the exact shape `sendTracked` writes): `markSending()`, re-send via
   `messenger.sendMessage(chat_jid, text)`, then `markSubmitted(wa_message_id)`. The op then
-  re-enters the normal `submitted → echoed` reconciliation path. If the send throws, the op
-  is set back to `maybe_sent` so it re-enters the reconnect-paced recovery loop (no inline
-  retry / tight-loop).
+  re-enters the normal `submitted → echoed` reconciliation path. If the send throws, the
+  shared classifier chooses the durable state: an ambiguous handoff becomes `maybe_sent`,
+  a definitive rejection becomes `failed_permanent`, and a new positive producer floor
+  returns to deferred `pending` (no inline retry / tight-loop).
 - **Non-reconstructable op** — unknown `op_type`, or a `text`/`status_ping` op whose payload
   does not parse to `{ text }`: `markQuarantined()` + an `outbound_quarantined` alert
   (`reason=pending_replay_unreconstructable`). These are **not** left `pending` forever —
@@ -311,18 +342,21 @@ For each op in `status='pending'`:
 One failing op never aborts the rest of the drain. The function returns
 `{ resent, expired }`: `resent` = ops transitioned out of `pending` via `markSubmitted`;
 `expired` = `status_ping` ops aged out past the TTL. **Duplicate-delivery tradeoff:** see
-§2.4 — only `safe`/`read_only` ops ever reach `pending`, so a replay that duplicates an
-already-delivered message is the accepted tradeoff for those ops and is never incurred for
-user-terminal (`unsafe`) replies. This is the same risk `sendTracked`-created ops already
-carry on a `maybe_sent → reset` cycle; the drainer does not widen it.
+§2.4 — only `safe`/`read_only` ambiguity recovery is reset to `pending`, so a replay that
+duplicates an already-delivered message is the accepted tradeoff for those policies.
+An `unsafe` op may also be `pending` only after a deterministic non-send with a producer
+deadline; retrying it cannot duplicate a prior provider submission. The drainer does not
+widen replay eligibility for ambiguous unsafe replies.
 
 **Status pings (`op_type === 'status_ping'`).** The agent "back online" / self-restart pings
 (`main.ts`) are enqueued `replayPolicy: 'unsafe'` + `opType: 'status_ping'` so they are
 structurally storm-proof (PR-C): (1) **unsafe** — `postConnectRecovery` quarantines a failed
 ping instead of resetting it to `pending`, so the drain never re-sends it; (2)
-**supersede-on-enqueue** — `createOutboundOp` marks any prior non-terminal `status_ping` for
-the same chat `failed_permanent`/`error='superseded'` (retention reclaims it), bounding the
-class to one outstanding ping per chat; (3) **TTL age-out** — the drain expires a stale ping
+**supersede-on-enqueue** — `createOutboundOp` marks a prior pending
+`status_ping` failed-permanent with `outbound.superseded`; an already
+sending/submitted/ambiguous ping is quarantined with its delivery certainty
+preserved so a late echo can still settle it. Either terminal scheduling state
+bounds the class to one outstanding ping per chat; (3) **TTL age-out** — the drain expires a stale ping
 (above). All three are gated strictly on `op_type === 'status_ping'`; genuine `text` ops
 (user replies, admin responses, the `isResume` continuity message) are untouched.
 
@@ -500,7 +534,11 @@ SELECT
   t.id,
   t.conversation_key,
   t.tool_name,
-  t.tool_input,
+  t.tool_group,
+  t.failure_code,
+  t.failure_stage,
+  t.operator_action,
+  t.evidence_coverage,
   t.created_at,
   t.completed_at
 FROM tool_calls t
@@ -574,7 +612,14 @@ These are the same 30-second constant applied in two different contexts. The rat
 
 Sends executed via MCP tool calls (e.g., `send_message` tool called by an external MCP client) bypass the `sendTracked` helper and do not create outbound op journal entries. This is **by design**: MCP tool sends are user-initiated and synchronous from the caller's perspective; the caller receives success/failure directly and manages retries. Journaling these would create phantom ops that the recovery engine cannot safely replay. This applies whether the target is supplied as raw `chatJid` or resolved from alias `to`.
 
-This means MCP tool sends are **not** tracked in the durability engine and will not appear in `outbound_ops`. They are still recorded in the separate `outbound_sends` audit table, which stores intent, outcome, hash, and length metadata without storing message bodies.
+This means MCP tool sends are **not** tracked in the durability engine and will not appear in `outbound_ops`. They are still recorded in the separate `outbound_sends` audit table. That table stores a random per-attempt receipt plus closed intent/outcome/failure/mutation evidence and bounded counters. It stores no destination, alias/profile, body fingerprint, exact length, provider identifier, or error prose.
+
+The supported `maintain_outbound_audit` tool only selects preview (`dry_run:true`) or
+apply (`dry_run:false`); it cannot override the automatic 30-day/10,000-terminal-row
+policy. Retention health exposes a closed `not_run`/`succeeded`/`failed` state, a
+saturating consecutive-failure count, and `retention_failed` without exception prose.
+Unreadable audit/tool aggregates and failed retention degrade authenticated diagnostic
+health with closed causes rather than reporting measured zeroes.
 
 ### 5.6 `sendTracked` — Shared Send Helper
 
@@ -596,7 +641,11 @@ The function:
 2. Transitions it to `sending`.
 3. Calls `messenger.sendMessage()`.
 4. On success: calls `markSubmitted(waMessageId)`.
-5. On error: calls `markMaybeSent(error)` and re-throws. The exception propagates so the caller can handle it, but the op is safely journaled for recovery.
+5. On error: classifies the failure once and persists the resulting disposition.
+   Definitive rejection becomes `failed_permanent`, ambiguous submission becomes
+   `maybe_sent`, and a positive producer retry floor remains `pending` with
+   `retry_not_before` owned by the pending drainer. The original exception is
+   re-thrown after the durable write.
 
 If `durability` is `undefined` (rare, test contexts only), the send proceeds without journaling.
 
@@ -639,13 +688,20 @@ delivery proof while adding auditable completion and conflict evidence.
 | `submitted_at` | TEXT | Timestamp when `markSubmitted()` was called (after `sendMessage()` returned). |
 | `echoed_at` | TEXT | Timestamp when WhatsApp echo was matched. |
 | `wa_message_id` | TEXT | WhatsApp-assigned message ID, populated by `markSubmitted()`. May be null if send failed before an ID was returned. |
-| `error` | TEXT | Error string for `maybe_sent`, `failed_permanent` states. |
+| `error` | TEXT | Nullable bounded `whatsoup-outbound-failure-v1` JSON for deferred or failed states. Stable fields: `failure_code`, `stage`, `mutation_state`, `retryable`, `retry_decision`, `retry_not_before`, `retry_owner`, `attempt_budget_disposition`, logical/provider attempt counts, first/last failure timestamps, and `evidence_coverage`. Legacy prose is read as `legacy_unclassified`; new writers never persist thrown prose. |
 | `source_inbound_seq` | INTEGER | FK to `inbound_events.seq`. Links this outbound op to the message that caused it. Nullable for proactive sends. |
-| `retry_count` | INTEGER | Reserved. Currently always 0. |
+| `retry_count` | INTEGER | Number of completed logical send invocations recorded for the op, including a call rejected at admission. Waiting until a producer deadline does not add another attempt, and `provider_submission_count` separately records calls that crossed the provider boundary. |
 | `is_terminal` | INTEGER | Boolean (0/1). If 1, echoing this op completes the linked inbound event. |
 | `replay_policy` | TEXT NOT NULL | `'safe'`, `'unsafe'`, or `'read_only'`. Default `'unsafe'`. |
 
 Index: `idx_outbound_ops_status` on `(status)`, `idx_outbound_ops_source` on `(source_inbound_seq)`.
+
+`GET /health` exposes a privacy-safe `durability.outboundFailureEvidence`
+projection. It samples the 500 newest non-null envelopes and returns at most 20
+groups by failure code, stage, mutation state, evidence coverage, terminal
+state, retry decision/owner, and remaining-delay bucket. Each group includes
+its earliest next-eligible time and aggregate provider-submission count; it
+does not expose destinations, message content, or provider prose.
 
 ### `turn_terminal_records` (Migration 37)
 
@@ -746,13 +802,21 @@ rewriting either durable disposition.
 | `conversation_key` | TEXT NOT NULL | Chat context of the tool call. Global-tier sessions (no per-chat key) record under the reserved `__global__` sentinel; real keys derive from JIDs so it cannot collide. |
 | `session_checkpoint_id` | INTEGER | FK to `session_checkpoints.id`. Links the tool call to the agent session. |
 | `tool_name` | TEXT NOT NULL | Name of the MCP tool invoked. |
-| `tool_input` | TEXT NOT NULL | JSON-serialized input arguments. |
+| `tool_group` | TEXT NOT NULL | Closed functional group used for aggregate diagnostics; unknown extension groups become `other`. |
+| `tool_input` | TEXT NOT NULL | Fixed `[metadata-only]` marker. Arguments are never persisted. |
 | `status` | TEXT NOT NULL | `pending`, `executing`, `complete`, `error`, `replayed`, `quarantined`. Default `'pending'`. `error` (added #1787) is the terminal state for a failed tool call — success-with-`isError` payload, a thrown handler, and a denied sensitive-tool attempt all mark `error` through the single `markToolComplete()` chokepoint. `complete`, `error`, `replayed`, and `quarantined` are the terminal statuses retention deletes (`database-retention.ts`); recovery only ever selects `executing`/`pending` (§4.1 Step 3), so `error` is never re-selected once written. |
-| `result` | TEXT | JSON-serialized tool result, or the `error: ...` message when `status = 'error'`. Populated by `markToolComplete()`. |
+| `result` | TEXT | Null while open; otherwise a fixed success, error, or recovery marker. Tool output and exception prose are never persisted. |
 | `replay_policy` | TEXT NOT NULL | Same semantics as `outbound_ops.replay_policy`. |
 | `created_at` | TEXT | Timestamp of record creation. |
 | `completed_at` | TEXT | Timestamp when status reached a terminal state. |
 | `outbound_op_id` | INTEGER | FK to `outbound_ops.id`. If set, this tool call produced an outbound send; recovery delegates to the op. |
+| `outcome_code` | TEXT NOT NULL | Closed lifecycle outcome: open, success, failure, replayed recovery, or recovery quarantine. |
+| `failure_code`, `failure_stage` | TEXT | Bounded typed failure evidence; null outside failed/quarantined outcomes. |
+| `retry_disposition`, `operator_action` | TEXT NOT NULL | Closed recovery guidance derived from typed facts, never prose. |
+| `evidence_coverage` | TEXT NOT NULL | `complete`, `partial`, or `legacy_unclassified`. |
+| `duration_ms` | INTEGER | Optional bounded execution duration; null for open rows. |
+
+Migration 50 replaces historical input/result/error content with these markers without interpreting legacy prose. This is a logical live-schema scrub, not proof of physical erasure: old bytes may remain in SQLite free pages, WAL files, backups, or snapshots until separately approved compaction and backup-retirement work occurs.
 
 ### `session_checkpoints`
 

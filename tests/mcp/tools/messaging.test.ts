@@ -721,16 +721,22 @@ describe('registerMessagingTools', () => {
         );
 
         expect(result.isError).toBeUndefined();
+        const body = JSON.parse(result.content[0].text) as { audit_receipt: string };
+        expect(body.audit_receipt).toMatch(/^[0-9a-f]{32}$/);
         const rows = auditDb.raw
-          .prepare('SELECT line, caller, chat_jid, target_kind, status, text_length FROM outbound_sends')
+          .prepare(`
+            SELECT audit_receipt, caller, target_kind, outcome_code,
+                   failure_code, mutation_state
+            FROM outbound_sends
+          `)
           .all() as Array<Record<string, unknown>>;
         expect(rows).toEqual([{
-          line: 'test-line',
+          audit_receipt: body.audit_receipt,
           caller: 'mcp',
-          chat_jid: 'audit-chat@s.whatsapp.net',
           target_kind: 'chatJid',
-          status: 'sent',
-          text_length: 'Hello audit'.length,
+          outcome_code: 'submitted',
+          failure_code: null,
+          mutation_state: 'acknowledged',
         }]);
       } finally {
         auditDb.close();
@@ -764,14 +770,20 @@ describe('registerMessagingTools', () => {
         const body = JSON.parse(result.content[0].text);
         expect(body.error).toMatch(/temporarily disconnected/);
         const rows = auditDb.raw
-          .prepare('SELECT caller, chat_jid, target_kind, status, error FROM outbound_sends')
+          .prepare(`
+            SELECT caller, target_kind, outcome_code, failure_code,
+                   failure_stage, mutation_state, evidence_coverage
+            FROM outbound_sends
+          `)
           .all() as Array<Record<string, unknown>>;
         expect(rows).toEqual([{
           caller: 'mcp',
-          chat_jid: 'audit-chat@s.whatsapp.net',
           target_kind: 'chatJid',
-          status: 'failed',
-          error: 'socket closed',
+          outcome_code: 'ambiguous',
+          failure_code: 'unknown',
+          failure_stage: 'unknown',
+          mutation_state: 'unknown',
+          evidence_coverage: 'untyped',
         }]);
       } finally {
         auditDb.close();

@@ -1,5 +1,8 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { EventEmitter } from 'node:events';
 import { createPrimaryModelProbeAdapters } from '../../../src/runtimes/agent/providers/primary-model-usability-adapters.ts';
+import { probePrimaryModelUsability } from '../../../src/runtimes/agent/providers/primary-model-usability.ts';
+import { probeBinaryCommand as runBinaryCommandProbe } from '../../../src/runtimes/agent/providers/binary-preflight.ts';
 import { ProviderExecutionGate } from '../../../src/runtimes/agent/provider-execution-gate.ts';
 import { shortHash } from '../../../src/lib/short-hash.ts';
 
@@ -21,6 +24,29 @@ describe('createPrimaryModelProbeAdapters', () => {
     await expect(
       adapters.probeBinaryModel?.({ provider: 'claude-cli', model: 'configured-primary' }),
     ).resolves.toEqual({ status: 'provider_unavailable' });
+    expect(probeBinaryCommand).not.toHaveBeenCalled();
+  });
+
+  it('does not resolve a binary or heal state when a CLI probe is already aborted', async () => {
+    const controller = new AbortController();
+    controller.abort();
+    const getProviderBinary = vi.fn(() => 'claude');
+    const ensureClaudeFileStoreCredential = vi.fn(() => ({ outcome: 'healed' as const }));
+    const probeBinaryCommand = vi.fn();
+    const adapters = createPrimaryModelProbeAdapters(undefined, {
+      getProviderBinary,
+      ensureClaudeFileStoreCredential,
+      probeBinaryCommand,
+    });
+
+    await expect(
+      adapters.probeBinaryModel?.(
+        { provider: 'claude-cli', model: 'configured-primary' },
+        controller.signal,
+      ),
+    ).resolves.toEqual({ status: 'timeout' });
+    expect(getProviderBinary).not.toHaveBeenCalled();
+    expect(ensureClaudeFileStoreCredential).not.toHaveBeenCalled();
     expect(probeBinaryCommand).not.toHaveBeenCalled();
   });
 
@@ -182,6 +208,278 @@ describe('createPrimaryModelProbeAdapters', () => {
     activeTurn.release();
     await expect(probe).resolves.toEqual({ status: 'ok' });
     expect(probeBinaryCommand).toHaveBeenCalledOnce();
+    expect(gate.snapshot()).toMatchObject({ active: false, pending: 0 });
+  });
+
+  it('cancels a timed-out OpenCode probe before its queued execution can start later', async () => {
+    vi.useFakeTimers();
+    try {
+      const gate = new ProviderExecutionGate();
+      const activeTurn = await gate.acquire();
+      const probeBinaryCommand = vi.fn(async () => ({ status: 'ok' as const, output: 'OK' }));
+      const adapters = createPrimaryModelProbeAdapters(undefined, {
+        getProviderBinary: vi.fn(() => 'opencode'),
+        probeBinaryCommand,
+        providerExecutionGate: gate,
+      });
+
+      const probe = probePrimaryModelUsability(
+        { provider: 'opencode-cli', model: 'openai/some-model' },
+        adapters,
+        { timeoutMs: 100 },
+      );
+      await vi.advanceTimersByTimeAsync(100);
+      const result = await probe;
+      const snapshotAtTimeout = gate.snapshot();
+
+      activeTurn.release();
+      await vi.advanceTimersByTimeAsync(0);
+      await Promise.resolve();
+
+      expect(result).toMatchObject({ status: 'timeout' });
+      expect(snapshotAtTimeout).toMatchObject({
+        active: true,
+        pending: 0,
+        abortedWaits: 1,
+      });
+      expect(probeBinaryCommand).not.toHaveBeenCalled();
+      expect(gate.snapshot()).toMatchObject({ active: false, pending: 0 });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('drains repeated timed-out OpenCode waiters without disturbing later FIFO work', async () => {
+    vi.useFakeTimers();
+    try {
+      const gate = new ProviderExecutionGate();
+      const activeTurn = await gate.acquire();
+      const probeBinaryCommand = vi.fn(async () => ({ status: 'ok' as const, output: 'OK' }));
+      const adapters = createPrimaryModelProbeAdapters(undefined, {
+        getProviderBinary: vi.fn(() => 'opencode'),
+        probeBinaryCommand,
+        providerExecutionGate: gate,
+      });
+
+      for (let index = 0; index < 3; index += 1) {
+        const probe = probePrimaryModelUsability(
+          { provider: 'opencode-cli', model: `openai/model-${index}` },
+          adapters,
+          { timeoutMs: 100 },
+        );
+        await vi.advanceTimersByTimeAsync(100);
+        await expect(probe).resolves.toMatchObject({ status: 'timeout' });
+        expect(gate.snapshot()).toMatchObject({
+          active: true,
+          pending: 0,
+          abortedWaits: index + 1,
+          pressureActive: false,
+        });
+      }
+
+      const legitimateWaiter = gate.acquire({
+        work: { kind: 'turn', scopeHash: 'aaaaaaaaaaaa' },
+      });
+      expect(gate.snapshot()).toMatchObject({ active: true, pending: 1 });
+      activeTurn.release();
+      const legitimateLease = await legitimateWaiter;
+      expect(gate.snapshot()).toMatchObject({
+        active: true,
+        activeWorkKind: 'turn',
+        pending: 0,
+        abortedWaits: 3,
+      });
+      legitimateLease.release();
+
+      expect(probeBinaryCommand).not.toHaveBeenCalled();
+      expect(gate.snapshot()).toMatchObject({
+        active: false,
+        pending: 0,
+        pressureActive: false,
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('retains the OpenCode execution lease until an aborted probe process closes', async () => {
+    const gate = new ProviderExecutionGate();
+    const controller = new AbortController();
+    const child = new EventEmitter() as EventEmitter & {
+      pid: number;
+      stdout: EventEmitter;
+      stderr: EventEmitter;
+      kill: ReturnType<typeof vi.fn>;
+    };
+    child.pid = 9913;
+    child.stdout = new EventEmitter();
+    child.stderr = new EventEmitter();
+    child.kill = vi.fn(() => true);
+    const spawnImpl = vi.fn(() => child) as unknown as typeof import('node:child_process').spawn;
+    const probeBinaryCommand = (
+      binary: string,
+      args: string[],
+      env: NodeJS.ProcessEnv,
+      options?: Parameters<typeof runBinaryCommandProbe>[3],
+    ) => runBinaryCommandProbe(binary, args, env, options, spawnImpl);
+    const adapters = createPrimaryModelProbeAdapters(undefined, {
+      buildChildEnv: vi.fn(() => ({ PATH: '/usr/bin' })),
+      getProviderBinary: vi.fn(() => 'opencode'),
+      probeBinaryCommand,
+      providerExecutionGate: gate,
+    });
+
+    const probe = probePrimaryModelUsability(
+      { provider: 'opencode-cli', model: 'openai/some-model' },
+      adapters,
+      { signal: controller.signal },
+    );
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(gate.snapshot()).toMatchObject({
+      active: true,
+      activeWorkKind: 'probe',
+      pending: 0,
+    });
+
+    controller.abort();
+    await Promise.resolve();
+    expect(child.kill).toHaveBeenCalledOnce();
+    expect(gate.snapshot()).toMatchObject({ active: true, activeWorkKind: 'probe' });
+    let successorGranted = false;
+    const successor = gate.acquire({
+      work: { kind: 'turn', scopeHash: 'bbbbbbbbbbbb' },
+    }).then((lease) => {
+      successorGranted = true;
+      return lease;
+    });
+    await Promise.resolve();
+    expect(successorGranted).toBe(false);
+    expect(gate.snapshot()).toMatchObject({
+      active: true,
+      activeWorkKind: 'probe',
+      pending: 1,
+    });
+
+    child.emit('close', null, 'SIGTERM');
+    await expect(probe).resolves.toMatchObject({ status: 'timeout' });
+    const successorLease = await successor;
+    expect(gate.snapshot()).toMatchObject({
+      active: true,
+      activeWorkKind: 'turn',
+      pending: 0,
+    });
+    successorLease.release();
+    expect(gate.snapshot()).toMatchObject({ active: false, pending: 0 });
+  });
+
+  it('does not complete an outer timeout or grant a successor until the probe process closes', async () => {
+    vi.useFakeTimers();
+    try {
+      const gate = new ProviderExecutionGate();
+      const child = new EventEmitter() as EventEmitter & {
+        pid: number;
+        stdout: EventEmitter;
+        stderr: EventEmitter;
+        kill: ReturnType<typeof vi.fn>;
+      };
+      child.pid = 9914;
+      child.stdout = new EventEmitter();
+      child.stderr = new EventEmitter();
+      child.kill = vi.fn(() => true);
+      const spawnImpl = vi.fn(() => child) as unknown as typeof import('node:child_process').spawn;
+      const probeBinaryCommand = (
+        binary: string,
+        args: string[],
+        env: NodeJS.ProcessEnv,
+        options?: Parameters<typeof runBinaryCommandProbe>[3],
+      ) => runBinaryCommandProbe(binary, args, env, options, spawnImpl);
+      const adapters = createPrimaryModelProbeAdapters(undefined, {
+        buildChildEnv: vi.fn(() => ({ PATH: '/usr/bin' })),
+        getProviderBinary: vi.fn(() => 'opencode'),
+        probeBinaryCommand,
+        providerExecutionGate: gate,
+      });
+
+      const probe = probePrimaryModelUsability(
+        { provider: 'opencode-cli', model: 'openai/some-model' },
+        adapters,
+        { timeoutMs: 100 },
+      );
+      await vi.advanceTimersByTimeAsync(0);
+      expect(gate.snapshot()).toMatchObject({ active: true, activeWorkKind: 'probe' });
+
+      let settled = false;
+      void probe.then(() => { settled = true; });
+      await vi.advanceTimersByTimeAsync(100);
+      expect(child.kill).toHaveBeenCalledOnce();
+      expect(settled).toBe(false);
+
+      let successorGranted = false;
+      const successor = gate.acquire({
+        work: { kind: 'turn', scopeHash: 'cccccccccccc' },
+      }).then((lease) => {
+        successorGranted = true;
+        return lease;
+      });
+      await Promise.resolve();
+      expect(successorGranted).toBe(false);
+      expect(gate.snapshot()).toMatchObject({
+        active: true,
+        activeWorkKind: 'probe',
+        pending: 1,
+      });
+
+      child.emit('close', null, 'SIGTERM');
+      await expect(probe).resolves.toMatchObject({ status: 'timeout' });
+      const successorLease = await successor;
+      expect(gate.snapshot()).toMatchObject({
+        active: true,
+        activeWorkKind: 'turn',
+        pending: 0,
+      });
+      successorLease.release();
+      expect(gate.snapshot()).toMatchObject({ active: false, pending: 0 });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('releases a granted lease without spawning when cancellation wins at the process boundary', async () => {
+    const gate = new ProviderExecutionGate();
+    const controller = new AbortController();
+    const spawnImpl = vi.fn();
+    const probeBinaryCommand = (
+      binary: string,
+      args: string[],
+      env: NodeJS.ProcessEnv,
+      options?: Parameters<typeof runBinaryCommandProbe>[3],
+    ) => {
+      controller.abort();
+      return runBinaryCommandProbe(
+        binary,
+        args,
+        env,
+        options,
+        spawnImpl as unknown as typeof import('node:child_process').spawn,
+      );
+    };
+    const adapters = createPrimaryModelProbeAdapters(undefined, {
+      buildChildEnv: vi.fn(() => ({ PATH: '/usr/bin' })),
+      getProviderBinary: vi.fn(() => 'opencode'),
+      probeBinaryCommand,
+      providerExecutionGate: gate,
+    });
+
+    await expect(
+      probePrimaryModelUsability(
+        { provider: 'opencode-cli', model: 'openai/some-model' },
+        adapters,
+        { signal: controller.signal },
+      ),
+    ).resolves.toMatchObject({ status: 'timeout' });
+
+    expect(spawnImpl).not.toHaveBeenCalled();
     expect(gate.snapshot()).toMatchObject({ active: false, pending: 0 });
   });
 
@@ -444,6 +742,55 @@ describe('createPrimaryModelProbeAdapters', () => {
     await expect(
       adapters.probeApiModelAccess?.({ provider: 'openai-api', model: 'api-live-model' }),
     ).resolves.toEqual({ status: 'provider_unavailable' });
+  });
+
+  it('does not resolve authorization or fetch when an API probe is already aborted', async () => {
+    const controller = new AbortController();
+    controller.abort();
+    const resolveApiKey = vi.fn(() => 'sk-test-secret');
+    const fetchImpl = vi.fn();
+    const adapters = createPrimaryModelProbeAdapters(undefined, {
+      fetch: fetchImpl as unknown as typeof fetch,
+      resolveApiKey,
+    });
+
+    await expect(
+      adapters.probeApiModelAccess?.(
+        { provider: 'openai-api', model: 'api-live-model' },
+        controller.signal,
+      ),
+    ).resolves.toEqual({ status: 'timeout' });
+    expect(resolveApiKey).not.toHaveBeenCalled();
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it('forwards caller cancellation into an in-flight API generation probe', async () => {
+    const controller = new AbortController();
+    let requestSignal: AbortSignal | null = null;
+    const fetchImpl = vi.fn(async (_url: string | URL | Request, init?: RequestInit) =>
+      new Promise<Response>((_resolve, reject) => {
+        requestSignal = init?.signal ?? null;
+        requestSignal?.addEventListener('abort', () => {
+          const error = new Error('request aborted');
+          error.name = 'AbortError';
+          reject(error);
+        }, { once: true });
+      }));
+    const adapters = createPrimaryModelProbeAdapters(undefined, {
+      fetch: fetchImpl as unknown as typeof fetch,
+      resolveApiKey: vi.fn(() => 'sk-test-secret'),
+    });
+
+    const probe = adapters.probeApiModelAccess?.(
+      { provider: 'openai-api', model: 'api-live-model' },
+      controller.signal,
+    );
+    await Promise.resolve();
+    controller.abort();
+
+    await expect(probe).resolves.toEqual({ status: 'timeout' });
+    const requestInit = fetchImpl.mock.calls[0]?.[1];
+    expect(requestInit?.signal?.aborted).toBe(true);
   });
 
   it('uses the default API-key resolver and OpenAI generation endpoint when no resolver is injected', async () => {

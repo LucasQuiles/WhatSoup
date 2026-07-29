@@ -3,12 +3,20 @@
 
 import { createHash } from 'node:crypto';
 import type { Messenger } from '../../core/types.ts';
-import type { DurabilityEngine } from '../../core/durability.ts';
+import {
+  persistOutboundFailureDisposition,
+  type DurabilityEngine,
+} from '../../core/durability.ts';
 import { toConversationKey } from '../../core/conversation-key.ts';
 import { createChildLogger } from '../../logger.ts';
-import { jitteredDelay } from '../../core/retry.ts';
+import { jitteredDelay, MAX_TIMER_DELAY_MS } from '../../core/retry.ts';
 import { canSendToGroup, recordGroupOutbound } from '../../core/echo-guard.ts';
-import { isOutboundGovernorShed } from '../../transport/outbound-governor.ts';
+import {
+  classifyOutboundFailure,
+  createInternalOutboundFailureEvidence,
+  outboundFailureWarrantsUserNotice,
+  type OutboundFailureEvidenceV1,
+} from '../../core/outbound-failure-disposition.ts';
 import { redactInternalArtifacts, resolveOutboundAudience } from '../../core/outbound-message-safety.ts';
 import { formatProviderErrorForUser } from '../../lib/provider-errors.ts';
 import { isGroupJid } from '../../core/jid-constants.ts';
@@ -1436,9 +1444,8 @@ export class OutboundQueue implements IOutboundQueue {
     // (a dashless UUID) is a valid, unique key.id.
     const stableMessageId = crypto.randomUUID().replace(/-/g, '').toUpperCase();
 
-    let lastErr: unknown;
+    let lastEvidence: OutboundFailureEvidenceV1 | undefined;
     let shutdownDeadlineExpired = false;
-    let hasAmbiguousAttempt = false;
     for (let attempt = 0; attempt < OutboundQueue.MAX_SEND_ATTEMPTS; attempt++) {
       if (this.shutdownDeadlineReached) {
         shutdownDeadlineExpired = true;
@@ -1463,89 +1470,150 @@ export class OutboundQueue implements IOutboundQueue {
         }
         if (receiptOrDeadline === OUTBOUND_SHUTDOWN_DEADLINE) {
           shutdownDeadlineExpired = true;
-          hasAmbiguousAttempt = true;
+          lastEvidence = createInternalOutboundFailureEvidence({
+            failureCode: 'outbound.shutdown_deadline',
+            stage: 'provider_request',
+            mutationState: 'ambiguous',
+            logicalAttemptCount: (lastEvidence?.logical_attempt_count ?? 0) + 1,
+            providerSubmissionCount: (lastEvidence?.provider_submission_count ?? 0) + 1,
+            previousEvidence: lastEvidence,
+            evidenceCoverage: 'partial',
+          });
           break;
         }
         if (opId !== undefined && this.durability) {
-          this.durability.markSubmitted(opId, receiptOrDeadline.waMessageId);
+          this.durability.markSubmitted(
+            opId,
+            receiptOrDeadline.waMessageId,
+            (lastEvidence?.logical_attempt_count ?? 0) + 1,
+          );
         }
         this.lastSubmittedTextDedupeKey = textDedupeKey;
         return;
       } catch (err) {
-        lastErr = err;
-        if (!isOutboundGovernorShed(err)) hasAmbiguousAttempt = true;
-        if (attempt < OutboundQueue.MAX_SEND_ATTEMPTS - 1) {
-          const truncated = text.length > 80 ? text.slice(0, 80) + '…' : text;
-          const isTimeout = (err as Error).message === 'SEND_TIMEOUT';
-          const retryAfterMs = OutboundQueue.retryAfterMs(err);
-          const delayMs = retryAfterMs ?? jitteredDelay(OutboundQueue.SEND_RETRY_BASE_MS, attempt, OutboundQueue.SEND_RETRY_MAX_MS);
-          log.warn({ chatJid: chunk.chatJid, attempt: attempt + 1, maxAttempts: OutboundQueue.MAX_SEND_ATTEMPTS, textPreview: truncated, ...(isTimeout && { timeout: true }), ...(retryAfterMs !== undefined && { retryAfterMs }) }, 'outbound send failed — retrying');
+        lastEvidence = classifyOutboundFailure(err, {
+          retryOwner: 'agent_queue',
+          attemptsRemaining: OutboundQueue.MAX_SEND_ATTEMPTS - attempt - 1,
+          previousEvidence: lastEvidence,
+        });
+        if (
+          lastEvidence.retry_decision === 'retry_now'
+          || (
+            lastEvidence.retry_decision === 'retry_not_before'
+            && !this.durability
+            && lastEvidence.retry_not_before !== null
+            && attempt < OutboundQueue.MAX_SEND_ATTEMPTS - 1
+          )
+        ) {
+          const retryNotBefore = lastEvidence.retry_not_before;
+          const delayMs = lastEvidence.retry_decision === 'retry_not_before'
+            ? Math.max(1, Date.parse(retryNotBefore!) - Date.now())
+            : jitteredDelay(
+              OutboundQueue.SEND_RETRY_BASE_MS,
+              attempt,
+              OutboundQueue.SEND_RETRY_MAX_MS,
+            );
+          log.warn({
+            opId,
+            attempt: attempt + 1,
+            maxAttempts: OutboundQueue.MAX_SEND_ATTEMPTS,
+            failureCode: lastEvidence.failure_code,
+            stage: lastEvidence.stage,
+            mutationState: lastEvidence.mutation_state,
+            delayMs,
+          }, 'outbound send failed — retrying');
           if (await this.waitForDelayOrShutdown(delayMs)) {
             shutdownDeadlineExpired = true;
             break;
           }
+        } else {
+          break;
         }
       }
     }
     if (shutdownDeadlineExpired) {
-      const truncated = text.length > 80 ? text.slice(0, 80) + '…' : text;
+      lastEvidence = lastEvidence === undefined
+        ? createInternalOutboundFailureEvidence({
+          failureCode: 'outbound.shutdown_before_send',
+          stage: 'admission',
+          mutationState: 'not_started',
+          logicalAttemptCount: 0,
+          providerSubmissionCount: 0,
+        })
+        : createInternalOutboundFailureEvidence({
+          failureCode: 'outbound.shutdown_deadline',
+          stage: 'runtime',
+          mutationState: lastEvidence.mutation_state,
+          logicalAttemptCount: lastEvidence.logical_attempt_count,
+          providerSubmissionCount: lastEvidence.provider_submission_count,
+          previousEvidence: lastEvidence,
+          evidenceCoverage: lastEvidence.evidence_coverage,
+        });
       log.warn({
-        chatJid: chunk.chatJid,
-        textPreview: truncated,
-        textLength: text.length,
-        ambiguous: hasAmbiguousAttempt,
+        opId,
+        failureCode: lastEvidence.failure_code,
+        stage: lastEvidence.stage,
+        mutationState: lastEvidence.mutation_state,
       }, 'outbound send stopped at runtime shutdown deadline');
       if (opId !== undefined && this.durability) {
-        if (hasAmbiguousAttempt) {
-          this.durability.markMaybeSent(opId, 'shutdown_deadline', stableMessageId);
-        } else {
-          this.durability.markFailedPermanent(opId, 'shutdown_before_send');
-        }
+        persistOutboundFailureDisposition(
+          this.durability,
+          opId,
+          lastEvidence,
+          lastEvidence.mutation_state === 'ambiguous' ? stableMessageId : undefined,
+        );
       }
       return;
     }
-    // All attempts exhausted — log and give up (do NOT re-throw, queue must keep draining)
-    const truncated = text.length > 80 ? text.slice(0, 80) + '…' : text;
-    log.error({ chatJid: chunk.chatJid, attempts: OutboundQueue.MAX_SEND_ATTEMPTS, textPreview: truncated, err: lastErr, textLength: text.length }, 'outbound send failed after all retries');
+    if (!lastEvidence) return;
+    log.error({
+      opId,
+      attempts: lastEvidence.logical_attempt_count,
+      providerSubmissions: lastEvidence.provider_submission_count,
+      failureCode: lastEvidence.failure_code,
+      stage: lastEvidence.stage,
+      mutationState: lastEvidence.mutation_state,
+      retryDecision: lastEvidence.retry_decision,
+    }, 'outbound send stopped with bounded failure disposition');
 
     if (opId !== undefined && this.durability) {
-      // A governor shed throws BEFORE the socket send executes — the op is
-      // provably not sent, so it must not enter the maybe_sent ambiguity
-      // machinery (recovery-owner transfer, drain/replay, fleet telemetry).
-      if (isOutboundGovernorShed(lastErr)) {
-        this.durability.markFailedPermanent(opId, (lastErr as Error).message);
-      } else {
-        this.durability.markMaybeSent(opId, (lastErr as Error)?.message ?? 'send_failed');
-      }
+      persistOutboundFailureDisposition(this.durability, opId, lastEvidence);
     }
 
-    // Best-effort: notify the user that part of the response was lost.
-    // Send directly (not through queue) to avoid re-entry loops.
-    Promise.race([
-      this.messenger.sendMessage(chunk.chatJid, '⚠️ A response could not be delivered after 3 attempts.'),
-      new Promise<void>((_, reject) => setTimeout(() => reject(new Error('timeout')), SEND_TIMEOUT_MS)),
-    ]).catch(() => { /* best effort only */ });
+    if (outboundFailureWarrantsUserNotice(lastEvidence)) {
+      // Best-effort: notify the user that part of the response was lost.
+      // Send directly (not through queue) to avoid re-entry loops. Not
+      // conditional on durability — the user still needs to know.
+      Promise.race([
+        this.messenger.sendMessage(chunk.chatJid, '⚠️ A response could not be delivered after 3 attempts.'),
+        new Promise<void>((_, reject) => setTimeout(() => reject(new Error('timeout')), SEND_TIMEOUT_MS)),
+      ]).catch(() => { /* best effort only */ });
+    }
   }
 
   private async waitForDelayOrShutdown(delayMs: number): Promise<boolean> {
     if (this.shutdownDeadlineReached) return true;
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    try {
-      return await Promise.race([
-        new Promise<false>((resolve) => {
-          timer = setTimeout(() => resolve(false), delayMs);
-        }),
-        this.shutdownDeadlineSignal.then(() => true as const),
-      ]);
-    } finally {
-      clearTimeout(timer);
+    if (!Number.isFinite(delayMs)) {
+      throw new RangeError('Outbound retry delay must be finite');
     }
-  }
-
-  private static retryAfterMs(err: unknown): number | undefined {
-    const retryAfterMs = (err as { payload?: { retryAfterMs?: unknown } })?.payload?.retryAfterMs;
-    if (typeof retryAfterMs !== 'number' || !Number.isFinite(retryAfterMs) || retryAfterMs <= 0) return undefined;
-    return Math.min(retryAfterMs, OutboundQueue.SEND_RETRY_MAX_MS);
+    let remainingMs = Math.max(0, delayMs);
+    while (remainingMs > 0) {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const chunkMs = Math.min(remainingMs, MAX_TIMER_DELAY_MS);
+      try {
+        const shutdown = await Promise.race([
+          new Promise<false>((resolve) => {
+            timer = setTimeout(() => resolve(false), chunkMs);
+          }),
+          this.shutdownDeadlineSignal.then(() => true as const),
+        ]);
+        if (shutdown) return true;
+      } finally {
+        clearTimeout(timer);
+      }
+      remainingMs -= chunkMs;
+    }
+    return false;
   }
 
   private suppressDuplicateTerminalText(text: string, chatJid: string): boolean {

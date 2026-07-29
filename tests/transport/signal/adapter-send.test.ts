@@ -115,7 +115,12 @@ describe('SignalAdapter — sendText port-error mapping', () => {
     const { adapter, channelId } = makeAdapter(port);
     const target = peerConversationRef(channelId, '+15559990000');
 
-    await expect(adapter.sendText(target, 'hi')).rejects.toThrow(/Signal rate limit/);
+    await expect(adapter.sendText(target, 'hi')).rejects.toMatchObject({
+      payload: {
+        code: 'transport.rate_limited',
+        phase: 'provider_call_started',
+      },
+    });
   });
 
   it('maps a 5xx to TransientProviderError', async () => {
@@ -167,6 +172,42 @@ describe('SignalAdapter — sendText port-error mapping', () => {
 
     await expect(adapter.sendText(target, 'hi')).rejects.toThrow(/Signal provider error/);
   });
+
+  it('honors a port-supplied phase of not_started instead of claiming provider_call_started', async () => {
+    // A port error that provably precedes any provider contact (e.g. a
+    // pre-write connection refusal) must surface phase 'not_started', not
+    // the classification default. Covers the auth branch of mapPortError.
+    const port = new MockSignalPort({
+      sendError: Object.assign(new Error('unlinked'), { status: 401, phase: 'not_started' }),
+    });
+    const { adapter, channelId } = makeAdapter(port);
+    const target = peerConversationRef(channelId, '+15559990000');
+
+    await expect(adapter.sendText(target, 'hi')).rejects.toMatchObject({
+      payload: {
+        code: 'transport.auth_required',
+        phase: 'not_started',
+      },
+    });
+  });
+
+  it('honors a port-supplied phase of not_started on the transient branch too', async () => {
+    // Same defect, different classification branch: a network-level failure
+    // (no status, no code) that the port marks as pre-request must not be
+    // relabeled provider_call_started either.
+    const port = new MockSignalPort({
+      sendError: Object.assign(new Error('boom'), { status: 503, phase: 'not_started' }),
+    });
+    const { adapter, channelId } = makeAdapter(port);
+    const target = peerConversationRef(channelId, '+15559990000');
+
+    await expect(adapter.sendText(target, 'hi')).rejects.toMatchObject({
+      payload: {
+        code: 'transport.transient_provider',
+        phase: 'not_started',
+      },
+    });
+  });
 });
 
 describe('SignalAdapter — group sends', () => {
@@ -205,7 +246,11 @@ describe('SignalAdapter — local rate limit', () => {
 
     await adapter.sendText(target, 'one');
     await expect(adapter.sendText(target, 'two')).rejects.toMatchObject({
-      payload: { code: 'transport.rate_limited', retryAfterMs: 60000 },
+      payload: {
+        code: 'transport.rate_limited',
+        phase: 'not_started',
+        retryAfterMs: 60000,
+      },
     });
     expect(port.sent).toHaveLength(1);
 

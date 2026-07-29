@@ -47,18 +47,20 @@ describe('outbound audit tools', () => {
       scope: 'global',
       replayPolicy: 'read_only',
     });
+    expect(capturedTools.find((tool) => tool.name === 'maintain_outbound_audit')).toMatchObject({
+      scope: 'global',
+      replayPolicy: 'unsafe',
+      sensitive: true,
+    });
   });
 
-  it('returns bounded outbound send rows without text content', async () => {
+  it('returns bounded metadata-only outbound send rows', async () => {
     const writer = createOutboundSendsWriter({ db: db.raw, line: 'personal' });
-    const id = writer.writeIntent({
+    const intent = writer.writeIntent({
       caller: 'mcp',
-      chatJid: '111@s.whatsapp.net',
       targetKind: 'chatJid',
-      profile: 'notify',
-      text: 'private body',
     });
-    writer.markSuccess(id, 'wamid.audit');
+    writer.markSuccess(intent.id);
 
     const result = await registry.call('read_outbound_sends', { limit: 10 }, globalSession());
 
@@ -68,40 +70,38 @@ describe('outbound audit tools', () => {
     };
     expect(body.outbound_sends).toHaveLength(1);
     expect(body.outbound_sends[0]).toMatchObject({
-      id,
-      chat_jid: '111@s.whatsapp.net',
-      status: 'sent',
-      profile: 'notify',
-      transport_id: 'wamid.audit',
+      id: intent.id,
+      audit_receipt: intent.auditReceipt,
+      caller: 'mcp',
+      target_kind: 'chatJid',
+      outcome_code: 'submitted',
     });
     expect(body.outbound_sends[0]).not.toHaveProperty('text');
+    expect(body.outbound_sends[0]).not.toHaveProperty('chat_jid');
+    expect(body.outbound_sends[0]).not.toHaveProperty('transport_id');
   });
 
-  it('filters by raw chatJid', async () => {
+  it('filters by exact opaque audit receipt', async () => {
     const writer = createOutboundSendsWriter({ db: db.raw, line: 'personal' });
-    writer.writeIntent({
+    const included = writer.writeIntent({
       caller: 'mcp',
-      chatJid: '111@s.whatsapp.net',
       targetKind: 'chatJid',
-      text: 'include',
     });
     writer.writeIntent({
       caller: 'health',
-      chatJid: '222@s.whatsapp.net',
       targetKind: 'chatJid',
-      text: 'exclude',
     });
 
     const result = await registry.call(
       'read_outbound_sends',
-      { chatJid: '111@s.whatsapp.net' },
+      { auditReceipt: included.auditReceipt },
       globalSession(),
     );
     const body = JSON.parse(result.content[0].text) as {
-      outbound_sends: Array<{ chat_jid: string }>;
+      outbound_sends: Array<{ audit_receipt: string }>;
     };
 
-    expect(body.outbound_sends.map((row) => row.chat_jid)).toEqual(['111@s.whatsapp.net']);
+    expect(body.outbound_sends.map((row) => row.audit_receipt)).toEqual([included.auditReceipt]);
   });
 
   it('rejects unknown arguments instead of silently stripping them', async () => {
@@ -109,6 +109,63 @@ describe('outbound audit tools', () => {
       'read_outbound_sends',
       { text: '' },
       globalSession(),
+    );
+
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toMatch(/Invalid parameters/);
+  });
+
+  it('supports authorized preview and apply under one fixed retention policy', async () => {
+    const maintenanceRegistry = new ToolRegistry();
+    const writer = createOutboundSendsWriter({ db: db.raw });
+    registerOutboundAuditTools(maintenanceRegistry, { writer });
+    maintenanceRegistry.setSensitiveToolAuthorizer(() => true);
+    const old = writer.writeIntent({ caller: 'mcp', targetKind: 'chatJid' });
+    writer.markSuccess(old.id);
+    db.raw.prepare(`
+      UPDATE outbound_sends
+      SET created_at = datetime('now', '-40 days'),
+          completed_at = datetime('now', '-40 days')
+      WHERE id = ?
+    `).run(old.id);
+    const session = { tier: 'global' as const, actorJid: 'operator@example.invalid' };
+
+    const preview = await maintenanceRegistry.call(
+      'maintain_outbound_audit',
+      { dry_run: true },
+      session,
+    );
+    expect(JSON.parse(preview.content[0].text)).toEqual({
+      dry_run: true,
+      retention_days: 30,
+      eligible: 1,
+      deleted: 0,
+    });
+
+    const apply = await maintenanceRegistry.call(
+      'maintain_outbound_audit',
+      { dry_run: false },
+      session,
+    );
+    expect(JSON.parse(apply.content[0].text)).toEqual({
+      dry_run: false,
+      retention_days: 30,
+      eligible: 1,
+      deleted: 1,
+    });
+  });
+
+  it('rejects caller-selected retention cutoffs', async () => {
+    const maintenanceRegistry = new ToolRegistry();
+    registerOutboundAuditTools(maintenanceRegistry, {
+      writer: createOutboundSendsWriter({ db: db.raw }),
+    });
+    maintenanceRegistry.setSensitiveToolAuthorizer(() => true);
+
+    const result = await maintenanceRegistry.call(
+      'maintain_outbound_audit',
+      { dry_run: true, terminalDays: 1, terminalMaxRows: 100 },
+      { tier: 'global', actorJid: 'operator@example.invalid' },
     );
 
     expect(result.isError).toBe(true);

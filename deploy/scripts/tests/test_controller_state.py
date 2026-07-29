@@ -1268,6 +1268,7 @@ def test_public_functions_and_session_methods_have_exact_signatures() -> None:
         cs.state_diagnostic_details,
         {"diagnostic": cs.StateDiagnostic, "return": dict[str, Any]},
     )
+    assert get_type_hints(cs.open_controller_state)["return"] is cs.ControllerStateSession
 
 
 def test_all_declared_records_have_exact_frozen_field_contract() -> None:
@@ -1514,7 +1515,9 @@ def test_unknown_controller_state_member_is_rejected(tmp_path: Path) -> None:
     _write_private_json(path, document)
 
     with _open(cs, path) as session:
-        _assert_recovery_required(session.load(), "schema_incompatible")
+        result = session.load()
+        assert result.mode == "recovery_required"
+        _assert_recovery_required(result, "schema_incompatible")
 
 
 def test_future_envelope_format_version_is_rejected_without_rollback(
@@ -1598,7 +1601,9 @@ def test_marker_without_generation_is_recovery_required(tmp_path: Path) -> None:
     _write_private_json(_managed(path, ".initialized"), marker)
 
     with _open(cs, path) as session:
-        _assert_recovery_required(session.load())
+        result = session.load()
+        assert result.mode == "recovery_required"
+        _assert_recovery_required(result)
 
 
 def test_pristine_legacy_writer_migrates_without_payload_change(tmp_path: Path) -> None:
@@ -1735,7 +1740,9 @@ def test_envelope_store_or_component_mismatch_is_not_adopted(
     _write_private_json(path, document)
 
     with _open(cs, path) as session:
-        _assert_recovery_required(session.load())
+        result = session.load()
+        assert result.mode == "recovery_required"
+        _assert_recovery_required(result)
 
 
 @pytest.mark.parametrize("sidecar", (".initialized", ".transaction", ".recovery"))
@@ -1781,7 +1788,9 @@ def test_generation_pair_below_marker_high_water_is_rollback(tmp_path: Path) -> 
     _managed(path, ".previous").write_bytes(older)
 
     with _open(cs, path) as session:
-        _assert_recovery_required(session.load(), "generation_invalid")
+        result = session.load()
+        assert result.mode == "recovery_required"
+        _assert_recovery_required(result, "generation_invalid")
 
 
 def test_semantically_invalid_component_payload_is_rejected(tmp_path: Path) -> None:
@@ -1794,7 +1803,9 @@ def test_semantically_invalid_component_payload_is_rejected(tmp_path: Path) -> N
     _write_private_json(path, document)
 
     with _open(cs, path) as session:
-        _assert_recovery_required(session.load(), "schema_incompatible")
+        result = session.load()
+        assert result.mode == "recovery_required"
+        _assert_recovery_required(result, "schema_incompatible")
 
 
 @pytest.mark.parametrize(
@@ -1994,13 +2005,15 @@ def test_save_requires_a_capability(tmp_path: Path) -> None:
     path = tmp_path / "state.json"
     ops = FaultOps()
     with _open(cs, path, ops=ops) as session:
-        session.load()
+        loaded = session.load()
+        assert loaded.capability is not None
         _assert_capability_rejected_without_mutation(
             cs,
             path,
             ops,
             lambda: session.save({"counters": {}}, None),
         )
+        assert ops.counters["write"] == 0
 
 
 def test_committed_save_consumes_old_and_returns_distinct_fresh_capability(
@@ -2030,7 +2043,9 @@ def test_reused_capability_is_rejected(tmp_path: Path) -> None:
     path = tmp_path / "state.json"
     ops = FaultOps()
     with _open(cs, path, ops=ops) as session:
-        capability = session.load().capability
+        loaded = session.load()
+        capability = loaded.capability
+        assert capability is not None
         session.save({"counters": {"seen": 1}}, capability)
         _assert_capability_rejected_without_mutation(
             cs,
@@ -2038,6 +2053,7 @@ def test_reused_capability_is_rejected(tmp_path: Path) -> None:
             ops,
             lambda: session.save({"counters": {"seen": 2}}, capability),
         )
+        assert ops.counters["write"] == 0
 
 
 def test_reload_invalidates_previously_issued_capability(tmp_path: Path) -> None:
@@ -2199,6 +2215,7 @@ def test_capability_object_identity_rejects_same_valued_forgery(
     ops = FaultOps()
     session, result = _load_valid(cs, path, ops=ops)
     forged = _clone_opaque_capability(result.capability)
+    assert forged is not result.capability
 
     _assert_capability_rejected_without_mutation(
         cs,
@@ -2206,6 +2223,7 @@ def test_capability_object_identity_rejects_same_valued_forgery(
         ops,
         lambda: session.save({"counters": {"seen": 2}}, forged),
     )
+    assert ops.counters["write"] == 0
     session.close()
 
 

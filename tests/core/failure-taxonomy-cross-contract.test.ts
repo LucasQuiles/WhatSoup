@@ -26,11 +26,41 @@ import {
   MEMORY_OPERATION_FAILURE_CODES,
 } from '../../src/lib/memory-operation-telemetry.ts';
 import {
+  CONSOLIDATION_FAILURE_CODES,
+} from '../../src/core/memory-consolidation-contract.ts';
+import {
+  OUTBOUND_FAILURE_CODES,
+  TOOL_FAILURE_CODES,
+} from '../../src/core/durability-evidence-contract.ts';
+import {
+  OUTBOUND_FAILURE_STAGES,
+  OUTBOUND_MUTATION_STATES,
+  OUTBOUND_EVIDENCE_COVERAGE,
+  type InternalOutboundFailureCode,
+} from '../../src/core/outbound-failure-disposition.ts';
+import {
   RUNTIME_AGENT_HEALTH_SIGNALS,
   RUNTIME_AGENT_HEALTH_SIGNAL_FIELDS,
 } from '../../src/lib/fault-classifier.ts';
 
+// if an extra key is present (excess-property checking on the literal),
+// so this map's keys are exhaustively bound to the union at compile time.
+const INTERNAL_OUTBOUND_FAILURE_CODE_MAP: Record<InternalOutboundFailureCode, true> = {
+  'outbound.unknown_failure': true,
+  'outbound.shutdown_before_send': true,
+  'outbound.shutdown_deadline': true,
+  'outbound.crash_in_flight': true,
+  'outbound.echo_timeout': true,
+  'outbound.superseded': true,
+  'outbound.pending_replay_unreconstructable': true,
+  'outbound.status_ping_expired': true,
+  'outbound.unsafe_delivery_unconfirmed': true,
+  'outbound.governor_shed': true,
+  'outbound.replay_failed': true,
+};
+
 const sorted = (values: Iterable<string>): string[] => [...values].sort();
+
 
 function failedTerminal(failureClass: AttemptOutcome & { kind: 'failed' }): TurnTerminalResult {
   return {
@@ -117,6 +147,20 @@ describe('failure taxonomy cross-contract', () => {
       .toEqual(sorted(ADMISSION_REJECT_CLASSES));
     expect(sorted(registry.failureDomains.memoryOperationFailureCodes.values))
       .toEqual(sorted(MEMORY_OPERATION_FAILURE_CODES));
+    expect(sorted(registry.failureDomains.consolidationFailureCodes.values))
+      .toEqual(sorted(CONSOLIDATION_FAILURE_CODES));
+    expect(sorted(registry.failureDomains.toolCallFailureCodes.values))
+      .toEqual(sorted(TOOL_FAILURE_CODES));
+    expect(sorted(registry.failureDomains.outboundAuditFailureCodes.values))
+      .toEqual(sorted(OUTBOUND_FAILURE_CODES));
+    expect(sorted(registry.failureDomains.outboundFailureCodes.values))
+      .toEqual(sorted(Object.keys(INTERNAL_OUTBOUND_FAILURE_CODE_MAP)));
+    expect(sorted(registry.failureDomains.outboundFailureStages.values))
+      .toEqual(sorted(OUTBOUND_FAILURE_STAGES));
+    expect(sorted(registry.failureDomains.outboundMutationStates.values))
+      .toEqual(sorted(OUTBOUND_MUTATION_STATES));
+    expect(sorted(registry.failureDomains.outboundEvidenceCoverage.values))
+      .toEqual(sorted(OUTBOUND_EVIDENCE_COVERAGE));
   });
 
   it('covers and validates every terminal-attempt to inbound projection', () => {

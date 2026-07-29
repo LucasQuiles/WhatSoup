@@ -34,6 +34,8 @@ export interface TwilioPortError {
   readonly message: string;
   readonly code?: number;   // Twilio error code (e.g. 21211)
   readonly status?: number; // HTTP status (e.g. 401, 429)
+  /** Set only when the port can PROVE the stage; absent when it cannot. */
+  readonly phase?: 'not_started' | 'provider_call_started' | 'ack_received';
 }
 
 /** Arguments for placing an outbound voice call. */

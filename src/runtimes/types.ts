@@ -2,6 +2,7 @@
 import type { IncomingMessage, RuntimeHealth } from '../core/types.ts';
 import type { DurabilityEngine } from '../core/durability.ts';
 import type { AgentFallbackEntry } from '../core/fallback-chain.ts';
+import type { ToolDurabilityTelemetrySnapshot } from '../core/durability-evidence-contract.ts';
 
 export interface RuntimeTurnCapabilityHealth {
   modelUsable: boolean | null;
@@ -35,9 +36,17 @@ export interface AgentCommandResult {
   silent: boolean;
 }
 
+export type RuntimeAdmissionReceipt =
+  | { status: 'accepted' }
+  | {
+      status: 'rejected';
+      reason: 'queue_full';
+      durableDisposition: 'failed' | 'unowned';
+    };
+
 export interface Runtime {
   start(): Promise<void>;
-  handleMessage(msg: IncomingMessage): Promise<void>;
+  handleMessage(msg: IncomingMessage): Promise<void | RuntimeAdmissionReceipt>;
   getHealthSnapshot(): RuntimeHealth;
   shutdown(): Promise<void>;
   setDurability(engine: DurabilityEngine): void;
@@ -90,4 +99,6 @@ export interface Runtime {
     oldestCallAgeMs: number | null;
     oldestCallTool: string | null;
   } | null;
+  /** Process-local losses while persisting metadata-only tool evidence. */
+  getToolDurabilityTelemetrySnapshot?(): ToolDurabilityTelemetrySnapshot | null;
 }

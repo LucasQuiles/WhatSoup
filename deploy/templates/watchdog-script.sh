@@ -25,6 +25,11 @@ HOME_DIR="__HOME__"
 LOG_DIR="$HOME_DIR/Library/Logs/whatsoup"
 LOG="$LOG_DIR/BOT_NAME-watchdog.log"
 LOCK="/tmp/com.whatsoup.BOT_NAME-watchdog.lock"
+# Present while the bot's provider credential is dead (decision-block exit 3).
+# The fleet console / alert path stats this; it is cleared on the next passing
+# check so its presence always reflects current state.
+CRED_MARKER="$LOG_DIR/BOT_NAME-credential-dead.marker"
+WD_FINAL="ok"
 
 BOT_LABEL="com.whatsoup.BOT_NAME"
 FLEET_LABEL="com.whatsoup.whatsoup-fleet"
@@ -41,6 +46,18 @@ PATH="$HOME_DIR/.local/bin:$(dirname "$NODE_BIN"):/opt/homebrew/bin:/usr/bin:/bi
 export HOME="$HOME_DIR" PATH
 
 mkdir -p "$LOG_DIR"
+
+# #2515: the diagnostic health body is auth-gated; unauthenticated reads get
+# the minimal public liveness envelope, whose missing whatsapp/turn_capability
+# fields would read as restart-worthy (connected=false/state=None) and starve
+# the CREDENTIAL-DEAD branch of turn_capability entirely. Send the instance
+# bearer from tokens.env when one resolves; the token reaches curl argv only,
+# never the log.
+BOT_TOKENS_ENV="$HOME_DIR/.config/whatsoup/instances/BOT_NAME/tokens.env"
+WHATSOUP_HEALTH_TOKEN=""
+[ -r "$BOT_TOKENS_ENV" ] && WHATSOUP_HEALTH_TOKEN="$(sed -n 's/^WHATSOUP_HEALTH_TOKEN=//p' "$BOT_TOKENS_ENV" | head -1)"
+AUTH_ARGS=()
+[ -n "$WHATSOUP_HEALTH_TOKEN" ] && AUTH_ARGS=(-H "Authorization: Bearer $WHATSOUP_HEALTH_TOKEN")
 
 # Single-instance lock: if another watchdog invocation is still running, exit.
 if ! mkdir "$LOCK" 2>/dev/null; then
@@ -125,7 +142,7 @@ ensure_loaded "$FLEET_LABEL" "$FLEET_PLIST"
 # restart cannot fix. So: no --fail; capture body + code; treat only a real
 # TRANSPORT failure (no HTTP response at all) as unreachable, and let the
 # decision block below act on the body (incl. the terminal-no-restart branch).
-bot_resp="$(curl --silent --show-error --max-time 8 -w $'\n%{http_code}' "$BOT_HEALTH" 2>>"$LOG")"
+bot_resp="$(curl --silent --show-error --max-time 8 "${AUTH_ARGS[@]}" -w $'\n%{http_code}' "$BOT_HEALTH" 2>>"$LOG")"
 curl_rc=$?
 bot_code="${bot_resp##*$'\n'}"
 bot_json="${bot_resp%$'\n'*}"
@@ -134,7 +151,7 @@ if [ "$curl_rc" -ne 0 ] || [ -z "$bot_code" ]; then
 elif [ -z "$bot_json" ]; then
   restart_label "$BOT_LABEL" "empty health body (http=$bot_code)"
 else
-  BOT_JSON="$bot_json" BOT_CODE="$bot_code" python3 - <<'PY' 2>>"$LOG" || restart_label "$BOT_LABEL" "unhealthy JSON response"
+  BOT_JSON="$bot_json" BOT_CODE="$bot_code" python3 - <<'PY' 2>>"$LOG"
 import datetime as dt
 import json
 import os
@@ -300,7 +317,34 @@ elif pong_parse_failed:
 if reasons:
     print("; ".join(reasons), file=sys.stderr)
     sys.exit(1)
+
+# Credential death: every liveness/connectivity check above passed, but the
+# agent's provider credential is gone (claude deletes its file store and leaves
+# a dead keychain stub on refresh failure). A restart cannot mint a credential
+# — kicking the bot here would just loop it — and logging plain "ok" is how a
+# 12-day credential outage stayed invisible (mini11, Jul 15–27). Exit 3 is the
+# distinct no-restart escalation the shell routes to a CREDENTIAL-DEAD log
+# line + marker file.
+turn_capability = data.get("turn_capability") or {}
+if turn_capability.get("model_usability_status") == "credential-unavailable":
+    print(
+        "CREDENTIAL-DEAD: turn_capability.model_usability_status=credential-unavailable — reauth required",
+        file=sys.stderr,
+    )
+    sys.exit(3)
 PY
+  py_rc=$?
+  if [ "$py_rc" -eq 3 ]; then
+    # marker: BOT_NAME-credential-dead.marker — deliberately no restart on this
+    # branch (a restart cannot fix auth; see the exit-3 decision-block comment).
+    log "CREDENTIAL-DEAD: claude credential unavailable — reauth required; restart suppressed"
+    touch "$CRED_MARKER"
+    WD_FINAL="CREDENTIAL-DEAD"
+  elif [ "$py_rc" -ne 0 ]; then
+    restart_label "$BOT_LABEL" "unhealthy JSON response"
+  else
+    rm -f "$CRED_MARKER" 2>/dev/null || true
+  fi
 fi
 
 # --- Fleet console health check ---
@@ -308,4 +352,4 @@ if ! curl --fail --silent --show-error --max-time 8 "$FLEET_HEALTH" >/dev/null 2
   restart_label "$FLEET_LABEL" "fleet console unreachable"
 fi
 
-log "ok"
+log "$WD_FINAL"

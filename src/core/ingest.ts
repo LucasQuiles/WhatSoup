@@ -542,7 +542,12 @@ export function createIngestHandler(
         } catch (err) {
           log.error({ err, messageId: msg.messageId }, 'runtime.handleMessage threw');
           if (durability && seq !== undefined) {
-            durability.markInboundFailed(seq, classifyErrorForInbound(err));
+            durability.markInboundFailedIfProcessing(
+              seq,
+              msg.messageId,
+              msg.chatJid,
+              classifyErrorForInbound(err),
+            );
           }
         }
       } catch (err) {

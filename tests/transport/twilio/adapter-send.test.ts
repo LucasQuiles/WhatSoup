@@ -207,7 +207,12 @@ describe('TwilioSmsAdapter sendText', () => {
     // Twilio may have accepted the message; callers must not blind-retry).
     await expect(
       adapter.sendText({ channel, id: '+15551230000' }, 'hello'),
-    ).rejects.toBeInstanceOf(TransientProviderError);
+    ).rejects.toMatchObject({
+      payload: {
+        code: 'transport.transient_provider',
+        phase: 'provider_call_started',
+      },
+    });
 
     expect(port.sent).toHaveLength(0);
   });
@@ -276,6 +281,55 @@ describe('TwilioSmsAdapter sendText', () => {
     await expect(
       adapter.sendText({ channel, id: '+15551230000' }, 'hello'),
     ).rejects.toBeInstanceOf(RateLimitedError);
+
+    expect(port.sent).toHaveLength(0);
+  });
+
+  it('honors a port-supplied phase of not_started instead of claiming provider_call_started', async () => {
+    // A port error that provably precedes any provider contact (e.g. DNS
+    // failure before the HTTP request left the process) must surface phase
+    // 'not_started', not the classification default.
+    const port = new MockTwilioSmsPort();
+    const adapter = new TwilioSmsAdapter(makeConfig(), port);
+    await adapter.connect();
+
+    const authErr = Object.assign(new Error('invalid credentials'), { status: 401, phase: 'not_started' });
+    port.failNextSend(authErr);
+
+    const channel = makeChannelId('sms', 'ml-bot');
+
+    await expect(
+      adapter.sendText({ channel, id: '+15551230000' }, 'hello'),
+    ).rejects.toMatchObject({
+      payload: {
+        code: 'transport.auth_required',
+        phase: 'not_started',
+      },
+    });
+
+    expect(port.sent).toHaveLength(0);
+  });
+
+  it('honors a port-supplied phase of not_started on the transient branch too', async () => {
+    // Same defect, different classification branch: a bare network-level
+    // failure (no status, no code) that the port marks as pre-request must
+    // not be relabeled provider_call_started either.
+    const port = new MockTwilioSmsPort();
+    const adapter = new TwilioSmsAdapter(makeConfig(), port);
+    await adapter.connect();
+
+    port.failNextSend(Object.assign(new Error('socket hang up'), { phase: 'not_started' }));
+
+    const channel = makeChannelId('sms', 'ml-bot');
+
+    await expect(
+      adapter.sendText({ channel, id: '+15551230000' }, 'hello'),
+    ).rejects.toMatchObject({
+      payload: {
+        code: 'transport.transient_provider',
+        phase: 'not_started',
+      },
+    });
 
     expect(port.sent).toHaveLength(0);
   });

@@ -15,10 +15,17 @@ import type {
 } from '../../core/types.ts';
 import type { LLMProvider, GenerateRequest, ChatMessage } from './providers/types.ts';
 import type { PineconeMemory } from './providers/pinecone.ts';
-import type { Runtime } from '../types.ts';
-import type { DurabilityEngine } from '../../core/durability.ts';
-import { sendTracked } from '../../core/durability.ts';
-import { isOutboundGovernorShed } from '../../transport/outbound-governor.ts';
+import type { Runtime, RuntimeAdmissionReceipt } from '../types.ts';
+import {
+  persistOutboundFailureDisposition,
+  sendTracked,
+  type DurabilityEngine,
+} from '../../core/durability.ts';
+import {
+  classifyOutboundFailure,
+  outboundFailureWarrantsUserNotice,
+  type OutboundFailureEvidenceV1,
+} from '../../core/outbound-failure-disposition.ts';
 import { toConversationKey } from '../../core/conversation-key.ts';
 import { resolvePhoneFromJid } from '../../core/access-list.ts';
 // Bot reply storage is handled by the Baileys echo via ingest → storeMessageIfNew
@@ -39,6 +46,7 @@ import { downloadMediaMessage } from '@whiskeysockets/baileys';
 import { jitteredDelay, sleep } from '../../core/retry.ts';
 import { WhatSoupError } from '../../errors.ts';
 import { DatabaseCompatibilityError } from '../../core/database-compatibility.ts';
+import { QueueAdmissionTerminalizationError } from '../../core/inbound-failure-class.ts';
 import { emitAlertChecked, clearAlertSourceChecked } from '../../lib/emit-alert.ts';
 import { resolveModelRole } from '../../lib/model-advisor.ts';
 
@@ -76,6 +84,8 @@ export function ensureChatSchema(db: Database): void {
 
 export interface ChatRuntimeOptions {
   enableEnrichment?: boolean;
+  /** Optional queue dependency; defaults to the production Chat queue limits. */
+  chatQueue?: ChatQueue;
   /** Getter returning the bot's own JID (e.g. '15551234567@s.whatsapp.net'). */
   getBotJid?: () => string;
   /** Getter returning the bot's own LID (e.g. '123456@lid'), or null. */
@@ -100,6 +110,7 @@ export class ChatRuntime implements Runtime {
   private cachedIdentityBlock: string | null = null;
   private cachedIdentityJid: string = '';
   private databaseCompatibilityRejection: DatabaseCompatibilityError | null = null;
+  private unownedQueueRejections = 0;
 
   constructor(
     db: Database,
@@ -114,7 +125,7 @@ export class ChatRuntime implements Runtime {
     this.pinecone = pinecone;
     this.primaryProvider = primaryProvider;
     this.fallbackProvider = fallbackProvider;
-    this.chatQueue = new ChatQueue(3);
+    this.chatQueue = options?.chatQueue ?? new ChatQueue(3);
     this.getBotJid = options?.getBotJid ?? (() => '');
     this.getBotLid = options?.getBotLid ?? (() => null);
     this.botName = options?.botName ?? config.botName;
@@ -140,12 +151,18 @@ export class ChatRuntime implements Runtime {
   }
 
   getHealthSnapshot(): RuntimeHealth {
-    const queue = this.chatQueue.stats;
+    const droppedCount = this.chatQueue.droppedCount ?? 0;
+    const queue = {
+      ...this.chatQueue.stats,
+      droppedCount,
+    };
     const enrichmentLastRunAt = this.enrichmentPoller?.lastRunAt ?? null;
 
     let status: RuntimeHealth['status'] = 'healthy';
     if (this.databaseCompatibilityRejection) {
       status = 'unhealthy';
+    } else if (this.unownedQueueRejections > 0) {
+      status = 'degraded';
     } else if ((queue?.queuedChats ?? 0) > 0) {
       // Waiters are backed up — signal degraded
       status = 'degraded';
@@ -160,6 +177,10 @@ export class ChatRuntime implements Runtime {
       status,
       details: {
         queue,
+        queueAdmission: {
+          rejectedTotal: droppedCount,
+          unownedTotal: this.unownedQueueRejections,
+        },
         enrichmentLastRunAt,
         queueDepth: queue?.queuedChats ?? 0,
         enrichmentUnprocessed: this.enrichmentPoller?.unprocessedCount ?? 0,
@@ -179,7 +200,7 @@ export class ChatRuntime implements Runtime {
     log.info('ChatRuntime shutdown complete');
   }
 
-  async handleMessage(msg: IncomingMessage): Promise<void> {
+  async handleMessage(msg: IncomingMessage): Promise<RuntimeAdmissionReceipt> {
     if (this.databaseCompatibilityRejection) {
       throw this.databaseCompatibilityRejection;
     }
@@ -187,7 +208,7 @@ export class ChatRuntime implements Runtime {
     const startTime = Date.now();
 
     // Enqueue via chatQueue for per-chat sequential processing
-    void this.chatQueue.enqueue(msg.chatJid, async () => {
+    const admitted = await this.chatQueue.enqueue(msg.chatJid, async () => {
       try {
         await this.processMessage(msg, traceId, startTime);
       } catch (err) {
@@ -195,6 +216,44 @@ export class ChatRuntime implements Runtime {
         this.handleDatabaseCompatibilityRejection(err);
       }
     });
+
+    if (admitted) return { status: 'accepted' };
+
+    if (this.durability && msg.inboundSeq !== undefined) {
+      try {
+        const terminalized = this.durability.markInboundFailedIfProcessing(
+          msg.inboundSeq,
+          msg.messageId,
+          msg.chatJid,
+          'queue_full',
+        );
+        if (!terminalized) {
+          throw new Error('Queue rejection terminalization did not update an inbound row');
+        }
+      } catch (err) {
+        this.recordUnownedQueueRejection();
+        throw new QueueAdmissionTerminalizationError(err);
+      }
+      return {
+        status: 'rejected',
+        reason: 'queue_full',
+        durableDisposition: 'failed',
+      };
+    }
+
+    this.recordUnownedQueueRejection();
+    return {
+      status: 'rejected',
+      reason: 'queue_full',
+      durableDisposition: 'unowned',
+    };
+  }
+
+  private recordUnownedQueueRejection(): void {
+    this.unownedQueueRejections = Math.min(
+      Number.MAX_SAFE_INTEGER,
+      this.unownedQueueRejections + 1,
+    );
   }
 
   handleDatabaseCompatibilityRejection(rejection: DatabaseCompatibilityError): void {
@@ -565,6 +624,7 @@ export class ChatRuntime implements Runtime {
       mainOpId = this.durability.createOutboundOp({
         conversationKey, chatJid: msg.chatJid, opType: 'text',
         payload: JSON.stringify({ text: responseText }), replayPolicy: 'unsafe',
+        sourceInboundSeq: msg.inboundSeq,
         isTerminal: true,
       });
       this.durability.markSending(mainOpId);
@@ -572,11 +632,22 @@ export class ChatRuntime implements Runtime {
     let sendSucceeded = false;
     let outboundReceipt: SubmissionReceipt | null = null;
     const MAX_SEND_ATTEMPTS = 3;
-    let lastSendErr: unknown;
+    let lastSendEvidence: OutboundFailureEvidenceV1 | undefined;
     for (let attempt = 0; attempt < MAX_SEND_ATTEMPTS; attempt++) {
       if (attempt > 0) {
-        const delay = jitteredDelay(2000, attempt - 1);
-        log.warn({ attempt: attempt + 1, maxAttempts: MAX_SEND_ATTEMPTS, chatJid: msg.chatJid, error: (lastSendErr as Error)?.message ?? 'unknown', elapsed_ms: Date.now() - sendStart, traceId }, 'send_retry');
+        const delay = lastSendEvidence?.retry_decision === 'retry_not_before'
+          && lastSendEvidence.retry_not_before !== null
+          ? Math.max(1, Date.parse(lastSendEvidence.retry_not_before) - Date.now())
+          : jitteredDelay(2000, attempt - 1);
+        log.warn({
+          attempt: attempt + 1,
+          maxAttempts: MAX_SEND_ATTEMPTS,
+          failureCode: lastSendEvidence?.failure_code ?? 'outbound.unknown_failure',
+          stage: lastSendEvidence?.stage ?? 'provider_request',
+          mutationState: lastSendEvidence?.mutation_state ?? 'ambiguous',
+          delayMs: delay,
+          traceId,
+        }, 'send_retry');
         await sleep(delay);
       }
       try {
@@ -584,36 +655,62 @@ export class ChatRuntime implements Runtime {
         sendSucceeded = true;
         break;
       } catch (err) {
-        lastSendErr = err;
+        lastSendEvidence = classifyOutboundFailure(err, {
+          retryOwner: 'chat_runtime',
+          attemptsRemaining: MAX_SEND_ATTEMPTS - attempt - 1,
+          previousEvidence: lastSendEvidence,
+        });
+        if (
+          lastSendEvidence.retry_decision !== 'retry_now'
+          && !(
+            lastSendEvidence.retry_decision === 'retry_not_before'
+            && !this.durability
+            && attempt < MAX_SEND_ATTEMPTS - 1
+          )
+        ) {
+          break;
+        }
       }
     }
     if (!sendSucceeded) {
       log.error(
-        { traceId, err: lastSendErr, chatJid: msg.chatJid, responseText },
-        'all send attempts failed — response text logged for recovery',
+        {
+          traceId,
+          outboundOpId: mainOpId,
+          attempts: lastSendEvidence?.logical_attempt_count ?? 0,
+          providerSubmissions: lastSendEvidence?.provider_submission_count ?? 0,
+          failureCode: lastSendEvidence?.failure_code ?? 'outbound.unknown_failure',
+          stage: lastSendEvidence?.stage ?? 'provider_request',
+          mutationState: lastSendEvidence?.mutation_state ?? 'ambiguous',
+          retryDecision: lastSendEvidence?.retry_decision ?? 'stop',
+        },
+        'chat send stopped with bounded failure disposition',
       );
-      if (mainOpId !== undefined && this.durability) {
-        // Governor sheds throw before the socket send executes — deterministic
-        // non-send, not ambiguous delivery. Same classification as the agent
-        // outbound queue (issue #1746).
-        if (isOutboundGovernorShed(lastSendErr)) {
-          this.durability.markFailedPermanent(mainOpId, (lastSendErr as Error).message);
-        } else {
-          this.durability.markMaybeSent(mainOpId, (lastSendErr as Error)?.message ?? 'send_retry_failed');
-        }
+      if (mainOpId !== undefined && this.durability && lastSendEvidence) {
+        persistOutboundFailureDisposition(this.durability, mainOpId, lastSendEvidence);
       }
-      if (this.durability && msg.inboundSeq !== undefined) {
+      const durablyDeferred = lastSendEvidence?.retry_decision === 'retry_not_before'
+        && mainOpId !== undefined
+        && this.durability !== undefined;
+      if (!durablyDeferred && this.durability && msg.inboundSeq !== undefined) {
         this.durability.markInboundFailed(msg.inboundSeq, 'transport_send_failed');
       }
-      // After send exhaustion, try one notification (don't retry this one)
-      try {
-        await this.messenger.sendMessage(msg.chatJid, '⚠️ My last response may not have been delivered. Please ask me again.');
-      } catch { /* best-effort, don't retry the notification */ }
+      if (lastSendEvidence && outboundFailureWarrantsUserNotice(lastSendEvidence)) {
+        // After send exhaustion, try one notification (don't retry this one).
+        // Not conditional on durability — the user still needs to know.
+        try {
+          await this.messenger.sendMessage(msg.chatJid, '⚠️ My last response may not have been delivered. Please ask me again.');
+        } catch { /* intentional: best-effort notice — the original send already failed terminally; retrying or surfacing the notice failure would re-enter the same failed channel */ }
+      }
       return;
     }
     if (mainOpId !== undefined && this.durability && outboundReceipt !== null) {
       try {
-        this.durability.markSubmitted(mainOpId, outboundReceipt.waMessageId);
+        this.durability.markSubmitted(
+          mainOpId,
+          outboundReceipt.waMessageId,
+          (lastSendEvidence?.logical_attempt_count ?? 0) + 1,
+        );
       } catch (settlementErr) {
         log.error({
           event: 'chat_runtime_post_send_settlement_failed',
