@@ -794,6 +794,15 @@ Probe mechanism is provider-specific and intentionally separate from fallback ac
 
 Agent `/health` also exposes a top-level `turn_capability` block derived from runtime state: `model_usable`, `model_usability_status`, `last_successful_turn_at`, `last_turn_error_class`, and `last_turn_error_at`. `model_usable` is `true` after a successful primary model probe, `false` after a configured primary model usability failure that requires operator attention, and `null` when no definitive probe result exists yet. A failed user turn records only the failure class (for example `model-unavailable` or `unknown-terminal`) and a timestamp; raw provider stderr/stdout is not surfaced. Top-level `/health.status` becomes `degraded` when the agent runtime reports degraded health, when `model_usable` is `false`, or when a user turn has a recorded error with no later successful user turn. A later successful user turn clears `last_turn_error_class` and `last_turn_error_at`.
 
+The `durability.outboundFailureEvidence` health block is a bounded,
+content-free projection of outbound failure envelopes: `sampledRows` covers at
+most the 500 newest rows and `groups` contains at most 20 aggregates by
+`failureCode`, `stage`, `mutationState`, `evidenceCoverage`, `terminalState`,
+`retryDecision`, `retryOwner`, and `remainingDelayBucket`. Each group includes
+the earliest `nextEligibleAt` and aggregate `providerSubmissionCount`. It never
+includes a recipient, message body, or raw provider error. Older prose rows
+appear only as `outbound.legacy_unclassified`.
+
 #### Cross-field validation rules
 
 Beyond the per-field shapes above, the shared validator

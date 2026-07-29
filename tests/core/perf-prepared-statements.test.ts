@@ -55,7 +55,7 @@ describe('prepared statement caching', () => {
     // (+5 vs 116, provider-route-policy task3: the five conversation-scoped
     // lifecycle proof/mutation statements enumerated above — merge union of
     // this branch's +5 with main's +2.)
-    expect(prepareSpy).toHaveBeenCalledTimes(121);
+    expect(prepareSpy).toHaveBeenCalledTimes(123);
     prepareSpy.mockClear();
 
     const seq = engine.journalInbound('msg-1', 'conv-1', 'jid-1@s.whatsapp.net', 'agent');
