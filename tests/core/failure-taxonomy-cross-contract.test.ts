@@ -57,6 +57,7 @@ const INTERNAL_OUTBOUND_FAILURE_CODE_MAP: Record<InternalOutboundFailureCode, tr
   'outbound.unsafe_delivery_unconfirmed': true,
   'outbound.governor_shed': true,
   'outbound.replay_failed': true,
+  'outbound.deferral_limit_exceeded': true,
 };
 
 const sorted = (values: Iterable<string>): string[] => [...values].sort();
