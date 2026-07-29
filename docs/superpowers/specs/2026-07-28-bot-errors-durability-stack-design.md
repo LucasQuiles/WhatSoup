@@ -285,8 +285,10 @@ The typed stage identifies:
 - reconciliation.
 
 The public diagnostic projection is limited to component class, outcome,
-stage, bounded error class, generation or count, and a domain-separated keyed
-projection token. Raw content digests, operation IDs, identities, destinations,
+stage, bounded error class, and generation or count. Draft 1 emits no
+correlation token: no key provisioning, rotation, cross-instance isolation,
+or retention contract exists that could make such a token safely
+non-correlatable. Raw content digests, operation IDs, identities, destinations,
 or low-entropy state values remain inside private state and are never emitted
 on a public or aggregate diagnostic surface.
 
@@ -583,13 +585,17 @@ caller-specific no-advance vectors for its inventory classification:
 - ambient umask cannot weaken the final mode;
 - root, intermediate, parent, and leaf symlink or non-directory substitution;
 - hard-link rejection or documented safe policy;
-- parent and target swaps after validation;
+- deterministic parent and target substitution at explicit test hooks after
+  descriptor validation, proving every subsequent operation remains
+  descriptor-confined without relying on a probabilistic scheduler race;
 - concurrent create-once and state-generation writers;
 - lock creation, lock-acquisition failure, canonical two-parent acquisition,
   contention, and crash release;
 - reconciliation sees intended, predecessor, superseding, conflicting,
   malformed, and absent targets;
-- real process crash and restart at every mutation boundary; and
+- deterministic exception/interruption injection at every mutation boundary,
+  plus real process kill/restart tests at the publication-before-parent-sync
+  and state-authority critical phases; and
 - no unproven outcome becomes ordinary success.
 
 Positive controls prove committed success and idempotent same-operation

@@ -31,7 +31,10 @@ residual.
 - `advance_allowed` requires committed/reconciled durability, proven confinement, intended authority, no conflict, and cleanup in `complete`, `not_required`, or `debt_private_temp`.
 - `debt_recovery_record`, conflict, supersession, unknown authority, or unproven durability blocks lifecycle advancement.
 - No caller may emit queued, saved, healthy, recovered, acknowledged, suppressed, cleared, or terminal success from an unproven result.
-- Public diagnostics contain only component class, outcome axes, stage, bounded error class, generation/count, and a keyed domain-separated projection token.
+- Public diagnostics contain only component class, outcome axes, stage,
+  bounded error class, and generation/count. Draft 1 emits no correlation
+  token because no reviewed key-provisioning, rotation, isolation, or
+  retention contract exists.
 - Raw paths, filenames, payloads, operation IDs, content digests, identities, destinations, processes, hosts, accounts, messages, credentials, and topology never enter public receipts, tests, issues, or PR text.
 - No production deployment, restart, live state read, fleet mutation, or issue label transition occurs before the draft is exact-head validated.
 - Masked, skipped, stale, environment-blocked, or unavailable checks are inconclusive.
@@ -191,11 +194,14 @@ Observed on the combined base:
 **Interfaces:**
 - Produces:
   - inventory schema version 1;
-  - exact caller records `{script, function, logical_publication, kind, operation_identity_source, result_consumer}`;
+  - exact caller records `{site_id, script, function, logical_publication,
+    kind, operation_identity_source, result_policy, result_consumer,
+    fault_test_ids}`;
   - guard exit 0 pass, 1 violation, 2 inconclusive.
 
 ```ts
 interface DurableWriterInventoryRow {
+  site_id: string;
   script: string;
   function: string;
   logical_publication: string;
@@ -205,10 +211,25 @@ interface DurableWriterInventoryRow {
     | "diagnostic_state"
     | "lifecycle_move_deferred_draft_3";
   operation_identity_source: "durable_json.operation_id.v1" | "deferred_draft_3";
+  result_policy:
+    | "require_advance"
+    | "explicit_advance_check"
+    | "propagate_result"
+    | "aggregate_all"
+    | "deferred_draft_3";
   result_consumer: string;
   fault_test_ids: string[];
 }
 ```
+
+`site_id` is a stable, unique inventory identifier. The guard resolves each
+row to a helper or deferred-move call inside the named function; file-level
+presence is insufficient. `result_consumer` names the enclosing or downstream
+function that enforces the closed `result_policy`. Assignment alone is not
+consumption: the guard must prove that the bound value reaches
+`require_advance`, an `advance_allowed` branch, a typed propagation return, or
+an `aggregate_all` gate. `logical_publication` is a bounded component-scoped
+identifier, not a path or payload-derived value.
 
 - [ ] **Step 1: Encode all principal and same-root cooperating writers**
 
@@ -277,9 +298,16 @@ Mutate synthetic fixture scripts to prove the guard rejects:
 
 - inline `atomic_write_json` or `fsync_parent` clones;
 - a helper call whose result is ignored;
+- a helper result assigned but never referenced;
+- a helper result assigned to `_`;
+- a helper result used only by `str()`, `repr()`, logging, or serialization
+  without an advance decision;
+- an inventory row naming a function that does not contain the claimed call;
 - a principal call absent from inventory;
 - a caller marked best-effort;
 - direct same-parent JSON `os.replace` outside the shared helper;
+- equivalent inline write-and-rename publication under renamed helper
+  functions, including `json.dump` or `Path.write_text` followed by rename;
 - a missing principal script;
 - a mixed helper generation; and
 - malformed or duplicate inventory rows.
@@ -313,14 +341,17 @@ Define tests before the module exists for:
 - intended/predecessor/superseded/conflict/malformed/absent reconciliation;
 - unknown-authority reconciliation;
 - root/intermediate/leaf symlink and non-directory substitution;
-- parent/target swaps;
+- deterministic parent/target substitution at explicit post-validation test
+  hooks; do not use probabilistic race loops as proof;
 - hard-link policy;
 - private-temporary link-count validation before publication;
 - concurrent event writers;
 - concurrent state writers;
 - concurrent event/state writers contending on one protected parent;
 - canonical two-parent lock order and crash release;
-- a real subprocess killed at each publication hook followed by restart reconciliation;
+- deterministic interruption injection at every publication hook, plus real
+  subprocess kill/restart at the event-publication-before-parent-sync and
+  state-authority critical phases;
 - committed success and idempotent same-operation reconciliation positive
   controls;
 - same-parent barrier sync exactly once and cross-parent destination/source
@@ -328,21 +359,30 @@ Define tests before the module exists for:
 - serialization and ambiguity vectors exercised once per inventory
   classification in addition to the complete helper matrix.
 
-- [ ] **Step 4: Run RED tests**
+- [ ] **Step 4: Run the first RED tests**
 
 ```bash
 loadgate -- python3.12 -m pytest -q deploy/scripts/tests/test_durable_json.py
 loadgate -- bash scripts/run-with-pinned-npm.sh test -- --run tests/scripts/bot-errors-python-atomic-write-guard.test.ts
 ```
 
-Expected: FAIL because the helper/guard contract is not implemented.
+Expected: assertion failures for the first guard and helper API behaviors
+because the contracts are not implemented. A module-import or test-collection
+error is not acceptable RED evidence. Introduce the smallest importable helper
+or guard skeleton only after its existence/API test is observed RED, then add
+the remaining matrix one behavior at a time in Task 3, observing each expected
+failure before its implementation.
 
-- [ ] **Step 5: Commit RED evidence**
+- [ ] **Step 5: Commit non-vacuous RED evidence**
 
 ```bash
 git add deploy/bot-errors-durable-writer-inventory.json deploy/scripts/tests/test_durable_json.py deploy/scripts/check-bot-errors-durable-writers.py tests/scripts/bot-errors-python-atomic-write-guard.test.ts
 git commit -m "test(durability): define durable writer fault matrix"
 ```
+
+The commit may contain the smallest importable skeleton required to make the
+recorded failures behavioral. It must not claim the complete matrix is RED
+when every case fails only because one module or symbol is absent.
 
 ### Task 3: Implement the descriptor-confined publication primitive
 
@@ -360,6 +400,13 @@ git commit -m "test(durability): define durable writer fault matrix"
   - `reconcile_json_publication(intent, previous) -> PublicationResult`
   - `sync_changed_parents(...) -> ParentSyncResult`
   - `require_advance(result: PublicationResult) -> None`
+
+Execute the fault matrix as explicit RED/GREEN cycles. Add one behavioral
+case, observe its expected assertion failure against an importable helper,
+implement the minimum contract for that case, and rerun it before adding the
+next case. Preserve the RED receipt for each fault ID. A bulk matrix that
+fails only at the first missing symbol is not evidence for the remaining
+cases.
 
 - [ ] **Step 1: Define closed outcome and stage types**
 
@@ -447,9 +494,9 @@ class PublicationResult:
 
 `stage` and `error_class` are closed enums, not arbitrary exception text.
 Private raw digests and operation IDs never appear in `public_projection()`.
-That method returns only closed values and a keyed domain-separated token.
-`require_advance()` raises a bounded `DurableWriteError` containing only the
-public projection.
+That method returns only the closed component/outcome/stage/error/generation
+values and no correlation token. `require_advance()` raises a bounded
+`DurableWriteError` containing only the public projection.
 
 Add a separate `PrePublicationFailure` constructor that is valid only when
 durability is `NOT_MUTATED`, confinement is `PROVEN`, cleanup is complete or
