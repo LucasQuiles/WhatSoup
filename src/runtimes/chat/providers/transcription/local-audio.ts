@@ -6,7 +6,9 @@ import { delimiter, join, resolve } from 'node:path';
 
 const DEFAULT_MAX_BUFFER_BYTES = 20 * 1024 * 1024;
 const KILL_GRACE_MS = 2_000;
-const DEFAULT_EXECUTABLE_PATH = ['/opt/homebrew/bin', '/usr/local/bin', '/usr/bin', '/bin'].join(delimiter);
+const DEFAULT_EXECUTABLE_PATH = process.platform === 'darwin'
+  ? ['/opt/homebrew/bin', '/usr/local/bin', '/usr/bin', '/bin'].join(delimiter)
+  : ['/usr/local/bin', '/usr/bin', '/bin'].join(delimiter);
 
 export function extensionForMimeType(mimeType: string): string {
   if (mimeType.includes('ogg')) return 'ogg';
