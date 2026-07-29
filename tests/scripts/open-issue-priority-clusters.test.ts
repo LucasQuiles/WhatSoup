@@ -23,7 +23,7 @@ describe("open issue priority clusters", () => {
     const inventory = buildPriorityClusterInventory(REGISTRY_TEXT);
 
     expect(inventory.source_registry_artifact_commit).toBe(
-      "c5fd3670b20436921e3bd1c2d20129c599e4ffe7",
+      "a18b17553c8cfcbaa07f1a57e7df1844171be955",
     );
     expect(inventory.source_registry_revision).toBe(
       "59166b78357e129ab8140b145e304b5426bcb209",
