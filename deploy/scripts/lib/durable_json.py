@@ -340,8 +340,33 @@ def _result(
 
 
 def _lock_parent(parent_fd: int) -> int:
-    flags = os.O_RDWR | os.O_CREAT | os.O_CLOEXEC | getattr(os, "O_NOFOLLOW", 0)
-    descriptor = os.open(".durable-json.lock", flags, 0o600, dir_fd=parent_fd)
+    common_flags = os.O_RDWR | os.O_CLOEXEC | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = -1
+    created = False
+    for _attempt in range(3):
+        try:
+            descriptor = os.open(
+                ".durable-json.lock",
+                common_flags | os.O_CREAT | os.O_EXCL,
+                0o600,
+                dir_fd=parent_fd,
+            )
+            created = True
+            break
+        except FileExistsError:
+            try:
+                descriptor = os.open(
+                    ".durable-json.lock",
+                    common_flags,
+                    dir_fd=parent_fd,
+                )
+                break
+            except FileNotFoundError:
+                continue
+        except FileNotFoundError:
+            continue
+    if descriptor < 0:
+        raise FileNotFoundError("lock entry did not stabilize")
     lock_stat = os.fstat(descriptor)
     if (
         not stat.S_ISREG(lock_stat.st_mode)
@@ -351,6 +376,9 @@ def _lock_parent(parent_fd: int) -> int:
         os.close(descriptor)
         raise DurableWriteError(ErrorClass.PERMISSION.value)
     os.fchmod(descriptor, 0o600)
+    if created:
+        os.fsync(descriptor)
+        os.fsync(parent_fd)
     fcntl.flock(descriptor, fcntl.LOCK_EX)
     return descriptor
 
@@ -362,6 +390,14 @@ def _write_all(descriptor: int, raw: bytes) -> None:
         if written <= 0:
             raise OSError("short write")
         offset += written
+
+
+def _inject_fault(
+    hook: Callable[[WriteStage], None] | None,
+    stage: WriteStage,
+) -> None:
+    if hook is not None:
+        hook(stage)
 
 
 def publish_event_json(
@@ -411,20 +447,39 @@ def publish_event_json(
     temp_created = False
     published = False
     cleanup = CleanupState.NOT_REQUIRED
+    current_stage = WriteStage.SERIALIZATION
     try:
+        _inject_fault(_fault_hook, current_stage)
+        current_stage = WriteStage.CAPABILITY_CHECK
+        _inject_fault(_fault_hook, current_stage)
+        current_stage = WriteStage.PARENT_OPEN
         parent_fd, leaf = _open_target_parent(target)
+        _inject_fault(_fault_hook, current_stage)
+        current_stage = WriteStage.LOCK_ACQUISITION
         lock_fd = _lock_parent(parent_fd)
+        _inject_fault(_fault_hook, current_stage)
+        current_stage = WriteStage.TEMPORARY_CREATION
         flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC | getattr(os, "O_NOFOLLOW", 0)
         temp_fd = os.open(temp_name, flags, 0o600, dir_fd=parent_fd)
         temp_created = True
+        _inject_fault(_fault_hook, current_stage)
+        current_stage = WriteStage.WRITE
         _write_all(temp_fd, raw)
+        _inject_fault(_fault_hook, current_stage)
+        current_stage = WriteStage.FILE_FLUSH
+        _inject_fault(_fault_hook, current_stage)
+        current_stage = WriteStage.FILE_SYNC
         os.fsync(temp_fd)
+        _inject_fault(_fault_hook, current_stage)
+        current_stage = WriteStage.PERMISSION_FINALIZATION
         os.fchmod(temp_fd, 0o600)
         temp_stat = os.fstat(temp_fd)
         if not stat.S_ISREG(temp_stat.st_mode) or temp_stat.st_nlink != 1:
             raise DurableWriteError(ErrorClass.IDENTITY_TYPE.value)
+        _inject_fault(_fault_hook, current_stage)
         os.close(temp_fd)
         temp_fd = -1
+        current_stage = WriteStage.PUBLICATION
         os.link(
             temp_name,
             leaf,
@@ -433,14 +488,17 @@ def publish_event_json(
             follow_symlinks=False,
         )
         published = True
+        _inject_fault(_fault_hook, current_stage)
+        current_stage = WriteStage.CLEANUP
         try:
             os.unlink(temp_name, dir_fd=parent_fd)
             temp_created = False
             cleanup = CleanupState.COMPLETE
         except OSError:
             cleanup = CleanupState.DEBT_PRIVATE_TEMP
-        if _fault_hook is not None:
-            _fault_hook(WriteStage.PARENT_SYNC)
+        _inject_fault(_fault_hook, current_stage)
+        current_stage = WriteStage.PARENT_SYNC
+        _inject_fault(_fault_hook, current_stage)
         os.fsync(parent_fd)
         return _result(
             component=component,
@@ -513,7 +571,7 @@ def publish_event_json(
             if parent_fd < 0 and isinstance(exc, DurableWriteError)
             else ConfinementProof.PROVEN
         )
-        error_class = (
+        error_class = ErrorClass.INTERRUPTION if isinstance(exc, InterruptedError) else (
             ErrorClass.IDENTITY_TYPE
             if confinement is ConfinementProof.VIOLATED
             else ErrorClass.IO
@@ -524,7 +582,7 @@ def publish_event_json(
             content_sha256=content_sha256,
             durability=DurabilityProof.UNPROVEN if published else DurabilityProof.NOT_MUTATED,
             authority=AuthorityState.UNKNOWN if published else AuthorityState.EXPECTED_PREDECESSOR,
-            stage=WriteStage.PARENT_SYNC if published else WriteStage.WRITE,
+            stage=current_stage,
             error_class=error_class,
             cleanup=CleanupState.DEBT_PRIVATE_TEMP if temp_created else CleanupState.NOT_REQUIRED,
             confinement=confinement,
@@ -599,6 +657,7 @@ def publish_state_json(
     operation_id: str,
     expected: JsonVersion,
     generation: int,
+    _fault_hook: Callable[[WriteStage], None] | None = None,
 ) -> PublicationResult:
     if (
         not isinstance(expected, JsonVersion)
@@ -655,11 +714,21 @@ def publish_state_json(
     temp_name = f".durable-json.{operation_id}.tmp"
     temp_created = False
     published = False
+    current_stage = WriteStage.SERIALIZATION
     try:
+        _inject_fault(_fault_hook, current_stage)
+        current_stage = WriteStage.CAPABILITY_CHECK
+        _inject_fault(_fault_hook, current_stage)
+        current_stage = WriteStage.PARENT_OPEN
         parent_fd, leaf = _open_target_parent(target)
+        _inject_fault(_fault_hook, current_stage)
+        current_stage = WriteStage.LOCK_ACQUISITION
         lock_fd = _lock_parent(parent_fd)
+        _inject_fault(_fault_hook, current_stage)
+        current_stage = WriteStage.RECONCILIATION
         current_raw, current = _read_version_at(parent_fd, leaf)
         if current_raw == raw:
+            os.fsync(parent_fd)
             return _result(
                 component=component,
                 operation=operation_id,
@@ -686,20 +755,35 @@ def publish_state_json(
                 error_class=ErrorClass.CONFLICT,
                 generation=generation,
             )
+        _inject_fault(_fault_hook, current_stage)
+        current_stage = WriteStage.TEMPORARY_CREATION
         flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC | getattr(os, "O_NOFOLLOW", 0)
         temp_fd = os.open(temp_name, flags, 0o600, dir_fd=parent_fd)
         temp_created = True
+        _inject_fault(_fault_hook, current_stage)
+        current_stage = WriteStage.WRITE
         _write_all(temp_fd, raw)
+        _inject_fault(_fault_hook, current_stage)
+        current_stage = WriteStage.FILE_FLUSH
+        _inject_fault(_fault_hook, current_stage)
+        current_stage = WriteStage.FILE_SYNC
         os.fsync(temp_fd)
+        _inject_fault(_fault_hook, current_stage)
+        current_stage = WriteStage.PERMISSION_FINALIZATION
         os.fchmod(temp_fd, 0o600)
         temp_stat = os.fstat(temp_fd)
         if not stat.S_ISREG(temp_stat.st_mode) or temp_stat.st_nlink != 1:
             raise DurableWriteError(ErrorClass.IDENTITY_TYPE.value)
+        _inject_fault(_fault_hook, current_stage)
         os.close(temp_fd)
         temp_fd = -1
+        current_stage = WriteStage.PUBLICATION
         os.replace(temp_name, leaf, src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
         temp_created = False
         published = True
+        _inject_fault(_fault_hook, current_stage)
+        current_stage = WriteStage.PARENT_SYNC
+        _inject_fault(_fault_hook, current_stage)
         os.fsync(parent_fd)
         return _result(
             component=component,
@@ -717,7 +801,7 @@ def publish_state_json(
             if parent_fd < 0 and isinstance(exc, DurableWriteError)
             else ConfinementProof.PROVEN
         )
-        error_class = (
+        error_class = ErrorClass.INTERRUPTION if isinstance(exc, InterruptedError) else (
             ErrorClass.IDENTITY_TYPE
             if confinement is ConfinementProof.VIOLATED
             else ErrorClass.IO
@@ -728,7 +812,7 @@ def publish_state_json(
             content_sha256=content_sha256,
             durability=DurabilityProof.UNPROVEN if published else DurabilityProof.NOT_MUTATED,
             authority=AuthorityState.UNKNOWN if published else AuthorityState.EXPECTED_PREDECESSOR,
-            stage=WriteStage.PARENT_SYNC if published else WriteStage.WRITE,
+            stage=current_stage,
             error_class=error_class,
             cleanup=CleanupState.DEBT_PRIVATE_TEMP if temp_created else CleanupState.NOT_REQUIRED,
             confinement=confinement,

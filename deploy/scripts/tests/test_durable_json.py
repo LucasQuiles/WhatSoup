@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import hashlib
 import importlib
+import json
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
@@ -392,3 +394,235 @@ def test_event_parent_sync_interruption_requires_reconciliation(tmp_path: Path) 
     assert not interrupted.advance_allowed
     assert reconciled.durability is module.DurabilityProof.RECONCILED_COMMITTED
     assert reconciled.advance_allowed
+
+
+def test_state_parent_sync_interruption_requires_reconciliation(tmp_path: Path) -> None:
+    module = importlib.import_module("deploy.scripts.lib.durable_json")
+    (tmp_path / "state").mkdir(mode=0o700)
+    target = module.durable_json_target(
+        trusted_root=tmp_path,
+        relative_path="state/current.json",
+    )
+    payload = {"status": "ready"}
+    absent = module.JsonVersion(False, None, None, None)
+    op_id = module.operation_id(
+        target,
+        payload,
+        component="fixture.state",
+        predecessor=absent,
+    )
+
+    def interrupt(stage: object) -> None:
+        if stage is module.WriteStage.PARENT_SYNC:
+            raise InterruptedError
+
+    interrupted = module.publish_state_json(
+        target,
+        payload,
+        component="fixture.state",
+        operation_id=op_id,
+        expected=absent,
+        generation=1,
+        _fault_hook=interrupt,
+    )
+    reconciled = module.publish_state_json(
+        target,
+        payload,
+        component="fixture.state",
+        operation_id=op_id,
+        expected=absent,
+        generation=1,
+    )
+
+    assert interrupted.durability is module.DurabilityProof.UNPROVEN
+    assert not interrupted.advance_allowed
+    assert reconciled.durability is module.DurabilityProof.RECONCILED_COMMITTED
+    assert reconciled.advance_allowed
+
+
+@pytest.mark.parametrize(
+    "stage_name",
+    [
+        "SERIALIZATION",
+        "CAPABILITY_CHECK",
+        "PARENT_OPEN",
+        "LOCK_ACQUISITION",
+        "TEMPORARY_CREATION",
+        "WRITE",
+        "FILE_FLUSH",
+        "FILE_SYNC",
+        "PERMISSION_FINALIZATION",
+        "PUBLICATION",
+        "CLEANUP",
+        "PARENT_SYNC",
+    ],
+)
+def test_event_interruptions_never_become_success(tmp_path: Path, stage_name: str) -> None:
+    module = importlib.import_module("deploy.scripts.lib.durable_json")
+    (tmp_path / "state").mkdir(mode=0o700)
+    target = module.durable_json_target(
+        trusted_root=tmp_path,
+        relative_path="state/event.json",
+    )
+    payload = {"id": "event-1"}
+    op_id = module.operation_id(
+        target,
+        payload,
+        component="fixture.event",
+        predecessor=module.JsonVersion(False, None, None, None),
+    )
+    fault_stage = getattr(module.WriteStage, stage_name)
+
+    def interrupt(stage: object) -> None:
+        if stage is fault_stage:
+            raise InterruptedError
+
+    result = module.publish_event_json(
+        target,
+        payload,
+        component="fixture.event",
+        operation_id=op_id,
+        _fault_hook=interrupt,
+    )
+
+    assert not result.advance_allowed
+    assert result.stage is fault_stage
+    assert result.error_class is module.ErrorClass.INTERRUPTION
+    if stage_name in {"PUBLICATION", "CLEANUP", "PARENT_SYNC"}:
+        assert result.durability is module.DurabilityProof.UNPROVEN
+        assert (tmp_path / "state/event.json").exists()
+    else:
+        assert result.durability is module.DurabilityProof.NOT_MUTATED
+        assert not (tmp_path / "state/event.json").exists()
+
+
+@pytest.mark.parametrize(
+    "stage_name",
+    [
+        "SERIALIZATION",
+        "CAPABILITY_CHECK",
+        "PARENT_OPEN",
+        "LOCK_ACQUISITION",
+        "RECONCILIATION",
+        "TEMPORARY_CREATION",
+        "WRITE",
+        "FILE_FLUSH",
+        "FILE_SYNC",
+        "PERMISSION_FINALIZATION",
+        "PUBLICATION",
+        "PARENT_SYNC",
+    ],
+)
+def test_state_interruptions_never_become_success(tmp_path: Path, stage_name: str) -> None:
+    module = importlib.import_module("deploy.scripts.lib.durable_json")
+    (tmp_path / "state").mkdir(mode=0o700)
+    target = module.durable_json_target(
+        trusted_root=tmp_path,
+        relative_path="state/current.json",
+    )
+    payload = {"status": "ready"}
+    absent = module.JsonVersion(False, None, None, None)
+    op_id = module.operation_id(
+        target,
+        payload,
+        component="fixture.state",
+        predecessor=absent,
+    )
+    fault_stage = getattr(module.WriteStage, stage_name)
+
+    def interrupt(stage: object) -> None:
+        if stage is fault_stage:
+            raise InterruptedError
+
+    result = module.publish_state_json(
+        target,
+        payload,
+        component="fixture.state",
+        operation_id=op_id,
+        expected=absent,
+        generation=1,
+        _fault_hook=interrupt,
+    )
+
+    assert not result.advance_allowed
+    assert result.stage is fault_stage
+    assert result.error_class is module.ErrorClass.INTERRUPTION
+    if stage_name in {"PUBLICATION", "PARENT_SYNC"}:
+        assert result.durability is module.DurabilityProof.UNPROVEN
+        assert (tmp_path / "state/current.json").exists()
+    else:
+        assert result.durability is module.DurabilityProof.NOT_MUTATED
+        assert not (tmp_path / "state/current.json").exists()
+
+
+def test_concurrent_event_writers_converge_on_one_operation(tmp_path: Path) -> None:
+    module = importlib.import_module("deploy.scripts.lib.durable_json")
+    (tmp_path / "state").mkdir(mode=0o700)
+    target = module.durable_json_target(
+        trusted_root=tmp_path,
+        relative_path="state/event.json",
+    )
+    payload = {"id": "event-1"}
+    op_id = module.operation_id(
+        target,
+        payload,
+        component="fixture.event",
+        predecessor=module.JsonVersion(False, None, None, None),
+    )
+
+    def publish() -> object:
+        return module.publish_event_json(
+            target,
+            payload,
+            component="fixture.event",
+            operation_id=op_id,
+        )
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        results = list(pool.map(lambda _index: publish(), range(8)))
+
+    assert all(result.advance_allowed for result in results)
+    assert sum(result.durability is module.DurabilityProof.COMMITTED for result in results) == 1
+    assert sum(
+        result.durability is module.DurabilityProof.RECONCILED_COMMITTED
+        for result in results
+    ) == 7
+
+
+def test_concurrent_state_writers_fence_the_same_predecessor(tmp_path: Path) -> None:
+    module = importlib.import_module("deploy.scripts.lib.durable_json")
+    (tmp_path / "state").mkdir(mode=0o700)
+    target = module.durable_json_target(
+        trusted_root=tmp_path,
+        relative_path="state/current.json",
+    )
+    absent = module.JsonVersion(False, None, None, None)
+    payloads = [{"winner": "alpha"}, {"winner": "beta"}]
+
+    def publish(payload: dict[str, str]) -> object:
+        op_id = module.operation_id(
+            target,
+            payload,
+            component="fixture.state",
+            predecessor=absent,
+        )
+        return module.publish_state_json(
+            target,
+            payload,
+            component="fixture.state",
+            operation_id=op_id,
+            expected=absent,
+            generation=1,
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(publish, payloads))
+
+    assert sum(result.advance_allowed for result in results) == 1
+    assert sum(
+        result.authority is module.AuthorityState.CONFLICT for result in results
+    ) == 1, json.dumps([result.public_projection() for result in results], sort_keys=True)
+    assert (tmp_path / "state/current.json").read_text(encoding="utf-8") in {
+        '{"winner":"alpha"}\n',
+        '{"winner":"beta"}\n',
+    }
