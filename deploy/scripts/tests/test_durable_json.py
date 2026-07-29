@@ -5,6 +5,9 @@ import importlib
 import json
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+import signal
+import subprocess
+import sys
 
 import pytest
 
@@ -1284,3 +1287,225 @@ def test_reconcile_json_publication_proves_intended_event_bytes(tmp_path: Path) 
     assert reconciled.advance_allowed
     assert reconciled.durability is module.DurabilityProof.RECONCILED_COMMITTED
     assert reconciled.authority is module.AuthorityState.INTENDED_AUTHORITATIVE
+
+
+def test_event_sigkill_after_publication_reconciles_on_restart(tmp_path: Path) -> None:
+    module = importlib.import_module("deploy.scripts.lib.durable_json")
+    (tmp_path / "state").mkdir(mode=0o700)
+    child = """
+import os
+import signal
+import sys
+from pathlib import Path
+from deploy.scripts.lib import durable_json as durable
+
+root = Path(sys.argv[1])
+target = durable.durable_json_target(
+    trusted_root=root,
+    relative_path="state/event.json",
+)
+payload = {"id": "event-1"}
+previous = durable.JsonVersion(False, None, None, None)
+operation = durable.operation_id(
+    target,
+    payload,
+    component="fixture.event",
+    predecessor=previous,
+)
+
+def kill_after_publication(stage):
+    if stage is durable.WriteStage.PUBLICATION:
+        os.kill(os.getpid(), signal.SIGKILL)
+
+durable.publish_event_json(
+    target,
+    payload,
+    component="fixture.event",
+    operation_id=operation,
+    _fault_hook=kill_after_publication,
+)
+"""
+    killed = subprocess.run(
+        [sys.executable, "-c", child, str(tmp_path)],
+        cwd=Path.cwd(),
+        check=False,
+    )
+    assert killed.returncode == -signal.SIGKILL
+
+    target = module.durable_json_target(
+        trusted_root=tmp_path,
+        relative_path="state/event.json",
+    )
+    payload = {"id": "event-1"}
+    previous = module.JsonVersion(False, None, None, None)
+    operation = module.operation_id(
+        target,
+        payload,
+        component="fixture.event",
+        predecessor=previous,
+    )
+    intent = module.JsonPublicationIntent(
+        kind=module.PublicationKind.EVENT,
+        target=target,
+        payload=payload,
+        component="fixture.event",
+        operation_id=operation,
+        generation=None,
+    )
+
+    reconciled = module.reconcile_json_publication(intent, previous)
+
+    assert reconciled.durability is module.DurabilityProof.RECONCILED_COMMITTED
+    assert reconciled.advance_allowed
+    assert reconciled.cleanup is module.CleanupState.COMPLETE
+    assert list((tmp_path / "state").glob(".durable-json.*.tmp")) == []
+
+
+def test_event_sigkill_before_publication_retires_unpublished_temp(
+    tmp_path: Path,
+) -> None:
+    module = importlib.import_module("deploy.scripts.lib.durable_json")
+    (tmp_path / "state").mkdir(mode=0o700)
+    child = """
+import os
+import signal
+import sys
+from pathlib import Path
+from deploy.scripts.lib import durable_json as durable
+
+root = Path(sys.argv[1])
+target = durable.durable_json_target(
+    trusted_root=root,
+    relative_path="state/event.json",
+)
+payload = {"id": "event-1"}
+previous = durable.JsonVersion(False, None, None, None)
+operation = durable.operation_id(
+    target,
+    payload,
+    component="fixture.event",
+    predecessor=previous,
+)
+
+def kill_before_publication(stage):
+    if stage is durable.WriteStage.PERMISSION_FINALIZATION:
+        os.kill(os.getpid(), signal.SIGKILL)
+
+durable.publish_event_json(
+    target,
+    payload,
+    component="fixture.event",
+    operation_id=operation,
+    _fault_hook=kill_before_publication,
+)
+"""
+    killed = subprocess.run(
+        [sys.executable, "-c", child, str(tmp_path)],
+        cwd=Path.cwd(),
+        check=False,
+    )
+    assert killed.returncode == -signal.SIGKILL
+
+    target = module.durable_json_target(
+        trusted_root=tmp_path,
+        relative_path="state/event.json",
+    )
+    payload = {"id": "event-1"}
+    previous = module.JsonVersion(False, None, None, None)
+    operation = module.operation_id(
+        target,
+        payload,
+        component="fixture.event",
+        predecessor=previous,
+    )
+    intent = module.JsonPublicationIntent(
+        kind=module.PublicationKind.EVENT,
+        target=target,
+        payload=payload,
+        component="fixture.event",
+        operation_id=operation,
+        generation=None,
+    )
+
+    reconciled = module.reconcile_json_publication(intent, previous)
+
+    assert reconciled.durability is module.DurabilityProof.NOT_MUTATED
+    assert reconciled.authority is module.AuthorityState.EXPECTED_PREDECESSOR
+    assert reconciled.cleanup is module.CleanupState.COMPLETE
+    assert not reconciled.advance_allowed
+    assert not (tmp_path / "state" / "event.json").exists()
+    assert list((tmp_path / "state").glob(".durable-json.*.tmp")) == []
+
+
+def test_state_sigkill_after_authority_replace_reconciles_on_restart(
+    tmp_path: Path,
+) -> None:
+    module = importlib.import_module("deploy.scripts.lib.durable_json")
+    (tmp_path / "state").mkdir(mode=0o700)
+    child = """
+import os
+import signal
+import sys
+from pathlib import Path
+from deploy.scripts.lib import durable_json as durable
+
+root = Path(sys.argv[1])
+target = durable.durable_json_target(
+    trusted_root=root,
+    relative_path="state/current.json",
+)
+payload = {"generation": 1, "status": "ready"}
+previous = durable.JsonVersion(False, None, None, None)
+operation = durable.operation_id(
+    target,
+    payload,
+    component="fixture.state",
+    predecessor=previous,
+)
+
+def kill_after_replace(stage):
+    if stage is durable.WriteStage.PUBLICATION:
+        os.kill(os.getpid(), signal.SIGKILL)
+
+durable.publish_state_json(
+    target,
+    payload,
+    component="fixture.state",
+    operation_id=operation,
+    expected=previous,
+    generation=1,
+    _fault_hook=kill_after_replace,
+)
+"""
+    killed = subprocess.run(
+        [sys.executable, "-c", child, str(tmp_path)],
+        cwd=Path.cwd(),
+        check=False,
+    )
+    assert killed.returncode == -signal.SIGKILL
+
+    target = module.durable_json_target(
+        trusted_root=tmp_path,
+        relative_path="state/current.json",
+    )
+    payload = {"generation": 1, "status": "ready"}
+    previous = module.JsonVersion(False, None, None, None)
+    operation = module.operation_id(
+        target,
+        payload,
+        component="fixture.state",
+        predecessor=previous,
+    )
+    intent = module.JsonPublicationIntent(
+        kind=module.PublicationKind.STATE,
+        target=target,
+        payload=payload,
+        component="fixture.state",
+        operation_id=operation,
+        generation=1,
+    )
+
+    reconciled = module.reconcile_json_publication(intent, previous)
+
+    assert reconciled.durability is module.DurabilityProof.RECONCILED_COMMITTED
+    assert reconciled.advance_allowed

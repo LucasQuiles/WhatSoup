@@ -77,6 +77,12 @@ class PublicationKind(str, Enum):
     STATE = "state"
 
 
+class _EventTempRecovery(Enum):
+    ABSENT = 0
+    RETIRED_UNPUBLISHED = 1
+    RETIRED_PUBLISHED = 2
+
+
 class DurableWriteError(RuntimeError):
     """Bounded public failure for a durable publication decision."""
 
@@ -772,6 +778,66 @@ def _read_version_at(parent_fd: int, leaf: str) -> tuple[bytes | None, JsonVersi
         os.close(descriptor)
 
 
+def _recover_reconciled_event_temp(
+    parent_fd: int,
+    *,
+    leaf: str,
+    temp_name: str,
+    intended_raw: bytes,
+) -> _EventTempRecovery:
+    flags = os.O_RDONLY | os.O_CLOEXEC | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        temp_fd = os.open(temp_name, flags, dir_fd=parent_fd)
+    except FileNotFoundError:
+        return _EventTempRecovery.ABSENT
+    target_fd = -1
+    try:
+        temp_stat = os.fstat(temp_fd)
+        if (
+            not stat.S_ISREG(temp_stat.st_mode)
+            or temp_stat.st_uid != os.getuid()
+            or stat.S_IMODE(temp_stat.st_mode) & 0o077
+            or temp_stat.st_nlink not in {1, 2}
+            or temp_stat.st_size != len(intended_raw)
+        ):
+            raise DurableWriteError(ErrorClass.CONFLICT)
+        observed = b""
+        while len(observed) < len(intended_raw):
+            chunk = os.read(temp_fd, len(intended_raw) - len(observed))
+            if not chunk:
+                break
+            observed += chunk
+        if observed != intended_raw:
+            raise DurableWriteError(ErrorClass.CONFLICT)
+        try:
+            target_fd = os.open(leaf, flags, dir_fd=parent_fd)
+        except FileNotFoundError:
+            if temp_stat.st_nlink != 1:
+                raise DurableWriteError(ErrorClass.CONFLICT)
+            os.unlink(temp_name, dir_fd=parent_fd)
+            os.fsync(parent_fd)
+            return _EventTempRecovery.RETIRED_UNPUBLISHED
+        target_stat = os.fstat(target_fd)
+        if (
+            not stat.S_ISREG(target_stat.st_mode)
+            or target_stat.st_uid != os.getuid()
+            or stat.S_IMODE(target_stat.st_mode) & 0o077
+            or temp_stat.st_dev != target_stat.st_dev
+            or temp_stat.st_ino != target_stat.st_ino
+            or temp_stat.st_nlink != 2
+            or target_stat.st_nlink != 2
+            or target_stat.st_size != len(intended_raw)
+        ):
+            raise DurableWriteError(ErrorClass.CONFLICT)
+        os.unlink(temp_name, dir_fd=parent_fd)
+        os.fsync(parent_fd)
+        return _EventTempRecovery.RETIRED_PUBLISHED
+    finally:
+        if target_fd >= 0:
+            os.close(target_fd)
+        os.close(temp_fd)
+
+
 def publish_state_json(
     target: DurableJsonTarget,
     payload: Mapping[str, Any],
@@ -1036,7 +1102,26 @@ def reconcile_json_publication(
     try:
         parent_fd, leaf = _open_target_parent(intent.target)
         lock_fd = _lock_parent(parent_fd)
-        current_raw, current = _read_version_at(parent_fd, leaf)
+        event_temp_recovery = (
+            _recover_reconciled_event_temp(
+                parent_fd,
+                leaf=leaf,
+                temp_name=f".durable-json.{intent.operation_id}.tmp",
+                intended_raw=raw,
+            )
+            if intent.kind is PublicationKind.EVENT
+            else _EventTempRecovery.ABSENT
+        )
+        if event_temp_recovery is _EventTempRecovery.RETIRED_PUBLISHED:
+            current_raw = raw
+            current = JsonVersion(
+                True,
+                hashlib.sha256(raw).hexdigest(),
+                None,
+                None,
+            )
+        else:
+            current_raw, current = _read_version_at(parent_fd, leaf)
         if current_raw == raw:
             os.fsync(parent_fd)
             authority = (
@@ -1051,7 +1136,11 @@ def reconcile_json_publication(
                 durability=DurabilityProof.RECONCILED_COMMITTED,
                 authority=authority,
                 stage=WriteStage.RECONCILIATION,
-                cleanup=CleanupState.NOT_REQUIRED,
+                cleanup=(
+                    CleanupState.COMPLETE
+                    if event_temp_recovery is not _EventTempRecovery.ABSENT
+                    else CleanupState.NOT_REQUIRED
+                ),
                 generation=intent.generation,
             )
         if current_raw is None:
@@ -1066,6 +1155,11 @@ def reconcile_json_publication(
                     else AuthorityState.UNKNOWN
                 ),
                 stage=WriteStage.RECONCILIATION,
+                cleanup=(
+                    CleanupState.COMPLETE
+                    if event_temp_recovery is _EventTempRecovery.RETIRED_UNPUBLISHED
+                    else CleanupState.NOT_REQUIRED
+                ),
                 generation=intent.generation,
             )
         superseded = (
