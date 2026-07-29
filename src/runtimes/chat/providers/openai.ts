@@ -73,6 +73,9 @@ export function createOpenAIProvider(
 
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), config.apiTimeoutMs);
+      const signal = request.signal
+        ? AbortSignal.any([request.signal, controller.signal])
+        : controller.signal;
 
       const startMs = Date.now();
       let response: OpenAI.Chat.ChatCompletion;
@@ -83,7 +86,7 @@ export function createOpenAIProvider(
             max_tokens: maxTokens,
             messages: chatMessages,
           },
-          { signal: controller.signal },
+          { signal },
         );
       } catch (err) {
         handleApiError(err, 'OpenAI', model, startMs, logger);

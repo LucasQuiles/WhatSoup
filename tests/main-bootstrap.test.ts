@@ -584,6 +584,7 @@ describe('main bootstrap', () => {
       expect.any(Object),
       guardedAnthropic,
       expect.any(Object),
+      expect.any(Object),
     );
     expect(h.memoryScheduler.start).toHaveBeenCalledOnce();
     expect(h.ChatRuntime.mock.invocationCallOrder[0])

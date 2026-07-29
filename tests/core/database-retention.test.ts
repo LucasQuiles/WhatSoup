@@ -67,6 +67,7 @@ describe('database retention', () => {
       outboundOps: 1,
       toolCalls: 1,
       factExportQueue: 1,
+      memoryConsolidationRuns: 0,
       metricsHourly: 0,
       decryptionFailures: 0,
       messages: 0,
@@ -191,6 +192,63 @@ describe('database retention', () => {
     );
   });
 
+  it('bounds content-free consolidation receipts while retaining the newest 100', () => {
+    const insert = db.raw.prepare(`
+      INSERT INTO memory_consolidation_runs (
+        run_id, source, mode, status, stage, failure_code, retryable,
+        evidence_coverage, attempted_at, last_progress_at, completed_at,
+        success_at
+      ) VALUES (
+        ?, 'manual', 'dry_run', 'no_work', 'finalize', 'none', 0,
+        'provider_response', ?, ?, ?, ?
+      )
+    `);
+    const oldBase = Date.now() - 40 * 86_400_000;
+    for (let index = 0; index < 102; index += 1) {
+      const runId = index.toString(16).padStart(32, '0');
+      const attemptedAt = oldBase + index;
+      insert.run(
+        runId,
+        attemptedAt,
+        attemptedAt,
+        attemptedAt + 1,
+        attemptedAt + 1,
+      );
+    }
+
+    const result = runDatabaseRetention(db, {
+      ...DEFAULT_DATABASE_RETENTION,
+      memoryConsolidationDays: 30,
+      memoryConsolidationMaxRows: 100,
+    });
+
+    expect(result.memoryConsolidationRuns).toBe(2);
+    expect(rowCount('memory_consolidation_runs')).toBe(100);
+    expect(columnValues('memory_consolidation_runs', 'attempted_at'))
+      .not.toContain(oldBase);
+
+    db.raw.exec('DELETE FROM memory_consolidation_runs');
+    const recentBase = Date.now() - 60_000;
+    for (let index = 0; index < 102; index += 1) {
+      const runId = (index + 102).toString(16).padStart(32, '0');
+      const attemptedAt = recentBase + index;
+      insert.run(
+        runId,
+        attemptedAt,
+        attemptedAt,
+        attemptedAt + 1,
+        attemptedAt + 1,
+      );
+    }
+    const capped = runDatabaseRetention(db, {
+      ...DEFAULT_DATABASE_RETENTION,
+      memoryConsolidationDays: 30,
+      memoryConsolidationMaxRows: 100,
+    });
+    expect(capped.memoryConsolidationRuns).toBe(2);
+    expect(rowCount('memory_consolidation_runs')).toBe(100);
+  });
+
   it('QR-066: prunes stale decryption_failures by last_seen_at, preserving a still-recurring one', () => {
     // Stale (no activity in 40 days) — must be reaped.
     db.raw.prepare(`
@@ -285,6 +343,7 @@ describe('database retention', () => {
       outboundOps: 0,
       toolCalls: 0,
       factExportQueue: 0,
+      memoryConsolidationRuns: 0,
       metricsHourly: 0,
       decryptionFailures: 0,
       messages: 0,
@@ -681,6 +740,8 @@ describe('database retention', () => {
         exportedFactDays: 30,
         metricsHourlyDays: 180,
         decryptionFailureDays: 30,
+        memoryConsolidationDays: 30,
+        memoryConsolidationMaxRows: 10_000,
         messageRetentionDays: 30,
       });
 
@@ -713,6 +774,8 @@ describe('database retention', () => {
         exportedFactDays: 30,
         metricsHourlyDays: 180,
         decryptionFailureDays: 30,
+        memoryConsolidationDays: 30,
+        memoryConsolidationMaxRows: 10_000,
         messageRetentionDays: 30,
       });
       const emptyResult = {
@@ -722,6 +785,7 @@ describe('database retention', () => {
         outboundOps: 0,
         toolCalls: 0,
         factExportQueue: 0,
+        memoryConsolidationRuns: 0,
         metricsHourly: 0,
         decryptionFailures: 0,
         messages: 0,

@@ -41,6 +41,9 @@ export function createAnthropicProvider(): LLMProvider {
 
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), config.apiTimeoutMs);
+      const signal = request.signal
+        ? AbortSignal.any([request.signal, controller.signal])
+        : controller.signal;
 
       // Defense layer: sanitize all message content to strip lone surrogates
       // that would produce invalid JSON and trigger "no low surrogate" API errors.
@@ -60,7 +63,7 @@ export function createAnthropicProvider(): LLMProvider {
             system: sanitizedSystemPrompt,
             messages: sanitizedMessages.map(toAnthropicMessage),
           },
-          { signal: controller.signal },
+          { signal },
         );
       } catch (err) {
         handleApiError(err, 'Anthropic', model, startMs, logger);

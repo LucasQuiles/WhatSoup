@@ -24,6 +24,7 @@ import { withDatabaseCompatibility } from './runtimes/chat/providers/database-co
 import { resolveBinaryPath } from './runtimes/chat/providers/transcription/local-audio.ts';
 import type { DatabaseCompatibilityError } from './core/database-compatibility.ts';
 import { MemoryConsolidationScheduler } from './memory/consolidation-scheduler.ts';
+import { ConsolidationRunStore } from './memory/consolidation-run-store.ts';
 import { startHealthServer } from './core/health.ts';
 import { openDatabaseForStartup } from './core/database-compatibility-health.ts';
 import {
@@ -190,6 +191,15 @@ if (databaseStartup.mode === 'drained') {
   process.exit(shutdownExitCode(drainSignal));
 }
 const db = databaseStartup.db;
+const memoryConsolidationRunStore = new ConsolidationRunStore(db);
+try {
+  memoryConsolidationRunStore.abandonInterruptedRuns(Date.now());
+} catch {
+  log.error({
+    failureCode: 'observation_failed',
+    stage: 'finalize',
+  }, 'memory consolidation: restart receipt recovery failed');
+}
 
 const pineconeReadiness = await getPineconeReadiness(config.pineconeIndex);
 log.info(
@@ -432,11 +442,16 @@ if (instanceType === 'agent') {
     config.memory.consolidation.enabled &&
     pineconeReadiness.state === 'ready'
   ) {
-    memoryConsolidationScheduler = new MemoryConsolidationScheduler(pinecone, anthropic, {
-      intervalMs: config.memory.consolidation.intervalHours * 60 * 60 * 1000,
-      lookbackDays: config.memory.consolidation.lookbackDays,
-      dryRun: config.memory.consolidation.dryRun,
-    });
+    memoryConsolidationScheduler = new MemoryConsolidationScheduler(
+      pinecone,
+      anthropic,
+      {
+        intervalMs: config.memory.consolidation.intervalHours * 60 * 60 * 1000,
+        lookbackDays: config.memory.consolidation.lookbackDays,
+        dryRun: config.memory.consolidation.dryRun,
+      },
+      memoryConsolidationRunStore,
+    );
     memoryConsolidationScheduler.start();
   } else if (config.memory.consolidation.enabled) {
     log.warn({
@@ -778,6 +793,15 @@ const healthServer = startHealthServer({
   instanceName: config.botName,
   instanceType: instanceType,
   accessMode: config.accessMode,
+  getMemoryConsolidationHealth: () =>
+    memoryConsolidationRunStore.readHealth({
+      enabled: config.memory.consolidation.enabled,
+      started: memoryConsolidationScheduler !== null,
+      nowMs: Date.now(),
+      // Skipped ticks do not renew progress or the lease. A run that makes no
+      // progress for the scheduler's five-minute total deadline is stalled.
+      stalledAfterMs: 5 * 60_000,
+    }),
   // D-4 console approval queue: only the agent runtime owns the
   // pending-poll machinery; chat/passive instances omit the callback and
   // the health endpoint answers 503 honestly.

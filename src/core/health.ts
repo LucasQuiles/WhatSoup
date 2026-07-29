@@ -43,6 +43,7 @@ import type { ConnectionRecentDisconnects, ConnectionStateSnapshot } from '../tr
 import { readBody } from '../lib/http.ts';
 import { readWhatsoupGitBranch, readWhatsoupGitSha } from '../lib/git-env.ts';
 import { LoopLagSampler, LOOP_LAG_STARVATION_THRESHOLD_MS } from '../lib/loop-lag-sampler.ts';
+import type { ConsolidationHealth } from './memory-consolidation-contract.ts';
 
 const log = createChildLogger('health');
 const EMPTY_SHA256 = 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855';
@@ -99,6 +100,7 @@ export interface HealthDeps {
   loopLagSampler?: LoopLagSampler;
   /** Monotonic clock for starvation-warning suppression; injectable for tests. */
   loopLagWarningNow?: () => number;
+  getMemoryConsolidationHealth?: () => ConsolidationHealth;
 }
 
 /**
@@ -230,6 +232,7 @@ export type HealthDegradationCause =
   | 'transport_disconnected'
   | 'enrichment_stale'
   | 'enrichment_runtime_degraded'
+  | 'memory_consolidation_degraded'
   | 'connection_churn'
   | 'outbound_flood'
   | 'event_loop_starved'
@@ -262,6 +265,7 @@ const HEALTH_DEGRADATION_CAUSE_PRESENCE: Readonly<Record<HealthDegradationCause,
   transport_disconnected: true,
   enrichment_stale: true,
   enrichment_runtime_degraded: true,
+  memory_consolidation_degraded: true,
   connection_churn: true,
   outbound_flood: true,
   event_loop_starved: true,
@@ -1404,6 +1408,18 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
       }
 
       const enrichmentStats = deps.getEnrichmentStats();
+      const memoryConsolidation = deps.getMemoryConsolidationHealth?.() ?? null;
+      const memoryConsolidationIsDegraded =
+        memoryConsolidation !== null
+        && [
+          'not_started',
+          'stalled',
+          'cancelling',
+          'partial',
+          'failed',
+          'abandoned',
+          'unreadable',
+        ].includes(memoryConsolidation.state);
       const connectionState = getConnectionState(deps.connectionManager);
       const authBond = formatAuthBond(connectionState);
       const authFailureClass = classifyAuthFailure(connectionState);
@@ -1538,6 +1554,9 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
         if (authFailureIsDegraded) statusReasons.push(`auth_failure.${authFailureClass}`);
         if (enrichmentIsStale) statusReasons.push('enrichment_stale');
         if (enrichmentStats.runtimeDegraded) statusReasons.push('enrichment_runtime_degraded');
+        if (memoryConsolidationIsDegraded) {
+          statusReasons.push(`memory_consolidation_${memoryConsolidation.state}`);
+        }
         if (connectionChurnIsDegraded) statusReasons.push('connection_churn');
         if (outboundFloodIsDegraded) statusReasons.push('outbound_flood');
         if (agentRuntimeStatus === 'degraded') {
@@ -1701,6 +1720,7 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
       if (!isConnected) addDegradationCause('transport_disconnected');
       if (enrichmentIsStale) addDegradationCause('enrichment_stale');
       if (enrichmentStats.runtimeDegraded) addDegradationCause('enrichment_runtime_degraded');
+      if (memoryConsolidationIsDegraded) addDegradationCause('memory_consolidation_degraded');
       if (connectionChurnIsDegraded) addDegradationCause('connection_churn');
       if (outboundFloodIsDegraded) addDegradationCause('outbound_flood');
       if (loopLag.locallyStarved) addDegradationCause('event_loop_starved');
@@ -1861,6 +1881,9 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
         outbound_sends: outboundSends,
         enrichment: {
           last_run: enrichmentStats.lastRun,
+        },
+        memory: {
+          consolidation: memoryConsolidation,
         },
         models: {
           conversation: config.models.conversation,

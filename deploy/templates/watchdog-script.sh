@@ -25,6 +25,11 @@ HOME_DIR="__HOME__"
 LOG_DIR="$HOME_DIR/Library/Logs/whatsoup"
 LOG="$LOG_DIR/BOT_NAME-watchdog.log"
 LOCK="/tmp/com.whatsoup.BOT_NAME-watchdog.lock"
+# Present while the bot's provider credential is dead (decision-block exit 3).
+# The fleet console / alert path stats this; it is cleared on the next passing
+# check so its presence always reflects current state.
+CRED_MARKER="$LOG_DIR/BOT_NAME-credential-dead.marker"
+WD_FINAL="ok"
 
 BOT_LABEL="com.whatsoup.BOT_NAME"
 FLEET_LABEL="com.whatsoup.whatsoup-fleet"
@@ -134,7 +139,7 @@ if [ "$curl_rc" -ne 0 ] || [ -z "$bot_code" ]; then
 elif [ -z "$bot_json" ]; then
   restart_label "$BOT_LABEL" "empty health body (http=$bot_code)"
 else
-  BOT_JSON="$bot_json" BOT_CODE="$bot_code" python3 - <<'PY' 2>>"$LOG" || restart_label "$BOT_LABEL" "unhealthy JSON response"
+  BOT_JSON="$bot_json" BOT_CODE="$bot_code" python3 - <<'PY' 2>>"$LOG"
 import datetime as dt
 import json
 import os
@@ -300,7 +305,34 @@ elif pong_parse_failed:
 if reasons:
     print("; ".join(reasons), file=sys.stderr)
     sys.exit(1)
+
+# Credential death: every liveness/connectivity check above passed, but the
+# agent's provider credential is gone (claude deletes its file store and leaves
+# a dead keychain stub on refresh failure). A restart cannot mint a credential
+# — kicking the bot here would just loop it — and logging plain "ok" is how a
+# 12-day credential outage stayed invisible (mini11, Jul 15–27). Exit 3 is the
+# distinct no-restart escalation the shell routes to a CREDENTIAL-DEAD log
+# line + marker file.
+turn_capability = data.get("turn_capability") or {}
+if turn_capability.get("model_usability_status") == "credential-unavailable":
+    print(
+        "CREDENTIAL-DEAD: turn_capability.model_usability_status=credential-unavailable — reauth required",
+        file=sys.stderr,
+    )
+    sys.exit(3)
 PY
+  py_rc=$?
+  if [ "$py_rc" -eq 3 ]; then
+    # marker: BOT_NAME-credential-dead.marker — deliberately no restart on this
+    # branch (a restart cannot fix auth; see the exit-3 decision-block comment).
+    log "CREDENTIAL-DEAD: claude credential unavailable — reauth required; restart suppressed"
+    touch "$CRED_MARKER"
+    WD_FINAL="CREDENTIAL-DEAD"
+  elif [ "$py_rc" -ne 0 ]; then
+    restart_label "$BOT_LABEL" "unhealthy JSON response"
+  else
+    rm -f "$CRED_MARKER" 2>/dev/null || true
+  fi
 fi
 
 # --- Fleet console health check ---
@@ -308,4 +340,4 @@ if ! curl --fail --silent --show-error --max-time 8 "$FLEET_HEALTH" >/dev/null 2
   restart_label "$FLEET_LABEL" "fleet console unreachable"
 fi
 
-log "ok"
+log "$WD_FINAL"
