@@ -193,6 +193,27 @@ describe('StartupNotificationController', () => {
     );
   });
 
+  it('reports waiting while a prompt-only resume timer is armed, then stops cleanly', () => {
+    const h = createHarness();
+
+    h.controller.onConnected({
+      generic: null,
+      event: { kind: 'resume', chatJid: 'resume-chat', text: 'resuming' },
+      intentionalRestartReceipt: null,
+    });
+
+    expect(h.controller.getHealthSnapshot()).toEqual({
+      state: 'waiting',
+      timerArmed: true,
+      journalStatus: 'available',
+      settlement: 'not_attempted',
+    });
+    expect(h.scheduler.pendingCount).toBe(1);
+
+    h.controller.stop();
+    expect(h.controller.getHealthSnapshot()).toMatchObject({ state: 'stopped', timerArmed: false });
+  });
+
   it('sends a restart-loop alert promptly without settling, then sends the configured generic aggregate', async () => {
     const h = createHarness();
 

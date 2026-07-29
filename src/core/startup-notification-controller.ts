@@ -191,6 +191,7 @@ export class StartupNotificationController {
   }
 
   private schedulePrompt(run: () => Promise<void>): void {
+    this.state = 'waiting';
     let timer: unknown;
     timer = this.scheduler.setTimeout(async () => {
       this.promptTimers.delete(timer);
