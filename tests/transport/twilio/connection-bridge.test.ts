@@ -166,7 +166,7 @@ describe('TwilioConnection bridge', () => {
       await vi.advanceTimersByTimeAsync(1000); // message arrives, guard false → dropped, no throw
 
       // Bridge stays healthy after silently dropping the unhandled message.
-      expect(bridge.getConnectionState?.()?.connected).toBe(true);
+      expect(bridge.getConnectionState().connected).toBe(true);
     });
 
     it('inbound message not delivered after shutdown', async () => {
@@ -229,9 +229,9 @@ describe('TwilioConnection bridge', () => {
   describe('getConnectionState()', () => {
     it('returns disconnected state before connect', () => {
       const { bridge } = makeBridge();
-      const state = bridge.getConnectionState?.();
-      expect(state?.connected).toBe(false);
-      expect(state?.state).toBe('disconnected');
+      const state = bridge.getConnectionState();
+      expect(state.connected).toBe(false);
+      expect(state.state).toBe('disconnected');
     });
 
     it('returns connected state after connect', async () => {
@@ -239,9 +239,9 @@ describe('TwilioConnection bridge', () => {
       const { bridge } = makeBridge();
       await bridge.connect();
 
-      const state = bridge.getConnectionState?.();
-      expect(state?.connected).toBe(true);
-      expect(state?.state).toBe('connected');
+      const state = bridge.getConnectionState();
+      expect(state.connected).toBe(true);
+      expect(state.state).toBe('connected');
     });
   });
 

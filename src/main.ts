@@ -10,6 +10,7 @@ import { processHistoryBatch, type HistoryInput } from './core/history-sync.ts';
 import { createConnection } from './transport/factory.ts';
 import { classifyStreamedProviderFailure } from './runtimes/agent/failure-taxonomy.ts';
 import type { RuntimeConnection } from './transport/runtime-connection.ts';
+import { isFullyConnected } from './transport/runtime-connection.ts';
 import { ChatRuntime } from './runtimes/chat/runtime.ts';
 import { AgentRuntime } from './runtimes/agent/runtime.ts';
 import { consumeIntentionalRestartMarker } from './runtimes/agent/self-restart.ts';
@@ -1124,9 +1125,7 @@ async function start(): Promise<void> {
         const fireWhenStable = (): void => {
           // "Back online" must be TRUE at send time: an instance still
           // reconnecting re-arms the timer instead of announcing recovery.
-          // A transport without the snapshot accessor fails open to connected.
-          const connected = connectionManager.getConnectionState?.().connected ?? true;
-          if (!connected) {
+          if (!isFullyConnected(connectionManager.getConnectionState())) {
             setTimeout(fireWhenStable, stabilityMs);
             return;
           }

@@ -12,6 +12,12 @@ import type { PresenceCache } from './presence-cache.ts';
 import type { WhatsAppSocket, ConnectionStateSnapshot } from './connection.ts';
 import type { OutboundBannerClassifier } from './outbound-content-egress.ts';
 
+export function isFullyConnected(
+  snapshot: Pick<ConnectionStateSnapshot, 'connected' | 'state'>,
+): boolean {
+  return snapshot.connected === true && snapshot.state === 'connected';
+}
+
 /**
  * Minimal runtime connection surface consumed by main.ts and its dependents.
  * Implemented by ConnectionManager (Baileys) and TwilioConnection (SMS bridge).
@@ -29,8 +35,8 @@ export interface RuntimeConnection extends EventEmitter, Messenger {
   readonly presenceCache: PresenceCache;
   /** Underlying socket — null for non-Baileys transports. Callers must null-check. */
   getSocket(): WhatsAppSocket | null;
-  /** Returns the current connection state snapshot. Optional — health falls back to botJid. */
-  getConnectionState?(): ConnectionStateSnapshot;
+  /** Returns the current bounded connection state snapshot. */
+  getConnectionState(): ConnectionStateSnapshot;
   /** Inject the outbound identity store + guard mode. Wired post-construction in main.ts. */
   setIdentityStore(store: IdentityStore, mode: GuardMode): void;
   /**

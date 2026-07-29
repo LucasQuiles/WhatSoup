@@ -97,7 +97,7 @@ class FakeConnection extends EventEmitter {
     size: 0,
   };
   presenceCache = {};
-  getConnectionState = vi.fn(() => ({ connected: true }));
+  getConnectionState = vi.fn(() => ({ connected: true, state: 'connected' }));
   connect = vi.fn(async () => {});
   shutdown = vi.fn();
   sendRaw = vi.fn(async () => ({ waMessageId: 'raw-1' }));
@@ -1349,18 +1349,18 @@ describe('main.ts — uncovered helpers and signal paths', () => {
       expect(h.sendTracked).toHaveBeenCalledWith(...backOnlineCall(h));
     });
 
-    it('re-arms instead of announcing while the transport is still reconnecting', async () => {
+    it('re-arms instead of announcing until the transport is fully connected', async () => {
       const h = await importMainWithMocks({
         instanceConfig: sharedAgentInstanceConfig(),
         pendingStartupMessage: null,
         startupNotificationStabilitySeconds: 600,
       });
-      h.connection.getConnectionState.mockReturnValue({ connected: false });
+      h.connection.getConnectionState.mockReturnValue({ connected: true, state: 'reconnecting' });
 
       await vi.advanceTimersByTimeAsync(600_000);
       expect(h.sendTracked).not.toHaveBeenCalledWith(...backOnlineCall(h));
 
-      h.connection.getConnectionState.mockReturnValue({ connected: true });
+      h.connection.getConnectionState.mockReturnValue({ connected: true, state: 'connected' });
       await vi.advanceTimersByTimeAsync(600_000);
       expect(h.sendTracked).toHaveBeenCalledWith(...backOnlineCall(h));
     });
