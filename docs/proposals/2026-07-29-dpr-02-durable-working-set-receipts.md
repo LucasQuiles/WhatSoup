@@ -143,3 +143,71 @@ Roll out in four phases: schema only, shadow receipt writes, read-only compariso
 Promotion requires zero unowned conflicts in canaries, freshness and authorization proof, idempotent hash behavior, orphan-recovery tests, privacy review, and DPR-04 identity compatibility.
 
 Rollback disables new consumption first, then new writes. Existing receipts remain governed by expiry, revoke, delete, and supersession rules; rollback does not silently discard pending debt or reinterpret receipts as completed work.
+
+## Current-main reconciliation — 2026-07-29
+
+This amendment supersedes current-system instructions pinned to `c9759467d`.
+Current main is `5398982e610bb948d671181a04856590c9f3f9e5`.
+
+**Readiness:** `BLOCKED PRE-CODE`; hard-blocked on the DPR-04 obligation/edge
+decision.
+
+### Retained current owners
+
+- `src/runtimes/agent/handoff-artifact.ts::upsertHandoffArtifact` owns the
+  current conversation handoff projection.
+- `src/core/background-work-store.ts` owns durable work registration, leases,
+  orphan sweeping, results, and result delivery.
+- Current turn/session recovery and delivery dedupe retain their identities.
+- Current startup notification aggregation owns startup/resume notice behavior;
+  this feature must not create another startup notification channel.
+
+### Exact gap
+
+No current-main hit was found for `working_set_receipt`, `work_obligation`, or
+`obligation_id`. The user-visible obligation identity and its relationship to
+current work/result/handoff records remain undecided.
+
+### Superseded instructions
+
+Any definite instruction to create `work_obligations`, use
+`work_obligations.obligation_id`, or add a receipt table is blocked. DPR-04 must
+first decide:
+
+- the canonical obligation creation point;
+- split/merge/supersession/partial-completion semantics;
+- whether existing foreign keys and projections are sufficient;
+- direct-observer and reconciliation ownership.
+
+The handoff artifact remains a projection; it cannot become a second canonical
+working-state store.
+
+### Owner decisions
+
+- canonical obligation identity and DPR-04 dependency;
+- adapter/projection versus new receipt store;
+- locator source allowlist and validation contract;
+- hash canonicalization/versioning;
+- sensitivity, optional content caching, expiry, and retention;
+- lease/orphan/checkpoint rules;
+- safe recompute versus non-replayable work;
+- resume/revoke/cancel/supersede authority.
+
+### First implementation-plan gate
+
+First RED binding:
+
+- File: `tests/core/working-set-receipt.test.ts`
+- Test: `refuses resume when the receipt hash does not match the current obligation input`
+- Command: `npm test -- tests/core/working-set-receipt.test.ts -t "refuses resume when the receipt hash does not match the current obligation input" --pool=forks`
+- Expected RED reason: the canonical obligation identity and receipt adapter
+  do not exist before the DPR-04 decision.
+
+Name RED tests in `tests/runtimes/agent/handoff-artifact.test.ts`,
+`tests/core/background-work-store.test.ts`, and recovery/durability suites.
+Cover reset, crash boundaries, stale locator, hash mismatch, duplicate
+checkpoint, orphan claim, supersession, unauthorized resume, privacy canaries,
+and feature-off rollback.
+
+The PR must remain draft; #2535 and other adjacent implementation issues are
+non-closing references.
