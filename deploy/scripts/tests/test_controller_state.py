@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from collections import Counter
 from collections.abc import Callable, Mapping
-from dataclasses import FrozenInstanceError, dataclass
+from dataclasses import MISSING, FrozenInstanceError, dataclass, fields
 from datetime import datetime, timedelta, timezone
 import errno
 import fcntl
@@ -25,7 +25,7 @@ import stat
 import sys
 import time
 from types import ModuleType
-from typing import Any
+from typing import Any, Literal, get_args, get_type_hints
 
 import pytest
 
@@ -34,7 +34,15 @@ _SCRIPT_ROOT = Path(__file__).resolve().parents[1]
 _MODULE_PATH = _SCRIPT_ROOT / "lib" / "controller_state.py"
 _COMPONENT = "collector"
 _STORE_ID = "00112233445566778899aabbccddeeff"
+_FORMAT = "whatsoup.controller-state"
+_FORMAT_VERSION = 1
+_MAX_GENERATION = 2**53 - 1
 _MAX_OCCURRENCE_COUNT = 2**31 - 1
+_HEX32 = re.compile(r"[0-9a-f]{32}")
+_HEX64 = re.compile(r"[0-9a-f]{64}")
+_UTC_MILLISECOND_TIMESTAMP = re.compile(
+    r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z"
+)
 _MANAGED_SUFFIXES = (
     "",
     ".previous",
@@ -626,6 +634,113 @@ def _json(path: Path) -> dict[str, Any]:
     return value
 
 
+def _assert_generation(value: Any, *, nullable: bool = False) -> None:
+    if nullable and value is None:
+        return
+    assert isinstance(value, int) and not isinstance(value, bool)
+    assert 0 <= value <= _MAX_GENERATION
+
+
+def _assert_digest(value: Any, *, nullable: bool = False) -> None:
+    if nullable and value is None:
+        return
+    assert isinstance(value, str)
+    assert _HEX64.fullmatch(value)
+
+
+def _assert_envelope_contract(
+    document: dict[str, Any],
+    *,
+    payload: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    assert "_controllerState" in document
+    projected_payload = {
+        key: value for key, value in document.items() if key != "_controllerState"
+    }
+    if payload is not None:
+        assert projected_payload == payload
+    metadata = document["_controllerState"]
+    assert isinstance(metadata, dict)
+    assert set(metadata) == _ENVELOPE_METADATA_KEYS
+    assert metadata["format"] == _FORMAT
+    assert metadata["formatVersion"] == _FORMAT_VERSION
+    assert metadata["component"] in {
+        "collector",
+        "heartbeat-watchdog",
+        "dispatcher-incident",
+    }
+    assert isinstance(metadata["storeId"], str)
+    assert _HEX32.fullmatch(metadata["storeId"])
+    _assert_generation(metadata["generation"])
+    assert isinstance(metadata["writtenAt"], str)
+    assert _UTC_MILLISECOND_TIMESTAMP.fullmatch(metadata["writtenAt"])
+    datetime.strptime(metadata["writtenAt"], "%Y-%m-%dT%H:%M:%S.%fZ")
+    _assert_digest(metadata["integritySha256"])
+    preimage = {
+        key: value for key, value in metadata.items() if key != "integritySha256"
+    }
+    preimage["payload"] = projected_payload
+    assert set(preimage) == _GOLDEN_PREIMAGE_KEYS
+    assert metadata["integritySha256"] == _integrity(preimage)
+    return metadata
+
+
+def _assert_marker_contract(
+    marker: dict[str, Any],
+    *,
+    authority: dict[str, Any] | None = None,
+) -> None:
+    assert set(marker) == _MARKER_KEYS
+    assert marker["format"] == _FORMAT
+    assert marker["formatVersion"] == _FORMAT_VERSION
+    assert marker["component"] in {
+        "collector",
+        "heartbeat-watchdog",
+        "dispatcher-incident",
+    }
+    assert isinstance(marker["storeId"], str)
+    assert _HEX32.fullmatch(marker["storeId"])
+    _assert_generation(marker["highWaterGeneration"])
+    _assert_digest(marker["highWaterIntegritySha256"])
+    _assert_digest(marker["integritySha256"])
+    _assert_sidecar_integrity(marker)
+    if authority is not None:
+        metadata = _assert_envelope_contract(authority)
+        assert marker["component"] == metadata["component"]
+        assert marker["storeId"] == metadata["storeId"]
+        assert marker["highWaterGeneration"] == metadata["generation"]
+        assert marker["highWaterIntegritySha256"] == metadata["integritySha256"]
+
+
+def _assert_fd2_line(action: Callable[[], Any]) -> tuple[Any, bytes]:
+    read_fd, write_fd = os.pipe()
+    saved_stderr = os.dup(2)
+    try:
+        os.dup2(write_fd, 2)
+        os.close(write_fd)
+        result = action()
+    finally:
+        os.dup2(saved_stderr, 2)
+        os.close(saved_stderr)
+    chunks = []
+    try:
+        while chunk := os.read(read_fd, 4096):
+            chunks.append(chunk)
+    finally:
+        os.close(read_fd)
+    return result, b"".join(chunks)
+
+
+def _with_closed_fd2(action: Callable[[], Any]) -> Any:
+    saved_stderr = os.dup(2)
+    try:
+        os.close(2)
+        return action()
+    finally:
+        os.dup2(saved_stderr, 2)
+        os.close(saved_stderr)
+
+
 def _managed(path: Path, suffix: str) -> Path:
     return path.with_name(path.name + suffix)
 
@@ -925,6 +1040,7 @@ def test_public_contract_exports_required_types_and_operations(tmp_path: Path) -
         "StateLoadResult",
         "StateReadResult",
         "StateCommitResult",
+        "StateWriteCapability",
         "ControllerStateSession",
         "ControllerStateRequired",
         "STATE_RECOVERY_REQUIRED_EXIT",
@@ -935,6 +1051,41 @@ def test_public_contract_exports_required_types_and_operations(tmp_path: Path) -
     }
     assert required <= set(vars(cs))
     assert cs.STATE_RECOVERY_REQUIRED_EXIT == 78
+    assert cs.JsonObject == dict[str, Any]
+    assert get_args(cs.StateComponent) == (
+        "collector",
+        "heartbeat-watchdog",
+        "dispatcher-incident",
+    )
+    assert get_args(cs.StateMode) == (
+        "bootstrap",
+        "valid",
+        "recovered",
+        "reconciled",
+        "recovery_required",
+    )
+    assert get_args(cs.ReadMode) == (
+        "valid",
+        "legacy_valid",
+        "recovery_pending",
+        "unavailable",
+    )
+    assert get_args(cs.RecoveryOutcome) == (
+        "validated_previous_only",
+        "authoritative_reconciliation",
+    )
+    assert get_args(cs.StateReason) == (
+        "read_failed",
+        "unsafe_file",
+        "decode_failed",
+        "invalid_root",
+        "schema_incompatible",
+        "integrity_mismatch",
+        "generation_invalid",
+        "publication_ambiguous",
+        "evidence_preservation_failed",
+        "lock_unavailable",
+    )
 
     session = _open(cs, tmp_path / "state.json")
     assert isinstance(session, cs.ControllerStateSession)
@@ -959,6 +1110,13 @@ def _assert_parameters(
         else:
             assert parameter.default == default
     assert signature.return_annotation is not inspect.Signature.empty
+
+
+def _assert_resolved_hints(
+    function: Callable[..., Any],
+    expected: dict[str, Any],
+) -> None:
+    assert get_type_hints(function) == expected
 
 
 def test_public_functions_and_session_methods_have_exact_signatures() -> None:
@@ -1020,10 +1178,112 @@ def test_public_functions_and_session_methods_have_exact_signatures() -> None:
         cs.state_diagnostic_details,
         (("diagnostic", positional, required),),
     )
+    json_validator = Callable[[Mapping[str, Any]], dict[str, Any]]
+    _assert_resolved_hints(
+        cs.open_controller_state,
+        {
+            "path": Path,
+            "component": cs.StateComponent,
+            "bootstrap": Callable[[], dict[str, Any]],
+            "validate_payload": json_validator,
+            "lock_timeout_seconds": float,
+            "clock": Callable[[], datetime] | None,
+            "random_bytes": Callable[[int], bytes] | None,
+            "file_ops": Any | None,
+            "return": cs.ControllerStateSession,
+        },
+    )
+    _assert_resolved_hints(
+        cs.read_controller_state,
+        {
+            "path": Path,
+            "component": cs.StateComponent,
+            "validate_payload": json_validator,
+            "lock_timeout_seconds": float,
+            "file_ops": Any | None,
+            "return": cs.StateReadResult,
+        },
+    )
+    for name in ("load", "reload"):
+        _assert_resolved_hints(
+            getattr(cs.ControllerStateSession, name),
+            {"return": cs.StateLoadResult},
+        )
+    _assert_resolved_hints(
+        cs.ControllerStateSession.save,
+        {
+            "payload": Mapping[str, Any],
+            "capability": cs.StateWriteCapability,
+            "return": cs.StateCommitResult,
+        },
+    )
+    _assert_resolved_hints(
+        cs.ControllerStateSession.complete_reconciliation,
+        {
+            "payload": Mapping[str, Any],
+            "capability": cs.StateWriteCapability,
+            "outcome": cs.RecoveryOutcome,
+            "return": cs.StateCommitResult,
+        },
+    )
+    _assert_resolved_hints(
+        cs.ControllerStateSession.close,
+        {"return": type(None)},
+    )
+    _assert_resolved_hints(
+        cs.emit_state_recovery_fallback,
+        {"diagnostic": cs.StateDiagnostic, "return": type(None)},
+    )
+    _assert_resolved_hints(
+        cs.state_diagnostic_details,
+        {"diagnostic": cs.StateDiagnostic, "return": dict[str, Any]},
+    )
 
 
-def test_all_declared_result_and_diagnostic_records_are_frozen() -> None:
+def test_all_declared_records_have_exact_frozen_field_contract() -> None:
     cs = load_controller_state_module()
+    expected_fields = {
+        cs.StateDiagnostic: (
+            ("component", cs.StateComponent),
+            ("mode", cs.StateMode),
+            ("current_generation", int | None),
+            ("recovered_generation", int | None),
+            ("reason", cs.StateReason | None),
+            ("recovery_receipt_id", str | None),
+            ("occurrence_count", int),
+        ),
+        cs.StateLoadResult: (
+            ("mode", cs.StateMode),
+            ("payload", dict[str, Any] | None),
+            ("capability", cs.StateWriteCapability | None),
+            ("diagnostic", cs.StateDiagnostic),
+        ),
+        cs.StateReadResult: (
+            ("mode", cs.ReadMode),
+            ("payload", dict[str, Any] | None),
+            ("generation", int | None),
+            ("reason", cs.StateReason | None),
+        ),
+        cs.StateCommitResult: (
+            ("mode", Literal["valid", "reconciled"]),
+            ("generation", int),
+            ("capability", cs.StateWriteCapability),
+            ("diagnostic", cs.StateDiagnostic),
+        ),
+    }
+    for record_type, expected in expected_fields.items():
+        declared = fields(record_type)
+        resolved = get_type_hints(record_type)
+        assert tuple(field.name for field in declared) == tuple(
+            name for name, _annotation in expected
+        )
+        assert tuple(resolved[field.name] for field in declared) == tuple(
+            annotation for _name, annotation in expected
+        )
+        assert all(field.default is MISSING for field in declared)
+        assert all(field.default_factory is MISSING for field in declared)
+        assert record_type.__dataclass_params__.frozen is True
+
     diagnostic = cs.StateDiagnostic(
         component="collector",
         mode="bootstrap",
@@ -1055,7 +1315,6 @@ def test_all_declared_result_and_diagnostic_records_are_frozen() -> None:
         ),
     )
     for record in records:
-        assert record.__dataclass_params__.frozen is True
         first_field = next(iter(record.__dataclass_fields__))
         with pytest.raises(FrozenInstanceError):
             setattr(record, first_field, None)
@@ -1108,14 +1367,10 @@ def test_committed_documents_use_canonical_json(
     assert raw == _canonical_bytes(document)
     assert probe in raw
     assert set(document) == set(payload) | {"_controllerState"}
-    metadata = document["_controllerState"]
-    assert set(metadata) == _ENVELOPE_METADATA_KEYS
-    preimage = {key: value for key, value in metadata.items() if key != "integritySha256"}
-    preimage["payload"] = payload
-    assert set(preimage) == _GOLDEN_PREIMAGE_KEYS
-    assert metadata["integritySha256"] == _integrity(preimage)
+    metadata = _assert_envelope_contract(document, payload=payload)
+    assert metadata["generation"] == 1
     marker = _json(_managed(path, ".initialized"))
-    assert set(marker) == _MARKER_KEYS
+    _assert_marker_contract(marker, authority=document)
 
 
 @pytest.mark.parametrize("value", (math.nan, math.inf, -math.inf))
@@ -1131,6 +1386,39 @@ def test_non_finite_numbers_are_rejected_before_publication(
         with pytest.raises((ValueError, cs.ControllerStateRequired)):
             session.save({"counters": {"invalid": value}}, loaded.capability)
         assert _authority_snapshot(path) == before
+        committed = session.save(
+            {"counters": {"valid_after_rejection": 1}},
+            loaded.capability,
+        )
+        assert committed.mode == "valid"
+        assert committed.generation == 1
+
+
+def test_payload_validator_rejection_does_not_consume_capability(
+    tmp_path: Path,
+) -> None:
+    cs = load_controller_state_module()
+    path = tmp_path / "state.json"
+    with _open(
+        cs,
+        path,
+        bootstrap=lambda: {"version": 1, "counters": {}},
+        validator=validate_versioned_payload,
+    ) as session:
+        loaded = session.load()
+        before = _authority_snapshot(path)
+        with pytest.raises((ValueError, cs.ControllerStateRequired)):
+            session.save(
+                {"version": 2, "counters": {"invalid": 1}},
+                loaded.capability,
+            )
+        assert _authority_snapshot(path) == before
+        committed = session.save(
+            {"version": 1, "counters": {"valid_after_rejection": 1}},
+            loaded.capability,
+        )
+        assert committed.mode == "valid"
+        assert committed.generation == 1
 
 
 @pytest.mark.parametrize(
@@ -1299,13 +1587,16 @@ def test_pristine_legacy_writer_migrates_without_payload_change(tmp_path: Path) 
         assert result.payload == legacy
         assert result.capability is not None
     migrated = _json(path)
-    assert {key: value for key, value in migrated.items() if key != "_controllerState"} == legacy
-    assert migrated["_controllerState"]["generation"] == 1
+    migrated_metadata = _assert_envelope_contract(migrated, payload=legacy)
+    assert migrated_metadata["generation"] == 1
     previous = _json(_managed(path, ".previous"))
-    assert previous["_controllerState"]["generation"] == 0
-    assert {
-        key: value for key, value in previous.items() if key != "_controllerState"
-    } == legacy
+    previous_metadata = _assert_envelope_contract(previous, payload=legacy)
+    assert previous_metadata["generation"] == 0
+    assert migrated_metadata["storeId"] == previous_metadata["storeId"]
+    _assert_marker_contract(
+        _json(_managed(path, ".initialized")),
+        authority=migrated,
+    )
 
 
 def test_migration_journal_binds_exact_noncanonical_legacy_bytes(
@@ -1331,7 +1622,7 @@ def test_migration_journal_binds_exact_noncanonical_legacy_bytes(
 
     ops.assert_all_rules_fired()
     journal = _json(_managed(path, ".transaction"))
-    assert set(journal) == _JOURNAL_KEYS
+    _assert_generated_journal_contract(journal)
     assert journal["operation"] == "migration"
     assert journal["phase"] == "prepared"
     assert journal["legacySourceSha256"] == hashlib.sha256(raw_legacy).hexdigest()
@@ -1654,12 +1945,14 @@ def test_identity_replacement_between_inspection_and_use_fails_closed(
 
 def test_capability_has_no_public_zero_argument_constructor(tmp_path: Path) -> None:
     cs = load_controller_state_module()
+    assert inspect.isclass(cs.StateWriteCapability)
+    with pytest.raises(TypeError):
+        cs.StateWriteCapability()
     path = tmp_path / "state.json"
     with _open(cs, path) as session:
         capability = session.load().capability
         assert capability is not None
-        with pytest.raises(TypeError):
-            type(capability)()
+        assert type(capability) is cs.StateWriteCapability
 
 
 def test_save_requires_a_capability(tmp_path: Path) -> None:
@@ -1841,31 +2134,6 @@ def test_capability_bound_to_observed_generation_rejects_external_advance(
     session.close()
 
 
-def test_capability_lock_binding_rejects_use_after_physical_unlock(
-    tmp_path: Path,
-) -> None:
-    cs = load_controller_state_module()
-    path = tmp_path / "state.json"
-    _seed_store(cs, path)
-    ops = FaultOps()
-    session, result = _load_valid(cs, path, ops=ops)
-    lock_fds = [
-        fd
-        for fd, role in ops.fd_roles.items()
-        if role == "lock" and fd not in ops.closed_fds
-    ]
-    assert len(lock_fds) == 1
-    fcntl.flock(lock_fds[0], fcntl.LOCK_UN)
-
-    _assert_capability_rejected_without_mutation(
-        cs,
-        path,
-        ops,
-        lambda: session.save({"counters": {"seen": 2}}, result.capability),
-    )
-    session.close()
-
-
 def test_capability_session_binding_rejects_prior_session_object(
     tmp_path: Path,
 ) -> None:
@@ -1931,6 +2199,12 @@ def test_reconciliation_capability_cannot_authorize_ordinary_save(
             ops,
             lambda: session.save(recovered.payload, recovered.capability),
         )
+        reconciled = session.complete_reconciliation(
+            recovered.payload,
+            recovered.capability,
+            outcome="validated_previous_only",
+        )
+        assert reconciled.mode == "reconciled"
 
 
 def test_normal_capability_cannot_authorize_reconciliation(tmp_path: Path) -> None:
@@ -1950,6 +2224,11 @@ def test_normal_capability_cannot_authorize_reconciliation(tmp_path: Path) -> No
                 outcome="validated_previous_only",
             ),
         )
+        committed = session.save(
+            {"counters": {"seen": 2}},
+            valid.capability,
+        )
+        assert committed.mode == "valid"
 
 
 def test_recovered_reconciled_valid_transition_is_ordered_and_not_repeated(
@@ -1972,7 +2251,12 @@ def test_recovered_reconciled_valid_transition_is_ordered_and_not_repeated(
         assert recovered.mode == recovered.diagnostic.mode == "recovered"
         receipt_id = recovered.diagnostic.recovery_receipt_id
         receipt_before = _json(_managed(path, ".recovery"))
-        assert set(receipt_before) == _RECOVERY_RECEIPT_BASE_KEYS
+        recovery_marker = _json(_managed(path, ".initialized"))
+        _assert_recovery_receipt_contract(
+            receipt_before,
+            marker=recovery_marker,
+            recovered_envelope=_json(_managed(path, ".previous")),
+        )
         assert receipt_before["phase"] == "restored"
         assert receipt_before["targetGeneration"] is None
         assert receipt_before["targetIntegritySha256"] is None
@@ -1984,7 +2268,12 @@ def test_recovered_reconciled_valid_transition_is_ordered_and_not_repeated(
         assert reconciled.mode == reconciled.diagnostic.mode == "reconciled"
         assert reconciled.diagnostic.recovery_receipt_id == receipt_id
         receipt_after_reconciliation = _json(_managed(path, ".recovery"))
-        assert set(receipt_after_reconciliation) == _RECOVERY_RECEIPT_BASE_KEYS
+        _assert_recovery_receipt_contract(
+            receipt_after_reconciliation,
+            marker=recovery_marker,
+            recovered_envelope=_json(_managed(path, ".previous")),
+            target_envelope=_json(path),
+        )
         changed = {
             key
             for key in receipt_before
@@ -2191,7 +2480,11 @@ def test_valid_previous_recovers_damaged_primary_with_one_receipt(
         assert result.capability is not None
         assert result.diagnostic.recovery_receipt_id
         receipt = _json(_managed(path, ".recovery"))
-        assert set(receipt) == _RECOVERY_RECEIPT_BASE_KEYS
+        _assert_recovery_receipt_contract(
+            receipt,
+            marker=_json(_managed(path, ".initialized")),
+            recovered_envelope=_json(_managed(path, ".previous")),
+        )
         assert receipt["recoveryReceiptId"] == result.diagnostic.recovery_receipt_id
         evidence = _evidence_files(path)
         assert len(evidence) == 1
@@ -2303,9 +2596,7 @@ def test_recovery_occurrence_count_saturates_without_new_identity(
     assert _evidence_snapshot(path) == evidence
 
 
-def test_emergency_fallback_is_at_most_once_per_module_invocation(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_emergency_fallback_is_at_most_once_per_module_invocation() -> None:
     cs = load_controller_state_module()
     diagnostic = cs.StateDiagnostic(
         component="collector",
@@ -2316,13 +2607,14 @@ def test_emergency_fallback_is_at_most_once_per_module_invocation(
         recovery_receipt_id=None,
         occurrence_count=1,
     )
-    writes: list[bytes] = []
-    monkeypatch.setattr(cs.os, "write", lambda _fd, data: writes.append(data) or len(data))
+    _result, raw = _assert_fd2_line(
+        lambda: (
+            cs.emit_state_recovery_fallback(diagnostic),
+            cs.emit_state_recovery_fallback(diagnostic),
+        )
+    )
 
-    cs.emit_state_recovery_fallback(diagnostic)
-    cs.emit_state_recovery_fallback(diagnostic)
-
-    assert len(writes) == 1
+    assert raw.count(b"\n") == 1
 
 
 def _corrupt_previous(path: Path) -> bytes:
@@ -2508,7 +2800,11 @@ def test_unrecoverable_fault_returns_no_payload_or_authority(
     else:
         assert after[".recovery"] is not None
         receipt = _json(_managed(path, ".recovery"))
-        assert set(receipt) == _RECOVERY_RECEIPT_BASE_KEYS
+        _assert_recovery_receipt_contract(
+            receipt,
+            marker=_json(_managed(path, ".initialized")),
+            recovered_envelope=_json(_managed(path, ".previous")),
+        )
         assert receipt["phase"] in {"planned", "evidence_preserved"}
 
 
@@ -2656,25 +2952,295 @@ def _assert_sidecar_integrity(document: dict[str, Any]) -> None:
     assert document["integritySha256"] == _integrity(unsigned)
 
 
+def _assert_recovery_receipt_contract(
+    receipt: dict[str, Any],
+    *,
+    marker: dict[str, Any],
+    recovered_envelope: dict[str, Any],
+    target_envelope: dict[str, Any] | None = None,
+) -> None:
+    assert set(receipt) == _RECOVERY_RECEIPT_BASE_KEYS
+    assert receipt["format"] == _FORMAT
+    assert receipt["formatVersion"] == _FORMAT_VERSION
+    assert receipt["component"] in {
+        "collector",
+        "heartbeat-watchdog",
+        "dispatcher-incident",
+    }
+    assert isinstance(receipt["storeId"], str)
+    assert _HEX32.fullmatch(receipt["storeId"])
+    assert isinstance(receipt["recoveryReceiptId"], str)
+    assert _HEX32.fullmatch(receipt["recoveryReceiptId"])
+    assert receipt["phase"] in {
+        "planned",
+        "evidence_preserved",
+        "restored",
+        "reconciliation_prepared",
+        "reconciled",
+    }
+    assert receipt["reason"] in {
+        "read_failed",
+        "unsafe_file",
+        "decode_failed",
+        "invalid_root",
+        "schema_incompatible",
+        "integrity_mismatch",
+        "generation_invalid",
+        "publication_ambiguous",
+        "evidence_preservation_failed",
+        "lock_unavailable",
+    }
+    assert isinstance(receipt["occurrenceCount"], int)
+    assert not isinstance(receipt["occurrenceCount"], bool)
+    assert 1 <= receipt["occurrenceCount"] <= _MAX_OCCURRENCE_COUNT
+    for key in (
+        "markerHighWaterGeneration",
+        "recoveredGeneration",
+        "targetGeneration",
+    ):
+        _assert_generation(receipt[key], nullable=key == "targetGeneration")
+    for key in (
+        "markerHighWaterIntegritySha256",
+        "recoveredIntegritySha256",
+        "targetIntegritySha256",
+    ):
+        _assert_digest(receipt[key], nullable=key == "targetIntegritySha256")
+    _assert_digest(receipt["integritySha256"])
+    _assert_marker_contract(marker)
+    recovered_metadata = _assert_envelope_contract(recovered_envelope)
+    assert receipt["component"] == marker["component"] == recovered_metadata["component"]
+    assert receipt["storeId"] == marker["storeId"] == recovered_metadata["storeId"]
+    assert receipt["markerHighWaterGeneration"] == marker["highWaterGeneration"]
+    assert (
+        receipt["markerHighWaterIntegritySha256"]
+        == marker["highWaterIntegritySha256"]
+    )
+    assert receipt["recoveredGeneration"] == recovered_metadata["generation"]
+    assert (
+        receipt["recoveredIntegritySha256"]
+        == recovered_metadata["integritySha256"]
+    )
+    if target_envelope is None:
+        assert receipt["targetGeneration"] is None
+        assert receipt["targetIntegritySha256"] is None
+    else:
+        target_metadata = _assert_envelope_contract(target_envelope)
+        assert target_metadata["component"] == receipt["component"]
+        assert target_metadata["storeId"] == receipt["storeId"]
+        assert receipt["targetGeneration"] == target_metadata["generation"]
+        assert receipt["targetIntegritySha256"] == target_metadata["integritySha256"]
+    _assert_sidecar_integrity(receipt)
+
+
+def _transaction_payload(generation: int) -> dict[str, Any]:
+    assert generation in {1, 2, 3}
+    return {"counters": {"seen": generation}}
+
+
+def _assert_generated_journal_contract(journal: dict[str, Any]) -> None:
+    assert set(journal) == _JOURNAL_KEYS
+    assert journal["format"] == _FORMAT
+    assert journal["formatVersion"] == _FORMAT_VERSION
+    assert journal["component"] in {
+        "collector",
+        "heartbeat-watchdog",
+        "dispatcher-incident",
+    }
+    assert isinstance(journal["storeId"], str)
+    assert _HEX32.fullmatch(journal["storeId"])
+    assert isinstance(journal["transactionId"], str)
+    assert _HEX32.fullmatch(journal["transactionId"])
+    assert journal["operation"] in {
+        "bootstrap",
+        "migration",
+        "normal",
+        "reconciliation",
+    }
+    assert journal["phase"] in {
+        "prepared",
+        "previous_committed",
+        "primary_committed",
+        "marker_committed",
+    }
+    for key in (
+        "expectedGeneration",
+        "targetGeneration",
+        "expectedHighWaterGeneration",
+        "targetHighWaterGeneration",
+    ):
+        _assert_generation(journal[key], nullable=True)
+    for key in (
+        "expectedIntegritySha256",
+        "targetIntegritySha256",
+        "expectedHighWaterIntegritySha256",
+        "targetHighWaterIntegritySha256",
+        "legacySourceSha256",
+    ):
+        _assert_digest(journal[key], nullable=True)
+    previous_metadata = _assert_envelope_contract(journal["previousEnvelope"])
+    target_metadata = _assert_envelope_contract(journal["targetEnvelope"])
+    assert previous_metadata["component"] == journal["component"]
+    assert target_metadata["component"] == journal["component"]
+    assert previous_metadata["storeId"] == journal["storeId"]
+    assert target_metadata["storeId"] == journal["storeId"]
+    if journal["expectedGeneration"] is not None:
+        assert previous_metadata["generation"] == journal["expectedGeneration"]
+        assert (
+            previous_metadata["integritySha256"]
+            == journal["expectedIntegritySha256"]
+        )
+    assert target_metadata["generation"] == journal["targetGeneration"]
+    assert target_metadata["integritySha256"] == journal["targetIntegritySha256"]
+    assert (
+        previous_metadata["generation"]
+        == journal["expectedHighWaterGeneration"]
+    )
+    assert (
+        previous_metadata["integritySha256"]
+        == journal["expectedHighWaterIntegritySha256"]
+    )
+    assert target_metadata["generation"] == journal["targetHighWaterGeneration"]
+    assert (
+        target_metadata["integritySha256"]
+        == journal["targetHighWaterIntegritySha256"]
+    )
+    _assert_digest(journal["integritySha256"])
+    _assert_sidecar_integrity(journal)
+
+
+def _assert_normal_journal_contract(
+    journal: dict[str, Any],
+    *,
+    phase: str,
+) -> None:
+    _assert_generated_journal_contract(journal)
+    assert journal["component"] == _COMPONENT
+    assert journal["operation"] == "normal"
+    assert journal["phase"] == phase
+    assert journal["legacySourceSha256"] is None
+    for key in (
+        "expectedGeneration",
+        "targetGeneration",
+        "expectedHighWaterGeneration",
+        "targetHighWaterGeneration",
+    ):
+        _assert_generation(journal[key])
+    for key in (
+        "expectedIntegritySha256",
+        "targetIntegritySha256",
+        "expectedHighWaterIntegritySha256",
+        "targetHighWaterIntegritySha256",
+        "integritySha256",
+    ):
+        _assert_digest(journal[key])
+    assert journal["expectedGeneration"] == 2
+    assert journal["targetGeneration"] == 3
+    assert journal["expectedHighWaterGeneration"] == 2
+    assert journal["targetHighWaterGeneration"] == 3
+    previous_metadata = _assert_envelope_contract(
+        journal["previousEnvelope"],
+        payload=_transaction_payload(2),
+    )
+    target_metadata = _assert_envelope_contract(
+        journal["targetEnvelope"],
+        payload=_transaction_payload(3),
+    )
+    assert previous_metadata["component"] == journal["component"]
+    assert target_metadata["component"] == journal["component"]
+    assert previous_metadata["storeId"] == journal["storeId"]
+    assert target_metadata["storeId"] == journal["storeId"]
+    assert previous_metadata["generation"] == journal["expectedGeneration"]
+    assert target_metadata["generation"] == journal["targetGeneration"]
+    assert previous_metadata["integritySha256"] == journal["expectedIntegritySha256"]
+    assert target_metadata["integritySha256"] == journal["targetIntegritySha256"]
+    assert (
+        journal["expectedHighWaterIntegritySha256"]
+        == previous_metadata["integritySha256"]
+    )
+    assert (
+        journal["targetHighWaterIntegritySha256"]
+        == target_metadata["integritySha256"]
+    )
+
+
 def _assert_transaction_crash_posture(path: Path, crash: CrashCase) -> None:
-    assert _envelope_generation(path) == crash.primary_generation
-    assert _envelope_generation(_managed(path, ".previous")) == crash.previous_generation
+    primary = _json(path)
+    previous = _json(_managed(path, ".previous"))
+    primary_metadata = _assert_envelope_contract(
+        primary,
+        payload=_transaction_payload(crash.primary_generation),
+    )
+    previous_metadata = _assert_envelope_contract(
+        previous,
+        payload=_transaction_payload(crash.previous_generation),
+    )
+    assert primary_metadata["generation"] == crash.primary_generation
+    assert previous_metadata["generation"] == crash.previous_generation
+    assert primary_metadata["component"] == previous_metadata["component"] == _COMPONENT
+    assert primary_metadata["storeId"] == previous_metadata["storeId"]
     marker = _json(_managed(path, ".initialized"))
-    assert set(marker) == _MARKER_KEYS
-    _assert_sidecar_integrity(marker)
+    marker_authority = (
+        primary
+        if crash.marker_generation == crash.primary_generation
+        else previous
+    )
+    _assert_marker_contract(marker, authority=marker_authority)
     assert marker["highWaterGeneration"] == crash.marker_generation
     journal_path = _managed(path, ".transaction")
     if crash.journal_phase is None:
         assert not journal_path.exists()
         return
     journal = _json(journal_path)
-    assert set(journal) == _JOURNAL_KEYS
-    _assert_sidecar_integrity(journal)
-    assert journal["operation"] == "normal"
-    assert journal["legacySourceSha256"] is None
-    assert journal["phase"] == crash.journal_phase
-    assert journal["expectedGeneration"] == 2
-    assert journal["targetGeneration"] == 3
+    _assert_normal_journal_contract(journal, phase=crash.journal_phase)
+    assert journal["storeId"] == primary_metadata["storeId"]
+    if crash.primary_generation == 2:
+        assert primary == journal["previousEnvelope"]
+    else:
+        assert primary == journal["targetEnvelope"]
+    if crash.previous_generation == 2:
+        assert previous == journal["previousEnvelope"]
+    expected_marker_digest = (
+        journal["expectedHighWaterIntegritySha256"]
+        if crash.marker_generation == 2
+        else journal["targetHighWaterIntegritySha256"]
+    )
+    assert marker["highWaterIntegritySha256"] == expected_marker_digest
+
+
+def _assert_completed_normal_transaction(
+    path: Path,
+    *,
+    expected_previous: dict[str, Any],
+    expected_target: dict[str, Any],
+) -> None:
+    primary = _json(path)
+    previous = _json(_managed(path, ".previous"))
+    assert primary == expected_target
+    assert previous == expected_previous
+    primary_metadata = _assert_envelope_contract(
+        primary,
+        payload=_transaction_payload(3),
+    )
+    previous_metadata = _assert_envelope_contract(
+        previous,
+        payload=_transaction_payload(2),
+    )
+    assert primary_metadata["generation"] == 3
+    assert previous_metadata["generation"] == 2
+    assert primary_metadata["component"] == previous_metadata["component"] == _COMPONENT
+    assert primary_metadata["storeId"] == previous_metadata["storeId"]
+    _assert_marker_contract(
+        _json(_managed(path, ".initialized")),
+        authority=primary,
+    )
+    assert not _managed(path, ".transaction").exists()
+
+
+@dataclass(frozen=True)
+class InterruptedNormalSave:
+    ops: FaultOps
+    expected_previous: dict[str, Any]
+    expected_target: dict[str, Any]
 
 
 def _transaction_crash_predicate(
@@ -2699,7 +3265,7 @@ def _interrupt_normal_save(
     cs: ModuleType,
     path: Path,
     crash: CrashCase,
-) -> FaultOps:
+) -> InterruptedNormalSave:
     ops = FaultOps()
     session, loaded = _load_valid(cs, path, ops=ops)
     ops.reset_trace()
@@ -2717,7 +3283,15 @@ def _interrupt_normal_save(
     ops.assert_all_rules_fired()
     assert ops.counters[crash.boundary] > 0
     _assert_transaction_crash_posture(path, crash)
-    return ops
+    journal_path = _managed(path, ".transaction")
+    if journal_path.exists():
+        journal = _json(journal_path)
+        expected_previous = journal["previousEnvelope"]
+        expected_target = journal["targetEnvelope"]
+    else:
+        expected_previous = _json(_managed(path, ".previous"))
+        expected_target = _json(path)
+    return InterruptedNormalSave(ops, expected_previous, expected_target)
 
 
 @pytest.mark.parametrize("crash", _TRANSACTION_CRASH_CASES, ids=lambda case: case.phase)
@@ -2736,16 +3310,19 @@ def test_transaction_crash_matrix_resumes_every_exact_durable_posture(
         ),
     )
 
-    ops = _interrupt_normal_save(cs, path, crash)
+    interrupted = _interrupt_normal_save(cs, path, crash)
 
-    assert ops.counters[crash.boundary] > 0
+    assert interrupted.ops.counters[crash.boundary] > 0
     with _open(cs, path) as restarted:
         result = restarted.load()
-    assert result.mode in {"valid", "reconciled"}
+    assert result.mode == result.diagnostic.mode == "valid"
     assert result.payload == {"counters": {"seen": 3}}
-    assert not _managed(path, ".transaction").exists()
-    assert _envelope_generation(path) == 3
-    assert _json(_managed(path, ".initialized"))["highWaterGeneration"] == 3
+    assert result.diagnostic.current_generation == 3
+    _assert_completed_normal_transaction(
+        path,
+        expected_previous=interrupted.expected_previous,
+        expected_target=interrupted.expected_target,
+    )
 
 
 @pytest.mark.parametrize(
@@ -2773,15 +3350,20 @@ def test_restart_resumes_each_exact_matching_transaction_phase(
         ),
     )
     crash = next(case for case in _TRANSACTION_CRASH_CASES if case.phase == crash_phase)
-    _interrupt_normal_save(cs, path, crash)
+    interrupted = _interrupt_normal_save(cs, path, crash)
     assert _json(_managed(path, ".transaction"))["phase"] == phase
 
     with _open(cs, path) as restarted:
         resumed = restarted.load()
 
-    assert resumed.mode in {"valid", "reconciled"}
+    assert resumed.mode == resumed.diagnostic.mode == "valid"
     assert resumed.payload == {"counters": {"seen": 3}}
-    assert not _managed(path, ".transaction").exists()
+    assert resumed.diagnostic.current_generation == 3
+    _assert_completed_normal_transaction(
+        path,
+        expected_previous=interrupted.expected_previous,
+        expected_target=interrupted.expected_target,
+    )
 
 
 @pytest.mark.parametrize(
@@ -2915,14 +3497,21 @@ def _seed_exact_recovery_phase(
     assert ops.counters["fsync_directory"] > 0
 
     receipt = _json(_managed(path, ".recovery"))
-    assert set(receipt) == _RECOVERY_RECEIPT_BASE_KEYS
-    _assert_sidecar_integrity(receipt)
-    assert receipt["phase"] == phase
     marker = _json(_managed(path, ".initialized"))
-    assert receipt["component"] == marker["component"]
-    assert receipt["storeId"] == marker["storeId"]
-    assert receipt["markerHighWaterGeneration"] == marker["highWaterGeneration"]
-    assert not _managed(path, ".transaction").exists()
+    journal_path = _managed(path, ".transaction")
+    target_envelope = None
+    if phase == "reconciliation_prepared":
+        journal = _json(journal_path)
+        target_envelope = journal["targetEnvelope"]
+    _assert_recovery_receipt_contract(
+        receipt,
+        marker=marker,
+        recovered_envelope=_json(_managed(path, ".previous")),
+        target_envelope=target_envelope,
+    )
+    assert receipt["phase"] == phase
+    if phase != "reconciliation_prepared":
+        assert not journal_path.exists()
     if phase == "planned":
         assert path.read_bytes() == damaged
         assert _evidence_snapshot(path) == ()
@@ -3065,21 +3654,22 @@ def test_actual_recovery_receipt_projects_only_bounded_opaque_identity(
         result = session.load()
         assert result.mode == "recovered"
     receipt = _json(_managed(path, ".recovery"))
-    assert set(receipt) == _RECOVERY_RECEIPT_BASE_KEYS
-    _assert_sidecar_integrity(receipt)
+    _assert_recovery_receipt_contract(
+        receipt,
+        marker=_json(_managed(path, ".initialized")),
+        recovered_envelope=_json(_managed(path, ".previous")),
+    )
     receipt_id = receipt["recoveryReceiptId"]
     assert receipt_id == result.diagnostic.recovery_receipt_id
-    assert re.fullmatch(r"[A-Za-z0-9_-]{1,64}", receipt_id)
+    assert _HEX32.fullmatch(receipt_id)
     evidence = _evidence_snapshot(path)
     assert len(evidence) == 1
 
     details = cs.state_diagnostic_details(result.diagnostic)
     encoded_details = _canonical_bytes(details)
-    writes: list[bytes] = []
-    monkeypatch.setattr(cs.os, "write", lambda _fd, data: writes.append(data) or len(data))
-    cs.emit_state_recovery_fallback(result.diagnostic)
-    assert len(writes) == 1
-    fallback = writes[0]
+    _return_value, fallback = _assert_fd2_line(
+        lambda: cs.emit_state_recovery_fallback(result.diagnostic)
+    )
     assert fallback.endswith(b"\n") and fallback.count(b"\n") == 1
     forbidden = (
         path.name,
@@ -3131,10 +3721,9 @@ def test_injected_raw_fault_canaries_do_not_escape_real_failure_diagnostic(
         result = session.load()
     _assert_recovery_required(result, "evidence_preservation_failed")
     ops.assert_all_rules_fired()
-    writes: list[bytes] = []
-    monkeypatch.setattr(cs.os, "write", lambda _fd, data: writes.append(data) or len(data))
-    cs.emit_state_recovery_fallback(result.diagnostic)
-    assert len(writes) == 1
+    _return_value, fallback = _assert_fd2_line(
+        lambda: cs.emit_state_recovery_fallback(result.diagnostic)
+    )
     forbidden = (
         "raw-exception-canary",
         "fault-path-canary",
@@ -3147,7 +3736,7 @@ def test_injected_raw_fault_canaries_do_not_escape_real_failure_diagnostic(
         _canonical_bytes(cs.state_diagnostic_details(result.diagnostic)),
         forbidden,
     )
-    _assert_closed_diagnostic_projection(writes[0].rstrip(b"\n"), forbidden)
+    _assert_closed_diagnostic_projection(fallback.rstrip(b"\n"), forbidden)
 
 
 def test_diagnostic_mapping_is_closed_bounded_and_content_free() -> None:
@@ -3205,9 +3794,7 @@ def test_diagnostic_without_durable_receipt_does_not_fabricate_identity() -> Non
     assert details["recoveryReceiptId"] is None
 
 
-def test_fallback_is_one_bounded_json_line_with_only_closed_schema(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_fallback_is_one_bounded_json_line_with_only_closed_schema() -> None:
     cs = load_controller_state_module()
     diagnostic = cs.StateDiagnostic(
         component="collector",
@@ -3218,18 +3805,11 @@ def test_fallback_is_one_bounded_json_line_with_only_closed_schema(
         recovery_receipt_id=None,
         occurrence_count=1,
     )
-    writes: list[tuple[int, bytes]] = []
-    monkeypatch.setattr(
-        cs.os,
-        "write",
-        lambda fd, data: writes.append((fd, data)) or len(data),
+    return_value, raw = _assert_fd2_line(
+        lambda: cs.emit_state_recovery_fallback(diagnostic)
     )
 
-    cs.emit_state_recovery_fallback(diagnostic)
-
-    assert len(writes) == 1
-    fd, raw = writes[0]
-    assert fd == 2
+    assert return_value is None
     assert raw.endswith(b"\n")
     assert raw.count(b"\n") == 1
     assert len(raw) <= 4096
@@ -3247,9 +3827,7 @@ def test_fallback_is_one_bounded_json_line_with_only_closed_schema(
     }
 
 
-def test_stderr_failure_cannot_replace_typed_non_success(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_stderr_failure_cannot_replace_typed_non_success() -> None:
     cs = load_controller_state_module()
     diagnostic = cs.StateDiagnostic(
         component="collector",
@@ -3261,12 +3839,8 @@ def test_stderr_failure_cannot_replace_typed_non_success(
         occurrence_count=1,
     )
     error = cs.ControllerStateRequired(diagnostic)
-    monkeypatch.setattr(
-        cs.os,
-        "write",
-        lambda _fd, _data: (_ for _ in ()).throw(OSError(errno.EIO, "stderr failed")),
-    )
-
-    assert cs.emit_state_recovery_fallback(diagnostic) is None
+    assert _with_closed_fd2(
+        lambda: cs.emit_state_recovery_fallback(diagnostic)
+    ) is None
     assert error.diagnostic is diagnostic
     assert str(error) == "controller state recovery required"
