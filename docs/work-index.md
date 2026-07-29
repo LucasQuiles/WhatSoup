@@ -18,15 +18,15 @@ The **Inconsistencies** section lists missing or stale index entries compared wi
 scoped markdown files currently on disk.
 
 **Repo:** `WhatSoup`
-**Total entries:** 96
+**Total entries:** 90
 
 ## Totals
 
 | Dimension | Breakdown |
 |---|---|
-| Kind | handoff=8, plan=45, review=4, spec=38, state=1 |
-| Status | active=27, closed=4, completed=33, deferred=7, pending=15, unknown=10 |
-| Status source | body-marker=89, fallback=6, state-md-status=1 |
+| Kind | handoff=8, plan=45, review=4, spec=32, state=1 |
+| Status | active=21, closed=4, completed=33, deferred=7, pending=15, unknown=10 |
+| Status source | body-marker=83, fallback=6, state-md-status=1 |
 
 ## Inconsistencies
 
@@ -34,7 +34,7 @@ scoped markdown files currently on disk.
 
 ## Synthesis
 
-### Active (27)
+### Active (21)
 
 | Path | Kind | Topic | Status source |
 |------|------|-------|---------------|
@@ -57,13 +57,7 @@ scoped markdown files currently on disk.
 | `docs/superpowers/specs/kill-session-transactional-cancellation/design.md` | spec | design | body-marker |
 | `docs/superpowers/specs/kill-session-transactional-cancellation/requirements.md` | spec | requirements | body-marker |
 | `docs/superpowers/specs/provider-event-lifecycle/design.md` | spec | design | body-marker |
-| `docs/superpowers/specs/provider-event-lifecycle/design.md` | spec | design | body-marker |
-| `docs/superpowers/specs/provider-event-lifecycle/design.md` | spec | design | body-marker |
 | `docs/superpowers/specs/provider-event-lifecycle/requirements.md` | spec | requirements | body-marker |
-| `docs/superpowers/specs/provider-event-lifecycle/requirements.md` | spec | requirements | body-marker |
-| `docs/superpowers/specs/provider-event-lifecycle/requirements.md` | spec | requirements | body-marker |
-| `docs/superpowers/specs/provider-event-lifecycle/tasks.md` | spec | tasks | body-marker |
-| `docs/superpowers/specs/provider-event-lifecycle/tasks.md` | spec | tasks | body-marker |
 | `docs/superpowers/specs/provider-event-lifecycle/tasks.md` | spec | tasks | body-marker |
 
 ### Unknown-status — triage needed (10)
@@ -85,13 +79,11 @@ scoped markdown files currently on disk.
 
 _Topics with entries in multiple canonical trees — candidates for canonical-home consolidation._
 
-#### `design`  —  4 entries across 2 locations
+#### `design`  —  2 entries across 2 locations
 
 | Path |
 |------|
 | `docs/superpowers/specs/kill-session-transactional-cancellation/design.md` |
-| `docs/superpowers/specs/provider-event-lifecycle/design.md` |
-| `docs/superpowers/specs/provider-event-lifecycle/design.md` |
 | `docs/superpowers/specs/provider-event-lifecycle/design.md` |
 
 #### `fleet-charts`  —  2 entries across 2 locations
@@ -101,22 +93,18 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 | `docs/sdlc/closed/fleet-charts-20260407/state.md` |
 | `docs/superpowers/plans/2026-04-07-fleet-charts.md` |
 
-#### `requirements`  —  4 entries across 2 locations
+#### `requirements`  —  2 entries across 2 locations
 
 | Path |
 |------|
 | `docs/superpowers/specs/kill-session-transactional-cancellation/requirements.md` |
 | `docs/superpowers/specs/provider-event-lifecycle/requirements.md` |
-| `docs/superpowers/specs/provider-event-lifecycle/requirements.md` |
-| `docs/superpowers/specs/provider-event-lifecycle/requirements.md` |
 
-#### `tasks`  —  4 entries across 2 locations
+#### `tasks`  —  2 entries across 2 locations
 
 | Path |
 |------|
 | `docs/superpowers/specs/kill-session-transactional-cancellation/tasks.md` |
-| `docs/superpowers/specs/provider-event-lifecycle/tasks.md` |
-| `docs/superpowers/specs/provider-event-lifecycle/tasks.md` |
 | `docs/superpowers/specs/provider-event-lifecycle/tasks.md` |
 
 ## Full listing by canonical parent
@@ -238,21 +226,15 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 | `docs/superpowers/specs/kill-session-transactional-cancellation/requirements.md` | spec | active | body-marker | requirements | 2026-07-14 |  |
 | `docs/superpowers/specs/kill-session-transactional-cancellation/tasks.md` | spec | pending | body-marker | tasks | 2026-07-14 |  |
 
-### docs/superpowers/specs/provider-event-lifecycle  _(9 entries)_
+### docs/superpowers/specs/provider-event-lifecycle  _(3 entries)_
 
 | Path | Kind | Status | Source | Topic | Last Mod | Supersedes |
 |------|------|--------|--------|-------|----------|------------|
 | `docs/superpowers/specs/provider-event-lifecycle/design.md` | spec | active | body-marker | design | 2026-07-29 |  |
-| `docs/superpowers/specs/provider-event-lifecycle/design.md` | spec | active | body-marker | design | 2026-07-29 |  |
-| `docs/superpowers/specs/provider-event-lifecycle/design.md` | spec | active | body-marker | design | 2026-07-29 |  |
 | `docs/superpowers/specs/provider-event-lifecycle/requirements.md` | spec | active | body-marker | requirements | 2026-07-29 |  |
-| `docs/superpowers/specs/provider-event-lifecycle/requirements.md` | spec | active | body-marker | requirements | 2026-07-29 |  |
-| `docs/superpowers/specs/provider-event-lifecycle/requirements.md` | spec | active | body-marker | requirements | 2026-07-29 |  |
-| `docs/superpowers/specs/provider-event-lifecycle/tasks.md` | spec | active | body-marker | tasks | 2026-07-29 |  |
-| `docs/superpowers/specs/provider-event-lifecycle/tasks.md` | spec | active | body-marker | tasks | 2026-07-29 |  |
 | `docs/superpowers/specs/provider-event-lifecycle/tasks.md` | spec | active | body-marker | tasks | 2026-07-29 |  |
 
 ---
 
 - Derived from `docs/work-index.json`
-- Generated at 2026-07-29T12:11:58Z from commit `7457ffc8c4766fe8094cdc764284aea39f12f0eb`
+- Generated at 2026-07-29T12:17:56Z from commit `d02f215ca83c0caacd048555bd31580b7061cd8f`
