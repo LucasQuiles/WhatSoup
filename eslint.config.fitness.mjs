@@ -64,6 +64,10 @@ function ruleEntriesFor(id) {
       };
     case 'invariant.no-unsafe-type-escapes':
       return { 'fitness/unsafe-type-escape': 'warn' };
+    case 'portability.fetch-timeout':
+      return { 'fitness/fetch-timeout': 'warn' };
+    case 'portability.sync-exec-timeout':
+      return { 'fitness/sync-exec-timeout': 'warn' };
     default:
       return {};
   }
@@ -94,7 +98,8 @@ const linterOptions = { reportUnusedDisableDirectives: 'off' };
 const config = [
   {
     // src + scripts: file-size, god-class, fail-closed-scanner, outbox-direct-write,
-    // ring-boundaries, unsafe-type-escape, timer-rearm-without-clear.
+    // ring-boundaries, unsafe-type-escape, timer-rearm-without-clear,
+    // portability: fetch-timeout, sync-exec-timeout.
     files: ['src/**/*.ts', 'scripts/**/*.ts'],
     linterOptions,
     languageOptions: {
@@ -111,6 +116,8 @@ const config = [
       ...ruleEntriesFor('arch.sqlite-busy-timeout-ssot'),
       ...ruleEntriesFor('invariant.no-unsafe-type-escapes'),
       ...ruleEntriesFor('invariant.timer-rearm-without-clear'),
+      ...ruleEntriesFor('portability.fetch-timeout'),
+      ...ruleEntriesFor('portability.sync-exec-timeout'),
     },
   },
   {

@@ -5,6 +5,7 @@ export const FITNESS_CATEGORIES = [
   'hygiene',
   'test',
   'meta',
+  'portability',
 ] as const;
 
 export const DETECTABILITIES = ['mechanical', 'ast', 'semantic', 'human'] as const;
@@ -536,5 +537,171 @@ export const fitnessRules = [
     severity: 'block',
     implementedBy: ['guard:insecure-tempfile'],
     source: ['codeql:py/insecure-temporary-file', 'spec:2026-06-27-insecure-tempfile'],
+  },
+  // ── Portability ────────────────────────────────────────────────────────────
+  {
+    id: 'portability.no-hardcoded-platform-binaries',
+    title: 'No hardcoded /usr/bin/ or /bin/ platform binary paths',
+    category: 'portability',
+    rationale:
+      'Hardcoded /usr/bin/git, /usr/bin/rustdesk, /usr/bin/python3 etc. break on macOS where binaries live under /usr/local/bin/, /opt/homebrew/bin/, or a PATH-resolved location. Use shutil.which() or env-based resolution instead. Enforced by guard:platform-patterns; existing occurrences are baselined as recognized debt.',
+    detect: 'mechanical',
+    rings: ['guard', 'ci'],
+    severity: 'block',
+    implementedBy: ['guard:platform-patterns'],
+    ratchet: true,
+    params: {
+      globs: ['src', 'scripts', 'deploy/scripts', 'tools/agent-runtime-probes'],
+      extensions: ['.ts', '.py', '.sh'],
+      // Detect hardcoded paths: looking for quoted string literals containing
+      // the binary path. /usr/bin/env is the standard portable shebang and is
+      // excluded. The patterns target specific binary paths rather than any
+      // mention of /usr/bin in comments.
+      patterns: [
+        '"/usr/bin/python',
+        '"/usr/bin/git',
+        '"/usr/bin/rustdesk',
+        '"/usr/bin/secret-tool',
+        '"/usr/bin/true',
+        '"/usr/bin/node',
+        '"/usr/bin/plutil',
+        "\'/usr/bin/python",
+        "\'/usr/bin/git",
+      ],
+      allowlistPaths: [
+        // plutil is macOS-only, correctly hardcoded for the platform
+        'tools/agent-runtime-probes/config_surface_doctor.py',
+        // Test fixtures use paths as mock values
+        'deploy/scripts/tests/',
+        'plugins/tokenomics/tests/',
+        'tools/agent-runtime-probes/tests/',
+        // Dockerfile uses apt-installed paths
+        'docker/',
+        // verify-lib.sh uses #!/usr/bin/env bash (portable pattern)
+        'scripts/lib/verify-lib.sh',
+        // Self-referential: registry.ts defines the patterns for this rule
+        'scripts/lib/fitness/',
+        // check-launchd-drift.sh uses /usr/bin/python3 only in darwin branch (correct for macOS)
+        'scripts/check-launchd-drift.sh',
+      ],
+    },
+    source: ['issue:2616', 'issue:2623'],
+  },
+  {
+    id: 'portability.platform-paths-guarded',
+    title: 'Linux-only paths must be platform-guarded',
+    category: 'portability',
+    rationale:
+      '/proc/, /sys/, /run/ paths raise OSError on macOS. Each occurrence must be behind a process.platform === "linux" guard or equivalent. Enforced by guard:platform-patterns; existing unguarded occurrences are baselined debt.',
+    detect: 'mechanical',
+    rings: ['guard', 'ci'],
+    severity: 'block',
+    implementedBy: ['guard:platform-patterns'],
+    ratchet: true,
+    params: {
+      globs: ['src', 'scripts', 'deploy/scripts'],
+      extensions: ['.ts', '.py', '.sh'],
+      patterns: ['/proc/', '/sys/', '/run/'],
+      allowlistPaths: [
+        // These /proc/ references are verified to have Linux guards or are
+        // preceded by process.platform checks. Add new allowances only after
+        // confirming the guard exists.
+        'deploy/scripts/tests/',
+        'plugins/tokenomics/tests/',
+      ],
+    },
+    source: ['issue:2623'],
+  },
+  {
+    id: 'portability.systemctl-guarded',
+    title: 'systemctl calls must have macOS launchctl fallback',
+    category: 'portability',
+    rationale:
+      'systemctl is Linux-only; on macOS the equivalent service manager is launchctl. Production scripts that invoke systemctl must either be behind a HOST_PLATFORM guard or provide a launchctl-equivalent branch. Enforced by guard:platform-patterns.',
+    detect: 'mechanical',
+    rings: ['guard', 'ci'],
+    severity: 'block',
+    implementedBy: ['guard:platform-patterns'],
+    ratchet: true,
+    params: {
+      globs: ['deploy/scripts', 'src', 'scripts'],
+      extensions: ['.py', '.ts'],
+      patterns: ['"systemctl', "'systemctl"],
+      allowlistPaths: [
+        // bot-errors-runtime-staleness.py uses systemctl with a HOST_PLATFORM guard
+        'deploy/scripts/bot-errors-health-check.py',
+        'deploy/scripts/bot-errors-heartbeat-watchdog.py',
+        'deploy/scripts/bot-errors-runtime-staleness.py',
+        'deploy/scripts/tests/',
+      ],
+    },
+    source: ['issue:2621'],
+  },
+  {
+    id: 'portability.gnu-bsd-shell-flags',
+    title: 'Shell scripts must avoid GNU-only flags',
+    category: 'portability',
+    rationale:
+      'readlink -f, sha256sum without shasum fallback, stat -c, grep -P, sed -i without backup, mktemp without template, and similar GNU-specific flags fail on BSD/macOS. Shell scripts must use portable alternatives or explicit platform branches. Enforced by guard:platform-patterns.',
+    detect: 'mechanical',
+    rings: ['hook', 'guard', 'ci'],
+    severity: 'block',
+    implementedBy: ['guard:platform-patterns'],
+    ratchet: true,
+    params: {
+      globs: ['scripts', 'deploy', 'tools', 'console'],
+      extensions: ['.sh'],
+      patterns: [
+        'readlink -f',
+        'sha256sum',
+        'stat -c ',
+        'grep -P',
+        'mktemp --directory',
+      ],
+      allowlistPaths: [
+        // read-private-health-token.sh implements PORTABLE fallback (tries BSD -f first)
+        'deploy/lib/read-private-health-token.sh',
+        // whatsoup-bot-errors-deploy.sh has portable shasum fallback
+        'deploy/scripts/whatsoup-bot-errors-deploy.sh',
+        // install-transcription-deps.sh has portable shasum fallback
+        'scripts/install-transcription-deps.sh',
+        // Test fixtures explicitly test shell portability patterns
+        'tests/fixtures/',
+      ],
+    },
+    source: ['issue:2622'],
+  },
+  {
+    id: 'portability.editorconfig-present',
+    title: 'Repository must maintain .editorconfig and .gitattributes',
+    category: 'portability',
+    rationale:
+      'Without .editorconfig and .gitattributes, different editors and git platforms can introduce inconsistent line endings (CRLF on Windows), indentation, and encoding. These files enforce LF line endings on all platforms. Enforced by repo-hygiene-guard or a file-existence check.',
+    detect: 'mechanical',
+    rings: ['guard'],
+    severity: 'advisory',
+    source: ['issue:2624'],
+  },
+  {
+    id: 'portability.fetch-timeout',
+    title: 'fetch() calls must include AbortSignal timeout',
+    category: 'portability',
+    rationale:
+      'fetch() without a signal parameter can hang indefinitely on an unresponsive server, blocking the agent loop or health check. Add AbortSignal.timeout(ms) as the signal option. Static analysis may miss indirect calls; the mechanical guard provides a secondary gate.',
+    detect: 'ast',
+    rings: ['eslint'],
+    severity: 'warn',
+    source: ['issue:2618'],
+  },
+  {
+    id: 'portability.sync-exec-timeout',
+    title: 'Sync child_process calls must include timeout',
+    category: 'portability',
+    rationale:
+      'execSync/execFileSync/spawnSync without timeout can block the Node.js event loop indefinitely on a hanging subprocess, freezing the agent. Add a timeout option to cap execution time. Static analysis may miss indirect calls; the mechanical guard provides a secondary gate.',
+    detect: 'ast',
+    rings: ['eslint'],
+    severity: 'warn',
+    source: ['issue:2620'],
   },
 ] satisfies FitnessRule[];

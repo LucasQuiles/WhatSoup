@@ -300,6 +300,9 @@ jobs:
       - name: Insecure tempfile guard
         run: npm run guard:insecure-tempfile
 
+      - name: Platform portability guard
+        run: npm run guard:platform-patterns
+
       - name: No destructive git guard
         run: npm run guard:no-destructive-git
 
