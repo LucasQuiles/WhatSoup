@@ -15,15 +15,15 @@ markers and re-run the command — the result is a fixed point, so the resolutio
 rather than a hand-count. `docs/work-index.{json,md}` has the same property via
 `npm run work-index:regen`.
 
-**Total classification rows:** 139
+**Total classification rows:** 332
 
 | Classification | Count |
 |---|---:|
-| PUBLIC | 3 |
+| PUBLIC | 196 |
 | PRIVATE-ARCHIVE | 136 |
 | SANITIZE | 0 |
 | DELETE | 0 |
-| Total | 139 |
+| Total | 332 |
 
 | Path | Classification | Rationale |
 |---|---|---|
@@ -161,7 +161,200 @@ rather than a hand-count. `docs/work-index.{json,md}` has the same property via
 | `docs/superpowers/specs/provider-event-lifecycle/requirements.md` | PRIVATE-ARCHIVE | Internal protocol requirements; retained in the repository but excluded from public publication by default. |
 | `docs/superpowers/specs/provider-event-lifecycle/tasks.md` | PRIVATE-ARCHIVE | Internal implementation plan; retained in the repository but excluded from public publication by default. |
 | `docs/triage/README.md` | PUBLIC | Sanitized operator contract for deterministic issue evidence, dry-run, confirmation, and recovery; complete issue bodies and private runtime identifiers are forbidden. |
+| `docs/triage/open-issue-registry.json` | PUBLIC | Body-free canonical issue evidence containing only public issue metadata, repository-relative paths, hashes, and sanitized analysis. |
+| `docs/triage/open-issue-registry.md` | PUBLIC | Generated body-free canonical issue evidence view containing only public issue metadata, repository-relative paths, hashes, and sanitized analysis. |
 | `docs/triage/open-issue-review-ledger.jsonl` | PUBLIC | Body-free append-only mutation receipts containing only public issue metadata, repository-relative paths, hashes, and sanitized diagnostics. |
+| `docs/triage/reviews/open-issue-refresh-20260728-current.json` | PUBLIC | Body-free reviewed issue evidence batch. |
+| `docs/triage/reviews/open-issue-refresh-20260728-current/1786.json` | PUBLIC | Body-free reviewed issue evidence. |
+| `docs/triage/reviews/open-issue-refresh-20260728-current/1882.json` | PUBLIC | Body-free reviewed issue evidence. |
+| `docs/triage/reviews/open-issue-refresh-20260728-current/1976.json` | PUBLIC | Body-free reviewed issue evidence. |
+| `docs/triage/reviews/open-issue-refresh-20260728-current/1977.json` | PUBLIC | Body-free reviewed issue evidence. |
+| `docs/triage/reviews/open-issue-refresh-20260728-current/2135.json` | PUBLIC | Body-free reviewed issue evidence. |
+| `docs/triage/reviews/open-issue-refresh-20260728-current/2144.json` | PUBLIC | Body-free reviewed issue evidence. |
+| `docs/triage/reviews/open-issue-refresh-20260728-current/2145.json` | PUBLIC | Body-free reviewed issue evidence. |
+| `docs/triage/reviews/open-issue-refresh-20260728-current/2147.json` | PUBLIC | Body-free reviewed issue evidence. |
+| `docs/triage/reviews/open-issue-refresh-20260728-current/2148.json` | PUBLIC | Body-free reviewed issue evidence. |
+| `docs/triage/reviews/open-issue-refresh-20260728-current/2150.json` | PUBLIC | Body-free reviewed issue evidence. |
+| `docs/triage/reviews/open-issue-refresh-20260728-current/2155.json` | PUBLIC | Body-free reviewed issue evidence. |
+| `docs/triage/reviews/open-issue-refresh-20260728-current/2164.json` | PUBLIC | Body-free reviewed issue evidence. |
+| `docs/triage/reviews/open-issue-refresh-20260728-current/2169.json` | PUBLIC | Body-free reviewed issue evidence. |
+| `docs/triage/reviews/open-issue-refresh-20260728-current/2170.json` | PUBLIC | Body-free reviewed issue evidence. |
+| `docs/triage/reviews/open-issue-refresh-20260728-current/2189.json` | PUBLIC | Body-free reviewed issue evidence. |
+| `docs/triage/reviews/open-issue-refresh-20260728-current/2190.json` | PUBLIC | Body-free reviewed issue evidence. |
+| `docs/triage/reviews/open-issue-refresh-20260728-current/2191.json` | PUBLIC | Body-free reviewed issue evidence. |
+| `docs/triage/reviews/open-issue-refresh-20260728-current/2192.json` | PUBLIC | Body-free reviewed issue evidence. |
+| `docs/triage/reviews/open-issue-refresh-20260728-current/2193.json` | PUBLIC | Body-free reviewed issue evidence. |
+| `docs/triage/reviews/open-issue-refresh-20260728-current/2194.json` | PUBLIC | Body-free reviewed issue evidence. |
+| `docs/triage/reviews/open-issue-refresh-20260728-current/2197.json` | PUBLIC | Body-free reviewed issue evidence. |
+| `docs/triage/reviews/open-issue-refresh-20260728-current/2200.json` | PUBLIC | Body-free reviewed issue evidence. |
+| `docs/triage/reviews/open-issue-refresh-20260728-current/2204.json` | PUBLIC | Body-free reviewed issue evidence. |
+| `docs/triage/reviews/open-issue-refresh-20260728-current/2206.json` | PUBLIC | Body-free reviewed issue evidence. |
+| `docs/triage/reviews/open-issue-refresh-20260728-current/2207.json` | PUBLIC | Body-free reviewed issue evidence. |
+| `docs/triage/reviews/open-issue-refresh-20260728-current/2209.json` | PUBLIC | Body-free reviewed issue evidence. |
+| `docs/triage/reviews/open-issue-refresh-20260728-current/2210.json` | PUBLIC | Body-free reviewed issue evidence. |
+| `docs/triage/reviews/open-issue-refresh-20260728-current/2211.json` | PUBLIC | Body-free reviewed issue evidence. |
+| `docs/triage/reviews/open-issue-refresh-20260728-current/2213.json` | PUBLIC | Body-free reviewed issue evidence. |
+| `docs/triage/reviews/open-issue-refresh-20260728-current/2214.json` | PUBLIC | Body-free reviewed issue evidence. |
+| `docs/triage/reviews/open-issue-refresh-20260728-current/2218.json` | PUBLIC | Body-free reviewed issue evidence. |
+| `docs/triage/reviews/open-issue-refresh-20260728-current/2222.json` | PUBLIC | Body-free reviewed issue evidence. |
+| `docs/triage/reviews/open-issue-refresh-20260728-current/2224.json` | PUBLIC | Body-free reviewed issue evidence. |
+| `docs/triage/reviews/open-issue-refresh-20260728-current/2225.json` | PUBLIC | Body-free reviewed issue evidence. |
+| `docs/triage/reviews/open-issue-refresh-20260728-current/2235.json` | PUBLIC | Body-free reviewed issue evidence. |
+| `docs/triage/reviews/open-issue-refresh-20260728-current/2241.json` | PUBLIC | Body-free reviewed issue evidence. |
+| `docs/triage/reviews/open-issue-refresh-20260728-current/2242.json` | PUBLIC | Body-free reviewed issue evidence. |
+| `docs/triage/reviews/open-issue-refresh-20260728-current/2244.json` | PUBLIC | Body-free reviewed issue evidence. |
+| `docs/triage/reviews/open-issue-refresh-20260728-current/2248.json` | PUBLIC | Body-free reviewed issue evidence. |
+| `docs/triage/reviews/open-issue-refresh-20260728-current/2250.json` | PUBLIC | Body-free reviewed issue evidence. |
+| `docs/triage/reviews/open-issue-refresh-20260728-current/2252.json` | PUBLIC | Body-free reviewed issue evidence. |
+| `docs/triage/reviews/open-issue-refresh-20260728-current/2253.json` | PUBLIC | Body-free reviewed issue evidence. |
+| `docs/triage/reviews/open-issue-refresh-20260728-current/2257.json` | PUBLIC | Body-free reviewed issue evidence. |
+| `docs/triage/reviews/open-issue-refresh-20260728-current/2258.json` | PUBLIC | Body-free reviewed issue evidence. |
+| `docs/triage/reviews/open-issue-refresh-20260728-current/2259.json` | PUBLIC | Body-free reviewed issue evidence. |
+| `docs/triage/reviews/open-issue-refresh-20260728-current/2260.json` | PUBLIC | Body-free reviewed issue evidence. |
+| `docs/triage/reviews/open-issue-refresh-20260728-current/2280.json` | PUBLIC | Body-free reviewed issue evidence. |
+| `docs/triage/reviews/open-issue-refresh-20260728-current/2281.json` | PUBLIC | Body-free reviewed issue evidence. |
+| `docs/triage/reviews/open-issue-refresh-20260728-current/2282.json` | PUBLIC | Body-free reviewed issue evidence. |
+| `docs/triage/reviews/open-issue-refresh-20260728-current/2284.json` | PUBLIC | Body-free reviewed issue evidence. |
+| `docs/triage/reviews/open-issue-refresh-20260728-current/2288.json` | PUBLIC | Body-free reviewed issue evidence. |
+| `docs/triage/reviews/open-issue-refresh-20260728-current/2289.json` | PUBLIC | Body-free reviewed issue evidence. |
+| `docs/triage/reviews/open-issue-refresh-20260728-current/2290.json` | PUBLIC | Body-free reviewed issue evidence. |
+| `docs/triage/reviews/open-issue-refresh-20260728-current/2295.json` | PUBLIC | Body-free reviewed issue evidence. |
+| `docs/triage/reviews/open-issue-refresh-20260728-current/2298.json` | PUBLIC | Body-free reviewed issue evidence. |
+| `docs/triage/reviews/open-issue-refresh-20260728-current/2300.json` | PUBLIC | Body-free reviewed issue evidence. |
+| `docs/triage/reviews/open-issue-refresh-20260728-current/2301.json` | PUBLIC | Body-free reviewed issue evidence. |
+| `docs/triage/reviews/open-issue-refresh-20260728-current/2304.json` | PUBLIC | Body-free reviewed issue evidence. |
+| `docs/triage/reviews/open-issue-refresh-20260728-current/2321.json` | PUBLIC | Body-free reviewed issue evidence. |
+| `docs/triage/reviews/open-issue-refresh-20260728-current/2322.json` | PUBLIC | Body-free reviewed issue evidence. |
+| `docs/triage/reviews/open-issue-refresh-20260728-current/2323.json` | PUBLIC | Body-free reviewed issue evidence. |
+| `docs/triage/reviews/open-issue-refresh-20260728-current/2325.json` | PUBLIC | Body-free reviewed issue evidence. |
+| `docs/triage/reviews/open-issue-refresh-20260728-current/2330.json` | PUBLIC | Body-free reviewed issue evidence. |
+| `docs/triage/reviews/open-issue-refresh-20260728-current/2331.json` | PUBLIC | Body-free reviewed issue evidence. |
+| `docs/triage/reviews/open-issue-refresh-20260728-current/2333.json` | PUBLIC | Body-free reviewed issue evidence. |
+| `docs/triage/reviews/open-issue-refresh-20260728-current/2340.json` | PUBLIC | Body-free reviewed issue evidence. |
+| `docs/triage/reviews/open-issue-refresh-20260728-current/2342.json` | PUBLIC | Body-free reviewed issue evidence. |
+| `docs/triage/reviews/open-issue-refresh-20260728-current/2343.json` | PUBLIC | Body-free reviewed issue evidence. |
+| `docs/triage/reviews/open-issue-refresh-20260728-current/2353.json` | PUBLIC | Body-free reviewed issue evidence. |
+| `docs/triage/reviews/open-issue-refresh-20260728-current/2354.json` | PUBLIC | Body-free reviewed issue evidence. |
+| `docs/triage/reviews/open-issue-refresh-20260728-current/2355.json` | PUBLIC | Body-free reviewed issue evidence. |
+| `docs/triage/reviews/open-issue-refresh-20260728-current/2356.json` | PUBLIC | Body-free reviewed issue evidence. |
+| `docs/triage/reviews/open-issue-refresh-20260728-current/2357.json` | PUBLIC | Body-free reviewed issue evidence. |
+| `docs/triage/reviews/open-issue-refresh-20260728-current/2363.json` | PUBLIC | Body-free reviewed issue evidence. |
+| `docs/triage/reviews/open-issue-refresh-20260728-current/2384.json` | PUBLIC | Body-free reviewed issue evidence. |
+| `docs/triage/reviews/open-issue-refresh-20260728-current/2385.json` | PUBLIC | Body-free reviewed issue evidence. |
+| `docs/triage/reviews/open-issue-refresh-20260728-current/2386.json` | PUBLIC | Body-free reviewed issue evidence. |
+| `docs/triage/reviews/open-issue-refresh-20260728-current/2387.json` | PUBLIC | Body-free reviewed issue evidence. |
+| `docs/triage/reviews/open-issue-refresh-20260728-current/2388.json` | PUBLIC | Body-free reviewed issue evidence. |
+| `docs/triage/reviews/open-issue-refresh-20260728-current/2390.json` | PUBLIC | Body-free reviewed issue evidence. |
+| `docs/triage/reviews/open-issue-refresh-20260728-current/2392.json` | PUBLIC | Body-free reviewed issue evidence. |
+| `docs/triage/reviews/open-issue-refresh-20260728-current/2393.json` | PUBLIC | Body-free reviewed issue evidence. |
+| `docs/triage/reviews/open-issue-refresh-20260728-current/2394.json` | PUBLIC | Body-free reviewed issue evidence. |
+| `docs/triage/reviews/open-issue-refresh-20260728-current/2395.json` | PUBLIC | Body-free reviewed issue evidence. |
+| `docs/triage/reviews/open-issue-refresh-20260728-current/2397.json` | PUBLIC | Body-free reviewed issue evidence. |
+| `docs/triage/reviews/open-issue-refresh-20260728-current/2398.json` | PUBLIC | Body-free reviewed issue evidence. |
+| `docs/triage/reviews/open-issue-refresh-20260728-current/2399.json` | PUBLIC | Body-free reviewed issue evidence. |
+| `docs/triage/reviews/open-issue-refresh-20260728-current/2400.json` | PUBLIC | Body-free reviewed issue evidence. |
+| `docs/triage/reviews/open-issue-refresh-20260728-current/2402.json` | PUBLIC | Body-free reviewed issue evidence. |
+| `docs/triage/reviews/open-issue-refresh-20260728-current/2403.json` | PUBLIC | Body-free reviewed issue evidence. |
+| `docs/triage/reviews/open-issue-refresh-20260728-current/2405.json` | PUBLIC | Body-free reviewed issue evidence. |
+| `docs/triage/reviews/open-issue-refresh-20260728-current/2406.json` | PUBLIC | Body-free reviewed issue evidence. |
+| `docs/triage/reviews/open-issue-refresh-20260728-current/2407.json` | PUBLIC | Body-free reviewed issue evidence. |
+| `docs/triage/reviews/open-issue-refresh-20260728-current/2408.json` | PUBLIC | Body-free reviewed issue evidence. |
+| `docs/triage/reviews/open-issue-refresh-20260728-current/2409.json` | PUBLIC | Body-free reviewed issue evidence. |
+| `docs/triage/reviews/open-issue-refresh-20260728-current/2410.json` | PUBLIC | Body-free reviewed issue evidence. |
+| `docs/triage/reviews/open-issue-refresh-20260728-current/2412.json` | PUBLIC | Body-free reviewed issue evidence. |
+| `docs/triage/reviews/open-issue-refresh-20260728-current/2413.json` | PUBLIC | Body-free reviewed issue evidence. |
+| `docs/triage/reviews/open-issue-refresh-20260728-current/2414.json` | PUBLIC | Body-free reviewed issue evidence. |
+| `docs/triage/reviews/open-issue-refresh-20260728-current/2416.json` | PUBLIC | Body-free reviewed issue evidence. |
+| `docs/triage/reviews/open-issue-refresh-20260728-current/2419.json` | PUBLIC | Body-free reviewed issue evidence. |
+| `docs/triage/reviews/open-issue-refresh-20260728-current/2420.json` | PUBLIC | Body-free reviewed issue evidence. |
+| `docs/triage/reviews/open-issue-refresh-20260728-current/2421.json` | PUBLIC | Body-free reviewed issue evidence. |
+| `docs/triage/reviews/open-issue-refresh-20260728-current/2424.json` | PUBLIC | Body-free reviewed issue evidence. |
+| `docs/triage/reviews/open-issue-refresh-20260728-current/2427.json` | PUBLIC | Body-free reviewed issue evidence. |
+| `docs/triage/reviews/open-issue-refresh-20260728-current/2428.json` | PUBLIC | Body-free reviewed issue evidence. |
+| `docs/triage/reviews/open-issue-refresh-20260728-current/2429.json` | PUBLIC | Body-free reviewed issue evidence. |
+| `docs/triage/reviews/open-issue-refresh-20260728-current/2430.json` | PUBLIC | Body-free reviewed issue evidence. |
+| `docs/triage/reviews/open-issue-refresh-20260728-current/2435.json` | PUBLIC | Body-free reviewed issue evidence. |
+| `docs/triage/reviews/open-issue-refresh-20260728-current/2437.json` | PUBLIC | Body-free reviewed issue evidence. |
+| `docs/triage/reviews/open-issue-refresh-20260728-current/2439.json` | PUBLIC | Body-free reviewed issue evidence. |
+| `docs/triage/reviews/open-issue-refresh-20260728-current/2444.json` | PUBLIC | Body-free reviewed issue evidence. |
+| `docs/triage/reviews/open-issue-refresh-20260728-current/2445.json` | PUBLIC | Body-free reviewed issue evidence. |
+| `docs/triage/reviews/open-issue-refresh-20260728-current/2447.json` | PUBLIC | Body-free reviewed issue evidence. |
+| `docs/triage/reviews/open-issue-refresh-20260728-current/2453.json` | PUBLIC | Body-free reviewed issue evidence. |
+| `docs/triage/reviews/open-issue-refresh-20260728-current/2457.json` | PUBLIC | Body-free reviewed issue evidence. |
+| `docs/triage/reviews/open-issue-refresh-20260728-current/2460.json` | PUBLIC | Body-free reviewed issue evidence. |
+| `docs/triage/reviews/open-issue-refresh-20260728-current/2462.json` | PUBLIC | Body-free reviewed issue evidence. |
+| `docs/triage/reviews/open-issue-refresh-20260728-current/2463.json` | PUBLIC | Body-free reviewed issue evidence. |
+| `docs/triage/reviews/open-issue-refresh-20260728-current/2464.json` | PUBLIC | Body-free reviewed issue evidence. |
+| `docs/triage/reviews/open-issue-refresh-20260728-current/2480.json` | PUBLIC | Body-free reviewed issue evidence. |
+| `docs/triage/reviews/open-issue-refresh-20260728-current/2481.json` | PUBLIC | Body-free reviewed issue evidence. |
+| `docs/triage/reviews/open-issue-refresh-20260728-current/2482.json` | PUBLIC | Body-free reviewed issue evidence. |
+| `docs/triage/reviews/open-issue-refresh-20260728-current/2483.json` | PUBLIC | Body-free reviewed issue evidence. |
+| `docs/triage/reviews/open-issue-refresh-20260728-current/2485.json` | PUBLIC | Body-free reviewed issue evidence. |
+| `docs/triage/reviews/open-issue-refresh-20260728-current/2486.json` | PUBLIC | Body-free reviewed issue evidence. |
+| `docs/triage/reviews/open-issue-refresh-20260728-current/2503.json` | PUBLIC | Body-free reviewed issue evidence. |
+| `docs/triage/reviews/open-issue-refresh-20260728-current/2506.json` | PUBLIC | Body-free reviewed issue evidence. |
+| `docs/triage/reviews/open-issue-refresh-20260728-current/2507.json` | PUBLIC | Body-free reviewed issue evidence. |
+| `docs/triage/reviews/open-issue-refresh-20260728-current/2508.json` | PUBLIC | Body-free reviewed issue evidence. |
+| `docs/triage/reviews/open-issue-refresh-20260728-current/2509.json` | PUBLIC | Body-free reviewed issue evidence. |
+| `docs/triage/reviews/open-issue-refresh-20260728-current/2510.json` | PUBLIC | Body-free reviewed issue evidence. |
+| `docs/triage/reviews/open-issue-refresh-20260728-current/2511.json` | PUBLIC | Body-free reviewed issue evidence. |
+| `docs/triage/reviews/open-issue-refresh-20260728-current/2512.json` | PUBLIC | Body-free reviewed issue evidence. |
+| `docs/triage/reviews/open-issue-refresh-20260728-current/2513.json` | PUBLIC | Body-free reviewed issue evidence. |
+| `docs/triage/reviews/open-issue-refresh-20260728-current/2514.json` | PUBLIC | Body-free reviewed issue evidence. |
+| `docs/triage/reviews/open-issue-refresh-20260728-current/2517.json` | PUBLIC | Body-free reviewed issue evidence. |
+| `docs/triage/reviews/open-issue-refresh-20260728-current/2518.json` | PUBLIC | Body-free reviewed issue evidence. |
+| `docs/triage/reviews/open-issue-refresh-20260728-current/2519.json` | PUBLIC | Body-free reviewed issue evidence. |
+| `docs/triage/reviews/open-issue-refresh-20260728-current/2520.json` | PUBLIC | Body-free reviewed issue evidence. |
+| `docs/triage/reviews/open-issue-refresh-20260728-current/2521.json` | PUBLIC | Body-free reviewed issue evidence. |
+| `docs/triage/reviews/open-issue-refresh-20260728-current/2522.json` | PUBLIC | Body-free reviewed issue evidence. |
+| `docs/triage/reviews/open-issue-refresh-20260728-current/2523.json` | PUBLIC | Body-free reviewed issue evidence. |
+| `docs/triage/reviews/open-issue-refresh-20260728-current/2525.json` | PUBLIC | Body-free reviewed issue evidence. |
+| `docs/triage/reviews/open-issue-refresh-20260728-current/2526.json` | PUBLIC | Body-free reviewed issue evidence. |
+| `docs/triage/reviews/open-issue-refresh-20260728-current/2527.json` | PUBLIC | Body-free reviewed issue evidence. |
+| `docs/triage/reviews/open-issue-refresh-20260728-current/2528.json` | PUBLIC | Body-free reviewed issue evidence. |
+| `docs/triage/reviews/open-issue-refresh-20260728-current/2529.json` | PUBLIC | Body-free reviewed issue evidence. |
+| `docs/triage/reviews/open-issue-refresh-20260728-current/2530.json` | PUBLIC | Body-free reviewed issue evidence. |
+| `docs/triage/reviews/open-issue-refresh-20260728-current/2531.json` | PUBLIC | Body-free reviewed issue evidence. |
+| `docs/triage/reviews/open-issue-refresh-20260728-current/2532.json` | PUBLIC | Body-free reviewed issue evidence. |
+| `docs/triage/reviews/open-issue-refresh-20260728-current/2533.json` | PUBLIC | Body-free reviewed issue evidence. |
+| `docs/triage/reviews/open-issue-refresh-20260728-current/2534.json` | PUBLIC | Body-free reviewed issue evidence. |
+| `docs/triage/reviews/open-issue-refresh-20260728-current/2535.json` | PUBLIC | Body-free reviewed issue evidence. |
+| `docs/triage/reviews/open-issue-refresh-20260728-current/2536.json` | PUBLIC | Body-free reviewed issue evidence. |
+| `docs/triage/reviews/open-issue-refresh-20260728-current/2537.json` | PUBLIC | Body-free reviewed issue evidence. |
+| `docs/triage/reviews/open-issue-refresh-20260728-current/2538.json` | PUBLIC | Body-free reviewed issue evidence. |
+| `docs/triage/reviews/open-issue-refresh-20260728-current/2539.json` | PUBLIC | Body-free reviewed issue evidence. |
+| `docs/triage/reviews/open-issue-refresh-20260728-current/2540.json` | PUBLIC | Body-free reviewed issue evidence. |
+| `docs/triage/reviews/open-issue-refresh-20260728-current/2541.json` | PUBLIC | Body-free reviewed issue evidence. |
+| `docs/triage/reviews/open-issue-refresh-20260728-current/2544.json` | PUBLIC | Body-free reviewed issue evidence. |
+| `docs/triage/reviews/open-issue-refresh-20260728-current/2545.json` | PUBLIC | Body-free reviewed issue evidence. |
+| `docs/triage/reviews/open-issue-refresh-20260728-current/2546.json` | PUBLIC | Body-free reviewed issue evidence. |
+| `docs/triage/reviews/open-issue-refresh-20260728-current/2547.json` | PUBLIC | Body-free reviewed issue evidence. |
+| `docs/triage/reviews/open-issue-refresh-20260728-current/2548.json` | PUBLIC | Body-free reviewed issue evidence. |
+| `docs/triage/reviews/open-issue-refresh-20260728-current/2549.json` | PUBLIC | Body-free reviewed issue evidence. |
+| `docs/triage/reviews/open-issue-refresh-20260728-current/2550.json` | PUBLIC | Body-free reviewed issue evidence. |
+| `docs/triage/reviews/open-issue-refresh-20260728-current/2551.json` | PUBLIC | Body-free reviewed issue evidence. |
+| `docs/triage/reviews/open-issue-refresh-20260728-current/2552.json` | PUBLIC | Body-free reviewed issue evidence. |
+| `docs/triage/reviews/open-issue-refresh-20260728-current/2553.json` | PUBLIC | Body-free reviewed issue evidence. |
+| `docs/triage/reviews/open-issue-refresh-20260728-current/2554.json` | PUBLIC | Body-free reviewed issue evidence. |
+| `docs/triage/reviews/open-issue-refresh-20260728-current/2555.json` | PUBLIC | Body-free reviewed issue evidence. |
+| `docs/triage/reviews/open-issue-refresh-20260728-current/2556.json` | PUBLIC | Body-free reviewed issue evidence. |
+| `docs/triage/reviews/open-issue-refresh-20260728-current/2557.json` | PUBLIC | Body-free reviewed issue evidence. |
+| `docs/triage/reviews/open-issue-refresh-20260728-current/2558.json` | PUBLIC | Body-free reviewed issue evidence. |
+| `docs/triage/reviews/open-issue-refresh-20260728-current/2559.json` | PUBLIC | Body-free reviewed issue evidence. |
+| `docs/triage/reviews/open-issue-refresh-20260728-current/2560.json` | PUBLIC | Body-free reviewed issue evidence. |
+| `docs/triage/reviews/open-issue-refresh-20260728-current/2561.json` | PUBLIC | Body-free reviewed issue evidence. |
+| `docs/triage/reviews/open-issue-refresh-20260728-current/2562.json` | PUBLIC | Body-free reviewed issue evidence. |
+| `docs/triage/reviews/open-issue-refresh-20260728-current/2564.json` | PUBLIC | Body-free reviewed issue evidence. |
+| `docs/triage/reviews/open-issue-refresh-20260728-current/2565.json` | PUBLIC | Body-free reviewed issue evidence. |
+| `docs/triage/reviews/open-issue-refresh-20260728-current/2566.json` | PUBLIC | Body-free reviewed issue evidence. |
+| `docs/triage/reviews/open-issue-refresh-20260728-current/2567.json` | PUBLIC | Body-free reviewed issue evidence. |
+| `docs/triage/reviews/open-issue-refresh-20260728-current/2568.json` | PUBLIC | Body-free reviewed issue evidence. |
+| `docs/triage/reviews/open-issue-refresh-20260728-current/2569.json` | PUBLIC | Body-free reviewed issue evidence. |
+| `docs/triage/reviews/open-issue-refresh-20260728-current/2572.json` | PUBLIC | Body-free reviewed issue evidence. |
+| `docs/triage/reviews/open-issue-refresh-20260728-main-59166b78.json` | PUBLIC | Body-free schema-v2 reviewed issue evidence bound to the exact source registry and target main revision. |
+| `docs/triage/reviews/open-issue-refresh-20260728-main-59166b78/2517.json` | PUBLIC | Public exact review record binding issue 2517 to its current draft implementation owner without reproducing issue-body text. |
+| `docs/triage/snapshots/open-issues-20260728T0730Z-reconciled.json` | PUBLIC | Body-free complete registry reconciliation seal bound to the committed review manifest and exact main revision. |
+| `docs/triage/snapshots/open-issues-20260728T2225Z-main-59166b78.json` | PUBLIC | Body-free complete registry reconciliation seal bound to the committed review manifest and exact main revision. |
 | `docs/work-index-repair-matrix.md` | PRIVATE-ARCHIVE | Internal planning or operational documentation; retained in the repository but excluded from public publication by default. |
 | `docs/work-index.json` | PRIVATE-ARCHIVE | Internal planning or operational documentation; retained in the repository but excluded from public publication by default. |
 | `docs/work-index.md` | PRIVATE-ARCHIVE | Internal planning or operational documentation; retained in the repository but excluded from public publication by default. |
