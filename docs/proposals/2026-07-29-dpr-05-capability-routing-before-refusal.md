@@ -166,3 +166,72 @@ Ship behind `advanced.capabilityRouting.enabled`, default `false`, with `shadowO
 Promotion requires deny-wins security review, live-probe budgets, cache-invalidation proof, successful-twin and false-positive evaluation, and the detector advancement rule above. Until then, the resolver is advisory and existing execution authorization remains unchanged.
 
 Rollback disables route selection first, then response annotations and probes. Shadow diagnostics may remain only if retention and privacy controls pass; resolver unavailability must yield an inconclusive internal state, never a stronger refusal claim or a broader execution path.
+
+## Current-main reconciliation — 2026-07-29
+
+This amendment supersedes current-system instructions pinned to `c9759467d`.
+Current main is `5398982e610bb948d671181a04856590c9f3f9e5`.
+
+**Readiness:** `BLOCKED PRE-CODE`; decision-ready after authorization/policy
+owners are named.
+
+### Retained current owners
+
+- `src/mcp/registry.ts::class ToolRegistry`;
+- `src/lib/capability-grant.ts::createCapabilityGrantManager`;
+- provider descriptors/parity, model usability, credential state, configuration,
+  transport declarations, identity/session, and policy owners;
+- bounded cancellation-aware diagnostic probes;
+- durability evidence and fault taxonomy.
+
+### Exact gap
+
+No unified `capability_resolver` exists. Current `probe_inconclusive` behavior is
+limited to provider-parity evidence. The missing feature is one read-only
+composition of authoritative owner observations before an inability response.
+
+### Binding precedence
+
+Policy deny → authorization deny → identity/scope mismatch → configuration
+disabled → credential absent/unreadable → registration absent →
+stale/inconclusive observation → available route.
+
+An earlier deny always wins. Resolver failure, adapter timeout, unreadable
+source, or stale cache yields `probe_inconclusive`. Probe success is not
+authorization; registration is not permission; credential presence is not
+capability.
+
+### Forbidden ownership
+
+No second tool/capability/provider/credential registry, policy engine,
+authorization store, probe engine, route executor, or permanent availability
+database. The response planner owns wording/partial results; execution
+revalidates at use time.
+
+### Owner decisions
+
+- authorization and policy SSOT;
+- predicate/verdict/blocker taxonomy registration;
+- response integration boundary;
+- freshness and version/fingerprint interface per owner;
+- probe deadlines, rates, privacy, and circuit breakers;
+- cache key, TTL, capacity, and invalidation;
+- first read-only route allowlist.
+
+### First implementation-plan gate
+
+First RED binding:
+
+- File: `tests/lib/capability-resolver.test.ts`
+- Test: `returns probe_inconclusive when an authoritative owner observation is stale`
+- Command: `npm test -- tests/lib/capability-resolver.test.ts -t "returns probe_inconclusive when an authoritative owner observation is stale" --pool=forks`
+- Expected RED reason: the read-only resolver and versioned owner adapters do
+  not exist.
+
+Add a pure resolver test first, then adapters. Bind RED tests to registry,
+capability-grant, provider-parity, config, credential, and transport suites.
+Require the full deny cross-product, randomized conflicting states, read-only
+owner assertions, stale-cache invalidation, resolver crash/timeout, execution
+recheck, successful twins, and false-positive controls.
+
+The PR must remain draft and use a non-closing reference to #2554.
