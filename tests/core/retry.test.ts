@@ -3,6 +3,7 @@ import {
   AbortSleepError,
   jitteredDelay,
   jitteredDelayPositive,
+  MAX_TIMER_DELAY_MS,
   sleep as retrySleep,
   sleepWithAbort,
 } from '../../src/core/retry.ts';
@@ -31,6 +32,21 @@ describe('retry helpers', () => {
     await vi.advanceTimersByTimeAsync(24);
     expect(resolved).toBe(false);
 
+    await vi.advanceTimersByTimeAsync(1);
+    await pending;
+    expect(resolved).toBe(true);
+  });
+
+  it('sleep chunks delays above the Node timer ceiling without waking early', async () => {
+    let resolved = false;
+    const pending = retrySleep(MAX_TIMER_DELAY_MS + 1_000).then(() => {
+      resolved = true;
+    });
+
+    await vi.advanceTimersByTimeAsync(MAX_TIMER_DELAY_MS);
+    expect(resolved).toBe(false);
+    await vi.advanceTimersByTimeAsync(999);
+    expect(resolved).toBe(false);
     await vi.advanceTimersByTimeAsync(1);
     await pending;
     expect(resolved).toBe(true);

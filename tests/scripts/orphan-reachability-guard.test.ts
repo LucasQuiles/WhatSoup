@@ -134,6 +134,11 @@ const TRACKED_UNREACHABLE: readonly TrackedEntry[] = [
   // imessage adapter/port/types graduated out of TRACKED_UNREACHABLE: the
   // factory now constructs the imsg/bluebubbles ports (this branch), so all
   // three are reachable from a production root.
+  // Fleet response-error projection (#2517): the closed schema, classifier,
+  // and projection entry point land first so the surface can be reviewed in
+  // isolation. Route migration (the 31 errorMessage call sites in fleet
+  // routes) lands in a follow-up PR and graduates this entry.
+  { path: 'src/fleet/lib/response-error.ts', issue: '#2517', reason: 'closed schema/classifier surface; route migration lands in follow-up PR' },
 ];
 
 // ---------------------------------------------------------------------------

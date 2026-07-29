@@ -22,7 +22,8 @@ import { WhatSoupError } from '../../../src/errors.ts';
 import { OUTBOUND_GOVERNOR_SHED_LOG } from '../../../src/transport/outbound-governor.ts';
 import { toConversationKey } from '../../../src/core/conversation-key.ts';
 import { makeChannelId } from '../../../src/core/transport-refs.ts';
-import { RateLimitedError } from '../../../src/transport/contract/errors.ts';
+import { RateLimitedError, PayloadTooLargeError, TransientProviderError } from '../../../src/transport/contract/errors.ts';
+import { MAX_TIMER_DELAY_MS } from '../../../src/core/retry.ts';
 import { canSendToGroup, recordGroupOutbound, __resetForTests } from '../../../src/core/echo-guard.ts';
 import type { EchoGuardConfig } from '../../../src/core/echo-guard.ts';
 
@@ -67,6 +68,7 @@ function makeDurabilityStub(): DurabilityEngine {
     markSubmitted: vi.fn(),
     markMaybeSent: vi.fn(),
     markFailedPermanent: vi.fn(),
+    markDeferred: vi.fn(),
     markTerminal: vi.fn(),
   } as unknown as DurabilityEngine;
 }
@@ -584,6 +586,60 @@ describe('OutboundQueue', () => {
     expect(calls).toContain('Queued message');
   });
 
+  it('shutdown before a send records a deterministic zero-attempt disposition', async () => {
+    const { messenger } = makeMessenger();
+    const durability = makeDurabilityStub();
+    const queue = new OutboundQueue(messenger, CHAT_JID);
+    queue.setDurability(durability);
+
+    queue.preemptForShutdown(Date.now());
+    queue.enqueueText('Queued after shutdown preemption');
+    await vi.runAllTimersAsync();
+    await queue.flush();
+
+    expect(messenger.sendMessage).not.toHaveBeenCalled();
+    expect(durability.markFailedPermanent).toHaveBeenCalledWith(
+      1,
+      expect.objectContaining({
+        failure_code: 'outbound.shutdown_before_send',
+        mutation_state: 'not_started',
+        logical_attempt_count: 0,
+        provider_submission_count: 0,
+        retry_owner: 'none',
+      }),
+    );
+  });
+
+  it('shutdown during a provider call records one ambiguous submitted attempt', async () => {
+    const inFlight = deferred<{ waMessageId: string | null }>();
+    const messenger: Messenger = {
+      sendMessage: vi.fn(() => inFlight.promise),
+      sendMedia: vi.fn(async () => ({ waMessageId: null })),
+    };
+    const durability = makeDurabilityStub();
+    const queue = new OutboundQueue(messenger, CHAT_JID);
+    queue.setDurability(durability);
+
+    queue.enqueueText('In-flight at shutdown');
+    await vi.advanceTimersByTimeAsync(0);
+    expect(messenger.sendMessage).toHaveBeenCalledOnce();
+    queue.preemptForShutdown(Date.now());
+    await queue.flush();
+
+    expect(durability.markMaybeSent).toHaveBeenCalledWith(
+      1,
+      expect.objectContaining({
+        failure_code: 'outbound.shutdown_deadline',
+        mutation_state: 'ambiguous',
+        logical_attempt_count: 1,
+        provider_submission_count: 1,
+        retry_owner: 'none',
+      }),
+      expect.any(String),
+    );
+    inFlight.resolve({ waMessageId: null });
+  });
+
   it('flush sends all pending immediately', async () => {
     const { messenger, calls } = makeMessenger();
     const queue = new OutboundQueue(messenger, CHAT_JID);
@@ -1071,8 +1127,8 @@ describe('OutboundQueue', () => {
       sendMessage: vi.fn(async (_jid: string, text: string) => {
         callNum += 1;
         // First 3 calls (for 'bad message') always fail
-        // Call 4 is the delivery-failure notice (should succeed)
-        // Call 5+ (for 'good message') succeed
+        // Call 4+ (for 'good message') succeed. No fourth failure-notice send
+        // is attempted through the channel that just exhausted.
         if (callNum <= 3) {
           throw new Error('permanent failure');
         }
@@ -1090,12 +1146,16 @@ describe('OutboundQueue', () => {
     // Error was logged for exhausted retries on 'bad message'
     expect(mockLog.error).toHaveBeenCalledOnce();
     const [errorArg, errorMsg] = mockLog.error.mock.calls[0];
-    expect(errorArg).toMatchObject({ attempts: 3 });
-    expect(typeof errorArg.textPreview).toBe('string');
-    expect(errorMsg).toContain('retries');
+    expect(errorArg).toMatchObject({
+      attempts: 3,
+      providerSubmissions: 3,
+      failureCode: 'outbound.unknown_failure',
+      mutationState: 'ambiguous',
+    });
+    expect(errorArg).not.toHaveProperty('textPreview');
+    expect(errorMsg).toContain('bounded failure disposition');
 
-    // Delivery-failure notice was sent
-    expect(successCalls.some((t) => t.includes('could not be delivered'))).toBe(true);
+    expect(successCalls.some((t) => t.includes('could not be delivered'))).toBe(false);
     // Queue kept draining — 'good message' was delivered
     expect(successCalls.some((t) => t === 'good message')).toBe(true);
   });
@@ -1186,8 +1246,8 @@ describe('OutboundQueue', () => {
 
     mathRandomSpy.mockRestore();
 
-    // All 3 attempts exhausted, plus 1 best-effort notice call
-    expect(alwaysFailMessenger.sendMessage).toHaveBeenCalledTimes(4);
+    // All 3 attempts exhaust without a fourth request through the failed channel.
+    expect(alwaysFailMessenger.sendMessage).toHaveBeenCalledTimes(3);
     // Error logged
     expect(mockLog.error).toHaveBeenCalledOnce();
 
@@ -1231,7 +1291,10 @@ describe('OutboundQueue', () => {
 
     expect(rateLimitedMessenger.sendMessage).toHaveBeenCalledTimes(2);
     expect(mockLog.warn).toHaveBeenCalledWith(
-      expect.objectContaining({ retryAfterMs: 4_000 }),
+      expect.objectContaining({
+        delayMs: 4_000,
+        failureCode: 'transport.rate_limited',
+      }),
       expect.stringContaining('retrying'),
     );
   });
@@ -1262,7 +1325,7 @@ describe('OutboundQueue', () => {
 
   // ─── B07: Queue exhaustion notification ───────────────────────────────────
 
-  it('B07: sends exact failure notice after MAX_SEND_ATTEMPTS retries exhausted', async () => {
+  it('B07: does not send a failure notice through the exhausted channel', async () => {
     mockLog.error.mockClear();
     const noticeCalls: string[] = [];
     let callNum = 0;
@@ -1271,7 +1334,7 @@ describe('OutboundQueue', () => {
         callNum += 1;
         // First 3 attempts fail (the original message)
         if (callNum <= 3) throw new Error('permanent failure');
-        // Call 4 is the best-effort notice — capture it
+        // A fourth call would be the unsafe legacy failure notice.
         noticeCalls.push(text);
         return { waMessageId: null };
       }),
@@ -1282,13 +1345,88 @@ describe('OutboundQueue', () => {
     queue.enqueueText('message that will fail');
     await vi.runAllTimersAsync();
 
-    expect(noticeCalls).toHaveLength(1);
-    expect(noticeCalls[0]).toBe('⚠️ A response could not be delivered after 3 attempts.');
+    expect(noticeCalls).toHaveLength(0);
+    expect(exhaustedMessenger.sendMessage).toHaveBeenCalledTimes(3);
+  });
+
+  it('B07: sends a failure notice when the failure class proves the channel is healthy', async () => {
+    mockLog.error.mockClear();
+    const noticeCalls: string[] = [];
+    let callNum = 0;
+    // payload_too_large is a message-specific, non-retryable rejection that
+    // fires BEFORE provider contact — a short fixed-string notice to the same
+    // destination does not share the defect, so it must go out (unlike the
+    // dead-channel classes in the sibling B07 test above).
+    const oversizedMessenger: Messenger = {
+      sendMessage: vi.fn(async (_jid: string, text: string) => {
+        callNum += 1;
+        if (callNum === 1) {
+          throw new PayloadTooLargeError({
+            channelId: makeChannelId('whatsapp', 'test'),
+            operation: 'sendText',
+            correlationId: 'corr-payload-too-large',
+            message: 'synthetic provider prose that must not persist',
+            scope: 'request',
+          });
+        }
+        noticeCalls.push(text);
+        return { waMessageId: null };
+      }),
+      sendMedia: vi.fn(async () => ({ waMessageId: null })),
+    };
+
+    const queue = new OutboundQueue(oversizedMessenger, CHAT_JID);
+    queue.enqueueText('message too large for the provider');
+    await vi.runAllTimersAsync();
+
+    expect(noticeCalls).toEqual(['⚠️ A response could not be delivered after 3 attempts.']);
+    // Not retryable — one failed attempt against the original message, one
+    // notice send. No blind retry of the oversized payload.
+    expect(oversizedMessenger.sendMessage).toHaveBeenCalledTimes(2);
+  });
+
+  it('B07: does not send a failure notice for a retryable transient_provider failure that reaches stop only via exhaustion', async () => {
+    // Pinning test (GAP 2b): behavior is already correct, no RED expected.
+    // transient_provider IS retryable, so classifyOutboundFailure keeps
+    // returning retry_decision 'retry_now' on attempts 1-2 — but on the
+    // final attempt (attemptsRemaining hits 0) it ALSO reaches 'stop', the
+    // exact same retry_decision the allowlisted classes use. This proves
+    // retry_decision==='stop' alone is not a safe gate for the notice —
+    // only the failure-class allowlist (payload_too_large,
+    // unsupported_capability) keeps this dead-channel class silent.
+    mockLog.error.mockClear();
+    const noticeCalls: string[] = [];
+    let callNum = 0;
+    const transientMessenger: Messenger = {
+      sendMessage: vi.fn(async (_jid: string, text: string) => {
+        callNum += 1;
+        if (callNum <= 3) {
+          throw new TransientProviderError({
+            channelId: makeChannelId('whatsapp', 'test'),
+            operation: 'sendText',
+            correlationId: 'corr-transient-exhausted',
+            message: 'synthetic provider prose that must not persist',
+            scope: 'request',
+            phase: 'provider_call_started',
+          });
+        }
+        noticeCalls.push(text);
+        return { waMessageId: null };
+      }),
+      sendMedia: vi.fn(async () => ({ waMessageId: null })),
+    };
+
+    const queue = new OutboundQueue(transientMessenger, CHAT_JID);
+    queue.enqueueText('message that keeps hitting a transient provider failure');
+    await vi.runAllTimersAsync();
+
+    expect(noticeCalls).toHaveLength(0);
+    expect(transientMessenger.sendMessage).toHaveBeenCalledTimes(3);
   });
 
   // ─── B12: Retry warn logs shape ───────────────────────────────────────────
 
-  it('B12: warn log includes chatJid, attempt, maxAttempts, textPreview on each retry', async () => {
+  it('B12: retry logs use bounded disposition fields without destination or content', async () => {
     mockLog.warn.mockClear();
     mockLog.error.mockClear();
     let callCount = 0;
@@ -1309,15 +1447,17 @@ describe('OutboundQueue', () => {
     expect(mockLog.warn).toHaveBeenCalledTimes(2);
     for (const [warnArg] of mockLog.warn.mock.calls) {
       expect(warnArg).toMatchObject({
-        chatJid: CHAT_JID,
         maxAttempts: 3,
+        failureCode: 'outbound.unknown_failure',
+        mutationState: 'ambiguous',
       });
       expect(typeof warnArg.attempt).toBe('number');
-      expect(typeof warnArg.textPreview).toBe('string');
+      expect(warnArg).not.toHaveProperty('chatJid');
+      expect(warnArg).not.toHaveProperty('textPreview');
     }
   });
 
-  it('B12: terminal failure error log includes chatJid, err, and textLength', async () => {
+  it('B12: terminal failure logs bounded evidence without raw error or content', async () => {
     mockLog.error.mockClear();
     let callNum = 0;
     const alwaysFailMessenger: Messenger = {
@@ -1335,11 +1475,15 @@ describe('OutboundQueue', () => {
 
     expect(mockLog.error).toHaveBeenCalledOnce();
     const [errorArg] = mockLog.error.mock.calls[0];
-    expect(errorArg).toMatchObject({ chatJid: CHAT_JID, attempts: 3 });
-    expect(typeof errorArg.textLength).toBe('number');
-    expect(errorArg.textLength).toBe('terminal shape test'.length);
-    expect(errorArg.err).toBeInstanceOf(Error);
-    expect((errorArg.err as Error).message).toBe('hard fail');
+    expect(errorArg).toMatchObject({
+      attempts: 3,
+      providerSubmissions: 3,
+      failureCode: 'outbound.unknown_failure',
+      mutationState: 'ambiguous',
+    });
+    expect(errorArg).not.toHaveProperty('chatJid');
+    expect(errorArg).not.toHaveProperty('textLength');
+    expect(errorArg).not.toHaveProperty('err');
   });
 
   // ─── enqueueProgressUpdate ──────────────────────────────────────────────
@@ -2056,7 +2200,7 @@ describe('OutboundQueue', () => {
 
   // ─── durability: markMaybeSent after retry exhaustion ────────────────────
 
-  it('markMaybeSent called with error message when all retries fail and opId is set', async () => {
+  it('markMaybeSent receives bounded evidence when all retries fail', async () => {
     const durability = makeDurabilityStub();
     let callNum = 0;
     const failMessenger: Messenger = {
@@ -2077,8 +2221,12 @@ describe('OutboundQueue', () => {
     expect(durability.markMaybeSent).toHaveBeenCalledOnce();
     const [opIdArg, msgArg] = (durability.markMaybeSent as ReturnType<typeof vi.fn>).mock.calls[0];
     expect(typeof opIdArg).toBe('number');
-    expect(typeof msgArg).toBe('string');
-    expect(msgArg).toBe('socket_error');
+    expect(msgArg).toMatchObject({
+      failure_code: 'outbound.unknown_failure',
+      mutation_state: 'ambiguous',
+      logical_attempt_count: 3,
+      provider_submission_count: 3,
+    });
   });
 
   // ─── durability: governor sheds are deterministic non-sends, NOT ambiguous ──
@@ -2105,7 +2253,13 @@ describe('OutboundQueue', () => {
     expect(durability.markFailedPermanent).toHaveBeenCalledOnce();
     const [opIdArg, msgArg] = (durability.markFailedPermanent as ReturnType<typeof vi.fn>).mock.calls[0];
     expect(typeof opIdArg).toBe('number');
-    expect(msgArg).toBe(OUTBOUND_GOVERNOR_SHED_LOG);
+    expect(msgArg).toMatchObject({
+      failure_code: 'outbound.governor_shed',
+      stage: 'admission',
+      mutation_state: 'not_started',
+      logical_attempt_count: 1,
+      provider_submission_count: 0,
+    });
     expect(durability.markMaybeSent).not.toHaveBeenCalled();
   });
 
@@ -2181,16 +2335,23 @@ describe('OutboundQueue', () => {
     expect(warnArg).not.toHaveProperty('retryAfterMs');
   });
 
-  it('retryAfterMs: retryAfterMs exceeding SEND_RETRY_MAX_MS is clamped to 8000ms', async () => {
+  it('retryAfterMs: producer floor is durably deferred without an 8000ms clamp', async () => {
     mockLog.warn.mockClear();
+    const durability = makeDurabilityStub();
     let callCount = 0;
     const clampedRetryMessenger: Messenger = {
       sendMessage: vi.fn(async () => {
         callCount += 1;
         if (callCount === 1) {
-          const err: Error & { payload?: unknown } = new Error('rate_limit_huge');
-          err.payload = { retryAfterMs: 999_999 }; // well above SEND_RETRY_MAX_MS (8000)
-          throw err;
+          throw new RateLimitedError({
+            channelId: makeChannelId('signal', 'test'),
+            operation: 'sendText',
+            correlationId: 'synthetic-rate-floor',
+            scope: 'conversation',
+            message: 'synthetic',
+            phase: 'not_started',
+            retryAfterMs: 999_999,
+          });
         }
         return { waMessageId: null };
       }),
@@ -2198,15 +2359,55 @@ describe('OutboundQueue', () => {
     };
 
     const queue = new OutboundQueue(clampedRetryMessenger, CHAT_JID);
+    queue.setDurability(durability);
     queue.enqueueText('clamped retryAfterMs test');
-    // Advance past the clamped delay (8000ms max) but not more
     await vi.advanceTimersByTimeAsync(8_001);
     await queue.flush();
 
-    expect(clampedRetryMessenger.sendMessage).toHaveBeenCalledTimes(2);
-    const [warnArg] = mockLog.warn.mock.calls[0];
-    // retryAfterMs logged should equal SEND_RETRY_MAX_MS (8000), not 999_999
-    expect(warnArg.retryAfterMs).toBe(8_000);
+    expect(clampedRetryMessenger.sendMessage).toHaveBeenCalledTimes(1);
+    expect(durability.markDeferred).toHaveBeenCalledOnce();
+    const [, evidence] = (durability.markDeferred as ReturnType<typeof vi.fn>).mock.calls[0];
+    expect(Date.parse(evidence.retry_not_before) - Date.now()).toBeGreaterThan(900_000);
+    expect(evidence).toMatchObject({
+      failure_code: 'transport.rate_limited',
+      mutation_state: 'not_started',
+      retry_owner: 'pending_drainer',
+      provider_submission_count: 0,
+    });
+  });
+
+  it('retryAfterMs: non-durable waits above the Node timer ceiling do not wake early', async () => {
+    let callCount = 0;
+    const messenger: Messenger = {
+      sendMessage: vi.fn(async () => {
+        callCount += 1;
+        if (callCount === 1) {
+          throw new RateLimitedError({
+            channelId: makeChannelId('signal', 'test'),
+            operation: 'sendText',
+            correlationId: 'synthetic-long-floor',
+            scope: 'conversation',
+            message: 'synthetic',
+            phase: 'not_started',
+            retryAfterMs: MAX_TIMER_DELAY_MS + 1_000,
+          });
+        }
+        return { waMessageId: null };
+      }),
+      sendMedia: vi.fn(async () => ({ waMessageId: null })),
+    };
+    const queue = new OutboundQueue(messenger, CHAT_JID);
+    queue.enqueueText('long producer floor');
+
+    await vi.advanceTimersByTimeAsync(0);
+    expect(messenger.sendMessage).toHaveBeenCalledOnce();
+    await vi.advanceTimersByTimeAsync(MAX_TIMER_DELAY_MS);
+    expect(messenger.sendMessage).toHaveBeenCalledOnce();
+    await vi.advanceTimersByTimeAsync(999);
+    expect(messenger.sendMessage).toHaveBeenCalledOnce();
+    await vi.advanceTimersByTimeAsync(1);
+    await queue.flush();
+    expect(messenger.sendMessage).toHaveBeenCalledTimes(2);
   });
 
   // ─── SEND_TIMEOUT logged as timeout:true on retry ────────────────────────
@@ -2237,7 +2438,10 @@ describe('OutboundQueue', () => {
     await queue.flush();
 
     expect(mockLog.warn).toHaveBeenCalled();
-    const timeoutLogs = mockLog.warn.mock.calls.filter(([arg]) => arg.timeout === true);
+    const timeoutLogs = mockLog.warn.mock.calls.filter(
+      ([arg]) => arg.failureCode === 'outbound.unknown_failure'
+        && arg.mutationState === 'ambiguous',
+    );
     expect(timeoutLogs.length).toBeGreaterThanOrEqual(1);
   });
 
@@ -2577,7 +2781,7 @@ describe('OutboundQueue', () => {
       __resetForTests();
     });
 
-    it('retry warn log truncates textPreview to 80 chars plus ellipsis for long messages', async () => {
+    it('retry warn log omits message content for long messages', async () => {
       mockLog.warn.mockClear();
       mockLog.error.mockClear();
       let callCount = 0;
@@ -2598,12 +2802,11 @@ describe('OutboundQueue', () => {
       // One retry fired before the successful second attempt.
       expect(mockLog.warn).toHaveBeenCalledOnce();
       const [warnArg] = mockLog.warn.mock.calls[0];
-      // Truncation branch: preview is the first 80 chars followed by the ellipsis.
-      expect(warnArg.textPreview).toBe('x'.repeat(80) + '…');
-      expect(warnArg.textPreview).toHaveLength(81);
+      expect(warnArg).not.toHaveProperty('textPreview');
+      expect(JSON.stringify(warnArg)).not.toContain('x'.repeat(20));
     });
 
-    it('terminal error log truncates textPreview to 80 chars plus ellipsis when all retries fail on a long message', async () => {
+    it('terminal error log omits message content when all retries fail', async () => {
       mockLog.warn.mockClear();
       mockLog.error.mockClear();
       let callNum = 0;
@@ -2612,7 +2815,6 @@ describe('OutboundQueue', () => {
         sendMessage: vi.fn(async () => {
           callNum += 1;
           if (callNum <= 3) throw new Error('hard fail');
-          // 4th call is the best-effort notice — let it succeed.
           return { waMessageId: null };
         }),
         sendMedia: vi.fn(async () => ({ waMessageId: null })),
@@ -2624,12 +2826,11 @@ describe('OutboundQueue', () => {
 
       expect(mockLog.error).toHaveBeenCalledOnce();
       const [errorArg] = mockLog.error.mock.calls[0];
-      // Truncation branch on the terminal-failure path.
-      expect(errorArg.textPreview).toBe('y'.repeat(80) + '…');
-      expect(errorArg.textPreview).toHaveLength(81);
+      expect(errorArg).not.toHaveProperty('textPreview');
+      expect(JSON.stringify(errorArg)).not.toContain('y'.repeat(20));
     });
 
-    it('markMaybeSent receives "send_failed" when the thrown value has no .message property', async () => {
+    it('markMaybeSent classifies a non-Error throw without persisting prose', async () => {
       mockLog.warn.mockClear();
       mockLog.error.mockClear();
       const durability = makeDurabilityStub();
@@ -2649,10 +2850,14 @@ describe('OutboundQueue', () => {
       queue.enqueueText('non-error throw');
       await vi.runAllTimersAsync();
 
-      // The ?? fallback fired — markMaybeSent got the literal 'send_failed'.
       expect(durability.markMaybeSent).toHaveBeenCalledOnce();
       const [, reasonArg] = (durability.markMaybeSent as ReturnType<typeof vi.fn>).mock.calls[0];
-      expect(reasonArg).toBe('send_failed');
+      expect(reasonArg).toMatchObject({
+        failure_code: 'outbound.unknown_failure',
+        evidence_coverage: 'partial',
+        logical_attempt_count: 3,
+        provider_submission_count: 3,
+      });
     });
 
     it('splitMessage skips the trailing empty chunk when text ends in whitespace past the boundary', async () => {

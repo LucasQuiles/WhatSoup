@@ -120,7 +120,10 @@ describe('DurabilityEngine — preConnectRecovery()', () => {
     });
     engine.markSending(id);
     engine.preConnectRecovery();
-    expect(getOutbound(db, id)['error']).toBe('crash-in-flight');
+    expect(JSON.parse(getOutbound(db, id)['error'] as string)).toMatchObject({
+      failure_code: 'outbound.crash_in_flight',
+      mutation_state: 'ambiguous',
+    });
   });
 
   // ── Risk 2: executing tool call with outbound_op_id ────────────────────

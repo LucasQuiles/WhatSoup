@@ -199,7 +199,29 @@ describe('DurabilityEngine', () => {
       engine.markMaybeSent(id, 'EPIPE');
       const row = db.raw.prepare('SELECT * FROM outbound_ops WHERE id = ?').get(id) as any;
       expect(row.status).toBe('maybe_sent');
-      expect(row.error).toBe('EPIPE');
+      expect(JSON.parse(row.error)).toMatchObject({
+        failure_code: 'outbound.unknown_failure',
+        mutation_state: 'ambiguous',
+      });
+    });
+
+    it('failure transitions cannot overwrite an echo that won the race', () => {
+      const id = engine.createOutboundOp({
+        conversationKey: 'k',
+        chatJid: 'j',
+        opType: 'text',
+        payload: '{}',
+        replayPolicy: 'unsafe',
+      });
+      engine.markSending(id);
+      engine.markSubmitted(id, 'WA_ECHO_WON');
+      engine.markEchoed(id);
+
+      expect(engine.markMaybeSent(id, 'late timeout')).toBe(false);
+      expect(engine.markFailedPermanent(id, 'late rejection')).toBe(false);
+      expect(engine.markQuarantined(id)).toBe(false);
+      expect(db.raw.prepare('SELECT status, error FROM outbound_ops WHERE id = ?').get(id))
+        .toMatchObject({ status: 'echoed', error: null });
     });
 
     it('getHealthStats surfaces the maybe_sent count and oldest submission age (#1865)', () => {
@@ -220,6 +242,58 @@ describe('DurabilityEngine', () => {
       expect(stats.oldestMaybeSentAt).not.toBeNull();
       const ageMs = Date.now() - Date.parse((stats.oldestMaybeSentAt as string).replace(' ', 'T') + 'Z');
       expect(ageMs).toBeGreaterThan(30 * 60 * 1000);
+    });
+
+    it('projects bounded failure evidence without message or destination data', () => {
+      const first = engine.createOutboundOp({
+        conversationKey: 'private-conversation',
+        chatJid: 'private-destination',
+        opType: 'text',
+        payload: '{"text":"private message body"}',
+        replayPolicy: 'unsafe',
+      });
+      engine.markMaybeSent(first, 'private provider prose');
+      const second = engine.createOutboundOp(BASE_OP);
+      db.raw.prepare('UPDATE outbound_ops SET error = ? WHERE id = ?').run(
+        'legacy private provider prose',
+        second,
+      );
+
+      const projection = engine.getHealthStats().outboundFailureEvidence;
+      expect(projection).toEqual({
+        sampledRows: 2,
+        groups: expect.arrayContaining([
+          {
+            failureCode: 'outbound.unknown_failure',
+            stage: 'provider_request',
+            mutationState: 'ambiguous',
+            evidenceCoverage: 'partial',
+            terminalState: 'maybe_sent',
+            retryDecision: 'stop',
+            retryOwner: 'none',
+            remainingDelayBucket: 'none',
+            nextEligibleAt: null,
+            providerSubmissionCount: 1,
+            count: 1,
+          },
+          {
+            failureCode: 'outbound.legacy_unclassified',
+            stage: 'legacy_unclassified',
+            mutationState: 'legacy_unclassified',
+            evidenceCoverage: 'legacy_unclassified',
+            terminalState: 'pending',
+            retryDecision: 'legacy_unclassified',
+            retryOwner: 'legacy_unclassified',
+            remainingDelayBucket: 'unknown',
+            nextEligibleAt: null,
+            providerSubmissionCount: 0,
+            count: 1,
+          },
+        ]),
+      });
+      const serialized = JSON.stringify(projection);
+      expect(serialized).not.toContain('private');
+      expect(projection.groups.length).toBeLessThanOrEqual(20);
     });
 
     it('fails closed on a send that failed before markSubmitted: null submitted_at must still age via created_at, not read as fresh (PRESTAGE-T4)', () => {
@@ -279,7 +353,10 @@ describe('DurabilityEngine', () => {
 
       const row = db.raw.prepare('SELECT status, error FROM outbound_ops WHERE id = ?').get(id) as any;
       expect(row.status).toBe('maybe_sent');
-      expect(row.error).toBe('echo_timeout');
+      expect(JSON.parse(row.error)).toMatchObject({
+        failure_code: 'outbound.echo_timeout',
+        stage: 'acknowledgement',
+      });
     });
 
     it('sweeps multiple stale ops in one call', () => {
@@ -506,7 +583,10 @@ describe('DurabilityEngine', () => {
         .rejects.toThrow('network down');
       const op = db.raw.prepare('SELECT * FROM outbound_ops ORDER BY id DESC LIMIT 1').get() as any;
       expect(op.status).toBe('maybe_sent');
-      expect(op.error).toBe('network down');
+      expect(JSON.parse(op.error)).toMatchObject({
+        failure_code: 'outbound.unknown_failure',
+        mutation_state: 'ambiguous',
+      });
     });
 
     it('works without durability engine (no-op tracking)', async () => {
@@ -694,7 +774,10 @@ describe('durability.ts uncovered-branch coverage', () => {
     const stats = engine.preConnectRecovery();
     const op = db.raw.prepare('SELECT status, error FROM outbound_ops WHERE id = ?').get(opId) as any;
     expect(op.status).toBe('maybe_sent');
-    expect(op.error).toBe('crash-in-flight');
+    expect(JSON.parse(op.error)).toMatchObject({
+      failure_code: 'outbound.crash_in_flight',
+      stage: 'provider_request',
+    });
     expect(stats.outboundReconciled).toBe(1);
   });
 
@@ -789,8 +872,12 @@ describe('durability.ts uncovered-branch coverage', () => {
     expect(stats.outboundReconciled).toBe(1);
     expect(stats.outboundReplayed).toBe(1);
     const op = db.raw.prepare('SELECT status, error FROM outbound_ops WHERE id = ?').get(opId) as any;
-    // Final state after safe reconciliation: reset to pending, error cleared.
-    expect(op).toMatchObject({ status: 'pending', error: null });
+    // Final state after safe reconciliation keeps the retry handoff evidence.
+    expect(op.status).toBe('pending');
+    expect(JSON.parse(op.error)).toMatchObject({
+      failure_code: 'outbound.echo_timeout',
+      retry_owner: 'pending_drainer',
+    });
   });
 
   // ── postConnectRecovery: maybe_sent with wa_message_id found in messages → echoed (lines 722-727) ──
@@ -823,7 +910,10 @@ describe('durability.ts uncovered-branch coverage', () => {
     const stats = engine.postConnectRecovery();
     const op = db.raw.prepare('SELECT status, error FROM outbound_ops WHERE id = ?').get(opId) as any;
     expect(op.status).toBe('pending');
-    expect(op.error).toBeNull();
+    expect(JSON.parse(op.error)).toMatchObject({
+      retry_decision: 'retry_now',
+      retry_owner: 'pending_drainer',
+    });
     expect(stats.outboundReplayed).toBe(1);
   });
 
@@ -892,7 +982,10 @@ describe('durability.ts uncovered-branch coverage', () => {
     expect(count).toBe(1);
     const op = db.raw.prepare('SELECT status, error FROM outbound_ops WHERE id = ?').get(opId) as any;
     expect(op.status).toBe('maybe_sent');
-    expect(op.error).toBe('echo_timeout');
+    expect(JSON.parse(op.error)).toMatchObject({
+      failure_code: 'outbound.echo_timeout',
+      stage: 'acknowledgement',
+    });
   });
 
   it('sweepStaleSubmitted returns 0 when no stale ops exist', () => {

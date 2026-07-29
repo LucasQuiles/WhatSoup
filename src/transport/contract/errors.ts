@@ -1,10 +1,11 @@
 // src/transport/contract/errors.ts
 import type { ChannelId } from '../../core/transport-refs.ts';
+import type { OperationPhase } from '../../core/transport-error-taxonomy.ts';
 import { ErrorCode } from './error-codes.ts';
 
 export type ErrorScope = 'request' | 'conversation' | 'channel' | 'provider' | 'runtime';
 export type CallerKind = 'internal' | 'mcp' | 'tool' | 'reconciliation';
-export type OperationPhase = 'not_started' | 'provider_call_started' | 'ack_received';
+export type { OperationPhase } from '../../core/transport-error-taxonomy.ts';
 
 export interface TransportErrorPayload {
   readonly code: string;
@@ -42,6 +43,7 @@ interface BaseInput {
   readonly providerCode?: string;
   readonly idempotencyKey?: string;
   readonly callerKind?: CallerKind;
+  readonly phase?: OperationPhase;
 }
 
 function build(code: string, retryable: boolean, input: BaseInput, extra: Partial<TransportErrorPayload> = {}): TransportErrorPayload {

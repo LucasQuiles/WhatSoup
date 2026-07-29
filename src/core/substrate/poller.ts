@@ -93,11 +93,12 @@ const MAX_CONSECUTIVE_FORBIDDEN_REJECTS = 3;
  * recovers by retrying the same target, so it must short-circuit the producer
  * rather than loop forever.
  *
- * Grounded in the incident bytes: `outbound_ops.error` is stored verbatim as
- * `err.message` (durability.markFailedPermanent / outbound-queue.ts), and the
- * 167 quarantined rows read `error='forbidden'` — i.e. the raw thrown message
- * for this rejection literally IS `forbidden`. The `output.statusCode === 403`
- * fallback also catches a Boom-wrapped reject whose message is opaque.
+ * Grounded in historical incident bytes recorded before structured outbound
+ * evidence: 167 quarantined rows contained the raw rejection `forbidden`.
+ * Current durability stores only the bounded failure envelope, while this
+ * producer-side classifier still inspects the live thrown error. The
+ * `output.statusCode === 403` fallback also catches a Boom-wrapped reject whose
+ * message is opaque.
  *
  * 401/`unauthorized` is deliberately EXCLUDED: it is a session/auth condition
  * (a re-pair heals it), NOT a per-target verdict — treating it as terminal

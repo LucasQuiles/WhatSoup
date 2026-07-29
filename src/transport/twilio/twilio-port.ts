@@ -110,8 +110,33 @@ function scrub(text: string, token: string): string {
 }
 
 /**
- * Rethrow err with {message, code, status} preserved and any token content
- * removed from the message.  The error shape matches TwilioPortError.
+ * True when `raw` is a Node/OS-level connection-establishment failure —
+ * provably pre-write: the underlying TCP connection was never established,
+ * so no HTTP request byte for THIS call ever left the process.
+ *
+ * ECONNREFUSED and the DNS failures (ENOTFOUND, EAI_AGAIN) are unambiguous
+ * regardless of syscall metadata. ETIMEDOUT is only unambiguous when Node
+ * tags it with syscall 'connect' (the TCP handshake itself timed out) — a
+ * bare ETIMEDOUT could be a response-level timeout on an already-open
+ * connection, which is genuinely ambiguous and must NOT be tagged.
+ *
+ * Deliberately independent of the code/status extraction below: these are
+ * raw Node system-error STRING codes, disjoint from Twilio's own numeric API
+ * error codes, so this check cannot reclassify a real Twilio rejection.
+ */
+function isProvablyPreConnectionFailure(raw: Record<string, unknown>): boolean {
+  const code = typeof raw['code'] === 'string' ? raw['code'] : undefined;
+  if (code === 'ECONNREFUSED' || code === 'ENOTFOUND' || code === 'EAI_AGAIN') return true;
+  if (code === 'ETIMEDOUT' && raw['syscall'] === 'connect') return true;
+  return false;
+}
+
+/**
+ * Rethrow err with {message, code, status, phase} preserved and any token
+ * content removed from the message.  The error shape matches
+ * TwilioPortError. `phase` is set only when the failure is PROVABLY
+ * pre-connection (see isProvablyPreConnectionFailure); otherwise it is left
+ * absent so the adapter's conservative default applies.
  *
  * The ORIGINAL stack is preserved (scrubbed) on the rethrown error so SDK
  * frames remain visible for production debugging. The original error object
@@ -124,8 +149,11 @@ function scrubAndRethrow(err: unknown, token: string): never {
   const safeMsg = scrub(rawMsg, token);
   const code = typeof raw['code'] === 'number' ? raw['code'] : undefined;
   const status = typeof raw['status'] === 'number' ? raw['status'] : undefined;
+  const phase = isProvablyPreConnectionFailure(raw)
+    ? { phase: 'not_started' as const }
+    : {};
   const out: TwilioPortError & { code?: number; status?: number } & Error =
-    Object.assign(new Error(safeMsg), { code, status } as Partial<TwilioPortError>);
+    Object.assign(new Error(safeMsg), { code, status, ...phase } as Partial<TwilioPortError>);
   if (typeof raw['stack'] === 'string') {
     out.stack = scrub(raw['stack'], token);
   }

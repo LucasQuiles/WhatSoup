@@ -687,7 +687,11 @@ systemctl --user start whatsoup@sandbox-agent
 ```bash
 # 1. Check outbound_ops for stuck or quarantined operations
 sqlite3 ~/.local/share/whatsoup/instances/sandbox-agent/bot.db \
-  "SELECT id, status, op_type, replay_policy, submitted_at, error
+  "SELECT id, status, op_type, replay_policy, retry_count, submitted_at,
+          CASE WHEN json_valid(error) THEN json_extract(error, '$.failure_code')
+               ELSE 'outbound.legacy_unclassified' END AS failure_code,
+          CASE WHEN json_valid(error) THEN json_extract(error, '$.stage')
+               ELSE 'legacy_unclassified' END AS failure_stage
    FROM outbound_ops
    WHERE status NOT IN ('echoed', 'failed_permanent')
    ORDER BY id DESC LIMIT 20;"
@@ -698,7 +702,7 @@ sqlite3 ~/.local/share/whatsoup/instances/sandbox-agent/bot.db \
 
 # 3. Check health for durability stats
 curl -s http://127.0.0.1:9091/health | python3 -c \
-  "import sys,json; d=json.load(sys.stdin); print('pending:', d['durability']['pendingOutbound'], '| quarantined:', d['durability']['quarantinedOutbound'])"
+  "import sys,json; d=json.load(sys.stdin)['durability']; print('pending:', d['pendingOutbound'], '| quarantined:', d['quarantinedOutbound'], '| failures:', d['outboundFailureEvidence'])"
 
 # 4. Check WhatsApp is connected
 curl -s http://127.0.0.1:9091/health | python3 -c \
@@ -707,6 +711,8 @@ curl -s http://127.0.0.1:9091/health | python3 -c \
 
 **Status meanings for `outbound_ops.status`:**
 - `pending` — waiting to send (normal during queue flush)
+- `pending` with a future `retry_not_before` — producer-requested defer; the
+  pending drainer owns the retry and will not send before the deadline
 - `sending` — send in progress
 - `submitted` — sent to WhatsApp, waiting for echo confirmation
 - `echoed` — confirmed delivered (normal terminal state)
@@ -880,7 +886,12 @@ OP_ID=123 # replace with the quarantined op under review
 
 # 1. Inspect quarantined operation metadata without printing message bodies.
 sqlite3 $DB \
-  "SELECT id, conversation_key, payload_hash, source_inbound_seq, error, submitted_at
+  "SELECT id, conversation_key, payload_hash, source_inbound_seq,
+          CASE WHEN json_valid(error) THEN json_extract(error, '$.failure_code')
+               ELSE 'outbound.legacy_unclassified' END AS failure_code,
+          CASE WHEN json_valid(error) THEN json_extract(error, '$.stage')
+               ELSE 'legacy_unclassified' END AS failure_stage,
+          retry_count, submitted_at
    FROM outbound_ops WHERE status = 'quarantined'
    ORDER BY id DESC;"
 

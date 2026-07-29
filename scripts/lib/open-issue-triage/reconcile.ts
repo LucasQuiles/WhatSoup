@@ -42,7 +42,7 @@ export interface ReconcileIssueRecord {
 export interface RefreshPullRequest {
   number: number;
   title: string;
-  body: string;
+  referenceNumbers: number[];
   url: string;
   updatedAt: string;
   disposition: "open" | "merged" | "closed-unmerged";
@@ -420,10 +420,7 @@ function currentDynamicEvidence(
   const matchedBy: string[] = [];
   if (
     textReferencesRepositoryNumber(issueBody, pullRequest.number) ||
-    textReferencesRepositoryNumber(
-      `${pullRequest.title}\n${pullRequest.body}`,
-      issue.issue_number,
-    )
+    pullRequest.referenceNumbers.includes(issue.issue_number)
   ) {
     matchedBy.push("issue-reference");
   }
