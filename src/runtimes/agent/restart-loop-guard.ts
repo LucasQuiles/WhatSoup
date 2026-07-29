@@ -26,8 +26,12 @@
  * Lane artifacts: oc-re/audits/2026-07-19-c5-restart-loop-guard-map.md,
  * oc-re/specs/2026-07-19-c5-restart-loop-guard-spec.md.
  */
-import { join } from 'node:path';
-import { readPrivateFileSync, writePrivateJsonMarkerSync } from '../../lib/private-fs.ts';
+import {
+  privateJournalPath,
+  readPrivateV1JournalSync,
+  type PrivateJournalStatus,
+  writePrivateJournalSync,
+} from '../../lib/private-journal.ts';
 import { createChildLogger } from '../../logger.ts';
 
 const log = createChildLogger('restart-loop-guard');
@@ -38,8 +42,6 @@ const log = createChildLogger('restart-loop-guard');
 export const RESTART_LOOP_GUARD_DEFAULTS = { maxRestarts: 3, windowMs: 300_000 } as const;
 
 export const RESTART_LOOP_GUARD_FILENAME = 'restart-loop-guard.json';
-
-const MAX_STATE_BYTES = 64 * 1024;
 
 interface RestartLoopGuardState {
   v: 1;
@@ -80,7 +82,7 @@ export interface RestartLoopGuardHealth extends RestartLoopGuardTrip {
 
 /** Canonical state-file location inside an instance state root. */
 export function restartLoopGuardPath(stateRoot: string): string {
-  return join(stateRoot, RESTART_LOOP_GUARD_FILENAME);
+  return privateJournalPath(stateRoot, RESTART_LOOP_GUARD_FILENAME);
 }
 
 function freshState(): RestartLoopGuardState {
@@ -92,34 +94,46 @@ function counterField(value: unknown): number {
   return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : 0;
 }
 
-/** Fail-open load: ANY problem (missing, corrupt, wrong shape, fs error) → null. */
-function loadState(statePath: string): RestartLoopGuardState | null {
-  try {
-    const raw = readPrivateFileSync(statePath, { maxBytes: MAX_STATE_BYTES, label: 'restart-loop guard state' });
-    if (raw === null) return null;
-    const data = JSON.parse(raw) as Partial<RestartLoopGuardState>;
-    if (data?.v !== 1 || typeof data.bootInProgress !== 'boolean' || !Array.isArray(data.boots)) return null;
-    return {
-      v: 1,
-      bootInProgress: data.bootInProgress,
-      boots: data.boots.filter((t): t is number => typeof t === 'number' && Number.isFinite(t)),
-      lastTripAt: typeof data.lastTripAt === 'number' && Number.isFinite(data.lastTripAt) ? data.lastTripAt : null,
-      // Back-compat: v:1 files written before observability counters existed
-      // lack these fields — default them to 0/null rather than rejecting the state.
-      bootsTotal: counterField(data.bootsTotal),
-      checksPerformed: counterField(data.checksPerformed),
-      lastCheckAt: typeof data.lastCheckAt === 'number' && Number.isFinite(data.lastCheckAt) ? data.lastCheckAt : null,
-    };
-  } catch (err) {
-    log.warn({ err, statePath }, 'restart-loop guard: state unreadable — failing open');
-    return null;
+interface RestartLoopGuardLoadResult {
+  status: PrivateJournalStatus;
+  state: RestartLoopGuardState | null;
+}
+
+function parseV1State(data: Record<string, unknown>): RestartLoopGuardState | null {
+  if (typeof data.bootInProgress !== 'boolean' || !Array.isArray(data.boots)) return null;
+  return {
+    v: 1,
+    bootInProgress: data.bootInProgress,
+    boots: data.boots.filter((t): t is number => typeof t === 'number' && Number.isFinite(t)),
+    lastTripAt: typeof data.lastTripAt === 'number' && Number.isFinite(data.lastTripAt) ? data.lastTripAt : null,
+    // Back-compat: v:1 files written before observability counters existed
+    // lack these fields — default them to 0/null rather than rejecting the state.
+    bootsTotal: counterField(data.bootsTotal),
+    checksPerformed: counterField(data.checksPerformed),
+    lastCheckAt: typeof data.lastCheckAt === 'number' && Number.isFinite(data.lastCheckAt) ? data.lastCheckAt : null,
+  };
+}
+
+/** Fail-open load; unreadable sources remain untouched. */
+function loadState(statePath: string): RestartLoopGuardLoadResult {
+  const source = readPrivateV1JournalSync(statePath, 'restart-loop guard state');
+  if (source.status === 'journal_unreadable') {
+    log.warn({ statePath }, 'restart-loop guard: state unreadable — preserving source (fail-open)');
+    return { status: 'journal_unreadable', state: null };
   }
+  if (source.version === 'missing') return { status: 'available', state: null };
+  const state = parseV1State(source.value);
+  if (state === null) {
+    log.warn({ statePath }, 'restart-loop guard: state malformed — preserving source (fail-open)');
+    return { status: 'journal_unreadable', state: null };
+  }
+  return { status: 'available', state };
 }
 
 /** Fail-open save: returns false instead of throwing on any fs error. */
 function saveState(statePath: string, state: RestartLoopGuardState): boolean {
   try {
-    writePrivateJsonMarkerSync(statePath, state);
+    writePrivateJournalSync(statePath, state, 'restart-loop guard state');
     return true;
   } catch (err) {
     log.warn({ err, statePath }, 'restart-loop guard: state not persisted — failing open');
@@ -134,9 +148,10 @@ function saveState(statePath: string, state: RestartLoopGuardState): boolean {
  * persistence failure degrades to "not interrupted" (fail-open).
  */
 export function markBootInProgress(statePath: string, now = Date.now()): boolean {
-  const prior = loadState(statePath);
-  const wasInterrupted = prior?.bootInProgress === true;
-  const state = prior ?? freshState();
+  const loaded = loadState(statePath);
+  if (loaded.status === 'journal_unreadable') return false;
+  const wasInterrupted = loaded.state?.bootInProgress === true;
+  const state = loaded.state ?? freshState();
   state.bootInProgress = true;
   // Monotonic: count EVERY boot (clean or crash) so a restart is provably
   // visible in health even after it ages out of the window.
@@ -155,8 +170,9 @@ export function markBootInProgress(statePath: string, now = Date.now()): boolean
  * health surfacing. No-op on any error.
  */
 export function markCleanExit(statePath: string): void {
-  const state = loadState(statePath);
-  if (state === null) return;
+  const loaded = loadState(statePath);
+  if (loaded.status === 'journal_unreadable' || loaded.state === null) return;
+  const { state } = loaded;
   state.bootInProgress = false;
   state.boots = [];
   saveState(statePath, state);
@@ -179,7 +195,9 @@ export function checkAndRecordInterruptedBoot(options: {
   const now = options.now ?? Date.now();
   if (maxRestarts <= 0) return { tripped: false, bootsInWindow: 0 };
 
-  const state = loadState(options.statePath) ?? freshState();
+  const loaded = loadState(options.statePath);
+  if (loaded.status === 'journal_unreadable') return { tripped: false, bootsInWindow: 0 };
+  const state = loaded.state ?? freshState();
   // Monotonic: this IS the breaker's decision point (reached only on a
   // crash-interrupted boot with resumable work). Counting it turns health from
   // "nothing bad happened" into "asked N times, allowed all but the trips".
@@ -214,10 +232,11 @@ export function readRestartLoopGuardHealth(
   windowMs: number = RESTART_LOOP_GUARD_DEFAULTS.windowMs,
   now: number = Date.now(),
 ): RestartLoopGuardHealth {
-  const state = loadState(statePath);
-  if (state === null) {
+  const loaded = loadState(statePath);
+  if (loaded.status === 'journal_unreadable' || loaded.state === null) {
     return { bootsInWindow: 0, tripped: false, lastTripAt: null, windowMs, bootsTotal: 0, checksPerformed: 0, lastCheckAt: null };
   }
+  const { state } = loaded;
   const cutoff = now - Math.max(1, windowMs);
   const bootsInWindow = state.boots.filter((t) => t >= cutoff).length;
   return {

@@ -15,7 +15,7 @@
  *    aborted resume (the store-level window the guard closes)
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -112,21 +112,42 @@ describe('restart-loop guard', () => {
   });
 
   describe('T3 — fail-open on persistence problems', () => {
+    it('updates a literal deployed v1 journal without changing its version', () => {
+      writeFileSync(
+        statePath,
+        JSON.stringify({ v: 1, bootInProgress: false, boots: [], lastTripAt: null }) + '\n',
+        'utf8',
+      );
+      chmodSync(statePath, 0o600);
+
+      expect(markBootInProgress(statePath, 1_000)).toBe(false);
+
+      const onDisk = JSON.parse(readFileSync(statePath, 'utf8'));
+      expect(onDisk).toMatchObject({ v: 1, bootInProgress: true, bootsTotal: 1 });
+    });
+
     it('missing state file → not interrupted, not tripped', () => {
       const b = boot(1_000);
       expect(b.interrupted).toBe(false);
       expect(b.tripped).toBe(false);
     });
 
-    it('corrupt state file → no throw, not tripped, state re-initializes', () => {
-      let t = 1_000_000;
-      boot(t);                                           // create valid state
-      writeFileSync(statePath, '{not json', 'utf-8');    // corrupt it (simulate crash mid-write)
-      const b = boot(t + 1_000);                         // single boot after corruption
-      expect(b.interrupted).toBe(false);                 // fail-open: corrupt ⇒ fresh
-      expect(b.tripped).toBe(false);
-      // recovered: next crash cycle counts normally from a clean journal
-      expect(boot(t + 2_000).bootsInWindow).toBe(1);
+    it.each([
+      ['malformed', '{not json\n'],
+      ['future v2', '{"v":2,"bootInProgress":false,"boots":[],"lastTripAt":null}\n'],
+      ['unreadable', '{"v":1,"bootInProgress":false,"boots":[],"lastTripAt":null}\n'],
+    ])('preserves an existing %s state and fails open without reinitializing it', (kind, source) => {
+      writeFileSync(statePath, source, 'utf8');
+      if (kind !== 'unreadable') chmodSync(statePath, 0o600);
+
+      const interrupted = markBootInProgress(statePath, 1_000);
+      expect(interrupted).toBe(false);
+      expect(checkAndRecordInterruptedBoot({ statePath, now: 1_000 }))
+        .toEqual({ tripped: false, bootsInWindow: 0 });
+      expect(readRestartLoopGuardHealth(statePath, DEFAULT_WINDOW, 1_000).bootsTotal).toBe(0);
+      expect(readFileSync(statePath, 'utf8')).toBe(source);
+      expect(() => markCleanExit(statePath)).not.toThrow();
+      expect(readFileSync(statePath, 'utf8')).toBe(source);
     });
 
     it('uncreatable state path → every call no-throws and fails open', () => {
@@ -232,6 +253,7 @@ describe('restart-loop guard', () => {
     it('back-compat: a legacy state file without the counters loads with defaults, not a reject', () => {
       // A v:1 file written before observability counters existed.
       writeFileSync(statePath, JSON.stringify({ v: 1, bootInProgress: false, boots: [], lastTripAt: null }));
+      chmodSync(statePath, 0o600);
       const h = readRestartLoopGuardHealth(statePath, DEFAULT_WINDOW, 1_000);
       expect(h.bootsTotal).toBe(0);
       expect(h.checksPerformed).toBe(0);

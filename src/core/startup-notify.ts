@@ -20,8 +20,12 @@
  *  - all persistence errors fail open — a broken journal must never block
  *    the boot or the notification.
  */
-import { join } from 'node:path';
-import { readPrivateFileSync, writePrivateJsonMarkerSync } from '../lib/private-fs.ts';
+import {
+  privateJournalPath,
+  readPrivateV1JournalSync,
+  type PrivateJournalStatus,
+  writePrivateJournalSync,
+} from '../lib/private-journal.ts';
 import { createChildLogger } from '../logger.ts';
 
 const log = createChildLogger('startup-notify');
@@ -32,8 +36,6 @@ export const STARTUP_NOTIFY_FILENAME = 'startup-notify.json';
 const BOOT_RETENTION_MS = 24 * 60 * 60 * 1_000;
 /** Hard cap so a pathological crash loop cannot grow the journal unbounded. */
 const MAX_BOOTS = 100;
-const MAX_STATE_BYTES = 64 * 1024;
-
 export interface StartupNotifyState {
   v: 1;
   /** epoch-ms of recent boots, pruned to retention on every write. */
@@ -48,46 +50,63 @@ export interface StartupNotification {
   bootsCovered: number;
 }
 
+export interface StartupNotifyJournalResult {
+  status: PrivateJournalStatus;
+  /** Usable v1 state; ephemeral when the persisted source is unreadable. */
+  state: StartupNotifyState;
+}
+
 export function startupNotifyPath(stateRoot: string): string {
-  return join(stateRoot, STARTUP_NOTIFY_FILENAME);
+  return privateJournalPath(stateRoot, STARTUP_NOTIFY_FILENAME);
 }
 
 function freshState(): StartupNotifyState {
   return { v: 1, boots: [], lastNotifiedAt: null };
 }
 
-function loadState(statePath: string): StartupNotifyState {
-  try {
-    const raw = readPrivateFileSync(statePath, { maxBytes: MAX_STATE_BYTES, label: 'startup-notify journal' });
-    if (raw === null) return freshState();
-    const data = JSON.parse(raw) as Partial<StartupNotifyState>;
-    return {
-      v: 1,
-      boots: Array.isArray(data.boots)
-        ? data.boots.filter((b): b is number => typeof b === 'number' && Number.isFinite(b))
-        : [],
-      lastNotifiedAt: typeof data.lastNotifiedAt === 'number' ? data.lastNotifiedAt : null,
-    };
-  } catch (err) {
-    log.warn({ err, statePath }, 'startup-notify: journal unreadable — starting fresh (fail-open)');
-    return freshState();
+function parseV1State(value: Record<string, unknown>): StartupNotifyState | null {
+  if (
+    !Array.isArray(value.boots)
+    || !value.boots.every((boot) => typeof boot === 'number' && Number.isFinite(boot))
+    || (value.lastNotifiedAt !== null && (typeof value.lastNotifiedAt !== 'number' || !Number.isFinite(value.lastNotifiedAt)))
+  ) {
+    return null;
   }
+  return { v: 1, boots: value.boots, lastNotifiedAt: value.lastNotifiedAt as number | null };
 }
 
-function persist(statePath: string, state: StartupNotifyState): void {
+function loadState(statePath: string): StartupNotifyJournalResult {
+  const source = readPrivateV1JournalSync(statePath, 'startup-notify journal');
+  if (source.status === 'journal_unreadable') {
+    log.warn({ statePath }, 'startup-notify: journal unreadable — preserving source (fail-open)');
+    return { status: 'journal_unreadable', state: freshState() };
+  }
+  if (source.version === 'missing') return { status: 'available', state: freshState() };
+  const state = parseV1State(source.value);
+  if (state === null) {
+    log.warn({ statePath }, 'startup-notify: journal malformed — preserving source (fail-open)');
+    return { status: 'journal_unreadable', state: freshState() };
+  }
+  return { status: 'available', state };
+}
+
+function persist(statePath: string, state: StartupNotifyState): boolean {
   try {
-    writePrivateJsonMarkerSync(statePath, state);
+    writePrivateJournalSync(statePath, state, 'startup-notify journal');
+    return true;
   } catch (err) {
     log.warn({ err, statePath }, 'startup-notify: journal not persisted — continuing (fail-open)');
+    return false;
   }
 }
 
 /** Record this process's boot; prune to retention; persist. Never throws. */
-export function recordStartupBoot(statePath: string, now: number): StartupNotifyState {
-  const state = loadState(statePath);
+export function recordStartupBoot(statePath: string, now: number): StartupNotifyJournalResult {
+  const result = loadState(statePath);
+  const { state } = result;
   state.boots = [...state.boots.filter((b) => now - b < BOOT_RETENTION_MS), now].slice(-MAX_BOOTS);
-  persist(statePath, state);
-  return state;
+  if (result.status === 'journal_unreadable') return result;
+  return { status: persist(statePath, state) ? 'available' : 'journal_unreadable', state };
 }
 
 const defaultLocalHm = (ms: number): string =>
@@ -121,8 +140,10 @@ export function composeStartupNotification(
 
 /** Mark boots-through-now as notified. Persisted BEFORE the send so a crash
  *  mid-send loses at most one summary and can never duplicate it. Never throws. */
-export function markStartupNotified(statePath: string, now: number): void {
-  const state = loadState(statePath);
+export function markStartupNotified(statePath: string, now: number): PrivateJournalStatus {
+  const result = loadState(statePath);
+  if (result.status === 'journal_unreadable') return result.status;
+  const { state } = result;
   state.lastNotifiedAt = now;
-  persist(statePath, state);
+  return persist(statePath, state) ? 'available' : 'journal_unreadable';
 }

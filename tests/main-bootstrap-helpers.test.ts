@@ -165,6 +165,9 @@ async function importMainWithMocks(options: {
   selfRestartMarkerThrows?: boolean;
   resolveBinaryPathReturn?: string | null;
   startupNotificationStabilitySeconds?: number;
+  startupNotifications?: boolean;
+  toolUpdateMode?: 'full' | 'minimal';
+  startupJournalStatus?: 'available' | 'journal_unreadable';
 } = {}) {
   vi.resetModules();
   vi.useFakeTimers();
@@ -225,7 +228,9 @@ async function importMainWithMocks(options: {
       ? vi.fn(() => { throw new Error('import failed'); })
       : vi.fn(),
   };
+  const startupEvents: string[] = [];
   const connection = new FakeConnection();
+  connection.connect.mockImplementation(async () => { startupEvents.push('connection.connect'); });
   const chatRuntime = runtimeStub();
   if (options.runtimeStartThrows) {
     chatRuntime.start = vi.fn(async () => { throw new Error('runtime start failed'); });
@@ -298,12 +303,23 @@ async function importMainWithMocks(options: {
     // tests touch no real filesystem state. A plain /tmp path does NOT achieve
     // this — writeAtomicPrivateFileSync mkdirs recursively and the writes land.
     stateRoot: '/dev/null/ws-helpers-state-root',
-    startupNotifications: true,
+    startupNotifications: options.startupNotifications ?? true,
     // 0 = legacy immediate send (3 s floor); individual tests opt into the
     // debounce window explicitly.
     startupNotificationStabilitySeconds: options.startupNotificationStabilitySeconds ?? 0,
-    toolUpdateMode: 'full',
+    toolUpdateMode: options.toolUpdateMode ?? 'full',
   };
+
+  const recordStartupBoot = vi.fn(() => {
+    startupEvents.push('journal.record');
+    return {
+      status: options.startupJournalStatus ?? 'available',
+      state: { v: 1 as const, boots: [1], lastNotifiedAt: null },
+    };
+  });
+  const markStartupNotified = vi.fn(() => 'available');
+  const composeStartupNotification = vi.fn(() => ({ text: '*Agent back online* ✓', bootsCovered: 1 }));
+  const startupNotifyPath = vi.fn((stateRoot: string) => `${stateRoot}/startup-notify.json`);
 
   const Database = vi.fn(function () { return db; });
   const DurabilityEngine = vi.fn(function () { return durability; });
@@ -314,6 +330,12 @@ async function importMainWithMocks(options: {
     const runtime = runtimeStub() as ReturnType<typeof runtimeStub> & {
       popStartupMessage: ReturnType<typeof vi.fn>;
     };
+    runtime.start = options.runtimeStartThrows
+      ? vi.fn(async () => {
+        startupEvents.push('runtime.start');
+        throw new Error('runtime start failed');
+      })
+      : vi.fn(async () => { startupEvents.push('runtime.start'); });
     // popStartupMessage is consumed synchronously inside main.ts start() before the
     // 3s notification timer fires, so the pending value must be seeded at construction
     // time (not patched on the instance afterwards).
@@ -400,7 +422,10 @@ async function importMainWithMocks(options: {
     drainPendingOutbound: options.drainPendingOutboundRejectsOnStartup
       ? vi.fn(async () => { throw new Error('startup drain failed'); })
       : vi.fn(async () => undefined),
-    waitForHistorySyncThenRecover: vi.fn(async ({ recover }: { recover: () => unknown }) => { recover(); }),
+    waitForHistorySyncThenRecover: vi.fn(async ({ recover }: { recover: () => unknown }) => {
+      startupEvents.push('history.recovery');
+      recover();
+    }),
     seedChatAliases: vi.fn(() => 0),
     createProfileRegistry: vi.fn(() => ({})),
     createOutboundSendsWriter: vi.fn(() => ({ write: vi.fn() })),
@@ -451,6 +476,11 @@ async function importMainWithMocks(options: {
     releaseProcessLock,
     flushLogger: vi.fn(async () => {}),
     shutdownExitCode: vi.fn(() => 0),
+    recordStartupBoot,
+    markStartupNotified,
+    composeStartupNotification,
+    startupNotifyPath,
+    startupEvents,
   };
 
   vi.doMock('../src/config.ts', () => ({ config }));
@@ -460,6 +490,12 @@ async function importMainWithMocks(options: {
     flushLogger: mocks.flushLogger,
   }));
   vi.doMock('../src/core/database.ts', () => ({ Database, storeDecryptionFailure: mocks.storeDecryptionFailure }));
+  vi.doMock('../src/core/startup-notify.ts', () => ({
+    recordStartupBoot: mocks.recordStartupBoot,
+    markStartupNotified: mocks.markStartupNotified,
+    composeStartupNotification: mocks.composeStartupNotification,
+    startupNotifyPath: mocks.startupNotifyPath,
+  }));
   vi.doMock('../src/runtimes/chat/rate-limits-db.ts', () => ({
     cleanupOldRateLimits: mocks.cleanupOldRateLimits,
     cleanupOldAttempts: mocks.cleanupOldAttempts,
@@ -1182,6 +1218,46 @@ describe('main.ts — uncovered helpers and signal paths', () => {
     });
   });
 
+  describe('early agent boot journal', () => {
+    const agentInstanceConfig = (introSent: boolean) => ({
+      name: 'q',
+      type: 'agent',
+      introSent,
+      agentOptions: { sessionScope: 'shared' },
+    });
+
+    it.each([
+      ['first introduction', { instanceConfig: agentInstanceConfig(false) }],
+      ['notifications disabled', { instanceConfig: agentInstanceConfig(true), startupNotifications: false }],
+      ['minimal tool mode', { instanceConfig: agentInstanceConfig(true), toolUpdateMode: 'minimal' as const }],
+      ['unlinked agent startup', { instanceConfig: agentInstanceConfig(true), adminPhones: [] }],
+    ])('records exactly one boot before runtime startup when %s', async (_case, options) => {
+      const h = await importMainWithMocks(options);
+
+      expect(h.recordStartupBoot).toHaveBeenCalledOnce();
+      expect(h.startupNotifyPath).toHaveBeenCalledWith('/dev/null/ws-helpers-state-root');
+      expect(h.startupEvents).toEqual([
+        'journal.record',
+        'runtime.start',
+        'connection.connect',
+        'history.recovery',
+      ]);
+    });
+
+    it('records the boot before an interrupted agent startup', async () => {
+      const exitSpy = vi.spyOn(process, 'exit').mockImplementation((() => {}) as never);
+      const h = await importMainWithMocks({
+        instanceConfig: agentInstanceConfig(true),
+        runtimeStartThrows: true,
+      });
+      await flushMicrotasks();
+
+      expect(h.recordStartupBoot).toHaveBeenCalledOnce();
+      expect(h.startupEvents).toEqual(['journal.record', 'runtime.start']);
+      expect(exitSpy).toHaveBeenCalled();
+    });
+  });
+
   // ── H. Memory consolidation warning (pinecone not ready) ──────────────────
 
   describe('memory consolidation disabled warning', () => {
@@ -1293,6 +1369,19 @@ describe('main.ts — uncovered helpers and signal paths', () => {
 
       await vi.advanceTimersByTimeAsync(3_000);
 
+      expect(h.sendTracked).toHaveBeenCalledWith(...backOnlineCall(h));
+    });
+
+    it('keeps the generic back-online notice fail-open for an unreadable journal', async () => {
+      const h = await importMainWithMocks({
+        instanceConfig: sharedAgentInstanceConfig(),
+        pendingStartupMessage: null,
+        startupJournalStatus: 'journal_unreadable',
+      });
+
+      await vi.advanceTimersByTimeAsync(3_000);
+
+      expect(h.recordStartupBoot).toHaveBeenCalledOnce();
       expect(h.sendTracked).toHaveBeenCalledWith(...backOnlineCall(h));
     });
 

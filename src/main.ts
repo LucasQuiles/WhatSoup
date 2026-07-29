@@ -153,6 +153,22 @@ acquireLock();
 // Safety net: release lock even if shutdown() throws or is bypassed
 process.on('exit', () => releaseLock());
 
+// Parse INSTANCE_CONFIG before fallible bootstrap work so an agent boot can
+// be journaled immediately after this process owns the instance lock.
+let instanceConfig: Record<string, unknown> | null = null;
+if (process.env.INSTANCE_CONFIG) {
+  try {
+    instanceConfig = JSON.parse(process.env.INSTANCE_CONFIG) as Record<string, unknown>;
+  } catch {
+    throw new Error('INSTANCE_CONFIG is set but is not valid JSON');
+  }
+}
+const instanceType = (instanceConfig?.type as string | undefined) ?? 'chat';
+const startupJournalPath = instanceType === 'agent' ? startupNotifyPath(config.stateRoot) : null;
+// This happens before runtime start/connect/history and all intro/notification
+// gates. A journal fault returns ephemeral v1 state and remains fail-open.
+const startupJournal = startupJournalPath === null ? null : recordStartupBoot(startupJournalPath, Date.now());
+
 // 2. Database
 // db.open() runs pending schema migrations against config.dbPath (see
 // core/database.ts:594+). This makes the process that executes these lines
@@ -249,16 +265,6 @@ if (config.accessMode !== 'self_only') {
 const durability = new DurabilityEngine(db);
 durability.preConnectRecovery();
 
-// Parse INSTANCE_CONFIG once — used for warm-start import and instance type selection.
-let instanceConfig: Record<string, unknown> | null = null;
-if (process.env.INSTANCE_CONFIG) {
-  try {
-    instanceConfig = JSON.parse(process.env.INSTANCE_CONFIG) as Record<string, unknown>;
-  } catch {
-    throw new Error('INSTANCE_CONFIG is set but is not valid JSON');
-  }
-}
-
 // Model currency advisories — startup + daily check that configured models are
 // still current, with operator notification via BOT_ERRORS when they are not.
 // Advisory-only and fail-open; never blocks startup. Symbolic role values
@@ -308,9 +314,6 @@ startModelCurrencyMonitor(config.botName, {
     }
   }
 }
-
-// 3. Instance type selection
-const instanceType = (instanceConfig?.type as string | undefined) ?? 'chat';
 
 // 4. Connection
 const connectionManager: RuntimeConnection = createConnection(config);
@@ -1103,13 +1106,14 @@ async function start(): Promise<void> {
       config.toolUpdateMode !== 'minimal'
     ) {
       // Agent restart notification — stability-debounced and aggregating.
-      // Every boot lands in a persisted journal; the back-online notice sends
-      // only after the instance has stayed up AND connected for the stability
-      // window, and one message covers every boot since the last notification
-      // (see src/core/startup-notify.ts for the five-consecutive-pings
-      // incident that shaped this). The journal write is fail-open.
-      const snPath = startupNotifyPath(config.stateRoot);
-      const snState = recordStartupBoot(snPath, Date.now());
+      // Every boot is captured before startup; valid v1 journals persist it,
+      // while unreadable sources use ephemeral state without being overwritten.
+      // The back-online notice sends only after the instance has stayed up AND
+      // connected for the stability window, and one message covers every boot
+      // since the last notification (see src/core/startup-notify.ts for the
+      // five-consecutive-pings incident that shaped this).
+      const snPath = startupJournalPath!;
+      const snState = startupJournal!.state;
       const pending = runtime.popStartupMessage();
       if (pending) {
         // Resume messages carry real continuity content — send promptly, and
