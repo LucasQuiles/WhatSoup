@@ -79,8 +79,7 @@ describe('buildBotErrorsEvent', () => {
       severity: 'info',
       instance: 'unknown',
       source: 'unknown',
-      summary: 'clear event from unknown',
-      evidence: '',
+      schemaVersion: 2,
       runtime: {
         invocationId: 'systemd-invocation',
         systemdExecPid: '4242',
@@ -89,15 +88,15 @@ describe('buildBotErrorsEvent', () => {
         queue: join(tmpRoot, 'state', 'outbox'),
       },
     });
-    expect(event.runtime.envKeys).toContain('LOG_DIR');
-    expect(event.runtime.envKeys).toContain('WHATSOUP_VISIBLE_FLAG');
-    expect(event.runtime.envKeys).not.toContain('WHATSOUP_SECRET_TOKEN');
-    expect(event.diagnostics.logHints).toContain(join(tmpRoot, 'logs', 'whatsoup.log'));
-    expect(event.diagnostics.logHints).toContain([
-      'journalctl --user -u whatsoup',
-      "unknown.service --since '30 minutes ago'",
-    ].join('@'));
-    expect(event.diagnostics.logHints).toContain("journalctl --user -u bot-errors-dispatcher.service --since '30 minutes ago'");
+    // Issue #2386: summary and evidence are now bounded objects, not raw strings.
+    expect(event.summary).toHaveProperty('failureClass');
+    expect(event.summary).toHaveProperty('length');
+    expect(event.summary).toHaveProperty('correlationDigest');
+    expect(event.evidence).toHaveProperty('failureClass', 'none');
+    expect(event.evidence).toHaveProperty('length', 0);
+    // Issue #2386: envKeys and logHints are stripped (contain paths/args).
+    expect(event.runtime).not.toHaveProperty('envKeys');
+    expect(event.diagnostics).not.toHaveProperty('logHints');
   });
 
   it('emits only declared v2 envelope variants', () => {
@@ -180,10 +179,14 @@ describe('buildBotErrorsEvent', () => {
       criticalAsset,
     }) as ReturnType<typeof buildBotErrorsEvent> & { criticalAsset: BotErrorsCriticalAssetDiagnostic };
 
-    expect(event.summary).toBe('provider token=[REDACTED] failed');
-    expect(event.evidence).toContain('cookie=[REDACTED]');
-    expect(event.evidence).toContain('[REDACTED PHONE]');
-    expect(event.evidence).toContain('for [REDACTED PHONE]');
+    // Issue #2386: summary and evidence are now confined to bounded metadata.
+    expect(event.summary).toHaveProperty('failureClass');
+    expect(event.evidence).toHaveProperty('failureClass');
+    // Raw secrets must not appear anywhere in the serialized event.
+    expect(JSON.stringify(event)).not.toContain('raw-secret');
+    expect(JSON.stringify(event)).not.toContain('topsecret');
+    expect(JSON.stringify(event)).not.toContain('session-secret');
+    // Critical asset diagnostics are still redacted via redactOutboxValue.
     expect(event.criticalAsset.asset.path).toBe('[REDACTED CREDENTIAL PATH]');
     expect(event.criticalAsset.asset.owner).toBe('line=[REDACTED PHONE]');
     expect(event.criticalAsset.asset.fingerprint).toBe('fp-123');
@@ -193,9 +196,6 @@ describe('buildBotErrorsEvent', () => {
       'Authorization: Bearer [REDACTED]',
       ['https://[REDACTED]', 'example.invalid/path'].join('@'),
     ]);
-    expect(JSON.stringify(event)).not.toContain('raw-secret');
-    expect(JSON.stringify(event)).not.toContain('topsecret');
-    expect(JSON.stringify(event)).not.toContain('session-secret');
   });
 
   it('masks device-suffixed (`:N`) JIDs at the redactText boundary — BEAD-048', () => {
@@ -215,15 +215,17 @@ describe('buildBotErrorsEvent', () => {
       evidence: `device ${deviceJid}, lid ${deviceLid}, plain ${plainJid}, dash ${dashJid}`,
     });
 
-    // The device-suffixed JIDs (the leak this fix closes) are fully masked.
-    expect(event.summary).not.toContain(deviceJid);
-    expect(event.evidence).not.toContain(deviceJid);
-    expect(event.evidence).not.toContain(deviceLid);
-    // No regression: plain and device-dash JIDs still redact.
-    expect(event.evidence).not.toContain(plainJid);
-    expect(event.evidence).not.toContain(dashJid);
-    expect(event.evidence).toContain('[REDACTED WHATSAPP JID]');
-    expect(JSON.stringify(event)).not.toContain(':6@');
+    // Issue #2386: JIDs are confined to bounded metadata — they must not
+    // appear anywhere in the serialized event. The evidence is now an
+    // object (failureClass, length, correlationDigest), not a redacted string.
+    const serialized = JSON.stringify(event);
+    expect(serialized).not.toContain(deviceJid);
+    expect(serialized).not.toContain(deviceLid);
+    expect(serialized).not.toContain(plainJid);
+    expect(serialized).not.toContain(dashJid);
+    expect(serialized).not.toContain(':6@');
+    expect(typeof event.summary).toBe('object');
+    expect(typeof event.evidence).toBe('object');
   });
 
   it('allows live outbox resolution in tests only behind the explicit override', () => {
@@ -385,7 +387,7 @@ describe('writeBotErrorsEvent', () => {
     expect(JSON.parse(readFileSync(written.path, 'utf8'))).toMatchObject({
       instance: 'agent',
       source: 'fsync',
-      summary: 'directory fsync fallback',
+      schemaVersion: 2,
     });
     expect(directoryOpenAttempts).toBeGreaterThan(0);
   });
@@ -458,8 +460,12 @@ describe('recordBotErrorsWritefail', () => {
   });
 });
 
-describe('credential-path redaction (canonical pattern)', () => {
-  function pathRedaction(rawPath: string): string {
+describe('credential-path confinement at the evidence boundary (issue #2386)', () => {
+  // The event builder now confines evidence to bounded metadata. These tests
+  // prove raw credential paths cannot cross the boundary. Pattern redaction
+  // (redactText) remains as defense-in-depth but is no longer the primary
+  // boundary — confinement is.
+  function confinedEventHasRawPath(rawPath: string): boolean {
     const event = buildBotErrorsEvent({
       eventType: 'alert',
       instance: 'agent-alpha',
@@ -467,36 +473,26 @@ describe('credential-path redaction (canonical pattern)', () => {
       summary: 'credential exposure',
       evidence: `leaked path ${rawPath} end`,
     });
-    return event.evidence;
+    return JSON.stringify(event).includes(rawPath);
   }
 
-  it('redacts a .config/secrets/ path (branch missing before canonical sync)', () => {
-    expect(pathRedaction('/srv/app/.config/secrets/fleet.json')).toBe(
-      'leaked path [REDACTED CREDENTIAL PATH] end',
-    );
+  it('confines a .config/secrets/ path', () => {
+    expect(confinedEventHasRawPath('/srv/app/.config/secrets/fleet.json')).toBe(false);
   });
 
-  it('redacts a bare .env credential file with suffix', () => {
-    expect(pathRedaction('/srv/app/.env.production')).toBe(
-      'leaked path [REDACTED CREDENTIAL PATH] end',
-    );
+  it('confines a bare .env credential file with suffix', () => {
+    expect(confinedEventHasRawPath('/srv/app/.env.production')).toBe(false);
   });
 
-  it('still redacts the previously-covered whatsoup auth path', () => {
-    expect(pathRedaction('/u/.local/share/whatsoup/instances/rb/auth/creds.json')).toBe(
-      'leaked path [REDACTED CREDENTIAL PATH] end',
-    );
+  it('confines the whatsoup auth path', () => {
+    expect(confinedEventHasRawPath('/u/.local/share/whatsoup/instances/rb/auth/creds.json')).toBe(false);
   });
 
-  it('leaves non-credential text untouched', () => {
-    expect(pathRedaction('https://example.com/public/page')).toBe(
-      'leaked path https://example.com/public/page end',
-    );
+  it('confines non-credential text equally (metadata-only boundary)', () => {
+    expect(confinedEventHasRawPath('https://example.com/public/page')).toBe(false);
   });
 
   it('is ReDoS-safe on a long ambiguous slash-path (no catastrophic backtracking)', () => {
-    // The pre-canonical `(?:~|/[^\s]+)*` prefix backtracked exponentially on this
-    // shape once the required suffix failed. Bound the work to prove it is linear.
     const evil = `/${'a/'.repeat(40000)}!`;
     const start = process.hrtime.bigint();
     const event = buildBotErrorsEvent({
@@ -508,7 +504,6 @@ describe('credential-path redaction (canonical pattern)', () => {
     });
     const elapsedMs = Number(process.hrtime.bigint() - start) / 1e6;
     expect(elapsedMs).toBeLessThan(1000);
-    // No credential category matched, so the adversarial input passes through.
-    expect(event.evidence).toContain('a/a/');
+    expect(JSON.stringify(event)).not.toContain('a/a/');
   });
 });

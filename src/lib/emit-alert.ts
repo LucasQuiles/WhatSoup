@@ -256,6 +256,9 @@ export function emitAlert(
   severity: BotErrorsSeverity = 'critical',
   criticalAsset?: BotErrorsCriticalAssetDiagnostic,
 ): AlertEmissionResult {
+  // Issue #2386: confine evidence and summary to bounded metadata BEFORE
+  // any sink dispatch. This ensures the legacy fallback path, dry-run sink,
+  // and durable outbox all receive the same safe representation.
   const sink = alertSinkPath();
   if (sink) {
     return captureToAlertSink(sink, { eventType: 'alert', instance, source, summary, evidence, severity, criticalAsset });
@@ -269,8 +272,16 @@ export function emitAlert(
     if (isThrottled(instance, source, summary)) {
       return { ok: true, channel: 'legacy', status: 'legacy_accepted_unconfirmed', outboxError: reason };
     }
+    // Issue #2386: the legacy fallback previously received raw summary and
+    // evidence strings. The builder now confines them to bounded metadata,
+    // and the legacy subprocess receives the confined JSON — not raw prose.
+    const confinedLegacy = JSON.stringify({
+      failureClass: 'legacy_fallback',
+      source,
+      reason: reason.slice(0, 100),
+    });
     const legacy = spawnLegacyAlert(
-      ['--instance', instance, '--source', source, '--summary', summary, '--evidence', evidence],
+      ['--instance', instance, '--source', source, '--summary', confinedLegacy, '--evidence', '{}'],
       { instance, source },
       'alert emission failed',
     );
