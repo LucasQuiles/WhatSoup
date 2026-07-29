@@ -328,6 +328,32 @@ describe('config — startup gates', () => {
     expect(config.startupNotifications).toBe(true);
     expect(config.proactiveResumeOnStartup).toBe(false);
   });
+
+  it('accepts an in-range integer stability window, including the documented 0', async () => {
+    process.env.INSTANCE_CONFIG = JSON.stringify(
+      makeMinimal({ startupNotificationStabilitySeconds: 0 }),
+    );
+    const { config } = await import('../src/config.ts');
+    expect(config.startupNotificationStabilitySeconds).toBe(0);
+  });
+
+  it('falls back to 600 for an out-of-range stability window instead of honoring it', async () => {
+    // A milliseconds-scale typo must not become a multi-day window that
+    // silently disables the notice.
+    process.env.INSTANCE_CONFIG = JSON.stringify(
+      makeMinimal({ startupNotificationStabilitySeconds: 600_000 }),
+    );
+    const { config } = await import('../src/config.ts');
+    expect(config.startupNotificationStabilitySeconds).toBe(600);
+  });
+
+  it('falls back to 600 for a non-integer stability window instead of silently restoring the legacy send', async () => {
+    process.env.INSTANCE_CONFIG = JSON.stringify(
+      makeMinimal({ startupNotificationStabilitySeconds: -0.5 }),
+    );
+    const { config } = await import('../src/config.ts');
+    expect(config.startupNotificationStabilitySeconds).toBe(600);
+  });
 });
 
 // ---------------------------------------------------------------------------

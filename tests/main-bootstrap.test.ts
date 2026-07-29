@@ -190,9 +190,11 @@ async function importMainWithMocks(options: {
       cacheHours: 24,
     },
     dataRoot: '/tmp/whatsoup-main-data-root',
-    // Nonexistent on purpose: the startup-notify journal fails open, keeping
-    // these wiring tests free of real-filesystem coupling.
-    stateRoot: '/tmp/whatsoup-main-state-root-absent',
+    // Unwritable on purpose (a path under a device file): mkdir/read/write all
+    // fail, so the startup-notify journal genuinely fails open and these wiring
+    // tests touch no real filesystem state. A plain /tmp path does NOT achieve
+    // this — writeAtomicPrivateFileSync mkdirs recursively and the writes land.
+    stateRoot: '/dev/null/whatsoup-main-state-root',
     startupNotifications: true,
     // 0 = legacy immediate send (3 s floor) so pre-debounce timing tests hold.
     startupNotificationStabilitySeconds: 0,

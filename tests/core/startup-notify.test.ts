@@ -24,7 +24,6 @@ import {
   markStartupNotified,
   recordStartupBoot,
   startupNotifyPath,
-  STARTUP_NOTIFY_FILENAME,
 } from '../../src/core/startup-notify.ts';
 
 let dir = '';
@@ -79,20 +78,18 @@ describe('recordStartupBoot', () => {
 });
 
 describe('composeStartupNotification', () => {
+  // Pure function of the journal state — composed from literals, no filesystem.
   it('keeps the classic copy for a single un-notified boot', () => {
-    const p = statePath();
-    const s = recordStartupBoot(p, T0);
-    const msg = composeStartupNotification(s, T0 + 10 * MIN, utcHm);
+    const msg = composeStartupNotification({ v: 1, boots: [T0], lastNotifiedAt: null }, utcHm);
     expect(msg.text).toBe('*Agent back online* ✓');
     expect(msg.bootsCovered).toBe(1);
   });
 
   it('aggregates multiple un-notified boots into one intentional message with the time range', () => {
-    const p = statePath();
-    recordStartupBoot(p, T0);
-    recordStartupBoot(p, T0 + 15 * MIN);
-    const s = recordStartupBoot(p, T0 + 79 * MIN);
-    const msg = composeStartupNotification(s, T0 + 89 * MIN, utcHm);
+    const msg = composeStartupNotification(
+      { v: 1, boots: [T0, T0 + 15 * MIN, T0 + 79 * MIN], lastNotifiedAt: null },
+      utcHm,
+    );
     expect(msg.bootsCovered).toBe(3);
     expect(msg.text).toContain('*Agent back online* ✓');
     expect(msg.text).toContain('3 restarts');
@@ -100,12 +97,14 @@ describe('composeStartupNotification', () => {
     expect(msg.text).toContain(utcHm(T0 + 79 * MIN));
   });
 
+  // Round-trip through the persisted journal: the notified watermark from one
+  // process must suppress covered boots for the next.
   it('counts only boots after the last notification', () => {
     const p = statePath();
     recordStartupBoot(p, T0);
     markStartupNotified(p, T0 + MIN);
     const s = recordStartupBoot(p, T0 + 30 * MIN);
-    const msg = composeStartupNotification(s, T0 + 40 * MIN, utcHm);
+    const msg = composeStartupNotification(s, utcHm);
     expect(msg.bootsCovered).toBe(1);
     expect(msg.text).toBe('*Agent back online* ✓');
   });
@@ -126,7 +125,8 @@ describe('markStartupNotified', () => {
 });
 
 describe('startupNotifyPath', () => {
-  it('joins the state root with the canonical filename', () => {
-    expect(startupNotifyPath('/x/state')).toBe(path.join('/x/state', STARTUP_NOTIFY_FILENAME));
+  it('pins the canonical on-disk journal location', () => {
+    // Literal on purpose: this is the filename ops and docs reference.
+    expect(startupNotifyPath('/x/state')).toBe('/x/state/startup-notify.json');
   });
 });
