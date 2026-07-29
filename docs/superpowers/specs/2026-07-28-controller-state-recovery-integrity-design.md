@@ -1,6 +1,6 @@
 # Controller State Recovery Integrity Design
 
-**Status:** Active — approved direction, written design awaiting owner review
+**Status:** Approved — implementation planning complete
 
 **Issue owner:** #2463
 
@@ -304,6 +304,10 @@ and one of `prepared`, `previous_committed`, `primary_committed`, or
 `marker_committed`. Each phase update is durable. The journal is a transient private
 state copy with the same trust and permission rules as the primary. Its payload is
 never logged or projected, and the journal contains no path or raw error.
+A migration journal also binds `legacySourceSha256`, the SHA-256 digest of the
+exact sole legacy primary bytes inspected before preparation. A restart at
+`prepared` must re-read that trusted leaf and match the digest before publishing
+the embedded migration envelopes; changed legacy bytes fail closed.
 
 The helper rejects:
 
@@ -325,9 +329,11 @@ All steps occur under the stable exclusive state lock.
 1. Verify the state directory, lock, initialized marker, transaction journal,
    recovery receipt, primary, and previous leaf identities without following
    symlinks.
-2. Classify an uninitialized store before trusting any sidecar. If the marker and
-   every managed artifact are absent, validate the bootstrap factory and return
-   `bootstrap`. If the marker is absent and the sole managed artifact is one
+2. Classify an uninitialized store before trusting any authority-bearing sidecar.
+   The stable lock is coordination-only and does not establish the store. If the
+   marker and every authority-bearing artifact are absent, validate the bootstrap
+   factory and return `bootstrap`. If the marker is absent and the sole
+   authority-bearing artifact is one
    supported legacy primary, validate and migrate it through the locked migration
    transaction. Any other missing or malformed marker is `recovery_required`.
 3. Validate the marker's schema, integrity, component, store ID, and high-water
@@ -382,10 +388,11 @@ and ambiguous publication do not authorize automatic fallback. They require
 operator reconciliation because an older process or substituted file may otherwise
 silently roll back newer truth.
 
-Missing primary is bootstrap only when the initialized marker and every managed
-state/recovery artifact are absent. A missing primary beside the initialized
-marker, journal, receipt, evidence, or retained generation is a recovery case, not
-first run.
+Missing primary is bootstrap only when the initialized marker and every
+authority-bearing state/recovery artifact are absent. A trusted stable lock may
+already exist and does not change that classification. A missing primary beside
+the initialized marker, journal, receipt, evidence, or retained generation is a
+recovery case, not first run.
 
 ## Save Algorithm and Crash Ordering
 
@@ -759,6 +766,7 @@ file as sufficient authority.
 
 ## Review Decision
 
-Implementation planning begins only after the owner reviews this written design.
-Any change to the component cohort, on-disk format, recovery eligibility, lock
-lifetime, or diagnostic fields requires a design amendment before production code.
+The owner approved this written design on 2026-07-28, and implementation planning
+is complete. Any change to the component cohort, on-disk format, recovery
+eligibility, lock lifetime, or diagnostic fields requires a design amendment
+before production code.
