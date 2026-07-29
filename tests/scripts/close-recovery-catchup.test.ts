@@ -508,6 +508,49 @@ describe('close-recovery-catchup CLI', () => {
     expect(replay.text).not.toContain(String(fixture.sourceSeqs[1]));
     expect(closureCount(fixture.dbPath)).toBe(fixture.sourceSeqs.length);
   });
+
+  // FIX 2(b): pin the EXACT allowlisted key set (not just a `.toMatchObject`
+  // subset check above, which would silently pass if an extra undocumented
+  // field leaked into the output). publicInspection()/publicReceipt() are
+  // unexported internals; this pins the equivalent, more faithful contract —
+  // the CLI's actual JSON output an operator or downstream tool observes.
+  it('pins the exact dry-run inspection key set — no undocumented field can leak in (M4)', () => {
+    const fixture = installFixture();
+    const result = captureRun(argsFor(fixture));
+
+    expect(Object.keys(result.output).sort()).toEqual([
+      'catchupSeqFingerprint',
+      'conversationFingerprint',
+      'dryRun',
+      'evidenceBasis',
+      'idempotent',
+      'nSourceSeqs',
+      'ok',
+      'openAfter',
+      'openBefore',
+      'planFingerprint',
+      'ready',
+      'wouldInsert',
+    ]);
+  });
+
+  it('pins the exact confirmed-receipt key set — no undocumented field can leak in (M4)', () => {
+    const fixture = installFixture();
+    const result = captureRun(argsFor(fixture, ['--confirm']));
+
+    expect(Object.keys(result.output).sort()).toEqual(['dryRun', 'ok', 'receipt']);
+    expect(Object.keys(result.output['receipt'] as Record<string, unknown>).sort()).toEqual([
+      'catchupSeqFingerprint',
+      'conversationFingerprint',
+      'evidenceBasis',
+      'idempotent',
+      'inserted',
+      'nSourceSeqs',
+      'openAfter',
+      'openBefore',
+      'planFingerprint',
+    ]);
+  });
 });
 
 // ─────────────────────────────────────────────────────────────────────────
