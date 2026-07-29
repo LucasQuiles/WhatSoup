@@ -1,6 +1,7 @@
 import { statSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
+import { createHash } from 'node:crypto';
 import { pathToFileURL } from 'node:url';
 import {
   closeOperatorCatchupRecoveryRaw,
@@ -202,17 +203,43 @@ function inspectReadOnly(
   }
 }
 
+/**
+ * Domain-separated SHA-256 fingerprint. Produces a deterministic, non-reversible
+ * 12-character hex handle that lets operators correlate outputs across dry-run
+ * and confirmation without exposing the raw private identifier.
+ *
+ * The domain prefix prevents two different field types (e.g. a plan ID and a
+ * conversation key that happen to share the same text) from producing the same
+ * fingerprint.
+ *
+ * Exported for canary tests that assert determinism and domain-separation.
+ */
+export function redactFingerprint(domain: string, value: string | number): string {
+  return createHash('sha256')
+    .update(`${domain}:`)
+    .update(String(value))
+    .digest('hex')
+    .slice(0, 12);
+}
+
+/**
+ * Redacted dry-run inspection shape. Exposes only readiness, bounded counts,
+ * proof basis, idempotency, open-before/open-after, and non-reversible
+ * correlation fingerprints. Never emits raw plan IDs, conversation keys,
+ * source/catch-up sequences, terminal IDs, operation IDs, job IDs, or
+ * completion-proof IDs.
+ *
+ * Issue #2457 § "Required behavior": replace raw identifiers in stdout with
+ * deterministic, domain-separated fingerprints or omit them when a count/state
+ * is sufficient.
+ */
 function publicInspection(inspection: OperatorCatchupRecoveryInspection): Record<string, unknown> {
   return {
-    planId: inspection.planId,
-    conversationKey: inspection.conversationKey,
-    sourceSeqs: inspection.sourceSeqs,
-    catchupSeq: inspection.catchupSeq,
+    planFingerprint: redactFingerprint('plan', inspection.planId),
+    conversationFingerprint: redactFingerprint('conversation', inspection.conversationKey),
+    nSourceSeqs: inspection.sourceSeqs.length,
+    catchupSeqFingerprint: redactFingerprint('catchup-seq', inspection.catchupSeq),
     evidenceBasis: inspection.evidenceBasis,
-    terminalRecordId: inspection.terminalRecordId,
-    selectedOpId: inspection.selectedOpId,
-    recoveryJobId: inspection.recoveryJobId,
-    completionProofId: inspection.completionProofId,
     wouldInsert: inspection.wouldInsert,
     idempotent: inspection.idempotent,
     openBefore: inspection.openBefore,
@@ -220,9 +247,28 @@ function publicInspection(inspection: OperatorCatchupRecoveryInspection): Record
   };
 }
 
+/**
+ * Redacted confirmed-receipt shape. Exposes only mutation counts, idempotency,
+ * proof basis, bounded state, and the same safe correlation fingerprints as
+ * the dry-run inspection. Never emits raw identifiers, actor, or evidence
+ * reference.
+ *
+ * Issue #2457 § "Required behavior": confirmed output should expose only
+ * mutation counts, idempotency, proof basis, bounded state, and the same
+ * safe correlations.
+ */
 function publicReceipt(receipt: CloseOperatorCatchupRecoveryReceipt): Record<string, unknown> {
-  const { actor: _actor, evidenceRef: _evidenceRef, ...safeReceipt } = receipt;
-  return safeReceipt;
+  return {
+    planFingerprint: redactFingerprint('plan', receipt.planId),
+    conversationFingerprint: redactFingerprint('conversation', receipt.conversationKey),
+    nSourceSeqs: receipt.sourceSeqs.length,
+    catchupSeqFingerprint: redactFingerprint('catchup-seq', receipt.catchupSeq),
+    evidenceBasis: receipt.evidenceBasis,
+    inserted: receipt.inserted,
+    idempotent: receipt.idempotent,
+    openBefore: receipt.openBefore,
+    openAfter: receipt.openAfter,
+  };
 }
 
 export function runCloseRecoveryCatchupCli(argv: string[]): number {
@@ -266,9 +312,16 @@ if (import.meta.url === invokedPath) {
   try {
     process.exitCode = runCloseRecoveryCatchupCli(process.argv.slice(2));
   } catch (error) {
+    // Issue #2457: error messages must remain class-level and must not
+    // interpolate private arguments. Emit a bounded error class with a
+    // correlation handle; the raw exception text stays in the operator's
+    // terminal scrollback (which is their own trust boundary) and never
+    // enters a machine-parseable JSON receipt.
+    const errorClass = error instanceof Error ? error.constructor.name : 'UnknownError';
     process.stderr.write(`${JSON.stringify({
       ok: false,
-      error: error instanceof Error ? error.message : String(error),
+      errorClass,
+      correlation: redactFingerprint('error', `${Date.now()}:${Math.random()}`),
     })}\n`);
     process.exitCode = 1;
   }
