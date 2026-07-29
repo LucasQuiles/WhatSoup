@@ -49,7 +49,7 @@ case_explicit_env_wins() {
   local bin="$tmp/explicit"
   mkdir -p "$bin"
   fake_python "$bin/python-explicit" 0
-  PATH="$bin" SENTINEL_PYTEST_PYTHON="$bin/python-explicit" \
+  PATH="$bin:$PATH" SENTINEL_PYTEST_PYTHON="$bin/python-explicit" \
     resolve_pytest_cmd SENTINEL_PYTEST_PYTHON /tmp/missing-sentinel-python python3.12 python3
   assert_cmd "$bin/python-explicit -m pytest" "${PYTEST_CMD[@]}"
 }
@@ -59,7 +59,7 @@ case_explicit_env_fails_closed() {
   mkdir -p "$bin"
   fake_python "$bin/python-explicit" 1
   set +e
-  PATH="$bin" SENTINEL_PYTEST_PYTHON="$bin/python-explicit" \
+  PATH="$bin:$PATH" SENTINEL_PYTEST_PYTHON="$bin/python-explicit" \
     resolve_pytest_cmd SENTINEL_PYTEST_PYTHON /tmp/missing-sentinel-python python3.12 python3 \
     > "$tmp/explicit-bad.out" 2> "$tmp/explicit-bad.err"
   local rc=$?
@@ -74,7 +74,7 @@ case_venv_wins_before_path() {
   mkdir -p "$bin" "$venv"
   fake_python "$venv/python" 0
   fake_python "$bin/python3.12" 0
-  PATH="$bin" resolve_pytest_cmd SENTINEL_PYTEST_PYTHON "$venv/python" python3.12 python3
+  PATH="$bin:$PATH" resolve_pytest_cmd SENTINEL_PYTEST_PYTHON "$venv/python" python3.12 python3
   assert_cmd "$venv/python -m pytest" "${PYTEST_CMD[@]}"
 }
 
@@ -83,7 +83,7 @@ case_python312_wins_over_python3() {
   mkdir -p "$bin"
   fake_python "$bin/python3.12" 0
   fake_python "$bin/python3" 0
-  PATH="$bin" resolve_pytest_cmd SENTINEL_PYTEST_PYTHON /tmp/missing-sentinel-python python3.12 python3
+  PATH="$bin:$PATH" resolve_pytest_cmd SENTINEL_PYTEST_PYTHON /tmp/missing-sentinel-python python3.12 python3
   assert_cmd "python3.12 -m pytest" "${PYTEST_CMD[@]}"
 }
 
@@ -93,7 +93,7 @@ case_pytest_fallback() {
   fake_python "$bin/python3.12" 1
   fake_python "$bin/python3" 1
   fake_pytest "$bin/pytest"
-  PATH="$bin" resolve_pytest_cmd SENTINEL_PYTEST_PYTHON /tmp/missing-sentinel-python python3.12 python3
+  PATH="$bin:$PATH" resolve_pytest_cmd SENTINEL_PYTEST_PYTHON /tmp/missing-sentinel-python python3.12 python3
   assert_cmd "pytest" "${PYTEST_CMD[@]}"
 }
 
@@ -103,7 +103,7 @@ case_no_runner_fails_closed() {
   fake_python "$bin/python3.12" 1
   fake_python "$bin/python3" 1
   set +e
-  PATH="$bin" resolve_pytest_cmd SENTINEL_PYTEST_PYTHON /tmp/missing-sentinel-python python3.12 python3 \
+  PATH="$bin:$PATH" resolve_pytest_cmd SENTINEL_PYTEST_PYTHON /tmp/missing-sentinel-python python3.12 python3 \
     > "$tmp/no-runner.out" 2> "$tmp/no-runner.err"
   local rc=$?
   set -e
