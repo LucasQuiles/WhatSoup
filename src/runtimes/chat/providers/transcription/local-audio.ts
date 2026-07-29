@@ -3,7 +3,7 @@ import { accessSync, constants } from "node:fs";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { delimiter, join, resolve } from "node:path";
-import { getArchBinSuffix } from "../../../lib/arch.ts";
+import { getArchBinSuffix } from "../../../../lib/arch.js";
 
 const DEFAULT_MAX_BUFFER_BYTES = 20 * 1024 * 1024;
 const KILL_GRACE_MS = 2_000;

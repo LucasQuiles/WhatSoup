@@ -33,7 +33,8 @@ export type KnownArch = "arm64" | "aarch64" | "x64" | "x86_64" | "ia32" | "loong
  *   *      → ""
  */
 export function getArchBinSuffix(): string {
-  switch (arch) {
+  const archStr: string = arch;
+  switch (archStr) {
     case "arm64":
     case "aarch64":
       return "-arm64";
@@ -67,7 +68,8 @@ export function getArchBinSuffix(): string {
  *   *             → arch as-is
  */
 export function getArchLabel(): string {
-  switch (arch) {
+  const archStr: string = arch;
+  switch (archStr) {
     case "arm64":
     case "aarch64":
       return "arm64";
@@ -101,7 +103,8 @@ export function getArchLabel(): string {
  *   - x64   → "x86_64" (POSIX convention).
  */
 export function getPlatformArch(): string {
-  switch (arch) {
+  const archStr: string = arch;
+  switch (archStr) {
     case "arm64":
     case "aarch64":
       return "aarch64";
