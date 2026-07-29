@@ -1681,11 +1681,31 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
         } else if (deps.instanceType === 'chat') {
           const details = snap.details as Record<string, unknown>;
           const queue = details.queue as { activeChats?: number; queuedChats?: number } | undefined;
+          const queueAdmission = details.queueAdmission as {
+            rejectedTotal?: unknown;
+            unownedTotal?: unknown;
+          } | undefined;
+          const rejectedTotal = queueAdmission?.rejectedTotal;
+          const unownedTotal = queueAdmission?.unownedTotal;
+          const queueAdmissionIsValid =
+            Number.isSafeInteger(rejectedTotal)
+            && (rejectedTotal as number) >= 0
+            && Number.isSafeInteger(unownedTotal)
+            && (unownedTotal as number) >= 0
+            && (unownedTotal as number) <= (rejectedTotal as number);
           const compatibility = details.databaseCompatibility as Record<string, unknown> | undefined;
           runtimeBlock = {
             chat: {
               queueDepth: (queue?.activeChats ?? 0) + (queue?.queuedChats ?? 0),
               enrichmentUnprocessed: enrichmentStats.unprocessed,
+              ...(queueAdmissionIsValid
+                ? {
+                    queue_admission: {
+                      rejected_total: rejectedTotal,
+                      unowned_total: unownedTotal,
+                    },
+                  }
+                : {}),
               ...(compatibility
                 ? {
                     database_compatibility: {

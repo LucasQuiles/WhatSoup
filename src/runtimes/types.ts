@@ -36,9 +36,17 @@ export interface AgentCommandResult {
   silent: boolean;
 }
 
+export type RuntimeAdmissionReceipt =
+  | { status: 'accepted' }
+  | {
+      status: 'rejected';
+      reason: 'queue_full';
+      durableDisposition: 'failed' | 'unowned';
+    };
+
 export interface Runtime {
   start(): Promise<void>;
-  handleMessage(msg: IncomingMessage): Promise<void>;
+  handleMessage(msg: IncomingMessage): Promise<void | RuntimeAdmissionReceipt>;
   getHealthSnapshot(): RuntimeHealth;
   shutdown(): Promise<void>;
   setDurability(engine: DurabilityEngine): void;

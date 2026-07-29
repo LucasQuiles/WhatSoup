@@ -1988,6 +1988,73 @@ describe('GET /health', () => {
     db2.close();
   });
 
+  it('projects bounded Chat queue-admission counters without copying runtime detail', async () => {
+    db.close();
+    const db2 = makeDb();
+    const deps = makeDeps(db2, {
+      runtime: {
+        getHealthSnapshot: vi.fn().mockReturnValue({
+          status: 'healthy',
+          details: {
+            queue: { activeChats: 0, queuedChats: 0, droppedCount: 4 },
+            queueAdmission: {
+              rejectedTotal: 4,
+              unownedTotal: 1,
+              chatJid: 'private-chat@s.whatsapp.net',
+            },
+          },
+        }),
+      } as any,
+    });
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    ({ server, port } = await buildTestServer(deps));
+
+    const { body } = await healthReq(port);
+    const json = JSON.parse(body);
+    expect(json.runtime.chat).toEqual({
+      queueDepth: 0,
+      enrichmentUnprocessed: 0,
+      queue_admission: {
+        rejected_total: 4,
+        unowned_total: 1,
+      },
+    });
+    expect(body).not.toContain('private-chat@s.whatsapp.net');
+    db2.close();
+  });
+
+  it.each([
+    ['fractional', { rejectedTotal: 1.5, unownedTotal: 0 }],
+    ['unsafe integer', { rejectedTotal: Number.MAX_SAFE_INTEGER + 1, unownedTotal: 0 }],
+    ['wrong type', { rejectedTotal: '4', unownedTotal: 0 }],
+    ['missing field', { rejectedTotal: 4 }],
+    ['incoherent totals', { rejectedTotal: 1, unownedTotal: 2 }],
+  ])('omits %s Chat queue-admission counters', async (_caseName, queueAdmission) => {
+    db.close();
+    const db2 = makeDb();
+    const deps = makeDeps(db2, {
+      runtime: {
+        getHealthSnapshot: vi.fn().mockReturnValue({
+          status: 'healthy',
+          details: {
+            queue: { activeChats: 0, queuedChats: 0 },
+            queueAdmission,
+          },
+        }),
+      } as any,
+    });
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    ({ server, port } = await buildTestServer(deps));
+
+    const { body } = await healthReq(port);
+    const json = JSON.parse(body);
+    expect(json.runtime.chat).toEqual({
+      queueDepth: 0,
+      enrichmentUnprocessed: 0,
+    });
+    db2.close();
+  });
+
   it('returns passive runtime details verbatim in the health JSON shape', async () => {
     db.close();
     const db2 = makeDb();

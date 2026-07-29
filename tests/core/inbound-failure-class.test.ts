@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import {
   ADMISSION_REJECT_CLASSES,
   INBOUND_FAILURE_CLASSES,
+  QueueAdmissionTerminalizationError,
   admissionRejectInboundFailureClass,
   coerceInboundFailureClass,
   classifyErrorForInbound,
@@ -82,6 +83,13 @@ describe('inbound-failure-class — coerceInboundFailureClass', () => {
 });
 
 describe('inbound-failure-class — classifyErrorForInbound', () => {
+  it('preserves queue_full when a queue terminal write is retried by ingest', () => {
+    const err = new QueueAdmissionTerminalizationError(
+      Object.assign(new Error('database or disk is full'), { code: 'SQLITE_FULL' }),
+    );
+    expect(classifyErrorForInbound(err)).toBe('queue_full');
+  });
+
   it('classifies SQLITE_* on .code as db_error', () => {
     const err = Object.assign(new Error('disk I/O error'), { code: 'SQLITE_IOERR' });
     expect(classifyErrorForInbound(err)).toBe('db_error');

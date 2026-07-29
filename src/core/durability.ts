@@ -268,6 +268,7 @@ type DurabilityStatements = {
   markTurnDone: PreparedStatement;
   markInboundComplete: PreparedStatement;
   markInboundFailed: PreparedStatement;
+  markInboundFailedIfProcessing: PreparedStatement;
   markContinuityCandidate: PreparedStatement;
   markContinuityCandidateIfUnownedAndNoTerminalOutbound: PreparedStatement;
   markInboundSkipped: PreparedStatement;
@@ -352,6 +353,17 @@ export class DurabilityEngine {
         // terminal_reason stays exactly 'error' (external matcher contract); the
         // bounded, content-free failure_class column carries the driver split.
         `UPDATE inbound_events SET processing_status = 'failed', completed_at = datetime('now'), terminal_reason = 'error', failure_class = ? WHERE seq = ?`,
+      ),
+      markInboundFailedIfProcessing: prepare(
+        `UPDATE inbound_events
+         SET processing_status = 'failed',
+             completed_at = datetime('now'),
+             terminal_reason = 'error',
+             failure_class = ?
+         WHERE seq = ?
+           AND message_id = ?
+           AND chat_jid = ?
+           AND processing_status = 'processing'`,
       ),
       markContinuityCandidate: prepare(
         `UPDATE inbound_events
@@ -1093,6 +1105,21 @@ export class DurabilityEngine {
 
   markInboundFailed(seq: number, failureClass?: InboundFailureClass): void {
     this.statements.markInboundFailed.run(coerceInboundFailureClass(failureClass), seq);
+  }
+
+  /** Fail exactly the processing inbound owned by the supplied runtime message. */
+  markInboundFailedIfProcessing(
+    seq: number,
+    messageId: string,
+    chatJid: string,
+    failureClass?: InboundFailureClass,
+  ): boolean {
+    return this.statements.markInboundFailedIfProcessing.run(
+      coerceInboundFailureClass(failureClass),
+      seq,
+      messageId,
+      chatJid,
+    ).changes === 1;
   }
 
   markContinuityCandidate(

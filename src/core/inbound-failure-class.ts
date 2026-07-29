@@ -67,6 +67,24 @@ export const INBOUND_FAILURE_CLASSES: ReadonlySet<string> = new Set(
   Object.keys(INBOUND_FAILURE_CLASS_PRESENCE),
 );
 
+export const QUEUE_ADMISSION_TERMINALIZATION_ERROR_CODE =
+  'QUEUE_ADMISSION_TERMINALIZATION_FAILED' as const;
+
+/** Preserve queue-capacity ownership when ingest retries a failed terminal write. */
+export class QueueAdmissionTerminalizationError extends Error {
+  readonly code = QUEUE_ADMISSION_TERMINALIZATION_ERROR_CODE;
+
+  constructor(cause: unknown) {
+    super(
+      cause instanceof Error
+        ? cause.message
+        : 'Queue rejection terminalization failed',
+      { cause },
+    );
+    this.name = 'QueueAdmissionTerminalizationError';
+  }
+}
+
 /**
  * Distinct reasons an admitted turn can be rejected before dispatch (#1750).
  * Each maps 1:1 onto the same-named InboundFailureClass so the durable
@@ -151,6 +169,9 @@ function errText(err: unknown): { message: string; code: string; name: string } 
 export function classifyErrorForInbound(err: unknown): InboundFailureClass {
   const { message, code, name } = errText(err);
 
+  if (code === QUEUE_ADMISSION_TERMINALIZATION_ERROR_CODE) {
+    return 'queue_full';
+  }
   if (UNRECOVERABLE_SQLITE.test(message) || UNRECOVERABLE_SQLITE.test(code)) {
     return 'db_error';
   }

@@ -41,7 +41,7 @@ export class ChatQueue {
   async enqueue(chatJid: string, task: () => Promise<void>): Promise<boolean> {
     const pending = this.pendingByChat.get(chatJid) ?? 0;
     if (pending >= this.maxPerChatDepth) {
-      this.dropped += 1;
+      this.dropped = Math.min(Number.MAX_SAFE_INTEGER, this.dropped + 1);
       log.warn(
         { chatJid, pending, cap: this.maxPerChatDepth, dropped: this.dropped },
         'queue: per-chat backlog at capacity — shedding task (message already persisted)',
