@@ -30,6 +30,7 @@ if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
 from lib.bot_errors_daily_health import daily_health_host_from_payload
+from lib.bot_errors_envelope import EnvelopeError, classify_event, normalize_event
 from lib.bot_errors_redaction import redact_bot_errors_text, redact_json_value as redact_shared_json_value
 from lib.controller_log import (
     ControllerLogContext,
@@ -989,12 +990,11 @@ def incident_scope(event: dict[str, Any]) -> str:
 
 
 def is_incident_alert(event: dict[str, Any]) -> bool:
-    severity = str(event.get("severity") or "").lower()
-    return str(event.get("eventType") or "alert") == "alert" and severity in {"critical", "error", "warning"}
+    return classify_event(event).kind == "incident_alert"
 
 
 def is_incident_clear(event: dict[str, Any]) -> bool:
-    return str(event.get("eventType") or "") == "clear"
+    return classify_event(event).kind == "incident_recovery"
 
 
 def is_daily_health_clear(event: dict[str, Any]) -> bool:
@@ -2043,11 +2043,11 @@ def stamp_delivery_freshness(event: dict[str, Any], current: int) -> None:
 
 
 def format_event(event: dict[str, Any]) -> str:
-    event_type = str(event.get("eventType") or "alert")
-    severity = str(event.get("severity") or "").lower()
-    if event_type == "clear":
+    classification = classify_event(event)
+    severity = classification.severity
+    if classification.kind == "incident_recovery":
         title = "BOT RECOVERY"
-    elif severity == "info":
+    elif classification.kind == "observation":
         title = "BOT INFO"
     elif severity == "warning":
         title = "BOT WARNING"
@@ -3704,9 +3704,8 @@ def find_event_path_by_id(event_id: str, paths: dict[str, Path], keys: tuple[str
 def is_storm_candidate(event: dict[str, Any]) -> bool:
     if isinstance(event.get("storm"), dict):
         return False
-    event_type = str(event.get("eventType") or "alert")
-    severity = str(event.get("severity") or "").lower()
-    return event_type == "alert" and severity in {"critical", "warning"}
+    classification = classify_event(event)
+    return classification.kind == "incident_alert" and classification.severity in {"critical", "warning"}
 
 
 def recovery_normalized_summary(event: dict[str, Any]) -> str:
@@ -3736,10 +3735,11 @@ def recovery_episode_fingerprint(event: dict[str, Any]) -> str:
 
 
 def recovery_duplicate_fingerprint(event: dict[str, Any]) -> str:
+    classification = classify_event(event)
     host, instance = recovery_identity(event)
     parts = [
-        str(event.get("eventType") or "alert").strip().lower(),
-        str(event.get("severity") or "").strip().lower(),
+        classification.event_type,
+        classification.severity,
         str(event.get("source") or "unknown").strip().lower(),
         recovery_normalized_summary(event),
         host,
@@ -3749,18 +3749,15 @@ def recovery_duplicate_fingerprint(event: dict[str, Any]) -> str:
 
 
 def is_recovery_dedupe_candidate(event: dict[str, Any]) -> bool:
-    event_type = str(event.get("eventType") or "alert").strip().lower()
-    severity = str(event.get("severity") or "").strip().lower()
+    classification = classify_event(event)
     source = str(event.get("source") or "").strip().lower()
-    if source == "daily-health" and severity == "info":
+    if source == "daily-health" and classification.severity == "info":
         return False
-    return event_type == "clear" or severity == "info"
+    return classification.kind == "incident_recovery"
 
 
 def is_recovery_episode_barrier(event: dict[str, Any]) -> bool:
-    event_type = str(event.get("eventType") or "alert").strip().lower()
-    severity = str(event.get("severity") or "").strip().lower()
-    return event_type == "alert" and severity in {"critical", "warning"}
+    return classify_event(event).kind == "incident_alert"
 
 
 def manifest_entry(path: Path, event: dict[str, Any]) -> dict[str, Any]:
@@ -4440,9 +4437,26 @@ def ready(path: Path, quarantine_dir: Path) -> bool:
     except Exception as exc:
         quarantine_poison(path, quarantine_dir, f"invalid JSON before claim: {exc}")
         return False
+    try:
+        classify_event(event)
+    except EnvelopeError as exc:
+        quarantine_invalid_envelope(path, quarantine_dir, exc.code)
+        return False
     delivery = event.get("delivery") if isinstance(event.get("delivery"), dict) else {}
     next_attempt = int(delivery.get("nextAttemptAtEpoch") or 0)
     return next_attempt <= int(time.time())
+
+
+def quarantine_invalid_envelope(path: Path, quarantine_dir: Path, code: str) -> Path:
+    """Quarantine an invalid envelope without treating it as an alert to send."""
+
+    ensure_private_dir(quarantine_dir)
+    dest = quarantine_dir / f"{path.name}.{int(time.time())}.{os.getpid()}.invalid-envelope"
+    try:
+        shutil.move(str(path), str(dest))
+    except FileNotFoundError:
+        return dest
+    return dest
 
 
 def quarantine_poison(path: Path, quarantine_dir: Path, reason: str) -> Path:
@@ -4772,6 +4786,12 @@ def process_one(path: Path, paths: dict[str, Path]) -> tuple[bool, str]:
     except Exception as exc:
         quarantine_poison(claimed, paths["quarantine"], f"invalid JSON after claim: {exc}")
         return False, "poison"
+    try:
+        event = normalize_event(event)
+    except EnvelopeError as exc:
+        quarantine_invalid_envelope(claimed, paths["quarantine"], exc.code)
+        return False, "invalid_envelope"
+    atomic_write_json(claimed, event)
 
     # --- Test-leak defense-in-depth (B2) ---
     # Drop test-fixture events BEFORE any delivery, incident-state load, or

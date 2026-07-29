@@ -218,6 +218,53 @@ describe('bot-errors-dispatcher', () => {
     expect(event.delivery.status).toBe('sent');
   });
 
+  it('quarantines a contradictory v1 clear before delivery or incident mutation', () => {
+    tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-dispatcher-'));
+    const capturePath = join(tmpRoot, 'sent-message.txt');
+    writeEvent(tmpRoot, 'critical', {
+      id: 'contradictory-critical-clear',
+      eventType: 'clear',
+      severity: 'critical',
+      source: 'envelope-contract-test',
+      summary: 'contradictory clear must not dispatch',
+    });
+
+    const result = dispatchCaptured(tmpRoot, capturePath);
+
+    expect(result).toMatchObject({ processed: 0, sent: 0, failed: 0 });
+    expect(existsSync(capturePath)).toBe(false);
+    const quarantine = readdirSync(join(tmpRoot, 'quarantine'));
+    expect(quarantine.some((entry) => entry.endsWith('.invalid-envelope'))).toBe(true);
+    expect(existsSync(join(tmpRoot, 'incident-state.json'))).toBe(false);
+  });
+
+  it('normalizes a legacy informational alert as an observation instead of a recovery', () => {
+    tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-dispatcher-'));
+    const capturePath = join(tmpRoot, 'sent-message.txt');
+    writeEvent(tmpRoot, 'info', {
+      id: 'legacy-info-observation',
+      eventType: 'alert',
+      severity: 'info',
+      source: 'envelope-contract-test',
+      summary: 'legacy informational observation',
+    });
+
+    const result = dispatchCaptured(tmpRoot, capturePath);
+
+    expect(result).toMatchObject({ processed: 1, sent: 1, failed: 0 });
+    expect(readFileSync(capturePath, 'utf8')).toContain('BOT INFO');
+    expect(readFileSync(capturePath, 'utf8')).not.toContain('BOT RECOVERY');
+    const sent = join(tmpRoot, 'sent');
+    const [file] = readdirSync(sent);
+    const event = JSON.parse(readFileSync(join(sent, file!), 'utf8')) as Record<string, unknown>;
+    expect(event).toMatchObject({
+      schemaVersion: 2,
+      eventKind: 'observation',
+      eventType: 'observation',
+      severity: 'info',
+    });
+  });
+
   it('keeps an alert durable when the WhatsApp socket is unavailable and sends once after recovery', () => {
     tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-dispatcher-'));
     const capturePath = join(tmpRoot, 'sent-message.txt');
@@ -871,11 +918,11 @@ describe('bot-errors-dispatcher', () => {
     expect(reasons.every((reason) => reason.includes('no open incident'))).toBe(true);
   });
 
-  it('does not suppress a clear separated from the previous clear by a same-fingerprint alert', () => {
+  it('does not suppress a clear separated from the previous clear by an error alert', () => {
     tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-dispatcher-'));
     const capturePath = join(tmpRoot, 'sent-message.txt');
     // Seed the incident the first clear recovers (a prior alert would have opened
-    // it). The same-fingerprint critical alert between the two clears reopens the
+    // it). The same-fingerprint error alert between the two clears reopens the
     // incident, so the second clear also closes an open incident and surfaces;
     // both recoveries are therefore non-orphan. This isolates the dedupe-barrier
     // property: the alert splits the two clears into separate recovery episodes so
@@ -889,7 +936,7 @@ describe('bot-errors-dispatcher', () => {
     writeRecoveryEvent(tmpRoot, 1, {
       id: 'flap-alert-between',
       eventType: 'alert',
-      severity: 'critical',
+      severity: 'error',
       createdAt: '2026-05-31T00:00:30Z',
       summary: 'flapping source restored',
     });
