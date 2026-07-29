@@ -197,7 +197,7 @@ def durable_json_target(
     relative_parts = relative_text.split("/")
     if (
         not root_text.startswith("/")
-        or any(part in {".", ".."} for part in root_parts)
+        or any(part in {"", ".", ".."} for part in root_parts[1:])
         or relative_text.startswith("/")
         or "\\" in relative_text
         or any(part in {"", ".", ".."} for part in relative_parts)
@@ -257,6 +257,20 @@ def _open_target_parent(target: DurableJsonTarget) -> tuple[int, str]:
         raise
 
 
+def _parent_authority_matches(target: DurableJsonTarget, parent_fd: int) -> bool:
+    comparison_fd = -1
+    try:
+        comparison_fd, _leaf = _open_target_parent(target)
+        current = os.fstat(parent_fd)
+        comparison = os.fstat(comparison_fd)
+        return current.st_dev == comparison.st_dev and current.st_ino == comparison.st_ino
+    except (OSError, DurableWriteError):
+        return False
+    finally:
+        if comparison_fd >= 0:
+            os.close(comparison_fd)
+
+
 def observe_json(target: DurableJsonTarget) -> JsonObservation:
     if not isinstance(target, DurableJsonTarget):
         raise DurableWriteError(ErrorClass.IDENTITY_TYPE.value)
@@ -273,6 +287,7 @@ def observe_json(target: DurableJsonTarget) -> JsonObservation:
                 not stat.S_ISREG(file_stat.st_mode)
                 or file_stat.st_uid != os.getuid()
                 or stat.S_IMODE(file_stat.st_mode) & 0o077
+                or file_stat.st_nlink != 1
             ):
                 raise DurableWriteError(ErrorClass.PERMISSION.value)
             if file_stat.st_size > 8 * 1024 * 1024:
@@ -581,12 +596,17 @@ def publish_event_json(
         current_stage = WriteStage.PARENT_SYNC
         _inject_fault(_fault_hook, current_stage)
         os.fsync(parent_fd)
+        authority = (
+            AuthorityState.INTENDED_AUTHORITATIVE
+            if _parent_authority_matches(target, parent_fd)
+            else AuthorityState.UNKNOWN
+        )
         return _result(
             component=component,
             operation=operation_id,
             content_sha256=content_sha256,
             durability=DurabilityProof.COMMITTED,
-            authority=AuthorityState.INTENDED_AUTHORITATIVE,
+            authority=authority,
             stage=WriteStage.PARENT_SYNC,
             cleanup=cleanup,
         )
@@ -622,12 +642,17 @@ def publish_event_json(
                     except OSError:
                         cleanup = CleanupState.DEBT_PRIVATE_TEMP
                     os.fsync(parent_fd)
+                    authority = (
+                        AuthorityState.INTENDED_AUTHORITATIVE
+                        if _parent_authority_matches(target, parent_fd)
+                        else AuthorityState.UNKNOWN
+                    )
                     return _result(
                         component=component,
                         operation=operation_id,
                         content_sha256=content_sha256,
                         durability=DurabilityProof.RECONCILED_COMMITTED,
-                        authority=AuthorityState.INTENDED_AUTHORITATIVE,
+                        authority=authority,
                         stage=WriteStage.RECONCILIATION,
                         cleanup=cleanup,
                     )
@@ -801,12 +826,17 @@ def publish_state_json(
         current_raw, current = _read_version_at(parent_fd, leaf)
         if current_raw == raw:
             os.fsync(parent_fd)
+            authority = (
+                AuthorityState.INTENDED_AUTHORITATIVE
+                if _parent_authority_matches(target, parent_fd)
+                else AuthorityState.UNKNOWN
+            )
             return _result(
                 component=component,
                 operation=operation_id,
                 content_sha256=content_sha256,
                 durability=DurabilityProof.RECONCILED_COMMITTED,
-                authority=AuthorityState.INTENDED_AUTHORITATIVE,
+                authority=authority,
                 stage=WriteStage.RECONCILIATION,
                 cleanup=CleanupState.NOT_REQUIRED,
                 generation=generation,
@@ -857,12 +887,17 @@ def publish_state_json(
         current_stage = WriteStage.PARENT_SYNC
         _inject_fault(_fault_hook, current_stage)
         os.fsync(parent_fd)
+        authority = (
+            AuthorityState.INTENDED_AUTHORITATIVE
+            if _parent_authority_matches(target, parent_fd)
+            else AuthorityState.UNKNOWN
+        )
         return _result(
             component=component,
             operation=operation_id,
             content_sha256=content_sha256,
             durability=DurabilityProof.COMMITTED,
-            authority=AuthorityState.INTENDED_AUTHORITATIVE,
+            authority=authority,
             stage=WriteStage.PARENT_SYNC,
             cleanup=CleanupState.COMPLETE,
             generation=generation,
@@ -950,12 +985,17 @@ def reconcile_json_publication(
         current_raw, current = _read_version_at(parent_fd, leaf)
         if current_raw == raw:
             os.fsync(parent_fd)
+            authority = (
+                AuthorityState.INTENDED_AUTHORITATIVE
+                if _parent_authority_matches(intent.target, parent_fd)
+                else AuthorityState.UNKNOWN
+            )
             return _result(
                 component=intent.component,
                 operation=intent.operation_id,
                 content_sha256=content_sha256,
                 durability=DurabilityProof.RECONCILED_COMMITTED,
-                authority=AuthorityState.INTENDED_AUTHORITATIVE,
+                authority=authority,
                 stage=WriteStage.RECONCILIATION,
                 cleanup=CleanupState.NOT_REQUIRED,
                 generation=intent.generation,

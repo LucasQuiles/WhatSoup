@@ -134,6 +134,15 @@ def test_target_factory_rejects_lexical_escape(tmp_path: Path) -> None:
         )
 
 
+def test_target_factory_rejects_empty_root_components(tmp_path: Path) -> None:
+    module = importlib.import_module("deploy.scripts.lib.durable_json")
+    with pytest.raises(module.DurableWriteError):
+        module.durable_json_target(
+            trusted_root=f"{tmp_path}//nested",
+            relative_path="state/current.json",
+        )
+
+
 def test_operation_id_is_canonical_and_predecessor_fenced(tmp_path: Path) -> None:
     module = importlib.import_module("deploy.scripts.lib.durable_json")
     target = module.durable_json_target(
@@ -262,6 +271,47 @@ def test_parent_descriptor_exhaustion_is_typed_and_inconclusive(
     assert result.confinement is module.ConfinementProof.UNPROVEN
     assert result.error_class is module.ErrorClass.DESCRIPTOR_EXHAUSTION
     assert result.stage is module.WriteStage.PARENT_OPEN
+    assert not result.advance_allowed
+
+
+def test_parent_substitution_after_validation_cannot_escape_or_advance(
+    tmp_path: Path,
+) -> None:
+    module = importlib.import_module("deploy.scripts.lib.durable_json")
+    state = tmp_path / "state"
+    state.mkdir(mode=0o700)
+    outside = tmp_path / "outside"
+    outside.mkdir(mode=0o700)
+    validated = tmp_path / "validated-parent"
+    target = module.durable_json_target(
+        trusted_root=tmp_path,
+        relative_path="state/event.json",
+    )
+    payload = {"id": "event-1"}
+    op_id = module.operation_id(
+        target,
+        payload,
+        component="fixture.event",
+        predecessor=module.JsonVersion(False, None, None, None),
+    )
+
+    def substitute(stage: object) -> None:
+        if stage is module.WriteStage.PARENT_OPEN:
+            state.rename(validated)
+            state.symlink_to(outside, target_is_directory=True)
+
+    result = module.publish_event_json(
+        target,
+        payload,
+        component="fixture.event",
+        operation_id=op_id,
+        _fault_hook=substitute,
+    )
+
+    assert (validated / "event.json").exists()
+    assert not (outside / "event.json").exists()
+    assert result.confinement is module.ConfinementProof.PROVEN
+    assert result.authority is module.AuthorityState.UNKNOWN
     assert not result.advance_allowed
 
 
@@ -419,6 +469,23 @@ def test_observe_json_rejects_a_symlinked_intermediate(tmp_path: Path) -> None:
 def test_observe_json_rejects_a_weakened_intermediate_mode(tmp_path: Path) -> None:
     module = importlib.import_module("deploy.scripts.lib.durable_json")
     (tmp_path / "state").mkdir(mode=0o755)
+    target = module.durable_json_target(
+        trusted_root=tmp_path,
+        relative_path="state/current.json",
+    )
+
+    with pytest.raises(module.DurableWriteError):
+        module.observe_json(target)
+
+
+def test_observe_json_rejects_a_hard_linked_target(tmp_path: Path) -> None:
+    module = importlib.import_module("deploy.scripts.lib.durable_json")
+    state = tmp_path / "state"
+    state.mkdir(mode=0o700)
+    record = state / "current.json"
+    record.write_text('{"status":"ready"}\n', encoding="utf-8")
+    record.chmod(0o600)
+    (state / "alias.json").hardlink_to(record)
     target = module.durable_json_target(
         trusted_root=tmp_path,
         relative_path="state/current.json",
