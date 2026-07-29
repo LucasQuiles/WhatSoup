@@ -142,3 +142,67 @@ Roll out by source-policy class: receipt-only dark launch, persistence canary fo
 Canary promotion requires policy approval, privacy review, zero denied-source persistence, restart/search success, deletion proof, FTS consistency, provider-fallback compliance, and reviewed false-positive controls.
 
 Rollback disables new durable writes and indexing for the affected source class while preserving immediate processing if separately authorized. Existing derived content remains governed by its recorded retention and deletion policy; rollback does not silently retain, delete, or relabel it.
+
+## Current-main reconciliation — 2026-07-29
+
+This amendment supersedes current-system instructions pinned to `c9759467d`.
+Current main is `5398982e610bb948d671181a04856590c9f3f9e5`.
+
+**Readiness:** `BLOCKED PRE-CODE`; conditional on policy and storage-owner
+decisions.
+
+### Retained current owners
+
+- `src/mcp/tools/media.ts::transcribe_audio` exposes the current tool.
+- `src/runtimes/chat/providers/transcription/chain.ts::transcribeAudioWithProviders`
+  owns provider selection/execution.
+- `src/core/messages.ts::updateTranscription` and `messages.content_text` own
+  persisted searchable transcription text.
+- MCP search and current message authorization remain the search boundary.
+
+### Exact gap
+
+No current-main hit was found for a transcription attempt or transcription
+consent state. The gap is policy/lifecycle around the existing chain:
+consent, admission, retry/recovery, honest terminal status, retention, and
+deletion.
+
+### Superseded and narrowed instructions
+
+- Do not add another transcription chain, provider router, or searchable field.
+- A new attempt table is conditional. First prove generic tool evidence plus
+  message state cannot represent required recovery and consent transitions.
+- FTS work is not greenfield; only authorization/status/deletion projections
+  may be missing.
+- No historical transcription/backfill is authorized by this proposal.
+
+### Owner decisions
+
+- source classes and consent basis;
+- native model-audio versus transcription policy;
+- provider/fallback equivalence;
+- persistence and search modes/authorization;
+- confidence, language, and provenance contract;
+- retention and deletion across message text, indexes, caches, exports, and
+  backups;
+- generic evidence adapter versus new attempt SSOT;
+- derived-secret integration with DPR-01.
+
+### First implementation-plan gate
+
+First RED binding:
+
+- File: `tests/runtimes/chat/transcription-continuity.test.ts`
+- Test: `does not persist or index a denied voice-note transcription`
+- Command: `npm test -- tests/runtimes/chat/transcription-continuity.test.ts -t "does not persist or index a denied voice-note transcription" --pool=forks`
+- Expected RED reason: no approved consent/admission state currently guards
+  the existing transcription chain and persistence seam.
+
+Name RED tests in transcription chain/integration suites,
+`tests/core/messages.test.ts`, `tests/mcp/tools/media.test.ts`, and
+`tests/mcp/tools/search.test.ts`. Cover consent deny/revoke, restart at every
+attempt boundary, fallback mismatch, duplicate completion, deletion, search
+authorization, privacy canaries, feature-off, and no-backfill behavior.
+
+The PR must remain draft and use non-closing references to the portability
+issues.
