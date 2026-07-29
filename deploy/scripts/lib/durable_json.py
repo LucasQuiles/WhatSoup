@@ -72,8 +72,21 @@ class ErrorClass(str, Enum):
     UNKNOWN = "unknown"
 
 
+class PublicationKind(str, Enum):
+    EVENT = "event"
+    STATE = "state"
+
+
 class DurableWriteError(RuntimeError):
     """Bounded public failure for a durable publication decision."""
+
+    def __init__(
+        self,
+        error_class: ErrorClass | str,
+        public_message: str | None = None,
+    ):
+        self.error_class = ErrorClass(error_class)
+        super().__init__(public_message or self.error_class.value)
 
 
 @dataclass(frozen=True)
@@ -139,6 +152,34 @@ class JsonVersion:
 class JsonObservation:
     payload: Mapping[str, Any] | None
     version: JsonVersion
+
+
+@dataclass(frozen=True)
+class JsonPublicationIntent:
+    kind: PublicationKind
+    target: DurableJsonTarget
+    payload: Mapping[str, Any]
+    component: str
+    operation_id: str
+    generation: int | None
+
+
+@dataclass(frozen=True)
+class ParentSyncResult:
+    same_parent: bool
+    destination_synced: bool
+    source_synced: bool
+    failed_parent: str | None
+    error_class: ErrorClass | None
+
+    @property
+    def advance_allowed(self) -> bool:
+        return (
+            self.destination_synced
+            and self.source_synced
+            and self.failed_parent is None
+            and self.error_class is None
+        )
 
 
 def _not_implemented() -> NoReturn:
@@ -272,6 +313,17 @@ def observe_json(target: DurableJsonTarget) -> JsonObservation:
 
 
 def _canonical_payload(payload: Mapping[str, Any]) -> bytes:
+    def validate(value: Any) -> None:
+        if isinstance(value, Mapping):
+            if any(not isinstance(key, str) for key in value):
+                raise DurableWriteError(ErrorClass.IDENTITY_TYPE.value)
+            for nested in value.values():
+                validate(nested)
+        elif isinstance(value, (list, tuple)):
+            for nested in value:
+                validate(nested)
+
+    validate(payload)
     try:
         rendered = json.dumps(
             payload,
@@ -336,6 +388,35 @@ def _result(
         generation=generation,
         private_operation_id=operation,
         private_content_sha256=content_sha256,
+    )
+
+
+def _classify_exception(
+    exc: OSError | DurableWriteError,
+    *,
+    parent_opened: bool,
+) -> tuple[ConfinementProof, ErrorClass]:
+    if isinstance(exc, InterruptedError):
+        return (
+            ConfinementProof.PROVEN if parent_opened else ConfinementProof.UNPROVEN,
+            ErrorClass.INTERRUPTION,
+        )
+    if isinstance(exc, DurableWriteError):
+        confinement = (
+            ConfinementProof.VIOLATED
+            if not parent_opened and exc.error_class is ErrorClass.IDENTITY_TYPE
+            else ConfinementProof.PROVEN if parent_opened else ConfinementProof.UNPROVEN
+        )
+        return confinement, exc.error_class
+    if exc.errno in {errno.EMFILE, errno.ENFILE}:
+        error_class = ErrorClass.DESCRIPTOR_EXHAUSTION
+    elif exc.errno in {errno.EACCES, errno.EPERM}:
+        error_class = ErrorClass.PERMISSION
+    else:
+        error_class = ErrorClass.IO
+    return (
+        ConfinementProof.PROVEN if parent_opened else ConfinementProof.UNPROVEN,
+        error_class,
     )
 
 
@@ -566,16 +647,7 @@ def publish_event_json(
             cleanup=CleanupState.DEBT_PRIVATE_TEMP if temp_created else CleanupState.NOT_REQUIRED,
         )
     except (OSError, DurableWriteError) as exc:
-        confinement = (
-            ConfinementProof.VIOLATED
-            if parent_fd < 0 and isinstance(exc, DurableWriteError)
-            else ConfinementProof.PROVEN
-        )
-        error_class = ErrorClass.INTERRUPTION if isinstance(exc, InterruptedError) else (
-            ErrorClass.IDENTITY_TYPE
-            if confinement is ConfinementProof.VIOLATED
-            else ErrorClass.IO
-        )
+        confinement, error_class = _classify_exception(exc, parent_opened=parent_fd >= 0)
         return _result(
             component=component,
             operation=operation_id,
@@ -796,16 +868,7 @@ def publish_state_json(
             generation=generation,
         )
     except (OSError, DurableWriteError) as exc:
-        confinement = (
-            ConfinementProof.VIOLATED
-            if parent_fd < 0 and isinstance(exc, DurableWriteError)
-            else ConfinementProof.PROVEN
-        )
-        error_class = ErrorClass.INTERRUPTION if isinstance(exc, InterruptedError) else (
-            ErrorClass.IDENTITY_TYPE
-            if confinement is ConfinementProof.VIOLATED
-            else ErrorClass.IO
-        )
+        confinement, error_class = _classify_exception(exc, parent_opened=parent_fd >= 0)
         return _result(
             component=component,
             operation=operation_id,
@@ -832,16 +895,179 @@ def publish_state_json(
             os.close(parent_fd)
 
 
-def reconcile_json_publication(*args: object, **kwargs: object) -> NoReturn:
-    _not_implemented()
+def reconcile_json_publication(
+    intent: JsonPublicationIntent,
+    previous: JsonVersion,
+) -> PublicationResult:
+    if not isinstance(intent, JsonPublicationIntent) or not isinstance(previous, JsonVersion):
+        return _result(
+            component="unknown",
+            operation="",
+            content_sha256=None,
+            durability=DurabilityProof.NOT_MUTATED,
+            authority=AuthorityState.UNKNOWN,
+            stage=WriteStage.RECONCILIATION,
+            error_class=ErrorClass.IDENTITY_TYPE,
+        )
+    try:
+        canonical = _canonical_payload(intent.payload)
+        expected_operation = operation_id(
+            intent.target,
+            intent.payload,
+            component=intent.component,
+            predecessor=previous,
+        )
+    except DurableWriteError:
+        return _result(
+            component=intent.component,
+            operation=intent.operation_id,
+            content_sha256=None,
+            durability=DurabilityProof.NOT_MUTATED,
+            authority=AuthorityState.UNKNOWN,
+            stage=WriteStage.RECONCILIATION,
+            error_class=ErrorClass.SERIALIZATION,
+            generation=intent.generation,
+        )
+    raw = canonical + b"\n"
+    content_sha256 = hashlib.sha256(raw).hexdigest()
+    if expected_operation != intent.operation_id:
+        return _result(
+            component=intent.component,
+            operation=intent.operation_id,
+            content_sha256=content_sha256,
+            durability=DurabilityProof.NOT_MUTATED,
+            authority=AuthorityState.UNKNOWN,
+            stage=WriteStage.RECONCILIATION,
+            error_class=ErrorClass.IDENTITY_TYPE,
+            generation=intent.generation,
+        )
+
+    parent_fd = -1
+    lock_fd = -1
+    try:
+        parent_fd, leaf = _open_target_parent(intent.target)
+        lock_fd = _lock_parent(parent_fd)
+        current_raw, current = _read_version_at(parent_fd, leaf)
+        if current_raw == raw:
+            os.fsync(parent_fd)
+            return _result(
+                component=intent.component,
+                operation=intent.operation_id,
+                content_sha256=content_sha256,
+                durability=DurabilityProof.RECONCILED_COMMITTED,
+                authority=AuthorityState.INTENDED_AUTHORITATIVE,
+                stage=WriteStage.RECONCILIATION,
+                cleanup=CleanupState.NOT_REQUIRED,
+                generation=intent.generation,
+            )
+        if current_raw is None:
+            return _result(
+                component=intent.component,
+                operation=intent.operation_id,
+                content_sha256=content_sha256,
+                durability=DurabilityProof.NOT_MUTATED,
+                authority=(
+                    AuthorityState.EXPECTED_PREDECESSOR
+                    if not previous.exists
+                    else AuthorityState.UNKNOWN
+                ),
+                stage=WriteStage.RECONCILIATION,
+                generation=intent.generation,
+            )
+        superseded = (
+            intent.kind is PublicationKind.STATE
+            and current.generation is not None
+            and intent.generation is not None
+            and current.generation > intent.generation
+        )
+        return _result(
+            component=intent.component,
+            operation=intent.operation_id,
+            content_sha256=content_sha256,
+            durability=DurabilityProof.NOT_MUTATED,
+            authority=AuthorityState.SUPERSEDED if superseded else AuthorityState.CONFLICT,
+            stage=WriteStage.RECONCILIATION,
+            error_class=ErrorClass.CONFLICT,
+            generation=intent.generation,
+        )
+    except (OSError, DurableWriteError) as exc:
+        confinement, error_class = _classify_exception(exc, parent_opened=parent_fd >= 0)
+        return _result(
+            component=intent.component,
+            operation=intent.operation_id,
+            content_sha256=content_sha256,
+            durability=DurabilityProof.UNPROVEN,
+            authority=AuthorityState.UNKNOWN,
+            stage=WriteStage.RECONCILIATION,
+            error_class=error_class,
+            confinement=confinement,
+            generation=intent.generation,
+        )
+    finally:
+        if lock_fd >= 0:
+            os.close(lock_fd)
+        if parent_fd >= 0:
+            os.close(parent_fd)
 
 
-def sync_changed_parents(*args: object, **kwargs: object) -> NoReturn:
-    _not_implemented()
+def sync_changed_parents(
+    destination: DurableJsonTarget,
+    source: DurableJsonTarget,
+) -> ParentSyncResult:
+    destination_fd = -1
+    source_fd = -1
+    same_parent = False
+    destination_synced = False
+    source_synced = False
+    failed_parent: str | None = None
+    try:
+        destination_fd, _destination_leaf = _open_target_parent(destination)
+        source_fd, _source_leaf = _open_target_parent(source)
+        destination_stat = os.fstat(destination_fd)
+        source_stat = os.fstat(source_fd)
+        same_parent = (
+            destination_stat.st_dev == source_stat.st_dev
+            and destination_stat.st_ino == source_stat.st_ino
+        )
+        failed_parent = "destination"
+        os.fsync(destination_fd)
+        destination_synced = True
+        if same_parent:
+            source_synced = True
+        else:
+            failed_parent = "source"
+            os.fsync(source_fd)
+            source_synced = True
+        failed_parent = None
+        return ParentSyncResult(
+            same_parent=same_parent,
+            destination_synced=destination_synced,
+            source_synced=source_synced,
+            failed_parent=None,
+            error_class=None,
+        )
+    except (OSError, DurableWriteError) as exc:
+        _confinement, error_class = _classify_exception(
+            exc,
+            parent_opened=destination_fd >= 0,
+        )
+        return ParentSyncResult(
+            same_parent=same_parent,
+            destination_synced=destination_synced,
+            source_synced=source_synced,
+            failed_parent=failed_parent or "destination",
+            error_class=error_class,
+        )
+    finally:
+        if source_fd >= 0:
+            os.close(source_fd)
+        if destination_fd >= 0:
+            os.close(destination_fd)
 
 
 def require_advance(result: PublicationResult) -> None:
     if not result.advance_allowed:
         raise DurableWriteError(
-            json.dumps(result.public_projection(), sort_keys=True, separators=(",", ":"))
+            result.error_class or ErrorClass.UNKNOWN,
+            json.dumps(result.public_projection(), sort_keys=True, separators=(",", ":")),
         )
