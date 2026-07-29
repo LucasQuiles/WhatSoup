@@ -427,6 +427,12 @@ def _classify_exception(
         error_class = ErrorClass.DESCRIPTOR_EXHAUSTION
     elif exc.errno in {errno.EACCES, errno.EPERM}:
         error_class = ErrorClass.PERMISSION
+    elif exc.errno in {
+        errno.EINVAL,
+        getattr(errno, "ENOTSUP", errno.EINVAL),
+        getattr(errno, "EOPNOTSUPP", errno.EINVAL),
+    }:
+        error_class = ErrorClass.UNSUPPORTED_CAPABILITY
     else:
         error_class = ErrorClass.IO
     return (
@@ -611,6 +617,17 @@ def publish_event_json(
             cleanup=cleanup,
         )
     except FileExistsError:
+        if current_stage is WriteStage.TEMPORARY_CREATION:
+            return _result(
+                component=component,
+                operation=operation_id,
+                content_sha256=content_sha256,
+                durability=DurabilityProof.NOT_MUTATED,
+                authority=AuthorityState.UNKNOWN,
+                stage=current_stage,
+                error_class=ErrorClass.CONFLICT,
+                cleanup=CleanupState.DEBT_RECOVERY_RECORD,
+            )
         if parent_fd >= 0:
             existing_fd = -1
             try:
@@ -673,6 +690,15 @@ def publish_event_json(
         )
     except (OSError, DurableWriteError) as exc:
         confinement, error_class = _classify_exception(exc, parent_opened=parent_fd >= 0)
+        cleanup_state = (
+            CleanupState.DEBT_RECOVERY_RECORD
+            if current_stage is WriteStage.TEMPORARY_CREATION
+            and isinstance(exc, FileExistsError)
+            and not temp_created
+            else CleanupState.DEBT_PRIVATE_TEMP
+            if temp_created
+            else CleanupState.NOT_REQUIRED
+        )
         return _result(
             component=component,
             operation=operation_id,
@@ -681,7 +707,7 @@ def publish_event_json(
             authority=AuthorityState.UNKNOWN if published else AuthorityState.EXPECTED_PREDECESSOR,
             stage=current_stage,
             error_class=error_class,
-            cleanup=CleanupState.DEBT_PRIVATE_TEMP if temp_created else CleanupState.NOT_REQUIRED,
+            cleanup=cleanup_state,
             confinement=confinement,
         )
     finally:
@@ -771,6 +797,25 @@ def publish_state_json(
             stage=WriteStage.CAPABILITY_CHECK,
             error_class=ErrorClass.IDENTITY_TYPE,
             generation=generation if isinstance(generation, int) else None,
+        )
+    payload_generation = payload.get("generation") if isinstance(payload, Mapping) else None
+    if (
+        payload_generation is not None
+        and payload_generation != generation
+    ) or (
+        expected.exists
+        and expected.generation is not None
+        and generation <= expected.generation
+    ):
+        return _result(
+            component=component,
+            operation=operation_id,
+            content_sha256=None,
+            durability=DurabilityProof.NOT_MUTATED,
+            authority=AuthorityState.SUPERSEDED,
+            stage=WriteStage.CAPABILITY_CHECK,
+            error_class=ErrorClass.CONFLICT,
+            generation=generation,
         )
     try:
         canonical = _canonical_payload(payload)
@@ -904,6 +949,15 @@ def publish_state_json(
         )
     except (OSError, DurableWriteError) as exc:
         confinement, error_class = _classify_exception(exc, parent_opened=parent_fd >= 0)
+        cleanup_state = (
+            CleanupState.DEBT_RECOVERY_RECORD
+            if current_stage is WriteStage.TEMPORARY_CREATION
+            and isinstance(exc, FileExistsError)
+            and not temp_created
+            else CleanupState.DEBT_PRIVATE_TEMP
+            if temp_created
+            else CleanupState.NOT_REQUIRED
+        )
         return _result(
             component=component,
             operation=operation_id,
@@ -912,7 +966,7 @@ def publish_state_json(
             authority=AuthorityState.UNKNOWN if published else AuthorityState.EXPECTED_PREDECESSOR,
             stage=current_stage,
             error_class=error_class,
-            cleanup=CleanupState.DEBT_PRIVATE_TEMP if temp_created else CleanupState.NOT_REQUIRED,
+            cleanup=cleanup_state,
             confinement=confinement,
             generation=generation,
         )

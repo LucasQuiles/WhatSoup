@@ -234,9 +234,237 @@ def test_event_write_failures_do_not_publish(
     assert list((tmp_path / "state").glob(".durable-json.*.tmp")) == []
 
 
+def test_event_file_sync_failure_does_not_publish(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = importlib.import_module("deploy.scripts.lib.durable_json")
+    (tmp_path / "state").mkdir(mode=0o700)
+    target = module.durable_json_target(
+        trusted_root=tmp_path,
+        relative_path="state/event.json",
+    )
+    payload = {"id": "event-1"}
+    op_id = module.operation_id(
+        target,
+        payload,
+        component="fixture.event",
+        predecessor=module.JsonVersion(False, None, None, None),
+    )
+    real_fsync = module.os.fsync
+    calls = 0
+
+    def fail_payload_sync(descriptor: int) -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 3:
+            raise OSError(module.errno.ENOSPC, "injected")
+        real_fsync(descriptor)
+
+    monkeypatch.setattr(module.os, "fsync", fail_payload_sync)
+
+    result = module.publish_event_json(
+        target,
+        payload,
+        component="fixture.event",
+        operation_id=op_id,
+    )
+
+    assert result.durability is module.DurabilityProof.NOT_MUTATED
+    assert result.stage is module.WriteStage.FILE_SYNC
+    assert result.error_class is module.ErrorClass.IO
+    assert not (tmp_path / "state/event.json").exists()
+
+
+def test_event_permission_finalization_failure_does_not_publish(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = importlib.import_module("deploy.scripts.lib.durable_json")
+    (tmp_path / "state").mkdir(mode=0o700)
+    target = module.durable_json_target(
+        trusted_root=tmp_path,
+        relative_path="state/event.json",
+    )
+    payload = {"id": "event-1"}
+    op_id = module.operation_id(
+        target,
+        payload,
+        component="fixture.event",
+        predecessor=module.JsonVersion(False, None, None, None),
+    )
+    real_fchmod = module.os.fchmod
+    calls = 0
+
+    def deny_payload_mode(descriptor: int, mode: int) -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise OSError(module.errno.EACCES, "injected")
+        real_fchmod(descriptor, mode)
+
+    monkeypatch.setattr(module.os, "fchmod", deny_payload_mode)
+
+    result = module.publish_event_json(
+        target,
+        payload,
+        component="fixture.event",
+        operation_id=op_id,
+    )
+
+    assert result.durability is module.DurabilityProof.NOT_MUTATED
+    assert result.stage is module.WriteStage.PERMISSION_FINALIZATION
+    assert result.error_class is module.ErrorClass.PERMISSION
+    assert not (tmp_path / "state/event.json").exists()
+
+
+def test_event_final_mode_ignores_ambient_umask(tmp_path: Path) -> None:
+    module = importlib.import_module("deploy.scripts.lib.durable_json")
+    (tmp_path / "state").mkdir(mode=0o700)
+    target = module.durable_json_target(
+        trusted_root=tmp_path,
+        relative_path="state/event.json",
+    )
+    payload = {"id": "event-1"}
+    op_id = module.operation_id(
+        target,
+        payload,
+        component="fixture.event",
+        predecessor=module.JsonVersion(False, None, None, None),
+    )
+    previous_umask = module.os.umask(0)
+    try:
+        result = module.publish_event_json(
+            target,
+            payload,
+            component="fixture.event",
+            operation_id=op_id,
+        )
+    finally:
+        module.os.umask(previous_umask)
+
+    assert result.advance_allowed
+    assert (tmp_path / "state/event.json").stat().st_mode & 0o777 == 0o600
+
+
+def test_event_private_temporary_cleanup_debt_is_explicit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = importlib.import_module("deploy.scripts.lib.durable_json")
+    state = tmp_path / "state"
+    state.mkdir(mode=0o700)
+    target = module.durable_json_target(
+        trusted_root=tmp_path,
+        relative_path="state/event.json",
+    )
+    payload = {"id": "event-1"}
+    op_id = module.operation_id(
+        target,
+        payload,
+        component="fixture.event",
+        predecessor=module.JsonVersion(False, None, None, None),
+    )
+    temp_name = f".durable-json.{op_id}.tmp"
+    real_unlink = module.os.unlink
+
+    def preserve_private_temp(path: object, *args: object, **kwargs: object) -> None:
+        if path == temp_name:
+            raise OSError(module.errno.EACCES, "injected")
+        real_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(module.os, "unlink", preserve_private_temp)
+
+    result = module.publish_event_json(
+        target,
+        payload,
+        component="fixture.event",
+        operation_id=op_id,
+    )
+
+    assert result.durability is module.DurabilityProof.COMMITTED
+    assert result.cleanup is module.CleanupState.DEBT_PRIVATE_TEMP
+    assert result.advance_allowed
+    assert (state / "event.json").exists()
+    assert (state / temp_name).exists()
+
+
+def test_exclusive_temporary_collision_is_preserved_as_recovery_debt(
+    tmp_path: Path,
+) -> None:
+    module = importlib.import_module("deploy.scripts.lib.durable_json")
+    state = tmp_path / "state"
+    state.mkdir(mode=0o700)
+    target = module.durable_json_target(
+        trusted_root=tmp_path,
+        relative_path="state/event.json",
+    )
+    payload = {"id": "event-1"}
+    op_id = module.operation_id(
+        target,
+        payload,
+        component="fixture.event",
+        predecessor=module.JsonVersion(False, None, None, None),
+    )
+    stale = state / f".durable-json.{op_id}.tmp"
+    stale.write_bytes(b"unverified-stale-bytes")
+    stale.chmod(0o600)
+
+    result = module.publish_event_json(
+        target,
+        payload,
+        component="fixture.event",
+        operation_id=op_id,
+    )
+
+    assert result.durability is module.DurabilityProof.NOT_MUTATED
+    assert result.cleanup is module.CleanupState.DEBT_RECOVERY_RECORD
+    assert not result.advance_allowed
+    assert stale.read_bytes() == b"unverified-stale-bytes"
+    assert not (state / "event.json").exists()
+
+
+def test_state_temporary_collision_blocks_replacement(tmp_path: Path) -> None:
+    module = importlib.import_module("deploy.scripts.lib.durable_json")
+    state = tmp_path / "state"
+    state.mkdir(mode=0o700)
+    target = module.durable_json_target(
+        trusted_root=tmp_path,
+        relative_path="state/current.json",
+    )
+    payload = {"status": "ready"}
+    absent = module.JsonVersion(False, None, None, None)
+    op_id = module.operation_id(
+        target,
+        payload,
+        component="fixture.state",
+        predecessor=absent,
+    )
+    stale = state / f".durable-json.{op_id}.tmp"
+    stale.write_bytes(b"unverified-stale-bytes")
+    stale.chmod(0o600)
+
+    result = module.publish_state_json(
+        target,
+        payload,
+        component="fixture.state",
+        operation_id=op_id,
+        expected=absent,
+        generation=1,
+    )
+
+    assert result.durability is module.DurabilityProof.NOT_MUTATED
+    assert result.cleanup is module.CleanupState.DEBT_RECOVERY_RECORD
+    assert not result.advance_allowed
+    assert stale.read_bytes() == b"unverified-stale-bytes"
+    assert not (state / "current.json").exists()
+
+
+@pytest.mark.parametrize("exhaustion_name", ["EMFILE", "ENFILE"])
 def test_parent_descriptor_exhaustion_is_typed_and_inconclusive(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    exhaustion_name: str,
 ) -> None:
     module = importlib.import_module("deploy.scripts.lib.durable_json")
     (tmp_path / "state").mkdir(mode=0o700)
@@ -255,7 +483,7 @@ def test_parent_descriptor_exhaustion_is_typed_and_inconclusive(
 
     def exhaust_on_state(path: object, flags: int, *args: object, **kwargs: object) -> int:
         if path == "state":
-            raise OSError(module.errno.EMFILE, "injected")
+            raise OSError(getattr(module.errno, exhaustion_name), "injected")
         return real_open(path, flags, *args, **kwargs)
 
     monkeypatch.setattr(module.os, "open", exhaust_on_state)
@@ -271,6 +499,46 @@ def test_parent_descriptor_exhaustion_is_typed_and_inconclusive(
     assert result.confinement is module.ConfinementProof.UNPROVEN
     assert result.error_class is module.ErrorClass.DESCRIPTOR_EXHAUSTION
     assert result.stage is module.WriteStage.PARENT_OPEN
+    assert not result.advance_allowed
+
+
+def test_lock_permission_failure_is_typed_before_mutation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = importlib.import_module("deploy.scripts.lib.durable_json")
+    (tmp_path / "state").mkdir(mode=0o700)
+    target = module.durable_json_target(
+        trusted_root=tmp_path,
+        relative_path="state/event.json",
+    )
+    payload = {"id": "event-1"}
+    op_id = module.operation_id(
+        target,
+        payload,
+        component="fixture.event",
+        predecessor=module.JsonVersion(False, None, None, None),
+    )
+    real_open = module.os.open
+
+    def deny_lock(path: object, flags: int, *args: object, **kwargs: object) -> int:
+        if path == ".durable-json.lock":
+            raise OSError(module.errno.EACCES, "injected")
+        return real_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(module.os, "open", deny_lock)
+
+    result = module.publish_event_json(
+        target,
+        payload,
+        component="fixture.event",
+        operation_id=op_id,
+    )
+
+    assert result.durability is module.DurabilityProof.NOT_MUTATED
+    assert result.confinement is module.ConfinementProof.PROVEN
+    assert result.error_class is module.ErrorClass.PERMISSION
+    assert result.stage is module.WriteStage.LOCK_ACQUISITION
     assert not result.advance_allowed
 
 
@@ -450,6 +718,54 @@ def test_publish_state_json_replaces_the_expected_generation(tmp_path: Path) -> 
     assert result.durability is module.DurabilityProof.COMMITTED
     assert result.generation == 1
     assert (tmp_path / "state/current.json").read_bytes() == b'{"status":"ready","version":1}\n'
+
+
+def test_state_generation_cannot_move_backwards(tmp_path: Path) -> None:
+    module = importlib.import_module("deploy.scripts.lib.durable_json")
+    (tmp_path / "state").mkdir(mode=0o700)
+    target = module.durable_json_target(
+        trusted_root=tmp_path,
+        relative_path="state/current.json",
+    )
+    absent = module.JsonVersion(False, None, None, None)
+    current_payload = {"generation": 2, "status": "current"}
+    current_op = module.operation_id(
+        target,
+        current_payload,
+        component="fixture.state",
+        predecessor=absent,
+    )
+    first = module.publish_state_json(
+        target,
+        current_payload,
+        component="fixture.state",
+        operation_id=current_op,
+        expected=absent,
+        generation=2,
+    )
+    expected = module.observe_json(target).version
+    stale_payload = {"generation": 1, "status": "stale"}
+    stale_op = module.operation_id(
+        target,
+        stale_payload,
+        component="fixture.state",
+        predecessor=expected,
+    )
+
+    stale = module.publish_state_json(
+        target,
+        stale_payload,
+        component="fixture.state",
+        operation_id=stale_op,
+        expected=expected,
+        generation=1,
+    )
+
+    assert first.advance_allowed
+    assert stale.durability is module.DurabilityProof.NOT_MUTATED
+    assert stale.authority is module.AuthorityState.SUPERSEDED
+    assert not stale.advance_allowed
+    assert module.observe_json(target).payload == current_payload
 
 
 def test_observe_json_rejects_a_symlinked_intermediate(tmp_path: Path) -> None:
@@ -903,6 +1219,33 @@ def test_sync_changed_parents_reports_the_failed_source_barrier(
     assert not result.source_synced
     assert result.failed_parent == "source"
     assert result.error_class is module.ErrorClass.IO
+
+
+def test_sync_changed_parents_reports_unsupported_directory_sync(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = importlib.import_module("deploy.scripts.lib.durable_json")
+    (tmp_path / "state").mkdir(mode=0o700)
+    destination = module.durable_json_target(
+        trusted_root=tmp_path,
+        relative_path="state/destination.json",
+    )
+    source = module.durable_json_target(
+        trusted_root=tmp_path,
+        relative_path="state/source.json",
+    )
+
+    def unsupported(_descriptor: int) -> None:
+        raise OSError(module.errno.EINVAL, "injected")
+
+    monkeypatch.setattr(module.os, "fsync", unsupported)
+
+    result = module.sync_changed_parents(destination, source)
+
+    assert not result.advance_allowed
+    assert result.failed_parent == "destination"
+    assert result.error_class is module.ErrorClass.UNSUPPORTED_CAPABILITY
 
 
 def test_reconcile_json_publication_proves_intended_event_bytes(tmp_path: Path) -> None:
