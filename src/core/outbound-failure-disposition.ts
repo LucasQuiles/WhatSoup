@@ -517,6 +517,48 @@ export function createInternalOutboundFailureEvidence(
   });
 }
 
+// Failure classes eligible for a best-effort user-facing "your message wasn't
+// delivered" notice, sent through the SAME channel that just failed. A
+// notice is only warranted when the failure is provably about THIS message
+// (its size or a requested capability) rather than the destination or the
+// provider connection — a short fixed-string notice to the same destination
+// does not share that defect, so it is likely to land.
+//
+// Deliberately excluded, even though they can also reach retry_decision
+// 'stop':
+//   - transport.auth_required   (auth — session/credential problem, not this message)
+//   - transport.rate_limited    (rate-limit/deferral — retryable, not a stop-worthy rejection)
+//   - transport.transient_provider (connectivity — a retryable class can still
+//     land on 'stop' once attempts are exhausted; that exhaustion says nothing
+//     about whether a fresh notice send would succeed)
+//   - transport.send_ambiguous  (ambiguous — the original may have landed; the
+//     outcome of a notice send would be equally uncertain)
+//   - transport.conversation_not_found (the DESTINATION is the defect — a
+//     notice to the same broken destination would hit the identical wall,
+//     stronger than "unknown": it is a proven negative)
+//   - transport.permanent_provider (mapPortError's unmatched-error fallback —
+//     channel health is unproven for whatever provider condition landed here)
+//   - every internal outbound.* code (shutdown, governor-shed, crash-in-flight,
+//     etc. — none carry transport-typed evidence of channel health)
+const NOTICE_ELIGIBLE_FAILURE_CODES: ReadonlySet<OutboundFailureCode> = new Set([
+  ErrorCode.PAYLOAD_TOO_LARGE,
+  ErrorCode.UNSUPPORTED_CAPABILITY,
+]);
+
+/**
+ * True when a stopped outbound failure proves the channel itself is healthy,
+ * so a best-effort user notice is warranted. False for every retryable
+ * outcome (retry_now / retry_not_before) and for stopped failures whose
+ * class does not prove channel health (dead-channel / unknown classes stay
+ * silent — durable evidence only).
+ */
+export function outboundFailureWarrantsUserNotice(
+  evidence: Pick<OutboundFailureEvidenceV1, 'retry_decision' | 'failure_code'>,
+): boolean {
+  return evidence.retry_decision === 'stop'
+    && NOTICE_ELIGIBLE_FAILURE_CODES.has(evidence.failure_code);
+}
+
 export function transferOutboundRetryOwnership(
   evidence: OutboundFailureEvidenceV1,
   retryOwner: Exclude<OutboundRetryOwner, 'none'>,

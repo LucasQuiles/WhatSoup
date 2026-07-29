@@ -17,6 +17,7 @@ import { OUTBOUND_GOVERNOR_SHED_LOG } from '../../../src/transport/outbound-gove
 import {
   AuthRequiredError,
   RateLimitedError,
+  PayloadTooLargeError,
 } from '../../../src/transport/contract/errors.ts';
 import { makeChannelId } from '../../../src/core/transport-refs.ts';
 import type { LLMProvider } from '../../../src/runtimes/chat/providers/types.ts';
@@ -1408,6 +1409,42 @@ describe('Send retry with exponential backoff (B02)', () => {
         mutation_state: 'rejected',
         logical_attempt_count: 1,
         provider_submission_count: 1,
+      }),
+    );
+  });
+
+  it('sends a failure notice when the failure class proves the channel is healthy', async () => {
+    const { handler, messenger } = makeHandler();
+    const durability = makeDurability();
+    handler.setDurability(durability);
+    // payload_too_large is a message-specific, non-retryable rejection that
+    // fires BEFORE provider contact — a short fixed-string notice to the same
+    // destination does not share the defect, so it must go out. Use
+    // mockRejectedValueOnce (not a blanket mockRejectedValue) so the notice
+    // send itself — reusing the same mock — can resolve and be observed.
+    messenger.sendMessage
+      .mockRejectedValueOnce(new PayloadTooLargeError({
+        channelId: makeChannelId('signal', 'test'),
+        operation: 'sendText',
+        correlationId: 'synthetic-payload-too-large',
+        scope: 'request',
+        message: 'synthetic provider prose that must not persist',
+      }))
+      .mockResolvedValueOnce({ waMessageId: null });
+
+    await handleAndDrain(handler, makeIncomingMessage({ inboundSeq: 99 }));
+
+    expect(messenger.sendMessage).toHaveBeenCalledTimes(2);
+    expect(messenger.sendMessage).toHaveBeenNthCalledWith(
+      2,
+      expect.any(String),
+      '⚠️ My last response may not have been delivered. Please ask me again.',
+    );
+    expect(vi.mocked(durability.markFailedPermanent)).toHaveBeenCalledWith(
+      42,
+      expect.objectContaining({
+        failure_code: 'transport.payload_too_large',
+        mutation_state: 'not_started',
       }),
     );
   });

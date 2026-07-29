@@ -23,6 +23,7 @@ import {
 } from '../../core/durability.ts';
 import {
   classifyOutboundFailure,
+  outboundFailureWarrantsUserNotice,
   type OutboundFailureEvidenceV1,
 } from '../../core/outbound-failure-disposition.ts';
 import { toConversationKey } from '../../core/conversation-key.ts';
@@ -641,6 +642,13 @@ export class ChatRuntime implements Runtime {
         && this.durability !== undefined;
       if (!durablyDeferred && this.durability && msg.inboundSeq !== undefined) {
         this.durability.markInboundFailed(msg.inboundSeq, 'transport_send_failed');
+      }
+      if (lastSendEvidence && outboundFailureWarrantsUserNotice(lastSendEvidence)) {
+        // After send exhaustion, try one notification (don't retry this one).
+        // Not conditional on durability — the user still needs to know.
+        try {
+          await this.messenger.sendMessage(msg.chatJid, '⚠️ My last response may not have been delivered. Please ask me again.');
+        } catch { /* best-effort, don't retry the notification */ }
       }
       return;
     }

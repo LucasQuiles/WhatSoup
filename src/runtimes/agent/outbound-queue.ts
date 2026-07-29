@@ -14,6 +14,7 @@ import { canSendToGroup, recordGroupOutbound } from '../../core/echo-guard.ts';
 import {
   classifyOutboundFailure,
   createInternalOutboundFailureEvidence,
+  outboundFailureWarrantsUserNotice,
   type OutboundFailureEvidenceV1,
 } from '../../core/outbound-failure-disposition.ts';
 import { redactInternalArtifacts, resolveOutboundAudience } from '../../core/outbound-message-safety.ts';
@@ -1577,6 +1578,16 @@ export class OutboundQueue implements IOutboundQueue {
 
     if (opId !== undefined && this.durability) {
       persistOutboundFailureDisposition(this.durability, opId, lastEvidence);
+    }
+
+    if (outboundFailureWarrantsUserNotice(lastEvidence)) {
+      // Best-effort: notify the user that part of the response was lost.
+      // Send directly (not through queue) to avoid re-entry loops. Not
+      // conditional on durability — the user still needs to know.
+      Promise.race([
+        this.messenger.sendMessage(chunk.chatJid, '⚠️ A response could not be delivered after 3 attempts.'),
+        new Promise<void>((_, reject) => setTimeout(() => reject(new Error('timeout')), SEND_TIMEOUT_MS)),
+      ]).catch(() => { /* best effort only */ });
     }
   }
 

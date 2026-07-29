@@ -22,7 +22,7 @@ import { WhatSoupError } from '../../../src/errors.ts';
 import { OUTBOUND_GOVERNOR_SHED_LOG } from '../../../src/transport/outbound-governor.ts';
 import { toConversationKey } from '../../../src/core/conversation-key.ts';
 import { makeChannelId } from '../../../src/core/transport-refs.ts';
-import { RateLimitedError } from '../../../src/transport/contract/errors.ts';
+import { RateLimitedError, PayloadTooLargeError } from '../../../src/transport/contract/errors.ts';
 import { MAX_TIMER_DELAY_MS } from '../../../src/core/retry.ts';
 import { canSendToGroup, recordGroupOutbound, __resetForTests } from '../../../src/core/echo-guard.ts';
 import type { EchoGuardConfig } from '../../../src/core/echo-guard.ts';
@@ -1347,6 +1347,42 @@ describe('OutboundQueue', () => {
 
     expect(noticeCalls).toHaveLength(0);
     expect(exhaustedMessenger.sendMessage).toHaveBeenCalledTimes(3);
+  });
+
+  it('B07: sends a failure notice when the failure class proves the channel is healthy', async () => {
+    mockLog.error.mockClear();
+    const noticeCalls: string[] = [];
+    let callNum = 0;
+    // payload_too_large is a message-specific, non-retryable rejection that
+    // fires BEFORE provider contact — a short fixed-string notice to the same
+    // destination does not share the defect, so it must go out (unlike the
+    // dead-channel classes in the sibling B07 test above).
+    const oversizedMessenger: Messenger = {
+      sendMessage: vi.fn(async (_jid: string, text: string) => {
+        callNum += 1;
+        if (callNum === 1) {
+          throw new PayloadTooLargeError({
+            channelId: makeChannelId('whatsapp', 'test'),
+            operation: 'sendText',
+            correlationId: 'corr-payload-too-large',
+            message: 'synthetic provider prose that must not persist',
+            scope: 'request',
+          });
+        }
+        noticeCalls.push(text);
+        return { waMessageId: null };
+      }),
+      sendMedia: vi.fn(async () => ({ waMessageId: null })),
+    };
+
+    const queue = new OutboundQueue(oversizedMessenger, CHAT_JID);
+    queue.enqueueText('message too large for the provider');
+    await vi.runAllTimersAsync();
+
+    expect(noticeCalls).toEqual(['⚠️ A response could not be delivered after 3 attempts.']);
+    // Not retryable — one failed attempt against the original message, one
+    // notice send. No blind retry of the oversized payload.
+    expect(oversizedMessenger.sendMessage).toHaveBeenCalledTimes(2);
   });
 
   // ─── B12: Retry warn logs shape ───────────────────────────────────────────
