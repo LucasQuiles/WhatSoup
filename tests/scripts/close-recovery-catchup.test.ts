@@ -6,6 +6,7 @@ import {
   rmSync,
   statSync,
 } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -13,6 +14,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { Database } from '../../src/core/database.ts';
 import { closeOperatorCatchupRecoveryRaw } from '../../src/core/recovery-catchup-closure.ts';
 import {
+  loadOrCreateRedactionSalt,
   openExistingWritableDatabase,
   parseCloseRecoveryArgs,
   redactFingerprint,
@@ -40,6 +42,16 @@ function makeTempRoot(): string {
   return root;
 }
 
+// Distinctive, explicitly-assigned seq base for fixture rows (inbound_events.seq
+// is INTEGER PRIMARY KEY, so an explicit high value is a legal insert — SQLite's
+// AUTOINCREMENT only guarantees the NEXT auto-assigned rowid exceeds any prior
+// value, it does not forbid assigning one directly). Values in this range are
+// large and specific enough that a `.not.toContain(String(seq))` canary on CLI
+// output is actually meaningful — small ints like 1/2/3 collide constantly with
+// bounded counts and hex fingerprint digits, which is why that canary was
+// previously narrowed away (702546c4a) rather than restored.
+const FIXTURE_SEQ_BASE = 900_001;
+
 function installFixture(echoed = true): RecoveryFixture {
   const dbPath = path.join(makeTempRoot(), 'bot.db');
   const db = new Database(dbPath);
@@ -52,14 +64,16 @@ function installFixture(echoed = true): RecoveryFixture {
   `).run(planId);
   const insertSource = db.raw.prepare(`
     INSERT INTO inbound_events (
-      message_id, conversation_key, chat_jid, processing_status, completed_at,
+      seq, message_id, conversation_key, chat_jid, processing_status, completed_at,
       terminal_reason, failure_class
-    ) VALUES (?, ?, 'closure-cli@g.us', 'failed', datetime('now'),
+    ) VALUES (?, ?, ?, 'closure-cli@g.us', 'failed', datetime('now'),
               'error', 'crash_recovery')
   `);
-  const sourceSeqs = ['source-one', 'source-two'].map((messageId) => Number(
-    insertSource.run(messageId, conversationKey).lastInsertRowid,
-  ));
+  const sourceSeqs = ['source-one', 'source-two'].map((messageId, index) => {
+    const seq = FIXTURE_SEQ_BASE + index;
+    insertSource.run(seq, messageId, conversationKey);
+    return seq;
+  });
   const insertPending = db.raw.prepare(`
     INSERT INTO inbound_disposition_links (
       inbound_seq, recovery_plan_id, disposition, superseded_by_seq,
@@ -69,13 +83,14 @@ function installFixture(echoed = true): RecoveryFixture {
   `);
   for (const sourceSeq of sourceSeqs) insertPending.run(sourceSeq, planId);
 
-  const catchupSeq = Number(db.raw.prepare(`
+  const catchupSeq = FIXTURE_SEQ_BASE + 100;
+  db.raw.prepare(`
     INSERT INTO inbound_events (
-      message_id, conversation_key, chat_jid, processing_status,
+      seq, message_id, conversation_key, chat_jid, processing_status,
       completed_at, terminal_reason
-    ) VALUES ('catchup', ?, 'closure-cli@g.us', 'complete',
+    ) VALUES (?, 'catchup', ?, 'closure-cli@g.us', 'complete',
               datetime('now'), 'response_sent')
-  `).run(conversationKey).lastInsertRowid);
+  `).run(catchupSeq, conversationKey);
   const opId = Number(db.raw.prepare(`
     INSERT INTO outbound_ops (
       conversation_key, chat_jid, op_type, payload, status,
@@ -231,16 +246,17 @@ describe('close-recovery-catchup CLI', () => {
     expect(latest.version).toBeGreaterThan(43);
 
     const result = captureRun(argsFor(fixture));
+    const salt = loadOrCreateRedactionSalt(fixture.dbPath);
 
     expect(result.exitCode).toBe(0);
     expect(result.output).toMatchObject({
       ok: true,
       dryRun: true,
       ready: true,
-      planFingerprint: redactFingerprint('plan', fixture.planId),
-      conversationFingerprint: redactFingerprint('conversation', fixture.conversationKey),
+      planFingerprint: redactFingerprint(salt, 'plan', fixture.planId),
+      conversationFingerprint: redactFingerprint(salt, 'conversation', fixture.conversationKey),
       nSourceSeqs: fixture.sourceSeqs.length,
-      catchupSeqFingerprint: redactFingerprint('catchup-seq', fixture.catchupSeq),
+      catchupSeqFingerprint: redactFingerprint(salt, 'catchup-seq', fixture.catchupSeq),
       evidenceBasis: 'selected_echoed',
       wouldInsert: fixture.sourceSeqs.length,
       idempotent: false,
@@ -260,6 +276,12 @@ describe('close-recovery-catchup CLI', () => {
     expect(result.text).not.toContain('"selectedOpId"');
     expect(result.text).not.toContain('"recoveryJobId"');
     expect(result.text).not.toContain('"completionProofId"');
+    // Raw value-absence canaries: fixture seqs are seeded at FIXTURE_SEQ_BASE
+    // (>=900001), distinctive enough that this is a meaningful check rather
+    // than a guaranteed false positive against bounded counts/hex digits.
+    expect(result.text).not.toContain(String(fixture.catchupSeq));
+    expect(result.text).not.toContain(String(fixture.sourceSeqs[0]));
+    expect(result.text).not.toContain(String(fixture.sourceSeqs[1]));
     expect(closureCount(fixture.dbPath)).toBe(0);
   });
 
@@ -416,16 +438,17 @@ describe('close-recovery-catchup CLI', () => {
     const fixture = installFixture();
 
     const result = captureRun(argsFor(fixture, ['--confirm']));
+    const salt = loadOrCreateRedactionSalt(fixture.dbPath);
 
     expect(result.exitCode).toBe(0);
     expect(result.output).toMatchObject({
       ok: true,
       dryRun: false,
       receipt: {
-        planFingerprint: redactFingerprint('plan', fixture.planId),
-        conversationFingerprint: redactFingerprint('conversation', fixture.conversationKey),
+        planFingerprint: redactFingerprint(salt, 'plan', fixture.planId),
+        conversationFingerprint: redactFingerprint(salt, 'conversation', fixture.conversationKey),
         nSourceSeqs: fixture.sourceSeqs.length,
-        catchupSeqFingerprint: redactFingerprint('catchup-seq', fixture.catchupSeq),
+        catchupSeqFingerprint: redactFingerprint(salt, 'catchup-seq', fixture.catchupSeq),
         inserted: fixture.sourceSeqs.length,
         idempotent: false,
         openAfter: 0,
@@ -444,6 +467,10 @@ describe('close-recovery-catchup CLI', () => {
     expect(result.text).not.toContain('"selectedOpId"');
     expect(result.text).not.toContain('"recoveryJobId"');
     expect(result.text).not.toContain('"completionProofId"');
+    // Raw value-absence canaries (see FIXTURE_SEQ_BASE comment above).
+    expect(result.text).not.toContain(String(fixture.catchupSeq));
+    expect(result.text).not.toContain(String(fixture.sourceSeqs[0]));
+    expect(result.text).not.toContain(String(fixture.sourceSeqs[1]));
     expect(closureCount(fixture.dbPath)).toBe(fixture.sourceSeqs.length);
 
     const replay = captureRun(argsFor(fixture, ['--confirm']));
@@ -455,6 +482,9 @@ describe('close-recovery-catchup CLI', () => {
     // Replay must also be redacted.
     expect(replay.text).not.toContain(fixture.planId);
     expect(replay.text).not.toContain(fixture.conversationKey);
+    expect(replay.text).not.toContain(String(fixture.catchupSeq));
+    expect(replay.text).not.toContain(String(fixture.sourceSeqs[0]));
+    expect(replay.text).not.toContain(String(fixture.sourceSeqs[1]));
     expect(closureCount(fixture.dbPath)).toBe(fixture.sourceSeqs.length);
   });
 });
@@ -463,24 +493,33 @@ describe('close-recovery-catchup CLI', () => {
 // Issue #2457: redaction fingerprint properties.
 // ─────────────────────────────────────────────────────────────────────────
 describe('redactFingerprint (issue #2457 redaction layer)', () => {
-  it('is deterministic: same domain + value always produces the same handle', () => {
-    const a = redactFingerprint('plan', 'secret-plan-id-123');
-    const b = redactFingerprint('plan', 'secret-plan-id-123');
+  const saltA = Buffer.from('a'.repeat(64), 'hex'); // 32 bytes
+  const saltB = Buffer.from('b'.repeat(64), 'hex'); // 32 bytes, distinct from saltA
+
+  it('is deterministic: same salt + domain + value always produces the same handle', () => {
+    const a = redactFingerprint(saltA, 'plan', 'secret-plan-id-123');
+    const b = redactFingerprint(saltA, 'plan', 'secret-plan-id-123');
     expect(a).toBe(b);
   });
 
   it('is domain-separated: same value in different domains produces different handles', () => {
-    const planFp = redactFingerprint('plan', 'shared-text');
-    const convFp = redactFingerprint('conversation', 'shared-text');
+    const planFp = redactFingerprint(saltA, 'plan', 'shared-text');
+    const convFp = redactFingerprint(saltA, 'conversation', 'shared-text');
     expect(planFp).not.toBe(convFp);
   });
 
+  it('is salt-separated: two different salts produce different handles for the identical domain+value', () => {
+    const fpA = redactFingerprint(saltA, 'plan', 'same-value');
+    const fpB = redactFingerprint(saltB, 'plan', 'same-value');
+    expect(fpA).not.toBe(fpB);
+  });
+
   it('produces a 12-character hex handle', () => {
-    expect(redactFingerprint('plan', 'x')).toMatch(/^[0-9a-f]{12}$/);
+    expect(redactFingerprint(saltA, 'plan', 'x')).toMatch(/^[0-9a-f]{12}$/);
   });
 
   it('does not leak the raw value in the fingerprint', () => {
-    const fp = redactFingerprint('plan', 'SUPER_SECRET_PLAN_ID_LEAK');
+    const fp = redactFingerprint(saltA, 'plan', 'SUPER_SECRET_PLAN_ID_LEAK');
     expect(fp).not.toContain('SUPER');
     expect(fp).not.toContain('SECRET');
     expect(fp).not.toContain('PLAN');
@@ -488,13 +527,92 @@ describe('redactFingerprint (issue #2457 redaction layer)', () => {
   });
 
   it('produces different handles for different values in the same domain', () => {
-    const a = redactFingerprint('plan', 'plan-A');
-    const b = redactFingerprint('plan', 'plan-B');
+    const a = redactFingerprint(saltA, 'plan', 'plan-A');
+    const b = redactFingerprint(saltA, 'plan', 'plan-B');
     expect(a).not.toBe(b);
   });
 
   it('works with numeric values (catchup sequences)', () => {
-    expect(redactFingerprint('catchup-seq', 42)).toMatch(/^[0-9a-f]{12}$/);
-    expect(redactFingerprint('catchup-seq', 42)).toBe(redactFingerprint('catchup-seq', 42));
+    expect(redactFingerprint(saltA, 'catchup-seq', 42)).toMatch(/^[0-9a-f]{12}$/);
+    expect(redactFingerprint(saltA, 'catchup-seq', 42)).toBe(redactFingerprint(saltA, 'catchup-seq', 42));
+  });
+
+  // ── The actual security property (issue #2457's stated defect) ──────────
+  it('is NOT recoverable by offline enumeration of the small catchup-seq preimage space', () => {
+    // Simulates an attacker who captured only a fingerprint from CLI output
+    // and knows catch-up sequences are small, plausible integers — exactly
+    // the enumeration attack #2457 exists to defeat. This helper is the OLD
+    // algorithm this fix replaces: plain domain-separated SHA-256, no
+    // per-database key. If the CLI's real output can be matched by brute
+    // force with THIS helper, the fingerprint is reversible without the
+    // salt file — the exact defect this fix closes.
+    function unsaltedFingerprint(domain: string, value: number): string {
+      return createHash('sha256').update(`${domain}:`).update(String(value)).digest('hex').slice(0, 12);
+    }
+
+    const fixture = installFixture();
+    const result = captureRun(argsFor(fixture));
+    const catchupSeqFingerprint = result.output['catchupSeqFingerprint'] as string;
+
+    // Enumerate a window that CONTAINS the real seeded value (FIXTURE_SEQ_BASE
+    // + 100) — if the CLI were still using the unsalted algorithm, this would
+    // find it immediately. With the HMAC salt, the same fingerprint cannot be
+    // reproduced by this offline attacker who lacks the salt file.
+    let recovered: number | undefined;
+    for (let candidate = FIXTURE_SEQ_BASE; candidate <= FIXTURE_SEQ_BASE + 200; candidate += 1) {
+      if (unsaltedFingerprint('catchup-seq', candidate) === catchupSeqFingerprint) {
+        recovered = candidate;
+        break;
+      }
+    }
+    expect(recovered).toBeUndefined();
+  });
+
+  // ── Salt file lifecycle ──────────────────────────────────────────────────
+  it('creates a 32-byte salt file mode 0600 adjacent to the database on first use', () => {
+    const fixture = installFixture();
+    const saltPath = `${fixture.dbPath}.redaction-salt`;
+    expect(existsSync(saltPath)).toBe(false);
+
+    const salt = loadOrCreateRedactionSalt(fixture.dbPath);
+
+    expect(salt).toHaveLength(32);
+    expect(existsSync(saltPath)).toBe(true);
+    expect(statSync(saltPath).mode & 0o777).toBe(0o600);
+  });
+
+  it('reuses an existing salt file rather than regenerating it', () => {
+    const fixture = installFixture();
+    const first = loadOrCreateRedactionSalt(fixture.dbPath);
+    const second = loadOrCreateRedactionSalt(fixture.dbPath);
+
+    expect(second.equals(first)).toBe(true);
+  });
+
+  it('produces stable fingerprints across separate CLI invocations against the same database', () => {
+    const fixture = installFixture();
+    const first = captureRun(argsFor(fixture));
+    const second = captureRun(argsFor(fixture));
+
+    expect(second.output['planFingerprint']).toBe(first.output['planFingerprint']);
+    expect(second.output['conversationFingerprint']).toBe(first.output['conversationFingerprint']);
+    expect(second.output['catchupSeqFingerprint']).toBe(first.output['catchupSeqFingerprint']);
+  });
+
+  it('produces DIFFERENT fingerprints for the identical value across two databases (two salt files)', () => {
+    const fixtureOne = installFixture();
+    const fixtureTwo = installFixture();
+    // Both fixtures use the same hardcoded planId/conversationKey text —
+    // installFixture() is deterministic — so any difference in fingerprint
+    // is attributable ONLY to the two databases' independent salt files.
+    expect(fixtureOne.planId).toBe(fixtureTwo.planId);
+
+    const saltOne = loadOrCreateRedactionSalt(fixtureOne.dbPath);
+    const saltTwo = loadOrCreateRedactionSalt(fixtureTwo.dbPath);
+    expect(saltOne.equals(saltTwo)).toBe(false);
+
+    const fpOne = redactFingerprint(saltOne, 'plan', fixtureOne.planId);
+    const fpTwo = redactFingerprint(saltTwo, 'plan', fixtureTwo.planId);
+    expect(fpOne).not.toBe(fpTwo);
   });
 });
