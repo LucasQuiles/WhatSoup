@@ -112,14 +112,14 @@ function mapPortError(
   correlationId: string,
   scope: 'request' | 'channel',
 ): TransportError {
+  const pe = err as PortErrorLike;
   const base = {
     channelId,
     operation,
     correlationId,
     scope,
-    phase: 'provider_call_started' as const,
+    phase: pe?.phase ?? 'provider_call_started' as const,
   };
-  const pe = err as PortErrorLike;
   const msg = (typeof pe?.message === 'string' && pe.message) ? pe.message : String(err);
 
   if (pe.code === 'SendAcceptedWithoutId' || pe.code === 'RequestAbortedAfterWrite') {

@@ -137,6 +137,28 @@ describe('ImessageAdapter — sendText port-error mapping', () => {
     await expect(adapter.sendText(peerConversationRef(channelId, 'u@example.com'), 'hi'))
       .rejects.toThrow(/iMessage provider error/);
   });
+
+  it('honors a port-supplied phase of not_started instead of claiming provider_call_started', async () => {
+    // A port error that provably precedes any provider contact (e.g. the
+    // daemon socket was never reachable) must surface phase 'not_started',
+    // not the classification default. Covers the auth branch of
+    // mapPortError — the SendAmbiguous branch already honors pe.phase.
+    const port = new MockImessagePort({
+      sendError: Object.assign(new Error('Unauthorized'), {
+        status: 401,
+        code: 'Unauthorized',
+        phase: 'not_started',
+      }),
+    });
+    const { adapter, channelId } = makeAdapter(port);
+    await expect(adapter.sendText(peerConversationRef(channelId, 'u@example.com'), 'hi'))
+      .rejects.toMatchObject({
+        payload: {
+          code: 'transport.auth_required',
+          phase: 'not_started',
+        },
+      });
+  });
 });
 
 describe('ImessageAdapter — extension error mapping', () => {

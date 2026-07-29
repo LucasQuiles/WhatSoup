@@ -172,6 +172,24 @@ describe('SignalAdapter — sendText port-error mapping', () => {
 
     await expect(adapter.sendText(target, 'hi')).rejects.toThrow(/Signal provider error/);
   });
+
+  it('honors a port-supplied phase of not_started instead of claiming provider_call_started', async () => {
+    // A port error that provably precedes any provider contact (e.g. a
+    // pre-write connection refusal) must surface phase 'not_started', not
+    // the classification default. Covers the auth branch of mapPortError.
+    const port = new MockSignalPort({
+      sendError: Object.assign(new Error('unlinked'), { status: 401, phase: 'not_started' }),
+    });
+    const { adapter, channelId } = makeAdapter(port);
+    const target = peerConversationRef(channelId, '+15559990000');
+
+    await expect(adapter.sendText(target, 'hi')).rejects.toMatchObject({
+      payload: {
+        code: 'transport.auth_required',
+        phase: 'not_started',
+      },
+    });
+  });
 });
 
 describe('SignalAdapter — group sends', () => {

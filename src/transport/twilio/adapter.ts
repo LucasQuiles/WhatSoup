@@ -47,6 +47,7 @@ interface PortErrorLike {
   message: string;
   status?: number;
   code?: number;
+  phase?: 'not_started' | 'provider_call_started' | 'ack_received';
 }
 
 function isTwilioAuth(err: PortErrorLike): boolean {
@@ -75,16 +76,15 @@ function mapPortError(
   correlationId: string,
   scope: 'request' | 'channel',
 ): TransportError {
+  // Narrow to duck-typed shape
+  const pe = err as PortErrorLike;
   const base = {
     channelId,
     operation,
     correlationId,
     scope,
-    phase: 'provider_call_started' as const,
+    phase: pe?.phase ?? 'provider_call_started' as const,
   };
-
-  // Narrow to duck-typed shape
-  const pe = err as PortErrorLike;
   const msg = (typeof pe?.message === 'string' && pe.message) ? pe.message : String(err);
 
   if (isTwilioAuth(pe)) {
