@@ -100,15 +100,18 @@ afterEach(() => {
   }
 });
 
-const atomicWriterScripts = [
-  'deploy/scripts/bot-errors-heartbeat-watchdog.py',
-  'deploy/scripts/bot-errors-health-check.py',
-  'deploy/scripts/bot-errors-q-loop.py',
-];
-
-const durableCollectorWriterScripts = [
+const durablePublisherScripts = [
   'deploy/scripts/bot-errors-collector.py',
   'deploy/scripts/bot-errors-dispatcher.py',
+  'deploy/scripts/bot-errors-health-check.py',
+  'deploy/scripts/bot-errors-heartbeat-watchdog.py',
+  'deploy/scripts/bot-errors-sentinel.py',
+];
+
+const durableStateWriterScripts = [
+  'deploy/scripts/bot-errors-q-loop.py',
+  'deploy/scripts/bot-errors-selfcheck.py',
+  'deploy/scripts/bot_errors_cutover.py',
 ];
 
 const durableEventWriterScripts = [
@@ -338,6 +341,33 @@ def hidden_direct_writer(target, payload):
     expect(runDurableWriterGuard(fixture)).toMatchObject({
       status: 1,
       code: 'inline-writer',
+    });
+  });
+
+  it('does not classify a JSON stderr diagnostic as a filesystem publisher', () => {
+    const fixture = pythonFixture(`
+import json
+import sys
+from lib.durable_json import publish_state_json, require_advance
+
+def report(payload):
+    sys.stderr.write(json.dumps(payload) + "\\n")
+
+def publish(target, payload, op_id, expected):
+    result = publish_state_json(
+        target,
+        payload,
+        component="fixture.state",
+        operation_id=op_id,
+        expected=expected,
+        generation=1,
+    )
+    require_advance(result)
+`);
+
+    expect(runDurableWriterGuard(fixture)).toMatchObject({
+      status: 0,
+      code: null,
     });
   });
 
@@ -637,29 +667,22 @@ def publish(target, payload, op_id, expected):
     });
   });
 
-  it.each(atomicWriterScripts)('%s uses no-follow fsynced temp writes before rename', (script) => {
-    const text = readFileSync(script, 'utf8');
-
-    expect(text).toContain('def atomic_write_json');
-    expect(text).toContain('O_EXCL');
-    expect(text).toContain('O_NOFOLLOW');
-    expect(text).toContain('os.fsync');
-    expect(text).toContain('os.replace');
-    expect(text).toContain('chmod(0o600)');
-    expect(text).toContain('def ensure_private_dir');
-    expect(text).toContain('path.lstat()');
-    expect(text).toContain('path.is_symlink()');
-    expect(text).toContain('not os.path.isdir(path)');
-    expect(text).not.toContain('tmp.write_text(json.dumps');
-  });
-
-  it.each(durableCollectorWriterScripts)('%s consumes shared durable publication outcomes', (script) => {
+  it.each(durablePublisherScripts)('%s consumes shared durable publication outcomes', (script) => {
     const text = readFileSync(script, 'utf8');
 
     expect(text).toContain('from lib.durable_json import');
     expect(text).toContain('publish_event_json(');
     expect(text).toContain('publish_state_json(');
     expect(text).toContain('require_advance(publication)');
+    expect(text).not.toContain('def atomic_write_json');
+  });
+
+  it.each(durableStateWriterScripts)('%s consumes shared durable state outcomes', (script) => {
+    const text = readFileSync(script, 'utf8');
+
+    expect(text).toContain('durable_json import');
+    expect(text).toContain('publish_state_json(');
+    expect(text).toContain('require_advance(');
     expect(text).not.toContain('def atomic_write_json');
   });
 

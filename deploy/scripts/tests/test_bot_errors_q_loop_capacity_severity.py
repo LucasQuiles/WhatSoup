@@ -37,6 +37,14 @@ CAPACITY_KEY = "q_loop:supervisor:capacity"
 SUPERVISOR_KEY = "q_loop:supervisor"
 
 
+def _write_private_json(path: Path, payload: dict) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    path.parent.chmod(0o700)
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    path.chmod(0o600)
+    return path
+
+
 def _load_module():
     spec = importlib.util.spec_from_file_location(
         "bot_errors_heartbeat_watchdog",
@@ -72,7 +80,7 @@ def _write_q_loop_state(mod, state: Path, monkeypatch, **fields) -> Path:
     monkeypatch.setenv("BOT_ERRORS_Q_LOOP_STATE", str(target))
     payload = {"updated_at": 100000}
     payload.update(fields)
-    mod.atomic_write_json(target, payload)
+    _write_private_json(target, payload)
     return target
 
 
@@ -159,7 +167,7 @@ def test_capacity_incident_never_escalates_to_critical(tmp_path, monkeypatch):
     # Seed an already-open, already-aged capacity incident.
     state_dir = state
     watchdog_state = mod.watchdog_state_path()
-    mod.atomic_write_json(
+    _write_private_json(
         watchdog_state,
         {
             "open": {
@@ -237,7 +245,7 @@ def test_genuine_supervisor_escalates_to_critical_on_renotify(tmp_path, monkeypa
     monkeypatch.setenv("BOT_ERRORS_OUTBOX_DIR", str(outbox))
     monkeypatch.setenv("BOT_ERRORS_WATCHDOG_RENOTIFY_SECONDS", "1")
     monkeypatch.setenv("BOT_ERRORS_WATCHDOG_ESCALATE_SECONDS", "1")
-    mod.atomic_write_json(
+    _write_private_json(
         mod.watchdog_state_path(),
         {
             "open": {

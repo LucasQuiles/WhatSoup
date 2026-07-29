@@ -42,8 +42,10 @@ _roster_lib = _load_roster_lib()
 
 
 def _write_json(path: Path, payload: dict) -> Path:
-    path.parent.mkdir(parents=True, exist_ok=True)
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    path.parent.chmod(0o700)
     path.write_text(json.dumps(payload), encoding="utf-8")
+    path.chmod(0o600)
     return path
 
 
@@ -207,7 +209,7 @@ def test_default_hosts_path_reuses_expected_fleet_manifest(monkeypatch):
     assert path == _mod.REPO_ROOT / "deploy" / "bot-errors-expected-fleet.json"
 
 
-def test_json_and_atomic_helpers_fail_closed(tmp_path: Path, monkeypatch):
+def test_json_and_private_directory_helpers_fail_closed(tmp_path: Path):
     with pytest.raises(_mod.SentinelError, match="missing JSON file"):
         _mod.read_json_object(tmp_path / "missing.json")
 
@@ -221,41 +223,16 @@ def test_json_and_atomic_helpers_fail_closed(tmp_path: Path, monkeypatch):
     with pytest.raises(_mod.SentinelError, match="must contain an object"):
         _mod.read_json_object(array)
 
-    def chmod(path: Path, mode: int) -> None:
-        raise OSError("chmod denied")
+    private = tmp_path / "private"
+    _mod.ensure_private_dir(private)
+    assert private.stat().st_mode & 0o777 == 0o700
 
-    monkeypatch.setattr(Path, "chmod", chmod)
-    _mod.ensure_private_dir(tmp_path / "private")
-    ok_target = tmp_path / "state" / "ok.json"
-    _mod.atomic_write_json(ok_target, {"ok": True})
-    assert json.loads(ok_target.read_text(encoding="utf-8")) == {"ok": True}
-
-    def replace(_src, _dst):
-        raise RuntimeError("replace failed")
-
-    monkeypatch.setattr(_mod.os, "replace", replace)
-    target = tmp_path / "state" / "payload.json"
-    with pytest.raises(RuntimeError):
-        _mod.atomic_write_json(target, {"ok": True})
-    assert list(target.parent.glob(".payload.json.*.tmp")) == []
-
-    original_unlink = Path.unlink
-
-    def unlink(path: Path):
-        if path.name.startswith(".unlink-fail.json."):
-            raise OSError("unlink denied")
-        original_unlink(path)
-
-    monkeypatch.setattr(Path, "unlink", unlink)
-    unlink_fail = tmp_path / "state" / "unlink-fail.json"
-    with pytest.raises(RuntimeError):
-        _mod.atomic_write_json(unlink_fail, {"ok": True})
-
-    def open_error(*_args, **_kwargs):
-        raise OSError("open denied")
-
-    monkeypatch.setattr(_mod.os, "open", open_error)
-    _mod.fsync_parent(tmp_path / "missing-parent" / "payload.json")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    linked = tmp_path / "linked"
+    linked.symlink_to(outside, target_is_directory=True)
+    with pytest.raises(_mod.SentinelError, match="through symlink"):
+        _mod.ensure_private_dir(linked)
 
 
 def test_healthy_host_writes_ack_and_resets_open_state(tmp_path: Path):
@@ -263,7 +240,7 @@ def test_healthy_host_writes_ack_and_resets_open_state(tmp_path: Path):
     ack = tmp_path / "acks" / "host-a.json"
     hosts = _hosts_file(tmp_path, [{"host": "host-a", "heartbeatPath": str(hb), "ackPath": str(ack)}])
     config = _config(tmp_path, hosts)
-    _mod.atomic_write_json(
+    _write_json(
         _mod.state_path(config),
         {"schemaVersion": 1, "hosts": {"host-a": {"alertState": "open", "lastClass": "out_of_rotation", "consecutive": 2}}},
     )
@@ -324,14 +301,14 @@ def test_ack_write_failure_is_reported_without_aborting_run(tmp_path: Path, monk
     ack = tmp_path / "acks" / "host-a.json"
     hosts = _hosts_file(tmp_path, [{"host": "host-a", "heartbeatPath": str(hb), "ackPath": str(ack)}])
     config = _config(tmp_path, hosts)
-    original_atomic_write_json = _mod.atomic_write_json
+    original_publish_state_json = _mod.publish_state_json
 
-    def atomic_write_json(path: Path, payload: dict) -> None:
-        if path == ack:
+    def publish_state_json(*args, **kwargs):
+        if kwargs.get("component") == "sentinel.ack":
             raise OSError("ack denied")
-        original_atomic_write_json(path, payload)
+        return original_publish_state_json(*args, **kwargs)
 
-    monkeypatch.setattr(_mod, "atomic_write_json", atomic_write_json)
+    monkeypatch.setattr(_mod, "publish_state_json", publish_state_json)
 
     result = _mod.run_once(config, _deps(1010.0, {"host-a": {"reachable": True, "healthy": True, "class": "healthy"}}))
 
@@ -628,7 +605,7 @@ def test_malformed_critical_whatsapp_state_is_reinitialized(tmp_path: Path):
     hb = _heartbeat(tmp_path / "host-a-hb.json", healthy=False, klass="permission_denied", mtime=995.0)
     hosts = _hosts_file(tmp_path, [{"host": "host-a", "heartbeatPath": str(hb)}])
     config = _config(tmp_path, hosts, hysteresis_cycles=1)
-    _mod.atomic_write_json(
+    _write_json(
         _mod.state_path(config),
         {"schemaVersion": 1, "hosts": {}, "criticalWhatsApp": ["corrupt"]},
     )
@@ -652,7 +629,7 @@ def test_non_finite_critical_whatsapp_allowed_count_is_reinitialized(tmp_path: P
     hb = _heartbeat(tmp_path / "host-a-hb.json", healthy=False, klass="permission_denied", mtime=995.0)
     hosts = _hosts_file(tmp_path, [{"host": "host-a", "heartbeatPath": str(hb)}])
     config = _config(tmp_path, hosts, hysteresis_cycles=1)
-    _mod.atomic_write_json(
+    _write_json(
         _mod.state_path(config),
         {
             "schemaVersion": 1,
@@ -677,7 +654,7 @@ def test_non_finite_critical_whatsapp_overflow_count_is_reinitialized(tmp_path: 
     hb = _heartbeat(tmp_path / "host-a-hb.json", healthy=False, klass="permission_denied", mtime=995.0)
     hosts = _hosts_file(tmp_path, [{"host": "host-a", "heartbeatPath": str(hb)}])
     config = _config(tmp_path, hosts, hysteresis_cycles=1, max_critical_whatsapp_per_day=1)
-    _mod.atomic_write_json(
+    _write_json(
         _mod.state_path(config),
         {
             "schemaVersion": 1,
@@ -862,7 +839,7 @@ def test_malformed_q_remediation_state_does_not_crash_tier2(tmp_path: Path, monk
         ],
     )
     config = _config(tmp_path, hosts, hysteresis_cycles=1, q_host="q-agent-host")
-    _mod.atomic_write_json(
+    _write_json(
         _mod.state_path(config),
         {"schemaVersion": 1, "hosts": {}, "qRemediation": ["corrupt"]},
     )
@@ -892,7 +869,7 @@ def test_expired_q_remediation_emits_q_unavailable_tier3_event(tmp_path: Path):
     hb = _heartbeat(tmp_path / "host-q-hb.json", healthy=True, mtime=995.0)
     hosts = _hosts_file(tmp_path, [{"host": "host-q", "heartbeatPath": str(hb)}])
     config = _config(tmp_path, hosts, hysteresis_cycles=1)
-    _mod.atomic_write_json(
+    _write_json(
         _mod.state_path(config),
         {
             "schemaVersion": 1,
@@ -947,7 +924,7 @@ def test_recent_q_unavailable_timeout_is_deduped_and_clears_inflight(tmp_path: P
     hosts = _hosts_file(tmp_path, [{"host": "host-q", "heartbeatPath": str(hb)}])
     config = _config(tmp_path, hosts, action_event_cooldown_seconds=3600)
     key = "q_unavailable:host-q:request-1:action-hash-1"
-    _mod.atomic_write_json(
+    _write_json(
         _mod.state_path(config),
         {
             "schemaVersion": 1,
@@ -973,7 +950,7 @@ def test_non_finite_q_unavailable_event_time_does_not_dedupe_timeout(tmp_path: P
     hosts = _hosts_file(tmp_path, [{"host": "host-q", "heartbeatPath": str(hb)}])
     config = _config(tmp_path, hosts, action_event_cooldown_seconds=3600)
     key = "q_unavailable:host-q:request-1:action-hash-1"
-    _mod.atomic_write_json(
+    _write_json(
         _mod.state_path(config),
         {
             "schemaVersion": 1,
@@ -1001,7 +978,7 @@ def test_boolean_q_unavailable_event_time_does_not_dedupe_timeout(tmp_path: Path
     hosts = _hosts_file(tmp_path, [{"host": "host-q", "heartbeatPath": str(hb)}])
     config = _config(tmp_path, hosts, action_event_cooldown_seconds=3600)
     key = "q_unavailable:host-q:request-1:action-hash-1"
-    _mod.atomic_write_json(
+    _write_json(
         _mod.state_path(config),
         {
             "schemaVersion": 1,
@@ -1028,7 +1005,7 @@ def test_malformed_q_unavailable_event_state_is_reinitialized(tmp_path: Path):
     hb = _heartbeat(tmp_path / "host-q-hb.json", healthy=True, mtime=995.0)
     hosts = _hosts_file(tmp_path, [{"host": "host-q", "heartbeatPath": str(hb)}])
     config = _config(tmp_path, hosts)
-    _mod.atomic_write_json(
+    _write_json(
         _mod.state_path(config),
         {
             "schemaVersion": 1,
@@ -1073,7 +1050,7 @@ def test_q_unavailable_timeout_respects_critical_whatsapp_cap(tmp_path: Path):
     hb = _heartbeat(tmp_path / "host-q-hb.json", healthy=True, mtime=995.0)
     hosts = _hosts_file(tmp_path, [{"host": "host-q", "heartbeatPath": str(hb)}])
     config = _config(tmp_path, hosts, max_critical_whatsapp_per_day=1)
-    _mod.atomic_write_json(
+    _write_json(
         _mod.state_path(config),
         {
             "schemaVersion": 1,
@@ -1109,7 +1086,7 @@ def test_malformed_fleet_action_event_state_is_reinitialized(tmp_path: Path):
         probes[name] = {"reachable": False, "healthy": False, "class": "unreachable"}
     hosts = _hosts_file(tmp_path, hosts_payload)
     config = _config(tmp_path, hosts, connectivity_hysteresis_cycles=1)
-    _mod.atomic_write_json(
+    _write_json(
         _mod.state_path(config),
         {"schemaVersion": 1, "hosts": {}, "fleetActionEvent": ["corrupt"]},
     )
@@ -1421,12 +1398,12 @@ def test_transition_pruning_and_state_cleanup(tmp_path: Path):
     hb = _heartbeat(tmp_path / "host-a-hb.json", healthy=True, mtime=995.0)
     hosts = _hosts_file(tmp_path, [{"host": "host-a", "heartbeatPath": str(hb)}])
     config = _config(tmp_path, hosts)
-    _mod.atomic_write_json(
+    _write_json(
         _mod.state_path(config),
         {"schemaVersion": 1, "hosts": ["bad"]},
     )
     assert _mod.load_state(config)["hosts"] == {}
-    _mod.atomic_write_json(
+    _write_json(
         _mod.state_path(config),
         {"schemaVersion": 1, "hosts": {"host-a": {"alertState": "closed"}, "removed": {"alertState": "open"}}},
     )
@@ -1441,7 +1418,7 @@ def test_malformed_host_state_record_is_reinitialized(tmp_path: Path):
     hb = _heartbeat(tmp_path / "host-a-hb.json", healthy=True, mtime=995.0)
     hosts = _hosts_file(tmp_path, [{"host": "host-a", "heartbeatPath": str(hb)}])
     config = _config(tmp_path, hosts)
-    _mod.atomic_write_json(
+    _write_json(
         _mod.state_path(config),
         {"schemaVersion": 1, "hosts": {"host-a": ["corrupt"]}},
     )
@@ -1458,7 +1435,7 @@ def test_malformed_host_state_fields_are_reinitialized(tmp_path: Path):
     hb = _heartbeat(tmp_path / "host-a-hb.json", healthy=True, mtime=995.0)
     hosts = _hosts_file(tmp_path, [{"host": "host-a", "heartbeatPath": str(hb)}])
     config = _config(tmp_path, hosts)
-    _mod.atomic_write_json(
+    _write_json(
         _mod.state_path(config),
         {
             "schemaVersion": 1,
@@ -1487,7 +1464,7 @@ def test_boolean_host_consecutive_is_reinitialized(tmp_path: Path):
     hb = _heartbeat(tmp_path / "host-a-hb.json", healthy=True, mtime=995.0)
     hosts = _hosts_file(tmp_path, [{"host": "host-a", "heartbeatPath": str(hb)}])
     config = _config(tmp_path, hosts)
-    _mod.atomic_write_json(
+    _write_json(
         _mod.state_path(config),
         {
             "schemaVersion": 1,
@@ -1619,7 +1596,7 @@ def test_save_state_runs_even_if_central_heartbeat_write_raises(tmp_path: Path, 
     hb = _heartbeat(tmp_path / "host-q-hb.json", healthy=False, klass="out_of_rotation", mtime=995.0)
     hosts = _hosts_file(tmp_path, [{"host": "host-q", "heartbeatPath": str(hb)}])
     config = _config(tmp_path, hosts, action_event_cooldown_seconds=3600)
-    _mod.atomic_write_json(
+    _write_json(
         _mod.state_path(config),
         {
             "schemaVersion": 1,
@@ -1982,7 +1959,7 @@ def test_prune_action_outbox_keeps_newest_n_by_mtime(tmp_path: Path):
     # 10 action files, oldest -> newest by mtime.
     for index in range(10):
         path = outbox / f"{1000 + index}-host-host-a-escalate-{index:04d}.json"
-        _mod.atomic_write_json(path, {"schemaVersion": 1, "seq": index})
+        _write_json(path, {"schemaVersion": 1, "seq": index})
         os.utime(path, (1000 + index, 1000 + index))
 
     depth = _mod.prune_action_outbox(config)
@@ -2014,7 +1991,7 @@ def test_prune_action_outbox_survives_stat_and_unlink_errors(tmp_path: Path, mon
     paths = []
     for index in range(3):
         path = outbox / f"{1000 + index}-host-host-a-escalate-{index:04d}.json"
-        _mod.atomic_write_json(path, {"schemaVersion": 1, "seq": index})
+        _write_json(path, {"schemaVersion": 1, "seq": index})
         os.utime(path, (1000 + index, 1000 + index))
         paths.append(path)
 
@@ -2051,7 +2028,7 @@ def test_run_once_prunes_outbox_and_reports_depth(tmp_path: Path):
     # Pre-seed the outbox above the retention cap with stale action files.
     for index in range(6):
         path = outbox / f"{500 + index}-host-host-a-escalate-{index:04d}.json"
-        _mod.atomic_write_json(path, {"schemaVersion": 1, "seq": index})
+        _write_json(path, {"schemaVersion": 1, "seq": index})
         os.utime(path, (500 + index, 500 + index))
 
     result = _mod.run_once(

@@ -263,6 +263,15 @@ def _stream_writer_names(function: ast.AST) -> set[str]:
     return names
 
 
+def _is_standard_stream(node: ast.AST) -> bool:
+    return (
+        isinstance(node, ast.Attribute)
+        and isinstance(node.value, ast.Name)
+        and node.value.id == "sys"
+        and node.attr in {"stdout", "stderr"}
+    )
+
+
 def _is_json_write_call(
     call: ast.Call,
     *,
@@ -285,6 +294,7 @@ def _is_json_write_call(
             isinstance(call.func.value, ast.Name)
             and call.func.value.id in stream_writer_names
         )
+        and not _is_standard_stream(call.func.value)
     )
 
 

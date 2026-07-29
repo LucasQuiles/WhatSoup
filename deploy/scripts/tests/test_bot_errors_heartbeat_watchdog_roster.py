@@ -44,6 +44,14 @@ _roster_lib = _load_roster_lib()
 _NOW = 100000
 
 
+def _write_private_json(path: Path, payload: dict) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    path.parent.chmod(0o700)
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    path.chmod(0o600)
+    return path
+
+
 def _args() -> SimpleNamespace:
     return SimpleNamespace(
         max_q_loop_age=600,
@@ -108,13 +116,13 @@ def _write_heartbeat(mod, state: Path, roster: dict, **overrides) -> Path:
     }
     payload.update(overrides)
     path = state / "fleet-sentinel" / "sentinel-heartbeat.json"
-    mod.atomic_write_json(path, payload)
+    _write_private_json(path, payload)
     return path
 
 
 def _write_collector_state(mod, state: Path, **fields) -> Path:
     path = state / "collector-state.json"
-    mod.atomic_write_json(path, {"schemaVersion": 1, **fields})
+    _write_private_json(path, {"schemaVersion": 1, **fields})
     return path
 
 

@@ -155,6 +155,11 @@ class DurableJsonTarget:
     trusted_root: Path
     relative_path: PurePath
     logical_target: str
+    owner_controlled_readable: bool = False
+
+    @property
+    def final_mode(self) -> int:
+        return 0o644 if self.owner_controlled_readable else 0o600
 
 
 @dataclass(frozen=True)
@@ -203,6 +208,7 @@ def durable_json_target(
     *,
     trusted_root: os.PathLike[str] | str,
     relative_path: os.PathLike[str] | str,
+    owner_controlled_readable: bool = False,
 ) -> DurableJsonTarget:
     root_text = os.fspath(trusted_root)
     relative_text = os.fspath(relative_path)
@@ -221,7 +227,18 @@ def durable_json_target(
         trusted_root=Path(root_text),
         relative_path=relative,
         logical_target=relative.as_posix(),
+        owner_controlled_readable=owner_controlled_readable,
     )
+
+
+def _directory_mode_allowed(target: DurableJsonTarget, mode: int) -> bool:
+    forbidden = 0o022 if target.owner_controlled_readable else 0o077
+    return not stat.S_IMODE(mode) & forbidden
+
+
+def _target_mode_allowed(target: DurableJsonTarget, mode: int) -> bool:
+    forbidden = 0o033 if target.owner_controlled_readable else 0o077
+    return not stat.S_IMODE(mode) & forbidden
 
 
 def _open_directory(name: str, *, dir_fd: int) -> int:
@@ -250,7 +267,10 @@ def _open_target_parent(target: DurableJsonTarget) -> tuple[int, str]:
             os.close(descriptor)
             descriptor = next_descriptor
         root_stat = os.fstat(descriptor)
-        if root_stat.st_uid != os.getuid() or stat.S_IMODE(root_stat.st_mode) & 0o077:
+        if (
+            root_stat.st_uid != os.getuid()
+            or not _directory_mode_allowed(target, root_stat.st_mode)
+        ):
             raise DurableWriteError(ErrorClass.PERMISSION.value)
         relative_parts = target.relative_path.parts
         for component in relative_parts[:-1]:
@@ -258,7 +278,7 @@ def _open_target_parent(target: DurableJsonTarget) -> tuple[int, str]:
             component_stat = os.fstat(next_descriptor)
             if (
                 component_stat.st_uid != os.getuid()
-                or stat.S_IMODE(component_stat.st_mode) & 0o077
+                or not _directory_mode_allowed(target, component_stat.st_mode)
             ):
                 os.close(next_descriptor)
                 raise DurableWriteError(ErrorClass.PERMISSION.value)
@@ -303,7 +323,7 @@ def observe_json(target: DurableJsonTarget) -> JsonObservation:
             if (
                 not stat.S_ISREG(file_stat.st_mode)
                 or file_stat.st_uid != os.getuid()
-                or stat.S_IMODE(file_stat.st_mode) & 0o077
+                or not _target_mode_allowed(target, file_stat.st_mode)
                 or file_stat.st_nlink != 1
             ):
                 raise DurableWriteError(ErrorClass.PERMISSION.value)
@@ -638,6 +658,7 @@ def publish_event_json(
         _inject_fault(_fault_hook, current_stage)
         current_stage = WriteStage.TEMPORARY_CREATION
         event_temp_recovery = _recover_reconciled_event_temp(
+            target,
             parent_fd,
             leaf=leaf,
             temp_name=temp_name,
@@ -671,7 +692,7 @@ def publish_event_json(
         os.fsync(temp_fd)
         _inject_fault(_fault_hook, current_stage)
         current_stage = WriteStage.PERMISSION_FINALIZATION
-        os.fchmod(temp_fd, 0o600)
+        os.fchmod(temp_fd, target.final_mode)
         temp_stat = os.fstat(temp_fd)
         if not stat.S_ISREG(temp_stat.st_mode) or temp_stat.st_nlink != 1:
             raise DurableWriteError(ErrorClass.IDENTITY_TYPE.value)
@@ -737,7 +758,7 @@ def publish_event_json(
                 if (
                     not stat.S_ISREG(existing_stat.st_mode)
                     or existing_stat.st_uid != os.getuid()
-                    or stat.S_IMODE(existing_stat.st_mode) & 0o077
+                    or not _target_mode_allowed(target, existing_stat.st_mode)
                     or existing_stat.st_nlink != 1
                     or existing_stat.st_size != len(raw)
                 ):
@@ -820,7 +841,11 @@ def publish_event_json(
             os.close(parent_fd)
 
 
-def _read_version_at(parent_fd: int, leaf: str) -> tuple[bytes | None, JsonVersion]:
+def _read_version_at(
+    target: DurableJsonTarget,
+    parent_fd: int,
+    leaf: str,
+) -> tuple[bytes | None, JsonVersion]:
     flags = os.O_RDONLY | os.O_CLOEXEC | getattr(os, "O_NOFOLLOW", 0)
     try:
         descriptor = os.open(leaf, flags, dir_fd=parent_fd)
@@ -831,7 +856,7 @@ def _read_version_at(parent_fd: int, leaf: str) -> tuple[bytes | None, JsonVersi
         if (
             not stat.S_ISREG(file_stat.st_mode)
             or file_stat.st_uid != os.getuid()
-            or stat.S_IMODE(file_stat.st_mode) & 0o077
+            or not _target_mode_allowed(target, file_stat.st_mode)
             or file_stat.st_nlink != 1
             or file_stat.st_size > _MAX_JSON_BYTES
         ):
@@ -872,6 +897,7 @@ def _read_version_at(parent_fd: int, leaf: str) -> tuple[bytes | None, JsonVersi
 
 
 def _recover_reconciled_event_temp(
+    target: DurableJsonTarget,
     parent_fd: int,
     *,
     leaf: str,
@@ -914,7 +940,7 @@ def _recover_reconciled_event_temp(
         if (
             not stat.S_ISREG(target_stat.st_mode)
             or target_stat.st_uid != os.getuid()
-            or stat.S_IMODE(target_stat.st_mode) & 0o077
+            or not _target_mode_allowed(target, target_stat.st_mode)
             or temp_stat.st_dev != target_stat.st_dev
             or temp_stat.st_ino != target_stat.st_ino
             or temp_stat.st_nlink != 2
@@ -1028,7 +1054,7 @@ def publish_state_json(
         lock_fd = _lock_parent(parent_fd)
         _inject_fault(_fault_hook, current_stage)
         current_stage = WriteStage.RECONCILIATION
-        current_raw, current = _read_version_at(parent_fd, leaf)
+        current_raw, current = _read_version_at(target, parent_fd, leaf)
         if current_raw == raw:
             os.fsync(parent_fd)
             authority = (
@@ -1077,7 +1103,7 @@ def publish_state_json(
         os.fsync(temp_fd)
         _inject_fault(_fault_hook, current_stage)
         current_stage = WriteStage.PERMISSION_FINALIZATION
-        os.fchmod(temp_fd, 0o600)
+        os.fchmod(temp_fd, target.final_mode)
         temp_stat = os.fstat(temp_fd)
         if not stat.S_ISREG(temp_stat.st_mode) or temp_stat.st_nlink != 1:
             raise DurableWriteError(ErrorClass.IDENTITY_TYPE.value)
@@ -1240,6 +1266,7 @@ def reconcile_json_publication(
         lock_fd = _lock_parent(parent_fd)
         event_temp_recovery = (
             _recover_reconciled_event_temp(
+                intent.target,
                 parent_fd,
                 leaf=leaf,
                 temp_name=f".durable-json.{intent.operation_id}.tmp",
@@ -1257,7 +1284,7 @@ def reconcile_json_publication(
                 None,
             )
         else:
-            current_raw, current = _read_version_at(parent_fd, leaf)
+            current_raw, current = _read_version_at(intent.target, parent_fd, leaf)
         if current_raw == raw:
             os.fsync(parent_fd)
             authority = (

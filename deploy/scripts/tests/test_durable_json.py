@@ -12,6 +12,25 @@ import sys
 import pytest
 
 
+_DURABLE_JSON = importlib.import_module("deploy.scripts.lib.durable_json")
+_EVENT_INTERRUPTION_STAGES = tuple(
+    stage
+    for stage in _DURABLE_JSON.WriteStage
+    if stage is not _DURABLE_JSON.WriteStage.RECONCILIATION
+)
+_STATE_INTERRUPTION_STAGES = tuple(
+    stage
+    for stage in _DURABLE_JSON.WriteStage
+    if stage is not _DURABLE_JSON.WriteStage.CLEANUP
+)
+_MALFORMED_INTENT_SHAPES = (
+    ("event", None),
+    ("state", 1),
+    ("typed_event", 1),
+    ("typed_state", None),
+)
+
+
 def publication_result(module: object, **overrides: object) -> object:
     values = {
         "component": "fixture.state",
@@ -1302,23 +1321,11 @@ def test_state_parent_sync_interruption_requires_reconciliation(tmp_path: Path) 
 
 
 @pytest.mark.parametrize(
-    "stage_name",
-    [
-        "SERIALIZATION",
-        "CAPABILITY_CHECK",
-        "PARENT_OPEN",
-        "LOCK_ACQUISITION",
-        "TEMPORARY_CREATION",
-        "WRITE",
-        "FILE_FLUSH",
-        "FILE_SYNC",
-        "PERMISSION_FINALIZATION",
-        "PUBLICATION",
-        "CLEANUP",
-        "PARENT_SYNC",
-    ],
+    "fault_stage",
+    _EVENT_INTERRUPTION_STAGES,
+    ids=lambda stage: stage.name.lower(),
 )
-def test_event_interruptions_never_become_success(tmp_path: Path, stage_name: str) -> None:
+def test_event_interruptions_never_become_success(tmp_path: Path, fault_stage) -> None:
     module = importlib.import_module("deploy.scripts.lib.durable_json")
     (tmp_path / "state").mkdir(mode=0o700)
     target = module.durable_json_target(
@@ -1332,8 +1339,6 @@ def test_event_interruptions_never_become_success(tmp_path: Path, stage_name: st
         component="fixture.event",
         predecessor=module.JsonVersion(False, None, None, None),
     )
-    fault_stage = getattr(module.WriteStage, stage_name)
-
     def interrupt(stage: object) -> None:
         if stage is fault_stage:
             raise InterruptedError
@@ -1349,7 +1354,11 @@ def test_event_interruptions_never_become_success(tmp_path: Path, stage_name: st
     assert not result.advance_allowed
     assert result.stage is fault_stage
     assert result.error_class is module.ErrorClass.INTERRUPTION
-    if stage_name in {"PUBLICATION", "CLEANUP", "PARENT_SYNC"}:
+    if fault_stage in {
+        module.WriteStage.PUBLICATION,
+        module.WriteStage.CLEANUP,
+        module.WriteStage.PARENT_SYNC,
+    }:
         assert result.durability is module.DurabilityProof.UNPROVEN
         assert (tmp_path / "state/event.json").exists()
     else:
@@ -1358,23 +1367,11 @@ def test_event_interruptions_never_become_success(tmp_path: Path, stage_name: st
 
 
 @pytest.mark.parametrize(
-    "stage_name",
-    [
-        "SERIALIZATION",
-        "CAPABILITY_CHECK",
-        "PARENT_OPEN",
-        "LOCK_ACQUISITION",
-        "RECONCILIATION",
-        "TEMPORARY_CREATION",
-        "WRITE",
-        "FILE_FLUSH",
-        "FILE_SYNC",
-        "PERMISSION_FINALIZATION",
-        "PUBLICATION",
-        "PARENT_SYNC",
-    ],
+    "fault_stage",
+    _STATE_INTERRUPTION_STAGES,
+    ids=lambda stage: stage.name.lower(),
 )
-def test_state_interruptions_never_become_success(tmp_path: Path, stage_name: str) -> None:
+def test_state_interruptions_never_become_success(tmp_path: Path, fault_stage) -> None:
     module = importlib.import_module("deploy.scripts.lib.durable_json")
     (tmp_path / "state").mkdir(mode=0o700)
     target = module.durable_json_target(
@@ -1389,8 +1386,6 @@ def test_state_interruptions_never_become_success(tmp_path: Path, stage_name: st
         component="fixture.state",
         predecessor=absent,
     )
-    fault_stage = getattr(module.WriteStage, stage_name)
-
     def interrupt(stage: object) -> None:
         if stage is fault_stage:
             raise InterruptedError
@@ -1408,7 +1403,10 @@ def test_state_interruptions_never_become_success(tmp_path: Path, stage_name: st
     assert not result.advance_allowed
     assert result.stage is fault_stage
     assert result.error_class is module.ErrorClass.INTERRUPTION
-    if stage_name in {"PUBLICATION", "PARENT_SYNC"}:
+    if fault_stage in {
+        module.WriteStage.PUBLICATION,
+        module.WriteStage.PARENT_SYNC,
+    }:
         assert result.durability is module.DurabilityProof.UNPROVEN
         assert (tmp_path / "state/current.json").exists()
     else:
@@ -2020,15 +2018,7 @@ def test_reconcile_matching_bytes_with_unknown_parent_authority_does_not_advance
     assert not reconciled.advance_allowed
 
 
-@pytest.mark.parametrize(
-    ("kind", "generation"),
-    [
-        ("event", None),
-        ("state", 1),
-        ("typed_event", 1),
-        ("typed_state", None),
-    ],
-)
+@pytest.mark.parametrize(("kind", "generation"), _MALFORMED_INTENT_SHAPES)
 def test_reconcile_rejects_malformed_intent_shape(
     tmp_path: Path,
     kind: str,
@@ -2291,3 +2281,55 @@ durable.publish_state_json(
 
     assert reconciled.durability is module.DurabilityProof.RECONCILED_COMMITTED
     assert reconciled.advance_allowed
+
+
+def test_owner_controlled_readable_target_preserves_public_modes(tmp_path: Path) -> None:
+    module = importlib.import_module("deploy.scripts.lib.durable_json")
+    tmp_path.chmod(0o755)
+    path = tmp_path / "inventory.json"
+    path.write_text('{"schemaVersion":1}\n', encoding="utf-8")
+    path.chmod(0o644)
+    target = module.durable_json_target(
+        trusted_root=tmp_path,
+        relative_path=path.name,
+        owner_controlled_readable=True,
+    )
+    observation = module.observe_json(target)
+    payload = {"schemaVersion": 1, "expected": "always_on"}
+    operation = module.operation_id(
+        target,
+        payload,
+        component="cutover.inventory_state",
+        predecessor=observation.version,
+    )
+
+    result = module.publish_state_json(
+        target,
+        payload,
+        component="cutover.inventory_state",
+        operation_id=operation,
+        expected=observation.version,
+        generation=1,
+    )
+
+    assert result.advance_allowed is True
+    assert path.stat().st_mode & 0o777 == 0o644
+    assert (tmp_path / ".durable-json.lock").stat().st_mode & 0o777 == 0o600
+
+
+def test_owner_controlled_readable_target_rejects_group_writable_parent(
+    tmp_path: Path,
+) -> None:
+    module = importlib.import_module("deploy.scripts.lib.durable_json")
+    tmp_path.chmod(0o775)
+    path = tmp_path / "inventory.json"
+    path.write_text('{"schemaVersion":1}\n', encoding="utf-8")
+    path.chmod(0o644)
+    target = module.durable_json_target(
+        trusted_root=tmp_path,
+        relative_path=path.name,
+        owner_controlled_readable=True,
+    )
+
+    with pytest.raises(module.DurableWriteError):
+        module.observe_json(target)

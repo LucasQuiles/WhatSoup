@@ -123,6 +123,7 @@ def _read_status(config) -> dict:
 def _seed_memory(config, payload: dict) -> None:
     config.memory_path.parent.mkdir(parents=True, exist_ok=True)
     config.memory_path.write_text(json.dumps(payload), encoding="utf-8")
+    config.memory_path.chmod(0o600)
 
 
 def test_clean_runtime_writes_healthy_status_without_heal(tmp_path: Path):
@@ -401,14 +402,14 @@ def test_central_down_alert_write_failure_is_reported(tmp_path: Path, monkeypatc
     monkeypatch.setenv("BOT_ERRORS_SELFCHECK_CENTRAL_ACK_MAX_AGE_SECONDS", "60")
     monkeypatch.setenv("BOT_ERRORS_SELFCHECK_CENTRAL_DOWN_MAX_AGE_SECONDS", "600")
     config, deps, calls, _head = _fixture(tmp_path, central_ack_path=ack)
-    original_atomic_write_json = _mod.atomic_write_json
+    original_publish_state_json = _mod.publish_state_json
 
-    def atomic_write_json(path: Path, payload: dict) -> None:
-        if path == config.central_down_alert_path:
+    def publish_state_json(*args, component: str, **kwargs):
+        if component == "selfcheck.central_down_alert":
             raise OSError("disk full")
-        original_atomic_write_json(path, payload)
+        return original_publish_state_json(*args, component=component, **kwargs)
 
-    monkeypatch.setattr(_mod, "atomic_write_json", atomic_write_json)
+    monkeypatch.setattr(_mod, "publish_state_json", publish_state_json)
     status = _mod.run_selfcheck(config, deps)
     assert status["healthy"] is True
     assert status["centralDownAlert"]["ok"] is False
@@ -551,11 +552,14 @@ def test_heartbeat_helper_fallbacks_and_local_write_failure(tmp_path: Path, monk
         "consecutive": 1,
     }
 
-    def atomic(path: Path, _payload: dict) -> None:
-        if path == config.heartbeat_path:
-            raise OSError("disk full")
+    original_publish_state_json = _mod.publish_state_json
 
-    monkeypatch.setattr(_mod, "atomic_write_json", atomic)
+    def publish_state_json(*args, component: str, **kwargs):
+        if component == "selfcheck.heartbeat":
+            raise OSError("disk full")
+        return original_publish_state_json(*args, component=component, **kwargs)
+
+    monkeypatch.setattr(_mod, "publish_state_json", publish_state_json)
     _mod.publish_heartbeat(config, deps, status)
     assert status["heartbeat"]["local"] == "write_failed:OSError"
     assert status["heartbeat"]["push"] == {"attempted": False, "mode": "disabled"}
@@ -1116,10 +1120,10 @@ def test_freshness_stat_error_is_stale_run(tmp_path: Path, monkeypatch):
     target.write_text("ok", encoding="utf-8")
     original_stat = Path.stat
 
-    def stat(path: Path):
+    def stat(path: Path, *args, **kwargs):
         if path == target:
             raise PermissionError("denied")
-        return original_stat(path)
+        return original_stat(path, *args, **kwargs)
 
     monkeypatch.setattr(Path, "stat", stat)
     monkeypatch.setenv(
@@ -1179,34 +1183,16 @@ def test_fsync_parent_ignores_open_error(tmp_path: Path, monkeypatch):
     assert called is True
 
 
-def test_atomic_write_json_cleans_temp_on_replace_error(tmp_path: Path, monkeypatch):
-    path = tmp_path / "state" / "status.json"
+def test_durable_target_rejects_symlinked_state_directory(tmp_path: Path):
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    state = tmp_path / "state"
+    state.symlink_to(outside, target_is_directory=True)
 
-    def replace(_src, _dst):
-        raise RuntimeError("replace failed")
+    with pytest.raises(_mod.SelfcheckError, match="through symlink"):
+        _mod._durable_target(state / "status.json")
 
-    monkeypatch.setattr(_mod.os, "replace", replace)
-    with pytest.raises(RuntimeError):
-        _mod.atomic_write_json(path, {"ok": True})
-    assert list(path.parent.glob(".status.json.*.tmp")) == []
-
-
-def test_atomic_write_json_ignores_temp_unlink_error_after_failure(tmp_path: Path, monkeypatch):
-    path = tmp_path / "state" / "status.json"
-    original_unlink = Path.unlink
-
-    def replace(_src, _dst):
-        raise RuntimeError("replace failed")
-
-    def unlink(path_obj: Path):
-        if path_obj.name.startswith(".status.json."):
-            raise OSError("unlink denied")
-        original_unlink(path_obj)
-
-    monkeypatch.setattr(_mod.os, "replace", replace)
-    monkeypatch.setattr(Path, "unlink", unlink)
-    with pytest.raises(RuntimeError):
-        _mod.atomic_write_json(path, {"ok": True})
+    assert list(outside.iterdir()) == []
 
 
 def test_read_json_object_rejects_bad_json_and_non_object(tmp_path: Path):
@@ -1509,7 +1495,11 @@ def test_main_error_still_returns_when_status_write_fails(tmp_path: Path, monkey
     monkeypatch.setattr(_mod, "default_config", lambda root, state_dir: config)
     monkeypatch.setattr(_mod, "default_deps", lambda cfg: deps)
     monkeypatch.setattr(_mod, "run_selfcheck", lambda cfg, deps=None, heal_enabled=True: (_ for _ in ()).throw(RuntimeError("boom")))
-    monkeypatch.setattr(_mod, "atomic_write_json", lambda path, payload: (_ for _ in ()).throw(RuntimeError("write failed")))
+    monkeypatch.setattr(
+        _mod,
+        "publish_state_json",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("write failed")),
+    )
     assert _mod.main(["--root", str(config.root), "--state-dir", str(config.state_dir)]) == 2
 
 

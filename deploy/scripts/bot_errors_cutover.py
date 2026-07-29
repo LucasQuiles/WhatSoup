@@ -12,53 +12,40 @@ independent JSON surfaces even after it comes back up:
 
 Monitoring reads both, so repairing only one leaves the service hidden from
 monitoring via the other. ``restore_service_to_always_on`` is the ONE writer
-that repairs both files in a single call -- it never edits one without the
-other -- and is fail-closed: an absent instance, an illegal ``expected``
-transition, or an unresolvable ``healthPort`` raises ``CutoverError`` before
-either file is touched.
+that validates and repairs both files in a single call. Validation fails before
+either file is touched. Each publication is durability-proven before the next
+step; if the second publication cannot be proven, the raised ``CutoverError``
+explicitly reports that the two surfaces may be divergent.
 """
 from __future__ import annotations
 
-import importlib.util
 import json
 from pathlib import Path
+import sys
 from typing import Any, Callable, NamedTuple
 
 
 SCRIPT_DIR = Path(__file__).resolve().parent
+if str(SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR))
 
-# `atomic_write_json` (temp file in the same directory, fsync the file,
-# atomic rename, fsync the parent directory) lives in
-# bot-errors-heartbeat-watchdog.py. That filename has hyphens, so it cannot
-# be imported as a normal module; load it via importlib instead of forking
-# its write semantics. This mirrors the existing test convention in
-# tests/test_bot_errors_heartbeat_watchdog_roster.py, which loads the same
-# file the same way to reach `atomic_write_json`.
-_WATCHDOG_PATH = SCRIPT_DIR / "bot-errors-heartbeat-watchdog.py"
-
-
-def _load_watchdog_module():
-    spec = importlib.util.spec_from_file_location(
-        "bot_errors_heartbeat_watchdog_for_cutover", _WATCHDOG_PATH
-    )
-    if spec is None or spec.loader is None:
-        raise ImportError(f"cannot load watchdog module from {_WATCHDOG_PATH}")
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod
-
-
-atomic_write_json = _load_watchdog_module().atomic_write_json
+from lib.durable_json import (  # noqa: E402
+    DurableWriteError,
+    durable_json_target,
+    observe_json,
+    operation_id,
+    publish_state_json,
+    require_advance,
+    require_all_advance,
+)
 
 
 class CutoverError(RuntimeError):
     """Raised when a blocked->always_on cutover repair cannot proceed safely.
 
-    Fail-closed: callers must treat this as "no write happened to either
-    surface" -- an absent instance, an illegal ``expected`` transition, or an
-    unresolvable ``healthPort`` is caught before any ``atomic_write_json``
-    call, so the inventory and the deployed profile are never left
-    diverging from each other.
+    Validation errors occur before either surface is written. Publication
+    errors identify whether a proven first publication may have left the
+    surfaces divergent, so callers cannot mistake a partial repair for success.
     """
 
 
@@ -66,6 +53,21 @@ class CutoverError(RuntimeError):
 # (`none`, or a future value) is left untouched -- only blocked->always_on
 # is a legal transition.
 _LEGAL_EXPECTED_STATES = {"blocked", "always_on"}
+
+
+def _durable_target(path: Path):
+    try:
+        parent = path.parent
+        parent.lstat()
+    except OSError as exc:
+        raise CutoverError(f"cannot inspect cutover parent {path.parent}: {exc}") from exc
+    if parent.is_symlink() or not parent.is_dir():
+        raise CutoverError(f"unsafe cutover parent: {parent}")
+    return durable_json_target(
+        trusted_root=parent.resolve(strict=True),
+        relative_path=path.name,
+        owner_controlled_readable=True,
+    )
 
 
 def _load_json(path: Path, *, what: str) -> dict[str, Any]:
@@ -132,6 +134,8 @@ def restore_service_to_always_on(
     profile_filename = host_entry.get("profile")
     if not profile_filename:
         raise CutoverError(f"host {host!r} has no 'profile' filename in inventory")
+    if Path(str(profile_filename)).name != str(profile_filename):
+        raise CutoverError(f"host {host!r} has unsafe profile filename")
     profile_path = profiles_dir / profile_filename
 
     profile = _load_json(profile_path, what="profile")
@@ -161,8 +165,47 @@ def restore_service_to_always_on(
     profile_instance["healthPort"] = health_port
     profile_instance["expected"] = "always_on"
 
-    atomic_write_json(inventory_path, inventory)
-    atomic_write_json(profile_path, profile)
+    inventory_target = _durable_target(inventory_path)
+    inventory_observation = observe_json(inventory_target)
+    inventory_operation = operation_id(
+        inventory_target,
+        inventory,
+        component="cutover.inventory_state",
+        predecessor=inventory_observation.version,
+    )
+    inventory_publication = publish_state_json(
+        inventory_target,
+        inventory,
+        component="cutover.inventory_state",
+        operation_id=inventory_operation,
+        expected=inventory_observation.version,
+        generation=(inventory_observation.version.generation or 0) + 1,
+    )
+    require_advance(inventory_publication)
+
+    profile_target = _durable_target(profile_path)
+    profile_observation = observe_json(profile_target)
+    profile_operation = operation_id(
+        profile_target,
+        profile,
+        component="cutover.profile_state",
+        predecessor=profile_observation.version,
+    )
+    profile_publication = publish_state_json(
+        profile_target,
+        profile,
+        component="cutover.profile_state",
+        operation_id=profile_operation,
+        expected=profile_observation.version,
+        generation=(profile_observation.version.generation or 0) + 1,
+    )
+    try:
+        require_all_advance([inventory_publication, profile_publication])
+    except DurableWriteError as exc:
+        raise CutoverError(
+            "inventory publication advanced but profile publication did not; "
+            "cutover surfaces may be divergent"
+        ) from exc
 
     return {
         "host": host,
