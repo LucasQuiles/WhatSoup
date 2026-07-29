@@ -630,6 +630,12 @@ describe('redactFingerprint (issue #2457 redaction layer)', () => {
       }
     }
     expect(recovered).toBeUndefined();
+    // Positive proof alongside the negative one: the CLI's real fingerprint
+    // is exactly the HMAC of the true value under the salt file it created —
+    // this isn't merely "unmatched by the attacker's guesses", it is the
+    // documented keyed algorithm applied to the real seeded seq.
+    const salt = loadOrCreateRedactionSalt(fixture.dbPath);
+    expect(catchupSeqFingerprint).toBe(redactFingerprint(salt, 'catchup-seq', fixture.catchupSeq));
   });
 
   // ── Salt file lifecycle ──────────────────────────────────────────────────
