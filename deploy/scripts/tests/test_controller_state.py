@@ -23,6 +23,7 @@ from pathlib import Path
 import re
 import stat
 import sys
+import threading
 import time
 from types import ModuleType
 from typing import Any, Literal, get_args, get_type_hints
@@ -377,7 +378,12 @@ class FaultOps:
         return self._path_detail(path, dir_fd)
 
     def _fixed_role(self, path: os.PathLike[str] | str) -> str | None:
-        return self.managed_names.get(Path(os.fspath(path)).name)
+        name = Path(os.fspath(path)).name
+        if re.fullmatch(r"[0-9a-f]{32}\.controller-state-evidence", name):
+            return "evidence"
+        if name.endswith(".reconciliation-journal.tmp"):
+            return "reconciliation_stage"
+        return self.managed_names.get(name)
 
     def open(
         self,
@@ -761,7 +767,9 @@ def _evidence_files(path: Path) -> set[Path]:
     return {
         candidate
         for candidate in path.parent.iterdir()
-        if candidate not in managed and candidate.is_file()
+        if candidate not in managed
+        and candidate.is_file()
+        and candidate.name.endswith(".controller-state-evidence")
     }
 
 
@@ -3580,7 +3588,14 @@ def _seed_exact_recovery_phase(
     journal_path = _managed(path, ".transaction")
     target_envelope = None
     if phase == "reconciliation_prepared":
-        journal = _json(journal_path)
+        staged = [
+            candidate
+            for candidate in path.parent.iterdir()
+            if candidate.name.startswith(f".{path.name}.")
+            and candidate.name.endswith(".reconciliation-journal.tmp")
+        ]
+        assert len(staged) == 1
+        journal = _json(staged[0])
         target_envelope = journal["targetEnvelope"]
     _assert_recovery_receipt_contract(
         receipt,
@@ -3590,6 +3605,8 @@ def _seed_exact_recovery_phase(
     )
     assert receipt["phase"] == phase
     if phase != "reconciliation_prepared":
+        assert not journal_path.exists()
+    else:
         assert not journal_path.exists()
     if phase == "planned":
         assert path.read_bytes() == damaged
@@ -3923,3 +3940,498 @@ def test_stderr_failure_cannot_replace_typed_non_success() -> None:
     ) is None
     assert error.diagnostic is diagnostic
     assert str(error) == "controller state recovery required"
+
+
+@pytest.mark.parametrize("retained_generation", (2, 3))
+def test_retained_generation_must_be_strictly_below_primary_before_normal_load(
+    tmp_path: Path,
+    retained_generation: int,
+) -> None:
+    cs = load_controller_state_module()
+    path = tmp_path / "state.json"
+    _seed_store(
+        cs,
+        path,
+        (
+            {"counters": {"seen": 1}},
+            {"counters": {"seen": 2}},
+        ),
+    )
+    retained_path = _managed(path, ".previous")
+    retained = _json(path)
+    retained["counters"] = {"retained": retained_generation}
+    retained["_controllerState"]["generation"] = retained_generation
+    _refresh_envelope_integrity(retained)
+    _write_private_json(retained_path, retained)
+    retained_before = retained_path.read_bytes()
+
+    with _open(cs, path) as session:
+        result = session.load()
+
+    _assert_recovery_required(result, "generation_invalid")
+    assert retained_path.read_bytes() == retained_before
+
+
+def test_save_revalidates_newer_retained_generation_before_replacement(
+    tmp_path: Path,
+) -> None:
+    cs = load_controller_state_module()
+    path = tmp_path / "state.json"
+    _seed_store(
+        cs,
+        path,
+        (
+            {"counters": {"seen": 1}},
+            {"counters": {"seen": 2}},
+        ),
+    )
+    with _open(cs, path) as session:
+        loaded = session.load()
+        retained_path = _managed(path, ".previous")
+        retained = _json(path)
+        retained["counters"] = {"retained": 3}
+        retained["_controllerState"]["generation"] = 3
+        _refresh_envelope_integrity(retained)
+        _write_private_json(retained_path, retained)
+        before = _authority_snapshot(path)
+
+        with pytest.raises(cs.ControllerStateRequired) as raised:
+            session.save({"counters": {"seen": 3}}, loaded.capability)
+
+    assert raised.value.diagnostic.reason == "generation_invalid"
+    assert _authority_snapshot(path) == before
+
+
+def test_evidence_preserved_restart_accepts_already_restored_primary_posture(
+    tmp_path: Path,
+) -> None:
+    cs = load_controller_state_module()
+    path = tmp_path / "state.json"
+    _seed_store(
+        cs,
+        path,
+        (
+            {"counters": {"seen": 1}},
+            {"counters": {"seen": 2}},
+        ),
+    )
+    damaged = _damage_primary(path, "truncated")
+    ops = FaultOps()
+    ops.crash_after(
+        "fsync_directory",
+        predicate=lambda call: call.role == "primary"
+        and _managed(path, ".recovery").exists()
+        and _json(_managed(path, ".recovery"))["phase"] == "evidence_preserved",
+    )
+    session = _open(cs, path, ops=ops)
+    try:
+        with pytest.raises(SimulatedCrash):
+            session.load()
+    finally:
+        session.close()
+    ops.assert_all_rules_fired()
+    assert _json(_managed(path, ".recovery"))["phase"] == "evidence_preserved"
+    assert path.read_bytes() == _managed(path, ".previous").read_bytes()
+    evidence = _evidence_snapshot(path)
+    assert len(evidence) == 1 and evidence[0].data == damaged
+
+    with _open(cs, path) as restarted:
+        resumed = restarted.load()
+
+    assert resumed.mode == "recovered"
+    assert resumed.payload == {"counters": {"seen": 1}}
+    assert _json(_managed(path, ".recovery"))["phase"] == "restored"
+
+
+def _seed_recovered_for_reconciliation(
+    cs: ModuleType,
+    path: Path,
+) -> None:
+    _seed_store(
+        cs,
+        path,
+        (
+            {"counters": {"seen": 1}},
+            {"counters": {"seen": 2}},
+        ),
+    )
+    _damage_primary(path, "truncated")
+    with _open(cs, path) as session:
+        assert session.load().mode == "recovered"
+
+
+def test_reconciliation_prepared_receipt_is_durable_before_journal(
+    tmp_path: Path,
+) -> None:
+    cs = load_controller_state_module()
+    path = tmp_path / "state.json"
+    _seed_recovered_for_reconciliation(cs, path)
+    ops = FaultOps()
+    session = _open(cs, path, ops=ops)
+    recovered = session.load()
+    ops.reset_trace()
+    ops.crash_after(
+        "fsync_directory",
+        predicate=lambda call: call.role == "recovery"
+        and _managed(path, ".recovery").exists()
+        and _json(_managed(path, ".recovery"))["phase"]
+        == "reconciliation_prepared",
+    )
+    try:
+        with pytest.raises(SimulatedCrash):
+            session.complete_reconciliation(
+                recovered.payload,
+                recovered.capability,
+                outcome="validated_previous_only",
+            )
+    finally:
+        session.close()
+    ops.assert_all_rules_fired()
+    assert _json(_managed(path, ".recovery"))["phase"] == "reconciliation_prepared"
+    assert not _managed(path, ".transaction").exists()
+
+    with _open(cs, path) as restarted:
+        retry = restarted.load()
+
+    assert retry.mode == "reconciled"
+    assert retry.payload == recovered.payload
+
+
+def test_staged_reconciliation_restart_preserves_restored_authority(
+    tmp_path: Path,
+) -> None:
+    cs = load_controller_state_module()
+    path = tmp_path / "state.json"
+    _seed_recovered_for_reconciliation(cs, path)
+    ops = FaultOps()
+    session = _open(cs, path, ops=ops)
+    recovered = session.load()
+    ops.reset_trace()
+    ops.crash_after(
+        "fsync_directory",
+        predicate=lambda call: call.role == "reconciliation_stage",
+    )
+    try:
+        with pytest.raises(SimulatedCrash):
+            session.complete_reconciliation(
+                recovered.payload,
+                recovered.capability,
+                outcome="validated_previous_only",
+            )
+    finally:
+        session.close()
+    ops.assert_all_rules_fired()
+    receipt = _json(_managed(path, ".recovery"))
+    assert receipt["phase"] == "restored"
+    assert not _managed(path, ".transaction").exists()
+    assert path.read_bytes() == _managed(path, ".previous").read_bytes()
+
+    with _open(cs, path) as restarted:
+        retry = restarted.load()
+        assert retry.mode == "recovered"
+        reconciled = restarted.complete_reconciliation(
+            retry.payload,
+            retry.capability,
+            outcome="validated_previous_only",
+        )
+
+    assert reconciled.mode == "reconciled"
+    assert _json(_managed(path, ".recovery"))["phase"] == "reconciled"
+
+
+def test_reconciliation_transaction_never_precedes_prepared_receipt(
+    tmp_path: Path,
+) -> None:
+    cs = load_controller_state_module()
+    path = tmp_path / "state.json"
+    _seed_recovered_for_reconciliation(cs, path)
+    ops = FaultOps()
+    session = _open(cs, path, ops=ops)
+    recovered = session.load()
+    ops.reset_trace()
+    ops.crash_after(
+        "fsync_directory",
+        predicate=lambda call: call.role == "transaction"
+        and _managed(path, ".transaction").exists()
+        and _json(_managed(path, ".transaction"))["phase"] == "prepared",
+    )
+    try:
+        with pytest.raises(SimulatedCrash):
+            session.complete_reconciliation(
+                recovered.payload,
+                recovered.capability,
+                outcome="validated_previous_only",
+            )
+    finally:
+        session.close()
+    ops.assert_all_rules_fired()
+    assert _json(_managed(path, ".recovery"))["phase"] == "reconciliation_prepared"
+    assert _json(_managed(path, ".transaction"))["phase"] == "prepared"
+
+    with _open(cs, path) as restarted:
+        resumed = restarted.load()
+        assert resumed.mode == "reconciled"
+        assert restarted.reload().mode == "valid"
+
+
+@pytest.mark.parametrize(
+    ("phase", "crash_phase"),
+    (
+        ("prepared", "journal_prepared"),
+        ("previous_committed", "journal_advanced_previous_committed"),
+    ),
+)
+def test_journal_validates_marker_before_phase_mutation(
+    tmp_path: Path,
+    phase: str,
+    crash_phase: str,
+) -> None:
+    cs = load_controller_state_module()
+    path = tmp_path / "state.json"
+    _seed_store(
+        cs,
+        path,
+        (
+            {"counters": {"seen": 1}},
+            {"counters": {"seen": 2}},
+        ),
+    )
+    crash = next(case for case in _TRANSACTION_CRASH_CASES if case.phase == crash_phase)
+    _interrupt_normal_save(cs, path, crash)
+    assert _json(_managed(path, ".transaction"))["phase"] == phase
+    marker_path = _managed(path, ".initialized")
+    marker = _json(marker_path)
+    marker["highWaterIntegritySha256"] = "a" * 64
+    _refresh_sidecar_integrity(marker)
+    _write_private_json(marker_path, marker)
+    primary_before = path.read_bytes()
+    previous_before = _managed(path, ".previous").read_bytes()
+    journal_before = _managed(path, ".transaction").read_bytes()
+
+    with _open(cs, path) as restarted:
+        result = restarted.load()
+
+    _assert_recovery_required(result, "publication_ambiguous")
+    assert path.read_bytes() == primary_before
+    assert _managed(path, ".previous").read_bytes() == previous_before
+    assert _managed(path, ".transaction").read_bytes() == journal_before
+
+
+class BlockingSharedReadOps(FaultOps):
+    def __init__(self) -> None:
+        super().__init__()
+        self.entered = threading.Event()
+        self.release = threading.Event()
+        self._blocked = False
+
+    def read(self, fd: int, size: int) -> bytes:
+        if not self._blocked and self.fd_roles.get(fd) == "initialized":
+            self._blocked = True
+            self.entered.set()
+            assert self.release.wait(2.0)
+        return super().read(fd, size)
+
+
+def test_overlapping_readers_share_lock_while_writer_is_excluded(
+    tmp_path: Path,
+) -> None:
+    cs = load_controller_state_module()
+    path = tmp_path / "state.json"
+    _seed_store(cs, path)
+    ops = BlockingSharedReadOps()
+    first_result: list[Any] = []
+    first = threading.Thread(
+        target=lambda: first_result.append(
+            _read(cs, path, ops=ops, lock_timeout=0.2)
+        )
+    )
+    first.start()
+    assert ops.entered.wait(1.0)
+    try:
+        second = _read(cs, path, lock_timeout=0.05)
+        assert second.mode == "valid"
+        with pytest.raises(cs.ControllerStateRequired) as raised:
+            _open(cs, path, lock_timeout=0.01)
+        assert raised.value.diagnostic.reason == "lock_unavailable"
+    finally:
+        ops.release.set()
+        first.join(timeout=2.0)
+    assert not first.is_alive()
+    assert len(first_result) == 1 and first_result[0].mode == "valid"
+
+
+@pytest.mark.parametrize(
+    "artifact_name",
+    (
+        "0123456789abcdef0123456789abcdef.controller-state-evidence",
+        ".state.json.0123456789abcdef0123456789abcdef.tmp",
+    ),
+)
+def test_bootstrap_revalidation_rejects_new_unmanaged_authority_artifact(
+    tmp_path: Path,
+    artifact_name: str,
+) -> None:
+    cs = load_controller_state_module()
+    path = tmp_path / "state.json"
+    artifact = tmp_path / artifact_name
+    with _open(cs, path) as session:
+        loaded = session.load()
+        assert loaded.mode == "bootstrap"
+        _write_private_raw(artifact, b"authority")
+        with pytest.raises(cs.ControllerStateRequired):
+            session.save({"counters": {"seen": 1}}, loaded.capability)
+    assert artifact.read_bytes() == b"authority"
+    for suffix in ("", ".previous", ".initialized", ".transaction", ".recovery"):
+        assert not _managed(path, suffix).exists()
+
+
+@pytest.mark.parametrize(
+    "artifact_name",
+    (
+        "0123456789abcdef0123456789abcdef.controller-state-evidence",
+        ".state.json.0123456789abcdef0123456789abcdef.tmp",
+    ),
+)
+def test_marker_free_legacy_read_rejects_unmanaged_authority_artifact(
+    tmp_path: Path,
+    artifact_name: str,
+) -> None:
+    cs = load_controller_state_module()
+    path = tmp_path / "state.json"
+    raw = b'{"counters":{"seen":1}}'
+    _write_private_raw(path, raw)
+    artifact = tmp_path / artifact_name
+    _write_private_raw(artifact, b"authority")
+    _write_private_raw(_managed(path, ".lock"), b"")
+    before = {candidate.name: candidate.read_bytes() for candidate in tmp_path.iterdir()}
+
+    result = _read(cs, path)
+
+    assert result.mode == "unavailable"
+    assert result.payload is None
+    assert {candidate.name: candidate.read_bytes() for candidate in tmp_path.iterdir()} == before
+
+
+class CloseAfterFaultOps(FaultOps):
+    def __init__(self, role: str) -> None:
+        super().__init__()
+        self.fault_role = role
+        self.close_fault_fired = False
+        self.close_fault_armed = False
+
+    def close(self, fd: int) -> None:
+        role = self.fd_roles.get(fd)
+        os.close(fd)
+        self.closed_fds.add(fd)
+        if (
+            self.close_fault_armed
+            and role == self.fault_role
+            and not self.close_fault_fired
+        ):
+            self.close_fault_fired = True
+            raise OSError(errno.EIO, "injected close failure")
+
+
+def _faulting_ops(boundary: str, role: str) -> FaultOps:
+    if boundary == "close":
+        return CloseAfterFaultOps(role)
+    ops = FaultOps()
+    ops.inject(boundary, predicate=lambda call: call.role == role)
+    return ops
+
+
+@pytest.mark.parametrize("boundary", ("open", "fstat", "read", "close"))
+def test_evidence_file_errors_stay_inside_typed_load_boundary(
+    tmp_path: Path,
+    boundary: str,
+) -> None:
+    cs = load_controller_state_module()
+    path = tmp_path / "state.json"
+    _seed_exact_recovery_phase(cs, path, "evidence_preserved")
+    ops = _faulting_ops(boundary, "evidence")
+    if isinstance(ops, CloseAfterFaultOps):
+        ops.close_fault_armed = True
+
+    with _open(cs, path, ops=ops) as session:
+        result = session.load()
+
+    _assert_recovery_required(result)
+    if boundary == "close":
+        assert isinstance(ops, CloseAfterFaultOps) and ops.close_fault_fired
+    else:
+        ops.assert_all_rules_fired()
+    for fd in ops.opened_fds:
+        with pytest.raises(OSError) as raised:
+            os.fstat(fd)
+        assert raised.value.errno == errno.EBADF
+
+
+@pytest.mark.parametrize("boundary", ("open", "fstat", "read", "close"))
+def test_capability_revalidation_file_errors_raise_only_typed_boundary(
+    tmp_path: Path,
+    boundary: str,
+) -> None:
+    cs = load_controller_state_module()
+    path = tmp_path / "state.json"
+    _seed_store(cs, path)
+    ops: FaultOps = (
+        CloseAfterFaultOps("initialized") if boundary == "close" else FaultOps()
+    )
+    session, loaded = _load_valid(cs, path, ops=ops)
+    ops.reset_trace()
+    if boundary == "close":
+        assert isinstance(ops, CloseAfterFaultOps)
+        ops.close_fault_armed = True
+    else:
+        ops.inject(boundary, predicate=lambda call: call.role == "initialized")
+    try:
+        with pytest.raises(cs.ControllerStateRequired):
+            session.save({"counters": {"seen": 2}}, loaded.capability)
+    finally:
+        session.close()
+    if boundary == "close":
+        assert isinstance(ops, CloseAfterFaultOps) and ops.close_fault_fired
+    else:
+        ops.assert_all_rules_fired()
+    for fd in ops.opened_fds:
+        with pytest.raises(OSError) as raised:
+            os.fstat(fd)
+        assert raised.value.errno == errno.EBADF
+
+
+@pytest.mark.parametrize(
+    "phase",
+    ("planned", "evidence_preserved", "restored", "reconciliation_prepared"),
+)
+def test_each_resumed_recovery_phase_counts_exactly_one_attempt(
+    tmp_path: Path,
+    phase: str,
+) -> None:
+    cs = load_controller_state_module()
+    path = tmp_path / "state.json"
+    _seed_exact_recovery_phase(cs, path, phase)
+    receipt_path = _managed(path, ".recovery")
+    before = _json(receipt_path)
+    receipt_id = before["recoveryReceiptId"]
+
+    if phase in {"planned", "evidence_preserved"}:
+        ops = FaultOps()
+        role = "evidence" if phase == "planned" else "primary"
+        ops.crash_after("fsync_directory", predicate=lambda call: call.role == role)
+        session = _open(cs, path, ops=ops)
+        try:
+            with pytest.raises(SimulatedCrash):
+                session.load()
+        finally:
+            session.close()
+        ops.assert_all_rules_fired()
+    else:
+        with _open(cs, path) as session:
+            session.load()
+
+    after = _json(receipt_path)
+    assert after["recoveryReceiptId"] == receipt_id
+    assert after["occurrenceCount"] == min(
+        before["occurrenceCount"] + 1,
+        _MAX_OCCURRENCE_COUNT,
+    )
