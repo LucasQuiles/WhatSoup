@@ -70,11 +70,14 @@ afterEach(() => {
 });
 
 const atomicWriterScripts = [
-  'deploy/scripts/bot-errors-collector.py',
   'deploy/scripts/bot-errors-dispatcher.py',
   'deploy/scripts/bot-errors-heartbeat-watchdog.py',
   'deploy/scripts/bot-errors-health-check.py',
   'deploy/scripts/bot-errors-q-loop.py',
+];
+
+const durableCollectorWriterScripts = [
+  'deploy/scripts/bot-errors-collector.py',
 ];
 
 const durableEventWriterScripts = [
@@ -475,6 +478,16 @@ def publish(target, payload, op_id, expected):
     expect(text).toContain('path.is_symlink()');
     expect(text).toContain('not os.path.isdir(path)');
     expect(text).not.toContain('tmp.write_text(json.dumps');
+  });
+
+  it.each(durableCollectorWriterScripts)('%s consumes shared durable publication outcomes', (script) => {
+    const text = readFileSync(script, 'utf8');
+
+    expect(text).toContain('from lib.durable_json import');
+    expect(text).toContain('publish_event_json(');
+    expect(text).toContain('publish_state_json(');
+    expect(text).toContain('require_advance(publication)');
+    expect(text).not.toContain('def atomic_write_json');
   });
 
   it.each(durableEventWriterScripts)('%s consumes the shared create-once publication outcome', (script) => {

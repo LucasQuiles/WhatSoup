@@ -217,14 +217,29 @@ function collectorEnv(overrides: Record<string, string>) {
   return { ...env, ...overrides };
 }
 
-function runAtomicWrite(targetPath: string) {
+function runDurableWrite(targetPath: string) {
   return spawnSync('python3', ['-c', `
 import importlib.util
 from pathlib import Path
 spec = importlib.util.spec_from_file_location("bot_errors_collector", "deploy/scripts/bot-errors-collector.py")
 m = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(m)
-m.atomic_write_json(Path(${JSON.stringify(targetPath)}), {"ok": True})
+path = Path(${JSON.stringify(targetPath)})
+target = m._durable_target(path)
+absent = m.JsonVersion(False, None, None, None)
+payload = {"ok": True}
+publication = m.publish_event_json(
+    target,
+    payload,
+    component="collector.test",
+    operation_id=m.operation_id(
+        target,
+        payload,
+        component="collector.test",
+        predecessor=absent,
+    ),
+)
+m.require_advance(publication)
 `], {
     cwd: process.cwd(),
     encoding: 'utf8',
@@ -341,24 +356,24 @@ afterEach(() => {
 });
 
 describe('bot-errors-collector', () => {
-  it('asserts the atomic-write parent is private before creating a temp file', () => {
+  it('asserts the durable-write parent is private before publication', () => {
     tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-collector-'));
     const realParent = join(tmpRoot, 'real-outbox');
     const linkedParent = join(tmpRoot, 'linked-outbox');
     mkdirSync(realParent, { recursive: true, mode: 0o700 });
     symlinkSync(realParent, linkedParent, 'dir');
 
-    const result = runAtomicWrite(join(linkedParent, 'event.json'));
+    const result = runDurableWrite(join(linkedParent, 'event.json'));
 
     expect(result.status).not.toBe(0);
     expect(result.stderr).toContain('refusing to use private directory through symlink');
     expect(readdirSync(realParent)).toEqual([]);
   });
 
-  it('creates a missing atomic-write parent with private permissions', () => {
+  it('creates a missing durable-write parent with private permissions', () => {
     tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-collector-'));
     const parent = join(tmpRoot, 'new-outbox');
-    const result = runAtomicWrite(join(parent, 'event.json'));
+    const result = runDurableWrite(join(parent, 'event.json'));
 
     expect(result.status).toBe(0);
     expect(statSync(parent).mode & 0o777).toBe(0o700);
@@ -728,7 +743,9 @@ describe('bot-errors-collector', () => {
     expect(result.status).toBe(0);
     expect(JSON.parse(result.stdout)).toMatchObject({ writefailHarvested: 1, writefailPoison: 1 });
     expect(readdirSync(join(tmpRoot, 'writefail')).filter((file) => file.endsWith('.writefail'))).toHaveLength(1);
-    expect(readdirSync(join(tmpRoot, 'writefail-harvest-quarantine'))).toHaveLength(1);
+    expect(
+      readdirSync(join(tmpRoot, 'writefail-harvest-quarantine')).filter((file) => file.endsWith('.poison')),
+    ).toHaveLength(1);
     const logEntries = readFileSync(join(tmpRoot, 'logs', 'collector.jsonl'), 'utf8')
       .trim()
       .split('\n')

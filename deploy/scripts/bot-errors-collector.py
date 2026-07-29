@@ -28,6 +28,15 @@ from lib.controller_log import (
     metadata_only_controller_details,
     write_controller_log,
 )
+from lib.durable_json import (
+    JsonVersion,
+    durable_json_target,
+    observe_json,
+    operation_id,
+    publish_event_json,
+    publish_state_json,
+    require_advance,
+)
 
 
 TAILSCALE_STATUS_CACHE: dict[str, Any] | None = None
@@ -523,36 +532,12 @@ def remote_python_command(host: str, args: list[str]) -> list[str]:
     ]
 
 
-def atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
+def _durable_target(path: Path):
     ensure_private_dir(path.parent)
-    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-    data = (json.dumps(payload, indent=2, sort_keys=True) + "\n").encode("utf-8")
-    fd = os.open(tmp, os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0), 0o600)
-    try:
-        with os.fdopen(fd, "wb") as handle:
-            handle.write(data)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(tmp, path)
-        try:
-            dir_fd = os.open(path.parent, os.O_DIRECTORY | os.O_RDONLY)
-        except OSError:
-            dir_fd = None
-        if dir_fd is not None:
-            try:
-                os.fsync(dir_fd)
-            finally:
-                os.close(dir_fd)
-        try:
-            path.chmod(0o600)
-        except OSError:
-            pass
-    except BaseException:
-        try:
-            tmp.unlink()
-        except OSError:
-            pass
-        raise
+    return durable_json_target(
+        trusted_root=path.parent.resolve(strict=True),
+        relative_path=path.name,
+    )
 
 
 def assert_regular_or_missing(path: Path) -> None:
@@ -607,10 +592,27 @@ def redacted_collector_payload(value: Any) -> Any:
 
 
 def persist_controller_log_health(record: dict[str, Any]) -> None:
-    atomic_write_json(
-        state_root() / "controller-log-health" / "collector.json",
-        record,
+    target = _durable_target(
+        state_root() / "controller-log-health" / "collector.json"
     )
+    observation = observe_json(target)
+    generation = (observation.version.generation or 0) + 1
+    publication_operation = operation_id(
+        target,
+        record,
+        component="collector.controller_log_health",
+        predecessor=observation.version,
+    )
+    publication = publish_state_json(
+        target,
+        record,
+        component="collector.controller_log_health",
+        operation_id=publication_operation,
+        expected=observation.version,
+        generation=generation,
+    )
+    if not publication.advance_allowed:
+        require_advance(publication)
 
 
 def controller_log_fallback(line: str) -> None:
@@ -659,8 +661,25 @@ def load_state() -> dict[str, Any]:
 
 def save_state(state: dict[str, Any]) -> None:
     path = state_path()
-    ensure_private_dir(path.parent)
-    atomic_write_json(path, redacted_collector_payload(state))
+    target = _durable_target(path)
+    observation = observe_json(target)
+    payload = redacted_collector_payload(state)
+    generation = (observation.version.generation or 0) + 1
+    publication_operation = operation_id(
+        target,
+        payload,
+        component="collector.state",
+        predecessor=observation.version,
+    )
+    publication = publish_state_json(
+        target,
+        payload,
+        component="collector.state",
+        operation_id=publication_operation,
+        expected=observation.version,
+        generation=generation,
+    )
+    require_advance(publication)
 
 
 def alert_key(remote: str, source: str) -> str:
@@ -1180,7 +1199,22 @@ def enqueue_meta_alert(
                 "diagnostics": diagnostics,
                 "delivery": {"attempts": 0, "status": "queued", "nextAttemptAtEpoch": 0, "lastError": None},
             }
-            atomic_write_json(local_outbox_path(event, "collector"), event)
+            path = local_outbox_path(event, "collector")
+            target = _durable_target(path)
+            absent = JsonVersion(False, None, None, None)
+            publication_operation = operation_id(
+                target,
+                event,
+                component="collector.meta_alert_existing_claim",
+                predecessor=absent,
+            )
+            publication = publish_event_json(
+                target,
+                event,
+                component="collector.meta_alert_existing_claim",
+                operation_id=publication_operation,
+            )
+            require_advance(publication)
             alerts[key] = current
             open_record["lastRenotifyAt"] = current
             open_record["lastRenotifyIso"] = created_at
@@ -1230,7 +1264,22 @@ def enqueue_meta_alert(
         "diagnostics": diagnostics,
         "delivery": {"attempts": 0, "status": "queued", "nextAttemptAtEpoch": 0, "lastError": None},
     }
-    atomic_write_json(local_outbox_path(event, "collector"), event)
+    path = local_outbox_path(event, "collector")
+    target = _durable_target(path)
+    absent = JsonVersion(False, None, None, None)
+    publication_operation = operation_id(
+        target,
+        event,
+        component="collector.meta_alert_new_claim",
+        predecessor=absent,
+    )
+    publication = publish_event_json(
+        target,
+        event,
+        component="collector.meta_alert_new_claim",
+        operation_id=publication_operation,
+    )
+    require_advance(publication)
     alerts[key] = current
     open_alerts[key] = {
         "status": "open",
@@ -1286,7 +1335,22 @@ def enqueue_meta_recovery(remote: str, source: str, summary: str, evidence: str,
         },
         "delivery": {"attempts": 0, "status": "queued", "nextAttemptAtEpoch": 0, "lastError": None},
     }
-    atomic_write_json(local_outbox_path(event, "collector"), event)
+    path = local_outbox_path(event, "collector")
+    target = _durable_target(path)
+    absent = JsonVersion(False, None, None, None)
+    publication_operation = operation_id(
+        target,
+        event,
+        component="collector.meta_recovery",
+        predecessor=absent,
+    )
+    publication = publish_event_json(
+        target,
+        event,
+        component="collector.meta_recovery",
+        operation_id=publication_operation,
+    )
+    require_advance(publication)
     open_alerts.pop(key, None)
     state.setdefault("alerts", {}).pop(key, None)
     append_log({
@@ -1632,7 +1696,22 @@ def enqueue_writefail_ack_failure(
             },
             "delivery": {"attempts": 0, "status": "queued", "nextAttemptAtEpoch": 0, "lastError": None},
         }
-        atomic_write_json(local_outbox_path(event, "collector"), event)
+        path = local_outbox_path(event, "collector")
+        target = _durable_target(path)
+        absent = JsonVersion(False, None, None, None)
+        publication_operation = operation_id(
+            target,
+            event,
+            component="collector.writefail_ack_failure",
+            predecessor=absent,
+        )
+        publication = publish_event_json(
+            target,
+            event,
+            component="collector.writefail_ack_failure",
+            operation_id=publication_operation,
+        )
+        require_advance(publication)
         entry["lastAlertAt"] = current
         entry["lastAlertIso"] = event["createdAt"]
         entry["suppressedCount"] = 0
@@ -1812,7 +1891,21 @@ def write_harvest_quarantine(remote_host: str, remote_root: str, record: dict[st
         "payload": payload_text[:20000],
         "quarantinedAt": now_iso(),
     }
-    atomic_write_json(path, payload)
+    target = _durable_target(path)
+    absent = JsonVersion(False, None, None, None)
+    publication_operation = operation_id(
+        target,
+        payload,
+        component="collector.harvest_quarantine",
+        predecessor=absent,
+    )
+    publication = publish_event_json(
+        target,
+        payload,
+        component="collector.harvest_quarantine",
+        operation_id=publication_operation,
+    )
+    require_advance(publication)
     return path
 
 
@@ -1854,7 +1947,21 @@ def relay_writefail(remote_host: str, remote_root: str, record: dict[str, Any]) 
         "harvestedAt": now_iso(),
     }
     path = local_writefail_path(remote_host, event_id)
-    atomic_write_json(path, crumb)
+    target = _durable_target(path)
+    absent = JsonVersion(False, None, None, None)
+    publication_operation = operation_id(
+        target,
+        crumb,
+        component="collector.relay_writefail",
+        predecessor=absent,
+    )
+    publication = publish_event_json(
+        target,
+        crumb,
+        component="collector.relay_writefail",
+        operation_id=publication_operation,
+    )
+    require_advance(publication)
     append_log({
         "type": "writefail_harvested",
         "remote": remote_host,
@@ -1896,7 +2003,21 @@ def relay_event(remote_host: str, remote_root: str, record: dict[str, Any]) -> P
     event["delivery"] = {"attempts": 0, "status": "queued", "nextAttemptAtEpoch": 0, "lastError": None}
     event = redacted_collector_payload(event)
     path = local_outbox_path(event, remote_host)
-    atomic_write_json(path, event)
+    target = _durable_target(path)
+    absent = JsonVersion(False, None, None, None)
+    publication_operation = operation_id(
+        target,
+        event,
+        component="collector.relay_event",
+        predecessor=absent,
+    )
+    publication = publish_event_json(
+        target,
+        event,
+        component="collector.relay_event",
+        operation_id=publication_operation,
+    )
+    require_advance(publication)
     return path
 
 
@@ -1970,7 +2091,21 @@ def _emit_collector_outbox_event(
         "delivery": {"attempts": 0, "status": "queued", "nextAttemptAtEpoch": 0, "lastError": None},
     }
     path = local_outbox_path(event, "collector")
-    atomic_write_json(path, event)
+    target = _durable_target(path)
+    absent = JsonVersion(False, None, None, None)
+    publication_operation = operation_id(
+        target,
+        event,
+        component="collector.local_outbox_event",
+        predecessor=absent,
+    )
+    publication = publish_event_json(
+        target,
+        event,
+        component="collector.local_outbox_event",
+        operation_id=publication_operation,
+    )
+    require_advance(publication)
     append_log({
         "type": log_type,
         "remote": remote,
