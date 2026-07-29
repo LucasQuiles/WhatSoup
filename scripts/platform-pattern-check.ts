@@ -52,6 +52,8 @@ export const ENFORCED_RULE_IDS = [
   'portability.platform-paths-guarded',
   'portability.systemctl-guarded',
   'portability.gnu-bsd-shell-flags',
+  'portability.arch-blind-path-fallback',
+  'portability.hardcoded-signal-name',
 ] as const;
 
 // ---------------------------------------------------------------------------

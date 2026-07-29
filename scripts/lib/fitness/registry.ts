@@ -685,4 +685,60 @@ export const fitnessRules = [
     severity: 'warn',
     source: ['retrospective:execfile-sync-no-timeout', 'retrospective:process-lock-hang'],
   },
+  {
+    id: 'portability.arch-blind-binary-resolution',
+    title: 'Binary resolution must consider process.arch on heterogeneous architectures',
+    category: 'portability',
+    rationale:
+      'Custom resolveBinaryPath() in local-audio.ts:18-27 is arch-aware (searches /opt/homebrew/bin first) but the bare-name provider binary resolution in session.ts:345-361 (returning bare names like "claude", "codex") and execFile calls in video.ts:43,112,129 (ffprobe/ffmpeg) and tree-liveness.ts:54 (ps) have zero arch awareness. process.arch is already recorded in health telemetry (health.ts:398, connection-snapshot.ts:63) but never consumed for adaptive resolution. On arm64 macOS, PATH-dependent resolution misses brew-installed binaries in stripped environments. New binary resolution code SHOULD use or extend resolveBinaryPath() to include arch-aware discovery.',
+    detect: 'semantic',
+    rings: ['guard', 'ci'],
+    severity: 'warn',
+    source: ['issue:2642'],
+  },
+  {
+    id: 'portability.arch-blind-path-fallback',
+    title: 'PATH fallbacks must include arch-aware Homebrew prefix',
+    category: 'portability',
+    rationale:
+      'Hardcoded PATH fallbacks in fleet/platform.ts:104 and boundary-run-cli/shared.ts:233 omit /opt/homebrew/bin — the standard Homebrew prefix on ARM macOS. In stripped-environment runs (launchd, systemd --user with minimal env), the fallback is used directly and brew-installed binaries (ffmpeg, whisper-cli, secret-tool) become invisible on Apple Silicon. All PATH fallbacks must include /opt/homebrew/bin when the default contains /usr/local/bin.',
+    detect: 'mechanical',
+    rings: ['guard', 'ci'],
+    severity: 'warn',
+    params: {
+      globs: ['src', 'scripts', 'deploy'],
+      extensions: ['.ts', '.mjs', '.js', '.sh'],
+      patterns: [
+        "process.env.PATH ?? '/usr/local/bin:/usr/bin:/bin'",
+      ],
+      allowlistPaths: ['scripts/lib/fitness/'],
+    },
+    source: ['issue:2642'],
+  },
+  {
+    id: 'portability.hardcoded-signal-name',
+    title: 'Signal names must use shared constants, not string literals',
+    category: 'portability',
+    rationale:
+      '29 signal string literals (SIGTERM, SIGKILL, SIGINT) are hardcoded across src/ and scripts/ in .kill(), process.on(), and spawn killSignal options. POSIX signal names have no equivalent on Windows (SIGKILL is absent, SIGTERM must be used instead), and the SIGTERM→SIGKILL escalation pattern appears identically at 7 call sites. A shared constants module (src/lib/signals.ts) provides a single-point abstraction for cross-platform signal mapping, making Windows adaptation a one-file change. ESLint rule should flag kill(\'SIG*\'), process.on(\'SIG*\'), and killSignal: \'SIG*\' string literals.',
+    detect: 'mechanical',
+    rings: ['eslint', 'guard', 'ci'],
+    severity: 'warn',
+    params: {
+      globs: ['src', 'scripts', 'deploy'],
+      extensions: ['.ts', '.mjs', '.js'],
+      patterns: [
+        ".kill('SIGTERM')",
+        ".kill('SIGKILL')",
+        "process.on('SIGINT'",
+        "process.on('SIGTERM'",
+        "killSignal: 'SIGKILL'",
+        "killSignal: 'SIGTERM'",
+        'killSignal: "SIGKILL"',
+        'killSignal: "SIGTERM"',
+      ],
+      allowlistPaths: ['tests/', 'node_modules/', 'scripts/lib/fitness/'],
+    },
+    source: ['issue:2643'],
+  },
 ] satisfies FitnessRule[];
