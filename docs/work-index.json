@@ -1,7 +1,7 @@
 {
-  "generated_at": "2026-07-28T23:43:57Z",
+  "generated_at": "2026-07-29T11:10:18Z",
   "repo": "WhatSoup",
-  "git_head": "a843cbd9890e308f9a907b618149c66bde2197e6",
+  "git_head": "7a426529b49359df6c1f64802af4e06a2c5cfaf2",
   "git_head_note": "git_head is captured at scan time, so it reflects the branch HEAD at the moment `build-work-index` ran — NOT the commit that carries this index. Expect divergence in two cases: (1) intra-branch, when the regenerated index is committed after further content changes are staged; (2) post-squash-merge, when the landed main SHA differs from the pre-merge branch SHA. The row data and inconsistency detection remain accurate regardless of git_head freshness.",
   "total": 90,
   "schema_version": 5,
@@ -1059,7 +1059,7 @@
       "status_source": "body-marker",
       "canonical_parent": "docs/superpowers/specs/provider-event-lifecycle",
       "supersedes_hint": null,
-      "last_modified": "2026-07-28",
+      "last_modified": "2026-07-27",
       "size_bytes": 81744
     },
     {
@@ -1071,7 +1071,7 @@
       "status_source": "body-marker",
       "canonical_parent": "docs/superpowers/specs/provider-event-lifecycle",
       "supersedes_hint": null,
-      "last_modified": "2026-07-28",
+      "last_modified": "2026-07-27",
       "size_bytes": 106801
     },
     {
@@ -1083,7 +1083,7 @@
       "status_source": "body-marker",
       "canonical_parent": "docs/superpowers/specs/provider-event-lifecycle",
       "supersedes_hint": null,
-      "last_modified": "2026-07-28",
+      "last_modified": "2026-07-27",
       "size_bytes": 60892
     }
   ],

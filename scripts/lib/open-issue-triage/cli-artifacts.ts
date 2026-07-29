@@ -654,14 +654,15 @@ export function writeExclusive(
   });
 }
 
-export function writeGeneratedView(
+export function writeConfinedGeneratedFile(
   rootInput: string,
+  relativePath: string,
   text: string,
   runtime: CliRuntime,
 ): void {
   const root = realpathSync(rootInput);
   withArtifactLock(root, (assertLock) => {
-    const parts = safeRelativePath(GENERATED_VIEW, "generated view");
+    const parts = safeRelativePath(relativePath, "generated file");
     const { parent, ancestors } = captureAncestorIdentities(
       root,
       parts.slice(0, -1),
@@ -669,7 +670,7 @@ export function writeGeneratedView(
     const path = { absolute: join(parent, parts.at(-1)!), parent, ancestors };
     const hookContext = {
       root,
-      output: GENERATED_VIEW,
+      output: relativePath,
       absolute: path.absolute,
     };
     let exists = false;
@@ -732,6 +733,14 @@ export function writeGeneratedView(
     fsyncDirectory(parent);
     verifyFinalArtifact(root, path, descriptorIdentity!);
   });
+}
+
+export function writeGeneratedView(
+  rootInput: string,
+  text: string,
+  runtime: CliRuntime,
+): void {
+  writeConfinedGeneratedFile(rootInput, GENERATED_VIEW, text, runtime);
 }
 
 export function readUnknownJson(path: string, label: string): unknown {
