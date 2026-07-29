@@ -158,3 +158,72 @@ Ship behind validated `advanced.proactiveAssistance.enabled=false`, `mode=record
 Rollout stages are offline fixtures, record-only evaluation, owner-internal suggestion-only trial, and narrowly allowlisted user trial. Each offer class advances separately after privacy review, detector controls, opt-out proof, and an explicit owner decision.
 
 Rollback flips the kill switch, stops new evaluations, expires pending suggestions, and leaves accepted-but-unexecuted records inert. It must not delete user opt-outs or reinterpret prior acceptance as authorization for future automation.
+
+## Current-main reconciliation — 2026-07-29
+
+This amendment supersedes current-system instructions pinned to `c9759467d`.
+Current main is `5398982e610bb948d671181a04856590c9f3f9e5`.
+
+**Readiness:** `BLOCKED PRE-CODE`; experimental and hard-blocked on DPR-04 and
+DPR-05 contracts.
+
+### Not greenfield
+
+Current owners already exist for:
+
+- schedules and schedule admission;
+- substrate triggers;
+- durable background work, results, and delivery;
+- question-approval rendering/routes;
+- configuration validation;
+- realtime/operator presentation.
+
+The missing feature is only candidate → eligible offer → explicit consent
+policy and experiment measurement.
+
+### Consent is not execution authority
+
+Use separate states:
+
+`observed_candidate` → `offer_pending` → `accepted_pending_authorization` →
+`action_admitted` → `acted`/`failed`, with independent
+`declined`/`expired`/`revoked`.
+
+Acceptance supplies user consent for one exact action/scope/version. DPR-05 and
+the canonical scheduler/trigger/background owner separately verify authority
+and admit execution. Acceptance alone must never call a tool, schedule, watch,
+memory operation, host action, or platform mutation.
+
+### Forbidden ownership
+
+No proactive scheduler, trigger engine, work queue, silent learning,
+cross-domain approval Boolean, raw transcript/profile store, or automatic rule
+derived from a prior acceptance.
+
+### Owner decisions
+
+- first reversible, low-risk action;
+- detector card, threshold, successful twins, and falsifiers;
+- consent state machine/domain;
+- offer/action identity, actor, scope, normalized digest, and single-use rule;
+- TTL, cooldown, frequency cap, retention, opt-out, and revocation;
+- experiment cohort, success/harm/stop metrics;
+- existing owner that executes the selected action.
+
+### First implementation-plan gate
+
+First RED binding:
+
+- File: `tests/core/proactive-assistance-policy.test.ts`
+- Test: `never admits an accepted offer without an independent authorization decision`
+- Command: `npm test -- tests/core/proactive-assistance-policy.test.ts -t "never admits an accepted offer without an independent authorization decision" --pool=forks`
+- Expected RED reason: no approved offer/consent state machine or DPR-05
+  authorization adapter exists.
+
+Start with offline fixtures, then shadow candidate metrics, then offer-only
+canary. Bind RED tests to approval, scheduler, substrate, and background-work
+suites. Prove no action without consent plus independent authorization/admission,
+no repeated offer after decline, no stale acceptance, no raw content, safe
+restart, canonical work failure, delivery uncertainty, and feature-off rollback.
+
+The PR must remain draft and use non-closing references.
