@@ -159,7 +159,7 @@ Then cherry-pick the design commit
 plan. Resolve only documentation index/audit conflicts. Do not absorb unrelated
 source changes.
 
-- [ ] **Step 6: Prove the combined base**
+- [x] **Step 6: Prove the combined base**
 
 ```bash
 git range-diff ec1cd2ae5ed766ea78850936b6b7a7360f02bba1..7de1b4438defb6ee8b6ca89fbe905b7cfc655428 "$COMBINED_DEPENDENCY_HEAD"..HEAD
@@ -168,6 +168,17 @@ git diff --name-only "$COMBINED_DEPENDENCY_HEAD"...HEAD
 ```
 
 Expected: only the approved design/plan documentation differs before implementation.
+
+Observed on the combined base:
+
+- `git range-diff` accounts for both source documentation commits against
+  their current-main regenerated audit and work-index forms;
+- `git cherry -v` reports only the two carried documentation commits plus the
+  live ownership/base reconciliation commit;
+- the branch diff contains only the design, plan, publication audit, and two
+  generated work-index files;
+- 1,400 Python tests and 286 focused TypeScript tests passed; and
+- the runtime-manifest guard and deploy verifier passed.
 
 ### Task 2: Lock the caller inventory and write the RED shared fault matrix
 
