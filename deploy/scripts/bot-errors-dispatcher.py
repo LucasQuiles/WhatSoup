@@ -1791,7 +1791,6 @@ def append_still_open_context(
     evidence = str(event.get("evidence") or "").strip()
     event["evidence"] = "\n".join(part for part in [evidence, *additions] if part)
     if awaiting_physical and digest:
-        event["severity"] = "info"
         if "still-open digest" not in str(event.get("summary") or "").lower():
             event["summary"] = f"Still-open digest, awaiting physical action: {event.get('summary') or key}"
     elif awaiting_physical:
@@ -1803,7 +1802,6 @@ def append_still_open_context(
         if "escalated" not in str(event.get("summary") or "").lower():
             event["summary"] = f"ESCALATED still open: {event.get('summary') or key}"
     elif digest:
-        event["severity"] = "info"
         if "still-open digest" not in str(event.get("summary") or "").lower():
             event["summary"] = f"Still-open digest: {event.get('summary') or key}"
     elif "still open" not in str(event.get("summary") or "").lower():
@@ -4437,7 +4435,8 @@ def quarantine_invalid_envelope(path: Path, quarantine_dir: Path, code: str) -> 
     """Quarantine an invalid envelope without treating it as an alert to send."""
 
     ensure_private_dir(quarantine_dir)
-    dest = quarantine_dir / f"{path.name}.{int(time.time())}.{os.getpid()}.invalid-envelope"
+    reason = safe_segment(code)
+    dest = quarantine_dir / f"{path.name}.{int(time.time())}.{os.getpid()}.{reason}.invalid-envelope"
     try:
         shutil.move(str(path), str(dest))
     except FileNotFoundError:
@@ -4628,6 +4627,19 @@ def recover_writefail_breadcrumbs(paths: dict[str, Path], limit: int = 25) -> in
                 event = crumb.get("event")
                 if not isinstance(event, dict):
                     raise ValueError("writefail breadcrumb missing event object")
+                try:
+                    event = normalize_event(event)
+                except EnvelopeError as exc:
+                    quarantined = move_writefail(
+                        path,
+                        paths["writefail_quarantine"],
+                        f"invalid-envelope-{safe_segment(exc.code)}",
+                    )
+                    append_dispatch_log(paths, {
+                        "type": "writefail_invalid_envelope",
+                        "reason": exc.code,
+                    })
+                    continue
                 event_id = str(event.get("id") or "")
                 if event_already_known(event, paths, known_index):
                     duplicate = move_writefail(path, paths["writefail_recovered"], "duplicate")

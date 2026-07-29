@@ -37,10 +37,11 @@
         "safe_open_entry",
         "safe_read_json",
         "safe_is_regular_entry",
-        "quarantine_untrusted_entry"
+        "quarantine_untrusted_entry",
+        "writefail_invalid_envelope"
       ],
       "path": "deploy/scripts/bot-errors-dispatcher.py",
-      "sha256": "e65e9cd33afccaab420fdd1a867cc101ee681922027eb67cfc1647a94910d5da"
+      "sha256": "76cfabba55d3043d0b0e886296dd949ad9f62cc0b50007f92a3703d587e21299"
     },
     {
       "mustContain": [
@@ -180,10 +181,11 @@
       "mustContain": [
         "O_NOFOLLOW",
         "refusing to use private directory through symlink",
-        "outbox_write_failure"
+        "outbox_write_failure",
+        "new_event_fields"
       ],
       "path": "deploy/scripts/bot-errors-runner.py",
-      "sha256": "f189971ec512b39901c1dbbe2c14de7b1c0fa663008f33fb05d3fc794347b030"
+      "sha256": "cc937f0fe4eba5887250b7ed01575f9c0a9272c5b39eb7c75152bb1c344b156c"
     },
     {
       "mustContain": [
@@ -236,10 +238,11 @@
       "mustContain": [
         "host gate",
         "RECEIPT",
-        "daemon-reload"
+        "daemon-reload",
+        "bot_errors_envelope.py"
       ],
       "path": "deploy/scripts/install-bot-errors-release-proof.sh",
-      "sha256": "a4fc7886c4e24914935ef94a62d8e50329ef34e2fa9b175736638d0bc039e14e"
+      "sha256": "032b3b4d1eb001729315cf6d32614be9e0b5723a653e8f2b1140cf2731465224"
     },
     {
       "mustContain": [
@@ -259,13 +262,14 @@
     },
     {
       "path": "deploy/scripts/lib/bot_errors_envelope.py",
-      "sha256": "5b4dd81b2b2f39eab1eea0f6838ab60f65ec9ebab6b223c0626d6974a0555781",
+      "sha256": "79be73a209d502108ff78edb2fa248b9010bb04d911309b375760fa980d34760",
       "mustContain": [
         "SCHEMA_VERSION = 2",
         "class EnvelopeError",
         "def classify_event",
         "def normalize_event",
-        "def new_event_fields"
+        "def new_event_fields",
+        "unexpected_legacy_event_kind"
       ]
     },
     {
@@ -296,10 +300,11 @@
         "diagnostic_best_effort",
         "controller_cycle",
         "metadata_only_controller_details",
-        "write_controller_log"
+        "write_controller_log",
+        "invalid_kind_severity"
       ],
       "path": "deploy/scripts/lib/controller_log.py",
-      "sha256": "a944c375c190ec25686fcc8ece7431803818d2ee474deaa62d5afd1e920958be"
+      "sha256": "484d209fa6e38ef74a75fea5f8f10a47bbd1f43d240702668115c2c96c9ff92a"
     },
     {
       "mustContain": [
@@ -342,10 +347,11 @@
         "WHATSAPP_SERVICE_UNIT",
         "constants.O_NOFOLLOW",
         "redactOutboxValue(event)",
-        "recordBotErrorsWritefail"
+        "recordBotErrorsWritefail",
+        "newBotErrorsEnvelope"
       ],
       "path": "src/lib/bot-errors-outbox.ts",
-      "sha256": "2a37ff503186aa25036a0bbed212af498450ee7499c51d7a621f4547bbc741cd"
+      "sha256": "93f9dcbd93832fa615b8637521978ea513cf4ecd85250f27c2fcbc55228b7781"
     },
     {
       "mustContain": [

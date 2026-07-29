@@ -10,6 +10,7 @@ SCHEMA_VERSION = 2
 LEGACY_SCHEMA_VERSION = 1
 EVENT_KINDS = ("incident_alert", "incident_recovery", "observation")
 EVENT_TYPES = ("alert", "clear", "observation")
+LEGACY_EVENT_TYPES = ("alert", "clear")
 SEVERITIES = ("critical", "error", "warning", "info")
 INCIDENT_SEVERITIES = frozenset(("critical", "error", "warning"))
 
@@ -52,7 +53,7 @@ def _schema_version(event: Mapping[str, Any]) -> int:
 
 
 def _classify_legacy_pair(event_type: str, severity: str) -> tuple[str, str, str]:
-    if event_type not in EVENT_TYPES:
+    if event_type not in LEGACY_EVENT_TYPES:
         raise EnvelopeError("unknown_event_type")
     if severity not in SEVERITIES:
         raise EnvelopeError("unknown_severity")
@@ -60,6 +61,18 @@ def _classify_legacy_pair(event_type: str, severity: str) -> tuple[str, str, str
         return "incident_alert", "alert", severity
     if event_type == "alert" and severity == "info":
         return "observation", "observation", "info"
+    if event_type == "clear" and severity == "info":
+        return "incident_recovery", "clear", "info"
+    raise EnvelopeError("invalid_kind_severity")
+
+
+def _classify_v2_pair(event_type: str, severity: str) -> tuple[str, str, str]:
+    if event_type not in EVENT_TYPES:
+        raise EnvelopeError("unknown_event_type")
+    if severity not in SEVERITIES:
+        raise EnvelopeError("unknown_severity")
+    if event_type == "alert" and severity in INCIDENT_SEVERITIES:
+        return "incident_alert", "alert", severity
     if event_type == "clear" and severity == "info":
         return "incident_recovery", "clear", "info"
     if event_type == "observation" and severity == "info":
@@ -73,19 +86,10 @@ def _classify_v2(event: Mapping[str, Any]) -> EventClassification:
         raise EnvelopeError("unknown_event_kind")
     event_type = _required_string(event, "eventType", "missing_event_type")
     severity = _required_string(event, "severity", "missing_severity")
-    if event_type not in EVENT_TYPES:
-        raise EnvelopeError("unknown_event_type")
-    if severity not in SEVERITIES:
-        raise EnvelopeError("unknown_severity")
-
-    expected = {
-        "incident_alert": ("alert", INCIDENT_SEVERITIES),
-        "incident_recovery": ("clear", frozenset(("info",))),
-        "observation": ("observation", frozenset(("info",))),
-    }[kind]
-    if event_type != expected[0] or severity not in expected[1]:
+    expected_kind, canonical_event_type, canonical_severity = _classify_v2_pair(event_type, severity)
+    if kind != expected_kind:
         raise EnvelopeError("invalid_kind_severity")
-    return EventClassification(kind, event_type, severity, SCHEMA_VERSION, False)
+    return EventClassification(kind, canonical_event_type, canonical_severity, SCHEMA_VERSION, False)
 
 
 def classify_event(event: Mapping[str, Any]) -> EventClassification:
@@ -95,6 +99,8 @@ def classify_event(event: Mapping[str, Any]) -> EventClassification:
     if version == SCHEMA_VERSION:
         return _classify_v2(event)
 
+    if "eventKind" in event:
+        raise EnvelopeError("unexpected_legacy_event_kind")
     event_type = _required_string(event, "eventType", "missing_event_type")
     severity = _required_string(event, "severity", "missing_severity")
     kind, canonical_event_type, canonical_severity = _classify_legacy_pair(event_type, severity)
@@ -120,9 +126,7 @@ def normalize_event(event: Mapping[str, Any]) -> dict[str, Any]:
 def new_event_fields(event_type: str, severity: str) -> dict[str, Any]:
     """Build strict schema-v2 envelope fields for a newly emitted event."""
 
-    pair = _classify_legacy_pair(event_type.strip().lower(), severity.strip().lower())
-    if event_type.strip().lower() == "alert" and severity.strip().lower() == "info":
-        raise EnvelopeError("invalid_kind_severity")
+    pair = _classify_v2_pair(event_type.strip().lower(), severity.strip().lower())
     kind, canonical_event_type, canonical_severity = pair
     return {
         "schemaVersion": SCHEMA_VERSION,

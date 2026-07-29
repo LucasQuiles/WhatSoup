@@ -172,6 +172,8 @@ describe('bot-errors outbox private writes', () => {
     }, '11111111-1111-4111-8111-111111111112', '2026-06-15T20:30:00.000Z');
 
     expect(event).toMatchObject({
+      schemaVersion: 2,
+      eventKind: 'incident_recovery',
       id: '11111111-1111-4111-8111-111111111112',
       eventType: 'clear',
       severity: 'info',

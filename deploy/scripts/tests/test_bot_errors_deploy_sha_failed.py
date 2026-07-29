@@ -60,6 +60,8 @@ def test_sha_tool_failure_emits_sha_error_not_drift(tmp_path: Path):
         "deploy/scripts/lib/bot_errors_redaction.py",
         "deploy/scripts/lib/bot_errors_daily_health.py",
         "deploy/scripts/lib/bot_errors_roster.py",
+        "deploy/scripts/lib/controller_log.py",
+        "deploy/scripts/lib/bot_errors_envelope.py",
     ]
 
     # Copy real files from repo root so the structure is valid,
@@ -117,6 +119,8 @@ def test_sha_tool_failure_sets_nonzero_exit(tmp_path: Path):
         "deploy/scripts/lib/bot_errors_redaction.py",
         "deploy/scripts/lib/bot_errors_daily_health.py",
         "deploy/scripts/lib/bot_errors_roster.py",
+        "deploy/scripts/lib/controller_log.py",
+        "deploy/scripts/lib/bot_errors_envelope.py",
     ]
     for rel in files_in_deployer:
         src = _REPO_ROOT / rel
@@ -155,6 +159,6 @@ def test_matching_files_still_emit_match_not_sha_error(tmp_path: Path):
     )
     # Every managed file should be MATCH
     match_lines = [l for l in stdout.splitlines() if "MATCH" in l]
-    assert len(match_lines) == 14, (
-        f"Expected 14 MATCH lines for clean repo root, got {len(match_lines)}:\n{stdout}"
+    assert len(match_lines) == 15, (
+        f"Expected 15 MATCH lines for clean repo root, got {len(match_lines)}:\n{stdout}"
     )
