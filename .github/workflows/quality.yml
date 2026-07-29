@@ -201,8 +201,18 @@ jobs:
       # It must be a NAMED CI STEP, not local-only: a guard wired solely into
       # verify:push:branch is bypassed by any server-side merge, which is exactly what
       # tests/scripts/pre-push-guard.test.ts caught when this shipped push-gate-only.
+      #
+      # Both revisions are pinned to EXACT OIDs rather than inferred. Unpinned, the guard
+      # weighs "whatever is checked out" against a merge base it recomputes itself, so its
+      # verdict names no commit and cannot be reproduced once the checkout moves — and on a
+      # merge_group both sides can resolve to the same OID, which weighs equal and passes
+      # having proven nothing. The guard rejects that pair (and a non-ancestor base) as
+      # INCONCLUSIVE instead of green. A branch-creation `before` is the all-zero OID, which
+      # the guard treats as "no explicit base" and falls back to inference.
       - name: Baseline growth guard
-        run: npm run guard:baseline-growth
+        env:
+          BASELINE_BASE_OID: ${{ github.event_name == 'push' && github.event.before || github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
+        run: npm run guard:baseline-growth -- --base "$BASELINE_BASE_OID" --candidate "$GITHUB_SHA"
 
       - name: Catch ratchet drift
         run: npm run guard:catch-ratchet

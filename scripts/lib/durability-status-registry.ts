@@ -412,9 +412,10 @@ export const NON_STATUS_JUSTIFICATIONS: Record<string, string> = {
  * `src/core/database.ts`) — invisible to `migratedSchemaSnapshot()`, which
  * only replays that migration registry. Verified directly against this
  * worktree: each module below is read by the guard's discovery-scan
- * anti-dodge extension (check 1b), which also confirms none of their DDL
- * text matches the status-shaped-column regex today (so `justification` is
- * unset on all six; it becomes required the day one does).
+ * anti-dodge extension (check 1b), which requires a truthful `justification`
+ * on any entry whose DDL text matches the status-shaped-column regex — the
+ * four incident-plane tables (events/incidents/meta/transitions) carry one
+ * for exactly that reason; the remaining entries do not match today.
  */
 export const SELF_PROVISIONED: SelfProvisionedEntry[] = [
   {
@@ -438,6 +439,27 @@ export const SELF_PROVISIONED: SelfProvisionedEntry[] = [
     reason: 'per-sender command-surface preference store; self-managed schema (ensureCommandSurfacePrefsSchema), generalizes the chat-preference-db.ts convention.',
   },
   {
+    table: 'events',
+    module: 'src/fleet/incidents/schema.ts',
+    reason: 'incident control plane event ledger; dedicated fleet-level SQLite database with its own meta.schema_version (openIncidentDb), not the instance message DB migration ledger.',
+    justification:
+      'disposition is an immutable receipt-taxonomy label CHECK-constrained in DDL, written exactly once inside the accept transaction and never updated afterward; condition lifecycle state lives in the incidents projection, not here.',
+  },
+  {
+    table: 'incidents',
+    module: 'src/fleet/incidents/schema.ts',
+    reason: 'incident control plane episode projection; same dedicated fleet incident database as the events ledger.',
+    justification:
+      'condition_state IS the lifecycle status by design: its vocabulary is CHECK-constrained in DDL and every change is recorded as an actor-typed append-only row in transitions within the same transaction, which is the durability-evidence pattern #1789 requires; the store lives outside the instance message DB this registry snapshots.',
+  },
+  {
+    table: 'meta',
+    module: 'src/fleet/incidents/schema.ts',
+    reason: 'incident control plane schema-version marker inside the dedicated fleet incident database.',
+    justification:
+      'two-column key/value schema-version marker; matches the status regex only via incidental DDL text in the same module, carries no lifecycle semantics.',
+  },
+  {
     table: 'pending_poll_decisions',
     module: 'src/fleet/routes/approvals.ts',
     reason: 'offline durable fallback queue for poll decisions when the fleet proxy returns 502 (v1.1 design D2(b)); created lazily inline at the write site, not a numbered global migration.',
@@ -446,6 +468,13 @@ export const SELF_PROVISIONED: SelfProvisionedEntry[] = [
     table: 'standby_notice',
     module: 'src/runtimes/agent/standby-notice.ts',
     reason: 'one-pending-notice-per-conversation stash for standby-provider handoff; self-managed schema (ensureStandbyNoticeSchema), not a numbered global migration.',
+  },
+  {
+    table: 'transitions',
+    module: 'src/fleet/incidents/schema.ts',
+    reason: 'incident control plane append-only lifecycle transitions; same dedicated fleet incident database as the events ledger.',
+    justification:
+      'from_state/to_state are immutable historical audit values on append-only rows, not a mutable status column; the current state they describe is projected in incidents.condition_state.',
   },
 ];
 

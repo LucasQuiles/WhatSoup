@@ -411,6 +411,7 @@ const requiredFiles: Record<string, string> = {
     'deploy/scripts/bot-errors-health-check.py',
     'deploy/scripts/bot-errors-emit.py',
     'src/lib/bot-errors-outbox.ts',
+    'src/lib/fault-taxonomy-registry.json',
   ].join('\n'),
 };
 

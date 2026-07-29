@@ -152,6 +152,11 @@ const SCOPE_MAP: Record<string, ScopeEntry> = {
   'publication:all': { class: 'skip-alias', reason: 'alias -> guard:publication (all mode floored + tested this session)' },
   'publication:release': { class: 'skip-alias', reason: 'alias -> guard:publication (release mode floored + tested in publication-guard.test.ts)' },
   'publication:staged': { class: 'skip-alias', reason: 'alias -> guard:publication (staged is diff-scoped; empty index legitimately clean)' },
+  'publication:write': {
+    class: 'skip-alias',
+    reason:
+      'alias -> guard:publication --write. NOT a validator: it rewrites docs/publication-audit.md and returns before every validation branch, so the empty-scope vacuity floor does not apply. Its output is proven valid by publication-guard.test.ts, which asserts --all passes on a freshly written document',
+  },
   'repo:release-hygiene': { class: 'skip-alias', reason: 'alias -> guard:repo --release-hygiene (whole-tree mode; floored this session, probed in MODE_PROBES)' },
   'repo:commit-msg': { class: 'skip-alias', reason: 'alias -> guard:repo (commit-msg mode; message-scoped)' },
   'repo:commit-authors': { class: 'skip-alias', reason: 'alias -> guard:repo (commit-range-scoped)' },

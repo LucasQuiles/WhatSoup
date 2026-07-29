@@ -1636,6 +1636,17 @@ After a successful auto-compact, the runtime applies a 5-minute success cooldown
 
 The next real user turn after a successful compact is measured separately. If that turn's own input exceeds `autoCompactInputTokens`, `runtime.agent.autoCompactNextTurnOverThreshold` increments. If it happens inside the rapid re-arm window, it also counts as the rapid re-arm for that compact cycle. If it happens later, it remains telemetry only; delayed eligibility is not the spiral condition.
 
+The three counters `autoCompactIneffective`,
+`autoCompactConsecutiveRapidRearmsMax`, and
+`autoCompactNextTurnOverThreshold` are process-lifetime diagnostics. Positive
+values do not by themselves mean the runtime is currently degraded. Current
+health comes from `autoCompactState`, `autoCompactActiveBackoffScopes`, and
+`autoCompactWorstCurrentBackoffTier`. An active rapid-rearm backoff reports
+`state=backoff` and degrades health; expiry, scope cleanup, or shutdown returns
+the aggregate state to `idle` without erasing the historical counters. The
+projection contains only aggregate counts and a bounded tier, never scope
+identities.
+
 An auto-compact that has not completed after 4 minutes is logged as `auto compact timed out`,
 enters a 5-minute retry backoff, and stops blocking the next user dispatch. The runtime keeps the
 timed-out compact's FIFO classification slot: if its result arrives late, that result is still
@@ -1655,14 +1666,20 @@ grep -E "auto compact triggered|auto compact timed out" /var/log/whatsoup/<insta
 # Check bounded-spiral detections
 grep -E "auto compact rapid re-arm detected|auto compact next turn input exceeded threshold" /var/log/whatsoup/<instance>.log
 
-# Check health counters
-curl -s http://127.0.0.1:<port>/health | python3 -c "import json,sys; a=json.load(sys.stdin)['runtime']['agent']; print(a['autoCompactIneffective'], a['autoCompactConsecutiveRapidRearmsMax'], a['autoCompactNextTurnOverThreshold'])"
+# Check current state followed by lifetime counters
+curl -s http://127.0.0.1:<port>/health | python3 -c "import json,sys; a=json.load(sys.stdin)['runtime']['agent']; print(a['autoCompactState'], a['autoCompactActiveBackoffScopes'], a['autoCompactWorstCurrentBackoffTier'], a['autoCompactIneffective'], a['autoCompactConsecutiveRapidRearmsMax'], a['autoCompactNextTurnOverThreshold'])"
 
 # Verify current threshold
 grep "autoCompactInputTokens" instances/<name>/instance.json
 ```
 
-Canary a compact change on one host first. During the canary window, the pass condition is that `auto compact triggered` entries for a hot scope occur no more often than the active cooldown tier and normal replies continue between compacts. A fail signal is repeated rapid re-arm logs with `autoCompactConsecutiveRapidRearmsMax` climbing while message latency remains elevated.
+Canary a compact change on one host first. During the canary window, the pass
+condition is that `auto compact triggered` entries for a hot scope occur no more
+often than the active cooldown tier and normal replies continue between
+compacts. A current fail signal is `autoCompactState=backoff` with a positive
+active-scope count while latency remains elevated. A historical maximum that is
+unchanged after state returns to `idle` is diagnostic evidence, not a standing
+failure.
 
 ---
 

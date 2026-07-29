@@ -88,6 +88,13 @@ interface TrackedEntry {
  * typing-start-guard has since been wired).
  */
 const TRACKED_UNREACHABLE: readonly TrackedEntry[] = [
+  // Incident control plane Plan 1 (store core) lands deliberately unwired; the
+  // Plan-2 ingestion surface (POST /api/signals) is the production importer.
+  // Spec: docs/superpowers/specs/2026-07-28-incident-control-plane-design.md §7.
+  { path: 'src/fleet/incidents/db.ts', issue: '#2468', reason: 'incident store core; wired by the Plan-2 ingestion surface' },
+  { path: 'src/fleet/incidents/envelope.ts', issue: '#2468', reason: 'incident store core; wired by the Plan-2 ingestion surface' },
+  { path: 'src/fleet/incidents/schema.ts', issue: '#2468', reason: 'incident store core; wired by the Plan-2 ingestion surface' },
+  { path: 'src/fleet/incidents/store.ts', issue: '#2468', reason: 'incident store core; wired by the Plan-2 ingestion surface' },
   // 24h-window primitives (#1871 inventory): landed test-only-wired, pending
   // wiring or removal per each owning issue. Wiring is out of scope for #1871.
   { path: 'src/core/retry-runner.ts', issue: '#1817', reason: 'test-only-wired primitive; no runtime importer' },
@@ -132,6 +139,11 @@ const TRACKED_UNREACHABLE: readonly TrackedEntry[] = [
   // imessage adapter/port/types graduated out of TRACKED_UNREACHABLE: the
   // factory now constructs the imsg/bluebubbles ports (this branch), so all
   // three are reachable from a production root.
+  // Fleet response-error projection (#2517): the closed schema, classifier,
+  // and projection entry point land first so the surface can be reviewed in
+  // isolation. Route migration (the 31 errorMessage call sites in fleet
+  // routes) lands in a follow-up PR and graduates this entry.
+  { path: 'src/fleet/lib/response-error.ts', issue: '#2517', reason: 'closed schema/classifier surface; route migration lands in follow-up PR' },
 ];
 
 // ---------------------------------------------------------------------------

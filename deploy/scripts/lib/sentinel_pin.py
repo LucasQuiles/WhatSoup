@@ -24,10 +24,25 @@ class Pin:
     head_sha: Optional[str]
     files: dict[str, str]
     f10_sha: Optional[str]
+    manifest_digest: Optional[str] = None  # sha256 over canonical file table (#2478)
 
 
 def _is_lower_hex(value, length: int) -> bool:
     return isinstance(value, str) and len(value) == length and all(c in _HEX for c in value)
+
+
+def compute_manifest_digest(files: dict) -> str:
+    """Canonical sha256 over the sorted path→hash table.
+
+    This binds the **complete** manifest content (not just the core F10 hash)
+    to the approved revision, closing the trust gap where two different desired
+    runtime states can carry the same revision and same approved core hash
+    (#2478)."""
+    canonical = json.dumps(
+        [{"path": p, "sha256": h} for p, h in sorted(files.items())],
+        sort_keys=True, separators=(",", ":"),
+    )
+    return hashlib.sha256(canonical.encode()).hexdigest()
 
 
 def _load_json_object(path, label: str) -> dict:
@@ -73,7 +88,8 @@ def load_pin(manifest_path) -> Pin:
         if path in files:
             raise PinLoadError(f"pin manifest duplicate path: {path}")
         files[path] = _checked_sha256(entry.get("sha256"), f"pin manifest files[{i}].sha256")
-    return Pin(head_sha=head_sha, files=files, f10_sha=files.get(F10_PATH))
+    return Pin(head_sha=head_sha, files=files, f10_sha=files.get(F10_PATH),
+               manifest_digest=compute_manifest_digest(files))
 
 
 def _checked_head_sha(value, field: str) -> str:
@@ -103,10 +119,31 @@ def load_approved_heads(ledger_path) -> set:
     return {_checked_head_sha(value, "approved-F10 ledger approved_heads entry") for value in approved}
 
 
-def verify_pin_trust(pin: Pin, approved_f10: set, commit_exists, approved_heads: Optional[set] = None) -> tuple[bool, str]:
-    """A pin is trusted only if stamped, its commit is real, and its F10 is owner-approved.
+def load_approved_manifest_digests(ledger_path) -> set:
+    """Load owner-approved full-manifest digests (#2478).  An empty set (field
+    absent or empty list) means the trust check skips manifest binding —
+    backward-compatible with pre-hardening ledgers."""
+    data = _load_approval_ledger(ledger_path)
+    approved = data.get("approved_manifest_digests", [])
+    if not isinstance(approved, list):
+        raise PinLoadError("approved-F10 ledger approved_manifest_digests must be a list")
+    return {_checked_sha256(value, "approved-F10 ledger approved_manifest_digests entry") for value in approved}
+
+
+def verify_pin_trust(pin: Pin, approved_f10: set, commit_exists,
+                      approved_heads: Optional[set] = None,
+                      approved_manifest_digests: Optional[set] = None) -> tuple[bool, str]:
+    """A pin is trusted only if stamped, its commit is real, its F10 is owner-approved,
+    and — when the ledger carries full-manifest digests — the complete file table matches
+    an approved digest (#2478).
+
     commit_exists(sha)->bool is injected (e.g. git cat-file -e <sha>^{commit} on origin/main).
-    Non-git runtime trees may use deployer-stamped approved_heads as a fail-closed fallback."""
+    Non-git runtime trees may use deployer-stamped approved_heads as a fail-closed fallback.
+
+    approved_manifest_digests binds the **entire** manifest to the revision.  When this set
+    is non-empty, a pin whose file table does not match any approved digest is rejected even
+    if its revision and core hash are valid.  An empty/None set skips this check (backward
+    compatibility with pre-hardening ledgers)."""
     if not pin.head_sha:
         return False, "unstamped: expected_head_sha absent"
     if not _is_lower_hex(pin.head_sha, 40):
@@ -124,6 +161,11 @@ def verify_pin_trust(pin: Pin, approved_f10: set, commit_exists, approved_heads:
         return False, "invalid f10 sha"
     if pin.f10_sha not in approved_f10:
         return False, f"f10 {(pin.f10_sha or 'none')[:12]} not in approved ledger"
+    if approved_manifest_digests:
+        if pin.manifest_digest is None:
+            return False, "manifest digest absent — pre-hardening pin cannot be bound"
+        if pin.manifest_digest not in approved_manifest_digests:
+            return False, f"manifest digest {pin.manifest_digest[:12]} not in approved ledger"
     if exists:
         return True, "ok"
     return True, "ok: approved head ledger"

@@ -235,10 +235,12 @@ describe('file transport configuration', () => {
       await import('../src/logger');
 
       expect(transportFactory).not.toHaveBeenCalled();
-      expect(pinoFactory).toHaveBeenCalledWith({
-        level: 'info',
-        serializers: { err: stdErrSerializer, error: stdErrSerializer },
-      });
+      expect(pinoFactory).toHaveBeenCalledWith(
+        expect.objectContaining({
+          level: 'info',
+          serializers: { err: stdErrSerializer, error: stdErrSerializer },
+        }),
+      );
     },
   );
 
@@ -258,7 +260,7 @@ describe('file transport configuration', () => {
 
     expect(transportFactory).toHaveBeenCalledOnce();
     expect(pinoFactory).toHaveBeenCalledWith(
-      { level: 'info', serializers: { err: stdErrSerializer, error: stdErrSerializer } },
+      expect.objectContaining({ level: 'info', serializers: { err: stdErrSerializer, error: stdErrSerializer } }),
       transport,
     );
   });
@@ -289,7 +291,7 @@ describe('file transport configuration', () => {
     });
     const stdErrSerializer = (pinoFactory as unknown as { stdSerializers: { err: unknown } }).stdSerializers.err;
     expect(pinoFactory).toHaveBeenCalledWith(
-      { level: 'debug', serializers: { err: stdErrSerializer, error: stdErrSerializer } },
+      expect.objectContaining({ level: 'debug', serializers: { err: stdErrSerializer, error: stdErrSerializer } }),
       transport,
     );
     expect(loggerModule.default.level).toBe('debug');
@@ -306,12 +308,98 @@ describe('file transport configuration', () => {
 
     const stdErrSerializer = (pinoFactory as unknown as { stdSerializers: { err: unknown } }).stdSerializers.err;
     expect(transportFactory).toHaveBeenCalledOnce();
-    expect(pinoFactory).toHaveBeenCalledWith({
-      level: 'warn',
-      serializers: { err: stdErrSerializer, error: stdErrSerializer },
-    });
+    expect(pinoFactory).toHaveBeenCalledWith(
+      expect.objectContaining({
+        level: 'warn',
+        serializers: { err: stdErrSerializer, error: stdErrSerializer },
+      }),
+    );
     expect(logger.flush).not.toHaveBeenCalled();
     expect(loggerModule.default.level).toBe('warn');
+  });
+});
+
+/**
+ * WS-A06 (#2164/#2598) wiring coverage.
+ *
+ * The recursive pre-sink sanitizer is only a security control if it is actually
+ * installed as pino's `logMethod` hook. Every other assertion in this file uses
+ * `expect.objectContaining({ level, serializers })`, which by definition ignores
+ * unlisted keys — so deleting `hooks.logMethod` from src/logger.ts left the whole
+ * suite green while disabling redaction at every sink. src/lib/log-sanitizer.ts
+ * has thorough unit coverage of `sanitizeLogValue`, but that tests the FUNCTION,
+ * not the WIRING; nothing referenced `logMethod` anywhere under tests/.
+ *
+ * These assertions are behavioural rather than identity-based on purpose:
+ * `loadLogger` calls `vi.resetModules()`, so a statically imported
+ * `sanitizingLogHook` would be a different module instance than the one
+ * src/logger.ts closes over, and a `toBe` identity check would compare stale
+ * references. Invoking the installed hook and asserting the payload is redacted
+ * proves both that a hook is wired AND that the wired hook is the sanitizing one.
+ */
+describe('sanitizing log hook wiring (WS-A06)', () => {
+  /** Pull the `hooks.logMethod` pino was actually constructed with. */
+  const installedHook = (
+    pinoFactory: ReturnType<typeof vi.fn>,
+  ): ((this: unknown, args: unknown[], method: (...a: unknown[]) => void, level: number) => void) => {
+    const options = pinoFactory.mock.calls[0]?.[0] as
+      | { hooks?: { logMethod?: unknown } }
+      | undefined;
+    const hook = options?.hooks?.logMethod;
+    expect(typeof hook).toBe('function');
+    return hook as never;
+  };
+
+  it('installs a logMethod hook on the stdout-only construction path', async () => {
+    const { pinoFactory, transportFactory } = await importLoggerWithMockedPino({ logDir: undefined });
+
+    expect(transportFactory).not.toHaveBeenCalled();
+    expect(installedHook(pinoFactory)).toBeTypeOf('function');
+  });
+
+  it('installs a logMethod hook on the file-transport construction path', async () => {
+    const transport: MockTransport = { end: vi.fn(), on: vi.fn() };
+    const { pinoFactory, transportFactory } = await importLoggerWithMockedPino({ logDir: '/tmp/ws-a06-hook', transport });
+
+    expect(transportFactory).toHaveBeenCalledOnce();
+    expect(installedHook(pinoFactory)).toBeTypeOf('function');
+  });
+
+  it('the installed hook redacts sensitive keys before the payload reaches the sink', async () => {
+    const { pinoFactory } = await importLoggerWithMockedPino({ logDir: undefined });
+    const hook = installedHook(pinoFactory);
+
+    const sink = vi.fn();
+    hook.call(
+      undefined,
+      [{ apiKey: 'CANARY-apikey-must-not-survive', nested: { password: 'canary-pw' }, component: 'test' }],
+      sink,
+      30,
+    );
+
+    expect(sink).toHaveBeenCalledOnce();
+    const forwarded = sink.mock.calls[0]?.[0] as {
+      apiKey: unknown;
+      nested: { password: unknown };
+      component: unknown;
+    };
+    expect(forwarded.apiKey).toBe('[redacted]');
+    expect(forwarded.nested.password).toBe('[redacted]');
+    // Non-sensitive keys must survive, or the hook would be a blunt payload drop
+    // rather than a sanitizer.
+    expect(forwarded.component).toBe('test');
+    expect(JSON.stringify(forwarded)).not.toContain('CANARY-apikey-must-not-survive');
+    expect(JSON.stringify(forwarded)).not.toContain('canary-pw');
+  });
+
+  it('the installed hook forwards non-object first args untouched', async () => {
+    const { pinoFactory } = await importLoggerWithMockedPino({ logDir: undefined });
+    const hook = installedHook(pinoFactory);
+
+    const sink = vi.fn();
+    hook.call(undefined, ['plain message'], sink, 30);
+
+    expect(sink).toHaveBeenCalledExactlyOnceWith('plain message');
   });
 });
 
