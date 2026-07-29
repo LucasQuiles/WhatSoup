@@ -21,8 +21,8 @@ import { afterEach, describe, expect, it } from 'vitest';
 
 import {
   composeStartupNotification,
-  markStartupNotified,
   recordStartupBoot,
+  settleStartupNotification,
   startupNotifyPath,
 } from '../../src/core/startup-notify.ts';
 
@@ -92,7 +92,13 @@ describe('recordStartupBoot', () => {
       state: { v: 1, boots: [T0], lastNotifiedAt: null },
     });
     expect(readFileSync(p, 'utf8')).toBe(source);
-    expect(markStartupNotified(p, T0 + MIN)).toBe('journal_unreadable');
+    const settled = settleStartupNotification(p, T0 + MIN, utcHm, result.state);
+    expect(settled).toMatchObject({
+      status: 'journal_unreadable',
+      watermarkPersisted: false,
+      state: { v: 1, boots: [T0], lastNotifiedAt: null },
+      notification: { bootsCovered: 1 },
+    });
     expect(readFileSync(p, 'utf8')).toBe(source);
   });
 
@@ -152,7 +158,7 @@ describe('composeStartupNotification', () => {
   it('counts only boots after the last notification', () => {
     const p = statePath();
     recordStartupBoot(p, T0);
-    markStartupNotified(p, T0 + MIN);
+    settleStartupNotification(p, T0 + MIN, utcHm);
     const s = recordStartupBoot(p, T0 + 30 * MIN);
     const msg = composeStartupNotification(s.state, utcHm);
     expect(msg.bootsCovered).toBe(1);
@@ -160,17 +166,33 @@ describe('composeStartupNotification', () => {
   });
 });
 
-describe('markStartupNotified', () => {
-  it('persists lastNotifiedAt so later processes see covered boots', () => {
+describe('settleStartupNotification', () => {
+  it('selects every unnotified boot, persists the watermark, and returns the composed aggregate', () => {
     const p = statePath();
     recordStartupBoot(p, T0);
-    markStartupNotified(p, T0 + MIN);
+    recordStartupBoot(p, T0 + 15 * MIN);
+    const settled = settleStartupNotification(p, T0 + 16 * MIN, utcHm);
+
+    expect(settled).toMatchObject({
+      status: 'available',
+      watermarkPersisted: true,
+      notification: { bootsCovered: 2 },
+    });
+    expect(settled.notification?.text).toContain('2 restarts');
     const onDisk = JSON.parse(readFileSync(p, 'utf8'));
-    expect(onDisk.lastNotifiedAt).toBe(T0 + MIN);
+    expect(onDisk.lastNotifiedAt).toBe(T0 + 16 * MIN);
   });
 
-  it('fails open when the journal cannot be written', () => {
-    expect(() => markStartupNotified('/nonexistent-root/nope/j.json', T0)).not.toThrow();
+  it('returns no notification when all boots are already covered', () => {
+    const p = statePath();
+    recordStartupBoot(p, T0);
+    settleStartupNotification(p, T0 + MIN, utcHm);
+
+    expect(settleStartupNotification(p, T0 + 2 * MIN, utcHm)).toMatchObject({
+      status: 'available',
+      watermarkPersisted: true,
+      notification: null,
+    });
   });
 });
 

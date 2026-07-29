@@ -51,8 +51,8 @@
  * H. Memory consolidation disabled warning (lines 297-302)
  *    enableEnrichment true but pinecone NOT ready → log.warn
  *
- * I. Agent runtime: cwd is undefined (no resolveTilde) + pending popStartupMessage
- *    pending !== null → notifyTarget uses pending.chatJid / pending.text
+ * I. Agent runtime: cwd is undefined (no resolveTilde) + typed startup event
+ *    event !== null → controller receives the event and checks strict readiness
  *
  * J. historyMessages: all-noop batch (inserted=0 etc.) → silent (no log.info)
  *
@@ -153,7 +153,11 @@ async function importMainWithMocks(options: {
   dbCloseThrows?: boolean;
   importFromLegacyDbThrows?: boolean;
   seedAutoRespondGroupsReturn?: number;
-  pendingStartupMessage?: { chatJid: string; text: string } | null;
+  pendingStartupEvent?: {
+    kind: 'resume' | 'restart_loop_guard_alert' | 'expired_session_notice';
+    chatJid: string;
+    text: string;
+  } | null;
   persistIntroSentFlagThrows?: boolean;
   drainPendingOutboundRejectsOnStartup?: boolean;
   selfRestartMarker?: {
@@ -245,7 +249,7 @@ async function importMainWithMocks(options: {
     }));
   }
   const passiveRuntime = runtimeStub();
-  const agentInstances: Array<ReturnType<typeof runtimeStub> & { popStartupMessage: ReturnType<typeof vi.fn> }> = [];
+  const agentInstances: Array<ReturnType<typeof runtimeStub> & { popStartupNotificationEvent: ReturnType<typeof vi.fn> }> = [];
   const healthServer = { close: vi.fn() };
   const memoryScheduler = { start: vi.fn(), stop: vi.fn(async () => {}) };
   const mediaRetentionTimer = { start: vi.fn(), stop: vi.fn() };
@@ -317,18 +321,26 @@ async function importMainWithMocks(options: {
       state: { v: 1 as const, boots: [1], lastNotifiedAt: null },
     };
   });
-  const markStartupNotified = vi.fn(() => 'available');
-  const composeStartupNotification = vi.fn(() => ({ text: '*Agent back online* ✓', bootsCovered: 1 }));
+  const settleStartupNotification = vi.fn(() => ({
+    status: options.startupJournalStatus ?? 'available',
+    watermarkPersisted: options.startupJournalStatus !== 'journal_unreadable',
+    state: { v: 1 as const, boots: [1], lastNotifiedAt: 1 },
+    notification: { text: '*Agent back online* ✓', bootsCovered: 1 },
+  }));
   const startupNotifyPath = vi.fn((stateRoot: string) => `${stateRoot}/startup-notify.json`);
+  const createStartupNotificationJournalPort = vi.fn(() => ({
+    recordStartupBoot,
+    settleStartupNotification,
+  }));
 
   const Database = vi.fn(function () { return db; });
   const DurabilityEngine = vi.fn(function () { return durability; });
   const ChatRuntime = vi.fn(function () { return chatRuntime; });
   const PassiveRuntime = vi.fn(function () { return passiveRuntime; });
-  const pendingStartupMessage = options.pendingStartupMessage ?? null;
+  const pendingStartupEvent = options.pendingStartupEvent ?? null;
   const AgentRuntime = vi.fn(function (this: unknown) {
     const runtime = runtimeStub() as ReturnType<typeof runtimeStub> & {
-      popStartupMessage: ReturnType<typeof vi.fn>;
+      popStartupNotificationEvent: ReturnType<typeof vi.fn>;
     };
     runtime.start = options.runtimeStartThrows
       ? vi.fn(async () => {
@@ -336,10 +348,10 @@ async function importMainWithMocks(options: {
         throw new Error('runtime start failed');
       })
       : vi.fn(async () => { startupEvents.push('runtime.start'); });
-    // popStartupMessage is consumed synchronously inside main.ts start() before the
+    // The event is consumed synchronously inside main.ts start() before the
     // 3s notification timer fires, so the pending value must be seeded at construction
     // time (not patched on the instance afterwards).
-    runtime.popStartupMessage = vi.fn(() => pendingStartupMessage);
+    runtime.popStartupNotificationEvent = vi.fn(() => pendingStartupEvent);
     Object.assign(this as object, runtime);
     agentInstances.push(this as typeof runtime);
   });
@@ -477,9 +489,9 @@ async function importMainWithMocks(options: {
     flushLogger: vi.fn(async () => {}),
     shutdownExitCode: vi.fn(() => 0),
     recordStartupBoot,
-    markStartupNotified,
-    composeStartupNotification,
+    settleStartupNotification,
     startupNotifyPath,
+    createStartupNotificationJournalPort,
     startupEvents,
   };
 
@@ -491,10 +503,8 @@ async function importMainWithMocks(options: {
   }));
   vi.doMock('../src/core/database.ts', () => ({ Database, storeDecryptionFailure: mocks.storeDecryptionFailure }));
   vi.doMock('../src/core/startup-notify.ts', () => ({
-    recordStartupBoot: mocks.recordStartupBoot,
-    markStartupNotified: mocks.markStartupNotified,
-    composeStartupNotification: mocks.composeStartupNotification,
     startupNotifyPath: mocks.startupNotifyPath,
+    createStartupNotificationJournalPort: mocks.createStartupNotificationJournalPort,
   }));
   vi.doMock('../src/runtimes/chat/rate-limits-db.ts', () => ({
     cleanupOldRateLimits: mocks.cleanupOldRateLimits,
@@ -1304,9 +1314,9 @@ describe('main.ts — uncovered helpers and signal paths', () => {
     });
   });
 
-  // ── I. Agent: pending startup message ─────────────────────────────────────
+  // ── I. Agent: typed startup event ─────────────────────────────────────────
 
-  describe('agent startup notification — pending popStartupMessage', () => {
+  describe('agent startup notification — controller startup event seam', () => {
     // The canonical back-online send, in one place: the notice text and send
     // options are asserted in seven tests below and must move in lockstep.
     const backOnlineCall = (
@@ -1327,7 +1337,7 @@ describe('main.ts — uncovered helpers and signal paths', () => {
       agentOptions: { sessionScope: 'shared' },
     });
 
-    it('sends the pending message to the pending chatJid when popStartupMessage returns a resume', async () => {
+    it('reaches strict readiness and sends the typed resume event from a structural runtime stub', async () => {
       const h = await importMainWithMocks({
         instanceConfig: {
           name: 'q',
@@ -1335,15 +1345,18 @@ describe('main.ts — uncovered helpers and signal paths', () => {
           introSent: true, // skip intro path
           agentOptions: { sessionScope: 'shared' },
         },
-        // Seed the resume message so popStartupMessage returns it at the moment
+        // Seed the resume event so main consumes it at the controller seam.
         // main.ts start() consumes it (before the 3s timer fires).
-        pendingStartupMessage: { chatJid: '15559001@s.whatsapp.net', text: 'resuming your task...' },
+        pendingStartupEvent: { kind: 'resume', chatJid: '15559001@s.whatsapp.net', text: 'resuming your task...' },
       });
 
-      // Confirm the resume value was consumed from the constructed agent runtime.
-      expect(h.agentInstances[0].popStartupMessage).toHaveBeenCalledOnce();
+      expect(h.agentInstances[0].popStartupNotificationEvent).toHaveBeenCalledOnce();
 
       await vi.advanceTimersByTimeAsync(3_000);
+
+      // This proves main reached the controller's strict-readiness port despite
+      // the constructor stub not satisfying `instanceof AgentRuntime`.
+      expect(h.connection.getConnectionState).toHaveBeenCalledOnce();
 
       // Pending branch: notifyTarget = { chatJid: pending.chatJid, text: pending.text }
       expect(h.sendTracked).toHaveBeenCalledWith(
@@ -1355,16 +1368,12 @@ describe('main.ts — uncovered helpers and signal paths', () => {
       );
       // It must NOT fall back to the default "back online" notice (a status op).
       expect(h.sendTracked).not.toHaveBeenCalledWith(...backOnlineCall(h));
-      expect(h.logger.info).toHaveBeenCalledWith(
-        { chatJid: '15559001@s.whatsapp.net', isResume: true },
-        'sent startup notification',
-      );
     });
 
     it('sends the default back-online notice when no pending message exists', async () => {
       const h = await importMainWithMocks({
         instanceConfig: sharedAgentInstanceConfig(),
-        pendingStartupMessage: null,
+        pendingStartupEvent: null,
       });
 
       await vi.advanceTimersByTimeAsync(3_000);
@@ -1375,7 +1384,7 @@ describe('main.ts — uncovered helpers and signal paths', () => {
     it('keeps the generic back-online notice fail-open for an unreadable journal', async () => {
       const h = await importMainWithMocks({
         instanceConfig: sharedAgentInstanceConfig(),
-        pendingStartupMessage: null,
+        pendingStartupEvent: null,
         startupJournalStatus: 'journal_unreadable',
       });
 
@@ -1390,7 +1399,7 @@ describe('main.ts — uncovered helpers and signal paths', () => {
         transport: 'signal',
         adminPhones: ['01234567-89ab-cdef-0123-456789abcdef'],
         instanceConfig: sharedAgentInstanceConfig(),
-        pendingStartupMessage: null,
+        pendingStartupEvent: null,
       });
 
       await vi.advanceTimersByTimeAsync(3_000);
@@ -1400,23 +1409,17 @@ describe('main.ts — uncovered helpers and signal paths', () => {
       );
     });
 
-    it('logs warn when default startup notification delivery fails', async () => {
+    it('keeps booting when generic startup submission rejects', async () => {
       const h = await importMainWithMocks({
         instanceConfig: sharedAgentInstanceConfig(),
-        pendingStartupMessage: null,
+        pendingStartupEvent: null,
       });
       h.sendTracked.mockRejectedValueOnce(new Error('send failed'));
 
       h.capturedTimeouts.find((timer) => timer.ms === 3_000)!.callback();
       await flushMicrotasks();
 
-      expect(h.logger.warn).toHaveBeenCalledWith(
-        expect.objectContaining({
-          err: expect.any(Error),
-          chatJid: '15551230000@s.whatsapp.net',
-        }),
-        'failed to send startup notification',
-      );
+      expect(h.sendTracked).toHaveBeenCalledOnce();
     });
 
     // ── Stability debounce (startupNotificationStabilitySeconds > 0) ─────────
@@ -1427,7 +1430,7 @@ describe('main.ts — uncovered helpers and signal paths', () => {
     it('debounces the back-online notice to the stability window', async () => {
       const h = await importMainWithMocks({
         instanceConfig: sharedAgentInstanceConfig(),
-        pendingStartupMessage: null,
+        pendingStartupEvent: null,
         startupNotificationStabilitySeconds: 600,
       });
 
@@ -1441,7 +1444,7 @@ describe('main.ts — uncovered helpers and signal paths', () => {
     it('re-arms instead of announcing until the transport is fully connected', async () => {
       const h = await importMainWithMocks({
         instanceConfig: sharedAgentInstanceConfig(),
-        pendingStartupMessage: null,
+        pendingStartupEvent: null,
         startupNotificationStabilitySeconds: 600,
       });
       h.connection.getConnectionState.mockReturnValue({ connected: true, state: 'reconnecting' });
@@ -1493,13 +1496,9 @@ describe('main.ts — uncovered helpers and signal paths', () => {
         h.durability,
         { replayPolicy: 'unsafe', opType: 'status_ping' },
       );
-      expect(h.logger.info).toHaveBeenCalledWith(
-        { chatJid: '15559002@s.whatsapp.net' },
-        'sent self-restart back-online ping',
-      );
     });
 
-    it('logs warn when the dedicated self-restart ping fails', async () => {
+    it('keeps booting when the dedicated self-restart receipt submission rejects', async () => {
       const h = await importMainWithMocks({
         adminPhones: [],
         instanceConfig: {
@@ -1520,13 +1519,7 @@ describe('main.ts — uncovered helpers and signal paths', () => {
       h.capturedTimeouts.find((timer) => timer.ms === 3_000)!.callback();
       await flushMicrotasks();
 
-      expect(h.logger.warn).toHaveBeenCalledWith(
-        expect.objectContaining({
-          err: expect.any(Error),
-          chatJid: '15559003@s.whatsapp.net',
-        }),
-        'failed to send self-restart back-online ping',
-      );
+      expect(h.sendTracked).toHaveBeenCalledOnce();
     });
 
     it('logs warn and continues when marker consumption fails', async () => {

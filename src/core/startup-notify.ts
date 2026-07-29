@@ -56,6 +56,18 @@ export interface StartupNotifyJournalResult {
   state: StartupNotifyState;
 }
 
+/**
+ * The result of the journal-owned read-modify-write settlement. A false
+ * watermark means callers may submit the returned status text for availability,
+ * but must not represent the batch as durably settled.
+ */
+export interface StartupNotificationSettlement {
+  status: PrivateJournalStatus;
+  watermarkPersisted: boolean;
+  state: StartupNotifyState;
+  notification: StartupNotification | null;
+}
+
 export function startupNotifyPath(stateRoot: string): string {
   return privateJournalPath(stateRoot, STARTUP_NOTIFY_FILENAME);
 }
@@ -138,12 +150,83 @@ export function composeStartupNotification(
   };
 }
 
-/** Mark boots-through-now as notified. Persisted BEFORE the send so a crash
- *  mid-send loses at most one summary and can never duplicate it. Never throws. */
-export function markStartupNotified(statePath: string, now: number): PrivateJournalStatus {
+/**
+ * Select unnotified boots, compose their one aggregate, and persist the
+ * watermark before the caller submits it. This is deliberately one journal
+ * operation: composition and watermark ordering cannot drift into callers.
+ *
+ * For an unreadable source, `ephemeralState` preserves the boot evidence the
+ * current process already recorded in memory while keeping the on-disk source
+ * untouched. The notification remains fail-open, but `watermarkPersisted` is
+ * false so no caller can claim durable settlement.
+ */
+export function settleStartupNotification(
+  statePath: string,
+  now: number,
+  formatTime: (ms: number) => string = defaultLocalHm,
+  ephemeralState?: StartupNotifyState,
+): StartupNotificationSettlement {
   const result = loadState(statePath);
-  if (result.status === 'journal_unreadable') return result.status;
+  if (result.status === 'journal_unreadable') {
+    const state = ephemeralState ?? result.state;
+    const composed = composeStartupNotification(state, formatTime);
+    return {
+      status: 'journal_unreadable',
+      watermarkPersisted: false,
+      state,
+      notification: composed.bootsCovered > 0 ? composed : null,
+    };
+  }
+
   const { state } = result;
-  state.lastNotifiedAt = now;
-  return persist(statePath, state) ? 'available' : 'journal_unreadable';
+  const composed = composeStartupNotification(state, formatTime);
+  if (composed.bootsCovered === 0) {
+    return {
+      status: 'available',
+      watermarkPersisted: true,
+      state,
+      notification: null,
+    };
+  }
+
+  const nextState: StartupNotifyState = { ...state, lastNotifiedAt: now };
+  if (!persist(statePath, nextState)) {
+    return {
+      status: 'journal_unreadable',
+      watermarkPersisted: false,
+      state,
+      notification: composed,
+    };
+  }
+  return {
+    status: 'available',
+    watermarkPersisted: true,
+    state: nextState,
+    notification: composed,
+  };
+}
+
+/**
+ * Narrow journal port for the process-local controller. Keeping path I/O and
+ * read-modify-write ownership here prevents the controller from knowing about
+ * filesystem layouts or persistence mechanics.
+ */
+export function createStartupNotificationJournalPort(
+  statePath: string,
+  formatTime: (ms: number) => string = defaultLocalHm,
+): {
+  recordStartupBoot(now: number): StartupNotifyJournalResult;
+  settleStartupNotification(now: number): StartupNotificationSettlement;
+} {
+  let ephemeralState: StartupNotifyState | undefined;
+  return {
+    recordStartupBoot(now: number): StartupNotifyJournalResult {
+      const result = recordStartupBoot(statePath, now);
+      ephemeralState = result.state;
+      return result;
+    },
+    settleStartupNotification(now: number): StartupNotificationSettlement {
+      return settleStartupNotification(statePath, now, formatTime, ephemeralState);
+    },
+  };
 }
