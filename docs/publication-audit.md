@@ -15,15 +15,15 @@ markers and re-run the command — the result is a fixed point, so the resolutio
 rather than a hand-count. `docs/work-index.{json,md}` has the same property via
 `npm run work-index:regen`.
 
-**Total classification rows:** 340
+**Total classification rows:** 342
 
 | Classification | Count |
 |---|---:|
 | PUBLIC | 198 |
-| PRIVATE-ARCHIVE | 142 |
+| PRIVATE-ARCHIVE | 144 |
 | SANITIZE | 0 |
 | DELETE | 0 |
-| Total | 340 |
+| Total | 342 |
 
 | Path | Classification | Rationale |
 |---|---|---|
