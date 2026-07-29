@@ -57,6 +57,7 @@ _CONTROLLER_STATE_REASONS = frozenset(
         "publication_ambiguous",
         "evidence_preservation_failed",
         "lock_unavailable",
+        "retention_exhausted",
     }
 )
 _SAFE_DETAIL_STRING_VALUES = frozenset(
@@ -257,6 +258,38 @@ def metadata_only_controller_details(value: Mapping[str, Any]) -> dict[str, Any]
                         and _RECOVERY_RECEIPT_ID_RE.fullmatch(receipt_id)
                     ):
                         projected[key] = receipt_id
+                    continue
+                if key in {"currentGeneration", "recoveredGeneration"}:
+                    generation = item[key]
+                    if generation is None or (
+                        isinstance(generation, int)
+                        and not isinstance(generation, bool)
+                        and 0 <= generation <= 2**53 - 1
+                    ):
+                        projected[key] = generation
+                    continue
+                if key == "occurrenceCount":
+                    count = item[key]
+                    if (
+                        isinstance(count, int)
+                        and not isinstance(count, bool)
+                        and 0 <= count <= 2**31 - 1
+                    ):
+                        projected[key] = count
+                    continue
+                if key == "stagingAttempt":
+                    attempt = item[key]
+                    if attempt is None or (
+                        isinstance(attempt, int)
+                        and not isinstance(attempt, bool)
+                        and 1 <= attempt <= 8
+                    ):
+                        projected[key] = attempt
+                    continue
+                if key in {
+                    "stagedRecordSha256",
+                    "retainedReconciliationRecords",
+                }:
                     continue
                 if key in _SAFE_BOOLEAN_DETAIL_KEYS and not isinstance(item[key], bool):
                     continue

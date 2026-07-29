@@ -496,6 +496,7 @@ def test_metadata_projection_allowlists_every_exact_controller_state_mode(
         "publication_ambiguous",
         "evidence_preservation_failed",
         "lock_unavailable",
+        "retention_exhausted",
     ),
 )
 def test_metadata_projection_allowlists_every_exact_controller_state_reason(
@@ -556,3 +557,78 @@ def test_metadata_projection_rejects_unknown_controller_state_enums() -> None:
             "occurrenceCount": 2,
         }
     ) == {"occurrenceCount": 2}
+
+
+@pytest.mark.parametrize(
+    ("key", "value"),
+    (
+        ("currentGeneration", -1),
+        ("currentGeneration", 2**53),
+        ("currentGeneration", True),
+        ("recoveredGeneration", -1),
+        ("recoveredGeneration", 2**53),
+        ("occurrenceCount", -1),
+        ("occurrenceCount", 2**31),
+        ("occurrenceCount", False),
+        ("stagingAttempt", 0),
+        ("stagingAttempt", 9),
+        ("stagingAttempt", True),
+    ),
+)
+def test_metadata_projection_rejects_invalid_controller_state_numbers(
+    key: str,
+    value: object,
+) -> None:
+    assert metadata_only_controller_details({key: value}) == {}
+
+
+def test_metadata_projection_accepts_only_bounded_controller_state_numbers() -> None:
+    assert metadata_only_controller_details(
+        {
+            "currentGeneration": 2**53 - 1,
+            "recoveredGeneration": 0,
+            "occurrenceCount": 2**31 - 1,
+            "stagingAttempt": 8,
+        }
+    ) == {
+        "currentGeneration": 2**53 - 1,
+        "occurrenceCount": 2**31 - 1,
+        "recoveredGeneration": 0,
+        "stagingAttempt": 8,
+    }
+
+
+def test_metadata_projection_drops_malicious_controller_state_values() -> None:
+    canary = "/private/controller-state path with raw prose"
+    assert metadata_only_controller_details(
+        {
+            "component": canary,
+            "stateMode": canary,
+            "reason": canary,
+            "recoveryReceiptId": canary,
+            "currentGeneration": canary,
+            "recoveredGeneration": "9" * 10_000,
+            "occurrenceCount": -(2**80),
+            "stagingAttempt": canary,
+        }
+    ) == {}
+
+
+def test_metadata_projection_never_leaks_record_names_digests_or_manifest() -> None:
+    record_name = (
+        ".state.json.0123456789abcdef0123456789abcdef.01.reconciliation-record"
+    )
+    assert metadata_only_controller_details(
+        {
+            "stagedRecordSha256": "a" * 64,
+            "retainedReconciliationRecords": [
+                {
+                    "recoveryReceiptId": "0123456789abcdef0123456789abcdef",
+                    "finalAttempt": 1,
+                    "recordSha256": "a" * 64,
+                }
+            ],
+            "recordName": record_name,
+            "stagingAttempt": 2,
+        }
+    ) == {"stagingAttempt": 2}

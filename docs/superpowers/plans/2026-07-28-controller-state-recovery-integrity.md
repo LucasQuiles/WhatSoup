@@ -72,6 +72,7 @@ StateReason = Literal[
     "publication_ambiguous",
     "evidence_preservation_failed",
     "lock_unavailable",
+    "retention_exhausted",
 ]
 
 @dataclass(frozen=True)
@@ -83,6 +84,7 @@ class StateDiagnostic:
     reason: StateReason | None
     recovery_receipt_id: str | None
     occurrence_count: int
+    staging_attempt: int | None
 
 @dataclass(frozen=True)
 class StateLoadResult:
@@ -111,6 +113,14 @@ class ControllerStateSession:
 class ControllerStateRequired(RuntimeError):
     """Content-free process-boundary signal carrying a private diagnostic attribute."""
 ```
+
+Append-only reconciliation-record interface constants (amendment 2026-07-29):
+`MAX_RETAINED_RECONCILIATION_RECORDS = 4`; the staging-attempt bound of 8 is
+encoded in the record-name grammar `0[1-8]` and mirrored by
+`MAX_RECONCILIATION_ATTEMPTS = 8`; receipt fields `stagingAttempt`
+(non-boolean integer 1..8) and `stagedRecordSha256` (lowercase hex64), both null
+until `reconciliation_prepared` and immutable after; marker manifest key
+`retainedReconciliationRecords`; bounded reason `retention_exhausted`.
 
 `StateWriteCapability` has no public constructor. `ControllerStateSession.save()` invalidates the supplied capability and returns a replacement only after the new generation, marker, and journal removal are durable. `complete_reconciliation()` accepts only a reconciliation-only capability and returns a normal capability after the receipt reaches `reconciled`.
 
@@ -173,6 +183,18 @@ rewind, retry-budget reset, cooldown reset, suppression reset, or counter reset.
 If execution discovers a complete authoritative ledger, stop and amend the design
 and this table before using `authoritative_reconciliation`.
 
+Amendment (2026-07-29), discharging the self-amend clause for record retention:
+reconciliation staging is append-only — attempt-numbered write-once records
+(`.state.json.<recoveryReceiptId>.<attempt>.reconciliation-record`, attempts
+`01`-`08`) that are never renamed, reused, or deleted by the online service. A
+pre-bind crash self-corrects by selecting the next attempt; the receipt binds
+`stagingAttempt` and `stagedRecordSha256` at `reconciliation_prepared`, and from
+then on only the exact digest-bound record may resume. Completed records remain
+on disk as inert evidence accounted across receipt turnover by the marker's
+`retainedReconciliationRecords` manifest (at most four entries). Bounded-resource
+exhaustion is the typed reason `retention_exhausted`; pruning/archival is a
+separately specified, operator-invoked offline procedure.
+
 ## Task 1: Establish the RED Shared Contract and Fault Harness
 
 **Files:**
@@ -212,13 +234,17 @@ def validate_probe_payload(raw: Mapping[str, Any]) -> dict[str, Any]:
 - [ ] Add RED failure cases for no previous, corrupt previous, cross-store previous, future primary, evidence write failure, evidence file fsync failure, evidence directory fsync failure, state directory full, and permission denial. Assert `payload is None`, `capability is None`, and no retained authority is overwritten.
 - [ ] Add the transaction crash matrix at every durable phase: journal prepared, previous temp fsynced, previous renamed, previous directory synced, primary temp fsynced, primary renamed, primary directory synced, marker renamed, marker directory synced, journal phase advanced, journal removed, and journal-removal directory synced. Each test must assert its expected syscall counter is nonzero.
 - [ ] Add restart tests for `prepared`, `previous_committed`, `primary_committed`, `marker_committed`, recovery `planned`, `evidence_preserved`, `restored`, and `reconciliation_prepared`. Exact matching state resumes; any envelope/sidecar mismatch returns `recovery_required`.
-- [ ] Add reconciliation-stage falsifiers for receipt/marker/recovered/journal
+- [ ] Add reconciliation-record falsifiers for receipt/marker/recovered/journal
   cross-binding, regular-file and symlink substitution after verified read, and
-  crashes after temp open, write, file sync, close, durable-stage rename, and
-  directory sync. Require restart to reuse the exact target and leave no stage.
+  crashes after record open, write, file sync, close, and directory sync.
+  Require a pre-bind restart to self-correct on the next attempt with every
+  prior record preserved byte-for-byte, and a post-bind restart to resume only
+  the exact `stagedRecordSha256`-bound record; no record is ever renamed,
+  reused, or removed.
 - [ ] Add closed-classifier controls proving `.state.json.notes` does not block
   pristine bootstrap or sole-legacy `legacy_valid`, while every exact atomic
-  temporary and receipt-derived reconciliation stage grammar fails closed.
+  temporary, every record outside its accounted posture, and every legacy
+  reconciliation grammar fails closed.
 - [ ] Add RED diagnostic tests proving the stderr line is one bounded JSON object with only schema version, component, state mode, bounded reason, known generation counters, opaque receipt ID, and occurrence count. Assert raw exception text, paths, evidence names, payload keys/values, environment values, and integrity digests are absent. Inject stderr failure and assert the typed non-success remains.
 - [ ] Run the RED suite and save the failure summary in the implementation task notes:
 
@@ -253,6 +279,7 @@ git commit -m "test: specify controller state recovery contract"
 - [ ] Implement closed constants, dataclasses, strict UTC RFC 3339 validation, strict lowercase `hex32` store IDs, strict lowercase `hex64` digests, exact integer generation checks, and payload deep-copy validation.
 - [ ] Set `MAX_GENERATION = 2**53 - 1`; accept only non-boolean integers from 0 through that value. Generation 0 is bootstrap/migration-only, normal saves use current plus 1, and reconciliation uses marker high-water plus 1.
 - [ ] Set `MAX_OCCURRENCE_COUNT = 2**31 - 1`; recovery retries increment with saturation and never allocate a replacement receipt ID.
+- [ ] Set `MAX_RETAINED_RECONCILIATION_RECORDS = 4` with the staging-attempt bound 8 encoded in the record-name grammar `0[1-8]`. Implement receipt fields `stagingAttempt`/`stagedRecordSha256` (null until `reconciliation_prepared`, immutable after, boolean rejected), the marker manifest `retainedReconciliationRecords` (lexicographically sorted, receipt-ID-unique, bounded, present-but-empty rejected), append-only record staging with next-attempt self-correction and `retention_exhausted` exhaustion, digest-bound promotion, idempotent manifest append between canonical publication and the `reconciled` advance, and the `retention_exhausted` reason plus `stagingAttempt` projection through controller_log's closed allowlists.
 - [ ] Implement canonical serialization with:
 
 ```python

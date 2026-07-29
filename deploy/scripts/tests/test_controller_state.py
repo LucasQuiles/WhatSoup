@@ -85,6 +85,8 @@ _RECOVERY_RECEIPT_BASE_KEYS = {
     "recoveredIntegritySha256",
     "targetGeneration",
     "targetIntegritySha256",
+    "stagingAttempt",
+    "stagedRecordSha256",
     "integritySha256",
 }
 _JOURNAL_KEYS = {
@@ -381,6 +383,8 @@ class FaultOps:
         name = Path(os.fspath(path)).name
         if re.fullmatch(r"[0-9a-f]{32}\.controller-state-evidence", name):
             return "evidence"
+        if re.search(r"\.0[1-8]\.reconciliation-record$", name):
+            return "reconciliation_record"
         if name.endswith(".reconciliation-journal.tmp"):
             return "reconciliation_stage_temp"
         if name.endswith(".reconciliation-journal"):
@@ -1110,6 +1114,7 @@ def test_public_contract_exports_required_types_and_operations(tmp_path: Path) -
         "publication_ambiguous",
         "evidence_preservation_failed",
         "lock_unavailable",
+        "retention_exhausted",
     )
 
     session = _open(cs, tmp_path / "state.json")
@@ -1276,6 +1281,7 @@ def test_all_declared_records_have_exact_frozen_field_contract() -> None:
             ("reason", cs.StateReason | None),
             ("recovery_receipt_id", str | None),
             ("occurrence_count", int),
+            ("staging_attempt", int | None),
         ),
         cs.StateLoadResult: (
             ("mode", cs.StateMode),
@@ -1317,6 +1323,7 @@ def test_all_declared_records_have_exact_frozen_field_contract() -> None:
         reason=None,
         recovery_receipt_id=None,
         occurrence_count=0,
+        staging_attempt=None,
     )
     records = (
         diagnostic,
@@ -2389,6 +2396,8 @@ def test_recovered_reconciled_valid_transition_is_ordered_and_not_repeated(
             "phase",
             "targetGeneration",
             "targetIntegritySha256",
+            "stagingAttempt",
+            "stagedRecordSha256",
             "integritySha256",
         }
         for retained in set(receipt_before) - changed:
@@ -2422,6 +2431,7 @@ def test_controller_state_required_is_content_free() -> None:
         reason="integrity_mismatch",
         recovery_receipt_id="opaque-receipt",
         occurrence_count=2,
+        staging_attempt=None,
     )
     error = cs.ControllerStateRequired(diagnostic)
 
@@ -2712,6 +2722,7 @@ def test_emergency_fallback_is_at_most_once_per_module_invocation() -> None:
         reason="read_failed",
         recovery_receipt_id=None,
         occurrence_count=1,
+        staging_attempt=None,
     )
     _result, raw = _assert_fd2_line(
         lambda: (
@@ -3095,10 +3106,23 @@ def _assert_recovery_receipt_contract(
         "publication_ambiguous",
         "evidence_preservation_failed",
         "lock_unavailable",
+        "retention_exhausted",
     }
     assert isinstance(receipt["occurrenceCount"], int)
     assert not isinstance(receipt["occurrenceCount"], bool)
     assert 1 <= receipt["occurrenceCount"] <= _MAX_OCCURRENCE_COUNT
+    early_phase = receipt["phase"] in {
+        "planned",
+        "evidence_preserved",
+        "restored",
+    }
+    assert (receipt["stagingAttempt"] is None) == early_phase
+    assert (receipt["stagedRecordSha256"] is None) == early_phase
+    if receipt["stagingAttempt"] is not None:
+        assert isinstance(receipt["stagingAttempt"], int)
+        assert not isinstance(receipt["stagingAttempt"], bool)
+        assert 1 <= receipt["stagingAttempt"] <= 8
+        _assert_digest(receipt["stagedRecordSha256"])
     for key in (
         "markerHighWaterGeneration",
         "recoveredGeneration",
@@ -3618,7 +3642,7 @@ def _seed_exact_recovery_phase(
             candidate
             for candidate in path.parent.iterdir()
             if candidate.name.startswith(f".{path.name}.")
-            and candidate.name.endswith(".reconciliation-journal")
+            and candidate.name.endswith(".reconciliation-record")
         ]
         assert len(staged) == 1
         journal = _json(staged[0])
@@ -3869,8 +3893,9 @@ def test_diagnostic_mapping_is_closed_bounded_and_content_free() -> None:
         current_generation=12,
         recovered_generation=11,
         reason="integrity_mismatch",
-        recovery_receipt_id="opaque_receipt_01",
+        recovery_receipt_id="0123456789abcdef0123456789abcdef",
         occurrence_count=3,
+        staging_attempt=None,
     )
 
     details = cs.state_diagnostic_details(diagnostic)
@@ -3882,7 +3907,7 @@ def test_diagnostic_mapping_is_closed_bounded_and_content_free() -> None:
         "reason": "integrity_mismatch",
         "currentGeneration": 12,
         "recoveredGeneration": 11,
-        "recoveryReceiptId": "opaque_receipt_01",
+        "recoveryReceiptId": "0123456789abcdef0123456789abcdef",
         "occurrenceCount": 3,
     }
     encoded = _canonical_bytes(details)
@@ -3911,6 +3936,7 @@ def test_diagnostic_without_durable_receipt_does_not_fabricate_identity() -> Non
         reason="read_failed",
         recovery_receipt_id=None,
         occurrence_count=1,
+        staging_attempt=None,
     )
     details = cs.state_diagnostic_details(diagnostic)
     assert details["recoveryReceiptId"] is None
@@ -3926,6 +3952,7 @@ def test_fallback_is_one_bounded_json_line_with_only_closed_schema() -> None:
         reason="read_failed",
         recovery_receipt_id=None,
         occurrence_count=1,
+        staging_attempt=None,
     )
     return_value, raw = _assert_fd2_line(
         lambda: cs.emit_state_recovery_fallback(diagnostic)
@@ -3959,6 +3986,7 @@ def test_stderr_failure_cannot_replace_typed_non_success() -> None:
         reason="read_failed",
         recovery_receipt_id=None,
         occurrence_count=1,
+        staging_attempt=None,
     )
     error = cs.ControllerStateRequired(diagnostic)
     assert _with_closed_fd2(
@@ -4135,7 +4163,7 @@ def test_staged_reconciliation_restart_preserves_restored_authority(
     ops.reset_trace()
     ops.crash_after(
         "fsync_directory",
-        predicate=lambda call: call.role == "reconciliation_stage",
+        predicate=lambda call: call.role == "reconciliation_record",
     )
     try:
         with pytest.raises(SimulatedCrash):
@@ -4501,9 +4529,22 @@ def _reconciliation_artifacts(path: Path) -> tuple[Path, ...]:
             candidate
             for candidate in path.parent.iterdir()
             if candidate.name.startswith(f".{path.name}.")
-            and "reconciliation-journal" in candidate.name
+            and (
+                "reconciliation-journal" in candidate.name
+                or candidate.name.endswith(".reconciliation-record")
+            )
         )
     )
+
+
+def _record_name(path: Path, receipt_id: str, attempt: int) -> str:
+    return f".{path.name}.{receipt_id}.{attempt:02d}.reconciliation-record"
+
+
+def _seed_legacy_durable_stage(path: Path, receipt_id: str) -> Path:
+    legacy = path.parent / f".{path.name}.{receipt_id}.reconciliation-journal"
+    _write_private_raw(legacy, b"legacy-durable-stage")
+    return legacy
 
 
 def _reconciliation_authority_snapshot(path: Path) -> tuple[Any, ...]:
@@ -4527,7 +4568,7 @@ def _reconciliation_authority_snapshot(path: Path) -> tuple[Any, ...]:
     return fixed, tuple(staged)
 
 
-def _seed_restored_with_staged_reconciliation(
+def _seed_restored_with_record(
     cs: ModuleType,
     path: Path,
 ) -> Path:
@@ -4538,7 +4579,7 @@ def _seed_restored_with_staged_reconciliation(
     ops.reset_trace()
     ops.crash_after(
         "fsync_directory",
-        predicate=lambda call: call.role == "reconciliation_stage",
+        predicate=lambda call: call.role == "reconciliation_record",
     )
     try:
         with pytest.raises(SimulatedCrash):
@@ -4557,52 +4598,61 @@ def _seed_restored_with_staged_reconciliation(
     return artifacts[0]
 
 
-class ReplaceStageAfterVerifiedReadOps(FaultOps):
+class ReplaceRecordAfterVerifiedWriteOps(FaultOps):
     def __init__(
         self,
         *,
-        stage_path: Path,
+        record_path: Path,
         replacement_kind: Literal["regular", "symlink"],
     ) -> None:
         super().__init__()
-        self.stage_path = stage_path
+        self.record_path = record_path
         self.replacement_kind = replacement_kind
         self.armed = False
         self.fired = False
-        self.replacement_bytes = b'{"replacement":"not-the-verified-stage"}'
-        self.outside = stage_path.parent / "outside-stage-target"
+        self.replacement_bytes = b'{"replacement":"not-the-verified-record"}'
+        self.outside = record_path.parent / "outside-record-target"
 
     def close(self, fd: int) -> None:
+        detail = self.fd_paths.get(fd, "")
         role = self.fd_roles.get(fd)
         super().close(fd)
-        if self.armed and not self.fired and role == "reconciliation_stage":
+        if (
+            self.armed
+            and not self.fired
+            and role == "reconciliation_record"
+            and detail.endswith(self.record_path.name)
+        ):
             self.fired = True
             if self.replacement_kind == "regular":
-                replacement = self.stage_path.parent / "replacement-stage"
+                replacement = self.record_path.parent / "replacement-record"
                 _write_private_raw(replacement, self.replacement_bytes)
-                os.replace(replacement, self.stage_path)
+                os.replace(replacement, self.record_path)
             else:
                 _write_private_raw(self.outside, b"outside")
-                self.stage_path.unlink()
-                os.symlink(self.outside, self.stage_path)
+                self.record_path.unlink()
+                os.symlink(self.outside, self.record_path)
 
 
 @pytest.mark.parametrize("replacement_kind", ("regular", "symlink"))
-def test_stage_replacement_after_verified_read_fails_before_authority_mutation(
+def test_record_replacement_after_verified_write_fails_before_authority_mutation(
     tmp_path: Path,
     replacement_kind: Literal["regular", "symlink"],
 ) -> None:
     cs = load_controller_state_module()
     path = tmp_path / "state.json"
-    stage = _seed_restored_with_staged_reconciliation(cs, path)
-    ops = ReplaceStageAfterVerifiedReadOps(
-        stage_path=stage,
+    seeded = _seed_restored_with_record(cs, path)
+    receipt_id = _json(_managed(path, ".recovery"))["recoveryReceiptId"]
+    predicted = path.parent / _record_name(path, receipt_id, 2)
+    ops = ReplaceRecordAfterVerifiedWriteOps(
+        record_path=predicted,
         replacement_kind=replacement_kind,
     )
     session = _open(cs, path, ops=ops)
     recovered = session.load()
     assert recovered.mode == "recovered"
     fixed_before = _authority_snapshot(path)
+    seeded_bytes = seeded.read_bytes()
     ops.armed = True
 
     try:
@@ -4618,14 +4668,16 @@ def test_stage_replacement_after_verified_read_fails_before_authority_mutation(
     assert ops.fired
     assert _authority_snapshot(path) == fixed_before
     assert not _managed(path, ".transaction").exists()
+    assert _json(_managed(path, ".recovery"))["phase"] == "restored"
+    assert seeded.read_bytes() == seeded_bytes
     if replacement_kind == "regular":
-        assert stage.read_bytes() == ops.replacement_bytes
+        assert predicted.read_bytes() == ops.replacement_bytes
     else:
-        assert stage.is_symlink()
+        assert predicted.is_symlink()
         assert ops.outside.read_bytes() == b"outside"
 
 
-def _seed_prepared_receipt_with_stage(cs: ModuleType, path: Path) -> Path:
+def _seed_prepared_receipt_with_record(cs: ModuleType, path: Path) -> Path:
     _seed_exact_recovery_phase(cs, path, "reconciliation_prepared")
     artifacts = _reconciliation_artifacts(path)
     assert len(artifacts) == 1
@@ -4644,7 +4696,7 @@ def test_prepared_reconciliation_cross_binding_fails_without_mutation(
 ) -> None:
     cs = load_controller_state_module()
     path = tmp_path / "state.json"
-    _seed_prepared_receipt_with_stage(cs, path)
+    _seed_prepared_receipt_with_record(cs, path)
     receipt_path = _managed(path, ".recovery")
     marker_path = _managed(path, ".initialized")
     if mismatch == "actual_marker":
@@ -4669,7 +4721,7 @@ def test_prepared_reconciliation_cross_binding_fails_without_mutation(
     assert _reconciliation_authority_snapshot(path) == before
 
 
-class StageCloseCrashOps(FaultOps):
+class RecordCloseCrashOps(FaultOps):
     def __init__(self) -> None:
         super().__init__()
         self.armed = False
@@ -4678,23 +4730,22 @@ class StageCloseCrashOps(FaultOps):
     def close(self, fd: int) -> None:
         role = self.fd_roles.get(fd)
         super().close(fd)
-        if self.armed and not self.fired and role == "reconciliation_stage_temp":
+        if self.armed and not self.fired and role == "reconciliation_record":
             self.fired = True
-            raise SimulatedCrash("simulated crash after stage temp close")
+            raise SimulatedCrash("simulated crash after record close")
 
 
 @pytest.mark.parametrize(
     ("boundary", "role"),
     (
-        ("open", "reconciliation_stage_temp"),
-        ("write", "reconciliation_stage_temp"),
-        ("fsync_file", "reconciliation_stage_temp"),
-        ("close", "reconciliation_stage_temp"),
-        ("replace", "reconciliation_stage"),
-        ("fsync_directory", "reconciliation_stage"),
+        ("open", "reconciliation_record"),
+        ("write", "reconciliation_record"),
+        ("fsync_file", "reconciliation_record"),
+        ("close", "reconciliation_record"),
+        ("fsync_directory", "reconciliation_record"),
     ),
 )
-def test_atomic_stage_publication_crash_matrix_resumes_exactly(
+def test_record_publication_crash_matrix_self_corrects_on_next_attempt(
     tmp_path: Path,
     boundary: str,
     role: str,
@@ -4702,12 +4753,12 @@ def test_atomic_stage_publication_crash_matrix_resumes_exactly(
     cs = load_controller_state_module()
     path = tmp_path / "state.json"
     _seed_recovered_for_reconciliation(cs, path)
-    ops: FaultOps = StageCloseCrashOps() if boundary == "close" else FaultOps()
+    ops: FaultOps = RecordCloseCrashOps() if boundary == "close" else FaultOps()
     session = _open(cs, path, ops=ops)
     recovered = session.load()
     ops.reset_trace()
     if boundary == "close":
-        assert isinstance(ops, StageCloseCrashOps)
+        assert isinstance(ops, RecordCloseCrashOps)
         ops.armed = True
     else:
         ops.crash_after(boundary, predicate=lambda call: call.role == role)
@@ -4721,12 +4772,17 @@ def test_atomic_stage_publication_crash_matrix_resumes_exactly(
     finally:
         session.close()
     if boundary == "close":
-        assert isinstance(ops, StageCloseCrashOps) and ops.fired
+        assert isinstance(ops, RecordCloseCrashOps) and ops.fired
     else:
         ops.assert_all_rules_fired()
     receipt = _json(_managed(path, ".recovery"))
     assert receipt["phase"] == "restored"
     assert not _managed(path, ".transaction").exists()
+    crash_left = {
+        artifact: artifact.read_bytes()
+        for artifact in _reconciliation_artifacts(path)
+    }
+    assert len(crash_left) == 1
 
     with _open(cs, path) as restarted:
         retry = restarted.load()
@@ -4738,8 +4794,17 @@ def test_atomic_stage_publication_crash_matrix_resumes_exactly(
         )
 
     assert reconciled.mode == "reconciled"
-    assert _json(_managed(path, ".recovery"))["phase"] == "reconciled"
-    assert _reconciliation_artifacts(path) == ()
+    receipt = _json(_managed(path, ".recovery"))
+    assert receipt["phase"] == "reconciled"
+    assert receipt["stagingAttempt"] == 2
+    assert len(_reconciliation_artifacts(path)) == 2
+    for artifact, expected in crash_left.items():
+        assert artifact.read_bytes() == expected
+    marker = _json(_managed(path, ".initialized"))
+    assert [
+        (entry["recoveryReceiptId"], entry["finalAttempt"])
+        for entry in marker["retainedReconciliationRecords"]
+    ] == [(receipt["recoveryReceiptId"], 2)]
 
 
 class PredicateCloseFaultOps(FaultOps):
@@ -5014,96 +5079,42 @@ def test_exact_authority_temporary_and_stage_grammars_fail_closed(
     assert artifact.read_bytes() == b"authority"
 
 
-class ReplaceAfterVerifiedRoleCloseOps(FaultOps):
-    def __init__(
-        self,
-        *,
-        target: Path,
-        role: str,
-        occurrence: int,
-        replacement_kind: Literal["regular", "symlink"],
-    ) -> None:
-        super().__init__()
-        self.target = target
-        self.target_role = role
-        self.matching_occurrence = occurrence
-        self.replacement_kind = replacement_kind
-        self.matches = 0
-        self.armed = False
-        self.fired = False
-        self.replacement_bytes = b'{"replacement":"final-gap"}'
-        self.outside = target.parent / f"{target.name}.outside"
-
-    def close(self, fd: int) -> None:
-        role = self.fd_roles.get(fd)
-        super().close(fd)
-        if not self.armed or role != self.target_role:
-            return
-        self.matches += 1
-        if self.matches != self.matching_occurrence:
-            return
-        self.fired = True
-        if self.replacement_kind == "regular":
-            replacement = self.target.parent / f"{self.target.name}.replacement"
-            _write_private_raw(replacement, self.replacement_bytes)
-            os.replace(replacement, self.target)
-        else:
-            _write_private_raw(self.outside, b"outside")
-            self.target.unlink()
-            os.symlink(self.outside, self.target)
-
-
 @pytest.mark.parametrize("replacement_kind", ("regular", "symlink"))
-def test_final_stage_promotion_gap_never_publishes_replacement(
+def test_final_record_promotion_gap_never_publishes_replacement(
     tmp_path: Path,
     replacement_kind: Literal["regular", "symlink"],
 ) -> None:
     cs = load_controller_state_module()
     path = tmp_path / "state.json"
-    stage = _seed_restored_with_staged_reconciliation(cs, path)
-    expected = stage.read_bytes()
-    ops = ReplaceAfterVerifiedRoleCloseOps(
-        target=stage,
-        role="reconciliation_stage",
-        occurrence=8,
-        replacement_kind=replacement_kind,
-    )
-    session = _open(cs, path, ops=ops)
-    recovered = session.load()
-    assert recovered.mode == "recovered"
+    record = _seed_prepared_receipt_with_record(cs, path)
     fixed_before = {
         suffix: _managed(path, suffix).read_bytes()
         for suffix in ("", ".previous", ".initialized")
     }
-    ops.armed = True
+    if replacement_kind == "regular":
+        replacement_bytes = b'{"replacement":"not-the-bound-record"}'
+        _write_private_raw(record, replacement_bytes)
+    else:
+        outside = record.parent / "outside-record-target"
+        _write_private_raw(outside, b"outside")
+        record.unlink()
+        os.symlink(outside, record)
 
-    try:
-        with pytest.raises(cs.ControllerStateRequired):
-            session.complete_reconciliation(
-                recovered.payload,
-                recovered.capability,
-                outcome="validated_previous_only",
-            )
-    finally:
-        session.close()
+    with _open(cs, path) as session:
+        result = session.load()
 
-    assert ops.fired
-    transaction = _managed(path, ".transaction")
-    assert transaction.is_file() and not transaction.is_symlink()
-    assert transaction.read_bytes() == expected
+    _assert_recovery_required(result)
     assert {
         suffix: _managed(path, suffix).read_bytes()
         for suffix in ("", ".previous", ".initialized")
     } == fixed_before
-    assert _json(_managed(path, ".recovery"))["phase"] == "reconciliation_prepared"
     if replacement_kind == "regular":
-        assert stage.read_bytes() == ops.replacement_bytes
+        assert record.read_bytes() == replacement_bytes
     else:
-        assert stage.is_symlink()
-        assert ops.outside.read_bytes() == b"outside"
+        assert record.is_symlink()
 
 
-def _seed_restored_with_incomplete_reconciliation_temp(
+def _seed_restored_with_crash_left_record(
     cs: ModuleType,
     path: Path,
 ) -> Path:
@@ -5114,7 +5125,7 @@ def _seed_restored_with_incomplete_reconciliation_temp(
     ops.reset_trace()
     ops.crash_after(
         "fsync_file",
-        predicate=lambda call: call.role == "reconciliation_stage_temp",
+        predicate=lambda call: call.role == "reconciliation_record",
     )
     try:
         with pytest.raises(SimulatedCrash):
@@ -5128,73 +5139,61 @@ def _seed_restored_with_incomplete_reconciliation_temp(
     ops.assert_all_rules_fired()
     artifacts = _reconciliation_artifacts(path)
     assert len(artifacts) == 1
-    assert artifacts[0].name.endswith(".reconciliation-journal.tmp")
+    assert artifacts[0].name.endswith(".reconciliation-record")
     assert _json(_managed(path, ".recovery"))["phase"] == "restored"
     return artifacts[0]
 
 
-@pytest.mark.parametrize("replacement_kind", ("regular", "symlink"))
-def test_final_incomplete_temp_cleanup_gap_preserves_replacement(
+def test_crash_left_record_substitution_is_inert_and_preserved(
     tmp_path: Path,
-    replacement_kind: Literal["regular", "symlink"],
 ) -> None:
     cs = load_controller_state_module()
     path = tmp_path / "state.json"
-    temporary = _seed_restored_with_incomplete_reconciliation_temp(cs, path)
-    ops = ReplaceAfterVerifiedRoleCloseOps(
-        target=temporary,
-        role="reconciliation_stage_temp",
-        occurrence=5,
-        replacement_kind=replacement_kind,
-    )
-    session = _open(cs, path, ops=ops)
-    recovered = session.load()
-    assert recovered.mode == "recovered"
-    fixed_before = _authority_snapshot(path)
-    ops.armed = True
-
-    try:
-        with pytest.raises(cs.ControllerStateRequired):
-            session.complete_reconciliation(
-                recovered.payload,
-                recovered.capability,
-                outcome="validated_previous_only",
-            )
-    finally:
-        session.close()
-
-    assert ops.fired
-    assert _authority_snapshot(path) == fixed_before
-    assert not _managed(path, ".transaction").exists()
-    if replacement_kind == "regular":
-        assert temporary.read_bytes() == ops.replacement_bytes
-    else:
-        assert temporary.is_symlink()
-        assert ops.outside.read_bytes() == b"outside"
-
-
-@pytest.mark.parametrize("stage_damage", ("expected_highwater", "malformed"))
-def test_restored_durable_stage_is_bound_before_retry_increment(
-    tmp_path: Path,
-    stage_damage: str,
-) -> None:
-    cs = load_controller_state_module()
-    path = tmp_path / "state.json"
-    stage = _seed_restored_with_staged_reconciliation(cs, path)
-    if stage_damage == "malformed":
-        _write_private_raw(stage, b"{")
-    else:
-        journal = _json(stage)
-        journal["expectedHighWaterIntegritySha256"] = "a" * 64
-        _refresh_sidecar_integrity(journal)
-        _write_private_json(stage, journal)
-    before = _reconciliation_authority_snapshot(path)
+    crash_left = _seed_restored_with_crash_left_record(cs, path)
+    substituted = b'{"substituted":"crash-left"}'
+    _write_private_raw(crash_left, substituted)
 
     with _open(cs, path) as session:
-        result = session.load()
+        recovered = session.load()
+        assert recovered.mode == "recovered"
+        committed = session.complete_reconciliation(
+            recovered.payload,
+            recovered.capability,
+            outcome="validated_previous_only",
+        )
 
-    _assert_recovery_required(result)
-    assert _reconciliation_authority_snapshot(path) == before
+    assert committed.mode == "reconciled"
+    assert crash_left.read_bytes() == substituted
+
+
+@pytest.mark.parametrize("record_damage", ("expected_highwater", "malformed"))
+def test_restored_records_are_inert_and_never_read(
+    tmp_path: Path,
+    record_damage: str,
+) -> None:
+    cs = load_controller_state_module()
+    path = tmp_path / "state.json"
+    record = _seed_restored_with_record(cs, path)
+    if record_damage == "malformed":
+        _write_private_raw(record, b"{")
+    else:
+        journal = _json(record)
+        journal["expectedHighWaterIntegritySha256"] = "a" * 64
+        _refresh_sidecar_integrity(journal)
+        _write_private_json(record, journal)
+    damaged = record.read_bytes()
+
+    with _open(cs, path) as session:
+        recovered = session.load()
+        assert recovered.mode == "recovered"
+        committed = session.complete_reconciliation(
+            recovered.payload,
+            recovered.capability,
+            outcome="validated_previous_only",
+        )
+
+    assert committed.mode == "reconciled"
+    assert record.read_bytes() == damaged
 
 
 class MutatePrimaryAfterCommitOps(FaultOps):
@@ -5295,7 +5294,7 @@ def test_reconciliation_restart_post_commit_primary_posture_is_typed(
 ) -> None:
     cs = load_controller_state_module()
     path = tmp_path / "state.json"
-    _seed_prepared_receipt_with_stage(cs, path)
+    _seed_prepared_receipt_with_record(cs, path)
     ops = MutatePrimaryAfterCommitOps(posture)
 
     with _open(cs, path, ops=ops) as session:
@@ -5360,28 +5359,640 @@ def test_established_store_keeps_innocent_state_prefixed_sibling_benign(
     assert note.read_bytes() == b"operator note"
 
 
-@pytest.mark.parametrize("source_kind", ("incomplete_temp", "durable_stage"))
-def test_reconciliation_cleanup_claim_crash_is_explicit_fail_closed_posture(
+@pytest.mark.parametrize("source_kind", ("crash_left", "durable_record"))
+def test_no_rename_or_claim_ever_targets_a_reconciliation_record(
     tmp_path: Path,
     source_kind: str,
 ) -> None:
     cs = load_controller_state_module()
     path = tmp_path / "state.json"
-    if source_kind == "incomplete_temp":
-        source = _seed_restored_with_incomplete_reconciliation_temp(cs, path)
+    if source_kind == "crash_left":
+        source = _seed_restored_with_crash_left_record(cs, path)
     else:
-        source = _seed_restored_with_staged_reconciliation(cs, path)
+        source = _seed_restored_with_record(cs, path)
     source_bytes = source.read_bytes()
     ops = FaultOps()
     session = _open(cs, path, ops=ops)
     recovered = session.load()
     assert recovered.mode == "recovered"
     ops.reset_trace()
-    ops.crash_after(
-        "replace",
-        predicate=lambda call: call.role == "reconciliation_claim",
+
+    try:
+        committed = session.complete_reconciliation(
+            recovered.payload,
+            recovered.capability,
+            outcome="validated_previous_only",
+        )
+    finally:
+        session.close()
+
+    assert committed.mode == "reconciled"
+    reconciliation_roles = {
+        "reconciliation_record",
+        "reconciliation_stage",
+        "reconciliation_stage_temp",
+        "reconciliation_claim",
+    }
+    for call in ops.calls:
+        if call.name in {"replace", "unlink"}:
+            assert call.role not in reconciliation_roles
+        if call.name == "unlink":
+            assert call.detail.endswith(".transaction")
+    assert source.exists()
+    assert source.read_bytes() == source_bytes
+    assert not any(
+        ".claim." in candidate.name
+        for candidate in _reconciliation_artifacts(path)
     )
 
+
+def _directory_bytes_snapshot(path: Path) -> dict[str, bytes | str]:
+    snapshot: dict[str, bytes | str] = {}
+    for candidate in sorted(path.parent.iterdir()):
+        if candidate.is_symlink():
+            snapshot[candidate.name] = os.readlink(candidate)
+        elif candidate.is_file():
+            snapshot[candidate.name] = candidate.read_bytes()
+    return snapshot
+
+
+@pytest.mark.parametrize(
+    "artifact_name",
+    (
+        ".state.json.0123456789abcdef0123456789abcdef.reconciliation-journal",
+        (
+            ".state.json.0123456789abcdef0123456789abcdef."
+            "reconciliation-journal.tmp"
+        ),
+        ".state.json.fedcba9876543210fedcba9876543210.reconciliation-journal",
+        ".state.json.0123456789abcdef0123456789abcdef.01.reconciliation-record",
+        ".state.json.0123456789abcdef0123456789abcdef.09.reconciliation-record",
+    ),
+)
+def test_shared_established_reader_rejects_every_unbound_reconciliation_leaf(
+    tmp_path: Path,
+    artifact_name: str,
+) -> None:
+    cs = load_controller_state_module()
+    path = tmp_path / "state.json"
+    _seed_store(cs, path)
+    artifact = tmp_path / artifact_name
+    _write_private_raw(artifact, b"unbound-reconciliation-authority")
+    before = _directory_bytes_snapshot(path)
+
+    result = _read(cs, path)
+
+    assert result.mode == "unavailable"
+    assert result.payload is None
+    assert result.generation is None
+    assert result.reason == "publication_ambiguous"
+    assert _directory_bytes_snapshot(path) == before
+
+
+def test_shared_established_reader_keeps_unrelated_dotfile_benign(
+    tmp_path: Path,
+) -> None:
+    cs = load_controller_state_module()
+    path = tmp_path / "state.json"
+    _seed_store(cs, path)
+    note = tmp_path / ".state.json.operator-note"
+    _write_private_raw(note, b"not authority")
+
+    result = _read(cs, path)
+
+    assert result.mode == "valid"
+    assert result.payload == {"counters": {"seen": 1}, "members": ["first"]}
+    assert note.read_bytes() == b"not authority"
+
+
+def _introduced_authority_leaf(path: Path, posture: str, receipt_id: str) -> Path:
+    names = {
+        "journal": path.name + ".transaction",
+        "stage": f".{path.name}.{receipt_id}.reconciliation-journal",
+        "claim": (
+            f".{path.name}.{receipt_id}.reconciliation-journal.claim."
+            "fedcba9876543210fedcba9876543210"
+        ),
+        "record": f".{path.name}.{receipt_id}.01.reconciliation-record",
+        "atomic_tmp": (
+            f".{path.name}.0123456789abcdef0123456789abcdef.tmp"
+        ),
+    }
+    return path.parent / names[posture]
+
+
+@pytest.mark.parametrize(
+    "posture",
+    ("journal", "stage", "claim", "record", "atomic_tmp"),
+)
+def test_normal_capability_rejects_live_authority_namespace_changes_before_mutation(
+    tmp_path: Path,
+    posture: str,
+) -> None:
+    cs = load_controller_state_module()
+    path = tmp_path / "state.json"
+    _seed_store(cs, path)
+    ops = FaultOps()
+    session, loaded = _load_valid(cs, path, ops=ops)
+    artifact = _introduced_authority_leaf(
+        path,
+        posture,
+        "0123456789abcdef0123456789abcdef",
+    )
+    _write_private_raw(artifact, b"introduced-after-load")
+    before = _directory_bytes_snapshot(path)
+    ops.reset_trace()
+
+    try:
+        with pytest.raises(cs.ControllerStateRequired):
+            session.save({"counters": {"seen": 2}}, loaded.capability)
+    finally:
+        session.close()
+
+    assert _directory_bytes_snapshot(path) == before
+    assert ops.counters["write"] == 0
+    assert ops.counters["replace"] == 0
+    assert ops.counters["unlink"] == 0
+
+
+@pytest.mark.parametrize(
+    "posture",
+    ("journal", "stage", "claim", "record", "atomic_tmp"),
+)
+def test_reconciliation_capability_rejects_non_receipt_namespace_changes_before_mutation(
+    tmp_path: Path,
+    posture: str,
+) -> None:
+    cs = load_controller_state_module()
+    path = tmp_path / "state.json"
+    _seed_recovered_for_reconciliation(cs, path)
+    ops = FaultOps()
+    session = _open(cs, path, ops=ops)
+    recovered = session.load()
+    assert recovered.mode == "recovered"
+    receipt_id = recovered.diagnostic.recovery_receipt_id
+    assert receipt_id is not None
+    foreign_receipt = (
+        "fedcba9876543210fedcba9876543210"
+        if posture in {"stage", "claim", "record"}
+        else receipt_id
+    )
+    artifact = _introduced_authority_leaf(path, posture, foreign_receipt)
+    _write_private_raw(artifact, b"introduced-after-recovery-load")
+    before = _directory_bytes_snapshot(path)
+    ops.reset_trace()
+
+    try:
+        with pytest.raises(cs.ControllerStateRequired):
+            session.complete_reconciliation(
+                recovered.payload,
+                recovered.capability,
+                outcome="validated_previous_only",
+            )
+    finally:
+        session.close()
+
+    assert _directory_bytes_snapshot(path) == before
+    assert ops.counters["write"] == 0
+    assert ops.counters["replace"] == 0
+    assert ops.counters["unlink"] == 0
+
+
+def test_valid_normal_and_receipt_owned_reconciliation_capabilities_still_commit(
+    tmp_path: Path,
+) -> None:
+    cs = load_controller_state_module()
+    normal_path = tmp_path / "normal-state.json"
+    _seed_store(cs, normal_path)
+    with _open(cs, normal_path) as normal:
+        loaded = normal.load()
+        committed = normal.save({"counters": {"seen": 2}}, loaded.capability)
+    assert committed.mode == "valid"
+
+    reconciliation_path = tmp_path / "reconciliation-state.json"
+    _seed_restored_with_record(cs, reconciliation_path)
+    with _open(cs, reconciliation_path) as reconciliation:
+        recovered = reconciliation.load()
+        committed = reconciliation.complete_reconciliation(
+            recovered.payload,
+            recovered.capability,
+            outcome="validated_previous_only",
+        )
+    assert committed.mode == "reconciled"
+    assert committed.generation > recovered.diagnostic.recovered_generation
+
+
+def test_capability_binds_same_inode_primary_bytes_and_coherent_marker_digest(
+    tmp_path: Path,
+) -> None:
+    cs = load_controller_state_module()
+    path = tmp_path / "state.json"
+    _seed_store(cs, path)
+    ops = FaultOps()
+    session, loaded = _load_valid(cs, path, ops=ops)
+    primary_identity = _file_identity(path)
+    marker_path = _managed(path, ".initialized")
+    marker_identity = _file_identity(marker_path)
+    rewritten = _json(path)
+    rewritten["counters"] = {"same-generation-rewrite": 9}
+    _refresh_envelope_integrity(rewritten)
+    _write_private_json(path, rewritten)
+    marker = _json(marker_path)
+    marker["highWaterIntegritySha256"] = rewritten["_controllerState"][
+        "integritySha256"
+    ]
+    _refresh_sidecar_integrity(marker)
+    _write_private_json(marker_path, marker)
+    assert _file_identity(path) == primary_identity
+    assert _file_identity(marker_path) == marker_identity
+    before = _directory_bytes_snapshot(path)
+    ops.reset_trace()
+
+    try:
+        with pytest.raises(cs.ControllerStateRequired):
+            session.save({"counters": {"seen": 2}}, loaded.capability)
+    finally:
+        session.close()
+
+    assert _directory_bytes_snapshot(path) == before
+    assert ops.counters["write"] == 0
+    assert ops.counters["replace"] == 0
+    assert ops.counters["unlink"] == 0
+
+
+def test_capability_binds_marker_high_water_digest_before_mutation(
+    tmp_path: Path,
+) -> None:
+    cs = load_controller_state_module()
+    path = tmp_path / "state.json"
+    _seed_store(cs, path)
+    ops = FaultOps()
+    session, loaded = _load_valid(cs, path, ops=ops)
+    marker_path = _managed(path, ".initialized")
+    marker = _json(marker_path)
+    marker["highWaterIntegritySha256"] = "a" * 64
+    _refresh_sidecar_integrity(marker)
+    _write_private_json(marker_path, marker)
+    before = _directory_bytes_snapshot(path)
+    ops.reset_trace()
+
+    try:
+        with pytest.raises(cs.ControllerStateRequired):
+            session.save({"counters": {"seen": 2}}, loaded.capability)
+    finally:
+        session.close()
+
+    assert _directory_bytes_snapshot(path) == before
+    assert ops.counters["write"] == 0
+    assert ops.counters["replace"] == 0
+    assert ops.counters["unlink"] == 0
+
+
+class SubstituteAtClaimReplaceOps(FaultOps):
+    def __init__(self, source: Path) -> None:
+        super().__init__()
+        self.source = source
+        self.preserved = source.with_name(source.name + ".verified-preserved")
+        self.replacement_bytes = b"unverified-substitution"
+        self.fired = False
+
+    def replace(
+        self,
+        source: os.PathLike[str] | str,
+        target: os.PathLike[str] | str,
+        *,
+        src_dir_fd: int | None = None,
+        dst_dir_fd: int | None = None,
+    ) -> None:
+        if not self.fired and self._fixed_role(target) == "reconciliation_claim":
+            self.fired = True
+            os.replace(self.source, self.preserved)
+            _write_private_raw(self.source, self.replacement_bytes)
+        super().replace(
+            source,
+            target,
+            src_dir_fd=src_dir_fd,
+            dst_dir_fd=dst_dir_fd,
+        )
+
+
+def test_no_claim_replace_is_ever_attempted_during_self_correction(
+    tmp_path: Path,
+) -> None:
+    cs = load_controller_state_module()
+    path = tmp_path / "state.json"
+    source = _seed_restored_with_crash_left_record(cs, path)
+    verified_bytes = source.read_bytes()
+    ops = SubstituteAtClaimReplaceOps(source)
+    session = _open(cs, path, ops=ops)
+    recovered = session.load()
+    assert recovered.mode == "recovered"
+
+    try:
+        committed = session.complete_reconciliation(
+            recovered.payload,
+            recovered.capability,
+            outcome="validated_previous_only",
+        )
+    finally:
+        session.close()
+
+    assert committed.mode == "reconciled"
+    assert ops.fired is False
+    assert source.read_bytes() == verified_bytes
+    assert not ops.preserved.exists()
+    assert not any(
+        ".claim." in candidate.name
+        for candidate in _reconciliation_artifacts(path)
+    )
+
+
+class OccupyClaimAtReplaceOps(FaultOps):
+    def __init__(self, source: Path) -> None:
+        super().__init__()
+        self.source = source
+        self.occupied_bytes = b"preexisting-claim-authority"
+        self.claim: Path | None = None
+        self.fired = False
+
+    def replace(
+        self,
+        source: os.PathLike[str] | str,
+        target: os.PathLike[str] | str,
+        *,
+        src_dir_fd: int | None = None,
+        dst_dir_fd: int | None = None,
+    ) -> None:
+        if not self.fired and self._fixed_role(target) == "reconciliation_claim":
+            self.fired = True
+            self.claim = self.source.parent / os.fspath(target)
+            _write_private_raw(self.claim, self.occupied_bytes)
+        super().replace(
+            source,
+            target,
+            src_dir_fd=src_dir_fd,
+            dst_dir_fd=dst_dir_fd,
+        )
+
+
+def test_no_claim_destination_is_ever_created_during_self_correction(
+    tmp_path: Path,
+) -> None:
+    cs = load_controller_state_module()
+    path = tmp_path / "state.json"
+    source = _seed_restored_with_crash_left_record(cs, path)
+    source_bytes = source.read_bytes()
+    ops = OccupyClaimAtReplaceOps(source)
+    session = _open(cs, path, ops=ops)
+    recovered = session.load()
+    assert recovered.mode == "recovered"
+
+    try:
+        committed = session.complete_reconciliation(
+            recovered.payload,
+            recovered.capability,
+            outcome="validated_previous_only",
+        )
+    finally:
+        session.close()
+
+    assert committed.mode == "reconciled"
+    assert ops.fired is False
+    assert source.read_bytes() == source_bytes
+    assert ops.claim is None
+
+
+def test_reconciliation_retains_authenticated_source_across_restart_and_next_save(
+    tmp_path: Path,
+) -> None:
+    cs = load_controller_state_module()
+    path = tmp_path / "state.json"
+    _seed_recovered_for_reconciliation(cs, path)
+
+    with _open(cs, path) as session:
+        recovered = session.load()
+        committed = session.complete_reconciliation(
+            recovered.payload,
+            recovered.capability,
+            outcome="validated_previous_only",
+        )
+    assert committed.mode == "reconciled"
+    retained = _reconciliation_artifacts(path)
+    assert len(retained) == 1
+    retained_before = _reconciliation_authority_snapshot(path)
+
+    with _open(cs, path) as restarted:
+        valid = restarted.load()
+        assert valid.mode == "valid"
+        advanced = restarted.save(
+            {"counters": {"seen": 3}},
+            valid.capability,
+        )
+    assert advanced.mode == "valid"
+    assert _read(cs, path).mode == "valid"
+    assert len(_reconciliation_artifacts(path)) == 1
+    assert _reconciliation_artifacts(path)[0].read_bytes() == retained[0].read_bytes()
+    assert _reconciliation_authority_snapshot(path)[1] == retained_before[1]
+
+
+class PostJournalRemovalRereadFaultOps(FaultOps):
+    def __init__(self, boundary: str) -> None:
+        super().__init__()
+        self.boundary = boundary
+        self.injected_leaf = False
+        self.close_fault_fired = False
+
+    def fsync_directory(self, fd: int) -> None:
+        super().fsync_directory(fd)
+        if (
+            self.last_namespace_role == "transaction"
+            and self.store_path is not None
+            and not _managed(self.store_path, ".transaction").exists()
+        ):
+            _write_private_raw(
+                _managed(self.store_path, ".transaction"),
+                b"private-reread-canary",
+            )
+            self.injected_leaf = True
+
+    def close(self, fd: int) -> None:
+        role = self.fd_roles.get(fd)
+        os.close(fd)
+        self.closed_fds.add(fd)
+        if (
+            self.boundary == "close"
+            and self.injected_leaf
+            and role == "transaction"
+            and not self.close_fault_fired
+        ):
+            self.close_fault_fired = True
+            raise OSError(errno.EIO, "private-reread-canary")
+
+
+@pytest.mark.parametrize("boundary", ("open", "fstat", "read", "close"))
+def test_post_journal_removal_reread_faults_stay_inside_public_typed_load_boundary(
+    tmp_path: Path,
+    boundary: str,
+) -> None:
+    cs = load_controller_state_module()
+    path = tmp_path / "state.json"
+    _seed_prepared_receipt_with_record(cs, path)
+    ops = PostJournalRemovalRereadFaultOps(boundary)
+    if boundary != "close":
+        ops.inject(
+            boundary,
+            error=OSError(errno.EIO, "private-reread-canary"),
+            predicate=lambda call: (
+                ops.injected_leaf and call.role == "transaction"
+            ),
+        )
+
+    with _open(cs, path, ops=ops) as session:
+        result = session.load()
+
+    _assert_recovery_required(result, "publication_ambiguous")
+    assert ops.injected_leaf
+    if boundary == "close":
+        assert ops.close_fault_fired
+    else:
+        ops.assert_all_rules_fired()
+    assert _managed(path, ".transaction").read_bytes() == b"private-reread-canary"
+    diagnostic_bytes = _canonical_bytes(cs.state_diagnostic_details(result.diagnostic))
+    assert b"private-reread-canary" not in diagnostic_bytes
+
+
+@pytest.mark.parametrize(
+    ("field", "invalid"),
+    (
+        ("component", "/private/component"),
+        ("mode", "future mode with private prose"),
+        ("reason", "/private/reason"),
+        ("current_generation", -1),
+        ("current_generation", 2**53),
+        ("recovered_generation", True),
+        ("occurrence_count", -1),
+        ("occurrence_count", 2**31),
+        ("recovery_receipt_id", "0123456789ABCDEF0123456789ABCDEF"),
+        ("recovery_receipt_id", "/private/receipt"),
+        ("staging_attempt", True),
+        ("staging_attempt", 0),
+        ("staging_attempt", 9),
+    ),
+)
+def test_invalid_runtime_diagnostic_is_never_formatted_or_emitted(
+    field: str,
+    invalid: Any,
+) -> None:
+    cs = load_controller_state_module()
+    values: dict[str, Any] = {
+        "component": "collector",
+        "mode": "recovery_required",
+        "current_generation": 2,
+        "recovered_generation": 1,
+        "reason": "publication_ambiguous",
+        "recovery_receipt_id": "0123456789abcdef0123456789abcdef",
+        "occurrence_count": 1,
+        "staging_attempt": None,
+    }
+    values[field] = invalid
+    diagnostic = cs.StateDiagnostic(**values)
+
+    with pytest.raises(ValueError) as raised:
+        cs.state_diagnostic_details(diagnostic)
+    assert str(invalid) not in str(raised.value)
+    cs._FALLBACK_EMITTED = False
+    _return_value, raw = _assert_fd2_line(
+        lambda: cs.emit_state_recovery_fallback(diagnostic)
+    )
+    assert raw == b'{"controllerState":"diagnostic_invalid","schemaVersion":1}\n'
+    assert str(invalid).encode("utf-8") not in raw
+
+
+def _complete_full_recovery_cycle(cs: ModuleType, path: Path) -> dict[str, Any]:
+    with _open(cs, path) as session:
+        recovered = session.load()
+        assert recovered.mode == "recovered"
+        committed = session.complete_reconciliation(
+            recovered.payload,
+            recovered.capability,
+            outcome="validated_previous_only",
+        )
+    assert committed.mode == "reconciled"
+    receipt = _json(_managed(path, ".recovery"))
+    assert receipt["phase"] == "reconciled"
+    return receipt
+
+
+def _write_marker_manifest(path: Path, entries: Any) -> None:
+    marker_path = _managed(path, ".initialized")
+    marker = _json(marker_path)
+    if entries is None:
+        marker.pop("retainedReconciliationRecords", None)
+    else:
+        marker["retainedReconciliationRecords"] = entries
+    _refresh_sidecar_integrity(marker)
+    _write_private_json(marker_path, marker)
+
+
+def _manifest_entry(
+    receipt_id: str,
+    final_attempt: Any,
+    digest: str,
+) -> dict[str, Any]:
+    return {
+        "recoveryReceiptId": receipt_id,
+        "finalAttempt": final_attempt,
+        "recordSha256": digest,
+    }
+
+
+def test_second_recovery_cycle_completes_and_accounts_prior_record(
+    tmp_path: Path,
+) -> None:
+    cs = load_controller_state_module()
+    path = tmp_path / "state.json"
+    _seed_recovered_for_reconciliation(cs, path)
+    first = _complete_full_recovery_cycle(cs, path)
+    first_records = _reconciliation_artifacts(path)
+    assert len(first_records) == 1
+    first_bytes = first_records[0].read_bytes()
+
+    _damage_primary(path, "truncated")
+    second = _complete_full_recovery_cycle(cs, path)
+    assert second["recoveryReceiptId"] != first["recoveryReceiptId"]
+
+    with _open(cs, path) as restarted:
+        result = restarted.load()
+    assert result.mode == "valid"
+    assert _read(cs, path).mode == "valid"
+    assert len(_reconciliation_artifacts(path)) == 2
+    assert first_records[0].read_bytes() == first_bytes
+    entries = _json(_managed(path, ".initialized"))[
+        "retainedReconciliationRecords"
+    ]
+    assert {entry["recoveryReceiptId"] for entry in entries} == {
+        first["recoveryReceiptId"],
+        second["recoveryReceiptId"],
+    }
+    assert entries == sorted(
+        entries, key=lambda entry: entry["recoveryReceiptId"]
+    )
+
+
+def test_crash_left_record_self_corrects_on_next_attempt(
+    tmp_path: Path,
+) -> None:
+    cs = load_controller_state_module()
+    path = tmp_path / "state.json"
+    _seed_recovered_for_reconciliation(cs, path)
+    ops = FaultOps()
+    session = _open(cs, path, ops=ops)
+    recovered = session.load()
+    ops.reset_trace()
+    ops.crash_after(
+        "open",
+        predicate=lambda call: call.role == "reconciliation_record",
+    )
     try:
         with pytest.raises(SimulatedCrash):
             session.complete_reconciliation(
@@ -5391,20 +6002,362 @@ def test_reconciliation_cleanup_claim_crash_is_explicit_fail_closed_posture(
             )
     finally:
         session.close()
-
     ops.assert_all_rules_fired()
-    assert not source.exists()
-    claims = tuple(
-        candidate
-        for candidate in _reconciliation_artifacts(path)
-        if ".reconciliation-journal.claim." in candidate.name
-    )
-    assert len(claims) == 1
-    assert claims[0].read_bytes() == source_bytes
-    before = _reconciliation_authority_snapshot(path)
+    receipt_id = _json(_managed(path, ".recovery"))["recoveryReceiptId"]
+    torn = path.parent / _record_name(path, receipt_id, 1)
+    assert torn.read_bytes() == b""
+
+    with _open(cs, path) as restarted:
+        retry = restarted.load()
+        assert retry.mode == "recovered"
+        committed = restarted.complete_reconciliation(
+            retry.payload,
+            retry.capability,
+            outcome="validated_previous_only",
+        )
+
+    assert committed.mode == "reconciled"
+    assert torn.read_bytes() == b""
+    receipt = _json(_managed(path, ".recovery"))
+    assert receipt["stagingAttempt"] == 2
+    final = path.parent / _record_name(path, receipt_id, 2)
+    entries = _json(_managed(path, ".initialized"))[
+        "retainedReconciliationRecords"
+    ]
+    assert entries == [
+        {
+            "recoveryReceiptId": receipt_id,
+            "finalAttempt": 2,
+            "recordSha256": hashlib.sha256(final.read_bytes()).hexdigest(),
+        }
+    ]
+
+
+@pytest.mark.parametrize(
+    "crash_point",
+    ("bound", "canonical", "manifest_appended"),
+)
+def test_post_bind_crash_exact_resumes_and_appends_once(
+    tmp_path: Path,
+    crash_point: str,
+) -> None:
+    cs = load_controller_state_module()
+    path = tmp_path / "state.json"
+    if crash_point == "bound":
+        _seed_exact_recovery_phase(cs, path, "reconciliation_prepared")
+    else:
+        _seed_recovered_for_reconciliation(cs, path)
+        ops = FaultOps()
+        session = _open(cs, path, ops=ops)
+        recovered = session.load()
+        ops.reset_trace()
+        if crash_point == "canonical":
+
+            def crash_predicate(call: BoundaryCall) -> bool:
+                receipt_path = _managed(path, ".recovery")
+                return (
+                    call.role == "transaction"
+                    and _managed(path, ".transaction").exists()
+                    and receipt_path.exists()
+                    and _json(receipt_path).get("phase")
+                    == "reconciliation_prepared"
+                )
+
+        else:
+
+            def crash_predicate(call: BoundaryCall) -> bool:
+                receipt_path = _managed(path, ".recovery")
+                marker_path = _managed(path, ".initialized")
+                return (
+                    call.role == "initialized"
+                    and receipt_path.exists()
+                    and _json(receipt_path).get("phase")
+                    == "reconciliation_prepared"
+                    and "retainedReconciliationRecords"
+                    in _json(marker_path)
+                )
+
+        ops.crash_after("fsync_directory", predicate=crash_predicate)
+        try:
+            with pytest.raises(SimulatedCrash):
+                session.complete_reconciliation(
+                    recovered.payload,
+                    recovered.capability,
+                    outcome="validated_previous_only",
+                )
+        finally:
+            session.close()
+        ops.assert_all_rules_fired()
+        assert (
+            _json(_managed(path, ".recovery"))["phase"]
+            == "reconciliation_prepared"
+        )
+
+    receipt_before = _json(_managed(path, ".recovery"))
+    receipt_id = receipt_before["recoveryReceiptId"]
+    bound_attempt = receipt_before["stagingAttempt"]
+    assert bound_attempt is not None
 
     with _open(cs, path) as restarted:
         result = restarted.load()
+        assert result.mode == "reconciled"
+        assert restarted.reload().mode == "valid"
+
+    receipt = _json(_managed(path, ".recovery"))
+    assert receipt["phase"] == "reconciled"
+    assert receipt["stagingAttempt"] == bound_attempt
+    entries = _json(_managed(path, ".initialized"))[
+        "retainedReconciliationRecords"
+    ]
+    matching = [
+        entry
+        for entry in entries
+        if entry["recoveryReceiptId"] == receipt_id
+    ]
+    assert len(matching) == 1
+    assert matching[0]["finalAttempt"] == bound_attempt
+    record = path.parent / _record_name(path, receipt_id, bound_attempt)
+    assert (
+        matching[0]["recordSha256"]
+        == hashlib.sha256(record.read_bytes()).hexdigest()
+    )
+    if bound_attempt < 8:
+        higher = path.parent / _record_name(
+            path, receipt_id, bound_attempt + 1
+        )
+        assert not higher.exists()
+
+
+def test_substituted_record_differing_in_unbound_fields_fails_closed(
+    tmp_path: Path,
+) -> None:
+    cs = load_controller_state_module()
+    path = tmp_path / "state.json"
+    _seed_recovered_for_reconciliation(cs, path)
+    _complete_full_recovery_cycle(cs, path)
+    records = _reconciliation_artifacts(path)
+    assert len(records) == 1
+    record = records[0]
+    substitute = _json(record)
+    assert substitute["transactionId"] != "f" * 32
+    substitute["transactionId"] = "f" * 32
+    _refresh_sidecar_integrity(substitute)
+    _write_private_json(record, substitute)
+    substituted_bytes = record.read_bytes()
+
+    with _open(cs, path) as session:
+        result = session.load()
+    reader = _read(cs, path)
+
+    _assert_recovery_required(result)
+    assert reader.mode == "unavailable"
+    assert record.read_bytes() == substituted_bytes
+
+
+def test_attempt_exhaustion_fails_closed_retention_exhausted(
+    tmp_path: Path,
+) -> None:
+    cs = load_controller_state_module()
+    path = tmp_path / "state.json"
+    _seed_recovered_for_reconciliation(cs, path)
+    with _open(cs, path) as session:
+        assert session.load().mode == "recovered"
+    receipt_id = _json(_managed(path, ".recovery"))["recoveryReceiptId"]
+    for attempt in range(1, 9):
+        _write_private_raw(
+            path.parent / _record_name(path, receipt_id, attempt),
+            b"crash-left",
+        )
+
+    ops = FaultOps()
+    session = _open(cs, path, ops=ops)
+    recovered = session.load()
+    assert recovered.mode == "recovered"
+    ops.reset_trace()
+    before = _directory_bytes_snapshot(path)
+    try:
+        with pytest.raises(cs.ControllerStateRequired) as raised:
+            session.complete_reconciliation(
+                recovered.payload,
+                recovered.capability,
+                outcome="validated_previous_only",
+            )
+    finally:
+        session.close()
+
+    assert raised.value.diagnostic.reason == "retention_exhausted"
+    assert ops.counters["write"] == 0
+    assert ops.counters["replace"] == 0
+    assert ops.counters["unlink"] == 0
+    assert _directory_bytes_snapshot(path) == before
+
+
+def test_attempt_09_is_unmanaged_authority(tmp_path: Path) -> None:
+    cs = load_controller_state_module()
+    path = tmp_path / "state.json"
+    _seed_recovered_for_reconciliation(cs, path)
+    with _open(cs, path) as session:
+        assert session.load().mode == "recovered"
+    receipt_id = _json(_managed(path, ".recovery"))["recoveryReceiptId"]
+    rogue = (
+        path.parent / f".{path.name}.{receipt_id}.09.reconciliation-record"
+    )
+    _write_private_raw(rogue, b"rogue-attempt")
+
+    with _open(cs, path) as session:
+        result = session.load()
+    reader = _read(cs, path)
 
     _assert_recovery_required(result, "publication_ambiguous")
-    assert _reconciliation_authority_snapshot(path) == before
+    assert reader.mode == "unavailable"
+    assert rogue.read_bytes() == b"rogue-attempt"
+
+
+def test_manifest_at_capacity_blocks_new_receipt(tmp_path: Path) -> None:
+    cs = load_controller_state_module()
+    path = tmp_path / "state.json"
+    _seed_store(
+        cs,
+        path,
+        (
+            {"counters": {"seen": 1}},
+            {"counters": {"seen": 2}},
+        ),
+    )
+    entries = [
+        _manifest_entry(f"{index:032x}", 1, "0" * 64) for index in range(4)
+    ]
+    _write_marker_manifest(path, entries)
+    with _open(cs, path) as session:
+        assert session.load().mode == "valid"
+    _damage_primary(path, "truncated")
+    before = _directory_bytes_snapshot(path)
+
+    with _open(cs, path) as session:
+        result = session.load()
+
+    _assert_recovery_required(result, "retention_exhausted")
+    assert not _managed(path, ".recovery").exists()
+    assert _directory_bytes_snapshot(path) == before
+
+
+def test_manifest_entry_with_absent_record_is_benign(tmp_path: Path) -> None:
+    cs = load_controller_state_module()
+    path = tmp_path / "state.json"
+    _seed_store(cs, path)
+    _write_marker_manifest(
+        path,
+        [_manifest_entry("0123456789abcdef0123456789abcdef", 3, "a" * 64)],
+    )
+
+    with _open(cs, path) as session:
+        result = session.load()
+    reader = _read(cs, path)
+
+    assert result.mode == "valid"
+    assert reader.mode == "valid"
+
+
+def test_manifest_final_digest_mismatch_fails_closed(tmp_path: Path) -> None:
+    cs = load_controller_state_module()
+    path = tmp_path / "state.json"
+    _seed_recovered_for_reconciliation(cs, path)
+    _complete_full_recovery_cycle(cs, path)
+    records = _reconciliation_artifacts(path)
+    assert len(records) == 1
+    _write_private_raw(records[0], b"tampered-record-bytes")
+
+    with _open(cs, path) as session:
+        result = session.load()
+    reader = _read(cs, path)
+
+    _assert_recovery_required(result)
+    assert reader.mode == "unavailable"
+    assert records[0].read_bytes() == b"tampered-record-bytes"
+
+
+@pytest.mark.parametrize(
+    "malformation",
+    (
+        "empty_array",
+        "oversized",
+        "unsorted",
+        "duplicate_receipt",
+        "unknown_entry_key",
+        "bool_attempt",
+        "string_attempt",
+        "attempt_out_of_range",
+        "short_digest",
+    ),
+)
+def test_marker_with_malformed_manifest_is_recovery_required(
+    tmp_path: Path,
+    malformation: str,
+) -> None:
+    cs = load_controller_state_module()
+    path = tmp_path / "state.json"
+    _seed_store(cs, path)
+    good = _manifest_entry("0123456789abcdef0123456789abcdef", 1, "a" * 64)
+    other = _manifest_entry("fedcba9876543210fedcba9876543210", 2, "b" * 64)
+    entries: Any
+    if malformation == "empty_array":
+        entries = []
+    elif malformation == "oversized":
+        entries = [
+            _manifest_entry(f"{index:032x}", 1, "c" * 64)
+            for index in range(5)
+        ]
+    elif malformation == "unsorted":
+        entries = [other, good]
+    elif malformation == "duplicate_receipt":
+        entries = [good, dict(good, finalAttempt=2)]
+    elif malformation == "unknown_entry_key":
+        entries = [dict(good, extra="x")]
+    elif malformation == "bool_attempt":
+        entries = [dict(good, finalAttempt=True)]
+    elif malformation == "string_attempt":
+        entries = [dict(good, finalAttempt="1")]
+    elif malformation == "attempt_out_of_range":
+        entries = [dict(good, finalAttempt=9)]
+    else:
+        entries = [dict(good, recordSha256="a" * 63)]
+    _write_marker_manifest(path, entries)
+
+    with _open(cs, path) as session:
+        result = session.load()
+    reader = _read(cs, path)
+
+    _assert_recovery_required(result)
+    assert reader.mode == "unavailable"
+
+
+def test_old_format_receipt_with_record_fails_closed(tmp_path: Path) -> None:
+    cs = load_controller_state_module()
+    path = tmp_path / "state.json"
+    _seed_recovered_for_reconciliation(cs, path)
+    _complete_full_recovery_cycle(cs, path)
+    records = _reconciliation_artifacts(path)
+    assert len(records) == 1
+    record_bytes = records[0].read_bytes()
+    receipt_path = _managed(path, ".recovery")
+    old_format = {
+        key: value
+        for key, value in _json(receipt_path).items()
+        if key not in {"stagingAttempt", "stagedRecordSha256"}
+    }
+    _refresh_sidecar_integrity(old_format)
+    _write_private_json(receipt_path, old_format)
+    ops = FaultOps()
+
+    with _open(cs, path, ops=ops) as session:
+        result = session.load()
+
+    _assert_recovery_required(result)
+    assert records[0].read_bytes() == record_bytes
+    record_reads = [
+        call
+        for call in ops.calls
+        if call.name in {"open", "read"}
+        and call.role == "reconciliation_record"
+    ]
+    assert record_reads == []

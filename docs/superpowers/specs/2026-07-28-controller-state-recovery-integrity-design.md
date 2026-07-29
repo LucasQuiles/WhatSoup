@@ -226,8 +226,10 @@ The helper returns a discriminated result:
 The result also contains only bounded enums and generation counters needed by the
 caller. Raw exceptions are mapped to a closed reason set such as `read_failed`,
 `unsafe_file`, `decode_failed`, `invalid_root`, `schema_incompatible`,
-`integrity_mismatch`, `generation_invalid`, `publication_ambiguous`, or
-`evidence_preservation_failed`.
+`integrity_mismatch`, `generation_invalid`, `publication_ambiguous`,
+`evidence_preservation_failed`, or `retention_exhausted` (a bounded
+reconciliation-record resource — staging attempts or the retained-record
+manifest — is full and requires operator-invoked offline archival).
 
 Only the helper can construct a capability. It is tied to the component, path
 identity, expected generation, allowed operation, and active lock context. Ordinary
@@ -261,29 +263,55 @@ non-user-controlled names:
 - `state.json.recovery` — the canonical closed recovery receipt; and
 - `state.json.lock` — stable lock file, never unlinked during normal operation.
 
-Reconciliation additionally uses three exact, receipt-derived private names:
+Reconciliation additionally uses one exact, receipt-derived private name that
+new builds produce — the append-only reconciliation record:
 
-- `.state.json.<recoveryReceiptId>.reconciliation-journal.tmp` — the
-  operation-owned incomplete publication temporary; and
-- `.state.json.<recoveryReceiptId>.reconciliation-journal` — the durable staged
-  journal; and
-- `.state.json.<recoveryReceiptId>.reconciliation-journal.claim.<hex32>` — an
-  operation-owned quarantine used only while deleting a verified temp or stage.
+- `.state.json.<recoveryReceiptId>.<attempt>.reconciliation-record` — a
+  write-once staging record, where `<attempt>` is the zero-padded closed range
+  `01` through `08`.
+
+The attempt range itself is grammar: `09` or any other numeric suffix is not a
+record name and is unmanaged authority. Wherever an attempt appears in receipt
+or marker fields it is a JSON integer 1..8 — never a boolean, string, or float.
+Three legacy grammars remain recognized but are never produced by this design:
+
+- `.state.json.<recoveryReceiptId>.reconciliation-journal.tmp` — the legacy
+  incomplete publication temporary;
+- `.state.json.<recoveryReceiptId>.reconciliation-journal` — the legacy durable
+  staged journal; and
+- `.state.json.<recoveryReceiptId>.reconciliation-journal.claim.<hex32>` — the
+  legacy deletion quarantine.
+
+A legacy artifact is always unresolved fail-closed authority: it is preserved,
+never read as content, and never cleaned, renamed, migrated, or reinterpreted
+by the online service.
 
 The ID is exactly 32 lowercase hexadecimal characters already bound by the
 receipt. No other state-prefixed sibling is authority. Atomic publication
 temporaries are accepted only by the closed grammar
 `.state.json[.previous|.initialized|.transaction|.recovery].<hex32>.tmp`;
-the three reconciliation names above are the only accepted stage/claim grammars.
+the record grammar and the three legacy grammars above are the only accepted
+reconciliation name grammars.
 Unrelated siblings such as `.state.json.notes` neither establish a pristine store
-nor invalidate a sole legacy primary. Every exact temporary or stage name does
-establish unresolved authority and therefore fails closed outside its owned
-operation and phase.
+nor invalidate a sole legacy primary. Every exact temporary, record, or legacy
+reconciliation name establishes authority that must be accounted by the
+classification below; unaccounted names fail closed.
 
-An exact random atomic temporary beside an established store is
-`publication_ambiguous` for both owner and shared-reader loads; random temporary
-IDs are not journal-bound restart authority. Immutable recovery evidence is
-classified separately and remains legal after reconciliation.
+Reconciliation-adjacent siblings classify three ways. First, an exact random
+atomic temporary beside an established store is `publication_ambiguous` for both
+owner and shared-reader loads; random temporary IDs are not journal-bound restart
+authority. Second, a reconciliation record is legal only when accounted: either a
+current-receipt record permitted by the active phase posture, or a record
+permitted by a `retainedReconciliationRecords` manifest entry (attempts one
+through that entry's `finalAttempt`). Records are never moved, renamed,
+overwritten, or deleted by the online service. Record content is read only to
+verify a present manifest-final record's digest (in every phase) and to promote
+the receipt-bound attempt from `reconciliation_prepared` onward; every other
+accounted record is inert — identity- and permission-checked as a private
+regular non-symlink file, its content never read or parsed. Third, legacy
+stage, temporary, and claim artifacts always fail closed, preserved. Immutable
+recovery evidence is classified separately and remains legal after
+reconciliation.
 
 Damaged primary evidence is copied byte-for-byte from its already verified
 descriptor to a private, collision-resistant name under the same state directory
@@ -302,7 +330,15 @@ are `planned`, `evidence_preserved`, `restored`,
 `reconciliation_prepared`, and `reconciled`. The opaque ID deterministically
 selects the private evidence leaf without placing its name in the receipt. A
 `reconciliation_prepared` receipt also binds the intended target generation and
-integrity value so a restart can finish or reject that exact reconciliation. It
+integrity value so a restart can finish or reject that exact reconciliation, and
+binds the staging record exactly: `stagingAttempt` (a non-boolean JSON integer
+1..8) and `stagedRecordSha256` (lowercase hex64, the SHA-256 of the exact
+canonical record bytes). Both fields are null in `planned`,
+`evidence_preserved`, and `restored`; both are non-null from
+`reconciliation_prepared` onward and are immutable once set. A missing,
+asymmetrically null, boolean, non-integer, out-of-range, or non-hex64 value
+fails closed before any mutation, and a receipt missing these fields — an old
+format — fails closed before any record is read. It
 contains no payload bytes, evidence filename, or path. Its private integrity value
 is never projected into logs or health.
 Creating and advancing the receipt is part of the recovery transaction; an
@@ -316,7 +352,22 @@ first generation is published, advances only through the active journal after a
 new primary is namespace-synced, and is never removed by normal operation. The
 primary and previous must bind its store ID, and the primary generation/integrity
 must match its high-water witness unless an active journal proves the exact
-in-flight target. A missing, malformed, or mismatched marker in an established
+in-flight target. The marker may also contain the optional
+`retainedReconciliationRecords` manifest: a nonempty array of at most four
+(`MAX_RETAINED_RECONCILIATION_RECORDS = 4`)
+closed entries `{recoveryReceiptId, finalAttempt, recordSha256}`, sorted
+lexicographically by receipt ID and unique by receipt ID, with `finalAttempt` a
+non-boolean integer 1..8 and digest/ID lowercase hex64/hex32, covered by the
+sidecar integrity digest. An absent key means no retained records; a
+present-but-empty array is malformed. An offline archive that removes the last
+entry omits the key entirely. Unknown marker or entry keys are rejected. The
+online service appends to the manifest idempotently only between canonical
+reconciliation publication and the `reconciled` receipt advance, never changing
+the high-water fields; entries are pruned only by the separately specified,
+operator-invoked offline archival procedure. A fresh recovery receipt never
+reuses the store ID or a receipt ID already present in the manifest, so
+manifest entries and record names stay unambiguous across receipt turnover. A missing, malformed, or mismatched
+marker in an established
 store is `recovery_required`, never silently repaired or treated as `valid`.
 
 `state.json.transaction` is written and namespace-synced before any publication
@@ -345,6 +396,15 @@ The helper rejects:
 
 New directories and files are created private. Existing untrusted objects are not
 silently repaired with `chmod`, followed, moved, or overwritten.
+
+Substitution resistance is digest-bound: authority transfers only by comparing
+the SHA-256 of exact canonical bytes against a previously validated receipt or
+marker field after no-follow identity verification, and no verified-then-moved
+object exists in the design. A record's self-contained `integritySha256` is
+never authority. This claim is deliberately bounded: it detects substitution
+against trusted receipt/marker state and stale private-directory artifacts. It
+is not a MAC or signature and does not authenticate an actor able to rewrite
+the marker, receipt, record, and their sidecars together.
 
 ## Load and Recovery Algorithm
 
@@ -375,21 +435,29 @@ All steps occur under the stable exclusive state lock.
    matching recovery receipt to `reconciled` before it can return a normal
    `reconciled` result; other operations continue through the remaining load
    checks. Any mismatch is `recovery_required`.
-5. If a recovery receipt is `planned` or `evidence_preserved`, resume only its
+5. Enforce the closed reconciliation-artifact posture for the active phase (the
+   accounted set defined under Save Algorithm and Crash Ordering) before using
+   any receipt authority; unaccounted, digest-mismatched, or legacy artifacts
+   fail closed with everything preserved. If a recovery receipt is `planned` or
+   `evidence_preserved`, resume only its
    recorded next step after revalidating all observed identities. If it is
    `restored`, require byte-equivalent primary and previous generations below the
    unchanged marker high-water witness and return `recovered` with a
-   reconciliation-only capability. If it is `reconciliation_prepared`, accept only
+   reconciliation-only capability; any current-receipt records present are inert
+   and their content is not read. If it is `reconciliation_prepared`, accept only
    the recorded recovered generation or the exact recorded target primary plus
-   recovered previous; finish or retry that transaction, advance the marker, and
+   recovered previous, with the bound record required to match
+   `stagedRecordSha256` exactly; finish or retry that transaction, advance the
+   marker, append the manifest entry exactly once, and
    durably mark the receipt `reconciled`. The ordinary `valid` path is unavailable
    until the receipt is durably `reconciled`.
-   Before incrementing the receipt occurrence count or promoting a staged journal,
+   Before incrementing the receipt occurrence count or promoting a digest-bound
+   record,
    cross-bind the receipt's marker high-water and recovered generation/integrity
    to the validated marker, previous envelope, retained bytes, and journal
    expected values. Cross-bind a prepared receipt's target fields to the journal
-   target. Any mismatch returns without mutating the receipt, stage, or canonical
-   journal.
+   target. Any mismatch returns without mutating the receipt, any record, or the
+   canonical journal.
 6. Parse and validate the primary's root, metadata, canonical digest, generation,
    store ID, and component payload schema.
 7. If the primary generation and integrity match the marker high-water witness,
@@ -489,41 +557,59 @@ Temporary files are removed only when their exact identity belongs to the active
 operation and removal is safe. Retained primary, previous, or evidence files are
 never cleaned speculatively.
 
-Reconciliation stages use an additional restart-safe publication sequence. With
-the receipt still at `restored`, the helper writes the exact receipt-owned `.tmp`
-name with create-exclusive/no-follow semantics, validates owner/mode/type, writes
-canonical journal bytes, syncs the file, closes it, atomically renames it to the
-durable stage name, and syncs the directory. A crash at open, write, file sync, or
-close may leave only the exact incomplete `.tmp`; a retry verifies its identity,
-claims it under the exact quarantine grammar while retaining the verified source
-descriptor, requires the claimed inode and bytes to equal the cached pre-claim
-identity and bytes, removes only that claim, syncs removal, and recreates it. A
-crash at rename or directory sync may leave the durable stage; a retry reopens it,
-requires identical canonical bytes and device/inode identity, syncs the file and
-directory again, and reuses it.
+Reconciliation staging uses an append-only, restart-safe publication sequence.
+With the receipt still at `restored`, the helper takes the verified authority
+namespace snapshot once, rejects any `09` or otherwise unrecognized
+state-prefixed sibling as unmanaged authority, and selects the next attempt as
+one greater than the highest recognized current-receipt record; if all eight
+attempts exist it fails closed `retention_exhausted` before creating anything.
+It then writes the exact receipt-owned record name once with
+create-exclusive/no-follow semantics: private open with explicit mode, full
+canonical journal bytes, file sync, close, directory sync, then a no-replace
+reread that requires byte and device/inode identity equality. Existing records
+are never opened, parsed, compared, reused, moved, renamed, overwritten, or
+removed: a crash at open, write, file sync, close, or directory sync leaves the
+incomplete record as preserved inert evidence, and the retried preparation
+simply selects the next attempt.
 
-Only after that durable-stage proof and all receipt/journal/marker/recovered
+Only after that durable record proof and all receipt/journal/marker/recovered
 cross-bindings succeed may the helper advance the receipt to
-`reconciliation_prepared`. It then reopens and revalidates the stage immediately
-before publishing cached verified bytes to `state.json.transaction` through the
-ordinary separately owned atomic writer. The stage pathname is never renamed into
-canonical authority. The helper reopens the canonical journal without following
-links, requires exact cached bytes, syncs the canonical file and directory, then
-claims and removes the original stage using its cached pre-claim identity and
-bytes. Only after canonical validation and successful cleanup may it mutate the
-transaction. A replacement by a regular file or symlink at either final gap is
-typed `recovery_required`; it is preserved rather than deleted or promoted.
+`reconciliation_prepared`, binding the target generation, target integrity,
+`stagingAttempt`, and `stagedRecordSha256` in the same durable receipt write.
+From the bind onward the record is exact-digest authority: the helper reopens
+the bound record without following links, requires SHA-256 equality with
+`stagedRecordSha256`, retains the verified bytes in memory, and only then
+publishes them to `state.json.transaction` through the ordinary separately
+owned atomic writer and completes the canonical transaction. The record
+pathname is never renamed into canonical authority and never deleted. After
+canonical publication and before the durable receipt advance to `reconciled`,
+the helper appends the record's manifest entry `{recoveryReceiptId,
+finalAttempt, recordSha256}` to the initialized marker idempotently; a crash
+between append and advance resumes the same prepared receipt and appends
+exactly once. The completed record remains on disk as inert, manifest-accounted
+evidence.
 
-The allowed phase postures are closed: `restored` may have no stage, the exact
-incomplete temporary, or the exact durable stage; `reconciliation_prepared` must
-have the exact durable stage, its canonical transaction, or both while canonical
-publication is durable but stage cleanup has not completed;
-`reconciled` has none of the temporary, stage, or canonical transaction. A stage
-or temporary for another receipt, or any such artifact beside another recovery
-phase, is unresolved authority and fails closed. A crash after source-to-claim
-rename leaves the exact claim as preserved authority and every restart returns
-typed `publication_ambiguous` without cleanup or mutation; it is never ignored or
-treated as a resumable receipt-only witness.
+The allowed phase postures are closed over the accounted set: every on-disk
+reconciliation artifact must be either a current-receipt record permitted by
+the phase rules below or a record permitted by a manifest entry (attempts one
+through that entry's `finalAttempt`). All recognized artifacts must be private
+regular non-symlink files. A present manifest-final record must be read and its
+digest must equal its entry in every phase; manifest-permitted lower attempts
+are inert and their content is never read or parsed; a manifest entry whose
+final record is absent on disk is legal (archived offline). With no receipt, or
+a receipt at `planned` or `evidence_preserved`, only manifest-accounted records
+are legal. `restored` additionally permits current-receipt attempts one through
+eight, all inert with no content read. `reconciliation_prepared` additionally
+permits current-receipt attempts one through `stagingAttempt` and requires the
+exact `stagingAttempt` record to exist and match `stagedRecordSha256`, with or
+without the canonical transaction while canonical publication has not
+completed. `reconciled` permits manifest-accounted records only and requires
+the completed record's manifest entry to be present. Any artifact outside the
+accounted set, any digest mismatch, and any legacy stage, temporary, or claim
+artifact is unresolved authority and fails closed, preserved. A crash before
+the `reconciliation_prepared` bind self-corrects on the next attempt; a crash
+after the bind resumes the exact digest-bound record or fails closed — never a
+new attempt.
 
 ## Concurrency Contract
 
@@ -647,19 +733,25 @@ Health distinguishes:
 
 The diagnostic schema is closed and contains only component class, state mode,
 current and recovered generation counters when known, bounded error class, random
-opaque recovery receipt ID when available, and a bounded occurrence count. It
+opaque recovery receipt ID when available, a bounded occurrence count, and a
+bounded `stagingAttempt` integer when the receipt binds one. It
 contains no damaged values, raw exception text, file path, evidence filename,
 environment value, domain identifier, destination, account, message, credential,
 topology, or digest derived from payload content.
 
 Controller-log metadata projection has key-aware closed allowlists for all five
-state modes and all ten state reasons. Unknown strings are dropped. The canonical
+state modes and the full closed state reason set, including
+`retention_exhausted`. Current and recovered generation counters, the
+occurrence count, and `stagingAttempt` project under bounded numeric
+allowlists. Unknown strings are dropped. The canonical
 component remains only in the outer controller-log envelope; the projected
 details do not duplicate that reserved field or relax arbitrary string handling.
 
-Receipt-derived stage and temporary names are private implementation details.
-Their names, paths, journal bytes, identities, and integrity values are never
-projected into controller logs, health, stderr fallback, or public diagnostics.
+Receipt-derived record, stage, and temporary names, the retained-record
+manifest contents, and every record digest are private implementation details.
+Their names, paths, journal bytes, identities, digests, and integrity values
+are never projected into controller logs, health, stderr fallback, or public
+diagnostics.
 
 This is an owner-approved privacy refinement to #2463's proposed diagnostic digest:
 the integrity digest remains private in the state envelope, while diagnostics use
@@ -715,12 +807,15 @@ previous complete bundle; it does not run mixed writers. Any state written by an
 old version after migration requires explicit reconciliation before the new writer
 resumes.
 
-Older helpers that do not implement receipt-derived staging encounter either an
-exact stage/temporary as unknown authority or a prepared receipt without the
-canonical journal and must fail closed; they must not classify that store as
-pristine or legacy. New helpers likewise fail closed on stage names or phase
-postures they do not own. A rollout never asks mixed helper versions to clean,
-rename, or reinterpret one another's reconciliation artifacts.
+Older helpers that do not implement append-only records fail closed by format,
+not by rollout choreography: a record name, a manifest-bearing initialized
+marker, or a receipt carrying `stagingAttempt`/`stagedRecordSha256` each fails
+their closed-key validation before any artifact is interpreted, and they must
+not classify that store as pristine or legacy. New helpers likewise fail closed
+on legacy stage, temporary, or claim artifacts, on old-format receipts missing
+the two record fields, and on phase postures they do not own. No helper version
+ever cleans, renames, migrates, or reinterprets another version's
+reconciliation artifacts — the on-disk format guarantees it.
 
 ## Collision and Integration Review
 
@@ -774,6 +869,16 @@ shared helper and each production adapter.
 | Recovered state before reconciliation | Reconciliation-only | Queue, remote, outbox, alert, clear, or ordinary save |
 | Restart with `restored` recovery receipt | `recovered`, reconciliation-only | Ordinary `valid` path |
 | Restart with `reconciliation_prepared` receipt | Finish/retry exact target or fail closed | Different payload or ordinary `valid` path |
+| Completed cycle, then a full second recovery cycle | Both cycles complete; both records manifest-accounted; reopen `valid` | Prior-cycle record rejected after receipt turnover |
+| Crash at record open/write/file-sync/close/dir-sync before bind | Restart self-corrects on next attempt; torn record preserved byte-for-byte | Read, reuse, rename, unlink, or overwrite of any record |
+| Crash after bind, canonical transaction, manifest append, or receipt advance | Exact digest-bound resume; manifest entry exactly once | New attempt or duplicate manifest entry |
+| Well-formed record substituted, differing only in receipt-unbound fields | Fail closed before primary/marker mutation | Semantic re-derivation accepting the substitute |
+| Manifest-final present with digest mismatch; absent final; lower attempts | Mismatch fails closed; absent final benign; lower attempts inert | Content read of inert records |
+| Attempt `09`, boolean/string attempt field, legacy stage/temp/claim | Fail closed, preserved | Grammar widening or migration |
+| Eight staging attempts or four manifest entries reached | `retention_exhausted` before any write | Partial record, receipt, or marker write |
+| Full recovery cycle under mutation interceptors | Zero rename/unlink against any record; sole unlink targets `.transaction` | Claim or cleanup path firing |
+| Record lifecycle diagnostics | Only bounded reasons and numeric fields project | Record name, digest, or manifest projection |
+| Old-format receipt or old helper meets new artifacts | Fail closed before mutation | Silent migration or cleanup |
 | Unsafe/full state directory | Closed stderr fallback + nonzero exit | Raw exception, success, or durable-receipt claim |
 | NaN, infinity, or semantic schema failure | Typed invalid | Digest or save |
 
@@ -856,3 +961,13 @@ The owner approved this written design on 2026-07-28, and implementation plannin
 is complete. Any change to the component cohort, on-disk format, recovery
 eligibility, lock lifetime, or diagnostic fields requires a design amendment
 before production code.
+
+Amendment (2026-07-29): the append-only reconciliation-record sequence, name
+grammar, receipt fields (`stagingAttempt`, `stagedRecordSha256`),
+initialized-marker manifest (`retainedReconciliationRecords`), and the
+`retention_exhausted` reason above supersede the previous
+temp-rename-claim-delete cleanup design, which could not satisfy this
+document's own substitution-safety contract with portable rename semantics.
+This amendment discharges the change-control obligation above for the
+retained-record hardening pass and those format additions. The owner approved
+the amended design after an independent structured review on 2026-07-29.
