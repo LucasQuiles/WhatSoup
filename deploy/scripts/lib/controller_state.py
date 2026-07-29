@@ -885,11 +885,14 @@ class ControllerStateSession:
     def _leaf(self, suffix: str) -> str:
         return self._name + suffix
 
-    def _has_unmanaged_authority_artifact(self) -> bool:
+    def _list_names(self) -> list[str]:
         try:
-            names = os.listdir(self._directory_fd)
+            return os.listdir(self._directory_fd)
         except OSError as exc:
             raise _StateFault("read_failed") from exc
+
+    def _has_unmanaged_authority_artifact(self) -> bool:
+        names = self._list_names()
         return any(
             _EVIDENCE_LEAF.fullmatch(name) is not None
             or self._authority_temporary_leaf(name)
@@ -928,10 +931,7 @@ class ControllerStateSession:
         )
 
     def _atomic_authority_temporary_names(self) -> set[str]:
-        try:
-            names = os.listdir(self._directory_fd)
-        except OSError as exc:
-            raise _StateFault("read_failed") from exc
+        names = self._list_names()
         escaped = re.escape(self._name)
         atomic = re.compile(
             rf"^\.{escaped}(?:\.(?:previous|initialized|transaction|recovery))?"
@@ -948,10 +948,7 @@ class ControllerStateSession:
         }
 
     def _reconciliation_artifact_names(self) -> set[str]:
-        try:
-            names = os.listdir(self._directory_fd)
-        except OSError as exc:
-            raise _StateFault("read_failed") from exc
+        names = self._list_names()
         return {
             name for name in names if self._reconciliation_artifact_leaf(name)
         }
@@ -962,10 +959,7 @@ class ControllerStateSession:
             raw = self._read_leaf(suffix)
             if raw is not None:
                 entries.append((self._leaf(suffix), raw))
-        try:
-            names = os.listdir(self._directory_fd)
-        except OSError as exc:
-            raise _StateFault("read_failed") from exc
+        names = self._list_names()
         for name in sorted(names):
             if not (
                 self._reconciliation_artifact_leaf(name)
@@ -1024,12 +1018,14 @@ class ControllerStateSession:
             ):
                 raise _StateFault("unsafe_file")
             chunks: list[bytes] = []
+            total = 0
             while True:
                 chunk = self._ops.read(first, 1024 * 1024)
                 if not chunk:
                     break
                 chunks.append(chunk)
-                if sum(map(len, chunks)) > 64 * 1024 * 1024:
+                total += len(chunk)
+                if total > 64 * 1024 * 1024:
                     raise _StateFault("read_failed")
             return b"".join(chunks), identity
         except OSError as exc:
@@ -1183,9 +1179,6 @@ class ControllerStateSession:
         advanced = _signed_sidecar(advanced)
         self._atomic_json(".transaction", advanced)
         return advanced
-
-    def _same_envelope(self, raw: bytes | None, envelope: dict[str, Any]) -> bool:
-        return raw == _canonical_bytes(envelope)
 
     def _published_primary(
         self, expected: Mapping[str, Any]
@@ -1451,8 +1444,7 @@ class ControllerStateSession:
             expected_highwater_integrity=previous_meta["integritySha256"],
             legacy_source=hashlib.sha256(raw).hexdigest(),
         )
-        self._atomic_json(".transaction", journal)
-        marker = self._resume_transaction(journal, marker)
+        marker = self._commit_transaction(journal, marker)
         observed = self._published_primary(target)
         return self._make_load_result(
             "reconciled",
@@ -1558,7 +1550,6 @@ class ControllerStateSession:
         receipt: dict[str, Any] | None = None,
     ) -> StateLoadResult:
         previous_raw = _canonical_bytes(previous)
-        is_retry = receipt is not None
         if receipt is None:
             retained = marker.get("retainedReconciliationRecords")
             if (
@@ -1571,12 +1562,12 @@ class ControllerStateSession:
             )
             try:
                 self._atomic_json(".recovery", receipt)
-            except (OSError, _StateFault, _PublicationAmbiguous):
+            except (OSError, _StateFault):
                 return self._failure_result("evidence_preservation_failed")
-        elif is_retry:
+        else:
             try:
                 receipt = self._increment_receipt(receipt)
-            except (OSError, _StateFault, _PublicationAmbiguous):
+            except (OSError, _StateFault):
                 return self._failure_result(
                     "publication_ambiguous", receipt=receipt
                 )
@@ -1598,7 +1589,7 @@ class ControllerStateSession:
                 receipt = self._advance_receipt(
                     receipt, "evidence_preserved"
                 )
-            except (OSError, _StateFault, _PublicationAmbiguous):
+            except (OSError, _StateFault):
                 return self._failure_result(
                     "evidence_preservation_failed", receipt=receipt
                 )
@@ -1620,7 +1611,7 @@ class ControllerStateSession:
                         "publication_ambiguous", receipt=receipt
                     )
                 receipt = self._advance_receipt(receipt, "restored")
-            except (OSError, _StateFault, _PublicationAmbiguous):
+            except (OSError, _StateFault):
                 return self._failure_result(
                     "publication_ambiguous", receipt=receipt
                 )
@@ -1754,10 +1745,7 @@ class ControllerStateSession:
     ) -> tuple[str, bytes, tuple[int, int], int]:
         encoded = _canonical_bytes(journal)
         receipt_id = receipt["recoveryReceiptId"]
-        try:
-            names = os.listdir(self._directory_fd)
-        except OSError as exc:
-            raise _StateFault("read_failed") from exc
+        names = self._list_names()
         rogue = re.compile(
             rf"^\.{re.escape(self._name)}\.{re.escape(receipt_id)}"
             r"\.[0-9]{2}\.reconciliation-record$"
@@ -2093,7 +2081,7 @@ class ControllerStateSession:
                 receipt=receipt,
                 artifacts=reconciliation_artifacts,
             )
-        except (_StateFault, OSError, _PublicationAmbiguous) as exc:
+        except (_StateFault, OSError) as exc:
             reason = (
                 exc.reason
                 if isinstance(exc, _StateFault)
@@ -2168,7 +2156,7 @@ class ControllerStateSession:
                         retained_raw=previous_raw,
                     )
                     receipt = self._increment_receipt(receipt)
-                except (_StateFault, OSError, _PublicationAmbiguous) as exc:
+                except (_StateFault, OSError) as exc:
                     reason = (
                         exc.reason
                         if isinstance(exc, _StateFault)
@@ -2240,7 +2228,7 @@ class ControllerStateSession:
                         expected=staged[0],
                         identity=staged[1],
                     )
-            except (_StateFault, OSError, _PublicationAmbiguous) as exc:
+            except (_StateFault, OSError) as exc:
                 reason = (
                     exc.reason
                     if isinstance(exc, _StateFault)
@@ -2253,7 +2241,7 @@ class ControllerStateSession:
                 marker = self._resume_transaction(journal, marker)
                 primary_observed = self._read_leaf_with_identity("")
                 previous_raw = self._read_leaf(".previous")
-            except (_StateFault, OSError, _PublicationAmbiguous) as exc:
+            except (_StateFault, OSError) as exc:
                 reason = (
                     exc.reason if isinstance(exc, _StateFault) else "publication_ambiguous"
                 )
@@ -2268,7 +2256,7 @@ class ControllerStateSession:
         if receipt is not None and receipt["phase"] == "reconciliation_prepared":
             try:
                 transaction_after_resume = self._read_leaf(".transaction")
-            except (_StateFault, OSError, _PublicationAmbiguous):
+            except (_StateFault, OSError):
                 return self._failure_result(
                     "publication_ambiguous", receipt=receipt
                 )
@@ -2314,7 +2302,7 @@ class ControllerStateSession:
                 receipt_raw = _canonical_bytes(receipt)
                 primary_observed = self._published_primary(target)
                 completed_reconciliation = True
-            except (_StateFault, OSError, _PublicationAmbiguous) as exc:
+            except (_StateFault, OSError) as exc:
                 reason = (
                     exc.reason
                     if isinstance(exc, _StateFault)
@@ -2525,8 +2513,6 @@ class ControllerStateSession:
             if isinstance(capability, StateWriteCapability)
             else "normal"
         )
-        if kind == "reconciliation":
-            self._validate_capability(capability, "normal")
         expected_kind = "bootstrap" if kind == "bootstrap" else "normal"
         marker, primary = self._validate_capability(capability, expected_kind)
         validated = _validate_payload_copy(payload, self._validate_payload)
@@ -2860,22 +2846,10 @@ class ControllerStateSession:
                 self._ops.flock(self._lock_fd, fcntl.LOCK_UN)
             except OSError:
                 pass
-            try:
-                self._ops.close(self._lock_fd)
-            except OSError:
-                try:
-                    os.close(self._lock_fd)
-                except OSError:
-                    pass
+            self._close_quiet(self._lock_fd)
             self._lock_fd = -1
         if self._directory_fd >= 0:
-            try:
-                self._ops.close(self._directory_fd)
-            except OSError:
-                try:
-                    os.close(self._directory_fd)
-                except OSError:
-                    pass
+            self._close_quiet(self._directory_fd)
             self._directory_fd = -1
 
 
@@ -3026,10 +3000,6 @@ def read_controller_state(
 
 
 def state_diagnostic_details(diagnostic: StateDiagnostic) -> dict[str, Any]:
-    generations = (
-        diagnostic.current_generation,
-        diagnostic.recovered_generation,
-    )
     if (
         diagnostic.component not in _COMPONENTS
         or diagnostic.mode not in _STATE_MODES
@@ -3037,24 +3007,16 @@ def state_diagnostic_details(diagnostic: StateDiagnostic) -> dict[str, Any]:
             diagnostic.reason is not None
             and diagnostic.reason not in _REASONS
         )
-        or any(
-            generation is not None
-            and (
-                not isinstance(generation, int)
-                or isinstance(generation, bool)
-                or not 0 <= generation <= MAX_GENERATION
-            )
-            for generation in generations
+        or not _valid_generation(diagnostic.current_generation, nullable=True)
+        or not _valid_generation(
+            diagnostic.recovered_generation, nullable=True
         )
-        or not isinstance(diagnostic.occurrence_count, int)
         or isinstance(diagnostic.occurrence_count, bool)
+        or not isinstance(diagnostic.occurrence_count, int)
         or not 0 <= diagnostic.occurrence_count <= MAX_OCCURRENCE_COUNT
         or (
             diagnostic.recovery_receipt_id is not None
-            and (
-                not isinstance(diagnostic.recovery_receipt_id, str)
-                or _HEX32.fullmatch(diagnostic.recovery_receipt_id) is None
-            )
+            and not _valid_store_id(diagnostic.recovery_receipt_id)
         )
         or (
             diagnostic.staging_attempt is not None

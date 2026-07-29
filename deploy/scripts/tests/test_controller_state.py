@@ -3672,10 +3672,7 @@ def _seed_exact_recovery_phase(
         target_envelope=target_envelope,
     )
     assert receipt["phase"] == phase
-    if phase != "reconciliation_prepared":
-        assert not journal_path.exists()
-    else:
-        assert not journal_path.exists()
+    assert not journal_path.exists()
     if phase == "planned":
         assert path.read_bytes() == damaged
         assert _evidence_snapshot(path) == ()

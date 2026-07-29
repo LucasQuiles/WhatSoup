@@ -314,7 +314,7 @@
     },
     {
       "path": "deploy/scripts/lib/controller_state.py",
-      "sha256": "118b427a07e29485efa92b8db00ddd3934980a879d989609b115ee1242facd46",
+      "sha256": "7e4eaaf9d5c13f6d3a0460aee52652414e94f21129c3071b5da66149ea9bb979",
       "mustContain": [
         "ControllerStateSession",
         "open_controller_state",
