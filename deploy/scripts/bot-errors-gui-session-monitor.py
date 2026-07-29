@@ -45,6 +45,14 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
+from lib.durable_json import (
+    durable_json_target,
+    observe_json,
+    operation_id,
+    publish_state_json,
+    require_advance,
+)
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 EMIT_SCRIPT = SCRIPT_DIR / "bot-errors-emit.py"
 
@@ -741,11 +749,37 @@ def load_state() -> dict:
 
 def save_state(state: dict) -> None:
     path = state_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-    with tmp.open("w", encoding="utf-8") as handle:
-        json.dump(state, handle, indent=2, sort_keys=True)
-    os.replace(tmp, path)
+    try:
+        path.parent.lstat()
+    except FileNotFoundError:
+        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    else:
+        if path.parent.is_symlink() or not path.parent.is_dir():
+            raise RuntimeError("refusing non-directory GUI monitor state root")
+    path.parent.chmod(0o700)
+    target = durable_json_target(
+        trusted_root=path.parent.resolve(strict=True),
+        relative_path=path.name,
+    )
+    observation = observe_json(target)
+    merged = dict(observation.payload or {})
+    merged.update(state)
+    generation = (observation.version.generation or 0) + 1
+    publication_operation = operation_id(
+        target,
+        merged,
+        component="gui_session_monitor.state",
+        predecessor=observation.version,
+    )
+    publication = publish_state_json(
+        target,
+        merged,
+        component="gui_session_monitor.state",
+        operation_id=publication_operation,
+        expected=observation.version,
+        generation=generation,
+    )
+    require_advance(publication)
 
 
 def resolve_expected_user(host: str) -> str | None:

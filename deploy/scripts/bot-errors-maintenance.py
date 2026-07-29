@@ -8,9 +8,9 @@ during deliberate restarts and deploys.
 
 State lives in ``maintenance.json`` under the same state directory the
 dispatcher uses (``BOT_ERRORS_STATE_DIR`` override honored), keyed by
-``"{machine}|{instance}"``. Writes are atomic (temp + ``os.replace``). A
-missing or corrupt file is treated as empty (fail-open) so a damaged state
-file never blocks the operator or the dispatcher.
+``"{machine}|{instance}"``. Mutations are predecessor-fenced and fail closed
+on unreadable state; read-only suppression checks retain their fail-open
+behavior until the separately owned recovery slice lands.
 """
 
 from __future__ import annotations
@@ -24,6 +24,19 @@ import sys
 import time
 from pathlib import Path
 from typing import Any
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+if str(SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR))
+
+from lib.durable_json import (
+    DurableWriteError,
+    durable_json_target,
+    observe_json,
+    operation_id,
+    publish_state_json,
+    require_advance,
+)
 
 # Hard ceiling on a window's length. A planned maintenance longer than this is
 # almost certainly a forgotten "open" — clamp so a stale window cannot silence
@@ -81,31 +94,27 @@ def window_key(machine: str, instance: str) -> str:
     return f"{safe_segment(machine)}|{safe_segment(instance)}"
 
 
-def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-    data = (json.dumps(payload, indent=2, sort_keys=True) + "\n").encode("utf-8")
-    fd = os.open(
-        tmp,
-        os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0),
-        0o600,
-    )
+def _private_state_target():
+    path = maintenance_state_path()
     try:
-        with os.fdopen(fd, "wb") as handle:
-            handle.write(data)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(tmp, path)
-        try:
-            path.chmod(0o600)
-        except OSError:
-            pass
-    except BaseException:
-        try:
-            os.unlink(tmp)
-        except OSError:
-            pass
-        raise
+        path.parent.lstat()
+    except FileNotFoundError:
+        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    else:
+        if path.parent.is_symlink() or not path.parent.is_dir():
+            raise DurableWriteError("identity_type")
+    path.parent.chmod(0o700)
+    target = durable_json_target(
+        trusted_root=path.parent.resolve(strict=True),
+        relative_path=path.name,
+    )
+    return target, observe_json(target)
+
+
+def _windows_from_payload(payload: Any) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        return {}
+    return {key: value for key, value in payload.items() if isinstance(value, dict)}
 
 
 def load_windows() -> dict[str, Any]:
@@ -149,7 +158,12 @@ def cmd_open(args: argparse.Namespace) -> int:
     machine = args.machine or socket.gethostname()
     now = int(time.time())
     key = window_key(machine, args.instance)
-    windows = load_windows()
+    try:
+        target, observation = _private_state_target()
+    except DurableWriteError as exc:
+        print(f"error: durable maintenance state unavailable: {exc}", file=sys.stderr)
+        return 1
+    windows = _windows_from_payload(observation.payload)
     record: dict[str, Any] = {
         "openedAt": now,
         "expiresAt": now + seconds,
@@ -157,7 +171,26 @@ def cmd_open(args: argparse.Namespace) -> int:
     if args.reason:
         record["reason"] = args.reason
     windows[key] = record
-    _atomic_write_json(maintenance_state_path(), windows)
+    generation = (observation.version.generation or 0) + 1
+    publication_operation = operation_id(
+        target,
+        windows,
+        component="maintenance.open_state",
+        predecessor=observation.version,
+    )
+    publication = publish_state_json(
+        target,
+        windows,
+        component="maintenance.open_state",
+        operation_id=publication_operation,
+        expected=observation.version,
+        generation=generation,
+    )
+    try:
+        require_advance(publication)
+    except DurableWriteError as exc:
+        print(f"error: durable maintenance state not committed: {exc}", file=sys.stderr)
+        return 1
     print(json.dumps({key: record}, indent=2, sort_keys=True))
     return 0
 
@@ -165,9 +198,33 @@ def cmd_open(args: argparse.Namespace) -> int:
 def cmd_close(args: argparse.Namespace) -> int:
     machine = args.machine or socket.gethostname()
     key = window_key(machine, args.instance)
-    windows = load_windows()
+    try:
+        target, observation = _private_state_target()
+    except DurableWriteError as exc:
+        print(f"error: durable maintenance state unavailable: {exc}", file=sys.stderr)
+        return 1
+    windows = _windows_from_payload(observation.payload)
     existed = windows.pop(key, None) is not None
-    _atomic_write_json(maintenance_state_path(), windows)
+    generation = (observation.version.generation or 0) + 1
+    publication_operation = operation_id(
+        target,
+        windows,
+        component="maintenance.close_state",
+        predecessor=observation.version,
+    )
+    publication = publish_state_json(
+        target,
+        windows,
+        component="maintenance.close_state",
+        operation_id=publication_operation,
+        expected=observation.version,
+        generation=generation,
+    )
+    try:
+        require_advance(publication)
+    except DurableWriteError as exc:
+        print(f"error: durable maintenance state not committed: {exc}", file=sys.stderr)
+        return 1
     print(json.dumps({"closed": key, "existed": existed}, indent=2, sort_keys=True))
     return 0
 

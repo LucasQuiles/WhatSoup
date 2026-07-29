@@ -127,3 +127,34 @@ def test_evidence_sidecar_rejects_unproven_publication(
 
     assert type(raised.value).__name__ == "DurableWriteError"
     assert list(evidence.glob("*")) == []
+
+
+def test_tree_provenance_outbox_rejects_unproven_publication(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _load_script(
+        "bot-errors-tree-provenance.py",
+        "bot_errors_tree_provenance_durable",
+    )
+    state = tmp_path / "state"
+    outbox = state / "outbox"
+    monkeypatch.setattr(module, "_state_root", lambda: state)
+    monkeypatch.setattr(module, "_resolve_outbox_dir", lambda: outbox)
+    monkeypatch.setattr(
+        module,
+        "publish_event_json",
+        lambda *_args, **_kwargs: _unproven("tree_provenance.outbox_event"),
+        raising=False,
+    )
+    event = module.build_outbox_event(
+        "summary",
+        "evidence",
+        "warning",
+    )
+
+    with pytest.raises(RuntimeError) as raised:
+        module.emit_outbox_event(event)
+
+    assert type(raised.value).__name__ == "DurableWriteError"
+    assert list(outbox.glob("*.json")) == []

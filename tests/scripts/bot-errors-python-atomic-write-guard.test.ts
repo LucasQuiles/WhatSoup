@@ -70,13 +70,16 @@ afterEach(() => {
 });
 
 const atomicWriterScripts = [
-  'deploy/scripts/bot-errors-emit.py',
-  'deploy/scripts/bot-errors-runner.py',
   'deploy/scripts/bot-errors-collector.py',
   'deploy/scripts/bot-errors-dispatcher.py',
   'deploy/scripts/bot-errors-heartbeat-watchdog.py',
   'deploy/scripts/bot-errors-health-check.py',
   'deploy/scripts/bot-errors-q-loop.py',
+];
+
+const durableEventWriterScripts = [
+  'deploy/scripts/bot-errors-emit.py',
+  'deploy/scripts/bot-errors-runner.py',
 ];
 
 const protectedAppendScripts = [
@@ -474,6 +477,16 @@ def publish(target, payload, op_id, expected):
     expect(text).not.toContain('tmp.write_text(json.dumps');
   });
 
+  it.each(durableEventWriterScripts)('%s consumes the shared create-once publication outcome', (script) => {
+    const text = readFileSync(script, 'utf8');
+
+    expect(text).toContain('from lib.durable_json import');
+    expect(text).toContain('publish_event_json(');
+    expect(text).toContain('require_advance(publication)');
+    expect(text).not.toContain('def atomic_write_json');
+    expect(text).not.toContain('os.replace(');
+  });
+
   it.each(protectedAppendScripts)('%s uses no-follow fsynced appends for JSONL diagnostics', (script) => {
     const text = readFileSync(script, 'utf8');
 
@@ -487,11 +500,11 @@ def publish(target, payload, op_id, expected):
     expect(text).not.toContain(".open('a'");
   });
 
-  it.each(['deploy/scripts/bot-errors-emit.py', 'deploy/scripts/bot-errors-runner.py'])('%s protects writefail breadcrumbs with no-follow temp writes', (script) => {
+  it.each(durableEventWriterScripts)('%s protects writefail breadcrumbs with the shared event fence', (script) => {
     const text = readFileSync(script, 'utf8');
 
     expect(text).toContain('kind": "outbox_write_failure"');
-    expect(text).toContain('O_NOFOLLOW');
-    expect(text).not.toContain('os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600');
+    expect(text).toMatch(/component="(?:emit|runner)\.writefail"/);
+    expect(text).not.toContain('os.O_CREAT | os.O_EXCL | os.O_WRONLY');
   });
 });
