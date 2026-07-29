@@ -648,7 +648,7 @@ export class ChatRuntime implements Runtime {
         // Not conditional on durability — the user still needs to know.
         try {
           await this.messenger.sendMessage(msg.chatJid, '⚠️ My last response may not have been delivered. Please ask me again.');
-        } catch { /* best-effort, don't retry the notification */ }
+        } catch { /* intentional: best-effort notice — the original send already failed terminally; retrying or surfacing the notice failure would re-enter the same failed channel */ }
       }
       return;
     }
