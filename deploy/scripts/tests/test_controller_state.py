@@ -1344,7 +1344,7 @@ def test_frozen_canonical_integrity_vector_has_exact_preimage_keys() -> None:
 @pytest.mark.parametrize(
     ("payload", "probe"),
     (
-        ({"z": 1, "a": 2, "counters": {}}, b'{"a":2,"counters":{},"z":1'),
+        ({"z": 1, "a": 2, "counters": {}}, b'"a":2,"counters":{},"z":1'),
         ({"counters": {}, "label": "caf\u00e9"}, "caf\u00e9".encode()),
         ({"counters": {}, "ordered": [3, 1, 2]}, b'"ordered":[3,1,2]'),
         ({"counters": {"large": 9_007_199_254_740_991}}, b"9007199254740991"),

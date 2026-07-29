@@ -435,3 +435,31 @@ def test_metadata_projection_drops_identity_content_and_raw_prose() -> None:
 
 def test_metadata_projection_requires_boolean_remote_ack_degradation() -> None:
     assert metadata_only_controller_details({"remoteAckDegraded": "healthy"}) == {}
+
+
+def test_metadata_projection_allowlists_only_closed_recovery_receipt_identity() -> None:
+    receipt_id = "0123456789abcdef0123456789abcdef"
+    assert metadata_only_controller_details(
+        {
+            "recoveryReceiptId": receipt_id,
+            "eventId": receipt_id,
+            "arbitraryId": receipt_id,
+        }
+    ) == {"recoveryReceiptId": receipt_id}
+
+
+@pytest.mark.parametrize(
+    "receipt_id",
+    (
+        "0123456789abcdef0123456789abcde",
+        "0123456789abcdef0123456789abcdef0",
+        "0123456789ABCDEF0123456789ABCDEF",
+        "opaque_receipt_01",
+    ),
+)
+def test_metadata_projection_rejects_noncanonical_recovery_receipt_identity(
+    receipt_id: str,
+) -> None:
+    assert metadata_only_controller_details(
+        {"recoveryReceiptId": receipt_id}
+    ) == {}

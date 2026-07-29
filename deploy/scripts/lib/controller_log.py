@@ -35,6 +35,7 @@ _RECORD_KIND_RE = re.compile(r"^[a-z][a-z0-9_]{0,95}$")
 _OPAQUE_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 _DETAIL_KEY_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]{0,95}$")
 _SAFE_DETAIL_STRING_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}$")
+_RECOVERY_RECEIPT_ID_RE = re.compile(r"^[0-9a-f]{32}$")
 _SAFE_DETAIL_STRING_VALUES = frozenset(
     {
         "1_64",
@@ -204,6 +205,14 @@ def metadata_only_controller_details(value: Mapping[str, Any]) -> dict[str, Any]
             projected: dict[str, Any] = {}
             for key in sorted(item):
                 if not isinstance(key, str) or not _DETAIL_KEY_RE.fullmatch(key):
+                    continue
+                if key == "recoveryReceiptId":
+                    receipt_id = item[key]
+                    if (
+                        isinstance(receipt_id, str)
+                        and _RECOVERY_RECEIPT_ID_RE.fullmatch(receipt_id)
+                    ):
+                        projected[key] = receipt_id
                     continue
                 if key in _SAFE_BOOLEAN_DETAIL_KEYS and not isinstance(item[key], bool):
                     continue
