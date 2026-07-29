@@ -162,3 +162,87 @@ Stage 1 records only bounded classifier comparisons in private test telemetry. S
 Roll back by disabling sampling and new receipt writes. Existing cleanup and session behavior remain active; retained receipts age out normally. Do not delete receipts merely to hide an elevated unknown or failure rate.
 
 Promotion requires stable write success, bounded storage, deterministic crash recovery, zero reserved-marker leakage, and owner acceptance of the cause/evidence vocabulary. The feature remains local and advisory until separately approved for implementation and publication.
+
+## Current-main reconciliation — 2026-07-29
+
+This amendment supersedes current-system instructions pinned to `c9759467d`.
+Current main is `5398982e610bb948d671181a04856590c9f3f9e5`.
+
+**Readiness:** `BLOCKED PRE-CODE`.
+
+### Existing owners to reuse
+
+- generation identity and lifecycle in the agent runtime/session;
+- process-tree discovery, tree liveness, and cancellation;
+- platform-specific termination and relaunch behavior;
+- durability failure disposition and registered fault taxonomy;
+- existing operator/realtime projections.
+
+Merged PR #2699 now owns deliberate non-zero-exit relaunch on generated
+launchd plists, bounded relaunch throttling, turn-session shutdown rejection
+containment, and serialization of unhandled-rejection reasons. This proposal
+must test and consume those contracts; it must not reopen them or add another
+relaunch, cleanup, or error-serialization path.
+
+The remaining feature is a bounded generation-scoped termination receipt and
+its reconciliation/projection contract. Do not create another generation ID,
+process reaper, process census, cancellation engine, or generic event store.
+
+### Evidence and classification contract
+
+Record observation separately from conclusion. Exit code, signal, intentional
+kill reason, cleanup result, bounded resource samples, platform evidence,
+timestamps, and source freshness are evidence fields. OOM classification is
+`confirmed`, `supported`, or `unknown`; a weak or absent signal cannot be
+upgraded by inference.
+
+The force-killed session that motivated this review remains suspected OOM only.
+Confirmation requires authoritative host/runtime evidence tied to the same
+generation and time window.
+
+### Vocabulary decision
+
+Before code, choose exactly one:
+
+1. DPR-04/#2655 owns the shared event vocabulary and becomes a hard dependency;
+   or
+2. this feature owns a stable, narrow `termination.*` namespace and DPR-04
+   references it.
+
+Do not copy a local version of DPR-04 names.
+
+### QPI generation-timeline fold-in
+
+The peer generation-tree pattern is a future operator projection, not a new
+runtime owner. This feature supplies only bounded termination/pressure evidence
+under the existing generation identity. DPR-04 decides the cross-domain
+projection contract; a later console view may consume both without adding a
+third run ledger, process supervisor, or cancellation path.
+
+### Owner decisions
+
+- authoritative OOM evidence per supported platform;
+- sample source, cadence, size, privacy, and retention budget;
+- exit/cleanup/reconciliation state machine;
+- restart and late-evidence behavior;
+- runtime, durability, and presentation owners;
+- schema migration need after projection-first proof.
+
+### First implementation-plan gate
+
+First RED binding:
+
+- File: `tests/runtimes/agent/termination-receipt.test.ts`
+- Test: `keeps OOM classification unknown when termination has no authoritative host evidence`
+- Command: `npm test -- tests/runtimes/agent/termination-receipt.test.ts -t "keeps OOM classification unknown when termination has no authoritative host evidence" --pool=forks`
+- Expected RED reason: the termination receipt and evidence-qualified
+  classifier do not exist.
+
+Bind the first RED tests to current process-tree, tree-liveness, runtime
+health/cancellation, launchd relaunch, shutdown containment, durability
+taxonomy, and platform suites. Prove normal exit, intentional cancellation,
+signal exit, partial cleanup, stale or absent samples, authoritative OOM,
+unsupported OOM, restart reconciliation, bounded payloads, and feature-off
+rollback.
+
+The PR must remain draft and use non-closing references.
