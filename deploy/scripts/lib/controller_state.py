@@ -15,7 +15,7 @@ import re
 import secrets
 import stat
 import time
-from typing import Any, Literal
+from typing import Any, Literal, get_args
 
 
 JsonObject = dict[str, Any]
@@ -49,24 +49,8 @@ MAX_RECONCILIATION_ATTEMPTS = 8
 
 _FORMAT = "whatsoup.controller-state"
 _FORMAT_VERSION = 1
-_COMPONENTS = frozenset(
-    {"collector", "heartbeat-watchdog", "dispatcher-incident"}
-)
-_REASONS = frozenset(
-    {
-        "read_failed",
-        "unsafe_file",
-        "decode_failed",
-        "invalid_root",
-        "schema_incompatible",
-        "integrity_mismatch",
-        "generation_invalid",
-        "publication_ambiguous",
-        "evidence_preservation_failed",
-        "lock_unavailable",
-        "retention_exhausted",
-    }
-)
+_COMPONENTS = frozenset(get_args(StateComponent))
+_REASONS = frozenset(get_args(StateReason))
 _ENVELOPE_KEYS = frozenset(
     {
         "format",
@@ -149,9 +133,7 @@ _RECOVERY_PHASES = frozenset(
         "reconciled",
     }
 )
-_STATE_MODES = frozenset(
-    {"bootstrap", "valid", "recovered", "reconciled", "recovery_required"}
-)
+_STATE_MODES = frozenset(get_args(StateMode))
 _HEX32 = re.compile(r"^[0-9a-f]{32}$")
 _HEX64 = re.compile(r"^[0-9a-f]{64}$")
 _UTC_MILLISECONDS = re.compile(
@@ -219,6 +201,22 @@ class _PublicationAmbiguous(_StateFault):
         super().__init__("publication_ambiguous")
 
 
+_VALIDATION_FAULT_REASONS = frozenset(
+    {"schema_incompatible", "integrity_mismatch", "generation_invalid"}
+)
+
+
+def _fault_reason(
+    exc: Exception, *, keep: frozenset[str] | None = None
+) -> StateReason:
+    reason = (
+        exc.reason if isinstance(exc, _StateFault) else "publication_ambiguous"
+    )
+    if keep is not None and reason not in keep:
+        return "publication_ambiguous"
+    return reason
+
+
 class _RealFileOps:
     open = staticmethod(os.open)
     fstat = staticmethod(os.fstat)
@@ -250,12 +248,18 @@ def _deep_copy(value: Any) -> Any:
     return json.loads(_canonical_bytes(value).decode("utf-8"))
 
 
-def _valid_generation(value: Any, *, nullable: bool = False) -> bool:
+def _valid_bounded_int(
+    value: Any, low: int, high: int, *, nullable: bool = False
+) -> bool:
     return (nullable and value is None) or (
         isinstance(value, int)
         and not isinstance(value, bool)
-        and 0 <= value <= MAX_GENERATION
+        and low <= value <= high
     )
+
+
+def _valid_generation(value: Any, *, nullable: bool = False) -> bool:
+    return _valid_bounded_int(value, 0, MAX_GENERATION, nullable=nullable)
 
 
 def _valid_digest(value: Any, *, nullable: bool = False) -> bool:
@@ -306,6 +310,15 @@ def _timestamp(clock: Callable[[], datetime]) -> str:
     return value.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
 
 
+def _header(component: StateComponent, store_id: str) -> dict[str, Any]:
+    return {
+        "format": _FORMAT,
+        "formatVersion": _FORMAT_VERSION,
+        "component": component,
+        "storeId": store_id,
+    }
+
+
 def _make_envelope(
     payload: dict[str, Any],
     *,
@@ -317,10 +330,7 @@ def _make_envelope(
     if not _valid_generation(generation):
         raise _StateFault("generation_invalid")
     metadata: dict[str, Any] = {
-        "format": _FORMAT,
-        "formatVersion": _FORMAT_VERSION,
-        "component": component,
-        "storeId": store_id,
+        **_header(component, store_id),
         "generation": generation,
         "writtenAt": _timestamp(clock),
     }
@@ -421,10 +431,8 @@ def _validate_marker(
             final_attempt = entry["finalAttempt"]
             if not _valid_store_id(receipt_id) or receipt_id <= previous_id:
                 raise _StateFault("schema_incompatible")
-            if (
-                isinstance(final_attempt, bool)
-                or not isinstance(final_attempt, int)
-                or not 1 <= final_attempt <= MAX_RECONCILIATION_ATTEMPTS
+            if not _valid_bounded_int(
+                final_attempt, 1, MAX_RECONCILIATION_ATTEMPTS
             ):
                 raise _StateFault("schema_incompatible")
             if not _valid_digest(entry["recordSha256"]):
@@ -457,9 +465,7 @@ def _validate_receipt(
     ):
         raise _StateFault("schema_incompatible")
     count = value.get("occurrenceCount")
-    if not isinstance(count, int) or isinstance(count, bool) or not (
-        1 <= count <= MAX_OCCURRENCE_COUNT
-    ):
+    if not _valid_bounded_int(count, 1, MAX_OCCURRENCE_COUNT):
         raise _StateFault("generation_invalid")
     for key in ("markerHighWaterGeneration", "recoveredGeneration"):
         if not _valid_generation(value.get(key)):
@@ -482,10 +488,8 @@ def _validate_receipt(
     if value["phase"] in {"reconciliation_prepared", "reconciled"} and target_null:
         raise _StateFault("schema_incompatible")
     attempt = value.get("stagingAttempt")
-    if attempt is not None and (
-        isinstance(attempt, bool)
-        or not isinstance(attempt, int)
-        or not 1 <= attempt <= MAX_RECONCILIATION_ATTEMPTS
+    if not _valid_bounded_int(
+        attempt, 1, MAX_RECONCILIATION_ATTEMPTS, nullable=True
     ):
         raise _StateFault("schema_incompatible")
     if not _valid_digest(value.get("stagedRecordSha256"), nullable=True):
@@ -672,6 +676,21 @@ class ControllerStateSession:
     ) -> None:
         self._path = path
         self._name = path.name
+        escaped = re.escape(self._name)
+        self._atomic_temporary_re = re.compile(
+            rf"^\.{escaped}"
+            r"(?:\.(?:previous|initialized|transaction|recovery))?"
+            r"\.[0-9a-f]{32}\.tmp$"
+        )
+        self._legacy_journal_artifact_re = re.compile(
+            rf"^\.{escaped}\.[0-9a-f]{{32}}"
+            r"\.reconciliation-journal"
+            r"(?:\.tmp|\.claim\.[0-9a-f]{32})?$"
+        )
+        self._reconciliation_record_re = re.compile(
+            rf"^\.{escaped}\.[0-9a-f]{{32}}"
+            r"\.[0-9]{2}\.reconciliation-record$"
+        )
         self._component = component
         self._bootstrap = bootstrap
         self._validate_payload = validate_payload
@@ -900,47 +919,23 @@ class ControllerStateSession:
         )
 
     def _authority_temporary_leaf(self, name: str) -> bool:
-        escaped = re.escape(self._name)
         return (
-            re.fullmatch(
-                rf"^\.{escaped}"
-                r"(?:\.(?:previous|initialized|transaction|recovery))?"
-                r"\.[0-9a-f]{32}\.tmp$",
-                name,
-            )
-            is not None
+            self._atomic_temporary_re.fullmatch(name) is not None
             or self._reconciliation_artifact_leaf(name)
         )
 
     def _reconciliation_artifact_leaf(self, name: str) -> bool:
-        escaped = re.escape(self._name)
         return (
-            re.fullmatch(
-                rf"^\.{escaped}\.[0-9a-f]{{32}}"
-                r"\.reconciliation-journal"
-                r"(?:\.tmp|\.claim\.[0-9a-f]{32})?$",
-                name,
-            )
-            is not None
-            or re.fullmatch(
-                rf"^\.{escaped}\.[0-9a-f]{{32}}"
-                r"\.[0-9]{2}\.reconciliation-record$",
-                name,
-            )
-            is not None
+            self._legacy_journal_artifact_re.fullmatch(name) is not None
+            or self._reconciliation_record_re.fullmatch(name) is not None
         )
 
     def _atomic_authority_temporary_names(self) -> set[str]:
         names = self._list_names()
-        escaped = re.escape(self._name)
-        atomic = re.compile(
-            rf"^\.{escaped}(?:\.(?:previous|initialized|transaction|recovery))?"
-            r"\.[0-9a-f]{32}\.tmp$"
-        )
         return {
             name
             for name in names
-            if atomic.fullmatch(name) is not None
+            if self._atomic_temporary_re.fullmatch(name) is not None
             or (
                 ".reconciliation-journal.claim." in name
                 and self._reconciliation_artifact_leaf(name)
@@ -1126,10 +1121,7 @@ class ControllerStateSession:
         retained: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         unsigned: dict[str, Any] = {
-            "format": _FORMAT,
-            "formatVersion": _FORMAT_VERSION,
-            "component": self._component,
-            "storeId": store_id,
+            **_header(self._component, store_id),
             "highWaterGeneration": generation,
             "highWaterIntegritySha256": integrity,
         }
@@ -1152,10 +1144,7 @@ class ControllerStateSession:
         target_meta = target["_controllerState"]
         return _signed_sidecar(
             {
-                "format": _FORMAT,
-                "formatVersion": _FORMAT_VERSION,
-                "component": self._component,
-                "storeId": target_meta["storeId"],
+                **_header(self._component, target_meta["storeId"]),
                 "transactionId": self._random_hex(),
                 "operation": operation,
                 "phase": "prepared",
@@ -1499,10 +1488,7 @@ class ControllerStateSession:
             receipt_id = self._random_hex()
         return _signed_sidecar(
             {
-                "format": _FORMAT,
-                "formatVersion": _FORMAT_VERSION,
-                "component": self._component,
-                "storeId": marker["storeId"],
+                **_header(self._component, marker["storeId"]),
                 "recoveryReceiptId": receipt_id,
                 "reason": reason,
                 "phase": "planned",
@@ -2051,7 +2037,7 @@ class ControllerStateSession:
                     return self._migrate(primary_observed[0], payload)
                 except _StateFault as exc:
                     return self._failure_result(exc.reason)
-                except (OSError, _PublicationAmbiguous):
+                except OSError:
                     return self._failure_result("publication_ambiguous")
             return self._failure_result("schema_incompatible")
 
@@ -2082,12 +2068,7 @@ class ControllerStateSession:
                 artifacts=reconciliation_artifacts,
             )
         except (_StateFault, OSError) as exc:
-            reason = (
-                exc.reason
-                if isinstance(exc, _StateFault)
-                else "publication_ambiguous"
-            )
-            return self._failure_result(reason, receipt=receipt)
+            return self._failure_result(_fault_reason(exc), receipt=receipt)
 
         journal: dict[str, Any] | None = None
         record_journal: dict[str, Any] | None = None
@@ -2157,12 +2138,9 @@ class ControllerStateSession:
                     )
                     receipt = self._increment_receipt(receipt)
                 except (_StateFault, OSError) as exc:
-                    reason = (
-                        exc.reason
-                        if isinstance(exc, _StateFault)
-                        else "publication_ambiguous"
+                    return self._failure_result(
+                        _fault_reason(exc), receipt=receipt
                     )
-                    return self._failure_result(reason, receipt=receipt)
         elif receipt is not None and receipt["phase"] == "reconciliation_prepared":
             source_leaf = self._reconciliation_record_leaf(
                 receipt["recoveryReceiptId"],
@@ -2229,12 +2207,9 @@ class ControllerStateSession:
                         identity=staged[1],
                     )
             except (_StateFault, OSError) as exc:
-                reason = (
-                    exc.reason
-                    if isinstance(exc, _StateFault)
-                    else "publication_ambiguous"
+                return self._failure_result(
+                    _fault_reason(exc), receipt=receipt
                 )
-                return self._failure_result(reason, receipt=receipt)
 
         if journal is not None:
             try:
@@ -2242,16 +2217,10 @@ class ControllerStateSession:
                 primary_observed = self._read_leaf_with_identity("")
                 previous_raw = self._read_leaf(".previous")
             except (_StateFault, OSError) as exc:
-                reason = (
-                    exc.reason if isinstance(exc, _StateFault) else "publication_ambiguous"
+                return self._failure_result(
+                    _fault_reason(exc, keep=_VALIDATION_FAULT_REASONS),
+                    receipt=receipt,
                 )
-                if reason not in {
-                    "schema_incompatible",
-                    "integrity_mismatch",
-                    "generation_invalid",
-                }:
-                    reason = "publication_ambiguous"
-                return self._failure_result(reason, receipt=receipt)
 
         if receipt is not None and receipt["phase"] == "reconciliation_prepared":
             try:
@@ -2303,18 +2272,10 @@ class ControllerStateSession:
                 primary_observed = self._published_primary(target)
                 completed_reconciliation = True
             except (_StateFault, OSError) as exc:
-                reason = (
-                    exc.reason
-                    if isinstance(exc, _StateFault)
-                    else "publication_ambiguous"
+                return self._failure_result(
+                    _fault_reason(exc, keep=_VALIDATION_FAULT_REASONS),
+                    receipt=receipt,
                 )
-                if reason not in {
-                    "schema_incompatible",
-                    "integrity_mismatch",
-                    "generation_invalid",
-                }:
-                    reason = "publication_ambiguous"
-                return self._failure_result(reason, receipt=receipt)
 
         if receipt is not None and receipt["phase"] in {
             "planned",
@@ -3011,22 +2972,18 @@ def state_diagnostic_details(diagnostic: StateDiagnostic) -> dict[str, Any]:
         or not _valid_generation(
             diagnostic.recovered_generation, nullable=True
         )
-        or isinstance(diagnostic.occurrence_count, bool)
-        or not isinstance(diagnostic.occurrence_count, int)
-        or not 0 <= diagnostic.occurrence_count <= MAX_OCCURRENCE_COUNT
+        or not _valid_bounded_int(
+            diagnostic.occurrence_count, 0, MAX_OCCURRENCE_COUNT
+        )
         or (
             diagnostic.recovery_receipt_id is not None
             and not _valid_store_id(diagnostic.recovery_receipt_id)
         )
-        or (
-            diagnostic.staging_attempt is not None
-            and (
-                isinstance(diagnostic.staging_attempt, bool)
-                or not isinstance(diagnostic.staging_attempt, int)
-                or not 1
-                <= diagnostic.staging_attempt
-                <= MAX_RECONCILIATION_ATTEMPTS
-            )
+        or not _valid_bounded_int(
+            diagnostic.staging_attempt,
+            1,
+            MAX_RECONCILIATION_ATTEMPTS,
+            nullable=True,
         )
     ):
         raise ValueError("controller state diagnostic is invalid")
