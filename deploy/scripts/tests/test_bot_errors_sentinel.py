@@ -5,6 +5,7 @@ is performed.
 """
 from __future__ import annotations
 
+import copy
 import importlib.util
 import json
 import os
@@ -12,6 +13,8 @@ from pathlib import Path
 import sys
 
 import pytest
+
+from deploy.scripts.lib import durable_json
 
 
 _SCRIPT = Path(__file__).resolve().parents[1] / "bot-errors-sentinel.py"
@@ -97,6 +100,21 @@ def _deps(now: float, probes: dict[str, dict], oracle: dict | None = None):
         hostname=lambda: "central-test",
         pull_probe=lambda spec, *_: probes.get(spec.host, {}),
         reachability_oracle=lambda: oracle or {"configured": False, "reachable": True, "class": "not_configured"},
+    )
+
+
+def _unproven_publication(component: str) -> durable_json.PublicationResult:
+    return durable_json.PublicationResult(
+        component=component,
+        durability=durable_json.DurabilityProof.UNPROVEN,
+        confinement=durable_json.ConfinementProof.PROVEN,
+        cleanup=durable_json.CleanupState.NOT_REQUIRED,
+        authority=durable_json.AuthorityState.UNKNOWN,
+        stage=durable_json.WriteStage.PARENT_SYNC,
+        error_class=durable_json.ErrorClass.IO,
+        generation=None,
+        private_operation_id="private-operation",
+        private_content_sha256="private-digest",
     )
 
 
@@ -233,6 +251,11 @@ def test_json_and_private_directory_helpers_fail_closed(tmp_path: Path):
     linked.symlink_to(outside, target_is_directory=True)
     with pytest.raises(_mod.SentinelError, match="through symlink"):
         _mod.ensure_private_dir(linked)
+
+    regular_file = tmp_path / "regular-file"
+    regular_file.write_text("not a directory", encoding="utf-8")
+    with pytest.raises(_mod.SentinelError, match="non-directory"):
+        _mod.ensure_private_dir(regular_file)
 
 
 def test_healthy_host_writes_ack_and_resets_open_state(tmp_path: Path):
@@ -917,6 +940,107 @@ def test_expired_q_remediation_emits_q_unavailable_tier3_event(tmp_path: Path):
     assert heartbeat["healthy"] is False
     assert heartbeat["problemHostCount"] == 0
     assert _mod.result_requires_attention(result) is True
+
+
+def test_q_unavailable_event_failure_restores_state(tmp_path: Path, monkeypatch):
+    hosts = _hosts_file(tmp_path, [{"host": "host-q"}])
+    config = _config(tmp_path, hosts)
+    state = {
+        "schemaVersion": 1,
+        "hosts": {},
+        "qRemediation": {
+            "requestId": "request-1",
+            "host": "host-q",
+            "actionHash": "action-hash-1",
+            "qHost": "q-agent-host",
+            "tokenId": "token-1",
+            "issuedAt": "2026-01-01T00:00:00Z",
+            "expiresAt": "2026-01-01T00:15:00Z",
+            "expiresAtEpoch": 900.0,
+        },
+    }
+    state_before = copy.deepcopy(state)
+    monkeypatch.setattr(
+        _mod,
+        "publish_event_json",
+        lambda *_args, **_kwargs: _unproven_publication(
+            "sentinel.q_unavailable_event"
+        ),
+    )
+
+    with pytest.raises(RuntimeError) as raised:
+        _mod.emit_q_unavailable_event(state, config, 1000.0, "controller")
+
+    assert type(raised.value).__name__ == "DurableWriteError"
+    assert state == state_before
+
+
+def test_host_action_event_failure_restores_state(tmp_path: Path, monkeypatch):
+    hosts = _hosts_file(tmp_path, [{"host": "host-a"}])
+    config = _config(tmp_path, hosts)
+    state = {"schemaVersion": 1, "hosts": {}}
+    state_before = copy.deepcopy(state)
+    result = {
+        "host": "host-a",
+        "role": "runtime",
+        "class": "out_of_rotation",
+        "action": "escalate",
+        "reason": "fixture",
+        "consecutive": 2,
+        "flapCount": 0,
+        "heartbeat": {},
+        "probe": {},
+    }
+    monkeypatch.setattr(
+        _mod,
+        "publish_event_json",
+        lambda *_args, **_kwargs: _unproven_publication(
+            "sentinel.action_event_primary"
+        ),
+    )
+
+    with pytest.raises(RuntimeError) as raised:
+        _mod.emit_action_events(
+            [result],
+            state,
+            config,
+            1000.0,
+            "controller",
+            "none",
+            {"configured": False},
+        )
+
+    assert type(raised.value).__name__ == "DurableWriteError"
+    assert state == state_before
+    assert "actionEvent" not in result
+
+
+def test_fleet_action_event_failure_restores_state(tmp_path: Path, monkeypatch):
+    hosts = _hosts_file(tmp_path, [{"host": "host-a"}])
+    config = _config(tmp_path, hosts)
+    state = {"schemaVersion": 1, "hosts": {}}
+    state_before = copy.deepcopy(state)
+    monkeypatch.setattr(
+        _mod,
+        "publish_event_json",
+        lambda *_args, **_kwargs: _unproven_publication(
+            "sentinel.action_event_secondary"
+        ),
+    )
+
+    with pytest.raises(RuntimeError) as raised:
+        _mod.emit_action_events(
+            [],
+            state,
+            config,
+            1000.0,
+            "controller",
+            "mass_unreachable_confirmed",
+            {"configured": False},
+        )
+
+    assert type(raised.value).__name__ == "DurableWriteError"
+    assert state == state_before
 
 
 def test_recent_q_unavailable_timeout_is_deduped_and_clears_inflight(tmp_path: Path):

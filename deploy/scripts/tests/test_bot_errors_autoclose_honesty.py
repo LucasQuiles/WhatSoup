@@ -58,7 +58,10 @@ def _load(state_dir: Path, extra_env: dict[str, str] | None = None):
     os.environ.setdefault("BOT_ERRORS_STALE_AUTOCLOSE_DIGEST_COALESCE_SECONDS", "0")
     for k, v in (extra_env or {}).items():
         os.environ[k] = v
-    (state_dir / "logs").mkdir(parents=True, exist_ok=True)
+    logs_dir = state_dir / "logs"
+    logs_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+    state_dir.chmod(0o700)
+    logs_dir.chmod(0o700)
     spec = importlib.util.spec_from_file_location("bot_errors_dispatcher_honesty", _SCRIPT)
     mod = importlib.util.module_from_spec(spec)  # type: ignore[arg-type]
     spec.loader.exec_module(mod)  # type: ignore[union-attr]
@@ -67,8 +70,10 @@ def _load(state_dir: Path, extra_env: dict[str, str] | None = None):
 
 def _write_state(mod, records: dict) -> None:
     path = mod.state_paths()["incident_state"]
-    path.parent.mkdir(parents=True, exist_ok=True)
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    path.parent.chmod(0o700)
     path.write_text(json.dumps({"version": 1, "openIncidents": records, "lastSentAt": {}}))
+    path.chmod(0o600)
 
 
 def _capture_sends(mod) -> list[str]:

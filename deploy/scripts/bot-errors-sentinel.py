@@ -283,17 +283,6 @@ def ensure_private_dir(path: Path) -> None:
         pass
 
 
-def fsync_parent(path: Path) -> None:
-    try:
-        fd = os.open(path.parent, os.O_DIRECTORY | os.O_RDONLY)
-    except OSError:
-        return
-    try:
-        os.fsync(fd)
-    finally:
-        os.close(fd)
-
-
 def _durable_target(path: Path):
     ensure_private_dir(path.parent)
     return durable_json_target(

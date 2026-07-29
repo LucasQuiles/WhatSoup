@@ -68,6 +68,7 @@ _HEALTHY_PROBE = (
 def _write_event(paths: dict[str, Path], filename: str, event: dict[str, Any]) -> Path:
     path = paths["outbox"] / filename
     path.write_text(json.dumps(event), encoding="utf-8")
+    path.chmod(0o600)
     return path
 
 
@@ -378,10 +379,10 @@ def test_collapse_crash_before_move_still_persists_absorbed_stamp(tmp_path, monk
         real_replace = _disp.os.replace
         storm_collapsed_dir = str(paths["storm_collapsed"])
 
-        def _crash_on_collapse_move(src, dst):
+        def _crash_on_collapse_move(src, dst, *args, **kwargs):
             if storm_collapsed_dir in str(dst):
                 raise RuntimeError("simulated crash during terminal collapse move")
-            return real_replace(src, dst)
+            return real_replace(src, dst, *args, **kwargs)
 
         monkeypatch.setattr(_disp.os, "replace", _crash_on_collapse_move)
 
@@ -480,10 +481,10 @@ def test_dedupe_crash_before_move_still_persists_absorbed_stamp(tmp_path, monkey
         real_replace = _disp.os.replace
         suppressed_dir = str(paths["suppressed"])
 
-        def _crash_on_suppress_move(src, dst):
+        def _crash_on_suppress_move(src, dst, *args, **kwargs):
             if suppressed_dir in str(dst):
                 raise RuntimeError("simulated crash during terminal suppress move")
-            return real_replace(src, dst)
+            return real_replace(src, dst, *args, **kwargs)
 
         monkeypatch.setattr(_disp.os, "replace", _crash_on_suppress_move)
 

@@ -50,7 +50,10 @@ def _load(state_dir: Path, extra_env: dict[str, str] | None = None):
     os.environ["BOT_ERRORS_STATE_DIR"] = str(state_dir)
     for k, v in (extra_env or {}).items():
         os.environ[k] = v
-    (state_dir / "logs").mkdir(parents=True, exist_ok=True)
+    logs_dir = state_dir / "logs"
+    logs_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+    state_dir.chmod(0o700)
+    logs_dir.chmod(0o700)
     spec = importlib.util.spec_from_file_location("bot_errors_autoclose_coalesce", _SCRIPT)
     mod = importlib.util.module_from_spec(spec)  # type: ignore[arg-type]
     spec.loader.exec_module(mod)  # type: ignore[union-attr]
@@ -76,11 +79,13 @@ def _stale_tool_error(now: int, n: int) -> dict:
 
 def _write_state(mod, *, incidents: dict, digest: dict | None = None) -> None:
     path = mod.state_paths()["incident_state"]
-    path.parent.mkdir(parents=True, exist_ok=True)
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    path.parent.chmod(0o700)
     state = {"version": 1, "openIncidents": incidents, "lastSentAt": {}}
     if digest is not None:
         state["staleAutocloseDigest"] = digest
     path.write_text(json.dumps(state))
+    path.chmod(0o600)
 
 
 def _read_state(mod) -> dict:

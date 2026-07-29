@@ -401,20 +401,24 @@ class TestDeadLetterMetaAlert:
         path.write_text(json.dumps(dl_record, indent=2, sort_keys=True) + "\n")
         path.chmod(0o600)
 
+    def _queued_meta_alerts(self, paths: dict[str, Path]) -> list[dict]:
+        return [
+            json.loads(path.read_text(encoding="utf-8"))
+            for path in sorted(paths["outbox"].glob("*.json"))
+        ]
+
     def test_meta_alert_fires_when_dead_letter_non_empty(self, tmp_path):
         mod = _load_module({"BOT_ERRORS_STATE_DIR": str(tmp_path / "state")})
         paths = mod.setup_dirs()
         self._seed_dead_letter(paths)
 
-        queued_payloads = []
-        with patch.object(mod, "atomic_write_json", side_effect=lambda p, d: queued_payloads.append(d)), \
-             patch.object(mod, "append_dispatch_log"), \
-             patch.object(mod, "read_meta_state", return_value={}), \
-             patch.object(mod, "write_meta_state"):
+        with patch.object(mod, "append_dispatch_log"), \
+             patch.object(mod, "read_meta_state", return_value={}):
             count = mod.queue_dead_letter_meta_alert(paths, int(time.time()))
 
         assert count == 1, f"Expected meta-alert fired (count=1), got {count}"
-        assert queued_payloads, "Expected atomic_write_json called for meta-alert"
+        queued_payloads = self._queued_meta_alerts(paths)
+        assert queued_payloads, "Expected durable meta-alert publication"
         meta = queued_payloads[0]
         assert meta.get("source") == "meta_alert_dead_letter", (
             f"source wrong: {meta.get('source')!r}"
@@ -429,14 +433,12 @@ class TestDeadLetterMetaAlert:
         now = int(time.time())
         state_recent = {"deadLetterMetaAlertAtEpoch": now - 1800}  # 30 min ago
 
-        queued_payloads = []
-        with patch.object(mod, "atomic_write_json", side_effect=lambda p, d: queued_payloads.append(d)), \
-             patch.object(mod, "append_dispatch_log"), \
-             patch.object(mod, "read_meta_state", return_value=state_recent), \
-             patch.object(mod, "write_meta_state"):
+        with patch.object(mod, "append_dispatch_log"), \
+             patch.object(mod, "read_meta_state", return_value=state_recent):
             count = mod.queue_dead_letter_meta_alert(paths, now)
 
         assert count == 0, f"Expected meta-alert throttled (count=0), got {count}"
+        assert self._queued_meta_alerts(paths) == []
 
     def test_meta_alert_fires_after_hour_elapsed(self, tmp_path):
         mod = _load_module({"BOT_ERRORS_STATE_DIR": str(tmp_path / "state")})
@@ -446,28 +448,24 @@ class TestDeadLetterMetaAlert:
         now = int(time.time())
         state_old = {"deadLetterMetaAlertAtEpoch": now - 7200}  # 2h ago
 
-        queued_payloads = []
-        with patch.object(mod, "atomic_write_json", side_effect=lambda p, d: queued_payloads.append(d)), \
-             patch.object(mod, "append_dispatch_log"), \
-             patch.object(mod, "read_meta_state", return_value=state_old), \
-             patch.object(mod, "write_meta_state"):
+        with patch.object(mod, "append_dispatch_log"), \
+             patch.object(mod, "read_meta_state", return_value=state_old):
             count = mod.queue_dead_letter_meta_alert(paths, now)
 
         assert count == 1, f"Expected meta-alert fired (count=1), got {count}"
+        assert len(self._queued_meta_alerts(paths)) == 1
 
     def test_meta_alert_zero_when_dead_letter_empty(self, tmp_path):
         mod = _load_module({"BOT_ERRORS_STATE_DIR": str(tmp_path / "state")})
         paths = mod.setup_dirs()
         # Dead-letter dir exists but is empty (only created by setup_dirs, no files placed)
 
-        queued_payloads = []
-        with patch.object(mod, "atomic_write_json", side_effect=lambda p, d: queued_payloads.append(d)), \
-             patch.object(mod, "append_dispatch_log"), \
-             patch.object(mod, "read_meta_state", return_value={}), \
-             patch.object(mod, "write_meta_state"):
+        with patch.object(mod, "append_dispatch_log"), \
+             patch.object(mod, "read_meta_state", return_value={}):
             count = mod.queue_dead_letter_meta_alert(paths, int(time.time()))
 
         assert count == 0, f"Expected no meta-alert for empty dead-letter dir, got {count}"
+        assert self._queued_meta_alerts(paths) == []
 
     def test_meta_alert_source_not_in_test_leak_patterns(self):
         mod = _load_module()
@@ -506,13 +504,11 @@ class TestDeadLetterMetaAlert:
         paths = mod.setup_dirs()
         self._seed_dead_letter(paths)
 
-        queued_payloads = []
-        with patch.object(mod, "atomic_write_json", side_effect=lambda p, d: queued_payloads.append(d)), \
-             patch.object(mod, "append_dispatch_log"), \
-             patch.object(mod, "read_meta_state", return_value={}), \
-             patch.object(mod, "write_meta_state"):
+        with patch.object(mod, "append_dispatch_log"), \
+             patch.object(mod, "read_meta_state", return_value={}):
             mod.queue_dead_letter_meta_alert(paths, int(time.time()))
 
+        queued_payloads = self._queued_meta_alerts(paths)
         assert queued_payloads, "Expected meta-alert queued"
         evidence = queued_payloads[0].get("evidence", "")
         assert "dead_letter_count" in evidence, (

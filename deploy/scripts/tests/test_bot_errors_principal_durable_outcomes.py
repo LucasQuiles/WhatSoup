@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import copy
 import importlib.util
 import json
 from pathlib import Path
@@ -290,51 +289,6 @@ def test_sentinel_state_rejects_unproven_publication(
 
     assert type(raised.value).__name__ == "DurableWriteError"
     assert not module.state_path(config).exists()
-
-
-def test_sentinel_event_failure_does_not_advance_budget_or_event_state(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    module = _load("bot-errors-sentinel.py")
-    config = _sentinel_config(module, tmp_path)
-    state = {"schemaVersion": 1, "hosts": {}}
-    state_before = copy.deepcopy(state)
-    result = {
-        "host": "worker",
-        "role": "runtime",
-        "class": "out_of_rotation",
-        "action": "escalate",
-        "reason": "fixture",
-        "consecutive": 2,
-        "flapCount": 0,
-        "heartbeat": {},
-        "probe": {},
-    }
-    monkeypatch.setattr(
-        module,
-        "publish_event_json",
-        lambda *_args, **_kwargs: _unproven(
-            "sentinel.action_event_primary",
-            generation=None,
-        ),
-        raising=False,
-    )
-
-    with pytest.raises(RuntimeError) as raised:
-        module.emit_action_events(
-            [result],
-            state,
-            config,
-            1_700_000_000.0,
-            "controller",
-            "none",
-            {"configured": False},
-        )
-
-    assert type(raised.value).__name__ == "DurableWriteError"
-    assert state == state_before
-    assert "actionEvent" not in result
 
 
 def test_cutover_does_not_advance_profile_when_inventory_is_unproven(
