@@ -7,13 +7,16 @@ import {
   statSync,
 } from 'node:fs';
 import { createHash } from 'node:crypto';
+import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { DatabaseSync } from 'node:sqlite';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { Database } from '../../src/core/database.ts';
 import { closeOperatorCatchupRecoveryRaw } from '../../src/core/recovery-catchup-closure.ts';
 import {
+  classifyError,
   loadOrCreateRedactionSalt,
   openExistingWritableDatabase,
   parseCloseRecoveryArgs,
@@ -25,6 +28,24 @@ const packageJson = JSON.parse(readFileSync(
   new URL('../../package.json', import.meta.url),
   'utf8',
 )) as { scripts: Record<string, string> };
+
+const CLI_PATH = fileURLToPath(new URL('../../scripts/close-recovery-catchup.ts', import.meta.url));
+
+/**
+ * Spawn the CLI as a real subprocess (module-invocation guard requires it —
+ * the top-level `if (import.meta.url === invokedPath)` block only runs when
+ * the file is the actual entrypoint, never when imported for in-process
+ * calls like `runCloseRecoveryCatchupCli`). Splits stdout/stderr the same
+ * way an operator's terminal would see them.
+ */
+function runCliSubprocess(args: string[]): { code: number; stdout: string; stderr: string } {
+  const result = spawnSync(
+    process.execPath,
+    ['--disable-warning=ExperimentalWarning', '--experimental-strip-types', CLI_PATH, ...args],
+    { encoding: 'utf8' },
+  );
+  return { code: result.status ?? -1, stdout: result.stdout ?? '', stderr: result.stderr ?? '' };
+}
 
 const tempRoots: string[] = [];
 
@@ -614,5 +635,156 @@ describe('redactFingerprint (issue #2457 redaction layer)', () => {
     const fpOne = redactFingerprint(saltOne, 'plan', fixtureOne.planId);
     const fpTwo = redactFingerprint(saltTwo, 'plan', fixtureTwo.planId);
     expect(fpOne).not.toBe(fpTwo);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────
+// FIX 3: subprocess-level error path — the top-level module-invocation guard
+// (`if (import.meta.url === invokedPath)`) only runs when the file is the
+// real process entrypoint, never when imported for in-process calls like
+// `runCloseRecoveryCatchupCli` above. It needs a real subprocess to exercise.
+// ─────────────────────────────────────────────────────────────────────────
+describe('CLI subprocess error path (module-invocation guard)', () => {
+  it('emits a bounded invalid_proof errorCode with a real correlation and no raw identifiers in stderr', () => {
+    const fixture = installFixture(false); // no echoed delivery proof
+
+    const result = runCliSubprocess(argsFor(fixture));
+    const salt = loadOrCreateRedactionSalt(fixture.dbPath);
+
+    expect(result.code).toBe(1);
+    const jsonLine = result.stderr.trim().split('\n').at(-1)!;
+    const parsed = JSON.parse(jsonLine) as {
+      ok: boolean;
+      errorCode: string;
+      correlation?: { planFingerprint: string; conversationFingerprint: string };
+    };
+    expect(Object.keys(parsed).sort()).toEqual(['correlation', 'errorCode', 'ok']);
+    expect(parsed.ok).toBe(false);
+    expect(parsed.errorCode).toBe('invalid_proof');
+    // Correlation is the REAL plan/conversation fingerprint (same salt, same
+    // algorithm the dry-run/receipt output uses) — not junk.
+    expect(parsed.correlation?.planFingerprint).toBe(redactFingerprint(salt, 'plan', fixture.planId));
+    expect(parsed.correlation?.conversationFingerprint).toBe(
+      redactFingerprint(salt, 'conversation', fixture.conversationKey),
+    );
+    // The static message for this path ("Catch-up reply must have echoed
+    // delivery proof") never interpolates plan/conversation/actor/evidence —
+    // safe to assert across the FULL stderr output, not just the JSON line.
+    expect(result.stderr).not.toContain('operator:private');
+    expect(result.stderr).not.toContain('secret://must-not-echo');
+    expect(result.stderr).not.toContain(fixture.planId);
+    expect(result.stderr).not.toContain(fixture.conversationKey);
+    expect(result.stderr).not.toContain(String(fixture.catchupSeq));
+    expect(result.stderr).not.toContain(String(fixture.sourceSeqs[0]));
+    // FIX 3c: the raw message IS expected to appear, printed as its own
+    // non-JSON line for operator debuggability (the prior comment claiming
+    // it "stays in scrollback" was false — it was never printed anywhere).
+    expect(result.stderr).toContain('Catch-up reply must have echoed delivery proof');
+    expect(closureCount(fixture.dbPath)).toBe(0);
+  });
+
+  it('emits a bounded busy_writer errorCode when another writer holds the database', () => {
+    const fixture = installFixture();
+    const blocker = new DatabaseSync(fixture.dbPath);
+    let result: { code: number; stdout: string; stderr: string };
+    try {
+      blocker.exec('BEGIN IMMEDIATE');
+      // SQLITE_BUSY_TIMEOUT_PRAGMA is a fixed 5000ms — the subprocess must
+      // exhaust that wait before reporting busy_writer (see the extended
+      // test timeout below).
+      result = runCliSubprocess(argsFor(fixture, ['--confirm']));
+    } finally {
+      blocker.exec('ROLLBACK');
+      blocker.close();
+    }
+    const salt = loadOrCreateRedactionSalt(fixture.dbPath);
+
+    expect(result.code).toBe(1);
+    const jsonLine = result.stderr.trim().split('\n').at(-1)!;
+    const parsed = JSON.parse(jsonLine) as {
+      ok: boolean;
+      errorCode: string;
+      correlation?: { planFingerprint: string; conversationFingerprint: string };
+    };
+    expect(Object.keys(parsed).sort()).toEqual(['correlation', 'errorCode', 'ok']);
+    expect(parsed.ok).toBe(false);
+    expect(parsed.errorCode).toBe('busy_writer');
+    expect(parsed.correlation?.planFingerprint).toBe(redactFingerprint(salt, 'plan', fixture.planId));
+    // "database is locked" never interpolates private data — safe to assert
+    // across the full stderr output.
+    expect(result.stderr).not.toContain('operator:private');
+    expect(result.stderr).not.toContain('secret://must-not-echo');
+    expect(result.stderr).not.toContain(fixture.planId);
+    expect(result.stderr).not.toContain(fixture.conversationKey);
+    expect(result.stderr).toMatch(/locked/i);
+    expect(closureCount(fixture.dbPath)).toBe(0);
+  }, 15_000);
+});
+
+// ─────────────────────────────────────────────────────────────────────────
+// classifyError: direct unit coverage of the full matcher table (the two
+// subprocess tests above only exercise invalid_proof and busy_writer end to
+// end; this covers the remaining branches — changed_evidence, changed_file,
+// io, invalid_args, and unknown — plus the errcode-based sqlite detection).
+// PINNING tests: classifyError already exists and is already correct by the
+// time these are written (same implementation the subprocess tests above
+// drove RED-then-GREEN), so there is no separate RED state here.
+// ─────────────────────────────────────────────────────────────────────────
+describe('classifyError (bounded error-code taxonomy)', () => {
+  it.each([
+    ['Recovery plan ID is required', 'invalid_args'],
+    ['Unknown argument: --bogus', 'invalid_args'],
+    ['Duplicate argument: --db', 'invalid_args'],
+    ['Source sequence must be a positive safe integer', 'invalid_args'],
+    ['Source sequence set contains duplicates', 'invalid_args'],
+    ['Expected source sequence set is required', 'invalid_args'],
+    ['Expected source sequence set contains duplicates', 'invalid_args'],
+    ['Recovery evidence reference exceeds 8192 bytes', 'invalid_args'],
+    ['Usage: close-recovery-catchup --db PATH ...', 'invalid_args'],
+    ['Database must include canonical schema 43 receipts', 'invalid_proof'],
+    ['Database must include contiguous schema 43+ receipts (migrations 1 through current)', 'invalid_proof'],
+    ['canonical schema 43 receipt is missing', 'invalid_proof'],
+    ['canonical schema 43 objects are missing or drifted: operator_catchup_closure_witness_append_only_update', 'invalid_proof'],
+    ['Recovery plan does not exist', 'invalid_proof'],
+    ['Expected source sequences must exactly match the pending recovery set', 'invalid_proof'],
+    ['Catch-up sequence must be later than every source sequence', 'invalid_proof'],
+    ['Closed recovery lacks its exact durable proof witness', 'invalid_proof'],
+    ['Catch-up inbound does not exist in the recovery conversation', 'invalid_proof'],
+    ['Catch-up inbound must be complete', 'invalid_proof'],
+    ['Catch-up reply must have echoed delivery proof', 'invalid_proof'],
+    ['Catch-up closure did not resolve the exact recovery set', 'invalid_proof'],
+    ['Catch-up closure did not persist its exact proof witness', 'invalid_proof'],
+    ['Recovery was already closed against a different catch-up or evidence', 'changed_evidence'],
+    ['Database path changed after read-only preflight', 'changed_file'],
+    ['database is locked', 'busy_writer'],
+    ['database table is locked', 'busy_writer'],
+    ['Database path must be an existing regular file: /tmp/typo.db', 'io'],
+    ['unable to open database file', 'io'],
+    ['some unrecognized message text', 'unknown'],
+  ] as const)('classifies %j as %s', (message, expected) => {
+    expect(classifyError(new Error(message))).toBe(expected);
+  });
+
+  it('classifies via node:sqlite .errcode when present, ahead of message text', () => {
+    // SQLITE_BUSY / SQLITE_LOCKED — real node:sqlite errors carry these
+    // exact fields (verified empirically: constructor.name is "Error",
+    // .code is the string 'ERR_SQLITE_ERROR', .errcode is the numeric
+    // SQLite result code).
+    expect(classifyError(Object.assign(new Error('database is locked'), {
+      code: 'ERR_SQLITE_ERROR', errcode: 5,
+    }))).toBe('busy_writer');
+    expect(classifyError(Object.assign(new Error('database table is locked'), {
+      code: 'ERR_SQLITE_ERROR', errcode: 6,
+    }))).toBe('busy_writer');
+    // SQLITE_CANTOPEN
+    expect(classifyError(Object.assign(new Error('unable to open database file'), {
+      code: 'ERR_SQLITE_ERROR', errcode: 14,
+    }))).toBe('io');
+  });
+
+  it('falls back to unknown for a non-Error thrown value', () => {
+    expect(classifyError('a bare string throw')).toBe('unknown');
+    expect(classifyError({ unrelated: true })).toBe('unknown');
+    expect(classifyError(undefined)).toBe('unknown');
   });
 });

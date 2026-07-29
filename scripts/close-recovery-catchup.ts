@@ -332,8 +332,7 @@ function publicReceipt(salt: Buffer, receipt: CloseOperatorCatchupRecoveryReceip
   };
 }
 
-export function runCloseRecoveryCatchupCli(argv: string[]): number {
-  const args = parseCloseRecoveryArgs(argv);
+function runCloseRecoveryCatchupWithArgs(args: CliArgs): number {
   const params = closureParams(args);
   const { inspection, identity, salt } = inspectReadOnly(args.dbPath, params);
   if (!args.confirm) {
@@ -368,21 +367,166 @@ export function runCloseRecoveryCatchupCli(argv: string[]): number {
   }
 }
 
+export function runCloseRecoveryCatchupCli(argv: string[]): number {
+  return runCloseRecoveryCatchupWithArgs(parseCloseRecoveryArgs(argv));
+}
+
+// ---------------------------------------------------------------------------
+// Bounded error taxonomy for the top-level CLI error path.
+// ---------------------------------------------------------------------------
+
+/**
+ * Bounded, machine-classifiable failure codes for the CLI's top-level catch
+ * handler. `error.constructor.name` is USELESS here — every one of this
+ * file's 13 throw sites (plus every throw in recovery-catchup-closure.ts and
+ * node:sqlite's own errors) is a bare `Error`/thrown-literal, so
+ * `constructor.name` is always the string "Error". Classification is by
+ * message-text matcher, with node:sqlite's own `.errcode` (the underlying
+ * SQLite result code) checked FIRST where available — it is a precise,
+ * platform-stable signal that message text is not (e.g. "unable to open
+ * database file" vs. a "no longer exists" variant on some platforms).
+ *
+ * `invalid_args` is NOT one of the six values issue #2457 originally named
+ * (invalid_proof, changed_evidence, busy_writer, changed_file, io, unknown) —
+ * it was added because roughly half of this file's own throw sites (and
+ * several in recovery-catchup-closure.ts) are pure CLI-argument/shape
+ * validation (missing/duplicate flags, non-positive sequences, oversized
+ * text) that do not fit any of those six domain buckets. Folding all of
+ * those into `unknown` would make `unknown` the dominant bucket for the most
+ * common real-world failure (an operator typo) — exactly what a bounded
+ * taxonomy exists to prevent. The raw message (see below) still reaches the
+ * operator's terminal regardless of which bucket a given error lands in, so
+ * no debuggability is lost by this addition.
+ */
+export type CloseRecoveryErrorCode =
+  | 'invalid_args'
+  | 'invalid_proof'
+  | 'changed_evidence'
+  | 'busy_writer'
+  | 'changed_file'
+  | 'io'
+  | 'unknown';
+
+interface SqliteLikeError {
+  readonly code?: unknown;
+  readonly errcode?: unknown;
+}
+
+// node:sqlite surfaces the underlying SQLite result code as a numeric
+// `.errcode` alongside the generic Node wrapper `.code === 'ERR_SQLITE_ERROR'`.
+// SQLITE_BUSY (5) and SQLITE_LOCKED (6) both mean "another connection holds a
+// conflicting lock"; SQLITE_CANTOPEN (14) means the file could not be opened.
+const SQLITE_BUSY_ERRCODES = new Set([5, 6]);
+const SQLITE_CANTOPEN_ERRCODE = 14;
+
+const ERROR_CLASSIFIERS: ReadonlyArray<{
+  readonly code: CloseRecoveryErrorCode;
+  readonly test: (message: string) => boolean;
+}> = [
+  {
+    code: 'changed_file',
+    test: (m) => m === 'Database path changed after read-only preflight',
+  },
+  {
+    code: 'changed_evidence',
+    test: (m) => m === 'Recovery was already closed against a different catch-up or evidence',
+  },
+  {
+    code: 'busy_writer',
+    test: (m) => /database is locked|database table is locked/i.test(m),
+  },
+  {
+    code: 'io',
+    test: (m) => m.startsWith('Database path must be an existing regular file:')
+      || m === 'unable to open database file'
+      || /no longer exists/i.test(m),
+  },
+  {
+    code: 'invalid_proof',
+    test: (m) => m.startsWith('Database must include canonical schema 43 receipts')
+      || m.startsWith('Database must include contiguous schema 43+ receipts')
+      || m === 'canonical schema 43 receipt is missing'
+      || m.startsWith('canonical schema 43 objects are missing or drifted')
+      || m === 'Recovery plan does not exist'
+      || m === 'Expected source sequences must exactly match the pending recovery set'
+      || m === 'Catch-up sequence must be later than every source sequence'
+      || m === 'Closed recovery lacks its exact durable proof witness'
+      || m === 'Catch-up inbound does not exist in the recovery conversation'
+      || m === 'Catch-up inbound must be complete'
+      || m === 'Catch-up reply must have echoed delivery proof'
+      || m === 'Catch-up closure did not resolve the exact recovery set'
+      || m === 'Catch-up closure did not persist its exact proof witness',
+  },
+  {
+    code: 'invalid_args',
+    test: (m) => m.endsWith('is required')
+      || m.endsWith('must be a positive safe integer')
+      || /exceeds \d+ bytes$/.test(m)
+      || m.startsWith('Unknown argument:')
+      || m.startsWith('Duplicate argument:')
+      || m === 'Source sequence set contains duplicates'
+      || m === 'Expected source sequence set is required'
+      || m === 'Expected source sequence set contains duplicates'
+      || m.startsWith('Usage: close-recovery-catchup'), // --help
+  },
+];
+
+/**
+ * Classify a caught error into a bounded code. Exported for direct unit
+ * coverage of the matcher table without spawning a subprocess.
+ */
+export function classifyError(error: unknown): CloseRecoveryErrorCode {
+  const sqliteError = error as SqliteLikeError;
+  if (sqliteError?.code === 'ERR_SQLITE_ERROR') {
+    const errcode = sqliteError.errcode;
+    if (typeof errcode === 'number' && SQLITE_BUSY_ERRCODES.has(errcode)) return 'busy_writer';
+    if (errcode === SQLITE_CANTOPEN_ERRCODE) return 'io';
+  }
+  const message = error instanceof Error ? error.message : String(error);
+  for (const classifier of ERROR_CLASSIFIERS) {
+    if (classifier.test(message)) return classifier.code;
+  }
+  return 'unknown';
+}
+
 const invokedPath = process.argv[1] ? pathToFileURL(resolve(process.argv[1])).href : '';
 if (import.meta.url === invokedPath) {
+  let args: CliArgs | undefined;
   try {
-    process.exitCode = runCloseRecoveryCatchupCli(process.argv.slice(2));
+    args = parseCloseRecoveryArgs(process.argv.slice(2));
+    process.exitCode = runCloseRecoveryCatchupWithArgs(args);
   } catch (error) {
-    // Issue #2457: error messages must remain class-level and must not
-    // interpolate private arguments. Emit a bounded error class with a
-    // correlation handle; the raw exception text stays in the operator's
-    // terminal scrollback (which is their own trust boundary) and never
-    // enters a machine-parseable JSON receipt.
-    const errorClass = error instanceof Error ? error.constructor.name : 'UnknownError';
+    const message = error instanceof Error ? error.message : String(error);
+    // Issue #2457 FIX 3(c): the message is printed as its OWN line, clearly
+    // separate from the JSON envelope below (never interpolated INTO JSON) —
+    // this is the operator-debuggability line. The prior comment claiming
+    // raw text "stays in scrollback" was false: nothing was ever printed
+    // anywhere, so the operator saw nothing but a bounded error class.
+    process.stderr.write(`${message}\n`);
+
+    const errorCode = classifyError(error);
+    // Correlate against the plan/conversation fingerprints an operator would
+    // have already seen in a prior dry-run/receipt — far more useful than a
+    // Date.now()+Math.random() value nobody could ever look up again. Only
+    // available when args parsed far enough to know the target database and
+    // plan; loading the salt can itself fail (e.g. dbPath doesn't exist), so
+    // this is best-effort and MUST NOT throw out of the handler.
+    let correlation: { planFingerprint: string; conversationFingerprint: string } | undefined;
+    if (args !== undefined) {
+      try {
+        const salt = loadOrCreateRedactionSalt(args.dbPath);
+        correlation = {
+          planFingerprint: redactFingerprint(salt, 'plan', args.planId),
+          conversationFingerprint: redactFingerprint(salt, 'conversation', args.conversationKey),
+        };
+      } catch {
+        correlation = undefined;
+      }
+    }
     process.stderr.write(`${JSON.stringify({
       ok: false,
-      errorClass,
-      correlation: redactFingerprint(randomBytes(REDACTION_SALT_BYTES), 'error', `${Date.now()}:${Math.random()}`),
+      errorCode,
+      ...(correlation !== undefined ? { correlation } : {}),
     })}\n`);
     process.exitCode = 1;
   }
