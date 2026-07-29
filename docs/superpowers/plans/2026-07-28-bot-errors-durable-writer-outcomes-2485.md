@@ -259,8 +259,13 @@ call sites:
     "deploy/scripts/bot_errors_cutover.py"
   ],
   "embedded_publishers": [
-    "collector.REMOTE_ACK_SCRIPT.write_ack_journal",
-    "collector.REMOTE_WRITEFAIL_ACK_SCRIPT.write_ack_journal"
+    "collector.REMOTE_CLAIM_SCRIPT.<module>",
+    "collector.REMOTE_ACK_SCRIPT.<module>",
+    "collector.REMOTE_WRITEFAIL_CLAIM_SCRIPT.<module>",
+    "collector.REMOTE_WRITEFAIL_ACK_SCRIPT.write_ack_journal",
+    "collector.REMOTE_WRITEFAIL_ACK_SCRIPT.copy_claim_atomic",
+    "collector.REMOTE_WRITEFAIL_ACK_SCRIPT.move_claim_terminal",
+    "collector.REMOTE_WRITEFAIL_ACK_SCRIPT.<module>"
   ],
   "diagnostic_only_weaker_callers": [
     "collector.persist_controller_log_health",
@@ -465,6 +470,7 @@ class ErrorClass(str, Enum):
 
 @dataclass(frozen=True)
 class PublicationResult:
+    component: str
     durability: DurabilityProof
     confinement: ConfinementProof
     cleanup: CleanupState

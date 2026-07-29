@@ -1,5 +1,73 @@
-import { readFileSync } from 'node:fs';
-import { describe, expect, it } from 'vitest';
+import { spawnSync } from 'node:child_process';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { dirname, join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { afterEach, describe, expect, it } from 'vitest';
+
+const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
+const durableWriterGuard = join(repoRoot, 'deploy/scripts/check-bot-errors-durable-writers.py');
+const fixtureDirs: string[] = [];
+
+function pythonFixture(source: string): string {
+  const root = mkdtempSync(join(tmpdir(), 'bot-errors-durable-writer-'));
+  fixtureDirs.push(root);
+  const script = 'deploy/scripts/fixture.py';
+  mkdirSync(join(root, 'deploy/scripts'), { recursive: true });
+  writeFileSync(join(root, script), `${source.trim()}\n`);
+  writeFileSync(
+    join(root, 'deploy/bot-errors-durable-writer-inventory.json'),
+    `${JSON.stringify({
+      schema_version: 1,
+      helper_generation: 1,
+      principal_scripts: [script],
+      cooperating_scripts: [],
+      embedded_publishers: [],
+      diagnostic_only_weaker_callers: [],
+      callers: [{
+        site_id: 'fixture-state',
+        script,
+        function: 'publish',
+        logical_publication: 'fixture.state',
+        kind: 'state_replace_expected',
+        operation_identity_source: 'durable_json.operation_id.v1',
+        result_policy: 'require_advance',
+        result_consumer: 'publish',
+        fault_test_ids: ['state.no-advance-unproven'],
+      }],
+    }, null, 2)}\n`,
+  );
+  return root;
+}
+
+function runDurableWriterGuard(root: string): { status: number | null; code: string | null; stderr: string } {
+  const result = spawnSync(
+    'python3.12',
+    [
+      durableWriterGuard,
+      '--root',
+      root,
+      '--inventory',
+      'deploy/bot-errors-durable-writer-inventory.json',
+      '--json',
+    ],
+    { cwd: repoRoot, encoding: 'utf8' },
+  );
+  let code: string | null = null;
+  try {
+    const parsed = JSON.parse(result.stdout) as { findings?: Array<{ code?: string }> };
+    code = parsed.findings?.[0]?.code ?? null;
+  } catch {
+    code = null;
+  }
+  return { status: result.status, code, stderr: result.stderr };
+}
+
+afterEach(() => {
+  for (const dir of fixtureDirs.splice(0)) {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
 
 const atomicWriterScripts = [
   'deploy/scripts/bot-errors-emit.py',
@@ -20,6 +88,259 @@ const protectedAppendScripts = [
 ];
 
 describe('BOT ERRORS Python atomic write guard', () => {
+  it('rejects a durable result that is discarded', () => {
+    const fixture = pythonFixture(`
+from lib.durable_json import publish_state_json
+
+def publish(target, payload, op_id, expected):
+    publish_state_json(
+        target,
+        payload,
+        component="fixture.state",
+        operation_id=op_id,
+        expected=expected,
+        generation=1,
+    )
+`);
+
+    expect(runDurableWriterGuard(fixture)).toMatchObject({
+      status: 1,
+      code: 'result-unconsumed',
+    });
+  });
+
+  it('rejects a durable result that is assigned but never read', () => {
+    const fixture = pythonFixture(`
+from lib.durable_json import publish_state_json
+
+def publish(target, payload, op_id, expected):
+    result = publish_state_json(
+        target,
+        payload,
+        component="fixture.state",
+        operation_id=op_id,
+        expected=expected,
+        generation=1,
+    )
+`);
+
+    expect(runDurableWriterGuard(fixture)).toMatchObject({
+      status: 1,
+      code: 'result-unconsumed',
+    });
+  });
+
+  it('rejects a durable result used only for string formatting', () => {
+    const fixture = pythonFixture(`
+from lib.durable_json import publish_state_json
+
+def publish(target, payload, op_id, expected):
+    result = publish_state_json(
+        target,
+        payload,
+        component="fixture.state",
+        operation_id=op_id,
+        expected=expected,
+        generation=1,
+    )
+    str(result)
+`);
+
+    expect(runDurableWriterGuard(fixture)).toMatchObject({
+      status: 1,
+      code: 'result-unconsumed',
+    });
+  });
+
+  it('rejects a durable publisher call absent from the inventory', () => {
+    const fixture = pythonFixture(`
+from lib.durable_json import publish_state_json, require_advance
+
+def publish(target, payload, op_id, expected):
+    first = publish_state_json(
+        target,
+        payload,
+        component="fixture.state",
+        operation_id=op_id,
+        expected=expected,
+        generation=1,
+    )
+    require_advance(first)
+    second = publish_state_json(
+        target,
+        payload,
+        component="fixture.other",
+        operation_id=op_id,
+        expected=expected,
+        generation=1,
+    )
+    require_advance(second)
+`);
+
+    expect(runDurableWriterGuard(fixture)).toMatchObject({
+      status: 1,
+      code: 'publisher-uninventoried',
+    });
+  });
+
+  it('rejects a missing principal script without reporting a clean scan', () => {
+    const fixture = pythonFixture(`
+from lib.durable_json import publish_state_json, require_advance
+
+def publish(target, payload, op_id, expected):
+    result = publish_state_json(
+        target,
+        payload,
+        component="fixture.state",
+        operation_id=op_id,
+        expected=expected,
+        generation=1,
+    )
+    require_advance(result)
+`);
+    rmSync(join(fixture, 'deploy/scripts/fixture.py'));
+
+    expect(runDurableWriterGuard(fixture)).toMatchObject({
+      status: 1,
+      code: 'script-missing',
+    });
+  });
+
+  it('rejects a renamed inline JSON write-and-replace publisher', () => {
+    const fixture = pythonFixture(`
+import json
+import os
+
+def publish(target, payload, op_id, expected):
+    temporary = target.with_suffix(".private")
+    with temporary.open("w", encoding="utf-8") as handle:
+        json.dump(payload, handle)
+    os.replace(temporary, target)
+`);
+
+    expect(runDurableWriterGuard(fixture)).toMatchObject({
+      status: 1,
+      code: 'inline-writer',
+    });
+  });
+
+  it('rejects duplicate inventory site identifiers', () => {
+    const fixture = pythonFixture(`
+from lib.durable_json import publish_state_json, require_advance
+
+def publish(target, payload, op_id, expected):
+    result = publish_state_json(
+        target,
+        payload,
+        component="fixture.state",
+        operation_id=op_id,
+        expected=expected,
+        generation=1,
+    )
+    require_advance(result)
+`);
+    const inventoryPath = join(fixture, 'deploy/bot-errors-durable-writer-inventory.json');
+    const inventory = JSON.parse(readFileSync(inventoryPath, 'utf8')) as {
+      callers: Array<Record<string, unknown>>;
+    };
+    inventory.callers.push({ ...inventory.callers[0] });
+    writeFileSync(inventoryPath, `${JSON.stringify(inventory, null, 2)}\n`);
+
+    expect(runDurableWriterGuard(fixture)).toMatchObject({
+      status: 1,
+      code: 'duplicate-site-id',
+    });
+  });
+
+  it.each([
+    ['underscore assignment', '_ = result'],
+    ['repr-only use', 'repr(result)'],
+    ['logging-only use', 'print(result)'],
+    ['serialization-only use', 'json.dumps({"result": str(result)})'],
+  ])('rejects %s as a durability decision', (_label, use) => {
+    const fixture = pythonFixture(`
+import json
+from lib.durable_json import publish_state_json
+
+def publish(target, payload, op_id, expected):
+    result = publish_state_json(
+        target,
+        payload,
+        component="fixture.state",
+        operation_id=op_id,
+        expected=expected,
+        generation=1,
+    )
+    ${use}
+`);
+
+    expect(runDurableWriterGuard(fixture)).toMatchObject({
+      status: 1,
+      code: 'result-unconsumed',
+    });
+  });
+
+  it('accepts a result that reaches the declared require_advance gate', () => {
+    const fixture = pythonFixture(`
+from lib.durable_json import publish_state_json, require_advance
+
+def publish(target, payload, op_id, expected):
+    result = publish_state_json(
+        target,
+        payload,
+        component="fixture.state",
+        operation_id=op_id,
+        expected=expected,
+        generation=1,
+    )
+    require_advance(result)
+`);
+
+    expect(runDurableWriterGuard(fixture)).toMatchObject({
+      status: 0,
+      code: null,
+    });
+  });
+
+  it.each([
+    ['wrong function', (inventory: { helper_generation: number; callers: Array<Record<string, unknown>> }) => {
+      inventory.callers[0].function = 'elsewhere';
+    }, 'inventory-call-missing'],
+    ['mixed helper generation', (inventory: { helper_generation: number }) => {
+      inventory.helper_generation = 2;
+    }, 'inventory-invalid'],
+    ['best-effort policy', (inventory: { callers: Array<Record<string, unknown>> }) => {
+      inventory.callers[0].result_policy = 'best_effort';
+    }, 'inventory-invalid'],
+  ])('rejects an inventory with %s', (_label, mutate, expectedCode) => {
+    const fixture = pythonFixture(`
+from lib.durable_json import publish_state_json, require_advance
+
+def publish(target, payload, op_id, expected):
+    result = publish_state_json(
+        target,
+        payload,
+        component="fixture.state",
+        operation_id=op_id,
+        expected=expected,
+        generation=1,
+    )
+    require_advance(result)
+`);
+    const inventoryPath = join(fixture, 'deploy/bot-errors-durable-writer-inventory.json');
+    const inventory = JSON.parse(readFileSync(inventoryPath, 'utf8')) as {
+      helper_generation: number;
+      callers: Array<Record<string, unknown>>;
+    };
+    mutate(inventory);
+    writeFileSync(inventoryPath, `${JSON.stringify(inventory, null, 2)}\n`);
+
+    expect(runDurableWriterGuard(fixture)).toMatchObject({
+      status: 1,
+      code: expectedCode,
+    });
+  });
+
   it.each(atomicWriterScripts)('%s uses no-follow fsynced temp writes before rename', (script) => {
     const text = readFileSync(script, 'utf8');
 
