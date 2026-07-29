@@ -18,15 +18,15 @@ The **Inconsistencies** section lists missing or stale index entries compared wi
 scoped markdown files currently on disk.
 
 **Repo:** `WhatSoup`
-**Total entries:** 94
+**Total entries:** 95
 
 ## Totals
 
 | Dimension | Breakdown |
 |---|---|
-| Kind | handoff=8, plan=47, review=4, spec=34, state=1 |
-| Status | active=22, closed=4, completed=34, deferred=7, pending=15, unknown=12 |
-| Status source | body-marker=85, fallback=8, state-md-status=1 |
+| Kind | handoff=8, plan=48, review=4, spec=34, state=1 |
+| Status | active=22, closed=4, completed=34, deferred=7, pending=15, unknown=13 |
+| Status source | body-marker=85, fallback=9, state-md-status=1 |
 
 ## Inconsistencies
 
@@ -61,7 +61,7 @@ scoped markdown files currently on disk.
 | `docs/superpowers/specs/provider-event-lifecycle/requirements.md` | spec | requirements | body-marker |
 | `docs/superpowers/specs/provider-event-lifecycle/tasks.md` | spec | tasks | body-marker |
 
-### Unknown-status — triage needed (12)
+### Unknown-status — triage needed (13)
 
 | Path | Kind | Topic | Last Mod |
 |------|------|-------|----------|
@@ -72,6 +72,7 @@ scoped markdown files currently on disk.
 | `docs/superpowers/plans/2026-07-23-agent-reliability-remediation-implementation.md` | plan | agent-reliability-remediation-implementation | 2026-07-27 |
 | `docs/superpowers/plans/2026-07-28-chat-queue-admission.md` | plan | chat-queue-admission | 2026-07-29 |
 | `docs/superpowers/plans/2026-07-28-incident-store-core.md` | plan | incident-store-core | 2026-07-28 |
+| `docs/superpowers/plans/2026-07-29-pr-metadata-guard.md` | plan | pr-metadata-guard | 2026-07-29 |
 | `docs/superpowers/specs/2026-07-11-turn-lifecycle-fitness-extraction-design.md` | spec | turn-lifecycle-fitness-extraction-design | 2026-07-11 |
 | `docs/superpowers/specs/2026-07-17-macos-credential-durability-design.md` | spec | macos-credential-durability-design | 2026-07-17 |
 | `docs/superpowers/specs/2026-07-23-agent-reliability-remediation-design.md` | spec | agent-reliability-remediation-design | 2026-07-27 |
@@ -131,7 +132,7 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 | `docs/superpowers/handoffs/2026-07-16-boundary-core-history-mining.md` | handoff | pending | body-marker | boundary-core-history-mining | 2026-07-16 |  |
 | `docs/superpowers/handoffs/2026-07-28-incident-control-plane-finder-report.md` | handoff | unknown | fallback | incident-control-plane-finder-report | 2026-07-28 |  |
 
-### docs/superpowers/plans  _(47 entries)_
+### docs/superpowers/plans  _(48 entries)_
 
 | Path | Kind | Status | Source | Topic | Last Mod | Supersedes |
 |------|------|--------|--------|-------|----------|------------|
@@ -182,6 +183,7 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 | `docs/superpowers/plans/2026-07-28-incident-store-core.md` | plan | unknown | fallback | incident-store-core | 2026-07-28 |  |
 | `docs/superpowers/plans/2026-07-28-primary-probe-cancellation.md` | plan | active | body-marker | primary-probe-cancellation | 2026-07-29 |  |
 | `docs/superpowers/plans/2026-07-28-runtime-health-signal-dispositions.md` | plan | active | body-marker | runtime-health-signal-dispositions | 2026-07-28 |  |
+| `docs/superpowers/plans/2026-07-29-pr-metadata-guard.md` | plan | unknown | fallback | pr-metadata-guard | 2026-07-29 |  |
 
 ### docs/superpowers/reviews  _(4 entries)_
 
@@ -244,4 +246,4 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 ---
 
 - Derived from `docs/work-index.json`
-- Generated at 2026-07-29T14:09:37Z from commit `05fa81c287d439ca28ef3f592fc5f4a68c6e5fb9`
+- Generated at 2026-07-29T17:55:13Z from commit `e099ea0c464feb898b6d67f4d65c5248e46309ab`
