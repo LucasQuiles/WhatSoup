@@ -224,6 +224,32 @@ def publish(target, payload, op_id, expected):
     });
   });
 
+  it('rejects a direct JSON write even when it does not rename', () => {
+    const fixture = pythonFixture(`
+import json
+from lib.durable_json import publish_state_json, require_advance
+
+def publish(target, payload, op_id, expected):
+    result = publish_state_json(
+        target,
+        payload,
+        component="fixture.state",
+        operation_id=op_id,
+        expected=expected,
+        generation=1,
+    )
+    require_advance(result)
+
+def hidden_direct_writer(target, payload):
+    target.write_text(json.dumps(payload), encoding="utf-8")
+`);
+
+    expect(runDurableWriterGuard(fixture)).toMatchObject({
+      status: 1,
+      code: 'inline-writer',
+    });
+  });
+
   it('rejects duplicate inventory site identifiers', () => {
     const fixture = pythonFixture(`
 from lib.durable_json import publish_state_json, require_advance
@@ -299,6 +325,97 @@ def publish(target, payload, op_id, expected):
     expect(runDurableWriterGuard(fixture)).toMatchObject({
       status: 0,
       code: null,
+    });
+  });
+
+  it('rejects a result variable overwritten before require_advance', () => {
+    const fixture = pythonFixture(`
+from lib.durable_json import publish_state_json, require_advance
+
+def publish(target, payload, op_id, expected):
+    result = publish_state_json(
+        target,
+        payload,
+        component="fixture.state",
+        operation_id=op_id,
+        expected=expected,
+        generation=1,
+    )
+    result = "overwritten"
+    require_advance(result)
+`);
+
+    expect(runDurableWriterGuard(fixture)).toMatchObject({
+      status: 1,
+      code: 'result-unconsumed',
+    });
+  });
+
+  it('rejects consumption that exists only in an uncalled nested function', () => {
+    const fixture = pythonFixture(`
+from lib.durable_json import publish_state_json, require_advance
+
+def publish(target, payload, op_id, expected):
+    result = publish_state_json(
+        target,
+        payload,
+        component="fixture.state",
+        operation_id=op_id,
+        expected=expected,
+        generation=1,
+    )
+    def never_called():
+        require_advance(result)
+`);
+
+    expect(runDurableWriterGuard(fixture)).toMatchObject({
+      status: 1,
+      code: 'result-unconsumed',
+    });
+  });
+
+  it('rejects an unrelated method impersonating require_advance', () => {
+    const fixture = pythonFixture(`
+from lib.durable_json import publish_state_json
+
+def publish(target, payload, op_id, expected, telemetry):
+    telemetry.require_advance(publish_state_json(
+        target,
+        payload,
+        component="fixture.state",
+        operation_id=op_id,
+        expected=expected,
+        generation=1,
+    ))
+`);
+
+    expect(runDurableWriterGuard(fixture)).toMatchObject({
+      status: 1,
+      code: 'result-unconsumed',
+    });
+  });
+
+  it('rejects a non-literal component that cannot be matched exactly', () => {
+    const fixture = pythonFixture(`
+from lib.durable_json import publish_state_json, require_advance
+
+COMPONENT = "fixture.state"
+
+def publish(target, payload, op_id, expected):
+    result = publish_state_json(
+        target,
+        payload,
+        component=COMPONENT,
+        operation_id=op_id,
+        expected=expected,
+        generation=1,
+    )
+    require_advance(result)
+`);
+
+    expect(runDurableWriterGuard(fixture)).toMatchObject({
+      status: 1,
+      code: 'component-not-literal',
     });
   });
 

@@ -80,13 +80,25 @@ def _assigned_name(call: ast.Call, parents: dict[ast.AST, ast.AST]) -> str | Non
     return target.id if isinstance(target, ast.Name) else None
 
 
+def _scope_walk(function: ast.AST) -> list[ast.AST]:
+    nodes: list[ast.AST] = []
+    stack = list(reversed(list(ast.iter_child_nodes(function))))
+    while stack:
+        node = stack.pop()
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)):
+            continue
+        nodes.append(node)
+        stack.extend(reversed(list(ast.iter_child_nodes(node))))
+    return nodes
+
+
 def _is_name_read(function: ast.AST, name: str, assignment: ast.AST) -> bool:
     return any(
         isinstance(node, ast.Name)
         and isinstance(node.ctx, ast.Load)
         and node.id == name
         and node is not assignment
-        for node in ast.walk(function)
+        for node in _scope_walk(function)
     )
 
 
@@ -106,7 +118,11 @@ def _result_satisfies_policy(
     policy: str,
 ) -> bool:
     parent = parents.get(call)
-    if isinstance(parent, ast.Call) and _call_name(parent) == "require_advance":
+    if (
+        isinstance(parent, ast.Call)
+        and isinstance(parent.func, ast.Name)
+        and parent.func.id == "require_advance"
+    ):
         return policy == "require_advance"
     if isinstance(parent, ast.Return):
         return policy == "propagate_result"
@@ -115,18 +131,30 @@ def _result_satisfies_policy(
     if assigned_name is None or assigned_name == "_":
         return False
     if policy == "require_advance":
-        return any(
-            isinstance(node, ast.Call)
-            and _call_name(node) == "require_advance"
-            and any(_contains_loaded_name(argument, assigned_name) for argument in node.args)
-            for node in ast.walk(function)
-        )
+        for node in _scope_walk(function):
+            if (
+                not isinstance(node, ast.Call)
+                or not isinstance(node.func, ast.Name)
+                or node.func.id != "require_advance"
+                or not any(_contains_loaded_name(argument, assigned_name) for argument in node.args)
+            ):
+                continue
+            rebound = any(
+                isinstance(candidate, ast.Name)
+                and isinstance(candidate.ctx, ast.Store)
+                and candidate.id == assigned_name
+                and getattr(call, "lineno", -1) < getattr(candidate, "lineno", -1) < getattr(node, "lineno", -1)
+                for candidate in _scope_walk(function)
+            )
+            if not rebound:
+                return True
+        return False
     if policy == "propagate_result":
         return any(
             isinstance(node, ast.Return)
             and node.value is not None
             and _contains_loaded_name(node.value, assigned_name)
-            for node in ast.walk(function)
+            for node in _scope_walk(function)
         )
     if policy == "explicit_advance_check":
         return any(
@@ -138,40 +166,39 @@ def _result_satisfies_policy(
                 and child.value.id == assigned_name
                 for child in ast.walk(node.test)
             )
-            for node in ast.walk(function)
+            for node in _scope_walk(function)
         )
     if policy == "aggregate_all":
         return any(
             isinstance(node, ast.Call)
-            and _call_name(node) in {"aggregate_all", "require_all_advance"}
+            and isinstance(node.func, ast.Name)
+            and node.func.id in {"aggregate_all", "require_all_advance"}
             and any(_contains_loaded_name(argument, assigned_name) for argument in node.args)
-            for node in ast.walk(function)
+            for node in _scope_walk(function)
         )
     return False
-
-
-def _is_replace_call(call: ast.Call) -> bool:
-    if not isinstance(call.func, ast.Attribute):
-        return False
-    if (
-        call.func.attr in {"replace", "rename"}
-        and isinstance(call.func.value, ast.Name)
-        and call.func.value.id == "os"
-    ):
-        return True
-    return call.func.attr in {"replace", "rename"} and len(call.args) == 1
 
 
 def _is_json_write_call(call: ast.Call) -> bool:
     if not isinstance(call.func, ast.Attribute):
         return False
     if (
-        call.func.attr in {"dump", "dumps"}
+        call.func.attr == "dump"
         and isinstance(call.func.value, ast.Name)
         and call.func.value.id == "json"
     ):
         return True
-    return call.func.attr in {"write_text", "write_bytes"}
+    if call.func.attr in {"write_text", "write_bytes"}:
+        return True
+    return call.func.attr == "write" and any(
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and isinstance(node.func.value, ast.Name)
+        and node.func.value.id == "json"
+        and node.func.attr == "dumps"
+        for argument in call.args
+        for node in ast.walk(argument)
+    )
 
 
 def _inline_writer_functions(tree: ast.Module) -> list[str]:
@@ -183,9 +210,7 @@ def _inline_writer_functions(tree: ast.Module) -> list[str]:
     ):
         calls = [node for node in ast.walk(function) if isinstance(node, ast.Call)]
         named_clone = function.name in {"atomic_write_json", "_atomic_write_json", "fsync_parent"}
-        semantic_clone = any(_is_replace_call(call) for call in calls) and any(
-            _is_json_write_call(call) for call in calls
-        )
+        semantic_clone = any(_is_json_write_call(call) for call in calls)
         if named_clone or semantic_clone:
             violations.append(function.name)
     return violations
@@ -307,6 +332,19 @@ def scan(root: Path, inventory_path: Path) -> list[dict[str, str]]:
         tree = ast.parse(script_path.read_text(encoding="utf-8"), filename=str(script_path))
         trees[script] = tree
         parent_maps[script] = _parent_map(tree)
+        findings.extend(
+            {
+                "code": "component-not-literal",
+                "site_id": "",
+                "script": script,
+                "function": "",
+                "detail": "durable publisher component must be a string literal",
+            }
+            for call in ast.walk(tree)
+            if isinstance(call, ast.Call)
+            and _call_name(call) in DURABLE_PUBLISHERS
+            and _constant_keyword(call, "component") is None
+        )
         findings.extend(
             {
                 "code": "inline-writer",
