@@ -90,7 +90,13 @@ describe('Crash Recovery — Scenario 1: crash after `sending`', () => {
 
     const op = getOutbound(db, opId);
     expect(op['status']).toBe('maybe_sent');
-    expect(op['error']).toBe('crash-in-flight');
+    expect(JSON.parse(op['error'] as string)).toMatchObject({
+      failure_code: 'outbound.crash_in_flight',
+      stage: 'provider_request',
+      mutation_state: 'ambiguous',
+      logical_attempt_count: 1,
+      provider_submission_count: 1,
+    });
     expect(stats.outboundReconciled).toBe(1);
 
     // The inbound is still turn_done — it has a terminal op that is now maybe_sent,

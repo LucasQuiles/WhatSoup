@@ -120,7 +120,10 @@ describe('drainPendingOutbound()', () => {
     expect(resent).toBe(0);
     const row = getOutbound(db, opId);
     expect(row['status']).toBe('maybe_sent');
-    expect(row['error']).toBe('socket closed');
+    expect(JSON.parse(row['error'] as string)).toMatchObject({
+      failure_code: 'outbound.unknown_failure',
+      mutation_state: 'ambiguous',
+    });
   });
 
   it('one failing op does not abort the rest of the drain', async () => {

@@ -67,6 +67,8 @@ export interface SignalPortError {
   readonly message: string;
   readonly code?: string;   // signal-cli JSON-RPC error code (e.g. 'ControllableException')
   readonly status?: number; // HTTP-style code synthesized by the port wrapper
+  /** Set only when the port can PROVE the stage; absent when it cannot. */
+  readonly phase?: 'not_started' | 'provider_call_started' | 'ack_received';
 }
 
 /** Arguments for reacting to a Signal message. */
