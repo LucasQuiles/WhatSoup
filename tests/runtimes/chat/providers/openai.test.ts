@@ -127,6 +127,18 @@ describe('OpenAI Provider', () => {
     expect(result.model).toBe('gpt-5.4');
   });
 
+  it('combines the caller cancellation signal with the provider deadline', async () => {
+    const caller = new AbortController();
+    mockCreate.mockResolvedValueOnce(makeSuccessResponse());
+
+    await provider.generate(makeRequest({ signal: caller.signal }));
+    const transportSignal = mockCreate.mock.calls[0][1].signal as AbortSignal;
+
+    expect(transportSignal.aborted).toBe(false);
+    caller.abort();
+    expect(transportSignal.aborted).toBe(true);
+  });
+
   it('places systemPrompt as first message with role "system"', async () => {
     mockCreate.mockResolvedValueOnce(makeSuccessResponse());
     await provider.generate(makeRequest({ systemPrompt: 'Be concise.' }));

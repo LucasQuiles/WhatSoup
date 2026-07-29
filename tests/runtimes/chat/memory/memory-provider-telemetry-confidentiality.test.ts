@@ -50,6 +50,7 @@ vi.mock('../../../../src/lib/emit-alert.ts', () => ({
 
 vi.mock('../../../../src/core/retry.ts', () => ({
   sleep: vi.fn().mockResolvedValue(undefined),
+  sleepWithAbort: vi.fn().mockResolvedValue(undefined),
 }));
 
 import { Pinecone } from '@pinecone-database/pinecone';

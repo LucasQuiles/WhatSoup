@@ -177,6 +177,20 @@ describe('handleApiError', () => {
     expect(meta.model).toBe('gpt-x');
     expect(typeof meta.elapsed_ms).toBe('number');
     expect((meta.elapsed_ms as number) >= 0).toBe(true);
+    expect(meta).not.toHaveProperty('err');
+  });
+
+  it('never includes raw provider exception bytes in structured logs', () => {
+    const logger = makeLogger();
+    const forbidden = 'private-raw-provider-exception';
+    try {
+      handleApiError(new Error(forbidden), 'provider', 'model-x', Date.now(), logger);
+    } catch {
+      /* expected */
+    }
+
+    expect(JSON.stringify((logger.error as ReturnType<typeof vi.fn>).mock.calls))
+      .not.toContain(forbidden);
   });
 
   it('embeds the provider name in the thrown error message', () => {

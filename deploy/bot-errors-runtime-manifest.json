@@ -220,6 +220,18 @@
     },
     {
       "mustContain": [
+        "restore_service_to_always_on",
+        "cutover_gate",
+        "CutoverError",
+        "_LEGAL_EXPECTED_STATES",
+        "atomic_write_json",
+        "always_on"
+      ],
+      "path": "deploy/scripts/bot_errors_cutover.py",
+      "sha256": "dae9e37f841216837f2ec9481d4534a9bad0a27ef265c1d33fec9b1d862f6232"
+    },
+    {
+      "mustContain": [
         "read_env_value",
         "env_or_default",
         "run_config_check",
@@ -259,15 +271,6 @@
     },
     {
       "mustContain": [
-        "roster_digest",
-        "roster_inventory",
-        "load_roster"
-      ],
-      "path": "deploy/scripts/lib/bot_errors_roster.py",
-      "sha256": "d5b0e418a46320bff46e9948b00b58a917922930e0649155db15bb1a6fea335c"
-    },
-    {
-      "mustContain": [
         "redact_bot_errors_text",
         "CREDENTIAL_PATH_RE",
         ".config/secrets/",
@@ -281,6 +284,22 @@
     },
     {
       "mustContain": [
+        "roster_digest",
+        "roster_inventory",
+        "load_roster"
+      ],
+      "path": "deploy/scripts/lib/bot_errors_roster.py",
+      "sha256": "d5b0e418a46320bff46e9948b00b58a917922930e0649155db15bb1a6fea335c"
+    },
+    {
+      "mustContain": [
+        "def classify(d: object) -> str:"
+      ],
+      "path": "deploy/scripts/lib/classify_health.py",
+      "sha256": "782cad21c8fff5be8e57bda78b2429d2f115457705af116518e7555e8b7b2ab7"
+    },
+    {
+      "mustContain": [
         "ControllerLogContext",
         "diagnostic_best_effort",
         "controller_cycle",
@@ -289,13 +308,6 @@
       ],
       "path": "deploy/scripts/lib/controller_log.py",
       "sha256": "a944c375c190ec25686fcc8ece7431803818d2ee474deaa62d5afd1e920958be"
-    },
-    {
-      "mustContain": [
-        "def classify(d: object) -> str:"
-      ],
-      "path": "deploy/scripts/lib/classify_health.py",
-      "sha256": "782cad21c8fff5be8e57bda78b2429d2f115457705af116518e7555e8b7b2ab7"
     },
     {
       "mustContain": [
@@ -344,19 +356,7 @@
         "autoCompactActiveBackoffScopes"
       ],
       "path": "src/lib/fault-taxonomy-registry.json",
-      "sha256": "81125c8b756bb7af67b174f2cbd66eadef3ff4f1f08a019345f7edf9c734bd94"
-    },
-    {
-      "mustContain": [
-        "restore_service_to_always_on",
-        "cutover_gate",
-        "CutoverError",
-        "_LEGAL_EXPECTED_STATES",
-        "atomic_write_json",
-        "always_on"
-      ],
-      "path": "deploy/scripts/bot_errors_cutover.py",
-      "sha256": "dae9e37f841216837f2ec9481d4534a9bad0a27ef265c1d33fec9b1d862f6232"
+      "sha256": "df5c394f8d5f9fe5c34a9bb25794eb2abcf7dd613b3ff3cd27e7fc448062b26e"
     }
   ],
   "generatedAt": "2026-07-28T12:38:40Z",

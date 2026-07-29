@@ -25,6 +25,10 @@ export interface DatabaseRetentionConfig {
    * well above the heal degradation-signal horizon (5 min, see core/heal.ts).
    */
   decryptionFailureDays: number;
+  /** Age bound for content-free terminal memory-consolidation receipts. */
+  memoryConsolidationDays: number;
+  /** Hard terminal-row cap; values below the 100-row recovery floor become 100. */
+  memoryConsolidationMaxRows: number;
   /**
    * Retention window for the `messages` table and its orphaned `receipts`
    * rows (#1445 QR-012). Folded in from the standalone main.ts setInterval
@@ -44,6 +48,7 @@ export interface DatabaseRetentionResult {
   outboundOps: number;
   toolCalls: number;
   factExportQueue: number;
+  memoryConsolidationRuns: number;
   metricsHourly: number;
   decryptionFailures: number;
   messages: number;
@@ -55,6 +60,8 @@ export const DEFAULT_DATABASE_RETENTION: DatabaseRetentionConfig = {
   exportedFactDays: 30,
   metricsHourlyDays: 180,
   decryptionFailureDays: 30,
+  memoryConsolidationDays: 30,
+  memoryConsolidationMaxRows: 10_000,
   messageRetentionDays: 30,
 };
 
@@ -217,6 +224,37 @@ export function runDatabaseRetention(
          AND COALESCE(exported_at, created_at) < datetime('now', ?)
     `).run(factCutoff));
 
+    const memoryConsolidationMaxAgeMs =
+      Math.max(1, Math.floor(retention.memoryConsolidationDays)) * 86_400_000;
+    const memoryConsolidationMaxRows = Math.max(
+      100,
+      Math.floor(retention.memoryConsolidationMaxRows),
+    );
+    const memoryConsolidationRuns = changes(db.raw.prepare(`
+      DELETE FROM memory_consolidation_runs
+       WHERE completed_at IS NOT NULL
+         AND (
+           (
+             completed_at
+               < CAST(strftime('%s', 'now') AS INTEGER) * 1000 - ?
+             AND run_id NOT IN (
+               SELECT run_id
+                 FROM memory_consolidation_runs
+                WHERE completed_at IS NOT NULL
+                ORDER BY attempted_at DESC, run_id DESC
+                LIMIT 100
+             )
+           )
+           OR run_id IN (
+             SELECT run_id
+               FROM memory_consolidation_runs
+              WHERE completed_at IS NOT NULL
+              ORDER BY attempted_at DESC, run_id DESC
+              LIMIT -1 OFFSET ?
+           )
+         )
+    `).run(memoryConsolidationMaxAgeMs, memoryConsolidationMaxRows));
+
     // metrics_hourly is an append-only rollup keyed on an ISO-8601 `bucket`
     // (written via toISOString()); datetime(bucket) normalizes it for comparison.
     // A malformed/unparseable bucket makes datetime(bucket) NULL, and `NULL < x`
@@ -257,6 +295,7 @@ export function runDatabaseRetention(
       outboundOps,
       toolCalls,
       factExportQueue,
+      memoryConsolidationRuns,
       metricsHourly,
       decryptionFailures,
       messages,

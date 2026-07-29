@@ -1,21 +1,92 @@
-import { shortHash } from '../lib/short-hash.ts';
 import { stripJsonFences } from '../lib/json-fences.ts';
 import { createChildLogger } from '../logger.ts';
 import { config } from '../config.ts';
 import { resolveModelRole } from '../lib/model-advisor.ts';
+import {
+  classifyMemoryOperationFailure,
+  type MemoryEvidenceCoverage,
+  type MemoryOperationFailureCode,
+} from '../lib/memory-operation-telemetry.ts';
 import type { LLMProvider } from '../runtimes/chat/providers/types.ts';
-import type { MemoryCluster, ConsolidationResult } from './types.ts';
+import type {
+  ClusterConsolidationOutcome,
+  ClusterConsolidationStatus,
+  ConsolidationResult,
+  MemoryCluster,
+} from './types.ts';
+import { z } from 'zod';
 
 /**
- * Dormant memory-consolidation infrastructure.
+ * Production memory-consolidation cluster selection and typed model outcomes.
  *
- * As of 2026-04-25 this module is exercised by tests only; no production
- * scheduler calls `clusterMemories` or `consolidateCluster` yet. Keep the
- * implementation staged here until the memory scheduler workstream wires
- * bounded cluster selection, validated LLM output, and provider deadlines.
+ * The scheduler owns deadlines, durable run receipts, cancellation, and the
+ * post-stop write fence. This module owns strict bounded validation and
+ * content-free failure classification for each attempted cluster.
  */
 
 const log = createChildLogger('consolidation');
+const MAX_PROMOTED_ITEMS = 32;
+const MAX_DISCARDED_ITEMS = 128;
+const MAX_CLAIM_BYTES = 1_024;
+const MAX_REASON_BYTES = 2_048;
+const MAX_SOURCE_ID_BYTES = 512;
+
+const boundedString = (maxBytes: number) =>
+  z.string()
+    .trim()
+    .min(1)
+    .refine((value) => Buffer.byteLength(value, 'utf8') <= maxBytes);
+
+const consolidationOutputSchema = z.object({
+  durableKnowledge: z.array(z.object({
+    claim: boundedString(MAX_CLAIM_BYTES),
+    promotionReason: boundedString(MAX_REASON_BYTES),
+    confidence: z.number().finite().min(0).max(1),
+    sourceRecordIds: z.array(boundedString(MAX_SOURCE_ID_BYTES)).min(1).max(128),
+  }).strict()).max(MAX_PROMOTED_ITEMS),
+  discarded: z.array(z.object({
+    recordId: boundedString(MAX_SOURCE_ID_BYTES),
+    reason: boundedString(MAX_REASON_BYTES),
+  }).strict()).max(MAX_DISCARDED_ITEMS),
+}).strict();
+
+const EMPTY_RESULT: ConsolidationResult = {
+  durableKnowledge: [],
+  discarded: [],
+};
+
+function outcome(
+  status: ClusterConsolidationStatus,
+  input: {
+    result?: ConsolidationResult;
+    failureCode: MemoryOperationFailureCode;
+    retryable: boolean;
+    evidenceCoverage: MemoryEvidenceCoverage;
+  },
+): ClusterConsolidationOutcome {
+  return {
+    status,
+    failureCode: input.failureCode,
+    retryable: input.retryable,
+    evidenceCoverage: input.evidenceCoverage,
+    ...(input.result ?? EMPTY_RESULT),
+  };
+}
+
+function outputMatchesCluster(
+  result: ConsolidationResult,
+  clusterRecordIds: ReadonlySet<string>,
+): boolean {
+  for (const durable of result.durableKnowledge) {
+    const uniqueIds = new Set(durable.sourceRecordIds);
+    if (uniqueIds.size !== durable.sourceRecordIds.length) return false;
+    if (durable.sourceRecordIds.some((id) => !clusterRecordIds.has(id))) return false;
+  }
+
+  const discardedIds = result.discarded.map((item) => item.recordId);
+  if (new Set(discardedIds).size !== discardedIds.length) return false;
+  return discardedIds.every((id) => clusterRecordIds.has(id));
+}
 
 const CONSOLIDATION_PROMPT = `You are a memory consolidation engine. Given a cluster of related memories from an AI agent's episodic history, identify which patterns represent durable knowledge worth keeping long-term.
 
@@ -102,9 +173,27 @@ export function clusterMemories(
 export async function consolidateCluster(
   provider: LLMProvider,
   cluster: MemoryCluster,
-): Promise<ConsolidationResult> {
-  const empty: ConsolidationResult = { durableKnowledge: [], discarded: [] };
-  if (cluster.records.length === 0) return empty;
+  options: { signal?: AbortSignal } = {},
+): Promise<ClusterConsolidationOutcome> {
+  const clusterRecordIds = cluster.records.map((record) => record.id);
+  if (
+    clusterRecordIds.length === 0
+    || clusterRecordIds.some((id) => id.length === 0 || Buffer.byteLength(id, 'utf8') > MAX_SOURCE_ID_BYTES)
+    || new Set(clusterRecordIds).size !== clusterRecordIds.length
+  ) {
+    return outcome('scope_invalid', {
+      failureCode: 'invalid_request',
+      retryable: false,
+      evidenceCoverage: 'local_guard',
+    });
+  }
+  if (options.signal?.aborted) {
+    return outcome('cancelled', {
+      failureCode: 'timeout',
+      retryable: true,
+      evidenceCoverage: 'local_guard',
+    });
+  }
 
   const clusterJson = JSON.stringify({
     topic: cluster.topic,
@@ -126,23 +215,79 @@ export async function consolidateCluster(
       maxTokens: 1000,
       systemPrompt: CONSOLIDATION_PROMPT,
       messages: [{ role: 'user', content: clusterJson }],
+      signal: options.signal,
     });
     raw = response.content.trim();
-  } catch (err) {
-    log.warn({ err, recordCount: cluster.records.length }, 'consolidation LLM call failed');
-    return empty;
+  } catch (error) {
+    if (options.signal?.aborted) {
+      return outcome('cancelled', {
+        failureCode: 'timeout',
+        retryable: true,
+        evidenceCoverage: 'local_guard',
+      });
+    }
+    const failure = classifyMemoryOperationFailure(error);
+    const status = failure.code === 'timeout'
+      ? 'provider_timeout'
+      : 'provider_unavailable';
+    log.warn({
+      status,
+      failureCode: failure.code,
+      retryable: failure.retryable,
+      recordCount: cluster.records.length,
+      evidenceCoverage: 'provider_error',
+    }, 'consolidation provider call failed');
+    return outcome(status, {
+      failureCode: failure.code,
+      retryable: failure.retryable,
+      evidenceCoverage: 'provider_error',
+    });
   }
 
   const jsonStr = stripJsonFences(raw);
 
   try {
-    const parsed = JSON.parse(jsonStr) as ConsolidationResult;
-    return {
-      durableKnowledge: Array.isArray(parsed.durableKnowledge) ? parsed.durableKnowledge : [],
-      discarded: Array.isArray(parsed.discarded) ? parsed.discarded : [],
-    };
+    const parsed = consolidationOutputSchema.safeParse(JSON.parse(jsonStr));
+    if (!parsed.success || !outputMatchesCluster(parsed.data, new Set(clusterRecordIds))) {
+      log.warn({
+        status: 'output_invalid',
+        failureCode: 'invalid_request',
+        retryable: false,
+        outputBytes: Buffer.byteLength(raw, 'utf8'),
+        recordCount: cluster.records.length,
+        evidenceCoverage: 'provider_response',
+      }, 'consolidation output validation failed');
+      return outcome('output_invalid', {
+        failureCode: 'invalid_request',
+        retryable: false,
+        evidenceCoverage: 'provider_response',
+      });
+    }
+    const result: ConsolidationResult = parsed.data;
+    return outcome(
+      result.durableKnowledge.length > 0
+        ? 'completed_promoted'
+        : 'completed_discarded',
+      {
+        result,
+        failureCode: 'none',
+        retryable: false,
+        evidenceCoverage: 'provider_response',
+      },
+    );
   } catch {
-    log.warn({ rawHash: shortHash(raw), rawLength: raw.length }, 'consolidation JSON parse failed');
-    return empty;
+    log.warn({
+      status: 'output_invalid',
+      failureCode: 'invalid_request',
+      retryable: false,
+      outputBytes: Buffer.byteLength(raw, 'utf8'),
+      recordCount: cluster.records.length,
+      evidenceCoverage: 'provider_response',
+    }, 'consolidation output validation failed');
+    return outcome('output_invalid', {
+      failureCode: 'invalid_request',
+      retryable: false,
+      evidenceCoverage: 'provider_response',
+    });
   }
 }
