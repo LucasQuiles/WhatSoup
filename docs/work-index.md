@@ -18,15 +18,15 @@ The **Inconsistencies** section lists missing or stale index entries compared wi
 scoped markdown files currently on disk.
 
 **Repo:** `WhatSoup`
-**Total entries:** 92
+**Total entries:** 94
 
 ## Totals
 
 | Dimension | Breakdown |
 |---|---|
-| Kind | handoff=8, plan=46, review=4, spec=33, state=1 |
-| Status | active=21, closed=4, completed=33, deferred=7, pending=15, unknown=12 |
-| Status source | body-marker=83, fallback=8, state-md-status=1 |
+| Kind | handoff=8, plan=47, review=4, spec=34, state=1 |
+| Status | active=22, closed=4, completed=34, deferred=7, pending=15, unknown=12 |
+| Status source | body-marker=85, fallback=8, state-md-status=1 |
 
 ## Inconsistencies
 
@@ -34,7 +34,7 @@ scoped markdown files currently on disk.
 
 ## Synthesis
 
-### Active (21)
+### Active (22)
 
 | Path | Kind | Topic | Status source |
 |------|------|-------|---------------|
@@ -44,6 +44,7 @@ scoped markdown files currently on disk.
 | `docs/superpowers/plans/2026-07-20-cicd-control-foundation.md` | plan | cicd-control-foundation | body-marker |
 | `docs/superpowers/plans/2026-07-20-cicd-enforcement-control-plane-program.md` | plan | cicd-enforcement-control-plane-program | body-marker |
 | `docs/superpowers/plans/2026-07-26-open-issue-triage-tooling.md` | plan | open-issue-triage-tooling | body-marker |
+| `docs/superpowers/plans/2026-07-28-primary-probe-cancellation.md` | plan | primary-probe-cancellation | body-marker |
 | `docs/superpowers/plans/2026-07-28-runtime-health-signal-dispositions.md` | plan | runtime-health-signal-dispositions | body-marker |
 | `docs/superpowers/specs/2026-07-09-wall-to-wall-audit-remediation-design.md` | spec | wall-to-wall-audit-remediation-design | body-marker |
 | `docs/superpowers/specs/2026-07-11-central-hub-release-proof-pilot-design.md` | spec | central-hub-release-proof-pilot-design | body-marker |
@@ -130,7 +131,7 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 | `docs/superpowers/handoffs/2026-07-16-boundary-core-history-mining.md` | handoff | pending | body-marker | boundary-core-history-mining | 2026-07-16 |  |
 | `docs/superpowers/handoffs/2026-07-28-incident-control-plane-finder-report.md` | handoff | unknown | fallback | incident-control-plane-finder-report | 2026-07-28 |  |
 
-### docs/superpowers/plans  _(46 entries)_
+### docs/superpowers/plans  _(47 entries)_
 
 | Path | Kind | Status | Source | Topic | Last Mod | Supersedes |
 |------|------|--------|--------|-------|----------|------------|
@@ -179,6 +180,7 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 | `docs/superpowers/plans/2026-07-26-open-issue-triage-tooling.md` | plan | active | body-marker | open-issue-triage-tooling | 2026-07-27 |  |
 | `docs/superpowers/plans/2026-07-28-chat-queue-admission.md` | plan | unknown | fallback | chat-queue-admission | 2026-07-29 |  |
 | `docs/superpowers/plans/2026-07-28-incident-store-core.md` | plan | unknown | fallback | incident-store-core | 2026-07-28 |  |
+| `docs/superpowers/plans/2026-07-28-primary-probe-cancellation.md` | plan | active | body-marker | primary-probe-cancellation | 2026-07-29 |  |
 | `docs/superpowers/plans/2026-07-28-runtime-health-signal-dispositions.md` | plan | active | body-marker | runtime-health-signal-dispositions | 2026-07-28 |  |
 
 ### docs/superpowers/reviews  _(4 entries)_
@@ -190,7 +192,7 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 | `docs/superpowers/reviews/2026-07-09-wall-to-wall-audit-pr-briefs.md` | review | completed | body-marker | wall-to-wall-audit-pr-briefs | 2026-07-10 |  |
 | `docs/superpowers/reviews/2026-07-24-r13-r15-tech-debt-review-map.md` | review | completed | body-marker | r13-r15-tech-debt-review-map | 2026-07-24 |  |
 
-### docs/superpowers/specs  _(27 entries)_
+### docs/superpowers/specs  _(28 entries)_
 
 | Path | Kind | Status | Source | Topic | Last Mod | Supersedes |
 |------|------|--------|--------|-------|----------|------------|
@@ -220,6 +222,7 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 | `docs/superpowers/specs/2026-07-26-open-issue-triage-and-cohort-pr-design.md` | spec | active | body-marker | open-issue-triage-and-cohort-pr-design | 2026-07-27 |  |
 | `docs/superpowers/specs/2026-07-28-chat-queue-admission-design.md` | spec | unknown | fallback | chat-queue-admission-design | 2026-07-29 |  |
 | `docs/superpowers/specs/2026-07-28-incident-control-plane-design.md` | spec | unknown | body-marker | incident-control-plane-design | 2026-07-28 | BOT ERRORS WhatsApp-transport-centric delivery (dispatcher/collector file+SSH architecture) as the canonical incident path. |
+| `docs/superpowers/specs/2026-07-28-primary-probe-cancellation-design.md` | spec | completed | body-marker | primary-probe-cancellation-design | 2026-07-29 |  |
 | `docs/superpowers/specs/2026-07-28-runtime-health-signal-dispositions-design.md` | spec | active | body-marker | runtime-health-signal-dispositions-design | 2026-07-28 |  |
 
 ### docs/superpowers/specs/kill-session-transactional-cancellation  _(3 entries)_
@@ -241,4 +244,4 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 ---
 
 - Derived from `docs/work-index.json`
-- Generated at 2026-07-29T11:56:03Z from commit `6060f6d5c28c15681f580f1a2f71418599619815`
+- Generated at 2026-07-29T13:30:00Z from commit `799b6c888fae18f5b789ca936c58088440ee05de`
