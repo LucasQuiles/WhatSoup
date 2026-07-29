@@ -1407,6 +1407,20 @@ describe('main.ts — uncovered helpers and signal paths', () => {
       });
     });
 
+    it('gives an unreadable journal precedence over minimal-mode generic disablement', async () => {
+      const h = await importMainWithMocks({
+        instanceConfig: sharedAgentInstanceConfig(),
+        toolUpdateMode: 'minimal',
+        pendingStartupEvent: null,
+        startupJournalStatus: 'journal_unreadable',
+      });
+
+      expect(h.getHealthDeps().getStartupNotificationHealth?.()).toMatchObject({
+        state: 'journal_unreadable',
+        policy: 'disabled',
+      });
+    });
+
     it('sends the default back-online notice when no pending message exists', async () => {
       const h = await importMainWithMocks({
         instanceConfig: sharedAgentInstanceConfig(),

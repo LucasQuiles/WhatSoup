@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+  runStartupNotificationReleaseCli,
   validateStartupNotificationRelease,
 } from '../../scripts/validate-startup-notification-release.ts';
 
@@ -28,6 +29,18 @@ function validJournal(overrides: Record<string, unknown> = {}): Record<string, u
     lastNotifiedAt: 3_000,
     ...overrides,
   };
+}
+
+function runCli(args: string[], files: Record<string, unknown> = {}) {
+  return runStartupNotificationReleaseCli(args, (path) => files[path]);
+}
+
+function cliArgs(probeOutcome: string): string[] {
+  return [
+    '--health-file', 'health.json',
+    '--journal-file', 'journal.json',
+    '--probe-outcome', probeOutcome,
+  ];
 }
 
 describe('startup notification release validator', () => {
@@ -68,6 +81,63 @@ describe('startup notification release validator', () => {
     expect(validateStartupNotificationRelease({ health, journal, probe: probe as never })).toMatchObject({
       exitCode: 2,
       outcome: 'infrastructure_error',
+    });
+  });
+
+  it('accepts supplied passed probe evidence through the executable-free CLI runner', () => {
+    expect(runCli(cliArgs('passed'), {
+      'health.json': completeHealth(),
+      'journal.json': validJournal(),
+    })).toMatchObject({ exitCode: 0, outcome: 'accepted', issues: [] });
+  });
+
+  it('rejects supplied failed probe evidence through the CLI runner', () => {
+    expect(runCli(cliArgs('failed'), {
+      'health.json': completeHealth(),
+      'journal.json': validJournal(),
+    })).toMatchObject({ exitCode: 1, outcome: 'rejected', issues: ['probe_failed'] });
+  });
+
+  it.each([
+    ['unavailable outcome', cliArgs('unavailable')],
+    ['unknown outcome', cliArgs('indeterminate')],
+    ['missing arguments', []],
+    ['arbitrary command option', ['--probe-command', '/usr/bin/true']],
+  ] as const)('returns infrastructure exit 2 for CLI %s', (_name, args) => {
+    expect(runCli(args, {
+      'health.json': completeHealth(),
+      'journal.json': validJournal(),
+    })).toMatchObject({ exitCode: 2, outcome: 'infrastructure_error' });
+  });
+
+  it.each([
+    ['health file', cliArgs('passed'), { 'journal.json': validJournal() }],
+    ['journal file', cliArgs('passed'), { 'health.json': completeHealth() }],
+  ] as const)('returns infrastructure exit 2 for an unreadable CLI %s', (_name, args, files) => {
+    expect(runCli(args, files)).toMatchObject({
+      exitCode: 2,
+      outcome: 'infrastructure_error',
+    });
+  });
+
+  it('rejects an oversized v1 journal without throwing', () => {
+    const oversizedJournal = validJournal({
+      boots: Array.from({ length: 300_000 }, (_, index) => index),
+    });
+
+    expect(() => validateStartupNotificationRelease({
+      health: completeHealth(),
+      journal: oversizedJournal,
+      probe: { outcome: 'passed' },
+    })).not.toThrow();
+    expect(validateStartupNotificationRelease({
+      health: completeHealth(),
+      journal: oversizedJournal,
+      probe: { outcome: 'passed' },
+    })).toMatchObject({
+      exitCode: 1,
+      outcome: 'rejected',
+      issues: expect.arrayContaining(['journal_boot_count_exceeds_protocol_cap']),
     });
   });
 });

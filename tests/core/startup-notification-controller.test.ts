@@ -40,6 +40,21 @@ class FakeScheduler {
     this.nowMs = target;
   }
 
+  advanceByWithoutAwaiting(ms: number): void {
+    const target = this.nowMs + ms;
+    while (true) {
+      const next = [...this.timers.entries()]
+        .filter(([, timer]) => timer.at <= target)
+        .sort(([, a], [, b]) => a.at - b.at)[0];
+      if (!next) break;
+      const [id, timer] = next;
+      this.timers.delete(id);
+      this.nowMs = timer.at;
+      void timer.callback();
+    }
+    this.nowMs = target;
+  }
+
   now = (): number => this.nowMs;
 }
 
@@ -93,6 +108,25 @@ function createHarness(options: {
     send,
     setReady(value: boolean): void { ready = value; },
   };
+}
+
+function deferred<T>(): {
+  promise: Promise<T>;
+  resolve(value: T): void;
+  reject(error: unknown): void;
+} {
+  let resolve!: (value: T) => void;
+  let reject!: (error: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
+
+async function flushMicrotasks(): Promise<void> {
+  await Promise.resolve();
+  await Promise.resolve();
 }
 
 describe('StartupNotificationController', () => {
@@ -188,6 +222,20 @@ describe('StartupNotificationController', () => {
     });
   });
 
+  it('gives an unreadable journal precedence over disabled generic policy', () => {
+    const journal = makeJournal();
+    journal.recordStartupBoot = vi.fn(() => ({
+      status: 'journal_unreadable',
+      state: { v: 1, boots: [1_000], lastNotifiedAt: null },
+    }));
+    const h = createHarness({ journal, genericNotificationsEnabled: false });
+
+    expect(h.controller.getStartupNotificationHealth()).toMatchObject({
+      state: 'journal_unreadable',
+      policy: 'disabled',
+    });
+  });
+
   it('does not arm a generic aggregate beside a typed event when generic policy is disabled', async () => {
     const h = createHarness({ genericNotificationsEnabled: false });
 
@@ -222,6 +270,51 @@ describe('StartupNotificationController', () => {
       stabilitySeconds: 30,
       nextEligibleAt: 30_000,
       lastSendAt: 3_000,
+    });
+  });
+
+  it('keeps an in-flight typed guard dispatch visible until the pending generic timer begins', async () => {
+    const pendingSend = deferred<unknown>();
+    const h = createHarness({ send: vi.fn(() => pendingSend.promise) });
+
+    h.controller.onConnected({
+      generic: { recipient: 'admin', stabilityWindowMs: 30_000 },
+      event: { kind: 'restart_loop_guard_alert', chatJid: 'admin', text: 'guard tripped' },
+      intentionalRestartReceipt: null,
+    });
+    h.scheduler.advanceByWithoutAwaiting(3_000);
+
+    expect(h.controller.getStartupNotificationHealth()).toMatchObject({
+      state: 'dispatching',
+      policy: 'restart_loop_guard_alert',
+      nextEligibleAt: 30_000,
+    });
+
+    pendingSend.resolve({ accepted: true });
+    await flushMicrotasks();
+    expect(h.controller.getStartupNotificationHealth()).toMatchObject({
+      state: 'waiting_stability',
+      policy: 'generic',
+    });
+  });
+
+  it('keeps a typed send failure visible until the pending generic timer begins', async () => {
+    const pendingSend = deferred<unknown>();
+    const h = createHarness({ send: vi.fn(() => pendingSend.promise) });
+
+    h.controller.onConnected({
+      generic: { recipient: 'admin', stabilityWindowMs: 30_000 },
+      event: { kind: 'expired_session_notice', chatJid: 'admin', text: 'session expired' },
+      intentionalRestartReceipt: null,
+    });
+    h.scheduler.advanceByWithoutAwaiting(3_000);
+    pendingSend.reject(new Error('submission failed'));
+    await flushMicrotasks();
+
+    expect(h.controller.getStartupNotificationHealth()).toMatchObject({
+      state: 'send_failed',
+      policy: 'expired_session_notice',
+      nextEligibleAt: 30_000,
     });
   });
 

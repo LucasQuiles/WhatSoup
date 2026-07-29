@@ -1,5 +1,7 @@
-import { readFileSync } from 'node:fs';
-import { spawnSync } from 'node:child_process';
+import { closeSync, constants, openSync, readSync } from 'node:fs';
+
+const MAX_JOURNAL_BOOTS = 100;
+const MAX_JSON_INPUT_BYTES = 64 * 1_024;
 
 const STATES = new Set([
   'not_applicable',
@@ -126,20 +128,28 @@ export function validateStartupNotificationRelease(
   }
   if (startupNotification.nextEligibleAt !== null) issues.push('startup_notification_still_waiting');
 
+  if (input.journal.v !== 1 || !Array.isArray(input.journal.boots)) {
+    return reject([...issues, 'journal_v1_invalid']);
+  }
   const boots = input.journal.boots;
+  if (boots.length > MAX_JOURNAL_BOOTS) {
+    return reject([...issues, 'journal_boot_count_exceeds_protocol_cap']);
+  }
   const journalLastNotifiedAt = input.journal.lastNotifiedAt;
-  const validJournal = input.journal.v === 1
-    && Array.isArray(boots)
-    && boots.every(isFiniteTimestamp)
-    && isNullableTimestamp(journalLastNotifiedAt);
-  if (!validJournal) return reject([...issues, 'journal_v1_invalid']);
+  if (!boots.every(isFiniteTimestamp) || !isNullableTimestamp(journalLastNotifiedAt)) {
+    return reject([...issues, 'journal_v1_invalid']);
+  }
   if (boots.length === 0) issues.push('journal_boot_evidence_missing');
 
   if (journalLastNotifiedAt === null) {
     issues.push('journal_watermark_missing');
   } else {
-    const lastBootAt = boots.length === 0 ? null : Math.max(...boots);
-    const unnotifiedBoots = boots.filter((boot) => boot > journalLastNotifiedAt).length;
+    let lastBootAt: number | null = null;
+    let unnotifiedBoots = 0;
+    for (const boot of boots) {
+      if (lastBootAt === null || boot > lastBootAt) lastBootAt = boot;
+      if (boot > journalLastNotifiedAt) unnotifiedBoots += 1;
+    }
     if (lastBootAt !== null && journalLastNotifiedAt < lastBootAt) {
       issues.push('journal_watermark_precedes_boot');
     }
@@ -168,78 +178,82 @@ export function validateStartupNotificationRelease(
 type CliOptions = {
   healthPath: string | null;
   journalPath: string | null;
-  probeCommand: string | null;
-  probeArgs: string[];
+  probeOutcome: StartupNotificationProbe['outcome'] | null;
 };
 
 type ParsedCliOptions = {
   healthPath: string;
   journalPath: string;
-  probeCommand: string;
-  probeArgs: string[];
+  probeOutcome: StartupNotificationProbe['outcome'];
 };
 
 function parseArgs(args: string[]): ParsedCliOptions | null {
-  const options: CliOptions = { healthPath: null, journalPath: null, probeCommand: null, probeArgs: [] };
+  const options: CliOptions = { healthPath: null, journalPath: null, probeOutcome: null };
   for (let index = 0; index < args.length; index += 1) {
     const arg = args[index];
     const value = args[index + 1];
-    if ((arg === '--health-file' || arg === '--journal-file' || arg === '--probe-command') && !value) return null;
+    if ((arg === '--health-file' || arg === '--journal-file' || arg === '--probe-outcome') && !value) return null;
     if (arg === '--health-file') {
+      if (options.healthPath !== null) return null;
       options.healthPath = value;
       index += 1;
     } else if (arg === '--journal-file') {
+      if (options.journalPath !== null) return null;
       options.journalPath = value;
       index += 1;
-    } else if (arg === '--probe-command') {
-      options.probeCommand = value;
-      index += 1;
-    } else if (arg === '--probe-arg' && value !== undefined) {
-      options.probeArgs.push(value);
+    } else if (arg === '--probe-outcome') {
+      if (
+        options.probeOutcome !== null
+        || (value !== 'passed' && value !== 'failed' && value !== 'unavailable')
+      ) return null;
+      options.probeOutcome = value;
       index += 1;
     } else {
       return null;
     }
   }
-  if (!options.healthPath || !options.journalPath || !options.probeCommand) return null;
+  if (!options.healthPath || !options.journalPath || options.probeOutcome === null) return null;
   return {
     healthPath: options.healthPath,
     journalPath: options.journalPath,
-    probeCommand: options.probeCommand,
-    probeArgs: options.probeArgs,
+    probeOutcome: options.probeOutcome,
   };
 }
 
 function readJson(path: string): unknown | undefined {
+  let descriptor: number | null = null;
   try {
-    return JSON.parse(readFileSync(path, 'utf8')) as unknown;
+    descriptor = openSync(path, constants.O_RDONLY | constants.O_NONBLOCK);
+    const contents = Buffer.alloc(MAX_JSON_INPUT_BYTES + 1);
+    const bytesRead = readSync(descriptor, contents, 0, contents.length, 0);
+    if (bytesRead > MAX_JSON_INPUT_BYTES) return undefined;
+    return JSON.parse(contents.toString('utf8', 0, bytesRead)) as unknown;
   } catch {
     return undefined;
+  } finally {
+    if (descriptor !== null) closeSync(descriptor);
   }
 }
 
-function runProbe(command: string, args: string[]): StartupNotificationProbe {
-  const result = spawnSync(command, args, { stdio: 'ignore', timeout: 15_000 });
-  if (result.error || result.signal !== null) return { outcome: 'unavailable' };
-  return result.status === 0 ? { outcome: 'passed' } : { outcome: 'failed' };
-}
-
-function runCli(args: string[]): StartupNotificationReleaseValidationResult {
+export function runStartupNotificationReleaseCli(
+  args: string[],
+  readJsonFile: (path: string) => unknown | undefined = readJson,
+): StartupNotificationReleaseValidationResult {
   const options = parseArgs(args);
   if (options === null) {
     return { exitCode: 2, outcome: 'infrastructure_error', issues: ['invalid_arguments'] };
   }
-  const health = readJson(options.healthPath);
-  const journal = readJson(options.journalPath);
+  const health = readJsonFile(options.healthPath);
+  const journal = readJsonFile(options.journalPath);
   return validateStartupNotificationRelease({
     health,
     journal,
-    probe: runProbe(options.probeCommand, options.probeArgs),
+    probe: { outcome: options.probeOutcome },
   });
 }
 
 if (process.argv[1]?.endsWith('/validate-startup-notification-release.ts')) {
-  const result = runCli(process.argv.slice(2));
+  const result = runStartupNotificationReleaseCli(process.argv.slice(2));
   process.stdout.write(`${JSON.stringify(result)}\n`);
   process.exitCode = result.exitCode;
 }

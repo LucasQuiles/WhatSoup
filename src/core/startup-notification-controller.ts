@@ -249,30 +249,29 @@ export class StartupNotificationController {
         : this.policy;
     const stabilitySeconds = pendingPrompt
       ? MINIMUM_DELAY_MS / 1_000
-      : pendingGeneric
-        ? this.genericStabilitySeconds
-        : this.genericStabilitySeconds;
+      : this.genericStabilitySeconds;
     const nextEligibleAt = pendingPrompt
       ? this.promptNextEligibleAt
       : pendingGeneric
         ? this.genericNextEligibleAt
         : null;
-    const state: StartupNotificationHealth['state'] = this.policy === 'disabled'
-      ? 'disabled'
-      : this.journalStatus === 'journal_unreadable'
-        ? 'journal_unreadable'
-        : this.state === 'waiting'
+    const activeSubmission = this.state === 'dispatching' || this.state === 'send_failed';
+    const state: StartupNotificationHealth['state'] = this.journalStatus === 'journal_unreadable'
+      ? 'journal_unreadable'
+      : this.policy === 'disabled'
+        ? 'disabled'
+        : this.state === 'dispatching'
+          ? 'dispatching'
+          : this.state === 'send_failed'
+            ? 'send_failed'
+            : this.state === 'waiting'
           ? pendingState ?? 'waiting_stability'
-          : this.state === 'dispatching'
-            ? 'dispatching'
             : this.state === 'sent'
               ? pendingState ?? 'sent'
-              : this.state === 'send_failed'
-                ? pendingState ?? 'send_failed'
-                : 'not_applicable';
+              : 'not_applicable';
     return {
       state,
-      policy: pendingState === null ? this.policy : pendingPolicy,
+      policy: activeSubmission || pendingState === null ? this.policy : pendingPolicy,
       stabilitySeconds,
       bootCountSinceNotification,
       lastBootAt,
