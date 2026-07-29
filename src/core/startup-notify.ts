@@ -178,7 +178,12 @@ export function settleStartupNotification(
     };
   }
 
-  const { state } = result;
+  // A record write can fail while leaving a valid older/missing source that
+  // later becomes writable. Reconcile just that process's unpersisted state
+  // with the recovered source so its boot cannot disappear before settlement.
+  const state = ephemeralState === undefined
+    ? result.state
+    : reconcileRecoveredState(result.state, ephemeralState, now);
   const composed = composeStartupNotification(state, formatTime);
   if (composed.bootsCovered === 0) {
     return {
@@ -206,6 +211,22 @@ export function settleStartupNotification(
   };
 }
 
+function reconcileRecoveredState(
+  persistedState: StartupNotifyState,
+  ephemeralState: StartupNotifyState,
+  now: number,
+): StartupNotifyState {
+  const lastNotifiedAt = Math.max(
+    persistedState.lastNotifiedAt ?? 0,
+    ephemeralState.lastNotifiedAt ?? 0,
+  ) || null;
+  const boots = [...new Set([...persistedState.boots, ...ephemeralState.boots])]
+    .filter((boot) => now - boot < BOOT_RETENTION_MS)
+    .sort((a, b) => a - b)
+    .slice(-MAX_BOOTS);
+  return { v: 1, boots, lastNotifiedAt };
+}
+
 /**
  * Narrow journal port for the process-local controller. Keeping path I/O and
  * read-modify-write ownership here prevents the controller from knowing about
@@ -218,15 +239,17 @@ export function createStartupNotificationJournalPort(
   recordStartupBoot(now: number): StartupNotifyJournalResult;
   settleStartupNotification(now: number): StartupNotificationSettlement;
 } {
-  let ephemeralState: StartupNotifyState | undefined;
+  let unpersistedState: StartupNotifyState | undefined;
   return {
     recordStartupBoot(now: number): StartupNotifyJournalResult {
       const result = recordStartupBoot(statePath, now);
-      ephemeralState = result.state;
+      unpersistedState = result.status === 'journal_unreadable' ? result.state : undefined;
       return result;
     },
     settleStartupNotification(now: number): StartupNotificationSettlement {
-      return settleStartupNotification(statePath, now, formatTime, ephemeralState);
+      const settled = settleStartupNotification(statePath, now, formatTime, unpersistedState);
+      if (settled.watermarkPersisted) unpersistedState = undefined;
+      return settled;
     },
   };
 }

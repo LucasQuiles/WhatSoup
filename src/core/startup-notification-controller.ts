@@ -93,7 +93,8 @@ export class StartupNotificationController {
   private readonly connection: StartupNotificationConnectionPort;
   private readonly journal: StartupNotificationJournalPort;
   private readonly send: StartupNotificationTrackedSendPort;
-  private timer: unknown | null = null;
+  private genericTimer: unknown | null = null;
+  private readonly promptTimers = new Set<unknown>();
   private stopped = false;
   private state: StartupNotificationControllerHealth['state'] = 'idle';
   private journalStatus: StartupNotificationControllerHealth['journalStatus'] = 'available';
@@ -118,45 +119,41 @@ export class StartupNotificationController {
   onConnected(input: StartupNotificationConnectedInput): void {
     if (this.stopped) return;
 
-    if (input.intentionalRestartReceipt) {
+    const { event, intentionalRestartReceipt } = input;
+    const promptSettlesBatch = intentionalRestartReceipt !== null || event?.kind === 'resume';
+    if (event || intentionalRestartReceipt) {
+      // A typed event is never discarded because a receipt also exists. Prompt
+      // delivery keeps the event first (the former main.ts insertion order).
+      // Resume and receipt each settle the boot batch; guard/expiry do not, so
+      // they retain a separate configured generic stability timer when alone.
       this.schedulePrompt(async () => {
-        this.settleGenericBoots();
-        await this.submit(
-          input.intentionalRestartReceipt!.chatJid,
-          input.intentionalRestartReceipt!.text,
-          { replayPolicy: 'unsafe', opType: 'status_ping' },
-        );
+        if (promptSettlesBatch) this.settleGenericBoots();
+        if (event) await this.submitEvent(event);
+        if (intentionalRestartReceipt) {
+          await this.submit(
+            intentionalRestartReceipt.chatJid,
+            intentionalRestartReceipt.text,
+            { replayPolicy: 'unsafe', opType: 'status_ping' },
+          );
+        }
       });
+      if (!promptSettlesBatch && input.generic) {
+        this.scheduleGeneric(input.generic.stabilityWindowMs, async () => {
+          const notification = this.settleGenericBoots();
+          if (notification) {
+            await this.submit(
+              input.generic!.recipient,
+              notification.text,
+              { replayPolicy: 'unsafe', opType: 'status_ping' },
+            );
+          }
+        });
+      }
       return;
     }
 
-    if (input.event) {
-      switch (input.event.kind) {
-        case 'resume':
-          this.schedulePrompt(async () => {
-            this.settleGenericBoots();
-            await this.submit(input.event!.chatJid, input.event!.text, { replayPolicy: 'safe' });
-          });
-          return;
-        case 'restart_loop_guard_alert':
-          this.schedulePrompt(() => this.submit(
-            input.event!.chatJid,
-            input.event!.text,
-            { replayPolicy: 'unsafe', opType: 'status_ping' },
-          ));
-          return;
-        case 'expired_session_notice':
-          this.schedulePrompt(() => this.submit(
-            input.event!.chatJid,
-            input.event!.text,
-            { replayPolicy: 'safe' },
-          ));
-          return;
-      }
-    }
-
     if (!input.generic) return;
-    this.scheduleWhenReady(
+    this.scheduleGeneric(
       input.generic.stabilityWindowMs,
       async () => {
         const notification = this.settleGenericBoots();
@@ -173,39 +170,63 @@ export class StartupNotificationController {
 
   stop(): void {
     this.stopped = true;
-    if (this.timer !== null) {
-      this.scheduler.clearTimeout(this.timer);
-      this.timer = null;
+    if (this.genericTimer !== null) {
+      this.scheduler.clearTimeout(this.genericTimer);
+      this.genericTimer = null;
     }
+    for (const timer of this.promptTimers) {
+      this.scheduler.clearTimeout(timer);
+    }
+    this.promptTimers.clear();
     this.state = 'stopped';
   }
 
   getHealthSnapshot(): StartupNotificationControllerHealth {
     return {
       state: this.state,
-      timerArmed: this.timer !== null,
+      timerArmed: this.genericTimer !== null || this.promptTimers.size > 0,
       journalStatus: this.journalStatus,
       settlement: this.settlement,
     };
   }
 
   private schedulePrompt(run: () => Promise<void>): void {
-    this.scheduleWhenReady(MINIMUM_DELAY_MS, run);
-  }
-
-  private scheduleWhenReady(delayMs: number, run: () => Promise<void>): void {
-    const delay = Math.max(delayMs, MINIMUM_DELAY_MS);
-    if (this.timer !== null) this.scheduler.clearTimeout(this.timer);
-    this.state = 'waiting';
-    this.timer = this.scheduler.setTimeout(async () => {
-      this.timer = null;
+    let timer: unknown;
+    timer = this.scheduler.setTimeout(async () => {
+      this.promptTimers.delete(timer);
       if (this.stopped) return;
       if (!this.connection.isFullyConnected()) {
-        this.scheduleWhenReady(delay, run);
+        this.schedulePrompt(run);
+        return;
+      }
+      await run();
+    }, MINIMUM_DELAY_MS);
+    this.promptTimers.add(timer);
+  }
+
+  private scheduleGeneric(delayMs: number, run: () => Promise<void>): void {
+    const delay = Math.max(delayMs, MINIMUM_DELAY_MS);
+    if (this.genericTimer !== null) this.scheduler.clearTimeout(this.genericTimer);
+    this.state = 'waiting';
+    this.genericTimer = this.scheduler.setTimeout(async () => {
+      this.genericTimer = null;
+      if (this.stopped) return;
+      if (!this.connection.isFullyConnected()) {
+        this.scheduleGeneric(delay, run);
         return;
       }
       await run();
     }, delay);
+  }
+
+  private submitEvent(event: StartupNotificationEvent): Promise<void> {
+    switch (event.kind) {
+      case 'resume':
+      case 'expired_session_notice':
+        return this.submit(event.chatJid, event.text, { replayPolicy: 'safe' });
+      case 'restart_loop_guard_alert':
+        return this.submit(event.chatJid, event.text, { replayPolicy: 'unsafe', opType: 'status_ping' });
+    }
   }
 
   private settleGenericBoots(): StartupNotification | null {

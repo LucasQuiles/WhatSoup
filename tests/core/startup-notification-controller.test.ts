@@ -193,7 +193,7 @@ describe('StartupNotificationController', () => {
     );
   });
 
-  it('sends a restart-loop alert without settling the generic watermark', async () => {
+  it('sends a restart-loop alert promptly without settling, then sends the configured generic aggregate', async () => {
     const h = createHarness();
 
     h.controller.onConnected({
@@ -211,9 +211,16 @@ describe('StartupNotificationController', () => {
     expect(h.send).toHaveBeenCalledWith('admin', 'guard tripped', {
       replayPolicy: 'unsafe', opType: 'status_ping',
     });
+    expect(h.scheduler.pendingCount).toBe(1);
+
+    await h.scheduler.advanceBy(27_000);
+    expect(h.journal.settleStartupNotification).toHaveBeenCalledOnce();
+    expect(h.send).toHaveBeenCalledWith('admin', '*Agent back online* ✓', {
+      replayPolicy: 'unsafe', opType: 'status_ping',
+    });
   });
 
-  it('keeps an expired-session notice distinct without a silent generic settlement', async () => {
+  it('keeps an expired-session notice distinct, then sends the configured generic aggregate', async () => {
     const h = createHarness();
 
     h.controller.onConnected({
@@ -229,6 +236,12 @@ describe('StartupNotificationController', () => {
 
     expect(h.journal.settleStartupNotification).not.toHaveBeenCalled();
     expect(h.send).toHaveBeenCalledWith('resume-chat', 'session expired', { replayPolicy: 'safe' });
+
+    await h.scheduler.advanceBy(27_000);
+    expect(h.journal.settleStartupNotification).toHaveBeenCalledOnce();
+    expect(h.send).toHaveBeenCalledWith('admin', '*Agent back online* ✓', {
+      replayPolicy: 'unsafe', opType: 'status_ping',
+    });
   });
 
   it('settles the whole batch before an intentional restart receipt and never sends a generic aggregate later', async () => {
@@ -273,6 +286,91 @@ describe('StartupNotificationController', () => {
     expect(h.send).toHaveBeenCalledWith('restart-requester', 'back online', {
       replayPolicy: 'unsafe', opType: 'status_ping',
     });
+  });
+
+  it('delivers a resume and receipt together after one settlement, without a later generic aggregate', async () => {
+    const h = createHarness();
+
+    h.controller.onConnected({
+      generic: { recipient: 'configured-admin', stabilityWindowMs: 30_000 },
+      event: { kind: 'resume', chatJid: 'resume-chat', text: 'resuming' },
+      intentionalRestartReceipt: { chatJid: 'receipt-chat', text: 'back online' },
+    });
+    await h.scheduler.advanceBy(3_000);
+
+    expect(h.journal.settleStartupNotification).toHaveBeenCalledOnce();
+    expect(h.send.mock.invocationCallOrder[0]).toBeGreaterThan(
+      h.journal.settleStartupNotification.mock.invocationCallOrder[0]!,
+    );
+    expect(h.send).toHaveBeenNthCalledWith(1, 'resume-chat', 'resuming', { replayPolicy: 'safe' });
+    expect(h.send).toHaveBeenNthCalledWith(2, 'receipt-chat', 'back online', {
+      replayPolicy: 'unsafe', opType: 'status_ping',
+    });
+    await h.scheduler.advanceBy(60_000);
+    expect(h.send).toHaveBeenCalledTimes(2);
+  });
+
+  it('delivers a guard alert and receipt together after the receipt settles the batch', async () => {
+    const h = createHarness();
+
+    h.controller.onConnected({
+      generic: { recipient: 'configured-admin', stabilityWindowMs: 30_000 },
+      event: { kind: 'restart_loop_guard_alert', chatJid: 'guard-chat', text: 'guard tripped' },
+      intentionalRestartReceipt: { chatJid: 'receipt-chat', text: 'back online' },
+    });
+    await h.scheduler.advanceBy(3_000);
+
+    expect(h.journal.settleStartupNotification).toHaveBeenCalledOnce();
+    expect(h.send.mock.invocationCallOrder[1]).toBeGreaterThan(
+      h.journal.settleStartupNotification.mock.invocationCallOrder[0]!,
+    );
+    expect(h.send).toHaveBeenNthCalledWith(1, 'guard-chat', 'guard tripped', {
+      replayPolicy: 'unsafe', opType: 'status_ping',
+    });
+    expect(h.send).toHaveBeenNthCalledWith(2, 'receipt-chat', 'back online', {
+      replayPolicy: 'unsafe', opType: 'status_ping',
+    });
+    await h.scheduler.advanceBy(60_000);
+    expect(h.send).toHaveBeenCalledTimes(2);
+  });
+
+  it('delivers an expired-session notice and receipt together after the receipt settles the batch', async () => {
+    const h = createHarness();
+
+    h.controller.onConnected({
+      generic: { recipient: 'configured-admin', stabilityWindowMs: 30_000 },
+      event: { kind: 'expired_session_notice', chatJid: 'expired-chat', text: 'session expired' },
+      intentionalRestartReceipt: { chatJid: 'receipt-chat', text: 'back online' },
+    });
+    await h.scheduler.advanceBy(3_000);
+
+    expect(h.journal.settleStartupNotification).toHaveBeenCalledOnce();
+    expect(h.send.mock.invocationCallOrder[1]).toBeGreaterThan(
+      h.journal.settleStartupNotification.mock.invocationCallOrder[0]!,
+    );
+    expect(h.send).toHaveBeenNthCalledWith(1, 'expired-chat', 'session expired', { replayPolicy: 'safe' });
+    expect(h.send).toHaveBeenNthCalledWith(2, 'receipt-chat', 'back online', {
+      replayPolicy: 'unsafe', opType: 'status_ping',
+    });
+    await h.scheduler.advanceBy(60_000);
+    expect(h.send).toHaveBeenCalledTimes(2);
+  });
+
+  it('cancels both prompt and generic timers on stop', async () => {
+    const h = createHarness();
+
+    h.controller.onConnected({
+      generic: { recipient: 'admin', stabilityWindowMs: 30_000 },
+      event: { kind: 'restart_loop_guard_alert', chatJid: 'admin', text: 'guard tripped' },
+      intentionalRestartReceipt: null,
+    });
+    expect(h.scheduler.pendingCount).toBe(2);
+
+    h.controller.stop();
+    expect(h.scheduler.pendingCount).toBe(0);
+    await h.scheduler.advanceBy(60_000);
+    expect(h.send).not.toHaveBeenCalled();
+    expect(h.controller.getHealthSnapshot()).toMatchObject({ state: 'stopped', timerArmed: false });
   });
 
   it('cancels its timer on stop and records send and journal failures without claiming durable settlement', async () => {

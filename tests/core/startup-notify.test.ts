@@ -14,13 +14,14 @@
 // un-notified boot into one intentional message; fail-open on all
 // persistence errors (a broken journal must never block the notification or
 // the boot).
-import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import {
   composeStartupNotification,
+  createStartupNotificationJournalPort,
   recordStartupBoot,
   settleStartupNotification,
   startupNotifyPath,
@@ -192,6 +193,38 @@ describe('settleStartupNotification', () => {
       status: 'available',
       watermarkPersisted: true,
       notification: null,
+    });
+  });
+});
+
+describe('createStartupNotificationJournalPort', () => {
+  it('reconciles an unpersisted boot when storage recovers before settlement', () => {
+    dir = mkdtempSync(path.join(tmpdir(), 'ws-startup-notify-recovery-'));
+    const journalParent = path.join(dir, 'journal-parent');
+    const p = path.join(journalParent, 'startup-notify.json');
+    writeFileSync(journalParent, 'blocking parent', 'utf8');
+
+    const port = createStartupNotificationJournalPort(p, utcHm);
+    expect(port.recordStartupBoot(T0)).toMatchObject({
+      status: 'journal_unreadable',
+      state: { v: 1, boots: [T0], lastNotifiedAt: null },
+    });
+
+    rmSync(journalParent);
+    mkdirSync(journalParent, { mode: 0o700 });
+
+    const settled = port.settleStartupNotification(T0 + MIN);
+
+    expect(settled).toMatchObject({
+      status: 'available',
+      watermarkPersisted: true,
+      state: { v: 1, boots: [T0], lastNotifiedAt: T0 + MIN },
+      notification: { bootsCovered: 1 },
+    });
+    expect(JSON.parse(readFileSync(p, 'utf8'))).toMatchObject({
+      v: 1,
+      boots: [T0],
+      lastNotifiedAt: T0 + MIN,
     });
   });
 });
