@@ -88,6 +88,7 @@
     "guard:test-integrity:required": "WHATSOUP_REQUIRE_TEST_INTEGRITY=1 npm run guard:test-integrity",
     "guard:boundaries": "bash scripts/run-with-pinned-node.sh scripts/import-boundary-check.ts",
     "guard:transport-patterns": "bash scripts/run-with-pinned-node.sh scripts/transport-pattern-check.ts",
+    "guard:hardcoded-tmpdir": "node --experimental-strip-types scripts/check-hardcoded-tmpdir.ts",
     "guard:ring-boundaries": "npm run guard:boundaries",
     "guard:ssot-patterns": "bash scripts/run-with-pinned-node.sh scripts/ssot-pattern-guard.ts",
     "guard:ring-boundary-ratchet": "bash scripts/run-with-pinned-node.sh scripts/ring-boundary-guard.ts",
