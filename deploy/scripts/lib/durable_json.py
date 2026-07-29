@@ -4,12 +4,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
+import errno
+import fcntl
 import hashlib
 import json
 import os
 from pathlib import Path, PurePath, PurePosixPath
 import stat
-from typing import Any, Mapping, NoReturn
+from typing import Any, Callable, Mapping, NoReturn
 
 
 class DurabilityProof(str, Enum):
@@ -170,7 +172,16 @@ def durable_json_target(
 
 def _open_directory(name: str, *, dir_fd: int) -> int:
     flags = os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | getattr(os, "O_NOFOLLOW", 0)
-    descriptor = os.open(name, flags, dir_fd=dir_fd)
+    try:
+        descriptor = os.open(name, flags, dir_fd=dir_fd)
+    except OSError as exc:
+        if exc.errno in {errno.EMFILE, errno.ENFILE}:
+            error_class = ErrorClass.DESCRIPTOR_EXHAUSTION
+        elif exc.errno in {errno.EACCES, errno.EPERM}:
+            error_class = ErrorClass.PERMISSION
+        else:
+            error_class = ErrorClass.IDENTITY_TYPE
+        raise DurableWriteError(error_class.value) from exc
     if not stat.S_ISDIR(os.fstat(descriptor).st_mode):
         os.close(descriptor)
         raise DurableWriteError(ErrorClass.IDENTITY_TYPE.value)
@@ -190,6 +201,13 @@ def _open_target_parent(target: DurableJsonTarget) -> tuple[int, str]:
         relative_parts = target.relative_path.parts
         for component in relative_parts[:-1]:
             next_descriptor = _open_directory(component, dir_fd=descriptor)
+            component_stat = os.fstat(next_descriptor)
+            if (
+                component_stat.st_uid != os.getuid()
+                or stat.S_IMODE(component_stat.st_mode) & 0o077
+            ):
+                os.close(next_descriptor)
+                raise DurableWriteError(ErrorClass.PERMISSION.value)
             os.close(descriptor)
             descriptor = next_descriptor
         return descriptor, relative_parts[-1]
@@ -294,12 +312,440 @@ def operation_id(
     return hashlib.sha256(material).hexdigest()
 
 
-def publish_event_json(*args: object, **kwargs: object) -> NoReturn:
-    _not_implemented()
+def _result(
+    *,
+    component: str,
+    operation: str,
+    content_sha256: str | None,
+    durability: DurabilityProof,
+    authority: AuthorityState,
+    stage: WriteStage,
+    error_class: ErrorClass | None = None,
+    cleanup: CleanupState = CleanupState.NOT_REQUIRED,
+    confinement: ConfinementProof = ConfinementProof.PROVEN,
+    generation: int | None = None,
+) -> PublicationResult:
+    return PublicationResult(
+        component=component,
+        durability=durability,
+        confinement=confinement,
+        cleanup=cleanup,
+        authority=authority,
+        stage=stage,
+        error_class=error_class,
+        generation=generation,
+        private_operation_id=operation,
+        private_content_sha256=content_sha256,
+    )
 
 
-def publish_state_json(*args: object, **kwargs: object) -> NoReturn:
-    _not_implemented()
+def _lock_parent(parent_fd: int) -> int:
+    flags = os.O_RDWR | os.O_CREAT | os.O_CLOEXEC | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(".durable-json.lock", flags, 0o600, dir_fd=parent_fd)
+    lock_stat = os.fstat(descriptor)
+    if (
+        not stat.S_ISREG(lock_stat.st_mode)
+        or lock_stat.st_uid != os.getuid()
+        or stat.S_IMODE(lock_stat.st_mode) & 0o077
+    ):
+        os.close(descriptor)
+        raise DurableWriteError(ErrorClass.PERMISSION.value)
+    os.fchmod(descriptor, 0o600)
+    fcntl.flock(descriptor, fcntl.LOCK_EX)
+    return descriptor
+
+
+def _write_all(descriptor: int, raw: bytes) -> None:
+    offset = 0
+    while offset < len(raw):
+        written = os.write(descriptor, raw[offset:])
+        if written <= 0:
+            raise OSError("short write")
+        offset += written
+
+
+def publish_event_json(
+    target: DurableJsonTarget,
+    payload: Mapping[str, Any],
+    *,
+    component: str,
+    operation_id: str,
+    _fault_hook: Callable[[WriteStage], None] | None = None,
+) -> PublicationResult:
+    absent = JsonVersion(False, None, None, None)
+    try:
+        canonical = _canonical_payload(payload)
+        expected_operation = globals()["operation_id"](
+            target,
+            payload,
+            component=component,
+            predecessor=absent,
+        )
+    except DurableWriteError:
+        return _result(
+            component=component,
+            operation=operation_id,
+            content_sha256=None,
+            durability=DurabilityProof.NOT_MUTATED,
+            authority=AuthorityState.EXPECTED_PREDECESSOR,
+            stage=WriteStage.SERIALIZATION,
+            error_class=ErrorClass.SERIALIZATION,
+        )
+    raw = canonical + b"\n"
+    content_sha256 = hashlib.sha256(raw).hexdigest()
+    if operation_id != expected_operation:
+        return _result(
+            component=component,
+            operation=operation_id,
+            content_sha256=content_sha256,
+            durability=DurabilityProof.NOT_MUTATED,
+            authority=AuthorityState.EXPECTED_PREDECESSOR,
+            stage=WriteStage.CAPABILITY_CHECK,
+            error_class=ErrorClass.IDENTITY_TYPE,
+        )
+
+    parent_fd = -1
+    lock_fd = -1
+    temp_fd = -1
+    temp_name = f".durable-json.{operation_id}.tmp"
+    temp_created = False
+    published = False
+    cleanup = CleanupState.NOT_REQUIRED
+    try:
+        parent_fd, leaf = _open_target_parent(target)
+        lock_fd = _lock_parent(parent_fd)
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC | getattr(os, "O_NOFOLLOW", 0)
+        temp_fd = os.open(temp_name, flags, 0o600, dir_fd=parent_fd)
+        temp_created = True
+        _write_all(temp_fd, raw)
+        os.fsync(temp_fd)
+        os.fchmod(temp_fd, 0o600)
+        temp_stat = os.fstat(temp_fd)
+        if not stat.S_ISREG(temp_stat.st_mode) or temp_stat.st_nlink != 1:
+            raise DurableWriteError(ErrorClass.IDENTITY_TYPE.value)
+        os.close(temp_fd)
+        temp_fd = -1
+        os.link(
+            temp_name,
+            leaf,
+            src_dir_fd=parent_fd,
+            dst_dir_fd=parent_fd,
+            follow_symlinks=False,
+        )
+        published = True
+        try:
+            os.unlink(temp_name, dir_fd=parent_fd)
+            temp_created = False
+            cleanup = CleanupState.COMPLETE
+        except OSError:
+            cleanup = CleanupState.DEBT_PRIVATE_TEMP
+        if _fault_hook is not None:
+            _fault_hook(WriteStage.PARENT_SYNC)
+        os.fsync(parent_fd)
+        return _result(
+            component=component,
+            operation=operation_id,
+            content_sha256=content_sha256,
+            durability=DurabilityProof.COMMITTED,
+            authority=AuthorityState.INTENDED_AUTHORITATIVE,
+            stage=WriteStage.PARENT_SYNC,
+            cleanup=cleanup,
+        )
+    except FileExistsError:
+        if parent_fd >= 0:
+            existing_fd = -1
+            try:
+                existing_fd = os.open(
+                    leaf,
+                    os.O_RDONLY | os.O_CLOEXEC | getattr(os, "O_NOFOLLOW", 0),
+                    dir_fd=parent_fd,
+                )
+                existing_stat = os.fstat(existing_fd)
+                if (
+                    not stat.S_ISREG(existing_stat.st_mode)
+                    or existing_stat.st_uid != os.getuid()
+                    or stat.S_IMODE(existing_stat.st_mode) & 0o077
+                    or existing_stat.st_nlink != 1
+                    or existing_stat.st_size != len(raw)
+                ):
+                    raise DurableWriteError(ErrorClass.CONFLICT.value)
+                existing = b""
+                while len(existing) < len(raw):
+                    chunk = os.read(existing_fd, len(raw) - len(existing))
+                    if not chunk:
+                        break
+                    existing += chunk
+                if existing == raw:
+                    try:
+                        os.unlink(temp_name, dir_fd=parent_fd)
+                        temp_created = False
+                        cleanup = CleanupState.COMPLETE
+                    except OSError:
+                        cleanup = CleanupState.DEBT_PRIVATE_TEMP
+                    os.fsync(parent_fd)
+                    return _result(
+                        component=component,
+                        operation=operation_id,
+                        content_sha256=content_sha256,
+                        durability=DurabilityProof.RECONCILED_COMMITTED,
+                        authority=AuthorityState.INTENDED_AUTHORITATIVE,
+                        stage=WriteStage.RECONCILIATION,
+                        cleanup=cleanup,
+                    )
+            except (OSError, DurableWriteError):
+                pass
+            finally:
+                if existing_fd >= 0:
+                    os.close(existing_fd)
+        return _result(
+            component=component,
+            operation=operation_id,
+            content_sha256=content_sha256,
+            durability=DurabilityProof.UNPROVEN if published else DurabilityProof.NOT_MUTATED,
+            authority=AuthorityState.CONFLICT,
+            stage=WriteStage.PUBLICATION,
+            error_class=ErrorClass.CONFLICT,
+            cleanup=CleanupState.DEBT_PRIVATE_TEMP if temp_created else CleanupState.NOT_REQUIRED,
+        )
+    except (OSError, DurableWriteError) as exc:
+        confinement = (
+            ConfinementProof.VIOLATED
+            if parent_fd < 0 and isinstance(exc, DurableWriteError)
+            else ConfinementProof.PROVEN
+        )
+        error_class = (
+            ErrorClass.IDENTITY_TYPE
+            if confinement is ConfinementProof.VIOLATED
+            else ErrorClass.IO
+        )
+        return _result(
+            component=component,
+            operation=operation_id,
+            content_sha256=content_sha256,
+            durability=DurabilityProof.UNPROVEN if published else DurabilityProof.NOT_MUTATED,
+            authority=AuthorityState.UNKNOWN if published else AuthorityState.EXPECTED_PREDECESSOR,
+            stage=WriteStage.PARENT_SYNC if published else WriteStage.WRITE,
+            error_class=error_class,
+            cleanup=CleanupState.DEBT_PRIVATE_TEMP if temp_created else CleanupState.NOT_REQUIRED,
+            confinement=confinement,
+        )
+    finally:
+        if temp_fd >= 0:
+            os.close(temp_fd)
+        if temp_created and parent_fd >= 0:
+            try:
+                os.unlink(temp_name, dir_fd=parent_fd)
+            except OSError:
+                pass
+        if lock_fd >= 0:
+            os.close(lock_fd)
+        if parent_fd >= 0:
+            os.close(parent_fd)
+
+
+def _read_version_at(parent_fd: int, leaf: str) -> tuple[bytes | None, JsonVersion]:
+    flags = os.O_RDONLY | os.O_CLOEXEC | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(leaf, flags, dir_fd=parent_fd)
+    except FileNotFoundError:
+        return None, JsonVersion(False, None, None, None)
+    try:
+        file_stat = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(file_stat.st_mode)
+            or file_stat.st_uid != os.getuid()
+            or stat.S_IMODE(file_stat.st_mode) & 0o077
+            or file_stat.st_nlink != 1
+            or file_stat.st_size > 8 * 1024 * 1024
+        ):
+            raise DurableWriteError(ErrorClass.PERMISSION.value)
+        raw = b""
+        while len(raw) <= 8 * 1024 * 1024:
+            chunk = os.read(descriptor, min(1024 * 1024, 8 * 1024 * 1024 + 1 - len(raw)))
+            if not chunk:
+                break
+            raw += chunk
+        if len(raw) > 8 * 1024 * 1024:
+            raise DurableWriteError(ErrorClass.SIZE.value)
+        try:
+            payload = json.loads(raw)
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise DurableWriteError(ErrorClass.SERIALIZATION.value) from exc
+        if not isinstance(payload, dict):
+            raise DurableWriteError(ErrorClass.IDENTITY_TYPE.value)
+        observed_generation = payload.get("generation")
+        observed_operation = payload.get("operationId")
+        if observed_generation is not None and (
+            not isinstance(observed_generation, int) or isinstance(observed_generation, bool)
+        ):
+            raise DurableWriteError(ErrorClass.IDENTITY_TYPE.value)
+        if observed_operation is not None and not isinstance(observed_operation, str):
+            raise DurableWriteError(ErrorClass.IDENTITY_TYPE.value)
+        return raw, JsonVersion(
+            True,
+            hashlib.sha256(raw).hexdigest(),
+            observed_generation,
+            observed_operation,
+        )
+    finally:
+        os.close(descriptor)
+
+
+def publish_state_json(
+    target: DurableJsonTarget,
+    payload: Mapping[str, Any],
+    *,
+    component: str,
+    operation_id: str,
+    expected: JsonVersion,
+    generation: int,
+) -> PublicationResult:
+    if (
+        not isinstance(expected, JsonVersion)
+        or not isinstance(generation, int)
+        or isinstance(generation, bool)
+        or generation < 1
+    ):
+        return _result(
+            component=component,
+            operation=operation_id,
+            content_sha256=None,
+            durability=DurabilityProof.NOT_MUTATED,
+            authority=AuthorityState.UNKNOWN,
+            stage=WriteStage.CAPABILITY_CHECK,
+            error_class=ErrorClass.IDENTITY_TYPE,
+            generation=generation if isinstance(generation, int) else None,
+        )
+    try:
+        canonical = _canonical_payload(payload)
+        expected_operation = globals()["operation_id"](
+            target,
+            payload,
+            component=component,
+            predecessor=expected,
+        )
+    except DurableWriteError:
+        return _result(
+            component=component,
+            operation=operation_id,
+            content_sha256=None,
+            durability=DurabilityProof.NOT_MUTATED,
+            authority=AuthorityState.UNKNOWN,
+            stage=WriteStage.SERIALIZATION,
+            error_class=ErrorClass.SERIALIZATION,
+            generation=generation,
+        )
+    raw = canonical + b"\n"
+    content_sha256 = hashlib.sha256(raw).hexdigest()
+    if operation_id != expected_operation:
+        return _result(
+            component=component,
+            operation=operation_id,
+            content_sha256=content_sha256,
+            durability=DurabilityProof.NOT_MUTATED,
+            authority=AuthorityState.UNKNOWN,
+            stage=WriteStage.CAPABILITY_CHECK,
+            error_class=ErrorClass.IDENTITY_TYPE,
+            generation=generation,
+        )
+
+    parent_fd = -1
+    lock_fd = -1
+    temp_fd = -1
+    temp_name = f".durable-json.{operation_id}.tmp"
+    temp_created = False
+    published = False
+    try:
+        parent_fd, leaf = _open_target_parent(target)
+        lock_fd = _lock_parent(parent_fd)
+        current_raw, current = _read_version_at(parent_fd, leaf)
+        if current_raw == raw:
+            return _result(
+                component=component,
+                operation=operation_id,
+                content_sha256=content_sha256,
+                durability=DurabilityProof.RECONCILED_COMMITTED,
+                authority=AuthorityState.INTENDED_AUTHORITATIVE,
+                stage=WriteStage.RECONCILIATION,
+                cleanup=CleanupState.NOT_REQUIRED,
+                generation=generation,
+            )
+        if current != expected:
+            superseded = (
+                current.generation is not None
+                and expected.generation is not None
+                and current.generation > expected.generation
+            )
+            return _result(
+                component=component,
+                operation=operation_id,
+                content_sha256=content_sha256,
+                durability=DurabilityProof.NOT_MUTATED,
+                authority=AuthorityState.SUPERSEDED if superseded else AuthorityState.CONFLICT,
+                stage=WriteStage.RECONCILIATION,
+                error_class=ErrorClass.CONFLICT,
+                generation=generation,
+            )
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC | getattr(os, "O_NOFOLLOW", 0)
+        temp_fd = os.open(temp_name, flags, 0o600, dir_fd=parent_fd)
+        temp_created = True
+        _write_all(temp_fd, raw)
+        os.fsync(temp_fd)
+        os.fchmod(temp_fd, 0o600)
+        temp_stat = os.fstat(temp_fd)
+        if not stat.S_ISREG(temp_stat.st_mode) or temp_stat.st_nlink != 1:
+            raise DurableWriteError(ErrorClass.IDENTITY_TYPE.value)
+        os.close(temp_fd)
+        temp_fd = -1
+        os.replace(temp_name, leaf, src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
+        temp_created = False
+        published = True
+        os.fsync(parent_fd)
+        return _result(
+            component=component,
+            operation=operation_id,
+            content_sha256=content_sha256,
+            durability=DurabilityProof.COMMITTED,
+            authority=AuthorityState.INTENDED_AUTHORITATIVE,
+            stage=WriteStage.PARENT_SYNC,
+            cleanup=CleanupState.COMPLETE,
+            generation=generation,
+        )
+    except (OSError, DurableWriteError) as exc:
+        confinement = (
+            ConfinementProof.VIOLATED
+            if parent_fd < 0 and isinstance(exc, DurableWriteError)
+            else ConfinementProof.PROVEN
+        )
+        error_class = (
+            ErrorClass.IDENTITY_TYPE
+            if confinement is ConfinementProof.VIOLATED
+            else ErrorClass.IO
+        )
+        return _result(
+            component=component,
+            operation=operation_id,
+            content_sha256=content_sha256,
+            durability=DurabilityProof.UNPROVEN if published else DurabilityProof.NOT_MUTATED,
+            authority=AuthorityState.UNKNOWN if published else AuthorityState.EXPECTED_PREDECESSOR,
+            stage=WriteStage.PARENT_SYNC if published else WriteStage.WRITE,
+            error_class=error_class,
+            cleanup=CleanupState.DEBT_PRIVATE_TEMP if temp_created else CleanupState.NOT_REQUIRED,
+            confinement=confinement,
+            generation=generation,
+        )
+    finally:
+        if temp_fd >= 0:
+            os.close(temp_fd)
+        if temp_created and parent_fd >= 0:
+            try:
+                os.unlink(temp_name, dir_fd=parent_fd)
+            except OSError:
+                pass
+        if lock_fd >= 0:
+            os.close(lock_fd)
+        if parent_fd >= 0:
+            os.close(parent_fd)
 
 
 def reconcile_json_publication(*args: object, **kwargs: object) -> NoReturn:
