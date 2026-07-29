@@ -51,7 +51,9 @@ function writeFixtureRelease(options: { drift?: boolean } = {}) {
 
 function outboxEvents(stateDir: string): Array<Record<string, unknown>> {
   const outbox = path.join(stateDir, 'outbox');
-  return readdirSync(outbox).map((name) => JSON.parse(readFileSync(path.join(outbox, name), 'utf8')) as Record<string, unknown>);
+  return readdirSync(outbox)
+    .filter((name) => name.endsWith('.json'))
+    .map((name) => JSON.parse(readFileSync(path.join(outbox, name), 'utf8')) as Record<string, unknown>);
 }
 
 function writeLaunchdPlist(releasePath: string): string {
