@@ -40,7 +40,7 @@
         "quarantine_untrusted_entry"
       ],
       "path": "deploy/scripts/bot-errors-dispatcher.py",
-      "sha256": "b264eb6cfc2c3de8258da14b0cc3d724302cb0236b5219f108021f2a940f9006"
+      "sha256": "e65e9cd33afccaab420fdd1a867cc101ee681922027eb67cfc1647a94910d5da"
     },
     {
       "mustContain": [

@@ -3741,7 +3741,7 @@ def recovery_duplicate_fingerprint(event: dict[str, Any]) -> str:
 def is_recovery_dedupe_candidate(event: dict[str, Any]) -> bool:
     classification = classify_event(event)
     source = str(event.get("source") or "").strip().lower()
-    if source == "daily-health" and classification.severity == "info":
+    if source == "daily-health" and classification.kind == "observation":
         return False
     return classification.kind == "incident_recovery"
 

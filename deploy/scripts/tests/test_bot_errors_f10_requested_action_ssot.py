@@ -59,6 +59,7 @@ def test_stale_info_event_has_single_requested_action():
 
 def test_info_event_with_operator_action_surfaces_action():
     event = {
+        "schemaVersion": 1,
         "eventType": "alert",
         "severity": "info",
         "summary": "Still-open digest, awaiting physical action: bond lost",
@@ -92,6 +93,7 @@ def test_info_event_with_operator_action_surfaces_action():
 
 def test_critical_event_keeps_investigate_action():
     event = {
+        "schemaVersion": 1,
         "eventType": "alert",
         "severity": "critical",
         "summary": "whatsoup health degraded",
@@ -109,6 +111,7 @@ def test_critical_event_keeps_investigate_action():
 
 def test_still_open_context_has_no_inner_requested_action():
     event = {
+        "schemaVersion": 1,
         "eventType": "alert",
         "severity": "critical",
         "summary": "persistent incident",
