@@ -130,6 +130,14 @@ export function parseKeychainServiceCandidates(dump: string): string[] {
  * name first, then prefix discovery via metadata dump for hash-suffixed
  * items. Returns the raw JSON payload string, or null when no readable item
  * exists under any candidate name.
+ *
+ * Identity guard: the module contract promises the heal "never changes which
+ * account is used", and the credential blobs carry no comparable account
+ * identity. With two or more suffixed candidates the right item is therefore
+ * unknowable — mirroring one could silently switch the bot to another
+ * account's token — so discovery heals only from an UNAMBIGUOUS single
+ * suffixed item and refuses otherwise, without reading any candidate's
+ * secret bytes.
  */
 export function readKeychainViaSecurity(exec: SecurityExec): string | null {
   const read = (service: string): string | null => {
@@ -140,12 +148,9 @@ export function readKeychainViaSecurity(exec: SecurityExec): string | null {
   if (bare !== null) return bare;
   const dump = exec(['dump-keychain']);
   if (dump === null) return null;
-  for (const candidate of parseKeychainServiceCandidates(dump)) {
-    if (candidate === KEYCHAIN_SERVICE) continue; // already tried above
-    const val = read(candidate);
-    if (val !== null) return val;
-  }
-  return null;
+  const suffixed = parseKeychainServiceCandidates(dump).filter((c) => c !== KEYCHAIN_SERVICE);
+  if (suffixed.length !== 1) return null;
+  return read(suffixed[0]);
 }
 
 function defaultReadKeychain(): string | null {

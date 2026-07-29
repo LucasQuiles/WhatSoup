@@ -118,7 +118,13 @@ describe('readKeychainViaSecurity', () => {
     expect(calls.some(isFind(`${SVC}-9821b58b`))).toBe(true);
   });
 
-  it('prefers the newest-mdat item when several suffixed items exist', () => {
+  it('REFUSES when several suffixed items exist: ambiguous account identity, no secret reads', () => {
+    // The module contract says the heal "never changes which account is used".
+    // The credential blobs carry no comparable account identity, so with two or
+    // more suffixed candidates the right item is unknowable — mirroring the
+    // newest-modified one could silently switch the bot to another account's
+    // token. Refuse instead (fail-open, same as the pre-discovery behavior on
+    // such hosts), and do not read any candidate's secret bytes on the way out.
     const dump = [
       dumpItem(`${SVC}-old00000`, '20260601000000Z'),
       dumpItem(`${SVC}-new00000`, '20260727161430Z'),
@@ -129,25 +135,18 @@ describe('readKeychainViaSecurity', () => {
       { match: isFind(`${SVC}-new00000`), out: 'newest-payload' },
       { match: isFind(`${SVC}-old00000`), out: 'older-payload' },
     ]);
-    expect(readKeychainViaSecurity(exec)).toBe('newest-payload');
-    // The newest candidate must be tried FIRST, not merely eventually.
-    const firstSuffixedFind = calls.find((c) => isFind(`${SVC}-new00000`)(c) || isFind(`${SVC}-old00000`)(c));
-    expect(firstSuffixedFind).toBeDefined();
-    expect(firstSuffixedFind![firstSuffixedFind!.indexOf('-s') + 1]).toBe(`${SVC}-new00000`);
+    expect(readKeychainViaSecurity(exec)).toBeNull();
+    expect(calls.some(isFind(`${SVC}-new00000`))).toBe(false);
+    expect(calls.some(isFind(`${SVC}-old00000`))).toBe(false);
   });
 
-  it('skips an empty suffixed item and continues to the next candidate', () => {
-    const dump = [
-      dumpItem(`${SVC}-new00000`, '20260727161430Z'),
-      dumpItem(`${SVC}-old00000`, '20260601000000Z'),
-    ].join('\n');
+  it('returns null when the single suffixed item is empty (no other candidate to fall to)', () => {
     const { exec } = fakeExec([
       { match: isFind(SVC), out: null },
-      { match: isDump, out: dump },
+      { match: isDump, out: dumpItem(`${SVC}-new00000`, '20260727161430Z') },
       { match: isFind(`${SVC}-new00000`), out: '   ' },
-      { match: isFind(`${SVC}-old00000`), out: 'older-payload' },
     ]);
-    expect(readKeychainViaSecurity(exec)).toBe('older-payload');
+    expect(readKeychainViaSecurity(exec)).toBeNull();
   });
 
   it('returns null when neither the bare item nor any suffixed item exists', () => {
