@@ -223,7 +223,7 @@
     },
     {
       "path": "deploy/scripts/install-bot-errors-gui-monitor-launchd.sh",
-      "sha256": "88dbf5fb4da2372926e96ce95f965df70a52a1ea132084c4434332a87ee9dcde",
+      "sha256": "dfaeee0c0224b3dc1fe1c89df7179d6e6adbf951479697378168b2dba3439f06",
       "mustContain": [
         "read_env_value",
         "env_or_default",
