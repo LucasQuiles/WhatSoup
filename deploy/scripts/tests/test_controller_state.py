@@ -2207,6 +2207,85 @@ def test_reconciliation_capability_cannot_authorize_ordinary_save(
         assert reconciled.mode == "reconciled"
 
 
+def test_reconciliation_validation_rejection_preserves_recovery_capability(
+    tmp_path: Path,
+) -> None:
+    cs = load_controller_state_module()
+    path = tmp_path / "state.json"
+    _seed_store(
+        cs,
+        path,
+        (
+            {"version": 1, "counters": {"seen": 1}},
+            {"version": 1, "counters": {"seen": 2}},
+        ),
+    )
+    _damage_primary(path, "truncated")
+    ops = FaultOps()
+
+    def namespace_snapshot() -> tuple[tuple[Any, ...], ...]:
+        snapshot = []
+        for candidate in sorted(tmp_path.iterdir()):
+            observed = candidate.lstat()
+            data = candidate.read_bytes() if stat.S_ISREG(observed.st_mode) else None
+            snapshot.append(
+                (
+                    candidate.name,
+                    observed.st_dev,
+                    observed.st_ino,
+                    observed.st_mode,
+                    observed.st_uid,
+                    observed.st_gid,
+                    observed.st_size,
+                    data,
+                )
+            )
+        return tuple(snapshot)
+
+    with _open(
+        cs,
+        path,
+        validator=validate_versioned_payload,
+        ops=ops,
+    ) as session:
+        recovered = session.load()
+        assert recovered.mode == "recovered"
+        assert recovered.payload == {"version": 1, "counters": {"seen": 1}}
+        capability = recovered.capability
+        assert capability is not None
+        authority_before = _authority_snapshot(path)
+        namespace_before = namespace_snapshot()
+        evidence_before = _evidence_snapshot(path)
+        ops.reset_trace()
+
+        with pytest.raises((ValueError, cs.ControllerStateRequired)):
+            session.complete_reconciliation(
+                {"version": 2, "counters": {"invalid": 1}},
+                capability,
+                outcome="validated_previous_only",
+            )
+
+        assert _authority_snapshot(path) == authority_before
+        assert namespace_snapshot() == namespace_before
+        assert _evidence_snapshot(path) == evidence_before
+        for boundary in (
+            "write",
+            "fsync_file",
+            "fsync_directory",
+            "replace",
+            "unlink",
+            "chmod",
+        ):
+            assert ops.counters[boundary] == 0
+
+        reconciled = session.complete_reconciliation(
+            recovered.payload,
+            capability,
+            outcome="validated_previous_only",
+        )
+        assert reconciled.mode == reconciled.diagnostic.mode == "reconciled"
+
+
 def test_normal_capability_cannot_authorize_reconciliation(tmp_path: Path) -> None:
     cs = load_controller_state_module()
     path = tmp_path / "state.json"
