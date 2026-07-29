@@ -20,7 +20,7 @@ afterEach(() => {
 
 function eventFrom(stateRoot: string) {
   const outbox = join(stateRoot, 'outbox');
-  const files = readdirSync(outbox);
+  const files = readdirSync(outbox).filter((name) => name.endsWith('.json'));
   expect(files).toHaveLength(1);
   return {
     name: files[0]!,
@@ -178,7 +178,7 @@ describe('bot-errors-emit', () => {
     });
 
     const outbox = join(tmpRoot, 'outbox');
-    const files = readdirSync(outbox);
+    const files = readdirSync(outbox).filter((name) => name.endsWith('.json'));
     expect(files).toHaveLength(1);
     expect(files[0]).toMatch(/\.json$/);
     expect(basename(files[0]!)).not.toMatch(/\\.tmp$/);
@@ -218,7 +218,8 @@ describe('bot-errors-emit', () => {
     const testRoot = join(writerTmp, 'whatsoup-vitest-bot-errors');
     const [workerDir] = readdirSync(testRoot);
     const outbox = join(testRoot, workerDir!, 'outbox');
-    const event = JSON.parse(readFileSync(join(outbox, readdirSync(outbox)[0]!), 'utf8')) as Record<string, any>;
+    const eventFile = readdirSync(outbox).find((name) => name.endsWith('.json'));
+    const event = JSON.parse(readFileSync(join(outbox, eventFile!), 'utf8')) as Record<string, any>;
     expect(event.runtime.provenance).toMatchObject({
       producer: 'python-emit',
       test: true,

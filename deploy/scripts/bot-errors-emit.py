@@ -23,6 +23,13 @@ if str(SCRIPT_DIR) not in sys.path:
 
 from lib.bot_errors_redaction import redact_bot_errors_text, redact_json_value as redact_shared_json_value
 from lib.bot_errors_envelope import EVENT_TYPES, SEVERITIES, EnvelopeError, new_event_fields
+from lib.durable_json import (
+    JsonVersion,
+    durable_json_target,
+    operation_id,
+    publish_event_json,
+    require_advance,
+)
 
 
 MAX_EVIDENCE_CHARS = 12000
@@ -285,33 +292,37 @@ def evidence_sidecar_dir() -> Path:
 
 
 def write_evidence_sidecar(event_id: str, full_redacted: str) -> Path:
-    """Persist the full (already-redacted) evidence to a private sidecar file.
+    """Persist full redacted evidence in a private create-once JSON sidecar.
 
-    Reuses the same private-dir + atomic-write helpers (0o700 dir / 0o600 file,
-    O_EXCL + fsync) the outbox writer uses so perms and durability match.
+    The envelope makes the sidecar use the same fenced durability contract as
+    the outbox while keeping the evidence private and reconstructable.
     """
     directory = evidence_sidecar_dir()
-    name = f"{safe_segment(event_id)}.evidence.txt"
+    name = f"{safe_segment(event_id)}.evidence.json"
     target = safe_child_path(directory, name)
-    tmp = target.with_name(f".{target.name}.{os.getpid()}.tmp")
-    data = full_redacted.encode("utf-8")
-    fd = os.open(tmp, os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0), 0o600)
-    try:
-        with os.fdopen(fd, "wb") as handle:
-            handle.write(data)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(tmp, target)
-        try:
-            target.chmod(0o600)
-        except OSError:
-            pass
-    except BaseException:
-        try:
-            tmp.unlink()
-        except OSError:
-            pass
-        raise
+    payload = {
+        "schemaVersion": 1,
+        "eventId": safe_segment(event_id),
+        "evidence": full_redacted,
+    }
+    publication_target = durable_json_target(
+        trusted_root=target.parent.resolve(strict=True),
+        relative_path=target.name,
+    )
+    absent = JsonVersion(False, None, None, None)
+    publication_operation = operation_id(
+        publication_target,
+        payload,
+        component="emit.evidence_sidecar",
+        predecessor=absent,
+    )
+    publication = publish_event_json(
+        publication_target,
+        payload,
+        component="emit.evidence_sidecar",
+        operation_id=publication_operation,
+    )
+    require_advance(publication)
     return target
 
 
@@ -528,43 +539,29 @@ def build_event(args: argparse.Namespace) -> dict[str, Any]:
     return event
 
 
-def atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
-    ensure_private_dir(path.parent)
-    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-    data = (json.dumps(payload, indent=2, sort_keys=True) + "\n").encode("utf-8")
-    fd = os.open(tmp, os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0), 0o600)
-    try:
-        with os.fdopen(fd, "wb") as handle:
-            handle.write(data)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(tmp, path)
-        try:
-            path.chmod(0o600)
-        except OSError:
-            pass
-        try:
-            dir_fd = os.open(path.parent, os.O_DIRECTORY | os.O_RDONLY)
-        except OSError:
-            return
-        try:
-            os.fsync(dir_fd)
-        finally:
-            os.close(dir_fd)
-    except BaseException:
-        try:
-            tmp.unlink()
-        except OSError:
-            pass
-        raise
-
-
 def write_event(event: dict[str, Any]) -> Path:
     outbox = outbox_dir()
     created = str(event["createdAt"]).replace("-", "").replace(":", "")
     file_name = f"{created}.{safe_segment(str(event['instance']))}.{safe_segment(str(event['source']))}.{event['id']}.json"
     final = safe_child_path(outbox, file_name)
-    atomic_write_json(final, event)
+    publication_target = durable_json_target(
+        trusted_root=final.parent.resolve(strict=True),
+        relative_path=final.name,
+    )
+    absent = JsonVersion(False, None, None, None)
+    publication_operation = operation_id(
+        publication_target,
+        event,
+        component="emit.event",
+        predecessor=absent,
+    )
+    publication = publish_event_json(
+        publication_target,
+        event,
+        component="emit.event",
+        operation_id=publication_operation,
+    )
+    require_advance(publication)
     return final
 
 
@@ -605,29 +602,29 @@ def record_writefail(event: dict[str, Any], exc: BaseException, target: Path) ->
         "emitPid": os.getpid(),
         "event": redact_json_value(event),
     }
-    data = (json.dumps(breadcrumb, indent=2, sort_keys=True) + "\n").encode("utf-8")
     stamp = now_iso().replace("-", "").replace(":", "")
     name = f"{stamp}.{safe_segment(str(instance))}.{safe_segment(str(event_id))}.writefail"
     for base in writefail_dirs():
-        tmp_path: Path | None = None
         try:
             path = safe_child_path(base, name)
-            tmp_path = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-            fd = os.open(tmp_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0), 0o600)
-            with os.fdopen(fd, "wb") as handle:
-                handle.write(data)
-                handle.flush()
-                os.fsync(handle.fileno())
-            os.replace(tmp_path, path)
-            try:
-                dir_fd = os.open(base, os.O_DIRECTORY | os.O_RDONLY)
-            except OSError:
-                dir_fd = None
-            if dir_fd is not None:
-                try:
-                    os.fsync(dir_fd)
-                finally:
-                    os.close(dir_fd)
+            publication_target = durable_json_target(
+                trusted_root=path.parent.resolve(strict=True),
+                relative_path=path.name,
+            )
+            absent = JsonVersion(False, None, None, None)
+            publication_operation = operation_id(
+                publication_target,
+                breadcrumb,
+                component="emit.writefail",
+                predecessor=absent,
+            )
+            publication = publish_event_json(
+                publication_target,
+                breadcrumb,
+                component="emit.writefail",
+                operation_id=publication_operation,
+            )
+            require_advance(publication)
             try:
                 sys.stderr.write(f"[bot-errors] lost-alert breadcrumb written: {redact(str(path))}\n")
                 sys.stderr.flush()
@@ -635,19 +632,15 @@ def record_writefail(event: dict[str, Any], exc: BaseException, target: Path) ->
                 pass
             return path
         except Exception:  # noqa: BLE001 - try the next fallback location.
-            if tmp_path is not None:
-                try:
-                    tmp_path.unlink()
-                except OSError:
-                    pass
             continue
 
     # Trace 2 failed everywhere — last resort: dump the event to stderr so it is at
     # least in the journal rather than entirely lost.
     try:
+        lost_payload = json.dumps(redact_json_value(event), sort_keys=True)
         sys.stderr.write(
             "[bot-errors] breadcrumb write failed in ALL fallback dirs; "
-            f"lost-event payload follows:\n{json.dumps(redact_json_value(event), sort_keys=True)}\n"
+            f"lost-event payload follows:\n{lost_payload}\n"
         )
         sys.stderr.flush()
     except Exception:  # noqa: BLE001
