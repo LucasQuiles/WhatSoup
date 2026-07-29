@@ -330,8 +330,10 @@ Consequences for deployment:
 
 ## Known Limits
 
-- `KeepAlive -> Crashed` only restarts crashed services. Clean exits do not
-  auto-restart unless the plist or supervisor is configured for that behavior.
+- Generated instance plists use `KeepAlive -> {Crashed: true, SuccessfulExit:
+  false}` + `ThrottleInterval 60` (#2682): any non-zero exit relaunches, with a
+  60s floor between relaunches. A plist generated before that fix is
+  `Crashed`-only — clean exits do not auto-restart until it is regenerated.
 - WhatSoup does not migrate keychain entries. BYOK config selects environment
   variable names; wrappers or service managers remain responsible for exporting
   those variables.

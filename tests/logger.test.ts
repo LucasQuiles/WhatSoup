@@ -238,7 +238,7 @@ describe('file transport configuration', () => {
       expect(pinoFactory).toHaveBeenCalledWith(
         expect.objectContaining({
           level: 'info',
-          serializers: { err: stdErrSerializer, error: stdErrSerializer },
+          serializers: { err: stdErrSerializer, error: stdErrSerializer, reason: stdErrSerializer },
         }),
       );
     },
@@ -260,7 +260,7 @@ describe('file transport configuration', () => {
 
     expect(transportFactory).toHaveBeenCalledOnce();
     expect(pinoFactory).toHaveBeenCalledWith(
-      expect.objectContaining({ level: 'info', serializers: { err: stdErrSerializer, error: stdErrSerializer } }),
+      expect.objectContaining({ level: 'info', serializers: { err: stdErrSerializer, error: stdErrSerializer, reason: stdErrSerializer } }),
       transport,
     );
   });
@@ -291,7 +291,7 @@ describe('file transport configuration', () => {
     });
     const stdErrSerializer = (pinoFactory as unknown as { stdSerializers: { err: unknown } }).stdSerializers.err;
     expect(pinoFactory).toHaveBeenCalledWith(
-      expect.objectContaining({ level: 'debug', serializers: { err: stdErrSerializer, error: stdErrSerializer } }),
+      expect.objectContaining({ level: 'debug', serializers: { err: stdErrSerializer, error: stdErrSerializer, reason: stdErrSerializer } }),
       transport,
     );
     expect(loggerModule.default.level).toBe('debug');
@@ -311,7 +311,7 @@ describe('file transport configuration', () => {
     expect(pinoFactory).toHaveBeenCalledWith(
       expect.objectContaining({
         level: 'warn',
-        serializers: { err: stdErrSerializer, error: stdErrSerializer },
+        serializers: { err: stdErrSerializer, error: stdErrSerializer, reason: stdErrSerializer },
       }),
     );
     expect(logger.flush).not.toHaveBeenCalled();
