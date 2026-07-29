@@ -13,33 +13,32 @@ import {
 import { toConversationKey, GLOBAL_CONVERSATION_KEY } from '../core/conversation-key.ts';
 import { createChildLogger } from '../logger.ts';
 import type { DurabilityEngine } from '../core/durability.ts';
-import { conversationBoundKey, isToolErrorPayload, type ToolDeclaration, type ToolCallResult, type SessionContext } from './types.ts';
+import {
+  conversationBoundKey,
+  getToolErrorEvidence,
+  isToolErrorPayload,
+  type ToolDeclaration,
+  type ToolCallResult,
+  type SessionContext,
+} from './types.ts';
 import { errorMessage } from '../lib/error-message.ts';
+import {
+  classifyThrownToolFailure,
+  normalizeToolDurabilityGroup,
+  TOOL_FAILURE_DISPOSITIONS,
+  type ToolCompletionEvidence,
+  type ToolFailureCode,
+  type ToolFailureStage,
+  type ToolDurabilityTelemetrySnapshot,
+  type ToolDurabilityWriteStage,
+} from '../core/durability-evidence-contract.ts';
+
+export type {
+  ToolDurabilityTelemetrySnapshot,
+  ToolDurabilityWriteStage,
+} from '../core/durability-evidence-contract.ts';
 
 const log = createChildLogger('ToolRegistry');
-
-// ---------------------------------------------------------------------------
-// Erasure-sensitive tools — redact durability telemetry at the source
-// ---------------------------------------------------------------------------
-//
-// capture_observation/forget_observation (src/mcp/tools/substrate.ts) model
-// entity_observations as erasable: forget_observation tombstones a row by id,
-// and the whole point of that contract is that the observation's content can
-// be made to disappear on request. If this registry durability-records a
-// tool's full raw arguments verbatim, a forgotten observation's text/metadata
-// would silently outlive its tombstone in tool_calls.tool_input until
-// retention pruning catches up. Tools in this set get a fixed marker instead
-// of their raw params. (add_alias also carries contact PII but has no
-// forget/tombstone counterpart in substrate.ts, so it is deliberately not
-// included here — nothing erases it, so nothing needs the telemetry copy to
-// track an erasure.) Extend this set whenever a new substrate tool captures
-// or forgets personal/erasable data.
-export const ERASURE_SENSITIVE_TOOL_NAMES: ReadonlySet<string> = new Set([
-  'capture_observation',
-  'forget_observation',
-]);
-
-const REDACTED_TOOL_INPUT_MARKER = '[redacted:erasure-sensitive]';
 
 // ---------------------------------------------------------------------------
 // Conversation-bound eligibility (per-chat actor sockets)
@@ -233,6 +232,15 @@ export class ToolRegistry {
   // loop-lag sampling alone cannot reveal it.
   private readonly inFlightCalls = new Map<number, { tool: string; startedAt: number }>();
   private nextCallId = 0;
+  private durabilityWriteLosses = 0;
+  private readonly durabilityWriteLossesByStage: Record<ToolDurabilityWriteStage, number> = {
+    record: 0,
+    execute: 0,
+    complete: 0,
+    deny: 0,
+  };
+  private firstDurabilityWriteLossAt: number | null = null;
+  private lastDurabilityWriteLossAt: number | null = null;
   // QR-017 / #1976: transient group tag applied by withModule() to any tool
   // registered inside the bracket. Set only for the synchronous span of a
   // withModule() call, so there is no cross-registration bleed. Pure taxonomy
@@ -262,6 +270,28 @@ export class ToolRegistry {
   /** Attach a DurabilityEngine to record tool calls. */
   setDurability(engine: DurabilityEngine): void {
     this.durability = engine;
+  }
+
+  getDurabilityTelemetrySnapshot(): ToolDurabilityTelemetrySnapshot {
+    return {
+      observed: true,
+      totalWriteLosses: this.durabilityWriteLosses,
+      byStage: { ...this.durabilityWriteLossesByStage },
+      firstLossAt: this.firstDurabilityWriteLossAt,
+      lastLossAt: this.lastDurabilityWriteLossAt,
+    };
+  }
+
+  private recordDurabilityWriteLoss(stage: ToolDurabilityWriteStage, toolName: string): void {
+    const now = Date.now();
+    this.durabilityWriteLosses = Math.min(Number.MAX_SAFE_INTEGER, this.durabilityWriteLosses + 1);
+    this.durabilityWriteLossesByStage[stage] = Math.min(
+      Number.MAX_SAFE_INTEGER,
+      this.durabilityWriteLossesByStage[stage] + 1,
+    );
+    this.firstDurabilityWriteLossAt ??= now;
+    this.lastDurabilityWriteLossAt = now;
+    log.warn({ tool: toolName, stage }, 'durability telemetry write failed');
   }
 
   /**
@@ -406,6 +436,59 @@ export class ToolRegistry {
       };
     }
 
+    const start = Date.now();
+    const replayPolicy = tool.replayPolicy ?? 'unsafe';
+    const durabilityKey = session.conversationKey
+      || (session.tier === 'global' ? GLOBAL_CONVERSATION_KEY : '');
+    let durabilityId: number | undefined;
+    if (this.durability && durabilityKey) {
+      try {
+        durabilityId = this.durability.recordToolCall(
+          durabilityKey,
+          name,
+          normalizeToolDurabilityGroup(tool.group),
+          replayPolicy,
+        );
+      } catch {
+        this.recordDurabilityWriteLoss('record', name);
+      }
+    }
+
+    const finishFailure = (
+      failureCode: ToolFailureCode,
+      failureStage: ToolFailureStage,
+      writeStage: Extract<ToolDurabilityWriteStage, 'deny' | 'complete'>,
+    ): void => {
+      if (durabilityId === undefined) return;
+      const completion: ToolCompletionEvidence = {
+        isError: true,
+        durationMs: Date.now() - start,
+        failure: {
+          failureCode,
+          failureStage,
+          ...TOOL_FAILURE_DISPOSITIONS[failureCode],
+          evidenceCoverage: 'complete',
+        },
+      };
+      try {
+        this.durability!.markToolComplete(durabilityId, completion);
+      } catch {
+        this.recordDurabilityWriteLoss(writeStage, name);
+      }
+    };
+
+    const reject = (
+      text: string,
+      failureCode: ToolFailureCode,
+      failureStage: ToolFailureStage,
+    ): ToolCallResult => {
+      finishFailure(failureCode, failureStage, 'deny');
+      return {
+        content: [{ type: 'text', text }],
+        isError: true,
+      };
+    };
+
     // --- R1 sensitive-tool gate (central, authoritative; in-handler
     // assertAdmin checks remain as defense in depth) ---
     if (tool.sensitive && !this.sensitiveAllowed(session)) {
@@ -418,42 +501,16 @@ export class ToolRegistry {
         { tool: name, tier: session.tier, actorJid: session.actorJid ?? null },
         session.actorJid ? 'sensitive tool denied (unauthorized actor)' : 'sensitive tool denied (missing actorJid - runtime wiring fault)',
       );
-      // Preserve the forensic trail the pre-R1 in-handler denial left in the
-      // durable ledger (F07): a denied attempt is still an attributable event.
-      // As with the main-path writes below, these are raw synchronous
-      // node:sqlite calls with no internal error handling — a throw here
-      // (SQLITE_BUSY/FULL) must degrade to "no forensic record", never let
-      // the denial itself throw past the uniform reply below. The three
-      // calls are wrapped together (not individually) because they're
-      // chained through denyId: a throw from recordToolCall leaves no id to
-      // pass to the other two anyway.
-      const denyConvKey = session.conversationKey ?? '';
-      if (this.durability && denyConvKey) {
-        try {
-          const denyId = this.durability.recordToolCall(
-            denyConvKey,
-            name,
-            ERASURE_SENSITIVE_TOOL_NAMES.has(name) ? REDACTED_TOOL_INPUT_MARKER : JSON.stringify(params),
-            tool.replayPolicy ?? 'unsafe',
-          );
-          this.durability.markToolExecuting(denyId);
-          this.durability.markToolComplete(denyId, 'error: sensitive tool denied (unauthorized or actor-less)', true);
-        } catch (err) {
-          log.warn({ tool: name, err }, 'durability deny-path record failed; proceeding without forensic telemetry');
-        }
-      }
-      return {
-        content: [{ type: 'text', text: `Unknown tool: ${name}` }],
-        isError: true,
-      };
+      return reject(`Unknown tool: ${name}`, 'authorization_denied', 'authorization');
     }
 
     // --- Scope enforcement ---
     if (session.tier === 'chat-scoped' && tool.scope === 'global') {
-      return {
-        content: [{ type: 'text', text: `Tool "${name}" is not available in a chat-scoped session` }],
-        isError: true,
-      };
+      return reject(
+        `Tool "${name}" is not available in a chat-scoped session`,
+        'authorization_denied',
+        'authorization',
+      );
     }
 
     // Conversation-bound sessions: call-time is the authoritative gate —
@@ -462,10 +519,11 @@ export class ToolRegistry {
     const boundKey = conversationBoundKey(session);
     if (boundKey !== undefined && !conversationBoundMaySee(tool)) {
       log.warn({ tool: name, conversationKey: boundKey }, 'tool denied for conversation-bound session (default-deny)');
-      return {
-        content: [{ type: 'text', text: `Tool "${name}" is not available in a conversation-bound session` }],
-        isError: true,
-      };
+      return reject(
+        `Tool "${name}" is not available in a conversation-bound session`,
+        'authorization_denied',
+        'authorization',
+      );
     }
 
     // --- Target injection/validation for injected tools ---
@@ -480,20 +538,22 @@ export class ToolRegistry {
         // rejected rather than coerced, so a retargeting attempt is a loud
         // error instead of a silently rewritten send.
         if (hasNonEmptyString(effectiveParams['chatJid']) || (supportsAliasTarget && hasNonEmptyString(effectiveParams['to']))) {
-          return {
-            content: [{ type: 'text', text: `Tool "${name}" fills its target from the conversation binding — do not pass chatJid/to` }],
-            isError: true,
-          };
+          return reject(
+            `Tool "${name}" fills its target from the conversation binding — do not pass chatJid/to`,
+            'validation_rejected',
+            'validation',
+          );
         }
         if (supportsAliasTarget) delete effectiveParams['to'];
         effectiveParams['chatJid'] = session.binding!.deliveryJid;
       } else if (session.tier === 'chat-scoped') {
         // Auto-fill deliveryJid from session; chatJid should not come from caller
         if (!session.deliveryJid) {
-          return {
-            content: [{ type: 'text', text: `Session has no deliveryJid — cannot auto-fill target for tool "${name}"` }],
-            isError: true,
-          };
+          return reject(
+            `Session has no deliveryJid — cannot auto-fill target for tool "${name}"`,
+            'validation_rejected',
+            'validation',
+          );
         }
         // Remove any caller-supplied chatJid to prevent override
         delete effectiveParams['chatJid'];
@@ -506,15 +566,13 @@ export class ToolRegistry {
         const hasCallerJid = hasNonEmptyString(callerJid);
         const hasAliasTarget = supportsAliasTarget && hasNonEmptyString(effectiveParams['to']);
         if (!hasCallerJid && !hasAliasTarget) {
-          return {
-            content: [{
-              type: 'text',
-              text: supportsAliasTarget
-                ? `Tool "${name}" requires chatJid or to parameter in a global session`
-                : `Tool "${name}" requires chatJid parameter in a global session`,
-            }],
-            isError: true,
-          };
+          return reject(
+            supportsAliasTarget
+              ? `Tool "${name}" requires chatJid or to parameter in a global session`
+              : `Tool "${name}" requires chatJid parameter in a global session`,
+            'validation_rejected',
+            'validation',
+          );
         }
 
         // Cross-conversation guard: only enforced when session has a bound conversationKey
@@ -524,22 +582,19 @@ export class ToolRegistry {
           try {
             resolved = toConversationKey(callerJid);
           } catch {
-            return {
-              content: [{ type: 'text', text: `Invalid chatJid "${callerJid}": must be a valid JID` }],
-              isError: true,
-            };
+            return reject(
+              `Invalid chatJid "${callerJid}": must be a valid JID`,
+              'validation_rejected',
+              'validation',
+            );
           }
 
           if (resolved !== session.conversationKey) {
-            return {
-              content: [
-                {
-                  type: 'text',
-                  text: `chatJid "${callerJid}" resolves to conversation "${resolved}" which does not match session conversation "${session.conversationKey}"`,
-                },
-              ],
-              isError: true,
-            };
+            return reject(
+              `chatJid "${callerJid}" resolves to conversation "${resolved}" which does not match session conversation "${session.conversationKey}"`,
+              'authorization_denied',
+              'authorization',
+            );
           }
         }
       }
@@ -548,52 +603,21 @@ export class ToolRegistry {
     // --- Schema validation ---
     const parsed = tool.schema.safeParse(effectiveParams);
     if (!parsed.success) {
-      return {
-        content: [{ type: 'text', text: `Invalid parameters for tool "${name}": ${parsed.error.message}` }],
-        isError: true,
-      };
+      return reject(
+        `Invalid parameters for tool "${name}": ${parsed.error.message}`,
+        'validation_rejected',
+        'validation',
+      );
     }
 
     // --- Invoke handler ---
-    const start = Date.now();
     log.debug({ tool: name, tier: session.tier }, 'tool call start');
-
-    const replayPolicy = tool.replayPolicy ?? 'unsafe';
-    // Global-tier sessions (operator-agent / primary-line) carry no
-    // conversationKey, so tool telemetry was never recorded for them — only
-    // chat-scoped hosts emitted tool_calls rows. Key those rows under the
-    // reserved GLOBAL_CONVERSATION_KEY sentinel (single-sourced from
-    // conversation-key.ts, where toConversationKey enforces the reservation —
-    // it refuses to mint this key from any JID). This adds rows, not columns,
-    // so the content fence is unchanged. Authorization/guard logic above still
-    // keys on session.conversationKey and is unaffected.
-    const durabilityKey = session.conversationKey || (session.tier === 'global' ? GLOBAL_CONVERSATION_KEY : '');
-
-    // Durability/telemetry writes must never gate the tool call itself.
-    // DurabilityEngine's tool-call methods are raw synchronous node:sqlite
-    // .run() calls with no internal error handling — a throw (SQLITE_BUSY
-    // under lock contention, SQLITE_FULL on disk pressure) must degrade to
-    // "no telemetry recorded", never "tool call failed". This matters most
-    // for the global/operator tier: a DB-unhealthy instance is exactly when
-    // an operator reaches for a recovery tool (self_restart,
-    // resync_app_state) and exactly when these writes are likely to throw.
-    let durabilityId: number | undefined;
-    if (this.durability && durabilityKey) {
-      const toolInput = ERASURE_SENSITIVE_TOOL_NAMES.has(name)
-        ? REDACTED_TOOL_INPUT_MARKER
-        : JSON.stringify(effectiveParams);
-      try {
-        durabilityId = this.durability.recordToolCall(durabilityKey, name, toolInput, replayPolicy);
-      } catch (err) {
-        log.warn({ tool: name, err }, 'durability recordToolCall failed; proceeding without telemetry');
-      }
-    }
 
     if (durabilityId !== undefined) {
       try {
         this.durability!.markToolExecuting(durabilityId);
-      } catch (err) {
-        log.warn({ tool: name, err }, 'durability markToolExecuting failed; proceeding without telemetry');
+      } catch {
+        this.recordDurabilityWriteLoss('execute', name);
       }
     }
 
@@ -607,13 +631,31 @@ export class ToolRegistry {
       try {
         const result = await tool.handler(effectiveParams, session);
         const isError = isToolErrorPayload(result);
+        const returnedErrorEvidence = getToolErrorEvidence(result);
         const text = typeof result === 'string' ? result : JSON.stringify(result, null, 2);
         log.info({ tool: name, durationMs: Date.now() - start }, 'tool call complete');
         if (durabilityId !== undefined) {
+          const durationMs = Date.now() - start;
           try {
-            this.durability!.markToolComplete(durabilityId, text, isError);
-          } catch (err) {
-            log.warn({ tool: name, err }, 'durability markToolComplete failed');
+            this.durability!.markToolComplete(
+              durabilityId,
+              isError
+                ? {
+                    isError: true,
+                    durationMs,
+                    failure: {
+                      failureCode: returnedErrorEvidence?.failureCode ?? 'returned_error',
+                      failureStage: returnedErrorEvidence?.failureStage ?? 'handler',
+                      ...TOOL_FAILURE_DISPOSITIONS[
+                        returnedErrorEvidence?.failureCode ?? 'returned_error'
+                      ],
+                      evidenceCoverage: 'complete',
+                    },
+                  }
+                : { isError: false, durationMs },
+            );
+          } catch {
+            this.recordDurabilityWriteLoss('complete', name);
           }
         }
         return {
@@ -622,12 +664,17 @@ export class ToolRegistry {
         };
       } catch (err) {
         const message = errorMessage(err);
-        log.error({ tool: name, durationMs: Date.now() - start, err }, 'tool handler threw');
+        const durationMs = Date.now() - start;
+        log.error({ tool: name, durationMs }, 'tool handler threw');
         if (durabilityId !== undefined) {
           try {
-            this.durability!.markToolComplete(durabilityId, `error: ${message}`, true);
-          } catch (durabilityErr) {
-            log.warn({ tool: name, err: durabilityErr }, 'durability markToolComplete failed');
+            this.durability!.markToolComplete(durabilityId, {
+              isError: true,
+              durationMs,
+              failure: classifyThrownToolFailure(err),
+            });
+          } catch {
+            this.recordDurabilityWriteLoss('complete', name);
           }
         }
         // Sanitize transport/protocol errors but keep application-level errors readable.

@@ -2,6 +2,7 @@
 import type { IncomingMessage, RuntimeHealth } from '../core/types.ts';
 import type { DurabilityEngine } from '../core/durability.ts';
 import type { AgentFallbackEntry } from '../core/fallback-chain.ts';
+import type { ToolDurabilityTelemetrySnapshot } from '../core/durability-evidence-contract.ts';
 
 export interface RuntimeTurnCapabilityHealth {
   modelUsable: boolean | null;
@@ -98,4 +99,6 @@ export interface Runtime {
     oldestCallAgeMs: number | null;
     oldestCallTool: string | null;
   } | null;
+  /** Process-local losses while persisting metadata-only tool evidence. */
+  getToolDurabilityTelemetrySnapshot?(): ToolDurabilityTelemetrySnapshot | null;
 }

@@ -213,6 +213,10 @@ if (seededChatAliases > 0) {
 }
 const profileRegistry = createProfileRegistry(config.profiles ?? {});
 const outboundSendsWriter = createOutboundSendsWriter({ db: db.raw, line: config.botName });
+const databaseRetentionTimer = new DatabaseRetentionTimer(db, {
+  ...DEFAULT_DATABASE_RETENTION,
+  messageRetentionDays: config.retentionDays,
+});
 
 // 2a. Seed admin phones into access_list for allowlist/open_dm modes.
 // INSERT OR IGNORE — existing entries are untouched, only missing ones are added.
@@ -802,6 +806,7 @@ const healthServer = startHealthServer({
       // progress for the scheduler's five-minute total deadline is stalled.
       stalledAfterMs: 5 * 60_000,
     }),
+  getDatabaseRetentionHealth: () => databaseRetentionTimer.getHealthSnapshot(),
   // D-4 console approval queue: only the agent runtime owns the
   // pending-poll machinery; chat/passive instances omit the callback and
   // the health endpoint answers 503 honestly.
@@ -918,10 +923,6 @@ processTmpRetentionTimer.start(DEFAULT_PROCESS_TMP_RETENTION.intervalMs);
 // messages/receipts now (config.retentionDays, same knob the retired
 // standalone path read), replacing the separate startup timeout + daily
 // interval that used to call deleteOldMessages() directly.
-const databaseRetentionTimer = new DatabaseRetentionTimer(db, {
-  ...DEFAULT_DATABASE_RETENTION,
-  messageRetentionDays: config.retentionDays,
-});
 databaseRetentionTimer.start(DEFAULT_DATABASE_RETENTION.intervalMs);
 
 // 13. Echo timeout checker — sweep submitted ops stuck > 30 s without an echo

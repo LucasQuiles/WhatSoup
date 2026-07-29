@@ -29,6 +29,10 @@ import {
   CONSOLIDATION_FAILURE_CODES,
 } from '../../src/core/memory-consolidation-contract.ts';
 import {
+  OUTBOUND_FAILURE_CODES,
+  TOOL_FAILURE_CODES,
+} from '../../src/core/durability-evidence-contract.ts';
+import {
   RUNTIME_AGENT_HEALTH_SIGNALS,
   RUNTIME_AGENT_HEALTH_SIGNAL_FIELDS,
 } from '../../src/lib/fault-classifier.ts';
@@ -122,6 +126,10 @@ describe('failure taxonomy cross-contract', () => {
       .toEqual(sorted(MEMORY_OPERATION_FAILURE_CODES));
     expect(sorted(registry.failureDomains.consolidationFailureCodes.values))
       .toEqual(sorted(CONSOLIDATION_FAILURE_CODES));
+    expect(sorted(registry.failureDomains.toolCallFailureCodes.values))
+      .toEqual(sorted(TOOL_FAILURE_CODES));
+    expect(sorted(registry.failureDomains.outboundAuditFailureCodes.values))
+      .toEqual(sorted(OUTBOUND_FAILURE_CODES));
   });
 
   it('covers and validates every terminal-attempt to inbound projection', () => {

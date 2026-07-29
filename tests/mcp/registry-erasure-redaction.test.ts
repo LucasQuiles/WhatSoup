@@ -4,24 +4,10 @@ import { ToolRegistry } from '../../src/mcp/registry.ts';
 import type { ToolDeclaration, SessionContext } from '../../src/mcp/types.ts';
 
 // ---------------------------------------------------------------------------
-// Erasure semantics: capture_observation/forget_observation (src/mcp/tools/
-// substrate.ts) model entity_observations as tombstoneable — forget_observation
-// exists specifically so a captured observation's content can be made to
-// disappear. #1661 activated durability recording for the global tier, and
-// ToolRegistry.call() durability-records every global tool's FULL raw
-// arguments (JSON.stringify(effectiveParams)) into tool_calls.tool_input with
-// no redaction. Left unfixed, a forgotten observation's verbatim text/metadata
-// would silently survive in that telemetry copy until 30-day retention
-// pruning — the tombstone contract bypassed for up to 30 days.
-//
-// These tests pin a redaction gate at the recording site in registry.ts: the
-// literal marker below is intentionally hardcoded (not imported from
-// registry.ts) so the assertion is a genuine behavioral check against the
-// recorded bytes, not a tautology against whatever constant the
-// implementation happens to export.
+// Metadata-only durability routing: ToolRegistry passes only a bounded group
+// to DurabilityEngine. The engine owns the fixed storage marker, so raw caller
+// parameters never cross this boundary for sensitive or ordinary tools.
 // ---------------------------------------------------------------------------
-
-const REDACTED_MARKER = '[redacted:erasure-sensitive]';
 
 function makeSession(overrides: Partial<SessionContext> = {}): SessionContext {
   return { tier: 'global', ...overrides };
@@ -50,14 +36,14 @@ function recordingDurability(calls: Array<{ method: string; args: unknown[] }>) 
   } as unknown as import('../../src/core/durability.ts').DurabilityEngine;
 }
 
-describe('ToolRegistry.call erasure-sensitive redaction', () => {
+describe('ToolRegistry.call metadata-only durability routing', () => {
   let registry: ToolRegistry;
 
   beforeEach(() => {
     registry = new ToolRegistry();
   });
 
-  it('records a fixed marker instead of raw args for capture_observation', async () => {
+  it('passes a bounded group instead of raw args for capture_observation', async () => {
     const calls: Array<{ method: string; args: unknown[] }> = [];
     registry.setDurability(recordingDurability(calls));
     registry.register(
@@ -83,13 +69,13 @@ describe('ToolRegistry.call erasure-sensitive redaction', () => {
 
     const recordCall = calls.find((c) => c.method === 'recordToolCall');
     expect(recordCall).toBeDefined();
-    const toolInput = recordCall!.args[2] as string;
-    expect(toolInput).toBe(REDACTED_MARKER);
-    expect(toolInput).not.toContain('Secret St');
-    expect(toolInput).not.toContain('+15551234567');
+    const toolGroup = recordCall!.args[2] as string;
+    expect(toolGroup).toBe('other');
+    expect(JSON.stringify(recordCall)).not.toContain('Secret St');
+    expect(JSON.stringify(recordCall)).not.toContain('+15551234567');
   });
 
-  it('records a fixed marker instead of raw args for forget_observation', async () => {
+  it('passes a bounded group instead of raw args for forget_observation', async () => {
     const calls: Array<{ method: string; args: unknown[] }> = [];
     registry.setDurability(recordingDurability(calls));
     registry.register(
@@ -107,17 +93,18 @@ describe('ToolRegistry.call erasure-sensitive redaction', () => {
 
     const recordCall = calls.find((c) => c.method === 'recordToolCall');
     expect(recordCall).toBeDefined();
-    const toolInput = recordCall!.args[2] as string;
-    expect(toolInput).toBe(REDACTED_MARKER);
-    expect(toolInput).not.toContain('home address');
+    const toolGroup = recordCall!.args[2] as string;
+    expect(toolGroup).toBe('other');
+    expect(JSON.stringify(recordCall)).not.toContain('home address');
   });
 
-  it('still records raw args verbatim for a non-sensitive tool (no over-redaction)', async () => {
+  it('passes a declared bounded group for an ordinary tool', async () => {
     const calls: Array<{ method: string; args: unknown[] }> = [];
     registry.setDurability(recordingDurability(calls));
     registry.register(
       makeTool({
         name: 'list_beads',
+        group: 'audit',
         schema: z.object({ owner_jid: z.string() }),
       }),
     );
@@ -126,7 +113,8 @@ describe('ToolRegistry.call erasure-sensitive redaction', () => {
 
     const recordCall = calls.find((c) => c.method === 'recordToolCall');
     expect(recordCall).toBeDefined();
-    const toolInput = recordCall!.args[2] as string;
-    expect(toolInput).toBe(JSON.stringify({ owner_jid: '15550000001@s.whatsapp.net' }));
+    const toolGroup = recordCall!.args[2] as string;
+    expect(toolGroup).toBe('audit');
+    expect(JSON.stringify(recordCall)).not.toContain('15550000001@s.whatsapp.net');
   });
 });

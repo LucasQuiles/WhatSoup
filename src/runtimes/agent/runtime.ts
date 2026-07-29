@@ -9286,6 +9286,10 @@ export class AgentRuntime implements Runtime {
     return this.registry.getInFlightCallStats();
   }
 
+  getToolDurabilityTelemetrySnapshot() {
+    return this.registry.getDurabilityTelemetrySnapshot();
+  }
+
   private getTurnCapability(): RuntimeTurnCapability {
     const usability = this.primaryModelUsability;
     const { modelUsable, modelUsableStale, modelUsableCheckedAt } = deriveModelUsable(usability, Date.now());
