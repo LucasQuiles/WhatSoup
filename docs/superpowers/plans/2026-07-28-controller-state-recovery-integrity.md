@@ -212,6 +212,13 @@ def validate_probe_payload(raw: Mapping[str, Any]) -> dict[str, Any]:
 - [ ] Add RED failure cases for no previous, corrupt previous, cross-store previous, future primary, evidence write failure, evidence file fsync failure, evidence directory fsync failure, state directory full, and permission denial. Assert `payload is None`, `capability is None`, and no retained authority is overwritten.
 - [ ] Add the transaction crash matrix at every durable phase: journal prepared, previous temp fsynced, previous renamed, previous directory synced, primary temp fsynced, primary renamed, primary directory synced, marker renamed, marker directory synced, journal phase advanced, journal removed, and journal-removal directory synced. Each test must assert its expected syscall counter is nonzero.
 - [ ] Add restart tests for `prepared`, `previous_committed`, `primary_committed`, `marker_committed`, recovery `planned`, `evidence_preserved`, `restored`, and `reconciliation_prepared`. Exact matching state resumes; any envelope/sidecar mismatch returns `recovery_required`.
+- [ ] Add reconciliation-stage falsifiers for receipt/marker/recovered/journal
+  cross-binding, regular-file and symlink substitution after verified read, and
+  crashes after temp open, write, file sync, close, durable-stage rename, and
+  directory sync. Require restart to reuse the exact target and leave no stage.
+- [ ] Add closed-classifier controls proving `.state.json.notes` does not block
+  pristine bootstrap or sole-legacy `legacy_valid`, while every exact atomic
+  temporary and receipt-derived reconciliation stage grammar fails closed.
 - [ ] Add RED diagnostic tests proving the stderr line is one bounded JSON object with only schema version, component, state mode, bounded reason, known generation counters, opaque receipt ID, and occurrence count. Assert raw exception text, paths, evidence names, payload keys/values, environment values, and integrity digests are absent. Inject stderr failure and assert the typed non-success remains.
 - [ ] Run the RED suite and save the failure summary in the implementation task notes:
 
@@ -267,12 +274,36 @@ json.dumps(
 - [ ] Implement descriptor-relative directory traversal and leaf access using `os.open(leaf_name, flags | os.O_NOFOLLOW, dir_fd=directory_fd)`, `fstat`, owner/mode/type checks, and identity revalidation. Use the confinement pattern from `sentinel_pin.py`; do not import its private functions or copy its best-effort behavior.
 - [ ] Implement a never-unlinked `state.json.lock`, bounded `flock`, exclusive owner sessions, and shared read sessions. Keep verified directory and lock descriptors alive for the session.
 - [ ] Implement the pristine-store classifier. The trusted stable lock is coordination-only and is excluded from the authority-bearing artifact set. Bootstrap is available when marker, primary, previous, journal, receipt, and evidence are absent even if the lock already exists. A sole valid legacy primary is eligible for writer migration or read-only `legacy_valid`; every other marker-free authority posture fails closed.
+- [ ] Classify authority artifacts with closed full-match grammars, never a broad
+  state-name prefix: atomic temporaries are
+  `.<primary>[.previous|.initialized|.transaction|.recovery].<hex32>.tmp`;
+  reconciliation uses only
+  `.<primary>.<recoveryReceiptId>.reconciliation-journal.tmp` and
+  `.<primary>.<recoveryReceiptId>.reconciliation-journal`.
 - [ ] Implement journaled bootstrap and legacy migration. Bind migration to the exact trusted legacy bytes in `legacySourceSha256`; a `prepared` restart revalidates those bytes before publication and changed legacy bytes return `recovery_required`. Create the initialized marker at high-water generation 0, retain an integrity-bound generation 0 previous, publish generation 1, advance the marker, remove the journal, and sync every namespace mutation.
 - [ ] Implement normal save ordering exactly as the design: validate payload; preserve invalid previous evidence; durable `prepared` journal; durable previous; `previous_committed`; durable primary; `primary_committed`; durable marker; `marker_committed`; durable journal removal.
 - [ ] Implement restart reconciliation for all journal phases. Only the journal's exact integrity-validated previous, target, and marker may resume. A visible rename without proven directory sync returns `publication_ambiguous`, never a success receipt.
 - [ ] Implement automatic recovery using a canonical receipt and one immutable evidence copy. Keep marker high-water unchanged when restoring previous bytes as primary. Return a reconciliation-only capability.
-- [ ] Implement reconciliation preparation and commit. Bind target generation and integrity into the receipt, use operation `reconciliation`, commit above marker high-water, advance the receipt to `reconciled`, and return a normal fresh capability.
+- [ ] Implement reconciliation preparation and commit. Publish the canonical
+  journal through the exact receipt-owned temp and durable stage, syncing file and
+  namespace at each boundary. On retry, remove only a verified exact incomplete
+  temp or revalidate/resync the durable stage; never accept a substituted path.
+  Before occurrence increment, receipt advancement, or promotion, cross-bind the
+  receipt, actual marker, retained/recovered envelope, and journal expected/target
+  fields. Reopen the stage immediately before promotion and reopen the canonical
+  transaction afterward, requiring the same identity and exact bytes before
+  resumption. Commit above marker high-water, advance the receipt to `reconciled`,
+  and return a normal fresh capability.
+- [ ] Enforce closed phase postures: `restored` may own no stage, its exact
+  incomplete temp, or its exact durable stage;
+  `reconciliation_prepared` owns either that stage or the promoted transaction;
+  `reconciled` owns none. Mismatched receipt IDs, extra artifacts, and
+  mixed-version postures fail closed without cleanup or mutation.
 - [ ] Implement `read_controller_state()` with the exhaustive union `valid`, `legacy_valid`, `recovery_pending`, `unavailable`. It must copy a validated payload under a shared lock and release the lock before returning.
+- [ ] Require read-only validation to reject a valid retained generation equal to
+  or above the primary outside an exact recovery posture. Map restored rereads,
+  post-save and post-reconciliation identity reads, and lock-recheck close errors
+  to typed results/exceptions while closing every opened descriptor.
 - [ ] Implement `emit_state_recovery_fallback()` with a direct bounded `os.write(2, encoded_line)`, one attempt per process invocation, no exception formatting, and no environment inspection.
 - [ ] Implement `state_diagnostic_details()` and add RED controller-log projection tests for the exact state modes, bounded reasons, generation counters, occurrence count, and an opaque 32-character recovery receipt ID. Add one narrowly allowlisted `recoveryReceiptId` validator to `metadata_only_controller_details()`; do not relax the general rule that ID-like keys and arbitrary strings are removed.
 - [ ] Specify and test the adapter projection contract: each component task implements a narrow `project_*_state_mode(diagnostic)` wrapper that calls `write_controller_log()` directly with record kind `controller_state_mode`, closed details, the controller's existing private append and health sinks, and `emit_fallback=lambda _line: emit_state_recovery_fallback(diagnostic)`. This replaces the generic fallback for this record and guarantees at most one state-specific stderr line.

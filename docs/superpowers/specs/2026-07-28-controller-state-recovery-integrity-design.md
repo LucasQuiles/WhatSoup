@@ -261,6 +261,23 @@ non-user-controlled names:
 - `state.json.recovery` — the canonical closed recovery receipt; and
 - `state.json.lock` — stable lock file, never unlinked during normal operation.
 
+Reconciliation additionally uses two exact, receipt-derived private names:
+
+- `.state.json.<recoveryReceiptId>.reconciliation-journal.tmp` — the
+  operation-owned incomplete publication temporary; and
+- `.state.json.<recoveryReceiptId>.reconciliation-journal` — the durable staged
+  journal.
+
+The ID is exactly 32 lowercase hexadecimal characters already bound by the
+receipt. No other state-prefixed sibling is authority. Atomic publication
+temporaries are accepted only by the closed grammar
+`.state.json[.previous|.initialized|.transaction|.recovery].<hex32>.tmp`;
+the two reconciliation names above are the only accepted stage grammars.
+Unrelated siblings such as `.state.json.notes` neither establish a pristine store
+nor invalidate a sole legacy primary. Every exact temporary or stage name does
+establish unresolved authority and therefore fails closed outside its owned
+operation and phase.
+
 Damaged primary evidence is copied byte-for-byte from its already verified
 descriptor to a private, collision-resistant name under the same state directory
 only after the directory and leaf have passed trust checks. The evidence file is
@@ -360,6 +377,12 @@ All steps occur under the stable exclusive state lock.
    recovered previous; finish or retry that transaction, advance the marker, and
    durably mark the receipt `reconciled`. The ordinary `valid` path is unavailable
    until the receipt is durably `reconciled`.
+   Before incrementing the receipt occurrence count or promoting a staged journal,
+   cross-bind the receipt's marker high-water and recovered generation/integrity
+   to the validated marker, previous envelope, retained bytes, and journal
+   expected values. Cross-bind a prepared receipt's target fields to the journal
+   target. Any mismatch returns without mutating the receipt, stage, or canonical
+   journal.
 6. Parse and validate the primary's root, metadata, canonical digest, generation,
    store ID, and component payload schema.
 7. If the primary generation and integrity match the marker high-water witness,
@@ -454,6 +477,33 @@ primary target, is the commit witness.
 Temporary files are removed only when their exact identity belongs to the active
 operation and removal is safe. Retained primary, previous, or evidence files are
 never cleaned speculatively.
+
+Reconciliation stages use an additional restart-safe publication sequence. With
+the receipt still at `restored`, the helper writes the exact receipt-owned `.tmp`
+name with create-exclusive/no-follow semantics, validates owner/mode/type, writes
+canonical journal bytes, syncs the file, closes it, atomically renames it to the
+durable stage name, and syncs the directory. A crash at open, write, file sync, or
+close may leave only the exact incomplete `.tmp`; a retry verifies its identity,
+removes only that receipt-owned temporary, syncs removal, and recreates it. A
+crash at rename or directory sync may leave the durable stage; a retry reopens it,
+requires identical canonical bytes and device/inode identity, syncs the file and
+directory again, and reuses it.
+
+Only after that durable-stage proof and all receipt/journal/marker/recovered
+cross-bindings succeed may the helper advance the receipt to
+`reconciliation_prepared`. It then reopens and revalidates the stage immediately
+before renaming it to `state.json.transaction`. After the rename it reopens the
+canonical journal without following links, requires the same identity and exact
+bytes, syncs the canonical file and directory, and only then resumes the
+transaction. A replacement by a regular file or symlink at either validation
+boundary is typed `recovery_required`, never promoted.
+
+The allowed phase postures are closed: `restored` may have no stage, the exact
+incomplete temporary, or the exact durable stage; `reconciliation_prepared` must
+have either the exact durable stage or its promoted canonical transaction;
+`reconciled` has none of the temporary, stage, or canonical transaction. A stage
+or temporary for another receipt, or any such artifact beside another recovery
+phase, is unresolved authority and fails closed.
 
 ## Concurrency Contract
 
@@ -582,6 +632,10 @@ contains no damaged values, raw exception text, file path, evidence filename,
 environment value, domain identifier, destination, account, message, credential,
 topology, or digest derived from payload content.
 
+Receipt-derived stage and temporary names are private implementation details.
+Their names, paths, journal bytes, identities, and integrity values are never
+projected into controller logs, health, stderr fallback, or public diagnostics.
+
 This is an owner-approved privacy refinement to #2463's proposed diagnostic digest:
 the integrity digest remains private in the state envelope, while diagnostics use
 a random receipt ID that cannot confirm guesses about state content. The draft PR
@@ -635,6 +689,13 @@ Operational rollback therefore stops migrated writers first and restores the
 previous complete bundle; it does not run mixed writers. Any state written by an
 old version after migration requires explicit reconciliation before the new writer
 resumes.
+
+Older helpers that do not implement receipt-derived staging encounter either an
+exact stage/temporary as unknown authority or a prepared receipt without the
+canonical journal and must fail closed; they must not classify that store as
+pristine or legacy. New helpers likewise fail closed on stage names or phase
+postures they do not own. A rollout never asks mixed helper versions to clean,
+rename, or reinterpret one another's reconciliation artifacts.
 
 ## Collision and Integration Review
 

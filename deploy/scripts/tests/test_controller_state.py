@@ -382,6 +382,8 @@ class FaultOps:
         if re.fullmatch(r"[0-9a-f]{32}\.controller-state-evidence", name):
             return "evidence"
         if name.endswith(".reconciliation-journal.tmp"):
+            return "reconciliation_stage_temp"
+        if name.endswith(".reconciliation-journal"):
             return "reconciliation_stage"
         return self.managed_names.get(name)
 
@@ -3592,7 +3594,7 @@ def _seed_exact_recovery_phase(
             candidate
             for candidate in path.parent.iterdir()
             if candidate.name.startswith(f".{path.name}.")
-            and candidate.name.endswith(".reconciliation-journal.tmp")
+            and candidate.name.endswith(".reconciliation-journal")
         ]
         assert len(staged) == 1
         journal = _json(staged[0])
@@ -4435,3 +4437,554 @@ def test_each_resumed_recovery_phase_counts_exactly_one_attempt(
         before["occurrenceCount"] + 1,
         _MAX_OCCURRENCE_COUNT,
     )
+
+
+@pytest.mark.parametrize("retained_generation", (2, 3))
+def test_shared_reader_rejects_retained_generation_not_below_primary(
+    tmp_path: Path,
+    retained_generation: int,
+) -> None:
+    cs = load_controller_state_module()
+    path = tmp_path / "state.json"
+    _seed_store(
+        cs,
+        path,
+        (
+            {"counters": {"seen": 1}},
+            {"counters": {"seen": 2}},
+        ),
+    )
+    retained_path = _managed(path, ".previous")
+    retained = _json(path)
+    retained["counters"] = {"retained": retained_generation}
+    retained["_controllerState"]["generation"] = retained_generation
+    _refresh_envelope_integrity(retained)
+    _write_private_json(retained_path, retained)
+    before = _authority_snapshot(path)
+
+    result = _read(cs, path)
+
+    assert result.mode == "unavailable"
+    assert result.payload is None
+    assert result.generation is None
+    assert result.reason == "generation_invalid"
+    assert _authority_snapshot(path) == before
+
+
+def _reconciliation_artifacts(path: Path) -> tuple[Path, ...]:
+    return tuple(
+        sorted(
+            candidate
+            for candidate in path.parent.iterdir()
+            if candidate.name.startswith(f".{path.name}.")
+            and "reconciliation-journal" in candidate.name
+        )
+    )
+
+
+def _reconciliation_authority_snapshot(path: Path) -> tuple[Any, ...]:
+    fixed = tuple(sorted(_authority_snapshot(path).items()))
+    staged = []
+    for candidate in _reconciliation_artifacts(path):
+        observed = candidate.lstat()
+        staged.append(
+            (
+                candidate.name,
+                observed.st_dev,
+                observed.st_ino,
+                observed.st_mode,
+                (
+                    os.readlink(candidate)
+                    if stat.S_ISLNK(observed.st_mode)
+                    else candidate.read_bytes()
+                ),
+            )
+        )
+    return fixed, tuple(staged)
+
+
+def _seed_restored_with_staged_reconciliation(
+    cs: ModuleType,
+    path: Path,
+) -> Path:
+    _seed_recovered_for_reconciliation(cs, path)
+    ops = FaultOps()
+    session = _open(cs, path, ops=ops)
+    recovered = session.load()
+    ops.reset_trace()
+    ops.crash_after(
+        "fsync_directory",
+        predicate=lambda call: call.role == "reconciliation_stage",
+    )
+    try:
+        with pytest.raises(SimulatedCrash):
+            session.complete_reconciliation(
+                recovered.payload,
+                recovered.capability,
+                outcome="validated_previous_only",
+            )
+    finally:
+        session.close()
+    ops.assert_all_rules_fired()
+    artifacts = _reconciliation_artifacts(path)
+    assert len(artifacts) == 1
+    assert _json(_managed(path, ".recovery"))["phase"] == "restored"
+    assert not _managed(path, ".transaction").exists()
+    return artifacts[0]
+
+
+class ReplaceStageAfterVerifiedReadOps(FaultOps):
+    def __init__(
+        self,
+        *,
+        stage_path: Path,
+        replacement_kind: Literal["regular", "symlink"],
+    ) -> None:
+        super().__init__()
+        self.stage_path = stage_path
+        self.replacement_kind = replacement_kind
+        self.armed = False
+        self.fired = False
+        self.replacement_bytes = b'{"replacement":"not-the-verified-stage"}'
+        self.outside = stage_path.parent / "outside-stage-target"
+
+    def close(self, fd: int) -> None:
+        role = self.fd_roles.get(fd)
+        super().close(fd)
+        if self.armed and not self.fired and role == "reconciliation_stage":
+            self.fired = True
+            if self.replacement_kind == "regular":
+                replacement = self.stage_path.parent / "replacement-stage"
+                _write_private_raw(replacement, self.replacement_bytes)
+                os.replace(replacement, self.stage_path)
+            else:
+                _write_private_raw(self.outside, b"outside")
+                self.stage_path.unlink()
+                os.symlink(self.outside, self.stage_path)
+
+
+@pytest.mark.parametrize("replacement_kind", ("regular", "symlink"))
+def test_stage_replacement_after_verified_read_fails_before_authority_mutation(
+    tmp_path: Path,
+    replacement_kind: Literal["regular", "symlink"],
+) -> None:
+    cs = load_controller_state_module()
+    path = tmp_path / "state.json"
+    stage = _seed_restored_with_staged_reconciliation(cs, path)
+    ops = ReplaceStageAfterVerifiedReadOps(
+        stage_path=stage,
+        replacement_kind=replacement_kind,
+    )
+    session = _open(cs, path, ops=ops)
+    recovered = session.load()
+    assert recovered.mode == "recovered"
+    fixed_before = _authority_snapshot(path)
+    ops.armed = True
+
+    try:
+        with pytest.raises(cs.ControllerStateRequired):
+            session.complete_reconciliation(
+                recovered.payload,
+                recovered.capability,
+                outcome="validated_previous_only",
+            )
+    finally:
+        session.close()
+
+    assert ops.fired
+    assert _authority_snapshot(path) == fixed_before
+    assert not _managed(path, ".transaction").exists()
+    if replacement_kind == "regular":
+        assert stage.read_bytes() == ops.replacement_bytes
+    else:
+        assert stage.is_symlink()
+        assert ops.outside.read_bytes() == b"outside"
+
+
+def _seed_prepared_receipt_with_stage(cs: ModuleType, path: Path) -> Path:
+    _seed_exact_recovery_phase(cs, path, "reconciliation_prepared")
+    artifacts = _reconciliation_artifacts(path)
+    assert len(artifacts) == 1
+    assert _json(_managed(path, ".recovery"))["phase"] == "reconciliation_prepared"
+    assert not _managed(path, ".transaction").exists()
+    return artifacts[0]
+
+
+@pytest.mark.parametrize(
+    "mismatch",
+    ("receipt_marker", "receipt_recovered", "actual_marker"),
+)
+def test_prepared_reconciliation_cross_binding_fails_without_mutation(
+    tmp_path: Path,
+    mismatch: str,
+) -> None:
+    cs = load_controller_state_module()
+    path = tmp_path / "state.json"
+    _seed_prepared_receipt_with_stage(cs, path)
+    receipt_path = _managed(path, ".recovery")
+    marker_path = _managed(path, ".initialized")
+    if mismatch == "actual_marker":
+        marker = _json(marker_path)
+        marker["highWaterIntegritySha256"] = "a" * 64
+        _refresh_sidecar_integrity(marker)
+        _write_private_json(marker_path, marker)
+    else:
+        receipt = _json(receipt_path)
+        if mismatch == "receipt_marker":
+            receipt["markerHighWaterIntegritySha256"] = "b" * 64
+        else:
+            receipt["recoveredIntegritySha256"] = "c" * 64
+        _refresh_sidecar_integrity(receipt)
+        _write_private_json(receipt_path, receipt)
+    before = _reconciliation_authority_snapshot(path)
+
+    with _open(cs, path) as session:
+        result = session.load()
+
+    _assert_recovery_required(result)
+    assert _reconciliation_authority_snapshot(path) == before
+
+
+class StageCloseCrashOps(FaultOps):
+    def __init__(self) -> None:
+        super().__init__()
+        self.armed = False
+        self.fired = False
+
+    def close(self, fd: int) -> None:
+        role = self.fd_roles.get(fd)
+        super().close(fd)
+        if self.armed and not self.fired and role == "reconciliation_stage_temp":
+            self.fired = True
+            raise SimulatedCrash("simulated crash after stage temp close")
+
+
+@pytest.mark.parametrize(
+    ("boundary", "role"),
+    (
+        ("open", "reconciliation_stage_temp"),
+        ("write", "reconciliation_stage_temp"),
+        ("fsync_file", "reconciliation_stage_temp"),
+        ("close", "reconciliation_stage_temp"),
+        ("replace", "reconciliation_stage"),
+        ("fsync_directory", "reconciliation_stage"),
+    ),
+)
+def test_atomic_stage_publication_crash_matrix_resumes_exactly(
+    tmp_path: Path,
+    boundary: str,
+    role: str,
+) -> None:
+    cs = load_controller_state_module()
+    path = tmp_path / "state.json"
+    _seed_recovered_for_reconciliation(cs, path)
+    ops: FaultOps = StageCloseCrashOps() if boundary == "close" else FaultOps()
+    session = _open(cs, path, ops=ops)
+    recovered = session.load()
+    ops.reset_trace()
+    if boundary == "close":
+        assert isinstance(ops, StageCloseCrashOps)
+        ops.armed = True
+    else:
+        ops.crash_after(boundary, predicate=lambda call: call.role == role)
+    try:
+        with pytest.raises(SimulatedCrash):
+            session.complete_reconciliation(
+                recovered.payload,
+                recovered.capability,
+                outcome="validated_previous_only",
+            )
+    finally:
+        session.close()
+    if boundary == "close":
+        assert isinstance(ops, StageCloseCrashOps) and ops.fired
+    else:
+        ops.assert_all_rules_fired()
+    receipt = _json(_managed(path, ".recovery"))
+    assert receipt["phase"] == "restored"
+    assert not _managed(path, ".transaction").exists()
+
+    with _open(cs, path) as restarted:
+        retry = restarted.load()
+        assert retry.mode == "recovered"
+        reconciled = restarted.complete_reconciliation(
+            retry.payload,
+            retry.capability,
+            outcome="validated_previous_only",
+        )
+
+    assert reconciled.mode == "reconciled"
+    assert _json(_managed(path, ".recovery"))["phase"] == "reconciled"
+    assert _reconciliation_artifacts(path) == ()
+
+
+class PredicateCloseFaultOps(FaultOps):
+    def __init__(
+        self,
+        *,
+        role: str,
+        occurrence: int,
+        after_effect: bool,
+        predicate: Callable[[], bool] = lambda: True,
+    ) -> None:
+        super().__init__()
+        self.fault_role = role
+        self.matching_occurrence = occurrence
+        self.after_effect = after_effect
+        self.predicate = predicate
+        self.matches = 0
+        self.fired = False
+        self.armed = False
+
+    def close(self, fd: int) -> None:
+        role = self.fd_roles.get(fd)
+        matches = self.armed and role == self.fault_role and self.predicate()
+        if matches:
+            self.matches += 1
+        fires = matches and self.matches == self.matching_occurrence
+        if fires and not self.after_effect:
+            self.fired = True
+            raise OSError(errno.EIO, "injected close-before-effect failure")
+        super().close(fd)
+        if fires:
+            self.fired = True
+            raise OSError(errno.EIO, "injected close-after-effect failure")
+
+
+def _inject_boundary(
+    ops: FaultOps,
+    *,
+    boundary: str,
+    role: str,
+    occurrence: int,
+    predicate: Callable[[BoundaryCall], bool] | None = None,
+) -> None:
+    if boundary != "close":
+        ops.inject(
+            boundary,
+            occurrence=occurrence,
+            predicate=predicate or (lambda call: call.role == role),
+        )
+
+
+@pytest.mark.parametrize("boundary", ("open", "fstat", "read", "close"))
+def test_restored_reread_errors_return_typed_load_result_and_close_descriptors(
+    tmp_path: Path,
+    boundary: str,
+) -> None:
+    cs = load_controller_state_module()
+    path = tmp_path / "state.json"
+    _seed_exact_recovery_phase(cs, path, "restored")
+    ops: FaultOps
+    if boundary == "close":
+        ops = PredicateCloseFaultOps(
+            role="primary", occurrence=3, after_effect=True
+        )
+        ops.armed = True
+    else:
+        ops = FaultOps()
+        _inject_boundary(
+            ops,
+            boundary=boundary,
+            role="primary",
+            occurrence=3,
+        )
+
+    with _open(cs, path, ops=ops) as session:
+        result = session.load()
+
+    _assert_recovery_required(result)
+    if boundary == "close":
+        assert isinstance(ops, PredicateCloseFaultOps) and ops.fired
+    else:
+        ops.assert_all_rules_fired()
+    for fd in ops.opened_fds:
+        with pytest.raises(OSError) as raised:
+            os.fstat(fd)
+        assert raised.value.errno == errno.EBADF
+
+
+@pytest.mark.parametrize("boundary", ("open", "fstat", "read", "close"))
+def test_post_save_identity_errors_raise_typed_boundary_and_close_descriptors(
+    tmp_path: Path,
+    boundary: str,
+) -> None:
+    cs = load_controller_state_module()
+    path = tmp_path / "state.json"
+    _seed_store(cs, path)
+
+    def post_commit() -> bool:
+        return (
+            path.exists()
+            and not _managed(path, ".transaction").exists()
+            and _envelope_generation(path) == 2
+        )
+
+    if boundary == "close":
+        ops: FaultOps = PredicateCloseFaultOps(
+            role="primary",
+            occurrence=1,
+            after_effect=True,
+            predicate=post_commit,
+        )
+    else:
+        ops = FaultOps()
+    session, loaded = _load_valid(cs, path, ops=ops)
+    ops.reset_trace()
+    if boundary == "close":
+        assert isinstance(ops, PredicateCloseFaultOps)
+        ops.armed = True
+    else:
+        _inject_boundary(
+            ops,
+            boundary=boundary,
+            role="primary",
+            occurrence=1,
+            predicate=lambda call: call.role == "primary" and post_commit(),
+        )
+    try:
+        with pytest.raises(cs.ControllerStateRequired):
+            session.save({"counters": {"seen": 2}}, loaded.capability)
+    finally:
+        session.close()
+    if boundary == "close":
+        assert isinstance(ops, PredicateCloseFaultOps) and ops.fired
+    else:
+        ops.assert_all_rules_fired()
+    for fd in ops.opened_fds:
+        with pytest.raises(OSError) as raised:
+            os.fstat(fd)
+        assert raised.value.errno == errno.EBADF
+
+
+@pytest.mark.parametrize("boundary", ("open", "fstat", "read", "close"))
+def test_post_reconciliation_identity_errors_raise_typed_boundary(
+    tmp_path: Path,
+    boundary: str,
+) -> None:
+    cs = load_controller_state_module()
+    path = tmp_path / "state.json"
+    _seed_recovered_for_reconciliation(cs, path)
+
+    def reconciled() -> bool:
+        return (
+            _managed(path, ".recovery").exists()
+            and _json(_managed(path, ".recovery"))["phase"] == "reconciled"
+        )
+
+    if boundary == "close":
+        ops: FaultOps = PredicateCloseFaultOps(
+            role="primary",
+            occurrence=1,
+            after_effect=True,
+            predicate=reconciled,
+        )
+    else:
+        ops = FaultOps()
+    session = _open(cs, path, ops=ops)
+    recovered = session.load()
+    ops.reset_trace()
+    if boundary == "close":
+        assert isinstance(ops, PredicateCloseFaultOps)
+        ops.armed = True
+    else:
+        _inject_boundary(
+            ops,
+            boundary=boundary,
+            role="primary",
+            occurrence=1,
+            predicate=lambda call: call.role == "primary" and reconciled(),
+        )
+    try:
+        with pytest.raises(cs.ControllerStateRequired):
+            session.complete_reconciliation(
+                recovered.payload,
+                recovered.capability,
+                outcome="validated_previous_only",
+            )
+    finally:
+        session.close()
+    if boundary == "close":
+        assert isinstance(ops, PredicateCloseFaultOps) and ops.fired
+    else:
+        ops.assert_all_rules_fired()
+    for fd in ops.opened_fds:
+        with pytest.raises(OSError) as raised:
+            os.fstat(fd)
+        assert raised.value.errno == errno.EBADF
+
+
+def test_lock_recheck_close_before_effect_is_typed_and_leak_free(
+    tmp_path: Path,
+) -> None:
+    cs = load_controller_state_module()
+    path = tmp_path / "state.json"
+    ops = PredicateCloseFaultOps(
+        role="lock", occurrence=1, after_effect=False
+    )
+    ops.armed = True
+
+    with pytest.raises(cs.ControllerStateRequired):
+        _open(cs, path, ops=ops)
+
+    assert ops.fired
+    for fd in ops.opened_fds:
+        with pytest.raises(OSError) as raised:
+            os.fstat(fd)
+        assert raised.value.errno == errno.EBADF
+
+
+def test_innocent_state_prefixed_sibling_does_not_establish_authority(
+    tmp_path: Path,
+) -> None:
+    cs = load_controller_state_module()
+    path = tmp_path / "state.json"
+    note = tmp_path / ".state.json.notes"
+    _write_private_raw(note, b"operator note")
+
+    with _open(cs, path) as session:
+        assert session.load().mode == "bootstrap"
+
+    raw = b'{"counters":{"seen":1}}'
+    _write_private_raw(path, raw)
+    result = _read(cs, path)
+
+    assert result.mode == "legacy_valid"
+    assert result.payload == {"counters": {"seen": 1}}
+    assert note.read_bytes() == b"operator note"
+
+
+@pytest.mark.parametrize(
+    "artifact_name",
+    (
+        ".state.json.0123456789abcdef0123456789abcdef.tmp",
+        ".state.json.previous.0123456789abcdef0123456789abcdef.tmp",
+        ".state.json.initialized.0123456789abcdef0123456789abcdef.tmp",
+        ".state.json.transaction.0123456789abcdef0123456789abcdef.tmp",
+        ".state.json.recovery.0123456789abcdef0123456789abcdef.tmp",
+        (
+            ".state.json.0123456789abcdef0123456789abcdef."
+            "reconciliation-journal"
+        ),
+        (
+            ".state.json.0123456789abcdef0123456789abcdef."
+            "reconciliation-journal.tmp"
+        ),
+    ),
+)
+def test_exact_authority_temporary_and_stage_grammars_fail_closed(
+    tmp_path: Path,
+    artifact_name: str,
+) -> None:
+    cs = load_controller_state_module()
+    path = tmp_path / "state.json"
+    artifact = tmp_path / artifact_name
+    _write_private_raw(artifact, b"authority")
+
+    with _open(cs, path) as session:
+        _assert_recovery_required(session.load())
+
+    raw = b'{"counters":{"seen":1}}'
+    _write_private_raw(path, raw)
+    assert _read(cs, path).mode == "unavailable"
+    assert artifact.read_bytes() == b"authority"
