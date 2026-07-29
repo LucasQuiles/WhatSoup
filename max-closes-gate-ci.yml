@@ -1,0 +1,24 @@
+name: "Gate: max Closes per draft PR"
+on:
+  pull_request:
+    types: [opened, edited, reopened, synchronize]
+jobs:
+  check-closes-count:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Count Closes references
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: |
+          COUNT=$(echo "$PR_BODY" | grep -oiP "closes\\s+#\\K[0-9]+" | sort -u | wc -l)
+          MAX=40
+          echo "unique-Closes: $COUNT (limit: $MAX)"
+          if [ "$COUNT" -gt "$MAX" ]; then
+            echo "FAIL: $COUNT Closes refs exceeds $MAX limit. Split across multiple thematic draft PRs."
+            exit 1
+          fi
+          if [ "$COUNT" -eq 0 ]; then
+            echo "OK (no Closes refs)"
+          else
+            echo "PASS: $COUNT Closes refs within limit"
+          fi
