@@ -36,6 +36,29 @@ _OPAQUE_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 _DETAIL_KEY_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]{0,95}$")
 _SAFE_DETAIL_STRING_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}$")
 _RECOVERY_RECEIPT_ID_RE = re.compile(r"^[0-9a-f]{32}$")
+_CONTROLLER_STATE_MODES = frozenset(
+    {
+        "bootstrap",
+        "valid",
+        "recovered",
+        "reconciled",
+        "recovery_required",
+    }
+)
+_CONTROLLER_STATE_REASONS = frozenset(
+    {
+        "read_failed",
+        "unsafe_file",
+        "decode_failed",
+        "invalid_root",
+        "schema_incompatible",
+        "integrity_mismatch",
+        "generation_invalid",
+        "publication_ambiguous",
+        "evidence_preservation_failed",
+        "lock_unavailable",
+    }
+)
 _SAFE_DETAIL_STRING_VALUES = frozenset(
     {
         "1_64",
@@ -205,6 +228,27 @@ def metadata_only_controller_details(value: Mapping[str, Any]) -> dict[str, Any]
             projected: dict[str, Any] = {}
             for key in sorted(item):
                 if not isinstance(key, str) or not _DETAIL_KEY_RE.fullmatch(key):
+                    continue
+                if key == "component":
+                    continue
+                if key == "stateMode":
+                    state_mode = item[key]
+                    if (
+                        isinstance(state_mode, str)
+                        and state_mode in _CONTROLLER_STATE_MODES
+                    ):
+                        projected[key] = state_mode
+                    continue
+                if key == "reason":
+                    reason = item[key]
+                    if (
+                        isinstance(reason, str)
+                        and (
+                            reason in _SAFE_DETAIL_STRING_VALUES
+                            or reason in _CONTROLLER_STATE_REASONS
+                        )
+                    ):
+                        projected[key] = reason
                     continue
                 if key == "recoveryReceiptId":
                     receipt_id = item[key]

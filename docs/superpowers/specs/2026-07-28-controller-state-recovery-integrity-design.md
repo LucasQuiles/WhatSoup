@@ -261,22 +261,29 @@ non-user-controlled names:
 - `state.json.recovery` — the canonical closed recovery receipt; and
 - `state.json.lock` — stable lock file, never unlinked during normal operation.
 
-Reconciliation additionally uses two exact, receipt-derived private names:
+Reconciliation additionally uses three exact, receipt-derived private names:
 
 - `.state.json.<recoveryReceiptId>.reconciliation-journal.tmp` — the
   operation-owned incomplete publication temporary; and
 - `.state.json.<recoveryReceiptId>.reconciliation-journal` — the durable staged
-  journal.
+  journal; and
+- `.state.json.<recoveryReceiptId>.reconciliation-journal.claim.<hex32>` — an
+  operation-owned quarantine used only while deleting a verified temp or stage.
 
 The ID is exactly 32 lowercase hexadecimal characters already bound by the
 receipt. No other state-prefixed sibling is authority. Atomic publication
 temporaries are accepted only by the closed grammar
 `.state.json[.previous|.initialized|.transaction|.recovery].<hex32>.tmp`;
-the two reconciliation names above are the only accepted stage grammars.
+the three reconciliation names above are the only accepted stage/claim grammars.
 Unrelated siblings such as `.state.json.notes` neither establish a pristine store
 nor invalidate a sole legacy primary. Every exact temporary or stage name does
 establish unresolved authority and therefore fails closed outside its owned
 operation and phase.
+
+An exact random atomic temporary beside an established store is
+`publication_ambiguous` for both owner and shared-reader loads; random temporary
+IDs are not journal-bound restart authority. Immutable recovery evidence is
+classified separately and remains legal after reconciliation.
 
 Damaged primary evidence is copied byte-for-byte from its already verified
 descriptor to a private, collision-resistant name under the same state directory
@@ -472,7 +479,11 @@ after a visible primary replacement but before directory sync is
 trusted generation, and the journal forces reconciliation on the next load.
 Masking or retrying that result as success is prohibited. Absence of the journal
 after a successful namespace-synced removal, together with a marker matching the
-primary target, is the commit witness.
+primary target, is the commit witness. Before returning from normal save, legacy
+migration, direct reconciliation, or reconciliation restart, the helper reopens
+the primary and requires byte equality with the exact committed target. Missing
+or substituted bytes are typed `publication_ambiguous`, never an assertion or a
+successful capability.
 
 Temporary files are removed only when their exact identity belongs to the active
 operation and removal is safe. Retained primary, previous, or evidence files are
@@ -484,7 +495,9 @@ name with create-exclusive/no-follow semantics, validates owner/mode/type, write
 canonical journal bytes, syncs the file, closes it, atomically renames it to the
 durable stage name, and syncs the directory. A crash at open, write, file sync, or
 close may leave only the exact incomplete `.tmp`; a retry verifies its identity,
-removes only that receipt-owned temporary, syncs removal, and recreates it. A
+claims it under the exact quarantine grammar while retaining the verified source
+descriptor, requires the claimed inode and bytes to equal the cached pre-claim
+identity and bytes, removes only that claim, syncs removal, and recreates it. A
 crash at rename or directory sync may leave the durable stage; a retry reopens it,
 requires identical canonical bytes and device/inode identity, syncs the file and
 directory again, and reuses it.
@@ -492,18 +505,25 @@ directory again, and reuses it.
 Only after that durable-stage proof and all receipt/journal/marker/recovered
 cross-bindings succeed may the helper advance the receipt to
 `reconciliation_prepared`. It then reopens and revalidates the stage immediately
-before renaming it to `state.json.transaction`. After the rename it reopens the
-canonical journal without following links, requires the same identity and exact
-bytes, syncs the canonical file and directory, and only then resumes the
-transaction. A replacement by a regular file or symlink at either validation
-boundary is typed `recovery_required`, never promoted.
+before publishing cached verified bytes to `state.json.transaction` through the
+ordinary separately owned atomic writer. The stage pathname is never renamed into
+canonical authority. The helper reopens the canonical journal without following
+links, requires exact cached bytes, syncs the canonical file and directory, then
+claims and removes the original stage using its cached pre-claim identity and
+bytes. Only after canonical validation and successful cleanup may it mutate the
+transaction. A replacement by a regular file or symlink at either final gap is
+typed `recovery_required`; it is preserved rather than deleted or promoted.
 
 The allowed phase postures are closed: `restored` may have no stage, the exact
 incomplete temporary, or the exact durable stage; `reconciliation_prepared` must
-have either the exact durable stage or its promoted canonical transaction;
+have the exact durable stage, its canonical transaction, or both while canonical
+publication is durable but stage cleanup has not completed;
 `reconciled` has none of the temporary, stage, or canonical transaction. A stage
 or temporary for another receipt, or any such artifact beside another recovery
-phase, is unresolved authority and fails closed.
+phase, is unresolved authority and fails closed. A crash after source-to-claim
+rename leaves the exact claim as preserved authority and every restart returns
+typed `publication_ambiguous` without cleanup or mutation; it is never ignored or
+treated as a resumable receipt-only witness.
 
 ## Concurrency Contract
 
@@ -631,6 +651,11 @@ opaque recovery receipt ID when available, and a bounded occurrence count. It
 contains no damaged values, raw exception text, file path, evidence filename,
 environment value, domain identifier, destination, account, message, credential,
 topology, or digest derived from payload content.
+
+Controller-log metadata projection has key-aware closed allowlists for all five
+state modes and all ten state reasons. Unknown strings are dropped. The canonical
+component remains only in the outer controller-log envelope; the projected
+details do not duplicate that reserved field or relax arbitrary string handling.
 
 Receipt-derived stage and temporary names are private implementation details.
 Their names, paths, journal bytes, identities, and integrity values are never

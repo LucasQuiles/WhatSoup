@@ -279,7 +279,10 @@ json.dumps(
   `.<primary>[.previous|.initialized|.transaction|.recovery].<hex32>.tmp`;
   reconciliation uses only
   `.<primary>.<recoveryReceiptId>.reconciliation-journal.tmp` and
-  `.<primary>.<recoveryReceiptId>.reconciliation-journal`.
+  `.<primary>.<recoveryReceiptId>.reconciliation-journal`, plus the cleanup-only
+  `.<primary>.<recoveryReceiptId>.reconciliation-journal.claim.<hex32>`.
+  Established owner and shared-reader paths reject every exact random atomic
+  temporary and cleanup claim; unrelated state-prefixed siblings stay benign.
 - [ ] Implement journaled bootstrap and legacy migration. Bind migration to the exact trusted legacy bytes in `legacySourceSha256`; a `prepared` restart revalidates those bytes before publication and changed legacy bytes return `recovery_required`. Create the initialized marker at high-water generation 0, retain an integrity-bound generation 0 previous, publish generation 1, advance the marker, remove the journal, and sync every namespace mutation.
 - [ ] Implement normal save ordering exactly as the design: validate payload; preserve invalid previous evidence; durable `prepared` journal; durable previous; `previous_committed`; durable primary; `primary_committed`; durable marker; `marker_committed`; durable journal removal.
 - [ ] Implement restart reconciliation for all journal phases. Only the journal's exact integrity-validated previous, target, and marker may resume. A visible rename without proven directory sync returns `publication_ambiguous`, never a success receipt.
@@ -290,22 +293,37 @@ json.dumps(
   temp or revalidate/resync the durable stage; never accept a substituted path.
   Before occurrence increment, receipt advancement, or promotion, cross-bind the
   receipt, actual marker, retained/recovered envelope, and journal expected/target
-  fields. Reopen the stage immediately before promotion and reopen the canonical
-  transaction afterward, requiring the same identity and exact bytes before
-  resumption. Commit above marker high-water, advance the receipt to `reconciled`,
-  and return a normal fresh capability.
+  fields. Reopen the stage immediately before promotion, atomically publish the
+  cached verified bytes through a separately owned canonical transaction
+  temporary, and reopen the canonical transaction afterward, requiring exact
+  bytes before resumption. Never rename the stage pathname into canonical
+  authority. Claim temp/stage cleanup sources under the closed quarantine grammar
+  while holding the verified descriptor, then require cached bytes plus the
+  pre-claim identity before unlinking the claim. Commit above marker high-water,
+  advance the receipt to `reconciled`, and return a normal fresh capability.
 - [ ] Enforce closed phase postures: `restored` may own no stage, its exact
   incomplete temp, or its exact durable stage;
   `reconciliation_prepared` owns either that stage or the promoted transaction;
-  `reconciled` owns none. Mismatched receipt IDs, extra artifacts, and
-  mixed-version postures fail closed without cleanup or mutation.
+  it may briefly own both after canonical publication and before verified stage
+  cleanup; `reconciled` owns none. A crash after source-to-claim rename is an
+  explicit typed fail-closed posture whose claim bytes remain unchanged.
+  Mismatched receipt IDs, extra artifacts, and mixed-version postures fail closed
+  without cleanup or mutation.
 - [ ] Implement `read_controller_state()` with the exhaustive union `valid`, `legacy_valid`, `recovery_pending`, `unavailable`. It must copy a validated payload under a shared lock and release the lock before returning.
 - [ ] Require read-only validation to reject a valid retained generation equal to
   or above the primary outside an exact recovery posture. Map restored rereads,
   post-save and post-reconciliation identity reads, and lock-recheck close errors
   to typed results/exceptions while closing every opened descriptor.
+- [ ] After durable normal save, legacy migration, direct reconciliation, and
+  reconciliation restart, reopen the primary and compare exact bytes with the
+  committed target. Missing or substituted primaries are
+  `publication_ambiguous`; do not use filesystem-dependent assertions.
 - [ ] Implement `emit_state_recovery_fallback()` with a direct bounded `os.write(2, encoded_line)`, one attempt per process invocation, no exception formatting, and no environment inspection.
 - [ ] Implement `state_diagnostic_details()` and add RED controller-log projection tests for the exact state modes, bounded reasons, generation counters, occurrence count, and an opaque 32-character recovery receipt ID. Add one narrowly allowlisted `recoveryReceiptId` validator to `metadata_only_controller_details()`; do not relax the general rule that ID-like keys and arbitrary strings are removed.
+- [ ] Add narrow key-aware metadata allowlists for every exact `stateMode` and
+  state `reason`, with unknown enum strings dropped. Keep the component only in
+  the controller-log outer envelope and prove the full projected
+  `controller_state_mode` record end to end.
 - [ ] Specify and test the adapter projection contract: each component task implements a narrow `project_*_state_mode(diagnostic)` wrapper that calls `write_controller_log()` directly with record kind `controller_state_mode`, closed details, the controller's existing private append and health sinks, and `emit_fallback=lambda _line: emit_state_recovery_fallback(diagnostic)`. This replaces the generic fallback for this record and guarantees at most one state-specific stderr line.
 - [ ] Implement `ControllerStateSession.__enter__()`, `__exit__()`, and idempotent `close()` before making any adapter hold a lock across domain work.
 - [ ] Implement the shared content-free `ControllerStateRequired` exception and export it for all three process boundaries.

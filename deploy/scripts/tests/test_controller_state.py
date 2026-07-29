@@ -385,6 +385,10 @@ class FaultOps:
             return "reconciliation_stage_temp"
         if name.endswith(".reconciliation-journal"):
             return "reconciliation_stage"
+        if re.search(
+            r"\.reconciliation-journal\.claim\.[0-9a-f]{32}$", name
+        ):
+            return "reconciliation_claim"
         return self.managed_names.get(name)
 
     def open(
@@ -762,6 +766,17 @@ def _authority_snapshot(path: Path) -> dict[str, bytes | None]:
         )
         for suffix in _MANAGED_SUFFIXES[:-1]
     }
+
+
+def _remove_exact_atomic_temporaries(path: Path) -> None:
+    grammar = re.compile(
+        rf"^\.{re.escape(path.name)}"
+        r"(?:\.(?:previous|initialized|transaction|recovery))?"
+        r"\.[0-9a-f]{32}\.tmp$"
+    )
+    for candidate in path.parent.iterdir():
+        if grammar.fullmatch(candidate.name):
+            candidate.unlink()
 
 
 def _evidence_files(path: Path) -> set[Path]:
@@ -1461,6 +1476,7 @@ def test_boolean_generation_fields_are_not_integers(
         session.close()
         ops.assert_all_rules_fired()
         assert ops.counters["replace"] > 0
+        _remove_exact_atomic_temporaries(path)
         targets[target] = _managed(path, ".transaction")
     elif target == "receipt":
         _damage_primary(path, "truncated")
@@ -1729,6 +1745,7 @@ def test_sidecar_tamper_is_recovery_required(tmp_path: Path, sidecar: str) -> No
         session.close()
         ops.assert_all_rules_fired()
         assert ops.counters["replace"] > 0
+        _remove_exact_atomic_temporaries(path)
     elif sidecar == ".recovery":
         _damage_primary(path, "truncated")
         with _open(cs, path) as session:
@@ -3384,7 +3401,7 @@ def _interrupt_normal_save(
 
 
 @pytest.mark.parametrize("crash", _TRANSACTION_CRASH_CASES, ids=lambda case: case.phase)
-def test_transaction_crash_matrix_resumes_every_exact_durable_posture(
+def test_transaction_crash_matrix_handles_every_exact_durable_posture(
     tmp_path: Path,
     crash: CrashCase,
 ) -> None:
@@ -3404,6 +3421,13 @@ def test_transaction_crash_matrix_resumes_every_exact_durable_posture(
     assert interrupted.ops.counters[crash.boundary] > 0
     with _open(cs, path) as restarted:
         result = restarted.load()
+    if crash.phase in {"previous_temp_fsynced", "primary_temp_fsynced"}:
+        _assert_recovery_required(result, "publication_ambiguous")
+        assert any(
+            candidate.name.endswith(".tmp")
+            for candidate in path.parent.iterdir()
+        )
+        return
     assert result.mode == result.diagnostic.mode == "valid"
     assert result.payload == {"counters": {"seen": 3}}
     assert result.diagnostic.current_generation == 3
@@ -4988,3 +5012,399 @@ def test_exact_authority_temporary_and_stage_grammars_fail_closed(
     _write_private_raw(path, raw)
     assert _read(cs, path).mode == "unavailable"
     assert artifact.read_bytes() == b"authority"
+
+
+class ReplaceAfterVerifiedRoleCloseOps(FaultOps):
+    def __init__(
+        self,
+        *,
+        target: Path,
+        role: str,
+        occurrence: int,
+        replacement_kind: Literal["regular", "symlink"],
+    ) -> None:
+        super().__init__()
+        self.target = target
+        self.target_role = role
+        self.matching_occurrence = occurrence
+        self.replacement_kind = replacement_kind
+        self.matches = 0
+        self.armed = False
+        self.fired = False
+        self.replacement_bytes = b'{"replacement":"final-gap"}'
+        self.outside = target.parent / f"{target.name}.outside"
+
+    def close(self, fd: int) -> None:
+        role = self.fd_roles.get(fd)
+        super().close(fd)
+        if not self.armed or role != self.target_role:
+            return
+        self.matches += 1
+        if self.matches != self.matching_occurrence:
+            return
+        self.fired = True
+        if self.replacement_kind == "regular":
+            replacement = self.target.parent / f"{self.target.name}.replacement"
+            _write_private_raw(replacement, self.replacement_bytes)
+            os.replace(replacement, self.target)
+        else:
+            _write_private_raw(self.outside, b"outside")
+            self.target.unlink()
+            os.symlink(self.outside, self.target)
+
+
+@pytest.mark.parametrize("replacement_kind", ("regular", "symlink"))
+def test_final_stage_promotion_gap_never_publishes_replacement(
+    tmp_path: Path,
+    replacement_kind: Literal["regular", "symlink"],
+) -> None:
+    cs = load_controller_state_module()
+    path = tmp_path / "state.json"
+    stage = _seed_restored_with_staged_reconciliation(cs, path)
+    expected = stage.read_bytes()
+    ops = ReplaceAfterVerifiedRoleCloseOps(
+        target=stage,
+        role="reconciliation_stage",
+        occurrence=8,
+        replacement_kind=replacement_kind,
+    )
+    session = _open(cs, path, ops=ops)
+    recovered = session.load()
+    assert recovered.mode == "recovered"
+    fixed_before = {
+        suffix: _managed(path, suffix).read_bytes()
+        for suffix in ("", ".previous", ".initialized")
+    }
+    ops.armed = True
+
+    try:
+        with pytest.raises(cs.ControllerStateRequired):
+            session.complete_reconciliation(
+                recovered.payload,
+                recovered.capability,
+                outcome="validated_previous_only",
+            )
+    finally:
+        session.close()
+
+    assert ops.fired
+    transaction = _managed(path, ".transaction")
+    assert transaction.is_file() and not transaction.is_symlink()
+    assert transaction.read_bytes() == expected
+    assert {
+        suffix: _managed(path, suffix).read_bytes()
+        for suffix in ("", ".previous", ".initialized")
+    } == fixed_before
+    assert _json(_managed(path, ".recovery"))["phase"] == "reconciliation_prepared"
+    if replacement_kind == "regular":
+        assert stage.read_bytes() == ops.replacement_bytes
+    else:
+        assert stage.is_symlink()
+        assert ops.outside.read_bytes() == b"outside"
+
+
+def _seed_restored_with_incomplete_reconciliation_temp(
+    cs: ModuleType,
+    path: Path,
+) -> Path:
+    _seed_recovered_for_reconciliation(cs, path)
+    ops = FaultOps()
+    session = _open(cs, path, ops=ops)
+    recovered = session.load()
+    ops.reset_trace()
+    ops.crash_after(
+        "fsync_file",
+        predicate=lambda call: call.role == "reconciliation_stage_temp",
+    )
+    try:
+        with pytest.raises(SimulatedCrash):
+            session.complete_reconciliation(
+                recovered.payload,
+                recovered.capability,
+                outcome="validated_previous_only",
+            )
+    finally:
+        session.close()
+    ops.assert_all_rules_fired()
+    artifacts = _reconciliation_artifacts(path)
+    assert len(artifacts) == 1
+    assert artifacts[0].name.endswith(".reconciliation-journal.tmp")
+    assert _json(_managed(path, ".recovery"))["phase"] == "restored"
+    return artifacts[0]
+
+
+@pytest.mark.parametrize("replacement_kind", ("regular", "symlink"))
+def test_final_incomplete_temp_cleanup_gap_preserves_replacement(
+    tmp_path: Path,
+    replacement_kind: Literal["regular", "symlink"],
+) -> None:
+    cs = load_controller_state_module()
+    path = tmp_path / "state.json"
+    temporary = _seed_restored_with_incomplete_reconciliation_temp(cs, path)
+    ops = ReplaceAfterVerifiedRoleCloseOps(
+        target=temporary,
+        role="reconciliation_stage_temp",
+        occurrence=5,
+        replacement_kind=replacement_kind,
+    )
+    session = _open(cs, path, ops=ops)
+    recovered = session.load()
+    assert recovered.mode == "recovered"
+    fixed_before = _authority_snapshot(path)
+    ops.armed = True
+
+    try:
+        with pytest.raises(cs.ControllerStateRequired):
+            session.complete_reconciliation(
+                recovered.payload,
+                recovered.capability,
+                outcome="validated_previous_only",
+            )
+    finally:
+        session.close()
+
+    assert ops.fired
+    assert _authority_snapshot(path) == fixed_before
+    assert not _managed(path, ".transaction").exists()
+    if replacement_kind == "regular":
+        assert temporary.read_bytes() == ops.replacement_bytes
+    else:
+        assert temporary.is_symlink()
+        assert ops.outside.read_bytes() == b"outside"
+
+
+@pytest.mark.parametrize("stage_damage", ("expected_highwater", "malformed"))
+def test_restored_durable_stage_is_bound_before_retry_increment(
+    tmp_path: Path,
+    stage_damage: str,
+) -> None:
+    cs = load_controller_state_module()
+    path = tmp_path / "state.json"
+    stage = _seed_restored_with_staged_reconciliation(cs, path)
+    if stage_damage == "malformed":
+        _write_private_raw(stage, b"{")
+    else:
+        journal = _json(stage)
+        journal["expectedHighWaterIntegritySha256"] = "a" * 64
+        _refresh_sidecar_integrity(journal)
+        _write_private_json(stage, journal)
+    before = _reconciliation_authority_snapshot(path)
+
+    with _open(cs, path) as session:
+        result = session.load()
+
+    _assert_recovery_required(result)
+    assert _reconciliation_authority_snapshot(path) == before
+
+
+class MutatePrimaryAfterCommitOps(FaultOps):
+    def __init__(self, posture: Literal["absent", "replaced"]) -> None:
+        super().__init__()
+        self.posture = posture
+        self.armed = True
+        self.fired = False
+
+    def fsync_directory(self, fd: int) -> None:
+        super().fsync_directory(fd)
+        if (
+            not self.armed
+            or self.fired
+            or self.store_path is None
+            or self.last_namespace_role != "transaction"
+            or _managed(self.store_path, ".transaction").exists()
+            or not self.store_path.exists()
+        ):
+            return
+        self.fired = True
+        if self.posture == "absent":
+            self.store_path.unlink()
+        else:
+            replacement = self.store_path.with_name("post-commit-replacement")
+            _write_private_raw(replacement, b'{"replacement":"post-commit"}')
+            os.replace(replacement, self.store_path)
+
+
+@pytest.mark.parametrize("posture", ("absent", "replaced"))
+def test_normal_save_post_commit_primary_posture_is_typed(
+    tmp_path: Path,
+    posture: Literal["absent", "replaced"],
+) -> None:
+    cs = load_controller_state_module()
+    path = tmp_path / "state.json"
+    _seed_store(cs, path)
+    ops = MutatePrimaryAfterCommitOps(posture)
+    session, loaded = _load_valid(cs, path, ops=ops)
+
+    try:
+        with pytest.raises(cs.ControllerStateRequired) as raised:
+            session.save({"counters": {"seen": 2}}, loaded.capability)
+    finally:
+        session.close()
+
+    assert ops.fired
+    assert raised.value.diagnostic.reason == "publication_ambiguous"
+
+
+@pytest.mark.parametrize("posture", ("absent", "replaced"))
+def test_migration_post_commit_primary_posture_is_typed(
+    tmp_path: Path,
+    posture: Literal["absent", "replaced"],
+) -> None:
+    cs = load_controller_state_module()
+    path = tmp_path / "state.json"
+    _write_private_raw(path, b'{"counters":{"seen":1}}')
+    ops = MutatePrimaryAfterCommitOps(posture)
+
+    with _open(cs, path, ops=ops) as session:
+        result = session.load()
+
+    assert ops.fired
+    _assert_recovery_required(result, "publication_ambiguous")
+
+
+@pytest.mark.parametrize("posture", ("absent", "replaced"))
+def test_complete_reconciliation_post_commit_primary_posture_is_typed(
+    tmp_path: Path,
+    posture: Literal["absent", "replaced"],
+) -> None:
+    cs = load_controller_state_module()
+    path = tmp_path / "state.json"
+    _seed_recovered_for_reconciliation(cs, path)
+    ops = MutatePrimaryAfterCommitOps(posture)
+    session = _open(cs, path, ops=ops)
+    recovered = session.load()
+
+    try:
+        with pytest.raises(cs.ControllerStateRequired) as raised:
+            session.complete_reconciliation(
+                recovered.payload,
+                recovered.capability,
+                outcome="validated_previous_only",
+            )
+    finally:
+        session.close()
+
+    assert ops.fired
+    assert raised.value.diagnostic.reason == "publication_ambiguous"
+
+
+@pytest.mark.parametrize("posture", ("absent", "replaced"))
+def test_reconciliation_restart_post_commit_primary_posture_is_typed(
+    tmp_path: Path,
+    posture: Literal["absent", "replaced"],
+) -> None:
+    cs = load_controller_state_module()
+    path = tmp_path / "state.json"
+    _seed_prepared_receipt_with_stage(cs, path)
+    ops = MutatePrimaryAfterCommitOps(posture)
+
+    with _open(cs, path, ops=ops) as session:
+        result = session.load()
+
+    assert ops.fired
+    _assert_recovery_required(result, "publication_ambiguous")
+
+
+@pytest.mark.parametrize(
+    "artifact_name",
+    (
+        ".state.json.0123456789abcdef0123456789abcdef.tmp",
+        ".state.json.previous.0123456789abcdef0123456789abcdef.tmp",
+        ".state.json.initialized.0123456789abcdef0123456789abcdef.tmp",
+        ".state.json.transaction.0123456789abcdef0123456789abcdef.tmp",
+        ".state.json.recovery.0123456789abcdef0123456789abcdef.tmp",
+        (
+            ".state.json.0123456789abcdef0123456789abcdef."
+            "reconciliation-journal.claim."
+            "fedcba9876543210fedcba9876543210"
+        ),
+    ),
+)
+def test_established_store_rejects_exact_atomic_temporary(
+    tmp_path: Path,
+    artifact_name: str,
+) -> None:
+    cs = load_controller_state_module()
+    path = tmp_path / "state.json"
+    _seed_store(cs, path)
+    artifact = tmp_path / artifact_name
+    _write_private_raw(artifact, b"authority")
+    before = _authority_snapshot(path)
+
+    with _open(cs, path) as session:
+        owner = session.load()
+    reader = _read(cs, path)
+
+    _assert_recovery_required(owner, "publication_ambiguous")
+    assert reader.mode == "unavailable"
+    assert reader.reason == "publication_ambiguous"
+    assert _authority_snapshot(path) == before
+    assert artifact.read_bytes() == b"authority"
+
+
+def test_established_store_keeps_innocent_state_prefixed_sibling_benign(
+    tmp_path: Path,
+) -> None:
+    cs = load_controller_state_module()
+    path = tmp_path / "state.json"
+    _seed_store(cs, path)
+    note = tmp_path / ".state.json.notes"
+    _write_private_raw(note, b"operator note")
+
+    with _open(cs, path) as session:
+        owner = session.load()
+    reader = _read(cs, path)
+
+    assert owner.mode == "valid"
+    assert reader.mode == "valid"
+    assert note.read_bytes() == b"operator note"
+
+
+@pytest.mark.parametrize("source_kind", ("incomplete_temp", "durable_stage"))
+def test_reconciliation_cleanup_claim_crash_is_explicit_fail_closed_posture(
+    tmp_path: Path,
+    source_kind: str,
+) -> None:
+    cs = load_controller_state_module()
+    path = tmp_path / "state.json"
+    if source_kind == "incomplete_temp":
+        source = _seed_restored_with_incomplete_reconciliation_temp(cs, path)
+    else:
+        source = _seed_restored_with_staged_reconciliation(cs, path)
+    source_bytes = source.read_bytes()
+    ops = FaultOps()
+    session = _open(cs, path, ops=ops)
+    recovered = session.load()
+    assert recovered.mode == "recovered"
+    ops.reset_trace()
+    ops.crash_after(
+        "replace",
+        predicate=lambda call: call.role == "reconciliation_claim",
+    )
+
+    try:
+        with pytest.raises(SimulatedCrash):
+            session.complete_reconciliation(
+                recovered.payload,
+                recovered.capability,
+                outcome="validated_previous_only",
+            )
+    finally:
+        session.close()
+
+    ops.assert_all_rules_fired()
+    assert not source.exists()
+    claims = tuple(
+        candidate
+        for candidate in _reconciliation_artifacts(path)
+        if ".reconciliation-journal.claim." in candidate.name
+    )
+    assert len(claims) == 1
+    assert claims[0].read_bytes() == source_bytes
+    before = _reconciliation_authority_snapshot(path)
+
+    with _open(cs, path) as restarted:
+        result = restarted.load()
+
+    _assert_recovery_required(result, "publication_ambiguous")
+    assert _reconciliation_authority_snapshot(path) == before

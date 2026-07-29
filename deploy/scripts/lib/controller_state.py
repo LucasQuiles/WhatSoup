@@ -818,30 +818,57 @@ class ControllerStateSession:
 
     def _authority_temporary_leaf(self, name: str) -> bool:
         escaped = re.escape(self._name)
+        return (
+            re.fullmatch(
+                rf"^\.{escaped}"
+                r"(?:\.(?:previous|initialized|transaction|recovery))?"
+                r"\.[0-9a-f]{32}\.tmp$",
+                name,
+            )
+            is not None
+            or self._reconciliation_artifact_leaf(name)
+        )
+
+    def _reconciliation_artifact_leaf(self, name: str) -> bool:
+        escaped = re.escape(self._name)
+        return (
+            re.fullmatch(
+                rf"^\.{escaped}\.[0-9a-f]{{32}}"
+                r"\.reconciliation-journal"
+                r"(?:\.tmp|\.claim\.[0-9a-f]{32})?$",
+                name,
+            )
+            is not None
+        )
+
+    def _atomic_authority_temporary_names(self) -> set[str]:
+        try:
+            names = os.listdir(self._directory_fd)
+        except OSError as exc:
+            raise _StateFault("read_failed") from exc
+        escaped = re.escape(self._name)
         atomic = re.compile(
             rf"^\.{escaped}(?:\.(?:previous|initialized|transaction|recovery))?"
             r"\.[0-9a-f]{32}\.tmp$"
         )
-        reconciliation = re.compile(
-            rf"^\.{escaped}\.[0-9a-f]{{32}}"
-            r"\.reconciliation-journal(?:\.tmp)?$"
-        )
-        return (
-            atomic.fullmatch(name) is not None
-            or reconciliation.fullmatch(name) is not None
-        )
+        return {
+            name
+            for name in names
+            if atomic.fullmatch(name) is not None
+            or (
+                ".reconciliation-journal.claim." in name
+                and self._reconciliation_artifact_leaf(name)
+            )
+        }
 
     def _reconciliation_artifact_names(self) -> set[str]:
         try:
             names = os.listdir(self._directory_fd)
         except OSError as exc:
             raise _StateFault("read_failed") from exc
-        escaped = re.escape(self._name)
-        grammar = re.compile(
-            rf"^\.{escaped}\.[0-9a-f]{{32}}"
-            r"\.reconciliation-journal(?:\.tmp)?$"
-        )
-        return {name for name in names if grammar.fullmatch(name) is not None}
+        return {
+            name for name in names if self._reconciliation_artifact_leaf(name)
+        }
 
     def _read_leaf_with_identity(
         self, suffix: str
@@ -1041,6 +1068,14 @@ class ControllerStateSession:
 
     def _same_envelope(self, raw: bytes | None, envelope: dict[str, Any]) -> bool:
         return raw == _canonical_bytes(envelope)
+
+    def _published_primary(
+        self, expected: Mapping[str, Any]
+    ) -> tuple[bytes, tuple[int, int]]:
+        observed = self._read_leaf_with_identity("")
+        if observed is None or observed[0] != _canonical_bytes(expected):
+            raise _StateFault("publication_ambiguous")
+        return observed
 
     def _resume_transaction(
         self,
@@ -1288,8 +1323,7 @@ class ControllerStateSession:
         )
         self._atomic_json(".transaction", journal)
         marker = self._resume_transaction(journal, marker)
-        observed = self._read_leaf_with_identity("")
-        assert observed is not None
+        observed = self._published_primary(target)
         return self._make_load_result(
             "reconciled",
             payload,
@@ -1315,6 +1349,15 @@ class ControllerStateSession:
         self, receipt: Mapping[str, Any]
     ) -> str:
         return self._reconciliation_stage_leaf(receipt) + ".tmp"
+
+    def _reconciliation_claim_leaf(
+        self, receipt: Mapping[str, Any]
+    ) -> str:
+        return (
+            self._reconciliation_stage_leaf(receipt)
+            + ".claim."
+            + self._random_hex()
+        )
 
     def _recovery_receipt(
         self,
@@ -1567,11 +1610,58 @@ class ControllerStateSession:
         self._verify_named_private(
             leaf, expected=existing[0], identity=existing[1]
         )
+        self._claim_and_unlink_named_private(
+            leaf,
+            receipt=receipt,
+            expected=existing[0],
+            identity=existing[1],
+        )
+
+    def _claim_and_unlink_named_private(
+        self,
+        leaf: str,
+        *,
+        receipt: Mapping[str, Any],
+        expected: bytes,
+        identity: tuple[int, int],
+    ) -> None:
+        held = -1
         try:
-            self._ops.unlink(leaf, dir_fd=self._directory_fd)
+            held = self._ops.open(
+                leaf,
+                os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW,
+                dir_fd=self._directory_fd,
+            )
+            observed = self._ops.fstat(held)
+            if (
+                not self._safe_file_stat(observed)
+                or (observed.st_dev, observed.st_ino) != identity
+            ):
+                raise _StateFault("publication_ambiguous")
+            chunks: list[bytes] = []
+            while chunk := self._ops.read(held, 1024 * 1024):
+                chunks.append(chunk)
+            if b"".join(chunks) != expected:
+                raise _StateFault("publication_ambiguous")
+            claim = self._reconciliation_claim_leaf(receipt)
+            if self._read_named_private_with_identity(claim) is not None:
+                raise _StateFault("publication_ambiguous")
+            self._ops.replace(
+                leaf,
+                claim,
+                src_dir_fd=self._directory_fd,
+                dst_dir_fd=self._directory_fd,
+            )
+            claimed = self._read_named_private_with_identity(claim)
+            if claimed is None or claimed != (expected, identity):
+                raise _StateFault("publication_ambiguous")
+            self._ops.unlink(claim, dir_fd=self._directory_fd)
             self._ops.fsync_directory(self._directory_fd)
         except OSError as exc:
             raise _StateFault("publication_ambiguous") from exc
+        finally:
+            if held >= 0:
+                self._close_quiet(held)
 
     def _stage_reconciliation_journal(
         self, receipt: Mapping[str, Any], journal: Mapping[str, Any]
@@ -1629,25 +1719,18 @@ class ControllerStateSession:
         self,
         stage_leaf: str,
         *,
+        receipt: Mapping[str, Any],
         expected: bytes,
         identity: tuple[int, int],
     ) -> None:
         self._verify_named_private(
             stage_leaf, expected=expected, identity=identity
         )
-        try:
-            self._ops.replace(
-                stage_leaf,
-                self._leaf(".transaction"),
-                src_dir_fd=self._directory_fd,
-                dst_dir_fd=self._directory_fd,
-            )
-            self._ops.fsync_directory(self._directory_fd)
-        except OSError as exc:
-            raise _PublicationAmbiguous() from exc
+        self._atomic_bytes(".transaction", expected)
         promoted = self._read_leaf_with_identity(".transaction")
-        if promoted is None or promoted != (expected, identity):
+        if promoted is None or promoted[0] != expected:
             raise _StateFault("publication_ambiguous")
+        promoted_identity = promoted[1]
         try:
             fd = self._ops.open(
                 self._leaf(".transaction"),
@@ -1657,7 +1740,7 @@ class ControllerStateSession:
             current = self._ops.fstat(fd)
             if (
                 not self._safe_file_stat(current)
-                or (current.st_dev, current.st_ino) != identity
+                or (current.st_dev, current.st_ino) != promoted_identity
             ):
                 raise _StateFault("publication_ambiguous")
             self._ops.fsync_file(fd)
@@ -1669,6 +1752,12 @@ class ControllerStateSession:
         finally:
             if "fd" in locals() and fd >= 0:
                 self._close_quiet(fd)
+        self._claim_and_unlink_named_private(
+            stage_leaf,
+            receipt=receipt,
+            expected=expected,
+            identity=identity,
+        )
 
     def _validate_reconciliation_bindings(
         self,
@@ -1750,6 +1839,7 @@ class ControllerStateSession:
             journal_raw = self._read_leaf(".transaction")
             receipt_raw = self._read_leaf(".recovery")
             unmanaged_authority = self._has_unmanaged_authority_artifact()
+            atomic_temporaries = self._atomic_authority_temporary_names()
         except _StateFault as exc:
             return self._failure_result(exc.reason)
 
@@ -1782,6 +1872,8 @@ class ControllerStateSession:
             marker = _validate_marker(marker_raw, component=self._component)
         except _StateFault as exc:
             return self._failure_result(exc.reason)
+        if atomic_temporaries:
+            return self._failure_result("publication_ambiguous")
         store_id = marker["storeId"]
 
         receipt: dict[str, Any] | None = None
@@ -1810,14 +1902,53 @@ class ControllerStateSession:
                     or len(reconciliation_artifacts) > 1
                 )
             elif phase == "reconciliation_prepared":
-                expected = set() if journal_raw is not None else {stage}
-                invalid_posture = reconciliation_artifacts != expected
+                if journal_raw is None:
+                    invalid_posture = reconciliation_artifacts != {stage}
+                else:
+                    invalid_posture = (
+                        not reconciliation_artifacts.issubset({stage})
+                        or len(reconciliation_artifacts) > 1
+                    )
             else:
                 invalid_posture = bool(reconciliation_artifacts)
             if invalid_posture:
                 return self._failure_result(
                     "publication_ambiguous", receipt=receipt
                 )
+            if phase == "restored" and reconciliation_artifacts == {stage}:
+                try:
+                    staged = self._read_named_private_with_identity(stage)
+                    if staged is None:
+                        return self._failure_result(
+                            "publication_ambiguous", receipt=receipt
+                        )
+                    staged_journal = _validate_journal(
+                        staged[0],
+                        component=self._component,
+                        store_id=store_id,
+                        validator=self._validate_payload,
+                    )
+                    self._validate_reconciliation_bindings(
+                        receipt=receipt,
+                        journal=staged_journal,
+                        marker=marker,
+                        primary_raw=(
+                            None
+                            if primary_observed is None
+                            else primary_observed[0]
+                        ),
+                        retained_raw=previous_raw,
+                    )
+                    self._verify_named_private(
+                        stage, expected=staged[0], identity=staged[1]
+                    )
+                except (_StateFault, OSError, _PublicationAmbiguous) as exc:
+                    reason = (
+                        exc.reason
+                        if isinstance(exc, _StateFault)
+                        else "publication_ambiguous"
+                    )
+                    return self._failure_result(reason, receipt=receipt)
 
         journal: dict[str, Any] | None = None
         if journal_raw is not None:
@@ -1848,6 +1979,28 @@ class ControllerStateSession:
             if reconciliation_receipt:
                 assert receipt is not None
                 try:
+                    staged_for_cleanup = None
+                    stage_leaf = self._reconciliation_stage_leaf(receipt)
+                    if stage_leaf in reconciliation_artifacts:
+                        staged_for_cleanup = (
+                            self._read_named_private_with_identity(stage_leaf)
+                        )
+                        if (
+                            staged_for_cleanup is None
+                            or staged_for_cleanup[0] != journal_raw
+                        ):
+                            raise _StateFault("publication_ambiguous")
+                        _validate_journal(
+                            staged_for_cleanup[0],
+                            component=self._component,
+                            store_id=store_id,
+                            validator=self._validate_payload,
+                        )
+                        self._verify_named_private(
+                            stage_leaf,
+                            expected=staged_for_cleanup[0],
+                            identity=staged_for_cleanup[1],
+                        )
                     self._validate_reconciliation_bindings(
                         receipt=receipt,
                         journal=journal,
@@ -1860,6 +2013,13 @@ class ControllerStateSession:
                         retained_raw=previous_raw,
                     )
                     receipt = self._increment_receipt(receipt)
+                    if staged_for_cleanup is not None:
+                        self._claim_and_unlink_named_private(
+                            stage_leaf,
+                            receipt=receipt,
+                            expected=staged_for_cleanup[0],
+                            identity=staged_for_cleanup[1],
+                        )
                 except (_StateFault, OSError, _PublicationAmbiguous) as exc:
                     reason = (
                         exc.reason
@@ -1907,6 +2067,7 @@ class ControllerStateSession:
                 receipt = self._increment_receipt(receipt)
                 self._promote_reconciliation_journal(
                     stage_leaf,
+                    receipt=receipt,
                     expected=staged[0],
                     identity=staged[1],
                 )
@@ -1941,8 +2102,12 @@ class ControllerStateSession:
                     "publication_ambiguous", receipt=receipt
                 )
             try:
-                primary_raw = self._read_leaf("")
-                assert primary_raw is not None
+                if journal is None:
+                    raise _StateFault("publication_ambiguous")
+                primary_observed = self._published_primary(
+                    journal["targetEnvelope"]
+                )
+                primary_raw = primary_observed[0]
                 _, target = _validate_envelope(
                     primary_raw,
                     component=self._component,
@@ -1963,10 +2128,21 @@ class ControllerStateSession:
                     )
                 receipt = self._advance_receipt(receipt, "reconciled")
                 receipt_raw = _canonical_bytes(receipt)
-                primary_observed = self._read_leaf_with_identity("")
+                primary_observed = self._published_primary(target)
                 completed_reconciliation = True
-            except (_StateFault, OSError, _PublicationAmbiguous):
-                return self._failure_result("generation_invalid", receipt=receipt)
+            except (_StateFault, OSError, _PublicationAmbiguous) as exc:
+                reason = (
+                    exc.reason
+                    if isinstance(exc, _StateFault)
+                    else "publication_ambiguous"
+                )
+                if reason not in {
+                    "schema_incompatible",
+                    "integrity_mismatch",
+                    "generation_invalid",
+                }:
+                    reason = "publication_ambiguous"
+                return self._failure_result(reason, receipt=receipt)
 
         if receipt is not None and receipt["phase"] in {
             "planned",
@@ -2251,10 +2427,9 @@ class ControllerStateSession:
             ) from exc
         self._invalidate_capability()
         try:
-            observed = self._read_leaf_with_identity("")
+            observed = self._published_primary(target)
         except (OSError, _StateFault) as exc:
             raise self._required("publication_ambiguous") from exc
-        assert observed is not None
         new_capability = self._new_capability(
             store_id=store_id,
             generation=target_generation,
@@ -2386,6 +2561,7 @@ class ControllerStateSession:
                 )
             self._promote_reconciliation_journal(
                 stage_leaf,
+                receipt=receipt,
                 expected=staged_raw,
                 identity=stage_identity,
             )
@@ -2420,10 +2596,9 @@ class ControllerStateSession:
             ) from exc
         self._invalidate_capability()
         try:
-            observed = self._read_leaf_with_identity("")
+            observed = self._published_primary(journal["targetEnvelope"])
         except (OSError, _StateFault) as exc:
             raise self._required("publication_ambiguous") from exc
-        assert observed is not None
         new_capability = self._new_capability(
             store_id=marker["storeId"],
             generation=target_generation,
@@ -2532,6 +2707,7 @@ def read_controller_state(
         journal = session._read_leaf(".transaction")
         receipt_raw = session._read_leaf(".recovery")
         unmanaged_authority = session._has_unmanaged_authority_artifact()
+        atomic_temporaries = session._atomic_authority_temporary_names()
         if marker_raw is None:
             if (
                 primary is not None
@@ -2547,6 +2723,10 @@ def read_controller_state(
                 return StateReadResult("legacy_valid", payload, None, None)
             return StateReadResult("unavailable", None, None, "read_failed")
         marker = _validate_marker(marker_raw, component=component)
+        if atomic_temporaries:
+            return StateReadResult(
+                "unavailable", None, None, "publication_ambiguous"
+            )
         if journal is not None:
             return StateReadResult(
                 "unavailable", None, None, "publication_ambiguous"
