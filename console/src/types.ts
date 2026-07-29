@@ -66,7 +66,14 @@ export interface LineInstance {
     sqlite: { messages_total: number; schema_version: number };
     runtime?: {
       passive?: { unreadCount: number; lastActivityAt: string | null };
-      chat?: { queueDepth: number; enrichmentUnprocessed: number };
+      chat?: {
+        queueDepth: number;
+        enrichmentUnprocessed: number;
+        queue_admission?: {
+          rejected_total: number;
+          unowned_total: number;
+        };
+      };
       agent?: {
         activeSessions: number;
         lastSessionStatus: string | null;
@@ -456,4 +463,3 @@ export interface ApprovalsPayload {
    *  never a fake-empty queue (fail-closed, PDR-3). */
   readError?: boolean;
 }
-
