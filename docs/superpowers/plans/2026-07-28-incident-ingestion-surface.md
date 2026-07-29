@@ -206,3 +206,15 @@ Startup: construct once, fail-open to degraded — `try { const db = openInciden
 ## Out of scope (unchanged)
 
 `condition_class_unknown` + `stored_evaluation_faulted` (Plan 3); opaque cursors, principals, operator actions (Plan 4); intents/delivery (Plan 5); real producer clients + spool + #2470 transport (Plan 6); shadow/cutover (Plan 7).
+
+---
+
+## Remediation tasks (2026-07-29, executed)
+
+Audit-driven remediation on the same branch, per spec §E and the reviewed plan at `~/.claude/plans/vivid-tumbling-kurzweil.md` (evidence under its operator evidence root):
+
+- [x] B: `readBodyBytes` + one-time decode in `src/lib/http.ts`; route/store hash original bytes; strict UTF-8 + BOM rejection (400, zero rows); `acceptSignal(string | Uint8Array)`.
+- [x] C: stale/equal recovery state-inert (`stored_stale_observation`, no new disposition); cross-occurrence supersession strictly-newer-only; `last_observed_at` advance-only via SQLite `MAX`.
+- [x] D: exact `application/json` media-type match; `credentialTtlMs` removed; `enrollmentTtlMs` finite-positive-integer validation; rotation overlap capped at old credential expiry; mandatory bounded `securityAudit` sink.
+- [x] E: fleet server owns the incident DB — `start()` probes once, `stop()` closes once, closed is terminal; `ProducerStore.close()` removed; `FleetDeps.openIncidentDatabase` test seam.
+- [x] All cycles red-first with preserved receipts; full-suite verdict is fail-closed (non-zero exit = Inconclusive, never an allowlisted pass).

@@ -36,6 +36,11 @@ export type AcceptResult =
   | { outcome: 'invalid'; malformedJson: boolean; errors: string[] };
 
 const DEFAULT_MAX_FUTURE_SKEW_MS = 5 * 60 * 1000;
+
+// fatal: reject invalid UTF-8 instead of substituting U+FFFD. ignoreBOM: keep
+// a leading BOM in the decoded text so JSON.parse rejects it — a stripped BOM
+// would make two different byte payloads parse identically.
+const STRICT_UTF8_DECODER = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
 const MAX_LIST_LIMIT = 200;
 
 interface StoredEventRow {
@@ -73,11 +78,22 @@ export class IncidentStore {
     this.db.close();
   }
 
-  acceptSignal(rawBody: string, producer: ProducerContext, now: Date): AcceptResult {
+  acceptSignal(rawBody: string | Uint8Array, producer: ProducerContext, now: Date): AcceptResult {
+    // The idempotency digest covers the exact bytes the producer sent, never
+    // a decode: a lossy decode collapses distinct byte payloads into one
+    // string (replacement characters, stripped BOM) and forges replays.
+    const bytes =
+      typeof rawBody === 'string'
+        ? Buffer.from(rawBody, 'utf8')
+        : Buffer.isBuffer(rawBody)
+          ? rawBody
+          : Buffer.from(rawBody.buffer, rawBody.byteOffset, rawBody.byteLength);
+    let bodyText = '';
     let parsedBody: unknown;
     let malformedJson = false;
     try {
-      parsedBody = JSON.parse(rawBody);
+      bodyText = STRICT_UTF8_DECODER.decode(bytes);
+      parsedBody = JSON.parse(bodyText);
     } catch {
       parsedBody = undefined;
       malformedJson = true;
@@ -93,7 +109,7 @@ export class IncidentStore {
     if (signalId !== null) {
       const existing = this.findStoredEvent(producer.producerId, signalId);
       if (existing) {
-        if (existing.payload_digest === sha256Digest(rawBody)) {
+        if (existing.payload_digest === sha256Digest(bytes)) {
           return { outcome: 'idempotent_replay', receipt: this.receiptFromRow(existing, producer) };
         }
         return { outcome: 'identity_conflict', existingDigest: existing.payload_digest };
@@ -109,7 +125,7 @@ export class IncidentStore {
     }
     const envelope = parsed.envelope;
 
-    const payloadDigest = sha256Digest(rawBody);
+    const payloadDigest = sha256Digest(bytes);
     const receivedAt = now.toISOString();
     const quarantined = Date.parse(envelope.observedAt) > now.getTime() + this.maxFutureSkewMs;
 
@@ -140,7 +156,7 @@ export class IncidentStore {
           producer.producerDomainId,
           envelope.signalId,
           payloadDigest,
-          rawBody,
+          bodyText,
           envelope.kind,
           envelope.subject,
           'conditionClass' in envelope ? envelope.conditionClass : null,
@@ -315,8 +331,12 @@ export class IncidentStore {
       }
       this.db
         .prepare(
+          // MAX keeps freshness advance-only: a causally newer observation
+          // (higher seq) may still carry an older producer clock reading, and
+          // absence/staleness evaluation must never see time move backwards.
+          // Strict ISO UTC timestamps compare correctly as strings.
           `UPDATE incidents
-              SET last_observed_at = ?, last_occurrence_seq = ?, projection_version = projection_version + 1
+              SET last_observed_at = MAX(last_observed_at, ?), last_occurrence_seq = ?, projection_version = projection_version + 1
             WHERE incident_id = ?`,
         )
         .run(envelope.observedAt, envelope.occurrenceSeq, episode.incident_id);
@@ -325,7 +345,7 @@ export class IncidentStore {
 
     const openOnKey = this.db
       .prepare(
-        `SELECT incident_id FROM incidents
+        `SELECT incident_id, last_observed_at FROM incidents
           WHERE producer_domain_id = ? AND subject = ? AND condition_class = ?
             AND condition_state = 'open' AND occurrence_id != ?`,
       )
@@ -334,7 +354,15 @@ export class IncidentStore {
         envelope.subject,
         envelope.conditionClass,
         envelope.occurrenceId,
-      ) as Array<{ incident_id: number }>;
+      ) as Array<{ incident_id: number; last_observed_at: string }>;
+
+    // A new occurrence supersedes open episodes only when it is strictly
+    // fresher than every one of them; a delayed or replayed observation of an
+    // old occurrence must not conclude an episode observed more recently.
+    // Strict ISO UTC timestamps compare correctly as strings.
+    if (openOnKey.some((open) => open.last_observed_at >= envelope.observedAt)) {
+      return { disposition: 'stored_stale_observation', incidentId: null, transitionId: null };
+    }
 
     for (const stale of openOnKey) {
       this.db
@@ -380,6 +408,12 @@ export class IncidentStore {
 
     if (!episode || episode.condition_state !== 'open') {
       return { disposition: 'stored_no_state_change', incidentId: null, transitionId: null };
+    }
+    if (envelope.occurrenceSeq <= episode.last_occurrence_seq) {
+      // A recovery must be causally newer than the last observation of its
+      // occurrence; a delayed or replayed recovery cannot conclude an episode
+      // the producer has since re-observed.
+      return { disposition: 'stored_stale_observation', incidentId: episode.incident_id, transitionId: null };
     }
 
     this.db
@@ -474,8 +508,8 @@ export interface TransitionRecord {
   createdAt: string;
 }
 
-function sha256Digest(rawBody: string): string {
-  return `sha256:${createHash('sha256').update(rawBody, 'utf-8').digest('hex')}`;
+function sha256Digest(bytes: Buffer): string {
+  return `sha256:${createHash('sha256').update(bytes).digest('hex')}`;
 }
 
 function projectIncident(row: Record<string, unknown>): IncidentProjection {

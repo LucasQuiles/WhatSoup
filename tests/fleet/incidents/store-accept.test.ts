@@ -1,4 +1,5 @@
 import { mkdtempSync, rmSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -77,6 +78,55 @@ describe('IncidentStore.acceptSignal — acceptance core', () => {
     expect(result.outcome).toBe('invalid');
     const replay = store.acceptSignal(heartbeatBody(), PRODUCER, NOW);
     expect(replay.outcome).toBe('accepted');
+  });
+
+  it('accepts bytes and hashes the exact supplied buffer', () => {
+    const bytes = Buffer.from(heartbeatBody('hb-bytes'), 'utf8');
+    const result = store.acceptSignal(bytes, PRODUCER, NOW);
+    expect(result.outcome).toBe('accepted');
+    if (result.outcome !== 'accepted') return;
+    const expected = `sha256:${createHash('sha256').update(bytes).digest('hex')}`;
+    expect(result.receipt.payloadDigest).toBe(expected);
+
+    const replay = store.acceptSignal(bytes, PRODUCER, NOW);
+    expect(replay.outcome).toBe('idempotent_replay');
+  });
+
+  it('rejects invalid UTF-8 bytes as invalid without storing an event', () => {
+    // A raw 0xFF inside a JSON string: a lossy decode turns it into U+FFFD,
+    // which parses as valid JSON — the digest would then cover replaced text
+    // instead of the producer's actual bytes.
+    const bytes = Buffer.concat([
+      Buffer.from(
+        '{"schemaVersion":1,"signalId":"hb-ff","kind":"heartbeat_observed","subject":"host:alpha","observedAt":"2026-07-28T12:00:00.000Z","attributes":{"note":"',
+        'utf8',
+      ),
+      Buffer.from([0xff]),
+      Buffer.from('"}}', 'utf8'),
+    ]);
+    const result = store.acceptSignal(bytes, PRODUCER, NOW);
+    expect(result.outcome).toBe('invalid');
+    if (result.outcome !== 'invalid') return;
+    expect(result.malformedJson).toBe(true);
+
+    const untouched = store.acceptSignal(heartbeatBody('hb-after-ff'), PRODUCER, NOW);
+    expect(untouched.outcome).toBe('accepted');
+  });
+
+  it('rejects a BOM-prefixed but otherwise valid JSON body without storing', () => {
+    const bytes = Buffer.concat([
+      Buffer.from([0xef, 0xbb, 0xbf]),
+      Buffer.from(heartbeatBody('hb-bom'), 'utf8'),
+    ]);
+    const result = store.acceptSignal(bytes, PRODUCER, NOW);
+    expect(result.outcome).toBe('invalid');
+    if (result.outcome !== 'invalid') return;
+    expect(result.malformedJson).toBe(true);
+
+    // The identity was never stored: the same signalId without the BOM is a
+    // fresh accept, not a replay or conflict.
+    const clean = store.acceptSignal(heartbeatBody('hb-bom'), PRODUCER, NOW);
+    expect(clean.outcome).toBe('accepted');
   });
 
   it('marks unparseable bodies as malformedJson and schema violations as not', () => {

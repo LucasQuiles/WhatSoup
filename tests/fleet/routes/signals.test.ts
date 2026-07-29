@@ -1,4 +1,5 @@
 import { mkdtempSync, rmSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { EventEmitter } from 'node:events';
@@ -12,6 +13,7 @@ import { createSignalsHandlers, type SignalsDeps } from '../../../src/fleet/rout
 const NOW = new Date('2026-07-28T12:00:00.000Z');
 
 let dir: string;
+let db: ReturnType<typeof openIncidentDb>;
 let incidentStore: IncidentStore | null;
 let producerStore: ProducerStore | null;
 let credential: string;
@@ -21,12 +23,16 @@ function deps(overrides: Partial<SignalsDeps> = {}): SignalsDeps {
     getIncidentStore: () => incidentStore,
     getProducerStore: () => producerStore,
     now: () => NOW,
+    securityAudit: () => {},
     ...overrides,
   };
 }
 
 function mockReq(options: {
-  body?: string;
+  body?: string | Buffer;
+  /** Emit each entry as its own 'data' event (e.g. to split a multibyte
+   * character across chunk boundaries). Takes precedence over `body`. */
+  chunks?: Buffer[];
   headers?: Record<string, string>;
 }): IncomingMessage {
   const req = new EventEmitter() as IncomingMessage;
@@ -37,8 +43,16 @@ function mockReq(options: {
     ...options.headers,
   };
   process.nextTick(() => {
-    if (options.body !== undefined) req.emit('data', options.body);
-    req.emit('end');
+    const parts = options.chunks ?? (options.body !== undefined ? [options.body] : []);
+    const emitNext = (index: number): void => {
+      if (index >= parts.length) {
+        req.emit('end');
+        return;
+      }
+      req.emit('data', parts[index]!);
+      setImmediate(() => emitNext(index + 1));
+    };
+    emitNext(0);
   });
   return req;
 }
@@ -81,6 +95,13 @@ async function post(body: string | undefined, headers: Record<string, string> = 
   return done;
 }
 
+async function postChunks(chunks: Buffer[], headers: Record<string, string> = {}, d = deps()): Promise<CapturedResponse> {
+  const handlers = createSignalsHandlers(d);
+  const { res, done } = mockRes();
+  await handlers.postSignal(mockReq({ chunks, headers }), res);
+  return done;
+}
+
 function heartbeat(signalId = 'hb-1'): string {
   return JSON.stringify({
     schemaVersion: 1,
@@ -97,7 +118,7 @@ function authed(extra: Record<string, string> = {}): Record<string, string> {
 
 beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), 'whatsoup-signals-route-'));
-  const db = openIncidentDb(join(dir, 'incidents.db'));
+  db = openIncidentDb(join(dir, 'incidents.db'));
   incidentStore = new IncidentStore(db);
   producerStore = new ProducerStore(db);
   const reg = producerStore.register(
@@ -259,5 +280,97 @@ describe('POST /api/signals', () => {
     const err = (out.body as { error: { code: string; message: string } }).error;
     expect(err.code).toBe('internal_error');
     expect(err.message).not.toContain('secret internal detail');
+  });
+});
+
+describe('POST /api/signals — media type is closed', () => {
+  it('rejects near-JSON media types with 415', async () => {
+    for (const mediaType of ['application/json5', 'application/jsonx', 'application/problem+json']) {
+      const out = await post(heartbeat('hb-mt'), authed({ 'content-type': mediaType }));
+      expect(out.status, mediaType).toBe(415);
+      expect((out.body as { error: { code: string } }).error.code, mediaType).toBe('unsupported_media_type');
+    }
+  });
+
+  it('accepts a mixed-case JSON media type with parameters', async () => {
+    const out = await post(heartbeat('hb-mt-ok'), authed({ 'content-type': 'Application/JSON; charset=utf-8' }));
+    expect(out.status).toBe(201);
+  });
+});
+
+describe('POST /api/signals — byte-stable ingestion', () => {
+  function euroHeartbeatBytes(): Buffer {
+    return Buffer.from(
+      JSON.stringify({
+        schemaVersion: 1,
+        signalId: 'hb-euro',
+        kind: 'heartbeat_observed',
+        subject: 'host:alpha',
+        observedAt: '2026-07-28T11:59:00.000Z',
+        attributes: { note: '€' },
+      }),
+      'utf8',
+    );
+  }
+
+  function splitInsideEuro(bytes: Buffer): Buffer[] {
+    const at = bytes.indexOf(0xe2) + 1;
+    return [bytes.subarray(0, at), bytes.subarray(at)];
+  }
+
+  function eventCount(): number {
+    return Number((db.prepare('SELECT COUNT(*) AS n FROM events').get() as { n: number | bigint }).n);
+  }
+
+  it('accepts a payload split inside a multibyte code point and hashes the original bytes', async () => {
+    const bytes = euroHeartbeatBytes();
+    const out = await postChunks(splitInsideEuro(bytes), authed());
+    expect(out.status).toBe(201);
+    const digest = (out.body as { payloadDigest: string }).payloadDigest;
+    expect(digest).toBe(`sha256:${createHash('sha256').update(bytes).digest('hex')}`);
+  });
+
+  it('returns the same digest and receipt on exact byte resend', async () => {
+    const bytes = euroHeartbeatBytes();
+    const first = await postChunks(splitInsideEuro(bytes), authed());
+    const replay = await postChunks([bytes], authed());
+    expect(first.status).toBe(201);
+    expect(replay.status).toBe(200);
+    expect(replay.headers['idempotent-replay']).toBe('true');
+    const firstBody = first.body as { payloadDigest: string; eventId: number };
+    const replayBody = replay.body as { payloadDigest: string; eventId: number };
+    expect(replayBody.payloadDigest).toBe(firstBody.payloadDigest);
+    expect(replayBody.eventId).toBe(firstBody.eventId);
+  });
+
+  it('answers 409 for the same identity with different valid bytes', async () => {
+    const bytes = euroHeartbeatBytes();
+    await postChunks([bytes], authed());
+    const changed = Buffer.from(bytes.toString('utf8').replace('€', 'e'), 'utf8');
+    const out = await postChunks([changed], authed());
+    expect(out.status).toBe(409);
+  });
+
+  it('rejects invalid UTF-8 hidden inside an otherwise-valid JSON string with 400 and stores nothing', async () => {
+    const bytes = Buffer.concat([
+      Buffer.from(
+        '{"schemaVersion":1,"signalId":"hb-ff","kind":"heartbeat_observed","subject":"host:alpha","observedAt":"2026-07-28T11:59:00.000Z","attributes":{"note":"',
+        'utf8',
+      ),
+      Buffer.from([0xff]),
+      Buffer.from('"}}', 'utf8'),
+    ]);
+    const out = await postChunks([bytes], authed());
+    expect(out.status).toBe(400);
+    expect((out.body as { error: { code: string } }).error.code).toBe('malformed_request');
+    expect(eventCount()).toBe(0);
+  });
+
+  it('rejects a UTF-8 BOM before otherwise-valid JSON with 400 and stores nothing', async () => {
+    const bytes = Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), euroHeartbeatBytes()]);
+    const out = await postChunks([bytes], authed());
+    expect(out.status).toBe(400);
+    expect((out.body as { error: { code: string } }).error.code).toBe('malformed_request');
+    expect(eventCount()).toBe(0);
   });
 });

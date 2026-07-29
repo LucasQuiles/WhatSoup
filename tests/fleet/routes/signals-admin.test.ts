@@ -22,6 +22,7 @@ function deps(overrides: Partial<SignalsDeps> = {}): SignalsDeps {
     getProducerStore: () => producerStore,
     now: () => NOW,
     verifyRootToken: (req: IncomingMessage) => req.headers['authorization'] === `Bearer ${ROOT}`,
+    securityAudit: () => {},
     ...overrides,
   };
 }
@@ -97,8 +98,9 @@ afterEach(() => {
 async function call(
   handler: 'postProducer' | 'postProducerCredential' | 'deleteProducerCredential',
   options: { body?: string; headers?: Record<string, string>; producerId?: string },
+  d: SignalsDeps = deps(),
 ): Promise<CapturedResponse> {
-  const handlers = createSignalsHandlers(deps());
+  const handlers = createSignalsHandlers(d);
   const { res, done } = mockRes();
   const req = mockReq({ body: options.body, headers: options.headers });
   if (handler === 'postProducer') await handlers.postProducer(req, res);
@@ -222,5 +224,70 @@ describe('producer admin routes', () => {
     expect(first.status).toBe(204);
     const again = await call('deleteProducerCredential', { headers: { authorization: `Bearer ${ROOT}` } });
     expect(again.status).toBe(204);
+  });
+
+  it('emits bounded security audit events for register, failed enrollment, and revoke', async () => {
+    const events: Array<Record<string, unknown>> = [];
+    const audited = deps({
+      securityAudit: (event) => events.push(event as unknown as Record<string, unknown>),
+    });
+
+    const reg = await call('postProducer', {
+      body: registrationBody(),
+      headers: { authorization: `Bearer ${ROOT}` },
+    }, audited);
+    const { enrollmentSecret } = reg.body as { enrollmentSecret: string };
+    expect(events).toContainEqual({ type: 'producer_registered', producerId: 'prod-alpha' });
+
+    const rejected = await call('postProducerCredential', {
+      body: JSON.stringify({ enrollmentSecret: 'wrong-secret' }),
+      headers: {},
+    }, audited);
+    expect(rejected.status).toBe(401);
+    expect(events).toContainEqual({
+      type: 'enrollment_rejected',
+      producerId: 'prod-alpha',
+      reason: 'secret_mismatch',
+    });
+
+    const revoked = await call('deleteProducerCredential', {
+      headers: { authorization: `Bearer ${ROOT}` },
+    }, audited);
+    expect(revoked.status).toBe(204);
+    expect(events).toContainEqual({ type: 'producer_revoked', producerId: 'prod-alpha' });
+
+    // No secret material ever enters the audit stream.
+    expect(JSON.stringify(events)).not.toContain(enrollmentSecret);
+  });
+
+  it('keeps external enrollment failures uniform across internal audit reasons', async () => {
+    const events: Array<Record<string, unknown>> = [];
+    const audited = deps({
+      securityAudit: (event) => events.push(event as unknown as Record<string, unknown>),
+    });
+    await call('postProducer', {
+      body: registrationBody(),
+      headers: { authorization: `Bearer ${ROOT}` },
+    }, audited);
+
+    const mismatch = await call('postProducerCredential', {
+      body: JSON.stringify({ enrollmentSecret: 'wrong-secret' }),
+      headers: {},
+    }, audited);
+    const unknownProducer = await call('postProducerCredential', {
+      body: JSON.stringify({ enrollmentSecret: 'wrong-secret' }),
+      headers: {},
+      producerId: 'prod-ghost',
+    }, audited);
+
+    expect(mismatch.status).toBe(401);
+    expect(unknownProducer.status).toBe(401);
+    expect(unknownProducer.body).toEqual(mismatch.body);
+
+    const reasons = events
+      .filter((event) => event.type === 'enrollment_rejected')
+      .map((event) => event.reason)
+      .sort();
+    expect(reasons).toEqual(['no_active_enrollment', 'secret_mismatch']);
   });
 });

@@ -9,14 +9,23 @@ export interface ProducerRegistration {
   allowedConditionClasses: readonly string[];
   allowedSubjects: readonly string[];
   enrollmentTtlMs?: number;
-  credentialTtlMs?: number;
 }
 
 export type RegisterResult =
   | { ok: true; enrollmentSecret: string; enrollmentSecretExpiresAt: string }
   | { ok: false; reason: 'producer_exists' | 'invalid_input' };
 
-export type ExchangeResult = { ok: true; credential: string; credentialExpiresAt: string } | { ok: false };
+/** Internal-only failure classification for security auditing. Never exposed
+ * over HTTP — external enrollment failures stay uniform. */
+export type ExchangeFailureReason =
+  | 'no_active_enrollment'
+  | 'enrollment_expired'
+  | 'secret_mismatch'
+  | 'enrollment_burned';
+
+export type ExchangeResult =
+  | { ok: true; credential: string; credentialExpiresAt: string }
+  | { ok: false; reason: ExchangeFailureReason };
 export type RotateResult = { ok: true; credential: string; credentialExpiresAt: string } | { ok: false };
 
 export interface AuthenticatedProducer {
@@ -57,14 +66,13 @@ export class ProducerStore {
   private readonly rotationOverlapMs: number;
   private readonly credentialTtlMs: number;
 
+  // No close(): the ProducerStore shares its handle with the IncidentStore,
+  // and the owning aggregate (the fleet server, or the test that opened the
+  // database) is the only closer — two closers on one handle double-close.
   constructor(db: DatabaseSync, options?: { rotationOverlapMs?: number; credentialTtlMs?: number }) {
     this.db = db;
     this.rotationOverlapMs = options?.rotationOverlapMs ?? DEFAULT_ROTATION_OVERLAP_MS;
     this.credentialTtlMs = options?.credentialTtlMs ?? DEFAULT_CREDENTIAL_TTL_MS;
-  }
-
-  close(): void {
-    this.db.close();
   }
 
   register(input: ProducerRegistration, now: Date): RegisterResult {
@@ -103,21 +111,23 @@ export class ProducerStore {
 
   exchangeEnrollmentSecret(producerId: string, secret: string, now: Date): ExchangeResult {
     const row = this.findRow(producerId);
-    if (!row || row.status !== 'enabled' || !row.enrollment_secret_hash) return { ok: false };
+    if (!row || row.status !== 'enabled' || !row.enrollment_secret_hash) {
+      return { ok: false, reason: 'no_active_enrollment' };
+    }
     if (!row.enrollment_secret_expires_at || Date.parse(row.enrollment_secret_expires_at) <= now.getTime()) {
       this.clearEnrollmentSecret(producerId);
-      return { ok: false };
+      return { ok: false, reason: 'enrollment_expired' };
     }
     if (digest(secret) !== row.enrollment_secret_hash) {
       const mismatches = row.enrollment_mismatches + 1;
       if (mismatches >= MAX_ENROLLMENT_MISMATCHES) {
         this.clearEnrollmentSecret(producerId);
-      } else {
-        this.db
-          .prepare(`UPDATE producers SET enrollment_mismatches = ? WHERE producer_id = ?`)
-          .run(mismatches, producerId);
+        return { ok: false, reason: 'enrollment_burned' };
       }
-      return { ok: false };
+      this.db
+        .prepare(`UPDATE producers SET enrollment_mismatches = ? WHERE producer_id = ?`)
+        .run(mismatches, producerId);
+      return { ok: false, reason: 'secret_mismatch' };
     }
     const credential = randomBytes(32).toString('base64url');
     const expiresAt = new Date(now.getTime() + this.credentialTtlMs).toISOString();
@@ -142,6 +152,12 @@ export class ProducerStore {
     }
     const credential = randomBytes(32).toString('base64url');
     const expiresAt = new Date(now.getTime() + this.credentialTtlMs).toISOString();
+    // The retired credential keeps working for the overlap window, but never
+    // beyond its own original expiry — rotation must not extend a lifetime.
+    const overlapEndMs = Math.min(
+      row.credential_expires_at ? Date.parse(row.credential_expires_at) : Number.POSITIVE_INFINITY,
+      now.getTime() + this.rotationOverlapMs,
+    );
     this.db
       .prepare(
         `UPDATE producers
@@ -151,7 +167,7 @@ export class ProducerStore {
           WHERE producer_id = ?`,
       )
       .run(
-        new Date(now.getTime() + this.rotationOverlapMs).toISOString(),
+        new Date(overlapEndMs).toISOString(),
         digest(credential),
         expiresAt,
         producerId,
@@ -241,6 +257,12 @@ function digest(value: string): string {
 function validRegistration(input: ProducerRegistration): boolean {
   const boundedId = (v: string): boolean => typeof v === 'string' && v.length >= 1 && v.length <= MAX_ID_LENGTH;
   if (!boundedId(input.producerId) || !boundedId(input.producerDomainId)) return false;
+  if (
+    input.enrollmentTtlMs !== undefined &&
+    (!Number.isInteger(input.enrollmentTtlMs) || input.enrollmentTtlMs <= 0)
+  ) {
+    return false;
+  }
   if (!Array.isArray(input.allowedKinds) || input.allowedKinds.length === 0) return false;
   if (!input.allowedKinds.every((k) => (SIGNAL_KINDS as readonly string[]).includes(k))) return false;
   if (!Array.isArray(input.allowedConditionClasses) || !input.allowedConditionClasses.every(boundedId)) {

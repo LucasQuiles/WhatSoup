@@ -1,11 +1,29 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
-import { extractBearer, jsonResponse, readBody } from '../../lib/http.ts';
+import { extractBearer, jsonResponse, readBody, readBodyBytes } from '../../lib/http.ts';
 import { parseSignalEnvelopeValue } from '../incidents/envelope.ts';
 import { IncidentStoreCorruptError } from '../incidents/db.ts';
 import type { IncidentStore } from '../incidents/store.ts';
-import type { ProducerStore } from '../incidents/producers.ts';
+import type { ExchangeFailureReason, ProducerStore } from '../incidents/producers.ts';
+
+/** Bounded, closed-vocabulary security audit events for producer lifecycle
+ * actions. Carries only the (length-bounded) producer id — never secrets,
+ * credentials, payloads, or exception prose. */
+export type ProducerSecurityAuditEvent =
+  | { type: 'producer_registered'; producerId: string }
+  | { type: 'producer_revoked'; producerId: string }
+  | { type: 'enrollment_rejected'; producerId: string; reason: ExchangeFailureReason };
+
+const AUDIT_ID_MAX_LENGTH = 128;
+
+function auditId(raw: string): string {
+  return raw.slice(0, AUDIT_ID_MAX_LENGTH);
+}
 
 export const SIGNALS_BODY_LIMIT_BYTES = 32 * 1024;
+
+// fatal: reject invalid UTF-8 instead of substituting U+FFFD. ignoreBOM: keep
+// a leading BOM in the decoded text so JSON.parse rejects it.
+const STRICT_UTF8_DECODER = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
 
 export interface SignalsDeps {
   getIncidentStore: () => IncidentStore | null;
@@ -14,6 +32,10 @@ export interface SignalsDeps {
   rateLimit?: { windowMs: number; maxPerWindow: number };
   /** Root fleet-token check for the producer admin routes (wired by index.ts). */
   verifyRootToken?: (req: IncomingMessage) => boolean;
+  /** Mandatory sink for producer security audit events (register, revoke,
+   * failed enrollment). Required so production wiring cannot silently drop
+   * the audit trail. */
+  securityAudit: (event: ProducerSecurityAuditEvent) => void;
 }
 
 interface RateWindow {
@@ -69,14 +91,14 @@ export function createSignalsHandlers(deps: SignalsDeps): {
       return;
     }
     const contentType = req.headers['content-type'];
-    if (typeof contentType !== 'string' || !contentType.split(';')[0]?.trim().toLowerCase().startsWith('application/json')) {
+    if (typeof contentType !== 'string' || contentType.split(';')[0]?.trim().toLowerCase() !== 'application/json') {
       jsonResponse(res, 415, errorBody('unsupported_media_type', false, 'body must be application/json'));
       return;
     }
 
-    let rawBody: string;
+    let rawBytes: Buffer;
     try {
-      rawBody = await readBody(req, SIGNALS_BODY_LIMIT_BYTES);
+      rawBytes = await readBodyBytes(req, SIGNALS_BODY_LIMIT_BYTES);
     } catch (err) {
       if (err instanceof Error && (err as { statusCode?: unknown }).statusCode === 413) {
         jsonResponse(res, 413, errorBody('body_too_large', false, 'body exceeds the 32 KiB limit'));
@@ -107,7 +129,9 @@ export function createSignalsHandlers(deps: SignalsDeps): {
 
     let parsedBody: unknown;
     try {
-      parsedBody = JSON.parse(rawBody);
+      // fatal + ignoreBOM: invalid UTF-8 and BOM-prefixed bodies fail here
+      // instead of being lossily decoded — the store digests the exact bytes.
+      parsedBody = JSON.parse(STRICT_UTF8_DECODER.decode(rawBytes));
     } catch {
       jsonResponse(res, 400, errorBody('malformed_request', false, 'body is not valid JSON'));
       return;
@@ -129,7 +153,7 @@ export function createSignalsHandlers(deps: SignalsDeps): {
     }
 
     try {
-      const result = incidentStore.acceptSignal(rawBody, {
+      const result = incidentStore.acceptSignal(rawBytes, {
         producerId: producer.producerId,
         producerDomainId: producer.producerDomainId,
       }, at);
@@ -215,7 +239,6 @@ export function createSignalsHandlers(deps: SignalsDeps): {
       allowedConditionClasses?: unknown;
       allowedSubjects?: unknown;
       enrollmentTtlMs?: unknown;
-      credentialTtlMs?: unknown;
     };
     const result = producerStore.register(
       input as Parameters<ProducerStore['register']>[0],
@@ -229,8 +252,10 @@ export function createSignalsHandlers(deps: SignalsDeps): {
       }
       return;
     }
+    const producerId = String((body as { producerId: string }).producerId);
+    deps.securityAudit({ type: 'producer_registered', producerId: auditId(producerId) });
     jsonResponse(res, 201, {
-      producerId: String((body as { producerId: string }).producerId),
+      producerId,
       enrollmentSecret: result.enrollmentSecret,
       enrollmentSecretExpiresAt: result.enrollmentSecretExpiresAt,
     });
@@ -251,6 +276,11 @@ export function createSignalsHandlers(deps: SignalsDeps): {
     if (typeof secret === 'string' && secret.length > 0) {
       const exchanged = producerStore.exchangeEnrollmentSecret(params.id, secret, at);
       if (!exchanged.ok) {
+        deps.securityAudit({
+          type: 'enrollment_rejected',
+          producerId: auditId(params.id),
+          reason: exchanged.reason,
+        });
         jsonResponse(res, 401, errorBody('enrollment_rejected', false, 'enrollment was not accepted'));
         return;
       }
@@ -288,6 +318,7 @@ export function createSignalsHandlers(deps: SignalsDeps): {
     if (!producerStore) return;
     if (!requireRoot(req, res)) return;
     producerStore.revoke(params.id);
+    deps.securityAudit({ type: 'producer_revoked', producerId: auditId(params.id) });
     res.writeHead(204);
     res.end();
   }

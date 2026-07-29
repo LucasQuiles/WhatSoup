@@ -6,6 +6,7 @@ import { openIncidentDb } from '../../../src/fleet/incidents/db.ts';
 import { ProducerStore } from '../../../src/fleet/incidents/producers.ts';
 
 let dir: string;
+let db: ReturnType<typeof openIncidentDb>;
 let store: ProducerStore;
 
 const NOW = new Date('2026-07-28T12:00:00.000Z');
@@ -23,11 +24,12 @@ function registration(overrides: Record<string, unknown> = {}) {
 
 beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), 'whatsoup-producers-'));
-  store = new ProducerStore(openIncidentDb(join(dir, 'incidents.db')));
+  db = openIncidentDb(join(dir, 'incidents.db'));
+  store = new ProducerStore(db);
 });
 
 afterEach(() => {
-  store.close();
+  db.close();
   rmSync(dir, { recursive: true, force: true });
 });
 
@@ -129,6 +131,77 @@ describe('ProducerStore', () => {
     expect(store.authenticate('', NOW)).toBeNull();
     const expired = new Date(NOW.getTime() + 366 * 24 * 60 * 60_000);
     expect(store.authenticate(credential, expired)).toBeNull();
+  });
+
+  it('rejects non-positive, fractional, and non-finite enrollment TTLs as invalid_input', () => {
+    const bad = [-5, 0, 1.5, Number.NaN, Number.POSITIVE_INFINITY];
+    for (const ttl of bad) {
+      const result = store.register(
+        registration({ producerId: `prod-ttl-${String(ttl)}`, enrollmentTtlMs: ttl }),
+        NOW,
+      );
+      expect(result).toEqual({ ok: false, reason: 'invalid_input' });
+    }
+  });
+
+  it('rotation overlap never extends beyond the old credential expiry', () => {
+    const shortDb = openIncidentDb(join(dir, 'short-ttl.db'));
+    const shortLived = new ProducerStore(shortDb, {
+      credentialTtlMs: 60 * 60_000,
+    });
+    const reg = shortLived.register(registration(), NOW);
+    if (!reg.ok) throw new Error('setup: registration failed');
+    const ex = shortLived.exchangeEnrollmentSecret('prod-selfcheck-alpha', reg.enrollmentSecret, NOW);
+    if (!ex.ok) throw new Error('setup: exchange failed');
+    const oldCredentialExpiry = Date.parse(ex.credentialExpiresAt);
+
+    const rotatedAt = new Date(NOW.getTime() + 30 * 60_000);
+    const rotated = shortLived.rotateCredential('prod-selfcheck-alpha', ex.credential, rotatedAt);
+    expect(rotated.ok).toBe(true);
+
+    // Before the OLD credential's original expiry: overlap valid.
+    const beforeOldExpiry = new Date(oldCredentialExpiry - 60_000);
+    expect(shortLived.authenticate(ex.credential, beforeOldExpiry)).not.toBeNull();
+    // After the old expiry: the 24h default overlap must NOT extend the
+    // retired credential past its own lifetime.
+    const afterOldExpiry = new Date(oldCredentialExpiry + 60_000);
+    expect(shortLived.authenticate(ex.credential, afterOldExpiry)).toBeNull();
+    shortDb.close();
+  });
+
+  it('exchange failures carry a closed internal reason vocabulary', () => {
+    expect(store.exchangeEnrollmentSecret('prod-unknown', 'whatever', NOW)).toEqual({
+      ok: false,
+      reason: 'no_active_enrollment',
+    });
+
+    const reg = store.register(registration(), NOW);
+    if (!reg.ok) throw new Error('setup: registration failed');
+
+    const lateBy11Min = new Date(NOW.getTime() + 11 * 60_000);
+    expect(store.exchangeEnrollmentSecret('prod-selfcheck-alpha', reg.enrollmentSecret, lateBy11Min)).toEqual({
+      ok: false,
+      reason: 'enrollment_expired',
+    });
+
+    const reg2 = store.register(registration({ producerId: 'prod-reasons' }), NOW);
+    if (!reg2.ok) throw new Error('setup: registration failed');
+    expect(store.exchangeEnrollmentSecret('prod-reasons', 'wrong-secret', NOW)).toEqual({
+      ok: false,
+      reason: 'secret_mismatch',
+    });
+    expect(store.exchangeEnrollmentSecret('prod-reasons', 'wrong-secret', NOW)).toEqual({
+      ok: false,
+      reason: 'secret_mismatch',
+    });
+    expect(store.exchangeEnrollmentSecret('prod-reasons', 'wrong-secret', NOW)).toEqual({
+      ok: false,
+      reason: 'enrollment_burned',
+    });
+    expect(store.exchangeEnrollmentSecret('prod-reasons', reg2.enrollmentSecret, NOW)).toEqual({
+      ok: false,
+      reason: 'no_active_enrollment',
+    });
   });
 
   it('authorize enforces kind, condition-class, and subject scopes', () => {

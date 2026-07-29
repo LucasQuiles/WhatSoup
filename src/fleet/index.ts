@@ -92,6 +92,10 @@ export interface FleetDeps {
   /** Optional request-time token source used by the standalone server after CLI rotation. */
   getFleetTokens?: () => { active: string; accept: readonly string[] };
   getSelfHealth: () => Record<string, unknown>;
+  /** Test seam: opener for the incident ingestion database. Defaults to the
+   * canonical XDG path. The fleet server owns the returned handle: start()
+   * probes it once, stop() closes it exactly once. */
+  openIncidentDatabase?: () => DatabaseSync;
 }
 
 export interface RouteDeps {
@@ -803,30 +807,42 @@ export function createFleetServer(deps: FleetDeps) {
     if (!candidate) return false;
     return verifyFleetTokenImpl(candidate, getTokenSet());
   }
-  // ---- Incident ingestion stores (lazy, fail-closed) --------------------
-  // Lazy so constructing a fleet server (including in tests) never creates
-  // the incident database as a side effect. A failed open is cached: the
-  // ingestion routes answer 503 and state_recovery_required needs an
-  // operator restart by design (spec §1 degraded mode).
-  let incidentStores: { incident: IncidentStore; producer: ProducerStore } | null | undefined;
-  function getIncidentStores(): { incident: IncidentStore; producer: ProducerStore } | null {
-    if (incidentStores !== undefined) return incidentStores;
+  // ---- Incident ingestion stores (start-probed, fail-closed) ------------
+  // start() probes the database once so an open failure is visible before
+  // any traffic; the rest of the fleet stays up and the ingestion routes
+  // answer 503 (spec §1 degraded mode — state_recovery_required needs an
+  // operator restart). The fleet server is the single owner of the shared
+  // handle: stop() closes it exactly once, and 'closed' is terminal so a
+  // stopped server can never reopen it.
+  const openIncidentDatabase = deps.openIncidentDatabase ?? (() => openIncidentDb(defaultIncidentDbPath()));
+  let incidentDb: DatabaseSync | null = null;
+  let incidentStores: { incident: IncidentStore; producer: ProducerStore } | null = null;
+  let incidentState: 'new' | 'open' | 'failed' | 'closed' = 'new';
+  function openIncidentStores(): void {
+    if (incidentState !== 'new') return;
     try {
-      const incidentDb = openIncidentDb(defaultIncidentDbPath());
+      incidentDb = openIncidentDatabase();
       incidentStores = { incident: new IncidentStore(incidentDb), producer: new ProducerStore(incidentDb) };
+      incidentState = 'open';
     } catch (err) {
       log.error(
         { event: 'incident_store_unavailable', reason: errorMessage(err) },
         'incident store failed to open; signal ingestion degraded',
       );
-      incidentStores = null;
+      incidentState = 'failed';
     }
-    return incidentStores;
+  }
+  function closeIncidentStores(): void {
+    if (incidentState === 'open') incidentDb?.close();
+    incidentDb = null;
+    incidentStores = null;
+    incidentState = 'closed';
   }
   const signalsHandlers = createSignalsHandlers({
-    getIncidentStore: () => getIncidentStores()?.incident ?? null,
-    getProducerStore: () => getIncidentStores()?.producer ?? null,
+    getIncidentStore: () => incidentStores?.incident ?? null,
+    getProducerStore: () => incidentStores?.producer ?? null,
     verifyRootToken: (req) => verifyToken(extractBearer(req)),
+    securityAudit: (event) => log.warn({ producerAudit: event }, 'incident producer security event'),
   });
 
   const ticketStore: TicketStore = createWsTicketStore();
@@ -1151,6 +1167,7 @@ export function createFleetServer(deps: FleetDeps) {
     start(port: number): void {
       const host = process.env.FLEET_BIND_ADDRESS ?? '127.0.0.1';
       assertSafeFleetBind(host); // fail fast — before any pollers/timers start
+      openIncidentStores(); // probe once so an open failure is visible before traffic
       discovery.startAutoRefresh();
       healthPoller.start();
       updateChecker.start();
@@ -1160,6 +1177,7 @@ export function createFleetServer(deps: FleetDeps) {
       });
     },
     stop(): void {
+      closeIncidentStores();
       realtimePoller.stop();
       healthPoller.stop();
       discovery.stop();
