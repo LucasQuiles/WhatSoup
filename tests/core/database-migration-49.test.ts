@@ -2,6 +2,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { Database, CURRENT_SCHEMA_MIGRATION } from '../../src/core/database.ts';
 import { runMigration49 } from '../../src/core/database-migration-49.ts';
+import { CONSOLIDATION_FAILURE_CODES } from '../../src/core/memory-consolidation-contract.ts';
 
 describe('migration 49 memory consolidation receipts', () => {
   let db: Database;
@@ -50,7 +51,12 @@ describe('migration 49 memory consolidation receipts', () => {
       'skipped',
       'overlap_skipped',
     ]);
-    expect(names).not.toEqual(expect.arrayContaining([
+    // Per-name check, not a single arrayContaining() assertion: arrayContaining
+    // only fails when EVERY listed name is present, so a leak of just one of
+    // these eight columns (the realistic failure mode — a stray raw field
+    // added to one column, not all eight at once) would slip through
+    // undetected by the prior form.
+    for (const forbidden of [
       'claim',
       'text',
       'source_id',
@@ -59,7 +65,9 @@ describe('migration 49 memory consolidation receipts', () => {
       'error',
       'hash',
       'model_output',
-    ]));
+    ]) {
+      expect(names).not.toContain(forbidden);
+    }
 
     for (const index of [
       'idx_memory_consolidation_runs_status_attempt',
@@ -73,6 +81,36 @@ describe('migration 49 memory consolidation receipts', () => {
       quick_check: 'ok',
     });
     expect(db.raw.prepare('PRAGMA foreign_key_check').all()).toEqual([]);
+  });
+
+  // M3: migration 49's failure_code CHECK constraint hand-lists all 17 codes
+  // as a THIRD independent copy — MEMORY_OPERATION_FAILURE_CODES and the 7
+  // literals unioned into CONSOLIDATION_FAILURE_CODES are the other two. A
+  // code added to the TS constant without updating this raw SQL string would
+  // typecheck fine and then throw at INSERT time in production. Derive the
+  // expected set from the TS constant and prove the LIVE constraint accepts
+  // exactly it — behaviorally (insert each code), not by comparing strings.
+  it('accepts exactly the failure codes in CONSOLIDATION_FAILURE_CODES (M3 — no third unsynchronized copy)', () => {
+    const insertWithCode = (runId: string, failureCode: string): void => {
+      db.raw.prepare(`
+        INSERT INTO memory_consolidation_runs (
+          run_id, source, mode, status, stage, failure_code, retryable,
+          evidence_coverage, attempted_at, last_progress_at, lease_expires_at
+        ) VALUES (?, 'manual', 'live', 'running', 'scheduled', ?, 0, 'not_observed', 1, 1, 2)
+      `).run(runId, failureCode);
+    };
+
+    CONSOLIDATION_FAILURE_CODES.forEach((code, index) => {
+      // run_id CHECK requires exactly 32 lowercase-hex characters; an
+      // all-digit, zero-padded index is valid hex and unique per code.
+      const runId = String(index).padStart(32, '0');
+      expect(() => insertWithCode(runId, code)).not.toThrow();
+    });
+
+    // The constraint must also REJECT anything outside the set — otherwise
+    // a dropped CHECK clause would let every one of the assertions above
+    // pass for the wrong reason (no constraint at all, not a correct one).
+    expect(() => insertWithCode('f'.repeat(32), '__not_a_real_failure_code__')).toThrow();
   });
 
   it('enforces enums, terminal timestamps, and nonnegative integer counters', () => {
