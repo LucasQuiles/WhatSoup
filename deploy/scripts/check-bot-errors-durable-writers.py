@@ -226,7 +226,48 @@ def _result_satisfies_policy(
     return False
 
 
-def _is_json_write_call(call: ast.Call) -> bool:
+def _contains_json_dumps(node: ast.AST) -> bool:
+    return any(
+        isinstance(candidate, ast.Call)
+        and isinstance(candidate.func, ast.Attribute)
+        and isinstance(candidate.func.value, ast.Name)
+        and candidate.func.value.id == "json"
+        and candidate.func.attr == "dumps"
+        for candidate in ast.walk(node)
+    )
+
+
+def _stream_writer_names(function: ast.AST) -> set[str]:
+    names: set[str] = set()
+    for node in _scope_walk(function):
+        if isinstance(node, ast.Assign):
+            targets = node.targets
+            value = node.value
+        elif isinstance(node, ast.AnnAssign):
+            targets = [node.target]
+            value = node.value
+        else:
+            continue
+        if (
+            value is None
+            or not isinstance(value, ast.Call)
+            or not isinstance(value.func, ast.Attribute)
+            or value.func.attr != "makefile"
+        ):
+            continue
+        names.update(
+            target.id
+            for target in targets
+            if isinstance(target, ast.Name)
+        )
+    return names
+
+
+def _is_json_write_call(
+    call: ast.Call,
+    *,
+    stream_writer_names: set[str],
+) -> bool:
     if not isinstance(call.func, ast.Attribute):
         return False
     if (
@@ -237,14 +278,13 @@ def _is_json_write_call(call: ast.Call) -> bool:
         return True
     if call.func.attr in {"write_text", "write_bytes"}:
         return True
-    return call.func.attr == "write" and any(
-        isinstance(node, ast.Call)
-        and isinstance(node.func, ast.Attribute)
-        and isinstance(node.func.value, ast.Name)
-        and node.func.value.id == "json"
-        and node.func.attr == "dumps"
-        for argument in call.args
-        for node in ast.walk(argument)
+    return (
+        call.func.attr == "write"
+        and any(_contains_json_dumps(argument) for argument in call.args)
+        and not (
+            isinstance(call.func.value, ast.Name)
+            and call.func.value.id in stream_writer_names
+        )
     )
 
 
@@ -256,8 +296,15 @@ def _inline_writer_functions(tree: ast.Module) -> list[str]:
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
     ):
         calls = [node for node in ast.walk(function) if isinstance(node, ast.Call)]
-        named_clone = function.name in {"atomic_write_json", "_atomic_write_json", "fsync_parent"}
-        semantic_clone = any(_is_json_write_call(call) for call in calls)
+        named_clone = function.name in {"atomic_write_json", "_atomic_write_json"}
+        stream_writer_names = _stream_writer_names(function)
+        semantic_clone = any(
+            _is_json_write_call(
+                call,
+                stream_writer_names=stream_writer_names,
+            )
+            for call in calls
+        )
         if named_clone or semantic_clone:
             violations.append(function.name)
     return violations

@@ -101,7 +101,6 @@ afterEach(() => {
 });
 
 const atomicWriterScripts = [
-  'deploy/scripts/bot-errors-dispatcher.py',
   'deploy/scripts/bot-errors-heartbeat-watchdog.py',
   'deploy/scripts/bot-errors-health-check.py',
   'deploy/scripts/bot-errors-q-loop.py',
@@ -109,6 +108,7 @@ const atomicWriterScripts = [
 
 const durableCollectorWriterScripts = [
   'deploy/scripts/bot-errors-collector.py',
+  'deploy/scripts/bot-errors-dispatcher.py',
 ];
 
 const durableEventWriterScripts = [
@@ -284,6 +284,90 @@ def hidden_direct_writer(target, payload):
     expect(runDurableWriterGuard(fixture)).toMatchObject({
       status: 1,
       code: 'inline-writer',
+    });
+  });
+
+  it('does not classify a JSON-RPC socket write as a filesystem publisher', () => {
+    const fixture = pythonFixture(`
+import json
+from lib.durable_json import publish_state_json, require_advance
+
+def send_rpc(sock, payload):
+    writer = sock.makefile("w", encoding="utf-8")
+    writer.write(json.dumps(payload) + "\\n")
+
+def publish(target, payload, op_id, expected):
+    result = publish_state_json(
+        target,
+        payload,
+        component="fixture.state",
+        operation_id=op_id,
+        expected=expected,
+        generation=1,
+    )
+    require_advance(result)
+`);
+
+    expect(runDurableWriterGuard(fixture)).toMatchObject({
+      status: 0,
+      code: null,
+    });
+  });
+
+  it('rejects a direct JSON file-handle write without a rename', () => {
+    const fixture = pythonFixture(`
+import json
+from lib.durable_json import publish_state_json, require_advance
+
+def publish(target, payload, op_id, expected):
+    result = publish_state_json(
+        target,
+        payload,
+        component="fixture.state",
+        operation_id=op_id,
+        expected=expected,
+        generation=1,
+    )
+    require_advance(result)
+
+def hidden_direct_writer(target, payload):
+    with target.open("w", encoding="utf-8") as handle:
+        handle.write(json.dumps(payload) + "\\n")
+`);
+
+    expect(runDurableWriterGuard(fixture)).toMatchObject({
+      status: 1,
+      code: 'inline-writer',
+    });
+  });
+
+  it('does not classify a lifecycle parent barrier as a JSON publisher', () => {
+    const fixture = pythonFixture(`
+import os
+from lib.durable_json import publish_state_json, require_advance
+
+def fsync_parent(path):
+    descriptor = os.open(path.parent, os.O_DIRECTORY | os.O_RDONLY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+def publish(target, payload, op_id, expected):
+    result = publish_state_json(
+        target,
+        payload,
+        component="fixture.state",
+        operation_id=op_id,
+        expected=expected,
+        generation=1,
+    )
+    require_advance(result)
+`);
+
+    expect(runDurableWriterGuard(fixture)).toMatchObject({
+      status: 0,
+      code: null,
     });
   });
 

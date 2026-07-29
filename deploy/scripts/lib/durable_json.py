@@ -10,7 +10,7 @@ import json
 import os
 from pathlib import Path, PurePath, PurePosixPath
 import stat
-from typing import Any, Callable, Mapping
+from typing import Any, Callable, Mapping, Sequence
 
 try:
     import fcntl
@@ -1416,3 +1416,8 @@ def require_advance(result: PublicationResult) -> None:
             result.error_class or ErrorClass.UNKNOWN,
             json.dumps(result.public_projection(), sort_keys=True, separators=(",", ":")),
         )
+
+
+def require_all_advance(results: Sequence[PublicationResult]) -> None:
+    for result in results:
+        require_advance(result)

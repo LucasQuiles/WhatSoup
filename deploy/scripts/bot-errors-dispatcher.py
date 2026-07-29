@@ -38,6 +38,17 @@ from lib.controller_log import (
     metadata_only_controller_details,
     write_controller_log,
 )
+from lib.durable_json import (
+    JsonVersion,
+    PublicationResult,
+    durable_json_target,
+    observe_json,
+    operation_id,
+    publish_event_json,
+    publish_state_json,
+    require_advance,
+    require_all_advance,
+)
 
 
 BOT_ERRORS_JID = os.environ.get("BOT_ERRORS_JID", "").strip()
@@ -601,37 +612,12 @@ def setup_dirs() -> dict[str, Path]:
     return paths
 
 
-def atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
-    # Create the parent 0700 before opening the temp file, matching the
-    # collector's writer. Without this the O_CREAT|O_EXCL below raises
-    # FileNotFoundError for any path whose directory setup_dirs() does not
-    # pre-create — which is every controller-log-health receipt, since that
-    # directory appears nowhere in the setup list.
+def _durable_target(path: Path):
     ensure_private_dir(path.parent)
-    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-    data = (json.dumps(payload, indent=2, sort_keys=True) + "\n").encode("utf-8")
-    fd = os.open(
-        tmp,
-        os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0),
-        0o600,
+    return durable_json_target(
+        trusted_root=path.parent.resolve(strict=True),
+        relative_path=path.name,
     )
-    try:
-        with os.fdopen(fd, "wb") as handle:
-            handle.write(data)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(tmp, path)
-        try:
-            path.chmod(0o600)
-        except OSError:
-            pass
-        fsync_parent(path)
-    except BaseException:
-        try:
-            tmp.unlink()
-        except OSError:
-            pass
-        raise
 
 
 def assert_regular_or_missing(path: Path) -> None:
@@ -673,7 +659,27 @@ def env_int(name: str, default: int) -> int:
 
 
 def persist_controller_log_health(paths: dict[str, Path], record: dict[str, Any]) -> None:
-    atomic_write_json(paths["root"] / "controller-log-health" / "dispatcher.json", record)
+    target = _durable_target(
+        paths["root"] / "controller-log-health" / "dispatcher.json"
+    )
+    observation = observe_json(target)
+    generation = (observation.version.generation or 0) + 1
+    publication_operation = operation_id(
+        target,
+        record,
+        component="dispatcher.controller_log_health",
+        predecessor=observation.version,
+    )
+    publication = publish_state_json(
+        target,
+        record,
+        component="dispatcher.controller_log_health",
+        operation_id=publication_operation,
+        expected=observation.version,
+        generation=generation,
+    )
+    if not publication.advance_allowed:
+        require_advance(publication)
 
 
 def controller_log_fallback(line: str) -> None:
@@ -795,6 +801,17 @@ def safe_is_regular_entry(path: Path) -> bool:
         return False
 
 
+def is_durable_internal_entry(path: Path) -> bool:
+    name = path.name
+    return name == ".durable-json.lock" or (
+        name.startswith(".durable-json.") and name.endswith(".tmp")
+    )
+
+
+def safe_is_data_entry(path: Path) -> bool:
+    return not is_durable_internal_entry(path) and safe_is_regular_entry(path)
+
+
 def quarantine_untrusted_entry(path: Path, quarantine_dir: Path, reason: str) -> Path:
     """Quarantine an untrusted queue entry without dereferencing its target.
 
@@ -864,9 +881,30 @@ def load_incident_state(paths: dict[str, Path]) -> dict[str, Any]:
     return state
 
 
-def save_incident_state(paths: dict[str, Path], state: dict[str, Any]) -> None:
+def save_incident_state(
+    paths: dict[str, Path],
+    state: dict[str, Any],
+) -> PublicationResult:
     state["updatedAt"] = now_iso()
-    atomic_write_json(paths["incident_state"], state)
+    target = _durable_target(paths["incident_state"])
+    observation = observe_json(target)
+    generation = (observation.version.generation or 0) + 1
+    publication_operation = operation_id(
+        target,
+        state,
+        component="dispatcher.incident_state",
+        predecessor=observation.version,
+    )
+    publication = publish_state_json(
+        target,
+        state,
+        component="dispatcher.incident_state",
+        operation_id=publication_operation,
+        expected=observation.version,
+        generation=generation,
+    )
+    require_advance(publication)
+    return publication
 
 
 def record_daily_health_freshness(event: dict[str, Any], incident_state: dict[str, Any]) -> str | None:
@@ -2272,7 +2310,21 @@ def move_to_dead_letter(
         paths["dead_letter"],
         f"{original_name}.{int(time.time())}.dead_letter.json",
     )
-    atomic_write_json(dest, record)
+    target = _durable_target(dest)
+    absent = JsonVersion(False, None, None, None)
+    publication_operation = operation_id(
+        target,
+        record,
+        component="dispatcher.dead_letter_record",
+        predecessor=absent,
+    )
+    publication = publish_event_json(
+        target,
+        record,
+        component="dispatcher.dead_letter_record",
+        operation_id=publication_operation,
+    )
+    require_all_advance([publication])
     try:
         claimed.unlink()
     except FileNotFoundError:
@@ -2337,10 +2389,25 @@ def queue_dead_letter_meta_alert(paths: dict[str, Path], now: int) -> int:
 
     event = dead_letter_meta_event(paths, len(dl_files), oldest_summary)
     path = outbox_path_for_event(event, paths)
-    atomic_write_json(path, event)
+    target = _durable_target(path)
+    absent = JsonVersion(False, None, None, None)
+    publication_operation = operation_id(
+        target,
+        event,
+        component="dispatcher.dead_letter_meta_alert",
+        predecessor=absent,
+    )
+    event_publication = publish_event_json(
+        target,
+        event,
+        component="dispatcher.dead_letter_meta_alert",
+        operation_id=publication_operation,
+    )
+    require_advance(event_publication)
     state["deadLetterMetaAlertAtEpoch"] = now
     state["deadLetterMetaAlertEventId"] = event["id"]
-    write_meta_state(paths, state)
+    state_publication = write_meta_state(paths, state)
+    require_all_advance([event_publication, state_publication])
     append_dispatch_log(paths, {
         "type": "dead_letter_meta_queued",
         "eventId": event["id"],
@@ -3719,7 +3786,7 @@ def find_event_path_by_id(event_id: str, paths: dict[str, Path], keys: tuple[str
         if not directory.exists():
             continue
         for path in directory.glob("*"):
-            if not safe_is_regular_entry(path):
+            if not safe_is_data_entry(path):
                 continue
             try:
                 if safe_read_json(path).get("id") == event_id:
@@ -3975,7 +4042,26 @@ def collapse_storm_group(
         "hosts": merged_hosts,
         "entries": merge_manifest_entries(existing_entries, additions),
     }
-    atomic_write_json(manifest_path, manifest)
+    publications: list[PublicationResult] = []
+    manifest_target = _durable_target(manifest_path)
+    manifest_observation = observe_json(manifest_target)
+    manifest_generation = (manifest_observation.version.generation or 0) + 1
+    manifest_operation = operation_id(
+        manifest_target,
+        manifest,
+        component="dispatcher.storm_manifest_initial",
+        predecessor=manifest_observation.version,
+    )
+    initial_manifest_publication = publish_state_json(
+        manifest_target,
+        manifest,
+        component="dispatcher.storm_manifest_initial",
+        operation_id=manifest_operation,
+        expected=manifest_observation.version,
+        generation=manifest_generation,
+    )
+    require_all_advance([initial_manifest_publication])
+    publications.append(initial_manifest_publication)
 
     known_digest_path = find_event_path_by_id(
         digest_id,
@@ -3987,7 +4073,22 @@ def collapse_storm_group(
     )
     digest_path = known_digest_path or storm_digest_outbox_path(paths, digest_id, str(digest.get("source")), bucket_start)
     if known_digest_path is None:
-        atomic_write_json(digest_path, digest)
+        digest_target = _durable_target(digest_path)
+        absent = JsonVersion(False, None, None, None)
+        digest_operation = operation_id(
+            digest_target,
+            digest,
+            component="dispatcher.storm_digest",
+            predecessor=absent,
+        )
+        digest_publication = publish_event_json(
+            digest_target,
+            digest,
+            component="dispatcher.storm_digest",
+            operation_id=digest_operation,
+        )
+        require_all_advance([digest_publication])
+        publications.append(digest_publication)
         append_dispatch_log(paths, {
             "type": "storm_digest_queued",
             "digestId": digest.get("id"),
@@ -4034,14 +4135,34 @@ def collapse_storm_group(
         if str(event.get("source") or "").startswith("daily-health"):
             state_changed = True
         event = mark_collapsed(event, str(digest.get("id")), manifest_path)
-        atomic_write_json(path, event)
+        member_target = _durable_target(path)
+        member_observation = observe_json(member_target)
+        member_generation = (member_observation.version.generation or 0) + 1
+        member_operation = operation_id(
+            member_target,
+            event,
+            component="dispatcher.storm_member_state",
+            predecessor=member_observation.version,
+        )
+        member_publication = publish_state_json(
+            member_target,
+            event,
+            component="dispatcher.storm_member_state",
+            operation_id=member_operation,
+            expected=member_observation.version,
+            generation=member_generation,
+        )
+        require_all_advance([member_publication])
+        publications.append(member_publication)
         target = paths["storm_collapsed"] / (
             f"{path.name}.{safe_segment(str(digest.get('id')))}.{int(time.time())}.collapsed"
         )
         prepared.append((path, target, event))
 
     if state_changed:
-        save_incident_state(paths, incident_state)
+        publications.append(save_incident_state(paths, incident_state))
+
+    require_all_advance(publications)
 
     for path, target, event in prepared:
         os.replace(path, target)
@@ -4062,7 +4183,23 @@ def collapse_storm_group(
         })
 
     manifest["entriesCollapsed"] = merge_manifest_entries(existing_collapsed, collapsed_entries)
-    atomic_write_json(manifest_path, manifest)
+    final_observation = observe_json(manifest_target)
+    final_generation = (final_observation.version.generation or 0) + 1
+    final_operation = operation_id(
+        manifest_target,
+        manifest,
+        component="dispatcher.storm_manifest_final",
+        predecessor=final_observation.version,
+    )
+    final_manifest_publication = publish_state_json(
+        manifest_target,
+        manifest,
+        component="dispatcher.storm_manifest_final",
+        operation_id=final_operation,
+        expected=final_observation.version,
+        generation=final_generation,
+    )
+    require_all_advance([*publications, final_manifest_publication])
     return collapsed
 
 
@@ -4139,7 +4276,24 @@ def move_suppressed_event(
     # process_one. normalize_event is idempotent on already-v2 events, and
     # every caller passes an event that has classified successfully.
     event = mark_suppressed(normalize_event(event), reason)
-    atomic_write_json(path, event)
+    target = _durable_target(path)
+    observation = observe_json(target)
+    generation = (observation.version.generation or 0) + 1
+    publication_operation = operation_id(
+        target,
+        event,
+        component="dispatcher.suppressed_event_state",
+        predecessor=observation.version,
+    )
+    publication = publish_state_json(
+        target,
+        event,
+        component="dispatcher.suppressed_event_state",
+        operation_id=publication_operation,
+        expected=observation.version,
+        generation=generation,
+    )
+    require_all_advance([publication])
     suppressed_path = archive_path(paths["suppressed"], source_name or path.name, "suppressed", event)
     os.replace(path, suppressed_path)
     fsync_parent(suppressed_path)
@@ -4343,7 +4497,11 @@ def suppress_ready_recovery_duplicates(paths: dict[str, Path]) -> int:
 
 def prune_suppressed(paths: dict[str, Path]) -> int:
     cap = suppressed_max_files()
-    files = [path for path in paths["suppressed"].glob("*") if safe_is_regular_entry(path)]
+    files = [
+        path
+        for path in paths["suppressed"].glob("*")
+        if safe_is_data_entry(path)
+    ]
     if len(files) <= cap:
         return 0
 
@@ -4389,8 +4547,29 @@ def read_meta_state(paths: dict[str, Path]) -> dict[str, Any]:
         return {}
 
 
-def write_meta_state(paths: dict[str, Path], state: dict[str, Any]) -> None:
-    atomic_write_json(paths["meta_state"], state)
+def write_meta_state(
+    paths: dict[str, Path],
+    state: dict[str, Any],
+) -> PublicationResult:
+    target = _durable_target(paths["meta_state"])
+    observation = observe_json(target)
+    generation = (observation.version.generation or 0) + 1
+    publication_operation = operation_id(
+        target,
+        state,
+        component="dispatcher.meta_state",
+        predecessor=observation.version,
+    )
+    publication = publish_state_json(
+        target,
+        state,
+        component="dispatcher.meta_state",
+        operation_id=publication_operation,
+        expected=observation.version,
+        generation=generation,
+    )
+    require_advance(publication)
+    return publication
 
 
 def test_provenance_meta_event(paths: dict[str, Path], refused: int, window: int) -> dict[str, Any]:
@@ -4433,10 +4612,25 @@ def queue_test_provenance_meta_alert(paths: dict[str, Path], refused: int) -> in
 
     event = test_provenance_meta_event(paths, refused, window)
     path = outbox_path_for_event(event, paths)
-    atomic_write_json(path, event)
+    target = _durable_target(path)
+    absent = JsonVersion(False, None, None, None)
+    publication_operation = operation_id(
+        target,
+        event,
+        component="dispatcher.test_provenance_meta_alert",
+        predecessor=absent,
+    )
+    event_publication = publish_event_json(
+        target,
+        event,
+        component="dispatcher.test_provenance_meta_alert",
+        operation_id=publication_operation,
+    )
+    require_advance(event_publication)
     state["testProvenanceMetaAlertAtEpoch"] = now
     state["testProvenanceMetaAlertEventId"] = event["id"]
-    write_meta_state(paths, state)
+    state_publication = write_meta_state(paths, state)
+    require_all_advance([event_publication, state_publication])
     append_dispatch_log(paths, {
         "type": "test_provenance_meta_queued",
         "eventId": event["id"],
@@ -4622,7 +4816,7 @@ def build_known_event_index(paths: dict[str, Path]) -> dict[str, dict[str, Any]]
         if not directory.exists():
             continue
         for path in directory.glob("*"):
-            if not safe_is_regular_entry(path):
+            if not safe_is_data_entry(path):
                 continue
             try:
                 existing = safe_read_json(path)
@@ -4750,7 +4944,21 @@ def recover_writefail_breadcrumbs(paths: dict[str, Path], limit: int = 25) -> in
                 reset_delivery(event)
                 outbox_path = outbox_path_for_event(event, paths)
                 try:
-                    atomic_write_json(outbox_path, event)
+                    target = _durable_target(outbox_path)
+                    absent = JsonVersion(False, None, None, None)
+                    publication_operation = operation_id(
+                        target,
+                        event,
+                        component="dispatcher.writefail_recovery_event",
+                        predecessor=absent,
+                    )
+                    publication = publish_event_json(
+                        target,
+                        event,
+                        component="dispatcher.writefail_recovery_event",
+                        operation_id=publication_operation,
+                    )
+                    require_all_advance([publication])
                 except Exception as exc:  # noqa: BLE001 - keep breadcrumb for a later retry.
                     append_dispatch_log(paths, {
                         "type": "writefail_requeue_failed",
@@ -4814,7 +5022,7 @@ def original_name_from_processing(path: Path) -> str:
 def reclaim_processing(paths: dict[str, Path]) -> int:
     reclaimed = 0
     for path in sorted(paths["processing"].glob("*")):
-        if not safe_is_regular_entry(path):
+        if not safe_is_data_entry(path):
             continue
         target = safe_child_path(paths["outbox"], original_name_from_processing(path))
         os.replace(path, target)
@@ -4826,16 +5034,16 @@ def reclaim_processing(paths: dict[str, Path]) -> int:
 
 def record_state(paths: dict[str, Path], **updates: Any) -> None:
     counts = {
-        "outbox": sum(1 for p in paths["outbox"].glob("*.json") if safe_is_regular_entry(p)),
-        "processing": sum(1 for p in paths["processing"].glob("*") if safe_is_regular_entry(p)),
-        "sent": sum(1 for p in paths["sent"].glob("*") if safe_is_regular_entry(p)),
-        "stormCollapsed": sum(1 for p in paths["storm_collapsed"].glob("*") if safe_is_regular_entry(p)),
-        "stormManifests": sum(1 for p in paths["storm_manifests"].glob("*") if safe_is_regular_entry(p)),
-        "suppressed": sum(1 for p in paths["suppressed"].glob("*") if safe_is_regular_entry(p)),
-        "quarantine": sum(1 for p in paths["quarantine"].glob("*") if safe_is_regular_entry(p)),
+        "outbox": sum(1 for p in paths["outbox"].glob("*.json") if safe_is_data_entry(p)),
+        "processing": sum(1 for p in paths["processing"].glob("*") if safe_is_data_entry(p)),
+        "sent": sum(1 for p in paths["sent"].glob("*") if safe_is_data_entry(p)),
+        "stormCollapsed": sum(1 for p in paths["storm_collapsed"].glob("*") if safe_is_data_entry(p)),
+        "stormManifests": sum(1 for p in paths["storm_manifests"].glob("*") if safe_is_data_entry(p)),
+        "suppressed": sum(1 for p in paths["suppressed"].glob("*") if safe_is_data_entry(p)),
+        "quarantine": sum(1 for p in paths["quarantine"].glob("*") if safe_is_data_entry(p)),
         "writefail": sum(sum(1 for p in path.glob("*.writefail") if safe_is_regular_entry(p)) for path in writefail_dirs() if path.exists()),
-        "writefailRecovered": sum(1 for p in paths["writefail_recovered"].glob("*") if safe_is_regular_entry(p)),
-        "writefailQuarantine": sum(1 for p in paths["writefail_quarantine"].glob("*") if safe_is_regular_entry(p)),
+        "writefailRecovered": sum(1 for p in paths["writefail_recovered"].glob("*") if safe_is_data_entry(p)),
+        "writefailQuarantine": sum(1 for p in paths["writefail_quarantine"].glob("*") if safe_is_data_entry(p)),
     }
     state = {
         "updatedAt": now_iso(),
@@ -4844,7 +5052,24 @@ def record_state(paths: dict[str, Path], **updates: Any) -> None:
         "counts": counts,
         **updates,
     }
-    atomic_write_json(paths["state"], state)
+    target = _durable_target(paths["state"])
+    observation = observe_json(target)
+    generation = (observation.version.generation or 0) + 1
+    publication_operation = operation_id(
+        target,
+        state,
+        component="dispatcher.state",
+        predecessor=observation.version,
+    )
+    publication = publish_state_json(
+        target,
+        state,
+        component="dispatcher.state",
+        operation_id=publication_operation,
+        expected=observation.version,
+        generation=generation,
+    )
+    require_advance(publication)
 
 
 def process_one(path: Path, paths: dict[str, Path]) -> tuple[bool, str]:
@@ -4892,7 +5117,24 @@ def process_one(path: Path, paths: dict[str, Path]) -> tuple[bool, str]:
     if isinstance(diagnostics, dict) and not omit_dispatch_log_in_message(event):
         diagnostics["dispatchLog"] = str(paths["logs"] / "dispatch.jsonl")
     event = mark_attempt(event)
-    atomic_write_json(claimed, event)
+    attempt_target = _durable_target(claimed)
+    attempt_observation = observe_json(attempt_target)
+    attempt_generation = (attempt_observation.version.generation or 0) + 1
+    attempt_operation = operation_id(
+        attempt_target,
+        event,
+        component="dispatcher.process_attempt_state",
+        predecessor=attempt_observation.version,
+    )
+    attempt_publication = publish_state_json(
+        attempt_target,
+        event,
+        component="dispatcher.process_attempt_state",
+        operation_id=attempt_operation,
+        expected=attempt_observation.version,
+        generation=attempt_generation,
+    )
+    require_all_advance([attempt_publication])
     incident_state = load_incident_state(paths)
 
     # Stamp daily-health liveness into the durable freshness ledger before any
@@ -4908,8 +5150,30 @@ def process_one(path: Path, paths: dict[str, Path]) -> tuple[bool, str]:
     suppress_reason = should_suppress_send(event, incident_state)
     if suppress_reason:
         event = mark_suppressed(event, suppress_reason)
-        atomic_write_json(claimed, event)
-        save_incident_state(paths, incident_state)
+        suppressed_target = _durable_target(claimed)
+        suppressed_observation = observe_json(suppressed_target)
+        suppressed_generation = (
+            suppressed_observation.version.generation or 0
+        ) + 1
+        suppressed_operation = operation_id(
+            suppressed_target,
+            event,
+            component="dispatcher.process_suppressed_state",
+            predecessor=suppressed_observation.version,
+        )
+        suppressed_publication = publish_state_json(
+            suppressed_target,
+            event,
+            component="dispatcher.process_suppressed_state",
+            operation_id=suppressed_operation,
+            expected=suppressed_observation.version,
+            generation=suppressed_generation,
+        )
+        require_advance(suppressed_publication)
+        incident_publication = save_incident_state(paths, incident_state)
+        require_all_advance(
+            [suppressed_publication, incident_publication]
+        )
         suppressed_path = archive_path(paths["suppressed"], path.name, "suppressed", event)
         os.replace(claimed, suppressed_path)
         append_dispatch_log(paths, {
@@ -4949,7 +5213,26 @@ def process_one(path: Path, paths: dict[str, Path]) -> tuple[bool, str]:
                 delivery["attempts"] = max(attempts - 1, 0)
                 delivery["status"] = "queued"
                 delivery["nextAttemptAtEpoch"] = int(time.time()) + BOT_ERRORS_TRANSIENT_BACKOFF_SECONDS
-                atomic_write_json(claimed, event)
+                transient_target = _durable_target(claimed)
+                transient_observation = observe_json(transient_target)
+                transient_generation = (
+                    transient_observation.version.generation or 0
+                ) + 1
+                transient_operation = operation_id(
+                    transient_target,
+                    event,
+                    component="dispatcher.process_transient_state",
+                    predecessor=transient_observation.version,
+                )
+                transient_publication = publish_state_json(
+                    transient_target,
+                    event,
+                    component="dispatcher.process_transient_state",
+                    operation_id=transient_operation,
+                    expected=transient_observation.version,
+                    generation=transient_generation,
+                )
+                require_all_advance([transient_publication])
                 retry_path = safe_child_path(paths["outbox"], path.name)
                 os.replace(claimed, retry_path)
                 fsync_parent(retry_path)
@@ -5005,7 +5288,24 @@ def process_one(path: Path, paths: dict[str, Path]) -> tuple[bool, str]:
             })
             return False, f"dead_letter; attempts={attempts}; {exc}"
 
-        atomic_write_json(claimed, event)
+        failure_target = _durable_target(claimed)
+        failure_observation = observe_json(failure_target)
+        failure_generation = (failure_observation.version.generation or 0) + 1
+        failure_operation = operation_id(
+            failure_target,
+            event,
+            component="dispatcher.process_failure_state",
+            predecessor=failure_observation.version,
+        )
+        failure_publication = publish_state_json(
+            failure_target,
+            event,
+            component="dispatcher.process_failure_state",
+            operation_id=failure_operation,
+            expected=failure_observation.version,
+            generation=failure_generation,
+        )
+        require_all_advance([failure_publication])
         retry_path = safe_child_path(paths["outbox"], path.name)
         os.replace(claimed, retry_path)
         fsync_parent(retry_path)
@@ -5020,9 +5320,26 @@ def process_one(path: Path, paths: dict[str, Path]) -> tuple[bool, str]:
         return False, f"{exc}; email_fallback={email_status}"
 
     mark_incident_sent(event, incident_state)
-    save_incident_state(paths, incident_state)
+    incident_publication = save_incident_state(paths, incident_state)
     event = mark_sent(event)
-    atomic_write_json(claimed, event)
+    sent_target = _durable_target(claimed)
+    sent_observation = observe_json(sent_target)
+    sent_generation = (sent_observation.version.generation or 0) + 1
+    sent_operation = operation_id(
+        sent_target,
+        event,
+        component="dispatcher.process_sent_state",
+        predecessor=sent_observation.version,
+    )
+    sent_publication = publish_state_json(
+        sent_target,
+        event,
+        component="dispatcher.process_sent_state",
+        operation_id=sent_operation,
+        expected=sent_observation.version,
+        generation=sent_generation,
+    )
+    require_all_advance([incident_publication, sent_publication])
     sent_path = archive_path(paths["sent"], path.name, "sent", event)
     os.replace(claimed, sent_path)
     append_dispatch_log(paths, {

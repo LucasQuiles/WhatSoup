@@ -44,6 +44,7 @@ def test_durable_json_contract_is_importable() -> None:
         "reconcile_json_publication",
         "sync_changed_parents",
         "require_advance",
+        "require_all_advance",
     }
     assert required <= set(dir(module))
 
@@ -85,6 +86,20 @@ def test_require_advance_rejects_unproven_without_private_identifiers() -> None:
     assert "private-operation-id" not in message
     assert "private-content-digest" not in message
     assert "unproven" in message
+
+
+def test_require_all_advance_rejects_any_unproven_result() -> None:
+    module = importlib.import_module("deploy.scripts.lib.durable_json")
+    committed = publication_result(module)
+    unproven = publication_result(
+        module,
+        durability=module.DurabilityProof.UNPROVEN,
+        authority=module.AuthorityState.UNKNOWN,
+        error_class=module.ErrorClass.IO,
+    )
+
+    with pytest.raises(module.DurableWriteError):
+        module.require_all_advance([committed, unproven])
 
 
 def test_advance_requires_every_closed_proof_axis() -> None:
