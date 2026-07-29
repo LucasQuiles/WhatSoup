@@ -79,6 +79,7 @@ type HealthServerDepsForTest = {
   handleAccessDecision: (subjectType: string, subjectId: string, action: string) => Promise<void>;
   getEnrichmentStats: () => unknown;
   getDatabaseRetentionHealth: () => unknown;
+  getStartupNotificationHealth?: () => Record<string, unknown>;
 };
 
 type CapturedTimer = {
@@ -1368,6 +1369,42 @@ describe('main.ts — uncovered helpers and signal paths', () => {
       );
       // It must NOT fall back to the default "back online" notice (a status op).
       expect(h.sendTracked).not.toHaveBeenCalledWith(...backOnlineCall(h));
+    });
+
+    it('disables only generic notification policy while preserving a typed resume event', async () => {
+      const h = await importMainWithMocks({
+        instanceConfig: sharedAgentInstanceConfig(),
+        startupNotifications: false,
+        pendingStartupEvent: { kind: 'resume', chatJid: '15559004@s.whatsapp.net', text: 'resuming safely' },
+      });
+
+      expect(h.getHealthDeps().getStartupNotificationHealth?.()).toMatchObject({
+        state: 'waiting_stability',
+        policy: 'resume',
+      });
+
+      await vi.advanceTimersByTimeAsync(3_000);
+      expect(h.sendTracked).toHaveBeenCalledWith(
+        h.connection,
+        '15559004@s.whatsapp.net',
+        'resuming safely',
+        h.durability,
+        { replayPolicy: 'safe' },
+      );
+      expect(h.sendTracked).not.toHaveBeenCalledWith(...backOnlineCall(h));
+    });
+
+    it('projects generic notification policy disabled in minimal tool mode', async () => {
+      const h = await importMainWithMocks({
+        instanceConfig: sharedAgentInstanceConfig(),
+        toolUpdateMode: 'minimal',
+        pendingStartupEvent: null,
+      });
+
+      expect(h.getHealthDeps().getStartupNotificationHealth?.()).toMatchObject({
+        state: 'disabled',
+        policy: 'disabled',
+      });
     });
 
     it('sends the default back-online notice when no pending message exists', async () => {

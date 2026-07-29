@@ -71,6 +71,7 @@ function createHarness(options: {
   ready?: boolean;
   journal?: StartupNotificationJournalPort;
   send?: ReturnType<typeof vi.fn>;
+  genericNotificationsEnabled?: boolean;
 } = {}) {
   const scheduler = new FakeScheduler();
   let ready = options.ready ?? true;
@@ -82,6 +83,7 @@ function createHarness(options: {
     connection: { isFullyConnected: () => ready },
     journal,
     send: { send },
+    genericNotificationsEnabled: options.genericNotificationsEnabled,
   });
   controller.recordStartupBoot();
   return {
@@ -114,6 +116,113 @@ describe('StartupNotificationController', () => {
       '*Agent back online* ✓',
       { replayPolicy: 'unsafe', opType: 'status_ping' },
     );
+  });
+
+  it('projects a bounded generic stability wait without notification content or recipient data', () => {
+    const h = createHarness();
+
+    h.controller.onConnected({
+      generic: { recipient: 'admin', stabilityWindowMs: 5_000 },
+      event: null,
+      intentionalRestartReceipt: null,
+    });
+
+    expect(h.controller.getStartupNotificationHealth()).toEqual({
+      state: 'waiting_stability',
+      policy: 'generic',
+      stabilitySeconds: 5,
+      bootCountSinceNotification: 1,
+      lastBootAt: 0,
+      lastNotifiedAt: null,
+      nextEligibleAt: 5_000,
+      lastSendAt: null,
+    });
+  });
+
+  it('projects a transport wait when the stability timer expires before strict readiness', async () => {
+    const h = createHarness({ ready: false });
+
+    h.controller.onConnected({
+      generic: { recipient: 'admin', stabilityWindowMs: 5_000 },
+      event: null,
+      intentionalRestartReceipt: null,
+    });
+    await h.scheduler.advanceBy(5_000);
+
+    expect(h.controller.getStartupNotificationHealth()).toMatchObject({
+      state: 'waiting_transport',
+      policy: 'generic',
+      stabilitySeconds: 5,
+      nextEligibleAt: 10_000,
+      lastSendAt: null,
+    });
+  });
+
+  it('reports generic policy disabled without suppressing a named restart receipt', async () => {
+    const disabled = createHarness({ genericNotificationsEnabled: false });
+    expect(disabled.controller.getStartupNotificationHealth()).toMatchObject({
+      state: 'disabled',
+      policy: 'disabled',
+    });
+    disabled.controller.onConnected({ generic: null, event: null, intentionalRestartReceipt: null });
+    expect(disabled.controller.getStartupNotificationHealth()).toMatchObject({
+      state: 'disabled',
+      policy: 'disabled',
+    });
+
+    const receipt = createHarness({ genericNotificationsEnabled: false });
+    receipt.controller.onConnected({
+      generic: null,
+      event: null,
+      intentionalRestartReceipt: { chatJid: 'restart-requester', text: 'back online' },
+    });
+    expect(receipt.controller.getStartupNotificationHealth()).toMatchObject({
+      state: 'waiting_stability',
+      policy: 'intentional_restart',
+    });
+
+    await receipt.scheduler.advanceBy(3_000);
+    expect(receipt.controller.getStartupNotificationHealth()).toMatchObject({
+      state: 'sent',
+      policy: 'intentional_restart',
+    });
+  });
+
+  it('does not arm a generic aggregate beside a typed event when generic policy is disabled', async () => {
+    const h = createHarness({ genericNotificationsEnabled: false });
+
+    h.controller.onConnected({
+      generic: { recipient: 'admin', stabilityWindowMs: 30_000 },
+      event: { kind: 'restart_loop_guard_alert', chatJid: 'admin', text: 'guard tripped' },
+      intentionalRestartReceipt: null,
+    });
+
+    expect(h.scheduler.pendingCount).toBe(1);
+    expect(h.controller.getStartupNotificationHealth()).toMatchObject({
+      state: 'waiting_stability',
+      policy: 'restart_loop_guard_alert',
+    });
+    await h.scheduler.advanceBy(3_000);
+    expect(h.send).toHaveBeenCalledOnce();
+  });
+
+  it('returns to the pending generic projection after a prompt guard alert submits', async () => {
+    const h = createHarness();
+
+    h.controller.onConnected({
+      generic: { recipient: 'admin', stabilityWindowMs: 30_000 },
+      event: { kind: 'restart_loop_guard_alert', chatJid: 'admin', text: 'guard tripped' },
+      intentionalRestartReceipt: null,
+    });
+    await h.scheduler.advanceBy(3_000);
+
+    expect(h.controller.getStartupNotificationHealth()).toMatchObject({
+      state: 'waiting_stability',
+      policy: 'generic',
+      stabilitySeconds: 30,
+      nextEligibleAt: 30_000,
+      lastSendAt: 3_000,
+    });
   });
 
   it('submits one aggregate returned for every unnotified v1 boot', async () => {

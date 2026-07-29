@@ -226,6 +226,31 @@ function makeAuthBond(overrides: Record<string, unknown> = {}): Record<string, u
   };
 }
 
+const STARTUP_NOTIFICATION_KEYS = [
+  'state',
+  'policy',
+  'stabilitySeconds',
+  'bootCountSinceNotification',
+  'lastBootAt',
+  'lastNotifiedAt',
+  'nextEligibleAt',
+  'lastSendAt',
+] as const;
+
+function startupNotificationHealth(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    state: 'waiting_stability',
+    policy: 'generic',
+    stabilitySeconds: 600,
+    bootCountSinceNotification: 2,
+    lastBootAt: 1_753_825_600_000,
+    lastNotifiedAt: 1_753_825_000_000,
+    nextEligibleAt: 1_753_826_200_000,
+    lastSendAt: null,
+    ...overrides,
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -259,6 +284,71 @@ describe('GET /health', () => {
     if (prevGitBranch === undefined) delete process.env.WHATSOUP_GIT_BRANCH;
     else process.env.WHATSOUP_GIT_BRANCH = prevGitBranch;
   });
+
+  it('always emits the exact privacy-safe startup notification health shape when not applicable', async () => {
+    const { status, body } = await healthReq(port);
+
+    expect(status).toBe(200);
+    expect(JSON.parse(body).startupNotification).toEqual({
+      state: 'not_applicable',
+      policy: 'none',
+      stabilitySeconds: null,
+      bootCountSinceNotification: null,
+      lastBootAt: null,
+      lastNotifiedAt: null,
+      nextEligibleAt: null,
+      lastSendAt: null,
+    });
+  });
+
+  it.each([
+    ['not_applicable', 'none'],
+    ['disabled', 'disabled'],
+    ['waiting_stability', 'generic'],
+    ['waiting_transport', 'resume'],
+    ['dispatching', 'restart_loop_guard_alert'],
+    ['sent', 'expired_session_notice'],
+    ['send_failed', 'intentional_restart'],
+    ['journal_unreadable', 'generic'],
+  ] as const)('retains the exact startup notification state and policy %s/%s without exposing private data', async (state, policy) => {
+    db.close();
+    const db2 = makeDb();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    ({ server, port } = await buildTestServer(makeDeps(db2, {
+      getStartupNotificationHealth: () => startupNotificationHealth({ state, policy }),
+    } as Partial<HealthDeps>)));
+
+    const { status, body } = await healthReq(port);
+    const startupNotification = JSON.parse(body).startupNotification as Record<string, unknown>;
+
+    expect(status).toBe(200);
+    expect(Object.keys(startupNotification).sort()).toEqual([...STARTUP_NOTIFICATION_KEYS].sort());
+    expect(startupNotification).toMatchObject({ state, policy });
+    expect(JSON.stringify(startupNotification)).not.toMatch(
+      /jid|identity|message|text|path|error|bot\.db/i,
+    );
+    db2.close();
+  });
+
+  it.each(['waiting_stability', 'waiting_transport', 'send_failed'] as const)(
+    'does not degrade normal service health solely for startup notification %s',
+    async (state) => {
+      db.close();
+      const db2 = makeDb();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+      ({ server, port } = await buildTestServer(makeDeps(db2, {
+        getStartupNotificationHealth: () => startupNotificationHealth({ state }),
+      } as Partial<HealthDeps>)));
+
+      const { status, body } = await healthReq(port);
+      expect(status).toBe(200);
+      expect(JSON.parse(body)).toMatchObject({
+        status: 'healthy',
+        startupNotification: { state },
+      });
+      db2.close();
+    },
+  );
 
   it('returns 200 with healthy status when connected', async () => {
     const requestedAt = Date.now();
@@ -2662,11 +2752,22 @@ describe('GET /health — #2515 public/private liveness split', () => {
     expect(status).toBe(200);
     const json = JSON.parse(body);
 
-    // The public envelope carries exactly three fields.
+    // The public envelope carries only liveness plus the privacy-safe startup
+    // notification projection.
     expect(json).toEqual({
       schema_version: 'health.public.v1',
       status: 'healthy',
       generated_at: expect.any(String),
+      startupNotification: {
+        state: 'not_applicable',
+        policy: 'none',
+        stabilitySeconds: null,
+        bootCountSinceNotification: null,
+        lastBootAt: null,
+        lastNotifiedAt: null,
+        nextEligibleAt: null,
+        lastSendAt: null,
+      },
     });
 
     // Fail-open canaries: if ANY privileged field leaks into the public bytes,

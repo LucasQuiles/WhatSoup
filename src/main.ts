@@ -181,6 +181,7 @@ const startupNotificationController = startupJournalPath === null
       send: {
         send: (chatJid, text, options) => sendTracked(connectionManager, chatJid, text, durability, options),
       },
+      genericNotificationsEnabled: config.startupNotifications && config.toolUpdateMode !== 'minimal',
     });
 startupNotificationController?.recordStartupBoot();
 
@@ -823,6 +824,9 @@ const healthServer = startHealthServer({
       stalledAfterMs: 5 * 60_000,
     }),
   getDatabaseRetentionHealth: () => databaseRetentionTimer.getHealthSnapshot(),
+  getStartupNotificationHealth: startupNotificationController
+    ? () => startupNotificationController.getStartupNotificationHealth()
+    : undefined,
   // D-4 console approval queue: only the agent runtime owns the
   // pending-poll machinery; chat/passive instances omit the callback and
   // the health endpoint answers 503 honestly.

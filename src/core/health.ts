@@ -46,6 +46,7 @@ import { readWhatsoupGitBranch, readWhatsoupGitSha } from '../lib/git-env.ts';
 import { LoopLagSampler, LOOP_LAG_STARVATION_THRESHOLD_MS } from '../lib/loop-lag-sampler.ts';
 import type { ConsolidationHealth } from './memory-consolidation-contract.ts';
 import type { DatabaseRetentionHealth } from './database-retention.ts';
+import type { StartupNotificationHealth } from './startup-notification-controller.ts';
 import {
   readOutboundSendHealth,
   readToolDurabilityHealth,
@@ -110,7 +111,20 @@ export interface HealthDeps {
   loopLagWarningNow?: () => number;
   getMemoryConsolidationHealth?: () => ConsolidationHealth;
   getDatabaseRetentionHealth?: () => DatabaseRetentionHealth;
+  /** Controller-owned, content-free startup notification projection. */
+  getStartupNotificationHealth?: () => StartupNotificationHealth;
 }
+
+const NOT_APPLICABLE_STARTUP_NOTIFICATION_HEALTH: StartupNotificationHealth = Object.freeze({
+  state: 'not_applicable',
+  policy: 'none',
+  stabilitySeconds: null,
+  bootCountSinceNotification: null,
+  lastBootAt: null,
+  lastNotifiedAt: null,
+  nextEligibleAt: null,
+  lastSendAt: null,
+});
 
 /**
  * Bounds health-probe error-log storms (#1778 Defect B). A permanent probe
@@ -1230,6 +1244,8 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
     }
 
     try {
+      const startupNotification = deps.getStartupNotificationHealth?.()
+        ?? NOT_APPLICABLE_STARTUP_NOTIFICATION_HEALTH;
       // #2515 — Public/private health split.
       //
       // GET /health is intentionally reachable without a bearer token (external
@@ -1257,6 +1273,7 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
           schema_version: HEALTH_PUBLIC_SCHEMA_VERSION,
           status: publicStatus,
           generated_at: new Date().toISOString(),
+          startupNotification,
         });
         // 'degraded' returns 200: a recovering transport is a warning, not a
         // hard outage. Only a fully disconnected/non-recovering state warrants
@@ -1724,6 +1741,7 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
 
       const body = JSON.stringify({
         status,
+        startupNotification,
         degradation_causes: degradationCauses,
         status_reasons: [...new Set(statusReasons)],
         generated_at: new Date().toISOString(),
