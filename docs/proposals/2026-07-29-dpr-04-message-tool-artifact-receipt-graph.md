@@ -172,3 +172,80 @@ Ship behind `advanced.receiptGraph.enabled`, default `false`, with separately co
 Roll out in schema-only, shadow-write, shadow-read, and opt-in completion-gate stages. Promotion requires writer coverage and reconciliation-debt thresholds agreed by owners, privacy review, retention proof, and restart fault-injection results.
 
 Rollback order is completion consumers, read APIs, adapters, then writers. Existing ledgers remain authoritative throughout; rollback must never delete their records or reinterpret a missing graph edge as a failed action.
+
+## Current-main reconciliation — 2026-07-29
+
+This amendment supersedes current-system instructions pinned to `c9759467d`.
+Current main is `5398982e610bb948d671181a04856590c9f3f9e5`.
+
+**Readiness:** `BLOCKED PRE-CODE`; obligation and persistence decisions are
+unresolved.
+
+### Retained current owners
+
+- inbound/message/conversation sequence identities;
+- `src/mcp/registry.ts::class ToolRegistry` and metadata-only `tool_calls`;
+- background-work/work-result/delivery identities;
+- `outbound_sends`, ordered outbound durability, quarantine, and delivery
+  evidence;
+- `src/core/durability-evidence-contract.ts` and the fault-taxonomy registry.
+
+Merged PR #2615 is shipped foundation, not an in-flight dependency.
+
+### Exact gap
+
+No current-main hit was found for `receipt_graph`, `artifact_refs`, or
+`obligation_id`. The missing decision is whether one user-visible obligation
+identity and directly observed cross-domain lineage require a new store.
+
+### Superseded and narrowed instructions
+
+The proposal’s definite four-record model and `src/core/receipt-graph.ts` are
+design candidates, not implementation instructions.
+
+First:
+
+1. inventory all current foreign keys and deterministic projections;
+2. prove which required query cannot be expressed;
+3. define one obligation identity and legal split/merge/supersession semantics;
+4. require domain adapters to assert only edges they directly observe;
+5. keep a generic writer narrow and non-inferential.
+
+Do not persist payloads or infer links from timestamps, text similarity, or
+proximity.
+
+### QPI run-lifecycle fold-in
+
+Peer C1–C4 run-ledger patterns do not authorize another universal run table.
+Current main already has detailed turn terminal, session/checkpoint, recovery,
+background-work, delivery, trigger-run, and memory-run owners. DPR-04 must
+decide how their opaque identities relate and which read projection is needed;
+it must not flatten them into a weaker seven-state write model. Any later
+generation timeline reads those owners through an approved projection.
+
+### Owner decisions
+
+- obligation creation point and authority;
+- split, merge, supersession, partial completion, and terminal aggregation;
+- projection versus normalized edge store;
+- endpoint/edge vocabulary and direct-observer rules;
+- reconciliation/backfill/legacy-unlinked policy;
+- authorization across mixed-domain chains;
+- retention and deletion behavior.
+
+### First implementation-plan gate
+
+First RED binding:
+
+- File: `tests/core/receipt-graph-projection.test.ts`
+- Test: `keeps an obligation edge unknown when no domain owner directly observed it`
+- Command: `npm test -- tests/core/receipt-graph-projection.test.ts -t "keeps an obligation edge unknown when no domain owner directly observed it" --pool=forks`
+- Expected RED reason: no approved obligation identity or cross-domain
+  projection contract exists.
+
+Name RED tests in registry durability, background-work, durability-edge, and
+failure-taxonomy cross-contract suites. Cover missing, duplicate, reordered,
+conflicting, inferred, legacy, deleted, unauthorized, crash-boundary, and
+reconciliation cases.
+
+The PR must remain draft and use non-closing references.
