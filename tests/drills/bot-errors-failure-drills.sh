@@ -19,6 +19,7 @@
 # Exit:   0 = all drills passed, 1 = at least one drill failed.
 
 set -uo pipefail
+umask 077
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 EMIT="$REPO_ROOT/deploy/scripts/bot-errors-emit.py"
@@ -241,7 +242,19 @@ WF_FILE=$(find "$WF_DIR" -name "*.writefail" 2>/dev/null | head -1)
 if [ -n "$WF_FILE" ]; then
   assert_in "outbox_write_failure" "$WF_FILE" "breadcrumb tags kind"
   assert_in "ana-bot" "$WF_FILE" "breadcrumb carries instance for reconstruction"
-  assert_in '"severity": "critical"' "$WF_FILE" "breadcrumb carries original event"
+  if python3 - "$WF_FILE" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+crumb = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+raise SystemExit(0 if crumb.get("event", {}).get("severity") == "critical" else 1)
+PY
+  then
+    pass "breadcrumb carries original event"
+  else
+    fail "breadcrumb does not carry original critical severity"
+  fi
   assert_not_in "+15558675309" "$WF_FILE" "breadcrumb keeps redaction (no PII leak)"
 else
   fail "breadcrumb file not found for content assertions"
