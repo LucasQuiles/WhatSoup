@@ -222,6 +222,18 @@
       ]
     },
     {
+      "path": "deploy/scripts/bot_errors_cutover.py",
+      "sha256": "dae9e37f841216837f2ec9481d4534a9bad0a27ef265c1d33fec9b1d862f6232",
+      "mustContain": [
+        "restore_service_to_always_on",
+        "cutover_gate",
+        "CutoverError",
+        "_LEGAL_EXPECTED_STATES",
+        "atomic_write_json",
+        "always_on"
+      ]
+    },
+    {
       "path": "deploy/scripts/install-bot-errors-gui-monitor-launchd.sh",
       "sha256": "88dbf5fb4da2372926e96ce95f965df70a52a1ea132084c4434332a87ee9dcde",
       "mustContain": [
@@ -261,15 +273,6 @@
       ]
     },
     {
-      "path": "deploy/scripts/lib/bot_errors_roster.py",
-      "sha256": "d5b0e418a46320bff46e9948b00b58a917922930e0649155db15bb1a6fea335c",
-      "mustContain": [
-        "roster_digest",
-        "roster_inventory",
-        "load_roster"
-      ]
-    },
-    {
       "path": "deploy/scripts/lib/bot_errors_redaction.py",
       "sha256": "274316080daac4fb1949e357e2d1688938a9d44fb63330ed2bef524ef73f4301",
       "mustContain": [
@@ -283,6 +286,22 @@
       ]
     },
     {
+      "path": "deploy/scripts/lib/bot_errors_roster.py",
+      "sha256": "d5b0e418a46320bff46e9948b00b58a917922930e0649155db15bb1a6fea335c",
+      "mustContain": [
+        "roster_digest",
+        "roster_inventory",
+        "load_roster"
+      ]
+    },
+    {
+      "path": "deploy/scripts/lib/classify_health.py",
+      "sha256": "782cad21c8fff5be8e57bda78b2429d2f115457705af116518e7555e8b7b2ab7",
+      "mustContain": [
+        "def classify(d: object) -> str:"
+      ]
+    },
+    {
       "path": "deploy/scripts/lib/controller_log.py",
       "sha256": "a944c375c190ec25686fcc8ece7431803818d2ee474deaa62d5afd1e920958be",
       "mustContain": [
@@ -291,13 +310,6 @@
         "controller_cycle",
         "metadata_only_controller_details",
         "write_controller_log"
-      ]
-    },
-    {
-      "path": "deploy/scripts/lib/classify_health.py",
-      "sha256": "782cad21c8fff5be8e57bda78b2429d2f115457705af116518e7555e8b7b2ab7",
-      "mustContain": [
-        "def classify(d: object) -> str:"
       ]
     },
     {
@@ -341,24 +353,12 @@
     },
     {
       "path": "src/lib/fault-taxonomy-registry.json",
-      "sha256": "c1f1f780df954e43f4c6fb6bc9ce089244cf63154f0212c1bc24e6b301279a97",
+      "sha256": "e1bfac329e64084533c65a56633c0bec22ac61decfec36282ea980a9d538b841",
       "mustContain": [
         "whatsoup-fault-taxonomy-registry-v3",
         "runtimeAgentHealthSignals",
         "turnRecoveryBlockedUnsafe",
         "autoCompactActiveBackoffScopes"
-      ]
-    },
-    {
-      "path": "deploy/scripts/bot_errors_cutover.py",
-      "sha256": "dae9e37f841216837f2ec9481d4534a9bad0a27ef265c1d33fec9b1d862f6232",
-      "mustContain": [
-        "restore_service_to_always_on",
-        "cutover_gate",
-        "CutoverError",
-        "_LEGAL_EXPECTED_STATES",
-        "atomic_write_json",
-        "always_on"
       ]
     }
   ]

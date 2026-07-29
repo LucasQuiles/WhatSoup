@@ -256,6 +256,52 @@
       ],
       "owner": "src/core/durability-evidence-contract.ts",
       "test": "tests/core/failure-taxonomy-cross-contract.test.ts"
+    },
+    "outboundFailureCodes": {
+      "values": [
+        "outbound.unknown_failure",
+        "outbound.shutdown_before_send",
+        "outbound.shutdown_deadline",
+        "outbound.crash_in_flight",
+        "outbound.echo_timeout",
+        "outbound.superseded",
+        "outbound.pending_replay_unreconstructable",
+        "outbound.status_ping_expired",
+        "outbound.unsafe_delivery_unconfirmed",
+        "outbound.governor_shed",
+        "outbound.replay_failed"
+      ],
+      "owner": "src/core/outbound-failure-disposition.ts",
+      "test": "tests/core/failure-taxonomy-cross-contract.test.ts"
+    },
+    "outboundFailureStages": {
+      "values": [
+        "admission",
+        "provider_request",
+        "provider_response",
+        "acknowledgement",
+        "runtime"
+      ],
+      "owner": "src/core/outbound-failure-disposition.ts",
+      "test": "tests/core/failure-taxonomy-cross-contract.test.ts"
+    },
+    "outboundMutationStates": {
+      "values": [
+        "not_started",
+        "rejected",
+        "ambiguous",
+        "submitted"
+      ],
+      "owner": "src/core/outbound-failure-disposition.ts",
+      "test": "tests/core/failure-taxonomy-cross-contract.test.ts"
+    },
+    "outboundEvidenceCoverage": {
+      "values": [
+        "complete",
+        "partial"
+      ],
+      "owner": "src/core/outbound-failure-disposition.ts",
+      "test": "tests/core/failure-taxonomy-cross-contract.test.ts"
     }
   },
   "runtimeAgentHealthSignals": [
