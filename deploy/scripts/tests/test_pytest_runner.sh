@@ -103,7 +103,7 @@ case_no_runner_fails_closed() {
   fake_python "$bin/python3.12" 1
   fake_python "$bin/python3" 1
   set +e
-  PATH="$bin:$PATH" resolve_pytest_cmd SENTINEL_PYTEST_PYTHON /tmp/missing-sentinel-python python3.12 python3 \
+  PATH="$bin:/usr/bin:/bin" resolve_pytest_cmd SENTINEL_PYTEST_PYTHON /tmp/missing-sentinel-python python3.12 python3 \
     > "$tmp/no-runner.out" 2> "$tmp/no-runner.err"
   local rc=$?
   set -e
