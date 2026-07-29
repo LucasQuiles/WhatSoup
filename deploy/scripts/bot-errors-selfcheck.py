@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import fcntl
+import hashlib
 import json
 import math
 import os
@@ -651,6 +652,11 @@ def update_central_ack_watch(memory: dict, central_ack: dict, now: float) -> Non
 
 
 def heartbeat_payload(status: dict) -> dict:
+    """Full local forensic payload — retains all detail for the local file.
+
+    Issue #2470: this is the PRIVATE local artifact. It is NOT safe for
+    central transport. Use ``central_telemetry_payload()`` for the push.
+    """
     keys = (
         "schemaVersion",
         "host",
@@ -675,6 +681,137 @@ def heartbeat_payload(status: dict) -> dict:
     return payload
 
 
+# ─────────────────────────────────────────────────────────────────────────
+# Issue #2470: central telemetry boundary.
+#
+# The central push must carry only bounded operational metadata. Raw host
+# identity, absolute paths, free-form problem text, file-level mismatch
+# tuples, unit labels, freshness file names/paths, raw verifier output, and
+# configured ack paths are stripped. Domain-separated SHA-256 digests
+# replace identity/path fields where stable correlation is needed.
+# ─────────────────────────────────────────────────────────────────────────
+
+_TELEMETRY_SCHEMA_VERSION = 2
+
+
+def _telemetry_digest(domain: str, value: str) -> str:
+    """Domain-separated 16-char hex digest — deterministic, non-reversible."""
+    return hashlib.sha256(f"bot-errors-telemetry:{domain}:{value}".encode()).hexdigest()[:16]
+
+
+def _mismatch_kind_counts(mismatches: list) -> dict[str, int]:
+    """Collapse (path, kind) tuples into kind-only counts."""
+    counts: dict[str, int] = {}
+    for item in mismatches:
+        if isinstance(item, (list, tuple)) and len(item) >= 2:
+            kind = str(item[1])
+            counts[kind] = counts.get(kind, 0) + 1
+        else:
+            counts["unknown"] = counts.get("unknown", 0) + 1
+    return counts
+
+
+def _aggregate_ok_bad(items: list) -> dict[str, int]:
+    """Aggregate a unit/freshness status list into ok/bad/total counts."""
+    total = len(items)
+    ok = 0
+    bad = 0
+    for item in items:
+        if isinstance(item, dict):
+            val = item.get("ok")
+            if val == "true":
+                ok += 1
+            else:
+                bad += 1
+        else:
+            bad += 1
+    return {"total": total, "ok": ok, "bad": bad}
+
+
+def central_telemetry_payload(status: dict) -> dict:
+    """Project local status into a bounded, metadata-only telemetry payload.
+
+    This is the ONLY shape safe for the central HTTP push. It contains:
+    - bounded enums: class, action, healthy
+    - counts: consecutive, problemCount, mismatch counts, unit/freshness aggregates
+    - digests: hostDigest, rootDigest (non-reversible, domain-separated)
+    - already-digested values: pin SHAs, bundle name
+    - bounded ack metadata: configured, mode, status, age, verdicts
+
+    It does NOT contain: raw hostname, absolute paths, filenames, unit labels,
+    free-form problem text, raw verifier output, or configured ack paths.
+    """
+    payload: dict = {
+        "kind": "bot-errors-selfcheck-heartbeat",
+        "schemaVersion": _TELEMETRY_SCHEMA_VERSION,
+        "checkedAt": status.get("checkedAt"),
+        "healthy": status.get("healthy"),
+        "class": status.get("class"),
+        "action": status.get("action"),
+        "consecutive": status.get("consecutive"),
+    }
+
+    host = status.get("host")
+    if host is not None:
+        payload["hostDigest"] = _telemetry_digest("host", str(host))
+
+    root = status.get("root")
+    if root is not None:
+        payload["rootDigest"] = _telemetry_digest("root", str(root))
+
+    problems = status.get("problems")
+    if isinstance(problems, list):
+        payload["problemCount"] = len(problems)
+
+    pin = status.get("pin")
+    if isinstance(pin, dict):
+        payload["pin"] = {
+            "headSha": pin.get("headSha"),
+            "f10Sha": pin.get("f10Sha"),
+            "trust": pin.get("trust"),
+            "headApproved": pin.get("headApproved"),
+        }
+
+    bundle = status.get("bundle")
+    if bundle is not None:
+        payload["bundle"] = str(bundle)
+
+    runtime_mismatches = status.get("runtimeMismatches")
+    if isinstance(runtime_mismatches, list):
+        payload["runtimeMismatchCount"] = len(runtime_mismatches)
+        payload["runtimeMismatchKinds"] = _mismatch_kind_counts(runtime_mismatches)
+
+    bundle_mismatches = status.get("bundleMismatches")
+    if isinstance(bundle_mismatches, list):
+        payload["bundleMismatchCount"] = len(bundle_mismatches)
+        payload["bundleMismatchKinds"] = _mismatch_kind_counts(bundle_mismatches)
+
+    unit_statuses = status.get("unitStatuses")
+    if isinstance(unit_statuses, list):
+        payload["unitAggregate"] = _aggregate_ok_bad(unit_statuses)
+
+    freshness = status.get("freshness")
+    if isinstance(freshness, list):
+        payload["freshnessAggregate"] = _aggregate_ok_bad(freshness)
+
+    runtime_verify = status.get("runtimeVerify")
+    if isinstance(runtime_verify, dict):
+        payload["runtimeVerifyRc"] = runtime_verify.get("rc")
+
+    central_ack = status.get("centralAck")
+    if isinstance(central_ack, dict):
+        payload["centralAck"] = {
+            "configured": central_ack.get("configured"),
+            "mode": central_ack.get("mode"),
+            "status": central_ack.get("status"),
+            "ageSeconds": central_ack.get("ageSeconds"),
+            "maxAgeSeconds": central_ack.get("maxAgeSeconds"),
+            "centralDownSuspected": central_ack.get("centralDownSuspected"),
+        }
+
+    return payload
+
+
 def default_push_heartbeat(payload: dict) -> dict:
     url = os.environ.get("BOT_ERRORS_SELFCHECK_HEARTBEAT_URL", "").strip()
     if not url:
@@ -692,15 +829,18 @@ def default_push_heartbeat(payload: dict) -> dict:
 
 
 def publish_heartbeat(config: SelfcheckConfig, deps: SelfcheckDeps, status: dict) -> None:
-    payload = heartbeat_payload(status)
+    # Issue #2470: local file keeps full forensic detail; central push gets
+    # only the bounded metadata-only telemetry projection.
+    local_payload = heartbeat_payload(status)
+    push_payload = central_telemetry_payload(status)
     result = {"path": str(config.heartbeat_path), "local": "pending", "push": {"attempted": False, "mode": "not_run"}}
     try:
-        atomic_write_json(config.heartbeat_path, payload)
+        atomic_write_json(config.heartbeat_path, local_payload)
         result["local"] = "ok"
     except Exception as exc:  # noqa: BLE001 - heartbeat failure must not mask runtime status.
         result["local"] = f"write_failed:{type(exc).__name__}"
     try:
-        result["push"] = deps.push_heartbeat(payload)
+        result["push"] = deps.push_heartbeat(push_payload)
     except Exception as exc:  # noqa: BLE001 - best-effort central push.
         result["push"] = {"attempted": True, "ok": False, "error": f"{type(exc).__name__}: {exc}"[:300]}
     status["heartbeat"] = result
@@ -710,20 +850,32 @@ def publish_central_down_alert(config: SelfcheckConfig, status: dict) -> None:
     central_ack = status.get("centralAck", {})
     if central_ack.get("centralDownSuspected") is not True:
         return
+    # Issue #2470: central-down alert artifact must also use bounded fields.
+    # Raw host identity and root paths are replaced with domain-separated
+    # digests; centralAck carries only verdict/age/mode metadata, no path.
+    host = status.get("host")
+    root = status.get("root")
     payload = {
-        "schemaVersion": 1,
+        "schemaVersion": _TELEMETRY_SCHEMA_VERSION,
         "kind": "bot-errors-selfcheck-central-down-alert",
         "scope": "host",
         "createdAt": status.get("checkedAt"),
-        "host": status.get("host"),
-        "root": status.get("root"),
+        "hostDigest": _telemetry_digest("host", str(host)) if host is not None else None,
+        "rootDigest": _telemetry_digest("root", str(root)) if root is not None else None,
         "class": status.get("class"),
         "action": "central_down_suspected",
         "tier": "tier3",
         "lane": "human",
         "severity": "critical",
         "criticalWhatsAppEligible": True,
-        "centralAck": central_ack,
+        "centralAck": {
+            "configured": central_ack.get("configured"),
+            "mode": central_ack.get("mode"),
+            "status": central_ack.get("status"),
+            "ageSeconds": central_ack.get("ageSeconds"),
+            "maxAgeSeconds": central_ack.get("maxAgeSeconds"),
+            "centralDownSuspected": central_ack.get("centralDownSuspected"),
+        },
     }
     result = {"active": True, "path": str(config.central_down_alert_path), "ok": False}
     try:
