@@ -161,6 +161,9 @@ interprocedural analysis; the rule does not claim to cover them.
 | `portability.systemctl-guarded` | mechanical | block | guard, ci | `systemctl` is Linux-only; callers must have a macOS `launchctl` fallback or platform guard. |
 | `portability.gnu-bsd-shell-flags` | mechanical | block | guard, ci | GNU-only shell flags (`readlink -f`, `sha256sum`, `stat -c`, `grep -P`, `mktemp --directory`) fail on BSD/macOS. Must use portable alternatives or platform branches. |
 | `portability.editorconfig-present` | mechanical | advisory | guard | Repository must maintain `.editorconfig` for cross-platform editor consistency (LF line endings, indentation). |
+| `portability.arch-blind-binary-resolution` | semantic | warn | guard, ci | Custom binary resolvers and bare `execFile()`/`spawn()` calls are architecture-blind. `process.arch` recorded in telemetry but never consumed. New binary resolution code should use or extend `resolveBinaryPath()`. |
+| `portability.arch-blind-path-fallback` | mechanical | warn | guard, ci | PATH fallbacks omit `/opt/homebrew/bin` (ARM macOS Homebrew prefix). In stripped environments (launchd, minimal systemd --user), brew-installed binaries vanish on Apple Silicon. |
+| `portability.hardcoded-signal-name` | mechanical | warn | guard, ci | Signal string literals (`'SIGTERM'`, `'SIGKILL'`, `'SIGINT'`) in `.kill()`, `process.on()`, and `killSignal` options must use shared constants for cross-platform portability. |
 | `portability.fetch-timeout` | ast | warn | eslint | `fetch()` calls must include an `AbortSignal.timeout()` to prevent indefinite hangs on unresponsive hosts. |
 | `portability.sync-exec-timeout` | ast | warn | eslint | `execSync`/`execFileSync`/`spawnSync` must include a `timeout` option to prevent event-loop blocking on hanging subprocesses. |
 
@@ -281,6 +284,8 @@ disagree (`| rule | count |` rows below are machine-checked):
 | `portability.platform-paths-guarded` | 24 | `scripts/platform-pattern-check.ts` |
 | `portability.systemctl-guarded` | 11 | `scripts/platform-pattern-check.ts` |
 | `portability.gnu-bsd-shell-flags` | 7 | `scripts/platform-pattern-check.ts` |
+| `portability.arch-blind-path-fallback` | 1 | `scripts/platform-pattern-check.ts` |
+| `portability.hardcoded-signal-name` | 20 | `scripts/platform-pattern-check.ts` |
 
 ## ESLint Ring (live)
 
