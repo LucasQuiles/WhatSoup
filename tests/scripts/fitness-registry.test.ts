@@ -38,7 +38,7 @@ describe('fitness rule registry', () => {
     const ids = fitnessRules.map((rule) => rule.id);
 
     expect(new Set(ids).size).toBe(ids.length);
-    expect(fitnessRules).toHaveLength(38);
+    expect(fitnessRules).toHaveLength(45);
 
     for (const rule of fitnessRules) {
       expect(rule.id).toMatch(/^[a-z]+\.[a-z0-9-]+$/);
@@ -117,6 +117,10 @@ describe('fitness rule registry', () => {
       'arch.ssot-name-ladder',
       'arch.ssot-phone-shape',
       'arch.ssot-presentation-literals',
+      'portability.no-hardcoded-platform-binaries',
+      'portability.platform-paths-guarded',
+      'portability.systemctl-guarded',
+      'portability.gnu-bsd-shell-flags',
     ]);
     expect(ratchetedRules[0].params).toMatchObject({ maxLines: expect.any(Number) });
     expect(ratchetedRules[1].params).toMatchObject({ layers: expect.any(Object) });
