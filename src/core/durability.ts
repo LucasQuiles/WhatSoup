@@ -131,6 +131,18 @@ const log = createChildLogger('durability');
  */
 const STATUS_OP_TTL_MS = 30 * 60 * 1000;
 
+/**
+ * PR-C: max deferrals for a `text` op before the drain quarantines it instead of
+ * re-deferring indefinitely. A persistently rate-limited conversation that keeps
+ * hitting `retry_not_before` will accumulate pending rows with no terminal state.
+ * This bound ensures the system fails loud (quarantine + alert via the existing
+ * outbound_quarantined pathway) rather than accumulating silently.
+ *
+ * `status_ping` ops are exempt — they have their own TTL age-out above.
+ * `failed_permanent` is a separate terminal path for non-retryable failures.
+ */
+const MAX_TEXT_OP_DEFERRAL_COUNT = 20;
+
 // ── Status string unions ──
 
 export type OutboundStatus = 'pending' | 'sending' | 'submitted' | 'echoed' | 'maybe_sent' | 'failed_permanent' | 'quarantined';
@@ -636,7 +648,7 @@ export class DurabilityEngine {
       getOutboundByStatus: prepare(
         `SELECT id, status, chat_jid, op_type, payload, wa_message_id, replay_policy,
                 created_at, submitted_at, source_inbound_seq, retry_count, error, is_terminal
-         FROM outbound_ops WHERE status = ?`,
+         FROM outbound_ops WHERE status = ? ORDER BY id ASC`,
       ),
       getLiveReconcileMaybeSent: prepare(
         `SELECT o.id, o.status, o.chat_jid, o.op_type, o.payload, o.wa_message_id,
@@ -2753,6 +2765,34 @@ export async function drainPendingOutbound(
         && priorEvidence.retry_not_before !== null
         && Date.parse(priorEvidence.retry_not_before) > Date.now()
       ) {
+        // PR-C max-deferral bound: a text op that has been deferred
+        // MAX_TEXT_OP_DEFERRAL_COUNT+ times is quarantined instead of being
+        // left pending forever. Status_ping has its own TTL age-out above.
+        // The retry_count stored by markDeferred reflects total deferrals.
+        if (
+          op.op_type === 'text'
+          && op.retry_count >= MAX_TEXT_OP_DEFERRAL_COUNT
+        ) {
+          durability.markQuarantined(op.id, createInternalOutboundFailureEvidence({
+            failureCode: 'outbound.deferral_limit_exceeded',
+            stage: 'admission',
+            mutationState: 'not_started',
+            logicalAttemptCount: op.retry_count,
+            providerSubmissionCount: priorEvidence?.provider_submission_count ?? 0,
+            previousEvidence: priorEvidence,
+            evidenceCoverage: priorEvidence ? 'complete' : 'partial',
+          }));
+          log.warn(
+            { opId: op.id, retryCount: op.retry_count, maxDeferrals: MAX_TEXT_OP_DEFERRAL_COUNT },
+            'drainPendingOutbound: text op exceeded max deferral count → quarantined',
+          );
+          emitAlertChecked(
+            config.botName,
+            'outbound_quarantined',
+            `whatsoup@${config.botName} outbound op ${op.id} quarantined`,
+            `replay_policy=${op.replay_policy} op_type=${op.op_type} reason=deferral_limit_exceeded retry_count=${op.retry_count}`,
+          );
+        }
         continue;
       }
       let text: string | undefined;
