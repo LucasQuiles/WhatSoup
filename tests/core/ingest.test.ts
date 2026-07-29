@@ -66,6 +66,10 @@ import { Database } from '../../src/core/database.ts';
 import { createIngestHandler, getIngestStats } from '../../src/core/ingest.ts';
 import { drainIngest } from './_helpers/ingest-drain.ts';
 import { DurabilityEngine } from '../../src/core/durability.ts';
+import { ChatQueue } from '../../src/runtimes/chat/queue.ts';
+import { ChatRuntime } from '../../src/runtimes/chat/runtime.ts';
+import type { LLMProvider } from '../../src/runtimes/chat/providers/types.ts';
+import type { PineconeMemory } from '../../src/runtimes/chat/providers/pinecone.ts';
 import { isAdminMessage, parseAdminCommand } from '../../src/core/command-router.ts';
 import { handleAdminCommand, handleFallbackCommand, sendApprovalRequest } from '../../src/core/admin.ts';
 import { shouldRespond } from '../../src/core/access-policy.ts';
@@ -883,14 +887,15 @@ describe('Inbound journaling: durabilityEngine.journalInbound', () => {
 
     const journalSpy = vi.spyOn(durability, 'journalInbound').mockReturnValue(11);
     vi.spyOn(durability, 'getInboundReceivedAtUnixSeconds').mockReturnValue(1_780_000_000);
-    const failSpy = vi.spyOn(durability, 'markInboundFailed');
+    const failSpy = vi.spyOn(durability, 'markInboundFailedIfProcessing');
+    const msg = makeIncomingMessage();
 
     const handler = makeIngest(db, messenger, runtime, BOT_JID, BOT_LID, durability);
-    await runIngest(handler, makeIncomingMessage());
+    await runIngest(handler, msg);
 
     expect(journalSpy).toHaveBeenCalledOnce();
     // A generic runtime error is unattributable → 'unknown'.
-    expect(failSpy).toHaveBeenCalledWith(11, 'unknown');
+    expect(failSpy).toHaveBeenCalledWith(11, msg.messageId, msg.chatJid, 'unknown');
   });
 
   it('runtime SQLITE_FULL error is classified db_error on the failed inbound', async () => {
@@ -905,12 +910,101 @@ describe('Inbound journaling: durabilityEngine.journalInbound', () => {
 
     vi.spyOn(durability, 'journalInbound').mockReturnValue(12);
     vi.spyOn(durability, 'getInboundReceivedAtUnixSeconds').mockReturnValue(1_780_000_000);
-    const failSpy = vi.spyOn(durability, 'markInboundFailed');
+    const failSpy = vi.spyOn(durability, 'markInboundFailedIfProcessing');
+    const msg = makeIncomingMessage();
 
     const handler = makeIngest(db, messenger, runtime, BOT_JID, BOT_LID, durability);
-    await runIngest(handler, makeIncomingMessage());
+    await runIngest(handler, msg);
 
-    expect(failSpy).toHaveBeenCalledWith(12, 'db_error');
+    expect(failSpy).toHaveBeenCalledWith(12, msg.messageId, msg.chatJid, 'db_error');
+  });
+
+  it('runtime error does not overwrite an inbound row terminalized before the catch path', async () => {
+    const db = makeTempDb();
+    const messenger = makeMessenger();
+    const runtime = makeRuntime();
+    const durability = new DurabilityEngine(db);
+    const msg = makeIncomingMessage({ messageId: 'terminal-before-ingest-catch' });
+
+    vi.mocked(runtime.handleMessage).mockImplementation(async (dispatched) => {
+      expect(dispatched.inboundSeq).toEqual(expect.any(Number));
+      durability.markInboundComplete(dispatched.inboundSeq!, 'already_terminal');
+      throw new Error('runtime rejected after terminal transition');
+    });
+
+    const handler = makeIngest(db, messenger, runtime, BOT_JID, BOT_LID, durability);
+    await runIngest(handler, msg);
+
+    const row = db.raw.prepare(
+      `SELECT processing_status, terminal_reason, failure_class
+       FROM inbound_events
+       WHERE message_id = ?`,
+    ).get(msg.messageId);
+    expect(row).toEqual({
+      processing_status: 'complete',
+      terminal_reason: 'already_terminal',
+      failure_class: null,
+    });
+  });
+
+  it('retries a real ChatRuntime queue terminal write with the bounded queue_full class', async () => {
+    const db = makeTempDb();
+    const messenger = makeMessenger();
+    const durability = new DurabilityEngine(db);
+    const msg = makeIncomingMessage({
+      messageId: 'queue-terminal-write-retry',
+      chatJid: '15551230009@s.whatsapp.net',
+      senderJid: '15551230009@s.whatsapp.net',
+    });
+    const queue = new ChatQueue(1, 1);
+    await queue.enqueue(msg.chatJid, () => new Promise<void>(() => {}));
+    const provider: LLMProvider = {
+      name: 'unused-provider',
+      generate: vi.fn(),
+    };
+    const runtime = new ChatRuntime(
+      db,
+      messenger,
+      {} as PineconeMemory,
+      provider,
+      provider,
+      { enableEnrichment: false, chatQueue: queue },
+    );
+    runtime.setDurability(durability);
+    const markInboundFailedIfProcessing =
+      durability.markInboundFailedIfProcessing.bind(durability);
+    const fencedWrite = vi.spyOn(durability, 'markInboundFailedIfProcessing')
+      .mockImplementationOnce(() => {
+        throw new Error('queue rejection terminalization failed');
+      })
+      .mockImplementation((...args) => markInboundFailedIfProcessing(...args));
+
+    const handler = makeIngest(db, messenger, runtime, BOT_JID, BOT_LID, durability);
+    await runIngest(handler, msg);
+
+    expect(fencedWrite).toHaveBeenCalledTimes(2);
+    const row = db.raw.prepare(
+      `SELECT processing_status, terminal_reason, failure_class
+       FROM inbound_events
+       WHERE message_id = ?`,
+    ).get(msg.messageId);
+    expect(row).toEqual({
+      processing_status: 'failed',
+      terminal_reason: 'error',
+      failure_class: 'queue_full',
+    });
+    expect(runtime.getHealthSnapshot()).toMatchObject({
+      status: 'degraded',
+      details: {
+        queueAdmission: {
+          rejectedTotal: 1,
+          unownedTotal: 1,
+        },
+      },
+    });
+    expect(provider.generate).not.toHaveBeenCalled();
+    expect(messenger.sendMessage).not.toHaveBeenCalled();
+    expect(messenger.sendMedia).not.toHaveBeenCalled();
   });
 
   it('no durability engine — existing behaviour unchanged', async () => {
@@ -1389,9 +1483,9 @@ describe('ingest.ts uncovered-branch coverage', () => {
 
     // Capture the dispatch callback handleAdminCommand receives, then invoke it
     // with a synthetic message to exercise the `(m) => runtime.handleMessage(m)` body.
-    let captured: ((m: IncomingMessage) => Promise<void>) | undefined;
+    let captured: Runtime['handleMessage'] | undefined;
     mockHandleAdminCommand.mockImplementation(
-      async (_db, _ms, _action, _st, _sid, _chat, dispatch: (m: IncomingMessage) => Promise<void>) => {
+      async (_db, _ms, _action, _st, _sid, _chat, dispatch: Runtime['handleMessage']) => {
         captured = dispatch;
       },
     );
@@ -1404,7 +1498,8 @@ describe('ingest.ts uncovered-branch coverage', () => {
 
     expect(captured).toBeDefined();
     const probe = makeIncomingMessage({ messageId: 'probe-via-callback' });
-    await captured!(probe);
+    vi.mocked(runtime.handleMessage).mockResolvedValue({ status: 'accepted' });
+    await expect(captured!(probe)).resolves.toEqual({ status: 'accepted' });
     expect(vi.mocked(runtime.handleMessage)).toHaveBeenCalledWith(probe);
   });
 
