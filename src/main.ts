@@ -72,6 +72,7 @@ import { startModelCurrencyMonitor } from './lib/model-advisor.ts';
 import { buildMemoryReadinessLogFields } from './lib/memory-operation-telemetry.ts';
 import { shutdownExitCode } from './main-shutdown-policy.ts';
 import { markCleanExit, restartLoopGuardPath } from './runtimes/agent/restart-loop-guard.ts';
+import { formatClockForUser } from './runtimes/agent/runtime-presentation.ts';
 import { acquireProcessLock, isProcessLockError, releaseProcessLock, type ProcessLockHandle } from './lib/process-lock.ts';
 import { createServiceManager } from './fleet/platform.ts';
 
@@ -1135,7 +1136,7 @@ async function start(): Promise<void> {
             setTimeout(fireWhenStable, stabilityMs);
             return;
           }
-          const notification = composeStartupNotification(snState, Date.now());
+          const notification = composeStartupNotification(snState, formatClockForUser);
           // Marked BEFORE the send: a crash mid-send loses at most one
           // summary and can never duplicate it (introSent precedent).
           markStartupNotified(snPath, Date.now());

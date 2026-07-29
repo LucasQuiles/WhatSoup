@@ -97,10 +97,13 @@ const defaultLocalHm = (ms: number): string =>
  * Compose the message covering every boot since the last notification.
  * One boot → the classic copy; several → one intentional summary that keeps
  * the user informed instead of pinging once per recovery.
+ *
+ * The composed text depends only on the journal state; callers that render
+ * user-facing clocks should inject their presentation formatter (main.ts
+ * passes formatClockForUser) so the copy matches the rest of the product.
  */
 export function composeStartupNotification(
   state: StartupNotifyState,
-  now: number,
   formatTime: (ms: number) => string = defaultLocalHm,
 ): StartupNotification {
   const since = state.lastNotifiedAt ?? 0;
