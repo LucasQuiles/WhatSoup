@@ -104,9 +104,9 @@ function legacyCounterField(value: unknown): number | null {
   return isNonNegativeFiniteNumber(value) ? value : null;
 }
 
-/** Missing timestamps predate some fields; present values must be null or finite. */
+/** A present timestamp must be null or finite; callers decide whether absence is valid. */
 function nullableTimestampField(value: unknown): number | null | undefined {
-  if (value === undefined || value === null) return null;
+  if (value === null) return null;
   return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
 }
 
@@ -121,7 +121,7 @@ function parseV1State(data: Record<string, unknown>): RestartLoopGuardState | nu
   const lastTripAt = nullableTimestampField(data.lastTripAt);
   const bootsTotal = legacyCounterField(data.bootsTotal);
   const checksPerformed = legacyCounterField(data.checksPerformed);
-  const lastCheckAt = nullableTimestampField(data.lastCheckAt);
+  const lastCheckAt = data.lastCheckAt === undefined ? null : nullableTimestampField(data.lastCheckAt);
   if (lastTripAt === undefined || bootsTotal === null || checksPerformed === null || lastCheckAt === undefined) {
     return null;
   }

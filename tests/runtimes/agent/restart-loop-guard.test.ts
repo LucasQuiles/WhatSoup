@@ -152,6 +152,7 @@ describe('restart-loop guard', () => {
 
     it.each([
       ['non-numeric boot entry', { v: 1, bootInProgress: false, boots: [1_000, 'bad'], lastTripAt: null }],
+      ['missing required last-trip timestamp', { v: 1, bootInProgress: false, boots: [] }],
       ['invalid last-trip timestamp', { v: 1, bootInProgress: false, boots: [], lastTripAt: 'never' }],
       ['negative boots-total counter', { v: 1, bootInProgress: false, boots: [], lastTripAt: null, bootsTotal: -1 }],
       ['non-numeric checks-performed counter', { v: 1, bootInProgress: false, boots: [], lastTripAt: null, checksPerformed: 'one' }],
