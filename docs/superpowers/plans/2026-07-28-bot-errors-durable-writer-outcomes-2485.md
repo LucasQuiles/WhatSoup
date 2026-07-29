@@ -14,14 +14,16 @@ residual.
 ## Global Constraints
 
 - Audit base revision: `ec1cd2ae5ed766ea78850936b6b7a7360f02bba1`.
-- Open collision PR #2603 reviewed head: `615dd194f01f3440b27dd556a0e0a21e5d43e9bf`.
-- Open collision PR #2604 reviewed head: `8b5dec468f2e1ce7bb134b05454443535475e0d3`.
-- #2603 and #2604 are sibling heads. Implementation requires one explicitly
-  reviewed combined dependency head; selecting either sibling alone is
-  forbidden.
+- PR #2603 final reviewed head `fe3bad7673e142e5db9ece6c30ec78f8ec7ba151`
+  is tree-identical to squash commit `51e78876e406e332c97e36a0a3b6d13df13cbcf5`.
+- PR #2604 final reviewed head `8bfeeb9523a1ad42ca88e67ce23569b25a2bec09`
+  is tree-identical to squash commit `455c8af4c48c10fecee4170218f5bde9418d5c97`.
+- Combined dependency base `a18b17553c8cfcbaa07f1a57e7df1844171be955`
+  contains both squash commits.
 - Draft 1 closes neither #2485 nor #2464. Both remain `IN PROGRESS`; Draft 3 is
   the earliest #2485 closure gate.
-- #2427, #2482, and #2463 remain separate later drafts; #2429 remains open.
+- #2427 and #2482 remain separate later drafts in this lane. #2463 has a
+  separate recorded owner and is coordination-only; #2429 remains open.
 - TypeScript turn-recovery issues #2148, #2150, #2151, and #2169 are out of scope.
 - Event publication is create-once/no-clobber; state publication requires an expected predecessor.
 - The selected Darwin/Linux fence is `fcntl.flock(LOCK_EX)` on a verified descriptor-relative lock entry.
@@ -77,20 +79,19 @@ residual.
 - Produces: isolated implementation branch whose base contains the reviewed
   semantics of both #2603 and #2604.
 
-- [ ] **Step 1: Re-read both live collision records**
+- [x] **Step 1: Re-read both live collision records**
 
 ```bash
 gh pr view 2603 --repo LucasQuiles/WhatSoup --json state,isDraft,headRefName,headRefOid,baseRefName,files,mergeCommit,statusCheckRollup
 gh pr view 2604 --repo LucasQuiles/WhatSoup --json state,isDraft,headRefName,headRefOid,baseRefName,files,mergeCommit,statusCheckRollup
 ```
 
-Expected: #2603 is open at
-`615dd194f01f3440b27dd556a0e0a21e5d43e9bf` and #2604 is open at
-`8b5dec468f2e1ce7bb134b05454443535475e0d3`, or an exact main commit
-contains each reviewed change. Any changed head/file set is a stop condition
-for renewed collision review.
+Observed: both PRs are merged, all hosted checks are terminal-green, and their
+final reviewed heads are tree-identical to the squash commits recorded above.
+Any later replacement or revert is a stop condition for renewed collision
+review.
 
-- [ ] **Step 2: Fetch both exact dependencies through SSH**
+- [x] **Step 2: Fetch both exact dependencies through SSH**
 
 For open PRs:
 
@@ -104,7 +105,7 @@ test "$(git rev-parse refs/heads/dependency/pr-2604-runtime-health)" = "8b5dec46
 For merged PRs, fetch `main` over SSH and resolve the exact merge/squash
 commit containing each reviewed change.
 
-- [ ] **Step 3: Establish one reviewed combined dependency head**
+- [x] **Step 3: Establish one reviewed combined dependency head**
 
 If both PRs are merged, use the exact main head containing both. Otherwise,
 create a private integration branch from the dependency selected as first
@@ -135,13 +136,13 @@ After the reviewed merge and focused tests pass:
 export COMBINED_DEPENDENCY_HEAD="$(git rev-parse HEAD)"
 ```
 
-- [ ] **Step 4: Create a new isolated implementation worktree**
+- [x] **Step 4: Create a new isolated implementation worktree**
 
 Use the `using-git-worktrees` skill. Name the branch
 `fix/bot-errors-durable-writer-outcomes-2485-impl-20260728` and base it on the
 exact combined dependency commit selected in Step 3.
 
-- [ ] **Step 5: Bring the approved design and plan onto the implementation branch**
+- [x] **Step 5: Bring the approved design and plan onto the implementation branch**
 
 First verify:
 

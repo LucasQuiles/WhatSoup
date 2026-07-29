@@ -1,9 +1,10 @@
 # BOT ERRORS Durability Stack Design
 
 **Date:** 2026-07-28
-**Status:** approved concept; independent written-spec review passed; owner review pending
+**Status:** approved for execution; independent written-spec and delivery-shape review passed
 **Audit base revision:** `ec1cd2ae5ed766ea78850936b6b7a7360f02bba1`
-**Claimed issues:** #2427, #2463, #2464, #2482, #2485
+**Claimed issues:** #2427, #2464, #2482, #2485
+**Coordination issues:** #2463 (separately owned), #2429
 
 ## Purpose
 
@@ -11,10 +12,11 @@ Replace false-success and best-effort persistence across the BOT ERRORS Python
 control plane with explicit durable outcomes, stable lifecycle identity,
 crash-durable namespace transitions, and validated state-generation recovery.
 
-The work is split into four stacked draft pull requests so each failure
-boundary can be reviewed and fault-injected independently. The stack preserves
-historical ownership decisions and does not absorb path-disjoint TypeScript
-turn-recovery work.
+The program retains four independently reviewable draft contracts. This lane
+owns Drafts 1–3 as one durability cluster; Draft 4 remains with the separately
+recorded #2463 owner and consumes the same shared persistence contract through
+coordination. The split preserves historical ownership decisions and does not
+absorb path-disjoint TypeScript turn-recovery work.
 
 ## Observed Failure Boundaries
 
@@ -137,11 +139,14 @@ preserves save-before-terminal-move ordering established by merged history,
 syncs every changed parent exactly once, and reconciles ambiguous outcomes by
 stable identity.
 
-### Draft 4: State-generation recovery
+### Draft 4: State-generation recovery (separately owned coordination draft)
 
 **Issue:** #2463; references and may partially advance #2429.
 
-Draft 4 wraps each owned controller-state class in a versioned generation
+The current #2463 owner, not this lane, owns Draft 4. The shared interface and
+acceptance contract remain here so the independently delivered recovery work
+does not invent a conflicting durability primitive. Draft 4 wraps each owned
+controller-state class in a versioned generation
 envelope, retains a bounded validated previous generation, and moves
 unrecoverable state into `state_recovery_required` without authorizing
 lifecycle progress or overwriting the only evidence.
@@ -150,7 +155,16 @@ lifecycle progress or overwriting the only evidence.
 configuration and roster-retirement disposition. Draft 4 must not close #2429
 unless that residual is separately implemented and tested.
 
-## Open Pull-Request Collisions
+## Pull-Request Collision Resolution
+
+The publication blocker is resolved. PR #2603 was squash-merged as
+`51e78876e406e332c97e36a0a3b6d13df13cbcf5`; its final reviewed head
+`fe3bad7673e142e5db9ece6c30ec78f8ec7ba151` has an identical tree. PR #2604
+was squash-merged as `455c8af4c48c10fecee4170218f5bde9418d5c97`; its final reviewed head
+`8bfeeb9523a1ad42ca88e67ce23569b25a2bec09` also has an identical tree.
+Implementation base `a18b17553c8cfcbaa07f1a57e7df1844171be955` contains both squash commits.
+The focused combined baseline passed 1,400 Python tests, 286 TypeScript tests,
+the runtime-manifest guard, and deploy verification before implementation.
 
 At the 2026-07-28 planning observation, open draft PR #2603 was at reviewed head
 `615dd194f01f3440b27dd556a0e0a21e5d43e9bf` owns controller-log envelope and
@@ -682,7 +696,7 @@ When a draft is complete and reproducibly validated:
 | 1 | none; #2485 remains `IN PROGRESS` pending Draft 3 | #2485 and #2464 remain non-closing |
 | 2 | #2427 | none |
 | 3 | #2482 and #2485, only if the full embedded parent-barrier residual is proven | none |
-| 4 | #2463 | #2429 remains open and non-closing |
+| 4 (separate owner) | #2463 | #2429 remains open and non-closing; this lane does not mutate either label |
 
 No primitive-only draft may transition #2485. Each eligible issue remains
 `IN PROGRESS` if its draft is incomplete, has inconclusive checks, or lacks
@@ -695,7 +709,7 @@ work-index artifacts in the same commit.
 
 ## Completion Criteria
 
-The four-draft stack is complete only when:
+The program-wide four-draft stack is complete only when:
 
 - every owned leaf acceptance criterion has direct fault-injection evidence;
 - no caller converts an unproven outcome into success;
@@ -707,3 +721,7 @@ The four-draft stack is complete only when:
 - independent reviewers inspect decisive diffs and falsifiers; and
 - issue comments, automatic backlinks, and lifecycle labels match the verified
   draft state.
+
+This lane may claim completion only for Drafts 1–3 and their owned issues. It
+must not represent the separately owned Draft 4 as complete without exact-head
+evidence from that owner.
