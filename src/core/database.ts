@@ -41,6 +41,8 @@ import { runMigration46 as runMigration46Impl } from './database-migration-46.ts
 import { runMigration47 as runMigration47Impl } from './database-migration-47.ts';
 import { runMigration48 as runMigration48Impl } from './database-migration-48.ts';
 import { runMigration49 as runMigration49Impl } from './database-migration-49.ts';
+import { runMigration50 as runMigration50Impl } from './database-migration-50.ts';
+import { runMigration51 as runMigration51Impl } from './database-migration-51.ts';
 
 export { CURRENT_SCHEMA_MIGRATION } from './database-schema-version.ts';
 export {
@@ -790,6 +792,8 @@ const MIGRATIONS: Map<number, MigrationFn> = new Map([
   [47, runMigration47],
   [48, runMigration48],
   [49, runMigration49],
+  [50, runMigration50],
+  [51, runMigration51],
 ]);
 
 if (Math.max(...MIGRATIONS.keys()) !== CURRENT_SCHEMA_MIGRATION) {
@@ -1163,6 +1167,14 @@ function runMigration48(db: DatabaseSync): void {
 
 function runMigration49(db: DatabaseSync): void {
   runMigration49Impl(db);
+}
+
+function runMigration50(db: DatabaseSync): void {
+  runMigration50Impl(db);
+}
+
+function runMigration51(db: DatabaseSync): void {
+  runMigration51Impl(db);
 }
 
 // #1774: total_input_tokens historically accumulated a turn's FULL

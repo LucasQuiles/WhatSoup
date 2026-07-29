@@ -783,10 +783,8 @@ describe('durability.ts uncovered-branch coverage', () => {
 
   // ── preConnectRecovery: tool-call recovery branches (lines 598-637) ──
   it('preConnectRecovery marks safe tool call (no outbound_op_id) as replayed', () => {
-    db.raw.exec(
-      `INSERT INTO tool_calls (conversation_key, tool_name, tool_input, status, replay_policy)
-       VALUES ('key-tc-safe', 'read_file', '{}', 'executing', 'safe')`,
-    );
+    const toolCallId = engine.recordToolCall('key-tc-safe', 'read_file', 'other', 'safe');
+    engine.markToolExecuting(toolCallId);
     const stats = engine.preConnectRecovery();
     const tc = db.raw.prepare('SELECT status FROM tool_calls WHERE conversation_key = ?').get('key-tc-safe') as any;
     expect(tc.status).toBe('replayed');
@@ -795,20 +793,16 @@ describe('durability.ts uncovered-branch coverage', () => {
   });
 
   it('preConnectRecovery marks read_only tool call as replayed', () => {
-    db.raw.exec(
-      `INSERT INTO tool_calls (conversation_key, tool_name, tool_input, status, replay_policy)
-       VALUES ('key-tc-ro', 'list_files', '{}', 'executing', 'read_only')`,
-    );
+    const toolCallId = engine.recordToolCall('key-tc-ro', 'list_files', 'other', 'read_only');
+    engine.markToolExecuting(toolCallId);
     engine.preConnectRecovery();
     const tc = db.raw.prepare('SELECT status FROM tool_calls WHERE conversation_key = ?').get('key-tc-ro') as any;
     expect(tc.status).toBe('replayed');
   });
 
   it('preConnectRecovery quarantines unsafe tool call with no outbound_op_id', () => {
-    db.raw.exec(
-      `INSERT INTO tool_calls (conversation_key, tool_name, tool_input, status, replay_policy)
-       VALUES ('key-tc-uns', 'send_message', '{}', 'executing', 'unsafe')`,
-    );
+    const toolCallId = engine.recordToolCall('key-tc-uns', 'send_message', 'messaging', 'unsafe');
+    engine.markToolExecuting(toolCallId);
     const stats = engine.preConnectRecovery();
     const tc = db.raw.prepare('SELECT status FROM tool_calls WHERE conversation_key = ?').get('key-tc-uns') as any;
     expect(tc.status).toBe('quarantined');
@@ -820,10 +814,9 @@ describe('durability.ts uncovered-branch coverage', () => {
       conversationKey: 'key-tc-op', chatJid: '15550000005@s.whatsapp.net', opType: 'text',
       payload: '{"text":"x"}', replayPolicy: 'unsafe',
     });
-    db.raw.exec(
-      `INSERT INTO tool_calls (conversation_key, tool_name, tool_input, status, replay_policy, outbound_op_id)
-       VALUES ('key-tc-op', 'send_message', '{}', 'executing', 'unsafe', ${opId})`,
-    );
+    const toolCallId = engine.recordToolCall('key-tc-op', 'send_message', 'messaging', 'unsafe');
+    engine.markToolExecuting(toolCallId);
+    db.raw.prepare('UPDATE tool_calls SET outbound_op_id = ? WHERE id = ?').run(opId, toolCallId);
     const stats = engine.preConnectRecovery();
     // Tool call is NOT replayed or quarantined — left for outbound reconciliation.
     const tc = db.raw.prepare('SELECT status FROM tool_calls WHERE conversation_key = ?').get('key-tc-op') as any;

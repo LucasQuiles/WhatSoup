@@ -2731,19 +2731,27 @@ describe('POST /send — Authorization header check', () => {
     expect(status).toBe(200);
     expect(JSON.parse(body).ok).toBe(true);
     const rows = db.raw
-      .prepare('SELECT line, caller, chat_jid, target_kind, status, text_length FROM outbound_sends')
+      .prepare(`
+        SELECT caller, target_kind, outcome_code, failure_code, failure_stage,
+               mutation_state, evidence_coverage, logical_attempt_count,
+               provider_submission_count
+        FROM outbound_sends
+      `)
       .all() as Array<Record<string, unknown>>;
     expect(rows).toEqual([{
-      line: 'test-line',
       caller: 'health',
-      chat_jid: '15550100001@s.whatsapp.net',
       target_kind: 'chatJid',
-      status: 'sent',
-      text_length: 'hello audit'.length,
+      outcome_code: 'submitted',
+      failure_code: null,
+      failure_stage: 'ack_received',
+      mutation_state: 'acknowledged',
+      evidence_coverage: 'typed',
+      logical_attempt_count: 1,
+      provider_submission_count: 1,
     }]);
   });
 
-  it('surfaces the latest confirmed outbound send in health', async () => {
+  it('surfaces bounded aggregate outbound evidence without destination or provider identifiers', async () => {
     process.env.WHATSOUP_HEALTH_TOKEN = TEST_HEALTH_TOKEN;
     const payload = JSON.stringify({ chatJid: '15550100001@s.whatsapp.net', text: 'hello health proof' });
 
@@ -2756,9 +2764,18 @@ describe('POST /send — Authorization header check', () => {
     expect(status).toBe(200);
     const json = JSON.parse(body);
     expect(json.outbound_sends).toEqual({
+      readable: true,
+      total: 1,
+      intent: 0,
+      submitted: 1,
+      confirmed: 0,
+      failed_not_sent: 0,
+      ambiguous: 0,
+      legacy_unclassified: 0,
       latest_successful_send_at: expect.stringMatching(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/),
-      latest_successful_transport_id: null,
     });
+    expect(body).not.toContain('15550100001@s.whatsapp.net');
+    expect(body).not.toContain('latest_successful_transport_id');
   });
 
   it('audits a failed health send exactly once', async () => {
@@ -2773,15 +2790,202 @@ describe('POST /send — Authorization header check', () => {
     expect(status).toBe(500);
     expect(JSON.parse(body).error).toBe('transport unavailable');
     const rows = db.raw
-      .prepare('SELECT caller, chat_jid, target_kind, status, error FROM outbound_sends')
+      .prepare(`
+        SELECT caller, target_kind, outcome_code, failure_code, failure_stage,
+               mutation_state, retryable, evidence_coverage
+        FROM outbound_sends
+      `)
       .all() as Array<Record<string, unknown>>;
     expect(rows).toEqual([{
       caller: 'health',
-      chat_jid: '15550100001@s.whatsapp.net',
       target_kind: 'chatJid',
-      status: 'failed',
-      error: 'transport unavailable',
+      outcome_code: 'ambiguous',
+      failure_code: 'unknown',
+      failure_stage: 'unknown',
+      mutation_state: 'unknown',
+      retryable: 0,
+      evidence_coverage: 'untyped',
     }]);
+  });
+
+  it('reports unreadable outbound evidence as unknown rather than zero', async () => {
+    process.env.WHATSOUP_HEALTH_TOKEN = TEST_HEALTH_TOKEN;
+    db.raw.exec('DROP TABLE outbound_sends');
+
+    const { status, body } = await healthReq(port);
+    expect(status).toBe(200);
+    const json = JSON.parse(body);
+    expect(json.status).toBe('degraded');
+    expect(json.status_reasons).toContain('durability_evidence_unreadable');
+    expect(json.degradation_causes).toContain('durability_evidence_unreadable');
+    expect(json.outbound_sends).toEqual({
+      readable: false,
+      total: null,
+      intent: null,
+      submitted: null,
+      confirmed: null,
+      failed_not_sent: null,
+      ambiguous: null,
+      legacy_unclassified: null,
+      latest_successful_send_at: null,
+    });
+  });
+
+  it('surfaces aggregate tool durability and process-local write-loss telemetry', async () => {
+    process.env.WHATSOUP_HEALTH_TOKEN = TEST_HEALTH_TOKEN;
+    db.raw.prepare(`
+      INSERT INTO tool_calls (
+        conversation_key, tool_name, tool_group, tool_input, status, result,
+        replay_policy, outcome_code, retry_disposition, operator_action,
+        evidence_coverage
+      ) VALUES (
+        'conversation-health', 'search_messages', 'search', '[metadata-only]',
+        'pending', NULL, 'read_only', 'not_terminal', 'not_applicable',
+        'none', 'complete'
+      )
+    `).run();
+    deps.runtime = {
+      getHealthSnapshot: () => ({ status: 'healthy', details: {} }),
+      getToolDurabilityTelemetrySnapshot: () => ({
+        observed: true,
+        totalWriteLosses: 2,
+        byStage: { record: 1, execute: 0, complete: 1, deny: 0 },
+        firstLossAt: 1_721_000_000_000,
+        lastLossAt: 1_721_000_001_000,
+      }),
+    } as unknown as HealthDeps['runtime'];
+
+    const { status, body } = await healthReq(port);
+    expect(status).toBe(200);
+    expect(JSON.parse(body).tool_durability).toEqual({
+      readable: true,
+      total: 1,
+      open: 1,
+      terminal: 0,
+      failures: 0,
+      legacy_unclassified: 0,
+      runtime_write_losses: {
+        observed: true,
+        totalWriteLosses: 2,
+        byStage: { record: 1, execute: 0, complete: 1, deny: 0 },
+        firstLossAt: 1_721_000_000_000,
+        lastLossAt: 1_721_000_001_000,
+      },
+    });
+  });
+
+  it('reports unreadable tool durability as unknown and retains runtime observation', async () => {
+    process.env.WHATSOUP_HEALTH_TOKEN = TEST_HEALTH_TOKEN;
+    db.raw.exec('DROP TABLE tool_calls');
+    deps.runtime = {
+      getHealthSnapshot: () => ({ status: 'healthy', details: {} }),
+      getToolDurabilityTelemetrySnapshot: () => ({
+        observed: true,
+        totalWriteLosses: 0,
+        byStage: { record: 0, execute: 0, complete: 0, deny: 0 },
+        firstLossAt: null,
+        lastLossAt: null,
+      }),
+    } as unknown as HealthDeps['runtime'];
+
+    const { status, body } = await healthReq(port);
+    expect(status).toBe(200);
+    const json = JSON.parse(body);
+    expect(json.status).toBe('degraded');
+    expect(json.status_reasons).toContain('durability_evidence_unreadable');
+    expect(json.degradation_causes).toContain('durability_evidence_unreadable');
+    expect(json.tool_durability).toEqual({
+      readable: false,
+      total: null,
+      open: null,
+      terminal: null,
+      failures: null,
+      legacy_unclassified: null,
+      runtime_write_losses: {
+        observed: true,
+        totalWriteLosses: 0,
+        byStage: { record: 0, execute: 0, complete: 0, deny: 0 },
+        firstLossAt: null,
+        lastLossAt: null,
+      },
+    });
+  });
+
+  it('surfaces the database-retention timer health snapshot', async () => {
+    process.env.WHATSOUP_HEALTH_TOKEN = TEST_HEALTH_TOKEN;
+    deps.getDatabaseRetentionHealth = () => ({
+      running: true,
+      state: 'succeeded',
+      consecutiveFailures: 0,
+      failureCode: null,
+      lastRunAt: 1_721_000_000_000,
+      lastSuccessAt: 1_721_000_000_100,
+      lastFailureAt: null,
+      lastResult: {
+        turnRecoveryJobs: 0,
+        turnTerminalRecords: 0,
+        inboundEvents: 0,
+        outboundOps: 0,
+        toolCalls: 3,
+        outboundSends: 4,
+        factExportQueue: 0,
+        memoryConsolidationRuns: 0,
+        metricsHourly: 0,
+        decryptionFailures: 0,
+        messages: 0,
+      },
+    });
+
+    const { status, body } = await healthReq(port);
+    expect(status).toBe(200);
+    expect(JSON.parse(body).retention.database).toEqual(deps.getDatabaseRetentionHealth());
+  });
+
+  it('degrades health for a failed database-retention snapshot', async () => {
+    process.env.WHATSOUP_HEALTH_TOKEN = TEST_HEALTH_TOKEN;
+    deps.getDatabaseRetentionHealth = () => ({
+      running: true,
+      state: 'failed',
+      consecutiveFailures: 2,
+      failureCode: 'retention_failed',
+      lastRunAt: 1_721_000_000_000,
+      lastSuccessAt: 1_720_000_000_000,
+      lastFailureAt: 1_721_000_000_100,
+      lastResult: null,
+    });
+
+    const { status, body } = await healthReq(port);
+    const json = JSON.parse(body);
+    expect(status).toBe(200);
+    expect(json.status).toBe('degraded');
+    expect(json.status_reasons).toContain('database_retention_failed');
+    expect(json.degradation_causes).toContain('database_retention_failed');
+    expect(json.retention.database).toEqual(deps.getDatabaseRetentionHealth());
+  });
+
+  it('degrades with bounded retention evidence when the snapshot getter throws', async () => {
+    process.env.WHATSOUP_HEALTH_TOKEN = TEST_HEALTH_TOKEN;
+    deps.getDatabaseRetentionHealth = () => {
+      throw new Error('CANARY-RETENTION-GETTER-FAILURE');
+    };
+
+    const { status, body } = await healthReq(port);
+    const json = JSON.parse(body);
+    expect(status).toBe(200);
+    expect(json.status).toBe('degraded');
+    expect(json.status_reasons).toContain('database_retention_failed');
+    expect(json.degradation_causes).toContain('database_retention_failed');
+    expect(json.retention.database).toEqual({
+      running: false,
+      state: 'failed',
+      consecutiveFailures: 1,
+      failureCode: 'retention_failed',
+      lastRunAt: null,
+      lastSuccessAt: null,
+      lastFailureAt: null,
+      lastResult: null,
+    });
+    expect(body).not.toContain('CANARY-RETENTION-GETTER-FAILURE');
   });
 
   it('returns 401 when no WHATSOUP_HEALTH_TOKEN is set (fail-closed)', async () => {

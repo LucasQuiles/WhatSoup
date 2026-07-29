@@ -1476,7 +1476,7 @@ If a profile has `linkPreview` and a request also sends `link_preview`, the requ
 
 ### Read Outbound Send Audit
 
-Every MCP `send_message`, health `/send`, and Reply Guarantee Protocol fallback attempt creates one row in the instance-local `outbound_sends` table. The public read surface is the global MCP `read_outbound_sends` tool.
+Every MCP `send_message`, health `/send`, and Reply Guarantee Protocol fallback attempt creates one metadata-only row in the instance-local `outbound_sends` table. The global `read_outbound_sends` tool reads bounded projections; the sensitive global `maintain_outbound_audit` tool previews or applies terminal-row retention.
 
 Query recent rows through the global MCP socket:
 
@@ -1490,16 +1490,16 @@ printf '%s\n%s\n' \
   | WHATSOUP_SOCKET="$SOCKET" node --experimental-strip-types deploy/mcp/whatsoup-proxy.ts
 ```
 
-Filter by exact raw JID when needed. Aliases are not resolved on audit reads:
+Filter by the exact opaque receipt returned by `send_message`:
 
 ```json
 {
   "limit": 25,
-  "chatJid": "EXAMPLE_JID@s.whatsapp.net"
+  "auditReceipt": "0123456789abcdef0123456789abcdef"
 }
 ```
 
-The tool returns `{ "outbound_sends": [...] }`. Rows expose `id`, `chat_jid`, `text_hash`, `text_length`, `status`, `created_at`, and optional `profile`, `transport_id`, `error_text`, and `sent_at`; optional fields are omitted when the DB value is null. Message bodies are never returned.
+The tool returns `{ "outbound_sends": [...] }`. Rows expose the receipt, caller and target-kind classes, closed outcome/failure/mutation evidence, bounded counters, evidence coverage, and timestamps. `submitted` means provider acknowledgement, not recipient delivery. Destinations, aliases, profiles, message content/fingerprints/lengths, provider IDs, and error prose are never stored or returned.
 
 For deeper history than the MCP cap of 100 rows, query the instance DB directly:
 
@@ -1508,31 +1508,34 @@ INSTANCE=primary-line
 DB=~/.local/share/whatsoup/instances/$INSTANCE/bot.db
 
 sqlite3 "$DB" \
-  "SELECT id, chat_jid, status, profile, transport_message_id, error, created_at, completed_at
+  "SELECT id, audit_receipt, caller, target_kind, outcome_code,
+          failure_code, failure_stage, mutation_state, retryable,
+          evidence_coverage, created_at, completed_at
      FROM outbound_sends
     ORDER BY created_at DESC, id DESC
     LIMIT 200;"
 ```
 
-The direct SQL columns are the raw schema names. The MCP API aliases `transport_message_id` to `transport_id`, `completed_at` to `sent_at`, and `error` to `error_text`.
-
 Common operator queries:
 
 ```bash
-# Failed sends in the last hour
+# Failure and ambiguity evidence in the last hour
 sqlite3 "$DB" \
-  "SELECT id, chat_jid, profile, error, created_at, completed_at
+  "SELECT outcome_code, failure_code, failure_stage, mutation_state,
+          retryable, evidence_coverage, COUNT(*) AS count
      FROM outbound_sends
-    WHERE status = 'failed'
+    WHERE outcome_code IN ('failed_not_sent', 'ambiguous', 'legacy_unclassified')
       AND created_at >= datetime('now', '-1 hour')
-    ORDER BY created_at DESC;"
+    GROUP BY outcome_code, failure_code, failure_stage, mutation_state,
+             retryable, evidence_coverage
+    ORDER BY outcome_code, failure_code;"
 
-# Sends grouped by profile and status
+# Attempts grouped by caller, target kind, and outcome
 sqlite3 "$DB" \
-  "SELECT COALESCE(profile, '(none)') AS profile, status, COUNT(*) AS count
+  "SELECT caller, target_kind, outcome_code, COUNT(*) AS count
      FROM outbound_sends
-    GROUP BY profile, status
-    ORDER BY profile, status;"
+    GROUP BY caller, target_kind, outcome_code
+    ORDER BY caller, target_kind, outcome_code;"
 
 # Hourly audit row growth for the last day
 sqlite3 "$DB" \
@@ -1542,10 +1545,19 @@ sqlite3 "$DB" \
     GROUP BY hour
     ORDER BY hour DESC;"
 
-# Optional manual prune after backup; retention is currently unbounded.
-sqlite3 "$DB" \
-  "DELETE FROM outbound_sends WHERE created_at < datetime('now', '-30 days');"
+# Preview supported terminal retention (no mutation).
+printf '%s\n%s\n' \
+  '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"ops-runbook","version":"1.0.0"}}}' \
+  '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"maintain_outbound_audit","arguments":{"dry_run":true}}}' \
+  | WHATSOUP_SOCKET="$SOCKET" node --experimental-strip-types deploy/mcp/whatsoup-proxy.ts
 ```
+
+The automatic and manual paths use the same fixed 30-day/10,000-terminal-row policy;
+callers cannot override its age or capacity bounds. Unresolved `intent` rows are never
+age- or cap-pruned. Use `dry_run:false` only after reviewing the preview. Do not replace
+this contract with direct ad hoc deletes.
+
+Migration 51 removes old raw columns from the live schema, but migration success alone is not forensic erasure. SQLite free pages, WAL files, backups, and snapshots may retain prior bytes; schedule any `VACUUM`, `secure_delete` policy, or backup retirement separately under the deployment's maintenance controls.
 
 ---
 
@@ -1560,9 +1572,18 @@ sqlite3 "$DB" \
 | Enrichment staleness | `health.enrichment.last_run` | Null or >15 min ago (chat instances only) |
 | Quarantined messages | `health.durability.quarantinedOutbound` | >0 (means message was lost) |
 | Pending outbound | `health.durability.pendingOutbound` | >50 (queue buildup) |
+| Outbound audit readable | `health.outbound_sends.readable` | `false` |
+| Tool evidence readable | `health.tool_durability.readable` | `false` |
+| Tool evidence write loss | `health.tool_durability.runtime_write_losses.totalWriteLosses` | >0 |
+| Database retention | `health.retention.database.state` / `consecutiveFailures` / `failureCode` | `state=failed` (`failureCode=retention_failed`) |
 | Access list backlog | `health.access_control.pending_count` | >10 (new users queued) |
 | Service restarts | `systemctl status` / journald | Restarted >3 times in 10 min |
 | Disk space | Log directory size | >500MB (10 rolling files) |
+
+If either durability ledger cannot be read, authenticated health reports null aggregates,
+sets `status=degraded`, and includes `durability_evidence_unreadable`. A failed retention
+sweep remains degraded with `database_retention_failed` until a later successful sweep
+resets the consecutive-failure count.
 
 ### BOT ERRORS Source Ownership
 

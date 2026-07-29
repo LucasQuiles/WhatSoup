@@ -95,7 +95,7 @@ describe('doc drift check', () => {
       staleDoc,
       currentToolsDoc
         .replace('| [substrate.ts](#substratets) | 21 |', '| [substrate.ts](#substratets) | 18 |')
-        .replace('| **Total** | **165** |', '| **Total** | **160** |'),
+        .replace('| **Total** | **166** |', '| **Total** | **160** |'),
       'utf8',
     );
 

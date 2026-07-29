@@ -579,11 +579,13 @@ Keep instance `config.json` files private. Profile names are safe to document, b
 
 ### Outbound Send Audit
 
-Outbound send auditing is automatic and has no `config.json` field. Migration 22 creates an `outbound_sends` table in each instance's SQLite database on startup.
+Outbound send auditing is automatic and has no `config.json` field. Migration 22 introduced the per-instance table; migration 51 replaces its original raw schema with a metadata-only evidence contract.
 
-The table is per instance. It records outbound send intent and outcome for MCP `send_message`, health `/send`, and Reply Guarantee Protocol fallbacks, including the resolved raw chat JID, whether the request used a raw `chatJid` or alias `to`, the selected `profile` when present, SHA-256 hash of the final message text, text length, status, transport message id when available, and error text for failed sends.
+Each logical attempt receives a random opaque receipt. Rows retain only caller and target-kind classes, closed outcome/failure/mutation evidence, bounded counters, evidence coverage, and timestamps. `submitted` means the provider acknowledged the request; it does not assert recipient delivery. Destinations, aliases, profiles, body fingerprints, exact lengths, provider IDs, and error prose are excluded.
 
-Message bodies are not stored in `outbound_sends`. Retention is currently unbounded; prune manually after backup if local policy requires it.
+The unified database retention sweep removes terminal rows older than 30 days and keeps at most 10,000 terminal rows by default. Unresolved `intent` rows are never pruned by those bounds. Operators can preview or apply the same policy through the sensitive global `maintain_outbound_audit` tool.
+
+Authenticated `GET /health` exposes aggregate-only `outbound_sends`, `tool_durability`, and `retention.database` blocks. A failed database observation reports `readable: false` and null counts rather than manufacturing zero. No receipt, destination, provider ID, or error prose appears in these blocks.
 
 ### `memory`
 
@@ -1687,6 +1689,10 @@ All migration sources are in `src/core/database.ts` unless noted otherwise.
 | 47 | Adds independently attested update and replacement fences for a recovery-linked `inbound_events` receipt. Recovery replay derives trusted identity and chronology from that journal row, so direct `seq`/`received_at` changes and replacement conflicts from either `INSERT OR REPLACE` or `UPDATE OR REPLACE` by linked sequence or message ID fail closed even when SQLite recursive triggers are disabled. Unlinked receipt correction or replacement, linked no-op updates, and unrelated inbound lifecycle updates remain allowed. The migration validates parent tables and columns, rejects any drifted same-name trigger, and preserves the deployed migration-40 identity trigger unchanged (`src/core/database-migration-47.ts`). |
 | 48 | Adds nullable `recovery_runs` failure-context columns — `error_kind` (the failing phase, e.g. `reconcile_maybe_sent_outbound`) and `error_message` (the primary error text) — so a failed recovery run carries a durable, queryable reason instead of burying it in the free-text `notes` JSON. Both are NULL for runs that did not fail (started/completed); no CHECK, no default, no backfill. Migration 45 (#2139) recorded THAT a run failed; this records WHY (`src/core/database-migration-48.ts`, #1786 salvage). |
 | 49 | Adds `memory_consolidation_runs`, a content-free execution-receipt table for typed consolidation mode/status/stage/cause, retryability, evidence coverage, bounded aggregate counters, overlap skips, absolute leases, and attempt/completion/success timestamps. Strict CHECK constraints exclude partial terminal state and require `success_at` exactly for successful/no-work outcomes; retention keeps the newest 100 receipts, removes terminal rows older than 30 days, and enforces a 10,000-row terminal cap (`src/core/database-migration-49.ts`). |
+| 50 | Rebuilds `tool_calls` as metadata-only durability evidence. Historical input/result/error text is replaced with fixed markers without parsing prose; new rows use closed tool-group, outcome, failure-stage, retry-disposition, operator-action, and evidence-coverage vocabularies (`src/core/database-migration-50.ts`). |
+| 51 | Rebuilds `outbound_sends` as destination-free metadata-only audit evidence with random opaque receipts, closed outcomes, bounded counters, and typed/untyped/legacy coverage. Historical rows become `legacy_unclassified` without interpreting old status or error prose (`src/core/database-migration-51.ts`). |
+
+Migrations 50 and 51 logically remove the old values from live rows and the current schema. SQLite may still retain prior bytes in free pages, WAL files, backups, or storage-layer snapshots. Do not claim forensic erasure from migration success alone. Physical compaction such as `VACUUM`, `secure_delete` policy changes, backup rotation, or snapshot retirement must be separately scheduled and operator-approved for the deployment.
 
 Recovery plans, runs, disposition links, delivery corroboration, and closure witnesses are retained
 as an indefinite audit ledger. There is currently no TTL or destructive pruning contract for these

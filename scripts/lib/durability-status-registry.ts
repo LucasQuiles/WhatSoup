@@ -191,11 +191,21 @@ export const REGISTRY: DurabilityStatusEntry[] = [
   },
   {
     table: 'outbound_sends',
-    statusColumn: 'status',
-    vocabulary: ['intent', 'sent', 'failed'],
+    statusColumn: 'outcome_code',
+    vocabulary: [
+      'intent',
+      'submitted',
+      'confirmed',
+      'failed_not_sent',
+      'ambiguous',
+      'legacy_unclassified',
+    ],
     vocabularySource: 'sql-check',
-    terminalFailureValues: ['failed'],
-    writerSites: ['src/core/outbound-sends.ts'], // markFailed prepared statement
+    terminalFailureValues: ['failed_not_sent', 'ambiguous', 'legacy_unclassified'],
+    writerSites: [
+      'src/core/durability-evidence-contract.ts',
+      'src/core/database-migration-51.ts',
+    ],
   },
   {
     table: 'scheduled_messages',
@@ -502,8 +512,16 @@ export const SELF_PROVISIONED: SelfProvisionedEntry[] = [
  */
 export const DISCOVERY_EXCLUSIONS: DiscoveryExclusionEntry[] = [
   {
+    table: 'tool_calls_v50',
+    reason: 'migration-50 transient create-copy-drop-rename artifact; the rebuilt table persists only after being renamed to tool_calls.',
+  },
+  {
     table: 'outbound_sends_v26',
     reason: "migration-26 transient create->copy->rename artifact (src/core/database.ts:521-575): outbound_sends_v26 is CREATEd, populated from the old outbound_sends via INSERT...SELECT, then the old table is DROPped and this one RENAMEd to outbound_sends — it never exists as a persisted table under its own name, so it never appears in migratedSchemaSnapshot() and needs no SELF_PROVISIONED entry.",
+  },
+  {
+    table: 'outbound_sends_v51',
+    reason: 'migration-51 transient create-copy-drop-rename artifact; the rebuilt table persists only after being renamed to outbound_sends.',
   },
 ];
 

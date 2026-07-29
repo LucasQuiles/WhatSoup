@@ -42,6 +42,12 @@ import {
   validatePositiveSafeInteger,
 } from './turn-recovery-store.ts';
 import {
+  normalizeToolDurabilityGroup,
+  TOOL_INPUT_MARKER,
+  TOOL_RESULT_MARKERS,
+  type ToolCompletionEvidence,
+} from './durability-evidence-contract.ts';
+import {
   SessionLifecycleStore,
   type BeginFreshSessionLifecycleParams,
   type CloseSessionLifecycleFailureParams,
@@ -130,7 +136,6 @@ const STATUS_OP_TTL_MS = 30 * 60 * 1000;
 export type OutboundStatus = 'pending' | 'sending' | 'submitted' | 'echoed' | 'maybe_sent' | 'failed_permanent' | 'quarantined';
 type InboundStatus = 'pending' | 'processing' | 'turn_done' | 'complete' | 'failed';
 export type SessionStatus = 'active' | 'suspended' | 'orphaned' | 'ended';
-type ToolCallStatus = 'pending' | 'executing' | 'complete' | 'error' | 'replayed' | 'quarantined';
 
 // ── SQLite row interfaces ──
 
@@ -481,12 +486,29 @@ export class DurabilityEngine {
            AND status IN ('submitted', 'maybe_sent', 'quarantined', 'failed_permanent')`,
       ),
       recordToolCall: prepare(
-        `INSERT INTO tool_calls (conversation_key, session_checkpoint_id, tool_name, tool_input, status, replay_policy)
-         VALUES (?, ?, ?, ?, 'pending', ?)`,
+        `INSERT INTO tool_calls (
+           conversation_key, session_checkpoint_id, tool_name, tool_group,
+           tool_input, status, replay_policy, outcome_code,
+           retry_disposition, operator_action, evidence_coverage
+         )
+         VALUES (?, ?, ?, ?, ?, 'pending', ?, 'not_terminal',
+                 'not_applicable', 'none', 'complete')`,
       ),
       markToolExecuting: prepare(`UPDATE tool_calls SET status = 'executing' WHERE id = ?`),
       markToolComplete: prepare(
-        `UPDATE tool_calls SET status = ?, result = ?, completed_at = datetime('now'), outbound_op_id = ? WHERE id = ?`,
+        `UPDATE tool_calls
+         SET status = ?,
+             result = ?,
+             completed_at = datetime('now'),
+             outbound_op_id = ?,
+             outcome_code = ?,
+             failure_code = ?,
+             failure_stage = ?,
+             retry_disposition = ?,
+             operator_action = ?,
+             evidence_coverage = ?,
+             duration_ms = ?
+         WHERE id = ?`,
       ),
       accumulateSessionTokens: prepare(
         `UPDATE agent_sessions
@@ -625,10 +647,32 @@ export class DurabilityEngine {
          FROM tool_calls WHERE status IN ('executing', 'pending')`,
       ),
       markToolReplayed: prepare(
-        `UPDATE tool_calls SET status = 'replayed', completed_at = datetime('now') WHERE id = ?`,
+        `UPDATE tool_calls
+         SET status = 'replayed',
+             result = ?,
+             completed_at = datetime('now'),
+             outcome_code = 'recovered_replayed',
+             failure_code = NULL,
+             failure_stage = NULL,
+             retry_disposition = 'not_applicable',
+             operator_action = 'none',
+             evidence_coverage = 'complete',
+             duration_ms = NULL
+         WHERE id = ?`,
       ),
       markRecoveredToolQuarantined: prepare(
-        `UPDATE tool_calls SET status = 'quarantined', completed_at = datetime('now') WHERE id = ?`,
+        `UPDATE tool_calls
+         SET status = 'quarantined',
+             result = ?,
+             completed_at = datetime('now'),
+             outcome_code = 'recovery_quarantined',
+             failure_code = 'unknown',
+             failure_stage = 'recovery',
+             retry_disposition = 'not_retryable',
+             operator_action = 'inspect',
+             evidence_coverage = 'partial',
+             duration_ms = NULL
+         WHERE id = ?`,
       ),
       getProcessingInboundEvents: prepare(
         `SELECT i.seq FROM inbound_events i
@@ -1660,9 +1704,20 @@ export class DurabilityEngine {
   }
 
   // ── Tool calls ──
-  recordToolCall(conversationKey: string, toolName: string, toolInput: string, replayPolicy: string, checkpointId?: number): number {
+  recordToolCall(
+    conversationKey: string,
+    toolName: string,
+    toolGroup: string,
+    replayPolicy: string,
+    checkpointId?: number,
+  ): number {
     const result = this.statements.recordToolCall.run(
-      conversationKey, checkpointId ?? null, toolName, toolInput, replayPolicy,
+      conversationKey,
+      checkpointId ?? null,
+      toolName,
+      normalizeToolDurabilityGroup(toolGroup),
+      TOOL_INPUT_MARKER,
+      replayPolicy,
     );
     const id = Number(result.lastInsertRowid);
     log.debug({ id, toolName, replayPolicy }, 'recordToolCall');
@@ -1673,13 +1728,68 @@ export class DurabilityEngine {
     this.statements.markToolExecuting.run(id);
   }
 
-  // #1787: isError is a required discriminator, not an optional flag — the
-  // three call sites (success, thrown, deny) must each make a conscious
-  // choice rather than silently defaulting to 'complete'. This is the single
-  // chokepoint that labels every terminal tool-call outcome.
-  markToolComplete(id: number, result: string, isError: boolean, outboundOpId?: number): void {
-    const status: ToolCallStatus = isError ? 'error' : 'complete';
-    this.statements.markToolComplete.run(status, result, outboundOpId ?? null, id);
+  markToolComplete(id: number, completion: ToolCompletionEvidence, outboundOpId?: number): void;
+  /** @deprecated Use the metadata-only ToolCompletionEvidence overload. */
+  markToolComplete(id: number, legacyResult: string, isError: boolean, outboundOpId?: number): void;
+  markToolComplete(
+    id: number,
+    completionOrLegacyResult: ToolCompletionEvidence | string,
+    outboundOpIdOrLegacyIsError?: number | boolean,
+    legacyOutboundOpId?: number,
+  ): void {
+    const completion: ToolCompletionEvidence = typeof completionOrLegacyResult === 'string'
+      ? outboundOpIdOrLegacyIsError === true
+        ? {
+            isError: true,
+            durationMs: 0,
+            failure: {
+              failureCode: 'unknown',
+              failureStage: 'unknown',
+              retryDisposition: 'unknown',
+              operatorAction: 'inspect',
+              evidenceCoverage: 'partial',
+            },
+          }
+        : { isError: false, durationMs: 0, evidenceCoverage: 'partial' }
+      : completionOrLegacyResult;
+    const outboundOpId = typeof completionOrLegacyResult === 'string'
+      ? legacyOutboundOpId
+      : typeof outboundOpIdOrLegacyIsError === 'number'
+        ? outboundOpIdOrLegacyIsError
+        : undefined;
+    const durationMs = Number.isSafeInteger(completion.durationMs) && completion.durationMs >= 0
+      ? completion.durationMs
+      : 0;
+    if (completion.isError) {
+      const failure = completion.failure;
+      this.statements.markToolComplete.run(
+        'error',
+        TOOL_RESULT_MARKERS.error,
+        outboundOpId ?? null,
+        'failure',
+        failure.failureCode,
+        failure.failureStage,
+        failure.retryDisposition,
+        failure.operatorAction,
+        failure.evidenceCoverage,
+        durationMs,
+        id,
+      );
+      return;
+    }
+    this.statements.markToolComplete.run(
+      'complete',
+      TOOL_RESULT_MARKERS.success,
+      outboundOpId ?? null,
+      'success',
+      null,
+      null,
+      'not_applicable',
+      'none',
+      completion.evidenceCoverage ?? 'complete',
+      durationMs,
+      id,
+    );
   }
 
   // ── Session checkpoints ──
@@ -1884,7 +1994,7 @@ export class DurabilityEngine {
             'preConnectRecovery: executing tool call has outbound_op_id, delegating to outbound reconciliation',
           );
         } else if (tc.replay_policy === 'safe' || tc.replay_policy === 'read_only') {
-          this.statements.markToolReplayed.run(tc.id);
+          this.statements.markToolReplayed.run(TOOL_RESULT_MARKERS.recovery, tc.id);
           stats.toolCallsReplayed += 1;
           log.info(
             { toolCallId: tc.id, toolName: tc.tool_name },
@@ -1892,7 +2002,7 @@ export class DurabilityEngine {
           );
         } else {
           // unsafe without an outbound op: quarantine
-          this.statements.markRecoveredToolQuarantined.run(tc.id);
+          this.statements.markRecoveredToolQuarantined.run(TOOL_RESULT_MARKERS.recovery, tc.id);
           stats.toolCallsQuarantined += 1;
           log.warn(
             { toolCallId: tc.id, toolName: tc.tool_name, replayPolicy: tc.replay_policy },

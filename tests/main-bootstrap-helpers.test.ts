@@ -78,6 +78,7 @@ type MainHarness = Awaited<ReturnType<typeof importMainWithMocks>>;
 type HealthServerDepsForTest = {
   handleAccessDecision: (subjectType: string, subjectId: string, action: string) => Promise<void>;
   getEnrichmentStats: () => unknown;
+  getDatabaseRetentionHealth: () => unknown;
 };
 
 type CapturedTimer = {
@@ -242,7 +243,11 @@ async function importMainWithMocks(options: {
   const memoryScheduler = { start: vi.fn(), stop: vi.fn(async () => {}) };
   const mediaRetentionTimer = { start: vi.fn(), stop: vi.fn() };
   const processTmpRetentionTimer = { start: vi.fn(), stop: vi.fn() };
-  const databaseRetentionTimer = { start: vi.fn(), stop: vi.fn() };
+  const databaseRetentionTimer = {
+    start: vi.fn(),
+    stop: vi.fn(),
+    getHealthSnapshot: vi.fn(() => ({ running: true })),
+  };
   const messageScheduler = { recoverStale: vi.fn(), start: vi.fn(), stop: vi.fn() };
   const triggerPoller = { start: vi.fn(), stop: vi.fn() };
   const durability = {

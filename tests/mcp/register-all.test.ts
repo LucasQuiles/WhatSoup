@@ -12,8 +12,8 @@ import type { ToolDeclaration } from '../../src/mcp/types.ts';
 
 // Baseline tool count for a non-Pinecone build.
 // Bumped from a loose `>= 100` to an exact baseline so a missing module is detected.
-// 162 always-registered + 1 conditional `knowledge_search` when Pinecone is configured.
-const BASELINE_TOOL_COUNT = 162;
+// 163 always-registered + 1 conditional `knowledge_search` when Pinecone is configured.
+const BASELINE_TOOL_COUNT = 163;
 
 // ---------------------------------------------------------------------------
 // Minimal ConnectionManager mock — mirrors what tool-registration.test.ts uses
@@ -84,6 +84,7 @@ describe('registerAllTools', () => {
       'list_scheduled',
       'cancel_scheduled',
       'read_outbound_sends',
+      'maintain_outbound_audit',
     ];
     for (const name of criticalInventory) {
       expect(names.has(name), `critical tool "${name}" missing from registry`).toBe(true);

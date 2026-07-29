@@ -125,13 +125,19 @@ describe('R1 sensitive-tool gate', () => {
     const res = await registry.call('sensitive_probe', {}, session);
     // Caller still gets the uniform non-disclosing reply...
     expect(res.content[0].text).toBe('Unknown tool: sensitive_probe');
-    // ...but the attempt is recorded: record -> executing -> complete(error).
-    expect(calls.map((c) => c.m)).toEqual(['record', 'exec', 'complete']);
+    // ...but the denied attempt is recorded and terminalized without entering execution.
+    expect(calls.map((c) => c.m)).toEqual(['record', 'complete']);
     expect(String(calls[0].args[1])).toBe('sensitive_probe'); // toolName
-    expect(String(calls[2].args[1])).toContain('denied'); // completion text
+    expect(calls[1].args[1]).toMatchObject({
+      isError: true,
+      failure: {
+        failureCode: 'authorization_denied',
+        failureStage: 'authorization',
+      },
+    });
   });
 
-  it('does NOT durably record when there is no conversationKey (no orphan rows)', async () => {
+  it('records global calls under the global durability sentinel when conversationKey is absent', async () => {
     const registry = makeRegistry();
     registry.setSensitiveToolAuthorizer(() => false);
     let recorded = 0;
@@ -142,7 +148,7 @@ describe('R1 sensitive-tool gate', () => {
     };
     (registry as unknown as { setDurability: (d: unknown) => void }).setDurability(durability);
     await registry.call('sensitive_probe', {}, GUEST); // GUEST has no conversationKey
-    expect(recorded).toBe(0);
+    expect(recorded).toBe(1);
   });
 
 });

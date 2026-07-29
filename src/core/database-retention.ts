@@ -2,6 +2,7 @@ import { createChildLogger } from '../logger.ts';
 import type { Database } from './database.ts';
 import { withTransaction } from './db-tx.ts';
 import { deleteOldMessages } from './messages.ts';
+import { maintainOutboundSends } from './outbound-sends.ts';
 
 const log = createChildLogger('database:retention');
 
@@ -29,6 +30,10 @@ export interface DatabaseRetentionConfig {
   memoryConsolidationDays: number;
   /** Hard terminal-row cap; values below the 100-row recovery floor become 100. */
   memoryConsolidationMaxRows: number;
+  /** Age bound for terminal metadata-only outbound audit evidence. */
+  outboundSendDays: number;
+  /** Hard cap for terminal outbound audit evidence; unresolved intents are excluded. */
+  outboundSendMaxRows: number;
   /**
    * Retention window for the `messages` table and its orphaned `receipts`
    * rows (#1445 QR-012). Folded in from the standalone main.ts setInterval
@@ -47,11 +52,23 @@ export interface DatabaseRetentionResult {
   inboundEvents: number;
   outboundOps: number;
   toolCalls: number;
+  outboundSends: number;
   factExportQueue: number;
   memoryConsolidationRuns: number;
   metricsHourly: number;
   decryptionFailures: number;
   messages: number;
+}
+
+export interface DatabaseRetentionHealth {
+  running: boolean;
+  state: 'not_run' | 'succeeded' | 'failed';
+  consecutiveFailures: number;
+  failureCode: 'retention_failed' | null;
+  lastRunAt: number | null;
+  lastSuccessAt: number | null;
+  lastFailureAt: number | null;
+  lastResult: DatabaseRetentionResult | null;
 }
 
 export const DEFAULT_DATABASE_RETENTION: DatabaseRetentionConfig = {
@@ -62,6 +79,8 @@ export const DEFAULT_DATABASE_RETENTION: DatabaseRetentionConfig = {
   decryptionFailureDays: 30,
   memoryConsolidationDays: 30,
   memoryConsolidationMaxRows: 10_000,
+  outboundSendDays: 30,
+  outboundSendMaxRows: 10_000,
   messageRetentionDays: 30,
 };
 
@@ -218,6 +237,12 @@ export function runDatabaseRetention(
          AND COALESCE(completed_at, created_at) < datetime('now', ?)
     `).run(terminalCutoff));
 
+    const outboundSends = maintainOutboundSends(db.raw, {
+      mode: 'apply',
+      terminalDays: retention.outboundSendDays,
+      terminalMaxRows: retention.outboundSendMaxRows,
+    }).deletedRows;
+
     const factExportQueue = changes(db.raw.prepare(`
       DELETE FROM fact_export_queue
        WHERE status = 'exported'
@@ -294,6 +319,7 @@ export function runDatabaseRetention(
       inboundEvents,
       outboundOps,
       toolCalls,
+      outboundSends,
       factExportQueue,
       memoryConsolidationRuns,
       metricsHourly,
@@ -312,6 +338,13 @@ export class DatabaseRetentionTimer {
   private timer: ReturnType<typeof setInterval> | null = null;
   private db: Database;
   private retention: DatabaseRetentionConfig;
+  private lastRunAt: number | null = null;
+  private lastSuccessAt: number | null = null;
+  private lastFailureAt: number | null = null;
+  private lastResult: DatabaseRetentionResult | null = null;
+  private state: DatabaseRetentionHealth['state'] = 'not_run';
+  private consecutiveFailures = 0;
+  private failureCode: DatabaseRetentionHealth['failureCode'] = null;
 
   constructor(
     db: Database,
@@ -339,7 +372,38 @@ export class DatabaseRetentionTimer {
     this.timer = null;
   }
 
+  getHealthSnapshot(): DatabaseRetentionHealth {
+    return {
+      running: this.timer !== null,
+      state: this.state,
+      consecutiveFailures: this.consecutiveFailures,
+      failureCode: this.failureCode,
+      lastRunAt: this.lastRunAt,
+      lastSuccessAt: this.lastSuccessAt,
+      lastFailureAt: this.lastFailureAt,
+      lastResult: this.lastResult === null ? null : { ...this.lastResult },
+    };
+  }
+
   async runCleanup(): Promise<DatabaseRetentionResult> {
-    return runDatabaseRetention(this.db, this.retention);
+    this.lastRunAt = Date.now();
+    try {
+      const result = runDatabaseRetention(this.db, this.retention);
+      this.lastSuccessAt = Date.now();
+      this.lastResult = { ...result };
+      this.state = 'succeeded';
+      this.consecutiveFailures = 0;
+      this.failureCode = null;
+      return result;
+    } catch (err) {
+      this.lastFailureAt = Date.now();
+      this.state = 'failed';
+      this.consecutiveFailures = Math.min(
+        Number.MAX_SAFE_INTEGER,
+        this.consecutiveFailures + 1,
+      );
+      this.failureCode = 'retention_failed';
+      throw err;
+    }
   }
 }

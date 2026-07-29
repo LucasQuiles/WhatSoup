@@ -651,16 +651,16 @@ describe('registry.ts uncovered-branch coverage', () => {
   it('records durability lifecycle (record → executing → complete) on a successful call', async () => {
     const calls: Array<{ method: string; args: unknown[] }> = [];
     const fakeDurability = {
-      recordToolCall: (conversationKey: string, toolName: string, input: string, replayPolicy: string) => {
+      recordToolCall: (conversationKey: string, toolName: string, group: string, replayPolicy: string) => {
         const id = 4242;
-        calls.push({ method: 'recordToolCall', args: [conversationKey, toolName, input, replayPolicy] });
+        calls.push({ method: 'recordToolCall', args: [conversationKey, toolName, group, replayPolicy] });
         return id;
       },
       markToolExecuting: (id: number) => {
         calls.push({ method: 'markToolExecuting', args: [id] });
       },
-      markToolComplete: (id: number, result: string) => {
-        calls.push({ method: 'markToolComplete', args: [id, result] });
+      markToolComplete: (id: number, completion: unknown) => {
+        calls.push({ method: 'markToolComplete', args: [id, completion] });
       },
     };
     registry.setDurability(fakeDurability as unknown as import('../../src/core/durability.ts').DurabilityEngine);
@@ -692,15 +692,15 @@ describe('registry.ts uncovered-branch coverage', () => {
 
   function recordingDurability(calls: Array<{ method: string; args: unknown[] }>) {
     return {
-      recordToolCall: (conversationKey: string, toolName: string, input: string, replayPolicy: string) => {
-        calls.push({ method: 'recordToolCall', args: [conversationKey, toolName, input, replayPolicy] });
+      recordToolCall: (conversationKey: string, toolName: string, group: string, replayPolicy: string) => {
+        calls.push({ method: 'recordToolCall', args: [conversationKey, toolName, group, replayPolicy] });
         return 99;
       },
       markToolExecuting: (id: number) => {
         calls.push({ method: 'markToolExecuting', args: [id] });
       },
-      markToolComplete: (id: number, result: string) => {
-        calls.push({ method: 'markToolComplete', args: [id, result] });
+      markToolComplete: (id: number, completion: unknown) => {
+        calls.push({ method: 'markToolComplete', args: [id, completion] });
       },
     } as unknown as import('../../src/core/durability.ts').DurabilityEngine;
   }
@@ -773,7 +773,7 @@ describe('registry.ts uncovered-branch coverage', () => {
     expect(chatResult.content[0].text).toContain('"echo": "hi"');
   });
 
-  it('marks tool complete with the error message when the handler throws an Error', async () => {
+  it('marks tool complete with bounded failure evidence when the handler throws an Error', async () => {
     const calls: Array<{ method: string; args: unknown[] }> = [];
     const fakeDurability = {
       recordToolCall: () => {
@@ -781,7 +781,7 @@ describe('registry.ts uncovered-branch coverage', () => {
         return 777;
       },
       markToolExecuting: (id: number) => calls.push({ method: 'markToolExecuting', args: [id] }),
-      markToolComplete: (id: number, result: string) => calls.push({ method: 'markToolComplete', args: [id, result] }),
+      markToolComplete: (id: number, completion: unknown) => calls.push({ method: 'markToolComplete', args: [id, completion] }),
     };
     registry.setDurability(fakeDurability as unknown as import('../../src/core/durability.ts').DurabilityEngine);
     registry.register(
@@ -801,7 +801,13 @@ describe('registry.ts uncovered-branch coverage', () => {
       makeSession({ tier: 'global', conversationKey: '15550000001@s.whatsapp.net' }),
     );
 
-    expect(calls[2].args[1]).toBe('error: boom');
+    expect(calls[2].args[1]).toMatchObject({
+      isError: true,
+      failure: {
+        failureCode: 'handler_failed',
+        failureStage: 'handler',
+      },
+    });
     expect(result.isError).toBe(true);
     expect(result.content[0].text).toBe('Tool "durable_fail" failed: boom');
   });
