@@ -5,13 +5,24 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import Enum
 import errno
-import fcntl
 import hashlib
 import json
 import os
 from pathlib import Path, PurePath, PurePosixPath
 import stat
-from typing import Any, Callable, Mapping, NoReturn
+from typing import Any, Callable, Mapping
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - exercised through capability simulation
+    fcntl = None  # type: ignore[assignment]
+
+
+_MAX_JSON_BYTES = 8 * 1024 * 1024
+_MAX_SAFE_INTEGER = (1 << 53) - 1
+_HAS_OPEN_DIR_FD = os.open in os.supports_dir_fd
+_HAS_LINK_DIR_FD = os.link in os.supports_dir_fd
+_HAS_LINK_NOFOLLOW = os.link in os.supports_follow_symlinks
 
 
 class DurabilityProof(str, Enum):
@@ -188,10 +199,6 @@ class ParentSyncResult:
         )
 
 
-def _not_implemented() -> NoReturn:
-    raise NotImplementedError("durable JSON publication is not implemented")
-
-
 def durable_json_target(
     *,
     trusted_root: os.PathLike[str] | str,
@@ -280,6 +287,8 @@ def _parent_authority_matches(target: DurableJsonTarget, parent_fd: int) -> bool
 def observe_json(target: DurableJsonTarget) -> JsonObservation:
     if not isinstance(target, DurableJsonTarget):
         raise DurableWriteError(ErrorClass.IDENTITY_TYPE.value)
+    if not getattr(os, "O_NOFOLLOW", 0) or not _HAS_OPEN_DIR_FD:
+        raise DurableWriteError(ErrorClass.UNSUPPORTED_CAPABILITY.value)
     parent_fd, leaf = _open_target_parent(target)
     try:
         flags = os.O_RDONLY | os.O_CLOEXEC | getattr(os, "O_NOFOLLOW", 0)
@@ -287,6 +296,8 @@ def observe_json(target: DurableJsonTarget) -> JsonObservation:
             descriptor = os.open(leaf, flags, dir_fd=parent_fd)
         except FileNotFoundError:
             return JsonObservation(None, JsonVersion(False, None, None, None))
+        except OSError as exc:
+            raise DurableWriteError(ErrorClass.IDENTITY_TYPE.value) from exc
         try:
             file_stat = os.fstat(descriptor)
             if (
@@ -296,15 +307,18 @@ def observe_json(target: DurableJsonTarget) -> JsonObservation:
                 or file_stat.st_nlink != 1
             ):
                 raise DurableWriteError(ErrorClass.PERMISSION.value)
-            if file_stat.st_size > 8 * 1024 * 1024:
+            if file_stat.st_size > _MAX_JSON_BYTES:
                 raise DurableWriteError(ErrorClass.SIZE.value)
             raw = b""
-            while len(raw) <= 8 * 1024 * 1024:
-                chunk = os.read(descriptor, min(1024 * 1024, 8 * 1024 * 1024 + 1 - len(raw)))
+            while len(raw) <= _MAX_JSON_BYTES:
+                chunk = os.read(
+                    descriptor,
+                    min(1024 * 1024, _MAX_JSON_BYTES + 1 - len(raw)),
+                )
                 if not chunk:
                     break
                 raw += chunk
-            if len(raw) > 8 * 1024 * 1024:
+            if len(raw) > _MAX_JSON_BYTES:
                 raise DurableWriteError(ErrorClass.SIZE.value)
             try:
                 payload = json.loads(raw)
@@ -334,15 +348,37 @@ def observe_json(target: DurableJsonTarget) -> JsonObservation:
 
 
 def _canonical_payload(payload: Mapping[str, Any]) -> bytes:
+    if not isinstance(payload, Mapping):
+        raise DurableWriteError(ErrorClass.SERIALIZATION.value)
+
+    active_containers: set[int] = set()
+
     def validate(value: Any) -> None:
-        if isinstance(value, Mapping):
-            if any(not isinstance(key, str) for key in value):
-                raise DurableWriteError(ErrorClass.IDENTITY_TYPE.value)
-            for nested in value.values():
-                validate(nested)
-        elif isinstance(value, (list, tuple)):
-            for nested in value:
-                validate(nested)
+        if isinstance(value, bool) or value is None or isinstance(value, str):
+            return
+        if isinstance(value, int):
+            if abs(value) > _MAX_SAFE_INTEGER:
+                raise DurableWriteError(ErrorClass.SERIALIZATION.value)
+            return
+        if isinstance(value, float):
+            return
+        if not isinstance(value, (Mapping, list, tuple)):
+            return
+        identity = id(value)
+        if identity in active_containers:
+            raise DurableWriteError(ErrorClass.SERIALIZATION.value)
+        active_containers.add(identity)
+        try:
+            if isinstance(value, Mapping):
+                if any(not isinstance(key, str) for key in value):
+                    raise DurableWriteError(ErrorClass.IDENTITY_TYPE.value)
+                for nested in value.values():
+                    validate(nested)
+            else:
+                for nested in value:
+                    validate(nested)
+        finally:
+            active_containers.remove(identity)
 
     validate(payload)
     try:
@@ -355,7 +391,10 @@ def _canonical_payload(payload: Mapping[str, Any]) -> bytes:
         )
     except (TypeError, ValueError) as exc:
         raise DurableWriteError(ErrorClass.SERIALIZATION.value) from exc
-    return rendered.encode("utf-8")
+    raw = rendered.encode("utf-8")
+    if len(raw) + 1 > _MAX_JSON_BYTES:
+        raise DurableWriteError(ErrorClass.SIZE.value)
+    return raw
 
 
 def operation_id(
@@ -368,6 +407,7 @@ def operation_id(
     if (
         not isinstance(target, DurableJsonTarget)
         or not isinstance(predecessor, JsonVersion)
+        or not isinstance(component, str)
         or not component
         or "\0" in component
     ):
@@ -448,6 +488,8 @@ def _classify_exception(
 
 
 def _lock_parent(parent_fd: int) -> int:
+    if fcntl is None:
+        raise DurableWriteError(ErrorClass.UNSUPPORTED_CAPABILITY.value)
     common_flags = os.O_RDWR | os.O_CLOEXEC | getattr(os, "O_NOFOLLOW", 0)
     descriptor = -1
     created = False
@@ -491,6 +533,33 @@ def _lock_parent(parent_fd: int) -> int:
     return descriptor
 
 
+def _require_capabilities() -> None:
+    if (
+        fcntl is None
+        or not getattr(os, "O_NOFOLLOW", 0)
+        or not _HAS_OPEN_DIR_FD
+        or not _HAS_LINK_DIR_FD
+        or not _HAS_LINK_NOFOLLOW
+    ):
+        raise DurableWriteError(ErrorClass.UNSUPPORTED_CAPABILITY.value)
+
+
+def _lock_unique_parents(*parent_fds: int) -> list[int]:
+    unique: dict[tuple[int, int], int] = {}
+    for parent_fd in parent_fds:
+        parent_stat = os.fstat(parent_fd)
+        unique.setdefault((parent_stat.st_dev, parent_stat.st_ino), parent_fd)
+    locks: list[int] = []
+    try:
+        for identity in sorted(unique):
+            locks.append(_lock_parent(unique[identity]))
+        return locks
+    except BaseException:
+        for lock_fd in reversed(locks):
+            os.close(lock_fd)
+        raise
+
+
 def _write_all(descriptor: int, raw: bytes) -> None:
     offset = 0
     while offset < len(raw):
@@ -525,7 +594,7 @@ def publish_event_json(
             component=component,
             predecessor=absent,
         )
-    except DurableWriteError:
+    except DurableWriteError as exc:
         return _result(
             component=component,
             operation=operation_id,
@@ -533,7 +602,7 @@ def publish_event_json(
             durability=DurabilityProof.NOT_MUTATED,
             authority=AuthorityState.EXPECTED_PREDECESSOR,
             stage=WriteStage.SERIALIZATION,
-            error_class=ErrorClass.SERIALIZATION,
+            error_class=exc.error_class,
         )
     raw = canonical + b"\n"
     content_sha256 = hashlib.sha256(raw).hexdigest()
@@ -559,6 +628,7 @@ def publish_event_json(
     try:
         _inject_fault(_fault_hook, current_stage)
         current_stage = WriteStage.CAPABILITY_CHECK
+        _require_capabilities()
         _inject_fault(_fault_hook, current_stage)
         current_stage = WriteStage.PARENT_OPEN
         parent_fd, leaf = _open_target_parent(target)
@@ -743,16 +813,19 @@ def _read_version_at(parent_fd: int, leaf: str) -> tuple[bytes | None, JsonVersi
             or file_stat.st_uid != os.getuid()
             or stat.S_IMODE(file_stat.st_mode) & 0o077
             or file_stat.st_nlink != 1
-            or file_stat.st_size > 8 * 1024 * 1024
+            or file_stat.st_size > _MAX_JSON_BYTES
         ):
             raise DurableWriteError(ErrorClass.PERMISSION.value)
         raw = b""
-        while len(raw) <= 8 * 1024 * 1024:
-            chunk = os.read(descriptor, min(1024 * 1024, 8 * 1024 * 1024 + 1 - len(raw)))
+        while len(raw) <= _MAX_JSON_BYTES:
+            chunk = os.read(
+                descriptor,
+                min(1024 * 1024, _MAX_JSON_BYTES + 1 - len(raw)),
+            )
             if not chunk:
                 break
             raw += chunk
-        if len(raw) > 8 * 1024 * 1024:
+        if len(raw) > _MAX_JSON_BYTES:
             raise DurableWriteError(ErrorClass.SIZE.value)
         try:
             payload = json.loads(raw)
@@ -891,7 +964,7 @@ def publish_state_json(
             component=component,
             predecessor=expected,
         )
-    except DurableWriteError:
+    except DurableWriteError as exc:
         return _result(
             component=component,
             operation=operation_id,
@@ -899,7 +972,7 @@ def publish_state_json(
             durability=DurabilityProof.NOT_MUTATED,
             authority=AuthorityState.UNKNOWN,
             stage=WriteStage.SERIALIZATION,
-            error_class=ErrorClass.SERIALIZATION,
+            error_class=exc.error_class,
             generation=generation,
         )
     raw = canonical + b"\n"
@@ -926,6 +999,7 @@ def publish_state_json(
     try:
         _inject_fault(_fault_hook, current_stage)
         current_stage = WriteStage.CAPABILITY_CHECK
+        _require_capabilities()
         _inject_fault(_fault_hook, current_stage)
         current_stage = WriteStage.PARENT_OPEN
         parent_fd, leaf = _open_target_parent(target)
@@ -1054,15 +1128,56 @@ def reconcile_json_publication(
     intent: JsonPublicationIntent,
     previous: JsonVersion,
 ) -> PublicationResult:
-    if not isinstance(intent, JsonPublicationIntent) or not isinstance(previous, JsonVersion):
+    valid_intent_shape = (
+        isinstance(intent, JsonPublicationIntent)
+        and isinstance(previous, JsonVersion)
+        and isinstance(intent.kind, PublicationKind)
+        and isinstance(intent.target, DurableJsonTarget)
+        and isinstance(intent.payload, Mapping)
+        and isinstance(intent.component, str)
+        and bool(intent.component)
+        and isinstance(intent.operation_id, str)
+        and bool(intent.operation_id)
+        and (
+            (
+                intent.kind is PublicationKind.EVENT
+                and intent.generation is None
+            )
+            or (
+                intent.kind is PublicationKind.STATE
+                and isinstance(intent.generation, int)
+                and not isinstance(intent.generation, bool)
+                and intent.generation >= 1
+            )
+        )
+    )
+    if not valid_intent_shape:
         return _result(
-            component="unknown",
-            operation="",
+            component=(
+                intent.component
+                if isinstance(intent, JsonPublicationIntent)
+                and isinstance(intent.component, str)
+                and intent.component
+                else "unknown"
+            ),
+            operation=(
+                intent.operation_id
+                if isinstance(intent, JsonPublicationIntent)
+                and isinstance(intent.operation_id, str)
+                else ""
+            ),
             content_sha256=None,
             durability=DurabilityProof.NOT_MUTATED,
             authority=AuthorityState.UNKNOWN,
             stage=WriteStage.RECONCILIATION,
             error_class=ErrorClass.IDENTITY_TYPE,
+            generation=(
+                intent.generation
+                if isinstance(intent, JsonPublicationIntent)
+                and isinstance(intent.generation, int)
+                and not isinstance(intent.generation, bool)
+                else None
+            ),
         )
     try:
         canonical = _canonical_payload(intent.payload)
@@ -1072,7 +1187,7 @@ def reconcile_json_publication(
             component=intent.component,
             predecessor=previous,
         )
-    except DurableWriteError:
+    except DurableWriteError as exc:
         return _result(
             component=intent.component,
             operation=intent.operation_id,
@@ -1080,7 +1195,7 @@ def reconcile_json_publication(
             durability=DurabilityProof.NOT_MUTATED,
             authority=AuthorityState.UNKNOWN,
             stage=WriteStage.RECONCILIATION,
-            error_class=ErrorClass.SERIALIZATION,
+            error_class=exc.error_class,
             generation=intent.generation,
         )
     raw = canonical + b"\n"
@@ -1100,6 +1215,7 @@ def reconcile_json_publication(
     parent_fd = -1
     lock_fd = -1
     try:
+        _require_capabilities()
         parent_fd, leaf = _open_target_parent(intent.target)
         lock_fd = _lock_parent(parent_fd)
         event_temp_recovery = (
@@ -1162,6 +1278,21 @@ def reconcile_json_publication(
                 ),
                 generation=intent.generation,
             )
+        if current == previous:
+            return _result(
+                component=intent.component,
+                operation=intent.operation_id,
+                content_sha256=content_sha256,
+                durability=DurabilityProof.NOT_MUTATED,
+                authority=AuthorityState.EXPECTED_PREDECESSOR,
+                stage=WriteStage.RECONCILIATION,
+                cleanup=(
+                    CleanupState.COMPLETE
+                    if event_temp_recovery is _EventTempRecovery.RETIRED_UNPUBLISHED
+                    else CleanupState.NOT_REQUIRED
+                ),
+                generation=intent.generation,
+            )
         superseded = (
             intent.kind is PublicationKind.STATE
             and current.generation is not None
@@ -1208,7 +1339,9 @@ def sync_changed_parents(
     destination_synced = False
     source_synced = False
     failed_parent: str | None = None
+    lock_fds: list[int] = []
     try:
+        _require_capabilities()
         destination_fd, _destination_leaf = _open_target_parent(destination)
         source_fd, _source_leaf = _open_target_parent(source)
         destination_stat = os.fstat(destination_fd)
@@ -1217,6 +1350,8 @@ def sync_changed_parents(
             destination_stat.st_dev == source_stat.st_dev
             and destination_stat.st_ino == source_stat.st_ino
         )
+        failed_parent = "destination"
+        lock_fds = _lock_unique_parents(destination_fd, source_fd)
         failed_parent = "destination"
         os.fsync(destination_fd)
         destination_synced = True
@@ -1247,6 +1382,8 @@ def sync_changed_parents(
             error_class=error_class,
         )
     finally:
+        for lock_fd in reversed(lock_fds):
+            os.close(lock_fd)
         if source_fd >= 0:
             os.close(source_fd)
         if destination_fd >= 0:
