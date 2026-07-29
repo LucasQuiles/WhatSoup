@@ -268,6 +268,7 @@ import {
 import { makeIdleEligibilityResolver } from './fallback-eligibility-cache.ts';
 import {
   createProviderMcpBridge,
+  mergeSessionProviderConfig,
   writeProviderMcpConfig,
   writeProviderMcpConfigTarget,
   type OpencodeProviderConfig,
@@ -10807,7 +10808,7 @@ export class AgentRuntime implements Runtime {
       allowM365Mutations: this.allowM365Mutations,
       provider: route.provider,
       providerConfig: providerConfigOverride
-        ? { ...this.routeSessionProviderConfig(route), ...providerConfigOverride }
+        ? mergeSessionProviderConfig(this.routeSessionProviderConfig(route), providerConfigOverride)
         : this.routeSessionProviderConfig(route),
       mcpBridge: createProviderMcpBridge(this.registry, providerToolSession),
       mcpSessionContext: providerToolSession,
