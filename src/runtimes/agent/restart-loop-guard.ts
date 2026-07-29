@@ -89,29 +89,58 @@ function freshState(): RestartLoopGuardState {
   return { v: 1, bootInProgress: false, boots: [], lastTripAt: null, bootsTotal: 0, checksPerformed: 0, lastCheckAt: null };
 }
 
-/** Coerce a persisted value to a non-negative monotonic counter (back-compat: absent → 0). */
+function isNonNegativeFiniteNumber(value: unknown): value is number {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0;
+}
+
+/** Normalize an already-validated in-memory counter. */
 function counterField(value: unknown): number {
-  return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : 0;
+  return isNonNegativeFiniteNumber(value) ? value : 0;
+}
+
+/** Back-compat: counters added after v1 are allowed to be absent, but not malformed. */
+function legacyCounterField(value: unknown): number | null {
+  if (value === undefined) return 0;
+  return isNonNegativeFiniteNumber(value) ? value : null;
+}
+
+/** Missing timestamps predate some fields; present values must be null or finite. */
+function nullableTimestampField(value: unknown): number | null | undefined {
+  if (value === undefined || value === null) return null;
+  return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
+}
+
+function parseV1State(data: Record<string, unknown>): RestartLoopGuardState | null {
+  if (
+    typeof data.bootInProgress !== 'boolean'
+    || !Array.isArray(data.boots)
+    || !data.boots.every((t) => typeof t === 'number' && Number.isFinite(t))
+  ) {
+    return null;
+  }
+  const lastTripAt = nullableTimestampField(data.lastTripAt);
+  const bootsTotal = legacyCounterField(data.bootsTotal);
+  const checksPerformed = legacyCounterField(data.checksPerformed);
+  const lastCheckAt = nullableTimestampField(data.lastCheckAt);
+  if (lastTripAt === undefined || bootsTotal === null || checksPerformed === null || lastCheckAt === undefined) {
+    return null;
+  }
+  return {
+    v: 1,
+    bootInProgress: data.bootInProgress,
+    boots: data.boots,
+    lastTripAt,
+    // Back-compat: v:1 files written before observability counters existed
+    // lack these fields — default them to 0/null rather than rejecting the state.
+    bootsTotal,
+    checksPerformed,
+    lastCheckAt,
+  };
 }
 
 interface RestartLoopGuardLoadResult {
   status: PrivateJournalStatus;
   state: RestartLoopGuardState | null;
-}
-
-function parseV1State(data: Record<string, unknown>): RestartLoopGuardState | null {
-  if (typeof data.bootInProgress !== 'boolean' || !Array.isArray(data.boots)) return null;
-  return {
-    v: 1,
-    bootInProgress: data.bootInProgress,
-    boots: data.boots.filter((t): t is number => typeof t === 'number' && Number.isFinite(t)),
-    lastTripAt: typeof data.lastTripAt === 'number' && Number.isFinite(data.lastTripAt) ? data.lastTripAt : null,
-    // Back-compat: v:1 files written before observability counters existed
-    // lack these fields — default them to 0/null rather than rejecting the state.
-    bootsTotal: counterField(data.bootsTotal),
-    checksPerformed: counterField(data.checksPerformed),
-    lastCheckAt: typeof data.lastCheckAt === 'number' && Number.isFinite(data.lastCheckAt) ? data.lastCheckAt : null,
-  };
 }
 
 /** Fail-open load; unreadable sources remain untouched. */

@@ -150,6 +150,26 @@ describe('restart-loop guard', () => {
       expect(readFileSync(statePath, 'utf8')).toBe(source);
     });
 
+    it.each([
+      ['non-numeric boot entry', { v: 1, bootInProgress: false, boots: [1_000, 'bad'], lastTripAt: null }],
+      ['invalid last-trip timestamp', { v: 1, bootInProgress: false, boots: [], lastTripAt: 'never' }],
+      ['negative boots-total counter', { v: 1, bootInProgress: false, boots: [], lastTripAt: null, bootsTotal: -1 }],
+      ['non-numeric checks-performed counter', { v: 1, bootInProgress: false, boots: [], lastTripAt: null, checksPerformed: 'one' }],
+      ['invalid last-check timestamp', { v: 1, bootInProgress: false, boots: [], lastTripAt: null, lastCheckAt: false }],
+    ])('preserves v1-shaped state with %s', (_kind, state) => {
+      const source = JSON.stringify(state) + '\n';
+      writeFileSync(statePath, source, 'utf8');
+      chmodSync(statePath, 0o600);
+
+      expect(markBootInProgress(statePath, 1_000)).toBe(false);
+      expect(checkAndRecordInterruptedBoot({ statePath, now: 1_000 }))
+        .toEqual({ tripped: false, bootsInWindow: 0 });
+      expect(readRestartLoopGuardHealth(statePath, DEFAULT_WINDOW, 1_000).bootsTotal).toBe(0);
+      expect(readFileSync(statePath, 'utf8')).toBe(source);
+      expect(() => markCleanExit(statePath)).not.toThrow();
+      expect(readFileSync(statePath, 'utf8')).toBe(source);
+    });
+
     it('uncreatable state path → every call no-throws and fails open', () => {
       const blocker = join(dir, 'a-regular-file');
       writeFileSync(blocker, 'x', 'utf-8');
