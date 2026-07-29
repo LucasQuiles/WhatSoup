@@ -190,7 +190,12 @@ async function importMainWithMocks(options: {
       cacheHours: 24,
     },
     dataRoot: '/tmp/whatsoup-main-data-root',
+    // Nonexistent on purpose: the startup-notify journal fails open, keeping
+    // these wiring tests free of real-filesystem coupling.
+    stateRoot: '/tmp/whatsoup-main-state-root-absent',
     startupNotifications: true,
+    // 0 = legacy immediate send (3 s floor) so pre-debounce timing tests hold.
+    startupNotificationStabilitySeconds: 0,
     toolUpdateMode: 'full',
     capabilityGrantGroups: {
       camera: { capabilities: ['camera.snap', 'camera.clip'] },
