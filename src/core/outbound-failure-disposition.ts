@@ -211,11 +211,18 @@ function readTransportPayload(
   };
 }
 
+// Every accepted deadline must serialize to a 24-char ISO string (isIsoTimestamp's
+// contract). That caps the year at 9999 — Date.parse('9999-12-31T23:59:59.999Z') —
+// well short of Date's own range ceiling (±8_640_000_000_000_000 ms), which
+// produces extended-year strings (e.g. "+275760-09-13T00:00:00.000Z", 27 chars)
+// that isIsoTimestamp always rejects.
+const MAX_ISO_TIMESTAMP_MS = 253_402_300_799_999;
+
 function validPositiveDelay(value: unknown, nowMs: number): number | null {
   if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) return null;
   const delayMs = Math.ceil(value);
   const deadlineMs = nowMs + delayMs;
-  return Number.isFinite(deadlineMs) && deadlineMs <= 8_640_000_000_000_000
+  return Number.isFinite(deadlineMs) && deadlineMs <= MAX_ISO_TIMESTAMP_MS
     ? delayMs
     : null;
 }

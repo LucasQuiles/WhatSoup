@@ -81,6 +81,34 @@ describe('outbound failure disposition', () => {
     expect(evidence.retry_not_before).toBe('2028-07-27T00:00:00.000Z');
   });
 
+  it('treats a retryAfterMs near the old Date-range ceiling as no hint instead of throwing', () => {
+    // A deadline beyond year 9999 serializes to an extended-year ISO string
+    // (e.g. "+275760-09-13T00:00:00.000Z", 27 chars) which isIsoTimestamp's
+    // 24-char check always rejects. The old ceiling (Date's own max range,
+    // 8_640_000_000_000_000 ms) let such deadlines through validPositiveDelay,
+    // so assertValidEvidence threw from inside classifyOutboundFailure —
+    // exactly the uncaught-throw defect class this PR eliminates. A huge
+    // retryAfterMs must degrade to "no deferral hint", not throw.
+    const nowMs = Date.parse('2026-07-28T00:00:00.000Z');
+    const retryAfterMs = 8_640_000_000_000_000 - nowMs; // lands exactly at the old ceiling
+
+    const evidence = classifyOutboundFailure(
+      new RateLimitedError({
+        ...base,
+        phase: 'not_started',
+        retryAfterMs,
+      }),
+      {
+        nowMs,
+        retryOwner: 'agent_queue',
+        attemptsRemaining: 2,
+      },
+    );
+
+    expect(evidence.retry_decision).toBe('retry_now');
+    expect(evidence.retry_not_before).toBeNull();
+  });
+
   it('stops a typed non-retryable provider rejection after one logical attempt', () => {
     const evidence = classifyOutboundFailure(
       new AuthRequiredError({
