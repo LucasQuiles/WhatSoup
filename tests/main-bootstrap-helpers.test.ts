@@ -137,7 +137,7 @@ async function importMainWithMocks(options: {
   rawInstanceConfig?: string;
   pineconeState?: 'ready' | 'missing_index';
   accessMode?: 'self_only' | 'allowlist';
-  transport?: 'baileys' | 'signal';
+  transport?: 'baileys' | 'signal' | 'twilio' | 'imessage';
   adminPhones?: string[];
   controlPeers?: string[];
   existingPaths?: string[];
@@ -385,6 +385,12 @@ async function importMainWithMocks(options: {
     toPersonalJid: vi.fn((phone: string) => `${phone}@s.whatsapp.net`),
     toLidJid: vi.fn((phone: string) => `${phone}@lid`),
     toSignalJid: vi.fn((identity: string) => `${identity}@signal`),
+    resolveConfiguredAdminJid: vi.fn((transport: string, identity: string) => {
+      if (transport === 'signal') return `${identity}@signal`;
+      if (transport === 'twilio') return `+${identity}@sms`;
+      if (transport === 'imessage') return `${identity}@imessage`;
+      return `${identity}@s.whatsapp.net`;
+    }),
     selectReplayableDms: vi.fn(() => ({
       toReplay: [] as StoredMessage[],
       groupSkipped: 0,
@@ -490,6 +496,7 @@ async function importMainWithMocks(options: {
   vi.doMock('../src/core/ingest.ts', () => ({ createIngestHandler: mocks.createIngestHandler }));
   vi.doMock('../src/core/conversation-key.ts', () => ({ toConversationKey: mocks.toConversationKey }));
   vi.doMock('../src/core/jid-constants.ts', () => ({
+    resolveConfiguredAdminJid: mocks.resolveConfiguredAdminJid,
     toPersonalJid: mocks.toPersonalJid,
     toLidJid: mocks.toLidJid,
     toSignalJid: mocks.toSignalJid,
@@ -1033,6 +1040,25 @@ describe('main.ts — uncovered helpers and signal paths', () => {
       expect(h.sendTracked).toHaveBeenCalledWith(
         h.connection,
         '+15551230000@signal',
+        expect.stringContaining('*Q* is online and ready'),
+        h.durability,
+        { replayPolicy: 'safe' },
+      );
+    });
+
+    it('routes an iMessage first-boot introduction to the canonical AppleID admin JID', async () => {
+      const h = await importMainWithMocks({
+        transport: 'imessage',
+        adminPhones: ['owner@example.test'],
+        instanceConfig: { name: 'q', introSent: false },
+      });
+
+      await vi.advanceTimersByTimeAsync(3_000);
+
+      expect(h.resolveConfiguredAdminJid).toHaveBeenCalledWith('imessage', 'owner@example.test');
+      expect(h.sendTracked).toHaveBeenCalledWith(
+        h.connection,
+        'owner@example.test@imessage',
         expect.stringContaining('*Q* is online and ready'),
         h.durability,
         { replayPolicy: 'safe' },

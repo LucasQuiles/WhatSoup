@@ -168,7 +168,7 @@ import { getRecentMessages, getMessagesSince, hasFromMeReplyAfter } from '../../
 import { toConversationKey, isGroupConversationKey, GLOBAL_CONVERSATION_KEY } from '../../core/conversation-key.ts';
 import { bulletedSection, savedPreferenceLine } from './owner-render-format.ts';
 import { classifyAssistantTextEgress } from '../../core/outbound-message-safety.ts';
-import { toPersonalJid, isGroupJid } from '../../core/jid-constants.ts';
+import { resolveConfiguredAdminJid, toPersonalJid, isGroupJid } from '../../core/jid-constants.ts';
 import { jidNormalizedUser } from '@whiskeysockets/baileys';
 import { canonicalizeChatJid } from '../../core/lid-resolver.ts';
 import { TurnQueue, type QueuedTurn, type TurnRejectReason } from './turn-queue.ts';
@@ -1580,7 +1580,7 @@ export class AgentRuntime implements Runtime {
     if (adminPhone) {
       const windowSec = Math.round(config.restartLoopGuard.windowMs / 1000);
       this.pendingStartupMessage = {
-        chatJid: toPersonalJid(adminPhone),
+        chatJid: resolveConfiguredAdminJid(config.transport, adminPhone),
         text:
           `*Restart-loop guard tripped* ⚠️ — ${trip.bootsInWindow} crash-interrupted boots ` +
           `inside ${windowSec}s with resumable sessions pending. Proactive resume is ` +
@@ -3637,6 +3637,7 @@ export class AgentRuntime implements Runtime {
         db: this.db,
         controlPeers: config.controlPeers,
         adminPhones: config.adminPhones,
+        resolveConfiguredAdminJid: (identity) => resolveConfiguredAdminJid(config.transport, identity),
       },
       restartSelf: serviceRestarter ? {
         instanceName: this.instanceName,
@@ -7143,7 +7144,7 @@ export class AgentRuntime implements Runtime {
         // DM admin
         const adminPhone = [...config.adminPhones][0];
         if (adminPhone) {
-          const adminJid = toPersonalJid(adminPhone);
+          const adminJid = resolveConfiguredAdminJid(config.transport, adminPhone);
           sendTracked(this.messenger, adminJid,
             `[HEAL_ESCALATE] Repair for report ${reportId} timed out after 15 minutes.`,
             this.durability ?? undefined, { replayPolicy: 'safe' })

@@ -37,7 +37,7 @@ import { createIngestHandler } from './core/ingest.ts';
 import { createCapabilityGrantManager, type CapabilityGrantManager } from './lib/capability-grant.ts';
 import { createSettingsPolicyAdapter, createFileGrantStore, assertGroupsRespectDenyFloor } from './core/capability-grant-adapter.ts';
 import { toConversationKey } from './core/conversation-key.ts';
-import { toPersonalJid, toLidJid, toSignalJid } from './core/jid-constants.ts';
+import { resolveConfiguredAdminJid, toPersonalJid, toLidJid, toSignalJid } from './core/jid-constants.ts';
 import { selectReplayableDms, rememberReplayedId } from './core/admin.ts';
 import { DurabilityEngine, sendTracked, drainPendingOutbound } from './core/durability.ts';
 import { waitForHistorySyncThenRecover } from './core/post-connect-recovery.ts';
@@ -92,12 +92,6 @@ if (!preflightImportOnlyAuthorized) {
 function resolveTilde(p: string): string {
   if (p === '~') return homedir();
   return p.startsWith('~/') ? join(homedir(), p.slice(2)) : p;
-}
-
-function toConfiguredDirectJid(identity: string): string {
-  return config.transport === 'signal'
-    ? toSignalJid(identity)
-    : toPersonalJid(identity);
 }
 
 const log = createChildLogger('main');
@@ -1079,7 +1073,7 @@ async function start(): Promise<void> {
   // Restarts (agent only): send terse "back online" status ping.
   const adminPhone = [...config.adminPhones][0];
   if (adminPhone && instanceType !== 'passive') {
-    const adminChatJid = toConfiguredDirectJid(adminPhone);
+    const adminChatJid = resolveConfiguredAdminJid(config.transport, adminPhone);
     const needsIntro = instanceConfig?.introSent === false;
 
     if (needsIntro) {

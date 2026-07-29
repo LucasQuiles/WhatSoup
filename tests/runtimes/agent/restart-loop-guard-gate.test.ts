@@ -119,6 +119,19 @@ describe('T5 — startup resume gate consults the restart-loop guard', () => {
     expect(stub.pendingStartupMessage?.text).toContain('resume on their next message');
   });
 
+  it('preserves #2674 by routing the restart-loop notice to an iMessage admin', async () => {
+    const { guard, config, stub } = await load({
+      transport: 'imessage',
+      adminPhones: ['owner@example.test'],
+      imessageConfig: { account: 'test-imsg', backend: 'imsg', sender: 'sender@example.test' },
+    });
+    driveCrashyBoots(guard, config.stateRoot, 2);
+    stub.restartLoopInterruptedBoot = true;
+
+    expect(stub.shouldSuppressProactiveResume(2)).toBe(true);
+    expect(stub.pendingStartupMessage?.chatJid).toBe('owner@example.test@imessage');
+  });
+
   it('does not trip below the threshold', async () => {
     const { guard, config, stub } = await load();
     driveCrashyBoots(guard, config.stateRoot, 1); // journal = 1

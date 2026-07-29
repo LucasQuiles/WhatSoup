@@ -9,6 +9,31 @@ export { APPLEID_EMAIL_RE, canonicalizeAppleIdEmail, isAppleIdEmail } from '../l
 /** E.164 phone shape shared across transport identity surfaces. */
 export { E164_RE } from '../lib/phone.ts';
 
+/**
+ * Canonical, ordered list of supported transport IDs. Frozen at module load
+ * so accidental mutation throws in strict mode. Treat as a closed set.
+ */
+export const TRANSPORT_IDS = Object.freeze(['baileys', 'twilio', 'signal', 'imessage'] as const);
+
+/** Discriminated union of supported transport IDs derived from {@link TRANSPORT_IDS}. */
+export type TransportId = (typeof TRANSPORT_IDS)[number];
+
+/** Default transport when none is configured. */
+export const DEFAULT_TRANSPORT_ID: TransportId = 'baileys';
+
+/** True when a value is one of the canonical case-sensitive transport IDs. */
+export function isTransportId(v: unknown): v is TransportId {
+  return typeof v === 'string' && (TRANSPORT_IDS as readonly string[]).includes(v);
+}
+
+/** Exhaustiveness helper for switches over {@link TransportId}. */
+export function assertNeverTransport(v: never, ctx: string): never {
+  throw new Error(
+    `[${ctx}] unknown transport id: ${JSON.stringify(v)}. ` +
+      `Valid: ${TRANSPORT_IDS.join(', ')}.`,
+  );
+}
+
 /** Transport library / protocol family. */
 export type ChannelKind =
   | 'whatsapp'
