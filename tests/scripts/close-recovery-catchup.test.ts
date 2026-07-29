@@ -15,6 +15,7 @@ import { closeOperatorCatchupRecoveryRaw } from '../../src/core/recovery-catchup
 import {
   openExistingWritableDatabase,
   parseCloseRecoveryArgs,
+  redactFingerprint,
   runCloseRecoveryCatchupCli,
 } from '../../scripts/close-recovery-catchup.ts';
 
@@ -236,16 +237,29 @@ describe('close-recovery-catchup CLI', () => {
       ok: true,
       dryRun: true,
       ready: true,
-      planId: fixture.planId,
-      conversationKey: fixture.conversationKey,
-      sourceSeqs: fixture.sourceSeqs,
-      catchupSeq: fixture.catchupSeq,
+      planFingerprint: redactFingerprint('plan', fixture.planId),
+      conversationFingerprint: redactFingerprint('conversation', fixture.conversationKey),
+      nSourceSeqs: fixture.sourceSeqs.length,
+      catchupSeqFingerprint: redactFingerprint('catchup-seq', fixture.catchupSeq),
       evidenceBasis: 'selected_echoed',
       wouldInsert: fixture.sourceSeqs.length,
       idempotent: false,
     });
+    // Issue #2457 canaries: raw private identifiers must NOT appear in stdout.
     expect(result.text).not.toContain('operator:private');
     expect(result.text).not.toContain('secret://must-not-echo');
+    expect(result.text).not.toContain(fixture.planId);
+    expect(result.text).not.toContain(fixture.conversationKey);
+    expect(result.text).not.toContain(String(fixture.catchupSeq));
+    for (const seq of fixture.sourceSeqs) {
+      expect(result.text).not.toContain(`"sourceSeqs"`);
+    }
+    expect(result.text).not.toContain('planId');
+    expect(result.text).not.toContain('conversationKey');
+    expect(result.text).not.toContain('terminalRecordId');
+    expect(result.text).not.toContain('selectedOpId');
+    expect(result.text).not.toContain('recoveryJobId');
+    expect(result.text).not.toContain('completionProofId');
     expect(closureCount(fixture.dbPath)).toBe(0);
   });
 
@@ -408,17 +422,27 @@ describe('close-recovery-catchup CLI', () => {
       ok: true,
       dryRun: false,
       receipt: {
-        planId: fixture.planId,
-        conversationKey: fixture.conversationKey,
-        sourceSeqs: fixture.sourceSeqs,
-        catchupSeq: fixture.catchupSeq,
+        planFingerprint: redactFingerprint('plan', fixture.planId),
+        conversationFingerprint: redactFingerprint('conversation', fixture.conversationKey),
+        nSourceSeqs: fixture.sourceSeqs.length,
+        catchupSeqFingerprint: redactFingerprint('catchup-seq', fixture.catchupSeq),
         inserted: fixture.sourceSeqs.length,
         idempotent: false,
         openAfter: 0,
       },
     });
+    // Issue #2457 canaries: raw private identifiers must NOT appear in stdout.
     expect(result.text).not.toContain('operator:private');
     expect(result.text).not.toContain('secret://must-not-echo');
+    expect(result.text).not.toContain(fixture.planId);
+    expect(result.text).not.toContain(fixture.conversationKey);
+    expect(result.text).not.toContain(String(fixture.catchupSeq));
+    expect(result.text).not.toContain('planId');
+    expect(result.text).not.toContain('conversationKey');
+    expect(result.text).not.toContain('terminalRecordId');
+    expect(result.text).not.toContain('selectedOpId');
+    expect(result.text).not.toContain('recoveryJobId');
+    expect(result.text).not.toContain('completionProofId');
     expect(closureCount(fixture.dbPath)).toBe(fixture.sourceSeqs.length);
 
     const replay = captureRun(argsFor(fixture, ['--confirm']));
@@ -427,6 +451,49 @@ describe('close-recovery-catchup CLI', () => {
       dryRun: false,
       receipt: { inserted: 0, idempotent: true, openBefore: 0, openAfter: 0 },
     });
+    // Replay must also be redacted.
+    expect(replay.text).not.toContain(fixture.planId);
+    expect(replay.text).not.toContain(fixture.conversationKey);
     expect(closureCount(fixture.dbPath)).toBe(fixture.sourceSeqs.length);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────
+// Issue #2457: redaction fingerprint properties.
+// ─────────────────────────────────────────────────────────────────────────
+describe('redactFingerprint (issue #2457 redaction layer)', () => {
+  it('is deterministic: same domain + value always produces the same handle', () => {
+    const a = redactFingerprint('plan', 'secret-plan-id-123');
+    const b = redactFingerprint('plan', 'secret-plan-id-123');
+    expect(a).toBe(b);
+  });
+
+  it('is domain-separated: same value in different domains produces different handles', () => {
+    const planFp = redactFingerprint('plan', 'shared-text');
+    const convFp = redactFingerprint('conversation', 'shared-text');
+    expect(planFp).not.toBe(convFp);
+  });
+
+  it('produces a 12-character hex handle', () => {
+    expect(redactFingerprint('plan', 'x')).toMatch(/^[0-9a-f]{12}$/);
+  });
+
+  it('does not leak the raw value in the fingerprint', () => {
+    const fp = redactFingerprint('plan', 'SUPER_SECRET_PLAN_ID_LEAK');
+    expect(fp).not.toContain('SUPER');
+    expect(fp).not.toContain('SECRET');
+    expect(fp).not.toContain('PLAN');
+    expect(fp).not.toContain('LEAK');
+  });
+
+  it('produces different handles for different values in the same domain', () => {
+    const a = redactFingerprint('plan', 'plan-A');
+    const b = redactFingerprint('plan', 'plan-B');
+    expect(a).not.toBe(b);
+  });
+
+  it('works with numeric values (catchup sequences)', () => {
+    expect(redactFingerprint('catchup-seq', 42)).toMatch(/^[0-9a-f]{12}$/);
+    expect(redactFingerprint('catchup-seq', 42)).toBe(redactFingerprint('catchup-seq', 42));
   });
 });
