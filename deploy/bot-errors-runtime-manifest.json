@@ -313,6 +313,17 @@
       ]
     },
     {
+      "path": "deploy/scripts/lib/controller_state.py",
+      "sha256": "118b427a07e29485efa92b8db00ddd3934980a879d989609b115ee1242facd46",
+      "mustContain": [
+        "ControllerStateSession",
+        "open_controller_state",
+        "read_controller_state",
+        "complete_reconciliation",
+        "retention_exhausted"
+      ]
+    },
+    {
       "path": "deploy/scripts/lib/sentinel_pin.py",
       "sha256": "4edd3c96fa28128567a01d698dc6a8e72a738d681a04269457c4ebb3e593b0b6",
       "mustContain": [
