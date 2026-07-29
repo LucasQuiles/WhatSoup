@@ -269,7 +269,8 @@
         "outbound.status_ping_expired",
         "outbound.unsafe_delivery_unconfirmed",
         "outbound.governor_shed",
-        "outbound.replay_failed"
+        "outbound.replay_failed",
+        "outbound.deferral_limit_exceeded"
       ],
       "owner": "src/core/outbound-failure-disposition.ts",
       "test": "tests/core/failure-taxonomy-cross-contract.test.ts"
