@@ -303,13 +303,24 @@
     },
     {
       "path": "deploy/scripts/lib/controller_log.py",
-      "sha256": "a944c375c190ec25686fcc8ece7431803818d2ee474deaa62d5afd1e920958be",
+      "sha256": "77abc3c07c87128bb25ff2d8f7c7af564d65df33700da0b8d0d44626942c75ea",
       "mustContain": [
         "ControllerLogContext",
         "diagnostic_best_effort",
         "controller_cycle",
         "metadata_only_controller_details",
         "write_controller_log"
+      ]
+    },
+    {
+      "path": "deploy/scripts/lib/controller_state.py",
+      "sha256": "f2f83805dde505f12e298d822d96a46d36ae566270216e87b243997f6b0cf4ce",
+      "mustContain": [
+        "ControllerStateSession",
+        "open_controller_state",
+        "read_controller_state",
+        "complete_reconciliation",
+        "retention_exhausted"
       ]
     },
     {

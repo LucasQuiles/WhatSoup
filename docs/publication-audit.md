@@ -15,15 +15,15 @@ markers and re-run the command — the result is a fixed point, so the resolutio
 rather than a hand-count. `docs/work-index.{json,md}` has the same property via
 `npm run work-index:regen`.
 
-**Total classification rows:** 338
+**Total classification rows:** 340
 
 | Classification | Count |
 |---|---:|
 | PUBLIC | 198 |
-| PRIVATE-ARCHIVE | 140 |
+| PRIVATE-ARCHIVE | 142 |
 | SANITIZE | 0 |
 | DELETE | 0 |
-| Total | 338 |
+| Total | 340 |
 
 | Path | Classification | Rationale |
 |---|---|---|
@@ -121,6 +121,7 @@ rather than a hand-count. `docs/work-index.{json,md}` has the same property via
 | `docs/superpowers/plans/2026-07-23-agent-reliability-remediation-implementation.md` | PRIVATE-ARCHIVE | Internal agent reliability and host-remediation implementation plan; retained in the repository but excluded from public publication by default. |
 | `docs/superpowers/plans/2026-07-26-open-issue-triage-tooling.md` | PRIVATE-ARCHIVE | Internal issue-triage tooling implementation plan; retained in the repository but excluded from public publication by default. |
 | `docs/superpowers/plans/2026-07-28-chat-queue-admission.md` | PRIVATE-ARCHIVE | Internal ChatRuntime admission implementation plan; retained in the repository but excluded from public publication by default. |
+| `docs/superpowers/plans/2026-07-28-controller-state-recovery-integrity.md` | PRIVATE-ARCHIVE | Internal fail-closed controller-state recovery implementation plan; sanitized test identifiers only; retained in the repository but excluded from public publication by default. |
 | `docs/superpowers/plans/2026-07-28-incident-store-core.md` | PRIVATE-ARCHIVE | Internal incident-store implementation plan (Plan 1 of the incident control plane series); sanitized fixture identifiers only; retained in the repository but excluded from public publication by default. |
 | `docs/superpowers/plans/2026-07-28-primary-probe-cancellation.md` | PRIVATE-ARCHIVE | Internal primary-probe cancellation implementation plan; retained in the repository but excluded from public publication by default. |
 | `docs/superpowers/plans/2026-07-28-runtime-health-signal-dispositions.md` | PRIVATE-ARCHIVE | Internal runtime-health signal-contract implementation plan; retained in the repository but excluded from public publication by default. |
@@ -153,6 +154,7 @@ rather than a hand-count. `docs/work-index.{json,md}` has the same property via
 | `docs/superpowers/specs/2026-07-23-agent-reliability-remediation-design.md` | PRIVATE-ARCHIVE | Internal reliability and host-remediation design; sanitized of private fleet identifiers and excluded from public publication by default. |
 | `docs/superpowers/specs/2026-07-26-open-issue-triage-and-cohort-pr-design.md` | PRIVATE-ARCHIVE | Internal issue-triage, evidence, and cohort-publication design; retained in the repository but excluded from public publication by default. |
 | `docs/superpowers/specs/2026-07-28-chat-queue-admission-design.md` | PRIVATE-ARCHIVE | Internal ChatRuntime admission and durability design; retained in the repository but excluded from public publication by default. |
+| `docs/superpowers/specs/2026-07-28-controller-state-recovery-integrity-design.md` | PRIVATE-ARCHIVE | Internal controller-state integrity and fail-closed recovery design; retained in the repository but excluded from public publication by default. |
 | `docs/superpowers/specs/2026-07-28-incident-control-plane-design.md` | PRIVATE-ARCHIVE | Internal incident control plane architecture design (locked sections 1-6 plus assembled migration section); retained in the repository but excluded from public publication by default. |
 | `docs/superpowers/specs/2026-07-28-primary-probe-cancellation-design.md` | PRIVATE-ARCHIVE | Internal primary-model probe cancellation design; retained in the repository but excluded from public publication by default. |
 | `docs/superpowers/specs/2026-07-28-runtime-health-signal-dispositions-design.md` | PRIVATE-ARCHIVE | Internal runtime-health signal-disposition design; retained in the repository but excluded from public publication by default. |
