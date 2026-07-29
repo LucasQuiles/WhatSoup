@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 from pathlib import Path, PurePath, PurePosixPath
+import stat
 from typing import Any, Mapping, NoReturn
 
 
@@ -167,8 +168,89 @@ def durable_json_target(
     )
 
 
-def observe_json(*args: object, **kwargs: object) -> NoReturn:
-    _not_implemented()
+def _open_directory(name: str, *, dir_fd: int) -> int:
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(name, flags, dir_fd=dir_fd)
+    if not stat.S_ISDIR(os.fstat(descriptor).st_mode):
+        os.close(descriptor)
+        raise DurableWriteError(ErrorClass.IDENTITY_TYPE.value)
+    return descriptor
+
+
+def _open_target_parent(target: DurableJsonTarget) -> tuple[int, str]:
+    descriptor = os.open("/", os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    try:
+        for component in target.trusted_root.parts[1:]:
+            next_descriptor = _open_directory(component, dir_fd=descriptor)
+            os.close(descriptor)
+            descriptor = next_descriptor
+        root_stat = os.fstat(descriptor)
+        if root_stat.st_uid != os.getuid() or stat.S_IMODE(root_stat.st_mode) & 0o077:
+            raise DurableWriteError(ErrorClass.PERMISSION.value)
+        relative_parts = target.relative_path.parts
+        for component in relative_parts[:-1]:
+            next_descriptor = _open_directory(component, dir_fd=descriptor)
+            os.close(descriptor)
+            descriptor = next_descriptor
+        return descriptor, relative_parts[-1]
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
+def observe_json(target: DurableJsonTarget) -> JsonObservation:
+    if not isinstance(target, DurableJsonTarget):
+        raise DurableWriteError(ErrorClass.IDENTITY_TYPE.value)
+    parent_fd, leaf = _open_target_parent(target)
+    try:
+        flags = os.O_RDONLY | os.O_CLOEXEC | getattr(os, "O_NOFOLLOW", 0)
+        try:
+            descriptor = os.open(leaf, flags, dir_fd=parent_fd)
+        except FileNotFoundError:
+            return JsonObservation(None, JsonVersion(False, None, None, None))
+        try:
+            file_stat = os.fstat(descriptor)
+            if (
+                not stat.S_ISREG(file_stat.st_mode)
+                or file_stat.st_uid != os.getuid()
+                or stat.S_IMODE(file_stat.st_mode) & 0o077
+            ):
+                raise DurableWriteError(ErrorClass.PERMISSION.value)
+            if file_stat.st_size > 8 * 1024 * 1024:
+                raise DurableWriteError(ErrorClass.SIZE.value)
+            raw = b""
+            while len(raw) <= 8 * 1024 * 1024:
+                chunk = os.read(descriptor, min(1024 * 1024, 8 * 1024 * 1024 + 1 - len(raw)))
+                if not chunk:
+                    break
+                raw += chunk
+            if len(raw) > 8 * 1024 * 1024:
+                raise DurableWriteError(ErrorClass.SIZE.value)
+            try:
+                payload = json.loads(raw)
+            except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                raise DurableWriteError(ErrorClass.SERIALIZATION.value) from exc
+            if not isinstance(payload, dict):
+                raise DurableWriteError(ErrorClass.IDENTITY_TYPE.value)
+            generation = payload.get("generation")
+            operation = payload.get("operationId")
+            if generation is not None and (not isinstance(generation, int) or isinstance(generation, bool)):
+                raise DurableWriteError(ErrorClass.IDENTITY_TYPE.value)
+            if operation is not None and not isinstance(operation, str):
+                raise DurableWriteError(ErrorClass.IDENTITY_TYPE.value)
+            return JsonObservation(
+                payload,
+                JsonVersion(
+                    True,
+                    hashlib.sha256(raw).hexdigest(),
+                    generation,
+                    operation,
+                ),
+            )
+        finally:
+            os.close(descriptor)
+    finally:
+        os.close(parent_fd)
 
 
 def _canonical_payload(payload: Mapping[str, Any]) -> bytes:

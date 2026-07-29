@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import importlib
 from pathlib import Path
 
@@ -159,3 +160,45 @@ def test_operation_id_is_canonical_and_predecessor_fenced(tmp_path: Path) -> Non
     assert first == reordered
     assert first != advanced
     assert len(first) == 64
+
+
+def test_observe_json_reports_an_absent_target(tmp_path: Path) -> None:
+    module = importlib.import_module("deploy.scripts.lib.durable_json")
+    (tmp_path / "state").mkdir(mode=0o700)
+    target = module.durable_json_target(
+        trusted_root=tmp_path,
+        relative_path="state/fixture.json",
+    )
+
+    observation = module.observe_json(target)
+
+    assert observation.payload is None
+    assert observation.version == module.JsonVersion(False, None, None, None)
+
+
+def test_observe_json_reads_a_regular_bounded_record(tmp_path: Path) -> None:
+    module = importlib.import_module("deploy.scripts.lib.durable_json")
+    state = tmp_path / "state"
+    state.mkdir(mode=0o700)
+    payload = {
+        "schemaVersion": 1,
+        "generation": 4,
+        "operationId": "fixture-operation",
+        "value": "ok",
+    }
+    raw = b'{"generation":4,"operationId":"fixture-operation","schemaVersion":1,"value":"ok"}\n'
+    record = state / "fixture.json"
+    record.write_bytes(raw)
+    record.chmod(0o600)
+    target = module.durable_json_target(
+        trusted_root=tmp_path,
+        relative_path="state/fixture.json",
+    )
+
+    observation = module.observe_json(target)
+
+    assert observation.payload == payload
+    assert observation.version.exists
+    assert observation.version.raw_sha256 == hashlib.sha256(raw).hexdigest()
+    assert observation.version.generation == 4
+    assert observation.version.operation_id == "fixture-operation"
