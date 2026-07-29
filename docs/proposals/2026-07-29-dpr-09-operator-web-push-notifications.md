@@ -171,3 +171,71 @@ Roll out through a fake provider, owner-only test subscriptions, one synthetic e
 Monitor aggregate subscription state, provider outcomes, retry age, expiry, suppression, dedupe, click-to-fetch success, stale-record navigation, key rotation, and privacy-canary results. Do not collect endpoint, payload, record, operator, or provider-response detail.
 
 Rollback disables dispatch, revokes or purges subscriptions according to owner policy, removes service-worker registration on the next console load, and clears the minimal cache. Source events, silences, WebSocket delivery, console access, and DPR-08 approvals continue independently.
+
+## Current-main reconciliation — 2026-07-29
+
+This amendment supersedes current-system instructions pinned to `c9759467d`.
+Current main is `5398982e610bb948d671181a04856590c9f3f9e5`.
+
+**Readiness:** `BLOCKED PRE-CODE`.
+
+### Existing owners and landed precedent
+
+Reuse the current realtime invalidation, authenticated console routes,
+silences/quiet hours, startup-notification aggregation/stability debounce, and
+durable failure vocabulary. Merged PR #2644 is a privacy and test precedent,
+not a browser-push implementation:
+
+- `deploy/scripts/bot-errors-selfcheck.py::central_telemetry_payload`
+- `deploy/scripts/bot-errors-selfcheck.py::publish_heartbeat`
+- `deploy/scripts/bot-errors-selfcheck.py::publish_central_down_alert`
+- `deploy/scripts/tests/test_bot_errors_selfcheck.py`
+
+The new ownership is limited to encrypted subscription lifecycle and push
+transport projection.
+
+### Receipt separation
+
+Do not collapse:
+
+`event admitted` → `push accepted by provider` → `displayed by browser` →
+`clicked` → `fresh state fetched` → `action separately authorized`.
+
+Provider acceptance is not delivery, display is not state freshness, a click
+is not authorization, and an old notification is never action authority.
+
+### Privacy boundary
+
+Payloads are closed-schema, versioned, metadata-only, and independently
+redacted. Exclude message content, transcript excerpts, credentials, tokens,
+raw errors, filesystem paths, private topology, command text, and sensitive
+identifiers. Encrypt subscription endpoints and keys at rest under a named key
+owner, with revocation and rotation.
+
+### Owner decisions
+
+- provider, VAPID/key lifecycle, and secret-storage owner;
+- eligible event classes and closed payload schema;
+- stable event/dedup identity, TTL, retry, and dead-letter behavior;
+- silence/quiet-hours/rate-limit precedence;
+- unsupported-browser and permission-revoked fallback;
+- delivery/display/click evidence and retention;
+- authenticated navigation and mandatory fresh fetch.
+
+### First implementation-plan gate
+
+First RED binding:
+
+- File: `tests/fleet/operator-web-push.test.ts`
+- Test: `requires a fresh authorized fetch before a notification click can expose an action`
+- Command: `npm test -- tests/fleet/operator-web-push.test.ts -t "requires a fresh authorized fetch before a notification click can expose an action" --pool=forks`
+- Expected RED reason: push subscription, transport projection, and the
+  click-through authorization contract do not exist.
+
+Start with a fake-provider contract and a synthetic metadata-only event. Prove
+secret encryption, no raw content, dedup, expiry, retry, revoked subscription,
+quiet hours, stale click, unauthorized click, fresh-fetch-before-action,
+provider-accepted-but-not-displayed, unsupported browser fallback, and
+feature-off rollback.
+
+The PR must remain draft and use non-closing references.
