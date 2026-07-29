@@ -67,16 +67,32 @@ export function createSocketConnection(
   let nextId = 1;
   let terminalError: SignalPortError | null = null;
 
+  // Node buffers socket.write() calls until the connection handshake
+  // completes; if the socket never reaches 'connect', no byte from any
+  // write queued in that window ever left the process. A failure while
+  // !connected is therefore provably pre-write for every currently pending
+  // request. Once connected, a later failure cannot prove any given pending
+  // request wasn't already flushed to the wire — phase stays absent (the
+  // adapter's provider_call_started default then applies) rather than
+  // guessing in either direction.
+  let connected = false;
+  const withPhase = (error: SignalPortError): SignalPortError =>
+    connected ? error : { ...error, phase: 'not_started' };
+
   const terminate = (error: SignalPortError): void => {
     if (terminalError !== null) return;
-    terminalError = error;
+    terminalError = withPhase(error);
     for (const request of pending.values()) {
       clearTimeout(request.timer);
-      request.reject(error);
+      request.reject(terminalError);
     }
     pending.clear();
     onTerminal?.();
   };
+
+  socket.on('connect', () => {
+    connected = true;
+  });
 
   socket.on('error', (error) => {
     terminate({
@@ -150,7 +166,7 @@ export function createSocketConnection(
             code: 'Timeout',
             status: 504,
           } satisfies SignalPortError;
-          reject(error);
+          reject(withPhase(error));
           terminate(error);
           socket.destroy();
         }, RPC_REQUEST_TIMEOUT_MS);
