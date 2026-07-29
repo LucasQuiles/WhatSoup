@@ -470,6 +470,91 @@ def test_event_private_temporary_cleanup_debt_is_explicit(
     assert (state / temp_name).exists()
 
 
+def test_event_direct_retry_reconciles_published_private_temporary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = importlib.import_module("deploy.scripts.lib.durable_json")
+    state = tmp_path / "state"
+    state.mkdir(mode=0o700)
+    target = module.durable_json_target(
+        trusted_root=tmp_path,
+        relative_path="state/event.json",
+    )
+    payload = {"id": "event-1"}
+    operation = module.operation_id(
+        target,
+        payload,
+        component="fixture.event",
+        predecessor=module.JsonVersion(False, None, None, None),
+    )
+    temp_name = f".durable-json.{operation}.tmp"
+    real_unlink = module.os.unlink
+
+    def preserve_private_temp(path: object, *args: object, **kwargs: object) -> None:
+        if path == temp_name:
+            raise OSError(module.errno.EACCES, "injected")
+        real_unlink(path, *args, **kwargs)
+
+    with monkeypatch.context() as context:
+        context.setattr(module.os, "unlink", preserve_private_temp)
+        first = module.publish_event_json(
+            target,
+            payload,
+            component="fixture.event",
+            operation_id=operation,
+        )
+
+    second = module.publish_event_json(
+        target,
+        payload,
+        component="fixture.event",
+        operation_id=operation,
+    )
+
+    assert first.advance_allowed
+    assert first.cleanup is module.CleanupState.DEBT_PRIVATE_TEMP
+    assert second.advance_allowed
+    assert second.durability is module.DurabilityProof.RECONCILED_COMMITTED
+    assert second.cleanup is module.CleanupState.COMPLETE
+    assert not (state / temp_name).exists()
+    assert (state / "event.json").read_bytes() == b'{"id":"event-1"}\n'
+
+
+def test_event_direct_retry_retires_complete_unpublished_temporary(
+    tmp_path: Path,
+) -> None:
+    module = importlib.import_module("deploy.scripts.lib.durable_json")
+    state = tmp_path / "state"
+    state.mkdir(mode=0o700)
+    target = module.durable_json_target(
+        trusted_root=tmp_path,
+        relative_path="state/event.json",
+    )
+    payload = {"id": "event-1"}
+    operation = module.operation_id(
+        target,
+        payload,
+        component="fixture.event",
+        predecessor=module.JsonVersion(False, None, None, None),
+    )
+    temp_name = f".durable-json.{operation}.tmp"
+    (state / temp_name).write_bytes(b'{"id":"event-1"}\n')
+    (state / temp_name).chmod(0o600)
+
+    result = module.publish_event_json(
+        target,
+        payload,
+        component="fixture.event",
+        operation_id=operation,
+    )
+
+    assert result.advance_allowed
+    assert result.durability is module.DurabilityProof.COMMITTED
+    assert not (state / temp_name).exists()
+    assert (state / "event.json").read_bytes() == b'{"id":"event-1"}\n'
+
+
 def test_event_rejects_private_temporary_with_unexpected_hard_link(
     tmp_path: Path,
 ) -> None:

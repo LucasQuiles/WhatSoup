@@ -62,6 +62,53 @@ def _function_nodes(tree: ast.Module) -> dict[str, list[ast.AST]]:
     return functions
 
 
+def _string_value(
+    node: ast.AST,
+    assignments: dict[str, str],
+) -> str | None:
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value
+    if isinstance(node, ast.Name):
+        return assignments.get(node.id)
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+        left = _string_value(node.left, assignments)
+        right = _string_value(node.right, assignments)
+        if left is not None and right is not None:
+            return left + right
+    return None
+
+
+def _string_assignments(tree: ast.Module) -> dict[str, str]:
+    assignments: dict[str, str] = {}
+    for statement in tree.body:
+        if (
+            isinstance(statement, ast.Assign)
+            and len(statement.targets) == 1
+            and isinstance(statement.targets[0], ast.Name)
+        ):
+            value = _string_value(statement.value, assignments)
+            if value is not None:
+                assignments[statement.targets[0].id] = value
+        elif (
+            isinstance(statement, ast.AnnAssign)
+            and isinstance(statement.target, ast.Name)
+            and statement.value is not None
+        ):
+            value = _string_value(statement.value, assignments)
+            if value is not None:
+                assignments[statement.target.id] = value
+    return assignments
+
+
+def _embedded_reference(function_name: str) -> tuple[str, str] | None:
+    if "." not in function_name:
+        return None
+    assignment, nested = function_name.split(".", 1)
+    if not assignment or not nested:
+        return None
+    return assignment, nested
+
+
 def _parent_map(node: ast.AST) -> dict[ast.AST, ast.AST]:
     return {
         child: parent
@@ -323,6 +370,7 @@ def scan(root: Path, inventory_path: Path) -> list[dict[str, str]]:
     )
     trees: dict[str, ast.Module] = {}
     parent_maps: dict[str, dict[ast.AST, ast.AST]] = {}
+    embedded_trees: dict[tuple[str, str], ast.Module] = {}
     inventoried_calls: set[ast.Call] = set()
     for script in covered_scripts:
         script = str(script)
@@ -356,6 +404,57 @@ def scan(root: Path, inventory_path: Path) -> list[dict[str, str]]:
             for function in _inline_writer_functions(tree)
         )
     for row in inventory.get("callers", []):
+        script = str(row["script"])
+        reference = _embedded_reference(str(row["function"]))
+        if (
+            reference is None
+            or script in missing_scripts
+            or reference[1] == "<module>"
+        ):
+            continue
+        assignment, _nested = reference
+        key = (script, assignment)
+        if key in embedded_trees:
+            continue
+        source = _string_assignments(trees[script]).get(assignment)
+        if source is None:
+            findings.append(
+                _finding(
+                    "embedded-source-missing",
+                    row,
+                    "embedded publisher assignment is not a static string",
+                )
+            )
+            continue
+        embedded_tree = ast.parse(
+            source,
+            filename=f"{root / script}:{assignment}",
+        )
+        embedded_trees[key] = embedded_tree
+        findings.extend(
+            {
+                "code": "component-not-literal",
+                "site_id": "",
+                "script": script,
+                "function": f"{assignment}.<module>",
+                "detail": "durable publisher component must be a string literal",
+            }
+            for call in ast.walk(embedded_tree)
+            if isinstance(call, ast.Call)
+            and _call_name(call) in DURABLE_PUBLISHERS
+            and _constant_keyword(call, "component") is None
+        )
+        findings.extend(
+            {
+                "code": "inline-writer",
+                "site_id": "",
+                "script": script,
+                "function": f"{assignment}.{function}",
+                "detail": "inline JSON publication primitive bypasses the shared helper",
+            }
+            for function in _inline_writer_functions(embedded_tree)
+        )
+    for row in inventory.get("callers", []):
         if row.get("kind") == "lifecycle_move_deferred_draft_3":
             continue
         script = str(row["script"])
@@ -367,7 +466,14 @@ def scan(root: Path, inventory_path: Path) -> list[dict[str, str]]:
             tree = ast.parse(script_path.read_text(encoding="utf-8"), filename=str(script_path))
             trees[script] = tree
             parent_maps[script] = _parent_map(tree)
-        candidates = _function_nodes(tree).get(str(row["function"]), [])
+        function_name = str(row["function"])
+        reference = _embedded_reference(function_name)
+        if reference is not None:
+            assignment, function_name = reference
+            tree = embedded_trees.get((script, assignment))
+            if tree is None:
+                continue
+        candidates = _function_nodes(tree).get(function_name, [])
         calls = [
             node
             for function in candidates
@@ -435,6 +541,32 @@ def scan(root: Path, inventory_path: Path) -> list[dict[str, str]]:
                     "site_id": "",
                     "script": script,
                     "function": function_name,
+                    "detail": "durable publisher call is absent from the inventory",
+                }
+            )
+    for (script, assignment), tree in embedded_trees.items():
+        parents = _parent_map(tree)
+        for call in (
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and _call_name(node) in DURABLE_PUBLISHERS
+        ):
+            if call in inventoried_calls:
+                continue
+            function_name = "<module>"
+            cursor: ast.AST = call
+            while cursor in parents:
+                cursor = parents[cursor]
+                if isinstance(cursor, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    function_name = cursor.name
+                    break
+            findings.append(
+                {
+                    "code": "publisher-uninventoried",
+                    "site_id": "",
+                    "script": script,
+                    "function": f"{assignment}.{function_name}",
                     "detail": "durable publisher call is absent from the inventory",
                 }
             )

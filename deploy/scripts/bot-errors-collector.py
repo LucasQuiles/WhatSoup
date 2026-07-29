@@ -252,7 +252,861 @@ for source in sources:
 """
 
 
-REMOTE_WRITEFAIL_ACK_SCRIPT = r"""
+# BEGIN GENERATED REMOTE DURABLE JSON SOURCE
+REMOTE_DURABLE_JSON_SOURCE = (
+    '"""Runtime-safe durable event publisher embedded into remote BOT ERRORS scripts."""\n'
+    '\n'
+    'from __future__ import annotations\n'
+    '\n'
+    'from dataclasses import dataclass\n'
+    'from enum import Enum\n'
+    'import errno\n'
+    'import hashlib\n'
+    'import json\n'
+    'import os\n'
+    'from pathlib import Path, PurePath, PurePosixPath\n'
+    'import stat\n'
+    'from typing import Any, Callable, Mapping, Sequence\n'
+    '\n'
+    'try:\n'
+    '    import fcntl\n'
+    'except ImportError:  # pragma: no cover - exercised through capability simulation\n'
+    '    fcntl = None  # type: ignore[assignment]\n'
+    '\n'
+    '\n'
+    'HELPER_GENERATION = 1\n'
+    '_MAX_JSON_BYTES = 8 * 1024 * 1024\n'
+    '_MAX_SAFE_INTEGER = (1 << 53) - 1\n'
+    '_HAS_OPEN_DIR_FD = os.open in os.supports_dir_fd\n'
+    '_HAS_LINK_DIR_FD = os.link in os.supports_dir_fd\n'
+    '_HAS_LINK_NOFOLLOW = os.link in os.supports_follow_symlinks\n'
+    '\n'
+    '\n'
+    'class DurabilityProof(str, Enum):\n'
+    '    NOT_MUTATED = "not_mutated"\n'
+    '    COMMITTED = "committed"\n'
+    '    UNPROVEN = "unproven"\n'
+    '    RECONCILED_COMMITTED = "reconciled_committed"\n'
+    '\n'
+    '\n'
+    'class ConfinementProof(str, Enum):\n'
+    '    PROVEN = "proven"\n'
+    '    UNPROVEN = "unproven"\n'
+    '    VIOLATED = "violated"\n'
+    '\n'
+    '\n'
+    'class CleanupState(str, Enum):\n'
+    '    NOT_REQUIRED = "not_required"\n'
+    '    COMPLETE = "complete"\n'
+    '    DEBT_PRIVATE_TEMP = "debt_private_temp"\n'
+    '    DEBT_RECOVERY_RECORD = "debt_recovery_record"\n'
+    '\n'
+    '\n'
+    'class AuthorityState(str, Enum):\n'
+    '    EXPECTED_PREDECESSOR = "expected_predecessor"\n'
+    '    INTENDED_AUTHORITATIVE = "intended_authoritative"\n'
+    '    SUPERSEDED = "superseded"\n'
+    '    CONFLICT = "conflict"\n'
+    '    UNKNOWN = "unknown"\n'
+    '\n'
+    '\n'
+    'class WriteStage(str, Enum):\n'
+    '    SERIALIZATION = "serialization"\n'
+    '    CAPABILITY_CHECK = "capability_check"\n'
+    '    LOCK_ACQUISITION = "lock_acquisition"\n'
+    '    TEMPORARY_CREATION = "temporary_creation"\n'
+    '    WRITE = "write"\n'
+    '    FILE_FLUSH = "file_flush"\n'
+    '    FILE_SYNC = "file_sync"\n'
+    '    PERMISSION_FINALIZATION = "permission_finalization"\n'
+    '    PUBLICATION = "publication"\n'
+    '    PARENT_OPEN = "parent_open"\n'
+    '    PARENT_SYNC = "parent_sync"\n'
+    '    CLEANUP = "cleanup"\n'
+    '    RECONCILIATION = "reconciliation"\n'
+    '\n'
+    '\n'
+    'class ErrorClass(str, Enum):\n'
+    '    SERIALIZATION = "serialization"\n'
+    '    SIZE = "size"\n'
+    '    PERMISSION = "permission"\n'
+    '    DESCRIPTOR_EXHAUSTION = "descriptor_exhaustion"\n'
+    '    UNSUPPORTED_CAPABILITY = "unsupported_capability"\n'
+    '    IO = "io"\n'
+    '    INTERRUPTION = "interruption"\n'
+    '    CONFLICT = "conflict"\n'
+    '    IDENTITY_TYPE = "identity_type"\n'
+    '    CLEANUP = "cleanup"\n'
+    '    UNKNOWN = "unknown"\n'
+    '\n'
+    '\n'
+    'class _EventTempRecovery(Enum):\n'
+    '    ABSENT = 0\n'
+    '    RETIRED_UNPUBLISHED = 1\n'
+    '    RETIRED_PUBLISHED = 2\n'
+    '\n'
+    '\n'
+    'class DurableWriteError(RuntimeError):\n'
+    '    def __init__(\n'
+    '        self,\n'
+    '        error_class: ErrorClass | str,\n'
+    '        public_message: str | None = None,\n'
+    '    ):\n'
+    '        self.error_class = ErrorClass(error_class)\n'
+    '        super().__init__(public_message or self.error_class.value)\n'
+    '\n'
+    '\n'
+    '@dataclass(frozen=True)\n'
+    'class PublicationResult:\n'
+    '    component: str\n'
+    '    durability: DurabilityProof\n'
+    '    confinement: ConfinementProof\n'
+    '    cleanup: CleanupState\n'
+    '    authority: AuthorityState\n'
+    '    stage: WriteStage\n'
+    '    error_class: ErrorClass | None\n'
+    '    generation: int | None\n'
+    '    private_operation_id: str\n'
+    '    private_content_sha256: str | None\n'
+    '\n'
+    '    @property\n'
+    '    def advance_allowed(self) -> bool:\n'
+    '        return (\n'
+    '            self.durability\n'
+    '            in {\n'
+    '                DurabilityProof.COMMITTED,\n'
+    '                DurabilityProof.RECONCILED_COMMITTED,\n'
+    '            }\n'
+    '            and self.confinement is ConfinementProof.PROVEN\n'
+    '            and self.authority is AuthorityState.INTENDED_AUTHORITATIVE\n'
+    '            and self.cleanup\n'
+    '            in {\n'
+    '                CleanupState.NOT_REQUIRED,\n'
+    '                CleanupState.COMPLETE,\n'
+    '                CleanupState.DEBT_PRIVATE_TEMP,\n'
+    '            }\n'
+    '        )\n'
+    '\n'
+    '    def public_projection(self) -> dict[str, str | int | None]:\n'
+    '        return {\n'
+    '            "component": self.component,\n'
+    '            "durability": self.durability.value,\n'
+    '            "confinement": self.confinement.value,\n'
+    '            "cleanup": self.cleanup.value,\n'
+    '            "authority": self.authority.value,\n'
+    '            "stage": self.stage.value,\n'
+    '            "error_class": self.error_class.value if self.error_class else None,\n'
+    '            "generation": self.generation,\n'
+    '        }\n'
+    '\n'
+    '\n'
+    '@dataclass(frozen=True)\n'
+    'class DurableJsonTarget:\n'
+    '    trusted_root: Path\n'
+    '    relative_path: PurePath\n'
+    '    logical_target: str\n'
+    '\n'
+    '\n'
+    '@dataclass(frozen=True)\n'
+    'class JsonVersion:\n'
+    '    exists: bool\n'
+    '    raw_sha256: str | None\n'
+    '    generation: int | None\n'
+    '    operation_id: str | None\n'
+    '\n'
+    '\n'
+    'def durable_json_target(\n'
+    '    *,\n'
+    '    trusted_root: os.PathLike[str] | str,\n'
+    '    relative_path: os.PathLike[str] | str,\n'
+    ') -> DurableJsonTarget:\n'
+    '    root_text = os.fspath(trusted_root)\n'
+    '    relative_text = os.fspath(relative_path)\n'
+    '    root_parts = root_text.split("/")\n'
+    '    relative_parts = relative_text.split("/")\n'
+    '    if (\n'
+    '        not root_text.startswith("/")\n'
+    '        or any(part in {"", ".", ".."} for part in root_parts[1:])\n'
+    '        or relative_text.startswith("/")\n'
+    '        or "\\\\" in relative_text\n'
+    '        or any(part in {"", ".", ".."} for part in relative_parts)\n'
+    '    ):\n'
+    '        raise DurableWriteError(ErrorClass.IDENTITY_TYPE.value)\n'
+    '    relative = PurePosixPath(*relative_parts)\n'
+    '    return DurableJsonTarget(\n'
+    '        trusted_root=Path(root_text),\n'
+    '        relative_path=relative,\n'
+    '        logical_target=relative.as_posix(),\n'
+    '    )\n'
+    '\n'
+    '\n'
+    'def _open_directory(name: str, *, dir_fd: int) -> int:\n'
+    '    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | getattr(\n'
+    '        os,\n'
+    '        "O_NOFOLLOW",\n'
+    '        0,\n'
+    '    )\n'
+    '    try:\n'
+    '        descriptor = os.open(name, flags, dir_fd=dir_fd)\n'
+    '    except OSError as exc:\n'
+    '        if exc.errno in {errno.EMFILE, errno.ENFILE}:\n'
+    '            error_class = ErrorClass.DESCRIPTOR_EXHAUSTION\n'
+    '        elif exc.errno in {errno.EACCES, errno.EPERM}:\n'
+    '            error_class = ErrorClass.PERMISSION\n'
+    '        else:\n'
+    '            error_class = ErrorClass.IDENTITY_TYPE\n'
+    '        raise DurableWriteError(error_class.value) from exc\n'
+    '    if not stat.S_ISDIR(os.fstat(descriptor).st_mode):\n'
+    '        os.close(descriptor)\n'
+    '        raise DurableWriteError(ErrorClass.IDENTITY_TYPE.value)\n'
+    '    return descriptor\n'
+    '\n'
+    '\n'
+    'def _open_target_parent(target: DurableJsonTarget) -> tuple[int, str]:\n'
+    '    descriptor = os.open("/", os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)\n'
+    '    try:\n'
+    '        for component in target.trusted_root.parts[1:]:\n'
+    '            next_descriptor = _open_directory(component, dir_fd=descriptor)\n'
+    '            os.close(descriptor)\n'
+    '            descriptor = next_descriptor\n'
+    '        root_stat = os.fstat(descriptor)\n'
+    '        if (\n'
+    '            root_stat.st_uid != os.getuid()\n'
+    '            or stat.S_IMODE(root_stat.st_mode) & 0o077\n'
+    '        ):\n'
+    '            raise DurableWriteError(ErrorClass.PERMISSION.value)\n'
+    '        relative_parts = target.relative_path.parts\n'
+    '        for component in relative_parts[:-1]:\n'
+    '            next_descriptor = _open_directory(component, dir_fd=descriptor)\n'
+    '            component_stat = os.fstat(next_descriptor)\n'
+    '            if (\n'
+    '                component_stat.st_uid != os.getuid()\n'
+    '                or stat.S_IMODE(component_stat.st_mode) & 0o077\n'
+    '            ):\n'
+    '                os.close(next_descriptor)\n'
+    '                raise DurableWriteError(ErrorClass.PERMISSION.value)\n'
+    '            os.close(descriptor)\n'
+    '            descriptor = next_descriptor\n'
+    '        return descriptor, relative_parts[-1]\n'
+    '    except BaseException:\n'
+    '        os.close(descriptor)\n'
+    '        raise\n'
+    '\n'
+    '\n'
+    'def _parent_authority_matches(\n'
+    '    target: DurableJsonTarget,\n'
+    '    parent_fd: int,\n'
+    ') -> bool:\n'
+    '    comparison_fd = -1\n'
+    '    try:\n'
+    '        comparison_fd, _leaf = _open_target_parent(target)\n'
+    '        current = os.fstat(parent_fd)\n'
+    '        comparison = os.fstat(comparison_fd)\n'
+    '        return (\n'
+    '            current.st_dev == comparison.st_dev\n'
+    '            and current.st_ino == comparison.st_ino\n'
+    '        )\n'
+    '    except (OSError, DurableWriteError):\n'
+    '        return False\n'
+    '    finally:\n'
+    '        if comparison_fd >= 0:\n'
+    '            os.close(comparison_fd)\n'
+    '\n'
+    '\n'
+    'def _canonical_payload(payload: Mapping[str, Any]) -> bytes:\n'
+    '    if not isinstance(payload, Mapping):\n'
+    '        raise DurableWriteError(ErrorClass.SERIALIZATION.value)\n'
+    '\n'
+    '    active_containers: set[int] = set()\n'
+    '\n'
+    '    def validate(value: Any) -> None:\n'
+    '        if isinstance(value, bool) or value is None or isinstance(value, str):\n'
+    '            return\n'
+    '        if isinstance(value, int):\n'
+    '            if abs(value) > _MAX_SAFE_INTEGER:\n'
+    '                raise DurableWriteError(ErrorClass.SERIALIZATION.value)\n'
+    '            return\n'
+    '        if isinstance(value, float):\n'
+    '            return\n'
+    '        if not isinstance(value, (Mapping, list, tuple)):\n'
+    '            return\n'
+    '        identity = id(value)\n'
+    '        if identity in active_containers:\n'
+    '            raise DurableWriteError(ErrorClass.SERIALIZATION.value)\n'
+    '        active_containers.add(identity)\n'
+    '        try:\n'
+    '            if isinstance(value, Mapping):\n'
+    '                if any(not isinstance(key, str) for key in value):\n'
+    '                    raise DurableWriteError(ErrorClass.IDENTITY_TYPE.value)\n'
+    '                for nested in value.values():\n'
+    '                    validate(nested)\n'
+    '            else:\n'
+    '                for nested in value:\n'
+    '                    validate(nested)\n'
+    '        finally:\n'
+    '            active_containers.remove(identity)\n'
+    '\n'
+    '    validate(payload)\n'
+    '    try:\n'
+    '        rendered = json.dumps(\n'
+    '            payload,\n'
+    '            allow_nan=False,\n'
+    '            ensure_ascii=False,\n'
+    '            separators=(",", ":"),\n'
+    '            sort_keys=True,\n'
+    '        )\n'
+    '    except (TypeError, ValueError) as exc:\n'
+    '        raise DurableWriteError(ErrorClass.SERIALIZATION.value) from exc\n'
+    '    raw = rendered.encode("utf-8")\n'
+    '    if len(raw) + 1 > _MAX_JSON_BYTES:\n'
+    '        raise DurableWriteError(ErrorClass.SIZE.value)\n'
+    '    return raw\n'
+    '\n'
+    '\n'
+    'def operation_id(\n'
+    '    target: DurableJsonTarget,\n'
+    '    payload: Mapping[str, Any],\n'
+    '    *,\n'
+    '    component: str,\n'
+    '    predecessor: JsonVersion,\n'
+    ') -> str:\n'
+    '    if (\n'
+    '        not isinstance(target, DurableJsonTarget)\n'
+    '        or not isinstance(predecessor, JsonVersion)\n'
+    '        or not isinstance(component, str)\n'
+    '        or not component\n'
+    '        or "\\0" in component\n'
+    '    ):\n'
+    '        raise DurableWriteError(ErrorClass.IDENTITY_TYPE.value)\n'
+    '    intended_sha256 = hashlib.sha256(_canonical_payload(payload)).hexdigest()\n'
+    '    material = "\\0".join(\n'
+    '        [\n'
+    '            "whatsoup.durable-json.v1",\n'
+    '            component,\n'
+    '            target.logical_target,\n'
+    '            predecessor.raw_sha256 or "absent",\n'
+    '            intended_sha256,\n'
+    '        ]\n'
+    '    ).encode("utf-8")\n'
+    '    return hashlib.sha256(material).hexdigest()\n'
+    '\n'
+    '\n'
+    'def _result(\n'
+    '    *,\n'
+    '    component: str,\n'
+    '    operation: str,\n'
+    '    content_sha256: str | None,\n'
+    '    durability: DurabilityProof,\n'
+    '    authority: AuthorityState,\n'
+    '    stage: WriteStage,\n'
+    '    error_class: ErrorClass | None = None,\n'
+    '    cleanup: CleanupState = CleanupState.NOT_REQUIRED,\n'
+    '    confinement: ConfinementProof = ConfinementProof.PROVEN,\n'
+    '    generation: int | None = None,\n'
+    ') -> PublicationResult:\n'
+    '    return PublicationResult(\n'
+    '        component=component,\n'
+    '        durability=durability,\n'
+    '        confinement=confinement,\n'
+    '        cleanup=cleanup,\n'
+    '        authority=authority,\n'
+    '        stage=stage,\n'
+    '        error_class=error_class,\n'
+    '        generation=generation,\n'
+    '        private_operation_id=operation,\n'
+    '        private_content_sha256=content_sha256,\n'
+    '    )\n'
+    '\n'
+    '\n'
+    'def _classify_exception(\n'
+    '    exc: OSError | DurableWriteError,\n'
+    '    *,\n'
+    '    parent_opened: bool,\n'
+    ') -> tuple[ConfinementProof, ErrorClass]:\n'
+    '    if isinstance(exc, InterruptedError):\n'
+    '        return (\n'
+    '            (\n'
+    '                ConfinementProof.PROVEN\n'
+    '                if parent_opened\n'
+    '                else ConfinementProof.UNPROVEN\n'
+    '            ),\n'
+    '            ErrorClass.INTERRUPTION,\n'
+    '        )\n'
+    '    if isinstance(exc, DurableWriteError):\n'
+    '        confinement = (\n'
+    '            ConfinementProof.VIOLATED\n'
+    '            if not parent_opened\n'
+    '            and exc.error_class is ErrorClass.IDENTITY_TYPE\n'
+    '            else (\n'
+    '                ConfinementProof.PROVEN\n'
+    '                if parent_opened\n'
+    '                else ConfinementProof.UNPROVEN\n'
+    '            )\n'
+    '        )\n'
+    '        return confinement, exc.error_class\n'
+    '    if exc.errno in {errno.EMFILE, errno.ENFILE}:\n'
+    '        error_class = ErrorClass.DESCRIPTOR_EXHAUSTION\n'
+    '    elif exc.errno in {errno.EACCES, errno.EPERM}:\n'
+    '        error_class = ErrorClass.PERMISSION\n'
+    '    elif exc.errno in {\n'
+    '        errno.EINVAL,\n'
+    '        getattr(errno, "ENOTSUP", errno.EINVAL),\n'
+    '        getattr(errno, "EOPNOTSUPP", errno.EINVAL),\n'
+    '    }:\n'
+    '        error_class = ErrorClass.UNSUPPORTED_CAPABILITY\n'
+    '    else:\n'
+    '        error_class = ErrorClass.IO\n'
+    '    return (\n'
+    '        (\n'
+    '            ConfinementProof.PROVEN\n'
+    '            if parent_opened\n'
+    '            else ConfinementProof.UNPROVEN\n'
+    '        ),\n'
+    '        error_class,\n'
+    '    )\n'
+    '\n'
+    '\n'
+    'def _lock_parent(parent_fd: int) -> int:\n'
+    '    if fcntl is None:\n'
+    '        raise DurableWriteError(ErrorClass.UNSUPPORTED_CAPABILITY.value)\n'
+    '    common_flags = (\n'
+    '        os.O_RDWR | os.O_CLOEXEC | getattr(os, "O_NOFOLLOW", 0)\n'
+    '    )\n'
+    '    descriptor = -1\n'
+    '    created = False\n'
+    '    for _attempt in range(3):\n'
+    '        try:\n'
+    '            descriptor = os.open(\n'
+    '                ".durable-json.lock",\n'
+    '                common_flags | os.O_CREAT | os.O_EXCL,\n'
+    '                0o600,\n'
+    '                dir_fd=parent_fd,\n'
+    '            )\n'
+    '            created = True\n'
+    '            break\n'
+    '        except FileExistsError:\n'
+    '            try:\n'
+    '                descriptor = os.open(\n'
+    '                    ".durable-json.lock",\n'
+    '                    common_flags,\n'
+    '                    dir_fd=parent_fd,\n'
+    '                )\n'
+    '                break\n'
+    '            except FileNotFoundError:\n'
+    '                continue\n'
+    '        except FileNotFoundError:\n'
+    '            continue\n'
+    '    if descriptor < 0:\n'
+    '        raise FileNotFoundError("lock entry did not stabilize")\n'
+    '    lock_stat = os.fstat(descriptor)\n'
+    '    if (\n'
+    '        not stat.S_ISREG(lock_stat.st_mode)\n'
+    '        or lock_stat.st_uid != os.getuid()\n'
+    '        or stat.S_IMODE(lock_stat.st_mode) & 0o077\n'
+    '    ):\n'
+    '        os.close(descriptor)\n'
+    '        raise DurableWriteError(ErrorClass.PERMISSION.value)\n'
+    '    os.fchmod(descriptor, 0o600)\n'
+    '    if created:\n'
+    '        os.fsync(descriptor)\n'
+    '        os.fsync(parent_fd)\n'
+    '    fcntl.flock(descriptor, fcntl.LOCK_EX)\n'
+    '    return descriptor\n'
+    '\n'
+    '\n'
+    'def _require_capabilities() -> None:\n'
+    '    if (\n'
+    '        fcntl is None\n'
+    '        or not getattr(os, "O_NOFOLLOW", 0)\n'
+    '        or not _HAS_OPEN_DIR_FD\n'
+    '        or not _HAS_LINK_DIR_FD\n'
+    '        or not _HAS_LINK_NOFOLLOW\n'
+    '    ):\n'
+    '        raise DurableWriteError(ErrorClass.UNSUPPORTED_CAPABILITY.value)\n'
+    '\n'
+    '\n'
+    'def _write_all(descriptor: int, raw: bytes) -> None:\n'
+    '    offset = 0\n'
+    '    while offset < len(raw):\n'
+    '        written = os.write(descriptor, raw[offset:])\n'
+    '        if written <= 0:\n'
+    '            raise OSError("short write")\n'
+    '        offset += written\n'
+    '\n'
+    '\n'
+    'def _inject_fault(\n'
+    '    hook: Callable[[WriteStage], None] | None,\n'
+    '    stage: WriteStage,\n'
+    ') -> None:\n'
+    '    if hook is not None:\n'
+    '        hook(stage)\n'
+    '\n'
+    '\n'
+    'def _recover_reconciled_event_temp(\n'
+    '    parent_fd: int,\n'
+    '    *,\n'
+    '    leaf: str,\n'
+    '    temp_name: str,\n'
+    '    intended_raw: bytes,\n'
+    ') -> _EventTempRecovery:\n'
+    '    flags = os.O_RDONLY | os.O_CLOEXEC | getattr(os, "O_NOFOLLOW", 0)\n'
+    '    try:\n'
+    '        temp_fd = os.open(temp_name, flags, dir_fd=parent_fd)\n'
+    '    except FileNotFoundError:\n'
+    '        return _EventTempRecovery.ABSENT\n'
+    '    target_fd = -1\n'
+    '    try:\n'
+    '        temp_stat = os.fstat(temp_fd)\n'
+    '        if (\n'
+    '            not stat.S_ISREG(temp_stat.st_mode)\n'
+    '            or temp_stat.st_uid != os.getuid()\n'
+    '            or stat.S_IMODE(temp_stat.st_mode) & 0o077\n'
+    '            or temp_stat.st_nlink not in {1, 2}\n'
+    '            or temp_stat.st_size != len(intended_raw)\n'
+    '        ):\n'
+    '            raise DurableWriteError(ErrorClass.CONFLICT)\n'
+    '        observed = b""\n'
+    '        while len(observed) < len(intended_raw):\n'
+    '            chunk = os.read(\n'
+    '                temp_fd,\n'
+    '                len(intended_raw) - len(observed),\n'
+    '            )\n'
+    '            if not chunk:\n'
+    '                break\n'
+    '            observed += chunk\n'
+    '        if observed != intended_raw:\n'
+    '            raise DurableWriteError(ErrorClass.CONFLICT)\n'
+    '        try:\n'
+    '            target_fd = os.open(leaf, flags, dir_fd=parent_fd)\n'
+    '        except FileNotFoundError:\n'
+    '            if temp_stat.st_nlink != 1:\n'
+    '                raise DurableWriteError(ErrorClass.CONFLICT)\n'
+    '            os.unlink(temp_name, dir_fd=parent_fd)\n'
+    '            os.fsync(parent_fd)\n'
+    '            return _EventTempRecovery.RETIRED_UNPUBLISHED\n'
+    '        target_stat = os.fstat(target_fd)\n'
+    '        if (\n'
+    '            not stat.S_ISREG(target_stat.st_mode)\n'
+    '            or target_stat.st_uid != os.getuid()\n'
+    '            or stat.S_IMODE(target_stat.st_mode) & 0o077\n'
+    '            or temp_stat.st_dev != target_stat.st_dev\n'
+    '            or temp_stat.st_ino != target_stat.st_ino\n'
+    '            or temp_stat.st_nlink != 2\n'
+    '            or target_stat.st_nlink != 2\n'
+    '            or target_stat.st_size != len(intended_raw)\n'
+    '        ):\n'
+    '            raise DurableWriteError(ErrorClass.CONFLICT)\n'
+    '        os.unlink(temp_name, dir_fd=parent_fd)\n'
+    '        os.fsync(parent_fd)\n'
+    '        return _EventTempRecovery.RETIRED_PUBLISHED\n'
+    '    finally:\n'
+    '        if target_fd >= 0:\n'
+    '            os.close(target_fd)\n'
+    '        os.close(temp_fd)\n'
+    '\n'
+    '\n'
+    'def publish_event_json(\n'
+    '    target: DurableJsonTarget,\n'
+    '    payload: Mapping[str, Any],\n'
+    '    *,\n'
+    '    component: str,\n'
+    '    operation_id: str,\n'
+    '    _fault_hook: Callable[[WriteStage], None] | None = None,\n'
+    ') -> PublicationResult:\n'
+    '    absent = JsonVersion(False, None, None, None)\n'
+    '    try:\n'
+    '        canonical = _canonical_payload(payload)\n'
+    '        expected_operation = globals()["operation_id"](\n'
+    '            target,\n'
+    '            payload,\n'
+    '            component=component,\n'
+    '            predecessor=absent,\n'
+    '        )\n'
+    '    except DurableWriteError as exc:\n'
+    '        return _result(\n'
+    '            component=component,\n'
+    '            operation=operation_id,\n'
+    '            content_sha256=None,\n'
+    '            durability=DurabilityProof.NOT_MUTATED,\n'
+    '            authority=AuthorityState.EXPECTED_PREDECESSOR,\n'
+    '            stage=WriteStage.SERIALIZATION,\n'
+    '            error_class=exc.error_class,\n'
+    '        )\n'
+    '    raw = canonical + b"\\n"\n'
+    '    content_sha256 = hashlib.sha256(raw).hexdigest()\n'
+    '    if operation_id != expected_operation:\n'
+    '        return _result(\n'
+    '            component=component,\n'
+    '            operation=operation_id,\n'
+    '            content_sha256=content_sha256,\n'
+    '            durability=DurabilityProof.NOT_MUTATED,\n'
+    '            authority=AuthorityState.EXPECTED_PREDECESSOR,\n'
+    '            stage=WriteStage.CAPABILITY_CHECK,\n'
+    '            error_class=ErrorClass.IDENTITY_TYPE,\n'
+    '        )\n'
+    '\n'
+    '    parent_fd = -1\n'
+    '    lock_fd = -1\n'
+    '    temp_fd = -1\n'
+    '    temp_name = f".durable-json.{operation_id}.tmp"\n'
+    '    temp_created = False\n'
+    '    published = False\n'
+    '    cleanup = CleanupState.NOT_REQUIRED\n'
+    '    current_stage = WriteStage.SERIALIZATION\n'
+    '    try:\n'
+    '        _inject_fault(_fault_hook, current_stage)\n'
+    '        current_stage = WriteStage.CAPABILITY_CHECK\n'
+    '        _require_capabilities()\n'
+    '        _inject_fault(_fault_hook, current_stage)\n'
+    '        current_stage = WriteStage.PARENT_OPEN\n'
+    '        _inject_fault(_fault_hook, current_stage)\n'
+    '        parent_fd, leaf = _open_target_parent(target)\n'
+    '        current_stage = WriteStage.LOCK_ACQUISITION\n'
+    '        lock_fd = _lock_parent(parent_fd)\n'
+    '        _inject_fault(_fault_hook, current_stage)\n'
+    '        current_stage = WriteStage.TEMPORARY_CREATION\n'
+    '        event_temp_recovery = _recover_reconciled_event_temp(\n'
+    '            parent_fd,\n'
+    '            leaf=leaf,\n'
+    '            temp_name=temp_name,\n'
+    '            intended_raw=raw,\n'
+    '        )\n'
+    '        if event_temp_recovery is _EventTempRecovery.RETIRED_PUBLISHED:\n'
+    '            authority = (\n'
+    '                AuthorityState.INTENDED_AUTHORITATIVE\n'
+    '                if _parent_authority_matches(target, parent_fd)\n'
+    '                else AuthorityState.UNKNOWN\n'
+    '            )\n'
+    '            return _result(\n'
+    '                component=component,\n'
+    '                operation=operation_id,\n'
+    '                content_sha256=content_sha256,\n'
+    '                durability=DurabilityProof.RECONCILED_COMMITTED,\n'
+    '                authority=authority,\n'
+    '                stage=WriteStage.RECONCILIATION,\n'
+    '                cleanup=CleanupState.COMPLETE,\n'
+    '            )\n'
+    '        flags = (\n'
+    '            os.O_WRONLY\n'
+    '            | os.O_CREAT\n'
+    '            | os.O_EXCL\n'
+    '            | os.O_CLOEXEC\n'
+    '            | getattr(os, "O_NOFOLLOW", 0)\n'
+    '        )\n'
+    '        temp_fd = os.open(\n'
+    '            temp_name,\n'
+    '            flags,\n'
+    '            0o600,\n'
+    '            dir_fd=parent_fd,\n'
+    '        )\n'
+    '        temp_created = True\n'
+    '        _inject_fault(_fault_hook, current_stage)\n'
+    '        current_stage = WriteStage.WRITE\n'
+    '        _write_all(temp_fd, raw)\n'
+    '        _inject_fault(_fault_hook, current_stage)\n'
+    '        current_stage = WriteStage.FILE_FLUSH\n'
+    '        _inject_fault(_fault_hook, current_stage)\n'
+    '        current_stage = WriteStage.FILE_SYNC\n'
+    '        os.fsync(temp_fd)\n'
+    '        _inject_fault(_fault_hook, current_stage)\n'
+    '        current_stage = WriteStage.PERMISSION_FINALIZATION\n'
+    '        os.fchmod(temp_fd, 0o600)\n'
+    '        temp_stat = os.fstat(temp_fd)\n'
+    '        if not stat.S_ISREG(temp_stat.st_mode) or temp_stat.st_nlink != 1:\n'
+    '            raise DurableWriteError(ErrorClass.IDENTITY_TYPE.value)\n'
+    '        _inject_fault(_fault_hook, current_stage)\n'
+    '        os.close(temp_fd)\n'
+    '        temp_fd = -1\n'
+    '        current_stage = WriteStage.PUBLICATION\n'
+    '        os.link(\n'
+    '            temp_name,\n'
+    '            leaf,\n'
+    '            src_dir_fd=parent_fd,\n'
+    '            dst_dir_fd=parent_fd,\n'
+    '            follow_symlinks=False,\n'
+    '        )\n'
+    '        published = True\n'
+    '        _inject_fault(_fault_hook, current_stage)\n'
+    '        current_stage = WriteStage.CLEANUP\n'
+    '        try:\n'
+    '            os.unlink(temp_name, dir_fd=parent_fd)\n'
+    '            temp_created = False\n'
+    '            cleanup = CleanupState.COMPLETE\n'
+    '        except OSError:\n'
+    '            cleanup = CleanupState.DEBT_PRIVATE_TEMP\n'
+    '        _inject_fault(_fault_hook, current_stage)\n'
+    '        current_stage = WriteStage.PARENT_SYNC\n'
+    '        _inject_fault(_fault_hook, current_stage)\n'
+    '        os.fsync(parent_fd)\n'
+    '        authority = (\n'
+    '            AuthorityState.INTENDED_AUTHORITATIVE\n'
+    '            if _parent_authority_matches(target, parent_fd)\n'
+    '            else AuthorityState.UNKNOWN\n'
+    '        )\n'
+    '        return _result(\n'
+    '            component=component,\n'
+    '            operation=operation_id,\n'
+    '            content_sha256=content_sha256,\n'
+    '            durability=DurabilityProof.COMMITTED,\n'
+    '            authority=authority,\n'
+    '            stage=WriteStage.PARENT_SYNC,\n'
+    '            cleanup=cleanup,\n'
+    '        )\n'
+    '    except FileExistsError:\n'
+    '        if current_stage is WriteStage.TEMPORARY_CREATION:\n'
+    '            return _result(\n'
+    '                component=component,\n'
+    '                operation=operation_id,\n'
+    '                content_sha256=content_sha256,\n'
+    '                durability=DurabilityProof.NOT_MUTATED,\n'
+    '                authority=AuthorityState.UNKNOWN,\n'
+    '                stage=current_stage,\n'
+    '                error_class=ErrorClass.CONFLICT,\n'
+    '                cleanup=CleanupState.DEBT_RECOVERY_RECORD,\n'
+    '            )\n'
+    '        if parent_fd >= 0:\n'
+    '            existing_fd = -1\n'
+    '            try:\n'
+    '                existing_fd = os.open(\n'
+    '                    leaf,\n'
+    '                    (\n'
+    '                        os.O_RDONLY\n'
+    '                        | os.O_CLOEXEC\n'
+    '                        | getattr(os, "O_NOFOLLOW", 0)\n'
+    '                    ),\n'
+    '                    dir_fd=parent_fd,\n'
+    '                )\n'
+    '                existing_stat = os.fstat(existing_fd)\n'
+    '                if (\n'
+    '                    not stat.S_ISREG(existing_stat.st_mode)\n'
+    '                    or existing_stat.st_uid != os.getuid()\n'
+    '                    or stat.S_IMODE(existing_stat.st_mode) & 0o077\n'
+    '                    or existing_stat.st_nlink != 1\n'
+    '                    or existing_stat.st_size != len(raw)\n'
+    '                ):\n'
+    '                    raise DurableWriteError(ErrorClass.CONFLICT.value)\n'
+    '                existing = b""\n'
+    '                while len(existing) < len(raw):\n'
+    '                    chunk = os.read(\n'
+    '                        existing_fd,\n'
+    '                        len(raw) - len(existing),\n'
+    '                    )\n'
+    '                    if not chunk:\n'
+    '                        break\n'
+    '                    existing += chunk\n'
+    '                if existing == raw:\n'
+    '                    try:\n'
+    '                        os.unlink(temp_name, dir_fd=parent_fd)\n'
+    '                        temp_created = False\n'
+    '                        cleanup = CleanupState.COMPLETE\n'
+    '                    except OSError:\n'
+    '                        cleanup = CleanupState.DEBT_PRIVATE_TEMP\n'
+    '                    os.fsync(parent_fd)\n'
+    '                    authority = (\n'
+    '                        AuthorityState.INTENDED_AUTHORITATIVE\n'
+    '                        if _parent_authority_matches(target, parent_fd)\n'
+    '                        else AuthorityState.UNKNOWN\n'
+    '                    )\n'
+    '                    return _result(\n'
+    '                        component=component,\n'
+    '                        operation=operation_id,\n'
+    '                        content_sha256=content_sha256,\n'
+    '                        durability=DurabilityProof.RECONCILED_COMMITTED,\n'
+    '                        authority=authority,\n'
+    '                        stage=WriteStage.RECONCILIATION,\n'
+    '                        cleanup=cleanup,\n'
+    '                    )\n'
+    '            except (OSError, DurableWriteError):\n'
+    '                pass\n'
+    '            finally:\n'
+    '                if existing_fd >= 0:\n'
+    '                    os.close(existing_fd)\n'
+    '        return _result(\n'
+    '            component=component,\n'
+    '            operation=operation_id,\n'
+    '            content_sha256=content_sha256,\n'
+    '            durability=(\n'
+    '                DurabilityProof.UNPROVEN\n'
+    '                if published\n'
+    '                else DurabilityProof.NOT_MUTATED\n'
+    '            ),\n'
+    '            authority=AuthorityState.CONFLICT,\n'
+    '            stage=WriteStage.PUBLICATION,\n'
+    '            error_class=ErrorClass.CONFLICT,\n'
+    '            cleanup=(\n'
+    '                CleanupState.DEBT_PRIVATE_TEMP\n'
+    '                if temp_created\n'
+    '                else CleanupState.NOT_REQUIRED\n'
+    '            ),\n'
+    '        )\n'
+    '    except (OSError, DurableWriteError) as exc:\n'
+    '        confinement, error_class = _classify_exception(\n'
+    '            exc,\n'
+    '            parent_opened=parent_fd >= 0,\n'
+    '        )\n'
+    '        cleanup_state = (\n'
+    '            CleanupState.DEBT_RECOVERY_RECORD\n'
+    '            if current_stage is WriteStage.TEMPORARY_CREATION\n'
+    '            and not temp_created\n'
+    '            else (\n'
+    '                CleanupState.DEBT_PRIVATE_TEMP\n'
+    '                if temp_created\n'
+    '                else CleanupState.NOT_REQUIRED\n'
+    '            )\n'
+    '        )\n'
+    '        return _result(\n'
+    '            component=component,\n'
+    '            operation=operation_id,\n'
+    '            content_sha256=content_sha256,\n'
+    '            durability=(\n'
+    '                DurabilityProof.UNPROVEN\n'
+    '                if published\n'
+    '                else DurabilityProof.NOT_MUTATED\n'
+    '            ),\n'
+    '            authority=(\n'
+    '                AuthorityState.UNKNOWN\n'
+    '                if published\n'
+    '                else AuthorityState.EXPECTED_PREDECESSOR\n'
+    '            ),\n'
+    '            stage=current_stage,\n'
+    '            error_class=error_class,\n'
+    '            cleanup=cleanup_state,\n'
+    '            confinement=confinement,\n'
+    '        )\n'
+    '    finally:\n'
+    '        if temp_fd >= 0:\n'
+    '            os.close(temp_fd)\n'
+    '        if temp_created and parent_fd >= 0:\n'
+    '            try:\n'
+    '                os.unlink(temp_name, dir_fd=parent_fd)\n'
+    '            except OSError:\n'
+    '                pass\n'
+    '        if lock_fd >= 0:\n'
+    '            os.close(lock_fd)\n'
+    '        if parent_fd >= 0:\n'
+    '            os.close(parent_fd)\n'
+    '\n'
+    '\n'
+    'def require_advance(result: PublicationResult) -> None:\n'
+    '    if not result.advance_allowed:\n'
+    '        raise DurableWriteError(\n'
+    '            result.error_class or ErrorClass.UNKNOWN,\n'
+    '            json.dumps(\n'
+    '                result.public_projection(),\n'
+    '                sort_keys=True,\n'
+    '                separators=(",", ":"),\n'
+    '            ),\n'
+    '        )\n'
+    '\n'
+    '\n'
+    'def require_all_advance(results: Sequence[PublicationResult]) -> None:\n'
+    '    for result in results:\n'
+    '        require_advance(result)\n'
+)
+# END GENERATED REMOTE DURABLE JSON SOURCE
+
+
+REMOTE_WRITEFAIL_ACK_SCRIPT = REMOTE_DURABLE_JSON_SOURCE + r"""
 import errno, hashlib, json, os, re, shutil, sys, time
 from pathlib import Path
 
@@ -276,10 +1130,7 @@ def unique(paths):
     return result
 
 def fsync_dir(path):
-    try:
-        fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
-    except OSError:
-        return
+    fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | getattr(os, "O_NOFOLLOW", 0))
     try:
         os.fsync(fd)
     finally:
@@ -292,14 +1143,8 @@ def payload_sha256():
             digest.update(chunk)
     return digest.hexdigest()
 
-def target_path(target_dir, suffix):
-    stem = f"{safe(claim.name)}.{int(time.time())}"
-    candidates = [target_dir / f"{stem}{suffix}", target_dir / f"{stem}.{os.getpid()}{suffix}"]
-    candidates.extend(target_dir / f"{stem}.{os.getpid()}.{index}{suffix}" for index in range(1, 100))
-    for candidate in candidates:
-        if not candidate.exists():
-            return candidate
-    raise FileExistsError(f"no unique terminal writefail ack path in {target_dir}")
+def target_path(target_dir, suffix, digest):
+    return target_dir / f"{safe(claim.name)}.{digest}{suffix}"
 
 def unique_child_path(target_dir, name):
     stem = safe(name)
@@ -320,32 +1165,38 @@ def temp_path(target_dir, target):
     raise FileExistsError(f"no unique temporary writefail ack path in {target_dir}")
 
 def journal_path(target_dir, digest):
-    return target_dir / f".{safe(claim.name)}.{digest[:24]}.ack.json"
+    return target_dir / f".{safe(claim.name)}.{digest}.ack.json"
+
+def copy_receipt_path(target_dir, digest):
+    return target_dir / f".{safe(claim.name)}.{digest}.copy.json"
 
 def write_ack_journal(target, digest):
     journal = journal_path(target.parent, digest)
-    tmp = journal.with_name(f".{journal.name}.{os.getpid()}.tmp")
     payload = {
         "claim": str(claim),
         "payloadSha256": digest,
         "target": str(target),
-        "createdAt": int(time.time()),
+        "createdAt": int(claim.stat().st_mtime),
     }
-    try:
-        with open(tmp, "x", encoding="utf-8") as handle:
-            json.dump(payload, handle, sort_keys=True)
-            handle.write("\n")
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(tmp, journal)
-        fsync_dir(target.parent)
-    except BaseException:
-        try:
-            tmp.unlink()
-        except OSError:
-            pass
-        raise
-    return journal
+    publication_target = durable_json_target(
+        trusted_root=str(target.parent.resolve(strict=True)),
+        relative_path=journal.name,
+    )
+    absent = JsonVersion(False, None, None, None)
+    publication_operation = operation_id(
+        publication_target,
+        payload,
+        component="collector.remote_writefail_ack_journal",
+        predecessor=absent,
+    )
+    publication = publish_event_json(
+        publication_target,
+        payload,
+        component="collector.remote_writefail_ack_journal",
+        operation_id=publication_operation,
+    )
+    require_advance(publication)
+    return journal, publication
 
 def find_terminal_journal(digest):
     for target_dir in terminal_dirs():
@@ -359,8 +1210,13 @@ def find_terminal_journal(digest):
         if loaded.get("claim") != str(claim) or loaded.get("payloadSha256") != digest:
             continue
         target = Path(str(loaded.get("target") or ""))
-        if target.exists():
-            return target
+        if target.parent != target_dir:
+            continue
+        try:
+            if validate_terminal_target(target_dir, target, digest):
+                return target
+        except OSError:
+            continue
     return None
 
 def terminal_dirs():
@@ -373,20 +1229,118 @@ def terminal_dirs():
         Path("/tmp") / f"bot-errors-writefail-relayed-{os.getuid()}",
     ])
 
+def descriptor_sha256(descriptor):
+    digest = hashlib.sha256()
+    while True:
+        chunk = os.read(descriptor, 1024 * 1024)
+        if not chunk:
+            break
+        digest.update(chunk)
+    return digest.hexdigest()
+
+def open_private_terminal_dir(path):
+    path_stat = path.lstat()
+    if path.is_symlink() or not path.is_dir():
+        raise OSError(errno.EPERM, "terminal directory is not a direct directory")
+    if path_stat.st_uid != os.getuid() or path_stat.st_mode & 0o077:
+        raise OSError(errno.EPERM, "terminal directory is not private")
+    descriptor = os.open(
+        path,
+        os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | getattr(os, "O_NOFOLLOW", 0),
+    )
+    descriptor_stat = os.fstat(descriptor)
+    if (
+        descriptor_stat.st_dev != path_stat.st_dev
+        or descriptor_stat.st_ino != path_stat.st_ino
+    ):
+        os.close(descriptor)
+        raise OSError(errno.EPERM, "terminal directory identity changed")
+    return descriptor
+
+def validate_terminal_target(target_dir, target, digest):
+    if target.parent != target_dir:
+        return False
+    parent_fd = open_private_terminal_dir(target_dir)
+    lock_fd = -1
+    target_fd = -1
+    try:
+        lock_fd = _lock_parent(parent_fd)
+        target_fd = os.open(
+            target.name,
+            os.O_RDONLY | os.O_CLOEXEC | getattr(os, "O_NOFOLLOW", 0),
+            dir_fd=parent_fd,
+        )
+        target_stat = os.fstat(target_fd)
+        if (
+            not stat.S_ISREG(target_stat.st_mode)
+            or target_stat.st_uid != os.getuid()
+            or stat.S_IMODE(target_stat.st_mode) & 0o077
+            or target_stat.st_nlink != 1
+        ):
+            return False
+        if descriptor_sha256(target_fd) != digest:
+            return False
+        os.fsync(parent_fd)
+        return True
+    finally:
+        if target_fd >= 0:
+            os.close(target_fd)
+        if lock_fd >= 0:
+            os.close(lock_fd)
+        os.close(parent_fd)
+
 def copy_claim_atomic(target_dir, target):
     digest = payload_sha256()
     tmp = temp_path(target_dir, target)
     try:
-        with open(claim, "rb") as source, open(tmp, "xb") as dest:
-            shutil.copyfileobj(source, dest)
-            dest.flush()
-            os.fsync(dest.fileno())
-        if target.exists():
-            raise FileExistsError(f"terminal writefail ack target already exists: {target}")
-        os.replace(tmp, target)
+        if os.path.lexists(target):
+            if not validate_terminal_target(target_dir, target, digest):
+                raise FileExistsError(f"terminal writefail ack target conflicts: {target}")
+        else:
+            flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC | getattr(os, "O_NOFOLLOW", 0)
+            descriptor = os.open(tmp, flags, 0o600)
+            try:
+                with open(claim, "rb") as source, os.fdopen(descriptor, "wb", closefd=False) as dest:
+                    shutil.copyfileobj(source, dest)
+                    dest.flush()
+                    os.fsync(dest.fileno())
+                os.fchmod(descriptor, 0o600)
+            finally:
+                os.close(descriptor)
+            try:
+                os.link(tmp, target, follow_symlinks=False)
+            except FileExistsError:
+                if not validate_terminal_target(target_dir, target, digest):
+                    raise
+            tmp.unlink()
         fsync_dir(target_dir)
-        # If this journal write fails, a later retry may create a duplicate forensic archive; local harvest stays authoritative.
-        write_ack_journal(target, digest)
+        if not validate_terminal_target(target_dir, target, digest):
+            raise OSError(errno.EIO, "terminal writefail ack target validation failed")
+        receipt = copy_receipt_path(target_dir, digest)
+        receipt_payload = {
+            "claim": str(claim),
+            "payloadSha256": digest,
+            "target": str(target),
+        }
+        receipt_target = durable_json_target(
+            trusted_root=str(target_dir.resolve(strict=True)),
+            relative_path=receipt.name,
+        )
+        absent = JsonVersion(False, None, None, None)
+        receipt_operation = operation_id(
+            receipt_target,
+            receipt_payload,
+            component="collector.remote_writefail_copy",
+            predecessor=absent,
+        )
+        copy_publication = publish_event_json(
+            receipt_target,
+            receipt_payload,
+            component="collector.remote_writefail_copy",
+            operation_id=receipt_operation,
+        )
+        _journal, journal_publication = write_ack_journal(target, digest)
+        require_all_advance([copy_publication, journal_publication])
         claim.unlink()
         fsync_dir(claim.parent)
     except BaseException:
@@ -398,12 +1352,17 @@ def copy_claim_atomic(target_dir, target):
 
 def move_claim_terminal(target_dir, suffix):
     target_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+    if target_dir.is_symlink() or not target_dir.is_dir():
+        raise OSError(errno.EPERM, "terminal directory is not a direct directory")
     try:
         target_dir.chmod(0o700)
     except OSError:
         pass
-    target = target_path(target_dir, suffix)
+    digest = payload_sha256()
+    target = target_path(target_dir, suffix, digest)
     try:
+        if target.exists():
+            raise FileExistsError(f"terminal writefail ack target already exists: {target}")
         os.replace(claim, target)
     except OSError as exc:
         if exc.errno != errno.EXDEV:

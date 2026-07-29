@@ -637,6 +637,27 @@ def publish_event_json(
         lock_fd = _lock_parent(parent_fd)
         _inject_fault(_fault_hook, current_stage)
         current_stage = WriteStage.TEMPORARY_CREATION
+        event_temp_recovery = _recover_reconciled_event_temp(
+            parent_fd,
+            leaf=leaf,
+            temp_name=temp_name,
+            intended_raw=raw,
+        )
+        if event_temp_recovery is _EventTempRecovery.RETIRED_PUBLISHED:
+            authority = (
+                AuthorityState.INTENDED_AUTHORITATIVE
+                if _parent_authority_matches(target, parent_fd)
+                else AuthorityState.UNKNOWN
+            )
+            return _result(
+                component=component,
+                operation=operation_id,
+                content_sha256=content_sha256,
+                durability=DurabilityProof.RECONCILED_COMMITTED,
+                authority=authority,
+                stage=WriteStage.RECONCILIATION,
+                cleanup=CleanupState.COMPLETE,
+            )
         flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC | getattr(os, "O_NOFOLLOW", 0)
         temp_fd = os.open(temp_name, flags, 0o600, dir_fd=parent_fd)
         temp_created = True
@@ -769,7 +790,6 @@ def publish_event_json(
         cleanup_state = (
             CleanupState.DEBT_RECOVERY_RECORD
             if current_stage is WriteStage.TEMPORARY_CREATION
-            and isinstance(exc, FileExistsError)
             and not temp_created
             else CleanupState.DEBT_PRIVATE_TEMP
             if temp_created

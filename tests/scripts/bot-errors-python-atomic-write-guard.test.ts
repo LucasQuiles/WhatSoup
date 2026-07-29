@@ -40,6 +40,37 @@ function pythonFixture(source: string): string {
   return root;
 }
 
+function embeddedFixture(source: string, resultPolicy = 'require_advance'): string {
+  const root = mkdtempSync(join(tmpdir(), 'bot-errors-durable-writer-embedded-'));
+  fixtureDirs.push(root);
+  const script = 'deploy/scripts/fixture.py';
+  mkdirSync(join(root, 'deploy/scripts'), { recursive: true });
+  writeFileSync(join(root, script), `REMOTE_SCRIPT = ${JSON.stringify(`${source.trim()}\n`)}\n`);
+  writeFileSync(
+    join(root, 'deploy/bot-errors-durable-writer-inventory.json'),
+    `${JSON.stringify({
+      schema_version: 1,
+      helper_generation: 1,
+      principal_scripts: [script],
+      cooperating_scripts: [],
+      embedded_publishers: ['fixture.REMOTE_SCRIPT.publish'],
+      diagnostic_only_weaker_callers: [],
+      callers: [{
+        site_id: 'fixture-embedded-event',
+        script,
+        function: 'REMOTE_SCRIPT.publish',
+        logical_publication: 'fixture.embedded',
+        kind: 'event_create_once',
+        operation_identity_source: 'durable_json.operation_id.v1',
+        result_policy: resultPolicy,
+        result_consumer: 'REMOTE_SCRIPT.publish',
+        fault_test_ids: ['event.no-advance-unproven'],
+      }],
+    }, null, 2)}\n`,
+  );
+  return root;
+}
+
 function runDurableWriterGuard(root: string): { status: number | null; code: string | null; stderr: string } {
   const result = spawnSync(
     'python3.12',
@@ -331,6 +362,64 @@ def publish(target, payload, op_id, expected):
     expect(runDurableWriterGuard(fixture)).toMatchObject({
       status: 0,
       code: null,
+    });
+  });
+
+  it('accepts a consumed durable result inside an inventoried embedded script', () => {
+    const fixture = embeddedFixture(`
+def publish(target, payload, op_id):
+    result = publish_event_json(
+        target,
+        payload,
+        component="fixture.embedded",
+        operation_id=op_id,
+    )
+    require_advance(result)
+`);
+
+    expect(runDurableWriterGuard(fixture)).toMatchObject({
+      status: 0,
+      code: null,
+    });
+  });
+
+  it('rejects a discarded durable result inside an inventoried embedded script', () => {
+    const fixture = embeddedFixture(`
+def publish(target, payload, op_id):
+    publish_event_json(
+        target,
+        payload,
+        component="fixture.embedded",
+        operation_id=op_id,
+    )
+`);
+
+    expect(runDurableWriterGuard(fixture)).toMatchObject({
+      status: 1,
+      code: 'result-unconsumed',
+    });
+  });
+
+  it('rejects an inline JSON writer hidden inside an embedded script', () => {
+    const fixture = embeddedFixture(`
+import json
+
+def hidden(target, payload):
+    target.write_text(json.dumps(payload), encoding="utf-8")
+
+def publish(target, payload, op_id):
+    result = publish_event_json(
+        target,
+        payload,
+        component="fixture.embedded",
+        operation_id=op_id,
+    )
+    require_advance(result)
+`);
+
+    expect(runDurableWriterGuard(fixture)).toMatchObject({
+      status: 1,
+      code: 'inline-writer',
     });
   });
 
