@@ -132,3 +132,69 @@ Roll out per instance and provider in three stages: synthetic-only validation, s
 Promotion requires a reviewed false-positive set, sink-leak fault tests, broker expiry and revocation proof, and operator documentation. Canary dashboards report categorical decisions and residual debt only.
 
 Rollback disables new blocking and broker issuance by policy version while preserving outstanding broker expiry, revocation, and containment-event audit state. It must not restore or replay contained message bodies, delete evidence silently, or claim that previously exposed values were rotated.
+
+## Current-main reconciliation — 2026-07-29
+
+This amendment is the current implementation-integration authority for this
+proposal. The original `c9759467d` pin remains historical provenance. Current
+main for this review is
+`5398982e610bb948d671181a04856590c9f3f9e5`.
+
+**Readiness:** `BLOCKED PRE-CODE`; decision-ready only.
+
+### Retained current owners
+
+- `src/core/ingest.ts::createIngestHandler` and `persistIncomingMessage` own
+  inbound ordering, dedupe, and ordinary persistence.
+- `src/lib/provider-key-service.ts::resolveProviderKeyService`, keyring,
+  credential state, and fleet credential routes own credential storage/status.
+- Provider-preview, handoff-PII, and outbound-content redactors are policy
+  precedents and possible shared-pattern consumers, not proof that one policy
+  applies to every sink.
+
+### Exact gap
+
+No current-main hit was found for a credential broker, containment event, or
+inbound-secret policy. The missing domain is a pre-persistence decision and
+short-lived broker reference. It is not a second key store or generic PII
+platform.
+
+### Narrowed and superseded instructions
+
+The proposal’s additive-schema language is conditional. No containment table is
+authorized until the owner chooses between:
+
+1. a content-free disposition on an existing message/inbound identity; or
+2. a new bounded event store with a demonstrated recovery/audit requirement.
+
+Do not persist matched content, reversible encodings, or deterministic
+low-entropy fingerprints. Do not claim transport deletion without a transport
+receipt.
+
+### Owner decisions
+
+- secret-class taxonomy and falsification corpus;
+- shared-pattern extraction versus context-specific parity adapter;
+- broker scope, identity, provider/account binding, TTL, revocation, and no
+  read-back;
+- transport remediation matrix and residual-exposure wording;
+- durable state fields, retention, rollback, and false-positive override;
+- exact sinks covered by privacy canaries.
+
+### First implementation-plan gate
+
+First RED binding:
+
+- File: `tests/core/inbound-secret-containment.test.ts`
+- Test: `blocks a synthetic credential before ordinary message persistence without storing the secret`
+- Command: `npm test -- tests/core/inbound-secret-containment.test.ts -t "blocks a synthetic credential before ordinary message persistence without storing the secret" --pool=forks`
+- Expected RED reason: no approved pre-persistence containment policy/broker
+  seam exists yet.
+
+Before code, name the first RED tests in `tests/core/ingest.test.ts`, provider
+key/credential route suites, redaction parity, and outbound content egress.
+Require exact-byte synthetic-secret scans across persistence, logs, previews,
+handoffs, tools, alerts, and responses plus auth/expiry/restart tests.
+
+The PR must remain draft and use non-closing issue references until these
+decisions are approved.
