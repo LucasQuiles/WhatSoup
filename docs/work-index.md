@@ -18,15 +18,15 @@ The **Inconsistencies** section lists missing or stale index entries compared wi
 scoped markdown files currently on disk.
 
 **Repo:** `WhatSoup`
-**Total entries:** 90
+**Total entries:** 91
 
 ## Totals
 
 | Dimension | Breakdown |
 |---|---|
-| Kind | handoff=8, plan=45, review=4, spec=32, state=1 |
-| Status | active=21, closed=4, completed=33, deferred=7, pending=15, unknown=10 |
-| Status source | body-marker=83, fallback=6, state-md-status=1 |
+| Kind | handoff=8, plan=45, review=4, spec=33, state=1 |
+| Status | active=22, closed=4, completed=33, deferred=7, pending=15, unknown=10 |
+| Status source | body-marker=84, fallback=6, state-md-status=1 |
 
 ## Inconsistencies
 
@@ -34,7 +34,7 @@ scoped markdown files currently on disk.
 
 ## Synthesis
 
-### Active (21)
+### Active (22)
 
 | Path | Kind | Topic | Status source |
 |------|------|-------|---------------|
@@ -53,6 +53,7 @@ scoped markdown files currently on disk.
 | `docs/superpowers/specs/2026-07-17-boundary-validator-ci-refactor-design.md` | spec | boundary-validator-ci-refactor-design | body-marker |
 | `docs/superpowers/specs/2026-07-20-cicd-enforcement-control-plane-design.md` | spec | cicd-enforcement-control-plane-design | body-marker |
 | `docs/superpowers/specs/2026-07-26-open-issue-triage-and-cohort-pr-design.md` | spec | open-issue-triage-and-cohort-pr-design | body-marker |
+| `docs/superpowers/specs/2026-07-28-controller-state-recovery-integrity-design.md` | spec | controller-state-recovery-integrity-design | body-marker |
 | `docs/superpowers/specs/2026-07-28-runtime-health-signal-dispositions-design.md` | spec | runtime-health-signal-dispositions-design | body-marker |
 | `docs/superpowers/specs/kill-session-transactional-cancellation/design.md` | spec | design | body-marker |
 | `docs/superpowers/specs/kill-session-transactional-cancellation/requirements.md` | spec | requirements | body-marker |
@@ -187,7 +188,7 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 | `docs/superpowers/reviews/2026-07-09-wall-to-wall-audit-pr-briefs.md` | review | completed | body-marker | wall-to-wall-audit-pr-briefs | 2026-07-10 |  |
 | `docs/superpowers/reviews/2026-07-24-r13-r15-tech-debt-review-map.md` | review | completed | body-marker | r13-r15-tech-debt-review-map | 2026-07-24 |  |
 
-### docs/superpowers/specs  _(26 entries)_
+### docs/superpowers/specs  _(27 entries)_
 
 | Path | Kind | Status | Source | Topic | Last Mod | Supersedes |
 |------|------|--------|--------|-------|----------|------------|
@@ -215,6 +216,7 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 | `docs/superpowers/specs/2026-07-20-cicd-enforcement-control-plane-design.md` | spec | active | body-marker | cicd-enforcement-control-plane-design | 2026-07-28 |  |
 | `docs/superpowers/specs/2026-07-23-agent-reliability-remediation-design.md` | spec | unknown | body-marker | agent-reliability-remediation-design | 2026-07-27 |  |
 | `docs/superpowers/specs/2026-07-26-open-issue-triage-and-cohort-pr-design.md` | spec | active | body-marker | open-issue-triage-and-cohort-pr-design | 2026-07-27 |  |
+| `docs/superpowers/specs/2026-07-28-controller-state-recovery-integrity-design.md` | spec | active | body-marker | controller-state-recovery-integrity-design | 2026-07-29 |  |
 | `docs/superpowers/specs/2026-07-28-incident-control-plane-design.md` | spec | unknown | body-marker | incident-control-plane-design | 2026-07-28 | BOT ERRORS WhatsApp-transport-centric delivery (dispatcher/collector file+SSH architecture) as the canonical incident path. |
 | `docs/superpowers/specs/2026-07-28-runtime-health-signal-dispositions-design.md` | spec | active | body-marker | runtime-health-signal-dispositions-design | 2026-07-28 |  |
 
@@ -237,4 +239,4 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 ---
 
 - Derived from `docs/work-index.json`
-- Generated at 2026-07-28T19:52:42Z from commit `92053fc4f10b6f5160c891f1721860b0d8cbacdc`
+- Generated at 2026-07-29T02:17:54Z from commit `77df0ba5ac103c4ec41141d2cacc7e7fcc6dcace`

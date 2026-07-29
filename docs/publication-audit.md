@@ -15,15 +15,15 @@ markers and re-run the command — the result is a fixed point, so the resolutio
 rather than a hand-count. `docs/work-index.{json,md}` has the same property via
 `npm run work-index:regen`.
 
-**Total classification rows:** 332
+**Total classification rows:** 333
 
 | Classification | Count |
 |---|---:|
 | PUBLIC | 196 |
-| PRIVATE-ARCHIVE | 136 |
+| PRIVATE-ARCHIVE | 137 |
 | SANITIZE | 0 |
 | DELETE | 0 |
-| Total | 332 |
+| Total | 333 |
 
 | Path | Classification | Rationale |
 |---|---|---|
@@ -150,6 +150,7 @@ rather than a hand-count. `docs/work-index.{json,md}` has the same property via
 | `docs/superpowers/specs/2026-07-20-cicd-enforcement-control-plane-design.md` | PRIVATE-ARCHIVE | Internal planning or operational documentation; retained in the repository but excluded from public publication by default. |
 | `docs/superpowers/specs/2026-07-23-agent-reliability-remediation-design.md` | PRIVATE-ARCHIVE | Internal reliability and host-remediation design; sanitized of private fleet identifiers and excluded from public publication by default. |
 | `docs/superpowers/specs/2026-07-26-open-issue-triage-and-cohort-pr-design.md` | PRIVATE-ARCHIVE | Internal issue-triage, evidence, and cohort-publication design; retained in the repository but excluded from public publication by default. |
+| `docs/superpowers/specs/2026-07-28-controller-state-recovery-integrity-design.md` | PRIVATE-ARCHIVE | Internal controller-state integrity and fail-closed recovery design; retained in the repository but excluded from public publication by default. |
 | `docs/superpowers/specs/2026-07-28-incident-control-plane-design.md` | PRIVATE-ARCHIVE | Internal incident control plane architecture design (locked sections 1-6 plus assembled migration section); retained in the repository but excluded from public publication by default. |
 | `docs/superpowers/specs/2026-07-28-runtime-health-signal-dispositions-design.md` | PRIVATE-ARCHIVE | Internal runtime-health signal-disposition design; retained in the repository but excluded from public publication by default. |
 | `docs/superpowers/specs/kill-session-transactional-cancellation/design.md` | PRIVATE-ARCHIVE | Internal targeted-cancellation protocol design; retained in the repository but excluded from public publication by default. |
