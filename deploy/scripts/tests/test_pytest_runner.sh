@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 set -euo pipefail
 
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)
@@ -15,7 +15,7 @@ fail() {
 fake_python() {
   local path="$1" import_status="$2"
   cat > "$path" <<SH
-#!/bin/bash
+#!/usr/bin/env bash
 if [ "\${1:-}" = "-c" ] && [ "\${2:-}" = "import pytest" ]; then
   exit $import_status
 fi
@@ -30,7 +30,7 @@ SH
 fake_pytest() {
   local path="$1"
   cat > "$path" <<'SH'
-#!/bin/bash
+#!/usr/bin/env bash
 exit 0
 SH
   chmod +x "$path"
