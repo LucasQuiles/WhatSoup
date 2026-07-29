@@ -174,3 +174,69 @@ Roll out first with a synthetic no-op recipe in non-production tests, then one r
 Observe pending age, approval latency, expiry, duplicate-claim prevention, runtime, timeout, cleanup, output rejection, receipt loss, and privacy-canary results. Do not collect raw recipe output as rollout telemetry.
 
 Rollback empties the allowlist and rejects new requests. Unclaimed grants expire; running attempts are bounded by their existing timeout and cleanup contract. No rollback path turns a previously approved request into reusable authority.
+
+## Current-main reconciliation — 2026-07-29
+
+This amendment supersedes current-system instructions pinned to `c9759467d`.
+Current main is `5398982e610bb948d671181a04856590c9f3f9e5`.
+
+**Readiness:** `BLOCKED PRE-CODE`.
+
+### Distinct authority domain
+
+`diagnostic_exec` is not `AskUserQuestion`, DPR-06 suggestion acceptance, a
+generic tool grant, or host administration. Approval means consent for one
+normalized recipe, scope, actor, version, and digest. Existing policy and the
+canonical execution owner must independently authorize and admit it.
+
+### Reuse and narrow
+
+Reuse current:
+
+- operator authentication and route authorization;
+- approval identity and presentation;
+- grants and deny-wins policy;
+- child-process supervision and process-tree cleanup;
+- durability receipt and registered failure vocabulary.
+
+Add one code-level recipe registry plus one reviewed wrapper around `execFile`
+or `spawn` with `shell: false`. A static guard must reject shell invocations,
+string commands, dynamic binaries, and unregistered process launch outside the
+wrapper. No generic PTY, remote shell, sudo path, or arbitrary command input.
+
+### First slice
+
+The scoped process census, journal query, read-only database check, and bounded
+file tail are a backlog, not one implementation PR. The first slice requires:
+
+1. a synthetic no-side-effect canary;
+2. one owner-selected, low-risk read-only recipe;
+3. the complete authority/digest/state/receipt contract;
+4. exact RED tests before the wrapper exists.
+
+### Owner decisions
+
+- first real recipe and evidence of need;
+- proposer/approver separation and role matrix;
+- normalized digest, actor, scope, grant, and version binding;
+- TTL, single-use, idempotency, cancellation, and terminal states;
+- supervisor and process-tree owner;
+- output byte/time/line bounds, overflow state, redaction, and private logs;
+- route, UI, audit, retention, and rollback owners.
+
+### First implementation-plan gate
+
+First RED binding:
+
+- File: `tests/runtimes/agent/diagnostic-exec.test.ts`
+- Test: `rejects an approved diagnostic when the normalized recipe digest does not match`
+- Command: `npm test -- tests/runtimes/agent/diagnostic-exec.test.ts -t "rejects an approved diagnostic when the normalized recipe digest does not match" --pool=forks`
+- Expected RED reason: the typed recipe registry, claim state, and bounded
+  execution wrapper do not exist.
+
+Prove deny, expiry, replay, wrong actor/scope/digest, self-approval, permission
+revocation, spawn rejection, timeout, cancellation, descendant cleanup,
+overflow, redaction, terminal receipt, restart behavior, and feature-off
+rollback. The static guard and the runtime canary are both required.
+
+The PR must remain draft and use non-closing references.
