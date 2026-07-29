@@ -97,6 +97,7 @@ class FakeConnection extends EventEmitter {
     size: 0,
   };
   presenceCache = {};
+  getConnectionState = vi.fn(() => ({ connected: true }));
   connect = vi.fn(async () => {});
   shutdown = vi.fn();
   sendRaw = vi.fn(async () => ({ waMessageId: 'raw-1' }));
@@ -163,6 +164,7 @@ async function importMainWithMocks(options: {
   } | null;
   selfRestartMarkerThrows?: boolean;
   resolveBinaryPathReturn?: string | null;
+  startupNotificationStabilitySeconds?: number;
 } = {}) {
   vi.resetModules();
   vi.useFakeTimers();
@@ -291,7 +293,13 @@ async function importMainWithMocks(options: {
     mediaDir: '/tmp/ws-helpers-media/tmp',
     mediaRetention: { intervalHours: 1, tempHours: 1, cacheHours: 24 },
     dataRoot: '/tmp/ws-helpers-data-root',
+    // Nonexistent on purpose: the startup-notify journal fails open, keeping
+    // these wiring tests free of real-filesystem coupling.
+    stateRoot: '/tmp/ws-helpers-state-root-absent',
     startupNotifications: true,
+    // 0 = legacy immediate send (3 s floor); individual tests opt into the
+    // debounce window explicitly.
+    startupNotificationStabilitySeconds: options.startupNotificationStabilitySeconds ?? 0,
     toolUpdateMode: 'full',
   };
 
@@ -1302,6 +1310,75 @@ describe('main.ts — uncovered helpers and signal paths', () => {
           chatJid: '15551230000@s.whatsapp.net',
         }),
         'failed to send startup notification',
+      );
+    });
+
+    // ── Stability debounce (startupNotificationStabilitySeconds > 0) ─────────
+    // Five consecutive back-online pings reached a real user during host
+    // maintenance because the notice fired 3 s after every boot; the debounce
+    // makes "back online" mean "up AND connected for the window".
+
+    it('debounces the back-online notice to the stability window', async () => {
+      const h = await importMainWithMocks({
+        instanceConfig: {
+          name: 'q',
+          type: 'agent',
+          introSent: true,
+          agentOptions: { sessionScope: 'shared' },
+        },
+        pendingStartupMessage: null,
+        startupNotificationStabilitySeconds: 600,
+      });
+
+      await vi.advanceTimersByTimeAsync(3_000);
+      expect(h.sendTracked).not.toHaveBeenCalledWith(
+        h.connection,
+        '15551230000@s.whatsapp.net',
+        '*Agent back online* ✓',
+        h.durability,
+        { replayPolicy: 'unsafe', opType: 'status_ping' },
+      );
+
+      await vi.advanceTimersByTimeAsync(600_000);
+      expect(h.sendTracked).toHaveBeenCalledWith(
+        h.connection,
+        '15551230000@s.whatsapp.net',
+        '*Agent back online* ✓',
+        h.durability,
+        { replayPolicy: 'unsafe', opType: 'status_ping' },
+      );
+    });
+
+    it('re-arms instead of announcing while the transport is still reconnecting', async () => {
+      const h = await importMainWithMocks({
+        instanceConfig: {
+          name: 'q',
+          type: 'agent',
+          introSent: true,
+          agentOptions: { sessionScope: 'shared' },
+        },
+        pendingStartupMessage: null,
+        startupNotificationStabilitySeconds: 600,
+      });
+      h.connection.getConnectionState.mockReturnValue({ connected: false });
+
+      await vi.advanceTimersByTimeAsync(600_000);
+      expect(h.sendTracked).not.toHaveBeenCalledWith(
+        h.connection,
+        '15551230000@s.whatsapp.net',
+        '*Agent back online* ✓',
+        h.durability,
+        { replayPolicy: 'unsafe', opType: 'status_ping' },
+      );
+
+      h.connection.getConnectionState.mockReturnValue({ connected: true });
+      await vi.advanceTimersByTimeAsync(600_000);
+      expect(h.sendTracked).toHaveBeenCalledWith(
+        h.connection,
+        '15551230000@s.whatsapp.net',
+        '*Agent back online* ✓',
+        h.durability,
+        { replayPolicy: 'unsafe', opType: 'status_ping' },
       );
     });
   });
