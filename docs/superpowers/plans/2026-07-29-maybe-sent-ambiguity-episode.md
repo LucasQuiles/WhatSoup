@@ -165,13 +165,13 @@ Expected: FAIL because the unsafe row is reconciled and quarantined immediately.
 ```ts
 function maybeSentDwellAtSql(prefix = ''): string {
   const column = (name: string) => `${prefix}${name}`;
-  const stale = "datetime('now', '-31 seconds')";
+  const stale = "datetime('now', '-31 minutes')";
   return `CASE
-    WHEN ${column('ambiguity_at')} IS NOT NULL AND datetime(${column('ambiguity_at')}) IS NOT NULL THEN ${column('ambiguity_at')}
+    WHEN ${column('ambiguity_at')} IS NOT NULL AND datetime(${column('ambiguity_at')}) IS NOT NULL THEN datetime(${column('ambiguity_at')})
     WHEN ${column('ambiguity_at')} IS NOT NULL THEN ${stale}
-    WHEN ${column('submitted_at')} IS NOT NULL AND datetime(${column('submitted_at')}) IS NOT NULL THEN ${column('submitted_at')}
+    WHEN ${column('submitted_at')} IS NOT NULL AND datetime(${column('submitted_at')}) IS NOT NULL THEN datetime(${column('submitted_at')})
     WHEN ${column('submitted_at')} IS NOT NULL THEN ${stale}
-    WHEN datetime(${column('created_at')}) IS NOT NULL THEN ${column('created_at')}
+    WHEN datetime(${column('created_at')}) IS NOT NULL THEN datetime(${column('created_at')})
     ELSE ${stale}
   END`;
 }
@@ -203,7 +203,7 @@ expect(getOutbound(db, opId).ambiguity_at).not.toBe('2000-01-01 00:00:00');
 db.raw.prepare("UPDATE outbound_ops SET ambiguity_at = datetime('now', '-31 seconds') WHERE id = ?").run(opId);
 expect(engine.reconcileLiveMaybeSent().outboundReconciled).toBe(1);
 
-// Corrupt chronology is deliberately stale, never fresh.
+// Corrupt or future chronology is deliberately stale, never fresh.
 db.raw.prepare("UPDATE outbound_ops SET ambiguity_at = 'not-a-timestamp' WHERE id = ?").run(opId);
 expect(engine.reconcileLiveMaybeSent().outboundReconciled).toBe(1);
 ```
@@ -214,7 +214,7 @@ Test an echo inside the fresh grace by creating an old queued submitted row, ent
 
 Run: `loadgate --label ambiguity-episode-green -- bash scripts/run-with-pinned-npm.sh test -- tests/core/durability.test.ts tests/core/durability-recovery.test.ts tests/core/health.test.ts --pool=forks`
 
-Expected: PASS. The old pending row has a fresh episode age, the old ambiguity threshold reconciles under existing policy, and malformed values cannot keep health green.
+Expected: PASS. The old pending row has a fresh episode age, the old ambiguity threshold reconciles under existing policy, and malformed or future values cannot keep health green.
 
 - [ ] **Step 6: Commit the behavior slice.**
 

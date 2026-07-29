@@ -1496,8 +1496,9 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
       const authFailureIsDegraded = authFailureClass !== 'none';
       // Durability debt: an outbound delivery stuck in maybe_sent past the stale
       // window is a long-lived continuity risk that /health must surface rather
-      // than read green (#1865). submitted_at is SQLite datetime('now') (UTC,
-      // space-separated, no zone) — normalize to ISO-UTC before parsing.
+      // than read green (#1865). The durability query returns canonical SQLite
+      // UTC datetimes for the active ambiguity episode or a fail-closed stale
+      // sentinel, so normalize that bounded value before parsing.
       const durabilityStats = deps.durability?.getHealthStats() ?? null;
       const oldestMaybeSentMs =
         durabilityStats?.oldestMaybeSentAt != null && durabilityStats.oldestMaybeSentAt !== ''

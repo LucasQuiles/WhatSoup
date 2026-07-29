@@ -615,7 +615,7 @@ describe('durable recovery evidence ordering', () => {
   it('does not create recurring live-recovery evidence for corroborated maybe_sent proof', () => {
     seedIncident();
     db.raw.prepare(
-      "UPDATE outbound_ops SET created_at = datetime('now', '-31 seconds') WHERE id = ?",
+      "UPDATE outbound_ops SET ambiguity_at = datetime('now', '-31 seconds') WHERE id = ?",
     ).run(INCIDENT_SELECTED_OP_ID);
     const freshEngine = new DurabilityEngine(db);
     freshEngine.postConnectRecovery();

@@ -38,13 +38,16 @@ dwell expression:
 
 1. A parseable `ambiguity_at` for the active episode.
 2. For legacy rows, a parseable `submitted_at`, then `created_at`.
-3. A bounded stale sentinel when the available chronology is malformed or
-   absent, so corrupted data cannot manufacture freshness or a green health
-   result.
+3. A canonical, bounded stale sentinel older than the health debt window when
+   the available chronology is malformed, future-dated, or absent, so corrupted
+   data cannot manufacture freshness or a green health result. Parseable
+   timestamp forms are normalized through SQLite before either comparison or
+   health parsing.
 
 Post-connect recovery remains an immediate history/corroboration pass rather
-than a dwell-gated live sweep. The change is limited to the two decisions that
-currently derive age: live reconciliation eligibility and health degradation.
+than a dwell-gated live sweep; its existing startup history grace is a separate
+boundary. The change is limited to the two decisions that currently derive age:
+recurring live reconciliation eligibility and health degradation.
 
 ## Validation contract
 

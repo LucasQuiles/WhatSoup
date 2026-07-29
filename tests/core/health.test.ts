@@ -380,7 +380,7 @@ describe('GET /health', () => {
     durability.markMaybeSent(id, 'echo_timeout');
     // One hour unresolved — well past the stale window.
     db2.raw
-      .prepare(`UPDATE outbound_ops SET submitted_at = datetime('now', '-3600 seconds') WHERE id = ?`)
+      .prepare(`UPDATE outbound_ops SET ambiguity_at = datetime('now', '-3600 seconds') WHERE id = ?`)
       .run(id);
 
     const { server: server2, port: port2 } = await buildTestServer(makeDeps(db2, { durability }));
@@ -393,6 +393,71 @@ describe('GET /health', () => {
       expect(json.status).toBe('degraded');
       expect(json.durability.maybeSentOutbound).toBe(1);
       expect(json.durability.oldestMaybeSentAt).not.toBeNull();
+    } finally {
+      await new Promise<void>((resolve) => server2.close(() => resolve()));
+      db2.close();
+    }
+  });
+
+  it('degrades instead of treating malformed ambiguity chronology as fresh (#2343)', async () => {
+    const db2 = makeDb();
+    const durability = new DurabilityEngine(db2);
+    const id = durability.createOutboundOp({ conversationKey: 'k', chatJid: 'j', opType: 'text', payload: '{}', replayPolicy: 'unsafe' });
+    durability.markSending(id);
+    durability.markMaybeSent(id, 'malformed chronology');
+    db2.raw.prepare("UPDATE outbound_ops SET ambiguity_at = 'not-a-timestamp' WHERE id = ?").run(id);
+
+    const { server: server2, port: port2 } = await buildTestServer(makeDeps(db2, { durability }));
+    try {
+      const { status, body } = await healthReq(port2);
+      const json = JSON.parse(body);
+      expect(status).toBe(200);
+      expect(json.status).toBe('degraded');
+      expect(json.durability).toMatchObject({ maybeSentOutbound: 1 });
+      expect(json.durability.oldestMaybeSentAt).not.toBeNull();
+    } finally {
+      await new Promise<void>((resolve) => server2.close(() => resolve()));
+      db2.close();
+    }
+  });
+
+  it('degrades instead of treating a future ambiguity episode as fresh (#2343)', async () => {
+    const db2 = makeDb();
+    const durability = new DurabilityEngine(db2);
+    const id = durability.createOutboundOp({ conversationKey: 'k', chatJid: 'j', opType: 'text', payload: '{}', replayPolicy: 'unsafe' });
+    durability.markSending(id);
+    durability.markMaybeSent(id, 'future chronology');
+    db2.raw.prepare("UPDATE outbound_ops SET ambiguity_at = '2099-01-01T00:00:00Z' WHERE id = ?").run(id);
+
+    const { server: server2, port: port2 } = await buildTestServer(makeDeps(db2, { durability }));
+    try {
+      const { status, body } = await healthReq(port2);
+      const json = JSON.parse(body);
+      expect(status).toBe(200);
+      expect(json.status).toBe('degraded');
+      expect(json.durability).toMatchObject({ maybeSentOutbound: 1 });
+      expect(json.durability.oldestMaybeSentAt).not.toBe('2099-01-01 00:00:00');
+    } finally {
+      await new Promise<void>((resolve) => server2.close(() => resolve()));
+      db2.close();
+    }
+  });
+
+  it('normalizes a parseable ISO ambiguity episode before evaluating health debt (#2343)', async () => {
+    const db2 = makeDb();
+    const durability = new DurabilityEngine(db2);
+    const id = durability.createOutboundOp({ conversationKey: 'k', chatJid: 'j', opType: 'text', payload: '{}', replayPolicy: 'unsafe' });
+    durability.markSending(id);
+    durability.markMaybeSent(id, 'ISO chronology');
+    db2.raw.prepare("UPDATE outbound_ops SET ambiguity_at = '2000-01-01T00:00:00Z' WHERE id = ?").run(id);
+
+    const { server: server2, port: port2 } = await buildTestServer(makeDeps(db2, { durability }));
+    try {
+      const { status, body } = await healthReq(port2);
+      const json = JSON.parse(body);
+      expect(status).toBe(200);
+      expect(json.status).toBe('degraded');
+      expect(json.durability.oldestMaybeSentAt).toBe('2000-01-01 00:00:00');
     } finally {
       await new Promise<void>((resolve) => server2.close(() => resolve()));
       db2.close();
