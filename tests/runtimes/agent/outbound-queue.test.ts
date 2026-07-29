@@ -22,7 +22,7 @@ import { WhatSoupError } from '../../../src/errors.ts';
 import { OUTBOUND_GOVERNOR_SHED_LOG } from '../../../src/transport/outbound-governor.ts';
 import { toConversationKey } from '../../../src/core/conversation-key.ts';
 import { makeChannelId } from '../../../src/core/transport-refs.ts';
-import { RateLimitedError, PayloadTooLargeError } from '../../../src/transport/contract/errors.ts';
+import { RateLimitedError, PayloadTooLargeError, TransientProviderError } from '../../../src/transport/contract/errors.ts';
 import { MAX_TIMER_DELAY_MS } from '../../../src/core/retry.ts';
 import { canSendToGroup, recordGroupOutbound, __resetForTests } from '../../../src/core/echo-guard.ts';
 import type { EchoGuardConfig } from '../../../src/core/echo-guard.ts';
@@ -1383,6 +1383,45 @@ describe('OutboundQueue', () => {
     // Not retryable — one failed attempt against the original message, one
     // notice send. No blind retry of the oversized payload.
     expect(oversizedMessenger.sendMessage).toHaveBeenCalledTimes(2);
+  });
+
+  it('B07: does not send a failure notice for a retryable transient_provider failure that reaches stop only via exhaustion', async () => {
+    // Pinning test (GAP 2b): behavior is already correct, no RED expected.
+    // transient_provider IS retryable, so classifyOutboundFailure keeps
+    // returning retry_decision 'retry_now' on attempts 1-2 — but on the
+    // final attempt (attemptsRemaining hits 0) it ALSO reaches 'stop', the
+    // exact same retry_decision the allowlisted classes use. This proves
+    // retry_decision==='stop' alone is not a safe gate for the notice —
+    // only the failure-class allowlist (payload_too_large,
+    // unsupported_capability) keeps this dead-channel class silent.
+    mockLog.error.mockClear();
+    const noticeCalls: string[] = [];
+    let callNum = 0;
+    const transientMessenger: Messenger = {
+      sendMessage: vi.fn(async (_jid: string, text: string) => {
+        callNum += 1;
+        if (callNum <= 3) {
+          throw new TransientProviderError({
+            channelId: makeChannelId('whatsapp', 'test'),
+            operation: 'sendText',
+            correlationId: 'corr-transient-exhausted',
+            message: 'synthetic provider prose that must not persist',
+            scope: 'request',
+            phase: 'provider_call_started',
+          });
+        }
+        noticeCalls.push(text);
+        return { waMessageId: null };
+      }),
+      sendMedia: vi.fn(async () => ({ waMessageId: null })),
+    };
+
+    const queue = new OutboundQueue(transientMessenger, CHAT_JID);
+    queue.enqueueText('message that keeps hitting a transient provider failure');
+    await vi.runAllTimersAsync();
+
+    expect(noticeCalls).toHaveLength(0);
+    expect(transientMessenger.sendMessage).toHaveBeenCalledTimes(3);
   });
 
   // ─── B12: Retry warn logs shape ───────────────────────────────────────────

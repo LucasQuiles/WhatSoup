@@ -4,13 +4,17 @@ import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
   AuthRequiredError,
+  PayloadTooLargeError,
   RateLimitedError,
   SendAmbiguousError,
+  TransientProviderError,
+  UnsupportedCapabilityError,
 } from '../../src/transport/contract/errors.ts';
 import {
   classifyOutboundFailure,
   decodeOutboundFailureEvidence,
   encodeOutboundFailureEvidence,
+  outboundFailureWarrantsUserNotice,
   OUTBOUND_FAILURE_EVIDENCE_MAX_BYTES,
 } from '../../src/core/outbound-failure-disposition.ts';
 import { makeChannelId } from '../../src/core/transport-refs.ts';
@@ -337,6 +341,99 @@ describe('outbound failure disposition', () => {
     expect(decodeOutboundFailureEvidence(
       encodeOutboundFailureEvidence(evidence),
     )).toEqual(evidence);
+  });
+});
+
+// GAP 2(a): unit coverage for outboundFailureWarrantsUserNotice directly.
+// The predicate already exists and is exercised end-to-end via the runtime
+// tests — these are PINNING tests (the underlying logic is already correct;
+// there is no RED state to reproduce), added to close the missing unit-test
+// gap the delta review flagged, especially the riskiest silence case: a
+// RETRYABLE class that still reaches retry_decision 'stop' once attempts are
+// exhausted must not be mistaken for a notice-worthy rejection just because
+// its retry_decision matches the allowlist's gate value.
+describe('outboundFailureWarrantsUserNotice', () => {
+  it('is true for payload_too_large at stop (message-specific, channel-healthy)', () => {
+    expect(outboundFailureWarrantsUserNotice({
+      retry_decision: 'stop',
+      failure_code: 'transport.payload_too_large',
+    })).toBe(true);
+  });
+
+  it('is true for unsupported_capability at stop (message-specific, channel-healthy)', () => {
+    expect(outboundFailureWarrantsUserNotice({
+      retry_decision: 'stop',
+      failure_code: 'transport.unsupported_capability',
+    })).toBe(true);
+  });
+
+  it('is false for a retryable transient_provider failure that reaches stop only because attempts are exhausted', () => {
+    // The riskiest silence case: retry_decision alone is NOT a safe gate —
+    // classifyOutboundFailure produces 'stop' for this class too once
+    // attemptsRemaining hits 0, even though retryable stays true. Build the
+    // evidence via the real classifier (not a hand-typed object) so this
+    // test proves the actual integration, not an assumption about its shape.
+    const evidence = classifyOutboundFailure(
+      new TransientProviderError({ ...base, phase: 'provider_call_started' }),
+      {
+        nowMs: Date.parse('2026-07-28T00:00:00.000Z'),
+        retryOwner: 'agent_queue',
+        attemptsRemaining: 0,
+      },
+    );
+
+    expect(evidence).toMatchObject({ retry_decision: 'stop', retryable: true });
+    expect(outboundFailureWarrantsUserNotice(evidence)).toBe(false);
+  });
+
+  it('is false for a deferred retry (retry_not_before set) regardless of failure class', () => {
+    const evidence = classifyOutboundFailure(
+      new RateLimitedError({ ...base, phase: 'not_started', retryAfterMs: 60_000 }),
+      {
+        nowMs: Date.parse('2026-07-28T00:00:00.000Z'),
+        retryOwner: 'agent_queue',
+        attemptsRemaining: 2,
+      },
+    );
+
+    expect(evidence.retry_decision).toBe('retry_not_before');
+    expect(outboundFailureWarrantsUserNotice(evidence)).toBe(false);
+  });
+
+  it('is false for excluded classes even at stop: auth, ambiguous, and permanent-provider fallback', () => {
+    const auth = classifyOutboundFailure(
+      new AuthRequiredError({ ...base, phase: 'provider_call_started' }),
+      { nowMs: Date.parse('2026-07-28T00:00:00.000Z'), retryOwner: 'agent_queue', attemptsRemaining: 2 },
+    );
+    const ambiguous = classifyOutboundFailure(
+      new SendAmbiguousError({ ...base, phase: 'ack_received' }),
+      { nowMs: Date.parse('2026-07-28T00:00:00.000Z'), retryOwner: 'agent_queue', attemptsRemaining: 2 },
+    );
+    const unknown = classifyOutboundFailure(
+      new Error('unclassified synthetic failure'),
+      { nowMs: Date.parse('2026-07-28T00:00:00.000Z'), retryOwner: 'agent_queue', attemptsRemaining: 0 },
+    );
+
+    for (const evidence of [auth, ambiguous, unknown]) {
+      expect(evidence.retry_decision).toBe('stop');
+      expect(outboundFailureWarrantsUserNotice(evidence)).toBe(false);
+    }
+  });
+
+  it('confirms PayloadTooLargeError and UnsupportedCapabilityError classify to stop end-to-end (not just the predicate)', () => {
+    const tooLarge = classifyOutboundFailure(
+      new PayloadTooLargeError({ ...base, phase: 'not_started' }),
+      { nowMs: Date.parse('2026-07-28T00:00:00.000Z'), retryOwner: 'agent_queue', attemptsRemaining: 2 },
+    );
+    const unsupported = classifyOutboundFailure(
+      new UnsupportedCapabilityError({ ...base, phase: 'not_started' }),
+      { nowMs: Date.parse('2026-07-28T00:00:00.000Z'), retryOwner: 'agent_queue', attemptsRemaining: 2 },
+    );
+
+    for (const evidence of [tooLarge, unsupported]) {
+      expect(evidence).toMatchObject({ retry_decision: 'stop', mutation_state: 'not_started' });
+      expect(outboundFailureWarrantsUserNotice(evidence)).toBe(true);
+    }
   });
 });
 

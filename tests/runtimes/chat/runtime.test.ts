@@ -18,6 +18,7 @@ import {
   AuthRequiredError,
   RateLimitedError,
   PayloadTooLargeError,
+  TransientProviderError,
 } from '../../../src/transport/contract/errors.ts';
 import { makeChannelId } from '../../../src/core/transport-refs.ts';
 import type { LLMProvider } from '../../../src/runtimes/chat/providers/types.ts';
@@ -1446,6 +1447,33 @@ describe('Send retry with exponential backoff (B02)', () => {
         failure_code: 'transport.payload_too_large',
         mutation_state: 'not_started',
       }),
+    );
+  });
+
+  it('does not send a failure notice for a retryable transient_provider failure that reaches stop only via exhaustion', async () => {
+    // Pinning test (GAP 2b): behavior already correct, no RED expected. Same
+    // discriminating case as the agent-queue companion: transient_provider
+    // is retryable and only reaches retry_decision 'stop' via exhaustion —
+    // proving retry_decision==='stop' alone is not a safe notice gate.
+    vi.useFakeTimers();
+    const { handler, messenger } = makeHandler();
+    messenger.sendMessage.mockRejectedValue(new TransientProviderError({
+      channelId: makeChannelId('signal', 'test'),
+      operation: 'sendText',
+      correlationId: 'synthetic-transient-exhausted',
+      scope: 'request',
+      message: 'synthetic provider prose that must not persist',
+      phase: 'provider_call_started',
+    }));
+
+    await handler.handleMessage(makeIncomingMessage());
+    await vi.runAllTimersAsync();
+    await drainQueue();
+
+    expect(messenger.sendMessage).toHaveBeenCalledTimes(3);
+    expect(messenger.sendMessage).not.toHaveBeenCalledWith(
+      expect.any(String),
+      '⚠️ My last response may not have been delivered. Please ask me again.',
     );
   });
 
