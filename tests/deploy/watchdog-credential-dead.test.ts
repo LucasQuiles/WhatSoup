@@ -136,3 +136,32 @@ describe('watchdog shell wiring — exit 3 routes to marker + log, never restart
     expect(template).toMatch(/elif \[ "\$py_rc" -ne 0 \]; then\n\s*restart_label/);
   });
 });
+
+describe('watchdog shell wiring — authenticated health read (#2515 public envelope)', () => {
+  // The diagnostic health body is auth-gated: unauthenticated callers get the
+  // minimal public liveness envelope, whose MISSING whatsapp/turn_capability
+  // fields read as connected=false/state=None — the decision block then
+  // restarts a perfectly healthy bot every cooldown window, and the
+  // CREDENTIAL-DEAD branch can never see turn_capability at all. Surfaced
+  // live on mini11 (2026-07-29): the watchdog kicked a healthy bot two
+  // minutes after a green gate. The bot health curl must therefore send the
+  // instance bearer from tokens.env when one resolves.
+  it('resolves the bearer from the instance tokens.env', () => {
+    expect(template).toMatch(/BOT_TOKENS_ENV="\$HOME_DIR\/\.config\/whatsoup\/instances\/BOT_NAME\/tokens\.env"/);
+    expect(template).toMatch(/WHATSOUP_HEALTH_TOKEN=.*sed -n 's\/\^WHATSOUP_HEALTH_TOKEN=\/\/p'/);
+  });
+
+  it('sends the bearer on the bot health curl when available', () => {
+    expect(template).toMatch(/AUTH_ARGS=\(\)/);
+    expect(template).toMatch(/AUTH_ARGS=\(-H "Authorization: Bearer \$WHATSOUP_HEALTH_TOKEN"\)/);
+    const botCurl = template.match(/bot_resp="\$\(curl[^\n]*/)?.[0];
+    expect(botCurl, 'bot health curl line missing').toBeTruthy();
+    expect(botCurl).toContain('"${AUTH_ARGS[@]}"');
+  });
+
+  it('never writes the token to the log', () => {
+    // The token flows only into curl argv; no log/echo/print line references it.
+    const tokenUses = template.split('\n').filter((l) => l.includes('WHATSOUP_HEALTH_TOKEN') && /\b(log|echo|print)\b/.test(l));
+    expect(tokenUses).toEqual([]);
+  });
+});

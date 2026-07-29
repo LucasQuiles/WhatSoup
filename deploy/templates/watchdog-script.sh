@@ -47,6 +47,18 @@ export HOME="$HOME_DIR" PATH
 
 mkdir -p "$LOG_DIR"
 
+# #2515: the diagnostic health body is auth-gated; unauthenticated reads get
+# the minimal public liveness envelope, whose missing whatsapp/turn_capability
+# fields would read as restart-worthy (connected=false/state=None) and starve
+# the CREDENTIAL-DEAD branch of turn_capability entirely. Send the instance
+# bearer from tokens.env when one resolves; the token reaches curl argv only,
+# never the log.
+BOT_TOKENS_ENV="$HOME_DIR/.config/whatsoup/instances/BOT_NAME/tokens.env"
+WHATSOUP_HEALTH_TOKEN=""
+[ -r "$BOT_TOKENS_ENV" ] && WHATSOUP_HEALTH_TOKEN="$(sed -n 's/^WHATSOUP_HEALTH_TOKEN=//p' "$BOT_TOKENS_ENV" | head -1)"
+AUTH_ARGS=()
+[ -n "$WHATSOUP_HEALTH_TOKEN" ] && AUTH_ARGS=(-H "Authorization: Bearer $WHATSOUP_HEALTH_TOKEN")
+
 # Single-instance lock: if another watchdog invocation is still running, exit.
 if ! mkdir "$LOCK" 2>/dev/null; then
   exit 0
@@ -130,7 +142,7 @@ ensure_loaded "$FLEET_LABEL" "$FLEET_PLIST"
 # restart cannot fix. So: no --fail; capture body + code; treat only a real
 # TRANSPORT failure (no HTTP response at all) as unreachable, and let the
 # decision block below act on the body (incl. the terminal-no-restart branch).
-bot_resp="$(curl --silent --show-error --max-time 8 -w $'\n%{http_code}' "$BOT_HEALTH" 2>>"$LOG")"
+bot_resp="$(curl --silent --show-error --max-time 8 "${AUTH_ARGS[@]}" -w $'\n%{http_code}' "$BOT_HEALTH" 2>>"$LOG")"
 curl_rc=$?
 bot_code="${bot_resp##*$'\n'}"
 bot_json="${bot_resp%$'\n'*}"
