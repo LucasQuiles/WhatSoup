@@ -309,6 +309,30 @@ describe('TwilioSmsAdapter sendText', () => {
 
     expect(port.sent).toHaveLength(0);
   });
+
+  it('honors a port-supplied phase of not_started on the transient branch too', async () => {
+    // Same defect, different classification branch: a bare network-level
+    // failure (no status, no code) that the port marks as pre-request must
+    // not be relabeled provider_call_started either.
+    const port = new MockTwilioSmsPort();
+    const adapter = new TwilioSmsAdapter(makeConfig(), port);
+    await adapter.connect();
+
+    port.failNextSend(Object.assign(new Error('socket hang up'), { phase: 'not_started' }));
+
+    const channel = makeChannelId('sms', 'ml-bot');
+
+    await expect(
+      adapter.sendText({ channel, id: '+15551230000' }, 'hello'),
+    ).rejects.toMatchObject({
+      payload: {
+        code: 'transport.transient_provider',
+        phase: 'not_started',
+      },
+    });
+
+    expect(port.sent).toHaveLength(0);
+  });
 });
 
 describe('TwilioSmsAdapter subscriptions', () => {

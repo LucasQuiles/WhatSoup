@@ -105,8 +105,13 @@ describe('outbound failure disposition', () => {
       },
     );
 
-    expect(evidence.retry_decision).toBe('retry_now');
-    expect(evidence.retry_not_before).toBeNull();
+    expect(evidence).toMatchObject({
+      retry_decision: 'retry_now',
+      retry_not_before: null,
+      retry_owner: 'agent_queue',
+      attempt_budget_disposition: 'consume',
+      retryable: true,
+    });
   });
 
   it('stops a typed non-retryable provider rejection after one logical attempt', () => {

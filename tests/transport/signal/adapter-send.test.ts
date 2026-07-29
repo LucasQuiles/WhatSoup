@@ -190,6 +190,24 @@ describe('SignalAdapter — sendText port-error mapping', () => {
       },
     });
   });
+
+  it('honors a port-supplied phase of not_started on the transient branch too', async () => {
+    // Same defect, different classification branch: a network-level failure
+    // (no status, no code) that the port marks as pre-request must not be
+    // relabeled provider_call_started either.
+    const port = new MockSignalPort({
+      sendError: Object.assign(new Error('boom'), { status: 503, phase: 'not_started' }),
+    });
+    const { adapter, channelId } = makeAdapter(port);
+    const target = peerConversationRef(channelId, '+15559990000');
+
+    await expect(adapter.sendText(target, 'hi')).rejects.toMatchObject({
+      payload: {
+        code: 'transport.transient_provider',
+        phase: 'not_started',
+      },
+    });
+  });
 });
 
 describe('SignalAdapter — group sends', () => {

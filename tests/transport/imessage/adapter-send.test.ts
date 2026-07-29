@@ -159,6 +159,23 @@ describe('ImessageAdapter — sendText port-error mapping', () => {
         },
       });
   });
+
+  it('honors a port-supplied phase of not_started on the transient branch too', async () => {
+    // Same defect, different classification branch: a 5xx BlueBubbles error
+    // that the port marks as pre-request must not be relabeled
+    // provider_call_started either.
+    const port = new MockImessagePort({
+      sendError: Object.assign(new Error('boom'), { status: 503, phase: 'not_started' }),
+    });
+    const { adapter, channelId } = makeAdapter(port);
+    await expect(adapter.sendText(peerConversationRef(channelId, 'u@example.com'), 'hi'))
+      .rejects.toMatchObject({
+        payload: {
+          code: 'transport.transient_provider',
+          phase: 'not_started',
+        },
+      });
+  });
 });
 
 describe('ImessageAdapter — extension error mapping', () => {
