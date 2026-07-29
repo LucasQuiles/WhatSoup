@@ -1255,8 +1255,23 @@ npm run close-recovery-catchup -- \
   --evidence-ref evidence:REFERENCE
 ```
 
-A successful dry run emits a redacted `ready: true` inspection and changes no rows. Confirm only after
-the exact source set, target sequence, actor, and evidence reference have been independently reviewed:
+A successful dry run emits a redacted `ready: true` inspection and changes no rows. It contains
+exactly these keys — no raw plan ID, conversation key, source/catch-up sequence, or any other private
+identifier ever appears in this or the confirmed output:
+
+```
+ok, dryRun, ready, planFingerprint, conversationFingerprint, nSourceSeqs,
+catchupSeqFingerprint, evidenceBasis, wouldInsert, idempotent, openBefore, openAfter
+```
+
+`planFingerprint`, `conversationFingerprint`, and `catchupSeqFingerprint` are 12-character hex handles —
+HMAC-SHA256 keyed by a per-database salt (see below), domain-separated so the same raw value in a
+different field never produces the same handle. They are stable across dry-run and confirmed output for
+the same database, so an operator can correlate a dry-run preview against a later confirmed receipt (or
+a later error) by comparing these handles, without ever seeing the raw identifier.
+
+Confirm only after the exact source set, target sequence, actor, and evidence reference have been
+independently reviewed:
 
 ```bash
 npm run close-recovery-catchup -- \
@@ -1275,6 +1290,38 @@ that same transaction, and either appends the full closure plus immutable witnes
 It fails on a busy writer, a changed database file, schema drift, a partial source set, ambiguous proof,
 or a later-only corroborated delivery. Coordinate against a live writer rather than retrying blindly.
 An exact repeated invocation is idempotent; changed evidence is rejected.
+
+The confirmed receipt contains exactly these keys:
+
+```
+ok, dryRun, receipt: {
+  planFingerprint, conversationFingerprint, nSourceSeqs, catchupSeqFingerprint,
+  evidenceBasis, inserted, idempotent, openBefore, openAfter
+}
+```
+
+On failure (either path), the command prints the raw error message to stderr (a plain line, for operator
+debuggability at the terminal — this text may describe a code path but never interpolates a raw plan ID,
+conversation key, actor, or evidence reference), followed by a bounded, machine-parseable JSON line:
+
+```
+ok: false, errorCode, correlation?: { planFingerprint, conversationFingerprint }
+```
+
+`errorCode` is one of `invalid_args`, `invalid_proof`, `changed_evidence`, `busy_writer`, `changed_file`,
+`io`, or `unknown`. `correlation` carries the same fingerprints as the dry-run/receipt output (so a
+failure can be matched against a prior preview) and is present whenever the command-line arguments parsed
+far enough to identify the target database and plan; it is omitted, never fabricated, when that
+information isn't available.
+
+**Redaction salt file.** On first use against a given database, the command creates
+`${DB}.redaction-salt` (32 random bytes, file mode `0600`) alongside it and reuses that file on every
+later invocation — including a dry run, which is otherwise non-mutating with respect to the target
+database's own rows. Losing or rotating this file changes every fingerprint the command emits for that
+database (dry-run previews taken before the loss will no longer match confirmed receipts taken after);
+back it up alongside the database if you rely on cross-run fingerprint correlation. It contains no
+identifying information by itself and only lets past/future runs against the SAME database correlate —
+it does not need to be treated as a credential, but if it changes, expect fingerprints to change with it.
 
 ### 7.7 Useful SQL Queries
 
