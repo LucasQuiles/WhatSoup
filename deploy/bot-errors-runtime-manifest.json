@@ -21,7 +21,7 @@
         "collector_remote_unreachable"
       ],
       "path": "deploy/scripts/bot-errors-collector.py",
-      "sha256": "728b4a920bc4c782560a37a0da4626626637efcda43ff8fe52ad157e2635752c"
+      "sha256": "f0485adc8dafd0175962f83a667f8a5d9a02dfe656f79844c8be29f76345fa38"
     },
     {
       "mustContain": [
@@ -40,7 +40,7 @@
         "quarantine_untrusted_entry"
       ],
       "path": "deploy/scripts/bot-errors-dispatcher.py",
-      "sha256": "118436f9f1cfcedb793ddd8e58cc788ea2ea62031d2b737a9a6d9d0fbdbee684"
+      "sha256": "b264eb6cfc2c3de8258da14b0cc3d724302cb0236b5219f108021f2a940f9006"
     },
     {
       "mustContain": [
@@ -49,7 +49,7 @@
         "outbox_write_failure"
       ],
       "path": "deploy/scripts/bot-errors-emit.py",
-      "sha256": "bcac5e797a7bf421e8f98f9991b5fc7ff8fc1712f8b77ffbdb1dacc00bb38bad"
+      "sha256": "990a860e1787f5883f2f055dfdc4b796410ec3ceec41ac24e5d2077a0027c181"
     },
     {
       "mustContain": [
@@ -137,7 +137,7 @@
         "BOT_ERRORS_HEALTH_BODY_MAX_FUTURE_SKEW_SECONDS"
       ],
       "path": "deploy/scripts/bot-errors-health-check.py",
-      "sha256": "d7541bbb35632a61eb7429c58ece6e391b1dfad246142759cc0135aca7c0c3c7"
+      "sha256": "6b6e2c0f22a1ddeeeb7046b96a27a134f2bd99e1186f7a6291565642112a7a6e"
     },
     {
       "mustContain": [
@@ -152,7 +152,7 @@
         "collector_reachability_evidence"
       ],
       "path": "deploy/scripts/bot-errors-heartbeat-watchdog.py",
-      "sha256": "22be25ac5ab4b00c459b33252cc486abe28320731d77640005fd082be630f9e8"
+      "sha256": "2f3812382e823800f35af75a2d4f5d5e6477b6cc5af2788880b93a5a7847f009"
     },
     {
       "mustContain": [
@@ -216,7 +216,7 @@
         "def redact_path_segment"
       ],
       "path": "deploy/scripts/bot-errors-tree-provenance.py",
-      "sha256": "13410627b322c05d3ceac979aa6ab23cd806c0815050614a4e4e616c588ed02a"
+      "sha256": "75eabfbd561ac89dcb608b6399280227771590582ed3de36e130562559b578d9"
     },
     {
       "mustContain": [
@@ -256,6 +256,17 @@
       ],
       "path": "deploy/scripts/lib/bot_errors_daily_health.py",
       "sha256": "45b9b3e23ffda454a8315c1ec80ffc81c691e8ef37f3b20cb3386eaaa2af5bea"
+    },
+    {
+      "path": "deploy/scripts/lib/bot_errors_envelope.py",
+      "sha256": "5b4dd81b2b2f39eab1eea0f6838ab60f65ec9ebab6b223c0626d6974a0555781",
+      "mustContain": [
+        "SCHEMA_VERSION = 2",
+        "class EnvelopeError",
+        "def classify_event",
+        "def normalize_event",
+        "def new_event_fields"
+      ]
     },
     {
       "mustContain": [

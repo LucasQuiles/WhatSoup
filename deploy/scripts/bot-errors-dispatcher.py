@@ -30,7 +30,7 @@ if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
 from lib.bot_errors_daily_health import daily_health_host_from_payload
-from lib.bot_errors_envelope import EnvelopeError, classify_event, normalize_event
+from lib.bot_errors_envelope import EnvelopeError, classify_event, new_event_fields, normalize_event
 from lib.bot_errors_redaction import redact_bot_errors_text, redact_json_value as redact_shared_json_value
 from lib.controller_log import (
     ControllerLogContext,
@@ -2255,9 +2255,7 @@ def move_to_dead_letter(
 def dead_letter_meta_event(paths: dict[str, Path], count: int, oldest_summary: str) -> dict[str, Any]:
     now = int(time.time())
     return {
-        "schemaVersion": 1,
-        "eventType": "alert",
-        "severity": "critical",
+        **new_event_fields("alert", "critical"),
         "id": f"dispatcher-dead-letter-meta-{now}",
         "createdAt": now_iso(),
         "machine": socket.gethostname(),
@@ -2849,10 +2847,8 @@ def stale_autoclose_summary_event(keys: list[str], current: int) -> dict[str, An
         "each will REOPEN automatically if the condition still fails on the next run.",
     ]
     return {
-        "schemaVersion": 1,
+        **new_event_fields("observation", "info"),
         "id": f"stale-autoclose-{current}",
-        "eventType": "alert",
-        "severity": "info",
         "createdAt": now_iso(),
         "machine": "bot-errors",
         "instance": "dispatcher",
@@ -2935,10 +2931,8 @@ def stale_incident_event(key: str, record: dict[str, Any], current: int) -> dict
     ]
     fields = incident_event_fields_from_key(key)
     event = {
-        "schemaVersion": 1,
+        **new_event_fields("observation", severity),
         "id": f"stale-{safe_segment(key)}-{current}",
-        "eventType": "alert",
-        "severity": severity,
         "createdAt": now_iso(),
         **fields,
         "summary": title,
@@ -3117,10 +3111,8 @@ def flap_storm_event(key: str, entry: dict[str, Any], severity: str, now: int) -
         ),
     ]
     return {
-        "schemaVersion": 1,
+        **new_event_fields("alert", severity),
         "id": f"flap-storm-{safe_segment(key)}-{now}",
-        "eventType": "alert",
-        "severity": severity,
         "createdAt": now_iso(),
         **fields,
         "source": "flap_storm",
@@ -3163,10 +3155,8 @@ def flap_resolve_event(key: str, entry: dict[str, Any], now: int) -> dict[str, A
         f"flap_first_seen={iso_from_epoch(first)}",
     ]
     return {
-        "schemaVersion": 1,
+        **new_event_fields("observation", "info"),
         "id": f"flap-resolved-{safe_segment(key)}-{now}",
-        "eventType": "alert",
-        "severity": "info",
         "createdAt": now_iso(),
         **fields,
         "source": "flap_storm_resolved",
@@ -3822,9 +3812,7 @@ def storm_digest_event(
         f"fingerprint_basis:{fingerprint.replace(chr(10), ' | ')}",
     ]
     return {
-        "schemaVersion": 1,
-        "eventType": "alert",
-        "severity": severity,
+        **new_event_fields("alert", severity),
         "id": digest_id,
         "createdAt": now_iso(),
         "machine": "fleet",
@@ -4348,9 +4336,7 @@ def write_meta_state(paths: dict[str, Path], state: dict[str, Any]) -> None:
 def test_provenance_meta_event(paths: dict[str, Path], refused: int, window: int) -> dict[str, Any]:
     now = int(time.time())
     return {
-        "schemaVersion": 1,
-        "eventType": "alert",
-        "severity": "warning",
+        **new_event_fields("alert", "warning"),
         "id": f"dispatcher-test-provenance-refused-{now}",
         "createdAt": now_iso(),
         "machine": socket.gethostname(),
@@ -4467,9 +4453,7 @@ def quarantine_poison(path: Path, quarantine_dir: Path, reason: str) -> Path:
     except FileNotFoundError:
         return dest
     meta = {
-        "schemaVersion": 1,
-        "eventType": "alert",
-        "severity": "critical",
+        **new_event_fields("alert", "critical"),
         "id": f"poison-{int(time.time())}-{os.getpid()}",
         "createdAt": now_iso(),
         "machine": socket.gethostname(),

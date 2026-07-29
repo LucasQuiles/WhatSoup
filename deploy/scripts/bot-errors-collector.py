@@ -21,6 +21,7 @@ if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
 from lib.bot_errors_redaction import redact_bot_errors_text, redact_json_value as redact_shared_json_value
+from lib.bot_errors_envelope import new_event_fields
 from lib.controller_log import (
     ControllerLogContext,
     controller_cycle,
@@ -1158,10 +1159,8 @@ def enqueue_meta_alert(
             if safe_extra_diagnostics:
                 diagnostics.update(safe_extra_diagnostics)
             event = {
-                "schemaVersion": 1,
+                **new_event_fields("observation" if effective_severity == "info" else "alert", effective_severity),
                 "id": event_id,
-                "eventType": "alert",
-                "severity": effective_severity,
                 "createdAt": created_at,
                 "machine": socket.gethostname(),
                 "platform": sys.platform,
@@ -1218,10 +1217,8 @@ def enqueue_meta_alert(
     if safe_extra_diagnostics:
         diagnostics.update(safe_extra_diagnostics)
     event = {
-        "schemaVersion": 1,
+        **new_event_fields("observation" if effective_severity == "info" else "alert", effective_severity),
         "id": event_id,
-        "eventType": "alert",
-        "severity": effective_severity,
         "createdAt": now_iso(),
         "machine": socket.gethostname(),
         "platform": sys.platform,
@@ -1265,10 +1262,8 @@ def enqueue_meta_recovery(remote: str, source: str, summary: str, evidence: str,
     prior_event = open_record.get("eventId")
     suppressed = int(open_record.get("suppressedCount") or 0)
     event = {
-        "schemaVersion": 1,
+        **new_event_fields("clear", "info"),
         "id": event_id,
-        "eventType": "clear",
-        "severity": "info",
         "createdAt": now_iso(),
         "machine": socket.gethostname(),
         "platform": sys.platform,
@@ -1617,10 +1612,8 @@ def enqueue_writefail_ack_failure(
             f"collector_log={state_root() / 'logs/collector.jsonl'}",
         ]))
         event = {
-            "schemaVersion": 1,
+            **new_event_fields("alert", "critical"),
             "id": event_id,
-            "eventType": "alert",
-            "severity": "critical",
             "createdAt": now_iso(),
             "machine": socket.gethostname(),
             "platform": sys.platform,
@@ -1960,11 +1953,10 @@ def _emit_collector_outbox_event(
     if extra_diagnostics:
         diagnostics.update(extra_diagnostics)
     event_id = f"collector-{time.time_ns()}-{os.getpid()}-{event_type}-{safe_segment(remote)}"
+    envelope_event_type = "observation" if event_type == "alert" and severity == "info" else event_type
     event = {
-        "schemaVersion": 1,
+        **new_event_fields(envelope_event_type, severity),
         "id": event_id,
-        "eventType": event_type,
-        "severity": severity,
         "createdAt": now_iso(),
         "machine": socket.gethostname(),
         "platform": sys.platform,

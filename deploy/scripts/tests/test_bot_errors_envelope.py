@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import importlib.util
 from pathlib import Path
 import sys
@@ -97,3 +98,45 @@ def test_new_fields_emit_v2_observation() -> None:
         "eventType": "observation",
         "severity": "info",
     }
+
+
+def test_direct_queue_event_constructors_do_not_inline_v1_envelopes() -> None:
+    producer_names = (
+        "bot-errors-emit.py",
+        "bot-errors-collector.py",
+        "bot-errors-dispatcher.py",
+        "bot-errors-health-check.py",
+        "bot-errors-heartbeat-watchdog.py",
+        "bot-errors-tree-provenance.py",
+    )
+    stale_literals: list[str] = []
+    missing_builder_calls: list[str] = []
+
+    for name in producer_names:
+        path = _SCRIPT_ROOT / name
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        builder_calls = [
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "new_event_fields"
+        ]
+        if not builder_calls:
+            missing_builder_calls.append(name)
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Dict):
+                continue
+            pairs = {
+                key.value: value
+                for key, value in zip(node.keys, node.values, strict=True)
+                if isinstance(key, ast.Constant) and isinstance(key.value, str)
+            }
+            schema_version = pairs.get("schemaVersion")
+            if (
+                "eventType" in pairs
+                and isinstance(schema_version, ast.Constant)
+                and schema_version.value == 1
+            ):
+                stale_literals.append(f"{name}:{node.lineno}")
+
+    assert missing_builder_calls == []
+    assert stale_literals == []
