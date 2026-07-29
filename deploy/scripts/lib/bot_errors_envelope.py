@@ -8,9 +8,9 @@ from typing import Any, Mapping
 
 SCHEMA_VERSION = 2
 LEGACY_SCHEMA_VERSION = 1
-EVENT_KINDS = frozenset(("incident_alert", "incident_recovery", "observation"))
-EVENT_TYPES = frozenset(("alert", "clear", "observation"))
-SEVERITIES = frozenset(("critical", "error", "warning", "info"))
+EVENT_KINDS = ("incident_alert", "incident_recovery", "observation")
+EVENT_TYPES = ("alert", "clear", "observation")
+SEVERITIES = ("critical", "error", "warning", "info")
 INCIDENT_SEVERITIES = frozenset(("critical", "error", "warning"))
 
 
