@@ -1758,7 +1758,7 @@ terminalizeUndispatchedRuntimeCrash(
     throw err;
   });
   this.undispatchedCrashFinalizations.set(turnId, finalization);
-  void finalization.catch((err) => log.warn({ err }, 'runtime-turn-coordinator: undispatched crash finalization rejected'));
+  void finalization.catch((err) => log.debug({ err }, 'runtime-turn-coordinator: undispatched crash finalization rejected (consumed at its await site; barrier only)'));
   return initialFinalization;
 }
 

@@ -16,6 +16,8 @@ import { isTypingHealthEntry } from '../typing-payload.ts';
 import { isPathWithinAllowedRoot } from '../../lib/path-boundary.ts';
 import { createChildLogger } from '../../logger.ts';
 
+const log = createChildLogger('routes/data');
+
 /**
  * Canonicalize `p` as far as it exists on disk, re-appending the not-yet-created
  * tail.
@@ -35,8 +37,6 @@ import { createChildLogger } from '../../logger.ts';
  * Falls back to the lexical path only when nothing in the chain resolves, which
  * means the confinement check below still runs against something.
  */
-const log = createChildLogger('routes/data');
-
 function canonicalizeDeepestExisting(p: string): string {
   let current = p;
   const missing: string[] = [];

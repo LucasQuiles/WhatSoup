@@ -67,7 +67,7 @@ export class RouteRecycleLifecycle<TSession> {
     this.publicationWork.set(work, scopeKey);
     void work.finally(() => {
       this.publicationWork.delete(work);
-    }).catch((err) => log.warn({ err }, 'route-recycle-lifecycle: publication tracking cleanup rejected'));
+    }).catch((err) => log.debug({ err }, 'route-recycle-lifecycle: tracked publication rejected (handled by its owner; this catch is the unhandled-rejection barrier for the finally chain)'));
   }
 
   runOwned(

@@ -91,7 +91,7 @@ function createRecoveryWaiter(): RecoveryWaiter {
     resolve = resolvePromise;
     reject = rejectPromise;
   });
-  void promise.catch((err) => log.warn({ err }, 'turn-supervisor: deferred rejection'));
+  void promise.catch((err) => log.debug({ err }, 'turn-supervisor: recovery waiter rejected (consumed by its awaiting turn; barrier only)'));
   return { promise, resolve, reject };
 }
 
