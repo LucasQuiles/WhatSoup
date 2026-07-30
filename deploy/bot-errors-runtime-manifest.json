@@ -41,7 +41,7 @@
         "writefail_invalid_envelope"
       ],
       "path": "deploy/scripts/bot-errors-dispatcher.py",
-      "sha256": "cdd268188f3f62aebbc729c9f0be537b63d2bc9eb6e18ddf872309e84037333e"
+      "sha256": "09eb9c293443500e1773323f4fd7a3bfdbc04138fc310c3f112428807827373a"
     },
     {
       "mustContain": [
@@ -384,7 +384,7 @@
         "autoCompactActiveBackoffScopes"
       ],
       "path": "src/lib/fault-taxonomy-registry.json",
-      "sha256": "23c712318b449d80d8809a8811f064bad3d936140743c41d2657907341d84f13"
+      "sha256": "82dcc8c5878c38d16fcf5b9998d4afefb8bf57e2306a8c1c3d7e018574ac6727"
     }
   ],
   "generatedAt": "2026-07-30T04:09:19Z",

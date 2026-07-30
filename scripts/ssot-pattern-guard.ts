@@ -265,11 +265,6 @@ export const SSOT_RULES: readonly SsotRuleSpec[] = [
       'use src/core/jid-constants.ts builders/predicates (toPersonalJid/toLidJid/toSmsJid, isPnJid/isLidJid/isGroupJid/isSmsJid)',
     allowlist: [
       {
-        file: 'src/core/admin.ts',
-        reason:
-          '`+${normalizePhoneE164(phone)}@sms` composes an SMS JID inline; toSmsJid exists but the site also plus-formats the phone (see arch.ssot-phone-shape) — migrate both together (W1.5 debt).',
-      },
-      {
         file: 'src/runtimes/agent/runtime.ts',
         reason:
           'two `${conversationKey}@lid` probe keys and one endsWith(\'@g.us\') group predicate predate jid-constants; behaviour-identical migration to toLidJid/isGroupJid pending (runtime.ts edits batched separately to keep the guard wave src-minimal).',

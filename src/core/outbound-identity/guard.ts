@@ -78,6 +78,13 @@ export class OutboundIdentityError extends Error {
   }
 }
 
+/** True only for a locally enforced identity policy block before provider I/O. */
+export function isOutboundIdentityBlocked(
+  error: unknown,
+): error is OutboundIdentityError {
+  return error instanceof OutboundIdentityError;
+}
+
 /**
  * Call-site helper: run the guard, audit every non-allow decision, and throw on
  * block. Synchronous (node:sqlite is sync). A store read failure is retried once
