@@ -250,6 +250,7 @@ export function registerMessagingTools(
     }),
     handler: async (params, session: SessionContext) => {
       let formattedText = '';
+      let auditReceipt: string | undefined;
       let guardDecision: OutboundMessageSafetyDecision | null = null;
       try {
         await sendPipeline.executeSend(params, async (prepared) => {
@@ -305,6 +306,9 @@ export function registerMessagingTools(
               );
             }
           },
+          onAuditReceipt(receipt: string): void {
+            auditReceipt = receipt;
+          },
         });
       } catch (err) {
         if (err instanceof SuppressedOutboundMessageError) {
@@ -327,7 +331,11 @@ export function registerMessagingTools(
       }
 
       routeDivertToOps(guardDecision, deps.instanceName);
-      return { sent: true, text: formattedText };
+      return {
+        sent: true,
+        text: formattedText,
+        ...(auditReceipt ? { audit_receipt: auditReceipt } : {}),
+      };
     },
   });
 

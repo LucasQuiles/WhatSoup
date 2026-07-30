@@ -8,6 +8,14 @@
       "issue": "https://github.com/LucasQuiles/WhatSoup/issues/1977",
       "grantedAt": "2026-07-27",
       "expiresAt": "2026-08-10"
+    },
+    {
+      "path": ".claude/test-integrity/baseline.json",
+      "maxWeight": 81,
+      "reason": "Controller-state recovery amendment (#2463) adds ~30 closed parametrized safety/fault-contract matrices to deploy/scripts tests; each triggers the advisory py-property-test-suggestion rule and carries a written keep-parametrize rationale in the baseline. Self-spending cap at the exact resulting weight (51 -> 81); no further growth authorized.",
+      "issue": "https://github.com/LucasQuiles/WhatSoup/issues/2463",
+      "grantedAt": "2026-07-29",
+      "expiresAt": "2026-08-12"
     }
   ]
 }

@@ -89,7 +89,7 @@ def _probe_with_outbound(after_epoch: int) -> str:
     ts = time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime(after_epoch))
     return (
         f"{_BASE_VERIFIED} "
-        f"outbound_success_transport_present=true "
+        f"outbound_success_evidence=provider_acknowledged_or_better "
         f"outbound_success_at={ts}"
     )
 
@@ -160,12 +160,12 @@ class TestPostIncidentOutboundProof:
         probe = _probe_with_outbound(after_epoch=now - 3600)
         assert mod.has_post_incident_outbound_proof(probe, record, incident_open) is False
 
-    def test_rejects_missing_outbound_transport(self):
+    def test_rejects_missing_outbound_evidence_class(self):
         mod = _load()
         now = int(time.time())
         incident_open = now - 3600
         record = {"openedAt": incident_open}
-        # No outbound_success_transport_present field
+        # No bounded outbound evidence class.
         assert mod.has_post_incident_outbound_proof(_BASE_VERIFIED, record, incident_open) is False
 
 

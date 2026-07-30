@@ -82,24 +82,84 @@ interface OAuthEntry {
   [k: string]: unknown;
 }
 
+/** Runs `security <args>`; null on any failure (rc 44 not-found / rc 36 unreadable / ENOENT / timeout). */
+type SecurityExec = (args: string[]) => string | null;
+
+function defaultSecurityExec(args: string[]): string | null {
+  try {
+    return execFileSync('security', args, {
+      timeout: KEYCHAIN_READ_TIMEOUT_MS,
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    });
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Extract candidate claude credential service names from `security
+ * dump-keychain` METADATA output (never invoked with `-d`; no secret bytes).
+ *
+ * The claude CLI does not always store its credential under the bare
+ * KEYCHAIN_SERVICE name — some installs use a hash-suffixed service name
+ * (`<bare>-9821b58b`), and a bare-name-only lookup on such a host reports
+ * "no keychain token" forever while a live credential sits in the keychain.
+ *
+ * Order: the bare name first (exact match is the common fleet shape), then
+ * suffixed items newest-`mdat` first; a missing mdat sorts last.
+ */
+export function parseKeychainServiceCandidates(dump: string): string[] {
+  const newestMdat = new Map<string, string>();
+  for (const block of dump.split(/^keychain: /m)) {
+    const svce = block.match(/"svce"<blob>="([^"]+)"/)?.[1];
+    if (!svce || !svce.startsWith(KEYCHAIN_SERVICE)) continue;
+    const mdat = block.match(/"mdat"<timedate>=\S+\s+"(\d{14}Z)/)?.[1] ?? '';
+    const prev = newestMdat.get(svce);
+    if (prev === undefined || mdat > prev) newestMdat.set(svce, mdat);
+  }
+  return [...newestMdat.keys()].sort((a, b) => {
+    if (a === KEYCHAIN_SERVICE) return -1;
+    if (b === KEYCHAIN_SERVICE) return 1;
+    return (newestMdat.get(b) ?? '').localeCompare(newestMdat.get(a) ?? '');
+  });
+}
+
+/**
+ * Read the claude credential payload from the login keychain: bare service
+ * name first, then prefix discovery via metadata dump for hash-suffixed
+ * items. Returns the raw JSON payload string, or null when no readable item
+ * exists under any candidate name.
+ *
+ * Identity guard: the module contract promises the heal "never changes which
+ * account is used", and the credential blobs carry no comparable account
+ * identity. With two or more suffixed candidates the right item is therefore
+ * unknowable — mirroring one could silently switch the bot to another
+ * account's token — so discovery heals only from an UNAMBIGUOUS single
+ * suffixed item and refuses otherwise, without reading any candidate's
+ * secret bytes.
+ */
+export function readKeychainViaSecurity(exec: SecurityExec): string | null {
+  const read = (service: string): string | null => {
+    const trimmed = exec(['find-generic-password', '-s', service, '-w'])?.trim();
+    return trimmed ? trimmed : null;
+  };
+  const bare = read(KEYCHAIN_SERVICE);
+  if (bare !== null) return bare;
+  const dump = exec(['dump-keychain']);
+  if (dump === null) return null;
+  const suffixed = parseKeychainServiceCandidates(dump).filter((c) => c !== KEYCHAIN_SERVICE);
+  if (suffixed.length !== 1) return null;
+  return read(suffixed[0]);
+}
+
 function defaultReadKeychain(): string | null {
   // Never touch the real login keychain under a test runner. Unit tests inject
   // readKeychain/readFileStore/writeFileStore and never reach this default; any
   // suite that exercises the probe path with DEFAULT deps (real CLAUDE_CONFIG_DIR
   // fixtures) must not read a live credential nor write it to a tmp fixture dir.
   if (process.env.VITEST || process.env.NODE_ENV === 'test') return null;
-  try {
-    const raw = execFileSync(
-      'security',
-      ['find-generic-password', '-s', KEYCHAIN_SERVICE, '-w'],
-      { timeout: KEYCHAIN_READ_TIMEOUT_MS, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] },
-    );
-    const trimmed = raw.trim();
-    return trimmed.length > 0 ? trimmed : null;
-  } catch {
-    // rc 44 (not found) / rc 36 (not readable in this context) / ENOENT → treat as absent.
-    return null;
-  }
+  return readKeychainViaSecurity(defaultSecurityExec);
 }
 
 function defaultReadFileStore(path: string): string | null {

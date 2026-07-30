@@ -130,22 +130,63 @@ _database_bootstrap_trust_git() (
   done < <(env)
   exec git -C "$REPO_ROOT" "$@"
 )
-if ! _database_bootstrap_trust_git rev-parse --is-inside-work-tree 2>/dev/null \
+# Verify one closure file against the release manifest: entry must exist and
+# the on-disk bytes must hash to the recorded sha256. Symlink/regular-file
+# checks happen in shell before this runs.
+_database_bootstrap_trust_manifest() {
+  "$NODE" -e '
+    const fs = require("node:fs");
+    const { createHash } = require("node:crypto");
+    const [manifestPath, repoRoot, relPath] = process.argv.slice(1);
+    try {
+      const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+      const entry = Array.isArray(manifest.files)
+        ? manifest.files.find((f) => f && f.path === relPath)
+        : undefined;
+      if (!entry || typeof entry.sha256 !== "string") process.exit(1);
+      const digest = createHash("sha256").update(fs.readFileSync(`${repoRoot}/${relPath}`)).digest("hex");
+      process.exit(digest === entry.sha256 ? 0 : 1);
+    } catch {
+      process.exit(1);
+    }
+  ' "$1" "$2" "$3"
+}
+_database_bootstrap_release_manifest="$REPO_ROOT/.whatsoup-release-manifest.json"
+if _database_bootstrap_trust_git rev-parse --is-inside-work-tree 2>/dev/null \
   | grep -qx 'true'; then
-  echo "FATAL: database bootstrap trust check requires a committed git work tree: $REPO_ROOT" >&2
+  # Git work tree: the committed history is the trust root (unchanged).
+  for trust_path in "${DATABASE_BOOTSTRAP_TRUST_PATHS[@]}"; do
+    trust_absolute="$REPO_ROOT/$trust_path"
+    if [ -L "$trust_absolute" ] || [ ! -f "$trust_absolute" ] \
+      || ! _database_bootstrap_trust_git ls-files --error-unmatch -- "$trust_path" >/dev/null 2>&1 \
+      || ! _database_bootstrap_trust_git cat-file -e "HEAD:$trust_path" >/dev/null 2>&1 \
+      || ! _database_bootstrap_trust_git diff --quiet HEAD -- "$trust_path"; then
+      echo "FATAL: unsafe database bootstrap trust checker path: $trust_absolute" >&2
+      echo "       checker closure must be regular non-symlink, tracked, committed, and clean" >&2
+      exit 1
+    fi
+  done
+elif [ -f "$_database_bootstrap_release_manifest" ] \
+  && [ ! -L "$_database_bootstrap_release_manifest" ]; then
+  # Non-git release export — the deployed shape a release directory takes (see
+  # docs/runbooks/release-deployment.md). The snapshot manifest is the trust
+  # root: preflight-check.sh already refuses to start when it is missing or
+  # schema-invalid, and here every checker-closure file must be a regular
+  # non-symlink file whose bytes hash to the manifest's recorded sha256.
+  # (A git-only check here refused to boot every manifest-based release.)
+  for trust_path in "${DATABASE_BOOTSTRAP_TRUST_PATHS[@]}"; do
+    trust_absolute="$REPO_ROOT/$trust_path"
+    if [ -L "$trust_absolute" ] || [ ! -f "$trust_absolute" ] \
+      || ! _database_bootstrap_trust_manifest "$_database_bootstrap_release_manifest" "$REPO_ROOT" "$trust_path"; then
+      echo "FATAL: unsafe database bootstrap trust checker path: $trust_absolute" >&2
+      echo "       checker closure must be regular non-symlink and match the release manifest sha256" >&2
+      exit 1
+    fi
+  done
+else
+  echo "FATAL: database bootstrap trust check requires a committed git work tree or a release manifest: $REPO_ROOT" >&2
   exit 1
 fi
-for trust_path in "${DATABASE_BOOTSTRAP_TRUST_PATHS[@]}"; do
-  trust_absolute="$REPO_ROOT/$trust_path"
-  if [ -L "$trust_absolute" ] || [ ! -f "$trust_absolute" ] \
-    || ! _database_bootstrap_trust_git ls-files --error-unmatch -- "$trust_path" >/dev/null 2>&1 \
-    || ! _database_bootstrap_trust_git cat-file -e "HEAD:$trust_path" >/dev/null 2>&1 \
-    || ! _database_bootstrap_trust_git diff --quiet HEAD -- "$trust_path"; then
-    echo "FATAL: unsafe database bootstrap trust checker path: $trust_absolute" >&2
-    echo "       checker closure must be regular non-symlink, tracked, committed, and clean" >&2
-    exit 1
-  fi
-done
 
 if ! (
   cd "$REPO_ROOT"

@@ -1,6 +1,15 @@
-/** Simple promise-based sleep. */
-export function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+/** Largest delay Node timers represent without overflowing to an immediate wake-up. */
+export const MAX_TIMER_DELAY_MS = 2_147_483_647;
+
+/** Promise-based sleep that chunks long waits without shortening them. */
+export async function sleep(ms: number): Promise<void> {
+  if (!Number.isFinite(ms)) throw new RangeError('Sleep duration must be finite');
+  let remainingMs = Math.max(0, ms);
+  while (remainingMs > 0) {
+    const chunkMs = Math.min(remainingMs, MAX_TIMER_DELAY_MS);
+    await new Promise<void>((resolve) => setTimeout(resolve, chunkMs));
+    remainingMs -= chunkMs;
+  }
 }
 
 /** Full jitter: delay = base * 2^attempt * random(0.75, 1.25), capped at maxMs */

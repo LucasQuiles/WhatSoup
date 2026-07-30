@@ -43,6 +43,14 @@ import type { ConnectionRecentDisconnects, ConnectionStateSnapshot } from '../tr
 import { readBody } from '../lib/http.ts';
 import { readWhatsoupGitBranch, readWhatsoupGitSha } from '../lib/git-env.ts';
 import { LoopLagSampler, LOOP_LAG_STARVATION_THRESHOLD_MS } from '../lib/loop-lag-sampler.ts';
+import type { ConsolidationHealth } from './memory-consolidation-contract.ts';
+import type { DatabaseRetentionHealth } from './database-retention.ts';
+import {
+  readOutboundSendHealth,
+  readToolDurabilityHealth,
+  unreadableOutboundSendHealth,
+  unreadableToolDurabilityHealth,
+} from './durability-health.ts';
 
 const log = createChildLogger('health');
 const EMPTY_SHA256 = 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855';
@@ -99,6 +107,8 @@ export interface HealthDeps {
   loopLagSampler?: LoopLagSampler;
   /** Monotonic clock for starvation-warning suppression; injectable for tests. */
   loopLagWarningNow?: () => number;
+  getMemoryConsolidationHealth?: () => ConsolidationHealth;
+  getDatabaseRetentionHealth?: () => DatabaseRetentionHealth;
 }
 
 /**
@@ -175,11 +185,6 @@ function safeDbQuery<T>(fn: () => T, fallback: T, warnMsg: string): T {
   }
 }
 
-interface LatestSuccessfulOutboundSend {
-  latest_successful_send_at: string | null;
-  latest_successful_transport_id: string | null;
-}
-
 interface HealthTurnCapability {
   model_usable: boolean | null;
   // #1392 freshness fields: surfaced so runtime.agent.turnCapability and the
@@ -230,10 +235,13 @@ export type HealthDegradationCause =
   | 'transport_disconnected'
   | 'enrichment_stale'
   | 'enrichment_runtime_degraded'
+  | 'memory_consolidation_degraded'
   | 'connection_churn'
   | 'outbound_flood'
   | 'event_loop_starved'
   | 'durability_debt'
+  | 'durability_evidence_unreadable'
+  | 'database_retention_failed'
   | 'continuity_gap_unreadable'
   | 'continuity_gap_open'
   | 'schema_future'
@@ -262,10 +270,13 @@ const HEALTH_DEGRADATION_CAUSE_PRESENCE: Readonly<Record<HealthDegradationCause,
   transport_disconnected: true,
   enrichment_stale: true,
   enrichment_runtime_degraded: true,
+  memory_consolidation_degraded: true,
   connection_churn: true,
   outbound_flood: true,
   event_loop_starved: true,
   durability_debt: true,
+  durability_evidence_unreadable: true,
+  database_retention_failed: true,
   continuity_gap_unreadable: true,
   continuity_gap_open: true,
   schema_future: true,
@@ -285,29 +296,6 @@ const HEALTH_DEGRADATION_CAUSE_PRESENCE: Readonly<Record<HealthDegradationCause,
 export const HEALTH_DEGRADATION_CAUSES = Object.freeze(
   Object.keys(HEALTH_DEGRADATION_CAUSE_PRESENCE),
 ) as readonly HealthDegradationCause[];
-
-function latestSuccessfulOutboundSend(deps: HealthDeps): LatestSuccessfulOutboundSend {
-  return safeDbQuery(
-    () => {
-      const row = deps.db.raw.prepare(`
-        SELECT
-          completed_at AS sent_at,
-          transport_message_id AS transport_id
-        FROM outbound_sends
-        WHERE status = 'sent'
-          AND completed_at IS NOT NULL
-        ORDER BY completed_at DESC, id DESC
-        LIMIT 1
-      `).get() as { sent_at: string | null; transport_id: string | null } | undefined;
-      return {
-        latest_successful_send_at: row?.sent_at ?? null,
-        latest_successful_transport_id: row?.transport_id ?? null,
-      };
-    },
-    { latest_successful_send_at: null, latest_successful_transport_id: null },
-    'failed to read latest successful outbound send',
-  );
-}
 
 function normalizeBooleanOrNull(value: unknown): boolean | null {
   return typeof value === 'boolean' ? value : null;
@@ -1404,6 +1392,18 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
       }
 
       const enrichmentStats = deps.getEnrichmentStats();
+      const memoryConsolidation = deps.getMemoryConsolidationHealth?.() ?? null;
+      const memoryConsolidationIsDegraded =
+        memoryConsolidation !== null
+        && [
+          'not_started',
+          'stalled',
+          'cancelling',
+          'partial',
+          'failed',
+          'abandoned',
+          'unreadable',
+        ].includes(memoryConsolidation.state);
       const connectionState = getConnectionState(deps.connectionManager);
       const authBond = formatAuthBond(connectionState);
       const authFailureClass = classifyAuthFailure(connectionState);
@@ -1538,6 +1538,9 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
         if (authFailureIsDegraded) statusReasons.push(`auth_failure.${authFailureClass}`);
         if (enrichmentIsStale) statusReasons.push('enrichment_stale');
         if (enrichmentStats.runtimeDegraded) statusReasons.push('enrichment_runtime_degraded');
+        if (memoryConsolidationIsDegraded) {
+          statusReasons.push(`memory_consolidation_${memoryConsolidation.state}`);
+        }
         if (connectionChurnIsDegraded) statusReasons.push('connection_churn');
         if (outboundFloodIsDegraded) statusReasons.push('outbound_flood');
         if (agentRuntimeStatus === 'degraded') {
@@ -1565,7 +1568,46 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
         'failed to count pending access-list entries',
       );
 
-      const outboundSends = latestSuccessfulOutboundSend(deps);
+      const outboundSends = safeDbQuery(
+        () => readOutboundSendHealth(deps.db),
+        unreadableOutboundSendHealth(),
+        'failed to read outbound send health',
+      );
+      const toolWriteLosses = deps.runtime?.getToolDurabilityTelemetrySnapshot?.() ?? null;
+      const toolDurability = safeDbQuery(
+        () => readToolDurabilityHealth(deps.db, toolWriteLosses),
+        unreadableToolDurabilityHealth(toolWriteLosses),
+        'failed to read tool durability health',
+      );
+      let databaseRetention: DatabaseRetentionHealth | null = null;
+      if (deps.getDatabaseRetentionHealth) {
+        try {
+          databaseRetention = deps.getDatabaseRetentionHealth();
+          noteProbeSuccess('failed to read database retention health');
+        } catch (err) {
+          logProbeFailure('failed to read database retention health', err);
+          databaseRetention = {
+            running: false,
+            state: 'failed',
+            consecutiveFailures: 1,
+            failureCode: 'retention_failed',
+            lastRunAt: null,
+            lastSuccessAt: null,
+            lastFailureAt: null,
+            lastResult: null,
+          };
+        }
+      }
+      const durabilityEvidenceUnreadable = !outboundSends.readable || !toolDurability.readable;
+      const databaseRetentionFailed = databaseRetention?.state === 'failed';
+      if (durabilityEvidenceUnreadable) {
+        if (status === 'healthy') status = 'degraded';
+        statusReasons.push('durability_evidence_unreadable');
+      }
+      if (databaseRetentionFailed) {
+        if (status === 'healthy') status = 'degraded';
+        statusReasons.push('database_retention_failed');
+      }
 
       const schemaVersion = safeDbQuery(
         () => {
@@ -1639,11 +1681,31 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
         } else if (deps.instanceType === 'chat') {
           const details = snap.details as Record<string, unknown>;
           const queue = details.queue as { activeChats?: number; queuedChats?: number } | undefined;
+          const queueAdmission = details.queueAdmission as {
+            rejectedTotal?: unknown;
+            unownedTotal?: unknown;
+          } | undefined;
+          const rejectedTotal = queueAdmission?.rejectedTotal;
+          const unownedTotal = queueAdmission?.unownedTotal;
+          const queueAdmissionIsValid =
+            Number.isSafeInteger(rejectedTotal)
+            && (rejectedTotal as number) >= 0
+            && Number.isSafeInteger(unownedTotal)
+            && (unownedTotal as number) >= 0
+            && (unownedTotal as number) <= (rejectedTotal as number);
           const compatibility = details.databaseCompatibility as Record<string, unknown> | undefined;
           runtimeBlock = {
             chat: {
               queueDepth: (queue?.activeChats ?? 0) + (queue?.queuedChats ?? 0),
               enrichmentUnprocessed: enrichmentStats.unprocessed,
+              ...(queueAdmissionIsValid
+                ? {
+                    queue_admission: {
+                      rejected_total: rejectedTotal,
+                      unowned_total: unownedTotal,
+                    },
+                  }
+                : {}),
               ...(compatibility
                 ? {
                     database_compatibility: {
@@ -1701,10 +1763,13 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
       if (!isConnected) addDegradationCause('transport_disconnected');
       if (enrichmentIsStale) addDegradationCause('enrichment_stale');
       if (enrichmentStats.runtimeDegraded) addDegradationCause('enrichment_runtime_degraded');
+      if (memoryConsolidationIsDegraded) addDegradationCause('memory_consolidation_degraded');
       if (connectionChurnIsDegraded) addDegradationCause('connection_churn');
       if (outboundFloodIsDegraded) addDegradationCause('outbound_flood');
       if (loopLag.locallyStarved) addDegradationCause('event_loop_starved');
       if (durabilityDebtIsDegraded) addDegradationCause('durability_debt');
+      if (durabilityEvidenceUnreadable) addDegradationCause('durability_evidence_unreadable');
+      if (databaseRetentionFailed) addDegradationCause('database_retention_failed');
       if (!continuity.readable) addDegradationCause('continuity_gap_unreadable');
       else if (continuity.open > 0) addDegradationCause('continuity_gap_open');
       if (schemaIsFuture) addDegradationCause('schema_future');
@@ -1859,8 +1924,15 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
           pending_count: pendingCount,
         },
         outbound_sends: outboundSends,
+        tool_durability: toolDurability,
+        retention: {
+          database: databaseRetention,
+        },
         enrichment: {
           last_run: enrichmentStats.lastRun,
+        },
+        memory: {
+          consolidation: memoryConsolidation,
         },
         models: {
           conversation: config.models.conversation,

@@ -195,7 +195,7 @@ event = {
         "health line-alpha: 200 http://127.0.0.1:9090/health "
         "status=healthy wa_connected=true state=connected auth_failure_class=none "
         "auth_bond_status=present auth_bond_creds_exists=true auth_bond_creds_size=32 "
-        "outbound_success_transport_present=true outbound_success_at=2026-06-12T17:20:00Z"
+        "outbound_success_evidence=provider_acknowledged_or_better outbound_success_at=2026-06-12T17:20:00Z"
     ),
 }
 print(json.dumps(dispatcher.daily_health_recovered_incident_keys(event, state)))

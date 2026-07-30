@@ -68,6 +68,13 @@ interface GitStateSnapshot {
   dirty: Set<string>;
   staged: Set<string>;
   error?: string;
+  /**
+   * Present when the trust root is a release snapshot manifest instead of
+   * git (a non-git release export — the deployed shape a release directory
+   * takes). Maps repo-relative path → expected sha256; every walked file is
+   * verified against it at the point its bytes are read.
+   */
+  releaseFiles?: Map<string, string>;
 }
 
 interface GitStatusSnapshot {
@@ -333,6 +340,41 @@ function refreshGitDriftSnapshot(
   return undefined;
 }
 
+/**
+ * Trust root for a non-git release export: `.whatsoup-release-manifest.json`
+ * (the same manifest preflight-check.sh and the wrapper's closure check
+ * already treat as the release-pipeline invariant). Membership doubles as
+ * tracked+committed; per-file byte verification happens in inspectSourceFile
+ * against `releaseFiles`. Returns null when no usable manifest exists — the
+ * caller then fails closed exactly as before.
+ */
+function loadReleaseManifestSnapshot(cwd: string): GitStateSnapshot | null {
+  const manifestPath = path.resolve(cwd, '.whatsoup-release-manifest.json');
+  try {
+    if (!existsSync(manifestPath) || lstatSync(manifestPath).isSymbolicLink()) return null;
+    const payload: unknown = JSON.parse(readFileSync(manifestPath, 'utf8'));
+    if (!isRecord(payload) || !Array.isArray(payload['files'])) return null;
+    const releaseFiles = new Map<string, string>();
+    for (const entry of payload['files']) {
+      if (!isRecord(entry)) return null;
+      const relPath = entry['path'];
+      const digest = entry['sha256'];
+      if (typeof relPath !== 'string' || typeof digest !== 'string') return null;
+      releaseFiles.set(relPath, digest);
+    }
+    const paths = new Set(releaseFiles.keys());
+    return {
+      tracked: paths,
+      committed: new Set(paths),
+      dirty: new Set(),
+      staged: new Set(),
+      releaseFiles,
+    };
+  } catch {
+    return null;
+  }
+}
+
 function gitFileState(snapshot: GitStateSnapshot, relPath: string): GitFileState {
   return {
     tracked: snapshot.tracked.has(relPath),
@@ -480,6 +522,16 @@ function inspectSourceFile(
       actual: actualSha256,
     }));
   }
+  // Release-manifest trust root: the bytes just read must hash to the
+  // manifest's recorded value (membership alone is not integrity).
+  const releaseExpected = gitSnapshot.releaseFiles?.get(canonicalPath) ?? gitSnapshot.releaseFiles?.get(relPath);
+  if (releaseExpected !== undefined && actualSha256 !== releaseExpected) {
+    issues.push(issue('file-sha256-drift', 'critical', `source runtime file hash drift vs release manifest: ${relPath}`, {
+      path: relPath,
+      expected: releaseExpected,
+      actual: actualSha256,
+    }));
+  }
 
   const text = body.toString('utf8');
   const missingMarkers = (options.mustContain ?? []).filter((marker) => !text.includes(marker));
@@ -499,9 +551,15 @@ export function collectSourceRuntimeIssues(
 ): SourceRuntimeIssue[] {
   const issues: SourceRuntimeIssue[] = [];
   const repoRealPath = realpathSync(cwd);
-  const gitSnapshot = loadGitStateSnapshot(cwd, dependencies.git ?? git);
+  let gitSnapshot = loadGitStateSnapshot(cwd, dependencies.git ?? git);
   if (gitSnapshot.error) {
-    return [issue('git-error', 'critical', `source runtime Git snapshot failed: ${gitSnapshot.error}`)];
+    // Non-git release export: fall back to the release snapshot manifest as
+    // the trust root; with neither, fail closed exactly as before.
+    const releaseSnapshot = loadReleaseManifestSnapshot(cwd);
+    if (releaseSnapshot === null) {
+      return [issue('git-error', 'critical', `source runtime Git snapshot failed: ${gitSnapshot.error}`)];
+    }
+    gitSnapshot = releaseSnapshot;
   }
   const visited = new Set<string>();
   const inspectedPaths = new Map<string, SourcePathContext>();
@@ -550,9 +608,11 @@ export function collectSourceRuntimeIssues(
     }
   }
 
-  const finalGitError = refreshGitDriftSnapshot(cwd, gitSnapshot, dependencies.git ?? git);
-  if (finalGitError) {
-    return [issue('git-error', 'critical', `source runtime final Git verification failed: ${finalGitError}`)];
+  if (!gitSnapshot.releaseFiles) {
+    const finalGitError = refreshGitDriftSnapshot(cwd, gitSnapshot, dependencies.git ?? git);
+    if (finalGitError) {
+      return [issue('git-error', 'critical', `source runtime final Git verification failed: ${finalGitError}`)];
+    }
   }
   for (const [relPath, context] of inspectedPaths) {
     if (gitSnapshot.dirty.has(relPath)) {

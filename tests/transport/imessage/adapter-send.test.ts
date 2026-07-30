@@ -112,7 +112,12 @@ describe('ImessageAdapter — sendText port-error mapping', () => {
     });
     const { adapter, channelId } = makeAdapter(port);
     await expect(adapter.sendText(peerConversationRef(channelId, 'u@example.com'), 'hi'))
-      .rejects.toThrow(/iMessage rate limit/);
+      .rejects.toMatchObject({
+        payload: {
+          code: 'transport.rate_limited',
+          phase: 'provider_call_started',
+        },
+      });
   });
 
   it('maps a 5xx to TransientProviderError', async () => {
@@ -131,6 +136,45 @@ describe('ImessageAdapter — sendText port-error mapping', () => {
     const { adapter, channelId } = makeAdapter(port);
     await expect(adapter.sendText(peerConversationRef(channelId, 'u@example.com'), 'hi'))
       .rejects.toThrow(/iMessage provider error/);
+  });
+
+  it('honors a port-supplied phase of not_started instead of claiming provider_call_started', async () => {
+    // A port error that provably precedes any provider contact (e.g. the
+    // daemon socket was never reachable) must surface phase 'not_started',
+    // not the classification default. Covers the auth branch of
+    // mapPortError — the SendAmbiguous branch already honors pe.phase.
+    const port = new MockImessagePort({
+      sendError: Object.assign(new Error('Unauthorized'), {
+        status: 401,
+        code: 'Unauthorized',
+        phase: 'not_started',
+      }),
+    });
+    const { adapter, channelId } = makeAdapter(port);
+    await expect(adapter.sendText(peerConversationRef(channelId, 'u@example.com'), 'hi'))
+      .rejects.toMatchObject({
+        payload: {
+          code: 'transport.auth_required',
+          phase: 'not_started',
+        },
+      });
+  });
+
+  it('honors a port-supplied phase of not_started on the transient branch too', async () => {
+    // Same defect, different classification branch: a 5xx BlueBubbles error
+    // that the port marks as pre-request must not be relabeled
+    // provider_call_started either.
+    const port = new MockImessagePort({
+      sendError: Object.assign(new Error('boom'), { status: 503, phase: 'not_started' }),
+    });
+    const { adapter, channelId } = makeAdapter(port);
+    await expect(adapter.sendText(peerConversationRef(channelId, 'u@example.com'), 'hi'))
+      .rejects.toMatchObject({
+        payload: {
+          code: 'transport.transient_provider',
+          phase: 'not_started',
+        },
+      });
   });
 });
 

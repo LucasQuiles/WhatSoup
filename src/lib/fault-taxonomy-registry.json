@@ -109,10 +109,13 @@
         "transport_disconnected",
         "enrichment_stale",
         "enrichment_runtime_degraded",
+        "memory_consolidation_degraded",
         "connection_churn",
         "outbound_flood",
         "event_loop_starved",
         "durability_debt",
+        "durability_evidence_unreadable",
+        "database_retention_failed",
         "continuity_gap_unreadable",
         "continuity_gap_open",
         "schema_future",
@@ -198,6 +201,108 @@
       ],
       "owner": "src/lib/memory-operation-telemetry.ts",
       "test": "tests/runtimes/chat/memory/operation-telemetry.test.ts"
+    },
+    "consolidationFailureCodes": {
+      "values": [
+        "none",
+        "breaker_open",
+        "project_guard_failed",
+        "auth_failed",
+        "rate_limited",
+        "timeout",
+        "network_error",
+        "invalid_request",
+        "provider_unavailable",
+        "unknown",
+        "output_invalid",
+        "scope_invalid",
+        "write_failed",
+        "cancelled",
+        "already_running",
+        "restart_abandoned",
+        "observation_failed"
+      ],
+      "owner": "src/core/memory-consolidation-contract.ts",
+      "test": "tests/core/failure-taxonomy-cross-contract.test.ts"
+    },
+    "toolCallFailureCodes": {
+      "values": [
+        "validation_rejected",
+        "authorization_denied",
+        "policy_or_hook_blocked",
+        "cancelled",
+        "dependency_unavailable",
+        "rate_limited",
+        "resource_exhausted",
+        "handler_failed",
+        "returned_error",
+        "unknown"
+      ],
+      "owner": "src/core/durability-evidence-contract.ts",
+      "test": "tests/core/failure-taxonomy-cross-contract.test.ts"
+    },
+    "outboundAuditFailureCodes": {
+      "values": [
+        "transport.unsupported_capability",
+        "transport.payload_too_large",
+        "transport.conversation_not_found",
+        "transport.auth_required",
+        "transport.rate_limited",
+        "transport.transient_provider",
+        "transport.permanent_provider",
+        "transport.send_ambiguous",
+        "unknown",
+        "legacy_unclassified"
+      ],
+      "owner": "src/core/durability-evidence-contract.ts",
+      "test": "tests/core/failure-taxonomy-cross-contract.test.ts"
+    },
+    "outboundFailureCodes": {
+      "values": [
+        "outbound.unknown_failure",
+        "outbound.shutdown_before_send",
+        "outbound.shutdown_deadline",
+        "outbound.crash_in_flight",
+        "outbound.echo_timeout",
+        "outbound.superseded",
+        "outbound.pending_replay_unreconstructable",
+        "outbound.status_ping_expired",
+        "outbound.unsafe_delivery_unconfirmed",
+        "outbound.governor_shed",
+        "outbound.replay_failed",
+        "outbound.deferral_limit_exceeded"
+      ],
+      "owner": "src/core/outbound-failure-disposition.ts",
+      "test": "tests/core/failure-taxonomy-cross-contract.test.ts"
+    },
+    "outboundFailureStages": {
+      "values": [
+        "admission",
+        "provider_request",
+        "provider_response",
+        "acknowledgement",
+        "runtime"
+      ],
+      "owner": "src/core/outbound-failure-disposition.ts",
+      "test": "tests/core/failure-taxonomy-cross-contract.test.ts"
+    },
+    "outboundMutationStates": {
+      "values": [
+        "not_started",
+        "rejected",
+        "ambiguous",
+        "submitted"
+      ],
+      "owner": "src/core/outbound-failure-disposition.ts",
+      "test": "tests/core/failure-taxonomy-cross-contract.test.ts"
+    },
+    "outboundEvidenceCoverage": {
+      "values": [
+        "complete",
+        "partial"
+      ],
+      "owner": "src/core/outbound-failure-disposition.ts",
+      "test": "tests/core/failure-taxonomy-cross-contract.test.ts"
     }
   },
   "runtimeAgentHealthSignals": [

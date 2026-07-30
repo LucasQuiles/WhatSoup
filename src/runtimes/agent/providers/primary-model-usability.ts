@@ -39,14 +39,23 @@ export type ApiModelAccessProbeResult =
 export interface PrimaryModelProbeAdapters {
   // model: null = probe the CLI's own default model (claude-cli only) — a
   // model-less instance must still be probeable or recovery can never pass.
-  probeBinaryModel?: (target: { provider: string; model: string | null }) => Promise<BinaryModelProbeResult>;
+  // When a signal is supplied, production adapters must settle after abort so
+  // the caller's timeout receipt cannot precede cancellation acknowledgement.
+  probeBinaryModel?: (
+    target: { provider: string; model: string | null },
+    signal?: AbortSignal,
+  ) => Promise<BinaryModelProbeResult>;
   // Despite the legacy name, this must exercise a generation-class API path:
   // catalog/list-model checks can pass while quota-limited turns still fail.
-  probeApiModelAccess?: (target: { provider: 'openai-api' | 'anthropic-api'; model: string }) => Promise<ApiModelAccessProbeResult>;
+  probeApiModelAccess?: (
+    target: { provider: 'openai-api' | 'anthropic-api'; model: string },
+    signal?: AbortSignal,
+  ) => Promise<ApiModelAccessProbeResult>;
 }
 
 export interface PrimaryModelProbeOptions {
   timeoutMs?: number;
+  signal?: AbortSignal;
 }
 
 const DEFAULT_TIMEOUT_MS = 15_000;
@@ -78,7 +87,11 @@ export async function probePrimaryModelUsability(
     if (!adapters.probeBinaryModel) {
       return result(target, model, 'unknown', 'binary-model-probe-unavailable');
     }
-    const probe = await withTimeout(() => adapters.probeBinaryModel!({ provider, model }), timeoutMs);
+    const probe = await withCancellationDeadline(
+      (signal) => adapters.probeBinaryModel!({ provider, model }, signal),
+      timeoutMs,
+      options.signal,
+    );
     if (probe === TIMEOUT) return result(target, model, 'timeout');
     if (probe === PROBE_THROW) return result(target, model, 'unknown', 'probe-threw');
     return mapBinaryModelProbe(target, model, probe);
@@ -94,7 +107,11 @@ export async function probePrimaryModelUsability(
     if (!adapters.probeApiModelAccess) {
       return result(target, model, 'unknown', 'api-model-probe-unavailable');
     }
-    const probe = await withTimeout(() => adapters.probeApiModelAccess!({ provider, model }), timeoutMs);
+    const probe = await withCancellationDeadline(
+      (signal) => adapters.probeApiModelAccess!({ provider, model }, signal),
+      timeoutMs,
+      options.signal,
+    );
     if (probe === TIMEOUT) return result(target, model, 'timeout');
     if (probe === PROBE_THROW) return result(target, model, 'unknown', 'probe-threw');
     return mapApiModelProbe(target, model, probe);
@@ -165,45 +182,36 @@ function normalizedModel(value: string | null | undefined): string | null {
   return trimmed === '' ? null : trimmed;
 }
 
-async function withTimeout<T>(
-  run: () => Promise<T>,
+async function withCancellationDeadline<T>(
+  run: (signal: AbortSignal) => Promise<T>,
   timeoutMs: number,
+  callerSignal?: AbortSignal,
 ): Promise<T | typeof TIMEOUT | typeof PROBE_THROW> {
-  if (timeoutMs <= 0) return TIMEOUT;
-  return new Promise<T | typeof TIMEOUT | typeof PROBE_THROW>((resolve) => {
-    let settled = false;
-    const timer = setTimeout(() => {
-      if (settled) return;
-      settled = true;
-      resolve(TIMEOUT);
-    }, timeoutMs);
-    timer.unref?.();
+  if (timeoutMs <= 0 || callerSignal?.aborted) return TIMEOUT;
 
+  const controller = new AbortController();
+  const abort = (): void => controller.abort();
+  callerSignal?.addEventListener('abort', abort, { once: true });
+  const timer = setTimeout(abort, timeoutMs);
+  timer.unref?.();
+
+  try {
     let promise: Promise<T>;
     try {
-      promise = run();
+      promise = run(controller.signal);
     } catch {
-      settled = true;
-      clearTimeout(timer);
-      resolve(PROBE_THROW);
-      return;
+      return controller.signal.aborted ? TIMEOUT : PROBE_THROW;
     }
-
-    promise.then(
-      (value) => {
-        if (settled) return;
-        settled = true;
-        clearTimeout(timer);
-        resolve(value);
-      },
-      () => {
-        if (settled) return;
-        settled = true;
-        clearTimeout(timer);
-        resolve(PROBE_THROW);
-      },
-    );
-  });
+    try {
+      const value = await promise;
+      return controller.signal.aborted ? TIMEOUT : value;
+    } catch {
+      return controller.signal.aborted ? TIMEOUT : PROBE_THROW;
+    }
+  } finally {
+    clearTimeout(timer);
+    callerSignal?.removeEventListener('abort', abort);
+  }
 }
 
 /**

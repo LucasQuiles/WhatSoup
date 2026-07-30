@@ -17,10 +17,13 @@ describe('probePrimaryModelUsability', () => {
     await expect(
       probePrimaryModelUsability({ provider: 'claude-cli', model: 'primary-model-a' }, adapters),
     ).resolves.toMatchObject({ status: 'usable', provider: 'claude-cli', model: 'primary-model-a' });
-    expect(adapters.probeBinaryModel).toHaveBeenCalledWith({
-      provider: 'claude-cli',
-      model: 'primary-model-a',
-    });
+    expect(adapters.probeBinaryModel).toHaveBeenCalledWith(
+      {
+        provider: 'claude-cli',
+        model: 'primary-model-a',
+      },
+      expect.any(AbortSignal),
+    );
   });
 
   it('maps a binary model rejection to model-unavailable', async () => {
@@ -50,10 +53,13 @@ describe('probePrimaryModelUsability', () => {
     await expect(
       probePrimaryModelUsability({ provider: 'opencode-cli', model: 'vendor/model-a' }, foundAdapters),
     ).resolves.toMatchObject({ status: 'usable' });
-    expect(foundAdapters.probeBinaryModel).toHaveBeenCalledWith({
-      provider: 'opencode-cli',
-      model: 'vendor/model-a',
-    });
+    expect(foundAdapters.probeBinaryModel).toHaveBeenCalledWith(
+      {
+        provider: 'opencode-cli',
+        model: 'vendor/model-a',
+      },
+      expect.any(AbortSignal),
+    );
 
     const missingAdapters: PrimaryModelProbeAdapters = {
       probeBinaryModel: vi.fn(async () => ({ status: 'model_unavailable' as const })),
@@ -92,7 +98,10 @@ describe('probePrimaryModelUsability', () => {
 
   it('returns timeout when an adapter does not settle before the deadline', async () => {
     const adapters: PrimaryModelProbeAdapters = {
-      probeApiModelAccess: vi.fn(async (): Promise<ApiModelAccessProbeResult> => new Promise(() => {})),
+      probeApiModelAccess: vi.fn(async (_target, signal): Promise<ApiModelAccessProbeResult> =>
+        new Promise((resolve) => {
+          signal?.addEventListener('abort', () => resolve({ status: 'timeout' }), { once: true });
+        })),
     };
 
     await expect(
@@ -108,7 +117,10 @@ describe('probePrimaryModelUsability', () => {
     vi.useFakeTimers();
     try {
       const adapters: PrimaryModelProbeAdapters = {
-        probeBinaryModel: vi.fn(async (): Promise<BinaryModelProbeResult> => new Promise(() => {})),
+        probeBinaryModel: vi.fn(async (_target, signal): Promise<BinaryModelProbeResult> =>
+          new Promise((resolve) => {
+            signal?.addEventListener('abort', () => resolve({ status: 'timeout' }), { once: true });
+          })),
       };
 
       const probePromise = probePrimaryModelUsability(
@@ -433,6 +445,27 @@ describe('primary-model-usability.ts uncovered-branch coverage', () => {
     expect(adapters.probeApiModelAccess).not.toHaveBeenCalled();
   });
 
+  it('returns timeout without starting an adapter when the caller is already aborted', async () => {
+    const controller = new AbortController();
+    controller.abort();
+    const adapters: PrimaryModelProbeAdapters = {
+      probeBinaryModel: vi.fn(async (): Promise<BinaryModelProbeResult> => ({ status: 'ok' })),
+    };
+
+    const result = await probePrimaryModelUsability(
+      { provider: 'claude-cli', model: 'primary-model-a' },
+      adapters,
+      { signal: controller.signal },
+    );
+
+    expect(result).toEqual({
+      status: 'timeout',
+      provider: 'claude-cli',
+      model: 'primary-model-a',
+    });
+    expect(adapters.probeBinaryModel).not.toHaveBeenCalled();
+  });
+
   it('drops the timer callback after the probe promise resolves first', async () => {
     vi.useFakeTimers();
     try {
@@ -461,15 +494,17 @@ describe('primary-model-usability.ts uncovered-branch coverage', () => {
     }
   });
 
-  it('drops the probe resolve callback after the deadline fires first', async () => {
+  it('waits for adapter cancellation acknowledgement before completing a timeout', async () => {
     vi.useFakeTimers();
     try {
-      let lateResolve!: (r: BinaryModelProbeResult) => void;
+      let acknowledgeAbort!: () => void;
       const adapters: PrimaryModelProbeAdapters = {
         probeBinaryModel: vi.fn(
-          async (): Promise<BinaryModelProbeResult> =>
+          async (_target, signal): Promise<BinaryModelProbeResult> =>
             new Promise((resolve) => {
-              lateResolve = resolve;
+              signal?.addEventListener('abort', () => {
+                acknowledgeAbort = () => resolve({ status: 'ok' });
+              }, { once: true });
             }),
         ),
       };
@@ -479,30 +514,31 @@ describe('primary-model-usability.ts uncovered-branch coverage', () => {
         adapters,
         { timeoutMs: 100 },
       );
+      let settled = false;
+      void probePromise.then(() => { settled = true; });
 
-      // Advance past the 100ms deadline — the internal state is settled as TIMEOUT.
       await vi.advanceTimersByTimeAsync(200);
-      await expect(probePromise).resolves.toMatchObject({ status: 'timeout' });
+      expect(settled).toBe(false);
 
-      // Fire the adapter's late resolve AFTER the deadline — its .then resolve
-      // callback should observe the internal state is already settled and return early.
-      lateResolve({ status: 'ok' });
+      acknowledgeAbort();
       await vi.advanceTimersByTimeAsync(0);
+      await expect(probePromise).resolves.toMatchObject({ status: 'timeout' });
       expect(adapters.probeBinaryModel).toHaveBeenCalledTimes(1);
     } finally {
       vi.useRealTimers();
     }
   });
 
-  it('drops the probe reject callback after the deadline fires first', async () => {
+  it('maps an adapter rejection during cancellation acknowledgement to timeout', async () => {
     vi.useFakeTimers();
     try {
-      let lateReject!: (e: Error) => void;
       const adapters: PrimaryModelProbeAdapters = {
         probeBinaryModel: vi.fn(
-          async (): Promise<BinaryModelProbeResult> =>
+          async (_target, signal): Promise<BinaryModelProbeResult> =>
             new Promise((_resolve, reject) => {
-              lateReject = reject;
+              signal?.addEventListener('abort', () => {
+                reject(new Error('cancelled binary probe'));
+              }, { once: true });
             }),
         ),
       };
@@ -513,14 +549,8 @@ describe('primary-model-usability.ts uncovered-branch coverage', () => {
         { timeoutMs: 100 },
       );
 
-      // Advance past the 100ms deadline — the internal state is settled as TIMEOUT.
       await vi.advanceTimersByTimeAsync(200);
       await expect(probePromise).resolves.toMatchObject({ status: 'timeout' });
-
-      // Fire the adapter's late reject AFTER the deadline — its .catch reject
-      // callback should observe the internal state is already settled and return early.
-      lateReject(new Error('late binary failure'));
-      await vi.advanceTimersByTimeAsync(0);
       expect(adapters.probeBinaryModel).toHaveBeenCalledTimes(1);
     } finally {
       vi.useRealTimers();
@@ -626,7 +656,10 @@ describe('claude-cli default-model probing (fleet recovery-stall fix)', () => {
       { provider: 'claude-cli', model: null },
       { probeBinaryModel },
     );
-    expect(probeBinaryModel).toHaveBeenCalledWith({ provider: 'claude-cli', model: null });
+    expect(probeBinaryModel).toHaveBeenCalledWith(
+      { provider: 'claude-cli', model: null },
+      expect.any(AbortSignal),
+    );
     expect(result).toEqual({ status: 'usable', provider: 'claude-cli', model: null });
   });
 

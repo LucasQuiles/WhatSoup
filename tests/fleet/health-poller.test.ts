@@ -250,7 +250,6 @@ function makeVerifiedRelinkHealth(overrides: {
     },
     outbound_sends: {
       latest_successful_send_at: '2026-05-20T12:00:10.000Z',
-      latest_successful_transport_id: 'wamid.relink-proof',
       ...overrides.outboundSends,
     },
     runtime: {},

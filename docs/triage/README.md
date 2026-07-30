@@ -13,7 +13,9 @@ The canonical artifacts are:
 - `reviews/*.json`: tracked review manifests that bind exact body-free evidence
   records to one source registry and main revision; and
 - `snapshots/*.json`: bounded, field-projected live-inventory captures and
-  immutable reconciliation seals.
+  immutable reconciliation seals; and
+- `open-issue-priority-clusters-20260728.{json,md}`: the sealed, numeric-only
+  P0/P1 cluster inventory and its deterministic generated view.
 
 Every tracked plan or snapshot needs its own `PUBLIC` row in
 `docs/publication-audit.md` in the same commit. The publication guard rejects an
@@ -43,6 +45,19 @@ view. To regenerate the view intentionally:
 npm run --silent triage:issues -- render --write \
   --registry docs/triage/open-issue-registry.json
 ```
+
+The dated priority-cluster projection is offline-only and fixed to the sealed
+registry digest recorded in the artifact:
+
+```bash
+npm run --silent triage:priority-clusters -- generate --write
+npm run --silent triage:priority-clusters -- check
+npm run --silent triage:priority-clusters -- render --check
+```
+
+The projection publishes only issue numbers, reviewed cluster identifiers,
+source bindings, and aggregate counts. It never reads GitHub or projects issue
+titles, bodies, paths, ownership details, or pull-request content.
 
 ## Live capture and dry-run
 

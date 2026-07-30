@@ -73,6 +73,7 @@ interface PortErrorLike {
   message: string;
   status?: number;
   code?: string;
+  phase?: 'not_started' | 'provider_call_started' | 'ack_received';
 }
 
 // signal-cli auth/linked-session failures. The JSON-RPC wrapper synthesizes
@@ -120,8 +121,14 @@ function mapPortError(
   correlationId: string,
   scope: 'request' | 'channel',
 ): TransportError {
-  const base = { channelId, operation, correlationId, scope };
   const pe = err as PortErrorLike;
+  const base = {
+    channelId,
+    operation,
+    correlationId,
+    scope,
+    phase: pe?.phase ?? 'provider_call_started' as const,
+  };
   const msg = (typeof pe?.message === 'string' && pe.message) ? pe.message : String(err);
 
   if (isSignalAuth(pe, operation)) {
@@ -697,6 +704,7 @@ export class SignalAdapter
         operation: 'sendText',
         correlationId,
         scope: 'conversation',
+        phase: 'not_started',
         retryAfterMs,
         message: 'Signal local rate limit reached for this conversation',
       });

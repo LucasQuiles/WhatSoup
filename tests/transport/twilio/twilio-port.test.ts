@@ -5,6 +5,8 @@ import { describe, it, expect, vi } from 'vitest';
 import { SdkTwilioSmsPort } from '../../../src/transport/twilio/twilio-port.ts';
 import type { TwilioClientLike } from '../../../src/transport/twilio/twilio-port.ts';
 import type { TwilioSmsConfig } from '../../../src/transport/twilio/types.ts';
+import { TwilioSmsAdapter } from '../../../src/transport/twilio/adapter.ts';
+import { makeChannelId } from '../../../src/core/transport-refs.ts';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -736,5 +738,116 @@ describe('twilio-port.ts uncovered-branch coverage', () => {
     expect((err as Error).message).toBe('[object Object]');
     expect((err as { code?: number }).code).toBeUndefined();
     expect((err as { status?: number }).status).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// GAP 1: phase classification on provably pre-connection failures.
+// scrubAndRethrow is the single shared error path for every SDK call
+// (verifyCredentials, sendSms, listInboundSince, placeCall) — a raw Node
+// system-error code (ECONNREFUSED/ENOTFOUND/EAI_AGAIN, or ETIMEDOUT tagged
+// syscall:'connect') means the underlying TCP connection was never
+// established, so no HTTP request byte for THIS call left the process.
+// Anything else (Twilio's own numeric API codes, HTTP status errors,
+// ECONNRESET, a bare ETIMEDOUT without the connect-syscall tag) cannot
+// disprove contact and must leave phase absent.
+// ---------------------------------------------------------------------------
+
+describe('SdkTwilioSmsPort phase classification (GAP 1)', () => {
+  it('tags ECONNREFUSED as phase not_started', async () => {
+    const netErr = Object.assign(new Error('connect ECONNREFUSED 127.0.0.1:443'), {
+      code: 'ECONNREFUSED',
+      syscall: 'connect',
+      errno: -61,
+    });
+    const messagesCreate = vi.fn().mockRejectedValue(netErr);
+    const factory = vi.fn().mockReturnValue(makeMockClient({ messagesCreate }));
+    const lookup = vi.fn().mockReturnValue(TOKEN);
+    const port = new SdkTwilioSmsPort(BASE_CONFIG, { credentialLookup: lookup, clientFactory: factory });
+
+    const err = await port.sendSms({ to: '+15551230000', from: '+15559990000', body: 'hi' }).catch((e) => e);
+
+    expect((err as { phase?: string }).phase).toBe('not_started');
+    // Twilio's own numeric code/status extraction must stay untouched — a
+    // raw Node error has neither, so both stay undefined.
+    expect((err as { code?: number }).code).toBeUndefined();
+    expect((err as { status?: number }).status).toBeUndefined();
+  });
+
+  it('tags ENOTFOUND (DNS failure) as phase not_started', async () => {
+    const dnsErr = Object.assign(new Error('getaddrinfo ENOTFOUND api.twilio.com'), {
+      code: 'ENOTFOUND',
+      syscall: 'getaddrinfo',
+    });
+    const messagesCreate = vi.fn().mockRejectedValue(dnsErr);
+    const factory = vi.fn().mockReturnValue(makeMockClient({ messagesCreate }));
+    const lookup = vi.fn().mockReturnValue(TOKEN);
+    const port = new SdkTwilioSmsPort(BASE_CONFIG, { credentialLookup: lookup, clientFactory: factory });
+
+    const err = await port.sendSms({ to: '+15551230000', from: '+15559990000', body: 'hi' }).catch((e) => e);
+
+    expect((err as { phase?: string }).phase).toBe('not_started');
+  });
+
+  it('tags a connect-phase ETIMEDOUT as phase not_started', async () => {
+    const connectTimeout = Object.assign(new Error('connect ETIMEDOUT 127.0.0.1:443'), {
+      code: 'ETIMEDOUT',
+      syscall: 'connect',
+    });
+    const messagesCreate = vi.fn().mockRejectedValue(connectTimeout);
+    const factory = vi.fn().mockReturnValue(makeMockClient({ messagesCreate }));
+    const lookup = vi.fn().mockReturnValue(TOKEN);
+    const port = new SdkTwilioSmsPort(BASE_CONFIG, { credentialLookup: lookup, clientFactory: factory });
+
+    const err = await port.sendSms({ to: '+15551230000', from: '+15559990000', body: 'hi' }).catch((e) => e);
+
+    expect((err as { phase?: string }).phase).toBe('not_started');
+  });
+
+  it('does NOT tag a bare ETIMEDOUT without a connect syscall (response-level timeout is ambiguous)', async () => {
+    const responseTimeout = Object.assign(new Error('socket hang up'), { code: 'ETIMEDOUT' });
+    const messagesCreate = vi.fn().mockRejectedValue(responseTimeout);
+    const factory = vi.fn().mockReturnValue(makeMockClient({ messagesCreate }));
+    const lookup = vi.fn().mockReturnValue(TOKEN);
+    const port = new SdkTwilioSmsPort(BASE_CONFIG, { credentialLookup: lookup, clientFactory: factory });
+
+    const err = await port.sendSms({ to: '+15551230000', from: '+15559990000', body: 'hi' }).catch((e) => e);
+
+    expect((err as { phase?: string }).phase).toBeUndefined();
+  });
+
+  it('does NOT tag a real Twilio API rejection (numeric code/status) — contact is proven', async () => {
+    const sendError = Object.assign(new Error('Invalid To Number'), { code: 21211, status: 400 });
+    const messagesCreate = vi.fn().mockRejectedValue(sendError);
+    const factory = vi.fn().mockReturnValue(makeMockClient({ messagesCreate }));
+    const lookup = vi.fn().mockReturnValue(TOKEN);
+    const port = new SdkTwilioSmsPort(BASE_CONFIG, { credentialLookup: lookup, clientFactory: factory });
+
+    const err = await port.sendSms({ to: '+15551230000', from: '+15559990000', body: 'hi' }).catch((e) => e);
+
+    expect((err as { phase?: string }).phase).toBeUndefined();
+    expect((err as { code?: number }).code).toBe(21211);
+  });
+
+  it('sends phase not_started end-to-end through TwilioSmsAdapter on connection refusal', async () => {
+    const netErr = Object.assign(new Error('connect ECONNREFUSED 127.0.0.1:443'), {
+      code: 'ECONNREFUSED',
+      syscall: 'connect',
+    });
+    const messagesCreate = vi.fn().mockRejectedValue(netErr);
+    const factory = vi.fn().mockReturnValue(makeMockClient({ messagesCreate }));
+    const lookup = vi.fn().mockReturnValue(TOKEN);
+    const port = new SdkTwilioSmsPort(BASE_CONFIG, { credentialLookup: lookup, clientFactory: factory });
+    const adapter = new TwilioSmsAdapter(BASE_CONFIG, port);
+    const channel = makeChannelId('sms', BASE_CONFIG.account);
+
+    await expect(
+      adapter.sendText({ channel, id: '+15551230000' }, 'hello'),
+    ).rejects.toMatchObject({
+      payload: {
+        code: 'transport.transient_provider',
+        phase: 'not_started',
+      },
+    });
   });
 });

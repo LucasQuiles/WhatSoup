@@ -120,9 +120,20 @@ export function buildPlist(name: string): string {
     '  <false/>',
     '  <key>KeepAlive</key>',
     '  <dict>',
+    // The process deliberately exits 1 on reconnect-exhaustion and
+    // unhandledRejection (systemd Restart=on-failure semantics). Crashed:true
+    // alone only relaunches on signal deaths, stranding instances on any
+    // clean exit(1) (#2682, 21h production outage). SuccessfulExit:false adds
+    // relaunch on every non-zero exit — the combined form is the documented
+    // bot-plist standard (docs/runbooks/macos-host-setup.md); ThrottleInterval
+    // bounds crash loops (same contract as install-bot-errors-sentinel.sh).
     '    <key>Crashed</key>',
     '    <true/>',
+    '    <key>SuccessfulExit</key>',
+    '    <false/>',
     '  </dict>',
+    '  <key>ThrottleInterval</key>',
+    '  <integer>60</integer>',
     '  <key>StandardOutPath</key>',
     `  <string>${escapeXml(logDir)}/stdout.log</string>`,
     '  <key>StandardErrorPath</key>',

@@ -6,6 +6,7 @@ type MainHarness = Awaited<ReturnType<typeof importMainWithMocks>>;
 type HealthServerDepsForTest = {
   handleAccessDecision: (subjectType: string, subjectId: string, action: string) => Promise<void>;
   getEnrichmentStats: () => unknown;
+  getDatabaseRetentionHealth: () => unknown;
 };
 
 type CapabilityGrantManagerOptionsForTest = {
@@ -114,7 +115,11 @@ async function importMainWithMocks(options: {
   const memoryScheduler = { start: vi.fn(), stop: vi.fn(async () => {}) };
   const mediaRetentionTimer = { start: vi.fn(), stop: vi.fn() };
   const processTmpRetentionTimer = { start: vi.fn(), stop: vi.fn() };
-  const databaseRetentionTimer = { start: vi.fn(), stop: vi.fn() };
+  const databaseRetentionTimer = {
+    start: vi.fn(),
+    stop: vi.fn(),
+    getHealthSnapshot: vi.fn(() => ({ running: true })),
+  };
   const messageScheduler = { recoverStale: vi.fn(), start: vi.fn(), stop: vi.fn() };
   const triggerPoller = { start: vi.fn(), stop: vi.fn() };
   const grantManager = {
@@ -185,7 +190,14 @@ async function importMainWithMocks(options: {
       cacheHours: 24,
     },
     dataRoot: '/tmp/whatsoup-main-data-root',
+    // Unwritable on purpose (a path under a device file): mkdir/read/write all
+    // fail, so the startup-notify journal genuinely fails open and these wiring
+    // tests touch no real filesystem state. A plain /tmp path does NOT achieve
+    // this — writeAtomicPrivateFileSync mkdirs recursively and the writes land.
+    stateRoot: '/dev/null/whatsoup-main-state-root',
     startupNotifications: true,
+    // 0 = legacy immediate send (3 s floor) so pre-debounce timing tests hold.
+    startupNotificationStabilitySeconds: 0,
     toolUpdateMode: 'full',
     capabilityGrantGroups: {
       camera: { capabilities: ['camera.snap', 'camera.clip'] },
@@ -584,6 +596,7 @@ describe('main bootstrap', () => {
       expect.any(Object),
       guardedAnthropic,
       expect.any(Object),
+      expect.any(Object),
     );
     expect(h.memoryScheduler.start).toHaveBeenCalledOnce();
     expect(h.ChatRuntime.mock.invocationCallOrder[0])
@@ -623,6 +636,7 @@ describe('main bootstrap', () => {
       h.db,
       expect.objectContaining({ messageRetentionDays: 30 }),
     );
+    expect(h.getHealthDeps().getDatabaseRetentionHealth()).toEqual({ running: true });
     expect(h.messageScheduler.recoverStale).toHaveBeenCalledOnce();
     expect(h.messageScheduler.start).toHaveBeenCalledOnce();
     expect(h.triggerPoller.start).toHaveBeenCalledOnce();

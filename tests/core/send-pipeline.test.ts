@@ -62,16 +62,20 @@ describe('executeSend outbound audit lifecycle', () => {
 
     expect(result).toEqual({ transportId: 'wamid.success' });
     const rows = db.raw
-      .prepare('SELECT status, caller, chat_jid, target_kind, alias, transport_message_id, error FROM outbound_sends')
+      .prepare(`
+        SELECT caller, target_kind, outcome_code, failure_code,
+               failure_stage, mutation_state, provider_submission_count
+        FROM outbound_sends
+      `)
       .all() as Array<Record<string, unknown>>;
     expect(rows).toEqual([{
-      status: 'sent',
       caller: 'mcp',
-      chat_jid: 'ops-chat@s.whatsapp.net',
       target_kind: 'alias',
-      alias: 'ops',
-      transport_message_id: 'wamid.success',
-      error: null,
+      outcome_code: 'submitted',
+      failure_code: null,
+      failure_stage: 'ack_received',
+      mutation_state: 'acknowledged',
+      provider_submission_count: 1,
     }]);
   });
 
@@ -92,16 +96,20 @@ describe('executeSend outbound audit lifecycle', () => {
     )).rejects.toThrow('socket closed');
 
     const rows = db.raw
-      .prepare('SELECT status, caller, chat_jid, target_kind, alias, transport_message_id, error FROM outbound_sends')
+      .prepare(`
+        SELECT caller, target_kind, outcome_code, failure_code,
+               failure_stage, mutation_state, evidence_coverage
+        FROM outbound_sends
+      `)
       .all() as Array<Record<string, unknown>>;
     expect(rows).toEqual([{
-      status: 'failed',
       caller: 'health',
-      chat_jid: 'raw-chat@s.whatsapp.net',
       target_kind: 'chatJid',
-      alias: null,
-      transport_message_id: null,
-      error: 'socket closed',
+      outcome_code: 'ambiguous',
+      failure_code: 'unknown',
+      failure_stage: 'unknown',
+      mutation_state: 'unknown',
+      evidence_coverage: 'untyped',
     }]);
   });
 
@@ -134,7 +142,7 @@ describe('executeSend outbound audit lifecycle', () => {
     )).rejects.toThrow(/caller is required/i);
   });
 
-  it('audits a sent row with a null transport id when the transport returns none', async () => {
+  it('records submitted without persisting a provider transport id', async () => {
     const { createOutboundSendsWriter } = await import('../../src/core/outbound-sends.ts');
     const writer = createOutboundSendsWriter({ db: db.raw, line: 'personal' });
     const pipeline = createSendPipeline({ resolver: chatResolver, auditWriter: writer, caller: 'mcp' });
@@ -146,9 +154,9 @@ describe('executeSend outbound audit lifecycle', () => {
 
     expect(result).toEqual({});
     const row = db.raw
-      .prepare('SELECT status, transport_message_id FROM outbound_sends')
+      .prepare('SELECT outcome_code, provider_submission_count FROM outbound_sends')
       .get() as Record<string, unknown>;
-    expect(row).toEqual({ status: 'sent', transport_message_id: null });
+    expect(row).toEqual({ outcome_code: 'submitted', provider_submission_count: 1 });
   });
 
   it('executes without auditing when no audit writer is configured', async () => {
@@ -178,9 +186,33 @@ describe('executeSend outbound audit lifecycle', () => {
     )).rejects.toBe('string failure');
 
     const row = db.raw
-      .prepare('SELECT status, error FROM outbound_sends')
+      .prepare('SELECT outcome_code, failure_code, evidence_coverage FROM outbound_sends')
       .get() as Record<string, unknown>;
-    expect(row).toEqual({ status: 'failed', error: 'string failure' });
+    expect(row).toEqual({
+      outcome_code: 'ambiguous',
+      failure_code: 'unknown',
+      evidence_coverage: 'untyped',
+    });
+  });
+
+  it('exposes the audit receipt before entering transport', async () => {
+    const { createOutboundSendsWriter } = await import('../../src/core/outbound-sends.ts');
+    const writer = createOutboundSendsWriter({ db: db.raw });
+    const pipeline = createSendPipeline({ resolver: chatResolver, auditWriter: writer, caller: 'mcp' });
+    let observedReceipt: string | undefined;
+    let receiptDuringTransport: string | undefined;
+
+    await pipeline.executeSend(
+      { chatJid: 'raw-chat@s.whatsapp.net', text: 'receipt' },
+      async () => {
+        receiptDuringTransport = observedReceipt;
+        return {};
+      },
+      { onAuditReceipt: (receipt) => { observedReceipt = receipt; } },
+    );
+
+    expect(observedReceipt).toMatch(/^[0-9a-f]{32}$/);
+    expect(receiptDuringTransport).toBe(observedReceipt);
   });
 });
 
@@ -232,9 +264,8 @@ describe('executeSend transformPrepared seam', () => {
     expect(seen).toBe('SAFE');
   });
 
-  it('audits the transformed text length and hash, not the original', async () => {
+  it('does not persist either transformed or original text evidence', async () => {
     const { createOutboundSendsWriter } = await import('../../src/core/outbound-sends.ts');
-    const { createHash } = await import('node:crypto');
     const writer = createOutboundSendsWriter({ db: db.raw, line: 'personal' });
     const pipeline = createSendPipeline({ resolver: chatResolver, auditWriter: writer, caller: 'mcp' });
 
@@ -244,11 +275,10 @@ describe('executeSend transformPrepared seam', () => {
       { transformPrepared: toSafe },
     );
 
-    const row = db.raw
-      .prepare('SELECT text_length, text_hash FROM outbound_sends')
-      .get() as Record<string, unknown>;
-    expect(row.text_length).toBe('SAFE'.length);
-    expect(row.text_hash).toBe(createHash('sha256').update('SAFE').digest('hex'));
+    const row = db.raw.prepare('SELECT * FROM outbound_sends').get() as Record<string, unknown>;
+    expect(row.outcome_code).toBe('submitted');
+    expect(JSON.stringify(row)).not.toContain('SAFE');
+    expect(JSON.stringify(row)).not.toContain('leaky original text');
   });
 
   it('awaits an async transformPrepared', async () => {

@@ -501,3 +501,41 @@ describe('provider preview redaction — source invariant (all sites)', () => {
     });
   }
 });
+
+describe('session shutdown rejection containment (#2698)', () => {
+  it('a rejecting session.shutdown() degrades the turn without an escaping rejection', async () => {
+    const harness = makeHarness({ fallbackActivation: null, replayScheduled: false });
+    harness.session.shutdown = vi.fn(() => {
+      harness.timeline.push('shutdown');
+      return Promise.reject(new Error('cleanup failed: child kill race'));
+    }) as never;
+
+    const escaped: unknown[] = [];
+    const spy = (reason: unknown) => { escaped.push(reason); };
+    process.on('unhandledRejection', spy);
+    try {
+      driveResult('scoped', harness, CASES[1]!.text);
+      // Flush microtasks so an unguarded rejection would surface before we assert.
+      await new Promise((resolve) => setImmediate(resolve));
+      await new Promise((resolve) => setImmediate(resolve));
+    } finally {
+      process.removeListener('unhandledRejection', spy);
+    }
+
+    expect(escaped).toEqual([]);
+    expect(harness.session.shutdown).toHaveBeenCalledOnce();
+    expect(harness.finalizeRuntimeTurnContext).toHaveBeenCalledOnce();
+    expect(harness.timeline).toEqual(['notice', 'shutdown', 'finalize']);
+  });
+
+  it('a synchronously-throwing session.shutdown() is contained the same way', () => {
+    const harness = makeHarness({ fallbackActivation: null, replayScheduled: false });
+    harness.session.shutdown = vi.fn(() => {
+      harness.timeline.push('shutdown');
+      throw new Error('sync shutdown fault');
+    }) as never;
+
+    expect(() => driveResult('scoped', harness, CASES[1]!.text)).not.toThrow();
+    expect(harness.finalizeRuntimeTurnContext).toHaveBeenCalledOnce();
+  });
+});

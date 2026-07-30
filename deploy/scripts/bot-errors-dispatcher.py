@@ -1287,7 +1287,7 @@ def is_verified_whatsapp_health_recovery(probe: str, *, require_outbound_proof: 
         return False
     if not require_outbound_proof:
         return True
-    if evidence_field(probe, "outbound_success_transport_present") != "true":
+    if evidence_field(probe, "outbound_success_evidence") != "provider_acknowledged_or_better":
         return False
     return evidence_epoch(probe, "outbound_success_at") is not None
 
@@ -1298,7 +1298,7 @@ def has_post_incident_outbound_proof(probe: str, record: dict[str, Any], opened_
     sources: a successful outbound send after the relink proves the server-side
     bond is alive.
     """
-    if evidence_field(probe, "outbound_success_transport_present") != "true":
+    if evidence_field(probe, "outbound_success_evidence") != "provider_acknowledged_or_better":
         return False
     outbound_epoch = evidence_epoch(probe, "outbound_success_at")
     if outbound_epoch is None:

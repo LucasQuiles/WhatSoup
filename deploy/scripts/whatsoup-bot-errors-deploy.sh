@@ -52,6 +52,7 @@ FILES=(
   "deploy/scripts/lib/bot_errors_daily_health.py"
   "deploy/scripts/lib/bot_errors_roster.py"
   "deploy/scripts/lib/controller_log.py"
+  "deploy/scripts/lib/controller_state.py"
 )
 
 sha() {

@@ -97,6 +97,18 @@ describe('Anthropic Provider', () => {
     expect(result.model).toBe('claude-opus-4-6');
   });
 
+  it('combines the caller cancellation signal with the provider deadline', async () => {
+    const caller = new AbortController();
+    mockCreate.mockResolvedValueOnce(makeSuccessResponse());
+
+    await provider.generate(makeRequest({ signal: caller.signal }));
+    const transportSignal = mockCreate.mock.calls[0][1].signal as AbortSignal;
+
+    expect(transportSignal.aborted).toBe(false);
+    caller.abort();
+    expect(transportSignal.aborted).toBe(true);
+  });
+
   it('passes systemPrompt as separate "system" parameter, not in messages', async () => {
     mockCreate.mockResolvedValueOnce(makeSuccessResponse());
     await provider.generate(makeRequest({ systemPrompt: 'System instruction here' }));

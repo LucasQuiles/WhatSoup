@@ -268,6 +268,7 @@ import {
 import { makeIdleEligibilityResolver } from './fallback-eligibility-cache.ts';
 import {
   createProviderMcpBridge,
+  mergeSessionProviderConfig,
   writeProviderMcpConfig,
   writeProviderMcpConfigTarget,
   type OpencodeProviderConfig,
@@ -9285,6 +9286,10 @@ export class AgentRuntime implements Runtime {
     return this.registry.getInFlightCallStats();
   }
 
+  getToolDurabilityTelemetrySnapshot() {
+    return this.registry.getDurabilityTelemetrySnapshot();
+  }
+
   private getTurnCapability(): RuntimeTurnCapability {
     const usability = this.primaryModelUsability;
     const { modelUsable, modelUsableStale, modelUsableCheckedAt } = deriveModelUsable(usability, Date.now());
@@ -10215,16 +10220,20 @@ export class AgentRuntime implements Runtime {
    * Probe whether the primary provider can serve again. Recovery requires a
    * real model-usability success, not credential presence: a revoked API key or
    * expired OAuth token can still be present in the key store while live turns
-   * continue returning auth failures. The probe is timeout-bounded and never
-   * rejects. `onEvidence` (DUR-02) gets the full result pre-resolve — see resolveFallbackRecoveryDecision for why a callback, not a field.
+   * continue returning auth failures. The probe is deadline-cancelled and never
+   * rejects; a timeout result waits for cancellation acknowledgement.
+   * `onEvidence` (DUR-02) gets the full result pre-resolve — see
+   * resolveFallbackRecoveryDecision for why a callback, not a field.
    */
   private async probePrimaryProviderRecovered(
     onEvidence?: (evidence: FallbackRecoveryEvidence) => void,
+    signal?: AbortSignal,
   ): Promise<boolean> {
-    const result = await probePrimaryModelUsability(
-      { provider: this.agentProvider, model: this.model ?? null },
-      createPrimaryModelProbeAdapters(this.agentProviderConfig, { cwd: this.cwd ?? homedir(), egressProxyPort: this.egressProxy?.port, providerExecutionGate: this.providerExecutionGate }),
-    );
+    const target = { provider: this.agentProvider, model: this.model ?? null };
+    const adapters = createPrimaryModelProbeAdapters(this.agentProviderConfig, { cwd: this.cwd ?? homedir(), egressProxyPort: this.egressProxy?.port, providerExecutionGate: this.providerExecutionGate });
+    const result = signal
+      ? await probePrimaryModelUsability(target, adapters, { signal })
+      : await probePrimaryModelUsability(target, adapters);
     onEvidence?.({ ...result, checkedAt: Date.now() });
     return result.status === 'usable';
   }
@@ -10264,11 +10273,12 @@ export class AgentRuntime implements Runtime {
           const d = extractUsageLimitResetTime(text);
           return d ? d.getTime() : null;
         },
-        runPrimaryModelUsability: () => probePrimaryModelUsability(
+        runPrimaryModelUsability: (signal) => probePrimaryModelUsability(
           { provider: this.agentProvider, model: this.model ?? null },
           createPrimaryModelProbeAdapters(this.agentProviderConfig, { cwd: this.cwd ?? homedir(), egressProxyPort: this.egressProxy?.port, providerExecutionGate: this.providerExecutionGate }),
+          { signal },
         ),
-        runPrimaryRecoveryProbe: () => this.probePrimaryProviderRecovered(),
+        runPrimaryRecoveryProbe: (signal) => this.probePrimaryProviderRecovered(undefined, signal),
         accountAuthDeps: {
           resolveKeyService: resolveProviderKeyService,
           lookupCredential,
@@ -10807,7 +10817,7 @@ export class AgentRuntime implements Runtime {
       allowM365Mutations: this.allowM365Mutations,
       provider: route.provider,
       providerConfig: providerConfigOverride
-        ? { ...this.routeSessionProviderConfig(route), ...providerConfigOverride }
+        ? mergeSessionProviderConfig(this.routeSessionProviderConfig(route), providerConfigOverride)
         : this.routeSessionProviderConfig(route),
       mcpBridge: createProviderMcpBridge(this.registry, providerToolSession),
       mcpSessionContext: providerToolSession,

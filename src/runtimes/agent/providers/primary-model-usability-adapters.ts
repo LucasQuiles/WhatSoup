@@ -70,8 +70,10 @@ export function createPrimaryModelProbeAdapters(
   deps: PrimaryModelProbeAdapterDeps = {},
 ): PrimaryModelProbeAdapters {
   return {
-    probeBinaryModel: (target) => probeCliModel(target.provider, target.model, providerConfig, deps),
-    probeApiModelAccess: (target) => probeApiModelAccess(target.provider, target.model, providerConfig, deps),
+    probeBinaryModel: (target, signal) =>
+      probeCliModel(target.provider, target.model, providerConfig, deps, signal),
+    probeApiModelAccess: (target, signal) =>
+      probeApiModelAccess(target.provider, target.model, providerConfig, deps, signal),
   };
 }
 
@@ -80,7 +82,9 @@ async function probeCliModel(
   model: string | null,
   providerConfig: Record<string, unknown> | undefined,
   deps: PrimaryModelProbeAdapterDeps,
+  signal?: AbortSignal,
 ): Promise<BinaryModelProbeResult> {
+  if (signal?.aborted) return { status: 'timeout' };
   const resolveBinary = deps.getProviderBinary ?? getProviderBinary;
   let binary: string | null;
   try {
@@ -117,6 +121,7 @@ async function probeCliModel(
   let executionLease: ProviderExecutionLease | null = null;
   if (provider === 'opencode-cli' && deps.providerExecutionGate) {
     executionLease = await deps.providerExecutionGate.acquire({
+      ...(signal ? { signal } : {}),
       work: { kind: 'probe', scopeHash: shortHash(`${provider}\0${model ?? ''}`) },
     });
   }
@@ -133,6 +138,7 @@ async function probeCliModel(
       {
         ...(deps.cwd ? { cwd: deps.cwd } : {}),
         timeoutMs: CLI_MODEL_PROBE_TIMEOUT_MS,
+        ...(signal ? { signal } : {}),
         ...(executionLease ? { onProcessClosed: releaseExecutionLease } : {}),
       },
     );
@@ -244,12 +250,20 @@ async function probeApiModelAccess(
   model: string,
   providerConfig: Record<string, unknown> | undefined,
   deps: PrimaryModelProbeAdapterDeps,
+  signal?: AbortSignal,
 ): Promise<ApiModelAccessProbeResult> {
+  if (signal?.aborted) return { status: 'timeout' };
   const apiKey = resolveProviderApiKey(provider, providerConfig, deps.resolveApiKey ?? resolveApiKey);
   if (!apiKey) return { status: 'credential_failed' };
 
   const fetchImpl = deps.fetch ?? globalThis.fetch;
   if (!fetchImpl) return { status: 'provider_unavailable' };
+
+  const controller = new AbortController();
+  const abort = (): void => controller.abort();
+  signal?.addEventListener('abort', abort, { once: true });
+  const timer = setTimeout(abort, API_PROBE_TIMEOUT_MS);
+  timer.unref?.();
 
   try {
     const response = await fetchImpl(apiGenerationUrl(provider, providerConfig), {
@@ -259,7 +273,7 @@ async function probeApiModelAccess(
         ...apiHeaders(provider, apiKey),
       },
       body: JSON.stringify(apiGenerationProbeBody(provider, model, providerConfig)),
-      signal: AbortSignal.timeout(API_PROBE_TIMEOUT_MS),
+      signal: controller.signal,
     });
     if (!response.ok) {
       const errText = await response.text().catch(() => '');
@@ -271,6 +285,9 @@ async function probeApiModelAccess(
     return name === 'AbortError' || name === 'TimeoutError'
       ? { status: 'timeout' }
       : { status: 'provider_unavailable' };
+  } finally {
+    clearTimeout(timer);
+    signal?.removeEventListener('abort', abort);
   }
 }
 
