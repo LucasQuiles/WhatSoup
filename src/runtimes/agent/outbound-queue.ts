@@ -1134,7 +1134,7 @@ export class OutboundQueue implements IOutboundQueue {
     this.typingStartedAt = Date.now();
     if (this.isTyping) return;
     this.isTyping = true;
-    this.messenger.setTyping?.(this.deliveryJid, true).catch(() => {});
+    this.messenger.setTyping?.(this.deliveryJid, true).catch((err) => log.warn({ err }, 'outbound-queue: setTyping(true) rejected'));
     // Re-assert composing every 8s — WA auto-clears it on the recipient side after ~10-15s.
     // This keeps the indicator alive during long tool chains with no intermediate messages.
     // The self-bound check caps the total lifetime to TYPING_MAX_MS so any future leak
@@ -1147,7 +1147,7 @@ export class OutboundQueue implements IOutboundQueue {
         this.stopTyping(false);
         return;
       }
-      this.messenger.setTyping?.(this.deliveryJid, true).catch(() => {});
+      this.messenger.setTyping?.(this.deliveryJid, true).catch((err) => log.warn({ err }, 'outbound-queue: setTyping(true) refresh rejected'));
     }, TYPING_REFRESH_MS);
   }
 
@@ -1164,7 +1164,7 @@ export class OutboundQueue implements IOutboundQueue {
       this.typingRefreshInterval = null;
     }
     if (notify) {
-      this.messenger.setTyping?.(this.deliveryJid, false).catch(() => {});
+      this.messenger.setTyping?.(this.deliveryJid, false).catch((err) => log.warn({ err }, 'outbound-queue: setTyping(false) rejected'));
     }
   }
 
@@ -1358,7 +1358,7 @@ export class OutboundQueue implements IOutboundQueue {
           // it immediately so there's no visible gap between mid-turn messages
           // (e.g. compact_boundary notification followed by continued output).
           if (this.isTyping) {
-            this.messenger.setTyping?.(chunk.chatJid, true).catch(() => {});
+            this.messenger.setTyping?.(chunk.chatJid, true).catch((err) => log.warn({ err }, 'outbound-queue: setTyping(chunk) rejected'));
           }
         }
         this.sending = false;
@@ -1587,7 +1587,7 @@ export class OutboundQueue implements IOutboundQueue {
       Promise.race([
         this.messenger.sendMessage(chunk.chatJid, '⚠️ A response could not be delivered after 3 attempts.'),
         new Promise<void>((_, reject) => setTimeout(() => reject(new Error('timeout')), SEND_TIMEOUT_MS)),
-      ]).catch(() => { /* best effort only */ });
+      ]).catch((err) => { log.warn({ err }, 'outbound-queue: delivery failure notification send failed'); });
     }
   }
 
