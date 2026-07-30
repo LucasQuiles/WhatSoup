@@ -1,3 +1,5 @@
+import { createChildLogger } from '../logger.ts';
+
 /**
  * Temporary capability grant manager.
  *
@@ -255,15 +257,16 @@ export function createCapabilityGrantManager(
 
   let pollTimer: ReturnType<typeof setTimeout> | null = null;
   let running = false;
+  const log = createChildLogger('capability-grant');
 
   const reportError = (
     error: unknown,
     operation: 'expiry-disarm' | 'disarm-observer',
   ): void => {
     try {
-      void Promise.resolve(onError(error, operation)).catch(() => {});
+      void Promise.resolve(onError(error, operation)).catch((err) => { log.warn({ err, operation }, 'capability-grant: error observer rejected'); });
     } catch {
-      // Observability must never break expiry retries or completed state changes.
+      // intentional: observability must never break expiry retries or completed state changes.
     }
   };
 
