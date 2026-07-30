@@ -52,15 +52,15 @@ export function resolveBinaryPath(binary: string): string | null {
   // Collect PATH entries once.
   const pathDirs = (process.env.PATH ?? DEFAULT_EXECUTABLE_PATH).split(delimiter);
 
-  // Phase 1: try the bare binary name in each PATH directory.
+  // First, try the bare binary name in each PATH directory.
   for (const dir of pathDirs) {
     const candidate = resolve(dir || ".", binary);
     if (isExecutable(candidate)) return candidate;
   }
 
-  // Phase 2: try the arch-suffixed name (e.g. "ffmpeg-arm64") in each PATH
-  // directory. This handles hosts where prebuilt or Homebrew binaries use an
-  // arch-specific cellar path.
+  // If that fails, try the arch-suffixed name (e.g. "ffmpeg-arm64") in each
+  // PATH directory. This handles hosts where prebuilt or Homebrew binaries
+  // use an arch-specific cellar path.
   const archSuffix = getArchBinSuffix();
   if (archSuffix) {
     const archBinary = `${binary}${archSuffix}`;
