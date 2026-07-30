@@ -2,7 +2,7 @@
 
 **Status:** Active — refreshed against canonical base `482b707d716aee5641db25d40c2a954caee5d78f`; the current branch advances the schema to migration 47 for recovery-receipt chronology, and provider-lifecycle implementation remains blocked on the migration-48 terminal-recovery prerequisite
 
-**Schema allocation:** current canonical schema is migration 52; bounded terminal recovery/canonical `not_sent` is forward migration 53; the provider-event lifecycle ledger is migration 54. Migrations 50 and 51 are consumed by metadata-only durability evidence and migration 52 by outbound ambiguity-episode tracking, so the still-unpublished forward allocations move to migrations 53 and 54.
+**Schema allocation:** current canonical schema is migration 52; bounded terminal recovery/canonical `not_sent` is forward migration 53; the provider-event lifecycle ledger is migration 54. Migrations 50 and 51 are consumed by metadata-only durability evidence, and migration 52 is consumed by outbound ambiguity-episode timing, so the still-unpublished forward allocations move to migrations 53 and 54.
 
 ## Context
 
