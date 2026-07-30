@@ -321,6 +321,7 @@ export class AnthropicApiProvider implements ProviderSession {
           'anthropic-version': '2023-06-01',
           ...(authKey ? { 'x-api-key': authKey } : {}),
         },
+        signal: AbortSignal.timeout(600_000),
         body: JSON.stringify({
           model,
           max_tokens: (this.config?.maxTokens as number | undefined) ?? 16384,

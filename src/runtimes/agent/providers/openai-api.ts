@@ -309,6 +309,7 @@ export class OpenAIApiProvider implements ProviderSession {
           'Content-Type': 'application/json',
           ...(authKey ? { Authorization: `Bearer ${authKey}` } : {}),
         },
+        signal: AbortSignal.timeout(600_000),
         body: JSON.stringify({
           model,
           messages: this.messages,
