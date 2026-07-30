@@ -3764,7 +3764,7 @@ export class AgentRuntime implements Runtime {
       if (tracksRouteRecycle) {
         this.routeRecycleLifecycle.untrackRouteCommand(processing);
       }
-    }).catch(() => {});
+    }).catch((err) => log.warn({ err }, 'runtime: message handler cleanup rejected'));
     return processing;
   }
 
