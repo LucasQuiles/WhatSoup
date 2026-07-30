@@ -7,6 +7,10 @@
  * shared shutdown deadline cannot drift across call sites.
  */
 
+import { createChildLogger } from '../../logger.ts';
+
+const log = createChildLogger('agent-route-recycle-lifecycle');
+
 export interface RouteRecycleFailure<TSession> {
   readonly session: TSession;
   readonly error: unknown;
@@ -63,7 +67,7 @@ export class RouteRecycleLifecycle<TSession> {
     this.publicationWork.set(work, scopeKey);
     void work.finally(() => {
       this.publicationWork.delete(work);
-    }).catch(() => {});
+    }).catch((err) => log.warn({ err }, 'route-recycle-lifecycle: publication tracking cleanup rejected'));
   }
 
   runOwned(
