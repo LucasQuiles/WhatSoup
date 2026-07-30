@@ -1,5 +1,5 @@
 import { Buffer } from 'node:buffer';
-import { spawnSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { readFileSync, readSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
 
@@ -24,7 +24,15 @@ import {
 } from './lib/ci-control/ref-policy.ts';
 import { sha256Bytes } from './lib/verification/boundary-run/shared.ts';
 
-const TRUSTED_GIT = '/usr/bin/git';
+const TRUSTED_GIT: string = process.env.GIT_PATH ??
+  (() => {
+    try {
+      const r = execFileSync('which', ['git'], { encoding: 'utf8', timeout: 5000 }).trim();
+      return r || '/usr/bin/git';
+    } catch {
+      return '/usr/bin/git';
+    }
+  })();
 const GIT_TIMEOUT_MS = 10_000;
 const MAX_GIT_OUTPUT_BYTES = 1_000_000;
 

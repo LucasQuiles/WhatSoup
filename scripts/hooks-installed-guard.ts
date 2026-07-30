@@ -85,12 +85,21 @@ const OID = /^[0-9a-f]{40}$/;
 const MAX_GIT_BYTES = 1_000_000;
 export const MAX_HOOK_RECEIPT_BYTES = 64 * 1024;
 const GIT_TIMEOUT_MS = 10_000;
-const TRUSTED_GIT_PATH = '/usr/bin/git';
+function resolveTrustedGitPath(): string {
+  if (process.env.GIT_PATH) return process.env.GIT_PATH;
+  try {
+    const r = execFileSync('which', ['git'], { encoding: 'utf8', timeout: 5000 }).trim();
+    return r || '/usr/bin/git';
+  } catch {
+    return '/usr/bin/git';
+  }
+}
+const TRUSTED_GIT_PATH = resolveTrustedGitPath();
 const MAX_GIT_EXECUTABLE_BYTES = 128 * 1024 * 1024;
 const MAX_INSTALLED_HOOK_BYTES = 1_000_000;
 
 interface TrustedGitExecutable {
-  path: typeof TRUSTED_GIT_PATH;
+  path: string;
   identity: GitExecutableIdentityV1;
 }
 
