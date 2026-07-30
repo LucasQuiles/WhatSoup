@@ -18,8 +18,8 @@ afterEach(() => {
   tmpRoot = '';
 });
 
-function outboxEvent() {
-  const outbox = join(tmpRoot, 'outbox');
+function eventFrom(stateRoot: string) {
+  const outbox = join(stateRoot, 'outbox');
   const files = readdirSync(outbox);
   expect(files).toHaveLength(1);
   return {
@@ -27,6 +27,10 @@ function outboxEvent() {
     path: join(outbox, files[0]!),
     event: JSON.parse(readFileSync(join(outbox, files[0]!), 'utf8')) as Record<string, any>,
   };
+}
+
+function outboxEvent() {
+  return eventFrom(tmpRoot);
 }
 
 describe('bot-errors-emit', () => {
@@ -74,7 +78,8 @@ describe('bot-errors-emit', () => {
     expect(name.startsWith('.')).toBe(false);
     expect(statSync(path).mode & 0o777).toBe(0o600);
     expect(event).toMatchObject({
-      schemaVersion: 1,
+      schemaVersion: 2,
+      eventKind: 'incident_alert',
       eventType: 'alert',
       severity: 'critical',
       instance: 'fleet-offload-sync',
@@ -101,6 +106,59 @@ describe('bot-errors-emit', () => {
     expect(event.evidence).not.toContain(PHONE_SAMPLE);
     expect(event.diagnostics.logHints).toContain(join('/tmp', 'bot-errors', 'unit-node-offload', 'logs', 'unit-node-offload-sync.log'));
     expect(event.diagnostics.target).toBe('unit-node');
+  });
+
+  it('writes equivalent v2 recoveries for clear shortcut and explicit clear', () => {
+    tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-emit-'));
+    const shortcutRoot = join(tmpRoot, 'shortcut');
+    const explicitRoot = join(tmpRoot, 'explicit');
+    const emit = (stateRoot: string, args: string[]) => execFileSync('python3', [
+      'deploy/scripts/bot-errors-emit.py',
+      ...args,
+    ], {
+      cwd: process.cwd(),
+      env: { ...process.env, BOT_ERRORS_STATE_DIR: stateRoot },
+    });
+
+    emit(shortcutRoot, ['--clear', '--instance', 'contract-test', '--source', 'contract-clear']);
+    emit(explicitRoot, ['--event-type', 'clear', '--instance', 'contract-test', '--source', 'contract-clear']);
+
+    const shortcut = eventFrom(shortcutRoot).event;
+    const explicit = eventFrom(explicitRoot).event;
+    const expected = {
+      schemaVersion: 2,
+      eventKind: 'incident_recovery',
+      eventType: 'clear',
+      severity: 'info',
+      summary: 'alert source cleared: contract-clear',
+    };
+    expect(shortcut).toMatchObject(expected);
+    expect(explicit).toMatchObject(expected);
+  });
+
+  it('rejects a contradictory clear before writing an outbox entry', () => {
+    tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-emit-'));
+    let exitCode = 0;
+    try {
+      execFileSync('python3', [
+        'deploy/scripts/bot-errors-emit.py',
+        '--event-type', 'clear',
+        '--severity', 'critical',
+        '--instance', 'contract-test',
+        '--source', 'contract-clear',
+        '--summary', 'contradictory clear must not enqueue',
+      ], {
+        cwd: process.cwd(),
+        env: { ...process.env, BOT_ERRORS_STATE_DIR: tmpRoot },
+        stdio: 'pipe',
+      });
+    } catch (error: any) {
+      exitCode = error.status ?? 1;
+    }
+
+    expect(exitCode).not.toBe(0);
+    const outbox = join(tmpRoot, 'outbox');
+    expect(existsSync(outbox) ? readdirSync(outbox) : []).toHaveLength(0);
   });
 
   it('uses hidden tmp files and leaves only final json visible', () => {

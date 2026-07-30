@@ -72,6 +72,8 @@ describe('buildBotErrorsEvent', () => {
     }, '11111111-1111-4111-8111-111111111111', '2026-06-13T10:00:00.000Z');
 
     expect(event).toMatchObject({
+      schemaVersion: 2,
+      eventKind: 'incident_recovery',
       id: '11111111-1111-4111-8111-111111111111',
       eventType: 'clear',
       severity: 'info',
@@ -96,6 +98,54 @@ describe('buildBotErrorsEvent', () => {
       "unknown.service --since '30 minutes ago'",
     ].join('@'));
     expect(event.diagnostics.logHints).toContain("journalctl --user -u bot-errors-dispatcher.service --since '30 minutes ago'");
+  });
+
+  it('emits only declared v2 envelope variants', () => {
+    const variants = [
+      {
+        input: { eventType: 'alert' as const, severity: 'error' as const },
+        expected: { eventKind: 'incident_alert', eventType: 'alert', severity: 'error' },
+      },
+      {
+        input: { eventType: 'clear' as const, severity: 'info' as const },
+        expected: { eventKind: 'incident_recovery', eventType: 'clear', severity: 'info' },
+      },
+      {
+        input: { eventType: 'observation' as const, severity: 'info' as const },
+        expected: { eventKind: 'observation', eventType: 'observation', severity: 'info' },
+      },
+    ];
+
+    for (const { input, expected } of variants) {
+      const event = buildBotErrorsEvent({
+        ...input,
+        instance: 'typed-envelope',
+        source: 'unit-test',
+        summary: 'declared envelope variant',
+      });
+      expect(event).toMatchObject({ schemaVersion: 2, ...expected });
+    }
+
+    const informationalAlert = buildBotErrorsEvent({
+      eventType: 'alert',
+      severity: 'info',
+      instance: 'typed-envelope',
+      source: 'invalid-alert',
+      summary: 'informational alerts are observations, not incidents',
+    });
+    expect(informationalAlert).toMatchObject({
+      schemaVersion: 2,
+      eventKind: 'observation',
+      eventType: 'observation',
+      severity: 'info',
+    });
+    expect(() => buildBotErrorsEvent({
+      eventType: 'clear',
+      severity: 'critical',
+      instance: 'typed-envelope',
+      source: 'invalid-clear',
+      summary: 'critical clears cannot authorize recovery',
+    })).toThrow('invalid bot errors envelope');
   });
 
   it('redacts nested critical asset diagnostics without dropping primitive values', () => {

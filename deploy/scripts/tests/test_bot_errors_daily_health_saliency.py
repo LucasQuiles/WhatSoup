@@ -270,6 +270,7 @@ def test_daily_health_fail_not_swallowed_by_info_retention(dirs):
     state_dir, outbox_dir = dirs
     dispatcher = _load_dispatcher(state_dir, outbox_dir)
     event = {
+        "schemaVersion": 1,
         "machine": "test-machine",
         "instance": "bot-errors-health",
         "source": "daily-health-fail",
