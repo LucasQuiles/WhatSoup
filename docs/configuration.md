@@ -431,7 +431,7 @@ into place during deployment.
 | `enabled` | boolean | no | `true` | Fleet opt-out switch. Set to `false` to keep the config on disk while taking the instance out of fleet rotation — discovery skips it, ops routes ignore its `healthPort`, and no polling or proxying occurs. Any other value (including absent) leaves the instance enabled. See note below.[^enabled] |
 | `name` | string | yes | — | Instance name. Must match the directory name. Validated by the loader. |
 | `type` | string | yes | — | Instance type: `chat`, `agent`, or `passive`. |
-| `adminPhones` | string[] | yes | — | Non-empty array of phone numbers with admin access. All elements must be non-empty strings. |
+| `adminPhones` | string[] | yes | — | Non-empty array of configured administrator identities. Canonical form depends on `transport`: phone digits for Baileys/Twilio, lowercase Signal UUID or E.164 wire identity for Signal, and AppleID email or E.164 wire identity for iMessage. All elements must be non-empty strings. |
 | `internalPeerJids` | string[] | no | `[]` | Exact authenticated direct-chat JIDs whose outbound messages are internal operator coordination. Ordinary paths and operator vocabulary are preserved, while secrets and credential paths remain masked. This does not grant inbound admin access. Group JIDs, duplicate entries, whitespace, and spoofable transports such as `@sms` are rejected. |
 | `accessMode` | string | yes | — | Who can interact with the bot. See [Access Modes](#access-modes). |
 | `systemPrompt` | string | see rules | — | LLM system prompt. **Required** for `chat`. **Forbidden** for `passive`. Optional for `agent` (falls back to `DEFAULT_SYSTEM_PROMPT` in `config.ts`). |
@@ -458,15 +458,15 @@ into place during deployment.
 | `agentOptions` | object | agent only | — | Agent-specific settings. Required fields vary by `sessionScope`. See [agentOptions](#agentoptions). |
 | `chatOptions` | object | no | — | Chat-specific settings. Currently just `openaiProviderConfig` (chat OpenAI endpoint/key override). See [chatOptions](#chatoptions). |
 | `transcriptionOptions` | object | no | — | Shared OpenAI Whisper transcription endpoint/key override. Valid for chat, agent, and passive instances. See [transcriptionOptions](#transcriptionoptions). |
-| `transport` | string | no | `baileys` | Message transport: `baileys` (WhatsApp, default) or `twilio` (SMS). See [`twilioConfig`](#twilioconfig). |
+| `transport` | string | no | `baileys` | Message transport: `baileys` (WhatsApp, default), `twilio` (SMS), `signal`, or `imessage`. Transport-specific settings are required by their selected transport; see [`twilioConfig`](#twilioconfig), the [Signal transport runbook](runbooks/signal-transport.md), and the [iMessage transport runbook](runbooks/imessage-transport.md). |
 | `twilioConfig` | object | iff `transport: "twilio"` | — | Twilio SMS transport settings. **Required** when `transport` is `twilio`; **rejected** when present with any other transport. See [`twilioConfig`](#twilioconfig). |
 | `rateLimitWindowMs` | integer (ms) | `3600000` (1 h) | Measurement window for the per-user response rate limit — `checkRateLimit` counts responses sent within this window and compares against `rateLimitPerHour` (`src/runtimes/chat/rate-limiter.ts:15`). When unset it falls back to `rateLimitNoticeWindowMs` if that is set (with a startup deprecation warning), else the 1-hour default (`src/config.ts:448`). |
 | `rateLimitNoticeWindowMs` | integer (ms) | `3600000` (1 h) | Dedup window for the "chill, I need a minute" rate-limit notice — once a user is told they are rate-limited, the notice is suppressed for this long before it can be sent again (`src/runtimes/chat/runtime.ts:174`). Distinct from `rateLimitWindowMs` (the counting window). |
 | `recencyHalfLifeDays` | integer | `14` | Per-instance override of `RECENCY_HALF_LIFE_DAYS` — positive day-count half-life for memory-search recency decay (`src/config.ts:858`). Smaller values forget faster. Falls back to the `RECENCY_HALF_LIFE_DAYS` env var, then `14`; non-positive/non-integer values are ignored. |
 | `maxAgeDays` | integer | `90` | Per-instance override of `MAX_AGE_DAYS` — positive day-count cutoff for memory search; records older than this are filtered out (`src/config.ts:859`). Falls back to the `MAX_AGE_DAYS` env var, then `90`; non-positive/non-integer values are ignored. |
 | `toolUpdateRedirectJid` | string | `null` | Redirect target for the agent's batched tool-status updates. When set, the aggregated tool-status text is sent to this JID instead of the originating chat (`src/runtimes/agent/outbound-queue.ts:717`), keeping operational chatter out of the user-facing conversation. `null` (default) sends status inline as a typing indicator in the active chat. |
-| `startupNotifications` | boolean | `true` | Gates the agent "back online" / resume startup notification (`src/main.ts`). `false` suppresses it. Only consulted for `agent` instances and only when `toolUpdateMode` is not `minimal`. |
-| `startupNotificationStabilitySeconds` | integer (s) | `600` | Stability window for the back-online notice (`src/core/startup-notify.ts`). Every boot is recorded in a persisted journal (`<stateRoot>/startup-notify.json`); the notice sends only after the instance has stayed up AND connected this long, and one message covers every boot since the last notification — a single boot keeps the classic `*Agent back online* ✓`, a flap/maintenance burst becomes one summary with the restart count and time range, so users are never pinged once per recovery. `0` restores the legacy immediate send (3 s floor). Accepted range is an integer `0`–`86400`; any other value (non-integer, negative, out of range) falls back to `600` rather than silently disabling the debounce. Resume messages (interrupted-turn continuity) still send promptly and count as the notification. NOTE: `startupNotificationDedupe` and `startupNotificationCooldownSeconds` were never implemented — configs carrying them held dead keys; this mechanism replaces the intent behind both. |
+| `startupNotifications` | boolean | `true` | Gates only the generic agent back-online aggregate. `false` does not suppress early boot evidence or named resume, restart-loop-guard, expired-session, or intentional-restart-receipt policies. Only consulted for `agent` instances and only when `toolUpdateMode` is not `minimal`; see [Startup-notification protocol](#startup-notification-protocol). |
+| `startupNotificationStabilitySeconds` | integer (s) | `600` | Stability window for the generic back-online aggregate. Every applicable agent boot is recorded in `<stateRoot>/startup-notify.json`; one aggregate covers every boot since the last generic settlement. The controller waits for this window and strict readiness, with a three-second floor even when configured as `0`. Accepted range is an integer `0`–`86400`; any other value falls back to `600`. See [Startup-notification protocol](#startup-notification-protocol). |
 | `proactiveResumeOnStartup` | boolean | `true` | For `per_chat` (non-sandboxed) agents, controls whether sessions that were active or gracefully suspended at last shutdown are proactively resumed instead of waiting for the next user message. Resume requires a complete, self-consistent persisted delivery identity; legacy or ambiguous checkpoints fail closed and wait for lazy recovery on the next inbound message. `false` disables proactive resume. Group conversations are never proactively resumed. |
 | `restartLoopGuard` | object | `{ enabled: true, maxRestarts: 3, windowMs: 300000 }` | Resume-replay circuit breaker for proactive resume (`src/runtimes/agent/restart-loop-guard.ts`). Each boot marks a crash marker in `<stateRoot>/restart-loop-guard.json`; a graceful shutdown clears it. When a boot follows an unclean exit with resumable checkpoints pending, the guard counts it; at `maxRestarts` crashy boots inside `windowMs`, proactive resume is suppressed for that boot (sessions still lazy-resume on their next message) and one admin notice is sent via the startup-notification channel. Defaults trip strictly before systemd's `StartLimitBurst=10`/`StartLimitIntervalSec=300` wedge, so the instance self-heals instead of the whole unit going dark. The guard fails open on any persistence error and never blocks inbound service. `enabled: false` disables the trip consult entirely. Guard state is surfaced in the runtime health snapshot (`restartLoopGuard` field). |
 | `textAggregateDelayMs` | integer (ms) | `2000` | Debounce window for aggregating an agent's streamed text chunks into one outbound WhatsApp message — the stream buffer flushes this long after the last chunk (`src/runtimes/agent/outbound-queue.ts:382`). Non-positive/non-integer values fall back to `2000`. |
@@ -489,6 +489,91 @@ into place during deployment.
 | `advanced` | object | `{ enableRelayMessage: false, enableResync: false, relayMaxPayloadBytes: 1048576, enableUrlWatch: false }` | Gates for low-level/privileged MCP capabilities (`src/mcp/tools/advanced.ts`, `src/mcp/tools/substrate.ts`). `enableResync` must be `true` for the `resync_app_state` tool; `enableRelayMessage` must be `true` for the `relay_message` tool; `relayMaxPayloadBytes` caps the raw protobuf payload size (default 1 MB). `enableUrlWatch` must be `true` for `create_watch` to accept `source:'poll.url'` watches — when `false` (default) creation is rejected and the poller fails any persisted `poll.url` row closed (`url_watch_disabled`). The `poll.url` executor reuses the link-preview SSRF stack and is https-only + default-port-only. All default off/conservative. |
 
 [^enabled]: Enforcement sites: [`src/fleet/discovery.ts:94`](../src/fleet/discovery.ts) (fleet scan skip), [`src/fleet/routes/ops.ts:767`](../src/fleet/routes/ops.ts) (port-in-use scan), [`src/fleet/routes/ops.ts:788`](../src/fleet/routes/ops.ts) (existing-port map for PATCH conflict checks).
+
+### Startup-notification protocol
+
+Startup notification is one process protocol for every `agent` instance. It
+has no service-manager branch: launchd, systemd, and Docker start the same
+process behavior. The configured administrator is resolved through the
+selected transport's existing direct-JID builder, rather than assuming a
+WhatsApp destination.
+
+| `transport` | Canonical `adminPhones` identity | Configured-admin direct JID builder |
+|---|---|---|
+| `baileys` | phone digits | `toPersonalJid` |
+| `twilio` | phone digits | `toSmsJid` (with the `+` E.164 wire form) |
+| `signal` | lowercase UUID or E.164 wire identity | `toSignalJid` |
+| `imessage` | AppleID or E.164 wire identity | `toImessageJid` |
+
+This routing applies to the generic startup aggregate and the named startup
+policies, not merely to the normal introduction path. iMessage identity
+canonicalization belongs to configuration ingress; the routing selector only
+uses the already-canonical value.
+
+#### Evidence, compatibility, and readiness
+
+An applicable agent process records one boot as soon as it owns a `stateRoot`,
+before runtime start, transport connect/history recovery, introduction, and
+notification gates. The persisted startup journal is
+`<stateRoot>/startup-notify.json`. A deployed v1 journal
+`{v:1,boots:number[],lastNotifiedAt:number|null}` remains v1; missing state
+starts the normal v1 path. Malformed, unreadable, or future-version state is
+preserved in place rather than coerced or overwritten. Service availability is
+fail-open, but the bounded health state becomes `journal_unreadable` and
+release acceptance is non-green.
+
+Neither the generic aggregate nor a prompt policy can submit until strict
+readiness is true: `connected === true && state === 'connected'`. A stability
+deadline reached while disconnected re-arms the controller timer instead of
+submitting against a partial transport state.
+
+#### Policy and settlement rules
+
+The controller separates the policies below. Named prompt policies retain the
+three-second minimum and strict-readiness requirement; their generic-batch
+rules differ. A tracked send is a provider submission attempt only; it is not
+provider delivery evidence.
+
+| Policy | Timing and generic-batch effect |
+|---|---|
+| `generic` | After the configured stability window (minimum three seconds) and strict readiness, settle and submit one aggregate for all unnotified v1 boots. |
+| `resume` | Prompt safe-continuity submission after strict readiness; it settles the generic boot batch. |
+| `restart_loop_guard_alert` | Prompt incident submission after strict readiness; it stays distinct and does not consume the generic watermark, so the generic aggregate remains eligible and still waits its normal generic stability window. |
+| `expired_session_notice` | Prompt session-status submission after strict readiness; it remains distinct and does not silently settle the generic batch. |
+| `intentional_restart` | The named self-restart receipt settles the generic boot batch before its own short submission and suppresses the later generic aggregate; the receipt remains a distinct policy. |
+| `disabled` | Generic aggregation is disabled, while named policies and early boot evidence retain their separate behavior. |
+
+#### Health observation and deferred follow-ups
+
+`GET /health` always exposes exactly one privacy-safe `startupNotification`
+object. Its fields are `state`, `policy`, `stabilitySeconds`,
+`bootCountSinceNotification`, `lastBootAt`, `lastNotifiedAt`,
+`nextEligibleAt`, and `lastSendAt`. Valid states are `not_applicable`,
+`disabled`, `waiting_stability`, `waiting_transport`, `dispatching`, `sent`,
+`send_failed`, and `journal_unreadable`; valid policies are `generic`,
+`resume`, `restart_loop_guard_alert`, `expired_session_notice`,
+`intentional_restart`, `disabled`, and `none`.
+
+`sent` means a tracked provider-submission attempt completed successfully.
+`lastSendAt` is recorded when the most recent submission attempt starts, so it
+may be non-null with `send_failed`; neither field proves provider delivery.
+Waiting and `send_failed` remain observable startup states without independently
+changing normal service health. The existing fleet health path retains this
+object as health data; it is not a second monitor and this protocol does not
+inspect `bot.db`.
+
+The following are deliberately tracked but not started by this protocol change:
+
+- Provider-bridge base extraction needs its own bridge contract and regression
+  matrix.
+- The health boolean-helper consolidation belongs in a focused health-poller
+  change.
+- The currently unused `STARTUP_NOTIFY_FILENAME` export cleanup remains a
+  recorded follow-up; this protocol lane does not fold a public-surface removal
+  into its journal-mechanics scope.
+
+For the single approval-gated operational evidence procedure, see
+[`release-deployment.md`](runbooks/release-deployment.md#startup-notification-acceptance).
 
 ### Access Modes
 
