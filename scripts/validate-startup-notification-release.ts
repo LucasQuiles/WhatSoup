@@ -1,6 +1,8 @@
 import { closeSync, constants, openSync, readSync } from 'node:fs';
 
+import { isRecord } from '../src/lib/type-guards.ts';
 import { isFullyConnected } from '../src/transport/runtime-connection.ts';
+import { parseClosedOptions } from './lib/cli-args.ts';
 
 const MAX_JOURNAL_BOOTS = 100;
 const MAX_JSON_INPUT_BYTES = 64 * 1_024;
@@ -50,10 +52,6 @@ export interface StartupNotificationReleaseValidationResult {
   exitCode: 0 | 1 | 2;
   outcome: 'accepted' | 'rejected' | 'infrastructure_error';
   issues: string[];
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
 function isFiniteTimestamp(value: unknown): value is number {
@@ -186,51 +184,6 @@ export function validateStartupNotificationRelease(
     : reject(issues);
 }
 
-type CliOptions = {
-  healthPath: string | null;
-  journalPath: string | null;
-  probeOutcome: StartupNotificationProbe['outcome'] | null;
-};
-
-type ParsedCliOptions = {
-  healthPath: string;
-  journalPath: string;
-  probeOutcome: StartupNotificationProbe['outcome'];
-};
-
-function parseArgs(args: readonly string[]): ParsedCliOptions | null {
-  const options: CliOptions = { healthPath: null, journalPath: null, probeOutcome: null };
-  for (let index = 0; index < args.length; index += 1) {
-    const arg = args[index];
-    const value = args[index + 1];
-    if ((arg === '--health-file' || arg === '--journal-file' || arg === '--probe-outcome') && !value) return null;
-    if (arg === '--health-file') {
-      if (options.healthPath !== null) return null;
-      options.healthPath = value;
-      index += 1;
-    } else if (arg === '--journal-file') {
-      if (options.journalPath !== null) return null;
-      options.journalPath = value;
-      index += 1;
-    } else if (arg === '--probe-outcome') {
-      if (
-        options.probeOutcome !== null
-        || (value !== 'passed' && value !== 'failed' && value !== 'unavailable')
-      ) return null;
-      options.probeOutcome = value;
-      index += 1;
-    } else {
-      return null;
-    }
-  }
-  if (!options.healthPath || !options.journalPath || options.probeOutcome === null) return null;
-  return {
-    healthPath: options.healthPath,
-    journalPath: options.journalPath,
-    probeOutcome: options.probeOutcome,
-  };
-}
-
 function readJson(path: string): unknown | undefined {
   let descriptor: number | null = null;
   try {
@@ -250,16 +203,27 @@ export function runStartupNotificationReleaseCli(
   args: readonly string[],
   readJsonFile: (path: string) => unknown | undefined = readJson,
 ): StartupNotificationReleaseValidationResult {
-  const options = parseArgs(args);
-  if (options === null) {
+  const parsed = parseClosedOptions(args, {
+    booleanOptions: [],
+    valueOptions: ['--health-file', '--journal-file', '--probe-outcome'],
+  });
+  const healthPath = parsed.values.get('--health-file');
+  const journalPath = parsed.values.get('--journal-file');
+  const probeOutcome = parsed.values.get('--probe-outcome');
+  if (
+    parsed.error !== null
+    || !healthPath
+    || !journalPath
+    || (probeOutcome !== 'passed' && probeOutcome !== 'failed' && probeOutcome !== 'unavailable')
+  ) {
     return { exitCode: 2, outcome: 'infrastructure_error', issues: ['invalid_arguments'] };
   }
-  const health = readJsonFile(options.healthPath);
-  const journal = readJsonFile(options.journalPath);
+  const health = readJsonFile(healthPath);
+  const journal = readJsonFile(journalPath);
   return validateStartupNotificationRelease({
     health,
     journal,
-    probe: { outcome: options.probeOutcome },
+    probe: { outcome: probeOutcome },
   });
 }
 

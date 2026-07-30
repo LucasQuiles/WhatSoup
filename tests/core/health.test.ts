@@ -3904,6 +3904,11 @@ describe('GET /typing — Authorization header check', () => {
         sendMedia: vi.fn().mockResolvedValue({ waMessageId: null }),
         connect: vi.fn().mockResolvedValue(undefined),
         disconnect: vi.fn().mockResolvedValue(undefined),
+        getConnectionState: vi.fn(() => emptyConnectionStateSnapshot({
+          connected: true,
+          stateChangedAt: '2026-07-30T00:00:00.000Z',
+          lastDisconnectReason: null,
+        })),
         presenceCache,
       } as unknown as ConnectionManager,
     });

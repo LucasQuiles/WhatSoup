@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import {
   runStartupNotificationReleaseCli,
@@ -136,6 +136,23 @@ describe('startup notification release validator', () => {
       'health.json': completeHealth(),
       'journal.json': validJournal(),
     })).toMatchObject({ exitCode: 2, outcome: 'infrastructure_error' });
+  });
+
+  it('fails closed before reading when a flag would otherwise be consumed as a file path', () => {
+    const readJsonFile = vi.fn((path: string) => ({ path }));
+
+    expect(runStartupNotificationReleaseCli([
+      '--health-file',
+      '--journal-file',
+      'journal.json',
+      '--probe-outcome',
+      'passed',
+    ], readJsonFile)).toEqual({
+      exitCode: 2,
+      outcome: 'infrastructure_error',
+      issues: ['invalid_arguments'],
+    });
+    expect(readJsonFile).not.toHaveBeenCalled();
   });
 
   it.each([
