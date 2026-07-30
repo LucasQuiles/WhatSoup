@@ -170,11 +170,43 @@ export interface OutboundOpRow {
   replay_policy: string;
   created_at: string;
   submitted_at: string | null;
+  ambiguity_at: string | null;
   source_inbound_seq: number | null;
   retry_count: number;
   error: string | null;
   failure_evidence: DecodedOutboundFailureEvidence;
   is_terminal: number;
+}
+
+/**
+ * Derive the age of the active ambiguity episode without treating missing or
+ * malformed or future chronology as a fresh delivery. Existing rows without
+ * the new clock fall back conservatively to their recorded submission, then
+ * creation.
+ */
+function maybeSentDwellAtSql(prefix = ''): string {
+  const column = (name: string) => `${prefix}${name}`;
+  // The fallback must be older than the /health durability-debt window as
+  // well as the live 30-second reconciliation grace. Re-evaluating this
+  // bounded sentinel keeps malformed or future chronology visible without
+  // inventing a durable event time.
+  const stale = "datetime('now', '-31 minutes')";
+  return `CASE
+    WHEN ${column('ambiguity_at')} IS NOT NULL
+      AND datetime(${column('ambiguity_at')}) IS NOT NULL
+      AND datetime(${column('ambiguity_at')}) <= datetime('now')
+      THEN datetime(${column('ambiguity_at')})
+    WHEN ${column('ambiguity_at')} IS NOT NULL THEN ${stale}
+    WHEN ${column('submitted_at')} IS NOT NULL
+      AND datetime(${column('submitted_at')}) IS NOT NULL
+      AND datetime(${column('submitted_at')}) <= datetime('now')
+      THEN datetime(${column('submitted_at')})
+    WHEN ${column('submitted_at')} IS NOT NULL THEN ${stale}
+    WHEN datetime(${column('created_at')}) IS NOT NULL
+      AND datetime(${column('created_at')}) <= datetime('now')
+      THEN datetime(${column('created_at')})
+    ELSE ${stale}
+  END`;
 }
 
 export interface OutboundDeliveryIdentity {
@@ -477,7 +509,12 @@ export class DurabilityEngine {
       ),
       markMaybeSent: prepare(
         `UPDATE outbound_ops
-         SET status = 'maybe_sent', error = ?, wa_message_id = COALESCE(?, wa_message_id),
+         SET status = 'maybe_sent',
+             ambiguity_at = CASE
+               WHEN status = 'maybe_sent' THEN ambiguity_at
+               ELSE datetime('now')
+             END,
+             error = ?, wa_message_id = COALESCE(?, wa_message_id),
              retry_count = MAX(retry_count, ?)
          WHERE id = ?
            AND status IN ('pending', 'sending', 'submitted', 'maybe_sent')`,
@@ -647,16 +684,16 @@ export class DurabilityEngine {
       ),
       getOutboundByStatus: prepare(
         `SELECT id, status, chat_jid, op_type, payload, wa_message_id, replay_policy,
-                created_at, submitted_at, source_inbound_seq, retry_count, error, is_terminal
+                created_at, submitted_at, ambiguity_at, source_inbound_seq, retry_count, error, is_terminal
          FROM outbound_ops WHERE status = ? ORDER BY id ASC`,
       ),
       getLiveReconcileMaybeSent: prepare(
         `SELECT o.id, o.status, o.chat_jid, o.op_type, o.payload, o.wa_message_id,
-                o.replay_policy, o.created_at, o.submitted_at, o.source_inbound_seq,
+                o.replay_policy, o.created_at, o.submitted_at, o.ambiguity_at, o.source_inbound_seq,
                 o.retry_count, o.error, o.is_terminal
          FROM outbound_ops o
          WHERE o.status = 'maybe_sent'
-           AND COALESCE(o.submitted_at, o.created_at) < datetime('now', '-30 seconds')
+           AND ${maybeSentDwellAtSql('o.')} < datetime('now', '-30 seconds')
            AND NOT EXISTS (
              SELECT 1
              FROM turn_terminal_records t
@@ -811,7 +848,7 @@ export class DurabilityEngine {
       ),
       getStaleSubmitted: prepare(
         `SELECT id, status, chat_jid, op_type, payload, wa_message_id, replay_policy,
-                created_at, submitted_at, source_inbound_seq, retry_count, error, is_terminal
+                created_at, submitted_at, ambiguity_at, source_inbound_seq, retry_count, error, is_terminal
          FROM outbound_ops
          WHERE status = 'submitted' AND submitted_at < datetime('now', '-30 seconds')`,
       ),
@@ -834,14 +871,11 @@ export class DurabilityEngine {
       getMaybeSentOutboundCount: prepare(
         `SELECT COUNT(*) as count FROM outbound_ops WHERE status = 'maybe_sent'`,
       ),
-      // Ambiguity-transition time, not queue time: a send that fails BEFORE
-      // markSubmitted() (null submitted_at — the BRICK-LAB job-1474 shape)
-      // must still age and page, not read as fresh. COALESCE mirrors the
-      // reconciliation query's fix (getLiveReconcileMaybeSent, #2079); this
-      // sibling health-staleness query was not covered by that fix and
-      // stayed null-blind exactly for the pre-submission failure case.
+      // A current ambiguity episode owns its own dwell clock. Legacy rows use
+      // the conservative receipt/queue fallback, while malformed chronology is
+      // deliberately stale so it cannot make health read fresh.
       getOldestMaybeSentSubmittedAt: prepare(
-        `SELECT MIN(COALESCE(submitted_at, created_at)) as at FROM outbound_ops WHERE status = 'maybe_sent'`,
+        `SELECT MIN(${maybeSentDwellAtSql()}) as at FROM outbound_ops WHERE status = 'maybe_sent'`,
       ),
       getRecentOutboundFailureEvidence: prepare(
         `SELECT status, error
@@ -2188,6 +2222,9 @@ export class DurabilityEngine {
     }
 
     // Step 2: Reconcile `maybe_sent` ops (includes those just promoted in Step 1).
+    // This one-shot post-connect history/corroboration pass intentionally stays
+    // immediate; the current-episode dwell gate applies to recurring live work
+    // created after this startup recovery pass.
     this.reconcileMaybeSentOutbound(
       this.getOutboundByStatus('maybe_sent'),
       recoveryRun,
