@@ -204,6 +204,44 @@ describe('provider-parity-report CLI', () => {
     expect(stderr).toHaveBeenCalledWith(expect.stringContaining('probes[0].state must be one of'));
   });
 
+  it.each([
+    'ok',
+    'failed',
+    'skipped',
+    'headless_auth_inconclusive',
+    'inconclusive',
+  ])('accepts %s as a provider-probe input state', (state) => {
+    const root = makeRoot();
+    const payload = happyPayload() as Record<string, unknown>;
+    payload.probes = [{ host: 'mini3', instance: 'agent', provider: 'opencode-cli', state }];
+    const input = writeFixture(root, payload);
+    const jsonOut = path.join(root, 'report.json');
+
+    const report = run(['--input', input, '--json-out', jsonOut], root);
+
+    expect(report).not.toBeNull();
+    expect(process.exitCode).not.toBe(2);
+    expect(() => readFileSync(jsonOut, 'utf8')).not.toThrow();
+  });
+
+  it.each(['not_required', 'unknown'])('sets exit 2 and writes no outputs for output-only provider-probe state %s', (state) => {
+    const root = makeRoot();
+    const payload = happyPayload() as Record<string, unknown>;
+    payload.probes = [{ host: 'mini3', instance: 'agent', provider: 'opencode-cli', state }];
+    const input = writeFixture(root, payload);
+    const jsonOut = path.join(root, 'report.json');
+    const mdOut = path.join(root, 'report.md');
+    const stderr = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+
+    const report = run(['--input', input, '--json-out', jsonOut, '--md-out', mdOut], root);
+
+    expect(report).toBeNull();
+    expect(process.exitCode).toBe(2);
+    expect(() => readFileSync(jsonOut, 'utf8')).toThrow();
+    expect(() => readFileSync(mdOut, 'utf8')).toThrow();
+    expect(stderr).toHaveBeenCalledWith(expect.stringContaining('probes[0].state must be one of'));
+  });
+
   it('sets exit 2 before writing when report output contains secret-like material', () => {
     const root = makeRoot();
     const payload = happyPayload() as Record<string, unknown>;
