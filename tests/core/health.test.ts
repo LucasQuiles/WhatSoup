@@ -371,6 +371,101 @@ describe('GET /health', () => {
     }
   });
 
+  it('projects redacted readiness and context failures only to authenticated diagnostics', async () => {
+    const readiness = {
+      state: 'unknown' as const,
+      observedAt: '2026-07-29T20:00:00.000Z',
+      failureCode: 'unknown' as const,
+      retryable: true,
+      evidenceCoverage: 'provider_error' as const,
+      index: 'SYNTHETIC_PRIVATE_MEMORY_TARGET',
+      rawError: 'SYNTHETIC_PRIVATE_PROVIDER_ERROR',
+    };
+    let readinessReads = 0;
+    const memoryContext = {
+      status: 'partial' as const,
+      scopes: [
+        {
+          scope: 'chat' as const,
+          status: 'failed' as const,
+          failureCode: 'network_error' as const,
+          retryable: true,
+        },
+        {
+          scope: 'sender' as const,
+          status: 'ok' as const,
+          failureCode: null,
+          retryable: false,
+        },
+      ],
+    };
+    const { server: server2, port: port2 } = await buildTestServer(makeDeps(db, {
+      getMemoryReadinessHealth: () => {
+        readinessReads += 1;
+        return readiness;
+      },
+      getMemoryContextHealth: () => memoryContext,
+    }));
+    try {
+      const diagnostic = await healthReq(port2);
+      const json = JSON.parse(diagnostic.body);
+      expect(diagnostic.status).toBe(200);
+      expect(json.status).toBe('degraded');
+      expect(json.degradation_causes).toContain('memory_readiness_degraded');
+      expect(json.degradation_causes).toContain('memory_context_degraded');
+      expect(json.memory.readiness).toEqual({
+        state: 'unknown',
+        observed_at: '2026-07-29T20:00:00.000Z',
+        failure_code: 'unknown',
+        retryable: true,
+        evidence_coverage: 'provider_error',
+      });
+      expect(json.memory.context).toEqual({
+        status: 'partial',
+        scopes: [
+          { scope: 'chat', status: 'failed', failure_code: 'network_error', retryable: true },
+          { scope: 'sender', status: 'ok', failure_code: null, retryable: false },
+        ],
+      });
+      expect(diagnostic.body).not.toContain('SYNTHETIC_PRIVATE_MEMORY_TARGET');
+      expect(diagnostic.body).not.toContain('SYNTHETIC_PRIVATE_PROVIDER_ERROR');
+
+      const publicResponse = await httpReq(port2, '/health', 'GET');
+      expect(JSON.parse(publicResponse.body)).not.toHaveProperty('memory');
+      expect(readinessReads).toBe(1);
+    } finally {
+      await new Promise<void>((resolve) => server2.close(() => resolve()));
+    }
+  });
+
+  it('does not degrade health for an explicitly disabled memory readiness probe', async () => {
+    const { server: server2, port: port2 } = await buildTestServer(makeDeps(db, {
+      getMemoryReadinessHealth: () => ({
+        state: 'disabled',
+        observedAt: '2026-07-29T20:00:00.000Z',
+        failureCode: 'none',
+        retryable: false,
+        evidenceCoverage: 'local_guard',
+      }),
+    }));
+    try {
+      const diagnostic = await healthReq(port2);
+      const json = JSON.parse(diagnostic.body);
+      expect(diagnostic.status).toBe(200);
+      expect(json.status).toBe('healthy');
+      expect(json.degradation_causes).not.toContain('memory_readiness_degraded');
+      expect(json.memory.readiness).toEqual({
+        state: 'disabled',
+        observed_at: '2026-07-29T20:00:00.000Z',
+        failure_code: 'none',
+        retryable: false,
+        evidence_coverage: 'local_guard',
+      });
+    } finally {
+      await new Promise<void>((resolve) => server2.close(() => resolve()));
+    }
+  });
+
   it('degrades and surfaces durability debt when an outbound delivery is stuck in maybe_sent past the stale window (#1865)', async () => {
     const db2 = makeDb();
     const durability = new DurabilityEngine(db2);
