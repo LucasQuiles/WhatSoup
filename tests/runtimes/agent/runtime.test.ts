@@ -1,4 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import type { Database } from '../../../src/core/database.ts';
 import type { IncomingMessage, Messenger } from '../../../src/core/types.ts';
 import type { AgentEvent } from '../../../src/runtimes/agent/stream-parser.ts';
@@ -258,6 +261,7 @@ vi.mock('../../../src/runtimes/agent/outbound-queue.ts', () => ({
 // mockConfig is mutable so individual tests can override voiceReply for voice reply tests.
 const { mockConfig, mockSynthesizeSpeech, mockWriteTempFile } = vi.hoisted(() => {
   const mockConfig = {
+    transport: 'baileys' as const,
     adminPhones: new Set<string>(['15550100001']),
     controlPeers: new Map<string, string>(),
     toolUpdateMode: 'full' as 'full' | 'minimal' | 'friendly',
@@ -499,7 +503,6 @@ type ImageCoalescerView = {
 import { Database as RealDatabase } from '../../../src/core/database.ts';
 import { DurabilityEngine, type SessionCheckpointRow } from '../../../src/core/durability.ts';
 import { getRecentMessages } from '../../../src/core/messages.ts';
-import { tmpdir } from 'node:os';
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -8688,12 +8691,39 @@ describe('AgentRuntime', () => {
     await runtime.start();
 
     expect(mockSession.spawnSession).toHaveBeenCalledWith('sess-123', 1);
-    // start() defers the message via pendingStartupMessage (main.ts pops it after WA connects)
+    // start() defers a typed event until main reaches its startup-controller seam.
     expect(sentMessages).toHaveLength(0);
-    const pending = runtime.popStartupMessage();
+    const pending = runtime.popStartupNotificationEvent();
     expect(pending).not.toBeNull();
+    expect(pending!.kind).toBe('resume');
     expect(pending!.chatJid).toBe('user@s.whatsapp.net');
     expect(pending!.text).toContain('Resuming');
+  });
+
+  it('emits a typed restart-loop guard alert for the startup controller', () => {
+    const stateRoot = mkdtempSync(join(tmpdir(), 'ws-runtime-startup-event-'));
+    const priorStateRoot = mockConfig.stateRoot;
+    const priorGuard = mockConfig.restartLoopGuard;
+    try {
+      mockConfig.stateRoot = stateRoot;
+      mockConfig.restartLoopGuard = { enabled: true, maxRestarts: 1, windowMs: 60_000 };
+      const runtime = new AgentRuntime(makeDb(), makeMessenger().messenger);
+      const runtimeState = runtime as unknown as {
+        restartLoopInterruptedBoot: boolean;
+        shouldSuppressProactiveResume(resumableCount: number): boolean;
+      };
+      runtimeState.restartLoopInterruptedBoot = true;
+
+      expect(runtimeState.shouldSuppressProactiveResume(1)).toBe(true);
+      expect(runtime.popStartupNotificationEvent()).toMatchObject({
+        kind: 'restart_loop_guard_alert',
+        chatJid: '15550100001@s.whatsapp.net',
+      });
+    } finally {
+      mockConfig.stateRoot = priorStateRoot;
+      mockConfig.restartLoopGuard = priorGuard;
+      rmSync(stateRoot, { recursive: true, force: true });
+    }
   });
 
   it('shared resume targets the latest completed turn identity instead of the first session chat', async () => {
@@ -8729,7 +8759,7 @@ describe('AgentRuntime', () => {
     await runtime.start();
 
     expect(mockSession.spawnSession).toHaveBeenCalledWith('shared-session-1', 1);
-    expect(runtime.popStartupMessage()?.chatJid).toBe('15550003002:8@s.whatsapp.net');
+    expect(runtime.popStartupNotificationEvent()?.chatJid).toBe('15550003002:8@s.whatsapp.net');
   });
 
   it('resume failure — sends expiry message and spawns fresh session', async () => {
@@ -8761,7 +8791,7 @@ describe('AgentRuntime', () => {
     await runtime.start();
 
     // Pop the pending startup message to simulate WA connecting
-    runtime.popStartupMessage();
+    runtime.popStartupNotificationEvent();
 
     // Simulate SessionManager calling onResumeFailed (WA is now connected)
     expect(capturedOnResumeFailedRef.current).not.toBeNull();
@@ -8815,8 +8845,9 @@ describe('AgentRuntime', () => {
     expect(sentMessages).toHaveLength(0);
 
     // The pending message should now be the expiry message (not the resume message)
-    const pending = runtime.popStartupMessage();
+    const pending = runtime.popStartupNotificationEvent();
     expect(pending).not.toBeNull();
+    expect(pending!.kind).toBe('expired_session_notice');
     expect(pending!.text).toContain('expired');
     expect(pending!.text).not.toContain('Resuming');
   });
@@ -8907,7 +8938,7 @@ describe('AgentRuntime', () => {
       upsertSessionCheckpoint: vi.fn(),
     };
     await runtime.start();
-    runtime.popStartupMessage();
+    runtime.popStartupNotificationEvent();
 
     capturedOnResumeFailedRef.current!();
 
@@ -11678,7 +11709,7 @@ describe('AgentRuntime', () => {
       );
       expect(mockDurability.upsertSessionCheckpoint).not.toHaveBeenCalled();
       expect(mockSession.spawnSession).not.toHaveBeenCalled();
-      expect(runtime.popStartupMessage()).toBeNull();
+      expect(runtime.popStartupNotificationEvent()).toBeNull();
       expect(runtime.getHealthSnapshot().details['proactiveResumeIdentityRejects']).toBe(1);
       expect(mockRuntimeLogger.warn).toHaveBeenCalledWith(
         { conversationKey: null, reason: 'legacy_or_ambiguous_identity' },
@@ -11779,7 +11810,7 @@ describe('AgentRuntime', () => {
       // Session IS spawned (shared mode serves all chats)
       expect(mockSession.spawnSession).toHaveBeenCalledWith('sess-shared-group', 2);
       // But NO startup message (group chat)
-      expect(runtime.popStartupMessage()).toBeNull();
+      expect(runtime.popStartupNotificationEvent()).toBeNull();
       // Session remains alive
       expect(mockSession.shutdown).not.toHaveBeenCalled();
     });
@@ -11821,7 +11852,7 @@ describe('AgentRuntime', () => {
       expect(mockSession.spawnSession).not.toHaveBeenCalled();
       expect(mockSession.shutdown).not.toHaveBeenCalled();
       // No startup message
-      expect(runtime.popStartupMessage()).toBeNull();
+      expect(runtime.popStartupNotificationEvent()).toBeNull();
     });
 
     it('fresh DM resumes normally — single mode', async () => {
@@ -11860,8 +11891,9 @@ describe('AgentRuntime', () => {
       // Session spawned normally
       expect(mockSession.spawnSession).toHaveBeenCalledWith('sess-dm-fresh', 4);
       // Startup message IS set (DM, not group)
-      const pending = runtime.popStartupMessage();
+      const pending = runtime.popStartupNotificationEvent();
       expect(pending).not.toBeNull();
+      expect(pending!.kind).toBe('resume');
       expect(pending!.chatJid).toBe('user@s.whatsapp.net');
       expect(pending!.text).toContain('Resuming');
       // Session NOT shutdown
@@ -11944,7 +11976,7 @@ describe('AgentRuntime', () => {
       // spawnSession was called but failed
       expect(mockSession.spawnSession).toHaveBeenCalledWith('sess-spawn-fail-single', 6);
       // No startup message — session cleaned up in catch
-      expect(runtime.popStartupMessage()).toBeNull();
+      expect(runtime.popStartupNotificationEvent()).toBeNull();
       // Runtime did not throw — it continues gracefully
     });
 
@@ -11987,7 +12019,7 @@ describe('AgentRuntime', () => {
       // spawnSession was called but failed
       expect(mockSession.spawnSession).toHaveBeenCalledWith('sess-spawn-fail-shared', 7);
       // No startup message — session cleaned up in catch
-      expect(runtime.popStartupMessage()).toBeNull();
+      expect(runtime.popStartupNotificationEvent()).toBeNull();
       // Runtime did not throw — it continues gracefully
     });
   });

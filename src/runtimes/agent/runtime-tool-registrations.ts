@@ -55,6 +55,8 @@ export interface EmitHealResultToolDeps {
   controlPeers: Map<string, string>;
   /** Configured admin phones; the first is DM'd on escalation. */
   adminPhones: Set<string>;
+  /** Resolve a canonical configured-admin identity to its transport JID. */
+  resolveConfiguredAdminJid(identity: string): string;
 }
 
 /**
@@ -118,7 +120,7 @@ export function buildEmitHealResultTool(deps: EmitHealResultToolDeps): ToolDecla
         // Also DM admin
         const adminPhone = [...deps.adminPhones][0];
         if (adminPhone) {
-          const adminJid = toPersonalJid(adminPhone);
+          const adminJid = deps.resolveConfiguredAdminJid(adminPhone);
           await sendTracked(deps.messenger, adminJid,
             `[HEAL_ESCALATE] Repair for ${parsed.errorClass} escalated.\n\n${parsed.diagnosis}`,
             deps.getDurability() ?? undefined, { replayPolicy: 'safe' });

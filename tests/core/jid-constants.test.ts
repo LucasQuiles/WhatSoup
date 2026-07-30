@@ -41,6 +41,7 @@ import {
   toSignalJid,
   fromSignalJid,
   parseWhatsAppDeliveryNamespace,
+  resolveConfiguredAdminJid,
 } from '../../src/core/jid-constants.ts';
 
 describe('domain constants', () => {
@@ -298,5 +299,17 @@ describe('Signal/iMessage JID helpers', () => {
     expect(isImessageJid('a@imessage')).toBe(true);
     expect(isImessageJid('a@signal')).toBe(false);
     expect(isImessageJid(null)).toBe(false);
+  });
+});
+
+describe('resolveConfiguredAdminJid', () => {
+  it.each([
+    ['baileys', '15551230000', '15551230000@s.whatsapp.net'],
+    ['signal', 'a1b2c3d4-1234-1234-1234-a1b2c3d4e5f6', 'a1b2c3d4-1234-1234-1234-a1b2c3d4e5f6@signal'],
+    ['twilio', '15551230000', '+15551230000@sms'],
+    ['imessage', 'owner@example.test', 'owner@example.test@imessage'],
+    ['imessage', '+15551230000', '+15551230000@imessage'],
+  ] as const)('routes configured %s admin identity %s to %s', (transport, identity, expected) => {
+    expect(resolveConfiguredAdminJid(transport, identity)).toBe(expected);
   });
 });

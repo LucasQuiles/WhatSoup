@@ -41,7 +41,7 @@
         "writefail_invalid_envelope"
       ],
       "path": "deploy/scripts/bot-errors-dispatcher.py",
-      "sha256": "9e2dea68218d3501d210af187adc5f8507c649f146060e6880e0360973ec5738"
+      "sha256": "d8bb00598834fdc2493f18006fac5bf59df85b4192fa4f8df3fa0d719f9cacc5"
     },
     {
       "mustContain": [
@@ -138,7 +138,7 @@
         "BOT_ERRORS_HEALTH_BODY_MAX_FUTURE_SKEW_SECONDS"
       ],
       "path": "deploy/scripts/bot-errors-health-check.py",
-      "sha256": "c2eacfc588568adaacaefbd8f80488c64564370c837870310597185f0322f152"
+      "sha256": "171820a29f3a6a4e880bcb0b5e2adcba9c16354021bced9c7c636c5b7d20548c"
     },
     {
       "mustContain": [
@@ -209,7 +209,7 @@
         "DEFAULT_HYSTERESIS_CYCLES"
       ],
       "path": "deploy/scripts/bot-errors-sentinel.py",
-      "sha256": "4aa5a264732441b6079a72bfa06df626b492dbd08089345d4bd8f3c14c6454ac"
+      "sha256": "caa218d899c4152a0a85aa9d957e0838228190fe48a0c3bc929b9e5e689c8aa7"
     },
     {
       "mustContain": [
@@ -384,7 +384,7 @@
         "autoCompactActiveBackoffScopes"
       ],
       "path": "src/lib/fault-taxonomy-registry.json",
-      "sha256": "23c712318b449d80d8809a8811f064bad3d936140743c41d2657907341d84f13"
+      "sha256": "82dcc8c5878c38d16fcf5b9998d4afefb8bf57e2306a8c1c3d7e018574ac6727"
     }
   ],
   "generatedAt": "2026-07-30T04:09:19Z",

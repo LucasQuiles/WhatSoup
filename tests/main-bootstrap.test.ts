@@ -31,6 +31,7 @@ class FakeConnection extends EventEmitter {
   shutdown = vi.fn();
   sendRaw = vi.fn(async () => ({ waMessageId: 'raw-1' }));
   sendPollMessage = vi.fn(async () => ({ waMessageId: 'poll-1', hasSecret: false }));
+  getConnectionState = vi.fn(() => ({ connected: true, state: 'connected' }));
   getSocket = vi.fn(() => null);
   setIdentityStore = vi.fn();
 }
@@ -110,7 +111,7 @@ async function importMainWithMocks(options: {
   const connection = new FakeConnection();
   const chatRuntime = runtimeStub();
   const passiveRuntime = runtimeStub();
-  const agentInstances: Array<ReturnType<typeof runtimeStub> & { popStartupMessage: ReturnType<typeof vi.fn> }> = [];
+  const agentInstances: Array<ReturnType<typeof runtimeStub>> = [];
   const healthServer = { close: vi.fn() };
   const memoryScheduler = { start: vi.fn(), stop: vi.fn(async () => {}) };
   const mediaRetentionTimer = { start: vi.fn(), stop: vi.fn() };
@@ -149,6 +150,7 @@ async function importMainWithMocks(options: {
   };
   const config = {
     botName: 'q',
+    transport: 'baileys',
     pineconeIndex: 'mw-mind',
     pineconeSearchMode: 'hybrid',
     pineconeRerank: true,
@@ -217,10 +219,7 @@ async function importMainWithMocks(options: {
     return passiveRuntime;
   });
   const AgentRuntime = vi.fn(function (this: any) {
-    const runtime = runtimeStub() as ReturnType<typeof runtimeStub> & {
-      popStartupMessage: ReturnType<typeof vi.fn>;
-    };
-    runtime.popStartupMessage = vi.fn(() => null);
+    const runtime = runtimeStub();
     Object.assign(this, runtime);
     agentInstances.push(this);
   });
@@ -302,6 +301,10 @@ async function importMainWithMocks(options: {
     toConversationKey: vi.fn((jid: string) => `conversation:${jid}`),
     toPersonalJid: vi.fn((phone: string) => `${phone}@s.whatsapp.net`),
     toLidJid: vi.fn((phone: string) => `${phone}@lid`),
+    resolveConfiguredAdminJid: vi.fn((transport: string, identity: string) => {
+      if (transport !== 'baileys') throw new Error(`unexpected transport: ${transport}`);
+      return `${identity}@s.whatsapp.net`;
+    }),
     selectReplayableDms: vi.fn((stored: unknown[]) => ({ toReplay: stored, groupSkipped: 1 })),
     rememberReplayedId: vi.fn(),
     sendTracked: vi.fn(async () => ({ waMessageId: 'sent-1' })),
@@ -424,6 +427,7 @@ async function importMainWithMocks(options: {
   vi.doMock('../src/core/ingest.ts', () => ({ createIngestHandler: mocks.createIngestHandler }));
   vi.doMock('../src/core/conversation-key.ts', () => ({ toConversationKey: mocks.toConversationKey }));
   vi.doMock('../src/core/jid-constants.ts', () => ({
+    resolveConfiguredAdminJid: mocks.resolveConfiguredAdminJid,
     toPersonalJid: mocks.toPersonalJid,
     toLidJid: mocks.toLidJid,
   }));
@@ -880,7 +884,7 @@ describe('main bootstrap', () => {
     expect(h.sendTracked).not.toHaveBeenCalled();
   });
 
-  it('selects agent runtime, resolves cwd and plugin dirs, and sends the restart notification', async () => {
+  it('reaches the controller strict-readiness seam for a structural agent-runtime stub', async () => {
     const h = await importMainWithMocks({
       instanceConfig: {
         name: 'q',
@@ -962,6 +966,7 @@ describe('main bootstrap', () => {
     );
 
     await vi.advanceTimersByTimeAsync(3_000);
+    expect(h.connection.getConnectionState).toHaveBeenCalledOnce();
     expect(h.sendTracked).toHaveBeenCalledWith(
       h.connection,
       '15551230000@s.whatsapp.net',

@@ -162,11 +162,11 @@ function mockServiceManager() {
     start: vi.fn().mockResolvedValue(undefined),
     stop: vi.fn().mockResolvedValue(undefined),
     restart: vi.fn().mockResolvedValue(undefined),
-    startFire: vi.fn(),
+    startFire: vi.fn((_name: string, onComplete?: (err: Error | null) => void) => onComplete?.(null)),
   };
 }
 
-function fakeChildProcess() {
+function fakeChildProcess({ emitCloseOnExit = true }: { emitCloseOnExit?: boolean } = {}) {
   const child = new EventEmitter() as EventEmitter & {
     stdout: PassThrough;
     stderr: PassThrough;
@@ -175,6 +175,9 @@ function fakeChildProcess() {
   child.stdout = new PassThrough();
   child.stderr = new PassThrough();
   child.kill = vi.fn();
+  if (emitCloseOnExit) {
+    child.once('exit', (code, signal) => child.emit('close', code, signal));
+  }
   return child;
 }
 
@@ -3640,17 +3643,273 @@ describe('ops.ts uncovered-branch coverage (wave 2)', () => {
 
       // introSent flipped to false on disk.
       expect(JSON.parse(fs.readFileSync(cfgPath, 'utf-8')).introSent).toBe(false);
-      // Service was restarted (startFire) and discovery rescanned.
+      // Startup waits for the pairing helper's successful exit.
+      expect(svc.startFire).not.toHaveBeenCalled();
+      expect(deps.discovery.scan).not.toHaveBeenCalled();
+      child.emit('exit', 0);
       expect(svc.startFire).toHaveBeenCalledWith('test-line', expect.any(Function));
       expect(deps.discovery.scan).toHaveBeenCalled();
 
-      child.emit('exit', 0);
       expect(res._ended).toBe(true);
     } finally {
       if (origConfig === undefined) delete process.env.XDG_CONFIG_HOME;
       else process.env.XDG_CONFIG_HOME = origConfig;
       fs.rmSync(cfgTmp, { recursive: true, force: true });
     }
+  });
+
+  it('waits for the pairing helper to exit successfully before using the authenticated-start hook', async () => {
+    const inst = fakeInstance({ name: 'test-line' });
+    const child = fakeChildProcess();
+    vi.mocked(spawn).mockReturnValue(child as any);
+    const svc = mockServiceManager();
+    const startAfterAuthFire = vi.fn((_name: string, onComplete?: (err: Error | null) => void) => onComplete?.(null));
+    const stopForAuth = vi.fn().mockResolvedValue(undefined);
+    (svc as typeof svc & { startAfterAuthFire: typeof startAfterAuthFire }).startAfterAuthFire = startAfterAuthFire;
+    (svc as typeof svc & { stopForAuth: typeof stopForAuth }).stopForAuth = stopForAuth;
+    const deps = makeDeps({
+      discovery: { getInstance: vi.fn(() => inst), scan: vi.fn() } as any,
+      serviceManager: svc,
+    });
+    const req = mockReq('', '/api/lines/test-line/auth');
+    const res = mockSseRes();
+
+    await handleAuth(req, res, deps, { name: 'test-line' });
+    expect(stopForAuth).toHaveBeenCalledWith('test-line');
+    expect(svc.stop).not.toHaveBeenCalled();
+    child.stdout.emit('data', Buffer.from(JSON.stringify({ event: 'connected', data: {} }) + '\n'));
+    child.stdout.emit('data', Buffer.from(JSON.stringify({ event: 'connected', data: {} }) + '\n'));
+
+    expect(startAfterAuthFire).not.toHaveBeenCalled();
+    expect(svc.startFire).not.toHaveBeenCalled();
+    expect(deps.discovery.scan).not.toHaveBeenCalled();
+    expect(res._chunks.join('')).not.toContain('event: connected');
+
+    child.emit('exit', 0);
+
+    expect(startAfterAuthFire).toHaveBeenCalledWith('test-line', expect.any(Function));
+    expect(svc.startFire).not.toHaveBeenCalled();
+    expect(deps.discovery.scan).toHaveBeenCalledTimes(1);
+    expect(res._chunks.join('')).toContain('event: connected');
+  });
+
+  it('waits for stdout to close before deciding whether a successful helper persisted credentials', async () => {
+    const inst = fakeInstance({ name: 'test-line' });
+    const child = fakeChildProcess({ emitCloseOnExit: false });
+    vi.mocked(spawn).mockReturnValue(child as any);
+    const svc = mockServiceManager();
+    const startAfterAuthFire = vi.fn((_name: string, onComplete?: (err: Error | null) => void) => {
+      onComplete?.(null);
+    });
+    (svc as typeof svc & { startAfterAuthFire: typeof startAfterAuthFire }).startAfterAuthFire = startAfterAuthFire;
+    const deps = makeDeps({
+      discovery: { getInstance: vi.fn(() => inst), scan: vi.fn() } as any,
+      serviceManager: svc,
+    });
+    const req = mockReq('', '/api/lines/test-line/auth');
+    const res = mockSseRes();
+
+    await handleAuth(req, res, deps, { name: 'test-line' });
+
+    // Node can emit `exit` before the final stdout data event. The service
+    // must wait for `close`, which follows stdio closure, before deciding.
+    child.emit('exit', 0);
+    expect(startAfterAuthFire).not.toHaveBeenCalled();
+    child.stdout.emit('data', Buffer.from(JSON.stringify({ event: 'connected', data: {} }) + '\n'));
+    expect(startAfterAuthFire).not.toHaveBeenCalled();
+    child.emit('close', 0);
+
+    expect(startAfterAuthFire).toHaveBeenCalledWith('test-line', expect.any(Function));
+    expect(res._chunks.join('')).toContain('event: connected');
+    expect(res._ended).toBe(true);
+  });
+
+  it('keeps a persisted pairing alive through an SSE client close and activates it on exit 0', async () => {
+    const inst = fakeInstance({ name: 'test-line' });
+    const child = fakeChildProcess();
+    vi.mocked(spawn).mockReturnValue(child as any);
+    const svc = mockServiceManager();
+    const startAfterAuthFire = vi.fn((_name: string, onComplete?: (err: Error | null) => void) => onComplete?.(null));
+    (svc as typeof svc & { startAfterAuthFire: typeof startAfterAuthFire }).startAfterAuthFire = startAfterAuthFire;
+    const deps = makeDeps({
+      discovery: { getInstance: vi.fn(() => inst), scan: vi.fn() } as any,
+      serviceManager: svc,
+    });
+    const req = mockReq('', '/api/lines/test-line/auth');
+    const res = mockSseRes();
+
+    await handleAuth(req, res, deps, { name: 'test-line' });
+    child.stdout.emit('data', Buffer.from(JSON.stringify({ event: 'connected', data: {} }) + '\n'));
+    req.emit('close');
+
+    expect(child.kill).not.toHaveBeenCalled();
+    child.emit('exit', 0);
+    expect(startAfterAuthFire).toHaveBeenCalledWith('test-line', expect.any(Function));
+  });
+
+  it('restores the stopped instance when a persisted pairing helper does not exit promptly', async () => {
+    vi.useFakeTimers();
+    try {
+      const inst = fakeInstance({ name: 'test-line' });
+      const child = fakeChildProcess();
+      vi.mocked(spawn).mockReturnValue(child as any);
+      const svc = mockServiceManager();
+      const startAfterAuthFire = vi.fn((_name: string, onComplete?: (err: Error | null) => void) => onComplete?.(null));
+      (svc as typeof svc & { startAfterAuthFire: typeof startAfterAuthFire }).startAfterAuthFire = startAfterAuthFire;
+      const deps = makeDeps({
+        discovery: { getInstance: vi.fn(() => inst), scan: vi.fn() } as any,
+        serviceManager: svc,
+      });
+      const req = mockReq('', '/api/lines/test-line/auth');
+      const res = mockSseRes();
+
+      await handleAuth(req, res, deps, { name: 'test-line' });
+      child.stdout.emit('data', Buffer.from(JSON.stringify({ event: 'connected', data: {} }) + '\n'));
+      vi.advanceTimersByTime(15_000);
+
+      expect(child.kill).toHaveBeenCalledWith('SIGTERM');
+      expect(startAfterAuthFire).toHaveBeenCalledWith('test-line', expect.any(Function));
+      expect(svc.startFire).not.toHaveBeenCalled();
+      expect(res._chunks.join('')).toContain('Authentication completed but did not finish');
+      expect(res._ended).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('reports a sanitized activation failure after persisted pairing exits successfully', async () => {
+    const inst = fakeInstance({ name: 'test-line' });
+    const child = fakeChildProcess();
+    vi.mocked(spawn).mockReturnValue(child as any);
+    const svc = mockServiceManager();
+    const startAfterAuthFire = vi.fn((_name: string, onComplete?: (err: Error | null) => void) => {
+      onComplete?.(new Error('launchctl bootstrap denied'));
+    });
+    (svc as typeof svc & { startAfterAuthFire: typeof startAfterAuthFire }).startAfterAuthFire = startAfterAuthFire;
+    const deps = makeDeps({
+      discovery: { getInstance: vi.fn(() => inst), scan: vi.fn() } as any,
+      serviceManager: svc,
+    });
+    const req = mockReq('', '/api/lines/test-line/auth');
+    const res = mockSseRes();
+
+    await handleAuth(req, res, deps, { name: 'test-line' });
+    child.stdout.emit('data', Buffer.from(JSON.stringify({ event: 'connected', data: {} }) + '\n'));
+    child.emit('exit', 0);
+
+    expect(startAfterAuthFire).toHaveBeenCalledWith('test-line', expect.any(Function));
+    expect(res._chunks.join('')).toContain('Authentication completed but the instance could not start');
+    expect(res._chunks.join('')).not.toContain('launchctl bootstrap denied');
+    expect(deps.discovery.scan).not.toHaveBeenCalled();
+    expect(res._ended).toBe(true);
+  });
+
+  it('does not activate an uninstalled macOS instance when auth teardown finds no existing job', async () => {
+    const inst = fakeInstance({ name: 'test-line' });
+    const child = fakeChildProcess();
+    vi.mocked(spawn).mockReturnValue(child as any);
+    const svc = mockServiceManager();
+    const stopForAuth = vi.fn().mockResolvedValue(false);
+    const startAfterAuthFire = vi.fn();
+    (svc as typeof svc & { stopForAuth: typeof stopForAuth }).stopForAuth = stopForAuth;
+    (svc as typeof svc & { startAfterAuthFire: typeof startAfterAuthFire }).startAfterAuthFire = startAfterAuthFire;
+    const deps = makeDeps({
+      discovery: { getInstance: vi.fn(() => inst), scan: vi.fn() } as any,
+      serviceManager: svc,
+    });
+    const req = mockReq('', '/api/lines/test-line/auth');
+    const res = mockSseRes();
+
+    await handleAuth(req, res, deps, { name: 'test-line' });
+    child.emit('error', new Error('pairing failed'));
+
+    expect(stopForAuth).toHaveBeenCalledWith('test-line');
+    expect(startAfterAuthFire).not.toHaveBeenCalled();
+    expect(res._chunks.join('')).toContain('pairing failed');
+    expect(res._ended).toBe(true);
+  });
+
+  it('fails authentication before spawning when macOS teardown cannot stop an existing job', async () => {
+    const inst = fakeInstance({ name: 'test-line' });
+    const child = fakeChildProcess();
+    vi.mocked(spawn).mockReturnValue(child as any);
+    const svc = mockServiceManager();
+    const stopForAuth = vi.fn().mockRejectedValue(new Error('launchctl permission denied'));
+    (svc as typeof svc & { stopForAuth: typeof stopForAuth }).stopForAuth = stopForAuth;
+    const deps = makeDeps({
+      discovery: { getInstance: vi.fn(() => inst), scan: vi.fn() } as any,
+      serviceManager: svc,
+    });
+    const req = mockReq('', '/api/lines/test-line/auth');
+    const res = mockSseRes();
+
+    await handleAuth(req, res, deps, { name: 'test-line' });
+
+    expect(stopForAuth).toHaveBeenCalledWith('test-line');
+    expect(spawn).not.toHaveBeenCalled();
+    expect(res._chunks.join('')).toContain('Unable to stop the existing instance before authentication');
+    expect(res._chunks.join('')).not.toContain('launchctl permission denied');
+    expect(res._ended).toBe(true);
+  });
+
+  it('suppresses a preflight-stop failure after the auth SSE client closes', async () => {
+    const inst = fakeInstance({ name: 'test-line' });
+    const child = fakeChildProcess();
+    vi.mocked(spawn).mockReturnValue(child as any);
+    let rejectStop: ((reason?: unknown) => void) | undefined;
+    const stopForAuth = vi.fn(() => new Promise<void>((_resolve, reject) => {
+      rejectStop = reject;
+    }));
+    const svc = mockServiceManager();
+    (svc as typeof svc & { stopForAuth: typeof stopForAuth }).stopForAuth = stopForAuth;
+    const deps = makeDeps({
+      discovery: { getInstance: vi.fn(() => inst), scan: vi.fn() } as any,
+      serviceManager: svc,
+    });
+    const req = mockReq('', '/api/lines/test-line/auth');
+    const res = mockSseRes();
+    const on = vi.fn(() => res);
+    Object.defineProperty(res, 'on', { configurable: true, value: on });
+
+    const handling = handleAuth(req, res, deps, { name: 'test-line' });
+    expect(on).toHaveBeenCalledWith('error', expect.any(Function));
+
+    req.emit('close');
+    rejectStop?.(new Error('launchctl permission denied'));
+    await handling;
+
+    expect(spawn).not.toHaveBeenCalled();
+    expect(res._chunks.join('')).not.toContain('Unable to stop the existing instance');
+    expect(res._ended).toBe(true);
+  });
+
+  it('restores a stopped service when the auth SSE client closes during preflight', async () => {
+    const inst = fakeInstance({ name: 'test-line' });
+    const child = fakeChildProcess();
+    vi.mocked(spawn).mockReturnValue(child as any);
+    let resolveStop: (() => void) | undefined;
+    const stopForAuth = vi.fn(() => new Promise<void>((resolve) => {
+      resolveStop = resolve;
+    }));
+    const startAfterAuthFire = vi.fn((_name: string, onComplete?: (err: Error | null) => void) => onComplete?.(null));
+    const svc = mockServiceManager();
+    (svc as typeof svc & { stopForAuth: typeof stopForAuth }).stopForAuth = stopForAuth;
+    (svc as typeof svc & { startAfterAuthFire: typeof startAfterAuthFire }).startAfterAuthFire = startAfterAuthFire;
+    const deps = makeDeps({
+      discovery: { getInstance: vi.fn(() => inst), scan: vi.fn() } as any,
+      serviceManager: svc,
+    });
+    const req = mockReq('', '/api/lines/test-line/auth');
+    const res = mockSseRes();
+
+    const handling = handleAuth(req, res, deps, { name: 'test-line' });
+    req.emit('close');
+    resolveStop?.();
+    await handling;
+
+    expect(spawn).not.toHaveBeenCalled();
+    expect(startAfterAuthFire).toHaveBeenCalledWith('test-line', expect.any(Function));
+    expect(res._ended).toBe(true);
   });
 
   // --- handleAuth: connected event when introSent reset throws (warn branch, ops.ts:1349-1352) ---
@@ -3668,13 +3927,14 @@ describe('ops.ts uncovered-branch coverage (wave 2)', () => {
     const res = mockSseRes();
     await handleAuth(req, res, deps, { name: 'test-line' });
 
-    // The connected branch runs even though introSent reset throws.
+    // The connected branch records the event even though introSent reset throws.
     child.stdout.emit('data', Buffer.from(JSON.stringify({ event: 'connected', data: {} }) + '\n'));
 
+    expect(svc.startFire).not.toHaveBeenCalled();
+    child.emit('exit', 0);
     expect(svc.startFire).toHaveBeenCalledWith('test-line', expect.any(Function));
     expect(deps.discovery.scan).toHaveBeenCalled();
 
-    child.emit('exit', 0);
     expect(res._ended).toBe(true);
   });
 
@@ -3744,8 +4004,8 @@ describe('ops.ts uncovered-branch coverage (wave 2)', () => {
     secondChild.emit('exit', 0);
   });
 
-  // --- handleAuth: restoreStoppedInstance no-op when already connected (ops.ts:1312 connected guard) ---
-  it('handleAuth does not restart the instance after connect when an error follows (line 1312 connected guard)', async () => {
+  // --- handleAuth: reconnect stopped instance when the helper fails after connected but before exit ---
+  it('handleAuth restores the stopped instance if an error follows connected before helper exit', async () => {
     const cfgTmp = fs.mkdtempSync(path.join(os.tmpdir(), 'whatsoup-wave2-norestart-'));
     const origConfig = process.env.XDG_CONFIG_HOME;
     process.env.XDG_CONFIG_HOME = path.join(cfgTmp, 'config');
@@ -3768,13 +4028,13 @@ describe('ops.ts uncovered-branch coverage (wave 2)', () => {
       const res = mockSseRes();
       await handleAuth(req, res, deps, { name: 'norestart-line' });
 
-      // First, complete the connection (sets connected=true and calls startFire once).
+      // A persisted connection alone does not start the service until helper exit.
       child.stdout.emit('data', Buffer.from(JSON.stringify({ event: 'connected', data: {} }) + '\n'));
-      const callsAfterConnect = vi.mocked(svc.startFire).mock.calls.length;
+      expect(svc.startFire).not.toHaveBeenCalled();
 
-      // Now emit a child error — restoreStoppedInstance must no-op because connected=true.
+      // A child error before exit restores the service that was stopped for auth.
       child.emit('error', new Error('late failure'));
-      expect(vi.mocked(svc.startFire).mock.calls.length).toBe(callsAfterConnect);
+      expect(svc.startFire).toHaveBeenCalledWith('norestart-line', expect.any(Function));
 
       child.emit('exit', 0);
       expect(res._ended).toBe(true);
@@ -3851,8 +4111,8 @@ describe('ops.ts uncovered-branch coverage', () => {
       const svc = mockServiceManager();
       // Make startFire invoke its callback with a non-null Error so the
       // `if (err) log.error(...)` branch fires inside restoreStoppedInstance.
-      svc.startFire.mockImplementation((_name: string, cb: (err: Error | null) => void) => {
-        cb(new Error('post-auth restart failed'));
+      svc.startFire.mockImplementation((_name: string, cb?: (err: Error | null) => void) => {
+        cb?.(new Error('post-auth restart failed'));
       });
       const deps = makeDeps({
         discovery: { getInstance: vi.fn(() => inst), scan: vi.fn() } as any,
@@ -3878,8 +4138,8 @@ describe('ops.ts uncovered-branch coverage', () => {
     vi.mocked(spawn).mockReturnValue(child as any);
     const svc = mockServiceManager();
     // First call (connected branch) returns an error via callback.
-    svc.startFire.mockImplementation((_name: string, cb: (err: Error | null) => void) => {
-      cb(new Error('post-connect restart failed'));
+    svc.startFire.mockImplementation((_name: string, cb?: (err: Error | null) => void) => {
+      cb?.(new Error('post-connect restart failed'));
     });
     const deps = makeDeps({
       discovery: { getInstance: vi.fn(() => inst), scan: vi.fn() } as any,
@@ -3890,11 +4150,12 @@ describe('ops.ts uncovered-branch coverage', () => {
 
     await handleAuth(req, res, deps, { name: 'test-line' });
 
-    // Emit a connected event so the post-connect startFire branch runs.
+    // A successful helper exit authorizes the post-auth start.
     child.stdout.emit('data', Buffer.from(JSON.stringify({ event: 'connected', data: {} }) + '\n'));
+    expect(svc.startFire).not.toHaveBeenCalled();
+    child.emit('exit', 0);
     expect(svc.startFire).toHaveBeenCalledWith('test-line', expect.any(Function));
-    // Wait for the connected branch's delayed end to complete the response.
-    await vi.waitFor(() => expect(res._ended).toBe(true), { timeout: 2000 });
+    expect(res._ended).toBe(true);
   });
 
   // ---- Lines 540, 558, 560: handleConfigUpdate settingsJson + enabledPlugins paths on existing cwd ----
@@ -4462,8 +4723,8 @@ describe('ops.ts uncovered-branch coverage', () => {
       vi.mocked(spawn).mockReturnValue(child as any);
       const svc = mockServiceManager();
       // startFire invokes callback with null (no error) — line 1315 if-false branch.
-      svc.startFire.mockImplementation((_name: string, cb: (err: Error | null) => void) => {
-        cb(null);
+      svc.startFire.mockImplementation((_name: string, cb?: (err: Error | null) => void) => {
+        cb?.(null);
       });
       const deps = makeDeps({
         discovery: { getInstance: vi.fn(() => inst), scan: vi.fn() } as any,
@@ -4771,8 +5032,8 @@ describe('ops.ts uncovered-branch coverage', () => {
     const child = fakeChildProcess();
     vi.mocked(spawn).mockReturnValue(child as any);
     const svc = mockServiceManager();
-    svc.startFire.mockImplementation((_name: string, cb: (err: Error | null) => void) => {
-      cb(null);
+    svc.startFire.mockImplementation((_name: string, cb?: (err: Error | null) => void) => {
+      cb?.(null);
     });
     const deps = makeDeps({
       discovery: { getInstance: vi.fn(() => inst), scan: vi.fn() } as any,
@@ -4784,7 +5045,9 @@ describe('ops.ts uncovered-branch coverage', () => {
     await handleAuth(req, res, deps, { name: 'test-line' });
 
     child.stdout.emit('data', Buffer.from(JSON.stringify({ event: 'connected', data: {} }) + '\n'));
+    expect(svc.startFire).not.toHaveBeenCalled();
+    child.emit('exit', 0);
     expect(svc.startFire).toHaveBeenCalledWith('test-line', expect.any(Function));
-    await vi.waitFor(() => expect(res._ended).toBe(true), { timeout: 2000 });
+    expect(res._ended).toBe(true);
   });
 });

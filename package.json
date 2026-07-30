@@ -96,6 +96,7 @@
     "guard:coverage-headroom": "bash scripts/run-with-pinned-node.sh scripts/check-coverage-headroom.ts",
     "guard:restart-preflight": "bash deploy/preflight-check.sh .",
     "migrate-memory-config": "bash scripts/run-with-pinned-node.sh scripts/migrate-memory-config.ts",
+    "reconcile-launchd-restart-policy": "bash scripts/run-with-pinned-node.sh scripts/reconcile-launchd-restart-policy.ts",
     "fleet:rotate-token": "bash scripts/run-with-pinned-node.sh scripts/fleet-rotate-token.ts",
     "arc:runtime-proof": "bash scripts/run-with-pinned-node.sh scripts/arc-runtime-proof.ts",
     "canary:artifact-proof": "bash scripts/run-with-pinned-node.sh scripts/disposable-client-canary-artifact.ts",

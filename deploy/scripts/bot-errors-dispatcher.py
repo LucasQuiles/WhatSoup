@@ -4132,9 +4132,8 @@ def suppress_alerts_recovered_before_delivery(paths: dict[str, Path]) -> int:
     alerts_by_key: dict[str, list[tuple[Path, dict[str, Any], int]]] = {}
     clears: list[tuple[Path, dict[str, Any], int]] = []
     for path in sorted(paths["outbox"].glob("*.json")):
-        try:
-            event = safe_read_json(path)
-        except Exception:
+        event = load_valid_event_or_quarantine(path, paths["quarantine"])
+        if event is None:
             continue
         # #2730: route envelope-invalid events through quarantine instead of
         # letting EnvelopeError propagate from is_incident_alert/is_incident_clear
@@ -4152,7 +4151,7 @@ def suppress_alerts_recovered_before_delivery(paths: dict[str, Path]) -> int:
             continue
         if is_alert:
             alerts_by_key.setdefault(incident_key(event), []).append((path, event, epoch))
-        elif is_clear and ready(path, paths["quarantine"]):
+        elif is_clear and delivery_ready(event):
             clears.append((path, event, epoch))
 
     suppressed = 0
@@ -4422,28 +4421,37 @@ def suppress_test_provenance_events(paths: dict[str, Path]) -> tuple[int, int]:
     return suppressed, alerted
 
 
-def ready(path: Path, quarantine_dir: Path) -> bool:
+def load_valid_event_or_quarantine(path: Path, quarantine_dir: Path) -> dict[str, Any] | None:
     # #2484: reject symlink and non-regular leaves before reading.  Quarantine
     # the directory entry itself without dereferencing its target.
     if not safe_is_regular_entry(path):
         quarantine_untrusted_entry(path, quarantine_dir, "untrusted leaf entry")
-        return False
+        return None
     try:
         event = safe_read_json(path)
     except UntrustedEntryError:
         quarantine_untrusted_entry(path, quarantine_dir, "untrusted leaf entry after open")
-        return False
+        return None
     except Exception as exc:
         quarantine_poison(path, quarantine_dir, f"invalid JSON before claim: {exc}")
-        return False
+        return None
     try:
         classify_event(event)
     except EnvelopeError as exc:
         quarantine_invalid_envelope(path, quarantine_dir, exc.code)
-        return False
+        return None
+    return event
+
+
+def delivery_ready(event: dict[str, Any]) -> bool:
     delivery = event.get("delivery") if isinstance(event.get("delivery"), dict) else {}
     next_attempt = int(delivery.get("nextAttemptAtEpoch") or 0)
     return next_attempt <= int(time.time())
+
+
+def ready(path: Path, quarantine_dir: Path) -> bool:
+    event = load_valid_event_or_quarantine(path, quarantine_dir)
+    return event is not None and delivery_ready(event)
 
 
 def quarantine_invalid_envelope(path: Path, quarantine_dir: Path, code: str) -> Path:
