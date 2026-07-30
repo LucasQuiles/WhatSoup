@@ -263,22 +263,11 @@ export const REGISTRY: DurabilityStatusEntry[] = [
   },
   {
     table: 'enrichment_runs',
-    statusColumn: 'error',
-    // Free text (the caught error's .message) — there is no fixed failure
-    // vocabulary to enumerate. terminalFailureValues is therefore not a real
-    // status value, it's literally the table name (chosen over the near-vacuous
-    // word "error", which would match almost any file).
-    // HONESTY NOTE: this means the guard's check (3) only proves this module's
-    // TEXT references 'enrichment_runs' — a much weaker claim than "the failure
-    // write is proven to execute" (near-tautological: any module that inserts
-    // into a table necessarily contains that table's own name somewhere). The
-    // real behavioral proof that a failure row is written on cycle failure
-    // lives in the Task 1-2 SQLite persistence tests
-    // (tests/runtimes/chat/enrichment/poller.test.ts), not this declaration.
-    vocabulary: [],
-    vocabularySource: 'literal',
-    terminalFailureValues: ['enrichment_runs'],
-    writerSites: ['src/runtimes/chat/enrichment/poller.ts'], // outer catch — cycle-failure row
+    statusColumn: 'status',
+    vocabulary: ['no_work', 'completed', 'partial', 'failed', 'legacy_unclassified'],
+    vocabularySource: 'sql-check',
+    terminalFailureValues: ['partial', 'failed'],
+    writerSites: ['src/runtimes/chat/enrichment/poller.ts'],
   },
   {
     table: 'beads',
@@ -443,7 +432,7 @@ export const NON_STATUS_JUSTIFICATIONS: Record<string, string> = {
   bead_triggers: "status ∈ {active,paused,expired,cancelled} is the trigger DEFINITION's own admin/config lifecycle (like a cron job being enabled/disabled), not a write-attempt's outcome; each individual firing's success/failure is recorded in trigger_runs, a registered KNOWN_STATUS_TABLES entry with terminalFailureValues=['failed'].",
   heal_reports: "error_class/error_type/state belong to the self-heal circuit-breaker (BOT ERRORS) incident workflow, not the durability engine's write-completion path #1789 targets — its terminal-failure value 'escalated' already has a resolvable production writer (handleHealComplete, src/core/heal.ts), so this is a domain exclusion, not a reporting-capability gap.",
   pending_heal_reports: "error_class/state mirror heal_reports' single-flight queue-slot bookkeeping for the same self-heal subsystem; state='resolved' is written in production (src/runtimes/agent/runtime.ts) — same domain exclusion as heal_reports.",
-  messages: "enrichment_error is a per-message denormalized cache of the last enrichment attempt's error text; the message row is content storage, not an operation-attempt whose own completion is asserted — the run-level terminal failure lives in enrichment_runs.error, a registered KNOWN_STATUS_TABLES entry.",
+  messages: "enrichment_error is a per-message denormalized cache of the last enrichment attempt's error text; the message row is content storage, not an operation-attempt whose own completion is asserted — the run-level terminal failure lives in enrichment_runs.status, a registered KNOWN_STATUS_TABLES entry.",
 };
 
 /**

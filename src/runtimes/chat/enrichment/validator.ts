@@ -4,7 +4,7 @@ import { resolveModelRole } from '../../../lib/model-advisor.ts';
 import type { LLMProvider } from '../providers/types.ts';
 import type { StoredMessage } from '../../../core/messages.ts';
 import type { ExtractedFact } from './extractor.ts';
-import { RAW_OUTPUT_TRUNCATE, truncateRaw } from './raw-output.ts';
+import { truncateRaw } from './raw-output.ts';
 import { stripJsonFences } from '../../../lib/json-fences.ts';
 import { EnrichmentError, type EnrichmentErrorStage, type EnrichmentErrorDetails } from './errors.ts';
 
@@ -106,7 +106,7 @@ export async function validateFacts(
   } catch (err) {
     if (strict) {
       log.error(
-        { stage: 'provider-call', factCount: facts.length, err },
+        { stage: 'provider-call', factCount: facts.length },
         'validateFacts: strict-mode provider-call failure',
       );
       throw new ValidationError('provider-call', {
@@ -125,7 +125,7 @@ export async function validateFacts(
   } catch {
     if (strict) {
       log.error(
-        { stage: 'json-parse', factCount: facts.length, raw: truncateRaw(raw) },
+        { stage: 'json-parse', factCount: facts.length },
         'validateFacts: strict-mode json-parse failure',
       );
       throw new ValidationError('json-parse', { rawOutput: truncateRaw(raw) });
@@ -137,7 +137,7 @@ export async function validateFacts(
   if (!Array.isArray(parsed)) {
     if (strict) {
       log.error(
-        { stage: 'schema-shape', factCount: facts.length, raw: truncateRaw(raw) },
+        { stage: 'schema-shape', factCount: facts.length },
         'validateFacts: strict-mode schema-shape failure',
       );
       throw new ValidationError('schema-shape', { rawOutput: truncateRaw(raw) });

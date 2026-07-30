@@ -148,6 +148,12 @@ value is intentionally insufficient for provider-progress corroboration.
 | `http:health.heal` | `POST /heal` | `src/core/health.ts:1032` | stable | active | Inject Type-3 repair report |
 | `http:health.agent-compact` | `POST /agent/compact` | `src/core/health.ts:943` | stable | active | Out-of-band compaction; requires `chatJid` for per-chat / shared scopes |
 
+For authenticated Chat health responses, `enrichment.cycle` is an additive, bounded receipt
+projection. It exposes only `state`, `last_attempt_at`, `last_success_at`, `status`,
+`failure_code`, `stage`, `retryable`, and `evidence_coverage`; it does not expose raw errors,
+message content, identities, or exporter payloads. `state` is one of `disabled`, `not_started`,
+`no_work`, `current`, `partial`, `failed`, `stale`, `unreadable`, or `invalid`.
+
 ### WebSocket
 
 | Identifier | Path | Source | Stability | Status | Notes |

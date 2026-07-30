@@ -8,8 +8,39 @@ import type { StoredMessage } from '../../../core/messages.ts';
 import { extractFacts } from './extractor.ts';
 import { validateFacts } from './validator.ts';
 import { enqueueFacts, toExportable } from './fact-export-queue.ts';
+import {
+  readOnlineEnrichmentCycleLedger,
+  writeEnrichmentCycleReceipt,
+  type EnrichmentCycleFailureCode,
+  type EnrichmentCycleReceipt,
+  type EnrichmentCycleStage,
+} from './cycle-receipt.ts';
 
 const log = createChildLogger('enrichment');
+
+export type EnrichmentCycleHealthState =
+  | 'not_started'
+  | 'no_work'
+  | 'current'
+  | 'partial'
+  | 'failed'
+  | 'stale'
+  | 'unreadable'
+  | 'invalid';
+
+function failureCodeForStage(stage: EnrichmentCycleStage): EnrichmentCycleFailureCode {
+  switch (stage) {
+    case 'selection':
+      return 'selection_failed';
+    case 'message_state':
+      return 'message_state_write_failed';
+    case 'ledger':
+      return 'ledger_write_failed';
+    case 'none':
+    case 'segment':
+      return 'segment_failed';
+  }
+}
 
 export class EnrichmentPoller {
   private timer: NodeJS.Timeout | null = null;
@@ -19,6 +50,8 @@ export class EnrichmentPoller {
   private validationProvider: LLMProvider;
   private stopped = false;
   public lastRunAt: string | null = null;
+  public latestCycleReceipt: EnrichmentCycleReceipt | null = null;
+  private receiptReadState: 'not_started' | 'available' | 'invalid' | 'unreadable' = 'not_started';
 
   /** Count of messages pending enrichment (not yet processed). */
   get unprocessedCount(): number {
@@ -37,12 +70,69 @@ export class EnrichmentPoller {
     this.validationProvider = validationProvider;
   }
 
+  get cycleHealthState(): EnrichmentCycleHealthState {
+    if (this.receiptReadState === 'invalid') return 'invalid';
+    if (this.receiptReadState === 'unreadable') return 'unreadable';
+    if (!this.latestCycleReceipt) return 'not_started';
+    switch (this.latestCycleReceipt.status) {
+      case 'no_work':
+        return 'no_work';
+      case 'completed':
+        return 'current';
+      case 'partial':
+      case 'failed':
+        return this.latestCycleReceipt.status;
+      case 'legacy_unclassified':
+        return 'invalid';
+    }
+  }
+
+  hydrateLatestCycleReceipt(): void {
+    try {
+      const ledger = readOnlineEnrichmentCycleLedger(this.db);
+      if (ledger.state === 'available') {
+        this.latestCycleReceipt = ledger.receipt;
+        this.lastRunAt = ledger.lastSuccessfulAt;
+        this.receiptReadState = 'available';
+      } else {
+        this.latestCycleReceipt = null;
+        this.lastRunAt = null;
+        this.receiptReadState = ledger.state === 'absent' ? 'not_started' : 'invalid';
+      }
+    } catch {
+      this.latestCycleReceipt = null;
+      this.lastRunAt = null;
+      this.receiptReadState = 'unreadable';
+      log.error({ stage: 'ledger' }, 'enrichment: cycle receipt ledger is unreadable');
+    }
+  }
+
+  private persistReceipt(receipt: EnrichmentCycleReceipt): boolean {
+    try {
+      writeEnrichmentCycleReceipt(this.db, receipt);
+    } catch {
+      this.latestCycleReceipt = null;
+      this.receiptReadState = 'unreadable';
+      log.error(
+        { failureCode: 'ledger_write_failed', stage: 'ledger' },
+        'enrichment: failed to write enrichment-cycle receipt',
+      );
+      return false;
+    }
+
+    this.latestCycleReceipt = receipt;
+    this.receiptReadState = 'available';
+    if (receipt.successAt !== null) this.lastRunAt = receipt.successAt;
+    return true;
+  }
+
   start(): void {
     if (this.timer !== null) {
       log.warn('EnrichmentPoller.start() called while already running');
       return;
     }
     this.stopped = false;
+    this.hydrateLatestCycleReceipt();
     log.info({ intervalMs: config.enrichmentIntervalMs }, 'Enrichment poller starting');
     this.scheduleNext();
   }
@@ -64,11 +154,11 @@ export class EnrichmentPoller {
     this.timer = null;
     try {
       await this.runCycle();
-    } catch (err) {
+    } catch {
       // runCycle has comprehensive internal error handling; this catch is a
       // last-resort safety net ensuring the poller always reschedules even if
       // an unexpected bug causes runCycle to throw past its own finally block.
-      log.error({ err }, 'enrichment: unexpected error in tick — rescheduling');
+      log.error({ stage: 'ledger' }, 'enrichment: unexpected error in tick — rescheduling');
     }
     if (this.stopped === false) {
       this.scheduleNext();
@@ -77,10 +167,15 @@ export class EnrichmentPoller {
 
   private async runCycle(): Promise<void> {
     const cycleStart = Date.now();
-    const runId = process.env.MW_MIND_RUN_ID;
 
     let totalExtracted = 0;
     let totalQueued = 0;
+    let messagesSelected = 0;
+    let stage: EnrichmentCycleStage = 'selection';
+    let segmentFailed = false;
+    let successStateWriteFailed = false;
+    let terminalStateWriteFailed = false;
+    let interrupted = false;
     const successPks: number[] = [];
     const failedPks: number[] = [];
 
@@ -95,8 +190,31 @@ export class EnrichmentPoller {
     // were known before the throw, instead of the cycle vanishing silently.
     try {
       const messages = getUnprocessedMessages(this.db, config.enrichmentBatchSize);
+      messagesSelected = messages.length;
 
-      if (messages.length === 0) return;
+      if (messages.length === 0) {
+        const completedAt = new Date().toISOString();
+        this.persistReceipt({
+          source: 'online',
+          status: 'no_work',
+          failureCode: 'none',
+          stage: 'none',
+          retryable: false,
+          evidenceCoverage: 'typed',
+          startedAt: new Date(cycleStart).toISOString(),
+          completedAt,
+          successAt: completedAt,
+          messagesSelected: 0,
+          messagesSucceeded: 0,
+          messagesDeferred: 0,
+          messagesTerminal: 0,
+          factsExtracted: 0,
+          factsQueued: 0,
+        });
+        return;
+      }
+
+      stage = 'segment';
 
       log.debug({ count: messages.length }, 'enrichment: processing messages');
 
@@ -113,8 +231,11 @@ export class EnrichmentPoller {
 
       for (const [chatJid, chatMessages] of byChat) {
         try {
-          const facts = await extractFacts(this.extractionProvider, chatMessages);
-          if (this.stopped) return;
+          const facts = await extractFacts(this.extractionProvider, chatMessages, { strict: true });
+          if (this.stopped) {
+            interrupted = true;
+            break;
+          }
           totalExtracted = totalExtracted + facts.length;
 
           if (facts.length === 0) {
@@ -122,8 +243,16 @@ export class EnrichmentPoller {
             continue;
           }
 
-          const validated = await validateFacts(this.validationProvider, facts, chatMessages);
-          if (this.stopped) return;
+          const validated = await validateFacts(
+            this.validationProvider,
+            facts,
+            chatMessages,
+            { strict: true },
+          );
+          if (this.stopped) {
+            interrupted = true;
+            break;
+          }
 
           if (validated.length === 0) {
             for (const msg of chatMessages) successPks.push(msg.pk);
@@ -152,29 +281,33 @@ export class EnrichmentPoller {
           if (accountingOk) {
             for (const msg of chatMessages) successPks.push(msg.pk);
           } else {
+            segmentFailed = true;
             log.warn(
               {
-                chatJid,
+                failureCode: 'segment_failed',
+                stage: 'segment',
                 expected: exportable.length,
                 attempted: result.attempted,
                 inserted: result.inserted,
                 duplicates: result.duplicates,
                 failed: result.failed,
-                segmentMessagePks: chatMessages.map((m) => m.pk),
-                ...(runId ? { runId } : {}),
               },
               'enrichment: queue accounting mismatch — segment messages NOT marked processed',
             );
           }
-        } catch (err) {
-          log.error({ err, chatJid }, 'enrichment: segment processing failed');
+        } catch {
+          segmentFailed = true;
+          log.error(
+            { failureCode: 'segment_failed', stage: 'segment', messages: chatMessages.length },
+            'enrichment: segment processing failed',
+          );
           const retryPks: number[] = [];
           for (const msg of chatMessages) {
             // enrichmentRetries is the count BEFORE this failure (read from DB)
             const nextRetry = msg.enrichmentRetries + 1;
             if (nextRetry >= config.enrichmentMaxRetries) {
               log.warn(
-                { pk: msg.pk, chatJid, retries: nextRetry },
+                { failureCode: 'segment_failed', stage: 'segment', retries: nextRetry },
                 'enrichment: message permanently failed — max_retries_exceeded',
               );
               failedPks.push(msg.pk);
@@ -185,79 +318,152 @@ export class EnrichmentPoller {
           // Persist incremented retry counts for messages that will be retried
           try {
             incrementEnrichmentRetries(this.db, retryPks);
-          } catch (dbErr) {
-            log.error({ err: dbErr }, 'enrichment: failed to persist retry counters');
+          } catch {
+            successStateWriteFailed = true;
+            log.error(
+              { failureCode: 'message_state_write_failed', stage: 'message_state' },
+              'enrichment: failed to persist retry counters',
+            );
           }
         }
       }
 
+      if (interrupted) {
+        const completedAt = new Date().toISOString();
+        this.persistReceipt({
+          source: 'online',
+          status: 'partial',
+          failureCode: 'segment_failed',
+          stage: 'segment',
+          retryable: true,
+          evidenceCoverage: 'typed',
+          startedAt: new Date(cycleStart).toISOString(),
+          completedAt,
+          successAt: null,
+          messagesSelected,
+          messagesSucceeded: 0,
+          messagesDeferred: messagesSelected,
+          messagesTerminal: 0,
+          factsExtracted: totalExtracted,
+          factsQueued: totalQueued,
+        });
+        return;
+      }
+
+      stage = 'message_state';
+      let messagesSucceeded = successPks.length;
+      let messagesTerminal = failedPks.length;
+
       // Mark successes as processed
       try {
         markMessagesProcessed(this.db, successPks);
-      } catch (err) {
-        log.error({ err }, 'enrichment: failed to mark messages processed');
+      } catch {
+        successStateWriteFailed = true;
+        messagesSucceeded = 0;
+        log.error(
+          { failureCode: 'message_state_write_failed', stage },
+          'enrichment: failed to mark messages processed',
+        );
       }
 
       // Mark terminal failures
       try {
         markMessagesWithError(this.db, failedPks, 'max_retries_exceeded');
-      } catch (err) {
-        log.error({ err }, 'enrichment: failed to mark messages with error');
+      } catch {
+        terminalStateWriteFailed = true;
+        messagesTerminal = 0;
+        log.error(
+          { failureCode: 'message_state_write_failed', stage },
+          'enrichment: failed to mark messages with error',
+        );
       }
 
-      const messagesProcessed = successPks.length + failedPks.length;
+      const messageStateWriteFailed = successStateWriteFailed || terminalStateWriteFailed;
+      const messagesDeferred = Math.max(
+        0,
+        messagesSelected - messagesSucceeded - messagesTerminal,
+      );
+      const hasCommittedOutcome = messagesSucceeded > 0 || messagesTerminal > 0;
+      const status = messageStateWriteFailed
+        ? (hasCommittedOutcome ? 'partial' : 'failed')
+        : segmentFailed
+          ? (messagesSucceeded > 0 ? 'partial' : 'failed')
+          : 'completed';
+      const failureCode = messageStateWriteFailed
+        ? 'message_state_write_failed'
+        : segmentFailed
+          ? 'segment_failed'
+          : 'none';
+      const outcomeStage: EnrichmentCycleStage = messageStateWriteFailed
+        ? 'message_state'
+        : segmentFailed
+          ? 'segment'
+          : 'none';
+      const completedAt = new Date().toISOString();
+      const successAt = status === 'completed' ? completedAt : null;
+      this.persistReceipt({
+        source: 'online',
+        status,
+        failureCode,
+        stage: outcomeStage,
+        retryable: status !== 'completed' && messagesDeferred > 0,
+        evidenceCoverage: 'typed',
+        startedAt: new Date(cycleStart).toISOString(),
+        completedAt,
+        successAt,
+        messagesSelected,
+        messagesSucceeded,
+        messagesDeferred,
+        messagesTerminal,
+        factsExtracted: totalExtracted,
+        factsQueued: totalQueued,
+      });
+
+      const messagesProcessed = messagesSucceeded + messagesTerminal;
       const durationMs = Date.now() - cycleStart;
-
-      // Write to enrichment_runs table. `facts_upserted` is retained as the
-      // column name for wire-compatibility with existing metrics readers; the
-      // value now represents facts successfully queued for external export. It
-      // is not proof that a Pinecone upsert has happened.
-      try {
-        this.db.raw.prepare(`
-          INSERT INTO enrichment_runs (started_at, completed_at, messages_processed, facts_extracted, facts_upserted)
-          VALUES (?, datetime('now'), ?, ?, ?)
-        `).run(new Date(cycleStart).toISOString(), messagesProcessed, totalExtracted, totalQueued);
-      } catch (err) {
-        log.error({ err }, 'enrichment: failed to write enrichment_runs record');
-      }
 
       log.info(
         {
+          status,
+          failureCode,
           messagesProcessed,
           factsExtracted: totalExtracted,
           factsQueued: totalQueued,
           durationMs,
-          ...(runId ? { runId } : {}),
         },
         'enrichment: cycle complete',
       );
-
-      this.lastRunAt = new Date().toISOString();
-    } catch (err) {
+    } catch {
       // Unexpected throw that escaped every step-level handler above —
       // including a message-fetch failure, which is the realistic case:
       // a DB error here used to just log and return with no durable
       // evidence at all. Record a terminal-failure enrichment_runs row
       // using whatever counts were accumulated before the throw.
       //
-      // Deliberately do NOT update lastRunAt here: getHealthSnapshot()
-      // (src/runtimes/chat/runtime.ts) derives `degraded` purely from
-      // staleness of lastRunAt. A failed cycle must leave it frozen at its
-      // last successful value (or null) so a persistently failing fetch
-      // still trips the staleness window instead of refreshing on every
-      // failed attempt and reading healthy forever while error rows pile
-      // up in enrichment_runs.
-      const messagesProcessedAtFailure = successPks.length + failedPks.length;
-      const message = err instanceof Error ? err.message : String(err);
-      log.error({ err }, 'enrichment: cycle failed — recording failure run');
-      try {
-        this.db.raw.prepare(`
-          INSERT INTO enrichment_runs (started_at, completed_at, messages_processed, facts_extracted, facts_upserted, error)
-          VALUES (?, datetime('now'), ?, ?, ?, ?)
-        `).run(new Date(cycleStart).toISOString(), messagesProcessedAtFailure, totalExtracted, totalQueued, message);
-      } catch (writeErr) {
-        log.error({ err: writeErr }, 'enrichment: failed to write enrichment_runs failure record');
-      }
+      // Deliberately do NOT update lastRunAt here: the runtime separately
+      // projects the latest failed receipt and the prior proven success. A
+      // failed cycle must not refresh the success clock while its typed
+      // receipt keeps health degraded.
+      const failureCode = failureCodeForStage(stage);
+      const completedAt = new Date().toISOString();
+      log.error({ failureCode, stage }, 'enrichment: cycle failed — recording failure receipt');
+      this.persistReceipt({
+        source: 'online',
+        status: 'failed',
+        failureCode,
+        stage,
+        retryable: true,
+        evidenceCoverage: 'typed',
+        startedAt: new Date(cycleStart).toISOString(),
+        completedAt,
+        successAt: null,
+        messagesSelected,
+        messagesSucceeded: 0,
+        messagesDeferred: messagesSelected,
+        messagesTerminal: 0,
+        factsExtracted: totalExtracted,
+        factsQueued: totalQueued,
+      });
     }
   }
 }
