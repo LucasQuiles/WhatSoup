@@ -409,7 +409,11 @@ def prune_action_outbox(config: SentinelConfig) -> int:
     retention = max(0, config.action_outbox_retention)
     try:
         with os.scandir(outbox) as scan:
-            files = [Path(entry.path) for entry in scan if entry.is_file()]
+            files = [
+                Path(entry.path)
+                for entry in scan
+                if entry.is_file() and entry.name != ".durable-json.lock"
+            ]
     except FileNotFoundError:
         return 0
     except OSError:
