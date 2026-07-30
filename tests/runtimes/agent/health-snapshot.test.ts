@@ -289,6 +289,7 @@ function expectedFallbackDetails(): Record<string, unknown> {
       modelUsableCheckedAt: null,
       modelUsabilityStatus: null,
       lastSuccessfulTurnAt: null,
+      lastSuccessfulTurnProvider: null,
       lastTurnErrorClass: null,
       lastTurnErrorAt: null,
     },

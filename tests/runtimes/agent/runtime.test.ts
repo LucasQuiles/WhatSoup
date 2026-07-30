@@ -5696,6 +5696,8 @@ describe('AgentRuntime', () => {
   });
 
   it('unknown terminal (is_error) result is default-denied: generic notice, never raw', async () => {
+    const agentConfig = mockConfig as typeof mockConfig & { agentProvider?: string };
+    agentConfig.agentProvider = 'claude-cli';
     const db = makeDb();
     const { messenger } = makeMessenger();
     const runtime = new AgentRuntime(db, messenger);
@@ -5727,6 +5729,7 @@ describe('AgentRuntime', () => {
     turnCapability = (runtime.getHealthSnapshot().details as Record<string, any>).turnCapability;
     expect(turnCapability.lastSuccessfulTurnAt).toEqual(expect.any(Number));
     expect(turnCapability.lastSuccessfulTurnAt).toBeGreaterThanOrEqual(failedAt);
+    expect(turnCapability.lastSuccessfulTurnProvider).toBe('claude-cli');
     expect({
       lastTurnErrorClass: turnCapability.lastTurnErrorClass,
       lastTurnErrorAt: turnCapability.lastTurnErrorAt,

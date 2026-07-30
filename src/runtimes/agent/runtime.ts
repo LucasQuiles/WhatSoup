@@ -9299,6 +9299,7 @@ export class AgentRuntime implements Runtime {
       modelUsableCheckedAt,
       modelUsabilityStatus: usability?.status ?? null,
       lastSuccessfulTurnAt: this.turnCapabilityTracker.lastSuccessfulTurnAt,
+      lastSuccessfulTurnProvider: this.turnCapabilityTracker.lastSuccessfulTurnProvider,
       lastTurnErrorClass: this.turnCapabilityTracker.lastTurnErrorClass,
       lastTurnErrorAt: this.turnCapabilityTracker.lastTurnErrorAt,
     };
@@ -9306,7 +9307,7 @@ export class AgentRuntime implements Runtime {
 
   private recordTurnCapabilitySuccess(isUserTurnResult: boolean): void {
     if (!isUserTurnResult) return;
-    this.turnCapabilityTracker.recordSuccess();
+    this.turnCapabilityTracker.recordSuccess(this.effectiveProvider);
     this.consecutivePrimaryEmptyTurns = 0;
     this.consecutiveUnknownTerminalTurns = 0;
     if (this.isFallbackWindowActive) return; // #1884 follow-up: a fallback turn proves nothing about the primary

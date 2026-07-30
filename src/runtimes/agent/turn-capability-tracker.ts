@@ -44,14 +44,17 @@ export class TurnCapabilityTracker {
   readonly errorCounts = new Map<TurnCapabilityErrorClass, number>();
   /** Epoch-ms of the most recent successful user turn (null until the first success). */
   lastSuccessfulTurnAt: number | null = null;
+  /** Provider that served the most recent successful user turn. */
+  lastSuccessfulTurnProvider: string | null = null;
   /** Class of the most recent user-turn failure (cleared to null on a success). */
   lastTurnErrorClass: TurnCapabilityErrorClass | null = null;
   /** Epoch-ms of the most recent user-turn failure (cleared to null on a success). */
   lastTurnErrorAt: number | null = null;
 
   /** A user turn completed successfully — stamp the time and clear the last error. */
-  recordSuccess(): void {
+  recordSuccess(provider: string): void {
     this.lastSuccessfulTurnAt = Date.now();
+    this.lastSuccessfulTurnProvider = provider;
     this.lastTurnErrorClass = null;
     this.lastTurnErrorAt = null;
   }

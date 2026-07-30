@@ -17,6 +17,8 @@ export interface RuntimeTurnCapabilityHealth {
   modelUsableCheckedAt: number | null;
   modelUsabilityStatus: string | null;
   lastSuccessfulTurnAt: number | null;
+  /** Provider that served the most recent successful user turn, if known. */
+  lastSuccessfulTurnProvider: string | null;
   lastTurnErrorClass: string | null;
   lastTurnErrorAt: number | null;
 }
