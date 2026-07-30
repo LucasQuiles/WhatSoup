@@ -15,7 +15,7 @@ describe('migration 49 memory consolidation receipts', () => {
   afterEach(() => db.close());
 
   it('installs the bounded content-free receipt table and indexes', () => {
-    expect(CURRENT_SCHEMA_MIGRATION).toBe(51);
+    expect(CURRENT_SCHEMA_MIGRATION).toBe(52);
     expect(db.raw.prepare(
       'SELECT version FROM schema_migrations WHERE version = 49',
     ).get()).toEqual({ version: 49 });
