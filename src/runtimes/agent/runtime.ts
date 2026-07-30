@@ -47,6 +47,7 @@ import type { AgentProvider } from './providers/types.ts';
 import { triggerSelfRestart, assertRestartSelfAdmin, type ServiceRestarter } from './self-restart.ts';
 import { registerRuntimeInlineTools } from './runtime-tool-registrations.ts';
 import { dequeueNextReport, emitHealReport, parseHealContext } from '../../core/heal.ts';
+import { allowlistedHealCrashClass, errorClassForHealEvidence } from '../../core/heal-evidence.ts';
 import { sendTracked } from '../../core/durability.ts';
 import { classifyErrorForInbound } from '../../core/inbound-failure-class.ts';
 import {
@@ -5419,11 +5420,12 @@ export class AgentRuntime implements Runtime {
   private dispatchNextControlReport(): void {
     const next = dequeueNextReport(this.db);
     if (!next) return;
-    const context = parseHealContext(next.context);
+    const evidence = parseHealContext(next.context);
+    const errorClass = errorClassForHealEvidence(evidence);
     void this.handleControlTurn(next.report_id, JSON.stringify({
-      ...context,
       reportId: next.report_id,
-      errorClass: next.error_class,
+      errorClass,
+      evidence,
     })).catch((err) => {
       log.error({ err, reportId: next.report_id }, 'unhandled error in handleControlTurn');
     });
@@ -11151,14 +11153,11 @@ export class AgentRuntime implements Runtime {
       return;
     }
     try {
+      const crashClass = allowlistedHealCrashClass(info.crashClass);
       emitHealReport(this.db, this.messenger, this.durability, {
         type: 'crash',
-        chatJid,
-        exitCode: info.exitCode ?? undefined,
-        signal: info.signal ?? undefined,
-        provider: info.provider,
-        crashClass: info.crashClass,
-        stderr: info.stderrPreview,
+        ...(crashClass ? { crashClass } : {}),
+        ...(info.exitCode !== null || info.signal ? { termination: 'exit_or_signal' as const } : {}),
       }, this.activeControlReportId);
     } catch (err) {
       log.warn({ err }, 'failed to emit heal report for session crash');
