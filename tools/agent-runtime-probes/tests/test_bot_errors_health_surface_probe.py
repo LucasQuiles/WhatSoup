@@ -183,9 +183,9 @@ def test_health_surface_malformed_json_sources_are_typed():
         managed = managed_surface(repo)
 
     assert manifest["status"] == "invalid_json", manifest
-    assert manifest["error_type"] == "JSONDecodeError", manifest
+    assert manifest["error_class"] == "json_decode", manifest
     assert managed["status"] == "invalid_json", managed
-    assert managed["error_type"] == "JSONDecodeError", managed
+    assert managed["error_class"] == "json_decode", managed
 
 
 def test_health_surface_probe_maps_source_without_raw_values():
@@ -193,7 +193,10 @@ def test_health_surface_probe_maps_source_without_raw_values():
         report = build_report(fixture_repo(Path(tmp_dir)))
         rendered = json.dumps(report, sort_keys=True)
         assert report["schema"] == "bot-errors-health-surface-report", report
-        assert report["schema_version"] == "0.1", report
+        assert report["schema_version"] == "0.2", report
+        assert report["serializationStatus"] == "emitted", report
+        assert report["reportVerdict"] == "valid", report
+        assert "repo" not in report, report
         assert report["summary"]["key_functions_missing"] == 0, report
         assert "runtime_manifest_inventory" in report["daily_health_surfaces"]["inventory_calls"], report
         assert "plugin_inventory" in report["daily_health_surfaces"]["inventory_calls"], report
@@ -251,11 +254,11 @@ def test_read_lines_missing_path_returns_empty():
 # ---------------------------------------------------------------------------
 
 def test_rel_path_outside_repo_returns_str_path():
-    """rel() falls back to str(path) when path is not under repo."""
+    """rel() suppresses paths outside the supplied repository root."""
     outside = Path("/tmp/not-under-repo.txt")
     repo = Path("/Users/testuser/LAB/WhatSoup")
     result = rel(outside, repo)
-    assert result == str(outside), result
+    assert result is None, result
 
 
 # ---------------------------------------------------------------------------
@@ -339,7 +342,8 @@ def test_manifest_surface_missing_file():
     with tempfile.TemporaryDirectory(prefix="bot-errors-manifest-miss-") as tmp_dir:
         result = manifest_surface(Path(tmp_dir))
     assert result["status"] == "missing", result
-    assert result["error_type"] is None, result
+    assert result["error_class"] is None, result
+    assert result["counts"]["observed_valid"] is None, result
     assert result["file_count"] == 0, result
 
 
@@ -353,12 +357,12 @@ def test_manifest_surface_invalid_shape_non_dict():
         )
         result = manifest_surface(repo)
     assert result["status"] == "invalid_shape", result
-    assert result["error_type"] == "list", result
+    assert result["error_class"] == "root_not_object", result
     assert result["file_count"] == 0, result
 
 
 def test_manifest_surface_invalid_files_not_list():
-    """manifest_surface returns status=invalid_files when 'files' key is not a list."""
+    """A non-list files field is an invalid source shape."""
     with tempfile.TemporaryDirectory(prefix="bot-errors-manifest-files-") as tmp_dir:
         repo = Path(tmp_dir)
         (repo / "deploy").mkdir(parents=True, exist_ok=True)
@@ -366,8 +370,8 @@ def test_manifest_surface_invalid_files_not_list():
             json.dumps({"files": "oops-not-a-list"}), encoding="utf-8"
         )
         result = manifest_surface(repo)
-    assert result["status"] == "invalid_files", result
-    assert result["error_type"] == "files_not_list", result
+    assert result["status"] == "invalid_shape", result
+    assert result["error_class"] == "files_not_list", result
     assert result["file_count"] == 0, result
 
 
@@ -381,9 +385,10 @@ def test_manifest_surface_non_dict_item_in_files_is_skipped():
             encoding="utf-8",
         )
         result = manifest_surface(repo)
-    assert result["status"] == "parsed", result
-    # Only the dict item is processed; non-dicts are skipped
-    assert result["file_count"] == 3, result
+    assert result["status"] == "partial", result
+    assert result["file_count"] == 1, result
+    assert result["counts"]["observed_valid"] == 1, result
+    assert result["counts"]["invalid"] == 2, result
     counts = result["marker_category_counts"]
     assert counts.get("plugin_markers", 0) == 1, counts
 
@@ -398,7 +403,7 @@ def test_manifest_surface_non_str_marker_is_skipped():
             encoding="utf-8",
         )
         result = manifest_surface(repo)
-    assert result["status"] == "parsed", result
+    assert result["status"] == "observed", result
     counts = result["marker_category_counts"]
     # Only the string "manifest marker" should be counted
     assert counts.get("runtime_manifest_markers", 0) == 1, counts
@@ -414,7 +419,7 @@ def test_manifest_surface_single_str_mustcontain():
             encoding="utf-8",
         )
         result = manifest_surface(repo)
-    assert result["status"] == "parsed", result
+    assert result["status"] == "observed", result
     counts = result["marker_category_counts"]
     assert counts.get("provider_markers", 0) == 1, counts
 
@@ -458,7 +463,7 @@ def test_managed_surface_missing_file():
     with tempfile.TemporaryDirectory(prefix="bot-errors-managed-miss-") as tmp_dir:
         result = managed_surface(Path(tmp_dir))
     assert result["status"] == "missing", result
-    assert result["error_type"] is None, result
+    assert result["error_class"] is None, result
 
 
 def test_managed_surface_invalid_shape_non_dict():
@@ -471,11 +476,11 @@ def test_managed_surface_invalid_shape_non_dict():
         )
         result = managed_surface(repo)
     assert result["status"] == "invalid_shape", result
-    assert result["error_type"] == "list", result
+    assert result["error_class"] == "root_not_object", result
 
 
-def test_managed_surface_entries_not_list_uses_empty():
-    """managed_surface treats entries as [] when it is not a list (line 262)."""
+def test_managed_surface_entries_not_list_is_invalid_not_observed_zero():
+    """A non-list entries field is invalid evidence, never a parsed empty inventory."""
     with tempfile.TemporaryDirectory(prefix="bot-errors-managed-entries-") as tmp_dir:
         repo = Path(tmp_dir)
         (repo / "deploy").mkdir(parents=True, exist_ok=True)
@@ -484,12 +489,14 @@ def test_managed_surface_entries_not_list_uses_empty():
             encoding="utf-8",
         )
         result = managed_surface(repo)
-    assert result["status"] == "parsed", result
+    assert result["status"] == "invalid_shape", result
+    assert result["counts"]["observed_valid"] is None, result
+    assert result["counts"]["unknown"] == 1, result
     assert result["protective_service_count"] == 0, result
 
 
-def test_managed_surface_non_dict_entry_is_skipped():
-    """managed_surface skips non-dict items in entries list (line 266 continue)."""
+def test_managed_surface_non_dict_entry_is_partial_not_complete_inventory():
+    """Invalid collection members preserve valid counts but make the observation partial."""
     with tempfile.TemporaryDirectory(prefix="bot-errors-managed-nondictentry-") as tmp_dir:
         repo = Path(tmp_dir)
         (repo / "deploy").mkdir(parents=True, exist_ok=True)
@@ -502,9 +509,10 @@ def test_managed_surface_non_dict_entry_is_skipped():
             encoding="utf-8",
         )
         result = managed_surface(repo)
-    assert result["status"] == "parsed", result
-    # entries count reflects all items in the list even if non-dicts are skipped for counting
-    assert result["protective_service_count"] == 3, result
+    assert result["status"] == "partial", result
+    assert result["counts"]["observed_valid"] == 1, result
+    assert result["counts"]["invalid"] == 2, result
+    assert result["protective_service_count"] == 1, result
     counts = result["purpose_category_counts"]
     assert counts.get("manifest_or_drift", 0) == 1, counts
 
@@ -531,7 +539,7 @@ def test_managed_surface_manifest_or_drift_counter():
 
 
 def test_managed_surface_protective_services_none():
-    """managed_surface handles protective_services being absent (non-dict) gracefully."""
+    """A missing protective-services object is invalid policy shape, not empty evidence."""
     with tempfile.TemporaryDirectory(prefix="bot-errors-managed-noprotect-") as tmp_dir:
         repo = Path(tmp_dir)
         (repo / "deploy").mkdir(parents=True, exist_ok=True)
@@ -539,9 +547,32 @@ def test_managed_surface_protective_services_none():
             json.dumps({"other_key": "value"}), encoding="utf-8"
         )
         result = managed_surface(repo)
-    # protective_services is None (not a dict), so entries becomes [] via ternary
-    assert result["status"] == "parsed", result
+    assert result["status"] == "invalid_shape", result
+    assert result["error_class"] == "protective_services_not_object", result
     assert result["protective_service_count"] == 0, result
+
+
+def test_health_report_missing_managed_policy_is_inconclusive_not_green():
+    with tempfile.TemporaryDirectory(prefix="private-health-root-") as tmp_dir:
+        report = build_report(Path(tmp_dir))
+        rendered = json.dumps(report, sort_keys=True)
+    assert report["reportVerdict"] == "inconclusive", report
+    assert report["consistency"]["managed_components_observed"] is False, report
+    assert report["summary"]["consistency_passed"] < report["summary"]["consistency_total"], report
+    assert tmp_dir not in rendered, rendered
+
+
+def test_health_surface_strict_mode_refuses_invalid_policy_but_report_mode_serializes():
+    with tempfile.TemporaryDirectory(prefix="private-health-root-") as tmp_dir:
+        repo = Path(tmp_dir)
+        write(repo / "deploy/managed-components.json", json.dumps({"protective_services": {"entries": "not-a-list"}}))
+        probe_path = str(Path(__file__).resolve().parents[1] / "bot_errors_health_surface_probe.py")
+        report_only = subprocess.run([sys.executable, probe_path, "--repo", str(repo)], capture_output=True, text=True)
+        strict = subprocess.run([sys.executable, probe_path, "--repo", str(repo), "--strict"], capture_output=True, text=True)
+    assert report_only.returncode == 0, report_only.stderr
+    assert json.loads(report_only.stdout)["reportVerdict"] == "invalid"
+    assert strict.returncode == 2, strict.stderr
+    assert json.loads(strict.stdout)["reportVerdict"] == "invalid"
 
 
 # ---------------------------------------------------------------------------
@@ -564,7 +595,7 @@ def test_main_direct_call_returns_zero_and_emits_json():
     output = buf.getvalue()
     parsed = json.loads(output)
     assert parsed["schema"] == "bot-errors-health-surface-report", parsed
-    assert parsed["schema_version"] == "0.1", parsed
+    assert parsed["schema_version"] == "0.2", parsed
 
 
 def test_main_pretty_flag_produces_indented_json():
