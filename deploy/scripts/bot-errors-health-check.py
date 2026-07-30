@@ -5674,10 +5674,23 @@ def _event_file_age_seconds(path: Path, now: float) -> float:
         return 0.0
 
 
+def _is_durable_internal_entry(path: Path) -> bool:
+    """Return True for durable_json internal artifacts (e.g. ``.durable-json.lock``).
+
+    These are never data entries and must be excluded from queue-depth counts
+    and age calculations. See #2727.
+    """
+    return path.name == ".durable-json.lock"
+
+
 def directory_stats(path: Path, pattern: str) -> tuple[int, int]:
     if not path.exists():
         return 0, 0
-    files = [item for item in path.glob(pattern) if item.is_file()]
+    files = [
+        item
+        for item in path.glob(pattern)
+        if item.is_file() and not _is_durable_internal_entry(item)
+    ]
     if not files:
         return 0, 0
     now = time.time()

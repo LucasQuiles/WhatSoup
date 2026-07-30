@@ -204,3 +204,59 @@ print(json.dumps(dispatcher.daily_health_recovered_incident_keys(event, state)))
     expect(JSON.parse(output)).toEqual(['test-host|line-alpha|daily-health:whatsapp_device_bond_lost']);
   });
 });
+
+describe('bot-errors-health-check queue depth ignores durable lock artifacts (#2727)', () => {
+  it('directory_stats does NOT count .durable-json.lock as a processing queue entry', () => {
+    tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-durable-lock-'));
+    const processingDir = join(tmpRoot, 'processing');
+    mkdirSync(processingDir, { recursive: true });
+    // Create the durable_json lock artifact that should be filtered out
+    writeFileSync(join(processingDir, '.durable-json.lock'), '{}');
+
+    // Without the fix, count=1 triggers WARN (warn_count=1). With the fix,
+    // count=0 so no warning fires.
+    const output = execFileSync('python3', ['-c', `
+import importlib.util, os
+spec = importlib.util.spec_from_file_location("hc", "deploy/scripts/bot-errors-health-check.py")
+hc = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(hc)
+from pathlib import Path
+count, oldest = hc.directory_stats(Path(os.environ["PROCESSING_DIR"]), "*")
+print(f"{count} {oldest}")
+`], {
+      cwd: process.cwd(),
+      encoding: 'utf8',
+      env: { ...process.env, PROCESSING_DIR: processingDir },
+    }).trim();
+
+    const [count, oldest] = output.split(' ').map(Number);
+    expect(count).toBe(0);
+    expect(oldest).toBe(0);
+  });
+
+  it('directory_stats still counts real data entries alongside the lock artifact', () => {
+    tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-durable-lock-'));
+    const processingDir = join(tmpRoot, 'processing');
+    mkdirSync(processingDir, { recursive: true });
+    writeFileSync(join(processingDir, '.durable-json.lock'), '{}');
+    writeFileSync(join(processingDir, 'real-event.json'), '{"createdAt":"2026-07-30T00:00:00Z"}');
+
+    const output = execFileSync('python3', ['-c', `
+import importlib.util, os
+spec = importlib.util.spec_from_file_location("hc", "deploy/scripts/bot-errors-health-check.py")
+hc = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(hc)
+from pathlib import Path
+count, oldest = hc.directory_stats(Path(os.environ["PROCESSING_DIR"]), "*")
+print(f"{count} {oldest}")
+`], {
+      cwd: process.cwd(),
+      encoding: 'utf8',
+      env: { ...process.env, PROCESSING_DIR: processingDir },
+    }).trim();
+
+    const [count] = output.split(' ').map(Number);
+    // Only the real data entry counts, not the lock artifact
+    expect(count).toBe(1);
+  });
+});
