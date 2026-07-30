@@ -1,4 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 type ConnectionUpdateHandler = (update: {
   connection?: string;
@@ -186,7 +188,7 @@ describe('auth CLI restartRequired handling', () => {
 
     try {
       await expect(import('../../src/transport/auth.ts')).rejects.toThrow('exit:1');
-      expect(checkedPaths).toContain('/var/run/whatsoup.lock');
+      expect(checkedPaths).toContain(join(tmpdir(), 'whatsoup-auth.lock'));
       expect(mocks.makeWASocket).not.toHaveBeenCalled();
     } finally {
       vi.doUnmock('../../src/config.ts');
