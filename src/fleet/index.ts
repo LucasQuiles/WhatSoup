@@ -775,8 +775,8 @@ export function createFleetServer(deps: FleetDeps) {
   // from the checker which stays fresh after each git pull.
   let startupSha = 'unknown';
   try {
-    startupSha = execFileSync('git', ['rev-parse', '--short', 'HEAD'], { cwd: repoRoot, env: cleanGitEnv() }).toString().trim();
-  } catch { /* git not available */ }
+    startupSha = execFileSync('git', ['rev-parse', '--short', 'HEAD'], { timeout: 5_000, cwd: repoRoot, env: cleanGitEnv() }).toString().trim();
+  } catch { /* intentional: startupSha stays 'unknown' if git is unavailable or the call times out; getVersion() prefers the async UpdateChecker's SHA once available */ }
   const getVersion = () => {
     const s = updateChecker.getState().sha;
     return (s && s !== 'unknown') ? s : startupSha;

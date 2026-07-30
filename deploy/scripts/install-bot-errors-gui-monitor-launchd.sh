@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # Install the EXTERNAL (off-GUI) WhatSoup GUI-session monitor as an off-host
 # timer on the central hub.
 #

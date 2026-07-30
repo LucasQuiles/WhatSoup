@@ -1,4 +1,4 @@
-#!/bin/zsh
+#!/usr/bin/env zsh
 # watchdog-script.sh — template for com.whatsoup.BOT_NAME-watchdog
 #
 # Replace before installing:

@@ -14,6 +14,9 @@ import { isGroupConversationKey, conversationKeyToJid } from '../../core/convers
 import { normalizeTimestamp, toIsoFromUnix } from '../time-utils.ts';
 import { isTypingHealthEntry } from '../typing-payload.ts';
 import { isPathWithinAllowedRoot } from '../../lib/path-boundary.ts';
+import { createChildLogger } from '../../logger.ts';
+
+const log = createChildLogger('routes/data');
 
 /**
  * Canonicalize `p` as far as it exists on disk, re-appending the not-yet-created
@@ -254,7 +257,7 @@ export function handleGetChats(
   // Fire-and-forget: resolve missing group names via this instance's connection
   if (groupsNeedingBackfill.length > 0) {
     Promise.resolve(resolveGroupNames(instance, groupsNeedingBackfill))
-      .catch(() => { /* group name backfill is best-effort — failure is not user-facing */ });
+      .catch((err) => { log.warn({ err }, 'routes/data: group name backfill failed'); });
   }
 }
 
