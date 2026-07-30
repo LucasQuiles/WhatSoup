@@ -10,19 +10,16 @@
 
 import type { ServerResponse } from 'node:http';
 import { jsonResponse } from '../../lib/http.ts';
+import { isValidInstanceName } from '../instance-name.ts';
 
-/** Valid instance name pattern: lowercase alphanumeric + hyphens, must start with a letter. */
-export const NAME_RE = /^[a-z][a-z0-9-]*$/;
-
-/** Maximum instance name length (route-layer guard). */
-export const NAME_MAX_LENGTH = 30;
+export { NAME_MAX_LENGTH, NAME_RE } from '../instance-name.ts';
 
 /**
  * Guard: validate instance name from URL params before using in shell commands
  * or path construction. Writes a 400 response and returns false on invalid input.
  */
 export function validateInstanceName(name: string, res: ServerResponse): boolean {
-  if (!NAME_RE.test(name) || name.length < 1 || name.length > NAME_MAX_LENGTH) {
+  if (!isValidInstanceName(name)) {
     jsonResponse(res, 400, { error: 'invalid instance name' });
     return false;
   }
