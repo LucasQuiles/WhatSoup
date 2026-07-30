@@ -289,6 +289,25 @@ describe('probeBinaryAuthStatus', () => {
     ).resolves.toMatchObject({ status: 'failed' });
   });
 
+  it('does not spawn when the caller signal is already aborted', async () => {
+    const controller = new AbortController();
+    controller.abort();
+    const spawnImpl = vi.fn();
+    const onProcessClosed = vi.fn();
+
+    await expect(
+      probeBinaryCommand(
+        'opencode',
+        ['run', 'probe'],
+        {},
+        { signal: controller.signal, onProcessClosed },
+        spawnImpl as unknown as SpawnImpl,
+      ),
+    ).resolves.toEqual({ status: 'failed', output: '' });
+    expect(spawnImpl).not.toHaveBeenCalled();
+    expect(onProcessClosed).toHaveBeenCalledOnce();
+  });
+
   it('times out a hung child after 5 s, kills it, and escalates to SIGKILL when it ignores the first kill', async () => {
     vi.useFakeTimers();
     const { spawnImpl, killCalls } = makeAuthSpawnImpl({ neverCloses: true });
@@ -363,6 +382,97 @@ describe('probeBinaryAuthStatus', () => {
       child.emit('close', null, 'SIGTERM');
       expect(onProcessClosed).toHaveBeenCalledOnce();
       child.emit('close', null, 'SIGTERM');
+      expect(onProcessClosed).toHaveBeenCalledOnce();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('terminates on caller abort and settles only after the child closes', async () => {
+    vi.useFakeTimers();
+    try {
+      const controller = new AbortController();
+      const onProcessClosed = vi.fn();
+      const child = new EventEmitter() as EventEmitter & {
+        pid: number;
+        stdout: EventEmitter;
+        stderr: EventEmitter;
+        kill: ReturnType<typeof vi.fn>;
+      };
+      child.pid = 9912;
+      child.stdout = new EventEmitter();
+      child.stderr = new EventEmitter();
+      child.kill = vi.fn(() => true);
+      const spawnImpl = vi.fn(() => child) as unknown as SpawnImpl;
+      const probe = probeBinaryCommand(
+        'opencode',
+        ['run', 'probe'],
+        {},
+        { timeoutMs: 15_000, onProcessClosed, signal: controller.signal },
+        spawnImpl,
+      );
+      let settled = false;
+      void probe.then(() => { settled = true; });
+
+      controller.abort();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(child.kill).toHaveBeenCalledOnce();
+      expect(child.kill).toHaveBeenCalledWith();
+      child.emit('error', new Error('termination in progress'));
+      await vi.advanceTimersByTimeAsync(0);
+      expect(settled).toBe(false);
+      expect(onProcessClosed).not.toHaveBeenCalled();
+
+      child.emit('close', null, 'SIGTERM');
+      await expect(probe).resolves.toMatchObject({ status: 'failed' });
+      expect(onProcessClosed).toHaveBeenCalledOnce();
+
+      controller.abort();
+      child.emit('close', null, 'SIGTERM');
+      expect(child.kill).toHaveBeenCalledOnce();
+      expect(onProcessClosed).toHaveBeenCalledOnce();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('keeps SIGKILL escalation armed after a spawned child errors during abort', async () => {
+    vi.useFakeTimers();
+    try {
+      const controller = new AbortController();
+      const onProcessClosed = vi.fn();
+      const child = new EventEmitter() as EventEmitter & {
+        pid: number;
+        stdout: EventEmitter;
+        stderr: EventEmitter;
+        kill: ReturnType<typeof vi.fn>;
+      };
+      child.pid = 9913;
+      child.stdout = new EventEmitter();
+      child.stderr = new EventEmitter();
+      child.kill = vi.fn(() => true);
+      const spawnImpl = vi.fn(() => child) as unknown as SpawnImpl;
+      const probe = probeBinaryCommand(
+        'opencode',
+        ['run', 'probe'],
+        {},
+        { timeoutMs: 15_000, onProcessClosed, signal: controller.signal },
+        spawnImpl,
+      );
+      let settled = false;
+      void probe.then(() => { settled = true; });
+
+      controller.abort();
+      child.emit('error', new Error('termination in progress'));
+      await vi.advanceTimersByTimeAsync(2_001);
+
+      expect(child.kill).toHaveBeenNthCalledWith(1);
+      expect(child.kill).toHaveBeenNthCalledWith(2, 'SIGKILL');
+      expect(settled).toBe(false);
+      expect(onProcessClosed).not.toHaveBeenCalled();
+
+      child.emit('close', null, 'SIGKILL');
+      await expect(probe).resolves.toMatchObject({ status: 'failed' });
       expect(onProcessClosed).toHaveBeenCalledOnce();
     } finally {
       vi.useRealTimers();

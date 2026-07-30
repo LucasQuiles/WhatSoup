@@ -69,7 +69,8 @@ export type InternalOutboundFailureCode =
   | 'outbound.status_ping_expired'
   | 'outbound.unsafe_delivery_unconfirmed'
   | 'outbound.governor_shed'
-  | 'outbound.replay_failed';
+  | 'outbound.replay_failed'
+  | 'outbound.deferral_limit_exceeded';
 
 export type OutboundFailureCode = TransportErrorCode | InternalOutboundFailureCode;
 
@@ -159,6 +160,7 @@ const INTERNAL_CODES = new Set<string>([
   'outbound.unsafe_delivery_unconfirmed',
   'outbound.governor_shed',
   'outbound.replay_failed',
+  'outbound.deferral_limit_exceeded',
 ]);
 const STAGES = new Set<string>(OUTBOUND_FAILURE_STAGES);
 const MUTATION_STATES = new Set<string>(OUTBOUND_MUTATION_STATES);

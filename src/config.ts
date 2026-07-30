@@ -1118,6 +1118,13 @@ export const config = {
   toolUpdateRedirectJid: stringProp(instance ?? undefined, 'toolUpdateRedirectJid') ?? null,
   // Gate the agent restart/back-online notification. Default true preserves existing behavior.
   startupNotifications: booleanProp(instance ?? undefined, 'startupNotifications', true),
+  // How long the instance must stay up AND connected before the back-online
+  // notice sends. Boots inside the window aggregate into ONE summary message
+  // (see src/core/startup-notify.ts) so flap or maintenance can never ping
+  // the user once per recovery. 0 restores the legacy immediate send; an
+  // invalid or out-of-range value falls back to 600 rather than silently
+  // disabling the debounce.
+  startupNotificationStabilitySeconds: boundedIntProp(instance ?? undefined, 'startupNotificationStabilitySeconds', 600, 0, 86_400),
   // Gate proactive per_chat session resume on startup. Default true preserves existing behavior.
   proactiveResumeOnStartup: booleanProp(instance ?? undefined, 'proactiveResumeOnStartup', true),
   // C5 restart-loop guard: suppress proactive resume after repeated crashy

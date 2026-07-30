@@ -24,7 +24,9 @@ import { withDatabaseCompatibility } from './runtimes/chat/providers/database-co
 import { resolveBinaryPath } from './runtimes/chat/providers/transcription/local-audio.ts';
 import type { DatabaseCompatibilityError } from './core/database-compatibility.ts';
 import { MemoryConsolidationScheduler } from './memory/consolidation-scheduler.ts';
+import { ConsolidationRunStore } from './memory/consolidation-run-store.ts';
 import { startHealthServer } from './core/health.ts';
+import { composeStartupNotification, markStartupNotified, recordStartupBoot, startupNotifyPath } from './core/startup-notify.ts';
 import { openDatabaseForStartup } from './core/database-compatibility-health.ts';
 import {
   closeDatabaseCompatibilityHealthServer,
@@ -70,6 +72,7 @@ import { startModelCurrencyMonitor } from './lib/model-advisor.ts';
 import { buildMemoryReadinessLogFields } from './lib/memory-operation-telemetry.ts';
 import { shutdownExitCode } from './main-shutdown-policy.ts';
 import { markCleanExit, restartLoopGuardPath } from './runtimes/agent/restart-loop-guard.ts';
+import { formatClockForUser } from './runtimes/agent/runtime-presentation.ts';
 import { acquireProcessLock, isProcessLockError, releaseProcessLock, type ProcessLockHandle } from './lib/process-lock.ts';
 import { createServiceManager } from './fleet/platform.ts';
 
@@ -190,6 +193,15 @@ if (databaseStartup.mode === 'drained') {
   process.exit(shutdownExitCode(drainSignal));
 }
 const db = databaseStartup.db;
+const memoryConsolidationRunStore = new ConsolidationRunStore(db);
+try {
+  memoryConsolidationRunStore.abandonInterruptedRuns(Date.now());
+} catch {
+  log.error({
+    failureCode: 'observation_failed',
+    stage: 'finalize',
+  }, 'memory consolidation: restart receipt recovery failed');
+}
 
 const pineconeReadiness = await getPineconeReadiness(config.pineconeIndex);
 log.info(
@@ -203,6 +215,10 @@ if (seededChatAliases > 0) {
 }
 const profileRegistry = createProfileRegistry(config.profiles ?? {});
 const outboundSendsWriter = createOutboundSendsWriter({ db: db.raw, line: config.botName });
+const databaseRetentionTimer = new DatabaseRetentionTimer(db, {
+  ...DEFAULT_DATABASE_RETENTION,
+  messageRetentionDays: config.retentionDays,
+});
 
 // 2a. Seed admin phones into access_list for allowlist/open_dm modes.
 // INSERT OR IGNORE — existing entries are untouched, only missing ones are added.
@@ -432,11 +448,16 @@ if (instanceType === 'agent') {
     config.memory.consolidation.enabled &&
     pineconeReadiness.state === 'ready'
   ) {
-    memoryConsolidationScheduler = new MemoryConsolidationScheduler(pinecone, anthropic, {
-      intervalMs: config.memory.consolidation.intervalHours * 60 * 60 * 1000,
-      lookbackDays: config.memory.consolidation.lookbackDays,
-      dryRun: config.memory.consolidation.dryRun,
-    });
+    memoryConsolidationScheduler = new MemoryConsolidationScheduler(
+      pinecone,
+      anthropic,
+      {
+        intervalMs: config.memory.consolidation.intervalHours * 60 * 60 * 1000,
+        lookbackDays: config.memory.consolidation.lookbackDays,
+        dryRun: config.memory.consolidation.dryRun,
+      },
+      memoryConsolidationRunStore,
+    );
     memoryConsolidationScheduler.start();
   } else if (config.memory.consolidation.enabled) {
     log.warn({
@@ -778,6 +799,16 @@ const healthServer = startHealthServer({
   instanceName: config.botName,
   instanceType: instanceType,
   accessMode: config.accessMode,
+  getMemoryConsolidationHealth: () =>
+    memoryConsolidationRunStore.readHealth({
+      enabled: config.memory.consolidation.enabled,
+      started: memoryConsolidationScheduler !== null,
+      nowMs: Date.now(),
+      // Skipped ticks do not renew progress or the lease. A run that makes no
+      // progress for the scheduler's five-minute total deadline is stalled.
+      stalledAfterMs: 5 * 60_000,
+    }),
+  getDatabaseRetentionHealth: () => databaseRetentionTimer.getHealthSnapshot(),
   // D-4 console approval queue: only the agent runtime owns the
   // pending-poll machinery; chat/passive instances omit the callback and
   // the health endpoint answers 503 honestly.
@@ -894,10 +925,6 @@ processTmpRetentionTimer.start(DEFAULT_PROCESS_TMP_RETENTION.intervalMs);
 // messages/receipts now (config.retentionDays, same knob the retired
 // standalone path read), replacing the separate startup timeout + daily
 // interval that used to call deleteOldMessages() directly.
-const databaseRetentionTimer = new DatabaseRetentionTimer(db, {
-  ...DEFAULT_DATABASE_RETENTION,
-  messageRetentionDays: config.retentionDays,
-});
 databaseRetentionTimer.start(DEFAULT_DATABASE_RETENTION.intervalMs);
 
 // 13. Echo timeout checker — sweep submitted ops stuck > 30 s without an echo
@@ -1080,23 +1107,47 @@ async function start(): Promise<void> {
       config.startupNotifications &&
       config.toolUpdateMode !== 'minimal'
     ) {
-      // Agent restart notification (existing behavior)
+      // Agent restart notification — stability-debounced and aggregating.
+      // Every boot lands in a persisted journal; the back-online notice sends
+      // only after the instance has stayed up AND connected for the stability
+      // window, and one message covers every boot since the last notification
+      // (see src/core/startup-notify.ts for the five-consecutive-pings
+      // incident that shaped this). The journal write is fail-open.
+      const snPath = startupNotifyPath(config.stateRoot);
+      const snState = recordStartupBoot(snPath, Date.now());
       const pending = runtime.popStartupMessage();
-      const notifyTarget = pending
-        ? { chatJid: pending.chatJid, text: pending.text, isResume: true }
-        : { chatJid: adminChatJid, text: '*Agent back online* ✓', isResume: false };
-      // PR-C: the bare '*Agent back online* ✓' fallback is a status op
-      // (unsafe + status_ping) so it supersedes/ages-out and cannot storm. The
-      // isResume branch carries real continuity content — it stays a safe text op.
-      const startupOpts: { replayPolicy: 'safe' | 'unsafe'; opType?: 'status_ping' } =
-        notifyTarget.isResume
-          ? { replayPolicy: 'safe' }
-          : { replayPolicy: 'unsafe', opType: 'status_ping' };
-      setTimeout(() => {
-        sendTracked(connectionManager, notifyTarget.chatJid, notifyTarget.text, durability, startupOpts)
-          .then(() => log.info({ chatJid: notifyTarget.chatJid, isResume: notifyTarget.isResume }, 'sent startup notification'))
-          .catch((err) => log.warn({ err, chatJid: notifyTarget.chatJid }, 'failed to send startup notification'));
-      }, 3_000);
+      if (pending) {
+        // Resume messages carry real continuity content — send promptly, and
+        // count this boot as notified so the debounced ping cannot duplicate.
+        setTimeout(() => {
+          markStartupNotified(snPath, Date.now());
+          sendTracked(connectionManager, pending.chatJid, pending.text, durability, { replayPolicy: 'safe' })
+            .then(() => log.info({ chatJid: pending.chatJid, isResume: true }, 'sent startup notification'))
+            .catch((err) => log.warn({ err, chatJid: pending.chatJid }, 'failed to send startup notification'));
+        }, 3_000);
+      } else {
+        const stabilityMs = Math.max(config.startupNotificationStabilitySeconds * 1_000, 3_000);
+        const fireWhenStable = (): void => {
+          // "Back online" must be TRUE at send time: an instance still
+          // reconnecting re-arms the timer instead of announcing recovery.
+          // A transport without the snapshot accessor fails open to connected.
+          const connected = connectionManager.getConnectionState?.().connected ?? true;
+          if (!connected) {
+            setTimeout(fireWhenStable, stabilityMs);
+            return;
+          }
+          const notification = composeStartupNotification(snState, formatClockForUser);
+          // Marked BEFORE the send: a crash mid-send loses at most one
+          // summary and can never duplicate it (introSent precedent).
+          markStartupNotified(snPath, Date.now());
+          // PR-C: the back-online notice is a status op (unsafe + status_ping)
+          // so it supersedes/ages-out in the durability queue and cannot storm.
+          sendTracked(connectionManager, adminChatJid, notification.text, durability, { replayPolicy: 'unsafe', opType: 'status_ping' })
+            .then(() => log.info({ chatJid: adminChatJid, isResume: false, bootsCovered: notification.bootsCovered }, 'sent startup notification'))
+            .catch((err) => log.warn({ err, chatJid: adminChatJid }, 'failed to send startup notification'));
+        };
+        setTimeout(fireWhenStable, stabilityMs);
+      }
     }
   } else if (!adminPhone) {
     log.warn('no admin phones configured — skipping startup notification');

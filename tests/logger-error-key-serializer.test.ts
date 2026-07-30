@@ -72,6 +72,32 @@ describe('logger.ts — error-key serialization (#1776)', () => {
       expect(typeof (entry.error as { stack?: string }).stack).toBe('string');
     });
 
+    it('serializes an Error logged under the `reason` key (unhandledRejection convention, #2698)', async () => {
+      const { errorLikeSerializers } = await import('../src/logger.ts');
+      const capture = captureStream();
+      const testLogger = pino({ serializers: errorLikeSerializers }, capture.stream);
+
+      // src/main.ts logs the raw rejection value as { reason } — before this
+      // serializer a real Error rendered as `{}`, masking the crash cause.
+      testLogger.fatal({ reason: new Error('shutdown rejected mid-turn') }, 'unhandled rejection');
+      const [entry] = capture.lines();
+
+      expect(entry.reason).not.toEqual({});
+      expect((entry.reason as { message?: string }).message).toBe('shutdown rejected mid-turn');
+      expect(typeof (entry.reason as { stack?: string }).stack).toBe('string');
+    });
+
+    it('passes a non-Error `reason` through unchanged (rejections can carry any value)', async () => {
+      const { errorLikeSerializers } = await import('../src/logger.ts');
+      const capture = captureStream();
+      const testLogger = pino({ serializers: errorLikeSerializers }, capture.stream);
+
+      testLogger.fatal({ reason: 'string rejection' }, 'unhandled rejection');
+      const [entry] = capture.lines();
+
+      expect(entry.reason).toBe('string rejection');
+    });
+
     it('still serializes the WhatSoup convention `err` key (regression guard)', async () => {
       const { errorLikeSerializers } = await import('../src/logger.ts');
       const capture = captureStream();

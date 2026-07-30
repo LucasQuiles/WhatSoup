@@ -1,9 +1,15 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import { buildDiagnosticProbes, type DiagnosticProbeBuilderDeps } from '../../../src/runtimes/agent/diagnostic-probes.ts';
 import { runDiagnosticBundle } from '../../../src/runtimes/agent/diagnostic-bundle.ts';
 import { RESPONSE_WORKFLOWS } from '../../../src/runtimes/agent/response-registry.ts';
-import type { PrimaryModelUsabilityResult, PrimaryModelUsabilityStatus } from '../../../src/runtimes/agent/providers/primary-model-usability.ts';
+import {
+  probePrimaryModelUsability,
+  type PrimaryModelUsabilityResult,
+  type PrimaryModelUsabilityStatus,
+} from '../../../src/runtimes/agent/providers/primary-model-usability.ts';
+import { createPrimaryModelProbeAdapters } from '../../../src/runtimes/agent/providers/primary-model-usability-adapters.ts';
+import { ProviderExecutionGate } from '../../../src/runtimes/agent/provider-execution-gate.ts';
 import type { AccountAuthStatusDeps } from '../../../src/runtimes/agent/providers/account-auth-status.ts';
 
 const NOW = 1_781_000_000_000;
@@ -133,6 +139,66 @@ describe('buildDiagnosticProbes', () => {
     expect(recovered).toMatchObject({ ok: true, confidence: 'probable' });
     const not = await buildDiagnosticProbes(deps())['primary-recovery-probe']!(signal());
     expect(not).toMatchObject({ ok: false, confidence: 'probable' });
+  });
+
+  it('forwards each diagnostic signal into the primary probe lifecycle', async () => {
+    const runPrimaryModelUsability = vi.fn(async () => ({
+      status: 'usable' as const,
+      provider: 'claude-cli',
+      model: 'claude-opus-4-8',
+    }));
+    const runPrimaryRecoveryProbe = vi.fn(async () => true);
+    const map = buildDiagnosticProbes(deps({
+      runPrimaryModelUsability,
+      runPrimaryRecoveryProbe,
+    }));
+    const usabilityController = new AbortController();
+    const recoveryController = new AbortController();
+
+    await map['primary-model-usability']!(usabilityController.signal);
+    await map['primary-recovery-probe']!(recoveryController.signal);
+
+    expect(runPrimaryModelUsability).toHaveBeenCalledWith(usabilityController.signal);
+    expect(runPrimaryRecoveryProbe).toHaveBeenCalledWith(recoveryController.signal);
+  });
+
+  it('diagnostic cancellation removes a real queued primary probe before it can start later', async () => {
+    const gate = new ProviderExecutionGate();
+    const activeTurn = await gate.acquire();
+    const probeBinaryCommand = vi.fn(async () => ({ status: 'ok' as const, output: 'OK' }));
+    const adapters = createPrimaryModelProbeAdapters(undefined, {
+      getProviderBinary: vi.fn(() => 'opencode'),
+      probeBinaryCommand,
+      providerExecutionGate: gate,
+    });
+    const map = buildDiagnosticProbes(deps({
+      runPrimaryModelUsability: (signal) => probePrimaryModelUsability(
+        { provider: 'opencode-cli', model: 'openai/some-model' },
+        adapters,
+        { signal },
+      ),
+    }));
+    const controller = new AbortController();
+    const diagnostic = map['primary-model-usability']!(controller.signal);
+    await Promise.resolve();
+    expect(gate.snapshot()).toMatchObject({ active: true, pending: 1 });
+
+    controller.abort();
+    await expect(diagnostic).resolves.toMatchObject({
+      ok: false,
+      confidence: 'suspected',
+      data: expect.objectContaining({ status: 'timeout' }),
+    });
+    expect(gate.snapshot()).toMatchObject({
+      active: true,
+      pending: 0,
+      abortedWaits: 1,
+    });
+
+    activeTurn.release();
+    await Promise.resolve();
+    expect(probeBinaryCommand).not.toHaveBeenCalled();
+    expect(gate.snapshot()).toMatchObject({ active: false, pending: 0 });
   });
 
   it('feeds a usage-limit workflow end-to-end through the orchestrator', async () => {

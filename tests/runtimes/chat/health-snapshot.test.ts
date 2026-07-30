@@ -58,7 +58,8 @@ vi.mock('../../../src/runtimes/chat/enrichment/poller.ts', () => {
 vi.mock('../../../src/runtimes/chat/queue.ts', () => {
   class ChatQueue {
     private _stats = { activeChats: 0, queuedChats: 0, trackedChats: 0 };
-    enqueue = vi.fn();
+    enqueue = vi.fn().mockResolvedValue(true);
+    get droppedCount() { return 0; }
     get stats() { return this._stats; }
   }
   return { ChatQueue };

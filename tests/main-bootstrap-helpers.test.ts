@@ -78,6 +78,7 @@ type MainHarness = Awaited<ReturnType<typeof importMainWithMocks>>;
 type HealthServerDepsForTest = {
   handleAccessDecision: (subjectType: string, subjectId: string, action: string) => Promise<void>;
   getEnrichmentStats: () => unknown;
+  getDatabaseRetentionHealth: () => unknown;
 };
 
 type CapturedTimer = {
@@ -96,6 +97,7 @@ class FakeConnection extends EventEmitter {
     size: 0,
   };
   presenceCache = {};
+  getConnectionState = vi.fn(() => ({ connected: true }));
   connect = vi.fn(async () => {});
   shutdown = vi.fn();
   sendRaw = vi.fn(async () => ({ waMessageId: 'raw-1' }));
@@ -162,6 +164,7 @@ async function importMainWithMocks(options: {
   } | null;
   selfRestartMarkerThrows?: boolean;
   resolveBinaryPathReturn?: string | null;
+  startupNotificationStabilitySeconds?: number;
 } = {}) {
   vi.resetModules();
   vi.useFakeTimers();
@@ -242,7 +245,11 @@ async function importMainWithMocks(options: {
   const memoryScheduler = { start: vi.fn(), stop: vi.fn(async () => {}) };
   const mediaRetentionTimer = { start: vi.fn(), stop: vi.fn() };
   const processTmpRetentionTimer = { start: vi.fn(), stop: vi.fn() };
-  const databaseRetentionTimer = { start: vi.fn(), stop: vi.fn() };
+  const databaseRetentionTimer = {
+    start: vi.fn(),
+    stop: vi.fn(),
+    getHealthSnapshot: vi.fn(() => ({ running: true })),
+  };
   const messageScheduler = { recoverStale: vi.fn(), start: vi.fn(), stop: vi.fn() };
   const triggerPoller = { start: vi.fn(), stop: vi.fn() };
   const durability = {
@@ -286,7 +293,15 @@ async function importMainWithMocks(options: {
     mediaDir: '/tmp/ws-helpers-media/tmp',
     mediaRetention: { intervalHours: 1, tempHours: 1, cacheHours: 24 },
     dataRoot: '/tmp/ws-helpers-data-root',
+    // Unwritable on purpose (a path under a device file): mkdir/read/write all
+    // fail, so the startup-notify journal genuinely fails open and these wiring
+    // tests touch no real filesystem state. A plain /tmp path does NOT achieve
+    // this — writeAtomicPrivateFileSync mkdirs recursively and the writes land.
+    stateRoot: '/dev/null/ws-helpers-state-root',
     startupNotifications: true,
+    // 0 = legacy immediate send (3 s floor); individual tests opt into the
+    // debounce window explicitly.
+    startupNotificationStabilitySeconds: options.startupNotificationStabilitySeconds ?? 0,
     toolUpdateMode: 'full',
   };
 
@@ -1190,6 +1205,26 @@ describe('main.ts — uncovered helpers and signal paths', () => {
   // ── I. Agent: pending startup message ─────────────────────────────────────
 
   describe('agent startup notification — pending popStartupMessage', () => {
+    // The canonical back-online send, in one place: the notice text and send
+    // options are asserted in seven tests below and must move in lockstep.
+    const backOnlineCall = (
+      h: { connection: unknown; durability: unknown },
+      chatJid = '15551230000@s.whatsapp.net',
+    ) =>
+      [
+        h.connection,
+        chatJid,
+        '*Agent back online* ✓',
+        h.durability,
+        { replayPolicy: 'unsafe', opType: 'status_ping' },
+      ] as const;
+    const sharedAgentInstanceConfig = () => ({
+      name: 'q',
+      type: 'agent',
+      introSent: true,
+      agentOptions: { sessionScope: 'shared' },
+    });
+
     it('sends the pending message to the pending chatJid when popStartupMessage returns a resume', async () => {
       const h = await importMainWithMocks({
         instanceConfig: {
@@ -1217,13 +1252,7 @@ describe('main.ts — uncovered helpers and signal paths', () => {
         { replayPolicy: 'safe' },
       );
       // It must NOT fall back to the default "back online" notice (a status op).
-      expect(h.sendTracked).not.toHaveBeenCalledWith(
-        h.connection,
-        '15551230000@s.whatsapp.net',
-        '*Agent back online* ✓',
-        h.durability,
-        { replayPolicy: 'unsafe', opType: 'status_ping' },
-      );
+      expect(h.sendTracked).not.toHaveBeenCalledWith(...backOnlineCall(h));
       expect(h.logger.info).toHaveBeenCalledWith(
         { chatJid: '15559001@s.whatsapp.net', isResume: true },
         'sent startup notification',
@@ -1232,58 +1261,33 @@ describe('main.ts — uncovered helpers and signal paths', () => {
 
     it('sends the default back-online notice when no pending message exists', async () => {
       const h = await importMainWithMocks({
-        instanceConfig: {
-          name: 'q',
-          type: 'agent',
-          introSent: true,
-          agentOptions: { sessionScope: 'shared' },
-        },
+        instanceConfig: sharedAgentInstanceConfig(),
         pendingStartupMessage: null,
       });
 
       await vi.advanceTimersByTimeAsync(3_000);
 
-      expect(h.sendTracked).toHaveBeenCalledWith(
-        h.connection,
-        '15551230000@s.whatsapp.net',
-        '*Agent back online* ✓',
-        h.durability,
-        { replayPolicy: 'unsafe', opType: 'status_ping' },
-      );
+      expect(h.sendTracked).toHaveBeenCalledWith(...backOnlineCall(h));
     });
 
     it('routes the default back-online notice to the canonical Signal admin JID', async () => {
       const h = await importMainWithMocks({
         transport: 'signal',
         adminPhones: ['01234567-89ab-cdef-0123-456789abcdef'],
-        instanceConfig: {
-          name: 'q',
-          type: 'agent',
-          introSent: true,
-          agentOptions: { sessionScope: 'shared' },
-        },
+        instanceConfig: sharedAgentInstanceConfig(),
         pendingStartupMessage: null,
       });
 
       await vi.advanceTimersByTimeAsync(3_000);
 
       expect(h.sendTracked).toHaveBeenCalledWith(
-        h.connection,
-        '01234567-89ab-cdef-0123-456789abcdef@signal',
-        '*Agent back online* ✓',
-        h.durability,
-        { replayPolicy: 'unsafe', opType: 'status_ping' },
+        ...backOnlineCall(h, '01234567-89ab-cdef-0123-456789abcdef@signal'),
       );
     });
 
     it('logs warn when default startup notification delivery fails', async () => {
       const h = await importMainWithMocks({
-        instanceConfig: {
-          name: 'q',
-          type: 'agent',
-          introSent: true,
-          agentOptions: { sessionScope: 'shared' },
-        },
+        instanceConfig: sharedAgentInstanceConfig(),
         pendingStartupMessage: null,
       });
       h.sendTracked.mockRejectedValueOnce(new Error('send failed'));
@@ -1298,6 +1302,41 @@ describe('main.ts — uncovered helpers and signal paths', () => {
         }),
         'failed to send startup notification',
       );
+    });
+
+    // ── Stability debounce (startupNotificationStabilitySeconds > 0) ─────────
+    // Five consecutive back-online pings reached a real user during host
+    // maintenance because the notice fired 3 s after every boot; the debounce
+    // makes "back online" mean "up AND connected for the window".
+
+    it('debounces the back-online notice to the stability window', async () => {
+      const h = await importMainWithMocks({
+        instanceConfig: sharedAgentInstanceConfig(),
+        pendingStartupMessage: null,
+        startupNotificationStabilitySeconds: 600,
+      });
+
+      await vi.advanceTimersByTimeAsync(3_000);
+      expect(h.sendTracked).not.toHaveBeenCalledWith(...backOnlineCall(h));
+
+      await vi.advanceTimersByTimeAsync(600_000);
+      expect(h.sendTracked).toHaveBeenCalledWith(...backOnlineCall(h));
+    });
+
+    it('re-arms instead of announcing while the transport is still reconnecting', async () => {
+      const h = await importMainWithMocks({
+        instanceConfig: sharedAgentInstanceConfig(),
+        pendingStartupMessage: null,
+        startupNotificationStabilitySeconds: 600,
+      });
+      h.connection.getConnectionState.mockReturnValue({ connected: false });
+
+      await vi.advanceTimersByTimeAsync(600_000);
+      expect(h.sendTracked).not.toHaveBeenCalledWith(...backOnlineCall(h));
+
+      h.connection.getConnectionState.mockReturnValue({ connected: true });
+      await vi.advanceTimersByTimeAsync(600_000);
+      expect(h.sendTracked).toHaveBeenCalledWith(...backOnlineCall(h));
     });
   });
 

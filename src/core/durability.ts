@@ -42,6 +42,12 @@ import {
   validatePositiveSafeInteger,
 } from './turn-recovery-store.ts';
 import {
+  normalizeToolDurabilityGroup,
+  TOOL_INPUT_MARKER,
+  TOOL_RESULT_MARKERS,
+  type ToolCompletionEvidence,
+} from './durability-evidence-contract.ts';
+import {
   SessionLifecycleStore,
   type BeginFreshSessionLifecycleParams,
   type CloseSessionLifecycleFailureParams,
@@ -125,12 +131,23 @@ const log = createChildLogger('durability');
  */
 const STATUS_OP_TTL_MS = 30 * 60 * 1000;
 
+/**
+ * PR-C: max deferrals for a `text` op before the drain quarantines it instead of
+ * re-deferring indefinitely. A persistently rate-limited conversation that keeps
+ * hitting `retry_not_before` will accumulate pending rows with no terminal state.
+ * This bound ensures the system fails loud (quarantine + alert via the existing
+ * outbound_quarantined pathway) rather than accumulating silently.
+ *
+ * `status_ping` ops are exempt — they have their own TTL age-out above.
+ * `failed_permanent` is a separate terminal path for non-retryable failures.
+ */
+const MAX_TEXT_OP_DEFERRAL_COUNT = 20;
+
 // ── Status string unions ──
 
 export type OutboundStatus = 'pending' | 'sending' | 'submitted' | 'echoed' | 'maybe_sent' | 'failed_permanent' | 'quarantined';
 type InboundStatus = 'pending' | 'processing' | 'turn_done' | 'complete' | 'failed';
 export type SessionStatus = 'active' | 'suspended' | 'orphaned' | 'ended';
-type ToolCallStatus = 'pending' | 'executing' | 'complete' | 'error' | 'replayed' | 'quarantined';
 
 // ── SQLite row interfaces ──
 
@@ -263,6 +280,7 @@ type DurabilityStatements = {
   markTurnDone: PreparedStatement;
   markInboundComplete: PreparedStatement;
   markInboundFailed: PreparedStatement;
+  markInboundFailedIfProcessing: PreparedStatement;
   markContinuityCandidate: PreparedStatement;
   markContinuityCandidateIfUnownedAndNoTerminalOutbound: PreparedStatement;
   markInboundSkipped: PreparedStatement;
@@ -347,6 +365,17 @@ export class DurabilityEngine {
         // terminal_reason stays exactly 'error' (external matcher contract); the
         // bounded, content-free failure_class column carries the driver split.
         `UPDATE inbound_events SET processing_status = 'failed', completed_at = datetime('now'), terminal_reason = 'error', failure_class = ? WHERE seq = ?`,
+      ),
+      markInboundFailedIfProcessing: prepare(
+        `UPDATE inbound_events
+         SET processing_status = 'failed',
+             completed_at = datetime('now'),
+             terminal_reason = 'error',
+             failure_class = ?
+         WHERE seq = ?
+           AND message_id = ?
+           AND chat_jid = ?
+           AND processing_status = 'processing'`,
       ),
       markContinuityCandidate: prepare(
         `UPDATE inbound_events
@@ -481,12 +510,29 @@ export class DurabilityEngine {
            AND status IN ('submitted', 'maybe_sent', 'quarantined', 'failed_permanent')`,
       ),
       recordToolCall: prepare(
-        `INSERT INTO tool_calls (conversation_key, session_checkpoint_id, tool_name, tool_input, status, replay_policy)
-         VALUES (?, ?, ?, ?, 'pending', ?)`,
+        `INSERT INTO tool_calls (
+           conversation_key, session_checkpoint_id, tool_name, tool_group,
+           tool_input, status, replay_policy, outcome_code,
+           retry_disposition, operator_action, evidence_coverage
+         )
+         VALUES (?, ?, ?, ?, ?, 'pending', ?, 'not_terminal',
+                 'not_applicable', 'none', 'complete')`,
       ),
       markToolExecuting: prepare(`UPDATE tool_calls SET status = 'executing' WHERE id = ?`),
       markToolComplete: prepare(
-        `UPDATE tool_calls SET status = ?, result = ?, completed_at = datetime('now'), outbound_op_id = ? WHERE id = ?`,
+        `UPDATE tool_calls
+         SET status = ?,
+             result = ?,
+             completed_at = datetime('now'),
+             outbound_op_id = ?,
+             outcome_code = ?,
+             failure_code = ?,
+             failure_stage = ?,
+             retry_disposition = ?,
+             operator_action = ?,
+             evidence_coverage = ?,
+             duration_ms = ?
+         WHERE id = ?`,
       ),
       accumulateSessionTokens: prepare(
         `UPDATE agent_sessions
@@ -602,7 +648,7 @@ export class DurabilityEngine {
       getOutboundByStatus: prepare(
         `SELECT id, status, chat_jid, op_type, payload, wa_message_id, replay_policy,
                 created_at, submitted_at, source_inbound_seq, retry_count, error, is_terminal
-         FROM outbound_ops WHERE status = ?`,
+         FROM outbound_ops WHERE status = ? ORDER BY id ASC`,
       ),
       getLiveReconcileMaybeSent: prepare(
         `SELECT o.id, o.status, o.chat_jid, o.op_type, o.payload, o.wa_message_id,
@@ -625,10 +671,32 @@ export class DurabilityEngine {
          FROM tool_calls WHERE status IN ('executing', 'pending')`,
       ),
       markToolReplayed: prepare(
-        `UPDATE tool_calls SET status = 'replayed', completed_at = datetime('now') WHERE id = ?`,
+        `UPDATE tool_calls
+         SET status = 'replayed',
+             result = ?,
+             completed_at = datetime('now'),
+             outcome_code = 'recovered_replayed',
+             failure_code = NULL,
+             failure_stage = NULL,
+             retry_disposition = 'not_applicable',
+             operator_action = 'none',
+             evidence_coverage = 'complete',
+             duration_ms = NULL
+         WHERE id = ?`,
       ),
       markRecoveredToolQuarantined: prepare(
-        `UPDATE tool_calls SET status = 'quarantined', completed_at = datetime('now') WHERE id = ?`,
+        `UPDATE tool_calls
+         SET status = 'quarantined',
+             result = ?,
+             completed_at = datetime('now'),
+             outcome_code = 'recovery_quarantined',
+             failure_code = 'unknown',
+             failure_stage = 'recovery',
+             retry_disposition = 'not_retryable',
+             operator_action = 'inspect',
+             evidence_coverage = 'partial',
+             duration_ms = NULL
+         WHERE id = ?`,
       ),
       getProcessingInboundEvents: prepare(
         `SELECT i.seq FROM inbound_events i
@@ -1049,6 +1117,21 @@ export class DurabilityEngine {
 
   markInboundFailed(seq: number, failureClass?: InboundFailureClass): void {
     this.statements.markInboundFailed.run(coerceInboundFailureClass(failureClass), seq);
+  }
+
+  /** Fail exactly the processing inbound owned by the supplied runtime message. */
+  markInboundFailedIfProcessing(
+    seq: number,
+    messageId: string,
+    chatJid: string,
+    failureClass?: InboundFailureClass,
+  ): boolean {
+    return this.statements.markInboundFailedIfProcessing.run(
+      coerceInboundFailureClass(failureClass),
+      seq,
+      messageId,
+      chatJid,
+    ).changes === 1;
   }
 
   markContinuityCandidate(
@@ -1660,9 +1743,20 @@ export class DurabilityEngine {
   }
 
   // ── Tool calls ──
-  recordToolCall(conversationKey: string, toolName: string, toolInput: string, replayPolicy: string, checkpointId?: number): number {
+  recordToolCall(
+    conversationKey: string,
+    toolName: string,
+    toolGroup: string,
+    replayPolicy: string,
+    checkpointId?: number,
+  ): number {
     const result = this.statements.recordToolCall.run(
-      conversationKey, checkpointId ?? null, toolName, toolInput, replayPolicy,
+      conversationKey,
+      checkpointId ?? null,
+      toolName,
+      normalizeToolDurabilityGroup(toolGroup),
+      TOOL_INPUT_MARKER,
+      replayPolicy,
     );
     const id = Number(result.lastInsertRowid);
     log.debug({ id, toolName, replayPolicy }, 'recordToolCall');
@@ -1673,13 +1767,68 @@ export class DurabilityEngine {
     this.statements.markToolExecuting.run(id);
   }
 
-  // #1787: isError is a required discriminator, not an optional flag — the
-  // three call sites (success, thrown, deny) must each make a conscious
-  // choice rather than silently defaulting to 'complete'. This is the single
-  // chokepoint that labels every terminal tool-call outcome.
-  markToolComplete(id: number, result: string, isError: boolean, outboundOpId?: number): void {
-    const status: ToolCallStatus = isError ? 'error' : 'complete';
-    this.statements.markToolComplete.run(status, result, outboundOpId ?? null, id);
+  markToolComplete(id: number, completion: ToolCompletionEvidence, outboundOpId?: number): void;
+  /** @deprecated Use the metadata-only ToolCompletionEvidence overload. */
+  markToolComplete(id: number, legacyResult: string, isError: boolean, outboundOpId?: number): void;
+  markToolComplete(
+    id: number,
+    completionOrLegacyResult: ToolCompletionEvidence | string,
+    outboundOpIdOrLegacyIsError?: number | boolean,
+    legacyOutboundOpId?: number,
+  ): void {
+    const completion: ToolCompletionEvidence = typeof completionOrLegacyResult === 'string'
+      ? outboundOpIdOrLegacyIsError === true
+        ? {
+            isError: true,
+            durationMs: 0,
+            failure: {
+              failureCode: 'unknown',
+              failureStage: 'unknown',
+              retryDisposition: 'unknown',
+              operatorAction: 'inspect',
+              evidenceCoverage: 'partial',
+            },
+          }
+        : { isError: false, durationMs: 0, evidenceCoverage: 'partial' }
+      : completionOrLegacyResult;
+    const outboundOpId = typeof completionOrLegacyResult === 'string'
+      ? legacyOutboundOpId
+      : typeof outboundOpIdOrLegacyIsError === 'number'
+        ? outboundOpIdOrLegacyIsError
+        : undefined;
+    const durationMs = Number.isSafeInteger(completion.durationMs) && completion.durationMs >= 0
+      ? completion.durationMs
+      : 0;
+    if (completion.isError) {
+      const failure = completion.failure;
+      this.statements.markToolComplete.run(
+        'error',
+        TOOL_RESULT_MARKERS.error,
+        outboundOpId ?? null,
+        'failure',
+        failure.failureCode,
+        failure.failureStage,
+        failure.retryDisposition,
+        failure.operatorAction,
+        failure.evidenceCoverage,
+        durationMs,
+        id,
+      );
+      return;
+    }
+    this.statements.markToolComplete.run(
+      'complete',
+      TOOL_RESULT_MARKERS.success,
+      outboundOpId ?? null,
+      'success',
+      null,
+      null,
+      'not_applicable',
+      'none',
+      completion.evidenceCoverage ?? 'complete',
+      durationMs,
+      id,
+    );
   }
 
   // ── Session checkpoints ──
@@ -1884,7 +2033,7 @@ export class DurabilityEngine {
             'preConnectRecovery: executing tool call has outbound_op_id, delegating to outbound reconciliation',
           );
         } else if (tc.replay_policy === 'safe' || tc.replay_policy === 'read_only') {
-          this.statements.markToolReplayed.run(tc.id);
+          this.statements.markToolReplayed.run(TOOL_RESULT_MARKERS.recovery, tc.id);
           stats.toolCallsReplayed += 1;
           log.info(
             { toolCallId: tc.id, toolName: tc.tool_name },
@@ -1892,7 +2041,7 @@ export class DurabilityEngine {
           );
         } else {
           // unsafe without an outbound op: quarantine
-          this.statements.markRecoveredToolQuarantined.run(tc.id);
+          this.statements.markRecoveredToolQuarantined.run(TOOL_RESULT_MARKERS.recovery, tc.id);
           stats.toolCallsQuarantined += 1;
           log.warn(
             { toolCallId: tc.id, toolName: tc.tool_name, replayPolicy: tc.replay_policy },
@@ -2616,6 +2765,34 @@ export async function drainPendingOutbound(
         && priorEvidence.retry_not_before !== null
         && Date.parse(priorEvidence.retry_not_before) > Date.now()
       ) {
+        // PR-C max-deferral bound: a text op that has been deferred
+        // MAX_TEXT_OP_DEFERRAL_COUNT+ times is quarantined instead of being
+        // left pending forever. Status_ping has its own TTL age-out above.
+        // The retry_count stored by markDeferred reflects total deferrals.
+        if (
+          op.op_type === 'text'
+          && op.retry_count >= MAX_TEXT_OP_DEFERRAL_COUNT
+        ) {
+          durability.markQuarantined(op.id, createInternalOutboundFailureEvidence({
+            failureCode: 'outbound.deferral_limit_exceeded',
+            stage: 'admission',
+            mutationState: 'not_started',
+            logicalAttemptCount: op.retry_count,
+            providerSubmissionCount: priorEvidence?.provider_submission_count ?? 0,
+            previousEvidence: priorEvidence,
+            evidenceCoverage: priorEvidence ? 'complete' : 'partial',
+          }));
+          log.warn(
+            { opId: op.id, retryCount: op.retry_count, maxDeferrals: MAX_TEXT_OP_DEFERRAL_COUNT },
+            'drainPendingOutbound: text op exceeded max deferral count → quarantined',
+          );
+          emitAlertChecked(
+            config.botName,
+            'outbound_quarantined',
+            `whatsoup@${config.botName} outbound op ${op.id} quarantined`,
+            `replay_policy=${op.replay_policy} op_type=${op.op_type} reason=deferral_limit_exceeded retry_count=${op.retry_count}`,
+          );
+        }
         continue;
       }
       let text: string | undefined;

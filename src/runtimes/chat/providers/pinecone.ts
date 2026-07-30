@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { Pinecone } from '@pinecone-database/pinecone';
 import { config } from '../../../config.ts';
 import { createChildLogger } from '../../../logger.ts';
@@ -6,7 +7,7 @@ import { truncateForRerank } from '../../../lib/text-utils.ts';
 import { resolveApiKey } from '../../../lib/api-key-resolver.ts';
 import { emitAlertChecked, clearAlertSourceChecked } from '../../../lib/emit-alert.ts';
 import { CircuitBreaker } from '../../../core/circuit-breaker.ts';
-import { sleep } from '../../../core/retry.ts';
+import { sleep, sleepWithAbort } from '../../../core/retry.ts';
 import {
   findPineconeIndex,
   hasPineconeProjectGuard,
@@ -30,6 +31,17 @@ const logger = createChildLogger('pinecone-provider');
 
 const FAILURE_ALERT_THRESHOLD = 3;
 const RETRY_DELAY_MS = 500;
+const PROJECT_GUARD_TIMEOUT_MS = 30_000;
+const pineconeOperationSignal = new AsyncLocalStorage<AbortSignal | undefined>();
+
+function combinedSignal(
+  sdkSignal: AbortSignal | null | undefined,
+  operationSignal: AbortSignal | undefined,
+): AbortSignal | undefined {
+  if (!sdkSignal) return operationSignal;
+  if (!operationSignal || sdkSignal === operationSignal) return sdkSignal;
+  return AbortSignal.any([sdkSignal, operationSignal]);
+}
 
 /** Per-operation circuit breakers (threshold=3, reset after 30s) */
 const breakers: Partial<Record<MemoryOperation, CircuitBreaker>> = {};
@@ -496,13 +508,52 @@ export class PineconeMemory {
   private projectGuardCheck: Promise<string | null> | null = null;
 
   constructor() {
-    this.client = new Pinecone({ apiKey: resolvePineconeApiKey() });
+    this.client = new Pinecone({
+      apiKey: resolvePineconeApiKey(),
+      fetchApi: (input, init) => {
+        const signal = combinedSignal(
+          init?.signal,
+          pineconeOperationSignal.getStore(),
+        );
+        return globalThis.fetch(input, {
+          ...init,
+          ...(signal ? { signal } : {}),
+        });
+      },
+    });
     this.index = this.client.index(config.pineconeIndex);
   }
 
   private async getProjectGuardError(): Promise<string | null> {
-    this.projectGuardCheck ??= configuredProjectGuardError(this.client, config.pineconeIndex);
-    return this.projectGuardCheck;
+    if (!this.projectGuardCheck) {
+      const controller = new AbortController();
+      let timeout: ReturnType<typeof setTimeout> | null = null;
+      const guardWork = pineconeOperationSignal.run(
+        controller.signal,
+        () => configuredProjectGuardError(this.client, config.pineconeIndex),
+      );
+      const deadline = new Promise<never>((_resolve, reject) => {
+        timeout = setTimeout(() => {
+          const error = new DOMException(
+          'Pinecone project guard deadline exceeded',
+          'TimeoutError',
+          );
+          controller.abort(error);
+          reject(error);
+        }, PROJECT_GUARD_TIMEOUT_MS);
+        timeout.unref?.();
+      });
+      this.projectGuardCheck = Promise.race([guardWork, deadline]).finally(() => {
+        if (timeout) clearTimeout(timeout);
+      });
+    }
+    const check = this.projectGuardCheck;
+    try {
+      return await check;
+    } catch (error) {
+      if (this.projectGuardCheck === check) this.projectGuardCheck = null;
+      throw error;
+    }
   }
 
   private async _searchCoreDetailed(
@@ -510,7 +561,9 @@ export class PineconeMemory {
     filters: Record<string, unknown>,
     topK: number,
     traceId?: string,
+    signal?: AbortSignal,
   ): Promise<PineconeSearchDetails> {
+    signal?.throwIfAborted();
     const filter = classifyMemoryFilter(filters);
     const operation = createMemoryOperationContext({
       operation: 'search',
@@ -554,8 +607,9 @@ export class PineconeMemory {
       };
     }
 
-    const doSearch = () =>
-      this.index.searchRecords({
+    const doSearch = () => {
+      signal?.throwIfAborted();
+      return this.index.searchRecords({
         query: {
           topK,
           inputs: { text: query },
@@ -563,6 +617,7 @@ export class PineconeMemory {
         },
         fields: ['*'],
       });
+    };
 
     const startMs = Date.now();
     try {
@@ -584,7 +639,7 @@ export class PineconeMemory {
       return { results, status: 'ok', durationMs };
     } catch (err) {
       // One retry after a short delay to catch transient blips
-      await sleep(RETRY_DELAY_MS);
+      await sleepWithAbort(RETRY_DELAY_MS, signal);
       try {
         const response = await doSearch();
         const results = (response.result.hits ?? []).map(fromPineconeHit);
@@ -641,12 +696,21 @@ export class PineconeMemory {
     filters: Record<string, unknown>,
     topK: number,
     traceId?: string,
+    signal?: AbortSignal,
   ): Promise<PineconeSearchDetails> {
-    const details = await this._searchCoreDetailed(query, filters, topK, traceId);
-    return {
-      ...details,
-      results: applyDecay(details.results, config.recencyHalfLifeDays, config.maxAgeDays),
-    };
+    return pineconeOperationSignal.run(signal, async () => {
+      const details = await this._searchCoreDetailed(
+        query,
+        filters,
+        topK,
+        traceId,
+        signal,
+      );
+      return {
+        ...details,
+        results: applyDecay(details.results, config.recencyHalfLifeDays, config.maxAgeDays),
+      };
+    });
   }
 
   async search(
@@ -885,8 +949,25 @@ export class PineconeMemory {
       operationId?: string;
       traceId?: string;
       operation?: 'upsert' | 'memory_write';
+      signal?: AbortSignal;
     } = {},
   ): Promise<void> {
+    return pineconeOperationSignal.run(
+      contextInput.signal,
+      () => this.upsertWithSignal(records, contextInput),
+    );
+  }
+
+  private async upsertWithSignal(
+    records: MemoryRecord[],
+    contextInput: {
+      operationId?: string;
+      traceId?: string;
+      operation?: 'upsert' | 'memory_write';
+      signal?: AbortSignal;
+    } = {},
+  ): Promise<void> {
+    contextInput.signal?.throwIfAborted();
     const operation = createMemoryOperationContext({
       operation: contextInput.operation ?? 'upsert',
       operationId: contextInput.operationId,
@@ -939,7 +1020,10 @@ export class PineconeMemory {
 
     const pineconeRecords = records.map(toPineconeRecord);
     const startMs = Date.now();
-    const doUpsert = () => this.index.upsertRecords({ records: pineconeRecords });
+    const doUpsert = () => {
+      contextInput.signal?.throwIfAborted();
+      return this.index.upsertRecords({ records: pineconeRecords });
+    };
 
     try {
       await doUpsert();
@@ -957,7 +1041,7 @@ export class PineconeMemory {
       trackSuccess('upsert');
     } catch (err) {
       // One retry after short delay
-      await sleep(RETRY_DELAY_MS);
+      await sleepWithAbort(RETRY_DELAY_MS, contextInput.signal);
       try {
         await doUpsert();
         const durationMs = Date.now() - startMs;

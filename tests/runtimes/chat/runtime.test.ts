@@ -6,10 +6,11 @@
  * and storing bot replies. Ingest concerns (store incoming, admin routing,
  * access policy) are tested in tests/core/ingest.test.ts.
  *
- * Architecture note: handleMessage() calls chatQueue.enqueue() without await
- * (fire-and-forget). The ChatQueue mock stores task promises in globalThis so
- * drainQueue() can await them. Tests that exercise processMessage() must call
- * drainQueue() (or handleAndDrain()) after handleMessage().
+ * Architecture note: handleMessage() awaits only ChatQueue's immediate
+ * admission decision, not the queued task. The ChatQueue mock stores task
+ * promises in globalThis so drainQueue() can await them. Tests that exercise
+ * processMessage() must call drainQueue() (or handleAndDrain()) after
+ * handleMessage().
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type { IncomingMessage, Messenger } from '../../../src/core/types.ts';
@@ -49,8 +50,9 @@ function drainQueue(): Promise<void> {
 // in globalThis.__queueTasks so tests can drain them via drainQueue().
 vi.mock('../../../src/runtimes/chat/queue.ts', () => {
   class ChatQueue {
-    enqueue(_chatJid: string, task: () => Promise<void>): void {
+    async enqueue(_chatJid: string, task: () => Promise<void>): Promise<boolean> {
       ((globalThis as any).__queueTasks as Promise<void>[]).push(task());
+      return true;
     }
   }
   return { ChatQueue };

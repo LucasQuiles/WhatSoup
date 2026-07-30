@@ -2819,12 +2819,9 @@ def health_probe_details(status: int, body: str, expected_name: str | None = Non
         append_evidence_field(details, "auth_bond_last_restore_error", last_restore_error, 180)
     outbound_sends = data.get("outbound_sends") if isinstance(data.get("outbound_sends"), dict) else {}
     outbound_success_at = outbound_sends.get("latest_successful_send_at")
-    outbound_transport_id = outbound_sends.get("latest_successful_transport_id")
     append_evidence_field(details, "outbound_success_at", outbound_success_at)
-    if isinstance(outbound_transport_id, str) and outbound_transport_id:
-        transport_hash = hashlib.sha256(outbound_transport_id.encode("utf-8")).hexdigest()[:20]
-        details.append("outbound_success_transport_present=true")
-        details.append(f"outbound_success_transport_hash={transport_hash}")
+    if isinstance(outbound_success_at, str) and outbound_success_at:
+        details.append("outbound_success_evidence=provider_acknowledged_or_better")
     runtime = data.get("runtime") if isinstance(data.get("runtime"), dict) else {}
     agent = runtime.get("agent") if isinstance(runtime.get("agent"), dict) else {}
     if agent:

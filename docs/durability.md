@@ -534,7 +534,11 @@ SELECT
   t.id,
   t.conversation_key,
   t.tool_name,
-  t.tool_input,
+  t.tool_group,
+  t.failure_code,
+  t.failure_stage,
+  t.operator_action,
+  t.evidence_coverage,
   t.created_at,
   t.completed_at
 FROM tool_calls t
@@ -608,7 +612,14 @@ These are the same 30-second constant applied in two different contexts. The rat
 
 Sends executed via MCP tool calls (e.g., `send_message` tool called by an external MCP client) bypass the `sendTracked` helper and do not create outbound op journal entries. This is **by design**: MCP tool sends are user-initiated and synchronous from the caller's perspective; the caller receives success/failure directly and manages retries. Journaling these would create phantom ops that the recovery engine cannot safely replay. This applies whether the target is supplied as raw `chatJid` or resolved from alias `to`.
 
-This means MCP tool sends are **not** tracked in the durability engine and will not appear in `outbound_ops`. They are still recorded in the separate `outbound_sends` audit table, which stores intent, outcome, hash, and length metadata without storing message bodies.
+This means MCP tool sends are **not** tracked in the durability engine and will not appear in `outbound_ops`. They are still recorded in the separate `outbound_sends` audit table. That table stores a random per-attempt receipt plus closed intent/outcome/failure/mutation evidence and bounded counters. It stores no destination, alias/profile, body fingerprint, exact length, provider identifier, or error prose.
+
+The supported `maintain_outbound_audit` tool only selects preview (`dry_run:true`) or
+apply (`dry_run:false`); it cannot override the automatic 30-day/10,000-terminal-row
+policy. Retention health exposes a closed `not_run`/`succeeded`/`failed` state, a
+saturating consecutive-failure count, and `retention_failed` without exception prose.
+Unreadable audit/tool aggregates and failed retention degrade authenticated diagnostic
+health with closed causes rather than reporting measured zeroes.
 
 ### 5.6 `sendTracked` — Shared Send Helper
 
@@ -791,13 +802,21 @@ rewriting either durable disposition.
 | `conversation_key` | TEXT NOT NULL | Chat context of the tool call. Global-tier sessions (no per-chat key) record under the reserved `__global__` sentinel; real keys derive from JIDs so it cannot collide. |
 | `session_checkpoint_id` | INTEGER | FK to `session_checkpoints.id`. Links the tool call to the agent session. |
 | `tool_name` | TEXT NOT NULL | Name of the MCP tool invoked. |
-| `tool_input` | TEXT NOT NULL | JSON-serialized input arguments. |
+| `tool_group` | TEXT NOT NULL | Closed functional group used for aggregate diagnostics; unknown extension groups become `other`. |
+| `tool_input` | TEXT NOT NULL | Fixed `[metadata-only]` marker. Arguments are never persisted. |
 | `status` | TEXT NOT NULL | `pending`, `executing`, `complete`, `error`, `replayed`, `quarantined`. Default `'pending'`. `error` (added #1787) is the terminal state for a failed tool call — success-with-`isError` payload, a thrown handler, and a denied sensitive-tool attempt all mark `error` through the single `markToolComplete()` chokepoint. `complete`, `error`, `replayed`, and `quarantined` are the terminal statuses retention deletes (`database-retention.ts`); recovery only ever selects `executing`/`pending` (§4.1 Step 3), so `error` is never re-selected once written. |
-| `result` | TEXT | JSON-serialized tool result, or the `error: ...` message when `status = 'error'`. Populated by `markToolComplete()`. |
+| `result` | TEXT | Null while open; otherwise a fixed success, error, or recovery marker. Tool output and exception prose are never persisted. |
 | `replay_policy` | TEXT NOT NULL | Same semantics as `outbound_ops.replay_policy`. |
 | `created_at` | TEXT | Timestamp of record creation. |
 | `completed_at` | TEXT | Timestamp when status reached a terminal state. |
 | `outbound_op_id` | INTEGER | FK to `outbound_ops.id`. If set, this tool call produced an outbound send; recovery delegates to the op. |
+| `outcome_code` | TEXT NOT NULL | Closed lifecycle outcome: open, success, failure, replayed recovery, or recovery quarantine. |
+| `failure_code`, `failure_stage` | TEXT | Bounded typed failure evidence; null outside failed/quarantined outcomes. |
+| `retry_disposition`, `operator_action` | TEXT NOT NULL | Closed recovery guidance derived from typed facts, never prose. |
+| `evidence_coverage` | TEXT NOT NULL | `complete`, `partial`, or `legacy_unclassified`. |
+| `duration_ms` | INTEGER | Optional bounded execution duration; null for open rows. |
+
+Migration 50 replaces historical input/result/error content with these markers without interpreting legacy prose. This is a logical live-schema scrub, not proof of physical erasure: old bytes may remain in SQLite free pages, WAL files, backups, or snapshots until separately approved compaction and backup-retirement work occurs.
 
 ### `session_checkpoints`
 

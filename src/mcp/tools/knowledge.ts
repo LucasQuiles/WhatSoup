@@ -229,6 +229,7 @@ export function createPineconeWatchSearch(
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ texts: [query], input_type: 'query' }),
+        signal: AbortSignal.timeout(30_000),
       });
       if (!embedResp.ok) throw new Error(`embed service HTTP ${embedResp.status}`);
       const embedJson = (await embedResp.json()) as { vectors: number[][] };
@@ -366,6 +367,7 @@ export function registerKnowledgeTools(
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({ texts: [query], input_type: 'query' }),
+              signal: AbortSignal.timeout(30_000),
             });
             if (!embedResp.ok) {
               const status = embedResp.status;

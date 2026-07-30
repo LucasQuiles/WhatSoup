@@ -1,6 +1,12 @@
 import type { ZodType } from 'zod';
 import type { WhatsAppSocket } from '../transport/connection.ts';
 import { toConversationKey } from '../core/conversation-key.ts';
+import {
+  TOOL_FAILURE_CODES,
+  TOOL_FAILURE_STAGES,
+  type ToolFailureCode,
+  type ToolFailureStage,
+} from '../core/durability-evidence-contract.ts';
 export { isPathWithinAllowedRoot } from '../lib/path-boundary.ts';
 
 export type ToolScope = 'chat' | 'global';
@@ -122,14 +128,39 @@ export interface ToolCallResult {
 }
 
 const TOOL_ERROR = Symbol('whatsoup.toolError');
+const TOOL_ERROR_EVIDENCE = Symbol('whatsoup.toolErrorEvidence');
+
+export interface ToolErrorEvidence {
+  failureCode: ToolFailureCode;
+  failureStage: ToolFailureStage;
+}
 
 export type ToolErrorPayload<T extends Record<string, unknown> = Record<string, unknown>> = T & {
   readonly [TOOL_ERROR]: true;
+  readonly [TOOL_ERROR_EVIDENCE]?: ToolErrorEvidence;
 };
 
-export function toolError<T extends Record<string, unknown>>(payload: T): ToolErrorPayload<T> {
+function isToolErrorEvidence(value: unknown): value is ToolErrorEvidence {
+  if (typeof value !== 'object' || value === null) return false;
+  const candidate = value as Partial<ToolErrorEvidence>;
+  return TOOL_FAILURE_CODES.includes(candidate.failureCode as ToolFailureCode)
+    && TOOL_FAILURE_STAGES.includes(candidate.failureStage as ToolFailureStage);
+}
+
+export function toolError<T extends Record<string, unknown>>(
+  payload: T,
+  evidence?: ToolErrorEvidence,
+): ToolErrorPayload<T> {
+  if (evidence !== undefined && !isToolErrorEvidence(evidence)) {
+    throw new TypeError('Invalid tool error evidence');
+  }
   const result = { ...payload };
   Object.defineProperty(result, TOOL_ERROR, { value: true });
+  if (evidence !== undefined) {
+    Object.defineProperty(result, TOOL_ERROR_EVIDENCE, {
+      value: Object.freeze({ ...evidence }),
+    });
+  }
   return result as ToolErrorPayload<T>;
 }
 
@@ -139,6 +170,12 @@ export function errorResult(error: string) {
 
 export function isToolErrorPayload(value: unknown): value is ToolErrorPayload {
   return typeof value === 'object' && value !== null && (value as { [TOOL_ERROR]?: unknown })[TOOL_ERROR] === true;
+}
+
+export function getToolErrorEvidence(value: unknown): ToolErrorEvidence | undefined {
+  if (!isToolErrorPayload(value)) return undefined;
+  const evidence = value[TOOL_ERROR_EVIDENCE];
+  return isToolErrorEvidence(evidence) ? evidence : undefined;
 }
 
 /**

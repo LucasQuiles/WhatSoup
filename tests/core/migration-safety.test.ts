@@ -42,7 +42,7 @@ function cleanup(...paths: string[]): void {
   }
 }
 
-const ALL_MIGRATION_VERSIONS = Array.from({ length: 48 }, (_, i) => i + 1);
+const ALL_MIGRATION_VERSIONS = Array.from({ length: 51 }, (_, i) => i + 1);
 
 /**
  * Raw migration 1 SQL — extracted verbatim from database.ts.
@@ -1228,10 +1228,10 @@ describe('outbound_sends migration contract', () => {
       .prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'outbound_sends'")
       .get() as { sql: string } | undefined;
     expect(table).toBeDefined();
-    expect(table!.sql).toContain("caller TEXT NOT NULL CHECK (caller IN ('mcp', 'health', 'rgp'))");
-    expect(table!.sql).toContain("target_kind TEXT NOT NULL CHECK (target_kind IN ('chatJid', 'alias'))");
-    expect(table!.sql).toContain("link_preview_mode TEXT CHECK (link_preview_mode IN ('auto', 'off') OR link_preview_mode IS NULL)");
-    expect(table!.sql).toContain("status TEXT NOT NULL DEFAULT 'intent' CHECK (status IN ('intent', 'sent', 'failed'))");
+    expect(table!.sql).toContain("CHECK (caller IN ('mcp', 'health', 'rgp'))");
+    expect(table!.sql).toContain("CHECK (target_kind IN ('chatJid', 'alias'))");
+    expect(table!.sql).toContain("outcome_code IN (");
+    expect(table!.sql).toContain("'intent', 'submitted', 'confirmed', 'failed_not_sent'");
 
     const cols = db.raw
       .prepare('PRAGMA table_info(outbound_sends)')
@@ -1239,24 +1239,38 @@ describe('outbound_sends migration contract', () => {
     const colMap = new Map(cols.map((col) => [col.name, col]));
 
     expect(colMap.get('id')).toMatchObject({ type: 'INTEGER' });
-    expect(colMap.get('line')).toMatchObject({ type: 'TEXT', notnull: 1 });
+    expect(colMap.get('audit_receipt')).toMatchObject({ type: 'TEXT', notnull: 1 });
+    expect(colMap.get('schema_version')).toMatchObject({ type: 'INTEGER', notnull: 1, dflt_value: '1' });
     expect(colMap.get('caller')).toMatchObject({ type: 'TEXT', notnull: 1 });
-    expect(colMap.get('chat_jid')).toMatchObject({ type: 'TEXT', notnull: 1 });
     expect(colMap.get('target_kind')).toMatchObject({ type: 'TEXT', notnull: 1 });
-    expect(colMap.get('alias')).toMatchObject({ type: 'TEXT' });
-    expect(colMap.get('profile')).toMatchObject({ type: 'TEXT' });
-    expect(colMap.get('text_hash')).toMatchObject({ type: 'TEXT', notnull: 1 });
-    expect(colMap.get('text_length')).toMatchObject({ type: 'INTEGER', notnull: 1 });
-    expect(colMap.get('link_preview_mode')).toMatchObject({ type: 'TEXT' });
-    expect(colMap.get('status')).toMatchObject({ type: 'TEXT', notnull: 1, dflt_value: "'intent'" });
-    expect(colMap.get('error')).toMatchObject({ type: 'TEXT' });
-    expect(colMap.get('transport_message_id')).toMatchObject({ type: 'TEXT' });
+    expect(colMap.get('outcome_code')).toMatchObject({ type: 'TEXT', notnull: 1, dflt_value: "'intent'" });
+    expect(colMap.get('failure_code')).toMatchObject({ type: 'TEXT' });
+    expect(colMap.get('failure_stage')).toMatchObject({ type: 'TEXT', notnull: 1 });
+    expect(colMap.get('mutation_state')).toMatchObject({ type: 'TEXT', notnull: 1 });
+    expect(colMap.get('retryable')).toMatchObject({ type: 'INTEGER' });
+    expect(colMap.get('evidence_coverage')).toMatchObject({ type: 'TEXT', notnull: 1 });
+    expect(colMap.get('logical_attempt_count')).toMatchObject({ type: 'INTEGER' });
+    expect(colMap.get('provider_submission_count')).toMatchObject({ type: 'INTEGER' });
     expect(colMap.get('created_at')).toMatchObject({ type: 'TEXT', notnull: 1, dflt_value: "datetime('now')" });
     expect(colMap.get('completed_at')).toMatchObject({ type: 'TEXT' });
 
-    expect(cols.map((col) => col.name)).not.toContain('text');
-    expect(cols.map((col) => col.name)).not.toContain('message_text');
-    expect(cols.map((col) => col.name)).not.toContain('payload');
+    const names = cols.map((col) => col.name);
+    for (const forbidden of [
+      'line',
+      'chat_jid',
+      'alias',
+      'profile',
+      'text',
+      'message_text',
+      'payload',
+      'text_hash',
+      'text_length',
+      'link_preview_mode',
+      'error',
+      'transport_message_id',
+    ]) {
+      expect(names).not.toContain(forbidden);
+    }
   });
 
   it('creates bounded-read indexes for outbound_sends', () => {
@@ -1266,13 +1280,12 @@ describe('outbound_sends migration contract', () => {
     const indexMap = new Map(indexes.map((index) => [index.name, index.sql ?? '']));
 
     expect(indexMap.get('idx_outbound_sends_created_at')).toContain('created_at');
-    expect(indexMap.get('idx_outbound_sends_status_created')).toContain('status, created_at');
-    expect(indexMap.get('idx_outbound_sends_chat_created')).toContain('chat_jid, created_at');
-    expect(indexMap.get('idx_outbound_sends_alias_created')).toContain('alias, created_at');
-    expect(indexMap.get('idx_outbound_sends_alias_created')).toContain('WHERE alias IS NOT NULL');
+    expect(indexMap.get('idx_outbound_sends_outcome_created')).toContain('outcome_code, created_at');
+    expect(indexes.some((index) => index.sql?.includes('chat_jid'))).toBe(false);
+    expect(indexes.some((index) => index.sql?.includes('alias'))).toBe(false);
   });
 
-  it('upgrades existing outbound_sends tables to allow rgp callers without losing rows', () => {
+  it('upgrades historical outbound_sends rows to metadata-only legacy evidence', () => {
     const dbPath = tmpFile();
     try {
       const raw = new DatabaseSync(dbPath);
@@ -1323,24 +1336,32 @@ describe('outbound_sends migration contract', () => {
         const table = migrated.raw
           .prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'outbound_sends'")
           .get() as { sql: string };
-        expect(table.sql).toContain("caller TEXT NOT NULL CHECK (caller IN ('mcp', 'health', 'rgp'))");
+        expect(table.sql).toContain("CHECK (caller IN ('mcp', 'health', 'rgp'))");
 
         const preserved = migrated.raw
-          .prepare("SELECT line, caller, chat_jid, status, transport_message_id FROM outbound_sends WHERE id = 1")
-          .get();
-        expect(preserved).toEqual({
-          line: 'personal',
+          .prepare(`
+            SELECT caller, target_kind, outcome_code, failure_code, audit_receipt
+            FROM outbound_sends WHERE id = 1
+          `)
+          .get() as Record<string, unknown>;
+        expect(preserved).toMatchObject({
           caller: 'mcp',
-          chat_jid: '111@s.whatsapp.net',
-          status: 'sent',
-          transport_message_id: 'wamid.old',
+          target_kind: 'chatJid',
+          outcome_code: 'legacy_unclassified',
+          failure_code: 'legacy_unclassified',
         });
+        expect(preserved.audit_receipt).toEqual(expect.stringMatching(/^[0-9a-f]{32}$/));
 
         migrated.raw.prepare(`
           INSERT INTO outbound_sends (
-            line, caller, chat_jid, target_kind, text_hash, text_length, status
+            audit_receipt, caller, target_kind, outcome_code,
+            failure_stage, mutation_state, evidence_coverage,
+            logical_attempt_count, provider_submission_count
           )
-          VALUES ('personal', 'rgp', '222@s.whatsapp.net', 'chatJid', 'def', 3, 'sent')
+          VALUES (
+            '00000000000000000000000000000001', 'rgp', 'chatJid', 'intent',
+            'not_started', 'not_started', 'typed', 1, 0
+          )
         `).run();
 
         const version = migrated.raw

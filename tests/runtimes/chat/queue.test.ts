@@ -281,6 +281,15 @@ describe('ChatQueue — negative / invariant', () => {
     await vi.waitFor(() => { expect(queue.stats.activeChats).toBe(0); });
   });
 
+  it('saturates the cumulative dropped count at the largest safe integer', async () => {
+    const queue = new ChatQueue(1, 0);
+    (queue as unknown as { dropped: number }).dropped = Number.MAX_SAFE_INTEGER;
+
+    await expect(queue.enqueue('chat-A', () => Promise.resolve())).resolves.toBe(false);
+
+    expect(queue.droppedCount).toBe(Number.MAX_SAFE_INTEGER);
+  });
+
   it('QR-060: per-chat cap does not shed across distinct chats (no over-trigger)', async () => {
     // Cap is PER chat: 10 different chats each with one task stay well under the cap of 3.
     const queue = new ChatQueue(2, 3);

@@ -160,7 +160,7 @@
       "file": "deploy/scripts/tests/test_bot_errors_gui_session_monitor.py",
       "line": 200,
       "owner": "q",
-      "reason": "advisory-suggestion: the 7 garbage-payload fail-closed cases are intentionally enumerated literals (each is a named adversarial input \u2014 empty/whitespace/permission-prompt/multi-token/unknown-token); hypothesis adds a dependency not used elsewhere in these tests and would obscure the specific fail-closed cases. Keep explicit parametrize.",
+      "reason": "advisory-suggestion: the 7 garbage-payload fail-closed cases are intentionally enumerated literals (each is a named adversarial input — empty/whitespace/permission-prompt/multi-token/unknown-token); hypothesis adds a dependency not used elsewhere in these tests and would obscure the specific fail-closed cases. Keep explicit parametrize.",
       "rule_id": "py-property-test-suggestion",
       "signature": "5a181c6e1659db7dfb5d82d5c477a8a1f9773f84a50d33b994aad5c031be0d3f"
     },
@@ -460,6 +460,276 @@
       "reason": "advisory-suggestion: test_size_and_inventory_metrics_are_wired_into_the_record enumerates the complete supported Harness enum ('claude','codex','opencode') across canonical integration fixtures; this is a finite adapter contract rather than a generative input domain. Property generation would obscure fixture identity without increasing supported-harness coverage. Keep explicit parametrize.",
       "rule_id": "py-property-test-suggestion",
       "signature": "904ba02e75ad406d98aa8710be9e8b7babeb9f5f4fe099c88f7588c0d47de99d"
+    },
+    {
+      "content_signature": "7dd23ebd944a0ef7d52ac33c09f14ed425565b7ff80126f3624245ee9260dbc8",
+      "file": "deploy/scripts/tests/test_controller_state.py",
+      "line": 5064,
+      "owner": "q",
+      "reason": "advisory-suggestion: this parametrized controller-recovery matrix enumerates a closed, named set of safety or fault-contract cases. Property generation would obscure the exact phase or artifact boundary and would not add coverage to this finite domain. Keep explicit parametrize.",
+      "rule_id": "py-property-test-suggestion",
+      "signature": "009bf7d48f169470ad3e974d3081ea3e35f874026545bde4f420f8aa893c17a7"
+    },
+    {
+      "content_signature": "91cbabc22ba9969665d70325daa6314edd830a73c45f78caaac55a924bf41573",
+      "file": "deploy/scripts/tests/test_controller_state.py",
+      "line": 6297,
+      "owner": "q",
+      "reason": "advisory-suggestion: this parametrized controller-recovery matrix enumerates a closed, named set of safety or fault-contract cases. Property generation would obscure the exact phase or artifact boundary and would not add coverage to this finite domain. Keep explicit parametrize.",
+      "rule_id": "py-property-test-suggestion",
+      "signature": "05edad9e1d4864ffa904f916347c108aa28d90ab3a3871b31c61a306facd6c95"
+    },
+    {
+      "content_signature": "a866bea4bb1a464138b9d3b82225ab3d0217706c72b7b306210b8af6fcedeac1",
+      "file": "deploy/scripts/tests/test_controller_state.py",
+      "line": 3483,
+      "owner": "q",
+      "reason": "advisory-suggestion: this parametrized controller-recovery matrix enumerates a closed, named set of safety or fault-contract cases. Property generation would obscure the exact phase or artifact boundary and would not add coverage to this finite domain. Keep explicit parametrize.",
+      "rule_id": "py-property-test-suggestion",
+      "signature": "07134d3d0edd640b27f7551a44b4c250cb1a65457f29761e1bfea84e6fb8e687"
+    },
+    {
+      "content_signature": "0d4f918bc435af77374729d56b68731157ad8b09b805189e2d51c078b67144ce",
+      "file": "deploy/scripts/tests/test_controller_state.py",
+      "line": 2806,
+      "owner": "q",
+      "reason": "advisory-suggestion: this parametrized controller-recovery matrix enumerates a closed, named set of safety or fault-contract cases. Property generation would obscure the exact phase or artifact boundary and would not add coverage to this finite domain. Keep explicit parametrize.",
+      "rule_id": "py-property-test-suggestion",
+      "signature": "11a7b783c643dc45076311d35806c2b6353de2561ed819082b2ce57ea3fda140"
+    },
+    {
+      "content_signature": "3e913a6d7b2e5b441177255842abe271135064ce2a99e06b10919f660c26bd13",
+      "file": "deploy/scripts/tests/test_controller_state.py",
+      "line": 1457,
+      "owner": "q",
+      "reason": "advisory-suggestion: this parametrized controller-recovery matrix enumerates a closed, named set of safety or fault-contract cases. Property generation would obscure the exact phase or artifact boundary and would not add coverage to this finite domain. Keep explicit parametrize.",
+      "rule_id": "py-property-test-suggestion",
+      "signature": "1dd66b392a73ca7817c9d2c75e7631461a8830fb392a4566cedc1447ceb4e41f"
+    },
+    {
+      "content_signature": "e75083dda7835644cab41e7ae4b5cd8b4e7884f2db9dc00568af17d34d242fd1",
+      "file": "deploy/scripts/tests/test_controller_state.py",
+      "line": 4756,
+      "owner": "q",
+      "reason": "advisory-suggestion: this parametrized controller-recovery matrix enumerates a closed, named set of safety or fault-contract cases. Property generation would obscure the exact phase or artifact boundary and would not add coverage to this finite domain. Keep explicit parametrize.",
+      "rule_id": "py-property-test-suggestion",
+      "signature": "223623334d1eedc0198e17419c0e032f7ecb4128d1bd1e958b95c58f43c038b4"
+    },
+    {
+      "content_signature": "dadd4331bc400109787d47638a13b2819e1b85262c3ff3b297859e5e7cf8abed",
+      "file": "deploy/scripts/tests/test_controller_log.py",
+      "line": 468,
+      "owner": "q",
+      "reason": "advisory-suggestion: this parametrized controller-recovery matrix enumerates a closed, named set of safety or fault-contract cases. Property generation would obscure the exact phase or artifact boundary and would not add coverage to this finite domain. Keep explicit parametrize.",
+      "rule_id": "py-property-test-suggestion",
+      "signature": "3a6551f2db812f272666635dfab6c313e79ab7e5200a8131e77f1b16e23d11fc"
+    },
+    {
+      "content_signature": "c93207873adbce084ae371409041180057ddf0b47a7c310e1102148b9cd3d49d",
+      "file": "deploy/scripts/tests/test_controller_state.py",
+      "line": 1748,
+      "owner": "q",
+      "reason": "advisory-suggestion: this parametrized controller-recovery matrix enumerates a closed, named set of safety or fault-contract cases. Property generation would obscure the exact phase or artifact boundary and would not add coverage to this finite domain. Keep explicit parametrize.",
+      "rule_id": "py-property-test-suggestion",
+      "signature": "3c9b612aca63490298409f83fecde6c8e286efce9223d4d503b93448d5186f07"
+    },
+    {
+      "content_signature": "7dd23ebd944a0ef7d52ac33c09f14ed425565b7ff80126f3624245ee9260dbc8",
+      "file": "deploy/scripts/tests/test_controller_state.py",
+      "line": 5325,
+      "owner": "q",
+      "reason": "advisory-suggestion: this parametrized controller-recovery matrix enumerates a closed, named set of safety or fault-contract cases. Property generation would obscure the exact phase or artifact boundary and would not add coverage to this finite domain. Keep explicit parametrize.",
+      "rule_id": "py-property-test-suggestion",
+      "signature": "45a33b415e8f868da275c82e27d717f7322bba8f47684805387c6c60f995142c"
+    },
+    {
+      "content_signature": "28fd406790ea6ae39f500a4a9cd781f99e554237a0d58219de7dda302b49d413",
+      "file": "deploy/scripts/tests/test_controller_state.py",
+      "line": 5850,
+      "owner": "q",
+      "reason": "advisory-suggestion: this parametrized controller-recovery matrix enumerates a closed, named set of safety or fault-contract cases. Property generation would obscure the exact phase or artifact boundary and would not add coverage to this finite domain. Keep explicit parametrize.",
+      "rule_id": "py-property-test-suggestion",
+      "signature": "47f746f984f44a2bfb959b3b909727264d133523de152f3d3c3e19bfb85c02ed"
+    },
+    {
+      "content_signature": "7dd23ebd944a0ef7d52ac33c09f14ed425565b7ff80126f3624245ee9260dbc8",
+      "file": "deploy/scripts/tests/test_controller_state.py",
+      "line": 5437,
+      "owner": "q",
+      "reason": "advisory-suggestion: this parametrized controller-recovery matrix enumerates a closed, named set of safety or fault-contract cases. Property generation would obscure the exact phase or artifact boundary and would not add coverage to this finite domain. Keep explicit parametrize.",
+      "rule_id": "py-property-test-suggestion",
+      "signature": "59612cc3057cb53243053aac111df250f2f4b803e37fb85fae7560357db2160b"
+    },
+    {
+      "content_signature": "6ea2b9a42e96ee3122f28d61b14f11dd55ed32d79a066c2b4f7e561ac31a6573",
+      "file": "deploy/scripts/tests/test_controller_state.py",
+      "line": 5536,
+      "owner": "q",
+      "reason": "advisory-suggestion: this parametrized controller-recovery matrix enumerates a closed, named set of safety or fault-contract cases. Property generation would obscure the exact phase or artifact boundary and would not add coverage to this finite domain. Keep explicit parametrize.",
+      "rule_id": "py-property-test-suggestion",
+      "signature": "5d51336e35fddcad4f94e1e6414d12a5c057338d1f6da8dbadb7d753901f171c"
+    },
+    {
+      "content_signature": "37903d443d17a0cb2b1cb04fc8b8b903c82aa06c143e7578d0603e278f5954aa",
+      "file": "deploy/scripts/tests/test_controller_state.py",
+      "line": 6054,
+      "owner": "q",
+      "reason": "advisory-suggestion: this parametrized controller-recovery matrix enumerates a closed, named set of safety or fault-contract cases. Property generation would obscure the exact phase or artifact boundary and would not add coverage to this finite domain. Keep explicit parametrize.",
+      "rule_id": "py-property-test-suggestion",
+      "signature": "60b4e24229d498896d45970a3d8c75630fc3d1ad17955297b5caeb09917af4ef"
+    },
+    {
+      "content_signature": "df737a50f0e461f1d78e6e6f6be359b92242c5b10df72a1d5f63f255ea7f686e",
+      "file": "deploy/scripts/tests/test_controller_state.py",
+      "line": 3731,
+      "owner": "q",
+      "reason": "advisory-suggestion: this parametrized controller-recovery matrix enumerates a closed, named set of safety or fault-contract cases. Property generation would obscure the exact phase or artifact boundary and would not add coverage to this finite domain. Keep explicit parametrize.",
+      "rule_id": "py-property-test-suggestion",
+      "signature": "626d2d9880ec85f306d3aae63b516c7f6048c9dcd134f1e3e3ee6babafedcbcb"
+    },
+    {
+      "content_signature": "c43f793a851492038dc3a75829bbc6e0ddb56acaafb1215a2d7383ac81de7ac5",
+      "file": "deploy/scripts/tests/test_controller_log.py",
+      "line": 486,
+      "owner": "q",
+      "reason": "advisory-suggestion: this parametrized controller-recovery matrix enumerates a closed, named set of safety or fault-contract cases. Property generation would obscure the exact phase or artifact boundary and would not add coverage to this finite domain. Keep explicit parametrize.",
+      "rule_id": "py-property-test-suggestion",
+      "signature": "7e16b735e4610f939172e032edd6d16bd54375f1ae0f96bb0a115c4e7ab0ccaa"
+    },
+    {
+      "content_signature": "8d7c389c8063ec82730cee34dae8a579191bb0265a609f745e2a4cc257526abf",
+      "file": "deploy/scripts/tests/test_controller_state.py",
+      "line": 3703,
+      "owner": "q",
+      "reason": "advisory-suggestion: this parametrized controller-recovery matrix enumerates a closed, named set of safety or fault-contract cases. Property generation would obscure the exact phase or artifact boundary and would not add coverage to this finite domain. Keep explicit parametrize.",
+      "rule_id": "py-property-test-suggestion",
+      "signature": "833395c3d86465657afffa716b9144350e7e3c9116aa14a8e4349b62002ec1be"
+    },
+    {
+      "content_signature": "fbe0592507bf1764bc04817cf8bab9818ad021868a9c31a8c9f02c172dc52149",
+      "file": "deploy/scripts/tests/test_controller_state.py",
+      "line": 1811,
+      "owner": "q",
+      "reason": "advisory-suggestion: this parametrized controller-recovery matrix enumerates a closed, named set of safety or fault-contract cases. Property generation would obscure the exact phase or artifact boundary and would not add coverage to this finite domain. Keep explicit parametrize.",
+      "rule_id": "py-property-test-suggestion",
+      "signature": "8478d74e4d71ebb16f7d725cf74f17312a75fcc1c019966d5420a0667cf850eb"
+    },
+    {
+      "content_signature": "9c3a7a38f8383c1b3f888399012ef3321057ffb5a9633cfe717a070c418ae665",
+      "file": "deploy/scripts/tests/test_controller_state.py",
+      "line": 4441,
+      "owner": "q",
+      "reason": "advisory-suggestion: this parametrized controller-recovery matrix enumerates a closed, named set of safety or fault-contract cases. Property generation would obscure the exact phase or artifact boundary and would not add coverage to this finite domain. Keep explicit parametrize.",
+      "rule_id": "py-property-test-suggestion",
+      "signature": "91ebe93ba77203de5947eecd7fa08bee3b231bda6a86cb598f9bf794fd6e9e15"
+    },
+    {
+      "content_signature": "fa0db28ea2d6e91bd7958369c58d88541d35c0235af92152cefbee0b41400371",
+      "file": "deploy/scripts/tests/test_controller_state.py",
+      "line": 4707,
+      "owner": "q",
+      "reason": "advisory-suggestion: this parametrized controller-recovery matrix enumerates a closed, named set of safety or fault-contract cases. Property generation would obscure the exact phase or artifact boundary and would not add coverage to this finite domain. Keep explicit parametrize.",
+      "rule_id": "py-property-test-suggestion",
+      "signature": "a9f68a833d21d8a70078642beaa04cefd1c97dccd587c9cbd25b6e8bdb8c8b2c"
+    },
+    {
+      "content_signature": "51b24f2e551f3e70ae4c2d71e2d9d8433ad2f953cab1df78cec06128429d0765",
+      "file": "deploy/scripts/tests/test_controller_state.py",
+      "line": 1938,
+      "owner": "q",
+      "reason": "advisory-suggestion: this parametrized controller-recovery matrix enumerates a closed, named set of safety or fault-contract cases. Property generation would obscure the exact phase or artifact boundary and would not add coverage to this finite domain. Keep explicit parametrize.",
+      "rule_id": "py-property-test-suggestion",
+      "signature": "b134bf89e293c00108424d80c844c3ddacaaf22cbefbbaeb6ae0f163428e13aa"
+    },
+    {
+      "content_signature": "e5dec1d3215ded7d449b04d1364e2ff85ab5e2420013682ad6ee910e5b1cc75a",
+      "file": "deploy/scripts/tests/test_controller_state.py",
+      "line": 2848,
+      "owner": "q",
+      "reason": "advisory-suggestion: this parametrized controller-recovery matrix enumerates a closed, named set of safety or fault-contract cases. Property generation would obscure the exact phase or artifact boundary and would not add coverage to this finite domain. Keep explicit parametrize.",
+      "rule_id": "py-property-test-suggestion",
+      "signature": "bbafbf5fb254c579caae47badd6d99a61a91ea4763922499127f8f92caf45aaa"
+    },
+    {
+      "content_signature": "97d3e6f330626315a8301e2744e3758b453ccf5ea1672effe2772d871321cb05",
+      "file": "deploy/scripts/tests/test_controller_state.py",
+      "line": 2591,
+      "owner": "q",
+      "reason": "advisory-suggestion: this parametrized controller-recovery matrix enumerates a closed, named set of safety or fault-contract cases. Property generation would obscure the exact phase or artifact boundary and would not add coverage to this finite domain. Keep explicit parametrize.",
+      "rule_id": "py-property-test-suggestion",
+      "signature": "c21a117f57372633fad8c29e3b46f93a74e4cc9a25b37176b9206cf2cba9dd16"
+    },
+    {
+      "content_signature": "6ea2b9a42e96ee3122f28d61b14f11dd55ed32d79a066c2b4f7e561ac31a6573",
+      "file": "deploy/scripts/tests/test_controller_state.py",
+      "line": 5502,
+      "owner": "q",
+      "reason": "advisory-suggestion: this parametrized controller-recovery matrix enumerates a closed, named set of safety or fault-contract cases. Property generation would obscure the exact phase or artifact boundary and would not add coverage to this finite domain. Keep explicit parametrize.",
+      "rule_id": "py-property-test-suggestion",
+      "signature": "c28d489976843d31dee29ff910850f933bbad53baf4bf99c5a813b2d546a31b5"
+    },
+    {
+      "content_signature": "92d283bc8220a7b6ea9ce0ff105372e53ae2968f6f5c6c7c878a845e3ad85121",
+      "file": "deploy/scripts/tests/test_controller_state.py",
+      "line": 4415,
+      "owner": "q",
+      "reason": "advisory-suggestion: this parametrized controller-recovery matrix enumerates a closed, named set of safety or fault-contract cases. Property generation would obscure the exact phase or artifact boundary and would not add coverage to this finite domain. Keep explicit parametrize.",
+      "rule_id": "py-property-test-suggestion",
+      "signature": "cbb0569117970ba507f85c145a136ef17868a1c47df22740ef9d261d3cf632d5"
+    },
+    {
+      "content_signature": "8d7c389c8063ec82730cee34dae8a579191bb0265a609f745e2a4cc257526abf",
+      "file": "deploy/scripts/tests/test_controller_state.py",
+      "line": 4474,
+      "owner": "q",
+      "reason": "advisory-suggestion: this parametrized controller-recovery matrix enumerates a closed, named set of safety or fault-contract cases. Property generation would obscure the exact phase or artifact boundary and would not add coverage to this finite domain. Keep explicit parametrize.",
+      "rule_id": "py-property-test-suggestion",
+      "signature": "cef64ddbb703fccf0cb20d9e6450e96c67a31296ed22cf60c795ffcae2343f9c"
+    },
+    {
+      "content_signature": "8cec40f3ee220d9638c559492767806b79ec15c9ee2517e1dfe2ddc25790a9f9",
+      "file": "deploy/scripts/tests/test_controller_state.py",
+      "line": 4967,
+      "owner": "q",
+      "reason": "advisory-suggestion: this parametrized controller-recovery matrix enumerates a closed, named set of safety or fault-contract cases. Property generation would obscure the exact phase or artifact boundary and would not add coverage to this finite domain. Keep explicit parametrize.",
+      "rule_id": "py-property-test-suggestion",
+      "signature": "cfc63c0df58f0d97a488aaa7b5ec40015f10e2f3c2c556c490d32190c8c2a6f2"
+    },
+    {
+      "content_signature": "a866bea4bb1a464138b9d3b82225ab3d0217706c72b7b306210b8af6fcedeac1",
+      "file": "deploy/scripts/tests/test_controller_state.py",
+      "line": 3524,
+      "owner": "q",
+      "reason": "advisory-suggestion: this parametrized controller-recovery matrix enumerates a closed, named set of safety or fault-contract cases. Property generation would obscure the exact phase or artifact boundary and would not add coverage to this finite domain. Keep explicit parametrize.",
+      "rule_id": "py-property-test-suggestion",
+      "signature": "dda9319717ba534b9fbf7d8fa1438d139321bfcaa9dfc76ccc5b7e62063aedd0"
+    },
+    {
+      "content_signature": "96a32447fe3f349d8ea67ceaec068e838413b611a988136d0371e06c28e2d7b9",
+      "file": "deploy/scripts/tests/test_controller_state.py",
+      "line": 4914,
+      "owner": "q",
+      "reason": "advisory-suggestion: this parametrized controller-recovery matrix enumerates a closed, named set of safety or fault-contract cases. Property generation would obscure the exact phase or artifact boundary and would not add coverage to this finite domain. Keep explicit parametrize.",
+      "rule_id": "py-property-test-suggestion",
+      "signature": "ec73b734fa0b668dce0d9c0e51c56f635842e4e3a9c7b798b8293c96d3d10b2e"
+    },
+    {
+      "content_signature": "9485c26c310282f889045cdb648474f60cfb7a96cd333e303b08820dc4aa6fde",
+      "file": "deploy/scripts/tests/test_controller_state.py",
+      "line": 4877,
+      "owner": "q",
+      "reason": "advisory-suggestion: this parametrized controller-recovery matrix enumerates a closed, named set of safety or fault-contract cases. Property generation would obscure the exact phase or artifact boundary and would not add coverage to this finite domain. Keep explicit parametrize.",
+      "rule_id": "py-property-test-suggestion",
+      "signature": "f375280fd0d652310346866abe3b04fde0ffa0183643105f77b86b06df989561"
+    },
+    {
+      "content_signature": "0cb1062579fbc5d5e200af159489222b8e728f42ea9b07f124fa54c6e01f5396",
+      "file": "deploy/scripts/tests/test_controller_log.py",
+      "line": 451,
+      "owner": "q",
+      "reason": "advisory-suggestion: this parametrized controller-recovery matrix enumerates a closed, named set of safety or fault-contract cases. Property generation would obscure the exact phase or artifact boundary and would not add coverage to this finite domain. Keep explicit parametrize.",
+      "rule_id": "py-property-test-suggestion",
+      "signature": "f3c89c62f88153a8df685c406b5cff4179ff3d7243141481b843ece7f6340b11"
     }
   ],
   "schema_version": "1"

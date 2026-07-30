@@ -78,12 +78,11 @@ describe('ToolRegistry structural policy: durability containment (QR-239)', () =
   it('pins the exact count of this.durability call sites inside call()', async () => {
     const body = extractCallMethodBody(await readRegistrySource());
     const sites = findDurabilityCallSites(body);
-    // deny path: recordToolCall, markToolExecuting, markToolComplete (3)
-    // main path: recordToolCall, markToolExecuting, markToolComplete(success),
-    //            markToolComplete(error) (4)
-    // = 7 total. A new site changes this count and forces a conscious look
+    // shared admission path: recordToolCall + markToolComplete(reject) (2)
+    // handler path: markToolExecuting + markToolComplete(success/error) (3)
+    // = 5 total. A new site changes this count and forces a conscious look
     // at whether it needs the same try/catch containment.
-    expect(sites.length).toBe(7);
+    expect(sites.length).toBe(5);
   });
 
   it('every this.durability call site inside call() sits inside an open try/catch', async () => {

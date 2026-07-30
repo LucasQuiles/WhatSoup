@@ -17,7 +17,11 @@ import { runConsolidation } from '../../src/memory/consolidation-cron.ts';
 describe('runConsolidation', () => {
   function makeMockPinecone(searchResults: any[] = []) {
     return {
-      search: vi.fn().mockResolvedValue(searchResults),
+      searchDetailed: vi.fn().mockResolvedValue({
+        results: searchResults,
+        status: 'ok',
+        evidenceCoverage: 'provider_response',
+      }),
       upsert: vi.fn().mockResolvedValue(undefined),
     };
   }
@@ -69,13 +73,28 @@ describe('runConsolidation', () => {
       { lookbackDays: 7, dryRun: false },
     );
 
-    expect(result.promoted).toBe(1);
-    expect(result.clustersProcessed).toBe(1);
+    expect(result).toMatchObject({
+      schemaVersion: 1,
+      mode: 'live',
+      status: 'completed',
+      stage: 'finalize',
+      failureCode: 'none',
+      retryable: false,
+      counters: {
+        wouldPromote: 0,
+        writeAttempted: 1,
+        writeConfirmed: 1,
+        clustersAttempted: 1,
+        clustersCompleted: 1,
+      },
+    });
     expect(mockPinecone.upsert).toHaveBeenCalledTimes(1);
-    expect(mockPinecone.search).toHaveBeenCalledWith(
+    expect(mockPinecone.searchDetailed).toHaveBeenCalledWith(
       'facts about people preferences locations interests',
       {},
       100,
+      undefined,
+      undefined,
     );
   });
 
@@ -108,7 +127,15 @@ describe('runConsolidation', () => {
       { lookbackDays: 7, dryRun: true },
     );
 
-    expect(result.promoted).toBe(1);
+    expect(result).toMatchObject({
+      mode: 'dry_run',
+      status: 'completed',
+      counters: {
+        wouldPromote: 1,
+        writeAttempted: 0,
+        writeConfirmed: 0,
+      },
+    });
     expect(mockPinecone.upsert).not.toHaveBeenCalled();
   });
 
@@ -122,8 +149,15 @@ describe('runConsolidation', () => {
       { lookbackDays: 7, dryRun: false },
     );
 
-    expect(result.promoted).toBe(0);
-    expect(result.clustersProcessed).toBe(0);
+    expect(result).toMatchObject({
+      status: 'no_work',
+      failureCode: 'none',
+      counters: {
+        recordsObserved: 0,
+        clustersAttempted: 0,
+        clustersCompleted: 0,
+      },
+    });
     expect(mockProvider.generate).not.toHaveBeenCalled();
   });
 
@@ -164,11 +198,13 @@ describe('runConsolidation', () => {
       { lookbackDays: 7, dryRun: false },
     );
 
-    expect(result).toEqual({
-      promoted: 0,
-      discarded: 0,
-      clustersProcessed: 0,
-      errors: 0,
+    expect(result).toMatchObject({
+      status: 'no_work',
+      counters: {
+        skipped: 2,
+        clustersAttempted: 0,
+        clustersCompleted: 0,
+      },
     });
     expect(mockProvider.generate).not.toHaveBeenCalled();
     expect(mockPinecone.upsert).not.toHaveBeenCalled();
@@ -180,7 +216,12 @@ describe('runConsolidation', () => {
 
   it('handles search failure gracefully', async () => {
     const mockPinecone = {
-      search: vi.fn().mockRejectedValue(new Error('Pinecone down')),
+      searchDetailed: vi.fn().mockResolvedValue({
+        results: [],
+        status: 'failed',
+        failureCode: 'network_error',
+        retryable: true,
+      }),
       upsert: vi.fn(),
     };
     const mockProvider = { name: 'test', generate: vi.fn() };
@@ -191,8 +232,13 @@ describe('runConsolidation', () => {
       { lookbackDays: 7, dryRun: false },
     );
 
-    expect(result.errors).toBe(1);
-    expect(result.promoted).toBe(0);
+    expect(result).toMatchObject({
+      status: 'failed',
+      stage: 'search',
+      failureCode: 'network_error',
+      retryable: true,
+      counters: { failed: 1, recordsObserved: 0 },
+    });
   });
 
   it('continues when a cluster yields only discarded memories', async () => {
@@ -223,11 +269,15 @@ describe('runConsolidation', () => {
       { lookbackDays: 7, dryRun: false },
     );
 
-    expect(result).toEqual({
-      promoted: 0,
-      discarded: 1,
-      clustersProcessed: 1,
-      errors: 0,
+    expect(result).toMatchObject({
+      status: 'completed',
+      counters: {
+        writeConfirmed: 0,
+        discarded: 1,
+        clustersAttempted: 1,
+        clustersCompleted: 1,
+        failed: 0,
+      },
     });
     expect(mockPinecone.upsert).not.toHaveBeenCalled();
   });
@@ -302,7 +352,7 @@ describe('runConsolidation', () => {
       },
     ]);
     mockPinecone.upsert
-      .mockRejectedValueOnce(new Error('write failed'))
+      .mockRejectedValueOnce(new Error('private-write-error'))
       .mockResolvedValueOnce(undefined);
     const mockProvider = {
       name: 'test-provider',
@@ -335,14 +385,23 @@ describe('runConsolidation', () => {
       { lookbackDays: 7, dryRun: false },
     );
 
-    expect(result).toEqual({
-      promoted: 1,
-      discarded: 0,
-      clustersProcessed: 2,
-      errors: 1,
+    expect(result).toMatchObject({
+      status: 'partial',
+      stage: 'write',
+      failureCode: 'write_failed',
+      counters: {
+        writeAttempted: 2,
+        writeConfirmed: 1,
+        discarded: 0,
+        clustersAttempted: 2,
+        clustersCompleted: 1,
+        failed: 1,
+      },
     });
     expect(mockProvider.generate).toHaveBeenCalledTimes(2);
     expect(mockPinecone.upsert).toHaveBeenCalledTimes(2);
+    expect(JSON.stringify(mockCronLogger.warn.mock.calls))
+      .not.toContain('private-write-error');
   });
 
   it('filters out memories older than lookbackDays client-side', async () => {
@@ -376,8 +435,8 @@ describe('runConsolidation', () => {
       { lookbackDays: 7, dryRun: false },
     );
 
-    expect(result.clustersProcessed).toBe(1);
-    expect(result.promoted).toBe(1);
+    expect(result.counters.clustersAttempted).toBe(1);
+    expect(result.counters.writeConfirmed).toBe(1);
   });
 
   it('consolidates each chat and sender scope independently', async () => {
@@ -453,8 +512,8 @@ describe('runConsolidation', () => {
       { lookbackDays: 7, dryRun: false },
     );
 
-    expect(result.promoted).toBe(2);
-    expect(result.clustersProcessed).toBe(2);
+    expect(result.counters.writeConfirmed).toBe(2);
+    expect(result.counters.clustersAttempted).toBe(2);
     expect(mockProvider.generate).toHaveBeenCalledTimes(2);
     const upsertedRecords = mockPinecone.upsert.mock.calls.map((call) => call[0][0]);
     expect(upsertedRecords.map((r) => [r.chatJid, r.senderJid])).toEqual([
@@ -538,7 +597,8 @@ describe('runConsolidation', () => {
 
     const serializedLogs = JSON.stringify(mockCronLogger.info.mock.calls);
     expect(serializedLogs).not.toContain(sensitiveClaim);
-    expect(serializedLogs).toContain('claimHashes');
+    expect(serializedLogs).not.toContain('claimHashes');
+    expect(serializedLogs).toContain('durableCount');
   });
 
   it('skips unscoped records and returns early when none have chat/sender scope', async () => {
@@ -566,8 +626,9 @@ describe('runConsolidation', () => {
       { lookbackDays: 7, dryRun: false },
     );
 
-    expect(result.promoted).toBe(0);
-    expect(result.clustersProcessed).toBe(0);
+    expect(result.counters.writeConfirmed).toBe(0);
+    expect(result.counters.clustersAttempted).toBe(0);
+    expect(result.counters.skipped).toBe(1);
     expect(mockProvider.generate).not.toHaveBeenCalled();
     expect(mockPinecone.upsert).not.toHaveBeenCalled();
   });
@@ -602,9 +663,180 @@ describe('runConsolidation', () => {
       { lookbackDays: 7, dryRun: false },
     );
 
-    expect(result.clustersProcessed).toBe(1);
-    expect(result.promoted).toBe(0);
-    expect(result.discarded).toBe(1);
+    expect(result.counters.clustersAttempted).toBe(1);
+    expect(result.counters.writeConfirmed).toBe(0);
+    expect(result.counters.discarded).toBe(1);
+    expect(mockPinecone.upsert).not.toHaveBeenCalled();
+  });
+
+  it('distinguishes a swallowed provider failure from an observed empty result', async () => {
+    const failedPinecone = {
+      searchDetailed: vi.fn().mockResolvedValue({
+        results: [],
+        status: 'failed',
+        failureCode: 'provider_unavailable',
+        retryable: true,
+      }),
+      upsert: vi.fn(),
+    };
+    const emptyPinecone = makeMockPinecone([]);
+    const provider = { name: 'test', generate: vi.fn() };
+
+    const failed = await runConsolidation(
+      failedPinecone,
+      provider,
+      { lookbackDays: 7, dryRun: false },
+    );
+    const empty = await runConsolidation(
+      emptyPinecone,
+      provider,
+      { lookbackDays: 7, dryRun: false },
+    );
+
+    expect(failed.status).toBe('failed');
+    expect(empty.status).toBe('no_work');
+    expect(failed).not.toEqual(empty);
+  });
+
+  it('reports cancellation when ownership expires as a failed search returns', async () => {
+    const controller = new AbortController();
+    const pinecone = {
+      searchDetailed: vi.fn().mockImplementation(async () => {
+        controller.abort(new DOMException('expired', 'AbortError'));
+        return {
+          results: [],
+          status: 'failed' as const,
+          failureCode: 'provider_unavailable' as const,
+          retryable: true,
+        };
+      }),
+      upsert: vi.fn(),
+    };
+
+    const result = await runConsolidation(
+      pinecone,
+      { name: 'test', generate: vi.fn() },
+      {
+        lookbackDays: 7,
+        dryRun: false,
+        signal: controller.signal,
+      },
+    );
+
+    expect(result).toMatchObject({
+      status: 'cancelled',
+      stage: 'search',
+      failureCode: 'cancelled',
+      retryable: true,
+      evidenceCoverage: 'local_guard',
+      counters: { failed: 1, writeAttempted: 0, writeConfirmed: 0 },
+    });
+  });
+
+  it('returns cancelled and fences writes when the run expires after generation', async () => {
+    let writeAllowed = true;
+    const mockPinecone = makeMockPinecone([{
+      id: 'rec-1',
+      score: 0.9,
+      record: {
+        id: 'rec-1',
+        text: 'Synthetic',
+        claim: 'Synthetic',
+        evidence: '',
+        createdAt: new Date().toISOString(),
+        confidence: 0.9,
+        chatJid: 'chat-1@g.us',
+        senderJid: 'sender-1@s.whatsapp.net',
+      },
+    }]);
+    const provider = makeMockProvider({
+      durableKnowledge: [{
+        claim: 'Synthetic durable claim',
+        promotionReason: 'Synthetic reason',
+        confidence: 0.9,
+        sourceRecordIds: ['rec-1'],
+      }],
+      discarded: [],
+    });
+    provider.generate.mockImplementationOnce(async () => {
+      writeAllowed = false;
+      return {
+        content: JSON.stringify({
+          durableKnowledge: [{
+            claim: 'Synthetic durable claim',
+            promotionReason: 'Synthetic reason',
+            confidence: 0.9,
+            sourceRecordIds: ['rec-1'],
+          }],
+          discarded: [],
+        }),
+        inputTokens: 1,
+        outputTokens: 1,
+        model: 'test',
+        durationMs: 1,
+      };
+    });
+
+    const result = await runConsolidation(
+      mockPinecone,
+      provider,
+      { lookbackDays: 7, dryRun: false, isWriteAllowed: () => writeAllowed },
+    );
+
+    expect(result).toMatchObject({
+      status: 'cancelled',
+      stage: 'write',
+      failureCode: 'cancelled',
+      counters: { writeAttempted: 0, writeConfirmed: 0, failed: 1 },
+    });
+    expect(mockPinecone.upsert).not.toHaveBeenCalled();
+  });
+
+  it('rechecks ownership after write progress before invoking the provider', async () => {
+    let writeAllowed = true;
+    const mockPinecone = makeMockPinecone([{
+      id: 'rec-1',
+      score: 0.9,
+      record: {
+        id: 'rec-1',
+        text: 'Synthetic',
+        claim: 'Synthetic',
+        evidence: '',
+        createdAt: new Date().toISOString(),
+        confidence: 0.9,
+        chatJid: 'chat-1@g.us',
+        senderJid: 'sender-1@s.whatsapp.net',
+      },
+    }]);
+    const provider = makeMockProvider({
+      durableKnowledge: [{
+        claim: 'Synthetic durable claim',
+        promotionReason: 'Synthetic reason',
+        confidence: 0.9,
+        sourceRecordIds: ['rec-1'],
+      }],
+      discarded: [],
+    });
+
+    const result = await runConsolidation(
+      mockPinecone,
+      provider,
+      {
+        lookbackDays: 7,
+        dryRun: false,
+        isWriteAllowed: () => writeAllowed,
+        onProgress: (stage) => {
+          if (stage === 'write') writeAllowed = false;
+        },
+      },
+    );
+
+    expect(result).toMatchObject({
+      status: 'cancelled',
+      stage: 'write',
+      failureCode: 'cancelled',
+      counters: { writeAttempted: 0, writeConfirmed: 0, failed: 1 },
+    });
     expect(mockPinecone.upsert).not.toHaveBeenCalled();
   });
 });
