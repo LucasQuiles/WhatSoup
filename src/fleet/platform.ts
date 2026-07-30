@@ -97,7 +97,11 @@ function plistPath(name: string): string {
  * PATH, home directory, or other environment-sourced strings.
  */
 export function buildPlist(name: string): string {
-  const xdgConfig = process.env.XDG_CONFIG_HOME ?? path.join(os.homedir(), '.config');
+  const isDarwin = os.platform() === 'darwin';
+  const xdgConfig = process.env.XDG_CONFIG_HOME ??
+    (isDarwin
+      ? path.join(os.homedir(), 'Library', 'Application Support')
+      : path.join(os.homedir(), '.config'));
   const logDir = path.join(xdgConfig, 'whatsoup', 'instances', name);
   const tmpDir = tmpRoot(name);
   const wrapper = path.join(os.homedir(), '.local', 'bin', 'whatsoup');

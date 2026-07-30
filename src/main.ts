@@ -1,5 +1,5 @@
 import { existsSync } from 'node:fs';
-import { homedir } from 'node:os';
+import { homedir, platform } from 'node:os';
 import { join } from 'node:path';
 import { config } from './config.ts';
 import logger, { createChildLogger, flushLogger } from './logger.ts';
@@ -284,8 +284,15 @@ startModelCurrencyMonitor(config.botName, {
   if (instanceName) {
     const msgCount = getMessageCount(db);
     if (msgCount === 0) {
-      const xdgData = process.env.XDG_DATA_HOME ?? join(homedir(), '.local/share');
-      const xdgConfig = process.env.XDG_CONFIG_HOME ?? join(homedir(), '.config');
+      const isDarwin = platform() === 'darwin';
+  const xdgData = process.env.XDG_DATA_HOME ??
+    (isDarwin
+      ? join(homedir(), 'Library', 'Application Support')
+      : join(homedir(), '.local/share'));
+      const xdgConfig = process.env.XDG_CONFIG_HOME ??
+    (isDarwin
+      ? join(homedir(), 'Library', 'Application Support')
+      : join(homedir(), '.config'));
       // Check legacy locations in order of likelihood.
       // The 'q' instance was renamed from 'personal', so also check the old name.
       const legacyNames = instanceName === 'q' ? [instanceName, 'personal'] : [instanceName];

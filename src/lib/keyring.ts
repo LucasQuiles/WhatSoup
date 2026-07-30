@@ -533,7 +533,11 @@ export function _setFileStoreDirForTests(dir: string | null): void {
 
 function fileStoreDir(): string {
   if (_fileStoreDirOverride) return _fileStoreDirOverride;
-  const base = process.env.XDG_CONFIG_HOME || path.join(os.homedir(), '.config');
+  const isDarwin = os.platform() === 'darwin';
+  const base = process.env.XDG_CONFIG_HOME
+    || (isDarwin
+      ? path.join(os.homedir(), 'Library', 'Application Support')
+      : path.join(os.homedir(), '.config'));
   return path.join(base, 'whatsoup', 'credentials');
 }
 
@@ -585,7 +589,10 @@ export function _setOpenCodeAuthDirForTests(dir: string | null): void {
 
 function openCodeAuthPath(): string {
   if (_openCodeAuthDirOverride) return path.join(_openCodeAuthDirOverride, 'auth.json');
-  const base = process.env.XDG_DATA_HOME || path.join(os.homedir(), '.local', 'share');
+  const base = process.env.XDG_DATA_HOME
+    || (isDarwin
+      ? path.join(os.homedir(), 'Library', 'Application Support')
+      : path.join(os.homedir(), '.local', 'share'));
   return path.join(base, 'opencode', 'auth.json');
 }
 

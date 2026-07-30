@@ -17,24 +17,50 @@ export const repoRoot: string = path.resolve(
   '..',
 );
 
+const isDarwin = os.platform() === 'darwin';
+
 export function xdgDir(envKey: string, fallbackSuffix: string): string {
   const value = process.env[envKey];
   return value ? value : path.join(os.homedir(), fallbackSuffix);
 }
 
+/**
+ * macOS app support root — avoids dotfile clutter in $HOME.
+ * Uses ~/Library/Application Support/ (Apple HIG) instead of XDG ~/.config.
+ * When XDG_* env vars are explicitly set they still take priority (compat).
+ */
+function macOsAppSupportDir(): string {
+  return path.join(os.homedir(), 'Library', 'Application Support', 'whatsoup');
+}
+function macOsCachesDir(): string {
+  return path.join(os.homedir(), 'Library', 'Caches', 'whatsoup');
+}
+
 export function configRoot(): string {
+  if (isDarwin && !process.env.XDG_CONFIG_HOME) {
+    return path.join(macOsAppSupportDir(), 'instances');
+  }
   return path.join(xdgDir('XDG_CONFIG_HOME', '.config'), 'whatsoup', 'instances');
 }
 
 export function dataRoot(name: string): string {
+  if (isDarwin && !process.env.XDG_DATA_HOME) {
+    return path.join(macOsAppSupportDir(), 'instances', name);
+  }
   return path.join(xdgDir('XDG_DATA_HOME', '.local/share'), 'whatsoup', 'instances', name);
 }
 
 export function tmpRoot(name: string): string {
+  if (isDarwin && !process.env.XDG_DATA_HOME) {
+    return path.join(macOsCachesDir(), 'tmp', name);
+  }
   return path.join(xdgDir('XDG_DATA_HOME', '.local/share'), 'whatsoup', 'tmp', name);
 }
 
 export function stateRoot(name: string): string {
+  if (isDarwin && !process.env.XDG_STATE_HOME) {
+    return path.join(macOsAppSupportDir(), 'instances', name);
+  }
   return path.join(xdgDir('XDG_STATE_HOME', '.local/state'), 'whatsoup', 'instances', name);
 }
 
