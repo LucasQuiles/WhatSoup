@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # Install only the BOT ERRORS daily health launchd agent on macOS relay/bot hosts.
 set -euo pipefail
 
