@@ -138,6 +138,7 @@ const SCOPE_MAP: Record<string, ScopeEntry> = {
   'lint:src': { class: 'skip-immune', reason: 'eslint-fitness CLI is locked to repoRoot (ignores argv); internal filesLinted===0 floor added this session + own unit test covers it' },
   'catch-ratchet': { class: 'skip-immune', reason: 'generator is import.meta-rooted and ignores cwd; its zero-file scan fails closed and is covered by generate-catch-ratchet.test.ts' },
   'durability-writer': { class: 'skip-immune', reason: 'SCRIPT_DIR/REPO_ROOT-rooted (REPO_ROOT = SCRIPT_DIR/..); scans the real repo regardless of cwd (verified empty-cwd exit 0). Its discoveredTableCount===0 -> exit 2 non-vacuity floor + the paired durability-writer-guard.test.ts cover the empty/inconclusive case (#1789)' },
+  'hardcoded-tmpdir': { class: 'skip-immune', reason: 'import.meta-rooted (ROOT = import.meta.dirname/..); scan() takes an explicit root param for testability but the CLI entrypoint always passes the real repo root, ignoring cwd. Its filesScanned===0 -> throw -> exit 2 INCONCLUSIVE non-vacuity floor (same pattern as catch-ratchet\'s results.length===0 throw) + the paired check-hardcoded-tmpdir.test.ts cover the empty/inconclusive case' },
 
   // ---- skip-network: needs a live API, not offline-judgeable ----
   'branch-protection-drift': { class: 'skip-network', reason: 'pipes `gh api` branch protection into the check; cannot be judged against an offline empty tree' },
