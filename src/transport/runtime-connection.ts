@@ -9,7 +9,7 @@ import type { IncomingMessage, Messenger, SubmissionReceipt } from '../core/type
 import type { IdentityStore, GuardMode } from '../core/outbound-identity/types.ts';
 import type { ContactsDirectory } from '../core/mentions.ts';
 import type { PresenceCache } from './presence-cache.ts';
-import type { WhatsAppSocket } from './connection.ts';
+import type { WhatsAppSocket, ConnectionStateSnapshot } from './connection.ts';
 import type { OutboundBannerClassifier } from './outbound-content-egress.ts';
 
 export function isFullyConnected(
