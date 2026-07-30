@@ -30,6 +30,8 @@ describe('startup-notification documentation', () => {
     expect(configuration).toContain('Provider-bridge base extraction');
     expect(configuration).toContain('health boolean-helper consolidation');
     expect(configuration).toContain('`STARTUP_NOTIFY_FILENAME` export cleanup');
+    expect(configuration).toContain('currently unused');
+    expect(configuration).not.toContain('final repository search found callers');
   });
 
   it('replaces per-process burst guidance with aggregate and health observation guidance', () => {

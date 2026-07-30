@@ -9,6 +9,10 @@ import {
 function completeHealth(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return {
     status: 'healthy',
+    transport: {
+      connected: true,
+      connection: { state: 'connected' },
+    },
     startupNotification: {
       state: 'sent',
       policy: 'generic',
@@ -32,6 +36,12 @@ function validJournal(overrides: Record<string, unknown> = {}): Record<string, u
   };
 }
 
+function healthWithoutTransport(): Record<string, unknown> {
+  const health = completeHealth();
+  delete health.transport;
+  return health;
+}
+
 function runCli(args: readonly string[], files: Record<string, unknown> = {}) {
   return runStartupNotificationReleaseCli(args, (path) => files[path]);
 }
@@ -51,6 +61,23 @@ describe('startup notification release validator', () => {
       journal: validJournal(),
       probe: { outcome: 'passed' },
     })).toMatchObject({ exitCode: 0, outcome: 'accepted', issues: [] });
+  });
+
+  it.each([
+    ['missing transport', healthWithoutTransport()],
+    ['disconnected transport', { ...completeHealth(), transport: { connected: false, connection: { state: 'connected' } } }],
+    ['reconnecting transport', { ...completeHealth(), transport: { connected: true, connection: { state: 'reconnecting' } } }],
+    ['missing connection state', { ...completeHealth(), transport: { connected: true } }],
+  ])('rejects %s as fail-closed release evidence', (_name, health) => {
+    expect(validateStartupNotificationRelease({
+      health,
+      journal: validJournal(),
+      probe: { outcome: 'passed' },
+    })).toMatchObject({
+      exitCode: 1,
+      outcome: 'rejected',
+      issues: expect.arrayContaining(['transport_not_ready']),
+    });
   });
 
   it.each([

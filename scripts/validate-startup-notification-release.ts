@@ -1,5 +1,7 @@
 import { closeSync, constants, openSync, readSync } from 'node:fs';
 
+import { isFullyConnected } from '../src/transport/runtime-connection.ts';
+
 const MAX_JOURNAL_BOOTS = 100;
 const MAX_JSON_INPUT_BYTES = 64 * 1_024;
 
@@ -62,6 +64,14 @@ function isNullableTimestamp(value: unknown): value is number | null {
   return value === null || isFiniteTimestamp(value);
 }
 
+function hasStrictTransportReadiness(value: unknown): boolean {
+  if (!isRecord(value) || !isRecord(value.connection)) return false;
+  return isFullyConnected({
+    connected: value.connected,
+    state: value.connection.state,
+  });
+}
+
 function reject(issues: string[]): StartupNotificationReleaseValidationResult {
   return { exitCode: 1, outcome: 'rejected', issues };
 }
@@ -94,6 +104,7 @@ export function validateStartupNotificationRelease(
   const issues: string[] = [];
   if (probe.outcome === 'failed') issues.push('probe_failed');
   if (input.health.status !== 'healthy') issues.push('service_not_healthy');
+  if (!hasStrictTransportReadiness(input.health.transport)) issues.push('transport_not_ready');
 
   const startupNotification = input.health.startupNotification;
   if (!isRecord(startupNotification)) return reject([...issues, 'startup_notification_missing']);

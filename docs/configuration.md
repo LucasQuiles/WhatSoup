@@ -568,8 +568,9 @@ The following are deliberately tracked but not started by this protocol change:
   matrix.
 - The health boolean-helper consolidation belongs in a focused health-poller
   change.
-- `STARTUP_NOTIFY_FILENAME` export cleanup remains deferred because Task 3's
-  final repository search found callers and did not support removal.
+- The currently unused `STARTUP_NOTIFY_FILENAME` export cleanup remains a
+  recorded follow-up; this protocol lane does not fold a public-surface removal
+  into its journal-mechanics scope.
 
 For the single approval-gated operational evidence procedure, see
 [`release-deployment.md`](runbooks/release-deployment.md#startup-notification-acceptance).
