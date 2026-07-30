@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any
 
 from bot_errors_probe_observation import observation, report_verdict, strict_exit_code
-from probelib import git_head, load_json, sha256_16
+from probelib import load_json
 
 SCHEMA = "bot-errors-health-surface-report"
 SCHEMA_VERSION = "0.2"
@@ -50,10 +50,26 @@ SAFE_SOURCE_PREFIXES = [
 ]
 
 
+def read_lines_with_status(path: Path) -> tuple[list[str], str | None]:
+    try:
+        if not path.exists():
+            return [], "missing"
+        if not path.is_file():
+            return [], "not_regular_file"
+        return path.read_text(encoding="utf-8", errors="replace").splitlines(), None
+    except OSError:
+        return [], "source_read"
+
+
 def read_lines(path: Path) -> list[str]:
-    if not path.exists():
-        return []
-    return path.read_text(encoding="utf-8", errors="replace").splitlines()
+    return read_lines_with_status(path)[0]
+
+
+def load_error_details(value: dict[str, Any]) -> tuple[str, str, str]:
+    error = value.get("_error")
+    if isinstance(error, str) and error.startswith("JSONDecodeError:"):
+        return "invalid_json", "invalid_json", "json_decode"
+    return "read_error", "read_error", "source_read"
 
 
 def rel(path: Path, repo: Path) -> str | None:
@@ -108,11 +124,6 @@ def function_body(source_lines: list[str], fn: dict[str, Any] | None) -> str:
     return "\n".join(source_lines[start:end])
 
 
-def source_hash(lines: list[str], start: int, end: int) -> str:
-    snippet = "\n".join(lines[max(0, start - 1):max(0, end)])
-    return sha256_16(snippet)
-
-
 def function_inventory(repo: Path, source_lines: list[str], functions: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
     items: list[dict[str, Any]] = []
     path = repo / HEALTH_SCRIPT
@@ -128,7 +139,6 @@ def function_inventory(repo: Path, source_lines: list[str], functions: dict[str,
             "present": True,
             "ref": ref(path, repo, line),
             "line_count": max(1, end_line - line + 1),
-            "body_sha256_16": source_hash(source_lines, line, end_line),
         })
     return items
 
@@ -225,8 +235,9 @@ def manifest_surface(repo: Path) -> dict[str, Any]:
             "marker_category_counts": {},
         }
     if isinstance(manifest, dict) and "_error" in manifest:
+        status, format_status, error_class = load_error_details(manifest)
         return {
-            **observation("runtime_manifest", "invalid_json", format_status="invalid_json", error_class="json_decode", unknown=1),
+            **observation("runtime_manifest", status, format_status=format_status, error_class=error_class, unknown=1),
             "file_count": 0,
             "marker_category_counts": {},
         }
@@ -285,8 +296,9 @@ def managed_surface(repo: Path) -> dict[str, Any]:
             "purpose_category_counts": {},
         }
     if isinstance(data, dict) and "_error" in data:
+        status, format_status, error_class = load_error_details(data)
         return {
-            **observation("managed_components", "invalid_json", format_status="invalid_json", error_class="json_decode", unknown=1),
+            **observation("managed_components", status, format_status=format_status, error_class=error_class, unknown=1),
             "protective_service_count": 0,
             "purpose_category_counts": {},
         }
@@ -336,7 +348,7 @@ def managed_surface(repo: Path) -> dict[str, Any]:
 def build_report(repo: Path) -> dict[str, Any]:
     repo = repo.expanduser().resolve()
     script_path = repo / HEALTH_SCRIPT
-    source_lines = read_lines(script_path)
+    source_lines, source_read_status = read_lines_with_status(script_path)
     source = "\n".join(source_lines)
     functions = parse_functions(source)
     function_parse_error = functions.get("_parse_error") if isinstance(functions.get("_parse_error"), dict) else None
@@ -348,14 +360,22 @@ def build_report(repo: Path) -> dict[str, Any]:
     plugins = plugin_surfaces(source_lines, functions)
     manifest = manifest_surface(repo)
     managed = managed_surface(repo)
+    if source_read_status == "missing":
+        health_status, health_format, health_schema, health_error = "missing", "absent", "not_applicable", None
+    elif source_read_status is not None:
+        health_status, health_format, health_schema, health_error = "read_error", "read_error", "not_applicable", source_read_status
+    elif function_parse_error:
+        health_status, health_format, health_schema, health_error = "invalid_shape", "not_applicable", "invalid_shape", "syntax_error"
+    else:
+        health_status, health_format, health_schema, health_error = "observed", "not_applicable", "not_applicable", None
     health_script = observation(
         "health_script",
-        "invalid_shape" if function_parse_error else "observed" if script_path.exists() else "missing",
-        format_status="not_applicable",
-        schema_status="invalid_shape" if function_parse_error else "not_applicable",
-        error_class="syntax_error" if function_parse_error else None,
-        unknown=1 if not script_path.exists() or function_parse_error else 0,
-        artifact_refs=(str(HEALTH_SCRIPT),) if script_path.exists() else (),
+        health_status,
+        format_status=health_format,
+        schema_status=health_schema,
+        error_class=health_error,
+        unknown=1 if health_status != "observed" else 0,
+        artifact_refs=(str(HEALTH_SCRIPT),) if health_status == "observed" else (),
     )
     observations = {
         "health_script": health_script,
@@ -363,7 +383,7 @@ def build_report(repo: Path) -> dict[str, Any]:
         "managed_components": managed,
     }
     consistency = {
-        "health_script_present": script_path.exists(),
+        "health_script_present": health_status == "observed",
         "key_functions_present": not missing_functions,
         "daily_has_plugin_inventory": "plugin_inventory" in daily["inventory_calls"],
         "daily_has_provider_probe_path": bool(provider["failure_classes"]),
@@ -379,16 +399,14 @@ def build_report(repo: Path) -> dict[str, Any]:
         "requiredObservations": sorted(observations),
         "observations": observations,
         "reportVerdict": report_verdict(observations),
-        "head": git_head(repo),
         "redaction": (
             "metadata-only source/static inventory; does not run health check, SSH, "
             "provider CLIs, service managers, queue readers, credential readers, or BOT ERRORS sends; "
             "does not emit source lines, paths from health output, commands, config values, or credential material"
         ),
         "source": {
-            "health_script_ref": ref(script_path, repo, 1) if script_path.exists() else None,
+            "health_script_ref": ref(script_path, repo, 1) if health_status == "observed" else None,
             "health_script_line_count": len(source_lines),
-            "health_script_sha256_16": sha256_16(source),
             "function_parse_error": function_parse_error,
             "functions": function_items,
             "argparse_flags": argparse_flags(source),

@@ -197,6 +197,8 @@ def test_health_surface_probe_maps_source_without_raw_values():
         assert report["serializationStatus"] == "emitted", report
         assert report["reportVerdict"] == "valid", report
         assert "repo" not in report, report
+        assert "head" not in report, report
+        assert "sha256" not in rendered, rendered
         assert report["summary"]["key_functions_missing"] == 0, report
         assert "runtime_manifest_inventory" in report["daily_health_surfaces"]["inventory_calls"], report
         assert "plugin_inventory" in report["daily_health_surfaces"]["inventory_calls"], report
@@ -216,6 +218,15 @@ def test_health_surface_probe_extracts_provider_and_alert_classes():
         assert "AGENT_PROVIDER_AUTH_REQUIRED" in alerts["critical_asset_codes"], alerts
         assert report["runtime_manifest_surface"]["marker_category_counts"]["provider_markers"] == 1, report
         assert report["managed_components_surface"]["purpose_category_counts"]["credential_backup"] == 1, report
+
+
+def test_provider_claude_path_requires_both_static_markers():
+    """A single marker cannot claim the Claude probe path is represented."""
+    assert probe.provider_surfaces("claude-cli", [], {})["supports_claude_probe_path"] is False
+    assert probe.provider_surfaces("provider_probe_target_inventory", [], {})["supports_claude_probe_path"] is False
+    assert probe.provider_surfaces(
+        "claude-cli provider_probe_target_inventory", [], {}
+    )["supports_claude_probe_path"] is True
 
 
 def test_health_surface_probe_cli_suppresses_fixture_payloads():
@@ -247,6 +258,46 @@ def test_read_lines_missing_path_returns_empty():
     """read_lines returns [] without raising when the path does not exist."""
     result = read_lines(Path("/nonexistent-xyz/does-not-exist.py"))
     assert result == [], result
+
+
+def test_health_script_directory_is_typed_read_error_and_strict_serializes():
+    """A non-regular health script cannot crash or be presented as source evidence."""
+    with tempfile.TemporaryDirectory(prefix="private-health-root-") as tmp_dir:
+        repo = Path(tmp_dir)
+        (repo / probe.HEALTH_SCRIPT).mkdir(parents=True)
+        report = build_report(repo)
+        probe_path = str(Path(__file__).resolve().parents[1] / "bot_errors_health_surface_probe.py")
+        strict = subprocess.run(
+            [sys.executable, probe_path, "--repo", str(repo), "--strict"],
+            capture_output=True,
+            text=True,
+        )
+    observation = report["observations"]["health_script"]
+    assert observation["status"] == "read_error", observation
+    assert observation["formatStatus"] == "read_error", observation
+    assert observation["error_class"] == "not_regular_file", observation
+    assert observation["artifact_refs"] == [], observation
+    assert report["source"]["health_script_ref"] is None, report
+    assert report["reportVerdict"] == "invalid", report
+    assert tmp_dir not in json.dumps(report, sort_keys=True), report
+    assert strict.returncode == 2, strict.stderr
+    assert json.loads(strict.stdout)["observations"]["health_script"]["status"] == "read_error", strict.stdout
+    assert tmp_dir not in strict.stdout, strict.stdout
+
+
+def test_health_surfaces_map_load_permission_failure_to_read_error():
+    """A read failure is not a malformed-JSON claim for either JSON source."""
+    original_load_json = probe.load_json
+    probe.load_json = lambda _path: {"_error": "PermissionError: denied"}
+    try:
+        manifest = manifest_surface(Path("/unused"))
+        managed = managed_surface(Path("/unused"))
+    finally:
+        probe.load_json = original_load_json
+    for result in (manifest, managed):
+        assert result["status"] == "read_error", result
+        assert result["formatStatus"] == "read_error", result
+        assert result["error_class"] == "source_read", result
 
 
 # ---------------------------------------------------------------------------
@@ -330,6 +381,18 @@ def test_function_inventory_missing_functions_marked_absent():
     assert len(absent) == len(probe.KEY_FUNCTIONS), absent
     assert all(item["name"] in probe.KEY_FUNCTIONS for item in absent), absent
     assert report["summary"]["key_functions_missing"] == len(probe.KEY_FUNCTIONS), report
+    assert report["observations"]["health_script"]["counts"]["unknown"] == 1, report
+
+
+def test_function_inventory_preserves_declared_end_line_for_line_count():
+    """A present function's source span includes every declared source line."""
+    with tempfile.TemporaryDirectory(prefix="bot-errors-function-span-") as tmp_dir:
+        functions = {
+            name: {"line": 4, "end_line": 7}
+            for name in probe.KEY_FUNCTIONS
+        }
+        items = probe.function_inventory(Path(tmp_dir), [], functions)
+    assert all(item["line_count"] == 4 for item in items), items
 
 
 # ---------------------------------------------------------------------------
@@ -536,6 +599,30 @@ def test_managed_surface_manifest_or_drift_counter():
         result = managed_surface(repo)
     counts = result["purpose_category_counts"]
     assert counts.get("manifest_or_drift", 0) == 2, counts
+
+
+def test_managed_surface_counts_single_keyword_purpose_classes():
+    """Each accepted keyword independently contributes to its bounded category."""
+    with tempfile.TemporaryDirectory(prefix="bot-errors-managed-keywords-") as tmp_dir:
+        repo = Path(tmp_dir)
+        (repo / "deploy").mkdir(parents=True, exist_ok=True)
+        (repo / "deploy/managed-components.json").write_text(
+            json.dumps({
+                "protective_services": {
+                    "entries": [
+                        {"purpose": "Monitors health."},
+                        {"purpose": "Restarts jobs."},
+                        {"purpose": "Stores token backup."},
+                        {"purpose": "Checks auth backup."},
+                    ]
+                }
+            }),
+            encoding="utf-8",
+        )
+        result = managed_surface(repo)
+    counts = result["purpose_category_counts"]
+    assert counts.get("health_or_restart", 0) == 2, counts
+    assert counts.get("credential_backup", 0) == 2, counts
 
 
 def test_managed_surface_protective_services_none():
