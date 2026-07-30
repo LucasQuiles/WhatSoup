@@ -40,7 +40,7 @@ import { loadContext } from './context.ts';
 import { ChatQueue } from './queue.ts';
 import { processMedia } from './media/processor.ts';
 import type { ProcessedMedia } from './media/processor.ts';
-import { EnrichmentPoller } from './enrichment/poller.ts';
+import { EnrichmentPoller, type EnrichmentCycleHealthState } from './enrichment/poller.ts';
 import { ENRICHMENT_STALE_MS } from '../../core/health.ts';
 import { downloadMediaMessage } from '@whiskeysockets/baileys';
 import { jitteredDelay, sleep } from '../../core/retry.ts';
@@ -68,13 +68,40 @@ CREATE INDEX IF NOT EXISTS idx_llm_attempts_sender ON llm_attempts(sender_jid, a
 
 CREATE TABLE IF NOT EXISTS enrichment_runs (
   run_id INTEGER PRIMARY KEY AUTOINCREMENT,
+  schema_version INTEGER NOT NULL DEFAULT 1 CHECK (schema_version = 1),
+  source TEXT NOT NULL DEFAULT 'legacy' CHECK (source IN ('online', 'legacy')),
+  status TEXT NOT NULL DEFAULT 'legacy_unclassified'
+    CHECK (status IN ('no_work', 'completed', 'partial', 'failed', 'legacy_unclassified')),
+  failure_code TEXT NOT NULL DEFAULT 'legacy_unclassified'
+    CHECK (failure_code IN ('none', 'segment_failed', 'selection_failed', 'message_state_write_failed', 'ledger_write_failed', 'legacy_unclassified')),
+  stage TEXT NOT NULL DEFAULT 'none'
+    CHECK (stage IN ('none', 'selection', 'segment', 'message_state', 'ledger')),
+  retryable INTEGER NOT NULL DEFAULT 0 CHECK (retryable IN (0, 1)),
+  evidence_coverage TEXT NOT NULL DEFAULT 'legacy_unclassified'
+    CHECK (evidence_coverage IN ('typed', 'legacy_unclassified')),
   started_at TEXT NOT NULL,
   completed_at TEXT,
+  success_at TEXT,
   messages_processed INTEGER DEFAULT 0,
+  messages_selected INTEGER NOT NULL DEFAULT 0
+    CHECK (typeof(messages_selected) = 'integer' AND messages_selected >= 0),
+  messages_succeeded INTEGER NOT NULL DEFAULT 0
+    CHECK (typeof(messages_succeeded) = 'integer' AND messages_succeeded >= 0),
+  messages_deferred INTEGER NOT NULL DEFAULT 0
+    CHECK (typeof(messages_deferred) = 'integer' AND messages_deferred >= 0),
+  messages_terminal INTEGER NOT NULL DEFAULT 0
+    CHECK (typeof(messages_terminal) = 'integer' AND messages_terminal >= 0),
   facts_extracted INTEGER DEFAULT 0,
   facts_upserted INTEGER DEFAULT 0,
+  facts_queued INTEGER NOT NULL DEFAULT 0
+    CHECK (typeof(facts_queued) = 'integer' AND facts_queued >= 0),
   error TEXT
 );
+CREATE INDEX IF NOT EXISTS idx_enrichment_runs_source_run_id
+  ON enrichment_runs(source, run_id DESC);
+CREATE INDEX IF NOT EXISTS idx_enrichment_runs_online_success_run_id
+  ON enrichment_runs(run_id DESC)
+  WHERE source = 'online' AND success_at IS NOT NULL;
 `;
 
 /** Ensure chat-specific tables exist in the given database. Idempotent. */
@@ -132,6 +159,7 @@ export class ChatRuntime implements Runtime {
     this.enrichmentPoller = (options?.enableEnrichment ?? true)
       ? new EnrichmentPoller(db, pinecone, primaryProvider, primaryProvider)
       : null;
+    this.enrichmentPoller?.hydrateLatestCycleReceipt();
   }
 
   /** Attach an optional DurabilityEngine to track outbound ops. */
@@ -157,6 +185,37 @@ export class ChatRuntime implements Runtime {
       droppedCount,
     };
     const enrichmentLastRunAt = this.enrichmentPoller?.lastRunAt ?? null;
+    const rawEnrichmentCycleState: EnrichmentCycleHealthState | 'disabled' =
+      this.enrichmentPoller?.cycleHealthState ?? 'disabled';
+    const enrichmentLastSuccessMs = enrichmentLastRunAt === null
+      ? null
+      : new Date(enrichmentLastRunAt).getTime();
+    let enrichmentCycleState: EnrichmentCycleHealthState | 'disabled' = rawEnrichmentCycleState;
+    if (rawEnrichmentCycleState === 'current' || rawEnrichmentCycleState === 'no_work') {
+      if (enrichmentLastSuccessMs === null || !Number.isFinite(enrichmentLastSuccessMs)) {
+        enrichmentCycleState = 'invalid';
+      } else if (Date.now() - enrichmentLastSuccessMs > ENRICHMENT_STALE_MS) {
+        enrichmentCycleState = 'stale';
+      }
+    }
+    const enrichmentReceipt = this.enrichmentPoller?.latestCycleReceipt ?? null;
+    const enrichmentCycle = {
+      state: enrichmentCycleState,
+      lastAttemptAt: enrichmentReceipt?.completedAt ?? enrichmentReceipt?.startedAt ?? null,
+      lastSuccessAt: enrichmentLastRunAt,
+      status: enrichmentReceipt?.status ?? null,
+      failureCode: enrichmentReceipt?.failureCode ?? null,
+      stage: enrichmentReceipt?.stage ?? null,
+      retryable: enrichmentReceipt?.retryable ?? null,
+      evidenceCoverage: enrichmentReceipt?.evidenceCoverage ?? null,
+    };
+    const enrichmentReceiptDegraded = [
+      'partial',
+      'failed',
+      'stale',
+      'unreadable',
+      'invalid',
+    ].includes(enrichmentCycleState);
 
     let status: RuntimeHealth['status'] = 'healthy';
     if (this.databaseCompatibilityRejection) {
@@ -166,11 +225,8 @@ export class ChatRuntime implements Runtime {
     } else if ((queue?.queuedChats ?? 0) > 0) {
       // Waiters are backed up — signal degraded
       status = 'degraded';
-    } else if (enrichmentLastRunAt !== null) {
-      const staleness = Date.now() - new Date(enrichmentLastRunAt).getTime();
-      if (staleness > ENRICHMENT_STALE_MS) {
-        status = 'degraded';
-      }
+    } else if (enrichmentReceiptDegraded) {
+      status = 'degraded';
     }
 
     return {
@@ -182,6 +238,7 @@ export class ChatRuntime implements Runtime {
           unownedTotal: this.unownedQueueRejections,
         },
         enrichmentLastRunAt,
+        enrichmentCycle,
         queueDepth: queue?.queuedChats ?? 0,
         enrichmentUnprocessed: this.enrichmentPoller?.unprocessedCount ?? 0,
         databaseCompatibility: this.databaseCompatibilityRejection

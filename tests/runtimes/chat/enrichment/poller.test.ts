@@ -78,6 +78,10 @@ import {
 import { extractFacts } from '../../../../src/runtimes/chat/enrichment/extractor.ts';
 import { validateFacts } from '../../../../src/runtimes/chat/enrichment/validator.ts';
 import { enqueueFacts } from '../../../../src/runtimes/chat/enrichment/fact-export-queue.ts';
+import {
+  readLatestEnrichmentCycleReceipt,
+  writeEnrichmentCycleReceipt,
+} from '../../../../src/runtimes/chat/enrichment/cycle-receipt.ts';
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 
@@ -248,12 +252,23 @@ describe('EnrichmentPoller', () => {
     vi.mocked(validateFacts).mockResolvedValue([validatedFact]);
     vi.mocked(enqueueFacts).mockReturnValue({ attempted: 1, inserted: 1, duplicates: 0, failed: 0 });
 
-    const { poller } = makePoller();
+    const { poller, extractionProvider, validationProvider } = makePoller();
     await triggerOneCycle(poller);
 
     expect(getUnprocessedMessages).toHaveBeenCalledTimes(1);
     expect(extractFacts).toHaveBeenCalledTimes(1);
     expect(validateFacts).toHaveBeenCalledTimes(1);
+    expect(extractFacts).toHaveBeenCalledWith(
+      extractionProvider,
+      [msg1, msg2],
+      { strict: true },
+    );
+    expect(validateFacts).toHaveBeenCalledWith(
+      validationProvider,
+      [extractedFact],
+      [msg1, msg2],
+      { strict: true },
+    );
     expect(enqueueFacts).toHaveBeenCalledTimes(1);
     // Messages are marked processed after successful queueing, NOT after Pinecone write.
     expect(markMessagesProcessed).toHaveBeenCalledWith(expect.anything(), [1, 2]);
@@ -287,12 +302,12 @@ describe('EnrichmentPoller', () => {
       expect.stringContaining('INSERT INTO enrichment_runs'),
     );
     expect(db._runFn).toHaveBeenCalledTimes(1);
-    // Success path writes no `error` column at all — SQLite defaults the
-    // omitted column to NULL, and the bound param list has exactly the four
-    // pre-existing values (no fifth error argument tacked on).
+    // The writer explicitly stores NULL in the legacy free-form column while
+    // binding only the bounded receipt fields.
     const [sql] = db._prepareFn.mock.calls[0] as [string];
-    expect(sql).not.toContain('error');
-    expect(db._runFn.mock.calls[0]).toHaveLength(4);
+    expect(sql).toContain('error');
+    expect(sql).toContain('status');
+    expect(db._runFn.mock.calls[0]).toHaveLength(18);
   });
 
   it('persists a real enrichment_runs row with error IS NULL on a successful cycle (real SQLite)', async () => {
@@ -311,11 +326,21 @@ describe('EnrichmentPoller', () => {
         error: string | null;
         completed_at: string | null;
         messages_processed: number;
+        source: string;
+        status: string;
+        failure_code: string;
+        success_at: string | null;
       }>;
       expect(rows).toHaveLength(1);
       expect(rows[0].error).toBeNull();
       expect(rows[0].completed_at).not.toBeNull();
       expect(rows[0].messages_processed).toBe(1);
+      expect(rows[0]).toMatchObject({
+        source: 'online',
+        status: 'completed',
+        failure_code: 'none',
+        success_at: expect.any(String),
+      });
     } finally {
       realDb.close();
     }
@@ -377,16 +402,15 @@ describe('EnrichmentPoller', () => {
 
   it('tick logs unexpected runCycle throws and reschedules while still running', async () => {
     const { poller } = makePoller();
-    const err = new Error('unexpected cycle fault');
     vi.spyOn(
       poller as unknown as { runCycle(): Promise<void> },
       'runCycle',
-    ).mockRejectedValueOnce(err);
+    ).mockRejectedValueOnce(new Error('unexpected cycle fault'));
 
     await (poller as unknown as { tick(): Promise<void> }).tick();
 
     expect(mockLogger.error).toHaveBeenCalledWith(
-      { err },
+      { stage: 'ledger' },
       'enrichment: unexpected error in tick — rescheduling',
     );
     expect((poller as unknown as { timer: NodeJS.Timeout | null }).timer).not.toBeNull();
@@ -406,7 +430,7 @@ describe('EnrichmentPoller', () => {
     expect((poller as unknown as { timer: NodeJS.Timeout | null }).timer).toBeNull();
   });
 
-  it('stop aborts an in-flight cycle before any post-provider database write', async () => {
+  it('stop records an interrupted partial receipt without mutating message state', async () => {
     let resolveExtraction!: (facts: []) => void;
     vi.mocked(getUnprocessedMessages).mockReturnValue([makeStoredMsg({ pk: 41 })]);
     vi.mocked(extractFacts).mockReturnValue(new Promise<[]>((resolve) => {
@@ -424,7 +448,13 @@ describe('EnrichmentPoller', () => {
     expect(markMessagesProcessed).not.toHaveBeenCalled();
     expect(markMessagesWithError).not.toHaveBeenCalled();
     expect(incrementEnrichmentRetries).not.toHaveBeenCalled();
-    expect(db._prepareFn).not.toHaveBeenCalled();
+    expect(db._prepareFn).toHaveBeenCalledWith(expect.stringContaining('INSERT INTO enrichment_runs'));
+    expect(poller.latestCycleReceipt).toMatchObject({
+      status: 'partial',
+      failureCode: 'segment_failed',
+      messagesSelected: 1,
+      messagesDeferred: 1,
+    });
     expect(poller.lastRunAt).toBeNull();
     expect((poller as unknown as { timer: NodeJS.Timeout | null }).timer).toBeNull();
   });
@@ -525,7 +555,96 @@ describe('EnrichmentPoller', () => {
     expect(markMessagesProcessed).not.toHaveBeenCalled();
   });
 
-  it('does NOT mark messages as processed when DB fetch throws, and records an enrichment_runs failure row instead of a silent skip', async () => {
+  it('records a no-work receipt instead of overloading an empty batch as no observation', async () => {
+    const realDb = new Database(':memory:');
+    realDb.open();
+    try {
+      vi.mocked(getUnprocessedMessages).mockReturnValue([]);
+
+      const { poller } = makePoller(realDb as unknown as ReturnType<typeof makeMockDb>);
+      await triggerOneCycle(poller);
+
+      expect(readLatestEnrichmentCycleReceipt(realDb)).toMatchObject({
+        source: 'online',
+        status: 'no_work',
+        failureCode: 'none',
+        stage: 'none',
+        retryable: false,
+        evidenceCoverage: 'typed',
+        successAt: expect.any(String),
+        messagesSelected: 0,
+        messagesSucceeded: 0,
+        messagesDeferred: 0,
+        messagesTerminal: 0,
+      });
+      expect(poller.lastRunAt).not.toBeNull();
+    } finally {
+      realDb.close();
+    }
+  });
+
+  it('records an all-segment failure as failed and does not advance success freshness', async () => {
+    const realDb = new Database(':memory:');
+    realDb.open();
+    try {
+      vi.mocked(getUnprocessedMessages).mockReturnValue([makeStoredMsg({ pk: 500 })]);
+      vi.mocked(extractFacts).mockRejectedValue(new Error('private extractor output'));
+
+      const { poller } = makePoller(realDb as unknown as ReturnType<typeof makeMockDb>);
+      await triggerOneCycle(poller);
+
+      expect(readLatestEnrichmentCycleReceipt(realDb)).toMatchObject({
+        source: 'online',
+        status: 'failed',
+        failureCode: 'segment_failed',
+        stage: 'segment',
+        retryable: true,
+        evidenceCoverage: 'typed',
+        messagesSelected: 1,
+        messagesSucceeded: 0,
+        messagesDeferred: 1,
+        messagesTerminal: 0,
+      });
+      expect(poller.lastRunAt).toBeNull();
+    } finally {
+      realDb.close();
+    }
+  });
+
+  it('records mixed segment outcomes as partial and does not advance success freshness', async () => {
+    const realDb = new Database(':memory:');
+    realDb.open();
+    try {
+      vi.mocked(getUnprocessedMessages).mockReturnValue([
+        makeStoredMsg({ pk: 501, chatJid: 'failed@g.us' }),
+        makeStoredMsg({ pk: 502, chatJid: 'completed@g.us' }),
+      ]);
+      vi.mocked(extractFacts)
+        .mockRejectedValueOnce(new Error('private failed segment'))
+        .mockResolvedValueOnce([]);
+
+      const { poller } = makePoller(realDb as unknown as ReturnType<typeof makeMockDb>);
+      await triggerOneCycle(poller);
+
+      expect(readLatestEnrichmentCycleReceipt(realDb)).toMatchObject({
+        source: 'online',
+        status: 'partial',
+        failureCode: 'segment_failed',
+        stage: 'segment',
+        retryable: true,
+        evidenceCoverage: 'typed',
+        messagesSelected: 2,
+        messagesSucceeded: 1,
+        messagesDeferred: 1,
+        messagesTerminal: 0,
+      });
+      expect(poller.lastRunAt).toBeNull();
+    } finally {
+      realDb.close();
+    }
+  });
+
+  it('does NOT mark messages as processed when DB fetch throws, and records a bounded failure receipt instead of a silent skip', async () => {
     vi.mocked(getUnprocessedMessages).mockImplementation(() => {
       throw new Error('DB connection lost');
     });
@@ -538,23 +657,21 @@ describe('EnrichmentPoller', () => {
     expect(markMessagesProcessed).not.toHaveBeenCalled();
     expect(extractFacts).not.toHaveBeenCalled();
 
-    // Before this fix, a fetch failure logged and returned with zero rows
-    // written to enrichment_runs — a failed cycle was durably invisible.
-    // Now it must persist a terminal-failure row: error set (non-null,
-    // carrying the underlying message), completed_at set (via the same
-    // datetime('now') the success path uses), and messages_processed known
-    // at failure time (0 — nothing was fetched before the throw).
+    // Before the durable failure writer, a fetch failure logged and returned
+    // with zero rows. The receipt must instead carry bounded outcome fields;
+    // exception prose is not part of the durable contract.
     const insertCall = db._prepareFn.mock.calls.find(([sql]) =>
       (sql as string).includes('INSERT INTO enrichment_runs'),
     );
     expect(insertCall?.[0]).toContain('error');
-    expect(insertCall?.[0]).toContain("datetime('now')");
+    expect(insertCall?.[0]).toContain('failure_code');
+    expect(insertCall?.[0]).toContain('status');
 
     expect(db._runFn).toHaveBeenCalledTimes(1);
     const runArgs = db._runFn.mock.calls[0] as unknown[];
-    const errorArg = runArgs[runArgs.length - 1];
-    expect(typeof errorArg).toBe('string');
-    expect(errorArg).toContain('DB connection lost');
+    expect(runArgs).toContain('failed');
+    expect(runArgs).toContain('selection_failed');
+    expect(runArgs).not.toContain('DB connection lost');
     expect(runArgs).toContain(0); // messages_processed known at failure time
 
     // A failed cycle must NOT advance lastRunAt — it stays frozen at its prior
@@ -565,7 +682,7 @@ describe('EnrichmentPoller', () => {
     expect(poller.lastRunAt).toBe(lastRunAtBeforeFailure);
   });
 
-  it('persists a real enrichment_runs row with a non-null error when the fetch throws (real SQLite)', async () => {
+  it('persists a real typed enrichment_runs failure receipt when the fetch throws (real SQLite)', async () => {
     // Same scenario as the mock-based test above, but against real SQLite —
     // proves the failure row actually lands with the right column values,
     // not just that the writer was invoked with the right-looking arguments.
@@ -583,12 +700,109 @@ describe('EnrichmentPoller', () => {
         error: string | null;
         completed_at: string | null;
         messages_processed: number;
+        status: string;
+        failure_code: string;
+        stage: string;
       }>;
       expect(rows).toHaveLength(1);
-      expect(rows[0].error).toBe('DB connection lost');
+      expect(rows[0].error).toBeNull();
       expect(rows[0].completed_at).not.toBeNull();
       expect(rows[0].messages_processed).toBe(0);
+      expect(rows[0]).toMatchObject({
+        status: 'failed',
+        failure_code: 'selection_failed',
+        stage: 'selection',
+      });
       expect(poller.lastRunAt).toBeNull();
+    } finally {
+      realDb.close();
+    }
+  });
+
+  it('records a bounded typed failure receipt when selecting messages throws', async () => {
+    const realDb = new Database(':memory:');
+    realDb.open();
+    try {
+      vi.mocked(getUnprocessedMessages).mockImplementation(() => {
+        throw new Error('database connection failed while selecting private message content');
+      });
+
+      const { poller } = makePoller(realDb as unknown as ReturnType<typeof makeMockDb>);
+      await triggerOneCycle(poller);
+
+      expect(readLatestEnrichmentCycleReceipt(realDb)).toEqual({
+        source: 'online',
+        status: 'failed',
+        failureCode: 'selection_failed',
+        stage: 'selection',
+        retryable: true,
+        evidenceCoverage: 'typed',
+        startedAt: expect.any(String),
+        completedAt: expect.any(String),
+        successAt: null,
+        messagesSelected: 0,
+        messagesSucceeded: 0,
+        messagesDeferred: 0,
+        messagesTerminal: 0,
+        factsExtracted: 0,
+        factsQueued: 0,
+      });
+      const raw = realDb.raw.prepare('SELECT error FROM enrichment_runs').get() as { error: string | null };
+      expect(raw.error).toBeNull();
+      expect(poller.lastRunAt).toBeNull();
+    } finally {
+      realDb.close();
+    }
+  });
+
+  it('rehydrates the latest failed online receipt separately from the prior success clock', () => {
+    const realDb = new Database(':memory:');
+    realDb.open();
+    try {
+      writeEnrichmentCycleReceipt(realDb, {
+        source: 'online',
+        status: 'completed',
+        failureCode: 'none',
+        stage: 'none',
+        retryable: false,
+        evidenceCoverage: 'typed',
+        startedAt: '2026-07-30T00:00:00.000Z',
+        completedAt: '2026-07-30T00:00:01.000Z',
+        successAt: '2026-07-30T00:00:01.000Z',
+        messagesSelected: 1,
+        messagesSucceeded: 1,
+        messagesDeferred: 0,
+        messagesTerminal: 0,
+        factsExtracted: 0,
+        factsQueued: 0,
+      });
+      writeEnrichmentCycleReceipt(realDb, {
+        source: 'online',
+        status: 'failed',
+        failureCode: 'selection_failed',
+        stage: 'selection',
+        retryable: true,
+        evidenceCoverage: 'typed',
+        startedAt: '2026-07-30T00:00:02.000Z',
+        completedAt: '2026-07-30T00:00:03.000Z',
+        successAt: null,
+        messagesSelected: 0,
+        messagesSucceeded: 0,
+        messagesDeferred: 0,
+        messagesTerminal: 0,
+        factsExtracted: 0,
+        factsQueued: 0,
+      });
+
+      const { poller } = makePoller(realDb as unknown as ReturnType<typeof makeMockDb>);
+      poller.hydrateLatestCycleReceipt();
+
+      expect(poller.cycleHealthState).toBe('failed');
+      expect(poller.latestCycleReceipt).toMatchObject({
+        status: 'failed',
+        failureCode: 'selection_failed',
+      });
+      expect(poller.lastRunAt).toBe('2026-07-30T00:00:01.000Z');
     } finally {
       realDb.close();
     }
@@ -672,7 +886,7 @@ describe('EnrichmentPoller', () => {
     expect(errorPks).toContain(77);
   });
 
-  it('lastRunAt is only updated when messages were fetched (not on empty batch)', async () => {
+  it('records no-work and advances success freshness on an empty batch', async () => {
     vi.mocked(getUnprocessedMessages).mockReturnValue([]);
 
     const { poller, db } = makePoller();
@@ -689,8 +903,13 @@ describe('EnrichmentPoller', () => {
     expect(markMessagesProcessed).not.toHaveBeenCalled();
     expect(markMessagesWithError).not.toHaveBeenCalled();
     expect(incrementEnrichmentRetries).not.toHaveBeenCalled();
-    expect(db._prepareFn).not.toHaveBeenCalled();
-    expect(poller.lastRunAt).toBe(previousLastRunAt);
+    expect(db._prepareFn).toHaveBeenCalledWith(expect.stringContaining('INSERT INTO enrichment_runs'));
+    expect(poller.latestCycleReceipt).toMatchObject({
+      status: 'no_work',
+      failureCode: 'none',
+      messagesSelected: 0,
+    });
+    expect(poller.lastRunAt).not.toBe(previousLastRunAt);
   });
 
   it('logs retry counter persistence failures without marking the failed segment processed', async () => {
@@ -708,9 +927,10 @@ describe('EnrichmentPoller', () => {
 
     expect(incrementEnrichmentRetries).toHaveBeenCalledWith(expect.anything(), [88]);
     expect(mockLogger.error).toHaveBeenCalledWith(
-      { err: retryErr },
+      { failureCode: 'message_state_write_failed', stage: 'message_state' },
       'enrichment: failed to persist retry counters',
     );
+    expect(JSON.stringify(mockLogger.error.mock.calls)).not.toContain(retryErr.message);
     const processedPks = vi.mocked(markMessagesProcessed).mock.calls.flatMap((c) => c[1] as number[]);
     expect(processedPks).not.toContain(88);
   });
@@ -727,12 +947,18 @@ describe('EnrichmentPoller', () => {
     await triggerOneCycle(poller);
 
     expect(mockLogger.error).toHaveBeenCalledWith(
-      { err: markErr },
+      { failureCode: 'message_state_write_failed', stage: 'message_state' },
       'enrichment: failed to mark messages processed',
     );
     expect(markMessagesWithError).toHaveBeenCalledWith(expect.anything(), [], 'max_retries_exceeded');
     expect(db._runFn).toHaveBeenCalledTimes(1);
-    expect(poller.lastRunAt).not.toBeNull();
+    expect(poller.lastRunAt).toBeNull();
+    expect(poller.latestCycleReceipt).toMatchObject({
+      status: 'failed',
+      failureCode: 'message_state_write_failed',
+      messagesSucceeded: 0,
+      messagesDeferred: 1,
+    });
   });
 
   it('logs markMessagesWithError failures without aborting final cycle accounting', async () => {
@@ -750,11 +976,17 @@ describe('EnrichmentPoller', () => {
 
     expect(markMessagesWithError).toHaveBeenCalledWith(expect.anything(), [92], 'max_retries_exceeded');
     expect(mockLogger.error).toHaveBeenCalledWith(
-      { err: errorErr },
+      { failureCode: 'message_state_write_failed', stage: 'message_state' },
       'enrichment: failed to mark messages with error',
     );
     expect(db._runFn).toHaveBeenCalledTimes(1);
-    expect(poller.lastRunAt).not.toBeNull();
+    expect(poller.lastRunAt).toBeNull();
+    expect(poller.latestCycleReceipt).toMatchObject({
+      status: 'failed',
+      failureCode: 'message_state_write_failed',
+      messagesTerminal: 0,
+      messagesDeferred: 1,
+    });
   });
 
   it('logs enrichment_runs insert failures after message accounting completes', async () => {
@@ -771,10 +1003,13 @@ describe('EnrichmentPoller', () => {
 
     expect(markMessagesProcessed).toHaveBeenCalledWith(expect.anything(), [93]);
     expect(mockLogger.error).toHaveBeenCalledWith(
-      { err: runErr },
-      'enrichment: failed to write enrichment_runs record',
+      { failureCode: 'ledger_write_failed', stage: 'ledger' },
+      'enrichment: failed to write enrichment-cycle receipt',
     );
-    expect(poller.lastRunAt).not.toBeNull();
+    expect(JSON.stringify(mockLogger.error.mock.calls)).not.toContain(runErr.message);
+    expect(poller.lastRunAt).toBeNull();
+    expect(poller.latestCycleReceipt).toBeNull();
+    expect(poller.cycleHealthState).toBe('unreadable');
   });
 
   // ── T1 hardening: accounting-gated markMessagesProcessed ─────────────────
@@ -790,8 +1025,7 @@ describe('EnrichmentPoller', () => {
   //   failed === 0  AND  inserted + duplicates === facts.length
   // On mismatch, the poller must:
   //   - NOT mark those messages processed
-  //   - log at WARN with run_id (from MW_MIND_RUN_ID), failed count, and the
-  //     full accounting object.
+  //   - log only bounded accounting and receipt fields.
 
   it('does NOT mark messages processed when enqueueFacts returns failed > 0', async () => {
     // Seed a fact segment with 3 messages and 3 extracted/validated facts.
@@ -850,7 +1084,7 @@ describe('EnrichmentPoller', () => {
     expect(processedPks).not.toContain(103);
   });
 
-  it('includes run id in queue mismatch and cycle-complete logs when present', async () => {
+  it('emits bounded queue-mismatch and cycle-complete logs without source identifiers', async () => {
     process.env.MW_MIND_RUN_ID = 'run-enrich-123';
     const msgs = [
       makeStoredMsg({ pk: 301, chatJid: 'chatRun@g.us', messageId: 'run1' }),
@@ -894,27 +1128,35 @@ describe('EnrichmentPoller', () => {
     await triggerOneCycle(poller);
 
     expect(mockLogger.warn).toHaveBeenCalledWith(
-      expect.objectContaining({
-        chatJid: 'chatRun@g.us',
+      {
+        failureCode: 'segment_failed',
+        stage: 'segment',
         expected: 2,
         attempted: 2,
         inserted: 1,
         duplicates: 0,
         failed: 0,
-        segmentMessagePks: [301, 302],
-        runId: 'run-enrich-123',
-      }),
+      },
       'enrichment: queue accounting mismatch — segment messages NOT marked processed',
     );
     expect(mockLogger.info).toHaveBeenCalledWith(
-      expect.objectContaining({
+      {
+        status: 'failed',
+        failureCode: 'segment_failed',
         messagesProcessed: 0,
         factsExtracted: 2,
         factsQueued: 1,
-        runId: 'run-enrich-123',
-      }),
+        durationMs: expect.any(Number),
+      },
       'enrichment: cycle complete',
     );
+    const logBytes = JSON.stringify([
+      ...mockLogger.warn.mock.calls,
+      ...mockLogger.info.mock.calls,
+    ]);
+    expect(logBytes).not.toContain('chatRun@g.us');
+    expect(logBytes).not.toContain('run-enrich-123');
+    expect(logBytes).not.toContain('Fact A');
   });
 
   it('marks all processed on full success (attempted === inserted + duplicates, failed === 0)', async () => {

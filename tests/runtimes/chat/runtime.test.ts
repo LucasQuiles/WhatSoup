@@ -91,13 +91,18 @@ vi.mock('../../../src/runtimes/chat/media/processor.ts', () => ({
 vi.mock('../../../src/runtimes/chat/enrichment/poller.ts', () => {
   const start = vi.fn();
   const stop = vi.fn();
+  const hydrateLatestCycleReceipt = vi.fn();
   (globalThis as any).__enrichmentPollerStart = start;
   (globalThis as any).__enrichmentPollerStop = stop;
+  (globalThis as any).__enrichmentPollerHydrate = hydrateLatestCycleReceipt;
   (globalThis as any).__enrichmentPollerInstances = [] as unknown[];
   class EnrichmentPoller {
     lastRunAt: string | null = null;
+    cycleHealthState = 'not_started';
+    latestCycleReceipt = null;
     start = start;
     stop = stop;
+    hydrateLatestCycleReceipt = hydrateLatestCycleReceipt;
     constructor(..._args: unknown[]) {
       ((globalThis as any).__enrichmentPollerInstances as unknown[]).push(this);
     }
@@ -154,6 +159,9 @@ function mockEnrichmentPollerStart(): ReturnType<typeof vi.fn> {
 }
 function mockEnrichmentPollerStop(): ReturnType<typeof vi.fn> {
   return (globalThis as any).__enrichmentPollerStop;
+}
+function mockEnrichmentPollerHydrate(): ReturnType<typeof vi.fn> {
+  return (globalThis as any).__enrichmentPollerHydrate;
 }
 function mockEnrichmentPollerInstances(): unknown[] {
   return (globalThis as any).__enrichmentPollerInstances ?? [];
@@ -1109,6 +1117,12 @@ describe('Runtime interface', () => {
     expect(mockEnrichmentPollerStart()).toHaveBeenCalledTimes(1);
   });
 
+  it('hydrates enrichment evidence during construction before the health server can answer', () => {
+    makeHandler();
+
+    expect(mockEnrichmentPollerHydrate()).toHaveBeenCalledTimes(1);
+  });
+
   it('shutdown() calls EnrichmentPoller.stop() exactly once', async () => {
     const { handler } = makeHandler();
     await handler.start();
@@ -1758,7 +1772,7 @@ describe('getHealthSnapshot degraded paths', () => {
     expect(snap.details.queueDepth).toBe(3);
   });
 
-  it('returns degraded when enrichment last run is stale (older than ENRICHMENT_STALE_MS)', () => {
+  it('returns degraded when a current enrichment cycle has a stale last success', () => {
     const db = makeDb();
     const messenger = makeMessenger();
     const pinecone = makePinecone();
@@ -1772,6 +1786,7 @@ describe('getHealthSnapshot degraded paths', () => {
     const poller = (handler as any).enrichmentPoller;
     if (poller) {
       poller.lastRunAt = staleTime;
+      poller.cycleHealthState = 'current';
     }
     const snap = handler.getHealthSnapshot();
     expect(snap.status).toBe('degraded');

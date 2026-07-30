@@ -43,6 +43,7 @@ import { runMigration48 as runMigration48Impl } from './database-migration-48.ts
 import { runMigration49 as runMigration49Impl } from './database-migration-49.ts';
 import { runMigration50 as runMigration50Impl } from './database-migration-50.ts';
 import { runMigration51 as runMigration51Impl } from './database-migration-51.ts';
+import { runMigration52 as runMigration52Impl } from './database-migration-52.ts';
 
 export { CURRENT_SCHEMA_MIGRATION } from './database-schema-version.ts';
 export {
@@ -148,13 +149,40 @@ CREATE INDEX idx_rate_limits_sender ON rate_limits(sender_jid, response_at);
 
 CREATE TABLE IF NOT EXISTS enrichment_runs (
   run_id INTEGER PRIMARY KEY AUTOINCREMENT,
+  schema_version INTEGER NOT NULL DEFAULT 1 CHECK (schema_version = 1),
+  source TEXT NOT NULL DEFAULT 'legacy' CHECK (source IN ('online', 'legacy')),
+  status TEXT NOT NULL DEFAULT 'legacy_unclassified'
+    CHECK (status IN ('no_work', 'completed', 'partial', 'failed', 'legacy_unclassified')),
+  failure_code TEXT NOT NULL DEFAULT 'legacy_unclassified'
+    CHECK (failure_code IN ('none', 'segment_failed', 'selection_failed', 'message_state_write_failed', 'ledger_write_failed', 'legacy_unclassified')),
+  stage TEXT NOT NULL DEFAULT 'none'
+    CHECK (stage IN ('none', 'selection', 'segment', 'message_state', 'ledger')),
+  retryable INTEGER NOT NULL DEFAULT 0 CHECK (retryable IN (0, 1)),
+  evidence_coverage TEXT NOT NULL DEFAULT 'legacy_unclassified'
+    CHECK (evidence_coverage IN ('typed', 'legacy_unclassified')),
   started_at TEXT NOT NULL,
   completed_at TEXT,
+  success_at TEXT,
   messages_processed INTEGER DEFAULT 0,
+  messages_selected INTEGER NOT NULL DEFAULT 0
+    CHECK (typeof(messages_selected) = 'integer' AND messages_selected >= 0),
+  messages_succeeded INTEGER NOT NULL DEFAULT 0
+    CHECK (typeof(messages_succeeded) = 'integer' AND messages_succeeded >= 0),
+  messages_deferred INTEGER NOT NULL DEFAULT 0
+    CHECK (typeof(messages_deferred) = 'integer' AND messages_deferred >= 0),
+  messages_terminal INTEGER NOT NULL DEFAULT 0
+    CHECK (typeof(messages_terminal) = 'integer' AND messages_terminal >= 0),
   facts_extracted INTEGER DEFAULT 0,
   facts_upserted INTEGER DEFAULT 0,
+  facts_queued INTEGER NOT NULL DEFAULT 0
+    CHECK (typeof(facts_queued) = 'integer' AND facts_queued >= 0),
   error TEXT
 );
+CREATE INDEX IF NOT EXISTS idx_enrichment_runs_source_run_id
+  ON enrichment_runs(source, run_id DESC);
+CREATE INDEX IF NOT EXISTS idx_enrichment_runs_online_success_run_id
+  ON enrichment_runs(run_id DESC)
+  WHERE source = 'online' AND success_at IS NOT NULL;
 `;
 
 // ─── Migration 2: Durability tables ─────────────────────────────────────────
@@ -794,6 +822,7 @@ const MIGRATIONS: Map<number, MigrationFn> = new Map([
   [49, runMigration49],
   [50, runMigration50],
   [51, runMigration51],
+  [52, runMigration52],
 ]);
 
 if (Math.max(...MIGRATIONS.keys()) !== CURRENT_SCHEMA_MIGRATION) {
@@ -1175,6 +1204,10 @@ function runMigration50(db: DatabaseSync): void {
 
 function runMigration51(db: DatabaseSync): void {
   runMigration51Impl(db);
+}
+
+function runMigration52(db: DatabaseSync): void {
+  runMigration52Impl(db);
 }
 
 // #1774: total_input_tokens historically accumulated a turn's FULL

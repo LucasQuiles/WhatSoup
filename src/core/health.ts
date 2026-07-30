@@ -339,6 +339,73 @@ function normalizeAgentTurnCapability(details: Record<string, unknown> | null): 
   };
 }
 
+const HEALTH_ENRICHMENT_CYCLE_STATES = new Set([
+  'disabled',
+  'not_started',
+  'no_work',
+  'current',
+  'partial',
+  'failed',
+  'stale',
+  'unreadable',
+  'invalid',
+]);
+const HEALTH_ENRICHMENT_CYCLE_STATUSES = new Set([
+  'no_work',
+  'completed',
+  'partial',
+  'failed',
+  'legacy_unclassified',
+]);
+const HEALTH_ENRICHMENT_CYCLE_FAILURE_CODES = new Set([
+  'none',
+  'segment_failed',
+  'selection_failed',
+  'message_state_write_failed',
+  'ledger_write_failed',
+  'legacy_unclassified',
+]);
+const HEALTH_ENRICHMENT_CYCLE_STAGES = new Set([
+  'none',
+  'selection',
+  'segment',
+  'message_state',
+  'ledger',
+]);
+const HEALTH_ENRICHMENT_EVIDENCE_COVERAGE = new Set(['typed', 'legacy_unclassified']);
+
+type HealthEnrichmentCycle = {
+  state: string;
+  last_attempt_at: string | null;
+  last_success_at: string | null;
+  status: string | null;
+  failure_code: string | null;
+  stage: string | null;
+  retryable: boolean | null;
+  evidence_coverage: string | null;
+};
+
+function normalizeTimestampOrNull(value: unknown): string | null {
+  return typeof value === 'string' && Number.isFinite(Date.parse(value)) ? value : null;
+}
+
+function normalizeChatEnrichmentCycle(details: Record<string, unknown> | null): HealthEnrichmentCycle | null {
+  if (!details || !isRecord(details.enrichmentCycle)) return null;
+  const raw = details.enrichmentCycle;
+  const state = normalizeEnumStringOrNull(raw.state, HEALTH_ENRICHMENT_CYCLE_STATES);
+  if (state === null) return null;
+  return {
+    state,
+    last_attempt_at: normalizeTimestampOrNull(raw.lastAttemptAt),
+    last_success_at: normalizeTimestampOrNull(raw.lastSuccessAt),
+    status: normalizeEnumStringOrNull(raw.status, HEALTH_ENRICHMENT_CYCLE_STATUSES),
+    failure_code: normalizeEnumStringOrNull(raw.failureCode, HEALTH_ENRICHMENT_CYCLE_FAILURE_CODES),
+    stage: normalizeEnumStringOrNull(raw.stage, HEALTH_ENRICHMENT_CYCLE_STAGES),
+    retryable: normalizeBooleanOrNull(raw.retryable),
+    evidence_coverage: normalizeEnumStringOrNull(raw.evidenceCoverage, HEALTH_ENRICHMENT_EVIDENCE_COVERAGE),
+  };
+}
+
 function runtimeDegradedReasons(details: Record<string, unknown> | null): string[] {
   if (!details || !Array.isArray(details.degradedReasons)) return [];
   return details.degradedReasons.filter(
@@ -1341,6 +1408,9 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
         ? Date.now() - new Date(enrichmentStats.lastRun).getTime()
         : null;
       const runtimeSnapshot = deps.runtime ? deps.runtime.getHealthSnapshot() : null;
+      const chatEnrichmentCycle = deps.instanceType === 'chat'
+        ? normalizeChatEnrichmentCycle(runtimeSnapshot?.details ?? null)
+        : null;
       const agentRuntimeStatus = deps.instanceType === 'agent' ? runtimeSnapshot?.status ?? null : null;
       const fallbackState = deps.runtime?.getFallbackState?.() ?? null;
       const healthyProviderFallbackCapacity = isHealthyProviderFallbackCapacity(fallbackState);
@@ -1847,6 +1917,7 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
         },
         enrichment: {
           last_run: enrichmentStats.lastRun,
+          ...(chatEnrichmentCycle ? { cycle: chatEnrichmentCycle } : {}),
         },
         memory: {
           consolidation: memoryConsolidation,

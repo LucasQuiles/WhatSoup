@@ -2,6 +2,13 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import type { LLMProvider } from '../../../../src/runtimes/chat/providers/types.ts';
 import type { StoredMessage } from '../../../../src/core/messages.ts';
 
+const mockLogger = vi.hoisted(() => ({
+  info: vi.fn(),
+  warn: vi.fn(),
+  error: vi.fn(),
+  debug: vi.fn(),
+}));
+
 vi.mock('../../../../src/config.ts', () => ({
   config: {
     models: {
@@ -13,12 +20,7 @@ vi.mock('../../../../src/config.ts', () => ({
 }));
 
 vi.mock('../../../../src/logger.ts', () => ({
-  createChildLogger: () => ({
-    info: vi.fn(),
-    warn: vi.fn(),
-    error: vi.fn(),
-    debug: vi.fn(),
-  }),
+  createChildLogger: () => mockLogger,
 }));
 
 import {
@@ -324,6 +326,22 @@ describe('validateFacts — strict mode (opt-in)', () => {
     });
   });
 
+  it('strict: provider failure logs only bounded stage and aggregate count', async () => {
+    const privateErrorMarker = 'PRIVATE_VALIDATION_PROVIDER_MARKER';
+    const provider: LLMProvider = {
+      name: 'mock',
+      generate: vi.fn().mockRejectedValue(new Error(privateErrorMarker)),
+    };
+
+    await expect(validateFacts(provider, [makeFact()], [makeStoredMsg()], { strict: true }))
+      .rejects.toBeInstanceOf(ValidationError);
+
+    expect(mockLogger.error).toHaveBeenCalledWith(
+      { stage: 'provider-call', factCount: 1 },
+      'validateFacts: strict-mode provider-call failure',
+    );
+  });
+
   it('strict: malformed JSON raises ValidationError with stage=json-parse', async () => {
     const provider = mockProvider('{invalid json!!!'); // synthetic per P3.6-H1
     const facts = [makeFact()];
@@ -338,6 +356,20 @@ describe('validateFacts — strict mode (opt-in)', () => {
       expect((e.details.rawOutput ?? '').length).toBeLessThanOrEqual(500);
       return true;
     });
+  });
+
+  it('strict: malformed output is not copied into logs', async () => {
+    const privateOutputMarker = 'PRIVATE_VALIDATION_OUTPUT_MARKER';
+    const provider = mockProvider(privateOutputMarker);
+
+    await expect(validateFacts(provider, [makeFact()], [makeStoredMsg()], { strict: true }))
+      .rejects.toBeInstanceOf(ValidationError);
+
+    expect(mockLogger.error).toHaveBeenCalledWith(
+      { stage: 'json-parse', factCount: 1 },
+      'validateFacts: strict-mode json-parse failure',
+    );
+    expect(JSON.stringify(mockLogger.error.mock.calls)).not.toContain(privateOutputMarker);
   });
 
   it('strict: non-array top-level raises ValidationError with stage=schema-shape', async () => {
