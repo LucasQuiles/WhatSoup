@@ -15,7 +15,7 @@ const { mockSession, mockQueue, capturedOnEventRef } = vi.hoisted(() => {
 
   const mockSession = {
     spawnSession: vi.fn(async () => {}),
-    sendTurn: vi.fn(async () => {}),
+    sendTurn: vi.fn(async (_content: string) => {}),
     handleNew: vi.fn(async () => {}),
     getStatus: vi.fn(() => ({
       active: false,
@@ -162,24 +162,18 @@ type HealReportRow = {
 const { mockDequeueNextReport } = vi.hoisted(() => ({
   mockDequeueNextReport: vi.fn(() => null as null | HealReportRow),
 }));
-vi.mock('../../../src/core/heal.ts', () => ({
-  dequeueNextReport: mockDequeueNextReport,
-  emitHealReport: vi.fn(() => null),
-  handleHealComplete: vi.fn(),
-  handleHealEscalate: vi.fn(),
-  getActiveReportForClass: vi.fn(() => null),
-  getGlobalValveCount: vi.fn(() => 0),
-  // Faithful stand-in for the real guarded parse (tests feed valid JSON).
-  parseHealContext: vi.fn((raw: string | null) => {
-    if (!raw) return {};
-    try {
-      const parsed = JSON.parse(raw);
-      return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
-    } catch {
-      return {};
-    }
-  }),
-}));
+vi.mock('../../../src/core/heal.ts', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../../src/core/heal.ts')>();
+  return {
+    ...actual,
+    dequeueNextReport: mockDequeueNextReport,
+    emitHealReport: vi.fn(() => null),
+    handleHealComplete: vi.fn(),
+    handleHealEscalate: vi.fn(),
+    getActiveReportForClass: vi.fn(() => null),
+    getGlobalValveCount: vi.fn(() => 0),
+  };
+});
 
 vi.mock('../../../src/core/workspace.ts', () => ({
   chatJidToWorkspace: vi.fn((_cwd: string, chatJid: string) => {
@@ -567,12 +561,12 @@ describe('emit_heal_result MCP tool', () => {
     // Simulate a queued report waiting
     mockDequeueNextReport.mockReturnValueOnce({
       report_id: 'r-NEXT',
-      error_class: 'crash__next',
+      error_class: 'crash__HEAL_QUEUED_ERROR_CLASS_CANARY_DO_NOT_LEAK',
       error_type: 'crash',
       state: 'queued',
       attempt_count: 1,
       cooldown_until: null,
-      context: JSON.stringify({ recentLogs: 'some logs' }),
+      context: JSON.stringify({ recentLogs: 'HEAL_QUEUED_CONTEXT_CANARY_DO_NOT_LEAK' }),
       created_at: new Date().toISOString(),
     });
 
@@ -602,8 +596,13 @@ describe('emit_heal_result MCP tool', () => {
     proveTerminalTeardown();
     await vi.waitFor(() => expect(sendTurnSpy).toHaveBeenCalled());
     expect(mockDequeueNextReport).toHaveBeenCalledOnce();
+    expect(sendTurnSpy).toHaveBeenCalledOnce();
     expect(sendTurnSpy).toHaveBeenCalledWith(expect.stringContaining('[REPAIR REQUEST — report_id: r-NEXT]'));
-    expect(sendTurnSpy).toHaveBeenCalledWith(expect.stringContaining('"errorClass":"crash__next"'));
+    expect(sendTurnSpy).toHaveBeenCalledWith(expect.stringContaining('"errorClass":"service_crash__legacy_unclassified"'));
+    const queuedRequest = String(sendTurnSpy.mock.calls[0]![0]);
+    expect(queuedRequest).toContain('"source":"legacy_unclassified"');
+    expect(queuedRequest).not.toContain('HEAL_QUEUED_ERROR_CLASS_CANARY_DO_NOT_LEAK');
+    expect(queuedRequest).not.toContain('HEAL_QUEUED_CONTEXT_CANARY_DO_NOT_LEAK');
     expect(runtime.currentControlReportId).toBe('r-NEXT');
   });
 
