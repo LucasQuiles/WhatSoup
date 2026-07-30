@@ -384,7 +384,7 @@
         "autoCompactActiveBackoffScopes"
       ],
       "path": "src/lib/fault-taxonomy-registry.json",
-      "sha256": "23c712318b449d80d8809a8811f064bad3d936140743c41d2657907341d84f13"
+      "sha256": "82dcc8c5878c38d16fcf5b9998d4afefb8bf57e2306a8c1c3d7e018574ac6727"
     }
   ],
   "generatedAt": "2026-07-30T04:09:19Z",
