@@ -96,6 +96,8 @@ describe('bot-errors-runner', () => {
     expect(result.stderr).toContain('bot-errors-runner: queued failure alert');
     const [event] = events();
     expect(event).toMatchObject({
+      schemaVersion: 2,
+      eventKind: 'incident_alert',
       eventType: 'alert',
       severity: 'critical',
       instance: 'unit-test',
@@ -116,6 +118,36 @@ describe('bot-errors-runner', () => {
     expect(event?.evidence).not.toContain(URL_USERINFO_SAMPLE);
     expect(event?.evidence).not.toContain(PHONE_SAMPLE);
     expect(event?.diagnostics.queue).toContain(tmpRoot);
+  });
+
+  it('emits informational command failures as v2 observations', () => {
+    tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-runner-'));
+
+    const result = spawnSync('python3', [
+      'deploy/scripts/bot-errors-runner.py',
+      '--instance', 'unit-test',
+      '--source', 'process-observation',
+      '--summary', 'unit-test informational failure',
+      '--severity', 'info',
+      '--',
+      'python3',
+      '-c',
+      'import sys; sys.exit(7)',
+    ], {
+      cwd: process.cwd(),
+      env: { ...process.env, BOT_ERRORS_STATE_DIR: tmpRoot },
+      encoding: 'utf8',
+    });
+
+    expect(result.status).toBe(7);
+    const [event] = events();
+    expect(event).toMatchObject({
+      schemaVersion: 2,
+      eventKind: 'observation',
+      eventType: 'observation',
+      severity: 'info',
+      source: 'process-observation',
+    });
   });
 
   it('does not emit an alert when the command succeeds', () => {

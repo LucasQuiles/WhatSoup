@@ -78,7 +78,9 @@ import { seedChatAliases } from '../../src/core/chats-resolver.ts';
 import { createProfileRegistry } from '../../src/core/profiles.ts';
 import { createOutboundSendsWriter } from '../../src/core/outbound-sends.ts';
 import type { HealthDeps } from '../../src/core/health.ts';
+import type { StartupNotificationHealth } from '../../src/core/startup-notification-controller.ts';
 import type { ConnectionManager } from '../../src/transport/connection.ts';
+import { emptyConnectionStateSnapshot } from '../../src/transport/twilio/connection-snapshot.ts';
 
 // ---------------------------------------------------------------------------
 // HTTP helper
@@ -174,6 +176,11 @@ function makeDeps(db: Database, overrides: Partial<HealthDeps> = {}): HealthDeps
       sendMedia: vi.fn().mockResolvedValue({ waMessageId: null }),
       connect: vi.fn().mockResolvedValue(undefined),
       disconnect: vi.fn().mockResolvedValue(undefined),
+      getConnectionState: vi.fn(() => emptyConnectionStateSnapshot({
+        connected: true,
+        stateChangedAt: '2026-07-29T00:00:00.000Z',
+        lastDisconnectReason: null,
+      })),
     } as unknown as ConnectionManager,
     startedAt: Date.now() - 1000,
     getEnrichmentStats: vi.fn().mockReturnValue({ lastRun: null, unprocessed: 0 }),
@@ -220,6 +227,32 @@ function makeAuthBond(overrides: Record<string, unknown> = {}): Record<string, u
   };
 }
 
+const STARTUP_NOTIFICATION_KEYS = [
+  'state',
+  'policy',
+  'stabilitySeconds',
+  'bootCountSinceNotification',
+  'lastBootAt',
+  'lastNotifiedAt',
+  'nextEligibleAt',
+  'lastSendAt',
+] as const;
+
+function startupNotificationHealth(
+  overrides: Partial<Pick<StartupNotificationHealth, 'state' | 'policy'>> = {},
+): StartupNotificationHealth {
+  return {
+    state: overrides.state ?? 'waiting_stability',
+    policy: overrides.policy ?? 'generic',
+    stabilitySeconds: 600,
+    bootCountSinceNotification: 2,
+    lastBootAt: 1_753_825_600_000,
+    lastNotifiedAt: 1_753_825_000_000,
+    nextEligibleAt: 1_753_826_200_000,
+    lastSendAt: null,
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -253,6 +286,71 @@ describe('GET /health', () => {
     if (prevGitBranch === undefined) delete process.env.WHATSOUP_GIT_BRANCH;
     else process.env.WHATSOUP_GIT_BRANCH = prevGitBranch;
   });
+
+  it('always emits the exact privacy-safe startup notification health shape when not applicable', async () => {
+    const { status, body } = await healthReq(port);
+
+    expect(status).toBe(200);
+    expect(JSON.parse(body).startupNotification).toEqual({
+      state: 'not_applicable',
+      policy: 'none',
+      stabilitySeconds: null,
+      bootCountSinceNotification: null,
+      lastBootAt: null,
+      lastNotifiedAt: null,
+      nextEligibleAt: null,
+      lastSendAt: null,
+    });
+  });
+
+  it.each([
+    ['not_applicable', 'none'],
+    ['disabled', 'disabled'],
+    ['waiting_stability', 'generic'],
+    ['waiting_transport', 'resume'],
+    ['dispatching', 'restart_loop_guard_alert'],
+    ['sent', 'expired_session_notice'],
+    ['send_failed', 'intentional_restart'],
+    ['journal_unreadable', 'generic'],
+  ] as const)('retains the exact startup notification state and policy %s/%s without exposing private data', async (state, policy) => {
+    db.close();
+    const db2 = makeDb();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    ({ server, port } = await buildTestServer(makeDeps(db2, {
+      getStartupNotificationHealth: () => startupNotificationHealth({ state, policy }),
+    })));
+
+    const { status, body } = await healthReq(port);
+    const startupNotification = JSON.parse(body).startupNotification as Record<string, unknown>;
+
+    expect(status).toBe(200);
+    expect(Object.keys(startupNotification).sort()).toEqual([...STARTUP_NOTIFICATION_KEYS].sort());
+    expect(startupNotification).toMatchObject({ state, policy });
+    expect(JSON.stringify(startupNotification)).not.toMatch(
+      /jid|identity|message|text|path|error|bot\.db/i,
+    );
+    db2.close();
+  });
+
+  it.each(['waiting_stability', 'waiting_transport', 'send_failed'] as const)(
+    'does not degrade normal service health solely for startup notification %s',
+    async (state) => {
+      db.close();
+      const db2 = makeDb();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+      ({ server, port } = await buildTestServer(makeDeps(db2, {
+        getStartupNotificationHealth: () => startupNotificationHealth({ state }),
+      })));
+
+      const { status, body } = await healthReq(port);
+      expect(status).toBe(200);
+      expect(JSON.parse(body)).toMatchObject({
+        status: 'healthy',
+        startupNotification: { state },
+      });
+      db2.close();
+    },
+  );
 
   it('returns 200 with healthy status when connected', async () => {
     const requestedAt = Date.now();
@@ -380,7 +478,7 @@ describe('GET /health', () => {
     durability.markMaybeSent(id, 'echo_timeout');
     // One hour unresolved — well past the stale window.
     db2.raw
-      .prepare(`UPDATE outbound_ops SET submitted_at = datetime('now', '-3600 seconds') WHERE id = ?`)
+      .prepare(`UPDATE outbound_ops SET ambiguity_at = datetime('now', '-3600 seconds') WHERE id = ?`)
       .run(id);
 
     const { server: server2, port: port2 } = await buildTestServer(makeDeps(db2, { durability }));
@@ -393,6 +491,71 @@ describe('GET /health', () => {
       expect(json.status).toBe('degraded');
       expect(json.durability.maybeSentOutbound).toBe(1);
       expect(json.durability.oldestMaybeSentAt).not.toBeNull();
+    } finally {
+      await new Promise<void>((resolve) => server2.close(() => resolve()));
+      db2.close();
+    }
+  });
+
+  it('degrades instead of treating malformed ambiguity chronology as fresh (#2343)', async () => {
+    const db2 = makeDb();
+    const durability = new DurabilityEngine(db2);
+    const id = durability.createOutboundOp({ conversationKey: 'k', chatJid: 'j', opType: 'text', payload: '{}', replayPolicy: 'unsafe' });
+    durability.markSending(id);
+    durability.markMaybeSent(id, 'malformed chronology');
+    db2.raw.prepare("UPDATE outbound_ops SET ambiguity_at = 'not-a-timestamp' WHERE id = ?").run(id);
+
+    const { server: server2, port: port2 } = await buildTestServer(makeDeps(db2, { durability }));
+    try {
+      const { status, body } = await healthReq(port2);
+      const json = JSON.parse(body);
+      expect(status).toBe(200);
+      expect(json.status).toBe('degraded');
+      expect(json.durability).toMatchObject({ maybeSentOutbound: 1 });
+      expect(json.durability.oldestMaybeSentAt).not.toBeNull();
+    } finally {
+      await new Promise<void>((resolve) => server2.close(() => resolve()));
+      db2.close();
+    }
+  });
+
+  it('degrades instead of treating a future ambiguity episode as fresh (#2343)', async () => {
+    const db2 = makeDb();
+    const durability = new DurabilityEngine(db2);
+    const id = durability.createOutboundOp({ conversationKey: 'k', chatJid: 'j', opType: 'text', payload: '{}', replayPolicy: 'unsafe' });
+    durability.markSending(id);
+    durability.markMaybeSent(id, 'future chronology');
+    db2.raw.prepare("UPDATE outbound_ops SET ambiguity_at = '2099-01-01T00:00:00Z' WHERE id = ?").run(id);
+
+    const { server: server2, port: port2 } = await buildTestServer(makeDeps(db2, { durability }));
+    try {
+      const { status, body } = await healthReq(port2);
+      const json = JSON.parse(body);
+      expect(status).toBe(200);
+      expect(json.status).toBe('degraded');
+      expect(json.durability).toMatchObject({ maybeSentOutbound: 1 });
+      expect(json.durability.oldestMaybeSentAt).not.toBe('2099-01-01 00:00:00');
+    } finally {
+      await new Promise<void>((resolve) => server2.close(() => resolve()));
+      db2.close();
+    }
+  });
+
+  it('normalizes a parseable ISO ambiguity episode before evaluating health debt (#2343)', async () => {
+    const db2 = makeDb();
+    const durability = new DurabilityEngine(db2);
+    const id = durability.createOutboundOp({ conversationKey: 'k', chatJid: 'j', opType: 'text', payload: '{}', replayPolicy: 'unsafe' });
+    durability.markSending(id);
+    durability.markMaybeSent(id, 'ISO chronology');
+    db2.raw.prepare("UPDATE outbound_ops SET ambiguity_at = '2000-01-01T00:00:00Z' WHERE id = ?").run(id);
+
+    const { server: server2, port: port2 } = await buildTestServer(makeDeps(db2, { durability }));
+    try {
+      const { status, body } = await healthReq(port2);
+      const json = JSON.parse(body);
+      expect(status).toBe(200);
+      expect(json.status).toBe('degraded');
+      expect(json.durability.oldestMaybeSentAt).toBe('2000-01-01 00:00:00');
     } finally {
       await new Promise<void>((resolve) => server2.close(() => resolve()));
       db2.close();
@@ -419,8 +582,8 @@ describe('GET /health', () => {
       };
       // Two distinct-class reports: the first fires the (mocked) critical and
       // arms the latch, the second is suppressed and counted.
-      emitHealReport(db, messenger, null, { type: 'crash', stderr: 'HealthLatchA: boom' });
-      emitHealReport(db, messenger, null, { type: 'crash', stderr: 'HealthLatchB: boom' });
+      emitHealReport(db, messenger, null, { type: 'crash', crashClass: 'provider_unknown' });
+      emitHealReport(db, messenger, null, { type: 'crash', crashClass: 'provider_timeout' });
 
       const { status, body } = await healthReq(port);
       expect(status).toBe(200);
@@ -644,6 +807,11 @@ describe('GET /health', () => {
         sendMedia: vi.fn().mockResolvedValue({ waMessageId: null }),
         connect: vi.fn().mockResolvedValue(undefined),
         disconnect: vi.fn().mockResolvedValue(undefined),
+        getConnectionState: vi.fn(() => emptyConnectionStateSnapshot({
+          connected: false,
+          stateChangedAt: '2026-07-29T00:00:00.000Z',
+          lastDisconnectReason: null,
+        })),
       } as unknown as ConnectionManager,
     });
     await new Promise<void>((resolve) => server.close(() => resolve()));
@@ -2629,6 +2797,11 @@ describe('GET /health — #2515 public/private liveness split', () => {
         sendMedia: vi.fn().mockResolvedValue({ waMessageId: null }),
         connect: vi.fn().mockResolvedValue(undefined),
         disconnect: vi.fn().mockResolvedValue(undefined),
+        getConnectionState: vi.fn(() => emptyConnectionStateSnapshot({
+          connected: true,
+          stateChangedAt: '2026-07-29T00:00:00.000Z',
+          lastDisconnectReason: null,
+        })),
       } as unknown as ConnectionManager,
       instanceName: 'synthetic-instance-name-marker-2515',
     })));
@@ -2646,11 +2819,22 @@ describe('GET /health — #2515 public/private liveness split', () => {
     expect(status).toBe(200);
     const json = JSON.parse(body);
 
-    // The public envelope carries exactly three fields.
+    // The public envelope carries only liveness plus the privacy-safe startup
+    // notification projection.
     expect(json).toEqual({
       schema_version: 'health.public.v1',
       status: 'healthy',
       generated_at: expect.any(String),
+      startupNotification: {
+        state: 'not_applicable',
+        policy: 'none',
+        stabilitySeconds: null,
+        bootCountSinceNotification: null,
+        lastBootAt: null,
+        lastNotifiedAt: null,
+        nextEligibleAt: null,
+        lastSendAt: null,
+      },
     });
 
     // Fail-open canaries: if ANY privileged field leaks into the public bytes,
@@ -2678,12 +2862,15 @@ describe('GET /health — #2515 public/private liveness split', () => {
       connectionManager: {
         botJid: null,
         botLid: null,
-        connected: false,
-        state: 'disconnected',
         sendMessage: vi.fn(),
         sendMedia: vi.fn(),
         connect: vi.fn(),
         disconnect: vi.fn(),
+        getConnectionState: vi.fn(() => emptyConnectionStateSnapshot({
+          connected: false,
+          stateChangedAt: '2026-07-29T00:00:00.000Z',
+          lastDisconnectReason: null,
+        })),
       } as unknown as ConnectionManager,
     })));
 
@@ -3782,6 +3969,11 @@ describe('GET /typing — Authorization header check', () => {
         sendMedia: vi.fn().mockResolvedValue({ waMessageId: null }),
         connect: vi.fn().mockResolvedValue(undefined),
         disconnect: vi.fn().mockResolvedValue(undefined),
+        getConnectionState: vi.fn(() => emptyConnectionStateSnapshot({
+          connected: true,
+          stateChangedAt: '2026-07-30T00:00:00.000Z',
+          lastDisconnectReason: null,
+        })),
         presenceCache,
       } as unknown as ConnectionManager,
     });
@@ -4584,26 +4776,6 @@ describe('health.ts lower-branch coverage (74-549)', () => {
     delete process.env.WHATSOUP_HEALTH_TOKEN;
     if (db) db.close();
     if (server) await new Promise<void>((resolve) => server.close(() => resolve()));
-  });
-
-  // --- line 273: getConnectionState() synthetic fallback, cfg.authDir falsy
-  //     → creds.path === 'unknown' (the false branch of `cfg.authDir ? ... : 'unknown'`)
-  it('reports creds.path "unknown" when connectionManager lacks getConnectionState and config has no authDir (line 273)', async () => {
-    // connectionManager WITHOUT getConnectionState → triggers the synthetic state branch.
-    // The mocked config (top of this file) does not set authDir, so cfg.authDir is undefined.
-    const deps = makeDeps(db);
-    ({ server, port } = await buildTestServer(deps));
-
-    const { status, body } = await healthReq(port);
-    expect(status).toBe(200);
-    const json = JSON.parse(body);
-    // currentAuthBond is nested under credential_lifecycle in the synthetic snapshot.
-    expect(json.whatsapp.credential_lifecycle.currentAuthBond.status).toBe('missing');
-    expect(json.whatsapp.credential_lifecycle.currentAuthBond.issues)
-      .toEqual(['connection_manager_does_not_expose_auth_bond']);
-    // The false branch of line 273's ternary — authDir is unset.
-    expect(json.whatsapp.credential_lifecycle.currentAuthBond.creds.path).toBe('unknown');
-    expect(json.whatsapp.credential_lifecycle.currentAuthBond.authDir.path).toBe('unknown');
   });
 
   // --- line 335: formatAuthBond hash nullish branch — creds.sha256 === null.

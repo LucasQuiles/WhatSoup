@@ -53,6 +53,8 @@ const HEALTH_BODY_DEGRADED_ALERT_DWELL_MS = readNonNegativeEnvInt(
 const HEALTH_PROBE_TIMEOUT_UNDER_PROXY_LOAD = 'health_probe_timeout_under_proxy_load';
 const HEALTH_SNAPSHOT_MAX_AGE_MS = 30_000;
 const HEALTH_SNAPSHOT_MAX_FUTURE_SKEW_MS = 5_000;
+const RECOVERY_CLEAR_WITHHELD_MSG = 'recovered alert clear withheld until recovery proof is complete';
+const RECOVERY_CLEAR_WITHHELD_EPISODE_END_MSG = 'recovery-clear withholding episode ended';
 const ALERT_SOURCES_SUPERSEDED_BY_LOGGED_OUT = new Set([
   'health_body_degraded',
   'health_probe_auth_failed',
@@ -162,6 +164,28 @@ interface HealthSnapshotClassification {
   confidence: StatusConfidence;
   reason: string;
   evidence: string[];
+}
+
+type RecoveryClearWithheldReason =
+  | 'transport_not_connected'
+  | 'connection_not_connected'
+  | 'auth_bond_missing'
+  | 'credentials_empty'
+  | 'credentials_mtime_unavailable'
+  | 'post_bond_send_missing'
+  | 'post_bond_send_before_credentials'
+  | 'post_bond_send_before_incident';
+
+type RecoveryClearEligibility =
+  | { eligible: true }
+  | { eligible: false; reason: RecoveryClearWithheldReason };
+
+interface RecoveryClearWithholdingEpisode {
+  name: string;
+  source: string;
+  reason: RecoveryClearWithheldReason;
+  since: number;
+  count: number;
 }
 
 function stringValue(value: unknown): string | null {
@@ -613,6 +637,9 @@ function classificationEvidenceText(classification: HealthSnapshotClassification
 export class HealthPoller {
   private statuses: Map<string, InstanceStatus> = new Map();
   private pollInterval: ReturnType<typeof setInterval> | null = null;
+  private pollEpoch = 0;
+  private nextPollRequestId = 0;
+  private latestPollRequestIdByInstance: Map<string, number> = new Map();
   private getInstances: () => Map<string, InstanceHealth>;
   private selfName: string;
   private getSelfHealth: () => Record<string, unknown>;
@@ -641,6 +668,7 @@ export class HealthPoller {
     string,
     { reason: string; since: number; count: number; name: string; source: string }
   > = new Map();
+  private recoveryClearWithholdingEpisodes: Map<string, RecoveryClearWithholdingEpisode> = new Map();
   private targetPids: Map<string, number> = new Map();
   private readonly loopLagSampler: LoopLagSampler;
   /**
@@ -705,6 +733,8 @@ export class HealthPoller {
   }
 
   stop(): void {
+    this.pollEpoch += 1;
+    this.latestPollRequestIdByInstance.clear();
     if (this.pollInterval) {
       clearInterval(this.pollInterval);
       this.pollInterval = null;
@@ -714,6 +744,9 @@ export class HealthPoller {
     // that never happens, so flush what is still open rather than losing the
     // count — otherwise a long-running suppression leaves no record of its size.
     for (const key of [...this.alertSuppressionEpisodes.keys()]) this.endAlertSuppressionEpisode(key);
+    for (const key of [...this.recoveryClearWithholdingEpisodes.keys()]) {
+      this.endRecoveryClearWithholdingEpisode(key);
+    }
   }
 
   getStatuses(): Map<string, InstanceStatus> {
@@ -791,10 +824,20 @@ export class HealthPoller {
     return latest;
   }
 
+  private isPollCurrent(pollEpoch: number, name: string, pollRequestId: number): boolean {
+    return this.pollEpoch === pollEpoch
+      && this.latestPollRequestIdByInstance.get(name) === pollRequestId
+      && this.getInstances().has(name);
+  }
+
   private async poll(): Promise<void> {
+    const pollEpoch = this.pollEpoch;
     const instances = this.getInstances();
 
     const promises = Array.from(instances.entries()).map(async ([name, inst]) => {
+      const pollRequestId = ++this.nextPollRequestId;
+      this.latestPollRequestIdByInstance.set(name, pollRequestId);
+      if (!this.isPollCurrent(pollEpoch, name, pollRequestId)) return;
       if (name === this.selfName) {
         // Self-instance: use callback, no HTTP. The snapshot is classified
         // with the SAME semantics as a remote payload — forcing 'online'
@@ -849,11 +892,13 @@ export class HealthPoller {
             signal: controller.signal,
             headers,
           });
+          if (!this.isPollCurrent(pollEpoch, name, pollRequestId)) return;
           reached = true;
           responseStatus = res.status;
 
           if (!res.ok) {
             const failureHealth = await this.readHealthBody(res);
+            if (!this.isPollCurrent(pollEpoch, name, pollRequestId)) return;
             if (res.status === 401 || res.status === 403) {
               this.updateDegraded(
                 name,
@@ -888,6 +933,7 @@ export class HealthPoller {
           }
 
           health = (await res.json()) as Record<string, unknown>;
+          if (!this.isPollCurrent(pollEpoch, name, pollRequestId)) return;
         } finally {
           clearTimeout(timeout);
         }
@@ -981,16 +1027,20 @@ export class HealthPoller {
           this.clearRecoveredAlert(name, existing, health);
         }
       } catch (err) {
+        if (!this.isPollCurrent(pollEpoch, name, pollRequestId)) return;
         this.updateProbeFailure(name, inst, err as Error, reached);
       }
     });
 
     await Promise.allSettled(promises);
 
-    const discoveredNames = new Set(instances.keys());
+    if (this.pollEpoch !== pollEpoch) return;
+    const discoveredNames = new Set(this.getInstances().keys());
     for (const name of this.statuses.keys()) {
       if (!discoveredNames.has(name)) {
+        this.endRecoveryClearWithholdingEpisodesForInstance(name);
         this.statuses.delete(name);
+        this.latestPollRequestIdByInstance.delete(name);
         this.targetPids.delete(name);
         this.resetHealthBodyDegradedDebounce(name);
       }
@@ -1580,6 +1630,7 @@ export class HealthPoller {
       silencedUntil: existing?.silencedUntil ?? null,
       activeAlertSources: existing?.activeAlertSources ?? [],
     });
+    this.endRecoveryClearWithholdingEpisodesForInstance(name);
 
     // Notify listeners on any status transition
     if (newStatus !== prevStatus) {
@@ -1688,6 +1739,7 @@ export class HealthPoller {
       silencedUntil: existing?.silencedUntil ?? null,
       activeAlertSources: existing?.activeAlertSources ?? [],
     });
+    this.endRecoveryClearWithholdingEpisodesForInstance(name);
 
     const nextStatus = staysUnreachable ? 'unreachable' : 'degraded';
     if (prevStatus !== nextStatus) {
@@ -1741,6 +1793,8 @@ export class HealthPoller {
       silencedUntil: existing?.silencedUntil ?? null,
       activeAlertSources: existing?.activeAlertSources ?? [],
     });
+
+    this.endRecoveryClearWithholdingEpisodesForInstance(name);
 
     if (newStatus !== prevStatus) {
       this.emitStatusChange(name, newStatus, prevStatus);
@@ -1904,11 +1958,13 @@ export class HealthPoller {
         retainedSources.push(source);
         continue;
       }
-      if (!this.shouldClearRecoveredSource(source, previous, currentHealth)) {
+      const eligibility = this.recoveryClearEligibility(source, previous, currentHealth);
+      if (!eligibility.eligible) {
         retainedSources.push(source);
-        log.info({ name, source }, 'recovered alert clear withheld until recovery proof is complete');
+        this.noteRecoveryClearWithheld(this.alertThrottleKey(name, source), name, source, eligibility.reason);
         continue;
       }
+      this.endRecoveryClearWithholdingEpisode(this.alertThrottleKey(name, source));
       try {
         const evidence = source === 'instance_logged_out' && currentHealth
           ? this.relinkRecoveryEvidence(name, currentHealth)
@@ -1932,55 +1988,98 @@ export class HealthPoller {
     }
   }
 
-  private shouldClearRecoveredSource(
+  private noteRecoveryClearWithheld(
+    key: string,
+    name: string,
+    source: string,
+    reason: RecoveryClearWithheldReason,
+  ): void {
+    const open = this.recoveryClearWithholdingEpisodes.get(key);
+    if (open?.reason === reason) {
+      open.count += 1;
+      return;
+    }
+    if (open) this.endRecoveryClearWithholdingEpisode(key);
+    this.recoveryClearWithholdingEpisodes.set(key, { name, source, reason, since: Date.now(), count: 1 });
+    log.info({ name, source, recoveryProofReason: reason }, RECOVERY_CLEAR_WITHHELD_MSG);
+  }
+
+  private endRecoveryClearWithholdingEpisode(key: string): void {
+    const open = this.recoveryClearWithholdingEpisodes.get(key);
+    if (!open) return;
+    this.recoveryClearWithholdingEpisodes.delete(key);
+    log.info({
+      name: open.name,
+      source: open.source,
+      recoveryProofReason: open.reason,
+      withheldObservations: open.count,
+      episodeDurationMs: Date.now() - open.since,
+    }, RECOVERY_CLEAR_WITHHELD_EPISODE_END_MSG);
+  }
+
+  private endRecoveryClearWithholdingEpisodesForInstance(name: string): void {
+    for (const [key, episode] of this.recoveryClearWithholdingEpisodes.entries()) {
+      if (episode.name === name) this.endRecoveryClearWithholdingEpisode(key);
+    }
+  }
+
+  private recoveryClearEligibility(
     source: string,
     previous: InstanceStatus | undefined,
     currentHealth: Record<string, unknown> | undefined,
-  ): boolean {
-    if (source !== 'instance_logged_out') return true;
-    return this.hasVerifiedRelinkRecovery(previous, currentHealth);
+  ): RecoveryClearEligibility {
+    if (source !== 'instance_logged_out') return { eligible: true };
+    return this.relinkRecoveryClearEligibility(previous, currentHealth);
   }
 
-  private hasVerifiedRelinkRecovery(
+  private relinkRecoveryClearEligibility(
     previous: InstanceStatus | undefined,
     health: Record<string, unknown> | undefined,
-  ): boolean {
-    if (!health) return false;
+  ): RecoveryClearEligibility {
+    if (!health) return { eligible: false, reason: 'transport_not_connected' };
     const whatsapp = this.readRecord(health['whatsapp']);
-    if (!whatsapp || whatsapp['connected'] !== true) return false;
+    if (!whatsapp || whatsapp['connected'] !== true) {
+      return { eligible: false, reason: 'transport_not_connected' };
+    }
 
     const connection = this.readRecord(whatsapp['connection']);
-    if (connection?.['state'] !== 'connected') return false;
+    if (connection?.['state'] !== 'connected') {
+      return { eligible: false, reason: 'connection_not_connected' };
+    }
 
     const authBond = this.readRecord(whatsapp['auth_bond']);
     const creds = this.readRecord(authBond?.['creds']);
-    if (!authBond || !creds) return false;
-    if (authBond['status'] !== 'present') return false;
-    if (creds['exists'] !== true) return false;
+    if (!authBond || !creds || authBond['status'] !== 'present' || creds['exists'] !== true) {
+      return { eligible: false, reason: 'auth_bond_missing' };
+    }
 
     const size = this.readNumber(creds['size']);
-    if (size === null || size <= 0) return false;
+    if (size === null || size <= 0) return { eligible: false, reason: 'credentials_empty' };
 
     if (creds['empty_hash'] !== false) {
       const hash = typeof creds['hash'] === 'string'
         ? creds['hash']
         : (typeof creds['sha256'] === 'string' ? creds['sha256'] : null);
       if (hash === null || hash.length === 0 || EMPTY_SHA256.startsWith(hash)) {
-        return false;
+        return { eligible: false, reason: 'credentials_empty' };
       }
     }
 
     const credsMtimeMs = this.readTimestampMs(creds['mtime']);
-    if (credsMtimeMs === null) return false;
+    if (credsMtimeMs === null) return { eligible: false, reason: 'credentials_mtime_unavailable' };
 
     const latestSendMs = this.readTimestampMs(this.readLatestSuccessfulSendAt(health));
-    if (latestSendMs === null) return false;
-    if (latestSendMs < credsMtimeMs) return false;
+    if (latestSendMs === null) return { eligible: false, reason: 'post_bond_send_missing' };
+    if (latestSendMs < credsMtimeMs) {
+      return { eligible: false, reason: 'post_bond_send_before_credentials' };
+    }
 
     const incidentMs = this.readTimestampMs(previous?.lastPollAt);
-    if (incidentMs !== null && latestSendMs < incidentMs) return false;
+    if (incidentMs !== null && latestSendMs < incidentMs) {
+      return { eligible: false, reason: 'post_bond_send_before_incident' };
+    }
 
-    return true;
+    return { eligible: true };
   }
 
   private loggedOutCriticalAsset(
