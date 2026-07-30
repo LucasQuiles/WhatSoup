@@ -150,7 +150,7 @@ The QPI relay treated web push and service-worker delivery as an untracked peer-
 
 DPR-08 owns diagnostic execution approval. DPR-09 may notify and navigate to its canonical request, but it owns no approval state, execution authority, or diagnostic result.
 
-Coordination update (2026-07-29): PR #2644 (central telemetry boundary for selfcheck heartbeat, #2470) is now open; the payload-privacy contract this draft inherits from #2470 should bind to #2644's landed boundary once merged. [issue survey 2026-07-29: #2644]
+Coordination update (2026-07-29, citation refresh): PR #2644 (central telemetry boundary for selfcheck heartbeat, #2470) is MERGED; the payload-privacy contract this draft inherits from #2470 binds to #2644's landed boundary. [issue survey 2026-07-29: #2644]
 
 ## Unresolved decisions, alternatives, and non-goals
 
