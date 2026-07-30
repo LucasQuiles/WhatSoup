@@ -38,6 +38,7 @@ Every message the bot sends is journaled in `outbound_ops` before the network ca
 - `replay_policy` — governs what happens if the op is found undelivered after a crash (see §2.4).
 - `source_inbound_seq` — links the outbound op back to the inbound event that caused it.
 - `is_terminal` — marks the op as the "final reply" for a conversation turn. When a terminal op reaches `echoed`, the linked inbound event is automatically advanced to `complete`.
+- `created_at` records queue creation and `submitted_at` records a provider submission receipt. `ambiguity_at` records entry to the current `maybe_sent` episode; it is not a substitute for either of the other clocks.
 - `error` — for failed, ambiguous, or deferred operations, a bounded
   `whatsoup-outbound-failure-v1` JSON envelope. It records a stable failure
   code, stage, mutation certainty, retry decision/owner/deadline, attempt
@@ -52,7 +53,7 @@ When Baileys delivers an outgoing message, WhatsApp echoes it back on the same W
 2. If found, call `markEchoed()`.
 3. If the op has `is_terminal = 1`, `markEchoed()` automatically calls `completeInbound()` on the linked inbound event.
 
-If no echo arrives within 30 seconds after submission, the op is promoted to `maybe_sent` by the periodic sweep (§4.3), which triggers reconciliation on the next post-connect recovery pass.
+If no echo arrives within 30 seconds after submission, the periodic sweep (§4.3) promotes the op to `maybe_sent` and starts its current ambiguity episode. The recurring live reconciliation loop waits that episode's own late-echo grace before replaying or quarantining it.
 
 ### 2.4 Replay Policies
 
@@ -168,7 +169,7 @@ Note: `completeInbound()` is a guarded helper — if the row is still `processin
 
 **Terminal states:** `echoed`, `failed_permanent`, `quarantined`
 
-**Recoverable state:** `maybe_sent` — always resolved in the next post-connect recovery pass.
+**Recoverable state:** `maybe_sent` — history debt is reconciled in the next post-connect recovery pass; debt created while a process remains live is reconciled only after its current ambiguity episode has the §4.3 late-echo grace.
 
 **Replay-pending state:** `pending` reached via a `maybe_sent` reset is re-sent by the
 pending drainer (§4.4) — both immediately after post-connect recovery and on the live
@@ -246,6 +247,8 @@ These newly promoted ops are immediately eligible for Step 2.
 
 **Step 2 — Reconcile `maybe_sent` ops**
 
+This one-time startup pass is an immediate history/corroboration reconciliation after the connection's history-sync and 10-second startup grace. It intentionally does not use the recurring live episode-dwell gate in §4.3.
+
 For each `maybe_sent` op (including those promoted in Step 1):
 
 - **Has `wa_message_id`**: query `messages` table for a matching `message_id`.
@@ -294,9 +297,12 @@ setInterval(() => {
 Promotes any `submitted` op with `submitted_at < now() - 30 seconds` to
 `maybe_sent` with structured `outbound.echo_timeout` evidence. This catches ops
 whose echo was permanently lost during a live session (not just crash
-recovery). The same interval reconciles `maybe_sent` debt created after the
-one-time post-connect pass, after preserving a 30-second late-echo grace
-period. Each pass selects the oldest 200 eligible rows so a large backlog
+recovery). Each transition into `maybe_sent` records `ambiguity_at`; the same
+interval reconciles live debt created after the one-time post-connect pass only
+after 30 seconds from that current episode, never from queue creation. Legacy
+rows fall back conservatively to a valid submission timestamp and then queue
+creation; missing, malformed, or future chronology is treated as stale rather
+than fresh. Each pass selects the oldest 200 eligible rows so a large backlog
 cannot monopolize the maintenance tick: confirmed echoes settle,
 `safe`/`read_only` ops reset to `pending`, and non-safe ops quarantine.
 Corroborated selected-delivery proof is excluded before applying the page limit
@@ -503,6 +509,7 @@ SELECT
   o.payload_hash,
   o.wa_message_id,
   o.submitted_at,
+  o.ambiguity_at,
   o.error,
   o.source_inbound_seq,
   i.processing_status AS inbound_status,
@@ -600,13 +607,15 @@ FROM recovery_runs;
 
 ### 5.4 The 30-Second Grace Period
 
-Two distinct 30-second thresholds appear in the code:
+Three distinct 30-second thresholds appear in the code:
 
 1. **`postConnectRecovery` Step 1**: `submitted_at < datetime('now', '-30 seconds')` — identifies ops submitted in a _previous session_ that had the full grace period to receive an echo and did not.
 
 2. **`sweepStaleSubmitted`**: same SQL threshold — identifies ops submitted in the _current live session_ that have been waiting for an echo for over 30 seconds without one arriving.
 
-These are the same 30-second constant applied in two different contexts. The rationale is identical: healthy echo latency is well under 5 seconds, so 30 seconds is a definitive signal that the echo will not arrive.
+3. **`reconcileLiveMaybeSent`**: the active `ambiguity_at` episode (or the conservative legacy fallback) must be older than 30 seconds before the recurring live path replays or quarantines it. Repeated observations preserve the clock; a safe replay that later becomes ambiguous starts a new one.
+
+The first two thresholds decide when a submission becomes ambiguous. The third protects the late-echo grace for that ambiguity episode. The post-connect history/corroboration pass remains immediate after its own startup grace. Healthy echo latency is well under 5 seconds, so 30 seconds provides a conservative margin without silently accumulating stuck work.
 
 ### 5.5 MCP Tool Sends Exclusion (Gap-Matrix Item 92)
 
@@ -686,6 +695,7 @@ delivery proof while adding auditable completion and conflict evidence.
 | `status` | TEXT NOT NULL | Lifecycle state. Default `'pending'`. |
 | `created_at` | TEXT | Timestamp of op creation. |
 | `submitted_at` | TEXT | Timestamp when `markSubmitted()` was called (after `sendMessage()` returned). |
+| `ambiguity_at` | TEXT | Nullable timestamp when the current `maybe_sent` episode began. Set atomically on entry, retained while the episode stays active, and replaced on a later re-entry. Legacy `maybe_sent` rows are backfilled from `submitted_at`, then `created_at`. |
 | `echoed_at` | TEXT | Timestamp when WhatsApp echo was matched. |
 | `wa_message_id` | TEXT | WhatsApp-assigned message ID, populated by `markSubmitted()`. May be null if send failed before an ID was returned. |
 | `error` | TEXT | Nullable bounded `whatsoup-outbound-failure-v1` JSON for deferred or failed states. Stable fields: `failure_code`, `stage`, `mutation_state`, `retryable`, `retry_decision`, `retry_not_before`, `retry_owner`, `attempt_budget_disposition`, logical/provider attempt counts, first/last failure timestamps, and `evidence_coverage`. Legacy prose is read as `legacy_unclassified`; new writers never persist thrown prose. |

@@ -104,9 +104,11 @@ describe('checkDegradationSignals', () => {
     checkDegradationSignals(db, messenger, null, null);
 
     expect(sendTracked).toHaveBeenCalledOnce();
-    const message = vi.mocked(sendTracked).mock.calls[0][2];
+    const message = vi.mocked(sendTracked).mock.calls[0][2] as string;
     expect(message).toContain('degraded');
-    expect(message).toContain('spammer@s.whatsapp.net');
+    expect(message).toContain('Occurrences: 5');
+    expect(message).toContain('Affected scopes: 1');
+    expect(message).not.toContain('spammer@s.whatsapp.net');
   });
 
   it('does not emit when fewer than 5 unresolved failures from a sender', () => {
@@ -153,8 +155,10 @@ describe('checkDegradationSignals', () => {
 
     expect(sendTracked).toHaveBeenCalledOnce();
     const message = vi.mocked(sendTracked).mock.calls[0][2] as string;
-    expect(message).toContain('sender-a@s.whatsapp.net');
-    expect(message).toContain('sender-b@s.whatsapp.net');
+    expect(message).toContain('Occurrences: 10');
+    expect(message).toContain('Affected scopes: 2');
+    expect(message).not.toContain('sender-a@s.whatsapp.net');
+    expect(message).not.toContain('sender-b@s.whatsapp.net');
   });
 
   it('single-flights across ticks even as failure counts change (stable error class)', () => {

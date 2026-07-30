@@ -88,13 +88,8 @@ interface TrackedEntry {
  * typing-start-guard has since been wired).
  */
 const TRACKED_UNREACHABLE: readonly TrackedEntry[] = [
-  // Incident control plane Plan 1 (store core) lands deliberately unwired; the
-  // Plan-2 ingestion surface (POST /api/signals) is the production importer.
-  // Spec: docs/superpowers/specs/2026-07-28-incident-control-plane-design.md §7.
-  { path: 'src/fleet/incidents/db.ts', issue: '#2468', reason: 'incident store core; wired by the Plan-2 ingestion surface' },
-  { path: 'src/fleet/incidents/envelope.ts', issue: '#2468', reason: 'incident store core; wired by the Plan-2 ingestion surface' },
-  { path: 'src/fleet/incidents/schema.ts', issue: '#2468', reason: 'incident store core; wired by the Plan-2 ingestion surface' },
-  { path: 'src/fleet/incidents/store.ts', issue: '#2468', reason: 'incident store core; wired by the Plan-2 ingestion surface' },
+  // src/fleet/incidents/* graduated 2026-07-28: the Plan-2 ingestion surface
+  // (POST /api/signals in src/fleet/index.ts) is their production importer.
   // 24h-window primitives (#1871 inventory): landed test-only-wired, pending
   // wiring or removal per each owning issue. Wiring is out of scope for #1871.
   { path: 'src/core/retry-runner.ts', issue: '#1817', reason: 'test-only-wired primitive; no runtime importer' },

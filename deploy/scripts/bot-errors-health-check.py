@@ -30,6 +30,7 @@ if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
 from lib.bot_errors_redaction import redact_bot_errors_text, redact_json_value as redact_shared_json_value
+from lib.bot_errors_envelope import new_event_fields
 from lib.controller_log import (
     ControllerLogContext,
     controller_cycle,
@@ -1743,11 +1744,10 @@ def outbox_event(
     outbox, provenance = resolve_outbox_dir()
     ensure_private_dir(root)
     event_id = f"health-{time.time_ns()}-{os.getpid()}"
+    envelope_event_type = "observation" if event_type == "alert" and severity == "info" else event_type
     event = {
-        "schemaVersion": 1,
+        **new_event_fields(envelope_event_type, severity),
         "id": event_id,
-        "eventType": event_type,
-        "severity": severity,
         "createdAt": now_iso(),
         "machine": socket.gethostname(),
         "platform": HOST_PLATFORM,
@@ -5674,10 +5674,23 @@ def _event_file_age_seconds(path: Path, now: float) -> float:
         return 0.0
 
 
+def _is_durable_internal_entry(path: Path) -> bool:
+    """Return True for durable_json internal artifacts (e.g. ``.durable-json.lock``).
+
+    These are never data entries and must be excluded from queue-depth counts
+    and age calculations. See #2727.
+    """
+    return path.name == ".durable-json.lock"
+
+
 def directory_stats(path: Path, pattern: str) -> tuple[int, int]:
     if not path.exists():
         return 0, 0
-    files = [item for item in path.glob(pattern) if item.is_file()]
+    files = [
+        item
+        for item in path.glob(pattern)
+        if item.is_file() and not _is_durable_internal_entry(item)
+    ]
     if not files:
         return 0, 0
     now = time.time()

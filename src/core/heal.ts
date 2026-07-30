@@ -8,7 +8,14 @@ import type { Database } from './database.ts';
 import type { Messenger } from './types.ts';
 import type { DurabilityEngine } from './durability.ts';
 import { sendTracked } from './durability.ts';
-import { normalizeErrorClass, type HealCompletePayload } from './heal-protocol.ts';
+import { LoopsHealPayloadSchema, type HealCompletePayload } from './heal-protocol.ts';
+import {
+  errorClassForHealEvidence,
+  parseStoredHealEvidence,
+  projectAutomaticHealEvidence,
+  type AutomaticHealReportInput,
+  type HealEvidenceV1,
+} from './heal-evidence.ts';
 import { config } from '../config.ts';
 import { toPersonalJid } from './jid-constants.ts';
 
@@ -51,16 +58,7 @@ export function resetDeliveryUnavailableLatch(): void {
   suppressedDeliveryUnavailableAlerts = 0;
 }
 
-export interface HealReportData {
-  type: 'crash' | 'degraded' | 'service_crash';
-  chatJid?: string;
-  exitCode?: number;
-  signal?: string | null;
-  provider?: string;
-  crashClass?: string;
-  stderr?: string;
-  recentLogs?: string;
-}
+export interface HealReportData extends AutomaticHealReportInput {}
 
 interface HealReportRow {
   report_id: string;
@@ -84,40 +82,22 @@ export interface ReconcileStaleHealReportsResult {
   staleMs: number;
 }
 
-/**
- * Build the dedup-class hint for a heal report. For 'crash' reports where
- * classifyProviderCrash could not identify a crashClass, raw stderr/recentLogs
- * content (addresses, thread-local detail, arbitrary IDs) varies per occurrence
- * even after normalizeErrorClass's regex stripping, so a repeated signal-less
- * SIGKILL produces a different class every time and single-flight dedup never
- * coalesces (see provider-crash-diagnostics.ts:classifyProviderCrash). Mirror the
- * 'degraded' path's fixed-first-line pattern (see normalizeErrorClass doc): key
- * on the structural signal/exitCode, which is stable across repeats, and push
- * the variable stderr/recentLogs detail to a second line where
- * normalizeErrorClass (which only reads split('\n')[0]) ignores it.
- */
-function buildErrorClassHint(data: HealReportData): string {
-  if (data.crashClass) return data.crashClass;
-  if (data.type === 'crash' && (data.signal || data.exitCode !== undefined)) {
-    const detail = data.stderr ?? data.recentLogs ?? '';
-    return `signal_${data.signal ?? 'none'}_exit_${data.exitCode ?? 'none'}${detail ? `\n${detail}` : ''}`;
-  }
-  return data.stderr ?? data.recentLogs ?? 'unknown';
-}
-
 /** Shared evidence lines for the two BOT ERRORS fallback paths below (valve trip, no control peer). */
-function buildHealEvidenceLines(data: HealReportData, errorClass: string): string {
+function buildHealEvidenceLines(evidence: HealEvidenceV1, errorClass: string): string {
   return [
-    `type=${data.type}`,
+    `schema_version=${evidence.schemaVersion}`,
+    `type=${evidence.type}`,
     `error_class=${errorClass}`,
-    data.chatJid ? `chat_jid=${data.chatJid}` : null,
-    data.exitCode !== undefined ? `exit_code=${data.exitCode}` : null,
-    data.signal ? `signal=${data.signal}` : null,
-    data.provider ? `provider=${data.provider}` : null,
-    data.crashClass ? `crash_class=${data.crashClass}` : null,
-    data.stderr ? `stderr=${data.stderr}` : null,
-    data.recentLogs ? `recent_logs=${data.recentLogs}` : null,
-  ].filter(Boolean).join('\n');
+    `source=${evidence.source}`,
+    `cause=${evidence.cause}`,
+    `stage=${evidence.stage}`,
+    `impact=${evidence.impact}`,
+    `evidence_coverage=${evidence.evidenceCoverage}`,
+    `occurrences=${evidence.counts.occurrences}`,
+    evidence.counts.affectedScopes === undefined ? null : `affected_scopes=${evidence.counts.affectedScopes}`,
+    `action=${evidence.action}`,
+    `correlation=${evidence.correlation}`,
+  ].filter((line): line is string => line !== null).join('\n');
 }
 
 /**
@@ -139,7 +119,8 @@ export function emitHealReport(
   data: HealReportData,
   activeControlReportId?: string | null,
 ): string | null {
-  const errorClass = normalizeErrorClass(data.type, buildErrorClassHint(data));
+  const evidence = projectAutomaticHealEvidence(data);
+  const errorClass = errorClassForHealEvidence(evidence);
   reconcileStaleHealReports(db);
 
   // Check for active report with same error class (single-flight)
@@ -164,7 +145,7 @@ export function emitHealReport(
       config.botName,
       'heal_repeated_failures',
       `whatsoup@${config.botName} heal valve triggered after ${valveCount} repair reports this hour`,
-      buildHealEvidenceLines(data, errorClass),
+      buildHealEvidenceLines(evidence, errorClass),
     );
     return null;
   }
@@ -176,9 +157,9 @@ export function emitHealReport(
   db.raw.prepare(`
     INSERT INTO heal_reports (report_id, error_class, error_type, state, attempt_count, origin_chat_jid, context)
     VALUES (?, ?, ?, ?, ?, ?, ?)
-  `).run(reportId, errorClass, data.type, state, attemptCount, data.chatJid ?? null, JSON.stringify(data));
+  `).run(reportId, errorClass, evidence.type, state, attemptCount, null, JSON.stringify(evidence));
 
-  log.info({ reportId, errorClass, type: data.type, state }, 'heal report created');
+  log.info({ reportId, errorClass, type: evidence.type, state }, 'heal report created');
 
   if (state === 'queued') {
     log.info({ reportId, errorClass }, 'heal report queued — slot occupied');
@@ -204,7 +185,7 @@ export function emitHealReport(
       'heal_delivery_unavailable',
       `whatsoup@${config.botName} heal report ${reportId} could not reach Q — no control peer configured`,
       [
-        buildHealEvidenceLines(data, errorClass),
+        buildHealEvidenceLines(evidence, errorClass),
         'further occurrences are latched for this process — suppressed count at /health control_peer.suppressed_unavailable_alerts',
       ].join('\n'),
     );
@@ -212,21 +193,15 @@ export function emitHealReport(
   }
   const qJid = toPersonalJid(qPhone);
 
-  const payload = {
+  const payload = LoopsHealPayloadSchema.parse({
     reportId,
-    type: data.type,
+    type: evidence.type,
     errorClass,
     attempt: attemptCount,
     maxAttempts: MAX_ATTEMPTS,
     timestamp: new Date().toISOString(),
-    chatJid: data.chatJid,
-    exitCode: data.exitCode,
-    signal: data.signal,
-    provider: data.provider,
-    crashClass: data.crashClass,
-    stderr: data.stderr,
-    recentLogs: data.recentLogs,
-  };
+    evidence,
+  });
 
   const humanReadable = formatHealReport(payload);
   const message = `[LOOPS_HEAL] ${JSON.stringify(payload)}\n\n${humanReadable}`;
@@ -361,10 +336,12 @@ export function dequeueNextReport(db: Database): HealReportRow | null {
   `).get() ?? null) as HealReportRow | null;
 
   if (row) {
+    const safeErrorClass = errorClassForHealEvidence(parseStoredHealEvidence(row.context));
     db.raw.prepare(`UPDATE heal_reports SET state = 'attempt_1' WHERE report_id = ?`).run(row.report_id);
-    log.info({ reportId: row.report_id, errorClass: row.error_class }, 'heal report dequeued');
+    log.info({ reportId: row.report_id, errorClass: safeErrorClass }, 'heal report dequeued');
+    return { ...row, error_class: safeErrorClass };
   }
-  return row;
+  return null;
 }
 
 function activeStateSql(): string {
@@ -372,22 +349,12 @@ function activeStateSql(): string {
 }
 
 /**
- * Parse a persisted heal-report context column. The dequeue callers run
- * inside timers and tool-completion paths where a parse throw is fatal
- * (uncaughtException) with the report already flipped to 'attempt_1' —
- * so a corrupt cell degrades to {} instead of throwing.
+ * Parse a persisted heal-report context column into the closed V1 projection.
+ * Legacy and corrupt rows degrade to a bounded unclassified envelope instead of
+ * replaying their historical context into a repair turn.
  */
-export function parseHealContext(raw: string | null): Record<string, unknown> {
-  if (!raw) return {};
-  try {
-    const parsed: unknown = JSON.parse(raw);
-    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
-      return parsed as Record<string, unknown>;
-    }
-  } catch {
-    // fall through to {}
-  }
-  return {};
+export function parseHealContext(raw: string | null): HealEvidenceV1 {
+  return parseStoredHealEvidence(raw);
 }
 
 /**
@@ -419,48 +386,42 @@ export function checkDegradationSignals(
   activeControlReportId: string | null,
 ): void {
   const cutoff = new Date(Date.now() - 5 * 60 * 1000).toISOString();
-  const failures = db.raw.prepare(`
-    SELECT sender_jid, COUNT(*) as cnt
-    FROM decryption_failures
-    WHERE resolved = 0 AND datetime(created_at) > datetime(?)
-    GROUP BY sender_jid
-    HAVING cnt >= 5
-  `).all(cutoff) as Array<{ sender_jid: string; cnt: number }>;
+  const aggregate = db.raw.prepare(`
+    SELECT COUNT(*) as affected_scope_count, COALESCE(SUM(cnt), 0) as total_failures
+    FROM (
+      SELECT COUNT(*) as cnt
+      FROM decryption_failures
+      WHERE resolved = 0 AND datetime(created_at) > datetime(?)
+      GROUP BY sender_jid
+      HAVING cnt >= 5
+    )
+  `).get(cutoff) as { affected_scope_count: number; total_failures: number };
 
-  if (failures.length === 0) return;
+  if (aggregate.affected_scope_count === 0) return;
 
-  // Coalesce per-sender signals into ONE degraded report per tick. The FIRST line is a
-  // fixed string so normalizeErrorClass produces a STABLE error class — otherwise each
-  // sender / rising count yields a distinct class and the single-flight guard never
-  // engages, paging Q with near-identical reports every 60s tick (bounded only by the
-  // global valve). Per-sender specifics go on following lines (not part of the class).
-  const totalFailures = failures.reduce((sum, f) => sum + f.cnt, 0);
-  const detail = failures.map((f) => `  ${f.cnt} from ${f.sender_jid}`).join('\n');
   emitHealReport(db, messenger, durability, {
     type: 'degraded',
-    stderr: `decryption failures degraded\n${failures.length} sender(s), ${totalFailures} unresolved in last 5 minutes\n${detail}`,
+    totalFailures: aggregate.total_failures,
+    affectedScopeCount: aggregate.affected_scope_count,
   }, activeControlReportId);
 }
 
 function formatHealReport(payload: {
-  type: string;
-  chatJid?: string;
-  exitCode?: number;
-  signal?: string | null;
-  provider?: string;
-  crashClass?: string;
-  stderr?: string;
-  recentLogs?: string;
+  evidence: HealEvidenceV1;
   attempt: number;
   maxAttempts: number;
 }): string {
-  const lines = [`Session ${payload.type} in ${payload.chatJid ?? 'unknown chat'}`];
-  if (payload.exitCode !== undefined) lines.push(`Exit code: ${payload.exitCode}`);
-  if (payload.signal) lines.push(`Signal: ${payload.signal}`);
-  if (payload.provider) lines.push(`Provider: ${payload.provider}`);
-  if (payload.crashClass) lines.push(`Crash class: ${payload.crashClass}`);
-  if (payload.stderr) lines.push(`Stderr (last lines):\n  ${payload.stderr.split('\n').slice(-5).join('\n  ')}`);
-  if (payload.recentLogs) lines.push(`Recent logs:\n  ${payload.recentLogs.split('\n').slice(-5).join('\n  ')}`);
+  const { evidence } = payload;
+  const lines = [
+    `Automated heal report: ${evidence.type}`,
+    `Cause: ${evidence.cause}`,
+    `Stage: ${evidence.stage}`,
+    `Impact: ${evidence.impact}`,
+    `Evidence coverage: ${evidence.evidenceCoverage}`,
+    `Occurrences: ${evidence.counts.occurrences}`,
+    evidence.counts.affectedScopes === undefined ? null : `Affected scopes: ${evidence.counts.affectedScopes}`,
+    `Recommended action: ${evidence.action}`,
+  ].filter((line): line is string => line !== null);
   // #1754: no writer ever sets cooldown_until or dispatches a timed retry, so this
   // must not promise one — it previously always read "attempt 1 of 2 ... 5m cooldown"
   // regardless of how many times the error actually recurred (see attempt_count

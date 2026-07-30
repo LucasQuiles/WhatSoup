@@ -244,6 +244,26 @@ and end with an alphanumeric character. Exit code 2 on violation.
 | `bot-errors-q-loop.py` | The hub's agent loop driver. |
 | `retire-outbound-quarantine.py` | Operator tool: retires one reviewed `quarantined` row in an instance's `outbound_ops` table (`--db`, `--instance`, `--op-id`, `--reason`), backing up the DB first and flipping the op to `failed_permanent`/`is_terminal=1`. When that was the last quarantined op it shells out to `bot-errors-emit.py` to emit a BOT ERRORS clear event. Supports `--dry-run` (no writes, reports whether a clear would fire), `--no-backup`, `--no-emit`, and `--emit-script`. |
 
+### Queue-event envelope v2 compatibility
+
+New queue writers emit `schemaVersion: 2` with one disjoint variant: an
+`incident_alert` (`alert` plus `critical`, `error`, or `warning`), an
+`incident_recovery` (`clear` plus `info`), or an `observation`
+(`observation` plus `info`). Informational requests through the TypeScript
+alert API are canonically emitted as `observation`; they are never stored as
+an `alert`/`info` pair.
+
+Schema-v1 records remain read-compatible only at dispatcher ingress, and only
+the legacy `alert` and `clear` tags are accepted. A valid queued, relayed,
+reclaimed-after-restart, or write-failure-recovered v1 record is normalized to
+v2 before dedupe, incident mutation, formatting, delivery, or archival.
+Historical archives are retained as written; replaying one routes through the
+same ingress normalization. Unsupported v1 or v2 combinations are quarantined
+without delivery or state mutation, with only the bounded classifier reason in
+quarantine metadata. Invalid write-failure breadcrumbs are quarantined before
+duplicate suppression; they cannot be replay-suppressed as if they were valid
+delivery records.
+
 ### Controller diagnostic envelope
 
 The q-loop, collector, dispatcher, heartbeat watchdog, and deadman write new

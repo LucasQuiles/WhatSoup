@@ -1,5 +1,6 @@
 import { isRecord } from '../lib/type-guards.ts';
 import { isOutboundGovernorShed } from './outbound-governor-shed.ts';
+import { isOutboundIdentityBlocked } from './outbound-identity/guard.ts';
 import {
   ErrorCode,
   type ErrorCode as TransportErrorCode,
@@ -69,6 +70,7 @@ export type InternalOutboundFailureCode =
   | 'outbound.status_ping_expired'
   | 'outbound.unsafe_delivery_unconfirmed'
   | 'outbound.governor_shed'
+  | 'outbound.identity_blocked'
   | 'outbound.replay_failed'
   | 'outbound.deferral_limit_exceeded';
 
@@ -159,6 +161,7 @@ const INTERNAL_CODES = new Set<string>([
   'outbound.status_ping_expired',
   'outbound.unsafe_delivery_unconfirmed',
   'outbound.governor_shed',
+  'outbound.identity_blocked',
   'outbound.replay_failed',
   'outbound.deferral_limit_exceeded',
 ]);
@@ -240,6 +243,7 @@ function stageFor(
     || code === ErrorCode.PAYLOAD_TOO_LARGE
     || code === ErrorCode.CONVERSATION_NOT_FOUND
     || code === 'outbound.governor_shed'
+    || code === 'outbound.identity_blocked'
     || code === 'outbound.shutdown_before_send'
   ) {
     return 'admission';
@@ -264,6 +268,7 @@ function mutationStateFor(
     || code === ErrorCode.PAYLOAD_TOO_LARGE
     || code === ErrorCode.CONVERSATION_NOT_FOUND
     || code === 'outbound.governor_shed'
+    || code === 'outbound.identity_blocked'
     || code === 'outbound.shutdown_before_send'
   ) {
     return 'not_started';
@@ -439,13 +444,16 @@ export function classifyOutboundFailure(
   const now = monotonicEvidenceTimestamp(nowMs, options.previousEvidence);
   const payload = readTransportPayload(error);
   const code: OutboundFailureCode = payload?.code as TransportErrorCode
-    ?? (isOutboundGovernorShed(error)
-      ? 'outbound.governor_shed'
-      : 'outbound.unknown_failure');
+    ?? (isOutboundIdentityBlocked(error)
+      ? 'outbound.identity_blocked'
+      : isOutboundGovernorShed(error)
+        ? 'outbound.governor_shed'
+        : 'outbound.unknown_failure');
   const phase = payload?.phase;
   const stage = stageFor(code, phase);
   const mutationState = mutationStateFor(code, phase);
-  const retryable = payload?.retryable ?? !isOutboundGovernorShed(error);
+  const retryable = payload?.retryable
+    ?? !(isOutboundIdentityBlocked(error) || isOutboundGovernorShed(error));
   const retryAfterMs = retryable && mutationState !== 'ambiguous'
     ? validPositiveDelay(payload?.retryAfterMs, nowMs)
     : null;

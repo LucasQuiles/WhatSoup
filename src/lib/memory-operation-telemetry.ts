@@ -25,6 +25,7 @@ export type MemoryReadinessState =
   | 'index_missing'
   | 'project_mismatch'
   | 'network_error'
+  | 'unknown'
   | 'ready';
 
 export interface MemoryReadinessLogFields {

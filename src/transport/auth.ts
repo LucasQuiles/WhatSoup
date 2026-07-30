@@ -35,7 +35,8 @@ if (existsSync(lockPath)) {
   console.error(
     `Bot is currently running. Stop it first:\n` +
     `  Linux: systemctl --user stop whatsoup\n` +
-    `  macOS: launchctl stop com.whatsoup.<name>`,
+    `  macOS: use the Fleet auth flow or see docs/runbooks/macos-launchd-deployment.md#restart-procedures\n` +
+    `         (do not use legacy launchctl stop for a KeepAlive job)`,
   );
   process.exit(1);
 }
@@ -114,7 +115,6 @@ async function startSocket(): Promise<void> {
     }
 
     if (connection === 'open') {
-      process.stdout.write(JSON.stringify({ event: 'connected' }) + '\n');
       clearTimeout(timeoutHandle);
       const rawId: string | undefined = (sock as any).user?.id;
       const jid = rawId ?? 'unknown';
@@ -133,6 +133,10 @@ async function startSocket(): Promise<void> {
         process.exit(1);
         return;
       }
+      // Fleet activation treats this as a persisted credential success signal.
+      // It must not start the managed instance while a failed save is still
+      // possible, because the instance would otherwise race its auth material.
+      process.stdout.write(JSON.stringify({ event: 'connected' }) + '\n');
       // Give the file system a moment to flush before we exit
       setTimeout(() => {
         try { sock.end(undefined); } catch { /* best-effort */ }

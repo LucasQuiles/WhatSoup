@@ -8,8 +8,21 @@ import {
   TRANSPORT_IDS, DEFAULT_TRANSPORT_ID, isTransportId, assertNeverTransport,
   type TransportId,
 } from '../../src/transport/registry.ts';
+import {
+  TRANSPORT_IDS as CORE_TRANSPORT_IDS,
+  DEFAULT_TRANSPORT_ID as CORE_DEFAULT_TRANSPORT_ID,
+  isTransportId as coreIsTransportId,
+  assertNeverTransport as coreAssertNeverTransport,
+} from '../../src/core/transport-refs.ts';
 
 describe('transport registry', () => {
+  it('re-exports the canonical core transport registry contract by identity', () => {
+    expect(TRANSPORT_IDS).toBe(CORE_TRANSPORT_IDS);
+    expect(DEFAULT_TRANSPORT_ID).toBe(CORE_DEFAULT_TRANSPORT_ID);
+    expect(isTransportId).toBe(coreIsTransportId);
+    expect(assertNeverTransport).toBe(coreAssertNeverTransport);
+  });
+
   it('is a frozen closed set pinned to the canonical IDs', () => {
     expect([...TRANSPORT_IDS]).toEqual(['baileys', 'twilio', 'signal', 'imessage']);
     expect(Object.isFrozen(TRANSPORT_IDS)).toBe(true);

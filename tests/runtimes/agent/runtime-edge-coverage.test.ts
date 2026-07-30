@@ -87,6 +87,7 @@ const {
   }));
   const mockBuildDiagnosticProbes = vi.fn((_args?: unknown) => ({}));
   const mockConfig = {
+    transport: 'baileys' as const,
     adminPhones: new Set<string>(),
     controlPeers: new Map<string, string>(),
     toolUpdateMode: 'full' as const,

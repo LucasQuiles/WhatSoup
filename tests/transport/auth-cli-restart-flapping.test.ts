@@ -167,7 +167,8 @@ describe('auth CLI restartRequired handling', () => {
     expect(console.error).toHaveBeenCalledWith(
       'Bot is currently running. Stop it first:\n' +
       '  Linux: systemctl --user stop whatsoup\n' +
-      '  macOS: launchctl stop com.whatsoup.<name>',
+      '  macOS: use the Fleet auth flow or see docs/runbooks/macos-launchd-deployment.md#restart-procedures\n' +
+      '         (do not use legacy launchctl stop for a KeepAlive job)',
     );
     expect(mocks.makeWASocket).not.toHaveBeenCalled();
   });

@@ -90,19 +90,20 @@ consistently — do not use `com.whatsoup-fleet.*` or `com.fleetconsole.*`.
 
 ### RunAtLoad and KeepAlive
 
-Every bot and protective-service plist must set:
+Protective-service plists that are maintained by hand must set:
 
 ```xml
 <key>RunAtLoad</key>
 <true/>
 ```
 
-Without `RunAtLoad=true`, the service does not start after reboot until the
-next scheduled interval fires or launchd is manually triggered. Bots that
-survive the reboot check but never restart are the most common class of
-silent failures.
+Without `RunAtLoad=true`, a hand-maintained protective service does not start
+after reboot until the next scheduled interval fires or launchd is manually
+triggered.
 
-Bot plists additionally require:
+Generated per-instance WhatSoup plists are a separate, code-owned contract;
+do not copy the hand-maintained template into them. They retain an explicit
+`RunAtLoad=false`, install only after successful pairing, and use:
 
 ```xml
 <key>KeepAlive</key>
@@ -112,10 +113,15 @@ Bot plists additionally require:
   <key>SuccessfulExit</key>
   <false/>
 </dict>
+<key>ThrottleInterval</key>
+<integer>60</integer>
 ```
 
-This combination restarts on crash and on non-zero exit, but not on clean
-shutdown (e.g., when the harness calls `launchctl kickstart -k`).
+The generated policy restarts crash-associated signals and nonzero ordinary
+exits, with a bounded retry cadence. `KeepAlive` itself implies initial launch,
+so the deferred installation order is part of the pairing safety contract. See
+`docs/runbooks/macos-launchd-deployment.md` for the one-instance migration and
+reload procedure.
 
 ### plist reload trap
 
