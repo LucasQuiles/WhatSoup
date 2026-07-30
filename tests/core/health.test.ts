@@ -78,6 +78,7 @@ import { seedChatAliases } from '../../src/core/chats-resolver.ts';
 import { createProfileRegistry } from '../../src/core/profiles.ts';
 import { createOutboundSendsWriter } from '../../src/core/outbound-sends.ts';
 import type { HealthDeps } from '../../src/core/health.ts';
+import type { StartupNotificationHealth } from '../../src/core/startup-notification-controller.ts';
 import type { ConnectionManager } from '../../src/transport/connection.ts';
 import { emptyConnectionStateSnapshot } from '../../src/transport/twilio/connection-snapshot.ts';
 
@@ -237,17 +238,18 @@ const STARTUP_NOTIFICATION_KEYS = [
   'lastSendAt',
 ] as const;
 
-function startupNotificationHealth(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+function startupNotificationHealth(
+  overrides: Partial<Pick<StartupNotificationHealth, 'state' | 'policy'>> = {},
+): StartupNotificationHealth {
   return {
-    state: 'waiting_stability',
-    policy: 'generic',
+    state: overrides.state ?? 'waiting_stability',
+    policy: overrides.policy ?? 'generic',
     stabilitySeconds: 600,
     bootCountSinceNotification: 2,
     lastBootAt: 1_753_825_600_000,
     lastNotifiedAt: 1_753_825_000_000,
     nextEligibleAt: 1_753_826_200_000,
     lastSendAt: null,
-    ...overrides,
   };
 }
 
@@ -316,7 +318,7 @@ describe('GET /health', () => {
     await new Promise<void>((resolve) => server.close(() => resolve()));
     ({ server, port } = await buildTestServer(makeDeps(db2, {
       getStartupNotificationHealth: () => startupNotificationHealth({ state, policy }),
-    } as Partial<HealthDeps>)));
+    })));
 
     const { status, body } = await healthReq(port);
     const startupNotification = JSON.parse(body).startupNotification as Record<string, unknown>;
@@ -338,7 +340,7 @@ describe('GET /health', () => {
       await new Promise<void>((resolve) => server.close(() => resolve()));
       ({ server, port } = await buildTestServer(makeDeps(db2, {
         getStartupNotificationHealth: () => startupNotificationHealth({ state }),
-      } as Partial<HealthDeps>)));
+      })));
 
       const { status, body } = await healthReq(port);
       expect(status).toBe(200);

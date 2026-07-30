@@ -3,8 +3,16 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   StartupNotificationController,
   type StartupNotificationJournalPort,
+  type StartupNotificationTrackedSendPort,
 } from '../../src/core/startup-notification-controller.ts';
 import type { StartupNotificationSettlement } from '../../src/core/startup-notify.ts';
+
+type JournalMock = {
+  recordStartupBoot: ReturnType<typeof vi.fn<StartupNotificationJournalPort['recordStartupBoot']>>;
+  settleStartupNotification: ReturnType<typeof vi.fn<StartupNotificationJournalPort['settleStartupNotification']>>;
+};
+
+type SendMock = ReturnType<typeof vi.fn<StartupNotificationTrackedSendPort['send']>>;
 
 class FakeScheduler {
   private nowMs = 0;
@@ -72,26 +80,26 @@ function settlement(
 
 function makeJournal(
   nextSettlement: StartupNotificationSettlement = settlement(),
-): StartupNotificationJournalPort {
+): JournalMock {
   return {
-    recordStartupBoot: vi.fn(() => ({
+    recordStartupBoot: vi.fn<StartupNotificationJournalPort['recordStartupBoot']>(() => ({
       status: 'available',
       state: { v: 1, boots: [0], lastNotifiedAt: null },
     })),
-    settleStartupNotification: vi.fn(() => nextSettlement),
+    settleStartupNotification: vi.fn<StartupNotificationJournalPort['settleStartupNotification']>(() => nextSettlement),
   };
 }
 
 function createHarness(options: {
   ready?: boolean;
-  journal?: StartupNotificationJournalPort;
-  send?: ReturnType<typeof vi.fn>;
+  journal?: JournalMock;
+  send?: SendMock;
   genericNotificationsEnabled?: boolean;
 } = {}) {
   const scheduler = new FakeScheduler();
   let ready = options.ready ?? true;
   const journal = options.journal ?? makeJournal();
-  const send = options.send ?? vi.fn(async () => ({ accepted: true }));
+  const send = options.send ?? vi.fn<StartupNotificationTrackedSendPort['send']>(async () => ({ accepted: true }));
   const controller = new StartupNotificationController({
     clock: { now: scheduler.now },
     scheduler,
@@ -224,7 +232,7 @@ describe('StartupNotificationController', () => {
 
   it('gives an unreadable journal precedence over disabled generic policy', () => {
     const journal = makeJournal();
-    journal.recordStartupBoot = vi.fn(() => ({
+    journal.recordStartupBoot = vi.fn<StartupNotificationJournalPort['recordStartupBoot']>(() => ({
       status: 'journal_unreadable',
       state: { v: 1, boots: [1_000], lastNotifiedAt: null },
     }));
@@ -597,7 +605,7 @@ describe('StartupNotificationController', () => {
   });
 
   it('cancels its timer on stop and records send and journal failures without claiming durable settlement', async () => {
-    const send = vi.fn(async () => { throw new Error('submission failed'); });
+    const send = vi.fn<StartupNotificationTrackedSendPort['send']>(async () => { throw new Error('submission failed'); });
     const journal = makeJournal(settlement({
       status: 'journal_unreadable',
       watermarkPersisted: false,
@@ -630,7 +638,7 @@ describe('StartupNotificationController', () => {
   });
 
   it('bounds journal and send failure health after a non-stopped attempt', async () => {
-    const send = vi.fn(async () => { throw new Error('submission failed'); });
+    const send = vi.fn<StartupNotificationTrackedSendPort['send']>(async () => { throw new Error('submission failed'); });
     const journal = makeJournal(settlement({
       status: 'journal_unreadable',
       watermarkPersisted: false,

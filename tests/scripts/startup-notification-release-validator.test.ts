@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import {
   runStartupNotificationReleaseCli,
+  type StartupNotificationProbe,
   validateStartupNotificationRelease,
 } from '../../scripts/validate-startup-notification-release.ts';
 
@@ -64,7 +65,7 @@ describe('startup notification release validator', () => {
     ['watermark mismatch', completeHealth({ lastNotifiedAt: 2_999 }), validJournal()],
     ['last-send precedes watermark', completeHealth({ lastSendAt: 2_999 }), validJournal()],
     ['probe failure', completeHealth(), validJournal(), { outcome: 'failed' }],
-  ] as const)('returns actionable exit 1 for %s', (_name, health, journal, probe = { outcome: 'passed' }) => {
+  ] as const)('returns actionable exit 1 for %s', (_name, health, journal, probe: StartupNotificationProbe = { outcome: 'passed' }) => {
     expect(validateStartupNotificationRelease({ health, journal, probe })).toMatchObject({
       exitCode: 1,
       outcome: 'rejected',

@@ -187,7 +187,7 @@ type ParsedCliOptions = {
   probeOutcome: StartupNotificationProbe['outcome'];
 };
 
-function parseArgs(args: string[]): ParsedCliOptions | null {
+function parseArgs(args: readonly string[]): ParsedCliOptions | null {
   const options: CliOptions = { healthPath: null, journalPath: null, probeOutcome: null };
   for (let index = 0; index < args.length; index += 1) {
     const arg = args[index];
@@ -236,7 +236,7 @@ function readJson(path: string): unknown | undefined {
 }
 
 export function runStartupNotificationReleaseCli(
-  args: string[],
+  args: readonly string[],
   readJsonFile: (path: string) => unknown | undefined = readJson,
 ): StartupNotificationReleaseValidationResult {
   const options = parseArgs(args);
