@@ -67,9 +67,9 @@ export class UpdateChecker {
 
   start(): void {
     if (this.timer) return;
-    this.checkNow().catch(() => {});
+    this.checkNow().catch((err) => log.warn({ err }, 'update-checker: initial check failed'));
     this.timer = setInterval(() => {
-      this.checkNow().catch(() => {});
+      this.checkNow().catch((err) => log.warn({ err }, 'update-checker: periodic check failed'));
     }, CHECK_INTERVAL_MS);
     this.timer.unref();
   }

@@ -59,7 +59,7 @@ function execPs(args: string[]): Promise<string | null> {
 
 /** Enumerate rootPid's descendant tree (root included) via a full pid/ppid census. */
 async function listTreePids(rootPid: number): Promise<number[] | null> {
-  const out = await execPs(['-axo', 'pid=,ppid=']);
+  const out = await execPs(['-e', '-o', 'pid=,ppid=']);
   if (out === null) return null;
   const children = new Map<number, number[]>();
   for (const line of out.split('\n')) {
