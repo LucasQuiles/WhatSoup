@@ -22,12 +22,21 @@ function checkIdentity(name: string, email: string) {
 describe("commit identity allowlist", () => {
   it.each([
     ["SoupBot QPI 1", "308864230+qpi-lab@users.noreply.github.com"],
+    ["SoupBot QPI 1", "310849274+LabRatQ@users.noreply.github.com"],
     ["SoupBot QPI 2", "308865677+qpi-lab2@users.noreply.github.com"],
-    ["SoupBot", "soupbot@users.noreply.github.com"],
-  ])("accepts the approved identity %s", (name, email) => {
+  ])("accepts the approved identity %s <%s>", (name, email) => {
     const result = checkIdentity(name, email);
 
     expect(result.status, result.stderr).toBe(0);
+  });
+
+  it("rejects the retired legacy soupbot identity", () => {
+    // Removed 2026-07-30 (owner decision): the username-form noreply resolves
+    // to a GitHub account the estate does not control, so new commits carrying
+    // it would misattribute to a third party.
+    const result = checkIdentity("SoupBot", "soupbot@users.noreply.github.com");
+
+    expect(result.status).not.toBe(0);
   });
 
   it("rejects a mismatched machine name and address", () => {
