@@ -197,7 +197,7 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 | `docs/superpowers/plans/2026-07-28-incident-store-core.md` | plan | unknown | fallback | incident-store-core | 2026-07-28 |  |
 | `docs/superpowers/plans/2026-07-28-primary-probe-cancellation.md` | plan | active | body-marker | primary-probe-cancellation | 2026-07-29 |  |
 | `docs/superpowers/plans/2026-07-28-runtime-health-signal-dispositions.md` | plan | active | body-marker | runtime-health-signal-dispositions | 2026-07-28 |  |
-| `docs/superpowers/plans/2026-07-28-turn-recovery-safety.md` | plan | active | body-marker | turn-recovery-safety | 2026-07-28 |  |
+| `docs/superpowers/plans/2026-07-28-turn-recovery-safety.md` | plan | active | body-marker | turn-recovery-safety | 2026-07-31 |  |
 | `docs/superpowers/plans/2026-07-29-launchd-restart-policy-2682.md` | plan | active | body-marker | launchd-restart-policy-2682 | 2026-07-30 |  |
 | `docs/superpowers/plans/2026-07-29-maybe-sent-ambiguity-episode.md` | plan | unknown | fallback | maybe-sent-ambiguity-episode | 2026-07-30 |  |
 | `docs/superpowers/plans/2026-07-29-portable-startup-notification-protocol.md` | plan | unknown | fallback | portable-startup-notification-protocol | 2026-07-30 |  |
@@ -246,7 +246,7 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 | `docs/superpowers/specs/2026-07-28-incident-ingestion-surface-design.md` | spec | unknown | body-marker | incident-ingestion-surface-design | 2026-07-30 |  |
 | `docs/superpowers/specs/2026-07-28-primary-probe-cancellation-design.md` | spec | completed | body-marker | primary-probe-cancellation-design | 2026-07-29 |  |
 | `docs/superpowers/specs/2026-07-28-runtime-health-signal-dispositions-design.md` | spec | active | body-marker | runtime-health-signal-dispositions-design | 2026-07-28 |  |
-| `docs/superpowers/specs/2026-07-28-turn-recovery-safety-design.md` | spec | active | body-marker | turn-recovery-safety-design | 2026-07-28 |  |
+| `docs/superpowers/specs/2026-07-28-turn-recovery-safety-design.md` | spec | active | body-marker | turn-recovery-safety-design | 2026-07-31 |  |
 | `docs/superpowers/specs/2026-07-29-incident-evaluator-core-design.md` | spec | unknown | body-marker | incident-evaluator-core-design | 2026-07-31 |  |
 | `docs/superpowers/specs/2026-07-29-launchd-restart-policy-2682-design.md` | spec | active | body-marker | launchd-restart-policy-2682-design | 2026-07-30 |  |
 | `docs/superpowers/specs/2026-07-29-maybe-sent-ambiguity-episode-design.md` | spec | unknown | fallback | maybe-sent-ambiguity-episode-design | 2026-07-30 |  |
@@ -271,4 +271,4 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 ---
 
 - Derived from `docs/work-index.json`
-- Generated at 2026-07-31T23:51:13Z from commit `02ec14577aefb9e02d1f714a2f5ae77fb30c4c64`
+- Generated at 2026-08-01T23:58:27Z from commit `f671771a7a7e90b17e0e9d37d702c0fccef34ba5`
