@@ -60,6 +60,8 @@ import math
 import os
 import subprocess
 import sys
+import re
+import os
 import time
 from pathlib import Path
 
@@ -297,36 +299,56 @@ def _run(args: list[str]) -> str:
 
 
 def discover_instances() -> list[str]:
-    """List whatsoup@ instance names via systemctl.
+    """List whatsoup@ instance names via the platform service manager.
 
     Raises ProbeError when the discovery command itself fails; an empty
     result is returned to the caller, which treats it as a probe error too.
     """
-    out = _run(
-        [
-            "systemctl",
-            "--user",
-            "list-units",
-            "whatsoup@*",
-            "--all",
-            "--no-legend",
-            "--plain",
-        ]
-    )
-    names: list[str] = []
-    for line in out.splitlines():
-        stripped = line.strip()
-        if not stripped:
-            continue
-        # Match a systemd unit line for a whatsoup instance and take its unit token.
-        token = stripped.split()[0]
-        if not token.startswith("whatsoup@") or not token.endswith(".service"):
-            raise ProbeError("malformed")
-        name = token.removeprefix("whatsoup@").removesuffix(".service")
-        if not name:
-            raise ProbeError("malformed")
-        names.append(name)
-    return names
+    if sys.platform == "linux":
+        out = _run(
+            [
+                "systemctl",
+                "--user",
+                "list-units",
+                "whatsoup@*",
+                "--all",
+                "--no-legend",
+                "--plain",
+            ]
+        )
+        names: list[str] = []
+        for line in out.splitlines():
+            stripped = line.strip()
+            if not stripped:
+                continue
+            token = stripped.split()[0]
+            if not token.startswith("whatsoup@") or not token.endswith(".service"):
+                raise ProbeError("malformed")
+            name = token.removeprefix("whatsoup@").removesuffix(".service")
+            if not name:
+                raise ProbeError("malformed")
+            names.append(name)
+        return names
+    elif sys.platform == "darwin":
+        # Discover com.whatsoup.* user LaunchAgent labels via launchctl list
+        out = _run(["launchctl", "list"])
+        names = []
+        for line in out.splitlines():
+            stripped = line.strip()
+            if not stripped:
+                continue
+            # launchctl list output: PID	ExitCode	Label
+            parts = stripped.split()
+            if len(parts) >= 3:
+                label = parts[2]
+                prefix = "com.whatsoup."
+                if label.startswith(prefix) and label.endswith(".service"):
+                    name = label[len(prefix):-len(".service")]
+                    if name:
+                        names.append(name)
+        return names
+    else:
+        raise ProbeError(f"unsupported_platform:{sys.platform}")
 
 
 def probe_instance(instance: str) -> dict:
@@ -347,17 +369,26 @@ def probe_instance(instance: str) -> dict:
     now_epoch = math.floor(time.time())
 
     # 1. MainPID
-    pid_out = _run(
-        [
-            "systemctl",
-            "--user",
-            "show",
-            f"whatsoup@{instance}",
-            "-p",
-            "MainPID",
-            "--value",
-        ]
-    )
+    if sys.platform == "linux":
+        pid_out = _run(
+            [
+                "systemctl",
+                "--user",
+                "show",
+                f"whatsoup@{instance}",
+                "-p",
+                "MainPID",
+                "--value",
+            ]
+        )
+    elif sys.platform == "darwin":
+        label = f"com.whatsoup.{instance}.service"
+        pid_out_raw = _run(["launchctl", "print", f"gui/{os.getuid()}/{label}"])
+        # Extract pid from launchctl print output
+        m = re.search(r'^[ \t]*pid = (\d+)', pid_out_raw, re.MULTILINE)
+        pid_out = m.group(1) if m else "0"
+    else:
+        raise ProbeError(f"unsupported_platform:{sys.platform}")
     pid_text = pid_out.strip()
     if pid_text == "0":
         return {
