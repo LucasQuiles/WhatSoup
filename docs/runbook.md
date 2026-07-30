@@ -697,7 +697,7 @@ systemctl --user start whatsoup@sandbox-agent
 ```bash
 # 1. Check outbound_ops for stuck or quarantined operations
 sqlite3 ~/.local/share/whatsoup/instances/sandbox-agent/bot.db \
-  "SELECT id, status, op_type, replay_policy, retry_count, submitted_at,
+  "SELECT id, status, op_type, replay_policy, retry_count, submitted_at, ambiguity_at,
           CASE WHEN json_valid(error) THEN json_extract(error, '$.failure_code')
                ELSE 'outbound.legacy_unclassified' END AS failure_code,
           CASE WHEN json_valid(error) THEN json_extract(error, '$.stage')
@@ -866,9 +866,9 @@ sqlite3 $DB ".backup '${DB}.pre-recovery'"
 # terminal owner, and selected unresolved delivery-op chain. It never blindly
 # replays an arbitrary prompt that happened to be open at the crash.
 # While the process remains live, the 10-second echo-maintenance loop also
-# reconciles up to 200 oldest `maybe_sent` rows created after the post-connect
-# pass once each has aged 30 seconds. Safe/read-only sends return to the pending
-# drainer; unsafe sends quarantine and the existing
+# reconciles up to 200 oldest live `maybe_sent` rows after each current
+# ambiguity_at episode has aged 30 seconds (not from queue creation).
+# Safe/read-only sends return to the pending drainer; unsafe sends quarantine and the existing
 # stuck-inbound sweep can then release a terminally non-echoed recovery owner.
 
 # 5. Start the service
@@ -901,7 +901,7 @@ sqlite3 $DB \
                ELSE 'outbound.legacy_unclassified' END AS failure_code,
           CASE WHEN json_valid(error) THEN json_extract(error, '$.stage')
                ELSE 'legacy_unclassified' END AS failure_stage,
-          retry_count, submitted_at
+          retry_count, submitted_at, ambiguity_at
    FROM outbound_ops WHERE status = 'quarantined'
    ORDER BY id DESC;"
 
@@ -1133,7 +1133,7 @@ sqlite3 $DB \
 
 # Outbound ops — pending/in-flight message sends
 sqlite3 $DB \
-  "SELECT id, status, op_type, replay_policy, submitted_at, error
+  "SELECT id, status, op_type, replay_policy, submitted_at, ambiguity_at, error
    FROM outbound_ops
    WHERE status NOT IN ('echoed', 'failed_permanent')
    ORDER BY id DESC LIMIT 20;"
