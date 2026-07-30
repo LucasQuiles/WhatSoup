@@ -486,7 +486,7 @@ describe('AgentRuntime — provider fallback state machine', () => {
     },
   );
 
-  it('schedules replay of the interrupted turn only when fallback is newly armed and usable', () => {
+  it('schedules replay of the interrupted turn only for a usable, route-safe fallback target', () => {
     const runtime = makeRuntime({
       agentFallbackProvider: 'opencode-cli',
       agentFallbackModel: 'minimax/MiniMax-M2.7',
@@ -539,10 +539,17 @@ describe('AgentRuntime — provider fallback state machine', () => {
       actorJid: 'sender@s.whatsapp.net',
       oldSession: null,
       runtimeContext,
+      routeOverride: expect.objectContaining({
+        provider: 'opencode-cli',
+        model: 'minimax/MiniMax-M2.7',
+        source: 'fallback',
+        reasonCode: 'fallback_window_active',
+      }),
     });
 
     const extended = v.activateProviderFallback(null, 'usage-limit')!;
     expect(extended.extended).toBe(true);
+    // An extension with no source-route identity remains fail-closed.
     expect(v.scheduleFallbackReplay({
       activation: extended,
       chatJid: 'chat@s.whatsapp.net',
