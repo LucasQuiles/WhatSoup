@@ -101,7 +101,9 @@ export function buildPlist(name: string): string {
   const logDir = path.join(xdgConfig, 'whatsoup', 'instances', name);
   const tmpDir = tmpRoot(name);
   const wrapper = path.join(os.homedir(), '.local', 'bin', 'whatsoup');
-  const envPath = process.env.PATH ?? '/usr/local/bin:/usr/bin:/bin';
+  const envPath = process.env.PATH ?? (process.platform === 'darwin'
+  ? '/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin'
+  : '/usr/local/bin:/usr/bin:/bin');
   const whatsoupNode = process.env.WHATSOUP_NODE;
 
   return [

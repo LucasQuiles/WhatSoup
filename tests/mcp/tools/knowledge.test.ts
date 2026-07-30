@@ -369,6 +369,7 @@ describe('createPineconeWatchSearch - vector search', () => {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ texts: ['vector watch'], input_type: 'query' }),
+      signal: expect.any(AbortSignal),
     });
     expect(namespaceQueryMock).toHaveBeenCalledWith('vec_a', {
       topK: 2,
@@ -970,6 +971,7 @@ describe('knowledge_search handler - Pinecone search behavior', () => {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ texts: ['vector query'], input_type: 'query' }),
+      signal: expect.any(AbortSignal),
     });
     expect(namespaceQueryMock).toHaveBeenNthCalledWith(1, 'vec_a', {
       topK: 2,
