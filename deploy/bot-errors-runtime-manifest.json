@@ -41,7 +41,7 @@
         "writefail_invalid_envelope"
       ],
       "path": "deploy/scripts/bot-errors-dispatcher.py",
-      "sha256": "cdd268188f3f62aebbc729c9f0be537b63d2bc9eb6e18ddf872309e84037333e"
+      "sha256": "9e2dea68218d3501d210af187adc5f8507c649f146060e6880e0360973ec5738"
     },
     {
       "mustContain": [

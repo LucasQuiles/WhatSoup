@@ -4136,12 +4136,23 @@ def suppress_alerts_recovered_before_delivery(paths: dict[str, Path]) -> int:
             event = safe_read_json(path)
         except Exception:
             continue
+        # #2730: route envelope-invalid events through quarantine instead of
+        # letting EnvelopeError propagate from is_incident_alert/is_incident_clear
+        # (which call classify_event). The ready() helper at line 4414 shows the
+        # canonical pattern; this collection pass globs outbox directly and
+        # bypasses it, so the guard must be explicit here.
+        try:
+            is_alert = is_incident_alert(event)
+            is_clear = is_incident_clear(event)
+        except EnvelopeError as exc:
+            quarantine_invalid_envelope(path, paths["quarantine"], exc.code)
+            continue
         epoch = event_created_epoch(event)
         if epoch is None:
             continue
-        if is_incident_alert(event):
+        if is_alert:
             alerts_by_key.setdefault(incident_key(event), []).append((path, event, epoch))
-        elif is_incident_clear(event) and ready(path, paths["quarantine"]):
+        elif is_clear and ready(path, paths["quarantine"]):
             clears.append((path, event, epoch))
 
     suppressed = 0

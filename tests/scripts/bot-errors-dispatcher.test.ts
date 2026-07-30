@@ -2351,3 +2351,88 @@ describe('Queue-entry leaf-trust (#2484)', () => {
     expect(existsSync(capturePath)).toBe(true);
   });
 });
+
+// #2730: a single malformed outbox event (JSON-valid but envelope-invalid) must
+// not crash-loop the dispatcher. The pre-process_one collection passes that
+// classify raw events must route unclassifiable events through quarantine
+// instead of letting EnvelopeError propagate and kill the run.
+describe('envelope-crash quarantine (#2730)', () => {
+  function writeMalformedEvent(root: string, filename: string) {
+    const outbox = join(root, 'outbox');
+    mkdirSync(outbox, { recursive: true, mode: 0o700 });
+    // schemaVersion 3 is unsupported → classify_event raises
+    // EnvelopeError("unsupported_schema_version")
+    const event = {
+      schemaVersion: 3,
+      id: 'malformed-schema-3',
+      eventType: 'alert',
+      severity: 'critical',
+      createdAt: '2026-07-30T00:00:00Z',
+      machine: 'test-machine',
+      instance: 'q',
+      source: 'envelope-crash-test',
+      summary: 'malformed event that should be quarantined not crash',
+      evidence: 'schemaVersion 3 is unsupported',
+      delivery: { attempts: 0, status: 'queued', nextAttemptAtEpoch: 0, lastError: null },
+    };
+    writeFileSync(join(outbox, filename), `${JSON.stringify(event, null, 2)}\n`, { mode: 0o600 });
+  }
+
+  it('does NOT crash when suppress_alerts_recovered_before_delivery sees a malformed event; quarantines it instead', () => {
+    tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-envelope-crash-'));
+
+    // Malformed event in outbox — schemaVersion 3 crashes classify_event,
+    // which is called by is_incident_alert/is_incident_clear inside
+    // suppress_alerts_recovered_before_delivery's collection loop.
+    writeMalformedEvent(tmpRoot, '20260730T000000Z.malformed-schema-3.json');
+
+    // Call suppress_alerts_recovered_before_delivery directly (mirrors the
+    // issue's falsifier) rather than through --once, since the full run_once
+    // pipeline has earlier passes that call ready() first and mask the bug.
+    // The fix must route the malformed event through quarantine_invalid_envelope
+    // instead of letting EnvelopeError propagate.
+    const output = execFileSync('python3', ['-c', `
+import sys, os, json
+sys.path.insert(0, "deploy/scripts")
+import importlib.util
+spec = importlib.util.spec_from_file_location("disp", "deploy/scripts/bot-errors-dispatcher.py")
+disp = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(disp)
+
+from pathlib import Path
+paths = {
+    "outbox": Path(os.environ["STATE_DIR"]) / "outbox",
+    "quarantine": Path(os.environ["STATE_DIR"]) / "quarantine",
+    "suppressed": Path(os.environ["STATE_DIR"]) / "suppressed",
+    "incident_state": Path(os.environ["STATE_DIR"]) / "incident-state.json",
+    "root": Path(os.environ["STATE_DIR"]),
+}
+try:
+    result = disp.suppress_alerts_recovered_before_delivery(paths)
+    print(json.dumps({"crashed": False, "suppressed": result}))
+except Exception as exc:
+    print(json.dumps({"crashed": True, "error_type": type(exc).__name__, "error": str(exc)}))
+`], {
+      cwd: process.cwd(),
+      env: { ...process.env, STATE_DIR: tmpRoot },
+      encoding: 'utf8',
+    }).trim();
+
+    const result = JSON.parse(output);
+
+    // The function must NOT crash — EnvelopeError must not propagate
+    expect(result.crashed).toBe(false);
+
+    // The malformed event was quarantined with an invalid-envelope suffix
+    const quarantineDir = join(tmpRoot, 'quarantine');
+    const quarantined = readdirSync(quarantineDir);
+    expect(quarantined.some((entry) => entry.endsWith('.invalid-envelope'))).toBe(true);
+    expect(
+      quarantined.some((entry) => entry.includes('unsupported_schema_version')),
+    ).toBe(true);
+
+    // The malformed event is no longer in the outbox
+    const outboxRemaining = readdirSync(join(tmpRoot, 'outbox'));
+    expect(outboxRemaining.some((name) => name.includes('malformed-schema-3'))).toBe(false);
+  });
+});
