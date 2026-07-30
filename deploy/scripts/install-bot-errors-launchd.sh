@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # Install BOT ERRORS dispatcher, deadman, and health launchd agents on macOS.
 set -euo pipefail
 
