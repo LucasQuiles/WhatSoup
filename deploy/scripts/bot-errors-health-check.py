@@ -2458,8 +2458,21 @@ def boot_inventory() -> list[str]:
     try:
         uptime = float(Path("/proc/uptime").read_text(encoding="utf-8").split()[0])
         return [f"boot: uptime_seconds={int(uptime)}"]
-    except Exception as exc:  # noqa: BLE001
-        return [f"WARN boot: unavailable {exc}"]
+    except Exception:
+        # macOS lacks /proc/uptime; try sysctl kern.boottime
+        try:
+            result = subprocess.run(
+                ["sysctl", "-n", "kern.boottime"], capture_output=True, text=True,
+                check=True, timeout=5,
+            )
+            # Output: { sec = 1234567890, usec = 123456 } Fri Jul ...
+            m = re.search(r"sec\s*=\s*(\d+)", result.stdout)
+            if m:
+                boot_time = int(m.group(1))
+                uptime = int(time.time() - boot_time)
+                return [f"boot: uptime_seconds={uptime}"]
+        except Exception as exc:  # noqa: BLE001
+            return [f"WARN boot: unavailable {exc}"]
 
 
 def tcp_connect_ok(host: str, port: int, timeout: float = 3.0) -> tuple[bool, str]:
@@ -3459,8 +3472,19 @@ def provider_host_uptime_seconds() -> int | None:
         return None
     try:
         return int(float(Path("/proc/uptime").read_text(encoding="utf-8").split()[0]))
-    except Exception:  # noqa: BLE001 - best-effort diagnostic only.
-        return None
+    except Exception:
+        # macOS lacks /proc/uptime; try sysctl kern.boottime
+        try:
+            result = subprocess.run(
+                ["sysctl", "-n", "kern.boottime"], capture_output=True, text=True,
+                check=True, timeout=5,
+            )
+            m = re.search(r"sec\s*=\s*(\d+)", result.stdout)
+            if m:
+                boot_time = int(m.group(1))
+                return int(time.time() - boot_time)
+        except Exception:  # noqa: BLE001 - best-effort diagnostic only.
+            return None
 
 
 def provider_settings_fragments() -> list[str]:
