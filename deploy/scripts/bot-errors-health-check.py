@@ -30,6 +30,7 @@ if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
 from lib.bot_errors_redaction import redact_bot_errors_text, redact_json_value as redact_shared_json_value
+from lib.bot_errors_envelope import new_event_fields
 from lib.controller_log import (
     ControllerLogContext,
     controller_cycle,
@@ -1743,11 +1744,10 @@ def outbox_event(
     outbox, provenance = resolve_outbox_dir()
     ensure_private_dir(root)
     event_id = f"health-{time.time_ns()}-{os.getpid()}"
+    envelope_event_type = "observation" if event_type == "alert" and severity == "info" else event_type
     event = {
-        "schemaVersion": 1,
+        **new_event_fields(envelope_event_type, severity),
         "id": event_id,
-        "eventType": event_type,
-        "severity": severity,
         "createdAt": now_iso(),
         "machine": socket.gethostname(),
         "platform": HOST_PLATFORM,

@@ -156,6 +156,7 @@ def test_storm_collapse_below_threshold_leaves_events_for_process_one(tmp_path):
         paths = _disp.setup_dirs()
         base_epoch = int(time.time())
         event = {
+            "schemaVersion": 1,
             "id": "evt-nostorm-1",
             "eventType": "alert",
             "severity": "critical",
@@ -199,9 +200,10 @@ def test_recovery_dedupe_discarded_duplicate_still_stamps_freshness(tmp_path):
 
         def _clear(idx: int, epoch: int) -> dict[str, Any]:
             return {
+                "schemaVersion": 1,
                 "id": f"evt-dedupe-{idx}",
                 "eventType": "clear",
-                "severity": "warning",
+                "severity": "info",
                 "source": "daily-health",
                 "machine": "relay-dedupe-hub",
                 "instance": "eh-bot",
@@ -252,6 +254,7 @@ def test_flap_suppressed_member_still_reaches_process_one_and_stamps_freshness(t
         base_epoch = int(time.time())
         relay_host = "flap-worker-y"
         event = {
+            "schemaVersion": 1,
             "id": "evt-flap-1",
             "eventType": "alert",
             "severity": "critical",
@@ -295,6 +298,7 @@ def test_test_provenance_screened_never_stamps_freshness(tmp_path):
         paths = _disp.setup_dirs()
         relay_host = "test-provenance-worker-z"
         event = {
+            "schemaVersion": 1,
             "id": "evt-testprov-1",
             "eventType": "alert",
             "severity": "info",
@@ -351,6 +355,7 @@ def test_collapse_crash_before_move_still_persists_absorbed_stamp(tmp_path, monk
 
         def _member(idx: int, machine: str) -> dict[str, Any]:
             return {
+                "schemaVersion": 1,
                 "id": f"evt-crash-{idx}",
                 "eventType": "alert",
                 "severity": "critical",
@@ -409,6 +414,7 @@ def test_collapse_no_op_storm_never_saves_state(tmp_path, monkeypatch):
 
         def _member(idx: int, machine: str) -> dict[str, Any]:
             return {
+                "schemaVersion": 1,
                 "id": f"evt-noop-{idx}",
                 "eventType": "alert",
                 "severity": "critical",
@@ -454,9 +460,10 @@ def test_dedupe_crash_before_move_still_persists_absorbed_stamp(tmp_path, monkey
 
         def _clear(idx: int, epoch: int) -> dict[str, Any]:
             return {
+                "schemaVersion": 1,
                 "id": f"evt-dedupe-crash-{idx}",
                 "eventType": "clear",
-                "severity": "warning",
+                "severity": "info",
                 "source": "daily-health",
                 "machine": "relay-dedupe-crash-hub",
                 "instance": "eh-bot",
@@ -505,9 +512,10 @@ def test_dedupe_no_op_duplicate_never_saves_state(tmp_path, monkeypatch):
 
         def _clear(idx: int, epoch: int) -> dict[str, Any]:
             return {
+                "schemaVersion": 1,
                 "id": f"evt-dedupe-noop-{idx}",
                 "eventType": "clear",
-                "severity": "warning",
+                "severity": "info",
                 "source": "provider-probe-fail",
                 "machine": "relay-dedupe-noop-hub",
                 "instance": "eh-bot",
@@ -562,6 +570,7 @@ def test_dead_letter_saves_absorbed_stamp_before_terminal_move(tmp_path, monkeyp
         base_epoch = int(time.time())
         relay_host = "deadletter-worker"
         event = {
+            "schemaVersion": 1,
             "id": "evt-deadletter-1",
             "eventType": "alert",
             "severity": "critical",
@@ -606,6 +615,9 @@ def test_absorb_return_shape_is_list_not_tuple():
     # recovered-incident-keys list directly.
     state: dict[str, Any] = {}
     event = {
+        "schemaVersion": 1,
+        "eventType": "alert",
+        "severity": "critical",
         "source": "daily-health",
         "machine": "relay-absorb-shape",
         "createdAt": _disp.iso_from_epoch(int(time.time())),
@@ -643,6 +655,7 @@ def test_collapsed_event_on_disk_carries_recovered_incidents_diagnostic(tmp_path
 
         def _member(idx: int, machine: str) -> dict[str, Any]:
             return {
+                "schemaVersion": 1,
                 "id": f"evt-diag-{idx}",
                 "eventType": "alert",
                 "severity": "critical",

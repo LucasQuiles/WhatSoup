@@ -415,7 +415,8 @@ function writeBotErrorsAlert(payload, entry, sessionLogPath) {
   const source = sourceFor(entry.toolName, hookEvent);
   const outboxResolution = resolveOutboxDir();
   const event = {
-    schemaVersion: 1,
+    schemaVersion: 2,
+    eventKind: 'incident_alert',
     id: `tool-${safeSegment(entry.sessionId)}-${safeSegment(entry.toolName)}-${Date.now()}-${randomUUID().slice(0, 8)}`,
     eventType: 'alert',
     severity: 'error',

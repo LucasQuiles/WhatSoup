@@ -24,6 +24,7 @@ if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
 from lib.bot_errors_daily_health import daily_health_host_from_payload, normalize_hub_host
+from lib.bot_errors_envelope import new_event_fields
 from lib.bot_errors_redaction import redact_bot_errors_text, redact_json_value as redact_shared_json_value
 from lib.bot_errors_roster import RosterError, load_roster  # noqa: E402
 from lib.controller_log import (
@@ -445,11 +446,10 @@ def outbox_event(
     safe_summary = redact_watchdog_text(summary)
     safe_evidence = redact_watchdog_text(evidence)
     event_id = f"heartbeat-watchdog-{re.sub(r'[^A-Za-z0-9_.:-]+', '_', source_key).replace(':', '-')}-{event_type}-{current}"
+    envelope_event_type = "observation" if event_type == "alert" and severity == "info" else event_type
     event = {
-        "schemaVersion": 1,
+        **new_event_fields(envelope_event_type, severity),
         "id": event_id,
-        "eventType": event_type,
-        "severity": severity,
         "createdAt": now_iso(current),
         "machine": socket.gethostname(),
         "platform": sys.platform,

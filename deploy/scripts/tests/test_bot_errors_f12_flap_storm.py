@@ -216,6 +216,7 @@ def test_should_suppress_send_suppresses_open_storm_member(tmp_path):
         "flapState": {KEY: {"stormAt": 1, "tripTimestamps": [], "cumulativeCount": 5}},
     }
     member = {
+        "schemaVersion": 1,
         "eventType": "alert",
         "severity": "warning",
         "machine": "host-a",
@@ -232,6 +233,7 @@ def test_should_not_suppress_when_no_open_storm(tmp_path):
     mod = _load(tmp_path)
     incident_state = {"version": 1, "openIncidents": {}, "lastSentAt": {}, "flapState": {}}
     member = {
+        "schemaVersion": 1,
         "eventType": "alert",
         "severity": "warning",
         "machine": "host-a",
