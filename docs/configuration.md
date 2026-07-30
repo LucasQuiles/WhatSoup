@@ -169,6 +169,8 @@ fails visibly instead of clearing the evidence needed for diagnosis or retry.
 |----------|------|---------|-------------|
 | `ADMIN_PHONES` | string | (empty) | Comma-separated list of phone numbers with admin access. Used only in single-instance mode; `config.json` `adminPhones` takes over in multi-instance mode. Example: `15555550100,15555550101`. |
 | `WHATSOUP_OUTBOUND_IDENTITY_MODE` | string | `log-only` | Mode for the outbound identity guard, which floors sends to cold (unknown) recipients at every `Messenger` egress. `log-only` (default) audits but never blocks — zero behavior change. `enforce` throws `OutboundIdentityError` and stops the send for cold targets. Any value other than `enforce` resolves to `log-only`. Resolved per-instance in `src/config.ts` (`outboundIdentityMode`). |
+| `WHATSOUP_GROUP_SENDER_POLICY` | string | (unset → per-instance `groupSenderPolicy`, default `any_member`) | Overrides the per-instance group-sender access-control policy (`src/config.ts:1396`). `allowlisted_only` requires the group sender to be allowlisted or admin; env takes precedence over `groupSenderPolicy` in instance config, letting an operator flip strict mode per instance without editing `config.json`. |
+| `WHATSOUP_INTERNAL_JIDS` | string (comma-separated JIDs) | (empty) | Group-JID allowlist read at outbound-safety-gate time (`src/core/outbound-message-safety.ts:363`); messages to a listed group are treated as internal operator coordination and skip the client-facing redaction scrub. Re-read per send (no restart needed). Admin 1:1 DM elevation is now handled separately by `internalPeerJids` in instance config — this var stays group-oriented. |
 
 #### Enabling enforce mode
 
@@ -232,6 +234,7 @@ These have no effect when `INSTANCE_CONFIG` is set (multi-instance mode).
 |----------|------|---------|-------------|
 | `WHATSOUP_BAILEYS_VERSION` | string | (unset → fetch latest) | Pin the Baileys WhatsApp Web protocol version as a dotted three-part tuple, e.g. `2.3000.1021` (`src/transport/baileys-version.ts:15`). When unset/empty the version is resolved live via `fetchLatestBaileysVersion()`. The value is strictly validated: it must be exactly three numeric, safe, non-negative integer parts or startup throws. |
 | `WHATSOUP_AUTH_BOND_AUTO_RESTORE` | boolean (`0` disables) | enabled | Controls the auth-bond guard's automatic restore of WhatsApp credentials from the most recent backup (`src/transport/auth-bond.ts:432`). Auto-restore is on unless the value is exactly `0`; any other value (including unset) leaves it enabled. An explicit `autoRestore` option in code overrides this env var. |
+| `WHATSOUP_PAIR_NUMBER` | string (E.164 phone number) | (unset → QR pairing) | Switches `deploy`/`npm run auth` from QR-code pairing to phone-number pairing-code mode (`src/transport/auth.ts:104,210`). Unset or invalid values leave QR-code pairing unaffected. |
 
 ### Credential Storage
 
