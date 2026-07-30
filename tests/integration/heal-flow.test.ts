@@ -128,6 +128,19 @@ function makeMessenger(): Messenger {
   };
 }
 
+const distinctCrashClasses = [
+  'provider_usage_limit',
+  'provider_rate_limit',
+  'provider_server_error',
+  'provider_timeout',
+  'provider_network_error',
+  'provider_auth_required',
+] as const;
+
+function distinctCrash(index: number) {
+  return { type: 'crash' as const, crashClass: distinctCrashClasses[index]! };
+}
+
 function makeRuntime(): Runtime {
   return {
     start: vi.fn().mockResolvedValue(undefined),
@@ -268,9 +281,7 @@ describe('12.1.3: emitHealReport persists heal_reports row', () => {
 
     const reportId = emitHealReport(db, messenger, null, {
       type: 'crash',
-      chatJid: '1234@s.whatsapp.net',
-      exitCode: 1,
-      stderr: 'TypeError: cannot read property of undefined',
+      termination: 'exit_or_signal',
     });
 
     expect(reportId).not.toBeNull();
@@ -298,14 +309,14 @@ describe('12.1.4: HEAL_COMPLETE resolves heal_reports row', () => {
     // Create a report
     const reportId = emitHealReport(db, messenger, null, {
       type: 'crash',
-      stderr: 'RangeError: stack overflow',
+      crashClass: 'provider_unknown',
     });
     expect(reportId).not.toBeNull();
 
     // Resolve it
     handleHealComplete(db, {
       reportId: reportId!,
-      errorClass: 'crash__RangeError__stack_overflow',
+      errorClass: 'crash__provider_unknown',
       result: 'fixed',
       diagnosis: 'Stack guard added',
     });
@@ -328,14 +339,14 @@ describe('12.1.5: duplicate error class is suppressed', () => {
 
     const first = emitHealReport(db, messenger, null, {
       type: 'crash',
-      stderr: 'SyntaxError: unexpected token',
+      crashClass: 'provider_unknown',
     });
     expect(first).not.toBeNull();
 
     // Same error hint → same errorClass → suppressed
     const second = emitHealReport(db, messenger, null, {
       type: 'crash',
-      stderr: 'SyntaxError: unexpected token',
+      crashClass: 'provider_unknown',
     });
     expect(second).toBeNull();
 
@@ -359,7 +370,7 @@ describe('12.1.6: queued report is dequeued after prior report completes', () =>
     // Create report A (occupies the active slot)
     const reportIdA = emitHealReport(db, messenger, null, {
       type: 'crash',
-      stderr: 'Error: report A',
+      crashClass: 'provider_auth_required',
     });
     expect(reportIdA).not.toBeNull();
 
@@ -368,7 +379,7 @@ describe('12.1.6: queued report is dequeued after prior report completes', () =>
       db,
       messenger,
       null,
-      { type: 'crash', stderr: 'Error: report B unique' },
+      { type: 'crash', crashClass: 'provider_timeout' },
       reportIdA, // activeControlReportId → forces 'queued' state
     );
     expect(reportIdB).not.toBeNull();
@@ -382,7 +393,7 @@ describe('12.1.6: queued report is dequeued after prior report completes', () =>
     // Resolve report A
     handleHealComplete(db, {
       reportId: reportIdA!,
-      errorClass: 'crash__Error__report_A',
+      errorClass: 'crash__provider_auth_required',
       result: 'fixed',
       diagnosis: 'Fixed A',
     });
@@ -411,10 +422,7 @@ describe('12.1.7: global valve blocks reports beyond the limit', () => {
 
     // Create 5 reports with distinct error classes to fill the valve
     for (let i = 0; i < 5; i++) {
-      const id = emitHealReport(db, messenger, null, {
-        type: 'crash',
-        stderr: `UniqueError_${randomUUID().slice(0, 8)}: valve fill ${i}`,
-      });
+      const id = emitHealReport(db, messenger, null, distinctCrash(i));
       expect(id).not.toBeNull();
     }
 
@@ -422,10 +430,7 @@ describe('12.1.7: global valve blocks reports beyond the limit', () => {
     expect(getGlobalValveCount(db) < GLOBAL_VALVE_LIMIT).toBe(false);
 
     // 6th report should be suppressed by the valve
-    const sixth = emitHealReport(db, messenger, null, {
-      type: 'crash',
-      stderr: `AnotherUniqueError_${randomUUID().slice(0, 8)}: sixth attempt`,
-    });
+    const sixth = emitHealReport(db, messenger, null, distinctCrash(5));
     expect(sixth).toBeNull();
 
     // Only 5 rows in heal_reports

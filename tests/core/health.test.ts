@@ -582,8 +582,8 @@ describe('GET /health', () => {
       };
       // Two distinct-class reports: the first fires the (mocked) critical and
       // arms the latch, the second is suppressed and counted.
-      emitHealReport(db, messenger, null, { type: 'crash', stderr: 'HealthLatchA: boom' });
-      emitHealReport(db, messenger, null, { type: 'crash', stderr: 'HealthLatchB: boom' });
+      emitHealReport(db, messenger, null, { type: 'crash', crashClass: 'provider_unknown' });
+      emitHealReport(db, messenger, null, { type: 'crash', crashClass: 'provider_timeout' });
 
       const { status, body } = await healthReq(port);
       expect(status).toBe(200);

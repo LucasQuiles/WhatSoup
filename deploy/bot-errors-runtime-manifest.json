@@ -138,7 +138,7 @@
         "BOT_ERRORS_HEALTH_BODY_MAX_FUTURE_SKEW_SECONDS"
       ],
       "path": "deploy/scripts/bot-errors-health-check.py",
-      "sha256": "c2eacfc588568adaacaefbd8f80488c64564370c837870310597185f0322f152"
+      "sha256": "171820a29f3a6a4e880bcb0b5e2adcba9c16354021bced9c7c636c5b7d20548c"
     },
     {
       "mustContain": [
@@ -209,7 +209,7 @@
         "DEFAULT_HYSTERESIS_CYCLES"
       ],
       "path": "deploy/scripts/bot-errors-sentinel.py",
-      "sha256": "4aa5a264732441b6079a72bfa06df626b492dbd08089345d4bd8f3c14c6454ac"
+      "sha256": "caa218d899c4152a0a85aa9d957e0838228190fe48a0c3bc929b9e5e689c8aa7"
     },
     {
       "mustContain": [
