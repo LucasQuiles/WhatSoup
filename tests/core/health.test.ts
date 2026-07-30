@@ -2547,6 +2547,7 @@ describe('GET /health', () => {
               modelUsable: false,
               modelUsabilityStatus: rawProviderText,
               lastSuccessfulTurnAt: null,
+              lastSuccessfulTurnProvider: rawProviderText,
               lastTurnErrorClass: rawProviderText,
               lastTurnErrorAt: 1_781_316_000_000,
             },
@@ -2566,6 +2567,7 @@ describe('GET /health', () => {
       model_usable_checked_at: null,
       model_usability_status: null,
       last_successful_turn_at: null,
+      last_successful_turn_provider: null,
       last_turn_error_class: null,
       last_turn_error_at: 1_781_316_000_000,
     });
@@ -2575,6 +2577,7 @@ describe('GET /health', () => {
       modelUsableCheckedAt: null,
       modelUsabilityStatus: null,
       lastSuccessfulTurnAt: null,
+      lastSuccessfulTurnProvider: null,
       lastTurnErrorClass: null,
       lastTurnErrorAt: 1_781_316_000_000,
     });
@@ -4846,6 +4849,7 @@ describe('health.ts upper-branch coverage (624-1020)', () => {
               modelUsable: true,
               modelUsabilityStatus: 'usable',
               lastSuccessfulTurnAt: 1_700_000_000_000,
+              lastSuccessfulTurnProvider: 'claude-cli',
               lastTurnErrorClass: null,
               lastTurnErrorAt: null,
             },
@@ -4870,6 +4874,7 @@ describe('health.ts upper-branch coverage (624-1020)', () => {
       model_usable_checked_at: null,
       model_usability_status: 'usable',
       last_successful_turn_at: 1_700_000_000_000,
+      last_successful_turn_provider: 'claude-cli',
       last_turn_error_class: null,
       last_turn_error_at: null,
     });
@@ -4880,6 +4885,7 @@ describe('health.ts upper-branch coverage (624-1020)', () => {
           modelUsable: true,
           modelUsabilityStatus: 'usable',
           lastSuccessfulTurnAt: 1_700_000_000_000,
+          lastSuccessfulTurnProvider: 'claude-cli',
           lastTurnErrorClass: null,
           lastTurnErrorAt: null,
         },

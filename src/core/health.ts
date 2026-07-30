@@ -196,6 +196,7 @@ interface HealthTurnCapability {
   model_usable_checked_at: number | null;
   model_usability_status: string | null;
   last_successful_turn_at: number | null;
+  last_successful_turn_provider: string | null;
   last_turn_error_class: string | null;
   last_turn_error_at: number | null;
 }
@@ -208,6 +209,7 @@ const HEALTH_MODEL_USABILITY_STATUSES = new Set([
   'timeout',
   'unknown',
 ]);
+const HEALTH_PROVIDER_NAME_RE = /^[a-z0-9][a-z0-9_-]{0,63}$/;
 
 export const HEALTH_TURN_ERROR_CLASSES = new Set([
   'usage-limit',
@@ -309,6 +311,10 @@ function normalizeEnumStringOrNull(value: unknown, allowed: ReadonlySet<string>)
   return typeof value === 'string' && allowed.has(value) ? value : null;
 }
 
+function normalizeProviderNameOrNull(value: unknown): string | null {
+  return typeof value === 'string' && HEALTH_PROVIDER_NAME_RE.test(value) ? value : null;
+}
+
 function normalizeAgentTurnCapability(details: Record<string, unknown> | null): HealthTurnCapability | null {
   if (!details) return null;
   const raw = details.turnCapability;
@@ -319,6 +325,7 @@ function normalizeAgentTurnCapability(details: Record<string, unknown> | null): 
     model_usable_checked_at: normalizeNumberOrNull(raw.modelUsableCheckedAt),
     model_usability_status: normalizeEnumStringOrNull(raw.modelUsabilityStatus, HEALTH_MODEL_USABILITY_STATUSES),
     last_successful_turn_at: normalizeNumberOrNull(raw.lastSuccessfulTurnAt),
+    last_successful_turn_provider: normalizeProviderNameOrNull(raw.lastSuccessfulTurnProvider),
     last_turn_error_class: normalizeEnumStringOrNull(raw.lastTurnErrorClass, HEALTH_TURN_ERROR_CLASSES),
     last_turn_error_at: normalizeNumberOrNull(raw.lastTurnErrorAt),
   };
@@ -358,6 +365,7 @@ function agentRuntimeDetailsForHealth(
           modelUsableCheckedAt: turnCapability.model_usable_checked_at,
           modelUsabilityStatus: turnCapability.model_usability_status,
           lastSuccessfulTurnAt: turnCapability.last_successful_turn_at,
+          lastSuccessfulTurnProvider: turnCapability.last_successful_turn_provider,
           lastTurnErrorClass: turnCapability.last_turn_error_class,
           lastTurnErrorAt: turnCapability.last_turn_error_at,
         }
