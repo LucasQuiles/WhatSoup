@@ -299,36 +299,52 @@ The bot.db location follows the standard XDG layout described in
 `docs/configuration.md` — typically
 `~/.local/share/whatsoup/instances/<instance>/bot.db`.
 
-## 8. Operational gotcha: startup-message amplification
+## 8. Startup-notification protocol
 
-During rapid instance restarts (e.g. iterating on launchd plist changes,
-testing wrapper updates, debugging MCP socket teardown), the admin DM can
-receive a burst of identical startup notifications — typically the agent's
-idle "back online / standing by" message — once per restarted process.
+Rapid restarts no longer produce one generic back-online notice per process.
+Every applicable agent boot is recorded early, then the generic policy waits
+for its stability window and full transport readiness. It submits one aggregate
+for every boot not yet covered by the v1 watermark. A maintenance flap therefore
+produces one aggregate, rather than an expected burst of identical notices.
 
-Contributing factors:
+The prompt policies are intentional exceptions, not extra generic sends:
 
-1. **Startup notification per process** — each new agent process posts a
-   single startup message to the admin's DM. Rapid restarts compress these
-   into a visible spam pattern.
-2. **Reply-guarantee fallback** — when an agent session does not complete
-   within `DEFAULT_REPLY_GUARANTEE_TIMEOUT_MS` (10 min), the fallback
-   fires. Rapid session cycling (spawn → suspend → spawn) compresses this
-   into a loop.
-3. **MCP socket churn** — restarting WhatSoup tears down and rebuilds the
-   MCP socket; in-flight agent sessions reconnect, but a session may cycle
-   (spawn idle response, then suspend) before stabilising.
+- `resume` sends the safe continuity message promptly after strict readiness and
+  settles the generic batch.
+- `restart_loop_guard_alert` sends the incident alert promptly but does not
+  settle the generic watermark; the normal aggregate remains eligible and keeps
+  its configured stability window.
+- `expired_session_notice` stays a distinct session-status message and does
+  not silently settle the generic batch.
+- An `intentional_restart` receipt settles the generic batch before its own
+  short receipt, then suppresses the later generic aggregate. Its receipt is
+  still distinct from a generic back-online notice.
 
-Mitigations:
+All of these sends require full readiness (`connected === true` and
+`state === 'connected'`); a disconnected transport re-arms the pending timer.
+`startupNotifications: false` disables only the generic aggregate, not early
+boot evidence or the named policies.
 
-- Avoid restarting WhatSoup while an agent session depends on its MCP
-  socket; let the session quiesce first.
-- The reply-guarantee rate limit (`DEFAULT_REPLY_GUARANTEE_RATE_LIMIT_MS`
-  ≈ 15 min) suppresses true spam between sessions, but rapid restarts
-  bypass it because each restart is a fresh process with no in-memory rate
-  state.
-- A follow-up enhancement worth tracking: persist the reply-guarantee
-  rate-limit timestamp to SQLite so it survives restarts.
+### Observe, do not infer delivery
+
+Observe `GET /health` → `startupNotification` first. It exposes the bounded
+state/policy and timing fields without a recipient, text, path, raw error, or
+database detail:
+
+- `waiting_stability` or `waiting_transport` means the protocol is pending;
+  it does not independently make otherwise-normal service health unhealthy.
+- `sent` with `lastSendAt` is a tracked provider submission, not provider
+  delivery. Do not treat it as a recipient read/delivery receipt.
+- `send_failed` or `journal_unreadable` is visible evidence to investigate;
+  neither supports a release-acceptance success claim.
+
+The operational path does not query `bot.db` and does not add a fleet monitor.
+The existing fleet health path only retains the `startupNotification` object as
+an observation. For the fail-closed acceptance evidence (including the supplied
+health/journal validator inputs), use the single
+[`release-deployment.md` procedure](release-deployment.md#startup-notification-acceptance)
+after explicit owner approval. Do not restart an instance merely to obtain this
+observation.
 
 ## 9. See also
 
@@ -337,3 +353,7 @@ Mitigations:
 - `src/core/substrate/triggers.ts` — `SPEC_REGISTRY` and `dueTriggers`
 - `src/core/substrate/schema.ts` — table definitions (`MIGRATION_23`)
 - `src/mcp/tools/substrate.ts` — `create_watch` MCP tool implementation
+- `docs/configuration.md#startup-notification-protocol` — routing, journal,
+  policy, and health contract
+- `docs/runbooks/release-deployment.md#startup-notification-acceptance` — the
+  one approval-gated acceptance and rollback evidence procedure

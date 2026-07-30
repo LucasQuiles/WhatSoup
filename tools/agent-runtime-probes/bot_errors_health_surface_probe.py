@@ -17,10 +17,11 @@ from collections import Counter
 from pathlib import Path
 from typing import Any
 
-from probelib import git_head, load_json, sha256_16
+from bot_errors_probe_observation import observation, report_verdict, strict_exit_code
+from probelib import load_json
 
 SCHEMA = "bot-errors-health-surface-report"
-SCHEMA_VERSION = "0.1"
+SCHEMA_VERSION = "0.2"
 DEFAULT_REPO = Path.home() / "LAB/WhatSoup"
 HEALTH_SCRIPT = Path("deploy/scripts/bot-errors-health-check.py")
 RUNTIME_MANIFEST = Path("deploy/bot-errors-runtime-manifest.json")
@@ -49,22 +50,41 @@ SAFE_SOURCE_PREFIXES = [
 ]
 
 
+def read_lines_with_status(path: Path) -> tuple[list[str], str | None]:
+    try:
+        if not path.exists():
+            return [], "missing"
+        if not path.is_file():
+            return [], "not_regular_file"
+        return path.read_text(encoding="utf-8", errors="replace").splitlines(), None
+    except OSError:
+        return [], "source_read"
+
+
 def read_lines(path: Path) -> list[str]:
-    if not path.exists():
-        return []
-    return path.read_text(encoding="utf-8", errors="replace").splitlines()
+    return read_lines_with_status(path)[0]
 
 
-def rel(path: Path, repo: Path) -> str:
+def load_error_details(value: dict[str, Any]) -> tuple[str, str, str]:
+    error = value.get("_error")
+    if isinstance(error, str) and error.startswith("JSONDecodeError:"):
+        return "invalid_json", "invalid_json", "json_decode"
+    return "read_error", "read_error", "source_read"
+
+
+def rel(path: Path, repo: Path) -> str | None:
     try:
         return str(path.relative_to(repo))
     except ValueError:
-        return str(path)
+        return None
 
 
-def ref(path: Path, repo: Path, line: int | None = None) -> str:
+def ref(path: Path, repo: Path, line: int | None = None) -> str | None:
+    relative = rel(path, repo)
+    if relative is None:
+        return None
     suffix = f":{line}" if line else ""
-    return f"{rel(path, repo)}{suffix}"
+    return f"{relative}{suffix}"
 
 
 def line_refs(repo: Path, rel_path: Path, pattern: str, limit: int = 8) -> list[str]:
@@ -73,7 +93,9 @@ def line_refs(repo: Path, rel_path: Path, pattern: str, limit: int = 8) -> list[
     refs: list[str] = []
     for idx, line in enumerate(read_lines(path), 1):
         if rx.search(line):
-            refs.append(ref(path, repo, idx))
+            item_ref = ref(path, repo, idx)
+            if item_ref is not None:
+                refs.append(item_ref)
             if len(refs) >= limit:
                 break
     return refs
@@ -102,11 +124,6 @@ def function_body(source_lines: list[str], fn: dict[str, Any] | None) -> str:
     return "\n".join(source_lines[start:end])
 
 
-def source_hash(lines: list[str], start: int, end: int) -> str:
-    snippet = "\n".join(lines[max(0, start - 1):max(0, end)])
-    return sha256_16(snippet)
-
-
 def function_inventory(repo: Path, source_lines: list[str], functions: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
     items: list[dict[str, Any]] = []
     path = repo / HEALTH_SCRIPT
@@ -122,7 +139,6 @@ def function_inventory(repo: Path, source_lines: list[str], functions: dict[str,
             "present": True,
             "ref": ref(path, repo, line),
             "line_count": max(1, end_line - line + 1),
-            "body_sha256_16": source_hash(source_lines, line, end_line),
         })
     return items
 
@@ -210,20 +226,42 @@ def plugin_surfaces(source_lines: list[str], functions: dict[str, dict[str, Any]
 
 
 def manifest_surface(repo: Path) -> dict[str, Any]:
-    manifest = load_json(repo / RUNTIME_MANIFEST)
+    path = repo / RUNTIME_MANIFEST
+    manifest = load_json(path)
     if manifest is None:
-        return {"status": "missing", "error_type": None, "file_count": 0}
+        return {
+            **observation("runtime_manifest", "missing", format_status="absent", unknown=1),
+            "file_count": 0,
+            "marker_category_counts": {},
+        }
     if isinstance(manifest, dict) and "_error" in manifest:
-        return {"status": "invalid_json", "error_type": str(manifest["_error"]).split(":", 1)[0], "file_count": 0}
+        status, format_status, error_class = load_error_details(manifest)
+        return {
+            **observation("runtime_manifest", status, format_status=format_status, error_class=error_class, unknown=1),
+            "file_count": 0,
+            "marker_category_counts": {},
+        }
     if not isinstance(manifest, dict):
-        return {"status": "invalid_shape", "error_type": type(manifest).__name__, "file_count": 0}
+        return {
+            **observation("runtime_manifest", "invalid_shape", format_status="valid_json", schema_status="invalid_shape", error_class="root_not_object", unknown=1, artifact_refs=(str(RUNTIME_MANIFEST),)),
+            "file_count": 0,
+            "marker_category_counts": {},
+        }
     files = manifest.get("files")
     if not isinstance(files, list):
-        return {"status": "invalid_files", "error_type": "files_not_list", "file_count": 0}
+        return {
+            **observation("runtime_manifest", "invalid_shape", format_status="valid_json", schema_status="invalid_shape", error_class="files_not_list", unknown=1, artifact_refs=(str(RUNTIME_MANIFEST),)),
+            "file_count": 0,
+            "marker_category_counts": {},
+        }
     marker_counter: Counter[str] = Counter()
+    valid_files = 0
+    invalid_files = 0
     for item in files:
         if not isinstance(item, dict):
+            invalid_files += 1
             continue
+        valid_files += 1
         markers = item.get("mustContain")
         marker_list = markers if isinstance(markers, list) else [markers] if isinstance(markers, str) else []
         for marker in marker_list:
@@ -240,30 +278,58 @@ def manifest_surface(repo: Path) -> dict[str, Any]:
                 marker_counter["runtime_manifest_markers"] += 1
             if "jsonl" in lowered or "private" in lowered:
                 marker_counter["private_log_markers"] += 1
+    status = "partial" if invalid_files else "observed"
     return {
-        "status": "parsed",
-        "file_count": len(files),
+        **observation("runtime_manifest", status, format_status="valid_json", schema_status="partial" if invalid_files else "valid", expected=len(files), observed_valid=valid_files, invalid=invalid_files, artifact_refs=(str(RUNTIME_MANIFEST),)),
+        "file_count": valid_files,
         "marker_category_counts": dict(sorted(marker_counter.items())),
-        "evidence_refs": [ref(repo / RUNTIME_MANIFEST, repo, 1)],
     }
 
 
 def managed_surface(repo: Path) -> dict[str, Any]:
-    data = load_json(repo / MANAGED_COMPONENTS)
+    path = repo / MANAGED_COMPONENTS
+    data = load_json(path)
     if data is None:
-        return {"status": "missing", "error_type": None}
+        return {
+            **observation("managed_components", "missing", format_status="absent", unknown=1),
+            "protective_service_count": 0,
+            "purpose_category_counts": {},
+        }
     if isinstance(data, dict) and "_error" in data:
-        return {"status": "invalid_json", "error_type": str(data["_error"]).split(":", 1)[0]}
+        status, format_status, error_class = load_error_details(data)
+        return {
+            **observation("managed_components", status, format_status=format_status, error_class=error_class, unknown=1),
+            "protective_service_count": 0,
+            "purpose_category_counts": {},
+        }
     if not isinstance(data, dict):
-        return {"status": "invalid_shape", "error_type": type(data).__name__}
+        return {
+            **observation("managed_components", "invalid_shape", format_status="valid_json", schema_status="invalid_shape", error_class="root_not_object", unknown=1, artifact_refs=(str(MANAGED_COMPONENTS),)),
+            "protective_service_count": 0,
+            "purpose_category_counts": {},
+        }
     protective = data.get("protective_services")
-    entries = protective.get("entries") if isinstance(protective, dict) else []
+    if not isinstance(protective, dict):
+        return {
+            **observation("managed_components", "invalid_shape", format_status="valid_json", schema_status="invalid_shape", error_class="protective_services_not_object", unknown=1, artifact_refs=(str(MANAGED_COMPONENTS),)),
+            "protective_service_count": 0,
+            "purpose_category_counts": {},
+        }
+    entries = protective.get("entries")
     if not isinstance(entries, list):
-        entries = []
+        return {
+            **observation("managed_components", "invalid_shape", format_status="valid_json", schema_status="invalid_shape", error_class="entries_not_list", unknown=1, artifact_refs=(str(MANAGED_COMPONENTS),)),
+            "protective_service_count": 0,
+            "purpose_category_counts": {},
+        }
     purpose_counter: Counter[str] = Counter()
+    valid_entries = 0
+    invalid_entries = 0
     for item in entries:
         if not isinstance(item, dict):
+            invalid_entries += 1
             continue
+        valid_entries += 1
         purpose = str(item.get("purpose") or "").lower()
         if "health" in purpose or "restart" in purpose:
             purpose_counter["health_or_restart"] += 1
@@ -271,18 +337,18 @@ def managed_surface(repo: Path) -> dict[str, Any]:
             purpose_counter["manifest_or_drift"] += 1
         if "token" in purpose or "auth" in purpose:
             purpose_counter["credential_backup"] += 1
+    status = "partial" if invalid_entries else "observed"
     return {
-        "status": "parsed",
-        "protective_service_count": len(entries),
+        **observation("managed_components", status, format_status="valid_json", schema_status="partial" if invalid_entries else "valid", expected=len(entries), observed_valid=valid_entries, invalid=invalid_entries, artifact_refs=(str(MANAGED_COMPONENTS),)),
+        "protective_service_count": valid_entries,
         "purpose_category_counts": dict(sorted(purpose_counter.items())),
-        "evidence_refs": [ref(repo / MANAGED_COMPONENTS, repo, 1)],
     }
 
 
 def build_report(repo: Path) -> dict[str, Any]:
     repo = repo.expanduser().resolve()
     script_path = repo / HEALTH_SCRIPT
-    source_lines = read_lines(script_path)
+    source_lines, source_read_status = read_lines_with_status(script_path)
     source = "\n".join(source_lines)
     functions = parse_functions(source)
     function_parse_error = functions.get("_parse_error") if isinstance(functions.get("_parse_error"), dict) else None
@@ -294,29 +360,53 @@ def build_report(repo: Path) -> dict[str, Any]:
     plugins = plugin_surfaces(source_lines, functions)
     manifest = manifest_surface(repo)
     managed = managed_surface(repo)
+    if source_read_status == "missing":
+        health_status, health_format, health_schema, health_error = "missing", "absent", "not_applicable", None
+    elif source_read_status is not None:
+        health_status, health_format, health_schema, health_error = "read_error", "read_error", "not_applicable", source_read_status
+    elif function_parse_error:
+        health_status, health_format, health_schema, health_error = "invalid_shape", "not_applicable", "invalid_shape", "syntax_error"
+    else:
+        health_status, health_format, health_schema, health_error = "observed", "not_applicable", "not_applicable", None
+    health_script = observation(
+        "health_script",
+        health_status,
+        format_status=health_format,
+        schema_status=health_schema,
+        error_class=health_error,
+        unknown=1 if health_status != "observed" else 0,
+        artifact_refs=(str(HEALTH_SCRIPT),) if health_status == "observed" else (),
+    )
+    observations = {
+        "health_script": health_script,
+        "runtime_manifest": manifest,
+        "managed_components": managed,
+    }
     consistency = {
-        "health_script_present": script_path.exists(),
+        "health_script_present": health_status == "observed",
         "key_functions_present": not missing_functions,
         "daily_has_plugin_inventory": "plugin_inventory" in daily["inventory_calls"],
         "daily_has_provider_probe_path": bool(provider["failure_classes"]),
         "daily_has_runtime_manifest_inventory": "runtime_manifest_inventory" in daily["inventory_calls"],
         "critical_asset_codes_present": bool(alerts["critical_asset_codes"]),
-        "runtime_manifest_parsed": manifest["status"] == "parsed",
+        "runtime_manifest_observed": manifest["status"] == "observed",
+        "managed_components_observed": managed["status"] == "observed",
     }
     return {
         "schema": SCHEMA,
         "schema_version": SCHEMA_VERSION,
-        "repo": str(repo),
-        "head": git_head(repo),
+        "serializationStatus": "emitted",
+        "requiredObservations": sorted(observations),
+        "observations": observations,
+        "reportVerdict": report_verdict(observations),
         "redaction": (
             "metadata-only source/static inventory; does not run health check, SSH, "
             "provider CLIs, service managers, queue readers, credential readers, or BOT ERRORS sends; "
             "does not emit source lines, paths from health output, commands, config values, or credential material"
         ),
         "source": {
-            "health_script_ref": ref(script_path, repo, 1) if script_path.exists() else None,
+            "health_script_ref": ref(script_path, repo, 1) if health_status == "observed" else None,
             "health_script_line_count": len(source_lines),
-            "health_script_sha256_16": sha256_16(source),
             "function_parse_error": function_parse_error,
             "functions": function_items,
             "argparse_flags": argparse_flags(source),
@@ -379,11 +469,12 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--repo", type=Path, default=DEFAULT_REPO)
     parser.add_argument("--pretty", action="store_true", help="pretty-print JSON")
+    parser.add_argument("--strict", action="store_true", help="exit 2 unless required evidence is valid")
     args = parser.parse_args()
     report = build_report(args.repo)
     json.dump(report, sys.stdout, indent=2 if args.pretty else None, sort_keys=True)
     sys.stdout.write("\n")
-    return 0
+    return strict_exit_code(report) if args.strict else 0
 
 
 if __name__ == "__main__":

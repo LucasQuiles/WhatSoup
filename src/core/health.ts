@@ -13,6 +13,7 @@ import {
 import { assertSafeHealthBind } from './health-bind-guard.ts';
 import { getMessageCount } from './messages.ts';
 import { getPendingCount, upsertAccess } from './access-list.ts';
+import { isFullyConnected } from '../transport/runtime-connection.ts';
 import type { RuntimeConnection } from '../transport/runtime-connection.ts';
 import { decideDisconnectAction } from '../transport/auth-disconnect-policy.ts';
 import { DEFAULT_FRESH_INVALID_GRACE_MS } from '../lib/auth-bond-policy.ts';
@@ -45,6 +46,7 @@ import { readWhatsoupGitBranch, readWhatsoupGitSha } from '../lib/git-env.ts';
 import { LoopLagSampler, LOOP_LAG_STARVATION_THRESHOLD_MS } from '../lib/loop-lag-sampler.ts';
 import type { ConsolidationHealth } from './memory-consolidation-contract.ts';
 import type { DatabaseRetentionHealth } from './database-retention.ts';
+import type { StartupNotificationHealth } from './startup-notification-controller.ts';
 import {
   readOutboundSendHealth,
   readToolDurabilityHealth,
@@ -134,7 +136,20 @@ export interface HealthDeps {
   getMemoryContextHealth?: () => MemoryContextHealth | null;
   getMemoryConsolidationHealth?: () => ConsolidationHealth;
   getDatabaseRetentionHealth?: () => DatabaseRetentionHealth;
+  /** Controller-owned, content-free startup notification projection. */
+  getStartupNotificationHealth?: () => StartupNotificationHealth;
 }
+
+const NOT_APPLICABLE_STARTUP_NOTIFICATION_HEALTH: StartupNotificationHealth = Object.freeze({
+  state: 'not_applicable',
+  policy: 'none',
+  stabilitySeconds: null,
+  bootCountSinceNotification: null,
+  lastBootAt: null,
+  lastNotifiedAt: null,
+  nextEligibleAt: null,
+  lastSendAt: null,
+});
 
 /**
  * Bounds health-probe error-log storms (#1778 Defect B). A permanent probe
@@ -482,110 +497,6 @@ function emptyRecentDisconnects(): ConnectionRecentDisconnects {
   };
 }
 
-function getConnectionState(connectionManager: HealthDeps['connectionManager']): ConnectionStateSnapshot {
-  if (typeof (connectionManager as { getConnectionState?: unknown }).getConnectionState === 'function') {
-    return (connectionManager as { getConnectionState: () => ConnectionStateSnapshot }).getConnectionState();
-  }
-
-  const connected = connectionManager.botJid !== null;
-  const cfg = config as typeof config & {
-    authDir?: string;
-    stateRoot?: string;
-    dataRoot?: string;
-    lockPath?: string;
-    agentProvider?: string;
-  };
-  return {
-    state: connected ? 'connected' : 'disconnected',
-    connected,
-    reconnectAttempts: 0,
-    reconnectPhase: null,
-    stateChangedAt: new Date().toISOString(),
-    firstFailureAt: null,
-    lastPingAt: null,
-    lastPongAt: null,
-    lastDisconnectReason: null,
-    lastStatusCode: null,
-    recentDisconnects: emptyRecentDisconnects(),
-    credentialLifecycle: {
-      version: 1,
-      redaction: {
-        version: 1,
-        policy: 'credential material, tokens, pairing codes, full JIDs, and full phone numbers are blocked; identity fields use short hashes only',
-      },
-      environment: {
-        instance: config.botName,
-        host: process.env['HOSTNAME'] ?? 'unknown',
-        pid: process.pid,
-        nodeVersion: process.version,
-        platform: process.platform,
-        arch: process.arch,
-        release: 'unknown',
-        processUptimeSeconds: Math.floor(process.uptime()),
-        osUptimeSeconds: 0,
-        loadavg: [],
-        memory: {
-          freeBytes: 0,
-          totalBytes: 0,
-        },
-        authDir: cfg.authDir ?? 'unknown',
-        stateRoot: cfg.stateRoot ?? null,
-        dataRoot: cfg.dataRoot ?? null,
-        lockPath: cfg.lockPath ?? 'unknown',
-        healthPort: config.healthPort,
-        provider: cfg.agentProvider ?? 'unknown',
-      },
-      currentAuthBond: {
-        status: 'missing',
-        issues: ['connection_manager_does_not_expose_auth_bond'],
-        authDir: { path: cfg.authDir ?? 'unknown', exists: false, mode: null, size: null, mtime: null },
-        creds: {
-          path: cfg.authDir ? `${cfg.authDir}/creds.json` : 'unknown',
-          exists: false,
-          mode: null,
-          size: null,
-          mtime: null,
-          hash: null,
-          identityHash: null,
-        },
-        treeHash: null,
-        fileCount: null,
-        totalBytes: null,
-        backup: {
-          root: cfg.stateRoot ?? 'unknown',
-          latest: null,
-          latestAt: null,
-          latestReason: null,
-          latestTreeHash: null,
-          lastCaptureAt: null,
-          lastCaptureReason: null,
-          lastCaptureError: null,
-          lastCaptureDeferredAt: null,
-          lastCaptureDeferredReason: null,
-          lastCaptureDeferredAgeMs: null,
-          lastRestoreAt: null,
-          lastRestoreSource: null,
-          lastRestoreError: null,
-        },
-      },
-      latestBaileysVersion: null,
-      connectStartedAt: null,
-      lastOpenAt: null,
-      lastCloseAt: null,
-      lastQrAt: null,
-      lastCredsUpdateAt: null,
-      lastCredsUpdateFailedAt: null,
-      lastAuthSnapshotAt: null,
-      lastAuthSnapshotFailedAt: null,
-      credsUpdateCount: 0,
-      authSnapshotCaptureCount: 0,
-      authSnapshotFailureCount: 0,
-      lastDisconnectDiagnostic: null,
-      recentEvents: [],
-    },
-  };
-}
-
 function formatAuthBond(connectionState: ConnectionStateSnapshot): Record<string, unknown> | null {
   const authBond = connectionState.authBond;
   if (!authBond) return null;
@@ -632,6 +543,8 @@ function formatAuthBond(connectionState: ConnectionStateSnapshot): Record<string
 
 function isFreshInvalidCredentialWriteInFlight(connectionState: ConnectionStateSnapshot): boolean {
   const authBond = connectionState.authBond;
+  // This is a credential-write race diagnostic, not a readiness decision: it
+  // intentionally tests the raw transport bit while preserving lifecycle data.
   if (!authBond || !connectionState.connected) return false;
   if (authBond.status === 'present') return false;
   if (!authBond.creds.exists || !authBond.creds.mtime) return false;
@@ -647,7 +560,7 @@ function isFreshInvalidCredentialWriteInFlight(connectionState: ConnectionStateS
 function classifyAuthFailure(connectionState: ConnectionStateSnapshot): AuthFailureClass {
   const reason = connectionState.lastDisconnectReason ?? '';
   if (
-    !connectionState.connected
+    !isFullyConnected(connectionState)
     && (
       connectionState.lastStatusCode === 401
       || reason === 'loggedOut'
@@ -661,7 +574,7 @@ function classifyAuthFailure(connectionState: ConnectionStateSnapshot): AuthFail
   const lastQrAt = lifecycle?.lastQrAt ? Date.parse(lifecycle.lastQrAt) : NaN;
   const lastOpenAt = lifecycle?.lastOpenAt ? Date.parse(lifecycle.lastOpenAt) : NaN;
   const qrRequiresPairing =
-    !connectionState.connected
+    !isFullyConnected(connectionState)
     && Number.isFinite(lastQrAt)
     && (!Number.isFinite(lastOpenAt) || lastQrAt >= lastOpenAt);
   if (qrRequiresPairing) {
@@ -690,7 +603,7 @@ function classifyAuthFailure(connectionState: ConnectionStateSnapshot): AuthFail
 }
 
 function classifyDisconnect(connectionState: ConnectionStateSnapshot): DisconnectClass {
-  if (connectionState.connected && connectionState.state === 'connected') return 'none';
+  if (isFullyConnected(connectionState)) return 'none';
   const statusCode = connectionState.lastStatusCode ?? undefined;
   if (statusCode === undefined) return 'none';
 
@@ -1360,6 +1273,8 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
     }
 
     try {
+      const startupNotification = deps.getStartupNotificationHealth?.()
+        ?? NOT_APPLICABLE_STARTUP_NOTIFICATION_HEALTH;
       // #2515 — Public/private health split.
       //
       // GET /health is intentionally reachable without a bearer token (external
@@ -1372,8 +1287,8 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
       // no auth-bond formatting, and no privileged fields touch the public
       // bytes. Authenticated callers proceed to the full diagnostic below.
       if (!hasHealthAuth(req)) {
-        const cs = getConnectionState(deps.connectionManager);
-        const publicConnected = cs.connected && cs.state === 'connected';
+        const cs = deps.connectionManager.getConnectionState();
+        const publicConnected = isFullyConnected(cs);
         const publicRecovering =
           cs.state === 'connecting'
           || cs.state === 'reconnecting'
@@ -1387,6 +1302,7 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
           schema_version: HEALTH_PUBLIC_SCHEMA_VERSION,
           status: publicStatus,
           generated_at: new Date().toISOString(),
+          startupNotification,
         });
         // 'degraded' returns 200: a recovering transport is a warning, not a
         // hard outage. Only a fully disconnected/non-recovering state warrants
@@ -1441,12 +1357,12 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
           'abandoned',
           'unreadable',
         ].includes(memoryConsolidation.state);
-      const connectionState = getConnectionState(deps.connectionManager);
+      const connectionState = deps.connectionManager.getConnectionState();
       const authBond = formatAuthBond(connectionState);
       const authFailureClass = classifyAuthFailure(connectionState);
       const disconnectClass = classifyDisconnect(connectionState);
 
-      const isConnected = connectionState.connected && connectionState.state === 'connected';
+      const isConnected = isFullyConnected(connectionState);
       const exposeDisconnectMetadata = !isConnected;
       const recentDisconnects = connectionState.recentDisconnects ?? emptyRecentDisconnects();
       const connectionChurnIsDegraded =
@@ -1533,8 +1449,9 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
       const authFailureIsDegraded = authFailureClass !== 'none';
       // Durability debt: an outbound delivery stuck in maybe_sent past the stale
       // window is a long-lived continuity risk that /health must surface rather
-      // than read green (#1865). submitted_at is SQLite datetime('now') (UTC,
-      // space-separated, no zone) — normalize to ISO-UTC before parsing.
+      // than read green (#1865). The durability query returns canonical SQLite
+      // UTC datetimes for the active ambiguity episode or a fail-closed stale
+      // sentinel, so normalize that bounded value before parsing.
       const durabilityStats = deps.durability?.getHealthStats() ?? null;
       const oldestMaybeSentMs =
         durabilityStats?.oldestMaybeSentAt != null && durabilityStats.oldestMaybeSentAt !== ''
@@ -1870,6 +1787,7 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
 
       const body = JSON.stringify({
         status,
+        startupNotification,
         degradation_causes: degradationCauses,
         status_reasons: [...new Set(statusReasons)],
         generated_at: new Date().toISOString(),

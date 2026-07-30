@@ -271,6 +271,7 @@
         "outbound.status_ping_expired",
         "outbound.unsafe_delivery_unconfirmed",
         "outbound.governor_shed",
+        "outbound.identity_blocked",
         "outbound.replay_failed",
         "outbound.deferral_limit_exceeded"
       ],

@@ -5,6 +5,7 @@ import { describe, it, expect, vi } from 'vitest';
 // ---------------------------------------------------------------------------
 vi.mock('../../src/config.ts', () => ({
   config: {
+    transport: 'baileys',
     adminPhones: new Set(['15550100001']),
     dbPath: ':memory:',
     authDir: '/tmp/wa-test-auth',
@@ -834,34 +835,41 @@ describe('admin.ts uncovered-branch coverage', () => {
   // ----- resolveAdminChatJid — SMS-row path (via sendApprovalRequest) -----
 
   it('sendApprovalRequest resolves the admin JID from an SMS sender row', async () => {
-    const db = openDb();
-    const messenger = makeMockMessenger();
+    const { config } = await import('../../src/config.ts');
+    const originalTransport = (config as any).transport;
+    (config as any).transport = 'twilio';
+    try {
+      const db = openDb();
+      const messenger = makeMockMessenger();
 
-    // Store an inbound message whose chat_jid/sender_jid is the admin's SMS JID.
-    storeMessageIfNew(db, {
-      chatJid: '+15550100001@s.whatsapp.net',
-      conversationKey: '15550100001',
-      senderJid: '+15550100001@sms',
-      senderName: 'AdminSms',
-      messageId: 'admin-sms-row-001',
-      content: 'hi',
-      contentType: 'text',
-      isFromMe: false,
-      timestamp: 1700060000,
-    });
+      // Store an inbound message whose chat_jid/sender_jid is the admin's SMS JID.
+      storeMessageIfNew(db, {
+        chatJid: '+15550100001@sms',
+        conversationKey: '15550100001',
+        senderJid: '+15550100001@sms',
+        senderName: 'AdminSms',
+        messageId: 'admin-sms-row-001',
+        content: 'hi',
+        contentType: 'text',
+        isFromMe: false,
+        timestamp: 1700060000,
+      });
 
-    await sendApprovalRequest(db, messenger, '15550000999', 'SmsResolved', 'hello');
+      await sendApprovalRequest(db, messenger, '15550000999', 'SmsResolved', 'hello');
 
-    // Admin JID must be the SMS row's chat_jid.
-    expect(messenger.sendMessage).toHaveBeenCalledWith(
-      '+15550100001@s.whatsapp.net',
-      expect.stringContaining('SmsResolved'),
-    );
+      // Admin JID must be the SMS row's chat_jid.
+      expect(messenger.sendMessage).toHaveBeenCalledWith(
+        '+15550100001@sms',
+        expect.stringContaining('SmsResolved'),
+      );
+    } finally {
+      (config as any).transport = originalTransport;
+    }
   });
 
-  // ----- resolveAdminChatJid — WhatsApp LIKE-prefix path -----
+  // ----- resolveAdminChatJid — WhatsApp personal-JID path -----
 
-  it('sendApprovalRequest resolves the admin JID from a WhatsApp sender LIKE match', async () => {
+  it('sendApprovalRequest resolves the admin JID from an exact WhatsApp sender match', async () => {
     const db = openDb();
     const messenger = makeMockMessenger();
 
@@ -959,6 +967,69 @@ describe('admin.ts uncovered-branch coverage', () => {
       );
     } finally {
       (config as any).transport = originalTransport;
+    }
+  });
+
+  it('does not let a WhatsApp history row satisfy a Twilio approval fallback', async () => {
+    const { config } = await import('../../src/config.ts');
+    const originalTransport = (config as any).transport;
+    (config as any).transport = 'twilio';
+    try {
+      const db = openDb();
+      const messenger = makeMockMessenger();
+      storeMessageIfNew(db, {
+        chatJid: '15550100001@s.whatsapp.net',
+        conversationKey: '15550100001',
+        senderJid: '15550100001@s.whatsapp.net',
+        senderName: 'AdminWhatsApp',
+        messageId: 'admin-wa-row-twilio-namespace-001',
+        content: 'hi',
+        contentType: 'text',
+        isFromMe: false,
+        timestamp: 1700060010,
+      });
+
+      await sendApprovalRequest(db, messenger, '15550000555', 'TwilioNamespaceSafe', 'hi');
+
+      expect(messenger.sendMessage).toHaveBeenCalledWith(
+        '+15550100001@sms',
+        expect.stringContaining('TwilioNamespaceSafe'),
+      );
+    } finally {
+      (config as any).transport = originalTransport;
+    }
+  });
+
+  it('does not let a WhatsApp history row satisfy an iMessage approval fallback', async () => {
+    const { config } = await import('../../src/config.ts');
+    const originalTransport = (config as any).transport;
+    const originalAdmins = (config as any).adminPhones;
+    (config as any).transport = 'imessage';
+    (config as any).adminPhones = new Set(['owner@example.test']);
+    try {
+      const db = openDb();
+      const messenger = makeMockMessenger();
+      storeMessageIfNew(db, {
+        chatJid: '15550100001@s.whatsapp.net',
+        conversationKey: '15550100001',
+        senderJid: '15550100001@s.whatsapp.net',
+        senderName: 'AdminWhatsApp',
+        messageId: 'admin-wa-row-imessage-namespace-001',
+        content: 'hi',
+        contentType: 'text',
+        isFromMe: false,
+        timestamp: 1700060011,
+      });
+
+      await sendApprovalRequest(db, messenger, '15550000556', 'ImessageNamespaceSafe', 'hi');
+
+      expect(messenger.sendMessage).toHaveBeenCalledWith(
+        'owner@example.test@imessage',
+        expect.stringContaining('ImessageNamespaceSafe'),
+      );
+    } finally {
+      (config as any).transport = originalTransport;
+      (config as any).adminPhones = originalAdmins;
     }
   });
 

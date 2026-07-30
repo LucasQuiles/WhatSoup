@@ -10,6 +10,7 @@ import { processHistoryBatch, type HistoryInput } from './core/history-sync.ts';
 import { createConnection } from './transport/factory.ts';
 import { classifyStreamedProviderFailure } from './runtimes/agent/failure-taxonomy.ts';
 import type { RuntimeConnection } from './transport/runtime-connection.ts';
+import { isFullyConnected } from './transport/runtime-connection.ts';
 import { ChatRuntime } from './runtimes/chat/runtime.ts';
 import { AgentRuntime } from './runtimes/agent/runtime.ts';
 import { consumeIntentionalRestartMarker } from './runtimes/agent/self-restart.ts';
@@ -26,7 +27,8 @@ import type { DatabaseCompatibilityError } from './core/database-compatibility.t
 import { MemoryConsolidationScheduler } from './memory/consolidation-scheduler.ts';
 import { ConsolidationRunStore } from './memory/consolidation-run-store.ts';
 import { startHealthServer } from './core/health.ts';
-import { composeStartupNotification, markStartupNotified, recordStartupBoot, startupNotifyPath } from './core/startup-notify.ts';
+import { createStartupNotificationJournalPort, startupNotifyPath } from './core/startup-notify.ts';
+import { StartupNotificationController } from './core/startup-notification-controller.ts';
 import { openDatabaseForStartup } from './core/database-compatibility-health.ts';
 import {
   closeDatabaseCompatibilityHealthServer,
@@ -37,7 +39,7 @@ import { createIngestHandler } from './core/ingest.ts';
 import { createCapabilityGrantManager, type CapabilityGrantManager } from './lib/capability-grant.ts';
 import { createSettingsPolicyAdapter, createFileGrantStore, assertGroupsRespectDenyFloor } from './core/capability-grant-adapter.ts';
 import { toConversationKey } from './core/conversation-key.ts';
-import { toPersonalJid, toLidJid, toSignalJid } from './core/jid-constants.ts';
+import { resolveConfiguredAdminJid, toPersonalJid, toLidJid, toSignalJid } from './core/jid-constants.ts';
 import { selectReplayableDms, rememberReplayedId } from './core/admin.ts';
 import { DurabilityEngine, sendTracked, drainPendingOutbound } from './core/durability.ts';
 import { waitForHistorySyncThenRecover } from './core/post-connect-recovery.ts';
@@ -94,17 +96,13 @@ function resolveTilde(p: string): string {
   return p.startsWith('~/') ? join(homedir(), p.slice(2)) : p;
 }
 
-function toConfiguredDirectJid(identity: string): string {
-  return config.transport === 'signal'
-    ? toSignalJid(identity)
-    : toPersonalJid(identity);
-}
-
 const log = createChildLogger('main');
 const startedAt = Date.now();
 let shutdownInProgress = false;
 let memoryConsolidationScheduler: MemoryConsolidationScheduler | null = null;
 let lockHandle: ProcessLockHandle | null = null;
+let connectionManager: RuntimeConnection;
+let durability: DurabilityEngine;
 
 // --- Lock file ---
 
@@ -157,6 +155,35 @@ if (config.adminPhones.size === 0) {
 acquireLock();
 // Safety net: release lock even if shutdown() throws or is bypassed
 process.on('exit', () => releaseLock());
+
+// Parse INSTANCE_CONFIG before fallible bootstrap work so an agent boot can
+// be journaled immediately after this process owns the instance lock.
+let instanceConfig: Record<string, unknown> | null = null;
+if (process.env.INSTANCE_CONFIG) {
+  try {
+    instanceConfig = JSON.parse(process.env.INSTANCE_CONFIG) as Record<string, unknown>;
+  } catch {
+    throw new Error('INSTANCE_CONFIG is set but is not valid JSON');
+  }
+}
+const instanceType = (instanceConfig?.type as string | undefined) ?? 'chat';
+const startupJournalPath = instanceType === 'agent' ? startupNotifyPath(config.stateRoot) : null;
+// The controller records boot evidence before database/runtime/connection work.
+// Its other ports close over composition-owned values populated before start().
+let strictStartupConnectionReady = (): boolean => false;
+const startupNotificationController = startupJournalPath === null
+  ? null
+  : new StartupNotificationController({
+      clock: { now: Date.now },
+      scheduler: { setTimeout, clearTimeout },
+      connection: { isFullyConnected: () => strictStartupConnectionReady() },
+      journal: createStartupNotificationJournalPort(startupJournalPath, formatClockForUser),
+      send: {
+        send: (chatJid, text, options) => sendTracked(connectionManager, chatJid, text, durability, options),
+      },
+      genericNotificationsEnabled: config.startupNotifications && config.toolUpdateMode !== 'minimal',
+    });
+startupNotificationController?.recordStartupBoot();
 
 // 2. Database
 // db.open() runs pending schema migrations against config.dbPath (see
@@ -251,18 +278,8 @@ if (config.accessMode !== 'self_only') {
 }
 
 // 2b. Pre-connect recovery — runs synchronously before any connection attempt
-const durability = new DurabilityEngine(db);
+durability = new DurabilityEngine(db);
 durability.preConnectRecovery();
-
-// Parse INSTANCE_CONFIG once — used for warm-start import and instance type selection.
-let instanceConfig: Record<string, unknown> | null = null;
-if (process.env.INSTANCE_CONFIG) {
-  try {
-    instanceConfig = JSON.parse(process.env.INSTANCE_CONFIG) as Record<string, unknown>;
-  } catch {
-    throw new Error('INSTANCE_CONFIG is set but is not valid JSON');
-  }
-}
 
 // Model currency advisories — startup + daily check that configured models are
 // still current, with operator notification via BOT_ERRORS when they are not.
@@ -314,11 +331,9 @@ startModelCurrencyMonitor(config.botName, {
   }
 }
 
-// 3. Instance type selection
-const instanceType = (instanceConfig?.type as string | undefined) ?? 'chat';
-
 // 4. Connection
-const connectionManager: RuntimeConnection = createConnection(config);
+connectionManager = createConnection(config);
+strictStartupConnectionReady = (): boolean => isFullyConnected(connectionManager.getConnectionState());
 // #1783 — wire the send-seam provider-error banner classifier into the Baileys
 // outbound governor. main.ts is the composition root (may import runtimes);
 // transport receives the classifier via DI so it need not import runtimes.
@@ -484,7 +499,7 @@ runtime.setDurability(durability);
 // (the live agent's setting) and startupNotifications, whereas a user-requested
 // restart must always confirm. Guarded so a failure here never blocks startup.
 let selfRestartBackOnline: { chatJid: string; text: string } | null = null;
-if (instanceType === 'agent' && runtime instanceof AgentRuntime) {
+if (instanceType === 'agent') {
   try {
     const marker = consumeIntentionalRestartMarker(config.dataRoot);
     if (marker) {
@@ -817,6 +832,9 @@ const healthServer = startHealthServer({
       stalledAfterMs: 5 * 60_000,
     }),
   getDatabaseRetentionHealth: () => databaseRetentionTimer.getHealthSnapshot(),
+  getStartupNotificationHealth: startupNotificationController
+    ? () => startupNotificationController.getStartupNotificationHealth()
+    : undefined,
   // D-4 console approval queue: only the agent runtime owns the
   // pending-poll machinery; chat/passive instances omit the callback and
   // the health endpoint answers 503 honestly.
@@ -1086,11 +1104,11 @@ async function start(): Promise<void> {
   // Set to false on creation and re-link. Patched to true after sending.
   // Restarts (agent only): send terse "back online" status ping.
   const adminPhone = [...config.adminPhones][0];
-  if (adminPhone && instanceType !== 'passive') {
-    const adminChatJid = toConfiguredDirectJid(adminPhone);
-    const needsIntro = instanceConfig?.introSent === false;
-
-    if (needsIntro) {
+  const adminChatJid = adminPhone === undefined
+    ? null
+    : resolveConfiguredAdminJid(config.transport, adminPhone);
+  const needsIntro = instanceConfig?.introSent === false;
+  if (adminPhone && instanceType !== 'passive' && needsIntro) {
       // First boot or re-link — introduce the instance
       // Persist introSent BEFORE sending to prevent duplicate intros if we crash mid-send
       try {
@@ -1105,75 +1123,40 @@ async function start(): Promise<void> {
         ? `Hey! *${titleName}* is online and ready. I'm an AI agent with tool access — I can research, write code, manage files, and help with tasks. Send me a message to get started.`
         : `Hey! *${titleName}* is online and ready. I'm an AI assistant — send me a message and I'll respond.`;
       setTimeout(() => {
-        sendTracked(connectionManager, adminChatJid, introText, durability, { replayPolicy: 'safe' })
+        sendTracked(connectionManager, adminChatJid!, introText, durability, { replayPolicy: 'safe' })
           .then(() => log.info({ chatJid: adminChatJid }, 'sent introduction'))
           .catch((err) => log.warn({ err }, 'failed to send introduction'));
       }, 3_000);
-    } else if (
-      instanceType === 'agent' &&
-      runtime instanceof AgentRuntime &&
-      config.startupNotifications &&
-      config.toolUpdateMode !== 'minimal'
-    ) {
-      // Agent restart notification — stability-debounced and aggregating.
-      // Every boot lands in a persisted journal; the back-online notice sends
-      // only after the instance has stayed up AND connected for the stability
-      // window, and one message covers every boot since the last notification
-      // (see src/core/startup-notify.ts for the five-consecutive-pings
-      // incident that shaped this). The journal write is fail-open.
-      const snPath = startupNotifyPath(config.stateRoot);
-      const snState = recordStartupBoot(snPath, Date.now());
-      const pending = runtime.popStartupMessage();
-      if (pending) {
-        // Resume messages carry real continuity content — send promptly, and
-        // count this boot as notified so the debounced ping cannot duplicate.
-        setTimeout(() => {
-          markStartupNotified(snPath, Date.now());
-          sendTracked(connectionManager, pending.chatJid, pending.text, durability, { replayPolicy: 'safe' })
-            .then(() => log.info({ chatJid: pending.chatJid, isResume: true }, 'sent startup notification'))
-            .catch((err) => log.warn({ err, chatJid: pending.chatJid }, 'failed to send startup notification'));
-        }, 3_000);
-      } else {
-        const stabilityMs = Math.max(config.startupNotificationStabilitySeconds * 1_000, 3_000);
-        const fireWhenStable = (): void => {
-          // "Back online" must be TRUE at send time: an instance still
-          // reconnecting re-arms the timer instead of announcing recovery.
-          // A transport without the snapshot accessor fails open to connected.
-          const connected = connectionManager.getConnectionState?.().connected ?? true;
-          if (!connected) {
-            setTimeout(fireWhenStable, stabilityMs);
-            return;
-          }
-          const notification = composeStartupNotification(snState, formatClockForUser);
-          // Marked BEFORE the send: a crash mid-send loses at most one
-          // summary and can never duplicate it (introSent precedent).
-          markStartupNotified(snPath, Date.now());
-          // PR-C: the back-online notice is a status op (unsafe + status_ping)
-          // so it supersedes/ages-out in the durability queue and cannot storm.
-          sendTracked(connectionManager, adminChatJid, notification.text, durability, { replayPolicy: 'unsafe', opType: 'status_ping' })
-            .then(() => log.info({ chatJid: adminChatJid, isResume: false, bootsCovered: notification.bootsCovered }, 'sent startup notification'))
-            .catch((err) => log.warn({ err, chatJid: adminChatJid }, 'failed to send startup notification'));
-        };
-        setTimeout(fireWhenStable, stabilityMs);
-      }
-    }
-  } else if (!adminPhone) {
+  }
+  if (!adminPhone) {
     log.warn('no admin phones configured — skipping startup notification');
   }
 
-  // Self-restart back-online ping — delivered regardless of toolUpdateMode /
-  // startupNotifications (which suppress the generic startup notice above),
-  // because a user-requested restart must always confirm completion. Reuses the
-  // same deferred sendTracked pattern; targets the validated originating chat.
-  if (selfRestartBackOnline) {
-    const resume = selfRestartBackOnline;
-    setTimeout(() => {
-      // PR-C: self-restart back-online is a status op (unsafe + status_ping).
-      sendTracked(connectionManager, resume.chatJid, resume.text, durability, { replayPolicy: 'unsafe', opType: 'status_ping' })
-        .then(() => log.info({ chatJid: resume.chatJid }, 'sent self-restart back-online ping'))
-        .catch((err) => log.warn({ err, chatJid: resume.chatJid }, 'failed to send self-restart back-online ping'));
-    }, 3_000);
-  }
+  // The controller owns startup timing, strict-readiness re-arming, batch
+  // settlement, and bounded health. Runtime and self-restart producers only
+  // provide discriminated events; submission still goes through sendTracked.
+  startupNotificationController?.onConnected({
+    generic: (
+      instanceType === 'agent'
+      && !needsIntro
+      && adminChatJid !== null
+      && config.startupNotifications
+      && config.toolUpdateMode !== 'minimal'
+    )
+      ? {
+          recipient: adminChatJid,
+          stabilityWindowMs: config.startupNotificationStabilitySeconds * 1_000,
+        }
+      : null,
+    event: (
+      instanceType === 'agent'
+      && !needsIntro
+      && adminPhone !== undefined
+    )
+      ? runtime.popStartupNotificationEvent?.() ?? null
+      : null,
+    intentionalRestartReceipt: selfRestartBackOnline,
+  });
 }
 
 // --- Shutdown ---
@@ -1200,6 +1183,7 @@ async function shutdown(signal: string): Promise<void> {
     clearInterval(stuckInboundInterval);
     clearInterval(lidReconcileInterval);
     if (degradationInterval) clearInterval(degradationInterval);
+    startupNotificationController?.stop();
     messageScheduler.stop();
     triggerPoller.stop();
     healthServer.close();
