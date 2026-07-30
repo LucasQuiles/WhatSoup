@@ -61,16 +61,18 @@ def test_malformed_json_sources_are_typed_not_clean_absence():
     assert manifest_files == []
     assert managed_names == []
     assert manifest["status"] == "invalid_json", manifest
-    assert manifest["error_type"] == "JSONDecodeError", manifest
+    assert manifest["error_class"] == "json_decode", manifest
+    assert manifest["formatStatus"] == "invalid_json", manifest
     assert managed["status"] == "invalid_json", managed
-    assert managed["error_type"] == "JSONDecodeError", managed
+    assert managed["error_class"] == "json_decode", managed
+    assert managed["formatStatus"] == "invalid_json", managed
     assert report["source_status"]["runtime_manifest"] == {
         "status": "invalid_json",
-        "error_type": "JSONDecodeError",
+        "error_class": "json_decode",
     }, report["source_status"]
     assert report["source_status"]["managed_components"] == {
         "status": "invalid_json",
-        "error_type": "JSONDecodeError",
+        "error_class": "json_decode",
     }, report["source_status"]
 
 
@@ -85,12 +87,12 @@ def test_rel_returns_relative_path_when_inside_repo():
     assert result == "deploy/scripts/foo.py", result
 
 
-def test_rel_returns_absolute_string_when_outside_repo():
+def test_rel_suppresses_path_when_outside_repo():
     # ValueError branch: path not under repo
     repo = Path("/home/user/repo")
     p = Path("/tmp/elsewhere/file.py")
     result = rel(p, repo)
-    assert result == "/tmp/elsewhere/file.py", result
+    assert result is None, result
 
 
 def test_ref_with_line_number_appends_suffix():
@@ -180,7 +182,7 @@ def test_runtime_manifest_missing_returns_missing_status():
         (repo / "deploy").mkdir()
         result = runtime_manifest_summary(repo)
     assert result["status"] == "missing"
-    assert result["error_type"] is None
+    assert result["error_class"] is None
     assert result["files"] == []
 
 
@@ -193,7 +195,7 @@ def test_runtime_manifest_invalid_shape_non_dict_returns_invalid_shape():
         (deploy / "bot-errors-runtime-manifest.json").write_text("[1, 2, 3]", encoding="utf-8")
         result = runtime_manifest_summary(repo)
     assert result["status"] == "invalid_shape", result
-    assert result["error_type"] == "list", result
+    assert result["error_class"] == "root_not_object", result
     assert result["files"] == []
 
 
@@ -206,11 +208,11 @@ def test_runtime_manifest_files_not_list_returns_invalid_shape():
         (deploy / "bot-errors-runtime-manifest.json").write_text(json.dumps(data), encoding="utf-8")
         result = runtime_manifest_summary(repo)
     assert result["status"] == "invalid_shape", result
-    assert result["error_type"] == "files_not_list", result
+    assert result["error_class"] == "files_not_list", result
     assert result["files"] == []
 
 
-def test_runtime_manifest_ok_returns_file_paths():
+def test_runtime_manifest_malformed_entry_is_partial_not_observed():
     with tempfile.TemporaryDirectory() as tmp:
         repo = Path(tmp)
         deploy = repo / "deploy"
@@ -219,12 +221,13 @@ def test_runtime_manifest_ok_returns_file_paths():
         (deploy / "bot-errors-runtime-manifest.json").write_text(json.dumps(data), encoding="utf-8")
         result = runtime_manifest_summary(repo)
         files = runtime_manifest_files(repo)
-    assert result["status"] == "ok", result
-    assert result["error_type"] is None
+    assert result["status"] == "partial", result
+    assert result["error_class"] is None
     # only items with a "path" key are included
     assert "a.py" in result["files"]
     assert "b.py" in result["files"]
     assert len(result["files"]) == 2
+    assert result["counts"]["invalid"] == 1
     assert files == result["files"]
 
 
@@ -240,6 +243,41 @@ def test_runtime_manifest_malformed_json_is_not_counted_as_valid():
     assert result["files"] == []  # NOT counted as clean
 
 
+def test_runtime_manifest_partial_entries_are_not_observed_zero():
+    with tempfile.TemporaryDirectory() as tmp:
+        repo = Path(tmp)
+        deploy = repo / "deploy"
+        deploy.mkdir()
+        (deploy / "bot-errors-runtime-manifest.json").write_text(
+            json.dumps({"files": [{"path": "valid.py"}, "not-a-file-entry"]}),
+            encoding="utf-8",
+        )
+        result = runtime_manifest_summary(repo)
+    assert result["status"] == "partial", result
+    assert result["counts"] == {
+        "expected": 2,
+        "observed_valid": 1,
+        "invalid": 1,
+        "skipped": 0,
+        "unknown": 0,
+    }, result
+
+
+def test_runtime_manifest_rejects_empty_and_non_string_paths():
+    with tempfile.TemporaryDirectory() as tmp:
+        repo = Path(tmp)
+        deploy = repo / "deploy"
+        deploy.mkdir()
+        (deploy / "bot-errors-runtime-manifest.json").write_text(
+            json.dumps({"files": [{"path": "valid.py"}, {"path": ""}, {"path": 7}]}),
+            encoding="utf-8",
+        )
+        result = runtime_manifest_summary(repo)
+    assert result["status"] == "partial", result
+    assert result["files"] == ["valid.py"], result
+    assert result["counts"]["invalid"] == 2, result
+
+
 # ---------------------------------------------------------------------------
 # managed_component_summary() unhappy paths
 # ---------------------------------------------------------------------------
@@ -250,7 +288,7 @@ def test_managed_components_missing_returns_missing_status():
         (repo / "deploy").mkdir()
         result = managed_component_summary(repo)
     assert result["status"] == "missing"
-    assert result["error_type"] is None
+    assert result["error_class"] is None
     assert result["names"] == []
 
 
@@ -262,7 +300,7 @@ def test_managed_components_invalid_shape_non_dict():
         (deploy / "managed-components.json").write_text("[1, 2]", encoding="utf-8")
         result = managed_component_summary(repo)
     assert result["status"] == "invalid_shape", result
-    assert result["error_type"] == "list", result
+    assert result["error_class"] == "root_not_object", result
     assert result["names"] == []
 
 
@@ -275,11 +313,11 @@ def test_managed_components_entries_not_list():
         (deploy / "managed-components.json").write_text(json.dumps(data), encoding="utf-8")
         result = managed_component_summary(repo)
     assert result["status"] == "invalid_shape", result
-    assert result["error_type"] == "entries_not_list", result
+    assert result["error_class"] == "entries_not_list", result
     assert result["names"] == []
 
 
-def test_managed_components_ok_returns_names():
+def test_managed_components_malformed_entry_is_partial_not_observed():
     with tempfile.TemporaryDirectory() as tmp:
         repo = Path(tmp)
         deploy = repo / "deploy"
@@ -292,11 +330,29 @@ def test_managed_components_ok_returns_names():
         (deploy / "managed-components.json").write_text(json.dumps(data), encoding="utf-8")
         result = managed_component_summary(repo)
         names = managed_component_names(repo)
-    assert result["status"] == "ok", result
+    assert result["status"] == "partial", result
     assert "svc-alpha" in result["names"]
     assert "svc-beta" in result["names"]
     assert len(result["names"]) == 2
+    assert result["counts"]["invalid"] == 1
     assert names == result["names"]
+
+
+def test_managed_components_reject_empty_and_non_string_names():
+    with tempfile.TemporaryDirectory() as tmp:
+        repo = Path(tmp)
+        deploy = repo / "deploy"
+        deploy.mkdir()
+        data = {
+            "protective_services": {
+                "entries": [{"name": "svc-alpha"}, {"name": ""}, {"name": 7}]
+            }
+        }
+        (deploy / "managed-components.json").write_text(json.dumps(data), encoding="utf-8")
+        result = managed_component_summary(repo)
+    assert result["status"] == "partial", result
+    assert result["names"] == ["svc-alpha"], result
+    assert result["counts"]["invalid"] == 2, result
 
 
 def test_managed_components_malformed_json_not_counted_as_valid():
@@ -378,6 +434,15 @@ def test_runtime_manifest_component_has_static_manifest_and_manifest_file_count(
     assert "2" in count_item["note"], count_item
 
 
+def test_missing_runtime_manifest_is_not_static_evidence():
+    with tempfile.TemporaryDirectory() as tmp:
+        repo = Path(tmp)
+        report = component_report(repo, "runtime_manifest", [], [])
+    static_manifest = next(item for item in report["evidence"] if item["proof_class"] == "static_manifest")
+    assert static_manifest["status"] == "missing", static_manifest
+    assert static_manifest["evidence_refs"] == [], static_manifest
+
+
 def test_managed_components_component_has_static_policy():
     with tempfile.TemporaryDirectory() as tmp:
         repo = Path(tmp)
@@ -386,6 +451,53 @@ def test_managed_components_component_has_static_policy():
     assert "static_policy" in pcs, pcs
     policy_item = next(e for e in r["evidence"] if e["proof_class"] == "static_policy")
     assert "2" in policy_item["note"], policy_item
+
+
+def test_invalid_managed_components_is_not_static_policy_evidence():
+    with tempfile.TemporaryDirectory() as tmp:
+        repo = Path(tmp)
+        deploy = repo / "deploy"
+        deploy.mkdir()
+        (deploy / "managed-components.json").write_text("{bad", encoding="utf-8")
+        report = build_report(repo)
+    component = next(item for item in report["components"] if item["component"] == "managed_components")
+    static_policy = next(item for item in component["evidence"] if item["proof_class"] == "static_policy")
+    assert static_policy["status"] == "invalid_json", static_policy
+    assert static_policy["evidence_refs"] == [], static_policy
+    assert "lists 0" not in static_policy["note"], static_policy
+
+
+def test_invalid_runtime_manifest_is_not_static_manifest_evidence():
+    with tempfile.TemporaryDirectory() as tmp:
+        repo = Path(tmp)
+        deploy = repo / "deploy"
+        deploy.mkdir()
+        (deploy / "bot-errors-runtime-manifest.json").write_text("{bad", encoding="utf-8")
+        report = build_report(repo)
+    component = next(item for item in report["components"] if item["component"] == "runtime_manifest")
+    static_manifest = next(item for item in component["evidence"] if item["proof_class"] == "static_manifest")
+    assert static_manifest["status"] == "invalid_json", static_manifest
+    assert static_manifest["evidence_refs"] == [], static_manifest
+    assert "lists 0" not in static_manifest["note"], static_manifest
+
+
+def test_invalid_manifest_status_suppresses_matching_policy_line_refs():
+    """An invalid source cannot borrow static policy lines from a readable fixture."""
+    with tempfile.TemporaryDirectory() as tmp:
+        repo = Path(tmp)
+        manifest = repo / "deploy" / "bot-errors-runtime-manifest.json"
+        manifest.parent.mkdir()
+        manifest.write_text("expectedHeadShaPolicy = observability-only\n", encoding="utf-8")
+        report = component_report(
+            repo,
+            "runtime_manifest",
+            [],
+            [],
+            manifest_status={"status": "invalid_json", "artifact_refs": ["deploy/bot-errors-runtime-manifest.json"]},
+        )
+    static_manifest = next(item for item in report["evidence"] if item["proof_class"] == "static_manifest")
+    assert static_manifest["status"] == "invalid_json", static_manifest
+    assert static_manifest["evidence_refs"] == [], static_manifest
 
 
 def test_component_report_with_all_files_present():
@@ -441,6 +553,60 @@ def test_component_report_with_all_files_present():
         assert design_items[0]["status"] == "present", design_items
 
 
+def test_role_profile_inventory_supplies_static_expectation_without_profile_name():
+    with tempfile.TemporaryDirectory() as tmp:
+        repo = Path(tmp)
+        profile = repo / "deploy" / "health-profiles" / "private-profile-name.json"
+        profile.parent.mkdir(parents=True)
+        profile.write_text(
+            json.dumps({
+                "expectQLoop": True,
+                "expectDispatcher": True,
+                "expectRuntimeManifest": True,
+            }),
+            encoding="utf-8",
+        )
+        report = build_report(repo)
+    q_loop = next(item for item in report["components"] if item["component"] == "q_loop")
+    expectation = next(item for item in q_loop["evidence"] if item["proof_class"] == "static_expectation")
+    assert expectation["status"] == "present", expectation
+    assert expectation["evidence_refs"] == ["deploy/health-profiles"], expectation
+    assert "private-profile-name.json" not in json.dumps(report, sort_keys=True), report
+
+
+def test_invalid_profile_source_propagates_without_static_reference():
+    with tempfile.TemporaryDirectory() as tmp:
+        repo = Path(tmp)
+        profile = repo / "deploy" / "health-profiles" / "private-profile-name.json"
+        profile.parent.mkdir(parents=True)
+        profile.write_text("{bad", encoding="utf-8")
+        report = build_report(repo)
+    q_loop = next(item for item in report["components"] if item["component"] == "q_loop")
+    expectation = next(item for item in q_loop["evidence"] if item["proof_class"] == "static_expectation")
+    assert report["observations"]["health_profiles"]["status"] == "invalid_json", report
+    assert expectation["status"] == "invalid_json", expectation
+    assert expectation["evidence_refs"] == [], expectation
+    assert "status is invalid_json" in expectation["note"], expectation
+    assert report["summary"]["health_profile_count"] is None, report
+
+
+def test_profile_read_failure_is_not_recast_as_invalid_shape():
+    with tempfile.TemporaryDirectory() as tmp:
+        repo = Path(tmp)
+        profile = repo / "deploy" / "health-profiles" / "profile.json"
+        profile.parent.mkdir(parents=True)
+        profile.write_text("{}", encoding="utf-8")
+        original_load_json = probe.load_json
+        probe.load_json = lambda _path: {"_error": "PermissionError: denied"}
+        try:
+            summary = probe.profile_expectation_summary(repo)
+        finally:
+            probe.load_json = original_load_json
+    assert summary["status"] == "read_error", summary
+    assert summary["error_class"] == "read_error", summary
+    assert summary["counts"]["unknown"] == 1, summary
+
+
 # ---------------------------------------------------------------------------
 # build_report() — shape, summary fields, redaction
 # ---------------------------------------------------------------------------
@@ -451,10 +617,16 @@ def test_build_report_empty_repo_has_correct_shape():
         report = build_report(repo)
 
     assert report["schema"] == "bot-errors-proof-ladder-report"
-    assert report["schema_version"] == "0.1"
+    assert report["schema_version"] == "0.2"
+    assert report["serializationStatus"] == "emitted"
+    assert report["requiredObservations"] == ["health_profiles", "managed_components", "runtime_manifest"]
+    assert report["reportVerdict"] == "inconclusive"
+    assert report["observations"]["runtime_manifest"]["status"] == "missing"
+    assert report["observations"]["runtime_manifest"]["counts"]["observed_valid"] is None
+    assert "repo" not in report
     assert "redaction" in report
     assert "summary" in report
-    assert "source_status" in report
+    assert "observations" in report
     assert "components" in report
     assert "gaps" in report
     assert "proof_class_definitions" in report
@@ -482,8 +654,8 @@ def test_build_report_redaction_field_prohibits_raw_paths_and_credentials():
         repo = Path(tmp)
         report = build_report(repo)
     redaction_note = report["redaction"]
-    assert "no SSH" in redaction_note or "SSH" in redaction_note, redaction_note
-    assert "token" in redaction_note or "secrets" in redaction_note or "auth" in redaction_note, redaction_note
+    assert "absolute-path" in redaction_note, redaction_note
+    assert "credential" in redaction_note, redaction_note
 
 
 def test_build_report_source_status_keys_present():
@@ -493,9 +665,10 @@ def test_build_report_source_status_keys_present():
     ss = report["source_status"]
     assert "runtime_manifest" in ss
     assert "managed_components" in ss
-    for key in ("runtime_manifest", "managed_components"):
+    assert "health_profiles" in ss
+    for key in ("runtime_manifest", "managed_components", "health_profiles"):
         assert "status" in ss[key], ss[key]
-        assert "error_type" in ss[key], ss[key]
+        assert "error_class" in ss[key], ss[key]
 
 
 def test_build_report_missing_sources_reflected_in_source_status():
@@ -517,9 +690,10 @@ def test_build_report_invalid_json_sources_are_invalid_not_missing():
         report = build_report(repo)
     assert report["source_status"]["runtime_manifest"]["status"] == "invalid_json"
     assert report["source_status"]["managed_components"]["status"] == "invalid_json"
-    # Must NOT count as valid — manifest_files and managed_names stay zero
-    assert report["summary"]["runtime_manifest_files"] == 0
-    assert report["summary"]["managed_protective_services"] == 0
+    # Must NOT claim a valid zero inventory when the source is invalid.
+    assert report["summary"]["runtime_manifest_files"] is None
+    assert report["summary"]["managed_protective_services"] is None
+    assert report["reportVerdict"] == "invalid"
 
 
 def test_build_report_ok_sources_populate_summary_counts():
@@ -536,8 +710,8 @@ def test_build_report_ok_sources_populate_summary_counts():
         report = build_report(repo)
     assert report["summary"]["runtime_manifest_files"] == 2
     assert report["summary"]["managed_protective_services"] == 3
-    assert report["source_status"]["runtime_manifest"]["status"] == "ok"
-    assert report["source_status"]["managed_components"]["status"] == "ok"
+    assert report["source_status"]["runtime_manifest"]["status"] == "observed"
+    assert report["source_status"]["managed_components"]["status"] == "observed"
 
 
 def test_build_report_proof_class_counts_in_summary():
@@ -561,12 +735,12 @@ def test_build_report_gaps_are_present():
     assert "live-observation-absent" in gap_ids, gap_ids
 
 
-def test_build_report_head_field_present():
+def test_build_report_suppresses_repo_and_head_identifiers():
     with tempfile.TemporaryDirectory() as tmp:
         repo = Path(tmp)
         report = build_report(repo)
-    # head can be None (not a git repo) but must be present in the report
-    assert "head" in report
+    assert "repo" not in report
+    assert "head" not in report
 
 
 # ---------------------------------------------------------------------------
@@ -632,6 +806,45 @@ def test_cli_pretty_flag_emits_indented_json():
     assert len(lines) > 10, "expected many lines for pretty-printed output"
     report = json.loads(proc.stdout)
     assert report["schema"] == "bot-errors-proof-ladder-report"
+
+
+def test_cli_strict_emits_report_and_fails_closed_for_missing_evidence():
+    proc = subprocess.run(
+        [sys.executable, str(PROBE_PATH), "--repo", "/tmp/no-such-bot-errors-repo", "--strict"],
+        capture_output=True, text=True, timeout=30,
+    )
+    assert proc.stdout, proc.stderr
+    report = json.loads(proc.stdout)
+    assert report["reportVerdict"] == "inconclusive", report
+    assert proc.returncode == 2, proc.stderr
+
+
+def test_cli_strict_accepts_complete_valid_sources():
+    with tempfile.TemporaryDirectory() as tmp:
+        repo = Path(tmp)
+        deploy = repo / "deploy"
+        deploy.mkdir()
+        (deploy / "bot-errors-runtime-manifest.json").write_text(
+            json.dumps({"files": [{"path": "deploy/scripts/probe.py"}]}), encoding="utf-8"
+        )
+        (deploy / "managed-components.json").write_text(
+            json.dumps({"protective_services": {"entries": [{"name": "health-monitor"}]}}),
+            encoding="utf-8",
+        )
+        profile = deploy / "health-profiles" / "profile.json"
+        profile.parent.mkdir()
+        profile.write_text(
+            json.dumps({"expectQLoop": True, "expectDispatcher": True, "expectRuntimeManifest": True}),
+            encoding="utf-8",
+        )
+        proc = subprocess.run(
+            [sys.executable, str(PROBE_PATH), "--repo", str(repo), "--strict"],
+            capture_output=True, text=True, timeout=30,
+        )
+    report = json.loads(proc.stdout)
+    assert proc.returncode == 0, proc.stderr
+    assert report["reportVerdict"] == "valid", report
+    assert report["summary"]["consistency_passed"] == report["summary"]["consistency_total"], report
 
 
 def test_cli_with_malformed_json_repo_reports_invalid_not_crash():
