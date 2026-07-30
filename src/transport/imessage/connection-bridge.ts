@@ -234,10 +234,7 @@ export class ImessageConnection extends EventEmitter implements RuntimeConnectio
     return null;
   }
 
-  /**
-   * Consumer: src/core/health.ts:81-84 (duck-typed with fallback to botJid)
-   * Synthesises ConnectionStateSnapshot from adapter.state().
-   */
+  /** Synthesises the mandatory ConnectionStateSnapshot from adapter.state(). */
   getConnectionState(): ConnectionStateSnapshot {
     const health = this.adapter.state();
     const connected = health.state === 'connected';

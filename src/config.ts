@@ -11,6 +11,7 @@ import { DEFAULT_FLEET_PORT, DEFAULT_INSTANCE_HEALTH_PORT } from './fleet/consta
 import { DEFAULT_TWILIO_SMS, DEFAULT_TWILIO_VOICE, type TwilioSmsConfig, type TwilioInboundMode, type TwilioWebhookConfig, type TwilioVoiceConfig } from './transport/twilio/types.ts';
 import { DEFAULT_IMESSAGE, type ImessageConfig, type ImessageInboundMode } from './transport/imessage/types.ts';
 import { DEFAULT_SIGNAL, SIGNAL_UUID_RE, type SignalConfig, type SignalInboundMode } from './transport/signal/types.ts';
+import { canonicalizeImessageDirectIdentity } from './core/transport-refs.ts';
 import { normalizeFallbackEntriesFromAgentOptions } from './core/fallback-chain.ts';
 import {
   isProviderBoundaryMode,
@@ -464,6 +465,15 @@ export function resolveAdminIdentities(
         throw new ConfigValidationError('Signal admin identity must be a UUID or E.164 phone number');
       }
       return wireIdentity;
+    }
+    if (transport === 'imessage') {
+      const directIdentity = canonicalizeImessageDirectIdentity(trimmed);
+      if (directIdentity !== null) return directIdentity;
+      const wireIdentity = normalizePhoneE164Wire(trimmed);
+      if (wireIdentity !== null) {
+        return canonicalizeImessageDirectIdentity(wireIdentity) ?? wireIdentity;
+      }
+      throw new ConfigValidationError('iMessage admin identity must be an AppleID email or E.164 phone number');
     }
     return normalizePhoneE164(trimmed);
   });

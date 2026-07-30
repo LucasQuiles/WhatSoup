@@ -7,9 +7,9 @@ import { readBody, jsonResponse, requireInstance } from '../../lib/http.ts';
 import { escapeRegExp } from '../../lib/regex-utils.ts';
 import { isRecord } from '../../lib/type-guards.ts';
 import { createSSEWriter } from '../sse-helpers.ts';
-import { normalizePhoneE164 } from '../../lib/phone.ts';
+import { normalizePhoneE164, normalizePhoneE164Wire } from '../../lib/phone.ts';
 import { SIGNAL_UUID_RE } from '../../transport/signal/types.ts';
-import { APPLEID_EMAIL_RE } from '../../transport/imessage/types.ts';
+import { canonicalizeImessageDirectIdentity } from '../../core/transport-refs.ts';
 import { createChildLogger } from '../../logger.ts';
 const log = createChildLogger('fleet:ops');
 import { mcpCall } from '../mcp-client.ts';
@@ -814,7 +814,12 @@ function normalizeAdminIdsForTransport(transport: string, phones: string[]): str
   if (transport === 'imessage') {
     return [...new Set(phones.map((p) => {
       const trimmed = p.trim();
-      return APPLEID_EMAIL_RE.test(trimmed) ? trimmed : normalizePhoneE164(trimmed);
+      const directIdentity = canonicalizeImessageDirectIdentity(trimmed);
+      if (directIdentity !== null) return directIdentity;
+      const wireIdentity = normalizePhoneE164Wire(trimmed);
+      return wireIdentity === null
+        ? normalizePhoneE164(trimmed)
+        : canonicalizeImessageDirectIdentity(wireIdentity) ?? wireIdentity;
     }))];
   }
   return normalizeAdminPhones(phones);

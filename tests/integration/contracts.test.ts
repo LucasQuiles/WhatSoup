@@ -12,6 +12,7 @@ import type { Server } from 'node:http';
 import { DatabaseSync } from 'node:sqlite';
 import { createServer } from 'node:http';
 import { WhatSoupError, type ErrorCode } from '../../src/errors.ts';
+import { emptyConnectionStateSnapshot } from '../../src/transport/twilio/connection-snapshot.ts';
 
 // ---------------------------------------------------------------------------
 // Port reservation
@@ -218,6 +219,11 @@ describe('Health endpoint contract', () => {
   const connectionManager = {
     botJid: '15551234567@s.whatsapp.net' as string | null,
     sendMessage: async () => ({ waMessageId: null }),
+    getConnectionState: () => emptyConnectionStateSnapshot({
+      connected: connectionManager.botJid !== null,
+      stateChangedAt: '2026-07-30T00:00:00.000Z',
+      lastDisconnectReason: null,
+    }),
   };
 
   const startedAt = Date.now() - 5000;

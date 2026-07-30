@@ -168,7 +168,7 @@ import { getRecentMessages, getMessagesSince, hasFromMeReplyAfter } from '../../
 import { toConversationKey, isGroupConversationKey, GLOBAL_CONVERSATION_KEY } from '../../core/conversation-key.ts';
 import { bulletedSection, savedPreferenceLine } from './owner-render-format.ts';
 import { classifyAssistantTextEgress } from '../../core/outbound-message-safety.ts';
-import { toPersonalJid, isGroupJid } from '../../core/jid-constants.ts';
+import { resolveConfiguredAdminJid, toPersonalJid, isGroupJid } from '../../core/jid-constants.ts';
 import { jidNormalizedUser } from '@whiskeysockets/baileys';
 import { canonicalizeChatJid } from '../../core/lid-resolver.ts';
 import { TurnQueue, type QueuedTurn, type TurnRejectReason } from './turn-queue.ts';
@@ -227,6 +227,7 @@ import { PendingPollPersistence } from './pending-poll-persistence.ts';
 import { HandoffDistillCoordinator } from './handoff-distill-coordinator.ts';
 import { handoffDistillerEnabled, handoffContextEnabled, handoffDistillModel } from './handoff-distill-config.ts';
 import { config } from '../../config.ts';
+import type { StartupNotificationEvent } from '../../core/startup-notification-controller.ts';
 import {
   checkAndRecordInterruptedBoot,
   markBootInProgress,
@@ -1558,7 +1559,7 @@ export class AgentRuntime implements Runtime {
    * when proactive resume must be suppressed for this boot: the guard is
    * enabled, resumable work exists, this boot follows an unclean exit, and
    * the crashy-boot journal has reached the trip threshold. On trip, queues
-   * ONE operator notice through the startup-message channel (popped and sent
+   * ONE operator notice through the typed startup-event channel (popped and sent
    * by main.ts after connect). Fail-open throughout — any guard error
    * degrades to "do not suppress".
    */
@@ -1579,8 +1580,9 @@ export class AgentRuntime implements Runtime {
     const adminPhone = [...config.adminPhones][0];
     if (adminPhone) {
       const windowSec = Math.round(config.restartLoopGuard.windowMs / 1000);
-      this.pendingStartupMessage = {
-        chatJid: toPersonalJid(adminPhone),
+      this.pendingStartupEvent = {
+        kind: 'restart_loop_guard_alert',
+        chatJid: resolveConfiguredAdminJid(config.transport, adminPhone),
         text:
           `*Restart-loop guard tripped* ⚠️ — ${trip.bootsInWindow} crash-interrupted boots ` +
           `inside ${windowSec}s with resumable sessions pending. Proactive resume is ` +
@@ -1837,8 +1839,8 @@ export class AgentRuntime implements Runtime {
   private readonly routeRecyclePublicationWork = this.routeRecycleLifecycle.publicationWork;
   private shutdownRequested = false;
 
-  // Startup notification deferred until after WA connects
-  private pendingStartupMessage: { chatJid: string; text: string } | null = null;
+  // Startup events are deferred until main's strict-readiness controller runs.
+  private pendingStartupEvent: StartupNotificationEvent | null = null;
 
   // Voice reply state (SP4) — tracks inbound contentType and accumulated assistant text per turn.
   // Per-chat mode uses Maps keyed by mapKey; single/shared mode uses scalar fields.
@@ -3606,7 +3608,8 @@ export class AgentRuntime implements Runtime {
             log.info({ chatJid: resumeChatJid }, 'suppressing startup message — shared-mode group chat');
           } else {
             const age = formatAge(priorSession.started_at);
-            this.pendingStartupMessage = {
+            this.pendingStartupEvent = {
+              kind: 'resume',
               chatJid: resumeChatJid,
               text: `_Resuming session_ from *${age}*. Send a message to continue, or /new to start fresh.`,
             };
@@ -3637,6 +3640,7 @@ export class AgentRuntime implements Runtime {
         db: this.db,
         controlPeers: config.controlPeers,
         adminPhones: config.adminPhones,
+        resolveConfiguredAdminJid: (identity) => resolveConfiguredAdminJid(config.transport, identity),
       },
       restartSelf: serviceRestarter ? {
         instanceName: this.instanceName,
@@ -6913,10 +6917,10 @@ export class AgentRuntime implements Runtime {
   }
 
   /** Pop and return the pending startup notification (set during resume), or null. */
-  popStartupMessage(): { chatJid: string; text: string } | null {
-    const msg = this.pendingStartupMessage;
-    this.pendingStartupMessage = null;
-    return msg;
+  popStartupNotificationEvent(): StartupNotificationEvent | null {
+    const event = this.pendingStartupEvent;
+    this.pendingStartupEvent = null;
+    return event;
   }
 
   getHealthSnapshot(): RuntimeHealth {
@@ -7143,7 +7147,7 @@ export class AgentRuntime implements Runtime {
         // DM admin
         const adminPhone = [...config.adminPhones][0];
         if (adminPhone) {
-          const adminJid = toPersonalJid(adminPhone);
+          const adminJid = resolveConfiguredAdminJid(config.transport, adminPhone);
           sendTracked(this.messenger, adminJid,
             `[HEAL_ESCALATE] Repair for report ${reportId} timed out after 15 minutes.`,
             this.durability ?? undefined, { replayPolicy: 'safe' })
@@ -11681,8 +11685,8 @@ export class AgentRuntime implements Runtime {
     if (!pendingText) {
       // No pending message — notify user to resend
       const msg = '_Previous session expired_ — starting fresh. Send a message to begin.';
-      if (this.pendingStartupMessage !== null) {
-        this.pendingStartupMessage = { chatJid, text: msg };
+      if (this.pendingStartupEvent !== null) {
+        this.pendingStartupEvent = { kind: 'expired_session_notice', chatJid, text: msg };
       } else {
         this.sendDirect(chatJid, msg);
       }

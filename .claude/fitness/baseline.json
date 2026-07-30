@@ -20,13 +20,13 @@
       "violationCount": 6
     },
     "arch.ssot-jid-construction": {
-      "violationCount": 7
+      "violationCount": 6
     },
     "arch.ssot-name-ladder": {
       "violationCount": 5
     },
     "arch.ssot-phone-shape": {
-      "violationCount": 6
+      "violationCount": 4
     },
     "arch.ssot-presentation-literals": {
       "violationCount": 0
