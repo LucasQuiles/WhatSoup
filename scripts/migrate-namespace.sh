@@ -1,4 +1,17 @@
 #!/usr/bin/env bash
+
+# Portable sha256: sha256sum (GNU) or shasum -a 256 (macOS/BSD)
+_shasum() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" | awk '{print $1}'
+  elif command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$1" | awk '{print $1}'
+  else
+    echo "ERROR: neither sha256sum nor shasum found" >&2
+    return 1
+  fi
+}
+
 # migrate-namespace.sh
 #
 # ONE-TIME migration: copies auth, DB, and config from legacy namespaces
@@ -84,8 +97,8 @@ copy_file() {
 
   if ! $DRY_RUN; then
     local src_sum dest_sum
-    src_sum=$(sha256sum "$src" | awk '{print $1}')
-    dest_sum=$(sha256sum "$dest" | awk '{print $1}')
+    src_sum=$(_shasum "$src")
+    dest_sum=$(_shasum "$dest")
     if [[ "$src_sum" != "$dest_sum" ]]; then
       error "Checksum mismatch after copy: $src -> $dest"
       CHECKSUM_MISMATCHES+=("$src -> $dest")
@@ -159,8 +172,8 @@ copy_db_with_wal() {
 
     if ! $DRY_RUN; then
       local src_sum dest_sum
-      src_sum=$(sha256sum "$src_file" | awk '{print $1}')
-      dest_sum=$(sha256sum "$dest_file" | awk '{print $1}')
+      src_sum=$(_shasum "$src_file")
+      dest_sum=$(_shasum "$dest_file")
       if [[ "$src_sum" != "$dest_sum" ]]; then
         error "Checksum mismatch: $src_file -> $dest_file"
         CHECKSUM_MISMATCHES+=("$src_file -> $dest_file")

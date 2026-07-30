@@ -2,7 +2,9 @@
 set -euo pipefail
 
 SCRIPT_PATH="${BASH_SOURCE[0]}"
-if resolved_path="$(readlink -f "$SCRIPT_PATH" 2>/dev/null)"; then
+# readlink -f is GNU-only (unavailable on macOS). Use cd/pwd fallback
+# which is POSIX and works on both platforms.
+if resolved_path="$( ( cd "$(dirname "$SCRIPT_PATH")" && pwd -P )/$(basename "$SCRIPT_PATH") )" 2>/dev/null; then
   SCRIPT_PATH="$resolved_path"
 fi
 REPO_ROOT="$(cd "$(dirname "$SCRIPT_PATH")/../.." && pwd)"
