@@ -1,13 +1,74 @@
-import type { EntitySearchResult, PineconeMemory, SearchResult } from './providers/pinecone.ts';
+import type {
+  EntitySearchResult,
+  PineconeMemory,
+  PineconeSearchStatus,
+  SearchResult,
+} from './providers/pinecone.ts';
 import { config } from '../../config.ts';
 import { createChildLogger } from '../../logger.ts';
 import {
   bucketMemoryScores,
+  classifyMemoryOperationFailure,
   normalizeMemoryTraceId,
+  type MemoryOperationFailureCode,
 } from '../../lib/memory-operation-telemetry.ts';
 import { routeQuery } from './memory/query-router.ts';
 
 const log = createChildLogger('conversation');
+
+export type ContextScope = 'chat' | 'sender' | 'self' | 'entity' | 'context';
+export type ContextLoadStatus = 'not_attempted' | 'complete' | 'partial' | 'unavailable';
+
+export interface ContextScopeOutcome {
+  scope: ContextScope;
+  status: PineconeSearchStatus;
+  failureCode: MemoryOperationFailureCode | null;
+  retryable: boolean;
+}
+
+export interface ContextLoadResult {
+  text: string;
+  status: ContextLoadStatus;
+  scopes: ContextScopeOutcome[];
+}
+
+type DetailedContextSearch<T> = {
+  results: T[];
+  status: PineconeSearchStatus;
+  failureCode?: MemoryOperationFailureCode;
+  retryable?: boolean;
+};
+
+async function captureContextSearch<T>(
+  search: () => Promise<DetailedContextSearch<T>>,
+): Promise<DetailedContextSearch<T>> {
+  try {
+    return await search();
+  } catch (error) {
+    const failure = classifyMemoryOperationFailure(error);
+    return {
+      results: [],
+      status: 'failed',
+      failureCode: failure.code,
+      retryable: failure.retryable,
+    };
+  }
+}
+
+function scopeOutcome<T>(scope: ContextScope, details: DetailedContextSearch<T>): ContextScopeOutcome {
+  return {
+    scope,
+    status: details.status,
+    failureCode: details.failureCode ?? null,
+    retryable: details.retryable ?? false,
+  };
+}
+
+function contextStatus(scopes: ContextScopeOutcome[]): ContextLoadStatus {
+  const successfulScopes = scopes.filter((scope) => scope.status === 'ok').length;
+  if (successfulScopes === scopes.length) return 'complete';
+  return successfulScopes > 0 ? 'partial' : 'unavailable';
+}
 
 /**
  * Format entity search results grouped by entity type into a WhatsApp-friendly
@@ -51,16 +112,18 @@ function loadEntityContext(results: EntitySearchResult[]): string {
  * results grouped by entity type. Self-fact and memory sections are suppressed.
  *
  * Results are deduplicated by id and formatted as a bulleted block.
- * Returns an empty string when no results are found.
+ * Returns a typed, content-free outcome while preserving prompt text separately.
  */
-export async function loadContext(
+export async function loadContextDetailed(
   pinecone: PineconeMemory,
   chatJid: string,
   senderJid: string,
   messageText: string,
   traceId?: string,
-): Promise<string> {
-  if (!messageText.trim()) return '';
+): Promise<ContextLoadResult> {
+  if (!messageText.trim()) {
+    return { text: '', status: 'not_attempted', scopes: [] };
+  }
 
   const routed = routeQuery(messageText, {
     namespaces: config.memory.pinecone.namespaces,
@@ -68,32 +131,57 @@ export async function loadContext(
   const safeTraceId = normalizeMemoryTraceId(traceId);
 
   if (config.pineconeSearchMode === 'entity') {
-    const results = traceId
-      ? await pinecone.searchEntities(messageText, traceId)
-      : await pinecone.searchEntities(messageText);
+    const details = await captureContextSearch(() =>
+      traceId
+        ? pinecone.searchEntitiesDetailed(messageText, traceId)
+        : pinecone.searchEntitiesDetailed(messageText),
+    );
+    const scopes = [scopeOutcome('entity', details)];
     log.info(
       {
         ...(safeTraceId ? { trace_id: safeTraceId } : {}),
         query_intent: routed.intent,
         routed_namespace_count: routed.namespaces.length,
         scope_coverage: ['entity'],
-        result_count: results.length,
+        result_count: details.results.length,
         score_buckets: bucketMemoryScores(
-          results.map((result) => result.score),
+          details.results.map((result) => result.score),
         ),
       },
       'entity context retrieval complete',
     );
-    return loadEntityContext(results);
+    return {
+      text: loadEntityContext(details.results),
+      status: contextStatus(scopes),
+      scopes,
+    };
   }
 
-  const [chatResults, senderResults, selfResults] = await Promise.all([
-    traceId ? pinecone.searchForChat(chatJid, messageText, traceId) : pinecone.searchForChat(chatJid, messageText),
-    traceId
-      ? pinecone.searchForSender(senderJid, messageText, traceId)
-      : pinecone.searchForSender(senderJid, messageText),
-    traceId ? pinecone.searchSelfFacts(messageText, traceId) : pinecone.searchSelfFacts(messageText),
+  const [chatDetails, senderDetails, selfDetails] = await Promise.all([
+    captureContextSearch(() =>
+      traceId
+        ? pinecone.searchForChatDetailed(chatJid, messageText, traceId)
+        : pinecone.searchForChatDetailed(chatJid, messageText),
+    ),
+    captureContextSearch(() =>
+      traceId
+        ? pinecone.searchForSenderDetailed(senderJid, messageText, traceId)
+        : pinecone.searchForSenderDetailed(senderJid, messageText),
+    ),
+    captureContextSearch(() =>
+      traceId
+        ? pinecone.searchSelfFactsDetailed(messageText, traceId)
+        : pinecone.searchSelfFactsDetailed(messageText),
+    ),
   ]);
+  const chatResults = chatDetails.results;
+  const senderResults = senderDetails.results;
+  const selfResults = selfDetails.results;
+  const scopes = [
+    scopeOutcome('chat', chatDetails),
+    scopeOutcome('sender', senderDetails),
+    scopeOutcome('self', selfDetails),
+  ];
 
   // Merge, deduplicate by id, preserve insertion order (chat results first)
   const seen = new Set<string>();
@@ -130,7 +218,9 @@ export async function loadContext(
     'context retrieval complete',
   );
 
-  if (topResults.length === 0) return '';
+  if (topResults.length === 0) {
+    return { text: '', status: contextStatus(scopes), scopes };
+  }
 
   const parts: string[] = [];
 
@@ -151,5 +241,18 @@ export async function loadContext(
     parts.push(`Things you (Loops) have said about yourself before — stay consistent with these:\n${lines}`);
   }
 
-  return parts.join('\n\n');
+  return { text: parts.join('\n\n'), status: contextStatus(scopes), scopes };
+}
+
+/**
+ * Legacy prompt-only wrapper for callers that do not need the retrieval outcome.
+ */
+export async function loadContext(
+  pinecone: PineconeMemory,
+  chatJid: string,
+  senderJid: string,
+  messageText: string,
+  traceId?: string,
+): Promise<string> {
+  return (await loadContextDetailed(pinecone, chatJid, senderJid, messageText, traceId)).text;
 }

@@ -79,6 +79,8 @@ type HealthServerDepsForTest = {
   handleAccessDecision: (subjectType: string, subjectId: string, action: string) => Promise<void>;
   getEnrichmentStats: () => unknown;
   getDatabaseRetentionHealth: () => unknown;
+  getMemoryReadinessHealth?: () => unknown;
+  getMemoryContextHealth?: () => unknown;
   getStartupNotificationHealth?: () => Record<string, unknown>;
 };
 
@@ -118,6 +120,7 @@ function runtimeStub() {
     shutdown: vi.fn(async () => {}),
     handleMessage: vi.fn(async () => {}),
     handleJidAliasChanged: vi.fn(),
+    getMemoryContextHealth: vi.fn(() => null),
   };
 }
 
@@ -136,7 +139,7 @@ function installProcessOnCapture() {
 async function importMainWithMocks(options: {
   instanceConfig?: Record<string, unknown> | null;
   rawInstanceConfig?: string;
-  pineconeState?: 'ready' | 'missing_index';
+  pineconeState?: 'ready' | 'index_missing';
   accessMode?: 'self_only' | 'allowlist';
   transport?: 'baileys' | 'signal' | 'twilio' | 'imessage';
   adminPhones?: string[];
@@ -407,6 +410,14 @@ async function importMainWithMocks(options: {
       index: 'mw-mind',
       state: options.pineconeState ?? 'ready',
     })),
+    getPineconeReadinessObservation: vi.fn(async () => ({
+      index: 'mw-mind',
+      state: options.pineconeState ?? 'ready',
+      observedAt: '2026-07-29T20:00:00.000Z',
+      failureCode: 'none',
+      retryable: false,
+      evidenceCoverage: 'provider_response',
+    })),
     createAnthropicProvider: vi.fn(() => ({ name: 'anthropic' })),
     createOpenAIProvider: vi.fn(() => ({ name: 'openai' })),
     MemoryConsolidationScheduler: vi.fn(function () { return memoryScheduler; }),
@@ -531,6 +542,7 @@ async function importMainWithMocks(options: {
   vi.doMock('../src/runtimes/chat/providers/pinecone.ts', () => ({
     PineconeMemory: mocks.PineconeMemory,
     getPineconeReadiness: mocks.getPineconeReadiness,
+    getPineconeReadinessObservation: mocks.getPineconeReadinessObservation,
   }));
   vi.doMock('../src/runtimes/chat/providers/anthropic.ts', () => ({ createAnthropicProvider: mocks.createAnthropicProvider }));
   vi.doMock('../src/runtimes/chat/providers/openai.ts', () => ({ createOpenAIProvider: mocks.createOpenAIProvider }));
@@ -1273,13 +1285,27 @@ describe('main.ts — uncovered helpers and signal paths', () => {
 
   describe('memory consolidation disabled warning', () => {
     it('logs warn when consolidation enabled but pinecone is not ready', async () => {
-      const h = await importMainWithMocks({ pineconeState: 'missing_index' });
+      const h = await importMainWithMocks({ pineconeState: 'index_missing' });
 
       expect(h.logger.warn).toHaveBeenCalledWith(
-        expect.objectContaining({ enableEnrichment: true, pineconeReadiness: 'missing_index' }),
+        expect.objectContaining({ enableEnrichment: true, pineconeReadiness: 'index_missing' }),
         'memory consolidation enabled but not started',
       );
       expect(h.memoryScheduler.start).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('memory health wiring', () => {
+    it('invokes the chat runtime context-health callback through the health dependency', async () => {
+      const h = await importMainWithMocks({ pineconeState: 'ready' });
+      const healthDeps = h.getHealthDeps();
+
+      expect(healthDeps.getMemoryReadinessHealth?.()).toEqual(expect.objectContaining({
+        state: 'ready',
+        failureCode: 'none',
+      }));
+      expect(healthDeps.getMemoryContextHealth?.()).toBeNull();
+      expect(h.chatRuntime.getMemoryContextHealth).toHaveBeenCalledOnce();
     });
   });
 

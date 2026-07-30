@@ -465,6 +465,19 @@ describe('PineconeMemory', () => {
       }
     });
 
+    it('preserves a successful empty chat lookup through the detailed scoped helper', async () => {
+      mockSearchRecords.mockResolvedValueOnce({ result: { hits: [] } });
+
+      try {
+        await expect(memory.searchForChatDetailed('chat-42@g.us', 'no matching memory')).resolves.toMatchObject({
+          results: [],
+          status: 'ok',
+        });
+      } finally {
+        mockSearchRecords.mockReset();
+      }
+    });
+
     // ── Content-free operation telemetry ────────────────────────────────────
 
     it('search success log includes bounded counts without candidate ids', async () => {
@@ -1934,12 +1947,12 @@ describe('getPineconeReadiness', () => {
     }
   });
 
-  it('returns auth_failed for generic unknown error (fallback branch)', async () => {
+  it('returns unknown for a generic error rather than misclassifying it as auth_failed', async () => {
     process.env['PINECONE_API_KEY'] = 'test-key-generic';
     mockListIndexes.mockRejectedValueOnce(new Error('some unknown error'));
     try {
       const result = await getPineconeReadiness('test-index');
-      expect(result).toEqual({ state: 'auth_failed', index: 'test-index' });
+      expect(result).toEqual({ state: 'unknown', index: 'test-index' });
     } finally {
       delete process.env['PINECONE_API_KEY'];
     }

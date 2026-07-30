@@ -7,6 +7,8 @@ type HealthServerDepsForTest = {
   handleAccessDecision: (subjectType: string, subjectId: string, action: string) => Promise<void>;
   getEnrichmentStats: () => unknown;
   getDatabaseRetentionHealth: () => unknown;
+  getMemoryReadinessHealth?: () => unknown;
+  getMemoryContextHealth?: () => unknown;
 };
 
 type CapabilityGrantManagerOptionsForTest = {
@@ -48,6 +50,7 @@ function runtimeStub() {
     handleMessage: vi.fn(async () => {}),
     handleJidAliasChanged: vi.fn(),
     handleDatabaseCompatibilityRejection: vi.fn(),
+    getMemoryContextHealth: vi.fn(() => null),
   };
 }
 
@@ -65,7 +68,7 @@ function installProcessOnCapture() {
 
 async function importMainWithMocks(options: {
   instanceConfig?: Record<string, unknown> | null;
-  pineconeState?: 'ready' | 'missing_index';
+  pineconeState?: 'ready' | 'index_missing';
   accessMode?: 'self_only' | 'allowlist';
   adminPhones?: string[];
   existingPaths?: string[];
@@ -279,6 +282,14 @@ async function importMainWithMocks(options: {
       index: 'mw-mind',
       state: options.pineconeState ?? 'ready',
     })),
+    getPineconeReadinessObservation: vi.fn(async () => ({
+      index: 'mw-mind',
+      state: options.pineconeState ?? 'ready',
+      observedAt: '2026-07-29T20:00:00.000Z',
+      failureCode: 'none',
+      retryable: false,
+      evidenceCoverage: 'provider_response',
+    })),
     createAnthropicProvider: vi.fn(() => ({ name: 'anthropic' })),
     createOpenAIProvider: vi.fn(() => ({ name: 'openai' })),
     withDatabaseCompatibility: vi.fn((
@@ -413,6 +424,7 @@ async function importMainWithMocks(options: {
   vi.doMock('../src/runtimes/chat/providers/pinecone.ts', () => ({
     PineconeMemory: mocks.PineconeMemory,
     getPineconeReadiness: mocks.getPineconeReadiness,
+    getPineconeReadinessObservation: mocks.getPineconeReadinessObservation,
   }));
   vi.doMock('../src/runtimes/chat/providers/anthropic.ts', () => ({ createAnthropicProvider: mocks.createAnthropicProvider }));
   vi.doMock('../src/runtimes/chat/providers/openai.ts', () => ({ createOpenAIProvider: mocks.createOpenAIProvider }));
@@ -843,6 +855,23 @@ describe('main bootstrap', () => {
     );
   });
 
+  it('wires bounded memory diagnostics into health without the configured index', async () => {
+    const h = await importMainWithMocks({ pineconeState: 'ready' });
+    const healthDeps = h.getHealthDeps();
+    const readiness = healthDeps.getMemoryReadinessHealth?.();
+    const context = healthDeps.getMemoryContextHealth?.();
+
+    expect(readiness).toEqual({
+      state: 'ready',
+      observedAt: '2026-07-29T20:00:00.000Z',
+      failureCode: 'none',
+      retryable: false,
+      evidenceCoverage: 'provider_response',
+    });
+    expect(context).toBeNull();
+    expect(JSON.stringify({ readiness, context })).not.toContain('mw-mind');
+  });
+
   it('imports a legacy q database on empty warm start', async () => {
     const h = await importMainWithMocks({
       instanceConfig: { name: 'q' },
@@ -870,7 +899,7 @@ describe('main bootstrap', () => {
   it('selects passive runtime without startup notification or memory consolidation when Pinecone is not ready', async () => {
     const h = await importMainWithMocks({
       instanceConfig: { name: 'relay', type: 'passive', paths: { root: '/tmp/relay' }, socketPath: '/tmp/relay.sock' },
-      pineconeState: 'missing_index',
+      pineconeState: 'index_missing',
     });
 
     expect(h.PassiveRuntime).toHaveBeenCalledWith(h.db, h.connection, {
