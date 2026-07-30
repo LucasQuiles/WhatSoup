@@ -3,7 +3,7 @@
  *
  * Exercises the REAL `shouldSuppressProactiveResume` method on a prototype
  * stub of AgentRuntime (Object.create — no sockets/db needed; the method
- * only touches the guard journal + pendingStartupMessage). Companion to
+ * only touches the guard journal + pendingStartupEvent). Companion to
  * restart-loop-guard.test.ts (module-level T2/T3/T4).
  *
  * LOCAL RUN NOTE: this file imports runtime.ts, whose module graph pulls the
@@ -70,11 +70,15 @@ describe('T5 — startup resume gate consults the restart-loop guard', () => {
     const { config } = await import('../../../src/config.ts');
     const stub = Object.create(AgentRuntime.prototype) as {
       restartLoopInterruptedBoot: boolean;
-      pendingStartupMessage: { chatJid: string; text: string } | null;
+      pendingStartupEvent: {
+        kind: 'restart_loop_guard_alert';
+        chatJid: string;
+        text: string;
+      } | null;
       shouldSuppressProactiveResume: (resumableCount: number) => boolean;
     };
     stub.restartLoopInterruptedBoot = false;
-    stub.pendingStartupMessage = null;
+    stub.pendingStartupEvent = null;
     return { guard, config, stub };
   }
 
@@ -94,7 +98,7 @@ describe('T5 — startup resume gate consults the restart-loop guard', () => {
     const h = guard.readRestartLoopGuardHealth(guard.restartLoopGuardPath(config.stateRoot));
     expect(h.bootsInWindow).toBe(0);
     expect(h.tripped).toBe(false); // a clean boot leaves the guard untripped
-    expect(stub.pendingStartupMessage).toBe(null); // no admin notice queued on a clean boot
+    expect(stub.pendingStartupEvent).toBe(null); // no admin notice queued on a clean boot
   });
 
   it('does not consult the journal when nothing is resumable', async () => {
@@ -114,9 +118,10 @@ describe('T5 — startup resume gate consults the restart-loop guard', () => {
     expect(h.bootsInWindow).toBe(3);
     expect(h.tripped).toBe(true);
     expect(h.lastTripAt).not.toBeNull();
-    expect(stub.pendingStartupMessage?.chatJid).toBe('15550000001@s.whatsapp.net');
-    expect(stub.pendingStartupMessage?.text).toContain('Restart-loop guard tripped');
-    expect(stub.pendingStartupMessage?.text).toContain('resume on their next message');
+    expect(stub.pendingStartupEvent?.kind).toBe('restart_loop_guard_alert');
+    expect(stub.pendingStartupEvent?.chatJid).toBe('15550000001@s.whatsapp.net');
+    expect(stub.pendingStartupEvent?.text).toContain('Restart-loop guard tripped');
+    expect(stub.pendingStartupEvent?.text).toContain('resume on their next message');
   });
 
   it('preserves #2674 by routing the restart-loop notice to an iMessage admin', async () => {
@@ -129,7 +134,8 @@ describe('T5 — startup resume gate consults the restart-loop guard', () => {
     stub.restartLoopInterruptedBoot = true;
 
     expect(stub.shouldSuppressProactiveResume(2)).toBe(true);
-    expect(stub.pendingStartupMessage?.chatJid).toBe('owner@example.test@imessage');
+    expect(stub.pendingStartupEvent?.kind).toBe('restart_loop_guard_alert');
+    expect(stub.pendingStartupEvent?.chatJid).toBe('owner@example.test@imessage');
   });
 
   it('does not trip below the threshold', async () => {
@@ -141,7 +147,7 @@ describe('T5 — startup resume gate consults the restart-loop guard', () => {
     expect(h.bootsInWindow).toBe(2);
     expect(h.tripped).toBe(false);
     expect(h.lastTripAt).toBe(null); // below threshold ⇒ no trip timestamp recorded
-    expect(stub.pendingStartupMessage).toBe(null); // no admin notice queued below threshold
+    expect(stub.pendingStartupEvent).toBe(null); // no admin notice queued below threshold
   });
 
   it('guard disabled in instance.json ⇒ never suppresses, never records', async () => {
@@ -152,6 +158,6 @@ describe('T5 — startup resume gate consults the restart-loop guard', () => {
     const h = guard.readRestartLoopGuardHealth(guard.restartLoopGuardPath(config.stateRoot));
     expect(h.bootsInWindow).toBe(2); // unchanged — the method returned before recording
     expect(h.tripped).toBe(false); // a disabled guard never trips
-    expect(stub.pendingStartupMessage).toBe(null); // no admin notice queued when disabled
+    expect(stub.pendingStartupEvent).toBe(null); // no admin notice queued when disabled
   });
 });
