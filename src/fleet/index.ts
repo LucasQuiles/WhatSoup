@@ -10,6 +10,11 @@ import { HealthPoller } from './health-poller.ts';
 import { FleetDbReader } from './db-reader.ts';
 import { createStaticHandler } from './static.ts';
 import { createLivenessHandler } from './livez.ts';
+import { defaultIncidentDbPath, openIncidentDb } from './incidents/db.ts';
+import { IncidentStore } from './incidents/store.ts';
+import { ProducerStore } from './incidents/producers.ts';
+import { createSignalsHandlers } from './routes/signals.ts';
+import { errorMessage } from '../lib/error-message.ts';
 import { handleGetLines, handleGetLine, handleGetLineProviderStatus } from './routes/lines.ts';
 import { handleGetLineCheckpoints, handleRestoreCheckpoint } from './routes/checkpoints.ts';
 import { handleGetLiveSessions } from './routes/live-sessions.ts';
@@ -87,6 +92,10 @@ export interface FleetDeps {
   /** Optional request-time token source used by the standalone server after CLI rotation. */
   getFleetTokens?: () => { active: string; accept: readonly string[] };
   getSelfHealth: () => Record<string, unknown>;
+  /** Test seam: opener for the incident ingestion database. Defaults to the
+   * canonical XDG path. The fleet server owns the returned handle: start()
+   * probes it once, stop() closes it exactly once. */
+  openIncidentDatabase?: () => DatabaseSync;
 }
 
 export interface RouteDeps {
@@ -798,6 +807,44 @@ export function createFleetServer(deps: FleetDeps) {
     if (!candidate) return false;
     return verifyFleetTokenImpl(candidate, getTokenSet());
   }
+  // ---- Incident ingestion stores (start-probed, fail-closed) ------------
+  // start() probes the database once so an open failure is visible before
+  // any traffic; the rest of the fleet stays up and the ingestion routes
+  // answer 503 (spec §1 degraded mode — state_recovery_required needs an
+  // operator restart). The fleet server is the single owner of the shared
+  // handle: stop() closes it exactly once, and 'closed' is terminal so a
+  // stopped server can never reopen it.
+  const openIncidentDatabase = deps.openIncidentDatabase ?? (() => openIncidentDb(defaultIncidentDbPath()));
+  let incidentDb: DatabaseSync | null = null;
+  let incidentStores: { incident: IncidentStore; producer: ProducerStore } | null = null;
+  let incidentState: 'new' | 'open' | 'failed' | 'closed' = 'new';
+  function openIncidentStores(): void {
+    if (incidentState !== 'new') return;
+    try {
+      incidentDb = openIncidentDatabase();
+      incidentStores = { incident: new IncidentStore(incidentDb), producer: new ProducerStore(incidentDb) };
+      incidentState = 'open';
+    } catch (err) {
+      log.error(
+        { event: 'incident_store_unavailable', reason: errorMessage(err) },
+        'incident store failed to open; signal ingestion degraded',
+      );
+      incidentState = 'failed';
+    }
+  }
+  function closeIncidentStores(): void {
+    if (incidentState === 'open') incidentDb?.close();
+    incidentDb = null;
+    incidentStores = null;
+    incidentState = 'closed';
+  }
+  const signalsHandlers = createSignalsHandlers({
+    getIncidentStore: () => incidentStores?.incident ?? null,
+    getProducerStore: () => incidentStores?.producer ?? null,
+    verifyRootToken: (req) => verifyToken(extractBearer(req)),
+    securityAudit: (event) => log.warn({ producerAudit: event }, 'incident producer security event'),
+  });
+
   const ticketStore: TicketStore = createWsTicketStore();
   // Audience-scoped store for HTTP and SSE tickets (#313). The WS path keeps
   // using `ticketStore` above so call sites do not need to care about the
@@ -978,6 +1025,35 @@ export function createFleetServer(deps: FleetDeps) {
         return;
       }
 
+      // Incident ingestion + producer enrollment authenticate with producer
+      // credentials (or their own root checks inside the handlers) — they must
+      // NOT pass the fleet root/ticket gate: an api-audience ticket does not
+      // authorize signal production, and producer credentials are not fleet
+      // tokens. Explicit pre-gate carve-outs, same pattern as the ticket mints.
+      if (pathname === '/api/signals' && method === 'POST') {
+        await signalsHandlers.postSignal(req, res);
+        return;
+      }
+      if (pathname === '/api/producers' && method === 'POST') {
+        await signalsHandlers.postProducer(req, res);
+        return;
+      }
+      {
+        // POST/DELETE /api/producers/:id/credential
+        const producerCredential = pathname.match(/^\/api\/producers\/(?<id>[^/]+)\/credential$/);
+        const id = producerCredential?.groups?.id;
+        if (typeof id === 'string') {
+          if (method === 'POST') {
+            await signalsHandlers.postProducerCredential(req, res, { id });
+            return;
+          }
+          if (method === 'DELETE') {
+            await signalsHandlers.deleteProducerCredential(req, res, { id });
+            return;
+          }
+        }
+      }
+
       const audience = audienceForPath(pathname);
       // Accept (a) root token via Bearer/?token=, OR (b) audience-scoped
       // ticket via ?ticket=. Bearer header may also carry a ticket so
@@ -1091,6 +1167,7 @@ export function createFleetServer(deps: FleetDeps) {
     start(port: number): void {
       const host = process.env.FLEET_BIND_ADDRESS ?? '127.0.0.1';
       assertSafeFleetBind(host); // fail fast — before any pollers/timers start
+      openIncidentStores(); // probe once so an open failure is visible before traffic
       discovery.startAutoRefresh();
       healthPoller.start();
       updateChecker.start();
@@ -1100,6 +1177,7 @@ export function createFleetServer(deps: FleetDeps) {
       });
     },
     stop(): void {
+      closeIncidentStores();
       realtimePoller.stop();
       healthPoller.stop();
       discovery.stop();
