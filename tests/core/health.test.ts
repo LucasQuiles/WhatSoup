@@ -2136,6 +2136,7 @@ describe('GET /health', () => {
       model_usable_checked_at: null,
       model_usability_status: 'model-unavailable',
       last_successful_turn_at: null,
+      last_successful_turn_provider: null,
       last_turn_error_class: 'model-unavailable',
       last_turn_error_at: 1_781_316_000_000,
     });
@@ -2175,6 +2176,7 @@ describe('GET /health', () => {
       model_usable_checked_at: null,
       model_usability_status: 'usable',
       last_successful_turn_at: 1_781_316_030_000,
+      last_successful_turn_provider: null,
       last_turn_error_class: null,
       last_turn_error_at: null,
     });
@@ -2220,6 +2222,7 @@ describe('GET /health', () => {
       model_usable_checked_at: null,
       model_usability_status: 'unknown',
       last_successful_turn_at: null,
+      last_successful_turn_provider: null,
       last_turn_error_class: 'empty-output',
       last_turn_error_at: 1_781_316_000_000,
     });
@@ -4562,6 +4565,7 @@ describe('GET /health — normalizeBooleanOrNull and normalizeNumberOrNull non-t
       model_usable_checked_at: null,
       model_usability_status: 'usable',
       last_successful_turn_at: null,
+      last_successful_turn_provider: null,
       last_turn_error_class: null,
       last_turn_error_at: null,
     });

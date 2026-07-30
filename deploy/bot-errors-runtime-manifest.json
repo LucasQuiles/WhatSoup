@@ -135,10 +135,16 @@
         "load_runtime_agent_health_signals",
         "runtime_agent_health_signal_registry_invalid",
         "BOT_ERRORS_HEALTH_BODY_MAX_AGE_SECONDS",
-        "BOT_ERRORS_HEALTH_BODY_MAX_FUTURE_SKEW_SECONDS"
+        "BOT_ERRORS_HEALTH_BODY_MAX_FUTURE_SKEW_SECONDS",
+        "runtime_agent_last_successful_turn_at",
+        "runtime_agent_last_successful_turn_provider",
+        "health_provider_observation_fresh",
+        "health_provider_progress_fresh",
+        "health_provider_effective_evidence_valid",
+        "live_provider_progress_fresh"
       ],
       "path": "deploy/scripts/bot-errors-health-check.py",
-      "sha256": "c2eacfc588568adaacaefbd8f80488c64564370c837870310597185f0322f152"
+      "sha256": "45c684398068179d3503ce7d67047c7a964288e9646f42fd9f8671d40cfcd7ec"
     },
     {
       "mustContain": [

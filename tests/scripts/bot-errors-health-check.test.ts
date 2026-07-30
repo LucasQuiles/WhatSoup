@@ -5694,6 +5694,173 @@ print(m.probe_health(9092))
     expect(event.evidence).not.toContain('do-not-emit-this-session-id');
   });
 
+  it('requires fresh provider-attributed progress instead of session birth for health corroboration', () => {
+    const now = Math.floor(Date.parse('2026-06-12T03:00:00Z') / 1000);
+    const output = JSON.parse(python([
+      importHealthModulePrelude(),
+      'import json',
+      `m.current_epoch = lambda: ${now}`,
+      'def evidence(snapshot):',
+      '    line = m.health_probe_details(200, json.dumps(snapshot), "agent-alpha")',
+      '    return m.provider_live_session_from_health("claude-cli", line, 1800)',
+      'progressing = evidence({',
+      '    "status": "healthy",',
+      '    "generated_at": "2026-06-12T02:59:58Z",',
+      '    "runtime": {"agent": {',
+      '        "activeSessions": 1, "lastSessionStatus": "active",',
+      '        "lastSessionStartedAt": "2026-06-12T00:00:00Z",',
+      '        "effectiveProvider": "claude-cli", "primaryProvider": "claude-cli",',
+      '        "turnCapability": {"lastSuccessfulTurnAt": 1781233140000, "lastSuccessfulTurnProvider": "claude-cli"},',
+      '    }},',
+      '})',
+      'idle = evidence({',
+      '    "status": "healthy",',
+      '    "generated_at": "2026-06-12T02:59:58Z",',
+      '    "runtime": {"agent": {',
+      '        "activeSessions": 1, "lastSessionStatus": "active",',
+      '        "lastSessionStartedAt": "2026-06-12T02:59:58Z",',
+      '        "effectiveProvider": "claude-cli", "primaryProvider": "claude-cli",',
+      '    }},',
+      '})',
+      'stale = evidence({',
+      '    "status": "healthy",',
+      '    "generated_at": "2026-06-12T01:00:00Z",',
+      '    "runtime": {"agent": {',
+      '        "activeSessions": 1, "lastSessionStatus": "active",',
+      '        "lastSessionStartedAt": "2026-06-12T02:59:58Z",',
+      '        "effectiveProvider": "claude-cli", "primaryProvider": "claude-cli",',
+      '        "turnCapability": {"lastSuccessfulTurnAt": 1781233140000, "lastSuccessfulTurnProvider": "claude-cli"},',
+      '    }},',
+      '})',
+      'fallback = evidence({',
+      '    "status": "healthy",',
+      '    "generated_at": "2026-06-12T02:59:58Z",',
+      '    "runtime": {"agent": {',
+      '        "activeSessions": 1, "lastSessionStatus": "active",',
+      '        "lastSessionStartedAt": "2026-06-12T02:59:58Z",',
+      '        "effectiveProvider": "openai-cli", "primaryProvider": "claude-cli",',
+      '        "turnCapability": {"lastSuccessfulTurnAt": 1781233140000, "lastSuccessfulTurnProvider": "claude-cli"},',
+      '    }},',
+      '})',
+      'malformed_effective = evidence({',
+      '    "status": "healthy",',
+      '    "generated_at": "2026-06-12T02:59:58Z",',
+      '    "runtime": {"agent": {',
+      '        "activeSessions": 1, "lastSessionStatus": "active",',
+      '        "lastSessionStartedAt": "2026-06-12T02:59:58Z",',
+      '        "effectiveProvider": "claude/cli", "primaryProvider": "claude-cli",',
+      '        "turnCapability": {"lastSuccessfulTurnAt": 1781233140000, "lastSuccessfulTurnProvider": "claude-cli"},',
+      '    }},',
+      '})',
+      'wrong_progress_provider = evidence({',
+      '    "status": "healthy",',
+      '    "generated_at": "2026-06-12T02:59:58Z",',
+      '    "runtime": {"agent": {',
+      '        "activeSessions": 1, "lastSessionStatus": "active",',
+      '        "effectiveProvider": "claude-cli", "primaryProvider": "claude-cli",',
+      '        "turnCapability": {"lastSuccessfulTurnAt": 1781233140000, "lastSuccessfulTurnProvider": "openai-cli"},',
+      '    }},',
+      '})',
+      'stale_progress = evidence({',
+      '    "status": "healthy",',
+      '    "generated_at": "2026-06-12T02:59:58Z",',
+      '    "runtime": {"agent": {',
+      '        "activeSessions": 1, "lastSessionStatus": "active",',
+      '        "effectiveProvider": "claude-cli", "primaryProvider": "claude-cli",',
+      '        "turnCapability": {"lastSuccessfulTurnAt": 1781231399000, "lastSuccessfulTurnProvider": "claude-cli"},',
+      '    }},',
+      '})',
+      'print(json.dumps({"progressing": progressing, "idle": idle, "stale": stale, "fallback": fallback, "malformed_effective": malformed_effective, "wrong_progress_provider": wrong_progress_provider, "stale_progress": stale_progress}))',
+    ].join('\n'))) as Record<string, { fresh: boolean; fragments: string[] }>;
+
+    expect(output.progressing!.fresh).toBe(true);
+    expect(output.progressing!.fragments).toContain('health_provider_observation_fresh=true');
+    expect(output.progressing!.fragments).toContain('health_provider_progress_fresh=true');
+    expect(output.idle!.fresh).toBe(false);
+    expect(output.idle!.fragments).toContain('health_provider_progress_fresh=false');
+    expect(output.stale!.fresh).toBe(false);
+    expect(output.stale!.fragments).toContain('health_provider_observation_fresh=false');
+    expect(output.fallback!.fresh).toBe(false);
+    expect(output.fallback!.fragments).toContain('health_provider_match=false');
+    expect(output.malformed_effective!.fresh).toBe(false);
+    expect(output.malformed_effective!.fragments).toContain('health_provider_effective_evidence_valid=false');
+    expect(output.wrong_progress_provider!.fresh).toBe(false);
+    expect(output.wrong_progress_provider!.fragments).toContain('health_provider_progress_provider_match=false');
+    expect(output.stale_progress!.fresh).toBe(false);
+    expect(output.stale_progress!.fragments).toContain('health_provider_progress_fresh=false');
+  });
+
+  it('does not let a newly started database session establish provider freshness', () => {
+    tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-health-'));
+    const dbPath = join(tmpRoot, 'bot.db');
+    const now = Math.floor(Date.parse('2026-06-12T03:00:00Z') / 1000);
+    const output = JSON.parse(python([
+      importHealthModulePrelude(),
+      'import json, os, sqlite3',
+      `m.current_epoch = lambda: ${now}`,
+      `db_path = ${JSON.stringify(dbPath)}`,
+      'conn = sqlite3.connect(db_path)',
+      'conn.execute("CREATE TABLE agent_sessions (id INTEGER, claude_pid INTEGER, provider TEXT, status TEXT, started_at TEXT, last_message_at TEXT, transcript_path TEXT)")',
+      'conn.execute("INSERT INTO agent_sessions VALUES (?, ?, ?, ?, ?, ?, ?)", (1, os.getpid(), "claude-cli", "active", "2026-06-12T02:59:58Z", None, None))',
+      'conn.commit()',
+      'conn.close()',
+      'result = m.provider_live_session_from_db("agent-alpha", {"paths": {"dbPath": db_path}}, "claude-cli", 1800, 1)',
+      'print(json.dumps(result))',
+    ].join('\n'))) as { fresh: boolean; fragments: string[] };
+
+    expect(output.fresh).toBe(false);
+    expect(output.fragments).toContain('live_provider_progress_fresh=false');
+  });
+
+  it('requires a single database session to be both live and recently active', () => {
+    tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-health-'));
+    const dbPath = join(tmpRoot, 'bot.db');
+    const now = Math.floor(Date.parse('2026-06-12T03:00:00Z') / 1000);
+    const output = JSON.parse(python([
+      importHealthModulePrelude(),
+      'import json, sqlite3',
+      `m.current_epoch = lambda: ${now}`,
+      'm.provider_process_alive = lambda pid: pid == 101',
+      'm.provider_process_command_matches = lambda pid, provider, timeout: (False, None)',
+      `db_path = ${JSON.stringify(dbPath)}`,
+      'conn = sqlite3.connect(db_path)',
+      'conn.execute("CREATE TABLE agent_sessions (id INTEGER, claude_pid INTEGER, provider TEXT, status TEXT, started_at TEXT, last_message_at TEXT, transcript_path TEXT)")',
+      'conn.execute("INSERT INTO agent_sessions VALUES (?, ?, ?, ?, ?, ?, ?)", (1, 101, "claude-cli", "active", "2026-06-12T02:59:58Z", None, None))',
+      'conn.execute("INSERT INTO agent_sessions VALUES (?, ?, ?, ?, ?, ?, ?)", (2, 202, "claude-cli", "active", "2026-06-12T02:59:00Z", "2026-06-12T02:59:59Z", None))',
+      'conn.commit()',
+      'conn.close()',
+      'result = m.provider_live_session_from_db("agent-alpha", {"paths": {"dbPath": db_path}}, "claude-cli", 1800, 1)',
+      'print(json.dumps(result))',
+    ].join('\n'))) as { fresh: boolean; fragments: string[] };
+
+    expect(output.fresh).toBe(false);
+    expect(output.fragments).toContain('live_provider_progress_fresh=false');
+  });
+
+  it('accepts a live database session with fresh post-start activity', () => {
+    tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-health-'));
+    const dbPath = join(tmpRoot, 'bot.db');
+    const now = Math.floor(Date.parse('2026-06-12T03:00:00Z') / 1000);
+    const output = JSON.parse(python([
+      importHealthModulePrelude(),
+      'import json, sqlite3',
+      `m.current_epoch = lambda: ${now}`,
+      'm.provider_process_alive = lambda pid: pid == 101',
+      'm.provider_process_command_matches = lambda pid, provider, timeout: (False, None)',
+      `db_path = ${JSON.stringify(dbPath)}`,
+      'conn = sqlite3.connect(db_path)',
+      'conn.execute("CREATE TABLE agent_sessions (id INTEGER, claude_pid INTEGER, provider TEXT, status TEXT, started_at TEXT, last_message_at TEXT, transcript_path TEXT)")',
+      'conn.execute("INSERT INTO agent_sessions VALUES (?, ?, ?, ?, ?, ?, ?)", (1, 101, "claude-cli", "active", "2026-06-12T02:59:00Z", "2026-06-12T02:59:58Z", None))',
+      'conn.commit()',
+      'conn.close()',
+      'result = m.provider_live_session_from_db("agent-alpha", {"paths": {"dbPath": db_path}}, "claude-cli", 1800, 1)',
+      'print(json.dumps(result))',
+    ].join('\n'))) as { fresh: boolean; fragments: string[] };
+
+    expect(output.fresh).toBe(true);
+    expect(output.fragments).toContain('live_provider_progress_fresh=true');
+  });
+
   it('treats a headless Claude auth probe as advisory when fresh live runtime evidence contradicts it', () => {
     tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-health-'));
     const configDir = join(tmpRoot, '.config', 'whatsoup', 'instances', 'agent-alpha');
@@ -5748,6 +5915,10 @@ print(m.probe_health(9092))
               effectiveProvider: 'claude-cli',
               fallbackActiveUntil: null,
               agentProvider: 'claude-cli',
+              turnCapability: {
+                lastSuccessfulTurnAt: Date.parse('2026-06-12T02:59:00Z'),
+                lastSuccessfulTurnProvider: 'claude-cli',
+              },
             },
           },
         }),

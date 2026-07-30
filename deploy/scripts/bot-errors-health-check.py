@@ -323,6 +323,16 @@ def append_evidence_field(details: list[str], key: str, value: Any, max_len: int
             details.append(f"{key}={rendered}")
 
 
+PROVIDER_EVIDENCE_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
+
+
+def bounded_provider_name(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    candidate = value.strip()
+    return candidate if PROVIDER_EVIDENCE_NAME_RE.fullmatch(candidate) else None
+
+
 def current_epoch() -> int:
     raw = os.environ.get("BOT_ERRORS_DRY_NOW_EPOCH")
     if raw is not None:
@@ -2845,6 +2855,21 @@ def health_probe_details(status: int, body: str, expected_name: str | None = Non
         ]:
             value = agent.get(key)
             append_evidence_field(details, label, value)
+        turn_capability = agent.get("turnCapability")
+        if isinstance(turn_capability, dict):
+            last_successful_turn_at = read_int(turn_capability.get("lastSuccessfulTurnAt"))
+            if last_successful_turn_at is not None and last_successful_turn_at >= 0:
+                details.append(
+                    f"runtime_agent_last_successful_turn_at={last_successful_turn_at}"
+                )
+            last_successful_turn_provider = bounded_provider_name(
+                turn_capability.get("lastSuccessfulTurnProvider")
+            )
+            if last_successful_turn_provider is not None:
+                details.append(
+                    "runtime_agent_last_successful_turn_provider="
+                    f"{last_successful_turn_provider}"
+                )
         health_signals, registry_error = load_runtime_agent_health_signals()
         if registry_error is not None:
             add_marker("runtime_agent_health_signal_registry_invalid")
@@ -3895,38 +3920,108 @@ def provider_live_session_from_dry(provider: str, freshness_seconds: int) -> dic
 
 def provider_live_session_from_health(provider: str, health_probe_line: str | None, freshness_seconds: int) -> dict[str, Any]:
     fragments: list[str] = []
-    active = evidence_int(health_probe_line, "runtime_agent_active_sessions") or 0
+    active = max(0, evidence_int(health_probe_line, "runtime_agent_active_sessions") or 0)
     latest_started_at = evidence_field(health_probe_line, "runtime_agent_last_session_started_at")
     status = evidence_field(health_probe_line, "runtime_agent_last_session_status")
-    providers = [
-        evidence_field(health_probe_line, "runtime_agent_effective_provider"),
-        evidence_field(health_probe_line, "runtime_agent_primary_provider"),
-        evidence_field(health_probe_line, "runtime_agent_agent_provider"),
-        evidence_field(health_probe_line, "instance_effective_provider"),
-        evidence_field(health_probe_line, "instance_provider"),
-    ]
-    rendered_providers = [value for value in providers if isinstance(value, str) and value]
-    provider_match = not rendered_providers or provider in rendered_providers
+    generated_at = evidence_field(health_probe_line, "generated_at")
+    requested_provider = bounded_provider_name(provider)
+    runtime_effective_provider = evidence_field(
+        health_probe_line, "runtime_agent_effective_provider"
+    )
+    instance_effective_provider = evidence_field(
+        health_probe_line, "instance_effective_provider"
+    )
+    effective_provider_value = (
+        runtime_effective_provider
+        if runtime_effective_provider is not None
+        else instance_effective_provider
+    )
+    effective_provider = bounded_provider_name(effective_provider_value)
+    effective_evidence_valid = (
+        effective_provider_value is None or effective_provider is not None
+    )
+    primary_provider_value = next(
+        (
+            candidate
+            for candidate in [
+                evidence_field(health_probe_line, "runtime_agent_primary_provider"),
+                evidence_field(health_probe_line, "runtime_agent_agent_provider"),
+                evidence_field(health_probe_line, "instance_provider"),
+            ]
+            if candidate is not None
+        ),
+        None,
+    )
+    primary_provider = bounded_provider_name(primary_provider_value)
+    current_provider = (
+        effective_provider if effective_provider_value is not None else primary_provider
+    )
+    provider_match = (
+        requested_provider is not None
+        and effective_evidence_valid
+        and current_provider == requested_provider
+    )
+    progress_at_ms = evidence_int(health_probe_line, "runtime_agent_last_successful_turn_at")
+    progress_provider = bounded_provider_name(
+        evidence_field(health_probe_line, "runtime_agent_last_successful_turn_provider")
+    )
+
+    fragments.append("live_provider_source=health")
     if active > 0:
-        fragments.append("live_provider_source=health")
         fragments.append(f"health_provider_active_sessions={active}")
-    if rendered_providers:
-        fragments.append("health_provider_candidates=" + ",".join(
-            redact_evidence_string(value, 80) for value in dict.fromkeys(rendered_providers)
-        ))
-        fragments.append(f"health_provider_match={str(provider_match).lower()}")
-    age: int | None = None
+    if current_provider is not None:
+        fragments.append(f"health_provider_current={current_provider}")
+    fragments.append(
+        "health_provider_effective_evidence_valid="
+        f"{str(effective_evidence_valid).lower()}"
+    )
+    fragments.append(f"health_provider_match={str(provider_match).lower()}")
+    observation_fresh = False
+    if generated_at:
+        generated_epoch = parse_iso_epoch(generated_at)
+        if generated_epoch is not None:
+            observation_age = current_epoch() - generated_epoch
+            fragments.append(f"health_provider_observation_age_seconds={observation_age}")
+            max_age = env_int("BOT_ERRORS_HEALTH_BODY_MAX_AGE_SECONDS", 30)
+            max_future_skew = env_int("BOT_ERRORS_HEALTH_BODY_MAX_FUTURE_SKEW_SECONDS", 5)
+            observation_fresh = -max_future_skew <= observation_age <= max_age
+        fragments.append(f"health_provider_observed_at={redact_evidence_string(generated_at, 80)}")
+    fragments.append(f"health_provider_observation_fresh={str(observation_fresh).lower()}")
     if latest_started_at:
         started_epoch = parse_iso_epoch(latest_started_at)
         if started_epoch is not None:
-            age = max(0, current_epoch() - started_epoch)
-            fragments.append(f"health_provider_latest_age_seconds={age}")
+            session_lifetime_age = current_epoch() - started_epoch
+            fragments.append(
+                "health_provider_session_lifetime_age_seconds="
+                f"{session_lifetime_age}"
+            )
         fragments.append(f"health_provider_latest_started_at={redact_evidence_string(latest_started_at, 80)}")
+    progress_fresh = False
+    progress_provider_match = (
+        requested_provider is not None and progress_provider == requested_provider
+    )
+    if progress_at_ms is not None and progress_at_ms >= 0:
+        progress_age = (current_epoch() * 1000 - progress_at_ms) // 1000
+        fragments.append(f"health_provider_progress_age_seconds={progress_age}")
+        max_future_skew = env_int("BOT_ERRORS_HEALTH_BODY_MAX_FUTURE_SKEW_SECONDS", 5)
+        progress_fresh = -max_future_skew <= progress_age <= freshness_seconds
+    if progress_provider is not None:
+        fragments.append(f"health_provider_progress_provider={progress_provider}")
+    fragments.append(
+        f"health_provider_progress_provider_match={str(progress_provider_match).lower()}"
+    )
+    fragments.append(f"health_provider_progress_fresh={str(progress_fresh).lower()}")
     if status:
         fragments.append(f"health_provider_last_session_status={redact_evidence_string(status, 40)}")
-    fresh = provider_match and active > 0 and status == "active" and age is not None and age <= freshness_seconds
-    if active > 0:
-        fragments.append(f"health_provider_fresh={str(fresh).lower()}")
+    fresh = (
+        observation_fresh
+        and provider_match
+        and active > 0
+        and status == "active"
+        and progress_provider_match
+        and progress_fresh
+    )
+    fragments.append(f"health_provider_fresh={str(fresh).lower()}")
     return {
         "fresh": fresh,
         "active": active if provider_match else 0,
@@ -4046,39 +4141,74 @@ def provider_live_session_from_db(
     alive = 0
     command_matches = 0
     command_hash: str | None = None
-    latest_epoch: int | None = None
-    latest_at: str | None = None
+    fresh_live_sessions = 0
+    latest_progress_epoch: int | None = None
+    latest_progress_at: str | None = None
+    latest_started_epoch: int | None = None
+    latest_started_at: str | None = None
+    progress_precedes_start = False
     legacy_home_bug = False
+    now_epoch = current_epoch()
+    max_future_skew = env_int("BOT_ERRORS_HEALTH_BODY_MAX_FUTURE_SKEW_SECONDS", 5)
     for row in matched_rows:
         transcript_path = row["transcript_path"]
         if isinstance(transcript_path, str) and "/.claude/projects/-home-" in transcript_path:
             legacy_home_bug = True
         pid = read_int(row["claude_pid"])
-        if pid is not None and provider_process_alive(pid):
+        row_alive = pid is not None and provider_process_alive(pid)
+        if row_alive:
             alive += 1
             command_match, hashed = provider_process_command_matches(pid, provider, timeout_seconds)
             if command_match:
                 command_matches += 1
             if hashed and command_hash is None:
                 command_hash = hashed
-        for raw_at in [row["last_message_at"], row["started_at"]]:
-            epoch = parse_iso_epoch(raw_at)
-            if epoch is not None and (latest_epoch is None or epoch > latest_epoch):
-                latest_epoch = epoch
-                latest_at = raw_at
+        started_epoch = parse_iso_epoch(row["started_at"])
+        if started_epoch is not None and (
+            latest_started_epoch is None or started_epoch > latest_started_epoch
+        ):
+            latest_started_epoch = started_epoch
+            latest_started_at = row["started_at"]
+        progress_epoch = parse_iso_epoch(row["last_message_at"])
+        if progress_epoch is not None and (
+            started_epoch is None or progress_epoch >= started_epoch
+        ):
+            if latest_progress_epoch is None or progress_epoch > latest_progress_epoch:
+                latest_progress_epoch = progress_epoch
+                latest_progress_at = row["last_message_at"]
+            progress_age = now_epoch - progress_epoch
+            row_progress_fresh = -max_future_skew <= progress_age <= freshness_seconds
+            if row_alive and row_progress_fresh:
+                fresh_live_sessions += 1
+        elif progress_epoch is not None:
+            progress_precedes_start = True
     fragments.append(f"live_provider_alive_pids={alive}")
     fragments.append(f"live_provider_pid_command_matches={command_matches}")
     if command_hash:
         fragments.append(f"live_provider_pid_command_hash={command_hash}")
-    if latest_epoch is not None:
-        age = max(0, current_epoch() - latest_epoch)
-        fragments.append(f"live_provider_latest_age_seconds={age}")
-        if latest_at:
-            fragments.append(f"live_provider_latest_activity_at={redact_evidence_string(str(latest_at), 80)}")
-    else:
-        age = None
+    progress_fresh = False
+    if latest_progress_epoch is not None:
+        progress_age = now_epoch - latest_progress_epoch
+        fragments.append(f"live_provider_latest_age_seconds={progress_age}")
+        if latest_progress_at:
+            fragments.append(
+                "live_provider_latest_activity_at="
+                f"{redact_evidence_string(str(latest_progress_at), 80)}"
+            )
+        progress_fresh = fresh_live_sessions > 0
+    if latest_started_epoch is not None:
+        started_age = now_epoch - latest_started_epoch
+        fragments.append(f"live_provider_latest_started_age_seconds={started_age}")
+        if latest_started_at:
+            fragments.append(
+                "live_provider_latest_started_at="
+                f"{redact_evidence_string(str(latest_started_at), 80)}"
+            )
+    if progress_precedes_start:
+        fragments.append("live_provider_progress_precedes_session_start=true")
     fragments.append(f"live_provider_transcript_path_legacy_home_bug={str(legacy_home_bug).lower()}")
-    fresh = len(matched_rows) > 0 and alive > 0 and age is not None and age <= freshness_seconds
+    fragments.append(f"live_provider_progress_fresh={str(progress_fresh).lower()}")
+    fresh = len(matched_rows) > 0 and alive > 0 and progress_fresh
     fragments.append(f"live_provider_fresh={str(fresh).lower()}")
     return {
         "fresh": fresh,
