@@ -1,9 +1,19 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { ConnectionManager } from '../../src/transport/connection.ts';
 import { TwilioConnection } from '../../src/transport/twilio/connection-bridge.ts';
+import { TwilioSmsAdapter } from '../../src/transport/twilio/adapter.ts';
+import { MockTwilioSmsPort } from '../../src/transport/twilio/testing/mock-port.ts';
+import { SignalConnection } from '../../src/transport/signal/connection-bridge.ts';
+import { SignalAdapter } from '../../src/transport/signal/adapter.ts';
+import { MockSignalPort, makeSignalConfig } from './signal/mock-port.ts';
+import { ImessageConnection } from '../../src/transport/imessage/connection-bridge.ts';
+import { ImessageAdapter } from '../../src/transport/imessage/adapter.ts';
+import { MockImessagePort, makeImessageConfig } from './imessage/mock-port.ts';
 import { SqliteIdentityStore } from '../../src/core/outbound-identity/store.ts';
 import { Database } from '../../src/core/database.ts';
 import { OutboundIdentityError } from '../../src/core/outbound-identity/guard.ts';
+import type { SendOptions, SubmissionReceipt } from '../../src/core/types.ts';
+import { makeTwilioConfig } from './twilio/helpers.ts';
 
 const COLD = '11111110000402@lid';
 
@@ -14,6 +24,42 @@ function coldStore(): SqliteIdentityStore {
   db.raw.prepare('INSERT INTO lid_mappings (lid, phone_jid) VALUES (?, ?)')
     .run('11111110000402', '15550009999@s.whatsapp.net');
   return new SqliteIdentityStore(db.raw);
+}
+
+interface GuardedBridge {
+  setIdentityStore(store: SqliteIdentityStore, mode: 'enforce'): void;
+  sendMessage(chatJid: string, text: string, opts?: SendOptions): Promise<SubmissionReceipt>;
+}
+
+function nonBaileysBridgeCases(): Array<{
+  name: string;
+  bridge: GuardedBridge;
+  coldTarget: string;
+  submissionCount(): number;
+}> {
+  const twilioPort = new MockTwilioSmsPort();
+  const signalPort = new MockSignalPort();
+  const imessagePort = new MockImessagePort();
+  return [
+    {
+      name: 'Twilio',
+      bridge: new TwilioConnection(new TwilioSmsAdapter(makeTwilioConfig(), twilioPort)),
+      coldTarget: '+15550009999@sms',
+      submissionCount: () => twilioPort.sent.length,
+    },
+    {
+      name: 'Signal',
+      bridge: new SignalConnection(new SignalAdapter(makeSignalConfig(), signalPort)),
+      coldTarget: '+15550009999@signal',
+      submissionCount: () => signalPort.sent.length,
+    },
+    {
+      name: 'iMessage',
+      bridge: new ImessageConnection(new ImessageAdapter(makeImessageConfig(), imessagePort)),
+      coldTarget: 'cold@example.test@imessage',
+      submissionCount: () => imessagePort.sent.length,
+    },
+  ];
 }
 
 /** Build a ConnectionManager with a fake sock and an enforce-mode cold store. */
@@ -140,4 +186,21 @@ describe('cross-transport — TwilioConnection egress is guarded', () => {
     );
     expect(sendText).not.toHaveBeenCalled();
   });
+});
+
+describe('cross-transport — system caller provenance', () => {
+  it.each(nonBaileysBridgeCases())(
+    '$name preserves the health caller but keeps a default caller floored',
+    async ({ bridge, coldTarget, submissionCount }) => {
+      bridge.setIdentityStore(coldStore(), 'enforce');
+
+      await expect(bridge.sendMessage(coldTarget, 'synthetic health text', { caller: 'health' }))
+        .resolves.toEqual(expect.objectContaining({ waMessageId: expect.any(String) }));
+      expect(submissionCount()).toBe(1);
+
+      await expect(bridge.sendMessage(coldTarget, 'synthetic default text'))
+        .rejects.toBeInstanceOf(OutboundIdentityError);
+      expect(submissionCount()).toBe(1);
+    },
+  );
 });
