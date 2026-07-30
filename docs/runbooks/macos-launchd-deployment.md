@@ -249,6 +249,56 @@ file:
 launchctl kickstart -k gui/$(id -u)/com.whatsoup.<instance>
 ```
 
+### Generated-instance restart-policy migration
+
+Generated instance plists restart both nonzero application exits and
+crash-associated signals with `KeepAlive={Crashed:true, SuccessfulExit:false}`
+and use a 60-second `ThrottleInterval` to bound repeated failures. This matches
+the systemd failure-restart contract while preserving launchd's crash-specific
+coverage and avoiding a hot respawn loop. `KeepAlive` implies an initial launch,
+so new instances intentionally install their plist only after the pairing helper
+has saved credentials and exited successfully.
+
+For one existing generated plist written by an older generator, first inspect
+the exact target without changing it. The command verifies the instance label
+and `ProgramArguments` structural identity before it will overwrite anything;
+do not use it to take over a hand-managed plist that happens to match those
+fields:
+
+```bash
+npm run reconcile-launchd-restart-policy -- --instance <instance>
+```
+
+Run it as the same GUI-login user that owns the instance plist; do not use
+`sudo`. The command derives both `~/Library/LaunchAgents` and its `gui/<uid>`
+target from the current user.
+
+Then apply the one-instance reload:
+
+```bash
+npm run reconcile-launchd-restart-policy -- --instance <instance> --apply
+```
+
+`--apply` atomically replaces only a plist whose stable generated structural identity
+matches that instance, then runs `bootout` on the named GUI-domain service
+followed by `bootstrap` and `kickstart -k`. It therefore interrupts and
+starts/restarts the named instance. The command is deliberately strict: if it
+cannot boot out the existing service, or if `bootstrap` or `kickstart` fails,
+it restores the prior plist and reports failure. It does not pre-probe whether
+the job is loaded. Because it performs the same reload sequence, the preceding
+SSH keychain-session hazard applies; run the acceptance check below after every
+`--apply`. If a prior manual stop left the job unloaded, explicitly reload the
+existing plist before retrying:
+
+```bash
+domain="gui/$(id -u)"
+plist="$HOME/Library/LaunchAgents/com.whatsoup.<instance>.plist"
+launchctl bootstrap "$domain" "$plist"
+launchctl kickstart -k "$domain/com.whatsoup.<instance>"
+```
+
+Do not turn this per-instance command into a fleet-wide loop.
+
 **Acceptance gate after any restart of a keychain-backed instance: confirm
 `turn_capability.model_usable=true`, not just health HTTP 200** (which is true even
 while degraded):
