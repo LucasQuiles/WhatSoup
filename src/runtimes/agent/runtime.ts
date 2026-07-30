@@ -9329,8 +9329,14 @@ export class AgentRuntime implements Runtime {
       typeof session?.captureEvidenceBinding === 'function'
         ? session.captureEvidenceBinding()
         : null;
+    // Defensive typeof guard mirrors the other getProviderId call sites in this
+    // file (e.g. maybeStartAutoCompact, /status, recordProviderFallback) and the
+    // sibling captureEvidenceBinding read above: an indeterminate provider fails
+    // safe to null rather than throwing on a session that lacks the accessor.
+    const successProvider =
+      typeof session?.getProviderId === 'function' ? session.getProviderId() : null;
     this.turnCapabilityTracker.recordSuccess(
-      session?.getProviderId() ?? null,
+      successProvider,
       session,
       sessionBinding,
     );
