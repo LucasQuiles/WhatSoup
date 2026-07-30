@@ -247,7 +247,7 @@ describe('migration 50 metadata-only tool-call evidence', () => {
     expect(raw.prepare('PRAGMA integrity_check').get()).toEqual({ integrity_check: 'ok' });
   });
 
-  it('is registered as the current schema migration', () => {
+  it('remains registered in the schema migration history', () => {
     const db = new Database(':memory:');
     db.open();
     try {

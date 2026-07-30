@@ -58,7 +58,7 @@ describe('migration 52 outbound ambiguity episodes', () => {
       .toEqual({ ambiguity_at: '2026-07-04 00:02:00' });
   });
 
-  it('is registered as the current schema migration', () => {
+  it('remains registered when a later schema migration is current', () => {
     const db = new Database(':memory:');
     db.open();
     try {

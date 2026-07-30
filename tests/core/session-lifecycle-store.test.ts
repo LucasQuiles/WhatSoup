@@ -137,6 +137,137 @@ describe('SessionLifecycleStore through DurabilityEngine', () => {
     ).get()).toEqual({ n: 2 });
   });
 
+  it('quarantines an exact rejected checkpoint, terminalizes its exact prior row, and resolves only through fresh inbound', () => {
+    const priorRowId = insertAgentRow(
+      db,
+      'rejected-completed-delivery-session',
+      'suspended',
+      'resume-admission-key',
+    );
+    durability.upsertSessionCheckpoint('resume-admission-key', {
+      sessionId: 'rejected-completed-delivery-session',
+      sessionStatus: 'suspended',
+      lastInboundSeq: 1,
+      completedInboundSeq: 1,
+      completedDeliveryJid: 'resume-admission-key@s.whatsapp.net',
+      completedDeliveryNamespace: 's.whatsapp.net',
+      completedScope: 'per_chat',
+      completedLogicalTurnId: 'bad-turn',
+      completedManagerId: 'bad-manager',
+      completedGeneration: 1,
+    });
+
+    durability.quarantineCompletedDeliveryIdentityCheckpoint({
+      conversationKey: 'resume-admission-key',
+      providerSessionId: 'rejected-completed-delivery-session',
+      provider: 'claude-cli',
+      reason: 'invalid',
+    });
+    durability.quarantineCompletedDeliveryIdentityCheckpoint({
+      conversationKey: 'resume-admission-key',
+      providerSessionId: 'rejected-completed-delivery-session',
+      provider: 'claude-cli',
+      reason: 'invalid',
+    });
+
+    expect(agentRow(db, priorRowId)).toMatchObject({ status: 'resume_failed' });
+    expect(durability.getSessionCheckpoint('resume-admission-key'))
+      .toMatchObject({ session_status: 'orphaned' });
+    expect(db.raw.prepare(`
+      SELECT target_kind, target_id, state, reason, attempts, owner, next_action
+      FROM completed_delivery_identity_admissions
+      ORDER BY target_kind
+    `).all()).toEqual([
+      {
+        target_kind: 'agent_session',
+        target_id: priorRowId,
+        state: 'quarantined',
+        reason: 'invalid',
+        attempts: 1,
+        owner: 'fresh_inbound',
+        next_action: 'fresh_inbound',
+      },
+      {
+        target_kind: 'checkpoint',
+        target_id: expect.any(Number),
+        state: 'quarantined',
+        reason: 'invalid',
+        attempts: 1,
+        owner: 'fresh_inbound',
+        next_action: 'fresh_inbound',
+      },
+    ]);
+
+    const freshRowId = durability.beginFreshSessionLifecycle({
+      pid: 419,
+      cwd: '/tmp/fresh-admission',
+      chatJid: 'resume-admission-key@s.whatsapp.net',
+      workspaceKey: 'resume-admission-key',
+      provider: 'claude-cli',
+      conversationKey: 'resume-admission-key',
+    });
+
+    expect(freshRowId).not.toBe(priorRowId);
+    expect(agentRow(db, priorRowId)).toMatchObject({ status: 'resume_failed' });
+    expect(agentRow(db, freshRowId)).toMatchObject({ status: 'active', session_id: null });
+    expect(durability.getSessionCheckpoint('resume-admission-key'))
+      .toMatchObject({ session_id: null, session_status: 'active' });
+    expect(db.raw.prepare(`
+      SELECT state, resolved_at
+      FROM completed_delivery_identity_admissions
+      ORDER BY target_kind
+    `).all()).toEqual([
+      { state: 'resolved', resolved_at: expect.any(String) },
+      { state: 'resolved', resolved_at: expect.any(String) },
+    ]);
+  });
+
+  it('terminalizes an unscoped shared/single row with an operator-owned admission', () => {
+    const inserted = db.raw.prepare(`
+      INSERT INTO agent_sessions (
+        session_id, claude_pid, started_in_directory, chat_jid, workspace_key,
+        started_at, status, provider
+      ) VALUES ('unscoped-rejected-session', 410, '/tmp/unscoped', NULL, NULL,
+                datetime('now'), 'active', 'claude-cli')
+    `).run();
+    const priorRowId = Number(inserted.lastInsertRowid);
+
+    durability.quarantineCompletedDeliveryIdentityAgentSession({
+      agentSessionRowId: priorRowId,
+      providerSessionId: 'unscoped-rejected-session',
+      provider: 'claude-cli',
+      workspaceKey: null,
+      reason: 'missing',
+    });
+
+    expect(agentRow(db, priorRowId)).toMatchObject({ status: 'resume_failed' });
+    expect(db.raw.prepare(`
+      SELECT target_kind, target_id, state, reason, attempts, owner, next_action
+      FROM completed_delivery_identity_admissions
+    `).all()).toEqual([{
+      target_kind: 'agent_session',
+      target_id: priorRowId,
+      state: 'quarantined',
+      reason: 'missing',
+      attempts: 1,
+      owner: 'operator',
+      next_action: 'operator',
+    }]);
+
+    durability.beginFreshSessionLifecycle({
+      pid: 420,
+      cwd: '/tmp/other-fresh',
+      chatJid: 'other-fresh@s.whatsapp.net',
+      workspaceKey: 'other-fresh',
+      provider: 'claude-cli',
+      conversationKey: 'other-fresh',
+    });
+    expect(db.raw.prepare(`
+      SELECT state, resolved_at
+      FROM completed_delivery_identity_admissions
+    `).all()).toEqual([{ state: 'quarantined', resolved_at: null }]);
+  });
+
   it('reactivates one exact resumable row and its exact conversation checkpoint', () => {
     const rowId = insertAgentRow(db, 'resume-session', 'crashed', 'resume-a');
     durability.upsertSessionCheckpoint('resume-a', {
