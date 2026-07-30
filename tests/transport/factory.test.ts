@@ -66,6 +66,10 @@ describe('createConnection factory', () => {
   it('baileys config returns a ConnectionManager instance', () => {
     const conn = createConnection({ transport: 'baileys' });
     expect(conn).toBeInstanceOf(ConnectionManager);
+    expect(conn.getConnectionState()).toMatchObject({
+      connected: expect.any(Boolean),
+      state: expect.any(String),
+    });
   });
 
   it('twilio config with twilioConfig returns a TwilioConnection instance', () => {
@@ -74,6 +78,10 @@ describe('createConnection factory', () => {
       twilioConfig: makeTwilioConfig(),
     });
     expect(conn).toBeInstanceOf(TwilioConnection);
+    expect(conn.getConnectionState()).toMatchObject({
+      connected: expect.any(Boolean),
+      state: expect.any(String),
+    });
   });
 
   it('twilio transport without twilioConfig throws a loud error', () => {
@@ -125,6 +133,10 @@ describe('createConnection factory', () => {
     expect(typeof conn.connect).toBe('function');
     expect(typeof conn.shutdown).toBe('function');
     expect(conn.getSocket()).toBeNull();
+    expect(conn.getConnectionState()).toMatchObject({
+      connected: expect.any(Boolean),
+      state: expect.any(String),
+    });
   });
 
   it('imessage transport throws when imessageConfig is missing (defence-in-depth)', () => {
@@ -150,6 +162,10 @@ describe('createConnection factory', () => {
     expect(typeof conn.connect).toBe('function');
     expect(typeof conn.shutdown).toBe('function');
     expect(conn.getSocket()).toBeNull();
+    expect(conn.getConnectionState()).toMatchObject({
+      connected: expect.any(Boolean),
+      state: expect.any(String),
+    });
   });
 
   it('imessage transport throws when imessageConfig.sender is empty', () => {

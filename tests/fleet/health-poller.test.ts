@@ -374,6 +374,31 @@ describe('HealthPoller', () => {
     poller.stop();
   });
 
+  it('retains a startup-notification wait verbatim without degrading an otherwise healthy self instance', async () => {
+    const startupNotification = {
+      state: 'waiting_stability',
+      policy: 'generic',
+      stabilitySeconds: 600,
+      bootCountSinceNotification: 2,
+      lastBootAt: 1_753_825_600_000,
+      lastNotifiedAt: 1_753_825_000_000,
+      nextEligibleAt: 1_753_826_200_000,
+      lastSendAt: null,
+    };
+    const selfHealth = makeOnlineHealth({ startupNotification });
+    const instances = makeInstances(['self', makeInstance({ name: 'self' })]);
+
+    const poller = new HealthPoller(() => instances, 'self', () => selfHealth);
+    poller.start();
+    await vi.advanceTimersByTimeAsync(0);
+
+    const status = poller.getStatus('self');
+    expect(status).toMatchObject({ status: 'online', error: null });
+    expect(status!.health!.startupNotification).toEqual(startupNotification);
+
+    poller.stop();
+  });
+
   it('start() is idempotent — a second start does not double-poll', async () => {
     const getSelfHealth = vi.fn().mockReturnValue(makeOnlineHealth({ uptime_seconds: 1 }));
     const instances = makeInstances(['self', makeInstance({ name: 'self' })]);

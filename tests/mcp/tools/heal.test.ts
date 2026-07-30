@@ -225,6 +225,7 @@ vi.mock('../../../src/mcp/register-all.ts', () => ({
 // - withPeers: controlPeers has 'loops' and 'q' entries
 // - withoutPeers: controlPeers is empty
 const configWithPeers = {
+  transport: 'baileys' as const,
   controlPeers: new Map<string, string>([
     ['loops', '15559990001'],
     ['q', '15559990002'],
@@ -233,6 +234,7 @@ const configWithPeers = {
 };
 
 const configWithoutPeers = {
+  transport: 'baileys' as const,
   controlPeers: new Map<string, string>(),
   adminPhones: new Set<string>(['15550100001']),
 };
@@ -240,6 +242,7 @@ const configWithoutPeers = {
 // Default mock — overridden per-test via vi.mocked pattern
 vi.mock('../../../src/config.ts', () => ({
   config: {
+    transport: 'baileys' as const,
     controlPeers: new Map<string, string>([
       ['loops', '15559990001'],
       ['q', '15559990002'],
