@@ -45,6 +45,7 @@ BUNDLE_FILES=(
   "deploy/scripts/bot-errors-runtime-staleness.py"
   "deploy/scripts/bot-errors-emit.py"
   "deploy/scripts/lib/__init__.py"
+  "deploy/scripts/lib/bot_errors_envelope.py"
   "deploy/scripts/lib/bot_errors_redaction.py"
 )
 UNIT_FILES=(

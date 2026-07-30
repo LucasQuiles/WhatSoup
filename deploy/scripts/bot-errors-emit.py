@@ -22,10 +22,9 @@ if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
 from lib.bot_errors_redaction import redact_bot_errors_text, redact_json_value as redact_shared_json_value
+from lib.bot_errors_envelope import EVENT_TYPES, SEVERITIES, EnvelopeError, new_event_fields
 
 
-SEVERITIES = ("critical", "error", "warning", "info")
-EVENT_TYPES = ("alert", "clear")
 MAX_EVIDENCE_CHARS = 12000
 
 
@@ -449,7 +448,7 @@ def parse_critical_asset(raw: str | None) -> dict[str, Any] | None:
 
 def build_event(args: argparse.Namespace) -> dict[str, Any]:
     event_type = args.event_type
-    severity = args.severity or ("info" if event_type == "clear" else "critical")
+    severity = args.severity or ("info" if event_type in {"clear", "observation"} else "critical")
     instance = args.instance.strip() or "unknown"
     source = args.source.strip() or "unknown"
     summary = args.summary.strip() if isinstance(args.summary, str) else ""
@@ -465,10 +464,8 @@ def build_event(args: argparse.Namespace) -> dict[str, Any]:
         args.evidence = f"{base}\n\n{section}" if base else section
     evidence_text, evidence_sidecar_ref = read_evidence(args)
     event = {
-        "schemaVersion": 1,
+        **new_event_fields(event_type, severity),
         "id": event_id,
-        "eventType": event_type,
-        "severity": severity,
         "createdAt": created,
         "machine": socket.gethostname(),
         "platform": f"{host_system()} {host_release()}",
@@ -655,8 +652,12 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     args = parser.parse_args(argv)
     if args.clear:
         args.event_type = "clear"
-        args.severity = args.severity or "info"
-    if not args.summary and not args.clear:
+    args.severity = args.severity or ("info" if args.event_type in {"clear", "observation"} else "critical")
+    try:
+        new_event_fields(args.event_type, args.severity)
+    except EnvelopeError as exc:
+        parser.error(f"invalid event envelope: {exc.code}")
+    if not args.summary and args.event_type != "clear":
         parser.error("--summary is required unless --clear is used")
     return args
 
