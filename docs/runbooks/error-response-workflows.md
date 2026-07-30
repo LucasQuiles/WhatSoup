@@ -2,7 +2,7 @@
 
 How WhatSoup maps a provider/harness failure to a differentiated response —
 diagnostics, fallback, and the user-facing message. This runbook documents what
-is live (and how to enable it) versus what is built but not yet wired, plus the
+is live by default versus what is available behind opt-in flags, plus the
 operational signals.
 
 ## Architecture
