@@ -405,7 +405,7 @@ export async function handleConfigUpdate(
       throw new Error('body must be a JSON object');
     }
   } catch (err) {
-    jsonResponse(res, 400, validationError('Invalid JSON body.', 'unknown'));
+    jsonResponse(res, 400, validationError('invalid_json', 'unknown'));
     return;
   }
 
@@ -1000,7 +1000,7 @@ export async function handleCreateLine(
       throw new Error('body must be a JSON object');
     }
   } catch (err) {
-    jsonResponse(res, 400, validationError('Invalid JSON body.', 'instance_create'));
+    jsonResponse(res, 400, validationError('invalid_json', 'instance_create'));
     return;
   }
 

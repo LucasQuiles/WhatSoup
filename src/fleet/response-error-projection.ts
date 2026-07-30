@@ -182,6 +182,28 @@ export function classifyError(err: unknown): {
   return { code: 'internal_error', retryable: false };
 }
 
+// ── Registered validation messages ──────────────────────────────
+
+/**
+ * Registered client-safe validation messages (requirement 2).
+ * Only these exact strings may appear in validation responses.
+ * A caller MUST use a registered key — arbitrary/dynamic strings are rejected.
+ */
+export type ValidationMessageKey =
+  | 'invalid_json'
+  | 'invalid_decision_body'
+  | 'invalid_request_body'
+  | 'invalid_subject_type'
+  | 'invalid_name';
+
+const VALIDATION_MESSAGES: Record<ValidationMessageKey, string> = {
+  invalid_json: 'Invalid JSON body.',
+  invalid_decision_body: 'Invalid decision body.',
+  invalid_request_body: 'Invalid request body.',
+  invalid_subject_type: 'Invalid subject type.',
+  invalid_name: 'Name must be 2-30 lowercase alphanumeric/hyphens, starting with a letter.',
+};
+
 // ── Main projection functions ───────────────────────────────────
 
 /**
@@ -213,11 +235,11 @@ export function projectError(
 
 /**
  * Create a validation error response for client input errors.
- * The `message` parameter MUST be a static, client-safe string — never
- * derived from exception text, user input, or upstream values.
+ * Uses a registered client-safe message key (requirement 2) — arbitrary
+ * or dynamic strings are never accepted as the response message.
  */
 export function validationError(
-  message: string,
+  messageKey: ValidationMessageKey,
   operation: FleetOperation,
 ): FleetErrorResponse {
   return {
@@ -225,7 +247,7 @@ export function validationError(
     code: 'validation_failed',
     operation,
     stage: 'parse',
-    message,
+    message: VALIDATION_MESSAGES[messageKey],
     retryable: false,
     mutation_state: 'not_started',
     rollback_state: 'not_applicable',

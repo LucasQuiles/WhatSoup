@@ -152,9 +152,9 @@ describe('response-error-projection — schema completeness', () => {
   });
 
   it('validationError produces correct shape', () => {
-    const projected = validationError('Bad input', 'silence');
+    const projected = validationError('invalid_json', 'silence');
     expect(projected.code).toBe('validation_failed');
-    expect(projected.message).toBe('Bad input');
+    expect(projected.message).toBe('Invalid JSON body.');
     expect(projected.retryable).toBe(false);
     expect(projected.mutation_state).toBe('not_started');
   });

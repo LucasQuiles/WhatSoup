@@ -36,7 +36,7 @@ export async function handleAddSilence(req: IncomingMessage, res: ServerResponse
   try {
     raw = await readBody(req);
   } catch (err) {
-    jsonResponse(res, 400, validationError('Invalid request body.', 'silence'));
+    jsonResponse(res, 400, validationError('invalid_request_body', 'silence'));
     return;
   }
 

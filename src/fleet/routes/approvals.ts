@@ -84,7 +84,7 @@ export async function handlePostApprovalDecision(
     }
     decision = p as DecisionBody;
   } catch (err) {
-    jsonResponse(res, 400, validationError('Invalid decision body.', 'decision_process'));
+    jsonResponse(res, 400, validationError('invalid_decision_body', 'decision_process'));
     return;
   }
 

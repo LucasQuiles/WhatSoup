@@ -146,7 +146,9 @@ describe('handleGetChats', () => {
     const res = mockRes();
     handleGetChats(mockReq(), res, deps, { name: 'test-line' });
     expect(res._status).toBe(500);
-    expect(JSON.parse(res._body).error).toBe('db locked');
+    const body = JSON.parse(res._body);
+    expect(body.schema).toBe('fleet-error-v1');
+    expect(body.code).toBeDefined();
   });
 
   it('returns display-safe strings for null preview and timestamp fields', () => {
@@ -294,7 +296,9 @@ describe('handleGetChats', () => {
     handleGetChats(mockReq('/api/lines/test-line/chats'), res, deps, { name: 'test-line' });
 
     expect(res._status).toBe(500);
-    expect(JSON.parse(res._body).error).toBe('preview query failed');
+    const body = JSON.parse(res._body);
+    expect(body.schema).toBe('fleet-error-v1');
+    expect(body.code).toBeDefined();
   });
 });
 
@@ -319,7 +323,9 @@ describe('handleGetMessages', () => {
     const res = mockRes();
     handleGetMessages(mockReq('/api/lines/test-line/messages'), res, deps, { name: 'test-line' });
     expect(res._status).toBe(400);
-    expect(JSON.parse(res._body).error).toMatch(/conversation_key/);
+    const body = JSON.parse(res._body);
+    expect(body.schema).toBe('fleet-error-v1');
+    expect(body.code).toBe('validation_failed');
   });
 
   it('passes conversation_key and defaults to db reader', () => {
@@ -445,7 +451,9 @@ describe('handleGetMessages', () => {
     handleGetMessages(mockReq('/api/lines/test-line/messages?conversation_key=abc'), res, deps, { name: 'test-line' });
 
     expect(res._status).toBe(500);
-    expect(JSON.parse(res._body).error).toBe('message query failed');
+    const body = JSON.parse(res._body);
+    expect(body.schema).toBe('fleet-error-v1');
+    expect(body.code).toBeDefined();
   });
 });
 
@@ -470,7 +478,9 @@ describe('handleSearchMessages', () => {
     const res = mockRes();
     handleSearchMessages(mockReq('/api/lines/test-line/messages/search'), res, deps, { name: 'test-line' });
     expect(res._status).toBe(400);
-    expect(JSON.parse(res._body).error).toMatch(/q/);
+    const body = JSON.parse(res._body);
+    expect(body.schema).toBe('fleet-error-v1');
+    expect(body.code).toBe('validation_failed');
   });
 
   it('passes query, conversation_key, and limit to db reader', () => {
@@ -545,7 +555,9 @@ describe('handleSearchMessages', () => {
     handleSearchMessages(mockReq('/api/lines/test-line/messages/search?q=receipt'), res, deps, { name: 'test-line' });
 
     expect(res._status).toBe(500);
-    expect(JSON.parse(res._body).error).toBe('fts failed');
+    const body = JSON.parse(res._body);
+    expect(body.schema).toBe('fleet-error-v1');
+    expect(body.code).toBeDefined();
   });
 });
 
@@ -565,7 +577,9 @@ describe('handleSearchMessages', () => {
     const res = mockRes();
     handleSearchMessages(mockReq('/api/lines/test-line/messages/search?q=%20%20%20'), res, deps, { name: 'test-line' });
     expect(res._status).toBe(400);
-    expect(JSON.parse(res._body).error).toMatch(/q/);
+    const body = JSON.parse(res._body);
+    expect(body.schema).toBe('fleet-error-v1');
+    expect(body.code).toBe('validation_failed');
     expect(searchMessages).not.toHaveBeenCalled();
   });
 
@@ -603,7 +617,9 @@ describe('handleSearchMessages', () => {
     const res = mockRes();
     handleSearchMessages(mockReq('/api/lines/test-line/messages/search'), res, deps, { name: 'test-line' });
     expect(res._status).toBe(400);
-    expect(JSON.parse(res._body).error).toMatch(/q/);
+    const body = JSON.parse(res._body);
+    expect(body.schema).toBe('fleet-error-v1');
+    expect(body.code).toBe('validation_failed');
   });
 
   it('returns 400 for blank q without querying the database', () => {
@@ -617,7 +633,9 @@ describe('handleSearchMessages', () => {
     const res = mockRes();
     handleSearchMessages(mockReq('/api/lines/test-line/messages/search?q=%20%20%20'), res, deps, { name: 'test-line' });
     expect(res._status).toBe(400);
-    expect(JSON.parse(res._body).error).toMatch(/q/);
+    const body = JSON.parse(res._body);
+    expect(body.schema).toBe('fleet-error-v1');
+    expect(body.code).toBe('validation_failed');
     expect(searchMessages).not.toHaveBeenCalled();
   });
 
@@ -709,7 +727,9 @@ describe('handleGetAccess', () => {
     const failRes = mockRes();
     handleGetAccess(mockReq(), failRes, failDeps, { name: 'test-line' });
     expect(failRes._status).toBe(500);
-    expect(JSON.parse(failRes._body).error).toBe('access query failed');
+    const body = JSON.parse(failRes._body);
+    expect(body.schema).toBe('fleet-error-v1');
+    expect(body.code).toBeDefined();
   });
 });
 
@@ -759,10 +779,9 @@ describe('handleGetLogs', () => {
     handleGetLogs(mockReq(), res, deps, { name: 'test-line' });
 
     expect(res._status).toBe(503);
-    expect(JSON.parse(res._body)).toMatchObject({
-      error: 'log evidence unavailable',
-      code: 'ENOTDIR',
-    });
+    const body = JSON.parse(res._body);
+    expect(body.schema).toBe('fleet-error-v1');
+    expect(body.code).toBeDefined();
   });
 
   it('parses NDJSON log lines and returns them', () => {
@@ -873,9 +892,9 @@ describe('handleGetLogs', () => {
     handleGetLogs(mockReq(), res, deps, { name: 'test-line' });
 
     expect(res._status).toBe(503);
-    expect(JSON.parse(res._body)).toMatchObject({
-      error: 'log evidence unavailable',
-    });
+    const body = JSON.parse(res._body);
+    expect(body.schema).toBe('fleet-error-v1');
+    expect(body.code).toBeDefined();
   });
 
   it('normalizes non-string log fields before returning entries', () => {
@@ -1024,12 +1043,16 @@ describe('handleCheckDirectory', () => {
     const missing = mockRes();
     handleCheckDirectory(mockReq('/api/directories/check'), missing);
     expect(missing._status).toBe(400);
-    expect(JSON.parse(missing._body).error).toMatch(/path/);
+    const missingBody = JSON.parse(missing._body);
+    expect(missingBody.schema).toBe('fleet-error-v1');
+    expect(missingBody.code).toBe('validation_failed');
 
     const outside = mockRes();
     handleCheckDirectory(mockReq('/api/directories/check?path=/tmp'), outside);
     expect(outside._status).toBe(400);
-    expect(JSON.parse(outside._body).error).toMatch(/home directory/);
+    const outsideBody = JSON.parse(outside._body);
+    expect(outsideBody.schema).toBe('fleet-error-v1');
+    expect(outsideBody.code).toBe('validation_failed');
   });
 
   it('reports existing writable directories and missing home children', () => {

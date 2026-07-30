@@ -7,7 +7,7 @@ import type { FleetDiscovery } from '../discovery.ts';
 import type { FleetDbReader, MessageRow } from '../db-reader.ts';
 import { proxyToInstance } from '../http-proxy.ts';
 import { configRoot } from '../paths.ts';
-import { projectError } from '../response-error-projection.ts';
+import { projectError, validationError } from '../response-error-projection.ts';
 
 import { inspectLatestLogFile, readTailLinesDetailed } from '../log-utils.ts';
 import { resolveGroupNames } from '../group-resolver.ts';
@@ -275,7 +275,7 @@ export function handleGetMessages(
   const qs = parseQueryString(req.url);
   const conversationKey = qs.conversation_key;
   if (!conversationKey) {
-    jsonResponse(res, 400, { error: 'missing required query parameter: conversation_key' });
+    jsonResponse(res, 400, validationError('invalid_request_body', 'log_scan'));
     return;
   }
 
@@ -311,7 +311,7 @@ export function handleSearchMessages(
   const qs = parseQueryString(req.url);
   const query = qs.q?.trim() ?? '';
   if (!query) {
-    jsonResponse(res, 400, { error: 'missing required query parameter: q' });
+    jsonResponse(res, 400, validationError('invalid_request_body', 'log_scan'));
     return;
   }
 
@@ -505,12 +505,12 @@ export function handleCheckDirectory(
   const qs = parseQueryString(req.url);
   const dirPath = qs.path;
   if (!dirPath) {
-    jsonResponse(res, 400, { error: 'missing required query parameter: path' });
+    jsonResponse(res, 400, validationError('invalid_request_body', 'unknown'));
     return;
   }
   const resolved = canonicalizeDeepestExisting(path.resolve(dirPath));
   if (!isPathWithinAllowedRoot(resolved, os.homedir())) {
-    jsonResponse(res, 400, { error: 'path must be within the home directory' });
+    jsonResponse(res, 400, validationError('invalid_request_body', 'unknown'));
     return;
   }
   let exists = false;
