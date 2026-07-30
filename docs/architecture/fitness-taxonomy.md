@@ -11,7 +11,7 @@ rules into hooks, and semantic or human rules into the SDLC review flow.
 
 ## Rule Fields
 
-- `category`: architecture, invariant, process, hygiene, test, or meta.
+- `category`: architecture, invariant, process, hygiene, test, meta, or portability.
 - `detect`: mechanical, AST, semantic, or human.
 - `rings`: hook, eslint, guard, ci, or sdlc.
 - `severity`: block, warn, or advisory.
@@ -152,6 +152,21 @@ interprocedural analysis; the rule does not claim to cover them.
 | `hygiene.no-health-whatsapp-key-read` | mechanical | block | guard, ci | Block new direct `health.whatsapp` key reads in console; reads go through the generic transport-health accessor with legacy fallback. |
 | `hygiene.catch-justification` | ast | warn | eslint | Flag catch blocks whose bodies only swallow/no-op unless they carry a reasoned justification; 127 inherited semantic identities are shrink-only ratchet debt. |
 
+## Portability
+
+| id | detect | severity | rings | purpose |
+|----|--------|----------|-------|---------|
+| `portability.no-hardcoded-platform-binaries` | mechanical | block | guard, ci | Hardcoded `/usr/bin/python`, `/usr/bin/git`, etc. break on macOS and NixOS where binaries live elsewhere. Must use env-resolved lookups. |
+| `portability.platform-paths-guarded` | mechanical | block | guard, ci | `/proc/`, `/sys/`, `/run/` paths are Linux-only and must be behind a `process.platform === "linux"` guard or equivalent. |
+| `portability.systemctl-guarded` | mechanical | block | guard, ci | `systemctl` is Linux-only; callers must have a macOS `launchctl` fallback or platform guard. |
+| `portability.gnu-bsd-shell-flags` | mechanical | block | guard, ci | GNU-only shell flags (`readlink -f`, `sha256sum`, `stat -c`, `grep -P`, `mktemp --directory`) fail on BSD/macOS. Must use portable alternatives or platform branches. |
+| `portability.editorconfig-present` | mechanical | advisory | guard | Repository must maintain `.editorconfig` for cross-platform editor consistency (LF line endings, indentation). |
+| `portability.arch-blind-binary-resolution` | semantic | warn | guard, ci | Custom binary resolvers and bare `execFile()`/`spawn()` calls are architecture-blind. `process.arch` recorded in telemetry but never consumed. New binary resolution code should use or extend `resolveBinaryPath()`. |
+| `portability.arch-blind-path-fallback` | mechanical | warn | guard, ci | PATH fallbacks omit `/opt/homebrew/bin` (ARM macOS Homebrew prefix). In stripped environments (launchd, minimal systemd --user), brew-installed binaries vanish on Apple Silicon. |
+| `portability.hardcoded-signal-name` | mechanical | warn | guard, ci | Signal string literals (`'SIGTERM'`, `'SIGKILL'`, `'SIGINT'`) in `.kill()`, `process.on()`, and `killSignal` options must use shared constants for cross-platform portability. |
+| `portability.fetch-timeout` | ast | warn | eslint | `fetch()` calls must include an `AbortSignal.timeout()` to prevent indefinite hangs on unresponsive hosts. |
+| `portability.sync-exec-timeout` | ast | warn | eslint | `execSync`/`execFileSync`/`spawnSync` must include a `timeout` option to prevent event-loop blocking on hanging subprocesses. |
+
 ## Test
 
 | id | detect | severity | rings | purpose |
@@ -169,8 +184,9 @@ interprocedural analysis; the rule does not claim to cover them.
 
 ## Ratchet Baseline
 
-Ratcheted rules are grandfathered through `.claude/fitness/baseline.json` (measurements-based)
-or `.claude/fitness/boundary-baseline.json` (import violations).
+Ratcheted rules are grandfathered through `.claude/fitness/baseline.json` (measurements-based),
+`.claude/fitness/boundary-baseline.json` (import violations), or
+`.claude/fitness/platform-baseline.json` (platform-pattern violations).
 Current baseline measurements:
 
 | rule | path | lines | ceiling |
@@ -239,7 +255,7 @@ Run `npm run guard:boundaries -- --report` to see the full edge list and `npm ru
 
 ### Pattern-Count Ratchet Baseline
 
-The SSOT pattern rules and the promoted ring rule are **count-ratcheted**: each rule's
+The portability pattern rules, SSOT pattern rules, and the promoted ring rule are **count-ratcheted**: each rule's
 `violationCount` in `.claude/fitness/baseline.json` records today's surviving violations
 (the allowlisted debt enumerated with reasons in the guard scripts). Enforcement
 (`npm run guard:ssot-patterns` → `scripts/ssot-pattern-guard.ts`;
@@ -264,6 +280,12 @@ disagree (`| rule | count |` rows below are machine-checked):
 | `arch.ssot-phone-shape` | 4 | `scripts/ssot-pattern-guard.ts` |
 | `arch.ssot-presentation-literals` | 0 | `scripts/ssot-pattern-guard.ts` (pure block) |
 | `arch.ring-boundaries` | 56 | `scripts/ring-boundary-guard.ts` (ratchet, not yet a pure block) |
+| `portability.no-hardcoded-platform-binaries` | 3 | `scripts/platform-pattern-check.ts` |
+| `portability.platform-paths-guarded` | 24 | `scripts/platform-pattern-check.ts` |
+| `portability.systemctl-guarded` | 11 | `scripts/platform-pattern-check.ts` |
+| `portability.gnu-bsd-shell-flags` | 7 | `scripts/platform-pattern-check.ts` |
+| `portability.arch-blind-path-fallback` | 1 | `scripts/platform-pattern-check.ts` |
+| `portability.hardcoded-signal-name` | 20 | `scripts/platform-pattern-check.ts` |
 
 ## ESLint Ring (live)
 
@@ -284,6 +306,8 @@ rules whose `rings` include `eslint`.
 | `invariant.outbox-env-gated` | `fitness/outbox-direct-write` | fs write whose path literal names the bot-errors outbox/state dir without referencing the resolver |
 | `invariant.timer-rearm-without-clear` | `fitness/timer-rearm-without-clear` | `map.set(key, {…setTimeout/setInterval…})` inside a function with no `clearTimeout`/`clearInterval`/`clear*()`/`.get()` guard |
 | `invariant.no-unsafe-type-escapes` | `fitness/unsafe-type-escape` | src/+scripts/**; `any` and `ts-ignore`/`ts-nocheck`/`ts-expect-error` suppressions |
+| `portability.fetch-timeout` | `fitness/fetch-timeout` | src/**; flags bare `fetch()` or `fetch(url, {})` without `signal` property |
+| `portability.sync-exec-timeout` | `fitness/sync-exec-timeout` | src/**; flags `execSync`/`execFileSync`/`spawnSync` without `timeout` option |
 | `test.skip-categorization` | `fitness/categorized-skips` | skip/`skipIf` must carry `@skip-env` or `@skip-timing` |
 
 **Every eslint-ring rule reports at `warn` severity, so `guard:lint:src` exits 0

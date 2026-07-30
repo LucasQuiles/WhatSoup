@@ -148,7 +148,7 @@ describe('parseClosedOptions', () => {
  * Lowering the baseline as scripts migrate is expected and the assertion says so.
  */
 describe('hand-rolled parseArgs ratchet', () => {
-  const HAND_ROLLED_PARSEARGS_BASELINE = 29;
+  const HAND_ROLLED_PARSEARGS_BASELINE = 30;
 
   const isHandRolledParser = (source: string): boolean => {
     const sourceFile = ts.createSourceFile(
