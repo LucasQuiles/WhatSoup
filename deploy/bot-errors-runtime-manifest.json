@@ -136,15 +136,18 @@
         "runtime_agent_health_signal_registry_invalid",
         "BOT_ERRORS_HEALTH_BODY_MAX_AGE_SECONDS",
         "BOT_ERRORS_HEALTH_BODY_MAX_FUTURE_SKEW_SECONDS",
-        "runtime_agent_last_successful_turn_at",
+        "runtime_agent_last_session_lifetime_age_seconds",
+        "runtime_agent_last_successful_turn_age_seconds",
         "runtime_agent_last_successful_turn_provider",
+        "runtime_agent_last_successful_turn_session_current",
         "health_provider_observation_fresh",
         "health_provider_progress_fresh",
+        "health_provider_progress_session_current",
         "health_provider_effective_evidence_valid",
-        "live_provider_progress_fresh"
+        "live_provider_progress_authoritative"
       ],
       "path": "deploy/scripts/bot-errors-health-check.py",
-      "sha256": "45c684398068179d3503ce7d67047c7a964288e9646f42fd9f8671d40cfcd7ec"
+      "sha256": "89da19c302062cd56f43fde0b45b964eb79ca43dcab55242c2655e35883280f5"
     },
     {
       "mustContain": [

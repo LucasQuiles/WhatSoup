@@ -19,6 +19,8 @@ export interface RuntimeTurnCapabilityHealth {
   lastSuccessfulTurnAt: number | null;
   /** Provider that served the most recent successful user turn, if known. */
   lastSuccessfulTurnProvider: string | null;
+  /** Whether that success belongs to the exact still-live session incarnation. */
+  lastSuccessfulTurnSessionCurrent: boolean | null;
   lastTurnErrorClass: string | null;
   lastTurnErrorAt: number | null;
 }

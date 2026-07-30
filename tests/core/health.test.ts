@@ -2137,6 +2137,7 @@ describe('GET /health', () => {
       model_usability_status: 'model-unavailable',
       last_successful_turn_at: null,
       last_successful_turn_provider: null,
+      last_successful_turn_session_current: null,
       last_turn_error_class: 'model-unavailable',
       last_turn_error_at: 1_781_316_000_000,
     });
@@ -2177,6 +2178,7 @@ describe('GET /health', () => {
       model_usability_status: 'usable',
       last_successful_turn_at: 1_781_316_030_000,
       last_successful_turn_provider: null,
+      last_successful_turn_session_current: null,
       last_turn_error_class: null,
       last_turn_error_at: null,
     });
@@ -2223,6 +2225,7 @@ describe('GET /health', () => {
       model_usability_status: 'unknown',
       last_successful_turn_at: null,
       last_successful_turn_provider: null,
+      last_successful_turn_session_current: null,
       last_turn_error_class: 'empty-output',
       last_turn_error_at: 1_781_316_000_000,
     });
@@ -2539,7 +2542,7 @@ describe('GET /health', () => {
   it('sanitizes agent turn capability strings before exposing them in health', async () => {
     db.close();
     const db2 = makeDb();
-    const rawProviderText = 'selected model raw provider diagnostic should not appear';
+    const rawProviderText = 'unrecognized-provider';
     const deps = makeDeps(db2, {
       instanceType: 'agent',
       runtime: {
@@ -2571,6 +2574,7 @@ describe('GET /health', () => {
       model_usability_status: null,
       last_successful_turn_at: null,
       last_successful_turn_provider: null,
+      last_successful_turn_session_current: null,
       last_turn_error_class: null,
       last_turn_error_at: 1_781_316_000_000,
     });
@@ -2581,6 +2585,7 @@ describe('GET /health', () => {
       modelUsabilityStatus: null,
       lastSuccessfulTurnAt: null,
       lastSuccessfulTurnProvider: null,
+      lastSuccessfulTurnSessionCurrent: null,
       lastTurnErrorClass: null,
       lastTurnErrorAt: 1_781_316_000_000,
     });
@@ -4566,6 +4571,7 @@ describe('GET /health — normalizeBooleanOrNull and normalizeNumberOrNull non-t
       model_usability_status: 'usable',
       last_successful_turn_at: null,
       last_successful_turn_provider: null,
+      last_successful_turn_session_current: null,
       last_turn_error_class: null,
       last_turn_error_at: null,
     });
@@ -4854,6 +4860,7 @@ describe('health.ts upper-branch coverage (624-1020)', () => {
               modelUsabilityStatus: 'usable',
               lastSuccessfulTurnAt: 1_700_000_000_000,
               lastSuccessfulTurnProvider: 'claude-cli',
+              lastSuccessfulTurnSessionCurrent: true,
               lastTurnErrorClass: null,
               lastTurnErrorAt: null,
             },
@@ -4879,6 +4886,7 @@ describe('health.ts upper-branch coverage (624-1020)', () => {
       model_usability_status: 'usable',
       last_successful_turn_at: 1_700_000_000_000,
       last_successful_turn_provider: 'claude-cli',
+      last_successful_turn_session_current: true,
       last_turn_error_class: null,
       last_turn_error_at: null,
     });
@@ -4890,6 +4898,7 @@ describe('health.ts upper-branch coverage (624-1020)', () => {
           modelUsabilityStatus: 'usable',
           lastSuccessfulTurnAt: 1_700_000_000_000,
           lastSuccessfulTurnProvider: 'claude-cli',
+          lastSuccessfulTurnSessionCurrent: true,
           lastTurnErrorClass: null,
           lastTurnErrorAt: null,
         },

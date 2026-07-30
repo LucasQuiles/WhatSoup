@@ -46,15 +46,26 @@ export class TurnCapabilityTracker {
   lastSuccessfulTurnAt: number | null = null;
   /** Provider that served the most recent successful user turn. */
   lastSuccessfulTurnProvider: string | null = null;
+  /** In-process session object that produced the successful turn, if bound. */
+  lastSuccessfulTurnSession: object | null = null;
+  /** Opaque in-process binding for the exact session incarnation. */
+  lastSuccessfulTurnSessionBinding: object | null = null;
   /** Class of the most recent user-turn failure (cleared to null on a success). */
   lastTurnErrorClass: TurnCapabilityErrorClass | null = null;
   /** Epoch-ms of the most recent user-turn failure (cleared to null on a success). */
   lastTurnErrorAt: number | null = null;
 
   /** A user turn completed successfully — stamp the time and clear the last error. */
-  recordSuccess(provider: string): void {
+  recordSuccess(
+    provider: string | null,
+    session: object | null,
+    sessionBinding: object | null,
+  ): void {
     this.lastSuccessfulTurnAt = Date.now();
     this.lastSuccessfulTurnProvider = provider;
+    const hasBoundSession = session !== null && sessionBinding !== null;
+    this.lastSuccessfulTurnSession = hasBoundSession ? session : null;
+    this.lastSuccessfulTurnSessionBinding = hasBoundSession ? sessionBinding : null;
     this.lastTurnErrorClass = null;
     this.lastTurnErrorAt = null;
   }
