@@ -2,7 +2,7 @@
 
 **Status:** Active — refreshed against canonical base `482b707d716aee5641db25d40c2a954caee5d78f`, which understands migrations through 46; the current branch advances the schema to migration 47 for recovery-receipt chronology, and no provider-lifecycle implementation or deployment is authorized
 
-**Schema allocation:** current canonical schema is migration 51; bounded terminal recovery/canonical `not_sent` is forward migration 52; the provider-event lifecycle ledger is migration 53. Migrations 50 and 51 are consumed by metadata-only durability evidence, so the still-unpublished forward allocations move to migrations 52 and 53.
+**Schema allocation:** current canonical schema is migration 52; bounded terminal recovery/canonical `not_sent` is forward migration 53; the provider-event lifecycle ledger is migration 54. Migrations 50, 51, and 52 are consumed by metadata-only durability evidence and enrichment-cycle receipts, so the still-unpublished forward allocations move to migrations 53 and 54.
 
 > **REQUIRED COMPANION SKILL:** superpowers:spec-driven-development
 
