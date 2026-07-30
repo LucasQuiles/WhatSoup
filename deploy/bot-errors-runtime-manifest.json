@@ -420,7 +420,8 @@
         "WHATSAPP_SERVICE_UNIT",
         "constants.O_NOFOLLOW",
         "redactOutboxValue(event)",
-        "recordBotErrorsWritefail"
+        "recordBotErrorsWritefail",
+        "confineAlertContent"
       ]
     },
     {
