@@ -14,24 +14,38 @@
  *   node scripts/check-hardcoded-tmpdir.ts          # check — exit 0/1 (default)
  *   node scripts/check-hardcoded-tmpdir.ts --report  # verbose listing
  *
- * Exit codes: 0 = no NEW violations; 1 = new violations found; 2 = infra error
+ * Exit codes: 0 = no NEW violations; 1 = new violations found; 2 = INCONCLUSIVE
+ * (infra error, or the non-vacuity floor below)
+ *
+ * Scan root is always the real repo (import.meta-rooted, resolved once as
+ * ROOT below) — cwd cannot redirect it. `scan`/`loadBaseline` take an
+ * explicit root so tests can point them at a synthetic fixture tree without
+ * touching the real repo.
+ *
+ * NON-VACUITY FLOOR: scan() throws if it walks src/ + scripts/ and finds
+ * ZERO scannable files. Without this, a broken/misconfigured SCAN_DIRS (or a
+ * genuinely empty tree) would silently report "0 violations — passed", a
+ * false green indistinguishable from a real clean scan. Same pattern as
+ * generate-catch-ratchet.mjs's `results.length === 0` throw and
+ * durability-writer-guard.ts's `discoveredTableCount === 0` INCONCLUSIVE path
+ * — both cited as skip-immune's floor precedent in SCOPE_MAP.
  */
 
 import { readFileSync, readdirSync, existsSync } from 'node:fs';
 import path from 'node:path';
+import { pathToFileURL } from 'node:url';
 
 // ---------------------------------------------------------------------------
 // Config
 // ---------------------------------------------------------------------------
 
 const ROOT = path.resolve(import.meta.dirname!, '..');
-const REPORT = process.argv.includes('--report');
 
 const SCAN_DIRS = ['src', 'scripts'];
 const EXTENSIONS = ['.ts', '.mjs', '.js'];
-const BASELINE_PATH = path.join(ROOT, '.claude/fitness/tmpdir-baseline.json');
+const BASELINE_REL_PATH = '.claude/fitness/tmpdir-baseline.json';
 
-/** Files to skip entirely (relative to ROOT). */
+/** Files to skip entirely (relative to the scan root). */
 const FILE_ALLOWLIST = new Set<string>([
   'scripts/check-hardcoded-tmpdir.ts',
 ]);
@@ -40,19 +54,20 @@ const FILE_ALLOWLIST = new Set<string>([
 // Baseline
 // ---------------------------------------------------------------------------
 
-interface BaselineEntry {
+export interface BaselineEntry {
   file: string;
   line: number;
 }
 
-function loadBaseline(): Set<string> {
+export function loadBaseline(root: string): Set<string> {
+  const baselinePath = path.join(root, BASELINE_REL_PATH);
   const s = new Set<string>();
-  if (!existsSync(BASELINE_PATH)) return s;
+  if (!existsSync(baselinePath)) return s;
   try {
-    const data: BaselineEntry[] = JSON.parse(readFileSync(BASELINE_PATH, 'utf8'));
+    const data: BaselineEntry[] = JSON.parse(readFileSync(baselinePath, 'utf8'));
     for (const e of data) s.add(`${e.file}:${e.line}`);
   } catch {
-    console.error(`[check-hardcoded-tmpdir] WARNING: corrupt baseline at ${BASELINE_PATH}`);
+    console.error(`[check-hardcoded-tmpdir] WARNING: corrupt baseline at ${baselinePath}`);
   }
   return s;
 }
@@ -61,7 +76,7 @@ function loadBaseline(): Set<string> {
 // Walk & scan
 // ---------------------------------------------------------------------------
 
-interface Violation {
+export interface Violation {
   file: string;
   line: number;
   snippet: string;
@@ -82,16 +97,20 @@ function walk(dir: string, exts: string[], acc: string[] = []): string[] {
   return acc;
 }
 
-function scan(): Violation[] {
-  const baseline = loadBaseline();
+export function scan(root: string): Violation[] {
+  const baseline = loadBaseline(root);
   const out: Violation[] = [];
+  let filesScanned = 0;
 
   for (const sd of SCAN_DIRS) {
-    const abs = path.join(ROOT, sd);
+    const abs = path.join(root, sd);
     if (!existsSync(abs)) continue;
 
-    for (const f of walk(abs, EXTENSIONS)) {
-      const rel = path.relative(ROOT, f);
+    const files = walk(abs, EXTENSIONS);
+    filesScanned += files.length;
+
+    for (const f of files) {
+      const rel = path.relative(root, f);
       if (FILE_ALLOWLIST.has(rel)) continue;
 
       const lines = readFileSync(f, 'utf8').split('\n');
@@ -112,46 +131,65 @@ function scan(): Violation[] {
     }
   }
 
+  // Non-vacuity floor — see file header. A real scan of this repo's src/ +
+  // scripts/ always finds thousands of files; zero means the walk found
+  // nothing to examine (missing/misconfigured SCAN_DIRS, or a genuinely
+  // empty tree), and "0 violations" would be indistinguishable from a
+  // legitimate clean scan if allowed through as a pass.
+  if (filesScanned === 0) {
+    throw new Error(
+      `scanned zero files under ${SCAN_DIRS.map((d) => `${d}/`).join(', ')} at ${root} — result is inconclusive, refusing to certify`,
+    );
+  }
+
   return out;
 }
 
 // ---------------------------------------------------------------------------
-// Main
+// CLI
 // ---------------------------------------------------------------------------
 
-try {
-  const violations = scan();
-  const total = violations.length;
+export function run(argv: string[] = process.argv.slice(2), root: string = ROOT): number {
+  const report = argv.includes('--report');
 
-  if (REPORT) {
-    const baseline = loadBaseline();
-    console.log(`tmpdir-baseline: ${baseline.size} known violations`);
+  try {
+    const violations = scan(root);
+    const total = violations.length;
+
+    if (report) {
+      const baseline = loadBaseline(root);
+      console.log(`tmpdir-baseline: ${baseline.size} known violations`);
+      if (total === 0) {
+        console.log('No NEW hardcoded /tmp/ paths found.');
+        return 0;
+      }
+      console.log(`\n${total} NEW hardcoded /tmp/ path(s) found:\n`);
+      for (const v of violations) {
+        console.log(`  ${v.file}:${v.line}`);
+        console.log(`    ${v.snippet}`);
+        console.log();
+      }
+      return 1;
+    }
+
+    // check mode
     if (total === 0) {
-      console.log('No NEW hardcoded /tmp/ paths found.');
-      process.exit(0);
+      console.log('guard:hardcoded-tmpdir — passed (0 new violations).');
+      return 0;
     }
-    console.log(`\n${total} NEW hardcoded /tmp/ path(s) found:\n`);
+
+    console.error(`guard:hardcoded-tmpdir — FAIL — ${total} new hardcoded /tmp/ path(s).`);
     for (const v of violations) {
-      console.log(`  ${v.file}:${v.line}`);
-      console.log(`    ${v.snippet}`);
-      console.log();
+      console.error(`  ${v.file}:${v.line}  ${v.snippet}`);
     }
-    process.exit(1);
+    console.error('\n  Use os.tmpdir() instead of hardcoded /tmp/. Add to tmpdir-baseline.json if intentional.');
+    return 1;
+  } catch (err) {
+    console.error(`guard:hardcoded-tmpdir — INCONCLUSIVE — ${err instanceof Error ? err.message : String(err)}`);
+    return 2;
   }
+}
 
-  // check mode
-  if (total === 0) {
-    console.log('guard:hardcoded-tmpdir — passed (0 new violations).');
-    process.exit(0);
-  }
-
-  console.error(`guard:hardcoded-tmpdir — FAIL — ${total} new hardcoded /tmp/ path(s).`);
-  for (const v of violations) {
-    console.error(`  ${v.file}:${v.line}  ${v.snippet}`);
-  }
-  console.error('\n  Use os.tmpdir() instead of hardcoded /tmp/. Add to tmpdir-baseline.json if intentional.');
-  process.exit(1);
-} catch (err) {
-  console.error(`guard:hardcoded-tmpdir — infra error — ${err instanceof Error ? err.message : String(err)}`);
-  process.exit(2);
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  process.exitCode = run();
 }

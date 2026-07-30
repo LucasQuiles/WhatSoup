@@ -1,7 +1,7 @@
 [
   {
     "file": "src/main.ts",
-    "line": 1177,
+    "line": 1228,
     "pattern": "/tmp/",
     "snippet": "errno.path.startsWith('/tmp/')",
     "justification": "read-only ENOENT check — inspects a path returned by the OS, not a hardcoded write-target"
