@@ -88,7 +88,15 @@ reset_sandbox() {
   CAPTURE_BYTES=0
 }
 
-emit() { python3 "$EMIT" "$@" >/dev/null 2>&1; }
+emit() {
+  local stderr_path="$SANDBOX/emit.stderr"
+  if python3 "$EMIT" "$@" >/dev/null 2>"$stderr_path"; then
+    return 0
+  fi
+  fail "emitter enqueues drill event"
+  sed -n '1,8p' "$stderr_path" >&2
+  return 1
+}
 dispatch_once() {
   python3 "$DISPATCH" --once >/dev/null 2>&1
   local rc=$?
@@ -127,7 +135,7 @@ echo
 echo "Drill 2: severity + event-type title rendering"
 reset_sandbox
 emit --severity warning --instance mini3 --source health --summary "degraded"
-emit --severity info --instance mini3 --source health --summary "fyi"
+emit --event-type observation --severity info --instance mini3 --source health --summary "fyi"
 dispatch_once
 emit --event-type clear --instance mini3 --source health --summary "recovered"
 dispatch_once
@@ -311,7 +319,7 @@ echo
 # ── Drill 10: quiet daily-health success is still observable by watchdog
 echo "Drill 10: daily-health info suppression + stale watchdog pairing"
 reset_sandbox
-emit --severity info --instance bot-errors-health --source daily-health \
+emit --event-type observation --severity info --instance bot-errors-health --source daily-health \
   --summary "BOT ERRORS daily health passed" --evidence "machine=mini1 status=ok"
 dispatch_once
 assert_missing "$CAPTURE" "daily-health info does not send to BOT ERRORS"
@@ -938,7 +946,7 @@ assert_count "$BOT_ERRORS_STATE_DIR/storm-collapsed" "*.collapsed" 6 "D20c colla
 
 reset_sandbox
 for host in mini1 mini2 mini3; do
-  emit --severity info --instance bot-errors-health --source daily-health \
+  emit --event-type observation --severity info --instance bot-errors-health --source daily-health \
     --summary "BOT ERRORS daily health passed" --evidence "machine=$host status=ok"
 done
 dispatch_once

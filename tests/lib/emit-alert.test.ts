@@ -550,7 +550,8 @@ describe('emitAlert', () => {
     const result = emitAlert('whatsoup-prod', 'agent_respawn_failed', 'respawn exhausted', 'crashed 3 times');
 
     expect(readOnlyEvent()).toMatchObject({
-      schemaVersion: 1,
+      schemaVersion: 2,
+      eventKind: 'incident_alert',
       eventType: 'alert',
       severity: 'critical',
       instance: 'whatsoup-prod',
@@ -565,6 +566,20 @@ describe('emitAlert', () => {
       outbox: { path: expect.stringContaining(outboxDir) },
     });
     expect(spawn).not.toHaveBeenCalled();
+  });
+
+  it('normalizes informational emitAlert calls into typed observations', () => {
+    const result = emitAlert('whatsoup-prod', 'provider_notice', 'provider notice', 'informational evidence', 'info');
+
+    expect(readOnlyEvent()).toMatchObject({
+      schemaVersion: 2,
+      eventKind: 'observation',
+      eventType: 'observation',
+      severity: 'info',
+      instance: 'whatsoup-prod',
+      source: 'provider_notice',
+    });
+    expect(result).toMatchObject({ ok: true, channel: 'outbox', status: 'durably_queued' });
   });
 
   it('fsyncs both event contents and the outbox directory before returning', () => {
@@ -1389,7 +1404,8 @@ describe('clearAlertSource', () => {
     const result = clearAlertSource('whatsoup-prod', 'agent_respawn_failed');
 
     expect(readOnlyEvent()).toMatchObject({
-      schemaVersion: 1,
+      schemaVersion: 2,
+      eventKind: 'incident_recovery',
       eventType: 'clear',
       severity: 'info',
       instance: 'whatsoup-prod',

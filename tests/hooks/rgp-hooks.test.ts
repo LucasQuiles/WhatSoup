@@ -197,6 +197,8 @@ describe('PostToolUse RGP error logger', () => {
     const botErrors = readBotErrors(home);
     expect(botErrors).toHaveLength(1);
     expect(botErrors[0]).toMatchObject({
+      schemaVersion: 2,
+      eventKind: 'incident_alert',
       eventType: 'alert',
       severity: 'error',
       instance: 'ana-bot',
@@ -326,6 +328,8 @@ describe('PostToolUse RGP error logger', () => {
     expect(crumbs).toHaveLength(1);
     expect(crumbs[0]).toMatchObject({ kind: 'outbox_write_failure', schemaVersion: 1 });
     expect(crumbs[0].event).toMatchObject({
+      schemaVersion: 2,
+      eventKind: 'incident_alert',
       eventType: 'alert',
       severity: 'error',
       instance: 'ana-bot',

@@ -351,7 +351,8 @@ def test_run_once_emits_critical_outbox_event(tmp_path: Path, monkeypatch):
     payload = json.loads(events[0].read_text())
     assert payload["severity"] == "critical"
     assert payload["source"] == "tree-provenance"
-    assert payload["schemaVersion"] == 1
+    assert payload["schemaVersion"] == 2
+    assert payload["eventKind"] == "incident_alert"
     assert payload["eventType"] == "alert"
     assert "alertSource" in payload
     # No full repo path leaked in the event body.

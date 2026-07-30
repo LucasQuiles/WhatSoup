@@ -90,6 +90,7 @@ def _alert(
 def _clear(source: str = "health_body_degraded", **kw) -> dict:
     evt = _alert(source, **kw)
     evt["eventType"] = "clear"
+    evt["severity"] = "info"
     return evt
 
 

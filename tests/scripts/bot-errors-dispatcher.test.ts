@@ -218,6 +218,137 @@ describe('bot-errors-dispatcher', () => {
     expect(event.delivery.status).toBe('sent');
   });
 
+  it('quarantines a contradictory v1 clear before delivery or incident mutation', () => {
+    tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-dispatcher-'));
+    const capturePath = join(tmpRoot, 'sent-message.txt');
+    writeEvent(tmpRoot, 'critical', {
+      id: 'contradictory-critical-clear',
+      eventType: 'clear',
+      severity: 'critical',
+      source: 'envelope-contract-test',
+      summary: 'contradictory clear must not dispatch',
+    });
+
+    const result = dispatchCaptured(tmpRoot, capturePath);
+
+    expect(result).toMatchObject({ processed: 0, sent: 0, failed: 0 });
+    expect(existsSync(capturePath)).toBe(false);
+    const quarantine = readdirSync(join(tmpRoot, 'quarantine'));
+    expect(quarantine.some((entry) => entry.endsWith('.invalid-envelope'))).toBe(true);
+    expect(quarantine.some((entry) => entry.includes('.invalid_kind_severity.invalid-envelope'))).toBe(true);
+    expect(existsSync(join(tmpRoot, 'incident-state.json'))).toBe(false);
+  });
+
+  it('quarantines a v1 payload carrying a v2 kind before it can clear state', () => {
+    tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-dispatcher-'));
+    const capturePath = join(tmpRoot, 'sent-message.txt');
+    writeEvent(tmpRoot, 'info', {
+      id: 'mixed-version-clear',
+      eventKind: 'incident_alert',
+      eventType: 'clear',
+      severity: 'info',
+      source: 'envelope-contract-test',
+      summary: 'mixed version clear must not dispatch',
+    });
+
+    const result = dispatchCaptured(tmpRoot, capturePath);
+
+    expect(result).toMatchObject({ processed: 0, sent: 0, failed: 0 });
+    expect(existsSync(capturePath)).toBe(false);
+    const quarantine = readdirSync(join(tmpRoot, 'quarantine'));
+    expect(quarantine.some((entry) => entry.includes('.unexpected_legacy_event_kind.invalid-envelope'))).toBe(true);
+    expect(existsSync(join(tmpRoot, 'incident-state.json'))).toBe(false);
+  });
+
+  it('quarantines every unsupported ingress variant with a bounded reason', () => {
+    tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-dispatcher-'));
+    const capturePath = join(tmpRoot, 'sent-message.txt');
+    const cases: Array<{ id: string; expectedReason: string; overrides: Record<string, unknown> }> = [
+      {
+        id: 'missing-event-type',
+        expectedReason: 'missing_event_type',
+        overrides: { eventType: undefined },
+      },
+      {
+        id: 'missing-severity',
+        expectedReason: 'missing_severity',
+        overrides: { severity: undefined },
+      },
+      {
+        id: 'unknown-v1-event-type',
+        expectedReason: 'unknown_event_type',
+        overrides: { eventType: 'observation', severity: 'info' },
+      },
+      {
+        id: 'missing-v2-kind',
+        expectedReason: 'missing_event_kind',
+        overrides: { schemaVersion: 2 },
+      },
+      {
+        id: 'unknown-v2-kind',
+        expectedReason: 'unknown_event_kind',
+        overrides: { schemaVersion: 2, eventKind: 'unknown' },
+      },
+      {
+        id: 'unknown-v2-event-type',
+        expectedReason: 'unknown_event_type',
+        overrides: { schemaVersion: 2, eventKind: 'incident_alert', eventType: 'unknown' },
+      },
+      {
+        id: 'unknown-v2-severity',
+        expectedReason: 'unknown_severity',
+        overrides: { schemaVersion: 2, eventKind: 'incident_alert', severity: 'unknown' },
+      },
+    ];
+
+    for (const testCase of cases) {
+      writeEvent(tmpRoot, 'critical', {
+        id: testCase.id,
+        source: 'envelope-contract-test',
+        summary: `unsupported ingress ${testCase.id}`,
+        ...testCase.overrides,
+      });
+      const result = dispatchCaptured(tmpRoot, capturePath);
+      expect(result).toMatchObject({ processed: 0, sent: 0, failed: 0 });
+    }
+
+    expect(existsSync(capturePath)).toBe(false);
+    const quarantine = readdirSync(join(tmpRoot, 'quarantine'));
+    for (const testCase of cases) {
+      expect(
+        quarantine.some((entry) => entry.includes(`.${testCase.expectedReason}.invalid-envelope`)),
+      ).toBe(true);
+    }
+    expect(existsSync(join(tmpRoot, 'incident-state.json'))).toBe(false);
+  });
+
+  it('normalizes a legacy informational alert as an observation instead of a recovery', () => {
+    tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-dispatcher-'));
+    const capturePath = join(tmpRoot, 'sent-message.txt');
+    writeEvent(tmpRoot, 'info', {
+      id: 'legacy-info-observation',
+      eventType: 'alert',
+      severity: 'info',
+      source: 'envelope-contract-test',
+      summary: 'legacy informational observation',
+    });
+
+    const result = dispatchCaptured(tmpRoot, capturePath);
+
+    expect(result).toMatchObject({ processed: 1, sent: 1, failed: 0 });
+    expect(readFileSync(capturePath, 'utf8')).toContain('BOT INFO');
+    expect(readFileSync(capturePath, 'utf8')).not.toContain('BOT RECOVERY');
+    const sent = join(tmpRoot, 'sent');
+    const [file] = readdirSync(sent);
+    const event = JSON.parse(readFileSync(join(sent, file!), 'utf8')) as Record<string, unknown>;
+    expect(event).toMatchObject({
+      schemaVersion: 2,
+      eventKind: 'observation',
+      eventType: 'observation',
+      severity: 'info',
+    });
+  });
+
   it('keeps an alert durable when the WhatsApp socket is unavailable and sends once after recovery', () => {
     tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-dispatcher-'));
     const capturePath = join(tmpRoot, 'sent-message.txt');
@@ -328,6 +459,13 @@ describe('bot-errors-dispatcher', () => {
     expect(readFileSync(capturePath, 'utf8').match(/crash mid-claim must replay once/g)).toHaveLength(1);
     expect(readdirSync(processing)).toHaveLength(0);
     expect(readdirSync(sent)).toHaveLength(1);
+    const [sentFile] = readdirSync(sent);
+    expect(JSON.parse(readFileSync(join(sent, sentFile!), 'utf8'))).toMatchObject({
+      schemaVersion: 2,
+      eventKind: 'incident_alert',
+      eventType: 'alert',
+      severity: 'critical',
+    });
   });
 
   it('renders info events as informational with no remediation request', () => {
@@ -871,11 +1009,11 @@ describe('bot-errors-dispatcher', () => {
     expect(reasons.every((reason) => reason.includes('no open incident'))).toBe(true);
   });
 
-  it('does not suppress a clear separated from the previous clear by a same-fingerprint alert', () => {
+  it('does not suppress a clear separated from the previous clear by an error alert', () => {
     tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-dispatcher-'));
     const capturePath = join(tmpRoot, 'sent-message.txt');
     // Seed the incident the first clear recovers (a prior alert would have opened
-    // it). The same-fingerprint critical alert between the two clears reopens the
+    // it). The same-fingerprint error alert between the two clears reopens the
     // incident, so the second clear also closes an open incident and surfaces;
     // both recoveries are therefore non-orphan. This isolates the dedupe-barrier
     // property: the alert splits the two clears into separate recovery episodes so
@@ -889,7 +1027,7 @@ describe('bot-errors-dispatcher', () => {
     writeRecoveryEvent(tmpRoot, 1, {
       id: 'flap-alert-between',
       eventType: 'alert',
-      severity: 'critical',
+      severity: 'error',
       createdAt: '2026-05-31T00:00:30Z',
       summary: 'flapping source restored',
     });
@@ -1285,8 +1423,12 @@ describe('bot-errors-dispatcher', () => {
     const sentFiles = readdirSync(sent);
     expect(sentFiles).toHaveLength(1);
     const event = JSON.parse(readFileSync(join(sent, sentFiles[0]!), 'utf8')) as {
+      schemaVersion: number;
+      eventKind: string;
       diagnostics: { writefailRecovery: { breadcrumb: string; reason: string } };
     };
+    expect(event.schemaVersion).toBe(2);
+    expect(event.eventKind).toBe('incident_alert');
     expect(event.diagnostics.writefailRecovery.reason).toContain('PermissionError');
     expect(event.diagnostics.writefailRecovery.breadcrumb).toContain('writefail-recovery-test.writefail');
   });
@@ -1320,6 +1462,48 @@ describe('bot-errors-dispatcher', () => {
     expect(readFileSync(dispatchLog, 'utf8')).toContain('"type": "writefail_duplicate"');
     expect(readdirSync(recovered)).toHaveLength(1);
     expect(readdirSync(sent)).toHaveLength(1);
+  });
+
+  it('quarantines an invalid writefail event before duplicate suppression', () => {
+    tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-dispatcher-'));
+    const capturePath = join(tmpRoot, 'sent-message.txt');
+    const dispatchLog = join(tmpRoot, 'logs', 'dispatch.jsonl');
+    const sent = join(tmpRoot, 'sent');
+    const recovered = join(tmpRoot, 'writefail-recovered');
+    const quarantined = join(tmpRoot, 'writefail-quarantine');
+    mkdirSync(sent, { recursive: true, mode: 0o700 });
+    writeFileSync(join(sent, 'known-invalid-writefail.json.sent'), JSON.stringify({
+      id: 'invalid-writefail-clear',
+      delivery: { status: 'sent' },
+    }));
+    writeWritefail(tmpRoot, {
+      id: 'invalid-writefail-clear',
+      eventType: 'clear',
+      severity: 'critical',
+      summary: 'invalid writefail clear must not be replay-suppressed',
+    });
+
+    const output = execFileSync('python3', ['deploy/scripts/bot-errors-dispatcher.py', '--once'], {
+      cwd: process.cwd(),
+      env: {
+        ...process.env,
+        BOT_ERRORS_STATE_DIR: tmpRoot,
+        BOT_ERRORS_WRITEFAIL_DIR: join(tmpRoot, 'writefail'),
+        BOT_ERRORS_DRY_SEND_CAPTURE: capturePath,
+      },
+      encoding: 'utf8',
+    });
+
+    expect(JSON.parse(output)).toMatchObject({ processed: 0, sent: 0, writefailRecovered: 0, failed: 0 });
+    expect(existsSync(capturePath)).toBe(false);
+    expect(existsSync(recovered) ? readdirSync(recovered) : []).toHaveLength(0);
+    expect(readdirSync(quarantined).some((entry) => entry.includes('invalid-envelope-invalid_kind_severity'))).toBe(true);
+    const records = readFileSync(dispatchLog, 'utf8').trim().split('\n').map((line) => JSON.parse(line));
+    expect(records).toContainEqual(expect.objectContaining({
+      type: 'writefail_invalid_envelope',
+      recordKind: 'writefail_invalid_envelope',
+      details: { reason: 'invalid_kind_severity' },
+    }));
   });
 
   it('does not treat substring event-id matches as writefail duplicates', () => {
@@ -1904,6 +2088,33 @@ describe('still-open reminder exponential backoff', () => {
     expect(JSON.parse(dispatchBackoff(tmpRoot, capture))).toMatchObject({ processed: 1, sent: 1, suppressed: 0 });
     expect(captureMessages(capture).filter((text) => text.includes('ESCALATED still open'))).toHaveLength(2);
     expect(readIncidentState(tmpRoot).openIncidents[key]!.renotifyIntervalSeconds).toBe(240);
+  });
+
+  it('keeps a non-escalated v2 still-open reminder in its incident-alert variant', () => {
+    tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-backoff-'));
+    const capture = join(tmpRoot, 'capture.jsonl');
+
+    emitBackoffAlert(tmpRoot);
+    expect(JSON.parse(dispatchBackoff(tmpRoot, capture))).toMatchObject({ processed: 1, sent: 1, suppressed: 0 });
+    const key = Object.keys(readIncidentState(tmpRoot).openIncidents)[0]!;
+    const now = Math.floor(Date.now() / 1000);
+    patchOpenRecord(tmpRoot, key, {
+      openedAt: now - 120,
+      lastNotifiedAt: now - 90,
+      lastSentAt: now - 90,
+    });
+
+    emitBackoffAlert(tmpRoot);
+    expect(JSON.parse(dispatchBackoff(tmpRoot, capture))).toMatchObject({ processed: 1, sent: 1, suppressed: 0 });
+    const sentEvents = readdirSync(join(tmpRoot, 'sent'))
+      .map((file) => JSON.parse(readFileSync(join(tmpRoot, 'sent', file), 'utf8')) as Record<string, unknown>);
+    const reminder = sentEvents.find((event) => String(event.summary).startsWith('Still-open digest:'));
+    expect(reminder).toMatchObject({
+      schemaVersion: 2,
+      eventKind: 'incident_alert',
+      eventType: 'alert',
+      severity: 'warning',
+    });
   });
 
   it('caps the reminder backoff at the configured ceiling', () => {
