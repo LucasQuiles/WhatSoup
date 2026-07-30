@@ -96,7 +96,7 @@ function defaultReadMacBootTime(): string {
   let lastErr: unknown;
   for (const bin of MAC_SYSCTL_BINS) {
     try {
-      const out = execFileSync(bin, ['-n', 'kern.boottime'], { encoding: 'utf8' });
+      const out = execFileSync(bin, ['-n', 'kern.boottime'], { encoding: 'utf8', timeout: 10_000 });
       if (out) return out;
     } catch (err) {
       lastErr = err;
