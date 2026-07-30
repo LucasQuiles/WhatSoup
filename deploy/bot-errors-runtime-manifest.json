@@ -6,7 +6,7 @@
   "files": [
     {
       "path": "deploy/scripts/bot-errors-collector.py",
-      "sha256": "728b4a920bc4c782560a37a0da4626626637efcda43ff8fe52ad157e2635752c",
+      "sha256": "f0485adc8dafd0175962f83a667f8a5d9a02dfe656f79844c8be29f76345fa38",
       "mustContain": [
         "append_private_jsonl",
         "refusing to use private directory through symlink",
@@ -28,7 +28,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-dispatcher.py",
-      "sha256": "2a751a3601c3a2aecb1682489288ac555d9b21e17687791d746864dadad9bfb8",
+      "sha256": "09eb9c293443500e1773323f4fd7a3bfdbc04138fc310c3f112428807827373a",
       "mustContain": [
         "append_private_jsonl",
         "refusing to use private directory through symlink",
@@ -47,7 +47,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-emit.py",
-      "sha256": "bcac5e797a7bf421e8f98f9991b5fc7ff8fc1712f8b77ffbdb1dacc00bb38bad",
+      "sha256": "990a860e1787f5883f2f055dfdc4b796410ec3ceec41ac24e5d2077a0027c181",
       "mustContain": [
         "O_NOFOLLOW",
         "refusing to use private directory through symlink",
@@ -75,7 +75,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-health-check.py",
-      "sha256": "62b068cff45702015e09c402063713f9dec483d90eecc9f7e98bcc226fc6b0a7",
+      "sha256": "171820a29f3a6a4e880bcb0b5e2adcba9c16354021bced9c7c636c5b7d20548c",
       "mustContain": [
         "critical_file_problem",
         "mustContain",
@@ -144,7 +144,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-heartbeat-watchdog.py",
-      "sha256": "22be25ac5ab4b00c459b33252cc486abe28320731d77640005fd082be630f9e8",
+      "sha256": "2f3812382e823800f35af75a2d4f5d5e6477b6cc5af2788880b93a5a7847f009",
       "mustContain": [
         "BOT_ERRORS_Q_LOOP_STATE_DIR",
         "BOT_ERRORS_FLEET_SENTINEL_HEARTBEAT",
@@ -181,7 +181,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-runner.py",
-      "sha256": "f189971ec512b39901c1dbbe2c14de7b1c0fa663008f33fb05d3fc794347b030",
+      "sha256": "cc937f0fe4eba5887250b7ed01575f9c0a9272c5b39eb7c75152bb1c344b156c",
       "mustContain": [
         "O_NOFOLLOW",
         "refusing to use private directory through symlink",
@@ -206,7 +206,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-sentinel.py",
-      "sha256": "4aa5a264732441b6079a72bfa06df626b492dbd08089345d4bd8f3c14c6454ac",
+      "sha256": "caa218d899c4152a0a85aa9d957e0838228190fe48a0c3bc929b9e5e689c8aa7",
       "mustContain": [
         "DEFAULT_HEARTBEAT_MAX_AGE_SECONDS",
         "DEFAULT_HYSTERESIS_CYCLES"
@@ -214,7 +214,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-tree-provenance.py",
-      "sha256": "13410627b322c05d3ceac979aa6ab23cd806c0815050614a4e4e616c588ed02a",
+      "sha256": "75eabfbd561ac89dcb608b6399280227771590582ed3de36e130562559b578d9",
       "mustContain": [
         "tree_provenance_inventory",
         "def redact_ref",
@@ -249,7 +249,7 @@
     },
     {
       "path": "deploy/scripts/install-bot-errors-release-proof.sh",
-      "sha256": "a4fc7886c4e24914935ef94a62d8e50329ef34e2fa9b175736638d0bc039e14e",
+      "sha256": "032b3b4d1eb001729315cf6d32614be9e0b5723a653e8f2b1140cf2731465224",
       "mustContain": [
         "host gate",
         "RECEIPT",
@@ -270,6 +270,19 @@
         "daily_health_host_from_payload",
         "normalize_hub_host",
         "remoteHost"
+      ]
+    },
+    {
+      "path": "deploy/scripts/lib/bot_errors_envelope.py",
+      "sha256": "79be73a209d502108ff78edb2fa248b9010bb04d911309b375760fa980d34760",
+      "mustContain": [
+        "SCHEMA_VERSION",
+        "EVENT_KINDS",
+        "class EnvelopeError",
+        "class EventClassification",
+        "classify_event",
+        "normalize_event",
+        "new_event_fields"
       ]
     },
     {
@@ -303,7 +316,7 @@
     },
     {
       "path": "deploy/scripts/lib/controller_log.py",
-      "sha256": "77abc3c07c87128bb25ff2d8f7c7af564d65df33700da0b8d0d44626942c75ea",
+      "sha256": "2ae8bd93f0ef836ea3c20eb00198a8e25b19f33644e0a58b12a45e2755a8e795",
       "mustContain": [
         "ControllerLogContext",
         "diagnostic_best_effort",
@@ -353,7 +366,7 @@
     },
     {
       "path": "src/lib/bot-errors-outbox.ts",
-      "sha256": "2a37ff503186aa25036a0bbed212af498450ee7499c51d7a621f4547bbc741cd",
+      "sha256": "93f9dcbd93832fa615b8637521978ea513cf4ecd85250f27c2fcbc55228b7781",
       "mustContain": [
         "AUTHORIZATION_BEARER",
         "WHATSAPP_SERVICE_UNIT",
@@ -364,7 +377,7 @@
     },
     {
       "path": "src/lib/fault-taxonomy-registry.json",
-      "sha256": "23c712318b449d80d8809a8811f064bad3d936140743c41d2657907341d84f13",
+      "sha256": "497f2ea7c52dd4e915239dca7cdee9e35696e328fb8cdd9eecb72c08c3087ed7",
       "mustContain": [
         "whatsoup-fault-taxonomy-registry-v3",
         "runtimeAgentHealthSignals",

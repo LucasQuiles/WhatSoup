@@ -54,6 +54,7 @@ function healDeps(overrides: Partial<EmitHealResultToolDeps> = {}): EmitHealResu
     db: fakeDb().db,
     controlPeers: new Map([['loops', LOOPS_PHONE]]),
     adminPhones: new Set<string>(),
+    resolveConfiguredAdminJid: (identity) => `${identity}@s.whatsapp.net`,
     ...overrides,
   };
 }
@@ -155,6 +156,26 @@ describe('emit_heal_result handler effects', () => {
     expect(q.sendControlMessage.mock.calls[0]![1]).toBe('HEAL_ESCALATE');
     expect(mark).toHaveBeenCalledWith('R1');
     expect(result).toEqual({ sent: true, reportId: 'R1', result: 'escalate' });
+  });
+
+  it('escalate: resolves the configured admin target through the injected dependency', async () => {
+    const q = fakeQueue();
+    const sendMessage = vi.fn().mockResolvedValue({});
+    const resolveConfiguredAdminJid = vi.fn(() => 'owner@example.test@imessage');
+    const tool = buildEmitHealResultTool(healDeps({
+      getControlQueue: () => q.queue,
+      messenger: { sendMessage } as unknown as Messenger,
+      adminPhones: new Set(['owner@example.test']),
+      resolveConfiguredAdminJid,
+    }));
+
+    await tool.handler(params('escalate'), {} as never);
+
+    expect(resolveConfiguredAdminJid).toHaveBeenCalledWith('owner@example.test');
+    expect(sendMessage).toHaveBeenCalledWith(
+      'owner@example.test@imessage',
+      expect.stringContaining('[HEAL_ESCALATE]'),
+    );
   });
 });
 

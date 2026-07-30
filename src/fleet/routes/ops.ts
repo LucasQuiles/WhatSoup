@@ -7,9 +7,9 @@ import { readBody, jsonResponse, requireInstance } from '../../lib/http.ts';
 import { escapeRegExp } from '../../lib/regex-utils.ts';
 import { isRecord } from '../../lib/type-guards.ts';
 import { createSSEWriter } from '../sse-helpers.ts';
-import { normalizePhoneE164 } from '../../lib/phone.ts';
+import { normalizePhoneE164, normalizePhoneE164Wire } from '../../lib/phone.ts';
 import { SIGNAL_UUID_RE } from '../../transport/signal/types.ts';
-import { APPLEID_EMAIL_RE } from '../../transport/imessage/types.ts';
+import { canonicalizeImessageDirectIdentity } from '../../core/transport-refs.ts';
 import { createChildLogger } from '../../logger.ts';
 const log = createChildLogger('fleet:ops');
 import { mcpCall } from '../mcp-client.ts';
@@ -814,7 +814,12 @@ function normalizeAdminIdsForTransport(transport: string, phones: string[]): str
   if (transport === 'imessage') {
     return [...new Set(phones.map((p) => {
       const trimmed = p.trim();
-      return APPLEID_EMAIL_RE.test(trimmed) ? trimmed : normalizePhoneE164(trimmed);
+      const directIdentity = canonicalizeImessageDirectIdentity(trimmed);
+      if (directIdentity !== null) return directIdentity;
+      const wireIdentity = normalizePhoneE164Wire(trimmed);
+      return wireIdentity === null
+        ? normalizePhoneE164(trimmed)
+        : canonicalizeImessageDirectIdentity(wireIdentity) ?? wireIdentity;
     }))];
   }
   return normalizeAdminPhones(phones);
@@ -1263,6 +1268,9 @@ const authInFlight = new Set<string>();
 
 // Auth session wall-clock timeout (5 minutes — QR codes expire in ~60s, allows 5 scan attempts)
 const AUTH_TIMEOUT_MS = 5 * 60 * 1000;
+// The helper normally exits about two seconds after it persists credentials.
+// Keep a short, bounded window so that a hung helper cannot strand its service.
+const AUTH_COMPLETION_TIMEOUT_MS = 15 * 1000;
 const ALLOWED_SSE_EVENTS = new Set(['qr', 'connected', 'error']);
 
 /** GET /api/lines/:name/auth — SSE stream of QR codes from the auth process. */
@@ -1298,12 +1306,63 @@ export async function handleAuth(
     'Connection': 'keep-alive',
   });
 
-  // Stop the running instance so the lock file is released for auth.
+  // Attach the SSE error listener before the asynchronous stop preflight. A
+  // client can disconnect while that stop is in flight.
+  let authTimer: ReturnType<typeof setTimeout> | null = null;
   let stoppedForAuth = false;
-  try {
-    await deps.serviceManager.stop(params.name);
-    stoppedForAuth = true;
-  } catch { /* may not be running */ }
+  let startupRequested = false;
+  let restoreRequested = false;
+  let preflightClosed = false;
+  const { writeSSE, endOnce } = createSSEWriter(res, () => {
+    activeAuthProcesses.delete(params.name);
+    authInFlight.delete(params.name);
+    if (authTimer) clearTimeout(authTimer);
+  });
+  const restoreStoppedInstance = (reason: string) => {
+    if (!stoppedForAuth || startupRequested || restoreRequested) return;
+    restoreRequested = true;
+    const onError = (err: Error | null) => {
+      if (err) log.error({ err, instance: params.name, reason }, 'post-auth failure restart failed');
+    };
+    if (deps.serviceManager.startAfterAuthFire) {
+      deps.serviceManager.startAfterAuthFire(params.name, onError);
+    } else {
+      deps.serviceManager.startFire(params.name, onError);
+    }
+  };
+  const onPreflightClose = () => {
+    // Keep the in-flight claim until the stop settles, then either restore the
+    // prior service or report the failure without writing to the closed stream.
+    preflightClosed = true;
+  };
+  req.once('close', onPreflightClose);
+
+  // Stop the running instance so the lock file is released for auth.
+  if (deps.serviceManager.stopForAuth) {
+    try {
+      stoppedForAuth = (await deps.serviceManager.stopForAuth(params.name)) !== false;
+    } catch (err) {
+      req.removeListener('close', onPreflightClose);
+      log.error({ err, instance: params.name }, 'auth preflight failed to stop existing service');
+      if (!preflightClosed) {
+        writeSSE('error', { message: 'Unable to stop the existing instance before authentication. Resolve its service state and retry.' });
+      }
+      endOnce();
+      return;
+    }
+  } else {
+    try {
+      await deps.serviceManager.stop(params.name);
+      stoppedForAuth = true;
+    } catch { /* may not be running */ }
+  }
+
+  req.removeListener('close', onPreflightClose);
+  if (preflightClosed) {
+    restoreStoppedInstance('client-close-before-auth-spawn');
+    endOnce();
+    return;
+  }
 
   // Auth bootstrap is an admin-only operation that needs full environment access
   // for WhatsApp pairing (QR code flow). This is not a user-facing agent session
@@ -1323,30 +1382,59 @@ export async function handleAuth(
   activeAuthProcesses.set(params.name, child);
 
   // Guard against double res.end() — declared before any event handlers
-  let authTimer: ReturnType<typeof setTimeout> | null = null;
   let connected = false;
-  let restoreRequested = false;
-  const { writeSSE, endOnce } = createSSEWriter(res, () => {
-    activeAuthProcesses.delete(params.name);
-    authInFlight.delete(params.name);
-    if (authTimer) clearTimeout(authTimer);
-  });
+  let terminalFailure = false;
 
-  const restoreStoppedInstance = (reason: string) => {
-    if (!stoppedForAuth || connected || restoreRequested) return;
-    restoreRequested = true;
-    deps.serviceManager.startFire(params.name, (err: Error | null) => {
-      if (err) log.error({ err, instance: params.name, reason }, 'post-auth failure restart failed');
-    });
+  const startAfterSuccessfulAuth = () => {
+    if (startupRequested) return;
+    startupRequested = true;
+    let activationCompleted = false;
+    const onComplete = (err: Error | null) => {
+      if (activationCompleted) return;
+      activationCompleted = true;
+      if (err) {
+        terminalFailure = true;
+        log.error({ err, instance: params.name }, 'post-auth start failed');
+        // The pairing helper has already persisted credentials, but the
+        // instance was not activated. Do not expose launchctl details in SSE.
+        writeSSE('error', { message: 'Authentication completed but the instance could not start. Please retry or inspect fleet logs.' });
+      } else {
+        deps.discovery.scan();
+        // The helper's internal `connected` signal proves persisted
+        // credentials, not a live managed instance. Only report connected to
+        // the browser after the helper exits and service activation succeeds.
+        writeSSE('connected', {});
+      }
+      endOnce();
+    };
+    try {
+      if (deps.serviceManager.startAfterAuthFire) {
+        deps.serviceManager.startAfterAuthFire(params.name, onComplete);
+      } else {
+        deps.serviceManager.startFire(params.name, onComplete);
+      }
+    } catch (error) {
+      onComplete(error instanceof Error ? error : new Error(String(error)));
+    }
   };
 
-  // Wall-clock timeout — prevents auth process from hanging forever
-  authTimer = setTimeout(() => {
-    writeSSE('error', { message: 'Authentication timed out. QR codes expire after ~60 seconds. Please retry.' });
-    child.kill('SIGTERM');
-    restoreStoppedInstance('timeout');
-    endOnce();
-  }, AUTH_TIMEOUT_MS);
+  const armAuthTimeout = (delayMs: number, message: string, reason: string) => {
+    if (authTimer) clearTimeout(authTimer);
+    authTimer = setTimeout(() => {
+      terminalFailure = true;
+      writeSSE('error', { message });
+      child.kill('SIGTERM');
+      restoreStoppedInstance(reason);
+      endOnce();
+    }, delayMs);
+  };
+
+  // Wall-clock timeout — prevents auth process from hanging forever.
+  armAuthTimeout(
+    AUTH_TIMEOUT_MS,
+    'Authentication timed out. QR codes expire after ~60 seconds. Please retry.',
+    'timeout',
+  );
 
   // Parse stdout for JSON events
   let buffer = '';
@@ -1359,24 +1447,30 @@ export async function handleAuth(
       try {
         const evt = JSON.parse(line);
         if (!ALLOWED_SSE_EVENTS.has(evt.event)) continue;
-        writeSSE(evt.event, evt.data ?? {});
         if (evt.event === 'connected') {
-          connected = true;
-          // Reset introSent so the instance sends an introduction on next boot
-          try {
-            persistIntroSentFlag(instance.configPath, false);
-          } catch (err) {
-            // Not fatal to the auth flow, but without this warn the operator
-            // has no clue why the instance never re-introduced itself.
-            log.warn({ err, instance: params.name }, 'introSent reset failed after re-auth; intro will not re-fire on next boot');
+          if (!connected) {
+            connected = true;
+            armAuthTimeout(
+              AUTH_COMPLETION_TIMEOUT_MS,
+              'Authentication completed but did not finish. Please retry.',
+              'completion-timeout',
+            );
+            // Reset introSent so the instance sends an introduction on next boot
+            try {
+              persistIntroSentFlag(instance.configPath, false);
+            } catch (err) {
+              // Not fatal to the auth flow, but without this warn the operator
+              // has no clue why the instance never re-introduced itself.
+              log.warn({ err, instance: params.name }, 'introSent reset failed after re-auth; intro will not re-fire on next boot');
+            }
           }
-          deps.serviceManager.startFire(params.name, (err: Error | null) => {
-            if (err) log.error({ err, instance: params.name }, 'post-auth start failed');
-          });
-          deps.discovery.scan();
-          setTimeout(endOnce, 1000);
+          continue;
         }
-      } catch { /* skip non-JSON lines */ }
+        writeSSE(evt.event, evt.data ?? {});
+      } catch {
+        // Intentional: the helper may emit human-readable non-JSON output;
+        // only structured SSE events are safe to forward to the browser.
+      }
     }
   });
 
@@ -1388,12 +1482,24 @@ export async function handleAuth(
 
   // Forward errors
   child.on('error', (err) => {
+    terminalFailure = true;
     writeSSE('error', { message: err.message });
     restoreStoppedInstance('child-error');
     endOnce();
   });
-  child.on('exit', (code) => {
-    if (code !== 0) {
+  // `exit` can arrive before the final stdout bytes. Wait for `close`, which
+  // follows closure of the child's stdio streams, before deciding whether the
+  // helper persisted credentials.
+  child.on('close', (code) => {
+    if (code === 0 && connected && !terminalFailure) {
+      if (authTimer) {
+        clearTimeout(authTimer);
+        authTimer = null;
+      }
+      startAfterSuccessfulAuth();
+      return;
+    } else if (code !== 0) {
+      terminalFailure = true;
       writeSSE('error', { message: `auth exited with code ${code}` });
       restoreStoppedInstance('child-exit');
     }
@@ -1402,6 +1508,11 @@ export async function handleAuth(
 
   // Cleanup on client disconnect
   req.on('close', () => {
+    // Once the helper has emitted the persisted-credential signal, let its
+    // short successful completion activate the instance even if the browser
+    // closes the SSE stream. Killing it here would strand the booted-out job.
+    if (connected && !terminalFailure) return;
+    terminalFailure = true;
     child.kill('SIGTERM');
     setTimeout(() => { try { child.kill('SIGKILL'); } catch { /* already exited */ } }, 5000);
     endOnce();

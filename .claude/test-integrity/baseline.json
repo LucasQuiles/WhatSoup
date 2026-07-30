@@ -1,49 +1,88 @@
 {
-  "captured_at": "2026-07-19T07:05:11+00:00",
-  "captured_at_sha": "4b9c2bebdf81ec518a8c700dc2eb32faea4cbda9",
+  "captured_at": "2026-07-30T04:37:53+00:00",
+  "captured_at_sha": "d7399e4a4e97280cbab91d432e8a8e49d1c59950",
   "findings": [
     {
       "content_signature": "da9a6c104ed4baefc18af51a4351a9aa256d3462f7ba658917adc5664f4249f4",
       "file": "tools/qsesh/tests/test_extract_opencode.py",
       "line": 429,
-      "owner": "q",
-      "reason": "advisory-suggestion: test_generic_tool_state_is_exact_and_completed enumerates 5 discrete literal cases ('state-keys', 'status', 'input', 'output', 'tool'); the test dispatches on each exact value or the set is an exhaustive finite domain, so these are named regression/contract cases rather than a samplable input space. Hypothesis generation would not reproduce the specific inputs and would obscure which cases are covered. Keep explicit parametrize.",
       "rule_id": "py-property-test-suggestion",
       "signature": "008a15751b0366e8961c8166e16e308facafea149e81291d306663549738be29"
+    },
+    {
+      "content_signature": "a866bea4bb1a464138b9d3b82225ab3d0217706c72b7b306210b8af6fcedeac1",
+      "file": "deploy/scripts/tests/test_controller_state.py",
+      "line": 3483,
+      "rule_id": "py-property-test-suggestion",
+      "signature": "07134d3d0edd640b27f7551a44b4c250cb1a65457f29761e1bfea84e6fb8e687"
+    },
+    {
+      "content_signature": "7dd23ebd944a0ef7d52ac33c09f14ed425565b7ff80126f3624245ee9260dbc8",
+      "file": "deploy/scripts/tests/test_controller_state.py",
+      "line": 5322,
+      "rule_id": "py-property-test-suggestion",
+      "signature": "0eceffe2a85ad9d921f7d02a18152bcf3443bd9953e99af859c7bfb4c80d4fc2"
     },
     {
       "content_signature": "5b64ae2c32de5f45f0ebf87928501f468c756df21eb31635bd81ebbf116693d6",
       "file": "tools/qsesh/tests/test_extract_opencode.py",
       "line": 411,
-      "owner": "q",
-      "reason": "advisory-suggestion: test_part_envelope_and_ids_are_exact enumerates 5 discrete literal cases ('type', 'id', 'message', 'session', 'duplicate'); the test dispatches on each exact value or the set is an exhaustive finite domain, so these are named regression/contract cases rather than a samplable input space. Hypothesis generation would not reproduce the specific inputs and would obscure which cases are covered. Keep explicit parametrize.",
       "rule_id": "py-property-test-suggestion",
       "signature": "109e5407b2ab163525bfe57a012f341b2b0f6e8a723d85b1dc76e39248ae5150"
+    },
+    {
+      "content_signature": "0d4f918bc435af77374729d56b68731157ad8b09b805189e2d51c078b67144ce",
+      "file": "deploy/scripts/tests/test_controller_state.py",
+      "line": 2806,
+      "rule_id": "py-property-test-suggestion",
+      "signature": "11a7b783c643dc45076311d35806c2b6353de2561ed819082b2ce57ea3fda140"
     },
     {
       "content_signature": "c36fe4dd05a6b23486cf03ea6a90407e746f332ad63d6842ef1cdcd9c78efffb",
       "file": "tools/qsesh/tests/test_jsonl_snapshot.py",
       "line": 294,
-      "owner": "q",
-      "reason": "advisory-suggestion: test_adapter_rejects_invalid_live_window enumerates 5 discrete literal cases (True, 0, -1, 1.5, '1'); the test dispatches on each exact value or the set is an exhaustive finite domain, so these are named regression/contract cases rather than a samplable input space. Hypothesis generation would not reproduce the specific inputs and would obscure which cases are covered. Keep explicit parametrize.",
       "rule_id": "py-property-test-suggestion",
       "signature": "1437034ee1d1314d1c1f04f4f54ccdb675ee1fb5fbeeb1fc1a3c583834aee150"
+    },
+    {
+      "content_signature": "91cbabc22ba9969665d70325daa6314edd830a73c45f78caaac55a924bf41573",
+      "file": "deploy/scripts/tests/test_controller_state.py",
+      "line": 6294,
+      "rule_id": "py-property-test-suggestion",
+      "signature": "163285ed41d961c9f29a7095c04dd5f71ff64defdcdb99bfcc7cd81529e3bb7e"
     },
     {
       "content_signature": "4db90e64090ff236013ebc46a85c11d3fa106b5f5edc11b43da091c4c9963cc1",
       "file": "tools/qsesh/tests/test_extract_codex.py",
       "line": 235,
-      "owner": "q",
-      "reason": "advisory-suggestion: test_tool_arguments_must_be_a_strict_json_object enumerates 4 discrete literal cases ('[]', '{', '{\"file\":\"src/example.py\",\"file\":\"other\"}', '{\"file\":NaN}'); the test dispatches on each exact value or the set is an exhaustive finite domain, so these are named regression/contract cases rather than a samplable input space. Hypothesis generation would not reproduce the specific inputs and would obscure which cases are covered. Keep explicit parametrize.",
       "rule_id": "py-property-test-suggestion",
       "signature": "1874b40666b3c9962ad12559db9d0b5954b92105586022c6185d7de7c347d25d"
+    },
+    {
+      "content_signature": "8d7c389c8063ec82730cee34dae8a579191bb0265a609f745e2a4cc257526abf",
+      "file": "deploy/scripts/tests/test_controller_state.py",
+      "line": 4471,
+      "rule_id": "py-property-test-suggestion",
+      "signature": "191aca8e5bf4c7498de7313a7545464ee7d226ac92fcfc2582366c5b315dc6c2"
+    },
+    {
+      "content_signature": "3e913a6d7b2e5b441177255842abe271135064ce2a99e06b10919f660c26bd13",
+      "file": "deploy/scripts/tests/test_controller_state.py",
+      "line": 1457,
+      "rule_id": "py-property-test-suggestion",
+      "signature": "1dd66b392a73ca7817c9d2c75e7631461a8830fb392a4566cedc1447ceb4e41f"
+    },
+    {
+      "content_signature": "7dd23ebd944a0ef7d52ac33c09f14ed425565b7ff80126f3624245ee9260dbc8",
+      "file": "deploy/scripts/tests/test_controller_state.py",
+      "line": 5434,
+      "rule_id": "py-property-test-suggestion",
+      "signature": "1f41a5700c73b65a3ffbd072d1ebea7425f31fca50cf4223fee35997022c408b"
     },
     {
       "content_signature": "2176a895a02bb581744b922c2e30f383ffecfa76ff47769fd92868ae5f34cc45",
       "file": "deploy/scripts/tests/test_bot_errors_maintenance.py",
       "line": 169,
-      "owner": "q",
-      "reason": "advisory-suggestion: test_parse_duration_rejects_bad enumerates named invalid CLI duration tokens (zero, negative, garbage, empty, missing unit, unknown unit, missing number); each literal documents a distinct fail-closed contract case, while property generation would obscure the supported grammar boundary. Keep explicit parametrize.",
       "rule_id": "py-property-test-suggestion",
       "signature": "206c0a16b67eab79b4304b92869634a708871864f93d481d285d1b2b11a15480"
     },
@@ -51,17 +90,20 @@
       "content_signature": "14eaaae25c1a7448c8e8c3d81d8e018a4d3fc31ae88577e15d6521b2bf065ef2",
       "file": "tools/qsesh/tests/test_archive.py",
       "line": 87,
-      "owner": "q",
-      "reason": "advisory-suggestion: test_malicious_or_noncanonical_qid_is_rejected_without_write enumerates 5 discrete literal cases ('', '../escape', 'qs-ABC', 'qs-abcdefghijk', 'x-abcdefghij'); the test dispatches on each exact value or the set is an exhaustive finite domain, so these are named regression/contract cases rather than a samplable input space. Hypothesis generation would not reproduce the specific inputs and would obscure which cases are covered. Keep explicit parametrize.",
       "rule_id": "py-property-test-suggestion",
       "signature": "24913fdd42f98180f15be50545edb35f6ae77f5fa99db06a41432f42a401f863"
+    },
+    {
+      "content_signature": "92d283bc8220a7b6ea9ce0ff105372e53ae2968f6f5c6c7c878a845e3ad85121",
+      "file": "deploy/scripts/tests/test_controller_state.py",
+      "line": 4412,
+      "rule_id": "py-property-test-suggestion",
+      "signature": "24b745a5cc409f9115a1f739cfea590bd06feb326a50117841d04090bbceffa3"
     },
     {
       "content_signature": "a340946f6b92ed6ff263cc388231df71dc3a357252489b719f8d88eaf624b54d",
       "file": "tools/qsesh/tests/test_extract_opencode.py",
       "line": 263,
-      "owner": "q",
-      "reason": "advisory-suggestion: test_session_info_has_exact_identity_version_time_and_allowed_fields enumerates 4 discrete literal cases ('id', 'version', 'time', 'keys'); the test dispatches on each exact value or the set is an exhaustive finite domain, so these are named regression/contract cases rather than a samplable input space. Hypothesis generation would not reproduce the specific inputs and would obscure which cases are covered. Keep explicit parametrize.",
       "rule_id": "py-property-test-suggestion",
       "signature": "2b6604d0a5904e634265bda2501f79491c471bee7d4e26310d0ef905933a4aff"
     },
@@ -69,53 +111,69 @@
       "content_signature": "e656ff858ce6461ec3a4f7cdef73cf5f70f5e4970fa2bc9979f7a79e3857f086",
       "file": "tools/qsesh/tests/test_opencode_source.py",
       "line": 447,
-      "owner": "q",
-      "reason": "advisory-suggestion: test_copy_mismatch_immediately_before_cli_starts_no_runner enumerates 3 discrete literal cases ('bytes', 'mode', 'replace'); the test dispatches on each exact value or the set is an exhaustive finite domain, so these are named regression/contract cases rather than a samplable input space. Hypothesis generation would not reproduce the specific inputs and would obscure which cases are covered. Keep explicit parametrize.",
       "rule_id": "py-property-test-suggestion",
       "signature": "3011183583b92fe8e012727b680169239993094f5bb99477c87a92b224fa2971"
     },
     {
-      "content_signature": "3b90fb5f1b5fa4dcbeb732504e82a621eb3998139d977d7b687635511be16715",
-      "file": "tools/qsesh/tests/test_distill.py",
-      "line": 368,
-      "owner": "q",
-      "reason": "advisory-suggestion: test_invalid_canonical_invariants_fail_as_one_typed_distill_error enumerates 12 discrete literal cases (('missing-session', 'distill-session-meta'), ('duplicate-session', 'distill-session-meta'), ('missing-project', 'distill-session-meta'), ('version-mismatch',...); the test dispatches on each exact value or the set is an exhaustive finite domain, so these are named regression/contract cases rather than a samplable input space. Hypothesis generation would not reproduce the specific inputs and would obscure which cases are covered. Keep explicit parametrize.",
+      "content_signature": "6ea2b9a42e96ee3122f28d61b14f11dd55ed32d79a066c2b4f7e561ac31a6573",
+      "file": "deploy/scripts/tests/test_controller_state.py",
+      "line": 5499,
       "rule_id": "py-property-test-suggestion",
-      "signature": "f0b1d0e17599da0673f92a07262cc7569cbf6deea629f211cd540e2d25327e9d"
+      "signature": "36e114b190203c9bbd6521eada7b86ef679b22332a8621e67eda7b46c7b7a902"
+    },
+    {
+      "content_signature": "6ea2b9a42e96ee3122f28d61b14f11dd55ed32d79a066c2b4f7e561ac31a6573",
+      "file": "deploy/scripts/tests/test_controller_state.py",
+      "line": 5533,
+      "rule_id": "py-property-test-suggestion",
+      "signature": "388ec163b4e3369a949e80e4bb8bf0cb60e78f970d5dfaa5cf0110b84758d16b"
+    },
+    {
+      "content_signature": "dadd4331bc400109787d47638a13b2819e1b85262c3ff3b297859e5e7cf8abed",
+      "file": "deploy/scripts/tests/test_controller_log.py",
+      "line": 468,
+      "rule_id": "py-property-test-suggestion",
+      "signature": "3a6551f2db812f272666635dfab6c313e79ab7e5200a8131e77f1b16e23d11fc"
     },
     {
       "content_signature": "4a4ac12d3a5609e0611c21e060efdde5a5fdd0b72d3c47e63156f4213e733490",
       "file": "tools/qsesh/tests/test_extract_codex.py",
       "line": 336,
-      "owner": "q",
-      "reason": "advisory-suggestion: test_unknown_payload_type_must_still_be_a_safe_discriminator enumerates 3 discrete literal cases (None, 1, '../../private'); the test dispatches on each exact value or the set is an exhaustive finite domain, so these are named regression/contract cases rather than a samplable input space. Hypothesis generation would not reproduce the specific inputs and would obscure which cases are covered. Keep explicit parametrize.",
       "rule_id": "py-property-test-suggestion",
       "signature": "3b0ebdf9486842c2e2ce0cc13ed55d4b1c323712790119473823d1dcfdbbbc6b"
+    },
+    {
+      "content_signature": "c93207873adbce084ae371409041180057ddf0b47a7c310e1102148b9cd3d49d",
+      "file": "deploy/scripts/tests/test_controller_state.py",
+      "line": 1748,
+      "rule_id": "py-property-test-suggestion",
+      "signature": "3c9b612aca63490298409f83fecde6c8e286efce9223d4d503b93448d5186f07"
+    },
+    {
+      "content_signature": "9c3a7a38f8383c1b3f888399012ef3321057ffb5a9633cfe717a070c418ae665",
+      "file": "deploy/scripts/tests/test_controller_state.py",
+      "line": 4438,
+      "rule_id": "py-property-test-suggestion",
+      "signature": "3ebda96988cd30902d79382dcea1c5beb787ddf78cc222268beb60c04bda7d5a"
     },
     {
       "content_signature": "79b4d9acdf597b3489f3fde87a5c02946b2c54ae2783a113baa43defa18d0cf7",
       "file": "tools/qsesh/tests/test_extract_opencode.py",
       "line": 251,
-      "owner": "q",
-      "reason": "advisory-suggestion: test_message_and_part_indices_preserve_export_order enumerates 3 discrete literal cases ('gap', 'repeat', 'part-before-message'); the test dispatches on each exact value or the set is an exhaustive finite domain, so these are named regression/contract cases rather than a samplable input space. Hypothesis generation would not reproduce the specific inputs and would obscure which cases are covered. Keep explicit parametrize.",
       "rule_id": "py-property-test-suggestion",
       "signature": "3f319e985452715ca98b444a92f8fa374867875f639835757bc7a2aeaadcf354"
     },
     {
-      "content_signature": "b44196b05b535fe296509cd256636afde8261c6718bd13dcdfa92616b64c0187",
-      "file": "tools/qsesh/tests/test_distill.py",
-      "line": 214,
-      "owner": "q",
-      "reason": "advisory-suggestion: test_clean_transcript_is_only_main_prose_plus_collapsed_skill_marker enumerates 3 discrete literal cases ('claude', 'codex', 'opencode'); the test dispatches on each exact value or the set is an exhaustive finite domain, so these are named regression/contract cases rather than a samplable input space. Hypothesis generation would not reproduce the specific inputs and would obscure which cases are covered. Keep explicit parametrize.",
+      "content_signature": "7dd23ebd944a0ef7d52ac33c09f14ed425565b7ff80126f3624245ee9260dbc8",
+      "file": "deploy/scripts/tests/test_controller_state.py",
+      "line": 5061,
       "rule_id": "py-property-test-suggestion",
-      "signature": "5c2e680ea036ee27abaa81f28b91a9bae82b577447aff0450ff7551289f5ee60"
+      "signature": "49d92e8ac9e775724e71a2bcf723e0bcc25b7b208f6bae4ec9999d0d6bc47e2c"
     },
     {
       "content_signature": "ed3ce1056d1dd5dcada198313ee354ef3662836f44f790c4ac55f2cf011e8074",
       "file": "tools/qsesh/tests/test_extract_claude.py",
       "line": 204,
-      "owner": "q",
-      "reason": "advisory-suggestion: test_invalid_or_naive_timestamp_is_rejected enumerates 4 discrete literal cases ('2026-01-02T08:04:06', 'not-a-time', 1, None); the test dispatches on each exact value or the set is an exhaustive finite domain, so these are named regression/contract cases rather than a samplable input space. Hypothesis generation would not reproduce the specific inputs and would obscure which cases are covered. Keep explicit parametrize.",
       "rule_id": "py-property-test-suggestion",
       "signature": "4a8bd5c1671442931761e355259d6f05fcb6a2a66bce0df028312c214a220063"
     },
@@ -123,8 +181,6 @@
       "content_signature": "00a75014a5fe127a67c00f69efacfb029454eca370d95355ed26d61044a506ea",
       "file": "tools/qsesh/tests/test_extract_opencode.py",
       "line": 322,
-      "owner": "q",
-      "reason": "advisory-suggestion: test_message_info_role_keys_and_time_are_exact enumerates 3 discrete literal cases ('role', 'keys', 'time'); the test dispatches on each exact value or the set is an exhaustive finite domain, so these are named regression/contract cases rather than a samplable input space. Hypothesis generation would not reproduce the specific inputs and would obscure which cases are covered. Keep explicit parametrize.",
       "rule_id": "py-property-test-suggestion",
       "signature": "4f8b20dc68450fa94af1a2f0da24251675267e46285e73bfb9d7b145c38dc007"
     },
@@ -132,8 +188,6 @@
       "content_signature": "90ebca4bc59812a57d5b083d75cfeb9b7e713deecea05ea07771a108dbef8c35",
       "file": "tools/qsesh/tests/test_extract_opencode.py",
       "line": 298,
-      "owner": "q",
-      "reason": "advisory-suggestion: test_message_and_part_identity_links_are_exact enumerates 5 discrete literal cases ('session', 'message', 'parent', 'part-message', 'part-session'); the test dispatches on each exact value or the set is an exhaustive finite domain, so these are named regression/contract cases rather than a samplable input space. Hypothesis generation would not reproduce the specific inputs and would obscure which cases are covered. Keep explicit parametrize.",
       "rule_id": "py-property-test-suggestion",
       "signature": "510d303b64998fceded74b429bb098f82e7c6a92781af49faf73631da88e9110"
     },
@@ -141,8 +195,6 @@
       "content_signature": "3dc269ef8818746649544baf2a45ade99b90578816983892779658d91e220bfd",
       "file": "tools/qsesh/tests/test_extract_opencode.py",
       "line": 474,
-      "owner": "q",
-      "reason": "advisory-suggestion: test_subtask_requires_exact_safe_agent_and_prompt enumerates 4 discrete literal cases ('agent', 'unsafe', 'prompt', 'extra'); the test dispatches on each exact value or the set is an exhaustive finite domain, so these are named regression/contract cases rather than a samplable input space. Hypothesis generation would not reproduce the specific inputs and would obscure which cases are covered. Keep explicit parametrize.",
       "rule_id": "py-property-test-suggestion",
       "signature": "516941c83955315cab10018c65767173b57af795f5918cc539d95530af107a48"
     },
@@ -150,8 +202,6 @@
       "content_signature": "dcb5d9d84b78a44e63c6662d7ecb92d611f30b9ba83f360402974140fc045bae",
       "file": "tools/qsesh/tests/test_extract_codex.py",
       "line": 171,
-      "owner": "q",
-      "reason": "advisory-suggestion: test_session_metadata_has_exact_identity_and_string_contract enumerates 5 discrete literal cases ('id', 'session_id', 'model', 'cwd', 'extra'); the test dispatches on each exact value or the set is an exhaustive finite domain, so these are named regression/contract cases rather than a samplable input space. Hypothesis generation would not reproduce the specific inputs and would obscure which cases are covered. Keep explicit parametrize.",
       "rule_id": "py-property-test-suggestion",
       "signature": "55d3293d4f5a6c8ccea6615b5e9f7067602831015fa5d226bffbc78586765762"
     },
@@ -159,8 +209,6 @@
       "content_signature": "29e36964b14b79ce5129f26d4d302c0161d87221e778313fa157219df8d2a106",
       "file": "deploy/scripts/tests/test_bot_errors_gui_session_monitor.py",
       "line": 200,
-      "owner": "q",
-      "reason": "advisory-suggestion: the 7 garbage-payload fail-closed cases are intentionally enumerated literals (each is a named adversarial input — empty/whitespace/permission-prompt/multi-token/unknown-token); hypothesis adds a dependency not used elsewhere in these tests and would obscure the specific fail-closed cases. Keep explicit parametrize.",
       "rule_id": "py-property-test-suggestion",
       "signature": "5a181c6e1659db7dfb5d82d5c477a8a1f9773f84a50d33b994aad5c031be0d3f"
     },
@@ -168,17 +216,20 @@
       "content_signature": "4e42337197dffed5d8d8b1b80faa40525d534678c9f9d95519b2eadbeb2faf1c",
       "file": "tools/qsesh/tests/test_extract_codex.py",
       "line": 140,
-      "owner": "q",
-      "reason": "advisory-suggestion: test_invalid_or_naive_timestamp_is_rejected enumerates 4 discrete literal cases ('2026-01-02T08:04:06', 'bad', 1, None); the test dispatches on each exact value or the set is an exhaustive finite domain, so these are named regression/contract cases rather than a samplable input space. Hypothesis generation would not reproduce the specific inputs and would obscure which cases are covered. Keep explicit parametrize.",
       "rule_id": "py-property-test-suggestion",
       "signature": "5b892978a723e2dde6a0027e633bc2b7273979e85a9fa591ed4db38771af914e"
+    },
+    {
+      "content_signature": "b44196b05b535fe296509cd256636afde8261c6718bd13dcdfa92616b64c0187",
+      "file": "tools/qsesh/tests/test_distill.py",
+      "line": 214,
+      "rule_id": "py-property-test-suggestion",
+      "signature": "5c2e680ea036ee27abaa81f28b91a9bae82b577447aff0450ff7551289f5ee60"
     },
     {
       "content_signature": "780c51499950d57e3f943b432fe4f29b5b95cade78160dfc0b48db14f2db3e43",
       "file": "tools/qsesh/tests/test_config.py",
       "line": 254,
-      "owner": "q",
-      "reason": "advisory-suggestion: test_opencode_source_root_must_end_in_exact_database_name enumerates 3 discrete literal cases ('opencode', 'opencode.sqlite', 'OpenCode.db'); the test dispatches on each exact value or the set is an exhaustive finite domain, so these are named regression/contract cases rather than a samplable input space. Hypothesis generation would not reproduce the specific inputs and would obscure which cases are covered. Keep explicit parametrize.",
       "rule_id": "py-property-test-suggestion",
       "signature": "6cbfd1927569651cf6a4c212a79fee2c6f6ed16d4751ae3d001e88ba77bc98df"
     },
@@ -186,8 +237,6 @@
       "content_signature": "00f30d89ffb976b569e965fd65f194dee39e78d7b151dd4129a392f9312df3f1",
       "file": "tools/qsesh/tests/test_source_boundary.py",
       "line": 296,
-      "owner": "q",
-      "reason": "advisory-suggestion: test_missing_or_escaped_runtime_directory_fails_before_spawn enumerates 5 discrete literal cases ('home', 'xdg-data', 'xdg-config', 'xdg-cache', 'tmp'); the test dispatches on each exact value or the set is an exhaustive finite domain, so these are named regression/contract cases rather than a samplable input space. Hypothesis generation would not reproduce the specific inputs and would obscure which cases are covered. Keep explicit parametrize.",
       "rule_id": "py-property-test-suggestion",
       "signature": "72ffb6cf57775fb73cf1bc96c8c991f548ee0c20a7042cbe746627a897be386c"
     },
@@ -195,80 +244,83 @@
       "content_signature": "042dd9404567a201fabc70f28f4cfaa02d0d2bacb1284a0630e9ea074077b1a2",
       "file": "tools/qsesh/tests/test_extract_codex.py",
       "line": 316,
-      "owner": "q",
-      "reason": "advisory-suggestion: test_attachment_payload_contract_is_exact enumerates 3 discrete literal cases ('attachment_type', 'id', 'extra'); the test dispatches on each exact value or the set is an exhaustive finite domain, so these are named regression/contract cases rather than a samplable input space. Hypothesis generation would not reproduce the specific inputs and would obscure which cases are covered. Keep explicit parametrize.",
       "rule_id": "py-property-test-suggestion",
       "signature": "782460b330ba73511d037a3f647206726cf79db9653b0a9496ceba2c2ad1bbd8"
     },
     {
-      "content_signature": "76f98654cceb4b1187c69608bcbd29586b831e0c0c304c1b7f6943838a79f002",
-      "file": "deploy/scripts/tests/test_bot_errors_maintenance.py",
-      "line": 160,
-      "owner": "q",
-      "reason": "advisory-suggestion: test_parse_duration_valid enumerates the finite public duration units accepted by the maintenance CLI (seconds, minutes, hours, days). The table is the contract; property generation would add broad parser fuzzing but reduce the named unit-level documentation. Keep explicit parametrize.",
+      "content_signature": "28fd406790ea6ae39f500a4a9cd781f99e554237a0d58219de7dda302b49d413",
+      "file": "deploy/scripts/tests/test_controller_state.py",
+      "line": 5847,
       "rule_id": "py-property-test-suggestion",
-      "signature": "7d933734ba3d8ca16beb36ec1771acd4f7d856d3a4c62e52858204bf0d3d884f"
-    },
-    {
-      "content_signature": "7dec4cdf3e88d09813fe5e26376a494800e3f4859343c1d699f6cd4609cc82cc",
-      "file": "tools/qsesh/tests/test_source_boundary.py",
-      "line": 927,
-      "owner": "q",
-      "reason": "advisory-suggestion: test_invalid_bounds_fail_before_spawn enumerates 4 discrete literal cases ((True, 64, 'opencode-timeout'), (0.0, 64, 'opencode-timeout'), (1.0, True, 'opencode-output-limit'), (1.0, 0, 'opencode-output-limit')); the test dispatches on each exact value or the set is an exhaustive finite domain, so these are named regression/contract cases rather than a samplable input space. Hypothesis generation would not reproduce the specific inputs and would obscure which cases are covered. Keep explicit parametrize.",
-      "rule_id": "py-property-test-suggestion",
-      "signature": "8cdc1a2ec6711f12e47bc10ed3dbb3a86d0db90ca2dcb793e019c2aea42e260c"
-    },
-    {
-      "content_signature": "b9ea576c65e575920a7a5694c68400fd28357018ae74e5d77d64ccfca958d2f3",
-      "file": "deploy/scripts/tests/test_bot_errors_best_effort_info_tier.py",
-      "line": 86,
-      "owner": "q",
-      "reason": "advisory-suggestion: test_gate_off_values enumerates 6 named falsy strings (0/false/no/off/OFF/False) for the gate-off path; each is an intentional literal and hypothesis would add a dependency not used elsewhere in these tests while obscuring the specific gate-off cases. Keep explicit parametrize. Mirrors the accepted finding in test_bot_errors_gui_session_monitor.py:199.",
-      "rule_id": "py-property-test-suggestion",
-      "signature": "8e9729b47230eeac2d65cea3051b475054783a0128aac66ac877b249039fa00e"
-    },
-    {
-      "content_signature": "b49cbcf5d5fa763b0af4f7dc081d4d9077c5954636eb24e4009d61a2bba73e4a",
-      "file": "tools/qsesh/tests/test_extract_opencode.py",
-      "line": 232,
-      "owner": "q",
-      "reason": "advisory-suggestion: test_session_row_is_exactly_once_and_first enumerates 3 discrete literal cases ('missing', 'duplicate', 'after-message'); the test dispatches on each exact value or the set is an exhaustive finite domain, so these are named regression/contract cases rather than a samplable input space. Hypothesis generation would not reproduce the specific inputs and would obscure which cases are covered. Keep explicit parametrize.",
-      "rule_id": "py-property-test-suggestion",
-      "signature": "968a260144a32346b953c9e670b4ed47dcef971209a0f885479f16ae536c2b0b"
+      "signature": "78978a7d749b229d98fa4990007bc9a343e5a966bbdba653ef0bec33973c46f0"
     },
     {
       "content_signature": "4a1e7e44fe8264a7e89a8d1f72bf6678d8c6ca78f82adc978637699f9ff92cfd",
       "file": "tools/qsesh/tests/test_schema.py",
       "line": 340,
-      "owner": "q",
-      "reason": "advisory-suggestion: test_existing_wrong_or_newer_database_is_rejected_before_ddl enumerates 3 discrete literal cases ('wrong-application', 'newer-version', 'drift'); the test dispatches on each exact value or the set is an exhaustive finite domain, so these are named regression/contract cases rather than a samplable input space. Hypothesis generation would not reproduce the specific inputs and would obscure which cases are covered. Keep explicit parametrize.",
       "rule_id": "py-property-test-suggestion",
       "signature": "7a5cf3803267f0068d01a46792ed0c258a29eeeec2757999ee62eabfacde6f31"
     },
     {
-      "content_signature": "35cd23ecf0e349f79ebd3bce16be39c81bcd283df64a8cabee640487236c9906",
-      "file": "tools/qsesh/tests/test_extract_opencode.py",
-      "line": 220,
-      "owner": "q",
-      "reason": "advisory-suggestion: test_canonical_session_row_has_exact_envelope enumerates 3 discrete literal cases ('missing', 'extra', 'version'); the test dispatches on each exact value or the set is an exhaustive finite domain, so these are named regression/contract cases rather than a samplable input space. Hypothesis generation would not reproduce the specific inputs and would obscure which cases are covered. Keep explicit parametrize.",
+      "content_signature": "76f98654cceb4b1187c69608bcbd29586b831e0c0c304c1b7f6943838a79f002",
+      "file": "deploy/scripts/tests/test_bot_errors_maintenance.py",
+      "line": 160,
       "rule_id": "py-property-test-suggestion",
-      "signature": "99f0701d7ab6b7f16df486f17727c0936f2ff6848665caa26624c1b820fa6b97"
+      "signature": "7d933734ba3d8ca16beb36ec1771acd4f7d856d3a4c62e52858204bf0d3d884f"
+    },
+    {
+      "content_signature": "c43f793a851492038dc3a75829bbc6e0ddb56acaafb1215a2d7383ac81de7ac5",
+      "file": "deploy/scripts/tests/test_controller_log.py",
+      "line": 486,
+      "rule_id": "py-property-test-suggestion",
+      "signature": "7e16b735e4610f939172e032edd6d16bd54375f1ae0f96bb0a115c4e7ab0ccaa"
+    },
+    {
+      "content_signature": "fbe0592507bf1764bc04817cf8bab9818ad021868a9c31a8c9f02c172dc52149",
+      "file": "deploy/scripts/tests/test_controller_state.py",
+      "line": 1811,
+      "rule_id": "py-property-test-suggestion",
+      "signature": "8478d74e4d71ebb16f7d725cf74f17312a75fcc1c019966d5420a0667cf850eb"
+    },
+    {
+      "content_signature": "b9ea576c65e575920a7a5694c68400fd28357018ae74e5d77d64ccfca958d2f3",
+      "file": "deploy/scripts/tests/test_bot_errors_best_effort_info_tier.py",
+      "line": 86,
+      "rule_id": "py-property-test-suggestion",
+      "signature": "8e9729b47230eeac2d65cea3051b475054783a0128aac66ac877b249039fa00e"
+    },
+    {
+      "content_signature": "9b8f06bafe18b269cc56634a18eff54b4bb78480fcdff1d9e13a4017d8496194",
+      "file": "tools/qsesh/tests/test_distill.py",
+      "line": 175,
+      "rule_id": "py-property-test-suggestion",
+      "signature": "904ba02e75ad406d98aa8710be9e8b7babeb9f5f4fe099c88f7588c0d47de99d"
     },
     {
       "content_signature": "4e622175a7cd4a792f3aee9440bd17b120f61dace715933114f3f9ae9ff13aa9",
       "file": "tools/qsesh/tests/test_distill.py",
       "line": 267,
-      "owner": "q",
-      "reason": "advisory-suggestion: test_inventories_and_record_counts_reconcile_every_stripped_kind enumerates 3 discrete literal cases ('claude', 'codex', 'opencode'); the test dispatches on each exact value or the set is an exhaustive finite domain, so these are named regression/contract cases rather than a samplable input space. Hypothesis generation would not reproduce the specific inputs and would obscure which cases are covered. Keep explicit parametrize.",
       "rule_id": "py-property-test-suggestion",
       "signature": "9343bb22194ea9a8455dfd06bb1a10375d48b78a9218fa5ef2bbb6fe840249dc"
+    },
+    {
+      "content_signature": "b49cbcf5d5fa763b0af4f7dc081d4d9077c5954636eb24e4009d61a2bba73e4a",
+      "file": "tools/qsesh/tests/test_extract_opencode.py",
+      "line": 232,
+      "rule_id": "py-property-test-suggestion",
+      "signature": "968a260144a32346b953c9e670b4ed47dcef971209a0f885479f16ae536c2b0b"
+    },
+    {
+      "content_signature": "35cd23ecf0e349f79ebd3bce16be39c81bcd283df64a8cabee640487236c9906",
+      "file": "tools/qsesh/tests/test_extract_opencode.py",
+      "line": 220,
+      "rule_id": "py-property-test-suggestion",
+      "signature": "99f0701d7ab6b7f16df486f17727c0936f2ff6848665caa26624c1b820fa6b97"
     },
     {
       "content_signature": "50474ee358fa7cd128ea082a1eeb0395d8f4aa3e26dcac55963090228ad64016",
       "file": "tools/qsesh/tests/test_extract_codex.py",
       "line": 255,
-      "owner": "q",
-      "reason": "advisory-suggestion: test_tool_results_require_one_prior_unconsumed_call enumerates 3 discrete literal cases ('missing', 'unknown', 'duplicate'); the test dispatches on each exact value or the set is an exhaustive finite domain, so these are named regression/contract cases rather than a samplable input space. Hypothesis generation would not reproduce the specific inputs and would obscure which cases are covered. Keep explicit parametrize.",
       "rule_id": "py-property-test-suggestion",
       "signature": "9ae0149b124e16c192fa1b7308da5896d598e37bedda6b430cc39e982227633e"
     },
@@ -276,8 +328,6 @@
       "content_signature": "48b9dd70d393ae659ec33b632aa5c3049b832bb37434470219fd5769588d1377",
       "file": "tools/qsesh/tests/test_source_boundary.py",
       "line": 433,
-      "owner": "q",
-      "reason": "advisory-suggestion: test_protected_roots_fail_before_any_open_or_scan enumerates 3 discrete literal cases ('iter_files', 'stat', 'read_bytes'); the test dispatches on each exact value or the set is an exhaustive finite domain, so these are named regression/contract cases rather than a samplable input space. Hypothesis generation would not reproduce the specific inputs and would obscure which cases are covered. Keep explicit parametrize.",
       "rule_id": "py-property-test-suggestion",
       "signature": "9caed0f2673f4f590c1b662d22fcfc238459c1b98738c5bdc9b8bd1c4df96822"
     },
@@ -285,17 +335,34 @@
       "content_signature": "81429ec372c4c04fca3450c48c0b14a91e0adc02e92dd086997b712991bcd1a4",
       "file": "deploy/scripts/tests/test_bot_errors_redaction_regex.py",
       "line": 87,
-      "owner": "q",
-      "reason": "advisory-suggestion: test_device_suffixed_jids_fully_masked_across_consumers enumerates the named JID forms whose verbatim leak BEAD-049 fixes (device-suffix :N, device-dash -N, plain) across each of the 7 consumer redactors; each literal is a distinct security regression contract, while property generation would obscure which JID shape proves the WHATSAPP_JID_RE fix. Keep explicit parametrize.",
       "rule_id": "py-property-test-suggestion",
       "signature": "9f2bd75463575d6566427c1db8122c93dfea40e05d82b1746a7bffed54cd0445"
+    },
+    {
+      "content_signature": "8cec40f3ee220d9638c559492767806b79ec15c9ee2517e1dfe2ddc25790a9f9",
+      "file": "deploy/scripts/tests/test_controller_state.py",
+      "line": 4964,
+      "rule_id": "py-property-test-suggestion",
+      "signature": "a1ea710a71541ec53d727d4c6c19351d551cf7212318c4ea0a41e41fa3d30066"
+    },
+    {
+      "content_signature": "96a32447fe3f349d8ea67ceaec068e838413b611a988136d0371e06c28e2d7b9",
+      "file": "deploy/scripts/tests/test_controller_state.py",
+      "line": 4911,
+      "rule_id": "py-property-test-suggestion",
+      "signature": "a24947d5dcc35a69d1a3e52cb0e0080befc54f588f60dd841e4f61c90db0b9f7"
+    },
+    {
+      "content_signature": "9485c26c310282f889045cdb648474f60cfb7a96cd333e303b08820dc4aa6fde",
+      "file": "deploy/scripts/tests/test_controller_state.py",
+      "line": 4874,
+      "rule_id": "py-property-test-suggestion",
+      "signature": "a646affcca7873c4e0e4c4f218e98fca7f0a98577e5082ef561ae6970ed58afd"
     },
     {
       "content_signature": "22a44fa42a05fe136bdced0835a29066d7e06cc24951c56398376b4568133d89",
       "file": "tools/qsesh/tests/test_source_boundary.py",
       "line": 536,
-      "owner": "q",
-      "reason": "advisory-suggestion: test_every_non_allowlisted_argv_is_rejected_before_spawn enumerates 9 discrete literal cases (('--version',), ('--pure', 'session', 'list'), ('--pure', 'session', 'list', '--format', 'json', '-n', '0'), ('--pure', 'session', 'list', '--format', 'json'...); the test dispatches on each exact value or the set is an exhaustive finite domain, so these are named regression/contract cases rather than a samplable input space. Hypothesis generation would not reproduce the specific inputs and would obscure which cases are covered. Keep explicit parametrize.",
       "rule_id": "py-property-test-suggestion",
       "signature": "a686dca27529ad1dd09630caba64da0fe63e1c22ffd1f347a6150118d0082e18"
     },
@@ -303,8 +370,6 @@
       "content_signature": "f8236dc80c10588c32f37d6307dbef6193d3e44b7c23c3ac5d5d275cc5c01187",
       "file": "tools/qsesh/tests/test_extract_claude.py",
       "line": 233,
-      "owner": "q",
-      "reason": "advisory-suggestion: test_tool_result_requires_one_prior_unconsumed_call_id enumerates 3 discrete literal cases ('missing', 'unknown', 'duplicate'); the test dispatches on each exact value or the set is an exhaustive finite domain, so these are named regression/contract cases rather than a samplable input space. Hypothesis generation would not reproduce the specific inputs and would obscure which cases are covered. Keep explicit parametrize.",
       "rule_id": "py-property-test-suggestion",
       "signature": "a9b6472a344f8cfaa12c61c62f5165ab228614d65e3b9d5d835e8bf1ea31aabd"
     },
@@ -312,8 +377,6 @@
       "content_signature": "a080eb888ef3dd6f289835fe1b94c13a86c3811605075dc4bbc1f3971d5bcca8",
       "file": "tools/qsesh/tests/test_scanner_cursor.py",
       "line": 89,
-      "owner": "q",
-      "reason": "advisory-suggestion: test_each_descriptor_identity_field_change_is_changed enumerates 5 discrete literal cases (('device', 9), ('inode', 9), ('size', 9), ('mtime_ns', 9), ('ctime_ns', 9)); the test dispatches on each exact value or the set is an exhaustive finite domain, so these are named regression/contract cases rather than a samplable input space. Hypothesis generation would not reproduce the specific inputs and would obscure which cases are covered. Keep explicit parametrize.",
       "rule_id": "py-property-test-suggestion",
       "signature": "aa10a11182889892365453f3a9720cb344483e18dfcac9892ce3447dd6376574"
     },
@@ -321,332 +384,34 @@
       "content_signature": "f246bd1864dc4d799c57e90d67435dc101c7f3ca9f5efbe10932534c4734fbe1",
       "file": "tools/qsesh/tests/test_extract_codex.py",
       "line": 268,
-      "owner": "q",
-      "reason": "advisory-suggestion: test_skill_call_requires_exact_safe_name_argument enumerates 3 discrete literal cases ('{}', '{\"name\":\"../../private\"}', '{\"name\":\"brainstorming\",\"x\":1}'); the test dispatches on each exact value or the set is an exhaustive finite domain, so these are named regression/contract cases rather than a samplable input space. Hypothesis generation would not reproduce the specific inputs and would obscure which cases are covered. Keep explicit parametrize.",
       "rule_id": "py-property-test-suggestion",
       "signature": "b05380cbdf5474cbf79e10b520db01bc800d21d254aad2b4c50f3fe2f000a09a"
-    },
-    {
-      "content_signature": "06a7951ac9ecd658c8ea86815b486675cb05dce3e43715c8f6dded86d5571cd3",
-      "file": "tools/qsesh/tests/test_extract_opencode.py",
-      "line": 459,
-      "owner": "q",
-      "reason": "advisory-suggestion: test_skill_tool_requires_exact_completed_safe_name enumerates 4 discrete literal cases ('state', 'name', 'unsafe', 'extra'); the test dispatches on each exact value or the set is an exhaustive finite domain, so these are named regression/contract cases rather than a samplable input space. Hypothesis generation would not reproduce the specific inputs and would obscure which cases are covered. Keep explicit parametrize.",
-      "rule_id": "py-property-test-suggestion",
-      "signature": "c6d88e51a2e535755add1fe1ce70277b8fb7fba67628cf580aacf70ed1862577"
-    },
-    {
-      "content_signature": "9a1bce7c8a9addf9afdc6364091e73e7c9342eb0c12e1903d397b171bf3ee8f6",
-      "file": "tools/qsesh/tests/test_jsonl_snapshot.py",
-      "line": 267,
-      "owner": "q",
-      "reason": "advisory-suggestion: test_snapshot_rejects_non_timestamp_clock_values enumerates 4 discrete literal cases (True, -1, 1.5, '1'); the test dispatches on each exact value or the set is an exhaustive finite domain, so these are named regression/contract cases rather than a samplable input space. Hypothesis generation would not reproduce the specific inputs and would obscure which cases are covered. Keep explicit parametrize.",
-      "rule_id": "py-property-test-suggestion",
-      "signature": "c9a69d4a4cc48d3f2ef5fec414c1bd53ceaa0166b2ff59a33e978b4d2fb17a0e"
-    },
-    {
-      "content_signature": "3b90fb5f1b5fa4dcbeb732504e82a621eb3998139d977d7b687635511be16715",
-      "file": "tools/qsesh/tests/test_extract_codex.py",
-      "line": 184,
-      "owner": "q",
-      "reason": "advisory-suggestion: test_user_message_payload_contract_is_exact enumerates 3 discrete literal cases (('keys', 'codex-user-message'), ('type', 'codex-payload-type'), ('message', 'codex-user-message')); the test dispatches on each exact value or the set is an exhaustive finite domain, so these are named regression/contract cases rather than a samplable input space. Hypothesis generation would not reproduce the specific inputs and would obscure which cases are covered. Keep explicit parametrize.",
-      "rule_id": "py-property-test-suggestion",
-      "signature": "cabb6e9cc8b5c5d1260dbd09eba19365066997f237211a1a681f8b0f3d8610ec"
-    },
-    {
-      "content_signature": "a2dd4912bf9101bc9124fcd372c9d5e5ed2829d454de52c54d064b5126d2d961",
-      "file": "tools/qsesh/tests/test_distill.py",
-      "line": 148,
-      "owner": "q",
-      "reason": "advisory-suggestion: test_each_harness_matches_its_independently_authored_distilled_golden enumerates 3 discrete literal cases ('claude', 'codex', 'opencode'); the test dispatches on each exact value or the set is an exhaustive finite domain, so these are named regression/contract cases rather than a samplable input space. Hypothesis generation would not reproduce the specific inputs and would obscure which cases are covered. Keep explicit parametrize.",
-      "rule_id": "py-property-test-suggestion",
-      "signature": "c9047a50d5664cc3a8e277bf09cc7b1ec7c92b6cd2d8a3a1a243f23ca268ef04"
-    },
-    {
-      "content_signature": "7c75279b1917473a8c9a0a5e48721e0193bc39e24f7fd54a4e764673048735d1",
-      "file": "tools/qsesh/tests/test_opencode_source.py",
-      "line": 386,
-      "owner": "q",
-      "reason": "advisory-suggestion: test_membership_identity_and_byte_races_start_no_runner enumerates 9 discrete literal cases (('source-set-observed', 'add-wal'), ('before-source-open', 'replace-db'), ('db-copy-chunk', 'change-db'), ('db-copy-complete', 'change-wal'), ('wal-copy-chun...); the test dispatches on each exact value or the set is an exhaustive finite domain, so these are named regression/contract cases rather than a samplable input space. Hypothesis generation would not reproduce the specific inputs and would obscure which cases are covered. Keep explicit parametrize.",
-      "rule_id": "py-property-test-suggestion",
-      "signature": "d698a31fc7002fef27a06cca267ebbaef8237ccfac72778f6571776400fd7341"
-    },
-    {
-      "content_signature": "7a92ff9afc1a7b8fa0c31398f9ac74475b32a7a63455ee37a264809947b3c250",
-      "file": "tools/qsesh/tests/test_extract_opencode.py",
-      "line": 501,
-      "owner": "q",
-      "reason": "advisory-suggestion: test_tail_part_shapes_are_exact enumerates 3 discrete literal cases ('compaction', 'file', 'unknown'); the test dispatches on each exact value or the set is an exhaustive finite domain, so these are named regression/contract cases rather than a samplable input space. Hypothesis generation would not reproduce the specific inputs and would obscure which cases are covered. Keep explicit parametrize.",
-      "rule_id": "py-property-test-suggestion",
-      "signature": "d79b83734a761d611f2a0d5f1b75e5e7f7c78fd1f0ecdbae8eb50c07905d5040"
-    },
-    {
-      "content_signature": "d8e23a3354f2c8d3d9daca0586992d65c37d37657834a805a2d8245f989bb0da",
-      "file": "tools/qsesh/tests/test_archive.py",
-      "line": 188,
-      "owner": "q",
-      "reason": "advisory-suggestion: test_injected_faults_never_accept_a_corrupt_final_and_report_residue_truthfully enumerates 6 discrete literal cases (('after-open', False, True), ('after-write', False, True), ('after-gzip-close', False, True), ('after-file-fsync', False, True), ('after-publish', True, True...); the test dispatches on each exact value or the set is an exhaustive finite domain, so these are named regression/contract cases rather than a samplable input space. Hypothesis generation would not reproduce the specific inputs and would obscure which cases are covered. Keep explicit parametrize.",
-      "rule_id": "py-property-test-suggestion",
-      "signature": "da194ea84f6d223d2dee3197cda8291eaa2a40a6f97d9226adbb472a8bfcc325"
-    },
-    {
-      "content_signature": "c0695c0a098ee65c5c31c14ea30bf768ee8c5267d1c76607c6012e33b8080929",
-      "file": "tools/qsesh/tests/test_extract_codex.py",
-      "line": 220,
-      "owner": "q",
-      "reason": "advisory-suggestion: test_assistant_message_and_content_keys_are_exact enumerates 4 discrete literal cases ('role', 'content', 'part_type', 'extra'); the test dispatches on each exact value or the set is an exhaustive finite domain, so these are named regression/contract cases rather than a samplable input space. Hypothesis generation would not reproduce the specific inputs and would obscure which cases are covered. Keep explicit parametrize.",
-      "rule_id": "py-property-test-suggestion",
-      "signature": "dd6c9e1477012e81df1c1de7b5555cf028c2ec11e186a5af230f6551c74b588d"
-    },
-    {
-      "content_signature": "c35de05dbba59cb485643df70c03c7538073e1b6db988b0b71653dd3009fcc65",
-      "file": "tools/qsesh/tests/test_source_boundary.py",
-      "line": 781,
-      "owner": "q",
-      "reason": "advisory-suggestion: test_first_cap_crossing_byte_kills_the_group_and_discards_output enumerates 3 discrete literal cases ('head -c 65 /dev/zero', 'head -c 65 /dev/zero >&2', '(head -c 65 /dev/zero) & (head -c 65 /dev/zero >&2) & wait'); the test dispatches on each exact value or the set is an exhaustive finite domain, so these are named regression/contract cases rather than a samplable input space. Hypothesis generation would not reproduce the specific inputs and would obscure which cases are covered. Keep explicit parametrize.",
-      "rule_id": "py-property-test-suggestion",
-      "signature": "df35c6cd074d6c2274a6b192d3203c825559068fdf026e216f437a3f44072fcf"
-    },
-    {
-      "content_signature": "61a499eeeeb74bc04ffe505d09338f1e96af98ddf46fc49a99620d15e4071c67",
-      "file": "tools/qsesh/tests/test_extract_codex.py",
-      "line": 164,
-      "owner": "q",
-      "reason": "advisory-suggestion: test_top_level_type_is_required_safe_and_allowlisted enumerates 4 discrete literal cases (None, 1, '../../private', 'unknown_top'); the test dispatches on each exact value or the set is an exhaustive finite domain, so these are named regression/contract cases rather than a samplable input space. Hypothesis generation would not reproduce the specific inputs and would obscure which cases are covered. Keep explicit parametrize.",
-      "rule_id": "py-property-test-suggestion",
-      "signature": "e095b01ffccc3e5eddc24d50992943a01c83c00d6bba0012e1b7e5eba29866bc"
-    },
-    {
-      "content_signature": "4db90e64090ff236013ebc46a85c11d3fa106b5f5edc11b43da091c4c9963cc1",
-      "file": "tools/qsesh/tests/test_extract_codex.py",
-      "line": 286,
-      "owner": "q",
-      "reason": "advisory-suggestion: test_subagent_call_requires_exact_agent_and_prompt enumerates 5 discrete literal cases ('{}', '{\"agent\":\"fixture-agent\"}', '{\"prompt\":\"USER_ALPHA\"}', '{\"agent\":\"../../private\",\"prompt\":\"USER_ALPHA\"}', '{\"agent\":\"fixture-agent\",\"prompt\":\"USER_ALP...); the test dispatches on each exact value or the set is an exhaustive finite domain, so these are named regression/contract cases rather than a samplable input space. Hypothesis generation would not reproduce the specific inputs and would obscure which cases are covered. Keep explicit parametrize.",
-      "rule_id": "py-property-test-suggestion",
-      "signature": "e0de5c6340f3b7cfcfff99115d4c0716343d1e83e0c1734fb11ae30788dac2c9"
-    },
-    {
-      "content_signature": "9e57ed9023bf72b5b2df4d6a6e61fd4045eacc5634f5980d3a2cfd406dcfaba4",
-      "file": "deploy/scripts/tests/test_bot_errors_inhibition.py",
-      "line": 219,
-      "owner": "q",
-      "reason": "advisory-suggestion: test_gate_off_accepts_falsey_values enumerates the finite accepted falsey env values for the inhibition gate (false/no/off/0). These are public compatibility literals, not a broad data domain, so explicit parametrize is clearer and keeps the fail-open contract readable.",
-      "rule_id": "py-property-test-suggestion",
-      "signature": "eb5bb6f5cfd7561578d1952f6bedb2c284b77f2dadd7c7dbfc9dcd30440316c6"
-    },
-    {
-      "content_signature": "628b8c6658847786404df5eccdcff11c38817916b5aa18c1518f35afa3f9ed6b",
-      "file": "tools/qsesh/tests/test_extract_opencode.py",
-      "line": 282,
-      "owner": "q",
-      "reason": "advisory-suggestion: test_epoch_milliseconds_are_nonnegative_integers enumerates 4 discrete literal cases (True, -1, 'bad', None); the test dispatches on each exact value or the set is an exhaustive finite domain, so these are named regression/contract cases rather than a samplable input space. Hypothesis generation would not reproduce the specific inputs and would obscure which cases are covered. Keep explicit parametrize.",
-      "rule_id": "py-property-test-suggestion",
-      "signature": "ee41ff2da3b86c676867b14b88bf5c7ed044803f60d2d16984d6ec914411b84a"
-    },
-    {
-      "content_signature": "032b851af91f55e7b013ba5b39aaec4f7bf5958d9c8bc01f3b92db161eaabf9a",
-      "file": "tools/qsesh/tests/test_extract_opencode.py",
-      "line": 244,
-      "owner": "q",
-      "reason": "advisory-suggestion: test_canonical_row_kind_is_required_safe_and_allowlisted enumerates 4 discrete literal cases (None, 1, '../../private', 'unknown'); the test dispatches on each exact value or the set is an exhaustive finite domain, so these are named regression/contract cases rather than a samplable input space. Hypothesis generation would not reproduce the specific inputs and would obscure which cases are covered. Keep explicit parametrize.",
-      "rule_id": "py-property-test-suggestion",
-      "signature": "efe97cb0dae3c2f900b3c0336efed12d2c68ac240ef0df2b886fbdf135e0b6b4"
-    },
-    {
-      "content_signature": "9b8f06bafe18b269cc56634a18eff54b4bb78480fcdff1d9e13a4017d8496194",
-      "file": "tools/qsesh/tests/test_distill.py",
-      "line": 175,
-      "owner": "q",
-      "reason": "advisory-suggestion: test_size_and_inventory_metrics_are_wired_into_the_record enumerates the complete supported Harness enum ('claude','codex','opencode') across canonical integration fixtures; this is a finite adapter contract rather than a generative input domain. Property generation would obscure fixture identity without increasing supported-harness coverage. Keep explicit parametrize.",
-      "rule_id": "py-property-test-suggestion",
-      "signature": "904ba02e75ad406d98aa8710be9e8b7babeb9f5f4fe099c88f7588c0d47de99d"
-    },
-    {
-      "content_signature": "7dd23ebd944a0ef7d52ac33c09f14ed425565b7ff80126f3624245ee9260dbc8",
-      "file": "deploy/scripts/tests/test_controller_state.py",
-      "line": 5064,
-      "owner": "q",
-      "reason": "advisory-suggestion: this parametrized controller-recovery matrix enumerates a closed, named set of safety or fault-contract cases. Property generation would obscure the exact phase or artifact boundary and would not add coverage to this finite domain. Keep explicit parametrize.",
-      "rule_id": "py-property-test-suggestion",
-      "signature": "009bf7d48f169470ad3e974d3081ea3e35f874026545bde4f420f8aa893c17a7"
-    },
-    {
-      "content_signature": "91cbabc22ba9969665d70325daa6314edd830a73c45f78caaac55a924bf41573",
-      "file": "deploy/scripts/tests/test_controller_state.py",
-      "line": 6297,
-      "owner": "q",
-      "reason": "advisory-suggestion: this parametrized controller-recovery matrix enumerates a closed, named set of safety or fault-contract cases. Property generation would obscure the exact phase or artifact boundary and would not add coverage to this finite domain. Keep explicit parametrize.",
-      "rule_id": "py-property-test-suggestion",
-      "signature": "05edad9e1d4864ffa904f916347c108aa28d90ab3a3871b31c61a306facd6c95"
-    },
-    {
-      "content_signature": "a866bea4bb1a464138b9d3b82225ab3d0217706c72b7b306210b8af6fcedeac1",
-      "file": "deploy/scripts/tests/test_controller_state.py",
-      "line": 3483,
-      "owner": "q",
-      "reason": "advisory-suggestion: this parametrized controller-recovery matrix enumerates a closed, named set of safety or fault-contract cases. Property generation would obscure the exact phase or artifact boundary and would not add coverage to this finite domain. Keep explicit parametrize.",
-      "rule_id": "py-property-test-suggestion",
-      "signature": "07134d3d0edd640b27f7551a44b4c250cb1a65457f29761e1bfea84e6fb8e687"
-    },
-    {
-      "content_signature": "0d4f918bc435af77374729d56b68731157ad8b09b805189e2d51c078b67144ce",
-      "file": "deploy/scripts/tests/test_controller_state.py",
-      "line": 2806,
-      "owner": "q",
-      "reason": "advisory-suggestion: this parametrized controller-recovery matrix enumerates a closed, named set of safety or fault-contract cases. Property generation would obscure the exact phase or artifact boundary and would not add coverage to this finite domain. Keep explicit parametrize.",
-      "rule_id": "py-property-test-suggestion",
-      "signature": "11a7b783c643dc45076311d35806c2b6353de2561ed819082b2ce57ea3fda140"
-    },
-    {
-      "content_signature": "3e913a6d7b2e5b441177255842abe271135064ce2a99e06b10919f660c26bd13",
-      "file": "deploy/scripts/tests/test_controller_state.py",
-      "line": 1457,
-      "owner": "q",
-      "reason": "advisory-suggestion: this parametrized controller-recovery matrix enumerates a closed, named set of safety or fault-contract cases. Property generation would obscure the exact phase or artifact boundary and would not add coverage to this finite domain. Keep explicit parametrize.",
-      "rule_id": "py-property-test-suggestion",
-      "signature": "1dd66b392a73ca7817c9d2c75e7631461a8830fb392a4566cedc1447ceb4e41f"
-    },
-    {
-      "content_signature": "e75083dda7835644cab41e7ae4b5cd8b4e7884f2db9dc00568af17d34d242fd1",
-      "file": "deploy/scripts/tests/test_controller_state.py",
-      "line": 4756,
-      "owner": "q",
-      "reason": "advisory-suggestion: this parametrized controller-recovery matrix enumerates a closed, named set of safety or fault-contract cases. Property generation would obscure the exact phase or artifact boundary and would not add coverage to this finite domain. Keep explicit parametrize.",
-      "rule_id": "py-property-test-suggestion",
-      "signature": "223623334d1eedc0198e17419c0e032f7ecb4128d1bd1e958b95c58f43c038b4"
-    },
-    {
-      "content_signature": "dadd4331bc400109787d47638a13b2819e1b85262c3ff3b297859e5e7cf8abed",
-      "file": "deploy/scripts/tests/test_controller_log.py",
-      "line": 468,
-      "owner": "q",
-      "reason": "advisory-suggestion: this parametrized controller-recovery matrix enumerates a closed, named set of safety or fault-contract cases. Property generation would obscure the exact phase or artifact boundary and would not add coverage to this finite domain. Keep explicit parametrize.",
-      "rule_id": "py-property-test-suggestion",
-      "signature": "3a6551f2db812f272666635dfab6c313e79ab7e5200a8131e77f1b16e23d11fc"
-    },
-    {
-      "content_signature": "c93207873adbce084ae371409041180057ddf0b47a7c310e1102148b9cd3d49d",
-      "file": "deploy/scripts/tests/test_controller_state.py",
-      "line": 1748,
-      "owner": "q",
-      "reason": "advisory-suggestion: this parametrized controller-recovery matrix enumerates a closed, named set of safety or fault-contract cases. Property generation would obscure the exact phase or artifact boundary and would not add coverage to this finite domain. Keep explicit parametrize.",
-      "rule_id": "py-property-test-suggestion",
-      "signature": "3c9b612aca63490298409f83fecde6c8e286efce9223d4d503b93448d5186f07"
-    },
-    {
-      "content_signature": "7dd23ebd944a0ef7d52ac33c09f14ed425565b7ff80126f3624245ee9260dbc8",
-      "file": "deploy/scripts/tests/test_controller_state.py",
-      "line": 5325,
-      "owner": "q",
-      "reason": "advisory-suggestion: this parametrized controller-recovery matrix enumerates a closed, named set of safety or fault-contract cases. Property generation would obscure the exact phase or artifact boundary and would not add coverage to this finite domain. Keep explicit parametrize.",
-      "rule_id": "py-property-test-suggestion",
-      "signature": "45a33b415e8f868da275c82e27d717f7322bba8f47684805387c6c60f995142c"
-    },
-    {
-      "content_signature": "28fd406790ea6ae39f500a4a9cd781f99e554237a0d58219de7dda302b49d413",
-      "file": "deploy/scripts/tests/test_controller_state.py",
-      "line": 5850,
-      "owner": "q",
-      "reason": "advisory-suggestion: this parametrized controller-recovery matrix enumerates a closed, named set of safety or fault-contract cases. Property generation would obscure the exact phase or artifact boundary and would not add coverage to this finite domain. Keep explicit parametrize.",
-      "rule_id": "py-property-test-suggestion",
-      "signature": "47f746f984f44a2bfb959b3b909727264d133523de152f3d3c3e19bfb85c02ed"
-    },
-    {
-      "content_signature": "7dd23ebd944a0ef7d52ac33c09f14ed425565b7ff80126f3624245ee9260dbc8",
-      "file": "deploy/scripts/tests/test_controller_state.py",
-      "line": 5437,
-      "owner": "q",
-      "reason": "advisory-suggestion: this parametrized controller-recovery matrix enumerates a closed, named set of safety or fault-contract cases. Property generation would obscure the exact phase or artifact boundary and would not add coverage to this finite domain. Keep explicit parametrize.",
-      "rule_id": "py-property-test-suggestion",
-      "signature": "59612cc3057cb53243053aac111df250f2f4b803e37fb85fae7560357db2160b"
-    },
-    {
-      "content_signature": "6ea2b9a42e96ee3122f28d61b14f11dd55ed32d79a066c2b4f7e561ac31a6573",
-      "file": "deploy/scripts/tests/test_controller_state.py",
-      "line": 5536,
-      "owner": "q",
-      "reason": "advisory-suggestion: this parametrized controller-recovery matrix enumerates a closed, named set of safety or fault-contract cases. Property generation would obscure the exact phase or artifact boundary and would not add coverage to this finite domain. Keep explicit parametrize.",
-      "rule_id": "py-property-test-suggestion",
-      "signature": "5d51336e35fddcad4f94e1e6414d12a5c057338d1f6da8dbadb7d753901f171c"
-    },
-    {
-      "content_signature": "37903d443d17a0cb2b1cb04fc8b8b903c82aa06c143e7578d0603e278f5954aa",
-      "file": "deploy/scripts/tests/test_controller_state.py",
-      "line": 6054,
-      "owner": "q",
-      "reason": "advisory-suggestion: this parametrized controller-recovery matrix enumerates a closed, named set of safety or fault-contract cases. Property generation would obscure the exact phase or artifact boundary and would not add coverage to this finite domain. Keep explicit parametrize.",
-      "rule_id": "py-property-test-suggestion",
-      "signature": "60b4e24229d498896d45970a3d8c75630fc3d1ad17955297b5caeb09917af4ef"
-    },
-    {
-      "content_signature": "df737a50f0e461f1d78e6e6f6be359b92242c5b10df72a1d5f63f255ea7f686e",
-      "file": "deploy/scripts/tests/test_controller_state.py",
-      "line": 3731,
-      "owner": "q",
-      "reason": "advisory-suggestion: this parametrized controller-recovery matrix enumerates a closed, named set of safety or fault-contract cases. Property generation would obscure the exact phase or artifact boundary and would not add coverage to this finite domain. Keep explicit parametrize.",
-      "rule_id": "py-property-test-suggestion",
-      "signature": "626d2d9880ec85f306d3aae63b516c7f6048c9dcd134f1e3e3ee6babafedcbcb"
-    },
-    {
-      "content_signature": "c43f793a851492038dc3a75829bbc6e0ddb56acaafb1215a2d7383ac81de7ac5",
-      "file": "deploy/scripts/tests/test_controller_log.py",
-      "line": 486,
-      "owner": "q",
-      "reason": "advisory-suggestion: this parametrized controller-recovery matrix enumerates a closed, named set of safety or fault-contract cases. Property generation would obscure the exact phase or artifact boundary and would not add coverage to this finite domain. Keep explicit parametrize.",
-      "rule_id": "py-property-test-suggestion",
-      "signature": "7e16b735e4610f939172e032edd6d16bd54375f1ae0f96bb0a115c4e7ab0ccaa"
-    },
-    {
-      "content_signature": "8d7c389c8063ec82730cee34dae8a579191bb0265a609f745e2a4cc257526abf",
-      "file": "deploy/scripts/tests/test_controller_state.py",
-      "line": 3703,
-      "owner": "q",
-      "reason": "advisory-suggestion: this parametrized controller-recovery matrix enumerates a closed, named set of safety or fault-contract cases. Property generation would obscure the exact phase or artifact boundary and would not add coverage to this finite domain. Keep explicit parametrize.",
-      "rule_id": "py-property-test-suggestion",
-      "signature": "833395c3d86465657afffa716b9144350e7e3c9116aa14a8e4349b62002ec1be"
-    },
-    {
-      "content_signature": "fbe0592507bf1764bc04817cf8bab9818ad021868a9c31a8c9f02c172dc52149",
-      "file": "deploy/scripts/tests/test_controller_state.py",
-      "line": 1811,
-      "owner": "q",
-      "reason": "advisory-suggestion: this parametrized controller-recovery matrix enumerates a closed, named set of safety or fault-contract cases. Property generation would obscure the exact phase or artifact boundary and would not add coverage to this finite domain. Keep explicit parametrize.",
-      "rule_id": "py-property-test-suggestion",
-      "signature": "8478d74e4d71ebb16f7d725cf74f17312a75fcc1c019966d5420a0667cf850eb"
-    },
-    {
-      "content_signature": "9c3a7a38f8383c1b3f888399012ef3321057ffb5a9633cfe717a070c418ae665",
-      "file": "deploy/scripts/tests/test_controller_state.py",
-      "line": 4441,
-      "owner": "q",
-      "reason": "advisory-suggestion: this parametrized controller-recovery matrix enumerates a closed, named set of safety or fault-contract cases. Property generation would obscure the exact phase or artifact boundary and would not add coverage to this finite domain. Keep explicit parametrize.",
-      "rule_id": "py-property-test-suggestion",
-      "signature": "91ebe93ba77203de5947eecd7fa08bee3b231bda6a86cb598f9bf794fd6e9e15"
-    },
-    {
-      "content_signature": "fa0db28ea2d6e91bd7958369c58d88541d35c0235af92152cefbee0b41400371",
-      "file": "deploy/scripts/tests/test_controller_state.py",
-      "line": 4707,
-      "owner": "q",
-      "reason": "advisory-suggestion: this parametrized controller-recovery matrix enumerates a closed, named set of safety or fault-contract cases. Property generation would obscure the exact phase or artifact boundary and would not add coverage to this finite domain. Keep explicit parametrize.",
-      "rule_id": "py-property-test-suggestion",
-      "signature": "a9f68a833d21d8a70078642beaa04cefd1c97dccd587c9cbd25b6e8bdb8c8b2c"
     },
     {
       "content_signature": "51b24f2e551f3e70ae4c2d71e2d9d8433ad2f953cab1df78cec06128429d0765",
       "file": "deploy/scripts/tests/test_controller_state.py",
       "line": 1938,
-      "owner": "q",
-      "reason": "advisory-suggestion: this parametrized controller-recovery matrix enumerates a closed, named set of safety or fault-contract cases. Property generation would obscure the exact phase or artifact boundary and would not add coverage to this finite domain. Keep explicit parametrize.",
       "rule_id": "py-property-test-suggestion",
       "signature": "b134bf89e293c00108424d80c844c3ddacaaf22cbefbbaeb6ae0f163428e13aa"
+    },
+    {
+      "content_signature": "8d7c389c8063ec82730cee34dae8a579191bb0265a609f745e2a4cc257526abf",
+      "file": "deploy/scripts/tests/test_controller_state.py",
+      "line": 3700,
+      "rule_id": "py-property-test-suggestion",
+      "signature": "b4035e92697403e4a877269d5b303e9019616a15959445fc94324b26a2397c3b"
+    },
+    {
+      "content_signature": "fa0db28ea2d6e91bd7958369c58d88541d35c0235af92152cefbee0b41400371",
+      "file": "deploy/scripts/tests/test_controller_state.py",
+      "line": 4704,
+      "rule_id": "py-property-test-suggestion",
+      "signature": "b9fdc09803265cbab9508891b374bf6e98bafd829a9fbbd8104d9395ce73546d"
     },
     {
       "content_signature": "e5dec1d3215ded7d449b04d1364e2ff85ab5e2420013682ad6ee910e5b1cc75a",
       "file": "deploy/scripts/tests/test_controller_state.py",
       "line": 2848,
-      "owner": "q",
-      "reason": "advisory-suggestion: this parametrized controller-recovery matrix enumerates a closed, named set of safety or fault-contract cases. Property generation would obscure the exact phase or artifact boundary and would not add coverage to this finite domain. Keep explicit parametrize.",
       "rule_id": "py-property-test-suggestion",
       "signature": "bbafbf5fb254c579caae47badd6d99a61a91ea4763922499127f8f92caf45aaa"
     },
@@ -654,82 +419,155 @@
       "content_signature": "97d3e6f330626315a8301e2744e3758b453ccf5ea1672effe2772d871321cb05",
       "file": "deploy/scripts/tests/test_controller_state.py",
       "line": 2591,
-      "owner": "q",
-      "reason": "advisory-suggestion: this parametrized controller-recovery matrix enumerates a closed, named set of safety or fault-contract cases. Property generation would obscure the exact phase or artifact boundary and would not add coverage to this finite domain. Keep explicit parametrize.",
       "rule_id": "py-property-test-suggestion",
       "signature": "c21a117f57372633fad8c29e3b46f93a74e4cc9a25b37176b9206cf2cba9dd16"
     },
     {
-      "content_signature": "6ea2b9a42e96ee3122f28d61b14f11dd55ed32d79a066c2b4f7e561ac31a6573",
+      "content_signature": "df737a50f0e461f1d78e6e6f6be359b92242c5b10df72a1d5f63f255ea7f686e",
       "file": "deploy/scripts/tests/test_controller_state.py",
-      "line": 5502,
-      "owner": "q",
-      "reason": "advisory-suggestion: this parametrized controller-recovery matrix enumerates a closed, named set of safety or fault-contract cases. Property generation would obscure the exact phase or artifact boundary and would not add coverage to this finite domain. Keep explicit parametrize.",
+      "line": 3728,
       "rule_id": "py-property-test-suggestion",
-      "signature": "c28d489976843d31dee29ff910850f933bbad53baf4bf99c5a813b2d546a31b5"
+      "signature": "c46d3beec986414dc34d8fbcfe578690f6297946e7084c674719ba3e8b49e8dc"
     },
     {
-      "content_signature": "92d283bc8220a7b6ea9ce0ff105372e53ae2968f6f5c6c7c878a845e3ad85121",
-      "file": "deploy/scripts/tests/test_controller_state.py",
-      "line": 4415,
-      "owner": "q",
-      "reason": "advisory-suggestion: this parametrized controller-recovery matrix enumerates a closed, named set of safety or fault-contract cases. Property generation would obscure the exact phase or artifact boundary and would not add coverage to this finite domain. Keep explicit parametrize.",
+      "content_signature": "06a7951ac9ecd658c8ea86815b486675cb05dce3e43715c8f6dded86d5571cd3",
+      "file": "tools/qsesh/tests/test_extract_opencode.py",
+      "line": 459,
       "rule_id": "py-property-test-suggestion",
-      "signature": "cbb0569117970ba507f85c145a136ef17868a1c47df22740ef9d261d3cf632d5"
+      "signature": "c6d88e51a2e535755add1fe1ce70277b8fb7fba67628cf580aacf70ed1862577"
     },
     {
-      "content_signature": "8d7c389c8063ec82730cee34dae8a579191bb0265a609f745e2a4cc257526abf",
-      "file": "deploy/scripts/tests/test_controller_state.py",
-      "line": 4474,
-      "owner": "q",
-      "reason": "advisory-suggestion: this parametrized controller-recovery matrix enumerates a closed, named set of safety or fault-contract cases. Property generation would obscure the exact phase or artifact boundary and would not add coverage to this finite domain. Keep explicit parametrize.",
+      "content_signature": "a2dd4912bf9101bc9124fcd372c9d5e5ed2829d454de52c54d064b5126d2d961",
+      "file": "tools/qsesh/tests/test_distill.py",
+      "line": 148,
       "rule_id": "py-property-test-suggestion",
-      "signature": "cef64ddbb703fccf0cb20d9e6450e96c67a31296ed22cf60c795ffcae2343f9c"
+      "signature": "c9047a50d5664cc3a8e277bf09cc7b1ec7c92b6cd2d8a3a1a243f23ca268ef04"
     },
     {
-      "content_signature": "8cec40f3ee220d9638c559492767806b79ec15c9ee2517e1dfe2ddc25790a9f9",
-      "file": "deploy/scripts/tests/test_controller_state.py",
-      "line": 4967,
-      "owner": "q",
-      "reason": "advisory-suggestion: this parametrized controller-recovery matrix enumerates a closed, named set of safety or fault-contract cases. Property generation would obscure the exact phase or artifact boundary and would not add coverage to this finite domain. Keep explicit parametrize.",
+      "content_signature": "9a1bce7c8a9addf9afdc6364091e73e7c9342eb0c12e1903d397b171bf3ee8f6",
+      "file": "tools/qsesh/tests/test_jsonl_snapshot.py",
+      "line": 267,
       "rule_id": "py-property-test-suggestion",
-      "signature": "cfc63c0df58f0d97a488aaa7b5ec40015f10e2f3c2c556c490d32190c8c2a6f2"
+      "signature": "c9a69d4a4cc48d3f2ef5fec414c1bd53ceaa0166b2ff59a33e978b4d2fb17a0e"
+    },
+    {
+      "content_signature": "3b90fb5f1b5fa4dcbeb732504e82a621eb3998139d977d7b687635511be16715",
+      "file": "tools/qsesh/tests/test_extract_codex.py",
+      "line": 184,
+      "rule_id": "py-property-test-suggestion",
+      "signature": "cabb6e9cc8b5c5d1260dbd09eba19365066997f237211a1a681f8b0f3d8610ec"
+    },
+    {
+      "content_signature": "7dec4cdf3e88d09813fe5e26376a494800e3f4859343c1d699f6cd4609cc82cc",
+      "file": "tools/qsesh/tests/test_source_boundary.py",
+      "line": 935,
+      "rule_id": "py-property-test-suggestion",
+      "signature": "d44c5bc9482d9904cce2c6721b4899b16519492a74516335fc6f864851c52ce7"
+    },
+    {
+      "content_signature": "37903d443d17a0cb2b1cb04fc8b8b903c82aa06c143e7578d0603e278f5954aa",
+      "file": "deploy/scripts/tests/test_controller_state.py",
+      "line": 6051,
+      "rule_id": "py-property-test-suggestion",
+      "signature": "d60a7e795144810f9d7a4393aa9934a851221ec05002c540843b61984f2aa46c"
+    },
+    {
+      "content_signature": "7c75279b1917473a8c9a0a5e48721e0193bc39e24f7fd54a4e764673048735d1",
+      "file": "tools/qsesh/tests/test_opencode_source.py",
+      "line": 386,
+      "rule_id": "py-property-test-suggestion",
+      "signature": "d698a31fc7002fef27a06cca267ebbaef8237ccfac72778f6571776400fd7341"
+    },
+    {
+      "content_signature": "7a92ff9afc1a7b8fa0c31398f9ac74475b32a7a63455ee37a264809947b3c250",
+      "file": "tools/qsesh/tests/test_extract_opencode.py",
+      "line": 501,
+      "rule_id": "py-property-test-suggestion",
+      "signature": "d79b83734a761d611f2a0d5f1b75e5e7f7c78fd1f0ecdbae8eb50c07905d5040"
+    },
+    {
+      "content_signature": "d8e23a3354f2c8d3d9daca0586992d65c37d37657834a805a2d8245f989bb0da",
+      "file": "tools/qsesh/tests/test_archive.py",
+      "line": 188,
+      "rule_id": "py-property-test-suggestion",
+      "signature": "da194ea84f6d223d2dee3197cda8291eaa2a40a6f97d9226adbb472a8bfcc325"
+    },
+    {
+      "content_signature": "c0695c0a098ee65c5c31c14ea30bf768ee8c5267d1c76607c6012e33b8080929",
+      "file": "tools/qsesh/tests/test_extract_codex.py",
+      "line": 220,
+      "rule_id": "py-property-test-suggestion",
+      "signature": "dd6c9e1477012e81df1c1de7b5555cf028c2ec11e186a5af230f6551c74b588d"
     },
     {
       "content_signature": "a866bea4bb1a464138b9d3b82225ab3d0217706c72b7b306210b8af6fcedeac1",
       "file": "deploy/scripts/tests/test_controller_state.py",
       "line": 3524,
-      "owner": "q",
-      "reason": "advisory-suggestion: this parametrized controller-recovery matrix enumerates a closed, named set of safety or fault-contract cases. Property generation would obscure the exact phase or artifact boundary and would not add coverage to this finite domain. Keep explicit parametrize.",
       "rule_id": "py-property-test-suggestion",
       "signature": "dda9319717ba534b9fbf7d8fa1438d139321bfcaa9dfc76ccc5b7e62063aedd0"
     },
     {
-      "content_signature": "96a32447fe3f349d8ea67ceaec068e838413b611a988136d0371e06c28e2d7b9",
-      "file": "deploy/scripts/tests/test_controller_state.py",
-      "line": 4914,
-      "owner": "q",
-      "reason": "advisory-suggestion: this parametrized controller-recovery matrix enumerates a closed, named set of safety or fault-contract cases. Property generation would obscure the exact phase or artifact boundary and would not add coverage to this finite domain. Keep explicit parametrize.",
+      "content_signature": "c35de05dbba59cb485643df70c03c7538073e1b6db988b0b71653dd3009fcc65",
+      "file": "tools/qsesh/tests/test_source_boundary.py",
+      "line": 781,
       "rule_id": "py-property-test-suggestion",
-      "signature": "ec73b734fa0b668dce0d9c0e51c56f635842e4e3a9c7b798b8293c96d3d10b2e"
+      "signature": "df35c6cd074d6c2274a6b192d3203c825559068fdf026e216f437a3f44072fcf"
     },
     {
-      "content_signature": "9485c26c310282f889045cdb648474f60cfb7a96cd333e303b08820dc4aa6fde",
-      "file": "deploy/scripts/tests/test_controller_state.py",
-      "line": 4877,
-      "owner": "q",
-      "reason": "advisory-suggestion: this parametrized controller-recovery matrix enumerates a closed, named set of safety or fault-contract cases. Property generation would obscure the exact phase or artifact boundary and would not add coverage to this finite domain. Keep explicit parametrize.",
+      "content_signature": "61a499eeeeb74bc04ffe505d09338f1e96af98ddf46fc49a99620d15e4071c67",
+      "file": "tools/qsesh/tests/test_extract_codex.py",
+      "line": 164,
       "rule_id": "py-property-test-suggestion",
-      "signature": "f375280fd0d652310346866abe3b04fde0ffa0183643105f77b86b06df989561"
+      "signature": "e095b01ffccc3e5eddc24d50992943a01c83c00d6bba0012e1b7e5eba29866bc"
+    },
+    {
+      "content_signature": "4db90e64090ff236013ebc46a85c11d3fa106b5f5edc11b43da091c4c9963cc1",
+      "file": "tools/qsesh/tests/test_extract_codex.py",
+      "line": 286,
+      "rule_id": "py-property-test-suggestion",
+      "signature": "e0de5c6340f3b7cfcfff99115d4c0716343d1e83e0c1734fb11ae30788dac2c9"
+    },
+    {
+      "content_signature": "9e57ed9023bf72b5b2df4d6a6e61fd4045eacc5634f5980d3a2cfd406dcfaba4",
+      "file": "deploy/scripts/tests/test_bot_errors_inhibition.py",
+      "line": 219,
+      "rule_id": "py-property-test-suggestion",
+      "signature": "eb5bb6f5cfd7561578d1952f6bedb2c284b77f2dadd7c7dbfc9dcd30440316c6"
+    },
+    {
+      "content_signature": "628b8c6658847786404df5eccdcff11c38817916b5aa18c1518f35afa3f9ed6b",
+      "file": "tools/qsesh/tests/test_extract_opencode.py",
+      "line": 282,
+      "rule_id": "py-property-test-suggestion",
+      "signature": "ee41ff2da3b86c676867b14b88bf5c7ed044803f60d2d16984d6ec914411b84a"
+    },
+    {
+      "content_signature": "032b851af91f55e7b013ba5b39aaec4f7bf5958d9c8bc01f3b92db161eaabf9a",
+      "file": "tools/qsesh/tests/test_extract_opencode.py",
+      "line": 244,
+      "rule_id": "py-property-test-suggestion",
+      "signature": "efe97cb0dae3c2f900b3c0336efed12d2c68ac240ef0df2b886fbdf135e0b6b4"
+    },
+    {
+      "content_signature": "3b90fb5f1b5fa4dcbeb732504e82a621eb3998139d977d7b687635511be16715",
+      "file": "tools/qsesh/tests/test_distill.py",
+      "line": 368,
+      "rule_id": "py-property-test-suggestion",
+      "signature": "f0b1d0e17599da0673f92a07262cc7569cbf6deea629f211cd540e2d25327e9d"
     },
     {
       "content_signature": "0cb1062579fbc5d5e200af159489222b8e728f42ea9b07f124fa54c6e01f5396",
       "file": "deploy/scripts/tests/test_controller_log.py",
       "line": 451,
-      "owner": "q",
-      "reason": "advisory-suggestion: this parametrized controller-recovery matrix enumerates a closed, named set of safety or fault-contract cases. Property generation would obscure the exact phase or artifact boundary and would not add coverage to this finite domain. Keep explicit parametrize.",
       "rule_id": "py-property-test-suggestion",
       "signature": "f3c89c62f88153a8df685c406b5cff4179ff3d7243141481b843ece7f6340b11"
+    },
+    {
+      "content_signature": "e75083dda7835644cab41e7ae4b5cd8b4e7884f2db9dc00568af17d34d242fd1",
+      "file": "deploy/scripts/tests/test_controller_state.py",
+      "line": 4753,
+      "rule_id": "py-property-test-suggestion",
+      "signature": "f5747ffe3693d004ab13026233e5fa2bacd37d559bb34fd2fb637c9d581aa7c9"
     }
   ],
   "schema_version": "1"

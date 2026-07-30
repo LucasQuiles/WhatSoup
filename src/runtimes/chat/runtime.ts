@@ -36,7 +36,7 @@ import { createChildLogger } from '../../logger.ts';
 import { checkRateLimit } from './rate-limiter.ts';
 import { loadConversationWindow } from './window.ts';
 import { summarizeWindowBeforeTrim } from './window-trim.ts';
-import { loadContext } from './context.ts';
+import { loadContextDetailed, type ContextLoadResult } from './context.ts';
 import { ChatQueue } from './queue.ts';
 import { processMedia } from './media/processor.ts';
 import type { ProcessedMedia } from './media/processor.ts';
@@ -49,8 +49,31 @@ import { DatabaseCompatibilityError } from '../../core/database-compatibility.ts
 import { QueueAdmissionTerminalizationError } from '../../core/inbound-failure-class.ts';
 import { emitAlertChecked, clearAlertSourceChecked } from '../../lib/emit-alert.ts';
 import { resolveModelRole } from '../../lib/model-advisor.ts';
+import { classifyMemoryOperationFailure } from '../../lib/memory-operation-telemetry.ts';
 
 const log = createChildLogger('conversation');
+const CONTEXT_TIMEOUT_MS = 5_000;
+
+function unavailableContextResult(
+  failureCode: ContextLoadResult['scopes'][number]['failureCode'],
+  retryable: boolean,
+): ContextLoadResult {
+  return {
+    text: '',
+    status: 'unavailable',
+    scopes: [{ scope: 'context', status: 'failed', failureCode, retryable }],
+  };
+}
+
+function contextFailureResult(error: unknown): ContextLoadResult {
+  const failure = classifyMemoryOperationFailure(error);
+  return unavailableContextResult(failure.code, failure.retryable);
+}
+
+type MemoryContextHealthSnapshot = {
+  status: Exclude<ContextLoadResult['status'], 'not_attempted'>;
+  scopes: ContextLoadResult['scopes'];
+};
 
 const CHAT_DDL = `
 CREATE TABLE IF NOT EXISTS rate_limits (
@@ -111,6 +134,7 @@ export class ChatRuntime implements Runtime {
   private cachedIdentityJid: string = '';
   private databaseCompatibilityRejection: DatabaseCompatibilityError | null = null;
   private unownedQueueRejections = 0;
+  private memoryContextHealth: MemoryContextHealthSnapshot | null = null;
 
   constructor(
     db: Database,
@@ -184,6 +208,7 @@ export class ChatRuntime implements Runtime {
         enrichmentLastRunAt,
         queueDepth: queue?.queuedChats ?? 0,
         enrichmentUnprocessed: this.enrichmentPoller?.unprocessedCount ?? 0,
+        memoryContext: this.memoryContextHealth,
         databaseCompatibility: this.databaseCompatibilityRejection
           ? {
               reason: this.databaseCompatibilityRejection.reason,
@@ -192,6 +217,14 @@ export class ChatRuntime implements Runtime {
             }
           : null,
       },
+    };
+  }
+
+  getMemoryContextHealth(): MemoryContextHealthSnapshot | null {
+    if (!this.memoryContextHealth) return null;
+    return {
+      status: this.memoryContextHealth.status,
+      scopes: this.memoryContextHealth.scopes.map((scope) => ({ ...scope })),
     };
   }
 
@@ -312,21 +345,41 @@ export class ChatRuntime implements Runtime {
     const mediaImages = media.images;
 
     // 3. Context + window (use mediaContent for Pinecone query)
-    // Pinecone is wrapped in a 5-second timeout race; on any failure we continue
-    // with null context so the user still gets a response.
+    // Pinecone is wrapped in a timeout race. The winning bounded outcome is
+    // retained for health while the user still gets a response without context.
     const contextStart = Date.now();
     let contextBlock: string | null = null;
+    let contextTimeout: ReturnType<typeof setTimeout> | undefined;
     try {
-      const contextRace = Promise.race([
-        loadContext(this.pinecone, msg.chatJid, msg.senderJid, mediaContent, traceId),
-        new Promise<never>((_, reject) =>
-          setTimeout(() => reject(new Error('PINECONE_TIMEOUT')), 5_000),
-        ),
+      const contextResult = await Promise.race([
+        loadContextDetailed(this.pinecone, msg.chatJid, msg.senderJid, mediaContent, traceId),
+        new Promise<ContextLoadResult>((resolve) => {
+          contextTimeout = setTimeout(
+            () => resolve(unavailableContextResult('timeout', true)),
+            CONTEXT_TIMEOUT_MS,
+          );
+        }),
       ]);
-      contextBlock = await contextRace;
+      if (contextResult.status !== 'not_attempted') {
+        this.memoryContextHealth = {
+          status: contextResult.status,
+          scopes: contextResult.scopes,
+        };
+      }
+      contextBlock = contextResult.text;
     } catch (err) {
-      log.warn({ traceId, err }, 'context retrieval failed — proceeding without memory context');
-      contextBlock = null;
+      const contextResult = contextFailureResult(err);
+      this.memoryContextHealth = {
+        status: 'unavailable',
+        scopes: contextResult.scopes,
+      };
+      log.warn(
+        { traceId, failure_code: contextResult.scopes[0]?.failureCode },
+        'context retrieval unavailable — proceeding without memory context',
+      );
+      contextBlock = contextResult.text;
+    } finally {
+      if (contextTimeout) clearTimeout(contextTimeout);
     }
     const conversationWindow = loadConversationWindow(this.db, msg.chatJid);
     const contextDurationMs = Date.now() - contextStart;
