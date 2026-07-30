@@ -46,6 +46,18 @@ import {
   type RuntimeTurnCompletion,
 } from './runtime-turn-completion.ts';
 import { discardCancelledPreBoundaryPerChatTurn } from './runtime-turn-pre-boundary-cancellation.ts';
+import {
+  replayTurnOnFallback as replayTurnOnFallbackForHost,
+  type ProviderFallbackReplayArgs,
+  type ResolvedReplayRoute,
+} from './fallback-replay.ts';
+
+export {
+  FallbackReplayInvalidatedError,
+  FallbackReplayOwnershipChangedError,
+  FallbackReplayRouteChangedError,
+} from './fallback-replay.ts';
+export type { ProviderFallbackReplayArgs, ResolvedReplayRoute } from './fallback-replay.ts';
 
 export type { RuntimeTurnCompletion } from './runtime-turn-completion.ts';
 const log = createChildLogger('agent-runtime');
@@ -64,15 +76,6 @@ export interface RuntimeTurnSourceSnapshot {
 
 export interface PerChatRuntimeScopeRef {
   value: string;
-}
-
-export interface ProviderFallbackReplayArgs {
-  chatJid: string;
-  mapKey?: string;
-  replayText: string;
-  actorJid?: string;
-  oldSession: SessionManager | null;
-  runtimeContext?: RuntimeTurnContext;
 }
 
 export interface RuntimeTurnPostEffects {
@@ -175,8 +178,24 @@ export interface RuntimeTurnCoordinatorPort {
     onProviderBoundary?: () => void,
   ): Promise<void>;
   deleteOwnedPerChatSession(mapKey: string, expected?: SessionManager): boolean;
-  recreatePerChatSessionForFallback(mapKey: string, chatJid: string, actorJid?: string): void;
-  recreateSingletonSessionForFallback(chatJid: string, actorJid?: string): void;
+  discardPerChatSessionForFallback(mapKey: string, expected: SessionManager): boolean;
+  discardSingletonSessionForFallback(expected: SessionManager): boolean;
+  recreatePerChatSessionForFallback(
+    mapKey: string,
+    chatJid: string,
+    actorJid?: string,
+    routeOverride?: ResolvedReplayRoute,
+  ): void;
+  recreateSingletonSessionForFallback(
+    chatJid: string,
+    actorJid?: string,
+    routeOverride?: ResolvedReplayRoute,
+  ): void;
+  isReplayRouteCurrent(
+    chatJid: string,
+    actorJid: string | undefined,
+    routeOverride: ResolvedReplayRoute,
+  ): boolean;
   bindActiveGlobalMcpConversation(chatJid: string): void;
   sendTurnToSession(
     session: SessionManager,
@@ -392,44 +411,7 @@ isRuntimeTurnContinuation(context: RuntimeTurnContext): boolean {
 }
 
 async replayTurnOnFallback(args: ProviderFallbackReplayArgs): Promise<void> {
-  if (args.oldSession) await args.oldSession.shutdown(false);
-  if (args.mapKey !== undefined) {
-    // The fallback kills the child without onCrash; clear the prior executing
-    // actor before replay so it cannot remain at the head of the actor queue.
-    this.host.perChatExecActorQueue.delete(args.mapKey);
-    this.host.deleteOwnedPerChatSession(args.mapKey, args.oldSession ?? undefined);
-    this.host.recreatePerChatSessionForFallback(args.mapKey, args.chatJid, args.actorJid);
-    await this.host.sendTurnPerChat(
-      args.chatJid,
-      args.replayText,
-      args.mapKey,
-      args.actorJid,
-      args.runtimeContext,
-      undefined,
-      undefined,
-      undefined,
-      'recovery_replay',
-    );
-    return;
-  }
-  this.host.recreateSingletonSessionForFallback(args.chatJid, args.actorJid);
-  this.host.currentTurnChatJid = args.chatJid;
-  this.host.bindActiveGlobalMcpConversation(args.chatJid);
-  this.host.turnHadVisibleOutput = false;
-  this.host.currentTurnReplayText = args.replayText;
-  this.host.currentTurnReplayActorJid = args.actorJid;
-  await this.host.sendTurnToSession(
-    this.host.session!,
-    args.chatJid,
-    args.replayText,
-    undefined,
-    args.actorJid,
-    undefined,
-    undefined,
-    undefined,
-    args.runtimeContext,
-    args.runtimeContext === undefined ? 'live' : 'recovery_replay',
-  );
+  return replayTurnOnFallbackForHost(this.host, args);
 }
 
 markRuntimeTurnDegraded(context: RuntimeTurnContext): void {

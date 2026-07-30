@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { Database } from '../../../src/core/database.ts';
 import type { RuntimeTurnContext } from '../../../src/runtimes/agent/runtime-turn-context.ts';
+import type { ResolvedReplayRoute } from '../../../src/runtimes/agent/runtime-turn-coordinator.ts';
 import { sharedRuntimeApplicationContext } from '../../../src/runtimes/agent/turn-provider-text.ts';
 import {
   type RuntimeState,
@@ -122,15 +123,36 @@ describe('runtime turn chronology integration', () => {
       oldSession.shutdown.mockImplementation(async () => shutdownGate);
 
       const dispatch = vi.fn(async (..._args: unknown[]) => {});
+      const routeOverride: ResolvedReplayRoute = {
+        provider: 'opencode-cli',
+        model: 'minimax/model-b',
+        source: 'fallback',
+        reasonCode: 'fallback_window_active_model_pin',
+        dataPolicy: null,
+        policyVersion: 'provider-data-policy-v1',
+        policyState: 'missing',
+        pinnedProvider: 'opencode-cli',
+      };
       const mutable = state as RuntimeState & {
         session: ReturnType<typeof sessionStub> | null;
-        recreateSingletonSessionForFallback(chatJid: string, actorJid?: string): void;
+        recreateSingletonSessionForFallback(
+          chatJid: string,
+          actorJid?: string,
+          capturedRoute?: ResolvedReplayRoute,
+        ): void;
+        isReplayRouteCurrent(
+          chatJid: string,
+          actorJid: string | undefined,
+          capturedRoute: ResolvedReplayRoute,
+        ): boolean;
         sendTurnToSession: typeof dispatch;
       };
       mutable.recreateSingletonSessionForFallback = vi.fn(() => {
         mutable.session = replacementSession;
       });
+      mutable.isReplayRouteCurrent = vi.fn(() => true);
       mutable.sendTurnToSession = dispatch;
+      mutable.session = oldSession;
       state.currentRuntimeTurnContext = captured;
 
       const replay = (
@@ -140,6 +162,7 @@ describe('runtime turn chronology integration', () => {
             replayText: string;
             oldSession: ReturnType<typeof sessionStub>;
             runtimeContext: RuntimeTurnContext;
+            routeOverride: ResolvedReplayRoute;
           }): Promise<void>;
         }
       ).replayTurnOnFallback({
@@ -147,6 +170,7 @@ describe('runtime turn chronology integration', () => {
         replayText: captured.replay.text,
         oldSession,
         runtimeContext: captured,
+        routeOverride,
       });
 
       await vi.waitFor(() => expect(oldSession.shutdown).toHaveBeenCalledWith(false));
@@ -158,6 +182,208 @@ describe('runtime turn chronology integration', () => {
       expect(call[2]).toBe(captured.replay.text);
       expect(call[8]).toBe(captured);
       expect(call[9]).toBe('recovery_replay');
+      expect(mutable.recreateSingletonSessionForFallback).toHaveBeenCalledWith(
+        captured.identity.deliveryJid,
+        undefined,
+        routeOverride,
+      );
+      expect(mutable.isReplayRouteCurrent).toHaveBeenCalledWith(
+        captured.identity.deliveryJid,
+        undefined,
+        routeOverride,
+      );
+    } finally {
+      db.close();
+    }
+  });
+
+  it('fails closed when the captured fallback route changes during shutdown', async () => {
+    const db = new Database(':memory:');
+    db.open();
+    try {
+      const { state } = makeRuntimeState<RuntimeState>(db);
+      const oldSession = sessionStub();
+      const mutable = state as RuntimeState & {
+        session: ReturnType<typeof sessionStub> | null;
+        recreateSingletonSessionForFallback: ReturnType<typeof vi.fn>;
+        isReplayRouteCurrent: ReturnType<typeof vi.fn>;
+      };
+      mutable.session = oldSession;
+      let releaseShutdown!: () => void;
+      const shutdownGate = new Promise<void>((resolve) => {
+        releaseShutdown = resolve;
+      });
+      oldSession.shutdown.mockImplementation(async () => shutdownGate);
+      const routeOverride: ResolvedReplayRoute = {
+        provider: 'opencode-cli',
+        model: 'minimax/model-b',
+        source: 'fallback',
+        reasonCode: 'fallback_window_active_model_pin',
+        dataPolicy: null,
+        policyVersion: 'provider-data-policy-v1',
+        policyState: 'missing',
+        pinnedProvider: 'opencode-cli',
+      };
+      mutable.recreateSingletonSessionForFallback = vi.fn();
+      mutable.isReplayRouteCurrent = vi.fn(() => false);
+
+      const replay = (
+        state.runtimeTurnCoordinator as unknown as {
+          replayTurnOnFallback(args: {
+            chatJid: string;
+            replayText: string;
+            oldSession: ReturnType<typeof sessionStub>;
+            routeOverride: ResolvedReplayRoute;
+          }): Promise<void>;
+        }
+      ).replayTurnOnFallback({
+        chatJid: '15550190047@s.whatsapp.net',
+        replayText: 'do not send this onto a stale route',
+        oldSession,
+        routeOverride,
+      });
+
+      await vi.waitFor(() => expect(oldSession.shutdown).toHaveBeenCalledWith(false));
+      releaseShutdown();
+
+      await expect(replay).rejects.toThrow('Fallback replay route changed before session recreation');
+      expect(mutable.isReplayRouteCurrent).toHaveBeenCalledWith(
+        '15550190047@s.whatsapp.net',
+        undefined,
+        routeOverride,
+      );
+      expect(mutable.recreateSingletonSessionForFallback).not.toHaveBeenCalled();
+      expect(mutable.session).toBeNull();
+    } finally {
+      db.close();
+    }
+  });
+
+  it('preserves a newer singleton owner that arrives during fallback shutdown', async () => {
+    const db = new Database(':memory:');
+    db.open();
+    try {
+      const { state } = makeRuntimeState<RuntimeState>(db);
+      const oldSession = sessionStub();
+      const replacementSession = sessionStub();
+      const mutable = state as RuntimeState & {
+        session: ReturnType<typeof sessionStub> | null;
+        recreateSingletonSessionForFallback: ReturnType<typeof vi.fn>;
+        isReplayRouteCurrent: ReturnType<typeof vi.fn>;
+      };
+      mutable.session = oldSession;
+      let releaseShutdown!: () => void;
+      const shutdownGate = new Promise<void>((resolve) => {
+        releaseShutdown = resolve;
+      });
+      oldSession.shutdown.mockImplementation(async () => shutdownGate);
+      const routeOverride: ResolvedReplayRoute = {
+        provider: 'opencode-cli',
+        model: 'minimax/model-b',
+        source: 'fallback',
+        reasonCode: 'fallback_window_active_model_pin',
+        dataPolicy: null,
+        policyVersion: 'provider-data-policy-v1',
+        policyState: 'missing',
+        pinnedProvider: 'opencode-cli',
+      };
+      mutable.recreateSingletonSessionForFallback = vi.fn();
+      mutable.isReplayRouteCurrent = vi.fn(() => true);
+
+      const replay = (
+        state.runtimeTurnCoordinator as unknown as {
+          replayTurnOnFallback(args: {
+            chatJid: string;
+            replayText: string;
+            oldSession: ReturnType<typeof sessionStub>;
+            routeOverride: ResolvedReplayRoute;
+          }): Promise<void>;
+        }
+      ).replayTurnOnFallback({
+        chatJid: '15550190048@s.whatsapp.net',
+        replayText: 'do not overwrite the replacement session',
+        oldSession,
+        routeOverride,
+      });
+
+      await vi.waitFor(() => expect(oldSession.shutdown).toHaveBeenCalledWith(false));
+      mutable.session = replacementSession;
+      releaseShutdown();
+
+      await expect(replay).rejects.toThrow('Fallback replay owner changed before session recreation');
+      expect(mutable.recreateSingletonSessionForFallback).not.toHaveBeenCalled();
+      expect(mutable.session).toBe(replacementSession);
+    } finally {
+      db.close();
+    }
+  });
+
+  it('preserves a newer per-chat owner and its actor queue during fallback shutdown', async () => {
+    const db = new Database(':memory:');
+    db.open();
+    try {
+      const { state } = makeRuntimeState<RuntimeState>(db, { sessionScope: 'per_chat' });
+      const mapKey = '15550190049@s.whatsapp.net';
+      const oldSession = sessionStub();
+      const replacementSession = sessionStub();
+      const replacementActors = ['replacement@s.whatsapp.net'];
+      const mutable = state as RuntimeState & {
+        perChatExecActorQueue: Map<string, Array<string | undefined>>;
+        recreatePerChatSessionForFallback: ReturnType<typeof vi.fn>;
+        sendTurnPerChat: ReturnType<typeof vi.fn>;
+        isReplayRouteCurrent: ReturnType<typeof vi.fn>;
+      };
+      state.chatSessions.set(mapKey, oldSession);
+      mutable.perChatExecActorQueue.set(mapKey, ['source@s.whatsapp.net']);
+      let releaseShutdown!: () => void;
+      const shutdownGate = new Promise<void>((resolve) => {
+        releaseShutdown = resolve;
+      });
+      oldSession.shutdown.mockImplementation(async () => shutdownGate);
+      const routeOverride: ResolvedReplayRoute = {
+        provider: 'opencode-cli',
+        model: 'minimax/model-b',
+        source: 'fallback',
+        reasonCode: 'fallback_window_active_model_pin',
+        dataPolicy: null,
+        policyVersion: 'provider-data-policy-v1',
+        policyState: 'missing',
+        pinnedProvider: 'opencode-cli',
+      };
+      mutable.recreatePerChatSessionForFallback = vi.fn();
+      mutable.sendTurnPerChat = vi.fn(async () => {});
+      mutable.isReplayRouteCurrent = vi.fn(() => true);
+
+      const replay = (
+        state.runtimeTurnCoordinator as unknown as {
+          replayTurnOnFallback(args: {
+            chatJid: string;
+            mapKey: string;
+            replayText: string;
+            actorJid: string;
+            oldSession: ReturnType<typeof sessionStub>;
+            routeOverride: ResolvedReplayRoute;
+          }): Promise<void>;
+        }
+      ).replayTurnOnFallback({
+        chatJid: mapKey,
+        mapKey,
+        replayText: 'do not overwrite the replacement per-chat session',
+        actorJid: 'source@s.whatsapp.net',
+        oldSession,
+        routeOverride,
+      });
+
+      await vi.waitFor(() => expect(oldSession.shutdown).toHaveBeenCalledWith(false));
+      state.chatSessions.set(mapKey, replacementSession);
+      mutable.perChatExecActorQueue.set(mapKey, replacementActors);
+      releaseShutdown();
+
+      await expect(replay).rejects.toThrow('Fallback replay owner changed before session recreation');
+      expect(mutable.recreatePerChatSessionForFallback).not.toHaveBeenCalled();
+      expect(mutable.sendTurnPerChat).not.toHaveBeenCalled();
+      expect(state.chatSessions.get(mapKey)).toBe(replacementSession);
+      expect(mutable.perChatExecActorQueue.get(mapKey)).toBe(replacementActors);
     } finally {
       db.close();
     }
