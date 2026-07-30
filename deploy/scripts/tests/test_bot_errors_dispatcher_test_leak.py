@@ -60,6 +60,7 @@ matched_test_leak_pattern = _mod.matched_test_leak_pattern
 
 def _make_event(**kwargs: Any) -> dict[str, Any]:
     base = {
+        "schemaVersion": 1,
         "id": "evt-test-001",
         "source": "whatsapp_auth_bond_local_failure",
         "severity": "error",

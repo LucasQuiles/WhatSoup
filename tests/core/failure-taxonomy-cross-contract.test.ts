@@ -56,6 +56,7 @@ const INTERNAL_OUTBOUND_FAILURE_CODE_MAP: Record<InternalOutboundFailureCode, tr
   'outbound.status_ping_expired': true,
   'outbound.unsafe_delivery_unconfirmed': true,
   'outbound.governor_shed': true,
+  'outbound.identity_blocked': true,
   'outbound.replay_failed': true,
   'outbound.deferral_limit_exceeded': true,
 };

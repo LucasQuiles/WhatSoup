@@ -64,6 +64,7 @@ vi.mock('../../src/logger.ts', () => {
 });
 
 import { createFleetServer, loadOrCreateFleetToken, loadOrCreateFleetTokens } from '../../src/fleet/index.ts';
+import { openIncidentDb } from '../../src/fleet/incidents/db.ts';
 
 // ---------------------------------------------------------------------------
 // Minimal schema — enough for fleet startup
@@ -2417,4 +2418,158 @@ describe('fleet/index.ts uncovered-branch coverage', () => {
   // no-message-err test above. Other structural-unreachable branches
   // (req.url/method ?? fallbacks) cannot be reached via the http server.
   // -----------------------------------------------------------------------
+});
+
+// ---------------------------------------------------------------------------
+// Incident DB lifecycle ownership — start() probes once, stop() closes once
+// ---------------------------------------------------------------------------
+
+describe('incident DB lifecycle ownership', () => {
+  async function freePort(): Promise<number> {
+    const net = await import('node:net');
+    return new Promise<number>((resolve) => {
+      const srv = net.createServer();
+      srv.listen(0, '127.0.0.1', () => {
+        const a = srv.address();
+        srv.close(() => resolve(typeof a === 'object' && a ? a.port : 0));
+      });
+    });
+  }
+
+  function makeFleet(openIncidentDatabase: () => DatabaseSync): {
+    fleet: ReturnType<typeof createFleetServer>;
+    db: DatabaseSync;
+    token: string;
+  } {
+    const db = new DatabaseSync(':memory:');
+    db.exec(SCHEMA_SQL);
+    const token = 'incident-lc-token-' + crypto.randomBytes(8).toString('hex');
+    const fleet = createFleetServer({
+      db,
+      selfName: '__incident_lc__',
+      fleetToken: token,
+      getSelfHealth: () => ({ status: 'ok' }),
+      openIncidentDatabase,
+    });
+    return { fleet, db, token };
+  }
+
+  function countingOpener(): {
+    opener: () => DatabaseSync;
+    counts: { opens: number; closes: number };
+  } {
+    const counts = { opens: 0, closes: 0 };
+    const opener = (): DatabaseSync => {
+      counts.opens += 1;
+      const real = openIncidentDb(path.join(tmpDir, `incident-lc-${counts.opens}-${Date.now()}.db`));
+      const originalClose = real.close.bind(real);
+      (real as { close: () => void }).close = () => {
+        counts.closes += 1;
+        originalClose();
+      };
+      return real;
+    };
+    return { opener, counts };
+  }
+
+  it('construction does not open; start() probes exactly once; stop() closes exactly once', async () => {
+    const { opener, counts } = countingOpener();
+    const { fleet, db } = makeFleet(opener);
+    expect(counts.opens).toBe(0);
+
+    const port = await freePort();
+    await new Promise<void>((resolve, reject) => {
+      fleet.server.once('error', reject);
+      fleet.start(port);
+      fleet.server.once('listening', resolve);
+    });
+    try {
+      expect(counts.opens).toBe(1);
+    } finally {
+      fleet.stop();
+      await new Promise<void>((resolve) => fleet.server.close(() => resolve())).catch(() => {});
+      db.close();
+    }
+    expect(counts.closes).toBe(1);
+
+    // Repeated stop must not double-close the shared handle.
+    fleet.stop();
+    expect(counts.closes).toBe(1);
+  });
+
+  it('stop() before start() neither opens nor closes the incident DB', () => {
+    const { opener, counts } = countingOpener();
+    const { fleet, db } = makeFleet(opener);
+    fleet.stop();
+    expect(counts.opens).toBe(0);
+    expect(counts.closes).toBe(0);
+    db.close();
+  });
+
+  it('an incident DB open failure degrades signal routes to 503 without crashing the fleet', async () => {
+    const { fleet, db, token } = makeFleet(() => {
+      throw new Error('injected open failure');
+    });
+    const port = await freePort();
+    await new Promise<void>((resolve, reject) => {
+      fleet.server.once('error', reject);
+      fleet.start(port);
+      fleet.server.once('listening', resolve);
+    });
+    try {
+      const signals = await fetch(`http://127.0.0.1:${port}/api/signals`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', authorization: 'Bearer whatever' },
+        body: '{}',
+      });
+      expect(signals.status).toBe(503);
+      const body = (await signals.json()) as { error: { code: string } };
+      expect(body.error.code).toBe('incident_store_unavailable');
+
+      const lines = await fetch(`http://127.0.0.1:${port}/api/lines`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      expect(lines.status).toBe(200);
+    } finally {
+      fleet.stop();
+      await new Promise<void>((resolve) => fleet.server.close(() => resolve())).catch(() => {});
+      db.close();
+    }
+  });
+
+  it('a stopped server does not reopen the incident DB', async () => {
+    const { opener, counts } = countingOpener();
+    const { fleet, db, token } = makeFleet(opener);
+    const port = await freePort();
+    await new Promise<void>((resolve, reject) => {
+      fleet.server.once('error', reject);
+      fleet.start(port);
+      fleet.server.once('listening', resolve);
+    });
+    fleet.stop();
+    await new Promise<void>((resolve) => fleet.server.close(() => resolve())).catch(() => {});
+    expect(counts).toEqual({ opens: 1, closes: 1 });
+
+    // Restarting after stop() must not resurrect the closed incident DB:
+    // ingestion stays terminally unavailable on this instance.
+    const port2 = await freePort();
+    await new Promise<void>((resolve, reject) => {
+      fleet.server.once('error', reject);
+      fleet.start(port2);
+      fleet.server.once('listening', resolve);
+    });
+    try {
+      expect(counts.opens).toBe(1);
+      const signals = await fetch(`http://127.0.0.1:${port2}/api/signals`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` },
+        body: '{}',
+      });
+      expect(signals.status).toBe(503);
+    } finally {
+      fleet.stop();
+      await new Promise<void>((resolve) => fleet.server.close(() => resolve())).catch(() => {});
+      db.close();
+    }
+  });
 });

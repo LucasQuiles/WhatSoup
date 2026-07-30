@@ -39,7 +39,10 @@ vi.mock('../../../../src/logger.ts', () => ({
 
 import { Pinecone } from '@pinecone-database/pinecone';
 import * as configModule from '../../../../src/config.ts';
-import { getPineconeReadiness } from '../../../../src/runtimes/chat/providers/pinecone.ts';
+import {
+  getPineconeReadiness,
+  getPineconeReadinessObservation,
+} from '../../../../src/runtimes/chat/providers/pinecone.ts';
 
 describe('getPineconeReadiness', () => {
   beforeEach(() => {
@@ -172,6 +175,28 @@ describe('getPineconeReadiness', () => {
     );
     expect(JSON.stringify(mockReadinessLogger.error.mock.calls)).not.toContain(
       'SYNTHETIC_PRIVATE_NETWORK_ERROR_MARKER',
+    );
+  });
+
+  it('returns a bounded observation for an unknown readiness failure', async () => {
+    process.env.PINECONE_API_KEY = 'pcsk-test';
+    vi.mocked(Pinecone).mockImplementation(function (this: Record<string, unknown>) {
+      this.listIndexes = mockListIndexes;
+    } as unknown as () => Pinecone);
+    mockListIndexes.mockRejectedValueOnce(new Error('SYNTHETIC_PRIVATE_UNKNOWN_ERROR_MARKER'));
+
+    const observation = await getPineconeReadinessObservation('mw-mind');
+
+    expect(observation).toMatchObject({
+      state: 'unknown',
+      index: 'mw-mind',
+      failureCode: 'unknown',
+      retryable: true,
+      evidenceCoverage: 'provider_error',
+    });
+    expect(Date.parse(observation.observedAt)).not.toBeNaN();
+    expect(JSON.stringify(mockReadinessLogger.error.mock.calls)).not.toContain(
+      'SYNTHETIC_PRIVATE_UNKNOWN_ERROR_MARKER',
     );
   });
 });
