@@ -63,6 +63,7 @@ vi.mock('../../console/src/lib/api', () => ({
 import { Database } from '../../src/core/database.ts'
 import type { HealthDeps } from '../../src/core/health.ts'
 import type { ConnectionManager } from '../../src/transport/connection.ts'
+import { emptyConnectionStateSnapshot } from '../../src/transport/twilio/connection-snapshot.ts'
 import { enrichInstance } from '../../src/fleet/routes/lines.ts'
 import type { DiscoveredInstance } from '../../src/fleet/discovery.ts'
 import type { InstanceStatus } from '../../src/fleet/health-poller.ts'
@@ -106,6 +107,11 @@ async function fetchRealHealthBody(): Promise<Record<string, unknown>> {
       sendMedia: vi.fn().mockResolvedValue({ waMessageId: null }),
       connect: vi.fn().mockResolvedValue(undefined),
       disconnect: vi.fn().mockResolvedValue(undefined),
+      getConnectionState: vi.fn(() => emptyConnectionStateSnapshot({
+        connected: true,
+        stateChangedAt: '2026-07-30T00:00:00.000Z',
+        lastDisconnectReason: null,
+      })),
     } as unknown as ConnectionManager,
     startedAt: Date.now() - 1000,
     getEnrichmentStats: vi.fn().mockReturnValue({ lastRun: null, unprocessed: 0 }),

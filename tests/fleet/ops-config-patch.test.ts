@@ -293,6 +293,42 @@ describe('handleConfigUpdate PATCH validation', () => {
     expect(body.adminPhones[0]).toBe('15551230006');
   });
 
+  it('canonicalizes an iMessage AppleID admin identity', async () => {
+    const configPath = writeConfig({
+      transport: 'imessage',
+      imessageConfig: { account: 'test-imsg', backend: 'imsg', sender: 'sender@example.test' },
+    });
+    const inst = fakeInstance(configPath);
+    const deps = makeDeps(inst);
+    const res = mockRes();
+
+    await handleConfigUpdate(
+      mockReq(JSON.stringify({ adminPhones: ['Owner@Example.test'] })),
+      res, deps, { name: 'test-line' },
+    );
+
+    expect(res._status).toBe(200);
+    expect(JSON.parse(res._body).adminPhones).toEqual(['owner@example.test']);
+  });
+
+  it('canonicalizes a loader-compatible iMessage phone admin identity to provider wire form', async () => {
+    const configPath = writeConfig({
+      transport: 'imessage',
+      imessageConfig: { account: 'test-imsg', backend: 'imsg', sender: 'sender@example.test' },
+    });
+    const inst = fakeInstance(configPath);
+    const deps = makeDeps(inst);
+    const res = mockRes();
+
+    await handleConfigUpdate(
+      mockReq(JSON.stringify({ adminPhones: ['5551230000'] })),
+      res, deps, { name: 'test-line' },
+    );
+
+    expect(res._status).toBe(200);
+    expect(JSON.parse(res._body).adminPhones).toEqual(['+15551230000']);
+  });
+
   // -- model (passthrough) --
 
   it('accepts any string value for model without validation', async () => {
