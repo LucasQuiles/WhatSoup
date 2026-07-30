@@ -554,11 +554,13 @@ object. Its fields are `state`, `policy`, `stabilitySeconds`,
 `resume`, `restart_loop_guard_alert`, `expired_session_notice`,
 `intentional_restart`, `disabled`, and `none`.
 
-`sent` and `lastSendAt` mean the tracked submission completed; neither proves
-provider delivery. Waiting and `send_failed` remain observable startup states
-without independently changing normal service health. The existing fleet health
-path retains this object as health data; it is not a second monitor and this
-protocol does not inspect `bot.db`.
+`sent` means a tracked provider-submission attempt completed successfully.
+`lastSendAt` is recorded when the most recent submission attempt starts, so it
+may be non-null with `send_failed`; neither field proves provider delivery.
+Waiting and `send_failed` remain observable startup states without independently
+changing normal service health. The existing fleet health path retains this
+object as health data; it is not a second monitor and this protocol does not
+inspect `bot.db`.
 
 The following are deliberately tracked but not started by this protocol change:
 

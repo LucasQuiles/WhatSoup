@@ -24,6 +24,9 @@ describe('startup-notification documentation', () => {
     expect(configuration).toContain('`restart_loop_guard_alert`');
     expect(configuration).toContain('`expired_session_notice`');
     expect(configuration).toContain('`intentional_restart`');
+    expect(configuration).toContain('`sent` means a tracked provider-submission attempt completed successfully');
+    expect(configuration).toContain('`lastSendAt` is recorded when the most recent submission attempt starts');
+    expect(configuration).toContain('may be non-null with `send_failed`');
     expect(configuration).toContain('Provider-bridge base extraction');
     expect(configuration).toContain('health boolean-helper consolidation');
     expect(configuration).toContain('`STARTUP_NOTIFY_FILENAME` export cleanup');
