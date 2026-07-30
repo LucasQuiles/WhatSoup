@@ -4094,7 +4094,11 @@ def move_suppressed_event(
     log_type: str = "suppressed",
     source_name: str | None = None,
 ) -> Path:
-    event = mark_suppressed(event, reason)
+    # Archival writes must honor the envelope contract ("normalized to v2
+    # before ... archival") even on pre-loop paths that never reach
+    # process_one. normalize_event is idempotent on already-v2 events, and
+    # every caller passes an event that has classified successfully.
+    event = mark_suppressed(normalize_event(event), reason)
     atomic_write_json(path, event)
     suppressed_path = archive_path(paths["suppressed"], source_name or path.name, "suppressed", event)
     os.replace(path, suppressed_path)

@@ -41,7 +41,7 @@
         "writefail_invalid_envelope"
       ],
       "path": "deploy/scripts/bot-errors-dispatcher.py",
-      "sha256": "9445490bba224e58f8db9335333906161374bd76fcd5158c6666d03f549584d1"
+      "sha256": "cdd268188f3f62aebbc729c9f0be537b63d2bc9eb6e18ddf872309e84037333e"
     },
     {
       "mustContain": [
@@ -222,6 +222,18 @@
     },
     {
       "mustContain": [
+        "restore_service_to_always_on",
+        "cutover_gate",
+        "CutoverError",
+        "_LEGAL_EXPECTED_STATES",
+        "atomic_write_json",
+        "always_on"
+      ],
+      "path": "deploy/scripts/bot_errors_cutover.py",
+      "sha256": "dae9e37f841216837f2ec9481d4534a9bad0a27ef265c1d33fec9b1d862f6232"
+    },
+    {
+      "mustContain": [
         "read_env_value",
         "env_or_default",
         "run_config_check",
@@ -274,15 +286,6 @@
     },
     {
       "mustContain": [
-        "roster_digest",
-        "roster_inventory",
-        "load_roster"
-      ],
-      "path": "deploy/scripts/lib/bot_errors_roster.py",
-      "sha256": "d5b0e418a46320bff46e9948b00b58a917922930e0649155db15bb1a6fea335c"
-    },
-    {
-      "mustContain": [
         "redact_bot_errors_text",
         "CREDENTIAL_PATH_RE",
         ".config/secrets/",
@@ -293,6 +296,22 @@
       ],
       "path": "deploy/scripts/lib/bot_errors_redaction.py",
       "sha256": "274316080daac4fb1949e357e2d1688938a9d44fb63330ed2bef524ef73f4301"
+    },
+    {
+      "mustContain": [
+        "roster_digest",
+        "roster_inventory",
+        "load_roster"
+      ],
+      "path": "deploy/scripts/lib/bot_errors_roster.py",
+      "sha256": "d5b0e418a46320bff46e9948b00b58a917922930e0649155db15bb1a6fea335c"
+    },
+    {
+      "mustContain": [
+        "def classify(d: object) -> str:"
+      ],
+      "path": "deploy/scripts/lib/classify_health.py",
+      "sha256": "782cad21c8fff5be8e57bda78b2429d2f115457705af116518e7555e8b7b2ab7"
     },
     {
       "mustContain": [
@@ -307,11 +326,15 @@
       "sha256": "2ae8bd93f0ef836ea3c20eb00198a8e25b19f33644e0a58b12a45e2755a8e795"
     },
     {
+      "path": "deploy/scripts/lib/controller_state.py",
+      "sha256": "f2f83805dde505f12e298d822d96a46d36ae566270216e87b243997f6b0cf4ce",
       "mustContain": [
-        "def classify(d: object) -> str:"
-      ],
-      "path": "deploy/scripts/lib/classify_health.py",
-      "sha256": "782cad21c8fff5be8e57bda78b2429d2f115457705af116518e7555e8b7b2ab7"
+        "ControllerStateSession",
+        "open_controller_state",
+        "read_controller_state",
+        "complete_reconciliation",
+        "retention_exhausted"
+      ]
     },
     {
       "mustContain": [
@@ -362,21 +385,9 @@
       ],
       "path": "src/lib/fault-taxonomy-registry.json",
       "sha256": "23c712318b449d80d8809a8811f064bad3d936140743c41d2657907341d84f13"
-    },
-    {
-      "mustContain": [
-        "restore_service_to_always_on",
-        "cutover_gate",
-        "CutoverError",
-        "_LEGAL_EXPECTED_STATES",
-        "atomic_write_json",
-        "always_on"
-      ],
-      "path": "deploy/scripts/bot_errors_cutover.py",
-      "sha256": "dae9e37f841216837f2ec9481d4534a9bad0a27ef265c1d33fec9b1d862f6232"
     }
   ],
-  "generatedAt": "2026-07-30T04:06:12Z",
+  "generatedAt": "2026-07-30T04:09:19Z",
   "schemaVersion": 1,
   "scope": "bot-errors-runtime-scripts"
 }

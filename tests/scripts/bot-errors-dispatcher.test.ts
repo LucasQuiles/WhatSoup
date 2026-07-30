@@ -525,6 +525,65 @@ describe('bot-errors-dispatcher', () => {
     expect(event.delivery.suppressedReason).toContain('daily-health info events');
   });
 
+  it('normalizes recovery-duplicate archives to schema v2 before writing', () => {
+    // Pre-loop suppression paths archive without passing through process_one,
+    // so their writes must normalize explicitly — a real 3,862-record corpus
+    // replay found 1,114 recovery duplicates archived still at schemaVersion 1.
+    tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-dispatcher-'));
+    const capturePath = join(tmpRoot, 'sent-message.txt');
+    const suppressed = join(tmpRoot, 'suppressed');
+    const outbox = join(tmpRoot, 'outbox');
+    mkdirSync(outbox, { recursive: true, mode: 0o700 });
+    const clearEvent = (id: string, createdAt: string) => ({
+      schemaVersion: 1,
+      id,
+      eventType: 'clear',
+      severity: 'info',
+      createdAt,
+      machine: 'test-machine',
+      instance: 'q',
+      source: 'dispatcher-test',
+      summary: 'recovery duplicate normalization test',
+      evidence: 'archived duplicate must be schema v2',
+      process: { pid: 123, cwd: tmpRoot, argv: ['test'] },
+      diagnostics: { logHints: [], queue: outbox },
+      delivery: { attempts: 0, status: 'queued', nextAttemptAtEpoch: 0, lastError: null },
+    });
+    writeFileSync(
+      join(outbox, '20260531T000000Z.recovery-dup-first.json'),
+      `${JSON.stringify(clearEvent('recovery-dup-first', '2026-05-31T00:00:00Z'), null, 2)}\n`,
+      { mode: 0o600 },
+    );
+    writeFileSync(
+      join(outbox, '20260531T000100Z.recovery-dup-second.json'),
+      `${JSON.stringify(clearEvent('recovery-dup-second', '2026-05-31T00:01:00Z'), null, 2)}\n`,
+      { mode: 0o600 },
+    );
+
+    execFileSync('python3', ['deploy/scripts/bot-errors-dispatcher.py', '--once'], {
+      cwd: process.cwd(),
+      env: {
+        ...process.env,
+        BOT_ERRORS_STATE_DIR: tmpRoot,
+        BOT_ERRORS_DRY_SEND_CAPTURE: capturePath,
+      },
+      encoding: 'utf8',
+    });
+
+    const archived = readdirSync(suppressed).map(
+      (name) =>
+        JSON.parse(readFileSync(join(suppressed, name), 'utf8')) as {
+          id: string;
+          schemaVersion: number;
+          eventKind?: string;
+        },
+    );
+    const duplicate = archived.find((event) => event.id === 'recovery-dup-second');
+    expect(duplicate).toBeDefined();
+    expect(duplicate!.schemaVersion).toBe(2);
+    expect(duplicate!.eventKind).toBe('incident_recovery');
+  });
+
   it('closes daily-health-fail incidents from a later healthy daily-health summary', () => {
     tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-dispatcher-'));
     const capturePath = join(tmpRoot, 'sent-message.txt');
