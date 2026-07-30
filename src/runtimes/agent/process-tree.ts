@@ -133,7 +133,7 @@ function parseProcessCensus(output: string): ProcessCensusRow[] {
 function readProcessCensus(): ProcessCensusRow[] {
   const output = execFileSync(
     'ps',
-    ['-ww', '-eo', 'pid,ppid,pgid,lstart,command'],
+    ['-eo', 'pid,ppid,pgid,lstart,command'],
     { encoding: 'utf8', timeout: 2_000, maxBuffer: 16 * 1024 * 1024 },
   );
   return parseProcessCensus(output);
