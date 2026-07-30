@@ -32,7 +32,7 @@ function validJournal(overrides: Record<string, unknown> = {}): Record<string, u
   };
 }
 
-function runCli(args: string[], files: Record<string, unknown> = {}) {
+function runCli(args: readonly string[], files: Record<string, unknown> = {}) {
   return runStartupNotificationReleaseCli(args, (path) => files[path]);
 }
 
