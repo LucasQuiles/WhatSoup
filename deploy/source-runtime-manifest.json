@@ -52,7 +52,7 @@
     },
     {
       "path": "src/transport/auth.ts",
-      "sha256": "5072b5af6294199b0dc4878687fd0f8abc692784059239745b161f6a3a0b6341",
+      "sha256": "9dad2da8eda5eecbd121c710989f5704cf2b9992e3a8cd07f4be26a1a21ed684",
       "mustContain": [
         "useMultiFileAuthState",
         "decideDisconnectAction"
