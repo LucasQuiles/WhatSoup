@@ -266,7 +266,7 @@ export function createCapabilityGrantManager(
     try {
       void Promise.resolve(onError(error, operation)).catch((err) => { log.warn({ err, operation }, 'capability-grant: error observer rejected'); });
     } catch {
-      // Observability must never break expiry retries or completed state changes.
+      // intentional: observability must never break expiry retries or completed state changes.
     }
   };
 
