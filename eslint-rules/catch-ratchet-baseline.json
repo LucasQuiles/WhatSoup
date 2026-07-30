@@ -45,7 +45,6 @@
   "src/fleet/platform.ts::910d63b53b5c4c0bc7be5ae6685c7ce41eecde33dca74882bc65878e817b817b",
   "src/fleet/realtime-event-poller.ts::438143711c6b9fc86916497ca66240f31fb68151817ec26d70dde135ff60f94e",
   "src/fleet/realtime-event-poller.ts::87087f03d7f663598ff047dcbff0d91e05bb9219dbab27f555e2c944a1fd282a",
-  "src/fleet/routes/checkpoints.ts::798700ed95320be7114ddbc8a1843026278b38387c3dde72e3e1ec81b99758c4",
   "src/fleet/routes/data.ts::1653a4ef570804f7fd321810011fc4eab894c225ed48439e4380ce859ff83edf",
   "src/fleet/routes/data.ts::691ef4ffb6e1b30e8244c90b637b35c6657f667589a26ab1af1f37f044517313",
   "src/fleet/routes/data.ts::69459980fa415576ea3af59c7492ddf714a3ec58e49b895d7c2f136fc1aaab03",

@@ -289,7 +289,13 @@ describe('POST /api/lines/:name/checkpoints/restore (handleRestoreCheckpoint)', 
       res, deps, { name: 'agent-line' },
     );
     expect(res._status).toBe(500);
-    expect(JSON.parse(res._body).restartAttempted).toBe(true);
+    // After #2517, the response uses the closed fleet-error-v1 projection schema.
+    // The restart is still attempted (verified by the serviceManager.start call below);
+    // the mutation_state reflects that state was already changed.
+    const body = JSON.parse(res._body);
+    expect(body.schema).toBe('fleet-error-v1');
+    expect(body.operation).toBe('checkpoint_restore');
+    expect(body.mutation_state).toBe('applied');
     expect(deps.serviceManager.start).toHaveBeenCalledWith('agent-line');
   });
 });

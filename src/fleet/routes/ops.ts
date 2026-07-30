@@ -45,6 +45,7 @@ import { stripPlaintextProviderKeys } from '../../lib/config-plaintext-keys.ts';
 import { DEFAULT_INSTANCE_HEALTH_PORT } from '../constants.ts';
 import { privateWriteError, writePrivateFileSync } from '../../lib/private-fs.ts';
 import { errorMessage } from '../../lib/error-message.ts';
+import { projectError, validationError, mutationError, serviceActionError } from '../response-error-projection.ts';
 import { NAME_MAX_LENGTH, NAME_RE, validateInstanceName } from './instance-name.ts';
 
 function deepMergeRecords(
@@ -332,10 +333,7 @@ async function handleServiceAction(
     publishFeedEvent(deps.realtime, params.name);
     jsonResponse(res, 202, { status: `${verb}_requested`, instance: params.name });
   } catch (err) {
-    jsonResponse(res, 500, {
-      error: `${verb} failed: ${errorMessage(err)}`,
-      instance: params.name,
-    });
+    jsonResponse(res, 500, projectError(err, { operation: 'service_action', stage: 'execute' }));
   }
 }
 
@@ -407,7 +405,7 @@ export async function handleConfigUpdate(
       throw new Error('body must be a JSON object');
     }
   } catch (err) {
-    jsonResponse(res, 400, { error: `invalid JSON: ${errorMessage(err)}` });
+    jsonResponse(res, 400, validationError('Invalid JSON body.', 'unknown'));
     return;
   }
 
@@ -420,7 +418,7 @@ export async function handleConfigUpdate(
       try {
         existing = JSON.parse(readPrivateConfigFileSync(instance.configPath));
       } catch (err) {
-        jsonResponse(res, 500, { error: `failed to read config: ${errorMessage(err)}` });
+        jsonResponse(res, 500, projectError(err, { operation: 'config_read', stage: 'execute' }));
         haltConfigUpdateAfterResponse();
       }
 
@@ -508,7 +506,7 @@ export async function handleConfigUpdate(
             ensureHomeConfinedDirectory(claudeDir);
             writePrivateFileSync(path.join(claudeDir, 'CLAUDE.md'), patch.claudeMd as string);
           } catch (err) {
-            jsonResponse(res, 500, { error: `failed to write CLAUDE.md: ${errorMessage(err)}` });
+            jsonResponse(res, 500, projectError(err, { operation: 'config_write', stage: 'commit' }));
             haltConfigUpdateAfterResponse();
           }
         }
@@ -526,7 +524,7 @@ export async function handleConfigUpdate(
               writePermissionsSettings(claudeDir, settings);
             }
           } catch (err) {
-            jsonResponse(res, 500, { error: `failed to write settings.json: ${errorMessage(err)}` });
+            jsonResponse(res, 500, projectError(err, { operation: 'config_write', stage: 'commit' }));
             haltConfigUpdateAfterResponse();
           }
         }
@@ -560,7 +558,7 @@ export async function handleConfigUpdate(
                 enabledPlugins: (patchAo.enabledPlugins ?? {}) as Record<string, boolean>,
               });
             } catch (err) {
-              jsonResponse(res, 500, { error: `failed to write enabledPlugins: ${errorMessage(err)}` });
+              jsonResponse(res, 500, projectError(err, { operation: 'config_write', stage: 'commit' }));
               haltConfigUpdateAfterResponse();
             }
           }
@@ -586,7 +584,7 @@ export async function handleConfigUpdate(
       try {
         writePrivateConfigFileSync(instance.configPath, JSON.stringify(clean, null, 2) + '\n');
       } catch (err) {
-        jsonResponse(res, 500, { error: `failed to write config: ${errorMessage(err)}` });
+        jsonResponse(res, 500, projectError(err, { operation: 'config_write', stage: 'execute' }));
         haltConfigUpdateAfterResponse();
       }
       return clean;
@@ -595,8 +593,7 @@ export async function handleConfigUpdate(
     if (err instanceof ConfigUpdateResponseSent) {
       return;
     }
-    const action = errnoCode(err) === 'ENOENT' ? 'failed to read config' : 'failed to write config';
-    jsonResponse(res, 500, { error: `${action}: ${errorMessage(err)}` });
+    jsonResponse(res, 500, projectError(err, { operation: 'config_write', stage: 'execute' }));
     return;
   }
 
@@ -920,7 +917,7 @@ function scanHealthPortInventory(excludeName?: string): HealthPortInventory {
 
 /** Map a ValidationError to the HTTP response and return false to halt the handler. */
 function emitValidationError(err: ConfigValidationError, res: ServerResponse): boolean {
-  jsonResponse(res, err.status ?? 400, { error: err.message });
+  jsonResponse(res, err.status ?? 400, projectError(err, { operation: 'unknown', stage: 'execute' }));
   return false;
 }
 
@@ -1003,7 +1000,7 @@ export async function handleCreateLine(
       throw new Error('body must be a JSON object');
     }
   } catch (err) {
-    jsonResponse(res, 400, { error: `invalid JSON: ${errorMessage(err)}` });
+    jsonResponse(res, 400, validationError('Invalid JSON body.', 'instance_create'));
     return;
   }
 
@@ -1167,7 +1164,7 @@ export async function handleCreateLine(
       jsonResponse(res, 409, { error: `instance '${name}' already exists` });
       return;
     }
-    jsonResponse(res, 500, { error: `instance creation failed: ${errorMessage(err)}` });
+    jsonResponse(res, 500, mutationError(err, { operation: 'instance_create', stage: 'commit', mutationState: 'not_started' }));
     return;
   }
 
@@ -1244,15 +1241,12 @@ export async function handleCreateLine(
           { err: rollbackErr, originalErr: err, instance: name },
           'failed to disable service after instance creation failure',
         );
-        jsonResponse(res, 500, {
-          error: `instance creation failed: ${errorMessage(err)}`,
-          rollbackError: `service disable failed: ${errorMessage(rollbackErr)}`,
-        });
+        jsonResponse(res, 500, mutationError(err, { operation: 'instance_create', stage: 'rollback', mutationState: 'rollback_failed', rollbackState: 'failed' }));
         return;
       }
     }
     cleanupPartial(name, createdExtras);
-    jsonResponse(res, 500, { error: `instance creation failed: ${errorMessage(err)}` });
+    jsonResponse(res, 500, mutationError(err, { operation: 'instance_create', stage: 'commit', mutationState: 'not_started' }));
   }
 }
 
@@ -1388,13 +1382,13 @@ export async function handleAuth(
 
   // Forward errors
   child.on('error', (err) => {
-    writeSSE('error', { message: err.message });
+    writeSSE('error', projectError(err, { operation: 'auth', stage: 'execute' }));
     restoreStoppedInstance('child-error');
     endOnce();
   });
   child.on('exit', (code) => {
     if (code !== 0) {
-      writeSSE('error', { message: `auth exited with code ${code}` });
+      writeSSE('error', serviceActionError(new Error('auth exited'), 'auth', 'auth_failed'));
       restoreStoppedInstance('child-exit');
     }
     endOnce();
