@@ -5,7 +5,7 @@
   "entrypoints": [
     {
       "path": "src/main.ts",
-      "sha256": "53ead8155988767c02d6c64548079aa2ca580e8eb6fda0a5369753f1caef7a28",
+      "sha256": "c9fa22b3b4656876a915e5861ac42ea148b74741b1b74f63aac81dd5575fa221",
       "mustContain": [
         "startHealthServer",
         "createConnection"
