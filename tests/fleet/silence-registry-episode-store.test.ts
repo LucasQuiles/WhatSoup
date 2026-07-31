@@ -215,4 +215,75 @@ describe('silence-registry episode store', () => {
     expect(primaryRecoveredButStale.prepareRecovery(10_000 + SILENCE_REGISTRY_EPISODE_PENDING_RETRY_MS + 7))
       .toEqual({ status: 'available', action: 'suppressed' });
   });
+
+  it('returns settled false when confirmOnset receives a mismatched episode id', () => {
+    const store = createSilenceRegistryEpisodeStore(statePath);
+    const onset = store.prepareOnset({ reasonClass: 'invalid_json', readBasis: 'none' });
+    expect(onset).toMatchObject({ status: 'available', action: 'emit_onset' });
+    // Phase is now 'onset_pending' with onset.episodeId; confirm with a different id.
+    expect(store.confirmOnset('00000000-0000-4000-8000-000000000000'))
+      .toEqual({ status: 'available', settled: false });
+  });
+
+  it('returns settled false when confirmRecovery receives a mismatched episode id', () => {
+    const store = createSilenceRegistryEpisodeStore(statePath);
+    const onset = store.prepareOnset({ reasonClass: 'invalid_json', readBasis: 'none' });
+    if (onset.status !== 'available' || onset.action !== 'emit_onset') {
+      throw new Error('expected an onset emission claim');
+    }
+    store.confirmOnset(onset.episodeId);
+    const recovery = store.prepareRecovery();
+    expect(recovery).toMatchObject({ status: 'available', action: 'emit_recovery' });
+    // Phase is now 'recovery_pending' with recovery.episodeId; confirm with a different id.
+    expect(store.confirmRecovery('00000000-0000-4000-8000-000000000000'))
+      .toEqual({ status: 'available', settled: false });
+  });
+
+  it('fails closed when the state directory cannot be initialized', () => {
+    const store = createSilenceRegistryEpisodeStore('/dev/null/impossible/episode-state.json');
+    expect(store.prepareOnset({ reasonClass: 'invalid_json', readBasis: 'none' }))
+      .toEqual({ status: 'journal_unreadable' });
+    expect(store.prepareRecovery()).toEqual({ status: 'journal_unreadable' });
+  });
+
+  it('is idempotent when confirmOnset is called on an already-open episode', () => {
+    const store = createSilenceRegistryEpisodeStore(statePath);
+    const onset = store.prepareOnset({ reasonClass: 'invalid_json', readBasis: 'none' });
+    if (onset.status !== 'available' || onset.action !== 'emit_onset') {
+      throw new Error('expected an onset emission claim');
+    }
+    store.confirmOnset(onset.episodeId);
+    // Calling again on already-open phase with same episodeId → settled:true (idempotent)
+    expect(store.confirmOnset(onset.episodeId)).toEqual({ status: 'available', settled: true });
+  });
+
+  it('fails closed for a non-recovery state carrying a recoveryFrom value', () => {
+    writeFileSync(statePath, `${JSON.stringify({
+      v: 1,
+      phase: 'open',
+      episodeId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+      updatedAt: '2026-07-30T00:00:00.000Z',
+      reasonClass: 'invalid_json',
+      readBasis: 'none',
+      recoveryFrom: 'onset_pending',
+    })}\n`, { mode: 0o600 });
+    chmodSync(statePath, 0o600);
+    const store = createSilenceRegistryEpisodeStore(statePath);
+    expect(store.read()).toEqual({ status: 'journal_unreadable' });
+  });
+
+  it('fails closed for a recovery_pending state with an invalid recoveryFrom source', () => {
+    writeFileSync(statePath, `${JSON.stringify({
+      v: 1,
+      phase: 'recovery_pending',
+      episodeId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+      updatedAt: '2026-07-30T00:00:00.000Z',
+      reasonClass: 'invalid_json',
+      readBasis: 'none',
+      recoveryFrom: 'closed',
+    })}\n`, { mode: 0o600 });
+    chmodSync(statePath, 0o600);
+    const store = createSilenceRegistryEpisodeStore(statePath);
+    expect(store.read()).toEqual({ status: 'journal_unreadable' });
+  });
 });
