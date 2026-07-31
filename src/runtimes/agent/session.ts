@@ -92,9 +92,6 @@ export const MAX_STDOUT_LINE_BYTES = 16 * 1024 * 1024;
 function isOpenCodeDiagnosticLogLine(line: string): boolean {
   return /^timestamp=\S+\s+level=(?:TRACE|DEBUG|INFO|WARN|ERROR)\b/.test(line);
 }
-/** @deprecated Use WATCHDOG_SOFT_MS / WATCHDOG_HARD_MS instead. Kept for test backward-compat. */
-export const TURN_WATCHDOG_MS = 600_000;
-
 // ─── 3-tier watchdog ────────────────────────────────────────────────────────
 // Soft probes notify the user; hard kill terminates the process.
 // ALL tiers reset on any agent activity (tool_use, tool_result, assistant_text).
@@ -633,6 +630,13 @@ export class SessionManager {
   private startedAt: string | null = null;
   private messageCount: number = 0;
   private lastMessageAt: string | null = null;
+  /** Opaque per-spawn epoch used only to fence health evidence to the live session. */
+  private nextEvidenceGeneration = 0;
+  private activeEvidenceGeneration: number | null = null;
+  private readonly evidenceBindings = new WeakMap<object, {
+    epoch: number;
+    ownership: SessionGenerationIdentity | null;
+  }>();
   private watchdogSoft: ReturnType<typeof setTimeout> | null = null;
   private watchdogWarn: ReturnType<typeof setTimeout> | null = null;
   private watchdogHard: ReturnType<typeof setTimeout> | null = null;
@@ -1817,6 +1821,7 @@ export class SessionManager {
     this.startedAt = null;
     this.messageCount = 0;
     this.lastMessageAt = null;
+    this.activeEvidenceGeneration = null;
     this.pendingToolIds.clear();
     this.codexThreadId = null;
     this.codexRequestSeq = 0;
@@ -1826,6 +1831,10 @@ export class SessionManager {
     this.providerReadyResolve = null;
     this.resumeAttemptId = null;
     this.codexResumeThreadStartReqId = null;
+  }
+
+  private admitEvidenceGeneration(): void {
+    this.activeEvidenceGeneration = ++this.nextEvidenceGeneration;
   }
 
   private retireUnsupportedResume(
@@ -2156,6 +2165,7 @@ export class SessionManager {
           this.dbRowId,
         );
         this.markDurableLifecycleAdmitted();
+        this.admitEvidenceGeneration();
       } catch (err) {
         log.error({ err, chatJid: this.chatJid, provider: this.provider }, 'session: failed to persist managed provider');
         this.resetFailedSessionStart();
@@ -2261,6 +2271,7 @@ export class SessionManager {
           this.dbRowId,
         );
         this.markDurableLifecycleAdmitted();
+        this.admitEvidenceGeneration();
       } catch (err) {
         log.error({ err, chatJid: this.chatJid, provider: this.provider }, 'session: failed to persist spawn-per-turn provider');
         this.resetFailedSessionStart();
@@ -2341,6 +2352,7 @@ export class SessionManager {
         this.dbRowId,
       );
       this.markDurableLifecycleAdmitted();
+      this.admitEvidenceGeneration();
     } catch (err) {
       log.error({ err, pid, chatJid: this.chatJid, existingRowId: resolvedRowId ?? null }, 'session: failed to persist spawned child lifecycle');
       let cleanupError: unknown = null;
@@ -3786,6 +3798,25 @@ export class SessionManager {
     return this.provider;
   }
 
+  /** Capture an opaque in-process binding for the current session incarnation. */
+  captureEvidenceBinding(): object | null {
+    if (!this.active || this.activeEvidenceGeneration === null) return null;
+    const ownership = this.currentGenerationIdentity();
+    if (this.resolveGenerationOwnership !== null && ownership === null) return null;
+    const binding = Object.freeze({});
+    this.evidenceBindings.set(binding, { epoch: this.activeEvidenceGeneration, ownership });
+    return binding;
+  }
+
+  /** Revalidate an opaque evidence binding without exposing session identity. */
+  isEvidenceBindingCurrent(binding: object): boolean {
+    const captured = this.evidenceBindings.get(binding);
+    if (!captured || !this.active || this.activeEvidenceGeneration !== captured.epoch) return false;
+    if (this.resolveGenerationOwnership === null) return true;
+    const ownership = this.currentGenerationIdentity();
+    return ownership !== null && this.sameGeneration(captured.ownership, ownership);
+  }
+
   /** Model ref this session was spawned with (undefined = provider default). */
   getModelRef(): string | undefined {
     return this.model;
@@ -3814,6 +3845,7 @@ export class SessionManager {
     this.clearTurnWatchdog();
     this.clearStalledOpKill();
     this.active = false; // Suppress crash notification for clean shutdown
+    this.activeEvidenceGeneration = null;
 
     const currentPid = this.child?.pid ?? null;
     const closingSessionId = this.sessionId ?? this.resumeAttemptId;

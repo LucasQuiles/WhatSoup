@@ -179,7 +179,7 @@ export interface RuntimeResultHandlerPort {
   flushRouteMarker(held: string | null, chatJid: string, actorJid: string | undefined): string | null;
   clearToolNames(toolScopeKey: string): void;
   recordTurnCostUsd(event: Extract<AgentEvent, { type: 'result' }>): void;
-  recordTurnCapabilitySuccess(isUserTurnResult: boolean): void;
+  recordTurnCapabilitySuccess(isUserTurnResult: boolean, session: SessionManager | null): void;
   recordTurnCapabilityFailure(
     isUserTurnResult: boolean,
     errorClass: TurnCapabilityErrorClass,
@@ -620,7 +620,7 @@ if (wasSilentCompact || hadCompactBoundary) {
     let armedFallbackNow = false;
     if (!turnCapabilityFailureRecorded) {
       if (hadVisible || turnHadToolWork || hadSuppressedReplySatisfaction) {
-        host.recordTurnCapabilitySuccess(true);
+        host.recordTurnCapabilitySuccess(true, session);
       } else {
         host.recordTurnCapabilityFailure(true, 'empty-output');
         // QR-226: the turnErrorCounts increment above is in-memory only —
@@ -1131,7 +1131,7 @@ if (!wasSilentCompact && !isSystemResult) {
   host.flushPendingHandoffNotice(queue);
   if (!turnCapabilityFailureRecorded) {
     if (host.turnHadVisibleOutput || turnHadToolWork || hadSuppressedReplySatisfaction) {
-      host.recordTurnCapabilitySuccess(true);
+      host.recordTurnCapabilitySuccess(true, host.session);
     } else {
       host.recordTurnCapabilityFailure(true, 'empty-output');
       // QR-226: see the matching log.warn in handleEventWithContext — the

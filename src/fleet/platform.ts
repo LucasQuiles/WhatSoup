@@ -15,7 +15,7 @@ import * as path from 'node:path';
 import * as fs from 'node:fs';
 import { isValidInstanceName } from './instance-name.ts';
 import { escapeRegExp } from '../lib/regex-utils.ts';
-import { repoRoot, tmpRoot } from './paths.ts';
+import { repoRoot, tmpRoot, xdgDir } from './paths.ts';
 
 const execFileAsync = promisify(execFile);
 
@@ -140,7 +140,7 @@ function assertExpectedGeneratedLaunchdPlist(name: string, contents: string): vo
  */
 export function buildPlist(name: string): string {
   assertValidLaunchdInstanceName(name);
-  const xdgConfig = process.env.XDG_CONFIG_HOME ?? path.join(os.homedir(), '.config');
+  const xdgConfig = xdgDir('XDG_CONFIG_HOME', '.config');
   const logDir = path.join(xdgConfig, 'whatsoup', 'instances', name);
   const tmpDir = tmpRoot(name);
   const wrapper = path.join(os.homedir(), '.local', 'bin', 'whatsoup');

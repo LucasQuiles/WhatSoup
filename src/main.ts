@@ -1,5 +1,5 @@
 import { existsSync } from 'node:fs';
-import { homedir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { config } from './config.ts';
 import logger, { createChildLogger, flushLogger } from './logger.ts';
@@ -77,6 +77,7 @@ import { markCleanExit, restartLoopGuardPath } from './runtimes/agent/restart-lo
 import { formatClockForUser } from './runtimes/agent/runtime-presentation.ts';
 import { acquireProcessLock, isProcessLockError, releaseProcessLock, type ProcessLockHandle } from './lib/process-lock.ts';
 import { createServiceManager } from './fleet/platform.ts';
+import { xdgDir } from './fleet/paths.ts';
 
 // The restart-safety probe must link the complete static import graph without
 // executing this module's database, network, transport, health, or timer body.
@@ -301,8 +302,8 @@ startModelCurrencyMonitor(config.botName, {
   if (instanceName) {
     const msgCount = getMessageCount(db);
     if (msgCount === 0) {
-      const xdgData = process.env.XDG_DATA_HOME ?? join(homedir(), '.local/share');
-      const xdgConfig = process.env.XDG_CONFIG_HOME ?? join(homedir(), '.config');
+      const xdgData = xdgDir('XDG_DATA_HOME', '.local/share');
+      const xdgConfig = xdgDir('XDG_CONFIG_HOME', '.config');
       // Check legacy locations in order of likelihood.
       // The 'q' instance was renamed from 'personal', so also check the old name.
       const legacyNames = instanceName === 'q' ? [instanceName, 'personal'] : [instanceName];
@@ -1214,10 +1215,12 @@ async function shutdown(signal: string): Promise<void> {
 process.on('SIGINT', () => shutdown('SIGINT'));
 process.on('SIGTERM', () => shutdown('SIGTERM'));
 process.on('uncaughtException', (err) => {
-  // Stray stream ENOENT on /tmp files — Baileys opened a read stream on a temp file
-  // that was cleaned up before the read completed. Non-fatal; demote to warning.
+  // Stray stream ENOENT on temp files — Baileys opened a read stream on a temp
+  // file that was cleaned up before the read completed. Non-fatal; demote to
+  // warning. tmpdir()-derived so the suppression also works where the system
+  // temp dir is not /tmp (macOS /var/folders).
   const errno = err as NodeJS.ErrnoException;
-  if (errno.code === 'ENOENT' && errno.path && errno.path.startsWith('/tmp/')) {
+  if (errno.code === 'ENOENT' && errno.path && errno.path.startsWith(`${tmpdir()}/`)) {
     log.warn({ err, path: errno.path }, 'non-fatal ENOENT on temp file — suppressed crash');
     return;
   }

@@ -3,7 +3,7 @@
 //
 //  Single source of truth for provider IDs (shared JSON, imported here AND
 //  by the backend registry src/runtimes/agent/providers/index.ts, #447):
-//    src/runtimes/agent/providers/provider-ids.json
+//    src/lib/provider-ids.json
 //
 //  Backend descriptor shape:
 //    src/runtimes/agent/providers/types.ts → ProviderDescriptor
@@ -15,8 +15,8 @@
 //  tests/console/provider-catalog-drift.test.ts pins the ID lists together.
 // ---------------------------------------------------------------------------
 
-import providerIdsJson from '../../../src/runtimes/agent/providers/provider-ids.json';
-import type { ProviderId } from '../../../src/runtimes/agent/providers/index.ts';
+import providerIdsJson from '../../../src/lib/provider-ids.json';
+import type { ProviderId } from '../../../src/lib/provider-ids.ts';
 import { PROVIDER_API_KEY_SERVICES } from '../../../src/lib/provider-key-service.ts';
 
 const PROVIDER_IDS = providerIdsJson as readonly ProviderId[];
