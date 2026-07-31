@@ -74,6 +74,12 @@ jobs:
             git fetch origin "$GITHUB_BASE_REF:refs/remotes/origin/$GITHUB_BASE_REF"
           fi
 
+      - name: PR metadata guard
+        if: github.event_name == 'pull_request'
+        env:
+          PR_METADATA_EVENT: ${{ github.event_path }}
+        run: npm run guard:pr-metadata -- --github-event "$PR_METADATA_EVENT" --json
+
       - name: Semantic quality (shadow)
         env:
           SEMANTIC_RECEIPT: ${{ runner.temp }}/semantic-quality.json

@@ -104,6 +104,7 @@ const SCOPE_MAP: Record<string, ScopeEntry> = {
   'work-index': { class: 'probe-nonzero', reason: 'reads cwd work-index; ENOENT -> non-zero', probe: { via: 'cwd' } },
   'harness-maintenance': { class: 'probe-nonzero', reason: 'reads cwd deploy/managed-components.json; ENOENT -> non-zero', probe: { via: 'cwd' } },
   'agent-iteration-review': { class: 'probe-nonzero', reason: 'requires an artifact path; absent -> non-zero usage error', probe: { via: 'cwd' } },
+  'pr-metadata': { class: 'probe-nonzero', reason: 'requires exactly one explicit PR body/event source plus authoritative full-OID range inputs; no source exits 2 INCONCLUSIVE', probe: { via: 'cwd' } },
   'worker-artifacts': { class: 'probe-nonzero', reason: 'reads cwd artifacts/opencode-workers; ENOENT -> non-zero', probe: { via: 'cwd' } },
   'source-runtime-drift': { class: 'probe-nonzero', reason: 'reads cwd runtime manifest; ENOENT -> non-zero', probe: { via: 'cwd' } },
   'arc-binding-drift': { class: 'probe-nonzero', reason: 'reads cwd .arc/ binding; drift/absent -> non-zero', probe: { via: 'cwd' } },
