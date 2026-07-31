@@ -81,6 +81,13 @@ function extractFailureClass(raw: string): string {
   return 'unknown';
 }
 
+// Issue #2386: This is a non-reversible correlation digest for de-duplicating
+// repeated BOT ERRORS evidence without exposing raw content. It is NOT used
+// for password hashing, credential storage, or any security-sensitive purpose.
+// The 64-bit (16-hex) truncation bounds the correlation key; domain separation
+// prevents cross-domain collisions. CodeQL flags this as insufficient-effort
+// hashing under the password-storage heuristic, which does not apply here.
+// codeql[js/hashing-with-insufficient-effort]
 function digestContent(domain: string, value: string): string {
   return createHash('sha256')
     .update(`bot-errors-evidence:${domain}:${value}`)
