@@ -88,6 +88,9 @@ function extractFailureClass(raw: string): string {
 // effort; domain separation prevents cross-domain collisions.
 function digestContent(domain: string, value: string): string {
   return createHash('sha256')
+    // codeql[js/hashing-with-insufficient-effort]: intentional non-reversible
+    // correlation digest for de-duplication (issue #2386), NOT password/credential
+    // hashing or storage. See module header and buildBotErrorsEvent contract.
     .update(`bot-errors-evidence:${domain}:${value}`)
     .digest('hex');
 }
