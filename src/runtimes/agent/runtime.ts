@@ -3081,6 +3081,53 @@ export class AgentRuntime implements Runtime {
     return identity?.scope === expectedScope ? identity : null;
   }
 
+  private completedDeliveryIdentityAdmissionReason(
+    checkpoint: SessionCheckpointRow | undefined,
+    expectedScope: PersistedResumeIdentity['scope'],
+  ): 'missing' | 'invalid' | 'scope_mismatch' {
+    if (checkpoint === undefined) return 'missing';
+    const fields = [
+      checkpoint.completed_scope,
+      checkpoint.completed_delivery_jid,
+      checkpoint.completed_delivery_namespace,
+      checkpoint.completed_inbound_seq,
+      checkpoint.completed_logical_turn_id,
+      checkpoint.completed_manager_id,
+      checkpoint.completed_generation,
+    ];
+    if (fields.some((field) => field === null || field === undefined)) return 'missing';
+    const identity = resolveResumeIdentity({
+      scope: checkpoint.completed_scope,
+      conversationKey: checkpoint.conversation_key,
+      deliveryJid: checkpoint.completed_delivery_jid,
+      deliveryNamespace: checkpoint.completed_delivery_namespace,
+      inboundSeq: checkpoint.completed_inbound_seq,
+      logicalTurnId: checkpoint.completed_logical_turn_id,
+      managerId: checkpoint.completed_manager_id,
+      generation: checkpoint.completed_generation,
+    });
+    if (identity === null) return 'invalid';
+    return identity.scope === expectedScope ? 'invalid' : 'scope_mismatch';
+  }
+
+  private completedDeliveryIdentityAdmissionHealth(): {
+    unresolvedCount: number;
+    oldestTransitionAt: string | null;
+    maximumAttempts: number;
+    nextAction: 'fresh_inbound' | 'operator' | null;
+  } {
+    const empty = {
+      unresolvedCount: 0,
+      oldestTransitionAt: null,
+      maximumAttempts: 0,
+      nextAction: null,
+    } as const;
+    if (!this.durability || typeof this.durability.getCompletedDeliveryIdentityAdmissionHealth !== 'function') {
+      return empty;
+    }
+    return this.durability.getCompletedDeliveryIdentityAdmissionHealth();
+  }
+
   private recordProactiveResumeIdentityReject(
     conversationKey: string | null,
     reason: 'legacy_or_ambiguous_identity' | 'scope_mismatch',
@@ -3344,12 +3391,21 @@ export class AgentRuntime implements Runtime {
 
         const resumeIdentity = this.checkpointResumeIdentity(full, 'per_chat');
         if (!resumeIdentity) {
+          const admissionReason = this.completedDeliveryIdentityAdmissionReason(full, 'per_chat');
           this.recordProactiveResumeIdentityReject(
             cp.conversation_key,
-            full.completed_scope === null || full.completed_scope === 'per_chat'
-              ? 'legacy_or_ambiguous_identity'
-              : 'scope_mismatch',
+            admissionReason === 'scope_mismatch'
+              ? 'scope_mismatch'
+              : 'legacy_or_ambiguous_identity',
           );
+          if (typeof this.durability.quarantineCompletedDeliveryIdentityCheckpoint === 'function') {
+            this.durability.quarantineCompletedDeliveryIdentityCheckpoint({
+              conversationKey: cp.conversation_key,
+              providerSessionId: full.session_id,
+              provider: this.effectiveProvider,
+              reason: admissionReason,
+            });
+          }
           continue;
         }
         const chatJid = resumeIdentity.deliveryJid;
@@ -3508,14 +3564,22 @@ export class AgentRuntime implements Runtime {
         ? this.checkpointResumeIdentity(checkpoint, expectedScope)
         : null;
       if (!priorResumeIdentity) {
+        const admissionReason = this.completedDeliveryIdentityAdmissionReason(checkpoint, expectedScope);
         this.recordProactiveResumeIdentityReject(
           checkpoint?.conversation_key ?? null,
-          checkpoint !== undefined &&
-            checkpoint.completed_scope !== null &&
-            checkpoint.completed_scope !== expectedScope
+          admissionReason === 'scope_mismatch'
             ? 'scope_mismatch'
             : 'legacy_or_ambiguous_identity',
         );
+        if (this.durability && typeof this.durability.quarantineCompletedDeliveryIdentityAgentSession === 'function') {
+          this.durability.quarantineCompletedDeliveryIdentityAgentSession({
+            agentSessionRowId: priorSession.id,
+            providerSessionId: priorSession.session_id!,
+            provider: this.effectiveProvider,
+            workspaceKey: priorSession.workspace_key ?? null,
+            reason: admissionReason,
+          });
+        }
         priorSession = null;
       } else if (checkpoint?.updated_at) {
         const ageMs = Date.now() - new Date(checkpoint.updated_at + 'Z').getTime();
@@ -7022,6 +7086,8 @@ export class AgentRuntime implements Runtime {
     const providerExecution = this.providerExecutionGate.snapshot();
     const finalizationHealth = this.runtimeTurnSupervisor.health();
     const recoveryHealth = getTurnRecoveryHealthDetails(this.durability);
+    const completedDeliveryIdentityAdmissions = this.completedDeliveryIdentityAdmissionHealth();
+    const completedDeliveryIdentityDebt = completedDeliveryIdentityAdmissions.unresolvedCount > 0;
     const finalizationDegraded = runtimeTurnRecoveryIsDegraded(finalizationHealth, recoveryHealth);
     const turnQueueHealth = this.runtimeTurnCoordinator.turnQueueHaltHealth(this.sessionScope);
     if (this.sessionScope === 'per_chat') {
@@ -7050,6 +7116,7 @@ export class AgentRuntime implements Runtime {
       if (autoCompactHealth.activeBackoffScopes > 0) degradedReasons.push('auto_compact_backoff');
       if (fallbackState.fallbackActiveUntil !== null) degradedReasons.push('provider_fallback_active');
       if (finalizationDegraded) degradedReasons.push('turn_finalization_debt');
+      if (completedDeliveryIdentityDebt) degradedReasons.push('completed_delivery_identity_debt');
       if (turnQueueHealth.turnQueueHalted) degradedReasons.push('turn_queue_halted');
       if (providerExecution.pressureActive) degradedReasons.push('provider_execution_pressure');
       const healthStatus: RuntimeHealth['status'] = degradedReasons.length > 0 ? 'degraded' : 'healthy';
@@ -7071,6 +7138,7 @@ export class AgentRuntime implements Runtime {
           autoCompactActiveBackoffScopes: autoCompactHealth.activeBackoffScopes,
           autoCompactWorstCurrentBackoffTier: autoCompactHealth.worstCurrentBackoffTier,
           proactiveResumeIdentityRejects: this.proactiveResumeIdentityRejects,
+          completedDeliveryIdentityAdmissions,
           restartLoopGuard: {
             enabled: config.restartLoopGuard.enabled,
             ...readRestartLoopGuardHealth(
@@ -7100,6 +7168,7 @@ export class AgentRuntime implements Runtime {
     if (autoCompactHealth.activeBackoffScopes > 0) degradedReasons.push('auto_compact_backoff');
     if (fallbackState.fallbackActiveUntil !== null) degradedReasons.push('provider_fallback_active');
     if (finalizationDegraded) degradedReasons.push('turn_finalization_debt');
+    if (completedDeliveryIdentityDebt) degradedReasons.push('completed_delivery_identity_debt');
     if (providerExecution.pressureActive) degradedReasons.push('provider_execution_pressure');
     if (turnQueueHealth.turnQueueHalted) degradedReasons.push('turn_queue_halted');
     // A halted single/shared queue is the active admission path — unhealthy/503,
@@ -7125,6 +7194,7 @@ export class AgentRuntime implements Runtime {
         autoCompactActiveBackoffScopes: autoCompactHealth.activeBackoffScopes,
         autoCompactWorstCurrentBackoffTier: autoCompactHealth.worstCurrentBackoffTier,
         proactiveResumeIdentityRejects: this.proactiveResumeIdentityRejects,
+        completedDeliveryIdentityAdmissions,
         restartLoopGuard: {
           enabled: config.restartLoopGuard.enabled,
           ...readRestartLoopGuardHealth(

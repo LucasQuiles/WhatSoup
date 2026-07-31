@@ -245,7 +245,13 @@ vi.mock('../../../src/core/media-mime.ts', () => ({
 
 // ── Imports ─────────────────────────────────────────────────────────────────
 
+import { config } from '../../../src/config.ts';
 import { AgentRuntime } from '../../../src/runtimes/agent/runtime.ts';
+import {
+  PROACTIVE_RESUME_IDENTITY_REJECTION_CASES,
+  type CompletedCheckpointInput,
+} from './completed-delivery-identity-admission.fixture.ts';
+import type { SessionCheckpointRow } from '../../../src/core/durability.ts';
 import type { Database } from '../../../src/core/database.ts';
 import type { Messenger } from '../../../src/core/types.ts';
 
@@ -423,6 +429,12 @@ describe('AgentRuntime.getHealthSnapshot — per_chat shape', () => {
         unownedProviderEventRejects: 0,
         chronologyDelayedDispatches: 0,
         chronologyRecoveryReplayDispatches: 0,
+        completedDeliveryIdentityAdmissions: {
+          maximumAttempts: 0,
+          nextAction: null,
+          oldestTransitionAt: null,
+          unresolvedCount: 0,
+        },
         degradedReasons: [],
         chronologyMaxQueueAgeSeconds: 0,
         turnFinalizationRetainedRetries: 0,
@@ -461,6 +473,12 @@ describe('AgentRuntime.getHealthSnapshot — per_chat shape', () => {
         unownedProviderEventRejects: 0,
         chronologyDelayedDispatches: 0,
         chronologyRecoveryReplayDispatches: 0,
+        completedDeliveryIdentityAdmissions: {
+          maximumAttempts: 0,
+          nextAction: null,
+          oldestTransitionAt: null,
+          unresolvedCount: 0,
+        },
         degradedReasons: [],
         chronologyMaxQueueAgeSeconds: 0,
         turnFinalizationRetainedRetries: 0,
@@ -702,6 +720,12 @@ describe('AgentRuntime.getHealthSnapshot — single-session shape', () => {
         unownedProviderEventRejects: 0,
         chronologyDelayedDispatches: 0,
         chronologyRecoveryReplayDispatches: 0,
+        completedDeliveryIdentityAdmissions: {
+          maximumAttempts: 0,
+          nextAction: null,
+          oldestTransitionAt: null,
+          unresolvedCount: 0,
+        },
         degradedReasons: [],
         chronologyMaxQueueAgeSeconds: 0,
         turnFinalizationRetainedRetries: 0,
@@ -753,6 +777,95 @@ describe('AgentRuntime.getHealthSnapshot — single-session shape', () => {
         turnQueueHalted: false,
         turnQueueHaltedScopes: 0,
       },
+    });
+  });
+  describe('proactive resume identity admission (#2540)', () => {
+    function completedCheckpoint(args: CompletedCheckpointInput & {
+      id?: number;
+      inboundSeq?: number;
+      logicalTurnId?: string;
+      managerId?: string;
+      generation?: number;
+      updatedAt?: string | null;
+    }): SessionCheckpointRow {
+      const inboundSeq = args.inboundSeq ?? 1;
+      return {
+        id: args.id ?? 1,
+        conversation_key: args.conversationKey,
+        session_id: args.sessionId,
+        transcript_path: null,
+        active_turn_id: null,
+        last_inbound_seq: inboundSeq,
+        completed_inbound_seq: inboundSeq,
+        last_flushed_outbound_id: null,
+        watchdog_state: null,
+        workspace_path: null,
+        claude_pid: null,
+        session_status: 'active',
+        checkpoint_version: 1,
+        completed_delivery_jid: args.deliveryJid,
+        completed_delivery_namespace: args.deliveryNamespace,
+        completed_scope: args.scope,
+        completed_logical_turn_id: args.logicalTurnId ?? `turn-${inboundSeq}`,
+        completed_manager_id: args.managerId ?? 'resume-manager',
+        completed_generation: args.generation ?? 1,
+        updated_at: args.updatedAt === undefined
+          ? new Date().toISOString().replace('T', ' ').replace('Z', '')
+          : args.updatedAt,
+      };
+    }
+
+    it.each(PROACTIVE_RESUME_IDENTITY_REJECTION_CASES)('persists $label before skipping proactive resume', async ({ checkpoint: checkpointInput, reason }) => {
+      mockSession.spawnSession.mockClear();
+      // This file mocks toConversationKey as jid => jid, so identity validity
+      // here requires conversationKey === the FULL delivery JID (the namespace
+      // parse still needs the @s.whatsapp.net form). The scope-mismatch case
+      // must PASS the identity check to reach the scope check; align its
+      // conversation key to the mock's semantics without touching the
+      // mismatched scope under test.
+      if (reason === 'scope_mismatch') {
+        checkpointInput = { ...checkpointInput, conversationKey: checkpointInput.deliveryJid };
+      }
+      const db = {
+        assertWritableCompatibility: vi.fn(),
+        raw: {
+          exec: vi.fn(),
+          prepare: vi.fn().mockReturnValue({ run: vi.fn(), get: vi.fn(), all: vi.fn(() => []) }),
+        },
+      } as unknown as Database;
+      const runtime = new AgentRuntime(db, makeMessenger(), 'test', {
+        sessionScope: 'per_chat',
+      });
+      const checkpoint = completedCheckpoint(checkpointInput);
+      const quarantine = vi.fn();
+      const mockDurability = {
+        getResumableCheckpoints: vi.fn(() => [
+          { conversation_key: checkpoint.conversation_key },
+        ]),
+        getSessionCheckpoint: vi.fn(() => checkpoint),
+        quarantineCompletedDeliveryIdentityCheckpoint: quarantine,
+        upsertSessionCheckpoint: vi.fn(),
+      };
+      (runtime as unknown as { durability: unknown }).durability = mockDurability;
+
+      const mutableConfig = config as unknown as Record<string, unknown>;
+      mutableConfig.proactiveResumeOnStartup = true;
+      try {
+        await runtime.start();
+      } finally {
+        delete mutableConfig.proactiveResumeOnStartup;
+      }
+
+      expect(quarantine).toHaveBeenCalledWith({
+        conversationKey: checkpoint.conversation_key,
+        providerSessionId: checkpoint.session_id,
+        // this file's config mock pins agentProvider: 'claude-cli'; the
+        // quarantine record carries it through verbatim
+        provider: 'claude-cli',
+        reason,
+      });
+      expect(mockSession.spawnSession).not.toHaveBeenCalled();
+      expect(runtime.getHealthSnapshot().details['proactiveResumeIdentityRejects']).toBe(1);
     });
   });
 });
