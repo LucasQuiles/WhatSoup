@@ -5,7 +5,6 @@ import {
   TERMINAL_AUTH_FAILURE_CLASSES,
   hasExplicitAuthLossSignal,
   isLoggedOutDisconnectReason,
-  isLoggedOutStatusCode,
   isTerminalAuthFailureClass,
 } from '../../src/fleet/auth-loss-signals.ts';
 
@@ -17,10 +16,12 @@ function pythonSetMembers(source: string, pattern: RegExp): string[] {
 
 describe('auth-loss signal classification', () => {
   it('recognizes explicit logged-out status codes without treating arbitrary values as terminal', () => {
-    expect(isLoggedOutStatusCode(401)).toBe(true);
-    expect(isLoggedOutStatusCode('401')).toBe(true);
-    expect(isLoggedOutStatusCode(440)).toBe(false);
-    expect(isLoggedOutStatusCode('401-ish')).toBe(false);
+    const withStatusCode = (lastStatusCode: unknown) =>
+      hasExplicitAuthLossSignal({ lastStatusCode, lastDisconnectReason: null, authFailureClass: null });
+    expect(withStatusCode(401)).toBe(true);
+    expect(withStatusCode('401')).toBe(true);
+    expect(withStatusCode(440)).toBe(false);
+    expect(withStatusCode('401-ish')).toBe(false);
   });
 
   it('normalizes logged-out reason separators and casing', () => {
