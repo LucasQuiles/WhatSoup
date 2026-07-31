@@ -18,15 +18,15 @@ The **Inconsistencies** section lists missing or stale index entries compared wi
 scoped markdown files currently on disk.
 
 **Repo:** `WhatSoup`
-**Total entries:** 104
+**Total entries:** 105
 
 ## Totals
 
 | Dimension | Breakdown |
 |---|---|
-| Kind | handoff=8, plan=52, review=4, spec=39, state=1 |
-| Status | active=25, closed=4, completed=35, deferred=7, pending=15, unknown=18 |
-| Status source | body-marker=91, fallback=12, state-md-status=1 |
+| Kind | handoff=8, plan=52, review=4, spec=40, state=1 |
+| Status | active=25, closed=4, completed=35, deferred=7, pending=15, unknown=19 |
+| Status source | body-marker=92, fallback=12, state-md-status=1 |
 
 ## Inconsistencies
 
@@ -64,7 +64,7 @@ scoped markdown files currently on disk.
 | `docs/superpowers/specs/provider-event-lifecycle/requirements.md` | spec | requirements | body-marker |
 | `docs/superpowers/specs/provider-event-lifecycle/tasks.md` | spec | tasks | body-marker |
 
-### Unknown-status — triage needed (18)
+### Unknown-status — triage needed (19)
 
 | Path | Kind | Topic | Last Mod |
 |------|------|-------|----------|
@@ -84,6 +84,7 @@ scoped markdown files currently on disk.
 | `docs/superpowers/specs/2026-07-28-chat-queue-admission-design.md` | spec | chat-queue-admission-design | 2026-07-29 |
 | `docs/superpowers/specs/2026-07-28-incident-control-plane-design.md` | spec | incident-control-plane-design | 2026-07-28 |
 | `docs/superpowers/specs/2026-07-28-incident-ingestion-surface-design.md` | spec | incident-ingestion-surface-design | 2026-07-30 |
+| `docs/superpowers/specs/2026-07-29-incident-evaluator-core-design.md` | spec | incident-evaluator-core-design | 2026-07-31 |
 | `docs/superpowers/specs/2026-07-29-maybe-sent-ambiguity-episode-design.md` | spec | maybe-sent-ambiguity-episode-design | 2026-07-30 |
 | `docs/superpowers/specs/2026-07-29-portable-startup-notification-protocol-design.md` | spec | portable-startup-notification-protocol-design | 2026-07-30 |
 
@@ -206,7 +207,7 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 | `docs/superpowers/reviews/2026-07-09-wall-to-wall-audit-pr-briefs.md` | review | completed | body-marker | wall-to-wall-audit-pr-briefs | 2026-07-10 |  |
 | `docs/superpowers/reviews/2026-07-24-r13-r15-tech-debt-review-map.md` | review | completed | body-marker | r13-r15-tech-debt-review-map | 2026-07-24 |  |
 
-### docs/superpowers/specs  _(33 entries)_
+### docs/superpowers/specs  _(34 entries)_
 
 | Path | Kind | Status | Source | Topic | Last Mod | Supersedes |
 |------|------|--------|--------|-------|----------|------------|
@@ -240,6 +241,7 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 | `docs/superpowers/specs/2026-07-28-incident-ingestion-surface-design.md` | spec | unknown | body-marker | incident-ingestion-surface-design | 2026-07-30 |  |
 | `docs/superpowers/specs/2026-07-28-primary-probe-cancellation-design.md` | spec | completed | body-marker | primary-probe-cancellation-design | 2026-07-29 |  |
 | `docs/superpowers/specs/2026-07-28-runtime-health-signal-dispositions-design.md` | spec | active | body-marker | runtime-health-signal-dispositions-design | 2026-07-28 |  |
+| `docs/superpowers/specs/2026-07-29-incident-evaluator-core-design.md` | spec | unknown | body-marker | incident-evaluator-core-design | 2026-07-31 |  |
 | `docs/superpowers/specs/2026-07-29-launchd-restart-policy-2682-design.md` | spec | active | body-marker | launchd-restart-policy-2682-design | 2026-07-30 |  |
 | `docs/superpowers/specs/2026-07-29-maybe-sent-ambiguity-episode-design.md` | spec | unknown | fallback | maybe-sent-ambiguity-episode-design | 2026-07-30 |  |
 | `docs/superpowers/specs/2026-07-29-portable-startup-notification-protocol-design.md` | spec | unknown | body-marker | portable-startup-notification-protocol-design | 2026-07-30 |  |
@@ -263,4 +265,4 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 ---
 
 - Derived from `docs/work-index.json`
-- Generated at 2026-07-31T15:01:11Z from commit `50bbaa890337475ed19ea871ad3563f4e2e257b4`
+- Generated at 2026-07-31T16:21:44Z from commit `87f17666bce80d8b63ae64a211c25132b51dd49d`
