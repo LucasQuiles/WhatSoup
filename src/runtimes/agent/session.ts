@@ -92,9 +92,6 @@ export const MAX_STDOUT_LINE_BYTES = 16 * 1024 * 1024;
 function isOpenCodeDiagnosticLogLine(line: string): boolean {
   return /^timestamp=\S+\s+level=(?:TRACE|DEBUG|INFO|WARN|ERROR)\b/.test(line);
 }
-/** @deprecated Use WATCHDOG_SOFT_MS / WATCHDOG_HARD_MS instead. Kept for test backward-compat. */
-export const TURN_WATCHDOG_MS = 600_000;
-
 // ─── 3-tier watchdog ────────────────────────────────────────────────────────
 // Soft probes notify the user; hard kill terminates the process.
 // ALL tiers reset on any agent activity (tool_use, tool_result, assistant_text).
