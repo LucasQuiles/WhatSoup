@@ -21,7 +21,7 @@ import subprocess
 import sys
 import tempfile
 import time
-from typing import Any
+from typing import Any, NamedTuple
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
@@ -4836,28 +4836,143 @@ SUPPORT_WHATSOUP_SERVICE_NAMES = {
 }
 
 
-def active_whatsoup_service_names() -> set[str]:
-    dry_services = os.environ.get("BOT_ERRORS_DRY_ACTIVE_WHATSOUP_SERVICES")
-    if dry_services is not None:
-        return {
+class ServiceInventoryObservation(NamedTuple):
+    """Typed result of active-service discovery (#2486).
+
+    Replaces the bare ``set[str]`` return so that an observation failure
+    (missing binary, timeout, nonzero exit, malformed output, unsupported
+    platform) is distinguishable from a successful observation of zero
+    active services. ``names`` are private inputs to local comparison only
+    and must not enter fleet aggregate or daily-health receipts — only
+    status/backend/count/freshness are safe to expose.
+    """
+
+    status: str
+    backend: str
+    observed_count: int
+    observed_at: str
+    names: frozenset[str]
+    exit_code: int | None = None
+    error_class: str = ""
+
+
+def service_manager_backend() -> str:
+    """Return the canonical service-manager backend for this host (#2486).
+
+    macOS -> ``launchctl``; Linux (including WSL2, which ships systemd by
+    default) -> ``systemd``; anything else -> ``unsupported``. WSL must
+    never inherit the macOS ``launchctl`` branch. This resolver is the
+    single source of truth for which service manager owns active-service
+    discovery; per-service liveness checks should adopt the same contract.
+    """
+    if HOST_PLATFORM == "darwin":
+        return "launchctl"
+    if HOST_PLATFORM == "linux":
+        return "systemd"
+    return "unsupported"
+
+
+def observe_active_services() -> ServiceInventoryObservation:
+    """Discover active WhatSoup services and return a typed observation.
+
+    Fail-closed: any discovery failure (missing binary, timeout, nonzero
+    exit, malformed output, unsupported platform) yields a non-``observed``
+    status that the profile-coverage consumer must treat as non-green.
+    Service names are private to local comparison; only status/backend/
+    count/freshness enter receipts.
+    """
+    dry = os.environ.get("BOT_ERRORS_DRY_ACTIVE_WHATSOUP_SERVICES")
+    backend = os.environ.get("BOT_ERRORS_DRY_SERVICE_MANAGER") or service_manager_backend()
+    now = datetime.now(timezone.utc).isoformat()
+
+    def _observed(names: set[str]) -> ServiceInventoryObservation:
+        return ServiceInventoryObservation(
+            status="observed",
+            backend=backend,
+            observed_count=len(names),
+            observed_at=now,
+            names=frozenset(names),
+        )
+
+    if dry is not None:
+        return _observed({
             item.strip().removeprefix("com.whatsoup.")
-            for item in dry_services.split(",")
+            for item in dry.split(",")
             if item.strip()
-        }
-    if HOST_PLATFORM == "darwin" or is_wsl():
-        try:
-            proc = subprocess.run(
-                ["launchctl", "list"],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.DEVNULL,
-                text=True,
-                timeout=3,
-                check=False,
-            )
-        except (FileNotFoundError, subprocess.TimeoutExpired):
-            return set()
-        names: set[str] = set()
-        for line in proc.stdout.splitlines():
+        })
+
+    if backend == "unsupported":
+        return ServiceInventoryObservation(
+            status="unsupported",
+            backend=backend,
+            observed_count=0,
+            observed_at=now,
+            names=frozenset(),
+            error_class="no_service_manager_for_platform",
+        )
+
+    if backend == "launchctl":
+        cmd: list[str] = ["launchctl", "list"]
+    else:
+        cmd = [
+            "systemctl", "--user", "list-units", "--type=service",
+            "--state=running", "--no-legend",
+        ]
+
+    try:
+        proc = subprocess.run(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            timeout=3,
+            check=False,
+        )
+    except FileNotFoundError:
+        return ServiceInventoryObservation(
+            status="unavailable",
+            backend=backend,
+            observed_count=0,
+            observed_at=now,
+            names=frozenset(),
+            error_class="binary_not_found",
+        )
+    except subprocess.TimeoutExpired:
+        return ServiceInventoryObservation(
+            status="timeout",
+            backend=backend,
+            observed_count=0,
+            observed_at=now,
+            names=frozenset(),
+            error_class="discovery_timeout_3s",
+        )
+
+    if proc.returncode != 0:
+        return ServiceInventoryObservation(
+            status="command_failed",
+            backend=backend,
+            observed_count=0,
+            observed_at=now,
+            names=frozenset(),
+            exit_code=proc.returncode,
+            error_class="nonzero_exit",
+        )
+
+    # Detect binary/corrupted output (null bytes or control chars in the
+    # stdout stream) — a bounded malformed classification (#2486).
+    if "\x00" in proc.stdout or any(ord(c) < 9 and c not in "\n\r\t" for c in proc.stdout):
+        return ServiceInventoryObservation(
+            status="malformed",
+            backend=backend,
+            observed_count=0,
+            observed_at=now,
+            names=frozenset(),
+            error_class="binary_or_control_chars_in_output",
+        )
+
+    names: set[str] = set()
+    for line in proc.stdout.splitlines():
+        if backend == "launchctl":
             parts = line.split()
             if len(parts) < 3:
                 continue
@@ -4865,29 +4980,32 @@ def active_whatsoup_service_names() -> set[str]:
             if pid == "-" or not label.startswith("com.whatsoup."):
                 continue
             names.add(label.removeprefix("com.whatsoup."))
-        return names
-    try:
-        proc = subprocess.run(
-            ["systemctl", "--user", "list-units", "--type=service", "--state=running", "--no-legend"],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            text=True,
-            timeout=3,
-            check=False,
-        )
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        return set()
-    names = set()
-    for line in proc.stdout.splitlines():
-        unit = line.split(maxsplit=1)[0] if line.split() else ""
-        if unit.startswith("whatsoup@") and unit.endswith(".service"):
-            names.add(unit.removeprefix("whatsoup@").removesuffix(".service"))
-    return names
+        else:
+            tokens = line.split()
+            unit = tokens[0] if tokens else ""
+            if unit.startswith("whatsoup@") and unit.endswith(".service"):
+                names.add(unit.removeprefix("whatsoup@").removesuffix(".service"))
+
+    return _observed(names)
 
 
 def unprofiled_service_inventory(root: Path, expected_names: set[str]) -> list[str]:
     lines: list[str] = []
-    for name in sorted(active_whatsoup_service_names()):
+    obs = observe_active_services()
+    if obs.status != "observed":
+        # Fail-closed (#2486): an unavailable, timed-out, failed, malformed,
+        # or unsupported inventory must NOT authorize a zero-service
+        # conclusion. Emit a metadata-only FAIL line carrying status/backend/
+        # count/freshness — no service names, host, account, or secrets.
+        detail = f" exit_code={obs.exit_code}" if obs.exit_code is not None else ""
+        detail += f" error_class={obs.error_class}" if obs.error_class else ""
+        lines.append(
+            f"FAIL profile_coverage_observation status={obs.status} "
+            f"backend={obs.backend} observed_count={obs.observed_count} "
+            f"observed_at={obs.observed_at}{detail}"
+        )
+        return lines
+    for name in sorted(obs.names):
         if name in expected_names:
             continue
         if (

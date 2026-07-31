@@ -138,7 +138,7 @@
         "BOT_ERRORS_HEALTH_BODY_MAX_FUTURE_SKEW_SECONDS"
       ],
       "path": "deploy/scripts/bot-errors-health-check.py",
-      "sha256": "b0fa953daa848b0d745b113fc79c64b47702737d22754cf175525363c1028aa6"
+      "sha256": "36449b097bdcfdcdd1b4b1a0464ee778a5e5ccdabf26554de7ed12d0534635c9"
     },
     {
       "mustContain": [
