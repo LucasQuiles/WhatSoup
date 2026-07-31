@@ -102,6 +102,159 @@ describe('database retention', () => {
     expect(columnValues('fact_export_queue', 'fact_id')).toEqual(['fact-young']);
   });
 
+  it('keeps unacknowledged ambiguous and legacy quarantines until reviewed', () => {
+    const insert = db.raw.prepare(`
+      INSERT INTO outbound_ops (
+        conversation_key, chat_jid, op_type, payload, status, created_at,
+        quarantined_at, quarantine_disposition, quarantine_evidence_coverage
+      ) VALUES (?, 'chat@g.us', 'send_message', '{}', 'quarantined',
+                datetime('now', '-365 days'), datetime('now', ?), ?, ?)
+    `);
+    insert.run(
+      'retain-ambiguous',
+      '-40 days',
+      'delivery_ambiguous_unsafe',
+      'complete',
+    );
+    insert.run(
+      'retain-legacy',
+      '-40 days',
+      'legacy_unclassified',
+      'legacy_unclassified',
+    );
+    insert.run(
+      'retain-unreconstructable',
+      '-40 days',
+      'record_unreconstructable',
+      'complete',
+    );
+    insert.run(
+      'delete-not-attempted',
+      '-40 days',
+      'delivery_not_attempted',
+      'complete',
+    );
+    insert.run(
+      'delete-old-ambiguous',
+      '-91 days',
+      'delivery_ambiguous_unsafe',
+      'complete',
+    );
+
+    const result = runDatabaseRetention(db, {
+      ...DEFAULT_DATABASE_RETENTION,
+      terminalDurabilityDays: 30,
+    });
+
+    expect(result.outboundOps).toBe(1);
+    expect(columnValues('outbound_ops', 'conversation_key')).toEqual([
+      'delete-old-ambiguous',
+      'retain-ambiguous',
+      'retain-legacy',
+      'retain-unreconstructable',
+    ]);
+  });
+
+  it('ages quarantines from their containment transition and keeps unknown or reviewed ambiguity conservatively', () => {
+    const insert = db.raw.prepare(`
+      INSERT INTO outbound_ops (
+        conversation_key, chat_jid, op_type, payload, status, created_at,
+        quarantined_at, quarantine_disposition, quarantine_evidence_coverage
+      ) VALUES (?, 'chat@g.us', 'send_message', '{}', ?, datetime('now', ?),
+                datetime('now', ?), ?, ?)
+    `);
+    insert.run(
+      'keep-ambiguous', 'quarantined', '-365 days', '-40 days',
+      'delivery_ambiguous_unsafe', 'complete',
+    );
+    insert.run(
+      'keep-unknown', 'quarantined', '-365 days', '-40 days',
+      'future-private-disposition', 'legacy_unclassified',
+    );
+    insert.run(
+      'keep-new-standard', 'quarantined', '-365 days', '-1 day',
+      'delivery_not_attempted', 'complete',
+    );
+    insert.run(
+      'keep-unreviewed-reconstruction', 'quarantined', '-365 days', '-40 days',
+      'record_unreconstructable', 'complete',
+    );
+    const retiredAmbiguous = insert.run(
+      'keep-reviewed-ambiguity', 'failed_permanent', '-365 days', '-40 days',
+      'delivery_ambiguous_unsafe', 'complete',
+    ).lastInsertRowid;
+    db.raw.prepare(`
+      UPDATE outbound_ops
+         SET quarantine_evidence_sha256 = ?
+       WHERE id = ?
+    `).run('0'.repeat(64), retiredAmbiguous);
+    db.raw.prepare(`
+      INSERT INTO outbound_quarantine_retirements (
+        outbound_op_id, quarantine_disposition, acknowledgement, evidence_sha256
+      ) VALUES (?, 'delivery_ambiguous_unsafe', 'delivery-risk-reviewed', ?)
+    `).run(retiredAmbiguous, '0'.repeat(64));
+    const expiredRetiredAmbiguous = insert.run(
+      'delete-reviewed-ambiguity', 'failed_permanent', '-365 days', '-91 days',
+      'delivery_ambiguous_unsafe', 'complete',
+    ).lastInsertRowid;
+    db.raw.prepare(`
+      UPDATE outbound_ops
+         SET quarantine_evidence_sha256 = ?
+       WHERE id = ?
+    `).run('1'.repeat(64), expiredRetiredAmbiguous);
+    db.raw.prepare(`
+      INSERT INTO outbound_quarantine_retirements (
+        outbound_op_id, quarantine_disposition, acknowledgement, evidence_sha256
+      ) VALUES (?, 'delivery_ambiguous_unsafe', 'delivery-risk-reviewed', ?)
+    `).run(expiredRetiredAmbiguous, '1'.repeat(64));
+    const expiredRetiredReconstruction = insert.run(
+      'delete-reviewed-reconstruction', 'failed_permanent', '-365 days', '-31 days',
+      'record_unreconstructable', 'complete',
+    ).lastInsertRowid;
+    db.raw.prepare(`
+      UPDATE outbound_ops
+         SET quarantine_evidence_sha256 = ?
+       WHERE id = ?
+    `).run('2'.repeat(64), expiredRetiredReconstruction);
+    db.raw.prepare(`
+      INSERT INTO outbound_quarantine_retirements (
+        outbound_op_id, quarantine_disposition, acknowledgement, evidence_sha256
+      ) VALUES (?, 'record_unreconstructable', 'record-reconstruction-reviewed', ?)
+    `).run(expiredRetiredReconstruction, '2'.repeat(64));
+    insert.run(
+      'delete-expired-standard', 'quarantined', '-365 days', '-31 days',
+      'stale_status_discarded', 'complete',
+    );
+    insert.run(
+      'delete-ordinary-failed', 'failed_permanent', '-40 days', '-40 days',
+      'legacy_unclassified', 'legacy_unclassified',
+    );
+    db.raw.prepare(`
+      UPDATE outbound_ops
+         SET quarantined_at = NULL
+       WHERE conversation_key = 'delete-ordinary-failed'
+    `).run();
+    insert.run(
+      'keep-unreviewed-terminal', 'failed_permanent', '-365 days', '-91 days',
+      'delivery_ambiguous_unsafe', 'complete',
+    );
+
+    const result = runDatabaseRetention(db, {
+      ...DEFAULT_DATABASE_RETENTION,
+      terminalDurabilityDays: 30,
+    });
+
+    expect(result.outboundOps).toBe(4);
+    expect(columnValues('outbound_ops', 'conversation_key')).toEqual([
+      'keep-ambiguous',
+      'keep-new-standard',
+      'keep-reviewed-ambiguity',
+      'keep-unknown',
+      'keep-unreviewed-reconstruction',
+      'keep-unreviewed-terminal',
+    ]);
+  });
+
   // #1445 QR-012: messages/receipts retention unification. `messages` was
   // pruned via a standalone main.ts setInterval calling deleteOldMessages()
   // directly, entirely outside this module's sweep. This folds that prune

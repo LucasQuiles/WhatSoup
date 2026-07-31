@@ -597,7 +597,13 @@ export function buildBotErrorsEvent(input: BotErrorsOutboxInput, eventId = rando
 export function writeBotErrorsEvent(input: BotErrorsOutboxInput): BotErrorsOutboxWrite {
   const outbox = botErrorsOutboxDir();
   const event = buildBotErrorsEvent(input);
-  const created = event.createdAt.replace(/[-:]/g, '').replace(/\.\d{3}Z$/, 'Z');
+  // Preserve milliseconds while sorting *after* old same-second names, which
+  // ended at `...SSZ.<instance>`. `_` sorts after that separator and keeps
+  // new fractional timestamps lexical within their second.
+  const fractionalTimestamp = event.createdAt.match(/^(.*)\.(\d{3})Z$/);
+  const created = fractionalTimestamp
+    ? `${fractionalTimestamp[1]!.replace(/[-:]/g, '')}Z_${fractionalTimestamp[2]}`
+    : event.createdAt.replace(/[-:]/g, '');
   const fileName = `${created}.${safeSegment(event.instance)}.${safeSegment(event.source)}.${event.id}.json`;
   const finalPath = join(outbox, fileName);
   const tmpPath = join(outbox, `.${fileName}.${process.pid}.tmp`);

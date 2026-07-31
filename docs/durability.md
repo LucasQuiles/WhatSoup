@@ -329,8 +329,8 @@ that re-sends them. It is wired in two places (`main.ts`):
 For each op in `status='pending'`:
 
 - **Stale status ping past TTL** — an `op_type === 'status_ping'` op whose `created_at` is
-  older than `STATUS_OP_TTL_MS` (30 min): `markQuarantined()` + an `outbound_quarantined`
-  alert (`reason=status_op_ttl_expired`), never re-sent. A "back online" notice this old is
+  older than `STATUS_OP_TTL_MS` (30 min): `markQuarantined()` with disposition
+  `stale_status_discarded` + an `outbound_status_discarded` info alert, never re-sent. A "back online" notice this old is
   stale misinformation, so dropping it is correct. Checked **before** `markSending`, and
   strictly gated on `op_type === 'status_ping'` — `text` ops have no age gate.
 - **Reconstructable text op** — `op_type === 'text'` or `'status_ping'` and `payload` parses
@@ -341,8 +341,8 @@ For each op in `status='pending'`:
   a definitive rejection becomes `failed_permanent`, and a new positive producer floor
   returns to deferred `pending` (no inline retry / tight-loop).
 - **Non-reconstructable op** — unknown `op_type`, or a `text`/`status_ping` op whose payload
-  does not parse to `{ text }`: `markQuarantined()` + an `outbound_quarantined` alert
-  (`reason=pending_replay_unreconstructable`). These are **not** left `pending` forever —
+  does not parse to `{ text }`: `markQuarantined()` with disposition
+  `record_unreconstructable` + an `outbound_record_unreconstructable` warning. These are **not** left `pending` forever —
   doing so would reintroduce the original silent-drop bug for non-text ops.
 
 One failing op never aborts the rest of the drain. The function returns
@@ -489,7 +489,24 @@ assumptions of the current recovery-job schema.
 
 ### 5.1 Quarantined Ops
 
-An op is quarantined when it is `unsafe` to replay — specifically, when its delivery status is ambiguous (`maybe_sent`) and re-sending it would create a visible duplicate for the recipient.
+`quarantined` is a terminal containment state, not a universal claim that a message was lost.
+Each transition stores a bounded `quarantine_disposition` and coverage value separately from the
+versioned failure-evidence payload:
+
+| Disposition | Provider-send conclusion | Alert source | Retention and clear policy |
+|---|---|---|---|
+| `delivery_ambiguous_unsafe` | A provider call may have happened; automatic replay remains disabled. | `outbound_delivery_ambiguous` (critical) | Retained until a reviewed retirement is recorded; its reviewed receipt then has an extended window (at least 90 days). Recovery clears only after proof and no unresolved contributor. |
+| `delivery_not_attempted` | Evidence proves no provider submission. | `outbound_delivery_not_attempted` (warning) | Standard terminal window; recovery clears after proof and no contributor. |
+| `record_unreconstructable` | Evidence proves no provider submission, but the original operation cannot be rebuilt. | `outbound_record_unreconstructable` (warning) | Retained until reviewed retirement; after its matching receipt, the standard terminal window applies. |
+| `stale_status_discarded` | Evidence proves a stale status notice was discarded before send. | `outbound_status_discarded` (info) | Standard terminal window; this is an observation, not an incident source to clear. |
+| `legacy_unclassified` | Historic or malformed evidence cannot prove a delivery outcome. | `outbound_quarantine_unclassified` (warning) | Retained for reviewed repair; it is never auto-expired as a resolved delivery outcome. |
+
+The authenticated health response exposes exact, content-free counts at
+`durability.outboundQuarantineDispositions`; `quarantinedOutbound` remains a coarse compatibility
+count. Neither view contains payloads, destinations, message IDs, or raw provider errors.
+
+A retirement receipt is accepted only when its bounded digest matches the immutable canonical
+digest stored when that quarantine was created. This does not expose the evidence payload.
 
 Quarantined ops require read-only inspection and evidence-backed resolution. A standalone
 quarantined op does not globally stop the bot. A quarantined selected delivery in a `pending` or
@@ -498,38 +515,39 @@ and `exhausted` jobs no longer block admission. Both remain retained and health-
 operator action; `blocked_unsafe` is informational by itself, while exhausted retry work degrades
 audit health until operator resolution.
 
-**To inspect quarantined ops:**
+**To inspect quarantined ops without exposing message content:**
 
 ```sql
--- All quarantined outbound ops with their source context
+-- Exact aggregate taxonomy; no payload, destination, identifier, or raw error.
 SELECT
-  o.id,
-  o.conversation_key,
-  o.op_type,
-  o.payload_hash,
-  o.wa_message_id,
-  o.submitted_at,
-  o.ambiguity_at,
-  o.error,
-  o.source_inbound_seq,
-  i.processing_status AS inbound_status,
-  t.id AS terminal_record_id,
-  j.id AS recovery_job_id,
-  j.state AS recovery_state
-FROM outbound_ops o
-LEFT JOIN inbound_events i ON i.seq = o.source_inbound_seq
-LEFT JOIN turn_terminal_records t ON t.delivery_op_id = o.id
-LEFT JOIN turn_recovery_jobs j ON j.terminal_record_id = t.id
-WHERE o.status = 'quarantined'
-ORDER BY o.id DESC;
+  CASE quarantine_disposition
+    WHEN 'delivery_ambiguous_unsafe' THEN 'delivery_ambiguous_unsafe'
+    WHEN 'delivery_not_attempted' THEN 'delivery_not_attempted'
+    WHEN 'record_unreconstructable' THEN 'record_unreconstructable'
+    WHEN 'stale_status_discarded' THEN 'stale_status_discarded'
+    ELSE 'legacy_unclassified'
+  END AS disposition,
+  CASE quarantine_evidence_coverage
+    WHEN 'complete' THEN 'complete'
+    WHEN 'partial' THEN 'partial'
+    ELSE 'legacy_unclassified'
+  END AS evidence_coverage,
+  COUNT(*) AS count
+FROM outbound_ops
+WHERE status = 'quarantined'
+GROUP BY 1, 2
+ORDER BY count DESC, disposition;
 ```
 
 Do not resolve this by directly updating `outbound_ops` or deleting/updating linked terminal and
 recovery rows. Such writes bypass terminal CAS, exact source settlement, completion proof,
 reply-guarantee disarm, and late-echo conflict handling; a fabricated `echoed` status is not
-transport evidence. Back up the database, preserve the query result, and use an audited
-application recovery path. If the deployed build has no supported resolver for the required
-operator decision, leave the chain intact for a reviewed repair.
+transport evidence. The supported retirement command first returns only a bounded evidence digest;
+an apply requires that exact digest, a matching disposition, and the disposition's fixed review
+acknowledgement. It writes a bounded receipt in `outbound_quarantine_retirements`, keeps the
+versioned evidence byte-for-byte, and creates an owner-only private backup without reporting its
+path. It never replays an op or clears a BOT ERRORS source; the runtime recovery gate is the clear
+authority after its own delivery proof and contributor checks.
 
 ### 5.2 Quarantined Tool Calls
 

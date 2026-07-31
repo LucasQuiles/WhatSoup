@@ -86,7 +86,7 @@ export function getTransactionRunner(db: Database): TransactionRunner {
       return result;
     } catch (err) {
       if (opened) {
-        try { rollback.run(); } catch { /* best-effort rollback */ }
+        try { rollback.run(); } catch { /* intentional: rollback failure must not replace the transaction callback error */ }
       }
       throw err;
     }
@@ -97,4 +97,54 @@ export function getTransactionRunner(db: Database): TransactionRunner {
 
 export function withTransaction<T>(db: Database, fn: () => T): T {
   return getTransactionRunner(db)(fn);
+}
+
+/**
+ * Run a top-level transaction with SQLite's single-writer reservation held
+ * before its callback reads a check-then-act predicate. It deliberately
+ * rejects nesting: a deferred outer transaction cannot be safely upgraded to
+ * this lock level, and callers needing this guarantee must fail closed.
+ *
+ * Statements are cached per-Database via a WeakMap (same pattern as
+ * getTransactionRunner) so repeat calls reuse the prepared BEGIN IMMEDIATE /
+ * COMMIT / ROLLBACK rather than preparing them on every invocation.
+ */
+const immediateTransactionRunners = new WeakMap<Database, ImmediateTransactionRunner>();
+
+/** Immediate (BEGIN IMMEDIATE) variant of TransactionRunner. */
+export type ImmediateTransactionRunner = <T>(fn: () => T) => T;
+
+export function getImmediateTransactionRunner(db: Database): ImmediateTransactionRunner {
+  const cached = immediateTransactionRunners.get(db);
+  if (cached) return cached;
+
+  const begin = db.raw.prepare('BEGIN IMMEDIATE');
+  const commit = db.raw.prepare('COMMIT');
+  const rollback = db.raw.prepare('ROLLBACK');
+
+  const runner = <T>(fn: () => T): T => {
+    if (db.raw.isTransaction) {
+      throw new Error('Immediate transaction requires a top-level database connection');
+    }
+    begin.run();
+    let opened = true;
+    try {
+      const result = fn();
+      commit.run();
+      opened = false;
+      return result;
+    } catch (err) {
+      if (opened) {
+        try { rollback.run(); } catch { /* intentional: rollback failure must not replace the transaction callback error */ }
+      }
+      throw err;
+    }
+  };
+
+  immediateTransactionRunners.set(db, runner);
+  return runner;
+}
+
+export function withImmediateTransaction<T>(db: Database, fn: () => T): T {
+  return getImmediateTransactionRunner(db)(fn);
 }

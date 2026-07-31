@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { Database } from '../../src/core/database.ts';
 import { DurabilityEngine, sendTracked } from '../../src/core/durability.ts';
 import type { OutboundOpParams } from '../../src/core/durability.ts';
+import { createInternalOutboundFailureEvidence } from '../../src/core/outbound-failure-disposition.ts';
 
 const BASE_OP: OutboundOpParams = {
   conversationKey: 'key-1',
@@ -294,6 +295,64 @@ describe('DurabilityEngine', () => {
       const serialized = JSON.stringify(projection);
       expect(serialized).not.toContain('private');
       expect(projection.groups.length).toBeLessThanOrEqual(20);
+    });
+
+    it('projects exact quarantine dispositions with closed taxonomy values only', () => {
+      const reconstructable = engine.createOutboundOp({
+        conversationKey: 'private-quarantine-conversation',
+        chatJid: 'private-quarantine-destination',
+        opType: 'media',
+        payload: '{"private":"payload"}',
+        replayPolicy: 'unsafe',
+      });
+      engine.markQuarantined(reconstructable, createInternalOutboundFailureEvidence({
+        failureCode: 'outbound.pending_replay_unreconstructable',
+        stage: 'admission',
+        mutationState: 'not_started',
+        providerSubmissionCount: 0,
+        evidenceCoverage: 'complete',
+      }));
+
+      const malformed = engine.createOutboundOp({
+        conversationKey: 'private-legacy-conversation',
+        chatJid: 'private-legacy-destination',
+        opType: 'text',
+        payload: '{"private":"legacy"}',
+        replayPolicy: 'unsafe',
+      });
+      engine.markQuarantined(malformed);
+      db.raw.prepare(
+        `UPDATE outbound_ops
+         SET quarantine_disposition = 'private-untrusted-disposition',
+             quarantine_evidence_coverage = 'private-untrusted-coverage'
+         WHERE id = ?`,
+      ).run(malformed);
+
+      const untrustedStatus = engine.createOutboundOp(BASE_OP);
+      db.raw.prepare(
+        "UPDATE outbound_ops SET status = 'private-untrusted-status', error = 'private-untrusted-error' WHERE id = ?",
+      ).run(untrustedStatus);
+
+      const stats = engine.getHealthStats();
+      expect(stats.outboundQuarantineDispositions).toEqual({
+        total: 2,
+        groups: [
+          {
+            disposition: 'legacy_unclassified',
+            evidenceCoverage: 'legacy_unclassified',
+            count: 1,
+          },
+          {
+            disposition: 'record_unreconstructable',
+            evidenceCoverage: 'complete',
+            count: 1,
+          },
+        ],
+      });
+      expect(stats.outboundFailureEvidence.groups).toContainEqual(
+        expect.objectContaining({ terminalState: 'unknown' }),
+      );
+      expect(JSON.stringify(stats)).not.toContain('private-');
     });
 
     it('fails closed on a send that failed before markSubmitted: null submitted_at ages from its ambiguity episode (PRESTAGE-T4)', () => {

@@ -522,6 +522,7 @@ afterEach(() => {
   delete process.env['BOT_ERRORS_OUTBOX_DIR'];
   delete process.env['BOT_ERRORS_WRITEFAIL_DIR'];
   delete process.env['BOT_ERRORS_STATE_DIR'];
+  delete process.env['WHATSOUP_ALERT_SINK'];
   delete process.env['BOT_ERRORS_REQUIRE_EXPECTED'];
   delete process.env['EMIT_ALERT_THROTTLE_MS'];
 });
@@ -1457,6 +1458,31 @@ describe('clearAlertSource', () => {
       instance: 'whatsoup-prod',
       source: 'agent_respawn_failed',
     });
+  });
+
+  it('requires an outbox-backed clear when causal ordering is mandatory', () => {
+    const sinkPath = join(outboxDir, 'dry-run-capture.jsonl');
+    process.env['WHATSOUP_ALERT_SINK'] = sinkPath;
+
+    expect(clearAlertSourceChecked(
+      'whatsoup-prod',
+      'outbound_delivery_ambiguous',
+      undefined,
+      undefined,
+      { requireDurableOutbox: true },
+    )).toBe(true);
+    expect(readdirSync(outboxDir).filter((file) => file.endsWith('.json'))).toHaveLength(1);
+    expect(() => readFileSync(sinkPath, 'utf8')).toThrow();
+
+    process.env['BOT_ERRORS_OUTBOX_DIR'] = '/dev/null/outbox';
+    expect(clearAlertSourceChecked(
+      'whatsoup-prod',
+      'outbound_delivery_ambiguous',
+      undefined,
+      undefined,
+      { requireDurableOutbox: true },
+    )).toBe(false);
+    expect(spawn).not.toHaveBeenCalled();
   });
 
   it('returns a failed result when both clear outbox and legacy helper fail', () => {
