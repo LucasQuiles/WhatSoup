@@ -7,6 +7,9 @@ import {
 } from './turn-finalizer.ts';
 import type { RuntimeTurnContext } from './runtime-turn-context.ts';
 import type { AttemptOutcome } from './turn-terminal.ts';
+import { createChildLogger } from '../../logger.ts';
+
+const log = createChildLogger('agent-runtime-turn-supervisor');
 
 const MAX_RETAINED_FINALIZATIONS = 128;
 const MAX_AUTOMATIC_RETRY_ATTEMPTS = 5;
@@ -88,7 +91,7 @@ function createRecoveryWaiter(): RecoveryWaiter {
     resolve = resolvePromise;
     reject = rejectPromise;
   });
-  void promise.catch(() => {});
+  void promise.catch((err) => log.debug({ err }, 'turn-supervisor: recovery waiter rejected (consumed by its awaiting turn; barrier only)'));
   return { promise, resolve, reject };
 }
 
@@ -341,9 +344,8 @@ export class RuntimeTurnSupervisor<TPostEffects> {
     ) return;
     this.retryTimer = setTimeout(() => {
       this.retryTimer = null;
-      void this.retryAll().catch(() => {
-        // runRetries contains failures per retained record. This final catch is
-        // only a last-resort rejection barrier for the timer callback.
+      void this.retryAll().catch((err) => {
+        log.warn({ err }, 'turn-supervisor: retry-all timer callback rejected');
       });
     }, RETRY_DELAY_MS);
     this.retryTimer.unref?.();

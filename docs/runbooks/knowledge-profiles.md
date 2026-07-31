@@ -144,7 +144,7 @@ host. Declare a custom profile with the same index name to override.
    - Preferred: `security add-generic-password -s pinecone -a <username> -w <key>` at a GUI session.
    - Interim (SSH-only hosts): write key to `~/.config/pinecone/api_key` (mode 600) and inject via plist `bash -c "export PINECONE_API_KEY=$(cat $HOME/.config/pinecone/api_key); exec ..."`.
 5. Add `expectedHostSuffix` and `allowedIndexes` + `knowledgeProfiles` to `config.json`.
-6. Restart the bot and verify `pineconeReadiness: "READY"` in `/health`.
+6. Restart the bot and, with the health bearer token, verify `memory.readiness.state` in the authenticated `/health` diagnostic.
 
 ---
 

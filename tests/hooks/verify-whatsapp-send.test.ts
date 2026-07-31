@@ -151,15 +151,17 @@ afterEach(async () => {
 });
 
 describe('verify-whatsapp-send hook', () => {
-  it('confirms successful sends through read_outbound_sends without reporting', async () => {
+  const auditReceipt = '0123456789abcdef0123456789abcdef';
+
+  it('confirms the exact successful receipt without destination fallback', async () => {
     const home = makeTempDir('rgp-send-verify-home-');
     const server = await startMockServer(mcpHandler({
       outbound_sends: [{
         id: 42,
-        chat_jid: 'chat@g.us',
-        status: 'sent',
+        audit_receipt: auditReceipt,
+        outcome_code: 'submitted',
         created_at: new Date().toISOString(),
-        sent_at: new Date().toISOString(),
+        completed_at: new Date().toISOString(),
       }],
     }));
 
@@ -168,7 +170,12 @@ describe('verify-whatsapp-send hook', () => {
       hook_event_name: 'PostToolUse',
       tool_name: 'mcp__whatsoup__send_message',
       tool_input: { chatJid: 'chat@g.us', text: 'hello' },
-      tool_response: { content: [{ type: 'text', text: 'sent' }] },
+      tool_response: {
+        content: [{
+          type: 'text',
+          text: JSON.stringify({ sent: true, audit_receipt: auditReceipt }),
+        }],
+      },
     }, hookEnv(home, server.socketPath));
 
     expect(result.status).toBe(0);
@@ -176,10 +183,45 @@ describe('verify-whatsapp-send hook', () => {
     expect(readHookJsonl(join(sessionDir(home, 'session-a'), 'send-verification.jsonl'))).toEqual([]);
     expect(server.received.map((request) => request.method)).toEqual(['initialize', 'tools/call']);
     expect(server.received[1].params?.name).toBe('read_outbound_sends');
-    expect(server.received[1].params?.arguments).toEqual({ limit: 25, chatJid: 'chat@g.us' });
+    expect(server.received[1].params?.arguments).toEqual({ limit: 25, auditReceipt });
   });
 
-  it('reports an unverified send once per session/tool/chat', async () => {
+  it('verifies a successful receipt when the sent text contains failure words', async () => {
+    const home = makeTempDir('rgp-send-verify-home-');
+    const server = await startMockServer(mcpHandler({
+      outbound_sends: [{
+        audit_receipt: auditReceipt,
+        outcome_code: 'submitted',
+        created_at: new Date().toISOString(),
+        completed_at: new Date().toISOString(),
+      }],
+    }));
+
+    const result = await runHook({
+      session_id: 'session-failure-words',
+      hook_event_name: 'PostToolUse',
+      tool_name: 'mcp__whatsoup__send_message',
+      tool_response: {
+        content: [{
+          type: 'text',
+          text: JSON.stringify({
+            sent: true,
+            text: 'error: the previous attempt failed with invalid parameters and EACCES/ENOENT',
+            audit_receipt: auditReceipt,
+          }),
+        }],
+      },
+    }, hookEnv(home, server.socketPath));
+
+    expect(result.status).toBe(0);
+    expect(result.stderr).toBe('');
+    expect(server.received.map((request) => request.method)).toEqual(['initialize', 'tools/call']);
+    expect(readHookJsonl(
+      join(sessionDir(home, 'session-failure-words'), 'verify-whatsapp-send.log'),
+    ).at(-1)).toMatchObject({ event: 'verified', auditReceipt });
+  });
+
+  it('reports an unverified send once per session/tool/receipt without raw destination', async () => {
     const home = makeTempDir('rgp-send-verify-home-');
     const server = await startMockServer(mcpHandler({ outbound_sends: [] }));
     const payload = {
@@ -187,7 +229,12 @@ describe('verify-whatsapp-send hook', () => {
       hook_event_name: 'PostToolUse',
       tool_name: 'mcp__whatsoup__send_message',
       tool_input: { chatJid: 'chat@g.us', text: 'hello' },
-      tool_response: { content: [{ type: 'text', text: 'sent' }] },
+      tool_response: {
+        content: [{
+          type: 'text',
+          text: JSON.stringify({ sent: true, audit_receipt: auditReceipt }),
+        }],
+      },
     };
     const env = hookEnv(home, server.socketPath);
 
@@ -204,13 +251,78 @@ describe('verify-whatsapp-send hook', () => {
       event: 'send-unverified',
       sessionId: 'session-b',
       toolName: 'mcp__whatsoup__send_message',
-      chatJid: 'chat@g.us',
+      auditReceipt,
       instance: 'ana-bot',
       reason: 'no outbound_sends rows returned',
     });
+    expect(JSON.stringify(entries)).not.toContain('chat@g.us');
   });
 
-  it('degrades softly when read_outbound_sends fails', async () => {
+  it('skips reply_message because it has no audit receipt contract', async () => {
+    const home = makeTempDir('rgp-send-verify-home-');
+    const server = await startMockServer(mcpHandler({ outbound_sends: [] }));
+
+    const result = await runHook({
+      session_id: 'session-c',
+      hook_event_name: 'PostToolUse',
+      tool_name: 'mcp__whatsoup__reply_message',
+      tool_input: { chatJid: 'chat@g.us', replyTo: 'msg-1', text: 'hello' },
+      tool_response: { content: [{ type: 'text', text: JSON.stringify({ sent: true }) }] },
+    }, hookEnv(home, server.socketPath));
+
+    expect(result.status).toBe(0);
+    expect(result.stderr).toBe('');
+    expect(server.received).toEqual([]);
+    expect(readHookJsonl(join(sessionDir(home, 'session-c'), 'verify-whatsapp-send.log')).at(-1))
+      .toMatchObject({
+        event: 'skip',
+        reason: 'audit-receipt-unavailable',
+        toolName: 'mcp__whatsoup__reply_message',
+      });
+  });
+
+  it('rejects mismatched or ambiguous rows for the requested receipt', async () => {
+    const home = makeTempDir('rgp-send-verify-home-');
+    const server = await startMockServer(mcpHandler({
+      outbound_sends: [
+        {
+          audit_receipt: 'ffffffffffffffffffffffffffffffff',
+          outcome_code: 'submitted',
+          completed_at: new Date().toISOString(),
+        },
+        {
+          audit_receipt: auditReceipt,
+          outcome_code: 'ambiguous',
+          completed_at: new Date().toISOString(),
+        },
+      ],
+    }));
+
+    const result = await runHook({
+      session_id: 'session-d',
+      hook_event_name: 'PostToolUse',
+      tool_name: 'mcp__whatsoup__send_message',
+      tool_input: { chatJid: 'chat@g.us', text: 'hello' },
+      tool_response: {
+        content: [{
+          type: 'text',
+          text: JSON.stringify({ sent: true, audit_receipt: auditReceipt }),
+        }],
+      },
+    }, hookEnv(home, server.socketPath));
+
+    expect(result.status).toBe(0);
+    expect(result.stderr).toContain('could not confirm');
+    expect(readHookJsonl(join(sessionDir(home, 'session-d'), 'send-verification.jsonl')))
+      .toEqual([
+        expect.objectContaining({
+          auditReceipt,
+          reason: 'no recent successful outbound_sends receipt matched',
+        }),
+      ]);
+  });
+
+  it('degrades softly without leaking MCP errors when receipt lookup fails', async () => {
     const home = makeTempDir('rgp-send-verify-home-');
     const server = await startMockServer((request) => {
       if (request.method === 'initialize') return { jsonrpc: '2.0', id: request.id, result: {} };
@@ -220,9 +332,14 @@ describe('verify-whatsapp-send hook', () => {
     const result = await runHook({
       session_id: 'session-c',
       hook_event_name: 'PostToolUse',
-      tool_name: 'mcp__whatsoup__reply_message',
-      tool_input: { chatJid: 'chat@g.us', replyTo: 'msg-1', text: 'hello' },
-      tool_response: { content: [{ type: 'text', text: 'sent' }] },
+      tool_name: 'mcp__whatsoup__send_message',
+      tool_input: { chatJid: 'chat@g.us', text: 'hello' },
+      tool_response: {
+        content: [{
+          type: 'text',
+          text: JSON.stringify({ sent: true, audit_receipt: auditReceipt }),
+        }],
+      },
     }, hookEnv(home, server.socketPath));
 
     expect(result.status).toBe(0);
@@ -230,8 +347,11 @@ describe('verify-whatsapp-send hook', () => {
     expect(readHookJsonl(join(sessionDir(home, 'session-c'), 'send-verification.jsonl'))).toEqual([]);
     expect(readHookJsonl(join(sessionDir(home, 'session-c'), 'verify-whatsapp-send.log')).at(-1)).toMatchObject({
       event: 'read-failed',
-      toolName: 'mcp__whatsoup__reply_message',
-      chatJid: 'chat@g.us',
+      toolName: 'mcp__whatsoup__send_message',
+      auditReceipt,
     });
+    expect(JSON.stringify(readHookJsonl(
+      join(sessionDir(home, 'session-c'), 'verify-whatsapp-send.log'),
+    ))).not.toContain('database busy');
   });
 });

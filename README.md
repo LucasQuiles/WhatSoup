@@ -2,7 +2,7 @@
 
 A multi-instance WhatsApp platform that runs three fundamentally different runtimes — passive listener, conversational chatbot, and autonomous AI agent — behind one Baileys v7 connection per line. Ships with a fleet management console for provisioning, monitoring, and operating all instances from a single dashboard.
 
-One process per instance. One SQLite database per instance. 165 MCP tools (162 always-registered + 3 conditionally-registered: `knowledge_search` when Pinecone config, credentials, and profiles are usable, `emit_heal_result` on non-sandboxed instances with at least one configured control-plane peer, and `memory_write` when a Pinecone key and index are configured). No backend build step — the runtime executes TypeScript directly via Node `--experimental-strip-types`; only the React console builds (to the repository-level `dist/`). Probably too many MCP tools.
+One process per instance. One SQLite database per instance. 166 MCP tools (163 always-registered + 3 conditionally-registered: `knowledge_search` when Pinecone config, credentials, and profiles are usable, `emit_heal_result` on non-sandboxed instances with at least one configured control-plane peer, and `memory_write` when a Pinecone key and index are configured). No backend build step — the runtime executes TypeScript directly via Node `--experimental-strip-types`; only the React console builds (to the repository-level `dist/`). Probably too many MCP tools.
 
 ## What It Does
 
@@ -156,7 +156,7 @@ cd console && npm run dev # Vite dev server with hot reload + API proxy
 src/
   core/           DB, access control, messages, durability engine, reply-guarantee, JID handling
   transport/      Baileys v7 (default) — auth, reconnection, parsing, event routing; optional Twilio SMS transport (webhook + voicemail)
-  mcp/            Tool registry (165 documented tools; 162 always registered + 3 conditional), Unix socket server, 21 tool modules
+  mcp/            Tool registry (166 documented tools; 163 always registered + 3 conditional), Unix socket server, 21 tool modules
   runtimes/
     passive/      Store-only. No auto-response. MCP socket for external access.
     chat/         LLM API — Anthropic/OpenAI, Pinecone RAG, enrichment, media
@@ -344,7 +344,7 @@ The fleet server's health poller probes each instance every 5 seconds and tracks
 
 ## Providers & Credentials
 
-The agent runtime supports a catalog of providers (`src/runtimes/agent/providers/provider-ids.json`): `claude-cli` (default), `codex-cli`, `gemini-cli`, `opencode-cli`, `openai-api`, and `anthropic-api`. An instance configures a primary provider and an optional fallback chain; primary-model probes verify usability before routing, and `GET /api/lines/:name/provider-status` reports per-instance readiness and fallback state. `GET /api/providers` lists the catalog and availability.
+The agent runtime supports a catalog of providers (`src/lib/provider-ids.json`): `claude-cli` (default), `codex-cli`, `gemini-cli`, `opencode-cli`, `openai-api`, and `anthropic-api`. An instance configures a primary provider and an optional fallback chain; primary-model probes verify usability before routing, and `GET /api/lines/:name/provider-status` reports per-instance readiness and fallback state. `GET /api/providers` lists the catalog and availability.
 
 Provider credentials are **write-only**: `PUT /api/credentials/:name` stores a secret, `POST /api/credentials/:name/verify` checks it against its provider, `DELETE /api/credentials/:name` removes it, and `GET /api/credentials/:name` deliberately returns `405` — credentials are never read back through the API. Secrets live in the keyring (or env) per the [Configuration Reference](docs/configuration.md).
 
@@ -394,7 +394,7 @@ Coverage includes: ingest backpressure (semaphore + overflow queue), relay guard
 | [Current Program](docs/current-program.md) | Current generated-index synthesis and artifact-sweep status |
 | [Console Guide](docs/console-guide.md) | Full walkthrough of every console page, tab, and feature |
 | [Configuration Reference](docs/configuration.md) | Full config schema, env vars, worked examples, per-instance chat aliases, send profiles, and **per-instance plugin scoping** |
-| [MCP Tool Reference](docs/tools.md) | All 165 tools across 21 documented modules plus the inline runtime tool, with scopes, parameters, replay policies |
+| [MCP Tool Reference](docs/tools.md) | All 166 tools across 21 documented modules plus the inline runtime tool, with scopes, parameters, replay policies |
 | [Agent Decision Polls](docs/runbooks/agent-decision-polls.md) | Portable contract for blocking `AskUserQuestion` poll interactions and non-blocking MCP `send_poll` usage |
 | [Runbook](docs/runbook.md) | Operational procedures and troubleshooting |
 | [Durability Design](docs/durability.md) | Durability engine design, state machines, recovery algorithms |

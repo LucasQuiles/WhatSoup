@@ -106,6 +106,7 @@ export interface BinaryAuthStatusResult {
 export interface BinaryCommandProbeOptions {
   cwd?: string;
   timeoutMs?: number;
+  signal?: AbortSignal;
   /** Called once spawn is proven absent or the child emits close. */
   onProcessClosed?: () => void;
 }
@@ -124,6 +125,7 @@ const KILL_ESCALATION_GRACE_MS = 2_000;
  *
  * - exit code 0 before the timeout → `{ status: 'ok', output }`
  * - non-zero exit, spawn error, or timeout → `{ status: 'failed', output }`
+ * - caller abort → terminate, then settle only when the child closes
  *
  * Auth-message classification is the caller's job — this function only answers
  * "did the probe command complete cleanly, and what did it say".
@@ -155,6 +157,9 @@ export async function probeBinaryCommand(
     let killTimer: ReturnType<typeof setTimeout> | undefined;
     let killEscalationTimer: ReturnType<typeof setTimeout> | undefined;
     let processClosedNotified = false;
+    let terminationStarted = false;
+    let abortRequested = false;
+    let abortListener: (() => void) | undefined;
 
     const notifyProcessClosed = (): void => {
       if (processClosedNotified) return;
@@ -170,6 +175,19 @@ export async function probeBinaryCommand(
       resolve(result);
     };
 
+    const removeAbortListener = (): void => {
+      if (options.signal && abortListener) {
+        options.signal.removeEventListener('abort', abortListener);
+        abortListener = undefined;
+      }
+    };
+
+    if (options.signal?.aborted) {
+      notifyProcessClosed();
+      settle({ status: 'failed', output: '' });
+      return;
+    }
+
     let child: ReturnType<typeof spawnImpl>;
     try {
       child = spawnImpl(binary, args, {
@@ -184,18 +202,32 @@ export async function probeBinaryCommand(
       return;
     }
 
-    const timeoutMs = options.timeoutMs ?? PROBE_TIMEOUT_MS;
-    killTimer = setTimeout(() => {
+    const terminate = (): void => {
+      if (terminationStarted) return;
+      terminationStarted = true;
       try { child.kill(); } catch { /* ignore kill errors */ }
-      // Escalate if the child ignores the polite kill. The probe result is
-      // already settled below — escalation is pure child-cleanup.
       killEscalationTimer = setTimeout(() => {
         try { child.kill('SIGKILL'); } catch { /* ignore kill errors */ }
       }, KILL_ESCALATION_GRACE_MS);
       killEscalationTimer.unref?.();
+    };
+
+    const timeoutMs = options.timeoutMs ?? PROBE_TIMEOUT_MS;
+    killTimer = setTimeout(() => {
+      terminate();
       settle({ status: 'failed', output: combinedOutput() });
     }, timeoutMs);
     killTimer.unref?.();
+
+    if (options.signal) {
+      abortListener = () => {
+        abortRequested = true;
+        clearTimeout(killTimer);
+        terminate();
+      };
+      options.signal.addEventListener('abort', abortListener, { once: true });
+      if (options.signal.aborted) abortListener();
+    }
 
     child.stdout?.on('data', (chunk: Buffer) => {
       stdoutBuffer += chunk.toString('utf8');
@@ -206,18 +238,29 @@ export async function probeBinaryCommand(
 
     child.on('error', () => {
       clearTimeout(killTimer);
-      clearTimeout(killEscalationTimer);
       // A failed spawn has no process lifetime to protect. For errors from an
-      // already-spawned child, retain ownership until its close event.
-      if (child.pid === undefined) notifyProcessClosed();
-      settle({ status: 'failed', output: combinedOutput() });
+      // already-spawned child, retain ownership until its close event. Keep
+      // any termination escalation armed too: an error does not prove that
+      // the spawned process closed or accepted the first termination signal.
+      if (child.pid === undefined) {
+        removeAbortListener();
+        notifyProcessClosed();
+      }
+      // Once caller cancellation owns a spawned child, `close` is the shared
+      // terminal event for both result settlement and lease release. An
+      // intervening process error must not let the timeout receipt get ahead
+      // of that process-lifetime boundary.
+      if (!abortRequested || child.pid === undefined) {
+        settle({ status: 'failed', output: combinedOutput() });
+      }
     });
 
     child.on('close', (code) => {
       clearTimeout(killTimer);
       clearTimeout(killEscalationTimer);
+      removeAbortListener();
       notifyProcessClosed();
-      settle({ status: code === 0 ? 'ok' : 'failed', output: combinedOutput() });
+      settle({ status: !abortRequested && code === 0 ? 'ok' : 'failed', output: combinedOutput() });
     });
   });
 }

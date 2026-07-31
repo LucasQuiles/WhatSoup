@@ -17,6 +17,7 @@ import {
   resolveDecryptionFailure,
   type DecryptionFailureInput,
 } from '../../src/core/database.ts';
+import { createOutboundSendsWriter } from '../../src/core/outbound-sends.ts';
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -1406,26 +1407,32 @@ describe('database.ts uncovered-branch coverage', () => {
 
     const preserved = db.raw
       .prepare(`
-        SELECT caller, chat_jid, text_hash, transport_message_id
+        SELECT caller, target_kind, outcome_code, failure_code, failure_stage,
+               mutation_state, evidence_coverage, logical_attempt_count,
+               provider_submission_count, completed_at
         FROM outbound_sends
-        WHERE chat_jid = '15550100011@s.whatsapp.net'
+        WHERE id = 1
       `)
-      .get() as { caller: string; chat_jid: string; text_hash: string; transport_message_id: string } | undefined;
+      .get() as Record<string, unknown> | undefined;
     expect(preserved).toEqual({
       caller: 'mcp',
-      chat_jid: '15550100011@s.whatsapp.net',
-      text_hash: 'hash-before-rgp',
-      transport_message_id: 'transport-1',
+      target_kind: 'chatJid',
+      outcome_code: 'legacy_unclassified',
+      failure_code: 'legacy_unclassified',
+      failure_stage: 'unknown',
+      mutation_state: 'unknown',
+      evidence_coverage: 'legacy_unclassified',
+      logical_attempt_count: null,
+      provider_submission_count: null,
+      completed_at: null,
     });
+    expect(JSON.stringify(db.raw.prepare('SELECT * FROM outbound_sends').all()))
+      .not.toContain('15550100011@s.whatsapp.net');
+    expect(JSON.stringify(db.raw.prepare('SELECT * FROM outbound_sends').all()))
+      .not.toContain('transport-1');
 
-    expect(() => {
-      db.raw.prepare(`
-        INSERT INTO outbound_sends (
-          line, caller, chat_jid, target_kind, text_hash, text_length, status
-        )
-        VALUES ('personal', 'rgp', '15550100012@s.whatsapp.net', 'chatJid', 'hash-rgp', 7, 'intent')
-      `).run();
-    }).not.toThrow();
+    const writer = createOutboundSendsWriter({ db: db.raw });
+    expect(() => writer.writeIntent({ caller: 'rgp', targetKind: 'chatJid' })).not.toThrow();
 
     const migratedSql = db.raw
       .prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'outbound_sends'")
@@ -1445,12 +1452,9 @@ describe('database.ts uncovered-branch coverage', () => {
     const path = tmpFile();
     const db = new Database(path);
     db.open();
-    db.raw.prepare(`
-      INSERT INTO outbound_sends (
-        line, caller, chat_jid, target_kind, text_hash, text_length, status
-      )
-      VALUES ('personal', 'rgp', '222@s.whatsapp.net', 'chatJid', 'hash', 4, 'sent')
-    `).run();
+    const writer = createOutboundSendsWriter({ db: db.raw });
+    const intent = writer.writeIntent({ caller: 'rgp', targetKind: 'chatJid' });
+    writer.markSuccess(intent.id);
     db.close();
 
     const rewind = new DatabaseSync(path);
@@ -1461,9 +1465,9 @@ describe('database.ts uncovered-branch coverage', () => {
     expect(() => reopened.open()).not.toThrow();
 
     const preserved = reopened.raw
-      .prepare("SELECT caller, status FROM outbound_sends WHERE chat_jid = '222@s.whatsapp.net'")
-      .get() as { caller: string; status: string } | undefined;
-    expect(preserved).toEqual({ caller: 'rgp', status: 'sent' });
+      .prepare('SELECT caller, outcome_code FROM outbound_sends WHERE audit_receipt = ?')
+      .get(intent.auditReceipt) as { caller: string; outcome_code: string } | undefined;
+    expect(preserved).toEqual({ caller: 'rgp', outcome_code: 'submitted' });
 
     const scheduleCols = (
       reopened.raw

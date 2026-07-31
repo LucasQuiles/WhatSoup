@@ -85,7 +85,8 @@ describe('ToolRegistry.call durability containment', () => {
     expect(throwingDurability.markToolExecuting).not.toHaveBeenCalled();
     expect(mockWarn).toHaveBeenCalledTimes(1);
     expect(mockWarn.mock.calls[0][0]).toMatchObject({ tool: 'test_tool' });
-    expect(mockWarn.mock.calls[0][0].err).toBeInstanceOf(Error);
+    expect(mockWarn.mock.calls[0][0]).toMatchObject({ stage: 'record' });
+    expect(mockWarn.mock.calls[0][0]).not.toHaveProperty('err');
   });
 
   it('still invokes the tool handler and returns its result when markToolExecuting throws', async () => {
@@ -193,26 +194,20 @@ describe('ToolRegistry.call durability containment', () => {
     // denyId-chained writes can fire.
     expect(throwingDurability.markToolExecuting).not.toHaveBeenCalled();
     expect(throwingDurability.markToolComplete).not.toHaveBeenCalled();
-    // Two distinct warns: the R1 denial itself always logs (unrelated to
-    // durability), and the caught durability throw logs a second, separate
-    // warning — unlike the main-path tests above, this deny path does not
-    // start from a clean warn slate.
+    // Two distinct warns: the failed durability record is observed first,
+    // then the R1 denial logs its bounded policy event.
     expect(mockWarn).toHaveBeenCalledTimes(2);
-    expect(mockWarn.mock.calls[0][0]).toMatchObject({ tool: 'sensitive_tool' });
+    expect(mockWarn.mock.calls[0][0]).toMatchObject({ tool: 'sensitive_tool', stage: 'record' });
+    expect(mockWarn.mock.calls[0][0]).not.toHaveProperty('err');
     expect(mockWarn.mock.calls[1][0]).toMatchObject({ tool: 'sensitive_tool' });
-    expect(mockWarn.mock.calls[1][0].err).toBeInstanceOf(Error);
   });
 
   // ---------------------------------------------------------------------------
-  // QR-DENY-REDACT: the deny path must redact erasure-sensitive tool input the
-  // same way the main path does (registry.ts:453-454). A denied
-  // capture_observation/forget_observation attempt still reaches the
-  // durability write below the R1 gate, so its raw params (potentially the
-  // very content meant to be erased) must not land unredacted in the durable
-  // ledger just because the call was refused rather than executed.
+  // Metadata-only durability: every known tool records a bounded group before
+  // admission. Raw parameters never cross the registry/durability boundary.
   // ---------------------------------------------------------------------------
 
-  it('redacts tool input in the deny-path durability record for an erasure-sensitive tool (QR-DENY-REDACT)', async () => {
+  it('passes only a bounded group for an erasure-sensitive deny path', async () => {
     const recordToolCall = vi.fn(
       (_conversationKey: string, _toolName: string, _toolInput: string, _replayPolicy: string, _checkpointId?: number) => 99,
     );
@@ -235,12 +230,11 @@ describe('ToolRegistry.call durability containment', () => {
     // No authorizer installed, so this is a denial regardless of actorJid.
     expect(result.isError).toBe(true);
     expect(recordToolCall).toHaveBeenCalledTimes(1);
-    // Third positional argument is the durable toolInput string — must be the
-    // fixed marker, not the raw params that could carry erasable content.
-    expect(recordToolCall.mock.calls[0][2]).toBe('[redacted:erasure-sensitive]');
+    expect(recordToolCall.mock.calls[0][2]).toBe('other');
+    expect(JSON.stringify(recordToolCall.mock.calls[0])).not.toContain('user requested erasure');
   });
 
-  it('still records raw params in the deny-path durability record for a non-erasure-sensitive tool (QR-DENY-REDACT companion)', async () => {
+  it('passes only a bounded group for every other deny path', async () => {
     const recordToolCall = vi.fn(
       (_conversationKey: string, _toolName: string, _toolInput: string, _replayPolicy: string, _checkpointId?: number) => 100,
     );
@@ -261,11 +255,9 @@ describe('ToolRegistry.call durability containment', () => {
       makeSession({ actorJid: '15550000001@s.whatsapp.net', conversationKey: '15550000009' }),
     );
 
-    // Same denial path, but this tool name is not in ERASURE_SENSITIVE_TOOL_NAMES,
-    // so the ternary's else-branch must still record the raw params — proving
-    // this fix scopes redaction to erasure-sensitive tools, not all denials.
     expect(result.isError).toBe(true);
     expect(recordToolCall).toHaveBeenCalledTimes(1);
-    expect(recordToolCall.mock.calls[0][2]).toBe(JSON.stringify(params));
+    expect(recordToolCall.mock.calls[0][2]).toBe('other');
+    expect(JSON.stringify(recordToolCall.mock.calls[0])).not.toContain(params.message);
   });
 });

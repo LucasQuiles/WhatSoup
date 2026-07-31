@@ -1240,6 +1240,18 @@ describe('verify chain composition (package.json)', () => {
 });
 
 describe('quality workflow composition', () => {
+  it('runs the PR metadata guard only with authoritative pull-request event data', () => {
+    expect(packageJson.scripts['guard:pr-metadata']).toBe(
+      'bash scripts/run-with-pinned-node.sh scripts/pr-metadata-guard.ts',
+    );
+    expect(packageJson.scripts['verify:push:branch']).toContain(
+      'tests/scripts/pr-metadata-guard.test.ts',
+    );
+    expect(qualityWorkflow).toMatch(
+      /- name: PR metadata guard\n        if: github\.event_name == 'pull_request'\n        env:\n          PR_METADATA_EVENT: \$\{\{ github\.event_path \}\}\n        run: npm run guard:pr-metadata -- --github-event "\$PR_METADATA_EVENT" --json/,
+    );
+  });
+
   it('runs one read-only Node 24 semantic shadow step before integrity and expensive suites', () => {
     const semanticMatches = qualityWorkflow.match(/name: Semantic quality \(shadow\)/g) ?? [];
     const semanticIndex = qualityWorkflow.indexOf('name: Semantic quality (shadow)');

@@ -1,24 +1,27 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { FleetDiscovery, DiscoveredInstance } from '../fleet/discovery.ts';
 
-/** Stream request body with size guard. Rejects with 413 if exceeded. */
-export function readBody(req: IncomingMessage, maxBytes = 64 * 1024): Promise<string> {
+/** Stream request body bytes with size guard. Rejects with 413 if exceeded.
+ * Returns the exact received byte sequence; callers that need byte-stable
+ * semantics (digests, idempotency) must hash this buffer, not a decode. */
+export function readBodyBytes(req: IncomingMessage, maxBytes = 64 * 1024): Promise<Buffer> {
   return new Promise((resolve, reject) => {
-    let body = '';
+    const chunks: Buffer[] = [];
     let bytes = 0;
     let settled = false;
     req.on('data', (chunk: Buffer | string) => {
       if (settled) return;
-      bytes += Buffer.byteLength(chunk);
+      const part = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      bytes += part.length;
       if (bytes > maxBytes) {
         settled = true;
         reject(Object.assign(new Error('request body too large'), { statusCode: 413 }));
         return;
       }
-      body += chunk;
+      chunks.push(part);
     });
     req.on('end', () => {
-      if (!settled) resolve(body);
+      if (!settled) resolve(Buffer.concat(chunks));
     });
     req.on('error', (err) => {
       if (!settled) {
@@ -27,6 +30,14 @@ export function readBody(req: IncomingMessage, maxBytes = 64 * 1024): Promise<st
       }
     });
   });
+}
+
+/** Stream request body with size guard. Rejects with 413 if exceeded.
+ * Decodes once after the full body arrives so multibyte characters split
+ * across chunk boundaries are preserved. */
+export async function readBody(req: IncomingMessage, maxBytes = 64 * 1024): Promise<string> {
+  const bytes = await readBodyBytes(req, maxBytes);
+  return bytes.toString('utf8');
 }
 
 /** Send a JSON response. */

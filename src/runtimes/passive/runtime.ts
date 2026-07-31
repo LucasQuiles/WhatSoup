@@ -99,6 +99,10 @@ export class PassiveRuntime implements Runtime {
     };
   }
 
+  getToolDurabilityTelemetrySnapshot() {
+    return this.registry.getDurabilityTelemetrySnapshot();
+  }
+
   async shutdown(): Promise<void> {
     this.socketServer?.stop();
     log.info('passive runtime shut down');

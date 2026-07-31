@@ -93,6 +93,7 @@ import {
 } from "./lib/open-issue-triage/refresh-manifest.ts";
 import {
   parseRegistryReviewBatch,
+  referencedRepositoryNumbers,
   reconcileRegistry,
   type RefreshClosedIssue,
   type RefreshIssue,
@@ -667,6 +668,29 @@ function publicGitRef(value: string | null): string | null {
   return value;
 }
 
+function publicPullRequestTitle(number: number, value: string): string {
+  const withheld = `Pull request #${number} (title withheld by publication policy)`;
+  if (
+    scanTextForPrivateLiterals("docs/triage/open-issue-registry.json", value)
+      .length > 0 ||
+    scanContentLines([
+      {
+        filePath: "docs/triage/open-issue-registry.json",
+        line: 1,
+        text: value,
+      },
+    ]).length > 0
+  ) {
+    return withheld;
+  }
+  try {
+    assertNoSecretLike(value, "pull request title");
+  } catch {
+    return withheld;
+  }
+  return value;
+}
+
 function refreshIssues(capture: RegistryCapture): RefreshIssue[] {
   return capture.issues.map((issue) => ({
     issueNumber: issue.number,
@@ -682,8 +706,10 @@ function refreshIssues(capture: RegistryCapture): RefreshIssue[] {
 function refreshPullRequests(capture: RegistryCapture): RefreshPullRequest[] {
   return capture.pullRequests.map((pullRequest) => ({
     number: pullRequest.number,
-    title: pullRequest.title,
-    body: pullRequest.body,
+    title: publicPullRequestTitle(pullRequest.number, pullRequest.title),
+    referenceNumbers: referencedRepositoryNumbers(
+      `${pullRequest.title}\n${pullRequest.body}`,
+    ),
     url: pullRequest.url,
     updatedAt: pullRequest.updatedAt,
     disposition: pullRequest.disposition,

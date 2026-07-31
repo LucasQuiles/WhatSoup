@@ -7,10 +7,14 @@ import {
   sendTracked,
 } from '../../src/core/durability.ts';
 import type { Messenger, SubmissionReceipt } from '../../src/core/types.ts';
+import { classifyOutboundFailure } from '../../src/core/outbound-failure-disposition.ts';
+import { RateLimitedError } from '../../src/transport/contract/errors.ts';
+import { makeChannelId } from '../../src/core/transport-refs.ts';
 
 const emitAlert = vi.hoisted(() => vi.fn(() => true));
 const clearAlertSource = vi.hoisted(() => vi.fn(() => true));
 const gateQuarantineClear = vi.hoisted(() => vi.fn());
+const QUARANTINE_CLEAR_OPTIONS = { requireDurableOutbox: true };
 
 vi.mock('../../src/lib/emit-alert.ts', () => ({
   emitAlert,
@@ -31,6 +35,12 @@ function makeDb(): Database {
 
 function getOutbound(db: Database, id: number): Record<string, unknown> {
   return db.raw.prepare('SELECT * FROM outbound_ops WHERE id = ?').get(id) as Record<string, unknown>;
+}
+
+function expectQuarantineClear(source: string): void {
+  expect(clearAlertSource).toHaveBeenCalledWith(
+    'Loops', source, undefined, undefined, QUARANTINE_CLEAR_OPTIONS,
+  );
 }
 
 function makeMessenger(
@@ -80,7 +90,7 @@ describe('DurabilityEngine edge coverage', () => {
     expect(skippedRow).toMatchObject({ processing_status: 'complete', terminal_reason: 'duplicate' });
   });
 
-  it('marks failed permanent and records null maybe_sent errors when no error is provided', () => {
+  it('marks failed permanent and records structured maybe_sent evidence', () => {
     const failed = engine.createOutboundOp({
       conversationKey: 'key-failed',
       chatJid: 'jid-failed',
@@ -89,7 +99,12 @@ describe('DurabilityEngine edge coverage', () => {
       replayPolicy: 'unsafe',
     });
     engine.markFailedPermanent(failed, 'not retriable');
-    expect(getOutbound(db, failed)).toMatchObject({ status: 'failed_permanent', error: 'not retriable' });
+    const failedRow = getOutbound(db, failed);
+    expect(failedRow['status']).toBe('failed_permanent');
+    expect(JSON.parse(failedRow['error'] as string)).toMatchObject({
+      failure_code: 'outbound.unknown_failure',
+      mutation_state: 'rejected',
+    });
 
     const maybe = engine.createOutboundOp({
       conversationKey: 'key-maybe',
@@ -99,7 +114,12 @@ describe('DurabilityEngine edge coverage', () => {
       replayPolicy: 'safe',
     });
     engine.markMaybeSent(maybe);
-    expect(getOutbound(db, maybe)).toMatchObject({ status: 'maybe_sent', error: null });
+    const maybeRow = getOutbound(db, maybe);
+    expect(maybeRow['status']).toBe('maybe_sent');
+    expect(JSON.parse(maybeRow['error'] as string)).toMatchObject({
+      failure_code: 'outbound.unknown_failure',
+      mutation_state: 'ambiguous',
+    });
   });
 
   it('matchEcho returns true and marks the matching submitted outbound echoed', () => {
@@ -241,7 +261,7 @@ describe('DurabilityEngine edge coverage', () => {
       expect.stringContaining('gate evidence; clear_suppressed=true'),
       'warning',
     );
-    expect(clearAlertSource).toHaveBeenCalledWith('Loops', 'outbound_quarantined');
+    expectQuarantineClear('outbound_quarantined');
   });
 
   it('postConnectRecovery records gate failure without committing a staged clear', () => {
@@ -457,7 +477,11 @@ describe('DurabilityEngine edge coverage', () => {
       );
 
     const row = db.raw.prepare('SELECT status, error FROM outbound_ops ORDER BY id DESC LIMIT 1').get() as Record<string, unknown>;
-    expect(row).toMatchObject({ status: 'maybe_sent', error: 'send_failed' });
+    expect(row['status']).toBe('maybe_sent');
+    expect(JSON.parse(row['error'] as string)).toMatchObject({
+      failure_code: 'outbound.unknown_failure',
+      mutation_state: 'ambiguous',
+    });
   });
 
   it('sendTracked rethrows send failures when durability tracking is disabled', async () => {
@@ -499,7 +523,12 @@ describe('DurabilityEngine edge coverage', () => {
     const messenger = makeMessenger(async () => Promise.reject(null));
 
     expect((await drainPendingOutbound(messenger, engine)).resent).toBe(0);
-    expect(getOutbound(db, id)).toMatchObject({ status: 'maybe_sent', error: 'replay_failed' });
+    const row = getOutbound(db, id);
+    expect(row['status']).toBe('maybe_sent');
+    expect(JSON.parse(row['error'] as string)).toMatchObject({
+      failure_code: 'outbound.unknown_failure',
+      mutation_state: 'ambiguous',
+    });
   });
 
   it('drainPendingOutbound keeps draining after an unexpected per-op failure', async () => {
@@ -545,5 +574,125 @@ describe('DurabilityEngine edge coverage', () => {
     engine.markEchoed(id);
 
     expect(probe(900)).toBe(true);
+  });
+});
+
+describe('drainPendingOutbound deferral bound (#2646) and redelivery order (#2647)', () => {
+  let db: Database;
+  let engine: DurabilityEngine;
+
+  beforeEach(() => {
+    db = makeDb();
+    engine = new DurabilityEngine(db);
+    emitAlert.mockClear();
+  });
+
+  afterEach(() => {
+    db.close();
+  });
+
+  function deferOp(id: number): void {
+    engine.markDeferred(id, classifyOutboundFailure(
+      new RateLimitedError({
+        channelId: makeChannelId('signal', 'primary'),
+        operation: 'sendText',
+        correlationId: 'synthetic-deferral',
+        scope: 'request',
+        message: 'synthetic provider prose that must not persist',
+        phase: 'not_started',
+        retryAfterMs: 60 * 60 * 1000,
+      }),
+      { retryOwner: 'agent_queue', attemptsRemaining: 2 },
+    ));
+  }
+
+  function makeTextOp(key: string): number {
+    return engine.createOutboundOp({
+      conversationKey: key,
+      chatJid: `${key}@s.whatsapp.net`,
+      opType: 'text',
+      payload: JSON.stringify({ text: `payload for ${key}` }),
+      replayPolicy: 'safe',
+    });
+  }
+
+  it('quarantines a text op that reaches the max deferral count while still rate-limited', async () => {
+    const id = makeTextOp('key-deferral-limit');
+    deferOp(id);
+    db.raw.prepare('UPDATE outbound_ops SET retry_count = 20 WHERE id = ?').run(id);
+    const messenger = makeMessenger(async () => ({ waMessageId: 'WA_UNUSED' }));
+
+    await drainPendingOutbound(messenger, engine);
+
+    const row = getOutbound(db, id);
+    expect(row).toMatchObject({
+      status: 'quarantined',
+      quarantine_disposition: 'delivery_not_attempted',
+      quarantine_evidence_coverage: 'complete',
+    });
+    expect(JSON.parse(row['error'] as string)).toMatchObject({
+      failure_code: 'outbound.deferral_limit_exceeded',
+      retry_decision: 'stop',
+      retry_owner: 'none',
+    });
+    expect(messenger.sendMessage).not.toHaveBeenCalled();
+    expect(emitAlert).toHaveBeenCalledWith(
+      expect.any(String),
+      'outbound_delivery_not_attempted',
+      expect.any(String),
+      expect.stringContaining('outbound.deferral_limit_exceeded'),
+      'warning',
+    );
+  });
+
+  it('keeps deferring a text op below the max deferral count', async () => {
+    const id = makeTextOp('key-deferral-below');
+    deferOp(id);
+    db.raw.prepare('UPDATE outbound_ops SET retry_count = 19 WHERE id = ?').run(id);
+    const messenger = makeMessenger(async () => ({ waMessageId: 'WA_UNUSED' }));
+
+    await drainPendingOutbound(messenger, engine);
+
+    expect(getOutbound(db, id)['status']).toBe('pending');
+    expect(messenger.sendMessage).not.toHaveBeenCalled();
+  });
+
+  it('leaves status_ping ops on their TTL path even at high deferral counts', async () => {
+    const id = engine.createOutboundOp({
+      conversationKey: 'key-ping-exempt',
+      chatJid: 'key-ping-exempt@s.whatsapp.net',
+      opType: 'status_ping',
+      payload: JSON.stringify({ text: 'ping' }),
+      replayPolicy: 'safe',
+    });
+    deferOp(id);
+    db.raw.prepare('UPDATE outbound_ops SET retry_count = 25 WHERE id = ?').run(id);
+    const messenger = makeMessenger(async () => ({ waMessageId: 'WA_UNUSED' }));
+
+    await drainPendingOutbound(messenger, engine);
+
+    const row = getOutbound(db, id);
+    expect(row['status']).toBe('pending');
+    expect(JSON.parse(row['error'] as string)['failure_code']).not.toBe('outbound.deferral_limit_exceeded');
+  });
+
+  it('redelivers pending ops in insertion (id) order', async () => {
+    const first = makeTextOp('key-order-a');
+    const second = makeTextOp('key-order-b');
+    const third = makeTextOp('key-order-c');
+    const sent: string[] = [];
+    const messenger = makeMessenger(async (_jid, text) => {
+      sent.push(text);
+      return { waMessageId: `WA_${sent.length}` };
+    });
+
+    await expect(drainPendingOutbound(messenger, engine)).resolves.toMatchObject({ resent: 3 });
+
+    expect(sent).toEqual([
+      `payload for key-order-a`,
+      `payload for key-order-b`,
+      `payload for key-order-c`,
+    ]);
+    expect([first, second, third]).toEqual([...[first, second, third]].sort((a, b) => a - b));
   });
 });

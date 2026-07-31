@@ -7,6 +7,11 @@ import {
   runDatabaseRetention,
 } from '../../src/core/database-retention.ts';
 import { closeOperatorCatchupRecovery } from '../../src/core/recovery-catchup-closure.ts';
+import {
+  TOOL_INPUT_MARKER,
+  TOOL_RESULT_MARKERS,
+} from '../../src/core/durability-evidence-contract.ts';
+import { createOutboundSendsWriter } from '../../src/core/outbound-sends.ts';
 
 describe('database retention', () => {
   let db: Database;
@@ -38,13 +43,27 @@ describe('database retention', () => {
       VALUES ('young-out', 'chat@g.us', 'send_message', '{}', 'echoed', datetime('now', '-5 days'))
     `).run();
     db.raw.prepare(`
-      INSERT INTO tool_calls (conversation_key, tool_name, tool_input, status, replay_policy, completed_at)
-      VALUES ('old-tool', 'search_messages', '{}', 'complete', 'safe', datetime('now', '-40 days'))
-    `).run();
+      INSERT INTO tool_calls (
+        conversation_key, tool_name, tool_group, tool_input, status, result,
+        replay_policy, completed_at, outcome_code, retry_disposition,
+        operator_action, evidence_coverage, duration_ms
+      ) VALUES (
+        'old-tool', 'search_messages', 'search', ?, 'complete', ?,
+        'safe', datetime('now', '-40 days'), 'success', 'not_applicable',
+        'none', 'complete', 1
+      )
+    `).run(TOOL_INPUT_MARKER, TOOL_RESULT_MARKERS.success);
     db.raw.prepare(`
-      INSERT INTO tool_calls (conversation_key, tool_name, tool_input, status, replay_policy, completed_at)
-      VALUES ('young-tool', 'search_messages', '{}', 'complete', 'safe', datetime('now', '-5 days'))
-    `).run();
+      INSERT INTO tool_calls (
+        conversation_key, tool_name, tool_group, tool_input, status, result,
+        replay_policy, completed_at, outcome_code, retry_disposition,
+        operator_action, evidence_coverage, duration_ms
+      ) VALUES (
+        'young-tool', 'search_messages', 'search', ?, 'complete', ?,
+        'safe', datetime('now', '-5 days'), 'success', 'not_applicable',
+        'none', 'complete', 1
+      )
+    `).run(TOOL_INPUT_MARKER, TOOL_RESULT_MARKERS.success);
     db.raw.prepare(`
       INSERT INTO fact_export_queue (fact_id, chat_jid, payload_json, status, created_at, exported_at)
       VALUES ('fact-old', 'chat@g.us', '{}', 'exported', datetime('now', '-45 days'), datetime('now', '-40 days'))
@@ -66,7 +85,9 @@ describe('database retention', () => {
       inboundEvents: 1,
       outboundOps: 1,
       toolCalls: 1,
+      outboundSends: 0,
       factExportQueue: 1,
+      memoryConsolidationRuns: 0,
       metricsHourly: 0,
       decryptionFailures: 0,
       messages: 0,
@@ -79,6 +100,159 @@ describe('database retention', () => {
     expect(columnValues('outbound_ops', 'conversation_key')).toEqual(['young-out']);
     expect(columnValues('tool_calls', 'conversation_key')).toEqual(['young-tool']);
     expect(columnValues('fact_export_queue', 'fact_id')).toEqual(['fact-young']);
+  });
+
+  it('keeps unacknowledged ambiguous and legacy quarantines until reviewed', () => {
+    const insert = db.raw.prepare(`
+      INSERT INTO outbound_ops (
+        conversation_key, chat_jid, op_type, payload, status, created_at,
+        quarantined_at, quarantine_disposition, quarantine_evidence_coverage
+      ) VALUES (?, 'chat@g.us', 'send_message', '{}', 'quarantined',
+                datetime('now', '-365 days'), datetime('now', ?), ?, ?)
+    `);
+    insert.run(
+      'retain-ambiguous',
+      '-40 days',
+      'delivery_ambiguous_unsafe',
+      'complete',
+    );
+    insert.run(
+      'retain-legacy',
+      '-40 days',
+      'legacy_unclassified',
+      'legacy_unclassified',
+    );
+    insert.run(
+      'retain-unreconstructable',
+      '-40 days',
+      'record_unreconstructable',
+      'complete',
+    );
+    insert.run(
+      'delete-not-attempted',
+      '-40 days',
+      'delivery_not_attempted',
+      'complete',
+    );
+    insert.run(
+      'delete-old-ambiguous',
+      '-91 days',
+      'delivery_ambiguous_unsafe',
+      'complete',
+    );
+
+    const result = runDatabaseRetention(db, {
+      ...DEFAULT_DATABASE_RETENTION,
+      terminalDurabilityDays: 30,
+    });
+
+    expect(result.outboundOps).toBe(1);
+    expect(columnValues('outbound_ops', 'conversation_key')).toEqual([
+      'delete-old-ambiguous',
+      'retain-ambiguous',
+      'retain-legacy',
+      'retain-unreconstructable',
+    ]);
+  });
+
+  it('ages quarantines from their containment transition and keeps unknown or reviewed ambiguity conservatively', () => {
+    const insert = db.raw.prepare(`
+      INSERT INTO outbound_ops (
+        conversation_key, chat_jid, op_type, payload, status, created_at,
+        quarantined_at, quarantine_disposition, quarantine_evidence_coverage
+      ) VALUES (?, 'chat@g.us', 'send_message', '{}', ?, datetime('now', ?),
+                datetime('now', ?), ?, ?)
+    `);
+    insert.run(
+      'keep-ambiguous', 'quarantined', '-365 days', '-40 days',
+      'delivery_ambiguous_unsafe', 'complete',
+    );
+    insert.run(
+      'keep-unknown', 'quarantined', '-365 days', '-40 days',
+      'future-private-disposition', 'legacy_unclassified',
+    );
+    insert.run(
+      'keep-new-standard', 'quarantined', '-365 days', '-1 day',
+      'delivery_not_attempted', 'complete',
+    );
+    insert.run(
+      'keep-unreviewed-reconstruction', 'quarantined', '-365 days', '-40 days',
+      'record_unreconstructable', 'complete',
+    );
+    const retiredAmbiguous = insert.run(
+      'keep-reviewed-ambiguity', 'failed_permanent', '-365 days', '-40 days',
+      'delivery_ambiguous_unsafe', 'complete',
+    ).lastInsertRowid;
+    db.raw.prepare(`
+      UPDATE outbound_ops
+         SET quarantine_evidence_sha256 = ?
+       WHERE id = ?
+    `).run('0'.repeat(64), retiredAmbiguous);
+    db.raw.prepare(`
+      INSERT INTO outbound_quarantine_retirements (
+        outbound_op_id, quarantine_disposition, acknowledgement, evidence_sha256
+      ) VALUES (?, 'delivery_ambiguous_unsafe', 'delivery-risk-reviewed', ?)
+    `).run(retiredAmbiguous, '0'.repeat(64));
+    const expiredRetiredAmbiguous = insert.run(
+      'delete-reviewed-ambiguity', 'failed_permanent', '-365 days', '-91 days',
+      'delivery_ambiguous_unsafe', 'complete',
+    ).lastInsertRowid;
+    db.raw.prepare(`
+      UPDATE outbound_ops
+         SET quarantine_evidence_sha256 = ?
+       WHERE id = ?
+    `).run('1'.repeat(64), expiredRetiredAmbiguous);
+    db.raw.prepare(`
+      INSERT INTO outbound_quarantine_retirements (
+        outbound_op_id, quarantine_disposition, acknowledgement, evidence_sha256
+      ) VALUES (?, 'delivery_ambiguous_unsafe', 'delivery-risk-reviewed', ?)
+    `).run(expiredRetiredAmbiguous, '1'.repeat(64));
+    const expiredRetiredReconstruction = insert.run(
+      'delete-reviewed-reconstruction', 'failed_permanent', '-365 days', '-31 days',
+      'record_unreconstructable', 'complete',
+    ).lastInsertRowid;
+    db.raw.prepare(`
+      UPDATE outbound_ops
+         SET quarantine_evidence_sha256 = ?
+       WHERE id = ?
+    `).run('2'.repeat(64), expiredRetiredReconstruction);
+    db.raw.prepare(`
+      INSERT INTO outbound_quarantine_retirements (
+        outbound_op_id, quarantine_disposition, acknowledgement, evidence_sha256
+      ) VALUES (?, 'record_unreconstructable', 'record-reconstruction-reviewed', ?)
+    `).run(expiredRetiredReconstruction, '2'.repeat(64));
+    insert.run(
+      'delete-expired-standard', 'quarantined', '-365 days', '-31 days',
+      'stale_status_discarded', 'complete',
+    );
+    insert.run(
+      'delete-ordinary-failed', 'failed_permanent', '-40 days', '-40 days',
+      'legacy_unclassified', 'legacy_unclassified',
+    );
+    db.raw.prepare(`
+      UPDATE outbound_ops
+         SET quarantined_at = NULL
+       WHERE conversation_key = 'delete-ordinary-failed'
+    `).run();
+    insert.run(
+      'keep-unreviewed-terminal', 'failed_permanent', '-365 days', '-91 days',
+      'delivery_ambiguous_unsafe', 'complete',
+    );
+
+    const result = runDatabaseRetention(db, {
+      ...DEFAULT_DATABASE_RETENTION,
+      terminalDurabilityDays: 30,
+    });
+
+    expect(result.outboundOps).toBe(4);
+    expect(columnValues('outbound_ops', 'conversation_key')).toEqual([
+      'keep-ambiguous',
+      'keep-new-standard',
+      'keep-reviewed-ambiguity',
+      'keep-unknown',
+      'keep-unreviewed-reconstruction',
+      'keep-unreviewed-terminal',
+    ]);
   });
 
   // #1445 QR-012: messages/receipts retention unification. `messages` was
@@ -123,6 +297,32 @@ describe('database retention', () => {
     expect(columnValues('receipts', 'message_id')).toEqual(['young-msg']);
   });
 
+  it('prunes old terminal outbound evidence while preserving unresolved intents', () => {
+    const writer = createOutboundSendsWriter({ db: db.raw });
+    const terminal = writer.writeIntent({ caller: 'mcp', targetKind: 'chatJid' });
+    const unresolved = writer.writeIntent({ caller: 'health', targetKind: 'alias' });
+    writer.markSuccess(terminal.id);
+    db.raw.prepare(`
+      UPDATE outbound_sends
+      SET created_at = datetime('now', '-40 days'),
+          completed_at = CASE
+            WHEN outcome_code = 'intent' THEN NULL
+            ELSE datetime('now', '-40 days')
+          END
+      WHERE id IN (?, ?)
+    `).run(terminal.id, unresolved.id);
+
+    const result = runDatabaseRetention(db, {
+      ...DEFAULT_DATABASE_RETENTION,
+      outboundSendDays: 30,
+      outboundSendMaxRows: 10_000,
+    });
+
+    expect(result.outboundSends).toBe(1);
+    expect(db.raw.prepare('SELECT id, outcome_code FROM outbound_sends').all())
+      .toEqual([{ id: unresolved.id, outcome_code: 'intent' }]);
+  });
+
   // #1445 QR-012 guard: main.ts used to run messages/receipts retention from
   // a standalone 60s-delayed startup setTimeout plus its own branch inside
   // the daily setInterval, both calling deleteOldMessages() directly and
@@ -150,13 +350,27 @@ describe('database retention', () => {
   // tool call past retention forever (under-deletion, the inverse of #1772).
   it('deletes old error-status tool_calls rows, same schedule as complete (#1787 retention coupling)', () => {
     db.raw.prepare(`
-      INSERT INTO tool_calls (conversation_key, tool_name, tool_input, status, replay_policy, completed_at)
-      VALUES ('old-error-tool', 'send_message', '{}', 'error', 'unsafe', datetime('now', '-40 days'))
-    `).run();
+      INSERT INTO tool_calls (
+        conversation_key, tool_name, tool_group, tool_input, status, result,
+        replay_policy, completed_at, outcome_code, failure_code, failure_stage,
+        retry_disposition, operator_action, evidence_coverage, duration_ms
+      ) VALUES (
+        'old-error-tool', 'send_message', 'messaging', ?, 'error', ?,
+        'unsafe', datetime('now', '-40 days'), 'failure', 'unknown', 'unknown',
+        'unknown', 'inspect', 'partial', 1
+      )
+    `).run(TOOL_INPUT_MARKER, TOOL_RESULT_MARKERS.error);
     db.raw.prepare(`
-      INSERT INTO tool_calls (conversation_key, tool_name, tool_input, status, replay_policy, completed_at)
-      VALUES ('young-error-tool', 'send_message', '{}', 'error', 'unsafe', datetime('now', '-5 days'))
-    `).run();
+      INSERT INTO tool_calls (
+        conversation_key, tool_name, tool_group, tool_input, status, result,
+        replay_policy, completed_at, outcome_code, failure_code, failure_stage,
+        retry_disposition, operator_action, evidence_coverage, duration_ms
+      ) VALUES (
+        'young-error-tool', 'send_message', 'messaging', ?, 'error', ?,
+        'unsafe', datetime('now', '-5 days'), 'failure', 'unknown', 'unknown',
+        'unknown', 'inspect', 'partial', 1
+      )
+    `).run(TOOL_INPUT_MARKER, TOOL_RESULT_MARKERS.error);
 
     const result = runDatabaseRetention(db, {
       ...DEFAULT_DATABASE_RETENTION,
@@ -189,6 +403,63 @@ describe('database retention', () => {
     expect(columnValues('metrics_hourly', 'bucket').sort()).toEqual(
       [insideBucket, recentBucket].sort(),
     );
+  });
+
+  it('bounds content-free consolidation receipts while retaining the newest 100', () => {
+    const insert = db.raw.prepare(`
+      INSERT INTO memory_consolidation_runs (
+        run_id, source, mode, status, stage, failure_code, retryable,
+        evidence_coverage, attempted_at, last_progress_at, completed_at,
+        success_at
+      ) VALUES (
+        ?, 'manual', 'dry_run', 'no_work', 'finalize', 'none', 0,
+        'provider_response', ?, ?, ?, ?
+      )
+    `);
+    const oldBase = Date.now() - 40 * 86_400_000;
+    for (let index = 0; index < 102; index += 1) {
+      const runId = index.toString(16).padStart(32, '0');
+      const attemptedAt = oldBase + index;
+      insert.run(
+        runId,
+        attemptedAt,
+        attemptedAt,
+        attemptedAt + 1,
+        attemptedAt + 1,
+      );
+    }
+
+    const result = runDatabaseRetention(db, {
+      ...DEFAULT_DATABASE_RETENTION,
+      memoryConsolidationDays: 30,
+      memoryConsolidationMaxRows: 100,
+    });
+
+    expect(result.memoryConsolidationRuns).toBe(2);
+    expect(rowCount('memory_consolidation_runs')).toBe(100);
+    expect(columnValues('memory_consolidation_runs', 'attempted_at'))
+      .not.toContain(oldBase);
+
+    db.raw.exec('DELETE FROM memory_consolidation_runs');
+    const recentBase = Date.now() - 60_000;
+    for (let index = 0; index < 102; index += 1) {
+      const runId = (index + 102).toString(16).padStart(32, '0');
+      const attemptedAt = recentBase + index;
+      insert.run(
+        runId,
+        attemptedAt,
+        attemptedAt,
+        attemptedAt + 1,
+        attemptedAt + 1,
+      );
+    }
+    const capped = runDatabaseRetention(db, {
+      ...DEFAULT_DATABASE_RETENTION,
+      memoryConsolidationDays: 30,
+      memoryConsolidationMaxRows: 100,
+    });
+    expect(capped.memoryConsolidationRuns).toBe(2);
+    expect(rowCount('memory_consolidation_runs')).toBe(100);
   });
 
   it('QR-066: prunes stale decryption_failures by last_seen_at, preserving a still-recurring one', () => {
@@ -264,13 +535,27 @@ describe('database retention', () => {
       VALUES ('c1', 'chat@g.us', 'send_message', '{}', 'maybe_sent', datetime('now', '-60 days'))
     `).run();
     db.raw.prepare(`
-      INSERT INTO tool_calls (conversation_key, tool_name, tool_input, status, replay_policy, created_at)
-      VALUES ('c1', 'send_message', '{}', 'pending', 'unsafe', datetime('now', '-60 days'))
-    `).run();
+      INSERT INTO tool_calls (
+        conversation_key, tool_name, tool_group, tool_input, status,
+        replay_policy, created_at, outcome_code, retry_disposition,
+        operator_action, evidence_coverage
+      ) VALUES (
+        'c1', 'send_message', 'messaging', ?, 'pending',
+        'unsafe', datetime('now', '-60 days'), 'not_terminal', 'not_applicable',
+        'none', 'complete'
+      )
+    `).run(TOOL_INPUT_MARKER);
     db.raw.prepare(`
-      INSERT INTO tool_calls (conversation_key, tool_name, tool_input, status, replay_policy, created_at)
-      VALUES ('c1', 'send_message', '{}', 'executing', 'unsafe', datetime('now', '-60 days'))
-    `).run();
+      INSERT INTO tool_calls (
+        conversation_key, tool_name, tool_group, tool_input, status,
+        replay_policy, created_at, outcome_code, retry_disposition,
+        operator_action, evidence_coverage
+      ) VALUES (
+        'c1', 'send_message', 'messaging', ?, 'executing',
+        'unsafe', datetime('now', '-60 days'), 'not_terminal', 'not_applicable',
+        'none', 'complete'
+      )
+    `).run(TOOL_INPUT_MARKER);
     db.raw.prepare(`
       INSERT INTO fact_export_queue (fact_id, chat_jid, payload_json, status, created_at)
       VALUES ('fact-pending', 'chat@g.us', '{}', 'pending', datetime('now', '-60 days'))
@@ -284,7 +569,9 @@ describe('database retention', () => {
       inboundEvents: 0,
       outboundOps: 0,
       toolCalls: 0,
+      outboundSends: 0,
       factExportQueue: 0,
+      memoryConsolidationRuns: 0,
       metricsHourly: 0,
       decryptionFailures: 0,
       messages: 0,
@@ -681,14 +968,38 @@ describe('database retention', () => {
         exportedFactDays: 30,
         metricsHourlyDays: 180,
         decryptionFailureDays: 30,
+        memoryConsolidationDays: 30,
+        memoryConsolidationMaxRows: 10_000,
+        outboundSendDays: 30,
+        outboundSendMaxRows: 10_000,
         messageRetentionDays: 30,
       });
 
+      expect(timer.getHealthSnapshot()).toEqual({
+        running: false,
+        state: 'not_run',
+        consecutiveFailures: 0,
+        failureCode: null,
+        lastRunAt: null,
+        lastSuccessAt: null,
+        lastFailureAt: null,
+        lastResult: null,
+      });
       insertOldCompleteInbound('immediate-in');
       timer.start();
       timer.start();
       await Promise.resolve();
       expect(rowCount('inbound_events')).toBe(0);
+      expect(timer.getHealthSnapshot()).toMatchObject({
+        running: true,
+        state: 'succeeded',
+        consecutiveFailures: 0,
+        failureCode: null,
+        lastRunAt: expect.any(Number),
+        lastSuccessAt: expect.any(Number),
+        lastFailureAt: null,
+        lastResult: expect.objectContaining({ inboundEvents: 1 }),
+      });
 
       insertOldCompleteInbound('periodic-in');
       await vi.advanceTimersByTimeAsync(1_000);
@@ -697,6 +1008,7 @@ describe('database retention', () => {
       insertOldCompleteInbound('stopped-in');
       timer.stop();
       timer.stop();
+      expect(timer.getHealthSnapshot().running).toBe(false);
       await vi.advanceTimersByTimeAsync(1_000);
       expect(rowCount('inbound_events')).toBe(1);
     } finally {
@@ -713,6 +1025,10 @@ describe('database retention', () => {
         exportedFactDays: 30,
         metricsHourlyDays: 180,
         decryptionFailureDays: 30,
+        memoryConsolidationDays: 30,
+        memoryConsolidationMaxRows: 10_000,
+        outboundSendDays: 30,
+        outboundSendMaxRows: 10_000,
         messageRetentionDays: 30,
       });
       const emptyResult = {
@@ -721,7 +1037,9 @@ describe('database retention', () => {
         inboundEvents: 0,
         outboundOps: 0,
         toolCalls: 0,
+        outboundSends: 0,
         factExportQueue: 0,
+        memoryConsolidationRuns: 0,
         metricsHourly: 0,
         decryptionFailures: 0,
         messages: 0,
@@ -747,6 +1065,45 @@ describe('database retention', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it('timer records bounded failure state and clears it after a later success', async () => {
+    insertOldCompleteInbound('retention-health-failure');
+    db.raw.exec(`
+      CREATE TRIGGER deny_retention_health_delete
+      BEFORE DELETE ON inbound_events
+      BEGIN
+        SELECT RAISE(ABORT, 'retention health failure');
+      END;
+    `);
+    const timer = new DatabaseRetentionTimer(db, DEFAULT_DATABASE_RETENTION);
+
+    await expect(timer.runCleanup()).rejects.toThrow('retention health failure');
+    expect(timer.getHealthSnapshot()).toMatchObject({
+      running: false,
+      state: 'failed',
+      consecutiveFailures: 1,
+      failureCode: 'retention_failed',
+      lastRunAt: expect.any(Number),
+      lastSuccessAt: null,
+      lastFailureAt: expect.any(Number),
+      lastResult: null,
+    });
+
+    (timer as unknown as { consecutiveFailures: number }).consecutiveFailures = Number.MAX_SAFE_INTEGER;
+    await expect(timer.runCleanup()).rejects.toThrow('retention health failure');
+    expect(timer.getHealthSnapshot().consecutiveFailures).toBe(Number.MAX_SAFE_INTEGER);
+
+    db.raw.exec('DROP TRIGGER deny_retention_health_delete');
+    await expect(timer.runCleanup()).resolves.toMatchObject({ inboundEvents: 1 });
+    expect(timer.getHealthSnapshot()).toMatchObject({
+      state: 'succeeded',
+      consecutiveFailures: 0,
+      failureCode: null,
+      lastSuccessAt: expect.any(Number),
+      lastFailureAt: expect.any(Number),
+      lastResult: expect.objectContaining({ inboundEvents: 1 }),
+    });
   });
 
   function rowCount(tableName: string): number {

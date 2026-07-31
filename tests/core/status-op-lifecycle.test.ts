@@ -116,8 +116,14 @@ describe('status-op lifecycle (PR-C)', () => {
       `SELECT chat_jid, status, error FROM outbound_ops WHERE op_type='status_ping' ORDER BY id`,
     ).all() as Array<{ chat_jid: string; status: string; error: string | null }>;
 
-    // ping1 (CHAT) superseded by ping2 (CHAT).
-    expect(rows[0]).toMatchObject({ chat_jid: CHAT, status: 'failed_permanent', error: 'superseded' });
+    // ping1 (CHAT) had an ambiguous send, so supersession stops retries without
+    // inventing definitive non-delivery; a late echo can still settle it.
+    expect(rows[0]).toMatchObject({ chat_jid: CHAT, status: 'quarantined' });
+    expect(JSON.parse(rows[0].error as string)).toMatchObject({
+      failure_code: 'outbound.superseded',
+      mutation_state: 'ambiguous',
+      retry_decision: 'stop',
+    });
     // pingX (OTHER_CHAT) untouched — different chat.
     expect(rows[1].chat_jid).toBe(OTHER_CHAT);
     expect(rows[1].status).not.toBe('failed_permanent');
@@ -171,13 +177,18 @@ describe('status-op lifecycle (PR-C)', () => {
     const { resent, expired } = await drainPendingOutbound(messenger, durability);
 
     // Stale ping: quarantined + TTL alert, never sent.
-    expect(getOutbound(db, staleId)['status']).toBe('quarantined');
+    expect(getOutbound(db, staleId)).toMatchObject({
+      status: 'quarantined',
+      quarantine_disposition: 'stale_status_discarded',
+      quarantine_evidence_coverage: 'partial',
+    });
     expect(messenger.sendMessage).not.toHaveBeenCalledWith(CHAT, 'stale back online');
     expect(emitAlert).toHaveBeenCalledWith(
       'Loops',
-      'outbound_quarantined',
+      'outbound_status_discarded',
       expect.any(String),
-      expect.stringContaining('status_op_ttl_expired'),
+      expect.stringContaining('outbound.status_ping_expired'),
+      'info',
     );
     // Fresh ping: re-sent.
     expect(getOutbound(db, freshId)['status']).toBe('submitted');

@@ -11,7 +11,7 @@ import json
 import subprocess
 
 from corpus_guard import (  # noqa: E402
-    check_fail_open_scan, check_lean_corpus, check_probe_hygiene, check_two_plane_separation,
+    LIBRARIES, check_fail_open_scan, check_lean_corpus, check_probe_hygiene, check_two_plane_separation,
 )
 
 
@@ -132,6 +132,10 @@ def test_current_style_probe_hygiene_passes():
         report = check_probe_hygiene(root)
         assert report["status"] == "pass", report
         assert report["script_count"] == 2, report
+
+
+def test_bot_errors_probe_observation_is_declared_a_non_probe_library():
+    assert "bot_errors_probe_observation.py" in LIBRARIES, LIBRARIES
 
 
 def test_probe_hygiene_flags_missing_direct_or_unhappy_path_test_signal():

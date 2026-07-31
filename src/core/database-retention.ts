@@ -2,6 +2,7 @@ import { createChildLogger } from '../logger.ts';
 import type { Database } from './database.ts';
 import { withTransaction } from './db-tx.ts';
 import { deleteOldMessages } from './messages.ts';
+import { maintainOutboundSends } from './outbound-sends.ts';
 
 const log = createChildLogger('database:retention');
 
@@ -25,6 +26,14 @@ export interface DatabaseRetentionConfig {
    * well above the heal degradation-signal horizon (5 min, see core/heal.ts).
    */
   decryptionFailureDays: number;
+  /** Age bound for content-free terminal memory-consolidation receipts. */
+  memoryConsolidationDays: number;
+  /** Hard terminal-row cap; values below the 100-row recovery floor become 100. */
+  memoryConsolidationMaxRows: number;
+  /** Age bound for terminal metadata-only outbound audit evidence. */
+  outboundSendDays: number;
+  /** Hard cap for terminal outbound audit evidence; unresolved intents are excluded. */
+  outboundSendMaxRows: number;
   /**
    * Retention window for the `messages` table and its orphaned `receipts`
    * rows (#1445 QR-012). Folded in from the standalone main.ts setInterval
@@ -43,10 +52,23 @@ export interface DatabaseRetentionResult {
   inboundEvents: number;
   outboundOps: number;
   toolCalls: number;
+  outboundSends: number;
   factExportQueue: number;
+  memoryConsolidationRuns: number;
   metricsHourly: number;
   decryptionFailures: number;
   messages: number;
+}
+
+export interface DatabaseRetentionHealth {
+  running: boolean;
+  state: 'not_run' | 'succeeded' | 'failed';
+  consecutiveFailures: number;
+  failureCode: 'retention_failed' | null;
+  lastRunAt: number | null;
+  lastSuccessAt: number | null;
+  lastFailureAt: number | null;
+  lastResult: DatabaseRetentionResult | null;
 }
 
 export const DEFAULT_DATABASE_RETENTION: DatabaseRetentionConfig = {
@@ -55,8 +77,18 @@ export const DEFAULT_DATABASE_RETENTION: DatabaseRetentionConfig = {
   exportedFactDays: 30,
   metricsHourlyDays: 180,
   decryptionFailureDays: 30,
+  memoryConsolidationDays: 30,
+  memoryConsolidationMaxRows: 10_000,
+  outboundSendDays: 30,
+  outboundSendMaxRows: 10_000,
   messageRetentionDays: 30,
 };
+
+/**
+ * Unsafe-delivery and legacy quarantine evidence needs a longer operator
+ * review window than terminal rows proven never to have reached a provider.
+ */
+export const OUTBOUND_QUARANTINE_EXTENDED_RETENTION_DAYS = 90;
 
 function daysModifier(days: number): string {
   return `-${Math.max(1, Math.floor(days))} days`;
@@ -71,6 +103,10 @@ export function runDatabaseRetention(
   retention: DatabaseRetentionConfig = DEFAULT_DATABASE_RETENTION,
 ): DatabaseRetentionResult {
   const terminalCutoff = daysModifier(retention.terminalDurabilityDays);
+  const extendedQuarantineCutoff = daysModifier(Math.max(
+    retention.terminalDurabilityDays,
+    OUTBOUND_QUARANTINE_EXTENDED_RETENTION_DAYS,
+  ));
   const factCutoff = daysModifier(retention.exportedFactDays);
 
   const result = withTransaction(db, () => {
@@ -192,7 +228,52 @@ export function runDatabaseRetention(
     const outboundOps = changes(db.raw.prepare(`
       DELETE FROM outbound_ops
        WHERE status IN ('echoed', 'failed_permanent', 'quarantined')
-         AND created_at < datetime('now', ?)
+         AND CASE
+           WHEN status = 'quarantined' THEN CASE
+             -- An ambiguous or legacy quarantine remains an open incident
+            -- until the reviewed retirement command records its acknowledgement.
+            WHEN quarantine_disposition IN (
+              'delivery_not_attempted',
+              'stale_status_discarded'
+            )
+               THEN COALESCE(quarantined_at, created_at) < datetime('now', ?)
+             ELSE 0
+           END
+           WHEN status = 'failed_permanent' AND quarantined_at IS NOT NULL THEN CASE
+             -- A terminalized quarantine is not resolved until a valid bounded
+             -- retirement receipt ties its disposition, acknowledgement, and
+             -- canonical evidence digest together.
+             WHEN EXISTS (
+               SELECT 1
+                 FROM outbound_quarantine_retirements retirement
+                WHERE retirement.outbound_op_id = outbound_ops.id
+                  AND retirement.quarantine_disposition = outbound_ops.quarantine_disposition
+                  AND (
+                    (retirement.quarantine_disposition = 'delivery_ambiguous_unsafe'
+                      AND retirement.acknowledgement = 'delivery-risk-reviewed')
+                    OR (retirement.quarantine_disposition = 'record_unreconstructable'
+                      AND retirement.acknowledgement = 'record-reconstruction-reviewed')
+                    OR (retirement.quarantine_disposition IN ('delivery_not_attempted', 'stale_status_discarded')
+                      AND retirement.acknowledgement = 'none')
+                  )
+                  AND retirement.evidence_sha256 = outbound_ops.quarantine_evidence_sha256
+                  AND length(outbound_ops.quarantine_evidence_sha256) = 64
+                  AND outbound_ops.quarantine_evidence_sha256 NOT GLOB '*[^0-9a-f]*'
+                  AND length(retirement.evidence_sha256) = 64
+                  AND retirement.evidence_sha256 NOT GLOB '*[^0-9a-f]*'
+             ) THEN CASE
+               WHEN quarantine_disposition IN (
+                 'delivery_not_attempted',
+                 'record_unreconstructable',
+                 'stale_status_discarded'
+               )
+                 THEN COALESCE(quarantined_at, created_at) < datetime('now', ?)
+               ELSE COALESCE(quarantined_at, created_at) < datetime('now', ?)
+             END
+             ELSE 0
+           END
+           ELSE created_at < datetime('now', ?)
+         END
          AND NOT EXISTS (
            SELECT 1
              FROM turn_terminal_records
@@ -203,7 +284,12 @@ export function runDatabaseRetention(
              FROM turn_delivery_corroboration
             WHERE corroborating_op_id = outbound_ops.id
          )
-    `).run(terminalCutoff));
+    `).run(
+      terminalCutoff,
+      terminalCutoff,
+      extendedQuarantineCutoff,
+      terminalCutoff,
+    ));
 
     const toolCalls = changes(db.raw.prepare(`
       DELETE FROM tool_calls
@@ -211,11 +297,48 @@ export function runDatabaseRetention(
          AND COALESCE(completed_at, created_at) < datetime('now', ?)
     `).run(terminalCutoff));
 
+    const outboundSends = maintainOutboundSends(db.raw, {
+      mode: 'apply',
+      terminalDays: retention.outboundSendDays,
+      terminalMaxRows: retention.outboundSendMaxRows,
+    }).deletedRows;
+
     const factExportQueue = changes(db.raw.prepare(`
       DELETE FROM fact_export_queue
        WHERE status = 'exported'
          AND COALESCE(exported_at, created_at) < datetime('now', ?)
     `).run(factCutoff));
+
+    const memoryConsolidationMaxAgeMs =
+      Math.max(1, Math.floor(retention.memoryConsolidationDays)) * 86_400_000;
+    const memoryConsolidationMaxRows = Math.max(
+      100,
+      Math.floor(retention.memoryConsolidationMaxRows),
+    );
+    const memoryConsolidationRuns = changes(db.raw.prepare(`
+      DELETE FROM memory_consolidation_runs
+       WHERE completed_at IS NOT NULL
+         AND (
+           (
+             completed_at
+               < CAST(strftime('%s', 'now') AS INTEGER) * 1000 - ?
+             AND run_id NOT IN (
+               SELECT run_id
+                 FROM memory_consolidation_runs
+                WHERE completed_at IS NOT NULL
+                ORDER BY attempted_at DESC, run_id DESC
+                LIMIT 100
+             )
+           )
+           OR run_id IN (
+             SELECT run_id
+               FROM memory_consolidation_runs
+              WHERE completed_at IS NOT NULL
+              ORDER BY attempted_at DESC, run_id DESC
+              LIMIT -1 OFFSET ?
+           )
+         )
+    `).run(memoryConsolidationMaxAgeMs, memoryConsolidationMaxRows));
 
     // metrics_hourly is an append-only rollup keyed on an ISO-8601 `bucket`
     // (written via toISOString()); datetime(bucket) normalizes it for comparison.
@@ -256,7 +379,9 @@ export function runDatabaseRetention(
       inboundEvents,
       outboundOps,
       toolCalls,
+      outboundSends,
       factExportQueue,
+      memoryConsolidationRuns,
       metricsHourly,
       decryptionFailures,
       messages,
@@ -273,6 +398,13 @@ export class DatabaseRetentionTimer {
   private timer: ReturnType<typeof setInterval> | null = null;
   private db: Database;
   private retention: DatabaseRetentionConfig;
+  private lastRunAt: number | null = null;
+  private lastSuccessAt: number | null = null;
+  private lastFailureAt: number | null = null;
+  private lastResult: DatabaseRetentionResult | null = null;
+  private state: DatabaseRetentionHealth['state'] = 'not_run';
+  private consecutiveFailures = 0;
+  private failureCode: DatabaseRetentionHealth['failureCode'] = null;
 
   constructor(
     db: Database,
@@ -300,7 +432,38 @@ export class DatabaseRetentionTimer {
     this.timer = null;
   }
 
+  getHealthSnapshot(): DatabaseRetentionHealth {
+    return {
+      running: this.timer !== null,
+      state: this.state,
+      consecutiveFailures: this.consecutiveFailures,
+      failureCode: this.failureCode,
+      lastRunAt: this.lastRunAt,
+      lastSuccessAt: this.lastSuccessAt,
+      lastFailureAt: this.lastFailureAt,
+      lastResult: this.lastResult === null ? null : { ...this.lastResult },
+    };
+  }
+
   async runCleanup(): Promise<DatabaseRetentionResult> {
-    return runDatabaseRetention(this.db, this.retention);
+    this.lastRunAt = Date.now();
+    try {
+      const result = runDatabaseRetention(this.db, this.retention);
+      this.lastSuccessAt = Date.now();
+      this.lastResult = { ...result };
+      this.state = 'succeeded';
+      this.consecutiveFailures = 0;
+      this.failureCode = null;
+      return result;
+    } catch (err) {
+      this.lastFailureAt = Date.now();
+      this.state = 'failed';
+      this.consecutiveFailures = Math.min(
+        Number.MAX_SAFE_INTEGER,
+        this.consecutiveFailures + 1,
+      );
+      this.failureCode = 'retention_failed';
+      throw err;
+    }
   }
 }

@@ -86,6 +86,7 @@ const SCOPE_MAP: Record<string, ScopeEntry> = {
   'fail-closed-gate': { class: 'probe-refuse', reason: 'scans shell files under cwd; refuses "no scan root"', probe: { via: 'cwd' } },
   'insecure-tempfile': { class: 'probe-refuse', reason: 'scans cwd (argv2 ?? cwd); refuses "examined 0 files" (#2102)', probe: { via: 'cwd' } },
   'no-destructive-git': { class: 'probe-refuse', reason: 'scans cwd (argv2 ?? cwd); refuses "examined 0 files" (#2102)', probe: { via: 'cwd' } },
+  'zero-byte-tracked': { class: 'probe-refuse', reason: 'enumerates git ls-files under cwd (argv2 ?? cwd); observed exit 2 on both an empty git repo ("examined 0 tracked files") and a non-git dir (git ls-files fatal -> fail-closed)', probe: { via: 'cwd' } },
   boundaries: { class: 'probe-refuse', reason: 'import-boundary walks cwd src; refuses "examined 0 source file(s)" (#2102)', probe: { via: 'cwd' } },
   'grant-resolver': { class: 'probe-refuse', reason: 'walks cwd/src; floor added this session — refuses "examined 0 source file(s)"', probe: { via: 'cwd' } },
   publication: { class: 'probe-refuse', reason: 'default mode all audits git ls-files; floor added this session — refuses 0 tracked files', probe: { via: 'cwd' } },
@@ -94,6 +95,7 @@ const SCOPE_MAP: Record<string, ScopeEntry> = {
   'phantom-deps': { class: 'probe-refuse', reason: 'import.meta-rooted but takes --repo; refuses "implausibly small" (floors 200/300)', probe: { via: 'flag', flag: '--repo' } },
   'hooks-installed': { class: 'probe-refuse', reason: 'resolves cwd git config core.hooksPath and the checked-out hook objects; refuses ci.hooks.evidence-unavailable (exit 2) when neither a repo nor hooks resolve', probe: { via: 'cwd' } },
   'transport-patterns': { class: 'probe-refuse', reason: 'walks glob roots; takes --root; floor added this session — refuses "matched 0 files"', probe: { via: 'flag', flag: '--root' } },
+  'platform-patterns': { class: 'probe-refuse', reason: 'scans cwd tree for platform-specific patterns; takes --root; floor added this session — refuses "matched 0 files"', probe: { via: 'flag', flag: '--root' } },
 
   // ---- probe-nonzero: cwd-relative fixed-artifact guards that fail closed on an empty tree ----
   'doc-drift': { class: 'probe-nonzero', reason: 'reads cwd docs/ manifests; ENOENT -> non-zero', probe: { via: 'cwd' } },
@@ -102,6 +104,7 @@ const SCOPE_MAP: Record<string, ScopeEntry> = {
   'work-index': { class: 'probe-nonzero', reason: 'reads cwd work-index; ENOENT -> non-zero', probe: { via: 'cwd' } },
   'harness-maintenance': { class: 'probe-nonzero', reason: 'reads cwd deploy/managed-components.json; ENOENT -> non-zero', probe: { via: 'cwd' } },
   'agent-iteration-review': { class: 'probe-nonzero', reason: 'requires an artifact path; absent -> non-zero usage error', probe: { via: 'cwd' } },
+  'pr-metadata': { class: 'probe-nonzero', reason: 'requires exactly one explicit PR body/event source plus authoritative full-OID range inputs; no source exits 2 INCONCLUSIVE', probe: { via: 'cwd' } },
   'worker-artifacts': { class: 'probe-nonzero', reason: 'reads cwd artifacts/opencode-workers; ENOENT -> non-zero', probe: { via: 'cwd' } },
   'source-runtime-drift': { class: 'probe-nonzero', reason: 'reads cwd runtime manifest; ENOENT -> non-zero', probe: { via: 'cwd' } },
   'arc-binding-drift': { class: 'probe-nonzero', reason: 'reads cwd .arc/ binding; drift/absent -> non-zero', probe: { via: 'cwd' } },
@@ -138,6 +141,7 @@ const SCOPE_MAP: Record<string, ScopeEntry> = {
   'lint:src': { class: 'skip-immune', reason: 'eslint-fitness CLI is locked to repoRoot (ignores argv); internal filesLinted===0 floor added this session + own unit test covers it' },
   'catch-ratchet': { class: 'skip-immune', reason: 'generator is import.meta-rooted and ignores cwd; its zero-file scan fails closed and is covered by generate-catch-ratchet.test.ts' },
   'durability-writer': { class: 'skip-immune', reason: 'SCRIPT_DIR/REPO_ROOT-rooted (REPO_ROOT = SCRIPT_DIR/..); scans the real repo regardless of cwd (verified empty-cwd exit 0). Its discoveredTableCount===0 -> exit 2 non-vacuity floor + the paired durability-writer-guard.test.ts cover the empty/inconclusive case (#1789)' },
+  'hardcoded-tmpdir': { class: 'skip-immune', reason: 'import.meta-rooted (ROOT = import.meta.dirname/..); scan() takes an explicit root param for testability but the CLI entrypoint always passes the real repo root, ignoring cwd. Its filesScanned===0 -> throw -> exit 2 INCONCLUSIVE non-vacuity floor (same pattern as catch-ratchet\'s results.length===0 throw) + the paired check-hardcoded-tmpdir.test.ts cover the empty/inconclusive case' },
 
   // ---- skip-network: needs a live API, not offline-judgeable ----
   'branch-protection-drift': { class: 'skip-network', reason: 'pipes `gh api` branch protection into the check; cannot be judged against an offline empty tree' },

@@ -77,10 +77,21 @@ describe('platform', () => {
       expect(plist).toContain('com.whatsoup.safe-name');
     });
 
-    it('includes KeepAlive Crashed semantics', () => {
+    it('relaunches on any non-successful exit, not only signal crashes (#2682)', () => {
       const plist = buildPlist('test');
+      // exit(1) on reconnect-exhaustion/unhandledRejection is deliberate and MUST
+      // relaunch under launchd; Crashed:true alone ignores clean non-zero exits.
+      // Combined form per docs/runbooks/macos-host-setup.md bot-plist standard.
+      expect(plist).toContain('<key>SuccessfulExit</key>');
+      expect(plist).toContain('<false/>');
       expect(plist).toContain('<key>Crashed</key>');
       expect(plist).toContain('<true/>');
+    });
+
+    it('throttles relaunch to avoid a tight crash loop (#2682)', () => {
+      const plist = buildPlist('test');
+      expect(plist).toContain('<key>ThrottleInterval</key>');
+      expect(plist).toContain('<integer>60</integer>');
     });
 
     it('includes log paths', () => {

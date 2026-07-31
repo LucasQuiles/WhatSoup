@@ -39,6 +39,37 @@ function streamErrorReq(message: string): IncomingMessage {
   return stream;
 }
 
+function expectClosedSilenceRegistryError(body: unknown, retryable: boolean): void {
+  expect(body).toMatchObject({
+    schema: 'fleet-error-v1',
+    code: 'silence_registry_unavailable',
+    operation: 'silence',
+    stage: 'precondition',
+    message: 'The silence registry is unavailable.',
+    retryable,
+    mutation_state: 'not_started',
+    rollback_state: 'not_applicable',
+    correlation_id: expect.stringMatching(/^[0-9a-f-]{36}$/),
+  });
+  expect(body).not.toHaveProperty('error');
+  expect(body).not.toHaveProperty('reasonClass');
+  expect(body).not.toHaveProperty('readBasis');
+}
+
+function expectSilenceRuleValidationError(body: unknown): void {
+  expect(body).toMatchObject({
+    schema: 'fleet-error-v1',
+    code: 'validation_failed',
+    operation: 'silence',
+    stage: 'parse',
+    message: 'Invalid silence rule.',
+    retryable: false,
+    mutation_state: 'not_started',
+    rollback_state: 'not_applicable',
+    correlation_id: expect.stringMatching(/^[0-9a-f-]{36}$/),
+  });
+}
+
 async function importRoutes(): Promise<typeof import('../../../src/fleet/routes/silence.ts')> {
   return import('../../../src/fleet/routes/silence.ts');
 }
@@ -86,7 +117,9 @@ describe('fleet silence routes', () => {
 
     expect(res._status).toBe(200);
     expect(res._headers['Content-Type']).toBe('application/json');
-    expect(JSON.parse(res._body)).toEqual({
+    const body = JSON.parse(res._body);
+    expect(body).toMatchObject({
+      availability: 'observed',
       silences: [
         {
           instance: 'q',
@@ -97,6 +130,85 @@ describe('fleet silence routes', () => {
         },
       ],
     });
+    expect(body.observedAt).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+    expect(body.revision).toMatch(/^sha256:[a-f0-9]{64}$/);
+  });
+
+  it('reports first-run absence as uninitialized rather than an observed empty registry', async () => {
+    const { handleGetSilences } = await importRoutes();
+    const res = mockRes();
+
+    await handleGetSilences(mockReq({ method: 'GET', url: '/api/fleet/silences' }), res);
+
+    expect(res._status).toBe(200);
+    const body = JSON.parse(res._body);
+    expect(body).toMatchObject({ availability: 'uninitialized', silences: [] });
+    expect(body.observedAt).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+  });
+
+  it('reports an invalid registry as unavailable without exposing its contents', async () => {
+    mkdirSync(configDir(), { recursive: true });
+    const marker = '{corrupt-registry-marker';
+    writeFileSync(silencesFile(), marker);
+    const { handleGetSilences } = await importRoutes();
+    const res = mockRes();
+
+    await handleGetSilences(mockReq({ method: 'GET', url: '/api/fleet/silences' }), res);
+
+    expect(res._status).toBe(503);
+    expectClosedSilenceRegistryError(JSON.parse(res._body), false);
+    expect(res._body).not.toContain(marker);
+  });
+
+  it('exposes a bounded stale last-known-good read but blocks destructive mutations', async () => {
+    const rule = {
+      instance: 'maintenance-line',
+      until: new Date(Date.now() + 60_000).toISOString(),
+      reason: 'maintenance',
+      silencedBy: 'operator',
+      createdAt: new Date().toISOString(),
+    };
+    writeSilences([rule]);
+    const { handleAddSilence, handleGetSilences, handleRemoveSilence } = await importRoutes();
+
+    const observed = mockRes();
+    await handleGetSilences(mockReq({ method: 'GET', url: '/api/fleet/silences' }), observed);
+    expect(JSON.parse(observed._body)).toMatchObject({ availability: 'observed', silences: [rule] });
+
+    const marker = '{corrupt-registry-marker';
+    writeFileSync(silencesFile(), marker);
+    const stale = mockRes();
+    await handleGetSilences(mockReq({ method: 'GET', url: '/api/fleet/silences' }), stale);
+    expect(stale._status).toBe(200);
+    const staleBody = JSON.parse(stale._body);
+    expect(staleBody).toMatchObject({
+      availability: 'invalid',
+      readBasis: 'last_known_good',
+      silences: [rule],
+      reasonClass: 'invalid_json',
+      lastKnownGoodAt: expect.stringMatching(/^\d{4}-\d{2}-\d{2}T/),
+      revision: expect.stringMatching(/^sha256:[a-f0-9]{64}$/),
+    });
+    expect(stale._body).not.toContain(marker);
+
+    const add = mockRes();
+    await handleAddSilence(
+      mockReq({
+        method: 'POST',
+        url: '/api/fleet/silence',
+        body: JSON.stringify({ instance: 'new-line', duration_minutes: 15 }),
+      }),
+      add,
+    );
+    expect(add._status).toBe(409);
+    expectClosedSilenceRegistryError(JSON.parse(add._body), false);
+    expect(readFileSync(silencesFile(), 'utf8')).toBe(marker);
+
+    const remove = mockRes();
+    await handleRemoveSilence(mockReq({ method: 'DELETE' }), remove, { instance: 'maintenance-line' });
+    expect(remove._status).toBe(409);
+    expectClosedSilenceRegistryError(JSON.parse(remove._body), false);
+    expect(readFileSync(silencesFile(), 'utf8')).toBe(marker);
   });
 
   it('adds a silence with a default reason and persists restrictive file permissions', async () => {
@@ -285,6 +397,45 @@ describe('fleet silence routes', () => {
     expect(() => readFileSync(silencesFile(), 'utf8')).toThrow();
   });
 
+  it('rejects a rule that would fail persisted-registry validation', async () => {
+    const { handleAddSilence } = await importRoutes();
+    const res = mockRes();
+
+    await handleAddSilence(
+      mockReq({
+        method: 'POST',
+        url: '/api/fleet/silence',
+        body: JSON.stringify({ instance: 'q', duration_minutes: 15, reason: '   ' }),
+      }),
+      res,
+    );
+
+    expect(res._status).toBe(400);
+    expectSilenceRuleValidationError(JSON.parse(res._body));
+    expect(() => readFileSync(silencesFile(), 'utf8')).toThrow();
+  });
+
+  it('rejects an add against an invalid registry without replacing its original bytes', async () => {
+    mkdirSync(configDir(), { recursive: true });
+    const marker = '{corrupt-registry-marker';
+    writeFileSync(silencesFile(), marker);
+    const { handleAddSilence } = await importRoutes();
+    const res = mockRes();
+
+    await handleAddSilence(
+      mockReq({
+        method: 'POST',
+        url: '/api/fleet/silence',
+        body: JSON.stringify({ instance: 'q', duration_minutes: 15 }),
+      }),
+      res,
+    );
+
+    expect(res._status).toBe(503);
+    expectClosedSilenceRegistryError(JSON.parse(res._body), false);
+    expect(readFileSync(silencesFile(), 'utf8')).toBe(marker);
+  });
+
   it('reports request stream failures without persisting a silence', async () => {
     const { handleAddSilence } = await importRoutes();
     const res = mockRes();
@@ -292,7 +443,10 @@ describe('fleet silence routes', () => {
     await handleAddSilence(streamErrorReq('socket reset while reading'), res);
 
     expect(res._status).toBe(400);
-    expect(JSON.parse(res._body)).toEqual({ error: 'socket reset while reading' });
+    const streamBody = JSON.parse(res._body);
+    expect(streamBody.schema).toBe('fleet-error-v1');
+    expect(streamBody.code).toBe('validation_failed');
+    expect(streamBody.operation).toBe('silence');
     expect(() => readFileSync(silencesFile(), 'utf8')).toThrow();
   });
 
@@ -303,7 +457,10 @@ describe('fleet silence routes', () => {
     await handleAddSilence(mockReq({ method: 'POST', url: '/api/fleet/silence', body: 'x'.repeat(64 * 1024 + 1) }), res);
 
     expect(res._status).toBe(400);
-    expect(JSON.parse(res._body)).toEqual({ error: 'request body too large' });
+    const tooLargeBody = JSON.parse(res._body);
+    expect(tooLargeBody.schema).toBe('fleet-error-v1');
+    expect(tooLargeBody.code).toBe('validation_failed');
+    expect(tooLargeBody.operation).toBe('silence');
     expect(() => readFileSync(silencesFile(), 'utf8')).toThrow();
   });
 
@@ -329,5 +486,19 @@ describe('fleet silence routes', () => {
     expect(removeRes._status).toBe(200);
     expect(JSON.parse(removeRes._body)).toEqual({ ok: true });
     expect(JSON.parse(readFileSync(silencesFile(), 'utf8'))).toEqual([]);
+  });
+
+  it('rejects a removal against an invalid registry without replacing its original bytes', async () => {
+    mkdirSync(configDir(), { recursive: true });
+    const marker = '{corrupt-registry-marker';
+    writeFileSync(silencesFile(), marker);
+    const { handleRemoveSilence } = await importRoutes();
+    const res = mockRes();
+
+    await handleRemoveSilence(mockReq({ method: 'DELETE' }), res, { instance: 'q' });
+
+    expect(res._status).toBe(503);
+    expectClosedSilenceRegistryError(JSON.parse(res._body), false);
+    expect(readFileSync(silencesFile(), 'utf8')).toBe(marker);
   });
 });

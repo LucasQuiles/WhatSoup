@@ -98,6 +98,20 @@ export const BASELINE_REGISTRY: readonly RegisteredBaseline[] = [
     initialWeight: 127,
     tolerates: 'inherited catch blocks that swallow failures without meaningful handling',
   },
+  {
+    id: 'tmpdir',
+    path: '.claude/fitness/tmpdir-baseline.json',
+    shape: 'entry-array',
+    initialWeight: 8,
+    tolerates: 'hardcoded /tmp/ path literals not yet migrated to os.tmpdir()',
+  },
+  {
+    id: 'platform-baseline',
+    path: '.claude/fitness/platform-baseline.json',
+    shape: 'entry-array',
+    initialWeight: 73,
+    tolerates: 'portability enforcement rule violations in the repository',
+  },
 ];
 
 /** Raised when a baseline cannot be weighed. Callers MUST map this to INCONCLUSIVE. */

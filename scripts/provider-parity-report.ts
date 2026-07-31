@@ -3,13 +3,14 @@ import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 import {
+  PROVIDER_PROBE_SNAPSHOT_STATES,
   evaluateProviderParity,
   exitCodeForProviderParityReport,
   type ProviderParityExpectation,
   type ProviderParityInput,
   type ProviderParityInstanceType,
-  type ProviderParityProbeState,
   type ProviderParityReport,
+  type ProviderProbeSnapshotState,
 } from '../src/fleet/provider-parity.ts';
 import { assertNoSecretLike } from './artifact-redaction.ts';
 
@@ -28,13 +29,7 @@ const EXPECTATION_VALUES: ReadonlySet<ProviderParityExpectation> = new Set([
   'owner_deferred',
 ]);
 const INSTANCE_TYPE_VALUES: ReadonlySet<ProviderParityInstanceType> = new Set(['agent', 'chat', 'unknown']);
-const PROBE_STATE_VALUES: ReadonlySet<ProviderParityProbeState | 'headless_auth_inconclusive'> = new Set([
-  'ok',
-  'failed',
-  'skipped',
-  'headless_auth_inconclusive',
-  'inconclusive',
-]);
+const PROBE_STATE_VALUES: ReadonlySet<ProviderProbeSnapshotState> = new Set(PROVIDER_PROBE_SNAPSHOT_STATES);
 
 function parseArgs(argv: string[]): ProviderParityReportArgs {
   let inputPath = '';

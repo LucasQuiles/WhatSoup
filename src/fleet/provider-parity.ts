@@ -1,11 +1,27 @@
 import { lacksIndependentFallback, type AgentFallbackEntry } from '../core/fallback-chain.ts';
 import { PROVIDER_IDS } from '../runtimes/agent/providers/index.ts';
 
+export const PROVIDER_PROBE_SNAPSHOT_STATES = [
+  'ok',
+  'failed',
+  'skipped',
+  'headless_auth_inconclusive',
+  'inconclusive',
+] as const;
+
+export type ProviderProbeSnapshotState = typeof PROVIDER_PROBE_SNAPSHOT_STATES[number];
 export type ProviderParityExpectation = 'always_on' | 'on_demand' | 'no_bot' | 'blocked' | 'owner_deferred';
 export type ProviderParityInstanceType = 'agent' | 'chat' | 'unknown';
 export type ProviderParityVerdict = 'green' | 'warn' | 'blocked' | 'inconclusive' | 'not_applicable';
 export type ProviderParityCredentialState = 'present' | 'missing' | 'native' | 'mixed' | 'unknown';
-export type ProviderParityProbeState = 'ok' | 'failed' | 'skipped' | 'inconclusive' | 'not_required' | 'unknown';
+// Aggregate probe state derives from the per-probe snapshot domain so a new
+// snapshot state cannot silently diverge: 'headless_auth_inconclusive'
+// collapses to 'inconclusive' at aggregation (see providerProbeState), and
+// the set-level-only states are added explicitly.
+export type ProviderParityProbeState =
+  | Exclude<ProviderProbeSnapshotState, 'headless_auth_inconclusive'>
+  | 'not_required'
+  | 'unknown';
 
 export interface ProviderParityExpectedInstance {
   host: string;
@@ -45,7 +61,7 @@ export interface ProviderProbeSnapshot {
   host: string;
   instance: string;
   provider: string;
-  state: 'ok' | 'failed' | 'skipped' | 'headless_auth_inconclusive' | 'inconclusive';
+  state: ProviderProbeSnapshotState;
   evidenceRef?: string;
   reason?: string;
 }

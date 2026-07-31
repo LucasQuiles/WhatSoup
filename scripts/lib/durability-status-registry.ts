@@ -191,11 +191,21 @@ export const REGISTRY: DurabilityStatusEntry[] = [
   },
   {
     table: 'outbound_sends',
-    statusColumn: 'status',
-    vocabulary: ['intent', 'sent', 'failed'],
+    statusColumn: 'outcome_code',
+    vocabulary: [
+      'intent',
+      'submitted',
+      'confirmed',
+      'failed_not_sent',
+      'ambiguous',
+      'legacy_unclassified',
+    ],
     vocabularySource: 'sql-check',
-    terminalFailureValues: ['failed'],
-    writerSites: ['src/core/outbound-sends.ts'], // markFailed prepared statement
+    terminalFailureValues: ['failed_not_sent', 'ambiguous', 'legacy_unclassified'],
+    writerSites: [
+      'src/core/durability-evidence-contract.ts',
+      'src/core/database-migration-51.ts',
+    ],
   },
   {
     table: 'scheduled_messages',
@@ -295,6 +305,23 @@ export const REGISTRY: DurabilityStatusEntry[] = [
     terminalFailureValues: ['failed'],
     writerSites: ['src/core/background-work-store.ts'], // releaseWorkResultDelivery(retryable=false)
   },
+  {
+    table: 'memory_consolidation_runs',
+    statusColumn: 'status',
+    vocabulary: [
+      'running',
+      'cancelling',
+      'no_work',
+      'completed',
+      'partial',
+      'failed',
+      'cancelled',
+      'abandoned',
+    ],
+    vocabularySource: 'sql-check',
+    terminalFailureValues: ['partial', 'failed', 'cancelled', 'abandoned'],
+    writerSites: ['src/memory/consolidation-run-store.ts'],
+  },
 ];
 
 /**
@@ -379,6 +406,7 @@ export const NON_STATUS_TABLES: Set<string> = new Set([
   'messages_fts_idx',
   'metrics_hourly',
   'operator_catchup_closure_witnesses',
+  'outbound_quarantine_retirements',
   'pending_heal_reports',
   'pending_polls',
   'rate_limits',
@@ -460,6 +488,13 @@ export const SELF_PROVISIONED: SelfProvisionedEntry[] = [
       'two-column key/value schema-version marker; matches the status regex only via incidental DDL text in the same module, carries no lifecycle semantics.',
   },
   {
+    table: 'producers',
+    module: 'src/fleet/incidents/schema.ts',
+    reason: 'incident control plane producer registry (migration v2 of the dedicated fleet incident database); provisioned by openIncidentDb, not the instance message DB migration ledger.',
+    justification:
+      'status is an admin enable/revoke flag whose transitions are root-gated operator actions (audited by the Plan-4 surface), not a #1789 lifecycle column with a terminal-failure value some writer must prove.',
+  },
+  {
     table: 'pending_poll_decisions',
     module: 'src/fleet/routes/approvals.ts',
     reason: 'offline durable fallback queue for poll decisions when the fleet proxy returns 502 (v1.1 design D2(b)); created lazily inline at the write site, not a numbered global migration.',
@@ -485,8 +520,16 @@ export const SELF_PROVISIONED: SelfProvisionedEntry[] = [
  */
 export const DISCOVERY_EXCLUSIONS: DiscoveryExclusionEntry[] = [
   {
+    table: 'tool_calls_v50',
+    reason: 'migration-50 transient create-copy-drop-rename artifact; the rebuilt table persists only after being renamed to tool_calls.',
+  },
+  {
     table: 'outbound_sends_v26',
     reason: "migration-26 transient create->copy->rename artifact (src/core/database.ts:521-575): outbound_sends_v26 is CREATEd, populated from the old outbound_sends via INSERT...SELECT, then the old table is DROPped and this one RENAMEd to outbound_sends — it never exists as a persisted table under its own name, so it never appears in migratedSchemaSnapshot() and needs no SELF_PROVISIONED entry.",
+  },
+  {
+    table: 'outbound_sends_v51',
+    reason: 'migration-51 transient create-copy-drop-rename artifact; the rebuilt table persists only after being renamed to outbound_sends.',
   },
 ];
 

@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { Database } from '../../src/core/database.ts';
 import { DurabilityEngine, sendTracked } from '../../src/core/durability.ts';
 import type { OutboundOpParams } from '../../src/core/durability.ts';
+import { createInternalOutboundFailureEvidence } from '../../src/core/outbound-failure-disposition.ts';
 
 const BASE_OP: OutboundOpParams = {
   conversationKey: 'key-1',
@@ -199,10 +200,32 @@ describe('DurabilityEngine', () => {
       engine.markMaybeSent(id, 'EPIPE');
       const row = db.raw.prepare('SELECT * FROM outbound_ops WHERE id = ?').get(id) as any;
       expect(row.status).toBe('maybe_sent');
-      expect(row.error).toBe('EPIPE');
+      expect(JSON.parse(row.error)).toMatchObject({
+        failure_code: 'outbound.unknown_failure',
+        mutation_state: 'ambiguous',
+      });
     });
 
-    it('getHealthStats surfaces the maybe_sent count and oldest submission age (#1865)', () => {
+    it('failure transitions cannot overwrite an echo that won the race', () => {
+      const id = engine.createOutboundOp({
+        conversationKey: 'k',
+        chatJid: 'j',
+        opType: 'text',
+        payload: '{}',
+        replayPolicy: 'unsafe',
+      });
+      engine.markSending(id);
+      engine.markSubmitted(id, 'WA_ECHO_WON');
+      engine.markEchoed(id);
+
+      expect(engine.markMaybeSent(id, 'late timeout')).toBe(false);
+      expect(engine.markFailedPermanent(id, 'late rejection')).toBe(false);
+      expect(engine.markQuarantined(id)).toBe(false);
+      expect(db.raw.prepare('SELECT status, error FROM outbound_ops WHERE id = ?').get(id))
+        .toMatchObject({ status: 'echoed', error: null });
+    });
+
+    it('getHealthStats surfaces the maybe_sent count and oldest ambiguity episode age (#1865)', () => {
       expect(engine.getHealthStats().maybeSentOutbound).toBe(0);
       expect(engine.getHealthStats().oldestMaybeSentAt).toBeNull();
 
@@ -210,9 +233,9 @@ describe('DurabilityEngine', () => {
       engine.markSending(id);
       engine.markSubmitted(id, 'WA_MSG_1865');
       engine.markMaybeSent(id, 'echo_timeout');
-      // Back-date submission to one hour ago to simulate a long-unresolved ambiguous delivery.
+      // Back-date the active ambiguity episode to simulate a long-unresolved delivery.
       db.raw
-        .prepare(`UPDATE outbound_ops SET submitted_at = datetime('now', '-3600 seconds') WHERE id = ?`)
+        .prepare(`UPDATE outbound_ops SET ambiguity_at = datetime('now', '-3600 seconds') WHERE id = ?`)
         .run(id);
 
       const stats = engine.getHealthStats();
@@ -222,21 +245,131 @@ describe('DurabilityEngine', () => {
       expect(ageMs).toBeGreaterThan(30 * 60 * 1000);
     });
 
-    it('fails closed on a send that failed before markSubmitted: null submitted_at must still age via created_at, not read as fresh (PRESTAGE-T4)', () => {
+    it('projects bounded failure evidence without message or destination data', () => {
+      const first = engine.createOutboundOp({
+        conversationKey: 'private-conversation',
+        chatJid: 'private-destination',
+        opType: 'text',
+        payload: '{"text":"private message body"}',
+        replayPolicy: 'unsafe',
+      });
+      engine.markMaybeSent(first, 'private provider prose');
+      const second = engine.createOutboundOp(BASE_OP);
+      db.raw.prepare('UPDATE outbound_ops SET error = ? WHERE id = ?').run(
+        'legacy private provider prose',
+        second,
+      );
+
+      const projection = engine.getHealthStats().outboundFailureEvidence;
+      expect(projection).toEqual({
+        sampledRows: 2,
+        groups: expect.arrayContaining([
+          {
+            failureCode: 'outbound.unknown_failure',
+            stage: 'provider_request',
+            mutationState: 'ambiguous',
+            evidenceCoverage: 'partial',
+            terminalState: 'maybe_sent',
+            retryDecision: 'stop',
+            retryOwner: 'none',
+            remainingDelayBucket: 'none',
+            nextEligibleAt: null,
+            providerSubmissionCount: 1,
+            count: 1,
+          },
+          {
+            failureCode: 'outbound.legacy_unclassified',
+            stage: 'legacy_unclassified',
+            mutationState: 'legacy_unclassified',
+            evidenceCoverage: 'legacy_unclassified',
+            terminalState: 'pending',
+            retryDecision: 'legacy_unclassified',
+            retryOwner: 'legacy_unclassified',
+            remainingDelayBucket: 'unknown',
+            nextEligibleAt: null,
+            providerSubmissionCount: 0,
+            count: 1,
+          },
+        ]),
+      });
+      const serialized = JSON.stringify(projection);
+      expect(serialized).not.toContain('private');
+      expect(projection.groups.length).toBeLessThanOrEqual(20);
+    });
+
+    it('projects exact quarantine dispositions with closed taxonomy values only', () => {
+      const reconstructable = engine.createOutboundOp({
+        conversationKey: 'private-quarantine-conversation',
+        chatJid: 'private-quarantine-destination',
+        opType: 'media',
+        payload: '{"private":"payload"}',
+        replayPolicy: 'unsafe',
+      });
+      engine.markQuarantined(reconstructable, createInternalOutboundFailureEvidence({
+        failureCode: 'outbound.pending_replay_unreconstructable',
+        stage: 'admission',
+        mutationState: 'not_started',
+        providerSubmissionCount: 0,
+        evidenceCoverage: 'complete',
+      }));
+
+      const malformed = engine.createOutboundOp({
+        conversationKey: 'private-legacy-conversation',
+        chatJid: 'private-legacy-destination',
+        opType: 'text',
+        payload: '{"private":"legacy"}',
+        replayPolicy: 'unsafe',
+      });
+      engine.markQuarantined(malformed);
+      db.raw.prepare(
+        `UPDATE outbound_ops
+         SET quarantine_disposition = 'private-untrusted-disposition',
+             quarantine_evidence_coverage = 'private-untrusted-coverage'
+         WHERE id = ?`,
+      ).run(malformed);
+
+      const untrustedStatus = engine.createOutboundOp(BASE_OP);
+      db.raw.prepare(
+        "UPDATE outbound_ops SET status = 'private-untrusted-status', error = 'private-untrusted-error' WHERE id = ?",
+      ).run(untrustedStatus);
+
+      const stats = engine.getHealthStats();
+      expect(stats.outboundQuarantineDispositions).toEqual({
+        total: 2,
+        groups: [
+          {
+            disposition: 'legacy_unclassified',
+            evidenceCoverage: 'legacy_unclassified',
+            count: 1,
+          },
+          {
+            disposition: 'record_unreconstructable',
+            evidenceCoverage: 'complete',
+            count: 1,
+          },
+        ],
+      });
+      expect(stats.outboundFailureEvidence.groups).toContainEqual(
+        expect.objectContaining({ terminalState: 'unknown' }),
+      );
+      expect(JSON.stringify(stats)).not.toContain('private-');
+    });
+
+    it('fails closed on a send that failed before markSubmitted: null submitted_at ages from its ambiguity episode (PRESTAGE-T4)', () => {
       const id = engine.createOutboundOp({ conversationKey: 'k', chatJid: 'j', opType: 'text', payload: '{}', replayPolicy: 'unsafe' });
       engine.markSending(id);
       // No markSubmitted() call: the transport attempt failed before a
       // submission receipt existed (the BRICK-LAB job-1474 shape) — status
       // goes straight sending -> maybe_sent with submitted_at left NULL.
       engine.markMaybeSent(id, 'ECONNRESET');
-      const row = db.raw.prepare('SELECT status, submitted_at, created_at FROM outbound_ops WHERE id = ?').get(id) as any;
+      const row = db.raw.prepare('SELECT status, submitted_at, ambiguity_at FROM outbound_ops WHERE id = ?').get(id) as any;
       expect(row.status).toBe('maybe_sent');
       expect(row.submitted_at).toBeNull();
 
-      // Back-date creation to one hour ago: the only ambiguity-transition
-      // signal available for a row that never reached markSubmitted.
+      // Back-date the current ambiguity episode. Queue creation is deliberately
+      // not an ambiguity-transition signal for a newly ambiguous row.
       db.raw
-        .prepare(`UPDATE outbound_ops SET created_at = datetime('now', '-3600 seconds') WHERE id = ?`)
+        .prepare(`UPDATE outbound_ops SET ambiguity_at = datetime('now', '-3600 seconds') WHERE id = ?`)
         .run(id);
 
       const stats = engine.getHealthStats();
@@ -279,7 +412,10 @@ describe('DurabilityEngine', () => {
 
       const row = db.raw.prepare('SELECT status, error FROM outbound_ops WHERE id = ?').get(id) as any;
       expect(row.status).toBe('maybe_sent');
-      expect(row.error).toBe('echo_timeout');
+      expect(JSON.parse(row.error)).toMatchObject({
+        failure_code: 'outbound.echo_timeout',
+        stage: 'acknowledgement',
+      });
     });
 
     it('sweeps multiple stale ops in one call', () => {
@@ -506,7 +642,10 @@ describe('DurabilityEngine', () => {
         .rejects.toThrow('network down');
       const op = db.raw.prepare('SELECT * FROM outbound_ops ORDER BY id DESC LIMIT 1').get() as any;
       expect(op.status).toBe('maybe_sent');
-      expect(op.error).toBe('network down');
+      expect(JSON.parse(op.error)).toMatchObject({
+        failure_code: 'outbound.unknown_failure',
+        mutation_state: 'ambiguous',
+      });
     });
 
     it('works without durability engine (no-op tracking)', async () => {
@@ -694,16 +833,17 @@ describe('durability.ts uncovered-branch coverage', () => {
     const stats = engine.preConnectRecovery();
     const op = db.raw.prepare('SELECT status, error FROM outbound_ops WHERE id = ?').get(opId) as any;
     expect(op.status).toBe('maybe_sent');
-    expect(op.error).toBe('crash-in-flight');
+    expect(JSON.parse(op.error)).toMatchObject({
+      failure_code: 'outbound.crash_in_flight',
+      stage: 'provider_request',
+    });
     expect(stats.outboundReconciled).toBe(1);
   });
 
   // ── preConnectRecovery: tool-call recovery branches (lines 598-637) ──
   it('preConnectRecovery marks safe tool call (no outbound_op_id) as replayed', () => {
-    db.raw.exec(
-      `INSERT INTO tool_calls (conversation_key, tool_name, tool_input, status, replay_policy)
-       VALUES ('key-tc-safe', 'read_file', '{}', 'executing', 'safe')`,
-    );
+    const toolCallId = engine.recordToolCall('key-tc-safe', 'read_file', 'other', 'safe');
+    engine.markToolExecuting(toolCallId);
     const stats = engine.preConnectRecovery();
     const tc = db.raw.prepare('SELECT status FROM tool_calls WHERE conversation_key = ?').get('key-tc-safe') as any;
     expect(tc.status).toBe('replayed');
@@ -712,20 +852,16 @@ describe('durability.ts uncovered-branch coverage', () => {
   });
 
   it('preConnectRecovery marks read_only tool call as replayed', () => {
-    db.raw.exec(
-      `INSERT INTO tool_calls (conversation_key, tool_name, tool_input, status, replay_policy)
-       VALUES ('key-tc-ro', 'list_files', '{}', 'executing', 'read_only')`,
-    );
+    const toolCallId = engine.recordToolCall('key-tc-ro', 'list_files', 'other', 'read_only');
+    engine.markToolExecuting(toolCallId);
     engine.preConnectRecovery();
     const tc = db.raw.prepare('SELECT status FROM tool_calls WHERE conversation_key = ?').get('key-tc-ro') as any;
     expect(tc.status).toBe('replayed');
   });
 
   it('preConnectRecovery quarantines unsafe tool call with no outbound_op_id', () => {
-    db.raw.exec(
-      `INSERT INTO tool_calls (conversation_key, tool_name, tool_input, status, replay_policy)
-       VALUES ('key-tc-uns', 'send_message', '{}', 'executing', 'unsafe')`,
-    );
+    const toolCallId = engine.recordToolCall('key-tc-uns', 'send_message', 'messaging', 'unsafe');
+    engine.markToolExecuting(toolCallId);
     const stats = engine.preConnectRecovery();
     const tc = db.raw.prepare('SELECT status FROM tool_calls WHERE conversation_key = ?').get('key-tc-uns') as any;
     expect(tc.status).toBe('quarantined');
@@ -737,10 +873,9 @@ describe('durability.ts uncovered-branch coverage', () => {
       conversationKey: 'key-tc-op', chatJid: '15550000005@s.whatsapp.net', opType: 'text',
       payload: '{"text":"x"}', replayPolicy: 'unsafe',
     });
-    db.raw.exec(
-      `INSERT INTO tool_calls (conversation_key, tool_name, tool_input, status, replay_policy, outbound_op_id)
-       VALUES ('key-tc-op', 'send_message', '{}', 'executing', 'unsafe', ${opId})`,
-    );
+    const toolCallId = engine.recordToolCall('key-tc-op', 'send_message', 'messaging', 'unsafe');
+    engine.markToolExecuting(toolCallId);
+    db.raw.prepare('UPDATE tool_calls SET outbound_op_id = ? WHERE id = ?').run(opId, toolCallId);
     const stats = engine.preConnectRecovery();
     // Tool call is NOT replayed or quarantined — left for outbound reconciliation.
     const tc = db.raw.prepare('SELECT status FROM tool_calls WHERE conversation_key = ?').get('key-tc-op') as any;
@@ -789,8 +924,12 @@ describe('durability.ts uncovered-branch coverage', () => {
     expect(stats.outboundReconciled).toBe(1);
     expect(stats.outboundReplayed).toBe(1);
     const op = db.raw.prepare('SELECT status, error FROM outbound_ops WHERE id = ?').get(opId) as any;
-    // Final state after safe reconciliation: reset to pending, error cleared.
-    expect(op).toMatchObject({ status: 'pending', error: null });
+    // Final state after safe reconciliation keeps the retry handoff evidence.
+    expect(op.status).toBe('pending');
+    expect(JSON.parse(op.error)).toMatchObject({
+      failure_code: 'outbound.echo_timeout',
+      retry_owner: 'pending_drainer',
+    });
   });
 
   // ── postConnectRecovery: maybe_sent with wa_message_id found in messages → echoed (lines 722-727) ──
@@ -823,7 +962,10 @@ describe('durability.ts uncovered-branch coverage', () => {
     const stats = engine.postConnectRecovery();
     const op = db.raw.prepare('SELECT status, error FROM outbound_ops WHERE id = ?').get(opId) as any;
     expect(op.status).toBe('pending');
-    expect(op.error).toBeNull();
+    expect(JSON.parse(op.error)).toMatchObject({
+      retry_decision: 'retry_now',
+      retry_owner: 'pending_drainer',
+    });
     expect(stats.outboundReplayed).toBe(1);
   });
 
@@ -892,7 +1034,10 @@ describe('durability.ts uncovered-branch coverage', () => {
     expect(count).toBe(1);
     const op = db.raw.prepare('SELECT status, error FROM outbound_ops WHERE id = ?').get(opId) as any;
     expect(op.status).toBe('maybe_sent');
-    expect(op.error).toBe('echo_timeout');
+    expect(JSON.parse(op.error)).toMatchObject({
+      failure_code: 'outbound.echo_timeout',
+      stage: 'acknowledgement',
+    });
   });
 
   it('sweepStaleSubmitted returns 0 when no stale ops exist', () => {

@@ -1,5 +1,5 @@
 import { existsSync } from 'node:fs';
-import { homedir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { config } from './config.ts';
 import logger, { createChildLogger, flushLogger } from './logger.ts';
@@ -10,6 +10,7 @@ import { processHistoryBatch, type HistoryInput } from './core/history-sync.ts';
 import { createConnection } from './transport/factory.ts';
 import { classifyStreamedProviderFailure } from './runtimes/agent/failure-taxonomy.ts';
 import type { RuntimeConnection } from './transport/runtime-connection.ts';
+import { isFullyConnected } from './transport/runtime-connection.ts';
 import { ChatRuntime } from './runtimes/chat/runtime.ts';
 import { AgentRuntime } from './runtimes/agent/runtime.ts';
 import { consumeIntentionalRestartMarker } from './runtimes/agent/self-restart.ts';
@@ -17,14 +18,17 @@ import { emitAlertChecked } from './lib/emit-alert.ts';
 import { resolveLatestPluginDir } from './runtimes/agent/plugin-dir-resolver.ts';
 import { resolveAgentModel } from './instance-loader.ts';
 import { PassiveRuntime } from './runtimes/passive/runtime.ts';
-import { PineconeMemory, getPineconeReadiness } from './runtimes/chat/providers/pinecone.ts';
+import { PineconeMemory, getPineconeReadinessObservation } from './runtimes/chat/providers/pinecone.ts';
 import { createAnthropicProvider } from './runtimes/chat/providers/anthropic.ts';
 import { createOpenAIProvider } from './runtimes/chat/providers/openai.ts';
 import { withDatabaseCompatibility } from './runtimes/chat/providers/database-compatibility.ts';
 import { resolveBinaryPath } from './runtimes/chat/providers/transcription/local-audio.ts';
 import type { DatabaseCompatibilityError } from './core/database-compatibility.ts';
 import { MemoryConsolidationScheduler } from './memory/consolidation-scheduler.ts';
+import { ConsolidationRunStore } from './memory/consolidation-run-store.ts';
 import { startHealthServer } from './core/health.ts';
+import { createStartupNotificationJournalPort, startupNotifyPath } from './core/startup-notify.ts';
+import { StartupNotificationController } from './core/startup-notification-controller.ts';
 import { openDatabaseForStartup } from './core/database-compatibility-health.ts';
 import {
   closeDatabaseCompatibilityHealthServer,
@@ -35,7 +39,7 @@ import { createIngestHandler } from './core/ingest.ts';
 import { createCapabilityGrantManager, type CapabilityGrantManager } from './lib/capability-grant.ts';
 import { createSettingsPolicyAdapter, createFileGrantStore, assertGroupsRespectDenyFloor } from './core/capability-grant-adapter.ts';
 import { toConversationKey } from './core/conversation-key.ts';
-import { toPersonalJid, toLidJid, toSignalJid } from './core/jid-constants.ts';
+import { resolveConfiguredAdminJid, toPersonalJid, toLidJid, toSignalJid } from './core/jid-constants.ts';
 import { selectReplayableDms, rememberReplayedId } from './core/admin.ts';
 import { DurabilityEngine, sendTracked, drainPendingOutbound } from './core/durability.ts';
 import { waitForHistorySyncThenRecover } from './core/post-connect-recovery.ts';
@@ -70,8 +74,10 @@ import { startModelCurrencyMonitor } from './lib/model-advisor.ts';
 import { buildMemoryReadinessLogFields } from './lib/memory-operation-telemetry.ts';
 import { shutdownExitCode } from './main-shutdown-policy.ts';
 import { markCleanExit, restartLoopGuardPath } from './runtimes/agent/restart-loop-guard.ts';
+import { formatClockForUser } from './runtimes/agent/runtime-presentation.ts';
 import { acquireProcessLock, isProcessLockError, releaseProcessLock, type ProcessLockHandle } from './lib/process-lock.ts';
 import { createServiceManager } from './fleet/platform.ts';
+import { xdgDir } from './fleet/paths.ts';
 
 // The restart-safety probe must link the complete static import graph without
 // executing this module's database, network, transport, health, or timer body.
@@ -91,17 +97,13 @@ function resolveTilde(p: string): string {
   return p.startsWith('~/') ? join(homedir(), p.slice(2)) : p;
 }
 
-function toConfiguredDirectJid(identity: string): string {
-  return config.transport === 'signal'
-    ? toSignalJid(identity)
-    : toPersonalJid(identity);
-}
-
 const log = createChildLogger('main');
 const startedAt = Date.now();
 let shutdownInProgress = false;
 let memoryConsolidationScheduler: MemoryConsolidationScheduler | null = null;
 let lockHandle: ProcessLockHandle | null = null;
+let connectionManager: RuntimeConnection;
+let durability: DurabilityEngine;
 
 // --- Lock file ---
 
@@ -155,6 +157,35 @@ acquireLock();
 // Safety net: release lock even if shutdown() throws or is bypassed
 process.on('exit', () => releaseLock());
 
+// Parse INSTANCE_CONFIG before fallible bootstrap work so an agent boot can
+// be journaled immediately after this process owns the instance lock.
+let instanceConfig: Record<string, unknown> | null = null;
+if (process.env.INSTANCE_CONFIG) {
+  try {
+    instanceConfig = JSON.parse(process.env.INSTANCE_CONFIG) as Record<string, unknown>;
+  } catch {
+    throw new Error('INSTANCE_CONFIG is set but is not valid JSON');
+  }
+}
+const instanceType = (instanceConfig?.type as string | undefined) ?? 'chat';
+const startupJournalPath = instanceType === 'agent' ? startupNotifyPath(config.stateRoot) : null;
+// The controller records boot evidence before database/runtime/connection work.
+// Its other ports close over composition-owned values populated before start().
+let strictStartupConnectionReady = (): boolean => false;
+const startupNotificationController = startupJournalPath === null
+  ? null
+  : new StartupNotificationController({
+      clock: { now: Date.now },
+      scheduler: { setTimeout, clearTimeout },
+      connection: { isFullyConnected: () => strictStartupConnectionReady() },
+      journal: createStartupNotificationJournalPort(startupJournalPath, formatClockForUser),
+      send: {
+        send: (chatJid, text, options) => sendTracked(connectionManager, chatJid, text, durability, options),
+      },
+      genericNotificationsEnabled: config.startupNotifications && config.toolUpdateMode !== 'minimal',
+    });
+startupNotificationController?.recordStartupBoot();
+
 // 2. Database
 // db.open() runs pending schema migrations against config.dbPath (see
 // core/database.ts:594+). This makes the process that executes these lines
@@ -190,8 +221,17 @@ if (databaseStartup.mode === 'drained') {
   process.exit(shutdownExitCode(drainSignal));
 }
 const db = databaseStartup.db;
+const memoryConsolidationRunStore = new ConsolidationRunStore(db);
+try {
+  memoryConsolidationRunStore.abandonInterruptedRuns(Date.now());
+} catch {
+  log.error({
+    failureCode: 'observation_failed',
+    stage: 'finalize',
+  }, 'memory consolidation: restart receipt recovery failed');
+}
 
-const pineconeReadiness = await getPineconeReadiness(config.pineconeIndex);
+const pineconeReadiness = await getPineconeReadinessObservation(config.pineconeIndex);
 log.info(
   buildMemoryReadinessLogFields(pineconeReadiness.state),
   'pinecone readiness',
@@ -203,6 +243,10 @@ if (seededChatAliases > 0) {
 }
 const profileRegistry = createProfileRegistry(config.profiles ?? {});
 const outboundSendsWriter = createOutboundSendsWriter({ db: db.raw, line: config.botName });
+const databaseRetentionTimer = new DatabaseRetentionTimer(db, {
+  ...DEFAULT_DATABASE_RETENTION,
+  messageRetentionDays: config.retentionDays,
+});
 
 // 2a. Seed admin phones into access_list for allowlist/open_dm modes.
 // INSERT OR IGNORE — existing entries are untouched, only missing ones are added.
@@ -235,18 +279,8 @@ if (config.accessMode !== 'self_only') {
 }
 
 // 2b. Pre-connect recovery — runs synchronously before any connection attempt
-const durability = new DurabilityEngine(db);
+durability = new DurabilityEngine(db);
 durability.preConnectRecovery();
-
-// Parse INSTANCE_CONFIG once — used for warm-start import and instance type selection.
-let instanceConfig: Record<string, unknown> | null = null;
-if (process.env.INSTANCE_CONFIG) {
-  try {
-    instanceConfig = JSON.parse(process.env.INSTANCE_CONFIG) as Record<string, unknown>;
-  } catch {
-    throw new Error('INSTANCE_CONFIG is set but is not valid JSON');
-  }
-}
 
 // Model currency advisories — startup + daily check that configured models are
 // still current, with operator notification via BOT_ERRORS when they are not.
@@ -268,8 +302,8 @@ startModelCurrencyMonitor(config.botName, {
   if (instanceName) {
     const msgCount = getMessageCount(db);
     if (msgCount === 0) {
-      const xdgData = process.env.XDG_DATA_HOME ?? join(homedir(), '.local/share');
-      const xdgConfig = process.env.XDG_CONFIG_HOME ?? join(homedir(), '.config');
+      const xdgData = xdgDir('XDG_DATA_HOME', '.local/share');
+      const xdgConfig = xdgDir('XDG_CONFIG_HOME', '.config');
       // Check legacy locations in order of likelihood.
       // The 'q' instance was renamed from 'personal', so also check the old name.
       const legacyNames = instanceName === 'q' ? [instanceName, 'personal'] : [instanceName];
@@ -298,11 +332,9 @@ startModelCurrencyMonitor(config.botName, {
   }
 }
 
-// 3. Instance type selection
-const instanceType = (instanceConfig?.type as string | undefined) ?? 'chat';
-
 // 4. Connection
-const connectionManager: RuntimeConnection = createConnection(config);
+connectionManager = createConnection(config);
+strictStartupConnectionReady = (): boolean => isFullyConnected(connectionManager.getConnectionState());
 // #1783 — wire the send-seam provider-error banner classifier into the Baileys
 // outbound governor. main.ts is the composition root (may import runtimes);
 // transport receives the classifier via DI so it need not import runtimes.
@@ -310,6 +342,7 @@ connectionManager.setOutboundContentClassifier?.(classifyStreamedProviderFailure
 
 // 5. Runtime — selected by instance type
 let runtime: Runtime;
+let chatRuntime: ChatRuntime | null = null;
 // Capability-grant manager (#1835) — agent instances only; groups are
 // config-driven (empty by default). Reconciliation is awaited before any
 // health, poller, runtime, or transport surface starts.
@@ -392,11 +425,10 @@ if (instanceType === 'agent') {
   });
 } else {
   // chat (default): create chat-specific providers
-  let chatRuntime: ChatRuntime;
   const handleDatabaseCompatibilityRejection = (
     rejection: DatabaseCompatibilityError,
   ): void => {
-    chatRuntime.handleDatabaseCompatibilityRejection(rejection);
+    chatRuntime?.handleDatabaseCompatibilityRejection(rejection);
     void memoryConsolidationScheduler?.stop();
   };
   const anthropic = withDatabaseCompatibility(
@@ -432,11 +464,16 @@ if (instanceType === 'agent') {
     config.memory.consolidation.enabled &&
     pineconeReadiness.state === 'ready'
   ) {
-    memoryConsolidationScheduler = new MemoryConsolidationScheduler(pinecone, anthropic, {
-      intervalMs: config.memory.consolidation.intervalHours * 60 * 60 * 1000,
-      lookbackDays: config.memory.consolidation.lookbackDays,
-      dryRun: config.memory.consolidation.dryRun,
-    });
+    memoryConsolidationScheduler = new MemoryConsolidationScheduler(
+      pinecone,
+      anthropic,
+      {
+        intervalMs: config.memory.consolidation.intervalHours * 60 * 60 * 1000,
+        lookbackDays: config.memory.consolidation.lookbackDays,
+        dryRun: config.memory.consolidation.dryRun,
+      },
+      memoryConsolidationRunStore,
+    );
     memoryConsolidationScheduler.start();
   } else if (config.memory.consolidation.enabled) {
     log.warn({
@@ -463,7 +500,7 @@ runtime.setDurability(durability);
 // (the live agent's setting) and startupNotifications, whereas a user-requested
 // restart must always confirm. Guarded so a failure here never blocks startup.
 let selfRestartBackOnline: { chatJid: string; text: string } | null = null;
-if (instanceType === 'agent' && runtime instanceof AgentRuntime) {
+if (instanceType === 'agent') {
   try {
     const marker = consumeIntentionalRestartMarker(config.dataRoot);
     if (marker) {
@@ -778,6 +815,27 @@ const healthServer = startHealthServer({
   instanceName: config.botName,
   instanceType: instanceType,
   accessMode: config.accessMode,
+  getMemoryReadinessHealth: () => ({
+    state: pineconeReadiness.state,
+    observedAt: pineconeReadiness.observedAt,
+    failureCode: pineconeReadiness.failureCode,
+    retryable: pineconeReadiness.retryable,
+    evidenceCoverage: pineconeReadiness.evidenceCoverage,
+  }),
+  getMemoryContextHealth: () => chatRuntime?.getMemoryContextHealth() ?? null,
+  getMemoryConsolidationHealth: () =>
+    memoryConsolidationRunStore.readHealth({
+      enabled: config.memory.consolidation.enabled,
+      started: memoryConsolidationScheduler !== null,
+      nowMs: Date.now(),
+      // Skipped ticks do not renew progress or the lease. A run that makes no
+      // progress for the scheduler's five-minute total deadline is stalled.
+      stalledAfterMs: 5 * 60_000,
+    }),
+  getDatabaseRetentionHealth: () => databaseRetentionTimer.getHealthSnapshot(),
+  getStartupNotificationHealth: startupNotificationController
+    ? () => startupNotificationController.getStartupNotificationHealth()
+    : undefined,
   // D-4 console approval queue: only the agent runtime owns the
   // pending-poll machinery; chat/passive instances omit the callback and
   // the health endpoint answers 503 honestly.
@@ -894,10 +952,6 @@ processTmpRetentionTimer.start(DEFAULT_PROCESS_TMP_RETENTION.intervalMs);
 // messages/receipts now (config.retentionDays, same knob the retired
 // standalone path read), replacing the separate startup timeout + daily
 // interval that used to call deleteOldMessages() directly.
-const databaseRetentionTimer = new DatabaseRetentionTimer(db, {
-  ...DEFAULT_DATABASE_RETENTION,
-  messageRetentionDays: config.retentionDays,
-});
 databaseRetentionTimer.start(DEFAULT_DATABASE_RETENTION.intervalMs);
 
 // 13. Echo timeout checker — sweep submitted ops stuck > 30 s without an echo
@@ -1051,11 +1105,11 @@ async function start(): Promise<void> {
   // Set to false on creation and re-link. Patched to true after sending.
   // Restarts (agent only): send terse "back online" status ping.
   const adminPhone = [...config.adminPhones][0];
-  if (adminPhone && instanceType !== 'passive') {
-    const adminChatJid = toConfiguredDirectJid(adminPhone);
-    const needsIntro = instanceConfig?.introSent === false;
-
-    if (needsIntro) {
+  const adminChatJid = adminPhone === undefined
+    ? null
+    : resolveConfiguredAdminJid(config.transport, adminPhone);
+  const needsIntro = instanceConfig?.introSent === false;
+  if (adminPhone && instanceType !== 'passive' && needsIntro) {
       // First boot or re-link — introduce the instance
       // Persist introSent BEFORE sending to prevent duplicate intros if we crash mid-send
       try {
@@ -1070,51 +1124,40 @@ async function start(): Promise<void> {
         ? `Hey! *${titleName}* is online and ready. I'm an AI agent with tool access — I can research, write code, manage files, and help with tasks. Send me a message to get started.`
         : `Hey! *${titleName}* is online and ready. I'm an AI assistant — send me a message and I'll respond.`;
       setTimeout(() => {
-        sendTracked(connectionManager, adminChatJid, introText, durability, { replayPolicy: 'safe' })
+        sendTracked(connectionManager, adminChatJid!, introText, durability, { replayPolicy: 'safe' })
           .then(() => log.info({ chatJid: adminChatJid }, 'sent introduction'))
           .catch((err) => log.warn({ err }, 'failed to send introduction'));
       }, 3_000);
-    } else if (
-      instanceType === 'agent' &&
-      runtime instanceof AgentRuntime &&
-      config.startupNotifications &&
-      config.toolUpdateMode !== 'minimal'
-    ) {
-      // Agent restart notification (existing behavior)
-      const pending = runtime.popStartupMessage();
-      const notifyTarget = pending
-        ? { chatJid: pending.chatJid, text: pending.text, isResume: true }
-        : { chatJid: adminChatJid, text: '*Agent back online* ✓', isResume: false };
-      // PR-C: the bare '*Agent back online* ✓' fallback is a status op
-      // (unsafe + status_ping) so it supersedes/ages-out and cannot storm. The
-      // isResume branch carries real continuity content — it stays a safe text op.
-      const startupOpts: { replayPolicy: 'safe' | 'unsafe'; opType?: 'status_ping' } =
-        notifyTarget.isResume
-          ? { replayPolicy: 'safe' }
-          : { replayPolicy: 'unsafe', opType: 'status_ping' };
-      setTimeout(() => {
-        sendTracked(connectionManager, notifyTarget.chatJid, notifyTarget.text, durability, startupOpts)
-          .then(() => log.info({ chatJid: notifyTarget.chatJid, isResume: notifyTarget.isResume }, 'sent startup notification'))
-          .catch((err) => log.warn({ err, chatJid: notifyTarget.chatJid }, 'failed to send startup notification'));
-      }, 3_000);
-    }
-  } else if (!adminPhone) {
+  }
+  if (!adminPhone) {
     log.warn('no admin phones configured — skipping startup notification');
   }
 
-  // Self-restart back-online ping — delivered regardless of toolUpdateMode /
-  // startupNotifications (which suppress the generic startup notice above),
-  // because a user-requested restart must always confirm completion. Reuses the
-  // same deferred sendTracked pattern; targets the validated originating chat.
-  if (selfRestartBackOnline) {
-    const resume = selfRestartBackOnline;
-    setTimeout(() => {
-      // PR-C: self-restart back-online is a status op (unsafe + status_ping).
-      sendTracked(connectionManager, resume.chatJid, resume.text, durability, { replayPolicy: 'unsafe', opType: 'status_ping' })
-        .then(() => log.info({ chatJid: resume.chatJid }, 'sent self-restart back-online ping'))
-        .catch((err) => log.warn({ err, chatJid: resume.chatJid }, 'failed to send self-restart back-online ping'));
-    }, 3_000);
-  }
+  // The controller owns startup timing, strict-readiness re-arming, batch
+  // settlement, and bounded health. Runtime and self-restart producers only
+  // provide discriminated events; submission still goes through sendTracked.
+  startupNotificationController?.onConnected({
+    generic: (
+      instanceType === 'agent'
+      && !needsIntro
+      && adminChatJid !== null
+      && config.startupNotifications
+      && config.toolUpdateMode !== 'minimal'
+    )
+      ? {
+          recipient: adminChatJid,
+          stabilityWindowMs: config.startupNotificationStabilitySeconds * 1_000,
+        }
+      : null,
+    event: (
+      instanceType === 'agent'
+      && !needsIntro
+      && adminPhone !== undefined
+    )
+      ? runtime.popStartupNotificationEvent?.() ?? null
+      : null,
+    intentionalRestartReceipt: selfRestartBackOnline,
+  });
 }
 
 // --- Shutdown ---
@@ -1141,6 +1184,7 @@ async function shutdown(signal: string): Promise<void> {
     clearInterval(stuckInboundInterval);
     clearInterval(lidReconcileInterval);
     if (degradationInterval) clearInterval(degradationInterval);
+    startupNotificationController?.stop();
     messageScheduler.stop();
     triggerPoller.stop();
     healthServer.close();
@@ -1171,10 +1215,12 @@ async function shutdown(signal: string): Promise<void> {
 process.on('SIGINT', () => shutdown('SIGINT'));
 process.on('SIGTERM', () => shutdown('SIGTERM'));
 process.on('uncaughtException', (err) => {
-  // Stray stream ENOENT on /tmp files — Baileys opened a read stream on a temp file
-  // that was cleaned up before the read completed. Non-fatal; demote to warning.
+  // Stray stream ENOENT on temp files — Baileys opened a read stream on a temp
+  // file that was cleaned up before the read completed. Non-fatal; demote to
+  // warning. tmpdir()-derived so the suppression also works where the system
+  // temp dir is not /tmp (macOS /var/folders).
   const errno = err as NodeJS.ErrnoException;
-  if (errno.code === 'ENOENT' && errno.path && errno.path.startsWith('/tmp/')) {
+  if (errno.code === 'ENOENT' && errno.path && errno.path.startsWith(`${tmpdir()}/`)) {
     log.warn({ err, path: errno.path }, 'non-fatal ENOENT on temp file — suppressed crash');
     return;
   }

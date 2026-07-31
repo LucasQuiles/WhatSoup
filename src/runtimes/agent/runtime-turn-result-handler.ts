@@ -30,6 +30,24 @@ import type { RuntimeTurnCoordinator } from './runtime-turn-coordinator.ts';
 const log = createChildLogger('agent-runtime');
 const GLOBAL_TOOL_SCOPE_KEY = GLOBAL_CONVERSATION_KEY;
 
+/**
+ * Fire-and-forget session shutdown that can never take the process down.
+ * SessionManager.shutdown() is async and can reject (child-kill races, DB
+ * writes); an unguarded `session?.shutdown()` turns that into an
+ * unhandledRejection, which the global handler treats as fatal (#2698).
+ * A failed cleanup must degrade that one turn, not the whole instance.
+ */
+function shutdownSessionQuietly(session: SessionManager | null | undefined): void {
+  if (!session) return;
+  try {
+    void Promise.resolve(session.shutdown()).catch((err: unknown) => {
+      log.warn({ err }, 'session shutdown rejected after turn result — continuing');
+    });
+  } catch (err) {
+    log.warn({ err }, 'session shutdown threw synchronously after turn result — continuing');
+  }
+}
+
 export type ProviderFallbackReason =
   | 'usage-limit'
   | 'rate-limit'
@@ -161,7 +179,7 @@ export interface RuntimeResultHandlerPort {
   flushRouteMarker(held: string | null, chatJid: string, actorJid: string | undefined): string | null;
   clearToolNames(toolScopeKey: string): void;
   recordTurnCostUsd(event: Extract<AgentEvent, { type: 'result' }>): void;
-  recordTurnCapabilitySuccess(isUserTurnResult: boolean): void;
+  recordTurnCapabilitySuccess(isUserTurnResult: boolean, session: SessionManager | null): void;
   recordTurnCapabilityFailure(
     isUserTurnResult: boolean,
     errorClass: TurnCapabilityErrorClass,
@@ -366,7 +384,7 @@ if (event.text && !hasPendingPoll) {
     }
     if (!replayScheduled) {
       if (!activation) queue.enqueueText(host.usageLimitNotice());
-      session?.shutdown();
+      shutdownSessionQuietly(session);
     }
     return;
   }
@@ -376,7 +394,7 @@ if (event.text && !hasPendingPoll) {
     // Deliberate silence: a policy block is not an operational fault to notify or
     // recover from, and any user notice here would coach around the block. Log +
     // shut down, no user-facing message and no fallback.
-    session?.shutdown();
+    shutdownSessionQuietly(session);
     return;
   }
   if (providerFailureKind === 'auth-required') {
@@ -407,7 +425,7 @@ if (event.text && !hasPendingPoll) {
       // QR-211: no fallback took over — without this, the turn ends in
       // permanent silence (session shuts down, nothing forwarded to chat).
       if (!activation) host.emitNoFallbackReauthNotice(queue);
-      session?.shutdown();
+      shutdownSessionQuietly(session);
     }
     return;
   }
@@ -440,7 +458,7 @@ if (event.text && !hasPendingPoll) {
       if (!activation && providerFailureKind === 'rate-limit') {
         enqueueNoFallbackTerminalNotice(queue, providerFailureKind);
       }
-      session?.shutdown();
+      shutdownSessionQuietly(session);
     }
     return;
   }
@@ -465,7 +483,7 @@ if (event.text && !hasPendingPoll) {
     }
     if (!replayScheduled) {
       if (!activation) enqueueNoFallbackTerminalNotice(queue, providerFailureKind);
-      session?.shutdown();
+      shutdownSessionQuietly(session);
     }
     return;
   }
@@ -474,7 +492,7 @@ if (event.text && !hasPendingPoll) {
     recordTurnFailure(providerFailureKind);
     log.warn({ chatJid: queue.targetChatJid, textPreview: providerPreview(event.text, 300) }, 'prompt too long — killing session');
     queue.enqueueText(contextOverflowNotice());
-    session?.shutdown();
+    shutdownSessionQuietly(session);
     return;
   }
   // Transient streaming-socket drop — recoverable, next message respawns the session.
@@ -602,7 +620,7 @@ if (wasSilentCompact || hadCompactBoundary) {
     let armedFallbackNow = false;
     if (!turnCapabilityFailureRecorded) {
       if (hadVisible || turnHadToolWork || hadSuppressedReplySatisfaction) {
-        host.recordTurnCapabilitySuccess(true);
+        host.recordTurnCapabilitySuccess(true, session);
       } else {
         host.recordTurnCapabilityFailure(true, 'empty-output');
         // QR-226: the turnErrorCounts increment above is in-memory only —
@@ -753,7 +771,7 @@ if (!wf.fallback.arms) {
   } else {
     log.error({ chatJid: logChatJid, textPreview }, 'suppressed provider policy-block message from result — session will be killed');
   }
-  session?.shutdown();
+  shutdownSessionQuietly(session);
   return;
 }
 
@@ -789,7 +807,7 @@ if (!replayScheduled) {
   if (!activation && (reason === 'rate-limit' || reason === 'model-unavailable')) {
     enqueueNoFallbackTerminalNotice(queue, reason);
   }
-  session?.shutdown();
+  shutdownSessionQuietly(session);
 }
 }
 
@@ -922,7 +940,7 @@ if (event.text) {
     }
     if (!replayScheduled) {
       if (!activation) queue.enqueueText(host.usageLimitNotice());
-      host.session?.shutdown();
+      shutdownSessionQuietly(host.session);
     }
     host.singleTurnHadToolActivity = false;
     return;
@@ -932,7 +950,7 @@ if (event.text) {
     log.error({ chatJid: host.shared ? host.currentTurnChatJid : host.activeChatJid, textPreview: providerPreview(event.text, 300) }, 'suppressed provider policy-block message from result — session will be killed');
     // Deliberate silence (see the per-chat policy-block branch): no user notice,
     // no fallback — a policy block is not an operational fault to recover from.
-    host.session?.shutdown();
+    shutdownSessionQuietly(host.session);
     return;
   }
   if (providerFailureKind === 'auth-required') {
@@ -962,7 +980,7 @@ if (event.text) {
       // QR-211: no fallback took over — without this, the turn ends in
       // permanent silence (session shuts down, nothing forwarded to chat).
       if (!activation) host.emitNoFallbackReauthNotice(queue);
-      host.session?.shutdown();
+      shutdownSessionQuietly(host.session);
     }
     host.singleTurnHadToolActivity = false;
     return;
@@ -995,7 +1013,7 @@ if (event.text) {
       if (!activation && providerFailureKind === 'rate-limit') {
         enqueueNoFallbackTerminalNotice(queue, providerFailureKind);
       }
-      host.session?.shutdown();
+      shutdownSessionQuietly(host.session);
     }
     host.singleTurnHadToolActivity = false;
     return;
@@ -1020,7 +1038,7 @@ if (event.text) {
     }
     if (!replayScheduled) {
       if (!activation) enqueueNoFallbackTerminalNotice(queue, providerFailureKind);
-      host.session?.shutdown();
+      shutdownSessionQuietly(host.session);
     }
     host.singleTurnHadToolActivity = false;
     return;
@@ -1030,7 +1048,7 @@ if (event.text) {
     recordTurnFailure(providerFailureKind);
     log.warn({ chatJid: host.shared ? host.currentTurnChatJid : host.activeChatJid, textPreview: providerPreview(event.text, 300) }, 'prompt too long — killing session');
     queue.enqueueText(contextOverflowNotice());
-    host.session?.shutdown();
+    shutdownSessionQuietly(host.session);
     return;
   }
   // Transient streaming-socket drop — recoverable, next message respawns the session.
@@ -1113,7 +1131,7 @@ if (!wasSilentCompact && !isSystemResult) {
   host.flushPendingHandoffNotice(queue);
   if (!turnCapabilityFailureRecorded) {
     if (host.turnHadVisibleOutput || turnHadToolWork || hadSuppressedReplySatisfaction) {
-      host.recordTurnCapabilitySuccess(true);
+      host.recordTurnCapabilitySuccess(true, host.session);
     } else {
       host.recordTurnCapabilityFailure(true, 'empty-output');
       // QR-226: see the matching log.warn in handleEventWithContext — the

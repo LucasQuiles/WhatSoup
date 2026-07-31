@@ -108,7 +108,10 @@ function makeDeps(instance: DiscoveredInstance): OpsDeps {
       start: vi.fn().mockResolvedValue(undefined),
       stop: vi.fn().mockResolvedValue(undefined),
       restart: vi.fn().mockResolvedValue(undefined),
-      startFire: vi.fn(),
+      // The deferred post-auth start passes a completion callback; invoking it
+      // lets the SSE flow finish (endOnce) so authInFlight is released between
+      // tests.
+      startFire: vi.fn((_name: string, onComplete?: (err: Error | null) => void) => onComplete?.(null)),
     },
   } as unknown as OpsDeps;
 }
@@ -151,12 +154,16 @@ describe('handleAuth introSent reset failure', () => {
       expect(warned).toBe(true);
     });
 
-    // The flow must still proceed: post-auth restart fired despite the
-    // config write failure.
-    expect(deps.serviceManager.startFire).toHaveBeenCalled();
+    // The start is deferred until the pairing helper's successful completion:
+    // `connected` on stdout only proves persisted credentials, so nothing may
+    // start before the child's `close`.
+    expect(deps.serviceManager.startFire).not.toHaveBeenCalled();
 
-    // Let the SSE stream finish so the handler promise settles.
+    // The flow must still proceed: once the helper closes cleanly, the
+    // post-auth start fires despite the config write failure.
     child.emit('exit', 0);
+    child.emit('close', 0);
+    expect(deps.serviceManager.startFire).toHaveBeenCalled();
     await pending;
   });
 
@@ -197,9 +204,12 @@ describe('handleAuth introSent reset failure', () => {
       });
 
       expect(JSON.parse(fs.readFileSync(configPath, 'utf-8')).introSent).toBe(true);
-      expect(deps.serviceManager.startFire).toHaveBeenCalled();
+      // Deferred-start contract: nothing starts until the helper closes.
+      expect(deps.serviceManager.startFire).not.toHaveBeenCalled();
 
       child.emit('exit', 0);
+      child.emit('close', 0);
+      expect(deps.serviceManager.startFire).toHaveBeenCalled();
       await pending;
     } finally {
       releaseProcessLock(lock);

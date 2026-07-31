@@ -92,6 +92,7 @@ def _alert(source: str = "instance_logged_out", *, machine: str = _MACHINE, inst
 def _clear(source: str = "instance_logged_out", *, machine: str = _MACHINE, instance: str = _INSTANCE) -> dict:
     evt = _alert(source, machine=machine, instance=instance)
     evt["eventType"] = "clear"
+    evt["severity"] = "info"
     return evt
 
 

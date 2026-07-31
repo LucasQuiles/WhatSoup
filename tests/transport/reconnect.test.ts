@@ -1229,8 +1229,8 @@ describe('ConnectionManager — keepalive', () => {
       content: [{ tag: 'ping', attrs: {} }],
     }, 10_000);
 
-    const state = (manager as any).getConnectionState?.();
-    expect(state?.lastPongAt ?? null).not.toBeNull();
+    const state = manager.getConnectionState();
+    expect(state.lastPongAt).not.toBeNull();
 
     await manager.shutdown();
   });

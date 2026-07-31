@@ -3,7 +3,7 @@ import { createChildLogger } from '../logger.ts';
 import type { Database } from './database.ts';
 import { insertPending, updateAccess } from './access-list.ts';
 import type { SubjectType } from './access-list.ts';
-import { toPersonalJid, toLidJid, toSmsJid, toSignalJid, isGroupJid } from './jid-constants.ts';
+import { resolveConfiguredAdminJid, toPersonalJid, toLidJid, toSmsJid, toSignalJid, isGroupJid } from './jid-constants.ts';
 import { getAllLidMappings } from './lid-resolver.ts';
 import { getMessagesBySender, type StoredMessage } from './messages.ts';
 import { isAdminPhone, isE164Wire, normalizePhoneE164 } from '../lib/phone.ts';
@@ -99,7 +99,7 @@ export async function handleAdminCommand(
   subjectType: SubjectType,
   subjectId: string,
   adminChatJid: string,
-  handleMessageFn: (msg: IncomingMessage) => Promise<void>,
+  handleMessageFn: Runtime['handleMessage'],
   durability?: DurabilityEngine,
 ): Promise<void> {
   if (action === 'allow') {
@@ -200,77 +200,35 @@ export async function handleAdminCommand(
 // sendApprovalRequest
 // ---------------------------------------------------------------------------
 
-/**
- * Find the admin's chat JID — checks SMS senders first (when present),
- * then personal JIDs and reverse-mapped LIDs from the lid_mappings table.
- *
- * SMS sender rows are stored as '+<digits>@sms'. The admin phones config
- * stores digit strings (no leading '+'). We try the exact SMS JID
- * ('+<phone>@sms') for each admin phone, so the approval reply reaches
- * the admin over the same transport they used to contact the bot.
- *
- * WhatsApp fallback: LIKE `<phone>%` matches '<phone>@s.whatsapp.net'.
- * Final fallback: when config.transport is 'twilio' and no message rows
- * exist yet, synthesise a '+<phone>@sms' JID rather than a WhatsApp JID
- * that the Twilio transport cannot deliver to.
- */
+/** Find the admin's latest direct chat in the active transport namespace. */
 function resolveAdminChatJid(db: Database): string | null {
   const msgStmt = db.raw.prepare(
-    'SELECT chat_jid FROM messages WHERE sender_jid LIKE ? AND is_from_me = 0 ORDER BY timestamp DESC LIMIT 1',
+    'SELECT chat_jid FROM messages WHERE sender_jid = ? AND is_from_me = 0 ORDER BY timestamp DESC LIMIT 1',
   );
 
-  if (config.transport === 'signal') {
-    for (const identity of config.adminPhones) {
-      const row = msgStmt.get(toSignalJid(identity)) as { chat_jid: string } | undefined;
-      if (row) return row.chat_jid;
-    }
-    const firstSignalAdmin = [...config.adminPhones][0];
-    if (!firstSignalAdmin) {
-      log.error('resolveAdminJid: no admin identities configured — cannot resolve Signal admin JID');
-      return null;
-    }
-    return toSignalJid(firstSignalAdmin);
+  for (const identity of config.adminPhones) {
+    const row = msgStmt.get(resolveConfiguredAdminJid(config.transport, identity)) as { chat_jid: string } | undefined;
+    if (row) return row.chat_jid;
   }
 
-  // Search by admin phone numbers — try SMS JID exact match first, then
-  // WhatsApp LIKE prefix (fast path for both transports).
-  for (const phone of config.adminPhones) {
-    // SMS: sender_jid is '+<phone>@sms' — exact LIKE with no wildcard needed,
-    // but LIKE is fine here; we use the exact string for precision.
-    const smsRow = msgStmt.get(`+${normalizePhoneE164(phone)}@sms`) as { chat_jid: string } | undefined;
-    if (smsRow) return smsRow.chat_jid;
-
-    // WhatsApp: sender_jid starts with '<phone>' (e.g. '15550100001@s.whatsapp.net')
-    const waRow = msgStmt.get(`${phone}%`) as { chat_jid: string } | undefined;
-    if (waRow) return waRow.chat_jid;
-  }
-
-  // Search by LIDs that map to admin phones (scans lid_mappings — typically small table)
-  const lidMap = getAllLidMappings(db);
-  for (const [lid, mappedPhone] of lidMap) {
-    if (isAdminPhone(mappedPhone, config.adminPhones)) {
-      const row = msgStmt.get(`${lid}%`) as { chat_jid: string } | undefined;
-      if (row) return row.chat_jid;
+  // LID identity is a Baileys-only delivery namespace. Other transports must
+  // never inherit a historical WhatsApp chat as their configured-admin target.
+  if (config.transport === 'baileys') {
+    const lidMap = getAllLidMappings(db);
+    for (const [lid, mappedPhone] of lidMap) {
+      if (isAdminPhone(mappedPhone, config.adminPhones)) {
+        const row = msgStmt.get(toLidJid(lid)) as { chat_jid: string } | undefined;
+        if (row) return row.chat_jid;
+      }
     }
   }
 
-  // No message rows found — synthesise a fallback JID.
   const firstAdmin = [...config.adminPhones][0];
   if (!firstAdmin) {
-    log.error('resolveAdminJid: no admin phones configured — cannot resolve admin JID');
+    log.error('resolveAdminJid: no admin identities configured — cannot resolve admin JID');
     return null;
   }
-
-  // When running on the Twilio transport, return an @sms JID so the
-  // approval message is delivered over SMS rather than failing with a
-  // WhatsApp JID that the bridge cannot route.
-  if (config.transport === 'twilio') {
-    // adminPhones entries may omit the country code (suffix-matching design);
-    // normalize so the SMS JID is valid E.164.
-    return toSmsJid(`+${normalizePhoneE164(firstAdmin)}`);
-  }
-
-  return toPersonalJid(firstAdmin);
+  return resolveConfiguredAdminJid(config.transport, firstAdmin);
 }
 
 /**

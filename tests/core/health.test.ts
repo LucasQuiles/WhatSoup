@@ -71,6 +71,7 @@ vi.mock('../../src/lib/emit-alert.ts', () => ({
 import { CURRENT_SCHEMA_MIGRATION, Database } from '../../src/core/database.ts';
 import { recordContinuityGaps } from '../../src/core/continuity-gap-ledger.ts';
 import { DurabilityEngine } from '../../src/core/durability.ts';
+import { createInternalOutboundFailureEvidence } from '../../src/core/outbound-failure-disposition.ts';
 import { config } from '../../src/config.ts';
 import { emitHealReport, resetDeliveryUnavailableLatch } from '../../src/core/heal.ts';
 import type { Messenger } from '../../src/core/types.ts';
@@ -78,7 +79,9 @@ import { seedChatAliases } from '../../src/core/chats-resolver.ts';
 import { createProfileRegistry } from '../../src/core/profiles.ts';
 import { createOutboundSendsWriter } from '../../src/core/outbound-sends.ts';
 import type { HealthDeps } from '../../src/core/health.ts';
+import type { StartupNotificationHealth } from '../../src/core/startup-notification-controller.ts';
 import type { ConnectionManager } from '../../src/transport/connection.ts';
+import { emptyConnectionStateSnapshot } from '../../src/transport/twilio/connection-snapshot.ts';
 
 // ---------------------------------------------------------------------------
 // HTTP helper
@@ -174,6 +177,11 @@ function makeDeps(db: Database, overrides: Partial<HealthDeps> = {}): HealthDeps
       sendMedia: vi.fn().mockResolvedValue({ waMessageId: null }),
       connect: vi.fn().mockResolvedValue(undefined),
       disconnect: vi.fn().mockResolvedValue(undefined),
+      getConnectionState: vi.fn(() => emptyConnectionStateSnapshot({
+        connected: true,
+        stateChangedAt: '2026-07-29T00:00:00.000Z',
+        lastDisconnectReason: null,
+      })),
     } as unknown as ConnectionManager,
     startedAt: Date.now() - 1000,
     getEnrichmentStats: vi.fn().mockReturnValue({ lastRun: null, unprocessed: 0 }),
@@ -220,6 +228,32 @@ function makeAuthBond(overrides: Record<string, unknown> = {}): Record<string, u
   };
 }
 
+const STARTUP_NOTIFICATION_KEYS = [
+  'state',
+  'policy',
+  'stabilitySeconds',
+  'bootCountSinceNotification',
+  'lastBootAt',
+  'lastNotifiedAt',
+  'nextEligibleAt',
+  'lastSendAt',
+] as const;
+
+function startupNotificationHealth(
+  overrides: Partial<Pick<StartupNotificationHealth, 'state' | 'policy'>> = {},
+): StartupNotificationHealth {
+  return {
+    state: overrides.state ?? 'waiting_stability',
+    policy: overrides.policy ?? 'generic',
+    stabilitySeconds: 600,
+    bootCountSinceNotification: 2,
+    lastBootAt: 1_753_825_600_000,
+    lastNotifiedAt: 1_753_825_000_000,
+    nextEligibleAt: 1_753_826_200_000,
+    lastSendAt: null,
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -254,6 +288,71 @@ describe('GET /health', () => {
     else process.env.WHATSOUP_GIT_BRANCH = prevGitBranch;
   });
 
+  it('always emits the exact privacy-safe startup notification health shape when not applicable', async () => {
+    const { status, body } = await healthReq(port);
+
+    expect(status).toBe(200);
+    expect(JSON.parse(body).startupNotification).toEqual({
+      state: 'not_applicable',
+      policy: 'none',
+      stabilitySeconds: null,
+      bootCountSinceNotification: null,
+      lastBootAt: null,
+      lastNotifiedAt: null,
+      nextEligibleAt: null,
+      lastSendAt: null,
+    });
+  });
+
+  it.each([
+    ['not_applicable', 'none'],
+    ['disabled', 'disabled'],
+    ['waiting_stability', 'generic'],
+    ['waiting_transport', 'resume'],
+    ['dispatching', 'restart_loop_guard_alert'],
+    ['sent', 'expired_session_notice'],
+    ['send_failed', 'intentional_restart'],
+    ['journal_unreadable', 'generic'],
+  ] as const)('retains the exact startup notification state and policy %s/%s without exposing private data', async (state, policy) => {
+    db.close();
+    const db2 = makeDb();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    ({ server, port } = await buildTestServer(makeDeps(db2, {
+      getStartupNotificationHealth: () => startupNotificationHealth({ state, policy }),
+    })));
+
+    const { status, body } = await healthReq(port);
+    const startupNotification = JSON.parse(body).startupNotification as Record<string, unknown>;
+
+    expect(status).toBe(200);
+    expect(Object.keys(startupNotification).sort()).toEqual([...STARTUP_NOTIFICATION_KEYS].sort());
+    expect(startupNotification).toMatchObject({ state, policy });
+    expect(JSON.stringify(startupNotification)).not.toMatch(
+      /jid|identity|message|text|path|error|bot\.db/i,
+    );
+    db2.close();
+  });
+
+  it.each(['waiting_stability', 'waiting_transport', 'send_failed'] as const)(
+    'does not degrade normal service health solely for startup notification %s',
+    async (state) => {
+      db.close();
+      const db2 = makeDb();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+      ({ server, port } = await buildTestServer(makeDeps(db2, {
+        getStartupNotificationHealth: () => startupNotificationHealth({ state }),
+      })));
+
+      const { status, body } = await healthReq(port);
+      expect(status).toBe(200);
+      expect(JSON.parse(body)).toMatchObject({
+        status: 'healthy',
+        startupNotification: { state },
+      });
+      db2.close();
+    },
+  );
+
   it('returns 200 with healthy status when connected', async () => {
     const requestedAt = Date.now();
     const { status, body } = await healthReq(port);
@@ -270,6 +369,202 @@ describe('GET /health', () => {
     expect(generatedAt).toBeLessThanOrEqual(receivedAt);
   });
 
+  it('projects content-free consolidation failure health only to authenticated diagnostics', async () => {
+    const consolidationHealth = {
+      schema_version: 1 as const,
+      readable: true,
+      state: 'failed' as const,
+      mode: 'live' as const,
+      latest_status: 'failed' as const,
+      latest_stage: 'write' as const,
+      failure_code: 'network_error' as const,
+      retryable: true,
+      evidence_coverage: 'provider_error' as const,
+      latest_attempt_at: 1_785_240_000_000,
+      latest_success_at: null,
+      active_age_ms: null,
+      skipped_ticks: 2,
+      counters: {
+        recordsObserved: 3,
+        clustersAttempted: 1,
+        clustersCompleted: 0,
+        wouldPromote: 0,
+        writeAttempted: 1,
+        writeConfirmed: 0,
+        discarded: 0,
+        failed: 1,
+        skipped: 2,
+      },
+    };
+    const { server: server2, port: port2 } = await buildTestServer(makeDeps(db, {
+      getMemoryConsolidationHealth: () => consolidationHealth,
+    }));
+    try {
+      const diagnostic = await healthReq(port2);
+      expect(diagnostic.status).toBe(200);
+      const json = JSON.parse(diagnostic.body);
+      expect(json.status).toBe('degraded');
+      expect(json.degradation_causes).toContain('memory_consolidation_degraded');
+      expect(json.memory.consolidation).toEqual(consolidationHealth);
+
+      for (const forbidden of [
+        'private-memory-text',
+        'private-claim',
+        'private-source-id',
+        'private-chat-id',
+        'private-sender-id',
+        'private-model-output',
+        'private-raw-exception',
+        'private-content-hash',
+        'private-credential',
+      ]) {
+        expect(diagnostic.body).not.toContain(forbidden);
+      }
+
+      const publicResponse = await httpReq(port2, '/health', 'GET');
+      expect(JSON.parse(publicResponse.body)).not.toHaveProperty('memory');
+    } finally {
+      await new Promise<void>((resolve) => server2.close(() => resolve()));
+    }
+  });
+
+  it('degrades authenticated health when consolidation is enabled but has not started', async () => {
+    const consolidationHealth = {
+      schema_version: 1 as const,
+      readable: true,
+      state: 'not_started' as const,
+      mode: null,
+      latest_status: null,
+      latest_stage: null,
+      failure_code: 'none' as const,
+      retryable: false,
+      evidence_coverage: 'not_observed' as const,
+      latest_attempt_at: null,
+      latest_success_at: null,
+      active_age_ms: null,
+      skipped_ticks: 0,
+      counters: {
+        recordsObserved: 0,
+        clustersAttempted: 0,
+        clustersCompleted: 0,
+        wouldPromote: 0,
+        writeAttempted: 0,
+        writeConfirmed: 0,
+        discarded: 0,
+        failed: 0,
+        skipped: 0,
+      },
+    };
+    const { server: server2, port: port2 } = await buildTestServer(makeDeps(db, {
+      getMemoryConsolidationHealth: () => consolidationHealth,
+    }));
+    try {
+      const diagnostic = await healthReq(port2);
+      const json = JSON.parse(diagnostic.body);
+      expect(diagnostic.status).toBe(200);
+      expect(json.status).toBe('degraded');
+      expect(json.degradation_causes).toContain('memory_consolidation_degraded');
+      expect(json.memory.consolidation).toEqual(consolidationHealth);
+    } finally {
+      await new Promise<void>((resolve) => server2.close(() => resolve()));
+    }
+  });
+
+  it('projects redacted readiness and context failures only to authenticated diagnostics', async () => {
+    const readiness = {
+      state: 'unknown' as const,
+      observedAt: '2026-07-29T20:00:00.000Z',
+      failureCode: 'unknown' as const,
+      retryable: true,
+      evidenceCoverage: 'provider_error' as const,
+      index: 'SYNTHETIC_PRIVATE_MEMORY_TARGET',
+      rawError: 'SYNTHETIC_PRIVATE_PROVIDER_ERROR',
+    };
+    let readinessReads = 0;
+    const memoryContext = {
+      status: 'partial' as const,
+      scopes: [
+        {
+          scope: 'chat' as const,
+          status: 'failed' as const,
+          failureCode: 'network_error' as const,
+          retryable: true,
+        },
+        {
+          scope: 'sender' as const,
+          status: 'ok' as const,
+          failureCode: null,
+          retryable: false,
+        },
+      ],
+    };
+    const { server: server2, port: port2 } = await buildTestServer(makeDeps(db, {
+      getMemoryReadinessHealth: () => {
+        readinessReads += 1;
+        return readiness;
+      },
+      getMemoryContextHealth: () => memoryContext,
+    }));
+    try {
+      const diagnostic = await healthReq(port2);
+      const json = JSON.parse(diagnostic.body);
+      expect(diagnostic.status).toBe(200);
+      expect(json.status).toBe('degraded');
+      expect(json.degradation_causes).toContain('memory_readiness_degraded');
+      expect(json.degradation_causes).toContain('memory_context_degraded');
+      expect(json.memory.readiness).toEqual({
+        state: 'unknown',
+        observed_at: '2026-07-29T20:00:00.000Z',
+        failure_code: 'unknown',
+        retryable: true,
+        evidence_coverage: 'provider_error',
+      });
+      expect(json.memory.context).toEqual({
+        status: 'partial',
+        scopes: [
+          { scope: 'chat', status: 'failed', failure_code: 'network_error', retryable: true },
+          { scope: 'sender', status: 'ok', failure_code: null, retryable: false },
+        ],
+      });
+      expect(diagnostic.body).not.toContain('SYNTHETIC_PRIVATE_MEMORY_TARGET');
+      expect(diagnostic.body).not.toContain('SYNTHETIC_PRIVATE_PROVIDER_ERROR');
+
+      const publicResponse = await httpReq(port2, '/health', 'GET');
+      expect(JSON.parse(publicResponse.body)).not.toHaveProperty('memory');
+      expect(readinessReads).toBe(1);
+    } finally {
+      await new Promise<void>((resolve) => server2.close(() => resolve()));
+    }
+  });
+
+  it('does not degrade health for an explicitly disabled memory readiness probe', async () => {
+    const { server: server2, port: port2 } = await buildTestServer(makeDeps(db, {
+      getMemoryReadinessHealth: () => ({
+        state: 'disabled',
+        observedAt: '2026-07-29T20:00:00.000Z',
+        failureCode: 'none',
+        retryable: false,
+        evidenceCoverage: 'local_guard',
+      }),
+    }));
+    try {
+      const diagnostic = await healthReq(port2);
+      const json = JSON.parse(diagnostic.body);
+      expect(diagnostic.status).toBe(200);
+      expect(json.status).toBe('healthy');
+      expect(json.degradation_causes).not.toContain('memory_readiness_degraded');
+      expect(json.memory.readiness).toEqual({
+        state: 'disabled',
+        observed_at: '2026-07-29T20:00:00.000Z',
+        failure_code: 'none',
+        retryable: false,
+        evidence_coverage: 'local_guard',
+      });
+    } finally {
+      await new Promise<void>((resolve) => server2.close(() => resolve()));
+    }
+  });
+
   it('degrades and surfaces durability debt when an outbound delivery is stuck in maybe_sent past the stale window (#1865)', async () => {
     const db2 = makeDb();
     const durability = new DurabilityEngine(db2);
@@ -279,7 +574,7 @@ describe('GET /health', () => {
     durability.markMaybeSent(id, 'echo_timeout');
     // One hour unresolved — well past the stale window.
     db2.raw
-      .prepare(`UPDATE outbound_ops SET submitted_at = datetime('now', '-3600 seconds') WHERE id = ?`)
+      .prepare(`UPDATE outbound_ops SET ambiguity_at = datetime('now', '-3600 seconds') WHERE id = ?`)
       .run(id);
 
     const { server: server2, port: port2 } = await buildTestServer(makeDeps(db2, { durability }));
@@ -292,6 +587,145 @@ describe('GET /health', () => {
       expect(json.status).toBe('degraded');
       expect(json.durability.maybeSentOutbound).toBe(1);
       expect(json.durability.oldestMaybeSentAt).not.toBeNull();
+    } finally {
+      await new Promise<void>((resolve) => server2.close(() => resolve()));
+      db2.close();
+    }
+  });
+
+  it('projects only the redacted quarantine aggregate to authenticated health diagnostics', async () => {
+    const db2 = makeDb();
+    const durability = new DurabilityEngine(db2);
+    const id = durability.createOutboundOp({
+      conversationKey: 'private-health-conversation',
+      chatJid: 'private-health-destination',
+      opType: 'media',
+      payload: '{"private":"health payload"}',
+      replayPolicy: 'unsafe',
+    });
+    durability.markQuarantined(id, createInternalOutboundFailureEvidence({
+      failureCode: 'outbound.pending_replay_unreconstructable',
+      stage: 'admission',
+      mutationState: 'not_started',
+      providerSubmissionCount: 0,
+    }));
+
+    const { server: server2, port: port2 } = await buildTestServer(makeDeps(db2, { durability }));
+    try {
+      const diagnostic = await healthReq(port2);
+      expect(diagnostic.status).toBe(200);
+      expect(JSON.parse(diagnostic.body).durability.outboundQuarantineDispositions).toEqual({
+        total: 1,
+        groups: [{
+          disposition: 'record_unreconstructable',
+          evidenceCoverage: 'complete',
+          count: 1,
+        }],
+      });
+      expect(diagnostic.body).not.toContain('private-health');
+
+      const publicResponse = await httpReq(port2, '/health', 'GET');
+      expect(publicResponse.status).toBe(200);
+      expect(JSON.parse(publicResponse.body)).not.toHaveProperty('durability');
+    } finally {
+      await new Promise<void>((resolve) => server2.close(() => resolve()));
+      db2.close();
+    }
+  });
+
+  it('keeps the quarantine aggregate total equal to its groups across a concurrent transition', () => {
+    const db2 = makeDb();
+    const durability = new DurabilityEngine(db2);
+    const statements = (durability as unknown as {
+      statements: { getQuarantinedOutboundCount: { get: () => { count: number } } };
+    }).statements;
+    const originalCount = statements.getQuarantinedOutboundCount;
+    let transitioned = false;
+    statements.getQuarantinedOutboundCount = {
+      get: () => {
+        const count = originalCount.get();
+        if (!transitioned) {
+          transitioned = true;
+          const id = durability.createOutboundOp({
+            conversationKey: 'interleaved', chatJid: 'interleaved@g.us', opType: 'text',
+            payload: '{}', replayPolicy: 'unsafe',
+          });
+          durability.markQuarantined(id, createInternalOutboundFailureEvidence({
+            failureCode: 'outbound.deferral_limit_exceeded',
+            stage: 'admission',
+            mutationState: 'not_started',
+            providerSubmissionCount: 0,
+          }));
+        }
+        return count;
+      },
+    };
+
+    const aggregate = durability.getHealthStats().outboundQuarantineDispositions;
+
+    expect(aggregate.total).toBe(aggregate.groups.reduce((total, group) => total + group.count, 0));
+    db2.close();
+  });
+
+  it('degrades instead of treating malformed ambiguity chronology as fresh (#2343)', async () => {
+    const db2 = makeDb();
+    const durability = new DurabilityEngine(db2);
+    const id = durability.createOutboundOp({ conversationKey: 'k', chatJid: 'j', opType: 'text', payload: '{}', replayPolicy: 'unsafe' });
+    durability.markSending(id);
+    durability.markMaybeSent(id, 'malformed chronology');
+    db2.raw.prepare("UPDATE outbound_ops SET ambiguity_at = 'not-a-timestamp' WHERE id = ?").run(id);
+
+    const { server: server2, port: port2 } = await buildTestServer(makeDeps(db2, { durability }));
+    try {
+      const { status, body } = await healthReq(port2);
+      const json = JSON.parse(body);
+      expect(status).toBe(200);
+      expect(json.status).toBe('degraded');
+      expect(json.durability).toMatchObject({ maybeSentOutbound: 1 });
+      expect(json.durability.oldestMaybeSentAt).not.toBeNull();
+    } finally {
+      await new Promise<void>((resolve) => server2.close(() => resolve()));
+      db2.close();
+    }
+  });
+
+  it('degrades instead of treating a future ambiguity episode as fresh (#2343)', async () => {
+    const db2 = makeDb();
+    const durability = new DurabilityEngine(db2);
+    const id = durability.createOutboundOp({ conversationKey: 'k', chatJid: 'j', opType: 'text', payload: '{}', replayPolicy: 'unsafe' });
+    durability.markSending(id);
+    durability.markMaybeSent(id, 'future chronology');
+    db2.raw.prepare("UPDATE outbound_ops SET ambiguity_at = '2099-01-01T00:00:00Z' WHERE id = ?").run(id);
+
+    const { server: server2, port: port2 } = await buildTestServer(makeDeps(db2, { durability }));
+    try {
+      const { status, body } = await healthReq(port2);
+      const json = JSON.parse(body);
+      expect(status).toBe(200);
+      expect(json.status).toBe('degraded');
+      expect(json.durability).toMatchObject({ maybeSentOutbound: 1 });
+      expect(json.durability.oldestMaybeSentAt).not.toBe('2099-01-01 00:00:00');
+    } finally {
+      await new Promise<void>((resolve) => server2.close(() => resolve()));
+      db2.close();
+    }
+  });
+
+  it('normalizes a parseable ISO ambiguity episode before evaluating health debt (#2343)', async () => {
+    const db2 = makeDb();
+    const durability = new DurabilityEngine(db2);
+    const id = durability.createOutboundOp({ conversationKey: 'k', chatJid: 'j', opType: 'text', payload: '{}', replayPolicy: 'unsafe' });
+    durability.markSending(id);
+    durability.markMaybeSent(id, 'ISO chronology');
+    db2.raw.prepare("UPDATE outbound_ops SET ambiguity_at = '2000-01-01T00:00:00Z' WHERE id = ?").run(id);
+
+    const { server: server2, port: port2 } = await buildTestServer(makeDeps(db2, { durability }));
+    try {
+      const { status, body } = await healthReq(port2);
+      const json = JSON.parse(body);
+      expect(status).toBe(200);
+      expect(json.status).toBe('degraded');
+      expect(json.durability.oldestMaybeSentAt).toBe('2000-01-01 00:00:00');
     } finally {
       await new Promise<void>((resolve) => server2.close(() => resolve()));
       db2.close();
@@ -318,8 +752,8 @@ describe('GET /health', () => {
       };
       // Two distinct-class reports: the first fires the (mocked) critical and
       // arms the latch, the second is suppressed and counted.
-      emitHealReport(db, messenger, null, { type: 'crash', stderr: 'HealthLatchA: boom' });
-      emitHealReport(db, messenger, null, { type: 'crash', stderr: 'HealthLatchB: boom' });
+      emitHealReport(db, messenger, null, { type: 'crash', crashClass: 'provider_unknown' });
+      emitHealReport(db, messenger, null, { type: 'crash', crashClass: 'provider_timeout' });
 
       const { status, body } = await healthReq(port);
       expect(status).toBe(200);
@@ -543,6 +977,11 @@ describe('GET /health', () => {
         sendMedia: vi.fn().mockResolvedValue({ waMessageId: null }),
         connect: vi.fn().mockResolvedValue(undefined),
         disconnect: vi.fn().mockResolvedValue(undefined),
+        getConnectionState: vi.fn(() => emptyConnectionStateSnapshot({
+          connected: false,
+          stateChangedAt: '2026-07-29T00:00:00.000Z',
+          lastDisconnectReason: null,
+        })),
       } as unknown as ConnectionManager,
     });
     await new Promise<void>((resolve) => server.close(() => resolve()));
@@ -1887,6 +2326,73 @@ describe('GET /health', () => {
     db2.close();
   });
 
+  it('projects bounded Chat queue-admission counters without copying runtime detail', async () => {
+    db.close();
+    const db2 = makeDb();
+    const deps = makeDeps(db2, {
+      runtime: {
+        getHealthSnapshot: vi.fn().mockReturnValue({
+          status: 'healthy',
+          details: {
+            queue: { activeChats: 0, queuedChats: 0, droppedCount: 4 },
+            queueAdmission: {
+              rejectedTotal: 4,
+              unownedTotal: 1,
+              chatJid: 'private-chat@s.whatsapp.net',
+            },
+          },
+        }),
+      } as any,
+    });
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    ({ server, port } = await buildTestServer(deps));
+
+    const { body } = await healthReq(port);
+    const json = JSON.parse(body);
+    expect(json.runtime.chat).toEqual({
+      queueDepth: 0,
+      enrichmentUnprocessed: 0,
+      queue_admission: {
+        rejected_total: 4,
+        unowned_total: 1,
+      },
+    });
+    expect(body).not.toContain('private-chat@s.whatsapp.net');
+    db2.close();
+  });
+
+  it.each([
+    ['fractional', { rejectedTotal: 1.5, unownedTotal: 0 }],
+    ['unsafe integer', { rejectedTotal: Number.MAX_SAFE_INTEGER + 1, unownedTotal: 0 }],
+    ['wrong type', { rejectedTotal: '4', unownedTotal: 0 }],
+    ['missing field', { rejectedTotal: 4 }],
+    ['incoherent totals', { rejectedTotal: 1, unownedTotal: 2 }],
+  ])('omits %s Chat queue-admission counters', async (_caseName, queueAdmission) => {
+    db.close();
+    const db2 = makeDb();
+    const deps = makeDeps(db2, {
+      runtime: {
+        getHealthSnapshot: vi.fn().mockReturnValue({
+          status: 'healthy',
+          details: {
+            queue: { activeChats: 0, queuedChats: 0 },
+            queueAdmission,
+          },
+        }),
+      } as any,
+    });
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    ({ server, port } = await buildTestServer(deps));
+
+    const { body } = await healthReq(port);
+    const json = JSON.parse(body);
+    expect(json.runtime.chat).toEqual({
+      queueDepth: 0,
+      enrichmentUnprocessed: 0,
+    });
+    db2.close();
+  });
+
   it('returns passive runtime details verbatim in the health JSON shape', async () => {
     db.close();
     const db2 = makeDb();
@@ -1968,6 +2474,8 @@ describe('GET /health', () => {
       model_usable_checked_at: null,
       model_usability_status: 'model-unavailable',
       last_successful_turn_at: null,
+      last_successful_turn_provider: null,
+      last_successful_turn_session_current: null,
       last_turn_error_class: 'model-unavailable',
       last_turn_error_at: 1_781_316_000_000,
     });
@@ -2007,6 +2515,8 @@ describe('GET /health', () => {
       model_usable_checked_at: null,
       model_usability_status: 'usable',
       last_successful_turn_at: 1_781_316_030_000,
+      last_successful_turn_provider: null,
+      last_successful_turn_session_current: null,
       last_turn_error_class: null,
       last_turn_error_at: null,
     });
@@ -2052,6 +2562,8 @@ describe('GET /health', () => {
       model_usable_checked_at: null,
       model_usability_status: 'unknown',
       last_successful_turn_at: null,
+      last_successful_turn_provider: null,
+      last_successful_turn_session_current: null,
       last_turn_error_class: 'empty-output',
       last_turn_error_at: 1_781_316_000_000,
     });
@@ -2368,7 +2880,7 @@ describe('GET /health', () => {
   it('sanitizes agent turn capability strings before exposing them in health', async () => {
     db.close();
     const db2 = makeDb();
-    const rawProviderText = 'selected model raw provider diagnostic should not appear';
+    const rawProviderText = 'unrecognized-provider';
     const deps = makeDeps(db2, {
       instanceType: 'agent',
       runtime: {
@@ -2379,6 +2891,7 @@ describe('GET /health', () => {
               modelUsable: false,
               modelUsabilityStatus: rawProviderText,
               lastSuccessfulTurnAt: null,
+              lastSuccessfulTurnProvider: rawProviderText,
               lastTurnErrorClass: rawProviderText,
               lastTurnErrorAt: 1_781_316_000_000,
             },
@@ -2398,6 +2911,8 @@ describe('GET /health', () => {
       model_usable_checked_at: null,
       model_usability_status: null,
       last_successful_turn_at: null,
+      last_successful_turn_provider: null,
+      last_successful_turn_session_current: null,
       last_turn_error_class: null,
       last_turn_error_at: 1_781_316_000_000,
     });
@@ -2407,6 +2922,8 @@ describe('GET /health', () => {
       modelUsableCheckedAt: null,
       modelUsabilityStatus: null,
       lastSuccessfulTurnAt: null,
+      lastSuccessfulTurnProvider: null,
+      lastSuccessfulTurnSessionCurrent: null,
       lastTurnErrorClass: null,
       lastTurnErrorAt: 1_781_316_000_000,
     });
@@ -2461,6 +2978,11 @@ describe('GET /health — #2515 public/private liveness split', () => {
         sendMedia: vi.fn().mockResolvedValue({ waMessageId: null }),
         connect: vi.fn().mockResolvedValue(undefined),
         disconnect: vi.fn().mockResolvedValue(undefined),
+        getConnectionState: vi.fn(() => emptyConnectionStateSnapshot({
+          connected: true,
+          stateChangedAt: '2026-07-29T00:00:00.000Z',
+          lastDisconnectReason: null,
+        })),
       } as unknown as ConnectionManager,
       instanceName: 'synthetic-instance-name-marker-2515',
     })));
@@ -2478,11 +3000,22 @@ describe('GET /health — #2515 public/private liveness split', () => {
     expect(status).toBe(200);
     const json = JSON.parse(body);
 
-    // The public envelope carries exactly three fields.
+    // The public envelope carries only liveness plus the privacy-safe startup
+    // notification projection.
     expect(json).toEqual({
       schema_version: 'health.public.v1',
       status: 'healthy',
       generated_at: expect.any(String),
+      startupNotification: {
+        state: 'not_applicable',
+        policy: 'none',
+        stabilitySeconds: null,
+        bootCountSinceNotification: null,
+        lastBootAt: null,
+        lastNotifiedAt: null,
+        nextEligibleAt: null,
+        lastSendAt: null,
+      },
     });
 
     // Fail-open canaries: if ANY privileged field leaks into the public bytes,
@@ -2510,12 +3043,15 @@ describe('GET /health — #2515 public/private liveness split', () => {
       connectionManager: {
         botJid: null,
         botLid: null,
-        connected: false,
-        state: 'disconnected',
         sendMessage: vi.fn(),
         sendMedia: vi.fn(),
         connect: vi.fn(),
         disconnect: vi.fn(),
+        getConnectionState: vi.fn(() => emptyConnectionStateSnapshot({
+          connected: false,
+          stateChangedAt: '2026-07-29T00:00:00.000Z',
+          lastDisconnectReason: null,
+        })),
       } as unknown as ConnectionManager,
     })));
 
@@ -2630,19 +3166,27 @@ describe('POST /send — Authorization header check', () => {
     expect(status).toBe(200);
     expect(JSON.parse(body).ok).toBe(true);
     const rows = db.raw
-      .prepare('SELECT line, caller, chat_jid, target_kind, status, text_length FROM outbound_sends')
+      .prepare(`
+        SELECT caller, target_kind, outcome_code, failure_code, failure_stage,
+               mutation_state, evidence_coverage, logical_attempt_count,
+               provider_submission_count
+        FROM outbound_sends
+      `)
       .all() as Array<Record<string, unknown>>;
     expect(rows).toEqual([{
-      line: 'test-line',
       caller: 'health',
-      chat_jid: '15550100001@s.whatsapp.net',
       target_kind: 'chatJid',
-      status: 'sent',
-      text_length: 'hello audit'.length,
+      outcome_code: 'submitted',
+      failure_code: null,
+      failure_stage: 'ack_received',
+      mutation_state: 'acknowledged',
+      evidence_coverage: 'typed',
+      logical_attempt_count: 1,
+      provider_submission_count: 1,
     }]);
   });
 
-  it('surfaces the latest confirmed outbound send in health', async () => {
+  it('surfaces bounded aggregate outbound evidence without destination or provider identifiers', async () => {
     process.env.WHATSOUP_HEALTH_TOKEN = TEST_HEALTH_TOKEN;
     const payload = JSON.stringify({ chatJid: '15550100001@s.whatsapp.net', text: 'hello health proof' });
 
@@ -2655,9 +3199,18 @@ describe('POST /send — Authorization header check', () => {
     expect(status).toBe(200);
     const json = JSON.parse(body);
     expect(json.outbound_sends).toEqual({
+      readable: true,
+      total: 1,
+      intent: 0,
+      submitted: 1,
+      confirmed: 0,
+      failed_not_sent: 0,
+      ambiguous: 0,
+      legacy_unclassified: 0,
       latest_successful_send_at: expect.stringMatching(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/),
-      latest_successful_transport_id: null,
     });
+    expect(body).not.toContain('15550100001@s.whatsapp.net');
+    expect(body).not.toContain('latest_successful_transport_id');
   });
 
   it('audits a failed health send exactly once', async () => {
@@ -2672,15 +3225,202 @@ describe('POST /send — Authorization header check', () => {
     expect(status).toBe(500);
     expect(JSON.parse(body).error).toBe('transport unavailable');
     const rows = db.raw
-      .prepare('SELECT caller, chat_jid, target_kind, status, error FROM outbound_sends')
+      .prepare(`
+        SELECT caller, target_kind, outcome_code, failure_code, failure_stage,
+               mutation_state, retryable, evidence_coverage
+        FROM outbound_sends
+      `)
       .all() as Array<Record<string, unknown>>;
     expect(rows).toEqual([{
       caller: 'health',
-      chat_jid: '15550100001@s.whatsapp.net',
       target_kind: 'chatJid',
-      status: 'failed',
-      error: 'transport unavailable',
+      outcome_code: 'ambiguous',
+      failure_code: 'unknown',
+      failure_stage: 'unknown',
+      mutation_state: 'unknown',
+      retryable: 0,
+      evidence_coverage: 'untyped',
     }]);
+  });
+
+  it('reports unreadable outbound evidence as unknown rather than zero', async () => {
+    process.env.WHATSOUP_HEALTH_TOKEN = TEST_HEALTH_TOKEN;
+    db.raw.exec('DROP TABLE outbound_sends');
+
+    const { status, body } = await healthReq(port);
+    expect(status).toBe(200);
+    const json = JSON.parse(body);
+    expect(json.status).toBe('degraded');
+    expect(json.status_reasons).toContain('durability_evidence_unreadable');
+    expect(json.degradation_causes).toContain('durability_evidence_unreadable');
+    expect(json.outbound_sends).toEqual({
+      readable: false,
+      total: null,
+      intent: null,
+      submitted: null,
+      confirmed: null,
+      failed_not_sent: null,
+      ambiguous: null,
+      legacy_unclassified: null,
+      latest_successful_send_at: null,
+    });
+  });
+
+  it('surfaces aggregate tool durability and process-local write-loss telemetry', async () => {
+    process.env.WHATSOUP_HEALTH_TOKEN = TEST_HEALTH_TOKEN;
+    db.raw.prepare(`
+      INSERT INTO tool_calls (
+        conversation_key, tool_name, tool_group, tool_input, status, result,
+        replay_policy, outcome_code, retry_disposition, operator_action,
+        evidence_coverage
+      ) VALUES (
+        'conversation-health', 'search_messages', 'search', '[metadata-only]',
+        'pending', NULL, 'read_only', 'not_terminal', 'not_applicable',
+        'none', 'complete'
+      )
+    `).run();
+    deps.runtime = {
+      getHealthSnapshot: () => ({ status: 'healthy', details: {} }),
+      getToolDurabilityTelemetrySnapshot: () => ({
+        observed: true,
+        totalWriteLosses: 2,
+        byStage: { record: 1, execute: 0, complete: 1, deny: 0 },
+        firstLossAt: 1_721_000_000_000,
+        lastLossAt: 1_721_000_001_000,
+      }),
+    } as unknown as HealthDeps['runtime'];
+
+    const { status, body } = await healthReq(port);
+    expect(status).toBe(200);
+    expect(JSON.parse(body).tool_durability).toEqual({
+      readable: true,
+      total: 1,
+      open: 1,
+      terminal: 0,
+      failures: 0,
+      legacy_unclassified: 0,
+      runtime_write_losses: {
+        observed: true,
+        totalWriteLosses: 2,
+        byStage: { record: 1, execute: 0, complete: 1, deny: 0 },
+        firstLossAt: 1_721_000_000_000,
+        lastLossAt: 1_721_000_001_000,
+      },
+    });
+  });
+
+  it('reports unreadable tool durability as unknown and retains runtime observation', async () => {
+    process.env.WHATSOUP_HEALTH_TOKEN = TEST_HEALTH_TOKEN;
+    db.raw.exec('DROP TABLE tool_calls');
+    deps.runtime = {
+      getHealthSnapshot: () => ({ status: 'healthy', details: {} }),
+      getToolDurabilityTelemetrySnapshot: () => ({
+        observed: true,
+        totalWriteLosses: 0,
+        byStage: { record: 0, execute: 0, complete: 0, deny: 0 },
+        firstLossAt: null,
+        lastLossAt: null,
+      }),
+    } as unknown as HealthDeps['runtime'];
+
+    const { status, body } = await healthReq(port);
+    expect(status).toBe(200);
+    const json = JSON.parse(body);
+    expect(json.status).toBe('degraded');
+    expect(json.status_reasons).toContain('durability_evidence_unreadable');
+    expect(json.degradation_causes).toContain('durability_evidence_unreadable');
+    expect(json.tool_durability).toEqual({
+      readable: false,
+      total: null,
+      open: null,
+      terminal: null,
+      failures: null,
+      legacy_unclassified: null,
+      runtime_write_losses: {
+        observed: true,
+        totalWriteLosses: 0,
+        byStage: { record: 0, execute: 0, complete: 0, deny: 0 },
+        firstLossAt: null,
+        lastLossAt: null,
+      },
+    });
+  });
+
+  it('surfaces the database-retention timer health snapshot', async () => {
+    process.env.WHATSOUP_HEALTH_TOKEN = TEST_HEALTH_TOKEN;
+    deps.getDatabaseRetentionHealth = () => ({
+      running: true,
+      state: 'succeeded',
+      consecutiveFailures: 0,
+      failureCode: null,
+      lastRunAt: 1_721_000_000_000,
+      lastSuccessAt: 1_721_000_000_100,
+      lastFailureAt: null,
+      lastResult: {
+        turnRecoveryJobs: 0,
+        turnTerminalRecords: 0,
+        inboundEvents: 0,
+        outboundOps: 0,
+        toolCalls: 3,
+        outboundSends: 4,
+        factExportQueue: 0,
+        memoryConsolidationRuns: 0,
+        metricsHourly: 0,
+        decryptionFailures: 0,
+        messages: 0,
+      },
+    });
+
+    const { status, body } = await healthReq(port);
+    expect(status).toBe(200);
+    expect(JSON.parse(body).retention.database).toEqual(deps.getDatabaseRetentionHealth());
+  });
+
+  it('degrades health for a failed database-retention snapshot', async () => {
+    process.env.WHATSOUP_HEALTH_TOKEN = TEST_HEALTH_TOKEN;
+    deps.getDatabaseRetentionHealth = () => ({
+      running: true,
+      state: 'failed',
+      consecutiveFailures: 2,
+      failureCode: 'retention_failed',
+      lastRunAt: 1_721_000_000_000,
+      lastSuccessAt: 1_720_000_000_000,
+      lastFailureAt: 1_721_000_000_100,
+      lastResult: null,
+    });
+
+    const { status, body } = await healthReq(port);
+    const json = JSON.parse(body);
+    expect(status).toBe(200);
+    expect(json.status).toBe('degraded');
+    expect(json.status_reasons).toContain('database_retention_failed');
+    expect(json.degradation_causes).toContain('database_retention_failed');
+    expect(json.retention.database).toEqual(deps.getDatabaseRetentionHealth());
+  });
+
+  it('degrades with bounded retention evidence when the snapshot getter throws', async () => {
+    process.env.WHATSOUP_HEALTH_TOKEN = TEST_HEALTH_TOKEN;
+    deps.getDatabaseRetentionHealth = () => {
+      throw new Error('CANARY-RETENTION-GETTER-FAILURE');
+    };
+
+    const { status, body } = await healthReq(port);
+    const json = JSON.parse(body);
+    expect(status).toBe(200);
+    expect(json.status).toBe('degraded');
+    expect(json.status_reasons).toContain('database_retention_failed');
+    expect(json.degradation_causes).toContain('database_retention_failed');
+    expect(json.retention.database).toEqual({
+      running: false,
+      state: 'failed',
+      consecutiveFailures: 1,
+      failureCode: 'retention_failed',
+      lastRunAt: null,
+      lastSuccessAt: null,
+      lastFailureAt: null,
+      lastResult: null,
+    });
+    expect(body).not.toContain('CANARY-RETENTION-GETTER-FAILURE');
   });
 
   it('returns 401 when no WHATSOUP_HEALTH_TOKEN is set (fail-closed)', async () => {
@@ -3410,6 +4150,11 @@ describe('GET /typing — Authorization header check', () => {
         sendMedia: vi.fn().mockResolvedValue({ waMessageId: null }),
         connect: vi.fn().mockResolvedValue(undefined),
         disconnect: vi.fn().mockResolvedValue(undefined),
+        getConnectionState: vi.fn(() => emptyConnectionStateSnapshot({
+          connected: true,
+          stateChangedAt: '2026-07-30T00:00:00.000Z',
+          lastDisconnectReason: null,
+        })),
         presenceCache,
       } as unknown as ConnectionManager,
     });
@@ -4187,6 +4932,8 @@ describe('GET /health — normalizeBooleanOrNull and normalizeNumberOrNull non-t
       model_usable_checked_at: null,
       model_usability_status: 'usable',
       last_successful_turn_at: null,
+      last_successful_turn_provider: null,
+      last_successful_turn_session_current: null,
       last_turn_error_class: null,
       last_turn_error_at: null,
     });
@@ -4212,26 +4959,6 @@ describe('health.ts lower-branch coverage (74-549)', () => {
     delete process.env.WHATSOUP_HEALTH_TOKEN;
     if (db) db.close();
     if (server) await new Promise<void>((resolve) => server.close(() => resolve()));
-  });
-
-  // --- line 273: getConnectionState() synthetic fallback, cfg.authDir falsy
-  //     → creds.path === 'unknown' (the false branch of `cfg.authDir ? ... : 'unknown'`)
-  it('reports creds.path "unknown" when connectionManager lacks getConnectionState and config has no authDir (line 273)', async () => {
-    // connectionManager WITHOUT getConnectionState → triggers the synthetic state branch.
-    // The mocked config (top of this file) does not set authDir, so cfg.authDir is undefined.
-    const deps = makeDeps(db);
-    ({ server, port } = await buildTestServer(deps));
-
-    const { status, body } = await healthReq(port);
-    expect(status).toBe(200);
-    const json = JSON.parse(body);
-    // currentAuthBond is nested under credential_lifecycle in the synthetic snapshot.
-    expect(json.whatsapp.credential_lifecycle.currentAuthBond.status).toBe('missing');
-    expect(json.whatsapp.credential_lifecycle.currentAuthBond.issues)
-      .toEqual(['connection_manager_does_not_expose_auth_bond']);
-    // The false branch of line 273's ternary — authDir is unset.
-    expect(json.whatsapp.credential_lifecycle.currentAuthBond.creds.path).toBe('unknown');
-    expect(json.whatsapp.credential_lifecycle.currentAuthBond.authDir.path).toBe('unknown');
   });
 
   // --- line 335: formatAuthBond hash nullish branch — creds.sha256 === null.
@@ -4474,6 +5201,8 @@ describe('health.ts upper-branch coverage (624-1020)', () => {
               modelUsable: true,
               modelUsabilityStatus: 'usable',
               lastSuccessfulTurnAt: 1_700_000_000_000,
+              lastSuccessfulTurnProvider: 'claude-cli',
+              lastSuccessfulTurnSessionCurrent: true,
               lastTurnErrorClass: null,
               lastTurnErrorAt: null,
             },
@@ -4498,6 +5227,8 @@ describe('health.ts upper-branch coverage (624-1020)', () => {
       model_usable_checked_at: null,
       model_usability_status: 'usable',
       last_successful_turn_at: 1_700_000_000_000,
+      last_successful_turn_provider: 'claude-cli',
+      last_successful_turn_session_current: true,
       last_turn_error_class: null,
       last_turn_error_at: null,
     });
@@ -4508,6 +5239,8 @@ describe('health.ts upper-branch coverage (624-1020)', () => {
           modelUsable: true,
           modelUsabilityStatus: 'usable',
           lastSuccessfulTurnAt: 1_700_000_000_000,
+          lastSuccessfulTurnProvider: 'claude-cli',
+          lastSuccessfulTurnSessionCurrent: true,
           lastTurnErrorClass: null,
           lastTurnErrorAt: null,
         },

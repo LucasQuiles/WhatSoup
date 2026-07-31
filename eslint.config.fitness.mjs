@@ -64,6 +64,10 @@ function ruleEntriesFor(id) {
       };
     case 'invariant.no-unsafe-type-escapes':
       return { 'fitness/unsafe-type-escape': 'warn' };
+    case 'portability.fetch-timeout':
+      return { 'fitness/fetch-timeout': 'warn' };
+    case 'portability.sync-exec-timeout':
+      return { 'fitness/sync-exec-timeout': 'warn' };
     default:
       return {};
   }
@@ -111,6 +115,8 @@ const config = [
       ...ruleEntriesFor('arch.sqlite-busy-timeout-ssot'),
       ...ruleEntriesFor('invariant.no-unsafe-type-escapes'),
       ...ruleEntriesFor('invariant.timer-rearm-without-clear'),
+      ...ruleEntriesFor('portability.fetch-timeout'),
+      ...ruleEntriesFor('portability.sync-exec-timeout'),
     },
   },
   {
@@ -156,6 +162,19 @@ const config = [
     plugins,
     rules: {
       ...ruleEntriesFor('arch.approved-api-client'),
+    },
+  },
+  {
+    // Fleet routes: no raw exception prose in responses (#2517).
+    files: ['src/fleet/routes/**/*.ts'],
+    linterOptions,
+    languageOptions: {
+      parser: tseslint.parser,
+      parserOptions: { ecmaVersion: 2024, sourceType: 'module' },
+    },
+    plugins,
+    rules: {
+      'fitness/no-raw-fleet-error': 'warn',
     },
   },
 ];

@@ -1,3 +1,8 @@
+import type {
+  MemoryEvidenceCoverage,
+  MemoryOperationFailureCode,
+} from '../lib/memory-operation-telemetry.ts';
+
 /** A durable knowledge record promoted from episodic memory consolidation */
 export interface DurableKnowledge {
   id: string;
@@ -39,4 +44,30 @@ export interface ConsolidationResult {
     recordId: string;
     reason: string;
   }>;
+}
+
+export type ClusterConsolidationStatus =
+  | 'completed_promoted'
+  | 'completed_discarded'
+  | 'provider_unavailable'
+  | 'provider_timeout'
+  | 'output_invalid'
+  | 'scope_invalid'
+  | 'cancelled';
+
+export type ClusterExecutionStatus =
+  | ClusterConsolidationStatus
+  | 'write_failed';
+
+export interface ClusterExecutionOutcome extends ConsolidationResult {
+  status: ClusterExecutionStatus;
+  failureCode: MemoryOperationFailureCode | 'write_failed';
+  retryable: boolean;
+  evidenceCoverage: MemoryEvidenceCoverage;
+}
+
+export interface ClusterConsolidationOutcome
+  extends ClusterExecutionOutcome {
+  status: ClusterConsolidationStatus;
+  failureCode: MemoryOperationFailureCode;
 }

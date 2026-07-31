@@ -148,7 +148,7 @@ describe('parseClosedOptions', () => {
  * Lowering the baseline as scripts migrate is expected and the assertion says so.
  */
 describe('hand-rolled parseArgs ratchet', () => {
-  const HAND_ROLLED_PARSEARGS_BASELINE = 29;
+  const HAND_ROLLED_PARSEARGS_BASELINE = 30;
 
   const isHandRolledParser = (source: string): boolean => {
     const sourceFile = ts.createSourceFile(
@@ -187,7 +187,12 @@ describe('hand-rolled parseArgs ratchet', () => {
       const bindings = statement.importClause?.namedBindings;
       if (!bindings || !ts.isNamedImports(bindings)) continue;
       for (const element of bindings.elements) {
-        if ((element.propertyName ?? element.name).text === 'takeValue') {
+        // parseClosedOptions counts too: it is built on takeValue and additionally
+        // rejects duplicate and unknown options, so a parser using it is strictly
+        // safer than one calling takeValue directly. Recognising only takeValue
+        // reported such a parser as hand-rolled and pushed authors down to the
+        // weaker primitive to satisfy the ratchet.
+        if (['takeValue', 'parseClosedOptions'].includes((element.propertyName ?? element.name).text)) {
           const symbol = checker.getSymbolAtLocation(element.name);
           if (symbol) sharedBindings.add(symbol);
         }

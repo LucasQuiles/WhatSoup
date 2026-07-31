@@ -6,14 +6,22 @@
  * and storing bot replies. Ingest concerns (store incoming, admin routing,
  * access policy) are tested in tests/core/ingest.test.ts.
  *
- * Architecture note: handleMessage() calls chatQueue.enqueue() without await
- * (fire-and-forget). The ChatQueue mock stores task promises in globalThis so
- * drainQueue() can await them. Tests that exercise processMessage() must call
- * drainQueue() (or handleAndDrain()) after handleMessage().
+ * Architecture note: handleMessage() awaits only ChatQueue's immediate
+ * admission decision, not the queued task. The ChatQueue mock stores task
+ * promises in globalThis so drainQueue() can await them. Tests that exercise
+ * processMessage() must call drainQueue() (or handleAndDrain()) after
+ * handleMessage().
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type { IncomingMessage, Messenger } from '../../../src/core/types.ts';
 import { OUTBOUND_GOVERNOR_SHED_LOG } from '../../../src/transport/outbound-governor.ts';
+import {
+  AuthRequiredError,
+  RateLimitedError,
+  PayloadTooLargeError,
+  TransientProviderError,
+} from '../../../src/transport/contract/errors.ts';
+import { makeChannelId } from '../../../src/core/transport-refs.ts';
 import type { LLMProvider } from '../../../src/runtimes/chat/providers/types.ts';
 import type { Database } from '../../../src/core/database.ts';
 import { DatabaseCompatibilityError } from '../../../src/core/database-compatibility.ts';
@@ -42,8 +50,9 @@ function drainQueue(): Promise<void> {
 // in globalThis.__queueTasks so tests can drain them via drainQueue().
 vi.mock('../../../src/runtimes/chat/queue.ts', () => {
   class ChatQueue {
-    enqueue(_chatJid: string, task: () => Promise<void>): void {
+    async enqueue(_chatJid: string, task: () => Promise<void>): Promise<boolean> {
       ((globalThis as any).__queueTasks as Promise<void>[]).push(task());
+      return true;
     }
   }
   return { ChatQueue };
@@ -59,6 +68,7 @@ vi.mock('../../../src/runtimes/chat/window.ts', () => ({
 
 vi.mock('../../../src/runtimes/chat/context.ts', () => ({
   loadContext: vi.fn(),
+  loadContextDetailed: vi.fn(),
 }));
 
 vi.mock('../../../src/core/messages.ts', () => ({
@@ -119,7 +129,7 @@ vi.mock('../../../src/logger.ts', () => {
 
 import { checkRateLimit } from '../../../src/runtimes/chat/rate-limiter.ts';
 import { loadConversationWindow } from '../../../src/runtimes/chat/window.ts';
-import { loadContext } from '../../../src/runtimes/chat/context.ts';
+import { loadContextDetailed } from '../../../src/runtimes/chat/context.ts';
 import { storeMessageIfNew } from '../../../src/core/messages.ts';
 import { recordAttempt, recordResponse } from '../../../src/runtimes/chat/rate-limits-db.ts';
 import { processMedia } from '../../../src/runtimes/chat/media/processor.ts';
@@ -156,7 +166,7 @@ function mockEnrichmentPollerInstances(): unknown[] {
 
 const mockCheckRateLimit = vi.mocked(checkRateLimit);
 const mockLoadConversationWindow = vi.mocked(loadConversationWindow);
-const mockLoadContext = vi.mocked(loadContext);
+const mockLoadContext = vi.mocked(loadContextDetailed);
 const mockStoreMessage = vi.mocked(storeMessageIfNew);
 const mockRecordAttempt = vi.mocked(recordAttempt);
 const mockRecordResponse = vi.mocked(recordResponse);
@@ -234,11 +244,15 @@ function makeIncomingMessage(overrides: Partial<IncomingMessage> = {}): Incoming
   };
 }
 
+function completeContextResult(text = '') {
+  return { text, status: 'complete' as const, scopes: [] };
+}
+
 /** Configure the "happy path" default mock return values. */
 function setHappyPathDefaults() {
   mockCheckRateLimit.mockReturnValue({ allowed: true, remaining: 44 });
   mockProcessMedia.mockResolvedValue({ content: 'hello bot', images: [] });
-  mockLoadContext.mockResolvedValue('');
+  mockLoadContext.mockResolvedValue(completeContextResult());
   mockLoadConversationWindow.mockReturnValue([]);
   mockStoreMessage.mockReturnValue(true);
   mockRecordResponse.mockImplementation(() => undefined);
@@ -419,7 +433,7 @@ describe('Happy path', () => {
 
   it('context block appended to system prompt when non-empty', async () => {
     const { handler, primary } = makeHandler();
-    mockLoadContext.mockResolvedValue('Background knowledge:\n- Alice likes cats');
+    mockLoadContext.mockResolvedValue(completeContextResult('Background knowledge:\n- Alice likes cats'));
 
     await handleAndDrain(handler, makeIncomingMessage());
 
@@ -909,7 +923,21 @@ describe('Media processing', () => {
 // ===========================================================================
 
 describe('Pinecone graceful degradation (B04)', () => {
-  it('loadContext throws → message still processed, LLM called, response sent', async () => {
+  it('records a bounded unavailable context outcome when retrieval throws', async () => {
+    const { handler } = makeHandler();
+    mockLoadContext.mockRejectedValue(new Error('synthetic provider failure'));
+
+    await handleAndDrain(handler, makeIncomingMessage());
+
+    expect(handler.getHealthSnapshot().details.memoryContext).toEqual({
+      status: 'unavailable',
+      scopes: [
+        { scope: 'context', status: 'failed', failureCode: 'unknown', retryable: true },
+      ],
+    });
+  });
+
+  it('context retrieval throws → message still processed, LLM called, response sent', async () => {
     const { handler, messenger, primary } = makeHandler();
     mockLoadContext.mockRejectedValue(new Error('Pinecone connection refused'));
 
@@ -921,24 +949,24 @@ describe('Pinecone graceful degradation (B04)', () => {
     expect(messenger.sendMessage).toHaveBeenCalledWith(expect.any(String), 'hey whats up');
   });
 
-  it('loadContext throws → warning log with "context retrieval failed" emitted', async () => {
+  it('context retrieval throws → bounded warning log emitted', async () => {
     const { handler } = makeHandler();
     mockLoadContext.mockRejectedValue(new Error('Pinecone down'));
 
     await handleAndDrain(handler, makeIncomingMessage());
 
     expect(mockLogWarn()).toHaveBeenCalledWith(
-      expect.objectContaining({ err: expect.any(Error) }),
-      expect.stringContaining('context retrieval failed'),
+      expect.objectContaining({ failure_code: 'unknown' }),
+      expect.stringContaining('context retrieval unavailable'),
     );
   });
 
-  it('loadContext hangs (never resolves) → times out after 5s, response sent without context', async () => {
+  it('context retrieval hangs → times out after 5s, response sent without context', async () => {
     vi.useFakeTimers();
     const { handler, messenger, primary } = makeHandler();
 
     // A promise that never resolves
-    mockLoadContext.mockReturnValue(new Promise<string>(() => {}));
+    mockLoadContext.mockReturnValue(new Promise<ReturnType<typeof completeContextResult>>(() => {}));
 
     await handler.handleMessage(makeIncomingMessage());
     // Advance past the 5-second Pinecone timeout
@@ -948,10 +976,56 @@ describe('Pinecone graceful degradation (B04)', () => {
     // LLM still called, response still sent
     expect(vi.mocked(primary.generate)).toHaveBeenCalledOnce();
     expect(messenger.sendMessage).toHaveBeenCalledWith(expect.any(String), 'hey whats up');
-    expect(mockLogWarn()).toHaveBeenCalledWith(
-      expect.objectContaining({ err: expect.objectContaining({ message: 'PINECONE_TIMEOUT' }) }),
-      expect.stringContaining('context retrieval failed'),
-    );
+    expect(handler.getHealthSnapshot().details.memoryContext).toEqual({
+      status: 'unavailable',
+      scopes: [
+        { scope: 'context', status: 'failed', failureCode: 'timeout', retryable: true },
+      ],
+    });
+  });
+
+  it('does not let a late context completion overwrite the timeout snapshot', async () => {
+    vi.useFakeTimers();
+    const { handler } = makeHandler();
+    let resolveContext: (result: ReturnType<typeof completeContextResult>) => void = () => {};
+    mockLoadContext.mockReturnValue(new Promise((resolve) => {
+      resolveContext = resolve;
+    }));
+
+    await handler.handleMessage(makeIncomingMessage());
+    await vi.advanceTimersByTimeAsync(6_000);
+    await drainQueue();
+
+    resolveContext(completeContextResult('late context'));
+    await Promise.resolve();
+
+    expect(handler.getMemoryContextHealth()).toEqual({
+      status: 'unavailable',
+      scopes: [
+        { scope: 'context', status: 'failed', failureCode: 'timeout', retryable: true },
+      ],
+    });
+  });
+
+  it('replaces an unavailable context snapshot after a later complete retrieval', async () => {
+    const { handler } = makeHandler();
+    mockLoadContext
+      .mockRejectedValueOnce(new Error('synthetic provider failure'))
+      .mockResolvedValueOnce(completeContextResult());
+
+    await handleAndDrain(handler, makeIncomingMessage());
+    expect(handler.getMemoryContextHealth()).toEqual({
+      status: 'unavailable',
+      scopes: [
+        { scope: 'context', status: 'failed', failureCode: 'unknown', retryable: true },
+      ],
+    });
+
+    await handleAndDrain(handler, makeIncomingMessage({ messageId: 'msg-002' }));
+    expect(handler.getMemoryContextHealth()).toEqual({
+      status: 'complete',
+      scopes: [],
+    });
   });
 });
 
@@ -1229,7 +1303,7 @@ describe('Identity injection', () => {
   });
 
   it('identity block appears before any context block in system prompt', async () => {
-    mockLoadContext.mockResolvedValue('Background:\n- some fact');
+    mockLoadContext.mockResolvedValue(completeContextResult('Background:\n- some fact'));
     const systemPrompt = await getSystemPromptWithOptions({
       enableEnrichment: false,
       getBotJid: () => '15551234567@s.whatsapp.net',
@@ -1324,7 +1398,7 @@ describe('Send retry with exponential backoff (B02)', () => {
     expect(mockRecordResponse).toHaveBeenCalledOnce();
   });
 
-  it('all 3 send attempts fail → error logged with responseText for recovery', async () => {
+  it('all 3 send attempts fail → bounded evidence is logged without response content', async () => {
     vi.useFakeTimers();
     const { handler, messenger } = makeHandler();
     messenger.sendMessage.mockRejectedValue(new Error('permanent failure'));
@@ -1333,13 +1407,19 @@ describe('Send retry with exponential backoff (B02)', () => {
     await vi.runAllTimersAsync();
     await drainQueue();
 
-    // 3 send attempts + 1 best-effort failure notification
-    expect(messenger.sendMessage).toHaveBeenCalledTimes(4);
-    // The error log must include responseText so the response is recoverable
+    expect(messenger.sendMessage).toHaveBeenCalledTimes(3);
     expect(mockLogError()).toHaveBeenCalledWith(
-      expect.objectContaining({ responseText: 'hey whats up' }),
-      expect.stringContaining('all send attempts failed'),
+      expect.objectContaining({
+        attempts: 3,
+        providerSubmissions: 3,
+        failureCode: 'outbound.unknown_failure',
+        mutationState: 'ambiguous',
+      }),
+      expect.stringContaining('bounded failure disposition'),
     );
+    const [metadata] = mockLogError().mock.calls.at(-1)!;
+    expect(metadata).not.toHaveProperty('responseText');
+    expect(metadata).not.toHaveProperty('err');
   });
 
   it('all 3 send attempts fail → rate limit NOT charged, reply NOT stored', async () => {
@@ -1372,6 +1452,126 @@ describe('Send retry with exponential backoff (B02)', () => {
       (c: unknown[]) => typeof c[1] === 'string' && c[1].includes('send_retry'),
     );
     expect(warnCalls).toHaveLength(2);
+  });
+
+  it('typed retryable=false rejection stops after one attempt with definitive evidence', async () => {
+    const { handler, messenger } = makeHandler();
+    const durability = makeDurability();
+    handler.setDurability(durability);
+    messenger.sendMessage.mockRejectedValue(new AuthRequiredError({
+      channelId: makeChannelId('signal', 'test'),
+      operation: 'sendText',
+      correlationId: 'synthetic-auth-reject',
+      scope: 'provider',
+      message: 'synthetic',
+      phase: 'provider_call_started',
+    }));
+
+    await handleAndDrain(handler, makeIncomingMessage({ inboundSeq: 99 }));
+
+    expect(messenger.sendMessage).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(durability.markFailedPermanent)).toHaveBeenCalledWith(
+      42,
+      expect.objectContaining({
+        failure_code: 'transport.auth_required',
+        mutation_state: 'rejected',
+        logical_attempt_count: 1,
+        provider_submission_count: 1,
+      }),
+    );
+  });
+
+  it('sends a failure notice when the failure class proves the channel is healthy', async () => {
+    const { handler, messenger } = makeHandler();
+    const durability = makeDurability();
+    handler.setDurability(durability);
+    // payload_too_large is a message-specific, non-retryable rejection that
+    // fires BEFORE provider contact — a short fixed-string notice to the same
+    // destination does not share the defect, so it must go out. Use
+    // mockRejectedValueOnce (not a blanket mockRejectedValue) so the notice
+    // send itself — reusing the same mock — can resolve and be observed.
+    messenger.sendMessage
+      .mockRejectedValueOnce(new PayloadTooLargeError({
+        channelId: makeChannelId('signal', 'test'),
+        operation: 'sendText',
+        correlationId: 'synthetic-payload-too-large',
+        scope: 'request',
+        message: 'synthetic provider prose that must not persist',
+      }))
+      .mockResolvedValueOnce({ waMessageId: null });
+
+    await handleAndDrain(handler, makeIncomingMessage({ inboundSeq: 99 }));
+
+    expect(messenger.sendMessage).toHaveBeenCalledTimes(2);
+    expect(messenger.sendMessage).toHaveBeenNthCalledWith(
+      2,
+      expect.any(String),
+      '⚠️ My last response may not have been delivered. Please ask me again.',
+    );
+    expect(vi.mocked(durability.markFailedPermanent)).toHaveBeenCalledWith(
+      42,
+      expect.objectContaining({
+        failure_code: 'transport.payload_too_large',
+        mutation_state: 'not_started',
+      }),
+    );
+  });
+
+  it('does not send a failure notice for a retryable transient_provider failure that reaches stop only via exhaustion', async () => {
+    // Pinning test (GAP 2b): behavior already correct, no RED expected. Same
+    // discriminating case as the agent-queue companion: transient_provider
+    // is retryable and only reaches retry_decision 'stop' via exhaustion —
+    // proving retry_decision==='stop' alone is not a safe notice gate.
+    vi.useFakeTimers();
+    const { handler, messenger } = makeHandler();
+    messenger.sendMessage.mockRejectedValue(new TransientProviderError({
+      channelId: makeChannelId('signal', 'test'),
+      operation: 'sendText',
+      correlationId: 'synthetic-transient-exhausted',
+      scope: 'request',
+      message: 'synthetic provider prose that must not persist',
+      phase: 'provider_call_started',
+    }));
+
+    await handler.handleMessage(makeIncomingMessage());
+    await vi.runAllTimersAsync();
+    await drainQueue();
+
+    expect(messenger.sendMessage).toHaveBeenCalledTimes(3);
+    expect(messenger.sendMessage).not.toHaveBeenCalledWith(
+      expect.any(String),
+      '⚠️ My last response may not have been delivered. Please ask me again.',
+    );
+  });
+
+  it('typed local producer floor transfers to the durable drainer without retrying', async () => {
+    const { handler, messenger } = makeHandler();
+    const durability = makeDurability();
+    handler.setDurability(durability);
+    messenger.sendMessage.mockRejectedValue(new RateLimitedError({
+      channelId: makeChannelId('signal', 'test'),
+      operation: 'sendText',
+      correlationId: 'synthetic-local-limit',
+      scope: 'conversation',
+      message: 'synthetic',
+      phase: 'not_started',
+      retryAfterMs: 60_000,
+    }));
+
+    await handleAndDrain(handler, makeIncomingMessage({ inboundSeq: 99 }));
+
+    expect(messenger.sendMessage).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(durability.markDeferred)).toHaveBeenCalledWith(
+      42,
+      expect.objectContaining({
+        failure_code: 'transport.rate_limited',
+        mutation_state: 'not_started',
+        retry_decision: 'retry_not_before',
+        retry_owner: 'pending_drainer',
+        provider_submission_count: 0,
+      }),
+    );
+    expect(vi.mocked(durability.markInboundFailed)).not.toHaveBeenCalled();
   });
 });
 
@@ -1875,6 +2075,7 @@ function makeDurability() {
     markSubmitted: vi.fn(),
     markMaybeSent: vi.fn(),
     markFailedPermanent: vi.fn(),
+    markDeferred: vi.fn(),
     markInboundSkipped: vi.fn(),
     markInboundFailed: vi.fn(),
     completeInbound: vi.fn(),
@@ -1891,7 +2092,7 @@ describe('DurabilityEngine integration', () => {
 
     expect(vi.mocked(durability.createOutboundOp)).toHaveBeenCalledOnce();
     expect(vi.mocked(durability.markSending)).toHaveBeenCalledWith(42);
-    expect(vi.mocked(durability.markSubmitted)).toHaveBeenCalledWith(42, null);
+    expect(vi.mocked(durability.markSubmitted)).toHaveBeenCalledWith(42, null, 1);
     expect(messenger.sendMessage).toHaveBeenCalledWith(expect.any(String), 'hey whats up');
   });
 
@@ -1927,7 +2128,7 @@ describe('DurabilityEngine integration', () => {
       '⚠️ My last response may not have been delivered. Please ask me again.',
     );
     expect(vi.mocked(durability.markSubmitted)).toHaveBeenCalledTimes(1);
-    expect(vi.mocked(durability.markSubmitted)).toHaveBeenCalledWith(42, 'wamid.confirmed');
+    expect(vi.mocked(durability.markSubmitted)).toHaveBeenCalledWith(42, 'wamid.confirmed', 1);
     expect(mockLogWarn().mock.calls.filter(
       (c: unknown[]) => typeof c[1] === 'string' && c[1] === 'send_retry',
     )).toHaveLength(0);
@@ -1967,7 +2168,7 @@ describe('DurabilityEngine integration', () => {
 
     expect(messenger.sendMessage).toHaveBeenCalledTimes(2);
     expect(vi.mocked(durability.markSubmitted)).toHaveBeenCalledTimes(1);
-    expect(vi.mocked(durability.markSubmitted)).toHaveBeenCalledWith(42, 'wamid.after-retry');
+    expect(vi.mocked(durability.markSubmitted)).toHaveBeenCalledWith(42, 'wamid.after-retry', 2);
     expect(vi.mocked(durability.markMaybeSent)).not.toHaveBeenCalled();
     expect(vi.mocked(durability.completeInbound)).toHaveBeenCalledWith(8, 'response_sent');
     expect(mockRecordResponse).toHaveBeenCalledOnce();
@@ -1984,7 +2185,7 @@ describe('DurabilityEngine integration', () => {
     expect(vi.mocked(durability.completeInbound)).not.toHaveBeenCalled();
   });
 
-  it('send failure: markMaybeSent called with error message, markInboundFailed called with inboundSeq', async () => {
+  it('send failure: markMaybeSent receives bounded evidence and inbound failure is recorded', async () => {
     vi.useFakeTimers();
     const { handler, messenger } = makeHandler();
     const durability = makeDurability();
@@ -1996,7 +2197,16 @@ describe('DurabilityEngine integration', () => {
     await vi.runAllTimersAsync();
     await drainQueue();
 
-    expect(vi.mocked(durability.markMaybeSent)).toHaveBeenCalledWith(42, 'permanent send failure');
+    expect(vi.mocked(durability.markMaybeSent)).toHaveBeenCalledWith(
+      42,
+      expect.objectContaining({
+        failure_code: 'outbound.unknown_failure',
+        mutation_state: 'ambiguous',
+        logical_attempt_count: 3,
+        provider_submission_count: 3,
+      }),
+      undefined,
+    );
     // Send exhaustion is a transport send failure.
     expect(vi.mocked(durability.markInboundFailed)).toHaveBeenCalledWith(99, 'transport_send_failed');
   });
@@ -2017,7 +2227,16 @@ describe('DurabilityEngine integration', () => {
     await vi.runAllTimersAsync();
     await drainQueue();
 
-    expect(vi.mocked(durability.markFailedPermanent)).toHaveBeenCalledWith(42, OUTBOUND_GOVERNOR_SHED_LOG);
+    expect(vi.mocked(durability.markFailedPermanent)).toHaveBeenCalledWith(
+      42,
+      expect.objectContaining({
+        failure_code: 'outbound.governor_shed',
+        stage: 'admission',
+        mutation_state: 'not_started',
+        logical_attempt_count: 1,
+        provider_submission_count: 0,
+      }),
+    );
     expect(vi.mocked(durability.markMaybeSent)).not.toHaveBeenCalled();
   });
 
@@ -2383,15 +2602,17 @@ describe("?? 'unknown' fallback in log calls (non-Error thrown values)", () => {
       (c: unknown[]) => typeof c[1] === 'string' && (c[1] as string) === 'send_retry',
     );
     expect(warnCalls).toHaveLength(1);
-    // error field in the log object should be 'unknown' (thrown value was a plain string)
     const warnMeta = warnCalls[0][0] as Record<string, unknown>;
-    expect(warnMeta.error).toBe('unknown');
+    expect(warnMeta).toMatchObject({
+      failureCode: 'outbound.unknown_failure',
+      mutationState: 'ambiguous',
+    });
+    expect(warnMeta).not.toHaveProperty('error');
     // Send eventually succeeded on attempt 2
     expect(mockRecordResponse).toHaveBeenCalledOnce();
   });
 
-  // Branch #40 line 440: markMaybeSent receives ?? 'send_retry_failed' when lastSendErr has no .message.
-  it('all 3 sends fail with non-Error throw → markMaybeSent called with "send_retry_failed"', async () => {
+  it('all 3 sends fail with non-Error throw → bounded unknown evidence is persisted', async () => {
     vi.useFakeTimers();
     const { handler, messenger } = makeHandler();
     const durability = makeDurability();
@@ -2403,7 +2624,15 @@ describe("?? 'unknown' fallback in log calls (non-Error thrown values)", () => {
     await vi.runAllTimersAsync();
     await drainQueue();
 
-    // markMaybeSent must be called with the fallback string 'send_retry_failed'
-    expect(vi.mocked(durability.markMaybeSent)).toHaveBeenCalledWith(42, 'send_retry_failed');
+    expect(vi.mocked(durability.markMaybeSent)).toHaveBeenCalledWith(
+      42,
+      expect.objectContaining({
+        failure_code: 'outbound.unknown_failure',
+        evidence_coverage: 'partial',
+        logical_attempt_count: 3,
+        provider_submission_count: 3,
+      }),
+      undefined,
+    );
   });
 });

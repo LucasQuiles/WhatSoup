@@ -54,6 +54,24 @@ import { asRecordOrEmpty } from './type-guards.js';
 const API_BASE = '';
 
 /**
+ * FleetApiError — renders only safe projection fields (#2517 requirement 7).
+ * The message contains the bounded code, registered safe message, and
+ * correlation ID — never raw response body bytes.
+ */
+export class FleetApiError extends Error {
+  readonly status: number;
+  readonly code: string;
+  readonly correlation: string;
+  constructor(status: number, code: string, message: string, correlation: string) {
+    super(`${message} (${code})${correlation}`);
+    this.name = 'FleetApiError';
+    this.status = status;
+    this.code = code;
+    this.correlation = correlation;
+  }
+}
+
+/**
  * B1 closure: the served HTML carries NO credentials. The production server
  * advertises its auth mode via a meta tag; the browser authenticates ticket
  * minting with an HttpOnly session cookie set by POST /api/console-session
@@ -185,7 +203,22 @@ async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
     signal: init?.signal ?? AbortSignal.timeout(5000),
   });
   if (!res.ok) {
-    throw new Error(`API ${res.status}: ${await res.text()}`);
+    // #2517: Parse the fleet-error-v1 projection and render only safe fields.
+    // Never interpolate the raw response body into the exception message.
+    const body = await res.text();
+    try {
+      const parsed = JSON.parse(body) as { schema?: string; code?: string; message?: string; correlation_id?: string };
+      if (parsed.schema === 'fleet-error-v1') {
+        const code = parsed.code ?? 'unknown';
+        const msg = parsed.message ?? 'An error occurred.';
+        const cid = parsed.correlation_id ? ` [${parsed.correlation_id}]` : '';
+        throw new FleetApiError(res.status, code, msg, cid);
+      }
+    } catch (parseErr) {
+      if (parseErr instanceof FleetApiError) throw parseErr;
+      // Body wasn't valid JSON — use status code only, never the raw body.
+    }
+    throw new Error(`API ${res.status}`);
   }
   return res.json() as Promise<T>;
 }
@@ -441,6 +474,13 @@ export const api = {
   // notification-adjacent prefs with real persistence (fleet-silences.json).
   getSilences: () =>
     apiFetch<{
+      availability: 'observed' | 'uninitialized' | 'unavailable' | 'invalid'
+      readBasis: 'current' | 'last_known_good'
+      observedAt: string
+      revision?: string
+      reasonClass?: 'invalid_json' | 'invalid_document' | 'missing_after_observed' | 'permission_denied' | 'read_failed'
+      lastKnownGoodAt?: string
+      lastKnownGoodAgeMs?: number
       silences: Array<{
         instance: string
         until: string

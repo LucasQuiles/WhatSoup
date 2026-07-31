@@ -1,9 +1,9 @@
 {
-  "generated_at": "2026-07-28T21:21:24Z",
+  "generated_at": "2026-07-31T17:37:36Z",
   "repo": "WhatSoup",
-  "git_head": "2f1c6cdcae8a25c8c989958fc0c26930cd8aaeb9",
+  "git_head": "4ffb5d459f28f4b70dde7715f0760a3457972f77",
   "git_head_note": "git_head is captured at scan time, so it reflects the branch HEAD at the moment `build-work-index` ran — NOT the commit that carries this index. Expect divergence in two cases: (1) intra-branch, when the regenerated index is committed after further content changes are staged; (2) post-squash-merge, when the landed main SHA differs from the pre-merge branch SHA. The row data and inconsistency detection remain accurate regardless of git_head freshness.",
-  "total": 92,
+  "total": 108,
   "schema_version": 5,
   "rows": [
     {
@@ -631,6 +631,42 @@
       "size_bytes": 31675
     },
     {
+      "path": "docs/superpowers/plans/2026-07-28-chat-queue-admission.md",
+      "kind": "plan",
+      "topic_raw": "2026-07-28-chat-queue-admission",
+      "topic": "chat-queue-admission",
+      "status": "unknown",
+      "status_source": "fallback",
+      "canonical_parent": "docs/superpowers/plans",
+      "supersedes_hint": null,
+      "last_modified": "2026-07-31",
+      "size_bytes": 7689
+    },
+    {
+      "path": "docs/superpowers/plans/2026-07-28-controller-state-recovery-integrity.md",
+      "kind": "plan",
+      "topic_raw": "2026-07-28-controller-state-recovery-integrity",
+      "topic": "controller-state-recovery-integrity",
+      "status": "active",
+      "status_source": "body-marker",
+      "canonical_parent": "docs/superpowers/plans",
+      "supersedes_hint": null,
+      "last_modified": "2026-07-31",
+      "size_bytes": 68095
+    },
+    {
+      "path": "docs/superpowers/plans/2026-07-28-incident-ingestion-surface.md",
+      "kind": "plan",
+      "topic_raw": "2026-07-28-incident-ingestion-surface",
+      "topic": "incident-ingestion-surface",
+      "status": "unknown",
+      "status_source": "fallback",
+      "canonical_parent": "docs/superpowers/plans",
+      "supersedes_hint": null,
+      "last_modified": "2026-07-31",
+      "size_bytes": 19439
+    },
+    {
       "path": "docs/superpowers/plans/2026-07-28-incident-store-core.md",
       "kind": "plan",
       "topic_raw": "2026-07-28-incident-store-core",
@@ -641,6 +677,18 @@
       "supersedes_hint": null,
       "last_modified": "2026-07-28",
       "size_bytes": 62003
+    },
+    {
+      "path": "docs/superpowers/plans/2026-07-28-primary-probe-cancellation.md",
+      "kind": "plan",
+      "topic_raw": "2026-07-28-primary-probe-cancellation",
+      "topic": "primary-probe-cancellation",
+      "status": "active",
+      "status_source": "body-marker",
+      "canonical_parent": "docs/superpowers/plans",
+      "supersedes_hint": null,
+      "last_modified": "2026-07-31",
+      "size_bytes": 8924
     },
     {
       "path": "docs/superpowers/plans/2026-07-28-runtime-health-signal-dispositions.md",
@@ -665,6 +713,54 @@
       "supersedes_hint": null,
       "last_modified": "2026-07-28",
       "size_bytes": 7274
+    },
+    {
+      "path": "docs/superpowers/plans/2026-07-29-launchd-restart-policy-2682.md",
+      "kind": "plan",
+      "topic_raw": "2026-07-29-launchd-restart-policy-2682",
+      "topic": "launchd-restart-policy-2682",
+      "status": "active",
+      "status_source": "body-marker",
+      "canonical_parent": "docs/superpowers/plans",
+      "supersedes_hint": null,
+      "last_modified": "2026-07-31",
+      "size_bytes": 6269
+    },
+    {
+      "path": "docs/superpowers/plans/2026-07-29-maybe-sent-ambiguity-episode.md",
+      "kind": "plan",
+      "topic_raw": "2026-07-29-maybe-sent-ambiguity-episode",
+      "topic": "maybe-sent-ambiguity-episode",
+      "status": "unknown",
+      "status_source": "fallback",
+      "canonical_parent": "docs/superpowers/plans",
+      "supersedes_hint": null,
+      "last_modified": "2026-07-31",
+      "size_bytes": 13541
+    },
+    {
+      "path": "docs/superpowers/plans/2026-07-29-portable-startup-notification-protocol.md",
+      "kind": "plan",
+      "topic_raw": "2026-07-29-portable-startup-notification-protocol",
+      "topic": "portable-startup-notification-protocol",
+      "status": "unknown",
+      "status_source": "fallback",
+      "canonical_parent": "docs/superpowers/plans",
+      "supersedes_hint": null,
+      "last_modified": "2026-07-31",
+      "size_bytes": 16436
+    },
+    {
+      "path": "docs/superpowers/plans/2026-07-29-pr-metadata-guard.md",
+      "kind": "plan",
+      "topic_raw": "2026-07-29-pr-metadata-guard",
+      "topic": "pr-metadata-guard",
+      "status": "unknown",
+      "status_source": "fallback",
+      "canonical_parent": "docs/superpowers/plans",
+      "supersedes_hint": null,
+      "last_modified": "2026-07-31",
+      "size_bytes": 17098
     },
     {
       "path": "docs/superpowers/reviews/2026-04-07-anti-echo-review-handoff.md",
@@ -1003,6 +1099,30 @@
       "size_bytes": 9610
     },
     {
+      "path": "docs/superpowers/specs/2026-07-28-chat-queue-admission-design.md",
+      "kind": "spec",
+      "topic_raw": "2026-07-28-chat-queue-admission-design",
+      "topic": "chat-queue-admission-design",
+      "status": "unknown",
+      "status_source": "fallback",
+      "canonical_parent": "docs/superpowers/specs",
+      "supersedes_hint": null,
+      "last_modified": "2026-07-31",
+      "size_bytes": 7312
+    },
+    {
+      "path": "docs/superpowers/specs/2026-07-28-controller-state-recovery-integrity-design.md",
+      "kind": "spec",
+      "topic_raw": "2026-07-28-controller-state-recovery-integrity-design",
+      "topic": "controller-state-recovery-integrity-design",
+      "status": "completed",
+      "status_source": "body-marker",
+      "canonical_parent": "docs/superpowers/specs",
+      "supersedes_hint": null,
+      "last_modified": "2026-07-31",
+      "size_bytes": 56487
+    },
+    {
       "path": "docs/superpowers/specs/2026-07-28-incident-control-plane-design.md",
       "kind": "spec",
       "topic_raw": "2026-07-28-incident-control-plane-design",
@@ -1013,6 +1133,30 @@
       "supersedes_hint": "BOT ERRORS WhatsApp-transport-centric delivery (dispatcher/collector file+SSH architecture) as the canonical incident path.",
       "last_modified": "2026-07-28",
       "size_bytes": 33216
+    },
+    {
+      "path": "docs/superpowers/specs/2026-07-28-incident-ingestion-surface-design.md",
+      "kind": "spec",
+      "topic_raw": "2026-07-28-incident-ingestion-surface-design",
+      "topic": "incident-ingestion-surface-design",
+      "status": "unknown",
+      "status_source": "body-marker",
+      "canonical_parent": "docs/superpowers/specs",
+      "supersedes_hint": null,
+      "last_modified": "2026-07-31",
+      "size_bytes": 11428
+    },
+    {
+      "path": "docs/superpowers/specs/2026-07-28-primary-probe-cancellation-design.md",
+      "kind": "spec",
+      "topic_raw": "2026-07-28-primary-probe-cancellation-design",
+      "topic": "primary-probe-cancellation-design",
+      "status": "completed",
+      "status_source": "body-marker",
+      "canonical_parent": "docs/superpowers/specs",
+      "supersedes_hint": null,
+      "last_modified": "2026-07-31",
+      "size_bytes": 6535
     },
     {
       "path": "docs/superpowers/specs/2026-07-28-runtime-health-signal-dispositions-design.md",
@@ -1037,6 +1181,54 @@
       "supersedes_hint": null,
       "last_modified": "2026-07-28",
       "size_bytes": 8877
+    },
+    {
+      "path": "docs/superpowers/specs/2026-07-29-incident-evaluator-core-design.md",
+      "kind": "spec",
+      "topic_raw": "2026-07-29-incident-evaluator-core-design",
+      "topic": "incident-evaluator-core-design",
+      "status": "unknown",
+      "status_source": "body-marker",
+      "canonical_parent": "docs/superpowers/specs",
+      "supersedes_hint": null,
+      "last_modified": "2026-07-31",
+      "size_bytes": 164371
+    },
+    {
+      "path": "docs/superpowers/specs/2026-07-29-launchd-restart-policy-2682-design.md",
+      "kind": "spec",
+      "topic_raw": "2026-07-29-launchd-restart-policy-2682-design",
+      "topic": "launchd-restart-policy-2682-design",
+      "status": "active",
+      "status_source": "body-marker",
+      "canonical_parent": "docs/superpowers/specs",
+      "supersedes_hint": null,
+      "last_modified": "2026-07-31",
+      "size_bytes": 6012
+    },
+    {
+      "path": "docs/superpowers/specs/2026-07-29-maybe-sent-ambiguity-episode-design.md",
+      "kind": "spec",
+      "topic_raw": "2026-07-29-maybe-sent-ambiguity-episode-design",
+      "topic": "maybe-sent-ambiguity-episode-design",
+      "status": "unknown",
+      "status_source": "fallback",
+      "canonical_parent": "docs/superpowers/specs",
+      "supersedes_hint": null,
+      "last_modified": "2026-07-31",
+      "size_bytes": 3278
+    },
+    {
+      "path": "docs/superpowers/specs/2026-07-29-portable-startup-notification-protocol-design.md",
+      "kind": "spec",
+      "topic_raw": "2026-07-29-portable-startup-notification-protocol-design",
+      "topic": "portable-startup-notification-protocol-design",
+      "status": "unknown",
+      "status_source": "body-marker",
+      "canonical_parent": "docs/superpowers/specs",
+      "supersedes_hint": null,
+      "last_modified": "2026-07-31",
+      "size_bytes": 12240
     },
     {
       "path": "docs/superpowers/specs/kill-session-transactional-cancellation/design.md",
@@ -1084,7 +1276,7 @@
       "canonical_parent": "docs/superpowers/specs/provider-event-lifecycle",
       "supersedes_hint": null,
       "last_modified": "2026-07-27",
-      "size_bytes": 81739
+      "size_bytes": 82326
     },
     {
       "path": "docs/superpowers/specs/provider-event-lifecycle/requirements.md",
@@ -1096,7 +1288,7 @@
       "canonical_parent": "docs/superpowers/specs/provider-event-lifecycle",
       "supersedes_hint": null,
       "last_modified": "2026-07-27",
-      "size_bytes": 106115
+      "size_bytes": 109176
     },
     {
       "path": "docs/superpowers/specs/provider-event-lifecycle/tasks.md",
@@ -1108,7 +1300,7 @@
       "canonical_parent": "docs/superpowers/specs/provider-event-lifecycle",
       "supersedes_hint": null,
       "last_modified": "2026-07-27",
-      "size_bytes": 60887
+      "size_bytes": 61269
     }
   ],
   "cross_tree_topics": {

@@ -2,6 +2,8 @@
 import type { IncomingMessage, RuntimeHealth } from '../core/types.ts';
 import type { DurabilityEngine } from '../core/durability.ts';
 import type { AgentFallbackEntry } from '../core/fallback-chain.ts';
+import type { ToolDurabilityTelemetrySnapshot } from '../core/durability-evidence-contract.ts';
+import type { StartupNotificationEvent } from '../core/startup-notification-controller.ts';
 
 export interface RuntimeTurnCapabilityHealth {
   modelUsable: boolean | null;
@@ -16,6 +18,10 @@ export interface RuntimeTurnCapabilityHealth {
   modelUsableCheckedAt: number | null;
   modelUsabilityStatus: string | null;
   lastSuccessfulTurnAt: number | null;
+  /** Provider that served the most recent successful user turn, if known. */
+  lastSuccessfulTurnProvider: string | null;
+  /** Whether that success belongs to the exact still-live session incarnation. */
+  lastSuccessfulTurnSessionCurrent: boolean | null;
   lastTurnErrorClass: string | null;
   lastTurnErrorAt: number | null;
 }
@@ -35,12 +41,22 @@ export interface AgentCommandResult {
   silent: boolean;
 }
 
+export type RuntimeAdmissionReceipt =
+  | { status: 'accepted' }
+  | {
+      status: 'rejected';
+      reason: 'queue_full';
+      durableDisposition: 'failed' | 'unowned';
+    };
+
 export interface Runtime {
   start(): Promise<void>;
-  handleMessage(msg: IncomingMessage): Promise<void>;
+  handleMessage(msg: IncomingMessage): Promise<void | RuntimeAdmissionReceipt>;
   getHealthSnapshot(): RuntimeHealth;
   shutdown(): Promise<void>;
   setDurability(engine: DurabilityEngine): void;
+  /** Agent runtimes expose at most one deferred startup event for main's controller. */
+  popStartupNotificationEvent?(): StartupNotificationEvent | null;
   /** Update delivery JID for active sessions/queues when a LID→phone mapping changes. */
   handleJidAliasChanged?(conversationKey: string, newJid: string): void;
   /** Inject a repair turn into the control session for self-healing. */
@@ -90,4 +106,6 @@ export interface Runtime {
     oldestCallAgeMs: number | null;
     oldestCallTool: string | null;
   } | null;
+  /** Process-local losses while persisting metadata-only tool evidence. */
+  getToolDurabilityTelemetrySnapshot?(): ToolDurabilityTelemetrySnapshot | null;
 }

@@ -43,8 +43,13 @@ plist shape for that host; it is not evidence that the same bridge is installed
 on maclab, nucles, or any other WhatSoup instance.
 
 Four `com.whatsoup.*` plists and two `com.mwlab.mw-mind-*` plists are loaded at
-login when this deployment is installed. Each `KeepAlive -> Crashed` so a clean
-exit will not restart automatically; use `launchctl kickstart -k` to bounce.
+login when this deployment is installed. Instance plists generated at or after
+the #2682 fix use `KeepAlive -> {Crashed: true, SuccessfulExit: false}` with
+`ThrottleInterval 60`, so any non-zero exit (including the deliberate `exit(1)`
+on reconnect-exhaustion or unhandled rejection) relaunches automatically.
+Plists generated BEFORE that fix are `Crashed`-only and strand instances on a
+clean `exit(1)` — the cause of the 2026-07-29 21h bot outage on this host; regenerate and
+reload them. `launchctl kickstart -k` still bounces a service manually.
 
 | Plist | Purpose | Listening port |
 | --- | --- | --- |
@@ -190,9 +195,10 @@ polled instance is unreachable. If that name is not expected, add
 
 ## Known limitations
 
-- All plists have `KeepAlive -> Crashed` only. Clean-exit services do not
-  auto-restart. No supervisor watches for stalled instances (no fleet-level
-  circuit breaker today).
+- Plists deployed before the #2682 fix have `KeepAlive -> Crashed` only, so
+  clean-exit services do not auto-restart until regenerated (newly generated
+  plists add `SuccessfulExit: false` + `ThrottleInterval 60`). No supervisor
+  watches for stalled instances (no fleet-level circuit breaker today).
 - `WHATSOUP_HEALTH_TOKEN` for mw-bot is loaded at runtime from the mwlab
   secrets keychain (`~/.config/mwlab-secrets.keychain-db`, service
   `whatsoup-health-token`, account `mw`) via the `with-health-token`

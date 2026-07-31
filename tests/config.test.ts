@@ -3,6 +3,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import { homedir as osHomedir } from 'node:os';
 import * as path from 'node:path';
+import { canonicalizeImessageDirectIdentity } from '../src/core/transport-refs.ts';
 
 // ---------------------------------------------------------------------------
 // Env var management
@@ -327,6 +328,32 @@ describe('config — startup gates', () => {
     // startupNotifications omitted → default true; proactiveResumeOnStartup explicit false.
     expect(config.startupNotifications).toBe(true);
     expect(config.proactiveResumeOnStartup).toBe(false);
+  });
+
+  it('accepts an in-range integer stability window, including the documented 0', async () => {
+    process.env.INSTANCE_CONFIG = JSON.stringify(
+      makeMinimal({ startupNotificationStabilitySeconds: 0 }),
+    );
+    const { config } = await import('../src/config.ts');
+    expect(config.startupNotificationStabilitySeconds).toBe(0);
+  });
+
+  it('falls back to 600 for an out-of-range stability window instead of honoring it', async () => {
+    // A milliseconds-scale typo must not become a multi-day window that
+    // silently disables the notice.
+    process.env.INSTANCE_CONFIG = JSON.stringify(
+      makeMinimal({ startupNotificationStabilitySeconds: 600_000 }),
+    );
+    const { config } = await import('../src/config.ts');
+    expect(config.startupNotificationStabilitySeconds).toBe(600);
+  });
+
+  it('falls back to 600 for a non-integer stability window instead of silently restoring the legacy send', async () => {
+    process.env.INSTANCE_CONFIG = JSON.stringify(
+      makeMinimal({ startupNotificationStabilitySeconds: -0.5 }),
+    );
+    const { config } = await import('../src/config.ts');
+    expect(config.startupNotificationStabilitySeconds).toBe(600);
   });
 });
 
@@ -2178,6 +2205,19 @@ describe('config — adminJid fallback', () => {
     }));
     const { config } = await import('../src/config.ts');
     expect(config.memory.adminJid).toBe('');
+  });
+});
+
+describe('config — iMessage admin identity canonicalization', () => {
+  it('keeps canonical direct AppleID and loader-compatible phone identities', async () => {
+    const { resolveAdminIdentities } = await import('../src/config.ts');
+    const appleId = canonicalizeImessageDirectIdentity('Owner@Example.test');
+    const phone = canonicalizeImessageDirectIdentity('+15551230000');
+
+    expect(appleId).toBe('owner@example.test');
+    expect(phone).toBe('+15551230000');
+    expect(resolveAdminIdentities(['Owner@Example.test', '5551230000'], 'imessage'))
+      .toEqual([appleId, phone]);
   });
 });
 

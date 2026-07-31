@@ -5,7 +5,7 @@
 // Every JID parsing/normalization operation should live here or delegate here.
 // Do NOT reimplement .split('@')[0] or .endsWith('@lid') inline — use these.
 
-import { isSignalGroupAddress } from './transport-refs.ts';
+import { assertNeverTransport, isSignalGroupAddress, type TransportId } from './transport-refs.ts';
 
 // ── Domain constants ────────────────────────────────────────────────────────
 
@@ -106,6 +106,26 @@ export function fromSignalJid(jid: string): string {
  */
 export function toImessageJid(address: string): string {
   return address.endsWith(JID_IMESSAGE) ? address : `${address}${JID_IMESSAGE}`;
+}
+
+/**
+ * Resolve a canonical configured-admin identity to the direct-chat JID used
+ * by its selected transport. Configuration ingress owns identity validation
+ * and canonicalization; this selector only composes existing JID builders.
+ */
+export function resolveConfiguredAdminJid(transport: TransportId, identity: string): string {
+  switch (transport) {
+    case 'baileys':
+      return toPersonalJid(identity);
+    case 'signal':
+      return toSignalJid(identity);
+    case 'twilio':
+      return toSmsJid(`+${identity}`);
+    case 'imessage':
+      return toImessageJid(identity);
+    default:
+      return assertNeverTransport(transport, 'resolveConfiguredAdminJid');
+  }
 }
 
 /**

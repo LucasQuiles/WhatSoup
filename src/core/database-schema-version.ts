@@ -2,4 +2,4 @@
  * pre-main compatibility gate can compare a read-only ledger without importing
  * logger/config/runtime modules. database.ts asserts this stays aligned with
  * its canonical migration registry. */
-export const CURRENT_SCHEMA_MIGRATION = 48;
+export const CURRENT_SCHEMA_MIGRATION = 53;

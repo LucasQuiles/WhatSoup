@@ -12,7 +12,7 @@ describe('migration 41 recovery evidence', () => {
   afterEach(() => db.close());
 
   it('installs the additive plan, disposition, corroboration, and run linkage schema', () => {
-    expect(CURRENT_SCHEMA_MIGRATION).toBe(48);
+    expect(CURRENT_SCHEMA_MIGRATION).toBe(53);
     for (const table of [
       'recovery_plans',
       'inbound_disposition_links',

@@ -53,6 +53,7 @@ import type { AgentProvider } from './providers/types.ts';
 import { triggerSelfRestart, assertRestartSelfAdmin, type ServiceRestarter } from './self-restart.ts';
 import { registerRuntimeInlineTools } from './runtime-tool-registrations.ts';
 import { dequeueNextReport, emitHealReport, parseHealContext } from '../../core/heal.ts';
+import { allowlistedHealCrashClass, errorClassForHealEvidence } from '../../core/heal-evidence.ts';
 import { sendTracked } from '../../core/durability.ts';
 import { classifyErrorForInbound } from '../../core/inbound-failure-class.ts';
 import {
@@ -174,7 +175,7 @@ import { getRecentMessages, getMessagesSince, hasFromMeReplyAfter } from '../../
 import { toConversationKey, isGroupConversationKey, GLOBAL_CONVERSATION_KEY } from '../../core/conversation-key.ts';
 import { bulletedSection, savedPreferenceLine } from './owner-render-format.ts';
 import { classifyAssistantTextEgress } from '../../core/outbound-message-safety.ts';
-import { toPersonalJid, isGroupJid } from '../../core/jid-constants.ts';
+import { resolveConfiguredAdminJid, toPersonalJid, isGroupJid } from '../../core/jid-constants.ts';
 import { jidNormalizedUser } from '@whiskeysockets/baileys';
 import { canonicalizeChatJid } from '../../core/lid-resolver.ts';
 import { TurnQueue, type QueuedTurn, type TurnRejectReason } from './turn-queue.ts';
@@ -233,6 +234,7 @@ import { PendingPollPersistence } from './pending-poll-persistence.ts';
 import { HandoffDistillCoordinator } from './handoff-distill-coordinator.ts';
 import { handoffDistillerEnabled, handoffContextEnabled, handoffDistillModel } from './handoff-distill-config.ts';
 import { config } from '../../config.ts';
+import type { StartupNotificationEvent } from '../../core/startup-notification-controller.ts';
 import {
   checkAndRecordInterruptedBoot,
   markBootInProgress,
@@ -274,6 +276,7 @@ import {
 import { makeIdleEligibilityResolver } from './fallback-eligibility-cache.ts';
 import {
   createProviderMcpBridge,
+  mergeSessionProviderConfig,
   writeProviderMcpConfig,
   writeProviderMcpConfigTarget,
   type OpencodeProviderConfig,
@@ -1563,7 +1566,7 @@ export class AgentRuntime implements Runtime {
    * when proactive resume must be suppressed for this boot: the guard is
    * enabled, resumable work exists, this boot follows an unclean exit, and
    * the crashy-boot journal has reached the trip threshold. On trip, queues
-   * ONE operator notice through the startup-message channel (popped and sent
+   * ONE operator notice through the typed startup-event channel (popped and sent
    * by main.ts after connect). Fail-open throughout — any guard error
    * degrades to "do not suppress".
    */
@@ -1584,8 +1587,9 @@ export class AgentRuntime implements Runtime {
     const adminPhone = [...config.adminPhones][0];
     if (adminPhone) {
       const windowSec = Math.round(config.restartLoopGuard.windowMs / 1000);
-      this.pendingStartupMessage = {
-        chatJid: toPersonalJid(adminPhone),
+      this.pendingStartupEvent = {
+        kind: 'restart_loop_guard_alert',
+        chatJid: resolveConfiguredAdminJid(config.transport, adminPhone),
         text:
           `*Restart-loop guard tripped* ⚠️ — ${trip.bootsInWindow} crash-interrupted boots ` +
           `inside ${windowSec}s with resumable sessions pending. Proactive resume is ` +
@@ -1843,8 +1847,8 @@ export class AgentRuntime implements Runtime {
   private readonly routeRecyclePublicationWork = this.routeRecycleLifecycle.publicationWork;
   private shutdownRequested = false;
 
-  // Startup notification deferred until after WA connects
-  private pendingStartupMessage: { chatJid: string; text: string } | null = null;
+  // Startup events are deferred until main's strict-readiness controller runs.
+  private pendingStartupEvent: StartupNotificationEvent | null = null;
 
   // Voice reply state (SP4) — tracks inbound contentType and accumulated assistant text per turn.
   // Per-chat mode uses Maps keyed by mapKey; single/shared mode uses scalar fields.
@@ -2675,7 +2679,8 @@ export class AgentRuntime implements Runtime {
       flushRouteMarker: (held, chatJid, actorJid) => runtime.flushRouteMarker(held, chatJid, actorJid),
       clearToolNames: (toolScopeKey) => runtime.clearToolNames(toolScopeKey),
       recordTurnCostUsd: (event) => runtime.recordTurnCostUsd(event),
-      recordTurnCapabilitySuccess: (isUserTurnResult) => runtime.recordTurnCapabilitySuccess(isUserTurnResult),
+      recordTurnCapabilitySuccess: (isUserTurnResult, session) =>
+        runtime.recordTurnCapabilitySuccess(isUserTurnResult, session),
       recordTurnCapabilityFailure: (isUserTurnResult, errorClass) =>
         runtime.recordTurnCapabilityFailure(isUserTurnResult, errorClass),
       recordFallbackTurnOutcome: (queue, hadVisibleOutput, hadToolWork, session, wasUnclassifiedError) =>
@@ -3622,7 +3627,8 @@ export class AgentRuntime implements Runtime {
             log.info({ chatJid: resumeChatJid }, 'suppressing startup message — shared-mode group chat');
           } else {
             const age = formatAge(priorSession.started_at);
-            this.pendingStartupMessage = {
+            this.pendingStartupEvent = {
+              kind: 'resume',
               chatJid: resumeChatJid,
               text: `_Resuming session_ from *${age}*. Send a message to continue, or /new to start fresh.`,
             };
@@ -3653,6 +3659,7 @@ export class AgentRuntime implements Runtime {
         db: this.db,
         controlPeers: config.controlPeers,
         adminPhones: config.adminPhones,
+        resolveConfiguredAdminJid: (identity) => resolveConfiguredAdminJid(config.transport, identity),
       },
       restartSelf: serviceRestarter ? {
         instanceName: this.instanceName,
@@ -3780,7 +3787,7 @@ export class AgentRuntime implements Runtime {
       if (tracksRouteRecycle) {
         this.routeRecycleLifecycle.untrackRouteCommand(processing);
       }
-    }).catch(() => {});
+    }).catch((err) => log.warn({ err }, 'runtime: message handler cleanup rejected'));
     return processing;
   }
 
@@ -5504,11 +5511,12 @@ export class AgentRuntime implements Runtime {
   private dispatchNextControlReport(): void {
     const next = dequeueNextReport(this.db);
     if (!next) return;
-    const context = parseHealContext(next.context);
+    const evidence = parseHealContext(next.context);
+    const errorClass = errorClassForHealEvidence(evidence);
     void this.handleControlTurn(next.report_id, JSON.stringify({
-      ...context,
       reportId: next.report_id,
-      errorClass: next.error_class,
+      errorClass,
+      evidence,
     })).catch((err) => {
       log.error({ err, reportId: next.report_id }, 'unhandled error in handleControlTurn');
     });
@@ -7002,10 +7010,10 @@ export class AgentRuntime implements Runtime {
   }
 
   /** Pop and return the pending startup notification (set during resume), or null. */
-  popStartupMessage(): { chatJid: string; text: string } | null {
-    const msg = this.pendingStartupMessage;
-    this.pendingStartupMessage = null;
-    return msg;
+  popStartupNotificationEvent(): StartupNotificationEvent | null {
+    const event = this.pendingStartupEvent;
+    this.pendingStartupEvent = null;
+    return event;
   }
 
   getHealthSnapshot(): RuntimeHealth {
@@ -7232,7 +7240,7 @@ export class AgentRuntime implements Runtime {
         // DM admin
         const adminPhone = [...config.adminPhones][0];
         if (adminPhone) {
-          const adminJid = toPersonalJid(adminPhone);
+          const adminJid = resolveConfiguredAdminJid(config.transport, adminPhone);
           sendTracked(this.messenger, adminJid,
             `[HEAL_ESCALATE] Repair for report ${reportId} timed out after 15 minutes.`,
             this.durability ?? undefined, { replayPolicy: 'safe' })
@@ -9376,6 +9384,26 @@ export class AgentRuntime implements Runtime {
     return this.registry.getInFlightCallStats();
   }
 
+  getToolDurabilityTelemetrySnapshot() {
+    return this.registry.getDurabilityTelemetrySnapshot();
+  }
+
+  private lastSuccessfulTurnSessionCurrent(): boolean | null {
+    const session = this.turnCapabilityTracker.lastSuccessfulTurnSession;
+    const binding = this.turnCapabilityTracker.lastSuccessfulTurnSessionBinding;
+    const provider = this.turnCapabilityTracker.lastSuccessfulTurnProvider;
+    if (session === null || binding === null || provider === null) return null;
+    const currentSessions = this.sessionScope === 'per_chat'
+      ? [...this.chatSessions.values()]
+      : this.session === null ? [] : [this.session];
+    if (!currentSessions.includes(session as SessionManager)) return false;
+    const current = session as SessionManager;
+    if (!current.getStatus().active) return false;
+    if (current.getProviderId() !== provider) return false;
+    if (typeof current.isEvidenceBindingCurrent !== 'function') return null;
+    return current.isEvidenceBindingCurrent(binding);
+  }
+
   private getTurnCapability(): RuntimeTurnCapability {
     const usability = this.primaryModelUsability;
     const { modelUsable, modelUsableStale, modelUsableCheckedAt } = deriveModelUsable(usability, Date.now());
@@ -9385,14 +9413,30 @@ export class AgentRuntime implements Runtime {
       modelUsableCheckedAt,
       modelUsabilityStatus: usability?.status ?? null,
       lastSuccessfulTurnAt: this.turnCapabilityTracker.lastSuccessfulTurnAt,
+      lastSuccessfulTurnProvider: this.turnCapabilityTracker.lastSuccessfulTurnProvider,
+      lastSuccessfulTurnSessionCurrent: this.lastSuccessfulTurnSessionCurrent(),
       lastTurnErrorClass: this.turnCapabilityTracker.lastTurnErrorClass,
       lastTurnErrorAt: this.turnCapabilityTracker.lastTurnErrorAt,
     };
   }
 
-  private recordTurnCapabilitySuccess(isUserTurnResult: boolean): void {
+  private recordTurnCapabilitySuccess(isUserTurnResult: boolean, session: SessionManager | null = null): void {
     if (!isUserTurnResult) return;
-    this.turnCapabilityTracker.recordSuccess();
+    const sessionBinding =
+      typeof session?.captureEvidenceBinding === 'function'
+        ? session.captureEvidenceBinding()
+        : null;
+    // Defensive typeof guard mirrors the other getProviderId call sites in this
+    // file (e.g. maybeStartAutoCompact, /status, recordProviderFallback) and the
+    // sibling captureEvidenceBinding read above: an indeterminate provider fails
+    // safe to null rather than throwing on a session that lacks the accessor.
+    const successProvider =
+      typeof session?.getProviderId === 'function' ? session.getProviderId() : null;
+    this.turnCapabilityTracker.recordSuccess(
+      successProvider,
+      session,
+      sessionBinding,
+    );
     this.consecutivePrimaryEmptyTurns = 0;
     this.consecutiveUnknownTerminalTurns = 0;
     if (this.isFallbackWindowActive) return; // #1884 follow-up: a fallback turn proves nothing about the primary
@@ -10306,16 +10350,20 @@ export class AgentRuntime implements Runtime {
    * Probe whether the primary provider can serve again. Recovery requires a
    * real model-usability success, not credential presence: a revoked API key or
    * expired OAuth token can still be present in the key store while live turns
-   * continue returning auth failures. The probe is timeout-bounded and never
-   * rejects. `onEvidence` (DUR-02) gets the full result pre-resolve — see resolveFallbackRecoveryDecision for why a callback, not a field.
+   * continue returning auth failures. The probe is deadline-cancelled and never
+   * rejects; a timeout result waits for cancellation acknowledgement.
+   * `onEvidence` (DUR-02) gets the full result pre-resolve — see
+   * resolveFallbackRecoveryDecision for why a callback, not a field.
    */
   private async probePrimaryProviderRecovered(
     onEvidence?: (evidence: FallbackRecoveryEvidence) => void,
+    signal?: AbortSignal,
   ): Promise<boolean> {
-    const result = await probePrimaryModelUsability(
-      { provider: this.agentProvider, model: this.model ?? null },
-      createPrimaryModelProbeAdapters(this.agentProviderConfig, { cwd: this.cwd ?? homedir(), egressProxyPort: this.egressProxy?.port, providerExecutionGate: this.providerExecutionGate }),
-    );
+    const target = { provider: this.agentProvider, model: this.model ?? null };
+    const adapters = createPrimaryModelProbeAdapters(this.agentProviderConfig, { cwd: this.cwd ?? homedir(), egressProxyPort: this.egressProxy?.port, providerExecutionGate: this.providerExecutionGate });
+    const result = signal
+      ? await probePrimaryModelUsability(target, adapters, { signal })
+      : await probePrimaryModelUsability(target, adapters);
     onEvidence?.({ ...result, checkedAt: Date.now() });
     return result.status === 'usable';
   }
@@ -10355,11 +10403,12 @@ export class AgentRuntime implements Runtime {
           const d = extractUsageLimitResetTime(text);
           return d ? d.getTime() : null;
         },
-        runPrimaryModelUsability: () => probePrimaryModelUsability(
+        runPrimaryModelUsability: (signal) => probePrimaryModelUsability(
           { provider: this.agentProvider, model: this.model ?? null },
           createPrimaryModelProbeAdapters(this.agentProviderConfig, { cwd: this.cwd ?? homedir(), egressProxyPort: this.egressProxy?.port, providerExecutionGate: this.providerExecutionGate }),
+          { signal },
         ),
-        runPrimaryRecoveryProbe: () => this.probePrimaryProviderRecovered(),
+        runPrimaryRecoveryProbe: (signal) => this.probePrimaryProviderRecovered(undefined, signal),
         accountAuthDeps: {
           resolveKeyService: resolveProviderKeyService,
           lookupCredential,
@@ -10898,7 +10947,7 @@ export class AgentRuntime implements Runtime {
       allowM365Mutations: this.allowM365Mutations,
       provider: route.provider,
       providerConfig: providerConfigOverride
-        ? { ...this.routeSessionProviderConfig(route), ...providerConfigOverride }
+        ? mergeSessionProviderConfig(this.routeSessionProviderConfig(route), providerConfigOverride)
         : this.routeSessionProviderConfig(route),
       mcpBridge: createProviderMcpBridge(this.registry, providerToolSession),
       mcpSessionContext: providerToolSession,
@@ -11228,14 +11277,11 @@ export class AgentRuntime implements Runtime {
       return;
     }
     try {
+      const crashClass = allowlistedHealCrashClass(info.crashClass);
       emitHealReport(this.db, this.messenger, this.durability, {
         type: 'crash',
-        chatJid,
-        exitCode: info.exitCode ?? undefined,
-        signal: info.signal ?? undefined,
-        provider: info.provider,
-        crashClass: info.crashClass,
-        stderr: info.stderrPreview,
+        ...(crashClass ? { crashClass } : {}),
+        ...(info.exitCode !== null || info.signal ? { termination: 'exit_or_signal' as const } : {}),
       }, this.activeControlReportId);
     } catch (err) {
       log.warn({ err }, 'failed to emit heal report for session crash');
@@ -11762,8 +11808,8 @@ export class AgentRuntime implements Runtime {
     if (!pendingText) {
       // No pending message — notify user to resend
       const msg = '_Previous session expired_ — starting fresh. Send a message to begin.';
-      if (this.pendingStartupMessage !== null) {
-        this.pendingStartupMessage = { chatJid, text: msg };
+      if (this.pendingStartupEvent !== null) {
+        this.pendingStartupEvent = { kind: 'expired_session_notice', chatJid, text: msg };
       } else {
         this.sendDirect(chatJid, msg);
       }

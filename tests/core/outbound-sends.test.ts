@@ -1,13 +1,21 @@
-import { createHash } from 'node:crypto';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { readFileSync } from 'node:fs';
 import { Database } from '../../src/core/database.ts';
 import { createOutboundSendsWriter } from '../../src/core/outbound-sends.ts';
+import { makeChannelId } from '../../src/core/transport-refs.ts';
+import {
+  AuthRequiredError,
+  SendAmbiguousError,
+} from '../../src/transport/contract/errors.ts';
 
-function sha256(text: string): string {
-  return createHash('sha256').update(text).digest('hex');
-}
+const transportBase = {
+  channelId: makeChannelId('whatsapp', 'outbound-audit-test'),
+  operation: 'sendText',
+  correlationId: 'synthetic-correlation',
+  scope: 'provider' as const,
+};
 
-describe('outbound_sends audit writer', () => {
+describe('outbound_sends metadata-only audit writer', () => {
   let db: Database;
 
   beforeEach(() => {
@@ -19,211 +27,290 @@ describe('outbound_sends audit writer', () => {
     db.close();
   });
 
-  it('writeIntent returns the inserted row id with intent status', () => {
-    const writer = createOutboundSendsWriter({ db: db.raw, line: 'personal' });
+  it('keeps removed raw audit fields out of production writer, reader, and health sources', () => {
+    const sources = [
+      'src/core/outbound-sends.ts',
+      'src/mcp/tools/audit.ts',
+    ].map((file) => readFileSync(file, 'utf8')).join('\n');
+    for (const removed of [
+      'chat_jid',
+      'profile',
+      'text_hash',
+      'text_length',
+      'transport_message_id',
+      'error_text',
+    ]) {
+      expect(sources).not.toContain(removed);
+    }
+    expect(sources).not.toContain('createHash');
+    expect(sources).not.toContain('errorMessage');
 
-    const id = writer.writeIntent({
+    const healthSource = readFileSync('src/core/health.ts', 'utf8');
+    expect(healthSource).not.toContain('latest_successful_transport_id');
+    expect(healthSource).not.toContain('transport_message_id AS transport_id');
+    expect(healthSource).not.toContain("WHERE status = 'sent'");
+  });
+
+  it('writeIntent returns an opaque receipt and stores only bounded intent evidence', () => {
+    const writer = createOutboundSendsWriter({ db: db.raw, line: 'ignored-compatibility-value' });
+
+    const intent = writer.writeIntent({
       caller: 'mcp',
-      chatJid: '15550100001@s.whatsapp.net',
       targetKind: 'alias',
-      alias: 'q',
-      profile: 'notify',
-      text: 'hello from audit',
-      linkPreviewMode: 'off',
     });
 
-    expect(id).toBeGreaterThan(0);
-    const row = db.raw.prepare('SELECT * FROM outbound_sends WHERE id = ?').get(id) as {
-      status: string;
-      line: string;
-      caller: string;
-      chat_jid: string;
-      target_kind: string;
-      alias: string;
-      profile: string;
-      link_preview_mode: string;
-    };
-    expect(row).toMatchObject({
-      status: 'intent',
-      line: 'personal',
+    expect(intent.id).toBeGreaterThan(0);
+    expect(intent.auditReceipt).toMatch(/^[0-9a-f]{32}$/);
+    expect(db.raw.prepare('SELECT * FROM outbound_sends WHERE id = ?').get(intent.id)).toEqual({
+      id: intent.id,
+      audit_receipt: intent.auditReceipt,
+      schema_version: 1,
       caller: 'mcp',
-      chat_jid: '15550100001@s.whatsapp.net',
       target_kind: 'alias',
-      alias: 'q',
-      profile: 'notify',
-      link_preview_mode: 'off',
+      outcome_code: 'intent',
+      failure_code: null,
+      failure_stage: 'not_started',
+      mutation_state: 'not_started',
+      retryable: null,
+      evidence_coverage: 'typed',
+      logical_attempt_count: 1,
+      provider_submission_count: 0,
+      created_at: expect.stringMatching(/^\d{4}-\d{2}-\d{2}/),
+      completed_at: null,
     });
   });
 
-  it('writeIntent stores SHA-256 of the final text without storing the text itself', () => {
-    const writer = createOutboundSendsWriter({ db: db.raw, line: 'personal' });
-    const text = '[ALERT] final body';
-
-    const id = writer.writeIntent({
-      caller: 'health',
-      chatJid: '15550100002@s.whatsapp.net',
-      targetKind: 'chatJid',
-      text,
-      linkPreviewMode: 'auto',
-    });
-
-    const cols = db.raw
-      .prepare('PRAGMA table_info(outbound_sends)')
-      .all() as Array<{ name: string }>;
-    expect(cols.map((col) => col.name)).not.toContain('text');
-
-    const row = db.raw
-      .prepare('SELECT text_hash, text_length FROM outbound_sends WHERE id = ?')
-      .get(id) as { text_hash: string; text_length: number };
-    expect(row.text_hash).toBe(sha256(text));
-    expect(row.text_length).toBe(text.length);
+  it('generates a unique random receipt for each logical attempt', () => {
+    const writer = createOutboundSendsWriter({ db: db.raw });
+    const receipts = new Set<string>();
+    for (let index = 0; index < 100; index += 1) {
+      receipts.add(writer.writeIntent({ caller: 'health', targetKind: 'chatJid' }).auditReceipt);
+    }
+    expect(receipts.size).toBe(100);
   });
 
-  it('markSuccess finalizes a row as sent with the optional transport id', () => {
-    const writer = createOutboundSendsWriter({ db: db.raw, line: 'personal' });
-    const id = writer.writeIntent({
-      caller: 'mcp',
-      chatJid: '15550100003@s.whatsapp.net',
-      targetKind: 'chatJid',
-      text: 'sent message',
+  it('markSuccess records provider acknowledgement as submitted, not recipient delivery', () => {
+    const writer = createOutboundSendsWriter({ db: db.raw });
+    const { id } = writer.writeIntent({ caller: 'mcp', targetKind: 'chatJid' });
+
+    writer.markSuccess(id);
+
+    expect(db.raw.prepare(`
+      SELECT outcome_code, failure_code, failure_stage, mutation_state,
+             retryable, evidence_coverage, logical_attempt_count,
+             provider_submission_count, completed_at
+      FROM outbound_sends WHERE id = ?
+    `).get(id)).toEqual({
+      outcome_code: 'submitted',
+      failure_code: null,
+      failure_stage: 'ack_received',
+      mutation_state: 'acknowledged',
+      retryable: null,
+      evidence_coverage: 'typed',
+      logical_attempt_count: 1,
+      provider_submission_count: 1,
+      completed_at: expect.stringMatching(/^\d{4}-\d{2}-\d{2}/),
     });
-
-    writer.markSuccess(id, 'wamid.test');
-
-    const row = db.raw
-      .prepare('SELECT status, transport_message_id, completed_at FROM outbound_sends WHERE id = ?')
-      .get(id) as { status: string; transport_message_id: string; completed_at: string | null };
-    expect(row.status).toBe('sent');
-    expect(row.transport_message_id).toBe('wamid.test');
-    expect(row.completed_at).toEqual(expect.stringMatching(/^\d{4}-\d{2}-\d{2}/));
   });
 
-  it('markFailure finalizes a row as failed with sanitized error text', () => {
-    const writer = createOutboundSendsWriter({ db: db.raw, line: 'personal' });
-    const id = writer.writeIntent({
-      caller: 'health',
-      chatJid: '15550100004@s.whatsapp.net',
-      targetKind: 'alias',
-      alias: 'ops',
-      text: 'failed message',
+  it('markFailure records a typed definite no-send outcome without error prose', () => {
+    const writer = createOutboundSendsWriter({ db: db.raw });
+    const { id } = writer.writeIntent({ caller: 'health', targetKind: 'alias' });
+
+    writer.markFailure(id, new AuthRequiredError({
+      ...transportBase,
+      message: 'CANARY-RAW-AUTH-ERROR',
+    }));
+
+    const row = db.raw.prepare('SELECT * FROM outbound_sends WHERE id = ?').get(id) as Record<string, unknown>;
+    expect(row).toMatchObject({
+      outcome_code: 'failed_not_sent',
+      failure_code: 'transport.auth_required',
+      failure_stage: 'not_started',
+      mutation_state: 'not_mutated',
+      retryable: 0,
+      evidence_coverage: 'typed',
+      provider_submission_count: 0,
     });
-
-    writer.markFailure(id, 'transport unavailable');
-
-    const row = db.raw
-      .prepare('SELECT status, error, completed_at FROM outbound_sends WHERE id = ?')
-      .get(id) as { status: string; error: string; completed_at: string | null };
-    expect(row.status).toBe('failed');
-    expect(row.error).toBe('transport unavailable');
-    expect(row.completed_at).toEqual(expect.stringMatching(/^\d{4}-\d{2}-\d{2}/));
+    expect(JSON.stringify(row)).not.toContain('CANARY-RAW-AUTH-ERROR');
   });
 
-  it('outcome markers throw when the audit row is already finalized', () => {
-    const writer = createOutboundSendsWriter({ db: db.raw, line: 'personal' });
-    const failedId = writer.writeIntent({
-      caller: 'mcp',
-      chatJid: '15550100005@s.whatsapp.net',
-      targetKind: 'chatJid',
-      text: 'failure wins',
-    });
-    writer.markFailure(failedId, 'first outcome wins');
+  it('markFailure preserves typed transport ambiguity without error prose', () => {
+    const writer = createOutboundSendsWriter({ db: db.raw });
+    const { id } = writer.writeIntent({ caller: 'mcp', targetKind: 'chatJid' });
 
-    const sentId = writer.writeIntent({
-      caller: 'health',
-      chatJid: '15550100006@s.whatsapp.net',
-      targetKind: 'chatJid',
-      text: 'success wins',
-    });
-    writer.markSuccess(sentId, 'wamid.first');
+    writer.markFailure(id, new SendAmbiguousError({
+      ...transportBase,
+      message: 'CANARY-RAW-AMBIGUOUS-ERROR',
+      phase: 'provider_call_started',
+    }));
 
-    expect(() => writer.markSuccess(failedId, 'wamid.late')).toThrow(/already finalized/i);
-    expect(() => writer.markFailure(sentId, 'late failure')).toThrow(/already finalized/i);
-    expect(() => writer.markSuccess(sentId, 'wamid.second')).toThrow(/already finalized/i);
+    const row = db.raw.prepare(`
+      SELECT outcome_code, failure_code, failure_stage, mutation_state,
+             retryable, evidence_coverage
+      FROM outbound_sends WHERE id = ?
+    `).get(id);
+    expect(row).toEqual({
+      outcome_code: 'ambiguous',
+      failure_code: 'transport.send_ambiguous',
+      failure_stage: 'provider_call_started',
+      mutation_state: 'maybe_mutated',
+      retryable: 0,
+      evidence_coverage: 'typed',
+    });
+    expect(JSON.stringify(row)).not.toContain('CANARY-RAW-AMBIGUOUS-ERROR');
   });
 
-  it('outcome markers throw when the audit row does not exist', () => {
-    const writer = createOutboundSendsWriter({ db: db.raw, line: 'personal' });
-    // No row with this id was ever inserted → UPDATE affects 0 rows and the
-    // status lookup returns undefined → the `!row` not-found branch.
-    expect(() => writer.markSuccess(999_999, 'wamid.ghost')).toThrow(/not found/i);
-    expect(() => writer.markFailure(999_998, 'ghost failure')).toThrow(/not found/i);
+  it('markFailure keeps an untyped throw honestly ambiguous', () => {
+    const writer = createOutboundSendsWriter({ db: db.raw });
+    const { id } = writer.writeIntent({ caller: 'rgp', targetKind: 'chatJid' });
+
+    writer.markFailure(id, new Error('CANARY-RAW-UNTYPED-ERROR'));
+
+    expect(db.raw.prepare(`
+      SELECT outcome_code, failure_code, failure_stage, mutation_state,
+             retryable, evidence_coverage
+      FROM outbound_sends WHERE id = ?
+    `).get(id)).toEqual({
+      outcome_code: 'ambiguous',
+      failure_code: 'unknown',
+      failure_stage: 'unknown',
+      mutation_state: 'unknown',
+      retryable: 0,
+      evidence_coverage: 'untyped',
+    });
   });
 
-  it('markSuccess without a transport id stores null (?? null arm)', () => {
-    const writer = createOutboundSendsWriter({ db: db.raw, line: 'personal' });
-    const id = writer.writeIntent({
-      caller: 'mcp',
-      chatJid: '15550100009@s.whatsapp.net',
-      targetKind: 'chatJid',
-      text: 'no transport id',
-    });
-    writer.markSuccess(id); // transportMessageId omitted → `transportMessageId ?? null`
+  it('outcome markers reject a missing or already terminal row', () => {
+    const writer = createOutboundSendsWriter({ db: db.raw });
+    const { id } = writer.writeIntent({ caller: 'mcp', targetKind: 'chatJid' });
+    writer.markSuccess(id);
 
-    const row = db.raw
-      .prepare('SELECT status, transport_message_id FROM outbound_sends WHERE id = ?')
-      .get(id) as { status: string; transport_message_id: string | null };
-    expect(row).toEqual({ status: 'sent', transport_message_id: null });
+    expect(() => writer.markFailure(id, new Error('late'))).toThrow(/already finalized/i);
+    expect(() => writer.markSuccess(id)).toThrow(/already finalized/i);
+    expect(() => writer.markSuccess(999_999)).toThrow(/not found/i);
   });
 
-  it('listRecent surfaces error_text for a failed row (spread true arm)', () => {
-    const writer = createOutboundSendsWriter({ db: db.raw, line: 'personal' });
-    const id = writer.writeIntent({
-      caller: 'mcp',
-      chatJid: '222@s.whatsapp.net',
-      targetKind: 'chatJid',
-      text: 'will fail',
-    });
-    writer.markFailure(id, 'delivery rejected');
-
-    const failed = writer.listRecent({ limit: 10 }).find((r) => r.id === id)!;
-    expect(failed.status).toBe('failed');
-    expect(failed.error_text).toContain('delivery rejected');
-  });
-
-  it('listRecent returns bounded rows without message text', () => {
-    const writer = createOutboundSendsWriter({ db: db.raw, line: 'personal' });
-    const id = writer.writeIntent({
-      caller: 'mcp',
-      chatJid: '111@s.whatsapp.net',
-      targetKind: 'chatJid',
-      profile: 'notify',
-      text: 'private body',
-    });
-    writer.markSuccess(id, 'wamid.audit');
+  it('listRecent returns only the closed projection and filters by exact receipt', () => {
+    const writer = createOutboundSendsWriter({ db: db.raw });
+    const first = writer.writeIntent({ caller: 'mcp', targetKind: 'chatJid' });
+    const second = writer.writeIntent({ caller: 'health', targetKind: 'alias' });
+    writer.markSuccess(first.id);
+    writer.markFailure(second.id, new Error('CANARY-LIST-ERROR'));
 
     const rows = writer.listRecent({ limit: 10 });
-
-    expect(rows).toHaveLength(1);
-    expect(rows[0]).toMatchObject({
-      id,
-      chat_jid: '111@s.whatsapp.net',
-      status: 'sent',
-      profile: 'notify',
-      transport_id: 'wamid.audit',
+    expect(rows).toHaveLength(2);
+    expect(rows[0]).toEqual({
+      id: second.id,
+      audit_receipt: second.auditReceipt,
+      schema_version: 1,
+      caller: 'health',
+      target_kind: 'alias',
+      outcome_code: 'ambiguous',
+      failure_code: 'unknown',
+      failure_stage: 'unknown',
+      mutation_state: 'unknown',
+      retryable: false,
+      evidence_coverage: 'untyped',
+      logical_attempt_count: 1,
+      provider_submission_count: 0,
+      created_at: expect.stringMatching(/^\d{4}-\d{2}-\d{2}/),
+      completed_at: expect.stringMatching(/^\d{4}-\d{2}-\d{2}/),
     });
-    expect(Object.keys(rows[0])).not.toContain('text');
+    expect(writer.listRecent({ auditReceipt: first.auditReceipt })).toEqual([
+      expect.objectContaining({
+        id: first.id,
+        audit_receipt: first.auditReceipt,
+        outcome_code: 'submitted',
+      }),
+    ]);
+    expect(JSON.stringify(rows)).not.toContain('CANARY-LIST-ERROR');
   });
 
-  it('listRecent filters by raw chatJid and clamps large limits', () => {
-    const writer = createOutboundSendsWriter({ db: db.raw, line: 'personal' });
-    for (let i = 0; i < 120; i += 1) {
-      writer.writeIntent({
-        caller: 'mcp',
-        chatJid: i % 2 === 0 ? 'include@s.whatsapp.net' : 'exclude@s.whatsapp.net',
-        targetKind: 'chatJid',
-        text: `message ${i}`,
-      });
+  it('listRecent clamps large limits and rejects invalid limits or receipts', () => {
+    const writer = createOutboundSendsWriter({ db: db.raw });
+    for (let index = 0; index < 120; index += 1) {
+      writer.writeIntent({ caller: 'mcp', targetKind: 'chatJid' });
     }
 
     expect(writer.listRecent({ limit: 500 })).toHaveLength(100);
-    expect(writer.listRecent({ chatJid: 'include@s.whatsapp.net' }).every((row) => row.chat_jid === 'include@s.whatsapp.net')).toBe(true);
+    expect(() => writer.listRecent({ limit: 0 })).toThrow(/limit must be at least 1/i);
+    expect(() => writer.listRecent({ limit: 1.5 })).toThrow(/limit must be an integer/i);
+    expect(() => writer.listRecent({ auditReceipt: 'not-a-receipt' })).toThrow(/auditReceipt/i);
   });
 
-  it('listRecent rejects invalid limits', () => {
-    const writer = createOutboundSendsWriter({ db: db.raw, line: 'personal' });
+  it('previews and applies age retention only to terminal rows', () => {
+    const writer = createOutboundSendsWriter({ db: db.raw });
+    const oldSubmitted = writer.writeIntent({ caller: 'mcp', targetKind: 'chatJid' });
+    const oldAmbiguous = writer.writeIntent({ caller: 'health', targetKind: 'alias' });
+    const oldIntent = writer.writeIntent({ caller: 'rgp', targetKind: 'chatJid' });
+    const recentSubmitted = writer.writeIntent({ caller: 'mcp', targetKind: 'chatJid' });
+    writer.markSuccess(oldSubmitted.id);
+    writer.markFailure(oldAmbiguous.id, new Error('untyped'));
+    writer.markSuccess(recentSubmitted.id);
+    db.raw.prepare(`
+      UPDATE outbound_sends
+      SET created_at = datetime('now', '-40 days'),
+          completed_at = CASE
+            WHEN outcome_code = 'intent' THEN NULL
+            ELSE datetime('now', '-40 days')
+          END
+      WHERE id IN (?, ?, ?)
+    `).run(oldSubmitted.id, oldAmbiguous.id, oldIntent.id);
 
-    expect(() => writer.listRecent({ limit: 0 })).toThrow(/limit must be at least 1/i);
-    expect(() => writer.listRecent({ limit: -1 })).toThrow(/limit must be at least 1/i);
-    expect(() => writer.listRecent({ limit: 1.5 })).toThrow(/limit must be an integer/i);
+    expect(writer.maintain({
+      mode: 'preview',
+      terminalDays: 30,
+      terminalMaxRows: 10_000,
+    })).toEqual({
+      mode: 'preview',
+      eligibleRows: 2,
+      deletedRows: 0,
+    });
+    expect(db.raw.prepare('SELECT COUNT(*) AS count FROM outbound_sends').get()).toEqual({ count: 4 });
+
+    expect(writer.maintain({
+      mode: 'apply',
+      terminalDays: 30,
+      terminalMaxRows: 10_000,
+    })).toEqual({
+      mode: 'apply',
+      eligibleRows: 2,
+      deletedRows: 2,
+    });
+    expect(db.raw.prepare(`
+      SELECT id, outcome_code FROM outbound_sends ORDER BY id
+    `).all()).toEqual([
+      { id: oldIntent.id, outcome_code: 'intent' },
+      { id: recentSubmitted.id, outcome_code: 'submitted' },
+    ]);
+  });
+
+  it('caps terminal rows while preserving every unresolved intent', () => {
+    const writer = createOutboundSendsWriter({ db: db.raw });
+    const unresolved = writer.writeIntent({ caller: 'mcp', targetKind: 'chatJid' });
+    for (let index = 0; index < 105; index += 1) {
+      const { id } = writer.writeIntent({ caller: 'mcp', targetKind: 'chatJid' });
+      writer.markSuccess(id);
+    }
+
+    expect(writer.maintain({
+      mode: 'apply',
+      terminalDays: 365,
+      terminalMaxRows: 100,
+    })).toEqual({
+      mode: 'apply',
+      eligibleRows: 5,
+      deletedRows: 5,
+    });
+    expect(db.raw.prepare(`
+      SELECT outcome_code, COUNT(*) AS count
+      FROM outbound_sends GROUP BY outcome_code ORDER BY outcome_code
+    `).all()).toEqual([
+      { outcome_code: 'intent', count: 1 },
+      { outcome_code: 'submitted', count: 100 },
+    ]);
+    expect(db.raw.prepare('SELECT outcome_code FROM outbound_sends WHERE id = ?').get(unresolved.id))
+      .toEqual({ outcome_code: 'intent' });
   });
 });

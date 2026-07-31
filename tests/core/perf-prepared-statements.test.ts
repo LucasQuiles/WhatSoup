@@ -55,7 +55,15 @@ describe('prepared statement caching', () => {
     // (+5 vs 116, provider-route-policy task3: the five conversation-scoped
     // lifecycle proof/mutation statements enumerated above — merge union of
     // this branch's +5 with main's +2.)
-    expect(prepareSpy).toHaveBeenCalledTimes(121);
+    // (+1 vs 123, #2145: markInboundFailedIfProcessing caches the
+    // identity/state-fenced queue-admission failure update. 123 is landed
+    // main's count post-#2596 — recounted empirically against the rebased
+    // tree (124), not assumed additive.)
+    // (+5 vs 124, #2560: two quarantine-disposition classification statements
+    // plus the three cached immediate-transaction statements (BEGIN IMMEDIATE,
+    // COMMIT, ROLLBACK) pre-warmed in the constructor for
+    // withImmediateTransaction reuse.)
+    expect(prepareSpy).toHaveBeenCalledTimes(129);
     prepareSpy.mockClear();
 
     const seq = engine.journalInbound('msg-1', 'conv-1', 'jid-1@s.whatsapp.net', 'agent');
@@ -64,6 +72,19 @@ describe('prepared statement caching', () => {
 
     const failedSeq = engine.journalInbound('msg-2', 'conv-1', 'jid-1@s.whatsapp.net', 'agent');
     engine.markInboundFailed(failedSeq);
+
+    const fencedFailedSeq = engine.journalInbound(
+      'msg-2-fenced',
+      'conv-1',
+      'jid-1@s.whatsapp.net',
+      'agent',
+    );
+    engine.markInboundFailedIfProcessing(
+      fencedFailedSeq,
+      'msg-2-fenced',
+      'jid-1@s.whatsapp.net',
+      'queue_full',
+    );
 
     const skippedSeq = engine.journalInbound('msg-3', 'conv-1', 'jid-1@s.whatsapp.net', 'agent');
     engine.markInboundSkipped(skippedSeq, 'duplicate');

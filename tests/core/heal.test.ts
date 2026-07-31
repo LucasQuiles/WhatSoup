@@ -75,6 +75,7 @@ import type { Messenger } from '../../src/core/types.ts';
 import { sendTracked } from '../../src/core/durability.ts';
 import { emitAlert } from '../../src/lib/emit-alert.ts';
 import { config } from '../../src/config.ts';
+import type { AutomaticHealReportInput } from '../../src/core/heal-evidence.ts';
 import {
   emitHealReport,
   handleHealComplete,
@@ -107,6 +108,25 @@ function makeMessenger(): Messenger {
   };
 }
 
+const distinctCrashClasses = [
+  'provider_usage_limit',
+  'provider_rate_limit',
+  'provider_server_error',
+  'provider_timeout',
+  'provider_network_error',
+  'provider_auth_required',
+  'provider_binary_missing',
+  'provider_permission_denied',
+] as const;
+
+function distinctCrash(index: number) {
+  return { type: 'crash' as const, crashClass: distinctCrashClasses[index]! };
+}
+
+function unsafeReporterInput(value: Record<string, unknown>): AutomaticHealReportInput {
+  return value as unknown as AutomaticHealReportInput;
+}
+
 beforeEach(() => {
   vi.clearAllMocks();
   // The delivery-unavailable latch is per-process module state — re-arm it so
@@ -125,9 +145,7 @@ describe('emitHealReport', () => {
 
     const reportId = emitHealReport(db, messenger, null, {
       type: 'crash',
-      chatJid: '1234@s.whatsapp.net',
-      exitCode: 1,
-      stderr: 'TypeError: boom',
+      termination: 'exit_or_signal',
     });
 
     expect(reportId).not.toBeNull();
@@ -146,7 +164,7 @@ describe('emitHealReport', () => {
 
     const first = emitHealReport(db, messenger, null, {
       type: 'crash',
-      stderr: 'TypeError: boom',
+      crashClass: 'provider_unknown',
     });
 
     expect(first).not.toBeNull();
@@ -154,7 +172,7 @@ describe('emitHealReport', () => {
     // Same error hint → same error class → should suppress
     const second = emitHealReport(db, messenger, null, {
       type: 'crash',
-      stderr: 'TypeError: boom',
+      crashClass: 'provider_unknown',
     });
 
     expect(second).toBeNull();
@@ -175,24 +193,42 @@ describe('emitHealReport', () => {
     const db = makeDb();
     const messenger = makeMessenger();
 
-    // No crashClass (classifyProviderCrash found nothing — signal-less SIGKILL),
-    // and stderr varies per occurrence (raw noise a real classifier can't tame).
+    // A bounded termination category stays stable even when the runtime has no
+    // registered crash class.
     const first = emitHealReport(db, messenger, null, {
       type: 'crash',
-      signal: 'SIGKILL',
-      stderr: `raw noise ${randomUUID()}`,
+      termination: 'exit_or_signal',
     });
     expect(first).not.toBeNull();
 
     const second = emitHealReport(db, messenger, null, {
       type: 'crash',
-      signal: 'SIGKILL',
-      stderr: `raw noise ${randomUUID()}`,
+      termination: 'exit_or_signal',
     });
     expect(second).toBeNull();
 
     const count = (db.raw.prepare('SELECT COUNT(*) as cnt FROM heal_reports').get() as { cnt: number }).cnt;
     expect(count).toBe(1);
+  });
+
+  it('coalesces an active pre-V1 row when its persisted class is already bounded', () => {
+    const db = makeDb();
+    const messenger = makeMessenger();
+    const canary = 'HEAL_LEGACY_ACTIVE_CONTEXT_CANARY_DO_NOT_LEAK';
+    db.raw.prepare(`
+      INSERT INTO heal_reports (report_id, error_class, error_type, state, attempt_count, context)
+      VALUES ('legacy-active', 'crash__provider_auth_required', 'crash', 'attempt_1', 1, ?)
+    `).run(JSON.stringify({ stderr: canary }));
+
+    const reportId = emitHealReport(db, messenger, null, {
+      type: 'crash',
+      crashClass: 'provider_auth_required',
+    });
+
+    expect(reportId).toBeNull();
+    const row = db.raw.prepare('SELECT attempt_count FROM heal_reports WHERE report_id = ?').get('legacy-active') as { attempt_count: number };
+    expect(row.attempt_count).toBe(2);
+    expect(JSON.stringify(mockHealLogger.debug.mock.calls)).not.toContain(canary);
   });
 
   // 3. emitHealReport queues when activeControlReportId is set
@@ -204,7 +240,7 @@ describe('emitHealReport', () => {
       db,
       messenger,
       null,
-      { type: 'degraded', recentLogs: 'hook denied tool' },
+      { type: 'degraded' },
       'some-active-report-id',
     );
 
@@ -224,8 +260,6 @@ describe('emitHealReport', () => {
 
     emitHealReport(db, messenger, null, {
       type: 'service_crash',
-      exitCode: 137,
-      stderr: 'Killed',
     });
 
     await vi.waitFor(() => {
@@ -236,25 +270,32 @@ describe('emitHealReport', () => {
     expect(message).toMatch(/^\[LOOPS_HEAL\]/);
   });
 
-  it('includes provider crash classification in Q payload and human summary', async () => {
+  it('persists and transmits only the projected provider classification', async () => {
     const db = makeDb();
     const messenger = makeMessenger();
+    const canary = 'HEAL_REPORT_CANARY_DO_NOT_LEAK';
 
-    const reportId = emitHealReport(db, messenger, null, {
+    const reportId = emitHealReport(db, messenger, null, unsafeReporterInput({
       type: 'crash',
-      chatJid: '1234@s.whatsapp.net',
+      chatJid: `chat-${canary}`,
       exitCode: 1,
-      provider: 'claude-cli',
+      signal: canary,
+      provider: canary,
       crashClass: 'provider_auth_required',
-      stderr: 'Please run /login\nBearer [REDACTED]',
-    });
+      stderr: canary,
+      recentLogs: canary,
+    }));
 
     expect(reportId).not.toBeNull();
-    const row = db.raw.prepare('SELECT error_class, context FROM heal_reports WHERE report_id = ?').get(reportId) as { error_class: string; context: string } | undefined;
+    const row = db.raw.prepare('SELECT error_class, origin_chat_jid, context FROM heal_reports WHERE report_id = ?').get(reportId) as { error_class: string; origin_chat_jid: string | null; context: string } | undefined;
     expect(row?.error_class).toBe('crash__provider_auth_required');
+    expect(row?.origin_chat_jid).toBeNull();
+    expect(row?.context).not.toContain(canary);
     expect(JSON.parse(row?.context ?? '{}')).toMatchObject({
-      provider: 'claude-cli',
-      crashClass: 'provider_auth_required',
+      schemaVersion: 1,
+      source: 'automatic_crash_reporter',
+      cause: 'provider_auth_required',
+      action: 'reauthenticate_provider',
     });
 
     await vi.waitFor(() => {
@@ -263,11 +304,17 @@ describe('emitHealReport', () => {
     const [, , message] = vi.mocked(sendTracked).mock.calls[0]!;
     const payload = JSON.parse(String(message).split('\n')[0]!.replace('[LOOPS_HEAL] ', '')) as Record<string, unknown>;
     expect(payload).toMatchObject({
-      provider: 'claude-cli',
-      crashClass: 'provider_auth_required',
+      errorClass: 'crash__provider_auth_required',
+      evidence: {
+        schemaVersion: 1,
+        source: 'automatic_crash_reporter',
+        cause: 'provider_auth_required',
+        action: 'reauthenticate_provider',
+      },
     });
-    expect(message).toContain('Provider: claude-cli');
-    expect(message).toContain('Crash class: provider_auth_required');
+    expect(message).toContain('Cause: provider_auth_required');
+    expect(message).not.toContain(canary);
+    expect(JSON.stringify(mockHealLogger.info.mock.calls)).not.toContain(canary);
   });
 });
 
@@ -417,7 +464,7 @@ describe('reconcileStaleHealReports', () => {
 
     db.raw.prepare(`
       INSERT INTO heal_reports (report_id, error_class, error_type, state, attempt_count, created_at)
-      VALUES ('stale-report', 'crash__boom', 'crash', 'escalated', 1, '2026-06-13T00:00:00.000Z')
+      VALUES ('stale-report', 'crash__provider_auth_required', 'crash', 'escalated', 1, '2026-06-13T00:00:00.000Z')
     `).run();
 
     const result = reconcileStaleHealReports(db, {
@@ -426,16 +473,16 @@ describe('reconcileStaleHealReports', () => {
     });
 
     expect(result.expiredReportIds).toEqual(['stale-report']);
-    expect(getActiveReportForClass(db, 'crash__boom')).toBeNull();
+    expect(getActiveReportForClass(db, 'crash__provider_auth_required')).toBeNull();
 
     const next = emitHealReport(db, messenger, null, {
       type: 'crash',
-      crashClass: 'boom',
+      crashClass: 'provider_auth_required',
     });
 
     expect(next).not.toBeNull();
     const rows = db.raw.prepare(`
-      SELECT report_id, state FROM heal_reports WHERE error_class = 'crash__boom'
+      SELECT report_id, state FROM heal_reports WHERE error_class = 'crash__provider_auth_required'
     `).all() as Array<{ report_id: string; state: string }>;
     expect(rows).toEqual(expect.arrayContaining([
       { report_id: 'stale-report', state: 'stale_expired' },
@@ -488,18 +535,18 @@ describe('reconcileStaleHealReports', () => {
 
     db.raw.prepare(`
       INSERT INTO heal_reports (report_id, error_class, error_type, state, attempt_count, created_at)
-      VALUES ('stale-suppressor', 'crash__auto', 'crash', 'escalated', 1, '2000-01-01T00:00:00.000Z')
+      VALUES ('stale-suppressor', 'crash__provider_timeout', 'crash', 'escalated', 1, '2000-01-01T00:00:00.000Z')
     `).run();
 
     const reportId = emitHealReport(db, messenger, null, {
       type: 'crash',
-      crashClass: 'auto',
+      crashClass: 'provider_timeout',
     });
 
     expect(reportId).not.toBeNull();
     const stale = db.raw.prepare('SELECT state FROM heal_reports WHERE report_id = ?').get('stale-suppressor') as { state: string };
     expect(stale.state).toBe('stale_expired');
-    expect(getActiveReportForClass(db, 'crash__auto')?.report_id).toBe(reportId);
+    expect(getActiveReportForClass(db, 'crash__provider_timeout')?.report_id).toBe(reportId);
   });
 });
 
@@ -534,6 +581,24 @@ describe('dequeueNextReport', () => {
     // r2 remains queued
     const r2Row = db.raw.prepare('SELECT state FROM heal_reports WHERE report_id = ?').get(r2) as { state: string };
     expect(r2Row.state).toBe('queued');
+  });
+
+  it('does not return or log a legacy queued error class', () => {
+    const db = makeDb();
+    const canary = 'HEAL_LEGACY_QUEUED_CLASS_CANARY_DO_NOT_LEAK';
+    db.raw.prepare(`
+      INSERT INTO heal_reports (report_id, error_class, error_type, state, attempt_count, context)
+      VALUES (?, ?, 'crash', 'queued', 1, ?)
+    `).run(
+      'legacy-queued',
+      `crash__${canary}`,
+      JSON.stringify({ stderr: canary }),
+    );
+
+    const dequeued = dequeueNextReport(db);
+
+    expect(dequeued?.error_class).toBe('service_crash__legacy_unclassified');
+    expect(JSON.stringify(mockHealLogger.info.mock.calls)).not.toContain(canary);
   });
 
   it('returns null when nothing is queued', () => {
@@ -597,19 +662,13 @@ describe('global valve gate', () => {
     const messenger = makeMessenger();
 
     for (let i = 0; i < 5; i++) {
-      const id = emitHealReport(db, messenger, null, {
-        type: 'crash',
-        stderr: `UniqueError_${randomUUID().slice(0, 8)}: valve fill ${i}`,
-      });
+      const id = emitHealReport(db, messenger, null, distinctCrash(i));
       expect(id).not.toBeNull();
     }
 
     vi.mocked(sendTracked).mockClear();
 
-    const sixth = emitHealReport(db, messenger, null, {
-      type: 'crash',
-      stderr: 'ValveTripError: sixth attempt',
-    });
+    const sixth = emitHealReport(db, messenger, null, distinctCrash(5));
 
     expect(sixth).toBeNull();
     expect(vi.mocked(sendTracked)).not.toHaveBeenCalled();
@@ -618,7 +677,7 @@ describe('global valve gate', () => {
       'WhatSoup',
       'heal_repeated_failures',
       expect.stringContaining('heal valve'),
-      expect.stringContaining('ValveTripError'),
+      expect.stringContaining('cause=provider_auth_required'),
     );
   });
 
@@ -656,29 +715,50 @@ describe('global valve gate', () => {
 // ---------------------------------------------------------------------------
 
 describe('parseHealContext', () => {
-  it('returns {} for corrupt JSON instead of throwing', () => {
-    // The dequeue callers run inside timers — a throw here was a fatal
-    // uncaughtException, with the report already flipped to attempt_1.
-    expect(parseHealContext('{not json')).toEqual({});
+  const legacyProjection = {
+    schemaVersion: 1,
+    type: 'service_crash',
+    source: 'legacy_unclassified',
+    cause: 'legacy_unclassified',
+    stage: 'unknown',
+    impact: 'unknown',
+    evidenceCoverage: 'legacy_context_rejected',
+    counts: { occurrences: 1 },
+    action: 'investigate_legacy_report',
+    correlation: 'heal:v1:legacy_unclassified',
+  };
+
+  it('returns a bounded legacy envelope for corrupt JSON instead of throwing', () => {
+    expect(parseHealContext('{not json')).toEqual(legacyProjection);
   });
 
-  it('returns {} for null and empty context', () => {
-    expect(parseHealContext(null)).toEqual({});
-    expect(parseHealContext('')).toEqual({});
+  it('returns a bounded legacy envelope for null and empty context', () => {
+    expect(parseHealContext(null)).toEqual(legacyProjection);
+    expect(parseHealContext('')).toEqual(legacyProjection);
   });
 
-  it('returns {} for valid JSON that is not a plain object', () => {
-    expect(parseHealContext('[1,2]')).toEqual({});
-    expect(parseHealContext('"a string"')).toEqual({});
-    expect(parseHealContext('42')).toEqual({});
-    expect(parseHealContext('null')).toEqual({});
+  it('returns a bounded legacy envelope for non-V1 JSON', () => {
+    expect(parseHealContext('[1,2]')).toEqual(legacyProjection);
+    expect(parseHealContext('"a string"')).toEqual(legacyProjection);
+    expect(parseHealContext('42')).toEqual(legacyProjection);
+    expect(parseHealContext('null')).toEqual(legacyProjection);
+    expect(parseHealContext('{"chatJid":"HEAL_CONTEXT_CANARY"}')).toEqual(legacyProjection);
   });
 
-  it('returns the parsed object for valid object JSON', () => {
-    expect(parseHealContext('{"chatJid":"123@s.whatsapp.net","attempt":2}')).toEqual({
-      chatJid: '123@s.whatsapp.net',
-      attempt: 2,
-    });
+  it('returns a valid stored V1 envelope unchanged', () => {
+    const evidence = {
+      schemaVersion: 1,
+      type: 'crash',
+      source: 'automatic_crash_reporter',
+      cause: 'provider_auth_required',
+      stage: 'provider_session',
+      impact: 'single_session',
+      evidenceCoverage: 'crash_classified',
+      counts: { occurrences: 1 },
+      action: 'reauthenticate_provider',
+      correlation: 'heal:v1:crash:provider_auth_required',
+    };
+    expect(parseHealContext(JSON.stringify(evidence))).toEqual(evidence);
   });
 });
 
@@ -687,113 +767,98 @@ describe('parseHealContext', () => {
 // ---------------------------------------------------------------------------
 
 describe('heal.ts uncovered-branch coverage', () => {
-  it('falls back to the "unknown" error class when crashClass/stderr/recentLogs are all absent', () => {
+  it('uses the bounded degradation error class without persisting a chat identity', () => {
     const db = makeDb();
     const messenger = makeMessenger();
 
-    // No crashClass, stderr, or recentLogs → normalizeErrorClass uses 'unknown'
-    // and the `?? 'unknown'` final fallback (4th binary-expr operand) is hit.
-    const reportId = emitHealReport(db, messenger, null, {
+    const reportId = emitHealReport(db, messenger, null, unsafeReporterInput({
       type: 'degraded',
-      chatJid: '15550000001@s.whatsapp.net',
-    });
+      chatJid: 'HEAL_DEGRADATION_CANARY_DO_NOT_LEAK',
+    }));
 
     expect(reportId).not.toBeNull();
-    const row = db.raw.prepare('SELECT error_class FROM heal_reports WHERE report_id = ?').get(reportId) as { error_class: string };
-    // Type 'degraded' + 'unknown' hint (no stderr/recentLogs/crashClass supplied)
-    expect(row.error_class).toBe('degraded__unknown');
+    const row = db.raw.prepare('SELECT error_class, origin_chat_jid, context FROM heal_reports WHERE report_id = ?').get(reportId) as { error_class: string; origin_chat_jid: string | null; context: string };
+    expect(row.error_class).toBe('degraded__decryption_failure_threshold');
+    expect(row.origin_chat_jid).toBeNull();
+    expect(row.context).not.toContain('HEAL_DEGRADATION_CANARY_DO_NOT_LEAK');
   });
 
-  it('emits the valve alert with every optional field populated in the detail lines', async () => {
+  it('emits a closed V1 valve alert even when the source input is content-bearing', async () => {
     const db = makeDb();
     const messenger = makeMessenger();
 
-    // Fill the valve with 5 unique non-queued reports first.
+    const canary = 'HEAL_VALVE_CANARY_DO_NOT_LEAK';
     for (let i = 0; i < 5; i++) {
-      emitHealReport(db, messenger, null, {
-        type: 'crash',
-        stderr: `ValveFill_${i}_${randomUUID().slice(0, 8)}: padding`,
-      });
+      emitHealReport(db, messenger, null, distinctCrash(i));
     }
 
     vi.mocked(emitAlert).mockClear();
     vi.mocked(sendTracked).mockClear();
 
-    // 6th emit trips the valve. Supply EVERY optional field so every
-    // `data.x ? \`x=${data.x}\` : null` ternary hits its truthy branch.
-    const tripped = emitHealReport(db, messenger, null, {
+    const tripped = emitHealReport(db, messenger, null, unsafeReporterInput({
       type: 'service_crash',
-      chatJid: '1111111000000000@g.us',
+      chatJid: canary,
       exitCode: 137,
-      signal: 'SIGKILL',
-      provider: 'claude-cli',
+      signal: canary,
+      provider: canary,
       crashClass: 'provider_auth_required',
-      stderr: 'fatal: out of memory',
-      recentLogs: 'line A\nline B',
-    });
+      stderr: canary,
+      recentLogs: canary,
+    }));
 
     // Valve suppresses the report (no DB row, no send)
     expect(tripped).toBeNull();
     expect(vi.mocked(sendTracked)).not.toHaveBeenCalled();
 
-    // Alert fired with all detail lines present (every ternary truthy branch).
     expect(vi.mocked(emitAlert)).toHaveBeenCalledOnce();
-    const detailArg = vi.mocked(emitAlert).mock.calls[0]![3];
-    expect(detailArg).toMatch(/chat_jid=1111111000000000@g\.us/);
-    expect(detailArg).toMatch(/exit_code=137/);
-    expect(detailArg).toMatch(/signal=SIGKILL/);
-    expect(detailArg).toMatch(/provider=claude-cli/);
-    expect(detailArg).toMatch(/crash_class=provider_auth_required/);
-    expect(detailArg).toMatch(/stderr=fatal: out of memory/);
-    expect(detailArg).toMatch(/recent_logs=line A/);
+    const detailArg = vi.mocked(emitAlert).mock.calls[0]![3] as string;
+    expect(detailArg).toMatch(/schema_version=1/);
+    expect(detailArg).toMatch(/cause=service_crash/);
+    expect(detailArg).toMatch(/action=investigate_service/);
+    expect(detailArg).not.toContain(canary);
   });
 
-  it('omits the stderr detail line in the valve alert when stderr is absent', () => {
+  it('keeps V1 valve evidence bounded when crash diagnostics are absent', () => {
     const db = makeDb();
     const messenger = makeMessenger();
 
-    // Fill the valve with 5 unique non-queued reports first.
     for (let i = 0; i < 5; i++) {
-      emitHealReport(db, messenger, null, {
-        type: 'crash',
-        stderr: `ValveFillB_${i}_${randomUUID().slice(0, 8)}: padding`,
-      });
+      emitHealReport(db, messenger, null, distinctCrash(i));
     }
 
     vi.mocked(emitAlert).mockClear();
     vi.mocked(sendTracked).mockClear();
 
-    // 6th emit trips the valve with NO stderr → the stderr ternary hits its
-    // falsy (null) branch and the detail line is omitted.
-    const tripped = emitHealReport(db, messenger, null, {
+    const tripped = emitHealReport(db, messenger, null, unsafeReporterInput({
       type: 'service_crash',
-      chatJid: '1111111000000000@g.us',
-      crashClass: 'startup_failed',
-      recentLogs: 'boot loop detected',
-    });
+      recentLogs: 'HEAL_ABSENT_DIAGNOSTIC_CANARY_DO_NOT_LEAK',
+    }));
 
     expect(tripped).toBeNull();
     expect(vi.mocked(sendTracked)).not.toHaveBeenCalled();
     expect(vi.mocked(emitAlert)).toHaveBeenCalledOnce();
     const detailArg = vi.mocked(emitAlert).mock.calls[0]![3];
-    // stderr line absent (falsy branch of the ternary)
     expect(detailArg).not.toMatch(/stderr=/);
-    // but other present fields are still rendered
-    expect(detailArg).toMatch(/crash_class=startup_failed/);
-    expect(detailArg).toMatch(/recent_logs=boot loop detected/);
+    expect(detailArg).toMatch(/cause=service_crash/);
+    expect(detailArg).not.toContain('HEAL_ABSENT_DIAGNOSTIC_CANARY_DO_NOT_LEAK');
   });
 
   it('routes the report through the BOT ERRORS fallback sink when no Q control peer is configured (#1754)', () => {
     const db = makeDb();
     const messenger = makeMessenger();
+    const canary = 'HEAL_NO_PEER_CANARY_DO_NOT_LEAK';
 
     // Mutate the shared config mock to remove the Q peer, then restore it.
     config.controlPeers.delete('q');
     try {
-      const reportId = emitHealReport(db, messenger, null, {
+      const reportId = emitHealReport(db, messenger, null, unsafeReporterInput({
         type: 'crash',
-        stderr: 'NoQPeer: boom',
-      });
+        chatJid: canary,
+        provider: canary,
+        crashClass: 'provider_auth_required',
+        stderr: canary,
+        recentLogs: canary,
+      }));
 
       // Report is still created with state='attempt_1' but no direct send happens.
       expect(reportId).not.toBeNull();
@@ -808,6 +873,9 @@ describe('heal.ts uncovered-branch coverage', () => {
       expect(instance).toBe(config.botName);
       expect(source).not.toBe('heal_repeated_failures'); // distinct from the valve alert
       expect(summary).toContain(reportId);
+      const evidence = vi.mocked(emitAlert).mock.calls[0]![3] as string;
+      expect(evidence).toContain('cause=provider_auth_required');
+      expect(evidence).not.toContain(canary);
     } finally {
       config.controlPeers.set('q', '15559998888');
     }
@@ -819,7 +887,7 @@ describe('heal.ts uncovered-branch coverage', () => {
 
     emitHealReport(db, messenger, null, {
       type: 'crash',
-      stderr: 'FalsePromiseError: boom',
+      crashClass: 'provider_unknown',
     });
 
     await vi.waitFor(() => {
@@ -834,31 +902,29 @@ describe('heal.ts uncovered-branch coverage', () => {
     expect(message).not.toMatch(/\battempt \d+ of \d+\b/i);
   });
 
-  it('includes signal and recentLogs lines in the human-readable heal report when present', async () => {
+  it('uses the safe V1 summary when source crash diagnostics are present', async () => {
     const db = makeDb();
     const messenger = makeMessenger();
 
-    emitHealReport(db, messenger, null, {
+    emitHealReport(db, messenger, null, unsafeReporterInput({
       type: 'crash',
-      chatJid: '15550000001@s.whatsapp.net',
+      chatJid: 'HEAL_HUMAN_SUMMARY_CANARY_DO_NOT_LEAK',
       exitCode: 1,
-      signal: 'SIGTERM',
-      provider: 'claude-cli',
-      crashClass: 'oom_killed',
-      stderr: 'Error: heap out of memory',
-      recentLogs: 'log line 1\nlog line 2\nlog line 3',
-    });
+      signal: 'HEAL_HUMAN_SUMMARY_CANARY_DO_NOT_LEAK',
+      provider: 'HEAL_HUMAN_SUMMARY_CANARY_DO_NOT_LEAK',
+      crashClass: 'provider_auth_required',
+      stderr: 'HEAL_HUMAN_SUMMARY_CANARY_DO_NOT_LEAK',
+      recentLogs: 'HEAL_HUMAN_SUMMARY_CANARY_DO_NOT_LEAK',
+    }));
 
     await vi.waitFor(() => {
       expect(vi.mocked(sendTracked)).toHaveBeenCalledOnce();
     });
 
     const [, , message] = vi.mocked(sendTracked).mock.calls[0]!;
-    // signal truthy branch (formatHealReport line 383)
-    expect(message).toContain('Signal: SIGTERM');
-    // recentLogs truthy branch (formatHealReport line 387)
-    expect(message).toContain('Recent logs:');
-    expect(message).toContain('log line 3');
+    expect(message).toContain('Cause: provider_auth_required');
+    expect(message).toContain('Recommended action: reauthenticate_provider');
+    expect(message).not.toContain('HEAL_HUMAN_SUMMARY_CANARY_DO_NOT_LEAK');
   });
 });
 
@@ -883,8 +949,8 @@ describe('heal_delivery_unavailable latch', () => {
     const db = makeDb();
     const messenger = makeMessenger();
 
-    const first = emitHealReport(db, messenger, null, { type: 'crash', stderr: 'LatchAlpha: boom' });
-    const second = emitHealReport(db, messenger, null, { type: 'crash', stderr: 'LatchBeta: other boom' });
+    const first = emitHealReport(db, messenger, null, distinctCrash(0));
+    const second = emitHealReport(db, messenger, null, distinctCrash(1));
 
     // Both reports are still created and fallback-routed exactly as before —
     // only the alert spam latches.
@@ -907,8 +973,8 @@ describe('heal_delivery_unavailable latch', () => {
     const db = makeDb();
     const messenger = makeMessenger();
 
-    emitHealReport(db, messenger, null, { type: 'crash', stderr: 'LatchWarnA: boom' });
-    emitHealReport(db, messenger, null, { type: 'crash', stderr: 'LatchWarnB: boom' });
+    emitHealReport(db, messenger, null, distinctCrash(0));
+    emitHealReport(db, messenger, null, distinctCrash(1));
 
     const warns = mockHealLogger.warn.mock.calls.filter(
       (call) => String(call[1]).includes('no Q control peer configured'),
@@ -920,7 +986,7 @@ describe('heal_delivery_unavailable latch', () => {
     const db = makeDb();
     const messenger = makeMessenger();
 
-    emitHealReport(db, messenger, null, { type: 'crash', stderr: 'LatchEvidence: boom' });
+    emitHealReport(db, messenger, null, distinctCrash(0));
 
     expect(vi.mocked(emitAlert)).toHaveBeenCalledOnce();
     const evidence = vi.mocked(emitAlert).mock.calls[0]![3] as string;
@@ -935,11 +1001,11 @@ describe('heal_delivery_unavailable latch', () => {
     expect(getControlPeerWiring()).toEqual({ configured: false, suppressedUnavailableAlerts: 0 });
 
     // First no-peer report alerts; it is not itself "suppressed".
-    emitHealReport(db, messenger, null, { type: 'crash', stderr: 'LatchCountA: boom' });
+    emitHealReport(db, messenger, null, distinctCrash(0));
     expect(getControlPeerWiring()).toEqual({ configured: false, suppressedUnavailableAlerts: 0 });
 
-    emitHealReport(db, messenger, null, { type: 'crash', stderr: 'LatchCountB: boom' });
-    emitHealReport(db, messenger, null, { type: 'crash', stderr: 'LatchCountC: boom' });
+    emitHealReport(db, messenger, null, distinctCrash(1));
+    emitHealReport(db, messenger, null, distinctCrash(2));
     expect(getControlPeerWiring()).toEqual({ configured: false, suppressedUnavailableAlerts: 2 });
   });
 
@@ -948,7 +1014,7 @@ describe('heal_delivery_unavailable latch', () => {
     const messenger = makeMessenger();
     config.controlPeers.set('q', '15559998888');
 
-    const reportId = emitHealReport(db, messenger, null, { type: 'crash', stderr: 'ConfiguredPeer: boom' });
+    const reportId = emitHealReport(db, messenger, null, distinctCrash(0));
 
     expect(reportId).not.toBeNull();
     expect(vi.mocked(emitAlert)).not.toHaveBeenCalled();

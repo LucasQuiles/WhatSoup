@@ -462,7 +462,7 @@ describe('durability-writer-guard — self-provisioned discovery (completeness b
     ).toHaveLength(0);
   });
 
-  it('the real SELF_PROVISIONED registry (all 10 tables) passes clean against the real repo', async () => {
+  it('the real SELF_PROVISIONED registry (all 11 tables) passes clean against the real repo', async () => {
     const snapshot = await loadRealSnapshot();
     const result = scanDurabilityWriterInvariant(snapshot, repoRoot, { registry: [], trackedReserved: [], trackedUnwiredTerminal: [] });
     const selfProvisionedFindings = result.findings.filter((f) =>
@@ -488,7 +488,7 @@ describe('durability-writer-guard — self-provisioned discovery (completeness b
     expect(result.discoveredTableCount).toBeGreaterThan(0);
   });
 
-  it('SELF_PROVISIONED declares exactly the ten known self-provisioned tables', () => {
+  it('SELF_PROVISIONED declares exactly the eleven known self-provisioned tables', () => {
     const tables = SELF_PROVISIONED.map((e) => e.table).sort();
     expect(tables).toEqual(
       [
@@ -500,6 +500,7 @@ describe('durability-writer-guard — self-provisioned discovery (completeness b
         'incidents',
         'meta',
         'pending_poll_decisions',
+        'producers',
         'standby_notice',
         'transitions',
       ].sort(),
@@ -511,10 +512,15 @@ describe('durability-writer-guard — self-provisioned discovery (completeness b
     }
   });
 
-  it('DISCOVERY_EXCLUSIONS declares exactly outbound_sends_v26 with a non-empty reason', () => {
-    expect(DISCOVERY_EXCLUSIONS).toHaveLength(1);
-    expect(DISCOVERY_EXCLUSIONS[0]?.table).toBe('outbound_sends_v26');
-    expect((DISCOVERY_EXCLUSIONS[0]?.reason ?? '').trim().length).toBeGreaterThan(0);
+  it('DISCOVERY_EXCLUSIONS declares only transient migration rebuild tables with reasons', () => {
+    expect(DISCOVERY_EXCLUSIONS.map(({ table }) => table)).toEqual([
+      'tool_calls_v50',
+      'outbound_sends_v26',
+      'outbound_sends_v51',
+    ]);
+    for (const entry of DISCOVERY_EXCLUSIONS) {
+      expect(entry.reason.trim().length, `${entry.table} needs a reason`).toBeGreaterThan(0);
+    }
   });
 });
 

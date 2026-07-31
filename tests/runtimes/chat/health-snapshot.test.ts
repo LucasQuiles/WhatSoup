@@ -58,7 +58,8 @@ vi.mock('../../../src/runtimes/chat/enrichment/poller.ts', () => {
 vi.mock('../../../src/runtimes/chat/queue.ts', () => {
   class ChatQueue {
     private _stats = { activeChats: 0, queuedChats: 0, trackedChats: 0 };
-    enqueue = vi.fn();
+    enqueue = vi.fn().mockResolvedValue(true);
+    get droppedCount() { return 0; }
     get stats() { return this._stats; }
   }
   return { ChatQueue };
@@ -67,7 +68,10 @@ vi.mock('../../../src/runtimes/chat/queue.ts', () => {
 // Stub remaining heavy deps that ChatRuntime imports
 vi.mock('../../../src/runtimes/chat/rate-limiter.ts', () => ({ checkRateLimit: vi.fn() }));
 vi.mock('../../../src/runtimes/chat/window.ts', () => ({ loadConversationWindow: vi.fn() }));
-vi.mock('../../../src/runtimes/chat/context.ts', () => ({ loadContext: vi.fn() }));
+vi.mock('../../../src/runtimes/chat/context.ts', () => ({
+  loadContext: vi.fn(),
+  loadContextDetailed: vi.fn(),
+}));
 vi.mock('../../../src/core/messages.ts', () => ({ storeMessage: vi.fn() }));
 vi.mock('../../../src/runtimes/chat/rate-limits-db.ts', () => ({ recordResponse: vi.fn() }));
 vi.mock('../../../src/runtimes/chat/media/processor.ts', () => ({ processMedia: vi.fn() }));

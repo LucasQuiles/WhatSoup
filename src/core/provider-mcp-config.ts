@@ -146,6 +146,35 @@ function readExistingOpenCodeConfig(target: string): Record<string, unknown> | n
   return parsed as Record<string, unknown>;
 }
 
+/**
+ * Merge a spawn-time providerConfig override (e.g. the QR-247 per-chat
+ * actor-socket wire's `{ mcpConfig: [perChatCfgPath], strictMcpConfig: true }`)
+ * onto the instance's configured providerConfig.
+ *
+ * Plain per-key override semantics for everything EXCEPT `mcpConfig`: the
+ * claude CLI accepts multiple `--mcp-config` files and merges their servers,
+ * so an instance-declared config (a host-local MCP server the bot depends on)
+ * must survive the per-chat override rather than being clobbered by it.
+ * Result order: override paths first, then instance paths, deduplicated.
+ */
+export function mergeSessionProviderConfig(
+  base: Record<string, unknown> | undefined,
+  override: Record<string, unknown>,
+): Record<string, unknown> {
+  const merged: Record<string, unknown> = { ...base, ...override };
+  const baseMcp = base?.['mcpConfig'];
+  const overrideMcp = override['mcpConfig'];
+  if (baseMcp !== undefined && overrideMcp !== undefined) {
+    const toPaths = (v: unknown): string[] => (Array.isArray(v) ? v.map(String) : [String(v)]);
+    const overridePaths = toPaths(overrideMcp);
+    merged['mcpConfig'] = [
+      ...overridePaths,
+      ...toPaths(baseMcp).filter((p) => !overridePaths.includes(p)),
+    ];
+  }
+  return merged;
+}
+
 export function writeProviderMcpConfigTarget(providerId: string, agentCwd: string): string | null {
   switch (providerId) {
     case 'claude-cli':

@@ -12,7 +12,6 @@ import type {
   OutboundSendsWriter,
 } from './outbound-sends.ts';
 import { isRecord } from '../lib/type-guards.ts';
-import { errorMessage } from '../lib/error-message.ts';
 
 export type LinkPreviewMode = 'auto' | 'off';
 export type TextSendTransportResult = { transportId?: string | null } | void;
@@ -23,13 +22,12 @@ export type TextSendTransport<T extends TextSendTransportResult = TextSendTransp
 export interface ExecuteSendOptions {
   /**
    * Rewrites the prepared send before it is audited and transmitted. Runs after
-   * preparation/profile application and before `beforeAudit`, so the audit row
-   * and transport both see the transformed text. A transform that changes the
-   * text MUST return a full `PreparedTextSend` with an updated
-   * `audit.textLength` so the audit reflects what was actually sent.
+   * preparation/profile application and before `beforeAudit`. Outbound audit
+   * persistence is metadata-only and receives no text-derived fields.
    */
   transformPrepared?: (prepared: PreparedTextSend) => PreparedTextSend | Promise<PreparedTextSend>;
   beforeAudit?: (prepared: PreparedTextSend) => void | Promise<void>;
+  onAuditReceipt?: (receipt: string) => void;
 }
 
 export interface TextSendInput extends ChatTarget {
@@ -109,26 +107,23 @@ export function createSendPipeline({
         if (!caller) {
           throw new InvalidSendRequestError('send audit caller is required');
         }
-        auditId = auditWriter.writeIntent({
+        const auditIntent = auditWriter.writeIntent({
           caller,
-          chatJid: prepared.chatJid,
           targetKind: prepared.audit.targetKind,
-          alias: prepared.audit.alias,
-          profile: prepared.audit.profile,
-          text: prepared.text,
-          linkPreviewMode: prepared.linkPreviewMode,
         });
+        auditId = auditIntent.id;
+        options.onAuditReceipt?.(auditIntent.auditReceipt);
       }
 
       try {
         const result = await transport(prepared);
         if (auditId !== undefined) {
-          auditWriter!.markSuccess(auditId, extractTransportId(result));
+          auditWriter!.markSuccess(auditId);
         }
         return result;
       } catch (err) {
         if (auditId !== undefined) {
-          auditWriter!.markFailure(auditId, errorMessage(err));
+          auditWriter!.markFailure(auditId, err);
         }
         throw err;
       }
@@ -186,11 +181,4 @@ export function prepareTextSend(
       textLength: text.length,
     },
   };
-}
-
-function extractTransportId(result: TextSendTransportResult): string | null {
-  if (result && typeof result.transportId === 'string' && result.transportId.length > 0) {
-    return result.transportId;
-  }
-  return null;
 }

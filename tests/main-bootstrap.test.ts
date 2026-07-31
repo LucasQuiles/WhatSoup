@@ -6,6 +6,9 @@ type MainHarness = Awaited<ReturnType<typeof importMainWithMocks>>;
 type HealthServerDepsForTest = {
   handleAccessDecision: (subjectType: string, subjectId: string, action: string) => Promise<void>;
   getEnrichmentStats: () => unknown;
+  getDatabaseRetentionHealth: () => unknown;
+  getMemoryReadinessHealth?: () => unknown;
+  getMemoryContextHealth?: () => unknown;
 };
 
 type CapabilityGrantManagerOptionsForTest = {
@@ -30,6 +33,7 @@ class FakeConnection extends EventEmitter {
   shutdown = vi.fn();
   sendRaw = vi.fn(async () => ({ waMessageId: 'raw-1' }));
   sendPollMessage = vi.fn(async () => ({ waMessageId: 'poll-1', hasSecret: false }));
+  getConnectionState = vi.fn(() => ({ connected: true, state: 'connected' }));
   getSocket = vi.fn(() => null);
   setIdentityStore = vi.fn();
 }
@@ -46,6 +50,7 @@ function runtimeStub() {
     handleMessage: vi.fn(async () => {}),
     handleJidAliasChanged: vi.fn(),
     handleDatabaseCompatibilityRejection: vi.fn(),
+    getMemoryContextHealth: vi.fn(() => null),
   };
 }
 
@@ -63,7 +68,7 @@ function installProcessOnCapture() {
 
 async function importMainWithMocks(options: {
   instanceConfig?: Record<string, unknown> | null;
-  pineconeState?: 'ready' | 'missing_index';
+  pineconeState?: 'ready' | 'index_missing';
   accessMode?: 'self_only' | 'allowlist';
   adminPhones?: string[];
   existingPaths?: string[];
@@ -109,12 +114,16 @@ async function importMainWithMocks(options: {
   const connection = new FakeConnection();
   const chatRuntime = runtimeStub();
   const passiveRuntime = runtimeStub();
-  const agentInstances: Array<ReturnType<typeof runtimeStub> & { popStartupMessage: ReturnType<typeof vi.fn> }> = [];
+  const agentInstances: Array<ReturnType<typeof runtimeStub>> = [];
   const healthServer = { close: vi.fn() };
   const memoryScheduler = { start: vi.fn(), stop: vi.fn(async () => {}) };
   const mediaRetentionTimer = { start: vi.fn(), stop: vi.fn() };
   const processTmpRetentionTimer = { start: vi.fn(), stop: vi.fn() };
-  const databaseRetentionTimer = { start: vi.fn(), stop: vi.fn() };
+  const databaseRetentionTimer = {
+    start: vi.fn(),
+    stop: vi.fn(),
+    getHealthSnapshot: vi.fn(() => ({ running: true })),
+  };
   const messageScheduler = { recoverStale: vi.fn(), start: vi.fn(), stop: vi.fn() };
   const triggerPoller = { start: vi.fn(), stop: vi.fn() };
   const grantManager = {
@@ -144,6 +153,7 @@ async function importMainWithMocks(options: {
   };
   const config = {
     botName: 'q',
+    transport: 'baileys',
     pineconeIndex: 'mw-mind',
     pineconeSearchMode: 'hybrid',
     pineconeRerank: true,
@@ -185,7 +195,14 @@ async function importMainWithMocks(options: {
       cacheHours: 24,
     },
     dataRoot: '/tmp/whatsoup-main-data-root',
+    // Unwritable on purpose (a path under a device file): mkdir/read/write all
+    // fail, so the startup-notify journal genuinely fails open and these wiring
+    // tests touch no real filesystem state. A plain /tmp path does NOT achieve
+    // this — writeAtomicPrivateFileSync mkdirs recursively and the writes land.
+    stateRoot: '/dev/null/whatsoup-main-state-root',
     startupNotifications: true,
+    // 0 = legacy immediate send (3 s floor) so pre-debounce timing tests hold.
+    startupNotificationStabilitySeconds: 0,
     toolUpdateMode: 'full',
     capabilityGrantGroups: {
       camera: { capabilities: ['camera.snap', 'camera.clip'] },
@@ -205,10 +222,7 @@ async function importMainWithMocks(options: {
     return passiveRuntime;
   });
   const AgentRuntime = vi.fn(function (this: any) {
-    const runtime = runtimeStub() as ReturnType<typeof runtimeStub> & {
-      popStartupMessage: ReturnType<typeof vi.fn>;
-    };
-    runtime.popStartupMessage = vi.fn(() => null);
+    const runtime = runtimeStub();
     Object.assign(this, runtime);
     agentInstances.push(this);
   });
@@ -268,6 +282,14 @@ async function importMainWithMocks(options: {
       index: 'mw-mind',
       state: options.pineconeState ?? 'ready',
     })),
+    getPineconeReadinessObservation: vi.fn(async () => ({
+      index: 'mw-mind',
+      state: options.pineconeState ?? 'ready',
+      observedAt: '2026-07-29T20:00:00.000Z',
+      failureCode: 'none',
+      retryable: false,
+      evidenceCoverage: 'provider_response',
+    })),
     createAnthropicProvider: vi.fn(() => ({ name: 'anthropic' })),
     createOpenAIProvider: vi.fn(() => ({ name: 'openai' })),
     withDatabaseCompatibility: vi.fn((
@@ -290,6 +312,10 @@ async function importMainWithMocks(options: {
     toConversationKey: vi.fn((jid: string) => `conversation:${jid}`),
     toPersonalJid: vi.fn((phone: string) => `${phone}@s.whatsapp.net`),
     toLidJid: vi.fn((phone: string) => `${phone}@lid`),
+    resolveConfiguredAdminJid: vi.fn((transport: string, identity: string) => {
+      if (transport !== 'baileys') throw new Error(`unexpected transport: ${transport}`);
+      return `${identity}@s.whatsapp.net`;
+    }),
     selectReplayableDms: vi.fn((stored: unknown[]) => ({ toReplay: stored, groupSkipped: 1 })),
     rememberReplayedId: vi.fn(),
     sendTracked: vi.fn(async () => ({ waMessageId: 'sent-1' })),
@@ -398,6 +424,7 @@ async function importMainWithMocks(options: {
   vi.doMock('../src/runtimes/chat/providers/pinecone.ts', () => ({
     PineconeMemory: mocks.PineconeMemory,
     getPineconeReadiness: mocks.getPineconeReadiness,
+    getPineconeReadinessObservation: mocks.getPineconeReadinessObservation,
   }));
   vi.doMock('../src/runtimes/chat/providers/anthropic.ts', () => ({ createAnthropicProvider: mocks.createAnthropicProvider }));
   vi.doMock('../src/runtimes/chat/providers/openai.ts', () => ({ createOpenAIProvider: mocks.createOpenAIProvider }));
@@ -412,6 +439,7 @@ async function importMainWithMocks(options: {
   vi.doMock('../src/core/ingest.ts', () => ({ createIngestHandler: mocks.createIngestHandler }));
   vi.doMock('../src/core/conversation-key.ts', () => ({ toConversationKey: mocks.toConversationKey }));
   vi.doMock('../src/core/jid-constants.ts', () => ({
+    resolveConfiguredAdminJid: mocks.resolveConfiguredAdminJid,
     toPersonalJid: mocks.toPersonalJid,
     toLidJid: mocks.toLidJid,
   }));
@@ -584,6 +612,7 @@ describe('main bootstrap', () => {
       expect.any(Object),
       guardedAnthropic,
       expect.any(Object),
+      expect.any(Object),
     );
     expect(h.memoryScheduler.start).toHaveBeenCalledOnce();
     expect(h.ChatRuntime.mock.invocationCallOrder[0])
@@ -623,6 +652,7 @@ describe('main bootstrap', () => {
       h.db,
       expect.objectContaining({ messageRetentionDays: 30 }),
     );
+    expect(h.getHealthDeps().getDatabaseRetentionHealth()).toEqual({ running: true });
     expect(h.messageScheduler.recoverStale).toHaveBeenCalledOnce();
     expect(h.messageScheduler.start).toHaveBeenCalledOnce();
     expect(h.triggerPoller.start).toHaveBeenCalledOnce();
@@ -825,6 +855,23 @@ describe('main bootstrap', () => {
     );
   });
 
+  it('wires bounded memory diagnostics into health without the configured index', async () => {
+    const h = await importMainWithMocks({ pineconeState: 'ready' });
+    const healthDeps = h.getHealthDeps();
+    const readiness = healthDeps.getMemoryReadinessHealth?.();
+    const context = healthDeps.getMemoryContextHealth?.();
+
+    expect(readiness).toEqual({
+      state: 'ready',
+      observedAt: '2026-07-29T20:00:00.000Z',
+      failureCode: 'none',
+      retryable: false,
+      evidenceCoverage: 'provider_response',
+    });
+    expect(context).toBeNull();
+    expect(JSON.stringify({ readiness, context })).not.toContain('mw-mind');
+  });
+
   it('imports a legacy q database on empty warm start', async () => {
     const h = await importMainWithMocks({
       instanceConfig: { name: 'q' },
@@ -852,7 +899,7 @@ describe('main bootstrap', () => {
   it('selects passive runtime without startup notification or memory consolidation when Pinecone is not ready', async () => {
     const h = await importMainWithMocks({
       instanceConfig: { name: 'relay', type: 'passive', paths: { root: '/tmp/relay' }, socketPath: '/tmp/relay.sock' },
-      pineconeState: 'missing_index',
+      pineconeState: 'index_missing',
     });
 
     expect(h.PassiveRuntime).toHaveBeenCalledWith(h.db, h.connection, {
@@ -866,7 +913,7 @@ describe('main bootstrap', () => {
     expect(h.sendTracked).not.toHaveBeenCalled();
   });
 
-  it('selects agent runtime, resolves cwd and plugin dirs, and sends the restart notification', async () => {
+  it('reaches the controller strict-readiness seam for a structural agent-runtime stub', async () => {
     const h = await importMainWithMocks({
       instanceConfig: {
         name: 'q',
@@ -948,6 +995,7 @@ describe('main bootstrap', () => {
     );
 
     await vi.advanceTimersByTimeAsync(3_000);
+    expect(h.connection.getConnectionState).toHaveBeenCalledOnce();
     expect(h.sendTracked).toHaveBeenCalledWith(
       h.connection,
       '15551230000@s.whatsapp.net',

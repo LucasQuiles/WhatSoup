@@ -75,26 +75,57 @@ describe('heal protocol contracts', () => {
     const valid = LoopsHealPayloadSchema.safeParse({
       reportId: 'r1',
       type: 'crash',
-      errorClass: 'crash__TypeError_boom',
+      errorClass: 'crash__provider_auth_required',
       attempt: 1,
       maxAttempts: 2,
       timestamp: '2026-03-31T19:17:46Z',
-      chatJid: '111111100000000003@g.us',
-      exitCode: 1,
-      signal: null,
-      provider: 'claude-cli',
-      crashClass: 'provider_auth_required',
-      stderr: 'TypeError: boom',
-      recentLogs: 'recent logs',
+      evidence: {
+        schemaVersion: 1,
+        type: 'crash',
+        source: 'automatic_crash_reporter',
+        cause: 'provider_auth_required',
+        stage: 'provider_session',
+        impact: 'single_session',
+        evidenceCoverage: 'crash_classified',
+        counts: { occurrences: 1 },
+        action: 'reauthenticate_provider',
+        correlation: 'heal:v1:crash:provider_auth_required',
+      },
     });
 
     expect(valid.success).toBe(true);
     expect(
       LoopsHealPayloadSchema.safeParse({
         reportId: 'r1',
-        type: 'crash',
       }).success,
     ).toBe(false);
+  });
+
+  it('binds the outer LOOPS_HEAL type and class to its V1 evidence', () => {
+    const evidence = {
+      schemaVersion: 1,
+      type: 'crash',
+      source: 'automatic_crash_reporter',
+      cause: 'provider_auth_required',
+      stage: 'provider_session',
+      impact: 'single_session',
+      evidenceCoverage: 'crash_classified',
+      counts: { occurrences: 1 },
+      action: 'reauthenticate_provider',
+      correlation: 'heal:v1:crash:provider_auth_required',
+    };
+    const payload = {
+      reportId: 'r1',
+      type: 'crash',
+      errorClass: 'crash__provider_auth_required',
+      attempt: 1,
+      maxAttempts: 2,
+      timestamp: '2026-03-31T19:17:46Z',
+      evidence,
+    };
+
+    expect(LoopsHealPayloadSchema.safeParse({ ...payload, type: 'degraded' }).success).toBe(false);
+    expect(LoopsHealPayloadSchema.safeParse({ ...payload, errorClass: 'crash__provider_unknown' }).success).toBe(false);
   });
 
   it('accepts valid completion payloads and emit payloads and rejects missing fields', () => {

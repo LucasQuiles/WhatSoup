@@ -298,7 +298,9 @@ describe('handleConfigUpdate PATCH chatOptions validation (QR-218 PR-2)', () => 
       res, makeDeps(fakeInstance(cfg)), { name: 'test-line' },
     );
     expect(res._status).toBe(400);
-    expect(JSON.parse(res._body).error).toMatch(/chatOptions\.openaiProviderConfig\.baseUrl must be a valid URL/);
+    const body = JSON.parse(res._body);
+    expect(body.schema).toBe('fleet-error-v1');
+    expect(body.code).toBe('validation_failed');
     expect(fs.readFileSync(cfg, 'utf-8')).toBe(before);
   });
 
@@ -369,9 +371,9 @@ describe('handleConfigUpdate PATCH chatOptions validation (QR-218 PR-2)', () => 
       res, makeDeps(fakeInstance(cfg)), { name: 'test-line' },
     );
     expect(res._status).toBe(400);
-    expect(JSON.parse(res._body).error).toMatch(
-      /chatOptions\.openaiProviderConfig\.apiKeyService .* is not a valid provider service/,
-    );
+    const body = JSON.parse(res._body);
+    expect(body.schema).toBe('fleet-error-v1');
+    expect(body.code).toBe('validation_failed');
     expect(fs.readFileSync(cfg, 'utf-8')).toBe(before);
   });
 
@@ -444,9 +446,9 @@ describe('handleConfigUpdate PATCH chatOptions validation (QR-218 PR-2)', () => 
       { name: 'agent-bad-transcription' },
     );
     expect(res._status).toBe(400);
-    expect(JSON.parse(res._body).error).toMatch(
-      /transcriptionOptions\.openaiProviderConfig\.baseUrl must be a valid URL/,
-    );
+    const body = JSON.parse(res._body);
+    expect(body.schema).toBe('fleet-error-v1');
+    expect(body.code).toBe('validation_failed');
     expect(fs.readFileSync(cfg, 'utf-8')).toBe(before);
   });
 });

@@ -15,7 +15,8 @@ import { homedir, hostname, platform, release, tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 
 export type BotErrorsSeverity = 'critical' | 'error' | 'warning' | 'info';
-export type BotErrorsEventType = 'alert' | 'clear';
+export type BotErrorsEventType = 'alert' | 'clear' | 'observation';
+export type BotErrorsEventKind = 'incident_alert' | 'incident_recovery' | 'observation';
 export type BotErrorsRecoverability =
   | 'auto_recoverable'
   | 'operator_recoverable'
@@ -64,6 +65,13 @@ export interface BotErrorsOutboxInput {
 export interface BotErrorsOutboxWrite {
   eventId: string;
   path: string;
+}
+
+interface BotErrorsEnvelopeFields {
+  schemaVersion: 2;
+  eventKind: BotErrorsEventKind;
+  eventType: BotErrorsEventType;
+  severity: BotErrorsSeverity;
 }
 
 // Mirror of the Python SSOT `KEYED_SECRET_RE` (deploy/scripts/lib/bot_errors_redaction.py):
@@ -519,20 +527,38 @@ function logHints(instance: string): string[] {
   return [...hints];
 }
 
+function newBotErrorsEnvelope(eventType: BotErrorsEventType, severity: BotErrorsSeverity): BotErrorsEnvelopeFields {
+  if (eventType === 'alert' && ['critical', 'error', 'warning'].includes(severity)) {
+    return { schemaVersion: 2, eventKind: 'incident_alert', eventType: 'alert', severity };
+  }
+  // Preserve the public alert API's historical informational-notice spelling
+  // without persisting its ambiguous v1-shaped pair.
+  if (eventType === 'alert' && severity === 'info') {
+    return { schemaVersion: 2, eventKind: 'observation', eventType: 'observation', severity: 'info' };
+  }
+  if (eventType === 'clear' && severity === 'info') {
+    return { schemaVersion: 2, eventKind: 'incident_recovery', eventType: 'clear', severity: 'info' };
+  }
+  if (eventType === 'observation' && severity === 'info') {
+    return { schemaVersion: 2, eventKind: 'observation', eventType: 'observation', severity: 'info' };
+  }
+  throw new Error('invalid bot errors envelope');
+}
+
 export function buildBotErrorsEvent(input: BotErrorsOutboxInput, eventId = randomUUID(), createdAt = nowIso()) {
   const instance = input.instance.trim() || 'unknown';
   const source = input.source.trim() || 'unknown';
-  const summary = input.summary.trim() || `${input.eventType} event from ${source}`;
+  const severity = input.severity ?? (input.eventType === 'alert' ? 'critical' : 'info');
+  const envelope = newBotErrorsEnvelope(input.eventType, severity);
+  const summary = input.summary.trim() || `${envelope.eventType} event from ${source}`;
   const evidence = input.evidence?.trim() ?? '';
   const criticalAsset = input.criticalAsset
     ? redactOutboxValue(input.criticalAsset) as BotErrorsCriticalAssetDiagnostic
     : null;
 
   return {
-    schemaVersion: 1,
+    ...envelope,
     id: eventId,
-    eventType: input.eventType,
-    severity: input.severity ?? (input.eventType === 'clear' ? 'info' : 'critical'),
     createdAt,
     machine: hostname(),
     platform: `${hostPlatform()} ${hostRelease()}`,
@@ -571,7 +597,13 @@ export function buildBotErrorsEvent(input: BotErrorsOutboxInput, eventId = rando
 export function writeBotErrorsEvent(input: BotErrorsOutboxInput): BotErrorsOutboxWrite {
   const outbox = botErrorsOutboxDir();
   const event = buildBotErrorsEvent(input);
-  const created = event.createdAt.replace(/[-:]/g, '').replace(/\.\d{3}Z$/, 'Z');
+  // Preserve milliseconds while sorting *after* old same-second names, which
+  // ended at `...SSZ.<instance>`. `_` sorts after that separator and keeps
+  // new fractional timestamps lexical within their second.
+  const fractionalTimestamp = event.createdAt.match(/^(.*)\.(\d{3})Z$/);
+  const created = fractionalTimestamp
+    ? `${fractionalTimestamp[1]!.replace(/[-:]/g, '')}Z_${fractionalTimestamp[2]}`
+    : event.createdAt.replace(/[-:]/g, '');
   const fileName = `${created}.${safeSegment(event.instance)}.${safeSegment(event.source)}.${event.id}.json`;
   const finalPath = join(outbox, fileName);
   const tmpPath = join(outbox, `.${fileName}.${process.pid}.tmp`);
