@@ -269,9 +269,10 @@ describe('handleCreateLine: mkdir failure other than EEXIST surfaces as 500', ()
     await handleCreateLine(req, res, deps);
 
     expect(res._status).toBe(500);
-    const body = JSON.parse(res._body) as { error: string };
-    expect(body.error).toContain('instance creation failed');
-    expect(body.error).toContain('ENOTDIR');
+    const body = JSON.parse(res._body) as { schema: string; code: string; operation: string };
+    expect(body.schema).toBe('fleet-error-v1');
+    expect(body.code).toBe('source_unavailable');
+    expect(body.operation).toBe('instance_create');
   });
 });
 

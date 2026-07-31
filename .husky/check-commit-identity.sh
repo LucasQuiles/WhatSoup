@@ -42,11 +42,15 @@ APPROVED_HUMAN_EMAILS=(
 # QPI-GIT-IDENTITY policy) are NOT commit identities — a display name paired
 # with a machine address fails the exact match by design.
 APPROVED_BOT_IDENTS=(
-  "SoupBot <soupbot@users.noreply.github.com>"
   "SoupBot QPI 1 <308864230+qpi-lab@users.noreply.github.com>"
+  "SoupBot QPI 1 <310849274+LabRatQ@users.noreply.github.com>"
   "SoupBot QPI 2 <308865677+qpi-lab2@users.noreply.github.com>"
   "dependabot[bot] <49699333+dependabot[bot]@users.noreply.github.com>"
 )
+# The legacy `SoupBot <soupbot@users.noreply.github.com>` entry was removed
+# 2026-07-30 (owner decision): the username-form noreply resolves to a GitHub
+# account the estate does not control, so new commits carrying it would
+# misattribute. Historical commits are unaffected.
 # ────────────────────────────────────────────────────────────────────────────
 
 _strip_time() { printf '%s' "$1" | sed -E 's/ [0-9]+ [-+][0-9]{4}$//'; }

@@ -70,6 +70,10 @@ function makePinecone(): PineconeMemory {
     searchForSender: vi.fn().mockResolvedValue([]),
     searchSelfFacts: vi.fn().mockResolvedValue([]),
     searchEntities: vi.fn().mockResolvedValue([]),
+    searchForChatDetailed: vi.fn().mockResolvedValue({ results: [], status: 'ok' }),
+    searchForSenderDetailed: vi.fn().mockResolvedValue({ results: [], status: 'ok' }),
+    searchSelfFactsDetailed: vi.fn().mockResolvedValue({ results: [], status: 'ok' }),
+    searchEntitiesDetailed: vi.fn().mockResolvedValue({ results: [], status: 'ok' }),
   } as unknown as PineconeMemory;
 }
 

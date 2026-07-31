@@ -4,6 +4,9 @@ import { vi, type Mock } from 'vitest';
 
 export interface MockReqOptions {
   body?: string;
+  /** Emit each entry as its own 'data' event (e.g. to split a multibyte
+   * character across chunk boundaries). Takes precedence over `body`. */
+  chunks?: Array<Buffer | string>;
   headers?: Record<string, string>;
   method?: string;
   url?: string;
@@ -32,6 +35,7 @@ export interface CommonRouteDeps {
 
 export function mockReq({
   body = '',
+  chunks,
   headers = {},
   method = 'GET',
   url = '/',
@@ -42,8 +46,16 @@ export function mockReq({
   stream.url = url;
   process.nextTick(() => {
     const writable = stream as unknown as PassThrough;
-    if (body) writable.write(body);
-    writable.end();
+    const parts = chunks ?? (body ? [body] : []);
+    const writeNext = (index: number): void => {
+      if (index >= parts.length) {
+        writable.end();
+        return;
+      }
+      writable.write(parts[index]!);
+      setImmediate(() => writeNext(index + 1));
+    };
+    writeNext(0);
   });
   return stream;
 }

@@ -186,20 +186,81 @@ directory layout), set `WHATSOUP_NPM=/absolute/path/to/npm` before running
 
 ## Live Acceptance
 
-After a separately approved re-cut:
+Live acceptance is a separately approved operation. Capture the source commit,
+release path, manifest path, and prepared rollback target before repointing a
+service manager. A scoped live turn, bogus-model check, or temporary-config
+change needs its own explicit approval; none is part of the startup-notification
+procedure below.
 
-1. Capture the source commit, release path, and manifest path.
-2. Repoint the service manager only after rollback is prepared.
-3. Restart the target service.
-4. Capture `/health`.
-5. Send a scoped live turn only if approved.
-6. Confirm no raw provider diagnostic text is sent to a user.
-7. Confirm fallback/health behavior for a bogus model only if that mutation is
-   separately approved.
-8. Revert any temporary config change and confirm health recovery.
+### Startup-notification acceptance
 
-Until this acceptance is complete, do not claim the live instance is protected by
-new source changes.
+This is the one manager-neutral startup-notification acceptance and rollback
+evidence procedure. Its execution requires explicit owner approval in the
+current turn, including the named instance, release, service-manager action,
+and rollback target. It does not authorize a deploy, restart, message send, or
+external action by itself.
+
+Run it once under launchd and once under systemd after that approval. Record the
+manager and unit/plist identity in each receipt, but do not add a manager branch
+to the protocol or this procedure. Docker inherits the process protocol and
+remains untested. Source tests do not prove portability; only the two approved
+operational receipts establish those manager claims.
+
+1. **Prepare owner-private release and rollback evidence.** Capture the source
+   commit, release path, release manifest path/digest, instance name,
+   service-manager identity, and timestamp. Before the approved restart,
+   capture the previous known-good release path/ref/manifest and the exact
+   rollback action for that manager. This is evidence preparation, not
+   permission to perform either action.
+2. **Perform one approved restart.** Use the selected manager's established
+   operational command exactly once for this acceptance attempt. Do not use a
+   second restart to turn a wait, failure, or inconclusive result into green.
+3. **At generic eligibility, capture the inputs.** After the configured
+   generic stability window (with its three-second floor), capture the raw
+   `GET /health` response and the private
+   `<stateRoot>/startup-notify.json` v1 journal into the receipt directory.
+   The captured health must show `status: "healthy"` and strict readiness through
+   `transport.connected: true` and `transport.connection.state: "connected"`,
+   then `startupNotification.state: "sent"`,
+   `startupNotification.policy: "generic"`, a null `nextEligibleAt`, and the
+   matching journal watermark/boot evidence (including `lastSendAt` no earlier
+   than the watermark). Record this health observation as `passed`, `failed`,
+   or `unavailable`; use `passed` only when the captured observation meets
+   those conditions. `sent` is tracked submission evidence, not a
+   provider-delivery claim. This acceptance expects generic aggregation to be
+   enabled; a disabled or named-only policy is intentionally non-green.
+4. **Run the fail-closed validator on the captured files.** The validator is
+   one-shot and does not execute a probe command, contact a provider, inspect
+   `bot.db`, run a daemon, or create a fleet monitor. It consumes the supplied
+   files and the recorded observation outcome:
+
+   ```bash
+   bash scripts/run-with-pinned-node.sh scripts/validate-startup-notification-release.ts \
+     --health-file "$RECEIPT_DIR/health.json" \
+     --journal-file "$RECEIPT_DIR/startup-notify.json" \
+     --probe-outcome passed \
+     > "$RECEIPT_DIR/startup-notification-validation.json"
+   ```
+
+   Capture the command's stdout and exit status. Exit `0` is accepted only for
+   the complete `sent`/`generic` submission projection, valid v1 journal,
+   matching timestamps/watermark, and supplied `passed` outcome. Exit `1` is
+   a rejected contract; exit `2` is missing, unreadable, malformed, or
+   unavailable input and is inconclusive. Any nonzero result is non-green. Do
+   not add other validator options or replace a failed or unavailable outcome
+   with `passed`.
+5. **Capture result or rollback evidence.** Preserve the approval reference,
+   manager identity, release/rollback evidence, raw health and journal inputs,
+   validator JSON, exit status, and timestamp together. On a non-green result,
+   stop the acceptance attempt. A rollback is the previously prepared,
+   separately approved manager action; capture its target, invocation result,
+   and resulting health. It is a recovery action, not a retry or a second
+   portability acceptance run.
+
+Until the applicable receipt is accepted, do not claim the live instance has
+the startup-notification release protection. Waiting, `send_failed`,
+`journal_unreadable`, malformed/future journal data, a failed observation, or
+an unavailable observation is explicitly non-green.
 
 ## In-place-git release-proof pilot (central host)
 

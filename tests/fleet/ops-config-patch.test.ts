@@ -189,7 +189,7 @@ describe('handleConfigUpdate PATCH validation', () => {
     );
 
     expect(res._status).toBe(400);
-    expect(JSON.parse(res._body).error).toMatch(/accessMode must be one of/);
+    expect(JSON.parse(res._body).message).toMatch(/accessMode must be one of/);
   });
 
   it('accepts all valid accessMode values', async () => {
@@ -293,6 +293,42 @@ describe('handleConfigUpdate PATCH validation', () => {
     expect(body.adminPhones[0]).toBe('15551230006');
   });
 
+  it('canonicalizes an iMessage AppleID admin identity', async () => {
+    const configPath = writeConfig({
+      transport: 'imessage',
+      imessageConfig: { account: 'test-imsg', backend: 'imsg', sender: 'sender@example.test' },
+    });
+    const inst = fakeInstance(configPath);
+    const deps = makeDeps(inst);
+    const res = mockRes();
+
+    await handleConfigUpdate(
+      mockReq(JSON.stringify({ adminPhones: ['Owner@Example.test'] })),
+      res, deps, { name: 'test-line' },
+    );
+
+    expect(res._status).toBe(200);
+    expect(JSON.parse(res._body).adminPhones).toEqual(['owner@example.test']);
+  });
+
+  it('canonicalizes a loader-compatible iMessage phone admin identity to provider wire form', async () => {
+    const configPath = writeConfig({
+      transport: 'imessage',
+      imessageConfig: { account: 'test-imsg', backend: 'imsg', sender: 'sender@example.test' },
+    });
+    const inst = fakeInstance(configPath);
+    const deps = makeDeps(inst);
+    const res = mockRes();
+
+    await handleConfigUpdate(
+      mockReq(JSON.stringify({ adminPhones: ['5551230000'] })),
+      res, deps, { name: 'test-line' },
+    );
+
+    expect(res._status).toBe(200);
+    expect(JSON.parse(res._body).adminPhones).toEqual(['+15551230000']);
+  });
+
   // -- model (passthrough) --
 
   it('accepts any string value for model without validation', async () => {
@@ -372,7 +408,12 @@ describe('handleConfigUpdate PATCH validation', () => {
       );
 
       expect(res._status).toBe(500);
-      expect(JSON.parse(res._body).error).toMatch(/process lock active/);
+      // #2517: the raw lock-contention detail ('process lock active') is
+      // redacted into the closed fleet-error-v1 projection.
+      const lockBody = JSON.parse(res._body);
+      expect(lockBody.schema).toBe('fleet-error-v1');
+      expect(lockBody.code).toBe('internal_error');
+      expect(lockBody.message).not.toContain('process lock active');
       expect(JSON.parse(fs.readFileSync(configPath, 'utf-8')).model).toBe('old-model');
     } finally {
       releaseProcessLock(lock);

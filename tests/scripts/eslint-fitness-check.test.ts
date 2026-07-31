@@ -49,6 +49,9 @@ describe('eslint fitness config — registry drift', () => {
       'invariant.no-unsafe-type-escapes',
       'invariant.outbox-env-gated',
       'invariant.timer-rearm-without-clear',
+      'portability.fetch-timeout',
+      'portability.hardcoded-signal-name',
+      'portability.sync-exec-timeout',
       'test.skip-categorization',
     ]);
   });
