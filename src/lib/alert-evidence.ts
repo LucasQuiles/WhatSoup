@@ -29,7 +29,16 @@
  * treated as proof of metadata-only confinement.
  */
 
-import { createHash } from 'node:crypto';
+import { createHmac } from 'node:crypto';
+
+/**
+ * Fixed domain-separation key for the correlation digest (issue #2386).
+ * This is NOT a secret — it is a non-secret domain label that makes the
+ * digest construction a keyed MAC rather than a plain hash, which is the
+ * correct primitive for a non-reversible correlation key. It is never used
+ * for credential storage or authentication.
+ */
+const CORRELATION_DIGEST_KEY = 'bot-errors-evidence-dedup-v1';
 
 /** Bounded metadata projected from a raw evidence or summary string. */
 export interface ConfinedAlertContent {
@@ -84,11 +93,12 @@ function extractFailureClass(raw: string): string {
 // Issue #2386: This is a non-reversible correlation digest for de-duplicating
 // repeated BOT ERRORS evidence without exposing raw content. It is NOT used
 // for password hashing, credential storage, or any security-sensitive purpose.
-// Full 256-bit SHA-256 output (64 hex chars) provides sufficient computational
-// effort; domain separation prevents cross-domain collisions.
+// Uses HMAC-SHA256 (a keyed MAC) rather than a plain hash: the correct
+// primitive for a deterministic, non-reversible correlation key. Full 256-bit
+// output (64 hex chars); domain separation prevents cross-domain collisions.
 function digestContent(domain: string, value: string): string {
-  return createHash('sha256')
-    .update(`bot-errors-evidence:${domain}:${value}`) // codeql[js/hashing-with-insufficient-effort]: non-reversible correlation digest for de-duplication (issue #2386), not password/credential hashing — see module header
+  return createHmac('sha256', CORRELATION_DIGEST_KEY)
+    .update(`bot-errors-evidence:${domain}:${value}`)
     .digest('hex');
 }
 
