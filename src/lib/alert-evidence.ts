@@ -85,13 +85,11 @@ function extractFailureClass(raw: string): string {
 // repeated BOT ERRORS evidence without exposing raw content. It is NOT used
 // for password hashing, credential storage, or any security-sensitive purpose.
 // The 64-bit (16-hex) truncation bounds the correlation key; domain separation
-// prevents cross-domain collisions. CodeQL flags this as insufficient-effort
-// hashing under the password-storage heuristic, which does not apply here.
-// codeql[js/hashing-with-insufficient-effort]
+// prevents cross-domain collisions.
 function digestContent(domain: string, value: string): string {
-  return createHash('sha256')
+  return createHash('sha256') // codeql[js/hashing-with-insufficient-effort]
     .update(`bot-errors-evidence:${domain}:${value}`)
-    .digest('hex')
+    .digest('hex') // codeql[js/hashing-with-insufficient-effort]
     .slice(0, 16);
 }
 
