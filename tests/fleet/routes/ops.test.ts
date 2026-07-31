@@ -258,7 +258,9 @@ describe('handleAuth', () => {
 
     expect(svc.stop).toHaveBeenCalledWith('test-line');
     expect(svc.startFire).toHaveBeenCalledWith('test-line', expect.any(Function));
-    expect(res._chunks.join('')).toContain('auth exited with code 1');
+    const exitSse = res._chunks.join('');
+    expect(exitSse).toContain('fleet-error-v1');
+    expect(exitSse).toContain('auth_failed');
     expect(res._ended).toBe(true);
   });
 
@@ -280,7 +282,10 @@ describe('handleAuth', () => {
 
     expect(svc.stop).toHaveBeenCalledWith('test-line');
     expect(svc.startFire).toHaveBeenCalledWith('test-line', expect.any(Function));
-    expect(res._chunks.join('')).toContain('spawn failed');
+    const errSse = res._chunks.join('');
+    expect(errSse).toContain('fleet-error-v1');
+    expect(errSse).toContain('internal_error');
+    expect(errSse).toContain('"operation":"auth"');
     expect(res._ended).toBe(true);
   });
 
@@ -654,7 +659,10 @@ describe('handleRestart', () => {
     const res = mockRes();
     await handleRestart(mockReq(), res, deps, { name: 'test-line' });
     expect(res._status).toBe(500);
-    expect(JSON.parse(res._body).error).toMatch(/unit not found/);
+    const restartBody = JSON.parse(res._body);
+    expect(restartBody.schema).toBe('fleet-error-v1');
+    expect(restartBody.code).toBe('internal_error');
+    expect(restartBody.operation).toBe('service_action');
   });
 
   it('returns a useful message when restart rejects with a non-Error value (#2178)', async () => {
@@ -670,9 +678,10 @@ describe('handleRestart', () => {
     const res = mockRes();
     await handleRestart(mockReq(), res, deps, { name: 'test-line' });
     expect(res._status).toBe(500);
-    const error = JSON.parse(res._body).error;
-    expect(error).toMatch(/service vanished/);
-    expect(error).not.toMatch(/undefined/);
+    const nonErrBody = JSON.parse(res._body);
+    expect(nonErrBody.schema).toBe('fleet-error-v1');
+    expect(nonErrBody.code).toBe('internal_error');
+    expect(nonErrBody.message).not.toMatch(/undefined/);
   });
 });
 
@@ -1302,7 +1311,11 @@ describe('handleCreateLine', () => {
     );
 
     expect(res._status).toBe(500);
-    expect(JSON.parse(res._body).error).toMatch(/scan failed after enable/);
+    const disabledBody = JSON.parse(res._body);
+    expect(disabledBody.schema).toBe('fleet-error-v1');
+    expect(disabledBody.code).toBe('internal_error');
+    expect(disabledBody.operation).toBe('instance_create');
+    expect(disabledBody.mutation_state).toBe('not_started');
     expect(svc.enable).toHaveBeenCalledWith(name);
     expect(svc.disable).toHaveBeenCalledWith(name);
     expect(fs.existsSync(path.join(process.env.XDG_CONFIG_HOME!, 'whatsoup', 'instances', name))).toBe(false);
@@ -1338,10 +1351,13 @@ describe('handleCreateLine', () => {
     );
 
     expect(res._status).toBe(500);
-    expect(JSON.parse(res._body)).toEqual({
-      error: 'instance creation failed: scan failed after enable',
-      rollbackError: 'service disable failed: disable failed',
-    });
+    const rollbackBody = JSON.parse(res._body);
+    expect(rollbackBody.schema).toBe('fleet-error-v1');
+    expect(rollbackBody.code).toBe('internal_error');
+    expect(rollbackBody.operation).toBe('instance_create');
+    expect(rollbackBody.stage).toBe('rollback');
+    expect(rollbackBody.mutation_state).toBe('rollback_failed');
+    expect(rollbackBody.rollback_state).toBe('failed');
     expect(svc.enable).toHaveBeenCalledWith(name);
     expect(svc.disable).toHaveBeenCalledWith(name);
     expect(fs.existsSync(path.join(process.env.XDG_CONFIG_HOME!, 'whatsoup', 'instances', name))).toBe(true);
@@ -1462,7 +1478,10 @@ describe('handleConfigUpdate', () => {
     const res = mockRes();
     await handleConfigUpdate(mockReq('not json'), res, deps, { name: 'test-line' });
     expect(res._status).toBe(400);
-    expect(JSON.parse(res._body).error).toMatch(/invalid JSON/);
+    const invalidJsonBody = JSON.parse(res._body);
+    expect(invalidJsonBody.schema).toBe('fleet-error-v1');
+    expect(invalidJsonBody.code).toBe('validation_failed');
+    expect(invalidJsonBody.message).toBe('Invalid JSON body.');
   });
 
   it('returns 400 for array body', async () => {
@@ -1474,7 +1493,10 @@ describe('handleConfigUpdate', () => {
     const res = mockRes();
     await handleConfigUpdate(mockReq('[1,2,3]'), res, deps, { name: 'test-line' });
     expect(res._status).toBe(400);
-    expect(JSON.parse(res._body).error).toMatch(/JSON object/);
+    const arrayBody = JSON.parse(res._body);
+    expect(arrayBody.schema).toBe('fleet-error-v1');
+    expect(arrayBody.code).toBe('validation_failed');
+    expect(arrayBody.message).toBe('Invalid JSON body.');
   });
 
   it('returns 500 and leaves a malformed existing config untouched', async () => {
@@ -1490,7 +1512,10 @@ describe('handleConfigUpdate', () => {
     );
 
     expect(res._status).toBe(500);
-    expect(JSON.parse(res._body).error).toMatch(/failed to read config/);
+    const readFailBody = JSON.parse(res._body);
+    expect(readFailBody.schema).toBe('fleet-error-v1');
+    expect(readFailBody.code).toBe('internal_error');
+    expect(readFailBody.operation).toBe('config_read');
     expect(fs.readFileSync(configPath, 'utf-8')).toBe('{"type":"chat"');
     expect(deps.realtime.publish).not.toHaveBeenCalled();
   });
@@ -1606,7 +1631,11 @@ describe('handleConfigUpdate', () => {
     );
 
     expect(res._status).toBe(500);
-    expect(JSON.parse(res._body).error).toMatch(/failed to write CLAUDE\.md/);
+    const claudeMdBody = JSON.parse(res._body);
+    expect(claudeMdBody.schema).toBe('fleet-error-v1');
+    expect(claudeMdBody.operation).toBe('config_write');
+    expect(claudeMdBody.stage).toBe('commit');
+    expect(claudeMdBody.retryable).toBe(false);
     expect(JSON.parse(fs.readFileSync(configPath, 'utf-8'))).toEqual(originalConfig);
     expect(deps.realtime.publish).not.toHaveBeenCalled();
   });
@@ -1644,7 +1673,11 @@ describe('handleConfigUpdate', () => {
     );
 
     expect(res._status).toBe(500);
-    expect(JSON.parse(res._body).error).toMatch(/failed to write settings\.json/);
+    const settingsBody = JSON.parse(res._body);
+    expect(settingsBody.schema).toBe('fleet-error-v1');
+    expect(settingsBody.operation).toBe('config_write');
+    expect(settingsBody.stage).toBe('commit');
+    expect(settingsBody.retryable).toBe(false);
     expect(JSON.parse(fs.readFileSync(configPath, 'utf-8'))).toEqual(originalConfig);
     expect(fs.existsSync(configPath + '.tmp')).toBe(false);
     expect(deps.realtime.publish).not.toHaveBeenCalled();
@@ -1679,7 +1712,11 @@ describe('handleConfigUpdate', () => {
     );
 
     expect(res._status).toBe(500);
-    expect(JSON.parse(res._body).error).toMatch(/failed to write enabledPlugins/);
+    const pluginsBody = JSON.parse(res._body);
+    expect(pluginsBody.schema).toBe('fleet-error-v1');
+    expect(pluginsBody.operation).toBe('config_write');
+    expect(pluginsBody.stage).toBe('commit');
+    expect(pluginsBody.retryable).toBe(false);
     expect(JSON.parse(fs.readFileSync(configPath, 'utf-8'))).toEqual(originalConfig);
     expect(fs.existsSync(configPath + '.tmp')).toBe(false);
     expect(deps.realtime.publish).not.toHaveBeenCalled();
@@ -1820,7 +1857,11 @@ describe('handleConfigUpdate', () => {
     );
 
     expect(res._status).toBe(500);
-    expect(JSON.parse(res._body).error).toMatch(/failed to write config/);
+    const tmpSymlinkBody = JSON.parse(res._body);
+    expect(tmpSymlinkBody.schema).toBe('fleet-error-v1');
+    expect(tmpSymlinkBody.operation).toBe('config_write');
+    expect(tmpSymlinkBody.stage).toBe('execute');
+    expect(tmpSymlinkBody.retryable).toBe(false);
     expect(fs.readFileSync(targetPath, 'utf-8')).toBe('keep me');
     expect(JSON.parse(fs.readFileSync(configPath, 'utf-8')).accessMode).toBe('self_only');
   });
@@ -1844,7 +1885,11 @@ describe('handleConfigUpdate', () => {
     );
 
     expect(res._status).toBe(500);
-    expect(JSON.parse(res._body).error).toMatch(/failed to write config/);
+    const dirSymlinkBody = JSON.parse(res._body);
+    expect(dirSymlinkBody.schema).toBe('fleet-error-v1');
+    expect(dirSymlinkBody.operation).toBe('config_write');
+    expect(dirSymlinkBody.stage).toBe('execute');
+    expect(dirSymlinkBody.retryable).toBe(false);
     expect(JSON.parse(fs.readFileSync(targetConfigPath, 'utf-8')).accessMode).toBe('self_only');
     expect(actualExistsSync(path.join(targetDir, 'config.json.tmp'))).toBe(false);
   });
@@ -1917,7 +1962,9 @@ describe('handleConfigUpdate', () => {
     const res = mockRes();
     await handleConfigUpdate(mockReq('{"x":1}'), res, deps, { name: 'test-line' });
     expect(res._status).toBe(500);
-    expect(JSON.parse(res._body).error).toMatch(/failed to read config/);
+    const missingBody = JSON.parse(res._body);
+    expect(missingBody.schema).toBe('fleet-error-v1');
+    expect(missingBody.code).toBe('source_unavailable');
   });
 });
 
@@ -2256,7 +2303,10 @@ describe('ops.ts uncovered-branch coverage (wave)', () => {
     const res = mockRes();
     await handleStop(mockReq(), res, deps, { name: 'test-line' });
     expect(res._status).toBe(500);
-    expect(JSON.parse(res._body).error).toMatch(/stop failed/);
+    const stopBody = JSON.parse(res._body);
+    expect(stopBody.schema).toBe('fleet-error-v1');
+    expect(stopBody.code).toBe('internal_error');
+    expect(stopBody.operation).toBe('service_action');
   });
 
   it('handleStop returns 404 for unknown instance', async () => {
@@ -2447,7 +2497,10 @@ describe('ops.ts uncovered-branch coverage (wave)', () => {
     const res = mockRes();
     await handleCreateLine(mockReq('not json'), res, deps);
     expect(res._status).toBe(400);
-    expect(JSON.parse(res._body).error).toMatch(/invalid JSON/);
+    const createInvalidJsonBody = JSON.parse(res._body);
+    expect(createInvalidJsonBody.schema).toBe('fleet-error-v1');
+    expect(createInvalidJsonBody.code).toBe('validation_failed');
+    expect(createInvalidJsonBody.message).toBe('Invalid JSON body.');
   });
 
   it('handleCreateLine rejects a JSON array body with 400', async () => {
@@ -3252,8 +3305,9 @@ describe('ops.ts uncovered-branch coverage (wave 2)', () => {
       // Either the inventory failure path or the shared validator must reject the collision.
       expect(res._status).toBeGreaterThanOrEqual(400);
       expect(res._status).toBeLessThan(500);
-      const err = JSON.parse(res._body).error;
-      expect(err).toMatch(/healthPort|already in use|collision|conflict|inventory/i);
+      const collisionBody = JSON.parse(res._body);
+      expect(collisionBody.schema).toBe('fleet-error-v1');
+      expect(collisionBody.code).toBe('validation_failed');
     } finally {
       if (origConfig === undefined) delete process.env.XDG_CONFIG_HOME;
       else process.env.XDG_CONFIG_HOME = origConfig;
@@ -3825,7 +3879,12 @@ describe('ops.ts uncovered-branch coverage (wave 2)', () => {
 
     expect(stopForAuth).toHaveBeenCalledWith('test-line');
     expect(startAfterAuthFire).not.toHaveBeenCalled();
-    expect(res._chunks.join('')).toContain('pairing failed');
+    // Security projection (#2517): the raw auth error must NOT be leaked to the
+    // SSE client; only the redacted fleet-error-v1 projection is forwarded.
+    const chunks = res._chunks.join('');
+    expect(chunks).toContain('fleet-error-v1');
+    expect(chunks).toContain('"operation":"auth"');
+    expect(chunks).not.toContain('pairing failed');
     expect(res._ended).toBe(true);
   });
 
@@ -4972,7 +5031,9 @@ describe('ops.ts uncovered-branch coverage', () => {
         })),
         res, deps, { name: 'test-line' });
       expect(res._status).toBe(400);
-      expect(JSON.parse(res._body).error).toMatch(/pluginDirs/);
+      const pluginDirsBody = JSON.parse(res._body);
+      expect(pluginDirsBody.schema).toBe('fleet-error-v1');
+      expect(pluginDirsBody.code).toBe('validation_failed');
     } finally {
       fs.rmSync(tmpDir, { recursive: true, force: true });
       fs.rmSync(agentCwd, { recursive: true, force: true });

@@ -51,7 +51,9 @@ describe('directory check confines to $HOME after canonicalization (#2291 M12)',
     fs.symlinkSync(outside, path.join(home, 'escape'));
     const res = check(path.join(home, 'escape', 'secret'));
     expect(res._status).toBe(400);
-    expect(JSON.parse(res._body).error).toMatch(/home directory/);
+    const escapeBody = JSON.parse(res._body);
+    expect(escapeBody.schema).toBe('fleet-error-v1');
+    expect(escapeBody.code).toBe('validation_failed');
   });
 
   it('rejects a symlinked path even when the leaf does not exist', () => {

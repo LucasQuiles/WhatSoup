@@ -401,7 +401,10 @@ describe('handleStop', () => {
     const res = mockRes();
     await handleStop(mockReq(), res, deps, { name: 'test-line' });
     expect(res._status).toBe(500);
-    expect(JSON.parse(res._body).error).toMatch(/unit failed to stop/);
+    const stopBody = JSON.parse(res._body);
+    expect(stopBody.schema).toBe('fleet-error-v1');
+    expect(stopBody.code).toBe('internal_error');
+    expect(stopBody.operation).toBe('service_action');
   });
 });
 
@@ -424,7 +427,9 @@ describe('handleConfigUpdate — config read failure', () => {
       res, deps, { name: 'test-line' },
     );
     expect(res._status).toBe(500);
-    expect(JSON.parse(res._body).error).toMatch(/failed to read config/);
+    const readBody = JSON.parse(res._body);
+    expect(readBody.schema).toBe('fleet-error-v1');
+    expect(readBody.code).toBe('source_unavailable');
   });
 
   it('returns 400 for non-object JSON body', async () => {
@@ -436,7 +441,10 @@ describe('handleConfigUpdate — config read failure', () => {
       res, deps, { name: 'test-line' },
     );
     expect(res._status).toBe(400);
-    expect(JSON.parse(res._body).error).toMatch(/invalid JSON/);
+    const nonObjectBody = JSON.parse(res._body);
+    expect(nonObjectBody.schema).toBe('fleet-error-v1');
+    expect(nonObjectBody.code).toBe('validation_failed');
+    expect(nonObjectBody.message).toBe('Invalid JSON body.');
   });
 });
 
@@ -480,7 +488,10 @@ describe('handleCreateLine — body and field validation', () => {
     const res = mockRes();
     await handleCreateLine(mockReq('not-json'), res, deps);
     expect(res._status).toBe(400);
-    expect(JSON.parse(res._body).error).toMatch(/invalid JSON/);
+    const nonJsonBody = JSON.parse(res._body);
+    expect(nonJsonBody.schema).toBe('fleet-error-v1');
+    expect(nonJsonBody.code).toBe('validation_failed');
+    expect(nonJsonBody.message).toBe('Invalid JSON body.');
   });
 
   it('returns 400 for array body', async () => {
@@ -488,7 +499,10 @@ describe('handleCreateLine — body and field validation', () => {
     const res = mockRes();
     await handleCreateLine(mockReq(JSON.stringify([1, 2])), res, deps);
     expect(res._status).toBe(400);
-    expect(JSON.parse(res._body).error).toMatch(/invalid JSON/);
+    const arrayBody = JSON.parse(res._body);
+    expect(arrayBody.schema).toBe('fleet-error-v1');
+    expect(arrayBody.code).toBe('validation_failed');
+    expect(arrayBody.message).toBe('Invalid JSON body.');
   });
 
   it('returns 400 for missing or invalid name (single char)', async () => {
@@ -742,7 +756,9 @@ describe('handleConfigUpdate — validateNumericBounds', () => {
       res, deps, { name: 'test-line' },
     );
     expect(res._status).toBe(400);
-    expect(JSON.parse(res._body).error).toMatch(/rateLimitPerHour/);
+    const rateLimitBody = JSON.parse(res._body);
+    expect(rateLimitBody.schema).toBe('fleet-error-v1');
+    expect(rateLimitBody.code).toBe('validation_failed');
   });
 
   it('returns 400 for maxTokens out of range', async () => {
@@ -759,6 +775,8 @@ describe('handleConfigUpdate — validateNumericBounds', () => {
       res, deps, { name: 'test-line' },
     );
     expect(res._status).toBe(400);
-    expect(JSON.parse(res._body).error).toMatch(/maxTokens/);
+    const maxTokensBody = JSON.parse(res._body);
+    expect(maxTokensBody.schema).toBe('fleet-error-v1');
+    expect(maxTokensBody.code).toBe('validation_failed');
   });
 });

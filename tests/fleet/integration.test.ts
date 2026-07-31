@@ -475,7 +475,7 @@ describe('fleet integration -- config update', () => {
     });
     expect(res.status).toBe(400);
     const body = await res.json();
-    expect(body.error).toMatch(/invalid JSON/i);
+    expect(body.message).toMatch(/invalid JSON/i);
   });
 
   it('PATCH config with array body returns 400', async () => {
@@ -486,7 +486,7 @@ describe('fleet integration -- config update', () => {
     });
     expect(res.status).toBe(400);
     const body = await res.json();
-    expect(body.error).toMatch(/must be a JSON object/i);
+    expect(body.message).toMatch(/invalid/i);
   });
 
   it('PATCH config for unknown instance returns 404', async () => {
@@ -523,8 +523,11 @@ describe('fleet integration -- restart', () => {
       method: 'POST',
     });
     expect(status).toBe(500);
-    expect(body.error).toContain('restart failed');
-    expect(body.error).toContain('unit not found');
+    // #2517: the raw exception ('unit not found') is redacted; only the closed
+    // fleet-error-v1 projection reaches the client.
+    expect(body.schema).toBe('fleet-error-v1');
+    expect(body.code).toBe('internal_error');
+    expect(body.message).not.toContain('unit not found');
   });
 
   it('POST restart for unknown instance returns 404', async () => {
@@ -611,7 +614,10 @@ describe('fleet integration -- DB error resilience', () => {
   it('GET /api/lines/:name/chats for corrupt DB returns 500', async () => {
     const { status, body } = await fetchJson(`/api/lines/${corruptInstance}/chats`);
     expect(status).toBe(500);
-    expect(body).toEqual({ error: 'file is not a database' });
+    // #2517: the raw SQLite error ('file is not a database') is redacted.
+    expect(body.schema).toBe('fleet-error-v1');
+    expect(body.code).toBe('internal_error');
+    expect(body.message).not.toContain('file is not a database');
   });
 
   it('healthy instances still work when a sibling DB is corrupt', async () => {
