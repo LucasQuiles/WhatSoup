@@ -8,6 +8,13 @@ import { OUTBOUND_FAILURE_EVIDENCE_CODES } from '../../src/core/outbound-failure
 
 let tmpRoot = '';
 
+// Probed once at collection time: queryRow()/queryRetirement() shell out to
+// the standalone sqlite3 CLI binary (distinct from Node's node:sqlite
+// library) to inspect fixture databases. On minimal Linux/macOS images this
+// is a separate apt/brew package that may be absent, which would otherwise
+// throw ENOENT out of spawnSync.
+const hasSqliteCli = spawnSync('sh', ['-c', 'command -v sqlite3'], { encoding: 'utf8', timeout: 5000 }).status === 0;
+
 afterEach(() => {
   if (tmpRoot) rmSync(tmpRoot, { recursive: true, force: true });
   tmpRoot = '';
@@ -176,11 +183,16 @@ print(json.dumps(sorted(namespace['KNOWN_FAILURE_CODES'])))
   return JSON.parse(result.stdout) as string[];
 }
 
+// Only depends on python3 (see scriptKnownFailureCodes above) — kept out of
+// the sqlite3-gated describe below so it still runs on a sqlite3-less host.
 describe('retire-outbound-quarantine', () => {
   it('keeps CLI evidence-code validation in parity with the durable evidence contract', () => {
     expect(scriptKnownFailureCodes()).toEqual([...OUTBOUND_FAILURE_EVIDENCE_CODES].sort());
   });
+});
 
+// @skip-env requires the standalone sqlite3 CLI binary (queryRow/queryRetirement).
+describe.skipIf(!hasSqliteCli)('retire-outbound-quarantine', () => {
   it('inspects only bounded metadata and never exposes stored evidence or message identifiers', () => {
     tmpRoot = mkdtempSync(join(tmpdir(), 'retire-outbound-'));
     const stored = evidence();
