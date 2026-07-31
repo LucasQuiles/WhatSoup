@@ -102,7 +102,7 @@ function makeMockChild(pid = 4242) {
   return {
     pid,
     stdin,
-    stdout: new EventEmitter(),
+    stdout: Object.assign(new EventEmitter(), { setEncoding: () => {} }),
     stderr: new EventEmitter(),
     kill: vi.fn(),
     on: vi.fn(),

@@ -39,7 +39,9 @@ function makeMockChild(pid = 12345) {
   );
   (stdin as unknown as { end: ReturnType<typeof vi.fn> }).end = vi.fn();
 
+  // #2290 M10: mock stdout needs setEncoding (real stream has it; session.ts calls it).
   const stdout = new EventEmitter();
+  (stdout as unknown as { setEncoding: ReturnType<typeof vi.fn> }).setEncoding = vi.fn();
   const stderr = new EventEmitter();
 
   const killFn = vi.fn();
@@ -788,7 +790,7 @@ describe('SessionManager', () => {
     const sm = new SessionManager({ db, messenger, chatJid: CHAT_JID, onEvent: (event) => events.push(event) });
     await sm.spawnSession();
 
-    const state = sm as unknown as { stdoutChunks?: Buffer[]; stdoutBufferStr?: string };
+    const state = sm as unknown as { stdoutChunks?: string[]; stdoutBufferStr?: string };
 
     mockChild.stdout.emit('data', Buffer.from('{"type":"system","subtype":"init",'));
 

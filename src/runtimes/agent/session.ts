@@ -628,7 +628,9 @@ export class SessionManager {
   private dbRowId: number | null = null;
   private sessionId: string | null = null;
   private active = false;
-  private stdoutChunks: Buffer[] = [];
+  // #2290 M10: chunks arrive as pre-decoded strings (setEncoding('utf8') on the
+  // spawn stdout) so multibyte chars split across pipe reads aren't corrupted.
+  private stdoutChunks: string[] = [];
   private stdoutBufferStr = '';
   private startedAt: string | null = null;
   private messageCount: number = 0;
@@ -1013,10 +1015,11 @@ export class SessionManager {
 
   private materializeStdoutChunks(): void {
     if (this.stdoutChunks.length === 0) return;
-    const bufferedChunk = this.stdoutChunks.length === 1
-      ? this.stdoutChunks[0]
-      : Buffer.concat(this.stdoutChunks);
-    this.stdoutBufferStr += bufferedChunk.toString('utf8');
+    // #2290 M10: chunks are already correctly UTF-8 decoded by the stream's
+    // StringDecoder (setEncoding('utf8')), so a plain join preserves multibyte
+    // chars that span chunk boundaries — unlike the prior Buffer.toString('utf8')
+    // per-chunk decode which emitted U+FFFD on split sequences.
+    this.stdoutBufferStr += this.stdoutChunks.join('');
     this.stdoutChunks = [];
   }
 
@@ -1033,7 +1036,7 @@ export class SessionManager {
     return lines;
   }
 
-  private appendStdoutChunk(chunk: Buffer): string[] {
+  private appendStdoutChunk(chunk: string): string[] {
     this.stdoutChunks.push(chunk);
     return this.extractCompleteStdoutLines();
   }
@@ -2437,9 +2440,14 @@ export class SessionManager {
       });
     });
 
+    // #2290 M10: set UTF-8 encoding so Node's StringDecoder buffers incomplete
+    // trailing multibyte sequences — prevents silent U+FFFD corruption when a
+    // multibyte char (emoji, CJK) is split across two pipe reads. Mirrors
+    // media-bridge.ts:121 and providers/sse.ts:52.
+    child.stdout.setEncoding('utf8');
     // Pipe stdout through line parser — use provider-specific parser
     const parse = this.getParser();
-    child.stdout.on('data', (chunk: Buffer) => {
+    child.stdout.on('data', (chunk: string) => {
       if (!this.isCurrentPersistentChild(child, childGeneration)) {
         log.debug({
           chatJid: this.chatJid,
@@ -3367,7 +3375,9 @@ export class SessionManager {
         });
       });
 
-      child.stdout.on('data', (chunk: Buffer) => {
+      // #2290 M10: see first spawn site — setEncoding prevents multibyte corruption.
+      child.stdout.setEncoding('utf8');
+      child.stdout.on('data', (chunk: string) => {
         if (!this.isCurrentPersistentChild(child, childGeneration)) return;
         if (this.activeProviderTurnToken !== providerTurnToken) return;
         const lines = this.appendStdoutChunk(chunk);
