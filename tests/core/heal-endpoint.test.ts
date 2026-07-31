@@ -45,6 +45,7 @@ vi.mock('../../src/logger.ts', () => ({
 import { Database } from '../../src/core/database.ts';
 import type { HealthDeps } from '../../src/core/health.ts';
 import type { Runtime } from '../../src/runtimes/types.ts';
+import { emptyConnectionStateSnapshot } from '../../src/transport/twilio/connection-snapshot.ts';
 
 // ---------------------------------------------------------------------------
 // HTTP helper
@@ -129,6 +130,11 @@ function makeDeps(db: Database, overrides: Partial<HealthDeps> = {}): HealthDeps
       sendMedia: vi.fn().mockResolvedValue({ waMessageId: null }),
       connect: vi.fn().mockResolvedValue(undefined),
       disconnect: vi.fn().mockResolvedValue(undefined),
+      getConnectionState: vi.fn(() => emptyConnectionStateSnapshot({
+        connected: true,
+        stateChangedAt: '2026-07-30T00:00:00.000Z',
+        lastDisconnectReason: null,
+      })),
     } as any,
     startedAt: Date.now() - 1000,
     getEnrichmentStats: vi.fn().mockReturnValue({ lastRun: null, unprocessed: 0 }),

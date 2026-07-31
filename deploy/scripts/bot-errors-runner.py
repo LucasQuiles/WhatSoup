@@ -23,6 +23,7 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
+from lib.bot_errors_envelope import new_event_fields
 from lib.bot_errors_redaction import redact_bot_errors_text, redact_json_value as redact_shared_json_value
 
 
@@ -394,10 +395,8 @@ def build_failure_event(
 ) -> dict[str, Any]:
     event_id = args.event_id or f"process-{safe_segment(args.instance)}-{safe_segment(args.source)}-{int(time.time())}-{uuid.uuid4().hex[:8]}"
     return {
-        "schemaVersion": 1,
+        **new_event_fields("observation" if args.severity == "info" else "alert", args.severity),
         "id": event_id,
-        "eventType": "alert",
-        "severity": args.severity,
         "createdAt": now_iso(),
         "machine": socket.gethostname(),
         "platform": f"{platform.system()} {platform.release()}",

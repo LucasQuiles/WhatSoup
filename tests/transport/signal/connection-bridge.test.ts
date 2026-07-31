@@ -9,6 +9,27 @@ import { Database } from '../../../src/core/database.ts';
 import { storeMessageIfNew } from '../../../src/core/messages.ts';
 
 describe('SignalConnection', () => {
+  it('exposes bounded connection snapshots before and after the adapter connects', async () => {
+    const adapter = new SignalAdapter(
+      makeSignalConfig({ pollIntervalMs: 60_000 }),
+      new MockSignalPort(),
+    );
+    const connection = new SignalConnection(adapter);
+
+    expect(connection.getConnectionState()).toMatchObject({
+      connected: false,
+      state: 'disconnected',
+    });
+
+    await connection.connect();
+
+    expect(connection.getConnectionState()).toMatchObject({
+      connected: true,
+      state: 'connected',
+    });
+    await connection.shutdown();
+  });
+
   it('translates group inbound messages onto the RuntimeConnection surface', async () => {
     const port = new MockSignalPort();
     const adapter = new SignalAdapter(makeSignalConfig({ pollIntervalMs: 60_000 }), port);

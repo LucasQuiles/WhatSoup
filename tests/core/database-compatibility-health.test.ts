@@ -652,7 +652,7 @@ describe('database compatibility health drain', () => {
     const gate = mainSource.indexOf('await openDatabaseForStartup({');
     expect(gate).toBeGreaterThanOrEqual(0);
     for (const laterOperation of [
-      'getPineconeReadiness(',
+      'getPineconeReadinessObservation(',
       'seedChatAliases(',
       'new DurabilityEngine(',
       'createConnection(',

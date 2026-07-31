@@ -657,6 +657,8 @@ describe('publication guard exact-range native receipt', () => {
     expect(initialOid).not.toBe(baseOid);
   });
 
+  // This deliberately creates six isolated Git repositories; allow bounded
+  // process-scheduling headroom when the full publication suite is concurrent.
   it('scans pure and modified copy/rename path transitions while preserving safe neighbors', () => {
     const token = ['sk-', 'abcdefghijklmnop'].join('');
 
@@ -785,7 +787,7 @@ describe('publication guard exact-range native receipt', () => {
       expect(validated.ok && validated.receipt.outcome).toBe('pass');
       expect(validated.ok && validated.receipt.nativeCauses).toEqual([]);
     }
-  });
+  }, 30_000);
 
   it('aligns the path-transition byte boundary with the shared exact blob reader', () => {
     expect(MAX_PUBLICATION_PATH_TRANSITION_BLOB_BYTES).toBe(MAX_EXACT_SINGLE_BLOB_BYTES);

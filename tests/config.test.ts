@@ -3,6 +3,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import { homedir as osHomedir } from 'node:os';
 import * as path from 'node:path';
+import { canonicalizeImessageDirectIdentity } from '../src/core/transport-refs.ts';
 
 // ---------------------------------------------------------------------------
 // Env var management
@@ -2204,6 +2205,19 @@ describe('config — adminJid fallback', () => {
     }));
     const { config } = await import('../src/config.ts');
     expect(config.memory.adminJid).toBe('');
+  });
+});
+
+describe('config — iMessage admin identity canonicalization', () => {
+  it('keeps canonical direct AppleID and loader-compatible phone identities', async () => {
+    const { resolveAdminIdentities } = await import('../src/config.ts');
+    const appleId = canonicalizeImessageDirectIdentity('Owner@Example.test');
+    const phone = canonicalizeImessageDirectIdentity('+15551230000');
+
+    expect(appleId).toBe('owner@example.test');
+    expect(phone).toBe('+15551230000');
+    expect(resolveAdminIdentities(['Owner@Example.test', '5551230000'], 'imessage'))
+      .toEqual([appleId, phone]);
   });
 });
 

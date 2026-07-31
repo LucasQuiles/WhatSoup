@@ -109,6 +109,8 @@
         "transport_disconnected",
         "enrichment_stale",
         "enrichment_runtime_degraded",
+        "memory_readiness_degraded",
+        "memory_context_degraded",
         "memory_consolidation_degraded",
         "connection_churn",
         "outbound_flood",
@@ -269,6 +271,7 @@
         "outbound.status_ping_expired",
         "outbound.unsafe_delivery_unconfirmed",
         "outbound.governor_shed",
+        "outbound.identity_blocked",
         "outbound.replay_failed",
         "outbound.deferral_limit_exceeded"
       ],

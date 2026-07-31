@@ -15,15 +15,15 @@ markers and re-run the command — the result is a fixed point, so the resolutio
 rather than a hand-count. `docs/work-index.{json,md}` has the same property via
 `npm run work-index:regen`.
 
-**Total classification rows:** 340
+**Total classification rows:** 348
 
 | Classification | Count |
 |---|---:|
 | PUBLIC | 198 |
-| PRIVATE-ARCHIVE | 142 |
+| PRIVATE-ARCHIVE | 150 |
 | SANITIZE | 0 |
 | DELETE | 0 |
-| Total | 340 |
+| Total | 348 |
 
 | Path | Classification | Rationale |
 |---|---|---|
@@ -122,9 +122,13 @@ rather than a hand-count. `docs/work-index.{json,md}` has the same property via
 | `docs/superpowers/plans/2026-07-26-open-issue-triage-tooling.md` | PRIVATE-ARCHIVE | Internal issue-triage tooling implementation plan; retained in the repository but excluded from public publication by default. |
 | `docs/superpowers/plans/2026-07-28-chat-queue-admission.md` | PRIVATE-ARCHIVE | Internal ChatRuntime admission implementation plan; retained in the repository but excluded from public publication by default. |
 | `docs/superpowers/plans/2026-07-28-controller-state-recovery-integrity.md` | PRIVATE-ARCHIVE | Internal fail-closed controller-state recovery implementation plan; sanitized test identifiers only; retained in the repository but excluded from public publication by default. |
+| `docs/superpowers/plans/2026-07-28-incident-ingestion-surface.md` | PRIVATE-ARCHIVE | Internal planning or operational documentation; retained in the repository but excluded from public publication by default. |
 | `docs/superpowers/plans/2026-07-28-incident-store-core.md` | PRIVATE-ARCHIVE | Internal incident-store implementation plan (Plan 1 of the incident control plane series); sanitized fixture identifiers only; retained in the repository but excluded from public publication by default. |
 | `docs/superpowers/plans/2026-07-28-primary-probe-cancellation.md` | PRIVATE-ARCHIVE | Internal primary-probe cancellation implementation plan; retained in the repository but excluded from public publication by default. |
 | `docs/superpowers/plans/2026-07-28-runtime-health-signal-dispositions.md` | PRIVATE-ARCHIVE | Internal runtime-health signal-contract implementation plan; retained in the repository but excluded from public publication by default. |
+| `docs/superpowers/plans/2026-07-29-launchd-restart-policy-2682.md` | PRIVATE-ARCHIVE | Internal planning or operational documentation; retained in the repository but excluded from public publication by default. |
+| `docs/superpowers/plans/2026-07-29-maybe-sent-ambiguity-episode.md` | PRIVATE-ARCHIVE | Internal planning or operational documentation; retained in the repository but excluded from public publication by default. |
+| `docs/superpowers/plans/2026-07-29-portable-startup-notification-protocol.md` | PRIVATE-ARCHIVE | Internal planning or operational documentation; retained in the repository but excluded from public publication by default. |
 | `docs/superpowers/reviews/2026-04-07-anti-echo-review-handoff.md` | PRIVATE-ARCHIVE | Internal planning or operational documentation; retained in the repository but excluded from public publication by default. |
 | `docs/superpowers/reviews/2026-05-31-bot-errors-tool-call-audit.md` | PRIVATE-ARCHIVE | Internal planning or operational documentation; retained in the repository but excluded from public publication by default. |
 | `docs/superpowers/reviews/2026-07-09-wall-to-wall-audit-pr-briefs.md` | PRIVATE-ARCHIVE | Internal copy-ready PR briefs from the audit; retained in the repository but excluded from public publication by default. |
@@ -156,8 +160,12 @@ rather than a hand-count. `docs/work-index.{json,md}` has the same property via
 | `docs/superpowers/specs/2026-07-28-chat-queue-admission-design.md` | PRIVATE-ARCHIVE | Internal ChatRuntime admission and durability design; retained in the repository but excluded from public publication by default. |
 | `docs/superpowers/specs/2026-07-28-controller-state-recovery-integrity-design.md` | PRIVATE-ARCHIVE | Internal controller-state integrity and fail-closed recovery design; retained in the repository but excluded from public publication by default. |
 | `docs/superpowers/specs/2026-07-28-incident-control-plane-design.md` | PRIVATE-ARCHIVE | Internal incident control plane architecture design (locked sections 1-6 plus assembled migration section); retained in the repository but excluded from public publication by default. |
+| `docs/superpowers/specs/2026-07-28-incident-ingestion-surface-design.md` | PRIVATE-ARCHIVE | Internal planning or operational documentation; retained in the repository but excluded from public publication by default. |
 | `docs/superpowers/specs/2026-07-28-primary-probe-cancellation-design.md` | PRIVATE-ARCHIVE | Internal primary-model probe cancellation design; retained in the repository but excluded from public publication by default. |
 | `docs/superpowers/specs/2026-07-28-runtime-health-signal-dispositions-design.md` | PRIVATE-ARCHIVE | Internal runtime-health signal-disposition design; retained in the repository but excluded from public publication by default. |
+| `docs/superpowers/specs/2026-07-29-launchd-restart-policy-2682-design.md` | PRIVATE-ARCHIVE | Internal planning or operational documentation; retained in the repository but excluded from public publication by default. |
+| `docs/superpowers/specs/2026-07-29-maybe-sent-ambiguity-episode-design.md` | PRIVATE-ARCHIVE | Internal planning or operational documentation; retained in the repository but excluded from public publication by default. |
+| `docs/superpowers/specs/2026-07-29-portable-startup-notification-protocol-design.md` | PRIVATE-ARCHIVE | Internal planning or operational documentation; retained in the repository but excluded from public publication by default. |
 | `docs/superpowers/specs/kill-session-transactional-cancellation/design.md` | PRIVATE-ARCHIVE | Internal targeted-cancellation protocol design; retained in the repository but excluded from public publication by default. |
 | `docs/superpowers/specs/kill-session-transactional-cancellation/requirements.md` | PRIVATE-ARCHIVE | Internal targeted-cancellation protocol requirements; retained in the repository but excluded from public publication by default. |
 | `docs/superpowers/specs/kill-session-transactional-cancellation/tasks.md` | PRIVATE-ARCHIVE | Internal targeted-cancellation implementation plan; retained in the repository but excluded from public publication by default. |

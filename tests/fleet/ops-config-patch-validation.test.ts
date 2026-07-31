@@ -116,7 +116,7 @@ describe('handleConfigUpdate PATCH healthPort validation (#244)', () => {
       res, makeDeps(fakeInstance(cfg)), { name: 'test-line' },
     );
     expect(res._status).toBe(400);
-    expect(JSON.parse(res._body).error).toMatch(/healthPort must be between 1024 and 65535/);
+    expect(JSON.parse(res._body).message).toMatch(/healthPort must be between 1024 and 65535/);
   });
 
   it('rejects healthPort above 65535 with 400', async () => {
@@ -127,7 +127,7 @@ describe('handleConfigUpdate PATCH healthPort validation (#244)', () => {
       res, makeDeps(fakeInstance(cfg)), { name: 'test-line' },
     );
     expect(res._status).toBe(400);
-    expect(JSON.parse(res._body).error).toMatch(/healthPort must be between 1024 and 65535/);
+    expect(JSON.parse(res._body).message).toMatch(/healthPort must be between 1024 and 65535/);
   });
 
   it('rejects healthPort that is not a number with 400', async () => {
@@ -138,7 +138,7 @@ describe('handleConfigUpdate PATCH healthPort validation (#244)', () => {
       res, makeDeps(fakeInstance(cfg)), { name: 'test-line' },
     );
     expect(res._status).toBe(400);
-    expect(JSON.parse(res._body).error).toMatch(/healthPort must be (an integer|between)/);
+    expect(JSON.parse(res._body).message).toMatch(/healthPort must be (an integer|between)/);
   });
 
   it('rejects healthPort already used by a sibling instance with 409', async () => {
@@ -150,7 +150,7 @@ describe('handleConfigUpdate PATCH healthPort validation (#244)', () => {
       res, makeDeps(fakeInstance(cfg)), { name: 'test-line' },
     );
     expect(res._status).toBe(409);
-    expect(JSON.parse(res._body).error).toMatch(/healthPort 9100 is already in use/);
+    expect(JSON.parse(res._body).message).toMatch(/healthPort 9100 is already in use/);
   });
 
   it('accepts a healthPort change to a valid, unused port', async () => {
@@ -173,7 +173,7 @@ describe('handleConfigUpdate PATCH healthPort validation (#244)', () => {
       res, makeDeps(fakeInstance(cfg)), { name: 'test-line' },
     );
     expect(res._status).toBe(409);
-    expect(JSON.parse(res._body).error).toMatch(/healthPort 9090 is already in use/);
+    expect(JSON.parse(res._body).message).toMatch(/healthPort 9090 is already in use/);
   });
 
   it('fails closed and preserves config when healthPort sibling inventory is unreadable', async () => {
@@ -204,7 +204,7 @@ describe('handleConfigUpdate PATCH healthPort validation (#244)', () => {
       res, makeDeps(fakeInstance(cfg)), { name: 'test-line' },
     );
     expect(res._status).toBe(400);
-    expect(JSON.parse(res._body).error).toMatch(/type is immutable/);
+    expect(JSON.parse(res._body).message).toMatch(/type is immutable/);
     expect(fs.readFileSync(cfg, 'utf-8')).toBe(before);
   });
 });
@@ -253,7 +253,7 @@ describe('handleConfigUpdate PATCH agentOptions validation (#249)', () => {
       res, makeDeps(inst), { name: 'test-agent' },
     );
     expect(res._status).toBe(400);
-    expect(JSON.parse(res._body).error).toMatch(/sessionScope must be (single|one of)/);
+    expect(JSON.parse(res._body).message).toMatch(/sessionScope must be (single|one of)/);
   });
 
   it('rejects sandboxPerChat true when merged sessionScope is not per_chat', async () => {
@@ -267,7 +267,7 @@ describe('handleConfigUpdate PATCH agentOptions validation (#249)', () => {
       res, makeDeps(inst), { name: 'test-agent' },
     );
     expect(res._status).toBe(400);
-    expect(JSON.parse(res._body).error).toMatch(/sandboxPerChat requires sessionScope "per_chat"/);
+    expect(JSON.parse(res._body).message).toMatch(/sandboxPerChat requires sessionScope "per_chat"/);
   });
 
   it('rejects empty provider string with 400 (registry enum, #447)', async () => {
@@ -281,8 +281,8 @@ describe('handleConfigUpdate PATCH agentOptions validation (#249)', () => {
     expect(res._status).toBe(400);
     // #447: provider is now validated against the shared PROVIDER_IDS registry,
     // so the error enumerates the valid set. Empty string is still rejected.
-    expect(JSON.parse(res._body).error).toMatch(/provider must be one of:/);
-    expect(JSON.parse(res._body).error).toMatch(/claude-cli/);
+    expect(JSON.parse(res._body).message).toMatch(/provider must be one of:/);
+    expect(JSON.parse(res._body).message).toMatch(/claude-cli/);
   });
 
   it('rejects providerConfig that is an array with 400', async () => {
@@ -294,7 +294,7 @@ describe('handleConfigUpdate PATCH agentOptions validation (#249)', () => {
       res, makeDeps(inst), { name: 'test-agent' },
     );
     expect(res._status).toBe(400);
-    expect(JSON.parse(res._body).error).toMatch(/providerConfig must be an object/);
+    expect(JSON.parse(res._body).message).toMatch(/providerConfig must be an object/);
   });
 
   it('rejects non-string instructionsPath with 400', async () => {
@@ -306,7 +306,7 @@ describe('handleConfigUpdate PATCH agentOptions validation (#249)', () => {
       res, makeDeps(inst), { name: 'test-agent' },
     );
     expect(res._status).toBe(400);
-    expect(JSON.parse(res._body).error).toMatch(/instructionsPath must be a string/);
+    expect(JSON.parse(res._body).message).toMatch(/instructionsPath must be a string/);
   });
 
   it('rejects systemPrompt on passive instance with 400', async () => {
@@ -327,7 +327,7 @@ describe('handleConfigUpdate PATCH agentOptions validation (#249)', () => {
       res, makeDeps(inst), { name: 'test-passive' },
     );
     expect(res._status).toBe(400);
-    expect(JSON.parse(res._body).error).toMatch(/Passive instances must not have a systemPrompt/);
+    expect(JSON.parse(res._body).message).toMatch(/Passive instances must not have a systemPrompt/);
   });
 });
 
@@ -380,7 +380,7 @@ describe('handleConfigUpdate PATCH Pinecone project guard validation', () => {
     );
 
     expect(res._status).toBe(400);
-    expect(JSON.parse(res._body).error).toContain(
+    expect(JSON.parse(res._body).message).toContain(
       'non-q instances with Pinecone config must set memory.pinecone.projectId or memory.pinecone.expectedHostSuffix',
     );
     expect(fs.readFileSync(cfg, 'utf-8')).toBe(before);

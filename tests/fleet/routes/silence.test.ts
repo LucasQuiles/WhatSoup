@@ -292,7 +292,10 @@ describe('fleet silence routes', () => {
     await handleAddSilence(streamErrorReq('socket reset while reading'), res);
 
     expect(res._status).toBe(400);
-    expect(JSON.parse(res._body)).toEqual({ error: 'socket reset while reading' });
+    const streamBody = JSON.parse(res._body);
+    expect(streamBody.schema).toBe('fleet-error-v1');
+    expect(streamBody.code).toBe('validation_failed');
+    expect(streamBody.operation).toBe('silence');
     expect(() => readFileSync(silencesFile(), 'utf8')).toThrow();
   });
 
@@ -303,7 +306,10 @@ describe('fleet silence routes', () => {
     await handleAddSilence(mockReq({ method: 'POST', url: '/api/fleet/silence', body: 'x'.repeat(64 * 1024 + 1) }), res);
 
     expect(res._status).toBe(400);
-    expect(JSON.parse(res._body)).toEqual({ error: 'request body too large' });
+    const tooLargeBody = JSON.parse(res._body);
+    expect(tooLargeBody.schema).toBe('fleet-error-v1');
+    expect(tooLargeBody.code).toBe('validation_failed');
+    expect(tooLargeBody.operation).toBe('silence');
     expect(() => readFileSync(silencesFile(), 'utf8')).toThrow();
   });
 

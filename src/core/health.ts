@@ -13,6 +13,7 @@ import {
 import { assertSafeHealthBind } from './health-bind-guard.ts';
 import { getMessageCount } from './messages.ts';
 import { getPendingCount, upsertAccess } from './access-list.ts';
+import { isFullyConnected } from '../transport/runtime-connection.ts';
 import type { RuntimeConnection } from '../transport/runtime-connection.ts';
 import { decideDisconnectAction } from '../transport/auth-disconnect-policy.ts';
 import { DEFAULT_FRESH_INVALID_GRACE_MS } from '../lib/auth-bond-policy.ts';
@@ -39,18 +40,25 @@ import { normalizeErrorClass } from './heal-protocol.ts';
 import { getControlPeerWiring } from './heal.ts';
 import { markConversationRead } from './mark-read.ts';
 import type { Runtime } from '../runtimes/types.ts';
+import { isProviderId } from '../lib/provider-ids.ts';
 import type { ConnectionRecentDisconnects, ConnectionStateSnapshot } from '../transport/connection.ts';
 import { readBody } from '../lib/http.ts';
 import { readWhatsoupGitBranch, readWhatsoupGitSha } from '../lib/git-env.ts';
 import { LoopLagSampler, LOOP_LAG_STARVATION_THRESHOLD_MS } from '../lib/loop-lag-sampler.ts';
 import type { ConsolidationHealth } from './memory-consolidation-contract.ts';
 import type { DatabaseRetentionHealth } from './database-retention.ts';
+import type { StartupNotificationHealth } from './startup-notification-controller.ts';
 import {
   readOutboundSendHealth,
   readToolDurabilityHealth,
   unreadableOutboundSendHealth,
   unreadableToolDurabilityHealth,
 } from './durability-health.ts';
+import type {
+  MemoryEvidenceCoverage,
+  MemoryOperationFailureCode,
+  MemoryReadinessState,
+} from '../lib/memory-operation-telemetry.ts';
 
 const log = createChildLogger('health');
 const EMPTY_SHA256 = 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855';
@@ -66,6 +74,24 @@ const EMPTY_SHA256 = 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b78
 function verifyBearer(header: string | undefined, expectedToken: string | undefined): boolean {
   if (!expectedToken || !header) return false;
   return safeStringEqual(header, `Bearer ${expectedToken}`);
+}
+
+export interface MemoryReadinessHealth {
+  state: MemoryReadinessState;
+  observedAt: string;
+  failureCode: MemoryOperationFailureCode;
+  retryable: boolean;
+  evidenceCoverage: MemoryEvidenceCoverage;
+}
+
+export interface MemoryContextHealth {
+  status: 'complete' | 'partial' | 'unavailable';
+  scopes: Array<{
+    scope: 'chat' | 'sender' | 'self' | 'entity' | 'context';
+    status: 'ok' | 'breaker_open' | 'project_guard_failed' | 'failed';
+    failureCode: MemoryOperationFailureCode | null;
+    retryable: boolean;
+  }>;
 }
 
 export interface HealthDeps {
@@ -107,9 +133,24 @@ export interface HealthDeps {
   loopLagSampler?: LoopLagSampler;
   /** Monotonic clock for starvation-warning suppression; injectable for tests. */
   loopLagWarningNow?: () => number;
+  getMemoryReadinessHealth?: () => MemoryReadinessHealth;
+  getMemoryContextHealth?: () => MemoryContextHealth | null;
   getMemoryConsolidationHealth?: () => ConsolidationHealth;
   getDatabaseRetentionHealth?: () => DatabaseRetentionHealth;
+  /** Controller-owned, content-free startup notification projection. */
+  getStartupNotificationHealth?: () => StartupNotificationHealth;
 }
+
+const NOT_APPLICABLE_STARTUP_NOTIFICATION_HEALTH: StartupNotificationHealth = Object.freeze({
+  state: 'not_applicable',
+  policy: 'none',
+  stabilitySeconds: null,
+  bootCountSinceNotification: null,
+  lastBootAt: null,
+  lastNotifiedAt: null,
+  nextEligibleAt: null,
+  lastSendAt: null,
+});
 
 /**
  * Bounds health-probe error-log storms (#1778 Defect B). A permanent probe
@@ -196,6 +237,8 @@ interface HealthTurnCapability {
   model_usable_checked_at: number | null;
   model_usability_status: string | null;
   last_successful_turn_at: number | null;
+  last_successful_turn_provider: string | null;
+  last_successful_turn_session_current: boolean | null;
   last_turn_error_class: string | null;
   last_turn_error_at: number | null;
 }
@@ -235,6 +278,8 @@ export type HealthDegradationCause =
   | 'transport_disconnected'
   | 'enrichment_stale'
   | 'enrichment_runtime_degraded'
+  | 'memory_readiness_degraded'
+  | 'memory_context_degraded'
   | 'memory_consolidation_degraded'
   | 'connection_churn'
   | 'outbound_flood'
@@ -270,6 +315,8 @@ const HEALTH_DEGRADATION_CAUSE_PRESENCE: Readonly<Record<HealthDegradationCause,
   transport_disconnected: true,
   enrichment_stale: true,
   enrichment_runtime_degraded: true,
+  memory_readiness_degraded: true,
+  memory_context_degraded: true,
   memory_consolidation_degraded: true,
   connection_churn: true,
   outbound_flood: true,
@@ -309,6 +356,10 @@ function normalizeEnumStringOrNull(value: unknown, allowed: ReadonlySet<string>)
   return typeof value === 'string' && allowed.has(value) ? value : null;
 }
 
+function normalizeProviderNameOrNull(value: unknown): string | null {
+  return isProviderId(value) ? value : null;
+}
+
 function normalizeAgentTurnCapability(details: Record<string, unknown> | null): HealthTurnCapability | null {
   if (!details) return null;
   const raw = details.turnCapability;
@@ -319,6 +370,8 @@ function normalizeAgentTurnCapability(details: Record<string, unknown> | null): 
     model_usable_checked_at: normalizeNumberOrNull(raw.modelUsableCheckedAt),
     model_usability_status: normalizeEnumStringOrNull(raw.modelUsabilityStatus, HEALTH_MODEL_USABILITY_STATUSES),
     last_successful_turn_at: normalizeNumberOrNull(raw.lastSuccessfulTurnAt),
+    last_successful_turn_provider: normalizeProviderNameOrNull(raw.lastSuccessfulTurnProvider),
+    last_successful_turn_session_current: normalizeBooleanOrNull(raw.lastSuccessfulTurnSessionCurrent),
     last_turn_error_class: normalizeEnumStringOrNull(raw.lastTurnErrorClass, HEALTH_TURN_ERROR_CLASSES),
     last_turn_error_at: normalizeNumberOrNull(raw.lastTurnErrorAt),
   };
@@ -358,6 +411,8 @@ function agentRuntimeDetailsForHealth(
           modelUsableCheckedAt: turnCapability.model_usable_checked_at,
           modelUsabilityStatus: turnCapability.model_usability_status,
           lastSuccessfulTurnAt: turnCapability.last_successful_turn_at,
+          lastSuccessfulTurnProvider: turnCapability.last_successful_turn_provider,
+          lastSuccessfulTurnSessionCurrent: turnCapability.last_successful_turn_session_current,
           lastTurnErrorClass: turnCapability.last_turn_error_class,
           lastTurnErrorAt: turnCapability.last_turn_error_at,
         }
@@ -453,110 +508,6 @@ function emptyRecentDisconnects(): ConnectionRecentDisconnects {
   };
 }
 
-function getConnectionState(connectionManager: HealthDeps['connectionManager']): ConnectionStateSnapshot {
-  if (typeof (connectionManager as { getConnectionState?: unknown }).getConnectionState === 'function') {
-    return (connectionManager as { getConnectionState: () => ConnectionStateSnapshot }).getConnectionState();
-  }
-
-  const connected = connectionManager.botJid !== null;
-  const cfg = config as typeof config & {
-    authDir?: string;
-    stateRoot?: string;
-    dataRoot?: string;
-    lockPath?: string;
-    agentProvider?: string;
-  };
-  return {
-    state: connected ? 'connected' : 'disconnected',
-    connected,
-    reconnectAttempts: 0,
-    reconnectPhase: null,
-    stateChangedAt: new Date().toISOString(),
-    firstFailureAt: null,
-    lastPingAt: null,
-    lastPongAt: null,
-    lastDisconnectReason: null,
-    lastStatusCode: null,
-    recentDisconnects: emptyRecentDisconnects(),
-    credentialLifecycle: {
-      version: 1,
-      redaction: {
-        version: 1,
-        policy: 'credential material, tokens, pairing codes, full JIDs, and full phone numbers are blocked; identity fields use short hashes only',
-      },
-      environment: {
-        instance: config.botName,
-        host: process.env['HOSTNAME'] ?? 'unknown',
-        pid: process.pid,
-        nodeVersion: process.version,
-        platform: process.platform,
-        arch: process.arch,
-        release: 'unknown',
-        processUptimeSeconds: Math.floor(process.uptime()),
-        osUptimeSeconds: 0,
-        loadavg: [],
-        memory: {
-          freeBytes: 0,
-          totalBytes: 0,
-        },
-        authDir: cfg.authDir ?? 'unknown',
-        stateRoot: cfg.stateRoot ?? null,
-        dataRoot: cfg.dataRoot ?? null,
-        lockPath: cfg.lockPath ?? 'unknown',
-        healthPort: config.healthPort,
-        provider: cfg.agentProvider ?? 'unknown',
-      },
-      currentAuthBond: {
-        status: 'missing',
-        issues: ['connection_manager_does_not_expose_auth_bond'],
-        authDir: { path: cfg.authDir ?? 'unknown', exists: false, mode: null, size: null, mtime: null },
-        creds: {
-          path: cfg.authDir ? `${cfg.authDir}/creds.json` : 'unknown',
-          exists: false,
-          mode: null,
-          size: null,
-          mtime: null,
-          hash: null,
-          identityHash: null,
-        },
-        treeHash: null,
-        fileCount: null,
-        totalBytes: null,
-        backup: {
-          root: cfg.stateRoot ?? 'unknown',
-          latest: null,
-          latestAt: null,
-          latestReason: null,
-          latestTreeHash: null,
-          lastCaptureAt: null,
-          lastCaptureReason: null,
-          lastCaptureError: null,
-          lastCaptureDeferredAt: null,
-          lastCaptureDeferredReason: null,
-          lastCaptureDeferredAgeMs: null,
-          lastRestoreAt: null,
-          lastRestoreSource: null,
-          lastRestoreError: null,
-        },
-      },
-      latestBaileysVersion: null,
-      connectStartedAt: null,
-      lastOpenAt: null,
-      lastCloseAt: null,
-      lastQrAt: null,
-      lastCredsUpdateAt: null,
-      lastCredsUpdateFailedAt: null,
-      lastAuthSnapshotAt: null,
-      lastAuthSnapshotFailedAt: null,
-      credsUpdateCount: 0,
-      authSnapshotCaptureCount: 0,
-      authSnapshotFailureCount: 0,
-      lastDisconnectDiagnostic: null,
-      recentEvents: [],
-    },
-  };
-}
-
 function formatAuthBond(connectionState: ConnectionStateSnapshot): Record<string, unknown> | null {
   const authBond = connectionState.authBond;
   if (!authBond) return null;
@@ -603,6 +554,8 @@ function formatAuthBond(connectionState: ConnectionStateSnapshot): Record<string
 
 function isFreshInvalidCredentialWriteInFlight(connectionState: ConnectionStateSnapshot): boolean {
   const authBond = connectionState.authBond;
+  // This is a credential-write race diagnostic, not a readiness decision: it
+  // intentionally tests the raw transport bit while preserving lifecycle data.
   if (!authBond || !connectionState.connected) return false;
   if (authBond.status === 'present') return false;
   if (!authBond.creds.exists || !authBond.creds.mtime) return false;
@@ -618,7 +571,7 @@ function isFreshInvalidCredentialWriteInFlight(connectionState: ConnectionStateS
 function classifyAuthFailure(connectionState: ConnectionStateSnapshot): AuthFailureClass {
   const reason = connectionState.lastDisconnectReason ?? '';
   if (
-    !connectionState.connected
+    !isFullyConnected(connectionState)
     && (
       connectionState.lastStatusCode === 401
       || reason === 'loggedOut'
@@ -632,7 +585,7 @@ function classifyAuthFailure(connectionState: ConnectionStateSnapshot): AuthFail
   const lastQrAt = lifecycle?.lastQrAt ? Date.parse(lifecycle.lastQrAt) : NaN;
   const lastOpenAt = lifecycle?.lastOpenAt ? Date.parse(lifecycle.lastOpenAt) : NaN;
   const qrRequiresPairing =
-    !connectionState.connected
+    !isFullyConnected(connectionState)
     && Number.isFinite(lastQrAt)
     && (!Number.isFinite(lastOpenAt) || lastQrAt >= lastOpenAt);
   if (qrRequiresPairing) {
@@ -661,7 +614,7 @@ function classifyAuthFailure(connectionState: ConnectionStateSnapshot): AuthFail
 }
 
 function classifyDisconnect(connectionState: ConnectionStateSnapshot): DisconnectClass {
-  if (connectionState.connected && connectionState.state === 'connected') return 'none';
+  if (isFullyConnected(connectionState)) return 'none';
   const statusCode = connectionState.lastStatusCode ?? undefined;
   if (statusCode === undefined) return 'none';
 
@@ -1331,6 +1284,8 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
     }
 
     try {
+      const startupNotification = deps.getStartupNotificationHealth?.()
+        ?? NOT_APPLICABLE_STARTUP_NOTIFICATION_HEALTH;
       // #2515 — Public/private health split.
       //
       // GET /health is intentionally reachable without a bearer token (external
@@ -1343,8 +1298,8 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
       // no auth-bond formatting, and no privileged fields touch the public
       // bytes. Authenticated callers proceed to the full diagnostic below.
       if (!hasHealthAuth(req)) {
-        const cs = getConnectionState(deps.connectionManager);
-        const publicConnected = cs.connected && cs.state === 'connected';
+        const cs = deps.connectionManager.getConnectionState();
+        const publicConnected = isFullyConnected(cs);
         const publicRecovering =
           cs.state === 'connecting'
           || cs.state === 'reconnecting'
@@ -1358,6 +1313,7 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
           schema_version: HEALTH_PUBLIC_SCHEMA_VERSION,
           status: publicStatus,
           generated_at: new Date().toISOString(),
+          startupNotification,
         });
         // 'degraded' returns 200: a recovering transport is a warning, not a
         // hard outage. Only a fully disconnected/non-recovering state warrants
@@ -1392,6 +1348,14 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
       }
 
       const enrichmentStats = deps.getEnrichmentStats();
+      const memoryReadiness = deps.getMemoryReadinessHealth?.() ?? null;
+      const memoryReadinessIsDegraded =
+        memoryReadiness !== null
+        && memoryReadiness.state !== 'ready'
+        && memoryReadiness.state !== 'disabled';
+      const memoryContext = deps.getMemoryContextHealth?.() ?? null;
+      const memoryContextIsDegraded =
+        memoryContext?.status === 'partial' || memoryContext?.status === 'unavailable';
       const memoryConsolidation = deps.getMemoryConsolidationHealth?.() ?? null;
       const memoryConsolidationIsDegraded =
         memoryConsolidation !== null
@@ -1404,12 +1368,12 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
           'abandoned',
           'unreadable',
         ].includes(memoryConsolidation.state);
-      const connectionState = getConnectionState(deps.connectionManager);
+      const connectionState = deps.connectionManager.getConnectionState();
       const authBond = formatAuthBond(connectionState);
       const authFailureClass = classifyAuthFailure(connectionState);
       const disconnectClass = classifyDisconnect(connectionState);
 
-      const isConnected = connectionState.connected && connectionState.state === 'connected';
+      const isConnected = isFullyConnected(connectionState);
       const exposeDisconnectMetadata = !isConnected;
       const recentDisconnects = connectionState.recentDisconnects ?? emptyRecentDisconnects();
       const connectionChurnIsDegraded =
@@ -1496,8 +1460,9 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
       const authFailureIsDegraded = authFailureClass !== 'none';
       // Durability debt: an outbound delivery stuck in maybe_sent past the stale
       // window is a long-lived continuity risk that /health must surface rather
-      // than read green (#1865). submitted_at is SQLite datetime('now') (UTC,
-      // space-separated, no zone) — normalize to ISO-UTC before parsing.
+      // than read green (#1865). The durability query returns canonical SQLite
+      // UTC datetimes for the active ambiguity episode or a fail-closed stale
+      // sentinel, so normalize that bounded value before parsing.
       const durabilityStats = deps.durability?.getHealthStats() ?? null;
       const oldestMaybeSentMs =
         durabilityStats?.oldestMaybeSentAt != null && durabilityStats.oldestMaybeSentAt !== ''
@@ -1538,6 +1503,12 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
         if (authFailureIsDegraded) statusReasons.push(`auth_failure.${authFailureClass}`);
         if (enrichmentIsStale) statusReasons.push('enrichment_stale');
         if (enrichmentStats.runtimeDegraded) statusReasons.push('enrichment_runtime_degraded');
+        if (memoryReadinessIsDegraded && memoryReadiness) {
+          statusReasons.push(`memory_readiness_${memoryReadiness.state}`);
+        }
+        if (memoryContextIsDegraded && memoryContext) {
+          statusReasons.push(`memory_context_${memoryContext.status}`);
+        }
         if (memoryConsolidationIsDegraded) {
           statusReasons.push(`memory_consolidation_${memoryConsolidation.state}`);
         }
@@ -1763,6 +1734,8 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
       if (!isConnected) addDegradationCause('transport_disconnected');
       if (enrichmentIsStale) addDegradationCause('enrichment_stale');
       if (enrichmentStats.runtimeDegraded) addDegradationCause('enrichment_runtime_degraded');
+      if (memoryReadinessIsDegraded) addDegradationCause('memory_readiness_degraded');
+      if (memoryContextIsDegraded) addDegradationCause('memory_context_degraded');
       if (memoryConsolidationIsDegraded) addDegradationCause('memory_consolidation_degraded');
       if (connectionChurnIsDegraded) addDegradationCause('connection_churn');
       if (outboundFloodIsDegraded) addDegradationCause('outbound_flood');
@@ -1825,6 +1798,7 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
 
       const body = JSON.stringify({
         status,
+        startupNotification,
         degradation_causes: degradationCauses,
         status_reasons: [...new Set(statusReasons)],
         generated_at: new Date().toISOString(),
@@ -1932,6 +1906,26 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
           last_run: enrichmentStats.lastRun,
         },
         memory: {
+          readiness: memoryReadiness
+            ? {
+                state: memoryReadiness.state,
+                observed_at: memoryReadiness.observedAt,
+                failure_code: memoryReadiness.failureCode,
+                retryable: memoryReadiness.retryable,
+                evidence_coverage: memoryReadiness.evidenceCoverage,
+              }
+            : null,
+          context: memoryContext
+            ? {
+                status: memoryContext.status,
+                scopes: memoryContext.scopes.map((scope) => ({
+                  scope: scope.scope,
+                  status: scope.status,
+                  failure_code: scope.failureCode,
+                  retryable: scope.retryable,
+                })),
+              }
+            : null,
           consolidation: memoryConsolidation,
         },
         models: {

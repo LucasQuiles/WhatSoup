@@ -100,6 +100,10 @@ const TAG_PATH_UNCOVERED_BLOCK_RULES: readonly string[] = [
   'hygiene.no-health-whatsapp-key-read',
   'hygiene.no-wa-jid-literal-in-generic-ui',
   'hygiene.no-whatsapp-copy-in-generic-ui',
+  'portability.gnu-bsd-shell-flags',
+  'portability.no-hardcoded-platform-binaries',
+  'portability.platform-paths-guarded',
+  'portability.systemctl-guarded',
   'process.no-destructive-git',
   'test.insecure-tempfile',
 ].sort();

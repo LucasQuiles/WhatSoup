@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { loadContext } from '../../../src/runtimes/chat/context.ts';
+import { loadContext, loadContextDetailed } from '../../../src/runtimes/chat/context.ts';
 import type { SearchResult, MemoryRecord, EntitySearchResult } from '../../../src/runtimes/chat/providers/pinecone.ts';
 
 vi.mock('../../../src/config.ts', () => ({
@@ -70,6 +70,9 @@ function makeMockPinecone(
     searchForChat: vi.fn().mockResolvedValue(chatResults),
     searchForSender: vi.fn().mockResolvedValue(senderResults),
     searchSelfFacts: vi.fn().mockResolvedValue(selfResults),
+    searchForChatDetailed: vi.fn().mockResolvedValue({ results: chatResults, status: 'ok' }),
+    searchForSenderDetailed: vi.fn().mockResolvedValue({ results: senderResults, status: 'ok' }),
+    searchSelfFactsDetailed: vi.fn().mockResolvedValue({ results: selfResults, status: 'ok' }),
     search: vi.fn().mockResolvedValue([]),
     upsert: vi.fn().mockResolvedValue(undefined),
     checkDuplicate: vi.fn().mockResolvedValue({ isDuplicate: false }),
@@ -200,7 +203,7 @@ describe('loadContext', () => {
     expect(idxChat).toBeLessThan(idxSender);
   });
 
-  it('passes chatJid and senderJid to the correct search methods', async () => {
+  it('passes chatJid and senderJid to the correct detailed search methods', async () => {
     const pinecone = makeMockPinecone([], []);
 
     await loadContext(
@@ -210,8 +213,8 @@ describe('loadContext', () => {
       'my query',
     );
 
-    expect(pinecone.searchForChat).toHaveBeenCalledWith('mygroup@g.us', 'my query');
-    expect(pinecone.searchForSender).toHaveBeenCalledWith('myuser@s.whatsapp.net', 'my query');
+    expect(pinecone.searchForChatDetailed).toHaveBeenCalledWith('mygroup@g.us', 'my query');
+    expect(pinecone.searchForSenderDetailed).toHaveBeenCalledWith('myuser@s.whatsapp.net', 'my query');
   });
 
   it('all three searches are called in parallel (all called regardless of the others)', async () => {
@@ -227,9 +230,60 @@ describe('loadContext', () => {
       'query',
     );
 
-    expect(pinecone.searchForChat).toHaveBeenCalledTimes(1);
-    expect(pinecone.searchForSender).toHaveBeenCalledTimes(1);
-    expect(pinecone.searchSelfFacts).toHaveBeenCalledTimes(1);
+    expect(pinecone.searchForChatDetailed).toHaveBeenCalledTimes(1);
+    expect(pinecone.searchForSenderDetailed).toHaveBeenCalledTimes(1);
+    expect(pinecone.searchSelfFactsDetailed).toHaveBeenCalledTimes(1);
+  });
+
+  it('reports a failed scope separately from a successful zero-match context lookup', async () => {
+    const pinecone = makeMockPinecone([], [makeResult('sender-result', 'sender fact')], []);
+    pinecone.searchForChatDetailed.mockResolvedValue({
+      results: [],
+      status: 'failed',
+      failureCode: 'network_error',
+      retryable: true,
+    });
+
+    const result = await loadContextDetailed(
+      pinecone as any,
+      'chat@g.us',
+      'alice@s.whatsapp.net',
+      'test query',
+    );
+
+    expect(result.status).toBe('partial');
+    expect(result.text).toContain('sender fact');
+    expect(result.scopes).toEqual([
+      { scope: 'chat', status: 'failed', failureCode: 'network_error', retryable: true },
+      { scope: 'sender', status: 'ok', failureCode: null, retryable: false },
+      { scope: 'self', status: 'ok', failureCode: null, retryable: false },
+    ]);
+  });
+
+  it('normalizes all thrown scoped lookups into a bounded unavailable outcome', async () => {
+    const pinecone = makeMockPinecone([], [], []);
+    const privateError = new Error('SYNTHETIC_PRIVATE_CONTEXT_FAILURE');
+    pinecone.searchForChatDetailed.mockRejectedValue(privateError);
+    pinecone.searchForSenderDetailed.mockRejectedValue(privateError);
+    pinecone.searchSelfFactsDetailed.mockRejectedValue(privateError);
+
+    const result = await loadContextDetailed(
+      pinecone as any,
+      'chat@g.us',
+      'alice@s.whatsapp.net',
+      'test query',
+    );
+
+    expect(result).toEqual({
+      text: '',
+      status: 'unavailable',
+      scopes: [
+        { scope: 'chat', status: 'failed', failureCode: 'unknown', retryable: true },
+        { scope: 'sender', status: 'failed', failureCode: 'unknown', retryable: true },
+        { scope: 'self', status: 'failed', failureCode: 'unknown', retryable: true },
+      ],
+    });
+    expect(JSON.stringify(result)).not.toContain('SYNTHETIC_PRIVATE_CONTEXT_FAILURE');
   });
 
   it('handles multiple results from each search, all appearing in output', async () => {
@@ -314,7 +368,7 @@ describe('loadContext', () => {
     expect(result).toContain('chat only fact');
   });
 
-  it('handles null senderJid without crashing (passes null to searchForSender)', async () => {
+  it('handles null senderJid without crashing (passes null to detailed sender search)', async () => {
     const pinecone = makeMockPinecone([makeResult('c1', 'chat fact')], []);
 
     // TypeScript would complain, but the runtime must not crash
@@ -325,9 +379,9 @@ describe('loadContext', () => {
       'test query',
     );
 
-    // searchForSender called with null — it returns [] because mock is set up that way
+    // The detailed sender search receives null and returns an empty successful result.
     expect(result).toContain('chat fact');
-    expect(pinecone.searchForSender).toHaveBeenCalledWith(null, 'test query');
+    expect(pinecone.searchForSenderDetailed).toHaveBeenCalledWith(null, 'test query');
   });
 
   it('preserves special characters and punctuation in fact text without escaping', async () => {
@@ -485,6 +539,10 @@ function makeMockPineconeWithEntity(entityResults: EntitySearchResult[] = []) {
     searchForSender: vi.fn().mockResolvedValue([]),
     searchSelfFacts: vi.fn().mockResolvedValue([]),
     searchEntities: vi.fn().mockResolvedValue(entityResults),
+    searchForChatDetailed: vi.fn().mockResolvedValue({ results: [], status: 'ok' }),
+    searchForSenderDetailed: vi.fn().mockResolvedValue({ results: [], status: 'ok' }),
+    searchSelfFactsDetailed: vi.fn().mockResolvedValue({ results: [], status: 'ok' }),
+    searchEntitiesDetailed: vi.fn().mockResolvedValue({ results: entityResults, status: 'ok' }),
     search: vi.fn().mockResolvedValue([]),
     upsert: vi.fn().mockResolvedValue(undefined),
     checkDuplicate: vi.fn().mockResolvedValue({ isDuplicate: false }),
@@ -503,23 +561,23 @@ describe('loadContext — entity mode', () => {
     mutableConfig.pineconeSearchMode = 'memory';
   });
 
-  it('calls searchEntities (not searchForChat/searchForSender/searchSelfFacts) in entity mode', async () => {
+  it('calls detailed entity search without touching memory-mode searches', async () => {
     const pinecone = makeMockPineconeWithEntity([]);
 
     await loadContext(pinecone as any, 'chat@g.us', 'alice@s.whatsapp.net', 'find invoice');
 
-    expect(pinecone.searchEntities).toHaveBeenCalledOnce();
-    expect(pinecone.searchForChat).not.toHaveBeenCalled();
-    expect(pinecone.searchForSender).not.toHaveBeenCalled();
-    expect(pinecone.searchSelfFacts).not.toHaveBeenCalled();
+    expect(pinecone.searchEntitiesDetailed).toHaveBeenCalledOnce();
+    expect(pinecone.searchForChatDetailed).not.toHaveBeenCalled();
+    expect(pinecone.searchForSenderDetailed).not.toHaveBeenCalled();
+    expect(pinecone.searchSelfFactsDetailed).not.toHaveBeenCalled();
   });
 
-  it('passes the message text to searchEntities', async () => {
+  it('passes the message text to detailed entity search', async () => {
     const pinecone = makeMockPineconeWithEntity([]);
 
     await loadContext(pinecone as any, 'chat@g.us', 'alice@s.whatsapp.net', 'find invoice 17088');
 
-    expect(pinecone.searchEntities).toHaveBeenCalledWith('find invoice 17088');
+    expect(pinecone.searchEntitiesDetailed).toHaveBeenCalledWith('find invoice 17088');
   });
 
   it('returns empty string when searchEntities returns no results', async () => {
@@ -601,7 +659,7 @@ describe('loadContext — entity mode', () => {
 
     // Blank message text short-circuits before hitting the entity branch
     expect(result).toBe('');
-    expect(pinecone.searchEntities).not.toHaveBeenCalled();
+    expect(pinecone.searchEntitiesDetailed).not.toHaveBeenCalled();
   });
 });
 
@@ -647,7 +705,7 @@ describe('loadContext — content-free telemetry (memory mode)', () => {
     expect(serialized).not.toContain('SYNTHETIC_PRIVATE_SENDER_RESULT_');
   });
 
-  it('threads a supplied traceId into the completion log and down to each search call', async () => {
+  it('threads a supplied traceId into the completion log and each detailed search call', async () => {
     const pinecone = makeMockPinecone([makeResult('r1', 'chat fact')], []);
 
     await loadContext(pinecone as any, 'chat@g.us', 'alice@s.whatsapp.net', 'query', 'abc12345');
@@ -656,9 +714,9 @@ describe('loadContext — content-free telemetry (memory mode)', () => {
       expect.objectContaining({ trace_id: 'abc12345' }),
       'context retrieval complete',
     );
-    expect(pinecone.searchForChat).toHaveBeenCalledWith('chat@g.us', 'query', 'abc12345');
-    expect(pinecone.searchForSender).toHaveBeenCalledWith('alice@s.whatsapp.net', 'query', 'abc12345');
-    expect(pinecone.searchSelfFacts).toHaveBeenCalledWith('query', 'abc12345');
+    expect(pinecone.searchForChatDetailed).toHaveBeenCalledWith('chat@g.us', 'query', 'abc12345');
+    expect(pinecone.searchForSenderDetailed).toHaveBeenCalledWith('alice@s.whatsapp.net', 'query', 'abc12345');
+    expect(pinecone.searchSelfFactsDetailed).toHaveBeenCalledWith('query', 'abc12345');
   });
 
   it('omits traceId from the completion log and search calls when not supplied', async () => {
@@ -668,8 +726,7 @@ describe('loadContext — content-free telemetry (memory mode)', () => {
 
     const [fields] = mockContextLogger.info.mock.calls[0];
     expect(fields).not.toHaveProperty('trace_id');
-    // Existing (pre-QR-006) callers keep the exact 2-arg call shape.
-    expect(pinecone.searchForChat).toHaveBeenCalledWith('chat@g.us', 'query');
+    expect(pinecone.searchForChatDetailed).toHaveBeenCalledWith('chat@g.us', 'query');
   });
 
   it('omits caller-controlled non-opaque trace text from telemetry', async () => {
@@ -732,7 +789,7 @@ describe('loadContext — content-free telemetry (entity mode)', () => {
     expect(serialized).not.toContain('SYNTHETIC_PRIVATE_ENTITY_RESULT_');
   });
 
-  it('threads a supplied traceId into the entity completion log and to searchEntities', async () => {
+  it('threads a supplied traceId into the entity completion log and detailed entity search', async () => {
     const pinecone = makeMockPineconeWithEntity([]);
 
     await loadContext(pinecone as any, 'chat@g.us', 'alice@s.whatsapp.net', 'find invoice', 'deadbeef');
@@ -741,16 +798,16 @@ describe('loadContext — content-free telemetry (entity mode)', () => {
       expect.objectContaining({ trace_id: 'deadbeef' }),
       'entity context retrieval complete',
     );
-    expect(pinecone.searchEntities).toHaveBeenCalledWith('find invoice', 'deadbeef');
+    expect(pinecone.searchEntitiesDetailed).toHaveBeenCalledWith('find invoice', 'deadbeef');
   });
 
-  it('omits traceId from the entity log and searchEntities call when not supplied', async () => {
+  it('omits traceId from the entity log and detailed entity search when not supplied', async () => {
     const pinecone = makeMockPineconeWithEntity([]);
 
     await loadContext(pinecone as any, 'chat@g.us', 'alice@s.whatsapp.net', 'find invoice');
 
     const [fields] = mockContextLogger.info.mock.calls[0];
     expect(fields).not.toHaveProperty('trace_id');
-    expect(pinecone.searchEntities).toHaveBeenCalledWith('find invoice');
+    expect(pinecone.searchEntitiesDetailed).toHaveBeenCalledWith('find invoice');
   });
 });

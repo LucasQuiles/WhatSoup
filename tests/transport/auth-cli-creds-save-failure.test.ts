@@ -185,6 +185,32 @@ describe('#2165 auth CLI credential-save failure', () => {
       expect(errorLines()).toContainEqual(expect.stringContaining('FATAL: credential save failed:'));
     });
 
+    it('does not emit a connected success event before the final credential save succeeds', async () => {
+      mocks.saveCreds.mockRejectedValueOnce(new Error('EACCES: permission denied'));
+      await openConnection();
+
+      expect(process.stdout.write).not.toHaveBeenCalledWith(JSON.stringify({ event: 'connected' }) + '\n');
+    });
+
+    it('emits the connected success event only after the final credential save resolves', async () => {
+      let resolveSave: (() => void) | undefined;
+      mocks.saveCreds.mockImplementationOnce(() => new Promise<void>((resolve) => {
+        resolveSave = resolve;
+      }));
+      await import('../../src/transport/auth.ts');
+      await flushPromises();
+      const handler = mocks.connectionHandlers.at(-1);
+      if (!handler) throw new Error('missing connection.update handler');
+
+      const opening = Promise.resolve(handler({ connection: 'open' }));
+      await flushPromises();
+      expect(process.stdout.write).not.toHaveBeenCalledWith(JSON.stringify({ event: 'connected' }) + '\n');
+
+      resolveSave?.();
+      await opening;
+      expect(process.stdout.write).toHaveBeenCalledWith(JSON.stringify({ event: 'connected' }) + '\n');
+    });
+
     it('tells the operator pairing did not complete', async () => {
       mocks.saveCreds.mockRejectedValueOnce(new Error('EACCES: permission denied'));
       await openConnection();

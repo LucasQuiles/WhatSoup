@@ -339,6 +339,7 @@ import { Database as RealDatabase } from '../../../src/core/database.ts';
 import { DurabilityEngine } from '../../../src/core/durability.ts';
 import { startHealthServer, HEALTH_TURN_ERROR_CLASSES, type HealthDeps } from '../../../src/core/health.ts';
 import type { ConnectionManager } from '../../../src/transport/connection.ts';
+import { emptyConnectionStateSnapshot } from '../../../src/transport/twilio/connection-snapshot.ts';
 
 // ─── Fixtures (fictional 1555-prefixed identities, sibling-suite idiom) ──────
 
@@ -754,6 +755,11 @@ describe('B22 group 4: turn-error class degrade contract', () => {
         sendMedia: vi.fn(async () => ({ waMessageId: null })),
         connect: vi.fn(async () => {}),
         disconnect: vi.fn(async () => {}),
+        getConnectionState: vi.fn(() => emptyConnectionStateSnapshot({
+          connected: true,
+          stateChangedAt: '2026-07-30T00:00:00.000Z',
+          lastDisconnectReason: null,
+        })),
       } as unknown as ConnectionManager,
       startedAt: Date.now() - 1000,
       getEnrichmentStats: vi.fn().mockReturnValue({ lastRun: null, unprocessed: 0 }),
