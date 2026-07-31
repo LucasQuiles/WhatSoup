@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { EventEmitter } from 'node:events';
-import { SessionManager, MAX_STDOUT_LINE_BYTES } from '../../../src/runtimes/agent/session.ts';
+import { SessionManager, MAX_STDOUT_LINE_BYTES, type SessionGenerationIdentity } from '../../../src/runtimes/agent/session.ts';
 import type { Database } from '../../../src/core/database.ts';
 import type { Messenger } from '../../../src/core/types.ts';
 import type { AgentEvent } from '../../../src/runtimes/agent/stream-parser.ts';
@@ -253,6 +253,36 @@ describe('SessionManager', () => {
   afterEach(() => {
     vi.unstubAllGlobals();
     vi.restoreAllMocks();
+  });
+
+  it('invalidates opaque evidence bindings on lifecycle or ownership generation changes', () => {
+    const sm = new SessionManager({
+      db: makeDb(),
+      messenger: makeMessenger().messenger,
+      chatJid: CHAT_JID,
+      onEvent: vi.fn(),
+    });
+    const state = sm as unknown as {
+      active: boolean;
+      activeEvidenceGeneration: number | null;
+    };
+    state.active = true;
+    state.activeEvidenceGeneration = 1;
+
+    const lifecycleBinding = sm.captureEvidenceBinding();
+    expect(lifecycleBinding).not.toBeNull();
+    expect(sm.isEvidenceBindingCurrent(lifecycleBinding!)).toBe(true);
+    state.activeEvidenceGeneration = 2;
+    expect(sm.isEvidenceBindingCurrent(lifecycleBinding!)).toBe(false);
+
+    state.activeEvidenceGeneration = 3;
+    let ownership: SessionGenerationIdentity | null = { managerId: 'manager', generation: 1 };
+    sm.bindGenerationOwnership(() => ownership);
+    const ownershipBinding = sm.captureEvidenceBinding();
+    expect(ownershipBinding).not.toBeNull();
+    expect(sm.isEvidenceBindingCurrent(ownershipBinding!)).toBe(true);
+    ownership = { managerId: 'manager', generation: 2 };
+    expect(sm.isEvidenceBindingCurrent(ownershipBinding!)).toBe(false);
   });
 
   it('rejects spawnSession before provider creation when the database is drained', async () => {

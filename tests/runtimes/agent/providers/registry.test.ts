@@ -17,9 +17,18 @@ import {
   isProviderId,
   type ProviderId,
 } from '../../../../src/runtimes/agent/providers/index.ts';
+import {
+  PROVIDER_IDS as SHARED_PROVIDER_IDS,
+  isProviderId as isSharedProviderId,
+} from '../../../../src/lib/provider-ids.ts';
 import { brandOf, resolveBrandProvider } from '../../../../src/runtimes/agent/providers/provider-brand.ts';
 
 describe('Provider ID registry (#447)', () => {
+  it('re-exports the shared provider ID registry without creating a second list', () => {
+    expect(PROVIDER_IDS).toBe(SHARED_PROVIDER_IDS);
+    expect(isProviderId).toBe(isSharedProviderId);
+  });
+
   it('exposes the 6 canonical provider IDs as a frozen array', () => {
     expect(PROVIDER_IDS).toEqual([
       'claude-cli',
