@@ -14,6 +14,12 @@ import {
 
 let tmpRoot = '';
 
+// Probed once at collection time: minimal/sandboxed CI runners (Docker slim
+// images, pnpm/yarn-only dev hosts, low-resource ARM hosts without global
+// node) may not have a global `npm` binary on PATH, which would otherwise
+// throw ENOENT out of spawnSync and fail the assertion below.
+const hasNpm = spawnSync('sh', ['-c', 'command -v npm'], { encoding: 'utf8', timeout: 5000 }).status === 0;
+
 afterEach(() => {
   if (tmpRoot) rmSync(tmpRoot, { recursive: true, force: true });
   tmpRoot = '';
@@ -363,7 +369,8 @@ describe('release snapshot planning', () => {
     ]));
   });
 
-  it('documented npm JSON planning command emits parseable JSON when run silent', () => {
+  // @skip-env requires a global npm binary on PATH.
+  it.skipIf(!hasNpm)('documented npm JSON planning command emits parseable JSON when run silent', () => {
     tmpRoot = mkdtempSync(path.join(tmpdir(), 'whatsoup-release-npm-smoke-'));
     const releaseRoot = path.join(tmpRoot, 'releases');
 
