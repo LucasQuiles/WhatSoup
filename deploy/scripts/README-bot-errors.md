@@ -722,3 +722,11 @@ The pilot always passes all four monitor unit names explicitly:
 plus `install-bot-errors-release-proof.sh verify`, which additionally checks
 loaded fragment paths and drop-ins via `systemctl --user show`, and requires
 both monitor timers to be enabled and active.
+
+`check-unit-drift.sh` also accepts `--no-wrappers`, which skips wrapper
+verification entirely instead of checking the default `whatsoup-ensure-node`
+wrapper (or an explicit `--wrapper NAME:REL_PATH` list). It is mutually
+exclusive with `--wrapper` and may not be repeated; combining the two, or
+repeating either flag, exits `2` before any check runs. Use it only for a
+host/context where the pilot units run without the wrapper layer, so there
+is nothing for the script to verify.
