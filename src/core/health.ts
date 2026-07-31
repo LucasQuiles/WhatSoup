@@ -40,6 +40,7 @@ import { normalizeErrorClass } from './heal-protocol.ts';
 import { getControlPeerWiring } from './heal.ts';
 import { markConversationRead } from './mark-read.ts';
 import type { Runtime } from '../runtimes/types.ts';
+import { isProviderId } from '../lib/provider-ids.ts';
 import type { ConnectionRecentDisconnects, ConnectionStateSnapshot } from '../transport/connection.ts';
 import { readBody } from '../lib/http.ts';
 import { readWhatsoupGitBranch, readWhatsoupGitSha } from '../lib/git-env.ts';
@@ -236,6 +237,8 @@ interface HealthTurnCapability {
   model_usable_checked_at: number | null;
   model_usability_status: string | null;
   last_successful_turn_at: number | null;
+  last_successful_turn_provider: string | null;
+  last_successful_turn_session_current: boolean | null;
   last_turn_error_class: string | null;
   last_turn_error_at: number | null;
 }
@@ -353,6 +356,10 @@ function normalizeEnumStringOrNull(value: unknown, allowed: ReadonlySet<string>)
   return typeof value === 'string' && allowed.has(value) ? value : null;
 }
 
+function normalizeProviderNameOrNull(value: unknown): string | null {
+  return isProviderId(value) ? value : null;
+}
+
 function normalizeAgentTurnCapability(details: Record<string, unknown> | null): HealthTurnCapability | null {
   if (!details) return null;
   const raw = details.turnCapability;
@@ -363,6 +370,8 @@ function normalizeAgentTurnCapability(details: Record<string, unknown> | null): 
     model_usable_checked_at: normalizeNumberOrNull(raw.modelUsableCheckedAt),
     model_usability_status: normalizeEnumStringOrNull(raw.modelUsabilityStatus, HEALTH_MODEL_USABILITY_STATUSES),
     last_successful_turn_at: normalizeNumberOrNull(raw.lastSuccessfulTurnAt),
+    last_successful_turn_provider: normalizeProviderNameOrNull(raw.lastSuccessfulTurnProvider),
+    last_successful_turn_session_current: normalizeBooleanOrNull(raw.lastSuccessfulTurnSessionCurrent),
     last_turn_error_class: normalizeEnumStringOrNull(raw.lastTurnErrorClass, HEALTH_TURN_ERROR_CLASSES),
     last_turn_error_at: normalizeNumberOrNull(raw.lastTurnErrorAt),
   };
@@ -402,6 +411,8 @@ function agentRuntimeDetailsForHealth(
           modelUsableCheckedAt: turnCapability.model_usable_checked_at,
           modelUsabilityStatus: turnCapability.model_usability_status,
           lastSuccessfulTurnAt: turnCapability.last_successful_turn_at,
+          lastSuccessfulTurnProvider: turnCapability.last_successful_turn_provider,
+          lastSuccessfulTurnSessionCurrent: turnCapability.last_successful_turn_session_current,
           lastTurnErrorClass: turnCapability.last_turn_error_class,
           lastTurnErrorAt: turnCapability.last_turn_error_at,
         }

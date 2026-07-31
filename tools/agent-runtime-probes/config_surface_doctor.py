@@ -76,7 +76,7 @@ def expand_specs() -> list[SurfaceSpec]:
         SurfaceSpec(HOME / ".config/opencode/bun.lock", "opencode", "plugin_dependency_lock", "lock", "OpenCode local plugin dependency resolver", "generated_review_only", "medium"),
         SurfaceSpec(HOME / ".claude/plugins/tmup/config/policy.yaml", "tmup", "orchestration_policy", "yaml", "tmup plugin", "editable_with_runtime_doctor", "high"),
         SurfaceSpec(HOME / ".claude/plugins/tmup/config/runtime-contract.json", "tmup", "runtime_contract", "json", "tmup SQLite runtime", "editable_only_with_tests", "high"),
-        SurfaceSpec(HOME / "LAB/WhatSoup/src/runtimes/agent/providers/provider-ids.json", "whatsoup", "provider_roster", "json", "WhatSoup provider registry", "source_edit_with_tests", "medium"),
+        SurfaceSpec(HOME / "LAB/WhatSoup/src/lib/provider-ids.json", "whatsoup", "provider_roster", "json", "WhatSoup provider registry", "source_edit_with_tests", "medium"),
         SurfaceSpec(HOME / "LAB/WhatSoup/deploy/bot-errors-expected-fleet.json", "whatsoup", "fleet_expected_manifest", "json", "WhatSoup BOT ERRORS expected-fleet monitor", "policy_review", "medium"),
         SurfaceSpec(HOME / "LAB/WhatSoup/deploy/bot-errors-runtime-manifest.json", "whatsoup", "fleet_runtime_manifest", "json", "WhatSoup deploy/runtime protection", "generated_or_policy_review", "medium"),
         SurfaceSpec(HOME / "LAB/WhatSoup/deploy/managed-components.json", "whatsoup", "managed_components", "json", "WhatSoup deploy/runtime protection", "policy_review", "medium"),

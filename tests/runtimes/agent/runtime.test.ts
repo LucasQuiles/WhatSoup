@@ -68,6 +68,8 @@ const { mockSession, mockQueue, capturedSessionManagerOptsRef, capturedOnEventRe
     setDurability: vi.fn((_durability: unknown) => {}),
     bindGenerationOwnership: vi.fn((_resolve: () => unknown) => {}),
     getProviderId: vi.fn((): string => 'claude-cli'),
+    captureEvidenceBinding: vi.fn(() => Object.freeze({})),
+    isEvidenceBindingCurrent: vi.fn(() => true),
     // Slice 3: applyRouteChangeAndRecycle's diff-gate reads the effective
     // spawned effort on every live session — a real SessionManager always has
     // it (session.ts), so the mock must too (default null = no static effort).
@@ -1127,6 +1129,8 @@ describe('AgentRuntime', () => {
     mockSession.shutdown.mockReset().mockResolvedValue(undefined);
     mockSession.waitForProviderTurnToTerminalize.mockReset().mockResolvedValue(undefined);
     mockSession.getStatus.mockReset().mockReturnValue({ active: false, pid: null, sessionId: null, startedAt: null, messageCount: 0, lastMessageAt: null });
+    mockSession.captureEvidenceBinding.mockReset().mockImplementation(() => Object.freeze({}));
+    mockSession.isEvidenceBindingCurrent.mockReset().mockReturnValue(true);
     mockSession.sendTurn.mockReset().mockResolvedValue(undefined);
     mockSession.getDbRowId.mockReset().mockReturnValue(null);
     mockQueue.flushTurnEvidence.mockReset().mockImplementation(async (turnId: string) => ({
@@ -5699,6 +5703,8 @@ describe('AgentRuntime', () => {
   });
 
   it('unknown terminal (is_error) result is default-denied: generic notice, never raw', async () => {
+    const agentConfig = mockConfig as typeof mockConfig & { agentProvider?: string };
+    agentConfig.agentProvider = 'claude-cli';
     const db = makeDb();
     const { messenger } = makeMessenger();
     const runtime = new AgentRuntime(db, messenger);
@@ -5730,6 +5736,7 @@ describe('AgentRuntime', () => {
     turnCapability = (runtime.getHealthSnapshot().details as Record<string, any>).turnCapability;
     expect(turnCapability.lastSuccessfulTurnAt).toEqual(expect.any(Number));
     expect(turnCapability.lastSuccessfulTurnAt).toBeGreaterThanOrEqual(failedAt);
+    expect(turnCapability.lastSuccessfulTurnProvider).toBe('claude-cli');
     expect({
       lastTurnErrorClass: turnCapability.lastTurnErrorClass,
       lastTurnErrorAt: turnCapability.lastTurnErrorAt,
@@ -5737,6 +5744,50 @@ describe('AgentRuntime', () => {
       lastTurnErrorClass: null,
       lastTurnErrorAt: null,
     });
+  });
+
+  it('records the provider that served the completed session, not the next-session route', async () => {
+    const agentConfig = mockConfig as typeof mockConfig & { agentProvider?: string };
+    agentConfig.agentProvider = 'claude-cli';
+    mockSession.getProviderId.mockReturnValue('opencode-cli');
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const runtime = new AgentRuntime(db, messenger);
+    await runtime.start();
+    await sendAndAwaitProviderDispatch(runtime, makeMsg({ content: 'served by the existing fallback session' }));
+
+    capturedOnEventRef.current!({ type: 'result', text: 'Recovered reply', isError: false });
+    await vi.waitFor(() => expect(mockQueue.enqueueResultText).toHaveBeenCalledWith('Recovered reply'));
+
+    const turnCapability = (runtime.getHealthSnapshot().details as Record<string, any>).turnCapability;
+    expect(turnCapability.lastSuccessfulTurnProvider).toBe('opencode-cli');
+  });
+
+  it('does not certify a replacement session from a prior successful turn', async () => {
+    mockSession.getProviderId.mockReturnValue('claude-cli');
+    mockSession.isEvidenceBindingCurrent.mockReturnValue(true);
+    mockSession.getStatus.mockReturnValue({
+      active: true,
+      pid: 123,
+      sessionId: 'session-1',
+      startedAt: '2026-07-30T00:00:00.000Z',
+      messageCount: 1,
+      lastMessageAt: null,
+    });
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const runtime = new AgentRuntime(db, messenger);
+    await runtime.start();
+    await sendAndAwaitProviderDispatch(runtime, makeMsg({ content: 'complete before restart' }));
+    capturedOnEventRef.current!({ type: 'result', text: 'Completed reply', isError: false });
+    await vi.waitFor(() => expect(mockQueue.enqueueResultText).toHaveBeenCalledWith('Completed reply'));
+
+    let turnCapability = (runtime.getHealthSnapshot().details as Record<string, any>).turnCapability;
+    expect(turnCapability.lastSuccessfulTurnSessionCurrent).toBe(true);
+
+    mockSession.isEvidenceBindingCurrent.mockReturnValue(false);
+    turnCapability = (runtime.getHealthSnapshot().details as Record<string, any>).turnCapability;
+    expect(turnCapability.lastSuccessfulTurnSessionCurrent).toBe(false);
   });
 
   it('end-to-end: a Gemini ACP in-band error update is default-denied (suppressed + ops-alerted), not leaked raw (BEAD-058)', async () => {
