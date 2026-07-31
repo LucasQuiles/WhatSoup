@@ -28,6 +28,20 @@ COPIED=()
 CHECKSUM_MISMATCHES=()
 LEGACY_PATHS_PRESERVED=()
 
+# macOS ships shasum, not GNU sha256sum; probe both (same pattern as
+# scripts/install-transcription-deps.sh).
+sha256_of() {
+  local path="$1"
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$path" | awk '{print $1}'
+  elif command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$path" | awk '{print $1}'
+  else
+    echo "Neither sha256sum nor shasum is available; cannot verify copies" >&2
+    return 1
+  fi
+}
+
 # ---------------------------------------------------------------------------
 # CLI parsing
 # ---------------------------------------------------------------------------
@@ -84,8 +98,8 @@ copy_file() {
 
   if ! $DRY_RUN; then
     local src_sum dest_sum
-    src_sum=$(sha256sum "$src" | awk '{print $1}')
-    dest_sum=$(sha256sum "$dest" | awk '{print $1}')
+    src_sum=$(sha256_of "$src")
+    dest_sum=$(sha256_of "$dest")
     if [[ "$src_sum" != "$dest_sum" ]]; then
       error "Checksum mismatch after copy: $src -> $dest"
       CHECKSUM_MISMATCHES+=("$src -> $dest")
@@ -159,8 +173,8 @@ copy_db_with_wal() {
 
     if ! $DRY_RUN; then
       local src_sum dest_sum
-      src_sum=$(sha256sum "$src_file" | awk '{print $1}')
-      dest_sum=$(sha256sum "$dest_file" | awk '{print $1}')
+      src_sum=$(sha256_of "$src_file")
+      dest_sum=$(sha256_of "$dest_file")
       if [[ "$src_sum" != "$dest_sum" ]]; then
         error "Checksum mismatch: $src_file -> $dest_file"
         CHECKSUM_MISMATCHES+=("$src_file -> $dest_file")
