@@ -86,6 +86,7 @@ const SCOPE_MAP: Record<string, ScopeEntry> = {
   'fail-closed-gate': { class: 'probe-refuse', reason: 'scans shell files under cwd; refuses "no scan root"', probe: { via: 'cwd' } },
   'insecure-tempfile': { class: 'probe-refuse', reason: 'scans cwd (argv2 ?? cwd); refuses "examined 0 files" (#2102)', probe: { via: 'cwd' } },
   'no-destructive-git': { class: 'probe-refuse', reason: 'scans cwd (argv2 ?? cwd); refuses "examined 0 files" (#2102)', probe: { via: 'cwd' } },
+  'zero-byte-tracked': { class: 'probe-refuse', reason: 'enumerates git ls-files under cwd (argv2 ?? cwd); observed exit 2 on both an empty git repo ("examined 0 tracked files") and a non-git dir (git ls-files fatal -> fail-closed)', probe: { via: 'cwd' } },
   boundaries: { class: 'probe-refuse', reason: 'import-boundary walks cwd src; refuses "examined 0 source file(s)" (#2102)', probe: { via: 'cwd' } },
   'grant-resolver': { class: 'probe-refuse', reason: 'walks cwd/src; floor added this session — refuses "examined 0 source file(s)"', probe: { via: 'cwd' } },
   publication: { class: 'probe-refuse', reason: 'default mode all audits git ls-files; floor added this session — refuses 0 tracked files', probe: { via: 'cwd' } },
