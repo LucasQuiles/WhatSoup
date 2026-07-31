@@ -3,7 +3,7 @@
 
 import { z } from 'zod';
 import { existsSync, statSync, readFileSync, realpathSync } from 'node:fs';
-import { extname, normalize } from 'node:path';
+import { basename, extname, normalize } from 'node:path';
 import type { MessageRow } from '../../core/messages.ts';
 import { downloadMedia as coreDownloadMedia, writeTempFile } from '../../core/media-download.ts';
 import { extractRawMime, EXTENSION_MEDIA_MAP } from '../../core/media-mime.ts';
@@ -207,13 +207,13 @@ export function registerMediaTools(
 
       // ── Build OutboundMedia ───────────────────────────────────────────
 
-      const basename = filenameOverride ?? resolved.split('/').pop() ?? 'file';
+      const outboundFilename = filenameOverride ?? basename(resolved) ?? 'file';
       const effectiveType = mediaTypeOverride ?? mediaInfo.type;
       const mime = mediaInfo.mime;
       const mediaParams = { caption, viewOnce, ptt, seconds, ptv, gifPlayback, isAnimated };
 
       for (let attempt = 0; ; attempt += 1) {
-        const media = buildSendMediaPayload(effectiveType, resolved, basename, mime, session.allowedRoot, mediaParams);
+        const media = buildSendMediaPayload(effectiveType, resolved, outboundFilename, mime, session.allowedRoot, mediaParams);
         try {
           await connection.sendMedia(chatJid, media);
           break;

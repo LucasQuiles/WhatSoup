@@ -110,7 +110,35 @@ function logMemoryOperation(
 
 export type PineconeReadinessState = MemoryReadinessState;
 
-function classifyReadinessError(err: unknown): Extract<PineconeReadinessState, 'auth_failed' | 'network_error'> {
+export interface PineconeReadinessObservation {
+  state: PineconeReadinessState;
+  index: string;
+  observedAt: string;
+  failureCode: MemoryOperationFailureCode;
+  retryable: boolean;
+  evidenceCoverage: 'local_guard' | 'provider_response' | 'provider_error';
+}
+
+function readinessObservation(
+  state: PineconeReadinessState,
+  index: string,
+  failureCode: MemoryOperationFailureCode,
+  retryable: boolean,
+  evidenceCoverage: PineconeReadinessObservation['evidenceCoverage'],
+): PineconeReadinessObservation {
+  return {
+    state,
+    index,
+    observedAt: new Date().toISOString(),
+    failureCode,
+    retryable,
+    evidenceCoverage,
+  };
+}
+
+function classifyReadinessError(
+  err: unknown,
+): Extract<PineconeReadinessState, 'auth_failed' | 'network_error' | 'unknown'> {
   const status = typeof err === 'object' && err !== null && 'status' in err
     ? (err as { status?: number }).status
     : undefined;
@@ -129,13 +157,12 @@ function classifyReadinessError(err: unknown): Extract<PineconeReadinessState, '
     return 'network_error';
   }
 
-  return 'auth_failed';
+  return 'unknown';
 }
 
-export async function getPineconeReadiness(indexName: string = config.pineconeIndex): Promise<{
-  state: PineconeReadinessState;
-  index: string;
-}> {
+export async function getPineconeReadinessObservation(
+  indexName: string = config.pineconeIndex,
+): Promise<PineconeReadinessObservation> {
   const operation = createMemoryOperationContext({
     operation: 'readiness',
     scopeKind: 'none',
@@ -153,7 +180,7 @@ export async function getPineconeReadiness(indexName: string = config.pineconeIn
       resultCount: 0,
       evidenceCoverage: 'local_guard',
     });
-    return { state: 'disabled', index: targetIndex };
+    return readinessObservation('disabled', targetIndex, 'none', false, 'local_guard');
   }
 
   const apiKey = resolvePineconeApiKey().trim();
@@ -167,7 +194,7 @@ export async function getPineconeReadiness(indexName: string = config.pineconeIn
       resultCount: 0,
       evidenceCoverage: 'local_guard',
     });
-    return { state: 'disabled', index: targetIndex };
+    return readinessObservation('disabled', targetIndex, 'none', false, 'local_guard');
   }
 
   const guard = configuredPineconeProjectGuard();
@@ -181,7 +208,7 @@ export async function getPineconeReadiness(indexName: string = config.pineconeIn
       resultCount: 0,
       evidenceCoverage: 'local_guard',
     });
-    return { state: 'project_mismatch', index: targetIndex };
+    return readinessObservation('project_mismatch', targetIndex, 'project_guard_failed', false, 'local_guard');
   }
 
   try {
@@ -200,7 +227,7 @@ export async function getPineconeReadiness(indexName: string = config.pineconeIn
           durationMs: Date.now() - startMs,
           evidenceCoverage: 'provider_response',
         });
-        return { state: 'project_mismatch', index: targetIndex };
+        return readinessObservation('project_mismatch', targetIndex, 'project_guard_failed', false, 'provider_response');
       }
       logMemoryOperation(operation, {
         stage: 'request',
@@ -212,7 +239,7 @@ export async function getPineconeReadiness(indexName: string = config.pineconeIn
         durationMs: Date.now() - startMs,
         evidenceCoverage: 'provider_response',
       });
-      return { state: 'ready', index: targetIndex };
+      return readinessObservation('ready', targetIndex, 'none', false, 'provider_response');
     }
 
     logMemoryOperation(operation, {
@@ -225,7 +252,7 @@ export async function getPineconeReadiness(indexName: string = config.pineconeIn
       durationMs: Date.now() - startMs,
       evidenceCoverage: 'provider_response',
     });
-    return { state: 'index_missing', index: targetIndex };
+    return readinessObservation('index_missing', targetIndex, 'none', false, 'provider_response');
   } catch (err) {
     const state = classifyReadinessError(err);
     const failure = classifyMemoryOperationFailure(err);
@@ -239,8 +266,15 @@ export async function getPineconeReadiness(indexName: string = config.pineconeIn
       durationMs: Date.now() - startMs,
       evidenceCoverage: 'provider_error',
     });
-    return { state, index: targetIndex };
+    return readinessObservation(state, targetIndex, failure.code, failure.retryable, 'provider_error');
   }
+}
+
+export async function getPineconeReadiness(
+  indexName: string = config.pineconeIndex,
+): Promise<{ state: PineconeReadinessState; index: string }> {
+  const { state, index } = await getPineconeReadinessObservation(indexName);
+  return { state, index };
 }
 
 function configuredPineconeApiKeyEnv(): string {
@@ -722,26 +756,46 @@ export class PineconeMemory {
     return (await this.searchDetailed(query, filters, topK, traceId)).results;
   }
 
-  private searchByField(
+  private searchByFieldDetailed(
     query: string,
     field: string,
     value: string,
     topK: number,
     traceId?: string,
-  ): Promise<SearchResult[]> {
-    return this.search(query, { [field]: { $eq: value } }, topK, traceId);
+  ): Promise<PineconeSearchDetails> {
+    return this.searchDetailed(query, { [field]: { $eq: value } }, topK, traceId);
+  }
+
+  async searchForChatDetailed(
+    chatJid: string,
+    query: string,
+    traceId?: string,
+  ): Promise<PineconeSearchDetails> {
+    return this.searchByFieldDetailed(query, 'chat_jid', chatJid, config.pineconeContextTopK, traceId);
   }
 
   async searchForChat(chatJid: string, query: string, traceId?: string): Promise<SearchResult[]> {
-    return this.searchByField(query, 'chat_jid', chatJid, config.pineconeContextTopK, traceId);
+    return (await this.searchForChatDetailed(chatJid, query, traceId)).results;
+  }
+
+  async searchForSenderDetailed(
+    senderJid: string,
+    query: string,
+    traceId?: string,
+  ): Promise<PineconeSearchDetails> {
+    return this.searchByFieldDetailed(query, 'sender_jid', senderJid, config.pineconeSenderTopK, traceId);
   }
 
   async searchForSender(senderJid: string, query: string, traceId?: string): Promise<SearchResult[]> {
-    return this.searchByField(query, 'sender_jid', senderJid, config.pineconeSenderTopK, traceId);
+    return (await this.searchForSenderDetailed(senderJid, query, traceId)).results;
+  }
+
+  async searchSelfFactsDetailed(query: string, traceId?: string): Promise<PineconeSearchDetails> {
+    return this.searchByFieldDetailed(query, 'memory_type', 'self_fact', config.pineconeSelfFactTopK, traceId);
   }
 
   async searchSelfFacts(query: string, traceId?: string): Promise<SearchResult[]> {
-    return this.searchByField(query, 'memory_type', 'self_fact', config.pineconeSelfFactTopK, traceId);
+    return (await this.searchSelfFactsDetailed(query, traceId)).results;
   }
 
   async searchEntities(query: string, traceId?: string): Promise<EntitySearchResult[]> {

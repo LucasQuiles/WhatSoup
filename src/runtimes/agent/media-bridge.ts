@@ -279,7 +279,7 @@ async function handleRequest(
   const filename =
     typeof req.filename === 'string'
       ? req.filename
-      : resolvedPath.split('/').pop() ?? 'file';
+      : basename(resolvedPath) ?? 'file';
 
   for (let attempt = 0; ; attempt += 1) {
     const media = buildOutboundMediaFromPath(mediaType, resolvedPath, filename, mimetype, caption, allowedRoot);

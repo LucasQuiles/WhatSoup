@@ -109,6 +109,8 @@
         "transport_disconnected",
         "enrichment_stale",
         "enrichment_runtime_degraded",
+        "memory_readiness_degraded",
+        "memory_context_degraded",
         "memory_consolidation_degraded",
         "connection_churn",
         "outbound_flood",

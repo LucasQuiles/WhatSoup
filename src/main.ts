@@ -18,7 +18,7 @@ import { emitAlertChecked } from './lib/emit-alert.ts';
 import { resolveLatestPluginDir } from './runtimes/agent/plugin-dir-resolver.ts';
 import { resolveAgentModel } from './instance-loader.ts';
 import { PassiveRuntime } from './runtimes/passive/runtime.ts';
-import { PineconeMemory, getPineconeReadiness } from './runtimes/chat/providers/pinecone.ts';
+import { PineconeMemory, getPineconeReadinessObservation } from './runtimes/chat/providers/pinecone.ts';
 import { createAnthropicProvider } from './runtimes/chat/providers/anthropic.ts';
 import { createOpenAIProvider } from './runtimes/chat/providers/openai.ts';
 import { withDatabaseCompatibility } from './runtimes/chat/providers/database-compatibility.ts';
@@ -230,7 +230,7 @@ try {
   }, 'memory consolidation: restart receipt recovery failed');
 }
 
-const pineconeReadiness = await getPineconeReadiness(config.pineconeIndex);
+const pineconeReadiness = await getPineconeReadinessObservation(config.pineconeIndex);
 log.info(
   buildMemoryReadinessLogFields(pineconeReadiness.state),
   'pinecone readiness',
@@ -341,6 +341,7 @@ connectionManager.setOutboundContentClassifier?.(classifyStreamedProviderFailure
 
 // 5. Runtime — selected by instance type
 let runtime: Runtime;
+let chatRuntime: ChatRuntime | null = null;
 // Capability-grant manager (#1835) — agent instances only; groups are
 // config-driven (empty by default). Reconciliation is awaited before any
 // health, poller, runtime, or transport surface starts.
@@ -423,11 +424,10 @@ if (instanceType === 'agent') {
   });
 } else {
   // chat (default): create chat-specific providers
-  let chatRuntime: ChatRuntime;
   const handleDatabaseCompatibilityRejection = (
     rejection: DatabaseCompatibilityError,
   ): void => {
-    chatRuntime.handleDatabaseCompatibilityRejection(rejection);
+    chatRuntime?.handleDatabaseCompatibilityRejection(rejection);
     void memoryConsolidationScheduler?.stop();
   };
   const anthropic = withDatabaseCompatibility(
@@ -814,6 +814,14 @@ const healthServer = startHealthServer({
   instanceName: config.botName,
   instanceType: instanceType,
   accessMode: config.accessMode,
+  getMemoryReadinessHealth: () => ({
+    state: pineconeReadiness.state,
+    observedAt: pineconeReadiness.observedAt,
+    failureCode: pineconeReadiness.failureCode,
+    retryable: pineconeReadiness.retryable,
+    evidenceCoverage: pineconeReadiness.evidenceCoverage,
+  }),
+  getMemoryContextHealth: () => chatRuntime?.getMemoryContextHealth() ?? null,
   getMemoryConsolidationHealth: () =>
     memoryConsolidationRunStore.readHealth({
       enabled: config.memory.consolidation.enabled,
