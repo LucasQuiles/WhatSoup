@@ -107,6 +107,10 @@ OBSERVATION_SCHEMA_VERSION = 1
 OBSERVATION_CHECK = "runtime-code-staleness"
 
 
+def host_sys_platform() -> str:
+    return os.environ.get("BOT_ERRORS_DRY_SYS_PLATFORM", sys.platform)
+
+
 # ---------------------------------------------------------------------------
 # Pure verdict helpers — no subprocess, fully unit-testable.
 # ---------------------------------------------------------------------------
@@ -709,6 +713,17 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv if argv is not None else sys.argv[1:])
+    if host_sys_platform() != "linux":
+        # Every probe step shells out to systemd (systemctl list-units/show).
+        # On a non-systemd host those calls fail in ways that are
+        # indistinguishable from a stopped instance, so refuse loudly instead
+        # of emitting a false verdict in either direction.
+        print(
+            "unsupported platform: runtime-staleness probes systemd (systemctl) "
+            f"and requires linux; got {host_sys_platform()!r}",
+            file=sys.stderr,
+        )
+        return 2
     if args.json and not args.observe_only:
         print("configuration error: --json requires --observe-only", file=sys.stderr)
         return 2
