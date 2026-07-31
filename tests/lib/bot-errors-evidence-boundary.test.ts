@@ -17,7 +17,7 @@ describe('confineAlertContent (issue #2386)', () => {
     const confined = confineAlertContent('evidence', raw);
     expect(confined.failureClass).toBe('TypeError');
     expect(confined.length).toBe(raw.length);
-    expect(confined.correlationDigest).toMatch(/^[0-9a-f]{16}$/);
+    expect(confined.correlationDigest).toMatch(/^[0-9a-f]{64}$/);
   });
 
   it('does not include the raw string in any field', () => {

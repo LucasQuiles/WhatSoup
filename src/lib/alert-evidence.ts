@@ -18,7 +18,7 @@
  *   patterns (``Error``, ``TypeError``, ``provider_unknown_terminal``, etc.).
  *   Never raw prose.
  * - ``length``: raw character count of the original string.
- * - ``correlationDigest``: a domain-separated SHA-256 16-char hex digest of
+ * - ``correlationDigest``: a domain-separated SHA-256 hex digest of
  *   the original content — deterministic, non-reversible, for dedup.
  *
  * ## What is stripped
@@ -37,7 +37,7 @@ export interface ConfinedAlertContent {
   readonly failureClass: string;
   /** Character length of the original raw string. */
   readonly length: number;
-  /** Domain-separated SHA-256 16-char hex digest — non-reversible. */
+  /** Domain-separated SHA-256 hex digest — non-reversible. */
   readonly correlationDigest: string;
 }
 
@@ -84,13 +84,12 @@ function extractFailureClass(raw: string): string {
 // Issue #2386: This is a non-reversible correlation digest for de-duplicating
 // repeated BOT ERRORS evidence without exposing raw content. It is NOT used
 // for password hashing, credential storage, or any security-sensitive purpose.
-// The 64-bit (16-hex) truncation bounds the correlation key; domain separation
-// prevents cross-domain collisions.
+// Full 256-bit SHA-256 output (64 hex chars) provides sufficient computational
+// effort; domain separation prevents cross-domain collisions.
 function digestContent(domain: string, value: string): string {
-  return createHash('sha256') // codeql[js/hashing-with-insufficient-effort]
+  return createHash('sha256')
     .update(`bot-errors-evidence:${domain}:${value}`)
-    .digest('hex') // codeql[js/hashing-with-insufficient-effort]
-    .slice(0, 16);
+    .digest('hex');
 }
 
 /**
