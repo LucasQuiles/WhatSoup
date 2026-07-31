@@ -27,6 +27,7 @@ from lib.bot_errors_daily_health import daily_health_host_from_payload, normaliz
 from lib.bot_errors_envelope import new_event_fields
 from lib.bot_errors_redaction import redact_bot_errors_text, redact_json_value as redact_shared_json_value
 from lib.bot_errors_roster import RosterError, load_roster  # noqa: E402
+from lib.queue_age import parse_queue_threshold, scan_directory, threshold_met
 from lib.controller_log import (
     ControllerLogContext,
     controller_cycle,
@@ -191,6 +192,27 @@ def validate_thresholds() -> None:
     browser_debug_min_age_seconds()
     browser_debug_min_rss_mb()
     watchdog_flap_rearm_seconds()
+    validate_queue_thresholds()
+
+
+def validate_queue_thresholds() -> None:
+    """Validate queue backlog thresholds at startup (fail-closed).  See #2460.
+
+    Invalid thresholds (negative, non-finite, non-integral) raise ValueError
+    so the script exits with a clear diagnostic instead of silently weakening
+    monitoring.
+    """
+    pairs = [
+        ("BOT_ERRORS_WATCHDOG_OUTBOX_CRITICAL_COUNT", "BOT_ERRORS_OUTBOX_CRITICAL_COUNT"),
+        ("BOT_ERRORS_WATCHDOG_OUTBOX_CRITICAL_OLDEST_SECONDS", "BOT_ERRORS_OUTBOX_CRITICAL_OLDEST_SECONDS"),
+        ("BOT_ERRORS_WATCHDOG_PROCESSING_CRITICAL_COUNT", "BOT_ERRORS_PROCESSING_CRITICAL_COUNT"),
+        ("BOT_ERRORS_WATCHDOG_PROCESSING_CRITICAL_OLDEST_SECONDS", "BOT_ERRORS_PROCESSING_CRITICAL_OLDEST_SECONDS"),
+        ("BOT_ERRORS_WATCHDOG_WRITEFAIL_CRITICAL_COUNT", "BOT_ERRORS_WRITEFAIL_CRITICAL_COUNT"),
+        ("BOT_ERRORS_WATCHDOG_WRITEFAIL_CRITICAL_OLDEST_SECONDS", "BOT_ERRORS_WRITEFAIL_CRITICAL_OLDEST_SECONDS"),
+    ]
+    for primary, fallback in pairs:
+        parse_queue_threshold(fallback, 0)
+        parse_queue_threshold(primary, 0)
 
 
 def now_epoch() -> int:
@@ -637,16 +659,16 @@ def env_int(name: str, default: int) -> int:
 
 
 def directory_stats(path: Path, pattern: str) -> tuple[int, int]:
+    """Delegate to the shared SSOT scanner (lib.queue_age).  See #2460.
+
+    Uses createdAt for *.json entries (same clock as daily health-check) so
+    that dispatcher retries (which refresh mtime without changing createdAt)
+    cannot make an old event appear brand-new to the watchdog.
+    """
     try:
-        if not path.exists():
-            return 0, 0
-        files = [item for item in path.glob(pattern) if item.is_file()]
-        if not files:
-            return 0, 0
-        oldest = max(0, now_epoch() - min(int(item.stat().st_mtime) for item in files))
+        return scan_directory(path, pattern, float(now_epoch()))
     except OSError as exc:
         raise QueueDirectoryError(f"path={path} pattern={pattern} error={type(exc).__name__}: {exc}") from exc
-    return len(files), oldest
 
 
 def queue_backlog_problem(
@@ -665,8 +687,8 @@ def queue_backlog_problem(
             return f"{label} backlog scan failed: {exc}"
         total_count += count
         oldest_seconds = max(oldest_seconds, oldest)
-    over_count = max_count > 0 and total_count >= max_count
-    over_age = max_oldest_seconds > 0 and oldest_seconds >= max_oldest_seconds
+    over_count = threshold_met(total_count, max_count)
+    over_age = threshold_met(oldest_seconds, max_oldest_seconds)
     if not over_count and not over_age:
         return None
     return (
@@ -684,10 +706,10 @@ def queue_backlog_problems() -> dict[str, str]:
             "outbox",
             [Path(os.environ.get("BOT_ERRORS_OUTBOX_DIR", root / "outbox"))],
             "*.json",
-            env_int("BOT_ERRORS_WATCHDOG_OUTBOX_CRITICAL_COUNT", env_int("BOT_ERRORS_OUTBOX_CRITICAL_COUNT", 100)),
-            env_int(
+            parse_queue_threshold("BOT_ERRORS_WATCHDOG_OUTBOX_CRITICAL_COUNT", parse_queue_threshold("BOT_ERRORS_OUTBOX_CRITICAL_COUNT", 100)),
+            parse_queue_threshold(
                 "BOT_ERRORS_WATCHDOG_OUTBOX_CRITICAL_OLDEST_SECONDS",
-                env_int("BOT_ERRORS_OUTBOX_CRITICAL_OLDEST_SECONDS", 3600),
+                parse_queue_threshold("BOT_ERRORS_OUTBOX_CRITICAL_OLDEST_SECONDS", 3600),
             ),
         ),
         (
@@ -695,13 +717,13 @@ def queue_backlog_problems() -> dict[str, str]:
             "processing",
             [root / "processing"],
             "*",
-            env_int(
+            parse_queue_threshold(
                 "BOT_ERRORS_WATCHDOG_PROCESSING_CRITICAL_COUNT",
-                env_int("BOT_ERRORS_PROCESSING_CRITICAL_COUNT", 10),
+                parse_queue_threshold("BOT_ERRORS_PROCESSING_CRITICAL_COUNT", 10),
             ),
-            env_int(
+            parse_queue_threshold(
                 "BOT_ERRORS_WATCHDOG_PROCESSING_CRITICAL_OLDEST_SECONDS",
-                env_int("BOT_ERRORS_PROCESSING_CRITICAL_OLDEST_SECONDS", 300),
+                parse_queue_threshold("BOT_ERRORS_PROCESSING_CRITICAL_OLDEST_SECONDS", 300),
             ),
         ),
         (
@@ -713,13 +735,13 @@ def queue_backlog_problems() -> dict[str, str]:
                 Path.home() / ".bot-errors-writefail",
             ],
             "*.writefail",
-            env_int(
+            parse_queue_threshold(
                 "BOT_ERRORS_WATCHDOG_WRITEFAIL_CRITICAL_COUNT",
-                env_int("BOT_ERRORS_WRITEFAIL_CRITICAL_COUNT", 10),
+                parse_queue_threshold("BOT_ERRORS_WRITEFAIL_CRITICAL_COUNT", 10),
             ),
-            env_int(
+            parse_queue_threshold(
                 "BOT_ERRORS_WATCHDOG_WRITEFAIL_CRITICAL_OLDEST_SECONDS",
-                env_int("BOT_ERRORS_WRITEFAIL_CRITICAL_OLDEST_SECONDS", 600),
+                parse_queue_threshold("BOT_ERRORS_WRITEFAIL_CRITICAL_OLDEST_SECONDS", 600),
             ),
         ),
     ]

@@ -31,6 +31,12 @@ if str(SCRIPT_DIR) not in sys.path:
 
 from lib.bot_errors_redaction import redact_bot_errors_text, redact_json_value as redact_shared_json_value
 from lib.bot_errors_envelope import new_event_fields
+from lib.queue_age import (
+    event_file_age_seconds as _event_file_age_seconds,
+    is_durable_internal_entry as _is_durable_internal_entry,
+    scan_directory,
+    threshold_met,
+)
 from lib.controller_log import (
     ControllerLogContext,
     controller_cycle,
@@ -5649,57 +5655,9 @@ def queue_inventory() -> list[str]:
     return lines
 
 
-def _event_file_age_seconds(path: Path, now: float) -> float:
-    """Return the age in seconds for a JSON event file.
-
-    For *.json event files, reads the event's createdAt ISO8601 field as the
-    true creation time (age = now - createdAt).  Falls back to st_mtime on
-    any error (missing field, unparseable timestamp, unreadable file).
-    Non-JSON callers already pass non-matching patterns; this path is only
-    reached for *.json glob results.
-    """
-    try:
-        raw = path.read_text(encoding="utf-8", errors="replace")
-        data = json.loads(raw)
-        if isinstance(data, dict):
-            created_at = data.get("createdAt")
-            if isinstance(created_at, str) and created_at.strip():
-                parsed = datetime.fromisoformat(created_at.strip().replace("Z", "+00:00"))
-                return max(0.0, now - parsed.timestamp())
-    except Exception:  # noqa: BLE001 - health path must never crash on malformed files
-        pass
-    try:
-        return max(0.0, now - path.stat().st_mtime)
-    except OSError:
-        return 0.0
-
-
-def _is_durable_internal_entry(path: Path) -> bool:
-    """Return True for durable_json internal artifacts (e.g. ``.durable-json.lock``).
-
-    These are never data entries and must be excluded from queue-depth counts
-    and age calculations. See #2727.
-    """
-    return path.name == ".durable-json.lock"
-
-
 def directory_stats(path: Path, pattern: str) -> tuple[int, int]:
-    if not path.exists():
-        return 0, 0
-    files = [
-        item
-        for item in path.glob(pattern)
-        if item.is_file() and not _is_durable_internal_entry(item)
-    ]
-    if not files:
-        return 0, 0
-    now = time.time()
-    is_json_pattern = pattern.endswith(".json") or pattern == "*.json"
-    if is_json_pattern:
-        oldest = max(_event_file_age_seconds(item, now) for item in files)
-    else:
-        oldest = now - min(item.stat().st_mtime for item in files)
-    return len(files), max(0, int(oldest))
+    """Delegate to the shared SSOT scanner (lib.queue_age).  See #2460."""
+    return scan_directory(path, pattern, time.time())
 
 
 def queue_prefix(
@@ -5710,13 +5668,13 @@ def queue_prefix(
     warn_oldest_seconds: int,
     critical_oldest_seconds: int,
 ) -> str:
-    if critical_count > 0 and count >= critical_count:
+    if threshold_met(count, critical_count):
         return "FAIL "
-    if critical_oldest_seconds > 0 and oldest_seconds >= critical_oldest_seconds:
+    if threshold_met(oldest_seconds, critical_oldest_seconds):
         return "FAIL "
-    if warn_count > 0 and count >= warn_count:
+    if threshold_met(count, warn_count):
         return "WARN "
-    if warn_oldest_seconds > 0 and oldest_seconds >= warn_oldest_seconds:
+    if threshold_met(oldest_seconds, warn_oldest_seconds):
         return "WARN "
     return ""
 

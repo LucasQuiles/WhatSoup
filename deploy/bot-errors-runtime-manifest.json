@@ -138,7 +138,7 @@
         "BOT_ERRORS_HEALTH_BODY_MAX_FUTURE_SKEW_SECONDS"
       ],
       "path": "deploy/scripts/bot-errors-health-check.py",
-      "sha256": "171820a29f3a6a4e880bcb0b5e2adcba9c16354021bced9c7c636c5b7d20548c"
+      "sha256": "b0fa953daa848b0d745b113fc79c64b47702737d22754cf175525363c1028aa6"
     },
     {
       "mustContain": [
@@ -153,7 +153,7 @@
         "collector_reachability_evidence"
       ],
       "path": "deploy/scripts/bot-errors-heartbeat-watchdog.py",
-      "sha256": "2f3812382e823800f35af75a2d4f5d5e6477b6cc5af2788880b93a5a7847f009"
+      "sha256": "a4f1b9beb1402c07ee382328e44da562ac60683433c5a88e6b3f5e581c04ff8d"
     },
     {
       "mustContain": [
@@ -273,8 +273,6 @@
       "sha256": "45b9b3e23ffda454a8315c1ec80ffc81c691e8ef37f3b20cb3386eaaa2af5bea"
     },
     {
-      "path": "deploy/scripts/lib/bot_errors_envelope.py",
-      "sha256": "79be73a209d502108ff78edb2fa248b9010bb04d911309b375760fa980d34760",
       "mustContain": [
         "SCHEMA_VERSION = 2",
         "class EnvelopeError",
@@ -282,7 +280,9 @@
         "def normalize_event",
         "def new_event_fields",
         "unexpected_legacy_event_kind"
-      ]
+      ],
+      "path": "deploy/scripts/lib/bot_errors_envelope.py",
+      "sha256": "79be73a209d502108ff78edb2fa248b9010bb04d911309b375760fa980d34760"
     },
     {
       "mustContain": [
@@ -326,15 +326,26 @@
       "sha256": "2ae8bd93f0ef836ea3c20eb00198a8e25b19f33644e0a58b12a45e2755a8e795"
     },
     {
-      "path": "deploy/scripts/lib/controller_state.py",
-      "sha256": "f2f83805dde505f12e298d822d96a46d36ae566270216e87b243997f6b0cf4ce",
       "mustContain": [
         "ControllerStateSession",
         "open_controller_state",
         "read_controller_state",
         "complete_reconciliation",
         "retention_exhausted"
-      ]
+      ],
+      "path": "deploy/scripts/lib/controller_state.py",
+      "sha256": "f2f83805dde505f12e298d822d96a46d36ae566270216e87b243997f6b0cf4ce"
+    },
+    {
+      "mustContain": [
+        "event_file_age_seconds",
+        "scan_directory",
+        "parse_queue_threshold",
+        "threshold_met",
+        "createdAt"
+      ],
+      "path": "deploy/scripts/lib/queue_age.py",
+      "sha256": "cc96f2b9738a27a570f03415129360df86e88ac8ef4f7456164958713b30631a"
     },
     {
       "mustContain": [
