@@ -84,6 +84,12 @@ export const DEFAULT_DATABASE_RETENTION: DatabaseRetentionConfig = {
   messageRetentionDays: 30,
 };
 
+/**
+ * Unsafe-delivery and legacy quarantine evidence needs a longer operator
+ * review window than terminal rows proven never to have reached a provider.
+ */
+export const OUTBOUND_QUARANTINE_EXTENDED_RETENTION_DAYS = 90;
+
 function daysModifier(days: number): string {
   return `-${Math.max(1, Math.floor(days))} days`;
 }
@@ -97,6 +103,10 @@ export function runDatabaseRetention(
   retention: DatabaseRetentionConfig = DEFAULT_DATABASE_RETENTION,
 ): DatabaseRetentionResult {
   const terminalCutoff = daysModifier(retention.terminalDurabilityDays);
+  const extendedQuarantineCutoff = daysModifier(Math.max(
+    retention.terminalDurabilityDays,
+    OUTBOUND_QUARANTINE_EXTENDED_RETENTION_DAYS,
+  ));
   const factCutoff = daysModifier(retention.exportedFactDays);
 
   const result = withTransaction(db, () => {
@@ -218,7 +228,52 @@ export function runDatabaseRetention(
     const outboundOps = changes(db.raw.prepare(`
       DELETE FROM outbound_ops
        WHERE status IN ('echoed', 'failed_permanent', 'quarantined')
-         AND created_at < datetime('now', ?)
+         AND CASE
+           WHEN status = 'quarantined' THEN CASE
+             -- An ambiguous or legacy quarantine remains an open incident
+            -- until the reviewed retirement command records its acknowledgement.
+            WHEN quarantine_disposition IN (
+              'delivery_not_attempted',
+              'stale_status_discarded'
+            )
+               THEN COALESCE(quarantined_at, created_at) < datetime('now', ?)
+             ELSE 0
+           END
+           WHEN status = 'failed_permanent' AND quarantined_at IS NOT NULL THEN CASE
+             -- A terminalized quarantine is not resolved until a valid bounded
+             -- retirement receipt ties its disposition, acknowledgement, and
+             -- canonical evidence digest together.
+             WHEN EXISTS (
+               SELECT 1
+                 FROM outbound_quarantine_retirements retirement
+                WHERE retirement.outbound_op_id = outbound_ops.id
+                  AND retirement.quarantine_disposition = outbound_ops.quarantine_disposition
+                  AND (
+                    (retirement.quarantine_disposition = 'delivery_ambiguous_unsafe'
+                      AND retirement.acknowledgement = 'delivery-risk-reviewed')
+                    OR (retirement.quarantine_disposition = 'record_unreconstructable'
+                      AND retirement.acknowledgement = 'record-reconstruction-reviewed')
+                    OR (retirement.quarantine_disposition IN ('delivery_not_attempted', 'stale_status_discarded')
+                      AND retirement.acknowledgement = 'none')
+                  )
+                  AND retirement.evidence_sha256 = outbound_ops.quarantine_evidence_sha256
+                  AND length(outbound_ops.quarantine_evidence_sha256) = 64
+                  AND outbound_ops.quarantine_evidence_sha256 NOT GLOB '*[^0-9a-f]*'
+                  AND length(retirement.evidence_sha256) = 64
+                  AND retirement.evidence_sha256 NOT GLOB '*[^0-9a-f]*'
+             ) THEN CASE
+               WHEN quarantine_disposition IN (
+                 'delivery_not_attempted',
+                 'record_unreconstructable',
+                 'stale_status_discarded'
+               )
+                 THEN COALESCE(quarantined_at, created_at) < datetime('now', ?)
+               ELSE COALESCE(quarantined_at, created_at) < datetime('now', ?)
+             END
+             ELSE 0
+           END
+           ELSE created_at < datetime('now', ?)
+         END
          AND NOT EXISTS (
            SELECT 1
              FROM turn_terminal_records
@@ -229,7 +284,12 @@ export function runDatabaseRetention(
              FROM turn_delivery_corroboration
             WHERE corroborating_op_id = outbound_ops.id
          )
-    `).run(terminalCutoff));
+    `).run(
+      terminalCutoff,
+      terminalCutoff,
+      extendedQuarantineCutoff,
+      terminalCutoff,
+    ));
 
     const toolCalls = changes(db.raw.prepare(`
       DELETE FROM tool_calls

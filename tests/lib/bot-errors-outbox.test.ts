@@ -277,6 +277,36 @@ describe('buildBotErrorsEvent', () => {
 });
 
 describe('writeBotErrorsEvent', () => {
+  it('keeps millisecond precision in the outbox filename for causal ordering', () => {
+    tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-outbox-order-'));
+    const outbox = join(tmpRoot, 'outbox');
+    process.env['BOT_ERRORS_OUTBOX_DIR'] = outbox;
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date('2026-07-30T12:00:00.123Z'));
+      const written = writeBotErrorsEvent({
+        eventType: 'alert',
+        instance: 'ordering-test',
+        source: 'outbound_delivery_ambiguous',
+        summary: 'ordering proof',
+      });
+
+      const filename = written.path.split('/').at(-1)!;
+      expect(filename).toMatch(
+        /^20260730T120000Z_123\.ordering-test\.outbound_delivery_ambiguous\./,
+      );
+      expect([
+        '20260730T120000Z.ordering-test.legacy-alert.json',
+        filename,
+      ].sort()).toEqual([
+        '20260730T120000Z.ordering-test.legacy-alert.json',
+        filename,
+      ]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('sanitizes and caps filename segments while preserving the event payload', () => {
     tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-outbox-write-'));
     const outbox = join(tmpRoot, 'outbox');

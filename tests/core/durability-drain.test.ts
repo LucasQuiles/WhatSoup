@@ -85,12 +85,17 @@ describe('drainPendingOutbound()', () => {
 
     expect(messenger.sendMessage).not.toHaveBeenCalled();
     expect(resent).toBe(0);
-    expect(getOutbound(db, opId)['status']).toBe('quarantined');
+    expect(getOutbound(db, opId)).toMatchObject({
+      status: 'quarantined',
+      quarantine_disposition: 'record_unreconstructable',
+      quarantine_evidence_coverage: 'partial',
+    });
     expect(emitAlert).toHaveBeenCalledWith(
       'Loops',
-      'outbound_quarantined',
+      'outbound_record_unreconstructable',
       expect.any(String),
       expect.stringContaining('pending_replay_unreconstructable'),
+      'warning',
     );
   });
 

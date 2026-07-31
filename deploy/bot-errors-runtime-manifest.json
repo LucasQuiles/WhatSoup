@@ -28,7 +28,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-dispatcher.py",
-      "sha256": "09eb9c293443500e1773323f4fd7a3bfdbc04138fc310c3f112428807827373a",
+      "sha256": "7bf6cd2c8379b9d3a8a12194906f8483c8f6081ab491d3d0edb4383b009711ee",
       "mustContain": [
         "append_private_jsonl",
         "refusing to use private directory through symlink",
@@ -37,6 +37,8 @@
         "event_line(\"incident_key\", incident_key(event))",
         "redacted_state_text",
         "suppress_alerts_recovered_before_delivery",
+        "QUARANTINE_INCIDENT_SOURCES",
+        "event_created_order",
         "recovered_before_delivery",
         "UntrustedEntryError",
         "safe_open_entry",
@@ -366,7 +368,7 @@
     },
     {
       "path": "src/lib/bot-errors-outbox.ts",
-      "sha256": "93f9dcbd93832fa615b8637521978ea513cf4ecd85250f27c2fcbc55228b7781",
+      "sha256": "b740146619f77606e4d1116399f6dfae3a948de32bf212de87cee494847653b5",
       "mustContain": [
         "AUTHORIZATION_BEARER",
         "WHATSAPP_SERVICE_UNIT",
@@ -377,7 +379,7 @@
     },
     {
       "path": "src/lib/fault-taxonomy-registry.json",
-      "sha256": "497f2ea7c52dd4e915239dca7cdee9e35696e328fb8cdd9eecb72c08c3087ed7",
+      "sha256": "ba731b8bfaec5957cce4202437a40dfe644cf2b6bda9742d4a58cd0caa01eee7",
       "mustContain": [
         "whatsoup-fault-taxonomy-registry-v3",
         "runtimeAgentHealthSignals",
