@@ -16,6 +16,7 @@ import * as fs from 'node:fs';
 import { isValidInstanceName } from './instance-name.ts';
 import { escapeRegExp } from '../lib/regex-utils.ts';
 import { repoRoot, tmpRoot, xdgDir } from './paths.ts';
+import { SIGNAL } from '../lib/signals.ts';
 
 const execFileAsync = promisify(execFile);
 
@@ -658,10 +659,10 @@ export class DockerSupervisorServiceManager extends BaseServiceManager {
     const child = this.processes.get(name);
     if (!child) return;
 
-    child.kill('SIGTERM');
+    child.kill(SIGNAL.TERM);
     await new Promise<void>((resolve) => {
       const timer = setTimeout(() => {
-        try { child.kill('SIGKILL'); } catch { /* already exited */ }
+        try { child.kill(SIGNAL.KILL); } catch { /* already exited: the graceful stop above may have already reaped the child, so kill throwing here is expected and safe to ignore. */ }
         resolve();
       }, 15_000);
       child.once('exit', () => { clearTimeout(timer); resolve(); });
