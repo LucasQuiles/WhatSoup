@@ -13,7 +13,3 @@ export const AdapterReasonCode = {
 } as const;
 
 export type AdapterReasonCode = (typeof AdapterReasonCode)[keyof typeof AdapterReasonCode];
-
-export function allAdapterReasonCodes(): readonly AdapterReasonCode[] {
-  return Object.values(AdapterReasonCode);
-}
