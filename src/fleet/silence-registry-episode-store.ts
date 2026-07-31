@@ -238,10 +238,19 @@ interface ActiveEpisodeState {
 type ResolvedEpisodeState = ActiveEpisodeState | { status: 'primary_unreadable' } | { status: 'journal_unreadable' };
 
 export class SilenceRegistryEpisodeStore implements SilenceRegistryEpisodeStorePort {
+  // Fields are declared and assigned rather than written as constructor
+  // parameter properties: WhatSoup runs .ts directly under Node's strip-only
+  // mode, which rejects parameter properties outright.
+  private readonly statePath: string;
+  private readonly failoverStatePath: string;
+
   constructor(
-    private readonly statePath = silenceRegistryEpisodePath(),
-    private readonly failoverStatePath = join(dirname(statePath), SILENCE_REGISTRY_EPISODE_FAILOVER_FILENAME),
-  ) {}
+    statePath = silenceRegistryEpisodePath(),
+    failoverStatePath = join(dirname(statePath), SILENCE_REGISTRY_EPISODE_FAILOVER_FILENAME),
+  ) {
+    this.statePath = statePath;
+    this.failoverStatePath = failoverStatePath;
+  }
 
   read(): SilenceRegistryEpisodeRead {
     const loaded = this.resolveState(Date.now());

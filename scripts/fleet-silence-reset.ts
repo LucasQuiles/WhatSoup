@@ -1,4 +1,5 @@
 import { pathToFileURL } from 'node:url';
+import { parseClosedOptions } from './lib/cli-args.ts';
 import {
   SilenceRegistryResetPreconditionError,
   inspectSilenceRegistryReset,
@@ -30,30 +31,24 @@ function usage(): string {
 }
 
 function parseArgs(argv: string[]): CliArgs {
-  let confirmRevision: string | null = null;
-  let schema = false;
-  for (let index = 0; index < argv.length; index += 1) {
-    const flag = argv[index];
-    if (flag === '--schema') {
-      if (schema) throw new Error('duplicate --schema');
-      schema = true;
-      continue;
-    }
-    if (flag === '--format') {
-      const format = argv[index + 1];
-      if (format !== 'json') throw new Error('--format must be json');
-      index += 1;
-      continue;
-    }
-    if (flag !== '--confirm-reset') throw new Error(`unknown argument: ${flag}`);
-    if (confirmRevision !== null) throw new Error('duplicate --confirm-reset');
-    const value = argv[index + 1];
-    if (value === undefined || !REVISION_RE.test(value)) {
-      throw new Error('--confirm-reset requires a sha256 revision');
-    }
-    confirmRevision = value;
-    index += 1;
+  // parseClosedOptions covers duplicate, unknown, and missing-value uniformly —
+  // including `--confirm-reset --schema`, which a hand-rolled `argv[++i]` would
+  // silently accept as the revision on a destructive command.
+  const parsed = parseClosedOptions(argv, {
+    booleanOptions: ['--schema'],
+    valueOptions: ['--confirm-reset', '--format'],
+  });
+  if (parsed.error) throw new Error(parsed.error);
+
+  const format = parsed.values.get('--format');
+  if (format !== undefined && format !== 'json') throw new Error('--format must be json');
+
+  const confirmRevision = parsed.values.get('--confirm-reset') ?? null;
+  if (confirmRevision !== null && !REVISION_RE.test(confirmRevision)) {
+    throw new Error('--confirm-reset requires a sha256 revision');
   }
+
+  const schema = parsed.flags.has('--schema');
   if (schema && confirmRevision !== null) throw new Error('--schema cannot be combined with --confirm-reset');
   return { confirmRevision, schema };
 }

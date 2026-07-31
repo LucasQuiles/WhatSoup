@@ -847,8 +847,7 @@ export class HealthPoller {
       }
       this.silenceRegistryEpisodeJournalUnavailableLogged = false;
       if (recovery.action !== 'emit_recovery') return;
-      const result = this.emitSilenceRegistryRecovery();
-      if (result?.status !== 'durably_queued') return;
+      if (!this.emitSilenceRegistryRecovery()) return;
       const settled = this.silenceRegistryEpisodeStore.confirmRecovery(recovery.episodeId);
       if (settled.status === 'journal_unreadable' || !settled.settled) {
         this.noteSilenceRegistryEpisodeJournalUnavailable();
@@ -867,8 +866,7 @@ export class HealthPoller {
     }
     this.silenceRegistryEpisodeJournalUnavailableLogged = false;
     if (onset.action !== 'emit_onset') return;
-    const result = this.emitSilenceRegistryAlert(observation);
-    if (result?.status !== 'durably_queued') return;
+    if (!this.emitSilenceRegistryAlert(observation)) return;
     const settled = this.silenceRegistryEpisodeStore.confirmOnset(onset.episodeId);
     if (settled.status === 'journal_unreadable' || !settled.settled) {
       this.noteSilenceRegistryEpisodeJournalUnavailable();
@@ -883,33 +881,37 @@ export class HealthPoller {
     ].join(' ');
   }
 
-  private emitSilenceRegistryAlert(
-    observation: SilenceRegistryFailureObservation,
-  ): AlertEmissionResult | null {
+  /** True only when the alert reached durable queueing; the episode journal advances on that alone. */
+  private emitSilenceRegistryAlert(observation: SilenceRegistryFailureObservation): boolean {
     try {
-      return emitAlert(
+      const result = emitAlert(
         this.selfName,
         SILENCE_REGISTRY_ALERT_SOURCE,
         'silence registry unavailable',
         this.silenceRegistryEvidence(observation),
         'warning',
       );
+      if (result.status !== 'durably_queued') return false;
+      return true;
     } catch {
       log.warn({ source: SILENCE_REGISTRY_ALERT_SOURCE }, 'silence registry alert emission threw');
-      return null;
+      return false;
     }
   }
 
-  private emitSilenceRegistryRecovery(): AlertEmissionResult | null {
+  /** True only when the recovery reached durable queueing. */
+  private emitSilenceRegistryRecovery(): boolean {
     try {
-      return clearAlertSource(
+      const result = clearAlertSource(
         this.selfName,
         SILENCE_REGISTRY_ALERT_SOURCE,
         'recovery=fresh_observed',
       );
+      if (result.status !== 'durably_queued') return false;
+      return true;
     } catch {
       log.warn({ source: SILENCE_REGISTRY_ALERT_SOURCE }, 'silence registry recovery emission threw');
-      return null;
+      return false;
     }
   }
 
