@@ -286,6 +286,9 @@ describe('bot-errors-emit', () => {
   });
 
   it('records a reconstructable breadcrumb when the outbox is unwritable (B4)', () => {
+    if (typeof process.getuid === 'function' && process.getuid() === 0) {
+      return;
+    }
     tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-emit-'));
     const roParent = join(tmpRoot, 'ro-parent');
     const writefail = join(tmpRoot, 'writefail');
@@ -338,6 +341,9 @@ describe('bot-errors-emit', () => {
   });
 
   it('prefers the collector-visible home writefail fallback before TMPDIR', () => {
+    if (typeof process.getuid === 'function' && process.getuid() === 0) {
+      return;
+    }
     tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-emit-'));
     const roParent = join(tmpRoot, 'ro-parent');
     const home = join(tmpRoot, 'home');
