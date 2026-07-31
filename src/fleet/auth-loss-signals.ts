@@ -22,7 +22,7 @@ function normalizedSignalKey(value: unknown): string | null {
   return text === null ? null : text.toLowerCase().replace(/[^a-z0-9]/g, '');
 }
 
-export function isLoggedOutStatusCode(value: unknown): boolean {
+function isLoggedOutStatusCode(value: unknown): boolean {
   if (typeof value === 'number') return value === LOGGED_OUT_STATUS_CODE;
   const text = normalizedText(value);
   if (text === null || !/^\d+$/.test(text)) return false;
