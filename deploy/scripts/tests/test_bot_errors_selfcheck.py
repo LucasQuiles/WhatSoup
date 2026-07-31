@@ -981,7 +981,8 @@ def test_deployer_failure_is_reported_and_lock_is_released(tmp_path: Path):
     status = _mod.run_selfcheck(config, deps)
     assert status["action"] == "heal_failed"
     assert "deployer_rc=4" in status["problems"]
-    assert not config.lock_path.exists()
+    # #2474: release_lock no longer unlinks the pathname, only the flock.
+    assert config.lock_path.exists()
 
 
 def test_no_heal_mode_is_monitor_only(tmp_path: Path):
@@ -1613,7 +1614,10 @@ def test_acquire_lock_ignores_holderless_leftover_file(tmp_path: Path):
     # The PID is rewritten to ours for observability.
     assert lock.read_text(encoding="utf-8").strip() == str(os.getpid())
     _mod.release_lock(lock, fd)
-    assert not lock.exists()
+    # #2474: release_lock must not unlink the pathname -- a leftover file is not
+    # a stale lock (flock ownership is descriptor-scoped), and removing it here
+    # would let a fresh acquirer create a new inode at the same path mid-handoff.
+    assert lock.exists(), "release_lock must leave the pathname in place"
 
 
 def test_acquire_lock_respects_live_holder(tmp_path: Path):
@@ -1631,15 +1635,52 @@ def test_acquire_lock_respects_live_holder(tmp_path: Path):
 
 
 def test_release_lock_allows_immediate_reacquire(tmp_path: Path):
-    """release_lock frees the flock and removes the file so the next acquire wins."""
+    """release_lock frees the flock; the pathname persists (#2474), but the next
+    acquire still wins immediately because flock ownership is descriptor-scoped,
+    not path-scoped."""
     lock = tmp_path / "selfcheck.lock"
     fd = _mod.acquire_lock(lock)
     assert fd is not None
     _mod.release_lock(lock, fd)
-    assert not lock.exists()
+    assert lock.exists(), "the lock pathname must persist across release (#2474)"
     fd2 = _mod.acquire_lock(lock)
     assert fd2 is not None, "lock must be re-acquirable immediately after release"
     _mod.release_lock(lock, fd2)
+
+
+def test_release_lock_preserves_inode_identity_across_handoff(tmp_path: Path):
+    """#2474 regression: release_lock must not unlink the lock pathname, because
+    a released-then-reacquired lock must keep the SAME inode identity across a
+    handoff. Under the pre-fix release_lock (close, then unlink), a release here
+    deleted the pathname; a fresh acquirer then created a NEW inode at the same
+    path, and any contender that had opened the OLD inode before the unlink
+    could hold a live lock independent of a later contender's lock on the NEW
+    inode. The issue's own deterministic canary reproduced exactly that split:
+    ``second_holder_live=True, third_holder_live=True, split_inode=True``. This
+    test proves the fixed release_lock keeps a single, stable inode across the
+    handoff, and that a contender racing in while the new holder is live is
+    correctly blocked rather than free to create a second, independent lock."""
+    lock = tmp_path / "selfcheck.lock"
+    fd_a = _mod.acquire_lock(lock)
+    assert fd_a is not None
+    inode_a = lock.stat().st_ino
+
+    _mod.release_lock(lock, fd_a)
+    assert lock.exists(), "the pathname must survive release (identity must not change hands)"
+    assert lock.stat().st_ino == inode_a, "release must not touch inode identity"
+
+    fd_b = _mod.acquire_lock(lock)
+    assert fd_b is not None, "handoff acquire must succeed on the SAME inode"
+    assert lock.stat().st_ino == inode_a, "handoff must reuse the original inode, never a fresh one"
+
+    # A third contender racing in while B is live must be blocked on the SAME
+    # inode -- not free to create and lock a brand-new inode at the same path,
+    # which is exactly the split-inode condition #2474 describes.
+    fd_c = _mod.acquire_lock(lock)
+    assert fd_c is None, "a third contender must be blocked by the live holder on the shared inode"
+    assert lock.stat().st_ino == inode_a, "a blocked contender must not have replaced the inode"
+
+    _mod.release_lock(lock, fd_b)
 
 
 def test_stale_lock_file_no_longer_freezes_heal(tmp_path: Path):
