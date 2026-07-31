@@ -59,11 +59,13 @@ const API_BASE = '';
  * correlation ID — never raw response body bytes.
  */
 export class FleetApiError extends Error {
+  readonly status: number;
   readonly code: string;
   readonly correlation: string;
   constructor(status: number, code: string, message: string, correlation: string) {
     super(`${message} (${code})${correlation}`);
     this.name = 'FleetApiError';
+    this.status = status;
     this.code = code;
     this.correlation = correlation;
   }
