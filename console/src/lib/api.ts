@@ -40,6 +40,7 @@ import type {
   GroupInfo,
   LineInstance,
   LineMetrics,
+  MarkConversationReadResult,
   RateLimitsPayload,
   ApprovalsPayload,
   LogEntry,
@@ -434,8 +435,11 @@ export const api = {
       body: JSON.stringify({ conversationKey }),
     }),
 
+  // #2550: the instance route 404s (and apiFetch throws) on chat_not_found —
+  // a 200 body is always the ok:true shape, carrying the independent
+  // `remote` receipt (see MarkConversationReadResult doc for the split).
   markRead: (name: string, conversationKey: string) =>
-    apiFetch<{ ok: boolean }>(`/api/lines/${encodeURIComponent(name)}/mark-read`, {
+    apiFetch<MarkConversationReadResult>(`/api/lines/${encodeURIComponent(name)}/mark-read`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ conversation_key: conversationKey }),
