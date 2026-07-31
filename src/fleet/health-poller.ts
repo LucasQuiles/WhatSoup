@@ -1,7 +1,9 @@
 import { createChildLogger } from '../logger.ts';
 import {
+  clearAlertSource,
   clearAlertSourceChecked,
   emitAlert,
+  emitAlertChecked,
   type AlertEmissionResult,
 } from '../lib/emit-alert.ts';
 import type { BotErrorsCriticalAssetDiagnostic } from '../lib/bot-errors-outbox.ts';
@@ -10,7 +12,12 @@ import type { BotErrorsCriticalAssetDiagnostic } from '../lib/bot-errors-outbox.
 import { asRecord } from '../lib/type-guards.ts';
 import { sqliteUtcToEpochMs } from '../lib/sqlite-time.ts';
 import { ALERT_THROTTLE_INTERVAL_MS, loadAlertThrottleDetailed, recordAlertThrottle } from './alert-throttle-store.ts';
-import { isInstanceSilenced } from './silence-manager.ts';
+import * as silenceManager from './silence-manager.ts';
+import type { SilenceStoreReadResult } from './silence-manager.ts';
+import {
+  createSilenceRegistryEpisodeStore,
+  type SilenceRegistryEpisodeStorePort,
+} from './silence-registry-episode-store.ts';
 import { hasExplicitAuthLossSignal } from './auth-loss-signals.ts';
 import { AuthLossSignalStore, type AuthLossSignalInput } from './auth-loss-signal-store.ts';
 import type { FleetDbReader } from './db-reader.ts';
@@ -55,6 +62,7 @@ const HEALTH_SNAPSHOT_MAX_AGE_MS = 30_000;
 const HEALTH_SNAPSHOT_MAX_FUTURE_SKEW_MS = 5_000;
 const RECOVERY_CLEAR_WITHHELD_MSG = 'recovered alert clear withheld until recovery proof is complete';
 const RECOVERY_CLEAR_WITHHELD_EPISODE_END_MSG = 'recovery-clear withholding episode ended';
+const SILENCE_REGISTRY_ALERT_SOURCE = 'silence_registry_unavailable';
 const ALERT_SOURCES_SUPERSEDED_BY_LOGGED_OUT = new Set([
   'health_body_degraded',
   'health_probe_auth_failed',
@@ -68,6 +76,8 @@ const PHONE_LIKE_RE = /(^|[^\w])(\+?(?:\d[\d\s().-]{8,}\d))(?![\w])/g;
 const BEARER_SECRET_RE = /\b(Bearer\s+)[A-Za-z0-9._~+/=-]{12,}/gi;
 const KEYED_SECRET_RE = /\b(token|secret|password|passphrase|api[_-]?key|client[_-]?secret|access[_-]?token|refresh[_-]?token|authorization|cookie)=([^\s,;]+)/gi;
 const PEM_PRIVATE_KEY_RE = /-----BEGIN [^-]+ PRIVATE KEY-----[\s\S]*?-----END [^-]+ PRIVATE KEY-----/g;
+
+type SilenceRegistryFailureObservation = Exclude<SilenceStoreReadResult, { readBasis: 'current' }>;
 
 function readNonNegativeEnvInt(name: string, fallback: number): number {
   const raw = process.env[name]?.trim();
@@ -668,6 +678,7 @@ export class HealthPoller {
     string,
     { reason: string; since: number; count: number; name: string; source: string }
   > = new Map();
+  private silenceRegistryEpisodeJournalUnavailableLogged = false;
   private recoveryClearWithholdingEpisodes: Map<string, RecoveryClearWithholdingEpisode> = new Map();
   private targetPids: Map<string, number> = new Map();
   private readonly loopLagSampler: LoopLagSampler;
@@ -683,6 +694,7 @@ export class HealthPoller {
    * resolves it.
    */
   private readonly dbReader: FleetDbReader | null;
+  private readonly silenceRegistryEpisodeStore: SilenceRegistryEpisodeStorePort;
 
   constructor(
     getInstances: () => Map<string, InstanceHealth>,
@@ -691,6 +703,7 @@ export class HealthPoller {
     intervalMs = 5_000,
     loopLagSampler = new LoopLagSampler(),
     dbReader: FleetDbReader | null = null,
+    silenceRegistryEpisodeStore: SilenceRegistryEpisodeStorePort = createSilenceRegistryEpisodeStore(),
   ) {
     this.getInstances = getInstances;
     this.selfName = selfName;
@@ -698,6 +711,7 @@ export class HealthPoller {
     this.intervalMs = intervalMs;
     this.loopLagSampler = loopLagSampler;
     this.dbReader = dbReader;
+    this.silenceRegistryEpisodeStore = silenceRegistryEpisodeStore;
     const throttle = loadAlertThrottleDetailed();
     this.persistedAlertThrottle = throttle.entries;
     this.alertThrottleLoadErrorCode = throttle.loadError?.code ?? (throttle.loadError ? 'UNKNOWN' : null);
@@ -811,6 +825,100 @@ export class HealthPoller {
     }, 'alert suppression episode ended');
   }
 
+  /**
+   * The registry is an operator control plane, not an attribute of any failed
+   * instance. Observe it once per poll so an otherwise healthy fleet still
+   * emits a bounded, content-free onset and only a fresh strict read clears it.
+   * The lifecycle journal survives a normal restart; the only unresolved
+   * exactly-once boundary is the separate outbox/remote-delivery contract.
+   */
+  private observeSilenceRegistry(): void {
+    // Several older focused suites mock only isInstanceSilenced(). Keep the
+    // compatibility seam local while production always provides the reader.
+    if (!Object.hasOwn(silenceManager, 'getSilenceStoreObservation')) return;
+    const readObservation = silenceManager.getSilenceStoreObservation;
+
+    const observation = readObservation();
+    if (observation.availability === 'observed' && observation.readBasis === 'current') {
+      const recovery = this.silenceRegistryEpisodeStore.prepareRecovery();
+      if (recovery.status === 'journal_unreadable') {
+        this.noteSilenceRegistryEpisodeJournalUnavailable();
+        return;
+      }
+      this.silenceRegistryEpisodeJournalUnavailableLogged = false;
+      if (recovery.action !== 'emit_recovery') return;
+      const result = this.emitSilenceRegistryRecovery();
+      if (result?.status !== 'durably_queued') return;
+      const settled = this.silenceRegistryEpisodeStore.confirmRecovery(recovery.episodeId);
+      if (settled.status === 'journal_unreadable' || !settled.settled) {
+        this.noteSilenceRegistryEpisodeJournalUnavailable();
+      }
+      return;
+    }
+
+    if (observation.readBasis === 'current') return;
+    const onset = this.silenceRegistryEpisodeStore.prepareOnset({
+      reasonClass: observation.reasonClass,
+      readBasis: observation.readBasis,
+    });
+    if (onset.status === 'journal_unreadable') {
+      this.noteSilenceRegistryEpisodeJournalUnavailable();
+      return;
+    }
+    this.silenceRegistryEpisodeJournalUnavailableLogged = false;
+    if (onset.action !== 'emit_onset') return;
+    const result = this.emitSilenceRegistryAlert(observation);
+    if (result?.status !== 'durably_queued') return;
+    const settled = this.silenceRegistryEpisodeStore.confirmOnset(onset.episodeId);
+    if (settled.status === 'journal_unreadable' || !settled.settled) {
+      this.noteSilenceRegistryEpisodeJournalUnavailable();
+    }
+  }
+
+  private silenceRegistryEvidence(observation: SilenceRegistryFailureObservation): string {
+    return [
+      `availability=${observation.availability}`,
+      `reason_class=${observation.reasonClass}`,
+      `read_basis=${observation.readBasis}`,
+    ].join(' ');
+  }
+
+  private emitSilenceRegistryAlert(
+    observation: SilenceRegistryFailureObservation,
+  ): AlertEmissionResult | null {
+    try {
+      return emitAlert(
+        this.selfName,
+        SILENCE_REGISTRY_ALERT_SOURCE,
+        'silence registry unavailable',
+        this.silenceRegistryEvidence(observation),
+        'warning',
+      );
+    } catch {
+      log.warn({ source: SILENCE_REGISTRY_ALERT_SOURCE }, 'silence registry alert emission threw');
+      return null;
+    }
+  }
+
+  private emitSilenceRegistryRecovery(): AlertEmissionResult | null {
+    try {
+      return clearAlertSource(
+        this.selfName,
+        SILENCE_REGISTRY_ALERT_SOURCE,
+        'recovery=fresh_observed',
+      );
+    } catch {
+      log.warn({ source: SILENCE_REGISTRY_ALERT_SOURCE }, 'silence registry recovery emission threw');
+      return null;
+    }
+  }
+
+  private noteSilenceRegistryEpisodeJournalUnavailable(): void {
+    if (this.silenceRegistryEpisodeJournalUnavailableLogged) return;
+    this.silenceRegistryEpisodeJournalUnavailableLogged = true;
+    log.warn({ source: SILENCE_REGISTRY_ALERT_SOURCE }, 'silence registry episode journal unavailable');
+  }
+
   private lastAlertAtFor(name: string, existing: InstanceStatus | undefined): string | null {
     if (existing?.lastAlertAt) return existing.lastAlertAt;
     let latest = this.persistedAlertThrottle.get(name) ?? null;
@@ -833,6 +941,7 @@ export class HealthPoller {
   private async poll(): Promise<void> {
     const pollEpoch = this.pollEpoch;
     const instances = this.getInstances();
+    this.observeSilenceRegistry();
 
     const promises = Array.from(instances.entries()).map(async ([name, inst]) => {
       const pollRequestId = ++this.nextPollRequestId;
@@ -2207,11 +2316,11 @@ export class HealthPoller {
   ): boolean {
     const bypassSuppression = source === 'instance_logged_out';
     const throttleKey = this.alertThrottleKey(name, source);
-    if (!bypassSuppression && isInstanceSilenced(name)) {
+    const silenceState = bypassSuppression ? false : silenceManager.isInstanceSilenced(name);
+    if (silenceState === true) {
       this.noteAlertSuppressed(throttleKey, name, source, 'alert suppressed — instance is silenced');
       return false;
     }
-
     const existing = this.statuses.get(name);
     const lastAlertAt = this.persistedAlertThrottle.get(throttleKey) ?? null;
     if (!bypassSuppression && lastAlertAt !== null) {

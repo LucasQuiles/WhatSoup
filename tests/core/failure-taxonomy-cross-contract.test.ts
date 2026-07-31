@@ -82,6 +82,14 @@ function failedTerminal(failureClass: AttemptOutcome & { kind: 'failed' }): Turn
 }
 
 describe('failure taxonomy cross-contract', () => {
+  it('registers the bounded silence-registry outage source and its lifecycle owner', () => {
+    expect(registry.sourceDispositions['silence_registry_unavailable']).toEqual({
+      disposition: 'operator_control_plane_unavailable_requires_fresh_read',
+      owner: 'src/fleet/health-poller.ts',
+      test: 'tests/fleet/health-poller-suppression-episodes.test.ts',
+    });
+  });
+
   it('registers the complete runtime-agent numeric health projection with typed dispositions', () => {
     const expectedFields = [
       'activeSessions',

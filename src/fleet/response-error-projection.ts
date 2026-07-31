@@ -49,7 +49,8 @@ export type FleetErrorCode =
   | 'validation_failed'
   | 'internal_error'
   | 'embed_service_unavailable'
-  | 'log_scan_failed';
+  | 'log_scan_failed'
+  | 'silence_registry_unavailable';
 
 /** Bounded operation names. */
 export type FleetOperation =
@@ -140,6 +141,7 @@ const SAFE_MESSAGES: Record<FleetErrorCode, string> = {
   embed_service_unavailable:
     'The embedding service is unavailable. Try again in a moment.',
   log_scan_failed: 'Log scanning encountered an error.',
+  silence_registry_unavailable: 'The silence registry is unavailable.',
 };
 
 // ── Error classification ────────────────────────────────────────
@@ -193,6 +195,7 @@ export type ValidationMessageKey =
   | 'invalid_json'
   | 'invalid_decision_body'
   | 'invalid_request_body'
+  | 'invalid_silence_rule'
   | 'invalid_subject_type'
   | 'invalid_name';
 
@@ -200,6 +203,7 @@ const VALIDATION_MESSAGES: Record<ValidationMessageKey, string> = {
   invalid_json: 'Invalid JSON body.',
   invalid_decision_body: 'Invalid decision body.',
   invalid_request_body: 'Invalid request body.',
+  invalid_silence_rule: 'Invalid silence rule.',
   invalid_subject_type: 'Invalid subject type.',
   invalid_name: 'Name must be 2-30 lowercase alphanumeric/hyphens, starting with a letter.',
 };
@@ -249,6 +253,25 @@ export function validationError(
     stage: 'parse',
     message: VALIDATION_MESSAGES[messageKey],
     retryable: false,
+    mutation_state: 'not_started',
+    rollback_state: 'not_applicable',
+    correlation_id: randomUUID(),
+  };
+}
+
+/**
+ * Project a failed current silence-registry read without widening the public
+ * response schema with persistence diagnostics. The caller selects HTTP 409
+ * for a stale last-known-good mutation basis and 503 when no read basis exists.
+ */
+export function silenceRegistryUnavailableError(retryable: boolean): FleetErrorResponse {
+  return {
+    schema: 'fleet-error-v1',
+    code: 'silence_registry_unavailable',
+    operation: 'silence',
+    stage: 'precondition',
+    message: SAFE_MESSAGES.silence_registry_unavailable,
+    retryable,
     mutation_state: 'not_started',
     rollback_state: 'not_applicable',
     correlation_id: randomUUID(),
