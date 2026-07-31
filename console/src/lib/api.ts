@@ -474,6 +474,13 @@ export const api = {
   // notification-adjacent prefs with real persistence (fleet-silences.json).
   getSilences: () =>
     apiFetch<{
+      availability: 'observed' | 'uninitialized' | 'unavailable' | 'invalid'
+      readBasis: 'current' | 'last_known_good'
+      observedAt: string
+      revision?: string
+      reasonClass?: 'invalid_json' | 'invalid_document' | 'missing_after_observed' | 'permission_denied' | 'read_failed'
+      lastKnownGoodAt?: string
+      lastKnownGoodAgeMs?: number
       silences: Array<{
         instance: string
         until: string

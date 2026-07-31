@@ -32,9 +32,15 @@ vi.mock('../../console/src/hooks/toast-context', () => ({
 }))
 
 let mockSilences: Array<{ instance: string; until: string; reason: string | null; silencedBy: string; createdAt: string }> = []
+let mockSilenceAvailability: 'observed' | 'uninitialized' | 'unavailable' | 'invalid' = 'observed'
+let mockSilenceReadBasis: 'current' | 'last_known_good' = 'current'
 vi.mock('../../console/src/lib/api', () => ({
   api: {
-    getSilences: vi.fn(() => Promise.resolve({ silences: mockSilences })),
+    getSilences: vi.fn(() => Promise.resolve({
+      availability: mockSilenceAvailability,
+      readBasis: mockSilenceReadBasis,
+      silences: mockSilences,
+    })),
     silenceLine: vi.fn().mockResolvedValue({ ok: true, rule: {} }),
     unsilenceLine: vi.fn().mockResolvedValue({ ok: true }),
     setCredential: vi.fn().mockResolvedValue({ ok: true, service: 'deepseek' }),
@@ -94,6 +100,8 @@ function renderPage() {
 beforeEach(() => {
   mockLines = [makeLine('personal'), makeLine('support')]
   mockSilences = []
+  mockSilenceAvailability = 'observed'
+  mockSilenceReadBasis = 'current'
   themeState.theme = 'dark'
   themeState.setTheme.mockClear()
   Object.values(toastMock).forEach((fn) => fn.mockClear())
@@ -185,7 +193,42 @@ describe('v3.5 settings — Notifications (real silence backend)', () => {
     await waitFor(() => expect(container.querySelector('#notifications')).not.toBeNull())
     const n = container.querySelector('#notifications')!
     expect(n.textContent).toContain('no prefs store exists today')
-    expect(n.textContent).toContain('No active mutes')
+    await waitFor(() => expect(n.textContent).toContain('No active mutes'))
+  })
+
+  it('renders a first-run registry distinctly from an observed empty mute list', async () => {
+    mockSilenceAvailability = 'uninitialized'
+    const { container } = renderPage()
+
+    await waitFor(() => expect(container.querySelector('#notifications')!.textContent).toContain('No mute registry initialized'))
+    expect(container.querySelector('#notifications')!.textContent).not.toContain('No active mutes')
+  })
+
+  it('renders registry failure as unavailable and disables mute controls', async () => {
+    getSilencesMock.mockRejectedValueOnce(new Error('corrupt-registry-marker'))
+    const { container } = renderPage()
+
+    await waitFor(() => expect(container.querySelector('#notifications')!.textContent).toContain('Alert mutes unavailable'))
+    const muteBtn = [...container.querySelectorAll('#notifications button')].find((b) => b.textContent === 'mute') as HTMLButtonElement
+    expect(muteBtn.disabled).toBe(true)
+    expect(container.querySelector('#notifications')!.textContent).not.toContain('No active mutes')
+    expect(container.querySelector('#notifications')!.textContent).not.toContain('corrupt-registry-marker')
+  })
+
+  it('renders last-known-good rules as stale and disables both mutation directions', async () => {
+    mockSilenceAvailability = 'invalid'
+    mockSilenceReadBasis = 'last_known_good'
+    mockSilences = [
+      { instance: 'maintenance-line', until: '2026-07-31T00:00:00.000Z', reason: 'maintenance', silencedBy: 'operator', createdAt: '' },
+    ]
+    const { container } = renderPage()
+
+    await waitFor(() => expect(container.querySelector('#notifications')!.textContent).toContain('Alert mutes may be stale'))
+    const muteBtn = [...container.querySelectorAll('#notifications button')].find((b) => b.textContent === 'mute') as HTMLButtonElement
+    const unmuteBtn = [...container.querySelectorAll('#notifications button')].find((b) => b.textContent === 'unmute') as HTMLButtonElement
+    expect(muteBtn.disabled).toBe(true)
+    expect(unmuteBtn.disabled).toBe(true)
+    expect(container.querySelector('#notifications')!.textContent).not.toContain('No active mutes')
   })
 
   it('lists active silences and unsilence calls the real route', async () => {

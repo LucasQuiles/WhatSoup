@@ -12,6 +12,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   projectError,
+  silenceRegistryUnavailableError,
   validationError,
   mutationError,
   serviceActionError,
@@ -174,6 +175,20 @@ describe('response-error-projection — schema completeness', () => {
     expect(projected.code).toBe('restart_failed');
   });
 
+  it('projects a silence-registry precondition failure through the closed v1 schema', () => {
+    const projected = silenceRegistryUnavailableError(true);
+    expect(projected).toMatchObject({
+      schema: 'fleet-error-v1',
+      code: 'silence_registry_unavailable',
+      operation: 'silence',
+      stage: 'precondition',
+      retryable: true,
+      mutation_state: 'not_started',
+      rollback_state: 'not_applicable',
+    });
+    assertNoMarker(projected);
+  });
+
   it('every error code has a registered safe message', () => {
     const allCodes: FleetErrorResponse['code'][] = [
       'source_unavailable', 'permission_denied', 'storage_full',
@@ -181,7 +196,7 @@ describe('response-error-projection — schema completeness', () => {
       'restart_failed', 'rollback_failed', 'config_read_failed',
       'config_write_failed', 'instance_creation_failed', 'auth_failed',
       'auth_timeout', 'validation_failed', 'internal_error',
-      'embed_service_unavailable', 'log_scan_failed',
+      'embed_service_unavailable', 'log_scan_failed', 'silence_registry_unavailable',
     ];
     for (const code of allCodes) {
       const projected = serviceActionError(new Error('test'), 'unknown', code);

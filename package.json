@@ -25,6 +25,7 @@
     "audit-continuity-manifest": "bash scripts/run-with-pinned-node.sh scripts/audit-continuity-manifest.ts",
     "record-continuity-manifest": "bash scripts/run-with-pinned-node.sh scripts/record-continuity-manifest.ts",
     "close-recovery-catchup": "bash scripts/run-with-pinned-node.sh scripts/close-recovery-catchup.ts",
+    "fleet-silence-reset": "bash scripts/run-with-pinned-node.sh scripts/fleet-silence-reset.ts",
     "validate-private-operation-record": "bash scripts/run-with-pinned-node.sh scripts/validate-private-operation-record.ts",
     "triage:issues": "bash scripts/run-with-pinned-node.sh scripts/open-issue-triage.ts",
     "triage:priority-clusters": "bash scripts/run-with-pinned-node.sh scripts/open-issue-priority-clusters.ts",

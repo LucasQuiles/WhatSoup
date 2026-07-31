@@ -200,11 +200,18 @@ export function NotificationsSection() {
   const [muteLine, setMuteLine] = useState('')
   const [muteMinutes, setMuteMinutes] = useState('60')
 
-  const { data: silences } = useQuery({
+  const silenceQuery = useQuery({
     queryKey: ['fleet-silences'],
     queryFn: () => api.getSilences(),
     refetchInterval: 30_000,
   })
+  const silences = silenceQuery.data
+  const silenceRegistryCurrent = !silenceQuery.isPending
+    && !silenceQuery.isError
+    && silences?.readBasis === 'current'
+  const silenceRegistryStale = !silenceQuery.isPending
+    && !silenceQuery.isError
+    && silences?.readBasis === 'last_known_good'
   const invalidate = () => queryClient.invalidateQueries({ queryKey: ['fleet-silences'] })
   const mute = useMutation({
     mutationFn: () => api.silenceLine(muteLine, Number(muteMinutes) || 60, 'muted from Settings'),
@@ -235,29 +242,53 @@ export function NotificationsSection() {
       <div className="settings-panel">
         <div className="settings-panel__b">
           <div className="settings-colhead">Alert mutes (real — persisted host-side)</div>
-          {(silences?.silences ?? []).length === 0 ? (
-            <div className="settings-empty">No active mutes</div>
+          {silenceQuery.isPending ? (
+            <div className="settings-empty">Loading alert mutes…</div>
+          ) : silenceQuery.isError ? (
+            <div className="settings-empty" role="alert">
+              Alert mutes unavailable — the silence registry could not be read.
+              <Button variant="ghost" size="sm" onClick={() => { void silenceQuery.refetch() }}>
+                retry
+              </Button>
+            </div>
           ) : (
-            (silences?.silences ?? []).map((s) => (
-              <Row
-                key={s.instance}
-                ctl={
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    disabled={unsilence.isPending}
-                    onClick={() => unsilence.mutate(s.instance)}
-                  >
-                    unmute
+            <>
+              {silenceRegistryStale && (
+                <div className="settings-empty" role="alert">
+                  Alert mutes may be stale — the silence registry could not be read.
+                  <Button variant="ghost" size="sm" onClick={() => { void silenceQuery.refetch() }}>
+                    retry
                   </Button>
-                }
-              >
-                <RowLabel
-                  label={s.instance}
-                  sub={`until ${formatFullTime(s.until)}${s.reason ? ` · ${s.reason}` : ''}`}
-                />
-              </Row>
-            ))
+                </div>
+              )}
+              {silences?.availability === 'uninitialized' ? (
+                <div className="settings-empty">No mute registry initialized</div>
+              ) : (silences?.silences ?? []).length === 0 ? (
+                <div className="settings-empty">No active mutes</div>
+              ) : (
+                (silences?.silences ?? []).map((s) => (
+                  <Row
+                    key={s.instance}
+                    ctl={
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        disabled={unsilence.isPending || !silenceRegistryCurrent}
+                        title={silenceRegistryCurrent ? undefined : 'Silence registry unavailable'}
+                        onClick={() => unsilence.mutate(s.instance)}
+                      >
+                        unmute
+                      </Button>
+                    }
+                  >
+                    <RowLabel
+                      label={s.instance}
+                      sub={`until ${formatFullTime(s.until)}${s.reason ? ` · ${s.reason}` : ''}`}
+                    />
+                  </Row>
+                ))
+              )}
+            </>
           )}
           <Row
             ctl={
@@ -267,6 +298,7 @@ export function NotificationsSection() {
                   value={muteLine}
                   onChange={(e) => setMuteLine(e.target.value)}
                   className="settings-input"
+                  disabled={!silenceRegistryCurrent}
                 >
                   <option value="">line…</option>
                   {(lines ?? []).map((l) => (
@@ -281,11 +313,13 @@ export function NotificationsSection() {
                   onChange={(e) => setMuteMinutes(e.target.value)}
                   className="settings-input settings-input--minutes"
                   min={1}
+                  disabled={!silenceRegistryCurrent}
                 />
                 <Button
                   variant="neutral"
                   size="sm"
-                  disabled={!muteLine || mute.isPending}
+                  disabled={!muteLine || mute.isPending || !silenceRegistryCurrent}
+                  title={silenceRegistryCurrent ? undefined : 'Silence registry unavailable'}
                   onClick={() => mute.mutate()}
                 >
                   mute

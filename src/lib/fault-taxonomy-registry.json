@@ -734,6 +734,11 @@
       "owner": "deploy/scripts/bot-errors-dispatcher.py",
       "test": "deploy/scripts/tests/test_bot_errors_relay_flap_coalesce.py"
     },
+    "silence_registry_unavailable": {
+      "disposition": "operator_control_plane_unavailable_requires_fresh_read",
+      "owner": "src/fleet/health-poller.ts",
+      "test": "tests/fleet/health-poller-suppression-episodes.test.ts"
+    },
     "source_update": {
       "disposition": "source_update_probe_failure",
       "owner": "deploy/scripts/bot-errors-health-check.py",
