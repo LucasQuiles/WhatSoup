@@ -46,7 +46,7 @@ import {
   dueTriggers, validateTriggerSpec, isSafeSqliteSql,
   countPastDueTriggers, DEFAULT_TRIGGER_PAST_DUE_GRACE_SEC,
 } from './triggers.ts';
-import { TERMINAL, countOverdueProposals } from './beads.ts';
+import { TERMINAL, countOverdueProposals, expireOverdueProposals } from './beads.ts';
 import { writeBeadEvent } from './events.ts';
 import { nextCronRun } from '../cron.ts';
 import type { BeadStatus, TriggerKind, TriggerRow } from './types.ts';
@@ -127,6 +127,8 @@ export function isForbiddenTargetReject(err: unknown): boolean {
  * many rows — see checkOverdueProposalBacklog.
  */
 const DEFAULT_OVERDUE_PROPOSAL_ALERT_THRESHOLD = 10;
+const DEFAULT_OVERDUE_PROPOSAL_GRACE_SECONDS = 86400; // 24h past review_by_at (#2384)
+const DEFAULT_OVERDUE_PROPOSAL_BATCH_SIZE = 100;       // bounded per-tick expiry (#2384)
 /** Minimum seconds between WhatsApp notifications per trigger. */
 const NOTIFICATION_THROTTLE_MIN_INTERVAL_SEC = 300;
 /**
@@ -298,6 +300,18 @@ export interface TriggerPollerOptions {
    */
   overdueProposalAlertThreshold?: number;
   /**
+   * #2384 — grace window (seconds) past review_by_at before an overdue
+   * status='proposed' bead is transitioned to 'cancelled' by the expiry sweep.
+   * Default 86400 (24h). Production passes config.memory.sweep.overdueProposalGraceSeconds.
+   */
+  overdueProposalGraceSeconds?: number;
+  /**
+   * #2384 — max overdue proposals expired per poller tick. Default 100.
+   * Bounded so a large historical backlog drains gradually without blocking
+   * the poller's primary trigger-draining job.
+   */
+  overdueProposalBatchSize?: number;
+  /**
    * #1765 — grace window (seconds) before an active, never-fired trigger whose
    * next_fire_at is in the past is reported as a liveness violation. Default 24h
    * (86400s). Only consulted when `instance` is set (same gate as the backlog
@@ -406,6 +420,8 @@ export class TriggerPoller {
   private readonly agentJobDispatch: AgentJobDispatchFn | null;
   private readonly instance: string | null;
   private readonly overdueProposalAlertThreshold: number;
+  private readonly overdueProposalGraceSeconds: number;
+  private readonly overdueProposalBatchSize: number;
   /**
    * State-transition guard for the #1773 rem-3 backlog alert (mirrors
    * ConnectionManager.loggedOutAlertEmitted): fire once when the backlog
@@ -446,6 +462,8 @@ export class TriggerPoller {
     this.agentJobDispatch = opts.agentJobDispatch ?? null;
     this.instance = opts.instance ?? null;
     this.overdueProposalAlertThreshold = opts.overdueProposalAlertThreshold ?? DEFAULT_OVERDUE_PROPOSAL_ALERT_THRESHOLD;
+    this.overdueProposalGraceSeconds = opts.overdueProposalGraceSeconds ?? DEFAULT_OVERDUE_PROPOSAL_GRACE_SECONDS;
+    this.overdueProposalBatchSize = opts.overdueProposalBatchSize ?? DEFAULT_OVERDUE_PROPOSAL_BATCH_SIZE;
     this.triggerPastDueGraceSeconds = opts.triggerPastDueGraceSeconds ?? DEFAULT_TRIGGER_PAST_DUE_GRACE_SEC;
   }
 
@@ -514,6 +532,24 @@ export class TriggerPoller {
       this.checkOverdueProposalBacklog(now);
     } catch (err) {
       log.error({ err }, 'overdue-proposal backlog check failed unexpectedly');
+    }
+    // 3b. Overdue-proposal terminal sweep (#2384). Transitions stale proposals
+    //     past review_by_at + grace to 'cancelled' with a bounded system actor.
+    //     Isolated in its own try/catch so a sweep failure never disrupts the
+    //     trigger draining or liveness checks above/below. The sweep is bounded
+    //     (overdueProposalBatchSize) and restartable (all state in SQLite).
+    try {
+      const result = expireOverdueProposals(
+        this.db, now, this.overdueProposalGraceSeconds, this.overdueProposalBatchSize,
+      );
+      if (result.expired > 0 || result.skipped > 0) {
+        log.info(
+          { expired: result.expired, skipped: result.skipped },
+          'overdue-proposal expiry sweep processed rows',
+        );
+      }
+    } catch (err) {
+      log.error({ err }, 'overdue-proposal expiry sweep failed unexpectedly');
     }
     // 4. Liveness watchdog (#1765). Runs AFTER the due loop, which drains and
     //    stamps every trigger it processes — so a non-zero count here means the

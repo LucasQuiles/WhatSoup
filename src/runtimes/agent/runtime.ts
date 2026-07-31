@@ -3828,7 +3828,11 @@ export class AgentRuntime implements Runtime {
           const title = target && target.length > 0 ? target.slice(0, 200) : content.slice(0, 120);
           // review_by_at records a review horizon on the proposal. It is stored on
           // the bead and surfaced via get_bead/list_beads for manual/operator
-          // review; no automatic sweep cancels unreviewed rows past this horizon.
+          // review. #2384 added an automatic terminal sweep: proposals still
+          // 'proposed' past review_by_at + a grace window (default 24h) are
+          // transitioned to 'cancelled' by the poller's expiry step with actor
+          // 'system:overdue-sweep'. Manual approve_proposal/reject_proposal
+          // remain available and win any race against the sweep.
           // Default is config.memory.sweep.reviewByDays * 86400 seconds.
           const reviewByAt = Math.floor(Date.now() / 1000) + config.memory.sweep.reviewByDays * 86400;
           createBead(this.db.raw, {
