@@ -1,5 +1,5 @@
 import { existsSync } from 'node:fs';
-import { homedir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { config } from './config.ts';
 import logger, { createChildLogger, flushLogger } from './logger.ts';
@@ -1215,10 +1215,12 @@ async function shutdown(signal: string): Promise<void> {
 process.on('SIGINT', () => shutdown('SIGINT'));
 process.on('SIGTERM', () => shutdown('SIGTERM'));
 process.on('uncaughtException', (err) => {
-  // Stray stream ENOENT on /tmp files — Baileys opened a read stream on a temp file
-  // that was cleaned up before the read completed. Non-fatal; demote to warning.
+  // Stray stream ENOENT on temp files — Baileys opened a read stream on a temp
+  // file that was cleaned up before the read completed. Non-fatal; demote to
+  // warning. tmpdir()-derived so the suppression also works where the system
+  // temp dir is not /tmp (macOS /var/folders).
   const errno = err as NodeJS.ErrnoException;
-  if (errno.code === 'ENOENT' && errno.path && errno.path.startsWith('/tmp/')) {
+  if (errno.code === 'ENOENT' && errno.path && errno.path.startsWith(`${tmpdir()}/`)) {
     log.warn({ err, path: errno.path }, 'non-fatal ENOENT on temp file — suppressed crash');
     return;
   }
