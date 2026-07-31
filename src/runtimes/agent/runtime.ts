@@ -2663,7 +2663,8 @@ export class AgentRuntime implements Runtime {
       flushRouteMarker: (held, chatJid, actorJid) => runtime.flushRouteMarker(held, chatJid, actorJid),
       clearToolNames: (toolScopeKey) => runtime.clearToolNames(toolScopeKey),
       recordTurnCostUsd: (event) => runtime.recordTurnCostUsd(event),
-      recordTurnCapabilitySuccess: (isUserTurnResult) => runtime.recordTurnCapabilitySuccess(isUserTurnResult),
+      recordTurnCapabilitySuccess: (isUserTurnResult, session) =>
+        runtime.recordTurnCapabilitySuccess(isUserTurnResult, session),
       recordTurnCapabilityFailure: (isUserTurnResult, errorClass) =>
         runtime.recordTurnCapabilityFailure(isUserTurnResult, errorClass),
       recordFallbackTurnOutcome: (queue, hadVisibleOutput, hadToolWork, session, wasUnclassifiedError) =>
@@ -9296,6 +9297,22 @@ export class AgentRuntime implements Runtime {
     return this.registry.getDurabilityTelemetrySnapshot();
   }
 
+  private lastSuccessfulTurnSessionCurrent(): boolean | null {
+    const session = this.turnCapabilityTracker.lastSuccessfulTurnSession;
+    const binding = this.turnCapabilityTracker.lastSuccessfulTurnSessionBinding;
+    const provider = this.turnCapabilityTracker.lastSuccessfulTurnProvider;
+    if (session === null || binding === null || provider === null) return null;
+    const currentSessions = this.sessionScope === 'per_chat'
+      ? [...this.chatSessions.values()]
+      : this.session === null ? [] : [this.session];
+    if (!currentSessions.includes(session as SessionManager)) return false;
+    const current = session as SessionManager;
+    if (!current.getStatus().active) return false;
+    if (current.getProviderId() !== provider) return false;
+    if (typeof current.isEvidenceBindingCurrent !== 'function') return null;
+    return current.isEvidenceBindingCurrent(binding);
+  }
+
   private getTurnCapability(): RuntimeTurnCapability {
     const usability = this.primaryModelUsability;
     const { modelUsable, modelUsableStale, modelUsableCheckedAt } = deriveModelUsable(usability, Date.now());
@@ -9305,14 +9322,30 @@ export class AgentRuntime implements Runtime {
       modelUsableCheckedAt,
       modelUsabilityStatus: usability?.status ?? null,
       lastSuccessfulTurnAt: this.turnCapabilityTracker.lastSuccessfulTurnAt,
+      lastSuccessfulTurnProvider: this.turnCapabilityTracker.lastSuccessfulTurnProvider,
+      lastSuccessfulTurnSessionCurrent: this.lastSuccessfulTurnSessionCurrent(),
       lastTurnErrorClass: this.turnCapabilityTracker.lastTurnErrorClass,
       lastTurnErrorAt: this.turnCapabilityTracker.lastTurnErrorAt,
     };
   }
 
-  private recordTurnCapabilitySuccess(isUserTurnResult: boolean): void {
+  private recordTurnCapabilitySuccess(isUserTurnResult: boolean, session: SessionManager | null = null): void {
     if (!isUserTurnResult) return;
-    this.turnCapabilityTracker.recordSuccess();
+    const sessionBinding =
+      typeof session?.captureEvidenceBinding === 'function'
+        ? session.captureEvidenceBinding()
+        : null;
+    // Defensive typeof guard mirrors the other getProviderId call sites in this
+    // file (e.g. maybeStartAutoCompact, /status, recordProviderFallback) and the
+    // sibling captureEvidenceBinding read above: an indeterminate provider fails
+    // safe to null rather than throwing on a session that lacks the accessor.
+    const successProvider =
+      typeof session?.getProviderId === 'function' ? session.getProviderId() : null;
+    this.turnCapabilityTracker.recordSuccess(
+      successProvider,
+      session,
+      sessionBinding,
+    );
     this.consecutivePrimaryEmptyTurns = 0;
     this.consecutiveUnknownTerminalTurns = 0;
     if (this.isFallbackWindowActive) return; // #1884 follow-up: a fallback turn proves nothing about the primary

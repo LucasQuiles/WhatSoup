@@ -27,6 +27,10 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import { DatabaseSync } from 'node:sqlite';
 import { jsonResponse, readBody, requireInstance } from '../../lib/http.ts';
 import { errorMessage } from '../../lib/error-message.ts';
+import { projectError } from '../response-error-projection.ts';
+import { createChildLogger } from '../../logger.ts';
+
+const log = createChildLogger('fleet:checkpoints');
 import { publishFeedEvent, publishInstanceStatus } from '../realtime-publisher.ts';
 import type { FleetDiscovery } from '../discovery.ts';
 import type { FleetDbReader } from '../db-reader.ts';
@@ -119,11 +123,7 @@ export async function handleRestoreCheckpoint(
   try {
     await deps.serviceManager.stop(instance.name);
   } catch (err) {
-    jsonResponse(res, 500, {
-      error: `restore failed at stop: ${errorMessage(err)}`,
-      instance: instance.name,
-      conversationKey,
-    });
+    jsonResponse(res, 500, projectError(err, { operation: 'checkpoint_restore', stage: 'execute', mutationState: 'applied' }));
     return;
   }
 
@@ -146,29 +146,21 @@ export async function handleRestoreCheckpoint(
       db.close();
     }
   } catch (err) {
-    let restartAttempted = false;
     try {
       await deps.serviceManager.start(instance.name);
-      restartAttempted = true;
-    } catch { /* start failure reported below as part of the same 500 */ }
-    jsonResponse(res, 500, {
-      error: `restore failed at write: ${errorMessage(err)}`,
-      instance: instance.name,
-      conversationKey,
-      restartAttempted,
-    });
+    } catch (restartErr) {
+      // Log the restart failure internally (correlated via the projected response below);
+      // raw exception prose never enters the client response (#2517).
+      log.warn({ err: errorMessage(restartErr) }, 'checkpoint restore: restart after DB write failure');
+    }
+    jsonResponse(res, 500, projectError(err, { operation: 'checkpoint_restore', stage: 'commit', mutationState: 'applied' }));
     return;
   }
 
   try {
     await deps.serviceManager.start(instance.name);
   } catch (err) {
-    jsonResponse(res, 500, {
-      error: `restore write landed but start failed — instance is down: ${errorMessage(err)}`,
-      instance: instance.name,
-      conversationKey,
-      instanceDown: true,
-    });
+    jsonResponse(res, 500, projectError(err, { operation: 'checkpoint_restore', stage: 'verify', mutationState: 'applied' }));
     return;
   }
 
