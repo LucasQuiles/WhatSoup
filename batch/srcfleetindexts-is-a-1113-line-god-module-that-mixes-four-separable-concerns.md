@@ -1,0 +1,1 @@
+batch/srcfleetindexts-is-a-1113-line-god-module-that-mixes-four-separable-concerns — 25 issues bundled
