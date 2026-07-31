@@ -1,9 +1,9 @@
-import { spawn } from "node:child_process";
-import { accessSync, constants } from "node:fs";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { delimiter, join, resolve } from "node:path";
-import { getArchBinSuffix } from "../../../../lib/arch.ts";
+import { spawn } from 'node:child_process';
+import { accessSync, constants } from 'node:fs';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { delimiter, join, resolve } from 'node:path';
+import { getArchBinSuffix } from '../../../../lib/arch.ts';
 
 const DEFAULT_MAX_BUFFER_BYTES = 20 * 1024 * 1024;
 const KILL_GRACE_MS = 2_000;
@@ -12,27 +12,13 @@ const DEFAULT_EXECUTABLE_PATH = process.platform === 'darwin'
   : ['/usr/local/bin', '/usr/bin', '/bin'].join(delimiter);
 
 export function extensionForMimeType(mimeType: string): string {
-  if (mimeType.includes("ogg")) return "ogg";
-  if (mimeType.includes("mp4") || mimeType.includes("m4a")) return "m4a";
-  if (mimeType.includes("webm")) return "webm";
-  if (mimeType.includes("wav")) return "wav";
-  return "bin";
+  if (mimeType.includes('ogg')) return 'ogg';
+  if (mimeType.includes('mp4') || mimeType.includes('m4a')) return 'm4a';
+  if (mimeType.includes('webm')) return 'webm';
+  if (mimeType.includes('wav')) return 'wav';
+  return 'bin';
 }
 
-/**
- * Resolve a binary path on this host, trying both the bare name and the
- * architecture-suffixed variant (e.g. "ffmpeg-arm64" on arm64).
- *
- * Architecture-aware lookup: on platforms where prebuilt binaries are commonly
- * shipped with an arch suffix, the bare-name resolution may fail while the
- * arch-suffixed name succeeds. For example, on an arm64 macOS host where ffmpeg
- * is installed via Homebrew, only the arch-specific cellar path is on PATH.
- *
- * When the bare name is not found on PATH, each directory is re-checked with
- * the arch suffix (getArchBinSuffix()) before giving up. A bare absolute or
- * relative path (containing "/") is *not* suffixed — the caller controls that
- * path explicitly.
- */
 export function resolveBinaryPath(binary: string): string | null {
   const isExecutable = (candidate: string): boolean => {
     try {
@@ -43,29 +29,26 @@ export function resolveBinaryPath(binary: string): string | null {
     }
   };
 
-  // Absolute or relative path — caller controls the path; do not suffix.
-  if (binary.includes("/")) {
+  if (binary.includes('/')) {
     const candidate = resolve(binary);
     return isExecutable(candidate) ? candidate : null;
   }
 
-  // Collect PATH entries once.
   const pathDirs = (process.env.PATH ?? DEFAULT_EXECUTABLE_PATH).split(delimiter);
-
-  // First, try the bare binary name in each PATH directory.
   for (const dir of pathDirs) {
-    const candidate = resolve(dir || ".", binary);
+    const candidate = resolve(dir || '.', binary);
     if (isExecutable(candidate)) return candidate;
   }
 
-  // If that fails, try the arch-suffixed name (e.g. "ffmpeg-arm64") in each
-  // PATH directory. This handles hosts where prebuilt or Homebrew binaries
-  // use an arch-specific cellar path.
+  // If the bare name is not on PATH, retry each directory with the arch
+  // suffix (e.g. "ffmpeg-arm64") for hosts where prebuilt or Homebrew
+  // binaries use arch-specific names. Explicit paths (with "/") are never
+  // suffixed — the caller controls those.
   const archSuffix = getArchBinSuffix();
   if (archSuffix) {
     const archBinary = `${binary}${archSuffix}`;
     for (const dir of pathDirs) {
-      const candidate = resolve(dir || ".", archBinary);
+      const candidate = resolve(dir || '.', archBinary);
       if (isExecutable(candidate)) return candidate;
     }
   }
@@ -81,9 +64,9 @@ export async function runCommand(
   return await new Promise((resolve, reject) => {
     const controller = new AbortController();
     const child = spawn(command, args, {
-      stdio: ["ignore", "pipe", "pipe"],
+      stdio: ['ignore', 'pipe', 'pipe'],
       signal: controller.signal,
-      killSignal: "SIGTERM",
+      killSignal: 'SIGTERM',
     });
 
     const stdoutChunks: Buffer[] = [];
@@ -109,7 +92,7 @@ export async function runCommand(
       controller.abort();
       if (!killTimer) {
         killTimer = setTimeout(() => {
-          if (!exited) child.kill("SIGKILL");
+          if (!exited) child.kill('SIGKILL');
         }, KILL_GRACE_MS);
       }
     };
@@ -118,7 +101,7 @@ export async function runCommand(
       requestTermination(new Error(`Command timed out after ${timeoutMs}ms`));
     }, timeoutMs);
 
-    child.stdout?.on("data", (chunk: Buffer | string) => {
+    child.stdout?.on('data', (chunk: Buffer | string) => {
       const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
       stdoutBytes += buffer.length;
       stdoutChunks.push(buffer);
@@ -127,7 +110,7 @@ export async function runCommand(
       }
     });
 
-    child.stderr?.on("data", (chunk: Buffer | string) => {
+    child.stderr?.on('data', (chunk: Buffer | string) => {
       const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
       stderrBytes += buffer.length;
       stderrChunks.push(buffer);
@@ -136,19 +119,19 @@ export async function runCommand(
       }
     });
 
-    child.on("error", (error) => {
-      if (error.name === "AbortError") return;
+    child.on('error', (error) => {
+      if (error.name === 'AbortError') return;
       rejectOnce(new Error(error.message, { cause: error }));
     });
 
-    child.on("close", (code, signal) => {
+    child.on('close', (code, signal) => {
       if (settled) return;
       exited = true;
       settled = true;
       cleanup();
 
-      const stdout = Buffer.concat(stdoutChunks).toString("utf8");
-      const stderr = Buffer.concat(stderrChunks).toString("utf8");
+      const stdout = Buffer.concat(stdoutChunks).toString('utf8');
+      const stderr = Buffer.concat(stderrChunks).toString('utf8');
 
       if (pendingError) {
         reject(pendingError);
@@ -161,7 +144,7 @@ export async function runCommand(
       }
 
       reject(new Error(
-        stderr.trim() || stdout.trim() || `Command failed with code ${code ?? "null"}${signal ? ` signal ${signal}` : ""}`,
+        stderr.trim() || stdout.trim() || `Command failed with code ${code ?? 'null'}${signal ? ` signal ${signal}` : ''}`,
       ));
     });
   });
@@ -172,19 +155,19 @@ export async function withNormalizedAudioFile<T>(
   mimeType: string,
   fn: (wavPath: string) => Promise<T>,
 ): Promise<T> {
-  const ffmpeg = resolveBinaryPath("ffmpeg");
-  if (!ffmpeg) throw new Error("ffmpeg is not installed");
+  const ffmpeg = resolveBinaryPath('ffmpeg');
+  if (!ffmpeg) throw new Error('ffmpeg is not installed');
 
-  const dir = await mkdtemp(join(tmpdir(), "whatsoup-transcription-"));
+  const dir = await mkdtemp(join(tmpdir(), 'whatsoup-transcription-'));
   const inputPath = join(dir, `input.${extensionForMimeType(mimeType)}`);
-  const wavPath = join(dir, "normalized.wav");
+  const wavPath = join(dir, 'normalized.wav');
 
   try {
     await writeFile(inputPath, buffer);
     await runCommand(ffmpeg, [
-      "-hide_banner",
-      "-loglevel", "error",
-      "-y",
+      '-hide_banner',
+      '-loglevel', 'error',
+      '-y',
       // Untrusted-media hardening: `buffer` is attacker-controlled bytes (a
       // WhatsApp voice note) and ffmpeg auto-probes the container from CONTENT,
       // not the extension. A crafted concat/HLS payload would otherwise let
@@ -193,10 +176,10 @@ export async function withNormalizedAudioFile<T>(
       // reach off-disk, instead of relying on the host ffmpeg's implicit `safe`
       // default (which varies by version across the fleet). Placed before -i so
       // it governs the demuxer that opens the media.
-      "-protocol_whitelist", "file",
-      "-i", inputPath,
-      "-ar", "16000",
-      "-ac", "1",
+      '-protocol_whitelist', 'file',
+      '-i', inputPath,
+      '-ar', '16000',
+      '-ac', '1',
       wavPath,
     ], 30_000);
     return await fn(wavPath);
