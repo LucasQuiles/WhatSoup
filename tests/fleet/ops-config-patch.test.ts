@@ -189,7 +189,7 @@ describe('handleConfigUpdate PATCH validation', () => {
     );
 
     expect(res._status).toBe(400);
-    expect(JSON.parse(res._body).error).toMatch(/accessMode must be one of/);
+    expect(JSON.parse(res._body).message).toMatch(/accessMode must be one of/);
   });
 
   it('accepts all valid accessMode values', async () => {
@@ -408,7 +408,12 @@ describe('handleConfigUpdate PATCH validation', () => {
       );
 
       expect(res._status).toBe(500);
-      expect(JSON.parse(res._body).error).toMatch(/process lock active/);
+      // #2517: the raw lock-contention detail ('process lock active') is
+      // redacted into the closed fleet-error-v1 projection.
+      const lockBody = JSON.parse(res._body);
+      expect(lockBody.schema).toBe('fleet-error-v1');
+      expect(lockBody.code).toBe('internal_error');
+      expect(lockBody.message).not.toContain('process lock active');
       expect(JSON.parse(fs.readFileSync(configPath, 'utf-8')).model).toBe('old-model');
     } finally {
       releaseProcessLock(lock);

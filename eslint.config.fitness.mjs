@@ -164,6 +164,19 @@ const config = [
       ...ruleEntriesFor('arch.approved-api-client'),
     },
   },
+  {
+    // Fleet routes: no raw exception prose in responses (#2517).
+    files: ['src/fleet/routes/**/*.ts'],
+    linterOptions,
+    languageOptions: {
+      parser: tseslint.parser,
+      parserOptions: { ecmaVersion: 2024, sourceType: 'module' },
+    },
+    plugins,
+    rules: {
+      'fitness/no-raw-fleet-error': 'warn',
+    },
+  },
 ];
 
 export default config;
