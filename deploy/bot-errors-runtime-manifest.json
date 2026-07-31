@@ -153,7 +153,7 @@
         "collector_reachability_evidence"
       ],
       "path": "deploy/scripts/bot-errors-heartbeat-watchdog.py",
-      "sha256": "a4f1b9beb1402c07ee382328e44da562ac60683433c5a88e6b3f5e581c04ff8d"
+      "sha256": "c06e2507fc1e9623f433e55ae3d715c1017d80a4ba1e7c2d0fcdfd1454c15ba2"
     },
     {
       "mustContain": [

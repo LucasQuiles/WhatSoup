@@ -37,6 +37,24 @@ from lib.controller_log import (
 
 
 DEFAULT_CHECKS = "q_loop,dispatcher,collector,daily_health,queue_backlog,local_services,local_instance_health,browser_debug"
+
+# Canonical registry of all recognized watchdog check identifiers (#2465).
+# Every name here MUST have a corresponding branch in collect_problems() AND
+# an entry in active_reconcile_prefixes(). The drift-guard test enforces this
+# alignment so a future check added to only one location fails CI.
+KNOWN_WATCHDOG_CHECKS: frozenset[str] = frozenset({
+    "q_loop",
+    "dispatcher",
+    "collector",
+    "daily_health",
+    "queue_backlog",
+    "local_services",
+    "local_instance_health",
+    "fleet_sentinel",
+    "collector_roster",
+    "browser_debug",
+})
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 TERMINAL_AUTH_FAILURE_CLASSES = {"pairing_required", "serverside_logout_irreversible"}
 CONTROLLER_LOG_CONTEXT = ControllerLogContext("heartbeat_watchdog")
@@ -1807,8 +1825,31 @@ def browser_debug_problems() -> dict[str, str]:
 
 
 def configured_checks() -> set[str]:
+    """Parse and validate BOT_ERRORS_WATCHDOG_CHECKS against the canonical registry.
+
+    Fail-closed (#2465): an empty, whitespace-only, or unknown-token selector
+    raises ValueError rather than silently producing a zero-check green result.
+    A mixed valid+unknown selector is also rejected in full -- partial execution
+    of a misconfigured selector would mask the typo.
+    """
     raw = os.environ.get("BOT_ERRORS_WATCHDOG_CHECKS", DEFAULT_CHECKS)
-    return {part.strip() for part in raw.split(",") if part.strip()}
+    tokens = {part.strip() for part in raw.split(",") if part.strip()}
+    if not tokens:
+        raise ValueError(
+            "BOT_ERRORS_WATCHDOG_CHECKS is empty or whitespace-only; "
+            "an empty check set cannot produce a meaningful watchdog verdict "
+            "(every observer would be silently disabled). "
+            "Set it to a comma-separated subset of: "
+            + ",".join(sorted(KNOWN_WATCHDOG_CHECKS))
+        )
+    unknown = tokens - KNOWN_WATCHDOG_CHECKS
+    if unknown:
+        raise ValueError(
+            "BOT_ERRORS_WATCHDOG_CHECKS contains unknown token(s): "
+            + ",".join(sorted(unknown))
+            + ". Valid checks: " + ",".join(sorted(KNOWN_WATCHDOG_CHECKS))
+        )
+    return tokens
 
 
 def active_reconcile_prefixes(checks: set[str]) -> list[str]:
@@ -2268,7 +2309,15 @@ def reconcile(problems: dict[str, str], active_prefixes: list[str]) -> list[Path
 )
 def run_once(args: argparse.Namespace) -> int:
     validate_thresholds()
-    checks = configured_checks()
+    try:
+        checks = configured_checks()
+    except ValueError as exc:
+        # Configuration error: fail closed (#2465). Do NOT reconcile, refresh
+        # state, or print a green-looking result. Exit nonzero with a bounded
+        # diagnostic so supervisors see a configuration failure, not success.
+        print(f"configuration_error: {exc}", file=sys.stderr)
+        print(json.dumps({"time": now_iso(), "verdict": "configuration_error", "error": str(exc)}, sort_keys=True))
+        return 2
     problems = collect_problems(args, checks)
     written = reconcile(problems, active_reconcile_prefixes(checks))
     print(json.dumps({
