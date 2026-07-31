@@ -286,4 +286,35 @@ describe('silence-registry episode store', () => {
     const store = createSilenceRegistryEpisodeStore(statePath);
     expect(store.read()).toEqual({ status: 'journal_unreadable' });
   });
+
+  it('fails closed for a primary state carrying a failover owner marker', () => {
+    writeFileSync(statePath, `${JSON.stringify({
+      v: 1,
+      owner: 'failover',
+      phase: 'open',
+      episodeId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+      updatedAt: '2026-07-30T00:00:00.000Z',
+      reasonClass: 'invalid_json',
+      readBasis: 'none',
+      recoveryFrom: null,
+    })}\n`, { mode: 0o600 });
+    chmodSync(statePath, 0o600);
+    const store = createSilenceRegistryEpisodeStore(statePath);
+    expect(store.read()).toEqual({ status: 'journal_unreadable' });
+  });
+
+  it('fails closed for a state with a malformed episode id', () => {
+    writeFileSync(statePath, `${JSON.stringify({
+      v: 1,
+      phase: 'open',
+      episodeId: 'not-a-uuid',
+      updatedAt: '2026-07-30T00:00:00.000Z',
+      reasonClass: 'invalid_json',
+      readBasis: 'none',
+      recoveryFrom: null,
+    })}\n`, { mode: 0o600 });
+    chmodSync(statePath, 0o600);
+    const store = createSilenceRegistryEpisodeStore(statePath);
+    expect(store.read()).toEqual({ status: 'journal_unreadable' });
+  });
 });
