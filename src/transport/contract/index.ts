@@ -4,6 +4,7 @@ export * from './capabilities.ts';
 export * from './commands.ts';
 export * from './errors.ts';
 export * from './error-codes.ts';
+export * from './adapter-reason-codes.ts';
 export * from './events.ts';
 export * from './extensions.ts';
 export * from './subscription.ts';

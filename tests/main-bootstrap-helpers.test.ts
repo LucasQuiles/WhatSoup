@@ -69,7 +69,7 @@
  */
 
 import { EventEmitter } from 'node:events';
-import { homedir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { StoredMessage } from '../src/core/messages.ts';
 
@@ -841,16 +841,17 @@ describe('main.ts — uncovered helpers and signal paths', () => {
   // ── D2. uncaughtException handler ─────────────────────────────────────────
 
   describe('uncaughtException handler', () => {
-    it('suppresses crash for ENOENT errors on /tmp paths', async () => {
+    it('suppresses crash for ENOENT errors on system temp-dir paths', async () => {
       const h = await importMainWithMocks();
       const handler = h.processOn.handlers.get('uncaughtException')!;
       const exitSpy = vi.spyOn(process, 'exit').mockImplementation((() => {}) as never);
 
-      const enoentErr = Object.assign(new Error('ENOENT'), { code: 'ENOENT', path: '/tmp/some-temp-file' });
+      const tempFilePath = `${tmpdir()}/some-temp-file`;
+      const enoentErr = Object.assign(new Error('ENOENT'), { code: 'ENOENT', path: tempFilePath });
       (handler[0] as (err: Error) => void)(enoentErr);
 
       expect(h.logger.warn).toHaveBeenCalledWith(
-        expect.objectContaining({ path: '/tmp/some-temp-file' }),
+        expect.objectContaining({ path: tempFilePath }),
         'non-fatal ENOENT on temp file — suppressed crash',
       );
       // Should NOT call shutdown

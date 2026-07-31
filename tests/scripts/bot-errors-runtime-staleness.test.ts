@@ -154,6 +154,10 @@ function run(
       // Bind the source root to a synthetic target-process cmdline rather than
       // accepting a configured checkout fallback.
       BOT_ERRORS_STALENESS_PROC_ROOT: procRoot,
+      // The script refuses non-linux hosts (systemd probes only); tests
+      // simulate the supported platform so the suite passes on macOS dev
+      // machines. The platform-guard test overrides this.
+      BOT_ERRORS_DRY_SYS_PLATFORM: 'linux',
       ...fakeEnv,
       PATH: `${binDir}:${process.env.PATH ?? '/usr/bin:/bin'}`,
     },
@@ -339,6 +343,16 @@ describe('--config-check', () => {
     expect(r.status).toBe(0);
     expect(r.stdout).toContain('config ok');
     expect(r.stdout).not.toContain(emitScript);
+  });
+});
+
+describe('platform guard', () => {
+  it('refuses non-linux hosts with exit 2 instead of probing', () => {
+    const r = run(['--observe-only', '--json'], { BOT_ERRORS_DRY_SYS_PLATFORM: 'darwin' });
+    expect(r.status).toBe(2);
+    expect(r.stderr).toContain('unsupported platform');
+    expect(r.stderr).toContain("'darwin'");
+    expect(r.stdout).toBe('');
   });
 });
 
