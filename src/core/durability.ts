@@ -3125,6 +3125,15 @@ export async function drainPendingOutbound(
         continue;
       }
       try {
+        // #2813: replayed ops deliberately send WITHOUT a caller token, even
+        // when the original send carried one (QR-086 infra callers such as
+        // 'health'). sendTracked persists only { text } in the payload, so the
+        // caller identity does not survive the round-trip through the DB, and
+        // the replay takes the default guard path — the most restrictive one
+        // (no cold-floor bypass). Fail-safe by design: a replayed health send
+        // may be floored where the original would not have been. If the bypass
+        // must survive replay, persist the caller in the payload envelope and
+        // read it back here (issue #2813, remediation branch A).
         const receipt = await messenger.sendMessage(op.chat_jid, text);
         durability.markSubmitted(
           op.id,
