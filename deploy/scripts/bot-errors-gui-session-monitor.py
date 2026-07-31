@@ -40,6 +40,7 @@ import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
+from typing import NamedTuple
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
@@ -670,6 +671,130 @@ def fleet_path() -> Path:
     return REPO_ROOT / "deploy" / "bot-errors-expected-fleet.json"
 
 
+# ---------------------------------------------------------------------------
+# Inventory validation (#2467)
+#
+# The scheduled runtime (run_once) and installer preflight (config_check)
+# share one canonical validator.  An invalid inventory NEVER yields targets;
+# the caller must exit non-zero without probing, writing state, or emitting.
+# ---------------------------------------------------------------------------
+
+INVENTORY_VALID = "valid"
+INVENTORY_NOT_APPLICABLE = "not_applicable"
+INVENTORY_MISSING = "missing"
+INVENTORY_UNREADABLE = "unreadable"
+INVENTORY_MALFORMED = "malformed"
+INVENTORY_NON_OBJECT = "non_object"
+INVENTORY_INVALID_POLICY = "invalid_policy"
+INVENTORY_IMPLICIT_EMPTY = "implicit_empty"
+
+# Inventory statuses that represent a valid (green) inventory.
+INVENTORY_OK_STATUSES = frozenset({INVENTORY_VALID, INVENTORY_NOT_APPLICABLE})
+
+
+class InventoryValidationResult(NamedTuple):
+    """Typed result of fleet inventory validation.
+
+    Both config_check() and run_once() consume this so that the same
+    canonical validator protects installer preflight and every scheduled
+    runtime cycle (#2467).  An invalid result NEVER yields targets; the
+    caller must exit non-zero without probing, writing state, or emitting.
+    """
+    status: str
+    error: str | None
+    fleet: dict | None
+    targets: list
+
+
+def _fleet_declares_not_applicable(fleet: dict) -> bool:
+    """True when the fleet has at least one instance declaring not_applicable.
+
+    Distinguishes an intentionally-empty monitor scope (every relevant
+    instance is explicitly excluded) from an implicit-empty file (no hosts,
+    missing instances, or all entries silently excluded by default).
+    """
+    hosts = fleet.get("hosts")
+    if not isinstance(hosts, list):
+        return False
+    for host_entry in hosts:
+        if not isinstance(host_entry, dict):
+            continue
+        instances = host_entry.get("instances")
+        if not isinstance(instances, list):
+            continue
+        for instance in instances:
+            if not isinstance(instance, dict):
+                continue
+            policy = policy_for_target(host_entry, instance)
+            if policy == POLICY_NOT_APPLICABLE:
+                return True
+    return False
+
+
+def validate_inventory() -> InventoryValidationResult:
+    """Validate the expected-fleet inventory exactly once.
+
+    Replaces the silent-error pattern in load_fleet() with a typed result
+    that distinguishes valid (including explicitly empty / not_applicable)
+    from every invalid class.  This is the single canonical validator used
+    by both --config-check and the scheduled --once path (#2467).
+    """
+    path = fleet_path()
+    # --- read + parse ---
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            data = json.load(handle)
+    except FileNotFoundError:
+        return InventoryValidationResult(
+            INVENTORY_MISSING, f"expected fleet file not found: {path}", None, [])
+    except json.JSONDecodeError as exc:
+        return InventoryValidationResult(
+            INVENTORY_MALFORMED,
+            f"expected fleet file is not valid JSON: {path}: {exc}", None, [])
+    except OSError as exc:
+        return InventoryValidationResult(
+            INVENTORY_UNREADABLE,
+            f"expected fleet file is not readable: {path}: {exc}", None, [])
+
+    if not isinstance(data, dict):
+        return InventoryValidationResult(
+            INVENTORY_NON_OBJECT,
+            f"expected fleet file must contain a JSON object: {path}", None, [])
+
+    # --- semantic validation ---
+    unknown = unknown_policy_values(data)
+    if unknown:
+        detail = ", ".join(
+            f"{o['host']}" + (f"/{o['instance']}" if o["instance"] else "") + f"={o['value']!r}"
+            for o in unknown
+        )
+        return InventoryValidationResult(
+            INVENTORY_INVALID_POLICY,
+            "expected fleet file declares unknown guiSessionExpected policy value(s): "
+            f"{detail}; known values: {sorted(KNOWN_GUI_SESSION_POLICIES)}: {path}",
+            None, [])
+
+    private_override_error = private_override_contract_error(data)
+    if private_override_error is not None:
+        return InventoryValidationResult(
+            INVENTORY_INVALID_POLICY, private_override_error, None, [])
+
+    # --- target enumeration ---
+    targets = gui_targets_from_fleet(data)
+    if targets:
+        return InventoryValidationResult(INVENTORY_VALID, None, data, targets)
+
+    # Zero targets: distinguish explicit not_applicable from implicit-empty.
+    if _fleet_declares_not_applicable(data):
+        return InventoryValidationResult(INVENTORY_NOT_APPLICABLE, None, data, targets)
+
+    return InventoryValidationResult(
+        INVENTORY_IMPLICIT_EMPTY,
+        "expected fleet file has no GUI-session monitor targets and no explicit "
+        f"not_applicable declaration: {path}",
+        None, [])
+
+
 def load_fleet() -> dict:
     try:
         with fleet_path().open("r", encoding="utf-8") as handle:
@@ -683,42 +808,17 @@ def load_fleet() -> dict:
 
 def config_check() -> int:
     """Validate monitor configuration without probing hosts or writing state."""
-    path = fleet_path()
-    try:
-        with path.open("r", encoding="utf-8") as handle:
-            data = json.load(handle)
-    except (OSError, json.JSONDecodeError) as exc:
-        print(f"expected fleet file is not readable JSON: {path}: {exc}", file=sys.stderr)
-        return 2
-    if not isinstance(data, dict):
-        print(f"expected fleet file must contain a JSON object: {path}", file=sys.stderr)
-        return 2
-
-    unknown = unknown_policy_values(data)
-    if unknown:
-        detail = ", ".join(
-            f"{o['host']}" + (f"/{o['instance']}" if o["instance"] else "") + f"={o['value']!r}"
-            for o in unknown
-        )
-        print(
-            "expected fleet file declares unknown guiSessionExpected policy value(s): "
-            f"{detail}; known values: {sorted(KNOWN_GUI_SESSION_POLICIES)}: {path}",
-            file=sys.stderr,
-        )
-        return 2
-
-    private_override_error = private_override_contract_error(data)
-    if private_override_error is not None:
-        print(private_override_error, file=sys.stderr)
-        return 2
-
-    targets = gui_targets_from_fleet(data)
-    if not targets:
-        print(f"expected fleet file has no GUI-session monitor targets: {path}", file=sys.stderr)
-        return 2
-
-    print(f"gui-session-monitor config ok: expected_fleet={path} targets={len(targets)}")
-    return 0
+    result = validate_inventory()
+    if result.status == INVENTORY_VALID:
+        print(f"gui-session-monitor config ok: expected_fleet={fleet_path()} "
+              f"targets={len(result.targets)}")
+        return 0
+    if result.status == INVENTORY_NOT_APPLICABLE:
+        print(f"gui-session-monitor config ok (not_applicable): "
+              f"expected_fleet={fleet_path()} targets=0")
+        return 0
+    print(result.error, file=sys.stderr)
+    return 2
 
 
 def state_path() -> Path:
@@ -862,12 +962,18 @@ def emit_event(emit_argv: list[str], *, dry_run: bool) -> int:
 
 def run_once(*, dry_run: bool) -> int:
     threshold = default_failure_threshold()
-    fleet = load_fleet()
-    private_override_error = private_override_contract_error(fleet)
-    if private_override_error is not None:
-        print(private_override_error, file=sys.stderr)
+    result = validate_inventory()
+    if result.status not in INVENTORY_OK_STATUSES:
+        # Invalid inventory: fail closed, preserve prior state, emit nothing.
+        # The scheduled runtime must agree with config_check on every invalid
+        # class (#2467) — missing, unreadable, malformed, non-object, invalid
+        # policy, and implicit-empty all exit 2 without probing.
+        print(result.error, file=sys.stderr)
         return 2
-    targets = gui_targets_from_fleet(fleet)
+    if result.status == INVENTORY_NOT_APPLICABLE:
+        # Explicitly-empty scope: valid, no probes, no state mutation.
+        return 0
+    targets = result.targets
     state = load_state()
     exit_code = 0
     for target in targets:

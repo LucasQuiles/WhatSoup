@@ -1355,7 +1355,7 @@ def test_config_check_fails_closed_on_unreadable_invalid_json(mod, tmp_path, mon
 
     assert mod.config_check() == 2
     captured = capsys.readouterr()
-    assert "not readable JSON" in captured.err
+    assert "not valid JSON" in captured.err
 
 
 def test_config_check_fails_closed_on_non_dict_json_payload(mod, tmp_path, monkeypatch, capsys):
@@ -2206,8 +2206,12 @@ def test_run_once_private_override_error_returns_two(mod, monkeypatch, tmp_path,
     assert "config error" in capsys.readouterr().err
 
 
-def test_run_once_empty_targets_returns_zero(mod, monkeypatch, tmp_path):
-    """An empty target list (no GUI bots) is valid — returns 0, writes empty state."""
+def test_run_once_empty_targets_fails_closed(mod, monkeypatch, tmp_path, capsys):
+    """An implicit-empty fleet (no targets, no not_applicable) must fail closed (#2467).
+
+    Previously run_once silently returned 0 with zero targets — erasing all
+    coverage. Now it exits 2 and preserves prior state without overwriting it.
+    """
     fleet_file = tmp_path / "fleet.json"
     fleet_file.write_text('{"hosts":[]}', encoding="utf-8")
     monkeypatch.setattr(mod, "fleet_path", lambda: fleet_file)
@@ -2217,8 +2221,10 @@ def test_run_once_empty_targets_returns_zero(mod, monkeypatch, tmp_path):
     monkeypatch.setattr(mod, "save_state", lambda s: saved.update(s))
 
     rc = mod.run_once(dry_run=False)
-    assert rc == 0
-    assert saved == {}
+    assert rc == 2
+    assert saved == {}  # prior state NOT overwritten
+    captured = capsys.readouterr()
+    assert "no GUI-session monitor targets" in captured.err
 
 
 # ---------------------------------------------------------------------------
