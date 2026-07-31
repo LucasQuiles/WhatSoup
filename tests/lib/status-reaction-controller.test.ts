@@ -250,6 +250,108 @@ describe('createStatusReactionController', () => {
     await vi.waitFor(() => expect(adapter.calls.set).toContain('🤔'));
   });
 
+  it('swallows adapter errors silently when onError is not provided (default no-op)', async () => {
+    const adapter: StatusReactionAdapter = {
+      async setReaction() { throw new Error('boom'); },
+      async clearReaction() { throw new Error('boom'); },
+    };
+    const ctrl = createStatusReactionController(adapter, { emojis, removeAfterFinalize: false });
+    expect(() => ctrl.setQueued()).not.toThrow();
+    await new Promise((r) => setImmediate(r));
+  });
+
+  it('defaults to clearing the reaction 3000ms after finalize when options are omitted', async () => {
+    vi.useFakeTimers();
+    const adapter = makeAdapter();
+    // No removeAfterFinalize / removeDelayMs: exercises both defaults (true, 3000).
+    const ctrl = createStatusReactionController(adapter, { emojis });
+    ctrl.setDone();
+    await vi.advanceTimersByTimeAsync(3000);
+    expect(adapter.calls.clear).toBe(1);
+    vi.useRealTimers();
+  });
+
+  it('uses an injected setTimeout instead of the global one when scheduling removal', async () => {
+    const adapter = makeAdapter();
+    const scheduled: Array<number | undefined> = [];
+    // Firing the callback inline proves the controller routed scheduling
+    // through the injected function without arming any real timer.
+    const customSetTimeout = ((fn: () => void, ms?: number) => {
+      scheduled.push(ms);
+      fn();
+      return 0 as unknown as ReturnType<typeof setTimeout>;
+    }) as typeof setTimeout;
+    const ctrl = createStatusReactionController(adapter, {
+      emojis,
+      removeAfterFinalize: true,
+      removeDelayMs: 250,
+      setTimeout: customSetTimeout,
+    });
+    ctrl.setDone();
+    await new Promise((r) => setImmediate(r));
+    expect(scheduled).toEqual([250]);
+    expect(adapter.calls.clear).toBe(1);
+  });
+
+  it('uses an injected clearTimeout when clear() cancels an already-armed removal timer', async () => {
+    const adapter = makeAdapter();
+    const clearedHandles: unknown[] = [];
+    const customClearTimeout = ((handle: Parameters<typeof clearTimeout>[0]) => {
+      clearedHandles.push(handle);
+      clearTimeout(handle);
+    }) as typeof clearTimeout;
+    const ctrl = createStatusReactionController(adapter, {
+      emojis,
+      removeAfterFinalize: true,
+      removeDelayMs: 10_000,
+      clearTimeout: customClearTimeout,
+    });
+    ctrl.setDone();
+    // Let the post-finalize .then(scheduleRemoval) continuation actually run (a real
+    // event-loop turn, not just the synchronous push inside applyEmoji) so the
+    // removal timer is armed before clear() tries to cancel it.
+    await new Promise((r) => setImmediate(r));
+    await new Promise((r) => setImmediate(r));
+    ctrl.clear();
+    expect(clearedHandles.length).toBe(1);
+  });
+
+  it('resolves stall-hard to its own emoji when specified', async () => {
+    const adapter = makeAdapter();
+    const ctrl = createStatusReactionController(adapter, { emojis, removeAfterFinalize: false });
+    ctrl.setStallHard();
+    await vi.waitFor(() => expect(adapter.calls.set).toContain('⏰'));
+  });
+
+  it('falls back stall-hard to stall-soft when stallHard is absent', async () => {
+    const adapter = makeAdapter();
+    const partial: StatusReactionEmojis = {
+      queued: '👍', thinking: '🤔', tool: '🔧', done: '✅', error: '❌', stallSoft: '⏳',
+    };
+    const ctrl = createStatusReactionController(adapter, { emojis: partial, removeAfterFinalize: false });
+    ctrl.setStallHard();
+    await vi.waitFor(() => expect(adapter.calls.set).toContain('⏳'));
+  });
+
+  it('falls back stall-hard to error when both stallHard and stallSoft are absent', async () => {
+    const adapter = makeAdapter();
+    const minimal: StatusReactionEmojis = {
+      queued: '👍', thinking: '🤔', tool: '🔧', done: '✅', error: '❌',
+    };
+    const ctrl = createStatusReactionController(adapter, { emojis: minimal, removeAfterFinalize: false });
+    ctrl.setStallHard();
+    await vi.waitFor(() => expect(adapter.calls.set).toContain('❌'));
+  });
+
+  it('uses the explicit compacting emoji when specified (no fallback)', async () => {
+    const adapter = makeAdapter();
+    // `emojis` (module-level const above) includes compacting: '📦' — the
+    // existing fallback test only exercises the absent-compacting path.
+    const ctrl = createStatusReactionController(adapter, { emojis, removeAfterFinalize: false });
+    ctrl.setCompacting();
+    await vi.waitFor(() => expect(adapter.calls.set).toContain('📦'));
+  });
+
   it('getState() returns null initially', () => {
     const adapter = makeAdapter();
     const ctrl = createStatusReactionController(adapter, { emojis });
