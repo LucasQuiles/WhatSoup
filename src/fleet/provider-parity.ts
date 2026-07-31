@@ -14,7 +14,14 @@ export type ProviderParityExpectation = 'always_on' | 'on_demand' | 'no_bot' | '
 export type ProviderParityInstanceType = 'agent' | 'chat' | 'unknown';
 export type ProviderParityVerdict = 'green' | 'warn' | 'blocked' | 'inconclusive' | 'not_applicable';
 export type ProviderParityCredentialState = 'present' | 'missing' | 'native' | 'mixed' | 'unknown';
-export type ProviderParityProbeState = 'ok' | 'failed' | 'skipped' | 'inconclusive' | 'not_required' | 'unknown';
+// Aggregate probe state derives from the per-probe snapshot domain so a new
+// snapshot state cannot silently diverge: 'headless_auth_inconclusive'
+// collapses to 'inconclusive' at aggregation (see providerProbeState), and
+// the set-level-only states are added explicitly.
+export type ProviderParityProbeState =
+  | Exclude<ProviderProbeSnapshotState, 'headless_auth_inconclusive'>
+  | 'not_required'
+  | 'unknown';
 
 export interface ProviderParityExpectedInstance {
   host: string;
