@@ -210,6 +210,30 @@ describe('drainPendingOutbound()', () => {
     expect(getOutbound(db, 2)['status']).toBe('submitted');
   });
 
+  // #2813: caller identity does not survive the DB round-trip. sendTracked
+  // persists only { text } — even when the original send carried a QR-086
+  // infra caller ('health') — so the replay must go out as a plain 2-arg
+  // sendMessage with NO caller option: the default, most restrictive guard
+  // path (no cold-floor bypass). This test pins that default-to-agent
+  // decision explicitly.
+  it('replays without a caller token even when the original send carried one (#2813 default-to-agent)', async () => {
+    // Exactly what sendTracked writes for a caller: 'health' send — the
+    // caller is NOT part of the persisted payload.
+    const opId = engine.createOutboundOp({
+      conversationKey: 'k1', chatJid: 'j1@s.whatsapp.net', opType: 'text',
+      payload: JSON.stringify({ text: 'health status ping' }), replayPolicy: 'safe',
+    });
+    expect(getOutbound(db, opId)['status']).toBe('pending');
+
+    const messenger = makeMessenger(async () => ({ waMessageId: 'WA_REPLAY_NO_CALLER' }));
+    const { resent } = await drainPendingOutbound(messenger, engine);
+
+    expect(resent).toBe(1);
+    // Exact-args assertion: a third { caller } argument would fail this.
+    expect(messenger.sendMessage).toHaveBeenCalledWith('j1@s.whatsapp.net', 'health status ping');
+    expect(vi.mocked(messenger.sendMessage).mock.calls[0]).toHaveLength(2);
+  });
+
   it('markSending is a CAS: true on a pending op (→sending), false on an already-sending op (no-op)', () => {
     const opId = engine.createOutboundOp({
       conversationKey: 'k1', chatJid: 'j1@s.whatsapp.net', opType: 'text',
