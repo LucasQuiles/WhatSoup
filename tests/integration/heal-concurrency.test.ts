@@ -264,14 +264,14 @@ describe('12.2.4: emitHealReport suppresses when same error class is active', ()
 
     const firstId = emitHealReport(db, messenger, null, {
       type: 'crash',
-      stderr: 'ReferenceError: foo is not defined',
+      crashClass: 'provider_unknown',
     });
     expect(firstId).not.toBeNull();
 
     // Active report exists for this class → second must be suppressed
     const secondId = emitHealReport(db, messenger, null, {
       type: 'crash',
-      stderr: 'ReferenceError: foo is not defined',
+      crashClass: 'provider_unknown',
     });
     expect(secondId).toBeNull();
 
@@ -294,7 +294,7 @@ describe('12.2.5: rapid crash loop — only first emitHealReport creates a row',
 
     const crashData = {
       type: 'crash' as const,
-      stderr: 'MemoryError: allocation failure at heap',
+      crashClass: 'provider_unknown',
     };
 
     const id1 = emitHealReport(db, messenger, null, crashData);
@@ -325,7 +325,6 @@ describe('12.2.5: rapid crash loop — only first emitHealReport creates a row',
 
     const crashData = {
       type: 'service_crash' as const,
-      stderr: 'SIGKILL received',
     };
 
     expect(() => {

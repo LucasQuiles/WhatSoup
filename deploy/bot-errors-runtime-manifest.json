@@ -1,7 +1,12 @@
 {
+  "schemaVersion": 1,
+  "generatedAt": "2026-07-28T12:38:40Z",
+  "scope": "bot-errors-runtime-scripts",
   "expectedHeadShaPolicy": "populated at deploy time by deploy step; absent here so committed state is observability-only",
   "files": [
     {
+      "path": "deploy/scripts/bot-errors-collector.py",
+      "sha256": "f0485adc8dafd0175962f83a667f8a5d9a02dfe656f79844c8be29f76345fa38",
       "mustContain": [
         "append_private_jsonl",
         "refusing to use private directory through symlink",
@@ -19,11 +24,11 @@
         "remote_liveness_probe_ok",
         "tailscale_ping_command",
         "collector_remote_unreachable"
-      ],
-      "path": "deploy/scripts/bot-errors-collector.py",
-      "sha256": "f0485adc8dafd0175962f83a667f8a5d9a02dfe656f79844c8be29f76345fa38"
+      ]
     },
     {
+      "path": "deploy/scripts/bot-errors-dispatcher.py",
+      "sha256": "09eb9c293443500e1773323f4fd7a3bfdbc04138fc310c3f112428807827373a",
       "mustContain": [
         "append_private_jsonl",
         "refusing to use private directory through symlink",
@@ -37,22 +42,21 @@
         "safe_open_entry",
         "safe_read_json",
         "safe_is_regular_entry",
-        "quarantine_untrusted_entry",
-        "writefail_invalid_envelope"
-      ],
-      "path": "deploy/scripts/bot-errors-dispatcher.py",
-      "sha256": "cdd268188f3f62aebbc729c9f0be537b63d2bc9eb6e18ddf872309e84037333e"
+        "quarantine_untrusted_entry"
+      ]
     },
     {
+      "path": "deploy/scripts/bot-errors-emit.py",
+      "sha256": "990a860e1787f5883f2f055dfdc4b796410ec3ceec41ac24e5d2077a0027c181",
       "mustContain": [
         "O_NOFOLLOW",
         "refusing to use private directory through symlink",
         "outbox_write_failure"
-      ],
-      "path": "deploy/scripts/bot-errors-emit.py",
-      "sha256": "990a860e1787f5883f2f055dfdc4b796410ec3ceec41ac24e5d2077a0027c181"
+      ]
     },
     {
+      "path": "deploy/scripts/bot-errors-gui-session-monitor.py",
+      "sha256": "8720776527c3dca43da31bb13b3f53a38719a8074d4899c4139c2f8b409340ca",
       "mustContain": [
         "classify_gui_session",
         "gui_targets_from_fleet",
@@ -67,11 +71,11 @@
         "privateMonitorOverrideRequired",
         "private_override_contract_error",
         "config_check"
-      ],
-      "path": "deploy/scripts/bot-errors-gui-session-monitor.py",
-      "sha256": "8720776527c3dca43da31bb13b3f53a38719a8074d4899c4139c2f8b409340ca"
+      ]
     },
     {
+      "path": "deploy/scripts/bot-errors-health-check.py",
+      "sha256": "ba34d57cd9ef5c338358dc6a26fc74dbbf71629dbe72c2c633ece178d55d730e",
       "mustContain": [
         "critical_file_problem",
         "mustContain",
@@ -135,21 +139,12 @@
         "load_runtime_agent_health_signals",
         "runtime_agent_health_signal_registry_invalid",
         "BOT_ERRORS_HEALTH_BODY_MAX_AGE_SECONDS",
-        "BOT_ERRORS_HEALTH_BODY_MAX_FUTURE_SKEW_SECONDS",
-        "runtime_agent_last_session_lifetime_age_seconds",
-        "runtime_agent_last_successful_turn_age_seconds",
-        "runtime_agent_last_successful_turn_provider",
-        "runtime_agent_last_successful_turn_session_current",
-        "health_provider_observation_fresh",
-        "health_provider_progress_fresh",
-        "health_provider_progress_session_current",
-        "health_provider_effective_evidence_valid",
-        "live_provider_progress_authoritative"
-      ],
-      "path": "deploy/scripts/bot-errors-health-check.py",
-      "sha256": "89da19c302062cd56f43fde0b45b964eb79ca43dcab55242c2655e35883280f5"
+        "BOT_ERRORS_HEALTH_BODY_MAX_FUTURE_SKEW_SECONDS"
+      ]
     },
     {
+      "path": "deploy/scripts/bot-errors-heartbeat-watchdog.py",
+      "sha256": "2f3812382e823800f35af75a2d4f5d5e6477b6cc5af2788880b93a5a7847f009",
       "mustContain": [
         "BOT_ERRORS_Q_LOOP_STATE_DIR",
         "BOT_ERRORS_FLEET_SENTINEL_HEARTBEAT",
@@ -160,11 +155,11 @@
         "redact_watchdog_text",
         "browser_debug_problems",
         "collector_reachability_evidence"
-      ],
-      "path": "deploy/scripts/bot-errors-heartbeat-watchdog.py",
-      "sha256": "2f3812382e823800f35af75a2d4f5d5e6477b6cc5af2788880b93a5a7847f009"
+      ]
     },
     {
+      "path": "deploy/scripts/bot-errors-q-loop.py",
+      "sha256": "c906d987a653d581916dcf709536d5c61000d2f012972a5f218d315ce6264f4b",
       "mustContain": [
         "q_unavailable_reason",
         "session_limit",
@@ -173,63 +168,62 @@
         "state_integrity_failed",
         "redact_json_value(state)",
         "BOT_ERRORS_Q_LOOP_STATE_DIR"
-      ],
-      "path": "deploy/scripts/bot-errors-q-loop.py",
-      "sha256": "c906d987a653d581916dcf709536d5c61000d2f012972a5f218d315ce6264f4b"
+      ]
     },
     {
+      "path": "deploy/scripts/bot-errors-release-proof-run.sh",
+      "sha256": "d52598ac7204805f5f5f3e4eb6b77ebe2e9693b756e55aba248d5b7b00375fac",
       "mustContain": [
         "BOT_ERRORS_RELEASE_PROOF_MODE",
         "exit 75",
         "flock -n 9"
-      ],
-      "path": "deploy/scripts/bot-errors-release-proof-run.sh",
-      "sha256": "d52598ac7204805f5f5f3e4eb6b77ebe2e9693b756e55aba248d5b7b00375fac"
+      ]
     },
     {
+      "path": "deploy/scripts/bot-errors-runner.py",
+      "sha256": "cc937f0fe4eba5887250b7ed01575f9c0a9272c5b39eb7c75152bb1c344b156c",
       "mustContain": [
         "O_NOFOLLOW",
         "refusing to use private directory through symlink",
-        "outbox_write_failure",
-        "new_event_fields"
-      ],
-      "path": "deploy/scripts/bot-errors-runner.py",
-      "sha256": "cc937f0fe4eba5887250b7ed01575f9c0a9272c5b39eb7c75152bb1c344b156c"
+        "outbox_write_failure"
+      ]
     },
     {
+      "path": "deploy/scripts/bot-errors-runtime-staleness.py",
+      "sha256": "1c9c6b94542d477e2eede4489881dacf03b34ab86eb9ce9eb76620eb6b9d890f",
       "mustContain": [
         "Runtime code-staleness monitor",
         "runtime_stale"
-      ],
-      "path": "deploy/scripts/bot-errors-runtime-staleness.py",
-      "sha256": "1c9c6b94542d477e2eede4489881dacf03b34ab86eb9ce9eb76620eb6b9d890f"
+      ]
     },
     {
+      "path": "deploy/scripts/bot-errors-selfcheck.py",
+      "sha256": "41dbe1ff8ddc52583e2c39cc8599caaa1513f9721aa102c9f6c87b82a602297c",
       "mustContain": [
         "SAFE_HEAL_CLASSES",
         "HEAL_WINDOW_SECONDS"
-      ],
-      "path": "deploy/scripts/bot-errors-selfcheck.py",
-      "sha256": "41dbe1ff8ddc52583e2c39cc8599caaa1513f9721aa102c9f6c87b82a602297c"
+      ]
     },
     {
+      "path": "deploy/scripts/bot-errors-sentinel.py",
+      "sha256": "caa218d899c4152a0a85aa9d957e0838228190fe48a0c3bc929b9e5e689c8aa7",
       "mustContain": [
         "DEFAULT_HEARTBEAT_MAX_AGE_SECONDS",
         "DEFAULT_HYSTERESIS_CYCLES"
-      ],
-      "path": "deploy/scripts/bot-errors-sentinel.py",
-      "sha256": "4aa5a264732441b6079a72bfa06df626b492dbd08089345d4bd8f3c14c6454ac"
+      ]
     },
     {
+      "path": "deploy/scripts/bot-errors-tree-provenance.py",
+      "sha256": "75eabfbd561ac89dcb608b6399280227771590582ed3de36e130562559b578d9",
       "mustContain": [
         "tree_provenance_inventory",
         "def redact_ref",
         "def redact_path_segment"
-      ],
-      "path": "deploy/scripts/bot-errors-tree-provenance.py",
-      "sha256": "75eabfbd561ac89dcb608b6399280227771590582ed3de36e130562559b578d9"
+      ]
     },
     {
+      "path": "deploy/scripts/bot_errors_cutover.py",
+      "sha256": "dae9e37f841216837f2ec9481d4534a9bad0a27ef265c1d33fec9b1d862f6232",
       "mustContain": [
         "restore_service_to_always_on",
         "cutover_gate",
@@ -237,11 +231,11 @@
         "_LEGAL_EXPECTED_STATES",
         "atomic_write_json",
         "always_on"
-      ],
-      "path": "deploy/scripts/bot_errors_cutover.py",
-      "sha256": "dae9e37f841216837f2ec9481d4534a9bad0a27ef265c1d33fec9b1d862f6232"
+      ]
     },
     {
+      "path": "deploy/scripts/install-bot-errors-gui-monitor-launchd.sh",
+      "sha256": "dfaeee0c0224b3dc1fe1c89df7179d6e6adbf951479697378168b2dba3439f06",
       "mustContain": [
         "read_env_value",
         "env_or_default",
@@ -251,49 +245,49 @@
         "bot-errors-gui-session-monitor.py",
         "--dry-run",
         "--config-check"
-      ],
-      "path": "deploy/scripts/install-bot-errors-gui-monitor-launchd.sh",
-      "sha256": "dfaeee0c0224b3dc1fe1c89df7179d6e6adbf951479697378168b2dba3439f06"
+      ]
     },
     {
+      "path": "deploy/scripts/install-bot-errors-release-proof.sh",
+      "sha256": "032b3b4d1eb001729315cf6d32614be9e0b5723a653e8f2b1140cf2731465224",
       "mustContain": [
         "host gate",
         "RECEIPT",
-        "daemon-reload",
-        "bot_errors_envelope.py"
-      ],
-      "path": "deploy/scripts/install-bot-errors-release-proof.sh",
-      "sha256": "032b3b4d1eb001729315cf6d32614be9e0b5723a653e8f2b1140cf2731465224"
+        "daemon-reload"
+      ]
     },
     {
+      "path": "deploy/scripts/lib/__init__.py",
+      "sha256": "438146338f7ceac8c0ecda8d7c6a7fb13fe88a0749bad1accf39ad92e4370da0",
       "mustContain": [
         "Shared helpers for manifest-tracked BOT ERRORS deploy scripts"
-      ],
-      "path": "deploy/scripts/lib/__init__.py",
-      "sha256": "438146338f7ceac8c0ecda8d7c6a7fb13fe88a0749bad1accf39ad92e4370da0"
+      ]
     },
     {
+      "path": "deploy/scripts/lib/bot_errors_daily_health.py",
+      "sha256": "45b9b3e23ffda454a8315c1ec80ffc81c691e8ef37f3b20cb3386eaaa2af5bea",
       "mustContain": [
         "daily_health_host_from_payload",
         "normalize_hub_host",
         "remoteHost"
-      ],
-      "path": "deploy/scripts/lib/bot_errors_daily_health.py",
-      "sha256": "45b9b3e23ffda454a8315c1ec80ffc81c691e8ef37f3b20cb3386eaaa2af5bea"
+      ]
     },
     {
       "path": "deploy/scripts/lib/bot_errors_envelope.py",
       "sha256": "79be73a209d502108ff78edb2fa248b9010bb04d911309b375760fa980d34760",
       "mustContain": [
-        "SCHEMA_VERSION = 2",
+        "SCHEMA_VERSION",
+        "EVENT_KINDS",
         "class EnvelopeError",
-        "def classify_event",
-        "def normalize_event",
-        "def new_event_fields",
-        "unexpected_legacy_event_kind"
+        "class EventClassification",
+        "classify_event",
+        "normalize_event",
+        "new_event_fields"
       ]
     },
     {
+      "path": "deploy/scripts/lib/bot_errors_redaction.py",
+      "sha256": "274316080daac4fb1949e357e2d1688938a9d44fb63330ed2bef524ef73f4301",
       "mustContain": [
         "redact_bot_errors_text",
         "CREDENTIAL_PATH_RE",
@@ -302,37 +296,34 @@
         "AUTHORIZATION_KEYED_RE",
         "WHATSAPP_SERVICE_UNIT_RE",
         "PEM_PRIVATE_KEY_RE"
-      ],
-      "path": "deploy/scripts/lib/bot_errors_redaction.py",
-      "sha256": "274316080daac4fb1949e357e2d1688938a9d44fb63330ed2bef524ef73f4301"
+      ]
     },
     {
+      "path": "deploy/scripts/lib/bot_errors_roster.py",
+      "sha256": "d5b0e418a46320bff46e9948b00b58a917922930e0649155db15bb1a6fea335c",
       "mustContain": [
         "roster_digest",
         "roster_inventory",
         "load_roster"
-      ],
-      "path": "deploy/scripts/lib/bot_errors_roster.py",
-      "sha256": "d5b0e418a46320bff46e9948b00b58a917922930e0649155db15bb1a6fea335c"
+      ]
     },
     {
+      "path": "deploy/scripts/lib/classify_health.py",
+      "sha256": "782cad21c8fff5be8e57bda78b2429d2f115457705af116518e7555e8b7b2ab7",
       "mustContain": [
         "def classify(d: object) -> str:"
-      ],
-      "path": "deploy/scripts/lib/classify_health.py",
-      "sha256": "782cad21c8fff5be8e57bda78b2429d2f115457705af116518e7555e8b7b2ab7"
+      ]
     },
     {
+      "path": "deploy/scripts/lib/controller_log.py",
+      "sha256": "2ae8bd93f0ef836ea3c20eb00198a8e25b19f33644e0a58b12a45e2755a8e795",
       "mustContain": [
         "ControllerLogContext",
         "diagnostic_best_effort",
         "controller_cycle",
         "metadata_only_controller_details",
-        "write_controller_log",
-        "invalid_kind_severity"
-      ],
-      "path": "deploy/scripts/lib/controller_log.py",
-      "sha256": "2ae8bd93f0ef836ea3c20eb00198a8e25b19f33644e0a58b12a45e2755a8e795"
+        "write_controller_log"
+      ]
     },
     {
       "path": "deploy/scripts/lib/controller_state.py",
@@ -346,6 +337,8 @@
       ]
     },
     {
+      "path": "deploy/scripts/lib/sentinel_pin.py",
+      "sha256": "4edd3c96fa28128567a01d698dc6a8e72a738d681a04269457c4ebb3e593b0b6",
       "mustContain": [
         "O_NOFOLLOW",
         "_classify_open_failure",
@@ -357,11 +350,11 @@
         "def compute_manifest_digest(",
         "def load_approved_manifest_digests(",
         "manifest_digest"
-      ],
-      "path": "deploy/scripts/lib/sentinel_pin.py",
-      "sha256": "4edd3c96fa28128567a01d698dc6a8e72a738d681a04269457c4ebb3e593b0b6"
+      ]
     },
     {
+      "path": "deploy/scripts/render-watchdog.py",
+      "sha256": "be0fb4a07bd7a1962a115924e430a749771ae718dd5a5dc76856eb48054ba290",
       "mustContain": [
         "PLACEHOLDER_TOKENS",
         "EXIT_UNSUBSTITUTED",
@@ -369,34 +362,28 @@
         "def cmd_render",
         "def cmd_verify",
         "find_placeholders"
-      ],
-      "path": "deploy/scripts/render-watchdog.py",
-      "sha256": "be0fb4a07bd7a1962a115924e430a749771ae718dd5a5dc76856eb48054ba290"
+      ]
     },
     {
+      "path": "src/lib/bot-errors-outbox.ts",
+      "sha256": "93f9dcbd93832fa615b8637521978ea513cf4ecd85250f27c2fcbc55228b7781",
       "mustContain": [
         "AUTHORIZATION_BEARER",
         "WHATSAPP_SERVICE_UNIT",
         "constants.O_NOFOLLOW",
         "redactOutboxValue(event)",
-        "recordBotErrorsWritefail",
-        "newBotErrorsEnvelope"
-      ],
-      "path": "src/lib/bot-errors-outbox.ts",
-      "sha256": "93f9dcbd93832fa615b8637521978ea513cf4ecd85250f27c2fcbc55228b7781"
+        "recordBotErrorsWritefail"
+      ]
     },
     {
+      "path": "src/lib/fault-taxonomy-registry.json",
+      "sha256": "497f2ea7c52dd4e915239dca7cdee9e35696e328fb8cdd9eecb72c08c3087ed7",
       "mustContain": [
         "whatsoup-fault-taxonomy-registry-v3",
         "runtimeAgentHealthSignals",
         "turnRecoveryBlockedUnsafe",
         "autoCompactActiveBackoffScopes"
-      ],
-      "path": "src/lib/fault-taxonomy-registry.json",
-      "sha256": "23c712318b449d80d8809a8811f064bad3d936140743c41d2657907341d84f13"
+      ]
     }
-  ],
-  "generatedAt": "2026-07-30T04:09:19Z",
-  "schemaVersion": 1,
-  "scope": "bot-errors-runtime-scripts"
+  ]
 }

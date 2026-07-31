@@ -217,13 +217,37 @@ describe('AgentRuntime crash reporting — supervisor reaps vs provider faults',
     expect(emitHealReport).toHaveBeenCalledTimes(1);
   });
 
-  it('pages for an untagged SIGKILL — a kill nobody here issued is a genuine crash', () => {
-    surface.emitCrashHealReport(CHAT_JID, crashInfo(), false);
+  it('preserves a bounded SessionManager fallback class without forwarding diagnostics', () => {
+    surface.emitCrashHealReport(CHAT_JID, crashInfo({
+      exitCode: null,
+      signal: null,
+      crashClass: 'spawn_error',
+    }), false);
+
+    expect(emitHealReport).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.anything(),
+      null,
+      { type: 'crash', crashClass: 'spawn_error' },
+      null,
+    );
+  });
+
+  it('projects an untagged crash into bounded reporter input without identity or diagnostics', () => {
+    const canary = 'RUNTIME_CRASH_CANARY_DO_NOT_LEAK';
+    surface.emitCrashHealReport(CHAT_JID, crashInfo({
+      provider: canary,
+      crashClass: canary,
+      stderrPreview: canary,
+    }), false);
     expect(emitHealReport).toHaveBeenCalledTimes(1);
-    expect(vi.mocked(emitHealReport).mock.calls[0][3]).toMatchObject({
+    const input = vi.mocked(emitHealReport).mock.calls[0][3];
+    expect(input).toMatchObject({
       type: 'crash',
-      chatJid: CHAT_JID,
-      signal: 'SIGKILL',
+      termination: 'exit_or_signal',
     });
+    expect(JSON.stringify(input)).not.toContain(CHAT_JID);
+    expect(JSON.stringify(input)).not.toContain(canary);
+    expect(JSON.stringify(input)).not.toContain('SIGKILL');
   });
 });

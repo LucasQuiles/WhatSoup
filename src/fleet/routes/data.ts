@@ -7,6 +7,7 @@ import type { FleetDiscovery } from '../discovery.ts';
 import type { FleetDbReader, MessageRow } from '../db-reader.ts';
 import { proxyToInstance } from '../http-proxy.ts';
 import { configRoot } from '../paths.ts';
+import { projectError, validationError } from '../response-error-projection.ts';
 
 import { inspectLatestLogFile, readTailLinesDetailed } from '../log-utils.ts';
 import { resolveGroupNames } from '../group-resolver.ts';
@@ -139,7 +140,7 @@ export function handleGetChats(
 
   const result = deps.dbReader.getChats(instance.name, instance.dbPath, { limit, offset });
   if (!result.ok) {
-    jsonResponse(res, 500, { error: result.error });
+    jsonResponse(res, 500, projectError(result.error ?? result, { operation: 'log_scan', stage: 'execute' }));
     return;
   }
 
@@ -236,7 +237,7 @@ export function handleGetChats(
   });
 
   if (!enriched.ok) {
-    jsonResponse(res, 500, { error: enriched.error });
+    jsonResponse(res, 500, projectError(enriched.error ?? enriched, { operation: 'log_scan', stage: 'execute' }));
     return;
   }
 
@@ -274,7 +275,7 @@ export function handleGetMessages(
   const qs = parseQueryString(req.url);
   const conversationKey = qs.conversation_key;
   if (!conversationKey) {
-    jsonResponse(res, 400, { error: 'missing required query parameter: conversation_key' });
+    jsonResponse(res, 400, validationError('invalid_request_body', 'log_scan'));
     return;
   }
 
@@ -287,7 +288,7 @@ export function handleGetMessages(
     limit,
   });
   if (!result.ok) {
-    jsonResponse(res, 500, { error: result.error });
+    jsonResponse(res, 500, projectError(result.error ?? result, { operation: 'log_scan', stage: 'execute' }));
     return;
   }
 
@@ -310,7 +311,7 @@ export function handleSearchMessages(
   const qs = parseQueryString(req.url);
   const query = qs.q?.trim() ?? '';
   if (!query) {
-    jsonResponse(res, 400, { error: 'missing required query parameter: q' });
+    jsonResponse(res, 400, validationError('invalid_request_body', 'log_scan'));
     return;
   }
 
@@ -324,7 +325,7 @@ export function handleSearchMessages(
   });
 
   if (!result.ok) {
-    jsonResponse(res, 500, { error: result.error });
+    jsonResponse(res, 500, projectError(result.error ?? result, { operation: 'log_scan', stage: 'execute' }));
     return;
   }
 
@@ -345,7 +346,7 @@ export function handleGetAccess(
 
   const result = deps.dbReader.getAccessList(instance.name, instance.dbPath);
   if (!result.ok) {
-    jsonResponse(res, 500, { error: result.error });
+    jsonResponse(res, 500, projectError(result.error ?? result, { operation: 'log_scan', stage: 'execute' }));
     return;
   }
 
@@ -377,11 +378,7 @@ export function handleGetLogs(
 
   const logResult = inspectLatestLogFile(instance.logDir);
   if (!logResult.ok) {
-    jsonResponse(res, 503, {
-      error: 'log evidence unavailable',
-      code: logResult.code ?? 'UNKNOWN',
-      detail: logResult.error,
-    });
+    jsonResponse(res, 503, projectError(logResult.error ?? new Error('log scan failed'), { operation: 'log_scan', stage: 'execute' }));
     return;
   }
   if (!logResult.file) {
@@ -393,11 +390,7 @@ export function handleGetLogs(
   // readTailLinesDetailed reads last 64KB and returns up to maxLines — same logic that was inlined here
   const tailResult = readTailLinesDetailed(logFile, 2000);
   if (!tailResult.ok) {
-    jsonResponse(res, 503, {
-      error: 'log evidence unavailable',
-      code: tailResult.code ?? 'UNKNOWN',
-      detail: tailResult.error,
-    });
+    jsonResponse(res, 503, projectError(tailResult.error ?? new Error('log tail failed'), { operation: 'log_tail', stage: 'execute' }));
     return;
   }
   const lines = tailResult.lines;
@@ -512,12 +505,12 @@ export function handleCheckDirectory(
   const qs = parseQueryString(req.url);
   const dirPath = qs.path;
   if (!dirPath) {
-    jsonResponse(res, 400, { error: 'missing required query parameter: path' });
+    jsonResponse(res, 400, validationError('invalid_request_body', 'unknown'));
     return;
   }
   const resolved = canonicalizeDeepestExisting(path.resolve(dirPath));
   if (!isPathWithinAllowedRoot(resolved, os.homedir())) {
-    jsonResponse(res, 400, { error: 'path must be within the home directory' });
+    jsonResponse(res, 400, validationError('invalid_request_body', 'unknown'));
     return;
   }
   let exists = false;

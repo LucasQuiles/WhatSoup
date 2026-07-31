@@ -86,7 +86,7 @@ RETIRE_TARGETS = [  # D4 merge/retire backlog — flagged while still present
     "AGENT-RUNTIME-CORE-OPTIMIZATION-RESEARCH-2026-06-14.md",
     "AGENT-RUNTIME-SWARM-REVIEW-2026-06-14.md",
 ]
-LIBRARIES = {"corpus_guard.py", "probelib.py"}
+LIBRARIES = {"bot_errors_probe_observation.py", "corpus_guard.py", "probelib.py"}
 SCHEMA_CONST = re.compile(r"\bSCHEMA_VERSION\s*=\s*['\"]([^'\"]+)['\"]")
 SCHEMA_FIELD = re.compile(r"['\"]schema_version['\"]\s*:\s*['\"]([^'\"]+)['\"]")
 SCHEMA_VALUE_OK = re.compile(r"^\d+\.\d+$")

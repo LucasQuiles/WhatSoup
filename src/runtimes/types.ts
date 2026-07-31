@@ -3,6 +3,7 @@ import type { IncomingMessage, RuntimeHealth } from '../core/types.ts';
 import type { DurabilityEngine } from '../core/durability.ts';
 import type { AgentFallbackEntry } from '../core/fallback-chain.ts';
 import type { ToolDurabilityTelemetrySnapshot } from '../core/durability-evidence-contract.ts';
+import type { StartupNotificationEvent } from '../core/startup-notification-controller.ts';
 
 export interface RuntimeTurnCapabilityHealth {
   modelUsable: boolean | null;
@@ -54,6 +55,8 @@ export interface Runtime {
   getHealthSnapshot(): RuntimeHealth;
   shutdown(): Promise<void>;
   setDurability(engine: DurabilityEngine): void;
+  /** Agent runtimes expose at most one deferred startup event for main's controller. */
+  popStartupNotificationEvent?(): StartupNotificationEvent | null;
   /** Update delivery JID for active sessions/queues when a LID→phone mapping changes. */
   handleJidAliasChanged?(conversationKey: string, newJid: string): void;
   /** Inject a repair turn into the control session for self-healing. */
