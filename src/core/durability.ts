@@ -9,7 +9,7 @@ import type { Database } from './database.ts';
 import type { Messenger } from './types.ts';
 import type { GuardCaller } from './outbound-identity/types.ts';
 import { toConversationKey } from './conversation-key.ts';
-import { withImmediateTransaction, withTransaction } from './db-tx.ts';
+import { getImmediateTransactionRunner, withImmediateTransaction, withTransaction } from './db-tx.ts';
 import {
   createRecoveryStats,
   DurabilityRecoveryEvidence,
@@ -1048,6 +1048,10 @@ export class DurabilityEngine {
     ).now);
     this.sessionLifecycle = new SessionLifecycleStore(db);
     this.confirmedOutboundProbe = makeConfirmedOutboundProbe(db.raw);
+    // Pre-warm the immediate-transaction runner so lifecycle methods that call
+    // withImmediateTransaction reuse cached BEGIN IMMEDIATE / COMMIT / ROLLBACK
+    // instead of preparing them on first invocation (#2560).
+    getImmediateTransactionRunner(db);
   }
 
   private runUpsertSessionCheckpoint(conversationKey: string, fields: SessionCheckpointFields): void {
