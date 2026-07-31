@@ -1,0 +1,513 @@
+[
+  {
+    "ruleId": "portability.gnu-bsd-shell-flags",
+    "file": "deploy/scripts/ensure-node-installed.sh",
+    "line": 16,
+    "pattern": "readlink -f",
+    "lineText": "# readlink -f is GNU-only and unavailable on macOS; replicate the same helper"
+  },
+  {
+    "ruleId": "portability.gnu-bsd-shell-flags",
+    "file": "deploy/scripts/harness-maintenance.sh",
+    "line": 5,
+    "pattern": "readlink -f",
+    "lineText": "if resolved_path=\"$(readlink -f \"$SCRIPT_PATH\" 2>/dev/null)\"; then"
+  },
+  {
+    "ruleId": "portability.gnu-bsd-shell-flags",
+    "file": "scripts/migrate-namespace.sh",
+    "line": 87,
+    "pattern": "sha256sum",
+    "lineText": "src_sum=$(sha256sum \"$src\" | awk '{print $1}')"
+  },
+  {
+    "ruleId": "portability.gnu-bsd-shell-flags",
+    "file": "scripts/migrate-namespace.sh",
+    "line": 88,
+    "pattern": "sha256sum",
+    "lineText": "dest_sum=$(sha256sum \"$dest\" | awk '{print $1}')"
+  },
+  {
+    "ruleId": "portability.gnu-bsd-shell-flags",
+    "file": "scripts/migrate-namespace.sh",
+    "line": 162,
+    "pattern": "sha256sum",
+    "lineText": "src_sum=$(sha256sum \"$src_file\" | awk '{print $1}')"
+  },
+  {
+    "ruleId": "portability.gnu-bsd-shell-flags",
+    "file": "scripts/migrate-namespace.sh",
+    "line": 163,
+    "pattern": "sha256sum",
+    "lineText": "dest_sum=$(sha256sum \"$dest_file\" | awk '{print $1}')"
+  },
+  {
+    "ruleId": "portability.gnu-bsd-shell-flags",
+    "file": "scripts/run-qsesh-pytests.sh",
+    "line": 14,
+    "pattern": "readlink -f",
+    "lineText": "# Deliberately NOT `readlink -f`: the managed runtime is a venv-style symlink"
+  },
+  {
+    "ruleId": "portability.no-hardcoded-platform-binaries",
+    "file": "deploy/scripts/bot-errors-health-check.py",
+    "line": 2481,
+    "pattern": "\"/usr/bin/rustdesk",
+    "lineText": "command = profile_string(profile, \"rustDeskCommand\") or shutil.which(\"rustdesk\") or \"/usr/bin/rustdesk\""
+  },
+  {
+    "ruleId": "portability.no-hardcoded-platform-binaries",
+    "file": "scripts/ci-control-ref-policy.ts",
+    "line": 27,
+    "pattern": "'/usr/bin/git",
+    "lineText": "const TRUSTED_GIT = '/usr/bin/git';"
+  },
+  {
+    "ruleId": "portability.no-hardcoded-platform-binaries",
+    "file": "scripts/hooks-installed-guard.ts",
+    "line": 88,
+    "pattern": "'/usr/bin/git",
+    "lineText": "const TRUSTED_GIT_PATH = '/usr/bin/git';"
+  },
+  {
+    "ruleId": "portability.platform-paths-guarded",
+    "file": "deploy/scripts/bot-errors-health-check.py",
+    "line": 242,
+    "pattern": "/proc/",
+    "lineText": "return Path(\"/proc/sys/kernel/osrelease\").read_text(encoding=\"utf-8\").strip()"
+  },
+  {
+    "ruleId": "portability.platform-paths-guarded",
+    "file": "deploy/scripts/bot-errors-health-check.py",
+    "line": 2459,
+    "pattern": "/proc/",
+    "lineText": "uptime = float(Path(\"/proc/uptime\").read_text(encoding=\"utf-8\").split()[0])"
+  },
+  {
+    "ruleId": "portability.platform-paths-guarded",
+    "file": "deploy/scripts/bot-errors-health-check.py",
+    "line": 3464,
+    "pattern": "/proc/",
+    "lineText": "return int(float(Path(\"/proc/uptime\").read_text(encoding=\"utf-8\").split()[0]))"
+  },
+  {
+    "ruleId": "portability.platform-paths-guarded",
+    "file": "deploy/scripts/bot-errors-health-check.py",
+    "line": 242,
+    "pattern": "/sys/",
+    "lineText": "return Path(\"/proc/sys/kernel/osrelease\").read_text(encoding=\"utf-8\").strip()"
+  },
+  {
+    "ruleId": "portability.platform-paths-guarded",
+    "file": "scripts/lib/fitness/registry.ts",
+    "line": 584,
+    "pattern": "/proc/",
+    "lineText": "'/proc/, /sys/, /run/ paths raise OSError on macOS. Each occurrence must be behind a process.platform === \"linux\" guard or equivalent. Enforced by guard:platfor"
+  },
+  {
+    "ruleId": "portability.platform-paths-guarded",
+    "file": "scripts/lib/fitness/registry.ts",
+    "line": 593,
+    "pattern": "/proc/",
+    "lineText": "patterns: ['/proc/', '/sys/', '/run/'],"
+  },
+  {
+    "ruleId": "portability.platform-paths-guarded",
+    "file": "scripts/lib/fitness/registry.ts",
+    "line": 584,
+    "pattern": "/run/",
+    "lineText": "'/proc/, /sys/, /run/ paths raise OSError on macOS. Each occurrence must be behind a process.platform === \"linux\" guard or equivalent. Enforced by guard:platfor"
+  },
+  {
+    "ruleId": "portability.platform-paths-guarded",
+    "file": "scripts/lib/fitness/registry.ts",
+    "line": 593,
+    "pattern": "/run/",
+    "lineText": "patterns: ['/proc/', '/sys/', '/run/'],"
+  },
+  {
+    "ruleId": "portability.platform-paths-guarded",
+    "file": "scripts/lib/fitness/registry.ts",
+    "line": 584,
+    "pattern": "/sys/",
+    "lineText": "'/proc/, /sys/, /run/ paths raise OSError on macOS. Each occurrence must be behind a process.platform === \"linux\" guard or equivalent. Enforced by guard:platfor"
+  },
+  {
+    "ruleId": "portability.platform-paths-guarded",
+    "file": "scripts/lib/fitness/registry.ts",
+    "line": 593,
+    "pattern": "/sys/",
+    "lineText": "patterns: ['/proc/', '/sys/', '/run/'],"
+  },
+  {
+    "ruleId": "portability.platform-paths-guarded",
+    "file": "scripts/platform-pattern-check.ts",
+    "line": 223,
+    "pattern": "/proc/",
+    "lineText": "'Guard behind process.platform === \"linux\" check before accessing /proc/ or /sys/.',"
+  },
+  {
+    "ruleId": "portability.platform-paths-guarded",
+    "file": "scripts/platform-pattern-check.ts",
+    "line": 223,
+    "pattern": "/sys/",
+    "lineText": "'Guard behind process.platform === \"linux\" check before accessing /proc/ or /sys/.',"
+  },
+  {
+    "ruleId": "portability.platform-paths-guarded",
+    "file": "src/lib/process-lock.ts",
+    "line": 74,
+    "pattern": "/proc/",
+    "lineText": "const LINUX_BOOT_ID_PATH = '/proc/sys/kernel/random/boot_id';"
+  },
+  {
+    "ruleId": "portability.platform-paths-guarded",
+    "file": "src/lib/process-lock.ts",
+    "line": 78,
+    "pattern": "/proc/",
+    "lineText": "/** Linux: kernel-provided `/proc/sys/kernel/random/boot_id` UUID. */"
+  },
+  {
+    "ruleId": "portability.platform-paths-guarded",
+    "file": "src/lib/process-lock.ts",
+    "line": 74,
+    "pattern": "/sys/",
+    "lineText": "const LINUX_BOOT_ID_PATH = '/proc/sys/kernel/random/boot_id';"
+  },
+  {
+    "ruleId": "portability.platform-paths-guarded",
+    "file": "src/lib/process-lock.ts",
+    "line": 78,
+    "pattern": "/sys/",
+    "lineText": "/** Linux: kernel-provided `/proc/sys/kernel/random/boot_id` UUID. */"
+  },
+  {
+    "ruleId": "portability.platform-paths-guarded",
+    "file": "src/runtimes/agent/process-tree.ts",
+    "line": 476,
+    "pattern": "/proc/",
+    "lineText": "* Linux systemd). Reads `/proc/self/cgroup` for the unified path, then reads"
+  },
+  {
+    "ruleId": "portability.platform-paths-guarded",
+    "file": "src/runtimes/agent/process-tree.ts",
+    "line": 484,
+    "pattern": "/proc/",
+    "lineText": "const selfCgroup = readFileSync('/proc/self/cgroup', 'utf8');"
+  },
+  {
+    "ruleId": "portability.platform-paths-guarded",
+    "file": "src/runtimes/agent/process-tree.ts",
+    "line": 477,
+    "pattern": "/sys/",
+    "lineText": "* `cgroup.procs` recursively under `/sys/fs/cgroup<path>`. Returns `null` on any"
+  },
+  {
+    "ruleId": "portability.platform-paths-guarded",
+    "file": "src/runtimes/agent/process-tree.ts",
+    "line": 489,
+    "pattern": "/sys/",
+    "lineText": "const base = join('/sys/fs/cgroup', rel);"
+  },
+  {
+    "ruleId": "portability.platform-paths-guarded",
+    "file": "src/runtimes/agent/runtime.ts",
+    "line": 1433,
+    "pattern": "/proc/",
+    "lineText": "return readdirSync('/proc/self/fd').length;"
+  },
+  {
+    "ruleId": "portability.platform-paths-guarded",
+    "file": "src/runtimes/agent/session-classifier.ts",
+    "line": 109,
+    "pattern": "/proc/",
+    "lineText": "const statusContent = readFileSync(`/proc/${pid}/status`, 'utf8');"
+  },
+  {
+    "ruleId": "portability.platform-paths-guarded",
+    "file": "src/runtimes/agent/session-classifier.ts",
+    "line": 119,
+    "pattern": "/proc/",
+    "lineText": "const cmdline = readFileSync(`/proc/${pid}/cmdline`, 'utf8');"
+  },
+  {
+    "ruleId": "portability.platform-paths-guarded",
+    "file": "src/transport/auth.ts",
+    "line": 30,
+    "pattern": "/run/",
+    "lineText": "const lockPath = (config as any).lockPath ?? '/var/run/whatsoup.lock';"
+  },
+  {
+    "ruleId": "portability.systemctl-guarded",
+    "file": "deploy/scripts/bot-errors-selfcheck.py",
+    "line": 313,
+    "pattern": "\"systemctl",
+    "lineText": "[\"systemctl\", \"--user\", \"is-active\", unit],"
+  },
+  {
+    "ruleId": "portability.systemctl-guarded",
+    "file": "scripts/lib/fitness/registry.ts",
+    "line": 603,
+    "pattern": "'systemctl",
+    "lineText": "title: 'systemctl calls must have macOS launchctl fallback',"
+  },
+  {
+    "ruleId": "portability.systemctl-guarded",
+    "file": "scripts/lib/fitness/registry.ts",
+    "line": 606,
+    "pattern": "'systemctl",
+    "lineText": "'systemctl is Linux-only; on macOS the equivalent service manager is launchctl. Production scripts that invoke systemctl must either be behind a HOST_PLATFORM g"
+  },
+  {
+    "ruleId": "portability.systemctl-guarded",
+    "file": "scripts/lib/fitness/registry.ts",
+    "line": 615,
+    "pattern": "'systemctl",
+    "lineText": "patterns: ['\"systemctl', \"'systemctl\"],"
+  },
+  {
+    "ruleId": "portability.systemctl-guarded",
+    "file": "scripts/lib/fitness/registry.ts",
+    "line": 615,
+    "pattern": "\"systemctl",
+    "lineText": "patterns: ['\"systemctl', \"'systemctl\"],"
+  },
+  {
+    "ruleId": "portability.systemctl-guarded",
+    "file": "src/fleet/platform.ts",
+    "line": 53,
+    "pattern": "'systemctl",
+    "lineText": "execFileSync('systemctl', ['--user', 'show-environment'], {"
+  },
+  {
+    "ruleId": "portability.systemctl-guarded",
+    "file": "src/fleet/platform.ts",
+    "line": 199,
+    "pattern": "'systemctl",
+    "lineText": "await execFileAsync('systemctl', ['--user', 'reenable', this.unit(name)]);"
+  },
+  {
+    "ruleId": "portability.systemctl-guarded",
+    "file": "src/fleet/platform.ts",
+    "line": 203,
+    "pattern": "'systemctl",
+    "lineText": "await execFileAsync('systemctl', ['--user', 'disable', this.unit(name)]);"
+  },
+  {
+    "ruleId": "portability.systemctl-guarded",
+    "file": "src/fleet/platform.ts",
+    "line": 207,
+    "pattern": "'systemctl",
+    "lineText": "await execFileAsync('systemctl', ['--user', 'start', this.unit(name)]);"
+  },
+  {
+    "ruleId": "portability.systemctl-guarded",
+    "file": "src/fleet/platform.ts",
+    "line": 211,
+    "pattern": "'systemctl",
+    "lineText": "await execFileAsync('systemctl', ['--user', 'stop', this.unit(name)]);"
+  },
+  {
+    "ruleId": "portability.systemctl-guarded",
+    "file": "src/fleet/platform.ts",
+    "line": 215,
+    "pattern": "'systemctl",
+    "lineText": "await execFileAsync('systemctl', ['--user', 'restart', this.unit(name)]);"
+  },
+  {
+    "ruleId": "portability.arch-blind-path-fallback",
+    "file": "src/fleet/platform.ts",
+    "line": 104,
+    "pattern": "process.env.PATH ?? '/usr/local/bin:/usr/bin:/bin'",
+    "lineText": "const envPath = process.env.PATH ?? '/usr/local/bin:/usr/bin:/bin';"
+  },
+  {
+    "ruleId": "portability.hardcoded-signal-name",
+    "file": "src/fleet/routes/ops.ts",
+    "line": 1295,
+    "pattern": ".kill('SIGTERM')",
+    "lineText": "try { existing.kill('SIGTERM'); } catch { /* already exited */ }"
+  },
+  {
+    "ruleId": "portability.hardcoded-signal-name",
+    "file": "src/fleet/routes/ops.ts",
+    "line": 1352,
+    "pattern": ".kill('SIGTERM')",
+    "lineText": "child.kill('SIGTERM');"
+  },
+  {
+    "ruleId": "portability.hardcoded-signal-name",
+    "file": "src/fleet/routes/ops.ts",
+    "line": 1411,
+    "pattern": ".kill('SIGTERM')",
+    "lineText": "child.kill('SIGTERM');"
+  },
+  {
+    "ruleId": "portability.hardcoded-signal-name",
+    "file": "src/fleet/routes/ops.ts",
+    "line": 1412,
+    "pattern": ".kill('SIGKILL')",
+    "lineText": "setTimeout(() => { try { child.kill('SIGKILL'); } catch { /* already exited */ } }, 5000);"
+  },
+  {
+    "ruleId": "portability.hardcoded-signal-name",
+    "file": "src/fleet/platform.ts",
+    "line": 309,
+    "pattern": ".kill('SIGTERM')",
+    "lineText": "child.kill('SIGTERM');"
+  },
+  {
+    "ruleId": "portability.hardcoded-signal-name",
+    "file": "src/fleet/platform.ts",
+    "line": 312,
+    "pattern": ".kill('SIGKILL')",
+    "lineText": "try { child.kill('SIGKILL'); } catch { /* already exited */ }"
+  },
+  {
+    "ruleId": "portability.hardcoded-signal-name",
+    "file": "src/runtimes/chat/providers/transcription/local-audio.ts",
+    "line": 39,
+    "pattern": "killSignal: 'SIGTERM'",
+    "lineText": "killSignal: 'SIGTERM',"
+  },
+  {
+    "ruleId": "portability.hardcoded-signal-name",
+    "file": "src/runtimes/chat/providers/transcription/local-audio.ts",
+    "line": 65,
+    "pattern": ".kill('SIGKILL')",
+    "lineText": "if (!exited) child.kill('SIGKILL');"
+  },
+  {
+    "ruleId": "portability.hardcoded-signal-name",
+    "file": "src/runtimes/agent/providers/binary-preflight.ts",
+    "line": 193,
+    "pattern": ".kill('SIGKILL')",
+    "lineText": "try { child.kill('SIGKILL'); } catch { /* ignore kill errors */ }"
+  },
+  {
+    "ruleId": "portability.hardcoded-signal-name",
+    "file": "src/main.ts",
+    "line": 1171,
+    "pattern": "process.on('SIGINT'",
+    "lineText": "process.on('SIGINT', () => shutdown('SIGINT'));"
+  },
+  {
+    "ruleId": "portability.hardcoded-signal-name",
+    "file": "src/main.ts",
+    "line": 1172,
+    "pattern": "process.on('SIGTERM'",
+    "lineText": "process.on('SIGTERM', () => shutdown('SIGTERM'));"
+  },
+  {
+    "ruleId": "portability.hardcoded-signal-name",
+    "file": "src/lib/keyring.ts",
+    "line": 59,
+    "pattern": "killSignal: 'SIGKILL'",
+    "lineText": "killSignal: 'SIGKILL' as const,"
+  },
+  {
+    "ruleId": "portability.hardcoded-signal-name",
+    "file": "src/lib/emit-alert.ts",
+    "line": 160,
+    "pattern": "killSignal: 'SIGKILL'",
+    "lineText": "{ stdio: 'ignore', timeout: 5_000, detached: false, killSignal: 'SIGKILL' },"
+  },
+  {
+    "ruleId": "portability.hardcoded-signal-name",
+    "file": "deploy/lib/read-keychain-secret.mjs",
+    "line": 15,
+    "pattern": "killSignal: 'SIGKILL'",
+    "lineText": "killSignal: 'SIGKILL',"
+  },
+  {
+    "ruleId": "portability.hardcoded-signal-name",
+    "file": "scripts/lib/ci-control/git-input.ts",
+    "line": 640,
+    "pattern": "killSignal: \"SIGKILL\"",
+    "lineText": "killSignal: \"SIGKILL\","
+  },
+  {
+    "ruleId": "portability.hardcoded-signal-name",
+    "file": "scripts/lib/ci-control/git-input-core.ts",
+    "line": 348,
+    "pattern": "killSignal: \"SIGKILL\"",
+    "lineText": "killSignal: \"SIGKILL\","
+  },
+  {
+    "ruleId": "portability.hardcoded-signal-name",
+    "file": "scripts/lib/ci-control/git-input-core.ts",
+    "line": 380,
+    "pattern": "killSignal: \"SIGKILL\"",
+    "lineText": "killSignal: \"SIGKILL\","
+  },
+  {
+    "ruleId": "portability.hardcoded-signal-name",
+    "file": "scripts/lib/ci-control/git-input-core.ts",
+    "line": 757,
+    "pattern": "killSignal: \"SIGKILL\"",
+    "lineText": "killSignal: \"SIGKILL\","
+  },
+  {
+    "ruleId": "portability.hardcoded-signal-name",
+    "file": "scripts/agent-decision-polls-guard.ts",
+    "line": 393,
+    "pattern": "killSignal: 'SIGKILL'",
+    "lineText": "killSignal: 'SIGKILL',"
+  },
+  {
+    "ruleId": "portability.hardcoded-signal-name",
+    "file": "src/transport/imessage/imsg-rpc-relay.ts",
+    "line": 268,
+    "pattern": ".kill('SIGTERM')",
+    "lineText": "if (child.exitCode === null && child.signalCode === null) child.kill('SIGTERM');"
+  },
+  {
+    "ruleId": "portability.hardcoded-signal-name",
+    "file": "src/transport/imessage/imsg-rpc-relay.ts",
+    "line": 271,
+    "pattern": ".kill('SIGKILL')",
+    "lineText": "if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');"
+  },
+  {
+    "ruleId": "portability.hardcoded-signal-name",
+    "file": "scripts/git-estate-guard.ts",
+    "line": 288,
+    "pattern": "killSignal: 'SIGKILL'",
+    "lineText": "killSignal: 'SIGKILL',"
+  },
+  {
+    "ruleId": "portability.hardcoded-signal-name",
+    "file": "scripts/git-estate-guard.ts",
+    "line": 308,
+    "pattern": "killSignal: 'SIGKILL'",
+    "lineText": "killSignal: 'SIGKILL',"
+  },
+  {
+    "ruleId": "portability.hardcoded-signal-name",
+    "file": "scripts/hooks-installed-guard.ts",
+    "line": 166,
+    "pattern": "killSignal: 'SIGKILL'",
+    "lineText": "killSignal: 'SIGKILL',"
+  },
+  {
+    "ruleId": "portability.hardcoded-signal-name",
+    "file": "scripts/hooks-installed-guard.ts",
+    "line": 516,
+    "pattern": "killSignal: 'SIGKILL'",
+    "lineText": "killSignal: 'SIGKILL',"
+  },
+  {
+    "ruleId": "portability.hardcoded-signal-name",
+    "file": "scripts/hooks-installed-guard.ts",
+    "line": 802,
+    "pattern": "killSignal: 'SIGKILL'",
+    "lineText": "killSignal: 'SIGKILL',"
+  },
+  {
+    "ruleId": "portability.hardcoded-signal-name",
+    "file": "scripts/pre-push-alignment.ts",
+    "line": 71,
+    "pattern": "killSignal: 'SIGTERM'",
+    "lineText": "killSignal: 'SIGTERM',"
+  }
+]

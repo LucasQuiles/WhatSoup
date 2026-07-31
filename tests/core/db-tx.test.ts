@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { unlinkSync, existsSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { Database } from '../../src/core/database.ts';
-import { withTransaction } from '../../src/core/db-tx.ts';
+import { withImmediateTransaction, withTransaction } from '../../src/core/db-tx.ts';
 
 // Covers the canonical BEGIN/COMMIT/ROLLBACK wrapper introduced in
 // src/core/db-tx.ts. The two real-DB cases exercise the happy path and the
@@ -278,5 +278,41 @@ describe('withTransaction', () => {
 
     expect(thrown).toBe(callbackError);
     expect(rollbackSpy).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('withImmediateTransaction', () => {
+  let db: Database;
+  let path: string;
+
+  beforeEach(() => {
+    const made = makeRealDb();
+    db = made.db;
+    path = made.path;
+  });
+
+  afterEach(() => {
+    db.close();
+    cleanup(path);
+  });
+
+  it('uses an immediate writer reservation before invoking the callback', () => {
+    const beginSpy = vi.fn();
+    const fakeDb = stubDb({ 'BEGIN IMMEDIATE': beginSpy });
+    const callback = vi.fn(() => 'value');
+
+    expect(withImmediateTransaction(fakeDb, callback)).toBe('value');
+    expect(beginSpy).toHaveBeenCalledTimes(1);
+    expect(callback).toHaveBeenCalledTimes(1);
+  });
+
+  it('fails closed when a caller already holds a transaction', () => {
+    db.raw.exec('BEGIN');
+    try {
+      expect(() => withImmediateTransaction(db, () => undefined))
+        .toThrow('Immediate transaction requires a top-level database connection');
+    } finally {
+      db.raw.exec('ROLLBACK');
+    }
   });
 });

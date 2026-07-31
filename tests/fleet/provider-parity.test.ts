@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
+import * as providerParity from '../../src/fleet/provider-parity.ts';
 import {
   evaluateProviderParity,
   exitCodeForProviderParityReport,
@@ -50,6 +51,16 @@ function status(overrides: Partial<ProviderStatusSnapshot> = {}): ProviderStatus
 }
 
 describe('evaluateProviderParity', () => {
+  it('exports the canonical provider-probe snapshot input states', () => {
+    expect(providerParity).toHaveProperty('PROVIDER_PROBE_SNAPSHOT_STATES', [
+      'ok',
+      'failed',
+      'skipped',
+      'headless_auth_inconclusive',
+      'inconclusive',
+    ]);
+  });
+
   it('returns green for a reachable agent with canonical primary, independent fallback, native primary auth, API fallback key, and ok probe', () => {
     const report = evaluateProviderParity({
       generatedAtUtc: '2026-06-23T10:24:24Z',

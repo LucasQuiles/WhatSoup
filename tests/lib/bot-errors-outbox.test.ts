@@ -72,6 +72,8 @@ describe('buildBotErrorsEvent', () => {
     }, '11111111-1111-4111-8111-111111111111', '2026-06-13T10:00:00.000Z');
 
     expect(event).toMatchObject({
+      schemaVersion: 2,
+      eventKind: 'incident_recovery',
       id: '11111111-1111-4111-8111-111111111111',
       eventType: 'clear',
       severity: 'info',
@@ -96,6 +98,54 @@ describe('buildBotErrorsEvent', () => {
       "unknown.service --since '30 minutes ago'",
     ].join('@'));
     expect(event.diagnostics.logHints).toContain("journalctl --user -u bot-errors-dispatcher.service --since '30 minutes ago'");
+  });
+
+  it('emits only declared v2 envelope variants', () => {
+    const variants = [
+      {
+        input: { eventType: 'alert' as const, severity: 'error' as const },
+        expected: { eventKind: 'incident_alert', eventType: 'alert', severity: 'error' },
+      },
+      {
+        input: { eventType: 'clear' as const, severity: 'info' as const },
+        expected: { eventKind: 'incident_recovery', eventType: 'clear', severity: 'info' },
+      },
+      {
+        input: { eventType: 'observation' as const, severity: 'info' as const },
+        expected: { eventKind: 'observation', eventType: 'observation', severity: 'info' },
+      },
+    ];
+
+    for (const { input, expected } of variants) {
+      const event = buildBotErrorsEvent({
+        ...input,
+        instance: 'typed-envelope',
+        source: 'unit-test',
+        summary: 'declared envelope variant',
+      });
+      expect(event).toMatchObject({ schemaVersion: 2, ...expected });
+    }
+
+    const informationalAlert = buildBotErrorsEvent({
+      eventType: 'alert',
+      severity: 'info',
+      instance: 'typed-envelope',
+      source: 'invalid-alert',
+      summary: 'informational alerts are observations, not incidents',
+    });
+    expect(informationalAlert).toMatchObject({
+      schemaVersion: 2,
+      eventKind: 'observation',
+      eventType: 'observation',
+      severity: 'info',
+    });
+    expect(() => buildBotErrorsEvent({
+      eventType: 'clear',
+      severity: 'critical',
+      instance: 'typed-envelope',
+      source: 'invalid-clear',
+      summary: 'critical clears cannot authorize recovery',
+    })).toThrow('invalid bot errors envelope');
   });
 
   it('redacts nested critical asset diagnostics without dropping primitive values', () => {
@@ -227,6 +277,36 @@ describe('buildBotErrorsEvent', () => {
 });
 
 describe('writeBotErrorsEvent', () => {
+  it('keeps millisecond precision in the outbox filename for causal ordering', () => {
+    tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-outbox-order-'));
+    const outbox = join(tmpRoot, 'outbox');
+    process.env['BOT_ERRORS_OUTBOX_DIR'] = outbox;
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date('2026-07-30T12:00:00.123Z'));
+      const written = writeBotErrorsEvent({
+        eventType: 'alert',
+        instance: 'ordering-test',
+        source: 'outbound_delivery_ambiguous',
+        summary: 'ordering proof',
+      });
+
+      const filename = written.path.split('/').at(-1)!;
+      expect(filename).toMatch(
+        /^20260730T120000Z_123\.ordering-test\.outbound_delivery_ambiguous\./,
+      );
+      expect([
+        '20260730T120000Z.ordering-test.legacy-alert.json',
+        filename,
+      ].sort()).toEqual([
+        '20260730T120000Z.ordering-test.legacy-alert.json',
+        filename,
+      ]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('sanitizes and caps filename segments while preserving the event payload', () => {
     tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-outbox-write-'));
     const outbox = join(tmpRoot, 'outbox');

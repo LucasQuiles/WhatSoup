@@ -435,3 +435,200 @@ def test_metadata_projection_drops_identity_content_and_raw_prose() -> None:
 
 def test_metadata_projection_requires_boolean_remote_ack_degradation() -> None:
     assert metadata_only_controller_details({"remoteAckDegraded": "healthy"}) == {}
+
+
+def test_metadata_projection_allowlists_only_closed_recovery_receipt_identity() -> None:
+    receipt_id = "0123456789abcdef0123456789abcdef"
+    assert metadata_only_controller_details(
+        {
+            "recoveryReceiptId": receipt_id,
+            "eventId": receipt_id,
+            "arbitraryId": receipt_id,
+        }
+    ) == {"recoveryReceiptId": receipt_id}
+
+
+@pytest.mark.parametrize(
+    "receipt_id",
+    (
+        "0123456789abcdef0123456789abcde",
+        "0123456789abcdef0123456789abcdef0",
+        "0123456789ABCDEF0123456789ABCDEF",
+        "opaque_receipt_01",
+    ),
+)
+def test_metadata_projection_rejects_noncanonical_recovery_receipt_identity(
+    receipt_id: str,
+) -> None:
+    assert metadata_only_controller_details(
+        {"recoveryReceiptId": receipt_id}
+    ) == {}
+
+
+@pytest.mark.parametrize(
+    "state_mode",
+    (
+        "bootstrap",
+        "valid",
+        "recovered",
+        "reconciled",
+        "recovery_required",
+    ),
+)
+def test_metadata_projection_allowlists_every_exact_controller_state_mode(
+    state_mode: str,
+) -> None:
+    assert metadata_only_controller_details({"stateMode": state_mode}) == {
+        "stateMode": state_mode
+    }
+
+
+@pytest.mark.parametrize(
+    "reason",
+    (
+        "read_failed",
+        "unsafe_file",
+        "decode_failed",
+        "invalid_root",
+        "schema_incompatible",
+        "integrity_mismatch",
+        "generation_invalid",
+        "publication_ambiguous",
+        "evidence_preservation_failed",
+        "lock_unavailable",
+        "retention_exhausted",
+    ),
+)
+def test_metadata_projection_allowlists_every_exact_controller_state_reason(
+    reason: str,
+) -> None:
+    assert metadata_only_controller_details({"reason": reason}) == {
+        "reason": reason
+    }
+
+
+def test_controller_state_mode_record_projects_closed_details_end_to_end() -> None:
+    context = make_context("collector")
+    captured = []
+    receipt_id = "0123456789abcdef0123456789abcdef"
+    projected = metadata_only_controller_details(
+        {
+            "component": "collector",
+            "stateMode": "recovery_required",
+            "reason": "publication_ambiguous",
+            "currentGeneration": 7,
+            "recoveredGeneration": 6,
+            "recoveryReceiptId": receipt_id,
+            "occurrenceCount": 3,
+        }
+    )
+
+    result = write_controller_log(
+        context=context,
+        record_kind="controller_state_mode",
+        level="error",
+        outcome="failed",
+        durability_class="diagnostic_best_effort",
+        details=projected,
+        append_record=captured.append,
+        persist_health=lambda _record: None,
+        emit_fallback=lambda _line: None,
+    )
+
+    assert result == "written"
+    assert len(captured) == 1
+    assert captured[0]["component"] == "collector"
+    assert captured[0]["details"] == {
+        "currentGeneration": 7,
+        "occurrenceCount": 3,
+        "reason": "publication_ambiguous",
+        "recoveredGeneration": 6,
+        "recoveryReceiptId": receipt_id,
+        "stateMode": "recovery_required",
+    }
+    assert "component" not in captured[0]["details"]
+
+
+def test_metadata_projection_rejects_unknown_controller_state_enums() -> None:
+    assert metadata_only_controller_details(
+        {
+            "stateMode": "future_mode",
+            "reason": "future_reason",
+            "occurrenceCount": 2,
+        }
+    ) == {"occurrenceCount": 2}
+
+
+@pytest.mark.parametrize(
+    ("key", "value"),
+    (
+        ("currentGeneration", -1),
+        ("currentGeneration", 2**53),
+        ("currentGeneration", True),
+        ("recoveredGeneration", -1),
+        ("recoveredGeneration", 2**53),
+        ("occurrenceCount", -1),
+        ("occurrenceCount", 2**31),
+        ("occurrenceCount", False),
+        ("stagingAttempt", 0),
+        ("stagingAttempt", 9),
+        ("stagingAttempt", True),
+    ),
+)
+def test_metadata_projection_rejects_invalid_controller_state_numbers(
+    key: str,
+    value: object,
+) -> None:
+    assert metadata_only_controller_details({key: value}) == {}
+
+
+def test_metadata_projection_accepts_only_bounded_controller_state_numbers() -> None:
+    assert metadata_only_controller_details(
+        {
+            "currentGeneration": 2**53 - 1,
+            "recoveredGeneration": 0,
+            "occurrenceCount": 2**31 - 1,
+            "stagingAttempt": 8,
+        }
+    ) == {
+        "currentGeneration": 2**53 - 1,
+        "occurrenceCount": 2**31 - 1,
+        "recoveredGeneration": 0,
+        "stagingAttempt": 8,
+    }
+
+
+def test_metadata_projection_drops_malicious_controller_state_values() -> None:
+    canary = "/private/controller-state path with raw prose"
+    assert metadata_only_controller_details(
+        {
+            "component": canary,
+            "stateMode": canary,
+            "reason": canary,
+            "recoveryReceiptId": canary,
+            "currentGeneration": canary,
+            "recoveredGeneration": "9" * 10_000,
+            "occurrenceCount": -(2**80),
+            "stagingAttempt": canary,
+        }
+    ) == {}
+
+
+def test_metadata_projection_never_leaks_record_names_digests_or_manifest() -> None:
+    record_name = (
+        ".state.json.0123456789abcdef0123456789abcdef.01.reconciliation-record"
+    )
+    assert metadata_only_controller_details(
+        {
+            "stagedRecordSha256": "a" * 64,
+            "retainedReconciliationRecords": [
+                {
+                    "recoveryReceiptId": "0123456789abcdef0123456789abcdef",
+                    "finalAttempt": 1,
+                    "recordSha256": "a" * 64,
+                }
+            ],
+            "recordName": record_name,
+            "stagingAttempt": 2,
+        }
+    ) == {"stagingAttempt": 2}

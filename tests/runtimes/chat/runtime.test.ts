@@ -68,6 +68,7 @@ vi.mock('../../../src/runtimes/chat/window.ts', () => ({
 
 vi.mock('../../../src/runtimes/chat/context.ts', () => ({
   loadContext: vi.fn(),
+  loadContextDetailed: vi.fn(),
 }));
 
 vi.mock('../../../src/core/messages.ts', () => ({
@@ -128,7 +129,7 @@ vi.mock('../../../src/logger.ts', () => {
 
 import { checkRateLimit } from '../../../src/runtimes/chat/rate-limiter.ts';
 import { loadConversationWindow } from '../../../src/runtimes/chat/window.ts';
-import { loadContext } from '../../../src/runtimes/chat/context.ts';
+import { loadContextDetailed } from '../../../src/runtimes/chat/context.ts';
 import { storeMessageIfNew } from '../../../src/core/messages.ts';
 import { recordAttempt, recordResponse } from '../../../src/runtimes/chat/rate-limits-db.ts';
 import { processMedia } from '../../../src/runtimes/chat/media/processor.ts';
@@ -165,7 +166,7 @@ function mockEnrichmentPollerInstances(): unknown[] {
 
 const mockCheckRateLimit = vi.mocked(checkRateLimit);
 const mockLoadConversationWindow = vi.mocked(loadConversationWindow);
-const mockLoadContext = vi.mocked(loadContext);
+const mockLoadContext = vi.mocked(loadContextDetailed);
 const mockStoreMessage = vi.mocked(storeMessageIfNew);
 const mockRecordAttempt = vi.mocked(recordAttempt);
 const mockRecordResponse = vi.mocked(recordResponse);
@@ -243,11 +244,15 @@ function makeIncomingMessage(overrides: Partial<IncomingMessage> = {}): Incoming
   };
 }
 
+function completeContextResult(text = '') {
+  return { text, status: 'complete' as const, scopes: [] };
+}
+
 /** Configure the "happy path" default mock return values. */
 function setHappyPathDefaults() {
   mockCheckRateLimit.mockReturnValue({ allowed: true, remaining: 44 });
   mockProcessMedia.mockResolvedValue({ content: 'hello bot', images: [] });
-  mockLoadContext.mockResolvedValue('');
+  mockLoadContext.mockResolvedValue(completeContextResult());
   mockLoadConversationWindow.mockReturnValue([]);
   mockStoreMessage.mockReturnValue(true);
   mockRecordResponse.mockImplementation(() => undefined);
@@ -428,7 +433,7 @@ describe('Happy path', () => {
 
   it('context block appended to system prompt when non-empty', async () => {
     const { handler, primary } = makeHandler();
-    mockLoadContext.mockResolvedValue('Background knowledge:\n- Alice likes cats');
+    mockLoadContext.mockResolvedValue(completeContextResult('Background knowledge:\n- Alice likes cats'));
 
     await handleAndDrain(handler, makeIncomingMessage());
 
@@ -918,7 +923,21 @@ describe('Media processing', () => {
 // ===========================================================================
 
 describe('Pinecone graceful degradation (B04)', () => {
-  it('loadContext throws → message still processed, LLM called, response sent', async () => {
+  it('records a bounded unavailable context outcome when retrieval throws', async () => {
+    const { handler } = makeHandler();
+    mockLoadContext.mockRejectedValue(new Error('synthetic provider failure'));
+
+    await handleAndDrain(handler, makeIncomingMessage());
+
+    expect(handler.getHealthSnapshot().details.memoryContext).toEqual({
+      status: 'unavailable',
+      scopes: [
+        { scope: 'context', status: 'failed', failureCode: 'unknown', retryable: true },
+      ],
+    });
+  });
+
+  it('context retrieval throws → message still processed, LLM called, response sent', async () => {
     const { handler, messenger, primary } = makeHandler();
     mockLoadContext.mockRejectedValue(new Error('Pinecone connection refused'));
 
@@ -930,24 +949,24 @@ describe('Pinecone graceful degradation (B04)', () => {
     expect(messenger.sendMessage).toHaveBeenCalledWith(expect.any(String), 'hey whats up');
   });
 
-  it('loadContext throws → warning log with "context retrieval failed" emitted', async () => {
+  it('context retrieval throws → bounded warning log emitted', async () => {
     const { handler } = makeHandler();
     mockLoadContext.mockRejectedValue(new Error('Pinecone down'));
 
     await handleAndDrain(handler, makeIncomingMessage());
 
     expect(mockLogWarn()).toHaveBeenCalledWith(
-      expect.objectContaining({ err: expect.any(Error) }),
-      expect.stringContaining('context retrieval failed'),
+      expect.objectContaining({ failure_code: 'unknown' }),
+      expect.stringContaining('context retrieval unavailable'),
     );
   });
 
-  it('loadContext hangs (never resolves) → times out after 5s, response sent without context', async () => {
+  it('context retrieval hangs → times out after 5s, response sent without context', async () => {
     vi.useFakeTimers();
     const { handler, messenger, primary } = makeHandler();
 
     // A promise that never resolves
-    mockLoadContext.mockReturnValue(new Promise<string>(() => {}));
+    mockLoadContext.mockReturnValue(new Promise<ReturnType<typeof completeContextResult>>(() => {}));
 
     await handler.handleMessage(makeIncomingMessage());
     // Advance past the 5-second Pinecone timeout
@@ -957,10 +976,56 @@ describe('Pinecone graceful degradation (B04)', () => {
     // LLM still called, response still sent
     expect(vi.mocked(primary.generate)).toHaveBeenCalledOnce();
     expect(messenger.sendMessage).toHaveBeenCalledWith(expect.any(String), 'hey whats up');
-    expect(mockLogWarn()).toHaveBeenCalledWith(
-      expect.objectContaining({ err: expect.objectContaining({ message: 'PINECONE_TIMEOUT' }) }),
-      expect.stringContaining('context retrieval failed'),
-    );
+    expect(handler.getHealthSnapshot().details.memoryContext).toEqual({
+      status: 'unavailable',
+      scopes: [
+        { scope: 'context', status: 'failed', failureCode: 'timeout', retryable: true },
+      ],
+    });
+  });
+
+  it('does not let a late context completion overwrite the timeout snapshot', async () => {
+    vi.useFakeTimers();
+    const { handler } = makeHandler();
+    let resolveContext: (result: ReturnType<typeof completeContextResult>) => void = () => {};
+    mockLoadContext.mockReturnValue(new Promise((resolve) => {
+      resolveContext = resolve;
+    }));
+
+    await handler.handleMessage(makeIncomingMessage());
+    await vi.advanceTimersByTimeAsync(6_000);
+    await drainQueue();
+
+    resolveContext(completeContextResult('late context'));
+    await Promise.resolve();
+
+    expect(handler.getMemoryContextHealth()).toEqual({
+      status: 'unavailable',
+      scopes: [
+        { scope: 'context', status: 'failed', failureCode: 'timeout', retryable: true },
+      ],
+    });
+  });
+
+  it('replaces an unavailable context snapshot after a later complete retrieval', async () => {
+    const { handler } = makeHandler();
+    mockLoadContext
+      .mockRejectedValueOnce(new Error('synthetic provider failure'))
+      .mockResolvedValueOnce(completeContextResult());
+
+    await handleAndDrain(handler, makeIncomingMessage());
+    expect(handler.getMemoryContextHealth()).toEqual({
+      status: 'unavailable',
+      scopes: [
+        { scope: 'context', status: 'failed', failureCode: 'unknown', retryable: true },
+      ],
+    });
+
+    await handleAndDrain(handler, makeIncomingMessage({ messageId: 'msg-002' }));
+    expect(handler.getMemoryContextHealth()).toEqual({
+      status: 'complete',
+      scopes: [],
+    });
   });
 });
 
@@ -1238,7 +1303,7 @@ describe('Identity injection', () => {
   });
 
   it('identity block appears before any context block in system prompt', async () => {
-    mockLoadContext.mockResolvedValue('Background:\n- some fact');
+    mockLoadContext.mockResolvedValue(completeContextResult('Background:\n- some fact'));
     const systemPrompt = await getSystemPromptWithOptions({
       enableEnrichment: false,
       getBotJid: () => '15551234567@s.whatsapp.net',

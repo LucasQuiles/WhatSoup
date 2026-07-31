@@ -406,6 +406,7 @@ export const NON_STATUS_TABLES: Set<string> = new Set([
   'messages_fts_idx',
   'metrics_hourly',
   'operator_catchup_closure_witnesses',
+  'outbound_quarantine_retirements',
   'pending_heal_reports',
   'pending_polls',
   'rate_limits',
@@ -485,6 +486,13 @@ export const SELF_PROVISIONED: SelfProvisionedEntry[] = [
     reason: 'incident control plane schema-version marker inside the dedicated fleet incident database.',
     justification:
       'two-column key/value schema-version marker; matches the status regex only via incidental DDL text in the same module, carries no lifecycle semantics.',
+  },
+  {
+    table: 'producers',
+    module: 'src/fleet/incidents/schema.ts',
+    reason: 'incident control plane producer registry (migration v2 of the dedicated fleet incident database); provisioned by openIncidentDb, not the instance message DB migration ledger.',
+    justification:
+      'status is an admin enable/revoke flag whose transitions are root-gated operator actions (audited by the Plan-4 surface), not a #1789 lifecycle column with a terminal-failure value some writer must prove.',
   },
   {
     table: 'pending_poll_decisions',

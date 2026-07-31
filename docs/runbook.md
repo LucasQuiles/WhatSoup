@@ -507,8 +507,8 @@ curl -s http://127.0.0.1:9091/health | python3 -m json.tool
 # the admission boundary. It stays positive until restart even if ingest later
 # recovers the row through its identity/state-fenced fallback.
 
-# 4. Check durability quarantine count
-# If durability.quarantinedOutbound > 0, messages were lost — investigate.
+# 4. Check the bounded quarantine taxonomy.
+# quarantinedOutbound is a coarse count; inspect dispositions before inferring loss.
 
 # 5. Check logs for enrichment errors (chat-bot only)
 journalctl --user -u whatsoup@chat-bot -n 100 | grep -i enrich
@@ -697,7 +697,7 @@ systemctl --user start whatsoup@sandbox-agent
 ```bash
 # 1. Check outbound_ops for stuck or quarantined operations
 sqlite3 ~/.local/share/whatsoup/instances/sandbox-agent/bot.db \
-  "SELECT id, status, op_type, replay_policy, retry_count, submitted_at,
+  "SELECT id, status, op_type, replay_policy, retry_count, submitted_at, ambiguity_at,
           CASE WHEN json_valid(error) THEN json_extract(error, '$.failure_code')
                ELSE 'outbound.legacy_unclassified' END AS failure_code,
           CASE WHEN json_valid(error) THEN json_extract(error, '$.stage')
@@ -706,13 +706,28 @@ sqlite3 ~/.local/share/whatsoup/instances/sandbox-agent/bot.db \
    WHERE status NOT IN ('echoed', 'failed_permanent')
    ORDER BY id DESC LIMIT 20;"
 
-# 2. Check for quarantined outbound ops (messages durability engine gave up on)
+# 2. Check quarantines by bounded disposition, not a raw loss count.
 sqlite3 ~/.local/share/whatsoup/instances/sandbox-agent/bot.db \
-  "SELECT COUNT(*) FROM outbound_ops WHERE status = 'quarantined';"
+  "SELECT CASE quarantine_disposition
+            WHEN 'delivery_ambiguous_unsafe' THEN 'delivery_ambiguous_unsafe'
+            WHEN 'delivery_not_attempted' THEN 'delivery_not_attempted'
+            WHEN 'record_unreconstructable' THEN 'record_unreconstructable'
+            WHEN 'stale_status_discarded' THEN 'stale_status_discarded'
+            ELSE 'legacy_unclassified'
+          END AS disposition,
+          CASE quarantine_evidence_coverage
+            WHEN 'complete' THEN 'complete'
+            WHEN 'partial' THEN 'partial'
+            ELSE 'legacy_unclassified'
+          END AS evidence_coverage,
+          COUNT(*) AS count
+   FROM outbound_ops WHERE status = 'quarantined'
+   GROUP BY 1, 2
+   ORDER BY count DESC, disposition;"
 
 # 3. Check health for durability stats
 curl -s http://127.0.0.1:9091/health | python3 -c \
-  "import sys,json; d=json.load(sys.stdin)['durability']; print('pending:', d['pendingOutbound'], '| quarantined:', d['quarantinedOutbound'], '| failures:', d['outboundFailureEvidence'])"
+  "import sys,json; d=json.load(sys.stdin)['durability']; print('pending:', d['pendingOutbound'], '| quarantine dispositions:', d['outboundQuarantineDispositions'])"
 
 # 4. Check WhatsApp is connected
 curl -s http://127.0.0.1:9091/health | python3 -c \
@@ -728,7 +743,7 @@ curl -s http://127.0.0.1:9091/health | python3 -c \
 - `echoed` — confirmed delivered (normal terminal state)
 - `maybe_sent` — send attempted but uncertain (network issue or crash mid-send)
 - `failed_permanent` — permanent failure (e.g. invalid JID)
-- `quarantined` — durability engine gave up; message may have been lost
+- `quarantined` — terminal containment; consult `quarantine_disposition` before inferring whether a provider send was possible
 
 ---
 
@@ -861,14 +876,14 @@ sqlite3 $DB ".backup '${DB}.pre-recovery'"
 # drainPendingOutbound() actually re-sends the 'pending' (reset) ops:
 #    - Reconstructable text/status_ping ops ({text}) → re-sent via messenger
 #    - Non-reconstructable ops → quarantined + alerted (never left pending)
-#    - status_ping ops older than 30m → quarantined (reason=status_op_ttl_expired)
+#    - status_ping ops older than 30m → quarantined as stale_status_discarded
 # Turn recovery is narrower: it reconciles only an exact source inbound,
 # terminal owner, and selected unresolved delivery-op chain. It never blindly
 # replays an arbitrary prompt that happened to be open at the crash.
 # While the process remains live, the 10-second echo-maintenance loop also
-# reconciles up to 200 oldest `maybe_sent` rows created after the post-connect
-# pass once each has aged 30 seconds. Safe/read-only sends return to the pending
-# drainer; unsafe sends quarantine and the existing
+# reconciles up to 200 oldest live `maybe_sent` rows after each current
+# ambiguity_at episode has aged 30 seconds (not from queue creation).
+# Safe/read-only sends return to the pending drainer; unsafe sends quarantine and the existing
 # stuck-inbound sweep can then release a terminally non-echoed recovery owner.
 
 # 5. Start the service
@@ -885,49 +900,61 @@ as completed evidence.
 
 ---
 
-### 6.3 Handling Quarantined Messages
+### 6.3 Handling Quarantined Outbound Ops
 
-Quarantined outbound operations are messages the durability engine could not safely replay after a crash. They are preserved in the database for read-only inspection and evidence-backed remediation.
+Quarantined outbound operations are terminal containment records. Their bounded disposition
+distinguishes a proven no-send outcome from delivery ambiguity; inspect the disposition before
+making any message-loss claim. They are preserved for read-only, evidence-backed remediation.
 
 ```bash
 INSTANCE=sandbox-agent
 DB=~/.local/share/whatsoup/instances/$INSTANCE/bot.db
 OP_ID=123 # replace with the quarantined op under review
+REPO=/path/to/WhatSoup
 
-# 1. Inspect quarantined operation metadata without printing message bodies.
-sqlite3 $DB \
-  "SELECT id, conversation_key, payload_hash, source_inbound_seq,
-          CASE WHEN json_valid(error) THEN json_extract(error, '$.failure_code')
-               ELSE 'outbound.legacy_unclassified' END AS failure_code,
-          CASE WHEN json_valid(error) THEN json_extract(error, '$.stage')
-               ELSE 'legacy_unclassified' END AS failure_stage,
-          retry_count, submitted_at
-   FROM outbound_ops WHERE status = 'quarantined'
-   ORDER BY id DESC;"
+# 1. Inspect one row through the supported, redacted interface. Save the
+#    returned evidenceSha256; it is an optimistic-concurrency precondition.
+python3 "$REPO/deploy/scripts/retire-outbound-quarantine.py" \
+  --db "$DB" --op-id "$OP_ID"
 
-# 2. Check the linked inbound event (the message that triggered this response)
-sqlite3 $DB \
-  "SELECT ie.seq, ie.message_id, ie.processing_status, ie.completed_at
+# 2. Check the linked inbound lifecycle for this one selected op, without printing message IDs.
+sqlite3 "$DB" \
+   "SELECT ie.seq, ie.processing_status, ie.completed_at,
+          CASE WHEN op.source_inbound_seq IS NULL THEN 'none' ELSE 'linked' END AS inbound_link
    FROM outbound_ops op
-   JOIN inbound_events ie ON op.source_inbound_seq = ie.seq
-   WHERE op.status = 'quarantined';"
+   LEFT JOIN inbound_events ie ON op.source_inbound_seq = ie.seq
+   WHERE op.id = $OP_ID;"
 
 # 3. Check whether the op is selected by an immutable terminal/recovery chain.
-sqlite3 $DB \
+sqlite3 "$DB" \
   "SELECT t.id AS terminal_id, t.inbound_disposition, j.id AS recovery_job_id,
           j.state, j.completion_kind, j.echo_conflict_at
    FROM turn_terminal_records t
    LEFT JOIN turn_recovery_jobs j ON j.terminal_record_id = t.id
    WHERE t.delivery_op_id = $OP_ID;"
+
+# 4. Only after a reviewed, matching acknowledgement, retire a supported
+#    disposition. This never replays a message or emits an alert clear.
+python3 "$REPO/deploy/scripts/retire-outbound-quarantine.py" \
+  --db "$DB" --op-id "$OP_ID" --apply --confirm-op-id "$OP_ID" \
+  --expected-disposition delivery_ambiguous_unsafe \
+  --acknowledgement delivery-risk-reviewed \
+  --expect-evidence-sha256 '<digest returned by step 1>'
 ```
 
 Do **not** repair these rows with direct `UPDATE outbound_ops`,
 `UPDATE turn_recovery_jobs`, or `DELETE` statements. Changing `quarantined` to `pending`,
 fabricating `echoed`, or deleting a job bypasses terminal CAS, source-inbound settlement,
-completion proof, reply-guarantee disarm, and late-echo conflict handling. Preserve a database
-backup and the read-only evidence above, then use an audited application recovery path. If the
-deployed build exposes no supported resolver for the required operator decision, leave the chain
-intact and escalate for a reviewed repair rather than manufacturing delivery truth in SQLite.
+completion proof, reply-guarantee disarm, and late-echo conflict handling. The command makes an
+owner-only private backup before an apply, preserves evidence byte-for-byte, and records a bounded
+receipt separately. It supports only these exact pairs: `delivery_ambiguous_unsafe` with
+`delivery-risk-reviewed`, `record_unreconstructable` with `record-reconstruction-reviewed`, and
+`delivery_not_attempted` or `stale_status_discarded` with `none`. Even `none` requires the exact
+digest and explicit apply command. It deliberately does not clear an alert: only runtime recovery
+can clear an incident source after trusted delivery proof, a zero contributor count, and any
+required durable review receipt. Retain the private backup or remove it according to the incident
+record-retention policy after the outcome is documented. If the row is not eligible, leave the chain intact and escalate
+for a reviewed repair rather than manufacturing delivery truth in SQLite.
 
 ---
 
@@ -1133,7 +1160,7 @@ sqlite3 $DB \
 
 # Outbound ops — pending/in-flight message sends
 sqlite3 $DB \
-  "SELECT id, status, op_type, replay_policy, submitted_at, error
+  "SELECT id, status, op_type, replay_policy, submitted_at, ambiguity_at, error
    FROM outbound_ops
    WHERE status NOT IN ('echoed', 'failed_permanent')
    ORDER BY id DESC LIMIT 20;"
@@ -1580,7 +1607,7 @@ Migration 51 removes old raw columns from the live schema, but migration success
 | WhatsApp connected | `health.whatsapp.connected` | False for >2 min |
 | Health status | `health.status` | `unhealthy` |
 | Enrichment staleness | `health.enrichment.last_run` | Null or >15 min ago (chat instances only) |
-| Quarantined messages | `health.durability.quarantinedOutbound` | >0 (means message was lost) |
+| Quarantined outbound ops | `health.durability.outboundQuarantineDispositions` | Any `delivery_ambiguous_unsafe` or `legacy_unclassified` group needs review; coarse count alone does not prove loss. |
 | Pending outbound | `health.durability.pendingOutbound` | >50 (queue buildup) |
 | Outbound audit readable | `health.outbound_sends.readable` | `false` |
 | Tool evidence readable | `health.tool_durability.readable` | `false` |
@@ -1649,7 +1676,7 @@ done
 
 - **WhatsApp disconnect:** Alert immediately after 2 minutes. WhatsApp sessions expire if offline too long. Priority: high.
 - **Service not running:** `systemctl --user is-active whatsoup@<name>` returning non-zero. Priority: high.
-- **Quarantined messages accumulating:** Means the bot has lost messages it cannot replay. Investigate outbound_ops table. Priority: medium.
+- **Quarantined ops accumulating:** Inspect the bounded disposition aggregate. Ambiguous or legacy groups need review; never infer loss from the coarse count alone. Priority: medium.
 - **Start limit hit:** `systemctl --user status whatsoup@<name>` shows "failed" state. Needs manual `reset-failed` + investigation. Priority: high.
 - **Large pending access list:** Unanswered approval requests from new users. Priority: low (informational).
 
@@ -1667,7 +1694,7 @@ Key log patterns to monitor:
 # Auth expired
 'Logged out'
 
-# Quarantine events (messages lost)
+# Quarantine events (classify the disposition before inferring delivery outcome)
 'quarantined'
 
 # Fatal errors

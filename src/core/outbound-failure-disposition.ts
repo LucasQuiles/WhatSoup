@@ -1,5 +1,6 @@
 import { isRecord } from '../lib/type-guards.ts';
 import { isOutboundGovernorShed } from './outbound-governor-shed.ts';
+import { isOutboundIdentityBlocked } from './outbound-identity/guard.ts';
 import {
   ErrorCode,
   type ErrorCode as TransportErrorCode,
@@ -58,6 +59,86 @@ export const OUTBOUND_EVIDENCE_COVERAGE = [
 ] as const;
 export type OutboundEvidenceCoverage = (typeof OUTBOUND_EVIDENCE_COVERAGE)[number];
 
+/**
+ * Bounded disposition for a terminal outbound quarantine. This deliberately
+ * lives outside the versioned failure-evidence payload: historical evidence
+ * remains decodable as v1 while new rows receive an explicit policy outcome.
+ */
+export const OUTBOUND_QUARANTINE_DISPOSITIONS = [
+  'delivery_ambiguous_unsafe',
+  'delivery_not_attempted',
+  'record_unreconstructable',
+  'stale_status_discarded',
+  'legacy_unclassified',
+] as const;
+export type OutboundQuarantineDisposition =
+  (typeof OUTBOUND_QUARANTINE_DISPOSITIONS)[number];
+
+export interface OutboundQuarantineDispositionPolicy {
+  /** Whether an external provider call might already have happened. */
+  providerCall: 'possible' | 'not_started' | 'unknown';
+  /** Stable, content-free alert routing. */
+  alertSource: string;
+  alertSeverity: 'critical' | 'warning' | 'info';
+  alertSummary: string;
+  /** Whether a human acknowledgement is required before retirement. */
+  acknowledgement: 'delivery-risk-reviewed' | 'record-reconstruction-reviewed' | 'none';
+  /** Retention class consumed by terminal database retention. */
+  retention: 'extended' | 'standard';
+  /** Whether recovery may clear this incident after its exact contributors reach zero. */
+  clearWhenContributorFree: boolean;
+}
+
+export const OUTBOUND_QUARANTINE_DISPOSITION_POLICIES: Readonly<
+  Record<OutboundQuarantineDisposition, OutboundQuarantineDispositionPolicy>
+> = {
+  delivery_ambiguous_unsafe: {
+    providerCall: 'possible',
+    alertSource: 'outbound_delivery_ambiguous',
+    alertSeverity: 'critical',
+    alertSummary: 'outbound delivery is ambiguous; automatic replay remains disabled',
+    acknowledgement: 'delivery-risk-reviewed',
+    retention: 'extended',
+    clearWhenContributorFree: true,
+  },
+  delivery_not_attempted: {
+    providerCall: 'not_started',
+    alertSource: 'outbound_delivery_not_attempted',
+    alertSeverity: 'warning',
+    alertSummary: 'outbound delivery was not attempted and requires disposition review',
+    acknowledgement: 'none',
+    retention: 'standard',
+    clearWhenContributorFree: true,
+  },
+  record_unreconstructable: {
+    providerCall: 'not_started',
+    alertSource: 'outbound_record_unreconstructable',
+    alertSeverity: 'warning',
+    alertSummary: 'outbound record cannot be reconstructed and requires review',
+    acknowledgement: 'record-reconstruction-reviewed',
+    retention: 'standard',
+    clearWhenContributorFree: true,
+  },
+  stale_status_discarded: {
+    providerCall: 'not_started',
+    alertSource: 'outbound_status_discarded',
+    alertSeverity: 'info',
+    alertSummary: 'stale outbound status notice was discarded before send',
+    acknowledgement: 'none',
+    retention: 'standard',
+    clearWhenContributorFree: false,
+  },
+  legacy_unclassified: {
+    providerCall: 'unknown',
+    alertSource: 'outbound_quarantine_unclassified',
+    alertSeverity: 'warning',
+    alertSummary: 'outbound quarantine lacks a classified disposition',
+    acknowledgement: 'delivery-risk-reviewed',
+    retention: 'extended',
+    clearWhenContributorFree: true,
+  },
+};
+
 export type InternalOutboundFailureCode =
   | 'outbound.unknown_failure'
   | 'outbound.shutdown_before_send'
@@ -69,6 +150,7 @@ export type InternalOutboundFailureCode =
   | 'outbound.status_ping_expired'
   | 'outbound.unsafe_delivery_unconfirmed'
   | 'outbound.governor_shed'
+  | 'outbound.identity_blocked'
   | 'outbound.replay_failed'
   | 'outbound.deferral_limit_exceeded';
 
@@ -159,8 +241,14 @@ const INTERNAL_CODES = new Set<string>([
   'outbound.status_ping_expired',
   'outbound.unsafe_delivery_unconfirmed',
   'outbound.governor_shed',
+  'outbound.identity_blocked',
   'outbound.replay_failed',
   'outbound.deferral_limit_exceeded',
+]);
+/** Runtime source of truth for every code accepted in v1 outbound evidence. */
+export const OUTBOUND_FAILURE_EVIDENCE_CODES = Object.freeze([
+  ...TRANSPORT_CODES,
+  ...INTERNAL_CODES,
 ]);
 const STAGES = new Set<string>(OUTBOUND_FAILURE_STAGES);
 const MUTATION_STATES = new Set<string>(OUTBOUND_MUTATION_STATES);
@@ -240,6 +328,7 @@ function stageFor(
     || code === ErrorCode.PAYLOAD_TOO_LARGE
     || code === ErrorCode.CONVERSATION_NOT_FOUND
     || code === 'outbound.governor_shed'
+    || code === 'outbound.identity_blocked'
     || code === 'outbound.shutdown_before_send'
   ) {
     return 'admission';
@@ -264,6 +353,7 @@ function mutationStateFor(
     || code === ErrorCode.PAYLOAD_TOO_LARGE
     || code === ErrorCode.CONVERSATION_NOT_FOUND
     || code === 'outbound.governor_shed'
+    || code === 'outbound.identity_blocked'
     || code === 'outbound.shutdown_before_send'
   ) {
     return 'not_started';
@@ -439,13 +529,16 @@ export function classifyOutboundFailure(
   const now = monotonicEvidenceTimestamp(nowMs, options.previousEvidence);
   const payload = readTransportPayload(error);
   const code: OutboundFailureCode = payload?.code as TransportErrorCode
-    ?? (isOutboundGovernorShed(error)
-      ? 'outbound.governor_shed'
-      : 'outbound.unknown_failure');
+    ?? (isOutboundIdentityBlocked(error)
+      ? 'outbound.identity_blocked'
+      : isOutboundGovernorShed(error)
+        ? 'outbound.governor_shed'
+        : 'outbound.unknown_failure');
   const phase = payload?.phase;
   const stage = stageFor(code, phase);
   const mutationState = mutationStateFor(code, phase);
-  const retryable = payload?.retryable ?? !isOutboundGovernorShed(error);
+  const retryable = payload?.retryable
+    ?? !(isOutboundIdentityBlocked(error) || isOutboundGovernorShed(error));
   const retryAfterMs = retryable && mutationState !== 'ambiguous'
     ? validPositiveDelay(payload?.retryAfterMs, nowMs)
     : null;
@@ -517,6 +610,38 @@ export function createInternalOutboundFailureEvidence(
     last_failure_at: now,
     evidence_coverage: options.evidenceCoverage ?? 'complete',
   });
+}
+
+/**
+ * Classify only from the bounded, validated outbound evidence contract. In
+ * particular, an operation type, payload, or historical error string can
+ * never make a row appear never-sent: that conclusion requires both a
+ * not-started mutation state and zero provider submissions.
+ */
+export function classifyOutboundQuarantineDisposition(
+  evidence: OutboundFailureEvidenceV1,
+): OutboundQuarantineDisposition {
+  if (
+    evidence.failure_code === 'outbound.unsafe_delivery_unconfirmed'
+    && evidence.mutation_state === 'ambiguous'
+  ) {
+    return 'delivery_ambiguous_unsafe';
+  }
+
+  const provenNotStarted = evidence.mutation_state === 'not_started'
+    && evidence.provider_submission_count === 0;
+  if (!provenNotStarted) return 'legacy_unclassified';
+
+  switch (evidence.failure_code) {
+    case 'outbound.deferral_limit_exceeded':
+      return 'delivery_not_attempted';
+    case 'outbound.pending_replay_unreconstructable':
+      return 'record_unreconstructable';
+    case 'outbound.status_ping_expired':
+      return 'stale_status_discarded';
+    default:
+      return 'legacy_unclassified';
+  }
 }
 
 // Failure classes eligible for a best-effort user-facing "your message wasn't

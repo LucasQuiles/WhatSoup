@@ -1,0 +1,51 @@
+[
+  {
+    "file": "src/transport/imessage/imsg-port.ts",
+    "line": 69,
+    "pattern": "/tmp/",
+    "snippet": "net.createConnection(config.imsgSocketPath ?? '/tmp/imsg.sock')",
+    "justification": "fallback socket path — needs os.tmpdir() refactor (issue #2632)"
+  },
+  {
+    "file": "src/transport/imessage/types.ts",
+    "line": 66,
+    "pattern": "/tmp/",
+    "snippet": "Default '/tmp/imsg.sock'",
+    "justification": "JSDoc documenting the default socket path"
+  },
+  {
+    "file": "src/transport/imessage/types.ts",
+    "line": 119,
+    "pattern": "/tmp/",
+    "snippet": "imsgSocketPath: '/tmp/imsg.sock'",
+    "justification": "default socket path — needs os.tmpdir() refactor (issue #2632)"
+  },
+  {
+    "file": "scripts/check-insecure-tempfile.ts",
+    "line": 14,
+    "pattern": "/tmp/",
+    "snippet": "shutil.copy(..., \"/tmp/...\") write-targets are not detected.",
+    "justification": "doc comment documenting patterns the SIBLING script does NOT detect"
+  },
+  {
+    "file": "scripts/check-insecure-tempfile.ts",
+    "line": 15,
+    "pattern": "/tmp/",
+    "snippet": "os.open(\"/tmp/...\") write-targets are not detected.",
+    "justification": "doc comment documenting patterns the sibling script does NOT detect"
+  },
+  {
+    "file": "scripts/check-insecure-tempfile.ts",
+    "line": 16,
+    "pattern": "/tmp/",
+    "snippet": "f-string /tmp write-targets (e.g. open(f\"/tmp/{name}\",\"w\")",
+    "justification": "doc comment documenting patterns the sibling script does NOT detect"
+  },
+  {
+    "file": "scripts/check-insecure-tempfile.ts",
+    "line": 45,
+    "pattern": "/tmp/",
+    "snippet": "f-string paths like open(f\"/tmp/{x}\",\"w\") are also detected.",
+    "justification": "doc comment documenting patterns the sibling script does detect"
+  }
+]

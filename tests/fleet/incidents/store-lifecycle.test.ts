@@ -62,7 +62,22 @@ describe('condition_observed lifecycle', () => {
 
   it('supersedes the prior open episode when a newer occurrence opens', () => {
     const first = store.acceptSignal(observed('sig-1', 'occ-1', 1), PRODUCER, NOW);
-    const second = store.acceptSignal(observed('sig-9', 'occ-2', 1), PRODUCER, NOW);
+    // Strictly newer observedAt: supersession requires the new occurrence to
+    // be fresher than every open episode, not merely different.
+    const second = store.acceptSignal(
+      JSON.stringify({
+        schemaVersion: 1,
+        signalId: 'sig-9',
+        kind: 'condition_observed',
+        subject: 'host:alpha',
+        conditionClass: 'selfcheck_drift',
+        occurrenceId: 'occ-2',
+        occurrenceSeq: 1,
+        observedAt: '2026-07-28T12:00:01.000Z',
+      }),
+      PRODUCER,
+      NOW,
+    );
     expect(second.outcome).toBe('accepted');
     if (first.outcome !== 'accepted' || second.outcome !== 'accepted') return;
 
@@ -165,6 +180,188 @@ describe('condition_observed lifecycle', () => {
     expect(result.outcome).toBe('accepted');
     if (result.outcome !== 'accepted') return;
     expect(result.receipt.disposition).toBe('heartbeat_recorded');
+  });
+
+  function observedWithTime(
+    signalId: string,
+    occurrenceId: string,
+    occurrenceSeq: number,
+    observedAtIso: string,
+  ): string {
+    return JSON.stringify({
+      schemaVersion: 1,
+      signalId,
+      kind: 'condition_observed',
+      subject: 'host:alpha',
+      conditionClass: 'selfcheck_drift',
+      occurrenceId,
+      occurrenceSeq,
+      observedAt: observedAtIso,
+    });
+  }
+
+  describe('stale recovery is causally inert', () => {
+    it('does not resolve on a recovery with an older sequence', () => {
+      const opened = store.acceptSignal(observed('sig-1', 'occ-1', 5), PRODUCER, NOW);
+      if (opened.outcome !== 'accepted') throw new Error('setup: open failed');
+      const incidentId = opened.receipt.incidentId as number;
+      const before = store.getIncident(incidentId);
+      const beforeTransitions = store.listTransitions(incidentId);
+
+      const stale = store.acceptSignal(recovered('sig-r-old', 'occ-1', 3), PRODUCER, NOW);
+      expect(stale.outcome).toBe('accepted');
+      if (stale.outcome !== 'accepted') return;
+      expect(stale.receipt.disposition).toBe('stored_stale_observation');
+      expect(stale.receipt.incidentId).toBe(incidentId);
+
+      const after = store.getIncident(incidentId);
+      expect(after?.conditionState).toBe('open');
+      expect(after?.projectionVersion).toBe(before?.projectionVersion);
+      expect(store.listTransitions(incidentId)).toEqual(beforeTransitions);
+    });
+
+    it('does not resolve on a recovery with an equal sequence', () => {
+      const opened = store.acceptSignal(observed('sig-1', 'occ-1', 5), PRODUCER, NOW);
+      if (opened.outcome !== 'accepted') throw new Error('setup: open failed');
+      const incidentId = opened.receipt.incidentId as number;
+
+      const equal = store.acceptSignal(recovered('sig-r-eq', 'occ-1', 5), PRODUCER, NOW);
+      expect(equal.outcome).toBe('accepted');
+      if (equal.outcome !== 'accepted') return;
+      expect(equal.receipt.disposition).toBe('stored_stale_observation');
+      expect(equal.receipt.incidentId).toBe(incidentId);
+      expect(store.getIncident(incidentId)?.conditionState).toBe('open');
+    });
+
+    it('replays the original state-inert receipt on exact resend', () => {
+      store.acceptSignal(observed('sig-1', 'occ-1', 5), PRODUCER, NOW);
+      const body = recovered('sig-r-old', 'occ-1', 3);
+      const first = store.acceptSignal(body, PRODUCER, NOW);
+      const replay = store.acceptSignal(body, PRODUCER, new Date('2026-07-28T12:30:00.000Z'));
+      expect(replay.outcome).toBe('idempotent_replay');
+      if (first.outcome !== 'accepted' || replay.outcome !== 'idempotent_replay') return;
+      expect(replay.receipt).toEqual(first.receipt);
+    });
+
+    it('still resolves on a causally newer recovery', () => {
+      const opened = store.acceptSignal(observed('sig-1', 'occ-1', 5), PRODUCER, NOW);
+      if (opened.outcome !== 'accepted') throw new Error('setup: open failed');
+      const result = store.acceptSignal(recovered('sig-r-new', 'occ-1', 6), PRODUCER, NOW);
+      expect(result.outcome).toBe('accepted');
+      if (result.outcome !== 'accepted') return;
+      expect(result.receipt.disposition).toBe('incident_resolved');
+    });
+  });
+
+  describe('cross-occurrence supersession is order-guarded', () => {
+    it('does not let a late occurrence with an older timestamp supersede a fresher episode', () => {
+      const fresh = store.acceptSignal(
+        observedWithTime('sig-b', 'occ-b', 1, '2026-07-28T12:00:00.000Z'),
+        PRODUCER,
+        NOW,
+      );
+      if (fresh.outcome !== 'accepted') throw new Error('setup: open failed');
+      const freshId = fresh.receipt.incidentId as number;
+
+      const late = store.acceptSignal(
+        observedWithTime('sig-a-late', 'occ-a', 7, '2026-07-28T11:00:00.000Z'),
+        PRODUCER,
+        NOW,
+      );
+      expect(late.outcome).toBe('accepted');
+      if (late.outcome !== 'accepted') return;
+      expect(late.receipt.disposition).toBe('stored_stale_observation');
+      expect(late.receipt.transitionId).toBeNull();
+
+      expect(store.getIncident(freshId)?.conditionState).toBe('open');
+      expect(store.listIncidents().filter((i) => i.occurrenceId === 'occ-a')).toEqual([]);
+    });
+
+    it('does not let an equal-timestamp occurrence supersede an open episode', () => {
+      const fresh = store.acceptSignal(
+        observedWithTime('sig-b', 'occ-b', 1, '2026-07-28T12:00:00.000Z'),
+        PRODUCER,
+        NOW,
+      );
+      if (fresh.outcome !== 'accepted') throw new Error('setup: open failed');
+
+      const equal = store.acceptSignal(
+        observedWithTime('sig-a-eq', 'occ-a', 1, '2026-07-28T12:00:00.000Z'),
+        PRODUCER,
+        NOW,
+      );
+      expect(equal.outcome).toBe('accepted');
+      if (equal.outcome !== 'accepted') return;
+      expect(equal.receipt.disposition).toBe('stored_stale_observation');
+      expect(store.getIncident(fresh.receipt.incidentId as number)?.conditionState).toBe('open');
+      expect(store.listIncidents().filter((i) => i.occurrenceId === 'occ-a')).toEqual([]);
+    });
+
+    it('still supersedes on a strictly newer occurrence', () => {
+      const older = store.acceptSignal(
+        observedWithTime('sig-b', 'occ-b', 1, '2026-07-28T12:00:00.000Z'),
+        PRODUCER,
+        NOW,
+      );
+      if (older.outcome !== 'accepted') throw new Error('setup: open failed');
+
+      const newer = store.acceptSignal(
+        observedWithTime('sig-c', 'occ-c', 1, '2026-07-28T12:00:01.000Z'),
+        PRODUCER,
+        NOW,
+      );
+      expect(newer.outcome).toBe('accepted');
+      if (newer.outcome !== 'accepted') return;
+      expect(newer.receipt.disposition).toBe('incident_opened');
+      expect(store.getIncident(older.receipt.incidentId as number)?.conditionState).toBe('superseded');
+    });
+  });
+
+  describe('observed freshness is advance-only', () => {
+    it('advances the sequence without regressing last_observed_at', () => {
+      const opened = store.acceptSignal(
+        observedWithTime('sig-1', 'occ-1', 5, '2026-07-28T12:00:02.000Z'),
+        PRODUCER,
+        NOW,
+      );
+      if (opened.outcome !== 'accepted') throw new Error('setup: open failed');
+      const incidentId = opened.receipt.incidentId as number;
+      const beforeVersion = store.getIncident(incidentId)?.projectionVersion ?? 0;
+
+      const result = store.acceptSignal(
+        observedWithTime('sig-2', 'occ-1', 6, '2026-07-28T12:00:01.000Z'),
+        PRODUCER,
+        NOW,
+      );
+      expect(result.outcome).toBe('accepted');
+      if (result.outcome !== 'accepted') return;
+      expect(result.receipt.disposition).toBe('incident_updated');
+
+      const projection = store.getIncident(incidentId);
+      expect(projection?.lastOccurrenceSeq).toBe(6);
+      expect(projection?.lastObservedAt).toBe('2026-07-28T12:00:02.000Z');
+      expect(projection?.projectionVersion).toBe(beforeVersion + 1);
+    });
+
+    it('advances last_observed_at when the newer sequence is also newer in time', () => {
+      const opened = store.acceptSignal(
+        observedWithTime('sig-1', 'occ-1', 5, '2026-07-28T12:00:01.000Z'),
+        PRODUCER,
+        NOW,
+      );
+      if (opened.outcome !== 'accepted') throw new Error('setup: open failed');
+      const incidentId = opened.receipt.incidentId as number;
+
+      const result = store.acceptSignal(
+        observedWithTime('sig-2', 'occ-1', 6, '2026-07-28T12:00:03.000Z'),
+        PRODUCER,
+        NOW,
+      );
+      expect(result.outcome).toBe('accepted');
+      const projection = store.getIncident(incidentId);
+      expect(projection?.lastOccurrenceSeq).toBe(6);
+      expect(projection?.lastObservedAt).toBe('2026-07-28T12:00:03.000Z');
+    });
   });
 
   it('honors a configured maxFutureSkewMs', () => {

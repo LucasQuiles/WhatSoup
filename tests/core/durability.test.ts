@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { Database } from '../../src/core/database.ts';
 import { DurabilityEngine, sendTracked } from '../../src/core/durability.ts';
 import type { OutboundOpParams } from '../../src/core/durability.ts';
+import { createInternalOutboundFailureEvidence } from '../../src/core/outbound-failure-disposition.ts';
 
 const BASE_OP: OutboundOpParams = {
   conversationKey: 'key-1',
@@ -224,7 +225,7 @@ describe('DurabilityEngine', () => {
         .toMatchObject({ status: 'echoed', error: null });
     });
 
-    it('getHealthStats surfaces the maybe_sent count and oldest submission age (#1865)', () => {
+    it('getHealthStats surfaces the maybe_sent count and oldest ambiguity episode age (#1865)', () => {
       expect(engine.getHealthStats().maybeSentOutbound).toBe(0);
       expect(engine.getHealthStats().oldestMaybeSentAt).toBeNull();
 
@@ -232,9 +233,9 @@ describe('DurabilityEngine', () => {
       engine.markSending(id);
       engine.markSubmitted(id, 'WA_MSG_1865');
       engine.markMaybeSent(id, 'echo_timeout');
-      // Back-date submission to one hour ago to simulate a long-unresolved ambiguous delivery.
+      // Back-date the active ambiguity episode to simulate a long-unresolved delivery.
       db.raw
-        .prepare(`UPDATE outbound_ops SET submitted_at = datetime('now', '-3600 seconds') WHERE id = ?`)
+        .prepare(`UPDATE outbound_ops SET ambiguity_at = datetime('now', '-3600 seconds') WHERE id = ?`)
         .run(id);
 
       const stats = engine.getHealthStats();
@@ -296,21 +297,79 @@ describe('DurabilityEngine', () => {
       expect(projection.groups.length).toBeLessThanOrEqual(20);
     });
 
-    it('fails closed on a send that failed before markSubmitted: null submitted_at must still age via created_at, not read as fresh (PRESTAGE-T4)', () => {
+    it('projects exact quarantine dispositions with closed taxonomy values only', () => {
+      const reconstructable = engine.createOutboundOp({
+        conversationKey: 'private-quarantine-conversation',
+        chatJid: 'private-quarantine-destination',
+        opType: 'media',
+        payload: '{"private":"payload"}',
+        replayPolicy: 'unsafe',
+      });
+      engine.markQuarantined(reconstructable, createInternalOutboundFailureEvidence({
+        failureCode: 'outbound.pending_replay_unreconstructable',
+        stage: 'admission',
+        mutationState: 'not_started',
+        providerSubmissionCount: 0,
+        evidenceCoverage: 'complete',
+      }));
+
+      const malformed = engine.createOutboundOp({
+        conversationKey: 'private-legacy-conversation',
+        chatJid: 'private-legacy-destination',
+        opType: 'text',
+        payload: '{"private":"legacy"}',
+        replayPolicy: 'unsafe',
+      });
+      engine.markQuarantined(malformed);
+      db.raw.prepare(
+        `UPDATE outbound_ops
+         SET quarantine_disposition = 'private-untrusted-disposition',
+             quarantine_evidence_coverage = 'private-untrusted-coverage'
+         WHERE id = ?`,
+      ).run(malformed);
+
+      const untrustedStatus = engine.createOutboundOp(BASE_OP);
+      db.raw.prepare(
+        "UPDATE outbound_ops SET status = 'private-untrusted-status', error = 'private-untrusted-error' WHERE id = ?",
+      ).run(untrustedStatus);
+
+      const stats = engine.getHealthStats();
+      expect(stats.outboundQuarantineDispositions).toEqual({
+        total: 2,
+        groups: [
+          {
+            disposition: 'legacy_unclassified',
+            evidenceCoverage: 'legacy_unclassified',
+            count: 1,
+          },
+          {
+            disposition: 'record_unreconstructable',
+            evidenceCoverage: 'complete',
+            count: 1,
+          },
+        ],
+      });
+      expect(stats.outboundFailureEvidence.groups).toContainEqual(
+        expect.objectContaining({ terminalState: 'unknown' }),
+      );
+      expect(JSON.stringify(stats)).not.toContain('private-');
+    });
+
+    it('fails closed on a send that failed before markSubmitted: null submitted_at ages from its ambiguity episode (PRESTAGE-T4)', () => {
       const id = engine.createOutboundOp({ conversationKey: 'k', chatJid: 'j', opType: 'text', payload: '{}', replayPolicy: 'unsafe' });
       engine.markSending(id);
       // No markSubmitted() call: the transport attempt failed before a
       // submission receipt existed (the BRICK-LAB job-1474 shape) — status
       // goes straight sending -> maybe_sent with submitted_at left NULL.
       engine.markMaybeSent(id, 'ECONNRESET');
-      const row = db.raw.prepare('SELECT status, submitted_at, created_at FROM outbound_ops WHERE id = ?').get(id) as any;
+      const row = db.raw.prepare('SELECT status, submitted_at, ambiguity_at FROM outbound_ops WHERE id = ?').get(id) as any;
       expect(row.status).toBe('maybe_sent');
       expect(row.submitted_at).toBeNull();
 
-      // Back-date creation to one hour ago: the only ambiguity-transition
-      // signal available for a row that never reached markSubmitted.
+      // Back-date the current ambiguity episode. Queue creation is deliberately
+      // not an ambiguity-transition signal for a newly ambiguous row.
       db.raw
-        .prepare(`UPDATE outbound_ops SET created_at = datetime('now', '-3600 seconds') WHERE id = ?`)
+        .prepare(`UPDATE outbound_ops SET ambiguity_at = datetime('now', '-3600 seconds') WHERE id = ?`)
         .run(id);
 
       const stats = engine.getHealthStats();

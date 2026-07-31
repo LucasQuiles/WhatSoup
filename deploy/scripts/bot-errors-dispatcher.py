@@ -30,6 +30,7 @@ if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
 from lib.bot_errors_daily_health import daily_health_host_from_payload
+from lib.bot_errors_envelope import EnvelopeError, classify_event, new_event_fields, normalize_event
 from lib.bot_errors_redaction import redact_bot_errors_text, redact_json_value as redact_shared_json_value
 from lib.controller_log import (
     ControllerLogContext,
@@ -511,6 +512,19 @@ def now_iso() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
 
+# These incidents are emitted from the local durability writer and their clear
+# can race a new quarantine only across the outbox boundary. Their clear must
+# prove a strictly later full timestamp; an equal or unparseable timestamp is
+# deliberately left open rather than risking loss of a new alert.
+QUARANTINE_INCIDENT_SOURCES = frozenset({
+    "outbound_delivery_ambiguous",
+    "outbound_delivery_not_attempted",
+    "outbound_record_unreconstructable",
+    "outbound_quarantine_unclassified",
+    "outbound_quarantined",
+})
+
+
 def state_root() -> Path:
     return Path(os.environ.get("BOT_ERRORS_STATE_DIR", Path.home() / ".local/state/bot-errors"))
 
@@ -989,12 +1003,11 @@ def incident_scope(event: dict[str, Any]) -> str:
 
 
 def is_incident_alert(event: dict[str, Any]) -> bool:
-    severity = str(event.get("severity") or "").lower()
-    return str(event.get("eventType") or "alert") == "alert" and severity in {"critical", "error", "warning"}
+    return classify_event(event).kind == "incident_alert"
 
 
 def is_incident_clear(event: dict[str, Any]) -> bool:
-    return str(event.get("eventType") or "") == "clear"
+    return classify_event(event).kind == "incident_recovery"
 
 
 def is_daily_health_clear(event: dict[str, Any]) -> bool:
@@ -1656,6 +1669,24 @@ def event_created_epoch(event: dict[str, Any]) -> int | None:
     return int(parsed.timestamp())
 
 
+def event_created_order(event: dict[str, Any]) -> int | None:
+    """Return a UTC microsecond order only for unambiguous full timestamps."""
+    created = event.get("createdAt")
+    if not isinstance(created, str) or not created.strip():
+        return None
+    try:
+        parsed = datetime.fromisoformat(created.strip().replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return None
+    return int(parsed.timestamp()) * 1_000_000 + parsed.microsecond
+
+
+def is_quarantine_incident(event: dict[str, Any]) -> bool:
+    return str(event.get("source") or "") in QUARANTINE_INCIDENT_SOURCES
+
+
 def is_logged_out_physical_signal(event: dict[str, Any]) -> bool:
     if critical_failure_code(event) == "WA_AUTH_BOND_SERVER_REVOKED":
         return True
@@ -1791,7 +1822,6 @@ def append_still_open_context(
     evidence = str(event.get("evidence") or "").strip()
     event["evidence"] = "\n".join(part for part in [evidence, *additions] if part)
     if awaiting_physical and digest:
-        event["severity"] = "info"
         if "still-open digest" not in str(event.get("summary") or "").lower():
             event["summary"] = f"Still-open digest, awaiting physical action: {event.get('summary') or key}"
     elif awaiting_physical:
@@ -1803,7 +1833,6 @@ def append_still_open_context(
         if "escalated" not in str(event.get("summary") or "").lower():
             event["summary"] = f"ESCALATED still open: {event.get('summary') or key}"
     elif digest:
-        event["severity"] = "info"
         if "still-open digest" not in str(event.get("summary") or "").lower():
             event["summary"] = f"Still-open digest: {event.get('summary') or key}"
     elif "still open" not in str(event.get("summary") or "").lower():
@@ -2043,11 +2072,11 @@ def stamp_delivery_freshness(event: dict[str, Any], current: int) -> None:
 
 
 def format_event(event: dict[str, Any]) -> str:
-    event_type = str(event.get("eventType") or "alert")
-    severity = str(event.get("severity") or "").lower()
-    if event_type == "clear":
+    classification = classify_event(event)
+    severity = classification.severity
+    if classification.kind == "incident_recovery":
         title = "BOT RECOVERY"
-    elif severity == "info":
+    elif classification.kind == "observation":
         title = "BOT INFO"
     elif severity == "warning":
         title = "BOT WARNING"
@@ -2255,9 +2284,7 @@ def move_to_dead_letter(
 def dead_letter_meta_event(paths: dict[str, Path], count: int, oldest_summary: str) -> dict[str, Any]:
     now = int(time.time())
     return {
-        "schemaVersion": 1,
-        "eventType": "alert",
-        "severity": "critical",
+        **new_event_fields("alert", "critical"),
         "id": f"dispatcher-dead-letter-meta-{now}",
         "createdAt": now_iso(),
         "machine": socket.gethostname(),
@@ -2489,6 +2516,15 @@ def should_suppress_send(event: dict[str, Any], incident_state: dict[str, Any]) 
             if recovered_keys:
                 return None
             return f"clear has no open incident for {key}; stale recovery suppressed"
+        if is_quarantine_incident(event):
+            opened_created = open_record.get("eventCreatedAt")
+            if isinstance(opened_created, str) and opened_created.strip():
+                opened_order = event_created_order({"createdAt": opened_created})
+                clear_order = event_created_order(event)
+                if opened_order is None or clear_order is None:
+                    return f"quarantine clear ordering is ambiguous for {key}; stale recovery suppressed"
+                if clear_order <= opened_order:
+                    return f"quarantine clear does not follow open incident for {key}; stale recovery suppressed"
         opened = int_field(open_record, "eventCreatedAtEpoch")
         created = event_created_epoch(event)
         if opened > 0 and created is not None and created < opened - CLOCK_SKEW_TOLERANCE_SECONDS:
@@ -2849,10 +2885,8 @@ def stale_autoclose_summary_event(keys: list[str], current: int) -> dict[str, An
         "each will REOPEN automatically if the condition still fails on the next run.",
     ]
     return {
-        "schemaVersion": 1,
+        **new_event_fields("observation", "info"),
         "id": f"stale-autoclose-{current}",
-        "eventType": "alert",
-        "severity": "info",
         "createdAt": now_iso(),
         "machine": "bot-errors",
         "instance": "dispatcher",
@@ -2935,10 +2969,8 @@ def stale_incident_event(key: str, record: dict[str, Any], current: int) -> dict
     ]
     fields = incident_event_fields_from_key(key)
     event = {
-        "schemaVersion": 1,
+        **new_event_fields("observation", severity),
         "id": f"stale-{safe_segment(key)}-{current}",
-        "eventType": "alert",
-        "severity": severity,
         "createdAt": now_iso(),
         **fields,
         "summary": title,
@@ -3117,10 +3149,8 @@ def flap_storm_event(key: str, entry: dict[str, Any], severity: str, now: int) -
         ),
     ]
     return {
-        "schemaVersion": 1,
+        **new_event_fields("alert", severity),
         "id": f"flap-storm-{safe_segment(key)}-{now}",
-        "eventType": "alert",
-        "severity": severity,
         "createdAt": now_iso(),
         **fields,
         "source": "flap_storm",
@@ -3163,10 +3193,8 @@ def flap_resolve_event(key: str, entry: dict[str, Any], now: int) -> dict[str, A
         f"flap_first_seen={iso_from_epoch(first)}",
     ]
     return {
-        "schemaVersion": 1,
+        **new_event_fields("observation", "info"),
         "id": f"flap-resolved-{safe_segment(key)}-{now}",
-        "eventType": "alert",
-        "severity": "info",
         "createdAt": now_iso(),
         **fields,
         "source": "flap_storm_resolved",
@@ -3704,9 +3732,8 @@ def find_event_path_by_id(event_id: str, paths: dict[str, Path], keys: tuple[str
 def is_storm_candidate(event: dict[str, Any]) -> bool:
     if isinstance(event.get("storm"), dict):
         return False
-    event_type = str(event.get("eventType") or "alert")
-    severity = str(event.get("severity") or "").lower()
-    return event_type == "alert" and severity in {"critical", "warning"}
+    classification = classify_event(event)
+    return classification.kind == "incident_alert" and classification.severity in {"critical", "warning"}
 
 
 def recovery_normalized_summary(event: dict[str, Any]) -> str:
@@ -3736,10 +3763,11 @@ def recovery_episode_fingerprint(event: dict[str, Any]) -> str:
 
 
 def recovery_duplicate_fingerprint(event: dict[str, Any]) -> str:
+    classification = classify_event(event)
     host, instance = recovery_identity(event)
     parts = [
-        str(event.get("eventType") or "alert").strip().lower(),
-        str(event.get("severity") or "").strip().lower(),
+        classification.event_type,
+        classification.severity,
         str(event.get("source") or "unknown").strip().lower(),
         recovery_normalized_summary(event),
         host,
@@ -3749,18 +3777,15 @@ def recovery_duplicate_fingerprint(event: dict[str, Any]) -> str:
 
 
 def is_recovery_dedupe_candidate(event: dict[str, Any]) -> bool:
-    event_type = str(event.get("eventType") or "alert").strip().lower()
-    severity = str(event.get("severity") or "").strip().lower()
+    classification = classify_event(event)
     source = str(event.get("source") or "").strip().lower()
-    if source == "daily-health" and severity == "info":
+    if source == "daily-health" and classification.kind == "observation":
         return False
-    return event_type == "clear" or severity == "info"
+    return classification.kind == "incident_recovery"
 
 
 def is_recovery_episode_barrier(event: dict[str, Any]) -> bool:
-    event_type = str(event.get("eventType") or "alert").strip().lower()
-    severity = str(event.get("severity") or "").strip().lower()
-    return event_type == "alert" and severity in {"critical", "warning"}
+    return classify_event(event).kind == "incident_alert"
 
 
 def manifest_entry(path: Path, event: dict[str, Any]) -> dict[str, Any]:
@@ -3825,9 +3850,7 @@ def storm_digest_event(
         f"fingerprint_basis:{fingerprint.replace(chr(10), ' | ')}",
     ]
     return {
-        "schemaVersion": 1,
-        "eventType": "alert",
-        "severity": severity,
+        **new_event_fields("alert", severity),
         "id": digest_id,
         "createdAt": now_iso(),
         "machine": "fleet",
@@ -4111,7 +4134,11 @@ def move_suppressed_event(
     log_type: str = "suppressed",
     source_name: str | None = None,
 ) -> Path:
-    event = mark_suppressed(event, reason)
+    # Archival writes must honor the envelope contract ("normalized to v2
+    # before ... archival") even on pre-loop paths that never reach
+    # process_one. normalize_event is idempotent on already-v2 events, and
+    # every caller passes an event that has classified successfully.
+    event = mark_suppressed(normalize_event(event), reason)
     atomic_write_json(path, event)
     suppressed_path = archive_path(paths["suppressed"], source_name or path.name, "suppressed", event)
     os.replace(path, suppressed_path)
@@ -4129,6 +4156,19 @@ def move_suppressed_event(
     return suppressed_path
 
 
+def queued_alert_precedes_recovery(
+    alert_event: dict[str, Any],
+    alert_epoch: int,
+    alert_order: int | None,
+    clear_event: dict[str, Any],
+    clear_epoch: int,
+    clear_order: int | None,
+) -> bool:
+    if is_quarantine_incident(alert_event) or is_quarantine_incident(clear_event):
+        return alert_order is not None and clear_order is not None and alert_order < clear_order
+    return alert_epoch <= clear_epoch
+
+
 def suppress_alerts_recovered_before_delivery(paths: dict[str, Path]) -> int:
     """Retire queued alerts when a later clear proves recovery before delivery.
 
@@ -4142,37 +4182,42 @@ def suppress_alerts_recovered_before_delivery(paths: dict[str, Path]) -> int:
     if not isinstance(open_incidents, dict):
         open_incidents = {}
 
-    alerts_by_key: dict[str, list[tuple[Path, dict[str, Any], int]]] = {}
-    clears: list[tuple[Path, dict[str, Any], int]] = []
+    alerts_by_key: dict[str, list[tuple[Path, dict[str, Any], int, int | None]]] = {}
+    clears: list[tuple[Path, dict[str, Any], int, int | None]] = []
     for path in sorted(paths["outbox"].glob("*.json")):
-        try:
-            event = safe_read_json(path)
-        except Exception:
+        event = load_valid_event_or_quarantine(path, paths["quarantine"])
+        if event is None:
             continue
         epoch = event_created_epoch(event)
         if epoch is None:
             continue
+        order = event_created_order(event)
         if is_incident_alert(event):
-            alerts_by_key.setdefault(incident_key(event), []).append((path, event, epoch))
-        elif is_incident_clear(event) and ready(path, paths["quarantine"]):
-            clears.append((path, event, epoch))
+            alerts_by_key.setdefault(incident_key(event), []).append((path, event, epoch, order))
+        elif is_incident_clear(event) and delivery_ready(event):
+            clears.append((path, event, epoch, order))
 
     suppressed = 0
-    for clear_path, clear_event, clear_epoch in sorted(clears, key=lambda row: (row[2], str(row[0]))):
+    for clear_path, clear_event, clear_epoch, clear_order in sorted(
+        clears,
+        key=lambda row: (row[3] if row[3] is not None else row[2] * 1_000_000, str(row[0])),
+    ):
         key = incident_key(clear_event)
         if not clear_path.exists():
             continue
         pending_alerts = [
             record for record in alerts_by_key.get(key, [])
             if record[0].exists()
-            and record[2] <= clear_epoch
+            and queued_alert_precedes_recovery(
+                record[1], record[2], record[3], clear_event, clear_epoch, clear_order,
+            )
             and not ready(record[0], paths["quarantine"])
         ]
         if not pending_alerts:
             continue
 
         alert_ids: list[str] = []
-        for alert_path, alert_event, _alert_epoch in pending_alerts:
+        for alert_path, alert_event, _alert_epoch, _alert_order in pending_alerts:
             move_suppressed_event(
                 alert_path,
                 paths,
@@ -4351,9 +4396,7 @@ def write_meta_state(paths: dict[str, Path], state: dict[str, Any]) -> None:
 def test_provenance_meta_event(paths: dict[str, Path], refused: int, window: int) -> dict[str, Any]:
     now = int(time.time())
     return {
-        "schemaVersion": 1,
-        "eventType": "alert",
-        "severity": "warning",
+        **new_event_fields("alert", "warning"),
         "id": f"dispatcher-test-provenance-refused-{now}",
         "createdAt": now_iso(),
         "machine": socket.gethostname(),
@@ -4426,23 +4469,50 @@ def suppress_test_provenance_events(paths: dict[str, Path]) -> tuple[int, int]:
     return suppressed, alerted
 
 
-def ready(path: Path, quarantine_dir: Path) -> bool:
+def load_valid_event_or_quarantine(path: Path, quarantine_dir: Path) -> dict[str, Any] | None:
     # #2484: reject symlink and non-regular leaves before reading.  Quarantine
     # the directory entry itself without dereferencing its target.
     if not safe_is_regular_entry(path):
         quarantine_untrusted_entry(path, quarantine_dir, "untrusted leaf entry")
-        return False
+        return None
     try:
         event = safe_read_json(path)
     except UntrustedEntryError:
         quarantine_untrusted_entry(path, quarantine_dir, "untrusted leaf entry after open")
-        return False
+        return None
     except Exception as exc:
         quarantine_poison(path, quarantine_dir, f"invalid JSON before claim: {exc}")
-        return False
+        return None
+    try:
+        classify_event(event)
+    except EnvelopeError as exc:
+        quarantine_invalid_envelope(path, quarantine_dir, exc.code)
+        return None
+    return event
+
+
+def delivery_ready(event: dict[str, Any]) -> bool:
     delivery = event.get("delivery") if isinstance(event.get("delivery"), dict) else {}
     next_attempt = int(delivery.get("nextAttemptAtEpoch") or 0)
     return next_attempt <= int(time.time())
+
+
+def ready(path: Path, quarantine_dir: Path) -> bool:
+    event = load_valid_event_or_quarantine(path, quarantine_dir)
+    return event is not None and delivery_ready(event)
+
+
+def quarantine_invalid_envelope(path: Path, quarantine_dir: Path, code: str) -> Path:
+    """Quarantine an invalid envelope without treating it as an alert to send."""
+
+    ensure_private_dir(quarantine_dir)
+    reason = safe_segment(code)
+    dest = quarantine_dir / f"{path.name}.{int(time.time())}.{os.getpid()}.{reason}.invalid-envelope"
+    try:
+        shutil.move(str(path), str(dest))
+    except FileNotFoundError:
+        return dest
+    return dest
 
 
 def quarantine_poison(path: Path, quarantine_dir: Path, reason: str) -> Path:
@@ -4453,9 +4523,7 @@ def quarantine_poison(path: Path, quarantine_dir: Path, reason: str) -> Path:
     except FileNotFoundError:
         return dest
     meta = {
-        "schemaVersion": 1,
-        "eventType": "alert",
-        "severity": "critical",
+        **new_event_fields("alert", "critical"),
         "id": f"poison-{int(time.time())}-{os.getpid()}",
         "createdAt": now_iso(),
         "machine": socket.gethostname(),
@@ -4591,8 +4659,17 @@ def event_already_known(
     return any(isinstance(values, set) and created_matches(values, created_at) for values in incident_key_values.values())
 
 
+def outbox_timestamp_prefix(created_at: object) -> str:
+    """Keep milliseconds without overtaking a legacy same-second `...Z.` file."""
+    raw = str(created_at or now_iso())
+    fractional = re.fullmatch(r"(.*)\.(\d{3})Z", raw)
+    if fractional:
+        return f"{fractional.group(1).replace('-', '').replace(':', '')}Z_{fractional.group(2)}"
+    return raw.replace("-", "").replace(":", "")
+
+
 def outbox_path_for_event(event: dict[str, Any], paths: dict[str, Path]) -> Path:
-    created = str(event.get("createdAt") or now_iso()).replace("-", "").replace(":", "")
+    created = outbox_timestamp_prefix(event.get("createdAt"))
     instance = safe_segment(str(event.get("instance") or "unknown"))
     source = safe_segment(str(event.get("source") or "unknown"))
     event_id = safe_segment(str(event.get("id") or f"recovered-{int(time.time())}-{os.getpid()}"))
@@ -4630,6 +4707,19 @@ def recover_writefail_breadcrumbs(paths: dict[str, Path], limit: int = 25) -> in
                 event = crumb.get("event")
                 if not isinstance(event, dict):
                     raise ValueError("writefail breadcrumb missing event object")
+                try:
+                    event = normalize_event(event)
+                except EnvelopeError as exc:
+                    quarantined = move_writefail(
+                        path,
+                        paths["writefail_quarantine"],
+                        f"invalid-envelope-{safe_segment(exc.code)}",
+                    )
+                    append_dispatch_log(paths, {
+                        "type": "writefail_invalid_envelope",
+                        "reason": exc.code,
+                    })
+                    continue
                 event_id = str(event.get("id") or "")
                 if event_already_known(event, paths, known_index):
                     duplicate = move_writefail(path, paths["writefail_recovered"], "duplicate")
@@ -4772,6 +4862,12 @@ def process_one(path: Path, paths: dict[str, Path]) -> tuple[bool, str]:
     except Exception as exc:
         quarantine_poison(claimed, paths["quarantine"], f"invalid JSON after claim: {exc}")
         return False, "poison"
+    try:
+        event = normalize_event(event)
+    except EnvelopeError as exc:
+        quarantine_invalid_envelope(claimed, paths["quarantine"], exc.code)
+        return False, "invalid_envelope"
+    atomic_write_json(claimed, event)
 
     # --- Test-leak defense-in-depth (B2) ---
     # Drop test-fixture events BEFORE any delivery, incident-state load, or

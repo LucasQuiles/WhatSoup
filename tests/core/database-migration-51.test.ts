@@ -247,7 +247,7 @@ describe('migration 51 metadata-only outbound-send evidence', () => {
     const db = new Database(':memory:');
     db.open();
     try {
-      expect(CURRENT_SCHEMA_MIGRATION).toBe(51);
+      expect(CURRENT_SCHEMA_MIGRATION).toBe(53);
       expect(db.raw.prepare(
         'SELECT version FROM schema_migrations WHERE version = 51',
       ).get()).toEqual({ version: 51 });

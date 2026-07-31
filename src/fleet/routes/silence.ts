@@ -1,7 +1,16 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { readBody, jsonResponse } from '../../lib/http.ts';
-import { errorMessage } from '../../lib/error-message.ts';
-import { listActiveSilences, addSilence, removeSilence } from '../silence-manager.ts';
+import {
+  silenceRegistryUnavailableError,
+  validationError,
+} from '../response-error-projection.ts';
+import {
+  SilenceRuleValidationError,
+  SilenceStoreUnavailableError,
+  addSilence,
+  listActiveSilences,
+  removeSilence,
+} from '../silence-manager.ts';
 
 /**
  * Longest silence this API will install, in minutes (one year).
@@ -24,10 +33,26 @@ import { listActiveSilences, addSilence, removeSilence } from '../silence-manage
  */
 export const MAX_SILENCE_MINUTES = 365 * 24 * 60;
 
+function respondSilenceRegistryUnavailable(
+  res: ServerResponse,
+  result: SilenceStoreUnavailableError,
+): void {
+  jsonResponse(
+    res,
+    result.readBasis === 'last_known_good' ? 409 : 503,
+    silenceRegistryUnavailableError(result.reasonClass === 'read_failed'),
+  );
+}
+
 /** GET /api/fleet/silences — list active silences */
 export async function handleGetSilences(_req: IncomingMessage, res: ServerResponse): Promise<void> {
-  const silences = listActiveSilences();
-  jsonResponse(res, 200, { silences });
+  const result = listActiveSilences();
+  if (result.rules === null) {
+    respondSilenceRegistryUnavailable(res, new SilenceStoreUnavailableError(result));
+    return;
+  }
+  const { rules, ...metadata } = result;
+  jsonResponse(res, 200, { ...metadata, silences: rules });
 }
 
 /** POST /api/fleet/silence — add a silence */
@@ -35,8 +60,8 @@ export async function handleAddSilence(req: IncomingMessage, res: ServerResponse
   let raw: string;
   try {
     raw = await readBody(req);
-  } catch (err) {
-    jsonResponse(res, 400, { error: errorMessage(err) });
+  } catch {
+    jsonResponse(res, 400, validationError('invalid_request_body', 'silence'));
     return;
   }
 
@@ -72,12 +97,25 @@ export async function handleAddSilence(req: IncomingMessage, res: ServerResponse
     return;
   }
 
-  const rule = addSilence(
-    instance,
-    duration_minutes,
-    typeof reason === 'string' ? reason : 'manual silence',
-    'fleet-api',
-  );
+  let rule;
+  try {
+    rule = addSilence(
+      instance,
+      duration_minutes,
+      typeof reason === 'string' ? reason : 'manual silence',
+      'fleet-api',
+    );
+  } catch (err) {
+    if (err instanceof SilenceStoreUnavailableError) {
+      respondSilenceRegistryUnavailable(res, err);
+      return;
+    }
+    if (err instanceof SilenceRuleValidationError) {
+      jsonResponse(res, 400, validationError('invalid_silence_rule', 'silence'));
+      return;
+    }
+    throw err;
+  }
   jsonResponse(res, 200, { ok: true, rule });
 }
 
@@ -87,7 +125,16 @@ export async function handleRemoveSilence(
   res: ServerResponse,
   params: { instance: string },
 ): Promise<void> {
-  const removed = removeSilence(params.instance);
+  let removed: boolean;
+  try {
+    removed = removeSilence(params.instance);
+  } catch (err) {
+    if (err instanceof SilenceStoreUnavailableError) {
+      respondSilenceRegistryUnavailable(res, err);
+      return;
+    }
+    throw err;
+  }
   if (!removed) {
     jsonResponse(res, 404, { error: 'no silence found for instance' });
     return;

@@ -123,7 +123,7 @@ describe('logger.ts — LOG_DIR (file transport) path', () => {
 
       // pino() was called with the transport
       expect(pinoFn).toHaveBeenCalledWith(
-        expect.objectContaining({ level: 'info', serializers: { err: pinoFn.stdSerializers.err, error: pinoFn.stdSerializers.err } }),
+        expect.objectContaining({ level: 'info', serializers: { err: pinoFn.stdSerializers.err, error: pinoFn.stdSerializers.err, reason: pinoFn.stdSerializers.err } }),
         fakeTransport,
       );
 

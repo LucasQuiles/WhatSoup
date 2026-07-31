@@ -9,7 +9,7 @@ import type { Database } from './database.ts';
 import type { Messenger } from './types.ts';
 import type { GuardCaller } from './outbound-identity/types.ts';
 import { toConversationKey } from './conversation-key.ts';
-import { withTransaction } from './db-tx.ts';
+import { getImmediateTransactionRunner, withImmediateTransaction, withTransaction } from './db-tx.ts';
 import {
   createRecoveryStats,
   DurabilityRecoveryEvidence,
@@ -59,12 +59,18 @@ import {
 } from './session-lifecycle-store.ts';
 import {
   classifyOutboundFailure,
+  classifyOutboundQuarantineDisposition,
   createInternalOutboundFailureEvidence,
   decodeOutboundFailureEvidence,
   encodeOutboundFailureEvidence,
   OUTBOUND_FAILURE_EVIDENCE_SCHEMA,
+  OUTBOUND_EVIDENCE_COVERAGE,
+  OUTBOUND_QUARANTINE_DISPOSITION_POLICIES,
+  OUTBOUND_QUARANTINE_DISPOSITIONS,
   type DecodedOutboundFailureEvidence,
+  type OutboundEvidenceCoverage,
   type OutboundFailureEvidenceV1,
+  type OutboundQuarantineDisposition,
   transferOutboundRetryOwnership,
 } from './outbound-failure-disposition.ts';
 import type {
@@ -135,19 +141,73 @@ const STATUS_OP_TTL_MS = 30 * 60 * 1000;
  * PR-C: max deferrals for a `text` op before the drain quarantines it instead of
  * re-deferring indefinitely. A persistently rate-limited conversation that keeps
  * hitting `retry_not_before` will accumulate pending rows with no terminal state.
- * This bound ensures the system fails loud (quarantine + alert via the existing
- * outbound_quarantined pathway) rather than accumulating silently.
+ * This bound ensures the system fails loud through its bounded quarantine
+ * disposition and alert pathway rather than accumulating silently.
  *
  * `status_ping` ops are exempt — they have their own TTL age-out above.
  * `failed_permanent` is a separate terminal path for non-retryable failures.
  */
 const MAX_TEXT_OP_DEFERRAL_COUNT = 20;
 
+/**
+ * Emits only bounded taxonomy data. A quarantined outbound record can contain
+ * user content or provider diagnostics in its durable payload, so neither is
+ * included in the operator-facing alert.
+ */
+function emitOutboundQuarantineAlert(evidence: OutboundFailureEvidenceV1): boolean {
+  const disposition = classifyOutboundQuarantineDisposition(evidence);
+  const policy = OUTBOUND_QUARANTINE_DISPOSITION_POLICIES[disposition];
+  return emitAlertChecked(
+    config.botName,
+    policy.alertSource,
+    `whatsoup@${config.botName} ${policy.alertSummary}`,
+    `disposition=${disposition} failure_code=${evidence.failure_code} evidence_coverage=${evidence.evidence_coverage}`,
+    policy.alertSeverity,
+  );
+}
+
 // ── Status string unions ──
 
-export type OutboundStatus = 'pending' | 'sending' | 'submitted' | 'echoed' | 'maybe_sent' | 'failed_permanent' | 'quarantined';
+const OUTBOUND_STATUSES = [
+  'pending',
+  'sending',
+  'submitted',
+  'echoed',
+  'maybe_sent',
+  'failed_permanent',
+  'quarantined',
+] as const;
+export type OutboundStatus = (typeof OUTBOUND_STATUSES)[number];
 type InboundStatus = 'pending' | 'processing' | 'turn_done' | 'complete' | 'failed';
 export type SessionStatus = 'active' | 'suspended' | 'orphaned' | 'ended';
+
+type OutboundQuarantineEvidenceCoverage =
+  | OutboundEvidenceCoverage
+  | 'legacy_unclassified';
+
+function normalizeOutboundStatus(value: unknown): OutboundStatus | 'unknown' {
+  return typeof value === 'string' && (OUTBOUND_STATUSES as readonly string[]).includes(value)
+    ? value as OutboundStatus
+    : 'unknown';
+}
+
+function normalizeOutboundQuarantineDisposition(
+  value: unknown,
+): OutboundQuarantineDisposition {
+  return typeof value === 'string'
+    && (OUTBOUND_QUARANTINE_DISPOSITIONS as readonly string[]).includes(value)
+    ? value as OutboundQuarantineDisposition
+    : 'legacy_unclassified';
+}
+
+function normalizeOutboundQuarantineEvidenceCoverage(
+  value: unknown,
+): OutboundQuarantineEvidenceCoverage {
+  return typeof value === 'string'
+    && (OUTBOUND_EVIDENCE_COVERAGE as readonly string[]).includes(value)
+    ? value as OutboundEvidenceCoverage
+    : 'legacy_unclassified';
+}
 
 // ── SQLite row interfaces ──
 
@@ -170,11 +230,43 @@ export interface OutboundOpRow {
   replay_policy: string;
   created_at: string;
   submitted_at: string | null;
+  ambiguity_at: string | null;
   source_inbound_seq: number | null;
   retry_count: number;
   error: string | null;
   failure_evidence: DecodedOutboundFailureEvidence;
   is_terminal: number;
+}
+
+/**
+ * Derive the age of the active ambiguity episode without treating missing or
+ * malformed or future chronology as a fresh delivery. Existing rows without
+ * the new clock fall back conservatively to their recorded submission, then
+ * creation.
+ */
+function maybeSentDwellAtSql(prefix = ''): string {
+  const column = (name: string) => `${prefix}${name}`;
+  // The fallback must be older than the /health durability-debt window as
+  // well as the live 30-second reconciliation grace. Re-evaluating this
+  // bounded sentinel keeps malformed or future chronology visible without
+  // inventing a durable event time.
+  const stale = "datetime('now', '-31 minutes')";
+  return `CASE
+    WHEN ${column('ambiguity_at')} IS NOT NULL
+      AND datetime(${column('ambiguity_at')}) IS NOT NULL
+      AND datetime(${column('ambiguity_at')}) <= datetime('now')
+      THEN datetime(${column('ambiguity_at')})
+    WHEN ${column('ambiguity_at')} IS NOT NULL THEN ${stale}
+    WHEN ${column('submitted_at')} IS NOT NULL
+      AND datetime(${column('submitted_at')}) IS NOT NULL
+      AND datetime(${column('submitted_at')}) <= datetime('now')
+      THEN datetime(${column('submitted_at')})
+    WHEN ${column('submitted_at')} IS NOT NULL THEN ${stale}
+    WHEN datetime(${column('created_at')}) IS NOT NULL
+      AND datetime(${column('created_at')}) <= datetime('now')
+      THEN datetime(${column('created_at')})
+    ELSE ${stale}
+  END`;
 }
 
 export interface OutboundDeliveryIdentity {
@@ -273,6 +365,18 @@ export interface OutboundFailureHealthProjection {
   groups: OutboundFailureHealthGroup[];
 }
 
+export interface OutboundQuarantineDispositionHealthGroup {
+  disposition: OutboundQuarantineDisposition;
+  evidenceCoverage: OutboundQuarantineEvidenceCoverage;
+  count: number;
+}
+
+export interface OutboundQuarantineDispositionHealthProjection {
+  /** Exact quarantined-row total; this is not a sampled failure-evidence view. */
+  total: number;
+  groups: OutboundQuarantineDispositionHealthGroup[];
+}
+
 type PreparedStatement = ReturnType<Database['raw']['prepare']>;
 
 type DurabilityStatements = {
@@ -332,6 +436,8 @@ type DurabilityStatements = {
   resetMaybeSentWithoutWaToPending: PreparedStatement;
   getPendingOutboundCount: PreparedStatement;
   getQuarantinedOutboundCount: PreparedStatement;
+  getQuarantinedOutboundDispositionGroups: PreparedStatement;
+  getQuarantineClearContributorCounts: PreparedStatement;
   getMaybeSentOutboundCount: PreparedStatement;
   getOldestMaybeSentSubmittedAt: PreparedStatement;
   getRecentOutboundFailureEvidence: PreparedStatement;
@@ -477,7 +583,12 @@ export class DurabilityEngine {
       ),
       markMaybeSent: prepare(
         `UPDATE outbound_ops
-         SET status = 'maybe_sent', error = ?, wa_message_id = COALESCE(?, wa_message_id),
+         SET status = 'maybe_sent',
+             ambiguity_at = CASE
+               WHEN status = 'maybe_sent' THEN ambiguity_at
+               ELSE datetime('now')
+             END,
+             error = ?, wa_message_id = COALESCE(?, wa_message_id),
              retry_count = MAX(retry_count, ?)
          WHERE id = ?
            AND status IN ('pending', 'sending', 'submitted', 'maybe_sent')`,
@@ -495,9 +606,15 @@ export class DurabilityEngine {
       ),
       markQuarantined: prepare(
         `UPDATE outbound_ops
-         SET status = 'quarantined', error = ?, retry_count = MAX(retry_count, ?)
+         SET status = 'quarantined',
+             error = ?,
+             retry_count = MAX(retry_count, ?),
+             quarantine_disposition = ?,
+             quarantine_evidence_coverage = ?,
+             quarantine_evidence_sha256 = ?,
+             quarantined_at = datetime('now')
          WHERE id = ?
-           AND status IN ('pending', 'sending', 'submitted', 'maybe_sent', 'quarantined')`,
+           AND status IN ('pending', 'sending', 'submitted', 'maybe_sent')`,
       ),
       markTerminal: prepare(`UPDATE outbound_ops SET is_terminal = 1 WHERE id = ?`),
       selectOutboundTerminalIdentity: prepare(`
@@ -647,16 +764,16 @@ export class DurabilityEngine {
       ),
       getOutboundByStatus: prepare(
         `SELECT id, status, chat_jid, op_type, payload, wa_message_id, replay_policy,
-                created_at, submitted_at, source_inbound_seq, retry_count, error, is_terminal
+                created_at, submitted_at, ambiguity_at, source_inbound_seq, retry_count, error, is_terminal
          FROM outbound_ops WHERE status = ? ORDER BY id ASC`,
       ),
       getLiveReconcileMaybeSent: prepare(
         `SELECT o.id, o.status, o.chat_jid, o.op_type, o.payload, o.wa_message_id,
-                o.replay_policy, o.created_at, o.submitted_at, o.source_inbound_seq,
+                o.replay_policy, o.created_at, o.submitted_at, o.ambiguity_at, o.source_inbound_seq,
                 o.retry_count, o.error, o.is_terminal
          FROM outbound_ops o
          WHERE o.status = 'maybe_sent'
-           AND COALESCE(o.submitted_at, o.created_at) < datetime('now', '-30 seconds')
+           AND ${maybeSentDwellAtSql('o.')} < datetime('now', '-30 seconds')
            AND NOT EXISTS (
              SELECT 1
              FROM turn_terminal_records t
@@ -811,7 +928,7 @@ export class DurabilityEngine {
       ),
       getStaleSubmitted: prepare(
         `SELECT id, status, chat_jid, op_type, payload, wa_message_id, replay_policy,
-                created_at, submitted_at, source_inbound_seq, retry_count, error, is_terminal
+                created_at, submitted_at, ambiguity_at, source_inbound_seq, retry_count, error, is_terminal
          FROM outbound_ops
          WHERE status = 'submitted' AND submitted_at < datetime('now', '-30 seconds')`,
       ),
@@ -834,14 +951,11 @@ export class DurabilityEngine {
       getMaybeSentOutboundCount: prepare(
         `SELECT COUNT(*) as count FROM outbound_ops WHERE status = 'maybe_sent'`,
       ),
-      // Ambiguity-transition time, not queue time: a send that fails BEFORE
-      // markSubmitted() (null submitted_at — the BRICK-LAB job-1474 shape)
-      // must still age and page, not read as fresh. COALESCE mirrors the
-      // reconciliation query's fix (getLiveReconcileMaybeSent, #2079); this
-      // sibling health-staleness query was not covered by that fix and
-      // stayed null-blind exactly for the pre-submission failure case.
+      // A current ambiguity episode owns its own dwell clock. Legacy rows use
+      // the conservative receipt/queue fallback, while malformed chronology is
+      // deliberately stale so it cannot make health read fresh.
       getOldestMaybeSentSubmittedAt: prepare(
-        `SELECT MIN(COALESCE(submitted_at, created_at)) as at FROM outbound_ops WHERE status = 'maybe_sent'`,
+        `SELECT MIN(${maybeSentDwellAtSql()}) as at FROM outbound_ops WHERE status = 'maybe_sent'`,
       ),
       getRecentOutboundFailureEvidence: prepare(
         `SELECT status, error
@@ -852,6 +966,62 @@ export class DurabilityEngine {
       ),
       getQuarantinedOutboundCount: prepare(
         `SELECT COUNT(*) as count FROM outbound_ops WHERE status = 'quarantined'`,
+      ),
+      getQuarantinedOutboundDispositionGroups: prepare(
+        `SELECT
+           CASE quarantine_disposition
+             WHEN 'delivery_ambiguous_unsafe' THEN 'delivery_ambiguous_unsafe'
+             WHEN 'delivery_not_attempted' THEN 'delivery_not_attempted'
+             WHEN 'record_unreconstructable' THEN 'record_unreconstructable'
+             WHEN 'stale_status_discarded' THEN 'stale_status_discarded'
+             ELSE 'legacy_unclassified'
+           END AS quarantine_disposition,
+           CASE quarantine_evidence_coverage
+             WHEN 'complete' THEN 'complete'
+             WHEN 'partial' THEN 'partial'
+             ELSE 'legacy_unclassified'
+           END AS quarantine_evidence_coverage,
+           COUNT(*) AS count
+         FROM outbound_ops
+         WHERE status = 'quarantined'
+         GROUP BY 1, 2`,
+      ),
+      getQuarantineClearContributorCounts: prepare(
+        `SELECT
+           CASE quarantine_disposition
+             WHEN 'delivery_ambiguous_unsafe' THEN 'delivery_ambiguous_unsafe'
+             WHEN 'delivery_not_attempted' THEN 'delivery_not_attempted'
+             WHEN 'record_unreconstructable' THEN 'record_unreconstructable'
+             WHEN 'stale_status_discarded' THEN 'stale_status_discarded'
+             ELSE 'legacy_unclassified'
+           END AS quarantine_disposition,
+           COUNT(*) AS count
+         FROM outbound_ops
+         WHERE status = 'quarantined'
+            OR (
+              status = 'failed_permanent'
+              AND quarantined_at IS NOT NULL
+              AND NOT EXISTS (
+                SELECT 1
+                  FROM outbound_quarantine_retirements retirement
+                 WHERE retirement.outbound_op_id = outbound_ops.id
+                   AND retirement.quarantine_disposition = outbound_ops.quarantine_disposition
+                   AND (
+                     (retirement.quarantine_disposition = 'delivery_ambiguous_unsafe'
+                       AND retirement.acknowledgement = 'delivery-risk-reviewed')
+                     OR (retirement.quarantine_disposition = 'record_unreconstructable'
+                       AND retirement.acknowledgement = 'record-reconstruction-reviewed')
+                     OR (retirement.quarantine_disposition IN ('delivery_not_attempted', 'stale_status_discarded')
+                       AND retirement.acknowledgement = 'none')
+                  )
+                  AND retirement.evidence_sha256 = outbound_ops.quarantine_evidence_sha256
+                  AND length(outbound_ops.quarantine_evidence_sha256) = 64
+                  AND outbound_ops.quarantine_evidence_sha256 NOT GLOB '*[^0-9a-f]*'
+                  AND length(retirement.evidence_sha256) = 64
+                   AND retirement.evidence_sha256 NOT GLOB '*[^0-9a-f]*'
+              )
+            )
+         GROUP BY 1`,
       ),
       getLastRecoveryRunCompletedAt: prepare(
         `SELECT completed_at FROM recovery_runs ORDER BY id DESC LIMIT 1`,
@@ -878,6 +1048,10 @@ export class DurabilityEngine {
     ).now);
     this.sessionLifecycle = new SessionLifecycleStore(db);
     this.confirmedOutboundProbe = makeConfirmedOutboundProbe(db.raw);
+    // Pre-warm the immediate-transaction runner so lifecycle methods that call
+    // withImmediateTransaction reuse cached BEGIN IMMEDIATE / COMMIT / ROLLBACK
+    // instead of preparing them on first invocation (#2560).
+    getImmediateTransactionRunner(db);
   }
 
   private runUpsertSessionCheckpoint(conversationKey: string, fields: SessionCheckpointFields): void {
@@ -1650,9 +1824,14 @@ export class DurabilityEngine {
     if (normalized.retry_decision !== 'stop' || normalized.retry_owner !== 'none') {
       throw new Error('Quarantined outbound transition cannot retain retry ownership');
     }
+    const encodedEvidence = encodeOutboundFailureEvidence(normalized);
+    const evidenceSha256 = createHash('sha256').update(encodedEvidence).digest('hex');
     return this.statements.markQuarantined.run(
-      encodeOutboundFailureEvidence(normalized),
+      encodedEvidence,
       normalized.logical_attempt_count,
+      classifyOutboundQuarantineDisposition(normalized),
+      normalized.evidence_coverage,
+      evidenceSha256,
       id,
     ).changes === 1;
   }
@@ -2188,6 +2367,9 @@ export class DurabilityEngine {
     }
 
     // Step 2: Reconcile `maybe_sent` ops (includes those just promoted in Step 1).
+    // This one-shot post-connect history/corroboration pass intentionally stays
+    // immediate; the current-episode dwell gate applies to recurring live work
+    // created after this startup recovery pass.
     this.reconcileMaybeSentOutbound(
       this.getOutboundByStatus('maybe_sent'),
       recoveryRun,
@@ -2238,11 +2420,43 @@ export class DurabilityEngine {
         },
       });
       log.info({ decision }, 'postConnectRecovery: quarantine-clear gate decision');
-      if (
-        quarantineClearRequested
-        && !clearAlertSourceChecked(config.botName, 'outbound_quarantined')
-      ) {
-        throw new Error('postConnectRecovery: quarantine clear could not be durably queued');
+      if (quarantineClearRequested) {
+        // Serialize the exact aggregate and supported outbox writes with the
+        // normal database writers. Raw out-of-band SQLite mutation is not a
+        // recovery proof and remains outside this instance-local contract.
+        withImmediateTransaction(this.db, () => {
+          const counts = this.getQuarantineClearContributorCounts();
+
+          for (const disposition of OUTBOUND_QUARANTINE_DISPOSITIONS) {
+            const policy = OUTBOUND_QUARANTINE_DISPOSITION_POLICIES[disposition];
+            if (!policy.clearWhenContributorFree || counts.get(disposition) !== 0) continue;
+            if (!clearAlertSourceChecked(
+              config.botName,
+              policy.alertSource,
+              undefined,
+              undefined,
+              { requireDurableOutbox: true },
+            )) {
+              throw new Error(
+                `postConnectRecovery: quarantine clear could not be durably queued for ${disposition}`,
+              );
+            }
+          }
+
+          const total = [...counts.values()].reduce((count, value) => count + value, 0);
+          if (
+            total === 0
+            && !clearAlertSourceChecked(
+              config.botName,
+              'outbound_quarantined',
+              undefined,
+              undefined,
+              { requireDurableOutbox: true },
+            )
+          ) {
+            throw new Error('postConnectRecovery: legacy quarantine clear could not be durably queued');
+          }
+        });
       }
     } catch (err) {
       log.error({ err }, 'postConnectRecovery: quarantine-clear verification failed');
@@ -2327,7 +2541,7 @@ export class DurabilityEngine {
               `${operation}: maybe_sent not confirmed, safe/read_only → reset to pending for replay`,
             );
           } else {
-            this.quarantineMaybeSent(op, recoveryRun, 'not_confirmed_non_safe', operation);
+            this.quarantineMaybeSent(op, recoveryRun, operation);
           }
         } else if (op.replay_policy === 'safe' || op.replay_policy === 'read_only') {
           const evidence = this.pendingReplayEvidence(op);
@@ -2343,7 +2557,7 @@ export class DurabilityEngine {
             `${operation}: maybe_sent (no wa_message_id), safe/read_only → reset to pending`,
           );
         } else {
-          this.quarantineMaybeSent(op, recoveryRun, 'no_wa_id_non_safe', operation);
+          this.quarantineMaybeSent(op, recoveryRun, operation);
         }
       }
     } catch (err) {
@@ -2358,13 +2572,12 @@ export class DurabilityEngine {
       readonly stats: RecoveryStats;
       recordFailure(phase: string, error: unknown): void;
     },
-    reason: 'not_confirmed_non_safe' | 'no_wa_id_non_safe',
     operation: 'postConnectRecovery' | 'reconcileLiveMaybeSent',
   ): void {
     const previous = op.failure_evidence.schema === OUTBOUND_FAILURE_EVIDENCE_SCHEMA
       ? op.failure_evidence
       : undefined;
-    const changed = this.markQuarantined(op.id, createInternalOutboundFailureEvidence({
+    const evidence = createInternalOutboundFailureEvidence({
       failureCode: 'outbound.unsafe_delivery_unconfirmed',
       stage: 'runtime',
       mutationState: 'ambiguous',
@@ -2373,19 +2586,15 @@ export class DurabilityEngine {
         ?? Math.min(op.retry_count, 1),
       previousEvidence: previous,
       evidenceCoverage: previous ? 'complete' : 'partial',
-    }));
+    });
+    const changed = this.markQuarantined(op.id, evidence);
     if (!changed) return;
     recoveryRun.stats.outboundQuarantined += 1;
     log.warn(
       { opId: op.id, replayPolicy: op.replay_policy },
       `${operation}: maybe_sent non-safe delivery quarantined`,
     );
-    const alertQueued = emitAlertChecked(
-      config.botName,
-      'outbound_quarantined',
-      `whatsoup@${config.botName} outbound op ${op.id} quarantined`,
-      `replay_policy=${op.replay_policy} wa_message_id=${op.wa_message_id ?? 'none'} reason=${reason}`,
-    );
+    const alertQueued = emitOutboundQuarantineAlert(evidence);
     if (!alertQueued) {
       recoveryRun.recordFailure(
         'emit_outbound_quarantine_alert',
@@ -2536,6 +2745,7 @@ export class DurabilityEngine {
     maybeSentOutbound: number;
     oldestMaybeSentAt: string | null;
     outboundFailureEvidence: OutboundFailureHealthProjection;
+    outboundQuarantineDispositions: OutboundQuarantineDispositionHealthProjection;
     lastRecoveryAt: string | null;
     openRecoveries: number;
   } {
@@ -2546,7 +2756,7 @@ export class DurabilityEngine {
       | { at: string | null }
       | undefined;
     const evidenceRows = this.statements.getRecentOutboundFailureEvidence.all() as Array<{
-      status: OutboundStatus;
+      status: string;
       error: string | null;
     }>;
     const evidenceGroups = new Map<string, OutboundFailureHealthGroup>();
@@ -2574,7 +2784,7 @@ export class DurabilityEngine {
           stage: evidence.stage,
           mutationState: evidence.mutation_state,
           evidenceCoverage: evidence.evidence_coverage,
-          terminalState: row.status,
+          terminalState: normalizeOutboundStatus(row.status),
           retryDecision: evidence.retry_decision,
           retryOwner: evidence.retry_owner,
           remainingDelayBucket,
@@ -2587,7 +2797,7 @@ export class DurabilityEngine {
           stage: 'legacy_unclassified',
           mutationState: 'legacy_unclassified',
           evidenceCoverage: evidence.evidence_coverage,
-          terminalState: row.status,
+          terminalState: normalizeOutboundStatus(row.status),
           retryDecision: 'legacy_unclassified',
           retryOwner: 'legacy_unclassified',
           remainingDelayBucket: 'unknown',
@@ -2639,6 +2849,11 @@ export class DurabilityEngine {
         ))
         .slice(0, 20),
     };
+    const quarantineGroups = this.getQuarantinedOutboundDispositionGroups();
+    const outboundQuarantineDispositions: OutboundQuarantineDispositionHealthProjection = {
+      total: quarantineGroups.reduce((total, group) => total + group.count, 0),
+      groups: quarantineGroups,
+    };
     const lastRecovery = this.statements.getLastRecoveryRunCompletedAt.get() as
       | { completed_at: string }
       | undefined;
@@ -2648,9 +2863,52 @@ export class DurabilityEngine {
       maybeSentOutbound: maybeSent.count,
       oldestMaybeSentAt: oldestMaybeSent?.at ?? null,
       outboundFailureEvidence,
+      outboundQuarantineDispositions,
       lastRecoveryAt: lastRecovery?.completed_at ?? null,
       openRecoveries: this.recoveryEvidence.countOpen(),
     };
+  }
+
+  private getQuarantinedOutboundDispositionGroups(): OutboundQuarantineDispositionHealthGroup[] {
+    const quarantineRows = this.statements.getQuarantinedOutboundDispositionGroups.all() as Array<{
+      quarantine_disposition: unknown;
+      quarantine_evidence_coverage: unknown;
+      count: number;
+    }>;
+    const quarantineGroups = new Map<string, OutboundQuarantineDispositionHealthGroup>();
+    for (const row of quarantineRows) {
+      const disposition = normalizeOutboundQuarantineDisposition(row.quarantine_disposition);
+      const evidenceCoverage = normalizeOutboundQuarantineEvidenceCoverage(
+        row.quarantine_evidence_coverage,
+      );
+      const key = `${disposition}\u0000${evidenceCoverage}`;
+      const existing = quarantineGroups.get(key);
+      if (existing) {
+        existing.count += row.count;
+      } else {
+        quarantineGroups.set(key, { disposition, evidenceCoverage, count: row.count });
+      }
+    }
+    return [...quarantineGroups.values()].sort((a, b) => (
+      b.count - a.count
+      || a.disposition.localeCompare(b.disposition)
+      || a.evidenceCoverage.localeCompare(b.evidenceCoverage)
+    ));
+  }
+
+  private getQuarantineClearContributorCounts(): Map<OutboundQuarantineDisposition, number> {
+    const counts = new Map<OutboundQuarantineDisposition, number>(
+      OUTBOUND_QUARANTINE_DISPOSITIONS.map((disposition) => [disposition, 0]),
+    );
+    const rows = this.statements.getQuarantineClearContributorCounts.all() as Array<{
+      quarantine_disposition: unknown;
+      count: number;
+    }>;
+    for (const row of rows) {
+      const disposition = normalizeOutboundQuarantineDisposition(row.quarantine_disposition);
+      counts.set(disposition, (counts.get(disposition) ?? 0) + row.count);
+    }
+    return counts;
   }
 
   /**
@@ -2773,7 +3031,7 @@ export async function drainPendingOutbound(
           op.op_type === 'text'
           && op.retry_count >= MAX_TEXT_OP_DEFERRAL_COUNT
         ) {
-          durability.markQuarantined(op.id, createInternalOutboundFailureEvidence({
+          const evidence = createInternalOutboundFailureEvidence({
             failureCode: 'outbound.deferral_limit_exceeded',
             stage: 'admission',
             mutationState: 'not_started',
@@ -2781,17 +3039,14 @@ export async function drainPendingOutbound(
             providerSubmissionCount: priorEvidence?.provider_submission_count ?? 0,
             previousEvidence: priorEvidence,
             evidenceCoverage: priorEvidence ? 'complete' : 'partial',
-          }));
+          });
+          const changed = durability.markQuarantined(op.id, evidence);
+          if (!changed) continue;
           log.warn(
             { opId: op.id, retryCount: op.retry_count, maxDeferrals: MAX_TEXT_OP_DEFERRAL_COUNT },
             'drainPendingOutbound: text op exceeded max deferral count → quarantined',
           );
-          emitAlertChecked(
-            config.botName,
-            'outbound_quarantined',
-            `whatsoup@${config.botName} outbound op ${op.id} quarantined`,
-            `replay_policy=${op.replay_policy} op_type=${op.op_type} reason=deferral_limit_exceeded retry_count=${op.retry_count}`,
-          );
+          emitOutboundQuarantineAlert(evidence);
         }
         continue;
       }
@@ -2814,7 +3069,7 @@ export async function drainPendingOutbound(
       if (text === undefined) {
         // Non-reconstructable: cannot faithfully rebuild the send. Quarantine +
         // alert rather than leave it pending forever (BEAD-057 non-text guard).
-        durability.markQuarantined(op.id, createInternalOutboundFailureEvidence({
+        const evidence = createInternalOutboundFailureEvidence({
           failureCode: 'outbound.pending_replay_unreconstructable',
           stage: 'admission',
           mutationState: 'not_started',
@@ -2822,17 +3077,14 @@ export async function drainPendingOutbound(
           providerSubmissionCount: priorEvidence?.provider_submission_count ?? 0,
           previousEvidence: priorEvidence,
           evidenceCoverage: priorEvidence ? 'complete' : 'partial',
-        }));
+        });
+        const changed = durability.markQuarantined(op.id, evidence);
+        if (!changed) continue;
         log.warn(
           { opId: op.id, opType: op.op_type, replayPolicy: op.replay_policy },
           'drainPendingOutbound: pending op not reconstructable → quarantined',
         );
-        emitAlertChecked(
-          config.botName,
-          'outbound_quarantined',
-          `whatsoup@${config.botName} outbound op ${op.id} quarantined`,
-          `replay_policy=${op.replay_policy} op_type=${op.op_type} reason=pending_replay_unreconstructable`,
-        );
+        emitOutboundQuarantineAlert(evidence);
         continue;
       }
 
@@ -2845,7 +3097,7 @@ export async function drainPendingOutbound(
         // non-reconstructable branch — quarantine (a terminal state retention
         // reclaims) + alert — but never re-send it. `text` ops are exempt: this
         // branch is gated on op_type='status_ping'.
-        durability.markQuarantined(op.id, createInternalOutboundFailureEvidence({
+        const evidence = createInternalOutboundFailureEvidence({
           failureCode: 'outbound.status_ping_expired',
           stage: 'admission',
           mutationState: 'not_started',
@@ -2853,17 +3105,14 @@ export async function drainPendingOutbound(
           providerSubmissionCount: priorEvidence?.provider_submission_count ?? 0,
           previousEvidence: priorEvidence,
           evidenceCoverage: priorEvidence ? 'complete' : 'partial',
-        }));
+        });
+        const changed = durability.markQuarantined(op.id, evidence);
+        if (!changed) continue;
         log.warn(
           { opId: op.id, opType: op.op_type, createdAt: op.created_at },
           'drainPendingOutbound: stale status_ping past TTL → quarantined',
         );
-        emitAlertChecked(
-          config.botName,
-          'outbound_quarantined',
-          `whatsoup@${config.botName} outbound op ${op.id} quarantined`,
-          `replay_policy=${op.replay_policy} op_type=${op.op_type} reason=status_op_ttl_expired`,
-        );
+        emitOutboundQuarantineAlert(evidence);
         expired += 1;
         continue;
       }

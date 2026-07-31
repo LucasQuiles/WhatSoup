@@ -1,4 +1,9 @@
 import { z } from 'zod';
+import {
+  errorClassForHealEvidence,
+  HEAL_REPORT_TYPES,
+  HealEvidenceV1Schema,
+} from './heal-evidence.ts';
 
 export const CONTROL_PREFIXES = [
   '[LOOPS_HEAL]',
@@ -32,18 +37,27 @@ export function extractPayload(content: string): unknown {
 
 export const LoopsHealPayloadSchema = z.object({
   reportId: z.string(),
-  type: z.enum(['crash', 'degraded', 'service_crash']),
+  type: z.enum(HEAL_REPORT_TYPES),
   errorClass: z.string(),
   attempt: z.number(),
   maxAttempts: z.number(),
   timestamp: z.string(),
-  chatJid: z.string().optional(),
-  exitCode: z.number().optional(),
-  signal: z.string().nullable().optional(),
-  provider: z.string().optional(),
-  crashClass: z.string().optional(),
-  stderr: z.string().optional(),
-  recentLogs: z.string().optional(),
+  evidence: HealEvidenceV1Schema,
+}).strict().superRefine((payload, ctx) => {
+  if (payload.type !== payload.evidence.type) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['type'],
+      message: 'LOOPS_HEAL type must match evidence.type',
+    });
+  }
+  if (payload.errorClass !== errorClassForHealEvidence(payload.evidence)) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['errorClass'],
+      message: 'LOOPS_HEAL errorClass must match evidence',
+    });
+  }
 });
 export type LoopsHealPayload = z.infer<typeof LoopsHealPayloadSchema>;
 

@@ -35,14 +35,22 @@ APPROVED_HUMAN_EMAILS=(
   "LucasQuiles@users.noreply.github.com"             # legacy GitHub noreply
   "lhquiles@users.noreply.github.com"                # legacy GitHub noreply
 )
-# Sanctioned automation: matched on the EXACT "Name <email>" identity, so the bot
-# address is only valid paired with the mandated name (SoupBot). The retired
+# Sanctioned automation: matched on the EXACT "Name <email>" identity, so each
+# address is only valid paired with its approved machine name. The retired
 # `whatsoup-bot <bot@users.noreply.github.com>` identity matches nothing here and
-# is rejected — SoupBot uses its own dedicated address.
+# is rejected. QPI display names (presentation metadata per the ratified
+# QPI-GIT-IDENTITY policy) are NOT commit identities — a display name paired
+# with a machine address fails the exact match by design.
 APPROVED_BOT_IDENTS=(
-  "SoupBot <soupbot@users.noreply.github.com>"
+  "SoupBot QPI 1 <308864230+qpi-lab@users.noreply.github.com>"
+  "SoupBot QPI 1 <310849274+LabRatQ@users.noreply.github.com>"
+  "SoupBot QPI 2 <308865677+qpi-lab2@users.noreply.github.com>"
   "dependabot[bot] <49699333+dependabot[bot]@users.noreply.github.com>"
 )
+# The legacy `SoupBot <soupbot@users.noreply.github.com>` entry was removed
+# 2026-07-30 (owner decision): the username-form noreply resolves to a GitHub
+# account the estate does not control, so new commits carrying it would
+# misattribute. Historical commits are unaffected.
 # ────────────────────────────────────────────────────────────────────────────
 
 _strip_time() { printf '%s' "$1" | sed -E 's/ [0-9]+ [-+][0-9]{4}$//'; }
@@ -80,7 +88,7 @@ if [ "$fail" -ne 0 ]; then
   echo "" >&2
   echo "  Mandate: commit author AND committer must be an approved identity." >&2
   echo "  • Human:      set an approved git user.email (see policy block)." >&2
-  echo "  • Automation: use exactly  SoupBot <soupbot@users.noreply.github.com>" >&2
+  echo "  • Automation: use an exact identity from APPROVED_BOT_IDENTS." >&2
   echo "  Edit policy:  .husky/check-commit-identity.sh" >&2
   echo "  Bypass (discouraged, audited): git commit --no-verify" >&2
   echo "" >&2

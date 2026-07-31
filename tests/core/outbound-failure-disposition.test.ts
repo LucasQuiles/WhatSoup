@@ -12,6 +12,8 @@ import {
 } from '../../src/transport/contract/errors.ts';
 import {
   classifyOutboundFailure,
+  classifyOutboundQuarantineDisposition,
+  createInternalOutboundFailureEvidence,
   decodeOutboundFailureEvidence,
   encodeOutboundFailureEvidence,
   outboundFailureWarrantsUserNotice,
@@ -20,6 +22,7 @@ import {
 import { makeChannelId } from '../../src/core/transport-refs.ts';
 import { WhatSoupError } from '../../src/errors.ts';
 import { OUTBOUND_GOVERNOR_SHED_LOG } from '../../src/core/outbound-governor-shed.ts';
+import { OutboundIdentityError } from '../../src/core/outbound-identity/guard.ts';
 import { Database } from '../../src/core/database.ts';
 import {
   drainPendingOutbound,
@@ -38,6 +41,35 @@ const base = {
 };
 
 describe('outbound failure disposition', () => {
+  it('classifies quarantine outcomes only from bounded failure evidence', () => {
+    const unreconstructable = createInternalOutboundFailureEvidence({
+      failureCode: 'outbound.pending_replay_unreconstructable',
+      stage: 'admission',
+      mutationState: 'not_started',
+      providerSubmissionCount: 0,
+    });
+    expect(classifyOutboundQuarantineDisposition(unreconstructable))
+      .toBe('record_unreconstructable');
+
+    const ambiguous = createInternalOutboundFailureEvidence({
+      failureCode: 'outbound.unsafe_delivery_unconfirmed',
+      stage: 'runtime',
+      mutationState: 'ambiguous',
+      providerSubmissionCount: 1,
+    });
+    expect(classifyOutboundQuarantineDisposition(ambiguous))
+      .toBe('delivery_ambiguous_unsafe');
+
+    const notProvenNeverSent = createInternalOutboundFailureEvidence({
+      failureCode: 'outbound.status_ping_expired',
+      stage: 'admission',
+      mutationState: 'not_started',
+      providerSubmissionCount: 1,
+    });
+    expect(classifyOutboundQuarantineDisposition(notProvenNeverSent))
+      .toBe('legacy_unclassified');
+  });
+
   it('defers a typed local producer cooldown without inventing a provider submission', () => {
     const evidence = classifyOutboundFailure(
       new RateLimitedError({
@@ -190,6 +222,32 @@ describe('outbound failure disposition', () => {
       provider_submission_count: 0,
       evidence_coverage: 'partial',
     });
+  });
+
+  it('classifies an identity guard block as a bounded zero-submission stop', () => {
+    const marker = 'identity-guard-marker-must-not-persist';
+    const evidence = classifyOutboundFailure(
+      new OutboundIdentityError('COLD_TARGET', marker),
+      {
+        nowMs: Date.parse('2026-07-29T00:00:00.000Z'),
+        retryOwner: 'send_tracked',
+        attemptsRemaining: 0,
+      },
+    );
+
+    expect(evidence).toMatchObject({
+      failure_code: 'outbound.identity_blocked',
+      stage: 'admission',
+      mutation_state: 'not_started',
+      retryable: false,
+      retry_decision: 'stop',
+      retry_owner: 'none',
+      attempt_budget_disposition: 'stop',
+      logical_attempt_count: 1,
+      provider_submission_count: 0,
+      evidence_coverage: 'partial',
+    });
+    expect(encodeOutboundFailureEvidence(evidence)).not.toContain(marker);
   });
 
   it('classifies an untyped throw conservatively without persisting its prose', () => {
@@ -660,6 +718,44 @@ describe('outbound failure durability contract', () => {
         }),
       }),
     );
+    db.close();
+  });
+
+  it('sendTracked terminalizes an identity guard block without persisting guard prose', async () => {
+    const { db, engine, opId } = makeEngine();
+    db.raw.prepare('DELETE FROM outbound_ops WHERE id = ?').run(opId);
+    const marker = 'identity-guard-send-tracked-marker';
+    const error = new OutboundIdentityError('COLD_TARGET', marker);
+    let sends = 0;
+    const messenger: Messenger = {
+      async sendMessage() {
+        sends += 1;
+        throw error;
+      },
+      async sendMedia() {
+        return { waMessageId: null };
+      },
+    };
+
+    await expect(sendTracked(
+      messenger,
+      'synthetic@s.whatsapp.net',
+      'synthetic',
+      engine,
+      { replayPolicy: 'safe' },
+    )).rejects.toBe(error);
+
+    expect(sends).toBe(1);
+    const stored = db.raw.prepare(
+      'SELECT status, error FROM outbound_ops ORDER BY id DESC LIMIT 1',
+    ).get() as { status: string; error: string };
+    expect(stored.status).toBe('failed_permanent');
+    expect(stored.error).not.toContain(marker);
+    expect(JSON.parse(stored.error)).toMatchObject({
+      failure_code: 'outbound.identity_blocked',
+      mutation_state: 'not_started',
+      provider_submission_count: 0,
+    });
     db.close();
   });
 

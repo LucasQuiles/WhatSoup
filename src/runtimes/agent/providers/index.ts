@@ -7,7 +7,7 @@
 // switches used a `default:` fall-through.
 //
 // Add a new provider:
-//   1. Append the canonical ID to provider-ids.json (kebab-case,
+//   1. Append the canonical ID to src/lib/provider-ids.json (kebab-case,
 //      transport-suffixed) AND to the ProviderIdTuple type below — the
 //      registry test pins the two in lockstep.
 //   2. Add display name in src/runtimes/agent/session.ts PROVIDER_DISPLAY_NAMES.
@@ -15,7 +15,7 @@
 //      getProviderArgs, getParser) — TypeScript will surface any miss via
 //      the assertNever pattern at the throw site.
 //   4. Add display metadata in console/src/lib/providers.ts (PROVIDER_META) —
-//      the ID list itself is shared via provider-ids.json, so the console
+//      the ID list itself is shared via src/lib/provider-ids.json, so the console
 //      picks up the new ID automatically.
 //   5. Add an impl file (parser or API client) here under providers/.
 //   6. Add the brand grouping in providers/provider-brand.ts BRAND_PROVIDER_ORDER
@@ -23,50 +23,21 @@
 //      the registry test pins every ID to a brand, so a miss fails there; an
 //      unmapped provider would silently vanish from the `/model` drill Level-1.
 
-import providerIdsJson from './provider-ids.json' with { type: 'json' };
+import {
+  PROVIDER_IDS,
+  type ProviderId,
+} from '../../../lib/provider-ids.ts';
 import type { ExecutionMode } from './types.ts';
 
-/**
- * Literal tuple type of the canonical provider IDs. TypeScript widens JSON
- * imports to `string[]`, so the literal types live here while the runtime
- * values live in provider-ids.json (the single source shared with the
- * console). tests/runtimes/agent/providers/registry.test.ts pins the JSON
- * values to this tuple, so the two cannot drift silently.
- */
-type ProviderIdTuple = readonly [
-  'claude-cli',
-  'codex-cli',
-  'gemini-cli',
-  'opencode-cli',
-  'openai-api',
-  'anthropic-api',
-];
+export {
+  PROVIDER_IDS,
+  isProviderId,
+  type ProviderId,
+} from '../../../lib/provider-ids.ts';
 
 /**
- * Canonical, ordered list of supported provider IDs, loaded from
- * provider-ids.json (shared with the console catalog). Frozen at module load
- * so accidental mutation throws in strict mode. Treat as a closed set — if
- * a new provider is needed, follow the steps listed above (the conformance
- * test in tests/runtimes/agent/providers/registry.test.ts pins the
- * relationship to impl files).
- */
-export const PROVIDER_IDS: ProviderIdTuple = Object.freeze(
-  providerIdsJson,
-) as ProviderIdTuple;
-
-/** Discriminated-union of supported provider IDs derived from {@link PROVIDER_IDS}. */
-export type ProviderId = (typeof PROVIDER_IDS)[number];
-
 /** Default provider when none is specified in config. */
 export const DEFAULT_PROVIDER_ID: ProviderId = 'claude-cli';
-
-/**
- * Type guard: narrows an unknown value to {@link ProviderId} iff it is one
- * of the canonical IDs. Case-sensitive — operators must use the exact ID.
- */
-export function isProviderId(value: unknown): value is ProviderId {
-  return typeof value === 'string' && (PROVIDER_IDS as readonly string[]).includes(value);
-}
 
 /**
  * Exhaustiveness helper for `switch` statements over {@link ProviderId}.

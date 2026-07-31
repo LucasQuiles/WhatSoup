@@ -13,9 +13,11 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { Database } from '../../src/core/database.ts';
 import { DurabilityEngine } from '../../src/core/durability.ts';
+import { createInternalOutboundFailureEvidence } from '../../src/core/outbound-failure-disposition.ts';
 
 const emitAlert = vi.hoisted(() => vi.fn(() => true));
 const clearAlertSource = vi.hoisted(() => vi.fn(() => true));
+const QUARANTINE_CLEAR_OPTIONS = { requireDurableOutbox: true };
 
 vi.mock('../../src/lib/emit-alert.ts', () => ({
   emitAlert,
@@ -50,6 +52,18 @@ function getToolCall(db: Database, id: number): Record<string, unknown> {
 /** Read a single row from outbound_ops by id. */
 function getOutbound(db: Database, id: number): Record<string, unknown> {
   return db.raw.prepare('SELECT * FROM outbound_ops WHERE id = ?').get(id) as Record<string, unknown>;
+}
+
+function expectQuarantineClear(source: string): void {
+  expect(clearAlertSource).toHaveBeenCalledWith(
+    'Loops', source, undefined, undefined, QUARANTINE_CLEAR_OPTIONS,
+  );
+}
+
+function expectNoQuarantineClear(source: string): void {
+  expect(clearAlertSource).not.toHaveBeenCalledWith(
+    'Loops', source, undefined, undefined, QUARANTINE_CLEAR_OPTIONS,
+  );
 }
 
 /** Read a single row from inbound_events by seq. */
@@ -404,9 +418,23 @@ describe('DurabilityEngine — postConnectRecovery()', () => {
 
     const stats = engine.postConnectRecovery();
 
-    expect(getOutbound(db, opId)['status']).toBe('quarantined');
+    expect(getOutbound(db, opId)).toMatchObject({
+      status: 'quarantined',
+      quarantine_disposition: 'delivery_ambiguous_unsafe',
+      quarantine_evidence_coverage: 'complete',
+    });
     expect(stats.outboundQuarantined).toBe(1);
     expect(stats.outboundReplayed).toBe(0);
+    expect(emitAlert).toHaveBeenCalledWith(
+      'Loops',
+      'outbound_delivery_ambiguous',
+      expect.any(String),
+      expect.stringContaining('outbound.unsafe_delivery_unconfirmed'),
+      'critical',
+    );
+    expectNoQuarantineClear('outbound_delivery_ambiguous');
+    expectNoQuarantineClear('outbound_quarantined');
+    expectQuarantineClear('outbound_record_unreconstructable');
   });
 
   // ── maybe_sent with no wa_message_id ──────────────────────────────────
@@ -456,13 +484,128 @@ describe('DurabilityEngine — postConnectRecovery()', () => {
     expect(freshStats.outboundReconciled).toBe(0);
 
     db.raw.prepare(
-      "UPDATE outbound_ops SET created_at = datetime('now', '-31 seconds') WHERE id = ?",
+      "UPDATE outbound_ops SET ambiguity_at = datetime('now', '-31 seconds') WHERE id = ?",
     ).run(opId);
     const agedStats = engine.reconcileLiveMaybeSent();
 
     expect(getOutbound(db, opId)['status']).toBe('quarantined');
     expect(agedStats.outboundReconciled).toBe(1);
     expect(agedStats.outboundQuarantined).toBe(1);
+  });
+
+  it('gives old queued work a full live ambiguity grace when it freshly becomes maybe_sent', () => {
+    const opId = engine.createOutboundOp({
+      conversationKey: 'k1', chatJid: 'j1', opType: 'text',
+      payload: '{}', replayPolicy: 'unsafe',
+    });
+    db.raw.prepare(
+      "UPDATE outbound_ops SET created_at = datetime('now', '-3600 seconds') WHERE id = ?",
+    ).run(opId);
+    engine.markSending(opId);
+    engine.markMaybeSent(opId, 'pre-receipt failure');
+
+    const before = getOutbound(db, opId);
+    const health = engine.getHealthStats();
+
+    expect(before['status']).toBe('maybe_sent');
+    expect(before['submitted_at']).toBeNull();
+    expect(health.oldestMaybeSentAt).not.toBe(before['created_at']);
+    expect(engine.reconcileLiveMaybeSent().outboundReconciled).toBe(0);
+    expect(getOutbound(db, opId)['status']).toBe('maybe_sent');
+  });
+
+  it('fails closed for future current or legacy chronology in recurring live reconciliation (#2343)', () => {
+    const ambiguityOpId = engine.createOutboundOp({
+      conversationKey: 'k1', chatJid: 'j1', opType: 'text',
+      payload: '{}', replayPolicy: 'unsafe',
+    });
+    engine.markSending(ambiguityOpId);
+    engine.markMaybeSent(ambiguityOpId, 'future ambiguity chronology');
+    db.raw.prepare(
+      "UPDATE outbound_ops SET ambiguity_at = '2099-01-01T00:00:00Z' WHERE id = ?",
+    ).run(ambiguityOpId);
+
+    const submittedOpId = engine.createOutboundOp({
+      conversationKey: 'k2', chatJid: 'j2', opType: 'text',
+      payload: '{}', replayPolicy: 'unsafe',
+    });
+    engine.markSending(submittedOpId);
+    engine.markMaybeSent(submittedOpId, 'future submission chronology');
+    db.raw.prepare(
+      "UPDATE outbound_ops SET ambiguity_at = NULL, submitted_at = '2099-01-01T00:00:00Z' WHERE id = ?",
+    ).run(submittedOpId);
+
+    const createdOpId = engine.createOutboundOp({
+      conversationKey: 'k3', chatJid: 'j3', opType: 'text',
+      payload: '{}', replayPolicy: 'unsafe',
+    });
+    engine.markSending(createdOpId);
+    engine.markMaybeSent(createdOpId, 'future creation chronology');
+    db.raw.prepare(
+      "UPDATE outbound_ops SET ambiguity_at = NULL, submitted_at = NULL, created_at = '2099-01-01T00:00:00Z' WHERE id = ?",
+    ).run(createdOpId);
+
+    const stats = engine.reconcileLiveMaybeSent();
+
+    expect(stats.outboundReconciled).toBe(3);
+    expect(stats.outboundQuarantined).toBe(3);
+    expect(getOutbound(db, ambiguityOpId)['status']).toBe('quarantined');
+    expect(getOutbound(db, submittedOpId)['status']).toBe('quarantined');
+    expect(getOutbound(db, createdOpId)['status']).toBe('quarantined');
+  });
+
+  it('preserves an active ambiguity timestamp across repeated maybe_sent observations', () => {
+    const opId = engine.createOutboundOp({
+      conversationKey: 'k1', chatJid: 'j1', opType: 'text',
+      payload: '{}', replayPolicy: 'unsafe',
+    });
+    engine.markSending(opId);
+    engine.markMaybeSent(opId, 'first ambiguous observation');
+    db.raw.prepare(
+      "UPDATE outbound_ops SET ambiguity_at = '2000-01-01 00:00:00' WHERE id = ?",
+    ).run(opId);
+
+    expect(engine.markMaybeSent(opId, 'second ambiguous observation')).toBe(true);
+    expect(getOutbound(db, opId)['ambiguity_at']).toBe('2000-01-01 00:00:00');
+  });
+
+  it('starts a new ambiguity episode after a safe replay re-enters maybe_sent', () => {
+    const opId = engine.createOutboundOp({
+      conversationKey: 'k1', chatJid: 'j1', opType: 'text',
+      payload: '{}', replayPolicy: 'safe',
+    });
+    engine.markSending(opId);
+    engine.markMaybeSent(opId, 'first ambiguous attempt');
+    db.raw.prepare(
+      "UPDATE outbound_ops SET ambiguity_at = '2000-01-01 00:00:00' WHERE id = ?",
+    ).run(opId);
+
+    expect(engine.reconcileLiveMaybeSent().outboundReplayed).toBe(1);
+    expect(getOutbound(db, opId)['status']).toBe('pending');
+
+    engine.markSending(opId);
+    engine.markMaybeSent(opId, 'second ambiguous attempt');
+
+    expect(getOutbound(db, opId)).toMatchObject({ status: 'maybe_sent' });
+    expect(getOutbound(db, opId)['ambiguity_at']).not.toBe('2000-01-01 00:00:00');
+    expect(engine.reconcileLiveMaybeSent().outboundReconciled).toBe(0);
+  });
+
+  it('settles a late echo during a fresh live ambiguity grace', () => {
+    const opId = engine.createOutboundOp({
+      conversationKey: 'k1', chatJid: 'j1', opType: 'text',
+      payload: '{}', replayPolicy: 'unsafe',
+    });
+    db.raw.prepare(
+      "UPDATE outbound_ops SET created_at = datetime('now', '-3600 seconds') WHERE id = ?",
+    ).run(opId);
+    engine.markSending(opId);
+    engine.markMaybeSent(opId, 'pre-receipt failure', 'WA_FRESH_ECHO');
+
+    expect(engine.reconcileLiveMaybeSent().outboundReconciled).toBe(0);
+    insertMessage(db, 'WA_FRESH_ECHO');
+    expect(engine.matchEcho('WA_FRESH_ECHO')).toBe(true);
+    expect(getOutbound(db, opId)['status']).toBe('echoed');
   });
 
   it('bounds live maybe_sent reconciliation to FIFO pages of 200 rows', () => {
@@ -474,7 +617,7 @@ describe('DurabilityEngine — postConnectRecovery()', () => {
       engine.markSending(opId);
       engine.markMaybeSent(opId, 'load-test');
     }
-    db.raw.exec("UPDATE outbound_ops SET created_at = datetime('now', '-31 seconds')");
+    db.raw.exec("UPDATE outbound_ops SET ambiguity_at = datetime('now', '-31 seconds')");
 
     const first = engine.reconcileLiveMaybeSent();
     const remainingAfterFirst = engine.getOutboundByStatus('maybe_sent');
@@ -496,12 +639,92 @@ describe('DurabilityEngine — postConnectRecovery()', () => {
     expect(after.count).toBe(before.count);
   });
 
-  it('clears outbound quarantine alert source after post-connect recovery completes', () => {
+  it('clears each contributor-free incident source but never clears an informational disposition', () => {
     const stats = engine.postConnectRecovery();
 
     expect(stats.outboundQuarantined).toBe(0);
-    expect(clearAlertSource).toHaveBeenCalledOnce();
-    expect(clearAlertSource).toHaveBeenCalledWith('Loops', 'outbound_quarantined');
+    expect(clearAlertSource).toHaveBeenCalledTimes(5);
+    expectQuarantineClear('outbound_quarantined');
+    expectQuarantineClear('outbound_delivery_ambiguous');
+    expectQuarantineClear('outbound_delivery_not_attempted');
+    expectQuarantineClear('outbound_record_unreconstructable');
+    expectQuarantineClear('outbound_quarantine_unclassified');
+    expectNoQuarantineClear('outbound_status_discarded');
+  });
+
+  it('keeps a source open while an exact normalized contributor remains', () => {
+    const deferred = engine.createOutboundOp({
+      conversationKey: 'deferred', chatJid: 'deferred@g.us', opType: 'text',
+      payload: '{}', replayPolicy: 'unsafe',
+    });
+    engine.markQuarantined(deferred, createInternalOutboundFailureEvidence({
+      failureCode: 'outbound.deferral_limit_exceeded',
+      stage: 'admission',
+      mutationState: 'not_started',
+      providerSubmissionCount: 0,
+    }));
+    const unclassified = engine.createOutboundOp({
+      conversationKey: 'unclassified', chatJid: 'unclassified@g.us', opType: 'text',
+      payload: '{}', replayPolicy: 'unsafe',
+    });
+    engine.markQuarantined(unclassified);
+    db.raw.prepare(`
+      UPDATE outbound_ops
+         SET quarantine_disposition = 'future_private_disposition'
+       WHERE id = ?
+    `).run(unclassified);
+
+    engine.postConnectRecovery();
+
+    expectQuarantineClear('outbound_delivery_ambiguous');
+    expectQuarantineClear('outbound_record_unreconstructable');
+    expectNoQuarantineClear('outbound_delivery_not_attempted');
+    expectNoQuarantineClear('outbound_quarantine_unclassified');
+    expectNoQuarantineClear('outbound_quarantined');
+    expectNoQuarantineClear('outbound_status_discarded');
+  });
+
+  it('does not resolve an unsafe source when a quarantine lacks its durable review receipt', () => {
+    const unsafe = engine.createOutboundOp({
+      conversationKey: 'unsafe', chatJid: 'unsafe@g.us', opType: 'text',
+      payload: '{}', replayPolicy: 'unsafe',
+    });
+    engine.markQuarantined(unsafe, createInternalOutboundFailureEvidence({
+      failureCode: 'outbound.unsafe_delivery_unconfirmed',
+      stage: 'runtime',
+      mutationState: 'ambiguous',
+      logicalAttemptCount: 1,
+      providerSubmissionCount: 1,
+    }));
+    db.raw.prepare(`
+      UPDATE outbound_ops
+         SET status = 'failed_permanent', is_terminal = 1
+       WHERE id = ?
+    `).run(unsafe);
+
+    engine.postConnectRecovery();
+
+    expectNoQuarantineClear('outbound_delivery_ambiguous');
+    expectNoQuarantineClear('outbound_quarantined');
+
+    const insertRetirement = db.raw.prepare(`
+      INSERT INTO outbound_quarantine_retirements (
+        outbound_op_id, quarantine_disposition, acknowledgement, evidence_sha256
+      ) VALUES (?, 'delivery_ambiguous_unsafe', 'delivery-risk-reviewed', ?)
+    `);
+    expect(() => insertRetirement.run(unsafe, '0'.repeat(64))).toThrow();
+    const canonicalEvidenceSha = getOutbound(db, unsafe)['quarantine_evidence_sha256'];
+    expect(canonicalEvidenceSha).toEqual(expect.stringMatching(/^[0-9a-f]{64}$/));
+    if (typeof canonicalEvidenceSha !== 'string') {
+      throw new Error('quarantine evidence digest was not persisted');
+    }
+    insertRetirement.run(unsafe, canonicalEvidenceSha);
+    clearAlertSource.mockClear();
+
+    engine.postConnectRecovery();
+
+    expectQuarantineClear('outbound_delivery_ambiguous');
+    expectQuarantineClear('outbound_quarantined');
   });
 
   // ── Risk 3: history-sync timeout scenario ─────────────────────────────

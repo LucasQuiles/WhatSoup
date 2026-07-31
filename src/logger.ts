@@ -13,7 +13,15 @@ const level = process.env.LOG_LEVEL ?? 'info';
 // cause (#1776). Registering pino's std error serializer under both keys
 // covers our convention and theirs at this single seam, rather than
 // patching call sites we don't own.
-export const errorLikeSerializers = { err: pino.stdSerializers.err, error: pino.stdSerializers.err };
+// `reason` is the unhandledRejection convention (src/main.ts logs the raw
+// rejection value under it). Without a serializer a real Error stringifies
+// to `{}` (non-enumerable message/stack), masking the crash cause (#2698).
+// pino's std err serializer passes non-Error values through unchanged.
+export const errorLikeSerializers = {
+  err: pino.stdSerializers.err,
+  error: pino.stdSerializers.err,
+  reason: pino.stdSerializers.err,
+};
 
 // ─── File transport via pino-roll ─────────────────────────────────────────────
 // Activated when LOG_DIR env var is set (always true in production via config/systemd).

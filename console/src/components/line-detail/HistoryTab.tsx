@@ -182,7 +182,6 @@ function HistoryMessages({ messages, outgoingBg, selectedChat, lineName }: {
               <MessageBubble
                 msg={row.message}
                 outgoingBg={outgoingBg}
-                onCreateContact={(name) => toast.info(`Save contact: ${name}`)}
                 animate={animatedPks.has(row.message.pk)}
               />
             </div>

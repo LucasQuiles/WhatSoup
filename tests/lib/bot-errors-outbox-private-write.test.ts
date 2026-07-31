@@ -42,7 +42,10 @@ describe('bot-errors outbox private writes', () => {
     const writefail = join(tmpRoot, 'writefail');
     const outside = join(tmpRoot, 'outside-target');
     const eventId = '11111111-1111-4111-8111-111111111111';
-    const created = '20260611T123456Z';
+    // Fractional-timestamp format introduced in #2560: milliseconds preserved
+    // as _NNN suffix so same-second events sort lexically after old-format
+    // names. The symlink must be at the exact tmp path the writer will target.
+    const created = '20260611T123456Z_789';
     const tmpName = `.${created}.vitest-outbox.symlink-test.${eventId}.json.${process.pid}.tmp`;
 
     process.env['BOT_ERRORS_OUTBOX_DIR'] = outbox;
@@ -172,6 +175,8 @@ describe('bot-errors outbox private writes', () => {
     }, '11111111-1111-4111-8111-111111111112', '2026-06-15T20:30:00.000Z');
 
     expect(event).toMatchObject({
+      schemaVersion: 2,
+      eventKind: 'incident_recovery',
       id: '11111111-1111-4111-8111-111111111112',
       eventType: 'clear',
       severity: 'info',

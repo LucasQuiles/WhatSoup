@@ -8,11 +8,14 @@
  *  - Linux without systemd (WSL1): throws descriptive errors
  */
 import { execFile, execFileSync, spawn, type ChildProcess } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import { promisify } from 'node:util';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import * as fs from 'node:fs';
-import { repoRoot, tmpRoot } from './paths.ts';
+import { isValidInstanceName } from './instance-name.ts';
+import { escapeRegExp } from '../lib/regex-utils.ts';
+import { repoRoot, tmpRoot, xdgDir } from './paths.ts';
 
 const execFileAsync = promisify(execFile);
 
@@ -90,6 +93,45 @@ function plistPath(name: string): string {
   return path.join(os.homedir(), 'Library', 'LaunchAgents', `${launchdLabel(name)}.plist`);
 }
 
+function launchdDomain(): string {
+  if (typeof process.getuid !== 'function') {
+    throw new Error('launchd service management requires a POSIX user id');
+  }
+  return `gui/${process.getuid()}`;
+}
+
+function launchdServiceTarget(name: string): string {
+  return `${launchdDomain()}/${launchdLabel(name)}`;
+}
+
+async function bootoutLaunchdService(name: string): Promise<void> {
+  await execFileAsync('launchctl', ['bootout', launchdServiceTarget(name)]);
+}
+
+function assertValidLaunchdInstanceName(name: string): void {
+  if (!isValidInstanceName(name)) throw new Error('invalid instance name');
+}
+
+/** Recognize the stable structural fields emitted by WhatSoup's plist generator. */
+function isExpectedGeneratedLaunchdPlist(name: string, contents: string): boolean {
+  const label = escapeRegExp(escapeXml(launchdLabel(name)));
+  const wrapper = escapeRegExp(escapeXml(path.join(os.homedir(), '.local', 'bin', 'whatsoup')));
+  const instance = escapeRegExp(escapeXml(name));
+  const identity = new RegExp(
+    `<key>Label</key>\\s*<string>${label}</string>\\s*` +
+    `<key>ProgramArguments</key>\\s*<array>\\s*` +
+    `<string>${wrapper}</string>\\s*<string>${instance}</string>`,
+    'u',
+  );
+  return identity.test(contents);
+}
+
+function assertExpectedGeneratedLaunchdPlist(name: string, contents: string): void {
+  if (!isExpectedGeneratedLaunchdPlist(name, contents)) {
+    throw new Error(`launchd plist for ${launchdLabel(name)} does not match the generated WhatSoup instance identity`);
+  }
+}
+
 /**
  * Build a launchd plist for a WhatSoup instance.
  *
@@ -97,11 +139,14 @@ function plistPath(name: string): string {
  * PATH, home directory, or other environment-sourced strings.
  */
 export function buildPlist(name: string): string {
-  const xdgConfig = process.env.XDG_CONFIG_HOME ?? path.join(os.homedir(), '.config');
+  assertValidLaunchdInstanceName(name);
+  const xdgConfig = xdgDir('XDG_CONFIG_HOME', '.config');
   const logDir = path.join(xdgConfig, 'whatsoup', 'instances', name);
   const tmpDir = tmpRoot(name);
   const wrapper = path.join(os.homedir(), '.local', 'bin', 'whatsoup');
-  const envPath = process.env.PATH ?? '/usr/local/bin:/usr/bin:/bin';
+  const envPath = process.env.PATH ?? (process.platform === 'darwin'
+  ? '/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin'
+  : '/usr/local/bin:/usr/bin:/bin');
   const whatsoupNode = process.env.WHATSOUP_NODE;
 
   return [
@@ -120,9 +165,20 @@ export function buildPlist(name: string): string {
     '  <false/>',
     '  <key>KeepAlive</key>',
     '  <dict>',
+    // The process deliberately exits 1 on reconnect-exhaustion and
+    // unhandledRejection (systemd Restart=on-failure semantics). Crashed:true
+    // alone only relaunches on signal deaths, stranding instances on any
+    // clean exit(1) (#2682, 21h production outage). SuccessfulExit:false adds
+    // relaunch on every non-zero exit — the combined form is the documented
+    // bot-plist standard (docs/runbooks/macos-host-setup.md); ThrottleInterval
+    // bounds crash loops (same contract as install-bot-errors-sentinel.sh).
     '    <key>Crashed</key>',
     '    <true/>',
+    '    <key>SuccessfulExit</key>',
+    '    <false/>',
     '  </dict>',
+    '  <key>ThrottleInterval</key>',
+    '  <integer>60</integer>',
     '  <key>StandardOutPath</key>',
     `  <string>${escapeXml(logDir)}/stdout.log</string>`,
     '  <key>StandardErrorPath</key>',
@@ -150,6 +206,189 @@ export function buildPlist(name: string): string {
   ].join('\n');
 }
 
+export interface LaunchdReconcileOptions {
+  /** Inspect the current plist and report the target without changing disk or launchd. */
+  dryRun?: boolean;
+}
+
+export interface LaunchdReconcileResult {
+  label: string;
+  plistPath: string;
+  priorPlistExisted: boolean;
+  dryRun: boolean;
+}
+
+function readExistingLaunchdPlist(filePath: string): string | null {
+  try {
+    return fs.readFileSync(filePath, 'utf-8');
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
+    throw error;
+  }
+}
+
+/** Read an existing plist only when it still bears the generated identity we own. */
+function readExpectedGeneratedLaunchdPlist(name: string, filePath: string): string | null {
+  const contents = readExistingLaunchdPlist(filePath);
+  if (contents !== null) assertExpectedGeneratedLaunchdPlist(name, contents);
+  return contents;
+}
+
+/** Publish a complete launchd plist in one same-directory rename. */
+function writeAtomicLaunchdPlist(filePath: string, contents: string): void {
+  const temporaryPath = path.join(
+    path.dirname(filePath),
+    `.${path.basename(filePath)}.tmp-${process.pid}-${randomUUID()}`,
+  );
+  let temporaryExists = false;
+  try {
+    // launchd rejects job definitions that are group- or world-writable. A
+    // same-directory rename replaces the old inode, so make the new inode safe
+    // independently of a permissive user umask.
+    temporaryExists = true;
+    fs.writeFileSync(temporaryPath, contents, { encoding: 'utf-8', mode: 0o644 });
+    fs.renameSync(temporaryPath, filePath);
+    temporaryExists = false;
+  } catch (error) {
+    if (temporaryExists) {
+      try { fs.unlinkSync(temporaryPath); } catch {
+        /* intentional: optional temporary-file cleanup must not replace the primary atomic-write failure */
+      }
+    }
+    throw error;
+  }
+}
+
+function restoreLaunchdPlist(filePath: string, previousContents: string | null): void {
+  if (previousContents !== null) {
+    writeAtomicLaunchdPlist(filePath, previousContents);
+    return;
+  }
+  try {
+    fs.unlinkSync(filePath);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+  }
+}
+
+function rollbackFailure(original: unknown, rollbacks: readonly unknown[]): Error {
+  const originalMessage = original instanceof Error ? original.message : String(original);
+  const rollbackMessage = rollbacks
+    .map((rollback) => rollback instanceof Error ? rollback.message : String(rollback))
+    .join('; ');
+  return new Error(`launchd reload failed: ${originalMessage}; rollback also failed: ${rollbackMessage}`);
+}
+
+async function bootstrapLaunchdService(name: string, dest: string): Promise<void> {
+  const domain = launchdDomain();
+  await execFileAsync('launchctl', ['bootstrap', domain, dest]);
+  await execFileAsync('launchctl', ['kickstart', '-k', launchdServiceTarget(name)]);
+}
+
+/** Attempt every rollback step so one failed cleanup cannot strand new bytes. */
+async function rollbackLaunchdService(
+  name: string,
+  dest: string,
+  previousContents: string | null,
+): Promise<unknown[]> {
+  const failures: unknown[] = [];
+  try {
+    await bootoutLaunchdService(name);
+  } catch (error) {
+    if (!isLaunchdAbsentServiceError(error)) failures.push(error);
+  }
+
+  let restored = false;
+  try {
+    restoreLaunchdPlist(dest, previousContents);
+    restored = true;
+  } catch (error) {
+    failures.push(error);
+  }
+
+  if (restored && previousContents !== null) {
+    try {
+      await bootstrapLaunchdService(name, dest);
+    } catch (error) {
+      failures.push(error);
+    }
+  }
+  return failures;
+}
+
+function throwLaunchdFailure(original: unknown, rollbackFailures: readonly unknown[]): never {
+  if (rollbackFailures.length > 0) throw rollbackFailure(original, rollbackFailures);
+  throw original;
+}
+
+/**
+ * Re-render and reload an existing macOS instance plist.
+ *
+ * A failed bootout is deliberately terminal rather than being guessed as an
+ * already-unloaded job: a failed launchctl operation may also mean an invalid
+ * domain or authorization problem. After bootstrap or kickstart fails, boot
+ * out the potentially new job before atomically restoring and restarting the
+ * old definition.
+ */
+export async function reconcileLaunchdPlist(
+  name: string,
+  options: LaunchdReconcileOptions = {},
+): Promise<LaunchdReconcileResult> {
+  assertValidLaunchdInstanceName(name);
+  if (process.platform !== 'darwin') {
+    throw new Error('launchd reconciliation is only available on macOS');
+  }
+  const dest = plistPath(name);
+  const previousContents = readExpectedGeneratedLaunchdPlist(name, dest);
+  const result: LaunchdReconcileResult = {
+    label: launchdLabel(name),
+    plistPath: dest,
+    priorPlistExisted: previousContents !== null,
+    dryRun: options.dryRun === true,
+  };
+
+  if (previousContents === null) {
+    throw new Error(`no existing launchd plist for ${result.label}`);
+  }
+  if (result.dryRun) return result;
+
+  fs.mkdirSync(path.dirname(dest), { recursive: true });
+  writeAtomicLaunchdPlist(dest, buildPlist(name));
+
+  try {
+    await bootoutLaunchdService(name);
+  } catch (error) {
+    try {
+      restoreLaunchdPlist(dest, previousContents);
+    } catch (rollback) {
+      throwLaunchdFailure(error, [rollback]);
+    }
+    throw error;
+  }
+
+  try {
+    await bootstrapLaunchdService(name, dest);
+  } catch (error) {
+    throwLaunchdFailure(error, await rollbackLaunchdService(name, dest, previousContents));
+  }
+
+  return result;
+}
+
+/** Install a newly authenticated instance without loading any pre-auth job. */
+async function installLaunchdPlist(name: string): Promise<void> {
+  const dest = plistPath(name);
+  const previousContents = readExpectedGeneratedLaunchdPlist(name, dest);
+  fs.mkdirSync(path.dirname(dest), { recursive: true });
+  writeAtomicLaunchdPlist(dest, buildPlist(name));
+
+  try {
+    await bootstrapLaunchdService(name, dest);
+  } catch (error) {
+    throwLaunchdFailure(error, await rollbackLaunchdService(name, dest, previousContents));
+  }
+}
+
 // ---------------------------------------------------------------------------
 // ServiceManager interface + implementations
 // ---------------------------------------------------------------------------
@@ -162,6 +401,10 @@ export interface ServiceManager {
   restart(name: string): Promise<void>;
   /** Fire-and-forget start with optional error callback (used in auth flow). */
   startFire(name: string, onError?: (err: Error | null) => void): void;
+  /** Optional auth teardown hook; false means there was no job to restore after a failed pairing. */
+  stopForAuth?(name: string): Promise<boolean | void>;
+  /** Optional authenticated-only activation hook for platforms that defer installation until pairing succeeds. */
+  startAfterAuthFire?(name: string, onError?: (err: Error | null) => void): void;
 }
 
 export function systemdUnitName(name: string): string {
@@ -185,6 +428,14 @@ abstract class BaseServiceManager implements ServiceManager {
       () => { if (onError) onError(null); },
       (err) => { if (onError) onError(err instanceof Error ? err : new Error(String(err))); },
     );
+  }
+
+  startAfterAuthFire(name: string, onError?: (err: Error | null) => void): void {
+    this.startFire(name, onError);
+  }
+
+  stopForAuth(name: string): Promise<boolean | void> {
+    return this.stop(name);
   }
 }
 
@@ -218,30 +469,129 @@ class SystemdServiceManager extends BaseServiceManager {
 
 // ---- macOS launchd ----
 
+function isLaunchdAbsentServiceError(error: unknown): boolean {
+  return typeof error === 'object'
+    && error !== null
+    && (error as { code?: unknown }).code === 3;
+}
+
 class LaunchdServiceManager extends BaseServiceManager {
+  /** Jobs explicitly removed by this manager and awaiting a subsequent start. */
+  private bootedOutServices = new Set<string>();
+
+  private async bootout(name: string): Promise<boolean> {
+    try {
+      await bootoutLaunchdService(name);
+    } catch (error) {
+      if (isLaunchdAbsentServiceError(error)) return false;
+      throw error;
+    }
+    return true;
+  }
+
+  private async bootstrapAfterBootout(name: string, dest: string): Promise<void> {
+    await bootstrapLaunchdService(name, dest);
+    this.bootedOutServices.delete(name);
+  }
+
+  private async kickstartExisting(name: string, dest: string, replaceRunning: boolean): Promise<void> {
+    const args = replaceRunning
+      ? ['kickstart', '-k', launchdServiceTarget(name)]
+      : ['kickstart', launchdServiceTarget(name)];
+    try {
+      await execFileAsync('launchctl', args);
+    } catch (error) {
+      if (!isLaunchdAbsentServiceError(error)) throw error;
+      await this.bootstrapAfterBootout(name, dest);
+      return;
+    }
+    this.bootedOutServices.delete(name);
+  }
+
   async enable(name: string): Promise<void> {
-    const dest = plistPath(name);
-    fs.mkdirSync(path.dirname(dest), { recursive: true });
-    fs.writeFileSync(dest, buildPlist(name), 'utf-8');
-    await execFileAsync('launchctl', ['load', dest]);
+    assertValidLaunchdInstanceName(name);
+    // handleCreateLine calls enable before QR authentication. KeepAlive with
+    // SuccessfulExit=false implies RunAtLoad, so creating/loading a plist here
+    // would race the unauthenticated auth flow. startAfterAuthFire() owns the
+    // first installation after the pairing helper has finished successfully.
   }
 
   async disable(name: string): Promise<void> {
+    assertValidLaunchdInstanceName(name);
     const dest = plistPath(name);
-    try { await execFileAsync('launchctl', ['unload', dest]); } catch { /* ok if not loaded */ }
-    try { fs.unlinkSync(dest); } catch { /* ok if not present */ }
+    if (readExpectedGeneratedLaunchdPlist(name, dest) === null) return;
+    await this.bootout(name);
+    try {
+      fs.unlinkSync(dest);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    }
+    this.bootedOutServices.delete(name);
   }
 
   async start(name: string): Promise<void> {
-    await execFileAsync('launchctl', ['start', launchdLabel(name)]);
+    assertValidLaunchdInstanceName(name);
+    const dest = plistPath(name);
+    if (readExpectedGeneratedLaunchdPlist(name, dest) === null) {
+      throw new Error('launchd plist is installed only after successful authentication; authenticate the instance before starting');
+    }
+    if (this.bootedOutServices.has(name)) {
+      await this.bootstrapAfterBootout(name, dest);
+      return;
+    }
+    await this.kickstartExisting(name, dest, false);
+  }
+
+  startAfterAuthFire(name: string, onError?: (err: Error | null) => void): void {
+    try {
+      assertValidLaunchdInstanceName(name);
+    } catch (error) {
+      if (onError) onError(error instanceof Error ? error : new Error(String(error)));
+      return;
+    }
+    let start: Promise<void>;
+    try {
+      const dest = plistPath(name);
+      const existing = readExpectedGeneratedLaunchdPlist(name, dest);
+      start = existing === null
+        ? installLaunchdPlist(name)
+        : this.bootedOutServices.has(name)
+          ? this.bootstrapAfterBootout(name, dest)
+          : this.kickstartExisting(name, dest, true);
+    } catch (error) {
+      if (onError) onError(error instanceof Error ? error : new Error(String(error)));
+      return;
+    }
+    start.then(
+      () => {
+        this.bootedOutServices.delete(name);
+        if (onError) onError(null);
+      },
+      (err) => { if (onError) onError(err instanceof Error ? err : new Error(String(err))); },
+    );
   }
 
   async stop(name: string): Promise<void> {
-    await execFileAsync('launchctl', ['stop', launchdLabel(name)]);
+    assertValidLaunchdInstanceName(name);
+    if (readExpectedGeneratedLaunchdPlist(name, plistPath(name)) === null) return;
+    await this.bootout(name);
+    this.bootedOutServices.add(name);
+  }
+
+  async stopForAuth(name: string): Promise<boolean> {
+    assertValidLaunchdInstanceName(name);
+    if (readExpectedGeneratedLaunchdPlist(name, plistPath(name)) === null) return false;
+    const wasLoaded = await this.bootout(name);
+    if (wasLoaded) this.bootedOutServices.add(name);
+    return wasLoaded;
   }
 
   async restart(name: string): Promise<void> {
-    try { await this.stop(name); } catch { /* ok if not running */ }
+    assertValidLaunchdInstanceName(name);
+    if (readExpectedGeneratedLaunchdPlist(name, plistPath(name)) === null) {
+      throw new Error('launchd plist is installed only after successful authentication; authenticate the instance before starting');
+    }
+    await this.stop(name);
     await this.start(name);
   }
 }

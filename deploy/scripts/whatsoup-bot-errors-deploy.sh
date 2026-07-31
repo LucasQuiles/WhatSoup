@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# whatsoup-bot-errors-deploy.sh — reversible materialize of the 13 bot-errors runtime
+# whatsoup-bot-errors-deploy.sh — reversible materialize of the 15 bot-errors runtime
 # files into a host's TRUE bot-errors root. Expected per-file hashes are resolved at
 # startup from deploy/bot-errors-runtime-manifest.json (the single source of truth) --
 # not embedded in this script.
@@ -48,10 +48,12 @@ FILES=(
   "deploy/scripts/bot-errors-emit.py"
   "deploy/scripts/bot-errors-runner.py"
   "deploy/scripts/lib/__init__.py"
+  "deploy/scripts/lib/bot_errors_envelope.py"
   "deploy/scripts/lib/bot_errors_redaction.py"
   "deploy/scripts/lib/bot_errors_daily_health.py"
   "deploy/scripts/lib/bot_errors_roster.py"
   "deploy/scripts/lib/controller_log.py"
+  "deploy/scripts/lib/controller_state.py"
 )
 
 sha() {

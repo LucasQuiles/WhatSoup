@@ -35,6 +35,31 @@ _RECORD_KIND_RE = re.compile(r"^[a-z][a-z0-9_]{0,95}$")
 _OPAQUE_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 _DETAIL_KEY_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]{0,95}$")
 _SAFE_DETAIL_STRING_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}$")
+_RECOVERY_RECEIPT_ID_RE = re.compile(r"^[0-9a-f]{32}$")
+_CONTROLLER_STATE_MODES = frozenset(
+    {
+        "bootstrap",
+        "valid",
+        "recovered",
+        "reconciled",
+        "recovery_required",
+    }
+)
+_CONTROLLER_STATE_REASONS = frozenset(
+    {
+        "read_failed",
+        "unsafe_file",
+        "decode_failed",
+        "invalid_root",
+        "schema_incompatible",
+        "integrity_mismatch",
+        "generation_invalid",
+        "publication_ambiguous",
+        "evidence_preservation_failed",
+        "lock_unavailable",
+        "retention_exhausted",
+    }
+)
 _SAFE_DETAIL_STRING_VALUES = frozenset(
     {
         "1_64",
@@ -50,9 +75,14 @@ _SAFE_DETAIL_STRING_VALUES = frozenset(
         "failed",
         "healthy",
         "inactive",
+        "invalid_kind_severity",
         "invalid_value",
         "locked",
         "missing",
+        "missing_event_kind",
+        "missing_event_type",
+        "missing_schema_version",
+        "missing_severity",
         "observed",
         "open",
         "os_error",
@@ -70,7 +100,12 @@ _SAFE_DETAIL_STRING_VALUES = frozenset(
         "suppressed",
         "tailscale_offline",
         "timeout",
+        "unexpected_legacy_event_kind",
+        "unknown_event_kind",
+        "unknown_event_type",
+        "unknown_severity",
         "unexpected_error",
+        "unsupported_schema_version",
         "unknown",
     }
 )
@@ -204,6 +239,67 @@ def metadata_only_controller_details(value: Mapping[str, Any]) -> dict[str, Any]
             projected: dict[str, Any] = {}
             for key in sorted(item):
                 if not isinstance(key, str) or not _DETAIL_KEY_RE.fullmatch(key):
+                    continue
+                if key == "component":
+                    continue
+                if key == "stateMode":
+                    state_mode = item[key]
+                    if (
+                        isinstance(state_mode, str)
+                        and state_mode in _CONTROLLER_STATE_MODES
+                    ):
+                        projected[key] = state_mode
+                    continue
+                if key == "reason":
+                    reason = item[key]
+                    if (
+                        isinstance(reason, str)
+                        and (
+                            reason in _SAFE_DETAIL_STRING_VALUES
+                            or reason in _CONTROLLER_STATE_REASONS
+                        )
+                    ):
+                        projected[key] = reason
+                    continue
+                if key == "recoveryReceiptId":
+                    receipt_id = item[key]
+                    if (
+                        isinstance(receipt_id, str)
+                        and _RECOVERY_RECEIPT_ID_RE.fullmatch(receipt_id)
+                    ):
+                        projected[key] = receipt_id
+                    continue
+                if key in {"currentGeneration", "recoveredGeneration"}:
+                    generation = item[key]
+                    if generation is None or (
+                        isinstance(generation, int)
+                        and not isinstance(generation, bool)
+                        and 0 <= generation <= 2**53 - 1
+                    ):
+                        projected[key] = generation
+                    continue
+                if key == "occurrenceCount":
+                    count = item[key]
+                    if (
+                        isinstance(count, int)
+                        and not isinstance(count, bool)
+                        and 0 <= count <= 2**31 - 1
+                    ):
+                        projected[key] = count
+                    continue
+                if key == "stagingAttempt":
+                    attempt = item[key]
+                    if attempt is None or (
+                        isinstance(attempt, int)
+                        and not isinstance(attempt, bool)
+                        and 1 <= attempt <= 8
+                    ):
+                        projected[key] = attempt
+                    continue
+                if key in {
+                    "stagedRecordSha256",
+                    "retainedReconciliationRecords",
+                }:
                     continue
                 if key in _SAFE_BOOLEAN_DETAIL_KEYS and not isinstance(item[key], bool):
                     continue
