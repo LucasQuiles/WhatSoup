@@ -3307,7 +3307,7 @@ describe('ops.ts uncovered-branch coverage (wave 2)', () => {
       expect(res._status).toBeLessThan(500);
       const collisionBody = JSON.parse(res._body);
       expect(collisionBody.schema).toBe('fleet-error-v1');
-      expect(collisionBody.code).toBe('internal_error');
+      expect(collisionBody.code).toBe('validation_failed');
     } finally {
       if (origConfig === undefined) delete process.env.XDG_CONFIG_HOME;
       else process.env.XDG_CONFIG_HOME = origConfig;
@@ -5033,7 +5033,7 @@ describe('ops.ts uncovered-branch coverage', () => {
       expect(res._status).toBe(400);
       const pluginDirsBody = JSON.parse(res._body);
       expect(pluginDirsBody.schema).toBe('fleet-error-v1');
-      expect(pluginDirsBody.code).toBe('internal_error');
+      expect(pluginDirsBody.code).toBe('validation_failed');
     } finally {
       fs.rmSync(tmpDir, { recursive: true, force: true });
       fs.rmSync(agentCwd, { recursive: true, force: true });

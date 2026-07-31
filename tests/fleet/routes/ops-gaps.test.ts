@@ -758,7 +758,7 @@ describe('handleConfigUpdate — validateNumericBounds', () => {
     expect(res._status).toBe(400);
     const rateLimitBody = JSON.parse(res._body);
     expect(rateLimitBody.schema).toBe('fleet-error-v1');
-    expect(rateLimitBody.code).toBe('internal_error');
+    expect(rateLimitBody.code).toBe('validation_failed');
   });
 
   it('returns 400 for maxTokens out of range', async () => {
@@ -777,6 +777,6 @@ describe('handleConfigUpdate — validateNumericBounds', () => {
     expect(res._status).toBe(400);
     const maxTokensBody = JSON.parse(res._body);
     expect(maxTokensBody.schema).toBe('fleet-error-v1');
-    expect(maxTokensBody.code).toBe('internal_error');
+    expect(maxTokensBody.code).toBe('validation_failed');
   });
 });

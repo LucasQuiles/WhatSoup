@@ -45,7 +45,7 @@ import { stripPlaintextProviderKeys } from '../../lib/config-plaintext-keys.ts';
 import { DEFAULT_INSTANCE_HEALTH_PORT } from '../constants.ts';
 import { privateWriteError, writePrivateFileSync } from '../../lib/private-fs.ts';
 import { errorMessage } from '../../lib/error-message.ts';
-import { projectError, validationError, mutationError, serviceActionError } from '../response-error-projection.ts';
+import { projectError, validationError, mutationError, serviceActionError, configValidationError } from '../response-error-projection.ts';
 import { NAME_MAX_LENGTH, NAME_RE, validateInstanceName } from './instance-name.ts';
 
 function deepMergeRecords(
@@ -922,7 +922,7 @@ function scanHealthPortInventory(excludeName?: string): HealthPortInventory {
 
 /** Map a ValidationError to the HTTP response and return false to halt the handler. */
 function emitValidationError(err: ConfigValidationError, res: ServerResponse): boolean {
-  jsonResponse(res, err.status ?? 400, projectError(err, { operation: 'unknown', stage: 'execute' }));
+  jsonResponse(res, err.status ?? 400, configValidationError(err, 'unknown'));
   return false;
 }
 

@@ -256,6 +256,35 @@ export function validationError(
 }
 
 /**
+ * Project a structured config-validation error into a fleet-error-v1 response.
+ *
+ * Unlike projectError() — which discards caught-exception text to prevent
+ * leaking internals (paths, commands, stderr) — this PRESERVES the validator's
+ * message. Validation messages describe field constraints the client must
+ * satisfy (e.g. "healthPort must be between 1024 and 65535"); they embed only
+ * client-supplied values and never server internals. The config validator is a
+ * trusted, audited producer of safe client guidance, analogous to the closed
+ * VALIDATION_MESSAGES registry. Routing these through projectError() would
+ * over-redact client-facing guidance and make the API unusable (#2517).
+ */
+export function configValidationError(
+  err: { message: string; status?: number },
+  operation: FleetOperation,
+): FleetErrorResponse {
+  return {
+    schema: 'fleet-error-v1',
+    code: 'validation_failed',
+    operation,
+    stage: 'parse',
+    message: err.message,
+    retryable: false,
+    mutation_state: 'not_started',
+    rollback_state: 'not_applicable',
+    correlation_id: randomUUID(),
+  };
+}
+
+/**
  * Create a mutation-state-aware error response that preserves operational
  * truth: not-started, applied, rolled-back, rollback-failed, unknown.
  */

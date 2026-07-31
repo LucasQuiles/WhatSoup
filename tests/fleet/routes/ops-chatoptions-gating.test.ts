@@ -300,7 +300,7 @@ describe('handleConfigUpdate PATCH chatOptions validation (QR-218 PR-2)', () => 
     expect(res._status).toBe(400);
     const body = JSON.parse(res._body);
     expect(body.schema).toBe('fleet-error-v1');
-    expect(body.code).toBe('internal_error');
+    expect(body.code).toBe('validation_failed');
     expect(fs.readFileSync(cfg, 'utf-8')).toBe(before);
   });
 
@@ -373,7 +373,7 @@ describe('handleConfigUpdate PATCH chatOptions validation (QR-218 PR-2)', () => 
     expect(res._status).toBe(400);
     const body = JSON.parse(res._body);
     expect(body.schema).toBe('fleet-error-v1');
-    expect(body.code).toBe('internal_error');
+    expect(body.code).toBe('validation_failed');
     expect(fs.readFileSync(cfg, 'utf-8')).toBe(before);
   });
 
@@ -448,7 +448,7 @@ describe('handleConfigUpdate PATCH chatOptions validation (QR-218 PR-2)', () => 
     expect(res._status).toBe(400);
     const body = JSON.parse(res._body);
     expect(body.schema).toBe('fleet-error-v1');
-    expect(body.code).toBe('internal_error');
+    expect(body.code).toBe('validation_failed');
     expect(fs.readFileSync(cfg, 'utf-8')).toBe(before);
   });
 });

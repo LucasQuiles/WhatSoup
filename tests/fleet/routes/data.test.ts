@@ -148,7 +148,7 @@ describe('handleGetChats', () => {
     expect(res._status).toBe(500);
     const body = JSON.parse(res._body);
     expect(body.schema).toBe('fleet-error-v1');
-    expect(body.code).toBeDefined();
+    expect(body.code).toBe('internal_error');
   });
 
   it('returns display-safe strings for null preview and timestamp fields', () => {
@@ -298,7 +298,7 @@ describe('handleGetChats', () => {
     expect(res._status).toBe(500);
     const body = JSON.parse(res._body);
     expect(body.schema).toBe('fleet-error-v1');
-    expect(body.code).toBeDefined();
+    expect(body.code).toBe('internal_error');
   });
 });
 
@@ -453,7 +453,7 @@ describe('handleGetMessages', () => {
     expect(res._status).toBe(500);
     const body = JSON.parse(res._body);
     expect(body.schema).toBe('fleet-error-v1');
-    expect(body.code).toBeDefined();
+    expect(body.code).toBe('internal_error');
   });
 });
 
@@ -557,7 +557,7 @@ describe('handleSearchMessages', () => {
     expect(res._status).toBe(500);
     const body = JSON.parse(res._body);
     expect(body.schema).toBe('fleet-error-v1');
-    expect(body.code).toBeDefined();
+    expect(body.code).toBe('internal_error');
   });
 });
 
@@ -729,7 +729,7 @@ describe('handleGetAccess', () => {
     expect(failRes._status).toBe(500);
     const body = JSON.parse(failRes._body);
     expect(body.schema).toBe('fleet-error-v1');
-    expect(body.code).toBeDefined();
+    expect(body.code).toBe('internal_error');
   });
 });
 
@@ -781,7 +781,7 @@ describe('handleGetLogs', () => {
     expect(res._status).toBe(503);
     const body = JSON.parse(res._body);
     expect(body.schema).toBe('fleet-error-v1');
-    expect(body.code).toBeDefined();
+    expect(body.code).toBe('internal_error');
   });
 
   it('parses NDJSON log lines and returns them', () => {
@@ -894,7 +894,7 @@ describe('handleGetLogs', () => {
     expect(res._status).toBe(503);
     const body = JSON.parse(res._body);
     expect(body.schema).toBe('fleet-error-v1');
-    expect(body.code).toBeDefined();
+    expect(body.code).toBe('internal_error');
   });
 
   it('normalizes non-string log fields before returning entries', () => {
