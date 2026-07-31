@@ -3,6 +3,7 @@ import { accessSync, constants } from 'node:fs';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { delimiter, join, resolve } from 'node:path';
+import { getArchBinSuffix } from '../../../../lib/arch.ts';
 
 const DEFAULT_MAX_BUFFER_BYTES = 20 * 1024 * 1024;
 const KILL_GRACE_MS = 2_000;
@@ -33,9 +34,23 @@ export function resolveBinaryPath(binary: string): string | null {
     return isExecutable(candidate) ? candidate : null;
   }
 
-  for (const dir of (process.env.PATH ?? DEFAULT_EXECUTABLE_PATH).split(delimiter)) {
+  const pathDirs = (process.env.PATH ?? DEFAULT_EXECUTABLE_PATH).split(delimiter);
+  for (const dir of pathDirs) {
     const candidate = resolve(dir || '.', binary);
     if (isExecutable(candidate)) return candidate;
+  }
+
+  // If the bare name is not on PATH, retry each directory with the arch
+  // suffix (e.g. "ffmpeg-arm64") for hosts where prebuilt or Homebrew
+  // binaries use arch-specific names. Explicit paths (with "/") are never
+  // suffixed — the caller controls those.
+  const archSuffix = getArchBinSuffix();
+  if (archSuffix) {
+    const archBinary = `${binary}${archSuffix}`;
+    for (const dir of pathDirs) {
+      const candidate = resolve(dir || '.', archBinary);
+      if (isExecutable(candidate)) return candidate;
+    }
   }
 
   return null;
