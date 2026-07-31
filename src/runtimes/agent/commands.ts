@@ -5,8 +5,8 @@ import { COMMAND_REGISTRY, type CommandSpec, type LocalCommandName } from './com
 // or a regular message to be passed through to the agent.
 
 export type CommandResult =
-  | { type: 'local'; command: LocalCommandName; args?: string }
-  | { type: 'forwarded'; text: string }
+  | { type: 'local'; command: LocalCommandName; args?: string; compoundBody?: string }
+  | { type: 'forwarded'; text: string; compoundBody?: string }
   | { type: 'message'; text: string };
 
 // Widen the narrow `as const` tuple to the interface array so optional-field
@@ -73,6 +73,25 @@ function isStructuredModelArg(parts: readonly string[]): boolean {
 }
 
 /**
+ * Extract the compound body from a slash-prefixed input, if present.
+ *
+ * A compound input is a slash command whose first line is followed by a
+ * nonblank remainder on subsequent lines. The body is preserved byte-for-byte
+ * (including line endings and leading whitespace within the body) per #2357.
+ *
+ * Returns `undefined` when the input is single-line or the remainder is blank.
+ * This is the SHADOW detection layer — it records the body without changing
+ * runtime behavior. Promotion to dual-phase execution is a later rollout step.
+ */
+function extractCompoundBody(text: string): string | undefined {
+  const newlineIdx = text.indexOf('\n');
+  if (newlineIdx === -1) return undefined;
+  const body = text.slice(newlineIdx + 1);
+  if (body.trim().length === 0) return undefined;
+  return body;
+}
+
+/**
  * Classify a user input string.
  *
  * - `/new`, `/status`, `/help` (case-insensitive) → local
@@ -87,6 +106,11 @@ function isStructuredModelArg(parts: readonly string[]): boolean {
  * - No leading `/` → message
  */
 export function classifyInput(text: string, opts?: { routingAliases?: boolean }): CommandResult {
+  // #2357 shadow: detect compound command+body (slash command followed by a
+  // nonblank multi-line remainder). The body is preserved byte-for-byte but
+  // does NOT yet change runtime behavior — this is detection-only.
+  const compoundBody = text.startsWith('/') ? extractCompoundBody(text) : undefined;
+
   if (!text.startsWith('/')) {
     return { type: 'message', text };
   }
@@ -118,8 +142,9 @@ export function classifyInput(text: string, opts?: { routingAliases?: boolean })
       type: 'local',
       command: commandName as LocalCommandName,
       args,
+      ...(compoundBody !== undefined && { compoundBody }),
     };
   }
 
-  return { type: 'forwarded', text };
+  return { type: 'forwarded', text, ...(compoundBody !== undefined && { compoundBody }) };
 }
