@@ -300,6 +300,9 @@ jobs:
       - name: Insecure tempfile guard
         run: npm run guard:insecure-tempfile
 
+      - name: Zero-byte tracked file guard
+        run: npm run guard:zero-byte-tracked
+
       - name: Hardcoded /tmp/ path guard
         run: npm run guard:hardcoded-tmpdir
 
