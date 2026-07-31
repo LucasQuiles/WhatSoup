@@ -59,7 +59,11 @@ describe('prepared statement caching', () => {
     // identity/state-fenced queue-admission failure update. 123 is landed
     // main's count post-#2596 — recounted empirically against the rebased
     // tree (124), not assumed additive.)
-    expect(prepareSpy).toHaveBeenCalledTimes(124);
+    // (+5 vs 124, #2560: two quarantine-disposition classification statements
+    // plus the three cached immediate-transaction statements (BEGIN IMMEDIATE,
+    // COMMIT, ROLLBACK) pre-warmed in the constructor for
+    // withImmediateTransaction reuse.)
+    expect(prepareSpy).toHaveBeenCalledTimes(129);
     prepareSpy.mockClear();
 
     const seq = engine.journalInbound('msg-1', 'conv-1', 'jid-1@s.whatsapp.net', 'agent');

@@ -53,7 +53,7 @@ describe('migration 47 recovery receipt immutability', () => {
   afterEach(() => db.close());
 
   it('installs dedicated receipt update and replacement fences', () => {
-    expect(CURRENT_SCHEMA_MIGRATION).toBe(52);
+    expect(CURRENT_SCHEMA_MIGRATION).toBe(53);
     expect(db.raw.prepare(
       'SELECT version FROM schema_migrations WHERE version = 47',
     ).get()).toEqual({ version: 47 });

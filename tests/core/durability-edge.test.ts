@@ -14,6 +14,7 @@ import { makeChannelId } from '../../src/core/transport-refs.ts';
 const emitAlert = vi.hoisted(() => vi.fn(() => true));
 const clearAlertSource = vi.hoisted(() => vi.fn(() => true));
 const gateQuarantineClear = vi.hoisted(() => vi.fn());
+const QUARANTINE_CLEAR_OPTIONS = { requireDurableOutbox: true };
 
 vi.mock('../../src/lib/emit-alert.ts', () => ({
   emitAlert,
@@ -34,6 +35,12 @@ function makeDb(): Database {
 
 function getOutbound(db: Database, id: number): Record<string, unknown> {
   return db.raw.prepare('SELECT * FROM outbound_ops WHERE id = ?').get(id) as Record<string, unknown>;
+}
+
+function expectQuarantineClear(source: string): void {
+  expect(clearAlertSource).toHaveBeenCalledWith(
+    'Loops', source, undefined, undefined, QUARANTINE_CLEAR_OPTIONS,
+  );
 }
 
 function makeMessenger(
@@ -254,7 +261,7 @@ describe('DurabilityEngine edge coverage', () => {
       expect.stringContaining('gate evidence; clear_suppressed=true'),
       'warning',
     );
-    expect(clearAlertSource).toHaveBeenCalledWith('Loops', 'outbound_quarantined');
+    expectQuarantineClear('outbound_quarantined');
   });
 
   it('postConnectRecovery records gate failure without committing a staged clear', () => {
@@ -618,7 +625,11 @@ describe('drainPendingOutbound deferral bound (#2646) and redelivery order (#264
     await drainPendingOutbound(messenger, engine);
 
     const row = getOutbound(db, id);
-    expect(row['status']).toBe('quarantined');
+    expect(row).toMatchObject({
+      status: 'quarantined',
+      quarantine_disposition: 'delivery_not_attempted',
+      quarantine_evidence_coverage: 'complete',
+    });
     expect(JSON.parse(row['error'] as string)).toMatchObject({
       failure_code: 'outbound.deferral_limit_exceeded',
       retry_decision: 'stop',
@@ -627,9 +638,10 @@ describe('drainPendingOutbound deferral bound (#2646) and redelivery order (#264
     expect(messenger.sendMessage).not.toHaveBeenCalled();
     expect(emitAlert).toHaveBeenCalledWith(
       expect.any(String),
-      'outbound_quarantined',
+      'outbound_delivery_not_attempted',
       expect.any(String),
-      expect.stringContaining('reason=deferral_limit_exceeded'),
+      expect.stringContaining('outbound.deferral_limit_exceeded'),
+      'warning',
     );
   });
 

@@ -13,9 +13,11 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { Database } from '../../src/core/database.ts';
 import { DurabilityEngine } from '../../src/core/durability.ts';
+import { createInternalOutboundFailureEvidence } from '../../src/core/outbound-failure-disposition.ts';
 
 const emitAlert = vi.hoisted(() => vi.fn(() => true));
 const clearAlertSource = vi.hoisted(() => vi.fn(() => true));
+const QUARANTINE_CLEAR_OPTIONS = { requireDurableOutbox: true };
 
 vi.mock('../../src/lib/emit-alert.ts', () => ({
   emitAlert,
@@ -50,6 +52,18 @@ function getToolCall(db: Database, id: number): Record<string, unknown> {
 /** Read a single row from outbound_ops by id. */
 function getOutbound(db: Database, id: number): Record<string, unknown> {
   return db.raw.prepare('SELECT * FROM outbound_ops WHERE id = ?').get(id) as Record<string, unknown>;
+}
+
+function expectQuarantineClear(source: string): void {
+  expect(clearAlertSource).toHaveBeenCalledWith(
+    'Loops', source, undefined, undefined, QUARANTINE_CLEAR_OPTIONS,
+  );
+}
+
+function expectNoQuarantineClear(source: string): void {
+  expect(clearAlertSource).not.toHaveBeenCalledWith(
+    'Loops', source, undefined, undefined, QUARANTINE_CLEAR_OPTIONS,
+  );
 }
 
 /** Read a single row from inbound_events by seq. */
@@ -404,9 +418,23 @@ describe('DurabilityEngine — postConnectRecovery()', () => {
 
     const stats = engine.postConnectRecovery();
 
-    expect(getOutbound(db, opId)['status']).toBe('quarantined');
+    expect(getOutbound(db, opId)).toMatchObject({
+      status: 'quarantined',
+      quarantine_disposition: 'delivery_ambiguous_unsafe',
+      quarantine_evidence_coverage: 'complete',
+    });
     expect(stats.outboundQuarantined).toBe(1);
     expect(stats.outboundReplayed).toBe(0);
+    expect(emitAlert).toHaveBeenCalledWith(
+      'Loops',
+      'outbound_delivery_ambiguous',
+      expect.any(String),
+      expect.stringContaining('outbound.unsafe_delivery_unconfirmed'),
+      'critical',
+    );
+    expectNoQuarantineClear('outbound_delivery_ambiguous');
+    expectNoQuarantineClear('outbound_quarantined');
+    expectQuarantineClear('outbound_record_unreconstructable');
   });
 
   // ── maybe_sent with no wa_message_id ──────────────────────────────────
@@ -611,12 +639,92 @@ describe('DurabilityEngine — postConnectRecovery()', () => {
     expect(after.count).toBe(before.count);
   });
 
-  it('clears outbound quarantine alert source after post-connect recovery completes', () => {
+  it('clears each contributor-free incident source but never clears an informational disposition', () => {
     const stats = engine.postConnectRecovery();
 
     expect(stats.outboundQuarantined).toBe(0);
-    expect(clearAlertSource).toHaveBeenCalledOnce();
-    expect(clearAlertSource).toHaveBeenCalledWith('Loops', 'outbound_quarantined');
+    expect(clearAlertSource).toHaveBeenCalledTimes(5);
+    expectQuarantineClear('outbound_quarantined');
+    expectQuarantineClear('outbound_delivery_ambiguous');
+    expectQuarantineClear('outbound_delivery_not_attempted');
+    expectQuarantineClear('outbound_record_unreconstructable');
+    expectQuarantineClear('outbound_quarantine_unclassified');
+    expectNoQuarantineClear('outbound_status_discarded');
+  });
+
+  it('keeps a source open while an exact normalized contributor remains', () => {
+    const deferred = engine.createOutboundOp({
+      conversationKey: 'deferred', chatJid: 'deferred@g.us', opType: 'text',
+      payload: '{}', replayPolicy: 'unsafe',
+    });
+    engine.markQuarantined(deferred, createInternalOutboundFailureEvidence({
+      failureCode: 'outbound.deferral_limit_exceeded',
+      stage: 'admission',
+      mutationState: 'not_started',
+      providerSubmissionCount: 0,
+    }));
+    const unclassified = engine.createOutboundOp({
+      conversationKey: 'unclassified', chatJid: 'unclassified@g.us', opType: 'text',
+      payload: '{}', replayPolicy: 'unsafe',
+    });
+    engine.markQuarantined(unclassified);
+    db.raw.prepare(`
+      UPDATE outbound_ops
+         SET quarantine_disposition = 'future_private_disposition'
+       WHERE id = ?
+    `).run(unclassified);
+
+    engine.postConnectRecovery();
+
+    expectQuarantineClear('outbound_delivery_ambiguous');
+    expectQuarantineClear('outbound_record_unreconstructable');
+    expectNoQuarantineClear('outbound_delivery_not_attempted');
+    expectNoQuarantineClear('outbound_quarantine_unclassified');
+    expectNoQuarantineClear('outbound_quarantined');
+    expectNoQuarantineClear('outbound_status_discarded');
+  });
+
+  it('does not resolve an unsafe source when a quarantine lacks its durable review receipt', () => {
+    const unsafe = engine.createOutboundOp({
+      conversationKey: 'unsafe', chatJid: 'unsafe@g.us', opType: 'text',
+      payload: '{}', replayPolicy: 'unsafe',
+    });
+    engine.markQuarantined(unsafe, createInternalOutboundFailureEvidence({
+      failureCode: 'outbound.unsafe_delivery_unconfirmed',
+      stage: 'runtime',
+      mutationState: 'ambiguous',
+      logicalAttemptCount: 1,
+      providerSubmissionCount: 1,
+    }));
+    db.raw.prepare(`
+      UPDATE outbound_ops
+         SET status = 'failed_permanent', is_terminal = 1
+       WHERE id = ?
+    `).run(unsafe);
+
+    engine.postConnectRecovery();
+
+    expectNoQuarantineClear('outbound_delivery_ambiguous');
+    expectNoQuarantineClear('outbound_quarantined');
+
+    const insertRetirement = db.raw.prepare(`
+      INSERT INTO outbound_quarantine_retirements (
+        outbound_op_id, quarantine_disposition, acknowledgement, evidence_sha256
+      ) VALUES (?, 'delivery_ambiguous_unsafe', 'delivery-risk-reviewed', ?)
+    `);
+    expect(() => insertRetirement.run(unsafe, '0'.repeat(64))).toThrow();
+    const canonicalEvidenceSha = getOutbound(db, unsafe)['quarantine_evidence_sha256'];
+    expect(canonicalEvidenceSha).toEqual(expect.stringMatching(/^[0-9a-f]{64}$/));
+    if (typeof canonicalEvidenceSha !== 'string') {
+      throw new Error('quarantine evidence digest was not persisted');
+    }
+    insertRetirement.run(unsafe, canonicalEvidenceSha);
+    clearAlertSource.mockClear();
+
+    engine.postConnectRecovery();
+
+    expectQuarantineClear('outbound_delivery_ambiguous');
+    expectQuarantineClear('outbound_quarantined');
   });
 
   // ── Risk 3: history-sync timeout scenario ─────────────────────────────

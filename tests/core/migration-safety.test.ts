@@ -42,7 +42,7 @@ function cleanup(...paths: string[]): void {
   }
 }
 
-const ALL_MIGRATION_VERSIONS = Array.from({ length: 52 }, (_, i) => i + 1);
+const ALL_MIGRATION_VERSIONS = Array.from({ length: 53 }, (_, i) => i + 1);
 
 /**
  * Raw migration 1 SQL — extracted verbatim from database.ts.
