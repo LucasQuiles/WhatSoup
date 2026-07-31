@@ -2783,7 +2783,15 @@ export class ConnectionManager extends EventEmitter implements Messenger {
 
       if (this.autoRejectCalls && callId) {
         try {
-          void (sock as any).rejectCall(callId, callFrom);
+          // rejectCall is async — a bare `void` discards the promise and an
+          // async rejection becomes an unhandled rejection → shutdown (#2289 M1).
+          // Catch both sync throws and async rejections.
+          const result = (sock as any).rejectCall(callId, callFrom);
+          if (result && typeof result.then === 'function') {
+            result.catch((err: unknown) => {
+              this.log.debug({ op: 'rejectCall', error: (err as Error).message }, 'transport_op_swallowed');
+            });
+          }
         } catch (err) {
           // best-effort
           this.log.debug({ op: 'rejectCall', error: (err as Error).message }, 'transport_op_swallowed');

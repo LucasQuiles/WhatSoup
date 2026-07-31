@@ -541,10 +541,23 @@ export class ImessageAdapter
       if (this.disposed || generation !== this.lifecycleGeneration) return;
 
       for (const record of records) {
-        if (this.inboundMaxTimestamp === null || record.timestamp > this.inboundMaxTimestamp) {
-          this.inboundMaxTimestamp = record.timestamp;
+        try {
+          if (this.inboundMaxTimestamp === null || record.timestamp > this.inboundMaxTimestamp) {
+            this.inboundMaxTimestamp = record.timestamp;
+          }
+          this.handleInboundRecord(record);
+        } catch (err) {
+          // A malformed provider record must not crash the poll loop or the
+          // process (#2289 M2). Log and continue with the next record.
+          this.safeEmit(this.listeners.error, new TransientProviderError({
+            channelId: this.channelId,
+            operation: 'pollInbound:handleRecord',
+            correlationId: this.nextCorrelationId(),
+            message: `malformed inbound record: ${err instanceof Error ? err.message : String(err)}`,
+            scope: 'channel',
+            phase: 'provider_call_started',
+          }));
         }
-        this.handleInboundRecord(record);
         if (this.disposed || generation !== this.lifecycleGeneration) return;
       }
       this.inboundCursor = cursor;
