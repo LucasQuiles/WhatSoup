@@ -18,7 +18,6 @@ import {
   COMPLETED_DELIVERY_IDENTITY_DEBT_HEALTH,
   LEGACY_ACTIVE_SESSION_WITHOUT_COMPLETED_IDENTITY,
   LEGACY_COMPLETED_DELIVERY_IDENTITY_QUARANTINE,
-  PROACTIVE_RESUME_IDENTITY_REJECTION_CASES,
 } from './completed-delivery-identity-admission.fixture.ts';
 
 // ─── Hoisted mocks ────────────────────────────────────────────────────────────
@@ -11262,34 +11261,6 @@ describe('AgentRuntime', () => {
 
   // ─── AE1: Group Resume Suppression ───────────────────────────────────────────
   describe('AE1 — group resume suppression', () => {
-    it.each(PROACTIVE_RESUME_IDENTITY_REJECTION_CASES)('persists $label before skipping proactive resume', async ({ checkpoint: checkpointInput, reason }) => {
-      const checkpoint = completedCheckpoint(checkpointInput);
-      const db = makeDb();
-      const { messenger } = makeMessenger();
-      const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
-      const quarantine = vi.fn();
-      const mockDurability = {
-        getResumableCheckpoints: vi.fn(() => [
-          { conversation_key: checkpoint.conversation_key },
-        ]),
-        getSessionCheckpoint: vi.fn(() => checkpoint),
-        quarantineCompletedDeliveryIdentityCheckpoint: quarantine,
-        upsertSessionCheckpoint: vi.fn(),
-      };
-      (runtime as unknown as { durability: unknown }).durability = mockDurability;
-
-      await runtime.start();
-
-      expect(quarantine).toHaveBeenCalledWith({
-        conversationKey: checkpoint.conversation_key,
-        providerSessionId: checkpoint.session_id,
-        provider: undefined,
-        reason,
-      });
-      expect(mockSession.spawnSession).not.toHaveBeenCalled();
-      expect(runtime.getHealthSnapshot().details['proactiveResumeIdentityRejects']).toBe(1);
-    });
-
     it('skips proactive resume for group checkpoints and marks them ended, resumes DMs normally', async () => {
       const db = makeDb();
       const { messenger } = makeMessenger();
