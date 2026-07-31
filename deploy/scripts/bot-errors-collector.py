@@ -122,6 +122,29 @@ def unique_target_path(target_dir, base, suffix):
 base = claim.name.split(".json.", 1)[0] + ".json" if ".json." in claim.name else claim.name
 target = unique_target_path(target_dir, base, suffix)
 os.replace(claim, target)
+if action == "ack":
+    # Rewrite embedded delivery state to terminal so a relayed artifact is
+    # machine-readable as terminal without relying on its directory or suffix
+    # (#2459). Preserve the producer-era state as producerDeliveryStatus.
+    import json as _json
+    try:
+        with target.open("r", encoding="utf-8") as _fh:
+            _data = _json.load(_fh)
+        if isinstance(_data, dict) and "delivery" in _data:
+            _data["producerDeliveryStatus"] = _data.pop("delivery")
+        if isinstance(_data, dict):
+            _data["collectorDisposition"] = {
+                "status": "relayed",
+                "at": int(time.time()),
+            }
+            _tmp = target.with_suffix(target.suffix + ".tmp")
+            with _tmp.open("w", encoding="utf-8") as _fh:
+                _json.dump(_data, _fh)
+            os.replace(_tmp, target)
+    except (OSError, ValueError):
+        # Malformed/unreadable payload: the .relayed suffix and relayed/
+        # directory still mark this as terminal. Leave as-is (forensic crumb).
+        pass
 print(target)
 """
 
@@ -640,6 +663,161 @@ def append_log(
         persist_health=persist_controller_log_health,
         emit_fallback=controller_log_fallback,
     )
+
+
+# ---------------------------------------------------------------------------
+# Terminal relay archive: census + retention (#2459)
+#
+# The relayed/ directory grows without bound. These functions provide a
+# privacy-safe census (count/bytes/age/parse health) and a dry-run-first
+# retention command that removes provably-terminal artifacts past a
+# configurable age/count threshold. Nonterminal or malformed artifacts are
+# never removed.
+# ---------------------------------------------------------------------------
+
+RELAY_ARCHIVE_DIR_NAME = "relayed"
+RELAY_ARCHIVE_SUFFIX = ".relayed"
+
+
+def relay_archive_dir() -> Path:
+    """Return the terminal relay archive root for the local state."""
+    return state_root() / RELAY_ARCHIVE_DIR_NAME
+
+
+def census_relay_archive(archive_dir: Path | None = None) -> dict[str, Any]:
+    """Privacy-safe census of the terminal relay archive.
+
+    Returns bounded aggregates only: count, total_bytes, oldest_age_seconds,
+    parse_failures, nonterminal_count. No host, user, payload, or identity
+    fields are emitted. Used by health-check to distinguish archive pressure
+    from active queue backlog (#2459).
+    """
+    if archive_dir is None:
+        archive_dir = relay_archive_dir()
+    now = int(time.time())
+    count = 0
+    total_bytes = 0
+    oldest_mtime = None
+    parse_failures = 0
+    nonterminal_count = 0
+    if not archive_dir.is_dir():
+        return {
+            "count": 0, "total_bytes": 0, "oldest_age_seconds": None,
+            "parse_failures": 0, "nonterminal_count": 0,
+        }
+    for entry in archive_dir.iterdir():
+        if not entry.is_file():
+            continue
+        count += 1
+        try:
+            total_bytes += entry.stat().st_size
+            mtime = int(entry.stat().st_mtime)
+            if oldest_mtime is None or mtime < oldest_mtime:
+                oldest_mtime = mtime
+        except OSError:
+            pass
+        # Check terminal state in payload (not just suffix/dir).
+        try:
+            with entry.open("r", encoding="utf-8") as fh:
+                data = json.load(fh)
+            if isinstance(data, dict):
+                disp = data.get("collectorDisposition")
+                if not (isinstance(disp, dict) and disp.get("status") == "relayed"):
+                    nonterminal_count += 1
+            else:
+                nonterminal_count += 1
+        except (OSError, ValueError):
+            parse_failures += 1
+    oldest_age = (now - oldest_mtime) if oldest_mtime is not None else None
+    return {
+        "count": count,
+        "total_bytes": total_bytes,
+        "oldest_age_seconds": oldest_age,
+        "parse_failures": parse_failures,
+        "nonterminal_count": nonterminal_count,
+    }
+
+
+def retention_prune_relay_archive(
+    *,
+    archive_dir: Path | None = None,
+    max_age_seconds: int | None = None,
+    max_count: int | None = None,
+    dry_run: bool = True,
+) -> dict[str, Any]:
+    """Dry-run-first retention prune of the terminal relay archive (#2459).
+
+    Removes only provably-terminal artifacts (those with
+    collectorDisposition.status == 'relayed') past the configured age or count
+    threshold. Malformed, nonterminal, or unreadable artifacts are NEVER
+    removed (fail-closed). Returns a deletion receipt with bounded aggregates.
+
+    max_age_seconds: remove artifacts older than now - max_age_seconds.
+    max_count: if set, remove the oldest artifacts beyond this count.
+    At least one threshold must be set.
+    """
+    if max_age_seconds is None and max_count is None:
+        raise ValueError("at least one of max_age_seconds or max_count must be set")
+    if archive_dir is None:
+        archive_dir = relay_archive_dir()
+    now = int(time.time())
+    # Collect terminal candidates (fail-closed: skip nonterminal/malformed).
+    candidates: list[tuple[Path, int]] = []
+    skipped = 0
+    if archive_dir.is_dir():
+        for entry in archive_dir.iterdir():
+            if not entry.is_file():
+                continue
+            try:
+                with entry.open("r", encoding="utf-8") as fh:
+                    data = json.load(fh)
+                disp = data.get("collectorDisposition") if isinstance(data, dict) else None
+                if not (isinstance(disp, dict) and disp.get("status") == "relayed"):
+                    skipped += 1
+                    continue
+            except (OSError, ValueError):
+                skipped += 1
+                continue
+            try:
+                candidates.append((entry, int(entry.stat().st_mtime)))
+            except OSError:
+                skipped += 1
+    # Apply age threshold.
+    to_remove: set[Path] = set()
+    if max_age_seconds is not None:
+        cutoff = now - max_age_seconds
+        for path, mtime in candidates:
+            if mtime < cutoff:
+                to_remove.add(path)
+    # Apply count threshold (remove oldest beyond max_count).
+    if max_count is not None and len(candidates) > max_count:
+        by_age = sorted(candidates, key=lambda x: x[1])
+        excess = len(candidates) - max_count
+        for path, _mtime in by_age[:excess]:
+            to_remove.add(path)
+    # Execute removal (or report only in dry-run).
+    removed_count = 0
+    removed_bytes = 0
+    for path in sorted(to_remove):
+        try:
+            removed_bytes += path.stat().st_size
+        except OSError:
+            pass
+        if not dry_run:
+            try:
+                path.unlink()
+            except OSError:
+                continue
+        removed_count += 1
+    return {
+        "dry_run": dry_run,
+        "removed_count": removed_count,
+        "removed_bytes": removed_bytes,
+        "skipped_nonterminal_or_malformed": skipped,
+        "remaining_count": len(candidates) - removed_count,
+        "max_age_seconds": max_age_seconds,
+        "max_count": max_count,
+    }
 
 
 def state_path() -> Path:
