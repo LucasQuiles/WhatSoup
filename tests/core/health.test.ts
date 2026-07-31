@@ -71,6 +71,7 @@ vi.mock('../../src/lib/emit-alert.ts', () => ({
 import { CURRENT_SCHEMA_MIGRATION, Database } from '../../src/core/database.ts';
 import { recordContinuityGaps } from '../../src/core/continuity-gap-ledger.ts';
 import { DurabilityEngine } from '../../src/core/durability.ts';
+import { createInternalOutboundFailureEvidence } from '../../src/core/outbound-failure-disposition.ts';
 import { config } from '../../src/config.ts';
 import { emitHealReport, resetDeliveryUnavailableLatch } from '../../src/core/heal.ts';
 import type { Messenger } from '../../src/core/types.ts';
@@ -590,6 +591,80 @@ describe('GET /health', () => {
       await new Promise<void>((resolve) => server2.close(() => resolve()));
       db2.close();
     }
+  });
+
+  it('projects only the redacted quarantine aggregate to authenticated health diagnostics', async () => {
+    const db2 = makeDb();
+    const durability = new DurabilityEngine(db2);
+    const id = durability.createOutboundOp({
+      conversationKey: 'private-health-conversation',
+      chatJid: 'private-health-destination',
+      opType: 'media',
+      payload: '{"private":"health payload"}',
+      replayPolicy: 'unsafe',
+    });
+    durability.markQuarantined(id, createInternalOutboundFailureEvidence({
+      failureCode: 'outbound.pending_replay_unreconstructable',
+      stage: 'admission',
+      mutationState: 'not_started',
+      providerSubmissionCount: 0,
+    }));
+
+    const { server: server2, port: port2 } = await buildTestServer(makeDeps(db2, { durability }));
+    try {
+      const diagnostic = await healthReq(port2);
+      expect(diagnostic.status).toBe(200);
+      expect(JSON.parse(diagnostic.body).durability.outboundQuarantineDispositions).toEqual({
+        total: 1,
+        groups: [{
+          disposition: 'record_unreconstructable',
+          evidenceCoverage: 'complete',
+          count: 1,
+        }],
+      });
+      expect(diagnostic.body).not.toContain('private-health');
+
+      const publicResponse = await httpReq(port2, '/health', 'GET');
+      expect(publicResponse.status).toBe(200);
+      expect(JSON.parse(publicResponse.body)).not.toHaveProperty('durability');
+    } finally {
+      await new Promise<void>((resolve) => server2.close(() => resolve()));
+      db2.close();
+    }
+  });
+
+  it('keeps the quarantine aggregate total equal to its groups across a concurrent transition', () => {
+    const db2 = makeDb();
+    const durability = new DurabilityEngine(db2);
+    const statements = (durability as unknown as {
+      statements: { getQuarantinedOutboundCount: { get: () => { count: number } } };
+    }).statements;
+    const originalCount = statements.getQuarantinedOutboundCount;
+    let transitioned = false;
+    statements.getQuarantinedOutboundCount = {
+      get: () => {
+        const count = originalCount.get();
+        if (!transitioned) {
+          transitioned = true;
+          const id = durability.createOutboundOp({
+            conversationKey: 'interleaved', chatJid: 'interleaved@g.us', opType: 'text',
+            payload: '{}', replayPolicy: 'unsafe',
+          });
+          durability.markQuarantined(id, createInternalOutboundFailureEvidence({
+            failureCode: 'outbound.deferral_limit_exceeded',
+            stage: 'admission',
+            mutationState: 'not_started',
+            providerSubmissionCount: 0,
+          }));
+        }
+        return count;
+      },
+    };
+
+    const aggregate = durability.getHealthStats().outboundQuarantineDispositions;
+
+    expect(aggregate.total).toBe(aggregate.groups.reduce((total, group) => total + group.count, 0));
+    db2.close();
   });
 
   it('degrades instead of treating malformed ambiguity chronology as fresh (#2343)', async () => {

@@ -93,6 +93,11 @@ export interface AlertEmissionContext {
   operation?: 'alert' | 'clear';
 }
 
+export interface ClearAlertSourceOptions {
+  /** Reject sink and legacy paths when a clear must preserve outbox causality. */
+  requireDurableOutbox?: boolean;
+}
+
 function requireExpectedJid(): boolean {
   const raw = process.env['BOT_ERRORS_REQUIRE_EXPECTED']?.trim().toLowerCase();
   return raw ? !['0', 'false', 'no', 'off'].includes(raw) : true;
@@ -329,6 +334,30 @@ export function clearAlertSource(
   }
 }
 
+function clearAlertSourceDurablyQueued(
+  instance: string,
+  source: string,
+  evidence: string,
+  criticalAsset?: BotErrorsCriticalAssetDiagnostic,
+): AlertEmissionResult {
+  try {
+    const outbox = writeBotErrorsEvent({
+      eventType: 'clear',
+      instance,
+      source,
+      summary: `alert source cleared: ${source}`,
+      evidence,
+      severity: 'info',
+      criticalAsset,
+    });
+    return { ok: true, channel: 'outbox', status: 'durably_queued', outbox };
+  } catch (err) {
+    const reason = errorMessage(err);
+    log.warn({ instance, source, err: reason }, 'bot-errors strict clear outbox write failed');
+    return { ok: false, channel: 'none', status: 'failed', outboxError: reason };
+  }
+}
+
 export function observeAlertEmission(result: AlertEmissionResult, context: AlertEmissionContext): boolean {
   if (!result.ok) {
     log.warn(
@@ -379,9 +408,12 @@ export function clearAlertSourceChecked(
   source: string,
   evidence = `repair_lane:${instance}`,
   criticalAsset?: BotErrorsCriticalAssetDiagnostic,
+  options: ClearAlertSourceOptions = {},
 ): boolean {
   return observeAlertEmission(
-    clearAlertSource(instance, source, evidence, criticalAsset),
+    options.requireDurableOutbox
+      ? clearAlertSourceDurablyQueued(instance, source, evidence, criticalAsset)
+      : clearAlertSource(instance, source, evidence, criticalAsset),
     { instance, source, operation: 'clear' },
   );
 }

@@ -512,6 +512,19 @@ def now_iso() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
 
+# These incidents are emitted from the local durability writer and their clear
+# can race a new quarantine only across the outbox boundary. Their clear must
+# prove a strictly later full timestamp; an equal or unparseable timestamp is
+# deliberately left open rather than risking loss of a new alert.
+QUARANTINE_INCIDENT_SOURCES = frozenset({
+    "outbound_delivery_ambiguous",
+    "outbound_delivery_not_attempted",
+    "outbound_record_unreconstructable",
+    "outbound_quarantine_unclassified",
+    "outbound_quarantined",
+})
+
+
 def state_root() -> Path:
     return Path(os.environ.get("BOT_ERRORS_STATE_DIR", Path.home() / ".local/state/bot-errors"))
 
@@ -1656,6 +1669,24 @@ def event_created_epoch(event: dict[str, Any]) -> int | None:
     return int(parsed.timestamp())
 
 
+def event_created_order(event: dict[str, Any]) -> int | None:
+    """Return a UTC microsecond order only for unambiguous full timestamps."""
+    created = event.get("createdAt")
+    if not isinstance(created, str) or not created.strip():
+        return None
+    try:
+        parsed = datetime.fromisoformat(created.strip().replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return None
+    return int(parsed.timestamp()) * 1_000_000 + parsed.microsecond
+
+
+def is_quarantine_incident(event: dict[str, Any]) -> bool:
+    return str(event.get("source") or "") in QUARANTINE_INCIDENT_SOURCES
+
+
 def is_logged_out_physical_signal(event: dict[str, Any]) -> bool:
     if critical_failure_code(event) == "WA_AUTH_BOND_SERVER_REVOKED":
         return True
@@ -2485,6 +2516,15 @@ def should_suppress_send(event: dict[str, Any], incident_state: dict[str, Any]) 
             if recovered_keys:
                 return None
             return f"clear has no open incident for {key}; stale recovery suppressed"
+        if is_quarantine_incident(event):
+            opened_created = open_record.get("eventCreatedAt")
+            if isinstance(opened_created, str) and opened_created.strip():
+                opened_order = event_created_order({"createdAt": opened_created})
+                clear_order = event_created_order(event)
+                if opened_order is None or clear_order is None:
+                    return f"quarantine clear ordering is ambiguous for {key}; stale recovery suppressed"
+                if clear_order <= opened_order:
+                    return f"quarantine clear does not follow open incident for {key}; stale recovery suppressed"
         opened = int_field(open_record, "eventCreatedAtEpoch")
         created = event_created_epoch(event)
         if opened > 0 and created is not None and created < opened - CLOCK_SKEW_TOLERANCE_SECONDS:
@@ -4116,6 +4156,19 @@ def move_suppressed_event(
     return suppressed_path
 
 
+def queued_alert_precedes_recovery(
+    alert_event: dict[str, Any],
+    alert_epoch: int,
+    alert_order: int | None,
+    clear_event: dict[str, Any],
+    clear_epoch: int,
+    clear_order: int | None,
+) -> bool:
+    if is_quarantine_incident(alert_event) or is_quarantine_incident(clear_event):
+        return alert_order is not None and clear_order is not None and alert_order < clear_order
+    return alert_epoch <= clear_epoch
+
+
 def suppress_alerts_recovered_before_delivery(paths: dict[str, Path]) -> int:
     """Retire queued alerts when a later clear proves recovery before delivery.
 
@@ -4129,8 +4182,8 @@ def suppress_alerts_recovered_before_delivery(paths: dict[str, Path]) -> int:
     if not isinstance(open_incidents, dict):
         open_incidents = {}
 
-    alerts_by_key: dict[str, list[tuple[Path, dict[str, Any], int]]] = {}
-    clears: list[tuple[Path, dict[str, Any], int]] = []
+    alerts_by_key: dict[str, list[tuple[Path, dict[str, Any], int, int | None]]] = {}
+    clears: list[tuple[Path, dict[str, Any], int, int | None]] = []
     for path in sorted(paths["outbox"].glob("*.json")):
         event = load_valid_event_or_quarantine(path, paths["quarantine"])
         if event is None:
@@ -4138,27 +4191,33 @@ def suppress_alerts_recovered_before_delivery(paths: dict[str, Path]) -> int:
         epoch = event_created_epoch(event)
         if epoch is None:
             continue
+        order = event_created_order(event)
         if is_incident_alert(event):
-            alerts_by_key.setdefault(incident_key(event), []).append((path, event, epoch))
+            alerts_by_key.setdefault(incident_key(event), []).append((path, event, epoch, order))
         elif is_incident_clear(event) and delivery_ready(event):
-            clears.append((path, event, epoch))
+            clears.append((path, event, epoch, order))
 
     suppressed = 0
-    for clear_path, clear_event, clear_epoch in sorted(clears, key=lambda row: (row[2], str(row[0]))):
+    for clear_path, clear_event, clear_epoch, clear_order in sorted(
+        clears,
+        key=lambda row: (row[3] if row[3] is not None else row[2] * 1_000_000, str(row[0])),
+    ):
         key = incident_key(clear_event)
         if not clear_path.exists():
             continue
         pending_alerts = [
             record for record in alerts_by_key.get(key, [])
             if record[0].exists()
-            and record[2] <= clear_epoch
+            and queued_alert_precedes_recovery(
+                record[1], record[2], record[3], clear_event, clear_epoch, clear_order,
+            )
             and not ready(record[0], paths["quarantine"])
         ]
         if not pending_alerts:
             continue
 
         alert_ids: list[str] = []
-        for alert_path, alert_event, _alert_epoch in pending_alerts:
+        for alert_path, alert_event, _alert_epoch, _alert_order in pending_alerts:
             move_suppressed_event(
                 alert_path,
                 paths,
@@ -4600,8 +4659,17 @@ def event_already_known(
     return any(isinstance(values, set) and created_matches(values, created_at) for values in incident_key_values.values())
 
 
+def outbox_timestamp_prefix(created_at: object) -> str:
+    """Keep milliseconds without overtaking a legacy same-second `...Z.` file."""
+    raw = str(created_at or now_iso())
+    fractional = re.fullmatch(r"(.*)\.(\d{3})Z", raw)
+    if fractional:
+        return f"{fractional.group(1).replace('-', '').replace(':', '')}Z_{fractional.group(2)}"
+    return raw.replace("-", "").replace(":", "")
+
+
 def outbox_path_for_event(event: dict[str, Any], paths: dict[str, Path]) -> Path:
-    created = str(event.get("createdAt") or now_iso()).replace("-", "").replace(":", "")
+    created = outbox_timestamp_prefix(event.get("createdAt"))
     instance = safe_segment(str(event.get("instance") or "unknown"))
     source = safe_segment(str(event.get("source") or "unknown"))
     event_id = safe_segment(str(event.get("id") or f"recovered-{int(time.time())}-{os.getpid()}"))

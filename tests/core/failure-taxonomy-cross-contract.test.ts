@@ -36,6 +36,8 @@ import {
   OUTBOUND_FAILURE_STAGES,
   OUTBOUND_MUTATION_STATES,
   OUTBOUND_EVIDENCE_COVERAGE,
+  OUTBOUND_QUARANTINE_DISPOSITIONS,
+  OUTBOUND_QUARANTINE_DISPOSITION_POLICIES,
   type InternalOutboundFailureCode,
 } from '../../src/core/outbound-failure-disposition.ts';
 import {
@@ -163,6 +165,15 @@ describe('failure taxonomy cross-contract', () => {
       .toEqual(sorted(OUTBOUND_MUTATION_STATES));
     expect(sorted(registry.failureDomains.outboundEvidenceCoverage.values))
       .toEqual(sorted(OUTBOUND_EVIDENCE_COVERAGE));
+    expect(sorted(registry.failureDomains.outboundQuarantineDispositions.values))
+      .toEqual(sorted(OUTBOUND_QUARANTINE_DISPOSITIONS));
+  });
+
+  it('registers every outbound quarantine alert source in the fault taxonomy', () => {
+    const registeredSources = new Set(Object.keys(registry.sourceDispositions));
+    for (const policy of Object.values(OUTBOUND_QUARANTINE_DISPOSITION_POLICIES)) {
+      expect(registeredSources).toContain(policy.alertSource);
+    }
   });
 
   it('covers and validates every terminal-attempt to inbound projection', () => {

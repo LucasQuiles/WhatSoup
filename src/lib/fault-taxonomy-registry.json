@@ -306,6 +306,17 @@
       ],
       "owner": "src/core/outbound-failure-disposition.ts",
       "test": "tests/core/failure-taxonomy-cross-contract.test.ts"
+    },
+    "outboundQuarantineDispositions": {
+      "values": [
+        "delivery_ambiguous_unsafe",
+        "delivery_not_attempted",
+        "record_unreconstructable",
+        "stale_status_discarded",
+        "legacy_unclassified"
+      ],
+      "owner": "src/core/outbound-failure-disposition.ts",
+      "test": "tests/core/failure-taxonomy-cross-contract.test.ts"
     }
   },
   "runtimeAgentHealthSignals": [
@@ -671,6 +682,31 @@
       "disposition": "auth_symptom_clear_gated",
       "owner": "src/lib/fleet-health-gate.ts",
       "test": "tests/lib/fleet-health-gate.test.ts"
+    },
+    "outbound_delivery_ambiguous": {
+      "disposition": "delivery_ambiguity_requires_contributor_aware_clear",
+      "owner": "src/core/durability.ts",
+      "test": "tests/core/durability-recovery.test.ts"
+    },
+    "outbound_delivery_not_attempted": {
+      "disposition": "not_started_delivery_requires_disposition_review",
+      "owner": "src/core/durability.ts",
+      "test": "tests/core/durability-edge.test.ts"
+    },
+    "outbound_record_unreconstructable": {
+      "disposition": "record_reconstruction_review_required",
+      "owner": "src/core/durability.ts",
+      "test": "tests/core/durability-drain.test.ts"
+    },
+    "outbound_status_discarded": {
+      "disposition": "stale_status_discarded_before_provider_send",
+      "owner": "src/core/durability.ts",
+      "test": "tests/core/status-op-lifecycle.test.ts"
+    },
+    "outbound_quarantine_unclassified": {
+      "disposition": "legacy_or_incomplete_evidence_requires_conservative_review",
+      "owner": "src/core/durability.ts",
+      "test": "tests/core/outbound-failure-disposition.test.ts"
     },
     "outbound_send_failed": {
       "disposition": "suppressed_by_auth_root_when_present",

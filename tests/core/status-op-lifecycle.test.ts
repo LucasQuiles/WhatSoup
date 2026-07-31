@@ -177,13 +177,18 @@ describe('status-op lifecycle (PR-C)', () => {
     const { resent, expired } = await drainPendingOutbound(messenger, durability);
 
     // Stale ping: quarantined + TTL alert, never sent.
-    expect(getOutbound(db, staleId)['status']).toBe('quarantined');
+    expect(getOutbound(db, staleId)).toMatchObject({
+      status: 'quarantined',
+      quarantine_disposition: 'stale_status_discarded',
+      quarantine_evidence_coverage: 'partial',
+    });
     expect(messenger.sendMessage).not.toHaveBeenCalledWith(CHAT, 'stale back online');
     expect(emitAlert).toHaveBeenCalledWith(
       'Loops',
-      'outbound_quarantined',
+      'outbound_status_discarded',
       expect.any(String),
-      expect.stringContaining('status_op_ttl_expired'),
+      expect.stringContaining('outbound.status_ping_expired'),
+      'info',
     );
     // Fresh ping: re-sent.
     expect(getOutbound(db, freshId)['status']).toBe('submitted');

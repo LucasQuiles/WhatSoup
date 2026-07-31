@@ -86,7 +86,7 @@ export function getTransactionRunner(db: Database): TransactionRunner {
       return result;
     } catch (err) {
       if (opened) {
-        try { rollback.run(); } catch { /* best-effort rollback */ }
+        try { rollback.run(); } catch { /* intentional: rollback failure must not replace the transaction callback error */ }
       }
       throw err;
     }
@@ -97,4 +97,32 @@ export function getTransactionRunner(db: Database): TransactionRunner {
 
 export function withTransaction<T>(db: Database, fn: () => T): T {
   return getTransactionRunner(db)(fn);
+}
+
+/**
+ * Run a top-level transaction with SQLite's single-writer reservation held
+ * before its callback reads a check-then-act predicate. It deliberately
+ * rejects nesting: a deferred outer transaction cannot be safely upgraded to
+ * this lock level, and callers needing this guarantee must fail closed.
+ */
+export function withImmediateTransaction<T>(db: Database, fn: () => T): T {
+  if (db.raw.isTransaction) {
+    throw new Error('Immediate transaction requires a top-level database connection');
+  }
+  const begin = db.raw.prepare('BEGIN IMMEDIATE');
+  const commit = db.raw.prepare('COMMIT');
+  const rollback = db.raw.prepare('ROLLBACK');
+  begin.run();
+  let opened = true;
+  try {
+    const result = fn();
+    commit.run();
+    opened = false;
+    return result;
+  } catch (err) {
+    if (opened) {
+      try { rollback.run(); } catch { /* intentional: rollback failure must not replace the transaction callback error */ }
+    }
+    throw err;
+  }
 }

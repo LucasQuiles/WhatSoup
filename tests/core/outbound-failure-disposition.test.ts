@@ -12,6 +12,8 @@ import {
 } from '../../src/transport/contract/errors.ts';
 import {
   classifyOutboundFailure,
+  classifyOutboundQuarantineDisposition,
+  createInternalOutboundFailureEvidence,
   decodeOutboundFailureEvidence,
   encodeOutboundFailureEvidence,
   outboundFailureWarrantsUserNotice,
@@ -39,6 +41,35 @@ const base = {
 };
 
 describe('outbound failure disposition', () => {
+  it('classifies quarantine outcomes only from bounded failure evidence', () => {
+    const unreconstructable = createInternalOutboundFailureEvidence({
+      failureCode: 'outbound.pending_replay_unreconstructable',
+      stage: 'admission',
+      mutationState: 'not_started',
+      providerSubmissionCount: 0,
+    });
+    expect(classifyOutboundQuarantineDisposition(unreconstructable))
+      .toBe('record_unreconstructable');
+
+    const ambiguous = createInternalOutboundFailureEvidence({
+      failureCode: 'outbound.unsafe_delivery_unconfirmed',
+      stage: 'runtime',
+      mutationState: 'ambiguous',
+      providerSubmissionCount: 1,
+    });
+    expect(classifyOutboundQuarantineDisposition(ambiguous))
+      .toBe('delivery_ambiguous_unsafe');
+
+    const notProvenNeverSent = createInternalOutboundFailureEvidence({
+      failureCode: 'outbound.status_ping_expired',
+      stage: 'admission',
+      mutationState: 'not_started',
+      providerSubmissionCount: 1,
+    });
+    expect(classifyOutboundQuarantineDisposition(notProvenNeverSent))
+      .toBe('legacy_unclassified');
+  });
+
   it('defers a typed local producer cooldown without inventing a provider submission', () => {
     const evidence = classifyOutboundFailure(
       new RateLimitedError({
