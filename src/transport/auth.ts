@@ -7,6 +7,8 @@
  */
 
 import { existsSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import {
   makeWASocket,
   useMultiFileAuthState,
@@ -27,7 +29,7 @@ import { classifyPairNumber, maskPairingCode, pairingEmissionLine, pairingGate }
 // Lock check
 // ---------------------------------------------------------------------------
 
-const lockPath = (config as any).lockPath ?? '/var/run/whatsoup.lock';
+const lockPath = (config as any).lockPath ?? join(tmpdir(), 'whatsoup-auth.lock');
 
 if (existsSync(lockPath)) {
   console.error(

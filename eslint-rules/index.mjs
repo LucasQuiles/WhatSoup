@@ -18,6 +18,8 @@ import timerRearmWithoutClear from './timer-rearm-without-clear.mjs';
 import noMagicSqlitePragma from './no-magic-sqlite-pragma.mjs';
 import requireCatchJustification from './require-catch-justification.mjs';
 import noRawFleetError from './no-raw-fleet-error.mjs';
+import fetchTimeout from './fetch-timeout.mjs';
+import syncExecTimeout from './sync-exec-timeout.mjs';
 
 /** @type {import('eslint').ESLint.Plugin} */
 const plugin = {
@@ -34,6 +36,8 @@ const plugin = {
     'no-magic-sqlite-pragma': noMagicSqlitePragma,
     'require-catch-justification': requireCatchJustification,
     'no-raw-fleet-error': noRawFleetError,
+    'fetch-timeout': fetchTimeout,
+    'sync-exec-timeout': syncExecTimeout,
   },
 };
 

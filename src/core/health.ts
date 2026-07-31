@@ -53,6 +53,11 @@ import {
   unreadableOutboundSendHealth,
   unreadableToolDurabilityHealth,
 } from './durability-health.ts';
+import type {
+  MemoryEvidenceCoverage,
+  MemoryOperationFailureCode,
+  MemoryReadinessState,
+} from '../lib/memory-operation-telemetry.ts';
 
 const log = createChildLogger('health');
 const EMPTY_SHA256 = 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855';
@@ -68,6 +73,24 @@ const EMPTY_SHA256 = 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b78
 function verifyBearer(header: string | undefined, expectedToken: string | undefined): boolean {
   if (!expectedToken || !header) return false;
   return safeStringEqual(header, `Bearer ${expectedToken}`);
+}
+
+export interface MemoryReadinessHealth {
+  state: MemoryReadinessState;
+  observedAt: string;
+  failureCode: MemoryOperationFailureCode;
+  retryable: boolean;
+  evidenceCoverage: MemoryEvidenceCoverage;
+}
+
+export interface MemoryContextHealth {
+  status: 'complete' | 'partial' | 'unavailable';
+  scopes: Array<{
+    scope: 'chat' | 'sender' | 'self' | 'entity' | 'context';
+    status: 'ok' | 'breaker_open' | 'project_guard_failed' | 'failed';
+    failureCode: MemoryOperationFailureCode | null;
+    retryable: boolean;
+  }>;
 }
 
 export interface HealthDeps {
@@ -109,6 +132,8 @@ export interface HealthDeps {
   loopLagSampler?: LoopLagSampler;
   /** Monotonic clock for starvation-warning suppression; injectable for tests. */
   loopLagWarningNow?: () => number;
+  getMemoryReadinessHealth?: () => MemoryReadinessHealth;
+  getMemoryContextHealth?: () => MemoryContextHealth | null;
   getMemoryConsolidationHealth?: () => ConsolidationHealth;
   getDatabaseRetentionHealth?: () => DatabaseRetentionHealth;
   /** Controller-owned, content-free startup notification projection. */
@@ -250,6 +275,8 @@ export type HealthDegradationCause =
   | 'transport_disconnected'
   | 'enrichment_stale'
   | 'enrichment_runtime_degraded'
+  | 'memory_readiness_degraded'
+  | 'memory_context_degraded'
   | 'memory_consolidation_degraded'
   | 'connection_churn'
   | 'outbound_flood'
@@ -285,6 +312,8 @@ const HEALTH_DEGRADATION_CAUSE_PRESENCE: Readonly<Record<HealthDegradationCause,
   transport_disconnected: true,
   enrichment_stale: true,
   enrichment_runtime_degraded: true,
+  memory_readiness_degraded: true,
+  memory_context_degraded: true,
   memory_consolidation_degraded: true,
   connection_churn: true,
   outbound_flood: true,
@@ -1308,6 +1337,14 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
       }
 
       const enrichmentStats = deps.getEnrichmentStats();
+      const memoryReadiness = deps.getMemoryReadinessHealth?.() ?? null;
+      const memoryReadinessIsDegraded =
+        memoryReadiness !== null
+        && memoryReadiness.state !== 'ready'
+        && memoryReadiness.state !== 'disabled';
+      const memoryContext = deps.getMemoryContextHealth?.() ?? null;
+      const memoryContextIsDegraded =
+        memoryContext?.status === 'partial' || memoryContext?.status === 'unavailable';
       const memoryConsolidation = deps.getMemoryConsolidationHealth?.() ?? null;
       const memoryConsolidationIsDegraded =
         memoryConsolidation !== null
@@ -1455,6 +1492,12 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
         if (authFailureIsDegraded) statusReasons.push(`auth_failure.${authFailureClass}`);
         if (enrichmentIsStale) statusReasons.push('enrichment_stale');
         if (enrichmentStats.runtimeDegraded) statusReasons.push('enrichment_runtime_degraded');
+        if (memoryReadinessIsDegraded && memoryReadiness) {
+          statusReasons.push(`memory_readiness_${memoryReadiness.state}`);
+        }
+        if (memoryContextIsDegraded && memoryContext) {
+          statusReasons.push(`memory_context_${memoryContext.status}`);
+        }
         if (memoryConsolidationIsDegraded) {
           statusReasons.push(`memory_consolidation_${memoryConsolidation.state}`);
         }
@@ -1680,6 +1723,8 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
       if (!isConnected) addDegradationCause('transport_disconnected');
       if (enrichmentIsStale) addDegradationCause('enrichment_stale');
       if (enrichmentStats.runtimeDegraded) addDegradationCause('enrichment_runtime_degraded');
+      if (memoryReadinessIsDegraded) addDegradationCause('memory_readiness_degraded');
+      if (memoryContextIsDegraded) addDegradationCause('memory_context_degraded');
       if (memoryConsolidationIsDegraded) addDegradationCause('memory_consolidation_degraded');
       if (connectionChurnIsDegraded) addDegradationCause('connection_churn');
       if (outboundFloodIsDegraded) addDegradationCause('outbound_flood');
@@ -1850,6 +1895,26 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
           last_run: enrichmentStats.lastRun,
         },
         memory: {
+          readiness: memoryReadiness
+            ? {
+                state: memoryReadiness.state,
+                observed_at: memoryReadiness.observedAt,
+                failure_code: memoryReadiness.failureCode,
+                retryable: memoryReadiness.retryable,
+                evidence_coverage: memoryReadiness.evidenceCoverage,
+              }
+            : null,
+          context: memoryContext
+            ? {
+                status: memoryContext.status,
+                scopes: memoryContext.scopes.map((scope) => ({
+                  scope: scope.scope,
+                  status: scope.status,
+                  failure_code: scope.failureCode,
+                  retryable: scope.retryable,
+                })),
+              }
+            : null,
           consolidation: memoryConsolidation,
         },
         models: {

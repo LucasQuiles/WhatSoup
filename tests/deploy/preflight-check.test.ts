@@ -1037,7 +1037,7 @@ describe('deploy/whatsoup — source wiring', () => {
     expect(guard).toBeGreaterThan(-1);
     for (const effect of [
       'openDatabaseForStartup({',
-      'getPineconeReadiness(',
+      'getPineconeReadinessObservation(',
       'createConnection(',
       'startHealthServer(',
       'setInterval(',

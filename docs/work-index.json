@@ -1,7 +1,7 @@
 {
-  "generated_at": "2026-07-30T17:49:19Z",
+  "generated_at": "2026-07-30T22:25:20Z",
   "repo": "WhatSoup",
-  "git_head": "b962a0a7927944f7a3f0f6ece381f7c0cdfcbc41",
+  "git_head": "2a15e4a4f87fc637a57c79ee2ca710301c1e63a6",
   "git_head_note": "git_head is captured at scan time, so it reflects the branch HEAD at the moment `build-work-index` ran — NOT the commit that carries this index. Expect divergence in two cases: (1) intra-branch, when the regenerated index is committed after further content changes are staged; (2) post-squash-merge, when the landed main SHA differs from the pre-merge branch SHA. The row data and inconsistency detection remain accurate regardless of git_head freshness.",
   "total": 104,
   "schema_version": 5,
@@ -723,7 +723,7 @@
       "status_source": "fallback",
       "canonical_parent": "docs/superpowers/plans",
       "supersedes_hint": null,
-      "last_modified": "2026-07-29",
+      "last_modified": "2026-07-30",
       "size_bytes": 13541
     },
     {
@@ -1167,7 +1167,7 @@
       "status_source": "fallback",
       "canonical_parent": "docs/superpowers/specs",
       "supersedes_hint": null,
-      "last_modified": "2026-07-29",
+      "last_modified": "2026-07-30",
       "size_bytes": 3278
     },
     {
@@ -1227,7 +1227,7 @@
       "status_source": "body-marker",
       "canonical_parent": "docs/superpowers/specs/provider-event-lifecycle",
       "supersedes_hint": null,
-      "last_modified": "2026-07-30",
+      "last_modified": "2026-07-29",
       "size_bytes": 81820
     },
     {
@@ -1239,7 +1239,7 @@
       "status_source": "body-marker",
       "canonical_parent": "docs/superpowers/specs/provider-event-lifecycle",
       "supersedes_hint": null,
-      "last_modified": "2026-07-30",
+      "last_modified": "2026-07-29",
       "size_bytes": 108155
     },
     {
@@ -1251,7 +1251,7 @@
       "status_source": "body-marker",
       "canonical_parent": "docs/superpowers/specs/provider-event-lifecycle",
       "supersedes_hint": null,
-      "last_modified": "2026-07-30",
+      "last_modified": "2026-07-29",
       "size_bytes": 60968
     }
   ],

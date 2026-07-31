@@ -5,6 +5,8 @@
  * unified ToolCategory used by the UI layer so display logic stays provider-agnostic.
  */
 
+import { basename } from 'node:path';
+
 export type ToolCategory =
   | 'reading'
   | 'searching'
@@ -63,8 +65,7 @@ export const claudeToolMapper: ToolNameMapper = {
 
   getToolLabel(toolName: string, toolInput: Record<string, unknown>): string {
     if (toolName === 'Read' && toolInput['file_path']) {
-      const parts = (toolInput['file_path'] as string).split('/');
-      return `Reading ${parts[parts.length - 1] ?? toolInput['file_path']}`;
+      return `Reading ${basename(toolInput['file_path'] as string)}`;
     }
     if (toolName === 'Bash' && toolInput['command']) return 'Running command';
     if (toolName === 'Grep' && toolInput['pattern']) return `Searching for ${toolInput['pattern']}`;
