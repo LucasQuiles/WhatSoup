@@ -1714,21 +1714,19 @@ describe('fleet server -- start() method', () => {
       getSelfHealth: () => ({ status: 'ok' }),
     });
 
-    // Find a free port
-    const net = await import('node:net');
-    const port = await new Promise<number>((resolve) => {
-      const srv = net.createServer();
-      srv.listen(0, '127.0.0.1', () => {
-        const a = srv.address();
-        srv.close(() => resolve(typeof a === 'object' && a ? a.port : 0));
-      });
-    });
-
+    // Bind port 0 directly (ephemeral port assigned by the OS) instead of
+    // probing a free port on a throwaway socket first — probe-then-rebind is
+    // a TOCTOU race: another process can claim the probed port before the
+    // real server rebinds it.
     await new Promise<void>((resolve, reject) => {
       startFleet.server.once('error', reject);
-      startFleet.start(port);
+      startFleet.start(0);
       startFleet.server.once('listening', resolve);
     });
+    const addr = startFleet.server.address();
+    if (!addr || typeof addr === 'string') throw new Error('unexpected address type');
+    const port = addr.port;
+    expect(port).toBeGreaterThan(0);
 
     try {
       const res = await fetch(`http://127.0.0.1:${port}/api/lines`, {
