@@ -336,7 +336,12 @@ For each op in `status='pending'`:
 - **Reconstructable text op** — `op_type === 'text'` or `'status_ping'` and `payload` parses
   to `{ text: string }` (the exact shape `sendTracked` writes): `markSending()`, re-send via
   `messenger.sendMessage(chat_jid, text)`, then `markSubmitted(wa_message_id)`. The op then
-  re-enters the normal `submitted → echoed` reconciliation path. If the send throws, the
+  re-enters the normal `submitted → echoed` reconciliation path. Replays carry **no caller
+  token** (#2813): `sendTracked` persists only `{ text }`, so a QR-086 infra caller (e.g.
+  `'health'`) on the original send does not survive into the replay, which therefore takes
+  the default — most restrictive — guard path with no cold-floor bypass. Fail-safe by
+  design; persisting the caller in the payload envelope is the documented alternative if
+  the bypass must survive replay. If the send throws, the
   shared classifier chooses the durable state: an ambiguous handoff becomes `maybe_sent`,
   a definitive rejection becomes `failed_permanent`, and a new positive producer floor
   returns to deferred `pending` (no inline retry / tight-loop).
