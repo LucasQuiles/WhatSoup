@@ -20,7 +20,7 @@ export const DEFAULT_TRUSTED_GIT_CANDIDATES: readonly string[] = [
 export class TrustedGitUnavailableError extends Error {
   readonly candidates: readonly string[];
 
-  constructor(candidates: readonly string[]) {
+  constructor(candidates: ReadonlyArray<string>) {
     super(`no trusted git executable found among: ${candidates.join(', ')}`);
     this.name = 'TrustedGitUnavailableError';
     this.candidates = candidates;
