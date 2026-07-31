@@ -16,6 +16,7 @@ import type {
   TransportError,
 } from '../contract/index.ts';
 import { makeSubscription } from '../contract/subscription.ts';
+import { AdapterReasonCode } from '../contract/adapter-reason-codes.ts';
 import {
   AuthRequiredError,
   ConversationNotFoundError,
@@ -459,7 +460,7 @@ export class TwilioSmsAdapter implements TransportAdapter, VoiceCapableTransport
           clearInterval(this.pollTimer);
           this.pollTimer = null;
         }
-        this.transitionTo({ state: 'auth_required', since: new Date(), reasonCode: 'poll-auth-failure' });
+        this.transitionTo({ state: 'auth_required', since: new Date(), reasonCode: AdapterReasonCode.PollAuthFailure });
       }
       // Transient / rate-limit: stay in current state and keep polling.
       return;
