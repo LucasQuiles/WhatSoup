@@ -1,7 +1,7 @@
 {
-  "generated_at": "2026-07-31T17:01:29Z",
+  "generated_at": "2026-07-31T21:21:53Z",
   "repo": "WhatSoup",
-  "git_head": "c30f8fa0188212bc86ad4212dd1e290fee3a7ffd",
+  "git_head": "2af2a9ce3ec57e7dd62b7b7c094dbd32dc7c6acf",
   "git_head_note": "git_head is captured at scan time, so it reflects the branch HEAD at the moment `build-work-index` ran — NOT the commit that carries this index. Expect divergence in two cases: (1) intra-branch, when the regenerated index is committed after further content changes are staged; (2) post-squash-merge, when the landed main SHA differs from the pre-merge branch SHA. The row data and inconsistency detection remain accurate regardless of git_head freshness.",
   "total": 106,
   "schema_version": 5,
@@ -651,7 +651,7 @@
       "status_source": "body-marker",
       "canonical_parent": "docs/superpowers/plans",
       "supersedes_hint": null,
-      "last_modified": "2026-07-31",
+      "last_modified": "2026-07-29",
       "size_bytes": 68095
     },
     {
@@ -663,7 +663,7 @@
       "status_source": "fallback",
       "canonical_parent": "docs/superpowers/plans",
       "supersedes_hint": null,
-      "last_modified": "2026-07-31",
+      "last_modified": "2026-07-30",
       "size_bytes": 19439
     },
     {
@@ -711,7 +711,7 @@
       "status_source": "body-marker",
       "canonical_parent": "docs/superpowers/plans",
       "supersedes_hint": null,
-      "last_modified": "2026-07-31",
+      "last_modified": "2026-07-30",
       "size_bytes": 6269
     },
     {
@@ -723,7 +723,7 @@
       "status_source": "fallback",
       "canonical_parent": "docs/superpowers/plans",
       "supersedes_hint": null,
-      "last_modified": "2026-07-31",
+      "last_modified": "2026-07-30",
       "size_bytes": 13541
     },
     {
@@ -735,7 +735,7 @@
       "status_source": "fallback",
       "canonical_parent": "docs/superpowers/plans",
       "supersedes_hint": null,
-      "last_modified": "2026-07-31",
+      "last_modified": "2026-07-30",
       "size_bytes": 16436
     },
     {
@@ -747,7 +747,7 @@
       "status_source": "fallback",
       "canonical_parent": "docs/superpowers/plans",
       "supersedes_hint": null,
-      "last_modified": "2026-07-29",
+      "last_modified": "2026-07-31",
       "size_bytes": 17098
     },
     {
@@ -1107,7 +1107,7 @@
       "status_source": "body-marker",
       "canonical_parent": "docs/superpowers/specs",
       "supersedes_hint": null,
-      "last_modified": "2026-07-31",
+      "last_modified": "2026-07-29",
       "size_bytes": 56487
     },
     {
@@ -1131,7 +1131,7 @@
       "status_source": "body-marker",
       "canonical_parent": "docs/superpowers/specs",
       "supersedes_hint": null,
-      "last_modified": "2026-07-31",
+      "last_modified": "2026-07-30",
       "size_bytes": 11428
     },
     {
@@ -1179,7 +1179,7 @@
       "status_source": "body-marker",
       "canonical_parent": "docs/superpowers/specs",
       "supersedes_hint": null,
-      "last_modified": "2026-07-31",
+      "last_modified": "2026-07-30",
       "size_bytes": 6012
     },
     {
@@ -1191,7 +1191,7 @@
       "status_source": "fallback",
       "canonical_parent": "docs/superpowers/specs",
       "supersedes_hint": null,
-      "last_modified": "2026-07-31",
+      "last_modified": "2026-07-30",
       "size_bytes": 3278
     },
     {
@@ -1203,7 +1203,7 @@
       "status_source": "body-marker",
       "canonical_parent": "docs/superpowers/specs",
       "supersedes_hint": null,
-      "last_modified": "2026-07-31",
+      "last_modified": "2026-07-30",
       "size_bytes": 12240
     },
     {
@@ -1251,8 +1251,8 @@
       "status_source": "body-marker",
       "canonical_parent": "docs/superpowers/specs/provider-event-lifecycle",
       "supersedes_hint": null,
-      "last_modified": "2026-07-29",
-      "size_bytes": 82326
+      "last_modified": "2026-07-31",
+      "size_bytes": 82392
     },
     {
       "path": "docs/superpowers/specs/provider-event-lifecycle/requirements.md",
@@ -1263,8 +1263,8 @@
       "status_source": "body-marker",
       "canonical_parent": "docs/superpowers/specs/provider-event-lifecycle",
       "supersedes_hint": null,
-      "last_modified": "2026-07-29",
-      "size_bytes": 109176
+      "last_modified": "2026-07-31",
+      "size_bytes": 109872
     },
     {
       "path": "docs/superpowers/specs/provider-event-lifecycle/tasks.md",
@@ -1275,8 +1275,8 @@
       "status_source": "body-marker",
       "canonical_parent": "docs/superpowers/specs/provider-event-lifecycle",
       "supersedes_hint": null,
-      "last_modified": "2026-07-29",
-      "size_bytes": 61269
+      "last_modified": "2026-07-31",
+      "size_bytes": 61335
     }
   ],
   "cross_tree_topics": {

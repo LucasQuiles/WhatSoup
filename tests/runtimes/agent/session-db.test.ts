@@ -53,6 +53,7 @@ afterAll(() => {
 describe('agent session-db', () => {
   beforeEach(() => {
     db.raw.prepare('DELETE FROM agent_token_events').run();
+    db.raw.prepare('DELETE FROM completed_delivery_identity_admissions').run();
     db.raw.prepare('DELETE FROM session_checkpoints').run();
     db.raw.prepare('DELETE FROM agent_sessions').run();
   });
@@ -405,6 +406,78 @@ describe('agent session-db', () => {
 
     expect(getResumableSessionForChat(db, wk, 'claude-cli')).toBeNull();
     expect(getResumableSessionForChat(db, wk, 'opencode-cli')).toBeNull();
+  });
+
+  it('excludes unresolved completed-delivery identity admissions from lazy, direct, and shared selectors', () => {
+    const workspaceKey = 'admission-protected';
+    const rowId = createSession(
+      db,
+      60012,
+      '/tmp/admission-protected',
+      'admission-protected@s.whatsapp.net',
+      workspaceKey,
+      'claude-cli',
+    );
+    updateSessionId(db, rowId, 'admission-protected-session');
+    updateSessionStatus(db, rowId, 'active');
+    writeResumeCheckpoint(workspaceKey, 'admission-protected-session', 'active');
+    const checkpoint = db.raw.prepare(
+      'SELECT id FROM session_checkpoints WHERE conversation_key = ?',
+    ).get(workspaceKey) as { id: number };
+    const input = {
+      provider: 'claude-cli',
+      providerSessionId: 'admission-protected-session',
+      agentSessionRowId: rowId,
+      workspaceKey,
+    };
+
+    db.raw.prepare(`
+      INSERT INTO completed_delivery_identity_admissions (
+        target_kind, target_id, state, reason, attempts, owner, next_action
+      ) VALUES ('checkpoint', ?, 'quarantined', 'invalid', 1, 'fresh_inbound', 'fresh_inbound')
+    `).run(checkpoint.id);
+
+    expect(getActiveSession(db, 'claude-cli')).toBeNull();
+    expect(() => resolveResumableAgentSession(db, input)).toThrow(/admission|resumable|checkpoint/i);
+
+    updateSessionStatus(db, rowId, 'orphaned');
+    db.raw.prepare(
+      "UPDATE session_checkpoints SET session_status = 'orphaned' WHERE id = ?",
+    ).run(checkpoint.id);
+    expect(getResumableSessionForChat(db, workspaceKey, 'claude-cli')).toBeNull();
+    expect(() => resolveResumableAgentSession(db, input)).toThrow(/admission|resumable|checkpoint/i);
+
+    db.raw.prepare(`
+      DELETE FROM completed_delivery_identity_admissions
+      WHERE target_kind = 'checkpoint' AND target_id = ?
+    `).run(checkpoint.id);
+    updateSessionStatus(db, rowId, 'active');
+    db.raw.prepare(`
+      INSERT INTO completed_delivery_identity_admissions (
+        target_kind, target_id, state, reason, attempts, owner, next_action
+      ) VALUES ('agent_session', ?, 'quarantined', 'scope_mismatch', 1, 'fresh_inbound', 'fresh_inbound')
+    `).run(rowId);
+
+    expect(getActiveSession(db, 'claude-cli')).toBeNull();
+    expect(getResumableSessionForChat(db, workspaceKey, 'claude-cli')).toBeNull();
+    expect(() => resolveResumableAgentSession(db, input)).toThrow(/admission|resumable|checkpoint/i);
+  });
+
+  it('excludes an unscoped shared row when its provider session has checkpoint-targeted debt', () => {
+    const sessionId = 'shared-checkpoint-admission-session';
+    const rowId = createSession(db, 60013, '/tmp/shared-admission', undefined, undefined, 'claude-cli');
+    updateSessionId(db, rowId, sessionId);
+    writeResumeCheckpoint('shared-admission-conversation', sessionId, 'active');
+    const checkpoint = db.raw.prepare(
+      'SELECT id FROM session_checkpoints WHERE conversation_key = ?',
+    ).get('shared-admission-conversation') as { id: number };
+    db.raw.prepare(`
+      INSERT INTO completed_delivery_identity_admissions (
+        target_kind, target_id, state, reason, attempts, owner, next_action
+      ) VALUES ('checkpoint', ?, 'quarantined', 'missing', 1, 'operator', 'operator')
+    `).run(checkpoint.id);
+
+    expect(getActiveSession(db, 'claude-cli')).toBeNull();
   });
 
   function writeResumeCheckpoint(

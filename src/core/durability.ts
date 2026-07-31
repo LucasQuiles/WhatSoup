@@ -52,6 +52,9 @@ import {
   type BeginFreshSessionLifecycleParams,
   type CloseSessionLifecycleFailureParams,
   type CloseSessionLifecycleParams,
+  type CompletedDeliveryIdentityAdmissionReason,
+  type QuarantineCompletedDeliveryIdentityAgentSessionParams,
+  type QuarantineCompletedDeliveryIdentityCheckpointParams,
   type ReactivateSessionLifecycleParams,
   type RetireExactSessionLifecycleParams,
   type RetireSessionLifecycleParams,
@@ -126,6 +129,18 @@ export type {
   TurnRecoverySourceIdentity,
   TurnRecoverySupervisorCounts,
 } from './turn-recovery-store.ts';
+export type {
+  CompletedDeliveryIdentityAdmissionReason,
+  QuarantineCompletedDeliveryIdentityAgentSessionParams,
+  QuarantineCompletedDeliveryIdentityCheckpointParams,
+} from './session-lifecycle-store.ts';
+
+export interface CompletedDeliveryIdentityAdmissionHealth {
+  unresolvedCount: number;
+  oldestTransitionAt: string | null;
+  maximumAttempts: number;
+  nextAction: 'fresh_inbound' | 'operator' | null;
+}
 
 const log = createChildLogger('durability');
 
@@ -442,6 +457,7 @@ type DurabilityStatements = {
   getOldestMaybeSentSubmittedAt: PreparedStatement;
   getRecentOutboundFailureEvidence: PreparedStatement;
   getLastRecoveryRunCompletedAt: PreparedStatement;
+  getCompletedDeliveryIdentityAdmissionHealth: PreparedStatement;
   insertRecoveryRun: PreparedStatement;
   selectNow: PreparedStatement;
 };
@@ -744,6 +760,13 @@ export class DurabilityEngine {
           AND completed_logical_turn_id IS NOT NULL
           AND completed_manager_id IS NOT NULL
           AND completed_generation IS NOT NULL
+          AND NOT EXISTS (
+            SELECT 1
+            FROM completed_delivery_identity_admissions AS admission
+            WHERE admission.target_kind = 'checkpoint'
+              AND admission.target_id = session_checkpoints.id
+              AND admission.state = 'quarantined'
+          )
         ORDER BY completed_inbound_seq DESC, id DESC
         LIMIT 1
       `),
@@ -754,7 +777,15 @@ export class DurabilityEngine {
       getResumableCheckpoints: prepare(
         `SELECT id, conversation_key, session_id, claude_pid, session_status
          FROM session_checkpoints
-         WHERE session_status IN ('active', 'suspended') AND session_id IS NOT NULL`,
+         WHERE session_status IN ('active', 'suspended')
+           AND session_id IS NOT NULL
+           AND NOT EXISTS (
+             SELECT 1
+             FROM completed_delivery_identity_admissions AS admission
+             WHERE admission.target_kind = 'checkpoint'
+               AND admission.target_id = session_checkpoints.id
+               AND admission.state = 'quarantined'
+           )`,
       ),
       markSessionOrphaned: prepare(
         `UPDATE session_checkpoints SET session_status = 'orphaned', updated_at = datetime('now') WHERE conversation_key = ?`,
@@ -1026,6 +1057,19 @@ export class DurabilityEngine {
       getLastRecoveryRunCompletedAt: prepare(
         `SELECT completed_at FROM recovery_runs ORDER BY id DESC LIMIT 1`,
       ),
+      getCompletedDeliveryIdentityAdmissionHealth: prepare(`
+        SELECT COUNT(*) AS unresolved_count,
+               MIN(last_transition_at) AS oldest_transition_at,
+               MAX(attempts) AS maximum_attempts,
+               CASE
+                 WHEN MAX(CASE WHEN next_action = 'operator' THEN 1 ELSE 0 END) = 1
+                   THEN 'operator'
+                 WHEN COUNT(*) > 0 THEN 'fresh_inbound'
+                 ELSE NULL
+               END AS next_action
+        FROM completed_delivery_identity_admissions
+        WHERE state = 'quarantined'
+      `),
       // #1789 companion fix: this INSERT sets completed_at at write time but
       // (until now) never set status, so under migration 45's
       // status DEFAULT 'started' a row born here was self-contradictory —
@@ -2064,6 +2108,18 @@ export class DurabilityEngine {
     return this.sessionLifecycle.updateExactSessionCheckpointStatus(params);
   }
 
+  quarantineCompletedDeliveryIdentityCheckpoint(
+    params: QuarantineCompletedDeliveryIdentityCheckpointParams,
+  ): void {
+    this.sessionLifecycle.quarantineCompletedDeliveryIdentityCheckpoint(params);
+  }
+
+  quarantineCompletedDeliveryIdentityAgentSession(
+    params: QuarantineCompletedDeliveryIdentityAgentSessionParams,
+  ): void {
+    this.sessionLifecycle.quarantineCompletedDeliveryIdentityAgentSession(params);
+  }
+
   getAllActiveCheckpoints(): ActiveSessionCheckpointRow[] {
     return this.statements.getAllActiveCheckpoints.all() as unknown as ActiveSessionCheckpointRow[];
   }
@@ -2909,6 +2965,24 @@ export class DurabilityEngine {
       counts.set(disposition, (counts.get(disposition) ?? 0) + row.count);
     }
     return counts;
+  }
+
+  getCompletedDeliveryIdentityAdmissionHealth(): CompletedDeliveryIdentityAdmissionHealth {
+    const row = this.statements.getCompletedDeliveryIdentityAdmissionHealth.get() as {
+      unresolved_count: number | bigint;
+      oldest_transition_at: string | null;
+      maximum_attempts: number | bigint | null;
+      next_action: string | null;
+    };
+    const nextAction = row.next_action === 'fresh_inbound' || row.next_action === 'operator'
+      ? row.next_action
+      : null;
+    return {
+      unresolvedCount: Number(row.unresolved_count),
+      oldestTransitionAt: row.oldest_transition_at,
+      maximumAttempts: row.maximum_attempts === null ? 0 : Number(row.maximum_attempts),
+      nextAction,
+    };
   }
 
   /**
