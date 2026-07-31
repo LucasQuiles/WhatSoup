@@ -231,6 +231,26 @@ describe('silence-manager corrupt-file handling', () => {
     expect(logWarn).toHaveBeenCalledOnce();
   });
 
+  it('classifies duplicate-instance rules as an invalid document', async () => {
+    mkdirSync(configDir(), { recursive: true });
+    const rule = {
+      instance: 'dup-line',
+      until: '2027-01-01T00:00:00Z',
+      reason: 'maintenance',
+      silencedBy: 'operator',
+      createdAt: '2026-07-30T00:00:00Z',
+    };
+    writeFileSync(silencesFile(), JSON.stringify([rule, rule]), { mode: 0o600 });
+    const { listActiveSilences } = await importManager();
+
+    expect(listActiveSilences()).toMatchObject({
+      availability: 'invalid',
+      rules: null,
+      reasonClass: 'invalid_document',
+    });
+    expect(logWarn).toHaveBeenCalledOnce();
+  });
+
   it('accepts valid ISO-8601 rule timestamps with an explicit UTC offset', async () => {
     mkdirSync(configDir(), { recursive: true });
     const createdAt = new Date(Date.now() - 60_000).toISOString().replace('Z', '+00:00');
