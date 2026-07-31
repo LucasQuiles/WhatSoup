@@ -1,6 +1,6 @@
 import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { existsSync, linkSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
+import { closeSync, existsSync, fsyncSync, linkSync, openSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 
 export type ProcessLockErrorReason = 'active' | 'stale' | 'corrupt';
 
@@ -184,7 +184,19 @@ export function acquireProcessLock(lockPath: string, options: AcquireProcessLock
   const isProcessAlive = options.isProcessAlive ?? defaultIsProcessAlive;
   const tempPath = `${lockPath}.${payload.pid}.${payload.token}.tmp`;
 
-  writeFileSync(tempPath, JSON.stringify(payload), { mode: 0o600, flag: 'wx' });
+  // #2288 M7: fsync the temp payload before linkSync so a crash between link
+  // and flush cannot leave the lock file present but empty — which would raise
+  // ProcessLockError('corrupt') and brick the lane until manual recovery.
+  const fd = openSync(tempPath, 'wx', 0o600);
+  try {
+    writeFileSync(fd, JSON.stringify(payload));
+    fsyncSync(fd);
+    closeSync(fd);
+  } catch (err) {
+    try { closeSync(fd); } catch { /* preserve original failure */ }
+    try { unlinkSync(tempPath); } catch { /* preserve original failure */ }
+    throw err;
+  }
   try {
     // linkSync is atomic. The loop performs at most one reclaim: if the existing
     // lock is provably from a previous boot, remove it and retry the link once.

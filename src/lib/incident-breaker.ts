@@ -1,7 +1,8 @@
 // src/lib/incident-breaker.ts
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { FaultClass } from './fault-classifier.ts';
+import { writeAtomicPrivateFileSync } from './private-fs.ts';
 
 export interface BreakerState {
   host: string;
@@ -52,9 +53,11 @@ export function loadBreakerState(dir: string, host: string, faultClass: FaultCla
 export function saveBreakerState(dir: string, state: BreakerState): void {
   mkdirSync(dir, { recursive: true });
   const file = stateFile(dir, state.host, state.faultClass);
-  const tmp = `${file}.tmp`;
-  writeFileSync(tmp, JSON.stringify(state), 'utf8');
-  renameSync(tmp, file); // atomic replace
+  // #2288 M6: crash-safe atomic write — openSync('wx', 0o600) + fsync + rename
+  // via the canonical writeAtomicPrivateFileSync helper. A crash mid-write can
+  // no longer leave a truncated/empty breaker file that loadBreakerState would
+  // silently swallow as a fresh (un-tripped) state.
+  writeAtomicPrivateFileSync(file, JSON.stringify(state), 'breaker state');
 }
 
 export function registerOnset(state: BreakerState, nowIso: string): void {

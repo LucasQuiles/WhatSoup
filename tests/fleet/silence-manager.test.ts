@@ -219,22 +219,21 @@ describe('silence-manager corrupt-file handling', () => {
     mkdirSync(configDir(), { recursive: true });
     const priorContents = '[{"instance":"prior-line"}]\n';
     writeFileSync(silencesFile(), priorContents, { mode: 0o600 });
-    const chmodCalls: Array<{ target: string; mode: number }> = [];
+    const fchmodCalls: Array<{ fd: number; mode: number }> = [];
     const actualFs = await vi.importActual<typeof import('node:fs')>('node:fs');
     vi.doMock('node:fs', () => ({
       ...actualFs,
-      chmodSync: vi.fn((target: string, mode: number) => {
-        chmodCalls.push({ target, mode });
-        throw new Error('simulated chmod failure');
+      fchmodSync: vi.fn((fd: number, mode: number) => {
+        fchmodCalls.push({ fd, mode });
+        throw new Error('simulated fchmod failure');
       }),
     }));
     const { addSilence } = await importManager();
 
-    expect(() => addSilence('new-line', 5, 'test', 'operator')).toThrow('simulated chmod failure');
+    expect(() => addSilence('new-line', 5, 'test', 'operator')).toThrow('simulated fchmod failure');
 
-    expect(chmodCalls).toHaveLength(1);
-    expect(chmodCalls[0]).toMatchObject({ mode: 0o600 });
-    expect(chmodCalls[0]?.target).toMatch(/\.fleet-silences\..+\.tmp$/);
+    expect(fchmodCalls.length).toBeGreaterThanOrEqual(1);
+    expect(fchmodCalls[0]).toMatchObject({ mode: 0o600 });
     expect(readFileSync(silencesFile(), 'utf-8')).toBe(priorContents);
     expect(readdirSync(configDir()).filter((entry) => entry.endsWith('.tmp'))).toEqual([]);
   });

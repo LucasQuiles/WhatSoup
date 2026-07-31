@@ -1,17 +1,13 @@
-import { randomUUID } from 'node:crypto';
 import {
-  chmodSync,
   existsSync,
-  mkdirSync,
   readFileSync,
-  renameSync,
   unlinkSync,
-  writeFileSync,
 } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 import { createChildLogger } from '../logger.ts';
 import { errorMessage } from '../lib/error-message.ts';
+import { writeAtomicPrivateFileSync } from '../lib/private-fs.ts';
 
 const log = createChildLogger('silence-manager');
 
@@ -51,22 +47,11 @@ function loadRules(): SilenceRule[] {
 }
 
 function saveRules(rules: SilenceRule[]): void {
-  if (!existsSync(CONFIG_DIR)) {
-    mkdirSync(CONFIG_DIR, { recursive: true, mode: 0o700 });
-  }
-  const tmpFile = join(CONFIG_DIR, `.fleet-silences.${process.pid}.${randomUUID()}.tmp`);
-  try {
-    writeFileSync(tmpFile, JSON.stringify(rules, null, 2) + '\n', { mode: 0o600 });
-    chmodSync(tmpFile, 0o600);
-    renameSync(tmpFile, SILENCES_FILE);
-  } catch (err) {
-    try {
-      unlinkSync(tmpFile);
-    } catch {
-      // intentional: best-effort temp cleanup must not mask the persistence failure being rethrown
-    }
-    throw err;
-  }
+  // #2288 M5: crash-safe atomic write via writeAtomicPrivateFileSync — adds the
+  // missing fsync before rename so a crash after rename but before flush cannot
+  // leave an empty/truncated silences file (which loadRules would silently
+  // treat as "no active silences", re-enabling deliberately suppressed alerts).
+  writeAtomicPrivateFileSync(SILENCES_FILE, JSON.stringify(rules, null, 2) + '\n', 'silence rules');
 }
 
 export function isInstanceSilenced(name: string): boolean {
