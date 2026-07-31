@@ -344,7 +344,7 @@ The fleet server's health poller probes each instance every 5 seconds and tracks
 
 ## Providers & Credentials
 
-The agent runtime supports a catalog of providers (`src/runtimes/agent/providers/provider-ids.json`): `claude-cli` (default), `codex-cli`, `gemini-cli`, `opencode-cli`, `openai-api`, and `anthropic-api`. An instance configures a primary provider and an optional fallback chain; primary-model probes verify usability before routing, and `GET /api/lines/:name/provider-status` reports per-instance readiness and fallback state. `GET /api/providers` lists the catalog and availability.
+The agent runtime supports a catalog of providers (`src/lib/provider-ids.json`): `claude-cli` (default), `codex-cli`, `gemini-cli`, `opencode-cli`, `openai-api`, and `anthropic-api`. An instance configures a primary provider and an optional fallback chain; primary-model probes verify usability before routing, and `GET /api/lines/:name/provider-status` reports per-instance readiness and fallback state. `GET /api/providers` lists the catalog and availability.
 
 Provider credentials are **write-only**: `PUT /api/credentials/:name` stores a secret, `POST /api/credentials/:name/verify` checks it against its provider, `DELETE /api/credentials/:name` removes it, and `GET /api/credentials/:name` deliberately returns `405` — credentials are never read back through the API. Secrets live in the keyring (or env) per the [Configuration Reference](docs/configuration.md).
 
