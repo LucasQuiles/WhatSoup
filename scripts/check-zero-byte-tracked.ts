@@ -47,6 +47,16 @@ export interface ZeroByteScan {
   filesExamined: number;
 }
 
+/**
+ * Deliberately NOT filtered for `.worktrees`, unlike check-insecure-tempfile.
+ * That guard walks the filesystem, so sibling lane checkouts under `.worktrees/`
+ * fell inside its scan and made one lane's push gate depend on another lane's
+ * content (twice — see the comment in that file). This one enumerates the git
+ * INDEX, and `.worktrees/` is gitignored, so a sibling checkout can never appear
+ * here: verified from inside a lane worktree, where `git ls-files` returns that
+ * lane's own tracked set and zero paths under `.worktrees/`. Adding a skip would
+ * be redundant, and a path-prefix skip would create a real blind spot.
+ */
 function trackedFiles(root: string): string[] {
   const out = execFileSync('git', ['ls-files', '-z'], {
     cwd: root,
