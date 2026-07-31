@@ -14,6 +14,7 @@ import type {
   SupportsInlineKeyboards, SupportsOutboundStatus,
 } from '../contract/index.ts';
 import { makeSubscription } from '../contract/subscription.ts';
+import { AdapterReasonCode } from '../contract/adapter-reason-codes.ts';
 import {
   ConversationNotFoundError, PayloadTooLargeError,
   AuthRequiredError, RateLimitedError, TransientProviderError, SendAmbiguousError,
@@ -154,12 +155,12 @@ export class InMemoryAdapter implements
   }
 
   injectAuthLoss(): void {
-    this.transitionTo({ state: 'auth_required', since: new Date(), reasonCode: 'in-memory-injected' });
+    this.transitionTo({ state: 'auth_required', since: new Date(), reasonCode: AdapterReasonCode.InMemoryInjected });
   }
 
   injectRateLimit(retryAfterMs: number): void {
     this.rateLimitRetryAfterMs = retryAfterMs;
-    this.transitionTo({ state: 'rate_limited', since: new Date(), reasonCode: 'in-memory-injected' });
+    this.transitionTo({ state: 'rate_limited', since: new Date(), reasonCode: AdapterReasonCode.InMemoryInjected });
   }
 
   injectAmbiguousFailure(operation: string): void {
