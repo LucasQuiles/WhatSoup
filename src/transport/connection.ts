@@ -2931,6 +2931,11 @@ export class ConnectionManager extends EventEmitter implements Messenger {
         }
       }
       this.log.fatal(marker, 'connection exhaustion limit reached — exiting for systemd restart');
+      // #2322 M4: drive shutdown() to completion before exiting. shutdown()'s
+      // body is entirely non-throwing (every fs/socket op is already
+      // internally best-effort or try/catch'd), so this cannot reject and
+      // needs no additional error handling here.
+      await this.shutdown();
       process.exit(1);
     }
 
