@@ -14,10 +14,12 @@ const fixtureDirs: string[] = [];
 
 /**
  * Build a minimal repo fixture with a `scripts/` dir, a `tests/scripts/` dir,
- * and a package.json whose `verify:push:branch` lists the given test paths.
+ * and a `scripts/push-gate.ts` manifest whose `CURATED_TEST_PATHS` lists the
+ * given test paths (the push-gate SSOT since #2224 — the guard text-parses
+ * the manifest so fixtures can simulate wired/unwired states).
  *
  * Each guard spec declares: the guard filename, whether a companion test file
- * is written, whether that test path is wired into verify:push:branch, and an
+ * is written, whether that test path is wired into the manifest, and an
  * optional allowlist comment body.
  */
 function makeFixture(
@@ -70,16 +72,14 @@ function makeFixture(
     }
   }
 
-  const verifyPushBranch = `npm run guard:foo && npm test -- ${wiredTestPaths.join(' ')} --pool=forks`;
-  writeFileSync(
-    path.join(dir, 'package.json'),
-    JSON.stringify(
-      { name: 'fixture', scripts: { 'verify:push:branch': verifyPushBranch } },
-      null,
-      2,
-    ),
-    'utf8',
-  );
+  const manifest = [
+    '// Fixture manifest mirroring scripts/push-gate.ts structure (#2224).',
+    'export const CURATED_TEST_PATHS = [',
+    ...wiredTestPaths.map((testPath) => `  '${testPath}',`),
+    '] as const;',
+    '',
+  ].join('\n');
+  writeFileSync(path.join(dir, 'scripts', 'push-gate.ts'), manifest, 'utf8');
 
   return dir;
 }
