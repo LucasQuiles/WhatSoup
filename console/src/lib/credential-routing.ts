@@ -4,13 +4,16 @@
  * only receives the key whose vendor matches the configured provider path
  * (spec: docs/specs/2026-07-05-onboarding-safety-firstrun-design.md).
  */
+import { asNonEmptyString } from './type-guards'
+
 export interface CredentialWrite { service: string; value: string }
 
 function explicitService(agentOptions: Record<string, unknown> | undefined): string | null {
   const pc = agentOptions?.providerConfig;
   if (pc && typeof pc === 'object' && !Array.isArray(pc)) {
     const s = (pc as Record<string, unknown>).apiKeyService;
-    if (typeof s === 'string' && s.trim().length > 0) return s.trim();
+    const trimmed = asNonEmptyString(s);
+    if (trimmed !== undefined) return trimmed;
   }
   return null;
 }

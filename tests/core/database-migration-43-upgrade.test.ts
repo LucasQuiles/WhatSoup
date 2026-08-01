@@ -1,13 +1,12 @@
 import { DatabaseSync } from 'node:sqlite';
 import { createHash } from 'node:crypto';
-import { mkdtempSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { describe, expect, it } from 'vitest';
 import { runMigration41 } from '../../src/core/database-migration-41.ts';
 import { runMigration42 } from '../../src/core/database-migration-42.ts';
 import { Database } from '../../src/core/database.ts';
 import { closeOperatorCatchupRecovery } from '../../src/core/recovery-catchup-closure.ts';
+import { trackTmpDirs } from '../helpers/tmp-dir.ts';
 
 interface DirectClosureFixture {
   planId: string;
@@ -22,11 +21,7 @@ interface DirectClosureFixture {
 }
 
 describe('migration 43 upgrade from historical schema 42', () => {
-  const tempDirs: string[] = [];
-
-  afterEach(() => {
-    for (const dir of tempDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
-  });
+  const tmp = trackTmpDirs('');
 
   it('upgrades an empty historical schema 42 with intact integrity and one migration receipt', () => {
     const path = schema42Path(true);
@@ -601,8 +596,7 @@ describe('migration 43 upgrade from historical schema 42', () => {
   });
 
   function schema42Path(historicalIndex: boolean): string {
-    const dir = mkdtempSync(join(tmpdir(), 'whatsoup-migration-43-upgrade-'));
-    tempDirs.push(dir);
+    const dir = tmp.make('whatsoup-migration-43-upgrade');
     const path = join(dir, 'bot.db');
     const current = new Database(path);
     current.open();
@@ -644,8 +638,7 @@ describe('migration 43 upgrade from historical schema 42', () => {
   }
 
   function currentSchemaPath(): string {
-    const dir = mkdtempSync(join(tmpdir(), 'whatsoup-migration-43-hardened-'));
-    tempDirs.push(dir);
+    const dir = tmp.make('whatsoup-migration-43-hardened');
     return join(dir, 'bot.db');
   }
 

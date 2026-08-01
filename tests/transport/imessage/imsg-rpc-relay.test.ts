@@ -2,19 +2,17 @@ import net, { type Server, type Socket } from 'node:net';
 import {
   chmodSync,
   lstatSync,
-  mkdtempSync,
   readFileSync,
-  rmSync,
   symlinkSync,
   unlinkSync,
   writeFileSync,
 } from 'node:fs';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { startImsgRpcRelay, type ImsgRpcRelay } from '../../../src/transport/imessage/imsg-rpc-relay.ts';
+import { trackTmpDirs } from '../../helpers/tmp-dir.ts';
 
-const roots: string[] = [];
+const tmp = trackTmpDirs('');
 const relays: ImsgRpcRelay[] = [];
 
 function fixture(version = '0.13.2'): {
@@ -23,8 +21,7 @@ function fixture(version = '0.13.2'): {
   readonly socketPath: string;
   readonly launchesPath: string;
 } {
-  const root = mkdtempSync(join(tmpdir(), 'whatsoup-imsg-relay-'));
-  roots.push(root);
+  const root = tmp.make('whatsoup-imsg-relay');
   const binary = join(root, 'fake-imsg.mjs');
   const socketPath = join(root, 'relay.sock');
   const launchesPath = join(root, 'launches.txt');
@@ -108,7 +105,6 @@ async function readLines(socket: Socket, count: number): Promise<string[]> {
 
 afterEach(async () => {
   await Promise.allSettled(relays.splice(0).map((relay) => relay.close()));
-  for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
 
 describe('imsg rpc relay', () => {

@@ -1,16 +1,10 @@
 import { execFileSync, spawnSync, type SpawnSyncReturns } from 'node:child_process';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { describe, expect, it } from 'vitest';
+import { trackTmpDirs } from '../helpers/tmp-dir.ts';
 
-const tmpDirs: string[] = [];
-
-afterEach(() => {
-  for (const dir of tmpDirs.splice(0)) {
-    fs.rmSync(dir, { recursive: true, force: true });
-  }
-});
+const tmp = trackTmpDirs('');
 
 function runWriterInWatchedChild(agentCwd: string): SpawnSyncReturns<string> {
   const source = `
@@ -42,8 +36,7 @@ function runWriterInWatchedChild(agentCwd: string): SpawnSyncReturns<string> {
 
 describe.skipIf(process.platform === 'win32')('OpenCode config descriptor boundary', () => {
   it('rejects a FIFO without blocking on a path-based read', () => {
-    const agentCwd = fs.mkdtempSync(path.join(os.tmpdir(), 'whatsoup-opencode-fifo-'));
-    tmpDirs.push(agentCwd);
+    const agentCwd = tmp.make('whatsoup-opencode-fifo');
     execFileSync('mkfifo', [path.join(agentCwd, 'opencode.json')]);
 
     const result = runWriterInWatchedChild(agentCwd);
@@ -58,8 +51,7 @@ describe.skipIf(process.platform === 'win32')('OpenCode config descriptor bounda
   });
 
   it('rejects a symlink without exposing either path', () => {
-    const agentCwd = fs.mkdtempSync(path.join(os.tmpdir(), 'whatsoup-opencode-link-'));
-    tmpDirs.push(agentCwd);
+    const agentCwd = tmp.make('whatsoup-opencode-link');
     const target = path.join(agentCwd, 'target.json');
     fs.writeFileSync(target, '{}', { mode: 0o600 });
     fs.symlinkSync(target, path.join(agentCwd, 'opencode.json'));

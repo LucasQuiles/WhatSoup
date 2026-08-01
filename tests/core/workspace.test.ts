@@ -1,7 +1,6 @@
-import { describe, it, expect, afterEach } from 'vitest';
+import { describe, it, expect } from 'vitest';
 import { join } from 'node:path';
-import { existsSync, mkdtempSync, rmSync, readFileSync, lstatSync, readlinkSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { existsSync, readFileSync, lstatSync, readlinkSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import {
   chatJidToWorkspace,
   provisionWorkspace,
@@ -12,8 +11,10 @@ import {
 } from '../../src/core/workspace.ts';
 import { toConversationKey } from '../../src/core/conversation-key.ts';
 import type { ProvisionOptions } from '../../src/core/workspace.ts';
+import { trackTmpDirs } from '../helpers/tmp-dir.ts';
 
 const CWD = '/instances/test-bot';
+const tmp = trackTmpDirs('');
 
 describe('chatJidToWorkspace', () => {
   it('DM @s.whatsapp.net: kind=dm, key=phone, path ends with users/<phone>', () => {
@@ -60,19 +61,8 @@ describe('toConversationKey (LID canonicalization)', () => {
 });
 
 describe('provisionWorkspace', () => {
-  let tmpDirs: string[] = [];
-
-  afterEach(() => {
-    for (const d of tmpDirs) {
-      rmSync(d, { recursive: true });
-    }
-    tmpDirs = [];
-  });
-
   function makeTmp(): string {
-    const d = mkdtempSync(join(tmpdir(), 'ws-test-'));
-    tmpDirs.push(d);
-    return d;
+    return tmp.make('ws-test');
   }
 
   function makeOpts(workspacePath: string, instanceCwd: string): ProvisionOptions {
@@ -423,19 +413,8 @@ describe('provisionWorkspace', () => {
 });
 
 describe('workspace.ts uncovered-branch coverage', () => {
-  let tmpDirs: string[] = [];
-
-  afterEach(() => {
-    for (const d of tmpDirs) {
-      rmSync(d, { recursive: true, force: true });
-    }
-    tmpDirs = [];
-  });
-
   function makeTmp(): string {
-    const d = mkdtempSync(join(tmpdir(), 'ws-test-cov-'));
-    tmpDirs.push(d);
-    return d;
+    return tmp.make('ws-test-cov');
   }
 
   // --- chatJidToWorkspace fallback branch (lines 61-66) ---

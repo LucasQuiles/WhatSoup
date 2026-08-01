@@ -1,9 +1,9 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { spawn } from 'node:child_process';
 import { createServer, type Socket } from 'node:net';
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { trackTmpDirs } from '../helpers/tmp-dir.ts';
 
 const HOOK = join(process.cwd(), 'deploy/hooks/verify-whatsapp-send.mjs');
 
@@ -24,13 +24,11 @@ interface MockServer {
   close: () => Promise<void>;
 }
 
-const tmpDirs: string[] = [];
+const tmp = trackTmpDirs('');
 const servers: MockServer[] = [];
 
-function makeTempDir(prefix: string): string {
-  const dir = mkdtempSync(join(tmpdir(), prefix));
-  tmpDirs.push(dir);
-  return dir;
+function makeTempDir(name: string): string {
+  return tmp.make(name);
 }
 
 async function runHook(payload: unknown, env: Record<string, string>): Promise<{
@@ -106,7 +104,7 @@ function mcpHandler(toolResult: unknown) {
 }
 
 async function startMockServer(handler: (request: JsonRpcRequest, socket: Socket) => unknown): Promise<MockServer> {
-  const dir = makeTempDir('rgp-send-verify-socket-');
+  const dir = makeTempDir('rgp-send-verify-socket');
   const socketPath = join(dir, 'whatsoup.sock');
   const received: JsonRpcRequest[] = [];
   const sockets = new Set<Socket>();
@@ -145,16 +143,13 @@ async function startMockServer(handler: (request: JsonRpcRequest, socket: Socket
 
 afterEach(async () => {
   await Promise.all(servers.splice(0).map((server) => server.close()));
-  for (const dir of tmpDirs.splice(0)) {
-    rmSync(dir, { recursive: true, force: true });
-  }
 });
 
 describe('verify-whatsapp-send hook', () => {
   const auditReceipt = '0123456789abcdef0123456789abcdef';
 
   it('confirms the exact successful receipt without destination fallback', async () => {
-    const home = makeTempDir('rgp-send-verify-home-');
+    const home = makeTempDir('rgp-send-verify-home');
     const server = await startMockServer(mcpHandler({
       outbound_sends: [{
         id: 42,
@@ -187,7 +182,7 @@ describe('verify-whatsapp-send hook', () => {
   });
 
   it('verifies a successful receipt when the sent text contains failure words', async () => {
-    const home = makeTempDir('rgp-send-verify-home-');
+    const home = makeTempDir('rgp-send-verify-home');
     const server = await startMockServer(mcpHandler({
       outbound_sends: [{
         audit_receipt: auditReceipt,
@@ -222,7 +217,7 @@ describe('verify-whatsapp-send hook', () => {
   });
 
   it('reports an unverified send once per session/tool/receipt without raw destination', async () => {
-    const home = makeTempDir('rgp-send-verify-home-');
+    const home = makeTempDir('rgp-send-verify-home');
     const server = await startMockServer(mcpHandler({ outbound_sends: [] }));
     const payload = {
       session_id: 'session-b',
@@ -259,7 +254,7 @@ describe('verify-whatsapp-send hook', () => {
   });
 
   it('skips reply_message because it has no audit receipt contract', async () => {
-    const home = makeTempDir('rgp-send-verify-home-');
+    const home = makeTempDir('rgp-send-verify-home');
     const server = await startMockServer(mcpHandler({ outbound_sends: [] }));
 
     const result = await runHook({
@@ -282,7 +277,7 @@ describe('verify-whatsapp-send hook', () => {
   });
 
   it('rejects mismatched or ambiguous rows for the requested receipt', async () => {
-    const home = makeTempDir('rgp-send-verify-home-');
+    const home = makeTempDir('rgp-send-verify-home');
     const server = await startMockServer(mcpHandler({
       outbound_sends: [
         {
@@ -323,7 +318,7 @@ describe('verify-whatsapp-send hook', () => {
   });
 
   it('degrades softly without leaking MCP errors when receipt lookup fails', async () => {
-    const home = makeTempDir('rgp-send-verify-home-');
+    const home = makeTempDir('rgp-send-verify-home');
     const server = await startMockServer((request) => {
       if (request.method === 'initialize') return { jsonrpc: '2.0', id: request.id, result: {} };
       return { jsonrpc: '2.0', id: request.id, error: { code: -32603, message: 'database busy' } };

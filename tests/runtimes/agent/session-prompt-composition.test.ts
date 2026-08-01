@@ -1,22 +1,20 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { afterEach, describe, expect, it } from 'vitest';
+import { describe, expect, it } from 'vitest';
 
 import { SessionManager } from '../../../src/runtimes/agent/session.ts';
 import type { Database } from '../../../src/core/database.ts';
 import type { Messenger } from '../../../src/core/types.ts';
+import { trackTmpDirs } from '../../helpers/tmp-dir.ts';
 
 const CHAT_JID = 'test@s.whatsapp.net';
 const BASE_TRANSPORT_PROMPT_BYTES = 1753;
 
-const tempRoots: string[] = [];
+const tmp = trackTmpDirs('');
 
 function makeTempRoot(): string {
-  const root = mkdtempSync(join(tmpdir(), 'whatsoup-session-prompt-'));
-  tempRoots.push(root);
-  return root;
+  return tmp.make('whatsoup-session-prompt');
 }
 
 function makeDb(): Database {
@@ -35,12 +33,6 @@ function makeMessenger(): Messenger {
     sendMedia: async () => ({ waMessageId: null }),
   };
 }
-
-afterEach(() => {
-  for (const root of tempRoots.splice(0)) {
-    rmSync(root, { recursive: true, force: true });
-  }
-});
 
 describe('SessionManager system prompt composition', () => {
   it('composes transport prelude, configured prompt, and instructionsPath with identity dedup', () => {

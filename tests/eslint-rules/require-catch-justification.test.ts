@@ -1,16 +1,16 @@
 import { ESLint } from 'eslint';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { afterEach, describe, expect, it } from 'vitest';
+import { describe, expect, it } from 'vitest';
 
 // @ts-expect-error -- local ESLint plugin is a .mjs module with no type declarations; expires 2026-12-31
 import fitnessPlugin from '../../eslint-rules/index.mjs';
 // @ts-expect-error -- local ESLint rule is a .mjs module with no type declarations; expires 2026-12-31
 import { parseCatchBaseline } from '../../eslint-rules/require-catch-justification.mjs';
 import tseslint from 'typescript-eslint';
+import { trackTmpDirs } from '../helpers/tmp-dir.ts';
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const REAL_BASELINE = resolve(
@@ -18,15 +18,10 @@ const REAL_BASELINE = resolve(
   'eslint-rules/catch-ratchet-baseline.json',
 );
 const SYNTH_PATH = 'src/__catch_probe__.ts';
-const tempRoots: string[] = [];
-
-afterEach(() => {
-  for (const dir of tempRoots.splice(0)) rmSync(dir, { recursive: true, force: true });
-});
+const tmp = trackTmpDirs('');
 
 function baselineFile(value: unknown): string {
-  const dir = mkdtempSync(join(tmpdir(), 'catch-ratchet-rule-'));
-  tempRoots.push(dir);
+  const dir = tmp.make('catch-ratchet-rule');
   const path = join(dir, 'baseline.json');
   writeFileSync(path, `${JSON.stringify(value)}\n`);
   return path;

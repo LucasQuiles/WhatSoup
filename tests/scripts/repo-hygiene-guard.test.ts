@@ -1,12 +1,12 @@
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
+import { trackTmpDirs } from '../helpers/tmp-dir.ts';
 import { cleanGitEnv } from '../../scripts/lib/guard-core.ts';
 import { canonicalizeBoundaryRun } from '../../scripts/lib/verification/boundary-run/shared.ts';
 import * as repoHygieneGuardModule from '../../scripts/repo-hygiene-guard.ts';
@@ -31,7 +31,7 @@ import {
 } from '../../scripts/repo-hygiene-guard.ts';
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
-const tempRepos: string[] = [];
+const tmp = trackTmpDirs('');
 const githubTokenFixture = ['ghp', 'RealLookingToken1234567890'].join('_');
 const privateHostLabelFixture = ['nuc', 'les'].join('');
 const privateHostDomainFixture = `${privateHostLabelFixture}.${['qui', 'les'].join('')}.${['stu', 'dio'].join('')}`;
@@ -109,8 +109,7 @@ function requireArtifactBindingFields(payload: unknown): { toolDigest: string; p
 }
 
 function makeBranchRepo(): string {
-  const repo = mkdtempSync(join(tmpdir(), 'repo-hygiene-branch-'));
-  tempRepos.push(repo);
+  const repo = tmp.make('repo-hygiene-branch');
   git(repo, ['init', '-b', 'main']);
   git(repo, ['config', 'user.name', 'WhatSoup Guard']);
   git(repo, ['config', 'user.email', 'guard@users.noreply.github.com']);
@@ -122,8 +121,7 @@ function makeBranchRepo(): string {
 }
 
 function makeEmptyRepo(): string {
-  const repo = mkdtempSync(join(tmpdir(), 'repo-hygiene-empty-'));
-  tempRepos.push(repo);
+  const repo = tmp.make('repo-hygiene-empty');
   git(repo, ['init', '-b', 'main']);
   git(repo, ['config', 'user.name', 'WhatSoup Guard']);
   git(repo, ['config', 'user.email', 'guard@users.noreply.github.com']);
@@ -133,9 +131,6 @@ function makeEmptyRepo(): string {
 afterEach(() => {
   vi.restoreAllMocks();
   vi.useRealTimers();
-  for (const repo of tempRepos.splice(0)) {
-    rmSync(repo, { recursive: true, force: true });
-  }
   process.exitCode = undefined;
 });
 
