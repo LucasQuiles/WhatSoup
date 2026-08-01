@@ -65,6 +65,7 @@ const log = createChildLogger('fleet');
 export const HTTP_LEGACY_QUERY_TOKEN_REMOVAL_DATE = '2026-06-30';
 
 export { DEFAULT_FLEET_PORT } from './constants.ts';
+import { DEFAULT_BIND_ADDRESS } from './constants.ts';
 import { assertSafeFleetBind } from './bind-guard.ts';
 import {
   createConsoleSessionStore,
@@ -1165,7 +1166,7 @@ export function createFleetServer(deps: FleetDeps) {
     wsServer,
     realtimePoller,
     start(port: number): void {
-      const host = process.env.FLEET_BIND_ADDRESS ?? '127.0.0.1';
+      const host = process.env.FLEET_BIND_ADDRESS ?? DEFAULT_BIND_ADDRESS;
       assertSafeFleetBind(host); // fail fast — before any pollers/timers start
       openIncidentStores(); // probe once so an open failure is visible before traffic
       discovery.startAutoRefresh();
