@@ -1482,19 +1482,20 @@ def test_parse_args_accepts_root_state_and_no_heal(tmp_path: Path):
 def test_main_success_and_unhealthy_exit_codes(tmp_path: Path, monkeypatch, capsys):
     config, _deps, _calls, _head = _fixture(tmp_path)
     monkeypatch.setattr(_mod, "default_config", lambda root, state_dir: config)
-    monkeypatch.setattr(_mod, "run_selfcheck", lambda cfg, heal_enabled=True: {"healthy": True, "action": "noop"})
+    monkeypatch.setattr(_mod, "run_selfcheck", lambda cfg, deps=None, heal_enabled=True: {"healthy": True, "action": "noop"})
     assert _mod.main(["--root", str(config.root), "--state-dir", str(config.state_dir)]) == 0
     assert '"healthy": true' in capsys.readouterr().out
 
-    monkeypatch.setattr(_mod, "run_selfcheck", lambda cfg, heal_enabled=True: {"healthy": False, "action": "escalate"})
+    monkeypatch.setattr(_mod, "run_selfcheck", lambda cfg, deps=None, heal_enabled=True: {"healthy": False, "action": "escalate"})
     assert _mod.main(["--root", str(config.root), "--state-dir", str(config.state_dir)]) == 1
 
 
 def test_main_error_writes_selfcheck_error_status(tmp_path: Path, monkeypatch, capsys):
-    config, _deps, _calls, _head = _fixture(tmp_path)
+    config, deps, _calls, _head = _fixture(tmp_path)
     monkeypatch.setattr(_mod, "default_config", lambda root, state_dir: config)
+    monkeypatch.setattr(_mod, "default_deps", lambda cfg: deps)
 
-    def fail(_cfg, heal_enabled=True):
+    def fail(_cfg, _deps=None, heal_enabled=True):
         raise RuntimeError("boom")
 
     monkeypatch.setattr(_mod, "run_selfcheck", fail)
@@ -1504,11 +1505,70 @@ def test_main_error_writes_selfcheck_error_status(tmp_path: Path, monkeypatch, c
 
 
 def test_main_error_still_returns_when_status_write_fails(tmp_path: Path, monkeypatch):
-    config, _deps, _calls, _head = _fixture(tmp_path)
+    config, deps, _calls, _head = _fixture(tmp_path)
     monkeypatch.setattr(_mod, "default_config", lambda root, state_dir: config)
-    monkeypatch.setattr(_mod, "run_selfcheck", lambda cfg, heal_enabled=True: (_ for _ in ()).throw(RuntimeError("boom")))
+    monkeypatch.setattr(_mod, "default_deps", lambda cfg: deps)
+    monkeypatch.setattr(_mod, "run_selfcheck", lambda cfg, deps=None, heal_enabled=True: (_ for _ in ()).throw(RuntimeError("boom")))
     monkeypatch.setattr(_mod, "atomic_write_json", lambda path, payload: (_ for _ in ()).throw(RuntimeError("write failed")))
     assert _mod.main(["--root", str(config.root), "--state-dir", str(config.state_dir)]) == 2
+
+
+def test_main_error_publishes_selfcheck_error_heartbeat(tmp_path: Path, monkeypatch):
+    """Issue #2469: a fatal cycle must publish its terminal verdict to the
+    heartbeat channel — otherwise the prior healthy heartbeat stays
+    authoritative centrally until it ages into generic staleness."""
+    config, deps, _calls, _head = _fixture(tmp_path)
+    pushed: list[dict] = []
+
+    def push_heartbeat(payload: dict) -> dict:
+        pushed.append(payload)
+        return {"attempted": True, "ok": True}
+
+    deps = _mod.SelfcheckDeps(
+        commit_exists=deps.commit_exists,
+        deploy=deps.deploy,
+        runtime_verify=deps.runtime_verify,
+        push_heartbeat=push_heartbeat,
+        now_epoch=deps.now_epoch,
+        hostname=deps.hostname,
+        service_status=deps.service_status,
+    )
+    monkeypatch.setattr(_mod, "default_config", lambda root, state_dir: config)
+    monkeypatch.setattr(_mod, "default_deps", lambda cfg: deps)
+
+    def fail(_cfg, _deps=None, heal_enabled=True):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(_mod, "run_selfcheck", fail)
+    assert _mod.main(["--root", str(config.root), "--state-dir", str(config.state_dir)]) == 2
+    assert len(pushed) == 1
+    assert pushed[0]["class"] == "selfcheck_error"
+    assert pushed[0]["healthy"] is False
+    assert pushed[0]["problemCount"] == 1
+    assert "problems" not in pushed[0]
+    heartbeat = json.loads(config.heartbeat_path.read_text(encoding="utf-8"))
+    assert heartbeat["kind"] == "bot-errors-selfcheck-heartbeat"
+    assert heartbeat["class"] == "selfcheck_error"
+    assert heartbeat["healthy"] is False
+    status = _read_status(config)
+    assert status["heartbeat"]["push"] == {"attempted": True, "ok": True}
+
+
+def test_main_error_heartbeat_publish_failure_cannot_crash_handler(tmp_path: Path, monkeypatch, capsys):
+    config, deps, _calls, _head = _fixture(tmp_path)
+    monkeypatch.setattr(_mod, "default_config", lambda root, state_dir: config)
+    monkeypatch.setattr(_mod, "default_deps", lambda cfg: deps)
+    monkeypatch.setattr(_mod, "run_selfcheck", lambda cfg, deps=None, heal_enabled=True: (_ for _ in ()).throw(RuntimeError("boom")))
+
+    def broken_publish(_config, _deps, _status):
+        raise RuntimeError("publish boom")
+
+    monkeypatch.setattr(_mod, "publish_heartbeat", broken_publish)
+    assert _mod.main(["--root", str(config.root), "--state-dir", str(config.state_dir)]) == 2
+    assert "selfcheck_error" in capsys.readouterr().err
+    status = _read_status(config)
+    assert status["class"] == "selfcheck_error"
+    assert "heartbeat_publish_failed:RuntimeError" in status["problems"]
 
 
 # ---------------------------------------------------------------------------

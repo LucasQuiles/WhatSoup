@@ -683,7 +683,7 @@ function validateCommandSurfaceConfig(
   if (surface['disabled'] !== undefined) {
     if (
       !Array.isArray(surface['disabled']) ||
-      !(surface['disabled'] as unknown[]).every((d) => typeof d === 'string' && d.trim() !== '')
+      !(surface['disabled'] as unknown[]).every((d) => isNonEmptyString(d))
     ) {
       return err(
         'agentOptions.commandSurface.disabled',
@@ -1245,7 +1245,7 @@ function validateAgentOptions(
   if (opts['provider'] === 'opencode-cli') {
     const pc = opts['providerConfig'];
     const apiKeyService = isRecord(pc) ? pc['apiKeyService'] : undefined;
-    const namesServiceExplicitly = typeof apiKeyService === 'string' && apiKeyService.trim() !== '';
+    const namesServiceExplicitly = isNonEmptyString(apiKeyService);
     // An explicit providerConfig.apiKeyService (validated above to a mapped
     // service + baseUrl) names the route directly, so the model prefix is not
     // consulted — exactly as buildChildEnv skips it. Otherwise the prefix must

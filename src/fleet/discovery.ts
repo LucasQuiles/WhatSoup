@@ -4,6 +4,7 @@ import * as path from 'node:path';
 import { VALID_TYPES } from '../instance-loader.ts';
 import { validateInstanceConfig } from '../core/agent-config-validator.ts';
 import { expandHomePath } from '../lib/home-path.ts';
+import { isNonEmptyString } from '../lib/type-guards.ts';
 import { createChildLogger } from '../logger.ts';
 import { DEFAULT_INSTANCE_HEALTH_PORT } from './constants.ts';
 import { configRoot as defaultConfigRoot, dataRoot, stateRoot } from './paths.ts';
@@ -156,7 +157,7 @@ export class FleetDiscovery {
           // home-default marker.
           agentCwds.set(
             name,
-            typeof agentOpts.cwd === 'string' && agentOpts.cwd.trim() !== ''
+            isNonEmptyString(agentOpts.cwd)
               ? expandHomePath(agentOpts.cwd)
               : HOME_DEFAULT_CWD,
           );

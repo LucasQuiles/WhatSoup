@@ -244,7 +244,7 @@ function expandTilde(p: string): string {
 function stringArrayProp(source: Record<string, unknown> | null | undefined, key: string): string[] {
   const value = source?.[key];
   return Array.isArray(value)
-    ? value.filter((item): item is string => typeof item === 'string' && item.trim() !== '')
+    ? value.filter((item): item is string => isNonEmptyString(item))
     : [];
 }
 
@@ -557,7 +557,7 @@ function warnConfigDeprecation(payload: Record<string, unknown>, message: string
 function resolvePineconeNamespaces(source: Record<string, unknown> | undefined): PineconeNamespaceConfig {
   const namespaces: PineconeNamespaceConfig = { ...DEFAULT_PINECONE_NAMESPACES };
   for (const [key, value] of Object.entries(source ?? {})) {
-    if (typeof value === 'string' && value.trim() !== '') {
+    if (isNonEmptyString(value)) {
       namespaces[key] = value;
     }
   }
@@ -1203,7 +1203,7 @@ export const config = {
   // must not widen inbound access-control authority.
   internalPeerJids: new Set<string>(
     (Array.isArray(instance?.internalPeerJids) ? instance.internalPeerJids : [])
-      .filter((jid: unknown): jid is string => typeof jid === 'string' && jid.trim() !== '')
+      .filter((jid: unknown): jid is string => isNonEmptyString(jid))
       .map((jid: string) => jid.trim()),
   ),
 
@@ -1217,7 +1217,7 @@ export const config = {
   // groups to prevent infinite echo loops between co-located bots.
   siblingPhones: new Set<string>(
     (Array.isArray(instance?.siblingPhones) ? instance.siblingPhones : [])
-      .filter((p: unknown) => typeof p === 'string' && (p as string).trim() !== '')
+      .filter((p: unknown): p is string => isNonEmptyString(p))
       .map((p: string) => normalizePhoneE164(p)),
   ),
 
@@ -1235,7 +1235,7 @@ export const config = {
   // Toggle groups on/off without losing messages. Add JIDs like "120363555555555002@g.us".
   pausedChats: new Set<string>(
     (Array.isArray(instance?.pausedChats) ? instance.pausedChats : [])
-      .filter((j: unknown) => typeof j === 'string' && (j as string).trim() !== ''),
+      .filter((j: unknown): j is string => isNonEmptyString(j)),
   ),
 
   // Paused-chat dispatch bypass — case-insensitive regex sources matched
