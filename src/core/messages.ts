@@ -1,7 +1,7 @@
 import type { Database } from './database.ts';
 import { resolveDecryptionFailure } from './database.ts';
 import type { ContentType } from './types.ts';
-import { normalizeUnixTimestampSeconds, nowUnixSec } from '../fleet/time-utils.ts';
+import { normalizeUnixTimestampSeconds, nowUnixSec } from './substrate/time.ts';
 
 // ---------------------------------------------------------------------------
 // MCP row shape — used by tool files that query the messages table directly

@@ -14,13 +14,6 @@
     "toLayer": "runtimes"
   },
   {
-    "file": "src/core/agent-config-validator.ts",
-    "line": 36,
-    "specifier": "../transport/registry.ts",
-    "fromLayer": "core",
-    "toLayer": "transport"
-  },
-  {
     "file": "src/core/health.ts",
     "line": 37,
     "specifier": "../runtimes/types.ts",
@@ -49,13 +42,6 @@
     "toLayer": "transport"
   },
   {
-    "file": "src/core/history-sync.ts",
-    "line": 28,
-    "specifier": "../fleet/time-utils.ts",
-    "fromLayer": "core",
-    "toLayer": "fleet"
-  },
-  {
     "file": "src/core/ingest.ts",
     "line": 8,
     "specifier": "../runtimes/types.ts",
@@ -70,52 +56,10 @@
     "toLayer": "transport"
   },
   {
-    "file": "src/core/media-retention.ts",
-    "line": 10,
-    "specifier": "../fleet/time-utils.ts",
-    "fromLayer": "core",
-    "toLayer": "fleet"
-  },
-  {
-    "file": "src/core/message-parser.ts",
-    "line": 14,
-    "specifier": "../fleet/time-utils.ts",
-    "fromLayer": "core",
-    "toLayer": "fleet"
-  },
-  {
-    "file": "src/core/messages.ts",
-    "line": 4,
-    "specifier": "../fleet/time-utils.ts",
-    "fromLayer": "core",
-    "toLayer": "fleet"
-  },
-  {
-    "file": "src/core/scheduler.ts",
-    "line": 8,
-    "specifier": "../fleet/time-utils.ts",
-    "fromLayer": "core",
-    "toLayer": "fleet"
-  },
-  {
-    "file": "src/core/substrate/time.ts",
-    "line": 2,
-    "specifier": "../../fleet/time-utils.ts",
-    "fromLayer": "core",
-    "toLayer": "fleet"
-  },
-  {
     "file": "src/lib/http.ts",
     "line": 2,
     "specifier": "../fleet/discovery.ts",
     "fromLayer": "lib",
-    "toLayer": "fleet"
-  },
-  {
-    "file": "src/mcp/tools/chat-management.ts",
-    "line": 13,
-    "specifier": "../../fleet/time-utils.ts",
-    "fromLayer": "mcp",
     "toLayer": "fleet"
   },
   {
@@ -145,20 +89,6 @@
     "specifier": "../../runtimes/agent/runtime.ts",
     "fromLayer": "mcp",
     "toLayer": "runtimes"
-  },
-  {
-    "file": "src/mcp/tools/scheduling.ts",
-    "line": 7,
-    "specifier": "../../fleet/time-utils.ts",
-    "fromLayer": "mcp",
-    "toLayer": "fleet"
-  },
-  {
-    "file": "src/mcp/tools/search.ts",
-    "line": 9,
-    "specifier": "../../fleet/db-reader.ts",
-    "fromLayer": "mcp",
-    "toLayer": "fleet"
   },
   {
     "file": "src/mcp/tools/voice.ts",
@@ -194,12 +124,5 @@
     "specifier": "../runtimes/chat/providers/types.ts",
     "fromLayer": "memory",
     "toLayer": "runtimes"
-  },
-  {
-    "file": "src/transport/connection.ts",
-    "line": 29,
-    "specifier": "../fleet/time-utils.ts",
-    "fromLayer": "transport",
-    "toLayer": "fleet"
   }
 ]
