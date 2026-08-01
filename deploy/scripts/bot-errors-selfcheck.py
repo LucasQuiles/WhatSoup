@@ -1074,8 +1074,12 @@ def run_selfcheck(config: SelfcheckConfig, deps: Optional[SelfcheckDeps] = None,
                             try:
                                 fresh_pin = sp.load_pin(config.manifest_path)
                                 fresh_approved = sp.load_approved_f10(config.ledger_path)
+                                fresh_approved_heads = sp.load_approved_heads(config.ledger_path)
                                 fresh_trusted, _fresh_reason = sp.verify_pin_trust(
-                                    fresh_pin, fresh_approved, deps.commit_exists
+                                    fresh_pin,
+                                    fresh_approved,
+                                    deps.commit_exists,
+                                    approved_heads=fresh_approved_heads,
                                 )
                             except sp.PinLoadError as exc:
                                 status["action"] = "current_changed"
