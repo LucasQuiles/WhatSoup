@@ -1,3 +1,5 @@
+import { nonEmptyString } from '../lib/type-guards.ts';
+
 export const TERMINAL_AUTH_FAILURE_CLASSES = [
   'pairing_required',
   'serverside_logout_irreversible',
@@ -14,7 +16,7 @@ export interface ExplicitAuthLossSignalInput {
 }
 
 function normalizedText(value: unknown): string | null {
-  return typeof value === 'string' && value.trim() !== '' ? value.trim() : null;
+  return nonEmptyString(value);
 }
 
 function normalizedSignalKey(value: unknown): string | null {

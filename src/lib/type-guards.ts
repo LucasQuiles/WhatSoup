@@ -31,3 +31,47 @@ export function isRecord(value: unknown): value is Record<string, unknown> {
 export function asRecord(value: unknown): Record<string, unknown> | undefined {
   return isRecord(value) ? value : undefined;
 }
+
+// ---------------------------------------------------------------------------
+// Non-empty-string type guards (#2211)
+// ---------------------------------------------------------------------------
+
+/**
+ * Branded non-empty string type. Constructable only through {@link nonEmptyString},
+ * which guarantees the value is a string with non-whitespace content (trimmed).
+ * Assignable to `string` (transparent brand) but cannot be constructed by accident.
+ */
+export type NonEmptyString = string & { readonly __nonEmpty: unique symbol };
+
+/**
+ * Narrow `unknown` to a trimmed non-empty string, else `null`.
+ *
+ * Returns the **trimmed** value when `value` is a string with non-whitespace
+ * content; `null` otherwise. This is the canonical non-empty-string coercer —
+ * the consolidation target for the 26+ open-coded `typeof v === 'string' &&
+ * v.trim() !== ''` sites across the codebase (#2211).
+ *
+ * Sites that intentionally return the **raw** (un-trimmed) value must use
+ * {@link nonEmptyStringRaw} instead. The raw-vs-trimmed distinction is the
+ * exact divergence this helper eliminates — each call-site now declares its
+ * intent by name rather than hiding it in a ternary branch.
+ */
+export function nonEmptyString(value: unknown): NonEmptyString | null {
+  return typeof value === 'string' && value.trim() !== ''
+    ? (value.trim() as NonEmptyString)
+    : null;
+}
+
+/**
+ * Narrow `unknown` to a non-empty (but **un-trimmed**) string, else `null`.
+ *
+ * Returns the **raw** value when `value` is a non-whitespace string; `null`
+ * otherwise. Use this at sites that historically returned `value` (not
+ * `value.trim()`) from the open-coded idiom — preserving the raw semantics
+ * is critical for values where leading/trailing whitespace is significant.
+ */
+export function nonEmptyStringRaw(value: unknown): string | null {
+  return typeof value === 'string' && value.trim() !== ''
+    ? value
+    : null;
+}

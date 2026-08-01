@@ -7,7 +7,7 @@ import {
 import type { BotErrorsCriticalAssetDiagnostic } from '../lib/bot-errors-outbox.ts';
 // Aliased to keep this module's call sites unchanged (asRecord returns
 // `undefined` for non-records; the one null-typed seam adapts with `?? null`).
-import { asRecord } from '../lib/type-guards.ts';
+import { asRecord, nonEmptyStringRaw } from '../lib/type-guards.ts';
 import { sqliteUtcToEpochMs } from '../lib/sqlite-time.ts';
 import { ALERT_THROTTLE_INTERVAL_MS, loadAlertThrottleDetailed, recordAlertThrottle } from './alert-throttle-store.ts';
 import { isInstanceSilenced } from './silence-manager.ts';
@@ -189,7 +189,7 @@ interface RecoveryClearWithholdingEpisode {
 }
 
 function stringValue(value: unknown): string | null {
-  return typeof value === 'string' && value.trim() !== '' ? value : null;
+  return nonEmptyStringRaw(value);
 }
 
 function nonNegativeIntegerValue(value: unknown): number | null {

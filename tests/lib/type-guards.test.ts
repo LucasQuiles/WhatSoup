@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { asRecord, isRecord } from '../../src/lib/type-guards.js';
+import { asRecord, isRecord, nonEmptyString, nonEmptyStringRaw, type NonEmptyString } from '../../src/lib/type-guards.js';
 
 /**
  * Contract-lock tests for isRecord.
@@ -119,5 +119,90 @@ describe('asRecord', () => {
     for (const probe of probes) {
       expect(asRecord(probe) !== undefined).toBe(isRecord(probe));
     }
+  });
+});
+
+/**
+ * Contract-lock tests for nonEmptyString / nonEmptyStringRaw (#2211).
+ *
+ * These are the consolidation targets for the 26+ open-coded
+ * `typeof v === 'string' && v.trim() !== ''` sites. The two variants
+ * exist because the open-coded idiom diverged: some sites returned the
+ * TRIMMED value, others returned the RAW value. Each helper pins one
+ * behavior by name.
+ */
+
+describe('nonEmptyString (returns TRIMMED)', () => {
+  describe('returns trimmed value for non-empty strings', () => {
+    it.each([
+      ['plain string', 'hello', 'hello'],
+      ['leading whitespace', '  hello', 'hello'],
+      ['trailing whitespace', 'hello  ', 'hello'],
+      ['both sides', '  hello  ', 'hello'],
+      ['single char', 'x', 'x'],
+    ])('%s', (_label, input, expected) => {
+      expect(nonEmptyString(input)).toBe(expected);
+    });
+  });
+
+  describe('returns null for empty/whitespace/non-string', () => {
+    it.each([
+      ['empty string', ''],
+      ['whitespace only', '   '],
+      ['tab only', '\t'],
+      ['newline only', '\n'],
+      ['mixed whitespace', ' \t\n '],
+      ['null', null],
+      ['undefined', undefined],
+      ['number', 123],
+      ['boolean', true],
+      ['object', {}],
+      ['array', []],
+    ])('%s', (_label, value) => {
+      expect(nonEmptyString(value)).toBeNull();
+    });
+  });
+
+  it('return type narrows to NonEmptyString (brand is transparent to string)', () => {
+    const v = nonEmptyString('test');
+    expect(v).not.toBeNull();
+    if (v !== null) {
+      // Brand is transparent: NonEmptyString is assignable to string.
+      const _: NonEmptyString = v;
+      expect(_.length).toBe(4);
+      expect(_.toUpperCase()).toBe('TEST');
+    }
+  });
+});
+
+describe('nonEmptyStringRaw (returns RAW, un-trimmed)', () => {
+  describe('returns raw (un-trimmed) value for non-empty strings', () => {
+    it.each([
+      ['plain string', 'hello', 'hello'],
+      ['leading whitespace', '  hello', '  hello'],
+      ['trailing whitespace', 'hello  ', 'hello  '],
+      ['both sides', '  hello  ', '  hello  '],
+    ])('%s', (_label, input, expected) => {
+      expect(nonEmptyStringRaw(input)).toBe(expected);
+    });
+  });
+
+  describe('returns null for empty/whitespace/non-string', () => {
+    it.each([
+      ['empty string', ''],
+      ['whitespace only', '   '],
+      ['null', null],
+      ['undefined', undefined],
+      ['number', 0],
+      ['object', {}],
+    ])('%s', (_label, value) => {
+      expect(nonEmptyStringRaw(value)).toBeNull();
+    });
+  });
+
+  it('differs from nonEmptyString on whitespace-padded input (raw vs trimmed)', () => {
+    const input = '  hello  ';
+    expect(nonEmptyString(input)).toBe('hello');
+    expect(nonEmptyStringRaw(input)).toBe('  hello  ');
   });
 });
