@@ -2,6 +2,7 @@ import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { SIGNAL } from '../../lib/signals.ts';
+import { bfsFromRoot, buildChildrenIndex, parsePsLines } from './process-tree-parse.ts';
 
 export interface ProcessTreeTarget {
   readonly pid?: number;
@@ -114,21 +115,23 @@ const DEFAULT_AMBIGUITY_RESOLVE_MS = 250;
 const activeTerminations = new Map<number, TerminationContext>();
 
 function parseProcessCensus(output: string): ProcessCensusRow[] {
-  const rows: ProcessCensusRow[] = [];
-  for (const line of output.split('\n').slice(1)) {
-    const match = line.match(
-      /^\s*(\d+)\s+(\d+)\s+(\d+)\s+(\S+\s+\S+\s+\S+\s+\S+\s+\S+)\s+(.*)\s*$/,
-    );
-    if (!match) continue;
-    rows.push({
-      pid: Number(match[1]),
-      ppid: Number(match[2]),
-      pgid: Number(match[3]),
-      startedAt: match[4],
-      command: match[5],
-    });
-  }
-  return rows;
+  return parsePsLines(
+    output,
+    (line) => {
+      const match = line.match(
+        /^\s*(\d+)\s+(\d+)\s+(\d+)\s+(\S+\s+\S+\s+\S+\s+\S+\s+\S+)\s+(.*)\s*$/,
+      );
+      if (!match) return null;
+      return {
+        pid: Number(match[1]),
+        ppid: Number(match[2]),
+        pgid: Number(match[3]),
+        startedAt: match[4],
+        command: match[5],
+      };
+    },
+    { skipHeaderLine: true },
+  );
 }
 
 function readProcessCensus(): ProcessCensusRow[] {
@@ -153,26 +156,9 @@ function snapshotOwnedTree(
   const root = uniqueRowForPid(rows, rootPid);
   if (!root) return [];
 
-  const childrenByParent = new Map<number, ProcessCensusRow[]>();
-  for (const row of rows) {
-    const children = childrenByParent.get(row.ppid) ?? [];
-    children.push(row);
-    childrenByParent.set(row.ppid, children);
-  }
-
-  const owned: OwnedProcessIdentity[] = [];
-  const queue: Array<{ row: ProcessCensusRow; depth: number }> = [{ row: root, depth: 0 }];
-  const seen = new Set<number>();
-  while (queue.length > 0) {
-    const next = queue.shift();
-    if (!next || seen.has(next.row.pid)) continue;
-    seen.add(next.row.pid);
-    owned.push({ ...next.row, depth: next.depth, generationMarker });
-    for (const child of childrenByParent.get(next.row.pid) ?? []) {
-      queue.push({ row: child, depth: next.depth + 1 });
-    }
-  }
-  return owned;
+  const childrenIndex = buildChildrenIndex(rows, (row) => row.ppid);
+  const walked = bfsFromRoot(childrenIndex, root, (row) => row.pid);
+  return walked.map(({ row, depth }) => ({ ...row, depth, generationMarker }));
 }
 
 function sameProcess(
