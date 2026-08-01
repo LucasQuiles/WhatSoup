@@ -13,6 +13,8 @@ import {
   type TurnTerminalResult,
 } from '../../../src/runtimes/agent/turn-terminal.ts';
 import {
+  DEFAULT_LEASE_SECONDS,
+  SCAN_PAGE_SIZE,
   TurnRecoverySupervisor,
   evaluateTurnRecoverySupervisorHeartbeat,
   type TurnRecoveryDispatchTarget,
@@ -20,6 +22,7 @@ import {
   type TurnRecoveryReplayDispatchResult,
   type TurnRecoverySupervisorDurability,
 } from '../../../src/runtimes/agent/turn-recovery-supervisor.ts';
+import { TurnRecoveryDeadman } from '../../../src/runtimes/agent/turn-recovery-deadman.ts';
 
 // ─── Fixture helpers (mirrors tests/core/turn-recovery-jobs.test.ts) ───────
 
@@ -805,6 +808,227 @@ describe('TurnRecoverySupervisor — BRICK-LAB-shaped regression', () => {
 
     const job = durability.getTurnRecoveryJob(jobId);
     expect(job).toMatchObject({ state: 'completed' });
+  });
+
+  // #2819: the deadman's staleness budget must be validated against how long
+  // a REAL scan can legitimately take, not just against a hand-built health
+  // snapshot (tests/runtimes/agent/turn-recovery-deadman.test.ts already
+  // covers the alerting path with synthetic snapshots; these two prove the
+  // BUDGET against a real supervisor driving a real multi-job scan through
+  // real durability, using PRODUCTION TurnRecoveryDeadman defaults — no
+  // staleAfterMs/startupGraceMs override, exactly as runtime.ts wires it).
+  describe('TurnRecoveryDeadman staleness budget (#2819)', () => {
+    // The exact pre-#2819 constants, kept here (not imported) so this test
+    // still proves the regression even after the source no longer exports
+    // them: constructing a deadman with these literal values must ALWAYS
+    // reproduce the false positive, regardless of what the fixed defaults
+    // derive to.
+    const PRE_FIX_STALE_AFTER_MS = 45_000;
+    const PRE_FIX_STARTUP_GRACE_MS = 45_000;
+
+    /**
+     * Read-and-clear a dispatch gate's release function. An object-property
+     * indirection (not a plain closured `let`) so TS's control-flow narrowing
+     * — which otherwise loses track of the non-null assignment happening
+     * inside the async dispatchReplay closure across loop iterations — never
+     * gets a chance to (mis)narrow this to `never`. Throws instead of a bare
+     * non-null assertion: a real timing bug here should fail loud, not
+     * silently invoke `undefined`.
+     */
+    function takeGateRelease(gate: { release: (() => void) | null }): () => void {
+      const release = gate.release;
+      gate.release = null;
+      if (release === null) throw new Error('dispatch gate has no pending release — test timing assumption broke');
+      return release;
+    }
+
+    it('a post-crash backlog of a full scan page, each replay taking ~1s, does not false-alarm during the startup grace window', async () => {
+      vi.useFakeTimers();
+      try {
+        const inboundSeqByJobId = new Map<number, number>();
+        for (let i = 0; i < SCAN_PAGE_SIZE; i += 1) {
+          const seeded = crashOneSourceTurn({ suffix: `backlog-${i}` });
+          inboundSeqByJobId.set(seeded.jobId, seeded.sourceInboundSeq);
+        }
+
+        // Jobs in a scan page are awaited strictly sequentially (the
+        // fair-scheduling loop in runScan()), so at most one dispatchReplay
+        // call is ever in flight — a single "current gate" reference is
+        // enough. Deferred, not a real setTimeout: each job's dispatch
+        // "completes" only when the test explicitly releases it, after fake
+        // time has been advanced by its simulated ~1s duration (mirrors the
+        // dispatchGate pattern in the lease-renewal tests above).
+        const currentDispatchGate: { release: (() => void) | null } = { release: null };
+        const supervisor = new TurnRecoverySupervisor({
+          instanceName: 'brick-instance',
+          durability: () => durability,
+          freshOwnerIdentity: () => ({
+            logicalTurnId: 'brick-recovery-owner-backlog',
+            managerId: 'brick-supervisor',
+            generation: 1,
+          }),
+          dispatchReplay: async (job): Promise<TurnRecoveryReplayDispatchResult> => {
+            await new Promise<void>((resolve) => { currentDispatchGate.release = resolve; });
+            durability.completeInbound(inboundSeqByJobId.get(job.id)!, 'response_sent');
+            return { kind: 'delivered' };
+          },
+        });
+
+        const emitAlertFixed = vi.fn(() => true);
+        const deadmanFixed = new TurnRecoveryDeadman({
+          instanceName: 'brick-instance',
+          enabled: () => true,
+          health: () => supervisor.health(),
+          emitAlert: emitAlertFixed,
+          clearAlert: vi.fn(() => true),
+          // No staleAfterMs/startupGraceMs override: exercises the PRODUCTION
+          // defaults derived from DEFAULT_LEASE_SECONDS.
+        });
+        const emitAlertPreFix = vi.fn(() => true);
+        const deadmanPreFix = new TurnRecoveryDeadman({
+          instanceName: 'brick-instance',
+          enabled: () => true,
+          health: () => supervisor.health(),
+          emitAlert: emitAlertPreFix,
+          clearAlert: vi.fn(() => true),
+          staleAfterMs: PRE_FIX_STALE_AFTER_MS,
+          startupGraceMs: PRE_FIX_STARTUP_GRACE_MS,
+        });
+
+        deadmanFixed.start();
+        deadmanPreFix.start();
+        const scanPromise = supervisor.scanOnce();
+        // Drive the full page's worth of ~1s-per-job sequential dispatches:
+        // flush microtasks so this iteration's dispatchReplay call has
+        // registered its gate, advance fake time by its simulated ~1s
+        // duration (the realistic per-job duration named in #2819's
+        // evidence — "a post-crash backlog of 50 queued jobs at ~1s each"),
+        // then release exactly that job's gate before the next one starts.
+        for (let i = 0; i < SCAN_PAGE_SIZE; i += 1) {
+          await vi.advanceTimersByTimeAsync(0);
+          await vi.advanceTimersByTimeAsync(1_000);
+          takeGateRelease(currentDispatchGate)();
+        }
+        // Margin for the deadman's own 15s check cadence to tick at least
+        // once more after the scan's genuine completion.
+        await vi.advanceTimersByTimeAsync(20_000);
+        const result = await scanPromise;
+        expect(result.completed).toBe(SCAN_PAGE_SIZE);
+
+        // GREEN: production-derived budget never false-alarms during the
+        // backlog's legitimate processing time.
+        expect(emitAlertFixed).not.toHaveBeenCalled();
+        // RED: the OLD 45s budget WOULD have false-alarmed `never_succeeded`
+        // partway through the exact same real scan — proving #2819 was a
+        // real defect in the constants, not just a hypothetical one.
+        expect(emitAlertPreFix).toHaveBeenCalledWith(
+          'brick-instance',
+          'turn_recovery_supervisor_unavailable',
+          'Turn-recovery supervisor unavailable',
+          expect.stringMatching(/^reason=never_succeeded/),
+          'critical',
+        );
+
+        deadmanFixed.stop();
+        deadmanPreFix.stop();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('a single legitimately slow replay spanning well past the old 45s budget does not false-alarm stale_success once the supervisor has an established healthy history', async () => {
+      vi.useFakeTimers();
+      try {
+        // Mutable, assigned only once the slow job is actually seeded below —
+        // dispatchReplay is never invoked before then (the first scanOnce()
+        // call has zero outstanding jobs), so reading it late is safe. Using
+        // ONE supervisor instance (not two) throughout is the point: its
+        // internal lastSuccessfulScanAt must carry over from the first,
+        // trivial, successful scan into the second, slow one — that IS "an
+        // established healthy history going stale", not a cold start (the
+        // cold-start/startup-grace path is the sibling test above).
+        let sourceInboundSeq: number | undefined;
+        // Deferred, not a real setTimeout: the dispatch "completes" only when
+        // the test explicitly releases it, after fake time has been advanced
+        // by the simulated ~90s duration (mirrors the dispatchGate pattern in
+        // the lease-renewal tests above).
+        const dispatchGate: { release: (() => void) | null } = { release: null };
+        const supervisor = new TurnRecoverySupervisor({
+          instanceName: 'brick-instance',
+          durability: () => durability,
+          freshOwnerIdentity: () => ({
+            logicalTurnId: 'brick-recovery-owner-slow',
+            managerId: 'brick-supervisor',
+            generation: 1,
+          }),
+          // DEFAULT_LEASE_SECONDS (120s) is left at its production default
+          // (not overridden) so real lease-renewal timing applies.
+          dispatchReplay: async (): Promise<TurnRecoveryReplayDispatchResult> => {
+            await new Promise<void>((resolve) => { dispatchGate.release = resolve; });
+            durability.completeInbound(sourceInboundSeq!, 'response_sent');
+            return { kind: 'delivered' };
+          },
+        });
+        await supervisor.scanOnce(); // zero outstanding jobs yet: a trivial success
+
+        const seeded = crashOneSourceTurn({ suffix: 'slow-replay' });
+        sourceInboundSeq = seeded.sourceInboundSeq;
+
+        const emitAlertFixed = vi.fn(() => true);
+        const deadmanFixed = new TurnRecoveryDeadman({
+          instanceName: 'brick-instance',
+          enabled: () => true,
+          health: () => supervisor.health(),
+          emitAlert: emitAlertFixed,
+          clearAlert: vi.fn(() => true),
+        });
+        const emitAlertPreFix = vi.fn(() => true);
+        const deadmanPreFix = new TurnRecoveryDeadman({
+          instanceName: 'brick-instance',
+          enabled: () => true,
+          health: () => supervisor.health(),
+          emitAlert: emitAlertPreFix,
+          clearAlert: vi.fn(() => true),
+          staleAfterMs: PRE_FIX_STALE_AFTER_MS,
+          startupGraceMs: PRE_FIX_STARTUP_GRACE_MS,
+        });
+
+        deadmanFixed.start();
+        deadmanPreFix.start();
+        const scanPromise = supervisor.scanOnce();
+        // Flush the synchronous claim -> dispatchReplay() call chain so the
+        // gate is registered, then advance fake time by the simulated ~90s
+        // duration (comfortably exceeds the 60s half-lease renewal interval
+        // named in #2819 while staying under one full DEFAULT_LEASE_SECONDS
+        // (120s) lease — this also drives the supervisor's own real
+        // lease-renewal timer, production code, not a test-side sleep).
+        await vi.advanceTimersByTimeAsync(0);
+        await vi.advanceTimersByTimeAsync(90_000);
+        takeGateRelease(dispatchGate)();
+        // Margin for the deadman's own check cadence to tick at least once
+        // more after the scan's genuine completion.
+        await vi.advanceTimersByTimeAsync(20_000);
+        const result = await scanPromise;
+        expect(result.completed).toBe(1);
+
+        // GREEN: production-derived budget survives a single ~90s replay.
+        expect(emitAlertFixed).not.toHaveBeenCalled();
+        // RED: the OLD 45s budget WOULD have false-alarmed `stale_success`
+        // against the SAME real, healthy, still-in-flight scan.
+        expect(emitAlertPreFix).toHaveBeenCalledWith(
+          'brick-instance',
+          'turn_recovery_supervisor_unavailable',
+          'Turn-recovery supervisor unavailable',
+          expect.stringMatching(/^reason=stale_success/),
+          'critical',
+        );
+
+        deadmanFixed.stop();
+        deadmanPreFix.stop();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
   });
 });
 
