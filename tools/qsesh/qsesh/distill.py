@@ -186,17 +186,20 @@ def distill(
     if not timed_events:
         raise _fail("distill-timestamp")
     parsed_times = [_timestamp(event.timestamp_utc) for event in timed_events]
-    if any(later < earlier for earlier, later in zip(parsed_times, parsed_times[1:])):
-        raise _fail("distill-timestamp-order")
-    started_at = timed_events[0].timestamp_utc
-    ended_at = timed_events[-1].timestamp_utc
+    # Wall-clock order is a separate coordinate system from canonical source
+    # order: valid append-ordered sessions carry timestamp inversions, so the
+    # session clock envelope is min/max over timed observations, never a
+    # monotonicity requirement. Canonical strings are unique per instant, so
+    # first-occurrence lookup is deterministic.
+    start_time = min(parsed_times)
+    end_time = max(parsed_times)
+    started_at = timed_events[parsed_times.index(start_time)].timestamp_utc
+    ended_at = timed_events[parsed_times.index(end_time)].timestamp_utc
     assert started_at is not None and ended_at is not None
-    duration = parsed_times[-1] - parsed_times[0]
+    duration = end_time - start_time
     duration_us = (
         duration.days * 86_400 + duration.seconds
     ) * 1_000_000 + duration.microseconds
-    if duration_us < 0:
-        raise _fail("distill-timestamp-order")
 
     event_counts: Counter[str] = Counter()
     meta_counts: Counter[str] = Counter()
