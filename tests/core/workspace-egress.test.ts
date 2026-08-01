@@ -1,24 +1,15 @@
-import { describe, it, expect, afterEach } from 'vitest';
+import { describe, it, expect } from 'vitest';
+import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { mkdtempSync, rmSync, readFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
 import { provisionWorkspace } from '../../src/core/workspace.ts';
 import type { ProvisionOptions } from '../../src/core/workspace.ts';
+import { trackTmpDirs } from '../helpers/tmp-dir.ts';
 
 describe('provisionWorkspace sandbox-policy.json allowedEgress', () => {
-  let tmpDirs: string[] = [];
-
-  afterEach(() => {
-    for (const d of tmpDirs) {
-      rmSync(d, { recursive: true, force: true });
-    }
-    tmpDirs = [];
-  });
+  const tmp = trackTmpDirs('');
 
   function makeTmp(): string {
-    const d = mkdtempSync(join(tmpdir(), 'ws-egress-test-'));
-    tmpDirs.push(d);
-    return d;
+    return tmp.make('ws-egress-test');
   }
 
   function makeOpts(workspacePath: string, instanceCwd: string, allowedEgress?: string[]): ProvisionOptions {
