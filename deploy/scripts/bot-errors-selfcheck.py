@@ -456,11 +456,13 @@ def acquire_lock(path: Path) -> Optional[int]:
 
 
 def release_lock(path: Path, fd: int) -> None:
+    """Release the flock held by ``fd``. The lock pathname is intentionally left
+    in place: flock ownership is descriptor-scoped, so a leftover file with no
+    live holder is not a stale lock (see ``acquire_lock``). Unlinking here would
+    let a fresh acquirer create a new inode at the same path while an earlier
+    contender may still hold an fd opened against the prior inode, splitting the
+    lock identity across two inodes and allowing concurrent holders (#2474)."""
     os.close(fd)  # closing the fd releases the flock
-    try:
-        path.unlink()
-    except FileNotFoundError:
-        pass
 
 
 def current_bundle_path(current_link: Path) -> Path:

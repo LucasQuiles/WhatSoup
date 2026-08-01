@@ -4831,6 +4831,9 @@ describe('ops.ts uncovered-branch coverage', () => {
 
   // ---- Line 969-971: cleanupPartial restores a pre-existing CLAUDE.md from snapshot ----
   it('handleCreateLine restores a pre-existing CLAUDE.md on create failure (lines 969-970)', async () => {
+    if (typeof process.getuid === 'function' && process.getuid() === 0) {
+      return;
+    }
     const homeTmp = path.join(os.homedir(), '.whatsoup-test-tmp');
     fs.mkdirSync(homeTmp, { recursive: true });
     const agentCwd = fs.mkdtempSync(path.join(homeTmp, 'ops-leaf-restore-'));

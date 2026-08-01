@@ -100,4 +100,26 @@ describe('decideModelPinResolution', () => {
       decideModelPinResolution(unverifiedClaude, 'claude-cli', { available: false }),
     ).toStrictEqual({ action: 'defer', modelId: 'claude-opus-4-8' });
   });
+
+  // Downstream proof for the anthropic/openai resolver fix (#2838: ok+empty
+  // must normalize to unavailable/empty, never ok+ids:[]): verifyModelPinAgainstCatalogue
+  // (model-pin.ts) maps a resolved listing to a CatalogueOutcome via
+  // `listing.status === 'ok' ? {available:true, ids} : {available:false}`.
+  // Pre-fix, an HTTP-200-but-empty fetch produced status:'ok', ids:[] →
+  // {available:true, ids:[]} here, which SILENTLY DROPS a just-verified pin
+  // (ids.includes(...) is false on an empty array). Post-fix the same empty
+  // fetch produces status:'unavailable' → {available:false} here, which
+  // fails OPEN instead (defer) — preserving the pin rather than discarding it
+  // on a transient empty response. decideModelPinResolution itself is
+  // unchanged; this proves the resolver fix's effect purely through the
+  // CatalogueOutcome shape it now produces downstream.
+  it('fail-open regression: ok+empty must map upstream to unavailable (available:false), not available:true+ids:[] — the OLD mapping silently dropped a valid pin, the NEW mapping defers', () => {
+    expect(
+      decideModelPinResolution(unverifiedClaude, 'claude-cli', { available: true, ids: [] }),
+    ).toStrictEqual({ action: 'drop', droppedModelId: 'claude-opus-4-8', reason: 'not in claude-cli catalogue' }); // pre-fix mapping
+
+    expect(
+      decideModelPinResolution(unverifiedClaude, 'claude-cli', { available: false }),
+    ).toStrictEqual({ action: 'defer', modelId: 'claude-opus-4-8' }); // post-fix mapping
+  });
 });

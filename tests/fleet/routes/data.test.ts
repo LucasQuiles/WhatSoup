@@ -1438,6 +1438,9 @@ describe('handleCheckDirectory', () => {
   });
 
   it('reports an existing read-only directory as not writable', () => {
+    if (typeof process.getuid === 'function' && process.getuid() === 0) {
+      return;
+    }
     const roDir = path.join(process.env.HOME!, 'readonly');
     fs.mkdirSync(roDir);
     fs.chmodSync(roDir, 0o555);

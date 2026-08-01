@@ -1809,11 +1809,16 @@ def main(argv: list[str]) -> int:
         print(json.dumps({"schemaVersion": 1, "healthy": False, "class": "fleet_sentinel_error", "problems": [str(exc)]}, sort_keys=True), file=sys.stderr)
         return 2
     finally:
+        # The lock pathname is intentionally left in place: flock ownership is
+        # descriptor-scoped, so a leftover file with no live holder is not a
+        # stale lock. Unlinking here would let a fresh acquirer create a new
+        # inode at the same path while an earlier contender may still hold an
+        # fd opened against the prior inode, splitting the lock identity across
+        # two inodes and allowing concurrent holders (#2474).
         try:
             fcntl.flock(lock_fd, fcntl.LOCK_UN)
             os.close(lock_fd)
-            lock_path.unlink()
-        except (OSError, FileNotFoundError):
+        except OSError:
             pass
     print(json.dumps(result, sort_keys=True))
     if result_requires_attention(result):

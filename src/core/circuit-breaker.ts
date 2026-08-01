@@ -1,6 +1,7 @@
 import type { Logger } from 'pino';
 
-type CircuitState = 'closed' | 'open' | 'half-open';
+/** Canonical circuit-breaker state union (#2249 SSOT — the sole definition; no consumer may re-declare its own copy). */
+export type CircuitState = 'closed' | 'open' | 'half-open';
 
 /**
  * Simple in-memory circuit breaker.

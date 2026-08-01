@@ -5,6 +5,7 @@ import type { LLMProvider } from '../providers/types.ts';
 import type { StoredMessage } from '../../../core/messages.ts';
 import { RAW_OUTPUT_TRUNCATE, truncateRaw } from './raw-output.ts';
 import { stripJsonFences } from '../../../lib/json-fences.ts';
+import { EnrichmentError, type EnrichmentErrorStage, type EnrichmentErrorDetails } from './errors.ts';
 
 const log = createChildLogger('enrichment');
 
@@ -16,51 +17,16 @@ const log = createChildLogger('enrichment');
  * Raised by {@link extractFacts} only when the caller opts into `strict: true`
  * AND an "ambiguous empty" is detected — i.e. an empty result that cannot be
  * distinguished from a legitimate "no facts" reply. A legitimate empty (model
- * returned `[]`, or no input messages) never raises.
+ * returned `[]`, or no input messages) never raises. The `schema-items-all-dropped`
+ * stage catches the 2026-04-18 regression where qwen3:32b-tuned returned
+ * `[{"fact":"..."}]`.
  *
- * Stage meanings:
- * - `provider-call`: the LLM provider threw before returning a response.
- * - `json-parse`: the response body failed `JSON.parse`.
- * - `schema-shape`: the parsed top-level is not a JSON array.
- * - `schema-items-all-dropped`: parsed array is non-empty but 100% of entries
- *   were schema-invalid (missing `text`, wrong type, etc.). This catches the
- *   2026-04-18 regression where qwen3:32b-tuned returned `[{"fact":"..."}]`.
- *
- * Intentionally no shared base class with ValidationError — each module stays
- * self-contained. Future callers handle both types via separate `instanceof`
- * branches (see backfill-enrichment.ts).
+ * See {@link EnrichmentError} for the shared stage contract and why this
+ * stays a distinct subclass rather than a discriminated single class.
  */
-export class ExtractionError extends Error {
-  public readonly stage:
-    | 'provider-call'
-    | 'json-parse'
-    | 'schema-shape'
-    | 'schema-items-all-dropped';
-  public readonly details: {
-    cause?: Error;
-    rawOutput?: string;
-    droppedCount?: number;
-    totalCount?: number;
-    sampleItem?: unknown;
-  };
-
-  constructor(
-    stage:
-      | 'provider-call'
-      | 'json-parse'
-      | 'schema-shape'
-      | 'schema-items-all-dropped',
-    details: {
-      cause?: Error;
-      rawOutput?: string;
-      droppedCount?: number;
-      totalCount?: number;
-      sampleItem?: unknown;
-    } = {},
-  ) {
-    super(`extraction failed: ${stage}`);
-    this.stage = stage;
-    this.details = details;
+export class ExtractionError extends EnrichmentError {
+  constructor(stage: EnrichmentErrorStage, details: EnrichmentErrorDetails = {}) {
+    super('extraction', stage, details);
     this.name = 'ExtractionError';
   }
 }
