@@ -21,6 +21,7 @@
 
 import { execFile } from 'node:child_process';
 import { createChildLogger } from '../../logger.ts';
+import { nonEmptyStringRaw } from '../../lib/type-guards.ts';
 
 const log = createChildLogger('tree-liveness');
 
@@ -55,7 +56,7 @@ function execPs(args: string[]): Promise<string | null> {
     // `ps` writes warnings or errors to stderr (even with exit 0), the stdout
     // may be a partial census — treat it as unreliable and fail closed (#2235).
     execFile('ps', args, { timeout: 4_000 }, (err, stdout, stderr) => {
-      if (err !== null || (typeof stderr === 'string' && stderr.trim() !== '')) {
+      if (err !== null || nonEmptyStringRaw(stderr) !== null) {
         resolve(null);
         return;
       }

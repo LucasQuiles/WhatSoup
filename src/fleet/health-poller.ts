@@ -7,7 +7,7 @@ import {
 import type { BotErrorsCriticalAssetDiagnostic } from '../lib/bot-errors-outbox.ts';
 // Aliased to keep this module's call sites unchanged (asRecord returns
 // `undefined` for non-records; the one null-typed seam adapts with `?? null`).
-import { asRecord, nonEmptyStringRaw } from '../lib/type-guards.ts';
+import { asRecord, nonEmptyString, nonEmptyStringRaw } from '../lib/type-guards.ts';
 import { sqliteUtcToEpochMs } from '../lib/sqlite-time.ts';
 import { ALERT_THROTTLE_INTERVAL_MS, loadAlertThrottleDetailed, recordAlertThrottle } from './alert-throttle-store.ts';
 import { isInstanceSilenced } from './silence-manager.ts';
@@ -307,8 +307,8 @@ function classifyHealthSnapshot(
 
   const healthStatus = stringValue(health.status);
   const generatedAtRaw = health.generated_at;
-  const generatedAtMs = typeof generatedAtRaw === 'string' && generatedAtRaw.trim() !== ''
-    ? Date.parse(generatedAtRaw)
+  const generatedAtMs = nonEmptyStringRaw(generatedAtRaw) !== null
+    ? Date.parse(generatedAtRaw as string)
     : Number.NaN;
   const whatsapp = asRecord(health.whatsapp);
   const connected = booleanValue(whatsapp?.connected);
@@ -1370,8 +1370,9 @@ export class HealthPoller {
 
   private readNumber(value: unknown): number | null {
     if (typeof value === 'number' && Number.isFinite(value)) return value;
-    if (typeof value === 'string' && value.trim() !== '') {
-      const parsed = Number(value);
+    const strValue = nonEmptyStringRaw(value);
+    if (strValue !== null) {
+      const parsed = Number(strValue);
       if (Number.isFinite(parsed)) return parsed;
     }
     return null;
@@ -1391,11 +1392,10 @@ export class HealthPoller {
     const runtime = this.readRecord(health['runtime']);
     const agent = this.readRecord(runtime?.['agent']);
     const fallbackReason = instance?.['fallbackReason'];
-    const effectiveProvider = instance?.['effectiveProvider'];
+    const effectiveProvider = nonEmptyString(instance?.['effectiveProvider']);
     return whatsapp?.['connected'] === true
       && connection?.['state'] === 'connected'
-      && typeof effectiveProvider === 'string'
-      && effectiveProvider.trim() !== ''
+      && effectiveProvider !== null
       && this.readNumber(instance?.['fallbackActiveUntil']) !== null
       && ['usage-limit', 'rate-limit', 'session-limit'].includes(String(fallbackReason ?? ''))
       && (this.readNumber(instance?.['fallbackTurnsServed']) ?? 0) > 0
@@ -2172,8 +2172,9 @@ export class HealthPoller {
   }
 
   private readTimestampMs(value: unknown): number | null {
-    if (typeof value !== 'string' || value.trim() === '') return null;
-    return sqliteUtcToEpochMs(value.trim());
+    const ts = nonEmptyString(value);
+    if (ts === null) return null;
+    return sqliteUtcToEpochMs(ts);
   }
 
   private trackActiveAlertSource(name: string, source: string, emitted: boolean): void {

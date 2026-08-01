@@ -1,5 +1,5 @@
 /**
- * Arch ratchet: typeof+trim non-empty-string SSOT concentration (#2211).
+ * Arch ratchet: typeof+trim non-empty-string SSOT concentration (#2211, #2849).
  *
  * The open-coded `typeof v === 'string' && v.trim() !== ''` idiom was
  * consolidated into `nonEmptyString()` / `nonEmptyStringRaw()` in
@@ -8,7 +8,7 @@
  *
  * The remaining sites are either:
  *  - Boolean-returning predicates (not value coercers — different shape)
- *  - Inline clauses inside larger logic (#2849 scope)
+ *  - Inline clauses inside larger logic (other variant patterns — #2849 scope)
  *  - Multi-arg helpers with additional logic beyond the bare idiom
  *
  * When a site is migrated, lower EXPECTED_BASELINE by the number of sites
@@ -29,8 +29,15 @@ const PATTERN = /typeof\s+\w+\s*===\s*['"]string['"]\s*&&\s*\w+\.trim\(\)\s*!==\
 /**
  * Current baseline of open-coded typeof+trim sites outside type-guards.ts.
  * Lower this when migrating sites to nonEmptyString/nonEmptyStringRaw.
+ *
+ * History:
+ *  - 21: initial baseline at #2211 landing (named-function migrations only).
+ *  - 0:  #2849 variant-1 batch migrated all remaining inline `typeof === 'string'
+ *        && v.trim() !== ''` sites in src/. Remaining #2849 scope uses other
+ *        variant patterns (.length, truthy, cast) not matched by this ratchet,
+ *        plus console/src sites (this ratchet scans src/ only).
  */
-const EXPECTED_BASELINE = 21;
+const EXPECTED_BASELINE = 0;
 
 function countOpenCodedSites(): { total: number; perFile: Record<string, number> } {
   const perFile: Record<string, number> = {};

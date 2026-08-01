@@ -2,7 +2,7 @@ import { mkdirSync } from 'node:fs';
 import { isAbsolute, join } from 'node:path';
 import { homedir } from 'node:os';
 import { normalizePhoneE164, normalizePhoneE164Wire } from './lib/phone.ts';
-import { asRecord } from './lib/type-guards.ts';
+import { asRecord, nonEmptyString, nonEmptyStringRaw } from './lib/type-guards.ts';
 import { migrateLegacyMemoryConfig } from './config-memory-migration.ts';
 import type { Profile } from './core/profiles.ts';
 import { VALID_ACCESS_MODES, VALID_GROUP_SENDER_POLICIES, type AccessMode, type GroupSenderPolicy } from './instance-loader.ts';
@@ -188,7 +188,7 @@ function positiveIntEnv(key: string, fallback: number): number {
 
 function stringProp(source: Record<string, unknown> | undefined, key: string): string | undefined {
   const value = source?.[key];
-  return typeof value === 'string' && value.trim() !== '' ? value : undefined;
+  return nonEmptyStringRaw(value) ?? undefined;
 }
 
 function numberProp(source: Record<string, unknown> | undefined, key: string, fallback: number): number {
@@ -244,7 +244,7 @@ function expandTilde(p: string): string {
 function stringArrayProp(source: Record<string, unknown> | null | undefined, key: string): string[] {
   const value = source?.[key];
   return Array.isArray(value)
-    ? value.filter((item): item is string => typeof item === 'string' && item.trim() !== '')
+    ? value.filter((item): item is string => nonEmptyString(item) !== null)
     : [];
 }
 
@@ -259,13 +259,14 @@ function stringRecordProp(source: Record<string, unknown> | null | undefined, ke
   const result: Record<string, string> = {};
   for (const [rawKey, rawValue] of Object.entries(obj)) {
     const alias = rawKey.trim();
-    if (alias === '' || typeof rawValue !== 'string' || rawValue.trim() === '') {
+    const valTrimmed = nonEmptyString(rawValue);
+    if (alias === '' || valTrimmed === null) {
       throw new ConfigValidationError(`${key} must be an object of non-empty string values`);
     }
     if (result[alias] !== undefined) {
       throw new ConfigValidationError(`${key} contains duplicate alias after trimming: ${alias}`);
     }
-    result[alias] = rawValue.trim();
+    result[alias] = valTrimmed;
   }
   return result;
 }
@@ -557,8 +558,9 @@ function warnConfigDeprecation(payload: Record<string, unknown>, message: string
 function resolvePineconeNamespaces(source: Record<string, unknown> | undefined): PineconeNamespaceConfig {
   const namespaces: PineconeNamespaceConfig = { ...DEFAULT_PINECONE_NAMESPACES };
   for (const [key, value] of Object.entries(source ?? {})) {
-    if (typeof value === 'string' && value.trim() !== '') {
-      namespaces[key] = value;
+    const nsValue = nonEmptyStringRaw(value);
+    if (nsValue !== null) {
+      namespaces[key] = nsValue;
     }
   }
   return namespaces;
@@ -1203,7 +1205,7 @@ export const config = {
   // must not widen inbound access-control authority.
   internalPeerJids: new Set<string>(
     (Array.isArray(instance?.internalPeerJids) ? instance.internalPeerJids : [])
-      .filter((jid: unknown): jid is string => typeof jid === 'string' && jid.trim() !== '')
+      .filter((jid: unknown): jid is string => nonEmptyString(jid) !== null)
       .map((jid: string) => jid.trim()),
   ),
 

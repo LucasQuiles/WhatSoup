@@ -12,6 +12,7 @@ import type {
   ProviderTurnTerminalStatus,
 } from '../stream-parser.ts';
 import { type JsonObject, isRecord, stringifyValue, extractMessage, extractTokenCounts } from './parser-utils.ts';
+import { nonEmptyString } from '../../../lib/type-guards.ts';
 
 // ─── Item helpers ─────────────────────────────────────────────────────────────
 
@@ -270,11 +271,11 @@ function handleResponse(id: unknown, result: unknown): AgentEvent {
   if (isRecord(result)) {
     const turn = result['turn'];
     if (isRecord(turn)) {
-      const turnId = turn['id'];
+      const turnIdRaw = turn['id'];
+      const turnId = nonEmptyString(turnIdRaw);
       if (
         (typeof id === 'string' || typeof id === 'number')
-        && typeof turnId === 'string'
-        && turnId.trim() !== ''
+        && turnId !== null
       ) {
         return {
           type: 'provider_turn_accepted',

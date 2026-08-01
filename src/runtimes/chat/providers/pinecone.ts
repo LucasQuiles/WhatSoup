@@ -4,6 +4,7 @@ import { config } from '../../../config.ts';
 import { createChildLogger } from '../../../logger.ts';
 import { WhatSoupError as AppError } from '../../../errors.ts';
 import { truncateForRerank } from '../../../lib/text-utils.ts';
+import { nonEmptyString, nonEmptyStringRaw } from '../../../lib/type-guards.ts';
 import { resolveApiKey } from '../../../lib/api-key-resolver.ts';
 import { emitAlertChecked, clearAlertSourceChecked } from '../../../lib/emit-alert.ts';
 import { CircuitBreaker } from '../../../core/circuit-breaker.ts';
@@ -246,7 +247,7 @@ export async function getPineconeReadiness(indexName: string = config.pineconeIn
 function configuredPineconeApiKeyEnv(): string {
   const memory = (config as { memory?: { pinecone?: { apiKeyEnv?: string } } }).memory;
   const apiKeyEnv = memory?.pinecone?.apiKeyEnv;
-  return typeof apiKeyEnv === 'string' && apiKeyEnv.trim() !== '' ? apiKeyEnv : 'PINECONE_API_KEY';
+  return nonEmptyStringRaw(apiKeyEnv) ?? 'PINECONE_API_KEY';
 }
 
 // Optional keyring service name for the Pinecone API key. When set (e.g.
@@ -255,7 +256,7 @@ function configuredPineconeApiKeyEnv(): string {
 function configuredPineconeApiKeyService(): string | undefined {
   const memory = (config as { memory?: { pinecone?: { apiKeyService?: string } } }).memory;
   const apiKeyService = memory?.pinecone?.apiKeyService;
-  return typeof apiKeyService === 'string' && apiKeyService.trim() !== '' ? apiKeyService : undefined;
+  return nonEmptyStringRaw(apiKeyService) ?? undefined;
 }
 
 // Centralized Pinecone API-key resolution through the shared resolver.
@@ -276,9 +277,9 @@ function configuredPineconeProjectGuard(): PineconeProjectGuard {
 }
 
 function pineconeProjectGuardRequired(): boolean {
-  const botName = (config as { botName?: unknown }).botName;
-  if (typeof botName !== 'string' || botName.trim() === '') return false;
-  return botName.trim().toLowerCase() !== 'q';
+  const botName = nonEmptyString((config as { botName?: unknown }).botName);
+  if (botName === null) return false;
+  return botName.toLowerCase() !== 'q';
 }
 
 function missingRequiredProjectGuardError(guard: PineconeProjectGuard): string | null {

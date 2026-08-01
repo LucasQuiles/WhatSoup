@@ -8,6 +8,8 @@
  * for existing callers.
  */
 
+import { nonEmptyStringRaw } from '../lib/type-guards.ts';
+
 /**
  * Resolve the agent subprocess model from an instance config.
  *
@@ -31,15 +33,15 @@ export function resolveAgentModel(
 ): string | undefined {
   const agentOptions = cfg?.agentOptions;
   if (agentOptions && typeof agentOptions === 'object') {
-    const agentModel = (agentOptions as Record<string, unknown>)['model'];
-    if (typeof agentModel === 'string' && agentModel.trim() !== '') return agentModel;
+    const agentModel = nonEmptyStringRaw((agentOptions as Record<string, unknown>)['model']);
+    if (agentModel !== null) return agentModel;
   }
-  const top = cfg?.model;
-  if (typeof top === 'string' && top.trim() !== '') return top;
+  const top = nonEmptyStringRaw(cfg?.model);
+  if (top !== null) return top;
   const models = cfg?.models;
   if (models && typeof models === 'object') {
-    const conv = (models as Record<string, unknown>)['conversation'];
-    if (typeof conv === 'string' && conv.trim() !== '') return conv;
+    const conv = nonEmptyStringRaw((models as Record<string, unknown>)['conversation']);
+    if (conv !== null) return conv;
   }
   return undefined;
 }

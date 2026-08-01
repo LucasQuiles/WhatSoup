@@ -24,7 +24,7 @@
 import { homedir } from 'node:os';
 import { PROVIDER_IDS } from '../runtimes/agent/providers/index.ts';
 import { PROVIDER_API_KEY_SERVICES, SERVICE_ENV_MAP, resolveProviderKeyService } from '../lib/provider-key-service.ts';
-import { isRecord } from '../lib/type-guards.ts';
+import { isRecord, nonEmptyString } from '../lib/type-guards.ts';
 import { isSamePhysicalDirectory } from '../lib/home-path.ts';
 import { resolveAgentModel } from './agent-model.ts';
 import {
@@ -111,7 +111,7 @@ function err(field: string, message: string, status = 400): ValidationError {
 }
 
 function nonBlankString(value: unknown): boolean {
-  return typeof value === 'string' && value.trim() !== '';
+  return nonEmptyString(value) !== null;
 }
 
 function normalizedModelString(value: unknown): string | null {
@@ -683,7 +683,7 @@ function validateCommandSurfaceConfig(
   if (surface['disabled'] !== undefined) {
     if (
       !Array.isArray(surface['disabled']) ||
-      !(surface['disabled'] as unknown[]).every((d) => typeof d === 'string' && d.trim() !== '')
+      !(surface['disabled'] as unknown[]).every((d) => nonEmptyString(d) !== null)
     ) {
       return err(
         'agentOptions.commandSurface.disabled',
@@ -1004,7 +1004,7 @@ function validateAgentOptions(
         );
       }
       const model = rawEntry['model'];
-      if (model !== undefined && (typeof model !== 'string' || model.trim() === '')) {
+      if (model !== undefined && nonEmptyString(model) === null) {
         return err(`${field}.model`, `${field}.model must be a non-empty string when provided`);
       }
       if (FALLBACK_MODEL_REQUIRED_PROVIDER_IDS.has(provider) && model === undefined) {
@@ -1245,7 +1245,7 @@ function validateAgentOptions(
   if (opts['provider'] === 'opencode-cli') {
     const pc = opts['providerConfig'];
     const apiKeyService = isRecord(pc) ? pc['apiKeyService'] : undefined;
-    const namesServiceExplicitly = typeof apiKeyService === 'string' && apiKeyService.trim() !== '';
+    const namesServiceExplicitly = nonEmptyString(apiKeyService) !== null;
     // An explicit providerConfig.apiKeyService (validated above to a mapped
     // service + baseUrl) names the route directly, so the model prefix is not
     // consulted — exactly as buildChildEnv skips it. Otherwise the prefix must
