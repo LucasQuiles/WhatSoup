@@ -20,9 +20,13 @@
  * bucket while its owning op is in a terminal non-echoed state.
  */
 
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Database } from '../../src/core/database.ts';
-import { DurabilityEngine } from '../../src/core/durability.ts';
+import {
+  DurabilityEngine,
+  type TurnRecoveryOwnerIdentity,
+} from '../../src/core/durability.ts';
+import { TurnRecoveryClaimFenceError } from '../../src/core/turn-recovery-store.ts';
 import {
   toTurnFinalizationPersistence,
   toTurnRecoveryJobPersistence,
@@ -35,6 +39,12 @@ const OWNER: RecoveryOwnerIdentity = {
   logicalTurnId: 'turn-recovery-owner',
   managerId: 'manager-recovery',
   generation: 7,
+};
+
+const NEXT_OWNER: TurnRecoveryOwnerIdentity = {
+  logicalTurnId: 'turn-recovery-restart',
+  managerId: 'manager-restarted',
+  generation: 8,
 };
 
 const SCOPE = 'per_chat' as const;
@@ -279,6 +289,76 @@ describe('sweepStuckInbound — recovery-owner reclaim (#1749 rem-2/3b)', () => 
     expect(jobState(jobId)).toBe('exhausted');
     expect(engine.hasOutstandingTurnRecoveryForScope(SCOPE, CONVERSATION_KEY)).toBe(false);
     expect(res.reclaimedRecoveryOwned).toBe(1);
+  });
+
+  it('types only semantic renewal ownership loss and leaves store failures retryable', () => {
+    const { jobId } = buildTransfer('renew-errors');
+    const claim = engine.claimTurnRecoveryJob(jobId, OWNER, {
+      claimToken: 'renew-errors-token',
+      leaseSeconds: 30,
+    });
+
+    expect(() => engine.renewTurnRecoveryClaim(
+      jobId,
+      OWNER,
+      { claimToken: claim.claimToken, claimEpoch: claim.claimEpoch + 1 },
+      { leaseSeconds: 30 },
+    )).toThrow(TurnRecoveryClaimFenceError);
+
+    db.raw.prepare(
+      `UPDATE turn_recovery_jobs
+       SET claim_expires_at = datetime('now', '-1 second')
+       WHERE id = ?`,
+    ).run(jobId);
+    expect(() => engine.renewTurnRecoveryClaim(
+      jobId,
+      OWNER,
+      claim,
+      { leaseSeconds: 30 },
+    )).toThrow(TurnRecoveryClaimFenceError);
+
+    engine.recoverStaleTurnRecoveryJobs();
+    engine.reassignPendingTurnRecoveryJob(
+      jobId,
+      OWNER,
+      NEXT_OWNER,
+      { claimEpoch: claim.claimEpoch, assignmentEpoch: 0 },
+    );
+    expect(() => engine.renewTurnRecoveryClaim(
+      jobId,
+      OWNER,
+      claim,
+      { leaseSeconds: 30 },
+    )).toThrow(TurnRecoveryClaimFenceError);
+
+    const second = buildTransfer('renew-store-error');
+    const secondClaim = engine.claimTurnRecoveryJob(second.jobId, OWNER, {
+      claimToken: 'renew-store-error-token',
+      leaseSeconds: 30,
+    });
+    const store = (
+      engine as unknown as {
+        turnRecovery: {
+          statements: {
+            renewTurnRecoveryClaim: { get: (...args: unknown[]) => unknown };
+          };
+        };
+      }
+    ).turnRecovery;
+    const databaseError = new Error('database unavailable');
+    vi.spyOn(store.statements.renewTurnRecoveryClaim, 'get').mockImplementation(() => {
+      throw databaseError;
+    });
+
+    try {
+      engine.renewTurnRecoveryClaim(second.jobId, OWNER, secondClaim, {
+        leaseSeconds: 30,
+      });
+      throw new Error('expected renewal to throw');
+    } catch (err) {
+      expect(err).toBe(databaseError);
+      expect(err).not.toBeInstanceOf(TurnRecoveryClaimFenceError);
+    }
   });
 
   it('is idempotent — a second sweep reclaims nothing further', () => {
