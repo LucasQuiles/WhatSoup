@@ -1,28 +1,20 @@
-import { afterEach, describe, expect, it } from 'vitest';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { describe, expect, it } from 'vitest';
+import { chmodSync, existsSync, mkdirSync, readFileSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { persistIntroSentFlag } from '../../src/core/intro-sent-config.ts';
 import { privateConfigLockPath } from '../../src/core/private-config-file.ts';
 import { acquireProcessLock, releaseProcessLock } from '../../src/lib/process-lock.ts';
+import { trackTmpDirs } from '../helpers/tmp-dir.ts';
 
 function fileMode(filePath: string): number {
   return statSync(filePath).mode & 0o777;
 }
 
 describe('persistIntroSentFlag', () => {
-  let tempDirs: string[] = [];
-
-  afterEach(() => {
-    for (const dir of tempDirs.splice(0)) {
-      rmSync(dir, { recursive: true, force: true });
-    }
-  });
+  const tmp = trackTmpDirs('');
 
   function makeTempDir(): string {
-    const dir = mkdtempSync(join(tmpdir(), 'whatsoup-intro-sent-'));
-    tempDirs.push(dir);
-    return dir;
+    return tmp.make('whatsoup-intro-sent');
   }
 
   it('tightens config.json to private mode when persisting introSent', () => {

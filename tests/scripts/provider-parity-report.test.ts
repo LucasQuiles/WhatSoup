@@ -1,16 +1,14 @@
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { renderProviderParityMarkdown, run } from '../../scripts/provider-parity-report.ts';
+import { trackTmpDirs } from '../helpers/tmp-dir.ts';
 
-const tempRoots: string[] = [];
+const tmp = trackTmpDirs('');
 
 function makeRoot(): string {
-  const root = mkdtempSync(path.join(tmpdir(), 'whatsoup-provider-parity-'));
-  tempRoots.push(root);
-  return root;
+  return tmp.make('whatsoup-provider-parity');
 }
 
 function writeFixture(root: string, payload: unknown): string {
@@ -57,7 +55,6 @@ function happyPayload(): unknown {
 afterEach(() => {
   vi.restoreAllMocks();
   process.exitCode = undefined;
-  for (const root of tempRoots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
 
 describe('provider-parity-report CLI', () => {

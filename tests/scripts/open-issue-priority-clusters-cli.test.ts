@@ -1,26 +1,23 @@
 import {
   mkdirSync,
-  mkdtempSync,
   readFileSync,
-  rmSync,
   writeFileSync,
 } from "node:fs";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { afterEach, describe, expect, it } from "vitest";
+import { describe, expect, it } from "vitest";
 
 import { runPriorityClusterCli } from "../../scripts/open-issue-priority-clusters.ts";
+import { trackTmpDirs } from "../helpers/tmp-dir.ts";
 
 const REGISTRY_TEXT = readFileSync(
   "docs/triage/open-issue-registry.json",
   "utf8",
 );
-const roots: string[] = [];
+const tmp = trackTmpDirs("");
 
 function fixtureRoot(): string {
-  const root = mkdtempSync(join(tmpdir(), "priority-clusters-"));
-  roots.push(root);
+  const root = tmp.make("priority-clusters");
   mkdirSync(join(root, "docs/triage"), { recursive: true });
   writeFileSync(
     join(root, "docs/triage/open-issue-registry.json"),
@@ -41,12 +38,6 @@ function output() {
     },
   };
 }
-
-afterEach(() => {
-  for (const root of roots.splice(0)) {
-    rmSync(root, { recursive: true, force: true });
-  }
-});
 
 describe("priority cluster CLI", () => {
   it("generates both artifacts and reaches deterministic check fixed points", () => {

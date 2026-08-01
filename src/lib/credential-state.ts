@@ -10,6 +10,7 @@
  */
 
 import { MS_PER_MINUTE } from './time-units.ts';
+import { isNonEmptyString } from './type-guards.ts';
 
 /**
  * Structural shape matching the W-1 `CredentialLookupResult` from keyring.ts.
@@ -122,7 +123,7 @@ export function hasUsableCredential(
 ): boolean {
   if (!credential) return false;
   const value = credential.value;
-  if (typeof value !== 'string' || value.trim().length === 0) {
+  if (!isNonEmptyString(value)) {
     return false;
   }
   // No expiry → static credential (API key); usable as long as value is non-empty.
@@ -173,7 +174,7 @@ export function classifyCredentialValue(value: string | null | undefined): Crede
   if (value === null || value === undefined) {
     return 'missing_credential';
   }
-  if (typeof value !== 'string' || value.trim().length === 0) {
+  if (!isNonEmptyString(value)) {
     return 'malformed';
   }
   return 'ok';
