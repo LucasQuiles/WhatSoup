@@ -18,6 +18,7 @@ import { isNonEmptyString } from './type-guards.ts';
  * land independently of the W-1 typed-lookup PR. When both are merged, the
  * real `CredentialLookupResult` satisfies this shape structurally.
  */
+
 interface LookupResultLike {
   value: string | null;
   reason: 'ok' | 'unknown_service' | 'not_found';

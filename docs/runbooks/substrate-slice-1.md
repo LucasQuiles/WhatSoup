@@ -2,7 +2,7 @@
 
 ## What's in the substrate
 
-Per-instance durable memory: `beads`, `bead_triggers`, `trigger_runs`, `bead_events`, `entities`, `entity_aliases`, `entity_observations`, `bead_entity_refs`, `sweep_runs`. MCP tools live in `src/mcp/tools/substrate.ts` — the current per-module tool count is the substrate row of `docs/public-surface.md`, which is CI-guarded against drift (this runbook previously hardcoded a count and it rotted). Obsidian vault defaults to `$HOME/Documents/Obsidian/whatsoup-memory`, config key `memory.vaultPath`.
+Per-instance durable memory: `beads`, `bead_triggers`, `trigger_runs`, `bead_events`, `entities`, `entity_aliases`, `entity_observations`, `bead_entity_refs`, `sweep_runs`. MCP tools live in `src/mcp/tools/substrate.ts` — the current per-module tool count is the substrate row of `docs/public-surface.md`, which is CI-guarded against drift (this runbook previously hardcoded a count and it rotted). Obsidian vault defaults to `$HOME/Documents/Obsidian/whatsoup-memory`, config key `memory.vaultPath` — see `docs/configuration.md` "Vault Path (`memory.vaultPath`)" for the locale caveat.
 
 ## Migration rollback
 

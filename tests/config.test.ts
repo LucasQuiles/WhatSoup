@@ -2336,6 +2336,44 @@ describe('config — expandTilde HOME-unset fallback to os.homedir', () => {
   });
 });
 
+// #2331: the default vaultPath template is a fixed HOME-relative path, not a
+// locale lookup. This pins that LANG/LC_ALL cannot perturb it — see
+// docs/configuration.md "memory.vaultPath" for why that's the intended
+// behavior (macOS does not rename ~/Documents on disk per locale; the
+// override for the genuine Linux xdg-user-dirs case is memory.vaultPath).
+describe('config — default vaultPath ignores locale env vars (#2331)', () => {
+  let savedLang: string | undefined;
+  let savedLcAll: string | undefined;
+
+  beforeEach(() => {
+    savedLang = process.env.LANG;
+    savedLcAll = process.env.LC_ALL;
+  });
+
+  afterEach(() => {
+    if (savedLang === undefined) {
+      delete process.env.LANG;
+    } else {
+      process.env.LANG = savedLang;
+    }
+    if (savedLcAll === undefined) {
+      delete process.env.LC_ALL;
+    } else {
+      process.env.LC_ALL = savedLcAll;
+    }
+  });
+
+  it('builds the same default vaultPath template under a non-English LANG/LC_ALL', async () => {
+    process.env.LANG = 'de_DE.UTF-8';
+    process.env.LC_ALL = 'de_DE.UTF-8';
+    process.env.INSTANCE_CONFIG = JSON.stringify(makeInstanceConfig({
+      memory: { conversation: { recent: 5 } },
+    }));
+    const { config } = await import('../src/config.ts');
+    expect(config.memory.vaultPath).toBe(`${process.env.HOME ?? osHomedir()}/Documents/Obsidian/whatsoup-memory`);
+  });
+});
+
 describe('config — resolveDir XDG and homedir resolution', () => {
   let savedHome: string | undefined;
   let savedXdg: Record<string, string | undefined>;

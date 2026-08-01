@@ -111,7 +111,7 @@ write_launchd() {
   # launchd has no EnvironmentFile hydration, so every supported runtime key
   # must be baked here; defaults must match the bot-errors-sentinel.py fallbacks.
   action_outbox_retention_xml=$(xml_escape "${BOT_ERRORS_FLEET_SENTINEL_ACTION_OUTBOX_RETENTION:-500}")
-  lock_xml=$(xml_escape "${BOT_ERRORS_FLEET_SENTINEL_LOCK:-$HOME/.local/state/bot-errors/fleet-sentinel/sentinel-instance.lock}")
+  lock_xml=$(xml_escape "${BOT_ERRORS_FLEET_SENTINEL_LOCK:-$SENTINEL_STATE_DIR/sentinel-instance.lock}")
   ssh_command_xml=$(xml_escape "${BOT_ERRORS_FLEET_SENTINEL_SSH_COMMAND:-ssh}")
   ssh_connect_timeout_xml=$(xml_escape "${BOT_ERRORS_FLEET_SENTINEL_SSH_CONNECT_TIMEOUT_SECONDS:-8}")
   ssh_probe_timeout_xml=$(xml_escape "${BOT_ERRORS_FLEET_SENTINEL_SSH_PROBE_TIMEOUT_SECONDS:-30}")
