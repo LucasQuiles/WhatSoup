@@ -56,20 +56,6 @@
     "lineText": "command = profile_string(profile, \"rustDeskCommand\") or shutil.which(\"rustdesk\") or \"/usr/bin/rustdesk\""
   },
   {
-    "ruleId": "portability.no-hardcoded-platform-binaries",
-    "file": "scripts/ci-control-ref-policy.ts",
-    "line": 27,
-    "pattern": "'/usr/bin/git",
-    "lineText": "const TRUSTED_GIT = '/usr/bin/git';"
-  },
-  {
-    "ruleId": "portability.no-hardcoded-platform-binaries",
-    "file": "scripts/hooks-installed-guard.ts",
-    "line": 88,
-    "pattern": "'/usr/bin/git",
-    "lineText": "const TRUSTED_GIT_PATH = '/usr/bin/git';"
-  },
-  {
     "ruleId": "portability.platform-paths-guarded",
     "file": "deploy/scripts/bot-errors-health-check.py",
     "line": 242,

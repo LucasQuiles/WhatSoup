@@ -11,6 +11,7 @@ import {
 } from '../../scripts/migrate-memory-config.ts';
 
 const isWindows = process.platform === 'win32';
+const isRoot = typeof process.getuid === 'function' && process.getuid() === 0;
 
 function makeInstance(root: string, name: string, config: Record<string, unknown>): string {
   const dir = path.join(root, name);
@@ -291,8 +292,9 @@ describe('migrate-memory-config operator errors', () => {
     }
   });
 
-  // @skip-env Windows does not preserve POSIX chmod unreadable-file semantics.
-  it.skipIf(isWindows)('reports EACCES with path context on unreadable config', () => {
+  // @skip-env Windows does not preserve POSIX chmod unreadable-file semantics;
+  // root bypasses file-mode permission checks entirely.
+  it.skipIf(isWindows || isRoot)('reports EACCES with path context on unreadable config', () => {
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ws-migrate-error-'));
     try {
       const configPath = path.join(tmp, 'config.json');
@@ -311,8 +313,9 @@ describe('migrate-memory-config operator errors', () => {
     }
   });
 
-  // @skip-env Windows does not preserve POSIX chmod read-only-directory semantics.
-  it.skipIf(isWindows)('reports EACCES with path context when write dir is read-only', () => {
+  // @skip-env Windows does not preserve POSIX chmod read-only-directory semantics;
+  // root bypasses file-mode permission checks entirely.
+  it.skipIf(isWindows || isRoot)('reports EACCES with path context when write dir is read-only', () => {
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ws-migrate-error-'));
     try {
       const instanceDir = path.join(tmp, 'ro-bot');
@@ -358,8 +361,9 @@ describe('migrate-memory-config rollback operator errors', () => {
     }
   });
 
-  // @skip-env Windows does not preserve POSIX chmod read-only-directory semantics.
-  it.skipIf(isWindows)('reports EACCES with path context when backup rename fails', () => {
+  // @skip-env Windows does not preserve POSIX chmod read-only-directory semantics;
+  // root bypasses file-mode permission checks entirely.
+  it.skipIf(isWindows || isRoot)('reports EACCES with path context when backup rename fails', () => {
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ws-rollback-error-'));
     try {
       const dir = path.join(tmp, 'perm-bot');

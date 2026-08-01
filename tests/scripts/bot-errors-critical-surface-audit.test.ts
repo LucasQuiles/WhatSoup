@@ -379,6 +379,9 @@ describe('bot-errors critical surface audit', () => {
   });
 
   it('flags credential files without owner-read permission as unreadable', () => {
+    if (typeof process.getuid === 'function' && process.getuid() === 0) {
+      return;
+    }
     const fixture = makeFixture();
     const tokens = path.join(fixture.home, '.config/whatsoup/instances/q/tokens.env');
     chmodSync(tokens, 0o200);

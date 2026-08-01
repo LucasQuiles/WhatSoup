@@ -376,5 +376,10 @@ describe('phantom-dependency guard — this repo', () => {
     expect(report.unverifiable).toEqual([]);
     expect(report.files).toBeGreaterThan(1000);
     expect(report.importSites).toBeGreaterThan(5000);
-  });
+    // A full-repo scan (~2000 files / ~10000 import sites) legitimately
+    // approaches the suite's 10s default on a loaded CI runner — it timed out
+    // three times across independent diffs (PR #2831 r2/rerun/r4) while every
+    // other suite stayed green. 3× the default keeps the ceiling meaningful
+    // without letting a hung scan run unbounded.
+  }, 30_000);
 });

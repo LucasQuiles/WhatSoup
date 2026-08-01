@@ -187,6 +187,9 @@ describe('loadOrCreateFleetTokens — corrupt file', () => {
   });
 
   it('treats an unreadable current JSON file as absent and rewrites it', () => {
+    if (typeof process.getuid === 'function' && process.getuid() === 0) {
+      return;
+    }
     const jsonPath = getFleetTokensPath();
     fs.mkdirSync(path.dirname(jsonPath), { recursive: true });
     fs.writeFileSync(jsonPath, JSON.stringify({
@@ -204,6 +207,9 @@ describe('loadOrCreateFleetTokens — corrupt file', () => {
   });
 
   it('treats an unreadable legacy token as absent during migration', () => {
+    if (typeof process.getuid === 'function' && process.getuid() === 0) {
+      return;
+    }
     const legacyPath = getLegacyFleetTokenPath();
     fs.mkdirSync(path.dirname(legacyPath), { recursive: true });
     fs.writeFileSync(legacyPath, `${'a'.repeat(64)}\n`);
