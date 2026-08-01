@@ -128,6 +128,15 @@ describe('cloneRecord', () => {
     (copy.nested as { inner: { flag: boolean } }).inner.flag = false;
     expect((original.nested as { inner: { flag: boolean } }).inner.flag).toBe(true);
   });
+
+  it('preserves undefined values instead of dropping them (#2859)', () => {
+    const original: Record<string, unknown> = { a: undefined, b: 1 };
+    const copy = cloneRecord(original);
+    // structuredClone preserves `a: undefined`; JSON round-trip silently drops the key.
+    expect('a' in copy).toBe(true);
+    expect(copy.a).toBeUndefined();
+    expect(copy.b).toBe(1);
+  });
 });
 
 describe('isEqualValue', () => {

@@ -8,9 +8,11 @@ import {
   type Stats,
 } from 'node:fs';
 import { dirname } from 'node:path';
+import { z } from 'zod';
 
 const HEALTH_TOKEN_PREFIX = 'WHATSOUP_HEALTH_TOKEN=';
 const CANONICAL_HEALTH_TOKEN_RE = /^[0-9a-f]{64}$/;
+const CanonicalHealthTokenSchema = z.string().regex(CANONICAL_HEALTH_TOKEN_RE);
 const PRIVATE_HEALTH_TOKEN_FILE_MODE = 0o600;
 const MAX_CANONICAL_FILE_BYTES = Buffer.byteLength(HEALTH_TOKEN_PREFIX) + 64 + 1;
 
@@ -92,7 +94,9 @@ function readBoundedUtf8(fd: number): string {
 }
 
 export function isCanonicalHealthToken(value: unknown): value is CanonicalHealthToken {
-  return typeof value === 'string' && CANONICAL_HEALTH_TOKEN_RE.test(value);
+  // The schema infers plain `string`; the brand is conferred by this
+  // predicate's signature, exactly as the previous typeof ladder did.
+  return CanonicalHealthTokenSchema.safeParse(value).success;
 }
 
 export function parseCanonicalHealthTokenFile(contents: string): CanonicalHealthToken | null {
