@@ -472,6 +472,64 @@ def test_expand_specs_tracks_maclab_launchd_prefix_not_retired_host_prefix():
     assert retired_label not in launchd_paths, launchd_paths
 
 
+def test_expand_specs_derives_whatsoup_paths_from_whatsoup_repo_not_home():
+    """issue #2299 M3: WhatSoup-tagged surfaces must resolve under
+    WHATSOUP_REPO (env override, else __file__-derived repo root), never
+    a hardcoded HOME/LAB/WhatSoup literal — the old hardcode silently
+    reports "missing" forever on any host where the checkout lives
+    elsewhere."""
+    with tempfile.TemporaryDirectory(prefix="config-surface-doctor-repo-") as repo_dir, \
+         tempfile.TemporaryDirectory(prefix="config-surface-doctor-home-") as home_dir:
+        repo_root = Path(repo_dir)
+        home = Path(home_dir)  # deliberately does NOT contain LAB/WhatSoup
+
+        orig_home = probe.HOME
+        orig_repo = probe.WHATSOUP_REPO
+        probe.HOME = home
+        probe.WHATSOUP_REPO = repo_root
+        try:
+            specs = probe.expand_specs()
+        finally:
+            probe.HOME = orig_home
+            probe.WHATSOUP_REPO = orig_repo
+
+    whatsoup_specs = [s for s in specs if s.harness == "whatsoup"]
+    assert whatsoup_specs, "expand_specs must still emit whatsoup-tagged surfaces"
+    for spec in whatsoup_specs:
+        assert str(spec.path).startswith(str(repo_root)), spec
+        assert str(home) not in str(spec.path), spec
+
+
+def test_expand_specs_health_profile_glob_uses_whatsoup_repo_root():
+    """issue #2299 M3: the third, uncited hardcode site (the health-profiles
+    .glob loop) must also honor WHATSOUP_REPO — the fix covers 8 occurrences
+    across 3 sites (7 static entries + this glob), not just the 2 cited
+    lines in the original issue."""
+    with tempfile.TemporaryDirectory(prefix="config-surface-doctor-repo-") as repo_dir, \
+         tempfile.TemporaryDirectory(prefix="config-surface-doctor-home-") as home_dir:
+        repo_root = Path(repo_dir)
+        home = Path(home_dir)
+        profiles_dir = repo_root / "deploy" / "health-profiles"
+        profiles_dir.mkdir(parents=True)
+        profile_file = profiles_dir / "example.json"
+        profile_file.write_text("{}", encoding="utf-8")
+
+        orig_home = probe.HOME
+        orig_repo = probe.WHATSOUP_REPO
+        probe.HOME = home
+        probe.WHATSOUP_REPO = repo_root
+        try:
+            specs = probe.expand_specs()
+        finally:
+            probe.HOME = orig_home
+            probe.WHATSOUP_REPO = orig_repo
+
+    health_profile_paths = {
+        spec.path for spec in specs if spec.surface == "fleet_health_profile"
+    }
+    assert profile_file in health_profile_paths, health_profile_paths
+
+
 # ---------------------------------------------------------------------------
 # main(): report shape, both flags, include-missing behavior
 # ---------------------------------------------------------------------------

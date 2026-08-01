@@ -25,6 +25,18 @@ from typing import Any
 
 HOME = Path.home()
 
+# Repo root for WhatSoup-tagged surfaces: WHATSOUP_REPO env var takes
+# precedence (explicit override), else derive from this file's own location
+# (this script is checked into the repo at tools/agent-runtime-probes/, so
+# two directories up is always the checkout root, wherever it lives on the
+# host). Never hardcode HOME / "LAB/WhatSoup" — that silently reports
+# "missing" forever on a host where the checkout isn't at that fixed path.
+WHATSOUP_REPO = (
+    Path(os.environ["WHATSOUP_REPO"])
+    if os.environ.get("WHATSOUP_REPO")
+    else Path(__file__).resolve().parents[2]
+)
+
 
 @dataclass(frozen=True)
 class SurfaceSpec:
@@ -76,14 +88,14 @@ def expand_specs() -> list[SurfaceSpec]:
         SurfaceSpec(HOME / ".config/opencode/bun.lock", "opencode", "plugin_dependency_lock", "lock", "OpenCode local plugin dependency resolver", "generated_review_only", "medium"),
         SurfaceSpec(HOME / ".claude/plugins/tmup/config/policy.yaml", "tmup", "orchestration_policy", "yaml", "tmup plugin", "editable_with_runtime_doctor", "high"),
         SurfaceSpec(HOME / ".claude/plugins/tmup/config/runtime-contract.json", "tmup", "runtime_contract", "json", "tmup SQLite runtime", "editable_only_with_tests", "high"),
-        SurfaceSpec(HOME / "LAB/WhatSoup/src/lib/provider-ids.json", "whatsoup", "provider_roster", "json", "WhatSoup provider registry", "source_edit_with_tests", "medium"),
-        SurfaceSpec(HOME / "LAB/WhatSoup/deploy/bot-errors-expected-fleet.json", "whatsoup", "fleet_expected_manifest", "json", "WhatSoup BOT ERRORS expected-fleet monitor", "policy_review", "medium"),
-        SurfaceSpec(HOME / "LAB/WhatSoup/deploy/bot-errors-runtime-manifest.json", "whatsoup", "fleet_runtime_manifest", "json", "WhatSoup deploy/runtime protection", "generated_or_policy_review", "medium"),
-        SurfaceSpec(HOME / "LAB/WhatSoup/deploy/managed-components.json", "whatsoup", "managed_components", "json", "WhatSoup deploy/runtime protection", "policy_review", "medium"),
-        SurfaceSpec(HOME / "LAB/WhatSoup/scripts/service-units-baseline.json", "whatsoup", "service_baseline", "json", "WhatSoup service audit scripts", "policy_review", "medium"),
-        SurfaceSpec(HOME / "LAB/WhatSoup/docker-compose.yml", "whatsoup", "service_config", "yaml", "Docker Compose", "editable_with_service_probe", "high"),
-        SurfaceSpec(HOME / "LAB/WhatSoup/CLAUDE.md", "whatsoup", "instruction", "markdown", "Claude project instruction loader", "editable_budgeted", "medium"),
-        SurfaceSpec(HOME / "LAB/WhatSoup/AGENTS.md", "whatsoup", "instruction", "markdown", "Codex/OpenCode instruction loader", "editable_budgeted", "medium"),
+        SurfaceSpec(WHATSOUP_REPO / "src/lib/provider-ids.json", "whatsoup", "provider_roster", "json", "WhatSoup provider registry", "source_edit_with_tests", "medium"),
+        SurfaceSpec(WHATSOUP_REPO / "deploy/bot-errors-expected-fleet.json", "whatsoup", "fleet_expected_manifest", "json", "WhatSoup BOT ERRORS expected-fleet monitor", "policy_review", "medium"),
+        SurfaceSpec(WHATSOUP_REPO / "deploy/bot-errors-runtime-manifest.json", "whatsoup", "fleet_runtime_manifest", "json", "WhatSoup deploy/runtime protection", "generated_or_policy_review", "medium"),
+        SurfaceSpec(WHATSOUP_REPO / "deploy/managed-components.json", "whatsoup", "managed_components", "json", "WhatSoup deploy/runtime protection", "policy_review", "medium"),
+        SurfaceSpec(WHATSOUP_REPO / "scripts/service-units-baseline.json", "whatsoup", "service_baseline", "json", "WhatSoup service audit scripts", "policy_review", "medium"),
+        SurfaceSpec(WHATSOUP_REPO / "docker-compose.yml", "whatsoup", "service_config", "yaml", "Docker Compose", "editable_with_service_probe", "high"),
+        SurfaceSpec(WHATSOUP_REPO / "CLAUDE.md", "whatsoup", "instruction", "markdown", "Claude project instruction loader", "editable_budgeted", "medium"),
+        SurfaceSpec(WHATSOUP_REPO / "AGENTS.md", "whatsoup", "instruction", "markdown", "Codex/OpenCode instruction loader", "editable_budgeted", "medium"),
     ]
 
     for path in sorted((HOME / ".codex").glob("*.config.toml")):
@@ -106,7 +118,7 @@ def expand_specs() -> list[SurfaceSpec]:
     for path in sorted((HOME / ".claude/plugins").glob("*/commands/*.md")):
         specs.append(SurfaceSpec(path, "claude", "plugin_command", "markdown", "Claude plugin slash-command loader", "editable_with_command_probe", "medium", active_evidence="claude plugin list / slash command list"))
 
-    for path in sorted((HOME / "LAB/WhatSoup/deploy/health-profiles").glob("*.json")):
+    for path in sorted((WHATSOUP_REPO / "deploy/health-profiles").glob("*.json")):
         specs.append(SurfaceSpec(path, "whatsoup", "fleet_health_profile", "json", "WhatSoup BOT ERRORS health profile", "policy_review", "medium"))
 
     for path in sorted((HOME / ".codex/agents").glob("*.toml")):
