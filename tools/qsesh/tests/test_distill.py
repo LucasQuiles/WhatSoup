@@ -373,7 +373,6 @@ def _reindex(events: list[CanonicalEvent]) -> tuple[CanonicalEvent, ...]:
         ("missing-project", "distill-session-meta"),
         ("version-mismatch", "distill-session-meta"),
         ("duplicate-source-ref", "distill-event-order"),
-        ("negative-duration", "distill-timestamp-order"),
         ("duplicate-call", "distill-tool-link"),
         ("unknown-result", "distill-tool-link"),
         ("missing-result", "distill-tool-link"),
@@ -405,8 +404,6 @@ def test_invalid_canonical_invariants_fail_as_one_typed_distill_error(
         return
     elif mutation == "duplicate-source-ref":
         events[1] = replace(events[1], source_ref=events[0].source_ref)
-    elif mutation == "negative-duration":
-        events[-1] = replace(events[-1], timestamp_utc="2026-01-02T08:04:04Z")
     elif mutation == "duplicate-call":
         skill_index = next(
             index
@@ -460,6 +457,48 @@ def test_invalid_canonical_invariants_fail_as_one_typed_distill_error(
     assert caught.value.code == "QS-E-DISTILL"
     assert caught.value.phase == phase
     assert "USER_ALPHA" not in str(caught.value)
+
+
+def test_valid_inversion_derives_start_end_duration_from_min_max_observations() -> None:
+    # Append-ordered sessions can legitimately carry a later event bearing an
+    # earlier timestamp; the session clock envelope is min/max over timed
+    # observations, and canonical source order must survive untouched.
+    extracted = _cases()["claude"]
+    baseline = _distilled(extracted)
+    events = list(extracted.events)
+    events[-1] = replace(events[-1], timestamp_utc="2026-01-02T08:04:04Z")
+
+    result = _distilled(replace(extracted, events=tuple(events)))
+
+    assert result.record["started_at_utc"] == "2026-01-02T08:04:04Z"
+    assert result.record["ended_at_utc"] == "2026-01-02T08:04:12Z"
+    assert result.record["duration_us"] == 8_000_000
+    envelope = {"started_at_utc", "ended_at_utc", "duration_us"}
+    assert {k: v for k, v in result.record.items() if k not in envelope} == {
+        k: v for k, v in baseline.record.items() if k not in envelope
+    }
+    assert result.turns == baseline.turns
+    assert result.tools == baseline.tools
+
+
+def test_subsecond_adjacent_inversion_inside_the_envelope_changes_nothing() -> None:
+    extracted = _cases()["claude"]
+    baseline = _distilled(extracted)
+    events = list(extracted.events)
+    result_index = next(
+        index
+        for index, event in enumerate(events)
+        if event.kind is EventKind.TOOL_RESULT
+    )
+    events[result_index] = replace(
+        events[result_index], timestamp_utc="2026-01-02T08:04:06.500000Z"
+    )
+
+    result = _distilled(replace(extracted, events=tuple(events)))
+
+    assert result.record == baseline.record
+    assert result.turns == baseline.turns
+    assert result.tools == baseline.tools
 
 
 def test_reordered_event_data_is_stable_but_reordered_events_are_rejected() -> None:

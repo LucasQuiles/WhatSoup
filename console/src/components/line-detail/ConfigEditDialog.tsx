@@ -187,7 +187,7 @@ export function ConfigEditDialog({
     if (key === CHAT_OPENAI_BASE_URL_KEY) {
       const baseUrl = typeof value === 'string' ? value.trim() : ''
       const service = currentValue(CHAT_OPENAI_API_KEY_SERVICE_KEY)
-      if (!baseUrl && typeof service === 'string' && service.trim() !== '') {
+      if (!baseUrl && isNonEmptyString(service)) {
         return 'Clear keyring service before removing the custom endpoint'
       }
     }
