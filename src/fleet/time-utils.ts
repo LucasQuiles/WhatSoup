@@ -1,26 +1,15 @@
 // ---------------------------------------------------------------------------
-//  Shared timestamp utilities for the fleet layer.
+//  Fleet-only timestamp utilities. nowUnixSec/normalizeUnixTimestampSeconds
+//  moved to src/core/substrate/time.ts (#2242) — those two are consumed by
+//  core/transport/mcp callers; the helpers below have no consumer outside
+//  src/fleet/, so they stay here and import the canonical primitive down
+//  from core.
 // ---------------------------------------------------------------------------
-
-const UNIX_MILLISECONDS_THRESHOLD = 100_000_000_000;
-
-/** Normalize a Unix timestamp-like value to epoch seconds. */
-export function normalizeUnixTimestampSeconds(value: unknown, fallback = nowUnixSec()): number {
-  if (value == null || value === '') return fallback;
-  const numeric = typeof value === 'bigint' ? Number(value) : Number(value);
-  if (!Number.isFinite(numeric)) return fallback;
-  const whole = Math.floor(numeric);
-  return whole >= UNIX_MILLISECONDS_THRESHOLD ? Math.floor(whole / 1000) : whole;
-}
+import { normalizeUnixTimestampSeconds } from '../core/substrate/time.ts';
 
 /** Convert Unix timestamp (seconds or milliseconds) to ISO string. */
 export function toIsoFromUnix(ts: number): string {
   return new Date(normalizeUnixTimestampSeconds(ts, ts) * 1000).toISOString();
-}
-
-/** Current time as Unix seconds. */
-export function nowUnixSec(): number {
-  return Math.floor(Date.now() / 1000);
 }
 
 /**

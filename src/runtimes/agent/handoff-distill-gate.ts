@@ -20,7 +20,7 @@
  * exactly one trial.
  */
 
-export type BreakerState = 'closed' | 'open' | 'half-open';
+import type { CircuitState } from '../../core/circuit-breaker.ts';
 
 export type DistillDenyReason =
   | 'budget-tokens'
@@ -48,7 +48,7 @@ export interface DistillState {
   tokensThisWindow: number;
   callsThisWindow: number;
   consecutiveFailures: number;
-  breaker: BreakerState;
+  breaker: CircuitState;
   breakerOpenedAt: number | null;
 }
 

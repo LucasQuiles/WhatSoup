@@ -10,7 +10,7 @@ import type { Database } from '../../core/database.ts';
 import type { ExtendedBaileysSocket } from '../types.ts';
 import { type MessageRow, rowToMessage } from '../../core/messages.ts';
 import { createChildLogger } from '../../logger.ts';
-import { nowUnixSec } from '../../fleet/time-utils.ts';
+import { nowUnixSec } from '../../core/substrate/time.ts';
 import { escapeSqlLikePattern } from '../../lib/sql-like.ts';
 import { toConversationKey } from '../../core/conversation-key.ts';
 import { DOMAIN_PERSONAL, DOMAIN_LID, DOMAIN_GROUP } from '../../core/jid-constants.ts';

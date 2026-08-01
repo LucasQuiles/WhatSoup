@@ -40,6 +40,7 @@ import { normalizeErrorClass } from './heal-protocol.ts';
 import { getControlPeerWiring } from './heal.ts';
 import { markConversationRead } from './mark-read.ts';
 import type { Runtime } from '../runtimes/types.ts';
+import type { AccessReplayOutcome } from './admin.ts';
 import { isProviderId } from '../lib/provider-ids.ts';
 import type { ConnectionRecentDisconnects, ConnectionStateSnapshot } from '../transport/connection.ts';
 import { readBody } from '../lib/http.ts';
@@ -117,8 +118,13 @@ export interface HealthDeps {
   socketPath?: string | null;
   /** Filesystem root that POST /schedule bounds media file paths to (fail-closed; route replies 409 when unset). */
   scheduleAllowedRoot?: string;
-  /** Callback for POST /access — allow triggers queued-message replay. */
-  handleAccessDecision?: (subjectType: string, subjectId: string, action: 'allow' | 'block') => Promise<void>;
+  /**
+   * Callback for POST /access — allow triggers queued-message replay.
+   * For the phone+allow path, resolves with an AccessReplayOutcome
+   * (attempted/replayed/failed counts) so the route can report partial
+   * replay failure honestly instead of always claiming full success.
+   */
+  handleAccessDecision?: (subjectType: string, subjectId: string, action: 'allow' | 'block') => Promise<AccessReplayOutcome | void>;
   /**
    * #1753 rem-1: in-process event-loop-lag self-probe. A wedged event loop
    * makes /health unanswerable, so nothing in the request handler itself can
@@ -1171,16 +1177,32 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
         const result = upsertAccess(deps.db, subjectType, subjectId, status);
 
         // Invoke runtime callback (allow triggers queued-message replay)
+        let replayOutcome: AccessReplayOutcome | undefined;
         if (deps.handleAccessDecision) {
           try {
-            await deps.handleAccessDecision(subjectType, subjectId, action);
+            replayOutcome = (await deps.handleAccessDecision(subjectType, subjectId, action)) ?? undefined;
+            if (replayOutcome && replayOutcome.failed > 0) {
+              log.warn(
+                { subjectId, action, ...replayOutcome },
+                '/access: queued-message replay completed with partial failures',
+              );
+            }
           } catch (err) {
             log.error({ err, subjectId, action }, '/access: handleAccessDecision callback failed');
           }
         }
 
+        // The access mutation above is what `ok: true` reports — it always
+        // succeeded to reach this line. `replay` is reported separately (only
+        // present when the callback resolved with an outcome) so a caller can
+        // tell "policy changed" apart from "policy changed and every queued
+        // message was durably re-admitted" instead of both looking identical.
+        const responseBody: Record<string, unknown> = { ok: true, action, subjectType, subjectId, result: result.action };
+        if (replayOutcome) {
+          responseBody.replay = replayOutcome;
+        }
         res.writeHead(200, jsonHeaders);
-        res.end(JSON.stringify({ ok: true, action, subjectType, subjectId, result: result.action }));
+        res.end(JSON.stringify(responseBody));
       })().catch((err) => {
         log.error({ err }, 'POST /access: unhandled error');
         try {
