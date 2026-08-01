@@ -224,6 +224,55 @@ async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
   return res.json() as Promise<T>;
 }
 
+/** One decoded `text/event-stream` frame: `event: <name>` paired with its `data: <payload>` line. */
+export interface SseFrame {
+  event: string;
+  data: string;
+}
+
+/** Thrown by {@link apiSse} when the initiating request itself is non-OK (the stream never opened). */
+export class SseRequestError extends Error {
+  readonly status: number;
+  constructor(status: number) {
+    super(`API ${status}`);
+    this.name = 'SseRequestError';
+    this.status = status;
+  }
+}
+
+/**
+ * POST/stream a `text/event-stream` response, yielding one {@link SseFrame} per
+ * `event: <name>\ndata: <payload>\n\n` block. Blocks missing an event or data
+ * line are skipped rather than yielded malformed.
+ *
+ * Unlike {@link apiFetch}, this does NOT inject auth headers itself: some SSE
+ * callers run fully unauthenticated in dev and must send no Authorization
+ * header at all, so ticket-minting (when needed) stays the caller's job via
+ * `init.headers` — mirroring how the request was built before this helper
+ * existed.
+ */
+export async function* apiSse(path: string, init?: RequestInit): AsyncGenerator<SseFrame> {
+  const res = await fetch(`${API_BASE}${path}`, init);
+  if (!res.ok) throw new SseRequestError(res.status);
+
+  const reader = res.body!.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) return;
+    buffer += decoder.decode(value, { stream: true });
+    const blocks = buffer.split('\n\n');
+    buffer = blocks.pop()!;
+    for (const block of blocks) {
+      const eventMatch = block.match(/^event: (\w+)/);
+      const dataMatch = block.match(/^data: (.+)$/m);
+      if (!eventMatch || !dataMatch) continue;
+      yield { event: eventMatch[1], data: dataMatch[1] };
+    }
+  }
+}
+
 let fleetAvailable: boolean | null = null;
 let checkInFlight: Promise<boolean> | null = null;
 let mockDataPromise: Promise<typeof import('../mock-data.ts')> | null = null;
