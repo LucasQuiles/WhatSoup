@@ -2535,6 +2535,23 @@ describe('NL routing handlers (nlRouting flag)', () => {
       expect(prefRows()).toHaveLength(0);
     });
 
+    it('DEGRADE (Level-2, #2838): an HTTP-200-but-EMPTY anthropic catalogue degrades honestly instead of rendering a blank menu, no pin', async () => {
+      // Pre-fix, resolveClaude returned {status:'ok', ids:[]} on an empty
+      // fetch, which sendModelDrillModelLevel's `listing.status !== 'ok'`
+      // guard let straight through — rendering an EMPTY Level-2 menu instead
+      // of the degrade copy. Post-fix, the resolver normalizes ok+[] to
+      // unavailable/empty, so this now takes the same honest-degrade path as
+      // the sibling opencode test above.
+      const anthropicFn = vi.fn().mockResolvedValue({ status: 'ok', ids: [] });
+      const { runtime, sentMessages } = makeRoutingRuntime({ model: 'claude-opus-4-8', modelCatalogueAnthropicFn: anthropicFn });
+      cfgAny().agentFallbacks = [{ provider: 'opencode-cli', model: 'kimi/kimi-k3' }];
+      (runtime as unknown as { routablePinTargets: () => string[] }).routablePinTargets = () => ['claude-cli', 'opencode-cli'];
+      await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model' }));
+      await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model 1', messageId: 'm2' }));
+      expect(allReplies(sentMessages).join('\n')).toContain("Couldn't load Claude models right now");
+      expect(prefRows()).toHaveLength(0);
+    });
+
     it('/model status still shows the route readout (status moved off bare /model, not removed)', async () => {
       const { runtime, sentMessages } = makeDrillRuntime();
       await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model status' }));

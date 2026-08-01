@@ -18,9 +18,21 @@ import type {
 
 const log = createChildLogger('turn-recovery-supervisor');
 
-/** Bounded per-scan page size, mirroring RETRY_BATCH_SIZE-style batching. */
-const SCAN_PAGE_SIZE = 50;
-const DEFAULT_LEASE_SECONDS = 120;
+/**
+ * Bounded per-scan page size, mirroring RETRY_BATCH_SIZE-style batching.
+ * Exported so the turn-recovery deadman (and its tests) can derive a scan's
+ * worst-case duration envelope from this SSOT rather than a second, drifting
+ * copy — see turn-recovery-deadman.ts's staleness-budget derivation (#2819).
+ */
+export const SCAN_PAGE_SIZE = 50;
+/**
+ * Exported so the turn-recovery deadman's staleness budget can be derived
+ * from the SAME lease duration the supervisor actually uses, rather than a
+ * hand-picked constant that silently drifts out of sync if this is ever
+ * retuned (#2819) — see the deadman's DEFAULT_STALE_AFTER_MS/
+ * DEFAULT_STARTUP_GRACE_MS derivation.
+ */
+export const DEFAULT_LEASE_SECONDS = 120;
 const DEFAULT_BACKOFF_SECONDS = 30;
 const SCAN_INTERVAL_MS = 15_000;
 const RECLAIM_STALE_LIMIT = 200;
