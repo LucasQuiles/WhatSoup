@@ -744,6 +744,11 @@
       "owner": "deploy/scripts/bot-errors-health-check.py",
       "test": "tests/scripts/bot-errors-health-check.test.ts"
     },
+    "turn_recovery_supervisor_unavailable": {
+      "disposition": "recovery_consumer_unavailable_until_successful_scan",
+      "owner": "src/runtimes/agent/turn-recovery-deadman.ts",
+      "test": "tests/runtimes/agent/turn-recovery-deadman.test.ts"
+    },
     "whatsapp_auth_bond_local_failure": {
       "disposition": "auth_bond_local_failure",
       "owner": "src/fleet/health-poller.ts",

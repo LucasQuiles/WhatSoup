@@ -62,6 +62,26 @@ export interface CloseSessionLifecycleParams {
   status: 'suspended' | 'ended';
 }
 
+export type CompletedDeliveryIdentityAdmissionReason =
+  | 'missing'
+  | 'invalid'
+  | 'scope_mismatch';
+
+export interface QuarantineCompletedDeliveryIdentityCheckpointParams {
+  conversationKey: string;
+  providerSessionId: string;
+  provider: string;
+  reason: CompletedDeliveryIdentityAdmissionReason;
+}
+
+export interface QuarantineCompletedDeliveryIdentityAgentSessionParams {
+  agentSessionRowId: number;
+  providerSessionId: string;
+  provider: string;
+  workspaceKey: string | null;
+  reason: CompletedDeliveryIdentityAdmissionReason;
+}
+
 interface LifecycleStatements {
   insertAgentSession: PreparedStatement;
   beginFreshCheckpoint: PreparedStatement;
@@ -87,6 +107,12 @@ interface LifecycleStatements {
   updateSessionCheckpointsStatusBySessionId: PreparedStatement;
   agentSessionRowAlreadyInStatusForProvider: PreparedStatement;
   updateExactSessionCheckpointStatus: PreparedStatement;
+  recordCompletedDeliveryIdentityAdmission: PreparedStatement;
+  quarantineExactSessionCheckpoint: PreparedStatement;
+  selectQuarantinableAgentRowsForCheckpoint: PreparedStatement;
+  selectExactQuarantinableAgentSessionForAdmission: PreparedStatement;
+  markExactAgentResumeFailed: PreparedStatement;
+  resolveCompletedDeliveryIdentityAdmissionsForFreshLifecycle: PreparedStatement;
 }
 
 function validateRowId(rowId: number): void {
@@ -325,6 +351,78 @@ export class SessionLifecycleStore {
            AND conversation_key = ?
            AND session_id = ?
       `),
+      recordCompletedDeliveryIdentityAdmission: prepare(`
+        INSERT INTO completed_delivery_identity_admissions (
+          target_kind, target_id, state, reason, attempts, owner, next_action
+        ) VALUES (?, ?, 'quarantined', ?, 1, ?, ?)
+        ON CONFLICT(target_kind, target_id) WHERE state = 'quarantined' DO NOTHING
+      `),
+      quarantineExactSessionCheckpoint: prepare(`
+        UPDATE session_checkpoints
+        SET session_status = 'orphaned',
+            checkpoint_version = checkpoint_version + 1,
+            updated_at = datetime('now')
+        WHERE id = ?
+          AND conversation_key = ?
+          AND session_id = ?
+          AND session_status IN ('active', 'suspended')
+      `),
+      selectQuarantinableAgentRowsForCheckpoint: prepare(`
+        SELECT id
+        FROM agent_sessions
+        WHERE session_id = ?
+          AND provider = ?
+          AND workspace_key = ?
+          AND status IN ('active', 'suspended', 'orphaned', 'crashed')
+        ORDER BY id
+      `),
+      selectExactQuarantinableAgentSessionForAdmission: prepare(`
+        SELECT id
+        FROM agent_sessions
+        WHERE id = ?
+          AND session_id = ?
+          AND provider = ?
+          AND workspace_key IS ?
+          AND status IN ('active', 'suspended', 'orphaned', 'crashed')
+      `),
+      markExactAgentResumeFailed: prepare(`
+        UPDATE agent_sessions
+        SET status = 'resume_failed',
+            ended_at = COALESCE(ended_at, datetime('now'))
+        WHERE id = ?
+          AND session_id = ?
+          AND provider = ?
+          AND workspace_key IS ?
+          AND status IN ('active', 'suspended', 'orphaned', 'crashed')
+      `),
+      resolveCompletedDeliveryIdentityAdmissionsForFreshLifecycle: prepare(`
+        UPDATE completed_delivery_identity_admissions
+        SET state = 'resolved',
+            last_transition_at = datetime('now'),
+            resolved_at = datetime('now')
+        WHERE state = 'quarantined'
+          AND (
+            (
+              target_kind = 'checkpoint'
+              AND EXISTS (
+                SELECT 1
+                FROM session_checkpoints
+                WHERE session_checkpoints.id = completed_delivery_identity_admissions.target_id
+                  AND session_checkpoints.conversation_key = ?
+              )
+            )
+            OR (
+              target_kind = 'agent_session'
+              AND owner = 'fresh_inbound'
+              AND EXISTS (
+                SELECT 1
+                FROM agent_sessions
+                WHERE agent_sessions.id = completed_delivery_identity_admissions.target_id
+                  AND agent_sessions.workspace_key = ?
+              )
+            )
+          )
+      `),
     };
   }
 
@@ -349,7 +447,111 @@ export class SessionLifecycleStore {
         params.checkpointWatchdogState ?? null,
         params.pid || null,
       );
+      this.statements.resolveCompletedDeliveryIdentityAdmissionsForFreshLifecycle.run(
+        params.conversationKey,
+        params.workspaceKey,
+      );
       return rowId;
+    });
+  }
+
+  quarantineCompletedDeliveryIdentityCheckpoint(
+    params: QuarantineCompletedDeliveryIdentityCheckpointParams,
+  ): void {
+    validateProviderSessionId(params.providerSessionId);
+    validateProvider(params.provider);
+    validateIdentityPart(params.conversationKey, 'Conversation key');
+    return this.transact(() => {
+      const checkpoint = this.statements.selectExactResumableCheckpoint.get(
+        params.conversationKey,
+        params.providerSessionId,
+      ) as { id: number } | undefined;
+      if (checkpoint === undefined) {
+        throw new Error('Exact resumable checkpoint does not match the completed-delivery identity');
+      }
+      this.statements.recordCompletedDeliveryIdentityAdmission.run(
+        'checkpoint',
+        checkpoint.id,
+        params.reason,
+        'fresh_inbound',
+        'fresh_inbound',
+      );
+      const checkpointResult = this.statements.quarantineExactSessionCheckpoint.run(
+        checkpoint.id,
+        params.conversationKey,
+        params.providerSessionId,
+      );
+      if (Number(checkpointResult.changes) === 0) {
+        const stillQuarantined = this.statements.selectExactResumableCheckpoint.get(
+          params.conversationKey,
+          params.providerSessionId,
+        ) as { id: number } | undefined;
+        if (stillQuarantined === undefined) {
+          throw new Error('Exact completed-delivery checkpoint changed during quarantine');
+        }
+      }
+      const agentRows = this.statements.selectQuarantinableAgentRowsForCheckpoint.all(
+        params.providerSessionId,
+        params.provider,
+        params.conversationKey,
+      ) as Array<{ id: number }>;
+      for (const agentRow of agentRows) {
+        this.statements.recordCompletedDeliveryIdentityAdmission.run(
+          'agent_session',
+          agentRow.id,
+          params.reason,
+          'fresh_inbound',
+          'fresh_inbound',
+        );
+        requireChanges(
+          this.statements.markExactAgentResumeFailed.run(
+            agentRow.id,
+            params.providerSessionId,
+            params.provider,
+            params.conversationKey,
+          ),
+          'Exact agent session changed during completed-delivery identity quarantine',
+        );
+      }
+    });
+  }
+
+  quarantineCompletedDeliveryIdentityAgentSession(
+    params: QuarantineCompletedDeliveryIdentityAgentSessionParams,
+  ): void {
+    validateRowId(params.agentSessionRowId);
+    validateProviderSessionId(params.providerSessionId);
+    validateProvider(params.provider);
+    if (params.workspaceKey !== null) {
+      validateIdentityPart(params.workspaceKey, 'Workspace key');
+    }
+    this.transact(() => {
+      const row = this.statements.selectExactQuarantinableAgentSessionForAdmission.get(
+        params.agentSessionRowId,
+        params.providerSessionId,
+        params.provider,
+        params.workspaceKey,
+      ) as { id: number } | undefined;
+      if (row === undefined) {
+        throw new Error('Exact agent session row does not match the completed-delivery identity');
+      }
+      const owner = params.workspaceKey === null ? 'operator' : 'fresh_inbound';
+      this.statements.recordCompletedDeliveryIdentityAdmission.run(
+        'agent_session',
+        row.id,
+        params.reason,
+        owner,
+        owner,
+      );
+      requireChanges(
+        this.statements.markExactAgentResumeFailed.run(
+          row.id,
+          params.providerSessionId,
+          params.provider,
+          params.workspaceKey,
+        ),
+        'Exact agent session changed during completed-delivery identity quarantine',
+      );
     });
   }
 

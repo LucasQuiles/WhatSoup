@@ -166,6 +166,19 @@ export const REGISTRY: DurabilityStatusEntry[] = [
     writerSites: ['src/core/durability.ts'],
   },
   {
+    table: 'completed_delivery_identity_admissions',
+    statusColumn: 'state',
+    vocabulary: ['quarantined', 'resolved'],
+    vocabularySource: 'sql-check',
+    // Quarantine is terminal for automatic resume: only the explicitly owned
+    // fresh-inbound or operator repair path can resolve it.
+    terminalFailureValues: ['quarantined'],
+    writerSites: [
+      'src/core/session-lifecycle-store.ts',
+      'src/core/database-migration-53.ts',
+    ],
+  },
+  {
     table: 'turn_recovery_jobs',
     statusColumn: 'state',
     vocabulary: ['blocked_unsafe', 'pending', 'claimed', 'completed', 'exhausted'],

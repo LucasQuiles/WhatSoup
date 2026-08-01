@@ -8,11 +8,30 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BIN_DIR="$HOME/.local/bin"
 SYSTEMD_DIR="$HOME/.config/systemd/user"
 PLATFORM="$(uname -s)"
+MACHINE="$(uname -m)"
 
 # Credential-store probes must be bounded on BOTH platforms; `timeout(1)` is not
 # present on stock macOS (see deploy/lib/bounded-exec.sh).
 # shellcheck source=deploy/lib/bounded-exec.sh
 . "$REPO_ROOT/deploy/lib/bounded-exec.sh"
+
+# --- arch-aware binary suffix ---
+# Prebuilt binary distributions (e.g. Homebrew, self-hosted CI artifacts)
+# sometimes publish an arch-suffixed name (`ffmpeg-arm64`) alongside the bare
+# one. Kept consistent with src/lib/arch.ts's getArchBinSuffix() aliasing
+# (aarch64 -> arm64, x86_64 -> x64) so the shell-side and TypeScript-side
+# binary resolvers never disagree about which suffixed name a host resolves
+# to (src/runtimes/chat/providers/transcription/local-audio.ts:resolveBinaryPath
+# applies the same fallback for the TS-side ffmpeg/ffprobe lookup). `amd64` is
+# included defensively — it is a FreeBSD `uname -m` value; Linux and macOS
+# always report `x86_64` and never reach it.
+arch_bin_suffix() {
+  case "$MACHINE" in
+    arm64|aarch64) printf '%s' '-arm64' ;;
+    x64|x86_64|amd64) printf '%s' '-x64' ;;
+    *) printf '' ;;
+  esac
+}
 
 LAUNCH_AGENTS_DIR="$HOME/Library/LaunchAgents"
 LAUNCHD_TIMER_LABELS=(
@@ -207,8 +226,11 @@ else
 fi
 
 # ffmpeg — optional
+ffmpeg_arch_suffix="$(arch_bin_suffix)"
 if command -v ffmpeg &>/dev/null; then
   echo "  ✓ ffmpeg available"
+elif [ -n "$ffmpeg_arch_suffix" ] && command -v "ffmpeg$ffmpeg_arch_suffix" &>/dev/null; then
+  echo "  ✓ ffmpeg available (arch-suffixed: ffmpeg$ffmpeg_arch_suffix)"
 else
   echo "  - ffmpeg not found (optional — video processing in chat mode disabled)"
 fi

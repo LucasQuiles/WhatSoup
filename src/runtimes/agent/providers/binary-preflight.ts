@@ -8,6 +8,7 @@
 // receive a loud alert when the binary is simply not installed.
 
 import { spawn, type SpawnOptionsWithoutStdio } from 'node:child_process';
+import { SIGNAL } from '../../../lib/signals.ts';
 
 export interface BinaryPreflightResult {
   status: 'present' | 'missing' | 'unknown';
@@ -207,7 +208,7 @@ export async function probeBinaryCommand(
       terminationStarted = true;
       try { child.kill(); } catch { /* ignore kill errors */ }
       killEscalationTimer = setTimeout(() => {
-        try { child.kill('SIGKILL'); } catch { /* ignore kill errors */ }
+        try { child.kill(SIGNAL.KILL); } catch { /* already exited: the probe process may have already exited before this escalation fires, so kill throwing here is expected and safe to ignore. */ }
       }, KILL_ESCALATION_GRACE_MS);
       killEscalationTimer.unref?.();
     };

@@ -2073,6 +2073,45 @@ describe('GET /health', () => {
     db2.close();
   });
 
+  it('projects durable completed-delivery identity debt without identity data', async () => {
+    db.close();
+    const db2 = makeDb();
+    const admissionHealth = {
+      unresolvedCount: 2,
+      oldestTransitionAt: '2026-06-10 09:55:00',
+      maximumAttempts: 1,
+      nextAction: 'fresh_inbound',
+    };
+    const fakeAgentRuntime = {
+      getHealthSnapshot: () => ({
+        status: 'degraded',
+        details: {
+          degradedReasons: ['completed_delivery_identity_debt'],
+          completedDeliveryIdentityAdmissions: admissionHealth,
+        },
+      }),
+      getFallbackState: () => null,
+    };
+    const deps = makeDeps(db2, {
+      instanceType: 'agent',
+      runtime: fakeAgentRuntime as unknown as HealthDeps['runtime'],
+    });
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    ({ server, port } = await buildTestServer(deps));
+
+    const { status, body } = await healthReq(port);
+    expect(status).toBe(200);
+    const json = JSON.parse(body);
+    expect(json.status).toBe('degraded');
+    expect(json.status_reasons).toContain('runtime.completed_delivery_identity_debt');
+    expect(json.runtime.agent.completedDeliveryIdentityAdmissions).toEqual(admissionHealth);
+    const serialized = JSON.stringify(json.runtime.agent.completedDeliveryIdentityAdmissions);
+    expect(serialized).not.toContain('conversation');
+    expect(serialized).not.toContain('session_id');
+    expect(serialized).not.toContain('delivery_jid');
+    db2.close();
+  });
+
   it('propagates unhealthy runtime snapshots to the top-level health status', async () => {
     db.close();
     const db2 = makeDb();

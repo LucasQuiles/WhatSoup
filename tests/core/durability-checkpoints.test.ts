@@ -278,6 +278,22 @@ describe('DurabilityEngine — session checkpoints', () => {
           completed_logical_turn_id: 'same-turn-22',
         });
     });
+
+    it('excludes a quarantined completed-delivery identity from shared resume lookup', () => {
+      engine.upsertSessionCheckpoint('15550124', {
+        sessionId: 'quarantined-shared-session',
+        ...completedFields('15550124', 24, 'quarantined-turn'),
+      });
+      const checkpoint = engine.getSessionCheckpoint('15550124');
+      db.raw.prepare(`
+        INSERT INTO completed_delivery_identity_admissions (
+          target_kind, target_id, state, reason, attempts, owner, next_action
+        ) VALUES ('checkpoint', ?, 'quarantined', 'invalid', 1, 'fresh_inbound', 'fresh_inbound')
+      `).run(checkpoint!.id);
+
+      expect(engine.getLatestCompletedCheckpointForSession('quarantined-shared-session'))
+        .toBeUndefined();
+    });
   });
 
   describe('retireSessionLifecycle', () => {
@@ -452,6 +468,54 @@ describe('DurabilityEngine — session checkpoints', () => {
           session_id: 'session-resume',
         }),
       ]);
+    });
+
+    it('excludes checkpoints with an unresolved completed-delivery identity admission', () => {
+      engine.upsertSessionCheckpoint('conv-quarantined-resume', {
+        sessionId: 'quarantined-session',
+        sessionStatus: 'suspended',
+      });
+      const checkpoint = engine.getSessionCheckpoint('conv-quarantined-resume');
+      db.raw.prepare(`
+        INSERT INTO completed_delivery_identity_admissions (
+          target_kind, target_id, state, reason, attempts, owner, next_action
+        ) VALUES ('checkpoint', ?, 'quarantined', 'missing', 1, 'fresh_inbound', 'fresh_inbound')
+      `).run(checkpoint!.id);
+
+      expect(engine.getResumableCheckpoints()).toEqual([]);
+    });
+  });
+
+  describe('completed-delivery identity admission health', () => {
+    it('reports only current bounded debt with its oldest transition and repair action', () => {
+      db.raw.prepare(`
+        INSERT INTO completed_delivery_identity_admissions (
+          target_kind, target_id, state, reason, attempts, owner, next_action,
+          last_transition_at
+        ) VALUES ('agent_session', 91, 'quarantined', 'missing', 1, 'operator', 'operator',
+                  '2026-06-10 09:55:00')
+      `).run();
+      db.raw.prepare(`
+        INSERT INTO completed_delivery_identity_admissions (
+          target_kind, target_id, state, reason, attempts, owner, next_action,
+          last_transition_at, resolved_at
+        ) VALUES ('checkpoint', 92, 'resolved', 'invalid', 1, 'fresh_inbound', 'fresh_inbound',
+                  '2026-06-10 10:00:00', '2026-06-10 10:01:00')
+      `).run();
+      db.raw.prepare(`
+        INSERT INTO completed_delivery_identity_admissions (
+          target_kind, target_id, state, reason, attempts, owner, next_action,
+          last_transition_at
+        ) VALUES ('checkpoint', 93, 'quarantined', 'missing', 1, 'fresh_inbound', 'fresh_inbound',
+                  '2026-06-10 11:00:00')
+      `).run();
+
+      expect(engine.getCompletedDeliveryIdentityAdmissionHealth()).toEqual({
+        unresolvedCount: 2,
+        oldestTransitionAt: '2026-06-10 09:55:00',
+        maximumAttempts: 1,
+        nextAction: 'operator',
+      });
     });
   });
 
