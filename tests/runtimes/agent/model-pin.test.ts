@@ -485,7 +485,7 @@ import {
   type ModelPinPort,
 } from '../../../src/runtimes/agent/model-pin.ts';
 import { __resetModelCatalogueCacheForTest } from '../../../src/runtimes/agent/model-catalogue-resolver.ts';
-import { providerConfigEffort } from '../../../src/runtimes/agent/reasoning-control.ts';
+import { providerConfigEffort, providerHasNativeReasoningControl } from '../../../src/runtimes/agent/reasoning-control.ts';
 import { Database as RealDatabase } from '../../../src/core/database.ts';
 import { DurabilityEngine } from '../../../src/core/durability.ts';
 
@@ -600,12 +600,20 @@ describe('NL routing handlers (nlRouting flag)', () => {
     );
     // Slice 3: the recycle diff also reads the session's EFFECTIVE spawned
     // effort. Like getModelRef/getProviderId above, the mock must report the
-    // LATEST construction opts. It calls the REAL providerConfigEffort rather
-    // than re-implementing its guard, so the double cannot silently drift from
-    // the production reader (which would make these tests verify the mock).
+    // LATEST construction opts. It calls the REAL providerConfigEffort and
+    // providerHasNativeReasoningControl rather than re-implementing their
+    // guards, so the double cannot silently drift from the production reader
+    // (which would make these tests verify the mock). Refs #2845: the
+    // provider gate mirrors session.ts's getSpawnedEffort() — a provider with
+    // no native reasoning control always reports null, regardless of any
+    // inherited static providerConfig.effort key.
     (mockSession as unknown as Record<string, unknown>).getSpawnedEffort = vi.fn(() => {
-      const pc = (capturedSessionManagerOptsRef.current as unknown as { providerConfig?: Record<string, unknown> } | null)?.providerConfig;
-      return providerConfigEffort(pc);
+      const opts = capturedSessionManagerOptsRef.current as unknown as {
+        providerConfig?: Record<string, unknown>;
+        provider?: string;
+      } | null;
+      if (!providerHasNativeReasoningControl(opts?.provider ?? 'claude-cli')) return null;
+      return providerConfigEffort(opts?.providerConfig);
     });
   });
 
@@ -982,6 +990,34 @@ describe('NL routing handlers (nlRouting flag)', () => {
         // Same model AND the same EFFECTIVE effort (static 'high', no pin override).
         (runtime as unknown as { resolveRouteForTurn: (c: string, s?: string) => unknown }).resolveRouteForTurn = () => ({
           provider: 'claude-cli', model: 'claude-opus-4-8', source: 'default', reasonCode: 'no_preference', pinnedProvider: null,
+        });
+        const outcome = await (runtime as unknown as ARCR).applyRouteChangeAndRecycle(CHAT, SENDER_A, undefined);
+        expect(outcome).toBe('noop');
+      });
+
+      // Refs #2845: a static agentProviderConfig.effort key (meaningful only
+      // for claude-cli) survives fallbackProviderConfigFor/applyRouteEffort
+      // untouched for a non-claude-cli route (see the 945-956 test above) —
+      // it is INHERITED, not applied. Before the fix, getSpawnedEffort() read
+      // it back unconditionally, so a stable opencode-cli pairing compared
+      // its own inherited 'high' against routeSessionProviderConfig's SAME
+      // inherited 'high' and happened to agree (dormant, per the issue). The
+      // fix instead makes BOTH sides of the comparison report null for any
+      // provider with no native reasoning control, so this stays a true
+      // no-op for the RIGHT reason (effort is structurally inert for this
+      // provider) rather than an accidental value match.
+      it('the recycle diff is a no-op for a non-claude-cli session carrying an inherited static effort (no spurious recycle, #2845)', async () => {
+        cfgAny().agentProviderConfig = { effort: 'high' };
+        const { runtime } = makeRoutingRuntime({ model: 'kimi/kimi-k3' });
+        // A live opencode-cli session that merely inherited the static effort key —
+        // never applied to spawn, per applyRouteEffort's provider gate.
+        capturedSessionManagerOptsRef.current = {
+          model: 'kimi/kimi-k3', provider: 'opencode-cli', providerConfig: { effort: 'high' },
+        } as unknown as typeof capturedSessionManagerOptsRef.current;
+        (runtime as unknown as { session: typeof mockSession }).session = mockSession;
+        // Same provider, same model, no pin override — an unchanged route.
+        (runtime as unknown as { resolveRouteForTurn: (c: string, s?: string) => unknown }).resolveRouteForTurn = () => ({
+          provider: 'opencode-cli', model: 'kimi/kimi-k3', source: 'default', reasonCode: 'no_preference', pinnedProvider: null,
         });
         const outcome = await (runtime as unknown as ARCR).applyRouteChangeAndRecycle(CHAT, SENDER_A, undefined);
         expect(outcome).toBe('noop');
