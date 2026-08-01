@@ -22,6 +22,7 @@ import { useQueryClient } from '@tanstack/react-query'
 import { AlertTriangle, Save } from 'lucide-react'
 import TagInput from '../TagInput'
 import { normalizePhoneInput, validatePhone } from '../../lib/validation'
+import { isNonEmptyString } from '../../lib/type-guards'
 import { useToast } from '../../hooks/toast-context'
 import { api } from '../../lib/api'
 import {
@@ -193,7 +194,7 @@ export function ConfigEditDialog({
     if (key === CHAT_OPENAI_API_KEY_SERVICE_KEY) {
       const service = typeof value === 'string' ? value : ''
       const baseUrl = currentValue(CHAT_OPENAI_BASE_URL_KEY)
-      if (service && (typeof baseUrl !== 'string' || baseUrl.trim() === '')) {
+      if (service && !isNonEmptyString(baseUrl)) {
         return 'Set a custom OpenAI endpoint before choosing a keyring service'
       }
     }
