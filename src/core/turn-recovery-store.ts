@@ -2,6 +2,7 @@ import { Buffer } from 'node:buffer';
 import { createHash } from 'node:crypto';
 import type { Database } from './database.ts';
 import { TURN_RECOVERY_MAX_TEXT_BYTES } from './turn-recovery-contract.ts';
+import { isNonEmptyString } from '../lib/type-guards.ts';
 
 export const TURN_RECOVERY_MAX_ID_BYTES = 2048;
 const TURN_RECOVERY_MAX_NAME_BYTES = 4096;
@@ -211,7 +212,7 @@ export function validatePositiveSafeInteger(value: number, label: string): void 
 }
 
 export function validateBoundedRequired(value: string, label: string, maxBytes: number): void {
-  if (typeof value !== 'string' || value.trim() === '') {
+  if (!isNonEmptyString(value)) {
     throw new Error(`${label} must be nonempty`);
   }
   if (Buffer.byteLength(value, 'utf8') > maxBytes) {
