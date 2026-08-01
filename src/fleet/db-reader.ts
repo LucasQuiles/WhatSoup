@@ -1,5 +1,6 @@
 import { DatabaseSync } from 'node:sqlite';
 import { SQLITE_BUSY_TIMEOUT_PRAGMA } from '../lib/sqlite-constants.ts';
+import { buildSafeFtsMatchQuery } from '../lib/sql-fts.ts';
 import { createChildLogger } from '../logger.ts';
 
 const log = createChildLogger('fleet:db-reader');
@@ -131,25 +132,6 @@ export interface PendingPollsData {
 const READ_ONLY_DATABASE_OPTIONS: ConstructorParameters<typeof DatabaseSync>[1] = {
   readOnly: true,
 };
-
-// ---------------------------------------------------------------------------
-// FTS query safety
-// ---------------------------------------------------------------------------
-
-export function buildSafeFtsMatchQuery(query: string): string {
-  const tokens = query.trim().split(/\s+/).filter(Boolean);
-  if (tokens.length === 0) {
-    throw new Error('Invalid FTS MATCH query: query must not be empty');
-  }
-
-  for (const token of tokens) {
-    if (/["\u0000-\u001f\u007f]/u.test(token)) {
-      throw new Error('Invalid FTS MATCH query: unsafe characters are not allowed');
-    }
-  }
-
-  return tokens.map((token) => `"${token}"`).join(' AND ');
-}
 
 // ---------------------------------------------------------------------------
 // FleetDbReader

@@ -271,8 +271,8 @@ describe('resolveCommandSurface — purity', () => {
   it('does not mutate its inputs', () => {
     const instance: InstanceCommandSurfaceConfig = { disabled: ['status'], optionDefaults: { status: { a: '1' } } };
     const user: UserSurfacePrefs = { hidden: ['help'], optionDefaults: { status: { b: '2' } } };
-    const instanceSnapshot = JSON.parse(JSON.stringify(instance));
-    const userSnapshot = JSON.parse(JSON.stringify(user));
+    const instanceSnapshot = structuredClone(instance);
+    const userSnapshot = structuredClone(user);
     resolveCommandSurface(FIXTURE_CATALOG, instance, user);
     expect(instance).toEqual(instanceSnapshot);
     expect(user).toEqual(userSnapshot);

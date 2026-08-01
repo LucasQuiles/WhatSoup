@@ -1,4 +1,4 @@
-import { asRecord } from '../lib/type-guards.ts';
+import { asNonEmptyString, asRecord } from '../lib/type-guards.ts';
 import { resolveAgentModel } from './agent-model.ts';
 import { isProviderDataPolicy, type ProviderDataPolicy } from './provider-data-policy.ts';
 
@@ -36,7 +36,7 @@ export const FALLBACK_MODEL_REQUIRED_PROVIDER_IDS: ReadonlySet<string> = new Set
 ]);
 
 function stringOrUndefined(value: unknown): string | undefined {
-  return typeof value === 'string' && value.trim() !== '' ? value.trim() : undefined;
+  return asNonEmptyString(value);
 }
 
 export function normalizeFallbackEntriesFromAgentOptions(

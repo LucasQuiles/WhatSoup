@@ -11,7 +11,7 @@
 import { type WAMessage, isJidGroup, jidNormalizedUser } from '@whiskeysockets/baileys';
 import type { IncomingMessage } from './types.ts';
 import { bareNumber, isLidJid } from './jid-constants.ts';
-import { normalizeUnixTimestampSeconds } from '../fleet/time-utils.ts';
+import { normalizeUnixTimestampSeconds } from './substrate/time.ts';
 import { stripLoneSurrogates } from './sanitize-surrogates.ts';
 
 /**
