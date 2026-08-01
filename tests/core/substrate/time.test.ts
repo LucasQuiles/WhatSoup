@@ -1,20 +1,23 @@
 /**
  * Direct unit coverage for src/core/substrate/time.ts.
  *
- * The module exposes two helpers used by the substrate vault to manage
- * TTL clamping on submission timestamps:
+ * The module is the canonical home (#2242) for cross-ring timestamp
+ * primitives, plus one substrate-local helper:
  *
- * - nowUnixSec: re-export from fleet/time-utils (already covered indirectly)
+ * - nowUnixSec: current time as Unix seconds
+ * - normalizeUnixTimestampSeconds: normalizes a Unix timestamp-like value
+ *   (seconds, milliseconds, or bigint) to epoch seconds
  * - clampTtl: bounds a requested terminal time to `now + maxHours*3600`,
  *   defaulting to the hard-max when no request is provided
- *
- * No test mirror existed for this module despite TTL clamping being the
- * vault's primary guarantee against runaway holds.
  */
-import { describe, expect, it } from 'vitest';
-import { clampTtl, nowUnixSec } from '../../../src/core/substrate/time.ts';
+import { describe, expect, it, vi, afterEach } from 'vitest';
+import { clampTtl, normalizeUnixTimestampSeconds, nowUnixSec } from '../../../src/core/substrate/time.ts';
 
-describe('nowUnixSec re-export', () => {
+afterEach(() => {
+  vi.restoreAllMocks();
+});
+
+describe('nowUnixSec', () => {
   it('returns a finite integer-ish unix-seconds value', () => {
     const t = nowUnixSec();
     expect(typeof t).toBe('number');
@@ -23,6 +26,26 @@ describe('nowUnixSec re-export', () => {
     // year 2050 (2524608000). Catches accidental ms-vs-sec drift.
     expect(t).toBeGreaterThan(1577836800);
     expect(t).toBeLessThan(2524608000);
+  });
+
+  it('returns the current unix timestamp in seconds', () => {
+    vi.spyOn(Date, 'now').mockReturnValue(1_744_000_123_987);
+    expect(nowUnixSec()).toBe(1_744_000_123);
+  });
+});
+
+describe('normalizeUnixTimestampSeconds', () => {
+  it('normalizes unix seconds and milliseconds to stored epoch seconds', () => {
+    expect(normalizeUnixTimestampSeconds(1_777_824_570)).toBe(1_777_824_570);
+    expect(normalizeUnixTimestampSeconds(1_777_824_570_676)).toBe(1_777_824_570);
+    expect(normalizeUnixTimestampSeconds(BigInt(1_777_824_570_676))).toBe(1_777_824_570);
+  });
+
+  it('uses the caller fallback for absent or non-finite unix timestamp values', () => {
+    expect(normalizeUnixTimestampSeconds(undefined, 123)).toBe(123);
+    expect(normalizeUnixTimestampSeconds('', 123)).toBe(123);
+    expect(normalizeUnixTimestampSeconds('not-a-number', 123)).toBe(123);
+    expect(normalizeUnixTimestampSeconds(Number.POSITIVE_INFINITY, 123)).toBe(123);
   });
 });
 

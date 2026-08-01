@@ -4,7 +4,7 @@ import type { Database } from '../../core/database.ts';
 import type { ToolRegistry } from '../registry.ts';
 import { conversationBoundKey, type SessionContext } from '../types.ts';
 import { parseCron, nextCronRun } from '../../core/cron.ts';
-import { nowUnixSec } from '../../fleet/time-utils.ts';
+import { nowUnixSec } from '../../core/substrate/time.ts';
 import { enqueueScheduledMessage, isValidIanaTimeZone } from '../../core/schedule-enqueue.ts';
 
 // #1067: validate a recurrence timezone is a real IANA zone before storing it.

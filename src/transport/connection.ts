@@ -26,7 +26,7 @@ import { createChildLogger } from '../logger.ts';
 import { clearAlertSourceChecked, emitAlertChecked } from '../lib/emit-alert.ts';
 import type { BotErrorsCriticalAssetDiagnostic } from '../lib/bot-errors-outbox.ts';
 import { WhatSoupError } from '../errors.ts';
-import { normalizeUnixTimestampSeconds, nowUnixSec } from '../fleet/time-utils.ts';
+import { normalizeUnixTimestampSeconds, nowUnixSec } from '../core/substrate/time.ts';
 import type { Messenger, IncomingMessage, OutboundMedia, SendOptions, SubmissionReceipt, TypingState } from '../core/types.ts';
 import { toConversationKey } from '../core/conversation-key.ts';
 import { bareNumber, isLidJid } from '../core/jid-constants.ts';

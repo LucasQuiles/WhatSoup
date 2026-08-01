@@ -25,7 +25,7 @@ import type { Database } from './database.ts';
 import { parseIncomingMessage } from './message-parser.ts';
 import { withTransaction } from './db-tx.ts';
 import { canonicalConversationKey } from './access-list.ts';
-import { normalizeUnixTimestampSeconds } from '../fleet/time-utils.ts';
+import { normalizeUnixTimestampSeconds } from './substrate/time.ts';
 
 /** Raw Baileys WAMessage shape we rely on. Cast through unknown at the boundary. */
 export interface HistoryInput {
