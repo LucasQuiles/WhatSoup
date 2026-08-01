@@ -1,5 +1,6 @@
 import type { ReactNode } from 'react'
 import { splitSearchHighlights } from './search-highlight'
+import { isNonEmptyString } from './type-guards'
 
 /**
  * WhatsApp-style text formatting to React elements.
@@ -14,7 +15,7 @@ const WA_FORMAT_PATTERN = '```([\\s\\S]*?)```|`([^`]+)`|\\*\\*(.+?)\\*\\*|\\*(.+
 const EMPTY_TEXT = '\u2014';
 
 function displayText(text: string | null | undefined): string {
-  return typeof text === 'string' && text.trim() ? text : EMPTY_TEXT;
+  return isNonEmptyString(text) ? text : EMPTY_TEXT;
 }
 
 function renderHighlightedText(text: string, query: string | undefined, keyRef: { value: number }): ReactNode[] {
