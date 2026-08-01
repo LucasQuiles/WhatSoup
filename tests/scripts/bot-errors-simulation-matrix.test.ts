@@ -10,6 +10,7 @@ import {
   run,
   type BotErrorsSimulationDomain,
 } from '../../scripts/bot-errors-simulation-matrix.ts';
+import { BRANCH_STEPS, RELEASE_STEPS } from '../../scripts/push-gate.ts';
 
 const repoRoot = fileURLToPath(new URL('../..', import.meta.url));
 const fixtureDirs: string[] = [];
@@ -56,7 +57,9 @@ describe('bot-errors simulation matrix guard', () => {
     };
 
     for (const scriptName of ['verify:push:branch', 'verify:release']) {
-      const chain = packageJson.scripts[scriptName];
+      const chain = scriptName === 'verify:push:branch'
+        ? BRANCH_STEPS.map((step) => step.cmd).join(' && ')
+        : RELEASE_STEPS.map((step) => step.cmd).join(' && ');
       expect(chain, `${scriptName} script must exist`).toBeDefined();
       expect(chain).toMatch(/\bnpm run guard:bot-errors-simulation-matrix\b/);
       expect(chain.indexOf('npm run guard:source-runtime-drift')).toBeLessThan(

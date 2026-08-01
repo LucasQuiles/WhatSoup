@@ -15,6 +15,7 @@ import {
   defaultSettingsJson,
   REQUIRED_DENY,
 } from '../../src/core/settings-template.ts';
+import { BRANCH_STEPS, RELEASE_STEPS } from '../../scripts/push-gate.ts';
 
 const repoRoot = fileURLToPath(new URL('../..', import.meta.url));
 const fixtureDirs: string[] = [];
@@ -103,7 +104,11 @@ describe('claude-settings guard', () => {
     ) as { scripts: Record<string, string> };
 
     for (const scriptName of ['verify:push:branch', 'verify:release', 'verify:publish']) {
-      const chain = packageJson.scripts[scriptName];
+const chain = scriptName === 'verify:push:branch'
+        ? BRANCH_STEPS.map((step) => step.cmd).join(' && ')
+        : scriptName === 'verify:release'
+          ? RELEASE_STEPS.map((step) => step.cmd).join(' && ')
+          : packageJson.scripts[scriptName];
       expect(chain, `${scriptName} script must exist`).toBeDefined();
       expect(chain).toMatch(/\bnpm run guard:claude-settings\b/);
 

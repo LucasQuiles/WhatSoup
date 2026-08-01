@@ -12,6 +12,7 @@ import { tmpdir } from 'node:os';
 import path, { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
+import { RELEASE_STEPS } from '../../scripts/push-gate.ts';
 
 const repoRoot = fileURLToPath(new URL('../..', import.meta.url));
 const wrapperScript = path.join(repoRoot, 'scripts', 'test-integrity-ci.sh');
@@ -115,10 +116,7 @@ describe('test-integrity CI wrapper', () => {
     expect(packageJson.scripts?.['guard:test-integrity:required']).toBe(
       'WHATSOUP_REQUIRE_TEST_INTEGRITY=1 npm run guard:test-integrity',
     );
-    const releaseSteps =
-      packageJson.scripts?.['verify:release']
-        ?.split('&&')
-        .map((step) => step.trim()) ?? [];
+    const releaseSteps = RELEASE_STEPS.map((step) => step.cmd);
     expect(
       releaseSteps.filter((step) => step === 'npm run guard:test-integrity:required'),
     ).toHaveLength(1);

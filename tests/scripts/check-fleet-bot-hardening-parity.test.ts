@@ -11,6 +11,7 @@ import {
 } from '../../scripts/check-fleet-bot-hardening-parity.ts';
 import { receiptCapabilityDigest } from '../../scripts/lib/fleet-receipt-digest.ts';
 import { rosterEpoch, rosterInventory } from '../../scripts/lib/fleet-roster-inventory.ts';
+import { BRANCH_STEPS, RELEASE_STEPS } from '../../scripts/push-gate.ts';
 
 const repoRoot = fileURLToPath(new URL('../..', import.meta.url));
 const tempRoots: string[] = [];
@@ -635,7 +636,11 @@ describe('fleet bot hardening parity guard', () => {
 
     expect(packageJson.scripts['guard:fleet-bot-hardening-parity']).toContain('check-fleet-bot-hardening-parity.ts');
     for (const scriptName of ['verify:push:branch', 'verify:release']) {
-      const chain = packageJson.scripts[scriptName];
+const chain = scriptName === 'verify:push:branch'
+        ? BRANCH_STEPS.map((step) => step.cmd).join(' && ')
+        : scriptName === 'verify:release'
+          ? RELEASE_STEPS.map((step) => step.cmd).join(' && ')
+          : packageJson.scripts[scriptName];
       expect(chain).toContain('npm run guard:fleet-bot-hardening-parity');
       expect(chain.indexOf('npm run guard:source-runtime-drift')).toBeLessThan(
         chain.indexOf('npm run guard:fleet-bot-hardening-parity'),
