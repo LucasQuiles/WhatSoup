@@ -1878,7 +1878,8 @@ def test_instance_lock_prevents_concurrent_run(tmp_path: Path, monkeypatch):
 
 
 def test_instance_lock_released_after_normal_run(tmp_path: Path, monkeypatch):
-    """After main() finishes the lock file is gone and immediately re-acquirable."""
+    """After main() finishes, the lock file persists (#2474: the pathname is not
+    unlinked, only the flock is released) and is immediately re-acquirable."""
     import fcntl
     lock_path = tmp_path / "sentinel-instance.lock"
     monkeypatch.setenv("BOT_ERRORS_FLEET_SENTINEL_LOCK", str(lock_path))
@@ -1889,7 +1890,7 @@ def test_instance_lock_released_after_normal_run(tmp_path: Path, monkeypatch):
     )
     rc = _mod.main(["--hosts", str(tmp_path / "hosts.json"), "--state-dir", str(tmp_path / "state")])
     assert rc == 0
-    assert not lock_path.exists(), "lock file must be removed after a normal run"
+    assert lock_path.exists(), "lock pathname must persist after a normal run (#2474)"
     # A fresh holder must be able to take the lock immediately.
     fd = os.open(str(lock_path), os.O_CREAT | os.O_WRONLY, 0o600)
     try:
@@ -1897,6 +1898,50 @@ def test_instance_lock_released_after_normal_run(tmp_path: Path, monkeypatch):
     finally:
         fcntl.flock(fd, fcntl.LOCK_UN)
         os.close(fd)
+
+
+def test_instance_lock_preserves_inode_identity_across_handoff(tmp_path: Path, monkeypatch):
+    """#2474 regression: main()'s finally must not unlink the instance-lock
+    pathname after releasing the flock. Deleting it would let a fresh acquirer
+    create a brand-new inode at the same path, and a contender that had already
+    opened the OLD inode before the unlink could hold a live lock independent of
+    a later contender's lock on the NEW inode -- the issue's deterministic
+    canary reproduced exactly that split (``second_holder_live=True,
+    third_holder_live=True, split_inode=True``). This proves the fixed finally
+    block keeps a single, stable inode across the release/reacquire handoff and
+    that a third contender racing in while the new holder is live is blocked on
+    the SAME inode rather than free to create a second, independent lock."""
+    import fcntl
+    lock_path = tmp_path / "sentinel-instance.lock"
+    monkeypatch.setenv("BOT_ERRORS_FLEET_SENTINEL_LOCK", str(lock_path))
+    monkeypatch.setattr(
+        _mod,
+        "run_once",
+        lambda config: {"schemaVersion": 1, "checkedAt": "2026-01-01T00:00:00Z", "fleetAction": "none", "hosts": [], "actionEvents": []},
+    )
+    rc = _mod.main(["--hosts", str(tmp_path / "hosts.json"), "--state-dir", str(tmp_path / "state")])
+    assert rc == 0
+    assert lock_path.exists(), "the pathname must survive a normal run (identity must not change hands)"
+    inode_a = lock_path.stat().st_ino
+
+    fd_b = os.open(str(lock_path), os.O_CREAT | os.O_WRONLY, 0o600)
+    try:
+        fcntl.flock(fd_b, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        assert lock_path.stat().st_ino == inode_a, "handoff must reuse the original inode, never a fresh one"
+
+        # A third contender racing in while B is live must be blocked on the
+        # SAME inode -- not free to create and lock a brand-new inode at the
+        # same path, which is exactly the split-inode condition #2474 describes.
+        fd_c = os.open(str(lock_path), os.O_CREAT | os.O_WRONLY, 0o600)
+        try:
+            with pytest.raises(OSError):
+                fcntl.flock(fd_c, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        finally:
+            os.close(fd_c)
+        assert lock_path.stat().st_ino == inode_a, "a blocked contender must not have replaced the inode"
+    finally:
+        fcntl.flock(fd_b, fcntl.LOCK_UN)
+        os.close(fd_b)
 
 
 # --- SENT-B2: unbounded action outbox ---------------------------------------
