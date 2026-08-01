@@ -503,3 +503,95 @@ def test_git_index_bytes_and_mtime_unchanged(tmp_path: Path):
     _mod.gather_tree_provenance(work.resolve(), do_fetch=False)
     assert index.read_bytes() == before_bytes
     assert index.stat().st_mtime_ns == before_mtime
+
+# ---------------------------------------------------------------------------
+# --fetch failure: classifier must consume fetch_error (#2503)
+#
+# Bug: gather_tree_provenance records fetch_error when do_fetch=True and the
+# refresh fails, but provenance_findings never checks it.  If ancestry is
+# "same" (cached ref still compares cleanly with HEAD) the findings list is
+# empty and run_once emits a *clear* event -- claiming the tree is provenant
+# after a refresh that silently failed.  The fix: emit a warning finding so
+# no clear event is produced from a fetch-failed snapshot.
+# ---------------------------------------------------------------------------
+def test_fetch_failure_prevents_clean_verdict(tmp_path: Path, monkeypatch):
+    """A failed --fetch must NOT produce an empty findings list when ancestry
+    is 'same' -- that would let run_once emit a spurious clear event."""
+    _, work = _make_origin_and_clone(tmp_path, branch="develop")
+
+    def _fail_fetch(repo, remote):
+        return "fetch_failed:rc=128"
+
+    monkeypatch.setattr(_mod, "fetch_upstream", _fail_fetch)
+    snap = _mod.gather_tree_provenance(work, do_fetch=True)
+    assert snap["fetch_error"] == "fetch_failed:rc=128"
+    assert snap["ancestry"] == "same"  # cached ref still compares cleanly
+    findings = _mod.provenance_findings(snap)
+    assert findings != [], "fetch failure must produce a finding, not clean"
+
+
+def test_fetch_failure_emits_warning_finding(tmp_path: Path, monkeypatch):
+    """The fetch-failed finding must be severity=warning with a recognisable
+    check name so the health-check classifier and alert policy handle it."""
+    _, work = _make_origin_and_clone(tmp_path, branch="develop")
+
+    def _fail_fetch(repo, remote):
+        return "fetch_failed:timeout"
+
+    monkeypatch.setattr(_mod, "fetch_upstream", _fail_fetch)
+    snap = _mod.gather_tree_provenance(work, do_fetch=True)
+    findings = _mod.provenance_findings(snap)
+    assert _mod.CHECK_FETCH_FAILED in _checks(findings)
+    assert _sev_for(findings, _mod.CHECK_FETCH_FAILED) == "warning"
+
+
+def test_fetch_failure_does_not_mask_dirty_finding(tmp_path: Path, monkeypatch):
+    """When the tree is dirty AND the fetch fails, both findings must appear."""
+    _, work = _make_origin_and_clone(tmp_path, branch="develop")
+    (work / "junk.txt").write_text("dirty\n")  # DIRTY -> warning
+
+    def _fail_fetch(repo, remote):
+        return "fetch_failed:rc=1"
+
+    monkeypatch.setattr(_mod, "fetch_upstream", _fail_fetch)
+    snap = _mod.gather_tree_provenance(work, do_fetch=True)
+    findings = _mod.provenance_findings(snap)
+    checks = _checks(findings)
+    assert _mod.CHECK_FETCH_FAILED in checks
+    assert _mod.CHECK_DIRTY in checks
+
+
+def test_fetch_success_produces_no_fetch_finding(tmp_path: Path, monkeypatch):
+    """A successful fetch must NOT produce a fetch_failed finding."""
+    _, work = _make_origin_and_clone(tmp_path, branch="develop")
+
+    def _ok_fetch(repo, remote):
+        return None  # success
+
+    monkeypatch.setattr(_mod, "fetch_upstream", _ok_fetch)
+    snap = _mod.gather_tree_provenance(work, do_fetch=True)
+    assert snap["fetch_error"] is None
+    findings = _mod.provenance_findings(snap)
+    assert _mod.CHECK_FETCH_FAILED not in _checks(findings)
+
+
+def test_run_once_no_clear_event_on_fetch_failure(tmp_path: Path, monkeypatch):
+    """End-to-end: run_once must not emit a 'clear' outbox event when the
+    fetch failed, even if the cached ancestry is 'same'."""
+    _, work = _make_origin_and_clone(tmp_path, branch="develop")
+    state = tmp_path / "state"
+
+    def _fail_fetch(repo, remote):
+        return "fetch_failed:rc=128"
+
+    monkeypatch.setattr(_mod, "fetch_upstream", _fail_fetch)
+    monkeypatch.setattr(_mod, "REPO_ROOT", work.resolve())
+    monkeypatch.setenv("BOT_ERRORS_STATE_DIR", str(state))
+    rc = _mod.run_once(do_fetch=True, dry=False)
+    assert rc == 1  # warning
+    import json
+
+    events = list((state / "outbox").glob("*.json"))
+    assert len(events) == 1
+    payload = json.loads(events[0].read_text())
+    assert payload["eventType"] == "alert"  # NOT "clear"

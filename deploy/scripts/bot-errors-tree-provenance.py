@@ -120,6 +120,7 @@ CHECK_AHEAD = "ahead_of_upstream"
 CHECK_DIRECT_TO_PROTECTED = "direct_to_protected_branch"
 CHECK_DIVERGED = "diverged"
 CHECK_PHANTOM_SRC = "phantom_src"
+CHECK_FETCH_FAILED = "fetch_failed"
 
 SEVERITY_RANK = {"info": 0, "warning": 1, "critical": 2}
 
@@ -328,6 +329,7 @@ def provenance_findings(snap: dict[str, Any]) -> list[dict[str, str]]:
     """Map a provenance snapshot to structured findings.
 
     Severity policy (per the gap-matrix class-2 design):
+      * fetch failed            -> warning  (stale-comparison: refresh failed)
       * dirty                   -> DIRTY_SEVERITY (default warning)
       * ahead-of-upstream       -> warning  (the hub-32 anti-pattern)
       * direct-to-protected+ahead -> critical (PR-bypass on production main)
@@ -336,6 +338,19 @@ def provenance_findings(snap: dict[str, Any]) -> list[dict[str, str]]:
     """
     findings: list[dict[str, str]] = []
     branch = snap.get("branch_redacted") or "DETACHED"
+
+    # 0. FETCH FAILED -- when an explicit --fetch was requested but the refresh
+    #    failed, the ancestry comparison is against stale cached refs.  Even if
+    #    the cached ref still compares "same", we cannot emit a clear event
+    #    because the provenance was not freshly confirmed (#2503).
+    if snap.get("fetch_error"):
+        findings.append({
+            "check": CHECK_FETCH_FAILED,
+            "severity": "warning",
+            "evidence": f"branch={branch} fetch_requested=true "
+                        f"fetch_error={snap['fetch_error']} "
+                        "upstream_comparison_stale_refresh_failed_no_clear_event",
+        })
 
     # 4. DIVERGED / DETACHED / unknown HEAD (critical).
     if snap["detached"]:
