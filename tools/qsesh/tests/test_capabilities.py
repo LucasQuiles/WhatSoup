@@ -60,7 +60,7 @@ def test_probe_reports_observed_runtime_and_real_lock_support() -> None:
     assert capabilities.fcntl_lock is True
     assert capabilities.platform == sys.platform
 
-    if sys.platform == "darwin":
+    if sys.platform in ("darwin", "linux"):
         assert require_capabilities(capabilities) is None
     else:
         with pytest.raises(QseshError) as caught:
@@ -119,11 +119,16 @@ def test_missing_fcntl_lock_fails_closed() -> None:
 
 
 def test_unsupported_platform_fails_closed() -> None:
-    assert _missing_capability_result("platform", "linux") == (
+    assert _missing_capability_result("platform", "win32") == (
         "QS-E-CAPABILITY",
         ("platform",),
         "required runtime capability unavailable at preflight: platform",
     )
+
+
+def test_linux_platform_is_supported() -> None:
+    capabilities = replace(SUPPORTED_CAPABILITIES, platform="linux")
+    assert require_capabilities(capabilities) is None
 
 
 def test_multiple_missing_capabilities_are_sorted_and_nonempty() -> None:
@@ -133,7 +138,7 @@ def test_multiple_missing_capabilities_are_sorted_and_nonempty() -> None:
         fts5=False,
         foreign_keys=False,
         fcntl_lock=False,
-        platform="linux",
+        platform="win32",
     )
 
     with pytest.raises(QseshError) as caught:
