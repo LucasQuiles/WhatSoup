@@ -24,13 +24,18 @@ vi.mock('../../src/config.ts', () => ({
   },
 }));
 
+// Shared, inspectable logger instance — admin.ts calls createChildLogger('admin')
+// once at module load, so every log call in the module lands on this same mock
+// and #2830's replay-failure log assertions can read it back.
+const mockLog = vi.hoisted(() => ({
+  info: vi.fn(),
+  warn: vi.fn(),
+  error: vi.fn(),
+  debug: vi.fn(),
+}));
+
 vi.mock('../../src/logger.ts', () => ({
-  createChildLogger: () => ({
-    info: vi.fn(),
-    warn: vi.fn(),
-    error: vi.fn(),
-    debug: vi.fn(),
-  }),
+  createChildLogger: () => mockLog,
 }));
 
 // ---------------------------------------------------------------------------
@@ -437,6 +442,104 @@ describe('handleAdminCommand ALLOW — SP4 replay hardening', () => {
     // 3 messages with 50ms delay each = at least ~100ms total (delay after each except possibly last)
     // Be lenient — just check it's noticeably above 0
     expect(elapsed).toBeGreaterThanOrEqual(80);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// #2830 — replay admission failure isolation: a rejected handleMessageFn call
+// must not (a) mark that message as replayed, or (b) abort admission of the
+// remaining queued messages. Mirrors the #2831 fix already landed in
+// src/main.ts's handleAccessDecision phone+allow replay loop.
+// ---------------------------------------------------------------------------
+
+describe('handleAdminCommand ALLOW — replay admission failure isolation (#2830)', () => {
+  it('all-succeed: every message is admitted and its ID is remembered', async () => {
+    const { config } = await import('../../src/config.ts');
+    (config as any).adminReplayMax = 10;
+    (config as any).adminReplayDelayMs = 0;
+    adminModule.__resetReplayedIdsForTests();
+
+    const db = openDb();
+    const messenger = makeMockMessenger();
+
+    for (let i = 0; i < 3; i++) {
+      storeMessageIfNew(db, {
+        chatJid: '15559990010@s.whatsapp.net',
+        conversationKey: '15559990010',
+        senderJid: '15559990010@s.whatsapp.net',
+        senderName: 'PassUser',
+        messageId: `pass-msg-${i}`,
+        content: `msg ${i}`,
+        contentType: 'text',
+        isFromMe: false,
+        timestamp: 1700001000 + i,
+      });
+    }
+
+    const handleMessageFn = vi.fn().mockResolvedValue(undefined);
+    await handleAdminCommand(db, messenger, 'allow', 'phone', '15559990010', ADMIN_CHAT_JID, handleMessageFn);
+
+    expect(handleMessageFn).toHaveBeenCalledTimes(3);
+    expect(adminModule.__hasReplayedIdForTests('pass-msg-0')).toBe(true);
+    expect(adminModule.__hasReplayedIdForTests('pass-msg-1')).toBe(true);
+    expect(adminModule.__hasReplayedIdForTests('pass-msg-2')).toBe(true);
+  });
+
+  it('one-fails-mid-loop: the loop continues past a rejected admission and the failed message stays retry-eligible', async () => {
+    const { config } = await import('../../src/config.ts');
+    (config as any).adminReplayMax = 10;
+    (config as any).adminReplayDelayMs = 0;
+    adminModule.__resetReplayedIdsForTests();
+
+    const db = openDb();
+    const messenger = makeMockMessenger();
+
+    for (let i = 0; i < 3; i++) {
+      storeMessageIfNew(db, {
+        chatJid: '15559990011@s.whatsapp.net',
+        conversationKey: '15559990011',
+        senderJid: '15559990011@s.whatsapp.net',
+        senderName: 'FailUser',
+        messageId: `fail-msg-${i}`,
+        content: `msg ${i}`,
+        contentType: 'text',
+        isFromMe: false,
+        timestamp: 1700002000 + i,
+      });
+    }
+
+    const handleMessageFn = vi.fn()
+      .mockResolvedValueOnce(undefined)
+      .mockRejectedValueOnce(new Error('handleMessage boom'))
+      .mockResolvedValueOnce(undefined);
+
+    await handleAdminCommand(db, messenger, 'allow', 'phone', '15559990011', ADMIN_CHAT_JID, handleMessageFn);
+
+    // The loop must not abandon later messages after fail-msg-1's admission throws.
+    expect(handleMessageFn).toHaveBeenCalledTimes(3);
+    expect(handleMessageFn).toHaveBeenNthCalledWith(1, expect.objectContaining({ messageId: 'fail-msg-0' }));
+    expect(handleMessageFn).toHaveBeenNthCalledWith(2, expect.objectContaining({ messageId: 'fail-msg-1' }));
+    expect(handleMessageFn).toHaveBeenNthCalledWith(3, expect.objectContaining({ messageId: 'fail-msg-2' }));
+
+    // fail-msg-0 and fail-msg-2 are armed in the dedup set; fail-msg-1 (the
+    // failed one) is deliberately NOT armed so a future /access retry can
+    // still admit it.
+    expect(adminModule.__hasReplayedIdForTests('fail-msg-0')).toBe(true);
+    expect(adminModule.__hasReplayedIdForTests('fail-msg-2')).toBe(true);
+    expect(adminModule.__hasReplayedIdForTests('fail-msg-1')).toBe(false);
+
+    expect(mockLog.error).toHaveBeenCalledWith(
+      expect.objectContaining({
+        err: expect.any(Error),
+        subjectId: '15559990011',
+        messageId: 'fail-msg-1',
+      }),
+      'access replay: message admission failed — leaving eligible for retry',
+    );
+    expect(mockLog.warn).toHaveBeenCalledWith(
+      expect.objectContaining({ subjectId: '15559990011', failed: 1 }),
+      'access replay: completed with partial failures',
+    );
   });
 });
 

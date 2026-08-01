@@ -5,7 +5,7 @@ import * as os from 'node:os';
 import { spawn } from 'node:child_process';
 import { readBody, jsonResponse, requireInstance } from '../../lib/http.ts';
 import { escapeRegExp } from '../../lib/regex-utils.ts';
-import { isRecord } from '../../lib/type-guards.ts';
+import { isNonEmptyString, isRecord } from '../../lib/type-guards.ts';
 import { createSSEWriter } from '../sse-helpers.ts';
 import { normalizePhoneE164, normalizePhoneE164Wire } from '../../lib/phone.ts';
 import { SIGNAL_UUID_RE } from '../../transport/signal/types.ts';
@@ -464,7 +464,7 @@ export async function handleConfigUpdate(
         if (
           !Array.isArray(patch.adminPhones) ||
           patch.adminPhones.length === 0 ||
-          !patch.adminPhones.every((p: unknown) => typeof p === 'string' && (p as string).trim())
+          !patch.adminPhones.every((p: unknown) => isNonEmptyString(p))
         ) {
           jsonResponse(res, 400, { error: 'adminPhones must be a non-empty array of strings' });
           haltConfigUpdateAfterResponse();
@@ -501,7 +501,7 @@ export async function handleConfigUpdate(
       }
       if (patch.claudeMd && merged.type === 'agent') {
         const ao = merged.agentOptions as Record<string, unknown> | undefined;
-        if (ao && typeof ao.cwd === 'string' && ao.cwd.trim()) {
+        if (ao && isNonEmptyString(ao.cwd)) {
           try {
             const claudeDir = path.join(ao.cwd, '.claude');
             ensureHomeConfinedDirectory(claudeDir);
@@ -516,7 +516,7 @@ export async function handleConfigUpdate(
       // Write settings.json when settingsJson is in the patch (agent instances only)
       if (patch.settingsJson && merged.type === 'agent') {
         const ao = merged.agentOptions as Record<string, unknown> | undefined;
-        if (ao && typeof ao.cwd === 'string' && ao.cwd.trim()) {
+        if (ao && isNonEmptyString(ao.cwd)) {
           try {
             const claudeDir = path.join(ao.cwd, '.claude');
             const settings = mergeSettingsJson('agent', patch.settingsJson as PermissionsSettings);
@@ -536,7 +536,7 @@ export async function handleConfigUpdate(
         const patchAo = patch.agentOptions as Record<string, unknown>;
         if (patchAo.enabledPlugins !== undefined && (patchAo.enabledPlugins === null || typeof patchAo.enabledPlugins === 'object')) {
           const ao = merged.agentOptions as Record<string, unknown> | undefined;
-          if (ao && typeof ao.cwd === 'string' && ao.cwd.trim()) {
+          if (ao && isNonEmptyString(ao.cwd)) {
             try {
               const claudeDir = path.join(ao.cwd, '.claude');
               ensureHomeConfinedDirectory(claudeDir);
@@ -759,13 +759,16 @@ function resolveAndValidateAgentCwd(
   res: ServerResponse,
 ): string | null {
   const cwd = agentOptions.cwd;
-  if (cwd == null || (typeof cwd === 'string' && !cwd.trim())) {
+  // The typeof guard is load-bearing, not redundant: it keeps a non-string,
+  // non-null cwd (e.g. a number) falling through to the `else if` 400 branch
+  // below instead of being silently defaulted here.
+  if (cwd == null || (typeof cwd === 'string' && !isNonEmptyString(cwd))) {
     agentOptions.cwd = defaultAgentCwd(name);
   } else if (typeof cwd !== 'string') {
     jsonResponse(res, 400, { error: 'agentOptions.cwd must be a string within the home directory' });
     return null;
   }
-  if (agentOptions.sessionScope == null || (typeof agentOptions.sessionScope === 'string' && !agentOptions.sessionScope.trim())) {
+  if (agentOptions.sessionScope == null || (typeof agentOptions.sessionScope === 'string' && !isNonEmptyString(agentOptions.sessionScope))) {
     agentOptions.sessionScope = 'per_chat';
   }
 

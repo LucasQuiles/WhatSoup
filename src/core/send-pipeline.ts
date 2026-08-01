@@ -11,7 +11,7 @@ import type {
   OutboundSendCaller,
   OutboundSendsWriter,
 } from './outbound-sends.ts';
-import { isRecord } from '../lib/type-guards.ts';
+import { isNonEmptyString, isRecord } from '../lib/type-guards.ts';
 
 export type LinkPreviewMode = 'auto' | 'off';
 export type TextSendTransportResult = { transportId?: string | null } | void;
@@ -150,7 +150,7 @@ export function prepareTextSend(
   }
 
   const profileName = input['profile'];
-  if (profileName !== undefined && (typeof profileName !== 'string' || profileName.trim().length === 0)) {
+  if (profileName !== undefined && !isNonEmptyString(profileName)) {
     throw new InvalidSendRequestError('profile must be a non-empty string');
   }
   const profile = typeof profileName === 'string'
@@ -165,7 +165,7 @@ export function prepareTextSend(
   if (typeof input['to'] === 'string') target.to = input['to'];
 
   const chatJid = chatResolver.resolve(target);
-  const alias = typeof input['to'] === 'string' && input['to'].trim().length > 0
+  const alias = isNonEmptyString(input['to'])
     ? input['to']
     : undefined;
   const text = profile ? applyProfile(input['text'], profile) : input['text'];

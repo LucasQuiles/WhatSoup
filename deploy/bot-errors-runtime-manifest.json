@@ -49,7 +49,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-emit.py",
-      "sha256": "990a860e1787f5883f2f055dfdc4b796410ec3ceec41ac24e5d2077a0027c181",
+      "sha256": "c8c22d37a46f5c435baa4f9f7e84b7b92a82af908bfb29815c36048b3577e7cb",
       "mustContain": [
         "O_NOFOLLOW",
         "refusing to use private directory through symlink",
@@ -208,7 +208,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-sentinel.py",
-      "sha256": "b1ef9e57f6013a29cd9556e7c0e12fb793843a9bd6a70238ff9409604fcfbbb3",
+      "sha256": "500f4377291ccf3699ea76bbeafa6a2062d082b7a42a1ffdfc61ae0c60809d88",
       "mustContain": [
         "DEFAULT_HEARTBEAT_MAX_AGE_SECONDS",
         "DEFAULT_HYSTERESIS_CYCLES"
@@ -256,6 +256,15 @@
         "host gate",
         "RECEIPT",
         "daemon-reload"
+      ]
+    },
+    {
+      "path": "deploy/scripts/install-bot-errors-sentinel.sh",
+      "sha256": "f56b4bf66061247250c38a1ebc677dffab12ce8b34ab6a2fe581c8249168acf4",
+      "mustContain": [
+        "BOT_ERRORS_FLEET_SENTINEL_ACTION_OUTBOX_RETENTION",
+        "BOT_ERRORS_FLEET_SENTINEL_SSH_COMMAND",
+        "EnvironmentFile="
       ]
     },
     {

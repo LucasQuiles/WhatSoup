@@ -901,16 +901,19 @@ const healthServer = startHealthServer({
     }
     // Block requires no additional action beyond the DB update
   },
-  getEnrichmentStats: () => {
-    const snap = runtime.getHealthSnapshot();
-    const lastRun = (snap.details as Record<string, unknown>)?.enrichmentLastRunAt as string | null ?? null;
+  // #2545: receives the snapshot the health handler already sampled once for
+  // this request, instead of sampling runtime.getHealthSnapshot() again here
+  // — the double-sample let a state transition mid-request mix two
+  // generations into one response.
+  getEnrichmentStats: (runtimeSnapshot) => {
+    const lastRun = (runtimeSnapshot?.details?.enrichmentLastRunAt as string | null | undefined) ?? null;
     // Agent runtime degradation has its own health causes (provider fallback,
     // turn recovery, process pressure, and so on). Treating that aggregate
     // status as an enrichment failure creates a circular false-positive on
     // every otherwise-operational fallback turn. Only ChatRuntime owns the
     // enrichment poller represented by this compatibility field.
     const runtimeDegraded = instanceType === 'chat'
-      && (snap.status === 'degraded' || snap.status === 'unhealthy');
+      && (runtimeSnapshot?.status === 'degraded' || runtimeSnapshot?.status === 'unhealthy');
     let unprocessed = 0;
     try {
       unprocessed = getUnprocessedCount(db);

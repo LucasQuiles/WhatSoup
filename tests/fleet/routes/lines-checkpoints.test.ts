@@ -3,7 +3,7 @@
  *  - FleetDbReader.getCheckpoints (real node:sqlite, minimal schema)
  *  - GET /api/lines/:name/checkpoints (handleGetLineCheckpoints, fake deps)
  *
- * Spec: oc-re/specs/2026-07-19-checkpoint-browser-ui-spec.md
+ * Design/implementation lineage: PR #1930
  * The `resumable` flag MUST use the durability engine's exact filter
  * (src/core/durability.ts:501-506): session_status IN ('active','suspended')
  * AND session_id IS NOT NULL.

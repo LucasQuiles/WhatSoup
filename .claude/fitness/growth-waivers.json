@@ -16,6 +16,14 @@
       "issue": "https://github.com/LucasQuiles/WhatSoup/issues/2463",
       "grantedAt": "2026-07-29",
       "expiresAt": "2026-08-12"
+    },
+    {
+      "path": "eslint-rules/catch-ratchet-baseline.json",
+      "maxWeight": 112,
+      "reason": "Identity-rename authorization for the #2849 isNonEmptyString migration: two staged lanes edit inside ops.ts try blocks, renaming their raw-token swallow identities (verified behavior-identical at gate review; guard:catch-ratchet reports 112 inherited, no growth, in both lanes and in their merge-tree-verified combination). maxWeight pinned at the exact current count 112 \u2014 replacements authorized, growth is not.",
+      "issue": "https://github.com/LucasQuiles/WhatSoup/issues/2849",
+      "grantedAt": "2026-08-01",
+      "expiresAt": "2026-08-15"
     }
   ]
 }

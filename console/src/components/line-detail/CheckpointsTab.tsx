@@ -16,9 +16,9 @@ import type { CheckpointRow, CheckpointsPayload, LiveSessionsPayload, LiveSessio
 
 /**
  * CheckpointsTab — browser + restart-mediated restore for a line's
- * session_checkpoints (spec: oc-re/specs/2026-07-19-checkpoint-browser-ui-spec.md;
- * sort + Delivery column: oc-re/specs/2026-07-19-checkpoints-tab-followups-spec.md;
- * Restore action: oc-re/specs/2026-07-19-checkpoint-restore-spec.md).
+ * session_checkpoints (design/implementation lineage: PR #1930;
+ * sort + Delivery column: PR #1951;
+ * Restore action: PR #1953).
  *
  * Shows which sessions would resume on restart (`resumable` is computed
  * server-side with the durability engine's exact filter), the lifecycle

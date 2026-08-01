@@ -1,11 +1,11 @@
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { chmodSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { chmodSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
+import { trackTmpDirs } from '../helpers/tmp-dir.ts';
 import { cleanGitEnv } from '../../scripts/lib/guard-core.ts';
 import {
   MAX_EXACT_ADDED_LINE_SOURCE_LINE_COUNT,
@@ -35,7 +35,7 @@ import { DEFAULT_RATIONALE, parsePublicationAuditEntries } from '../../scripts/l
 
 const internalDocPath = 'docs/sdlc/closed/example/state.md';
 
-const repos: string[] = [];
+const tmp = trackTmpDirs('');
 
 function git(repo: string, args: string[]): void {
   execFileSync('git', args, { cwd: repo, stdio: 'ignore', env: cleanGitEnv() });
@@ -51,8 +51,7 @@ function payloadDigest(bytes: Uint8Array): `sha256:${string}` {
 }
 
 function makeExactRangeRepo(): { repo: string; baseOid: string } {
-  const repo = mkdtempSync(join(tmpdir(), 'publication-exact-range-'));
-  repos.push(repo);
+  const repo = tmp.make('publication-exact-range');
   git(repo, ['init']);
   git(repo, ['config', 'user.email', 'guard-test@users.noreply.github.com']);
   git(repo, ['config', 'user.name', 'Guard Test']);
@@ -129,14 +128,10 @@ exec ${shellQuote(realGit)} "$@"
 
 afterEach(() => {
   vi.restoreAllMocks();
-  for (const repo of repos.splice(0)) {
-    rmSync(repo, { recursive: true, force: true });
-  }
 });
 
 function makeRepo(docText: string, classification: 'PUBLIC' | 'PRIVATE-ARCHIVE'): string {
-  const repo = mkdtempSync(join(tmpdir(), 'publication-guard-'));
-  repos.push(repo);
+  const repo = tmp.make('publication-guard');
 
   mkdirSync(join(repo, 'docs/sdlc/closed/example'), { recursive: true });
   writeFileSync(join(repo, internalDocPath), docText);
@@ -164,8 +159,7 @@ function makeRepo(docText: string, classification: 'PUBLIC' | 'PRIVATE-ARCHIVE')
 
 /** A git repo with ZERO tracked files — the empty/wrong-tree scope the floor must refuse. */
 function makeEmptyRepo(): string {
-  const repo = mkdtempSync(join(tmpdir(), 'publication-guard-empty-'));
-  repos.push(repo);
+  const repo = tmp.make('publication-guard-empty');
   git(repo, ['init']);
   return repo;
 }
@@ -300,8 +294,7 @@ describe('publication guard root classification', () => {
   });
 
   it('fails staged mode when a docs/runbooks/ file is staged without audit classification', () => {
-    const repo = mkdtempSync(join(tmpdir(), 'publication-guard-rb-'));
-    repos.push(repo);
+    const repo = tmp.make('publication-guard-rb');
 
     mkdirSync(join(repo, 'docs/runbooks'), { recursive: true });
     const runbookPath = 'docs/runbooks/example-runbook.md';
@@ -331,8 +324,7 @@ describe('publication guard root classification', () => {
   });
 
   it('fails when a new runbook is staged but its audit row is only in the working tree', () => {
-    const repo = mkdtempSync(join(tmpdir(), 'publication-guard-staged-audit-'));
-    repos.push(repo);
+    const repo = tmp.make('publication-guard-staged-audit');
 
     mkdirSync(join(repo, 'docs/runbooks'), { recursive: true });
     const existingRunbook = 'docs/runbooks/existing.md';
@@ -1514,8 +1506,7 @@ describe('publication guard exact-range native receipt', () => {
     expect('artifact' in invalidUtf8).toBe(false);
 
     git(repo, ['checkout', '--detach', baseOid]);
-    const child = mkdtempSync(join(tmpdir(), 'publication-gitlink-child-'));
-    repos.push(child);
+    const child = tmp.make('publication-gitlink-child');
     git(child, ['init']);
     git(child, ['config', 'user.email', 'guard-test@users.noreply.github.com']);
     git(child, ['config', 'user.name', 'Guard Test']);
@@ -1569,8 +1560,7 @@ describe('publication guard exact-range native receipt', () => {
 describe('publication audit --write canonicalization', () => {
   /** Repo with two internal docs, an audit missing one of them, and a duplicated header. */
   function makeWriteRepo(auditBody: string, extraDocs: string[] = []): string {
-    const repo = mkdtempSync(join(tmpdir(), 'publication-guard-write-'));
-    repos.push(repo);
+    const repo = tmp.make('publication-guard-write');
     mkdirSync(join(repo, 'docs/sdlc/closed/example'), { recursive: true });
     writeFileSync(join(repo, internalDocPath), '# clean fixture doc\n');
     for (const doc of extraDocs) {

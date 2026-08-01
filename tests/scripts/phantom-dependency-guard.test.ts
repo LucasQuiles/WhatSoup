@@ -9,20 +9,18 @@
  * and the phantom rules are unchanged.
  */
 import { execFileSync, spawnSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { mkdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { afterAll, describe, expect, it } from 'vitest';
+import { describe, expect, it } from 'vitest';
+
+import { trackTmpDirs } from '../helpers/tmp-dir.ts';
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const guardPath = resolve(repoRoot, 'scripts/phantom-dependency-guard.ts');
 
-const tempRoots: string[] = [];
-afterAll(() => {
-  for (const dir of tempRoots) rmSync(dir, { recursive: true, force: true });
-});
+const tmp = trackTmpDirs('');
 
 function git(cwd: string, args: string[]): void {
   execFileSync('git', args, {
@@ -37,8 +35,7 @@ function git(cwd: string, args: string[]): void {
  * Padding is added so the scan clears the guard's non-vacuity floors (200 files / 300 sites).
  */
 function makeRepo(files: Record<string, string>, manifests: Record<string, string[]>): string {
-  const dir = mkdtempSync(join(tmpdir(), 'phantom-dep-'));
-  tempRoots.push(dir);
+  const dir = tmp.make('phantom-dep');
   git(dir, ['init', '-q', '-b', 'main']);
   git(dir, ['config', 'user.email', 'guard@test.invalid']);
   git(dir, ['config', 'user.name', 'guard test']);
@@ -149,8 +146,7 @@ describe('phantom-dependency guard — the red proof', () => {
       { 'tools/sub/x.ts': `import ambient from 'ambient-pkg';\nexport const x = ambient;\n` },
       { '': ['pino'], 'tools/sub': ['pino'] },
     );
-    const ambientDir = mkdtempSync(join(tmpdir(), 'phantom-dep-ambient-manifest-'));
-    tempRoots.push(ambientDir);
+    const ambientDir = tmp.make('phantom-dep-ambient-manifest');
     const ambientManifest = join(ambientDir, 'package.json');
     writeFileSync(
       ambientManifest,
@@ -186,8 +182,7 @@ describe('phantom-dependency guard — the red proof', () => {
       { 'src/linked.ts': `export const original = true;\n` },
       { '': ['pino'] },
     );
-    const ambientDir = mkdtempSync(join(tmpdir(), 'phantom-dep-ambient-source-'));
-    tempRoots.push(ambientDir);
+    const ambientDir = tmp.make('phantom-dep-ambient-source');
     const ambientSource = join(ambientDir, 'ambient.ts');
     writeFileSync(
       ambientSource,
@@ -210,8 +205,7 @@ describe('phantom-dependency guard — the red proof', () => {
       { 'tools/sub/x.ts': `import pino from 'pino';\nexport const x = pino;\n` },
       { '': ['pino'], 'tools/sub': ['pino'] },
     );
-    const ambientDir = mkdtempSync(join(tmpdir(), 'phantom-dep-ambient-ancestor-'));
-    tempRoots.push(ambientDir);
+    const ambientDir = tmp.make('phantom-dep-ambient-ancestor');
     writeFileSync(
       join(ambientDir, 'x.ts'),
       `import pino from 'pino';\nexport const ambient = pino;\n`,
@@ -331,8 +325,7 @@ export const a = forged;
   });
 
   it('is INCONCLUSIVE (exit 2), never a pass, when the scan is implausibly small', () => {
-    const dir = mkdtempSync(join(tmpdir(), 'phantom-dep-tiny-'));
-    tempRoots.push(dir);
+    const dir = tmp.make('phantom-dep-tiny');
     git(dir, ['init', '-q', '-b', 'main']);
     git(dir, ['config', 'user.email', 'g@t.invalid']);
     git(dir, ['config', 'user.name', 'g']);

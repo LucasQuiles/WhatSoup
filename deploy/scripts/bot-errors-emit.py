@@ -323,18 +323,20 @@ def inline_log_tail_enabled() -> bool:
 
 
 def primary_local_log_candidates() -> list[Path]:
-    """Primary local log paths, most-specific first, for the inline tail.
+    """Source-specific local log paths for the inline tail.
 
-    Only locally-readable files — this is for locally-emitted events, so we read
-    LOG_DIR/whatsoup.log and the bot-errors state logs, never remote/journal.
+    Only LOG_DIR/whatsoup.log qualifies: it belongs to the emitting process, so
+    its tail is correlated with the alert. The fleet-wide bot-errors state logs
+    (dispatcher.out.log, collector.jsonl) are deliberately NOT fallbacks — their
+    records can belong to any source or episode, and attaching them presented
+    stale unrelated records as local evidence (#2136). Without a source-specific
+    log the alert carries no inline tail; log_hints() still points responders at
+    the fleet-wide files.
     """
-    candidates: list[Path] = []
     log_dir = os.environ.get("LOG_DIR")
     if log_dir and log_dir.strip():
-        candidates.append(Path(log_dir) / "whatsoup.log")
-    candidates.append(state_root() / "logs/dispatcher.out.log")
-    candidates.append(state_root() / "logs/collector.jsonl")
-    return candidates
+        return [Path(log_dir) / "whatsoup.log"]
+    return []
 
 
 def capture_log_tail(instance: str, max_chars: int = 1200, max_lines: int = 20) -> str | None:

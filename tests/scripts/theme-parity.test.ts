@@ -1,23 +1,18 @@
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { describe, expect, it } from 'vitest';
+
+import { trackTmpDirs } from '../helpers/tmp-dir.ts';
 
 const SCRIPT = resolve(process.cwd(), 'console/scripts/check-theme-parity.mjs');
 
-const tmpDirs: string[] = [];
-
-afterEach(() => {
-  for (const dir of tmpDirs) rmSync(dir, { recursive: true, force: true });
-  tmpDirs.length = 0;
-});
+const tmp = trackTmpDirs('');
 
 // Flat single-block scopes — the script's parser is `([^{}]+)\{([^{}]*)\}`, which
 // does not nest, so fixtures use the same flat shape as the real token file.
 function makeFixture(css: string) {
-  const root = mkdtempSync(join(tmpdir(), 'theme-parity-'));
-  tmpDirs.push(root);
+  const root = tmp.make('theme-parity');
   const file = join(root, 'tokens.semantic.css');
   writeFileSync(file, css);
   return file;

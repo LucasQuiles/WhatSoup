@@ -40,6 +40,7 @@ import { normalizeErrorClass } from './heal-protocol.ts';
 import { getControlPeerWiring } from './heal.ts';
 import { markConversationRead } from './mark-read.ts';
 import type { Runtime } from '../runtimes/types.ts';
+import type { RuntimeHealth } from './types.ts';
 import type { AccessReplayOutcome } from './admin.ts';
 import { isProviderId } from '../lib/provider-ids.ts';
 import type { ConnectionRecentDisconnects, ConnectionStateSnapshot } from '../transport/connection.ts';
@@ -99,7 +100,14 @@ export interface HealthDeps {
   db: Database;
   connectionManager: RuntimeConnection;
   startedAt: number;
-  getEnrichmentStats: () => { lastRun: string | null; unprocessed: number; runtimeDegraded?: boolean };
+  /**
+   * #2545: takes the ALREADY-SAMPLED runtime snapshot (see `runtimeSnapshot`
+   * below) instead of sampling `runtime.getHealthSnapshot()` itself. The
+   * handler samples the snapshot exactly once per request and threads it
+   * into both this and the runtime block, so a state transition mid-request
+   * can never mix two generations into one response.
+   */
+  getEnrichmentStats: (runtimeSnapshot: RuntimeHealth | null) => { lastRun: string | null; unprocessed: number; runtimeDegraded?: boolean };
   durability?: DurabilityEngine;
   runtime?: Runtime;
   profiles?: ProfileRegistry;
@@ -1369,7 +1377,14 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
         loopLagWasStarved = false;
       }
 
-      const enrichmentStats = deps.getEnrichmentStats();
+      // #2545: sample the runtime snapshot exactly ONCE per request and
+      // thread it into getEnrichmentStats — previously this was sampled here
+      // AND independently inside getEnrichmentStats's own implementation, so
+      // a state transition between the two calls could mix two generations
+      // into a single response (e.g. a degraded enrichment verdict paired
+      // with an already-recovered runtime block).
+      const runtimeSnapshot = deps.runtime ? deps.runtime.getHealthSnapshot() : null;
+      const enrichmentStats = deps.getEnrichmentStats(runtimeSnapshot);
       const memoryReadiness = deps.getMemoryReadinessHealth?.() ?? null;
       const memoryReadinessIsDegraded =
         memoryReadiness !== null
@@ -1410,7 +1425,6 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
       const enrichmentStaleness = enrichmentStats.lastRun
         ? Date.now() - new Date(enrichmentStats.lastRun).getTime()
         : null;
-      const runtimeSnapshot = deps.runtime ? deps.runtime.getHealthSnapshot() : null;
       const agentRuntimeStatus = deps.instanceType === 'agent' ? runtimeSnapshot?.status ?? null : null;
       const fallbackState = deps.runtime?.getFallbackState?.() ?? null;
       const healthyProviderFallbackCapacity = isHealthyProviderFallbackCapacity(fallbackState);

@@ -1,10 +1,9 @@
 /**
  * GET /api/lines/:name/checkpoints — read-only feed for the console
- * checkpoint browser tab (spec:
- * oc-re/specs/2026-07-19-checkpoint-browser-ui-spec.md).
+ * checkpoint browser tab (design/implementation lineage: PR #1930).
  *
  * POST /api/lines/:name/checkpoints/restore — restart-mediated restore
- * (D-1; spec: oc-re/specs/2026-07-19-checkpoint-restore-spec.md).
+ * (D-1; design/implementation lineage: PR #1953).
  *
  * Deliberately narrow imports (http + node:sqlite + type-only
  * discovery/db-reader/platform) so this handler's module graph stays off

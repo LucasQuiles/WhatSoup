@@ -4,14 +4,13 @@ import {
   existsSync,
   globSync,
   mkdirSync,
-  mkdtempSync,
   readFileSync,
-  rmSync,
   writeFileSync,
 } from 'node:fs';
-import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { describe, expect, it } from 'vitest';
+
+import { trackTmpDirs } from '../helpers/tmp-dir.ts';
 
 const serviceTemplates = [
   'deploy/bot-errors-collector.service',
@@ -51,7 +50,7 @@ const routingEnvKeys = [
   'BOT_ERRORS_DB',
   'BOT_ERRORS_HEALTH_PROFILE',
 ];
-const tempRoots: string[] = [];
+const tmp = trackTmpDirs('');
 
 function xmlEscape(value: string): string {
   return value
@@ -62,10 +61,16 @@ function xmlEscape(value: string): string {
     .replaceAll("'", '&apos;');
 }
 
+// Invariant made explicit (previously implicit/unenforced): every call site below
+// passes a literal ending in exactly one '-', which trackTmpDirs()'s make() relies
+// on to reproduce the original prefix string exactly (see notes-qf-t2-tmpdir4.md).
+// A caller that ever violates this fails loudly here instead of silently producing
+// a wrong-but-plausible tmp prefix with no test failure.
 function makeTempRoot(prefix: string): string {
-  const root = mkdtempSync(path.join(tmpdir(), prefix));
-  tempRoots.push(root);
-  return root;
+  if (!prefix.endsWith('-')) {
+    throw new Error(`makeTempRoot: prefix must end with '-' (got ${JSON.stringify(prefix)})`);
+  }
+  return tmp.make(prefix.slice(0, -1));
 }
 
 function writeShim(dir: string, name: string, body: string): void {
@@ -108,10 +113,6 @@ function writeLaunchdShims(shimDir: string): void {
     '',
   ].join('\n'));
 }
-
-afterEach(() => {
-  for (const root of tempRoots.splice(0)) rmSync(root, { recursive: true, force: true });
-});
 
 describe('BOT ERRORS service templates', () => {
   it('load live routing from the private host env file', () => {
