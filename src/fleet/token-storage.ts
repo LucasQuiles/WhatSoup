@@ -19,6 +19,7 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as crypto from 'node:crypto';
+import { z } from 'zod';
 import { xdgDir } from './paths.ts';
 import { safeStringEqual } from './safe-compare.ts';
 import { privateWriteError } from '../lib/private-fs.ts';
@@ -44,18 +45,23 @@ function tokenPaths(): { dir: string; legacy: string; current: string } {
   };
 }
 
+const FleetTokenSchema = z.string().regex(TOKEN_RE);
+
+// `.passthrough()` because the previous guard only checked the listed keys —
+// files carrying unknown extra keys stay accepted, not stripped or rejected.
+// `satisfies` pins the schema output to the exported wire type at compile time.
+const FleetTokensFileSchema = z.object({
+  active: FleetTokenSchema,
+  accept: z.array(FleetTokenSchema),
+  rotatedAt: z.string(),
+}).passthrough() satisfies z.ZodType<FleetTokensFile>;
+
 function isValidToken(value: unknown): value is string {
-  return typeof value === 'string' && TOKEN_RE.test(value);
+  return FleetTokenSchema.safeParse(value).success;
 }
 
 function isFleetTokensFile(value: unknown): value is FleetTokensFile {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
-  const rec = value as Record<string, unknown>;
-  if (!isValidToken(rec.active)) return false;
-  if (!Array.isArray(rec.accept)) return false;
-  if (!rec.accept.every(isValidToken)) return false;
-  if (typeof rec.rotatedAt !== 'string') return false;
-  return true;
+  return FleetTokensFileSchema.safeParse(value).success;
 }
 
 function assertPrivateTokenDirectory(dir: string): void {

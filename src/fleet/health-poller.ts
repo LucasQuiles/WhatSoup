@@ -198,6 +198,11 @@ interface RecoveryClearWithholdingEpisode {
   count: number;
 }
 
+// Deliberately NOT migrated onto the shared isNonEmptyString/asNonEmptyString
+// helpers in lib/type-guards.ts (#2211): the trim-check validates non-empty
+// but the RAW (untrimmed) value is returned. Whether that's intentional or a
+// latent bug is an open question the issue itself flags as needing a human
+// call, not a mechanical refactor — left untouched pending that decision.
 function stringValue(value: unknown): string | null {
   return typeof value === 'string' && value.trim() !== '' ? value : null;
 }

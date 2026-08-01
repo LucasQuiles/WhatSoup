@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
 
-import { isRecord } from '../../../src/lib/type-guards.ts';
+import { isNonEmptyString, isRecord } from '../../../src/lib/type-guards.ts';
 
 import {
   analyzeExportOwnership,
@@ -58,7 +58,7 @@ const ALLOWLIST_KEYS = new Set([
 ]);
 
 function nonEmptyString(value: unknown): value is string {
-  return typeof value === 'string' && value.trim().length > 0;
+  return isNonEmptyString(value);
 }
 
 function uniqueStrings(values: string[], label: string): string[] {
