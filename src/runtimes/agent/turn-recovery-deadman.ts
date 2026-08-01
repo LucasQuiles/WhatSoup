@@ -1,5 +1,6 @@
 import type { BotErrorsSeverity } from '../../lib/bot-errors-outbox.ts';
 import {
+  DEFAULT_LEASE_SECONDS,
   evaluateTurnRecoverySupervisorHeartbeat,
   type TurnRecoveryScanFailureReason,
   type TurnRecoverySupervisorHealth,
@@ -10,8 +11,32 @@ export const TURN_RECOVERY_SUPERVISOR_ALERT_SOURCE =
   'turn_recovery_supervisor_unavailable';
 
 const DEFAULT_INTERVAL_MS = 15_000;
-const DEFAULT_STARTUP_GRACE_MS = 45_000;
-const DEFAULT_STALE_AFTER_MS = 45_000;
+
+/**
+ * `recordScanSuccess()` fires only at the END of `runScan()`, after a bounded
+ * batch of up to SCAN_PAGE_SIZE jobs processed strictly sequentially (a
+ * deliberate fair-scheduling requirement — see the
+ * `no-await-in-loop`-justified loop in turn-recovery-supervisor.ts). Two
+ * NORMAL, healthy scenarios can each legitimately push a single scan's wall
+ * time well past a hand-picked fixed threshold:
+ *   - a post-crash backlog of a full scan page at ~1s/job (~50s), and
+ *   - a single replay that legitimately runs close to a full lease before
+ *     completing (the entire lease-renewal design — renewLeaseWhilePending —
+ *     exists because this is expected, not exceptional).
+ * A fixed 45s budget is smaller than EITHER of these healthy scenarios, so it
+ * fired a `critical` false positive during ordinary backlog recovery (#2819).
+ * Deriving the budget from DEFAULT_LEASE_SECONDS instead of a second
+ * hand-picked constant keeps it correct if the lease is ever retuned: 2 lease
+ * cycles comfortably covers a legitimately-slow single replay (~1 lease)
+ * PLUS the rest of a full page's worth of fast jobs finishing around it,
+ * with margin to spare over either named scenario alone. The supervisor's
+ * FIRST scan is subject to the exact same worst-case duration envelope as any
+ * later one, so the startup grace before the deadman starts judging
+ * staleness at all uses the same derived budget.
+ */
+const STALE_AFTER_LEASE_MULTIPLIER = 2;
+const DEFAULT_STALE_AFTER_MS = DEFAULT_LEASE_SECONDS * 1_000 * STALE_AFTER_LEASE_MULTIPLIER;
+const DEFAULT_STARTUP_GRACE_MS = DEFAULT_STALE_AFTER_MS;
 const DEFAULT_MAX_CONSECUTIVE_FAILURES = 3;
 
 export interface TurnRecoveryDeadmanDeps {
