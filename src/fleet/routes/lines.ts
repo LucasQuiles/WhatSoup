@@ -2,7 +2,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { jsonResponse, requireInstance } from '../../lib/http.ts';
-import { asRecord } from '../../lib/type-guards.ts';
+import { asRecord, isNonEmptyString } from '../../lib/type-guards.ts';
 import { lookupCredential, resolveProviderKeyService } from '../../lib/keyring.ts';
 import { normalizeFallbackEntriesFromInstanceConfig } from '../../core/fallback-chain.ts';
 import { extractLocal } from '../../core/access-list.ts';
@@ -667,7 +667,7 @@ function apiProviderConfigModel(
 ): string | undefined {
   if (provider !== 'openai-api' && provider !== 'anthropic-api') return undefined;
   const model = providerConfig?.['model'];
-  return typeof model === 'string' && model.trim() !== '' ? model : undefined;
+  return isNonEmptyString(model) ? model : undefined;
 }
 
 function lineReachableFromPoll(poll: InstanceStatus | undefined): boolean {

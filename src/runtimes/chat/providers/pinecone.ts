@@ -5,6 +5,7 @@ import { createChildLogger } from '../../../logger.ts';
 import { WhatSoupError as AppError } from '../../../errors.ts';
 import { truncateForRerank } from '../../../lib/text-utils.ts';
 import { resolveApiKey } from '../../../lib/api-key-resolver.ts';
+import { isNonEmptyString } from '../../../lib/type-guards.ts';
 import { emitAlertChecked, clearAlertSourceChecked } from '../../../lib/emit-alert.ts';
 import { CircuitBreaker } from '../../../core/circuit-breaker.ts';
 import { sleep, sleepWithAbort } from '../../../core/retry.ts';
@@ -280,7 +281,7 @@ export async function getPineconeReadiness(
 function configuredPineconeApiKeyEnv(): string {
   const memory = (config as { memory?: { pinecone?: { apiKeyEnv?: string } } }).memory;
   const apiKeyEnv = memory?.pinecone?.apiKeyEnv;
-  return typeof apiKeyEnv === 'string' && apiKeyEnv.trim() !== '' ? apiKeyEnv : 'PINECONE_API_KEY';
+  return isNonEmptyString(apiKeyEnv) ? apiKeyEnv : 'PINECONE_API_KEY';
 }
 
 // Optional keyring service name for the Pinecone API key. When set (e.g.
@@ -289,7 +290,7 @@ function configuredPineconeApiKeyEnv(): string {
 function configuredPineconeApiKeyService(): string | undefined {
   const memory = (config as { memory?: { pinecone?: { apiKeyService?: string } } }).memory;
   const apiKeyService = memory?.pinecone?.apiKeyService;
-  return typeof apiKeyService === 'string' && apiKeyService.trim() !== '' ? apiKeyService : undefined;
+  return isNonEmptyString(apiKeyService) ? apiKeyService : undefined;
 }
 
 // Centralized Pinecone API-key resolution through the shared resolver.

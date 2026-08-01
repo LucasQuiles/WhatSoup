@@ -1209,6 +1209,7 @@ def health_reasons_from_payload(payload: dict, name: str) -> tuple[list[str], di
     auth_bond = whatsapp.get("auth_bond") if isinstance(whatsapp.get("auth_bond"), dict) else {}
     connected = whatsapp.get("connected") if isinstance(whatsapp, dict) else None
     health_status = payload.get("status")
+    degradation_causes = payload.get("degradation_causes")
     auth_failure = connection.get("auth_failure_class") if isinstance(connection, dict) else None
     bond_status = auth_bond.get("status") if isinstance(auth_bond, dict) else None
     bond_issues = auth_bond.get("issues") if isinstance(auth_bond, dict) else None
@@ -1217,6 +1218,15 @@ def health_reasons_from_payload(payload: dict, name: str) -> tuple[list[str], di
         reasons.append(f"health_identity_mismatch actual={actual_name}")
     if health_status == "unhealthy":
         reasons.append("health_status=unhealthy")
+    elif health_status == "degraded":
+        # /health returns HTTP 200 for degraded (src/core/health.ts), so the
+        # transport path succeeds — without this branch a reachable degraded
+        # runtime reads as healthy silence.
+        reasons.append("health_status=degraded")
+        if isinstance(degradation_causes, list) and degradation_causes:
+            reasons.append(
+                f"degradation_causes={','.join(str(cause) for cause in degradation_causes[:5])}"
+            )
     if connected is not True:
         reasons.append(f"connected={str(connected).lower()}")
     if auth_failure not in (None, "", "none"):

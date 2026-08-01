@@ -24,7 +24,7 @@
 import { homedir } from 'node:os';
 import { PROVIDER_IDS } from '../runtimes/agent/providers/index.ts';
 import { PROVIDER_API_KEY_SERVICES, SERVICE_ENV_MAP, resolveProviderKeyService } from '../lib/provider-key-service.ts';
-import { isRecord } from '../lib/type-guards.ts';
+import { isNonEmptyString, isRecord } from '../lib/type-guards.ts';
 import { isSamePhysicalDirectory } from '../lib/home-path.ts';
 import { resolveAgentModel } from './agent-model.ts';
 import {
@@ -111,7 +111,7 @@ function err(field: string, message: string, status = 400): ValidationError {
 }
 
 function nonBlankString(value: unknown): boolean {
-  return typeof value === 'string' && value.trim() !== '';
+  return isNonEmptyString(value);
 }
 
 function normalizedModelString(value: unknown): string | null {

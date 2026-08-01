@@ -8,14 +8,20 @@ import UpdateModal from '../../console/src/components/UpdateModal'
 import { api } from '../../console/src/lib/api'
 import type { LineInstance } from '../../console/src/types'
 
-vi.mock('../../console/src/lib/api', () => ({
-  api: {
-    getVersion: vi.fn(),
-    restart: vi.fn(),
-  },
-  getApiTicket: vi.fn(),
-  isProductionConsole: vi.fn(() => false),
-}))
+vi.mock('../../console/src/lib/api', async (importOriginal) => {
+  // apiSse/SseRequestError stay REAL — these tests stub global fetch and rely
+  // on the actual SSE-parsing implementation under test, not a bypass of it.
+  const actual = await importOriginal<typeof import('../../console/src/lib/api')>()
+  return {
+    ...actual,
+    api: {
+      getVersion: vi.fn(),
+      restart: vi.fn(),
+    },
+    getApiTicket: vi.fn(),
+    isProductionConsole: vi.fn(() => false),
+  }
+})
 
 const getVersionMock = api.getVersion as unknown as ReturnType<typeof vi.fn>
 

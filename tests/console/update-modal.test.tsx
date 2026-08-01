@@ -40,14 +40,20 @@ const mockApiGetVersion = vi.fn()
 const mockIsProductionConsole = vi.fn(() => false)
 const mockGetApiTicket = vi.fn()
 
-vi.mock('../../console/src/lib/api', () => ({
-  api: {
-    restart: (...args: unknown[]) => mockApiRestart(...args),
-    getVersion: (...args: unknown[]) => mockApiGetVersion(...args),
-  },
-  isProductionConsole: () => mockIsProductionConsole(),
-  getApiTicket: (audience: string) => mockGetApiTicket(audience),
-}))
+vi.mock('../../console/src/lib/api', async (importOriginal) => {
+  // apiSse/SseRequestError stay REAL — these tests stub global fetch and rely
+  // on the actual SSE-parsing implementation under test, not a bypass of it.
+  const actual = await importOriginal<typeof import('../../console/src/lib/api')>()
+  return {
+    ...actual,
+    api: {
+      restart: (...args: unknown[]) => mockApiRestart(...args),
+      getVersion: (...args: unknown[]) => mockApiGetVersion(...args),
+    },
+    isProductionConsole: () => mockIsProductionConsole(),
+    getApiTicket: (audience: string) => mockGetApiTicket(audience),
+  }
+})
 
 // ---------------------------------------------------------------------------
 // Import component AFTER mocks
