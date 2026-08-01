@@ -10525,12 +10525,46 @@ export class AgentRuntime implements Runtime {
     const hadVisibleOutput = args.mapKey !== undefined
       ? ((this.perChatTurnText.get(args.mapKey)?.trim() ?? '') !== '')
       : this.turnHadVisibleOutput;
+    // #2354: An already-active (extended) fallback window no longer unconditionally
+    // rejects replay. When the primary route fails again while the fallback is
+    // already armed and usable, a retained replay-safe turn may replay exactly once
+    // to the healthy fallback. The no-replay safety behavior is retained when the
+    // fallback target itself is the failing or throttled route (activeUntil expired
+    // or the fallback provider is the same as the failing primary).
     if (
-      args.activation.extended
-      || args.activation.keyPresent === false
+      args.activation.keyPresent === false
       || args.hadToolActivity
       || hadVisibleOutput
     ) return false;
+    if (args.activation.extended) {
+      // The fallback window was already active when the primary failed again.
+      // Verify the replay target is a distinct, usable route before proceeding.
+      const now = Date.now();
+      const targetUsable = args.activation.activeUntil > now
+        && args.activation.fallbackProvider !== args.activation.primaryProvider;
+      if (!targetUsable) {
+        // Shadow decision: record that the extended path was evaluated but the
+        // target was unusable (expired or same-provider), so operators can
+        // distinguish "safely suppressed" from "not evaluated."
+        emitAlertChecked(
+          this.instanceName,
+          'provider_fallback_extended_replay_suppressed',
+          'Extended fallback replay suppressed: target route not usable',
+          `extended=true provider=${args.activation.fallbackProvider} model=${args.activation.fallbackModel ?? 'default'} reason=${args.activation.reason} activeUntil=${args.activation.activeUntil} now=${now}`,
+          'info',
+        );
+        return false;
+      }
+      // Shadow decision: the extended path is eligible under the new route-aware
+      // gate. Record for promotion monitoring before scheduling the replay.
+      emitAlertChecked(
+        this.instanceName,
+        'provider_fallback_extended_replay_eligible',
+        'Extended fallback replay eligible under route-aware gate',
+        `extended=true provider=${args.activation.fallbackProvider} model=${args.activation.fallbackModel ?? 'default'} reason=${args.activation.reason}`,
+        'info',
+      );
+    }
     const replayText = args.mapKey !== undefined
       ? this.pendingTurnText.get(args.mapKey)
       : this.currentTurnReplayText;

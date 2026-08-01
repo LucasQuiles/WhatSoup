@@ -10,8 +10,8 @@
  *     turn counters (deltas against an arm-time snapshot — never the lifetime
  *     totals), and window duration in the evidence — never when idle
  *   - provider_fallback_replayed fires only after the replay COMPLETES —
- *     never on gate-rejected replays (extended / key-absent / tool activity)
- *     and never for a replay that fails (the failure alert covers that turn)
+ *     never on gate-rejected replays (extended-with-expired-window /
+ *     key-absent / tool activity) and never for a replay that fails
  *   - restoring a persisted window after a restart re-arms WITHOUT re-counting
  *     or re-emitting activation (the pre-restart arm already did; the
  *     once-per-window contract spans restarts)
@@ -395,9 +395,14 @@ describe('AgentRuntime — fallback transition alerts', () => {
     v.pendingTurnText.set('chat-key', 'please continue the task');
     v.replayTurnOnFallback = vi.fn(async () => {});
 
-    // Gate 1: extension never replays.
+    // Gate 1: an extended fallback with an EXPIRED window does not replay
+    // (target route not usable — the #2354 route-aware safety gate).
     expect(v.scheduleFallbackReplay({
-      activation: { ...activation, extended: true },
+      activation: {
+        ...activation,
+        extended: true,
+        activeUntil: Date.now() - 1000, // expired
+      },
       chatJid: 'chat@s.whatsapp.net',
       mapKey: 'chat-key',
       oldSession: null,
@@ -425,6 +430,122 @@ describe('AgentRuntime — fallback transition alerts', () => {
       oldSession: null,
     })).toBe(false);
 
+    expect(alertsFor('provider_fallback_replayed')).toHaveLength(0);
+    expect(v.replayTurnOnFallback).not.toHaveBeenCalled();
+  });
+
+  // ── #2354: already-active fallback replay eligibility ──────────────
+
+  it('replays a retained turn when an already-active fallback is usable and distinct (#2354)', () => {
+    const runtime = makeRuntime();
+    const v = view(runtime);
+
+    // First activation arms the fallback (extended=false).
+    const initial = v.activateProviderFallback(new Date(Date.now() + 60 * 60 * 1000), 'usage-limit')!;
+    expect(initial.extended).toBe(false);
+
+    // Second activation while window is active → extended=true (primary failed again).
+    const extended = v.activateProviderFallback(new Date(Date.now() + 2 * 60 * 60 * 1000), 'usage-limit')!;
+    expect(extended.extended).toBe(true);
+    expect(extended.fallbackProvider).not.toBe(extended.primaryProvider);
+
+    v.pendingTurnText.set('chat-key', 'please continue the task');
+    v.replayTurnOnFallback = vi.fn(async () => {});
+
+    // Under the old gate, extended=true would reject. Under #2354, the retained
+    // turn replays to the healthy, distinct, still-active fallback exactly once.
+    const scheduled = v.scheduleFallbackReplay({
+      activation: extended,
+      chatJid: 'chat@s.whatsapp.net',
+      mapKey: 'chat-key',
+      oldSession: null,
+    });
+    expect(scheduled).toBe(true);
+    // Shadow decision alert fires to record eligibility for promotion monitoring.
+    expect(alertsFor('provider_fallback_extended_replay_eligible')).toHaveLength(1);
+  });
+
+  it('does NOT replay an extended turn when the fallback target is the same as the failing primary', () => {
+    const runtime = makeRuntime();
+    const v = view(runtime);
+
+    const activation = v.activateProviderFallback(new Date(Date.now() + 60 * 60 * 1000), 'usage-limit')!;
+    v.pendingTurnText.set('chat-key', 'please continue the task');
+    v.replayTurnOnFallback = vi.fn(async () => {});
+
+    // Simulate the pathological case: fallback target == primary provider.
+    // The route-aware gate must suppress replay (no distinct usable target).
+    expect(v.scheduleFallbackReplay({
+      activation: {
+        ...activation,
+        extended: true,
+        fallbackProvider: activation.primaryProvider, // same provider!
+      },
+      chatJid: 'chat@s.whatsapp.net',
+      mapKey: 'chat-key',
+      oldSession: null,
+    })).toBe(false);
+    expect(alertsFor('provider_fallback_extended_replay_suppressed')).toHaveLength(1);
+    expect(v.replayTurnOnFallback).not.toHaveBeenCalled();
+  });
+
+  it('does NOT replay an extended turn when the fallback window has expired', () => {
+    const runtime = makeRuntime();
+    const v = view(runtime);
+
+    const activation = v.activateProviderFallback(new Date(Date.now() + 60 * 60 * 1000), 'usage-limit')!;
+    v.pendingTurnText.set('chat-key', 'please continue the task');
+    v.replayTurnOnFallback = vi.fn(async () => {});
+
+    expect(v.scheduleFallbackReplay({
+      activation: {
+        ...activation,
+        extended: true,
+        activeUntil: Date.now() - 1, // expired
+      },
+      chatJid: 'chat@s.whatsapp.net',
+      mapKey: 'chat-key',
+      oldSession: null,
+    })).toBe(false);
+    expect(alertsFor('provider_fallback_extended_replay_suppressed')).toHaveLength(1);
+    expect(v.replayTurnOnFallback).not.toHaveBeenCalled();
+  });
+
+  it('LabRatQ challenge: extended replay suppressed when visible output was already delivered (no duplicate)', () => {
+    const runtime = makeRuntime();
+    const v = view(runtime);
+
+    const activation = v.activateProviderFallback(new Date(Date.now() + 60 * 60 * 1000), 'usage-limit')!;
+    v.pendingTurnText.set('chat-key', 'please continue the task');
+    // The turn already delivered visible output — replaying would duplicate it.
+    v.perChatTurnText.set('chat-key', 'previous visible reply');
+    v.replayTurnOnFallback = vi.fn(async () => {});
+
+    expect(v.scheduleFallbackReplay({
+      activation: { ...activation, extended: true },
+      chatJid: 'chat@s.whatsapp.net',
+      mapKey: 'chat-key',
+      oldSession: null,
+    })).toBe(false);
+    expect(alertsFor('provider_fallback_replayed')).toHaveLength(0);
+    expect(v.replayTurnOnFallback).not.toHaveBeenCalled();
+  });
+
+  it('LabRatQ challenge: extended replay suppressed when tool activity already started', () => {
+    const runtime = makeRuntime();
+    const v = view(runtime);
+
+    const activation = v.activateProviderFallback(new Date(Date.now() + 60 * 60 * 1000), 'usage-limit')!;
+    v.pendingTurnText.set('chat-key', 'please continue the task');
+    v.replayTurnOnFallback = vi.fn(async () => {});
+
+    expect(v.scheduleFallbackReplay({
+      activation: { ...activation, extended: true },
+      chatJid: 'chat@s.whatsapp.net',
+      mapKey: 'chat-key',
+      oldSession: null,
+      hadToolActivity: true,
+    })).toBe(false);
     expect(alertsFor('provider_fallback_replayed')).toHaveLength(0);
     expect(v.replayTurnOnFallback).not.toHaveBeenCalled();
   });
@@ -480,14 +601,16 @@ describe('AgentRuntime — fallback transition counters', () => {
     v.replayTurnOnFallback = vi.fn(async () => {});
 
     expect(v.getFallbackState().fallbackReplays).toBe(0);
+    // A gate-rejected replay (absent key) does not count.
     v.scheduleFallbackReplay({
-      activation: { ...activation, extended: true },
+      activation: { ...activation, keyPresent: false },
       chatJid: 'chat@s.whatsapp.net',
       mapKey: 'chat-key',
       oldSession: null,
     });
     await vi.runAllTimersAsync();
     expect(v.getFallbackState().fallbackReplays).toBe(0);
+    // An eligible replay counts on completion.
     v.scheduleFallbackReplay({
       activation,
       chatJid: 'chat@s.whatsapp.net',
