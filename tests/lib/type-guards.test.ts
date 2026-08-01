@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { asRecord, isRecord } from '../../src/lib/type-guards.js';
+import { asNonEmptyString, asRecord, isNonEmptyString, isRecord } from '../../src/lib/type-guards.js';
 
 /**
  * Contract-lock tests for isRecord.
@@ -118,6 +118,99 @@ describe('asRecord', () => {
     ];
     for (const probe of probes) {
       expect(asRecord(probe) !== undefined).toBe(isRecord(probe));
+    }
+  });
+});
+
+/**
+ * Contract-lock tests for isNonEmptyString.
+ *
+ * Implementation: typeof value === 'string' && value.trim() !== ''
+ */
+describe('isNonEmptyString', () => {
+  describe('returns true for strings with non-whitespace content', () => {
+    it.each([
+      ['single word', 'hello'],
+      ['sentence with spaces', 'hello world'],
+      ['leading/trailing whitespace around real content', '  hello  '],
+      ['single non-space character', 'x'],
+      ['string with only interior whitespace preserved', 'a b'],
+    ])('%s', (_label, value) => {
+      expect(isNonEmptyString(value)).toBe(true);
+    });
+  });
+
+  describe('returns false for empty or all-whitespace strings', () => {
+    it.each([
+      ['empty string', ''],
+      ['single space', ' '],
+      ['tabs and newlines', '\t\n  \t'],
+      ['multiple spaces', '     '],
+    ])('%s', (_label, value) => {
+      expect(isNonEmptyString(value)).toBe(false);
+    });
+  });
+
+  describe('returns false for non-strings', () => {
+    it.each([
+      ['null', null],
+      ['undefined', undefined],
+      ['zero', 0],
+      ['positive integer', 42],
+      ['true', true],
+      ['false', false],
+      ['empty object', {}],
+      ['empty array', []],
+      ['arrow function', () => {}],
+      ['NaN', NaN],
+    ])('%s', (_label, value) => {
+      expect(isNonEmptyString(value)).toBe(false);
+    });
+  });
+});
+
+/**
+ * Contract-lock tests for asNonEmptyString — the trimming coercer companion
+ * to isNonEmptyString.
+ *
+ * Contract: returns the TRIMMED string when isNonEmptyString holds, otherwise
+ * `undefined` (never `null` — mirrors asRecord's undefined-over-null choice).
+ */
+describe('asNonEmptyString', () => {
+  describe('returns the trimmed string for non-empty strings', () => {
+    it.each([
+      ['no whitespace', 'hello', 'hello'],
+      ['leading whitespace', '  hello', 'hello'],
+      ['trailing whitespace', 'hello  ', 'hello'],
+      ['both sides', '  hello  ', 'hello'],
+      ['interior whitespace preserved', '  hello world  ', 'hello world'],
+    ])('%s', (_label, input, expected) => {
+      expect(asNonEmptyString(input)).toBe(expected);
+    });
+  });
+
+  describe('returns undefined (never null) for blank or non-string values', () => {
+    it.each([
+      ['empty string', ''],
+      ['all whitespace', '   '],
+      ['null', null],
+      ['undefined', undefined],
+      ['zero', 0],
+      ['true', true],
+      ['empty array', []],
+      ['empty object', {}],
+    ])('%s', (_label, value) => {
+      expect(asNonEmptyString(value)).toBeUndefined();
+      expect(asNonEmptyString(value)).not.toBeNull();
+    });
+  });
+
+  it('agrees with isNonEmptyString on every probe (delegation contract)', () => {
+    const probes: unknown[] = [
+      '', ' ', 'x', '  x  ', null, undefined, 0, 1, true, false, {}, [], () => {},
+    ];
+    for (const probe of probes) {
+      expect(asNonEmptyString(probe) !== undefined).toBe(isNonEmptyString(probe));
     }
   });
 });

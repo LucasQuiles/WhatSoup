@@ -2,6 +2,7 @@
 // Parses provider stream-json (JSONL) lines into ordered AgentEvent envelopes.
 
 import { createChildLogger } from '../../logger.ts';
+import { isNonEmptyString } from '../../lib/type-guards.ts';
 
 const parserLog = createChildLogger('stream-parser');
 
@@ -125,10 +126,6 @@ function asRecord(value: unknown): JsonRecord | null {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
     ? value as JsonRecord
     : null;
-}
-
-function isNonEmptyString(value: unknown): value is string {
-  return typeof value === 'string' && value.trim().length > 0;
 }
 
 function describeBlockType(block: unknown): string {

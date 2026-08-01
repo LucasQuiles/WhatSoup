@@ -42,7 +42,7 @@ import {
   INSTANCE_HEALTH_PORT_MIN,
   INSTANCE_HEALTH_PORT_MAX,
 } from '../src/fleet/constants.ts';
-import { isRecord } from '../src/lib/type-guards.ts';
+import { isNonEmptyString, isRecord } from '../src/lib/type-guards.ts';
 
 // ---------------------------------------------------------------------------
 // SSOT for the host-suffix shape and projectId-UUID shape.
@@ -92,7 +92,7 @@ export interface CheckOptions {
 type PortConfig = { instance: string; filePath: string; healthPort?: number };
 
 function nonBlankString(value: unknown): value is string {
-  return typeof value === 'string' && value.trim() !== '';
+  return isNonEmptyString(value);
 }
 
 /**
