@@ -16,30 +16,30 @@
   {
     "ruleId": "portability.gnu-bsd-shell-flags",
     "file": "scripts/migrate-namespace.sh",
-    "line": 31,
+    "line": 87,
     "pattern": "sha256sum",
-    "lineText": "# macOS ships shasum, not GNU sha256sum; probe both (same pattern as"
+    "lineText": "src_sum=$(sha256sum \"$src\" | awk '{print $1}')"
   },
   {
     "ruleId": "portability.gnu-bsd-shell-flags",
     "file": "scripts/migrate-namespace.sh",
-    "line": 35,
+    "line": 88,
     "pattern": "sha256sum",
-    "lineText": "if command -v sha256sum >/dev/null 2>&1; then"
+    "lineText": "dest_sum=$(sha256sum \"$dest\" | awk '{print $1}')"
   },
   {
     "ruleId": "portability.gnu-bsd-shell-flags",
     "file": "scripts/migrate-namespace.sh",
-    "line": 36,
+    "line": 162,
     "pattern": "sha256sum",
-    "lineText": "sha256sum \"$path\" | awk '{print $1}'"
+    "lineText": "src_sum=$(sha256sum \"$src_file\" | awk '{print $1}')"
   },
   {
     "ruleId": "portability.gnu-bsd-shell-flags",
     "file": "scripts/migrate-namespace.sh",
-    "line": 40,
+    "line": 163,
     "pattern": "sha256sum",
-    "lineText": "echo \"Neither sha256sum nor shasum is available; cannot verify copies\" >&2"
+    "lineText": "dest_sum=$(sha256sum \"$dest_file\" | awk '{print $1}')"
   },
   {
     "ruleId": "portability.gnu-bsd-shell-flags",
@@ -49,191 +49,51 @@
     "lineText": "# Deliberately NOT `readlink -f`: the managed runtime is a venv-style symlink"
   },
   {
-    "ruleId": "portability.hardcoded-signal-name",
-    "file": "deploy/lib/read-keychain-secret.mjs",
-    "line": 15,
-    "pattern": "killSignal: 'SIGKILL'",
-    "lineText": "killSignal: 'SIGKILL',"
-  },
-  {
-    "ruleId": "portability.hardcoded-signal-name",
-    "file": "scripts/agent-decision-polls-guard.ts",
-    "line": 393,
-    "pattern": "killSignal: 'SIGKILL'",
-    "lineText": "killSignal: 'SIGKILL',"
-  },
-  {
-    "ruleId": "portability.hardcoded-signal-name",
-    "file": "scripts/git-estate-guard.ts",
-    "line": 288,
-    "pattern": "killSignal: 'SIGKILL'",
-    "lineText": "killSignal: 'SIGKILL',"
-  },
-  {
-    "ruleId": "portability.hardcoded-signal-name",
-    "file": "scripts/git-estate-guard.ts",
-    "line": 308,
-    "pattern": "killSignal: 'SIGKILL'",
-    "lineText": "killSignal: 'SIGKILL',"
-  },
-  {
-    "ruleId": "portability.hardcoded-signal-name",
-    "file": "scripts/hooks-installed-guard.ts",
-    "line": 167,
-    "pattern": "killSignal: 'SIGKILL'",
-    "lineText": "killSignal: 'SIGKILL',"
-  },
-  {
-    "ruleId": "portability.hardcoded-signal-name",
-    "file": "scripts/hooks-installed-guard.ts",
-    "line": 517,
-    "pattern": "killSignal: 'SIGKILL'",
-    "lineText": "killSignal: 'SIGKILL',"
-  },
-  {
-    "ruleId": "portability.hardcoded-signal-name",
-    "file": "scripts/hooks-installed-guard.ts",
-    "line": 803,
-    "pattern": "killSignal: 'SIGKILL'",
-    "lineText": "killSignal: 'SIGKILL',"
-  },
-  {
-    "ruleId": "portability.hardcoded-signal-name",
-    "file": "scripts/lib/ci-control/git-input-core.ts",
-    "line": 376,
-    "pattern": "killSignal: \"SIGKILL\"",
-    "lineText": "killSignal: \"SIGKILL\","
-  },
-  {
-    "ruleId": "portability.hardcoded-signal-name",
-    "file": "scripts/lib/ci-control/git-input-core.ts",
-    "line": 406,
-    "pattern": "killSignal: \"SIGKILL\"",
-    "lineText": "killSignal: \"SIGKILL\","
-  },
-  {
-    "ruleId": "portability.hardcoded-signal-name",
-    "file": "scripts/lib/ci-control/git-input-core.ts",
-    "line": 776,
-    "pattern": "killSignal: \"SIGKILL\"",
-    "lineText": "killSignal: \"SIGKILL\","
-  },
-  {
-    "ruleId": "portability.hardcoded-signal-name",
-    "file": "scripts/lib/ci-control/git-input-core.ts",
-    "line": 807,
-    "pattern": "killSignal: \"SIGKILL\"",
-    "lineText": "killSignal: \"SIGKILL\","
-  },
-  {
-    "ruleId": "portability.hardcoded-signal-name",
-    "file": "scripts/lib/ci-control/git-input.ts",
-    "line": 829,
-    "pattern": "killSignal: \"SIGKILL\"",
-    "lineText": "killSignal: \"SIGKILL\","
-  },
-  {
-    "ruleId": "portability.hardcoded-signal-name",
-    "file": "scripts/pre-push-alignment.ts",
-    "line": 71,
-    "pattern": "killSignal: 'SIGTERM'",
-    "lineText": "killSignal: 'SIGTERM',"
-  },
-  {
-    "ruleId": "portability.hardcoded-signal-name",
-    "file": "src/lib/emit-alert.ts",
-    "line": 165,
-    "pattern": "killSignal: 'SIGKILL'",
-    "lineText": "{ stdio: 'ignore', timeout: 5_000, detached: false, killSignal: 'SIGKILL' },"
-  },
-  {
-    "ruleId": "portability.hardcoded-signal-name",
-    "file": "src/lib/keyring.ts",
-    "line": 118,
-    "pattern": "killSignal: 'SIGKILL'",
-    "lineText": "killSignal: 'SIGKILL' as const,"
-  },
-  {
-    "ruleId": "portability.hardcoded-signal-name",
-    "file": "src/main.ts",
-    "line": 1215,
-    "pattern": "process.on('SIGINT'",
-    "lineText": "process.on('SIGINT', () => shutdown('SIGINT'));"
-  },
-  {
-    "ruleId": "portability.hardcoded-signal-name",
-    "file": "src/main.ts",
-    "line": 1216,
-    "pattern": "process.on('SIGTERM'",
-    "lineText": "process.on('SIGTERM', () => shutdown('SIGTERM'));"
-  },
-  {
-    "ruleId": "portability.hardcoded-signal-name",
-    "file": "src/runtimes/chat/providers/transcription/local-audio.ts",
-    "line": 95,
-    "pattern": ".kill('SIGKILL')",
-    "lineText": "if (!exited) child.kill('SIGKILL');"
-  },
-  {
-    "ruleId": "portability.hardcoded-signal-name",
-    "file": "src/runtimes/chat/providers/transcription/local-audio.ts",
-    "line": 69,
-    "pattern": "killSignal: 'SIGTERM'",
-    "lineText": "killSignal: 'SIGTERM',"
-  },
-  {
-    "ruleId": "portability.hardcoded-signal-name",
-    "file": "src/transport/imessage/imsg-rpc-relay.ts",
-    "line": 271,
-    "pattern": ".kill('SIGKILL')",
-    "lineText": "if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');"
-  },
-  {
-    "ruleId": "portability.hardcoded-signal-name",
-    "file": "src/transport/imessage/imsg-rpc-relay.ts",
-    "line": 268,
-    "pattern": ".kill('SIGTERM')",
-    "lineText": "if (child.exitCode === null && child.signalCode === null) child.kill('SIGTERM');"
-  },
-  {
     "ruleId": "portability.no-hardcoded-platform-binaries",
     "file": "deploy/scripts/bot-errors-health-check.py",
-    "line": 2512,
+    "line": 2481,
     "pattern": "\"/usr/bin/rustdesk",
     "lineText": "command = profile_string(profile, \"rustDeskCommand\") or shutil.which(\"rustdesk\") or \"/usr/bin/rustdesk\""
   },
   {
     "ruleId": "portability.no-hardcoded-platform-binaries",
-    "file": "scripts/lib/ci-control/trusted-git.ts",
-    "line": 13,
+    "file": "scripts/ci-control-ref-policy.ts",
+    "line": 27,
     "pattern": "'/usr/bin/git",
-    "lineText": "'/usr/bin/git',"
+    "lineText": "const TRUSTED_GIT = '/usr/bin/git';"
+  },
+  {
+    "ruleId": "portability.no-hardcoded-platform-binaries",
+    "file": "scripts/hooks-installed-guard.ts",
+    "line": 88,
+    "pattern": "'/usr/bin/git",
+    "lineText": "const TRUSTED_GIT_PATH = '/usr/bin/git';"
   },
   {
     "ruleId": "portability.platform-paths-guarded",
     "file": "deploy/scripts/bot-errors-health-check.py",
-    "line": 243,
+    "line": 242,
     "pattern": "/proc/",
     "lineText": "return Path(\"/proc/sys/kernel/osrelease\").read_text(encoding=\"utf-8\").strip()"
   },
   {
     "ruleId": "portability.platform-paths-guarded",
     "file": "deploy/scripts/bot-errors-health-check.py",
-    "line": 2490,
+    "line": 2459,
     "pattern": "/proc/",
     "lineText": "uptime = float(Path(\"/proc/uptime\").read_text(encoding=\"utf-8\").split()[0])"
   },
   {
     "ruleId": "portability.platform-paths-guarded",
     "file": "deploy/scripts/bot-errors-health-check.py",
-    "line": 3529,
+    "line": 3464,
     "pattern": "/proc/",
     "lineText": "return int(float(Path(\"/proc/uptime\").read_text(encoding=\"utf-8\").split()[0]))"
   },
   {
     "ruleId": "portability.platform-paths-guarded",
     "file": "deploy/scripts/bot-errors-health-check.py",
-    "line": 243,
+    "line": 242,
     "pattern": "/sys/",
     "lineText": "return Path(\"/proc/sys/kernel/osrelease\").read_text(encoding=\"utf-8\").strip()"
   },
@@ -282,14 +142,14 @@
   {
     "ruleId": "portability.platform-paths-guarded",
     "file": "scripts/platform-pattern-check.ts",
-    "line": 225,
+    "line": 223,
     "pattern": "/proc/",
     "lineText": "'Guard behind process.platform === \"linux\" check before accessing /proc/ or /sys/.',"
   },
   {
     "ruleId": "portability.platform-paths-guarded",
     "file": "scripts/platform-pattern-check.ts",
-    "line": 225,
+    "line": 223,
     "pattern": "/sys/",
     "lineText": "'Guard behind process.platform === \"linux\" check before accessing /proc/ or /sys/.',"
   },
@@ -324,35 +184,35 @@
   {
     "ruleId": "portability.platform-paths-guarded",
     "file": "src/runtimes/agent/process-tree.ts",
-    "line": 477,
+    "line": 476,
     "pattern": "/proc/",
     "lineText": "* Linux systemd). Reads `/proc/self/cgroup` for the unified path, then reads"
   },
   {
     "ruleId": "portability.platform-paths-guarded",
     "file": "src/runtimes/agent/process-tree.ts",
-    "line": 485,
+    "line": 484,
     "pattern": "/proc/",
     "lineText": "const selfCgroup = readFileSync('/proc/self/cgroup', 'utf8');"
   },
   {
     "ruleId": "portability.platform-paths-guarded",
     "file": "src/runtimes/agent/process-tree.ts",
-    "line": 478,
+    "line": 477,
     "pattern": "/sys/",
     "lineText": "* `cgroup.procs` recursively under `/sys/fs/cgroup<path>`. Returns `null` on any"
   },
   {
     "ruleId": "portability.platform-paths-guarded",
     "file": "src/runtimes/agent/process-tree.ts",
-    "line": 490,
+    "line": 489,
     "pattern": "/sys/",
     "lineText": "const base = join('/sys/fs/cgroup', rel);"
   },
   {
     "ruleId": "portability.platform-paths-guarded",
     "file": "src/runtimes/agent/runtime.ts",
-    "line": 1436,
+    "line": 1433,
     "pattern": "/proc/",
     "lineText": "return readdirSync('/proc/self/fd').length;"
   },
@@ -371,9 +231,16 @@
     "lineText": "const cmdline = readFileSync(`/proc/${pid}/cmdline`, 'utf8');"
   },
   {
+    "ruleId": "portability.platform-paths-guarded",
+    "file": "src/transport/auth.ts",
+    "line": 30,
+    "pattern": "/run/",
+    "lineText": "const lockPath = (config as any).lockPath ?? '/var/run/whatsoup.lock';"
+  },
+  {
     "ruleId": "portability.systemctl-guarded",
     "file": "deploy/scripts/bot-errors-selfcheck.py",
-    "line": 314,
+    "line": 313,
     "pattern": "\"systemctl",
     "lineText": "[\"systemctl\", \"--user\", \"is-active\", unit],"
   },
@@ -408,43 +275,239 @@
   {
     "ruleId": "portability.systemctl-guarded",
     "file": "src/fleet/platform.ts",
-    "line": 57,
+    "line": 53,
     "pattern": "'systemctl",
     "lineText": "execFileSync('systemctl', ['--user', 'show-environment'], {"
   },
   {
     "ruleId": "portability.systemctl-guarded",
     "file": "src/fleet/platform.ts",
-    "line": 451,
+    "line": 199,
     "pattern": "'systemctl",
     "lineText": "await execFileAsync('systemctl', ['--user', 'reenable', this.unit(name)]);"
   },
   {
     "ruleId": "portability.systemctl-guarded",
     "file": "src/fleet/platform.ts",
-    "line": 455,
+    "line": 203,
     "pattern": "'systemctl",
     "lineText": "await execFileAsync('systemctl', ['--user', 'disable', this.unit(name)]);"
   },
   {
     "ruleId": "portability.systemctl-guarded",
     "file": "src/fleet/platform.ts",
-    "line": 459,
+    "line": 207,
     "pattern": "'systemctl",
     "lineText": "await execFileAsync('systemctl', ['--user', 'start', this.unit(name)]);"
   },
   {
     "ruleId": "portability.systemctl-guarded",
     "file": "src/fleet/platform.ts",
-    "line": 463,
+    "line": 211,
     "pattern": "'systemctl",
     "lineText": "await execFileAsync('systemctl', ['--user', 'stop', this.unit(name)]);"
   },
   {
     "ruleId": "portability.systemctl-guarded",
     "file": "src/fleet/platform.ts",
-    "line": 467,
+    "line": 215,
     "pattern": "'systemctl",
     "lineText": "await execFileAsync('systemctl', ['--user', 'restart', this.unit(name)]);"
+  },
+  {
+    "ruleId": "portability.arch-blind-path-fallback",
+    "file": "src/fleet/platform.ts",
+    "line": 104,
+    "pattern": "process.env.PATH ?? '/usr/local/bin:/usr/bin:/bin'",
+    "lineText": "const envPath = process.env.PATH ?? '/usr/local/bin:/usr/bin:/bin';"
+  },
+  {
+    "ruleId": "portability.hardcoded-signal-name",
+    "file": "src/fleet/routes/ops.ts",
+    "line": 1295,
+    "pattern": ".kill('SIGTERM')",
+    "lineText": "try { existing.kill('SIGTERM'); } catch { /* already exited */ }"
+  },
+  {
+    "ruleId": "portability.hardcoded-signal-name",
+    "file": "src/fleet/routes/ops.ts",
+    "line": 1352,
+    "pattern": ".kill('SIGTERM')",
+    "lineText": "child.kill('SIGTERM');"
+  },
+  {
+    "ruleId": "portability.hardcoded-signal-name",
+    "file": "src/fleet/routes/ops.ts",
+    "line": 1411,
+    "pattern": ".kill('SIGTERM')",
+    "lineText": "child.kill('SIGTERM');"
+  },
+  {
+    "ruleId": "portability.hardcoded-signal-name",
+    "file": "src/fleet/routes/ops.ts",
+    "line": 1412,
+    "pattern": ".kill('SIGKILL')",
+    "lineText": "setTimeout(() => { try { child.kill('SIGKILL'); } catch { /* already exited */ } }, 5000);"
+  },
+  {
+    "ruleId": "portability.hardcoded-signal-name",
+    "file": "src/fleet/platform.ts",
+    "line": 309,
+    "pattern": ".kill('SIGTERM')",
+    "lineText": "child.kill('SIGTERM');"
+  },
+  {
+    "ruleId": "portability.hardcoded-signal-name",
+    "file": "src/fleet/platform.ts",
+    "line": 312,
+    "pattern": ".kill('SIGKILL')",
+    "lineText": "try { child.kill('SIGKILL'); } catch { /* already exited */ }"
+  },
+  {
+    "ruleId": "portability.hardcoded-signal-name",
+    "file": "src/runtimes/chat/providers/transcription/local-audio.ts",
+    "line": 39,
+    "pattern": "killSignal: 'SIGTERM'",
+    "lineText": "killSignal: 'SIGTERM',"
+  },
+  {
+    "ruleId": "portability.hardcoded-signal-name",
+    "file": "src/runtimes/chat/providers/transcription/local-audio.ts",
+    "line": 65,
+    "pattern": ".kill('SIGKILL')",
+    "lineText": "if (!exited) child.kill('SIGKILL');"
+  },
+  {
+    "ruleId": "portability.hardcoded-signal-name",
+    "file": "src/runtimes/agent/providers/binary-preflight.ts",
+    "line": 193,
+    "pattern": ".kill('SIGKILL')",
+    "lineText": "try { child.kill('SIGKILL'); } catch { /* ignore kill errors */ }"
+  },
+  {
+    "ruleId": "portability.hardcoded-signal-name",
+    "file": "src/main.ts",
+    "line": 1171,
+    "pattern": "process.on('SIGINT'",
+    "lineText": "process.on('SIGINT', () => shutdown('SIGINT'));"
+  },
+  {
+    "ruleId": "portability.hardcoded-signal-name",
+    "file": "src/main.ts",
+    "line": 1172,
+    "pattern": "process.on('SIGTERM'",
+    "lineText": "process.on('SIGTERM', () => shutdown('SIGTERM'));"
+  },
+  {
+    "ruleId": "portability.hardcoded-signal-name",
+    "file": "src/lib/keyring.ts",
+    "line": 59,
+    "pattern": "killSignal: 'SIGKILL'",
+    "lineText": "killSignal: 'SIGKILL' as const,"
+  },
+  {
+    "ruleId": "portability.hardcoded-signal-name",
+    "file": "src/lib/emit-alert.ts",
+    "line": 160,
+    "pattern": "killSignal: 'SIGKILL'",
+    "lineText": "{ stdio: 'ignore', timeout: 5_000, detached: false, killSignal: 'SIGKILL' },"
+  },
+  {
+    "ruleId": "portability.hardcoded-signal-name",
+    "file": "deploy/lib/read-keychain-secret.mjs",
+    "line": 15,
+    "pattern": "killSignal: 'SIGKILL'",
+    "lineText": "killSignal: 'SIGKILL',"
+  },
+  {
+    "ruleId": "portability.hardcoded-signal-name",
+    "file": "scripts/lib/ci-control/git-input.ts",
+    "line": 640,
+    "pattern": "killSignal: \"SIGKILL\"",
+    "lineText": "killSignal: \"SIGKILL\","
+  },
+  {
+    "ruleId": "portability.hardcoded-signal-name",
+    "file": "scripts/lib/ci-control/git-input-core.ts",
+    "line": 348,
+    "pattern": "killSignal: \"SIGKILL\"",
+    "lineText": "killSignal: \"SIGKILL\","
+  },
+  {
+    "ruleId": "portability.hardcoded-signal-name",
+    "file": "scripts/lib/ci-control/git-input-core.ts",
+    "line": 380,
+    "pattern": "killSignal: \"SIGKILL\"",
+    "lineText": "killSignal: \"SIGKILL\","
+  },
+  {
+    "ruleId": "portability.hardcoded-signal-name",
+    "file": "scripts/lib/ci-control/git-input-core.ts",
+    "line": 757,
+    "pattern": "killSignal: \"SIGKILL\"",
+    "lineText": "killSignal: \"SIGKILL\","
+  },
+  {
+    "ruleId": "portability.hardcoded-signal-name",
+    "file": "scripts/agent-decision-polls-guard.ts",
+    "line": 393,
+    "pattern": "killSignal: 'SIGKILL'",
+    "lineText": "killSignal: 'SIGKILL',"
+  },
+  {
+    "ruleId": "portability.hardcoded-signal-name",
+    "file": "src/transport/imessage/imsg-rpc-relay.ts",
+    "line": 268,
+    "pattern": ".kill('SIGTERM')",
+    "lineText": "if (child.exitCode === null && child.signalCode === null) child.kill('SIGTERM');"
+  },
+  {
+    "ruleId": "portability.hardcoded-signal-name",
+    "file": "src/transport/imessage/imsg-rpc-relay.ts",
+    "line": 271,
+    "pattern": ".kill('SIGKILL')",
+    "lineText": "if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');"
+  },
+  {
+    "ruleId": "portability.hardcoded-signal-name",
+    "file": "scripts/git-estate-guard.ts",
+    "line": 288,
+    "pattern": "killSignal: 'SIGKILL'",
+    "lineText": "killSignal: 'SIGKILL',"
+  },
+  {
+    "ruleId": "portability.hardcoded-signal-name",
+    "file": "scripts/git-estate-guard.ts",
+    "line": 308,
+    "pattern": "killSignal: 'SIGKILL'",
+    "lineText": "killSignal: 'SIGKILL',"
+  },
+  {
+    "ruleId": "portability.hardcoded-signal-name",
+    "file": "scripts/hooks-installed-guard.ts",
+    "line": 166,
+    "pattern": "killSignal: 'SIGKILL'",
+    "lineText": "killSignal: 'SIGKILL',"
+  },
+  {
+    "ruleId": "portability.hardcoded-signal-name",
+    "file": "scripts/hooks-installed-guard.ts",
+    "line": 516,
+    "pattern": "killSignal: 'SIGKILL'",
+    "lineText": "killSignal: 'SIGKILL',"
+  },
+  {
+    "ruleId": "portability.hardcoded-signal-name",
+    "file": "scripts/hooks-installed-guard.ts",
+    "line": 802,
+    "pattern": "killSignal: 'SIGKILL'",
+    "lineText": "killSignal: 'SIGKILL',"
+  },
+  {
+    "ruleId": "portability.hardcoded-signal-name",
+    "file": "scripts/pre-push-alignment.ts",
+    "line": 71,
+    "pattern": "killSignal: 'SIGTERM'",
+    "lineText": "killSignal: 'SIGTERM',"
   }
 ]
