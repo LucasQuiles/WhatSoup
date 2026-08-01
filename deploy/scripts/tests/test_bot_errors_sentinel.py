@@ -1944,6 +1944,30 @@ def test_instance_lock_preserves_inode_identity_across_handoff(tmp_path: Path, m
         os.close(fd_b)
 
 
+def test_instance_lock_path_default_derives_from_state_root(monkeypatch):
+    """#2436: with no explicit BOT_ERRORS_FLEET_SENTINEL_LOCK, the default must
+    move with state_root() (i.e. with BOT_ERRORS_FLEET_SENTINEL_STATE_DIR), not
+    a literal baked independently of it -- otherwise two sentinels pointed at
+    different state roots would contend on the same lock file."""
+    monkeypatch.delenv("BOT_ERRORS_FLEET_SENTINEL_LOCK", raising=False)
+    monkeypatch.setenv("BOT_ERRORS_FLEET_SENTINEL_STATE_DIR", "/tmp/state-root-a/fleet-sentinel")
+    assert _mod._instance_lock_path() == _mod.state_root() / "sentinel-instance.lock"
+    assert str(_mod._instance_lock_path()) == "/tmp/state-root-a/fleet-sentinel/sentinel-instance.lock"
+
+    monkeypatch.setenv("BOT_ERRORS_FLEET_SENTINEL_STATE_DIR", "/tmp/state-root-b/fleet-sentinel")
+    assert str(_mod._instance_lock_path()) == "/tmp/state-root-b/fleet-sentinel/sentinel-instance.lock", (
+        "the lock default must move with state_root(), not stay pinned to the first-seen value"
+    )
+
+
+def test_instance_lock_path_explicit_override_still_wins(monkeypatch):
+    """An explicit BOT_ERRORS_FLEET_SENTINEL_LOCK must take precedence over the
+    state_root()-derived default."""
+    monkeypatch.setenv("BOT_ERRORS_FLEET_SENTINEL_STATE_DIR", "/tmp/state-root-a/fleet-sentinel")
+    monkeypatch.setenv("BOT_ERRORS_FLEET_SENTINEL_LOCK", "/tmp/explicit-lock/sentinel-instance.lock")
+    assert str(_mod._instance_lock_path()) == "/tmp/explicit-lock/sentinel-instance.lock"
+
+
 # --- SENT-B2: unbounded action outbox ---------------------------------------
 # The action outbox accumulates one file per emitted action with no consumer or
 # pruner, so inode/disk usage grows without bound. A cycle-end retention sweep
