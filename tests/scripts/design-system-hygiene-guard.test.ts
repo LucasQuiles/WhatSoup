@@ -1,6 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { mkdirSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
@@ -10,8 +9,9 @@ import {
   parseArgs,
   runDesignSystemHygieneGuard,
 } from '../../scripts/design-system-hygiene-guard.ts';
+import { trackTmpDirs } from '../helpers/tmp-dir.ts';
 
-const repos: string[] = [];
+const tmp = trackTmpDirs('');
 
 function git(repo: string, args: string[]): void {
   execFileSync('git', args, { cwd: repo, stdio: 'ignore', env: cleanGitEnv() });
@@ -22,8 +22,7 @@ function gitOutput(repo: string, args: string[]): string {
 }
 
 function makeRepo(): string {
-  const repo = mkdtempSync(join(tmpdir(), 'design-system-hygiene-'));
-  repos.push(repo);
+  const repo = tmp.make('design-system-hygiene');
   git(repo, ['init']);
   git(repo, ['config', 'user.name', 'WhatSoup Test']);
   git(repo, ['config', 'user.email', 'whatsoup-test@users.noreply.github.com']);
@@ -44,9 +43,6 @@ function commit(repo: string, message: string): void {
 afterEach(() => {
   vi.restoreAllMocks();
   process.exitCode = undefined;
-  for (const repo of repos.splice(0)) {
-    rmSync(repo, { recursive: true, force: true });
-  }
 });
 
 describe('design-system hygiene guard', () => {

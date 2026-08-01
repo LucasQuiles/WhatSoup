@@ -1,8 +1,7 @@
 import { execFileSync } from 'node:child_process';
-import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { cpSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { describe, expect, it } from 'vitest';
 
 import { runClassifierCli } from '../../scripts/ci-control-classify.ts';
 import {
@@ -19,16 +18,13 @@ import {
 import { readExactChangeFacts } from '../../scripts/lib/ci-control/git-input.ts';
 import { digestControlManifest, loadControlManifest } from '../../scripts/lib/ci-control/manifest.ts';
 import { runtimeSourceClosure } from '../helpers/runtime-source-closure.ts';
+import { trackTmpDirs } from '../helpers/tmp-dir.ts';
 
 const projectRoot = resolve(import.meta.dirname, '../..');
-const temporaryRoots: string[] = [];
+const tmp = trackTmpDirs('');
 const ZERO_OID = '0'.repeat(40);
 const DIGEST_A = `sha256:${'a'.repeat(64)}`;
 const DIGEST_B = `sha256:${'b'.repeat(64)}`;
-
-afterEach(() => {
-  for (const directory of temporaryRoots.splice(0)) rmSync(directory, { recursive: true, force: true });
-});
 
 function git(cwd: string, args: string[]): string {
   return execFileSync('git', args, {
@@ -63,8 +59,7 @@ function commit(root: string, message: string): string {
 }
 
 function fixture(): { root: string; baseOid: string; manifestDigest: string } {
-  const root = mkdtempSync(join(tmpdir(), 'ci-control-classifier-'));
-  temporaryRoots.push(root);
+  const root = tmp.make('ci-control-classifier');
   git(root, ['init', '--quiet']);
   mkdirSync(join(root, 'controls'), { recursive: true });
   cpSync(join(projectRoot, 'controls/ci-control-manifest.json'), join(root, 'controls/ci-control-manifest.json'));
@@ -224,8 +219,7 @@ describe('exact revision classification', () => {
     expect([...CLASSIFIER_TOOL_SOURCE_PATHS].sort()).toEqual(
       runtimeSourceClosure('scripts/ci-control-classify.ts', projectRoot),
     );
-    const sourceRoot = mkdtempSync(join(tmpdir(), 'ci-control-source-identity-'));
-    temporaryRoots.push(sourceRoot);
+    const sourceRoot = tmp.make('ci-control-source-identity');
     for (const path of CLASSIFIER_TOOL_SOURCE_PATHS) {
       const target = join(sourceRoot, path);
       mkdirSync(dirname(target), { recursive: true });
@@ -242,8 +236,7 @@ describe('exact revision classification', () => {
   });
 
   it('tracks bounded dynamic imports and rejects computed runtime dependencies', () => {
-    const sourceRoot = mkdtempSync(join(tmpdir(), 'ci-control-import-closure-'));
-    temporaryRoots.push(sourceRoot);
+    const sourceRoot = tmp.make('ci-control-import-closure');
     write(sourceRoot, 'entry.ts', [
       "void import('./dynamic-one.ts');",
       'void import(`./dynamic-two.ts`, {});',
@@ -268,8 +261,7 @@ describe('exact revision classification', () => {
   });
 
   it('rejects tool sources changed after process start or after the loaded digest was captured', () => {
-    const sourceRoot = mkdtempSync(join(tmpdir(), 'ci-control-source-stability-'));
-    temporaryRoots.push(sourceRoot);
+    const sourceRoot = tmp.make('ci-control-source-stability');
     for (const path of CLASSIFIER_TOOL_SOURCE_PATHS) {
       const target = join(sourceRoot, path);
       mkdirSync(dirname(target), { recursive: true });
@@ -670,8 +662,7 @@ describe('exact revision classification', () => {
 
   it('fails closed when the base and candidate histories are unrelated', () => {
     const { root, baseOid, manifestDigest } = fixture();
-    const other = mkdtempSync(join(tmpdir(), 'ci-control-unrelated-'));
-    temporaryRoots.push(other);
+    const other = tmp.make('ci-control-unrelated');
     git(other, ['init', '--quiet']);
     mkdirSync(join(other, 'controls'), { recursive: true });
     cpSync(join(projectRoot, 'controls/ci-control-manifest.json'), join(other, 'controls/ci-control-manifest.json'));
@@ -689,8 +680,7 @@ describe('exact revision classification', () => {
     const source = fixture();
     write(source.root, 'docs/guide.md', 'shallow candidate\n');
     const candidateOid = commit(source.root, 'candidate');
-    const parent = mkdtempSync(join(tmpdir(), 'ci-control-shallow-parent-'));
-    temporaryRoots.push(parent);
+    const parent = tmp.make('ci-control-shallow-parent');
     const shallow = join(parent, 'clone');
     git(parent, ['clone', '--quiet', '--depth=1', `file://${source.root}`, shallow]);
     expect(git(shallow, ['rev-parse', 'HEAD'])).toBe(candidateOid);
@@ -851,8 +841,7 @@ describe('lineage lease invalidation', () => {
 
   it('rejects unavailable remote graph evidence and defensively invalidates legacy null leases', () => {
     const { root, baseOid, manifestDigest } = fixture();
-    const other = mkdtempSync(join(tmpdir(), 'ci-control-lineage-unrelated-'));
-    temporaryRoots.push(other);
+    const other = tmp.make('ci-control-lineage-unrelated');
     git(other, ['init', '--quiet']);
     write(other, 'other.txt', 'other\n');
     const unrelatedOid = commit(other, 'unrelated remote');

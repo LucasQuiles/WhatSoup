@@ -1,20 +1,14 @@
 import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { mkdirSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { describe, expect, it } from 'vitest';
+
+import { trackTmpDirs } from '../helpers/tmp-dir.ts';
 
 const SCRIPT = resolve(process.cwd(), 'console/scripts/check-font-assets.mjs');
 
-const tmpDirs: string[] = [];
-
-afterEach(() => {
-  for (const dir of tmpDirs) {
-    rmSync(dir, { recursive: true, force: true });
-  }
-  tmpDirs.length = 0;
-});
+const tmp = trackTmpDirs('');
 
 function hash(content: string) {
   return createHash('sha256').update(content).digest('hex');
@@ -28,8 +22,7 @@ interface FixtureOptions {
 }
 
 function makeFixture(options: FixtureOptions = {}) {
-  const root = mkdtempSync(join(tmpdir(), 'font-assets-'));
-  tmpDirs.push(root);
+  const root = tmp.make('font-assets');
   const fontsCss = join(root, 'console/src/styles/fonts.css');
   const fontsDir = join(root, 'console/public/fonts');
   const readme = join(fontsDir, 'README.md');
