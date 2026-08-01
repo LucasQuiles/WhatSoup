@@ -9,25 +9,22 @@
  * about the resolution, graph construction, or cycle rules changes.
  */
 import { spawnSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { mkdirSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { afterAll, describe, expect, it } from 'vitest';
+import { describe, expect, it } from 'vitest';
+
+import { trackTmpDirs } from '../helpers/tmp-dir.ts';
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const guardPath = resolve(repoRoot, 'scripts/import-cycle-guard.ts');
 
-const tempRoots: string[] = [];
-afterAll(() => {
-  for (const dir of tempRoots) rmSync(dir, { recursive: true, force: true });
-});
+const tmp = trackTmpDirs('');
 
 /** A throwaway TS project whose `src/` holds exactly the given files. */
 function makeProject(files: Record<string, string>): string {
-  const dir = mkdtempSync(join(tmpdir(), 'import-cycle-'));
-  tempRoots.push(dir);
+  const dir = tmp.make('import-cycle');
   writeFileSync(
     join(dir, 'tsconfig.json'),
     JSON.stringify(
