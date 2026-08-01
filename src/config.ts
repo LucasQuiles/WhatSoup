@@ -2,7 +2,7 @@ import { mkdirSync } from 'node:fs';
 import { isAbsolute, join } from 'node:path';
 import { homedir } from 'node:os';
 import { normalizePhoneE164, normalizePhoneE164Wire } from './lib/phone.ts';
-import { asRecord } from './lib/type-guards.ts';
+import { asRecord, isNonEmptyString } from './lib/type-guards.ts';
 import { migrateLegacyMemoryConfig } from './config-memory-migration.ts';
 import type { Profile } from './core/profiles.ts';
 import { VALID_ACCESS_MODES, VALID_GROUP_SENDER_POLICIES, type AccessMode, type GroupSenderPolicy } from './instance-loader.ts';
@@ -188,7 +188,7 @@ function positiveIntEnv(key: string, fallback: number): number {
 
 function stringProp(source: Record<string, unknown> | undefined, key: string): string | undefined {
   const value = source?.[key];
-  return typeof value === 'string' && value.trim() !== '' ? value : undefined;
+  return isNonEmptyString(value) ? value : undefined;
 }
 
 function numberProp(source: Record<string, unknown> | undefined, key: string, fallback: number): number {

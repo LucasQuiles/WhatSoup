@@ -1,10 +1,12 @@
+import { asNonEmptyString } from '../../lib/type-guards'
+
 export function parseQrPayload(data: string): string | null {
   const raw = data.trim()
   if (!raw) return null
 
   try {
     const parsed = JSON.parse(data) as unknown
-    return typeof parsed === 'string' && parsed.trim() ? parsed.trim() : null
+    return asNonEmptyString(parsed) ?? null
   } catch {
     return raw
   }

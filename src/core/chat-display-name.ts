@@ -59,6 +59,7 @@ import {
 } from './jid-constants.ts';
 import { resolveLid, resolveLidsForPhone } from './lid-resolver.ts';
 import { isPhoneLocal } from '../lib/phone.ts';
+import { asNonEmptyString } from '../lib/type-guards.ts';
 
 /**
  * Digit floor above which an UNMAPPED bare numeric ref is treated as a
@@ -76,7 +77,7 @@ const LID_SUSPECT_MIN_DIGITS = 12;
 
 /** Non-empty trimmed string, else null — blank DB values are misses. */
 function nonEmpty(value: unknown): string | null {
-  return typeof value === 'string' && value.trim() !== '' ? value.trim() : null;
+  return asNonEmptyString(value) ?? null;
 }
 
 /**
