@@ -4684,10 +4684,15 @@ describe('ops.ts uncovered-branch coverage', () => {
     }
   });
 
-  // ---- Line 525 (false branch): claudeMd patch when merged agentOptions has no cwd ----
-  it('handleConfigUpdate skips CLAUDE.md write when agent has no agentOptions.cwd (line 525 false)', async () => {
+  // ---- resolveAndValidateAgentCwd's internal null-cwd defaulting (config-update call site) ----
+  it('handleConfigUpdate writes CLAUDE.md to the defaulted cwd when agentOptions.cwd is absent (line 504)', async () => {
+    const originalHome = process.env.HOME;
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'whatsoup-leaf-nocwd-'));
+    const homeDir = path.join(tmpDir, 'home');
     try {
+      fs.mkdirSync(homeDir, { recursive: true, mode: 0o700 });
+      process.env.HOME = homeDir;
+      const expectedCwd = path.join(homeDir, '.local', 'share', 'whatsoup', 'instances', 'test-line', 'workspace');
       const configPath = path.join(tmpDir, 'config.json');
       fs.writeFileSync(configPath, JSON.stringify({
         type: 'agent', healthPort: 3010, accessMode: 'self_only',
@@ -4701,20 +4706,24 @@ describe('ops.ts uncovered-branch coverage', () => {
         res, deps, { name: 'test-line' });
       expect(res._status).toBe(200);
       const written = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
-      // Patch passed validation but the inner cwd-guard short-circuited, so no CLAUDE.md
-      // was written to disk. Verify by passing an explicitly empty cwd — the merged
-      // agentOptions has no cwd at all, exercising the `!ao || typeof ao.cwd !== 'string'`
-      // branch of line 525.
       expect(written.claudeMd).toBe('# fresh');
+      expect(written.agentOptions.cwd).toBe(expectedCwd);
+      expect(fs.existsSync(path.join(expectedCwd, '.claude', 'CLAUDE.md'))).toBe(true);
+      expect(fs.readFileSync(path.join(expectedCwd, '.claude', 'CLAUDE.md'), 'utf-8')).toBe('# fresh');
     } finally {
+      if (originalHome === undefined) delete process.env.HOME; else process.env.HOME = originalHome;
       fs.rmSync(tmpDir, { recursive: true, force: true });
     }
   });
 
-  // ---- Line 540 (false branch): settingsJson patch without a usable cwd ----
-  it('handleConfigUpdate skips settings.json write when agentOptions.cwd is missing (line 540 false)', async () => {
+  it('handleConfigUpdate writes settings.json to the defaulted cwd when agentOptions.cwd is absent (line 519)', async () => {
+    const originalHome = process.env.HOME;
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'whatsoup-leaf-nosj-'));
+    const homeDir = path.join(tmpDir, 'home');
     try {
+      fs.mkdirSync(homeDir, { recursive: true, mode: 0o700 });
+      process.env.HOME = homeDir;
+      const expectedCwd = path.join(homeDir, '.local', 'share', 'whatsoup', 'instances', 'test-line', 'workspace');
       const configPath = path.join(tmpDir, 'config.json');
       fs.writeFileSync(configPath, JSON.stringify({
         type: 'agent', healthPort: 3010, accessMode: 'self_only',
@@ -4725,28 +4734,28 @@ describe('ops.ts uncovered-branch coverage', () => {
       const res = mockRes();
       await handleConfigUpdate(
         mockReq(JSON.stringify({
-          settingsJson: {
-            permissions: {
-              allow: ['Bash(ls:*)'],
-              deny: [],
-              defaultMode: 'bypassPermissions',
-            },
-          },
+          settingsJson: { permissions: { allow: ['Bash(ls:*)'], deny: [], defaultMode: 'bypassPermissions' } },
         })),
         res, deps, { name: 'test-line' });
       expect(res._status).toBe(200);
-      // settingsJson was stripped from merged config (no cwd -> no write).
-      const written = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
-      expect(written.settingsJson).toBeUndefined();
+      const settingsPath = path.join(expectedCwd, '.claude', 'settings.json');
+      expect(fs.existsSync(settingsPath)).toBe(true);
+      const written = JSON.parse(fs.readFileSync(settingsPath, 'utf-8'));
+      expect(written.permissions.allow).toContain('Bash(ls:*)');
     } finally {
+      if (originalHome === undefined) delete process.env.HOME; else process.env.HOME = originalHome;
       fs.rmSync(tmpDir, { recursive: true, force: true });
     }
   });
 
-  // ---- Line 558 (false branch): enabledPlugins patch without agentOptions.cwd ----
-  it('handleConfigUpdate skips enabledPlugins write when agentOptions.cwd is missing (line 558 false)', async () => {
+  it('handleConfigUpdate writes enabledPlugins to the defaulted cwd when agentOptions.cwd is absent (line 539)', async () => {
+    const originalHome = process.env.HOME;
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'whatsoup-leaf-noep-'));
+    const homeDir = path.join(tmpDir, 'home');
     try {
+      fs.mkdirSync(homeDir, { recursive: true, mode: 0o700 });
+      process.env.HOME = homeDir;
+      const expectedCwd = path.join(homeDir, '.local', 'share', 'whatsoup', 'instances', 'test-line', 'workspace');
       const configPath = path.join(tmpDir, 'config.json');
       fs.writeFileSync(configPath, JSON.stringify({
         type: 'agent', healthPort: 3010, accessMode: 'self_only',
@@ -4756,14 +4765,17 @@ describe('ops.ts uncovered-branch coverage', () => {
       const deps = makeDeps({ discovery: { getInstance: vi.fn(() => inst) } as any });
       const res = mockRes();
       await handleConfigUpdate(
-        mockReq(JSON.stringify({
-          agentOptions: { enabledPlugins: { 'whatsoup/x': true } },
-        })),
+        mockReq(JSON.stringify({ agentOptions: { enabledPlugins: { 'whatsoup/x': true } } })),
         res, deps, { name: 'test-line' });
       expect(res._status).toBe(200);
       const written = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
       expect(written.agentOptions.enabledPlugins).toEqual({ 'whatsoup/x': true });
+      const settingsPath = path.join(expectedCwd, '.claude', 'settings.json');
+      expect(fs.existsSync(settingsPath)).toBe(true);
+      const settings = JSON.parse(fs.readFileSync(settingsPath, 'utf-8'));
+      expect(settings.enabledPlugins).toEqual({ 'whatsoup/x': true });
     } finally {
+      if (originalHome === undefined) delete process.env.HOME; else process.env.HOME = originalHome;
       fs.rmSync(tmpDir, { recursive: true, force: true });
     }
   });
