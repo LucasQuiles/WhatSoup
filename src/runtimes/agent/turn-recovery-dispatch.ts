@@ -22,6 +22,8 @@ import type { SessionManager } from './session.ts';
 import type { QueuedTurn } from './turn-queue.ts';
 import {
   TurnRecoverySupervisor,
+  type TurnRecoveryDispatchTarget,
+  type TurnRecoveryReplayAbortControl,
   type TurnRecoveryReplayDispatchResult,
 } from './turn-recovery-supervisor.ts';
 
@@ -33,10 +35,12 @@ export function createTurnRecoverySupervisorForRuntime(deps: {
   readonly dispatchReplay: (
     job: TurnRecoveryJobRow,
     fence: TurnRecoveryClaimFence,
+    target?: TurnRecoveryDispatchTarget,
+    abortControl?: TurnRecoveryReplayAbortControl,
   ) => Promise<TurnRecoveryReplayDispatchResult>;
   readonly recoveryManagerId: string;
   readonly nextRecoveryGeneration: () => number;
-  readonly hasSessionForChat: (deliveryJid: string) => boolean;
+  readonly resolveDispatchTarget: (job: TurnRecoveryJobRow) => TurnRecoveryDispatchTarget | null;
 }): TurnRecoverySupervisor {
   // per_chat only for now — shared/singleton recovery jobs are left exactly
   // as wedged as they are today (skippedUnsupportedScope, not a regression);
@@ -52,7 +56,7 @@ export function createTurnRecoverySupervisorForRuntime(deps: {
       generation: deps.nextRecoveryGeneration(),
     }),
     supportedScopes: new Set(['per_chat']),
-    isDispatchable: (job) => job.scope === 'per_chat' && deps.hasSessionForChat(job.delivery_jid),
+    resolveDispatchTarget: deps.resolveDispatchTarget,
   });
 }
 
@@ -86,11 +90,18 @@ function verifyProvenBeforeDelivered(
   dispatchReplay: (
     job: TurnRecoveryJobRow,
     fence: TurnRecoveryClaimFence,
+    target?: TurnRecoveryDispatchTarget,
+    abortControl?: TurnRecoveryReplayAbortControl,
   ) => Promise<TurnRecoveryReplayDispatchResult>,
   getDurability: () => DurabilityEngine | null,
-): (job: TurnRecoveryJobRow, fence: TurnRecoveryClaimFence) => Promise<TurnRecoveryReplayDispatchResult> {
-  return async (job, fence) => {
-    const outcome = await dispatchReplay(job, fence);
+): (
+  job: TurnRecoveryJobRow,
+  fence: TurnRecoveryClaimFence,
+  target?: TurnRecoveryDispatchTarget,
+  abortControl?: TurnRecoveryReplayAbortControl,
+) => Promise<TurnRecoveryReplayDispatchResult> {
+  return async (job, fence, target, abortControl) => {
+    const outcome = await dispatchReplay(job, fence, target, abortControl);
     if (outcome.kind !== 'delivered') return outcome;
     // Fail closed: an undefined row (job gone, or claim raced expiry in the
     // narrow window between dispatch resolving and this check) is not proof
@@ -120,14 +131,23 @@ export async function dispatchTurnRecoveryReplayForJob(
   resolvePerChatMapKey: (deliveryJid: string) => string,
   getSession: (mapKey: string) => SessionManager | undefined,
   requireSessionToolScopeKey: (session: SessionManager) => string,
+  isTargetCurrent: (target: TurnRecoveryDispatchTarget) => boolean,
+  abortTarget: (
+    target: TurnRecoveryDispatchTarget,
+    context: RuntimeTurnContext,
+  ) => Promise<boolean>,
   job: TurnRecoveryJobRow,
+  target?: TurnRecoveryDispatchTarget,
+  abortControl?: TurnRecoveryReplayAbortControl,
 ): Promise<TurnRecoveryReplayDispatchResult> {
   // supportedScopes/isDispatchable already filter these before claiming;
   // re-checked here so this can never silently "deliver" otherwise.
   if (job.scope !== 'per_chat') return { kind: 'retryable_failure' };
   const mapKey = resolvePerChatMapKey(job.delivery_jid);
-  const session = getSession(mapKey);
-  if (!session) return { kind: 'retryable_failure' };
+  if (target?.mapKey !== mapKey) return { kind: 'retryable_failure' };
+  const session = target?.session as SessionManager | undefined;
+  if (session !== getSession(mapKey)) return { kind: 'retryable_failure' };
+  if (!session || !target || !isTargetCurrent(target)) return { kind: 'retryable_failure' };
 
   const source: RuntimeTurnSourceSnapshot = {
     sourceMessageId: job.source_message_id,
@@ -157,6 +177,12 @@ export async function dispatchTurnRecoveryReplayForJob(
     return { kind: 'retryable_failure' };
   }
   if (!runtimeContext) return { kind: 'retryable_failure' };
+  let providerBoundaryCrossed = false;
+  abortControl?.registerAbort(async () => (
+    providerBoundaryCrossed
+      ? abortTarget(target, runtimeContext)
+      : true
+  ));
 
   const turn: QueuedTurn = {
     sourceMessageId: source.sourceMessageId,
@@ -174,7 +200,13 @@ export async function dispatchTurnRecoveryReplayForJob(
   };
   const scopeRef: PerChatRuntimeScopeRef = { value: mapKey };
   try {
-    await coordinator.processPerChatTurn(scopeRef, turn, job.id);
+    await coordinator.processPerChatTurn(
+      scopeRef,
+      turn,
+      job.id,
+      () => isTargetCurrent(target) && abortControl?.signal.aborted !== true,
+      () => { providerBoundaryCrossed = true; },
+    );
   } catch (err) {
     log.warn({ err, jobId: job.id }, 'turn recovery replay dispatch failed');
     return { kind: 'retryable_failure' };

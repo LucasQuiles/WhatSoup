@@ -1,34 +1,14 @@
 import type { Database } from './database.ts';
 import { createChildLogger } from '../logger.ts';
 import type { RuntimeConnection } from '../transport/runtime-connection.ts';
+// Types live in a zero-import leaf module (mark-read-types.ts) so the
+// console workspace can share them without pulling this file's transitive
+// backend graph into the console's stricter tsconfig — see that file's
+// header for why (#2550).
+import type { MarkConversationReadResult, MarkReadRemoteStatus } from './mark-read-types.ts';
+export type { MarkConversationReadResult, MarkReadRemoteStatus };
 
 const log = createChildLogger('mark-read');
-
-/**
- * Whether the REMOTE read-receipt was accepted, reported alongside the local
- * result (#2292 L16).
- *
- * The local `unread_count` is zeroed in every case — that is deliberate and
- * pinned by two named tests ("swallows chatModify errors: still returns ok and
- * zeroes unread", "skips chatModify when no socket is available, still zeroes
- * unread"): clearing the badge is what the caller asked for, and WhatsApp
- * re-syncs read state on reconnect. What was missing is that the caller could
- * not TELL whether the remote side agreed, so a local zero and a remote
- * still-unread were indistinguishable.
- */
-export type MarkReadRemoteStatus =
-  | 'acked'           // chatModify was called and succeeded
-  | 'failed'          // chatModify was called and threw — remote may still be unread
-  | 'offline'         // no socket; nothing was sent
-  | 'nothing_to_ack'; // the chat has no messages, so there is no receipt to send
-
-export interface MarkConversationReadResult {
-  ok: true;
-  jid: string;
-  conversation_key: string;
-  /** Remote-side outcome. `ok: true` refers to the LOCAL update only. */
-  remote: MarkReadRemoteStatus;
-}
 
 export async function markConversationRead(
   db: Database,

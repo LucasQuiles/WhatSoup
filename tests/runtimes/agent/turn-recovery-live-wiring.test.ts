@@ -24,7 +24,12 @@ import { beforeEach, afterEach, describe, expect, it, vi } from 'vitest';
 import { Database } from '../../../src/core/database.ts';
 import { DurabilityEngine } from '../../../src/core/durability.ts';
 import type { TurnRecoveryClaimFence, TurnRecoveryJobRow } from '../../../src/core/turn-recovery-store.ts';
-import type { TurnRecoveryReplayDispatchResult } from '../../../src/runtimes/agent/turn-recovery-supervisor.ts';
+import type {
+  TurnRecoveryDispatchTarget,
+  TurnRecoveryReplayAbortControl,
+  TurnRecoveryReplayAbortReason,
+  TurnRecoveryReplayDispatchResult,
+} from '../../../src/runtimes/agent/turn-recovery-supervisor.ts';
 import {
   toTurnFinalizationPersistence,
   toTurnRecoveryJobPersistence,
@@ -49,6 +54,8 @@ interface LiveWiringRuntimeState extends RuntimeState {
   dispatchTurnRecoveryReplay(
     job: TurnRecoveryJobRow,
     fence: TurnRecoveryClaimFence,
+    target?: TurnRecoveryDispatchTarget,
+    abortControl?: TurnRecoveryReplayAbortControl,
   ): Promise<TurnRecoveryReplayDispatchResult>;
   perChatRuntimeTurnCompletions: Map<string, RuntimeTurnCompletion>;
   // requireSessionToolScopeKey (runtime.ts:1069) reads this WeakMap, normally
@@ -69,6 +76,10 @@ interface LiveWiringRuntimeState extends RuntimeState {
       skippedUnsupportedScope: number;
       skippedNotDispatchable: number;
     }>;
+    stop(): void;
+  };
+  turnRecoveryDeadman: {
+    health(): { running: boolean };
     stop(): void;
   };
 }
@@ -195,6 +206,7 @@ describe('AgentRuntime.dispatchTurnRecoveryReplay — live wiring (PRESTAGE-T4 P
     const session = sessionStub();
     const managerId = state.managerIdFor(session);
     state.sessionOwnership.claim(mapKey, managerId);
+    state.sessionOwnership.transition(mapKey, managerId, 'active');
     state.chatSessions.set(mapKey, session);
     state.chatQueues.set(mapKey, queueStub(deliveryJid));
     state.sessionEventToolScopes.set(session, mapKey);
@@ -250,6 +262,181 @@ describe('AgentRuntime.dispatchTurnRecoveryReplay — live wiring (PRESTAGE-T4 P
     expect(result.claimed).toBe(0);
   });
 
+  it('admits only the exact active per-chat generation and leaves inactive or non-active mappings unclaimed', async () => {
+    const inactive = crashOneSourceTurn(db, durability, '15550190784', 'inactive');
+    const inactiveSession = sessionStub();
+    inactiveSession.getStatus.mockReturnValue({
+      active: false,
+      sessionId: 'session-inactive',
+      pid: null,
+    });
+    const inactiveManagerId = state.managerIdFor(inactiveSession);
+    state.sessionOwnership.claim(inactive.deliveryJid, inactiveManagerId);
+    state.sessionOwnership.transition(inactive.deliveryJid, inactiveManagerId, 'active');
+    state.chatSessions.set(inactive.deliveryJid, inactiveSession);
+
+    const starting = crashOneSourceTurn(db, durability, '15550190785', 'starting');
+    const startingSession = sessionStub();
+    const startingManagerId = state.managerIdFor(startingSession);
+    state.sessionOwnership.claim(starting.deliveryJid, startingManagerId);
+    state.chatSessions.set(starting.deliveryJid, startingSession);
+
+    const skipped = await state.turnRecoverySupervisor.scanOnce();
+    expect(skipped).toMatchObject({
+      scanned: 2,
+      claimed: 0,
+      skippedNotDispatchable: 2,
+    });
+    expect(durability.getTurnRecoveryJob(inactive.jobId)).toMatchObject({
+      state: 'pending',
+      attempt_count: 0,
+    });
+    expect(durability.getTurnRecoveryJob(starting.jobId)).toMatchObject({
+      state: 'pending',
+      attempt_count: 0,
+    });
+
+    inactiveSession.getStatus.mockReturnValue({
+      active: true,
+      sessionId: 'session-active',
+      pid: 4100,
+    });
+    state.chatQueues.set(inactive.deliveryJid, queueStub(inactive.deliveryJid));
+    state.sessionEventToolScopes.set(inactiveSession, inactive.deliveryJid);
+
+    const admitted = state.turnRecoverySupervisor.scanOnce();
+    await vi.waitFor(() => {
+      expect(state.perChatRuntimeTurnCompletions.has(inactive.deliveryJid)).toBe(true);
+    });
+    durability.completeInbound(inactive.sourceInboundSeq, 'response_sent');
+    state.perChatRuntimeTurnCompletions.get(inactive.deliveryJid)!.resolve();
+
+    expect(await admitted).toMatchObject({
+      claimed: 1,
+      completed: 1,
+      skippedNotDispatchable: 1,
+    });
+    state.perChatRuntimeTurnCompletions.delete(inactive.deliveryJid);
+    state.perChatRuntimeTurnContexts.delete(inactive.deliveryJid);
+    state.perChatInboundSeqQueue.delete(inactive.deliveryJid);
+  });
+
+  it('revalidates the captured generation at the exact provider boundary before writing', async () => {
+    const crashed = crashOneSourceTurn(db, durability, '15550190786', 'boundary-swap');
+    const mapKey = crashed.deliveryJid;
+    const session = sessionStub();
+    const managerId = state.managerIdFor(session);
+    state.sessionOwnership.claim(mapKey, managerId);
+    state.sessionOwnership.transition(mapKey, managerId, 'active');
+    state.chatSessions.set(mapKey, session);
+    state.chatQueues.set(mapKey, queueStub(mapKey));
+    state.sessionEventToolScopes.set(session, mapKey);
+
+    const sendTurnAtProviderBoundary = vi.fn(async (
+      input: unknown,
+      onReady?: () => void,
+    ) => {
+      state.sessionOwnership.advanceGeneration(mapKey, managerId);
+      onReady?.();
+      await session.sendTurn(input);
+    });
+    Object.assign(session, { sendTurnAtProviderBoundary });
+
+    const result = await state.turnRecoverySupervisor.scanOnce();
+
+    expect(sendTurnAtProviderBoundary).toHaveBeenCalledTimes(1);
+    expect(session.sendTurn).not.toHaveBeenCalled();
+    expect(result).toMatchObject({ claimed: 1, requeued: 1, completed: 0 });
+    expect(state.perChatInboundSeqQueue.has(mapKey)).toBe(false);
+    expect(state.pendingTurnText.has(mapKey)).toBe(false);
+  });
+
+  it('cooperatively terminates the exact provider generation after the boundary before proving abort', async () => {
+    const crashed = crashOneSourceTurn(db, durability, '15550190787', 'renewal-abort');
+    const mapKey = crashed.deliveryJid;
+    const owner = {
+      logicalTurnId: OWNER.logicalTurnId,
+      managerId: OWNER.managerId,
+      generation: OWNER.generation,
+    };
+    const claimed = durability.claimTurnRecoveryJob(
+      crashed.jobId,
+      owner,
+      { claimToken: 'live-wiring-abort-claim', leaseSeconds: 120 },
+    );
+    const fence: TurnRecoveryClaimFence = {
+      claimToken: claimed.claimToken,
+      claimEpoch: claimed.claimEpoch,
+    };
+
+    let active = true;
+    let turnInFlight = true;
+    let resolveProvider: () => void = () => {};
+    const providerGate = new Promise<void>((resolve) => { resolveProvider = resolve; });
+    const session = sessionStub();
+    session.getStatus.mockImplementation(() => ({
+      active,
+      sessionId: active ? 'session-abort' : null,
+      pid: active ? 4100 : null,
+      turnInFlight,
+    }));
+    session.shutdown.mockImplementation(async () => {
+      active = false;
+      turnInFlight = false;
+      resolveProvider();
+    });
+    Object.assign(session, {
+      sendTurnAtProviderBoundary: vi.fn(async (_input: unknown, onReady?: () => void) => {
+        onReady?.();
+        await providerGate;
+      }),
+    });
+    const managerId = state.managerIdFor(session);
+    const generation = state.sessionOwnership.claim(mapKey, managerId).generation;
+    state.sessionOwnership.transition(mapKey, managerId, 'active');
+    state.chatSessions.set(mapKey, session);
+    const queue = queueStub(mapKey);
+    state.chatQueues.set(mapKey, queue);
+    state.sessionEventToolScopes.set(session, mapKey);
+    const target: TurnRecoveryDispatchTarget = {
+      scope: 'per_chat',
+      mapKey,
+      managerId,
+      generation,
+      session,
+    };
+
+    let abortHandler:
+      | ((reason: TurnRecoveryReplayAbortReason) => Promise<boolean>)
+      | undefined;
+    const controller = new AbortController();
+    const control: TurnRecoveryReplayAbortControl = {
+      signal: controller.signal,
+      registerAbort: (handler) => { abortHandler = handler; },
+    };
+    const dispatch = state.dispatchTurnRecoveryReplay(
+      durability.getTurnRecoveryJob(crashed.jobId)!,
+      fence,
+      target,
+      control,
+    );
+    await vi.waitFor(() => {
+      expect(state.perChatRuntimeTurnCompletions.has(mapKey)).toBe(true);
+      expect(abortHandler).toBeTypeOf('function');
+    });
+
+    controller.abort('claim_fence_lost');
+    expect(await abortHandler!('claim_fence_lost')).toBe(true);
+    expect(session.shutdown).toHaveBeenCalledWith(false);
+    expect(queue.abortTurn).toHaveBeenCalledWith({ preserveEvidence: true });
+    expect(session.getStatus()).toMatchObject({
+      active: false,
+      pid: null,
+      turnInFlight: false,
+    });
+    expect(await dispatch).toEqual({ kind: 'retryable_failure' });
+  });
+
   it('(d) double-send fix: a replay whose OWN finalization defers (source inbound stays non-terminal) is requeued, not misreported delivered -- through the REAL wired supervisor, not a fake dispatchReplay', async () => {
     const { jobId, conversationKey, deliveryJid } = crashOneSourceTurn(db, durability, '15550190781', 'defer');
     const mapKey = deliveryJid;
@@ -257,6 +444,7 @@ describe('AgentRuntime.dispatchTurnRecoveryReplay — live wiring (PRESTAGE-T4 P
     const session = sessionStub();
     const managerId = state.managerIdFor(session);
     state.sessionOwnership.claim(mapKey, managerId);
+    state.sessionOwnership.transition(mapKey, managerId, 'active');
     state.chatSessions.set(mapKey, session);
     state.chatQueues.set(mapKey, queueStub(deliveryJid));
     state.sessionEventToolScopes.set(session, mapKey);
@@ -311,6 +499,7 @@ describe('AgentRuntime.dispatchTurnRecoveryReplay — live wiring (PRESTAGE-T4 P
     const session = sessionStub();
     const managerId = state.managerIdFor(session);
     state.sessionOwnership.claim(mapKey, managerId);
+    state.sessionOwnership.transition(mapKey, managerId, 'active');
     state.chatSessions.set(mapKey, session);
     state.chatQueues.set(mapKey, queueStub(deliveryJid));
     state.sessionEventToolScopes.set(session, mapKey);
@@ -481,5 +670,19 @@ describe('AgentRuntime.shutdown — H2 turn-recovery scan quiescence ordering', 
     const stopOrder = stopSpy.mock.invocationCallOrder[0]!;
     const teardownOrder = vi.mocked(session.shutdown).mock.invocationCallOrder[0]!;
     expect(stopOrder).toBeLessThan(teardownOrder);
+  });
+
+  it('starts the independent deadman with per-chat durability and stops it before the watched supervisor', async () => {
+    expect(state.turnRecoveryDeadman.health().running).toBe(true);
+    const deadmanStop = vi.spyOn(state.turnRecoveryDeadman, 'stop');
+    const supervisorStop = vi.spyOn(state.turnRecoverySupervisor, 'stop');
+
+    await runtime.shutdown();
+
+    expect(deadmanStop).toHaveBeenCalledTimes(1);
+    expect(supervisorStop).toHaveBeenCalled();
+    expect(deadmanStop.mock.invocationCallOrder[0]).toBeLessThan(
+      supervisorStop.mock.invocationCallOrder[0]!,
+    );
   });
 });

@@ -14,6 +14,11 @@ import type {
   SystemTurnLeaseToken,
   SystemTurnPurpose,
 } from '../../../src/runtimes/agent/pending-system-result-tracker.ts';
+import {
+  COMPLETED_DELIVERY_IDENTITY_DEBT_HEALTH,
+  LEGACY_ACTIVE_SESSION_WITHOUT_COMPLETED_IDENTITY,
+  LEGACY_COMPLETED_DELIVERY_IDENTITY_QUARANTINE,
+} from './completed-delivery-identity-admission.fixture.ts';
 
 // ─── Hoisted mocks ────────────────────────────────────────────────────────────
 // vi.hoisted values are available inside vi.mock factory callbacks.
@@ -11735,21 +11740,14 @@ describe('AgentRuntime', () => {
       const db = makeDb();
       const { messenger } = makeMessenger();
 
-      mockGetActiveSession.mockReturnValue({
-        id: 8,
-        session_id: 'sess-legacy-null-chat',
-        chat_jid: null,
-        claude_pid: 0,
-        status: 'active',
-        started_at: new Date(Date.now() - 5 * 60_000).toISOString(),
-        last_message_at: null,
-        message_count: 0,
-      });
+      mockGetActiveSession.mockReturnValue(LEGACY_ACTIVE_SESSION_WITHOUT_COMPLETED_IDENTITY);
 
       const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'single' });
       const mockDurability = {
         getLatestCompletedCheckpointForSession: vi.fn(() => undefined),
         upsertSessionCheckpoint: vi.fn(),
+        quarantineCompletedDeliveryIdentityAgentSession: vi.fn(),
+        getCompletedDeliveryIdentityAdmissionHealth: vi.fn(() => COMPLETED_DELIVERY_IDENTITY_DEBT_HEALTH),
       };
       (runtime as unknown as { durability: unknown }).durability = mockDurability;
 
@@ -11759,9 +11757,17 @@ describe('AgentRuntime', () => {
         'sess-legacy-null-chat',
       );
       expect(mockDurability.upsertSessionCheckpoint).not.toHaveBeenCalled();
+      expect(mockDurability.quarantineCompletedDeliveryIdentityAgentSession).toHaveBeenCalledWith(LEGACY_COMPLETED_DELIVERY_IDENTITY_QUARANTINE);
       expect(mockSession.spawnSession).not.toHaveBeenCalled();
       expect(runtime.popStartupNotificationEvent()).toBeNull();
       expect(runtime.getHealthSnapshot().details['proactiveResumeIdentityRejects']).toBe(1);
+      expect(runtime.getHealthSnapshot()).toMatchObject({
+        status: 'degraded',
+        details: {
+          degradedReasons: expect.arrayContaining(['completed_delivery_identity_debt']),
+          completedDeliveryIdentityAdmissions: COMPLETED_DELIVERY_IDENTITY_DEBT_HEALTH,
+        },
+      });
       expect(mockRuntimeLogger.warn).toHaveBeenCalledWith(
         { conversationKey: null, reason: 'legacy_or_ambiguous_identity' },
         'skipping proactive resume — persisted delivery identity is not provable',

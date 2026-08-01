@@ -8,6 +8,7 @@ import {
   type TurnRecoveryOwnerIdentity,
 } from '../../src/core/durability.ts';
 import { closeOperatorCatchupRecovery } from '../../src/core/recovery-catchup-closure.ts';
+import { TurnRecoveryClaimFenceError } from '../../src/core/turn-recovery-store.ts';
 import {
   toTurnFinalizationPersistence,
   toTurnRecoveryJobPersistence,
@@ -1481,7 +1482,7 @@ describe('atomic linked turn recovery jobs', () => {
       OWNER,
       { claimToken: 'wrong-renew-token', claimEpoch: claim.claimEpoch },
       { leaseSeconds: 60 },
-    )).toThrow('claim fence');
+    )).toThrow(TurnRecoveryClaimFenceError);
     expect(() => durability.renewTurnRecoveryClaim(
       queued.jobId,
       OWNER,

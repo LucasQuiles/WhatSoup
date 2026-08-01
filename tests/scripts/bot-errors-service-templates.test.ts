@@ -452,6 +452,9 @@ describe('BOT ERRORS service templates', () => {
   });
 
   it('fails closed before writing launchd plists when the health profile is unreadable', () => {
+    if (typeof process.getuid === 'function' && process.getuid() === 0) {
+      return;
+    }
     for (const [script, labels] of [
       ['deploy/scripts/install-bot-errors-launchd.sh', [
         'com.bot-errors.dispatcher',

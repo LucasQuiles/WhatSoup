@@ -188,6 +188,19 @@ class FaultTaxonomyRegistryTest(unittest.TestCase):
 
         self.assertEqual(missing, [], f"missing registry references: {missing}")
 
+    def test_turn_recovery_deadman_source_has_semantic_alert_clear_owner(self):
+        entry = _load_registry()["sourceDispositions"][
+            "turn_recovery_supervisor_unavailable"
+        ]
+        self.assertEqual(
+            entry,
+            {
+                "disposition": "recovery_consumer_unavailable_until_successful_scan",
+                "owner": "src/runtimes/agent/turn-recovery-deadman.ts",
+                "test": "tests/runtimes/agent/turn-recovery-deadman.test.ts",
+            },
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
