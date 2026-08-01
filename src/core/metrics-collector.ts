@@ -1,4 +1,5 @@
 import type { Database } from './database.ts';
+import { MS_PER_HOUR } from '../lib/time-units.ts';
 
 interface HourWindow {
   bucket: string;
@@ -22,7 +23,7 @@ function toHourWindow(now: Date): HourWindow {
   return {
     bucket: start.toISOString(),
     startSec: Math.floor(start.getTime() / 1000),
-    endSec: Math.floor((start.getTime() + 60 * 60 * 1000) / 1000),
+    endSec: Math.floor((start.getTime() + MS_PER_HOUR) / 1000),
   };
 }
 

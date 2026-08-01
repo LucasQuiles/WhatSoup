@@ -1,6 +1,8 @@
 // src/transport/presence-cache.ts
 // In-memory cache for WhatsApp presence status.
 
+import { MS_PER_MINUTE } from '../lib/time-units.ts';
+
 interface PresenceEntry {
   status: string;
   lastSeen?: number;
@@ -13,7 +15,7 @@ export interface PresenceResult {
   stale: boolean;
 }
 
-const STALE_THRESHOLD_MS = 5 * 60 * 1000; // 5 minutes
+const STALE_THRESHOLD_MS = 5 * MS_PER_MINUTE;
 const DEFAULT_MAX_ENTRIES = 10_000;
 
 export class PresenceCache {

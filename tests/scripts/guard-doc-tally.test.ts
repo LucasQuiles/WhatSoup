@@ -1,8 +1,7 @@
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { mkdirSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 
-import { afterEach, describe, expect, it } from 'vitest';
+import { describe, expect, it } from 'vitest';
 
 import {
   countTally,
@@ -12,18 +11,14 @@ import {
   validateTallyDoc,
   type TallyDoc,
 } from '../../scripts/guard-doc-tally.ts';
+import { trackTmpDirs } from '../helpers/tmp-dir.ts';
 
 const REPO_ROOT = join(__dirname, '..', '..');
 
-const dirs: string[] = [];
-
-afterEach(() => {
-  for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
-});
+const tmp = trackTmpDirs('');
 
 function makeRepo(files: Record<string, string>): string {
-  const repo = mkdtempSync(join(tmpdir(), 'doc-tally-'));
-  dirs.push(repo);
+  const repo = tmp.make('doc-tally');
   for (const [rel, content] of Object.entries(files)) {
     const abs = join(repo, rel);
     mkdirSync(dirname(abs), { recursive: true });

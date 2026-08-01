@@ -1,14 +1,14 @@
 import { execFileSync, spawnSync } from 'node:child_process';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { writeFileSync } from 'node:fs';
 import path from 'node:path';
 
-import { afterEach, describe, expect, it } from 'vitest';
+import { describe, expect, it } from 'vitest';
 
 import { cleanGitEnv } from '../../scripts/lib/guard-core.ts';
 import { runPrMetadataGuard } from '../../scripts/pr-metadata-guard.ts';
+import { trackTmpDirs } from '../helpers/tmp-dir.ts';
 
-const repos: string[] = [];
+const tmp = trackTmpDirs('');
 const REPO_ROOT = path.resolve(import.meta.dirname, '../..');
 
 function git(repo: string, args: string[]): string {
@@ -21,8 +21,7 @@ function git(repo: string, args: string[]): string {
 }
 
 function makeRangeRepo(candidateMessage = 'candidate'): { repo: string; baseOid: string; headOid: string } {
-  const repo = mkdtempSync(path.join(tmpdir(), 'pr-metadata-guard-'));
-  repos.push(repo);
+  const repo = tmp.make('pr-metadata-guard');
 
   git(repo, ['init']);
   git(repo, ['config', 'user.email', 'guard-test@users.noreply.github.com']);
@@ -38,10 +37,6 @@ function makeRangeRepo(candidateMessage = 'candidate'): { repo: string; baseOid:
   git(repo, ['commit', '-m', candidateMessage]);
   return { repo, baseOid, headOid: git(repo, ['rev-parse', 'HEAD']) };
 }
-
-afterEach(() => {
-  for (const repo of repos.splice(0)) rmSync(repo, { recursive: true, force: true });
-});
 
 describe('PR metadata guard', () => {
   it('rejects the #2391 historical negated closing phrase outside the declared directive section', () => {
