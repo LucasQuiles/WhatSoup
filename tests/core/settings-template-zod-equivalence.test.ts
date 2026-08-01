@@ -159,3 +159,25 @@ describe('isValidPermissionsShape equivalence (observed through mergeSettingsJso
     expect(mergeSettingsJson('chat', { permissions: validPermissions() } as unknown as PermissionsSettings)).toBeNull();
   });
 });
+
+// Documented tightening, not equivalence: the old ladder's `typeof v ===
+// 'object'` accepted host values (arrays, Dates) decorated with a valid
+// `permissions` property, while `z.object` rejects any non-plain-object
+// container. These values are not JSON-representable, and every production
+// input reaches the guard via JSON.parse (HTTP bodies / settings.json), so
+// the narrowing is unreachable in practice. Pinned here so the delta is
+// explicit and reviewable rather than silent.
+describe('isValidPermissionsSettings documented tightening on decorated host objects', () => {
+  const decorated: Array<{ name: string; value: unknown }> = [
+    { name: 'array decorated with a valid permissions property', value: Object.assign([], { permissions: validPermissions() }) },
+    { name: 'Date decorated with a valid permissions property', value: Object.assign(new Date(0), { permissions: validPermissions() }) },
+    { name: 'Map decorated with a valid permissions property', value: Object.assign(new Map(), { permissions: validPermissions() }) },
+  ];
+
+  for (const c of decorated) {
+    it(`${c.name}: reference ladder accepted, Zod guard rejects`, () => {
+      expect(referenceIsValidPermissionsSettings(c.value)).toBe(true);
+      expect(isValidPermissionsSettings(c.value)).toBe(false);
+    });
+  }
+});
