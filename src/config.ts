@@ -259,7 +259,7 @@ function stringRecordProp(source: Record<string, unknown> | null | undefined, ke
   const result: Record<string, string> = {};
   for (const [rawKey, rawValue] of Object.entries(obj)) {
     const alias = rawKey.trim();
-    if (alias === '' || typeof rawValue !== 'string' || rawValue.trim() === '') {
+    if (alias === '' || !isNonEmptyString(rawValue)) {
       throw new ConfigValidationError(`${key} must be an object of non-empty string values`);
     }
     if (result[alias] !== undefined) {

@@ -312,7 +312,7 @@ function configuredPineconeProjectGuard(): PineconeProjectGuard {
 
 function pineconeProjectGuardRequired(): boolean {
   const botName = (config as { botName?: unknown }).botName;
-  if (typeof botName !== 'string' || botName.trim() === '') return false;
+  if (!isNonEmptyString(botName)) return false;
   return botName.trim().toLowerCase() !== 'q';
 }
 

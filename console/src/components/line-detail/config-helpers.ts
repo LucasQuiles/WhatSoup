@@ -68,7 +68,7 @@ export function deleteValueAtPath(target: Record<string, unknown>, keyPath: stri
 }
 
 export function cloneRecord(value: Record<string, unknown>): Record<string, unknown> {
-  return JSON.parse(JSON.stringify(value)) as Record<string, unknown>
+  return structuredClone(value)
 }
 
 export function isEqualValue(left: unknown, right: unknown): boolean {

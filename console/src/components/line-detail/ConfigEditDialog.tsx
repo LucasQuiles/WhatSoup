@@ -194,7 +194,7 @@ export function ConfigEditDialog({
     if (key === CHAT_OPENAI_API_KEY_SERVICE_KEY) {
       const service = typeof value === 'string' ? value : ''
       const baseUrl = currentValue(CHAT_OPENAI_BASE_URL_KEY)
-      if (service && (typeof baseUrl !== 'string' || baseUrl.trim() === '')) {
+      if (service && !isNonEmptyString(baseUrl)) {
         return 'Set a custom OpenAI endpoint before choosing a keyring service'
       }
     }
