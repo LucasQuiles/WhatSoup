@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import html
 import json
 import os
 import re
@@ -36,6 +37,84 @@ WHATSOUP_REPO = (
     if os.environ.get("WHATSOUP_REPO")
     else Path(__file__).resolve().parents[2]
 )
+
+
+# XML plist fallback tokenizer/parser -- mirrors launchd_plist_inventory_probe.py's
+# tokenized_xml_plist / parse_value / fallback_parse_xml_plist verbatim (in-tree proven
+# template, see #2299 L3). Duplicated rather than imported: this script is deliberately
+# self-contained (stdlib-only imports, no local imports), matching the sibling probe's
+# own single-file convention.
+PLIST_TOKEN = re.compile(
+    r"<key>(.*?)</key>|<string>(.*?)</string>|<integer>(.*?)</integer>|"
+    r"<true\s*/>|<false\s*/>|<dict>|</dict>|<array>|</array>",
+    re.S,
+)
+
+
+def tokenized_xml_plist(raw: str) -> list[tuple[str, Any]]:
+    tokens: list[tuple[str, Any]] = []
+    for match in PLIST_TOKEN.finditer(raw):
+        if match.group(1) is not None:
+            tokens.append(("key", html.unescape(match.group(1))))
+        elif match.group(2) is not None:
+            tokens.append(("string", html.unescape(match.group(2))))
+        elif match.group(3) is not None:
+            try:
+                tokens.append(("integer", int(match.group(3))))
+            except ValueError:
+                tokens.append(("string", match.group(3)))
+        else:
+            text = match.group(0)
+            if text.startswith("<true"):
+                tokens.append(("bool", True))
+            elif text.startswith("<false"):
+                tokens.append(("bool", False))
+            elif text == "<dict>":
+                tokens.append(("dict_start", None))
+            elif text == "</dict>":
+                tokens.append(("dict_end", None))
+            elif text == "<array>":
+                tokens.append(("array_start", None))
+            elif text == "</array>":
+                tokens.append(("array_end", None))
+    return tokens
+
+
+def parse_value(tokens: list[tuple[str, Any]], index: int) -> tuple[Any, int]:
+    if index >= len(tokens):
+        return None, index
+    kind, value = tokens[index]
+    if kind in {"string", "integer", "bool"}:
+        return value, index + 1
+    if kind == "dict_start":
+        result: dict[str, Any] = {}
+        index += 1
+        while index < len(tokens) and tokens[index][0] != "dict_end":
+            key_kind, key_value = tokens[index]
+            if key_kind != "key":
+                index += 1
+                continue
+            parsed, index = parse_value(tokens, index + 1)
+            result[str(key_value)] = parsed
+        return result, index + 1 if index < len(tokens) else index
+    if kind == "array_start":
+        result: list[Any] = []
+        index += 1
+        while index < len(tokens) and tokens[index][0] != "array_end":
+            parsed, index = parse_value(tokens, index)
+            result.append(parsed)
+        return result, index + 1 if index < len(tokens) else index
+    return None, index + 1
+
+
+def fallback_parse_xml_plist(raw: str) -> dict[str, Any]:
+    tokens = tokenized_xml_plist(raw)
+    for index, token in enumerate(tokens):
+        if token[0] == "dict_start":
+            parsed, _ = parse_value(tokens, index)
+            if isinstance(parsed, dict):
+                return parsed
+    raise ValueError("no top-level dict found")
 
 
 @dataclass(frozen=True)
@@ -224,20 +303,35 @@ def parse_toml(path: Path) -> dict[str, Any]:
 
 
 def parse_plist(path: Path) -> dict[str, Any]:
-    proc = subprocess.run(
-        ["/usr/bin/plutil", "-convert", "json", "-o", "-", str(path)],
-        text=True,
-        capture_output=True,
-        timeout=10,
-        check=False,
-    )
-    if proc.returncode != 0:
-        return {
-            "parse_status": "invalid",
-            "error_type": "plutil",
-            "error": (proc.stderr or proc.stdout).strip().splitlines()[0] if (proc.stderr or proc.stdout).strip() else "plutil failed",
-        }
-    data = json.loads(proc.stdout)
+    plutil_error: str | None = None
+    data: Any = None
+    try:
+        proc = subprocess.run(
+            ["plutil", "-convert", "json", "-o", "-", str(path)],
+            text=True,
+            capture_output=True,
+            timeout=10,
+            check=False,
+        )
+        if proc.returncode == 0:
+            data = json.loads(proc.stdout)
+        else:
+            plutil_error = (proc.stderr or proc.stdout).strip().splitlines()[0] if (proc.stderr or proc.stdout).strip() else "plutil failed"
+    except Exception as exc:
+        plutil_error = str(exc) or type(exc).__name__
+
+    if data is None:
+        # Mirror launchd_plist_inventory_probe.py's load_plist_object fallback: plutil
+        # missing/failing does not have to be fatal when the file is readable XML.
+        try:
+            data = fallback_parse_xml_plist(path.read_text(errors="replace"))
+        except Exception:
+            return {
+                "parse_status": "invalid",
+                "error_type": "plutil",
+                "error": plutil_error or "plutil failed",
+            }
+
     out: dict[str, Any] = {"parse_status": "valid", "shape": type(data).__name__}
     if isinstance(data, dict):
         out["top_level_keys"] = sorted(data.keys())
