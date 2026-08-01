@@ -8,6 +8,7 @@ import { join } from 'node:path';
 import { createChildLogger } from '../logger.ts';
 import type { Database } from './database.ts';
 import { nowUnixSec } from './substrate/time.ts';
+import { MS_PER_HOUR, MS_PER_WEEK } from '../lib/time-units.ts';
 
 const log = createChildLogger('media:retention');
 
@@ -38,9 +39,9 @@ export interface CleanupResult {
 // ---------------------------------------------------------------------------
 
 export const DEFAULT_RETENTION: RetentionConfig = {
-  intervalMs:    6  * 60 * 60 * 1000,       // 6 hours
-  tempMaxAgeMs:  72 * 60 * 60 * 1000,       // 72 hours
-  cacheMaxAgeMs: 7  * 24 * 60 * 60 * 1000,  // 7 days
+  intervalMs:    6  * MS_PER_HOUR,
+  tempMaxAgeMs:  72 * MS_PER_HOUR,
+  cacheMaxAgeMs: MS_PER_WEEK,
 };
 
 // ---------------------------------------------------------------------------

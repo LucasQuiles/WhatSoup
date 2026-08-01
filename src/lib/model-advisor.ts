@@ -29,12 +29,13 @@ import { resolveApiKey } from './api-key-resolver.ts';
 import { readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
+import { MS_PER_DAY } from './time-units.ts';
 
 const log = createChildLogger('model-advisor');
 
 const ALERT_SOURCE = 'model-currency';
 const LIVE_SCAN_ALERT_SOURCE = 'model-currency-live-scan';
-const CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000;
+const CHECK_INTERVAL_MS = MS_PER_DAY;
 const FETCH_TIMEOUT_MS = 5_000;
 
 let cachedAdvisories: ModelAdvisory[] = [];
