@@ -1,23 +1,16 @@
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { readFileSync } from 'node:fs';
 import path from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { describe, expect, it } from 'vitest';
+
+import { trackTmpDirs } from '../helpers/tmp-dir.ts';
 
 const repoRoot = path.resolve(import.meta.dirname, '..', '..');
 const scriptPath = path.join(repoRoot, 'deploy/scripts/render-release-drift-launchd.sh');
-const tmpRoots: string[] = [];
-
-afterEach(() => {
-  for (const dir of tmpRoots.splice(0)) {
-    rmSync(dir, { recursive: true, force: true });
-  }
-});
+const tmp = trackTmpDirs('release-drift-launchd-');
 
 function makeTmpRoot(): string {
-  const dir = mkdtempSync(path.join(tmpdir(), 'release-drift-launchd-render-'));
-  tmpRoots.push(dir);
-  return dir;
+  return tmp.make('render');
 }
 
 function runRenderer(args: string[], env: Record<string, string> = {}) {

@@ -1,5 +1,4 @@
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -10,20 +9,18 @@ import {
   run,
   type BotErrorsSimulationDomain,
 } from '../../scripts/bot-errors-simulation-matrix.ts';
+import { trackTmpDirs } from '../helpers/tmp-dir.ts';
 
 const repoRoot = fileURLToPath(new URL('../..', import.meta.url));
-const fixtureDirs: string[] = [];
+const tmp = trackTmpDirs('whatsoup-bot-errors-');
 
 function makeFixture(): string {
-  const dir = mkdtempSync(path.join(tmpdir(), 'whatsoup-bot-errors-matrix-'));
-  fixtureDirs.push(dir);
-  return dir;
+  return tmp.make('matrix');
 }
 
 afterEach(() => {
   vi.restoreAllMocks();
   process.exitCode = undefined;
-  for (const dir of fixtureDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
 });
 
 describe('bot-errors simulation matrix guard', () => {
