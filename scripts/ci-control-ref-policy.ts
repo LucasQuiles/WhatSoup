@@ -22,9 +22,9 @@ import {
   type RefGraphFactV1,
   type RefUpdateV1,
 } from './lib/ci-control/ref-policy.ts';
+import { resolveTrustedGit } from './lib/ci-control/trusted-git.ts';
 import { sha256Bytes } from './lib/verification/boundary-run/shared.ts';
 
-const TRUSTED_GIT = '/usr/bin/git';
 const GIT_TIMEOUT_MS = 10_000;
 const MAX_GIT_OUTPUT_BYTES = 1_000_000;
 
@@ -34,6 +34,7 @@ export const REF_POLICY_TOOL_SOURCE_PATHS = [
   'scripts/lib/ci-control/git-input-core.ts',
   'scripts/lib/ci-control/reasons.ts',
   'scripts/lib/ci-control/ref-policy.ts',
+  'scripts/lib/ci-control/trusted-git.ts',
   'scripts/lib/cli-args.ts',
   'scripts/lib/verification/boundary-run/contracts.ts',
   'scripts/lib/verification/boundary-run/model.ts',
@@ -110,7 +111,7 @@ function parseRefPolicyArgs(args: readonly string[]): ParsedArgs {
 
 function git(cwd: string, args: readonly string[]): { status: number | null; stdout: string } {
   assertNoLegacyGrafts(cwd);
-  const result = spawnSync(TRUSTED_GIT, args, {
+  const result = spawnSync(resolveTrustedGit(), args, {
     cwd,
     env: gitEnvironment(),
     encoding: 'utf8',
@@ -158,7 +159,7 @@ export function resolveNativeRefGraphFacts(
   updates: readonly RefUpdateV1[],
 ): RefGraphFactV1[] {
   assertSupportedObjectFormat(cwd);
-  const toolDigest = `sha256:${sha256Bytes(readFileSync(TRUSTED_GIT))}`;
+  const toolDigest = `sha256:${sha256Bytes(readFileSync(resolveTrustedGit()))}`;
   return updates.map((update) => {
     if (update.operation === 'delete') {
       return {
