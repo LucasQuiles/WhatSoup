@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { createChildLogger } from '../../logger.ts';
+import { TurnRecoveryClaimFenceError } from '../../core/turn-recovery-store.ts';
 import type {
   ClaimTurnRecoveryJobOptions,
   ClaimTurnRecoveryJobResult,
@@ -23,6 +24,7 @@ const DEFAULT_LEASE_SECONDS = 120;
 const DEFAULT_BACKOFF_SECONDS = 30;
 const SCAN_INTERVAL_MS = 15_000;
 const RECLAIM_STALE_LIMIT = 200;
+const RENEWAL_RETRY_DELAY_MS = 250;
 
 /**
  * The durability surface this supervisor needs. Narrower than
@@ -97,6 +99,59 @@ export type TurnRecoveryReplayDispatchResult =
   /** Newly-discovered unsafe condition; the store's blocked_unsafe path owns this, not a requeue. */
   | { readonly kind: 'blocked_unsafe_detected' };
 
+export interface TurnRecoveryDispatchTarget {
+  readonly scope: 'per_chat';
+  readonly mapKey: string;
+  readonly managerId: string;
+  readonly generation: number;
+  /** Exact in-memory target; intentionally opaque to the supervisor. */
+  readonly session: object;
+}
+
+export type TurnRecoveryReplayAbortReason =
+  | 'claim_fence_lost'
+  | 'renewal_unavailable';
+
+export interface TurnRecoveryReplayAbortControl {
+  readonly signal: AbortSignal;
+  registerAbort(handler: (reason: TurnRecoveryReplayAbortReason) => Promise<boolean>): void;
+}
+
+class ReplayAbortController implements TurnRecoveryReplayAbortControl {
+  private readonly controller = new AbortController();
+  private handler: ((reason: TurnRecoveryReplayAbortReason) => Promise<boolean>) | null = null;
+  private abortPromise: Promise<boolean> | null = null;
+
+  get signal(): AbortSignal {
+    return this.controller.signal;
+  }
+
+  registerAbort(handler: (reason: TurnRecoveryReplayAbortReason) => Promise<boolean>): void {
+    if (this.handler) throw new Error('Turn-recovery replay abort handler is already registered');
+    this.handler = handler;
+  }
+
+  requestAbort(reason: TurnRecoveryReplayAbortReason): Promise<boolean> {
+    if (this.abortPromise) return this.abortPromise;
+    this.controller.abort(reason);
+    this.abortPromise = this.handler
+      ? this.handler(reason).then(
+          (proven) => proven,
+          () => false,
+        )
+      : Promise.resolve(false);
+    return this.abortPromise;
+  }
+}
+
+type LeaseGuardResult<T> =
+  | { readonly kind: 'settled'; readonly value: T }
+  | {
+      readonly kind: 'aborted';
+      readonly reason: TurnRecoveryReplayAbortReason;
+      readonly proven: boolean;
+    };
+
 /**
  * Dispatches one claimed job's replay through the *normal* per-chat
  * provider/session/outbound-durability path (never raw SQL, never a
@@ -107,6 +162,8 @@ export type TurnRecoveryReplayDispatchResult =
 export type TurnRecoveryReplayDispatcher = (
   job: TurnRecoveryJobRow,
   fence: TurnRecoveryClaimFence,
+  target?: TurnRecoveryDispatchTarget,
+  abortControl?: TurnRecoveryReplayAbortControl,
 ) => Promise<TurnRecoveryReplayDispatchResult>;
 
 export interface TurnRecoveryScanResult {
@@ -158,7 +215,12 @@ export interface TurnRecoveryScanResult {
 }
 
 export interface TurnRecoverySupervisorHealth {
+  /** Compatibility alias for `lastScanAttemptAt`; never use as proof of successful work. */
   readonly lastScanAt: number | null;
+  readonly lastScanAttemptAt: number | null;
+  readonly lastSuccessfulScanAt: number | null;
+  readonly consecutiveScanFailures: number;
+  readonly lastScanFailureReason: TurnRecoveryScanFailureReason | null;
   readonly scans: number;
   readonly claims: number;
   readonly completions: number;
@@ -169,8 +231,18 @@ export interface TurnRecoverySupervisorHealth {
   readonly processingErrors: number;
   readonly leaseRenewals: number;
   readonly leaseRenewalFailures: number;
+  readonly renewalRetryableFailures: number;
+  readonly renewalOwnershipLosses: number;
+  readonly renewalFailClosedAborts: number;
+  readonly renewalAbortFailures: number;
   readonly storeCounts: TurnRecoverySupervisorCounts | null;
 }
+
+export type TurnRecoveryScanFailureReason =
+  | 'durability_unavailable'
+  | 'stale_claim_recovery_failed'
+  | 'enumeration_failed'
+  | 'processing_failed';
 
 export interface TurnRecoverySupervisorDeps {
   readonly instanceName: string;
@@ -194,6 +266,13 @@ export interface TurnRecoverySupervisorDeps {
    * job for this cycle without claiming it (see `skippedNotDispatchable`).
    */
   readonly isDispatchable?: (job: TurnRecoveryJobRow) => boolean;
+  /**
+   * Production admission resolver. A non-null result is captured before the
+   * claim and threaded unchanged to exact-boundary dispatch validation.
+   */
+  readonly resolveDispatchTarget?: (
+    job: TurnRecoveryJobRow,
+  ) => TurnRecoveryDispatchTarget | null;
   readonly leaseSeconds?: number;
   readonly backoffSeconds?: number;
   readonly scanIntervalMs?: number;
@@ -250,6 +329,8 @@ export class TurnRecoverySupervisor {
   private readonly freshOwnerIdentity: () => TurnRecoveryOwnerIdentity;
   private readonly supportedScopes: ReadonlySet<TurnRecoveryJobRow['scope']> | null;
   private readonly isDispatchable: ((job: TurnRecoveryJobRow) => boolean) | null;
+  private readonly resolveDispatchTarget:
+    ((job: TurnRecoveryJobRow) => TurnRecoveryDispatchTarget | null) | null;
   private readonly leaseSeconds: number;
   private readonly backoffSeconds: number;
   private readonly scanIntervalMs: number;
@@ -269,7 +350,14 @@ export class TurnRecoverySupervisor {
   private processingErrors = 0;
   private leaseRenewals = 0;
   private leaseRenewalFailures = 0;
+  private renewalRetryableFailures = 0;
+  private renewalOwnershipLosses = 0;
+  private renewalFailClosedAborts = 0;
+  private renewalAbortFailures = 0;
   private lastScanAt: number | null = null;
+  private lastSuccessfulScanAt: number | null = null;
+  private consecutiveScanFailures = 0;
+  private lastScanFailureReason: TurnRecoveryScanFailureReason | null = null;
 
   constructor(deps: TurnRecoverySupervisorDeps) {
     this.instanceName = deps.instanceName;
@@ -278,6 +366,7 @@ export class TurnRecoverySupervisor {
     this.freshOwnerIdentity = deps.freshOwnerIdentity;
     this.supportedScopes = deps.supportedScopes ?? null;
     this.isDispatchable = deps.isDispatchable ?? null;
+    this.resolveDispatchTarget = deps.resolveDispatchTarget ?? null;
     this.leaseSeconds = deps.leaseSeconds ?? DEFAULT_LEASE_SECONDS;
     this.backoffSeconds = deps.backoffSeconds ?? DEFAULT_BACKOFF_SECONDS;
     this.scanIntervalMs = deps.scanIntervalMs ?? SCAN_INTERVAL_MS;
@@ -310,6 +399,10 @@ export class TurnRecoverySupervisor {
     const durability = this.durability();
     return {
       lastScanAt: this.lastScanAt,
+      lastScanAttemptAt: this.lastScanAt,
+      lastSuccessfulScanAt: this.lastSuccessfulScanAt,
+      consecutiveScanFailures: this.consecutiveScanFailures,
+      lastScanFailureReason: this.lastScanFailureReason,
       scans: this.scans,
       claims: this.claims,
       completions: this.completions,
@@ -320,6 +413,10 @@ export class TurnRecoverySupervisor {
       processingErrors: this.processingErrors,
       leaseRenewals: this.leaseRenewals,
       leaseRenewalFailures: this.leaseRenewalFailures,
+      renewalRetryableFailures: this.renewalRetryableFailures,
+      renewalOwnershipLosses: this.renewalOwnershipLosses,
+      renewalFailClosedAborts: this.renewalFailClosedAborts,
+      renewalAbortFailures: this.renewalAbortFailures,
       storeCounts: durability ? durability.getTurnRecoverySupervisorCounts() : null,
     };
   }
@@ -359,20 +456,32 @@ export class TurnRecoverySupervisor {
     const durability = this.durability();
     this.scans += 1;
     this.lastScanAt = Date.now();
-    if (!durability || this.closed) return emptyScanResult();
+    if (this.closed) return emptyScanResult();
+    if (!durability) {
+      this.recordScanFailure('durability_unavailable');
+      return emptyScanResult();
+    }
 
     // Sweep expired claims back to pending/exhausted first so this cycle's
     // enumeration can see freshly-reclaimable rows (store-owned transition).
+    let failureReason: TurnRecoveryScanFailureReason | null = null;
     try {
       durability.recoverStaleTurnRecoveryJobs(RECLAIM_STALE_LIMIT);
     } catch (err) {
+      failureReason = 'stale_claim_recovery_failed';
       log.warn({ err }, 'turn recovery supervisor stale-claim sweep failed');
     }
 
-    const page = durability.getOutstandingTurnRecoveryJobsForSupervisor({
-      limit: SCAN_PAGE_SIZE,
-      afterId: this.cursor,
-    });
+    let page: TurnRecoveryEnumerationPage;
+    try {
+      page = durability.getOutstandingTurnRecoveryJobsForSupervisor({
+        limit: SCAN_PAGE_SIZE,
+        afterId: this.cursor,
+      });
+    } catch (err) {
+      this.recordScanFailure('enumeration_failed');
+      throw err;
+    }
     this.cursor = page.scanComplete ? 0 : (page.nextCursor ?? 0);
 
     const totals = {
@@ -382,13 +491,34 @@ export class TurnRecoverySupervisor {
       skippedNotDispatchable: 0, processingErrors: 0,
     };
 
-    for (const job of page.jobs) {
-      // eslint-disable-next-line no-await-in-loop -- bounded batch, intentionally sequential per PRESTAGE-T4 fair-scheduling requirement; expires 2026-12-31
-      const delta = await this.processJob(durability, job);
-      mergeScanResult(totals, delta);
+    try {
+      for (const job of page.jobs) {
+        // eslint-disable-next-line no-await-in-loop -- bounded batch, intentionally sequential per PRESTAGE-T4 fair-scheduling requirement; expires 2026-12-31
+        const delta = await this.processJob(durability, job);
+        mergeScanResult(totals, delta);
+      }
+    } catch (err) {
+      this.recordScanFailure('processing_failed');
+      throw err;
     }
 
+    if (totals.processingErrors > 0) {
+      failureReason = failureReason ?? 'processing_failed';
+    }
+    if (failureReason) this.recordScanFailure(failureReason);
+    else this.recordScanSuccess();
     return totals;
+  }
+
+  private recordScanFailure(reason: TurnRecoveryScanFailureReason): void {
+    this.consecutiveScanFailures += 1;
+    this.lastScanFailureReason = reason;
+  }
+
+  private recordScanSuccess(): void {
+    this.lastSuccessfulScanAt = Date.now();
+    this.consecutiveScanFailures = 0;
+    this.lastScanFailureReason = null;
   }
 
   private async processJob(
@@ -409,7 +539,12 @@ export class TurnRecoverySupervisor {
     if (this.supportedScopes && !this.supportedScopes.has(job.scope)) {
       return { skippedUnsupportedScope: 1 };
     }
-    if (this.isDispatchable && !this.isDispatchable(job)) {
+    let dispatchTarget: TurnRecoveryDispatchTarget | undefined;
+    if (this.resolveDispatchTarget) {
+      const resolved = this.resolveDispatchTarget(job);
+      if (!resolved) return { skippedNotDispatchable: 1 };
+      dispatchTarget = resolved;
+    } else if (this.isDispatchable && !this.isDispatchable(job)) {
       return { skippedNotDispatchable: 1 };
     }
 
@@ -436,7 +571,13 @@ export class TurnRecoverySupervisor {
         log.warn({ err, jobId: job.id }, 'turn recovery supervisor reassignment failed');
         return { processingErrors: 1 };
       }
-      return this.claimAndReplay(durability, job, newOwner, { reassigned: 1 });
+      return this.claimAndReplay(
+        durability,
+        job,
+        newOwner,
+        { reassigned: 1 },
+        dispatchTarget,
+      );
     }
 
     if (job.state === 'pending') {
@@ -454,7 +595,7 @@ export class TurnRecoverySupervisor {
         managerId: job.assigned_owner_manager_id,
         generation: job.assigned_owner_generation,
       };
-      return this.claimAndReplay(durability, job, owner, {});
+      return this.claimAndReplay(durability, job, owner, {}, dispatchTarget);
     }
 
     return {};
@@ -465,6 +606,7 @@ export class TurnRecoverySupervisor {
     job: TurnRecoveryJobRow,
     owner: TurnRecoveryOwnerIdentity,
     baseDelta: Partial<TurnRecoveryScanResult>,
+    dispatchTarget?: TurnRecoveryDispatchTarget,
   ): Promise<Partial<TurnRecoveryScanResult>> {
     const jobId = job.id;
 
@@ -550,9 +692,24 @@ export class TurnRecoverySupervisor {
     // replay-relevant fields (sender/text/scope/conversation) are immutable.
     let outcome: TurnRecoveryReplayDispatchResult;
     try {
-      outcome = await this.renewLeaseWhilePending(
-        durability, jobId, owner, fence, this.dispatchReplay(job, fence),
+      const abortControl = new ReplayAbortController();
+      const guarded = await this.renewLeaseWhilePending(
+        durability,
+        jobId,
+        owner,
+        fence,
+        claim.claimExpiresAt,
+        this.dispatchReplay(job, fence, dispatchTarget, abortControl),
+        abortControl,
       );
+      if (guarded.kind === 'aborted') {
+        if (!guarded.proven || guarded.reason === 'claim_fence_lost') {
+          return { ...baseDelta, claimed: 1 };
+        }
+        outcome = { kind: 'retryable_failure' };
+      } else {
+        outcome = guarded.value;
+      }
     } catch (err) {
       this.dispatchFailures += 1;
       log.warn({ err, jobId }, 'turn recovery supervisor replay dispatch threw');
@@ -604,40 +761,124 @@ export class TurnRecoverySupervisor {
    * would have its own claim expire and get reassigned to a fresh owner
    * mid-flight, producing two concurrent replays of the same job. Renews at
    * half the lease duration so a single transient renewal failure still
-   * leaves margin before the lease actually lapses. A renewal failure (fence
-   * gone stale — e.g. this claim WAS reassigned out from under us) is
-   * logged and renewal simply stops; it is not a second failure path: the
-   * eventual complete/requeue call after `pending` settles re-checks the
-   * SAME fence and fails there if ownership was truly lost, which
-   * `claimAndReplay`'s existing catch blocks already handle.
+   * leaves margin before the lease actually lapses. Semantic fence loss or
+   * transient failures that consume the safety margin reserve settlement for
+   * cooperative abort: a concurrently settling dispatch cannot win while the
+   * exact provider-generation termination proof is still pending.
    */
-  private async renewLeaseWhilePending<T>(
+  private renewLeaseWhilePending<T>(
     durability: TurnRecoverySupervisorDurability,
     jobId: number,
     owner: TurnRecoveryOwnerIdentity,
     fence: TurnRecoveryClaimFence,
+    initialClaimExpiresAt: string,
     pending: Promise<T>,
-  ): Promise<T> {
-    let stale = false;
-    const renewalIntervalMs = Math.max(1_000, Math.floor((this.leaseSeconds * 1000) / 2));
-    const timer = setInterval(() => {
-      if (stale) return;
-      try {
-        durability.renewTurnRecoveryClaim(jobId, owner, fence, { leaseSeconds: this.leaseSeconds });
-        this.leaseRenewals += 1;
-      } catch (err) {
-        this.leaseRenewalFailures += 1;
-        stale = true;
-        log.warn({ err, jobId }, 'turn recovery supervisor lease renewal failed; stopping renewal for this replay');
-      }
-    }, renewalIntervalMs);
-    timer.unref?.();
-    try {
-      return await pending;
-    } finally {
-      clearInterval(timer);
-    }
+    abortControl: ReplayAbortController,
+  ): Promise<LeaseGuardResult<T>> {
+    return new Promise<LeaseGuardResult<T>>((resolve, reject) => {
+      let timer: ReturnType<typeof setTimeout> | null = null;
+      let settled = false;
+      let aborting = false;
+      let claimExpiresAtMs = parseRecoveryTimestamp(initialClaimExpiresAt);
+      const leaseMs = this.leaseSeconds * 1_000;
+      const abortMarginMs = Math.min(15_000, Math.max(250, Math.floor(leaseMs / 4)));
+
+      const clearTimer = (): void => {
+        if (timer) clearTimeout(timer);
+        timer = null;
+      };
+      const settle = (result: LeaseGuardResult<T>): void => {
+        if (settled) return;
+        settled = true;
+        clearTimer();
+        resolve(result);
+      };
+      const finishPending = (result: LeaseGuardResult<T>): void => {
+        if (aborting) return;
+        settle(result);
+      };
+      const abortReplay = async (reason: TurnRecoveryReplayAbortReason): Promise<void> => {
+        if (settled || aborting) return;
+        aborting = true;
+        clearTimer();
+        const proven = await abortControl.requestAbort(reason);
+        if (proven) this.renewalFailClosedAborts += 1;
+        else this.renewalAbortFailures += 1;
+        settle({ kind: 'aborted', reason, proven });
+      };
+      const schedule = (delayMs: number): void => {
+        clearTimer();
+        timer = setTimeout(() => {
+          timer = null;
+          void renewOrAbort();
+        }, Math.max(1, Math.floor(delayMs)));
+        timer.unref?.();
+      };
+      const scheduleNormalRenewal = (): void => {
+        const remainingMs = claimExpiresAtMs - Date.now();
+        const safetyDeadlineMs = claimExpiresAtMs - abortMarginMs;
+        if (Date.now() >= safetyDeadlineMs) {
+          void abortReplay('renewal_unavailable');
+          return;
+        }
+        schedule(Math.min(
+          Math.max(1, Math.floor(remainingMs / 2)),
+          Math.max(1, safetyDeadlineMs - Date.now()),
+        ));
+      };
+      const renewOrAbort = async (): Promise<void> => {
+        if (settled) return;
+        const safetyDeadlineMs = claimExpiresAtMs - abortMarginMs;
+        if (Date.now() >= safetyDeadlineMs) {
+          await abortReplay('renewal_unavailable');
+          return;
+        }
+        try {
+          const renewed = durability.renewTurnRecoveryClaim(
+            jobId,
+            owner,
+            fence,
+            { leaseSeconds: this.leaseSeconds },
+          );
+          this.leaseRenewals += 1;
+          claimExpiresAtMs = parseRecoveryTimestamp(renewed.claimExpiresAt);
+          scheduleNormalRenewal();
+        } catch (err) {
+          this.leaseRenewalFailures += 1;
+          if (err instanceof TurnRecoveryClaimFenceError) {
+            this.renewalOwnershipLosses += 1;
+            await abortReplay('claim_fence_lost');
+            return;
+          }
+          this.renewalRetryableFailures += 1;
+          log.warn({ err, jobId }, 'turn recovery supervisor lease renewal failed; retrying within lease margin');
+          const retryWindowMs = safetyDeadlineMs - Date.now();
+          if (retryWindowMs <= 0) {
+            await abortReplay('renewal_unavailable');
+            return;
+          }
+          schedule(Math.min(RENEWAL_RETRY_DELAY_MS, retryWindowMs));
+        }
+      };
+
+      pending.then(
+        (value) => finishPending({ kind: 'settled', value }),
+        (err) => {
+          if (settled || aborting) return;
+          settled = true;
+          clearTimer();
+          reject(err);
+        },
+      );
+      scheduleNormalRenewal();
+    });
   }
+}
+
+function parseRecoveryTimestamp(value: string): number {
+  const parsed = Date.parse(value.includes('T') ? value : `${value.replace(' ', 'T')}Z`);
+  if (!Number.isFinite(parsed)) throw new Error('Invalid turn-recovery claim expiry');
+  return parsed;
 }
 
 function isoNow(): string {
@@ -646,7 +887,7 @@ function isoNow(): string {
 
 export interface TurnRecoverySupervisorHeartbeatVerdict {
   readonly healthy: boolean;
-  readonly reason: 'ok' | 'never_scanned' | 'stale_scan';
+  readonly reason: 'ok' | 'never_succeeded' | 'stale_success' | 'repeated_failures';
 }
 
 /**
@@ -658,19 +899,23 @@ export interface TurnRecoverySupervisorHeartbeatVerdict {
  * A supervisor that stops cycling is a dormant consumer at one more remove
  * (PRESTAGE-T4's own missing-consumer defect, rebuilt); this is the
  * required `turn_recovery_supervisor_unavailable` typed-alert predicate.
- * Wiring this to an actual `emitAlertChecked`/typed-clear call site is
- * separate follow-up (main.ts/health.ts), not done here.
+ * `TurnRecoveryDeadman` evaluates this snapshot on its own timer and owns
+ * the checked alert/clear lifecycle.
  */
 export function evaluateTurnRecoverySupervisorHeartbeat(
   health: TurnRecoverySupervisorHealth,
-  opts: { nowMs: number; staleAfterMs: number },
+  opts: { nowMs: number; staleAfterMs: number; maxConsecutiveFailures?: number },
 ): TurnRecoverySupervisorHeartbeatVerdict {
-  if (health.lastScanAt === null) {
-    return { healthy: false, reason: 'never_scanned' };
+  const maxConsecutiveFailures = opts.maxConsecutiveFailures ?? 3;
+  if (health.consecutiveScanFailures >= maxConsecutiveFailures) {
+    return { healthy: false, reason: 'repeated_failures' };
   }
-  const age = opts.nowMs - health.lastScanAt;
+  if (health.lastSuccessfulScanAt === null) {
+    return { healthy: false, reason: 'never_succeeded' };
+  }
+  const age = opts.nowMs - health.lastSuccessfulScanAt;
   if (age > opts.staleAfterMs) {
-    return { healthy: false, reason: 'stale_scan' };
+    return { healthy: false, reason: 'stale_success' };
   }
   return { healthy: true, reason: 'ok' };
 }

@@ -58,11 +58,11 @@ describe('migration 52 outbound ambiguity episodes', () => {
       .toEqual({ ambiguity_at: '2026-07-04 00:02:00' });
   });
 
-  it('is registered as the current schema migration', () => {
+  it('remains registered when a later schema migration is current', () => {
     const db = new Database(':memory:');
     db.open();
     try {
-      expect(CURRENT_SCHEMA_MIGRATION).toBe(53);
+      expect(CURRENT_SCHEMA_MIGRATION).toBe(54);
       expect(db.raw.prepare(
         'SELECT version FROM schema_migrations WHERE version = 52',
       ).get()).toEqual({ version: 52 });

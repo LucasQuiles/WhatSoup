@@ -14,6 +14,7 @@ import type { IOutboundQueue } from '../../../../src/runtimes/agent/outbound-que
 import { AgentRuntime, type AgentRuntimeOptions } from '../../../../src/runtimes/agent/runtime.ts';
 import { createRuntimeTurnContext, type RuntimeTurnContext } from '../../../../src/runtimes/agent/runtime-turn-context.ts';
 import type { AgentEvent } from '../../../../src/runtimes/agent/stream-parser.ts';
+import type { SessionOwnershipRegistry } from '../../../../src/runtimes/agent/session-ownership.ts';
 import type { QueuedTurn } from '../../../../src/runtimes/agent/turn-queue.ts';
 import type {
   FinalizeTurnTerminalResult,
@@ -101,9 +102,10 @@ export interface RuntimeState {
       degradedScopes: number;
     }>;
   };
-  sessionOwnership: {
-    claim(mapKey: string, managerId: string): { generation: number };
-  };
+  sessionOwnership: Pick<
+    SessionOwnershipRegistry,
+    'claim' | 'transition' | 'advanceGeneration'
+  >;
   managerIdFor(session: ReturnType<typeof sessionStub>): string;
   crashes: { record(scopeKey: string): number };
   handlePerChatCrash(
@@ -317,7 +319,7 @@ export function sessionStub() {
     clearTurnWatchdog: vi.fn(),
     completeProviderTurn: vi.fn(),
     tickWatchdog: vi.fn(),
-    sendTurn: vi.fn(async () => {}),
+    sendTurn: vi.fn(async (_input: unknown) => {}),
     spawnSession: vi.fn(async () => {}),
     shutdown: vi.fn(async () => {}),
     getDbRowId: vi.fn(() => 41),
@@ -325,9 +327,10 @@ export function sessionStub() {
       active: boolean;
       sessionId: string | null;
       pid: number | null;
+      turnInFlight?: boolean;
       durableFailureClosed?: boolean;
       durableFailureInconclusive?: boolean;
-    }>(() => ({ active: true, sessionId: 'session-41', pid: 4100 })),
+    }>(() => ({ active: true, sessionId: 'session-41', pid: 4100, turnInFlight: false })),
   };
 }
 

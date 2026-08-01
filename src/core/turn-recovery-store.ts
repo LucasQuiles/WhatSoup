@@ -118,6 +118,15 @@ export interface TurnRecoveryClaimFence {
   claimEpoch: number;
 }
 
+export class TurnRecoveryClaimFenceError extends Error {
+  readonly code = 'TURN_RECOVERY_CLAIM_FENCE_LOST';
+
+  constructor(message: string) {
+    super(message);
+    this.name = 'TurnRecoveryClaimFenceError';
+  }
+}
+
 export interface TurnRecoveryAssignmentFence {
   claimEpoch: number;
   assignmentEpoch: number;
@@ -1137,7 +1146,19 @@ export class TurnRecoveryStore {
     validateRecoveryClaimToken(fence.claimToken);
     validatePositiveSafeInteger(fence.claimEpoch, 'Recovery claim epoch');
     validateRecoveryLeaseSeconds(options.leaseSeconds);
-    this.getOwnedTurnRecoveryJob(jobId, owner);
+    const owned = this.getInternalTurnRecoveryJob(jobId);
+    if (!owned) {
+      throw new TurnRecoveryClaimFenceError('Recovery claim job no longer exists');
+    }
+    if (
+      owned.assigned_owner_logical_turn_id !== owner.logicalTurnId ||
+      owned.assigned_owner_manager_id !== owner.managerId ||
+      owned.assigned_owner_generation !== owner.generation
+    ) {
+      throw new TurnRecoveryClaimFenceError(
+        'Recovery claim ownership no longer matches the renewing owner',
+      );
+    }
     const row = this.statements.renewTurnRecoveryClaim.get(
       recoveryTimeModifier(options.leaseSeconds),
       jobId,
@@ -1147,7 +1168,9 @@ export class TurnRecoveryStore {
       fence.claimToken,
       fence.claimEpoch,
     ) as { claim_expires_at: string } | undefined;
-    if (!row) throw new Error('Recovery claim fence is stale or expired');
+    if (!row) {
+      throw new TurnRecoveryClaimFenceError('Recovery claim fence is stale or expired');
+    }
     return {
       applied: true,
       jobId,

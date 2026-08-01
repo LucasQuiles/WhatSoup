@@ -149,6 +149,26 @@ export function getActiveSession(db: Database, provider: string): {
          AND candidate.provider = ?
          AND NOT EXISTS (
            SELECT 1
+           FROM completed_delivery_identity_admissions AS admission
+           WHERE admission.target_kind = 'agent_session'
+             AND admission.target_id = candidate.id
+             AND admission.state = 'quarantined'
+         )
+         AND NOT EXISTS (
+           SELECT 1
+           FROM completed_delivery_identity_admissions AS admission
+           JOIN session_checkpoints AS checkpoint
+             ON checkpoint.id = admission.target_id
+           WHERE admission.target_kind = 'checkpoint'
+             AND admission.state = 'quarantined'
+             AND checkpoint.session_id = candidate.session_id
+             AND (
+               candidate.workspace_key IS NULL
+               OR checkpoint.conversation_key = candidate.workspace_key
+             )
+         )
+         AND NOT EXISTS (
+           SELECT 1
            FROM agent_sessions AS conflicting
            WHERE conflicting.session_id = candidate.session_id
              AND (conflicting.provider IS NULL OR conflicting.provider != ?)
@@ -526,6 +546,23 @@ export function getResumableSessionForChat(
          AND candidate.session_id IS NOT NULL
          AND NOT EXISTS (
            SELECT 1
+           FROM completed_delivery_identity_admissions AS admission
+           WHERE admission.target_kind = 'agent_session'
+             AND admission.target_id = candidate.id
+             AND admission.state = 'quarantined'
+         )
+         AND NOT EXISTS (
+           SELECT 1
+           FROM completed_delivery_identity_admissions AS admission
+           JOIN session_checkpoints AS checkpoint
+             ON checkpoint.id = admission.target_id
+           WHERE admission.target_kind = 'checkpoint'
+             AND admission.state = 'quarantined'
+             AND checkpoint.conversation_key = candidate.workspace_key
+             AND checkpoint.session_id = candidate.session_id
+         )
+         AND NOT EXISTS (
+           SELECT 1
            FROM agent_sessions AS conflicting
            WHERE conflicting.session_id = candidate.session_id
              AND (conflicting.provider IS NULL OR conflicting.provider != ?)
@@ -597,6 +634,13 @@ export function resolveResumableAgentSession(
     `session_id = ?`,
     `provider = ?`,
     `status IN ('active', 'suspended', 'orphaned', 'crashed')`,
+    `NOT EXISTS (
+      SELECT 1
+      FROM completed_delivery_identity_admissions AS admission
+      WHERE admission.target_kind = 'agent_session'
+        AND admission.target_id = agent_sessions.id
+        AND admission.state = 'quarantined'
+    )`,
   ];
   const rowBindings: Array<string | number> = [input.providerSessionId, input.provider];
   if (input.agentSessionRowId !== undefined) {
@@ -630,7 +674,14 @@ export function resolveResumableAgentSession(
      FROM session_checkpoints
      WHERE conversation_key = ?
        AND session_id = ?
-       AND session_status IN ('active', 'suspended', 'orphaned')`,
+       AND session_status IN ('active', 'suspended', 'orphaned')
+       AND NOT EXISTS (
+         SELECT 1
+         FROM completed_delivery_identity_admissions AS admission
+         WHERE admission.target_kind = 'checkpoint'
+           AND admission.target_id = session_checkpoints.id
+           AND admission.state = 'quarantined'
+       )`,
   ).get(conversationKey, input.providerSessionId) as { id: number } | undefined;
   if (checkpoint === undefined) {
     throw new Error('No resumable checkpoint matches the provider session and conversation');
