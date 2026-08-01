@@ -12,6 +12,12 @@ import {
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
+import {
+  SCHEDULE_LANES,
+  REQUIRED_LANE_NAMES,
+  MACOS_LOCAL_DEFAULT_CHECKS,
+  HUB_ONLY_CHECKS,
+} from '../../src/fleet/bot-errors-schedule-matrix.ts';
 
 const serviceTemplates = [
   'deploy/bot-errors-collector.service',
@@ -84,6 +90,7 @@ function writeFakeBotErrorsRepo(repoRoot: string): void {
     'bot-errors-dispatcher.py',
     'bot-errors-health-check.py',
     'bot-errors-runner.py',
+    'bot-errors-heartbeat-watchdog.py',
   ]) {
     writeFileSync(path.join(repoRoot, 'deploy', 'scripts', script), '#!/usr/bin/env python3\n', 'utf8');
   }
@@ -220,6 +227,7 @@ describe('BOT ERRORS service templates', () => {
       'com.bot-errors.dispatcher',
       'com.bot-errors.deadman',
       'com.bot-errors.health',
+      'com.bot-errors.heartbeat-watchdog',
       'com.bot-errors.health-only',
     ]) {
       const plist = readFileSync(launchAgentPath(home, label), 'utf8');
@@ -286,6 +294,7 @@ describe('BOT ERRORS service templates', () => {
       'com.bot-errors.dispatcher',
       'com.bot-errors.deadman',
       'com.bot-errors.health',
+      'com.bot-errors.heartbeat-watchdog',
       'com.bot-errors.health-only',
     ]) {
       const plist = readFileSync(launchAgentPath(home, label), 'utf8');
@@ -550,6 +559,213 @@ describe('BOT ERRORS service templates', () => {
       expect(result.stderr).toContain(`invalid ${envKey}; expected integer`);
       expect(existsSync(launchAgentPath(home, 'com.bot-errors.health-only'))).toBe(false);
       expect(existsSync(path.join(home, 'launchctl.log'))).toBe(false);
+    }
+  });
+
+  // ── Heartbeat-watchdog schedule parity (#2466) ──────────────────────
+
+  it('launchd installer renders a heartbeat-watchdog plist with 5-minute cadence', () => {
+    const home = makeTempRoot('whatsoup-watchdog-home-');
+    const shimDir = makeTempRoot('whatsoup-watchdog-shims-');
+    const profile = path.join(home, 'health-profile.json');
+    const envFile = path.join(home, 'bot-errors.env');
+    const repoRoot = path.join(home, 'repo');
+    const jid = 'fixture-watchdog@g.us';
+    const socket = path.join(home, 'whatsoup.sock');
+    const db = path.join(home, 'bot.sqlite');
+
+    writeFileSync(profile, '{}\n', 'utf8');
+    writeFakeBotErrorsRepo(repoRoot);
+    writeFileSync(envFile, [
+      `BOT_ERRORS_JID=${jid}`,
+      `BOT_ERRORS_EXPECTED_JID=${jid}`,
+      `BOT_ERRORS_SOCKET_PATH=${socket}`,
+      `BOT_ERRORS_SOCKET=${socket}`,
+      `BOT_ERRORS_DB=${db}`,
+      `BOT_ERRORS_HEALTH_PROFILE=${profile}`,
+      '',
+    ].join('\n'), 'utf8');
+    writeLaunchdShims(shimDir);
+
+    execFileSync('bash', ['deploy/scripts/install-bot-errors-launchd.sh'], {
+      cwd: process.cwd(),
+      env: {
+        ...process.env,
+        HOME: home,
+        PATH: `${shimDir}:${process.env.PATH ?? ''}`,
+        BOT_ERRORS_REPO_ROOT: repoRoot,
+        BOT_ERRORS_ENV_FILE: envFile,
+      },
+    });
+
+    const plistPath = launchAgentPath(home, 'com.bot-errors.heartbeat-watchdog');
+    expect(existsSync(plistPath), 'heartbeat-watchdog plist not rendered').toBe(true);
+    const plist = readFileSync(plistPath, 'utf8');
+    // Cadence: 5-minute StartInterval (matches Linux OnUnitActiveSec=5m)
+    expect(plist).toContain('<key>StartInterval</key><integer>300</integer>');
+    // Invokes the watchdog script with --once
+    expect(plist).toContain('bot-errors-heartbeat-watchdog.py');
+    expect(plist).toContain('<string>--once</string>');
+    // Carries the watchdog check selector
+    expect(plist).toContain('<key>BOT_ERRORS_WATCHDOG_CHECKS</key>');
+  });
+
+  it('heartbeat-watchdog default checks exclude hub-only lanes that cause false incidents', () => {
+    const home = makeTempRoot('whatsoup-watchdog-defaults-');
+    const shimDir = makeTempRoot('whatsoup-watchdog-defaults-shims-');
+    const profile = path.join(home, 'health-profile.json');
+    const envFile = path.join(home, 'bot-errors.env');
+    const repoRoot = path.join(home, 'repo');
+
+    writeFileSync(profile, '{}\n', 'utf8');
+    writeFakeBotErrorsRepo(repoRoot);
+    writeFileSync(envFile, [
+      `BOT_ERRORS_JID=fixture-defaults@g.us`,
+      `BOT_ERRORS_EXPECTED_JID=fixture-defaults@g.us`,
+      `BOT_ERRORS_SOCKET_PATH=${path.join(home, 'whatsoup.sock')}`,
+      `BOT_ERRORS_SOCKET=${path.join(home, 'whatsoup.sock')}`,
+      `BOT_ERRORS_DB=${path.join(home, 'bot.sqlite')}`,
+      `BOT_ERRORS_HEALTH_PROFILE=${profile}`,
+      '',
+    ].join('\n'), 'utf8');
+    writeLaunchdShims(shimDir);
+
+    execFileSync('bash', ['deploy/scripts/install-bot-errors-launchd.sh'], {
+      cwd: process.cwd(),
+      env: {
+        ...process.env,
+        HOME: home,
+        PATH: `${shimDir}:${process.env.PATH ?? ''}`,
+        BOT_ERRORS_REPO_ROOT: repoRoot,
+        BOT_ERRORS_ENV_FILE: envFile,
+      },
+    });
+
+    const plist = readFileSync(launchAgentPath(home, 'com.bot-errors.heartbeat-watchdog'), 'utf8');
+    const expectedChecks = MACOS_LOCAL_DEFAULT_CHECKS.join(',');
+    expect(plist, 'default watchdog checks must match the schedule matrix local-safe set').toContain(
+      `<key>BOT_ERRORS_WATCHDOG_CHECKS</key><string>${expectedChecks}</string>`,
+    );
+    for (const hubOnly of HUB_ONLY_CHECKS) {
+      expect(plist, `hub-only check "${hubOnly}" must not appear in the default set`).not.toContain(
+        `>${hubOnly}<`,
+      );
+    }
+  });
+
+  it('heartbeat-watchdog respects explicit BOT_ERRORS_WATCHDOG_CHECKS override', () => {
+    const home = makeTempRoot('whatsoup-watchdog-override-');
+    const shimDir = makeTempRoot('whatsoup-watchdog-override-shims-');
+    const profile = path.join(home, 'health-profile.json');
+    const envFile = path.join(home, 'bot-errors.env');
+    const repoRoot = path.join(home, 'repo');
+    const customChecks = 'daily_health,queue_backlog';
+
+    writeFileSync(profile, '{}\n', 'utf8');
+    writeFakeBotErrorsRepo(repoRoot);
+    writeFileSync(envFile, [
+      `BOT_ERRORS_JID=fixture-override@g.us`,
+      `BOT_ERRORS_EXPECTED_JID=fixture-override@g.us`,
+      `BOT_ERRORS_SOCKET_PATH=${path.join(home, 'whatsoup.sock')}`,
+      `BOT_ERRORS_SOCKET=${path.join(home, 'whatsoup.sock')}`,
+      `BOT_ERRORS_DB=${path.join(home, 'bot.sqlite')}`,
+      `BOT_ERRORS_HEALTH_PROFILE=${profile}`,
+      `BOT_ERRORS_WATCHDOG_CHECKS=${customChecks}`,
+      '',
+    ].join('\n'), 'utf8');
+    writeLaunchdShims(shimDir);
+
+    execFileSync('bash', ['deploy/scripts/install-bot-errors-launchd.sh'], {
+      cwd: process.cwd(),
+      env: {
+        ...process.env,
+        HOME: home,
+        PATH: `${shimDir}:${process.env.PATH ?? ''}`,
+        BOT_ERRORS_REPO_ROOT: repoRoot,
+        BOT_ERRORS_ENV_FILE: envFile,
+      },
+    });
+
+    const plist = readFileSync(launchAgentPath(home, 'com.bot-errors.heartbeat-watchdog'), 'utf8');
+    expect(plist, 'explicit override must replace the default').toContain(
+      `<key>BOT_ERRORS_WATCHDOG_CHECKS</key><string>${customChecks}</string>`,
+    );
+  });
+
+  it('launchd installer fails closed when the heartbeat-watchdog script is missing', () => {
+    const home = makeTempRoot('whatsoup-watchdog-missing-');
+    const shimDir = makeTempRoot('whatsoup-watchdog-missing-shims-');
+    const profile = path.join(home, 'health-profile.json');
+    const envFile = path.join(home, 'bot-errors.env');
+    const repoRoot = path.join(home, 'repo');
+
+    writeFileSync(profile, '{}\n', 'utf8');
+    writeFakeBotErrorsRepo(repoRoot);
+    // Remove the watchdog shim to simulate a missing script
+    rmSync(path.join(repoRoot, 'deploy', 'scripts', 'bot-errors-heartbeat-watchdog.py'), { force: true });
+    writeFileSync(envFile, [
+      `BOT_ERRORS_JID=fixture-missing@g.us`,
+      `BOT_ERRORS_EXPECTED_JID=fixture-missing@g.us`,
+      `BOT_ERRORS_SOCKET_PATH=${path.join(home, 'whatsoup.sock')}`,
+      `BOT_ERRORS_SOCKET=${path.join(home, 'whatsoup.sock')}`,
+      `BOT_ERRORS_DB=${path.join(home, 'bot.sqlite')}`,
+      `BOT_ERRORS_HEALTH_PROFILE=${profile}`,
+      '',
+    ].join('\n'), 'utf8');
+    writeLaunchdShims(shimDir);
+
+    const result = spawnSync('bash', ['deploy/scripts/install-bot-errors-launchd.sh'], {
+      cwd: process.cwd(),
+      env: {
+        ...process.env,
+        HOME: home,
+        PATH: `${shimDir}:${process.env.PATH ?? ''}`,
+        BOT_ERRORS_REPO_ROOT: repoRoot,
+        BOT_ERRORS_ENV_FILE: envFile,
+      },
+      encoding: 'utf8',
+    });
+
+    expect(result.status, 'installer must exit non-zero when watchdog script is missing').not.toBe(0);
+    expect(result.stderr).toContain('bot-errors-heartbeat-watchdog.py');
+  });
+
+  it('every required schedule lane has a matching launchd label in the installer output', () => {
+    const home = makeTempRoot('whatsoup-parity-home-');
+    const shimDir = makeTempRoot('whatsoup-parity-shims-');
+    const profile = path.join(home, 'health-profile.json');
+    const envFile = path.join(home, 'bot-errors.env');
+    const repoRoot = path.join(home, 'repo');
+
+    writeFileSync(profile, '{}\n', 'utf8');
+    writeFakeBotErrorsRepo(repoRoot);
+    writeFileSync(envFile, [
+      `BOT_ERRORS_JID=fixture-parity@g.us`,
+      `BOT_ERRORS_EXPECTED_JID=fixture-parity@g.us`,
+      `BOT_ERRORS_SOCKET_PATH=${path.join(home, 'whatsoup.sock')}`,
+      `BOT_ERRORS_SOCKET=${path.join(home, 'whatsoup.sock')}`,
+      `BOT_ERRORS_DB=${path.join(home, 'bot.sqlite')}`,
+      `BOT_ERRORS_HEALTH_PROFILE=${profile}`,
+      '',
+    ].join('\n'), 'utf8');
+    writeLaunchdShims(shimDir);
+
+    const result = execFileSync('bash', ['deploy/scripts/install-bot-errors-launchd.sh'], {
+      cwd: process.cwd(),
+      env: {
+        ...process.env,
+        HOME: home,
+        PATH: `${shimDir}:${process.env.PATH ?? ''}`,
+        BOT_ERRORS_REPO_ROOT: repoRoot,
+        BOT_ERRORS_ENV_FILE: envFile,
+      },
+      encoding: 'utf8',
+    });
+
+    // The installer echoes all installed labels; every required lane must appear.
+    for (const laneName of REQUIRED_LANE_NAMES) {
+      const lane = SCHEDULE_LANES.find((l) => l.name === laneName)!;
+      expect(result, `lane "${laneName}" missing from installer output`).toContain(lane.macosLabel);
     }
   });
 

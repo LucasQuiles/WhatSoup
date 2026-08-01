@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Install BOT ERRORS dispatcher, deadman, and health launchd agents on macOS.
+# Install BOT ERRORS dispatcher, deadman, health, and heartbeat-watchdog launchd agents on macOS.
 set -euo pipefail
 
 LABEL_PREFIX=${BOT_ERRORS_LABEL_PREFIX:-com.bot-errors}
@@ -13,6 +13,7 @@ UID_VALUE=$(id -u)
 DISPATCHER_SCRIPT="$REPO_ROOT/deploy/scripts/bot-errors-dispatcher.py"
 HEALTH_SCRIPT="$REPO_ROOT/deploy/scripts/bot-errors-health-check.py"
 RUNNER_SCRIPT="$REPO_ROOT/deploy/scripts/bot-errors-runner.py"
+WATCHDOG_SCRIPT="$REPO_ROOT/deploy/scripts/bot-errors-heartbeat-watchdog.py"
 
 read_env_value(){
   local key="$1"
@@ -75,6 +76,13 @@ elif [[ -z "$BOT_ERRORS_SOCKET_VALUE" && -n "$BOT_ERRORS_SOCKET_PATH_VALUE" ]]; 
 fi
 BOT_ERRORS_DB_VALUE="$(env_or_default BOT_ERRORS_DB "")"
 
+# Heartbeat-watchdog check selector (#2466). Default to local-safe checks that
+# exclude hub-only central services (q_loop, collector, fleet_sentinel,
+# collector_roster) so a non-hub macOS host cannot emit false incidents.
+# The operator can override via BOT_ERRORS_WATCHDOG_CHECKS in the env file.
+MACOS_DEFAULT_WATCHDOG_CHECKS="dispatcher,daily_health,queue_backlog,local_services,local_instance_health,browser_debug"
+BOT_ERRORS_WATCHDOG_CHECKS_VALUE="$(env_or_default BOT_ERRORS_WATCHDOG_CHECKS "$MACOS_DEFAULT_WATCHDOG_CHECKS")"
+
 if [[ -z "$HEALTH_PROFILE" || ! -f "$HEALTH_PROFILE" || ! -r "$HEALTH_PROFILE" ]]; then
   echo "missing BOT_ERRORS_HEALTH_PROFILE; expected readable profile path" >&2
   exit 2
@@ -89,6 +97,8 @@ HEALTH_PROFILE_XML="$(xml_escape "$HEALTH_PROFILE")"
 DISPATCHER_SCRIPT_XML="$(xml_escape "$DISPATCHER_SCRIPT")"
 HEALTH_SCRIPT_XML="$(xml_escape "$HEALTH_SCRIPT")"
 RUNNER_SCRIPT_XML="$(xml_escape "$RUNNER_SCRIPT")"
+WATCHDOG_SCRIPT_XML="$(xml_escape "$WATCHDOG_SCRIPT")"
+BOT_ERRORS_WATCHDOG_CHECKS_XML="$(xml_escape "$BOT_ERRORS_WATCHDOG_CHECKS_VALUE")"
 BOT_ERRORS_JID_XML="$(xml_escape "$BOT_ERRORS_JID_VALUE")"
 BOT_ERRORS_EXPECTED_JID_XML="$(xml_escape "$BOT_ERRORS_EXPECTED_JID_VALUE")"
 BOT_ERRORS_SOCKET_PATH_XML="$(xml_escape "$BOT_ERRORS_SOCKET_PATH_VALUE")"
@@ -98,7 +108,7 @@ BOT_ERRORS_DB_XML="$(xml_escape "$BOT_ERRORS_DB_VALUE")"
 mkdir -p "$STATE_DIR/logs" "$LAUNCH_AGENTS"
 chmod 700 "$STATE_DIR" "$STATE_DIR/logs" 2>/dev/null || true
 
-for required in "$DISPATCHER_SCRIPT" "$HEALTH_SCRIPT" "$RUNNER_SCRIPT"; do
+for required in "$DISPATCHER_SCRIPT" "$HEALTH_SCRIPT" "$RUNNER_SCRIPT" "$WATCHDOG_SCRIPT"; do
   if [[ ! -f "$required" ]]; then
     echo "missing required BOT ERRORS script: $required" >&2
     exit 2
@@ -118,13 +128,16 @@ write_plist(){
 dispatcher_label="$LABEL_PREFIX.dispatcher"
 deadman_label="$LABEL_PREFIX.deadman"
 health_label="$LABEL_PREFIX.health"
+watchdog_label="$LABEL_PREFIX.heartbeat-watchdog"
 dispatcher_label_xml="$LABEL_PREFIX_XML.dispatcher"
 deadman_label_xml="$LABEL_PREFIX_XML.deadman"
 health_label_xml="$LABEL_PREFIX_XML.health"
+watchdog_label_xml="$LABEL_PREFIX_XML.heartbeat-watchdog"
 
 dispatcher_plist="$LAUNCH_AGENTS/$dispatcher_label.plist"
 deadman_plist="$LAUNCH_AGENTS/$deadman_label.plist"
 health_plist="$LAUNCH_AGENTS/$health_label.plist"
+watchdog_plist="$LAUNCH_AGENTS/$watchdog_label.plist"
 
 write_plist "$dispatcher_label" "$dispatcher_plist" "$(cat <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -245,7 +258,41 @@ write_plist "$health_label" "$health_plist" "$(cat <<PLIST
 PLIST
 )"
 
+write_plist "$watchdog_label" "$watchdog_plist" "$(cat <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>$watchdog_label_xml</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>$PYTHON_XML</string>
+    <string>$WATCHDOG_SCRIPT_XML</string>
+    <string>--once</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>BOT_ERRORS_STATE_DIR</key><string>$STATE_DIR_XML</string>
+    <key>BOT_ERRORS_JID</key><string>$BOT_ERRORS_JID_XML</string>
+    <key>BOT_ERRORS_EXPECTED_JID</key><string>$BOT_ERRORS_EXPECTED_JID_XML</string>
+    <key>BOT_ERRORS_SOCKET_PATH</key><string>$BOT_ERRORS_SOCKET_PATH_XML</string>
+    <key>BOT_ERRORS_SOCKET</key><string>$BOT_ERRORS_SOCKET_XML</string>
+    <key>BOT_ERRORS_DB</key><string>$BOT_ERRORS_DB_XML</string>
+    <key>BOT_ERRORS_DISPATCHER_SERVICE</key><string>$dispatcher_label_xml</string>
+    <key>BOT_ERRORS_HEALTH_PROFILE</key><string>$HEALTH_PROFILE_XML</string>
+    <key>BOT_ERRORS_WATCHDOG_CHECKS</key><string>$BOT_ERRORS_WATCHDOG_CHECKS_XML</string>
+  </dict>
+  <key>WorkingDirectory</key><string>$REPO_ROOT_XML</string>
+  <key>RunAtLoad</key><false/>
+  <key>StartInterval</key><integer>300</integer>
+  <key>StandardOutPath</key><string>$STATE_DIR_XML/logs/heartbeat-watchdog.out.log</string>
+  <key>StandardErrorPath</key><string>$STATE_DIR_XML/logs/heartbeat-watchdog.err.log</string>
+</dict>
+</plist>
+PLIST
+)"
+
 launchctl kickstart -k "gui/$UID_VALUE/$dispatcher_label" >/dev/null 2>&1 || true
 launchctl kickstart -k "gui/$UID_VALUE/$deadman_label" >/dev/null 2>&1 || true
 
-echo "installed $dispatcher_label $deadman_label $health_label"
+echo "installed $dispatcher_label $deadman_label $health_label $watchdog_label"
