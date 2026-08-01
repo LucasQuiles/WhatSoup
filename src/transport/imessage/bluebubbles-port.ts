@@ -120,6 +120,12 @@ interface BbMessage {
    * 2000-2005 add and 3000-3005 remove the six canonical tapbacks.
    */
   associatedMessageType?: number | string | null;
+  /**
+   * BlueBubbles `dateRead` field — epoch ms when the peer read this outbound
+   * message. Present only on `isFromMe: true` records that have been read.
+   * Absent or null on unread messages and inbound messages.
+   */
+  dateRead?: number | null;
 }
 
 interface BbCursorState {
@@ -341,6 +347,12 @@ function normalizeMessage(msg: BbMessage): InboundImessage | null {
     fromMe: msg.isFromMe === true,
     kind: msg.text !== null && msg.text !== undefined ? 'text' : 'other',
     timestamp,
+    // dateRead is only meaningful on outbound messages (the peer reading our
+    // message). Inbound dateRead is the local user's own read state and is
+    // not a remote read transition.
+    dateRead: msg.isFromMe === true && typeof msg.dateRead === 'number' && Number.isFinite(msg.dateRead)
+      ? msg.dateRead
+      : undefined,
   };
 }
 

@@ -130,7 +130,7 @@ Both backends use **config-only auth** (matches the Twilio precedent — no
 | Typing indicators — outbound (composing/stopped) | ✅ BlueBubbles; not advertised for imsg without IMCore attestation |
 | Typing indicators — inbound | ❌ deferred (BlueBubbles surfaces typing only via socket/SSE push events, not in `/message/query`; needs webhook/socket mode) |
 | Read receipts — outbound (per conversation, coalesced GUIDs) | ✅ BlueBubbles; not advertised for imsg without IMCore attestation |
-| Read receipts — inbound | ❌ deferred (iMessage read receipts ride on the original outbound message's `dateRead` field, updated in place; needs cross-poll state diffing, not a separate envelope) |
+| Read receipts — inbound | ✅ BlueBubbles (`dateRead` on outbound messages; piggybacked on the inbound poll — see below); ❌ imsg RPC relay (no `date_read` surfaced) |
 | Remote delete | ❌ iMessage has no remote-delete protocol (documented parity gap) |
 | Media attachments | ❌ deferred (adapter declares `media.maxBytes: 0`) |
 | Polls | ❌ rejected (WhatsApp-only feature) |
@@ -145,12 +145,41 @@ by the `kind` discriminator on `InboundImessage`:
 |---|---|---|
 | `text` | `message` (InboundMessage) | body !== null |
 | `reaction` | `reaction` (ReactionEvent) | requires `reactionTargetGuid`; the BlueBubbles port populates `reactionEmoji`/`reactionRemove`/`reactionTargetGuid` from `associatedMessageGuid`+`associatedMessageType` |
-| other | dropped | typing/call events have no v1 contract event; read receipts handled separately (deferred) |
+| other | dropped | typing/call events have no v1 contract event |
+
+Read receipts are NOT routed by `kind`. They ride on the `dateRead` field of
+outbound (`fromMe: true`) text records and are checked before the `seen`
+dedup guard. See [Inbound read receipts](#inbound-read-receipts) below.
 
 Accepted envelope classes share the `seen` dedupe set (keyed by `guid`);
 redelivery never double-emits. Malformed reaction payloads are rejected before
 dedupe admission, so a corrected same-GUID redelivery remains processable.
 Disposed or non-connected adapters drop silently.
+
+### Inbound read receipts
+
+iMessage read receipts are **state on an existing record**, not a separate
+envelope. When the peer reads an outbound message, the backend updates the
+`dateRead` field on the original `fromMe: true` message record in place.
+
+**Outbound marking vs inbound observation** — these are separate flows:
+
+| Direction | Mechanism | Method |
+|---|---|---|
+| Outbound (we mark peer's messages read) | `markRead()` → `sendReadReceipts` → BlueBubbles `POST /chat/{guid}/read` | `SupportsReadReceipts.markRead()` |
+| Inbound (peer reads our messages) | `dateRead` field on outbound records, observed via the inbound poll | `handleInboundRecord` → `maybeEmitReadReceipt` → `listeners.read` |
+
+The inbound path piggybacks on the existing `/message/query` cursor poll:
+when an outbound record is fetched with `dateRead` set, the adapter checks
+the `emittedReadReceipts` set (session-level exactly-once dedup) and a
+time filter (`dateRead > lastPolledAt`, restart-safe dedup) before emitting
+a `ReadEvent`.
+
+**Limitation**: the cursor-based poll is forward-only (ROWID advancing).
+Messages read AFTER the cursor advances past their ROWID are not re-fetched,
+so their read transition is not observed. Full coverage requires a
+streaming/webhook inbound mode. This limitation is documented in
+`adapter.ts` at `maybeEmitReadReceipt`.
 
 ### Reaction envelope shapes
 
