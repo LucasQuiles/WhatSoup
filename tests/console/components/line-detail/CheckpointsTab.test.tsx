@@ -1,9 +1,8 @@
 /**
  * CheckpointsTab — render contract for the checkpoint browser surface.
- * Spec: oc-re/specs/2026-07-19-checkpoint-browser-ui-spec.md
- * Follow-ups (sort + Delivery column):
- * oc-re/specs/2026-07-19-checkpoints-tab-followups-spec.md
- * Restore action (D-1): oc-re/specs/2026-07-19-checkpoint-restore-spec.md
+ * Design/implementation lineage: PR #1930
+ * Follow-ups (sort + Delivery column): PR #1951
+ * Restore action (D-1): PR #1953
  * The tab is props-driven for DATA (LineDetail owns useCheckpoints); the
  * restore action consumes toast/queryClient hooks, so renders wrap the
  * AccessTab-proven provider idiom.

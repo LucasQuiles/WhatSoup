@@ -2,7 +2,7 @@
  * Tests for the checkpoint-restore path (D-1, restart-mediated):
  *  POST /api/lines/:name/checkpoints/restore (handleRestoreCheckpoint)
  *
- * Spec: oc-re/specs/2026-07-19-checkpoint-restore-spec.md
+ * Design/implementation lineage: PR #1953
  * Safety ordering (handoff §6 — the runtime owns resume semantics):
  * validate → stop → guarded write (while DOWN) → start → publish.
  * The fleet NEVER writes checkpoint state behind a running instance's
