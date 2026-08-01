@@ -5,7 +5,7 @@ import * as os from 'node:os';
 import { spawn } from 'node:child_process';
 import { readBody, jsonResponse, requireInstance } from '../../lib/http.ts';
 import { escapeRegExp } from '../../lib/regex-utils.ts';
-import { isRecord } from '../../lib/type-guards.ts';
+import { isNonEmptyString, isRecord } from '../../lib/type-guards.ts';
 import { createSSEWriter } from '../sse-helpers.ts';
 import { normalizePhoneE164, normalizePhoneE164Wire } from '../../lib/phone.ts';
 import { SIGNAL_UUID_RE } from '../../transport/signal/types.ts';
@@ -128,8 +128,8 @@ export async function handleSend(
     // Trim before length check: whitespace-only values count as not-provided
     // (matches resolver semantics in src/core/chats-resolver.ts and prevents
     // forwarding `'   '` to the instance via JID normalization).
-    const hasChatJid = typeof parsed.chatJid === 'string' && parsed.chatJid.trim().length > 0;
-    const hasTo = typeof parsed.to === 'string' && parsed.to.trim().length > 0;
+    const hasChatJid = isNonEmptyString(parsed.chatJid);
+    const hasTo = isNonEmptyString(parsed.to);
 
     if (hasChatJid && hasTo) {
       jsonResponse(res, 400, {
@@ -144,7 +144,7 @@ export async function handleSend(
       return;
     }
 
-    if (parsed.profile !== undefined && (typeof parsed.profile !== 'string' || parsed.profile.trim().length === 0)) {
+    if (parsed.profile !== undefined && !isNonEmptyString(parsed.profile)) {
       jsonResponse(res, 400, { error: 'profile must be a non-empty string' });
       return;
     }

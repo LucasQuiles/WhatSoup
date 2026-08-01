@@ -15,6 +15,9 @@
  * land independently of the W-1 typed-lookup PR. When both are merged, the
  * real `CredentialLookupResult` satisfies this shape structurally.
  */
+
+import { isNonEmptyString } from './type-guards.ts';
+
 interface LookupResultLike {
   value: string | null;
   reason: 'ok' | 'unknown_service' | 'not_found';
@@ -120,7 +123,7 @@ export function hasUsableCredential(
 ): boolean {
   if (!credential) return false;
   const value = credential.value;
-  if (typeof value !== 'string' || value.trim().length === 0) {
+  if (!isNonEmptyString(value)) {
     return false;
   }
   // No expiry → static credential (API key); usable as long as value is non-empty.
@@ -171,7 +174,7 @@ export function classifyCredentialValue(value: string | null | undefined): Crede
   if (value === null || value === undefined) {
     return 'missing_credential';
   }
-  if (typeof value !== 'string' || value.trim().length === 0) {
+  if (!isNonEmptyString(value)) {
     return 'malformed';
   }
   return 'ok';
