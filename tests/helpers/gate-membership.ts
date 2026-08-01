@@ -27,6 +27,7 @@
  */
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
+import { BRANCH_STEPS } from '../../scripts/push-gate.ts';
 
 /**
  * The independent server-side gates. Neither subsumes the other:
@@ -120,11 +121,13 @@ export const CI_EXEMPT_PUSH_GATE_GUARDS: Readonly<
 
 /** Every `guard:*` npm script that `verify:push:branch` invokes, deduped and sorted. */
 export function pushGateGuards(scripts: Record<string, string>): string[] {
+  // The declarative manifest (scripts/push-gate.ts) is the SSOT for gate
+  // membership; verify:push:branch is now a thin entry point into it (#2224).
+  // The `scripts` parameter is retained for call-site compatibility.
+  void scripts;
   return [
     ...new Set(
-      [...(scripts['verify:push:branch'] ?? '').matchAll(/npm run (guard:[a-z0-9:._-]+)/g)].map(
-        (m) => m[1],
-      ),
+      BRANCH_STEPS.map((step) => step.name).filter((name) => name.startsWith('guard:')),
     ),
   ].sort();
 }
