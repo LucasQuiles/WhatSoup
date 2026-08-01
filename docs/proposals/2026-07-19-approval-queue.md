@@ -4,8 +4,8 @@
 owner nod" (operator-local status note `whatsoup-ui-ux-review-20260719.md` §D-4). No
 build authorization is claimed here; §6 lists the explicit decision points
 the nod covers.
-**Grounding:** `oc-re/audits/2026-07-16-whatsoup-parity-debt-register.md`
-PDR-2; the exec-approval seam verified against current source (this date).
+**Grounding:** PDR-2 (design/implementation lineage: PR #1943); the
+exec-approval seam verified against current source (this date).
 
 ## 1. The gap, precisely
 

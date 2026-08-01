@@ -1,20 +1,14 @@
 import { spawnSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { mkdirSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { describe, expect, it } from 'vitest';
+
+import { trackTmpDirs } from '../helpers/tmp-dir.ts';
 
 const SCRIPT = resolve(process.cwd(), 'console/scripts/check-raw-form-control-inventory.mjs');
 const RAW_FORM_MESSAGE = '[soup/no-raw-form-control SHADOW] Raw form control element.';
 
-const tmpDirs: string[] = [];
-
-afterEach(() => {
-  for (const dir of tmpDirs) {
-    rmSync(dir, { recursive: true, force: true });
-  }
-  tmpDirs.length = 0;
-});
+const tmp = trackTmpDirs('');
 
 interface EslintHit {
   file: string;
@@ -24,8 +18,7 @@ interface EslintHit {
 }
 
 function makeFixture(files: Record<string, string>, hits: EslintHit[]) {
-  const root = mkdtempSync(join(tmpdir(), 'raw-form-inventory-'));
-  tmpDirs.push(root);
+  const root = tmp.make('raw-form-inventory');
 
   for (const [filePath, source] of Object.entries(files)) {
     const absolute = join(root, filePath);

@@ -1,9 +1,7 @@
 /**
  * Tests for the C5 restart-loop guard (resume-replay breaker).
  *
- * Design sources (WhatSoup contribution lane):
- *   MAP:  oc-re/audits/2026-07-19-c5-restart-loop-guard-map.md
- *   SPEC: oc-re/specs/2026-07-19-c5-restart-loop-guard-spec.md
+ * Design/implementation lineage: PR #1929, PR #1969.
  * Reference shape: Hermes restart_loop_guard.py (quarantine, static-read only).
  *
  * Invariants under test:

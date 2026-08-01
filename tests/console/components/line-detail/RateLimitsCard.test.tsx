@@ -1,7 +1,7 @@
 /**
  * RateLimitsCard — render contract for the per-line throttle surface
  * (D-5, PDR-5 corrected: sender-throttle, not provider quota).
- * Spec: oc-re/specs/2026-07-19-rate-limits-surface-spec.md
+ * Design/implementation lineage: PR #1937
  * The card self-fetches via useRateLimits (mocked here, soup-kitchen
  * idiom) — states are driven entirely through the hook mock.
  * @vitest-environment jsdom

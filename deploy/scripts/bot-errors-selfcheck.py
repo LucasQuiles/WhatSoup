@@ -1125,10 +1125,18 @@ def main(argv: list[str]) -> int:
     args = parse_args(argv)
     state_dir = Path(args.state_dir).expanduser() if args.state_dir else None
     config = default_config(Path(args.root).expanduser().resolve(), state_dir)
+    deps = default_deps(config)
     try:
-        status = run_selfcheck(config, heal_enabled=not args.no_heal)
+        status = run_selfcheck(config, deps, heal_enabled=not args.no_heal)
     except Exception as exc:
         status = {"schemaVersion": 1, "checkedAt": now_iso(), "healthy": False, "class": "selfcheck_error", "problems": [str(exc)]}
+        # Issue #2469: the fatal verdict must reach the heartbeat channel, or
+        # the prior healthy heartbeat stays authoritative centrally until it
+        # ages into generic staleness.
+        try:
+            publish_heartbeat(config, deps, status)
+        except Exception as publish_exc:  # noqa: BLE001 - crash handler must not crash.
+            status["problems"].append(f"heartbeat_publish_failed:{type(publish_exc).__name__}")
         try:
             atomic_write_json(config.status_path, status)
         except Exception:

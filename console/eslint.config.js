@@ -795,7 +795,6 @@ export default defineConfig([
       'src/components/CardSelector.tsx',
       'src/components/ConfirmDialog.tsx',
       'src/components/RelinkModal.tsx',
-      'src/components/SaveContactDialog.tsx',
       'src/components/UpdateModal.tsx',
     ],
     rules: {

@@ -5,7 +5,7 @@ import { formatRelative } from '../../lib/format-time'
 
 /**
  * RateLimitsCard — live per-line throttle surface (D-5, PDR-5 corrected).
- * Spec: oc-re/specs/2026-07-19-rate-limits-surface-spec.md
+ * Design/implementation lineage: PR #1937
  *
  * The `rate_limits` table is per-SENDER chat throttling (successful
  * responses vs the line's configured limit), NOT provider quota. Pills:

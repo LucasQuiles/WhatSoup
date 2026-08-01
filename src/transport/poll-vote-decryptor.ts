@@ -20,6 +20,7 @@
 import { jidNormalizedUser, type WAMessage } from '@whiskeysockets/baileys';
 import { createHash } from 'node:crypto';
 import type { Logger } from 'pino';
+import { MS_PER_HOUR } from '../lib/time-units.ts';
 
 // ---------------------------------------------------------------------------
 // Poll vote decryption — loaded from Baileys at runtime via dynamic import.
@@ -81,7 +82,7 @@ export class PollVoteDecryptor {
   // Poll vote tracking — stores data needed to decrypt votes for polls we sent.
   // -------------------------------------------------------------------------
   private pendingPolls = new Map<string, PendingPoll>();
-  private static readonly PENDING_POLL_TTL_MS = 60 * 60 * 1000; // 1 hour
+  private static readonly PENDING_POLL_TTL_MS = MS_PER_HOUR;
 
   // Vote grace window: buffer decoded votes for 5s so vote changes
   // (user taps a different option) replace the previous selection.

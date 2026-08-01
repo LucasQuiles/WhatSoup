@@ -23,8 +23,7 @@
  *  - FAIL OPEN on any persistence error — a broken breaker must never
  *    wedge a healthy instance
  *
- * Lane artifacts: oc-re/audits/2026-07-19-c5-restart-loop-guard-map.md,
- * oc-re/specs/2026-07-19-c5-restart-loop-guard-spec.md.
+ * Design/implementation lineage: PR #1929, PR #1969.
  */
 import {
   privateJournalPath,

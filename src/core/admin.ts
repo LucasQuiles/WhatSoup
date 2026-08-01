@@ -170,8 +170,8 @@ export async function handleAdminCommand(
         : `Allowed ${formatAccessPhoneSubject(subjectId)} — replaying ${replayCount} of ${totalQueued} queued messages`;
       await sendTracked(messenger, adminChatJid, noticeText, durability, { replayPolicy: 'safe', isTerminal: true });
 
+      let failed = 0;
       for (const msg of toReplay) {
-        rememberReplayedId(msg.messageId);
         const incomingMsg: IncomingMessage = {
           messageId: msg.messageId,
           chatJid: msg.chatJid,
@@ -187,11 +187,26 @@ export async function handleAdminCommand(
           quotedMessageId: msg.quotedMessageId,
           isResponseWorthy: true,
         };
-        await handleMessageFn(incomingMsg);
+        try {
+          await handleMessageFn(incomingMsg);
+          // Mark replayed only after successful admission — arming the dedup
+          // marker before the await (the prior behavior) permanently hid a
+          // failed message from every future /access retry.
+          rememberReplayedId(msg.messageId);
+        } catch (err) {
+          failed++;
+          log.error(
+            { err, subjectId, messageId: msg.messageId },
+            'access replay: message admission failed — leaving eligible for retry',
+          );
+        }
         // Throttle between replayed messages to avoid flooding
         if (config.adminReplayDelayMs > 0) {
           await sleep(config.adminReplayDelayMs);
         }
+      }
+      if (failed > 0) {
+        log.warn({ subjectId, replayCount, failed }, 'access replay: completed with partial failures');
       }
     } else {
       // group subject

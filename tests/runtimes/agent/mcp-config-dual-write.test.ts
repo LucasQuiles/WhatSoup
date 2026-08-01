@@ -4,6 +4,7 @@ import type { Messenger } from '../../../src/core/types.ts';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { trackTmpDirs } from '../../helpers/tmp-dir.ts';
 
 const { mockConfig, mockRuntimeLogger } = vi.hoisted(() => ({
   mockConfig: {
@@ -510,25 +511,16 @@ describe('AgentRuntime startup MCP config dual-write', () => {
 });
 
 describe('opencode MCP config write hardening', () => {
-  let tmpDirs: string[] = [];
+  const tmpTracker = trackTmpDirs('');
   const socketPath = '/tmp/test.sock';
   const proxyScript = '/opt/whatsoup/deploy/mcp/whatsoup-proxy.ts';
 
   beforeEach(() => {
     vi.clearAllMocks();
-    tmpDirs = [];
-  });
-
-  afterEach(() => {
-    for (const dir of tmpDirs) {
-      rmSync(dir, { recursive: true, force: true });
-    }
   });
 
   function tmp(): string {
-    const dir = mkdtempSync(join(tmpdir(), 'ws-opencode-hardening-'));
-    tmpDirs.push(dir);
-    return dir;
+    return tmpTracker.make('ws-opencode-hardening');
   }
 
   it('fails closed on corrupt user opencode.json without logging or overwriting it', () => {

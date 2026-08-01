@@ -93,7 +93,7 @@ grep -q 'BOT_ERRORS_FLEET_SENTINEL_Q_HOST' "$plist" || { echo "SENTINEL_INSTALLE
 # match the bot-errors-sentinel.py fallbacks so installing changes nothing
 # for unset variables.
 grep -q '<key>BOT_ERRORS_FLEET_SENTINEL_ACTION_OUTBOX_RETENTION</key><string>500</string>' "$plist" || { echo "SENTINEL_INSTALLER_FAIL launchd action outbox retention env"; cat "$plist"; exit 1; }
-grep -qF "<key>BOT_ERRORS_FLEET_SENTINEL_LOCK</key><string>$HOME/.local/state/bot-errors/fleet-sentinel/sentinel-instance.lock</string>" "$plist" || { echo "SENTINEL_INSTALLER_FAIL launchd instance lock env"; cat "$plist"; exit 1; }
+grep -qF "<key>BOT_ERRORS_FLEET_SENTINEL_LOCK</key><string>$tmp/state/fleet-sentinel/sentinel-instance.lock</string>" "$plist" || { echo "SENTINEL_INSTALLER_FAIL launchd instance lock env"; cat "$plist"; exit 1; }
 grep -q '<key>BOT_ERRORS_FLEET_SENTINEL_SSH_COMMAND</key><string>ssh</string>' "$plist" || { echo "SENTINEL_INSTALLER_FAIL launchd ssh command env"; cat "$plist"; exit 1; }
 grep -q '<key>BOT_ERRORS_FLEET_SENTINEL_SSH_CONNECT_TIMEOUT_SECONDS</key><string>8</string>' "$plist" || { echo "SENTINEL_INSTALLER_FAIL launchd ssh connect timeout env"; cat "$plist"; exit 1; }
 grep -q '<key>BOT_ERRORS_FLEET_SENTINEL_SSH_PROBE_TIMEOUT_SECONDS</key><string>30</string>' "$plist" || { echo "SENTINEL_INSTALLER_FAIL launchd ssh probe timeout env"; cat "$plist"; exit 1; }
@@ -104,6 +104,19 @@ grep -q '<key>BOT_ERRORS_FLEET_SENTINEL_HOSTS</key>' "$watchdog_plist" || { echo
 grep -q '<key>BOT_ERRORS_FLEET_SENTINEL_HEARTBEAT</key>' "$watchdog_plist" || { echo "SENTINEL_INSTALLER_FAIL launchd watchdog heartbeat env"; cat "$watchdog_plist"; exit 1; }
 grep -q 'dry_run=1' "$tmp/launchd.out" || { echo "SENTINEL_INSTALLER_FAIL launchd dry-run output"; cat "$tmp/launchd.out"; exit 1; }
 [[ ! -s "$tmp/launchd.err" ]] || { echo "SENTINEL_INSTALLER_FAIL launchd invoked activation"; cat "$tmp/launchd.err"; exit 1; }
+
+# #2436: the LOCK default must derive from the state root, not a fixed
+# literal — re-render with a distinct BOT_ERRORS_FLEET_SENTINEL_STATE_DIR and
+# assert the lock path moves with it.
+PATH="$fakebin:$PATH" env "${common_env[@]}" \
+  BOT_ERRORS_FLEET_SENTINEL_STATE_DIR="$tmp/state2/fleet-sentinel" \
+  BOT_ERRORS_FLEET_SENTINEL_PLATFORM=launchd \
+  BOT_ERRORS_LAUNCH_AGENTS_DIR="$tmp/LaunchAgents2" \
+  bash "$S" > "$tmp/launchd2.out" 2> "$tmp/launchd2.err"
+plist2="$tmp/LaunchAgents2/com.bot-errors.sentinel.plist"
+[[ -f "$plist2" ]] || { echo "SENTINEL_INSTALLER_FAIL missing second launchd plist"; cat "$tmp/launchd2.err"; exit 1; }
+grep -qF "<key>BOT_ERRORS_FLEET_SENTINEL_LOCK</key><string>$tmp/state2/fleet-sentinel/sentinel-instance.lock</string>" "$plist2" || { echo "SENTINEL_INSTALLER_FAIL launchd instance lock env did not move with state dir"; cat "$plist2"; exit 1; }
+grep -qF "<key>BOT_ERRORS_FLEET_SENTINEL_LOCK</key><string>$tmp/state/fleet-sentinel/sentinel-instance.lock</string>" "$plist2" && { echo "SENTINEL_INSTALLER_FAIL second launchd plist still has first render's lock path"; cat "$plist2"; exit 1; }
 
 PATH="$fakebin:$PATH" env "${common_env[@]}" \
   BOT_ERRORS_FLEET_SENTINEL_PLATFORM=systemd \

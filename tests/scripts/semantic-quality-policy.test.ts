@@ -1,8 +1,7 @@
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { describe, expect, it } from 'vitest';
 
 import { cleanGitEnv } from '../../src/lib/git-env.ts';
 import {
@@ -15,8 +14,9 @@ import {
   type SemanticPolicyFinding,
   type SemanticQualityPolicy,
 } from '../../scripts/lib/semantic-quality/policy.ts';
+import { trackTmpDirs } from '../helpers/tmp-dir.ts';
 
-const repos: string[] = [];
+const tmp = trackTmpDirs('');
 
 const BASE_POLICY: SemanticQualityPolicy = {
   schemaVersion: 1,
@@ -48,8 +48,7 @@ function commit(repo: string, message: string): string {
 }
 
 function makeRepo(extraFiles: Record<string, string> = {}): { repo: string; baseOid: string } {
-  const repo = mkdtempSync(path.join(tmpdir(), 'semantic-quality-policy-'));
-  repos.push(repo);
+  const repo = tmp.make('semantic-quality-policy');
   git(repo, ['init', '--initial-branch=main']);
   git(repo, ['config', 'user.name', 'Semantic Quality Test']);
   git(repo, ['config', 'user.email', 'semantic-quality-test@users.noreply.github.com']);
@@ -81,10 +80,6 @@ function findingForPath(
 function writePolicy(repo: string, payload: unknown): void {
   write(repo, 'config/semantic-quality.json', `${JSON.stringify(payload, null, 2)}\n`);
 }
-
-afterEach(() => {
-  for (const repo of repos.splice(0)) rmSync(repo, { recursive: true, force: true });
-});
 
 describe('exact candidate Git tree', () => {
   it('reads full head, base, and merge-base OIDs and accepts an integrated added module', () => {

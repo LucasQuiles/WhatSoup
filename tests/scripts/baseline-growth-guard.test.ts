@@ -11,22 +11,19 @@
  * revision resolution, weighing, and comparison are all the production code path.
  */
 import { execFileSync, spawnSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { afterAll, describe, expect, it } from 'vitest';
+import { describe, expect, it } from 'vitest';
 
+import { trackTmpDirs } from '../helpers/tmp-dir.ts';
 import { BASELINE_REGISTRY, GROWTH_WAIVERS_PATH } from '../../scripts/lib/baseline-weight.ts';
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const guard = resolve(repoRoot, 'scripts/baseline-growth-guard.ts');
 
-const tempRoots: string[] = [];
-afterAll(() => {
-  for (const dir of tempRoots) rmSync(dir, { recursive: true, force: true });
-});
+const tmp = trackTmpDirs('');
 
 function git(cwd: string, args: string[]): string {
   return execFileSync('git', args, {
@@ -38,8 +35,7 @@ function git(cwd: string, args: string[]): string {
 
 /** A throwaway repo whose `main` holds `boundaryEntries` boundary-baseline entries. */
 function makeRepo(boundaryEntries: number): string {
-  const dir = mkdtempSync(join(tmpdir(), 'baseline-growth-'));
-  tempRoots.push(dir);
+  const dir = tmp.make('baseline-growth');
   git(dir, ['init', '-q', '-b', 'main']);
   git(dir, ['config', 'user.email', 'guard@test.invalid']);
   git(dir, ['config', 'user.name', 'guard test']);
@@ -171,8 +167,7 @@ describe('baseline growth guard — the red proof', () => {
     // threw on every read, and were dropped — the guard printed a clean pass over the other
     // five and never mentioned them. A baseline the guard cannot read is UNWATCHED, and
     // unwatched must never present as clean.
-    const dir = mkdtempSync(join(tmpdir(), 'baseline-growth-shape-'));
-    tempRoots.push(dir);
+    const dir = tmp.make('baseline-growth-shape');
     git(dir, ['init', '-q', '-b', 'main']);
     git(dir, ['config', 'user.email', 'guard@test.invalid']);
     git(dir, ['config', 'user.name', 'guard test']);

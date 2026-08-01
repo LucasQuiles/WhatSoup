@@ -8,6 +8,7 @@ import {
   publicFetchArgs,
   shouldRetryWithPublicHttps,
 } from '../lib/git-public-remote.ts';
+import { MS_PER_HOUR } from '../lib/time-units.ts';
 
 const execFileAsync = promisify(execFile);
 const log = createChildLogger('update-checker');
@@ -19,7 +20,7 @@ export interface UpdateState {
   checkedAt: string;
 }
 
-const CHECK_INTERVAL_MS = 60 * 60 * 1000; // 60 minutes
+const CHECK_INTERVAL_MS = MS_PER_HOUR;
 
 export class UpdateChecker {
   private repoRoot: string;

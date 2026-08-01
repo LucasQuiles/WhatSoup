@@ -14,6 +14,13 @@ from .errors import QseshError as RegistryQseshError
 MINIMUM_PYTHON = (3, 12, 0)
 CAPABILITY_ERROR_CODE = "QS-E-CAPABILITY"
 
+# Every other qsesh primitive (XDG paths, the fcntl_lock probe, SQLite) is
+# already portable across POSIX platforms; fcntl_lock above is what actually
+# filters out non-Unix hosts. This list is closed to the platforms qSesh is
+# verified on (macOS dev hosts, Linux CI runners) rather than open to
+# "anything with fcntl", so an unverified POSIX platform still fails closed.
+SUPPORTED_PLATFORMS = ("darwin", "linux")
+
 
 class QseshError(RegistryQseshError):
     """Capability failure retaining its sorted missing-capability tuple."""
@@ -141,7 +148,7 @@ def require_capabilities(capabilities: RuntimeCapabilities) -> None:
         missing.append("foreign_keys")
     if not capabilities.fcntl_lock:
         missing.append("fcntl_lock")
-    if capabilities.platform != "darwin":
+    if capabilities.platform not in SUPPORTED_PLATFORMS:
         missing.append("platform")
 
     if missing:
