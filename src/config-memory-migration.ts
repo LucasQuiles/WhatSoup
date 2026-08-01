@@ -51,7 +51,7 @@ const LEGACY_FIELD_MAPPINGS: ReadonlyArray<{ from: string; to: string }> = [
 
 function cloneJson<T>(value: T): T {
   if (value === undefined) return value;
-  return JSON.parse(JSON.stringify(value)) as T;
+  return structuredClone(value);
 }
 
 function getPath(root: Record<string, unknown>, path: string): unknown {
