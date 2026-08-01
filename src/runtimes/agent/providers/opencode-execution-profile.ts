@@ -2,6 +2,7 @@ import {
   isWhatSoupHeadlessExecutionProfile,
   WHATSOUP_HEADLESS_EXECUTION_PROFILE,
 } from '../../../lib/opencode-execution-profile-contract.ts';
+import { isNonEmptyString } from '../../../lib/type-guards.ts';
 
 export { WHATSOUP_HEADLESS_EXECUTION_PROFILE };
 
@@ -37,8 +38,7 @@ export function openCodeAgentArgs(config: OpenCodeExecutionProfileConfig | undef
 }
 
 export function opencodeUsesConfigModel(config: OpenCodeExecutionProfileConfig | undefined): boolean {
-  const baseUrl = config?.baseUrl;
-  return typeof baseUrl === 'string' && baseUrl.trim() !== '';
+  return isNonEmptyString(config?.baseUrl);
 }
 
 export interface OpenCodeRunArgsOptions {

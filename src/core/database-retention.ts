@@ -1,4 +1,5 @@
 import { createChildLogger } from '../logger.ts';
+import { MS_PER_DAY } from '../lib/time-units.ts';
 import type { Database } from './database.ts';
 import { withTransaction } from './db-tx.ts';
 import { deleteOldMessages } from './messages.ts';
@@ -72,7 +73,7 @@ export interface DatabaseRetentionHealth {
 }
 
 export const DEFAULT_DATABASE_RETENTION: DatabaseRetentionConfig = {
-  intervalMs: 24 * 60 * 60 * 1000,
+  intervalMs: MS_PER_DAY,
   terminalDurabilityDays: 30,
   exportedFactDays: 30,
   metricsHourlyDays: 180,

@@ -27,3 +27,27 @@ export function isRecord(value: unknown): value is Record<string, unknown> {
 export function asRecordOrEmpty(value: unknown): Record<string, unknown> {
   return isRecord(value) ? value : {};
 }
+
+/**
+ * Narrow `unknown` to a string with non-whitespace content.
+ *
+ * Returns true iff the value is a string and `.trim()` leaves something behind
+ * (rejects `''`, `'   '`, etc). Mirrors the Node-side
+ * `src/lib/type-guards.ts` `isNonEmptyString`, consolidating the private
+ * `typeof value === 'string' && value.trim() !== ''` checks that accreted
+ * across console components (agents/panels `str`, wizard/link-step-events).
+ */
+export function isNonEmptyString(value: unknown): value is string {
+  return typeof value === 'string' && value.trim() !== '';
+}
+
+/**
+ * Coerce `unknown` to its trimmed string form, else `undefined`.
+ *
+ * Companion coercer to {@link isNonEmptyString}, mirroring the Node-side
+ * `asNonEmptyString` — `undefined` rather than `null` so the result composes
+ * with optional chaining and `??` defaults.
+ */
+export function asNonEmptyString(value: unknown): string | undefined {
+  return isNonEmptyString(value) ? value.trim() : undefined;
+}

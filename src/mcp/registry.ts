@@ -22,6 +22,7 @@ import {
   type SessionContext,
 } from './types.ts';
 import { errorMessage } from '../lib/error-message.ts';
+import { isNonEmptyString } from '../lib/type-guards.ts';
 import {
   classifyThrownToolFailure,
   normalizeToolDurabilityGroup,
@@ -146,7 +147,7 @@ function schemaHasProperty(tool: ToolDeclaration, propertyName: string): boolean
 }
 
 function hasNonEmptyString(value: unknown): value is string {
-  return typeof value === 'string' && value.trim().length > 0;
+  return isNonEmptyString(value);
 }
 
 /**
