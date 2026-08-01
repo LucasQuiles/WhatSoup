@@ -3,6 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync, readFileSync
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { BRANCH_STEPS, RELEASE_STEPS } from '../../scripts/push-gate.ts';
 import { spawnSync } from 'node:child_process';
 
 import { checkAgentDecisionPolls, run } from '../../scripts/agent-decision-polls-guard.ts';
@@ -265,9 +266,16 @@ describe('agent decision polls guard', () => {
     const packageJson = JSON.parse(readFileSync(path.join(repoRoot, 'package.json'), 'utf8')) as {
       scripts: Record<string, string>;
     };
+    // Gate composition lives in the declarative manifest (scripts/push-gate.ts)
+    // since #2224; chain views over its ordered step arrays preserve the legacy
+    // assertion idiom. verify:publish remains a package.json chain.
+    const chainViews: Record<string, string> = {
+      'verify:push:branch': BRANCH_STEPS.map((step) => step.cmd).join(' && '),
+      'verify:release': RELEASE_STEPS.map((step) => step.cmd).join(' && '),
+    };
 
     for (const scriptName of ['verify:push:branch', 'verify:release', 'verify:publish']) {
-      const chain = packageJson.scripts[scriptName];
+      const chain = chainViews[scriptName] ?? packageJson.scripts[scriptName];
       expect(chain, `${scriptName} script must exist`).toBeDefined();
       expect(chain).toMatch(/\bnpm run guard:agent-decision-polls\b/);
       const guardIndex = chain.indexOf('npm run guard:agent-decision-polls');

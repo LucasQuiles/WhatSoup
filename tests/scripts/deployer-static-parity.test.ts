@@ -2,6 +2,7 @@ import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
+import { BRANCH_STEPS } from '../../scripts/push-gate.ts';
 
 // BEAD-039: local/CI parity guard.
 //
@@ -83,14 +84,14 @@ describe('deployer-static parity (BEAD-039)', () => {
   });
 
   it('wires guard:deployer-static into verify:push:branch', () => {
-    const chain = pkg.scripts['verify:push:branch'];
+    const chain = BRANCH_STEPS.map((step) => step.cmd).join(' && ');
     expect(chain, 'verify:push:branch must exist').toBeTruthy();
     expect(chain).toContain('npm run guard:deployer-static');
   });
 
   it('covers every deploy.sh pinned path via a locally-wired guard', () => {
     const pinPaths = parseDeployPinPaths(scriptText);
-    const chain = pkg.scripts['verify:push:branch'] ?? '';
+    const chain = BRANCH_STEPS.map((step) => step.cmd).join(' && ');
     const guardWired = chain.includes('npm run guard:deployer-static');
     // guard:deployer-static runs the SAME deploy.sh `verify`, so its covered set
     // is exactly the deploy.sh pin set. If it is wired, containment holds for
