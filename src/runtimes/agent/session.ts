@@ -2851,6 +2851,11 @@ export class SessionManager {
       // recycled, a newer kill armed). Only act if this child is still the live one.
       if (!this.active || this.child !== args.child) return;
       if (this.livenessProgressEpoch !== assessmentEpoch) return;
+      // Gap 3 (#2235): if a managed provider session appeared during the assessment
+      // (session model switched from child-process to managed), this child-based
+      // assessment is stale and must not act — the managed-session path has its
+      // own lifecycle and should not inherit a child-process liveness verdict.
+      if (this.managedProviderSession !== null) return;
       const decisionAt = Date.now();
       const decisionElapsed = decisionAt - gateStartedAt;
       if (decisionElapsed >= LONG_OP_CEILING_MS) {

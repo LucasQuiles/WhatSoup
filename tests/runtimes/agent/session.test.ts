@@ -1835,6 +1835,41 @@ describe('SessionManager', () => {
     vi.useRealTimers();
   });
 
+  it('managed session appearing during assessment invalidates the stale child-based kill (#2235)', async () => {
+    vi.useFakeTimers();
+
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    let resolveAssessment!: (verdict: {
+      alive: boolean; cpuDeltaMs: number; pidChurn: number; pidCount: number;
+    }) => void;
+    const treeLivenessAssessor = vi.fn(() => new Promise<{
+      alive: boolean; cpuDeltaMs: number; pidChurn: number; pidCount: number;
+    }>((resolve) => { resolveAssessment = resolve; }));
+    const sm = new SessionManager({
+      db, messenger, chatJid: CHAT_JID, onEvent: vi.fn(), treeLivenessAssessor,
+    });
+    await sm.spawnSession();
+    await sm.sendTurn('long tool');
+
+    sm.recoverStalledOperation('toolu_managed_switch', 'Bash');
+    await vi.advanceTimersByTimeAsync(STALLED_OP_KILL_GRACE_MS + 1);
+    expect(treeLivenessAssessor).toHaveBeenCalledOnce();
+
+    // While assessment is pending, a managed provider session appears (session
+    // model switched from child-process to managed). The child-based assessment
+    // is now stale — it must not kill, notify, or rearm.
+    (sm as unknown as { managedProviderSession: unknown }).managedProviderSession = {};
+    resolveAssessment({ alive: false, cpuDeltaMs: 0, pidChurn: 0, pidCount: 2 });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(mockChild.kill).not.toHaveBeenCalledWith('SIGKILL');
+    expect((sm as unknown as { stalledOpKill: unknown }).stalledOpKill).toBeNull();
+
+    vi.useRealTimers();
+  });
+
   it('liveness gate: a CPU-active tree defers the stalled-op kill and re-arms the grace timer', async () => {
     vi.useFakeTimers();
 
