@@ -38,7 +38,7 @@ import {
 } from './providers/child-env.ts';
 import { ProviderBudget, type BudgetConfig } from './providers/budget.ts';
 import { watchdogHardMsForProvider } from './providers/watchdog-policy.ts';
-import { providerConfigEffort } from './reasoning-control.ts';
+import { providerConfigEffort, providerHasNativeReasoningControl } from './reasoning-control.ts';
 import type { ProviderMcpBridge, ProviderSession } from './providers/types.ts';
 import { OpenAIApiProvider } from './providers/openai-api.ts';
 import { AnthropicApiProvider } from './providers/anthropic-api.ts';
@@ -3824,13 +3824,24 @@ export class SessionManager {
 
   /**
    * Reasoning effort this session was actually spawned with (null = none /
-   * provider default). Shares providerConfigEffort with the `--effort` argv
-   * builder, so "reports exactly what spawn threaded" holds BY CONSTRUCTION
-   * rather than by two guards agreeing — letting the pin/recycle diff compare
-   * the EFFECTIVE spawned effort, never a raw pin override that a static
-   * config may already satisfy (Slice 3).
+   * provider default, OR a provider with no native reasoning control at
+   * all). Shares providerConfigEffort with the `--effort` argv builder, so
+   * "reports exactly what spawn threaded" holds BY CONSTRUCTION rather than
+   * by two guards agreeing — letting the pin/recycle diff compare the
+   * EFFECTIVE spawned effort, never a raw pin override that a static config
+   * may already satisfy (Slice 3).
+   *
+   * Gated on providerHasNativeReasoningControl(this.provider) (Refs #2845):
+   * the argv builder only threads `--effort` in resolveProviderArgs' `case
+   * 'claude-cli'` arm, so `providerConfig.effort` is structurally inert for
+   * every other provider. Without this gate, a static `agentProviderConfig`
+   * carrying an `effort` key (meaningful only for claude-cli) would still be
+   * echoed back for e.g. an opencode-cli session that merely inherited the
+   * field via fallbackProviderConfigFor, giving applyRouteChangeAndRecycle's
+   * diff gate a value to compare that spawn never acted on.
    */
   getSpawnedEffort(): string | null {
+    if (!providerHasNativeReasoningControl(this.provider)) return null;
     return providerConfigEffort(this.providerConfig);
   }
 
