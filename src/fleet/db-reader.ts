@@ -3,6 +3,7 @@ import { SQLITE_BUSY_TIMEOUT_PRAGMA } from '../lib/sqlite-constants.ts';
 import { buildSafeFtsMatchQuery } from '../lib/sql-fts.ts';
 import { queryAll } from '../lib/db-query.ts';
 import { createChildLogger } from '../logger.ts';
+import { MS_PER_HOUR } from '../lib/time-units.ts';
 
 const log = createChildLogger('fleet:db-reader');
 
@@ -435,7 +436,7 @@ export class FleetDbReader {
     providers: string[];
   }> {
     const rangeHours = opts.range === '24h' ? 24 : opts.range === '7d' ? 168 : 720;
-    const cutoff = new Date(Date.now() - rangeHours * 60 * 60 * 1000).toISOString();
+    const cutoff = new Date(Date.now() - rangeHours * MS_PER_HOUR).toISOString();
 
     return this.query(name, dbPath, (db) => {
       // Read all 9 metrics from metrics_hourly
@@ -465,7 +466,7 @@ export class FleetDbReader {
       nowHour.setUTCMinutes(0, 0, 0);
       const bucketSequence: string[] = [];
       for (let i = rangeHours - 1; i >= 0; i--) {
-        const t = new Date(nowHour.getTime() - i * 60 * 60 * 1000);
+        const t = new Date(nowHour.getTime() - i * MS_PER_HOUR);
         bucketSequence.push(t.toISOString());
       }
 

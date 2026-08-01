@@ -10,6 +10,7 @@ import { runCleanup } from '../../core/media-retention.ts';
 import type { Database } from '../../core/database.ts';
 import type { ToolRegistry } from '../registry.ts';
 import { createChildLogger } from '../../logger.ts';
+import { MS_PER_HOUR } from '../../lib/time-units.ts';
 
 const log = createChildLogger('mcp:retention');
 
@@ -87,9 +88,9 @@ export function registerRetentionTools(registry: ToolRegistry, deps: RetentionDe
       const dryRun = (params['dry_run'] as boolean | undefined) ?? false;
 
       const tempMaxAgeMs = maxAgeHours != null
-        ? maxAgeHours * 60 * 60 * 1000
-        : config.mediaRetention.tempHours * 60 * 60 * 1000;
-      const cacheMaxAgeMs = config.mediaRetention.cacheHours * 60 * 60 * 1000;
+        ? maxAgeHours * MS_PER_HOUR
+        : config.mediaRetention.tempHours * MS_PER_HOUR;
+      const cacheMaxAgeMs = config.mediaRetention.cacheHours * MS_PER_HOUR;
 
       if (dryRun) {
         const tmpScan   = scanDir(join(baseMediaDir, 'tmp'),   tempMaxAgeMs);
@@ -105,7 +106,7 @@ export function registerRetentionTools(registry: ToolRegistry, deps: RetentionDe
       }
 
       const result = await runCleanup(baseMediaDir, db, {
-        intervalMs:    config.mediaRetention.intervalHours * 60 * 60 * 1000,
+        intervalMs:    config.mediaRetention.intervalHours * MS_PER_HOUR,
         tempMaxAgeMs,
         cacheMaxAgeMs,
       });
