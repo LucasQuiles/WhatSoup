@@ -8,7 +8,7 @@ import {
 } from '../../src/core/reply-guarantee.ts';
 import { Database } from '../../src/core/database.ts';
 import { DurabilityEngine } from '../../src/core/durability.ts';
-import type { InboundStatus } from '../../src/core/durability.ts';
+import type { InboundStatus } from '../../src/core/inbound-status.ts';
 import type { Messenger } from '../../src/core/types.ts';
 import { finalizeRuntimeTurn } from '../../src/runtimes/agent/turn-finalizer.ts';
 
