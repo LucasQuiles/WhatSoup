@@ -15,51 +15,19 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
-import { PassThrough } from 'node:stream';
-import type { IncomingMessage, ServerResponse } from 'node:http';
 import { handleCreateLine } from '../../../src/fleet/routes/ops.ts';
 import type { OpsDeps } from '../../../src/fleet/routes/ops.ts';
-
-function mockReq(body = ''): IncomingMessage {
-  const stream = new PassThrough() as unknown as IncomingMessage;
-  (stream as any).headers = {};
-  (stream as any).url = '/';
-  (stream as any).method = 'POST';
-  process.nextTick(() => {
-    (stream as unknown as PassThrough).write(body);
-    (stream as unknown as PassThrough).end();
-  });
-  return stream;
-}
-
-function mockRes(): ServerResponse & { _status: number; _body: string } {
-  const res = {
-    _status: 0,
-    _body: '',
-    writeHead(status: number) { res._status = status; },
-    end(data?: string) { if (data) res._body = data; },
-  };
-  return res as any;
-}
+import { makeDeps, mockReq, mockRes } from '../../helpers/http-mocks.ts';
 
 function failingDeps(): OpsDeps {
-  return {
-    discovery: {
-      getInstance: vi.fn(() => undefined),
-      getInstances: vi.fn(() => new Map()),
-      scan: vi.fn(),
-    } as any,
-    realtime: { publish: vi.fn() },
+  // makeDeps's base discovery has no scan(); handleCreateLine calls it.
+  return makeDeps({
+    discovery: { scan: vi.fn() } as any,
     serviceManager: {
       // Force the rollback path: enable() throws after extras are written.
       enable: vi.fn().mockRejectedValue(new Error('boom: simulated service enable failure')),
-      disable: vi.fn().mockResolvedValue(undefined),
-      start: vi.fn().mockResolvedValue(undefined),
-      stop: vi.fn().mockResolvedValue(undefined),
-      restart: vi.fn().mockResolvedValue(undefined),
-      startFire: vi.fn(),
-    },
-  };
+    } as any,
+  });
 }
 
 describe('handleCreateLine — rollback preserves pre-existing user files (#248)', () => {
@@ -118,13 +86,16 @@ describe('handleCreateLine — rollback preserves pre-existing user files (#248)
     const deps = failingDeps();
     const res = mockRes();
     await handleCreateLine(
-      mockReq(JSON.stringify({
-        name: 'preserve-agent',
-        type: 'agent',
-        adminPhones: ['15551234567'],
-        agentOptions: { cwd: agentCwd, sessionScope: 'per_chat' },
-        claudeMd: 'AGENT_PROMPT — should be rolled back\n',
-      })),
+      mockReq({
+        method: 'POST',
+        body: JSON.stringify({
+          name: 'preserve-agent',
+          type: 'agent',
+          adminPhones: ['15551234567'],
+          agentOptions: { cwd: agentCwd, sessionScope: 'per_chat' },
+          claudeMd: 'AGENT_PROMPT — should be rolled back\n',
+        }),
+      }),
       res,
       deps,
     );
@@ -160,13 +131,16 @@ describe('handleCreateLine — rollback preserves pre-existing user files (#248)
     const deps = failingDeps();
     const res = mockRes();
     await handleCreateLine(
-      mockReq(JSON.stringify({
-        name: 'fresh-agent',
-        type: 'agent',
-        adminPhones: ['15551234567'],
-        agentOptions: { cwd: agentCwd, sessionScope: 'per_chat' },
-        claudeMd: 'AGENT_PROMPT — should be removed\n',
-      })),
+      mockReq({
+        method: 'POST',
+        body: JSON.stringify({
+          name: 'fresh-agent',
+          type: 'agent',
+          adminPhones: ['15551234567'],
+          agentOptions: { cwd: agentCwd, sessionScope: 'per_chat' },
+          claudeMd: 'AGENT_PROMPT — should be removed\n',
+        }),
+      }),
       res,
       deps,
     );
