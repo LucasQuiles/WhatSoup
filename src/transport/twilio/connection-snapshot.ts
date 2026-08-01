@@ -11,6 +11,7 @@
 // is evaluated at call time exactly as before) is baked in here.
 
 import type { ConnectionStateSnapshot } from '../connection.ts';
+import { MS_PER_MINUTE } from '../../lib/time-units.ts';
 
 export interface EmptyConnectionStateSnapshotOverrides {
   /** True when adapter.state().state === 'connected'. */
@@ -41,7 +42,7 @@ export function emptyConnectionStateSnapshot(
     lastDisconnectReason,
     lastStatusCode: null,
     recentDisconnects: {
-      windowMs: 10 * 60 * 1000,
+      windowMs: 10 * MS_PER_MINUTE,
       count: 0,
       lastAt: null,
       lastReason: null,

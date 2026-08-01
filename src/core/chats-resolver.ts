@@ -14,6 +14,7 @@
 // Contract tests at tests/core/chats-resolver.test.ts lock the surface.
 
 import type { DatabaseSync } from 'node:sqlite';
+import { isNonEmptyString } from '../lib/type-guards.ts';
 
 // ── Errors ──────────────────────────────────────────────────────────────────
 
@@ -88,9 +89,8 @@ export function createChatResolver(deps: ChatResolverDeps): ChatResolver {
 
   return {
     resolve(target: ChatTarget): string {
-      const hasChatJid =
-        typeof target.chatJid === 'string' && target.chatJid.trim().length > 0;
-      const hasTo = typeof target.to === 'string' && target.to.trim().length > 0;
+      const hasChatJid = isNonEmptyString(target.chatJid);
+      const hasTo = isNonEmptyString(target.to);
 
       // Mutual-exclusion check first: if both are set, even an empty value on
       // one side wouldn't matter — but only count "set" as "non-empty value

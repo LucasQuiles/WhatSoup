@@ -8,6 +8,7 @@ import { normalizeTimestamp } from '../time-utils.ts';
 import type { FleetDbReader } from '../db-reader.ts';
 import { toConversationKey } from '../../core/conversation-key.ts';
 import { createChildLogger } from '../../logger.ts';
+import { isNonEmptyString } from '../../lib/type-guards.ts';
 const log = createChildLogger('fleet:feed');
 
 export interface FeedDeps {
@@ -107,7 +108,7 @@ const PINO_LEVEL_MAP: Record<number, 'info' | 'warn' | 'error'> = {
 
 function firstString(...values: unknown[]): string {
   for (const value of values) {
-    if (typeof value === 'string' && value.trim()) return value;
+    if (isNonEmptyString(value)) return value;
   }
   return '';
 }

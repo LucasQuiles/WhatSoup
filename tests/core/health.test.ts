@@ -2365,6 +2365,57 @@ describe('GET /health', () => {
     db2.close();
   });
 
+  // #2545: the handler must sample getHealthSnapshot() exactly once per
+  // request and thread that single snapshot into both the enrichment stats
+  // and the runtime block. getEnrichmentStats() here stands in for
+  // src/main.ts's real implementation: when called with the (new) snapshot
+  // argument it uses that snapshot directly; when called with none — the
+  // pre-fix calling convention — it falls back to self-sampling, exactly
+  // like the unfixed production code did. A state transition between the
+  // two snapshot generations must not leak into a mixed-generation response.
+  it('samples the runtime snapshot exactly once per request, keeping enrichment and runtime blocks on the same generation', async () => {
+    db.close();
+    const db2 = makeDb();
+    const getHealthSnapshot = vi.fn()
+      .mockReturnValueOnce({
+        status: 'healthy',
+        details: { enrichmentLastRunAt: 'GEN-A', queue: { activeChats: 1, queuedChats: 0 } },
+      })
+      .mockReturnValueOnce({
+        status: 'healthy',
+        details: { enrichmentLastRunAt: 'GEN-B', queue: { activeChats: 9, queuedChats: 9 } },
+      });
+    const deps = makeDeps(db2, {
+      getEnrichmentStats: ((snapshotArg?: { details: Record<string, unknown> } | null) => {
+        const snap = snapshotArg ?? getHealthSnapshot();
+        return {
+          lastRun: (snap.details.enrichmentLastRunAt as string | null) ?? null,
+          unprocessed: 0,
+          runtimeDegraded: false,
+        };
+      }) as HealthDeps['getEnrichmentStats'],
+      runtime: { getHealthSnapshot } as any,
+    });
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    ({ server, port } = await buildTestServer(deps));
+
+    const { status, body } = await healthReq(port);
+    const json = JSON.parse(body);
+    expect(status).toBe(200);
+
+    // One request must sample the runtime snapshot exactly once — not once
+    // for enrichment stats and again for the runtime block.
+    expect(getHealthSnapshot).toHaveBeenCalledTimes(1);
+    // Both the enrichment block and the runtime block must derive from the
+    // SAME (first, generation-A) snapshot. Pre-fix, enrichment reads
+    // generation A while the runtime block reads generation B (queueDepth
+    // 18 instead of 1) — a mixed-generation response.
+    expect(json.enrichment.last_run).toBe('GEN-A');
+    expect(json.runtime.chat.queueDepth).toBe(1);
+
+    db2.close();
+  });
+
   it('projects bounded Chat queue-admission counters without copying runtime detail', async () => {
     db.close();
     const db2 = makeDb();

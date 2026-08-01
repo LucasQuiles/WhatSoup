@@ -9,6 +9,9 @@
  * Part of docs/security-handoffs/2026-05-09-env-secret-exposure.md (W-2 observability).
  */
 
+import { MS_PER_MINUTE } from './time-units.ts';
+import { isNonEmptyString } from './type-guards.ts';
+
 /**
  * Structural shape matching the W-1 `CredentialLookupResult` from keyring.ts.
  * Defined locally (not imported) so this module is self-contained and can
@@ -48,7 +51,7 @@ export type TokenExpiryState = 'missing' | 'valid' | 'expiring' | 'expired' | 'i
  * within this window is classified as 'expiring' rather than 'valid', so
  * refresh logic can act before the credential actually expires.
  */
-export const DEFAULT_REFRESH_MARGIN_MS = 5 * 60 * 1000;
+export const DEFAULT_REFRESH_MARGIN_MS = 5 * MS_PER_MINUTE;
 
 /**
  * Maximum plausible timestamp in milliseconds since epoch. Used to reject
@@ -120,7 +123,7 @@ export function hasUsableCredential(
 ): boolean {
   if (!credential) return false;
   const value = credential.value;
-  if (typeof value !== 'string' || value.trim().length === 0) {
+  if (!isNonEmptyString(value)) {
     return false;
   }
   // No expiry → static credential (API key); usable as long as value is non-empty.
@@ -171,7 +174,7 @@ export function classifyCredentialValue(value: string | null | undefined): Crede
   if (value === null || value === undefined) {
     return 'missing_credential';
   }
-  if (typeof value !== 'string' || value.trim().length === 0) {
+  if (!isNonEmptyString(value)) {
     return 'malformed';
   }
   return 'ok';

@@ -16,6 +16,7 @@ import {
   readPrivateFileSync,
   writeAtomicPrivateFileSync,
 } from './private-fs.ts';
+import { isNonEmptyString } from './type-guards.ts';
 
 export type KeyringBackend = 'secret-tool' | 'macos-keychain' | 'env-only';
 
@@ -607,7 +608,7 @@ export function readOpenCodeAuthKey(provider: string): string | null {
     const entry = data[provider];
     if (entry && typeof entry === 'object') {
       const key = (entry as { key?: unknown }).key;
-      if (typeof key === 'string' && key.trim()) return key.trim();
+      if (isNonEmptyString(key)) return key.trim();
     }
     return null;
   } catch (err) {
