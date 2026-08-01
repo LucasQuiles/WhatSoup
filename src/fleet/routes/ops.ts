@@ -113,11 +113,11 @@ export async function handleSend(
     const parsed = JSON.parse(body);
 
     // Reject non-object payloads explicitly. Without this guard, a body of `null`
-    // throws TypeError on property access, the catch swallows it as "invalid
-    // JSON", and the request falls through to mcpCall with a `null` payload —
-    // bypassing xor validation. Arrays and primitives currently land at the
-    // "neither" branch by accident; explicit type-shape rejection makes the
-    // boundary deliberate.
+    // throws TypeError on property access; the catch below would report it as
+    // "invalid JSON body", masking the real problem (valid JSON that parses to
+    // `null`, not malformed JSON) behind the wrong error message. Arrays and
+    // primitives currently land at the "neither" branch by accident; explicit
+    // type-shape rejection makes the boundary deliberate.
     if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
       jsonResponse(res, 400, {
         error: 'request body must be a JSON object with chatJid (raw JID) or to (alias)',
@@ -128,8 +128,8 @@ export async function handleSend(
     // Trim before length check: whitespace-only values count as not-provided
     // (matches resolver semantics in src/core/chats-resolver.ts and prevents
     // forwarding `'   '` to the instance via JID normalization).
-    const hasChatJid = typeof parsed.chatJid === 'string' && parsed.chatJid.trim().length > 0;
-    const hasTo = typeof parsed.to === 'string' && parsed.to.trim().length > 0;
+    const hasChatJid = isNonEmptyString(parsed.chatJid);
+    const hasTo = isNonEmptyString(parsed.to);
 
     if (hasChatJid && hasTo) {
       jsonResponse(res, 400, {
@@ -144,7 +144,7 @@ export async function handleSend(
       return;
     }
 
-    if (parsed.profile !== undefined && (typeof parsed.profile !== 'string' || parsed.profile.trim().length === 0)) {
+    if (parsed.profile !== undefined && !isNonEmptyString(parsed.profile)) {
       jsonResponse(res, 400, { error: 'profile must be a non-empty string' });
       return;
     }
@@ -155,7 +155,10 @@ export async function handleSend(
         : toPersonalJid(parsed.chatJid);
       fixedBody = JSON.stringify(parsed);
     }
-  } catch { /* invalid JSON: existing fall-through; downstream returns 400 */ }
+  } catch {
+    jsonResponse(res, 400, { error: 'invalid JSON body' });
+    return;
+  }
 
   // Route 1: Try MCP socket (passive instances with verified socket)
   if (instance.type === 'passive' && instance.socketPath) {
