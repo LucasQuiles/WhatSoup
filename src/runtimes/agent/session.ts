@@ -2789,10 +2789,19 @@ export class SessionManager {
     this.stalledOpKill = null;
     if (!this.active || this.child === null) return;
     const child = this.child;
+    // Capture the epoch at fire time so the rearm closure can detect a newer
+    // stall that armed during the async assessment. Without this, an old rearm
+    // would overwrite the newer timer handle, leaving it live but untracked (#2235).
+    const fireEpoch = this.livenessProgressEpoch;
     void this.runLivenessGatedKill({
       child,
       reason: 'stalled_operation',
       rearm: (maxDelayMs) => {
+        // Compare-and-swap: if a newer stall armed during the assessment
+        // (incrementing the epoch and setting its own timer), do not overwrite
+        // it. The newer timer owns the slot; the old one is silently retired.
+        if (this.livenessProgressEpoch !== fireEpoch) return;
+        if (this.stalledOpKill !== null) return;
         this.stalledOpKill = setTimeout(
           () => this.handleStalledOpKill(toolId, toolName),
           Math.min(STALLED_OP_KILL_GRACE_MS, maxDelayMs),
@@ -2918,7 +2927,14 @@ export class SessionManager {
     managedProviderSession = this.managedProviderSession,
     managedProviderGeneration = this.managedProviderGeneration,
     delayMs = watchdogHardMsForProvider(this.provider),
+    // When set, only arm if this.watchdogHard === expectedSlot. Used by the
+    // hard-watchdog rearm closure to avoid overwriting a newer timer that was
+    // armed during an async liveness assessment (#2235).
+    expectedSlot: ReturnType<typeof setTimeout> | 'only-if-null' | undefined = undefined,
   ): void {
+    // Compare-and-swap guard: skip if the slot is already occupied by a
+    // different timer than expected (a newer arm won the race).
+    if (expectedSlot === 'only-if-null' && this.watchdogHard !== null) return;
     // Only the hard backstop remains — soft/warn probes are replaced by the operation tracker.
     // The timeout honors the provider's descriptor (API providers: 10 min; CLI providers: 30 min)
     // instead of a single hardcoded constant (L1-F1).
@@ -2966,6 +2982,8 @@ export class SessionManager {
         managedProviderSession,
         managedProviderGeneration,
         Math.min(watchdogHardMsForProvider(this.provider), maxDelayMs),
+        // Only arm if no newer watchdog was set during the assessment (#2235).
+        'only-if-null',
       ),
       kill: () => {
         log.warn({ sessionId: this.sessionId, pid: child.pid, reason: 'turn_watchdog' }, 'turn watchdog fired — killing stalled Claude process');

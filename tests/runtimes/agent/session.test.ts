@@ -1797,6 +1797,44 @@ describe('SessionManager', () => {
     vi.useRealTimers();
   });
 
+  it('stalled-op rearm does not overwrite a newer timer armed during assessment (#2235)', async () => {
+    vi.useFakeTimers();
+
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    let resolveFirstAssessment!: (verdict: {
+      alive: boolean; cpuDeltaMs: number; pidChurn: number; pidCount: number;
+    }) => void;
+    const treeLivenessAssessor = vi.fn(() => new Promise<{
+      alive: boolean; cpuDeltaMs: number; pidChurn: number; pidCount: number;
+    }>((resolve) => { resolveFirstAssessment = resolve; }));
+    const sm = new SessionManager({
+      db, messenger, chatJid: CHAT_JID, onEvent: vi.fn(), treeLivenessAssessor,
+    });
+    await sm.spawnSession();
+    await sm.sendTurn('long tool');
+
+    // Arm the first stalled-op kill.
+    sm.recoverStalledOperation('toolu_race', 'Bash');
+    await vi.advanceTimersByTimeAsync(STALLED_OP_KILL_GRACE_MS + 1);
+    expect(treeLivenessAssessor).toHaveBeenCalledOnce();
+
+    // While the first assessment is pending, provider progress + a new stall fire.
+    // tickWatchdog increments livenessProgressEpoch and clears the stalled-op kill.
+    sm.tickWatchdog();
+    // The old rearm closure captured fireEpoch; it must see the epoch changed.
+    resolveFirstAssessment({ alive: true, cpuDeltaMs: 1_000, pidChurn: 0, pidCount: 3 });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    // The old rearm must NOT have set a timer (epoch changed → compare-and-swap guard).
+    // If it did, the timer handle would be non-null but tracking the wrong (old) closure.
+    // The old kill must not fire.
+    expect((sm as unknown as { stalledOpKill: unknown }).stalledOpKill).toBeNull();
+
+    vi.useRealTimers();
+  });
+
   it('liveness gate: a CPU-active tree defers the stalled-op kill and re-arms the grace timer', async () => {
     vi.useFakeTimers();
 
