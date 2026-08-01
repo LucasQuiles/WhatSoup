@@ -1,17 +1,13 @@
 import { spawnSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { mkdirSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { describe, expect, it } from 'vitest';
+
+import { trackTmpDirs } from '../helpers/tmp-dir.ts';
 
 const SCRIPT = resolve(process.cwd(), 'console/scripts/check-shadow-frozen-inventory.mjs');
 
-const tmpDirs: string[] = [];
-
-afterEach(() => {
-  for (const dir of tmpDirs) rmSync(dir, { recursive: true, force: true });
-  tmpDirs.length = 0;
-});
+const tmp = trackTmpDirs('');
 
 interface EslintHit {
   file: string;
@@ -22,8 +18,7 @@ interface EslintHit {
 }
 
 function makeFixture(hits: EslintHit[]) {
-  const root = mkdtempSync(join(tmpdir(), 'shadow-frozen-inventory-'));
-  tmpDirs.push(root);
+  const root = tmp.make('shadow-frozen-inventory');
 
   const byFile = new Map<string, Array<{ column: number; line: number; message: string; ruleId: string }>>();
   for (const hit of hits) {
