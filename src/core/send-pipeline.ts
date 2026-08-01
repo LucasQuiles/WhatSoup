@@ -150,7 +150,7 @@ export function prepareTextSend(
   }
 
   const profileName = input['profile'];
-  if (profileName !== undefined && (typeof profileName !== 'string' || profileName.trim().length === 0)) {
+  if (profileName !== undefined && !isNonEmptyString(profileName)) {
     throw new InvalidSendRequestError('profile must be a non-empty string');
   }
   const profile = typeof profileName === 'string'
