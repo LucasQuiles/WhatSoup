@@ -11,6 +11,7 @@ import {
   readArcBindingHealth,
   type ArcBindingHealthLoaded,
 } from '../src/core/arc-binding-health.ts';
+import { requireRecord, requireString, requireStringArray } from '../src/lib/type-guards.ts';
 
 const CONSUMER = 'whatsoup';
 const RUNTIME_PROOF_FILE = '.arc/runtime-enforcement.verification-record.json';
@@ -76,28 +77,8 @@ export function parseArgs(argv: string[], cwd = process.cwd()): ParsedArgs {
   return { healthJson, out, repoRoot, arcRepoDir, help };
 }
 
-function asRecord(value: unknown, label: string): Record<string, unknown> {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) {
-    throw new Error(`${label} must be a JSON object`);
-  }
-  return value as Record<string, unknown>;
-}
-
-function requireString(value: unknown, label: string): string {
-  if (typeof value !== 'string' || value.length === 0) {
-    throw new Error(`${label} must be a non-empty string`);
-  }
-  return value;
-}
-
-function requireStringArray(value: unknown, label: string): string[] {
-  if (!Array.isArray(value)) throw new Error(`${label} must be an array`);
-  value.forEach((entry, index) => requireString(entry, `${label}[${index}]`));
-  return value as string[];
-}
-
 function parseRuntimeArcHealth(value: unknown): ArcBindingHealthLoaded {
-  const arc = asRecord(value, 'health.arc');
+  const arc = requireRecord(value, 'health.arc');
   if (arc.loaded !== true) throw new Error('health.arc.loaded must be true');
   return {
     loaded: true,
@@ -138,7 +119,7 @@ function assertDriftFree(result: ArcDriftResult): void {
 function loadHealth(pathname: string): ArcBindingHealthLoaded {
   const text = readFileSync(pathname, 'utf8');
   assertNoSecretLike(text, 'runtime health JSON');
-  const parsed = asRecord(JSON.parse(text), 'health');
+  const parsed = requireRecord(JSON.parse(text), 'health');
   return parseRuntimeArcHealth(parsed.arc);
 }
 

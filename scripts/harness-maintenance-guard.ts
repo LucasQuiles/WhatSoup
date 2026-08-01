@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
-import { isRecord } from '../src/lib/type-guards.ts';
+import { isRecord, requireNumber, requireRecord, requireString } from '../src/lib/type-guards.ts';
 
 export const DEFAULT_COOLDOWN_MINUTES = 7 * 24 * 60;
 export const DEFAULT_NPMRC_MIN_RELEASE_AGE_DAYS = 7;
@@ -49,27 +49,12 @@ export interface ManifestValidation {
 
 type JsonRecord = Record<string, unknown>;
 
-function asRecord(value: unknown, label: string): JsonRecord {
-  if (!isRecord(value)) throw new Error(`${label} must be an object`);
-  return value;
-}
-
+// Non-validating: only narrows to unknown[], element shape is checked by the
+// caller. Left local (not requireArrayOfRecords/requireStringArray) because
+// one call site (tier1[].smoke) discards the return value and just wants the
+// array-shape assertion, not a typed element-by-element result.
 function asArray(value: unknown, label: string): unknown[] {
   if (!Array.isArray(value)) throw new Error(`${label} must be an array`);
-  return value;
-}
-
-function asString(value: unknown, label: string): string {
-  if (typeof value !== 'string' || value.trim() === '') {
-    throw new Error(`${label} must be a non-empty string`);
-  }
-  return value;
-}
-
-function asNumber(value: unknown, label: string): number {
-  if (typeof value !== 'number' || !Number.isFinite(value)) {
-    throw new Error(`${label} must be a number`);
-  }
   return value;
 }
 
@@ -119,20 +104,20 @@ function walkForFloatingReferences(
 }
 
 export function validateManifestPayload(payload: unknown): ManifestValidation {
-  const root = asRecord(payload, 'manifest');
-  const schemaVersion = asNumber(root.schema_version, 'schema_version');
+  const root = requireRecord(payload, 'manifest');
+  const schemaVersion = requireNumber(root.schema_version, 'schema_version');
   if (schemaVersion !== 1) {
     throw new Error(`schema_version must be 1, got ${schemaVersion}`);
   }
 
-  const npm = asRecord(root.npm, 'npm');
-  const cooldownMinutes = asNumber(npm.cooldown_minutes, 'npm.cooldown_minutes');
+  const npm = requireRecord(root.npm, 'npm');
+  const cooldownMinutes = requireNumber(npm.cooldown_minutes, 'npm.cooldown_minutes');
   if (cooldownMinutes < DEFAULT_COOLDOWN_MINUTES) {
     throw new Error(
       `npm.cooldown_minutes must be at least ${DEFAULT_COOLDOWN_MINUTES}`,
     );
   }
-  const npmrcMinReleaseAgeDays = asNumber(
+  const npmrcMinReleaseAgeDays = requireNumber(
     npm.npmrc_min_release_age_days,
     'npm.npmrc_min_release_age_days',
   );
@@ -141,18 +126,18 @@ export function validateManifestPayload(payload: unknown): ManifestValidation {
       `npm.npmrc_min_release_age_days must be at least ${DEFAULT_NPMRC_MIN_RELEASE_AGE_DAYS}`,
     );
   }
-  const codexNode = asRecord(npm.codex_node, 'npm.codex_node');
-  asString(codexNode.node_bin, 'npm.codex_node.node_bin');
-  const codexNodeNpmMinVersion = asString(
+  const codexNode = requireRecord(npm.codex_node, 'npm.codex_node');
+  requireString(codexNode.node_bin, 'npm.codex_node.node_bin');
+  const codexNodeNpmMinVersion = requireString(
     codexNode.npm_min_version,
     'npm.codex_node.npm_min_version',
   );
 
   const tier1 = asArray(root.tier1, 'tier1');
   const tier1Harnesses = tier1.map((entry, index) => {
-    const record = asRecord(entry, `tier1[${index}]`);
-    const name = asString(record.name, `tier1[${index}].name`);
-    asString(record.kind, `tier1[${index}].kind`);
+    const record = requireRecord(entry, `tier1[${index}]`);
+    const name = requireString(record.name, `tier1[${index}].name`);
+    requireString(record.kind, `tier1[${index}].kind`);
     asArray(record.smoke, `tier1[${index}].smoke`);
     return name;
   });
@@ -162,12 +147,12 @@ export function validateManifestPayload(payload: unknown): ManifestValidation {
     }
   }
 
-  const tier2 = asRecord(root.tier2, 'tier2');
+  const tier2 = requireRecord(root.tier2, 'tier2');
   const probesPayload = asArray(tier2.probes, 'tier2.probes');
   const probes = probesPayload.map((entry, index) => {
-    const record = asRecord(entry, `tier2.probes[${index}]`);
-    const name = asString(record.name, `tier2.probes[${index}].name`);
-    asString(record.mode, `tier2.probes[${index}].mode`);
+    const record = requireRecord(entry, `tier2.probes[${index}]`);
+    const name = requireString(record.name, `tier2.probes[${index}].name`);
+    requireString(record.mode, `tier2.probes[${index}].mode`);
     return name;
   });
 
@@ -310,11 +295,11 @@ function parseArgs(argv: string[]): Record<string, string | boolean> {
 export function run(argv: string[] = process.argv.slice(2)): unknown {
   const args = parseArgs(argv);
   if (args['npm-cooldown-config']) {
-    const npmVersion = asString(args['npm-version'], '--npm-version');
-    const minVersion = asString(args['min-version'], '--min-version');
-    const expectedDays = asString(args['expected-days'], '--expected-days');
-    const npmrcPath = asString(args['npmrc-file'], '--npmrc-file');
-    const stderrPath = asString(args['stderr-file'], '--stderr-file');
+    const npmVersion = requireString(args['npm-version'], '--npm-version');
+    const minVersion = requireString(args['min-version'], '--min-version');
+    const expectedDays = requireString(args['expected-days'], '--expected-days');
+    const npmrcPath = requireString(args['npmrc-file'], '--npmrc-file');
+    const stderrPath = requireString(args['stderr-file'], '--stderr-file');
     const installExitCode = Number(args['install-exit-code']);
     if (!Number.isInteger(installExitCode) || installExitCode < 0) {
       throw new Error('--install-exit-code must be a non-negative integer');
@@ -337,7 +322,7 @@ export function run(argv: string[] = process.argv.slice(2)): unknown {
 
   if (args['version-eligible']) {
     const version = String(args['version-eligible']);
-    const timeJsonPath = asString(args['time-json'], '--time-json');
+    const timeJsonPath = requireString(args['time-json'], '--time-json');
     const cooldownMinutes = args['cooldown-minutes']
       ? Number(args['cooldown-minutes'])
       : DEFAULT_COOLDOWN_MINUTES;
@@ -355,7 +340,7 @@ export function run(argv: string[] = process.argv.slice(2)): unknown {
   }
 
   if (args['latest-eligible-version']) {
-    const timeJsonPath = asString(args['time-json'], '--time-json');
+    const timeJsonPath = requireString(args['time-json'], '--time-json');
     const cooldownMinutes = args['cooldown-minutes']
       ? Number(args['cooldown-minutes'])
       : DEFAULT_COOLDOWN_MINUTES;

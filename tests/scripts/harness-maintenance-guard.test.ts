@@ -106,7 +106,7 @@ describe('harness maintenance guard', () => {
         ...(manifest().npm as Record<string, unknown>),
         codex_node: { node_bin: '', npm_min_version: '11.12.0' },
       },
-    })).toThrow('npm.codex_node.node_bin must be a non-empty string');
+    })).toThrow('npm.codex_node.node_bin must be a string');
     expect(() => validateManifestPayload({ ...manifest(), tier1: 'bad' })).toThrow('tier1 must be an array');
     expect(() => validateManifestPayload({
       ...manifest(),
@@ -115,11 +115,11 @@ describe('harness maintenance guard', () => {
     expect(() => validateManifestPayload({
       ...manifest(),
       tier1: [{ name: '', kind: 'native', smoke: [] }, { name: 'codex', kind: 'npm-global', smoke: [] }, { name: 'opencode', kind: 'native', smoke: [] }],
-    })).toThrow('tier1[0].name must be a non-empty string');
+    })).toThrow('tier1[0].name must be a string');
     expect(() => validateManifestPayload({
       ...manifest(),
       tier2: { probes: [{ name: 'mcp-servers', mode: '' }] },
-    })).toThrow('tier2.probes[0].mode must be a non-empty string');
+    })).toThrow('tier2.probes[0].mode must be a string');
   });
 
   it('rejects manifests that omit a required harness', () => {
