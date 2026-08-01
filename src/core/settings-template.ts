@@ -3,6 +3,8 @@
 // Agent instances need a permissions block to prevent Claude Code's
 // built-in "sensitive file" protection from blocking tool calls.
 
+import { z } from 'zod';
+
 export interface PermissionsSettings {
   permissions: {
     allow: string[];
@@ -215,6 +217,48 @@ export function defaultSettingsJson(type: string): PermissionsSettings | null {
 }
 
 /**
+ * Shape schema for PermissionsSettings.
+ *
+ * The permissions block is `.passthrough()` because the previous hand-rolled
+ * guard only checked the listed keys — payloads carrying unknown extra keys
+ * stay accepted. The outer object stays in default (strip) mode instead:
+ * verdict-wise strip and passthrough are identical (both accept unknown keys,
+ * and only `.success` is ever consulted), but a top-level `.passthrough()`
+ * would widen the inferred type's optional `enabledPlugins` to `unknown` and
+ * break assignability to `PermissionsSettings`. `enabledPlugins` itself is
+ * deliberately absent from the schema — the previous guard never validated
+ * it, so e.g. a non-record value there must stay accepted.
+ *
+ * `satisfies` pins the schema output to the exported type at compile time.
+ */
+const PermissionsSettingsShapeSchema = z.object({
+  permissions: z.object({
+    allow: z.array(z.string()),
+    deny: z.array(z.string()),
+    defaultMode: z.literal('bypassPermissions'),
+  }).passthrough(),
+}) satisfies z.ZodType<PermissionsSettings>;
+
+/**
+ * Full schema: shape plus the deny-floor subset check. Every `REQUIRED_DENY`
+ * entry must already be present in the supplied deny list. mergeSettingsJson
+ * will union them anyway, but rejecting here lets the loader surface drift
+ * early (e.g. an operator hand-editing settings.json to drop a floor entry).
+ */
+const PermissionsSettingsSchema = PermissionsSettingsShapeSchema.superRefine((settings, ctx) => {
+  const denySet = new Set(settings.permissions.deny);
+  for (const required of REQUIRED_DENY) {
+    if (!denySet.has(required)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['permissions', 'deny'],
+        message: `missing required deny entry: ${required}`,
+      });
+    }
+  }
+});
+
+/**
  * Validate that a value has the shape of PermissionsSettings.
  * Guards against arbitrary JSON being written to settings.json.
  *
@@ -223,26 +267,7 @@ export function defaultSettingsJson(type: string): PermissionsSettings | null {
  * settings payload.
  */
 export function isValidPermissionsSettings(v: unknown): v is PermissionsSettings {
-  if (typeof v !== 'object' || v === null) return false;
-  const p = (v as Record<string, unknown>).permissions;
-  if (typeof p !== 'object' || p === null) return false;
-  const perms = p as Record<string, unknown>;
-  const shapeOk = Array.isArray(perms.allow)
-    && (perms.allow as unknown[]).every((x: unknown) => typeof x === 'string')
-    && Array.isArray(perms.deny)
-    && (perms.deny as unknown[]).every((x: unknown) => typeof x === 'string')
-    && perms.defaultMode === 'bypassPermissions';
-  if (!shapeOk) return false;
-  // Deny-floor subset check: every REQUIRED_DENY entry must already
-  // be present in the supplied deny list. mergeSettingsJson will union
-  // them anyway, but rejecting here lets the loader surface drift early
-  // (e.g. an operator hand-editing settings.json to drop a floor entry).
-  const denyList = perms.deny as string[];
-  const denySet = new Set(denyList);
-  for (const required of REQUIRED_DENY) {
-    if (!denySet.has(required)) return false;
-  }
-  return true;
+  return PermissionsSettingsSchema.safeParse(v).success;
 }
 
 /**
@@ -278,13 +303,5 @@ export function mergeSettingsJson(
  * without rejecting them outright.
  */
 function isValidPermissionsShape(v: unknown): v is PermissionsSettings {
-  if (typeof v !== 'object' || v === null) return false;
-  const p = (v as Record<string, unknown>).permissions;
-  if (typeof p !== 'object' || p === null) return false;
-  const perms = p as Record<string, unknown>;
-  return Array.isArray(perms.allow)
-    && (perms.allow as unknown[]).every((x: unknown) => typeof x === 'string')
-    && Array.isArray(perms.deny)
-    && (perms.deny as unknown[]).every((x: unknown) => typeof x === 'string')
-    && perms.defaultMode === 'bypassPermissions';
+  return PermissionsSettingsShapeSchema.safeParse(v).success;
 }

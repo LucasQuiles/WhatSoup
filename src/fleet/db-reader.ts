@@ -1,6 +1,7 @@
 import { DatabaseSync } from 'node:sqlite';
 import { SQLITE_BUSY_TIMEOUT_PRAGMA } from '../lib/sqlite-constants.ts';
 import { buildSafeFtsMatchQuery } from '../lib/sql-fts.ts';
+import { queryAll } from '../lib/db-query.ts';
 import { createChildLogger } from '../logger.ts';
 
 const log = createChildLogger('fleet:db-reader');
@@ -285,7 +286,7 @@ export class FleetDbReader {
       if (opts.beforePk != null) params.push(opts.beforePk);
       params.push(opts.limit);
 
-      return db.prepare(`
+      return queryAll<MessageRow>(db, `
         SELECT pk, conversation_key, chat_jid, sender_jid, sender_name,
                message_id, content, content_type, timestamp, is_from_me, raw_message
         FROM messages m
@@ -300,7 +301,7 @@ export class FleetDbReader {
           )
         ORDER BY m.pk DESC
         LIMIT ?
-      `).all(...params) as unknown as MessageRow[];
+      `, ...params);
     });
   }
 
@@ -390,7 +391,7 @@ export class FleetDbReader {
       const matchQuery = buildSafeFtsMatchQuery(opts.query);
 
       if (opts.conversationKey) {
-        return db.prepare(`
+        return queryAll<MessageRow>(db, `
           SELECT m.pk, m.conversation_key, m.chat_jid, m.sender_jid, m.sender_name,
                  m.message_id, m.content, m.content_type, m.timestamp, m.is_from_me, m.raw_message
           FROM messages_fts fts
@@ -400,9 +401,9 @@ export class FleetDbReader {
             AND m.conversation_key = ?
           ORDER BY m.timestamp DESC
           LIMIT ?
-        `).all(matchQuery, opts.conversationKey, opts.limit) as unknown as MessageRow[];
+        `, matchQuery, opts.conversationKey, opts.limit);
       }
-      return db.prepare(`
+      return queryAll<MessageRow>(db, `
         SELECT m.pk, m.conversation_key, m.chat_jid, m.sender_jid, m.sender_name,
                m.message_id, m.content, m.content_type, m.timestamp, m.is_from_me, m.raw_message
         FROM messages_fts fts
@@ -411,7 +412,7 @@ export class FleetDbReader {
           AND m.deleted_at IS NULL
         ORDER BY m.timestamp DESC
         LIMIT ?
-      `).all(matchQuery, opts.limit) as unknown as MessageRow[];
+      `, matchQuery, opts.limit);
     });
   }
 
@@ -639,13 +640,13 @@ export class FleetDbReader {
     if (messageIds.length === 0) return { ok: true, data: [] };
     return this.query(name, dbPath, (db) => {
       const placeholders = messageIds.map(() => '?').join(', ');
-      return db.prepare(`
+      return queryAll<FeedMessageRow>(db, `
         SELECT pk, conversation_key, chat_jid, sender_jid, sender_name,
                message_id, content, content_type, timestamp, is_from_me
         FROM messages
         WHERE message_id IN (${placeholders})
           AND deleted_at IS NULL
-      `).all(...messageIds) as unknown as FeedMessageRow[];
+      `, ...messageIds);
     });
   }
 
@@ -661,7 +662,7 @@ export class FleetDbReader {
     const isFromMe = direction === 'outbound' ? 1 : 0;
     const windowSec = 5;
     return this.query(name, dbPath, (db) => {
-      return db.prepare(`
+      return queryAll<FeedMessageRow>(db, `
         SELECT pk, conversation_key, chat_jid, sender_jid, sender_name,
                message_id, content, content_type, timestamp, is_from_me
         FROM messages
@@ -669,11 +670,11 @@ export class FleetDbReader {
           AND timestamp BETWEEN ? AND ?
         ORDER BY ABS(timestamp - ?) ASC
         LIMIT ?
-      `).all(
+      `,
         conversationKey, isFromMe,
         aroundTimestamp - windowSec, aroundTimestamp + windowSec,
         aroundTimestamp, limit,
-      ) as unknown as FeedMessageRow[];
+      );
     });
   }
 
