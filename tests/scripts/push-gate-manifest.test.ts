@@ -151,4 +151,35 @@ describe('push-gate manifest registry (#2224)', () => {
       expect(new Set(names).size).toBe(names.length);
     }
   });
+
+  it('every step command is shell-free tokenizable (the runner uses no shell)', () => {
+    // The runner spawns with shell:false (repo-hygiene: child-process-shell-true).
+    // A cmd containing shell metacharacters would silently change semantics
+    // when tokenized — so it must fail review here instead.
+    const shellMetachar = /["';|&$`<>()\\{}[\]\n]/;
+    for (const step of [...BRANCH_STEPS, ...RELEASE_STEPS]) {
+      expect(
+        shellMetachar.test(step.cmd),
+        `${step.name}: '${step.cmd}' needs a shell — rewrite as plain argv tokens`,
+      ).toBe(false);
+      expect(step.cmd.trim().length, `${step.name} has an empty cmd`).toBeGreaterThan(0);
+    }
+  });
+
+  it('the child env allowlist excludes the neutralized skip-vars and passes WHATSOUP_* through', async () => {
+    const { pushGateChildEnv } = await import('../../scripts/push-gate.ts');
+    process.env.WHATSOUP_SKIP_DOC_DRIFT = '1';
+    process.env.WHATSOUP_TEST_PASSTHROUGH_PROBE = 'probe';
+    try {
+      const env = pushGateChildEnv();
+      expect(env.WHATSOUP_SKIP_DOC_DRIFT).toBeUndefined();
+      expect(env.WHATSOUP_TEST_PASSTHROUGH_PROBE).toBe('probe');
+      expect(typeof env.PATH).toBe('string');
+      delete process.env.WHATSOUP_SKIP_DOC_DRIFT;
+      delete process.env.WHATSOUP_TEST_PASSTHROUGH_PROBE;
+    } finally {
+      delete process.env.WHATSOUP_SKIP_DOC_DRIFT;
+      delete process.env.WHATSOUP_TEST_PASSTHROUGH_PROBE;
+    }
+  });
 });
