@@ -145,7 +145,7 @@ export const REGISTRY: DurabilityStatusEntry[] = [
     table: 'inbound_events',
     statusColumn: 'processing_status',
     vocabulary: ['pending', 'processing', 'turn_done', 'complete', 'failed'],
-    vocabularySource: 'ts-union',
+    vocabularySource: 'sql-check',
     terminalFailureValues: ['failed'],
     writerSites: ['src/core/durability.ts'],
   },
@@ -532,6 +532,10 @@ export const DISCOVERY_EXCLUSIONS: DiscoveryExclusionEntry[] = [
   {
     table: 'outbound_sends_v51',
     reason: 'migration-51 transient create-copy-drop-rename artifact; the rebuilt table persists only after being renamed to outbound_sends.',
+  },
+  {
+    table: 'inbound_events_v56',
+    reason: 'migration-56 transient create-copy-drop-rename artifact; the rebuilt table persists only after being renamed to inbound_events.',
   },
 ];
 
