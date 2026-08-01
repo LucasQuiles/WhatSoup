@@ -4,6 +4,7 @@
 import { randomUUID } from 'node:crypto';
 import { createChildLogger } from '../logger.ts';
 import { emitAlertChecked } from '../lib/emit-alert.ts';
+import { MS_PER_HOUR } from '../lib/time-units.ts';
 import type { Database } from './database.ts';
 import type { Messenger } from './types.ts';
 import type { DurabilityEngine } from './durability.ts';
@@ -24,7 +25,7 @@ const log = createChildLogger('heal');
 const MAX_ATTEMPTS = 2;
 const RESOLUTION_WINDOW_MS = 30 * 60 * 1000; // 30 minutes
 export const GLOBAL_VALVE_LIMIT = 5;
-const GLOBAL_VALVE_WINDOW_MS = 60 * 60 * 1000; // 1 hour
+const GLOBAL_VALVE_WINDOW_MS = MS_PER_HOUR;
 const ACTIVE_REPORT_STATES = ['attempt_1', 'cooldown', 'attempt_2', 'escalated', 'queued'] as const;
 export const HEAL_ACTIVE_STALE_MS = RESOLUTION_WINDOW_MS;
 
