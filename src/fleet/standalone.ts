@@ -7,7 +7,7 @@
 
 import { DatabaseSync } from 'node:sqlite';
 import { createFleetServer } from './index.ts';
-import { DEFAULT_FLEET_PORT } from './constants.ts';
+import { DEFAULT_BIND_ADDRESS, DEFAULT_FLEET_PORT } from './constants.ts';
 import { loadOrCreateFleetTokens } from './token-storage.ts';
 
 const port = parseInt(process.argv[2] ?? String(DEFAULT_FLEET_PORT), 10);
@@ -33,5 +33,5 @@ const server = createFleetServer({
 });
 
 server.start(port);
-console.log(`Fleet server listening on http://${process.env.FLEET_BIND_ADDRESS ?? '127.0.0.1'}:${port}`);
+console.log(`Fleet server listening on http://${process.env.FLEET_BIND_ADDRESS ?? DEFAULT_BIND_ADDRESS}:${port}`);
 console.log('Press Ctrl+C to stop');

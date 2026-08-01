@@ -13,6 +13,14 @@ export const DEFAULT_FLEET_PORT = 9099;
 export const DEFAULT_INSTANCE_HEALTH_PORT = 9090;
 
 /**
+ * Default bind address when FLEET_BIND_ADDRESS is unset — loopback only, so
+ * nothing listens on external interfaces unless explicitly configured.
+ * src/core/health.ts carries its own copy for HEALTH_BIND_ADDRESS: it sits in
+ * a lower ring and must not import this module (see ring-boundaries).
+ */
+export const DEFAULT_BIND_ADDRESS = '127.0.0.1';
+
+/**
  * Agreed per-instance health-port band for a single host's fleet.
  *
  * Instance `healthPort` values are expected to fall in this inclusive range so
