@@ -136,10 +136,37 @@ def test_path_like_bot_uses_sanitized_default_state_root(tmp_path, monkeypatch):
     module = load_hook_module()
     monkeypatch.delenv("TOKENOMICS_STATE_DIR", raising=False)
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setattr(sys, "platform", "darwin")
 
     root = module.state_root("../../evil bot")
 
     assert root == pathlib.Path.home() / "Library" / "Application Support" / "evil_bot-tokenomics"
+
+
+def test_path_like_bot_uses_xdg_state_dir_on_linux(tmp_path, monkeypatch):
+    module = load_hook_module()
+    monkeypatch.delenv("TOKENOMICS_STATE_DIR", raising=False)
+    monkeypatch.delenv("XDG_STATE_HOME", raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setattr(sys, "platform", "linux")
+
+    root = module.state_root("../../evil bot")
+
+    assert root == pathlib.Path.home() / ".local" / "state" / "evil_bot-tokenomics"
+    assert "Library" not in str(root)
+    assert "Application Support" not in str(root)
+
+
+def test_path_like_bot_honors_xdg_state_home_override_on_linux(tmp_path, monkeypatch):
+    module = load_hook_module()
+    monkeypatch.delenv("TOKENOMICS_STATE_DIR", raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "custom-xdg"))
+    monkeypatch.setattr(sys, "platform", "linux")
+
+    root = module.state_root("target-bot")
+
+    assert root == tmp_path / "custom-xdg" / "target-bot-tokenomics"
 
 
 def test_empty_stdin_fails_open(tmp_path):
