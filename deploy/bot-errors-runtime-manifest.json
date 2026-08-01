@@ -215,10 +215,11 @@
       "mustContain": [
         "tree_provenance_inventory",
         "def redact_ref",
-        "def redact_path_segment"
+        "def redact_path_segment",
+        "CHECK_FETCH_FAILED"
       ],
       "path": "deploy/scripts/bot-errors-tree-provenance.py",
-      "sha256": "75eabfbd561ac89dcb608b6399280227771590582ed3de36e130562559b578d9"
+      "sha256": "a30f09602408042d503e9730e8a0b2ce49532a72abfe3305e5ac38cd127b3421"
     },
     {
       "mustContain": [
