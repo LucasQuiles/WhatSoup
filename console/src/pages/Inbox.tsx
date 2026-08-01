@@ -15,13 +15,13 @@
  *   opening a conversation with unread marks it read (real mark-read route).
  */
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { useQueries, useQueryClient } from '@tanstack/react-query'
+import { useQueries, useQueryClient, type QueryClient } from '@tanstack/react-query'
 import { useSearchParams } from 'react-router-dom'
 import { getChatsQueryOptions, useLines, useMessages } from '../hooks/use-fleet'
 import { useRealtime } from '../hooks/use-websocket'
-import { useToast } from '../hooks/toast-context'
+import { useToast, type ToastContextValue } from '../hooks/toast-context'
 import { api } from '../lib/api'
-import type { ChatItem, Message } from '../types'
+import type { ChatItem, MarkConversationReadResult, Message } from '../types'
 import type { InboxChannel, InboxSeg } from '../lib/inbox-unified'
 import {
   conversationId,
@@ -37,6 +37,37 @@ import { ChannelGlyph } from '../components/inbox/channel-glyphs'
 import { CHANNEL_LABEL } from '../lib/transport-identity'
 import { Button } from '../components/primitives/Button'
 import EmptyState from '../components/EmptyState'
+
+/**
+ * #2550: the local `unread_count` zero already happened (optimistic, at the
+ * call site) — this only decides whether the operator needs to be told the
+ * REMOTE side disagrees. `acked`/`nothing_to_ack` settle silently (today's
+ * behavior, unchanged); `offline`/`failed` are the states the console used
+ * to discard, rendering a remote failure identically to a real ack.
+ */
+function applyMarkReadOutcome(
+  result: MarkConversationReadResult,
+  ctx: { line: string; queryClient: QueryClient; toast: ToastContextValue },
+): void {
+  switch (result.remote) {
+    case 'acked':
+    case 'nothing_to_ack':
+      return
+    case 'offline':
+      ctx.toast.info('Read marked locally — the line is offline, so the read receipt was not sent yet. It will resync once reconnected.')
+      return
+    case 'failed':
+      ctx.queryClient.invalidateQueries({ queryKey: ['chats', ctx.line] })
+      ctx.toast.error('Read receipt failed to send — the line may still show this chat as unread.')
+      return
+    default: {
+      // Compile-time exhaustiveness guard: a new backend `remote` state must
+      // be handled explicitly above, not silently fall through as if acked.
+      const unreachable: never = result.remote
+      ctx.toast.error(`Unrecognized mark-read outcome: ${String(unreachable)}`)
+    }
+  }
+}
 
 export default function Inbox() {
   const { data: lines } = useLines()
@@ -119,10 +150,12 @@ export default function Inbox() {
     queryClient.setQueryData<ChatItem[]>(['chats', line], (old) =>
       old?.map((c) => (c.conversationKey === key ? { ...c, unreadCount: 0 } : c)),
     )
-    api.markRead(line, key).catch((e) => {
-      queryClient.invalidateQueries({ queryKey: ['chats', line] })
-      toast.error(`Failed to mark read: ${e instanceof Error ? e.message : e}`)
-    })
+    api.markRead(line, key)
+      .then((result) => applyMarkReadOutcome(result, { line, queryClient, toast }))
+      .catch((e) => {
+        queryClient.invalidateQueries({ queryKey: ['chats', line] })
+        toast.error(`Failed to mark read: ${e instanceof Error ? e.message : e}`)
+      })
   }, [selected, selectedConversation, selectedId, queryClient, toast])
 
   const handleLoadOlder = async () => {

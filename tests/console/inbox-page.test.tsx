@@ -154,6 +154,17 @@ function makeChat(conversationKey: string, overrides: Record<string, unknown> = 
   }
 }
 
+/** #2550: the typed mark-read outcome the console now inspects. */
+function markReadResult(remote: 'acked' | 'nothing_to_ack' | 'offline' | 'failed', overrides: Record<string, unknown> = {}) {
+  return {
+    ok: true as const,
+    jid: '15555550100@s.whatsapp.net',
+    conversation_key: 'conv-a',
+    remote,
+    ...overrides,
+  }
+}
+
 function makeMessage(pk: number, content: string | null, overrides: Record<string, unknown> = {}) {
   return {
     pk,
@@ -190,7 +201,9 @@ beforeEach(() => {
   getChatsMock.mockReset().mockResolvedValue([makeChat('conv-a')])
   getMessagesMock.mockReset().mockResolvedValue([])
   sendMessageMock.mockReset().mockResolvedValue(undefined)
-  markReadMock.mockReset().mockResolvedValue(undefined)
+  // Default to the common healthy path (#2550); state-specific tests below
+  // override with mockResolvedValueOnce for the other three remote outcomes.
+  markReadMock.mockReset().mockResolvedValue(markReadResult('acked'))
   getCheckpointsMock.mockReset().mockResolvedValue({ observedAt: '', checkpoints: [] })
   Object.values(toastMock).forEach((fn) => fn.mockClear())
 })
@@ -377,6 +390,87 @@ describe('v3.5 inbox — mark-read on open', () => {
     await waitFor(() => expect(toastMock.error).toHaveBeenCalled())
     expect(toastMock.error.mock.calls[0]![0]).toContain('route gone')
     expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ['chats', 'personal'] })
+  })
+
+  // #2550: the resolved remote-receipt body reaches Inbox.tsx now — these
+  // pin the four backend states plus the unknown-state visibility guard.
+  describe('remote receipt outcome (#2550)', () => {
+    it('acked clears the optimistic state without any warning toast', async () => {
+      getChatsMock.mockResolvedValue([makeChat('conv-a', { unreadCount: 2 })])
+      markReadMock.mockResolvedValueOnce(markReadResult('acked'))
+      const { container } = renderInbox()
+      await waitFor(() => expect(container.querySelector('.inbox-citem')).not.toBeNull())
+      fireEvent.click(container.querySelector('.inbox-citem')!)
+      await waitFor(() => expect(markReadMock).toHaveBeenCalled())
+      await waitFor(() => expect(container.querySelectorAll('.inbox-ub').length).toBe(0))
+      expect(toastMock.error).not.toHaveBeenCalled()
+      expect(toastMock.info).not.toHaveBeenCalled()
+    })
+
+    it('nothing_to_ack is a quiet healthy no-op, distinguishable from failure', async () => {
+      getChatsMock.mockResolvedValue([makeChat('conv-a', { unreadCount: 2 })])
+      markReadMock.mockResolvedValueOnce(markReadResult('nothing_to_ack'))
+      const { container } = renderInbox()
+      await waitFor(() => expect(container.querySelector('.inbox-citem')).not.toBeNull())
+      fireEvent.click(container.querySelector('.inbox-citem')!)
+      await waitFor(() => expect(markReadMock).toHaveBeenCalled())
+      expect(toastMock.error).not.toHaveBeenCalled()
+      expect(toastMock.info).not.toHaveBeenCalled()
+    })
+
+    it('offline renders a local-only/pending-sync notice, not silence', async () => {
+      getChatsMock.mockResolvedValue([makeChat('conv-a', { unreadCount: 2 })])
+      markReadMock.mockResolvedValueOnce(markReadResult('offline'))
+      const { container } = renderInbox()
+      await waitFor(() => expect(container.querySelector('.inbox-citem')).not.toBeNull())
+      fireEvent.click(container.querySelector('.inbox-citem')!)
+      await waitFor(() => expect(toastMock.info).toHaveBeenCalled())
+      expect(toastMock.info.mock.calls[0]![0]).toMatch(/offline/i)
+      // no raw identity leaks into the copy (jid/conversation_key)
+      expect(toastMock.info.mock.calls[0]![0]).not.toContain('conv-a')
+      expect(toastMock.error).not.toHaveBeenCalled()
+    })
+
+    it('failed renders a warning and re-invalidates so the badge can resettle from truth', async () => {
+      getChatsMock.mockResolvedValue([makeChat('conv-a', { unreadCount: 2 })])
+      markReadMock.mockResolvedValueOnce(markReadResult('failed'))
+      const { container, qc } = renderInbox()
+      const invalidateSpy = vi.spyOn(qc, 'invalidateQueries')
+      await waitFor(() => expect(container.querySelector('.inbox-citem')).not.toBeNull())
+      fireEvent.click(container.querySelector('.inbox-citem')!)
+      await waitFor(() => expect(toastMock.error).toHaveBeenCalled())
+      expect(toastMock.error.mock.calls[0]![0]).toMatch(/fail/i)
+      expect(toastMock.error.mock.calls[0]![0]).not.toContain('conv-a')
+      expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ['chats', 'personal'] })
+    })
+
+    it('an unrecognized remote state fails visibly rather than passing as a silent ack', async () => {
+      getChatsMock.mockResolvedValue([makeChat('conv-a', { unreadCount: 2 })])
+      markReadMock.mockResolvedValueOnce(
+        markReadResult('acked', { remote: 'mystery-future-state' }),
+      )
+      const { container } = renderInbox()
+      await waitFor(() => expect(container.querySelector('.inbox-citem')).not.toBeNull())
+      fireEvent.click(container.querySelector('.inbox-citem')!)
+      await waitFor(() => expect(toastMock.error).toHaveBeenCalled())
+      expect(toastMock.error.mock.calls[0]![0]).toContain('mystery-future-state')
+    })
+
+    it('does not re-fire mark-read for the same open selection after a failed-outcome invalidate', async () => {
+      getChatsMock.mockResolvedValue([makeChat('conv-a', { unreadCount: 2 })])
+      markReadMock.mockResolvedValueOnce(markReadResult('failed'))
+      const { container } = renderInbox()
+      await waitFor(() => expect(container.querySelector('.inbox-citem')).not.toBeNull())
+      const callsBeforeSelect = getChatsMock.mock.calls.length
+      fireEvent.click(container.querySelector('.inbox-citem')!)
+      await waitFor(() => expect(toastMock.error).toHaveBeenCalled())
+      expect(markReadMock).toHaveBeenCalledTimes(1)
+      // 'failed' invalidates ['chats','personal'], forcing a real refetch —
+      // wait for that refetch to actually land (getChatsMock called again)
+      // before re-checking that the per-selection guard held mark-read to 1.
+      await waitFor(() => expect(getChatsMock.mock.calls.length).toBeGreaterThan(callsBeforeSelect))
+      expect(markReadMock).toHaveBeenCalledTimes(1)
+    })
   })
 })
 

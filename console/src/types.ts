@@ -463,3 +463,12 @@ export interface ApprovalsPayload {
    *  never a fake-empty queue (fail-closed, PDR-3). */
   readError?: boolean;
 }
+
+/**
+ * Mark-read remote receipt (#2550). Shared live from the backend's leaf
+ * types module (not `src/core/mark-read.ts` itself, which pulls in the
+ * database/connection graph) so a future backend state added to the union
+ * cannot silently vanish at this boundary — it fails the console's
+ * exhaustiveness check at compile time instead.
+ */
+export type { MarkReadRemoteStatus, MarkConversationReadResult } from '../../src/core/mark-read-types.ts';
