@@ -1,9 +1,10 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { describe, expect, it } from 'vitest';
 import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+
+import { trackTmpDirs } from '../helpers/tmp-dir.ts';
 
 const STOP_HOOK = join(process.cwd(), 'deploy/hooks/stop-ensure-reply.mjs');
 const POST_TOOL_HOOK = join(process.cwd(), 'deploy/hooks/post-tool-use-log.mjs');
@@ -14,22 +15,18 @@ const PRIVATE_KEY_SAMPLE = ['-----BEGIN ', 'PRIVATE KEY-----', '\nabc\n', '-----
 const URL_USERINFO_SAMPLE = `https://user:pass@${'service'}.invalid/path`;
 const REDACTED_URL_USERINFO = `https://[REDACTED]@${'service'}.invalid/path`;
 
-const tmpDirs: string[] = [];
+const tmp = trackTmpDirs('rgp-hooks-');
 
 function testCwdHash(): string {
   return createHash('sha256').update(process.cwd()).digest('hex').slice(0, 12);
 }
 
 function makeHome(): string {
-  const dir = mkdtempSync(join(tmpdir(), 'rgp-hooks-home-'));
-  tmpDirs.push(dir);
-  return dir;
+  return tmp.make('home');
 }
 
 function writeTranscript(records: unknown[]): string {
-  const dir = mkdtempSync(join(tmpdir(), 'rgp-hooks-transcript-'));
-  tmpDirs.push(dir);
-  const path = join(dir, 'transcript.jsonl');
+  const path = join(tmp.make('transcript'), 'transcript.jsonl');
   writeFileSync(path, `${records.map((record) => JSON.stringify(record)).join('\n')}\n`);
   return path;
 }
@@ -83,13 +80,6 @@ function readWritefails(dir: string): Record<string, any>[] {
     .filter((name) => name.endsWith('.writefail'))
     .map((name) => JSON.parse(readFileSync(join(dir, name), 'utf8')));
 }
-
-afterEach(() => {
-  for (const dir of tmpDirs) {
-    rmSync(dir, { recursive: true, force: true });
-  }
-  tmpDirs.length = 0;
-});
 
 describe('PostToolUse RGP error logger', () => {
   it('records tool errors as bounded session JSONL without blocking the hook path', () => {
@@ -223,8 +213,7 @@ describe('PostToolUse RGP error logger', () => {
 
   it('keeps unconfigured Vitest hook alerts out of the real home outbox', () => {
     const home = makeHome();
-    const temp = mkdtempSync(join(tmpdir(), 'rgp-hooks-vitest-state-'));
-    tmpDirs.push(temp);
+    const temp = tmp.make('vitest-state');
 
     const result = runNodeHook(POST_TOOL_HOOK, {
       session_id: 'session-vitest-default',
@@ -255,8 +244,7 @@ describe('PostToolUse RGP error logger', () => {
 
   it('redirects an explicit live hook outbox under strong test provenance', () => {
     const home = makeHome();
-    const temp = mkdtempSync(join(tmpdir(), 'rgp-hooks-vitest-live-'));
-    tmpDirs.push(temp);
+    const temp = tmp.make('vitest-live');
     const liveOutbox = botErrorsOutbox(home);
 
     const result = runNodeHook(POST_TOOL_HOOK, {
@@ -348,8 +336,7 @@ describe('PostToolUse RGP error logger', () => {
   });
 
   it('uses HOME writefail fallback before TMPDIR when override and state writefail dirs are blocked', () => {
-    const root = mkdtempSync(join(tmpdir(), 'rgp-hooks-writefail-fallback-'));
-    tmpDirs.push(root);
+    const root = tmp.make('writefail-fallback');
     const blockedOverride = join(root, 'blocked-override');
     const stateRoot = join(root, 'state');
     const home = join(root, 'home');

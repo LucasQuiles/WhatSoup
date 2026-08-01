@@ -323,7 +323,7 @@ export function validateInstanceConfig(
     if (!Array.isArray(phones) || phones.length === 0) {
       return err('adminPhones', 'adminPhones must be a non-empty array of phone numbers');
     }
-    if (phones.some((p) => typeof p !== 'string' || (p as string).trim() === '')) {
+    if (phones.some((p) => !isNonEmptyString(p))) {
       // Preserve the loader's instance-path-flavored message vs the route's array message.
       if (ctx.mode === 'load') {
         return err(
@@ -373,7 +373,7 @@ export function validateInstanceConfig(
     const seen = new Set<string>();
     for (const [alias, chatJid] of Object.entries(chatAliases as Record<string, unknown>)) {
       const trimmed = alias.trim();
-      if (trimmed === '' || typeof chatJid !== 'string' || (chatJid as string).trim() === '') {
+      if (trimmed === '' || !isNonEmptyString(chatJid)) {
         return err('chatAliases', 'chatAliases must contain only non-empty alias -> chatJid strings');
       }
       if (seen.has(trimmed)) {
@@ -515,7 +515,7 @@ function validateProviderConfigShape(
   // non-empty, parseable absolute http(s) URL — a malformed value would
   // silently break routing at agent/chat startup.
   if (pc['baseUrl'] !== undefined) {
-    if (typeof pc['baseUrl'] !== 'string' || pc['baseUrl'].trim() === '') {
+    if (!isNonEmptyString(pc['baseUrl'])) {
       return err(
         `${path}.baseUrl`,
         `${path}.baseUrl must be a non-empty string when provided`,
@@ -547,7 +547,7 @@ function validateProviderConfigShape(
   // endpoint for the key to authenticate, so the setting would be silently
   // inert — reject.
   if (pc['apiKeyService'] !== undefined) {
-    if (typeof pc['apiKeyService'] !== 'string' || pc['apiKeyService'].trim() === '') {
+    if (!isNonEmptyString(pc['apiKeyService'])) {
       return err(
         `${path}.apiKeyService`,
         `${path}.apiKeyService must be a non-empty string when provided`,
@@ -683,7 +683,7 @@ function validateCommandSurfaceConfig(
   if (surface['disabled'] !== undefined) {
     if (
       !Array.isArray(surface['disabled']) ||
-      !(surface['disabled'] as unknown[]).every((d) => typeof d === 'string' && d.trim() !== '')
+      !(surface['disabled'] as unknown[]).every((d) => isNonEmptyString(d))
     ) {
       return err(
         'agentOptions.commandSurface.disabled',
@@ -1004,7 +1004,7 @@ function validateAgentOptions(
         );
       }
       const model = rawEntry['model'];
-      if (model !== undefined && (typeof model !== 'string' || model.trim() === '')) {
+      if (model !== undefined && !isNonEmptyString(model)) {
         return err(`${field}.model`, `${field}.model must be a non-empty string when provided`);
       }
       if (FALLBACK_MODEL_REQUIRED_PROVIDER_IDS.has(provider) && model === undefined) {
@@ -1245,7 +1245,7 @@ function validateAgentOptions(
   if (opts['provider'] === 'opencode-cli') {
     const pc = opts['providerConfig'];
     const apiKeyService = isRecord(pc) ? pc['apiKeyService'] : undefined;
-    const namesServiceExplicitly = typeof apiKeyService === 'string' && apiKeyService.trim() !== '';
+    const namesServiceExplicitly = isNonEmptyString(apiKeyService);
     // An explicit providerConfig.apiKeyService (validated above to a mapped
     // service + baseUrl) names the route directly, so the model prefix is not
     // consulted — exactly as buildChildEnv skips it. Otherwise the prefix must

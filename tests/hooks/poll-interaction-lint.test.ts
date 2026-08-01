@@ -1,17 +1,12 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { describe, expect, it } from 'vitest';
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
-const HOOK = join(process.cwd(), 'deploy/hooks/poll-interaction-lint.mjs');
-const tmpDirs: string[] = [];
+import { trackTmpDirs } from '../helpers/tmp-dir.ts';
 
-function makeTempDir(prefix: string): string {
-  const dir = mkdtempSync(join(tmpdir(), prefix));
-  tmpDirs.push(dir);
-  return dir;
-}
+const HOOK = join(process.cwd(), 'deploy/hooks/poll-interaction-lint.mjs');
+const tmp = trackTmpDirs('poll-lint-');
 
 function runHook(payload: unknown, home: string) {
   return spawnSync(process.execPath, [HOOK], {
@@ -30,13 +25,9 @@ function readHookJsonl(home: string, sessionId: string): Array<{ findings?: Arra
     .map((line) => JSON.parse(line.slice(line.indexOf('{'))));
 }
 
-afterEach(() => {
-  for (const dir of tmpDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
-});
-
 describe('poll-interaction-lint hook', () => {
   it('logs a diagnostic when an agent asks the user to type a vote status', () => {
-    const home = makeTempDir('poll-lint-home-');
+    const home = tmp.make('home');
 
     const result = runHook({
       session_id: 'session-a',
@@ -53,7 +44,7 @@ describe('poll-interaction-lint hook', () => {
   });
 
   it('logs poll shape issues that create WhatsApp or agent-friction failures', () => {
-    const home = makeTempDir('poll-lint-home-');
+    const home = tmp.make('home');
 
     const result = runHook({
       session_id: 'session-b',
@@ -79,7 +70,7 @@ describe('poll-interaction-lint hook', () => {
   });
 
   it('does not log for a concise valid coordination poll', () => {
-    const home = makeTempDir('poll-lint-home-');
+    const home = tmp.make('home');
 
     const result = runHook({
       session_id: 'session-c',
@@ -98,7 +89,7 @@ describe('poll-interaction-lint hook', () => {
   });
 
   it('fails open on malformed hook input', () => {
-    const home = makeTempDir('poll-lint-home-');
+    const home = tmp.make('home');
 
     const result = runHook('{not-json', home);
 

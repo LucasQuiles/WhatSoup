@@ -209,7 +209,7 @@ function linkedStatusFromHealth(health: Record<string, unknown> | null): LinkedS
   const healthStatus = dig(health, 'status');
   const accountJidStatus = accountJid === 'not connected'
     ? 'not_connected'
-    : typeof accountJid === 'string' && accountJid.trim() !== ''
+    : isNonEmptyString(accountJid)
       ? 'present'
       : 'unknown';
   const explicitAuthLossSignal =

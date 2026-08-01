@@ -83,7 +83,7 @@ resolve_platform() {
 write_launchd() {
   local plist="$LAUNCH_AGENTS/$LABEL.plist"
   local watchdog_plist="$LAUNCH_AGENTS/$WATCHDOG_LABEL.plist"
-  local label_xml watchdog_label_xml repo_xml py_xml script_xml watchdog_script_xml state_xml sentinel_xml hosts_xml oracle_xml action_outbox_xml sentinel_heartbeat_xml heartbeat_xml hysteresis_xml connectivity_hysteresis_xml flap_window_xml flap_threshold_xml max_tier1_xml correlated_xml clock_skew_xml action_cooldown_xml whatsapp_cap_xml tier2_token_ttl_xml q_host_xml watchdog_max_age_xml stdout_xml stderr_xml watchdog_stdout_xml watchdog_stderr_xml
+  local label_xml watchdog_label_xml repo_xml py_xml script_xml watchdog_script_xml state_xml sentinel_xml hosts_xml oracle_xml action_outbox_xml sentinel_heartbeat_xml heartbeat_xml hysteresis_xml connectivity_hysteresis_xml flap_window_xml flap_threshold_xml max_tier1_xml correlated_xml clock_skew_xml action_cooldown_xml whatsapp_cap_xml tier2_token_ttl_xml q_host_xml action_outbox_retention_xml lock_xml ssh_command_xml ssh_connect_timeout_xml ssh_probe_timeout_xml watchdog_max_age_xml stdout_xml stderr_xml watchdog_stdout_xml watchdog_stderr_xml
   label_xml=$(xml_escape "$LABEL")
   watchdog_label_xml=$(xml_escape "$WATCHDOG_LABEL")
   repo_xml=$(xml_escape "$REPO_ROOT")
@@ -108,6 +108,13 @@ write_launchd() {
   whatsapp_cap_xml=$(xml_escape "${BOT_ERRORS_FLEET_SENTINEL_MAX_CRITICAL_WHATSAPP_PER_DAY:-8}")
   tier2_token_ttl_xml=$(xml_escape "${BOT_ERRORS_FLEET_SENTINEL_TIER2_TOKEN_TTL_SECONDS:-1800}")
   q_host_xml=$(xml_escape "${BOT_ERRORS_FLEET_SENTINEL_Q_HOST:-q-agent-host}")
+  # launchd has no EnvironmentFile hydration, so every supported runtime key
+  # must be baked here; defaults must match the bot-errors-sentinel.py fallbacks.
+  action_outbox_retention_xml=$(xml_escape "${BOT_ERRORS_FLEET_SENTINEL_ACTION_OUTBOX_RETENTION:-500}")
+  lock_xml=$(xml_escape "${BOT_ERRORS_FLEET_SENTINEL_LOCK:-$HOME/.local/state/bot-errors/fleet-sentinel/sentinel-instance.lock}")
+  ssh_command_xml=$(xml_escape "${BOT_ERRORS_FLEET_SENTINEL_SSH_COMMAND:-ssh}")
+  ssh_connect_timeout_xml=$(xml_escape "${BOT_ERRORS_FLEET_SENTINEL_SSH_CONNECT_TIMEOUT_SECONDS:-8}")
+  ssh_probe_timeout_xml=$(xml_escape "${BOT_ERRORS_FLEET_SENTINEL_SSH_PROBE_TIMEOUT_SECONDS:-30}")
   watchdog_max_age_xml=$(xml_escape "$WATCHDOG_MAX_AGE_SECONDS")
   stdout_xml=$(xml_escape "$STATE_DIR/logs/sentinel.out.log")
   stderr_xml=$(xml_escape "$STATE_DIR/logs/sentinel.err.log")
@@ -151,6 +158,11 @@ write_launchd() {
     <key>BOT_ERRORS_FLEET_SENTINEL_MAX_CRITICAL_WHATSAPP_PER_DAY</key><string>$whatsapp_cap_xml</string>
     <key>BOT_ERRORS_FLEET_SENTINEL_TIER2_TOKEN_TTL_SECONDS</key><string>$tier2_token_ttl_xml</string>
     <key>BOT_ERRORS_FLEET_SENTINEL_Q_HOST</key><string>$q_host_xml</string>
+    <key>BOT_ERRORS_FLEET_SENTINEL_ACTION_OUTBOX_RETENTION</key><string>$action_outbox_retention_xml</string>
+    <key>BOT_ERRORS_FLEET_SENTINEL_LOCK</key><string>$lock_xml</string>
+    <key>BOT_ERRORS_FLEET_SENTINEL_SSH_COMMAND</key><string>$ssh_command_xml</string>
+    <key>BOT_ERRORS_FLEET_SENTINEL_SSH_CONNECT_TIMEOUT_SECONDS</key><string>$ssh_connect_timeout_xml</string>
+    <key>BOT_ERRORS_FLEET_SENTINEL_SSH_PROBE_TIMEOUT_SECONDS</key><string>$ssh_probe_timeout_xml</string>
   </dict>
   <key>WorkingDirectory</key><string>$repo_xml</string>
   <key>RunAtLoad</key><true/>
