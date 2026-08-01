@@ -52,4 +52,22 @@ describe('fleet time-utils', () => {
     vi.spyOn(Date, 'now').mockReturnValue(1_744_000_123_987);
     expect(nowUnixSec()).toBe(1_744_000_123);
   });
+
+  // #2526: toIsoFromUnix must preserve millisecond precision.  The old
+  // implementation routed through normalizeUnixTimestampSeconds (which floors
+  // to epoch seconds for storage), losing the subsecond part.  A Pino numeric
+  // timestamp ending in .676 must round-trip as .676Z, not .000Z.
+  it('preserves millisecond precision for unix millisecond timestamps (#2526)', () => {
+    expect(toIsoFromUnix(1_744_000_000_676)).toBe('2025-04-07T04:26:40.676Z');
+  });
+
+  it('preserves millisecond precision through normalizeTimestamp for numeric inputs (#2526)', () => {
+    expect(normalizeTimestamp(1_744_000_000_676)).toBe('2025-04-07T04:26:40.676Z');
+  });
+
+  it('still handles whole-second unix millisecond timestamps correctly (#2526)', () => {
+    // Regression guard: values ending in 000ms must not regress
+    expect(toIsoFromUnix(1_744_000_000_000)).toBe('2025-04-07T04:26:40.000Z');
+    expect(toIsoFromUnix(1_744_000_000)).toBe('2025-04-07T04:26:40.000Z');
+  });
 });

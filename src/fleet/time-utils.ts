@@ -13,9 +13,15 @@ export function normalizeUnixTimestampSeconds(value: unknown, fallback = nowUnix
   return whole >= UNIX_MILLISECONDS_THRESHOLD ? Math.floor(whole / 1000) : whole;
 }
 
-/** Convert Unix timestamp (seconds or milliseconds) to ISO string. */
+/** Convert Unix timestamp (seconds or milliseconds) to ISO string.
+ *
+ * Preserves millisecond precision: does NOT route through
+ * ``normalizeUnixTimestampSeconds`` (which floors to epoch seconds for
+ * storage).  Instead, detects seconds vs. milliseconds directly so a
+ * numeric Pino timestamp ending in .676 round-trips as .676Z (#2526). */
 export function toIsoFromUnix(ts: number): string {
-  return new Date(normalizeUnixTimestampSeconds(ts, ts) * 1000).toISOString();
+  const ms = ts >= UNIX_MILLISECONDS_THRESHOLD ? ts : ts * 1000;
+  return new Date(ms).toISOString();
 }
 
 /** Current time as Unix seconds. */
