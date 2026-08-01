@@ -25,24 +25,25 @@
  * eligibility reads/writes (exposed as public readonly fields).
  */
 import { createChildLogger } from '../../logger.ts';
+import { MS_PER_MINUTE, MS_PER_HOUR } from '../../lib/time-units.ts';
 
 // Same component name as AgentRuntime: the rapid-rearm / next-turn warnings keep
 // their existing `component: 'agent-runtime'` log binding (no observable change).
 const log = createChildLogger('agent-runtime');
 
 /** TTL for the silent-compact suppression window (mirrors a /compact round-trip). */
-export const SILENT_COMPACT_TTL_MS = 5 * 60 * 1000;
+export const SILENT_COMPACT_TTL_MS = 5 * MS_PER_MINUTE;
 // Baseline cooldown after a successful auto-compact before another may start.
 // Keeps success and timeout paths from re-arming /compact on every turn.
-export const AUTO_COMPACT_SUCCESS_COOLDOWN_MS = 5 * 60 * 1000;
+export const AUTO_COMPACT_SUCCESS_COOLDOWN_MS = 5 * MS_PER_MINUTE;
 // A scope eligible again inside this window after a successful compact is a
 // rapid re-arm: the compact completed but was operationally ineffective.
-export const AUTO_COMPACT_RAPID_REARM_WINDOW_MS = 5 * 60 * 1000;
+export const AUTO_COMPACT_RAPID_REARM_WINDOW_MS = 5 * MS_PER_MINUTE;
 export const AUTO_COMPACT_BACKOFF_TIERS_MS = [
   AUTO_COMPACT_SUCCESS_COOLDOWN_MS,
-  15 * 60 * 1000,
-  30 * 60 * 1000,
-  60 * 60 * 1000,
+  15 * MS_PER_MINUTE,
+  30 * MS_PER_MINUTE,
+  MS_PER_HOUR,
 ] as const;
 
 interface AutoCompactWaiter {

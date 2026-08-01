@@ -4,6 +4,7 @@ import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 import { isRecord } from '../src/lib/type-guards.ts';
+import { MS_PER_DAY } from '../src/lib/time-units.ts';
 import { receiptCapabilityDigest } from './lib/fleet-receipt-digest.ts';
 import { rosterEpoch, rosterInventory } from './lib/fleet-roster-inventory.ts';
 
@@ -27,7 +28,7 @@ export const FLEET_ROSTER_PATH = 'deploy/bot-errors-expected-fleet.json';
 // expiry is tracked separately from this age check.
 export const FLEET_BOT_HARDENING_PARITY_MAX_AGE_DAYS = 90;
 const FLEET_BOT_HARDENING_PARITY_MAX_AGE_MS =
-  FLEET_BOT_HARDENING_PARITY_MAX_AGE_DAYS * 24 * 60 * 60 * 1000;
+  FLEET_BOT_HARDENING_PARITY_MAX_AGE_DAYS * MS_PER_DAY;
 
 export const REQUIRED_FLEET_BOT_HARDENING_CAPABILITIES = [
   'turn-capability-health',

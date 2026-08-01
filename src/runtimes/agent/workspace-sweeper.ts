@@ -16,6 +16,7 @@
 import { createChildLogger } from '../../logger.ts';
 import { WhatSoupSocketServer } from '../../mcp/socket-server.ts';
 import { type MediaBridge } from './media-bridge.ts';
+import { MS_PER_MINUTE } from '../../lib/time-units.ts';
 
 const log = createChildLogger('agent-runtime');
 
@@ -31,8 +32,8 @@ export class WorkspaceSweeper {
   /** The periodic sweep interval handle. Public so tests can assert lifecycle. */
   timer: ReturnType<typeof setInterval> | null = null;
 
-  private static readonly WORKSPACE_IDLE_MS = 30 * 60 * 1000;
-  private static readonly WORKSPACE_SWEEP_INTERVAL_MS = 5 * 60 * 1000;
+  private static readonly WORKSPACE_IDLE_MS = 30 * MS_PER_MINUTE;
+  private static readonly WORKSPACE_SWEEP_INTERVAL_MS = 5 * MS_PER_MINUTE;
 
   // Explicit fields + assignment, NOT TS constructor parameter-properties: Node's
   // --experimental-strip-types rejects the access-modifier-in-constructor-args
