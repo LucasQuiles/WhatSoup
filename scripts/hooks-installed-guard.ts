@@ -24,6 +24,7 @@ import {
 } from './lib/verification/boundary-run/shared.ts';
 import { parseBoundaryJsonBytes } from './lib/verification/boundary-run/schema.ts';
 import { reasonDefinition } from './lib/ci-control/reasons.ts';
+import { isTrustedGitOwner, resolveTrustedGit } from './lib/ci-control/trusted-git.ts';
 
 export const HOOK_ENTRYPOINTS = [
   '.husky/commit-msg',
@@ -85,19 +86,18 @@ const OID = /^[0-9a-f]{40}$/;
 const MAX_GIT_BYTES = 1_000_000;
 export const MAX_HOOK_RECEIPT_BYTES = 64 * 1024;
 const GIT_TIMEOUT_MS = 10_000;
-const TRUSTED_GIT_PATH = '/usr/bin/git';
 const MAX_GIT_EXECUTABLE_BYTES = 128 * 1024 * 1024;
 const MAX_INSTALLED_HOOK_BYTES = 1_000_000;
 
 interface TrustedGitExecutable {
-  path: typeof TRUSTED_GIT_PATH;
+  path: string;
   identity: GitExecutableIdentityV1;
 }
 
 function trustedSystemFile(path: string): { digest: string } | null {
   try {
     const stat = lstatSync(path);
-    if (stat.isSymbolicLink() || !stat.isFile() || stat.uid !== 0 || (stat.mode & 0o022) !== 0) return null;
+    if (stat.isSymbolicLink() || !stat.isFile() || !isTrustedGitOwner(stat.uid) || (stat.mode & 0o022) !== 0) return null;
     if (stat.size <= 0 || stat.size > MAX_GIT_EXECUTABLE_BYTES) return null;
     accessSync(path, constants.R_OK | constants.X_OK);
     const bytes = readFileSync(path);
@@ -109,9 +109,10 @@ function trustedSystemFile(path: string): { digest: string } | null {
 
 function trustedGitExecutable(): TrustedGitExecutable | null {
   try {
-    const launcher = trustedSystemFile(TRUSTED_GIT_PATH);
+    const trustedGitPath = resolveTrustedGit();
+    const launcher = trustedSystemFile(trustedGitPath);
     if (launcher === null) return null;
-    const version = execFileSync(TRUSTED_GIT_PATH, ['--version'], {
+    const version = execFileSync(trustedGitPath, ['--version'], {
       env: exactGitEnvironment(),
       encoding: 'utf8',
       maxBuffer: 4_096,
@@ -119,7 +120,7 @@ function trustedGitExecutable(): TrustedGitExecutable | null {
       stdio: ['ignore', 'pipe', 'pipe'],
     }).trim();
     if (!/^git version [0-9][0-9A-Za-z. ()+-]{0,127}$/.test(version)) return null;
-    const execPath = execFileSync(TRUSTED_GIT_PATH, ['--exec-path'], {
+    const execPath = execFileSync(trustedGitPath, ['--exec-path'], {
       env: exactGitEnvironment(),
       encoding: 'utf8',
       maxBuffer: 4_096,
@@ -131,7 +132,7 @@ function trustedGitExecutable(): TrustedGitExecutable | null {
     const implementation = trustedSystemFile(implementationPath);
     if (implementation === null) return null;
     return {
-      path: TRUSTED_GIT_PATH,
+      path: trustedGitPath,
       identity: {
         identity: 'system',
         version,

@@ -177,6 +177,18 @@ async function resolveClaude(deps: CatalogueResolveDeps): Promise<AvailableModel
   if (result.status === 'failed') {
     return { status: 'unavailable', reason: categoryToReason(result.category), asOfLabel: 'just now' };
   }
+  // An HTTP-200 with an EMPTY body is untrustworthy, not "this org has zero
+  // models" — normalize to unavailable/empty (matches resolveOpencode's own
+  // empty handling) rather than ok+ids:[], which downstream (the drill
+  // Level-2 render, and verifyModelPinAgainstCatalogue's pin re-validation)
+  // reads as a real, queried, empty catalogue: the drill would render a
+  // blank menu instead of degrading, and the pin re-validation would map it
+  // to {available:true, ids:[]} and silently drop a just-verified pin. No
+  // cache exists on this path (unlike resolveOpenai below), so there is no
+  // stale-serve interaction to preserve here.
+  if (result.ids.length === 0) {
+    return { status: 'unavailable', reason: { kind: 'empty' }, asOfLabel: 'just now' };
+  }
   // The org catalogue — labeled as its source, NOT "what this harness can run".
   return { status: 'ok', ids: result.ids, sourceLabel: 'anthropic /v1/models (org catalogue)', asOfLabel: 'just now' };
 }
@@ -186,7 +198,10 @@ async function resolveClaude(deps: CatalogueResolveDeps): Promise<AvailableModel
  * discipline as resolveOpencode: a fresh capture serves without a network call,
  * and a transient re-probe failure (including a THROWN fetch, never assumed
  * total from an injected fn) serves the last-known-good list stale rather than
- * blanking the catalogue, with the age disclosed rather than hidden.
+ * blanking the catalogue, with the age disclosed rather than hidden. An
+ * HTTP-200-but-EMPTY response is treated the same way: it never overwrites the
+ * cache and never wins over a stale non-empty last-known-good serve — it only
+ * becomes unavailable/empty when there is no prior capture to fall back on.
  */
 async function resolveOpenai(deps: CatalogueResolveDeps): Promise<AvailableModelsListing> {
   const openaiFn = deps.openaiFn ?? fetchOpenAIModelIdsWithStatus;
@@ -207,6 +222,20 @@ async function resolveOpenai(deps: CatalogueResolveDeps): Promise<AvailableModel
   }
 
   if (result.status === 'ok') {
+    // An HTTP-200 with an EMPTY body is untrustworthy, not "this org has zero
+    // models" — treat it exactly like a transient failure for cache purposes:
+    // never let it overwrite `openaiCache`, and prefer serving the stale
+    // last-known-good list (age disclosed, same as the 'failed' branch below)
+    // over blanking the catalogue. Only when there is no prior capture to
+    // fall back on does it become unavailable/empty. This mirrors
+    // resolveOpencode's own empty handling and keeps an empty fresh capture
+    // from clobbering a non-empty last-known-good serve.
+    if (result.ids.length === 0) {
+      if (cached) {
+        return { status: 'ok', ids: cached.ids, sourceLabel, asOfLabel: formatCaptureAsOf(cached.capturedAtMs, deps.nowMs) };
+      }
+      return { status: 'unavailable', reason: { kind: 'empty' }, asOfLabel: 'just now' };
+    }
     openaiCache = { ids: [...result.ids], capturedAtMs: deps.nowMs };
     return { status: 'ok', ids: result.ids, sourceLabel, asOfLabel: 'just now' };
   }

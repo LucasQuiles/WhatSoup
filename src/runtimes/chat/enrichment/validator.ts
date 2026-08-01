@@ -6,6 +6,7 @@ import type { StoredMessage } from '../../../core/messages.ts';
 import type { ExtractedFact } from './extractor.ts';
 import { RAW_OUTPUT_TRUNCATE, truncateRaw } from './raw-output.ts';
 import { stripJsonFences } from '../../../lib/json-fences.ts';
+import { EnrichmentError, type EnrichmentErrorStage, type EnrichmentErrorDetails } from './errors.ts';
 
 const log = createChildLogger('enrichment');
 
@@ -19,41 +20,12 @@ const log = createChildLogger('enrichment');
  * — `grounded=false` results and `adjustedConfidence < threshold` — are the
  * model's explicit "this fact isn't defensible" signal and never raise.
  *
- * Intentionally no shared base class with ExtractionError — each module stays
- * self-contained. Future callers handle both types via separate `instanceof`
- * branches (see backfill-enrichment.ts).
+ * See {@link EnrichmentError} for the shared stage contract and why this
+ * stays a distinct subclass rather than a discriminated single class.
  */
-export class ValidationError extends Error {
-  public readonly stage:
-    | 'provider-call'
-    | 'json-parse'
-    | 'schema-shape'
-    | 'schema-items-all-dropped';
-  public readonly details: {
-    cause?: Error;
-    rawOutput?: string;
-    droppedCount?: number;
-    totalCount?: number;
-    sampleItem?: unknown;
-  };
-
-  constructor(
-    stage:
-      | 'provider-call'
-      | 'json-parse'
-      | 'schema-shape'
-      | 'schema-items-all-dropped',
-    details: {
-      cause?: Error;
-      rawOutput?: string;
-      droppedCount?: number;
-      totalCount?: number;
-      sampleItem?: unknown;
-    } = {},
-  ) {
-    super(`validation failed: ${stage}`);
-    this.stage = stage;
-    this.details = details;
+export class ValidationError extends EnrichmentError {
+  constructor(stage: EnrichmentErrorStage, details: EnrichmentErrorDetails = {}) {
+    super('validation', stage, details);
     this.name = 'ValidationError';
   }
 }
