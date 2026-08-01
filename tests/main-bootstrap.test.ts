@@ -5,7 +5,8 @@ type MainHarness = Awaited<ReturnType<typeof importMainWithMocks>>;
 
 type HealthServerDepsForTest = {
   handleAccessDecision: (subjectType: string, subjectId: string, action: string) => Promise<void>;
-  getEnrichmentStats: () => unknown;
+  // #2545: takes the already-sampled runtime snapshot rather than self-sampling.
+  getEnrichmentStats: (runtimeSnapshot: unknown) => unknown;
   getDatabaseRetentionHealth: () => unknown;
   getMemoryReadinessHealth?: () => unknown;
   getMemoryContextHealth?: () => unknown;
@@ -675,7 +676,13 @@ describe('main bootstrap', () => {
       isGroup: false,
       isResponseWorthy: true,
     }));
-    expect(healthDeps.getEnrichmentStats()).toEqual({
+    // #2545: getEnrichmentStats no longer self-samples runtime.getHealthSnapshot()
+    // — the health handler samples it once and passes the snapshot in, so the
+    // test drives that same contract by passing the snapshot explicitly.
+    expect(healthDeps.getEnrichmentStats({
+      status: 'healthy',
+      details: { enrichmentLastRunAt: '2026-06-14T00:00:00.000Z' },
+    })).toEqual({
       lastRun: '2026-06-14T00:00:00.000Z',
       unprocessed: 4,
       runtimeDegraded: false,
@@ -683,16 +690,18 @@ describe('main bootstrap', () => {
     h.getUnprocessedCount.mockImplementationOnce(() => {
       throw new Error('stats failed');
     });
-    expect(healthDeps.getEnrichmentStats()).toEqual({
+    expect(healthDeps.getEnrichmentStats({
+      status: 'healthy',
+      details: { enrichmentLastRunAt: '2026-06-14T00:00:00.000Z' },
+    })).toEqual({
       lastRun: '2026-06-14T00:00:00.000Z',
       unprocessed: 0,
       runtimeDegraded: false,
     });
-    h.chatRuntime.getHealthSnapshot.mockReturnValueOnce({
+    expect(healthDeps.getEnrichmentStats({
       status: 'degraded',
       details: { enrichmentLastRunAt: '2026-06-14T00:00:00.000Z' },
-    });
-    expect(healthDeps.getEnrichmentStats()).toEqual({
+    })).toEqual({
       lastRun: '2026-06-14T00:00:00.000Z',
       unprocessed: 4,
       runtimeDegraded: true,
@@ -972,13 +981,15 @@ describe('main bootstrap', () => {
     expect(h.chatRuntime.start).not.toHaveBeenCalled();
     expect(h.agentInstances[0].start).toHaveBeenCalledOnce();
 
-    h.agentInstances[0].getHealthSnapshot.mockReturnValueOnce({
+    // #2545: getEnrichmentStats takes the already-sampled snapshot (the
+    // health handler samples runtime.getHealthSnapshot() once and passes it
+    // in) rather than self-sampling, so the test passes the snapshot directly.
+    expect(h.getHealthDeps().getEnrichmentStats({
       status: 'degraded',
       details: {
         enrichmentLastRunAt: '2026-06-14T00:00:00.000Z',
       },
-    });
-    expect(h.getHealthDeps().getEnrichmentStats()).toEqual({
+    })).toEqual({
       lastRun: '2026-06-14T00:00:00.000Z',
       unprocessed: 4,
       runtimeDegraded: false,
