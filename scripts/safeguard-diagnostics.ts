@@ -3,6 +3,7 @@ import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { parseDocument } from 'yaml';
 import { git as runGit, gitList as runGitList, readText } from './lib/guard-core.ts';
+import { asRecord } from '../src/lib/type-guards.ts';
 
 export type DiagnosticStatus = 'pass' | 'warn' | 'fail';
 export type DiagnosticCategory =
@@ -755,12 +756,6 @@ function checkConsoleDesignScriptCoverage(rootScripts: Record<string, string>, c
   };
 }
 
-function asRecord(value: unknown): Record<string, unknown> | null {
-  return value !== null && typeof value === 'object' && !Array.isArray(value)
-    ? value as Record<string, unknown>
-    : null;
-}
-
 function hasOwn(value: Record<string, unknown>, key: string): boolean {
   return Object.prototype.hasOwnProperty.call(value, key);
 }
@@ -837,7 +832,7 @@ function qualityCiSemanticShadowFailures(text: string): string[] {
     return failures;
   }
   const steps = quality.steps.map(asRecord);
-  if (steps.some((step) => step === null)) {
+  if (steps.some((step) => !step)) {
     failures.push('every quality-job step must be a mapping');
     return failures;
   }
@@ -1052,7 +1047,7 @@ function qualityCiPlaywrightTimeoutFailures(text: string): string[] {
     return failures;
   }
   const steps = quality.steps.map(asRecord);
-  if (steps.some((step) => step === null)) {
+  if (steps.some((step) => !step)) {
     failures.push('every quality-job step must be a mapping');
     return failures;
   }
