@@ -88,6 +88,15 @@ grep -q 'BOT_ERRORS_FLEET_SENTINEL_ACTION_EVENT_COOLDOWN_SECONDS' "$plist" || { 
 grep -q 'BOT_ERRORS_FLEET_SENTINEL_MAX_CRITICAL_WHATSAPP_PER_DAY' "$plist" || { echo "SENTINEL_INSTALLER_FAIL launchd whatsapp cap env"; cat "$plist"; exit 1; }
 grep -q 'BOT_ERRORS_FLEET_SENTINEL_TIER2_TOKEN_TTL_SECONDS' "$plist" || { echo "SENTINEL_INSTALLER_FAIL launchd tier2 token ttl env"; cat "$plist"; exit 1; }
 grep -q 'BOT_ERRORS_FLEET_SENTINEL_Q_HOST' "$plist" || { echo "SENTINEL_INSTALLER_FAIL launchd q host env"; cat "$plist"; exit 1; }
+# #2436: launchd has no EnvironmentFile equivalent, so any supported runtime
+# control missing from the plist dict is unreachable on macOS. Defaults must
+# match the bot-errors-sentinel.py fallbacks so installing changes nothing
+# for unset variables.
+grep -q '<key>BOT_ERRORS_FLEET_SENTINEL_ACTION_OUTBOX_RETENTION</key><string>500</string>' "$plist" || { echo "SENTINEL_INSTALLER_FAIL launchd action outbox retention env"; cat "$plist"; exit 1; }
+grep -qF "<key>BOT_ERRORS_FLEET_SENTINEL_LOCK</key><string>$HOME/.local/state/bot-errors/fleet-sentinel/sentinel-instance.lock</string>" "$plist" || { echo "SENTINEL_INSTALLER_FAIL launchd instance lock env"; cat "$plist"; exit 1; }
+grep -q '<key>BOT_ERRORS_FLEET_SENTINEL_SSH_COMMAND</key><string>ssh</string>' "$plist" || { echo "SENTINEL_INSTALLER_FAIL launchd ssh command env"; cat "$plist"; exit 1; }
+grep -q '<key>BOT_ERRORS_FLEET_SENTINEL_SSH_CONNECT_TIMEOUT_SECONDS</key><string>8</string>' "$plist" || { echo "SENTINEL_INSTALLER_FAIL launchd ssh connect timeout env"; cat "$plist"; exit 1; }
+grep -q '<key>BOT_ERRORS_FLEET_SENTINEL_SSH_PROBE_TIMEOUT_SECONDS</key><string>30</string>' "$plist" || { echo "SENTINEL_INSTALLER_FAIL launchd ssh probe timeout env"; cat "$plist"; exit 1; }
 grep -q '<string>--max-fleet-sentinel-age</string>' "$watchdog_plist" || { echo "SENTINEL_INSTALLER_FAIL launchd watchdog max-age arg"; cat "$watchdog_plist"; exit 1; }
 grep -q '<key>StartInterval</key><integer>300</integer>' "$watchdog_plist" || { echo "SENTINEL_INSTALLER_FAIL launchd watchdog interval"; cat "$watchdog_plist"; exit 1; }
 grep -q '<key>BOT_ERRORS_WATCHDOG_CHECKS</key><string>fleet_sentinel,collector_roster</string>' "$watchdog_plist" || { echo "SENTINEL_INSTALLER_FAIL launchd watchdog checks env"; cat "$watchdog_plist"; exit 1; }
@@ -119,6 +128,17 @@ grep -q '^Environment="BOT_ERRORS_FLEET_SENTINEL_ACTION_EVENT_COOLDOWN_SECONDS='
 grep -q '^Environment="BOT_ERRORS_FLEET_SENTINEL_MAX_CRITICAL_WHATSAPP_PER_DAY=' "$service" || { echo "SENTINEL_INSTALLER_FAIL systemd whatsapp cap env"; cat "$service"; exit 1; }
 grep -q '^Environment="BOT_ERRORS_FLEET_SENTINEL_TIER2_TOKEN_TTL_SECONDS=' "$service" || { echo "SENTINEL_INSTALLER_FAIL systemd tier2 token ttl env"; cat "$service"; exit 1; }
 grep -q '^Environment="BOT_ERRORS_FLEET_SENTINEL_Q_HOST=' "$service" || { echo "SENTINEL_INSTALLER_FAIL systemd q host env"; cat "$service"; exit 1; }
+# #2436: the five launchd-only additions must NOT be baked into the systemd
+# unit — Linux hydrates them from the canonical environment file so they stay
+# editable without reinstall, and that hydration line must survive.
+grep -q '^EnvironmentFile=-%h/.config/whatsoup/bot-errors.env$' "$service" || { echo "SENTINEL_INSTALLER_FAIL systemd env-file hydration"; cat "$service"; exit 1; }
+for key in ACTION_OUTBOX_RETENTION LOCK SSH_COMMAND SSH_CONNECT_TIMEOUT_SECONDS SSH_PROBE_TIMEOUT_SECONDS; do
+  if grep -q "BOT_ERRORS_FLEET_SENTINEL_$key=" "$service"; then
+    echo "SENTINEL_INSTALLER_FAIL systemd baked $key"
+    cat "$service"
+    exit 1
+  fi
+done
 grep -q '^OnUnitActiveSec=1800s$' "$timer" || { echo "SENTINEL_INSTALLER_FAIL systemd interval"; cat "$timer"; exit 1; }
 grep -q '^RandomizedDelaySec=120s$' "$timer" || { echo "SENTINEL_INSTALLER_FAIL systemd randomized delay"; cat "$timer"; exit 1; }
 grep -q '^Persistent=true$' "$timer" || { echo "SENTINEL_INSTALLER_FAIL systemd persistent"; cat "$timer"; exit 1; }
