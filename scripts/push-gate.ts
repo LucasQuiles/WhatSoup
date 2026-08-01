@@ -22,6 +22,7 @@
  */
 import { spawn } from 'node:child_process';
 import { pathToFileURL } from 'node:url';
+import { cleanGitEnv } from '../src/lib/git-env.ts';
 
 export interface GateStep {
   readonly name: string;
@@ -252,17 +253,52 @@ export const CI_ONLY_GUARDS: ReadonlyArray<{ readonly name: string; readonly rea
   { name: 'guard:worker-artifacts', reason: 'CI worker-artifact audit lane' },
 ];
 
+/**
+ * Explicit allowlisted child env (repo-hygiene: no process.env inheritance).
+ * Base is the repo's git-child allowlist (PATH/HOME/TMPDIR/XDG/…); WHATSOUP_*
+ * vars pass through EXCEPT the neutralized skip-vars — which implements the
+ * legacy `unset WHATSOUP_SKIP_*` preamble structurally rather than by
+ * mutation: the skips simply never reach the children.
+ */
+export function pushGateChildEnv(): NodeJS.ProcessEnv {
+  const env = cleanGitEnv();
+  for (const [key, value] of Object.entries(process.env)) {
+    if (
+      key.startsWith('WHATSOUP_')
+      && value !== undefined
+      && !(NEUTRALIZED_SKIP_VARS as readonly string[]).includes(key)
+    ) {
+      env[key] = value;
+    }
+  }
+  return env;
+}
+
 function formatElapsed(ms: number): string {
   const seconds = Math.round(ms / 100) / 10;
   return `${seconds.toFixed(1)}s`;
 }
 
+/**
+ * Steps execute WITHOUT a shell (repo-hygiene: shell mode requires a reviewed
+ * exception, and this runner needs none). Every manifest cmd is
+ * whitespace-tokenizable by construction — the registry test ratchets the
+ * no-shell-metacharacters invariant so a future step that would NEED a
+ * shell fails review instead of silently reintroducing shell mode.
+ */
+function tokenize(cmd: string): { exe: string; args: string[] } {
+  const tokens = cmd.split(' ').filter((token) => token.length > 0);
+  const [exe, ...args] = tokens;
+  if (!exe) throw new Error(`push-gate: empty step command`);
+  return { exe, args };
+}
+
 function runStep(gateStep: GateStep): Promise<number> {
   return new Promise((resolvePromise) => {
-    const child = spawn(gateStep.cmd, {
-      shell: true,
+    const { exe, args } = tokenize(gateStep.cmd);
+    const child = spawn(exe, args, {
       stdio: 'inherit',
-      env: process.env,
+      env: pushGateChildEnv(),
     });
     child.on('close', (code) => resolvePromise(code ?? 1));
     child.on('error', () => resolvePromise(1));
@@ -275,12 +311,6 @@ export async function main(argv: readonly string[]): Promise<number> {
   if (!steps) {
     console.error('Usage: push-gate.ts <branch|release>');
     return 64;
-  }
-
-  // Legacy `unset WHATSOUP_SKIP_*` preamble: neutralize inherited skip-vars
-  // for the whole pipeline before any step spawns.
-  for (const name of NEUTRALIZED_SKIP_VARS) {
-    delete process.env[name];
   }
 
   const startedAt = Date.now();
