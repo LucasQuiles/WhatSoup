@@ -723,6 +723,14 @@ Use `memory` for new installs and migrations. The runtime still accepts the old 
 }
 ```
 
+#### Vault Path (`memory.vaultPath`)
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `memory.vaultPath` | path | `$HOME/Documents/Obsidian/whatsoup-memory` | Filesystem root the Obsidian-vault memory substrate writes to (`regenerate_vault`, `src/core/substrate/vault.ts`). Tilde-expanded; overrides the default template entirely when set. |
+
+The default is a fixed HOME-relative template — it does not consult `LANG`/`LC_ALL` or any other locale setting. On macOS this is always correct: the on-disk `~/Documents` directory name is not locale-dependent (only the Finder *display* name is localized, via a `.localized` marker; the POSIX path stays `Documents`), and Obsidian resolves the same path. On Linux desktop environments running `xdg-user-dirs`, `~/Documents` *can* be renamed on disk to a translated name at first login — in that case set `memory.vaultPath` explicitly, since the default template will not detect or follow the rename (see #2331).
+
 #### Pinecone BYOK Fields
 
 | Field | Type | Default | Description |
