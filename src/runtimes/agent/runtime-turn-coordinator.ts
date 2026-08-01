@@ -40,7 +40,14 @@ import type { SessionOwnershipRegistry } from './session-ownership.ts';
 import { createChildLogger } from '../../logger.ts';
 import { emitAlertChecked } from '../../lib/emit-alert.ts';
 import type { TurnDeliveryKind } from './turn-chronology.ts';
+import {
+  createRuntimeTurnCompletionValue,
+  rejectRuntimeTurnCompletionValue,
+  type RuntimeTurnCompletion,
+} from './runtime-turn-completion.ts';
+import { discardCancelledPreBoundaryPerChatTurn } from './runtime-turn-pre-boundary-cancellation.ts';
 
+export type { RuntimeTurnCompletion } from './runtime-turn-completion.ts';
 const log = createChildLogger('agent-runtime');
 export const RUNTIME_TURN_SHUTDOWN_FINALIZATION_TIMEOUT_MS = 2_000;
 
@@ -53,13 +60,6 @@ export interface RuntimeTurnSourceSnapshot {
   readonly contentType: ContentType;
   readonly isGroup: boolean;
   readonly groupName?: string;
-}
-
-export interface RuntimeTurnCompletion {
-  readonly context: RuntimeTurnContext;
-  readonly promise: Promise<void>;
-  readonly resolve: () => void;
-  readonly reject: (error: unknown) => void;
 }
 
 export interface PerChatRuntimeScopeRef {
@@ -171,6 +171,8 @@ export interface RuntimeTurnCoordinatorPort {
     systemTurnLease?: SystemTurnLeaseToken,
     excludeJobId?: number,
     deliveryKind?: TurnDeliveryKind,
+    dispatchAllowed?: () => boolean,
+    onProviderBoundary?: () => void,
   ): Promise<void>;
   deleteOwnedPerChatSession(mapKey: string, expected?: SessionManager): boolean;
   recreatePerChatSessionForFallback(mapKey: string, chatJid: string, actorJid?: string): void;
@@ -439,16 +441,7 @@ rejectRuntimeTurnCompletion(
   mapKey?: string,
   expectedContext?: RuntimeTurnContext,
 ): boolean {
-  const completion = mapKey === undefined
-    ? this.host.currentRuntimeTurnCompletion
-    : this.host.perChatRuntimeTurnCompletions.get(mapKey);
-  if (!completion) return false;
-  if (
-    expectedContext
-    && completion.context.identity.logicalTurnId !== expectedContext.identity.logicalTurnId
-  ) return false;
-  completion.reject(error);
-  return true;
+  return rejectRuntimeTurnCompletionValue(this.host, error, mapKey, expectedContext);
 }
 
 runtimeTurnScopeKey(context: RuntimeTurnContext): string {
@@ -456,13 +449,7 @@ runtimeTurnScopeKey(context: RuntimeTurnContext): string {
 }
 
 createRuntimeTurnCompletion(context: RuntimeTurnContext): RuntimeTurnCompletion {
-  let resolve!: () => void;
-  let reject!: (error: unknown) => void;
-  const promise = new Promise<void>((resolvePromise, rejectPromise) => {
-    resolve = resolvePromise;
-    reject = rejectPromise;
-  });
-  return { context, promise, resolve, reject };
+  return createRuntimeTurnCompletionValue(context);
 }
 
 createRuntimeTurnPostEffects(
@@ -1953,6 +1940,8 @@ async processPerChatTurn(
   // directly (not via the live-message queue path) to dispatch a claimed
   // job's replay — see beginRuntimeTurnEvidence's doc comment for why.
   excludeJobId?: number,
+  dispatchAllowed?: () => boolean,
+  onProviderBoundary?: () => void,
 ): Promise<void> {
   const mapKey = scopeRef.value;
   const seqQueue = this.host.perChatInboundSeqQueue.get(mapKey) ?? [];
@@ -1970,6 +1959,7 @@ async processPerChatTurn(
 
   let dispatchError: unknown;
   let dispatchFailed = false;
+  let providerBoundaryCrossed = false;
   try {
     await this.host.sendTurnPerChat(
       turn.chatJid,
@@ -1980,10 +1970,20 @@ async processPerChatTurn(
       scopeRef,
       undefined,
       excludeJobId,
+      undefined,
+      dispatchAllowed,
+      () => {
+        providerBoundaryCrossed = true;
+        onProviderBoundary?.();
+      },
     );
   } catch (err) {
     dispatchFailed = true;
     dispatchError = err;
+  }
+  if (!providerBoundaryCrossed && dispatchAllowed?.() === false) {
+    discardCancelledPreBoundaryPerChatTurn(this.host, mapKey, turn);
+    return;
   }
   if (turn.runtimeContext) {
     const cancelled = this.isUndispatchedRuntimeTurnCancelled(turn.runtimeContext);

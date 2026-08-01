@@ -63,7 +63,15 @@ describe('prepared statement caching', () => {
     // plus the three cached immediate-transaction statements (BEGIN IMMEDIATE,
     // COMMIT, ROLLBACK) pre-warmed in the constructor for
     // withImmediateTransaction reuse.)
-    expect(prepareSpy).toHaveBeenCalledTimes(129);
+    // (+7 vs 129, #2540: the completed-delivery identity admission ledger —
+    // getCompletedDeliveryIdentityAdmissionHealth, recordCompletedDelivery
+    // IdentityAdmission, quarantineExactSessionCheckpoint, selectQuarantinable
+    // AgentRowsForCheckpoint, selectExactQuarantinableAgentSessionForAdmission,
+    // markExactAgentResumeFailed, resolveCompletedDeliveryIdentityAdmissions
+    // ForFreshLifecycle — the bounded content-free admission/quarantine
+    // statements that keep unprovable resume identities resumable while
+    // health stays green. Merge union with main's +5 (#2560) on the rebased tree (136); verified by running this suite.)
+    expect(prepareSpy).toHaveBeenCalledTimes(136);
     prepareSpy.mockClear();
 
     const seq = engine.journalInbound('msg-1', 'conv-1', 'jid-1@s.whatsapp.net', 'agent');

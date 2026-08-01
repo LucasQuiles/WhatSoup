@@ -9,6 +9,7 @@ import { isRecord } from '../../lib/type-guards.ts';
 import { createSSEWriter } from '../sse-helpers.ts';
 import { normalizePhoneE164, normalizePhoneE164Wire } from '../../lib/phone.ts';
 import { SIGNAL_UUID_RE } from '../../transport/signal/types.ts';
+import { SIGNAL } from '../../lib/signals.ts';
 import { canonicalizeImessageDirectIdentity } from '../../core/transport-refs.ts';
 import { createChildLogger } from '../../logger.ts';
 const log = createChildLogger('fleet:ops');
@@ -1288,7 +1289,7 @@ export async function handleAuth(
   // Kill any existing auth process for this instance before starting a new one
   const existing = activeAuthProcesses.get(params.name);
   if (existing) {
-    try { existing.kill('SIGTERM'); } catch { /* already exited */ }
+    try { existing.kill(SIGNAL.TERM); } catch { /* already exited: the previous auth process may have exited on its own before this cleanup runs, so kill throwing here is expected and safe to ignore. */ }
     activeAuthProcesses.delete(params.name);
   }
 
@@ -1417,7 +1418,7 @@ export async function handleAuth(
     authTimer = setTimeout(() => {
       terminalFailure = true;
       writeSSE('error', { message });
-      child.kill('SIGTERM');
+      child.kill(SIGNAL.TERM);
       restoreStoppedInstance(reason);
       endOnce();
     }, delayMs);
@@ -1507,8 +1508,8 @@ export async function handleAuth(
     // closes the SSE stream. Killing it here would strand the booted-out job.
     if (connected && !terminalFailure) return;
     terminalFailure = true;
-    child.kill('SIGTERM');
-    setTimeout(() => { try { child.kill('SIGKILL'); } catch { /* already exited */ } }, 5000);
+    child.kill(SIGNAL.TERM);
+    setTimeout(() => { try { child.kill(SIGNAL.KILL); } catch { /* already exited: the auth helper may have already exited before this escalation fires, so kill throwing here is expected and safe to ignore. */ } }, 5000);
     endOnce();
   });
 }

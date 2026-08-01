@@ -1,6 +1,7 @@
 import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
+import { SIGNAL } from '../../lib/signals.ts';
 
 export interface ProcessTreeTarget {
   readonly pid?: number;
@@ -387,7 +388,7 @@ async function runTermination(
     signalOwned(target, rootPid, first.rows, first.survivors, signal, generationMarker, first.ambiguous);
   }
 
-  if (signal === 'SIGTERM') {
+  if (signal === SIGNAL.TERM) {
     const termCheck = await waitForOwnedExit(
       owned,
       generationMarker,
@@ -408,7 +409,7 @@ async function runTermination(
       }
       if (kill.survivors.length > 0) {
         escalated = true;
-        signalOwned(target, rootPid, kill.rows, kill.survivors, 'SIGKILL', generationMarker, kill.ambiguous);
+        signalOwned(target, rootPid, kill.rows, kill.survivors, SIGNAL.KILL, generationMarker, kill.ambiguous);
       }
     }
   }
