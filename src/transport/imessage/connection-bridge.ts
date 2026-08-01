@@ -27,6 +27,7 @@ import { emptyConnectionStateSnapshot } from '../twilio/connection-snapshot.ts';
 import type { Subscription } from '../contract/subscription.ts';
 import { toImessageJid, fromImessageJid } from '../../core/jid-constants.ts';
 import type { ImessageAdapter } from './adapter.ts';
+import type { ImessagePort } from './port.ts';
 
 /** Error thrown when an operation is not supported by the iMessage transport. */
 // #2202: the canonical error lives in transport/unsupported-operation.ts.
@@ -79,6 +80,7 @@ function contractToIncoming(msg: ContractInboundMessage, isGroup: boolean): Inco
  */
 export class ImessageConnection extends EventEmitter implements RuntimeConnection {
   private readonly adapter: ImessageAdapter;
+  private readonly port: ImessagePort | null;
   private readonly log = createChildLogger('imessage-bridge');
   private messageSubscription: Subscription | null = null;
   private errorSubscription: Subscription | null = null;
@@ -111,9 +113,10 @@ export class ImessageConnection extends EventEmitter implements RuntimeConnectio
     this.identityMode = mode;
   }
 
-  constructor(adapter: ImessageAdapter) {
+  constructor(adapter: ImessageAdapter, port?: ImessagePort) {
     super();
     this.adapter = adapter;
+    this.port = port ?? null;
   }
 
   // ── Lifecycle ────────────────────────────────────────────────────────────
@@ -183,6 +186,11 @@ export class ImessageConnection extends EventEmitter implements RuntimeConnectio
     this.messageSubscription = null;
     this.errorSubscription?.dispose();
     this.errorSubscription = null;
+    // #2322 H2: the port (e.g. ImsgPort's persistent UNIX socket) is a
+    // separate resource from adapter-internal lifecycle state and must be
+    // disposed independently, mirroring signal/connection-bridge.ts:158.
+    // Optional: BlueBubbles is stateless HTTP and implements no dispose().
+    this.port?.dispose?.();
     await this.adapter.disconnect();
   }
 
