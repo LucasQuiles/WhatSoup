@@ -134,6 +134,12 @@ describe('resolveModelCatalogue — claude-cli', () => {
     const out = await resolveModelCatalogue('claude-cli', 'claude', { nowMs: T0, anthropicFn });
     expect(out).toStrictEqual({ status: 'unavailable', reason: { kind: 'lookup-failed' }, asOfLabel: 'just now' });
   });
+
+  it('maps an HTTP-200 but EMPTY catalogue to unavailable/empty, never ok+empty — an empty successful fetch is untrustworthy, not "this org has zero models"', async () => {
+    const anthropicFn = vi.fn().mockResolvedValue({ status: 'ok', ids: [] });
+    const out = await resolveModelCatalogue('claude-cli', 'claude', { nowMs: T0, anthropicFn });
+    expect(out).toStrictEqual({ status: 'unavailable', reason: { kind: 'empty' }, asOfLabel: 'just now' });
+  });
 });
 
 describe('resolveModelCatalogue — unadapted harness', () => {
@@ -221,6 +227,34 @@ describe('resolveModelCatalogue — openai', () => {
     await resolveModelCatalogue('openai', '', { nowMs: T0, openaiFn });
     const out = await resolveModelCatalogue('openai', '', { nowMs: T0 + 5 * 60_000, openaiFn });
     expect(out).toStrictEqual({ status: 'unavailable', reason: { kind: 'no-key' }, asOfLabel: 'just now' });
+  });
+
+  it('maps an HTTP-200 but EMPTY catalogue to unavailable/empty when there is no prior cache to fall back on', async () => {
+    const openaiFn = vi.fn().mockResolvedValue({ status: 'ok', ids: [] });
+    const out = await resolveModelCatalogue('openai', '', { nowMs: T0, openaiFn });
+    expect(out).toStrictEqual({ status: 'unavailable', reason: { kind: 'empty' }, asOfLabel: 'just now' });
+  });
+
+  it('an empty fresh capture does NOT clobber a non-empty last-known-good cache — serves it stale, age disclosed, instead of blanking the catalogue', async () => {
+    const openaiFn = vi.fn()
+      .mockResolvedValueOnce({ status: 'ok', ids: ['gpt-x'] })
+      .mockResolvedValueOnce({ status: 'ok', ids: [] })
+      .mockResolvedValueOnce({ status: 'ok', ids: ['gpt-y'] });
+
+    const first = await resolveModelCatalogue('openai', '', { nowMs: T0, openaiFn });
+    expect(first).toStrictEqual({ status: 'ok', ids: ['gpt-x'], sourceLabel: 'openai /v1/models', asOfLabel: 'just now' });
+
+    // Past TTL: the re-probe comes back ok+EMPTY. Must not overwrite the cache
+    // or render a blank menu — serve the stale non-empty list, age disclosed.
+    const second = await resolveModelCatalogue('openai', '', { nowMs: T0 + 5 * 60_000, openaiFn });
+    expect(second).toStrictEqual({ status: 'ok', ids: ['gpt-x'], sourceLabel: 'openai /v1/models', asOfLabel: '5m ago' });
+
+    // The empty result was never cached, so the NEXT re-probe still hits the
+    // network — and a genuinely fresh non-empty result replaces the cache
+    // normally, proving the empty response didn't corrupt anything.
+    const third = await resolveModelCatalogue('openai', '', { nowMs: T0 + 10 * 60_000, openaiFn });
+    expect(third).toStrictEqual({ status: 'ok', ids: ['gpt-y'], sourceLabel: 'openai /v1/models', asOfLabel: 'just now' });
+    expect(openaiFn).toHaveBeenCalledTimes(3);
   });
 });
 
