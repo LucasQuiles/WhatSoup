@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
 
 import { describe, expect, it } from 'vitest';
+import { CURATED_TEST_PATHS } from '../../scripts/push-gate.ts';
 
 import { resolveNativeRefGraphFacts, runRefPolicyCli } from '../../scripts/ci-control-ref-policy.ts';
 import {
@@ -680,7 +681,7 @@ describe('report-only outgoing ref policy CLI', () => {
 
   it('is wired into the branch verification test set while remaining absent from the active hook', () => {
     const packageJson = JSON.parse(readFileSync(resolve(root, 'package.json'), 'utf8')) as { scripts: Record<string, string> };
-    expect(packageJson.scripts['verify:push:branch']).toContain('tests/scripts/ci-control-ref-policy.test.ts');
+    expect([...CURATED_TEST_PATHS]).toContain('tests/scripts/ci-control-ref-policy.test.ts');
     expect(readFileSync(resolve(root, '.husky/pre-push'), 'utf8')).not.toContain('ci:ref-policy');
   });
 });

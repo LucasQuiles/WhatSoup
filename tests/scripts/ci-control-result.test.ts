@@ -71,6 +71,7 @@ import { buildBoundaryReceipt } from '../../scripts/lib/semantic-quality/receipt
 import { canonicalizeBoundaryRun } from '../../scripts/lib/verification/boundary-run/shared.ts';
 import { reasonDefinition } from '../../scripts/lib/ci-control/reasons.ts';
 import { OID as BOUNDARY_OID, validManifest } from './verify-boundary-run/support.ts';
+import { BRANCH_STEPS } from '../../scripts/push-gate.ts';
 
 const OID = '0123456789abcdef0123456789abcdef01234567';
 const BASE_OID = '89abcdef89abcdef89abcdef89abcdef89abcdef';
@@ -942,7 +943,7 @@ describe('CP-F2 strict outcome and diagnostic contract', () => {
 describe('CP-F2 parsing, bounds, canonical bytes, and safe feedback', () => {
   it('keeps canonical native receipt byte validation in the branch gate', () => {
     const packageJson = JSON.parse(readFileSync(path.join(process.cwd(), 'package.json'), 'utf8')) as { scripts: Record<string, string> };
-    expect(packageJson.scripts['verify:push:branch']).toContain('verify:semantic:shadow');
+    expect(BRANCH_STEPS.map((step) => step.cmd).join(' && ')).toContain('verify:semantic:shadow');
     expect(packageJson.scripts['verify:semantic:shadow']).toContain('tests/scripts/semantic-quality-receipt-validation.test.ts');
   });
 

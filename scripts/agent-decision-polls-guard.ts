@@ -4,6 +4,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { BRANCH_STEPS, RELEASE_STEPS } from './push-gate.ts';
 import ts from 'typescript';
 import { readText } from './lib/guard-core.ts';
 
@@ -443,8 +444,15 @@ function checkPackageScripts(cwd: string, findings: string[]): void {
     findings.push('package.json: guard:agent-decision-polls must run scripts/agent-decision-polls-guard.ts');
   }
 
+  // Gate composition lives in the declarative manifest (scripts/push-gate.ts)
+  // since #2224; chain views over its ordered step arrays preserve the legacy
+  // 'a && b && c' assertion idiom. verify:publish remains a package.json chain.
+  const chainViews: Record<string, string> = {
+    'verify:push:branch': BRANCH_STEPS.map((step) => step.cmd).join(' && '),
+    'verify:release': RELEASE_STEPS.map((step) => step.cmd).join(' && '),
+  };
   for (const scriptName of ['verify:push:branch', 'verify:release', 'verify:publish']) {
-    const chain = scripts[scriptName];
+    const chain = chainViews[scriptName] ?? scripts[scriptName];
     if (!chain) {
       findings.push(`package.json: missing ${scriptName} script`);
       continue;
