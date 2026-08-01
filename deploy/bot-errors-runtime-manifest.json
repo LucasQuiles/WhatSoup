@@ -200,7 +200,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-selfcheck.py",
-      "sha256": "41dbe1ff8ddc52583e2c39cc8599caaa1513f9721aa102c9f6c87b82a602297c",
+      "sha256": "700de83e5407ef453850724b25bba8dc9b949289d9d4ebad58adfe8a339f4d76",
       "mustContain": [
         "SAFE_HEAL_CLASSES",
         "HEAL_WINDOW_SECONDS"
@@ -208,7 +208,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-sentinel.py",
-      "sha256": "caa218d899c4152a0a85aa9d957e0838228190fe48a0c3bc929b9e5e689c8aa7",
+      "sha256": "b1ef9e57f6013a29cd9556e7c0e12fb793843a9bd6a70238ff9409604fcfbbb3",
       "mustContain": [
         "DEFAULT_HEARTBEAT_MAX_AGE_SECONDS",
         "DEFAULT_HYSTERESIS_CYCLES"
@@ -379,7 +379,7 @@
     },
     {
       "path": "src/lib/fault-taxonomy-registry.json",
-      "sha256": "4c253d0dd1b674b60f0b26f1835945acbe48e60fc7937706f88d27889d7c36a0",
+      "sha256": "4416ec31c4001fefec137f2dc4718c4fa8e29076bfcefc173a7094a279a4eb3e",
       "mustContain": [
         "whatsoup-fault-taxonomy-registry-v3",
         "runtimeAgentHealthSignals",

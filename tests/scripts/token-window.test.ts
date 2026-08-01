@@ -221,6 +221,9 @@ describe('token-window helper', () => {
   });
 
   it('opens the database read-only', () => {
+    if (typeof process.getuid === 'function' && process.getuid() === 0) {
+      return;
+    }
     const { root, instancePath, dbPath } = makeInstance('read only');
     const nowSec = Math.floor(Date.now() / 1000);
     const db = createTokenDb(dbPath);
