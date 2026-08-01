@@ -155,7 +155,7 @@ export async function handleSend(
         : toPersonalJid(parsed.chatJid);
       fixedBody = JSON.stringify(parsed);
     }
-  } catch { /* invalid JSON: existing fall-through; downstream returns 400 */ }
+  } catch { /* intentional: invalid JSON falls through; the shared body parser downstream returns 400 */ }
 
   // Route 1: Try MCP socket (passive instances with verified socket)
   if (instance.type === 'passive' && instance.socketPath) {
