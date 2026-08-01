@@ -572,6 +572,10 @@ export const fitnessRules = [
         'scripts/lib/verify-lib.sh',
         'scripts/lib/fitness/',
         'scripts/check-launchd-drift.sh',
+        // The one sanctioned home for absolute git paths: the static trust
+        // allowlist that exists so security-sensitive scripts never
+        // PATH-resolve git (#2616). Candidates are individually vetted there.
+        'scripts/lib/ci-control/trusted-git.ts',
       ],
     },
     source: ['issue:2616', 'issue:2623'],
