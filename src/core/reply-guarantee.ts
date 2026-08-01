@@ -1,15 +1,13 @@
 import { createChildLogger } from '../logger.ts';
-import type { InboundStatus } from './durability.ts';
+import { isOpenInboundStatus } from './inbound-status.ts';
+import type { InboundStatus } from './inbound-status.ts';
 import type { Messenger } from './types.ts';
-import { MS_PER_MINUTE } from '../lib/time-units.ts';
 
 const log = createChildLogger('reply-guarantee');
 
 export const DEFAULT_REPLY_GUARANTEE_TEXT = "I'm still working on this and will follow up shortly.";
-export const DEFAULT_REPLY_GUARANTEE_TIMEOUT_MS = 10 * MS_PER_MINUTE;
-const DEFAULT_REPLY_GUARANTEE_RATE_LIMIT_MS = 15 * MS_PER_MINUTE;
-
-export type InboundProcessingStatus = 'processing' | 'turn_done' | 'complete' | 'failed' | 'skipped';
+export const DEFAULT_REPLY_GUARANTEE_TIMEOUT_MS = 10 * 60 * 1000;
+const DEFAULT_REPLY_GUARANTEE_RATE_LIMIT_MS = 15 * 60 * 1000;
 
 export interface ReplyGuaranteeDurability {
   getInboundStatus(seq: number): InboundStatus | undefined;
@@ -194,10 +192,6 @@ export function createReplyGuaranteeLivenessSender({
     await messenger.setTyping(chatJid, 'composing');
     return { terminalReason: 'rgp_liveness_nudged' };
   };
-}
-
-function isOpenInboundStatus(status: string | undefined): boolean {
-  return status === 'processing' || status === 'turn_done';
 }
 
 function normalizePositiveMs(value: number | undefined, fallback: number): number {

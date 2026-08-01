@@ -1,37 +1,179 @@
 import type { DatabaseSync } from 'node:sqlite';
+import { INBOUND_STATUSES } from './inbound-status.ts';
 
+/**
+ * Add a CHECK constraint closing `inbound_events.processing_status` to the
+ * canonical InboundStatus union (#2250). Before this migration the column
+ * accepted any string, so a malformed value could land silently and every
+ * reader (including `getInboundStatus`) saw a widened `string` type.
+ *
+ * SQLite cannot add a CHECK via ALTER TABLE, so the table is rebuilt:
+ * create `_v55` with the constraint, copy every row verbatim, drop the old
+ * table, rename, then recreate the triggers captured before the drop.
+ *
+ * Fail-closed properties (adversarial review, #2250):
+ * - Pre-flight scan: any out-of-union value aborts BEFORE any mutation, with
+ *   the offending values named in the error. The DB stays at v54 and the
+ *   migration retries on next boot.
+ * - Atomicity: the rebuild runs inside a SAVEPOINT, which nests within the
+ *   framework's BEGIN IMMEDIATE...COMMIT wrapper (database.ts open()) and
+ *   also starts a standalone transaction when invoked directly. A
+ *   mid-rebuild crash or error rolls back to the untouched old table, and
+ *   the write lock held by the outer transaction prevents any
+ *   concurrent-writer interleave during the copy.
+ * - Idempotent: a completed rebuild is detected via the constraint text in
+ *   the table SQL and skipped on retry.
+ */
 export function runMigration55(db: DatabaseSync): void {
-  const columns = db
-    .prepare("PRAGMA table_info('enrichment_runs')")
-    .all() as Array<{ name: string }>;
-  if (columns.length === 0) return;
+  const table = db
+    .prepare(
+      "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'inbound_events'",
+    )
+    .get() as { sql: string } | undefined;
+  if (!table) return;
+  if (table.sql.includes('CHECK (processing_status IN')) return;
 
-  const knownColumns = new Set(columns.map(({ name }) => name));
-  const additions: Array<readonly [string, string]> = [
-    ['schema_version', 'ALTER TABLE enrichment_runs ADD COLUMN schema_version INTEGER NOT NULL DEFAULT 1 CHECK (schema_version = 1)'],
-    ['source', "ALTER TABLE enrichment_runs ADD COLUMN source TEXT NOT NULL DEFAULT 'legacy' CHECK (source IN ('online', 'legacy'))"],
-    ['status', "ALTER TABLE enrichment_runs ADD COLUMN status TEXT NOT NULL DEFAULT 'legacy_unclassified' CHECK (status IN ('no_work', 'completed', 'partial', 'failed', 'legacy_unclassified'))"],
-    ['failure_code', "ALTER TABLE enrichment_runs ADD COLUMN failure_code TEXT NOT NULL DEFAULT 'legacy_unclassified' CHECK (failure_code IN ('none', 'segment_failed', 'selection_failed', 'message_state_write_failed', 'ledger_write_failed', 'legacy_unclassified'))"],
-    ['stage', "ALTER TABLE enrichment_runs ADD COLUMN stage TEXT NOT NULL DEFAULT 'none' CHECK (stage IN ('none', 'selection', 'segment', 'message_state', 'ledger'))"],
-    ['retryable', 'ALTER TABLE enrichment_runs ADD COLUMN retryable INTEGER NOT NULL DEFAULT 0 CHECK (retryable IN (0, 1))'],
-    ['evidence_coverage', "ALTER TABLE enrichment_runs ADD COLUMN evidence_coverage TEXT NOT NULL DEFAULT 'legacy_unclassified' CHECK (evidence_coverage IN ('typed', 'legacy_unclassified'))"],
-    ['success_at', 'ALTER TABLE enrichment_runs ADD COLUMN success_at TEXT'],
-    ['messages_selected', "ALTER TABLE enrichment_runs ADD COLUMN messages_selected INTEGER NOT NULL DEFAULT 0 CHECK (typeof(messages_selected) = 'integer' AND messages_selected >= 0)"],
-    ['messages_succeeded', "ALTER TABLE enrichment_runs ADD COLUMN messages_succeeded INTEGER NOT NULL DEFAULT 0 CHECK (typeof(messages_succeeded) = 'integer' AND messages_succeeded >= 0)"],
-    ['messages_deferred', "ALTER TABLE enrichment_runs ADD COLUMN messages_deferred INTEGER NOT NULL DEFAULT 0 CHECK (typeof(messages_deferred) = 'integer' AND messages_deferred >= 0)"],
-    ['messages_terminal', "ALTER TABLE enrichment_runs ADD COLUMN messages_terminal INTEGER NOT NULL DEFAULT 0 CHECK (typeof(messages_terminal) = 'integer' AND messages_terminal >= 0)"],
-    ['facts_queued', "ALTER TABLE enrichment_runs ADD COLUMN facts_queued INTEGER NOT NULL DEFAULT 0 CHECK (typeof(facts_queued) = 'integer' AND facts_queued >= 0)"],
-  ];
-
-  for (const [column, statement] of additions) {
-    if (!knownColumns.has(column)) db.exec(statement);
+  const distinct = db
+    .prepare('SELECT DISTINCT processing_status AS status FROM inbound_events')
+    .all() as Array<{ status: unknown }>;
+  const invalid = distinct
+    .map((row) => row.status)
+    .filter(
+      (status) =>
+        typeof status !== 'string'
+        || !(INBOUND_STATUSES as readonly string[]).includes(status),
+    );
+  if (invalid.length > 0) {
+    throw new Error(
+      'migration 55 abort: inbound_events.processing_status holds value(s)'
+        + ` outside the canonical InboundStatus union: ${invalid.map(String).join(', ')}`,
+    );
   }
 
-  db.exec(`
-    CREATE INDEX IF NOT EXISTS idx_enrichment_runs_source_run_id
-      ON enrichment_runs(source, run_id DESC);
-    CREATE INDEX IF NOT EXISTS idx_enrichment_runs_online_success_run_id
-      ON enrichment_runs(run_id DESC)
-      WHERE source = 'online' AND success_at IS NOT NULL;
-  `);
+  const triggerSql = (
+    db
+      .prepare(
+        "SELECT sql FROM sqlite_master WHERE type = 'trigger' AND tbl_name = 'inbound_events' ORDER BY name",
+      )
+      .all() as Array<{ sql: string }>
+  ).map((row) => row.sql);
+
+  // Dependent schema objects whose bodies reference inbound_events — or
+  // reference another dependent object (view-on-view chains such as
+  // operator_catchup_delivery_proofs → operator_catchup_delivery_proof_
+  // candidates) — would dangle during the DROP and break schema reload for
+  // every subsequent statement. The transitive closure is computed by name
+  // reference, dropped in reverse dependency order, and recreated verbatim
+  // in dependency order after the rename.
+  const allDependents = db
+    .prepare(
+      "SELECT type, name, sql FROM sqlite_master WHERE type IN ('trigger', 'view') AND tbl_name != 'inbound_events'",
+    )
+    .all() as Array<{ type: 'trigger' | 'view'; name: string; sql: string }>;
+
+  const included = new Set<string>();
+  for (const object of allDependents) {
+    if (object.sql.includes('inbound_events')) included.add(object.name);
+  }
+  let grew = true;
+  while (grew) {
+    grew = false;
+    for (const object of allDependents) {
+      if (included.has(object.name)) continue;
+      for (const name of included) {
+        if (object.sql.includes(name)) {
+          included.add(object.name);
+          grew = true;
+          break;
+        }
+      }
+    }
+  }
+
+  const dependents = allDependents.filter((object) => included.has(object.name));
+  const recreateOrder: typeof dependents = [];
+  const placed = new Set<string>();
+  let progressed = true;
+  while (recreateOrder.length < dependents.length && progressed) {
+    progressed = false;
+    for (const object of dependents) {
+      if (placed.has(object.name)) continue;
+      const references = [...included].filter(
+        (name) => name !== object.name && object.sql.includes(name),
+      );
+      if (references.every((name) => placed.has(name))) {
+        recreateOrder.push(object);
+        placed.add(object.name);
+        progressed = true;
+      }
+    }
+  }
+  // Cyclic references cannot occur in SQLite views/triggers; anything left
+  // over failed the name-match heuristic and is appended verbatim.
+  for (const object of dependents) {
+    if (!placed.has(object.name)) recreateOrder.push(object);
+  }
+
+  const statuses = INBOUND_STATUSES.map((status) => `'${status}'`).join(', ');
+
+  db.exec('SAVEPOINT migration_55');
+  try {
+    for (const object of [...recreateOrder].reverse()) {
+      db.exec(`DROP ${object.type === 'view' ? 'VIEW' : 'TRIGGER'} IF EXISTS ${object.name}`);
+    }
+    db.exec(`
+      CREATE TABLE inbound_events_v55 (
+        seq INTEGER PRIMARY KEY AUTOINCREMENT,
+        message_id TEXT NOT NULL,
+        conversation_key TEXT NOT NULL,
+        chat_jid TEXT NOT NULL,
+        received_at TEXT NOT NULL DEFAULT (datetime('now')),
+        routed_to TEXT,
+        processing_status TEXT NOT NULL DEFAULT 'pending'
+          CHECK (processing_status IN (${statuses})),
+        completed_at TEXT,
+        terminal_reason TEXT,
+        continuity_candidate_reason TEXT
+          CHECK (
+            continuity_candidate_reason IS NULL OR
+            continuity_candidate_reason IN ('crash_reclaim_no_terminal_outbound', 'runtime_fault_no_terminal_outbound')
+          ),
+        continuity_candidate_source TEXT
+          CHECK (
+            continuity_candidate_source IS NULL OR
+            continuity_candidate_source IN ('pre_connect_recovery', 'runtime_fault_disarm')
+          ),
+        continuity_candidate_marked_at TEXT,
+        failure_class TEXT,
+        UNIQUE(message_id)
+      );
+
+      INSERT INTO inbound_events_v55 (
+        seq, message_id, conversation_key, chat_jid, received_at, routed_to,
+        processing_status, completed_at, terminal_reason,
+        continuity_candidate_reason, continuity_candidate_source,
+        continuity_candidate_marked_at, failure_class
+      )
+      SELECT
+        seq, message_id, conversation_key, chat_jid, received_at, routed_to,
+        processing_status, completed_at, terminal_reason,
+        continuity_candidate_reason, continuity_candidate_source,
+        continuity_candidate_marked_at, failure_class
+      FROM inbound_events;
+
+      DROP TABLE inbound_events;
+      ALTER TABLE inbound_events_v55 RENAME TO inbound_events;
+    `);
+    for (const sql of triggerSql) {
+      db.exec(sql);
+    }
+    for (const object of recreateOrder) {
+      db.exec(object.sql);
+    }
+    db.exec('RELEASE migration_55');
+  } catch (error) {
+    db.exec('ROLLBACK TO migration_55');
+    db.exec('RELEASE migration_55');
+    throw error;
+  }
 }
