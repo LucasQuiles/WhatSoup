@@ -989,3 +989,9 @@ Changelog: 2026-06-14 — `soup/no-raw-form-control` is now a scoped-error selec
 omits it intentionally, and `eslint.config.shadow.mjs` no longer carries a duplicate shadow-only copy.
 Default-config probes pin raw `input`/`select`/`textarea` failures plus the FormControl and
 ToolbarSearch primitive exemptions.
+
+Changelog: 2026-08-01 — `SaveContactDialog.tsx` removed from the block-4a M-list `files` array
+in `console/eslint.config.js`: the component was deleted as dead code (orphaned since the
+console v3.5 de-wiring; #2327), so the M list drops from 10 files to 9 (8 in block 4a plus
+`line-detail/CreateGroupModal.tsx` in the full-union block 4b). No rule or selector changes —
+the entry was a per-file scope member for a file that no longer exists.

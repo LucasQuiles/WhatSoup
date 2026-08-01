@@ -1,27 +1,18 @@
-import { afterEach, describe, expect, it } from 'vitest';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { describe, expect, it } from 'vitest';
+import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 // @ts-expect-error -- hook libraries are JavaScript modules imported by Node hooks; expires 2026-08-14
 import { hasVisibleReply, inspectTranscript, MIN_ASSISTANT_TEXT_CHARS, WHATSAPP_SEND_TOOLS } from '../../deploy/hooks/lib/transcript-walk.mjs';
+import { trackTmpDirs } from '../helpers/tmp-dir.ts';
 
-const tmpDirs: string[] = [];
+const tmp = trackTmpDirs('whatsoup-');
 
 function writeTranscript(records: unknown[]): string {
-  const dir = mkdtempSync(join(tmpdir(), 'whatsoup-transcript-'));
-  tmpDirs.push(dir);
-  const path = join(dir, 'transcript.jsonl');
+  const path = join(tmp.make('transcript'), 'transcript.jsonl');
   writeFileSync(path, `${records.map((record) => JSON.stringify(record)).join('\n')}\n`);
   return path;
 }
-
-afterEach(() => {
-  for (const dir of tmpDirs) {
-    rmSync(dir, { recursive: true, force: true });
-  }
-  tmpDirs.length = 0;
-});
 
 describe('transcript-walk', () => {
   it('counts assistant text after the last human user message as a visible reply', () => {
@@ -116,9 +107,7 @@ describe('transcript-walk', () => {
   });
 
   it('tolerates malformed transcript lines', () => {
-    const dir = mkdtempSync(join(tmpdir(), 'whatsoup-transcript-'));
-    tmpDirs.push(dir);
-    const path = join(dir, 'transcript.jsonl');
+    const path = join(tmp.make('transcript'), 'transcript.jsonl');
     writeFileSync(path, [
       'not json',
       JSON.stringify({ type: 'user', message: 'hello' }),

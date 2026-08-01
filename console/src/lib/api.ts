@@ -424,12 +424,6 @@ export const api = {
     apiFetch<unknown>(
       `/api/lines/${encodeURIComponent(name)}/messages/search?q=${encodeURIComponent(query)}${conversationKey ? `&conversation_key=${encodeURIComponent(conversationKey)}` : ''}`
     ).then(normalizeSearchResponse),
-  saveContact: (name: string, contact: { jid: string; firstName?: string; lastName?: string }) =>
-    apiFetch<{ saved: boolean }>(`/api/lines/${encodeURIComponent(name)}/contacts`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(contact),
-    }),
   getAccess: (name: string) => withFallback(
     () => apiFetch<AccessEntry[]>(`/api/lines/${encodeURIComponent(name)}/access`),
     async () => (await loadMockData()).getAccess(name),
