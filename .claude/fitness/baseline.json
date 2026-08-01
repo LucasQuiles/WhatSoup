@@ -32,7 +32,7 @@
       "violationCount": 0
     },
     "arch.ring-boundaries": {
-      "violationCount": 56
+      "violationCount": 46
     }
   }
 }

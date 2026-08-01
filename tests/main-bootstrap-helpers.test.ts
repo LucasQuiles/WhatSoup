@@ -76,7 +76,9 @@ import type { StoredMessage } from '../src/core/messages.ts';
 type MainHarness = Awaited<ReturnType<typeof importMainWithMocks>>;
 
 type HealthServerDepsForTest = {
-  handleAccessDecision: (subjectType: string, subjectId: string, action: string) => Promise<void>;
+  // #2548: phone+allow replay resolves with { attempted, replayed, failed };
+  // the group/block paths still resolve void, so the union stays loose here.
+  handleAccessDecision: (subjectType: string, subjectId: string, action: string) => Promise<{ attempted: number; replayed: number; failed: number } | void>;
   getEnrichmentStats: () => unknown;
   getDatabaseRetentionHealth: () => unknown;
   getMemoryReadinessHealth?: () => unknown;
@@ -1771,6 +1773,98 @@ describe('main.ts — uncovered helpers and signal paths', () => {
       // No new log for block (only DB update, no replay)
       const logCallsAfter = (h.logger.info as ReturnType<typeof vi.fn>).mock.calls.length;
       expect(logCallsAfter).toBe(logCallsBefore);
+    });
+  });
+
+  // ── #2548: /access replay admits messages independently, marks replayed
+  // only after success, and reports an honest outcome ────────────────────────
+
+  describe('handleAccessDecision — phone allow replay outcome (#2548)', () => {
+    function makeQueuedMessage(messageId: string, timestamp: number): StoredMessage {
+      return {
+        pk: 1,
+        messageId,
+        conversationKey: '+15559990000@signal',
+        chatJid: '+15559990000@signal',
+        senderJid: '+15559990000@signal',
+        senderName: null,
+        content: `pending ${messageId}`,
+        contentText: null,
+        contentType: 'text',
+        isFromMe: false,
+        timestamp,
+        quotedMessageId: null,
+        enrichmentProcessedAt: null,
+        enrichmentRetries: 0,
+        createdAt: '2026-07-21T00:00:00.000Z',
+        mediaPath: null,
+      };
+    }
+
+    it('all-succeed: replays every candidate and reports a full-success outcome', async () => {
+      const h = await importMainWithMocks({ transport: 'signal' });
+      const queued = [
+        makeQueuedMessage('m1', 1),
+        makeQueuedMessage('m2', 2),
+        makeQueuedMessage('m3', 3),
+      ];
+      h.getMessagesBySender.mockReturnValue(queued);
+      h.selectReplayableDms.mockReturnValue({ toReplay: queued, groupSkipped: 0 });
+
+      const outcome = await h.getHealthDeps().handleAccessDecision('phone', '+15559990000', 'allow');
+
+      expect(h.chatRuntime.handleMessage).toHaveBeenCalledTimes(3);
+      expect(h.rememberReplayedId).toHaveBeenCalledTimes(3);
+      expect(h.rememberReplayedId).toHaveBeenNthCalledWith(1, 'm1');
+      expect(h.rememberReplayedId).toHaveBeenNthCalledWith(2, 'm2');
+      expect(h.rememberReplayedId).toHaveBeenNthCalledWith(3, 'm3');
+      expect(outcome).toEqual({ attempted: 3, replayed: 3, failed: 0 });
+    });
+
+    it('one-fails-mid-loop: later messages still replay, the failed message is not marked replayed, and the outcome reflects the failure', async () => {
+      const h = await importMainWithMocks({ transport: 'signal' });
+      const queued = [
+        makeQueuedMessage('m1', 1),
+        makeQueuedMessage('m2', 2),
+        makeQueuedMessage('m3', 3),
+      ];
+      h.getMessagesBySender.mockReturnValue(queued);
+      h.selectReplayableDms.mockReturnValue({ toReplay: queued, groupSkipped: 0 });
+      (h.chatRuntime.handleMessage as ReturnType<typeof vi.fn>)
+        .mockResolvedValueOnce(undefined)
+        .mockRejectedValueOnce(new Error('handleMessage boom'))
+        .mockResolvedValueOnce(undefined);
+
+      const outcome = await h.getHealthDeps().handleAccessDecision('phone', '+15559990000', 'allow');
+
+      // The loop must not abandon later messages after m2's admission throws.
+      expect(h.chatRuntime.handleMessage).toHaveBeenCalledTimes(3);
+      expect(h.chatRuntime.handleMessage).toHaveBeenNthCalledWith(1, expect.objectContaining({ messageId: 'm1' }));
+      expect(h.chatRuntime.handleMessage).toHaveBeenNthCalledWith(2, expect.objectContaining({ messageId: 'm2' }));
+      expect(h.chatRuntime.handleMessage).toHaveBeenNthCalledWith(3, expect.objectContaining({ messageId: 'm3' }));
+
+      // m1 and m3 are armed in the dedup set; m2 (the failed one) is
+      // deliberately NOT armed so a future /access retry can still admit it.
+      expect(h.rememberReplayedId).toHaveBeenCalledTimes(2);
+      expect(h.rememberReplayedId).toHaveBeenCalledWith('m1');
+      expect(h.rememberReplayedId).toHaveBeenCalledWith('m3');
+      expect(h.rememberReplayedId).not.toHaveBeenCalledWith('m2');
+
+      // The caller-visible outcome distinguishes partial failure from full success.
+      expect(outcome).toEqual({ attempted: 3, replayed: 2, failed: 1 });
+
+      expect(h.logger.error).toHaveBeenCalledWith(
+        expect.objectContaining({
+          err: expect.any(Error),
+          subjectId: '+15559990000',
+          messageId: 'm2',
+        }),
+        'access replay: message admission failed — leaving eligible for retry',
+      );
+      expect(h.logger.warn).toHaveBeenCalledWith(
+        { subjectId: '+15559990000', attempted: 3, replayed: 2, failed: 1 },
+        'access replay: completed with partial failures',
+      );
     });
   });
 

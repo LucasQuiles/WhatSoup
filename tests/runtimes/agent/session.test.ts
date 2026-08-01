@@ -4977,6 +4977,64 @@ describe('getProviderId', () => {
   });
 });
 
+// ─── getSpawnedEffort (Refs #2845) ───────────────────────────────────────────
+//
+// getSpawnedEffort() must report exactly what spawn threaded: only claude-cli
+// structurally consumes providerConfig.effort (resolveProviderArgs' `case
+// 'claude-cli'` arm, above). A static agentProviderConfig can carry an
+// `effort` key for ANY provider (it is never stripped on inheritance — see
+// fallback-config.ts / applyRouteEffort), so an un-gated read echoed that
+// inert key back for non-claude-cli sessions with nothing to distinguish it
+// from a real spawned effort.
+describe('getSpawnedEffort', () => {
+  it('claude-cli: returns the configured providerConfig.effort', () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+
+    const sm = new SessionManager({
+      db, messenger, chatJid: CHAT_JID, onEvent: vi.fn(),
+      provider: 'claude-cli',
+      providerConfig: { effort: 'high' },
+    });
+    expect(sm.getSpawnedEffort()).toBe('high');
+  });
+
+  it('claude-cli: returns null when no effort is configured', () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+
+    const sm = new SessionManager({ db, messenger, chatJid: CHAT_JID, onEvent: vi.fn() });
+    expect(sm.getSpawnedEffort()).toBeNull();
+  });
+
+  it('opencode-cli: returns null even when providerConfig carries an inherited static effort key', () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+
+    // Same providerConfig shape a claude-cli session would honor — opencode-cli
+    // has no native reasoning control, so the argv builder never reads this key
+    // (resolveProviderArgs' effort read lives only inside `case 'claude-cli'`).
+    const sm = new SessionManager({
+      db, messenger, chatJid: CHAT_JID, onEvent: vi.fn(),
+      provider: 'opencode-cli',
+      providerConfig: { effort: 'high' },
+    });
+    expect(sm.getSpawnedEffort()).toBeNull();
+  });
+
+  it('codex-cli: returns null even when providerConfig carries an inherited static effort key', () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+
+    const sm = new SessionManager({
+      db, messenger, chatJid: CHAT_JID, onEvent: vi.fn(),
+      provider: 'codex-cli',
+      providerConfig: { effort: 'high' },
+    });
+    expect(sm.getSpawnedEffort()).toBeNull();
+  });
+});
+
 // ─── durability upsert branch coverage ───────────────────────────────────────
 
 describe('durability upsert branch coverage', () => {

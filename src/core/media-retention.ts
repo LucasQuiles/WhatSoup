@@ -7,7 +7,7 @@ import { readdirSync, statSync, unlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import { createChildLogger } from '../logger.ts';
 import type { Database } from './database.ts';
-import { nowUnixSec } from '../fleet/time-utils.ts';
+import { nowUnixSec } from './substrate/time.ts';
 
 const log = createChildLogger('media:retention');
 

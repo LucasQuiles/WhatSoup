@@ -6,7 +6,7 @@ import type { ToolDeclaration, SessionContext } from '../types.ts';
 import { resolveConversationKey } from '../types.ts';
 import type { Database } from '../../core/database.ts';
 import { type MessageRow, rowToMessage } from '../../core/messages.ts';
-import { buildSafeFtsMatchQuery } from '../../fleet/db-reader.ts';
+import { buildSafeFtsMatchQuery } from '../../lib/sql-fts.ts';
 import { escapeSqlLikePattern } from '../../lib/sql-like.ts';
 
 const SQLITE_READ_LIMIT_MAX = 1000;

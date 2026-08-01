@@ -36,8 +36,10 @@ ruleTester.run('ring-boundaries', ringBoundaries, {
   ],
   invalid: [
     {
+      // Illustrative fixture — domain (core) may not reach up into
+      // composition (fleet), regardless of which fleet module is targeted.
       filename: '/repo/src/core/message-parser.ts',
-      code: `import { nowUnixSec } from '../fleet/time-utils.ts';`,
+      code: `import { someFleetHelper } from '../fleet/some-fleet-module.ts';`,
       errors: [{ messageId: 'invalidRing' }],
     },
     {
@@ -46,8 +48,10 @@ ruleTester.run('ring-boundaries', ringBoundaries, {
       errors: [{ messageId: 'invalidRing' }],
     },
     {
+      // Illustrative fixture — adapter (transport) may not reach up into
+      // composition (fleet), regardless of which fleet module is targeted.
       filename: '/repo/src/transport/connection.ts',
-      code: `import { normalizeTimestamp } from '../fleet/time-utils.ts';`,
+      code: `import { someFleetHelper } from '../fleet/some-fleet-module.ts';`,
       errors: [{ messageId: 'invalidRing' }],
     },
   ],

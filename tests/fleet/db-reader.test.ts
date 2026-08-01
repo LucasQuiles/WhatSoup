@@ -4,8 +4,9 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { unlinkSync, existsSync, writeFileSync } from 'node:fs';
-import { FleetDbReader, buildSafeFtsMatchQuery } from '../../src/fleet/db-reader.ts';
+import { FleetDbReader } from '../../src/fleet/db-reader.ts';
 import type { MessageRow, AccessEntry } from '../../src/fleet/db-reader.ts';
+import { buildSafeFtsMatchQuery } from '../../src/lib/sql-fts.ts';
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
