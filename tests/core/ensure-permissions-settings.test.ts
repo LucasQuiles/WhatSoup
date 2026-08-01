@@ -1,24 +1,15 @@
-import { describe, it, expect, afterEach } from 'vitest';
+import { describe, it, expect } from 'vitest';
 import { join } from 'node:path';
-import { mkdtempSync, rmSync, readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
 import { ensurePermissionsSettings } from '../../src/core/workspace.ts';
 import { REQUIRED_DENY } from '../../src/core/settings-template.ts';
+import { trackTmpDirs } from '../helpers/tmp-dir.ts';
 
 describe('ensurePermissionsSettings', () => {
-  let tmpDirs: string[] = [];
-
-  afterEach(() => {
-    for (const d of tmpDirs) {
-      rmSync(d, { recursive: true });
-    }
-    tmpDirs = [];
-  });
+  const tmp = trackTmpDirs('');
 
   function makeTmp(): string {
-    const d = mkdtempSync(join(tmpdir(), 'ensure-settings-'));
-    tmpDirs.push(d);
-    return d;
+    return tmp.make('ensure-settings');
   }
 
   it('writes default agent settings when no settings.json exists', () => {

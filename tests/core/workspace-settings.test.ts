@@ -1,24 +1,15 @@
-import { describe, it, expect, afterEach } from 'vitest';
+import { describe, it, expect } from 'vitest';
 import { join } from 'node:path';
-import { chmodSync, mkdtempSync, rmSync, readFileSync, existsSync, writeFileSync, mkdirSync, statSync, symlinkSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { chmodSync, readFileSync, existsSync, writeFileSync, mkdirSync, statSync, symlinkSync } from 'node:fs';
 import { writePermissionsSettings } from '../../src/core/workspace.ts';
 import { REQUIRED_DENY } from '../../src/core/settings-template.ts';
+import { trackTmpDirs } from '../helpers/tmp-dir.ts';
 
 describe('writePermissionsSettings', () => {
-  let tmpDirs: string[] = [];
-
-  afterEach(() => {
-    for (const d of tmpDirs) {
-      rmSync(d, { recursive: true });
-    }
-    tmpDirs = [];
-  });
+  const tmp = trackTmpDirs('');
 
   function makeTmp(): string {
-    const d = mkdtempSync(join(tmpdir(), 'ws-settings-'));
-    tmpDirs.push(d);
-    return d;
+    return tmp.make('ws-settings');
   }
 
   it('writes settings.json with permissions block to .claude/ directory', () => {
