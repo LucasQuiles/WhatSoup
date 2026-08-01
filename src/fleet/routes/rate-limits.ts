@@ -1,11 +1,10 @@
 /**
  * GET /api/lines/:name/rate-limits — windowed per-sender throttle feed for
- * the console RateLimitsCard (D-5; spec:
- * oc-re/specs/2026-07-19-rate-limits-surface-spec.md).
+ * the console RateLimitsCard (D-5; design/implementation lineage:
+ * PR #1937).
  *
  * The `rate_limits` table is per-SENDER chat throttling (successful
- * responses), NOT provider quota (MAP §correction:
- * oc-re/audits/2026-07-19-rate-limits-surface-map.md).
+ * responses), NOT provider quota (correction landed in PR #1937).
  *
  * Limit/window resolution: read from the instance's config.json with the
  * same fallback chain as src/config.ts (rateLimitPerHour ?? 45;

@@ -3,7 +3,7 @@
  *  - FleetDbReader.getRateLimits (real node:sqlite, minimal schema)
  *  - GET /api/lines/:name/rate-limits (handleGetRateLimits, fake deps)
  *
- * Spec: oc-re/specs/2026-07-19-rate-limits-surface-spec.md
+ * Design/implementation lineage: PR #1937
  * The `rate_limits` table is per-SENDER chat throttling (successful
  * responses), `llm_attempts` every LLM invocation (audit 1065) — the
  * windowed excess is the retry/token-storm signal (#1864 class).

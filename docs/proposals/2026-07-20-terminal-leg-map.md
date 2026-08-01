@@ -2,7 +2,7 @@
 
 **Stage:** MAP (research/design; no build authorization claimed).
 **Sources:** review §3/§D-5 (operator-local status note `whatsoup-ui-ux-review-20260719.md`),
-PDR-1 (`oc-re/audits/2026-07-16-whatsoup-parity-debt-register.md`).
+PDR-1 (design/implementation lineage: PR #1947).
 
 ## 1. The gap, precisely
 
