@@ -14,6 +14,7 @@ import {
   renderUserMessage,
 } from './response-templates.ts';
 import { emitAlertChecked } from '../../lib/emit-alert.ts';
+import { isNonEmptyString } from '../../lib/type-guards.ts';
 import { providerPreview } from '../../lib/provider-preview-sanitizer.ts';
 import { accumulateTokensWithEvent, markSessionCompacted } from './session-db.ts';
 import { createChildLogger } from '../../logger.ts';
@@ -595,7 +596,7 @@ if (wasSilentCompact || hadCompactBoundary) {
   if (!isSystemResult && !hasPendingPoll && !wasSilentCompact) {
     const hadVisible =
       responseText.trim() !== '' ||
-      (typeof event.text === 'string' && event.text.trim() !== '');
+      (isNonEmptyString(event.text));
     // A fallback turn whose entire reply was MCP tool sends (e.g.
     // send_message, send_media) is NOT silent — the user received the
     // result through the outbound channel. Only fire the notice and

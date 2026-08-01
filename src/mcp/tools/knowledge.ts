@@ -6,6 +6,7 @@ import { z } from 'zod';
 import { Pinecone } from '@pinecone-database/pinecone';
 import { createChildLogger } from '../../logger.ts';
 import { truncateForRerank } from '../../lib/text-utils.ts';
+import { isNonEmptyString } from '../../lib/type-guards.ts';
 import { routeQuery } from '../../runtimes/chat/memory/query-router.ts';
 import { config } from '../../config.ts';
 import type { KnowledgeProfileConfig } from '../../config.ts';
@@ -52,7 +53,7 @@ function pineconeMemoryConfig(): {
   }).memory?.pinecone;
   return {
     apiKeyEnv: pinecone?.apiKeyEnv || 'PINECONE_API_KEY',
-    apiKeyService: typeof pinecone?.apiKeyService === 'string' && pinecone.apiKeyService.trim() !== ''
+    apiKeyService: isNonEmptyString(pinecone?.apiKeyService)
       ? pinecone.apiKeyService
       : undefined,
     projectId: pinecone?.projectId,

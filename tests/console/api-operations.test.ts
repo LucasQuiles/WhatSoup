@@ -93,11 +93,6 @@ describe('api write operations', () => {
     expect(api.accessDecision.length).toBe(4);
   });
 
-  it('saveContact is a function accepting (name, contact)', () => {
-    expect(typeof api.saveContact).toBe('function');
-    expect(api.saveContact.length).toBe(2);
-  });
-
   it('searchMessages is a function accepting (name, query, conversationKey?)', () => {
     expect(typeof api.searchMessages).toBe('function');
     expect(api.searchMessages.length).toBeGreaterThanOrEqual(2);
@@ -687,7 +682,6 @@ describe('api read operations', () => {
       { invoke: () => freshApi.getMessages('line a', 'chat jid', 99), path: '/api/lines/line%20a/messages?conversation_key=chat%20jid&before_pk=99' },
       { invoke: () => freshApi.getMetrics('line a', '24h'), path: '/api/lines/line%20a/metrics?range=24h' },
       { invoke: () => freshApi.getFleetMetrics('7d'), path: '/api/metrics?range=7d' },
-      { invoke: () => freshApi.saveContact('line a', { jid: '1555000001@s.whatsapp.net', firstName: 'Ada' }), path: '/api/lines/line%20a/contacts', method: 'POST', body: { jid: '1555000001@s.whatsapp.net', firstName: 'Ada' } },
       { invoke: () => freshApi.getAccess('line a'), path: '/api/lines/line%20a/access' },
       { invoke: () => freshApi.getLogs('line a'), path: '/api/lines/line%20a/logs' },
       { invoke: () => freshApi.getFeed(), path: '/api/feed' },
@@ -838,12 +832,6 @@ describe('api operation request construction', () => {
 
     const { api: freshApi } = await import('../../console/src/lib/api.ts');
     const cases = [
-      {
-        run: () => freshApi.saveContact('line main', { jid: 'chat/jid', firstName: 'Ada' }),
-        url: '/api/lines/line%20main/contacts',
-        method: 'POST',
-        body: { jid: 'chat/jid', firstName: 'Ada' },
-      },
       {
         run: () => freshApi.stopInstance('line main'),
         url: '/api/lines/line%20main/stop',
