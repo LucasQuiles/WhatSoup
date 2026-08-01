@@ -49,7 +49,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-emit.py",
-      "sha256": "990a860e1787f5883f2f055dfdc4b796410ec3ceec41ac24e5d2077a0027c181",
+      "sha256": "c8c22d37a46f5c435baa4f9f7e84b7b92a82af908bfb29815c36048b3577e7cb",
       "mustContain": [
         "O_NOFOLLOW",
         "refusing to use private directory through symlink",
