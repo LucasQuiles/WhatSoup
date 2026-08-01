@@ -1,15 +1,15 @@
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { chmodSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { afterEach, describe, expect, it } from 'vitest';
+import { describe, expect, it } from 'vitest';
+
+import { trackTmpDirs } from '../helpers/tmp-dir.ts';
 
 const SCRIPT = join(process.cwd(), 'scripts/check-unit-drift.sh');
-const tmpDirs: string[] = [];
+const tmp = trackTmpDirs('');
 
 function makeFixture(): { repo: string; systemd: string; bin: string } {
-  const root = mkdtempSync(join(tmpdir(), 'whatsoup-unit-drift-'));
-  tmpDirs.push(root);
+  const root = tmp.make('whatsoup-unit-drift');
   const repo = join(root, 'repo');
   const systemd = join(root, 'systemd');
   const bin = join(root, 'bin');
@@ -78,11 +78,6 @@ function writeMonitorUnits(repo: string, systemd: string): void {
     writeFileSync(join(systemd, unit), body);
   }
 }
-
-afterEach(() => {
-  for (const dir of tmpDirs) rmSync(dir, { recursive: true, force: true });
-  tmpDirs.length = 0;
-});
 
 describe('check-unit-drift.sh', () => {
   it('passes when the checked-in and installed unit match', () => {

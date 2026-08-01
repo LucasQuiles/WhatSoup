@@ -1,9 +1,8 @@
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { readFileSync, utimesSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { afterEach, describe, expect, it } from 'vitest';
+import { describe, expect, it } from 'vitest';
 
 import {
   rosterDigest,
@@ -12,18 +11,17 @@ import {
   rosterInventory,
   RosterPortError,
 } from '../../../scripts/lib/fleet-roster-inventory.ts';
+import { trackTmpDirs } from '../../helpers/tmp-dir.ts';
 
 // lib/ -> scripts/ -> tests/ -> repo root
 const repoRoot = fileURLToPath(new URL('../../..', import.meta.url));
 const realRosterPath = path.join(repoRoot, 'deploy/bot-errors-expected-fleet.json');
 const rosterLibDir = path.join(repoRoot, 'deploy/scripts/lib');
 
-const tempRoots: string[] = [];
+const tmp = trackTmpDirs('');
 
 function makeRoot(): string {
-  const root = mkdtempSync(path.join(tmpdir(), 'whatsoup-fleet-roster-port-'));
-  tempRoots.push(root);
-  return root;
+  return tmp.make('whatsoup-fleet-roster-port');
 }
 
 function writeRoster(
@@ -47,10 +45,6 @@ function makeHosts(n: number): Array<Record<string, unknown>> {
     ],
   }));
 }
-
-afterEach(() => {
-  for (const root of tempRoots.splice(0)) rmSync(root, { recursive: true, force: true });
-});
 
 describe('fleet-roster-inventory (TS port of bot_errors_roster.py, #1867 D4)', () => {
   it('produces a digest and inventory identical to the Python roster module for the real committed roster (lockstep)', () => {

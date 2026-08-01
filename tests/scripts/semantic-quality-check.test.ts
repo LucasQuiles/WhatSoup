@@ -2,18 +2,15 @@ import { execFileSync, spawnSync } from 'node:child_process';
 import {
   lstatSync,
   mkdirSync,
-  mkdtempSync,
   readFileSync,
   readdirSync,
-  rmSync,
   statSync,
   symlinkSync,
   writeFileSync,
 } from 'node:fs';
-import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { afterEach, describe, expect, it } from 'vitest';
+import { describe, expect, it } from 'vitest';
 
 import { cleanGitEnv } from '../../src/lib/git-env.ts';
 import type { CandidateTree } from '../../scripts/lib/semantic-quality/git-tree.ts';
@@ -32,10 +29,11 @@ import {
   type EnforcementMode,
 } from '../../scripts/lib/semantic-quality/receipt.ts';
 import type { BoundaryAction } from '../../scripts/lib/semantic-quality/boundary-types.ts';
+import { trackTmpDirs } from '../helpers/tmp-dir.ts';
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const CLI = path.join(REPO_ROOT, 'scripts/semantic-quality-check.ts');
-const repos: string[] = [];
+const tmp = trackTmpDirs('');
 
 const TREE: CandidateTree = {
   headOid: '1111111111111111111111111111111111111111',
@@ -68,8 +66,7 @@ function commit(repo: string, message: string): string {
 }
 
 function initRepo(): string {
-  const repo = mkdtempSync(path.join(tmpdir(), 'semantic-quality-check-'));
-  repos.push(repo);
+  const repo = tmp.make('semantic-quality-check');
   git(repo, ['init', '--initial-branch=main']);
   git(repo, ['config', 'user.name', 'Semantic Quality Test']);
   git(repo, ['config', 'user.email', 'semantic-quality-test@users.noreply.github.com']);
@@ -210,10 +207,6 @@ function genericFinding(
     ...overrides,
   };
 }
-
-afterEach(() => {
-  for (const repo of repos.splice(0)) rmSync(repo, { recursive: true, force: true });
-});
 
 describe('semantic quality receipt', () => {
   it('shares decision aggregation and feedback-completeness semantics with experiment adapters', () => {

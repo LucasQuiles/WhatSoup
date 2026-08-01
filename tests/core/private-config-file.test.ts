@@ -4,14 +4,11 @@ import {
   existsSync,
   lstatSync,
   mkdirSync,
-  mkdtempSync,
   readFileSync,
-  rmSync,
   statSync,
   symlinkSync,
   writeFileSync,
 } from 'node:fs';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   mutatePrivateConfigFileSync,
@@ -20,22 +17,18 @@ import {
   withPrivateConfigLockSync,
   writePrivateConfigFileSync,
 } from '../../src/core/private-config-file.ts';
+import { trackTmpDirs } from '../helpers/tmp-dir.ts';
 
-let tempDirs: string[] = [];
+const tmp = trackTmpDirs('');
 
 afterEach(() => {
   vi.doUnmock('node:fs');
   vi.restoreAllMocks();
   vi.resetModules();
-  for (const dir of tempDirs.splice(0)) {
-    rmSync(dir, { recursive: true, force: true });
-  }
 });
 
 function makeTempDir(): string {
-  const dir = mkdtempSync(join(tmpdir(), 'whatsoup-private-config-'));
-  tempDirs.push(dir);
-  return dir;
+  return tmp.make('whatsoup-private-config');
 }
 
 function makeConfigFile(body = '{"ok":false}\n'): string {
