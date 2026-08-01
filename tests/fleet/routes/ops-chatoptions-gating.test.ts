@@ -20,8 +20,6 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
-import { PassThrough } from 'node:stream';
-import type { IncomingMessage, ServerResponse } from 'node:http';
 
 vi.mock('../../../src/fleet/mcp-client.ts', () => ({ mcpCall: vi.fn() }));
 vi.mock('../../../src/fleet/http-proxy.ts', () => ({ proxyToInstance: vi.fn() }));
@@ -30,46 +28,11 @@ vi.mock('node:child_process', () => ({ execFile: vi.fn(), spawn: vi.fn() }));
 import { handleCreateLine, handleConfigUpdate } from '../../../src/fleet/routes/ops.ts';
 import type { OpsDeps } from '../../../src/fleet/routes/ops.ts';
 import type { DiscoveredInstance } from '../../../src/fleet/discovery.ts';
-
-function mockReq(body = '', method = 'POST'): IncomingMessage {
-  const stream = new PassThrough() as unknown as IncomingMessage;
-  (stream as any).headers = {};
-  (stream as any).url = '/';
-  (stream as any).method = method;
-  process.nextTick(() => {
-    (stream as unknown as PassThrough).write(body);
-    (stream as unknown as PassThrough).end();
-  });
-  return stream;
-}
-
-function mockRes(): ServerResponse & { _status: number; _body: string } {
-  const res = {
-    _status: 0,
-    _body: '',
-    writeHead(status: number) { res._status = status; },
-    end(data?: string) { if (data) res._body = data; },
-  };
-  return res as any;
-}
+import { makeDeps, mockReq, mockRes } from '../../helpers/http-mocks.ts';
 
 function successDeps(): OpsDeps {
-  return {
-    discovery: {
-      getInstance: vi.fn(() => undefined),
-      getInstances: vi.fn(() => new Map()),
-      scan: vi.fn(),
-    } as any,
-    realtime: { publish: vi.fn() },
-    serviceManager: {
-      enable: vi.fn().mockResolvedValue(undefined),
-      disable: vi.fn().mockResolvedValue(undefined),
-      start: vi.fn().mockResolvedValue(undefined),
-      stop: vi.fn().mockResolvedValue(undefined),
-      restart: vi.fn().mockResolvedValue(undefined),
-      startFire: vi.fn(),
-    },
-  };
+  // makeDeps's base discovery has no scan(); handleCreateLine calls it.
+  return makeDeps({ discovery: { scan: vi.fn() } as any });
 }
 
 describe('handleCreateLine — chatOptions gating (QR-218 PR-2)', () => {
@@ -113,12 +76,15 @@ describe('handleCreateLine — chatOptions gating (QR-218 PR-2)', () => {
 
     const res = mockRes();
     await handleCreateLine(
-      mockReq(JSON.stringify({
-        name: 'chatopts-roundtrip',
-        type: 'chat',
-        adminPhones: ['15551234567'],
-        chatOptions: { openaiProviderConfig },
-      })),
+      mockReq({
+        method: 'POST',
+        body: JSON.stringify({
+          name: 'chatopts-roundtrip',
+          type: 'chat',
+          adminPhones: ['15551234567'],
+          chatOptions: { openaiProviderConfig },
+        }),
+      }),
       res,
       successDeps(),
     );
@@ -137,15 +103,18 @@ describe('handleCreateLine — chatOptions gating (QR-218 PR-2)', () => {
     const agentCwd = fs.mkdtempSync(path.join(process.env.HOME!, 'chatopts-agent-cwd-'));
     const res = mockRes();
     await handleCreateLine(
-      mockReq(JSON.stringify({
-        name: 'chatopts-agent-drop',
-        type: 'agent',
-        adminPhones: ['15551234567'],
-        agentOptions: { cwd: agentCwd, sessionScope: 'single' },
-        chatOptions: {
-          openaiProviderConfig: { baseUrl: 'https://api.groq.com/openai/v1', apiKeyService: 'groq' },
-        },
-      })),
+      mockReq({
+        method: 'POST',
+        body: JSON.stringify({
+          name: 'chatopts-agent-drop',
+          type: 'agent',
+          adminPhones: ['15551234567'],
+          agentOptions: { cwd: agentCwd, sessionScope: 'single' },
+          chatOptions: {
+            openaiProviderConfig: { baseUrl: 'https://api.groq.com/openai/v1', apiKeyService: 'groq' },
+          },
+        }),
+      }),
       res,
       successDeps(),
     );
@@ -172,13 +141,16 @@ describe('handleCreateLine — chatOptions gating (QR-218 PR-2)', () => {
     };
     const res = mockRes();
     await handleCreateLine(
-      mockReq(JSON.stringify({
-        name: 'transcription-agent-roundtrip',
-        type: 'agent',
-        adminPhones: ['15551234567'],
-        agentOptions: { cwd: agentCwd, sessionScope: 'single' },
-        transcriptionOptions: { openaiProviderConfig },
-      })),
+      mockReq({
+        method: 'POST',
+        body: JSON.stringify({
+          name: 'transcription-agent-roundtrip',
+          type: 'agent',
+          adminPhones: ['15551234567'],
+          agentOptions: { cwd: agentCwd, sessionScope: 'single' },
+          transcriptionOptions: { openaiProviderConfig },
+        }),
+      }),
       res,
       successDeps(),
     );
@@ -197,15 +169,18 @@ describe('handleCreateLine — chatOptions gating (QR-218 PR-2)', () => {
     const agentCwd = fs.mkdtempSync(path.join(process.env.HOME!, 'transcription-agent-cwd-'));
     const res = mockRes();
     await handleCreateLine(
-      mockReq(JSON.stringify({
-        name: 'transcription-agent-invalid',
-        type: 'agent',
-        adminPhones: ['15551234567'],
-        agentOptions: { cwd: agentCwd, sessionScope: 'single' },
-        transcriptionOptions: {
-          openaiProviderConfig: { baseUrl: 'not-a-url' },
-        },
-      })),
+      mockReq({
+        method: 'POST',
+        body: JSON.stringify({
+          name: 'transcription-agent-invalid',
+          type: 'agent',
+          adminPhones: ['15551234567'],
+          agentOptions: { cwd: agentCwd, sessionScope: 'single' },
+          transcriptionOptions: {
+            openaiProviderConfig: { baseUrl: 'not-a-url' },
+          },
+        }),
+      }),
       res,
       successDeps(),
     );
@@ -265,15 +240,8 @@ describe('handleConfigUpdate PATCH chatOptions validation (QR-218 PR-2)', () => 
     };
   }
 
-  function makeDeps(instance: DiscoveredInstance): OpsDeps {
-    return {
-      discovery: {
-        getInstance: vi.fn(() => instance),
-        getInstances: vi.fn(() => new Map()),
-      } as any,
-      realtime: { publish: vi.fn() },
-      serviceManager: { restart: vi.fn(), stop: vi.fn(), disable: vi.fn(), enable: vi.fn() } as any,
-    };
+  function depsFor(instance: DiscoveredInstance): OpsDeps {
+    return makeDeps({ discovery: { getInstance: vi.fn(() => instance) } as any });
   }
 
   function writeChatConfig(name = 'test-line', data: Record<string, unknown> = {}): string {
@@ -292,10 +260,13 @@ describe('handleConfigUpdate PATCH chatOptions validation (QR-218 PR-2)', () => 
     const before = fs.readFileSync(cfg, 'utf-8');
     const res = mockRes();
     await handleConfigUpdate(
-      mockReq(JSON.stringify({
-        chatOptions: { openaiProviderConfig: { baseUrl: 'not-a-url' } },
-      }), 'PATCH'),
-      res, makeDeps(fakeInstance(cfg)), { name: 'test-line' },
+      mockReq({
+        method: 'PATCH',
+        body: JSON.stringify({
+          chatOptions: { openaiProviderConfig: { baseUrl: 'not-a-url' } },
+        }),
+      }),
+      res, depsFor(fakeInstance(cfg)), { name: 'test-line' },
     );
     expect(res._status).toBe(400);
     const body = JSON.parse(res._body);
@@ -315,8 +286,8 @@ describe('handleConfigUpdate PATCH chatOptions validation (QR-218 PR-2)', () => 
     };
     const res = mockRes();
     await handleConfigUpdate(
-      mockReq(JSON.stringify({ chatOptions: { openaiProviderConfig } }), 'PATCH'),
-      res, makeDeps(fakeInstance(cfg)), { name: 'test-line' },
+      mockReq({ method: 'PATCH', body: JSON.stringify({ chatOptions: { openaiProviderConfig } }) }),
+      res, depsFor(fakeInstance(cfg)), { name: 'test-line' },
     );
     expect(res._status, res._body).toBe(200);
     const persisted = JSON.parse(fs.readFileSync(cfg, 'utf-8'));
@@ -336,14 +307,17 @@ describe('handleConfigUpdate PATCH chatOptions validation (QR-218 PR-2)', () => 
     const res = mockRes();
 
     await handleConfigUpdate(
-      mockReq(JSON.stringify({
-        chatOptions: {
-          openaiProviderConfig: {
-            baseUrl: 'https://api.openrouter.ai/v1',
+      mockReq({
+        method: 'PATCH',
+        body: JSON.stringify({
+          chatOptions: {
+            openaiProviderConfig: {
+              baseUrl: 'https://api.openrouter.ai/v1',
+            },
           },
-        },
-      }), 'PATCH'),
-      res, makeDeps(fakeInstance(cfg)), { name: 'test-line' },
+        }),
+      }),
+      res, depsFor(fakeInstance(cfg)), { name: 'test-line' },
     );
 
     expect(res._status, res._body).toBe(200);
@@ -360,15 +334,18 @@ describe('handleConfigUpdate PATCH chatOptions validation (QR-218 PR-2)', () => 
     const before = fs.readFileSync(cfg, 'utf-8');
     const res = mockRes();
     await handleConfigUpdate(
-      mockReq(JSON.stringify({
-        chatOptions: {
-          openaiProviderConfig: {
-            baseUrl: 'https://api.groq.com/openai/v1',
-            apiKeyService: 'not-a-real-service',
+      mockReq({
+        method: 'PATCH',
+        body: JSON.stringify({
+          chatOptions: {
+            openaiProviderConfig: {
+              baseUrl: 'https://api.groq.com/openai/v1',
+              apiKeyService: 'not-a-real-service',
+            },
           },
-        },
-      }), 'PATCH'),
-      res, makeDeps(fakeInstance(cfg)), { name: 'test-line' },
+        }),
+      }),
+      res, depsFor(fakeInstance(cfg)), { name: 'test-line' },
     );
     expect(res._status).toBe(400);
     const body = JSON.parse(res._body);
@@ -390,10 +367,13 @@ describe('handleConfigUpdate PATCH chatOptions validation (QR-218 PR-2)', () => 
     });
     const res = mockRes();
     await handleConfigUpdate(
-      mockReq(JSON.stringify({
-        chatOptions: { openaiProviderConfig: { baseUrl: 'not-a-url' } },
-      }), 'PATCH'),
-      res, makeDeps(fakeInstance(cfg, { type: 'agent', name: 'test-agent-chatopts' })),
+      mockReq({
+        method: 'PATCH',
+        body: JSON.stringify({
+          chatOptions: { openaiProviderConfig: { baseUrl: 'not-a-url' } },
+        }),
+      }),
+      res, depsFor(fakeInstance(cfg, { type: 'agent', name: 'test-agent-chatopts' })),
       { name: 'test-agent-chatopts' },
     );
     expect(res._status, 'drop, not reject: ' + res._body).toBe(200);
@@ -418,9 +398,9 @@ describe('handleConfigUpdate PATCH chatOptions validation (QR-218 PR-2)', () => 
     };
     const res = mockRes();
     await handleConfigUpdate(
-      mockReq(JSON.stringify({ transcriptionOptions: { openaiProviderConfig } }), 'PATCH'),
+      mockReq({ method: 'PATCH', body: JSON.stringify({ transcriptionOptions: { openaiProviderConfig } }) }),
       res,
-      makeDeps(fakeInstance(cfg, { type: 'agent', name: 'test-agent-transcriptionopts' })),
+      depsFor(fakeInstance(cfg, { type: 'agent', name: 'test-agent-transcriptionopts' })),
       { name: 'test-agent-transcriptionopts' },
     );
     expect(res._status, res._body).toBe(200);
@@ -438,11 +418,14 @@ describe('handleConfigUpdate PATCH chatOptions validation (QR-218 PR-2)', () => 
     const before = fs.readFileSync(cfg, 'utf-8');
     const res = mockRes();
     await handleConfigUpdate(
-      mockReq(JSON.stringify({
-        transcriptionOptions: { openaiProviderConfig: { baseUrl: 'not-a-url' } },
-      }), 'PATCH'),
+      mockReq({
+        method: 'PATCH',
+        body: JSON.stringify({
+          transcriptionOptions: { openaiProviderConfig: { baseUrl: 'not-a-url' } },
+        }),
+      }),
       res,
-      makeDeps(fakeInstance(cfg, { type: 'agent', name: 'agent-bad-transcription' })),
+      depsFor(fakeInstance(cfg, { type: 'agent', name: 'agent-bad-transcription' })),
       { name: 'agent-bad-transcription' },
     );
     expect(res._status).toBe(400);

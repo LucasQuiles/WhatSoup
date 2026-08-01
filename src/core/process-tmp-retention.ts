@@ -1,6 +1,7 @@
 import { lstatSync, readdirSync, rmSync, statSync, unlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import { createChildLogger } from '../logger.ts';
+import { MS_PER_HOUR } from '../lib/time-units.ts';
 
 const log = createChildLogger('process-tmp:retention');
 
@@ -20,8 +21,8 @@ export interface ProcessTmpCleanupResult {
 }
 
 export const DEFAULT_PROCESS_TMP_RETENTION: ProcessTmpRetentionConfig = {
-  intervalMs: 60 * 60 * 1000,
-  maxAgeMs: 3 * 60 * 60 * 1000,
+  intervalMs: MS_PER_HOUR,
+  maxAgeMs: 3 * MS_PER_HOUR,
 };
 
 /**

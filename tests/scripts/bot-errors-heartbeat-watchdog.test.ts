@@ -900,7 +900,7 @@ m.reconcile({"credential_probe": evidence}, ["credential_probe"])
         'agent-alpha': {
           status: 200,
           body: {
-            status: 'degraded',
+            status: 'healthy',
             instance: { name: 'agent-alpha' },
             whatsapp: {
               connected: true,
@@ -914,6 +914,47 @@ m.reconcile({"credential_probe": evidence}, ["credential_probe"])
 
     expect(output).toContain('"problems": []');
     expect(() => readdirSync(join(tmpRoot, 'outbox'))).toThrow();
+  });
+
+  it('emits when a reachable instance reports degraded runtime health with clean transport', () => {
+    tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-heartbeat-'));
+    const profile = join(tmpRoot, 'health-profile.json');
+    writeFileSync(profile, JSON.stringify({
+      instances: [
+        { name: 'agent-alpha', expected: 'always_on', service: 'whatsoup-agent-alpha.service', healthPort: 9092 },
+      ],
+    }));
+
+    runWatchdog({
+      BOT_ERRORS_STATE_DIR: tmpRoot,
+      BOT_ERRORS_WATCHDOG_CHECKS: 'local_instance_health',
+      BOT_ERRORS_HEALTH_PROFILE: profile,
+      BOT_ERRORS_DRY_LOCAL_HEALTH_RESPONSES: JSON.stringify({
+        'agent-alpha': {
+          status: 200,
+          body: {
+            status: 'degraded',
+            degradation_causes: ['finalization_debt', 'recovery_debt'],
+            instance: { name: 'agent-alpha' },
+            whatsapp: {
+              connected: true,
+              connection: { state: 'connected', auth_failure_class: 'none' },
+              auth_bond: { status: 'present', issues: [] },
+            },
+          },
+        },
+      }),
+    });
+
+    const events = readOutboxEvents();
+    expect(events).toHaveLength(1);
+    expect(events[0]!.severity).toBe('critical');
+    expect(events[0]!.alertSource).toBe('local_health:agent-alpha');
+    expect(events[0]!.summary).toBe('BOT ERRORS heartbeat watchdog stale: local_health:agent-alpha');
+    expect(events[0]!.evidence).toContain('local instance health failure: instance=agent-alpha');
+    expect(events[0]!.evidence).toContain('health_status=degraded');
+    expect(events[0]!.evidence).toContain('degradation_causes=finalization_debt,recovery_debt');
+    expect(events[0]!.evidence).not.toContain('auth_failure_class=');
   });
 
   it('does not clear unrelated open incidents during a scoped watchdog run', () => {

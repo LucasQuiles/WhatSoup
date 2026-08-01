@@ -1036,6 +1036,48 @@ def test_local_instance_health_503_unparseable_body_fails_open(tmp_path: Path, m
     assert "http_status=503" in detail
 
 
+def test_local_instance_health_surfaces_reachable_degraded_status(tmp_path: Path, monkeypatch):
+    """A reachable HTTP-200 degraded payload must surface reasons (#2248).
+
+    src/core/health.ts returns 200 for status=degraded with a top-level
+    degradation_causes array, so the transport path stays clean while the
+    runtime is degraded. That structured evidence must not read as healthy
+    silence.
+    """
+    mod = _load_module()
+    monkeypatch.setenv("BOT_ERRORS_HEALTH_PROFILE", str(_single_instance_profile(tmp_path)))
+    monkeypatch.setenv(
+        "BOT_ERRORS_DRY_LOCAL_HEALTH_RESPONSES",
+        json.dumps(
+            {
+                "line-alpha": {
+                    "status": 200,
+                    "json": {
+                        "status": "degraded",
+                        "degradation_causes": ["finalization_debt", "recovery_debt"],
+                        "instance": {"name": "line-alpha"},
+                        "whatsapp": {
+                            "connected": True,
+                            "connection": {"state": "connected", "auth_failure_class": "none"},
+                            "auth_bond": {"status": "present", "issues": []},
+                        },
+                    },
+                }
+            }
+        ),
+    )
+
+    problems = mod.local_instance_health_problems()
+
+    assert "local_health:line-alpha" in problems
+    detail = problems["local_health:line-alpha"]
+    assert "health_status=degraded" in detail
+    assert "degradation_causes=finalization_debt,recovery_debt" in detail
+    # Degraded runtime state with clean transport must not fabricate auth signals.
+    assert "physical_intervention_required" not in detail
+    assert "auth_failure_class=" not in detail
+
+
 def test_terminal_auth_failure_class_inventory_matches_dispatcher_and_health_check():
     mod = _load_module()
 
