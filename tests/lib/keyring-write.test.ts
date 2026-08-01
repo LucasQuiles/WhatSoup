@@ -120,6 +120,9 @@ describe('writeCredential — macos-keychain backend', () => {
   });
 
   it('does not report true when an inaccessible mirror may still exist', () => {
+    if (typeof process.getuid === 'function' && process.getuid() === 0) {
+      return;
+    }
     const mirror = path.join(dir, 'minimax.key');
     fs.writeFileSync(mirror, 'unscoped-value', { mode: 0o600 });
     fs.chmodSync(dir, 0o000);
