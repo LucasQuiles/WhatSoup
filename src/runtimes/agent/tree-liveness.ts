@@ -15,12 +15,17 @@
 // the caller extends its deadline instead of killing. A flat tree is genuinely
 // hung and the existing kill proceeds.
 //
-// Deliberately dependency-free: `ps` is invoked directly (portable across
-// macOS and Linux) so this cannot import from session.ts (import cycle) and
-// works identically on launchd and systemd fleet hosts.
+// Deliberately kept off any dependency chain that could reach session.ts:
+// `ps` is invoked directly (portable across macOS and Linux) rather than via
+// process-tree.ts, and the only project import is process-tree-parse.ts, a
+// zero-import leaf shared with process-tree.ts's kill path (#2223) — so this
+// still cannot import from session.ts (import cycle: session.ts already
+// imports both this module and process-tree.ts) and works identically on
+// launchd and systemd fleet hosts.
 
 import { execFile } from 'node:child_process';
 import { createChildLogger } from '../../logger.ts';
+import { bfsFromRoot, buildChildrenIndex, parsePsLines } from './process-tree-parse.ts';
 
 const log = createChildLogger('tree-liveness');
 
@@ -57,31 +62,32 @@ function execPs(args: string[]): Promise<string | null> {
   });
 }
 
-/** Enumerate rootPid's descendant tree (root included) via a full pid/ppid census. */
+/** One `ps -o pid=,ppid=` row (no header — `=` suffix suppresses it). */
+interface PidPpidRow {
+  pid: number;
+  ppid: number;
+}
+
+/**
+ * Enumerate rootPid's descendant tree (root always included, regardless of
+ * whether rootPid itself appears in the census — this is an advisory
+ * liveness signal, not a kill decision, so it does not require the root to
+ * resolve to a unique census row the way process-tree.ts's kill path does).
+ */
 async function listTreePids(rootPid: number): Promise<number[] | null> {
   const out = await execPs(['-e', '-o', 'pid=,ppid=']);
   if (out === null) return null;
-  const children = new Map<number, number[]>();
-  for (const line of out.split('\n')) {
+  const rows = parsePsLines<PidPpidRow>(out, (line) => {
     const m = line.trim().match(/^(\d+)\s+(\d+)$/);
-    if (!m) continue;
-    const pid = Number(m[1]);
-    const ppid = Number(m[2]);
-    const list = children.get(ppid);
-    if (list) list.push(pid);
-    else children.set(ppid, [pid]);
-  }
-  const tree: number[] = [];
-  const queue = [rootPid];
-  const seen = new Set<number>();
-  while (queue.length > 0) {
-    const pid = queue.shift()!;
-    if (seen.has(pid)) continue;
-    seen.add(pid);
-    tree.push(pid);
-    for (const child of children.get(pid) ?? []) queue.push(child);
-  }
-  return tree;
+    if (!m) return null;
+    return { pid: Number(m[1]), ppid: Number(m[2]) };
+  });
+  const childrenIndex = buildChildrenIndex(rows, (row) => row.ppid);
+  // Synthetic root row: rootPid may not appear as its own census entry
+  // (already exited), but its children still resolve via the index. -1 is
+  // a sentinel ppid that never collides with a real ppid (always >= 0).
+  const walked = bfsFromRoot(childrenIndex, { pid: rootPid, ppid: -1 }, (row) => row.pid);
+  return walked.map(({ row }) => row.pid);
 }
 
 /** Parse a `ps -o time=` value ([[dd-]hh:]mm:ss[.cc]) into milliseconds. */

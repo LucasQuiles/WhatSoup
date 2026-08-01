@@ -79,6 +79,12 @@ const EXPECTED_FILE_SIZE_WARNING_FILES = [
   // 2000-line arch.file-size warn budget (~2076). Grandfathered per the project
   // norm for large core files; a durability.ts slice is a separate follow-up.
   'src/core/durability.ts',
+  // #2548's /access replay-outcome fix (AccessReplayOutcome type on the shared
+  // callback signature, per-message try/catch, and the counted response body)
+  // added a couple dozen lines to the already-1999-line /access route, taking
+  // this file to ~2021. Grandfathered per the project norm for large core
+  // files (cf. database.ts/durability.ts above).
+  'src/core/health.ts',
   // #2051's turn-recovery health evidence + degraded-cause classification
   // additions took this file to ~2007 lines, just over the 2000-line
   // arch.file-size warn budget. The new logic is cohesive with the poller's
@@ -98,6 +104,12 @@ const EXPECTED_FILE_SIZE_WARNING_FILES = [
   'tests/fleet/index.test.ts',
   'tests/fleet/routes/feed.test.ts',
   'tests/fleet/routes/ops.test.ts',
+  // #2548's replay-outcome test matrix (all-succeed / one-fails-mid-loop)
+  // reuses this suite's shared importMainWithMocks bootstrap-mock harness,
+  // taking it from 1945 to ~2039 lines. Extracting the two new cases would
+  // duplicate that harness; grandfathered per the project norm for large
+  // cohesive test files (cf. the agent runtime/session twins below).
+  'tests/main-bootstrap-helpers.test.ts',
   // The two-level /model drill-down (Slice 2) added the drill handler cases
   // (bare->L1, brand->L2, leaf pin, recency both orderings, L1/L2 degrade, L2
   // discovery, cap) beside the Slice-1 selector suite, taking this file just

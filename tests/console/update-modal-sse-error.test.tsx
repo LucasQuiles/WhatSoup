@@ -11,14 +11,20 @@ vi.mock('@tanstack/react-query', () => ({
 const mockApiRestart = vi.fn()
 const mockApiGetVersion = vi.fn()
 
-vi.mock('../../console/src/lib/api', () => ({
-  api: {
-    restart: (...args: unknown[]) => mockApiRestart(...args),
-    getVersion: (...args: unknown[]) => mockApiGetVersion(...args),
-  },
-  isProductionConsole: () => false,
-  getApiTicket: vi.fn(),
-}))
+vi.mock('../../console/src/lib/api', async (importOriginal) => {
+  // apiSse/SseRequestError stay REAL — these tests stub global fetch and rely
+  // on the actual SSE-parsing implementation under test, not a bypass of it.
+  const actual = await importOriginal<typeof import('../../console/src/lib/api')>()
+  return {
+    ...actual,
+    api: {
+      restart: (...args: unknown[]) => mockApiRestart(...args),
+      getVersion: (...args: unknown[]) => mockApiGetVersion(...args),
+    },
+    isProductionConsole: () => false,
+    getApiTicket: vi.fn(),
+  }
+})
 
 import UpdateModal from '../../console/src/components/UpdateModal'
 import type { LineInstance } from '../../console/src/types'

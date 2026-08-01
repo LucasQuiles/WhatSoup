@@ -44,7 +44,7 @@ import {
 } from './model-catalogue-render.ts';
 import { brandOf, listBrands } from './providers/provider-brand.ts';
 import { renderBrandLevel, renderEffortLevel, renderModelLevel, prettyEffortLabel, type RenderedLevel } from './model-drilldown-render.ts';
-import { nativeReasoningControl, providerConfigEffort, type ReasoningControl } from './reasoning-control.ts';
+import { nativeReasoningControl, providerConfigEffort, providerHasNativeReasoningControl, type ReasoningControl } from './reasoning-control.ts';
 import {
   RouteRecycleLifecycle,
   type RouteRecycleFailure as LifecycleRouteRecycleFailure,
@@ -412,7 +412,23 @@ export async function applyRouteChangeAndRecycle(
   // recycles so the new effort takes (E10); an unchanged effective effort
   // (e.g. a pin whose override equals the static config) stays a no-op (F3, no
   // over-recycle).
-  const nextEffort = providerConfigEffort(port.routeSessionProviderConfig(next));
+  //
+  // Refs #2845: gated on providerHasNativeReasoningControl(next.provider),
+  // mirroring getSpawnedEffort()'s own gate. applyRouteEffort deliberately
+  // leaves a non-claude-cli route's base config UNTOUCHED (it only ever
+  // STRIPS or overrides effort for a provider that natively supports it), so
+  // routeSessionProviderConfig(next) can still carry an inherited static
+  // `effort` key for a provider that never acts on it. Reading that key here
+  // unconditionally would compare it against getSpawnedEffort()'s now-gated
+  // `null` and force a recycle for every non-claude-cli session that merely
+  // inherited the field — the exact spurious-recycle failure mode this slice
+  // exists to prevent, just moved from one side of the comparison to the
+  // other. Gating both sides on the same predicate keeps the comparison a
+  // true reading of "does the EFFECTIVE, spawn-consumed effort differ",
+  // never a raw config key neither side's provider can act on.
+  const nextEffort = providerHasNativeReasoningControl(next.provider)
+    ? providerConfigEffort(port.routeSessionProviderConfig(next))
+    : null;
   if (
     session.getProviderId() === next.provider &&
     session.getModelRef() === next.model &&

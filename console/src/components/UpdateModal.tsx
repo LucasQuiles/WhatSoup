@@ -29,7 +29,7 @@
 import { type FC, useReducer, useEffect, useCallback, useRef } from 'react'
 import { Download, Check, Loader2, AlertCircle, RotateCcw } from 'lucide-react'
 import { useQueryClient } from '@tanstack/react-query'
-import { api, getApiTicket, isProductionConsole } from '../lib/api'
+import { api, apiSse, getApiTicket, isProductionConsole, SseRequestError } from '../lib/api'
 import { CheckboxField, Modal, ModalHeader, ModalBody, ModalFooter } from './primitives'
 import { Button } from './primitives/Button'
 import type { LineInstance } from '../types'
@@ -259,74 +259,44 @@ const UpdateModal: FC<UpdateModalProps> = ({
       }
 
       try {
-        const response = await fetch('/api/update', {
+        for await (const { event, data: rawData } of apiSse('/api/update', {
           method: 'POST',
           headers,
           signal: controller.signal,
-        })
+        })) {
+          // SSE payload shape is server-defined; type the fields this
+          // client actually reads (retires waiver WVR-010).
+          const data = JSON.parse(rawData) as {
+            step?: string
+            status?: string
+            message?: string
+          }
 
-        if (!response.ok) {
-          hasErroredRef.current = true
-          dispatch({ type: 'setError', message: `Update failed: ${response.status}` })
-          return
-        }
-
-        const reader = response.body!.getReader()
-        const decoder = new TextDecoder()
-        let buffer = ''
-
-        const read = async (): Promise<void> => {
-          try {
-            const { done, value } = await reader.read()
-            if (done) {
-              // F-058: only enter fleet-restart polling if the stream did not
-              // already signal a terminal error; preserve the error phase.
-              if (!hasErroredRef.current) waitForFleetRestart()
-              return
+          if (event === 'progress') {
+            // The server always sends step/status on progress events; skip
+            // any malformed block rather than dispatching undefined fields.
+            if (!data.step || !data.status) continue
+            dispatch({ type: 'stepProgress', step: data.step, status: data.status as StepStatus, message: data.message })
+            if (data.step === 'restart' && data.status === 'running') {
+              dispatch({ type: 'setPhase', phase: 'restarting-fleet' })
             }
-            buffer += decoder.decode(value, { stream: true })
-            const chunks = buffer.split('\n\n')
-            buffer = chunks.pop()!
-
-            for (const block of chunks) {
-              const eventMatch = block.match(/^event: (\w+)/)
-              const dataMatch = block.match(/^data: (.+)$/m)
-              if (!eventMatch || !dataMatch) continue
-
-              const event = eventMatch[1]
-              // SSE payload shape is server-defined; type the fields this
-              // client actually reads (retires waiver WVR-010).
-              const data = JSON.parse(dataMatch[1]) as {
-                step?: string
-                status?: string
-                message?: string
-              }
-
-              if (event === 'progress') {
-                // The server always sends step/status on progress events; skip
-                // any malformed block rather than dispatching undefined fields.
-                if (!data.step || !data.status) continue
-                dispatch({ type: 'stepProgress', step: data.step, status: data.status as StepStatus, message: data.message })
-                if (data.step === 'restart' && data.status === 'running') {
-                  dispatch({ type: 'setPhase', phase: 'restarting-fleet' })
-                }
-              } else if (event === 'error') {
-                // Set ref before dispatch so the done-branch check (F-058) sees
-                // the flag synchronously in the same microtask.
-                hasErroredRef.current = true
-                dispatch({ type: 'setError', message: data.message ?? 'update stream error', step: data.step })
-              }
-            }
-            await read()
-          } catch {
-            // Connection dropped — expected during restart; skip if already errored (F-058).
-            if (controller.signal.aborted) return
-            if (!hasErroredRef.current) waitForFleetRestart()
+          } else if (event === 'error') {
+            // Set ref before dispatch so the done-branch check (F-058) sees
+            // the flag synchronously in the same microtask.
+            hasErroredRef.current = true
+            dispatch({ type: 'setError', message: data.message ?? 'update stream error', step: data.step })
           }
         }
-        await read()
-      } catch {
-        // Aborted or network error — fleet may be restarting; skip if already errored (F-058).
+        // F-058: only enter fleet-restart polling if the stream did not
+        // already signal a terminal error; preserve the error phase.
+        if (!hasErroredRef.current) waitForFleetRestart()
+      } catch (err) {
+        if (err instanceof SseRequestError) {
+          hasErroredRef.current = true
+          dispatch({ type: 'setError', message: `Update failed: ${err.status}` })
+          return
+        }
+        // Aborted or network/stream error — fleet may be restarting; skip if already errored (F-058).
         if (controller.signal.aborted) return
         if (!hasErroredRef.current) waitForFleetRestart()
       }
