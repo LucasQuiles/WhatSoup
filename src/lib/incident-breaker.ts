@@ -3,7 +3,8 @@ import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from '
 import { join } from 'node:path';
 import type { FaultClass } from './fault-classifier.ts';
 
-export interface BreakerState {
+/** Incident rate-limit persistence record (#2249: distinct from circuit-breaker.ts's CircuitState — renamed to avoid the name collision). */
+export interface IncidentBreakerState {
   host: string;
   faultClass: FaultClass;
   /** incident onset timestamp (sqlite 'YYYY-MM-DD HH:MM:SS' format), or null when no open incident. */
@@ -28,13 +29,13 @@ function stateFile(dir: string, host: string, faultClass: FaultClass): string {
   return join(dir, `${safe(host)}__${safe(faultClass)}.json`);
 }
 
-export function loadBreakerState(dir: string, host: string, faultClass: FaultClass): BreakerState {
+export function loadBreakerState(dir: string, host: string, faultClass: FaultClass): IncidentBreakerState {
   const file = stateFile(dir, host, faultClass);
   if (!existsSync(file)) {
     return { host, faultClass, onset: null, attempts: [], tripped: false, escalated: false };
   }
   try {
-    const parsed = JSON.parse(readFileSync(file, 'utf8')) as Partial<BreakerState>;
+    const parsed = JSON.parse(readFileSync(file, 'utf8')) as Partial<IncidentBreakerState>;
     return {
       host,
       faultClass,
@@ -49,7 +50,7 @@ export function loadBreakerState(dir: string, host: string, faultClass: FaultCla
   }
 }
 
-export function saveBreakerState(dir: string, state: BreakerState): void {
+export function saveBreakerState(dir: string, state: IncidentBreakerState): void {
   mkdirSync(dir, { recursive: true });
   const file = stateFile(dir, state.host, state.faultClass);
   const tmp = `${file}.tmp`;
@@ -57,21 +58,21 @@ export function saveBreakerState(dir: string, state: BreakerState): void {
   renameSync(tmp, file); // atomic replace
 }
 
-export function registerOnset(state: BreakerState, nowIso: string): void {
+export function registerOnset(state: IncidentBreakerState, nowIso: string): void {
   if (state.onset === null) state.onset = nowIso;
 }
 
 /** Count attempts within `windowSeconds` of `nowIso`, pruning anything older in place. */
-export function attemptsInWindow(state: BreakerState, nowIso: string, windowSeconds: number): number {
+export function attemptsInWindow(state: IncidentBreakerState, nowIso: string, windowSeconds: number): number {
   state.attempts = state.attempts.filter((t) => diffSeconds(nowIso, t) <= windowSeconds);
   return state.attempts.length;
 }
 
-export function recordAttempt(state: BreakerState, nowIso: string): void {
+export function recordAttempt(state: IncidentBreakerState, nowIso: string): void {
   state.attempts.push(nowIso);
 }
 
-export function clearIncident(state: BreakerState): void {
+export function clearIncident(state: IncidentBreakerState): void {
   state.onset = null;
   state.attempts = [];
   state.tripped = false;

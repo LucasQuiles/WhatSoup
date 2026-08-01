@@ -22,6 +22,20 @@ const log = createChildLogger('admin');
 const MAX_REPLAYED_IDS = 10_000;
 const replayedIds = new Set<string>();
 
+/**
+ * Outcome of a queued-DM replay pass triggered by an access-approval decision.
+ * `attempted` is the DM-only candidate count (see selectReplayableDms); `replayed`
+ * counts messages admitted successfully; `failed` counts messages whose
+ * `handleMessage` call rejected. A `failed` message is deliberately NOT recorded
+ * in `replayedIds`, so it remains eligible for a future replay attempt instead of
+ * being silently suppressed until process restart.
+ */
+export interface AccessReplayOutcome {
+  attempted: number;
+  replayed: number;
+  failed: number;
+}
+
 function normalizeAccessPhoneSubject(subjectId: string): string {
   if (config.transport === 'signal') {
     const lower = subjectId.toLowerCase();

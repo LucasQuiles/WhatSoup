@@ -40,7 +40,7 @@ import { createCapabilityGrantManager, type CapabilityGrantManager } from './lib
 import { createSettingsPolicyAdapter, createFileGrantStore, assertGroupsRespectDenyFloor } from './core/capability-grant-adapter.ts';
 import { toConversationKey } from './core/conversation-key.ts';
 import { resolveConfiguredAdminJid, toPersonalJid, toLidJid, toSignalJid } from './core/jid-constants.ts';
-import { selectReplayableDms, rememberReplayedId } from './core/admin.ts';
+import { selectReplayableDms, rememberReplayedId, type AccessReplayOutcome } from './core/admin.ts';
 import { DurabilityEngine, sendTracked, drainPendingOutbound } from './core/durability.ts';
 import { waitForHistorySyncThenRecover } from './core/post-connect-recovery.ts';
 import { seedChatAliases } from './core/chats-resolver.ts';
@@ -842,7 +842,7 @@ const healthServer = startHealthServer({
   resolvePollDecision: runtime instanceof AgentRuntime
     ? (decision) => runtime.resolvePollDecisionFromConsole(decision)
     : undefined,
-  handleAccessDecision: async (subjectType, subjectId, action) => {
+  handleAccessDecision: async (subjectType, subjectId, action): Promise<AccessReplayOutcome | void> => {
     if (action === 'allow' && subjectType === 'phone') {
       // Replay queued DM messages — uses shared selectReplayableDms helper from admin.ts
       // so group exclusion, dedup (replayedIds), and adminReplayMax cap are all applied consistently.
@@ -850,6 +850,9 @@ const healthServer = startHealthServer({
       const jidFormats = config.transport === 'signal'
         ? [toSignalJid(subjectId)]
         : [toPersonalJid(subjectId), toLidJid(subjectId)];
+      let attempted = 0;
+      let replayed = 0;
+      let failed = 0;
       for (const senderJid of jidFormats) {
         const stored = getMessagesBySender(db, senderJid);
         const { toReplay, groupSkipped } = selectReplayableDms(stored, config.adminReplayMax);
@@ -857,25 +860,42 @@ const healthServer = startHealthServer({
           log.info({ subjectId, senderJid, groupSkipped }, 'access replay: skipped group messages');
         }
         for (const msg of toReplay) {
-          rememberReplayedId(msg.messageId);
-          await runtime.handleMessage({
-            messageId: msg.messageId,
-            chatJid: msg.chatJid,
-            senderJid: msg.senderJid,
-            senderName: msg.senderName,
-            content: msg.content,
-            contentText: msg.contentText ?? null,
-            contentType: msg.contentType,
-            isFromMe: false,
-            // group messages never replay: mentioned ones dispatched at ingest; unmentioned ones must not re-enter as pseudo-DMs
-            isGroup: false,
-            mentionedJids: [],
-            timestamp: msg.timestamp,
-            quotedMessageId: msg.quotedMessageId,
-            isResponseWorthy: true,
-          });
+          attempted++;
+          try {
+            await runtime.handleMessage({
+              messageId: msg.messageId,
+              chatJid: msg.chatJid,
+              senderJid: msg.senderJid,
+              senderName: msg.senderName,
+              content: msg.content,
+              contentText: msg.contentText ?? null,
+              contentType: msg.contentType,
+              isFromMe: false,
+              // group messages never replay: mentioned ones dispatched at ingest; unmentioned ones must not re-enter as pseudo-DMs
+              isGroup: false,
+              mentionedJids: [],
+              timestamp: msg.timestamp,
+              quotedMessageId: msg.quotedMessageId,
+              isResponseWorthy: true,
+            });
+            // Mark replayed only after successful admission — arming the dedup
+            // marker before the await (the prior behavior) permanently hid a
+            // failed message from every future /access retry.
+            rememberReplayedId(msg.messageId);
+            replayed++;
+          } catch (err) {
+            failed++;
+            log.error(
+              { err, subjectId, senderJid, messageId: msg.messageId },
+              'access replay: message admission failed — leaving eligible for retry',
+            );
+          }
         }
       }
+      if (failed > 0) {
+        log.warn({ subjectId, attempted, replayed, failed }, 'access replay: completed with partial failures');
+      }
+      return { attempted, replayed, failed };
     } else if (action === 'allow' && subjectType === 'group') {
       log.info({ subjectType, subjectId }, 'access: group allowed via POST /access');
     }

@@ -280,7 +280,7 @@ describe('config-memory-migration.ts uncovered-branch coverage', () => {
         },
       },
     };
-    const snapshot = JSON.parse(JSON.stringify(input));
+    const snapshot = structuredClone(input);
 
     const result = migrateLegacyMemoryConfig(input, { removeLegacy: true });
 
