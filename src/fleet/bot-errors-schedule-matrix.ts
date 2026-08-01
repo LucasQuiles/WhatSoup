@@ -128,3 +128,123 @@ export const MACOS_LOCAL_DEFAULT_CHECKS: readonly string[] = LOCAL_SAFE_CHECKS;
  * the `BOT_ERRORS_WATCHDOG_CHECKS` environment variable in rendered plists.
  */
 export const MACOS_LOCAL_DEFAULT_CHECKS_STRING: string = MACOS_LOCAL_DEFAULT_CHECKS.join(',');
+
+// ---------------------------------------------------------------------------
+// Independent observer relationships (criterion 6)
+// ---------------------------------------------------------------------------
+
+/**
+ * Declares which lane independently observes another lane's receipts. An
+ * independent observer detects a stopped/failed/stale job WITHOUT relying on
+ * the job itself to self-report — the observer checks the job's receipt file
+ * freshness from a separate process.
+ *
+ * Key invariant: a lane MUST NOT observe itself. The observer must be a
+ * different lane with its own schedule.
+ */
+export interface ObserverRelationship {
+  /** The lane being observed (must exist in SCHEDULE_LANES). */
+  readonly observed: string;
+  /** The independent lane that checks the observed lane's receipts. */
+  readonly observer: string;
+}
+
+/**
+ * Canonical observer relationships. The deadman lane independently checks the
+ * heartbeat-watchdog's receipts because the deadman runs on a different schedule
+ * and from a separate process — a watchdog that fails silently is caught by the
+ * deadman's stale-receipt detection, not by the watchdog itself (#2466 criterion 6).
+ */
+export const OBSERVER_RELATIONSHIPS: readonly ObserverRelationship[] = [
+  { observed: 'heartbeat-watchdog', observer: 'deadman' },
+];
+
+// ---------------------------------------------------------------------------
+// Runtime readback validation (criterion 5)
+// ---------------------------------------------------------------------------
+
+/**
+ * Result of validating a watchdog runtime receipt. File presence alone is
+ * insufficient — the receipt must prove the job loaded, executed the expected
+ * check set recently, and produced valid structured output.
+ */
+export interface WatchdogReceiptVerdict {
+  /** True only when every check below passes. */
+  readonly valid: boolean;
+  /** Human-readable reasons for any failure (empty when valid). */
+  readonly reasons: readonly string[];
+}
+
+/** Maximum age (ms) of a receipt before it's considered stale. Matches the 5-min cadence × 2 grace. */
+export const WATCHDOG_RECEIPT_MAX_AGE_MS = 600_000; // 10 minutes
+
+/**
+ * Validate a heartbeat-watchdog runtime receipt (criterion 5).
+ *
+ * The receipt is the `heartbeat-watchdog-state.json` file written by the Python
+ * watchdog on each execution. This function checks:
+ * 1. The receipt has a `schemaVersion` field (proves structured output).
+ * 2. The receipt has a `lastRunAt` timestamp within the freshness window.
+ * 3. The receipt records which checks were executed and they match the
+ *    expected set (or a declared subset for non-hub roles).
+ *
+ * @param receipt - Parsed JSON contents of the state file.
+ * @param expectedChecks - The check set the job should have run (role-dependent).
+ * @param now - Current time (epoch ms); defaults to Date.now() for production,
+ *   injectable for deterministic tests.
+ */
+export function verifyWatchdogReceipt(
+  receipt: unknown,
+  expectedChecks: readonly string[],
+  now: number = Date.now(),
+): WatchdogReceiptVerdict {
+  const reasons: string[] = [];
+
+  if (typeof receipt !== 'object' || receipt === null) {
+    return { valid: false, reasons: ['receipt is not an object'] };
+  }
+
+  const r = receipt as Record<string, unknown>;
+
+  // 1. Schema version must be present and numeric.
+  if (typeof r.schemaVersion !== 'number') {
+    reasons.push('receipt missing numeric schemaVersion');
+  }
+
+  // 2. lastRunAt must be a valid timestamp within the freshness window.
+  if (typeof r.lastRunAt !== 'number' || !Number.isFinite(r.lastRunAt)) {
+    reasons.push('receipt missing numeric lastRunAt');
+  } else {
+    const age = now - r.lastRunAt;
+    if (age < 0) {
+      reasons.push('receipt lastRunAt is in the future');
+    } else if (age > WATCHDOG_RECEIPT_MAX_AGE_MS) {
+      reasons.push(`receipt is stale (age=${Math.round(age / 1000)}s, max=${WATCHDOG_RECEIPT_MAX_AGE_MS / 1000}s)`);
+    }
+  }
+
+  // 3. The executed checks must match the expected set.
+  const executedChecks = r.executedChecks;
+  if (!Array.isArray(executedChecks)) {
+    reasons.push('receipt missing executedChecks array');
+  } else {
+    const executed = new Set(executedChecks.filter((c): c is string => typeof c === 'string'));
+    const expected = new Set(expectedChecks);
+    // Every expected check must appear in the executed set.
+    for (const check of expectedChecks) {
+      if (!executed.has(check)) {
+        reasons.push(`receipt missing expected check: ${check}`);
+      }
+    }
+    // Warn on unexpected checks not in the known registry (but don't fail —
+    // a newer watchdog version may have added checks not yet in the TS matrix).
+    const known = new Set<string>(WATCHDOG_CHECKS);
+    for (const check of executed) {
+      if (!expected.has(check) && !known.has(check)) {
+        reasons.push(`receipt has unknown check: ${check}`);
+      }
+    }
+  }
+
+  return { valid: reasons.length === 0, reasons };
+}
