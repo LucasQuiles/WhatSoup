@@ -13,11 +13,16 @@ const emitAlert = vi.hoisted(() => vi.fn(() => ({
   status: 'durably_queued',
 })));
 
-vi.mock('../../../src/logger.ts', () => ({
-  default: { child: () => ({ info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() }) },
-  createChildLogger: () => ({ info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() }),
-  flushLogger: () => Promise.resolve(),
-}));
+vi.mock('../../../src/logger.ts', async () => {
+  const { loggerMock } = await import('../../helpers/logger-mock.ts');
+  const mock = loggerMock();
+  const logger = mock.createChildLogger();
+  return {
+    ...mock,
+    default: { ...logger, child: () => logger },
+    flushLogger: vi.fn(),
+  };
+});
 
 vi.mock('../../../src/lib/emit-alert.ts', async (importOriginal) => ({
   ...await importOriginal<typeof import('../../../src/lib/emit-alert.ts')>(),
