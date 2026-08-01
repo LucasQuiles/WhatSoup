@@ -1,11 +1,11 @@
 import { spawnSync } from 'node:child_process';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { describe, expect, it } from 'vitest';
+import { trackTmpDirs } from '../helpers/tmp-dir.ts';
 
 const RUNNER = join(process.cwd(), 'deploy/scripts/bot-errors-release-proof-run.sh');
-const tmpDirs: string[] = [];
+const tmp = trackTmpDirs('rp-');
 
 interface Fixture {
   home: string;
@@ -17,8 +17,7 @@ interface Fixture {
 }
 
 function makeFixture(mode: string | null, opts: { flockRc?: number; noDetectors?: boolean } = {}): Fixture {
-  const home = mkdtempSync(join(tmpdir(), 'rp-run-'));
-  tmpDirs.push(home);
+  const home = tmp.make('run');
   const bin = join(home, 'bin');
   const bundle = join(home, 'bundle');
   const stateDir = join(home, 'state');
@@ -62,11 +61,6 @@ function runRunner(fx: Fixture, args: string[], extraEnv: Record<string, string>
 function ledgerLines(fx: Fixture): string[] {
   return existsSync(fx.ledger) ? readFileSync(fx.ledger, 'utf8').trim().split('\n') : [];
 }
-
-afterEach(() => {
-  for (const dir of tmpDirs) rmSync(dir, { recursive: true, force: true });
-  tmpDirs.length = 0;
-});
 
 describe('bot-errors-release-proof-run.sh', () => {
   it('observe + tree → --reporter --print --repo <app repo>, exit 0', () => {

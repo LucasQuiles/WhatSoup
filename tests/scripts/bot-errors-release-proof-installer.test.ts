@@ -1,16 +1,16 @@
 import { spawnSync } from 'node:child_process';
 import {
-  chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync,
+  chmodSync, existsSync, lstatSync, mkdirSync,
   readFileSync, readdirSync, readlinkSync, rmSync, symlinkSync, writeFileSync,
 } from 'node:fs';
 import { createHash } from 'node:crypto';
-import { tmpdir } from 'node:os';
 import { join, relative } from 'node:path';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
+import { trackTmpDirs } from '../helpers/tmp-dir.ts';
 
 const INSTALLER = join(process.cwd(), 'deploy/scripts/install-bot-errors-release-proof.sh');
 const SYNTH_HOST = 'rp-test-host';
-const tmpDirs: string[] = [];
+const tmp = trackTmpDirs('rp-');
 
 const BUNDLE_FILES = [
   'deploy/scripts/bot-errors-release-proof-run.sh',
@@ -123,8 +123,7 @@ function fixtureGit(root: string, args: string[]): string {
 }
 
 function makeFixture(): Fixture {
-  const root = mkdtempSync(join(tmpdir(), 'rp-install-'));
-  tmpDirs.push(root);
+  const root = tmp.make('install');
   const home = join(root, 'home');
   const source = join(root, 'source');
   const systemd = join(home, '.config/systemd/user');
@@ -270,11 +269,6 @@ function installOk(fx: Fixture) {
   expect(res.stdout).toContain('INSTALL_OK');
   return res;
 }
-
-afterEach(() => {
-  for (const dir of tmpDirs) rmSync(dir, { recursive: true, force: true });
-  tmpDirs.length = 0;
-});
 
 describe('installer preflight and dry-run', () => {
   it('dry-run prints the plan and produces zero filesystem and command delta', () => {

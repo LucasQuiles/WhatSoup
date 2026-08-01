@@ -1,8 +1,8 @@
 import { spawnSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { describe, expect, it } from 'vitest';
+import { trackTmpDirs } from '../helpers/tmp-dir.ts';
 
 const SCRIPT = resolve(process.cwd(), 'console/scripts/check-color-semantics.mjs');
 const PACKAGE_JSON = resolve(process.cwd(), 'console/package.json');
@@ -13,18 +13,10 @@ const PROMOTED_RULES = [
   'soup/traffic-neutrality',
 ];
 
-const tmpDirs: string[] = [];
-
-afterEach(() => {
-  for (const dir of tmpDirs) {
-    rmSync(dir, { recursive: true, force: true });
-  }
-  tmpDirs.length = 0;
-});
+const tmp = trackTmpDirs('color-');
 
 function makeFixture(files: Record<string, string>) {
-  const root = mkdtempSync(join(tmpdir(), 'color-semantics-'));
-  tmpDirs.push(root);
+  const root = tmp.make('semantics');
   for (const [filePath, source] of Object.entries(files)) {
     const absolute = join(root, filePath);
     mkdirSync(dirname(absolute), { recursive: true });
