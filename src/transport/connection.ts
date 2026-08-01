@@ -1122,8 +1122,9 @@ export class ConnectionManager extends EventEmitter implements Messenger {
     if (this.sock) {
       try {
         this.sock.end(undefined);
-      } catch {
-        // best-effort
+      } catch (err) {
+        // best-effort — the socket is being torn down regardless
+        this.log.debug({ op: 'shutdown.sock.end', error: errorMessage(err) }, 'transport_op_swallowed');
       }
       this.sock = null;
     }
@@ -2096,7 +2097,12 @@ export class ConnectionManager extends EventEmitter implements Messenger {
       // Invalidate the stale socket before deciding whether to reconnect
       this.stopKeepalive();
       this.clearAuthSnapshotSettledTimer();
-      try { sock.end(undefined); } catch { /* best-effort */ }
+      try {
+        sock.end(undefined);
+      } catch (err) {
+        // best-effort — the socket is being invalidated regardless
+        this.log.debug({ op: 'connectionClose.sock.end', error: errorMessage(err) }, 'transport_op_swallowed');
+      }
       this.sock = null;
       this.clearIdentity();
 
@@ -2966,8 +2972,9 @@ export class ConnectionManager extends EventEmitter implements Messenger {
 
     try {
       sock.end(undefined);
-    } catch {
-      // best-effort
+    } catch (err) {
+      // best-effort — the socket is being invalidated regardless
+      this.log.debug({ op: 'gracefulReconnect.sock.end', error: errorMessage(err) }, 'transport_op_swallowed');
     }
 
     try {
