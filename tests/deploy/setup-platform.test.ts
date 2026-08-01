@@ -48,7 +48,16 @@ function writeHealthProfile(file: string): void {
 }
 
 function writeLinuxSetupShims(dir: string): void {
-  writeExecutable(dir, 'uname', '#!/usr/bin/env bash\nprintf "Linux\\n"\n');
+  // Responds to `-m` with FAKE_UNAME_M (default x86_64) so tests can drive
+  // deploy/setup.sh's arch_bin_suffix() through a real full-script replay;
+  // any other invocation form (bare, `-s`) keeps the pre-existing "Linux"
+  // answer the rest of this suite already depends on.
+  writeExecutable(dir, 'uname', [
+    '#!/usr/bin/env bash',
+    'if [[ "${1:-}" == "-m" ]]; then printf "%s\\n" "${FAKE_UNAME_M:-x86_64}"; exit 0; fi',
+    'printf "Linux\\n"',
+    '',
+  ].join('\n'));
   writeExecutable(dir, 'node', [
     '#!/usr/bin/env bash',
     'if [[ "${1:-}" == "-v" ]]; then printf "v24.15.0\\n"; exit 0; fi',
@@ -70,18 +79,47 @@ function writeLinuxSetupShims(dir: string): void {
   ].join('\n'));
 }
 
-function runLinuxSetupReplay(home: string, shimDir: string, extraEnv: NodeJS.ProcessEnv = {}) {
+function runLinuxSetupReplay(
+  home: string,
+  shimDir: string,
+  extraEnv: NodeJS.ProcessEnv = {},
+  realPath: string = process.env.PATH ?? '',
+) {
   return spawnSync('bash', ['deploy/setup.sh'], {
     cwd: repoRoot,
     env: {
       ...process.env,
       ...extraEnv,
       HOME: home,
-      PATH: `${shimDir}:${process.env.PATH ?? ''}`,
+      PATH: `${shimDir}:${realPath}`,
       USER: 'setup-test',
     },
     encoding: 'utf8',
   });
+}
+
+/**
+ * Strips any real PATH directory that actually resolves an ffmpeg binary
+ * (bare or arch-suffixed). Without this, "ffmpeg absent" test cases are not
+ * hermetic — a dev machine or CI image with ffmpeg genuinely installed (e.g.
+ * Homebrew's /opt/homebrew/bin) leaks through the inherited PATH that
+ * runLinuxSetupReplay appends after the shim dir, and `command -v ffmpeg`
+ * finds the real binary regardless of what the test intends to simulate.
+ */
+function realPathWithoutFfmpeg(): string {
+  const dirs = (process.env.PATH ?? '').split(path.delimiter);
+  return dirs
+    .filter((dir) => {
+      if (!dir) return false;
+      try {
+        return !['ffmpeg', 'ffmpeg-arm64', 'ffmpeg-x64'].some((name) =>
+          fs.existsSync(path.join(dir, name)),
+        );
+      } catch {
+        return true;
+      }
+    })
+    .join(path.delimiter);
 }
 
 afterEach(() => {
@@ -434,6 +472,178 @@ describe('deploy/setup.sh platform portability', () => {
     }
     expect(fs.existsSync(path.join(home, '.config', 'whatsoup', 'bot-errors.env'))).toBe(false);
     expect(result.stdout).not.toContain('BOT ERRORS service/timer units installed');
+  });
+});
+
+/**
+ * arch-aware binary suffix (#2820, residual of #2642).
+ *
+ * Shape follows tests/scripts/install-transcription-deps-portability.test.ts:
+ * extract the real shell function from the shipped source and execute it
+ * under a controlled MACHINE, so a change to the script is seen here
+ * directly rather than via a restated copy.
+ */
+function extractShellFunction(source: string, name: string): string {
+  const start = source.indexOf(`${name}() {`);
+  if (start === -1) throw new Error(`helper ${name}() not found in deploy/setup.sh`);
+  const end = source.indexOf('\n}\n', start);
+  if (end === -1) throw new Error(`helper ${name}() has no terminating brace`);
+  return source.slice(start, end + 3);
+}
+
+function runArchBinSuffix(machine: string): { status: number; stdout: string; stderr: string } {
+  const fn = extractShellFunction(setupSource, 'arch_bin_suffix');
+  const result = spawnSync('bash', ['-c', `MACHINE='${machine}'\n${fn}\narch_bin_suffix`], {
+    encoding: 'utf8',
+  });
+  return { status: result.status ?? -1, stdout: result.stdout ?? '', stderr: result.stderr ?? '' };
+}
+
+describe('deploy/setup.sh — arch_bin_suffix (#2820)', () => {
+  it('defines MACHINE via uname -m alongside PLATFORM, before step 1', () => {
+    const machineAssign = 'MACHINE="$(uname -m)"';
+    const platformAssign = 'PLATFORM="$(uname -s)"';
+    const step1Header = '[1/7] Checking requirements';
+    expect(setupSource).toContain(machineAssign);
+    const platformIdx = setupSource.indexOf(platformAssign);
+    const machineIdx = setupSource.indexOf(machineAssign);
+    const step1Idx = setupSource.indexOf(step1Header);
+    expect(machineIdx).toBeGreaterThan(platformIdx);
+    expect(machineIdx).toBeLessThan(step1Idx);
+  });
+
+  it('contains the stable arch-aware-binary-suffix anchor comment', () => {
+    expect(setupSource).toContain('# --- arch-aware binary suffix ---');
+  });
+
+  it.each([
+    ['x86_64', '-x64'],
+    ['amd64', '-x64'],
+    ['x64', '-x64'],
+    ['aarch64', '-arm64'],
+    ['arm64', '-arm64'],
+    ['riscv64', ''],
+    ['i686', ''],
+    ['', ''],
+  ])('maps `uname -m` value %s to suffix %s', (machine, expected) => {
+    const { status, stdout, stderr } = runArchBinSuffix(machine);
+    expect(status, stderr).toBe(0);
+    expect(stdout).toBe(expected);
+  });
+
+  // One-host canary, not cross-arch proof: getArchBinSuffix() reads
+  // process.arch (no parameter), so it can only be compared against this
+  // shell function on the arch actually running the test. Cross-arch
+  // agreement is covered by the it.each table above, whose case list was
+  // copied from src/lib/arch.ts's own switch so a divergence there fails here.
+  it('agrees with src/lib/arch.ts getArchBinSuffix() for the arch running this test (canary)', async () => {
+    const { getArchBinSuffix } = await import('../../src/lib/arch.ts');
+    const hostMachine = spawnSync('uname', ['-m'], { encoding: 'utf8' }).stdout.trim();
+    const { status, stdout, stderr } = runArchBinSuffix(hostMachine);
+    expect(status, stderr).toBe(0);
+    expect(stdout).toBe(getArchBinSuffix());
+  });
+});
+
+describe('deploy/setup.sh — ffmpeg arch-suffix fallback (#2820)', () => {
+  const ffmpegBlockStart = '# ffmpeg — optional';
+  const ffmpegBlockEnd = 'if [ "$errors" -gt 0 ]; then';
+
+  it('checks the arch-suffixed name only after the bare name misses', () => {
+    const block = sliceBetween(setupSource, ffmpegBlockStart, ffmpegBlockEnd);
+    expect(block).toContain('command -v ffmpeg &>/dev/null');
+    expect(block).toContain('arch_bin_suffix');
+    expect(block.indexOf('command -v ffmpeg &>/dev/null')).toBeLessThan(
+      block.indexOf('ffmpeg$ffmpeg_arch_suffix'),
+    );
+  });
+
+  it('preserves the not-found message verbatim (regression pin)', () => {
+    expect(setupSource).toContain(
+      '  - ffmpeg not found (optional — video processing in chat mode disabled)',
+    );
+  });
+
+  it('falls back to an arch-suffixed ffmpeg when the bare name is absent', () => {
+    const home = makeTempRoot('whatsoup-setup-home-');
+    const shimDir = makeTempRoot('whatsoup-setup-shims-');
+    const profile = path.join(home, 'profiles', 'testhost.json');
+    writeHealthProfile(profile);
+    writeLinuxSetupShims(shimDir);
+    writeExecutable(shimDir, 'ffmpeg-arm64', '#!/usr/bin/env bash\nexit 0\n');
+
+    const result = runLinuxSetupReplay(
+      home,
+      shimDir,
+      { BOT_ERRORS_HEALTH_PROFILE: profile, FAKE_UNAME_M: 'aarch64' },
+      realPathWithoutFfmpeg(),
+    );
+
+    expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
+    expect(result.stdout).toContain('  ✓ ffmpeg available (arch-suffixed: ffmpeg-arm64)');
+    expect(result.stdout).not.toContain('ffmpeg not found');
+  });
+
+  it('prefers the bare ffmpeg name over an arch-suffixed one when both are present', () => {
+    const home = makeTempRoot('whatsoup-setup-home-');
+    const shimDir = makeTempRoot('whatsoup-setup-shims-');
+    const profile = path.join(home, 'profiles', 'testhost.json');
+    writeHealthProfile(profile);
+    writeLinuxSetupShims(shimDir);
+    writeExecutable(shimDir, 'ffmpeg', '#!/usr/bin/env bash\nexit 0\n');
+    writeExecutable(shimDir, 'ffmpeg-arm64', '#!/usr/bin/env bash\nexit 0\n');
+
+    const result = runLinuxSetupReplay(home, shimDir, {
+      BOT_ERRORS_HEALTH_PROFILE: profile,
+      FAKE_UNAME_M: 'aarch64',
+    });
+
+    expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
+    expect(result.stdout).toContain('  ✓ ffmpeg available\n');
+    expect(result.stdout).not.toContain('arch-suffixed');
+  });
+
+  it('reports ffmpeg not found when neither the bare nor the arch-suffixed name exists', () => {
+    const home = makeTempRoot('whatsoup-setup-home-');
+    const shimDir = makeTempRoot('whatsoup-setup-shims-');
+    const profile = path.join(home, 'profiles', 'testhost.json');
+    writeHealthProfile(profile);
+    writeLinuxSetupShims(shimDir);
+
+    const result = runLinuxSetupReplay(
+      home,
+      shimDir,
+      { BOT_ERRORS_HEALTH_PROFILE: profile, FAKE_UNAME_M: 'aarch64' },
+      realPathWithoutFfmpeg(),
+    );
+
+    expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
+    expect(result.stdout).toContain(
+      '  - ffmpeg not found (optional — video processing in chat mode disabled)',
+    );
+  });
+
+  it('does not attempt an arch-suffixed fallback for an unrecognised `uname -m` value', () => {
+    const home = makeTempRoot('whatsoup-setup-home-');
+    const shimDir = makeTempRoot('whatsoup-setup-shims-');
+    const profile = path.join(home, 'profiles', 'testhost.json');
+    writeHealthProfile(profile);
+    writeLinuxSetupShims(shimDir);
+    // Present under the arm64 suffix, but the host reports an arch this
+    // repo has no suffix mapping for — must not be found by accident.
+    writeExecutable(shimDir, 'ffmpeg-arm64', '#!/usr/bin/env bash\nexit 0\n');
+
+    const result = runLinuxSetupReplay(
+      home,
+      shimDir,
+      { BOT_ERRORS_HEALTH_PROFILE: profile, FAKE_UNAME_M: 'riscv64' },
+      realPathWithoutFfmpeg(),
+    );
+
+    expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
+    expect(result.stdout).toContain(
+      '  - ffmpeg not found (optional — video processing in chat mode disabled)',
+    );
   });
 });
 
