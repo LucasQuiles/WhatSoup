@@ -279,7 +279,7 @@ disagree (`| rule | count |` rows below are machine-checked):
 | `arch.ssot-name-ladder` | 5 | `scripts/ssot-pattern-guard.ts` |
 | `arch.ssot-phone-shape` | 4 | `scripts/ssot-pattern-guard.ts` |
 | `arch.ssot-presentation-literals` | 0 | `scripts/ssot-pattern-guard.ts` (pure block) |
-| `arch.ring-boundaries` | 56 | `scripts/ring-boundary-guard.ts` (ratchet, not yet a pure block) |
+| `arch.ring-boundaries` | 46 | `scripts/ring-boundary-guard.ts` (ratchet, not yet a pure block) |
 | `portability.no-hardcoded-platform-binaries` | 3 | `scripts/platform-pattern-check.ts` |
 | `portability.platform-paths-guarded` | 24 | `scripts/platform-pattern-check.ts` |
 | `portability.systemctl-guarded` | 11 | `scripts/platform-pattern-check.ts` |

@@ -1768,6 +1768,34 @@ def test_stable_pin_still_heals(tmp_path: Path):
     assert len(calls) == 1
 
 
+def test_stable_approved_head_pin_heals_on_non_git_tree(tmp_path: Path):
+    """Issue #2480: on a non-Git tree the pin is trusted at observation via the
+    approved-head ledger, so the in-lock recheck must reload approved_heads and
+    apply the same trust contract. Dropping it rejected the unchanged pin
+    mid-heal and reported a spurious current_changed with no repair."""
+    config, deps, calls, head = _fixture(
+        tmp_path, root_data=b"wrong\n", approved_heads=["a" * 40]
+    )
+    deps = _mod.SelfcheckDeps(
+        commit_exists=lambda _sha: False,
+        deploy=deps.deploy,
+        runtime_verify=deps.runtime_verify,
+        push_heartbeat=deps.push_heartbeat,
+        now_epoch=deps.now_epoch,
+        hostname=deps.hostname,
+        service_status=deps.service_status,
+    )
+    _seed_memory(config, {"lastClass": "drift", "consecutive": 1, "healHistory": []})
+    status = _mod.run_selfcheck(config, deps)
+    assert status["pin"]["headSha"] == head
+    assert status["pin"]["trust"] == "ok: approved head ledger"
+    assert status["action"] == "healed", (
+        f"unchanged approved-head pin must heal on a non-Git tree, got {status['action']}"
+    )
+    assert len(calls) == 1, "deploy must run exactly once for the heal"
+    assert not any("pin_changed_during_heal" in p for p in status.get("problems", []))
+
+
 # ─────────────────────────────────────────────────────────────────────────
 # Issue #2470: central telemetry boundary canary tests.
 #

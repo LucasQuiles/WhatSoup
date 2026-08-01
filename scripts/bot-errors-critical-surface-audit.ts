@@ -9,7 +9,7 @@ import {
 } from 'node:fs';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { isRecord } from '../src/lib/type-guards.ts';
+import { asNonEmptyString, isRecord } from '../src/lib/type-guards.ts';
 
 type FileKind = 'missing' | 'regular' | 'directory' | 'symlink' | 'other';
 type ExpectedKind = 'file' | 'directory';
@@ -233,9 +233,7 @@ function parseProfileInstances(value: unknown): HealthProfileInstance[] {
       if (!/^[A-Za-z0-9._-]+$/.test(trimmed)) {
         throw new Error(`health profile instances[${index}].name must be a safe instance name`);
       }
-      const expected = typeof item['expected'] === 'string' && item['expected'].trim().length > 0
-        ? item['expected'].trim()
-        : 'always_on';
+      const expected = asNonEmptyString(item['expected']) ?? 'always_on';
       return { name: trimmed, expected };
     })
     .filter((item): item is HealthProfileInstance => item !== null);

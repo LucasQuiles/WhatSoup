@@ -5,7 +5,7 @@ import { createChildLogger } from '../logger.ts';
 import type { Database } from './database.ts';
 import type { SubmissionReceipt, OutboundMedia } from './types.ts';
 import { nextCronRun } from './cron.ts';
-import { nowUnixSec } from '../fleet/time-utils.ts';
+import { nowUnixSec } from './substrate/time.ts';
 import { errorMessage } from '../lib/error-message.ts';
 import { emitAlertChecked } from '../lib/emit-alert.ts';
 
