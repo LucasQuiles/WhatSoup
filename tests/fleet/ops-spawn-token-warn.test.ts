@@ -4,7 +4,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import type { IncomingMessage, ServerResponse } from 'node:http';
+import type { ServerResponse } from 'node:http';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { lookupCredential } from '../../src/lib/keyring.ts';
 import { handleCreateLine } from '../../src/fleet/routes/ops.ts';
@@ -40,11 +40,7 @@ vi.mock('../../src/lib/keyring.ts', () => ({
 
 const mockedLookupCredential = vi.mocked(lookupCredential);
 
-import { mockReq as helperMockReq, mockRes } from '../helpers/http-mocks.ts';
-
-function mockReq(body = ''): IncomingMessage {
-  return helperMockReq({ body, method: 'POST', url: '/api/lines' });
-}
+import { mockReq, mockRes } from '../helpers/http-mocks.ts';
 
 function makeDeps(): OpsDeps {
   return {
@@ -100,11 +96,11 @@ describe('ops handleCreateLine spawn-token warn', () => {
 
     const res = mockRes();
     await handleCreateLine(
-      mockReq(JSON.stringify({
+      mockReq({ body: JSON.stringify({
         name: 'warn-test-line',
         type: 'chat',
         adminPhones: ['+15551230000'],
-      })),
+      }), method: 'POST', url: '/api/lines' }),
       res,
       makeDeps(),
     );
@@ -129,11 +125,11 @@ describe('ops handleCreateLine spawn-token warn', () => {
 
     const res = mockRes();
     await handleCreateLine(
-      mockReq(JSON.stringify({
+      mockReq({ body: JSON.stringify({
         name: 'no-token-line',
         type: 'chat',
         adminPhones: ['+15551230001'],
-      })),
+      }), method: 'POST', url: '/api/lines' }),
       res,
       makeDeps(),
     );

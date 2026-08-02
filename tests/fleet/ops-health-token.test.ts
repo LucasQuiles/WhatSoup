@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { PassThrough } from 'node:stream';
-import type { IncomingMessage, ServerResponse } from 'node:http';
+import type { ServerResponse } from 'node:http';
 import { lookupCredential } from '../../src/lib/keyring.ts';
 import { handleCreateLine } from '../../src/fleet/routes/ops.ts';
 import type { OpsDeps } from '../../src/fleet/routes/ops.ts';
@@ -14,11 +14,7 @@ vi.mock('../../src/lib/keyring.ts', () => ({
 
 const mockedLookupCredential = vi.mocked(lookupCredential);
 
-import { mockReq as helperMockReq, mockRes } from '../helpers/http-mocks.ts';
-
-function mockReq(body = ''): IncomingMessage {
-  return helperMockReq({ body, method: 'POST', url: '/api/lines' });
-}
+import { mockReq, mockRes } from '../helpers/http-mocks.ts';
 
 function fileMode(filePath: string): number {
   return fs.statSync(filePath).mode & 0o777;
@@ -87,11 +83,11 @@ describe('fleet ops health token service', () => {
 
     const res = mockRes();
     await handleCreateLine(
-      mockReq(JSON.stringify({
+      mockReq({ body: JSON.stringify({
         name: 'token-line',
         type: 'chat',
         adminPhones: ['15551234567'],
-      })),
+      }), method: 'POST', url: '/api/lines' }),
       res,
       makeDeps(),
     );
@@ -115,11 +111,11 @@ describe('fleet ops health token service', () => {
 
     const res = mockRes();
     await handleCreateLine(
-      mockReq(JSON.stringify({
+      mockReq({ body: JSON.stringify({
         name: 'legacy-line',
         type: 'chat',
         adminPhones: ['15551234567'],
-      })),
+      }), method: 'POST', url: '/api/lines' }),
       res,
       makeDeps(),
     );
@@ -145,11 +141,11 @@ describe('fleet ops health token service', () => {
 
     const res = mockRes();
     await handleCreateLine(
-      mockReq(JSON.stringify({
+      mockReq({ body: JSON.stringify({
         name: 'env-line',
         type: 'chat',
         adminPhones: ['15551234567'],
-      })),
+      }), method: 'POST', url: '/api/lines' }),
       res,
       makeDeps(),
     );

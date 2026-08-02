@@ -11,7 +11,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
 import { PassThrough } from 'node:stream';
-import type { IncomingMessage, ServerResponse } from 'node:http';
+import type { ServerResponse } from 'node:http';
 
 import { normalizePhone, normalizePhoneE164, isAdminPhone } from '../../src/lib/phone.ts';
 import { handleConfigUpdate } from '../../src/fleet/routes/ops.ts';
@@ -32,11 +32,7 @@ vi.mock('node:child_process', async () => {
 // Test helpers
 // ---------------------------------------------------------------------------
 
-import { mockReq as helperMockReq, mockRes } from '../helpers/http-mocks.ts';
-
-function mockReq(body = ''): IncomingMessage {
-  return helperMockReq({ body, method: 'PATCH' });
-}
+import { mockReq, mockRes } from '../helpers/http-mocks.ts';
 
 function fakeInstance(configPath: string, overrides: Partial<DiscoveredInstance> = {}): DiscoveredInstance {
   return {
@@ -184,7 +180,7 @@ describe('handleConfigUpdate PATCH validation', () => {
 
     const res = mockRes();
     await handleConfigUpdate(
-      mockReq(JSON.stringify({ accessMode: 'superuser' })),
+      mockReq({ body: JSON.stringify({ accessMode: 'superuser' }), method: 'PATCH' }),
       res, deps, { name: 'test-line' },
     );
 
@@ -201,7 +197,7 @@ describe('handleConfigUpdate PATCH validation', () => {
 
       const res = mockRes();
       await handleConfigUpdate(
-        mockReq(JSON.stringify({ accessMode: mode })),
+        mockReq({ body: JSON.stringify({ accessMode: mode }), method: 'PATCH' }),
         res, deps, { name: 'test-line' },
       );
 
@@ -219,7 +215,7 @@ describe('handleConfigUpdate PATCH validation', () => {
 
     const res = mockRes();
     await handleConfigUpdate(
-      mockReq(JSON.stringify({ adminPhones: [] })),
+      mockReq({ body: JSON.stringify({ adminPhones: [] }), method: 'PATCH' }),
       res, deps, { name: 'test-line' },
     );
 
@@ -234,7 +230,7 @@ describe('handleConfigUpdate PATCH validation', () => {
 
     const res = mockRes();
     await handleConfigUpdate(
-      mockReq(JSON.stringify({ adminPhones: '5551230006' })),
+      mockReq({ body: JSON.stringify({ adminPhones: '5551230006' }), method: 'PATCH' }),
       res, deps, { name: 'test-line' },
     );
 
@@ -249,7 +245,7 @@ describe('handleConfigUpdate PATCH validation', () => {
 
     const res = mockRes();
     await handleConfigUpdate(
-      mockReq(JSON.stringify({ adminPhones: ['5551230006', ''] })),
+      mockReq({ body: JSON.stringify({ adminPhones: ['5551230006', ''] }), method: 'PATCH' }),
       res, deps, { name: 'test-line' },
     );
 
@@ -264,7 +260,7 @@ describe('handleConfigUpdate PATCH validation', () => {
 
     const res = mockRes();
     await handleConfigUpdate(
-      mockReq(JSON.stringify({ adminPhones: ['5551230006', '(212) 555-0100'] })),
+      mockReq({ body: JSON.stringify({ adminPhones: ['5551230006', '(212) 555-0100'] }), method: 'PATCH' }),
       res, deps, { name: 'test-line' },
     );
 
@@ -283,7 +279,7 @@ describe('handleConfigUpdate PATCH validation', () => {
     const res = mockRes();
     await handleConfigUpdate(
       // Two representations of the same number
-      mockReq(JSON.stringify({ adminPhones: ['5551230006', '(555) 123-0006'] })),
+      mockReq({ body: JSON.stringify({ adminPhones: ['5551230006', '(555) 123-0006'] }), method: 'PATCH' }),
       res, deps, { name: 'test-line' },
     );
 
@@ -303,7 +299,7 @@ describe('handleConfigUpdate PATCH validation', () => {
     const res = mockRes();
 
     await handleConfigUpdate(
-      mockReq(JSON.stringify({ adminPhones: ['Owner@Example.test'] })),
+      mockReq({ body: JSON.stringify({ adminPhones: ['Owner@Example.test'] }), method: 'PATCH' }),
       res, deps, { name: 'test-line' },
     );
 
@@ -321,7 +317,7 @@ describe('handleConfigUpdate PATCH validation', () => {
     const res = mockRes();
 
     await handleConfigUpdate(
-      mockReq(JSON.stringify({ adminPhones: ['5551230000'] })),
+      mockReq({ body: JSON.stringify({ adminPhones: ['5551230000'] }), method: 'PATCH' }),
       res, deps, { name: 'test-line' },
     );
 
@@ -338,7 +334,7 @@ describe('handleConfigUpdate PATCH validation', () => {
 
     const res = mockRes();
     await handleConfigUpdate(
-      mockReq(JSON.stringify({ model: 'claude-opus-4-9000' })),
+      mockReq({ body: JSON.stringify({ model: 'claude-opus-4-9000' }), method: 'PATCH' }),
       res, deps, { name: 'test-line' },
     );
 
@@ -365,7 +361,7 @@ describe('handleConfigUpdate PATCH validation', () => {
 
     const res = mockRes();
     await handleConfigUpdate(
-      mockReq(JSON.stringify({
+      mockReq({ body: JSON.stringify({
         pineconeAllowedIndexes: ['mw-mind'],
         memory: {
           pinecone: {
@@ -373,7 +369,7 @@ describe('handleConfigUpdate PATCH validation', () => {
             namespaces: { facts: 'mw-facts' },
           },
         },
-      })),
+      }), method: 'PATCH' }),
       res, deps, { name: 'test-line' },
     );
 
@@ -403,7 +399,7 @@ describe('handleConfigUpdate PATCH validation', () => {
     try {
       const res = mockRes();
       await handleConfigUpdate(
-        mockReq(JSON.stringify({ model: 'new-model' })),
+        mockReq({ body: JSON.stringify({ model: 'new-model' }), method: 'PATCH' }),
         res, deps, { name: 'test-line' },
       );
 
@@ -429,11 +425,11 @@ describe('handleConfigUpdate PATCH validation', () => {
 
     const res = mockRes();
     await handleConfigUpdate(
-      mockReq(JSON.stringify({
+      mockReq({ body: JSON.stringify({
         accessMode: 'allowlist',
         adminPhones: ['15551230006'],
         model: 'claude-haiku-3-5',
-      })),
+      }), method: 'PATCH' }),
       res, deps, { name: 'test-line' },
     );
 

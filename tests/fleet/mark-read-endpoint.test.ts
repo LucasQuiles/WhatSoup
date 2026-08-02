@@ -4,7 +4,7 @@
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { PassThrough } from 'node:stream';
-import type { IncomingMessage, ServerResponse } from 'node:http';
+import type { ServerResponse } from 'node:http';
 import { handleMarkRead } from '../../src/fleet/routes/ops.ts';
 import type { OpsDeps } from '../../src/fleet/routes/ops.ts';
 import type { DiscoveredInstance } from '../../src/fleet/discovery.ts';
@@ -23,11 +23,7 @@ import { proxyToInstance } from '../../src/fleet/http-proxy.ts';
 // Test helpers
 // ---------------------------------------------------------------------------
 
-import { mockReq as helperMockReq, mockRes } from '../helpers/http-mocks.ts';
-
-function mockReq(body = ''): IncomingMessage {
-  return helperMockReq({ body, method: 'POST' });
-}
+import { mockReq, mockRes } from '../helpers/http-mocks.ts';
 
 function fakeInstance(overrides: Partial<DiscoveredInstance> = {}): DiscoveredInstance {
   return {
@@ -76,7 +72,7 @@ describe('handleMarkRead', () => {
   it('returns 404 when instance not found', async () => {
     const deps = makeDeps();
     const res = mockRes();
-    await handleMarkRead(mockReq('{}'), res, deps, { name: 'unknown-line' });
+    await handleMarkRead(mockReq({ body: '{}', method: 'POST' }), res, deps, { name: 'unknown-line' });
     expect(res._status).toBe(404);
     expect(JSON.parse(res._body).error).toMatch(/unknown-line/);
   });
@@ -88,7 +84,7 @@ describe('handleMarkRead', () => {
 
     const res = mockRes();
     const body = '{"chatJid":"123@s.whatsapp.net"}';
-    await handleMarkRead(mockReq(body), res, deps, { name: 'test-line' });
+    await handleMarkRead(mockReq({ body: body, method: 'POST' }), res, deps, { name: 'test-line' });
 
     expect(proxyToInstance).toHaveBeenCalledWith(3010, '/mark-read', 'POST', body, 'tok123');
     expect(res._status).toBe(200);
@@ -105,7 +101,7 @@ describe('handleMarkRead', () => {
     vi.mocked(proxyToInstance).mockResolvedValue({ status: 200, body: '{"ok":true}' });
 
     const res = mockRes();
-    await handleMarkRead(mockReq('{}'), res, deps, { name: 'test-line' });
+    await handleMarkRead(mockReq({ body: '{}', method: 'POST' }), res, deps, { name: 'test-line' });
 
     expect(realtime.publish).toHaveBeenCalledWith(
       expect.objectContaining({ type: 'chat_updated' }),
@@ -125,7 +121,7 @@ describe('handleMarkRead', () => {
     vi.mocked(proxyToInstance).mockResolvedValue({ status: 500, body: '{"error":"fail"}' });
 
     const res = mockRes();
-    await handleMarkRead(mockReq('{}'), res, deps, { name: 'test-line' });
+    await handleMarkRead(mockReq({ body: '{}', method: 'POST' }), res, deps, { name: 'test-line' });
 
     expect(res._status).toBe(500);
     expect(realtime.publish).not.toHaveBeenCalled();
@@ -137,7 +133,7 @@ describe('handleMarkRead', () => {
     vi.mocked(proxyToInstance).mockResolvedValue({ status: 422, body: '{"error":"unprocessable"}' });
 
     const res = mockRes();
-    await handleMarkRead(mockReq('{}'), res, deps, { name: 'test-line' });
+    await handleMarkRead(mockReq({ body: '{}', method: 'POST' }), res, deps, { name: 'test-line' });
 
     expect(res._status).toBe(422);
     expect(JSON.parse(res._body).error).toBe('unprocessable');

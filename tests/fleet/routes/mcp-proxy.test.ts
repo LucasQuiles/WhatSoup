@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { PassThrough } from 'node:stream';
-import type { IncomingMessage, ServerResponse } from 'node:http';
+import type { ServerResponse } from 'node:http';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -59,11 +59,7 @@ function makeDeps(): McpProxyDeps {
   };
 }
 
-import { mockReq as helperMockReq, mockRes } from '../../helpers/http-mocks.ts';
-
-function mockReq(body: string, url = '/api/lines/alpha/groups'): IncomingMessage {
-  return helperMockReq({ body, method: 'POST', url });
-}
+import { mockReq, mockRes } from '../../helpers/http-mocks.ts';
 
 beforeEach(() => {
   tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'whatsoup-mcp-proxy-'));
@@ -80,7 +76,7 @@ afterEach(() => {
 describe('mcp proxy body handlers', () => {
   it('rejects null JSON bodies before calling MCP tools', async () => {
     const res = mockRes();
-    await handleCreateGroup(mockReq('null'), res, makeDeps(), { name: 'alpha' });
+    await handleCreateGroup(mockReq({ body: 'null', method: 'POST', url: '/api/lines/alpha/groups' }), res, makeDeps(), { name: 'alpha' });
 
     expect(res._status).toBe(400);
     expect(JSON.parse(res._body)).toEqual({ error: 'JSON body must be an object' });
@@ -89,7 +85,7 @@ describe('mcp proxy body handlers', () => {
 
   it('rejects array JSON bodies before calling MCP tools', async () => {
     const res = mockRes();
-    await handleCreateGroup(mockReq('[]'), res, makeDeps(), { name: 'alpha' });
+    await handleCreateGroup(mockReq({ body: '[]', method: 'POST', url: '/api/lines/alpha/groups' }), res, makeDeps(), { name: 'alpha' });
 
     expect(res._status).toBe(400);
     expect(JSON.parse(res._body)).toEqual({ error: 'JSON body must be an object' });
@@ -98,7 +94,7 @@ describe('mcp proxy body handlers', () => {
 
   it('forwards object JSON bodies to MCP tools', async () => {
     const res = mockRes();
-    await handleCreateGroup(mockReq('{"subject":"Ops","participants":[]}'), res, makeDeps(), { name: 'alpha' });
+    await handleCreateGroup(mockReq({ body: '{"subject":"Ops","participants":[]}', method: 'POST', url: '/api/lines/alpha/groups' }), res, makeDeps(), { name: 'alpha' });
 
     expect(res._status).toBe(201);
     expect(JSON.parse(res._body)).toEqual({ ok: true });
@@ -109,7 +105,7 @@ describe('mcp proxy body handlers', () => {
     vi.mocked(mcpCall).mockResolvedValue({ success: true, result: { content: [{ type: 'text', text: 'null' }] } });
     const res = mockRes();
 
-    await handleSearchContacts(mockReq('', '/api/lines/alpha/contacts/search?q=ana'), res, makeDeps(), { name: 'alpha' });
+    await handleSearchContacts(mockReq({ body: '', method: 'POST', url: '/api/lines/alpha/contacts/search?q=ana' }), res, makeDeps(), { name: 'alpha' });
 
     expect(res._status).toBe(200);
     expect(JSON.parse(res._body)).toEqual({ contacts: [] });
@@ -124,7 +120,7 @@ describe('mcp-proxy.ts uncovered-branch coverage', () => {
     vi.mocked(mcpCall).mockResolvedValue({ success: false, error: 'socket closed' });
     const res = mockRes();
 
-    await handleGetGroups(mockReq('', '/api/lines/alpha/groups'), res, makeDeps(), { name: 'alpha' });
+    await handleGetGroups(mockReq({ body: '', method: 'POST', url: '/api/lines/alpha/groups' }), res, makeDeps(), { name: 'alpha' });
 
     expect(res._status).toBe(502);
     expect(JSON.parse(res._body)).toEqual({ error: 'socket closed' });
@@ -134,7 +130,7 @@ describe('mcp-proxy.ts uncovered-branch coverage', () => {
     vi.mocked(mcpCall).mockResolvedValue({ success: false });
     const res = mockRes();
 
-    await handleGetGroups(mockReq('', '/api/lines/alpha/groups'), res, makeDeps(), { name: 'alpha' });
+    await handleGetGroups(mockReq({ body: '', method: 'POST', url: '/api/lines/alpha/groups' }), res, makeDeps(), { name: 'alpha' });
 
     expect(res._status).toBe(502);
     expect(JSON.parse(res._body)).toEqual({ error: 'MCP call failed' });
@@ -150,7 +146,7 @@ describe('mcp-proxy.ts uncovered-branch coverage', () => {
     });
     const res = mockRes();
 
-    await handleGetGroups(mockReq('', '/api/lines/alpha/groups'), res, makeDeps(), { name: 'alpha' });
+    await handleGetGroups(mockReq({ body: '', method: 'POST', url: '/api/lines/alpha/groups' }), res, makeDeps(), { name: 'alpha' });
 
     expect(res._status).toBe(422);
     const body = JSON.parse(res._body);
@@ -166,7 +162,7 @@ describe('mcp-proxy.ts uncovered-branch coverage', () => {
     });
     const res = mockRes();
 
-    await handleGetGroups(mockReq('', '/api/lines/alpha/groups'), res, makeDeps(), { name: 'alpha' });
+    await handleGetGroups(mockReq({ body: '', method: 'POST', url: '/api/lines/alpha/groups' }), res, makeDeps(), { name: 'alpha' });
 
     expect(res._status).toBe(500);
     const body = JSON.parse(res._body);
@@ -180,7 +176,7 @@ describe('mcp-proxy.ts uncovered-branch coverage', () => {
     fs.rmSync(socketPath, { force: true });
     const res = mockRes();
 
-    await handleGetGroups(mockReq('', '/api/lines/alpha/groups'), res, makeDeps(), { name: 'alpha' });
+    await handleGetGroups(mockReq({ body: '', method: 'POST', url: '/api/lines/alpha/groups' }), res, makeDeps(), { name: 'alpha' });
 
     expect(res._status).toBe(503);
     expect(JSON.parse(res._body).error).toContain('MCP socket not available');
@@ -192,7 +188,7 @@ describe('mcp-proxy.ts uncovered-branch coverage', () => {
     (deps.discovery.getInstance as ReturnType<typeof vi.fn>).mockReturnValue({ ...makeInstance(), socketPath: null });
     const res = mockRes();
 
-    await handleCreateGroup(mockReq('{}'), res, deps, { name: 'alpha' });
+    await handleCreateGroup(mockReq({ body: '{}', method: 'POST', url: '/api/lines/alpha/groups' }), res, deps, { name: 'alpha' });
 
     expect(res._status).toBe(503);
     expect(JSON.parse(res._body).error).toContain('MCP socket not available');
@@ -205,7 +201,7 @@ describe('mcp-proxy.ts uncovered-branch coverage', () => {
     (deps.discovery.getInstance as ReturnType<typeof vi.fn>).mockReturnValue(undefined);
     const res = mockRes();
 
-    await handleGetGroups(mockReq('', '/api/lines/alpha/groups'), res, deps, { name: 'alpha' });
+    await handleGetGroups(mockReq({ body: '', method: 'POST', url: '/api/lines/alpha/groups' }), res, deps, { name: 'alpha' });
 
     expect(res._status).toBe(404);
     expect(JSON.parse(res._body).error).toContain('not found');
@@ -218,7 +214,7 @@ describe('mcp-proxy.ts uncovered-branch coverage', () => {
     vi.mocked(mcpCall).mockResolvedValue({ success: true, result: { ok: true, id: 42 } });
     const res = mockRes();
 
-    await handleGetGroups(mockReq('', '/api/lines/alpha/groups'), res, makeDeps(), { name: 'alpha' });
+    await handleGetGroups(mockReq({ body: '', method: 'POST', url: '/api/lines/alpha/groups' }), res, makeDeps(), { name: 'alpha' });
 
     expect(res._status).toBe(200);
     expect(JSON.parse(res._body)).toEqual({ ok: true, id: 42 });
@@ -228,7 +224,7 @@ describe('mcp-proxy.ts uncovered-branch coverage', () => {
     vi.mocked(mcpCall).mockResolvedValue({ success: true, result: { content: [] } });
     const res = mockRes();
 
-    await handleGetGroups(mockReq('', '/api/lines/alpha/groups'), res, makeDeps(), { name: 'alpha' });
+    await handleGetGroups(mockReq({ body: '', method: 'POST', url: '/api/lines/alpha/groups' }), res, makeDeps(), { name: 'alpha' });
 
     expect(res._status).toBe(200);
     expect(JSON.parse(res._body)).toEqual({ content: [] });
@@ -241,7 +237,7 @@ describe('mcp-proxy.ts uncovered-branch coverage', () => {
     });
     const res = mockRes();
 
-    await handleGetGroups(mockReq('', '/api/lines/alpha/groups'), res, makeDeps(), { name: 'alpha' });
+    await handleGetGroups(mockReq({ body: '', method: 'POST', url: '/api/lines/alpha/groups' }), res, makeDeps(), { name: 'alpha' });
 
     expect(res._status).toBe(200);
     expect(JSON.parse(res._body)).toBe('not-json-text');
@@ -254,7 +250,7 @@ describe('mcp-proxy.ts uncovered-branch coverage', () => {
     });
     const res = mockRes();
 
-    await handleGetGroups(mockReq('', '/api/lines/alpha/groups'), res, makeDeps(), { name: 'alpha' });
+    await handleGetGroups(mockReq({ body: '', method: 'POST', url: '/api/lines/alpha/groups' }), res, makeDeps(), { name: 'alpha' });
 
     expect(res._status).toBe(200);
     expect(JSON.parse(res._body)).toEqual({ content: [{ type: 'image', text: 'ignored' }] });
@@ -267,7 +263,7 @@ describe('mcp-proxy.ts uncovered-branch coverage', () => {
     const res = mockRes();
 
     await handleGetGroupDetail(
-      mockReq('', '/api/lines/alpha/groups/1555XXXXXXX%40s.whatsapp.net'),
+      mockReq({ body: '', method: 'POST', url: '/api/lines/alpha/groups/1555XXXXXXX%40s.whatsapp.net' }),
       res,
       makeDeps(),
       { name: 'alpha', jid: '1555XXXXXXX%40s.whatsapp.net' },
@@ -282,7 +278,7 @@ describe('mcp-proxy.ts uncovered-branch coverage', () => {
     const res = mockRes();
 
     await handleGetGroupDetail(
-      mockReq('', '/api/lines/alpha/groups/%E0%A4%A'),
+      mockReq({ body: '', method: 'POST', url: '/api/lines/alpha/groups/%E0%A4%A' }),
       res,
       makeDeps(),
       { name: 'alpha', jid: '%E0%A4%A' },
@@ -298,7 +294,7 @@ describe('mcp-proxy.ts uncovered-branch coverage', () => {
     const res = mockRes();
 
     await handleRevokeGroupInvite(
-      mockReq('', '/api/lines/alpha/groups/1555XXXXXXX%40s.whatsapp.net/invite/revoke'),
+      mockReq({ body: '', method: 'POST', url: '/api/lines/alpha/groups/1555XXXXXXX%40s.whatsapp.net/invite/revoke' }),
       res,
       makeDeps(),
       { name: 'alpha', jid: '1555XXXXXXX%40s.whatsapp.net' },
@@ -314,7 +310,7 @@ describe('mcp-proxy.ts uncovered-branch coverage', () => {
     const res = mockRes();
 
     await handleLeaveGroup(
-      mockReq('', '/api/lines/alpha/groups/1555XXXXXXX%40s.whatsapp.net'),
+      mockReq({ body: '', method: 'POST', url: '/api/lines/alpha/groups/1555XXXXXXX%40s.whatsapp.net' }),
       res,
       makeDeps(),
       { name: 'alpha', jid: '1555XXXXXXX%40s.whatsapp.net' },
@@ -328,7 +324,7 @@ describe('mcp-proxy.ts uncovered-branch coverage', () => {
     vi.mocked(mcpCall).mockResolvedValue({ success: true, result: { content: [{ type: 'text', text: '{"id":7}' }] } });
     const res = mockRes();
 
-    await handleGetScheduledById(mockReq('', '/api/lines/alpha/scheduled/7'), res, makeDeps(), {
+    await handleGetScheduledById(mockReq({ body: '', method: 'POST', url: '/api/lines/alpha/scheduled/7' }), res, makeDeps(), {
       name: 'alpha',
       id: '7',
     });
@@ -342,7 +338,7 @@ describe('mcp-proxy.ts uncovered-branch coverage', () => {
     vi.mocked(mcpCall).mockResolvedValue({ success: true, result: { content: [{ type: 'text', text: '"gone"' }] } });
     const res = mockRes();
 
-    await handleCancelScheduledById(mockReq('', '/api/lines/alpha/scheduled/9'), res, makeDeps(), {
+    await handleCancelScheduledById(mockReq({ body: '', method: 'POST', url: '/api/lines/alpha/scheduled/9' }), res, makeDeps(), {
       name: 'alpha',
       id: '9',
     });
@@ -356,7 +352,7 @@ describe('mcp-proxy.ts uncovered-branch coverage', () => {
   it('returns 400 for invalid JSON body (mcpWithBody)', async () => {
     const res = mockRes();
 
-    await handleCreateScheduled(mockReq('{not-json'), res, makeDeps(), { name: 'alpha' });
+    await handleCreateScheduled(mockReq({ body: '{not-json', method: 'POST', url: '/api/lines/alpha/groups' }), res, makeDeps(), { name: 'alpha' });
 
     expect(res._status).toBe(400);
     expect(JSON.parse(res._body)).toEqual({ error: 'Invalid JSON body' });
@@ -367,7 +363,7 @@ describe('mcp-proxy.ts uncovered-branch coverage', () => {
     vi.mocked(mcpCall).mockResolvedValue({ success: true, result: { content: [{ type: 'text', text: '{"id":3}' }] } });
     const res = mockRes();
 
-    await handleCreateScheduled(mockReq('{"to":"1555XXXXXXX@s.whatsapp.net","text":"hi"}'), res, makeDeps(), {
+    await handleCreateScheduled(mockReq({ body: '{"to":"1555XXXXXXX@s.whatsapp.net","text":"hi"}', method: 'POST', url: '/api/lines/alpha/groups' }), res, makeDeps(), {
       name: 'alpha',
     });
 
@@ -385,7 +381,7 @@ describe('mcp-proxy.ts uncovered-branch coverage', () => {
     vi.mocked(mcpCall).mockResolvedValue({ success: true, result: { content: [{ type: 'text', text: '{"id":2}' }] } });
     const res = mockRes();
 
-    await handleUpdateScheduled(mockReq('{"text":"updated"}'), res, makeDeps(), { name: 'alpha', id: '2' });
+    await handleUpdateScheduled(mockReq({ body: '{"text":"updated"}', method: 'POST', url: '/api/lines/alpha/groups' }), res, makeDeps(), { name: 'alpha', id: '2' });
 
     expect(res._status).toBe(200);
     expect(mcpCall).toHaveBeenCalledWith(socketPath, 'update_scheduled', { text: 'updated', id: 2 }, undefined);
@@ -396,7 +392,7 @@ describe('mcp-proxy.ts uncovered-branch coverage', () => {
     const res = mockRes();
 
     await handleUpdateGroupSubject(
-      mockReq('{"subject":"New"}'),
+      mockReq({ body: '{"subject":"New"}', method: 'POST', url: '/api/lines/alpha/groups' }),
       res,
       makeDeps(),
       { name: 'alpha', jid: '1555XXXXXXX%40s.whatsapp.net' },
@@ -416,7 +412,7 @@ describe('mcp-proxy.ts uncovered-branch coverage', () => {
     const res = mockRes();
 
     await handleGroupParticipants(
-      mockReq('{"action":"add","participants":[]}'),
+      mockReq({ body: '{"action":"add","participants":[]}', method: 'POST', url: '/api/lines/alpha/groups' }),
       res,
       makeDeps(),
       { name: 'alpha', jid: '1555XXXXXXX%40s.whatsapp.net' },
@@ -435,7 +431,7 @@ describe('mcp-proxy.ts uncovered-branch coverage', () => {
     vi.mocked(mcpCall).mockResolvedValue({ success: true, result: { content: [{ type: 'text', text: '"ok"' }] } });
     const res = mockRes();
 
-    await handleGroupSettings(mockReq('{"announcement":true}'), res, makeDeps(), {
+    await handleGroupSettings(mockReq({ body: '{"announcement":true}', method: 'POST', url: '/api/lines/alpha/groups' }), res, makeDeps(), {
       name: 'alpha',
       jid: '1555XXXXXXX%40s.whatsapp.net',
     });
@@ -453,7 +449,7 @@ describe('mcp-proxy.ts uncovered-branch coverage', () => {
     vi.mocked(mcpCall).mockResolvedValue({ success: true, result: { content: [{ type: 'text', text: '"ok"' }] } });
     const res = mockRes();
 
-    await handleUpdateGroupDescription(mockReq('{"description":"d"}'), res, makeDeps(), {
+    await handleUpdateGroupDescription(mockReq({ body: '{"description":"d"}', method: 'POST', url: '/api/lines/alpha/groups' }), res, makeDeps(), {
       name: 'alpha',
       jid: '1555XXXXXXX%40s.whatsapp.net',
     });
@@ -471,7 +467,7 @@ describe('mcp-proxy.ts uncovered-branch coverage', () => {
     vi.mocked(mcpCall).mockResolvedValue({ success: true, result: { content: [{ type: 'text', text: '"ok"' }] } });
     const res = mockRes();
 
-    await handleGroupEphemeral(mockReq('{"enabled":true}'), res, makeDeps(), {
+    await handleGroupEphemeral(mockReq({ body: '{"enabled":true}', method: 'POST', url: '/api/lines/alpha/groups' }), res, makeDeps(), {
       name: 'alpha',
       jid: '1555XXXXXXX%40s.whatsapp.net',
     });
@@ -490,7 +486,7 @@ describe('mcp-proxy.ts uncovered-branch coverage', () => {
     const res = mockRes();
 
     await handleGetGroupRequests(
-      mockReq('', '/api/lines/alpha/groups/1555XXXXXXX%40s.whatsapp.net/requests'),
+      mockReq({ body: '', method: 'POST', url: '/api/lines/alpha/groups/1555XXXXXXX%40s.whatsapp.net/requests' }),
       res,
       makeDeps(),
       { name: 'alpha', jid: '1555XXXXXXX%40s.whatsapp.net' },
@@ -511,7 +507,7 @@ describe('mcp-proxy.ts uncovered-branch coverage', () => {
     const res = mockRes();
 
     await handleGetGroupInvite(
-      mockReq('', '/api/lines/alpha/groups/1555XXXXXXX%40s.whatsapp.net/invite'),
+      mockReq({ body: '', method: 'POST', url: '/api/lines/alpha/groups/1555XXXXXXX%40s.whatsapp.net/invite' }),
       res,
       makeDeps(),
       { name: 'alpha', jid: '1555XXXXXXX%40s.whatsapp.net' },
@@ -527,7 +523,7 @@ describe('mcp-proxy.ts uncovered-branch coverage', () => {
     vi.mocked(mcpCall).mockResolvedValue({ success: true, result: { content: [{ type: 'text', text: '[{"id":1}]' }] } });
     const res = mockRes();
 
-    await handleGetScheduled(mockReq('', '/api/lines/alpha/scheduled?status=sent'), res, makeDeps(), { name: 'alpha' });
+    await handleGetScheduled(mockReq({ body: '', method: 'POST', url: '/api/lines/alpha/scheduled?status=sent' }), res, makeDeps(), { name: 'alpha' });
 
     expect(res._status).toBe(200);
     expect(JSON.parse(res._body)).toEqual([{ id: 1 }]);
@@ -538,7 +534,7 @@ describe('mcp-proxy.ts uncovered-branch coverage', () => {
     vi.mocked(mcpCall).mockResolvedValue({ success: true, result: { content: [{ type: 'text', text: '[]' }] } });
     const res = mockRes();
 
-    await handleGetScheduled(mockReq('', '/api/lines/alpha/scheduled'), res, makeDeps(), { name: 'alpha' });
+    await handleGetScheduled(mockReq({ body: '', method: 'POST', url: '/api/lines/alpha/scheduled' }), res, makeDeps(), { name: 'alpha' });
 
     expect(res._status).toBe(200);
     expect(mcpCall).toHaveBeenCalledWith(socketPath, 'list_scheduled', {});
@@ -548,7 +544,7 @@ describe('mcp-proxy.ts uncovered-branch coverage', () => {
     fs.rmSync(socketPath, { force: true });
     const res = mockRes();
 
-    await handleGetScheduled(mockReq('', '/api/lines/alpha/scheduled'), res, makeDeps(), { name: 'alpha' });
+    await handleGetScheduled(mockReq({ body: '', method: 'POST', url: '/api/lines/alpha/scheduled' }), res, makeDeps(), { name: 'alpha' });
 
     expect(res._status).toBe(503);
     expect(mcpCall).not.toHaveBeenCalled();
@@ -559,7 +555,7 @@ describe('mcp-proxy.ts uncovered-branch coverage', () => {
   it('returns 400 when id query param is missing (legacy cancel route)', async () => {
     const res = mockRes();
 
-    await handleCancelScheduled(mockReq('', '/api/lines/alpha/scheduled'), res, makeDeps(), { name: 'alpha' });
+    await handleCancelScheduled(mockReq({ body: '', method: 'POST', url: '/api/lines/alpha/scheduled' }), res, makeDeps(), { name: 'alpha' });
 
     expect(res._status).toBe(400);
     expect(JSON.parse(res._body)).toEqual({ error: 'id query parameter is required' });
@@ -569,7 +565,7 @@ describe('mcp-proxy.ts uncovered-branch coverage', () => {
   it('returns 400 when id query param is not a positive integer (legacy cancel route)', async () => {
     const res = mockRes();
 
-    await handleCancelScheduled(mockReq('', '/api/lines/alpha/scheduled?id=abc'), res, makeDeps(), { name: 'alpha' });
+    await handleCancelScheduled(mockReq({ body: '', method: 'POST', url: '/api/lines/alpha/scheduled?id=abc' }), res, makeDeps(), { name: 'alpha' });
 
     expect(res._status).toBe(400);
     expect(JSON.parse(res._body)).toEqual({ error: 'id query parameter must be a positive integer' });
@@ -579,7 +575,7 @@ describe('mcp-proxy.ts uncovered-branch coverage', () => {
   it('returns 400 when id query param is zero (legacy cancel route)', async () => {
     const res = mockRes();
 
-    await handleCancelScheduled(mockReq('', '/api/lines/alpha/scheduled?id=0'), res, makeDeps(), { name: 'alpha' });
+    await handleCancelScheduled(mockReq({ body: '', method: 'POST', url: '/api/lines/alpha/scheduled?id=0' }), res, makeDeps(), { name: 'alpha' });
 
     expect(res._status).toBe(400);
     expect(JSON.parse(res._body)).toEqual({ error: 'id query parameter must be a positive integer' });
@@ -590,7 +586,7 @@ describe('mcp-proxy.ts uncovered-branch coverage', () => {
     fs.rmSync(socketPath, { force: true });
     const res = mockRes();
 
-    await handleCancelScheduled(mockReq('', '/api/lines/alpha/scheduled?id=5'), res, makeDeps(), { name: 'alpha' });
+    await handleCancelScheduled(mockReq({ body: '', method: 'POST', url: '/api/lines/alpha/scheduled?id=5' }), res, makeDeps(), { name: 'alpha' });
 
     expect(res._status).toBe(503);
     expect(mcpCall).not.toHaveBeenCalled();
@@ -600,7 +596,7 @@ describe('mcp-proxy.ts uncovered-branch coverage', () => {
     vi.mocked(mcpCall).mockResolvedValue({ success: true, result: { content: [{ type: 'text', text: '"ok"' }] } });
     const res = mockRes();
 
-    await handleCancelScheduled(mockReq('', '/api/lines/alpha/scheduled?id=8'), res, makeDeps(), { name: 'alpha' });
+    await handleCancelScheduled(mockReq({ body: '', method: 'POST', url: '/api/lines/alpha/scheduled?id=8' }), res, makeDeps(), { name: 'alpha' });
 
     expect(res._status).toBe(200);
     expect(JSON.parse(res._body)).toEqual({ cancelled: true, id: 8 });
@@ -612,7 +608,7 @@ describe('mcp-proxy.ts uncovered-branch coverage', () => {
   it('returns 400 when q query param is missing', async () => {
     const res = mockRes();
 
-    await handleSearchContacts(mockReq('', '/api/lines/alpha/contacts/search'), res, makeDeps(), { name: 'alpha' });
+    await handleSearchContacts(mockReq({ body: '', method: 'POST', url: '/api/lines/alpha/contacts/search' }), res, makeDeps(), { name: 'alpha' });
 
     expect(res._status).toBe(400);
     expect(JSON.parse(res._body)).toEqual({ error: 'q query parameter is required' });
@@ -623,7 +619,7 @@ describe('mcp-proxy.ts uncovered-branch coverage', () => {
     fs.rmSync(socketPath, { force: true });
     const res = mockRes();
 
-    await handleSearchContacts(mockReq('', '/api/lines/alpha/contacts/search?q=a'), res, makeDeps(), { name: 'alpha' });
+    await handleSearchContacts(mockReq({ body: '', method: 'POST', url: '/api/lines/alpha/contacts/search?q=a' }), res, makeDeps(), { name: 'alpha' });
 
     expect(res._status).toBe(503);
     expect(mcpCall).not.toHaveBeenCalled();
@@ -636,7 +632,7 @@ describe('mcp-proxy.ts uncovered-branch coverage', () => {
     });
     const res = mockRes();
 
-    await handleSearchContacts(mockReq('', '/api/lines/alpha/contacts/search?q=ana'), res, makeDeps(), { name: 'alpha' });
+    await handleSearchContacts(mockReq({ body: '', method: 'POST', url: '/api/lines/alpha/contacts/search?q=ana' }), res, makeDeps(), { name: 'alpha' });
 
     expect(res._status).toBe(200);
     expect(JSON.parse(res._body)).toEqual({ contacts: [{ name: 'Ana' }] });
@@ -649,7 +645,7 @@ describe('mcp-proxy.ts uncovered-branch coverage', () => {
     });
     const res = mockRes();
 
-    await handleSearchContacts(mockReq('', '/api/lines/alpha/contacts/search?q=bo'), res, makeDeps(), { name: 'alpha' });
+    await handleSearchContacts(mockReq({ body: '', method: 'POST', url: '/api/lines/alpha/contacts/search?q=bo' }), res, makeDeps(), { name: 'alpha' });
 
     expect(res._status).toBe(200);
     expect(JSON.parse(res._body)).toEqual({ contacts: [{ name: 'Bo' }] });
@@ -659,7 +655,7 @@ describe('mcp-proxy.ts uncovered-branch coverage', () => {
     vi.mocked(mcpCall).mockResolvedValue({ success: true, result: { content: [{ type: 'text', text: '{"foo":"bar"}' }] } });
     const res = mockRes();
 
-    await handleSearchContacts(mockReq('', '/api/lines/alpha/contacts/search?q=z'), res, makeDeps(), { name: 'alpha' });
+    await handleSearchContacts(mockReq({ body: '', method: 'POST', url: '/api/lines/alpha/contacts/search?q=z' }), res, makeDeps(), { name: 'alpha' });
 
     expect(res._status).toBe(200);
     expect(JSON.parse(res._body)).toEqual({ contacts: [] });
@@ -669,7 +665,7 @@ describe('mcp-proxy.ts uncovered-branch coverage', () => {
     vi.mocked(mcpCall).mockResolvedValue({ success: true, result: { content: [{ type: 'text', text: 'just-text' }] } });
     const res = mockRes();
 
-    await handleSearchContacts(mockReq('', '/api/lines/alpha/contacts/search?q=t'), res, makeDeps(), { name: 'alpha' });
+    await handleSearchContacts(mockReq({ body: '', method: 'POST', url: '/api/lines/alpha/contacts/search?q=t' }), res, makeDeps(), { name: 'alpha' });
 
     expect(res._status).toBe(200);
     expect(JSON.parse(res._body)).toEqual({ contacts: [] });
@@ -685,7 +681,7 @@ describe('mcp-proxy.ts uncovered-branch coverage', () => {
     });
     const res = mockRes();
 
-    await handleGetGroups(mockReq('', '/api/lines/alpha/groups'), res, makeDeps(), { name: 'alpha' });
+    await handleGetGroups(mockReq({ body: '', method: 'POST', url: '/api/lines/alpha/groups' }), res, makeDeps(), { name: 'alpha' });
 
     expect(res._status).toBe(422);
     const body = JSON.parse(res._body);
