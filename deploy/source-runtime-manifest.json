@@ -5,7 +5,7 @@
   "entrypoints": [
     {
       "path": "src/main.ts",
-      "sha256": "d6cba25434fb60611d81aa8fd22ef99559e8ed87462eb6b1b7a1134401019718",
+      "sha256": "a8752508aef9db7747a06f762f426a2e0b18a782e2737dc9992514f68dd17121",
       "mustContain": [
         "startHealthServer",
         "createConnection"
@@ -22,7 +22,7 @@
     },
     {
       "path": "src/database-compatibility-bootstrap.ts",
-      "sha256": "48a90fe623c7c31f059b8d03056a590bf0a9e2bf68465a34b1f30f4f5c867fce",
+      "sha256": "d01829e5ba02b01c3e8444fe57a379a60474773ddea6b8244fc8953fe48e306e",
       "mustContain": [
         "databaseCompatibilityBootstrap",
         "checkLoadedInstanceDatabase"
