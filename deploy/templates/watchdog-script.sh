@@ -42,7 +42,7 @@ FLEET_HEALTH="http://127.0.0.1:FLEET_PORT/"
 # Use the pinned node binary — never /usr/bin/env node (see macOS-host-setup runbook).
 NODE_BIN="__HOME__/.nvm/versions/node/v24.15.0/bin/node"
 
-PATH="$HOME_DIR/.local/bin:$(dirname "$NODE_BIN"):/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+PATH="$HOME_DIR/.local/bin:$(dirname "$NODE_BIN"):/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 export HOME="$HOME_DIR" PATH
 
 mkdir -p "$LOG_DIR"
