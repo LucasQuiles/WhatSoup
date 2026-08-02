@@ -95,6 +95,7 @@ export const CURATED_TEST_PATHS = [
   'tests/scripts/check-coverage-headroom.test.ts',
   'tests/scripts/design-system-hygiene-guard.test.ts',
   'tests/scripts/harness-maintenance-guard.test.ts',
+  'tests/scripts/logger-mock-residue.test.ts',
   'tests/scripts/publication-guard.test.ts',
   'tests/scripts/guard-test-coverage-check.test.ts',
   'tests/deploy/preflight-check.test.ts',
