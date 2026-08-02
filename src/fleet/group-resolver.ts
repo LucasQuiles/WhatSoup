@@ -17,13 +17,14 @@ import { proxyToInstance } from './http-proxy.ts';
 import { conversationKeyToJid } from '../core/conversation-key.ts';
 import type { DiscoveredInstance } from './discovery.ts';
 import { createChildLogger } from '../logger.ts';
+import { MS_PER_MINUTE } from '../lib/time-units.ts';
 
 const log = createChildLogger('fleet:group-resolver');
 
 /** Track which groups we've already attempted (avoid repeated failures). */
 const attemptedCache = new Map<string, number>();
-const RETRY_MS = 5 * 60 * 1000;
-const PRUNE_INTERVAL_MS = 10 * 60 * 1000;
+const RETRY_MS = 5 * MS_PER_MINUTE;
+const PRUNE_INTERVAL_MS = 10 * MS_PER_MINUTE;
 let lastPruneAt = 0;
 
 function pruneAttemptedCache(now: number): void {

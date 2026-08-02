@@ -1,6 +1,7 @@
 import { createHash, randomBytes } from 'node:crypto';
 import type { DatabaseSync } from 'node:sqlite';
 import { SIGNAL_KINDS, type SignalKind } from './envelope.ts';
+import { MS_PER_MINUTE, MS_PER_DAY } from '../../lib/time-units.ts';
 
 export interface ProducerRegistration {
   producerId: string;
@@ -38,10 +39,10 @@ export interface AuthenticatedProducer {
 
 export type ScopeDenial = 'kind_not_allowed' | 'condition_class_not_allowed' | 'subject_not_allowed';
 
-const DEFAULT_ENROLLMENT_TTL_MS = 10 * 60_000;
-const MAX_ENROLLMENT_TTL_MS = 30 * 60_000;
-const DEFAULT_CREDENTIAL_TTL_MS = 90 * 24 * 60 * 60_000;
-const DEFAULT_ROTATION_OVERLAP_MS = 24 * 60 * 60_000;
+const DEFAULT_ENROLLMENT_TTL_MS = 10 * MS_PER_MINUTE;
+const MAX_ENROLLMENT_TTL_MS = 30 * MS_PER_MINUTE;
+const DEFAULT_CREDENTIAL_TTL_MS = 90 * MS_PER_DAY;
+const DEFAULT_ROTATION_OVERLAP_MS = MS_PER_DAY;
 const MAX_ENROLLMENT_MISMATCHES = 3;
 const MAX_ID_LENGTH = 128;
 

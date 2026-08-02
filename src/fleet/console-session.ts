@@ -16,11 +16,12 @@
  */
 import { randomBytes } from 'node:crypto';
 import type { IncomingMessage } from 'node:http';
+import { MS_PER_DAY } from '../lib/time-units.ts';
 
 export const CONSOLE_SESSION_COOKIE = 'whatsoup_console_session';
 
 /** Fixed session lifetime; no sliding renewal. */
-export const CONSOLE_SESSION_TTL_MS = 24 * 60 * 60 * 1000;
+export const CONSOLE_SESSION_TTL_MS = MS_PER_DAY;
 
 const SESSION_ID_RE = /^[0-9a-f]{64}$/;
 const DEFAULT_MAX_SESSIONS = 32;

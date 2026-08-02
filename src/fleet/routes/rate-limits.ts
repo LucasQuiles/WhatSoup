@@ -25,6 +25,7 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { readFileSync } from 'node:fs';
 import { jsonResponse, requireInstance } from '../../lib/http.ts';
+import { MS_PER_HOUR } from '../../lib/time-units.ts';
 import type { FleetDiscovery } from '../discovery.ts';
 import type { FleetDbReader } from '../db-reader.ts';
 
@@ -34,7 +35,7 @@ export interface RateLimitsDeps {
 }
 
 const DEFAULT_RATE_LIMIT_PER_HOUR = 45;
-const DEFAULT_RATE_WINDOW_MS = 60 * 60 * 1000;
+const DEFAULT_RATE_WINDOW_MS = MS_PER_HOUR;
 
 /** Resolve limit + window from the instance config.json, mirroring
  *  src/config.ts's fallback chain. Returns the values plus which seam

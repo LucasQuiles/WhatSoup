@@ -14,9 +14,10 @@
  * The clock is injected so the TTL is deterministically testable.
  */
 import type { AgentFallbackEntry } from '../../core/fallback-chain.ts';
+import { MS_PER_MINUTE } from '../../lib/time-units.ts';
 
 /** Default refresh window for idle eligibility - credentials change rarely. */
-export const IDLE_FALLBACK_ELIGIBILITY_TTL_MS = 5 * 60 * 1000;
+export const IDLE_FALLBACK_ELIGIBILITY_TTL_MS = 5 * MS_PER_MINUTE;
 
 function entryKey(entry: AgentFallbackEntry): string {
   return [entry.provider, entry.model ?? ''].join('|');

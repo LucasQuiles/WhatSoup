@@ -9,6 +9,7 @@ import type { Runtime } from '../runtimes/types.ts';
 import type { DurabilityEngine } from './durability.ts';
 import { sendTracked } from './durability.ts';
 import type { CapabilityGrantManager } from '../lib/capability-grant.ts';
+import { MS_PER_MINUTE } from '../lib/time-units.ts';
 import { classifyErrorForInbound } from './inbound-failure-class.ts';
 import { storeMessageIfNew } from './messages.ts';
 import { stripLoneSurrogates } from './sanitize-surrogates.ts';
@@ -36,7 +37,7 @@ let ingestActive = 0;
 let ingestQueued = 0;
 let ingestDropped = 0;
 
-const DISPLACEMENT_INCIDENT_WINDOW_MS = 15 * 60 * 1000;
+const DISPLACEMENT_INCIDENT_WINDOW_MS = 15 * MS_PER_MINUTE;
 const DISPLACEMENT_INCIDENT_LIMITER_MAX_ENTRIES = 256;
 const displacementIncidentNextAttemptAt = new Map<string, number>();
 

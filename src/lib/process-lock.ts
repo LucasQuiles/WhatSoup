@@ -1,6 +1,7 @@
 import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { existsSync, linkSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
+import { z } from 'zod';
 
 export type ProcessLockErrorReason = 'active' | 'stale' | 'corrupt';
 
@@ -145,25 +146,32 @@ function createProcessLockPayload(options: AcquireProcessLockOptions = {}): Proc
   };
 }
 
+// Shape schema for the three fields whose validation can reject the whole
+// payload. `bootId` is deliberately excluded: the previous ladder never
+// rejected the payload over a wrong-typed bootId, it just silently dropped
+// it, so that permissive behavior stays as a manual conditional spread below
+// rather than becoming part of the schema (a schema field would fail the
+// whole `safeParse` on a wrong-typed value instead of merely omitting it).
+//
+// `pid` uses `.int().safe().positive()` rather than plain `.int()`: plain
+// `.int()` accepts values like 2**60 (Number.isInteger true but
+// Number.isSafeInteger false), which the previous `Number.isSafeInteger`
+// check rejected. A real OS pid is a positive, in-range integer — reject
+// 0/negative (process.kill would target a process GROUP), fractional, and
+// unsafe integers as corrupt rather than feeding them to process.kill(pid, 0).
+const ProcessLockShapeSchema = z.object({
+  pid: z.number().int().safe().positive(),
+  token: z.string(),
+  startedAt: z.string(),
+}) satisfies z.ZodType<Omit<ProcessLockPayload, 'bootId'>>;
+
 export function readProcessLockPayload(lockPath: string): ProcessLockPayload | null {
   try {
     const parsed = JSON.parse(readFileSync(lockPath, 'utf8')) as Partial<ProcessLockPayload>;
-    if (
-      typeof parsed.pid !== 'number'
-      // A real OS pid is a positive, in-range integer. Reject 0/negative
-      // (process.kill would target a process GROUP), fractional, and unsafe
-      // integers as corrupt rather than feeding them to process.kill(pid, 0).
-      || !Number.isSafeInteger(parsed.pid)
-      || parsed.pid <= 0
-      || typeof parsed.token !== 'string'
-      || typeof parsed.startedAt !== 'string'
-    ) {
-      return null;
-    }
+    const result = ProcessLockShapeSchema.safeParse(parsed);
+    if (!result.success) return null;
     return {
-      pid: parsed.pid,
-      token: parsed.token,
-      startedAt: parsed.startedAt,
+      ...result.data,
       ...(typeof parsed.bootId === 'string' ? { bootId: parsed.bootId } : {}),
     };
   } catch {
