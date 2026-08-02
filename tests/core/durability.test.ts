@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { Database } from '../../src/core/database.ts';
 import { DurabilityEngine, sendTracked } from '../../src/core/durability.ts';
-import type { OutboundOpParams } from '../../src/core/durability.ts';
+import type { InboundStatus, OutboundOpParams } from '../../src/core/durability.ts';
 import { createInternalOutboundFailureEvidence } from '../../src/core/outbound-failure-disposition.ts';
 
 const BASE_OP: OutboundOpParams = {
@@ -88,6 +88,15 @@ describe('DurabilityEngine', () => {
       expect(engine.getInboundStatus(seq)).toBe('processing');
       engine.markTurnDone(seq);
       expect(engine.getInboundStatus(seq)).toBe('turn_done');
+    });
+
+    it('getInboundStatus narrows to the exported InboundStatus union, not a bare string', () => {
+      const seq = engine.journalInbound('msg-status-type', 'key-1', 'jid-status-type', 'agent');
+      // Compile-time contract: this assignment only type-checks if InboundStatus is
+      // exported from durability.ts AND getInboundStatus's return type is narrowed
+      // to InboundStatus | undefined (not the wider string | undefined).
+      const status: InboundStatus | undefined = engine.getInboundStatus(seq);
+      expect(status).toBe('processing');
     });
 
     it('markInboundComplete transitions turn_done → complete', () => {
