@@ -1,4 +1,5 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
+import { z } from 'zod';
 import { readBody, jsonResponse } from '../../lib/http.ts';
 import {
   silenceRegistryUnavailableError,
@@ -32,6 +33,65 @@ import {
  * while guaranteeing a silence cannot outlive the operator who set it.
  */
 export const MAX_SILENCE_MINUTES = 365 * 24 * 60;
+
+const DURATION_MINUTES_ERROR =
+  `duration_minutes must be a positive number of minutes no greater than ${MAX_SILENCE_MINUTES}`;
+
+/**
+ * Field-scoped shape schemas for `handleAddSilence`'s request-body
+ * validators (Tier-B lane 2, tierb-contract-lane-spec-r15 §1.4). `instance`
+ * and `duration_minutes` are each their own schema, checked SEQUENTIALLY in
+ * the handler below with an early return per field, rather than one
+ * combined `z.object(...)`. That mirrors the original ladder's own
+ * short-circuit order exactly — `instance` is validated before
+ * `duration_minutes` ever runs, so a body invalid in both fields must
+ * report `'instance is required'`, never the duration message. A single
+ * combined schema's default cross-field issue collection does not
+ * guarantee that ordering (PILOT ADDENDUM point 1); two independently
+ * early-returning schemas make the precedence explicit and remove the
+ * ambiguity instead of relying on `issues[0]` across fields.
+ *
+ * `data['instance']` / `data['duration_minutes']` extraction happens
+ * exactly as it did before conversion (see `handleAddSilence` below) — a
+ * literal JSON `null` body still throws a TypeError on that property
+ * access (no `isRecord` guard exists here, unlike health.ts's endpoints),
+ * preserved on purpose (see tests/fleet/routes/silence-zod-equivalence.test.ts's
+ * null-body crash case). Because the schemas below only ever see the
+ * already-extracted field VALUE, not the raw `data` object, no
+ * `z.object`-level `invalid_type_error` override is needed here — there is
+ * no object-shape node in this conversion for a non-object root to hit.
+ *
+ * `reason` is deliberately NOT modeled — the original ladder never
+ * rejects on it (`typeof reason === 'string' ? reason : 'manual silence'`,
+ * a silent cast-through with no reject path), so giving it a schema would
+ * add a rejection mode the original never had (lane spec §3.5).
+ */
+const InstanceFieldSchema = z
+  .string({
+    required_error: 'instance is required',
+    invalid_type_error: 'instance is required',
+  })
+  .min(1, { message: 'instance is required' });
+
+/**
+ * `duration_minutes must be a positive number ... no greater than N` covers
+ * three original sub-conditions (wrong type, `<= 0`, `> MAX_SILENCE_MINUTES`)
+ * with ONE literal message. Unlike `/access`'s three sequential DISTINCT
+ * messages, this field has no message-ordering ambiguity to resolve: the
+ * three sub-conditions are mutually exclusive per value (a value cannot
+ * simultaneously fail the type check and a numeric range check), so
+ * whichever single zod check fires, the resulting message is identical.
+ * `.gt(0)` matches the original strict `<= 0` rejection; `.max()` is
+ * inclusive, matching the original `> MAX_SILENCE_MINUTES` rejection (a
+ * duration exactly at the cap is accepted).
+ */
+const DurationMinutesFieldSchema = z
+  .number({
+    required_error: DURATION_MINUTES_ERROR,
+    invalid_type_error: DURATION_MINUTES_ERROR,
+  })
+  .gt(0, { message: DURATION_MINUTES_ERROR })
+  .max(MAX_SILENCE_MINUTES, { message: DURATION_MINUTES_ERROR });
 
 function respondSilenceRegistryUnavailable(
   res: ServerResponse,
@@ -73,29 +133,25 @@ export async function handleAddSilence(req: IncomingMessage, res: ServerResponse
     return;
   }
 
-  const instance = data['instance'];
-  const duration_minutes = data['duration_minutes'];
-  const reason = data['reason'];
+  // Property access on `data` below is unguarded on purpose: no `isRecord`
+  // check exists before it, so a literal JSON `null` body still throws a
+  // TypeError here exactly as it did before this field-shape guard moved to
+  // zod (see the equivalence net's null-body crash case).
+  const instanceField = InstanceFieldSchema.safeParse(data['instance']);
+  if (!instanceField.success) {
+    jsonResponse(res, 400, { error: instanceField.error.issues[0]?.message ?? 'instance is required' });
+    return;
+  }
+  const instance = instanceField.data;
 
-  if (typeof instance !== 'string' || !instance) {
-    jsonResponse(res, 400, { error: 'instance is required' });
+  const durationField = DurationMinutesFieldSchema.safeParse(data['duration_minutes']);
+  if (!durationField.success) {
+    jsonResponse(res, 400, { error: durationField.error.issues[0]?.message ?? DURATION_MINUTES_ERROR });
     return;
   }
-  // The upper bound is what does the work: it rejects Infinity and the finite
-  // overflowing values alike. `Number.isFinite` is deliberately NOT used here —
-  // it would be unreachable. JSON cannot yield a numeric NaN (`{"d":NaN}` is a
-  // SyntaxError, and `{"d":"NaN"}` is a string caught by the typeof check), and
-  // ±Infinity is already excluded by the bound and the `<= 0` test.
-  if (
-    typeof duration_minutes !== 'number'
-    || duration_minutes <= 0
-    || duration_minutes > MAX_SILENCE_MINUTES
-  ) {
-    jsonResponse(res, 400, {
-      error: `duration_minutes must be a positive number of minutes no greater than ${MAX_SILENCE_MINUTES}`,
-    });
-    return;
-  }
+  const duration_minutes = durationField.data;
+
+  const reason = data['reason'];
 
   let rule;
   try {

@@ -322,6 +322,14 @@ def inline_log_tail_enabled() -> bool:
     return raw.strip().lower() in {"1", "true", "yes", "on"}
 
 
+def inline_log_tail_max_age_seconds() -> int:
+    raw = os.environ.get("BOT_ERRORS_INLINE_LOG_TAIL_MAX_AGE_SECONDS", "600")
+    try:
+        return max(0, int(raw))
+    except ValueError:
+        return 600
+
+
 def primary_local_log_candidates() -> list[Path]:
     """Source-specific local log paths for the inline tail.
 
@@ -346,6 +354,14 @@ def capture_log_tail(instance: str, max_chars: int = 1200, max_lines: int = 20) 
     characters, or None when no local log is available / readable. Fail-open:
     any error returns None rather than raising — a log tail is best-effort
     enrichment, never load-bearing for the alert itself.
+
+    A file whose mtime is older than ``inline_log_tail_max_age_seconds()`` is
+    treated as unavailable (same as a missing file): pino's append-only
+    pino-roll transport means the last-written line is by construction only
+    as old as the file's last write, so a stale mtime implies stale tail
+    content, not merely stale metadata. This is fail-closed for relevance —
+    distinct from the fail-open handling of an ``OSError`` from the stat
+    call itself, which falls through to the existing ``except OSError``.
     """
     if not inline_log_tail_enabled():
         return None
@@ -353,6 +369,9 @@ def capture_log_tail(instance: str, max_chars: int = 1200, max_lines: int = 20) 
         for path in primary_local_log_candidates():
             try:
                 if not path.is_file():
+                    continue
+                age_seconds = time.time() - path.stat().st_mtime
+                if age_seconds > inline_log_tail_max_age_seconds():
                     continue
                 # Read a bounded tail without slurping huge logs.
                 with open(path, "rb") as handle:
