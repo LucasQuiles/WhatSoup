@@ -377,7 +377,7 @@
     },
     {
       "path": "src/lib/bot-errors-outbox.ts",
-      "sha256": "b740146619f77606e4d1116399f6dfae3a948de32bf212de87cee494847653b5",
+      "sha256": "824597cd16ae41172d8dcc487c8071de3defe5bef085b761dc0ef996feaa72ad",
       "mustContain": [
         "AUTHORIZATION_BEARER",
         "WHATSAPP_SERVICE_UNIT",
