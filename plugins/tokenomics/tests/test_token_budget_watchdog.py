@@ -4,6 +4,7 @@ import json
 import os
 import pathlib
 import socket
+import sys
 import threading
 import urllib.request
 
@@ -144,7 +145,7 @@ def test_above_ceiling_alerts_and_updates_last_alert(tmp_path):
 
     assert result == 0
     assert len(alerts) == 1
-    assert alerts[0][0] == module.syslog.LOG_WARNING
+    assert alerts[0][0] == module.ALERT_SYSLOG_PRIORITY
     assert "target-bot" in alerts[0][1]
     assert history_lines(module, env)[0]["pct"] == 0.75
     assert last_alert(module, env) == {"ts": 2_000}
@@ -232,7 +233,8 @@ def test_watchdog_source_has_no_chat_network_or_config_mutation_imports():
     assert ".config/whatsoup" not in source
 
 
-def test_state_root_sanitizes_bot_path_segment(tmp_path):
+def test_state_root_sanitizes_bot_path_segment(tmp_path, monkeypatch):
+    monkeypatch.setattr(sys, "platform", "darwin")
     module = load_watchdog()
     env = make_env(tmp_path, state_override=False)
     env["TOKENOMICS_BOT"] = "../../evil bot"
@@ -240,6 +242,75 @@ def test_state_root_sanitizes_bot_path_segment(tmp_path):
     root = module.state_root(env)
 
     assert root == pathlib.Path(env["HOME"]) / "Library" / "Application Support" / "evil_bot-tokenomics"
+
+
+def test_state_root_uses_xdg_state_dir_on_linux(tmp_path, monkeypatch):
+    monkeypatch.setattr(sys, "platform", "linux")
+    module = load_watchdog()
+    env = make_env(tmp_path, state_override=False)
+    env["TOKENOMICS_BOT"] = "../../evil bot"
+
+    root = module.state_root(env)
+
+    assert root == pathlib.Path(env["HOME"]) / ".local" / "state" / "evil_bot-tokenomics"
+    assert "Library" not in str(root)
+    assert "Application Support" not in str(root)
+
+
+def test_state_root_honors_xdg_state_home_override_on_linux(tmp_path, monkeypatch):
+    monkeypatch.setattr(sys, "platform", "linux")
+    module = load_watchdog()
+    env = make_env(tmp_path, state_override=False)
+    env["XDG_STATE_HOME"] = str(tmp_path / "custom-xdg")
+
+    root = module.state_root(env)
+
+    assert root == tmp_path / "custom-xdg" / "target-bot-tokenomics"
+
+
+def test_syslog_address_is_local_path_on_darwin(monkeypatch):
+    monkeypatch.setattr(sys, "platform", "darwin")
+    module = load_watchdog()
+
+    assert module.syslog_address() == "/var/run/syslog"
+
+
+def test_syslog_address_is_local_path_on_linux(monkeypatch):
+    monkeypatch.setattr(sys, "platform", "linux")
+    module = load_watchdog()
+
+    assert module.syslog_address() == "/dev/log"
+
+
+def test_syslog_address_never_returns_the_handler_udp_default(monkeypatch):
+    for platform_name in ("darwin", "linux"):
+        monkeypatch.setattr(sys, "platform", platform_name)
+        module = load_watchdog()
+
+        address = module.syslog_address()
+
+        assert isinstance(address, str)
+        assert address != ("localhost", 514)
+
+
+def test_default_syslog_fn_fails_open_when_local_endpoint_unavailable(tmp_path, monkeypatch):
+    module = load_watchdog()
+
+    def _raise_no_endpoint(*args, **kwargs):
+        raise OSError("no local syslog endpoint")
+
+    monkeypatch.setattr(module, "SysLogHandler", _raise_no_endpoint)
+
+    env = make_env(tmp_path, ceiling="1000")
+    helper = helper_output(module, 750)
+
+    result = module.run_cycle(
+        env=env,
+        now_fn=lambda: 2_000,
+        helper_fn=lambda config: helper,
+    )
+
+    assert result == 0
 
 
 def test_node_resolver_skips_incompatible_path_node_for_repo_pin(tmp_path, monkeypatch):
