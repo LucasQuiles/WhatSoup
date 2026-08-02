@@ -1,5 +1,16 @@
 // src/lib/incident-breaker.ts
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import {
+  closeSync,
+  existsSync,
+  fsyncSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  renameSync,
+  unlinkSync,
+  writeFileSync,
+} from 'node:fs';
+import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 import type { FaultClass } from './fault-classifier.ts';
 
@@ -53,9 +64,40 @@ export function loadBreakerState(dir: string, host: string, faultClass: FaultCla
 export function saveBreakerState(dir: string, state: IncidentBreakerState): void {
   mkdirSync(dir, { recursive: true });
   const file = stateFile(dir, state.host, state.faultClass);
-  const tmp = `${file}.tmp`;
-  writeFileSync(tmp, JSON.stringify(state), 'utf8');
-  renameSync(tmp, file); // atomic replace
+  // Pid/token-suffixed tmp name, mirroring process-lock.ts's acquireProcessLock
+  // (src/lib/process-lock.ts:193): a fixed `${file}.tmp` name lets two
+  // concurrent saves for the same (host, faultClass) collide on the same tmp
+  // path and clobber each other before either rename lands.
+  const tmp = `${file}.${process.pid}.${randomUUID()}.tmp`;
+  try {
+    // openSync + writeFileSync(fd, ...) rather than writeFileSync(path, ...):
+    // fsyncSync needs the open descriptor, and process-lock.ts's own
+    // writeFileSync(tempPath, ..., { mode: 0o600, flag: 'wx' }) call has no
+    // fd to fsync — this repo's fixed tmp-per-lock-attempt flow relies on
+    // linkSync's atomicity instead, which isn't available for a plain
+    // overwrite-in-place save.
+    const fd = openSync(tmp, 'w', 0o600);
+    try {
+      writeFileSync(fd, JSON.stringify(state), 'utf8');
+      fsyncSync(fd); // durability: survive a crash between write and rename
+    } finally {
+      closeSync(fd);
+    }
+    renameSync(tmp, file); // atomic replace
+  } finally {
+    // Best-effort cleanup, mirroring process-lock.ts's finally block
+    // (src/lib/process-lock.ts:263-268): after a successful renameSync the
+    // tmp path no longer exists (rename moves it), so unlinkSync here throws
+    // ENOENT on the success path — expected, not a failure. On a thrown
+    // write/fsync error the tmp file is orphaned without this, per M1.
+    try {
+      unlinkSync(tmp);
+    } catch {
+      // Intentional: on the success path renameSync already moved the tmp
+      // path away, so the ENOENT this throws here is expected, not a
+      // failure worth surfacing.
+    }
+  }
 }
 
 export function registerOnset(state: IncidentBreakerState, nowIso: string): void {
