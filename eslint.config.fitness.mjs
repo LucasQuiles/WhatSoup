@@ -120,6 +120,24 @@ const config = [
     },
   },
   {
+    // console/src: ring-boundaries apply to the peer package too (#2210) —
+    // boundaries are a global invariant, not a src/-only one. Fail-closed
+    // enforcement lives in the standalone boundary guard (console layer in the
+    // import-boundary matrix) and the console ratchet test; this block is the
+    // advisory fitness-ring mirror. Only ring-boundaries is meaningful here:
+    // import-boundaries has no ESLint rule form (standalone guard only).
+    files: ['console/src/**/*.{ts,tsx}'],
+    linterOptions,
+    languageOptions: {
+      parser: tseslint.parser,
+      parserOptions: { ecmaVersion: 2024, sourceType: 'module' },
+    },
+    plugins,
+    rules: {
+      ...ruleEntriesFor('arch.ring-boundaries'),
+    },
+  },
+  {
     // The catch ratchet's semantic baseline and generator both scan src/.
     // Keep the configured rule on that exact scope so scripts/ cannot produce
     // untracked warnings outside the shrink-only multiset.
