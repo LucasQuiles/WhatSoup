@@ -408,6 +408,19 @@ describe('GroupDetailModal info actions', () => {
     expect(toast.success).toHaveBeenCalledWith('Invite link revoked')
   })
 
+  it('guards the copy button against an insecure context (no clipboard API)', async () => {
+    const { toast } = renderModal()
+    await waitForDetail()
+
+    const writeText = navigator.clipboard.writeText as Mock
+    Object.defineProperty(navigator, 'clipboard', { configurable: true, value: undefined })
+
+    fireEvent.click(screen.getByRole('button', { name: /Copy/ }))
+
+    expect(toast.error).toHaveBeenCalledWith('Clipboard unavailable (insecure context)')
+    expect(writeText).not.toHaveBeenCalled()
+  })
+
   it('reports invite revocation failures', async () => {
     const { toast } = renderModal()
     await waitForDetail()

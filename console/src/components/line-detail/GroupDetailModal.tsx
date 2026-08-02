@@ -134,7 +134,13 @@ function InfoTab({
 
   const handleCopyLink = () => {
     if (!inviteLink) return
-    navigator.clipboard.writeText(inviteLink).then(() => toast.success('Invite link copied'))
+    if (!navigator.clipboard) {
+      toast.error('Clipboard unavailable (insecure context)')
+      return
+    }
+    navigator.clipboard.writeText(inviteLink)
+      .then(() => toast.success('Invite link copied'))
+      .catch(() => toast.error('Failed to copy invite link'))
   }
 
   const handleRevoke = async () => {
