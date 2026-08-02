@@ -7,7 +7,7 @@ import * as path from 'node:path';
 import * as os from 'node:os';
 import { PassThrough } from 'node:stream';
 import { EventEmitter } from 'node:events';
-import type { IncomingMessage, ServerResponse } from 'node:http';
+import type { ServerResponse } from 'node:http';
 import {
   handleSend,
   handleAccessUpdate,
@@ -60,44 +60,34 @@ import { mcpCall } from '../../../src/fleet/mcp-client.ts';
 import { proxyToInstance } from '../../../src/fleet/http-proxy.ts';
 import { execFile, spawn } from 'node:child_process';
 import { lookupCredential } from '../../../src/lib/keyring.ts';
+import { mockReq, mockRes } from '../../helpers/http-mocks.ts';
 
 // ---------------------------------------------------------------------------
 // Mock helpers
 // ---------------------------------------------------------------------------
-
-function mockReq(body = '', url = '/'): IncomingMessage {
-  const stream = new PassThrough() as unknown as IncomingMessage;
-  (stream as any).headers = {};
-  (stream as any).url = url;
-  (stream as any).method = 'POST';
-  // Write body async so readBody can consume it
-  process.nextTick(() => {
-    (stream as unknown as PassThrough).write(body);
-    (stream as unknown as PassThrough).end();
-  });
-  return stream;
-}
-
-function mockRes(): ServerResponse & { _status: number; _headers: Record<string, string>; _body: string } {
-  const res = {
-    _status: 0,
-    _headers: {} as Record<string, string>,
-    _body: '',
-    writeHead(status: number, headers?: Record<string, string>) {
-      res._status = status;
-      if (headers) Object.assign(res._headers, headers);
-    },
-    end(data?: string) {
-      if (data) res._body = data;
-    },
-    // ServerResponse is an EventEmitter; createSSEWriter attaches an 'error'
-    // listener (#2292 L7), so a fake without `on` is an incomplete fake.
-    on() {
-      return res;
-    },
-  };
-  return res as any;
-}
+//
+// mockReq/mockRes migrated onto the shared helper (#2240 umbrella). mockSseRes,
+// fakeInstance, fakeChildProcess, mockServiceManager, and makeDeps below stay
+// local — mockSseRes because tests/helpers/http-mocks.ts does not export an
+// SSE response fake (same choice ops-gaps.test.ts made); the rest because of
+// two behavioral divergences from the shared makeDeps/mockServiceManager that
+// this file's handleAuth coverage genuinely depends on:
+//   1. The shared mockServiceManager's `startFire` is a bare `vi.fn()`.
+//      handleAuth (src/fleet/routes/ops.ts:1415, :1331) calls
+//      `startFire(name, onComplete)` and only calls `endOnce()` /
+//      `writeSSE('connected', ...)` from inside that callback — a bare stub
+//      never invokes it, so any test that doesn't explicitly override
+//      startFire would hang to the suite timeout instead of resolving. This
+//      file's local mockServiceManager auto-invokes the callback with `null`
+//      (success) by default, which dozens of handleAuth-flow tests below rely
+//      on implicitly.
+//   2. The shared makeDeps merges override sub-objects onto its base
+//      (`discovery: { ...base.discovery, ...override.discovery }`), which
+//      would inject a default `getInstances` into every override that only
+//      specified `getInstance`. This file's local makeDeps does a flat
+//      spread instead, so `makeDeps({ discovery: { getInstance, scan } })`
+//      produces a discovery with exactly those two keys — several tests here
+//      assert against a discovery mock with a deliberately narrow surface.
 
 function mockSseRes(): ServerResponse & {
   _status: number;
@@ -215,7 +205,7 @@ describe('handleAuth', () => {
     const deps = makeDeps({
       discovery: { getInstance: vi.fn(() => inst), scan: vi.fn() } as any,
     });
-    const req = mockReq('', '/api/lines/test-line/auth');
+    const req = mockReq({ method: 'POST', body: '', url: '/api/lines/test-line/auth' });
     const res = mockSseRes();
 
     await handleAuth(req, res, deps, { name: 'test-line' });
@@ -250,7 +240,7 @@ describe('handleAuth', () => {
       discovery: { getInstance: vi.fn(() => inst), scan: vi.fn() } as any,
       serviceManager: svc,
     });
-    const req = mockReq('', '/api/lines/test-line/auth');
+    const req = mockReq({ method: 'POST', body: '', url: '/api/lines/test-line/auth' });
     const res = mockSseRes();
 
     await handleAuth(req, res, deps, { name: 'test-line' });
@@ -274,7 +264,7 @@ describe('handleAuth', () => {
       discovery: { getInstance: vi.fn(() => inst), scan: vi.fn() } as any,
       serviceManager: svc,
     });
-    const req = mockReq('', '/api/lines/test-line/auth');
+    const req = mockReq({ method: 'POST', body: '', url: '/api/lines/test-line/auth' });
     const res = mockSseRes();
 
     await handleAuth(req, res, deps, { name: 'test-line' });
@@ -301,7 +291,7 @@ describe('handleAuth', () => {
         discovery: { getInstance: vi.fn(() => inst), scan: vi.fn() } as any,
         serviceManager: svc,
       });
-      const req = mockReq('', '/api/lines/test-line/auth');
+      const req = mockReq({ method: 'POST', body: '', url: '/api/lines/test-line/auth' });
       const res = mockSseRes();
 
       await handleAuth(req, res, deps, { name: 'test-line' });
@@ -335,7 +325,7 @@ describe('handleSend', () => {
   it('returns 404 for unknown instance', async () => {
     const deps = makeDeps();
     const res = mockRes();
-    await handleSend(mockReq('{}'), res, deps, { name: 'nope' });
+    await handleSend(mockReq({ method: 'POST', body: '{}' }), res, deps, { name: 'nope' });
     expect(res._status).toBe(404);
   });
 
@@ -347,7 +337,7 @@ describe('handleSend', () => {
     vi.mocked(mcpCall).mockResolvedValue({ success: true, result: { sent: true } });
 
     const res = mockRes();
-    await handleSend(mockReq(JSON.stringify({ chatJid: '123', text: 'hi' })), res, deps, { name: 'test-line' });
+    await handleSend(mockReq({ method: 'POST', body: JSON.stringify({ chatJid: '123', text: 'hi' }) }), res, deps, { name: 'test-line' });
 
     expect(mcpCall).toHaveBeenCalledWith('/state/test-line/whatsoup.sock', 'send_message', { chatJid: '123@s.whatsapp.net', text: 'hi' });
     expect(res._status).toBe(200);
@@ -366,7 +356,7 @@ describe('handleSend', () => {
     const res = mockRes();
     // Body must include chatJid or to (post-P1-D xor validation).
     const body = JSON.stringify({ chatJid: 'x@s.whatsapp.net', text: 'hello' });
-    await handleSend(mockReq(body), res, deps, { name: 'test-line' });
+    await handleSend(mockReq({ method: 'POST', body: body }), res, deps, { name: 'test-line' });
     expect(mcpCall).not.toHaveBeenCalled();
     expect(proxyToInstance).toHaveBeenCalledWith(3010, '/send', 'POST', body, 'tok123');
     expect(res._status).toBe(200);
@@ -381,7 +371,7 @@ describe('handleSend', () => {
 
     const res = mockRes();
     await handleSend(
-      mockReq(JSON.stringify({ chatJid: 'x@s.whatsapp.net', text: 'hi' })),
+      mockReq({ method: 'POST', body: JSON.stringify({ chatJid: 'x@s.whatsapp.net', text: 'hi' }) }),
       res, deps, { name: 'test-line' });
     expect(res._status).toBe(502);
   });
@@ -392,7 +382,7 @@ describe('handleSend', () => {
 
     vi.mocked(fs.existsSync).mockReturnValue(true);
     const res = mockRes();
-    await handleSend(mockReq('not json'), res, deps, { name: 'test-line' });
+    await handleSend(mockReq({ method: 'POST', body: 'not json' }), res, deps, { name: 'test-line' });
     expect(res._status).toBe(400);
     expect(JSON.parse(res._body).error).toMatch(/invalid JSON/);
     // The fleet must surface the parse failure itself rather than silently
@@ -411,7 +401,7 @@ describe('handleSend', () => {
     const res = mockRes();
     // Body must include chatJid or to (post-P1-D xor validation).
     const body = JSON.stringify({ chatJid: 'x@s.whatsapp.net', text: 'hi' });
-    await handleSend(mockReq(body), res, deps, { name: 'test-line' });
+    await handleSend(mockReq({ method: 'POST', body: body }), res, deps, { name: 'test-line' });
     expect(proxyToInstance).toHaveBeenCalledWith(3010, '/send', 'POST', body, 'tok123');
     expect(res._status).toBe(200);
   });
@@ -424,7 +414,7 @@ describe('handleSend', () => {
     const res = mockRes();
     // Body must include chatJid (post-P1-D xor validation) so we reach the
     // route-availability check rather than failing at body validation.
-    await handleSend(mockReq(JSON.stringify({ chatJid: 'x@s.whatsapp.net' })), res, deps, { name: 'test-line' });
+    await handleSend(mockReq({ method: 'POST', body: JSON.stringify({ chatJid: 'x@s.whatsapp.net' }) }), res, deps, { name: 'test-line' });
     expect(res._status).toBe(422);
     expect(JSON.parse(res._body).error).toMatch(/no send route/);
   });
@@ -440,7 +430,7 @@ describe('handleSend', () => {
 
     const res = mockRes();
     await handleSend(
-      mockReq(JSON.stringify({ to: 'kio', text: 'hi' })),
+      mockReq({ method: 'POST', body: JSON.stringify({ to: 'kio', text: 'hi' }) }),
       res, deps, { name: 'test-line' });
 
     // Fleet forwards `to` verbatim; the per-instance MCP layer (P1-E) does the
@@ -457,7 +447,7 @@ describe('handleSend', () => {
 
     const res = mockRes();
     await handleSend(
-      mockReq(JSON.stringify({ to: 'kio', text: 'hi', profile: 123 })),
+      mockReq({ method: 'POST', body: JSON.stringify({ to: 'kio', text: 'hi', profile: 123 }) }),
       res,
       deps,
       { name: 'test-line' },
@@ -478,7 +468,7 @@ describe('handleSend', () => {
 
     const res = mockRes();
     await handleSend(
-      mockReq(JSON.stringify({ to: 'kio', text: 'hi', profile: 'satellite' })),
+      mockReq({ method: 'POST', body: JSON.stringify({ to: 'kio', text: 'hi', profile: 'satellite' }) }),
       res,
       deps,
       { name: 'test-line' },
@@ -498,7 +488,7 @@ describe('handleSend', () => {
 
     const res = mockRes();
     await handleSend(
-      mockReq(JSON.stringify({ chatJid: 'x@s.whatsapp.net', to: 'kio', text: 'hi' })),
+      mockReq({ method: 'POST', body: JSON.stringify({ chatJid: 'x@s.whatsapp.net', to: 'kio', text: 'hi' }) }),
       res, deps, { name: 'test-line' });
 
     expect(res._status).toBe(400);
@@ -513,7 +503,7 @@ describe('handleSend', () => {
 
     const res = mockRes();
     await handleSend(
-      mockReq(JSON.stringify({ text: 'hi' })),
+      mockReq({ method: 'POST', body: JSON.stringify({ text: 'hi' }) }),
       res, deps, { name: 'test-line' });
 
     expect(res._status).toBe(400);
@@ -534,7 +524,7 @@ describe('handleSend', () => {
 
     const res = mockRes();
     await handleSend(
-      mockReq(JSON.stringify({ to: 'unknown', text: 'hi' })),
+      mockReq({ method: 'POST', body: JSON.stringify({ to: 'unknown', text: 'hi' }) }),
       res, deps, { name: 'test-line' });
 
     expect(res._status).toBe(502);
@@ -552,7 +542,7 @@ describe('handleSend', () => {
     // throws TypeError, and the catch below reports it as "invalid JSON body" —
     // the wrong error for valid JSON that parses to `null` — instead of the
     // "must be a JSON object" message this test pins.
-    await handleSend(mockReq('null'), res, deps, { name: 'test-line' });
+    await handleSend(mockReq({ method: 'POST', body: 'null' }), res, deps, { name: 'test-line' });
 
     expect(res._status).toBe(400);
     expect(mcpCall).not.toHaveBeenCalled();
@@ -565,7 +555,7 @@ describe('handleSend', () => {
     const deps = makeDeps({ discovery: { getInstance: vi.fn(() => inst) } as any });
 
     const res = mockRes();
-    await handleSend(mockReq('[]'), res, deps, { name: 'test-line' });
+    await handleSend(mockReq({ method: 'POST', body: '[]' }), res, deps, { name: 'test-line' });
 
     expect(res._status).toBe(400);
     expect(mcpCall).not.toHaveBeenCalled();
@@ -579,7 +569,7 @@ describe('handleSend', () => {
 
     const res = mockRes();
     await handleSend(
-      mockReq(JSON.stringify({ chatJid: '   ', text: 'hi' })),
+      mockReq({ method: 'POST', body: JSON.stringify({ chatJid: '   ', text: 'hi' }) }),
       res, deps, { name: 'test-line' });
 
     // Whitespace-only count as not-provided after trim; with no `to` present,
@@ -596,7 +586,7 @@ describe('handleSend', () => {
 
     const res = mockRes();
     await handleSend(
-      mockReq(JSON.stringify({ to: '   ', text: 'hi' })),
+      mockReq({ method: 'POST', body: JSON.stringify({ to: '   ', text: 'hi' }) }),
       res, deps, { name: 'test-line' });
 
     expect(res._status).toBe(400);
@@ -613,7 +603,7 @@ describe('handleAccessUpdate', () => {
   it('returns 404 for unknown instance', async () => {
     const deps = makeDeps();
     const res = mockRes();
-    await handleAccessUpdate(mockReq('{}'), res, deps, { name: 'nope' });
+    await handleAccessUpdate(mockReq({ method: 'POST', body: '{}' }), res, deps, { name: 'nope' });
     expect(res._status).toBe(404);
   });
 
@@ -625,7 +615,7 @@ describe('handleAccessUpdate', () => {
 
     const res = mockRes();
     const body = '{"subjectType":"phone","subjectId":"15551234567","action":"allow"}';
-    await handleAccessUpdate(mockReq(body), res, deps, { name: 'test-line' });
+    await handleAccessUpdate(mockReq({ method: 'POST', body: body }), res, deps, { name: 'test-line' });
     expect(proxyToInstance).toHaveBeenCalledWith(3010, '/access', 'POST', body, 'tok123');
     expect(res._status).toBe(200);
   });
@@ -639,7 +629,7 @@ describe('handleRestart', () => {
   it('returns 404 for unknown instance', async () => {
     const deps = makeDeps();
     const res = mockRes();
-    await handleRestart(mockReq(), res, deps, { name: 'nope' });
+    await handleRestart(mockReq({ method: 'POST' }), res, deps, { name: 'nope' });
     expect(res._status).toBe(404);
   });
 
@@ -649,7 +639,7 @@ describe('handleRestart', () => {
     const deps = makeDeps({ discovery: { getInstance: vi.fn(() => inst) } as any, serviceManager: svc });
 
     const res = mockRes();
-    await handleRestart(mockReq(), res, deps, { name: 'test-line' });
+    await handleRestart(mockReq({ method: 'POST' }), res, deps, { name: 'test-line' });
     expect(svc.restart).toHaveBeenCalledWith('test-line');
     expect(res._status).toBe(202);
     expect(JSON.parse(res._body).status).toBe('restart_requested');
@@ -662,7 +652,7 @@ describe('handleRestart', () => {
     const deps = makeDeps({ discovery: { getInstance: vi.fn(() => inst) } as any, serviceManager: svc });
 
     const res = mockRes();
-    await handleRestart(mockReq(), res, deps, { name: 'test-line' });
+    await handleRestart(mockReq({ method: 'POST' }), res, deps, { name: 'test-line' });
     expect(res._status).toBe(500);
     const restartBody = JSON.parse(res._body);
     expect(restartBody.schema).toBe('fleet-error-v1');
@@ -681,7 +671,7 @@ describe('handleRestart', () => {
     vi.spyOn(deps.discovery, 'getInstance').mockReturnValue(inst);
 
     const res = mockRes();
-    await handleRestart(mockReq(), res, deps, { name: 'test-line' });
+    await handleRestart(mockReq({ method: 'POST' }), res, deps, { name: 'test-line' });
     expect(res._status).toBe(500);
     const nonErrBody = JSON.parse(res._body);
     expect(nonErrBody.schema).toBe('fleet-error-v1');
@@ -744,7 +734,7 @@ describe('handleDeleteLine', () => {
     });
 
     const res = mockRes();
-    await handleDeleteLine(mockReq('', `/api/lines/${name}`), res, deps, { name });
+    await handleDeleteLine(mockReq({ method: 'POST', body: '', url: `/api/lines/${name}` }), res, deps, { name });
 
     expect(res._status).toBe(500);
     expect(JSON.parse(res._body).error).toMatch(/stop failed/);
@@ -767,7 +757,7 @@ describe('handleDeleteLine', () => {
     });
 
     const res = mockRes();
-    await handleDeleteLine(mockReq('', `/api/lines/${name}`), res, deps, { name });
+    await handleDeleteLine(mockReq({ method: 'POST', body: '', url: `/api/lines/${name}` }), res, deps, { name });
 
     expect(res._status).toBe(500);
     expect(JSON.parse(res._body).error).toMatch(/disable failed/);
@@ -791,7 +781,7 @@ describe('handleDeleteLine', () => {
     });
 
     const res = mockRes();
-    await handleDeleteLine(mockReq('', `/api/lines/${name}`), res, deps, { name });
+    await handleDeleteLine(mockReq({ method: 'POST', body: '', url: `/api/lines/${name}` }), res, deps, { name });
 
     expect(res._status).toBe(200);
     expect(JSON.parse(res._body)).toEqual({ deleted: name });
@@ -816,7 +806,7 @@ describe('handleDeleteLine', () => {
     });
 
     const res = mockRes();
-    await handleDeleteLine(mockReq('', `/api/lines/${name}`), res, deps, { name });
+    await handleDeleteLine(mockReq({ method: 'POST', body: '', url: `/api/lines/${name}` }), res, deps, { name });
 
     expect(res._status).toBe(200);
     expect(JSON.parse(res._body)).toEqual({ deleted: name });
@@ -839,7 +829,7 @@ describe('handleDeleteLine', () => {
     });
 
     const res = mockRes();
-    await handleDeleteLine(mockReq('', `/api/lines/${name}`), res, deps, { name });
+    await handleDeleteLine(mockReq({ method: 'POST', body: '', url: `/api/lines/${name}` }), res, deps, { name });
 
     expect(res._status).toBe(500);
     expect(JSON.parse(res._body).error).toMatch(/stop failed/);
@@ -912,13 +902,13 @@ describe('handleCreateLine', () => {
 
     const res = mockRes();
     await handleCreateLine(
-      mockReq(JSON.stringify({
+      mockReq({ method: 'POST', body: JSON.stringify({
         name: 'mode-agent',
         type: 'agent',
         adminPhones: ['15551234567'],
         agentOptions: { cwd: agentCwd, sessionScope: 'per_chat' },
         claudeMd: 'Local operating instructions for this instance.\n',
-      })),
+      }) }),
       res,
       deps,
     );
@@ -948,13 +938,13 @@ describe('handleCreateLine', () => {
 
     const res = mockRes();
     await handleCreateLine(
-      mockReq(JSON.stringify({
+      mockReq({ method: 'POST', body: JSON.stringify({
         name: 'default-agent',
         type: 'agent',
         adminPhones: ['15551234567'],
         agentOptions: { cwd: '', sessionScope: 'per_chat' },
         claudeMd: 'Local operating instructions for this instance.\n',
-      })),
+      }) }),
       res,
       deps,
     );
@@ -983,12 +973,12 @@ describe('handleCreateLine', () => {
 
     const res = mockRes();
     await handleCreateLine(
-      mockReq(JSON.stringify({
+      mockReq({ method: 'POST', body: JSON.stringify({
         name: 'home-alias-agent',
         type: 'agent',
         adminPhones: ['15551234567'],
         agentOptions: { cwd: homeAlias, sessionScope: 'per_chat' },
-      })),
+      }) }),
       res,
       deps,
     );
@@ -1014,12 +1004,12 @@ describe('handleCreateLine', () => {
 
     const res = mockRes();
     await handleCreateLine(
-      mockReq(JSON.stringify({
+      mockReq({ method: 'POST', body: JSON.stringify({
         name: 'file-cwd-agent',
         type: 'agent',
         adminPhones: ['15551234567'],
         agentOptions: { cwd: fileCwd, sessionScope: 'per_chat' },
-      })),
+      }) }),
       res,
       deps,
     );
@@ -1047,13 +1037,13 @@ describe('handleCreateLine', () => {
 
     const res = mockRes();
     await handleCreateLine(
-      mockReq(JSON.stringify({
+      mockReq({ method: 'POST', body: JSON.stringify({
         name: 'tilde-agent',
         type: 'agent',
         adminPhones: ['15551234567'],
         agentOptions: { cwd: '~/.local/share/whatsoup/instances/tilde-agent/workspace', sessionScope: 'per_chat' },
         claudeMd: 'Local operating instructions for this instance.\n',
-      })),
+      }) }),
       res,
       deps,
     );
@@ -1082,13 +1072,13 @@ describe('handleCreateLine', () => {
 
     const res = mockRes();
     await handleCreateLine(
-      mockReq(JSON.stringify({
+      mockReq({ method: 'POST', body: JSON.stringify({
         name: 'no-cwd-agent',
         type: 'agent',
         adminPhones: ['15551234567'],
         agentOptions: { sessionScope: 'per_chat' },
         claudeMd: 'instructions\n',
-      })),
+      }) }),
       res,
       deps,
     );
@@ -1114,12 +1104,12 @@ describe('handleCreateLine', () => {
 
     const res = mockRes();
     await handleCreateLine(
-      mockReq(JSON.stringify({
+      mockReq({ method: 'POST', body: JSON.stringify({
         name: 'omitted-agent-options',
         type: 'agent',
         adminPhones: ['15551234567'],
         claudeMd: 'instructions\n',
-      })),
+      }) }),
       res,
       deps,
     );
@@ -1146,13 +1136,13 @@ describe('handleCreateLine', () => {
 
     const res = mockRes();
     await handleCreateLine(
-      mockReq(JSON.stringify({
+      mockReq({ method: 'POST', body: JSON.stringify({
         name: 'ws-cwd-agent',
         type: 'agent',
         adminPhones: ['15551234567'],
         agentOptions: { cwd: '   ', sessionScope: 'per_chat' },
         claudeMd: 'instructions\n',
-      })),
+      }) }),
       res,
       deps,
     );
@@ -1174,13 +1164,13 @@ describe('handleCreateLine', () => {
 
     const res = mockRes();
     await handleCreateLine(
-      mockReq(JSON.stringify({
+      mockReq({ method: 'POST', body: JSON.stringify({
         name: 'bad-cwd-agent',
         type: 'agent',
         adminPhones: ['15551234567'],
         agentOptions: { cwd: 123, sessionScope: 'per_chat' },
         claudeMd: 'instructions\n',
-      })),
+      }) }),
       res,
       deps,
     );
@@ -1200,13 +1190,13 @@ describe('handleCreateLine', () => {
 
     const res = mockRes();
     await handleCreateLine(
-      mockReq(JSON.stringify({
+      mockReq({ method: 'POST', body: JSON.stringify({
         name: 'array-opts-agent',
         type: 'agent',
         adminPhones: ['15551234567'],
         agentOptions: ['unexpected'],
         claudeMd: 'instructions\n',
-      })),
+      }) }),
       res,
       deps,
     );
@@ -1233,13 +1223,13 @@ describe('handleCreateLine', () => {
 
     const res = mockRes();
     await handleCreateLine(
-      mockReq(JSON.stringify({
+      mockReq({ method: 'POST', body: JSON.stringify({
         name: 'mode-agent-existing',
         type: 'agent',
         adminPhones: ['15551234567'],
         agentOptions: { cwd: agentCwd, sessionScope: 'per_chat' },
         claudeMd: 'Updated local operating instructions.\n',
-      })),
+      }) }),
       res,
       deps,
     );
@@ -1272,14 +1262,14 @@ describe('handleCreateLine', () => {
 
     const res = mockRes();
     await handleCreateLine(
-      mockReq(JSON.stringify({
+      mockReq({ method: 'POST', body: JSON.stringify({
         name,
         type: 'chat',
         // Real-shaped phone — the shared validator (added for #244/#249)
         // now rejects unparseable strings that normalize to empty.
         adminPhones: ['15551230006'],
         healthPort: 3201,
-      })),
+      }) }),
       res,
       deps,
     );
@@ -1305,12 +1295,12 @@ describe('handleCreateLine', () => {
 
     const res = mockRes();
     await handleCreateLine(
-      mockReq(JSON.stringify({
+      mockReq({ method: 'POST', body: JSON.stringify({
         name,
         type: 'chat',
         adminPhones: ['15551230006'],
         healthPort: 3202,
-      })),
+      }) }),
       res,
       deps,
     );
@@ -1345,12 +1335,12 @@ describe('handleCreateLine', () => {
 
     const res = mockRes();
     await handleCreateLine(
-      mockReq(JSON.stringify({
+      mockReq({ method: 'POST', body: JSON.stringify({
         name,
         type: 'chat',
         adminPhones: ['15551230006'],
         healthPort: 3203,
-      })),
+      }) }),
       res,
       deps,
     );
@@ -1390,12 +1380,12 @@ describe('handleCreateLine', () => {
 
     const res = mockRes();
     await handleCreateLine(
-      mockReq(JSON.stringify({
+      mockReq({ method: 'POST', body: JSON.stringify({
         name: 'new-line',
         type: 'chat',
         adminPhones: ['15551230006'],
         healthPort: 9090,
-      })),
+      }) }),
       res,
       deps,
     );
@@ -1420,12 +1410,12 @@ describe('handleCreateLine', () => {
 
     const res = mockRes();
     await handleCreateLine(
-      mockReq(JSON.stringify({
+      mockReq({ method: 'POST', body: JSON.stringify({
         name: 'new-line',
         type: 'chat',
         adminPhones: ['15551230006'],
         healthPort: 9200,
-      })),
+      }) }),
       res,
       deps,
     );
@@ -1470,7 +1460,7 @@ describe('handleConfigUpdate', () => {
   it('returns 404 for unknown instance', async () => {
     const deps = makeDeps();
     const res = mockRes();
-    await handleConfigUpdate(mockReq('{}'), res, deps, { name: 'nope' });
+    await handleConfigUpdate(mockReq({ method: 'POST', body: '{}' }), res, deps, { name: 'nope' });
     expect(res._status).toBe(404);
   });
 
@@ -1481,7 +1471,7 @@ describe('handleConfigUpdate', () => {
     const deps = makeDeps({ discovery: { getInstance: vi.fn(() => inst) } as any });
 
     const res = mockRes();
-    await handleConfigUpdate(mockReq('not json'), res, deps, { name: 'test-line' });
+    await handleConfigUpdate(mockReq({ method: 'POST', body: 'not json' }), res, deps, { name: 'test-line' });
     expect(res._status).toBe(400);
     const invalidJsonBody = JSON.parse(res._body);
     expect(invalidJsonBody.schema).toBe('fleet-error-v1');
@@ -1496,7 +1486,7 @@ describe('handleConfigUpdate', () => {
     const deps = makeDeps({ discovery: { getInstance: vi.fn(() => inst) } as any });
 
     const res = mockRes();
-    await handleConfigUpdate(mockReq('[1,2,3]'), res, deps, { name: 'test-line' });
+    await handleConfigUpdate(mockReq({ method: 'POST', body: '[1,2,3]' }), res, deps, { name: 'test-line' });
     expect(res._status).toBe(400);
     const arrayBody = JSON.parse(res._body);
     expect(arrayBody.schema).toBe('fleet-error-v1');
@@ -1512,7 +1502,7 @@ describe('handleConfigUpdate', () => {
 
     const res = mockRes();
     await handleConfigUpdate(
-      mockReq(JSON.stringify({ accessMode: 'allowlist' })),
+      mockReq({ method: 'POST', body: JSON.stringify({ accessMode: 'allowlist' }) }),
       res, deps, { name: 'test-line' },
     );
 
@@ -1534,7 +1524,7 @@ describe('handleConfigUpdate', () => {
 
     const res = mockRes();
     await handleConfigUpdate(
-      mockReq(JSON.stringify({ accessMode: 'allowlist', newField: true })),
+      mockReq({ method: 'POST', body: JSON.stringify({ accessMode: 'allowlist', newField: true }) }),
       res, deps, { name: 'test-line' },
     );
 
@@ -1565,7 +1555,7 @@ describe('handleConfigUpdate', () => {
 
     const res = mockRes();
     await handleConfigUpdate(
-      mockReq(JSON.stringify({ accessMode: 'allowlist' })),
+      mockReq({ method: 'POST', body: JSON.stringify({ accessMode: 'allowlist' }) }),
       res, deps, { name: 'test-line' },
     );
 
@@ -1595,7 +1585,7 @@ describe('handleConfigUpdate', () => {
 
     const res = mockRes();
     await handleConfigUpdate(
-      mockReq(JSON.stringify({
+      mockReq({ method: 'POST', body: JSON.stringify({
         claudeMd: 'Updated local operating instructions.\n',
         settingsJson: {
           permissions: {
@@ -1604,7 +1594,7 @@ describe('handleConfigUpdate', () => {
             defaultMode: 'bypassPermissions',
           },
         },
-      })),
+      }) }),
       res,
       deps,
       { name: 'test-line' },
@@ -1631,7 +1621,7 @@ describe('handleConfigUpdate', () => {
 
     const res = mockRes();
     await handleConfigUpdate(
-      mockReq(JSON.stringify({ claudeMd: 'Updated local operating instructions.\n' })),
+      mockReq({ method: 'POST', body: JSON.stringify({ claudeMd: 'Updated local operating instructions.\n' }) }),
       res, deps, { name: 'test-line' },
     );
 
@@ -1662,7 +1652,7 @@ describe('handleConfigUpdate', () => {
 
     const res = mockRes();
     await handleConfigUpdate(
-      mockReq(JSON.stringify({
+      mockReq({ method: 'POST', body: JSON.stringify({
         accessMode: 'allowlist',
         settingsJson: {
           permissions: {
@@ -1671,7 +1661,7 @@ describe('handleConfigUpdate', () => {
             defaultMode: 'bypassPermissions',
           },
         },
-      })),
+      }) }),
       res,
       deps,
       { name: 'test-line' },
@@ -1705,12 +1695,12 @@ describe('handleConfigUpdate', () => {
 
     const res = mockRes();
     await handleConfigUpdate(
-      mockReq(JSON.stringify({
+      mockReq({ method: 'POST', body: JSON.stringify({
         accessMode: 'allowlist',
         agentOptions: {
           enabledPlugins: { github: true },
         },
-      })),
+      }) }),
       res,
       deps,
       { name: 'test-line' },
@@ -1745,7 +1735,7 @@ describe('handleConfigUpdate', () => {
 
     const res = mockRes();
     await handleConfigUpdate(
-      mockReq(JSON.stringify({ claudeMd: 'Updated local operating instructions.\n' })),
+      mockReq({ method: 'POST', body: JSON.stringify({ claudeMd: 'Updated local operating instructions.\n' }) }),
       res,
       deps,
       { name: 'test-line' },
@@ -1778,7 +1768,7 @@ describe('handleConfigUpdate', () => {
 
     const res = mockRes();
     await handleConfigUpdate(
-      mockReq(JSON.stringify({ claudeMd: 'Updated local operating instructions.\n' })),
+      mockReq({ method: 'POST', body: JSON.stringify({ claudeMd: 'Updated local operating instructions.\n' }) }),
       res,
       deps,
       { name: 'tilde-update' },
@@ -1809,7 +1799,7 @@ describe('handleConfigUpdate', () => {
 
     const res = mockRes();
     await handleConfigUpdate(
-      mockReq(JSON.stringify({ claudeMd: 'Updated local operating instructions.\n' })),
+      mockReq({ method: 'POST', body: JSON.stringify({ claudeMd: 'Updated local operating instructions.\n' }) }),
       res,
       deps,
       { name: 'update-no-agent-options' },
@@ -1835,7 +1825,7 @@ describe('handleConfigUpdate', () => {
 
     const res = mockRes();
     await handleConfigUpdate(
-      mockReq(JSON.stringify({ agentOptions: ['unexpected'] })),
+      mockReq({ method: 'POST', body: JSON.stringify({ agentOptions: ['unexpected'] }) }),
       res,
       deps,
       { name: 'arr-update' },
@@ -1857,7 +1847,7 @@ describe('handleConfigUpdate', () => {
 
     const res = mockRes();
     await handleConfigUpdate(
-      mockReq(JSON.stringify({ accessMode: 'allowlist' })),
+      mockReq({ method: 'POST', body: JSON.stringify({ accessMode: 'allowlist' }) }),
       res, deps, { name: 'test-line' },
     );
 
@@ -1885,7 +1875,7 @@ describe('handleConfigUpdate', () => {
 
     const res = mockRes();
     await handleConfigUpdate(
-      mockReq(JSON.stringify({ accessMode: 'allowlist' })),
+      mockReq({ method: 'POST', body: JSON.stringify({ accessMode: 'allowlist' }) }),
       res, deps, { name: 'test-line' },
     );
 
@@ -1918,7 +1908,7 @@ describe('handleConfigUpdate', () => {
 
       const res = mockRes();
       await handleConfigUpdate(
-        mockReq(JSON.stringify({ accessMode: 'self_only' })),
+        mockReq({ method: 'POST', body: JSON.stringify({ accessMode: 'self_only' }) }),
         res, deps, { name: 'test-line' },
       );
 
@@ -1948,7 +1938,7 @@ describe('handleConfigUpdate', () => {
 
       const res = mockRes();
       await handleConfigUpdate(
-        mockReq(JSON.stringify({ agentOptions: { pluginDirs: [symlinkPluginDir] } })),
+        mockReq({ method: 'POST', body: JSON.stringify({ agentOptions: { pluginDirs: [symlinkPluginDir] } }) }),
         res, deps, { name: 'test-line' },
       );
 
@@ -1965,7 +1955,7 @@ describe('handleConfigUpdate', () => {
     const deps = makeDeps({ discovery: { getInstance: vi.fn(() => inst) } as any });
 
     const res = mockRes();
-    await handleConfigUpdate(mockReq('{"x":1}'), res, deps, { name: 'test-line' });
+    await handleConfigUpdate(mockReq({ method: 'POST', body: '{"x":1}' }), res, deps, { name: 'test-line' });
     expect(res._status).toBe(500);
     const missingBody = JSON.parse(res._body);
     expect(missingBody.schema).toBe('fleet-error-v1');
@@ -1991,7 +1981,7 @@ describe('ops.ts uncovered-branch coverage (wave)', () => {
   it('handleSend rejects an invalid instance name with 400', async () => {
     const deps = makeDeps();
     const res = mockRes();
-    await handleSend(mockReq('{}'), res, deps, { name: 'Bad_Name!' });
+    await handleSend(mockReq({ method: 'POST', body: '{}' }), res, deps, { name: 'Bad_Name!' });
     expect(res._status).toBe(400);
     expect(JSON.parse(res._body).error).toMatch(/invalid instance name/);
   });
@@ -1999,7 +1989,7 @@ describe('ops.ts uncovered-branch coverage (wave)', () => {
   it('handleAccessUpdate rejects an invalid instance name with 400', async () => {
     const deps = makeDeps();
     const res = mockRes();
-    await handleAccessUpdate(mockReq('{}'), res, deps, { name: 'UPPER' });
+    await handleAccessUpdate(mockReq({ method: 'POST', body: '{}' }), res, deps, { name: 'UPPER' });
     expect(res._status).toBe(400);
   });
 
@@ -2016,7 +2006,7 @@ describe('ops.ts uncovered-branch coverage (wave)', () => {
     vi.mocked(proxyToInstance).mockResolvedValue({ status: 200, body: '{"ok":true}' });
     const res = mockRes();
     const body = JSON.stringify({ chatJid: '15550000001@s.whatsapp.net', text: 'hi' });
-    await handleSend(mockReq(body), res, deps, { name: 'test-line' });
+    await handleSend(mockReq({ method: 'POST', body: body }), res, deps, { name: 'test-line' });
     expect(proxyToInstance).toHaveBeenCalledWith(4567, '/send', 'POST', body, 'tok123');
     expect(res._status).toBe(200);
     // Realtime publish on 2xx success
@@ -2038,7 +2028,7 @@ describe('ops.ts uncovered-branch coverage (wave)', () => {
     vi.mocked(proxyToInstance).mockResolvedValue({ status: 200, body: '{"ok":true}' });
     const res = mockRes();
     await handleSend(
-      mockReq(JSON.stringify({ chatJid: '15550000001@s.whatsapp.net', text: 'hi' })),
+      mockReq({ method: 'POST', body: JSON.stringify({ chatJid: '15550000001@s.whatsapp.net', text: 'hi' }) }),
       res, deps, { name: 'test-line' });
     expect(mcpCall).not.toHaveBeenCalled();
     expect(proxyToInstance).toHaveBeenCalledWith(4568, '/send', 'POST', expect.any(String), 'tok123');
@@ -2053,7 +2043,7 @@ describe('ops.ts uncovered-branch coverage (wave)', () => {
     vi.mocked(proxyToInstance).mockResolvedValue({ status: 500, body: '{"error":"down"}' });
     const res = mockRes();
     await handleSend(
-      mockReq(JSON.stringify({ chatJid: '15550000001@s.whatsapp.net', text: 'hi' })),
+      mockReq({ method: 'POST', body: JSON.stringify({ chatJid: '15550000001@s.whatsapp.net', text: 'hi' }) }),
       res, deps, { name: 'test-line' });
     expect(res._status).toBe(500);
     expect(deps.realtime.publish).not.toHaveBeenCalled();
@@ -2068,7 +2058,7 @@ describe('ops.ts uncovered-branch coverage (wave)', () => {
     vi.mocked(proxyToInstance).mockResolvedValue({ status: 200, body: '{"ok":true}' });
     const res = mockRes();
     await handleSend(
-      mockReq(JSON.stringify({ chatJid: '15550000001', text: 'hi' })),
+      mockReq({ method: 'POST', body: JSON.stringify({ chatJid: '15550000001', text: 'hi' }) }),
       res, deps, { name: 'test-line' });
     expect(res._status).toBe(200);
     const forwarded = JSON.parse(vi.mocked(proxyToInstance).mock.calls[0][3] as string);
@@ -2092,7 +2082,7 @@ describe('ops.ts uncovered-branch coverage (wave)', () => {
     });
     const res = mockRes();
     await handleSend(
-      mockReq(JSON.stringify({ chatJid: '15550000001@s.whatsapp.net', text: 'hi' })),
+      mockReq({ method: 'POST', body: JSON.stringify({ chatJid: '15550000001@s.whatsapp.net', text: 'hi' }) }),
       res, deps, { name: 'test-line' });
     expect(deps.realtime.publish).not.toHaveBeenCalled();
   });
@@ -2102,7 +2092,7 @@ describe('ops.ts uncovered-branch coverage (wave)', () => {
     const inst = fakeInstance();
     const deps = makeDeps({ discovery: { getInstance: vi.fn(() => inst) } as any });
     const res = mockRes();
-    await handleAccessUpdate(mockReq('not json'), res, deps, { name: 'test-line' });
+    await handleAccessUpdate(mockReq({ method: 'POST', body: 'not json' }), res, deps, { name: 'test-line' });
     expect(res._status).toBe(400);
     expect(JSON.parse(res._body).error).toMatch(/invalid JSON/);
   });
@@ -2113,7 +2103,7 @@ describe('ops.ts uncovered-branch coverage (wave)', () => {
     const deps = makeDeps({ discovery: { getInstance: vi.fn(() => inst) } as any });
     const res = mockRes();
     await handleAccessUpdate(
-      mockReq(JSON.stringify({ subjectType: 'user', subjectId: '15550000001', action: 'allow' })),
+      mockReq({ method: 'POST', body: JSON.stringify({ subjectType: 'user', subjectId: '15550000001', action: 'allow' }) }),
       res, deps, { name: 'test-line' });
     expect(res._status).toBe(400);
     expect(proxyToInstance).not.toHaveBeenCalled();
@@ -2125,7 +2115,7 @@ describe('ops.ts uncovered-branch coverage (wave)', () => {
     const deps = makeDeps({ discovery: { getInstance: vi.fn(() => inst) } as any });
     const res = mockRes();
     await handleAccessUpdate(
-      mockReq(JSON.stringify({ subjectType: 'phone', subjectId: '', action: 'allow' })),
+      mockReq({ method: 'POST', body: JSON.stringify({ subjectType: 'phone', subjectId: '', action: 'allow' }) }),
       res, deps, { name: 'test-line' });
     expect(res._status).toBe(400);
   });
@@ -2136,7 +2126,7 @@ describe('ops.ts uncovered-branch coverage (wave)', () => {
     const deps = makeDeps({ discovery: { getInstance: vi.fn(() => inst) } as any });
     const res = mockRes();
     await handleAccessUpdate(
-      mockReq(JSON.stringify({ subjectType: 'group', subjectId: '15550000001', action: 'delete' })),
+      mockReq({ method: 'POST', body: JSON.stringify({ subjectType: 'group', subjectId: '15550000001', action: 'delete' }) }),
       res, deps, { name: 'test-line' });
     expect(res._status).toBe(400);
   });
@@ -2152,7 +2142,7 @@ describe('ops.ts uncovered-branch coverage (wave)', () => {
       subjectId: '1111111000000000',
       action: 'block',
     });
-    await handleAccessUpdate(mockReq(body), res, deps, { name: 'test-line' });
+    await handleAccessUpdate(mockReq({ method: 'POST', body: body }), res, deps, { name: 'test-line' });
     expect(proxyToInstance).toHaveBeenCalledWith(3010, '/access', 'POST', body, 'tok123');
     expect(res._status).toBe(200);
     expect(deps.realtime.publish).toHaveBeenCalled();
@@ -2165,7 +2155,7 @@ describe('ops.ts uncovered-branch coverage (wave)', () => {
     vi.mocked(proxyToInstance).mockResolvedValue({ status: 403, body: '{"error":"denied"}' });
     const res = mockRes();
     await handleAccessUpdate(
-      mockReq(JSON.stringify({ subjectType: 'phone', subjectId: '15550000001', action: 'allow' })),
+      mockReq({ method: 'POST', body: JSON.stringify({ subjectType: 'phone', subjectId: '15550000001', action: 'allow' }) }),
       res, deps, { name: 'test-line' });
     expect(res._status).toBe(403);
     expect(deps.realtime.publish).not.toHaveBeenCalled();
@@ -2175,14 +2165,14 @@ describe('ops.ts uncovered-branch coverage (wave)', () => {
   it('handleMarkRead returns 404 for unknown instance', async () => {
     const deps = makeDeps();
     const res = mockRes();
-    await handleMarkRead(mockReq('{}'), res, deps, { name: 'nope' });
+    await handleMarkRead(mockReq({ method: 'POST', body: '{}' }), res, deps, { name: 'nope' });
     expect(res._status).toBe(404);
   });
 
   it('handleMarkRead rejects invalid instance name with 400', async () => {
     const deps = makeDeps();
     const res = mockRes();
-    await handleMarkRead(mockReq('{}'), res, deps, { name: 'bad name' });
+    await handleMarkRead(mockReq({ method: 'POST', body: '{}' }), res, deps, { name: 'bad name' });
     expect(res._status).toBe(400);
   });
 
@@ -2192,7 +2182,7 @@ describe('ops.ts uncovered-branch coverage (wave)', () => {
     vi.mocked(proxyToInstance).mockResolvedValue({ status: 200, body: '{"ok":true}' });
     const res = mockRes();
     const body = '{"chatJid":"15550000001@s.whatsapp.net"}';
-    await handleMarkRead(mockReq(body), res, deps, { name: 'test-line' });
+    await handleMarkRead(mockReq({ method: 'POST', body: body }), res, deps, { name: 'test-line' });
     expect(proxyToInstance).toHaveBeenCalledWith(3010, '/mark-read', 'POST', body, 'tok123');
     expect(res._status).toBe(200);
     expect(deps.realtime.publish).toHaveBeenCalled();
@@ -2203,7 +2193,7 @@ describe('ops.ts uncovered-branch coverage (wave)', () => {
     const deps = makeDeps({ discovery: { getInstance: vi.fn(() => inst) } as any });
     vi.mocked(proxyToInstance).mockResolvedValue({ status: 500, body: '{"error":"x"}' });
     const res = mockRes();
-    await handleMarkRead(mockReq('{}'), res, deps, { name: 'test-line' });
+    await handleMarkRead(mockReq({ method: 'POST', body: '{}' }), res, deps, { name: 'test-line' });
     expect(res._status).toBe(500);
     expect(deps.realtime.publish).not.toHaveBeenCalled();
   });
@@ -2213,7 +2203,7 @@ describe('ops.ts uncovered-branch coverage (wave)', () => {
     const inst = fakeInstance();
     const deps = makeDeps({ discovery: { getInstance: vi.fn(() => inst) } as any });
     const res = mockRes();
-    await handleSaveContact(mockReq('not json'), res, deps, { name: 'test-line' });
+    await handleSaveContact(mockReq({ method: 'POST', body: 'not json' }), res, deps, { name: 'test-line' });
     expect(res._status).toBe(400);
     expect(JSON.parse(res._body).error).toMatch(/invalid JSON/);
   });
@@ -2223,7 +2213,7 @@ describe('ops.ts uncovered-branch coverage (wave)', () => {
     const deps = makeDeps({ discovery: { getInstance: vi.fn(() => inst) } as any });
     const res = mockRes();
     await handleSaveContact(
-      mockReq(JSON.stringify({ firstName: 'Kio' })),
+      mockReq({ method: 'POST', body: JSON.stringify({ firstName: 'Kio' }) }),
       res, deps, { name: 'test-line' });
     expect(res._status).toBe(400);
     expect(JSON.parse(res._body).error).toMatch(/jid is required/);
@@ -2234,7 +2224,7 @@ describe('ops.ts uncovered-branch coverage (wave)', () => {
     const deps = makeDeps({ discovery: { getInstance: vi.fn(() => inst) } as any });
     const res = mockRes();
     await handleSaveContact(
-      mockReq(JSON.stringify({ jid: '15550000001@s.whatsapp.net', firstName: 'Kio' })),
+      mockReq({ method: 'POST', body: JSON.stringify({ jid: '15550000001@s.whatsapp.net', firstName: 'Kio' }) }),
       res, deps, { name: 'test-line' });
     expect(res._status).toBe(503);
     expect(JSON.parse(res._body).error).toMatch(/MCP socket not available/);
@@ -2247,13 +2237,13 @@ describe('ops.ts uncovered-branch coverage (wave)', () => {
     vi.mocked(mcpCall).mockResolvedValue({ success: true, result: { added: true } });
     const res = mockRes();
     await handleSaveContact(
-      mockReq(JSON.stringify({
+      mockReq({ method: 'POST', body: JSON.stringify({
         jid: '15550000001@s.whatsapp.net',
         firstName: 'Kio',
         lastName: 'Bot',
         company: 'Acme',
         phone: '15550000001',
-      })),
+      }) }),
       res, deps, { name: 'test-line' });
     expect(mcpCall).toHaveBeenCalledWith(
       '/state/test-line/whatsoup.sock',
@@ -2276,7 +2266,7 @@ describe('ops.ts uncovered-branch coverage (wave)', () => {
     vi.mocked(mcpCall).mockRejectedValue(new Error('socket dead'));
     const res = mockRes();
     await handleSaveContact(
-      mockReq(JSON.stringify({ jid: '15550000001@s.whatsapp.net' })),
+      mockReq({ method: 'POST', body: JSON.stringify({ jid: '15550000001@s.whatsapp.net' }) }),
       res, deps, { name: 'test-line' });
     expect(res._status).toBe(503);
   });
@@ -2290,7 +2280,7 @@ describe('ops.ts uncovered-branch coverage (wave)', () => {
       serviceManager: svc,
     });
     const res = mockRes();
-    await handleStop(mockReq(), res, deps, { name: 'test-line' });
+    await handleStop(mockReq({ method: 'POST' }), res, deps, { name: 'test-line' });
     expect(svc.stop).toHaveBeenCalledWith('test-line');
     expect(svc.restart).not.toHaveBeenCalled();
     expect(res._status).toBe(202);
@@ -2306,7 +2296,7 @@ describe('ops.ts uncovered-branch coverage (wave)', () => {
       serviceManager: svc,
     });
     const res = mockRes();
-    await handleStop(mockReq(), res, deps, { name: 'test-line' });
+    await handleStop(mockReq({ method: 'POST' }), res, deps, { name: 'test-line' });
     expect(res._status).toBe(500);
     const stopBody = JSON.parse(res._body);
     expect(stopBody.schema).toBe('fleet-error-v1');
@@ -2317,14 +2307,14 @@ describe('ops.ts uncovered-branch coverage (wave)', () => {
   it('handleStop returns 404 for unknown instance', async () => {
     const deps = makeDeps();
     const res = mockRes();
-    await handleStop(mockReq(), res, deps, { name: 'nope' });
+    await handleStop(mockReq({ method: 'POST' }), res, deps, { name: 'nope' });
     expect(res._status).toBe(404);
   });
 
   it('handleStop rejects invalid instance name with 400', async () => {
     const deps = makeDeps();
     const res = mockRes();
-    await handleStop(mockReq(), res, deps, { name: '1nv@lid' });
+    await handleStop(mockReq({ method: 'POST' }), res, deps, { name: '1nv@lid' });
     expect(res._status).toBe(400);
   });
 
@@ -2333,7 +2323,7 @@ describe('ops.ts uncovered-branch coverage (wave)', () => {
     const deps = makeDeps();
     const res = mockRes();
     await handleCreateLine(
-      mockReq(JSON.stringify({ name: 'a', type: 'chat', adminPhones: ['15550000001'] })),
+      mockReq({ method: 'POST', body: JSON.stringify({ name: 'a', type: 'chat', adminPhones: ['15550000001'] }) }),
       res, deps);
     expect(res._status).toBe(400);
     expect(JSON.parse(res._body).error).toMatch(/name must be/);
@@ -2344,7 +2334,7 @@ describe('ops.ts uncovered-branch coverage (wave)', () => {
     const deps = makeDeps();
     const res = mockRes();
     await handleCreateLine(
-      mockReq(JSON.stringify({ name: 42, type: 'chat', adminPhones: ['15550000001'] })),
+      mockReq({ method: 'POST', body: JSON.stringify({ name: 42, type: 'chat', adminPhones: ['15550000001'] }) }),
       res, deps);
     expect(res._status).toBe(400);
   });
@@ -2360,7 +2350,7 @@ describe('ops.ts uncovered-branch coverage (wave)', () => {
     });
     const res = mockRes();
     await handleCreateLine(
-      mockReq(JSON.stringify({ name: 'dup', type: 'chat', adminPhones: ['15550000001'] })),
+      mockReq({ method: 'POST', body: JSON.stringify({ name: 'dup', type: 'chat', adminPhones: ['15550000001'] }) }),
       res, deps);
     expect(res._status).toBe(409);
     expect(JSON.parse(res._body).error).toMatch(/already exists/);
@@ -2377,7 +2367,7 @@ describe('ops.ts uncovered-branch coverage (wave)', () => {
     });
     const res = mockRes();
     await handleCreateLine(
-      mockReq(JSON.stringify({ name: 'good-name', type: 'magic', adminPhones: ['15550000001'] })),
+      mockReq({ method: 'POST', body: JSON.stringify({ name: 'good-name', type: 'magic', adminPhones: ['15550000001'] }) }),
       res, deps);
     expect(res._status).toBe(400);
     expect(JSON.parse(res._body).error).toMatch(/type must be/);
@@ -2394,7 +2384,7 @@ describe('ops.ts uncovered-branch coverage (wave)', () => {
     });
     const res = mockRes();
     await handleCreateLine(
-      mockReq(JSON.stringify({ name: 'good-name', type: 'chat', adminPhones: [] })),
+      mockReq({ method: 'POST', body: JSON.stringify({ name: 'good-name', type: 'chat', adminPhones: [] }) }),
       res, deps);
     expect(res._status).toBe(400);
     expect(JSON.parse(res._body).error).toMatch(/adminPhones/);
@@ -2410,7 +2400,7 @@ describe('ops.ts uncovered-branch coverage (wave)', () => {
     });
     const res = mockRes();
     await handleCreateLine(
-      mockReq(JSON.stringify({ name: 'good-name', type: 'chat', adminPhones: '15550000001' })),
+      mockReq({ method: 'POST', body: JSON.stringify({ name: 'good-name', type: 'chat', adminPhones: '15550000001' }) }),
       res, deps);
     expect(res._status).toBe(400);
   });
@@ -2426,10 +2416,10 @@ describe('ops.ts uncovered-branch coverage (wave)', () => {
     });
     const res = mockRes();
     await handleCreateLine(
-      mockReq(JSON.stringify({
+      mockReq({ method: 'POST', body: JSON.stringify({
         name: 'good-name', type: 'passive',
         adminPhones: ['15550000001'], systemPrompt: 'be nice',
-      })),
+      }) }),
       res, deps);
     expect(res._status).toBe(400);
     expect(JSON.parse(res._body).error).toMatch(/systemPrompt/);
@@ -2446,10 +2436,10 @@ describe('ops.ts uncovered-branch coverage (wave)', () => {
     });
     const res = mockRes();
     await handleCreateLine(
-      mockReq(JSON.stringify({
+      mockReq({ method: 'POST', body: JSON.stringify({
         name: 'good-name', type: 'chat',
         adminPhones: ['15550000001'], healthPort: 80,
-      })),
+      }) }),
       res, deps);
     expect(res._status).toBe(400);
     expect(JSON.parse(res._body).error).toMatch(/healthPort/);
@@ -2466,10 +2456,10 @@ describe('ops.ts uncovered-branch coverage (wave)', () => {
     });
     const res = mockRes();
     await handleCreateLine(
-      mockReq(JSON.stringify({
+      mockReq({ method: 'POST', body: JSON.stringify({
         name: 'good-name', type: 'chat',
         adminPhones: ['15550000001'], accessMode: 'wide_open',
-      })),
+      }) }),
       res, deps);
     expect(res._status).toBe(400);
     expect(JSON.parse(res._body).error).toMatch(/accessMode/);
@@ -2486,11 +2476,11 @@ describe('ops.ts uncovered-branch coverage (wave)', () => {
     });
     const res = mockRes();
     await handleCreateLine(
-      mockReq(JSON.stringify({
+      mockReq({ method: 'POST', body: JSON.stringify({
         name: 'good-name', type: 'agent',
         adminPhones: ['15550000001'],
         agentOptions: { cwd: '/tmp', sessionScope: 'bogus' },
-      })),
+      }) }),
       res, deps);
     expect(res._status).toBe(400);
     expect(JSON.parse(res._body).error).toMatch(/sessionScope/);
@@ -2500,7 +2490,7 @@ describe('ops.ts uncovered-branch coverage (wave)', () => {
   it('handleCreateLine rejects an invalid JSON body with 400', async () => {
     const deps = makeDeps();
     const res = mockRes();
-    await handleCreateLine(mockReq('not json'), res, deps);
+    await handleCreateLine(mockReq({ method: 'POST', body: 'not json' }), res, deps);
     expect(res._status).toBe(400);
     const createInvalidJsonBody = JSON.parse(res._body);
     expect(createInvalidJsonBody.schema).toBe('fleet-error-v1');
@@ -2511,7 +2501,7 @@ describe('ops.ts uncovered-branch coverage (wave)', () => {
   it('handleCreateLine rejects a JSON array body with 400', async () => {
     const deps = makeDeps();
     const res = mockRes();
-    await handleCreateLine(mockReq('[1,2,3]'), res, deps);
+    await handleCreateLine(mockReq({ method: 'POST', body: '[1,2,3]' }), res, deps);
     expect(res._status).toBe(400);
   });
 
@@ -2536,7 +2526,7 @@ describe('ops.ts uncovered-branch coverage (wave)', () => {
         serviceManager: svc,
       });
       const res = mockRes();
-      await handleDeleteLine(mockReq('', `/api/lines/${name}`), res, deps, { name });
+      await handleDeleteLine(mockReq({ method: 'POST', body: '', url: `/api/lines/${name}` }), res, deps, { name });
       expect(res._status).toBe(200);
       expect(JSON.parse(res._body)).toEqual({ deleted: name });
       expect(fs.existsSync(configDir)).toBe(false);
@@ -2551,7 +2541,7 @@ describe('ops.ts uncovered-branch coverage (wave)', () => {
   it('handleDeleteLine rejects an invalid instance name with 400', async () => {
     const deps = makeDeps();
     const res = mockRes();
-    await handleDeleteLine(mockReq(''), res, deps, { name: 'BAD NAME' });
+    await handleDeleteLine(mockReq({ method: 'POST', body: '' }), res, deps, { name: 'BAD NAME' });
     expect(res._status).toBe(400);
   });
 
@@ -2571,7 +2561,7 @@ describe('ops.ts uncovered-branch coverage (wave)', () => {
       const deps = makeDeps({ discovery: { getInstance: vi.fn(() => inst) } as any });
       const res = mockRes();
       await handleConfigUpdate(
-        mockReq(JSON.stringify({ description: 'patched' })),
+        mockReq({ method: 'POST', body: JSON.stringify({ description: 'patched' }) }),
         res, deps, { name: 'test-line' });
       expect(res._status).toBe(400);
       expect(JSON.parse(res._body).error).toMatch(/agentOptions must be an object/);
@@ -2592,7 +2582,7 @@ describe('ops.ts uncovered-branch coverage (wave)', () => {
       const deps = makeDeps({ discovery: { getInstance: vi.fn(() => inst) } as any });
       const res = mockRes();
       await handleConfigUpdate(
-        mockReq(JSON.stringify({ adminPhones: [] })),
+        mockReq({ method: 'POST', body: JSON.stringify({ adminPhones: [] }) }),
         res, deps, { name: 'test-line' });
       expect(res._status).toBe(400);
       expect(JSON.parse(res._body).error).toMatch(/adminPhones/);
@@ -2612,7 +2602,7 @@ describe('ops.ts uncovered-branch coverage (wave)', () => {
       const deps = makeDeps({ discovery: { getInstance: vi.fn(() => inst) } as any });
       const res = mockRes();
       await handleConfigUpdate(
-        mockReq(JSON.stringify({ adminPhones: '15550000001' })),
+        mockReq({ method: 'POST', body: JSON.stringify({ adminPhones: '15550000001' }) }),
         res, deps, { name: 'test-line' });
       expect(res._status).toBe(400);
       expect(JSON.parse(res._body).error).toMatch(/adminPhones/);
@@ -2691,11 +2681,11 @@ describe('ops.ts handleCreateLine uncovered-branch coverage', () => {
   it('rejects an uppercase name with 400 (line 1005)', async () => {
     const res = mockRes();
     await handleCreateLine(
-      mockReq(JSON.stringify({
+      mockReq({ method: 'POST', body: JSON.stringify({
         name: 'Upper-Name',
         type: 'chat',
         adminPhones: ['15550000001'],
-      })),
+      }) }),
       res,
       freshDeps(),
     );
@@ -2707,11 +2697,11 @@ describe('ops.ts handleCreateLine uncovered-branch coverage', () => {
   it('rejects a one-character name with 400 (line 1005)', async () => {
     const res = mockRes();
     await handleCreateLine(
-      mockReq(JSON.stringify({
+      mockReq({ method: 'POST', body: JSON.stringify({
         name: 'a',
         type: 'chat',
         adminPhones: ['15550000001'],
-      })),
+      }) }),
       res,
       freshDeps(),
     );
@@ -2731,11 +2721,11 @@ describe('ops.ts handleCreateLine uncovered-branch coverage', () => {
     });
     const res = mockRes();
     await handleCreateLine(
-      mockReq(JSON.stringify({
+      mockReq({ method: 'POST', body: JSON.stringify({
         name: 'dup-line',
         type: 'chat',
         adminPhones: ['15550000001'],
-      })),
+      }) }),
       res,
       deps,
     );
@@ -2747,11 +2737,11 @@ describe('ops.ts handleCreateLine uncovered-branch coverage', () => {
   it('rejects an unknown type with 400 (line 1019)', async () => {
     const res = mockRes();
     await handleCreateLine(
-      mockReq(JSON.stringify({
+      mockReq({ method: 'POST', body: JSON.stringify({
         name: 'cov-type',
         type: 'superuser',
         adminPhones: ['15550000001'],
-      })),
+      }) }),
       res,
       freshDeps(),
     );
@@ -2763,11 +2753,11 @@ describe('ops.ts handleCreateLine uncovered-branch coverage', () => {
   it('rejects a non-array adminPhones with 400 (line 1026)', async () => {
     const res = mockRes();
     await handleCreateLine(
-      mockReq(JSON.stringify({
+      mockReq({ method: 'POST', body: JSON.stringify({
         name: 'cov-phones',
         type: 'chat',
         adminPhones: '15550000001',
-      })),
+      }) }),
       res,
       freshDeps(),
     );
@@ -2779,11 +2769,11 @@ describe('ops.ts handleCreateLine uncovered-branch coverage', () => {
   it('rejects an adminPhones array with an empty entry with 400 (line 1026)', async () => {
     const res = mockRes();
     await handleCreateLine(
-      mockReq(JSON.stringify({
+      mockReq({ method: 'POST', body: JSON.stringify({
         name: 'cov-phones2',
         type: 'chat',
         adminPhones: [''],
-      })),
+      }) }),
       res,
       freshDeps(),
     );
@@ -2795,12 +2785,12 @@ describe('ops.ts handleCreateLine uncovered-branch coverage', () => {
   it('rejects a passive instance with a systemPrompt with 400 (line 1037)', async () => {
     const res = mockRes();
     await handleCreateLine(
-      mockReq(JSON.stringify({
+      mockReq({ method: 'POST', body: JSON.stringify({
         name: 'cov-passive',
         type: 'passive',
         adminPhones: ['15550000001'],
         systemPrompt: 'should not be allowed',
-      })),
+      }) }),
       res,
       freshDeps(),
     );
@@ -2812,12 +2802,12 @@ describe('ops.ts handleCreateLine uncovered-branch coverage', () => {
   it('rejects a healthPort below 1024 with 400 (line 1044)', async () => {
     const res = mockRes();
     await handleCreateLine(
-      mockReq(JSON.stringify({
+      mockReq({ method: 'POST', body: JSON.stringify({
         name: 'cov-port',
         type: 'chat',
         adminPhones: ['15550000001'],
         healthPort: 80,
-      })),
+      }) }),
       res,
       freshDeps(),
     );
@@ -2829,12 +2819,12 @@ describe('ops.ts handleCreateLine uncovered-branch coverage', () => {
   it('rejects a healthPort above 65535 with 400 (line 1044)', async () => {
     const res = mockRes();
     await handleCreateLine(
-      mockReq(JSON.stringify({
+      mockReq({ method: 'POST', body: JSON.stringify({
         name: 'cov-port-hi',
         type: 'chat',
         adminPhones: ['15550000001'],
         healthPort: 70000,
-      })),
+      }) }),
       res,
       freshDeps(),
     );
@@ -2857,11 +2847,11 @@ describe('ops.ts handleCreateLine uncovered-branch coverage', () => {
 
     const res = mockRes();
     await handleCreateLine(
-      mockReq(JSON.stringify({
+      mockReq({ method: 'POST', body: JSON.stringify({
         name: 'cov-auto-port',
         type: 'chat',
         adminPhones: ['15550000001'],
-      })),
+      }) }),
       res,
       freshDeps(),
     );
@@ -2873,11 +2863,11 @@ describe('ops.ts handleCreateLine uncovered-branch coverage', () => {
   it('auto-assigns the 9095 default when no siblings exist (line 1055)', async () => {
     const res = mockRes();
     await handleCreateLine(
-      mockReq(JSON.stringify({
+      mockReq({ method: 'POST', body: JSON.stringify({
         name: 'cov-default-port',
         type: 'chat',
         adminPhones: ['15550000001'],
-      })),
+      }) }),
       res,
       freshDeps(),
     );
@@ -2889,12 +2879,12 @@ describe('ops.ts handleCreateLine uncovered-branch coverage', () => {
   it('forces accessMode to self_only for a passive instance (line 1066)', async () => {
     const res = mockRes();
     await handleCreateLine(
-      mockReq(JSON.stringify({
+      mockReq({ method: 'POST', body: JSON.stringify({
         name: 'cov-passive-am',
         type: 'passive',
         adminPhones: ['15550000001'],
         accessMode: 'open_dm',
-      })),
+      }) }),
       res,
       freshDeps(),
     );
@@ -2910,12 +2900,12 @@ describe('ops.ts handleCreateLine uncovered-branch coverage', () => {
   it('rejects an invalid accessMode for a chat instance with 400 (line 1067)', async () => {
     const res = mockRes();
     await handleCreateLine(
-      mockReq(JSON.stringify({
+      mockReq({ method: 'POST', body: JSON.stringify({
         name: 'cov-bad-am',
         type: 'chat',
         adminPhones: ['15550000001'],
         accessMode: 'everyone',
-      })),
+      }) }),
       res,
       freshDeps(),
     );
@@ -2927,12 +2917,12 @@ describe('ops.ts handleCreateLine uncovered-branch coverage', () => {
   it('rejects an invalid agentOptions.sessionScope with 400 (line 1082)', async () => {
     const res = mockRes();
     await handleCreateLine(
-      mockReq(JSON.stringify({
+      mockReq({ method: 'POST', body: JSON.stringify({
         name: 'cov-scope',
         type: 'agent',
         adminPhones: ['15550000001'],
         agentOptions: { cwd: agentCwd, sessionScope: 'global' },
-      })),
+      }) }),
       res,
       freshDeps(),
     );
@@ -2944,7 +2934,7 @@ describe('ops.ts handleCreateLine uncovered-branch coverage', () => {
   it('rejects a pluginDirs entry outside the home directory with 400 (lines 1088-1089)', async () => {
     const res = mockRes();
     await handleCreateLine(
-      mockReq(JSON.stringify({
+      mockReq({ method: 'POST', body: JSON.stringify({
         name: 'cov-plugindirs',
         type: 'agent',
         adminPhones: ['15550000001'],
@@ -2953,7 +2943,7 @@ describe('ops.ts handleCreateLine uncovered-branch coverage', () => {
           sessionScope: 'single',
           pluginDirs: ['/etc/not-allowed'],
         },
-      })),
+      }) }),
       res,
       freshDeps(),
     );
@@ -2965,12 +2955,12 @@ describe('ops.ts handleCreateLine uncovered-branch coverage', () => {
   it('rejects an out-of-range tokenBudget with 400', async () => {
     const res = mockRes();
     await handleCreateLine(
-      mockReq(JSON.stringify({
+      mockReq({ method: 'POST', body: JSON.stringify({
         name: 'cov-budget',
         type: 'chat',
         adminPhones: ['15550000001'],
         tokenBudget: 10,
-      })),
+      }) }),
       res,
       freshDeps(),
     );
@@ -2984,13 +2974,13 @@ describe('ops.ts handleCreateLine uncovered-branch coverage', () => {
     const res = mockRes();
     const oversize = '# x\n'.repeat(9000); // > 32_768 bytes
     await handleCreateLine(
-      mockReq(JSON.stringify({
+      mockReq({ method: 'POST', body: JSON.stringify({
         name: 'cov-claudemd',
         type: 'agent',
         adminPhones: ['15550000001'],
         agentOptions: { cwd: agentCwd, sessionScope: 'single' },
         claudeMd: oversize,
-      })),
+      }) }),
       res,
       freshDeps(),
     );
@@ -3004,11 +2994,11 @@ describe('ops.ts handleCreateLine uncovered-branch coverage', () => {
     vi.mocked(lookupCredential).mockReturnValue('secret-health-token-xyz');
     const res = mockRes();
     await handleCreateLine(
-      mockReq(JSON.stringify({
+      mockReq({ method: 'POST', body: JSON.stringify({
         name: 'cov-token',
         type: 'chat',
         adminPhones: ['15550000001'],
-      })),
+      }) }),
       res,
       freshDeps(),
     );
@@ -3026,7 +3016,7 @@ describe('ops.ts handleCreateLine uncovered-branch coverage', () => {
   it('merges enabledPlugins into the written settings.json (lines 1193-1196)', async () => {
     const res = mockRes();
     await handleCreateLine(
-      mockReq(JSON.stringify({
+      mockReq({ method: 'POST', body: JSON.stringify({
         name: 'cov-plugins',
         type: 'agent',
         adminPhones: ['15550000001'],
@@ -3035,7 +3025,7 @@ describe('ops.ts handleCreateLine uncovered-branch coverage', () => {
           sessionScope: 'single',
           enabledPlugins: { 'whatsoup/diagnostics': true, 'whatsoup/legacy': false },
         },
-      })),
+      }) }),
       res,
       freshDeps(),
     );
@@ -3073,7 +3063,7 @@ describe('ops.ts handleAuth uncovered-branch coverage', () => {
     const deps = makeDeps({
       discovery: { getInstance: vi.fn(() => inst), scan: vi.fn() } as any,
     });
-    const req = mockReq('', '/api/lines/test-line/auth');
+    const req = mockReq({ method: 'POST', body: '', url: '/api/lines/test-line/auth' });
     const res = mockSseRes();
 
     await handleAuth(req, res, deps, { name: 'test-line' });
@@ -3093,7 +3083,7 @@ describe('ops.ts handleAuth uncovered-branch coverage', () => {
     const deps = makeDeps({
       discovery: { getInstance: vi.fn(() => inst), scan: vi.fn() } as any,
     });
-    const req = mockReq('', '/api/lines/test-line/auth');
+    const req = mockReq({ method: 'POST', body: '', url: '/api/lines/test-line/auth' });
     const res = mockSseRes();
 
     await handleAuth(req, res, deps, { name: 'test-line' });
@@ -3112,7 +3102,7 @@ describe('ops.ts handleAuth uncovered-branch coverage', () => {
     const deps = makeDeps({
       discovery: { getInstance: vi.fn(() => inst), scan: vi.fn() } as any,
     });
-    const req = mockReq('', '/api/lines/test-line/auth');
+    const req = mockReq({ method: 'POST', body: '', url: '/api/lines/test-line/auth' });
     const res = mockSseRes();
 
     await handleAuth(req, res, deps, { name: 'test-line' });
@@ -3134,7 +3124,7 @@ describe('ops.ts handleAuth uncovered-branch coverage', () => {
     const deps = makeDeps({
       discovery: { getInstance: vi.fn(() => inst), scan: vi.fn() } as any,
     });
-    const req = mockReq('', '/api/lines/test-line/auth');
+    const req = mockReq({ method: 'POST', body: '', url: '/api/lines/test-line/auth' });
     const res = mockSseRes();
 
     await handleAuth(req, res, deps, { name: 'test-line' });
@@ -3156,7 +3146,7 @@ describe('ops.ts handleAuth uncovered-branch coverage', () => {
     const deps = makeDeps({
       discovery: { getInstance: vi.fn(() => inst), scan: vi.fn() } as any,
     });
-    const req = mockReq('', '/api/lines/test-line/auth');
+    const req = mockReq({ method: 'POST', body: '', url: '/api/lines/test-line/auth' });
     const res = mockSseRes();
 
     await handleAuth(req, res, deps, { name: 'test-line' });
@@ -3203,7 +3193,7 @@ describe('ops.ts uncovered-branch coverage (wave 2)', () => {
     const res = mockRes();
     // Bare group conversation key (no @) -> isGroupConversationKey true -> conversationKeyToJid.
     await handleSend(
-      mockReq(JSON.stringify({ chatJid: '1111111000000000_at_g.us', text: 'hi' })),
+      mockReq({ method: 'POST', body: JSON.stringify({ chatJid: '1111111000000000_at_g.us', text: 'hi' }) }),
       res, deps, { name: 'test-line' });
     expect(res._status).toBe(200);
     const forwarded = JSON.parse(vi.mocked(proxyToInstance).mock.calls[0][3] as string);
@@ -3225,7 +3215,7 @@ describe('ops.ts uncovered-branch coverage (wave 2)', () => {
     vi.mocked(proxyToInstance).mockResolvedValue({ status: 200, body: '{"ok":true}' });
     const res = mockRes();
     await handleSend(
-      mockReq(JSON.stringify({ chatJid: '15550000001@s.whatsapp.net', text: 'hi' })),
+      mockReq({ method: 'POST', body: JSON.stringify({ chatJid: '15550000001@s.whatsapp.net', text: 'hi' }) }),
       res, deps, { name: 'test-line' });
     // Fell through to HTTP route.
     expect(proxyToInstance).toHaveBeenCalledWith(
@@ -3237,7 +3227,7 @@ describe('ops.ts uncovered-branch coverage (wave 2)', () => {
   it('handleConfigUpdate rejects an invalid instance name with 400 (line 442)', async () => {
     const deps = makeDeps();
     const res = mockRes();
-    await handleConfigUpdate(mockReq('{}'), res, deps, { name: 'BAD NAME' });
+    await handleConfigUpdate(mockReq({ method: 'POST', body: '{}' }), res, deps, { name: 'BAD NAME' });
     expect(res._status).toBe(400);
     expect(JSON.parse(res._body).error).toMatch(/invalid instance name/);
   });
@@ -3254,7 +3244,7 @@ describe('ops.ts uncovered-branch coverage (wave 2)', () => {
       const deps = makeDeps({ discovery: { getInstance: vi.fn(() => inst) } as any });
       const res = mockRes();
       await handleConfigUpdate(
-        mockReq(JSON.stringify({ adminPhones: ['15550000001', 42] })),
+        mockReq({ method: 'POST', body: JSON.stringify({ adminPhones: ['15550000001', 42] }) }),
         res, deps, { name: 'test-line' });
       expect(res._status).toBe(400);
       expect(JSON.parse(res._body).error).toMatch(/adminPhones must be a non-empty array of strings/);
@@ -3275,7 +3265,7 @@ describe('ops.ts uncovered-branch coverage (wave 2)', () => {
       const deps = makeDeps({ discovery: { getInstance: vi.fn(() => inst) } as any });
       const res = mockRes();
       await handleConfigUpdate(
-        mockReq(JSON.stringify({ adminPhones: ['   '] })),
+        mockReq({ method: 'POST', body: JSON.stringify({ adminPhones: ['   '] }) }),
         res, deps, { name: 'test-line' });
       expect(res._status).toBe(400);
       expect(JSON.parse(res._body).error).toMatch(/adminPhones must be a non-empty array of strings/);
@@ -3305,7 +3295,7 @@ describe('ops.ts uncovered-branch coverage (wave 2)', () => {
       const deps = makeDeps({ discovery: { getInstance: vi.fn(() => inst) } as any });
       const res = mockRes();
       await handleConfigUpdate(
-        mockReq(JSON.stringify({ healthPort: 9401 })),
+        mockReq({ method: 'POST', body: JSON.stringify({ healthPort: 9401 }) }),
         res, deps, { name: 'target-line' });
       // Either the inventory failure path or the shared validator must reject the collision.
       expect(res._status).toBeGreaterThanOrEqual(400);
@@ -3342,7 +3332,7 @@ describe('ops.ts uncovered-branch coverage (wave 2)', () => {
       // settingsJson with an empty permissions object: mergeSettingsJson returns null when there
       // is nothing to merge beyond the empty default the instance already has.
       await handleConfigUpdate(
-        mockReq(JSON.stringify({ settingsJson: { permissions: { allow: [], deny: [], defaultMode: 'default' } } })),
+        mockReq({ method: 'POST', body: JSON.stringify({ settingsJson: { permissions: { allow: [], deny: [], defaultMode: 'default' } } }) }),
         res, deps, { name: 'test-line' });
       // Patch must not error from a write failure; outcome is either 200 or a validator 4xx.
       expect([200, 400, 422]).toContain(res._status);
@@ -3383,7 +3373,7 @@ describe('ops.ts uncovered-branch coverage (wave 2)', () => {
       const deps = makeDeps({ discovery: { getInstance: vi.fn(() => inst) } as any });
       const res = mockRes();
       await handleConfigUpdate(
-        mockReq(JSON.stringify({ agentOptions: { enabledPlugins: { 'whatsoup/x': true } } })),
+        mockReq({ method: 'POST', body: JSON.stringify({ agentOptions: { enabledPlugins: { 'whatsoup/x': true } } }) }),
         res, deps, { name: 'test-line' });
       expect(res._status).toBe(200);
       const written = JSON.parse(fs.readFileSync(settingsPath, 'utf-8'));
@@ -3414,7 +3404,7 @@ describe('ops.ts uncovered-branch coverage (wave 2)', () => {
       const deps = makeDeps({ discovery: { getInstance: vi.fn(() => inst) } as any });
       const res = mockRes();
       await handleConfigUpdate(
-        mockReq(JSON.stringify({ agentOptions: { enabledPlugins: null } })),
+        mockReq({ method: 'POST', body: JSON.stringify({ agentOptions: { enabledPlugins: null } }) }),
         res, deps, { name: 'test-line' });
       expect(res._status).toBe(200);
       const settingsPath = path.join(agentCwd, '.claude', 'settings.json');
@@ -3449,7 +3439,7 @@ describe('ops.ts uncovered-branch coverage (wave 2)', () => {
         serviceManager: svc,
       });
       const res = mockRes();
-      await handleDeleteLine(mockReq('', `/api/lines/${name}`), res, deps, { name });
+      await handleDeleteLine(mockReq({ method: 'POST', body: '', url: `/api/lines/${name}` }), res, deps, { name });
       expect(res._status).toBe(500);
       expect(JSON.parse(res._body).error).toMatch(/stop failed: a string failure/);
     } finally {
@@ -3479,10 +3469,10 @@ describe('ops.ts uncovered-branch coverage (wave 2)', () => {
       });
       const res = mockRes();
       await handleCreateLine(
-        mockReq(JSON.stringify({
+        mockReq({ method: 'POST', body: JSON.stringify({
           name: 'rate-line', type: 'chat',
           adminPhones: ['15550000001'], rateLimitPerHour: 0,
-        })),
+        }) }),
         res, deps);
       expect(res._status).toBe(400);
       expect(JSON.parse(res._body).error).toMatch(/rateLimitPerHour must be between/);
@@ -3513,10 +3503,10 @@ describe('ops.ts uncovered-branch coverage (wave 2)', () => {
       });
       const res = mockRes();
       await handleCreateLine(
-        mockReq(JSON.stringify({
+        mockReq({ method: 'POST', body: JSON.stringify({
           name: 'mt-line', type: 'chat',
           adminPhones: ['15550000001'], maxTokens: 10,
-        })),
+        }) }),
         res, deps);
       expect(res._status).toBe(400);
       expect(JSON.parse(res._body).error).toMatch(/maxTokens must be between/);
@@ -3557,10 +3547,10 @@ describe('ops.ts uncovered-branch coverage (wave 2)', () => {
       const res = mockRes();
       // Request port 9401 explicitly — the disabled sibling is ignored, so no collision.
       await handleCreateLine(
-        mockReq(JSON.stringify({
+        mockReq({ method: 'POST', body: JSON.stringify({
           name: 'new-line', type: 'chat',
           adminPhones: ['15550000001'], healthPort: 9401,
-        })),
+        }) }),
         res, deps);
       expect(res._status).toBe(201);
     } finally {
@@ -3594,10 +3584,10 @@ describe('ops.ts uncovered-branch coverage (wave 2)', () => {
       });
       const res = mockRes();
       await handleCreateLine(
-        mockReq(JSON.stringify({
+        mockReq({ method: 'POST', body: JSON.stringify({
           name: 'new-line', type: 'chat',
           adminPhones: ['15550000001'], healthPort: 9402,
-        })),
+        }) }),
         res, deps);
       expect(res._status).toBe(500);
       expect(JSON.parse(res._body)).toMatchObject({
@@ -3634,10 +3624,10 @@ describe('ops.ts uncovered-branch coverage (wave 2)', () => {
       });
       const res = mockRes();
       await handleCreateLine(
-        mockReq(JSON.stringify({
+        mockReq({ method: 'POST', body: JSON.stringify({
           name: 'new-line', type: 'chat',
           adminPhones: ['15550000001'], healthPort: 9403,
-        })),
+        }) }),
         res, deps);
       expect(res._status).toBe(500);
       expect(JSON.parse(res._body)).toMatchObject({
@@ -3660,7 +3650,7 @@ describe('ops.ts uncovered-branch coverage (wave 2)', () => {
     const deps = makeDeps({
       discovery: { getInstance: vi.fn(() => inst), scan: vi.fn() } as any,
     });
-    const req = mockReq('', '/api/lines/test-line/auth');
+    const req = mockReq({ method: 'POST', body: '', url: '/api/lines/test-line/auth' });
     const res = mockSseRes();
     await handleAuth(req, res, deps, { name: 'test-line' });
 
@@ -3694,7 +3684,7 @@ describe('ops.ts uncovered-branch coverage (wave 2)', () => {
         discovery: { getInstance: vi.fn(() => inst), scan: vi.fn() } as any,
         serviceManager: svc,
       });
-      const req = mockReq('', '/api/lines/test-line/auth');
+      const req = mockReq({ method: 'POST', body: '', url: '/api/lines/test-line/auth' });
       const res = mockSseRes();
       await handleAuth(req, res, deps, { name: 'test-line' });
 
@@ -3730,7 +3720,7 @@ describe('ops.ts uncovered-branch coverage (wave 2)', () => {
       discovery: { getInstance: vi.fn(() => inst), scan: vi.fn() } as any,
       serviceManager: svc,
     });
-    const req = mockReq('', '/api/lines/test-line/auth');
+    const req = mockReq({ method: 'POST', body: '', url: '/api/lines/test-line/auth' });
     const res = mockSseRes();
 
     await handleAuth(req, res, deps, { name: 'test-line' });
@@ -3765,7 +3755,7 @@ describe('ops.ts uncovered-branch coverage (wave 2)', () => {
       discovery: { getInstance: vi.fn(() => inst), scan: vi.fn() } as any,
       serviceManager: svc,
     });
-    const req = mockReq('', '/api/lines/test-line/auth');
+    const req = mockReq({ method: 'POST', body: '', url: '/api/lines/test-line/auth' });
     const res = mockSseRes();
 
     await handleAuth(req, res, deps, { name: 'test-line' });
@@ -3794,7 +3784,7 @@ describe('ops.ts uncovered-branch coverage (wave 2)', () => {
       discovery: { getInstance: vi.fn(() => inst), scan: vi.fn() } as any,
       serviceManager: svc,
     });
-    const req = mockReq('', '/api/lines/test-line/auth');
+    const req = mockReq({ method: 'POST', body: '', url: '/api/lines/test-line/auth' });
     const res = mockSseRes();
 
     await handleAuth(req, res, deps, { name: 'test-line' });
@@ -3819,7 +3809,7 @@ describe('ops.ts uncovered-branch coverage (wave 2)', () => {
         discovery: { getInstance: vi.fn(() => inst), scan: vi.fn() } as any,
         serviceManager: svc,
       });
-      const req = mockReq('', '/api/lines/test-line/auth');
+      const req = mockReq({ method: 'POST', body: '', url: '/api/lines/test-line/auth' });
       const res = mockSseRes();
 
       await handleAuth(req, res, deps, { name: 'test-line' });
@@ -3849,7 +3839,7 @@ describe('ops.ts uncovered-branch coverage (wave 2)', () => {
       discovery: { getInstance: vi.fn(() => inst), scan: vi.fn() } as any,
       serviceManager: svc,
     });
-    const req = mockReq('', '/api/lines/test-line/auth');
+    const req = mockReq({ method: 'POST', body: '', url: '/api/lines/test-line/auth' });
     const res = mockSseRes();
 
     await handleAuth(req, res, deps, { name: 'test-line' });
@@ -3876,7 +3866,7 @@ describe('ops.ts uncovered-branch coverage (wave 2)', () => {
       discovery: { getInstance: vi.fn(() => inst), scan: vi.fn() } as any,
       serviceManager: svc,
     });
-    const req = mockReq('', '/api/lines/test-line/auth');
+    const req = mockReq({ method: 'POST', body: '', url: '/api/lines/test-line/auth' });
     const res = mockSseRes();
 
     await handleAuth(req, res, deps, { name: 'test-line' });
@@ -3904,7 +3894,7 @@ describe('ops.ts uncovered-branch coverage (wave 2)', () => {
       discovery: { getInstance: vi.fn(() => inst), scan: vi.fn() } as any,
       serviceManager: svc,
     });
-    const req = mockReq('', '/api/lines/test-line/auth');
+    const req = mockReq({ method: 'POST', body: '', url: '/api/lines/test-line/auth' });
     const res = mockSseRes();
 
     await handleAuth(req, res, deps, { name: 'test-line' });
@@ -3930,7 +3920,7 @@ describe('ops.ts uncovered-branch coverage (wave 2)', () => {
       discovery: { getInstance: vi.fn(() => inst), scan: vi.fn() } as any,
       serviceManager: svc,
     });
-    const req = mockReq('', '/api/lines/test-line/auth');
+    const req = mockReq({ method: 'POST', body: '', url: '/api/lines/test-line/auth' });
     const res = mockSseRes();
     const on = vi.fn(() => res);
     Object.defineProperty(res, 'on', { configurable: true, value: on });
@@ -3963,7 +3953,7 @@ describe('ops.ts uncovered-branch coverage (wave 2)', () => {
       discovery: { getInstance: vi.fn(() => inst), scan: vi.fn() } as any,
       serviceManager: svc,
     });
-    const req = mockReq('', '/api/lines/test-line/auth');
+    const req = mockReq({ method: 'POST', body: '', url: '/api/lines/test-line/auth' });
     const res = mockSseRes();
 
     const handling = handleAuth(req, res, deps, { name: 'test-line' });
@@ -3987,7 +3977,7 @@ describe('ops.ts uncovered-branch coverage (wave 2)', () => {
       discovery: { getInstance: vi.fn(() => inst), scan: vi.fn() } as any,
       serviceManager: svc,
     });
-    const req = mockReq('', '/api/lines/test-line/auth');
+    const req = mockReq({ method: 'POST', body: '', url: '/api/lines/test-line/auth' });
     const res = mockSseRes();
     await handleAuth(req, res, deps, { name: 'test-line' });
 
@@ -4014,13 +4004,13 @@ describe('ops.ts uncovered-branch coverage (wave 2)', () => {
     });
 
     // First call registers the session in authInFlight; it never exits within this test.
-    const req1 = mockReq('', '/api/lines/inflight-line/auth');
+    const req1 = mockReq({ method: 'POST', body: '', url: '/api/lines/inflight-line/auth' });
     const res1 = mockSseRes();
     await handleAuth(req1, res1, deps, { name: 'inflight-line' });
     expect(res1._status).toBe(200);
 
     // Second concurrent call must hit the in-flight guard.
-    const req2 = mockReq('', '/api/lines/inflight-line/auth');
+    const req2 = mockReq({ method: 'POST', body: '', url: '/api/lines/inflight-line/auth' });
     const res2 = mockRes();
     await handleAuth(req2, res2, deps, { name: 'inflight-line' });
     expect(res2._status).toBe(409);
@@ -4042,7 +4032,7 @@ describe('ops.ts uncovered-branch coverage (wave 2)', () => {
       discovery: { getInstance: vi.fn(() => inst), scan: vi.fn() } as any,
     });
 
-    const req1 = mockReq('', '/api/lines/reuse-line/auth');
+    const req1 = mockReq({ method: 'POST', body: '', url: '/api/lines/reuse-line/auth' });
     const res1 = mockSseRes();
     await handleAuth(req1, res1, deps, { name: 'reuse-line' });
     expect(res1._status).toBe(200);
@@ -4060,7 +4050,7 @@ describe('ops.ts uncovered-branch coverage (wave 2)', () => {
     firstChild.emit('exit', 0);
     expect(res1._ended).toBe(true);
 
-    const req2 = mockReq('', '/api/lines/reuse-line/auth');
+    const req2 = mockReq({ method: 'POST', body: '', url: '/api/lines/reuse-line/auth' });
     const res2 = mockSseRes();
     await handleAuth(req2, res2, deps, { name: 'reuse-line' });
     expect(res2._status).toBe(200);
@@ -4088,7 +4078,7 @@ describe('ops.ts uncovered-branch coverage (wave 2)', () => {
         discovery: { getInstance: vi.fn(() => inst), scan: vi.fn() } as any,
         serviceManager: svc,
       });
-      const req = mockReq('', '/api/lines/norestart-line/auth');
+      const req = mockReq({ method: 'POST', body: '', url: '/api/lines/norestart-line/auth' });
       const res = mockSseRes();
       await handleAuth(req, res, deps, { name: 'norestart-line' });
 
@@ -4131,7 +4121,7 @@ describe('ops.ts uncovered-branch coverage', () => {
   it('handleSaveContact rejects an invalid instance name with 400 (line 317)', async () => {
     const deps = makeDeps();
     const res = mockRes();
-    await handleSaveContact(mockReq('{}'), res, deps, { name: 'INVALID' });
+    await handleSaveContact(mockReq({ method: 'POST', body: '{}' }), res, deps, { name: 'INVALID' });
     expect(res._status).toBe(400);
     expect(JSON.parse(res._body).error).toMatch(/invalid instance name/);
   });
@@ -4141,7 +4131,7 @@ describe('ops.ts uncovered-branch coverage', () => {
       discovery: { getInstance: vi.fn(() => undefined) } as any,
     });
     const res = mockRes();
-    await handleSaveContact(mockReq('{}'), res, deps, { name: 'nope' });
+    await handleSaveContact(mockReq({ method: 'POST', body: '{}' }), res, deps, { name: 'nope' });
     expect(res._status).toBe(404);
     expect(JSON.parse(res._body).error).toMatch(/not found/);
   });
@@ -4150,7 +4140,7 @@ describe('ops.ts uncovered-branch coverage', () => {
   it('handleAuth rejects an invalid instance name with 400 (line 1251)', async () => {
     const deps = makeDeps();
     const res = mockSseRes();
-    await handleAuth(mockReq(), res, deps, { name: 'INVALID' });
+    await handleAuth(mockReq({ method: 'POST' }), res, deps, { name: 'INVALID' });
     expect(res._status).toBe(400);
     expect(res._ended).toBe(true);
   });
@@ -4160,7 +4150,7 @@ describe('ops.ts uncovered-branch coverage', () => {
       discovery: { getInstance: vi.fn(() => undefined) } as any,
     });
     const res = mockRes();
-    await handleAuth(mockReq(), res, deps, { name: 'nope' });
+    await handleAuth(mockReq({ method: 'POST' }), res, deps, { name: 'nope' });
     expect(res._status).toBe(404);
     expect(JSON.parse(res._body).error).toMatch(/not found/);
   });
@@ -4182,7 +4172,7 @@ describe('ops.ts uncovered-branch coverage', () => {
         discovery: { getInstance: vi.fn(() => inst), scan: vi.fn() } as any,
         serviceManager: svc,
       });
-      const req = mockReq('', '/api/lines/test-line/auth');
+      const req = mockReq({ method: 'POST', body: '', url: '/api/lines/test-line/auth' });
       const res = mockSseRes();
 
       await handleAuth(req, res, deps, { name: 'test-line' });
@@ -4209,7 +4199,7 @@ describe('ops.ts uncovered-branch coverage', () => {
       discovery: { getInstance: vi.fn(() => inst), scan: vi.fn() } as any,
       serviceManager: svc,
     });
-    const req = mockReq('', '/api/lines/test-line/auth');
+    const req = mockReq({ method: 'POST', body: '', url: '/api/lines/test-line/auth' });
     const res = mockSseRes();
 
     await handleAuth(req, res, deps, { name: 'test-line' });
@@ -4242,7 +4232,7 @@ describe('ops.ts uncovered-branch coverage', () => {
       // settingsJson with a fresh allowlist should normalize and be written to settings.json.
       // mergeSettingsJson requires defaultMode === 'bypassPermissions' to merge the custom payload.
       await handleConfigUpdate(
-        mockReq(JSON.stringify({
+        mockReq({ method: 'POST', body: JSON.stringify({
           settingsJson: {
             permissions: {
               allow: ['Bash(npm:*)'],
@@ -4250,7 +4240,7 @@ describe('ops.ts uncovered-branch coverage', () => {
               defaultMode: 'bypassPermissions',
             },
           },
-        })),
+        }) }),
         res, deps, { name: 'test-line' });
       expect(res._status).toBe(200);
       const settingsPath = path.join(agentCwd, '.claude', 'settings.json');
@@ -4293,11 +4283,11 @@ describe('ops.ts uncovered-branch coverage', () => {
       const deps = makeDeps({ discovery: { getInstance: vi.fn(() => inst) } as any });
       const res = mockRes();
       await handleConfigUpdate(
-        mockReq(JSON.stringify({
+        mockReq({ method: 'POST', body: JSON.stringify({
           agentOptions: {
             enabledPlugins: { 'whatsoup/leaf-a': true, 'whatsoup/leaf-b': false },
           },
-        })),
+        }) }),
         res, deps, { name: 'test-line' });
       expect(res._status).toBe(200);
       const written = JSON.parse(fs.readFileSync(settingsPath, 'utf-8'));
@@ -4342,9 +4332,9 @@ describe('ops.ts uncovered-branch coverage', () => {
       const deps = makeDeps({ discovery: { getInstance: vi.fn(() => inst) } as any });
       const res = mockRes();
       await handleConfigUpdate(
-        mockReq(JSON.stringify({
+        mockReq({ method: 'POST', body: JSON.stringify({
           agentOptions: { enabledPlugins: { 'whatsoup/x': true } },
-        })),
+        }) }),
         res, deps, { name: 'test-line' });
       expect(res._status).toBe(200);
       const written = JSON.parse(fs.readFileSync(settingsPath, 'utf-8'));
@@ -4375,7 +4365,7 @@ describe('ops.ts uncovered-branch coverage', () => {
       const deps = makeDeps({ discovery: { getInstance: vi.fn(() => inst) } as any });
       const res = mockRes();
       await handleConfigUpdate(
-        mockReq(JSON.stringify({ claudeMd: '# fresh\nleaf coverage body\n' })),
+        mockReq({ method: 'POST', body: JSON.stringify({ claudeMd: '# fresh\nleaf coverage body\n' }) }),
         res, deps, { name: 'test-line' });
       expect(res._status).toBe(200);
       const claudeMdPath = path.join(agentCwd, '.claude', 'CLAUDE.md');
@@ -4414,10 +4404,10 @@ describe('ops.ts uncovered-branch coverage', () => {
       const name = 'race-line';
       fs.mkdirSync(path.join(process.env.XDG_CONFIG_HOME, 'whatsoup', 'instances', name), { recursive: true });
       await handleCreateLine(
-        mockReq(JSON.stringify({
+        mockReq({ method: 'POST', body: JSON.stringify({
           name, type: 'chat',
           adminPhones: ['15550000001'],
-        })),
+        }) }),
         res, deps);
       expect(res._status).toBe(409);
       expect(JSON.parse(res._body).error).toMatch(/already exists/);
@@ -4454,7 +4444,7 @@ describe('ops.ts uncovered-branch coverage', () => {
       });
       const res = mockRes();
       await handleCreateLine(
-        mockReq(JSON.stringify({
+        mockReq({ method: 'POST', body: JSON.stringify({
           name: 'crset-line', type: 'agent',
           adminPhones: ['15550000001'],
           agentOptions: { cwd: agentCwd, sessionScope: 'single' },
@@ -4465,7 +4455,7 @@ describe('ops.ts uncovered-branch coverage', () => {
               defaultMode: 'bypassPermissions',
             },
           },
-        })),
+        }) }),
         res, deps);
       expect(res._status).toBe(201);
       const settingsPath = path.join(agentCwd, '.claude', 'settings.json');
@@ -4509,7 +4499,7 @@ describe('ops.ts uncovered-branch coverage', () => {
       const res = mockRes();
       // Patching healthPort triggers the inventory scan — which fails closed for the broken sibling.
       await handleConfigUpdate(
-        mockReq(JSON.stringify({ healthPort: 9510 })),
+        mockReq({ method: 'POST', body: JSON.stringify({ healthPort: 9510 }) }),
         res, deps, { name: 'target-line' });
       expect(res._status).toBe(500);
       expect(JSON.parse(res._body).error).toMatch(/healthPort inventory/);
@@ -4540,10 +4530,10 @@ describe('ops.ts uncovered-branch coverage', () => {
       });
       const res = mockRes();
       await handleCreateLine(
-        mockReq(JSON.stringify({
+        mockReq({ method: 'POST', body: JSON.stringify({
           name: 'rlh-line', type: 'chat',
           adminPhones: ['15550000001'], rateLimitPerHour: 99999,
-        })),
+        }) }),
         res, deps);
       expect(res._status).toBe(400);
       expect(JSON.parse(res._body).error).toMatch(/rateLimitPerHour/);
@@ -4576,10 +4566,10 @@ describe('ops.ts uncovered-branch coverage', () => {
       });
       const res = mockRes();
       await handleCreateLine(
-        mockReq(JSON.stringify({
+        mockReq({ method: 'POST', body: JSON.stringify({
           name: 'mt-line', type: 'chat',
           adminPhones: ['15550000001'], maxTokens: 999999,
-        })),
+        }) }),
         res, deps);
       expect(res._status).toBe(400);
       expect(JSON.parse(res._body).error).toMatch(/maxTokens/);
@@ -4612,10 +4602,10 @@ describe('ops.ts uncovered-branch coverage', () => {
       });
       const res = mockRes();
       await handleCreateLine(
-        mockReq(JSON.stringify({
+        mockReq({ method: 'POST', body: JSON.stringify({
           name: 'tb-line', type: 'chat',
           adminPhones: ['15550000001'], tokenBudget: 99999999,
-        })),
+        }) }),
         res, deps);
       expect(res._status).toBe(400);
       expect(JSON.parse(res._body).error).toMatch(/tokenBudget/);
@@ -4649,9 +4639,9 @@ describe('ops.ts uncovered-branch coverage', () => {
       const deps = makeDeps({ discovery: { getInstance: vi.fn(() => inst) } as any });
       const res = mockRes();
       await handleConfigUpdate(
-        mockReq(JSON.stringify({
+        mockReq({ method: 'POST', body: JSON.stringify({
           agentOptions: { pluginDirs: [pluginDir] },
-        })),
+        }) }),
         res, deps, { name: 'test-line' });
       expect(res._status).toBe(200);
       const written = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
@@ -4676,9 +4666,9 @@ describe('ops.ts uncovered-branch coverage', () => {
       const deps = makeDeps({ discovery: { getInstance: vi.fn(() => inst) } as any });
       const res = mockRes();
       await handleConfigUpdate(
-        mockReq(JSON.stringify({
+        mockReq({ method: 'POST', body: JSON.stringify({
           adminPhones: ['15550000002', '15550000003'],
-        })),
+        }) }),
         res, deps, { name: 'test-line' });
       expect(res._status).toBe(200);
       const written = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
@@ -4707,7 +4697,7 @@ describe('ops.ts uncovered-branch coverage', () => {
       const deps = makeDeps({ discovery: { getInstance: vi.fn(() => inst) } as any });
       const res = mockRes();
       await handleConfigUpdate(
-        mockReq(JSON.stringify({ claudeMd: '# fresh' })),
+        mockReq({ method: 'POST', body: JSON.stringify({ claudeMd: '# fresh' }) }),
         res, deps, { name: 'test-line' });
       expect(res._status).toBe(200);
       const written = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
@@ -4738,9 +4728,9 @@ describe('ops.ts uncovered-branch coverage', () => {
       const deps = makeDeps({ discovery: { getInstance: vi.fn(() => inst) } as any });
       const res = mockRes();
       await handleConfigUpdate(
-        mockReq(JSON.stringify({
+        mockReq({ method: 'POST', body: JSON.stringify({
           settingsJson: { permissions: { allow: ['Bash(ls:*)'], deny: [], defaultMode: 'bypassPermissions' } },
-        })),
+        }) }),
         res, deps, { name: 'test-line' });
       expect(res._status).toBe(200);
       const settingsPath = path.join(expectedCwd, '.claude', 'settings.json');
@@ -4770,7 +4760,7 @@ describe('ops.ts uncovered-branch coverage', () => {
       const deps = makeDeps({ discovery: { getInstance: vi.fn(() => inst) } as any });
       const res = mockRes();
       await handleConfigUpdate(
-        mockReq(JSON.stringify({ agentOptions: { enabledPlugins: { 'whatsoup/x': true } } })),
+        mockReq({ method: 'POST', body: JSON.stringify({ agentOptions: { enabledPlugins: { 'whatsoup/x': true } } }) }),
         res, deps, { name: 'test-line' });
       expect(res._status).toBe(200);
       const written = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
@@ -4806,7 +4796,7 @@ describe('ops.ts uncovered-branch coverage', () => {
         discovery: { getInstance: vi.fn(() => inst), scan: vi.fn() } as any,
         serviceManager: svc,
       });
-      const req = mockReq('', '/api/lines/test-line/auth');
+      const req = mockReq({ method: 'POST', body: '', url: '/api/lines/test-line/auth' });
       const res = mockSseRes();
 
       await handleAuth(req, res, deps, { name: 'test-line' });
@@ -4835,7 +4825,7 @@ describe('ops.ts uncovered-branch coverage', () => {
       const deps = makeDeps({ discovery: { getInstance: vi.fn(() => inst) } as any });
       const res = mockRes();
       await handleConfigUpdate(
-        mockReq(JSON.stringify({ healthPort: 9520 })),
+        mockReq({ method: 'POST', body: JSON.stringify({ healthPort: 9520 }) }),
         res, deps, { name: 'target-line' });
       // Inventory returned ok:true (empty map), validator still validates the port.
       expect([200, 400, 422]).toContain(res._status);
@@ -4879,12 +4869,12 @@ describe('ops.ts uncovered-branch coverage', () => {
       });
       const res = mockRes();
       await handleCreateLine(
-        mockReq(JSON.stringify({
+        mockReq({ method: 'POST', body: JSON.stringify({
           name: 'restore-line', type: 'agent',
           adminPhones: ['15550000001'],
           agentOptions: { cwd: agentCwd, sessionScope: 'single' },
           claudeMd: '# new',
-        })),
+        }) }),
         res, deps);
       // Write fails with EACCES → catch → cleanupPartial restores prior contents.
       expect(res._status).toBe(500);
@@ -4928,12 +4918,12 @@ describe('ops.ts uncovered-branch coverage', () => {
       });
       const res = mockRes();
       await handleCreateLine(
-        mockReq(JSON.stringify({
+        mockReq({ method: 'POST', body: JSON.stringify({
           name: 'snap-line', type: 'agent',
           adminPhones: ['15550000001'],
           agentOptions: { cwd: agentCwd, sessionScope: 'single' },
           claudeMd: '# fresh',
-        })),
+        }) }),
         res, deps);
       // snapshotExtra throws EINVAL — propagated to outer catch → 500.
       expect(res._status).toBe(500);
@@ -4971,10 +4961,10 @@ describe('ops.ts uncovered-branch coverage', () => {
       });
       const res = mockRes();
       await handleCreateLine(
-        mockReq(JSON.stringify({
+        mockReq({ method: 'POST', body: JSON.stringify({
           name: 'nojson-line', type: 'chat',
           adminPhones: ['15550000001'],
-        })),
+        }) }),
         res, deps);
       // The empty sibling is skipped (line 886 continue), so create succeeds.
       expect(res._status).toBe(201);
@@ -5016,7 +5006,7 @@ describe('ops.ts uncovered-branch coverage', () => {
       const deps = makeDeps({ discovery: { getInstance: vi.fn(() => inst) } as any });
       const res = mockRes();
       await handleConfigUpdate(
-        mockReq(JSON.stringify({ healthPort: 9301 })),
+        mockReq({ method: 'POST', body: JSON.stringify({ healthPort: 9301 }) }),
         res, deps, { name: 'target-line' });
       // 9301 matches sibling — either validator or inventory catches it.
       expect(res._status).toBeGreaterThanOrEqual(400);
@@ -5046,9 +5036,9 @@ describe('ops.ts uncovered-branch coverage', () => {
       const deps = makeDeps({ discovery: { getInstance: vi.fn(() => inst) } as any });
       const res = mockRes();
       await handleConfigUpdate(
-        mockReq(JSON.stringify({
+        mockReq({ method: 'POST', body: JSON.stringify({
           agentOptions: { pluginDirs: [42] },
-        })),
+        }) }),
         res, deps, { name: 'test-line' });
       expect(res._status).toBe(400);
       const pluginDirsBody = JSON.parse(res._body);
@@ -5083,7 +5073,7 @@ describe('ops.ts uncovered-branch coverage', () => {
       });
       const res = mockRes();
       await handleCreateLine(
-        mockReq(JSON.stringify({
+        mockReq({ method: 'POST', body: JSON.stringify({
           name: 'crpd-line', type: 'agent',
           adminPhones: ['15550000001'],
           agentOptions: {
@@ -5091,7 +5081,7 @@ describe('ops.ts uncovered-branch coverage', () => {
             sessionScope: 'single',
             pluginDirs: [pluginDir],
           },
-        })),
+        }) }),
         res, deps);
       expect(res._status).toBe(201);
     } finally {
@@ -5120,7 +5110,7 @@ describe('ops.ts uncovered-branch coverage', () => {
       discovery: { getInstance: vi.fn(() => inst), scan: vi.fn() } as any,
       serviceManager: svc,
     });
-    const req = mockReq('', '/api/lines/test-line/auth');
+    const req = mockReq({ method: 'POST', body: '', url: '/api/lines/test-line/auth' });
     const res = mockSseRes();
 
     await handleAuth(req, res, deps, { name: 'test-line' });
