@@ -296,6 +296,15 @@ export class EnrichmentPoller {
             );
           }
         } catch {
+          // Deliberately untyped: ExtractionError/ValidationError (both extend the
+          // shared EnrichmentError base, #2846) carry a finer provider-call/json-parse/
+          // schema-shape/schema-items-all-dropped stage for structured logging at throw
+          // time, but the cycle receipt's failureCode/stage vocabulary (cycle-receipt.ts)
+          // is bounded at the coarser selection/segment/message_state/ledger level by
+          // design (#2565) — the durable ledger and health projection must never carry
+          // raw exception detail. Narrowing on `instanceof EnrichmentError` here would
+          // have no receipt field to populate; any segment failure, typed or not, is
+          // uniformly `segment_failed`/`segment`.
           segmentFailed = true;
           log.error(
             { failureCode: 'segment_failed', stage: 'segment', messages: chatMessages.length },

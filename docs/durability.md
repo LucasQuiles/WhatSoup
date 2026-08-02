@@ -994,7 +994,7 @@ to fix, alongside `recovery_runs` above.
 | `facts_queued` | INTEGER | Aggregate facts newly accepted by the local fact-export queue; remote export confirmation is owned separately. |
 | `error` | TEXT | Historical compatibility field. Typed online receipts always write `NULL`; they never persist raw exception prose. |
 
-Migration 52 adds the receipt fields and online-reader indexes without assigning stable meaning to
+Migration 55 adds the receipt fields and online-reader indexes without assigning stable meaning to
 historical rows: those remain `legacy` / `legacy_unclassified`. On startup the runtime reads only
 the newest typed `online` receipt, separately remembers the last proven success, and fails closed
 for malformed or unreadable receipt evidence. Health projects only the bounded states `disabled`,
