@@ -330,6 +330,10 @@ function QuickActions({ event, onRestart, onStop, onNavigate, onCopyResult }: {
       icon={<Copy size={12} strokeWidth={1.75} />}
       onClick={(e) => {
         e.stopPropagation();
+        if (!navigator.clipboard) {
+          onCopyResult?.(false);
+          return;
+        }
         const text = copyContent(event);
         navigator.clipboard.writeText(text)
           .then(() => onCopyResult?.(true))
