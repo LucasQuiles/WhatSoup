@@ -10,10 +10,22 @@ export interface TrackedTmpDirs {
 
 // Call at file scope: registering the afterEach hook inside a test is a
 // vitest error, so trackTmpDirs() cannot be invoked from within it().
-export function trackTmpDirs(prefix = 'whatsoup-test-'): TrackedTmpDirs {
+//
+// `options.base` overrides the default `os.tmpdir()` base with a
+// precomputed, already-resolved directory string, computed once at
+// trackTmpDirs() call time — not re-resolved per make() call. This exists
+// for callers that need a realpath-canonical base (e.g. macOS's /var ->
+// /private/var symlink makes raw os.tmpdir() non-canonical, which trips
+// production code that rejects non-canonical database path aliases). It is
+// not a general-purpose arbitrary-base override.
+export function trackTmpDirs(
+  prefix = 'whatsoup-test-',
+  options: { base?: string } = {},
+): TrackedTmpDirs {
+  const base = options.base ?? tmpdir();
   const dirs: string[] = [];
   const make = (name: string): string => {
-    const dir = mkdtempSync(join(tmpdir(), `${prefix}${name}-`));
+    const dir = mkdtempSync(join(base, `${prefix}${name}-`));
     dirs.push(dir);
     return dir;
   };
