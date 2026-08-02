@@ -1,10 +1,18 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-SCRIPT_PATH="${BASH_SOURCE[0]}"
-if resolved_path="$(readlink -f "$SCRIPT_PATH" 2>/dev/null)"; then
-  SCRIPT_PATH="$resolved_path"
-fi
+# POSIX-portable symlink resolution (readlink -f is GNU-only, unavailable on macOS)
+_resolve_symlinks() {
+  local p="$1"
+  while [ -L "$p" ]; do
+    local dir="$(cd "$(dirname "$p")" && pwd)"
+    p="$(readlink "$p")"
+    [[ "$p" != /* ]] && p="$dir/$p"
+  done
+  echo "$(cd "$(dirname "$p")" && pwd)/$(basename "$p")"
+}
+
+SCRIPT_PATH="$(_resolve_symlinks "${BASH_SOURCE[0]}")"
 REPO_ROOT="$(cd "$(dirname "$SCRIPT_PATH")/../.." && pwd)"
 STATE_DIR="${WHATSOUP_HARNESS_MAINTENANCE_STATE_DIR:-$HOME/.cache/whatsoup/harness-maintenance}"
 MANIFEST="${WHATSOUP_HARNESS_MAINTENANCE_MANIFEST:-$REPO_ROOT/deploy/managed-components.json}"

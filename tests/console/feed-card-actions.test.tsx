@@ -119,6 +119,22 @@ describe('FeedCard action handling', () => {
     })
   })
 
+  it('guards the copy button against an insecure context (no clipboard API)', () => {
+    Object.defineProperty(navigator, 'clipboard', { configurable: true, value: undefined })
+    const onCopyResult = vi.fn()
+
+    render(
+      <FeedCard
+        event={event({ text: 'raw incident line', detail: undefined })}
+        onCopyResult={onCopyResult}
+      />,
+    )
+
+    fireEvent.click(screen.getByRole('button', { name: 'Copy to clipboard' }))
+
+    expect(onCopyResult).toHaveBeenCalledWith(false)
+  })
+
   it('copies generic detail payloads through the fallback path', async () => {
     const writeText = installClipboard()
 
