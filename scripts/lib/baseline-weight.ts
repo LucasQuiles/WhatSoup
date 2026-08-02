@@ -106,6 +106,13 @@ export const BASELINE_REGISTRY: readonly RegisteredBaseline[] = [
     tolerates: 'hardcoded /tmp/ path literals not yet migrated to os.tmpdir()',
   },
   {
+    id: 'loggermock',
+    path: '.claude/fitness/loggermock-baseline.json',
+    shape: 'entry-array',
+    initialWeight: 144,
+    tolerates: 'test files still constructing local logger mocks instead of the shared helper',
+  },
+  {
     id: 'platform-baseline',
     path: '.claude/fitness/platform-baseline.json',
     shape: 'entry-array',
