@@ -12,7 +12,6 @@
  *   - `mcp-client` translates `result.isError === true` into `toolError` on McpCallResult.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import type { IncomingMessage } from 'node:http';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -26,7 +25,7 @@ import {
 import type { McpProxyDeps } from '../../../src/fleet/routes/mcp-proxy.ts';
 import { mcpCall } from '../../../src/fleet/mcp-client.ts';
 import type { DiscoveredInstance, FleetDiscovery } from '../../../src/fleet/discovery.ts';
-import { mockReq as helperMockReq, mockRes } from '../../helpers/http-mocks.ts';
+import { mockReq, mockRes } from '../../helpers/http-mocks.ts';
 
 vi.mock('../../../src/fleet/mcp-client.ts', () => ({
   mcpCall: vi.fn(),
@@ -58,10 +57,6 @@ function makeDeps(): McpProxyDeps {
   };
 }
 
-function mockReq(body: string, url = '/api/lines/alpha/groups', method = 'POST'): IncomingMessage {
-  return helperMockReq({ body, method, url });
-}
-
 /** MCP envelope shape for a tool-level error. */
 function toolErrorEnvelope(text: string) {
   return { content: [{ type: 'text', text }], isError: true };
@@ -87,7 +82,7 @@ describe('mcp proxy honors isError tool envelopes (issue #257)', () => {
         result: toolErrorEnvelope('Invalid parameters for tool "group_create": subject is required'),
       });
       const res = mockRes();
-      await handleCreateGroup(mockReq('{}'), res, makeDeps(), { name: 'alpha' });
+      await handleCreateGroup(mockReq({ body: '{}', method: 'POST', url: '/api/lines/alpha/groups' }), res, makeDeps(), { name: 'alpha' });
 
       expect(res._status).toBe(422);
       const body = JSON.parse(res._body);
@@ -107,7 +102,7 @@ describe('mcp proxy honors isError tool envelopes (issue #257)', () => {
       });
       const res = mockRes();
       await handleLeaveGroup(
-        helperMockReq({ method: 'DELETE', url: '/api/lines/alpha/groups/abc' }),
+        mockReq({ method: 'DELETE', url: '/api/lines/alpha/groups/abc' }),
         res,
         makeDeps(),
         { name: 'alpha', jid: 'abc' },
@@ -126,7 +121,7 @@ describe('mcp proxy honors isError tool envelopes (issue #257)', () => {
         result: toolErrorEnvelope('Internal error executing tool group_create'),
       });
       const res = mockRes();
-      await handleCreateGroup(mockReq('{"subject":"x","participants":[]}'), res, makeDeps(), { name: 'alpha' });
+      await handleCreateGroup(mockReq({ body: '{"subject":"x","participants":[]}', method: 'POST', url: '/api/lines/alpha/groups' }), res, makeDeps(), { name: 'alpha' });
 
       expect(res._status).toBe(500);
       const body = JSON.parse(res._body);
@@ -144,7 +139,7 @@ describe('mcp proxy honors isError tool envelopes (issue #257)', () => {
       });
       const res = mockRes();
       await handleCancelScheduled(
-        helperMockReq({ method: 'DELETE', url: '/api/lines/alpha/scheduled?id=5' }),
+        mockReq({ method: 'DELETE', url: '/api/lines/alpha/scheduled?id=5' }),
         res,
         makeDeps(),
         { name: 'alpha' },
@@ -164,7 +159,7 @@ describe('mcp proxy honors isError tool envelopes (issue #257)', () => {
       });
       const res = mockRes();
       await handleSearchContacts(
-        helperMockReq({ method: 'GET', url: '/api/lines/alpha/contacts/search?q=ana' }),
+        mockReq({ method: 'GET', url: '/api/lines/alpha/contacts/search?q=ana' }),
         res,
         makeDeps(),
         { name: 'alpha' },
@@ -184,7 +179,7 @@ describe('mcp proxy honors isError tool envelopes (issue #257)', () => {
       });
       const res = mockRes();
       await handleGetScheduled(
-        helperMockReq({ method: 'GET', url: '/api/lines/alpha/scheduled?status=oops' }),
+        mockReq({ method: 'GET', url: '/api/lines/alpha/scheduled?status=oops' }),
         res,
         makeDeps(),
         { name: 'alpha' },
@@ -202,7 +197,7 @@ describe('mcp proxy honors isError tool envelopes (issue #257)', () => {
         result: { content: [{ type: 'text', text: '{"jid":"g123"}' }] },
       });
       const res = mockRes();
-      await handleCreateGroup(mockReq('{"subject":"Ops","participants":[]}'), res, makeDeps(), { name: 'alpha' });
+      await handleCreateGroup(mockReq({ body: '{"subject":"Ops","participants":[]}', method: 'POST', url: '/api/lines/alpha/groups' }), res, makeDeps(), { name: 'alpha' });
 
       expect(res._status).toBe(201);
       expect(JSON.parse(res._body)).toEqual({ jid: 'g123' });
@@ -215,7 +210,7 @@ describe('mcp proxy honors isError tool envelopes (issue #257)', () => {
       });
       const res = mockRes();
       await handleSearchContacts(
-        helperMockReq({ method: 'GET', url: '/api/lines/alpha/contacts/search?q=ana' }),
+        mockReq({ method: 'GET', url: '/api/lines/alpha/contacts/search?q=ana' }),
         res,
         makeDeps(),
         { name: 'alpha' },
@@ -232,7 +227,7 @@ describe('mcp proxy honors isError tool envelopes (issue #257)', () => {
       });
       const res = mockRes();
       await handleCancelScheduled(
-        helperMockReq({ method: 'DELETE', url: '/api/lines/alpha/scheduled?id=5' }),
+        mockReq({ method: 'DELETE', url: '/api/lines/alpha/scheduled?id=5' }),
         res,
         makeDeps(),
         { name: 'alpha' },
@@ -247,7 +242,7 @@ describe('mcp proxy honors isError tool envelopes (issue #257)', () => {
     it('mcpWithBody returns 502 when result.success is false', async () => {
       vi.mocked(mcpCall).mockResolvedValue({ success: false, error: 'timeout' });
       const res = mockRes();
-      await handleCreateGroup(mockReq('{"subject":"x","participants":[]}'), res, makeDeps(), { name: 'alpha' });
+      await handleCreateGroup(mockReq({ body: '{"subject":"x","participants":[]}', method: 'POST', url: '/api/lines/alpha/groups' }), res, makeDeps(), { name: 'alpha' });
 
       expect(res._status).toBe(502);
       expect(JSON.parse(res._body)).toEqual({ error: 'timeout' });

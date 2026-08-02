@@ -5,7 +5,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
-import type { IncomingMessage, ServerResponse } from 'node:http';
+import type { ServerResponse } from 'node:http';
 import {
   handleGetChats,
   handleGetMessages,
@@ -30,11 +30,7 @@ const mockProxyToInstance = vi.mocked(proxyToInstance);
 // Mock helpers
 // ---------------------------------------------------------------------------
 
-import { mockReq as helperMockReq, mockRes } from '../../helpers/http-mocks.ts';
-
-function mockReq(url = '/'): IncomingMessage {
-  return helperMockReq({ url });
-}
+import { mockReq, mockRes } from '../../helpers/http-mocks.ts';
 
 function fakeInstance(overrides: Partial<DiscoveredInstance> = {}): DiscoveredInstance {
   return {
@@ -94,7 +90,7 @@ describe('handleGetChats', () => {
     });
 
     const res = mockRes();
-    handleGetChats(mockReq('/api/lines/test-line/chats'), res, deps, { name: 'test-line' });
+    handleGetChats(mockReq({ url: '/api/lines/test-line/chats' }), res, deps, { name: 'test-line' });
     expect(res._status).toBe(200);
     expect(JSON.parse(res._body)).toEqual([{
       conversationKey: '123@s.whatsapp.net',
@@ -117,7 +113,7 @@ describe('handleGetChats', () => {
     });
 
     const res = mockRes();
-    handleGetChats(mockReq('/api/lines/test-line/chats?limit=10&offset=20'), res, deps, { name: 'test-line' });
+    handleGetChats(mockReq({ url: '/api/lines/test-line/chats?limit=10&offset=20' }), res, deps, { name: 'test-line' });
     expect(deps.dbReader.getChats).toHaveBeenCalledWith('test-line', inst.dbPath, { limit: 10, offset: 20 });
   });
 
@@ -132,7 +128,7 @@ describe('handleGetChats', () => {
     });
 
     const res = mockRes();
-    handleGetChats(mockReq('/api/lines/test-line/chats?limit=9999'), res, deps, { name: 'test-line' });
+    handleGetChats(mockReq({ url: '/api/lines/test-line/chats?limit=9999' }), res, deps, { name: 'test-line' });
     expect(deps.dbReader.getChats).toHaveBeenCalledWith('test-line', inst.dbPath, { limit: 500, offset: 0 });
   });
 
@@ -178,7 +174,7 @@ describe('handleGetChats', () => {
     });
 
     const res = mockRes();
-    handleGetChats(mockReq('/api/lines/test-line/chats'), res, deps, { name: 'test-line' });
+    handleGetChats(mockReq({ url: '/api/lines/test-line/chats' }), res, deps, { name: 'test-line' });
 
     expect(res._status).toBe(200);
     expect(JSON.parse(res._body)).toEqual([{
@@ -246,7 +242,7 @@ describe('handleGetChats', () => {
     });
 
     const res = mockRes();
-    handleGetChats(mockReq('/api/lines/test-line/chats'), res, deps, { name: 'test-line' });
+    handleGetChats(mockReq({ url: '/api/lines/test-line/chats' }), res, deps, { name: 'test-line' });
 
     expect(res._status).toBe(200);
     expect(JSON.parse(res._body)).toEqual([
@@ -293,7 +289,7 @@ describe('handleGetChats', () => {
     });
 
     const res = mockRes();
-    handleGetChats(mockReq('/api/lines/test-line/chats'), res, deps, { name: 'test-line' });
+    handleGetChats(mockReq({ url: '/api/lines/test-line/chats' }), res, deps, { name: 'test-line' });
 
     expect(res._status).toBe(500);
     const body = JSON.parse(res._body);
@@ -321,7 +317,7 @@ describe('handleGetMessages', () => {
     });
 
     const res = mockRes();
-    handleGetMessages(mockReq('/api/lines/test-line/messages'), res, deps, { name: 'test-line' });
+    handleGetMessages(mockReq({ url: '/api/lines/test-line/messages' }), res, deps, { name: 'test-line' });
     expect(res._status).toBe(400);
     const body = JSON.parse(res._body);
     expect(body.schema).toBe('fleet-error-v1');
@@ -337,7 +333,7 @@ describe('handleGetMessages', () => {
 
     const res = mockRes();
     handleGetMessages(
-      mockReq('/api/lines/test-line/messages?conversation_key=123%40s.whatsapp.net'),
+      mockReq({ url: '/api/lines/test-line/messages?conversation_key=123%40s.whatsapp.net' }),
       res, deps, { name: 'test-line' },
     );
     expect(res._status).toBe(200);
@@ -356,7 +352,7 @@ describe('handleGetMessages', () => {
 
     const res = mockRes();
     handleGetMessages(
-      mockReq('/api/lines/test-line/messages?conversation_key=abc&before_pk=42&limit=10'),
+      mockReq({ url: '/api/lines/test-line/messages?conversation_key=abc&before_pk=42&limit=10' }),
       res, deps, { name: 'test-line' },
     );
     expect(deps.dbReader.getMessages).toHaveBeenCalledWith(
@@ -387,7 +383,7 @@ describe('handleGetMessages', () => {
     });
 
     const res = mockRes();
-    handleGetMessages(mockReq('/api/lines/test-line/messages?conversation_key=abc'), res, deps, { name: 'test-line' });
+    handleGetMessages(mockReq({ url: '/api/lines/test-line/messages?conversation_key=abc' }), res, deps, { name: 'test-line' });
 
     expect(res._status).toBe(200);
     expect(JSON.parse(res._body)).toEqual([{
@@ -424,7 +420,7 @@ describe('handleGetMessages', () => {
     });
 
     const res = mockRes();
-    handleGetMessages(mockReq('/api/lines/test-line/messages?conversation_key=abc'), res, deps, { name: 'test-line' });
+    handleGetMessages(mockReq({ url: '/api/lines/test-line/messages?conversation_key=abc' }), res, deps, { name: 'test-line' });
 
     expect(res._status).toBe(200);
     expect(JSON.parse(res._body)).toEqual([{
@@ -448,7 +444,7 @@ describe('handleGetMessages', () => {
     });
 
     const res = mockRes();
-    handleGetMessages(mockReq('/api/lines/test-line/messages?conversation_key=abc'), res, deps, { name: 'test-line' });
+    handleGetMessages(mockReq({ url: '/api/lines/test-line/messages?conversation_key=abc' }), res, deps, { name: 'test-line' });
 
     expect(res._status).toBe(500);
     const body = JSON.parse(res._body);
@@ -476,7 +472,7 @@ describe('handleSearchMessages', () => {
     });
 
     const res = mockRes();
-    handleSearchMessages(mockReq('/api/lines/test-line/messages/search'), res, deps, { name: 'test-line' });
+    handleSearchMessages(mockReq({ url: '/api/lines/test-line/messages/search' }), res, deps, { name: 'test-line' });
     expect(res._status).toBe(400);
     const body = JSON.parse(res._body);
     expect(body.schema).toBe('fleet-error-v1');
@@ -492,7 +488,7 @@ describe('handleSearchMessages', () => {
 
     const res = mockRes();
     handleSearchMessages(
-      mockReq('/api/lines/test-line/messages/search?q=receipt&conversation_key=abc&limit=7'),
+      mockReq({ url: '/api/lines/test-line/messages/search?q=receipt&conversation_key=abc&limit=7' }),
       res, deps, { name: 'test-line' },
     );
 
@@ -525,7 +521,7 @@ describe('handleSearchMessages', () => {
     });
 
     const res = mockRes();
-    handleSearchMessages(mockReq('/api/lines/test-line/messages/search?q=receipt'), res, deps, { name: 'test-line' });
+    handleSearchMessages(mockReq({ url: '/api/lines/test-line/messages/search?q=receipt' }), res, deps, { name: 'test-line' });
 
     expect(res._status).toBe(200);
     expect(JSON.parse(res._body)).toEqual({
@@ -552,7 +548,7 @@ describe('handleSearchMessages', () => {
     });
 
     const res = mockRes();
-    handleSearchMessages(mockReq('/api/lines/test-line/messages/search?q=receipt'), res, deps, { name: 'test-line' });
+    handleSearchMessages(mockReq({ url: '/api/lines/test-line/messages/search?q=receipt' }), res, deps, { name: 'test-line' });
 
     expect(res._status).toBe(500);
     const body = JSON.parse(res._body);
@@ -575,7 +571,7 @@ describe('handleSearchMessages', () => {
     });
 
     const res = mockRes();
-    handleSearchMessages(mockReq('/api/lines/test-line/messages/search?q=%20%20%20'), res, deps, { name: 'test-line' });
+    handleSearchMessages(mockReq({ url: '/api/lines/test-line/messages/search?q=%20%20%20' }), res, deps, { name: 'test-line' });
     expect(res._status).toBe(400);
     const body = JSON.parse(res._body);
     expect(body.schema).toBe('fleet-error-v1');
@@ -592,7 +588,7 @@ describe('handleSearchMessages', () => {
     });
 
     const res = mockRes();
-    handleSearchMessages(mockReq('/api/lines/test-line/messages/search?q=%20hello%20&conversation_key=chat-1'), res, deps, { name: 'test-line' });
+    handleSearchMessages(mockReq({ url: '/api/lines/test-line/messages/search?q=%20hello%20&conversation_key=chat-1' }), res, deps, { name: 'test-line' });
     expect(res._status).toBe(200);
     expect(searchMessages).toHaveBeenCalledWith('test-line', inst.dbPath, {
       query: 'hello',
@@ -615,7 +611,7 @@ describe('handleSearchMessages', () => {
     });
 
     const res = mockRes();
-    handleSearchMessages(mockReq('/api/lines/test-line/messages/search'), res, deps, { name: 'test-line' });
+    handleSearchMessages(mockReq({ url: '/api/lines/test-line/messages/search' }), res, deps, { name: 'test-line' });
     expect(res._status).toBe(400);
     const body = JSON.parse(res._body);
     expect(body.schema).toBe('fleet-error-v1');
@@ -631,7 +627,7 @@ describe('handleSearchMessages', () => {
     });
 
     const res = mockRes();
-    handleSearchMessages(mockReq('/api/lines/test-line/messages/search?q=%20%20%20'), res, deps, { name: 'test-line' });
+    handleSearchMessages(mockReq({ url: '/api/lines/test-line/messages/search?q=%20%20%20' }), res, deps, { name: 'test-line' });
     expect(res._status).toBe(400);
     const body = JSON.parse(res._body);
     expect(body.schema).toBe('fleet-error-v1');
@@ -648,7 +644,7 @@ describe('handleSearchMessages', () => {
     });
 
     const res = mockRes();
-    handleSearchMessages(mockReq('/api/lines/test-line/messages/search?q=%20hello%20&conversation_key=abc'), res, deps, { name: 'test-line' });
+    handleSearchMessages(mockReq({ url: '/api/lines/test-line/messages/search?q=%20hello%20&conversation_key=abc' }), res, deps, { name: 'test-line' });
     expect(res._status).toBe(200);
     expect(searchMessages).toHaveBeenCalledWith('test-line', inst.dbPath, {
       query: 'hello',
@@ -820,7 +816,7 @@ describe('handleGetLogs', () => {
     });
 
     const res = mockRes();
-    handleGetLogs(mockReq('/api/lines/test-line/logs?level=40'), res, deps, { name: 'test-line' });
+    handleGetLogs(mockReq({ url: '/api/lines/test-line/logs?level=40' }), res, deps, { name: 'test-line' });
     const body = JSON.parse(res._body);
     expect(body).toHaveLength(1);
     expect(body[0].msg).toBe('warn');
@@ -839,7 +835,7 @@ describe('handleGetLogs', () => {
     });
 
     const res = mockRes();
-    handleGetLogs(mockReq('/api/lines/test-line/logs?level=error'), res, deps, { name: 'test-line' });
+    handleGetLogs(mockReq({ url: '/api/lines/test-line/logs?level=error' }), res, deps, { name: 'test-line' });
     const body = JSON.parse(res._body);
     expect(body).toHaveLength(1);
     expect(body[0].msg).toBe('error-line');
@@ -857,7 +853,7 @@ describe('handleGetLogs', () => {
     });
 
     const res = mockRes();
-    handleGetLogs(mockReq('/api/lines/test-line/logs?limit=3'), res, deps, { name: 'test-line' });
+    handleGetLogs(mockReq({ url: '/api/lines/test-line/logs?limit=3' }), res, deps, { name: 'test-line' });
     const body = JSON.parse(res._body);
     expect(body).toHaveLength(3);
     // Should return the LAST 3 entries
@@ -978,7 +974,7 @@ describe('handleGetTyping', () => {
     });
 
     const res = mockRes();
-    await handleGetTyping(mockReq('/api/typing'), res, deps);
+    await handleGetTyping(mockReq({ url: '/api/typing' }), res, deps);
 
     expect(mockProxyToInstance).toHaveBeenCalledWith(3010, '/typing', 'GET', null, 'token', 2000);
     expect(res._status).toBe(200);
@@ -1008,7 +1004,7 @@ describe('handleGetTyping', () => {
       .mockResolvedValueOnce({ status: 200, body: JSON.stringify({ composing: [{ jid: 'valid@g.us', since: 40 }] }) });
 
     const res = mockRes();
-    await handleGetTyping(mockReq('/api/typing'), res, deps);
+    await handleGetTyping(mockReq({ url: '/api/typing' }), res, deps);
 
     expect(mockProxyToInstance).toHaveBeenCalledTimes(3);
     expect(res._status).toBe(200);
@@ -1041,14 +1037,14 @@ describe('handleCheckDirectory', () => {
 
   it('requires a path inside the home directory', () => {
     const missing = mockRes();
-    handleCheckDirectory(mockReq('/api/directories/check'), missing);
+    handleCheckDirectory(mockReq({ url: '/api/directories/check' }), missing);
     expect(missing._status).toBe(400);
     const missingBody = JSON.parse(missing._body);
     expect(missingBody.schema).toBe('fleet-error-v1');
     expect(missingBody.code).toBe('validation_failed');
 
     const outside = mockRes();
-    handleCheckDirectory(mockReq('/api/directories/check?path=/tmp'), outside);
+    handleCheckDirectory(mockReq({ url: '/api/directories/check?path=/tmp' }), outside);
     expect(outside._status).toBe(400);
     const outsideBody = JSON.parse(outside._body);
     expect(outsideBody.schema).toBe('fleet-error-v1');
@@ -1060,12 +1056,12 @@ describe('handleCheckDirectory', () => {
     fs.mkdirSync(existingDir);
 
     const existing = mockRes();
-    handleCheckDirectory(mockReq(`/api/directories/check?path=${encodeURIComponent(existingDir)}`), existing);
+    handleCheckDirectory(mockReq({ url: `/api/directories/check?path=${encodeURIComponent(existingDir)}` }), existing);
     expect(existing._status).toBe(200);
     expect(JSON.parse(existing._body)).toEqual({ exists: true, writable: true });
 
     const missing = mockRes();
-    handleCheckDirectory(mockReq(`/api/directories/check?path=${encodeURIComponent(path.join(process.env.HOME!, 'missing'))}`), missing);
+    handleCheckDirectory(mockReq({ url: `/api/directories/check?path=${encodeURIComponent(path.join(process.env.HOME!, 'missing'))}` }), missing);
     expect(missing._status).toBe(200);
     expect(JSON.parse(missing._body)).toEqual({ exists: false, writable: false });
   });
@@ -1098,17 +1094,17 @@ describe('handleCheckExists', () => {
     });
 
     const discovered = mockRes();
-    handleCheckExists(mockReq('/api/lines/known-line/exists'), discovered, deps, { name: 'known-line' });
+    handleCheckExists(mockReq({ url: '/api/lines/known-line/exists' }), discovered, deps, { name: 'known-line' });
     expect(JSON.parse(discovered._body)).toEqual({ exists: true });
 
     const configDir = path.join(process.env.XDG_CONFIG_HOME!, 'whatsoup', 'instances', 'config-line');
     fs.mkdirSync(configDir, { recursive: true });
     const configured = mockRes();
-    handleCheckExists(mockReq('/api/lines/config-line/exists'), configured, deps, { name: 'config-line' });
+    handleCheckExists(mockReq({ url: '/api/lines/config-line/exists' }), configured, deps, { name: 'config-line' });
     expect(JSON.parse(configured._body)).toEqual({ exists: true });
 
     const available = mockRes();
-    handleCheckExists(mockReq('/api/lines/new-line/exists'), available, deps, { name: 'new-line' });
+    handleCheckExists(mockReq({ url: '/api/lines/new-line/exists' }), available, deps, { name: 'new-line' });
     expect(JSON.parse(available._body)).toEqual({ exists: false });
   });
 });
@@ -1143,7 +1139,7 @@ describe('handleGetChats', () => {
     });
 
     const res = mockRes();
-    handleGetChats(mockReq('/api/lines/test-line/chats'), res, deps, { name: 'test-line' });
+    handleGetChats(mockReq({ url: '/api/lines/test-line/chats' }), res, deps, { name: 'test-line' });
 
     expect(res._status).toBe(200);
     expect(JSON.parse(res._body)).toEqual([{
@@ -1183,7 +1179,7 @@ describe('handleGetChats', () => {
     });
 
     const res = mockRes();
-    handleGetChats(mockReq('/api/lines/test-line/chats'), res, deps, { name: 'test-line' });
+    handleGetChats(mockReq({ url: '/api/lines/test-line/chats' }), res, deps, { name: 'test-line' });
 
     expect(res._status).toBe(200);
     expect(JSON.parse(res._body)).toEqual([expect.objectContaining({
@@ -1210,7 +1206,7 @@ describe('handleGetMessages', () => {
 
     const res = mockRes();
     handleGetMessages(
-      mockReq('/api/lines/test-line/messages?conversation_key=15550000001%40s.whatsapp.net&before_pk=abc'),
+      mockReq({ url: '/api/lines/test-line/messages?conversation_key=15550000001%40s.whatsapp.net&before_pk=abc' }),
       res, deps, { name: 'test-line' },
     );
     expect(res._status).toBe(200);
@@ -1229,7 +1225,7 @@ describe('handleGetMessages', () => {
 
     const res = mockRes();
     handleGetMessages(
-      mockReq('/api/lines/test-line/messages?conversation_key=15550000002%40s.whatsapp.net&limit=99999'),
+      mockReq({ url: '/api/lines/test-line/messages?conversation_key=15550000002%40s.whatsapp.net&limit=99999' }),
       res, deps, { name: 'test-line' },
     );
     expect(res._status).toBe(200);
@@ -1255,7 +1251,7 @@ describe('handleSearchMessages', () => {
 
     const res = mockRes();
     handleSearchMessages(
-      mockReq('/api/lines/test-line/messages/search?q=receipt&limit=99999'),
+      mockReq({ url: '/api/lines/test-line/messages/search?q=receipt&limit=99999' }),
       res, deps, { name: 'test-line' },
     );
     expect(res._status).toBe(200);
@@ -1272,7 +1268,7 @@ describe('handleSearchMessages', () => {
 
     const res = mockRes();
     handleSearchMessages(
-      mockReq('/api/lines/test-line/messages/search?q=receipt'),
+      mockReq({ url: '/api/lines/test-line/messages/search?q=receipt' }),
       res, deps, { name: 'test-line' },
     );
     expect(res._status).toBe(200);
@@ -1312,7 +1308,7 @@ describe('handleGetLogs', () => {
     });
 
     const res = mockRes();
-    handleGetLogs(mockReq('/api/lines/test-line/logs?level=bogus'), res, deps, { name: 'test-line' });
+    handleGetLogs(mockReq({ url: '/api/lines/test-line/logs?level=bogus' }), res, deps, { name: 'test-line' });
 
     expect(res._status).toBe(200);
     const body = JSON.parse(res._body);
@@ -1375,7 +1371,7 @@ describe('handleGetTyping', () => {
     });
 
     const res = mockRes();
-    await handleGetTyping(mockReq('/api/typing'), res, deps);
+    await handleGetTyping(mockReq({ url: '/api/typing' }), res, deps);
 
     expect(mockProxyToInstance).not.toHaveBeenCalled();
     expect(res._status).toBe(200);
@@ -1390,7 +1386,7 @@ describe('handleGetTyping', () => {
     mockProxyToInstance.mockRejectedValueOnce(new Error('ECONNREFUSED'));
 
     const res = mockRes();
-    await handleGetTyping(mockReq('/api/typing'), res, deps);
+    await handleGetTyping(mockReq({ url: '/api/typing' }), res, deps);
 
     expect(mockProxyToInstance).toHaveBeenCalledTimes(1);
     expect(res._status).toBe(200);
@@ -1422,7 +1418,7 @@ describe('handleCheckDirectory', () => {
   it('accepts the home directory root itself as within-bounds', () => {
     const home = process.env.HOME!;
     const res = mockRes();
-    handleCheckDirectory(mockReq(`/api/directories/check?path=${encodeURIComponent(home)}`), res);
+    handleCheckDirectory(mockReq({ url: `/api/directories/check?path=${encodeURIComponent(home)}` }), res);
     expect(res._status).toBe(200);
     expect(JSON.parse(res._body)).toEqual({ exists: true, writable: true });
   });
@@ -1432,7 +1428,7 @@ describe('handleCheckDirectory', () => {
     fs.writeFileSync(filePath, 'x');
 
     const res = mockRes();
-    handleCheckDirectory(mockReq(`/api/directories/check?path=${encodeURIComponent(filePath)}`), res);
+    handleCheckDirectory(mockReq({ url: `/api/directories/check?path=${encodeURIComponent(filePath)}` }), res);
     expect(res._status).toBe(200);
     expect(JSON.parse(res._body)).toEqual({ exists: false, writable: false });
   });
@@ -1446,7 +1442,7 @@ describe('handleCheckDirectory', () => {
     fs.chmodSync(roDir, 0o555);
     try {
       const res = mockRes();
-      handleCheckDirectory(mockReq(`/api/directories/check?path=${encodeURIComponent(roDir)}`), res);
+      handleCheckDirectory(mockReq({ url: `/api/directories/check?path=${encodeURIComponent(roDir)}` }), res);
       expect(res._status).toBe(200);
       expect(JSON.parse(res._body)).toEqual({ exists: true, writable: false });
     } finally {
