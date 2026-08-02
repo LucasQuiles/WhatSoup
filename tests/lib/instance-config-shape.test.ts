@@ -75,14 +75,15 @@ describe('parseRuntimeBootstrapConfig — Site 1 (config.ts)', () => {
     expect(parsed.systemPrompt).toBeUndefined();
     expect(parsed.socketPath).toBeUndefined();
     expect(parsed.introSent).toBeUndefined();
-    expect(parsed.paths).toEqual(fullPaths);
     expect(parsed.paths.tmpDir).toBeUndefined();
     expect(parsed.paths.authDir).toBeUndefined();
+    expect(parsed.paths).toEqual(fullPaths);
   });
 
   it('drops a non-object agentOptions silently (opaque passthrough, shape-only check)', () => {
     const parsed = parseRuntimeBootstrapConfig(JSON.stringify({ paths: fullPaths, agentOptions: 'not an object' }));
     expect(parsed.agentOptions).toBeUndefined();
+    expect(parsed.paths).toEqual(fullPaths);
   });
 
   it('rejects invalid JSON with the paths-object-agnostic parse-context message', () => {
