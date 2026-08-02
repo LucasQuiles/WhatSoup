@@ -1,20 +1,13 @@
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync, existsSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { mkdirSync, writeFileSync, readFileSync, existsSync, rmSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { afterEach, describe, expect, it } from 'vitest';
+import { describe, expect, it } from 'vitest';
+import { trackTmpDirs } from '../helpers/tmp-dir.ts';
 
 // Path to the script under test (resolved from repo root = process.cwd())
 const SCRIPT = resolve(process.cwd(), 'console/scripts/check-design-burndown.mjs');
 
-const tmpDirs: string[] = [];
-
-afterEach(() => {
-  for (const dir of tmpDirs) {
-    rmSync(dir, { recursive: true, force: true });
-  }
-  tmpDirs.length = 0;
-});
+const tmp = trackTmpDirs('design-');
 
 // ---------------------------------------------------------------------------
 // Fixture builders
@@ -116,8 +109,7 @@ function makeFixture(opts: {
   compositesCss?: string;
   tsx?: string | null;
 } = {}): Fixture {
-  const root = mkdtempSync(join(tmpdir(), 'design-burndown-'));
-  tmpDirs.push(root);
+  const root = tmp.make('burndown');
 
   const consoleDir = join(root, 'console');
   const stylesDir = join(consoleDir, 'src', 'styles');

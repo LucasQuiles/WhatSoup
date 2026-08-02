@@ -2,10 +2,12 @@ import { accessSync, chmodSync, constants, cpSync, existsSync, mkdirSync, mkdtem
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { afterEach, describe, expect, it } from 'vitest';
+import { describe, expect, it } from 'vitest';
+
+import { trackTmpDirs } from '../helpers/tmp-dir.ts';
 
 const SCRIPT = join(process.cwd(), 'scripts/check-launchd-drift.sh');
-const tmpDirs: string[] = [];
+const tmp = trackTmpDirs('');
 
 const FAKE_SECRET = 'sekrit-value-9f2c41';
 
@@ -103,8 +105,7 @@ function subst(template: string, repo: string, home: string, bot = ''): string {
 }
 
 function makeFixture(): { repo: string; launchd: string; bin: string; home: string } {
-  const root = mkdtempSync(join(tmpdir(), 'whatsoup-launchd-drift-'));
-  tmpDirs.push(root);
+  const root = tmp.make('whatsoup-launchd-drift');
   const repo = join(root, 'repo');
   const launchd = join(root, 'LaunchAgents');
   const bin = join(root, 'bin');
@@ -196,10 +197,6 @@ function runWithoutPythonOverride(
   });
 }
 
-afterEach(() => {
-  for (const dir of tmpDirs) rmSync(dir, { recursive: true, force: true });
-  tmpDirs.length = 0;
-});
 
 describe('check-launchd-drift.sh CLI + dir gate', () => {
   it('exits 2 on an unexpected argument', () => {

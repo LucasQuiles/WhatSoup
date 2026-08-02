@@ -2416,6 +2416,60 @@ describe('GET /health', () => {
     db2.close();
   });
 
+  it('projects a bounded failed enrichment-cycle receipt without copying arbitrary runtime detail', async () => {
+    db.close();
+    const db2 = makeDb();
+    const deps = makeDeps(db2, {
+      getEnrichmentStats: vi.fn().mockReturnValue({
+        lastRun: '2026-07-30T00:00:01.000Z',
+        unprocessed: 0,
+        runtimeDegraded: true,
+      }),
+      runtime: {
+        getHealthSnapshot: vi.fn().mockReturnValue({
+          status: 'degraded',
+          details: {
+            queue: { activeChats: 0, queuedChats: 0 },
+            enrichmentCycle: {
+              state: 'failed',
+              lastAttemptAt: '2026-07-30T00:00:03.000Z',
+              lastSuccessAt: '2026-07-30T00:00:01.000Z',
+              status: 'failed',
+              failureCode: 'selection_failed',
+              stage: 'selection',
+              retryable: true,
+              evidenceCoverage: 'typed',
+              privateMarker: 'PRIVATE-ENRICHMENT-DETAIL',
+            },
+          },
+        }),
+      } as any,
+    });
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    ({ server, port } = await buildTestServer(deps));
+
+    const { status, body } = await healthReq(port);
+    const json = JSON.parse(body);
+
+    expect(status).toBe(200);
+    expect(json.status).toBe('degraded');
+    expect(json.enrichment).toEqual({
+      last_run: '2026-07-30T00:00:01.000Z',
+      cycle: {
+        state: 'failed',
+        last_attempt_at: '2026-07-30T00:00:03.000Z',
+        last_success_at: '2026-07-30T00:00:01.000Z',
+        status: 'failed',
+        failure_code: 'selection_failed',
+        stage: 'selection',
+        retryable: true,
+        evidence_coverage: 'typed',
+      },
+    });
+    expect(body).not.toContain('PRIVATE-ENRICHMENT-DETAIL');
+    db2.close();
+  });
+
   it('projects bounded Chat queue-admission counters without copying runtime detail', async () => {
     db.close();
     const db2 = makeDb();

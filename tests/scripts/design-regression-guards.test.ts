@@ -1,19 +1,12 @@
-import { copyFileSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { copyFileSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { afterEach, describe, expect, it } from 'vitest';
+import { describe, expect, it } from 'vitest';
+import { trackTmpDirs } from '../helpers/tmp-dir.ts';
 
 const SCRIPT = resolve(process.cwd(), 'console/scripts/design-regression.sh');
 const WAIVER_SYNC_SCRIPT = resolve(process.cwd(), 'console/scripts/check-waiver-sync.mjs');
-const tmpDirs: string[] = [];
-
-afterEach(() => {
-  for (const dir of tmpDirs) {
-    rmSync(dir, { recursive: true, force: true });
-  }
-  tmpDirs.length = 0;
-});
+const tmp = trackTmpDirs('');
 
 function runScript(env: Record<string, string> = {}) {
   return spawnSync('bash', [SCRIPT], {
@@ -28,8 +21,7 @@ function makeWaiverFixture(opts: {
   source?: string;
   waivers?: string;
 } = {}) {
-  const root = mkdtempSync(join(tmpdir(), 'waiver-sync-'));
-  tmpDirs.push(root);
+  const root = tmp.make('waiver-sync');
 
   const consoleDir = join(root, 'console');
   const srcDir = join(consoleDir, 'src');
@@ -72,8 +64,7 @@ function runWaiverSync(consoleRoot: string) {
 }
 
 function makeDesignRegressionFixture(componentCss: string) {
-  const root = mkdtempSync(join(tmpdir(), 'design-regression-'));
-  tmpDirs.push(root);
+  const root = tmp.make('design-regression');
 
   const consoleDir = join(root, 'console');
   const scriptsDir = join(consoleDir, 'scripts');

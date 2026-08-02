@@ -4,8 +4,10 @@
 State root:
 - TOKENOMICS_STATE_DIR set: use that directory. Tests use this to avoid touching
   operator state.
-- TOKENOMICS_STATE_DIR unset: use
+- TOKENOMICS_STATE_DIR unset, darwin: use
   ~/Library/Application Support/<TOKENOMICS_BOT>-tokenomics.
+- TOKENOMICS_STATE_DIR unset, non-darwin: use XDG_STATE_HOME (or
+  ~/.local/state) /<TOKENOMICS_BOT>-tokenomics.
 
 The hook fails open on infrastructure errors: it exits 0 with no stdout so the
 tool call proceeds. Diagnostics go to stderr.
@@ -68,7 +70,11 @@ def state_root(bot: str) -> Path:
     override = os.environ.get("TOKENOMICS_STATE_DIR")
     if override:
         return Path(override)
-    return Path.home() / "Library" / "Application Support" / state_dir_name(bot)
+    if sys.platform == "darwin":
+        return Path.home() / "Library" / "Application Support" / state_dir_name(bot)
+    xdg_state = os.environ.get("XDG_STATE_HOME")
+    base = Path(xdg_state) if xdg_state else Path.home() / ".local" / "state"
+    return base / state_dir_name(bot)
 
 
 def state_path(root: Path, session_id: str) -> Path:

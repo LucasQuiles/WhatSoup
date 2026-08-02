@@ -74,6 +74,7 @@ import {
 } from '../../core/reply-guarantee.ts';
 import { clearAlertSourceChecked, emitAlertChecked } from '../../lib/emit-alert.ts';
 import { lookupCredential, resolveProviderKeyService } from '../../lib/keyring.ts';
+import { MS_PER_SECOND, MS_PER_MINUTE, MS_PER_HOUR, MS_PER_DAY } from '../../lib/time-units.ts';
 import { resolveProviderCredentialState, isProviderRoutable, spawnFailureCredentialNote } from '../../lib/provider-credential-eligibility.ts';
 import { createChildLogger } from '../../logger.ts';
 import {
@@ -323,18 +324,18 @@ interface LegacyProviderTurnOwner {
 }
 
 /** Maximum duration (ms) a control session is allowed to run before force-shutdown. */
-const CONTROL_SESSION_TIMEOUT_MS = 15 * 60 * 1000;
+const CONTROL_SESSION_TIMEOUT_MS = 15 * MS_PER_MINUTE;
 
 /** Max consecutive crashes before auto-respawn gives up and waits for user action. */
 const AUTO_RESPAWN_MAX_CRASHES = 3;
 /** Base delay (ms) before attempting auto-respawn after a crash. Actual delay uses exponential backoff. */
-const AUTO_RESPAWN_BASE_MS = 2_000;
+const AUTO_RESPAWN_BASE_MS = 2 * MS_PER_SECOND;
 /** Maximum respawn delay (ms) — caps the exponential backoff. */
-const AUTO_RESPAWN_MAX_DELAY_MS = 15_000;
+const AUTO_RESPAWN_MAX_DELAY_MS = 15 * MS_PER_SECOND;
 /** Periodic runtime health stats emission interval. */
-const HEALTH_STATS_INTERVAL_MS = 60_000;
-const SHARED_QUEUE_IDLE_MS = 60 * 60 * 1000;
-const SHARED_QUEUE_SWEEP_INTERVAL_MS = 10 * 60 * 1000;
+const HEALTH_STATS_INTERVAL_MS = MS_PER_MINUTE;
+const SHARED_QUEUE_IDLE_MS = MS_PER_HOUR;
+const SHARED_QUEUE_SWEEP_INTERVAL_MS = 10 * MS_PER_MINUTE;
 // Idle per-chat agent session lifecycle bounds. A resident session idle (no
 // message) beyond SESSION_IDLE_MS is suspended; sessions support --resume so the
 // next message rehydrates. MAX_RESIDENT_SESSIONS is an LRU ceiling so a burst of
@@ -344,18 +345,18 @@ const envPositiveInt = (key: string, fallback: number): number => {
   const raw = Number(process.env[key]);
   return Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : fallback;
 };
-const SESSION_IDLE_MS = envPositiveInt('WHATSOUP_SESSION_IDLE_MS', 60 * 60 * 1000); // 1h
-const SESSION_SWEEP_INTERVAL_MS = envPositiveInt('WHATSOUP_SESSION_SWEEP_MS', 10 * 60 * 1000); // 10m
+const SESSION_IDLE_MS = envPositiveInt('WHATSOUP_SESSION_IDLE_MS', MS_PER_HOUR); // 1h
+const SESSION_SWEEP_INTERVAL_MS = envPositiveInt('WHATSOUP_SESSION_SWEEP_MS', 10 * MS_PER_MINUTE); // 10m
 // #1756: the agent_sessions DB classifier used to run startup-only, so an
 // init-failure session landing in the 'ambiguous' bucket was skipped forever.
 // ZOMBIE_SESSION_SWEEP_INTERVAL_MS re-runs the classifier periodically;
 // AMBIGUOUS_SESSION_MAX_AGE_MS is the age (with zero processed messages)
 // past which an ambiguous row is independently re-verified and, if still not
 // alive+owned, marked terminal (see resolveAmbiguousAgeFallback).
-const ZOMBIE_SESSION_SWEEP_INTERVAL_MS = envPositiveInt('WHATSOUP_ZOMBIE_SWEEP_MS', 30 * 60 * 1000); // 30m
-const AMBIGUOUS_SESSION_MAX_AGE_MS = envPositiveInt('WHATSOUP_AMBIGUOUS_SESSION_MAX_AGE_MS', 24 * 60 * 60 * 1000); // 24h
+const ZOMBIE_SESSION_SWEEP_INTERVAL_MS = envPositiveInt('WHATSOUP_ZOMBIE_SWEEP_MS', 30 * MS_PER_MINUTE); // 30m
+const AMBIGUOUS_SESSION_MAX_AGE_MS = envPositiveInt('WHATSOUP_AMBIGUOUS_SESSION_MAX_AGE_MS', MS_PER_DAY); // 24h
 const MAX_RESIDENT_SESSIONS = envPositiveInt('WHATSOUP_MAX_SESSIONS', 12);
-const SESSION_MIN_RESIDENCY_MS = envPositiveInt('WHATSOUP_SESSION_MIN_RESIDENCY_MS', 5 * 60 * 1000); // 5m
+const SESSION_MIN_RESIDENCY_MS = envPositiveInt('WHATSOUP_SESSION_MIN_RESIDENCY_MS', 5 * MS_PER_MINUTE); // 5m
 // Single-sourced from conversation-key.ts so the tool/crash scope keys and the
 // tool_calls telemetry sentinel can never drift apart.
 const GLOBAL_TOOL_SCOPE_KEY = GLOBAL_CONVERSATION_KEY;
@@ -365,19 +366,19 @@ const MAX_TOOL_FAILURE_ALERT_DEDUP_KEYS = 1_000;
 // Default provider-fallback window when the usage-limit message names no reset
 // time. Claude usage limits operate on 5-hour rolling windows, so 5h is a safe
 // upper-bound estimate for when the primary provider becomes available again.
-const DEFAULT_FALLBACK_WINDOW_MS = 5 * 60 * 60 * 1000; // 18_000_000 ms (5h)
+const DEFAULT_FALLBACK_WINDOW_MS = 5 * MS_PER_HOUR; // 18_000_000 ms (5h)
 // Clamp the fallback window so a malformed/adversarial reset time can neither
 // revert almost immediately nor pin the fallback for an unreasonable span.
-const MIN_FALLBACK_WINDOW_MS = 60 * 1000; // 1 minute
-const MAX_FALLBACK_WINDOW_MS = 24 * 60 * 60 * 1000; // 24 hours
+const MIN_FALLBACK_WINDOW_MS = MS_PER_MINUTE; // 1 minute
+const MAX_FALLBACK_WINDOW_MS = MS_PER_DAY; // 24 hours
 const PROVIDER_FALLBACK_NOTICE_DEDUP_MS = (() => {
   const raw = Number(process.env['WHATSOUP_PROVIDER_FALLBACK_NOTICE_DEDUP_MS']);
-  return Number.isFinite(raw) && raw > 0 ? raw : 30 * 60 * 1000;
+  return Number.isFinite(raw) && raw > 0 ? raw : 30 * MS_PER_MINUTE;
 })();
 const PROVIDER_FALLBACK_PRIMARY_RECHECK_MS = (() => {
   const raw = Number(process.env['WHATSOUP_PROVIDER_FALLBACK_PRIMARY_RECHECK_MS']);
-  if (!Number.isFinite(raw) || raw <= 0) return 5 * 60 * 1000;
-  return Math.min(Math.max(raw, 30 * 1000), 30 * 60 * 1000);
+  if (!Number.isFinite(raw) || raw <= 0) return 5 * MS_PER_MINUTE;
+  return Math.min(Math.max(raw, 30 * MS_PER_SECOND), 30 * MS_PER_MINUTE);
 })();
 // The primary model usability probe has its own longer CLI deadline in
 // primary-model-usability-adapters.ts; shorter binary presence checks keep
@@ -409,11 +410,11 @@ function diagnosticBundleEnabled(): boolean {
 // window so a fallback storm — many chats failing at once, or rapid repeated
 // failures — cannot spawn a flurry of CLI auth-status probes, and so we do not
 // re-probe the same primary health redundantly.
-const DIAGNOSTIC_BUNDLE_THROTTLE_MS = 60_000;
+const DIAGNOSTIC_BUNDLE_THROTTLE_MS = MS_PER_MINUTE;
 // Max age of a handoff artifact before it is considered stale and dropped from
 // the injected system block. A stale summary misleads the stand-in, so the
 // prelude builder rejects artifacts older than this when composing context.
-const HANDOFF_STALE_MS = 120_000;
+const HANDOFF_STALE_MS = 2 * MS_PER_MINUTE;
 /**
  * `modelUsable` reports `true` only when the primary-model usability probe behind
  * it is no older than this window. A stale `usable` probe (e.g. after reverting to
@@ -421,7 +422,7 @@ const HANDOFF_STALE_MS = 120_000;
  * downgraded to `null` (unknown) so /health and monitors cannot read a green that
  * is hours out of date. See RCA 2026-06-24 (rb-bot stale-`modelUsable` gap).
  */
-const MODEL_USABILITY_FRESHNESS_MS = 30 * 60_000;
+const MODEL_USABILITY_FRESHNESS_MS = 30 * MS_PER_MINUTE;
 
 /**
  * Consecutive empty PRIMARY-provider user turns that force a provider fallback
@@ -471,7 +472,7 @@ const UNKNOWN_TERMINAL_FALLBACK_THRESHOLD = 2;
  *
  * See {@link AgentRuntime.maybeArmFallbackAfterEmptyPrimaryTurn}.
  */
-const EMPTY_OUTPUT_ARM_STARTUP_GRACE_MS = 60_000;
+const EMPTY_OUTPUT_ARM_STARTUP_GRACE_MS = MS_PER_MINUTE;
 type RuntimeTurnCapability = RuntimeTurnCapabilityHealth & {
   modelUsabilityStatus: PrimaryModelUsabilityResult['status'] | null;
   lastTurnErrorClass: TurnCapabilityErrorClass | null;
@@ -483,7 +484,7 @@ type RuntimeTurnCapability = RuntimeTurnCapabilityHealth & {
 // timeouts that fed an unbounded-growth spiral. Must stay < SILENT_COMPACT_TTL_MS
 // (defined in auto-compact-controller.ts) so the silent-compact flag does not
 // expire mid-compaction.
-const AUTO_COMPACT_TIMEOUT_MS = 4 * 60 * 1000;
+const AUTO_COMPACT_TIMEOUT_MS = 4 * MS_PER_MINUTE;
 /** Absolute wall bound for every non-auto provider request owned by the runtime. */
 const SYSTEM_TURN_TIMEOUT_MS = AUTO_COMPACT_TIMEOUT_MS;
 // Cooldown after a timed-out /compact before another auto-compact may be tried.
@@ -491,7 +492,7 @@ const SYSTEM_TURN_TIMEOUT_MS = AUTO_COMPACT_TIMEOUT_MS;
 // between attempts) rather than degrading for a long window; still long enough to
 // prevent a per-turn retry storm. A session that genuinely cannot compact is
 // ultimately recovered by the prompt-too-long kill+respawn path.
-const AUTO_COMPACT_TIMEOUT_BACKOFF_MS = 5 * 60 * 1000;
+const AUTO_COMPACT_TIMEOUT_BACKOFF_MS = 5 * MS_PER_MINUTE;
 // The success-cooldown, rapid-rearm window, and backoff tiers now live in
 // auto-compact-controller.ts alongside the state machine that uses them;
 // AUTO_COMPACT_RAPID_REARM_WINDOW_MS is imported above for the trigger gate.
@@ -984,7 +985,7 @@ export class AgentRuntime implements Runtime {
   /** Tool IDs for which the auto-resolved is_error tool_result should be suppressed. */
   private suppressedAskUserToolIds = new Set<string>();
   private groupMetadataCache = new Map<string, { adminJids: Set<string>; fetchedAt: number }>();
-  private static readonly GROUP_METADATA_CACHE_TTL_MS = 5 * 60 * 1000;
+  private static readonly GROUP_METADATA_CACHE_TTL_MS = 5 * MS_PER_MINUTE;
   private static readonly GROUP_METADATA_CACHE_MAX = 256;
 
   // Crash tracking — keyed by per-chat mapKey for per_chat runtimes and by a
@@ -1047,7 +1048,7 @@ export class AgentRuntime implements Runtime {
    * crash LOOPS are still caught by auto-respawn exhaustion (a separate alert), so
    * a short window here only governs the soft "crashed recently" health hint.
    */
-  private static readonly CRASH_HEALTH_DECAY_WINDOW_MS = 10 * 60_000;
+  private static readonly CRASH_HEALTH_DECAY_WINDOW_MS = 10 * MS_PER_MINUTE;
 
   private getRecentCrashCount(): number {
     return this.crashes.recentWithin(AgentRuntime.CRASH_HEALTH_DECAY_WINDOW_MS);
@@ -1897,7 +1898,7 @@ export class AgentRuntime implements Runtime {
   // When multiple images arrive for the same chat within IMAGE_COALESCE_MS,
   // they're collected and sent as one combined turn to avoid hitting Claude's
   // per-image dimension limits in multi-image sessions.
-  private static readonly IMAGE_COALESCE_MS = 3_000;
+  private static readonly IMAGE_COALESCE_MS = 3 * MS_PER_SECOND;
   private static readonly MAX_COALESCE_BATCH = 20;
   // Owns the per-chat image coalesce buffer map + durability marking / abort.
   // The turn-pipeline methods (coalesceImageTurn / flushImageCoalesce / LID rekey)
@@ -3422,7 +3423,7 @@ export class AgentRuntime implements Runtime {
 
         // Skip stale sessions — don't resume conversations that have been inactive for over 60 minutes.
         // Without this, every restart tries to resurrect days-old sessions and fires unsolicited messages.
-        const RESUME_MAX_AGE_MS = 60 * 60 * 1000;
+        const RESUME_MAX_AGE_MS = MS_PER_HOUR;
         if (full.updated_at) {
           const age = Date.now() - new Date(full.updated_at + 'Z').getTime();
           if (age > RESUME_MAX_AGE_MS) {
@@ -3492,7 +3493,7 @@ export class AgentRuntime implements Runtime {
             resumeOwnership,
           );
           // Small delay to let the init event propagate (confirms resume succeeded)
-          await sleep(1_000);
+          await sleep(MS_PER_SECOND);
           if (!session.getStatus().active) return; // resume failed, onResumeFailed handles it
           try {
             // Inject messages that arrived while the service was down.
@@ -3583,7 +3584,7 @@ export class AgentRuntime implements Runtime {
         priorSession = null;
       } else if (checkpoint?.updated_at) {
         const ageMs = Date.now() - new Date(checkpoint.updated_at + 'Z').getTime();
-        if (ageMs > 60 * 60 * 1000) {
+        if (ageMs > MS_PER_HOUR) {
           log.info({ chatJid: priorResumeIdentity.deliveryJid, ageMinutes: Math.round(ageMs / 60_000) },
             'skipping shared/single resume — session too stale');
           if (priorSession.workspace_key === null) {

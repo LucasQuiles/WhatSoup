@@ -3,7 +3,7 @@ import { createChildLogger } from '../../../logger.ts';
 import { resolveModelRole } from '../../../lib/model-advisor.ts';
 import type { LLMProvider } from '../providers/types.ts';
 import type { StoredMessage } from '../../../core/messages.ts';
-import { RAW_OUTPUT_TRUNCATE, truncateRaw } from './raw-output.ts';
+import { truncateRaw } from './raw-output.ts';
 import { stripJsonFences } from '../../../lib/json-fences.ts';
 import { EnrichmentError, type EnrichmentErrorStage, type EnrichmentErrorDetails } from './errors.ts';
 
@@ -134,7 +134,7 @@ export async function extractFacts(
   } catch (err) {
     if (strict) {
       // P3.6-H1 — log before throw so operators see the failure in telemetry.
-      log.error({ stage: 'provider-call', chatJid, err }, 'extractFacts: strict-mode provider-call failure');
+      log.error({ stage: 'provider-call' }, 'extractFacts: strict-mode provider-call failure');
       throw new ExtractionError('provider-call', {
         cause: err instanceof Error ? err : new Error(String(err)),
       });
@@ -151,7 +151,7 @@ export async function extractFacts(
   } catch {
     if (strict) {
       log.error(
-        { stage: 'json-parse', chatJid, raw: truncateRaw(raw) },
+        { stage: 'json-parse' },
         'extractFacts: strict-mode json-parse failure',
       );
       throw new ExtractionError('json-parse', { rawOutput: truncateRaw(raw) });
@@ -163,7 +163,7 @@ export async function extractFacts(
   if (!Array.isArray(parsed)) {
     if (strict) {
       log.error(
-        { stage: 'schema-shape', chatJid, raw: truncateRaw(raw) },
+        { stage: 'schema-shape' },
         'extractFacts: strict-mode schema-shape failure',
       );
       throw new ExtractionError('schema-shape', { rawOutput: truncateRaw(raw) });
@@ -267,7 +267,6 @@ export async function extractFacts(
     log.error(
       {
         stage: 'schema-items-all-dropped',
-        chatJid,
         droppedCount: schemaDrop,
         totalCount: parsed.length,
       },

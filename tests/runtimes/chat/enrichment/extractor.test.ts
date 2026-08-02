@@ -2,6 +2,13 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import type { LLMProvider } from '../../../../src/runtimes/chat/providers/types.ts';
 import type { StoredMessage } from '../../../../src/core/messages.ts';
 
+const mockLogger = vi.hoisted(() => ({
+  info: vi.fn(),
+  warn: vi.fn(),
+  error: vi.fn(),
+  debug: vi.fn(),
+}));
+
 // Mock config before importing extractor
 vi.mock('../../../../src/config.ts', () => ({
   config: {
@@ -14,12 +21,7 @@ vi.mock('../../../../src/config.ts', () => ({
 }));
 
 vi.mock('../../../../src/logger.ts', () => ({
-  createChildLogger: () => ({
-    info: vi.fn(),
-    warn: vi.fn(),
-    error: vi.fn(),
-    debug: vi.fn(),
-  }),
+  createChildLogger: () => mockLogger,
 }));
 
 import {
@@ -344,6 +346,24 @@ describe('extractFacts — strict mode (opt-in)', () => {
     });
   });
 
+  it('strict: provider failure logs only bounded stage metadata', async () => {
+    const privateErrorMarker = 'PRIVATE_EXTRACTION_PROVIDER_MARKER';
+    const privateChatMarker = 'private-extraction-chat-marker@g.us';
+    const provider: LLMProvider = {
+      name: 'mock',
+      generate: vi.fn().mockRejectedValue(new Error(privateErrorMarker)),
+    };
+
+    await expect(extractFacts(provider, [makeStoredMsg({ chatJid: privateChatMarker })], { strict: true }))
+      .rejects.toBeInstanceOf(ExtractionError);
+
+    expect(mockLogger.error).toHaveBeenCalledWith(
+      { stage: 'provider-call' },
+      'extractFacts: strict-mode provider-call failure',
+    );
+    expect(JSON.stringify(mockLogger.error.mock.calls)).not.toContain(privateChatMarker);
+  });
+
   it('strict: malformed JSON raises ExtractionError with stage=json-parse and truncated rawOutput', async () => {
     const provider = mockProvider('not json at all {{{'); // synthetic per P3.6-H1
     const msgs = [makeStoredMsg()];
@@ -357,6 +377,20 @@ describe('extractFacts — strict mode (opt-in)', () => {
       expect((e.details.rawOutput ?? '').length).toBeLessThanOrEqual(500);
       return true;
     });
+  });
+
+  it('strict: malformed output is not copied into logs', async () => {
+    const privateOutputMarker = 'PRIVATE_EXTRACTION_OUTPUT_MARKER';
+    const provider = mockProvider(privateOutputMarker);
+
+    await expect(extractFacts(provider, [makeStoredMsg()], { strict: true }))
+      .rejects.toBeInstanceOf(ExtractionError);
+
+    expect(mockLogger.error).toHaveBeenCalledWith(
+      { stage: 'json-parse' },
+      'extractFacts: strict-mode json-parse failure',
+    );
+    expect(JSON.stringify(mockLogger.error.mock.calls)).not.toContain(privateOutputMarker);
   });
 
   it('strict: non-array top-level raises ExtractionError with stage=schema-shape', async () => {

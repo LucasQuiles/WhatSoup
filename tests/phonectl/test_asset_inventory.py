@@ -13,6 +13,7 @@ from pathlib import Path
 
 from phonectl.asset_inventory import (
     AssetInventory,
+    AssetInventoryError,
     InventoryConflict,
     SensitiveLeak,
 )
@@ -578,6 +579,25 @@ class AssetInventoryTest(unittest.TestCase):
         self.assertTrue(proof["wifi_mandatory_satisfied"])
         self.assertEqual(proof["endpoint"], "192.0.2.44:5555")
         self.assertEqual(inv.count("physical_device"), 1)
+
+    def test_adb_getprop_wraps_missing_binary_as_asset_inventory_error(self) -> None:
+        # L4 falsifier: a missing/non-executable adb binary must surface as the typed
+        # AssetInventoryError, never as a raw OSError/FileNotFoundError escaping the method.
+        inv = self.inventory()
+        inv.init_db()
+        missing_adb = str(self.root / "no-such-adb-binary")
+
+        with self.assertRaises(AssetInventoryError):
+            inv._adb_getprop(missing_adb, "USB-SERIAL-A", "ro.product.manufacturer")
+
+    def test_discover_wraps_missing_adb_binary_as_asset_inventory_error(self) -> None:
+        # Same falsifier through the real call path (discover() -> _adb_getprop()).
+        inv = self.inventory()
+        inv.init_db()
+        missing_adb = str(self.root / "no-such-adb-binary")
+
+        with self.assertRaises(AssetInventoryError):
+            inv.discover(adb_target="USB-SERIAL-A", host="operator-host", adb_path=missing_adb)
 
     def test_secure_export_fails_closed_until_encryption_backend_is_implemented(self) -> None:
         inv = self.inventory()

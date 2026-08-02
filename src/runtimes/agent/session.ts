@@ -1012,6 +1012,17 @@ export class SessionManager {
           log.debug(record, 'kill-tree outcome');
         }
       },
+      // #1869: surface the cgroup-vs-PPID divergence gauge (PR #1960) at the one
+      // call site that reaches killSessionTree; it was landed telemetry-only with
+      // no sink ever wired, so it emitted nothing in production. Best-effort by
+      // construction (never throws, never affects termination) — see
+      // process-tree.ts's emitCgroupDivergence/KillSessionTreeOptions doc comments.
+      onCgroupDivergence: (info) => {
+        log.debug(
+          { ...info, chatJid: this.chatJid, sessionId: this.sessionId },
+          'cgroup divergence',
+        );
+      },
     });
   }
 

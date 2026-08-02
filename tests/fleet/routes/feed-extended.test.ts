@@ -21,9 +21,9 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
-import type { IncomingMessage, ServerResponse } from 'node:http';
 import { handleGetFeed, parsePinoLine, type FeedDeps } from '../../../src/fleet/routes/feed.ts';
 import type { DiscoveredInstance } from '../../../src/fleet/discovery.ts';
+import { mockReq, mockRes } from '../../helpers/http-mocks.ts';
 
 // ---------------------------------------------------------------------------
 // Helpers (match the pattern in the existing feed.test.ts)
@@ -33,20 +33,6 @@ const CTX = { instanceName: 'test-line', instanceType: 'passive' as const };
 
 function makeLine(fields: Record<string, unknown>): string {
   return JSON.stringify({ level: 30, time: 1700000000000, ...fields });
-}
-
-function mockReq(url = '/'): IncomingMessage {
-  return { url, method: 'GET', headers: {} } as unknown as IncomingMessage;
-}
-
-function mockRes(): ServerResponse & { _status: number; _body: unknown } {
-  const res = {
-    _status: 0,
-    _body: undefined as unknown,
-    writeHead(status: number) { res._status = status; },
-    end(data?: string) { if (data) res._body = JSON.parse(data); },
-  };
-  return res as any;
 }
 
 function fakeInstance(overrides: Partial<DiscoveredInstance> = {}): DiscoveredInstance {
@@ -180,9 +166,9 @@ describe('handleGetFeed — preview enrichment and limit', () => {
     });
 
     const res = mockRes();
-    handleGetFeed(mockReq('/api/feed?limit=10'), res, deps);
+    handleGetFeed(mockReq({ url: '/api/feed?limit=10' }), res, deps);
 
-    const body = res._body as any[];
+    const body = JSON.parse(res._body) as any[];
     const msgEvent = body.find((e: any) => e.detail?.type === 'message' && e.detail?.messageId === msgId);
     expect(msgEvent).toBeDefined();
     expect(msgEvent.detail.preview).toBe('Hello world from Bob');
@@ -218,9 +204,9 @@ describe('handleGetFeed — preview enrichment and limit', () => {
     });
 
     const res = mockRes();
-    handleGetFeed(mockReq('/api/feed?limit=10'), res, deps);
+    handleGetFeed(mockReq({ url: '/api/feed?limit=10' }), res, deps);
 
-    const body = res._body as any[];
+    const body = JSON.parse(res._body) as any[];
     const msgEvent = body.find((e: any) => e.detail?.type === 'message');
     // fallback is best-effort, may or may not hit depending on timestamp parse
     expect(res._status).toBe(200);
@@ -254,7 +240,7 @@ describe('handleGetFeed — preview enrichment and limit', () => {
 
     const res = mockRes();
     // Should not throw — preview errors are best-effort
-    handleGetFeed(mockReq('/api/feed?limit=10'), res, deps);
+    handleGetFeed(mockReq({ url: '/api/feed?limit=10' }), res, deps);
     expect(res._status).toBe(200);
     expect(dbReader.getMessagesByIds).toHaveBeenCalled();
   });
@@ -287,7 +273,7 @@ describe('handleGetFeed — preview enrichment and limit', () => {
     });
 
     const res = mockRes();
-    handleGetFeed(mockReq('/api/feed?limit=10'), res, deps);
+    handleGetFeed(mockReq({ url: '/api/feed?limit=10' }), res, deps);
     expect(res._status).toBe(200);
     // getRecentMessagesByChat should be attempted for events without messageId
     expect(dbReader.getRecentMessagesByChat).toHaveBeenCalled();
@@ -307,9 +293,9 @@ describe('handleGetFeed — preview enrichment and limit', () => {
     });
 
     const res = mockRes();
-    handleGetFeed(mockReq('/api/feed?limit=5'), res, deps);
+    handleGetFeed(mockReq({ url: '/api/feed?limit=5' }), res, deps);
 
-    const body = res._body as any[];
+    const body = JSON.parse(res._body) as any[];
     expect(body.length).toBeLessThanOrEqual(5);
     expect(res._status).toBe(200);
   });
@@ -358,9 +344,9 @@ describe('handleGetFeed — coalesceConnectionEvents uncovered branches', () => 
     });
 
     const res = mockRes();
-    handleGetFeed(mockReq('/api/feed?limit=10'), res, deps);
+    handleGetFeed(mockReq({ url: '/api/feed?limit=10' }), res, deps);
 
-    const body = res._body as any[];
+    const body = JSON.parse(res._body) as any[];
     const connEvents = body.filter((e: any) => e.detail?.type === 'connection');
     // Should be exactly 1 card (the connected state wins)
     expect(connEvents).toHaveLength(1);
@@ -384,9 +370,9 @@ describe('handleGetFeed — coalesceConnectionEvents uncovered branches', () => 
     });
 
     const res = mockRes();
-    handleGetFeed(mockReq('/api/feed?limit=10'), res, deps);
+    handleGetFeed(mockReq({ url: '/api/feed?limit=10' }), res, deps);
 
-    const body = res._body as any[];
+    const body = JSON.parse(res._body) as any[];
     const connEvents = body.filter((e: any) => e.detail?.type === 'connection');
     // Both connecting events are in same bucket with no error — first survives
     expect(connEvents).toHaveLength(1);
@@ -410,11 +396,11 @@ describe('handleGetFeed — coalesceConnectionEvents uncovered branches', () => 
     });
 
     const res = mockRes();
-    handleGetFeed(mockReq('/api/feed?limit=10'), res, deps);
+    handleGetFeed(mockReq({ url: '/api/feed?limit=10' }), res, deps);
 
     // Should not throw; status 200
     expect(res._status).toBe(200);
-    const body = res._body as any[];
+    const body = JSON.parse(res._body) as any[];
     expect(Array.isArray(body)).toBe(true);
   });
 });
@@ -469,9 +455,9 @@ describe('handleGetFeed — sanitizePreview whitespace-only content', () => {
     });
 
     const res = mockRes();
-    handleGetFeed(mockReq('/api/feed?limit=10'), res, deps);
+    handleGetFeed(mockReq({ url: '/api/feed?limit=10' }), res, deps);
 
-    const body = res._body as any[];
+    const body = JSON.parse(res._body) as any[];
     const msgEvent = body.find((e: any) => e.detail?.type === 'message' && e.detail?.messageId === msgId);
     // Preview should be absent (sanitizePreview returns undefined for whitespace-only)
     if (msgEvent) {
@@ -506,7 +492,7 @@ describe('handleGetFeed — healthStatusMessage/Level completeness', () => {
     // Transition to unreachable
     const res = mockRes();
     handleGetFeed(mockReq(), res, deps);
-    const body = res._body as any[];
+    const body = JSON.parse(res._body) as any[];
     const healthEvent = body.find((e: any) => e.detail?.type === 'health' && e.detail?.status === 'unreachable');
     // Either found (if instance was tracked in previousStatuses from a prior test run)
     // or the feed is clean — either way no throw

@@ -5,11 +5,10 @@
  * re-introduced itself after pairing.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { PassThrough } from 'node:stream';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import type { IncomingMessage, ServerResponse } from 'node:http';
+import type { ServerResponse } from 'node:http';
 
 const { mockLogWarn } = vi.hoisted(() => ({ mockLogWarn: vi.fn() }));
 
@@ -38,18 +37,7 @@ import type { DiscoveredInstance } from '../../../src/fleet/discovery.ts';
 import { privateConfigLockPath } from '../../../src/core/private-config-file.ts';
 import { acquireProcessLock, releaseProcessLock } from '../../../src/lib/process-lock.ts';
 import { spawn } from 'node:child_process';
-
-function mockReq(body = '', url = '/'): IncomingMessage {
-  const stream = new PassThrough() as unknown as IncomingMessage;
-  (stream as unknown as { headers: Record<string, string> }).headers = {};
-  (stream as unknown as { url: string }).url = url;
-  (stream as unknown as { method: string }).method = 'POST';
-  process.nextTick(() => {
-    (stream as unknown as PassThrough).write(body);
-    (stream as unknown as PassThrough).end();
-  });
-  return stream;
-}
+import { mockReq } from '../../helpers/http-mocks.ts';
 
 function mockSseRes(): ServerResponse & { _chunks: string[]; _ended: boolean } {
   const res = {
@@ -124,7 +112,7 @@ describe('handleAuth introSent reset failure', () => {
   it('warns when the introSent config rewrite fails after auth connects', async () => {
     const instance = fakeInstance();
     const deps = makeDeps(instance);
-    const req = mockReq('', '/api/lines/test-line/auth');
+    const req = mockReq({ method: 'POST', url: '/api/lines/test-line/auth' });
     const res = mockSseRes();
 
     const pending = handleAuth(req, res, deps, { name: 'test-line' });
@@ -177,7 +165,7 @@ describe('handleAuth introSent reset failure', () => {
     try {
       const instance = fakeInstance({ configPath });
       const deps = makeDeps(instance);
-      const req = mockReq('', '/api/lines/test-line/auth');
+      const req = mockReq({ method: 'POST', url: '/api/lines/test-line/auth' });
       const res = mockSseRes();
 
       const pending = handleAuth(req, res, deps, { name: 'test-line' });

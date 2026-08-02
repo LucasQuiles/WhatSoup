@@ -1,9 +1,9 @@
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
+import { trackTmpDirs } from '../helpers/tmp-dir.ts';
 import {
   checkFleetBotHardeningParity,
   DEFAULT_FLEET_BOT_HARDENING_PARITY_PATH,
@@ -13,15 +13,14 @@ import { receiptCapabilityDigest } from '../../scripts/lib/fleet-receipt-digest.
 import { rosterEpoch, rosterInventory } from '../../scripts/lib/fleet-roster-inventory.ts';
 
 const repoRoot = fileURLToPath(new URL('../..', import.meta.url));
-const tempRoots: string[] = [];
+const tmp = trackTmpDirs('whatsoup-fleet-hardening-');
 
 // Same conventional path the guard resolves against `cwd` (mirrors
 // `deploy/scripts/lib/bot_errors_roster.py`'s `default_roster_path()`).
 const FLEET_ROSTER_FIXTURE_PATH = 'deploy/bot-errors-expected-fleet.json';
 
 function makeRoot(): string {
-  const root = mkdtempSync(path.join(tmpdir(), 'whatsoup-fleet-hardening-parity-'));
-  tempRoots.push(root);
+  const root = tmp.make('parity');
   mkdirSync(path.join(root, 'docs/reliability-runner'), { recursive: true });
   return root;
 }
@@ -146,7 +145,6 @@ function makeFixtureHosts(n: number): Array<Record<string, unknown>> {
 afterEach(() => {
   vi.restoreAllMocks();
   process.exitCode = undefined;
-  for (const root of tempRoots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
 
 describe('fleet bot hardening parity guard', () => {

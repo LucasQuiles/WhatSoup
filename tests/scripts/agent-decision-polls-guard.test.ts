@@ -1,19 +1,17 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync, readFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { existsSync, mkdirSync, writeFileSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
 
 import { checkAgentDecisionPolls, run } from '../../scripts/agent-decision-polls-guard.ts';
+import { trackTmpDirs } from '../helpers/tmp-dir.ts';
 
 const repoRoot = fileURLToPath(new URL('../..', import.meta.url));
-const fixtureDirs: string[] = [];
+const tmp = trackTmpDirs('whatsoup-agent-polls-');
 
 function makeFixture(): string {
-  const dir = mkdtempSync(path.join(tmpdir(), 'whatsoup-agent-polls-guard-'));
-  fixtureDirs.push(dir);
-  return dir;
+  return tmp.make('guard');
 }
 
 function writeFixtureFile(fixture: string, relativePath: string, contents: string): void {
@@ -116,7 +114,6 @@ function replaceFixtureText(fixture: string, relativePath: string, before: strin
 afterEach(() => {
   vi.restoreAllMocks();
   process.exitCode = undefined;
-  for (const dir of fixtureDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
 });
 
 describe('agent decision polls guard', () => {

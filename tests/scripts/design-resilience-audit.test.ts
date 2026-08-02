@@ -1,8 +1,9 @@
 import { spawnSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { describe, expect, it } from 'vitest';
+
+import { trackTmpDirs } from '../helpers/tmp-dir.ts';
 
 const SCRIPT = resolve(process.cwd(), 'console/scripts/check-design-resilience.mjs');
 const PROMOTED_RULES = [
@@ -17,18 +18,10 @@ const PROMOTED_RULES = [
   'soup/scroll-owner-required',
 ];
 
-const tmpDirs: string[] = [];
-
-afterEach(() => {
-  for (const dir of tmpDirs) {
-    rmSync(dir, { recursive: true, force: true });
-  }
-  tmpDirs.length = 0;
-});
+const tmp = trackTmpDirs('');
 
 function makeFixture(source: string, filePath = 'console/src/Fixture.tsx') {
-  const root = mkdtempSync(join(tmpdir(), 'design-resilience-'));
-  tmpDirs.push(root);
+  const root = tmp.make('design-resilience');
   const absolute = join(root, filePath);
   mkdirSync(dirname(absolute), { recursive: true });
   writeFileSync(absolute, source);
@@ -480,8 +473,7 @@ export function Fixture() {
   });
 
   it('fails closed on an empty scan (zero files = broken glob, never a silent PASS)', () => {
-    const root = mkdtempSync(join(tmpdir(), 'design-resilience-empty-'));
-    tmpDirs.push(root);
+    const root = tmp.make('design-resilience-empty');
     const result = runScript(root);
     const output = parsedOutput(result);
 

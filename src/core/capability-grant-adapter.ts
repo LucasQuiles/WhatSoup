@@ -25,6 +25,7 @@
 
 import { existsSync, readFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
+import { z } from 'zod';
 
 import { writePermissionsSettings } from './workspace.ts';
 import { REQUIRED_DENY } from './settings-template.ts';
@@ -90,31 +91,64 @@ export function createSettingsPolicyAdapter(claudeDir: string): PolicyAdapter {
   return { read, apply };
 }
 
+/**
+ * Shape schema for GrantRecord.
+ *
+ * `.passthrough()` because the previous hand-rolled guard only checked the
+ * listed keys — payloads carrying unknown extra keys stay accepted.
+ * `armedAtMs`/`expiresAtMs` use `.int().safe()` rather than plain `.int()`:
+ * plain `.int()` accepts values like 2**60 (Number.isInteger true but
+ * Number.isSafeInteger false), which the previous `Number.isSafeInteger`
+ * check rejected. `satisfies` pins the schema output to the exported wire
+ * type at compile time.
+ */
+const GrantRecordShapeSchema = z.object({
+  version: z.literal(2),
+  armedAtMs: z.number().int().safe().nonnegative(),
+  expiresAtMs: z.number().int().safe().nullable(),
+  group: z.string().min(1),
+  capabilities: z.array(z.string()),
+  addedToAllow: z.array(z.string()),
+  removedFromDeny: z.array(z.string()),
+}).passthrough() satisfies z.ZodType<GrantRecord>;
+
+/**
+ * Full schema: shape plus the cross-field checks the previous ladder
+ * enforced inline — expiresAtMs (when non-null) must be strictly after
+ * armedAtMs, and every addedToAllow/removedFromDeny entry must be a member
+ * of capabilities.
+ */
+const GrantRecordSchema = GrantRecordShapeSchema.superRefine((record, ctx) => {
+  if (record.expiresAtMs !== null && record.expiresAtMs <= record.armedAtMs) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['expiresAtMs'],
+      message: 'expiresAtMs must be greater than armedAtMs',
+    });
+  }
+  for (const entry of record.addedToAllow) {
+    if (!record.capabilities.includes(entry)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['addedToAllow'],
+        message: `addedToAllow entry not present in capabilities: ${entry}`,
+      });
+    }
+  }
+  for (const entry of record.removedFromDeny) {
+    if (!record.capabilities.includes(entry)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['removedFromDeny'],
+        message: `removedFromDeny entry not present in capabilities: ${entry}`,
+      });
+    }
+  }
+});
+
 /** Shape-check persisted rollback state before it can drive reconciliation. */
 function isGrantRecord(v: unknown): v is GrantRecord {
-  if (v === null || typeof v !== 'object') return false;
-  const r = v as Record<string, unknown>;
-  const isStringArray = (value: unknown): value is string[] =>
-    Array.isArray(value) && value.every((entry) => typeof entry === 'string');
-  const capabilities = r.capabilities;
-  const addedToAllow = r.addedToAllow;
-  const removedFromDeny = r.removedFromDeny;
-  if (
-    !isStringArray(capabilities) ||
-    !isStringArray(addedToAllow) ||
-    !isStringArray(removedFromDeny)
-  ) {
-    return false;
-  }
-  return (
-    r.version === 2 &&
-    typeof r.group === 'string' && r.group.length > 0 &&
-    Number.isSafeInteger(r.armedAtMs) && (r.armedAtMs as number) >= 0 &&
-    (r.expiresAtMs === null ||
-      (Number.isSafeInteger(r.expiresAtMs) && (r.expiresAtMs as number) > (r.armedAtMs as number))) &&
-    addedToAllow.every((entry) => capabilities.includes(entry)) &&
-    removedFromDeny.every((entry) => capabilities.includes(entry))
-  );
+  return GrantRecordSchema.safeParse(v).success;
 }
 
 /**

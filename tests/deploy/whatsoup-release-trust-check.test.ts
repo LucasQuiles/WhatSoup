@@ -13,17 +13,14 @@
 // Contract pinned here: git work tree → git trust (unchanged); non-git with a
 // manifest → every closure file must be a regular non-symlink file whose
 // sha256 matches the manifest entry; anything else → FATAL, boot refused.
-import { afterEach, describe, expect, it } from 'vitest';
+import { describe, expect, it } from 'vitest';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
+import { trackTmpDirs } from '../helpers/tmp-dir.ts';
 
-const tmpDirs: string[] = [];
-afterEach(() => {
-  for (const dir of tmpDirs.splice(0)) fs.rmSync(dir, { recursive: true, force: true });
-});
+const tmp = trackTmpDirs('whatsoup-trust-');
 
 const TRUST_PATHS = [
   'scripts/source-runtime-drift-check.ts',
@@ -72,9 +69,8 @@ function writeManifest(root: string, over?: (files: Array<{ path: string; sha256
 }
 
 function runTrustBlock(repoRoot: string): { status: number | null; stderr: string } {
-  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'whatsoup-trust-runner-'));
-  tmpDirs.push(tmp);
-  const script = path.join(tmp, 'run-trust.sh');
+  const runnerDir = tmp.make('runner');
+  const script = path.join(runnerDir, 'run-trust.sh');
   fs.writeFileSync(script, [
     '#!/usr/bin/env bash',
     'set -uo pipefail',
@@ -91,8 +87,7 @@ function runTrustBlock(repoRoot: string): { status: number | null; stderr: strin
 }
 
 function makeRelease(): string {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'whatsoup-trust-release-'));
-  tmpDirs.push(root);
+  const root = tmp.make('release');
   makeReleaseTree(root);
   return root;
 }

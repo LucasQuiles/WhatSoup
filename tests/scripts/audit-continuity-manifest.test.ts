@@ -1,16 +1,14 @@
 import { createHash } from 'node:crypto';
 import {
   existsSync,
-  mkdtempSync,
   readFileSync,
-  rmSync,
   chmodSync,
   writeFileSync,
 } from 'node:fs';
-import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { trackTmpDirs } from '../helpers/tmp-dir.ts';
 import { Database } from '../../src/core/database.ts';
 import {
   parseAuditContinuityManifestArgs,
@@ -26,12 +24,10 @@ const packageJson = JSON.parse(readFileSync(
   'utf8',
 )) as { scripts: Record<string, string> };
 
-const tempRoots: string[] = [];
+const tmp = trackTmpDirs('whatsoup-continuity-');
 
 function makeTempRoot(): string {
-  const root = mkdtempSync(path.join(tmpdir(), 'whatsoup-continuity-audit-'));
-  tempRoots.push(root);
-  return root;
+  return tmp.make('audit');
 }
 
 function digest(value: string): string {
@@ -225,7 +221,6 @@ function captureRun(argv: string[]): {
 
 afterEach(() => {
   vi.restoreAllMocks();
-  for (const root of tempRoots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
 
 describe('audit-continuity-manifest CLI', () => {

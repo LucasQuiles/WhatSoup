@@ -20,6 +20,7 @@ import { shortHash } from '../lib/short-hash.ts';
 import { isRecord } from '../lib/type-guards.ts';
 import { createTypingStartGuard, type TypingStartGuard } from '../lib/typing-start-guard.ts';
 import { appendPrivateJsonLineSync, readFreshMarkerSync, writePrivateJsonMarkerSync } from '../lib/private-fs.ts';
+import { MS_PER_SECOND, MS_PER_MINUTE } from '../lib/time-units.ts';
 
 import { config } from '../config.ts';
 import { createChildLogger } from '../logger.ts';
@@ -250,7 +251,7 @@ export interface CredentialLifecycleSnapshot {
 }
 
 /** Maximum time to wait for a send operation before aborting. */
-const SEND_TIMEOUT_MS = 30_000;
+const SEND_TIMEOUT_MS = 30 * MS_PER_SECOND;
 
 /**
  * #1872: consecutive presence (typing-indicator) failures before the typing
@@ -266,7 +267,7 @@ export const TYPING_BREAKER_MAX_CONSECUTIVE_FAILURES = 3;
  * takes seconds is already useless, and a timeout counts as a failure toward the
  * breaker trip.
  */
-export const TYPING_PRESENCE_TIMEOUT_MS = 5_000;
+export const TYPING_PRESENCE_TIMEOUT_MS = 5 * MS_PER_SECOND;
 
 /** Wrap a promise with a timeout. Rejects with a descriptive error if it takes too long. */
 function withTimeout<T>(promise: Promise<T>, timeoutMs: number, operation: string): Promise<T> {
@@ -589,14 +590,14 @@ export class ConnectionManager extends EventEmitter implements Messenger {
       ? 'loggedOut/device-bond-lost state active; refusing to snapshot possibly poisoned credentials'
       : null,
   });
-  private static readonly RECENT_DISCONNECT_WINDOW_MS = 10 * 60 * 1000;
-  private static readonly MAX_FAILURE_DURATION_MS = 30 * 60 * 1000;
-  private static readonly COOLDOWN_MS = 5 * 60 * 1000;
-  private static readonly KEEPALIVE_INTERVAL_MS = 30_000;
-  private static readonly KEEPALIVE_TIMEOUT_MS = 10_000;
-  private static readonly AUTH_BOND_CLEAR_PROOF_TTL_MS = 10 * 60 * 1000;
-  private static readonly AUTH_BOND_SETTLED_SNAPSHOT_DELAY_MS = 60_000;
-  private static readonly AUTH_BOND_SETTLED_SNAPSHOT_MIN_INTERVAL_MS = 5 * 60_000;
+  private static readonly RECENT_DISCONNECT_WINDOW_MS = 10 * MS_PER_MINUTE;
+  private static readonly MAX_FAILURE_DURATION_MS = 30 * MS_PER_MINUTE;
+  private static readonly COOLDOWN_MS = 5 * MS_PER_MINUTE;
+  private static readonly KEEPALIVE_INTERVAL_MS = 30 * MS_PER_SECOND;
+  private static readonly KEEPALIVE_TIMEOUT_MS = 10 * MS_PER_SECOND;
+  private static readonly AUTH_BOND_CLEAR_PROOF_TTL_MS = 10 * MS_PER_MINUTE;
+  private static readonly AUTH_BOND_SETTLED_SNAPSHOT_DELAY_MS = MS_PER_MINUTE;
+  private static readonly AUTH_BOND_SETTLED_SNAPSHOT_MIN_INTERVAL_MS = 5 * MS_PER_MINUTE;
   private static readonly CREDENTIAL_LIFECYCLE_EVENT_LIMIT = 40;
 
   private readonly log = createChildLogger('connection');
@@ -709,8 +710,8 @@ export class ConnectionManager extends EventEmitter implements Messenger {
   }
 
   private static readonly MAX_RECONNECT_ATTEMPTS = 10;
-  private static readonly BASE_BACKOFF_MS = 1_000;
-  private static readonly MAX_BACKOFF_MS = 60_000;
+  private static readonly BASE_BACKOFF_MS = MS_PER_SECOND;
+  private static readonly MAX_BACKOFF_MS = MS_PER_MINUTE;
 
   constructor() {
     super();
@@ -773,7 +774,7 @@ export class ConnectionManager extends EventEmitter implements Messenger {
       const markerPath = join(config.dataRoot, 'exhausted.marker');
       const marker = readFreshMarkerSync<{ timestamp: string; cycles: number; instanceName: string }>(
         markerPath,
-        5 * 60 * 1000,
+        5 * MS_PER_MINUTE,
       );
       if (marker) {
         const ageMs = Date.now() - new Date(marker.timestamp).getTime();
@@ -2110,7 +2111,7 @@ export class ConnectionManager extends EventEmitter implements Messenger {
       if (statusCode === DisconnectReason.restartRequired) {
         const now = Date.now();
         this.restartRequiredTimestamps.push(now);
-        this.restartRequiredTimestamps = this.restartRequiredTimestamps.filter(t => now - t < 60_000);
+        this.restartRequiredTimestamps = this.restartRequiredTimestamps.filter(t => now - t < MS_PER_MINUTE);
         restartRequiredCount = this.restartRequiredTimestamps.length;
       }
 

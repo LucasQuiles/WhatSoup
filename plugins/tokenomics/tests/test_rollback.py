@@ -168,6 +168,42 @@ def test_from_path_reloads_journal_for_out_of_process_rollback(tmp_path):
     assert not target.exists()
 
 
+def test_from_path_skips_malformed_lines_instead_of_aborting(tmp_path):
+    """Crash-recovery must tolerate a corrupt/malformed journal line: skip
+    and record it rather than raising and aborting the entire rollback
+    (issue #2299 M2 — from_path() previously had zero per-line tolerance)."""
+    module = _load_module()
+    journal_path = tmp_path / "j.jsonl"
+    good_a = tmp_path / "a.txt"
+    good_b = tmp_path / "b.txt"
+    good_a.write_text("x", encoding="utf-8")
+    good_b.write_text("x", encoding="utf-8")
+
+    journal = module.RollbackJournal(journal_path=journal_path)
+    journal.record_file(good_a)
+    journal.record_file(good_b)
+
+    # Corrupt the middle line of an otherwise-valid 2-entry journal.
+    lines = journal_path.read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 2
+    corrupted = [lines[0], "{not valid json", lines[1]]
+    journal_path.write_text("\n".join(corrupted) + "\n", encoding="utf-8")
+
+    reloaded = module.RollbackJournal.from_path(journal_path)
+
+    assert len(reloaded._entries) == 2
+    assert len(reloaded.skipped_lines) == 1
+    skipped = reloaded.skipped_lines[0]
+    assert skipped.line_number == 2
+    assert "not valid json" in skipped.raw_line
+    assert skipped.error
+
+    failures = reloaded.undo()
+    assert failures == []
+    assert not good_a.exists()
+    assert not good_b.exists()
+
+
 def test_undo_persists_done_state_so_reload_does_not_double_execute(tmp_path):
     """Regression: a crash-recovery rollback that reloads the journal
     after a successful undo MUST NOT re-execute command undos. The

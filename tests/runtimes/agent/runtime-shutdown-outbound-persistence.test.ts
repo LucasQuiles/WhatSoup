@@ -21,24 +21,25 @@ const emitAlert = vi.hoisted(() => vi.fn(() => ({
   channel: 'outbox',
   status: 'durably_queued',
 })));
-const runtimeLogger = vi.hoisted(() => ({
-  info: vi.fn(),
-  warn: vi.fn(),
-  error: vi.fn(),
-  debug: vi.fn(),
-}));
 
-vi.mock('../../../src/logger.ts', () => ({
-  default: { ...runtimeLogger, child: () => runtimeLogger },
-  createChildLogger: () => runtimeLogger,
-  flushLogger: () => Promise.resolve(),
-}));
+vi.mock('../../../src/logger.ts', async () => {
+  const { singletonLoggerMock } = await import('../../helpers/logger-mock.ts');
+  const runtimeLogger = singletonLoggerMock();
+  return {
+    default: { ...runtimeLogger, child: () => runtimeLogger },
+    createChildLogger: () => runtimeLogger,
+    flushLogger: () => Promise.resolve(),
+  };
+});
 
 vi.mock('../../../src/lib/emit-alert.ts', async (importOriginal) => ({
   ...await importOriginal<typeof import('../../../src/lib/emit-alert.ts')>(),
   emitAlert,
   emitAlertChecked: emitAlert,
 }));
+
+import { createChildLogger } from '../../../src/logger.ts';
+const runtimeLogger = createChildLogger('test');
 
 interface Deferred<T> {
   readonly promise: Promise<T>;
