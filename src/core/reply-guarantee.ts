@@ -1,4 +1,5 @@
 import { createChildLogger } from '../logger.ts';
+import type { InboundStatus } from './durability.ts';
 import type { Messenger } from './types.ts';
 
 const log = createChildLogger('reply-guarantee');
@@ -10,7 +11,7 @@ const DEFAULT_REPLY_GUARANTEE_RATE_LIMIT_MS = 15 * 60 * 1000;
 export type InboundProcessingStatus = 'processing' | 'turn_done' | 'complete' | 'failed' | 'skipped';
 
 export interface ReplyGuaranteeDurability {
-  getInboundStatus(seq: number): InboundProcessingStatus | string | undefined;
+  getInboundStatus(seq: number): InboundStatus | undefined;
 }
 
 export interface ReplyGuaranteeFallbackInput {

@@ -193,7 +193,7 @@ const OUTBOUND_STATUSES = [
   'quarantined',
 ] as const;
 export type OutboundStatus = (typeof OUTBOUND_STATUSES)[number];
-type InboundStatus = 'pending' | 'processing' | 'turn_done' | 'complete' | 'failed';
+export type InboundStatus = 'pending' | 'processing' | 'turn_done' | 'complete' | 'failed';
 export type SessionStatus = 'active' | 'suspended' | 'orphaned' | 'ended';
 
 type OutboundQuarantineEvidenceCoverage =
@@ -1324,8 +1324,8 @@ export class DurabilityEngine {
     this.statements.markTurnDone.run(seq);
   }
 
-  getInboundStatus(seq: number): string | undefined {
-    const row = this.statements.selectInboundStatus.get(seq) as { processing_status: string } | undefined;
+  getInboundStatus(seq: number): InboundStatus | undefined {
+    const row = this.statements.selectInboundStatus.get(seq) as { processing_status: InboundStatus } | undefined;
     return row?.processing_status;
   }
 
