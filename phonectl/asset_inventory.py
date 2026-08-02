@@ -1045,13 +1045,16 @@ class AssetInventory:
         return out
 
     def _adb_getprop(self, adb: str, target: str, prop: str) -> str | None:
-        result = subprocess.run(
-            [adb, "-s", target, "shell", "getprop", prop],
-            text=True,
-            capture_output=True,
-            timeout=8,
-            check=False,
-        )
+        try:
+            result = subprocess.run(
+                [adb, "-s", target, "shell", "getprop", prop],
+                text=True,
+                capture_output=True,
+                timeout=8,
+                check=False,
+            )
+        except OSError as exc:
+            raise AssetInventoryError(f"adb invocation failed for {target}: {exc}") from exc
         if result.returncode != 0:
             raise AssetInventoryError(f"adb getprop failed for {target} {prop}: rc={result.returncode}")
         return normalize_blank(result.stdout)

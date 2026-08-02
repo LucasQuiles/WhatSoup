@@ -1,8 +1,9 @@
 import { describe, expect, expectTypeOf, it } from 'vitest';
-import type {
-  AdapterState,
-  AdapterHealth,
-  TransportAdapter,
+import {
+  ALL_ADAPTER_STATES,
+  type AdapterState,
+  type AdapterHealth,
+  type TransportAdapter,
 } from '../../../src/transport/contract/adapter.ts';
 import type { Capabilities } from '../../../src/transport/contract/capabilities.ts';
 import type { Subscription } from '../../../src/transport/contract/subscription.ts';
@@ -15,16 +16,11 @@ import type {
 } from '../../../src/core/transport-refs.ts';
 import type { SendTextOptions } from '../../../src/transport/contract/commands.ts';
 
-const VALID_STATES: readonly AdapterState[] = [
-  'starting',
-  'connected',
-  'degraded',
-  'disconnected',
-  'auth_required',
-  'rate_limited',
-  'exhausted',
-  'stopping',
-] as const;
+// Derived, not hand-mirrored: a state added to ALL_ADAPTER_STATES flows in here
+// automatically, and the explicit length assertions below go loud instead of
+// silently under-covering it (the pre-#2892 hand-array satisfied `readonly
+// AdapterState[]` even when incomplete).
+const VALID_STATES = ALL_ADAPTER_STATES;
 
 function makeStubAdapter(initialState: AdapterState = 'connected'): TransportAdapter {
   const startedAt = new Date();

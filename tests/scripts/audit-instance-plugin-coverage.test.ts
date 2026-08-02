@@ -1,19 +1,17 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { describe, expect, it } from 'vitest';
 import * as fs from 'node:fs';
-import * as os from 'node:os';
 import * as path from 'node:path';
 import {
   auditInstancePluginCoverage,
   findConfigFiles,
   parseArgs,
 } from '../../scripts/audit-instance-plugin-coverage.ts';
+import { trackTmpDirs } from '../helpers/tmp-dir.ts';
 
-const tmpDirs: string[] = [];
+const tmp = trackTmpDirs('plugin-coverage');
 
 function makeTmpDir(): string {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'plugin-coverage-'));
-  tmpDirs.push(dir);
-  return dir;
+  return tmp.make('');
 }
 
 function writeJson(filePath: string, value: unknown): void {
@@ -26,17 +24,6 @@ function writeInstance(root: string, name: string, config: Record<string, unknow
   writeJson(configPath, { name, type: 'agent', accessMode: 'self_only', adminPhones: ['15555550100'], ...config });
   return configPath;
 }
-
-afterEach(() => {
-  for (const dir of tmpDirs) {
-    try {
-      fs.rmSync(dir, { recursive: true });
-    } catch {
-      // ignore cleanup failures
-    }
-  }
-  tmpDirs.length = 0;
-});
 
 describe('audit-instance-plugin-coverage', () => {
   it('reports no gaps when an agent explicitly covers every user-scope plugin key', () => {

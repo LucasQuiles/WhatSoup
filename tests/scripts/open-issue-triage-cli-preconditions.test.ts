@@ -1,7 +1,6 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { describe, expect, it } from "vitest";
 
 import {
   run,
@@ -14,11 +13,12 @@ import {
   sha256,
   type OpenIssueRegistry,
 } from "../../scripts/lib/open-issue-triage/model.ts";
+import { trackTmpDirs } from "../helpers/tmp-dir.ts";
 
 const MAIN_SHA = "b".repeat(40);
 const OWNER_BODY = "Owner-authored body.\n";
 const REPOSITORY = "LucasQuiles/WhatSoup";
-const roots: string[] = [];
+const tmp = trackTmpDirs("");
 
 function registry(): OpenIssueRegistry {
   return {
@@ -75,8 +75,7 @@ function registry(): OpenIssueRegistry {
 }
 
 function fixtureRoot(): string {
-  const root = mkdtempSync(join(tmpdir(), "whatsoup-triage-preconditions-"));
-  roots.push(root);
+  const root = tmp.make("whatsoup-triage-preconditions");
   mkdirSync(join(root, "docs/triage/plans"), { recursive: true });
   writeFileSync(
     join(root, "docs/triage/open-issue-registry.json"),
@@ -116,12 +115,6 @@ function clientMustRemainUncalled(): GitHubIssueClient {
     },
   });
 }
-
-afterEach(() => {
-  for (const root of roots.splice(0)) {
-    rmSync(root, { recursive: true, force: true });
-  }
-});
 
 describe("open issue triage CLI local preconditions", () => {
   it("refuses untracked or dirty apply plans before client access", async () => {

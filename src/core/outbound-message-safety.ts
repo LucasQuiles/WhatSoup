@@ -32,6 +32,7 @@
 import { sanitizeProviderPreviewText } from '../lib/provider-preview-sanitizer.ts';
 import { jidPattern } from '../lib/redaction-patterns.ts';
 import { isAdminPhone } from '../lib/phone.ts';
+import { MS_PER_MINUTE } from '../lib/time-units.ts';
 import { isLidJid, isAuthenticatedSenderJid } from './jid-constants.ts';
 import { resolvePhoneFromJid } from './access-list.ts';
 import { createChildLogger } from '../logger.ts';
@@ -50,7 +51,7 @@ const audienceLog = createChildLogger('outbound-audience');
 // the deny DECISION is never deduped, and NFR-3 never-silent still holds:
 // every distinct chatJid warns, only repeats within the TTL are suppressed.
 // ---------------------------------------------------------------------------
-const SPOOF_WARN_TTL_MS = 10 * 60 * 1000;
+const SPOOF_WARN_TTL_MS = 10 * MS_PER_MINUTE;
 
 /** Maps chatJid → epoch ms of the last emitted spoof-attempt warn. */
 const spoofWarnLastLoggedAt = new Map<string, number>();

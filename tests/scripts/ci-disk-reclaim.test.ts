@@ -3,19 +3,17 @@ import {
   chmodSync,
   existsSync,
   mkdirSync,
-  mkdtempSync,
   readFileSync,
-  rmSync,
   writeFileSync,
 } from 'node:fs';
-import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { afterEach, describe, expect, it } from 'vitest';
+import { describe, expect, it } from 'vitest';
+import { trackTmpDirs } from '../helpers/tmp-dir.ts';
 
 const repoRoot = fileURLToPath(new URL('../..', import.meta.url));
 const scriptPath = path.join(repoRoot, 'scripts', 'ci-disk-reclaim.sh');
-const fixtures: string[] = [];
+const tmp = trackTmpDirs('whatsoup-ci-disk-');
 const budgetKib = 30 * 1024 * 1024;
 const allowlistedPaths = [
   '/usr/share/dotnet',
@@ -72,8 +70,7 @@ function parseReceipt(stdout: string): DiskReceipt | null {
 }
 
 function runHelper(options: RunOptions): RunResult {
-  const fixture = mkdtempSync(path.join(tmpdir(), 'whatsoup-ci-disk-reclaim-'));
-  fixtures.push(fixture);
+  const fixture = tmp.make('reclaim');
   const binDir = path.join(fixture, 'bin');
   mkdirSync(binDir);
 
@@ -160,12 +157,6 @@ exit "\${DOCKER_EXIT:-0}"
     commands: readFileSync(commandLog, 'utf8').split('\n').filter(Boolean),
   };
 }
-
-afterEach(() => {
-  for (const fixture of fixtures.splice(0)) {
-    rmSync(fixture, { recursive: true, force: true });
-  }
-});
 
 describe('CI disk reclaim helper', () => {
   it('uses the default 30 GiB budget and skips every mutation when space is sufficient', () => {

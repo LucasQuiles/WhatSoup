@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { createChildLogger } from '../logger.ts';
 import { emitAlertChecked, clearAlertSourceChecked } from '../lib/emit-alert.ts';
 import { gateQuarantineClear } from '../lib/fleet-health-gate.ts';
+import { MS_PER_MINUTE } from '../lib/time-units.ts';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
@@ -150,7 +151,7 @@ const log = createChildLogger('durability');
  * than this is stale misinformation, so dropping it is correct. Strictly scoped
  * to `op_type='status_ping'` — `text` ops have no age gate.
  */
-const STATUS_OP_TTL_MS = 30 * 60 * 1000;
+const STATUS_OP_TTL_MS = 30 * MS_PER_MINUTE;
 
 /**
  * PR-C: max deferrals for a `text` op before the drain quarantines it instead of
@@ -193,7 +194,7 @@ const OUTBOUND_STATUSES = [
   'quarantined',
 ] as const;
 export type OutboundStatus = (typeof OUTBOUND_STATUSES)[number];
-type InboundStatus = 'pending' | 'processing' | 'turn_done' | 'complete' | 'failed';
+export type InboundStatus = 'pending' | 'processing' | 'turn_done' | 'complete' | 'failed';
 export type SessionStatus = 'active' | 'suspended' | 'orphaned' | 'ended';
 
 type OutboundQuarantineEvidenceCoverage =
@@ -1324,8 +1325,8 @@ export class DurabilityEngine {
     this.statements.markTurnDone.run(seq);
   }
 
-  getInboundStatus(seq: number): string | undefined {
-    const row = this.statements.selectInboundStatus.get(seq) as { processing_status: string } | undefined;
+  getInboundStatus(seq: number): InboundStatus | undefined {
+    const row = this.statements.selectInboundStatus.get(seq) as { processing_status: InboundStatus } | undefined;
     return row?.processing_status;
   }
 

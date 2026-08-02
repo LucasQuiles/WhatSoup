@@ -19,6 +19,7 @@ import {
 } from '../../core/outbound-failure-disposition.ts';
 import { redactInternalArtifacts, resolveOutboundAudience } from '../../core/outbound-message-safety.ts';
 import { formatProviderErrorForUser } from '../../lib/provider-errors.ts';
+import { MS_PER_SECOND, MS_PER_MINUTE } from '../../lib/time-units.ts';
 import { isGroupJid } from '../../core/jid-constants.ts';
 import { config } from '../../config.ts';
 import { hasVisibleToolText } from './tool-update.ts';
@@ -152,11 +153,11 @@ export const MAX_CHUNKS = 12;
 const CHUNK_TRUNCATION_NOTICE = '… [reply truncated]';
 // Exported so tests can import the exact values rather than hardcoding them.
 // Changing a constant here will automatically break tests that rely on it.
-export const TOOL_BATCH_DELAY_MS = 5000;
-export const TOOL_BATCH_MAX_AGE_MS = 30_000;
+export const TOOL_BATCH_DELAY_MS = 5 * MS_PER_SECOND;
+export const TOOL_BATCH_MAX_AGE_MS = 30 * MS_PER_SECOND;
 export const MIN_SEND_GAP_MS = 500;
 /** Re-assert composing every N ms — WA auto-clears the indicator on the recipient side after ~10-15s. */
-export const TYPING_REFRESH_MS = 8_000;
+export const TYPING_REFRESH_MS = 8 * MS_PER_SECOND;
 /**
  * Hard upper bound on how long a single composing indicator may be re-asserted
  * without fresh turn activity. Safety net: if a future code path ever leaks a
@@ -164,13 +165,13 @@ export const TYPING_REFRESH_MS = 8_000;
  * Set well above the longest legitimate single tool chain; streaming text
  * re-arms typing and resets this clock.
  */
-export const TYPING_MAX_MS = 300_000; // 5 min
-export const SEND_TIMEOUT_MS = 15_000;
+export const TYPING_MAX_MS = 5 * MS_PER_MINUTE; // 5 min
+export const SEND_TIMEOUT_MS = 15 * MS_PER_SECOND;
 const OUTBOUND_SHUTDOWN_DEADLINE = Symbol('outbound_shutdown_deadline');
 /** Delay before flushing aggregated text — batches streaming provider fragments. */
-export const TEXT_AGGREGATE_DELAY_MS = 2_000;
+export const TEXT_AGGREGATE_DELAY_MS = 2 * MS_PER_SECOND;
 /** Suppress repeated terminal/error text from respawn loops without affecting normal repeated assistant output. */
-export const TERMINAL_TEXT_DEDUPE_WINDOW_MS = 5 * 60_000;
+export const TERMINAL_TEXT_DEDUPE_WINDOW_MS = 5 * MS_PER_MINUTE;
 /**
  * Coalesce identical progress placeholders ("_Still working..._", etc.) within this window.
  * A parallel tool batch arms one slow/stall timer per tool, so several operations cross
@@ -179,7 +180,7 @@ export const TERMINAL_TEXT_DEDUPE_WINDOW_MS = 5 * 60_000;
  * wide enough to span a staggered batch yet short enough that a genuinely later nudge —
  * after real continued silence — still reaches the user.
  */
-export const PROGRESS_TEXT_DEDUPE_WINDOW_MS = 30_000;
+export const PROGRESS_TEXT_DEDUPE_WINDOW_MS = 30 * MS_PER_SECOND;
 /**
  * Default persistent per-chat minimum spacing between progress placeholders.
  * Unlike PROGRESS_TEXT_DEDUPE_WINDOW_MS (a 30s per-TEXT window cleared every turn),
@@ -189,7 +190,7 @@ export const PROGRESS_TEXT_DEDUPE_WINDOW_MS = 30_000;
  * ReplyGuaranteeManager per-chat fallback floor. Per-instance override via
  * config.operationTracker.progressPlaceholderRateLimitMs (0 disables).
  */
-export const PROGRESS_PLACEHOLDER_RATE_FLOOR_MS = 180_000;
+export const PROGRESS_PLACEHOLDER_RATE_FLOOR_MS = 3 * MS_PER_MINUTE;
 /**
  * PR-E: hard per-turn cap on STATUS NARRATION messages (the `⚙️ Working on: • …`
  * tool batches and the `_… Still working …_` progress placeholders). Bounds the
@@ -207,7 +208,7 @@ export const MAX_STATUS_MESSAGES_PER_TURN = 10;
  * transport's 20-send threshold even when every individual turn is bounded.
  */
 export const MAX_STATUS_MESSAGES_PER_WINDOW = 10;
-export const STATUS_MESSAGE_WINDOW_MS = 5 * 60_000;
+export const STATUS_MESSAGE_WINDOW_MS = 5 * MS_PER_MINUTE;
 /**
  * PR-E: the single friendly note sent the first time a turn trips the status cap.
  * Classified as status delivery evidence, but emitted outside the counter gate so
@@ -392,8 +393,8 @@ export interface IOutboundQueue {
 
 export class OutboundQueue implements IOutboundQueue {
   private static readonly MAX_SEND_ATTEMPTS = 3;
-  private static readonly SEND_RETRY_BASE_MS = 1_000;
-  private static readonly SEND_RETRY_MAX_MS = 8_000;
+  private static readonly SEND_RETRY_BASE_MS = MS_PER_SECOND;
+  private static readonly SEND_RETRY_MAX_MS = 8 * MS_PER_SECOND;
 
   private readonly messenger: Messenger;
   private deliveryJid: string;

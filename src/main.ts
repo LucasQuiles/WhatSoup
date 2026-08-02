@@ -17,6 +17,7 @@ import { consumeIntentionalRestartMarker } from './runtimes/agent/self-restart.t
 import { emitAlertChecked } from './lib/emit-alert.ts';
 import { resolveLatestPluginDir } from './runtimes/agent/plugin-dir-resolver.ts';
 import { resolveAgentModel } from './instance-loader.ts';
+import { getLoadedInstanceConfigOrNull } from './lib/instance-context.ts';
 import { PassiveRuntime } from './runtimes/passive/runtime.ts';
 import { PineconeMemory, getPineconeReadinessObservation } from './runtimes/chat/providers/pinecone.ts';
 import { createAnthropicProvider } from './runtimes/chat/providers/anthropic.ts';
@@ -157,15 +158,15 @@ acquireLock();
 // Safety net: release lock even if shutdown() throws or is bypassed
 process.on('exit', () => releaseLock());
 
-// Parse INSTANCE_CONFIG before fallible bootstrap work so an agent boot can
-// be journaled immediately after this process owns the instance lock.
+// Parse the loaded instance config before fallible bootstrap work so an agent boot can
+// be journaled immediately after this process owns the instance lock. Typed
+// store over the env round-trip (#2206); absent-means-default semantics kept,
+// and the legacy invalid-JSON error contract is preserved verbatim.
 let instanceConfig: Record<string, unknown> | null = null;
-if (process.env.INSTANCE_CONFIG) {
-  try {
-    instanceConfig = JSON.parse(process.env.INSTANCE_CONFIG) as Record<string, unknown>;
-  } catch {
-    throw new Error('INSTANCE_CONFIG is set but is not valid JSON');
-  }
+try {
+  instanceConfig = getLoadedInstanceConfigOrNull();
+} catch (error) {
+  throw new Error('INSTANCE_CONFIG is set but is not valid JSON', { cause: error });
 }
 const instanceType = (instanceConfig?.type as string | undefined) ?? 'chat';
 const startupJournalPath = instanceType === 'agent' ? startupNotifyPath(config.stateRoot) : null;

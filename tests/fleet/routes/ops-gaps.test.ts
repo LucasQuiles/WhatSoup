@@ -39,7 +39,6 @@ import * as path from 'node:path';
 import * as os from 'node:os';
 import { PassThrough } from 'node:stream';
 import { EventEmitter } from 'node:events';
-import type { IncomingMessage, ServerResponse } from 'node:http';
 import {
   handleSend,
   handleAccessUpdate,
@@ -52,8 +51,8 @@ import {
   handleDeleteLine,
   handleAuth,
 } from '../../../src/fleet/routes/ops.ts';
-import type { OpsDeps } from '../../../src/fleet/routes/ops.ts';
 import type { DiscoveredInstance } from '../../../src/fleet/discovery.ts';
+import { makeDeps, mockReq, mockRes } from '../../helpers/http-mocks.ts';
 
 // ---------------------------------------------------------------------------
 // Mocks
@@ -80,35 +79,6 @@ import { spawn } from 'node:child_process';
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-function mockReq(body = '', url = '/'): IncomingMessage {
-  const stream = new PassThrough() as unknown as IncomingMessage;
-  (stream as any).headers = {};
-  (stream as any).url = url;
-  (stream as any).method = 'POST';
-  process.nextTick(() => {
-    (stream as unknown as PassThrough).write(body);
-    (stream as unknown as PassThrough).end();
-  });
-  return stream;
-}
-
-function mockRes(): ServerResponse & { _status: number; _headers: Record<string, string>; _body: string } {
-  const res = {
-    _status: 0,
-    _headers: {} as Record<string, string>,
-    _body: '',
-    writeHead(status: number, headers?: Record<string, string>) {
-      res._status = status;
-      if (headers) Object.assign(res._headers, headers);
-    },
-    end(data?: string) { if (data) res._body = data; },
-    // ServerResponse is an EventEmitter; createSSEWriter attaches an 'error'
-    // listener (#2292 L7), so a fake without `on` is an incomplete fake.
-    on() { return res; },
-  };
-  return res as any;
-}
 
 function mockSseRes() {
   const res = {
@@ -146,30 +116,6 @@ function fakeInstance(overrides: Partial<DiscoveredInstance> = {}): DiscoveredIn
   };
 }
 
-function mockServiceManager() {
-  return {
-    enable: vi.fn().mockResolvedValue(undefined),
-    disable: vi.fn().mockResolvedValue(undefined),
-    start: vi.fn().mockResolvedValue(undefined),
-    stop: vi.fn().mockResolvedValue(undefined),
-    restart: vi.fn().mockResolvedValue(undefined),
-    startFire: vi.fn(),
-  };
-}
-
-function makeDeps(overrides: Partial<OpsDeps> = {}): OpsDeps {
-  return {
-    discovery: {
-      getInstance: vi.fn(() => undefined),
-      getInstances: vi.fn(() => new Map()),
-      scan: vi.fn(),
-    } as any,
-    realtime: { publish: vi.fn() },
-    serviceManager: mockServiceManager(),
-    ...overrides,
-  };
-}
-
 function fakeChildProcess() {
   const child = new EventEmitter() as EventEmitter & {
     stdout: PassThrough;
@@ -197,9 +143,9 @@ describe('validateInstanceName — 400 on invalid name', () => {
 
   for (const name of VALID_NAMES) {
     it(`handleSend accepts name="${name}"`, async () => {
-      const deps = makeDeps();
+      const deps = makeDeps({ discovery: {} as any });
       const res = mockRes();
-      await handleSend(mockReq('{}'), res, deps, { name });
+      await handleSend(mockReq({ method: 'POST', body: '{}' }), res, deps, { name });
       expect(res._status).toBe(404);
       expect(JSON.parse(res._body)).toEqual({ error: `instance '${name}' not found` });
     });
@@ -209,72 +155,72 @@ describe('validateInstanceName — 400 on invalid name', () => {
     it(`handleSend rejects name="${name}"`, async () => {
       const deps = makeDeps({ discovery: { getInstance: vi.fn(() => fakeInstance()) } as any });
       const res = mockRes();
-      await handleSend(mockReq('{}'), res, deps, { name });
+      await handleSend(mockReq({ method: 'POST', body: '{}' }), res, deps, { name });
       expect(res._status).toBe(400);
       expect(JSON.parse(res._body)).toEqual({ error: 'invalid instance name' });
     });
   }
 
   it('handleAccessUpdate rejects invalid instance name', async () => {
-    const deps = makeDeps();
+    const deps = makeDeps({ discovery: {} as any });
     const res = mockRes();
-    await handleAccessUpdate(mockReq('{}'), res, deps, { name: 'INVALID' });
+    await handleAccessUpdate(mockReq({ method: 'POST', body: '{}' }), res, deps, { name: 'INVALID' });
     expect(res._status).toBe(400);
     expect(JSON.parse(res._body).error).toMatch(/invalid instance name/);
   });
 
   it('handleMarkRead rejects invalid instance name', async () => {
-    const deps = makeDeps();
+    const deps = makeDeps({ discovery: {} as any });
     const res = mockRes();
-    await handleMarkRead(mockReq('{}'), res, deps, { name: 'INVALID' });
+    await handleMarkRead(mockReq({ method: 'POST', body: '{}' }), res, deps, { name: 'INVALID' });
     expect(res._status).toBe(400);
     expect(JSON.parse(res._body).error).toMatch(/invalid instance name/);
   });
 
   it('handleSaveContact rejects invalid instance name', async () => {
-    const deps = makeDeps();
+    const deps = makeDeps({ discovery: {} as any });
     const res = mockRes();
-    await handleSaveContact(mockReq('{}'), res, deps, { name: 'INVALID' });
+    await handleSaveContact(mockReq({ method: 'POST', body: '{}' }), res, deps, { name: 'INVALID' });
     expect(res._status).toBe(400);
     expect(JSON.parse(res._body).error).toMatch(/invalid instance name/);
   });
 
   it('handleRestart rejects invalid instance name', async () => {
-    const deps = makeDeps();
+    const deps = makeDeps({ discovery: {} as any });
     const res = mockRes();
-    await handleRestart(mockReq(), res, deps, { name: 'INVALID' });
+    await handleRestart(mockReq({ method: 'POST' }), res, deps, { name: 'INVALID' });
     expect(res._status).toBe(400);
     expect(JSON.parse(res._body).error).toMatch(/invalid instance name/);
   });
 
   it('handleStop rejects invalid instance name', async () => {
-    const deps = makeDeps();
+    const deps = makeDeps({ discovery: {} as any });
     const res = mockRes();
-    await handleStop(mockReq(), res, deps, { name: 'INVALID' });
+    await handleStop(mockReq({ method: 'POST' }), res, deps, { name: 'INVALID' });
     expect(res._status).toBe(400);
     expect(JSON.parse(res._body).error).toMatch(/invalid instance name/);
   });
 
   it('handleConfigUpdate rejects invalid instance name', async () => {
-    const deps = makeDeps();
+    const deps = makeDeps({ discovery: {} as any });
     const res = mockRes();
-    await handleConfigUpdate(mockReq('{}'), res, deps, { name: 'INVALID' });
+    await handleConfigUpdate(mockReq({ method: 'POST', body: '{}' }), res, deps, { name: 'INVALID' });
     expect(res._status).toBe(400);
     expect(JSON.parse(res._body).error).toMatch(/invalid instance name/);
   });
 
   it('handleDeleteLine rejects invalid instance name', async () => {
-    const deps = makeDeps();
+    const deps = makeDeps({ discovery: {} as any });
     const res = mockRes();
-    await handleDeleteLine(mockReq(), res, deps, { name: 'INVALID' });
+    await handleDeleteLine(mockReq({ method: 'POST' }), res, deps, { name: 'INVALID' });
     expect(res._status).toBe(400);
     expect(JSON.parse(res._body).error).toMatch(/invalid instance name/);
   });
 
   it('handleAuth rejects invalid instance name', async () => {
-    const deps = makeDeps();
+    const deps = makeDeps({ discovery: {} as any });
     const res = mockSseRes();
-    await handleAuth(mockReq(), res, deps, { name: 'INVALID' });
+    await handleAuth(mockReq({ method: 'POST' }), res, deps, { name: 'INVALID' });
     expect(res._status).toBe(400);
   });
 });
@@ -293,7 +239,7 @@ describe('handleAccessUpdate — body validation', () => {
     const inst = fakeInstance();
     const deps = makeDeps({ discovery: { getInstance: vi.fn(() => inst) } as any });
     const res = mockRes();
-    await handleAccessUpdate(mockReq('not-json'), res, deps, { name: 'test-line' });
+    await handleAccessUpdate(mockReq({ method: 'POST', body: 'not-json' }), res, deps, { name: 'test-line' });
     expect(res._status).toBe(400);
     expect(JSON.parse(res._body).error).toMatch(/invalid JSON/);
   });
@@ -303,7 +249,7 @@ describe('handleAccessUpdate — body validation', () => {
     const deps = makeDeps({ discovery: { getInstance: vi.fn(() => inst) } as any });
     const res = mockRes();
     await handleAccessUpdate(
-      mockReq(JSON.stringify({ subjectId: '15551234567', action: 'allow' })),
+      mockReq({ method: 'POST', body: JSON.stringify({ subjectId: '15551234567', action: 'allow' }) }),
       res, deps, { name: 'test-line' },
     );
     expect(res._status).toBe(400);
@@ -315,7 +261,7 @@ describe('handleAccessUpdate — body validation', () => {
     const deps = makeDeps({ discovery: { getInstance: vi.fn(() => inst) } as any });
     const res = mockRes();
     await handleAccessUpdate(
-      mockReq(JSON.stringify({ subjectType: 'phone', subjectId: '15551234567', action: 'delete' })),
+      mockReq({ method: 'POST', body: JSON.stringify({ subjectType: 'phone', subjectId: '15551234567', action: 'delete' }) }),
       res, deps, { name: 'test-line' },
     );
     expect(res._status).toBe(400);
@@ -337,7 +283,7 @@ describe('handleSaveContact — jid validation', () => {
     const deps = makeDeps({ discovery: { getInstance: vi.fn(() => inst) } as any });
     const res = mockRes();
     await handleSaveContact(
-      mockReq(JSON.stringify({ firstName: 'Alice' })),
+      mockReq({ method: 'POST', body: JSON.stringify({ firstName: 'Alice' }) }),
       res, deps, { name: 'test-line' },
     );
     expect(res._status).toBe(400);
@@ -348,7 +294,7 @@ describe('handleSaveContact — jid validation', () => {
     const inst = fakeInstance();
     const deps = makeDeps({ discovery: { getInstance: vi.fn(() => inst) } as any });
     const res = mockRes();
-    await handleSaveContact(mockReq('oops'), res, deps, { name: 'test-line' });
+    await handleSaveContact(mockReq({ method: 'POST', body: 'oops' }), res, deps, { name: 'test-line' });
     expect(res._status).toBe(400);
   });
 
@@ -357,7 +303,7 @@ describe('handleSaveContact — jid validation', () => {
     const deps = makeDeps({ discovery: { getInstance: vi.fn(() => inst) } as any });
     const res = mockRes();
     await handleSaveContact(
-      mockReq(JSON.stringify({ jid: '15551234567@s.whatsapp.net' })),
+      mockReq({ method: 'POST', body: JSON.stringify({ jid: '15551234567@s.whatsapp.net' }) }),
       res, deps, { name: 'test-line' },
     );
     expect(res._status).toBe(503);
@@ -376,30 +322,28 @@ describe('handleStop', () => {
   });
 
   it('returns 404 for unknown instance', async () => {
-    const deps = makeDeps();
+    const deps = makeDeps({ discovery: {} as any });
     const res = mockRes();
-    await handleStop(mockReq(), res, deps, { name: 'nope' });
+    await handleStop(mockReq({ method: 'POST' }), res, deps, { name: 'nope' });
     expect(res._status).toBe(404);
   });
 
   it('calls serviceManager.stop and returns 202 on success', async () => {
     const inst = fakeInstance();
-    const svc = mockServiceManager();
-    const deps = makeDeps({ discovery: { getInstance: vi.fn(() => inst) } as any, serviceManager: svc });
+    const deps = makeDeps({ discovery: { getInstance: vi.fn(() => inst) } as any });
     const res = mockRes();
-    await handleStop(mockReq(), res, deps, { name: 'test-line' });
-    expect(svc.stop).toHaveBeenCalledWith('test-line');
+    await handleStop(mockReq({ method: 'POST' }), res, deps, { name: 'test-line' });
+    expect(deps.serviceManager.stop).toHaveBeenCalledWith('test-line');
     expect(res._status).toBe(202);
     expect(JSON.parse(res._body).status).toBe('stop_requested');
   });
 
   it('returns 500 when serviceManager.stop throws', async () => {
     const inst = fakeInstance();
-    const svc = mockServiceManager();
-    svc.stop.mockRejectedValueOnce(new Error('unit failed to stop'));
-    const deps = makeDeps({ discovery: { getInstance: vi.fn(() => inst) } as any, serviceManager: svc });
+    const deps = makeDeps({ discovery: { getInstance: vi.fn(() => inst) } as any });
+    vi.mocked(deps.serviceManager.stop).mockRejectedValueOnce(new Error('unit failed to stop'));
     const res = mockRes();
-    await handleStop(mockReq(), res, deps, { name: 'test-line' });
+    await handleStop(mockReq({ method: 'POST' }), res, deps, { name: 'test-line' });
     expect(res._status).toBe(500);
     const stopBody = JSON.parse(res._body);
     expect(stopBody.schema).toBe('fleet-error-v1');
@@ -423,7 +367,7 @@ describe('handleConfigUpdate — config read failure', () => {
     const deps = makeDeps({ discovery: { getInstance: vi.fn(() => inst) } as any });
     const res = mockRes();
     await handleConfigUpdate(
-      mockReq(JSON.stringify({ accessMode: 'community' })),
+      mockReq({ method: 'POST', body: JSON.stringify({ accessMode: 'community' }) }),
       res, deps, { name: 'test-line' },
     );
     expect(res._status).toBe(500);
@@ -437,7 +381,7 @@ describe('handleConfigUpdate — config read failure', () => {
     const deps = makeDeps({ discovery: { getInstance: vi.fn(() => inst) } as any });
     const res = mockRes();
     await handleConfigUpdate(
-      mockReq(JSON.stringify([1, 2, 3])),
+      mockReq({ method: 'POST', body: JSON.stringify([1, 2, 3]) }),
       res, deps, { name: 'test-line' },
     );
     expect(res._status).toBe(400);
@@ -456,9 +400,9 @@ describe('handleDeleteLine — name guard', () => {
   it('returns 400 for invalid name (already covered by cluster A)', async () => {
     // Confirms the code path is reachable via the dedicated name guard,
     // complementing the cluster-A tests above.
-    const deps = makeDeps();
+    const deps = makeDeps({ discovery: {} as any });
     const res = mockRes();
-    await handleDeleteLine(mockReq(), res, deps, { name: '..injection' });
+    await handleDeleteLine(mockReq({ method: 'POST' }), res, deps, { name: '..injection' });
     expect(res._status).toBe(400);
   });
 });
@@ -484,9 +428,9 @@ describe('handleCreateLine — body and field validation', () => {
   });
 
   it('returns 400 for non-JSON body', async () => {
-    const deps = makeDeps();
+    const deps = makeDeps({ discovery: {} as any });
     const res = mockRes();
-    await handleCreateLine(mockReq('not-json'), res, deps);
+    await handleCreateLine(mockReq({ method: 'POST', body: 'not-json' }), res, deps);
     expect(res._status).toBe(400);
     const nonJsonBody = JSON.parse(res._body);
     expect(nonJsonBody.schema).toBe('fleet-error-v1');
@@ -495,9 +439,9 @@ describe('handleCreateLine — body and field validation', () => {
   });
 
   it('returns 400 for array body', async () => {
-    const deps = makeDeps();
+    const deps = makeDeps({ discovery: {} as any });
     const res = mockRes();
-    await handleCreateLine(mockReq(JSON.stringify([1, 2])), res, deps);
+    await handleCreateLine(mockReq({ method: 'POST', body: JSON.stringify([1, 2]) }), res, deps);
     expect(res._status).toBe(400);
     const arrayBody = JSON.parse(res._body);
     expect(arrayBody.schema).toBe('fleet-error-v1');
@@ -506,28 +450,26 @@ describe('handleCreateLine — body and field validation', () => {
   });
 
   it('returns 400 for missing or invalid name (single char)', async () => {
-    const deps = makeDeps();
+    const deps = makeDeps({ discovery: {} as any });
     const res = mockRes();
-    await handleCreateLine(mockReq(JSON.stringify({ name: 'a', type: 'chat', adminPhones: ['15551234567'] })), res, deps);
+    await handleCreateLine(mockReq({ method: 'POST', body: JSON.stringify({ name: 'a', type: 'chat', adminPhones: ['15551234567'] }) }), res, deps);
     expect(res._status).toBe(400);
     expect(JSON.parse(res._body).error).toMatch(/name/);
   });
 
   it('returns 400 for uppercase name', async () => {
-    const deps = makeDeps();
+    const deps = makeDeps({ discovery: {} as any });
     const res = mockRes();
-    await handleCreateLine(mockReq(JSON.stringify({ name: 'MyLine', type: 'chat', adminPhones: ['15551234567'] })), res, deps);
+    await handleCreateLine(mockReq({ method: 'POST', body: JSON.stringify({ name: 'MyLine', type: 'chat', adminPhones: ['15551234567'] }) }), res, deps);
     expect(res._status).toBe(400);
     expect(JSON.parse(res._body).error).toMatch(/name/);
   });
 
   it('returns 400 for invalid type', async () => {
-    const deps = makeDeps({
-      discovery: { getInstance: vi.fn(() => undefined), getInstances: vi.fn(() => new Map()), scan: vi.fn() } as any,
-    });
+    const deps = makeDeps({ discovery: { scan: vi.fn() } as any });
     const res = mockRes();
     await handleCreateLine(
-      mockReq(JSON.stringify({ name: 'new-line', type: 'superagent', adminPhones: ['15551234567'] })),
+      mockReq({ method: 'POST', body: JSON.stringify({ name: 'new-line', type: 'superagent', adminPhones: ['15551234567'] }) }),
       res, deps,
     );
     expect(res._status).toBe(400);
@@ -535,12 +477,10 @@ describe('handleCreateLine — body and field validation', () => {
   });
 
   it('returns 400 for empty adminPhones array', async () => {
-    const deps = makeDeps({
-      discovery: { getInstance: vi.fn(() => undefined), getInstances: vi.fn(() => new Map()), scan: vi.fn() } as any,
-    });
+    const deps = makeDeps({ discovery: { scan: vi.fn() } as any });
     const res = mockRes();
     await handleCreateLine(
-      mockReq(JSON.stringify({ name: 'new-line', type: 'chat', adminPhones: [] })),
+      mockReq({ method: 'POST', body: JSON.stringify({ name: 'new-line', type: 'chat', adminPhones: [] }) }),
       res, deps,
     );
     expect(res._status).toBe(400);
@@ -548,12 +488,10 @@ describe('handleCreateLine — body and field validation', () => {
   });
 
   it('returns 400 for non-array adminPhones', async () => {
-    const deps = makeDeps({
-      discovery: { getInstance: vi.fn(() => undefined), getInstances: vi.fn(() => new Map()), scan: vi.fn() } as any,
-    });
+    const deps = makeDeps({ discovery: { scan: vi.fn() } as any });
     const res = mockRes();
     await handleCreateLine(
-      mockReq(JSON.stringify({ name: 'new-line', type: 'chat', adminPhones: '15551234567' })),
+      mockReq({ method: 'POST', body: JSON.stringify({ name: 'new-line', type: 'chat', adminPhones: '15551234567' }) }),
       res, deps,
     );
     expect(res._status).toBe(400);
@@ -561,17 +499,15 @@ describe('handleCreateLine — body and field validation', () => {
   });
 
   it('returns 400 for passive instance with systemPrompt', async () => {
-    const deps = makeDeps({
-      discovery: { getInstance: vi.fn(() => undefined), getInstances: vi.fn(() => new Map()), scan: vi.fn() } as any,
-    });
+    const deps = makeDeps({ discovery: { scan: vi.fn() } as any });
     const res = mockRes();
     await handleCreateLine(
-      mockReq(JSON.stringify({
+      mockReq({ method: 'POST', body: JSON.stringify({
         name: 'passive-bot',
         type: 'passive',
         adminPhones: ['15551234567'],
         systemPrompt: 'Do not include this',
-      })),
+      }) }),
       res, deps,
     );
     expect(res._status).toBe(400);
@@ -579,17 +515,15 @@ describe('handleCreateLine — body and field validation', () => {
   });
 
   it('returns 400 for healthPort out of range (too low)', async () => {
-    const deps = makeDeps({
-      discovery: { getInstance: vi.fn(() => undefined), getInstances: vi.fn(() => new Map()), scan: vi.fn() } as any,
-    });
+    const deps = makeDeps({ discovery: { scan: vi.fn() } as any });
     const res = mockRes();
     await handleCreateLine(
-      mockReq(JSON.stringify({
+      mockReq({ method: 'POST', body: JSON.stringify({
         name: 'low-port',
         type: 'chat',
         adminPhones: ['15551234567'],
         healthPort: 80,
-      })),
+      }) }),
       res, deps,
     );
     expect(res._status).toBe(400);
@@ -598,15 +532,11 @@ describe('handleCreateLine — body and field validation', () => {
 
   it('returns 409 when instance already exists in discovery', async () => {
     const deps = makeDeps({
-      discovery: {
-        getInstance: vi.fn(() => fakeInstance({ name: 'existing-line' })),
-        getInstances: vi.fn(() => new Map()),
-        scan: vi.fn(),
-      } as any,
+      discovery: { getInstance: vi.fn(() => fakeInstance({ name: 'existing-line' })), scan: vi.fn() } as any,
     });
     const res = mockRes();
     await handleCreateLine(
-      mockReq(JSON.stringify({ name: 'existing-line', type: 'chat', adminPhones: ['15551234567'] })),
+      mockReq({ method: 'POST', body: JSON.stringify({ name: 'existing-line', type: 'chat', adminPhones: ['15551234567'] }) }),
       res, deps,
     );
     expect(res._status).toBe(409);
@@ -635,21 +565,15 @@ describe('handleCreateLine — agentOptions validation', () => {
   });
 
   it('returns 400 when agentOptions.cwd is a number', async () => {
-    const deps = makeDeps({
-      discovery: {
-        getInstance: vi.fn(() => undefined),
-        getInstances: vi.fn(() => new Map()),
-        scan: vi.fn(),
-      } as any,
-    });
+    const deps = makeDeps({ discovery: { scan: vi.fn() } as any });
     const res = mockRes();
     await handleCreateLine(
-      mockReq(JSON.stringify({
+      mockReq({ method: 'POST', body: JSON.stringify({
         name: 'num-cwd-agent',
         type: 'agent',
         adminPhones: ['15551234567'],
         agentOptions: { cwd: 42, sessionScope: 'per_chat' },
-      })),
+      }) }),
       res, deps,
     );
     expect(res._status).toBe(400);
@@ -657,21 +581,15 @@ describe('handleCreateLine — agentOptions validation', () => {
   });
 
   it('returns 400 when agentOptions is an array', async () => {
-    const deps = makeDeps({
-      discovery: {
-        getInstance: vi.fn(() => undefined),
-        getInstances: vi.fn(() => new Map()),
-        scan: vi.fn(),
-      } as any,
-    });
+    const deps = makeDeps({ discovery: { scan: vi.fn() } as any });
     const res = mockRes();
     await handleCreateLine(
-      mockReq(JSON.stringify({
+      mockReq({ method: 'POST', body: JSON.stringify({
         name: 'arr-opts-agent',
         type: 'agent',
         adminPhones: ['15551234567'],
         agentOptions: ['bad'],
-      })),
+      }) }),
       res, deps,
     );
     expect(res._status).toBe(400);
@@ -694,18 +612,14 @@ describe('handleAuth — concurrency guards', () => {
     const child = fakeChildProcess();
     vi.mocked(spawn).mockReturnValue(child as any);
 
-    const svc = mockServiceManager();
-    const deps = makeDeps({
-      discovery: { getInstance: vi.fn(() => inst), scan: vi.fn() } as any,
-      serviceManager: svc,
-    });
+    const deps = makeDeps({ discovery: { getInstance: vi.fn(() => inst), scan: vi.fn() } as any });
 
     // Start first auth — do not await, so it stays in-flight
-    const promise1 = handleAuth(mockReq(), mockSseRes(), deps, { name: 'alpha' });
+    const promise1 = handleAuth(mockReq({ method: 'POST' }), mockSseRes(), deps, { name: 'alpha' });
 
     // Second concurrent request should get 409
     const res2 = mockRes();
-    await handleAuth(mockReq(), res2, deps, { name: 'alpha' });
+    await handleAuth(mockReq({ method: 'POST' }), res2, deps, { name: 'alpha' });
     expect(res2._status).toBe(409);
     expect(JSON.parse(res2._body).error).toMatch(/already in progress/);
 
@@ -752,7 +666,7 @@ describe('handleConfigUpdate — validateNumericBounds', () => {
     const deps = makeDeps({ discovery: { getInstance: vi.fn(() => inst) } as any });
     const res = mockRes();
     await handleConfigUpdate(
-      mockReq(JSON.stringify({ rateLimitPerHour: 0 })),
+      mockReq({ method: 'POST', body: JSON.stringify({ rateLimitPerHour: 0 }) }),
       res, deps, { name: 'test-line' },
     );
     expect(res._status).toBe(400);
@@ -771,7 +685,7 @@ describe('handleConfigUpdate — validateNumericBounds', () => {
     const deps = makeDeps({ discovery: { getInstance: vi.fn(() => inst) } as any });
     const res = mockRes();
     await handleConfigUpdate(
-      mockReq(JSON.stringify({ maxTokens: 100 })),
+      mockReq({ method: 'POST', body: JSON.stringify({ maxTokens: 100 }) }),
       res, deps, { name: 'test-line' },
     );
     expect(res._status).toBe(400);

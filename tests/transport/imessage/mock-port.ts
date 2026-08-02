@@ -22,6 +22,7 @@ export class MockImessagePort implements ImessagePort {
   readonly receipts: SendReadReceiptArgs[] = [];
   readonly typings: SendTypingArgs[] = [];
   verifyCalls = 0;
+  disposeCalls = 0;
   private nextGuid = 1;
 
   constructor(private opts: MockPortOptions = {}) {}
@@ -29,6 +30,11 @@ export class MockImessagePort implements ImessagePort {
   async verifyCredentials(): Promise<void> {
     this.verifyCalls++;
     if (this.opts.verifyError) throw this.opts.verifyError;
+  }
+
+  /** #2322 H2: mirrors ImsgPort.dispose() — call count only, no real socket. */
+  dispose(): void {
+    this.disposeCalls++;
   }
 
   async send(args: SendImessageArgs): Promise<{ guid: string }> {

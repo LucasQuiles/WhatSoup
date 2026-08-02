@@ -22,6 +22,7 @@ import type { TwilioSmsConfig } from './transport/twilio/types.ts';
 import type { ImessageConfig } from './transport/imessage/types.ts';
 import type { SignalConfig } from './transport/signal/types.ts';
 import { errorMessage } from './lib/error-message.ts';
+import { setLoadedInstanceConfig } from './lib/instance-context.ts';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -187,6 +188,8 @@ export function loadInstance(name: string, opts?: { authOnly?: boolean }): void 
   // verified the required fields; TS cannot narrow from Record<string,unknown>
   const config = { ...parsed, paths } as InstanceConfig;
 
-  // 7. Set env var
+  // 7. Publish the validated config: typed store is the in-process SSOT
+  // (#2206); the env var stays for the remaining compat consumers.
+  setLoadedInstanceConfig(config as unknown as Record<string, unknown>);
   process.env.INSTANCE_CONFIG = JSON.stringify(config);
 }

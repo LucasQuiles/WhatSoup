@@ -1,25 +1,10 @@
 import { describe, expect, it, vi, beforeEach } from 'vitest';
-import type { IncomingMessage, ServerResponse } from 'node:http';
 import { handleGetFleetMetrics, type FleetMetricsDeps } from '../../src/fleet/routes/fleet-metrics.ts';
+import { mockReq, mockRes } from '../helpers/http-mocks.ts';
 
 vi.mock('../../src/logger.ts', () => ({
   createChildLogger: () => ({ info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() }),
 }));
-
-function mockRes(): ServerResponse & { _statusCode: number; _body: any } {
-  const res = {
-    _statusCode: 0,
-    _body: null,
-    writeHead(code: number) { res._statusCode = code; return res; },
-    end(body: string) { res._body = JSON.parse(body); },
-    setHeader() {},
-  } as unknown as ServerResponse & { _statusCode: number; _body: any };
-  return res;
-}
-
-function mockReq(url: string): IncomingMessage {
-  return { url } as IncomingMessage;
-}
 
 describe('handleGetFleetMetrics — extended', () => {
   it('aggregates all 9 metrics across instances with meta flags', () => {
@@ -60,32 +45,33 @@ describe('handleGetFleetMetrics — extended', () => {
     };
 
     const res = mockRes();
-    handleGetFleetMetrics(mockReq('/api/metrics?range=24h'), res, deps);
+    handleGetFleetMetrics(mockReq({ url: '/api/metrics?range=24h' }), res, deps);
+    const body = JSON.parse(res._body);
 
-    expect(res._statusCode).toBe(200);
-    expect(res._body.range).toBe('24h');
-    expect(res._body.messageVolume).toHaveLength(1);
-    expect(res._body.messageVolume[0]).toEqual({
+    expect(res._status).toBe(200);
+    expect(body.range).toBe('24h');
+    expect(body.messageVolume).toHaveLength(1);
+    expect(body.messageVolume[0]).toEqual({
       bucket: '2026-04-05T15:00:00.000Z',
       inbound: 8,
       outbound: 5,
       media: 1,
     });
-    expect(res._body.tokenUsage[0]).toEqual({
+    expect(body.tokenUsage[0]).toEqual({
       bucket: '2026-04-05T15:00:00.000Z',
       input: 300,
       output: 125,
     });
-    expect(res._body.sessionActivity[0]).toEqual({
+    expect(body.sessionActivity[0]).toEqual({
       bucket: '2026-04-05T15:00:00.000Z',
       active: 3,
       started: 1,
     });
-    expect(res._body.meta.instancesQueried).toBe(2);
-    expect(res._body.meta.instancesFailed).toBe(0);
-    expect(res._body.meta.hasMessageData).toBe(true);
-    expect(res._body.meta.hasTokenData).toBe(true);
-    expect(res._body.meta.hasSessionData).toBe(true);
+    expect(body.meta.instancesQueried).toBe(2);
+    expect(body.meta.instancesFailed).toBe(0);
+    expect(body.meta.hasMessageData).toBe(true);
+    expect(body.meta.hasTokenData).toBe(true);
+    expect(body.meta.hasSessionData).toBe(true);
   });
 
   it('aggregates per-provider token and session data across instances', () => {
@@ -136,13 +122,14 @@ describe('handleGetFleetMetrics — extended', () => {
     };
 
     const res = mockRes();
-    handleGetFleetMetrics(mockReq('/api/metrics?range=24h'), res, deps);
+    handleGetFleetMetrics(mockReq({ url: '/api/metrics?range=24h' }), res, deps);
+    const body = JSON.parse(res._body);
 
-    expect(res._body.meta.providers.sort()).toEqual(['claude-cli', 'codex-cli']);
-    expect(res._body.tokenUsageByProvider['claude-cli'][0].input).toBe(100);
-    expect(res._body.tokenUsageByProvider['codex-cli'][0].input).toBe(200);
-    expect(res._body.sessionActivityByProvider['claude-cli'][0].active).toBe(2);
-    expect(res._body.sessionActivityByProvider['codex-cli'][0].active).toBe(1);
+    expect(body.meta.providers.sort()).toEqual(['claude-cli', 'codex-cli']);
+    expect(body.tokenUsageByProvider['claude-cli'][0].input).toBe(100);
+    expect(body.tokenUsageByProvider['codex-cli'][0].input).toBe(200);
+    expect(body.sessionActivityByProvider['claude-cli'][0].active).toBe(2);
+    expect(body.sessionActivityByProvider['codex-cli'][0].active).toBe(1);
   });
 
   it('handles partial instance failure with meta.instancesFailed', () => {
@@ -172,12 +159,13 @@ describe('handleGetFleetMetrics — extended', () => {
     };
 
     const res = mockRes();
-    handleGetFleetMetrics(mockReq('/api/metrics?range=24h'), res, deps);
+    handleGetFleetMetrics(mockReq({ url: '/api/metrics?range=24h' }), res, deps);
+    const body = JSON.parse(res._body);
 
-    expect(res._statusCode).toBe(200);
-    expect(res._body.meta.instancesQueried).toBe(2);
-    expect(res._body.meta.instancesFailed).toBe(1);
-    expect(res._body.messageVolume).toHaveLength(1);
-    expect(res._body.messageVolume[0].inbound).toBe(5);
+    expect(res._status).toBe(200);
+    expect(body.meta.instancesQueried).toBe(2);
+    expect(body.meta.instancesFailed).toBe(1);
+    expect(body.messageVolume).toHaveLength(1);
+    expect(body.messageVolume[0].inbound).toBe(5);
   });
 });

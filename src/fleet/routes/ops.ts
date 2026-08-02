@@ -12,6 +12,7 @@ import { SIGNAL_UUID_RE } from '../../transport/signal/types.ts';
 import { SIGNAL } from '../../lib/signals.ts';
 import { canonicalizeImessageDirectIdentity } from '../../core/transport-refs.ts';
 import { createChildLogger } from '../../logger.ts';
+import { MS_PER_MINUTE, MS_PER_SECOND } from '../../lib/time-units.ts';
 const log = createChildLogger('fleet:ops');
 import { mcpCall } from '../mcp-client.ts';
 import { respondMcp } from './mcp-proxy.ts';
@@ -1268,10 +1269,10 @@ const activeAuthProcesses = new Map<string, ReturnType<typeof spawn>>();
 const authInFlight = new Set<string>();
 
 // Auth session wall-clock timeout (5 minutes — QR codes expire in ~60s, allows 5 scan attempts)
-const AUTH_TIMEOUT_MS = 5 * 60 * 1000;
+const AUTH_TIMEOUT_MS = 5 * MS_PER_MINUTE;
 // The helper normally exits about two seconds after it persists credentials.
 // Keep a short, bounded window so that a hung helper cannot strand its service.
-const AUTH_COMPLETION_TIMEOUT_MS = 15 * 1000;
+const AUTH_COMPLETION_TIMEOUT_MS = 15 * MS_PER_SECOND;
 const ALLOWED_SSE_EVENTS = new Set(['qr', 'connected', 'error']);
 
 /** GET /api/lines/:name/auth — SSE stream of QR codes from the auth process. */

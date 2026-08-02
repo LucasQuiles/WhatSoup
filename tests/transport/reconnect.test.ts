@@ -82,23 +82,10 @@ vi.mock('../../src/core/retry.ts', () => ({
   },
 }));
 
-vi.mock('../../src/logger.ts', () => ({
-  createChildLogger: () => ({
-    info: vi.fn(),
-    warn: vi.fn(),
-    error: vi.fn(),
-    debug: vi.fn(),
-    fatal: vi.fn(),
-    child: () => ({
-      info: vi.fn(),
-      warn: vi.fn(),
-      error: vi.fn(),
-      debug: vi.fn(),
-      fatal: vi.fn(),
-      level: 'error',
-    }),
-  }),
-}));
+vi.mock('../../src/logger.ts', async () => {
+  const { loggerMock } = await import('../helpers/logger-mock.ts');
+  return loggerMock();
+});
 
 vi.mock('../../src/lib/emit-alert.ts', () => ({
   emitAlert: emitAlertMock,

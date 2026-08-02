@@ -3,6 +3,7 @@ import { join } from 'node:path';
 import { DEFAULT_INSTANCE_HEALTH_PORT } from './fleet/constants.ts';
 import { configRoot, instancePaths } from './fleet/paths.ts';
 import { DatabaseCompatibilityPermanentStartupError } from './core/database-compatibility-early.ts';
+import { setBootstrapInstanceContext } from './lib/instance-context.ts';
 
 const INSTANCE_NAME_RE = /^[a-z][a-z0-9-]*$/;
 
@@ -35,6 +36,9 @@ export function configureDatabaseCompatibilityBootstrap(instanceName: string): v
     // Deliberately defer missing/malformed unrelated config to loadInstance().
     // The database safety verdict remains observable on the canonical default.
   }
+  // Typed store is the in-process SSOT (#2206); the env var stays for the
+  // remaining compat consumers. A conflicting second write now throws.
+  setBootstrapInstanceContext({ name: instanceName, healthPort, paths });
   process.env.INSTANCE_CONFIG = JSON.stringify({
     name: instanceName,
     healthPort,
