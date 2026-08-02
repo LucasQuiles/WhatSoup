@@ -1,7 +1,8 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { Database } from '../../src/core/database.ts';
 import { DurabilityEngine, sendTracked } from '../../src/core/durability.ts';
-import type { InboundStatus, OutboundOpParams } from '../../src/core/durability.ts';
+import type { OutboundOpParams } from '../../src/core/durability.ts';
+import type { InboundStatus } from '../../src/core/inbound-status.ts';
 import { createInternalOutboundFailureEvidence } from '../../src/core/outbound-failure-disposition.ts';
 
 const BASE_OP: OutboundOpParams = {
