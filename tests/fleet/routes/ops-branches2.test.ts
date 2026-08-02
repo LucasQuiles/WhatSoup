@@ -18,8 +18,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
-import { PassThrough } from 'node:stream';
-import type { IncomingMessage, ServerResponse } from 'node:http';
+import type { ServerResponse } from 'node:http';
 
 vi.mock('../../../src/fleet/mcp-client.ts', () => ({ mcpCall: vi.fn() }));
 vi.mock('../../../src/fleet/http-proxy.ts', () => ({ proxyToInstance: vi.fn() }));
@@ -59,51 +58,11 @@ import type { OpsDeps } from '../../../src/fleet/routes/ops.ts';
 import type { DiscoveredInstance } from '../../../src/fleet/discovery.ts';
 import { REQUIRED_DENY } from '../../../src/core/settings-template.ts';
 import { spawn } from 'node:child_process';
+import { makeDeps, mockReq, mockRes } from '../../helpers/http-mocks.ts';
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-function mockReq(body = '', method = 'POST'): IncomingMessage {
-  const stream = new PassThrough() as unknown as IncomingMessage;
-  (stream as unknown as { headers: Record<string, string> }).headers = {};
-  (stream as unknown as { method: string }).method = method;
-  (stream as unknown as { url: string }).url = '/';
-  process.nextTick(() => {
-    const w = stream as unknown as PassThrough;
-    if (body) w.write(body);
-    w.end();
-  });
-  return stream;
-}
-
-interface JsonRes extends ServerResponse {
-  _status: number;
-  _headers: Record<string, string>;
-  _body: string;
-}
-
-function mockJsonRes(): JsonRes {
-  const res = {
-    _status: 0,
-    _headers: {} as Record<string, string>,
-    _body: '',
-    writeHead(status: number, headers?: Record<string, string>) {
-      res._status = status;
-      if (headers) Object.assign(res._headers, headers);
-      return res;
-    },
-    end(data?: string) {
-      if (data) res._body += data;
-      return res;
-    },
-    write(data: string) {
-      res._body += data;
-      return true;
-    },
-  };
-  return res as unknown as JsonRes;
-}
 
 function mockSseRes(): ServerResponse & { _chunks: string[]; _ended: boolean } {
   const res = {
@@ -148,23 +107,8 @@ function fakeInstance(overrides: Partial<DiscoveredInstance> = {}): DiscoveredIn
   } as DiscoveredInstance;
 }
 
-function makeDeps(instance: DiscoveredInstance | null = null): OpsDeps {
-  return {
-    discovery: {
-      getInstance: vi.fn(() => instance ?? undefined),
-      getInstances: vi.fn(() => new Map()),
-      scan: vi.fn(),
-    },
-    realtime: { publish: vi.fn() },
-    serviceManager: {
-      enable: vi.fn().mockResolvedValue(undefined),
-      disable: vi.fn().mockResolvedValue(undefined),
-      start: vi.fn().mockResolvedValue(undefined),
-      stop: vi.fn().mockResolvedValue(undefined),
-      restart: vi.fn().mockResolvedValue(undefined),
-      startFire: vi.fn(),
-    },
-  } as unknown as OpsDeps;
+function depsFor(instance: DiscoveredInstance | null = null): OpsDeps {
+  return makeDeps({ discovery: { getInstance: vi.fn(() => instance ?? undefined), scan: vi.fn() } as any });
 }
 
 // ---------------------------------------------------------------------------
@@ -203,13 +147,13 @@ describe('handleCreateLine: inventory failure carries errno code and instance', 
     const siblingDir = path.join(configRootDir, 'existing-sib');
     fs.mkdirSync(path.join(siblingDir, 'config.json'), { recursive: true });
 
-    const deps = makeDeps();
-    const req = mockReq(JSON.stringify({
+    const deps = depsFor();
+    const req = mockReq({ method: 'POST', body: JSON.stringify({
       name: 'new-line',
       type: 'chat',
       adminPhones: ['15551230006'],
-    }));
-    const res = mockJsonRes();
+    }) });
+    const res = mockRes();
     await handleCreateLine(req, res, deps);
 
     expect(res._status).toBe(500);
@@ -259,13 +203,13 @@ describe('handleCreateLine: mkdir failure other than EEXIST surfaces as 500', ()
     mkdirControl.code = 'ENOTDIR';
     mkdirControl.failFor = path.join('instances', 'mkdir-line');
 
-    const deps = makeDeps();
-    const req = mockReq(JSON.stringify({
+    const deps = depsFor();
+    const req = mockReq({ method: 'POST', body: JSON.stringify({
       name: 'mkdir-line',
       type: 'chat',
       adminPhones: ['15551230006'],
-    }));
-    const res = mockJsonRes();
+    }) });
+    const res = mockRes();
     await handleCreateLine(req, res, deps);
 
     expect(res._status).toBe(500);
@@ -285,8 +229,8 @@ describe('handleAuth: branch arms', () => {
   });
 
   it('skips blank stdout lines and ignores empty stderr chunks (lines 1334, 1367)', async () => {
-    const deps = makeDeps(fakeInstance());
-    const req = mockReq('', 'POST');
+    const deps = depsFor(fakeInstance());
+    const req = mockReq({ method: 'POST' });
     const res = mockSseRes();
     const pending = handleAuth(req, res, deps, { name: 'test-line' });
     await vi.waitFor(() => expect(vi.mocked(spawn)).toHaveBeenCalledTimes(1));
@@ -343,11 +287,7 @@ describe('handleConfigUpdate: agent path validation branch arms', () => {
       healthPort: 9099, dbPath: '/tmp/bot.db', stateRoot: '/tmp/state',
       logDir: '/tmp/logs', healthToken: 'tok', configPath: configFile, socketPath: null,
     } as DiscoveredInstance;
-    const deps = {
-      discovery: { getInstance: vi.fn(() => instance), getInstances: vi.fn(() => new Map()), scan: vi.fn() },
-      realtime: { publish: vi.fn() },
-      serviceManager: { restart: vi.fn(), stop: vi.fn(), disable: vi.fn(), enable: vi.fn() },
-    } as unknown as OpsDeps;
+    const deps = makeDeps({ discovery: { getInstance: vi.fn(() => instance), scan: vi.fn() } as any });
     return { instance, deps };
   }
 
@@ -363,8 +303,8 @@ describe('handleConfigUpdate: agent path validation branch arms', () => {
   it('rejects an agentOptions.cwd with an unsupported ~user tilde prefix (line 711)', async () => {
     const { deps } = agentInstance(homeTmp);
     // Patch cwd to a ~user form (not ~ or ~/) -> hasUnsupportedTildePrefix true.
-    const req = mockReq(JSON.stringify({ agentOptions: { cwd: '~root/workspace' } }), 'PATCH');
-    const res = mockJsonRes();
+    const req = mockReq({ method: 'PATCH', body: JSON.stringify({ agentOptions: { cwd: '~root/workspace' } }) });
+    const res = mockRes();
     await handleConfigUpdate(req, res, deps, { name: 'agent-x' });
 
     expect(res._status).toBe(400);
@@ -377,8 +317,8 @@ describe('handleConfigUpdate: agent path validation branch arms', () => {
     // The shared validator only checks string-ness; the route-level
     // validatePluginDirs enforces home-confinement and rejects an absolute
     // path that resolves outside $HOME.
-    const req = mockReq(JSON.stringify({ agentOptions: { pluginDirs: ['/etc/not-home'] } }), 'PATCH');
-    const res = mockJsonRes();
+    const req = mockReq({ method: 'PATCH', body: JSON.stringify({ agentOptions: { pluginDirs: ['/etc/not-home'] } }) });
+    const res = mockRes();
     await handleConfigUpdate(req, res, deps, { name: 'agent-x' });
 
     expect(res._status).toBe(400);
@@ -397,8 +337,8 @@ describe('handleConfigUpdate: agent path validation branch arms', () => {
     }));
 
     const plugins = { 'tmup@tmup-dev': true };
-    const req = mockReq(JSON.stringify({ agentOptions: { enabledPlugins: plugins } }), 'PATCH');
-    const res = mockJsonRes();
+    const req = mockReq({ method: 'PATCH', body: JSON.stringify({ agentOptions: { enabledPlugins: plugins } }) });
+    const res = mockRes();
     await handleConfigUpdate(req, res, deps, { name: 'agent-x' });
 
     expect(res._status).toBe(200);
@@ -447,18 +387,14 @@ describe('handleConfigUpdate: transport immutability + per-transport admin IDs',
       healthPort: 9099, dbPath: '/tmp/bot.db', stateRoot: '/tmp/state',
       logDir: '/tmp/logs', healthToken: 'tok', configPath: configFile, socketPath: null,
     } as DiscoveredInstance;
-    const deps = {
-      discovery: { getInstance: vi.fn(() => instance), getInstances: vi.fn(() => new Map()), scan: vi.fn() },
-      realtime: { publish: vi.fn() },
-      serviceManager: { restart: vi.fn(), stop: vi.fn(), disable: vi.fn(), enable: vi.fn() },
-    } as unknown as OpsDeps;
+    const deps = makeDeps({ discovery: { getInstance: vi.fn(() => instance), scan: vi.fn() } as any });
     return { instance, deps, configFile };
   }
 
   it('rejects a transport change with 409 (immutable)', async () => {
     const { deps } = transportInstance('baileys');
-    const req = mockReq(JSON.stringify({ transport: 'twilio' }), 'PATCH');
-    const res = mockJsonRes();
+    const req = mockReq({ method: 'PATCH', body: JSON.stringify({ transport: 'twilio' }) });
+    const res = mockRes();
     await handleConfigUpdate(req, res, deps, { name: 'line-x' });
     expect(res._status).toBe(409);
     expect(JSON.parse(res._body).error).toMatch(/transport is immutable/);
@@ -466,8 +402,8 @@ describe('handleConfigUpdate: transport immutability + per-transport admin IDs',
 
   it('accepts a patch that restates the same transport (no change)', async () => {
     const { deps, configFile } = transportInstance('signal');
-    const req = mockReq(JSON.stringify({ transport: 'signal', rateLimitPerHour: 50 }), 'PATCH');
-    const res = mockJsonRes();
+    const req = mockReq({ method: 'PATCH', body: JSON.stringify({ transport: 'signal', rateLimitPerHour: 50 }) });
+    const res = mockRes();
     await handleConfigUpdate(req, res, deps, { name: 'line-x' });
     expect(res._status).toBe(200);
     const merged = JSON.parse(fs.readFileSync(configFile, 'utf8'));
@@ -477,8 +413,8 @@ describe('handleConfigUpdate: transport immutability + per-transport admin IDs',
   it('normalizes a Signal UUID admin ID verbatim on a signal line', async () => {
     const { deps, configFile } = transportInstance('signal');
     const uuid = 'a1b2c3d4-1234-1234-1234-a1b2c3d4e5f6';
-    const req = mockReq(JSON.stringify({ adminPhones: [uuid] }), 'PATCH');
-    const res = mockJsonRes();
+    const req = mockReq({ method: 'PATCH', body: JSON.stringify({ adminPhones: [uuid] }) });
+    const res = mockRes();
     await handleConfigUpdate(req, res, deps, { name: 'line-x' });
     expect(res._status).toBe(200);
     const merged = JSON.parse(fs.readFileSync(configFile, 'utf8'));
@@ -487,8 +423,8 @@ describe('handleConfigUpdate: transport immutability + per-transport admin IDs',
 
   it('normalizes an AppleID email admin ID verbatim on an imessage line', async () => {
     const { deps, configFile } = transportInstance('imessage');
-    const req = mockReq(JSON.stringify({ adminPhones: ['boss@heal.internal'] }), 'PATCH');
-    const res = mockJsonRes();
+    const req = mockReq({ method: 'PATCH', body: JSON.stringify({ adminPhones: ['boss@heal.internal'] }) });
+    const res = mockRes();
     await handleConfigUpdate(req, res, deps, { name: 'line-x' });
     expect(res._status).toBe(200);
     const merged = JSON.parse(fs.readFileSync(configFile, 'utf8'));
@@ -497,8 +433,8 @@ describe('handleConfigUpdate: transport immutability + per-transport admin IDs',
 
   it('still digit-normalizes E.164 admin phones on a baileys line', async () => {
     const { deps, configFile } = transportInstance('baileys');
-    const req = mockReq(JSON.stringify({ adminPhones: ['+1 (555) 123-0006'] }), 'PATCH');
-    const res = mockJsonRes();
+    const req = mockReq({ method: 'PATCH', body: JSON.stringify({ adminPhones: ['+1 (555) 123-0006'] }) });
+    const res = mockRes();
     await handleConfigUpdate(req, res, deps, { name: 'line-x' });
     expect(res._status).toBe(200);
     const merged = JSON.parse(fs.readFileSync(configFile, 'utf8'));

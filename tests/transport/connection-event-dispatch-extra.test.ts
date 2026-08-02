@@ -42,13 +42,9 @@ vi.mock('../../src/config.ts', () => ({
   },
 }));
 
-vi.mock('../../src/logger.ts', () => {
-  const stub = () => ({
-    info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn(), fatal: vi.fn(),
-    level: 'error',
-    child: () => stub(),
-  });
-  return { createChildLogger: () => stub() };
+vi.mock('../../src/logger.ts', async () => {
+  const { loggerMock } = await import('../helpers/logger-mock.ts');
+  return loggerMock();
 });
 
 import { makeWASocket } from '@whiskeysockets/baileys';

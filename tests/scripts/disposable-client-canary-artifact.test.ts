@@ -1,5 +1,4 @@
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
@@ -7,8 +6,9 @@ import {
   run,
   validateDisposableClientCanaryArtifact,
 } from '../../scripts/disposable-client-canary-artifact.ts';
+import { trackTmpDirs } from '../helpers/tmp-dir.ts';
 
-const tempRoots: string[] = [];
+const tmp = trackTmpDirs('');
 
 function validArtifact(): Record<string, unknown> {
   return {
@@ -43,8 +43,7 @@ function rawLid(): string {
 }
 
 function makeTempArtifact(artifact: Record<string, unknown>): string {
-  const root = mkdtempSync(path.join(tmpdir(), 'whatsoup-canary-artifact-'));
-  tempRoots.push(root);
+  const root = tmp.make('whatsoup-canary-artifact');
   const file = path.join(root, 'artifact.json');
   writeFileSync(file, `${JSON.stringify(artifact, null, 2)}\n`, 'utf8');
   return file;
@@ -53,7 +52,6 @@ function makeTempArtifact(artifact: Record<string, unknown>): string {
 afterEach(() => {
   vi.restoreAllMocks();
   process.exitCode = undefined;
-  for (const root of tempRoots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
 
 describe('disposable client canary artifact contract', () => {

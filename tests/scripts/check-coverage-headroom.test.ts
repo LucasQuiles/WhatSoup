@@ -1,23 +1,18 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { mkdirSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { describe, expect, it } from 'vitest';
 
+import { trackTmpDirs } from '../helpers/tmp-dir.ts';
 import { checkCoverageHeadroom } from '../../scripts/check-coverage-headroom.ts';
 
-const roots: string[] = [];
+const tmp = trackTmpDirs('coverage-');
 
 function makeSummary(total: Record<string, { pct: number }>): string {
-  const root = mkdtempSync(path.join(tmpdir(), 'coverage-headroom-'));
-  roots.push(root);
+  const root = tmp.make('headroom');
   mkdirSync(path.join(root, 'coverage'), { recursive: true });
   writeFileSync(path.join(root, 'coverage', 'coverage-summary.json'), JSON.stringify({ total }, null, 2));
   return root;
 }
-
-afterEach(() => {
-  for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
-});
 
 describe('coverage headroom guard', () => {
   // Floors are the hard gate (lines 95 / branches 90 / functions 93); the guard

@@ -36,22 +36,10 @@ vi.mock('@whiskeysockets/baileys', async () => {
 
 vi.mock('../../src/config.ts', () => ({ config: mockConfig }));
 
-vi.mock('../../src/logger.ts', () => ({
-  createChildLogger: () => ({
-    info: vi.fn(),
-    warn: vi.fn(),
-    error: vi.fn(),
-    debug: vi.fn(),
-    fatal: vi.fn(),
-    child: () => ({
-      info: vi.fn(),
-      warn: vi.fn(),
-      error: vi.fn(),
-      debug: vi.fn(),
-      level: 'error',
-    }),
-  }),
-}));
+vi.mock('../../src/logger.ts', async () => {
+  const { loggerMock } = await import('../helpers/logger-mock.ts');
+  return loggerMock();
+});
 
 import { makeWASocket } from '@whiskeysockets/baileys';
 import {

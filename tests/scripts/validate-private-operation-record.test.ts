@@ -1,33 +1,30 @@
 import {
   chmodSync,
   mkdirSync,
-  mkdtempSync,
   readFileSync,
-  rmSync,
   writeFileSync,
 } from 'node:fs';
 import { spawnSync } from 'node:child_process';
-import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { describe, expect, it } from 'vitest';
 
 import { run } from '../../scripts/validate-private-operation-record.ts';
 import {
   PRIVATE_OPERATION_ACTIONS,
   PRIVATE_OPERATION_RECORD_SCHEMA,
 } from '../../scripts/lib/private-operation-record.ts';
+import { trackTmpDirs } from '../helpers/tmp-dir.ts';
 
-const tempRoots: string[] = [];
+const tmp = trackTmpDirs('');
 
 function recordPath(value: unknown): { home: string; record: string } {
-  const root = mkdtempSync(path.join(tmpdir(), 'whatsoup-private-operation-cli-'));
+  const root = tmp.make('whatsoup-private-operation-cli');
   const directory = path.join(root, '.local', 'state', 'whatsoup', 'private-ops');
   mkdirSync(directory, { mode: 0o700, recursive: true });
   chmodSync(directory, 0o700);
   const record = path.join(directory, 'record.json');
   writeFileSync(record, `${JSON.stringify(value)}\n`, { mode: 0o600 });
   chmodSync(record, 0o600);
-  tempRoots.push(root);
   return { home: root, record };
 }
 
@@ -92,12 +89,6 @@ function invoke(
     raw,
   };
 }
-
-afterEach(() => {
-  for (const root of tempRoots.splice(0)) {
-    rmSync(root, { recursive: true, force: true });
-  }
-});
 
 describe('validate-private-operation-record CLI', () => {
   it('returns command schemas and read-only effect metadata', () => {
@@ -210,8 +201,7 @@ describe('validate-private-operation-record CLI', () => {
   });
 
   it('uses exit 2 for read failures without disclosing the requested path', () => {
-    const home = mkdtempSync(path.join(tmpdir(), 'whatsoup-private-operation-missing-'));
-    tempRoots.push(home);
+    const home = tmp.make('whatsoup-private-operation-missing');
     const missing = path.join(
       home,
       '.local',

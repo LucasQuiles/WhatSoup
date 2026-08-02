@@ -1,13 +1,10 @@
 import {
   chmodSync,
   mkdirSync,
-  mkdtempSync,
-  rmSync,
   writeFileSync,
 } from 'node:fs';
-import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { describe, expect, it } from 'vitest';
 
 import {
   PRIVATE_OPERATION_ACTIONS,
@@ -17,8 +14,9 @@ import {
   validatePrivateOperationRecordFile,
   validatePrivateOperationRecordValue,
 } from '../../scripts/lib/private-operation-record.ts';
+import { trackTmpDirs } from '../helpers/tmp-dir.ts';
 
-const tempRoots: string[] = [];
+const tmp = trackTmpDirs('');
 
 function plannedSteps(): Record<string, unknown>[] {
   return PRIVATE_OPERATION_ACTIONS.slice(1).map((action, index) => ({
@@ -164,22 +162,15 @@ function completedRecord(): Record<string, unknown> {
 }
 
 function writePrivateRecord(value: unknown): { home: string; record: string } {
-  const root = mkdtempSync(path.join(tmpdir(), 'whatsoup-private-operation-'));
+  const root = tmp.make('whatsoup-private-operation');
   const directory = path.join(root, '.local', 'state', 'whatsoup', 'private-ops');
   mkdirSync(directory, { mode: 0o700, recursive: true });
   chmodSync(directory, 0o700);
   const record = path.join(directory, 'record.json');
   writeFileSync(record, `${JSON.stringify(value)}\n`, { mode: 0o600 });
   chmodSync(record, 0o600);
-  tempRoots.push(root);
   return { home: root, record };
 }
-
-afterEach(() => {
-  for (const root of tempRoots.splice(0)) {
-    rmSync(root, { recursive: true, force: true });
-  }
-});
 
 describe('private operation record validation', () => {
   it('publishes the same closed action and evidence registries enforced at runtime', () => {
@@ -629,8 +620,7 @@ describe('private operation record validation', () => {
 
   it('rejects a private-mode record outside the canonical private-ops directory', () => {
     const { record } = writePrivateRecord(validRecord());
-    const otherHome = mkdtempSync(path.join(tmpdir(), 'whatsoup-other-home-'));
-    tempRoots.push(otherHome);
+    const otherHome = tmp.make('whatsoup-other-home');
 
     const result = validatePrivateOperationRecordFile(record, { homeDir: otherHome });
     expect(result).toEqual({

@@ -7,9 +7,7 @@
 import {
   chmodSync,
   mkdirSync,
-  mkdtempSync,
   realpathSync,
-  rmSync,
   symlinkSync,
   writeFileSync,
 } from 'node:fs';
@@ -27,13 +25,17 @@ import {
   installReadOnlyRejectionFence,
 } from '../../src/core/database-compatibility.ts';
 import { WhatSoupError } from '../../src/errors.ts';
+import { trackTmpDirs } from '../helpers/tmp-dir.ts';
 
-let tempDirs: string[] = [];
-
+// realpathSync(os.tmpdir()) is required, not defensive: inspectDatabaseIdentity
+// (src/core/database-compatibility.ts:242-243) and assertTrustedDatabaseParent
+// reject any path whose own realpath differs from itself. On macOS, /var is a
+// symlink to /private/var, so raw os.tmpdir() is not canonical — a raw base
+// would fail the ordinary (non-symlink-testing) cases in this file, not just
+// the deliberately-aliased ones. Do not "simplify" this to trackTmpDirs('').
+const tmp = trackTmpDirs('', { base: realpathSync(systemTmpdir()) });
 function makeTempDir(): string {
-  const dir = mkdtempSync(join(realpathSync(systemTmpdir()), 'whatsoup-dbcompat-'));
-  tempDirs.push(dir);
-  return dir;
+  return tmp.make('whatsoup-dbcompat');
 }
 
 function captureError(fn: () => unknown): unknown {
@@ -48,11 +50,6 @@ function captureError(fn: () => unknown): unknown {
 afterEach(() => {
   vi.doUnmock('node:fs');
   vi.resetModules();
-  for (const dir of tempDirs) {
-    chmodSync(dir, 0o700);
-    rmSync(dir, { recursive: true, force: true });
-  }
-  tempDirs = [];
 });
 
 describe('databaseWriteCompatibilityError traversal bounds', () => {

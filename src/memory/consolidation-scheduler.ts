@@ -1,4 +1,5 @@
 import { createChildLogger } from '../logger.ts';
+import { MS_PER_SECOND, MS_PER_MINUTE } from '../lib/time-units.ts';
 import type { LLMProvider } from '../runtimes/chat/providers/types.ts';
 import {
   runConsolidation,
@@ -36,7 +37,7 @@ interface ActiveRun {
   promise: Promise<ConsolidationRunReport>;
 }
 
-const DEFAULT_TOTAL_RUN_TIMEOUT_MS = 5 * 60_000;
+const DEFAULT_TOTAL_RUN_TIMEOUT_MS = 5 * MS_PER_MINUTE;
 
 function asIso(nowMs: number): string {
   return new Date(nowMs).toISOString();
@@ -74,7 +75,7 @@ export class MemoryConsolidationScheduler {
     this.timer.unref?.();
   }
 
-  async stop(timeoutMs = 5_000): Promise<void> {
+  async stop(timeoutMs = 5 * MS_PER_SECOND): Promise<void> {
     this.stopped = true;
     if (this.timer) {
       clearInterval(this.timer);

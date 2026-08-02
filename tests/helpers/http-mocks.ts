@@ -78,6 +78,12 @@ export function mockRes(): MockRes {
       if (data) res._body += data.toString();
       return res;
     },
+    // ServerResponse is an EventEmitter; createSSEWriter (src/fleet/sse-helpers.ts)
+    // attaches an 'error' listener (#2292 L7), so a fake without `on` is an
+    // incomplete fake for any consumer that constructs an SSE writer around it.
+    on() {
+      return res;
+    },
   };
   return res as unknown as MockRes;
 }

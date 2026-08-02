@@ -1,19 +1,12 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { mkdirSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { afterEach, describe, expect, it } from 'vitest';
+import { describe, expect, it } from 'vitest';
+import { trackTmpDirs } from '../helpers/tmp-dir.ts';
 
 const SCRIPT = resolve(process.cwd(), 'console/scripts/check-waiver-sync.mjs');
 
-const tmpDirs: string[] = [];
-
-afterEach(() => {
-  for (const dir of tmpDirs) {
-    rmSync(dir, { recursive: true, force: true });
-  }
-  tmpDirs.length = 0;
-});
+const tmp = trackTmpDirs('check-waiver-');
 
 // ---------------------------------------------------------------------------
 // Fixture helpers
@@ -43,8 +36,7 @@ function makeFixture(opts: {
   source?: string;
   waivers?: string;
 } = {}) {
-  const root = mkdtempSync(join(tmpdir(), 'check-waiver-sync-'));
-  tmpDirs.push(root);
+  const root = tmp.make('sync');
 
   const consoleDir = join(root, 'console');
   const srcDir = join(consoleDir, 'src');

@@ -6,8 +6,6 @@
  * factory-generated group handlers.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { PassThrough } from 'node:stream';
-import type { IncomingMessage, ServerResponse } from 'node:http';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -30,6 +28,7 @@ import {
 import type { McpProxyDeps } from '../../../src/fleet/routes/mcp-proxy.ts';
 import { mcpCall } from '../../../src/fleet/mcp-client.ts';
 import type { DiscoveredInstance, FleetDiscovery } from '../../../src/fleet/discovery.ts';
+import { mockReq, mockRes } from '../../helpers/http-mocks.ts';
 
 vi.mock('../../../src/fleet/mcp-client.ts', () => ({
   mcpCall: vi.fn(),
@@ -63,31 +62,6 @@ function makeDeps(instance?: DiscoveredInstance): McpProxyDeps {
   };
 }
 
-function mockReq(body: string, url = '/api/lines/alpha/scheduled'): IncomingMessage {
-  const stream = new PassThrough();
-  const req = stream as unknown as IncomingMessage;
-  req.method = 'POST';
-  req.url = url;
-  process.nextTick(() => {
-    stream.end(body);
-  });
-  return req;
-}
-
-function mockRes(): ServerResponse & { _status: number; _body: string } {
-  const res = {
-    _status: 0,
-    _body: '',
-    writeHead(status: number) {
-      res._status = status;
-    },
-    end(data?: string) {
-      res._body = data ?? '';
-    },
-  };
-  return res as unknown as ServerResponse & { _status: number; _body: string };
-}
-
 function happyMcpResult(data: unknown) {
   return {
     success: true,
@@ -111,7 +85,12 @@ describe('handleGetScheduled (manual handler)', () => {
   it('lists scheduled messages without filter', async () => {
     vi.mocked(mcpCall).mockResolvedValueOnce(happyMcpResult({ scheduled: [{ id: 1 }] }));
     const res = mockRes();
-    await handleGetScheduled(mockReq('', '/api/lines/alpha/scheduled'), res, makeDeps(), { name: 'alpha' });
+    await handleGetScheduled(
+      mockReq({ method: 'POST', url: '/api/lines/alpha/scheduled' }),
+      res,
+      makeDeps(),
+      { name: 'alpha' },
+    );
     expect(res._status).toBe(200);
     expect(JSON.parse(res._body)).toEqual({ scheduled: [{ id: 1 }] });
     expect(mcpCall).toHaveBeenCalledWith(socketPath, 'list_scheduled', {});
@@ -120,7 +99,7 @@ describe('handleGetScheduled (manual handler)', () => {
   it('forwards ?status= as a filter arg to list_scheduled', async () => {
     const res = mockRes();
     await handleGetScheduled(
-      mockReq('', '/api/lines/alpha/scheduled?status=pending'),
+      mockReq({ method: 'POST', url: '/api/lines/alpha/scheduled?status=pending' }),
       res,
       makeDeps(),
       { name: 'alpha' },
@@ -131,7 +110,12 @@ describe('handleGetScheduled (manual handler)', () => {
   it('returns 502 when the MCP call fails', async () => {
     vi.mocked(mcpCall).mockResolvedValueOnce({ success: false, error: 'mcp down' });
     const res = mockRes();
-    await handleGetScheduled(mockReq('', '/api/lines/alpha/scheduled'), res, makeDeps(), { name: 'alpha' });
+    await handleGetScheduled(
+      mockReq({ method: 'POST', url: '/api/lines/alpha/scheduled' }),
+      res,
+      makeDeps(),
+      { name: 'alpha' },
+    );
     expect(res._status).toBe(502);
     expect(JSON.parse(res._body)).toEqual({ error: 'mcp down' });
   });
@@ -139,7 +123,12 @@ describe('handleGetScheduled (manual handler)', () => {
   it('returns 503 when socket is missing', async () => {
     fs.unlinkSync(socketPath);
     const res = mockRes();
-    await handleGetScheduled(mockReq('', '/api/lines/alpha/scheduled'), res, makeDeps(), { name: 'alpha' });
+    await handleGetScheduled(
+      mockReq({ method: 'POST', url: '/api/lines/alpha/scheduled' }),
+      res,
+      makeDeps(),
+      { name: 'alpha' },
+    );
     expect(res._status).toBe(503);
     expect(mcpCall).not.toHaveBeenCalled();
   });
@@ -148,7 +137,12 @@ describe('handleGetScheduled (manual handler)', () => {
 describe('handleCancelScheduled (manual legacy handler)', () => {
   it('returns 400 when the id query parameter is missing', async () => {
     const res = mockRes();
-    await handleCancelScheduled(mockReq('', '/api/lines/alpha/scheduled'), res, makeDeps(), { name: 'alpha' });
+    await handleCancelScheduled(
+      mockReq({ method: 'POST', url: '/api/lines/alpha/scheduled' }),
+      res,
+      makeDeps(),
+      { name: 'alpha' },
+    );
     expect(res._status).toBe(400);
     expect(JSON.parse(res._body)).toEqual({ error: 'id query parameter is required' });
     expect(mcpCall).not.toHaveBeenCalled();
@@ -157,7 +151,7 @@ describe('handleCancelScheduled (manual legacy handler)', () => {
   it('returns 400 when the legacy id query parameter is not numeric', async () => {
     const res = mockRes();
     await handleCancelScheduled(
-      mockReq('', '/api/lines/alpha/scheduled?id=abc'),
+      mockReq({ method: 'POST', url: '/api/lines/alpha/scheduled?id=abc' }),
       res,
       makeDeps(),
       { name: 'alpha' },
@@ -170,7 +164,7 @@ describe('handleCancelScheduled (manual legacy handler)', () => {
   it('dispatches to cancel_scheduled with numeric id on success', async () => {
     const res = mockRes();
     await handleCancelScheduled(
-      mockReq('', '/api/lines/alpha/scheduled?id=123'),
+      mockReq({ method: 'POST', url: '/api/lines/alpha/scheduled?id=123' }),
       res,
       makeDeps(),
       { name: 'alpha' },
@@ -184,7 +178,7 @@ describe('handleCancelScheduled (manual legacy handler)', () => {
     fs.unlinkSync(socketPath);
     const res = mockRes();
     await handleCancelScheduled(
-      mockReq('', '/api/lines/alpha/scheduled?id=123'),
+      mockReq({ method: 'POST', url: '/api/lines/alpha/scheduled?id=123' }),
       res,
       makeDeps(),
       { name: 'alpha' },
@@ -197,7 +191,7 @@ describe('handleSearchContacts (manual handler)', () => {
   it('returns 400 when the q query parameter is missing', async () => {
     const res = mockRes();
     await handleSearchContacts(
-      mockReq('', '/api/lines/alpha/contacts/search'),
+      mockReq({ method: 'POST', url: '/api/lines/alpha/contacts/search' }),
       res,
       makeDeps(),
       { name: 'alpha' },
@@ -213,7 +207,7 @@ describe('handleSearchContacts (manual handler)', () => {
     );
     const res = mockRes();
     await handleSearchContacts(
-      mockReq('', '/api/lines/alpha/contacts/search?q=ana'),
+      mockReq({ method: 'POST', url: '/api/lines/alpha/contacts/search?q=ana' }),
       res,
       makeDeps(),
       { name: 'alpha' },
@@ -228,7 +222,7 @@ describe('handleSearchContacts (manual handler)', () => {
     );
     const res = mockRes();
     await handleSearchContacts(
-      mockReq('', '/api/lines/alpha/contacts/search?q=ana'),
+      mockReq({ method: 'POST', url: '/api/lines/alpha/contacts/search?q=ana' }),
       res,
       makeDeps(),
       { name: 'alpha' },
@@ -240,7 +234,7 @@ describe('handleSearchContacts (manual handler)', () => {
     vi.mocked(mcpCall).mockResolvedValueOnce({ success: false });
     const res = mockRes();
     await handleSearchContacts(
-      mockReq('', '/api/lines/alpha/contacts/search?q=ana'),
+      mockReq({ method: 'POST', url: '/api/lines/alpha/contacts/search?q=ana' }),
       res,
       makeDeps(),
       { name: 'alpha' },
@@ -254,7 +248,7 @@ describe('factory-generated scheduled handlers', () => {
   it('handleCreateScheduled returns 201 on success', async () => {
     const res = mockRes();
     await handleCreateScheduled(
-      mockReq('{"text":"hi","scheduled_at":1767225600,"chatJid":"a"}', '/api/lines/alpha/scheduled'),
+      mockReq({ method: 'POST', body: '{"text":"hi","scheduled_at":1767225600,"chatJid":"a"}', url: '/api/lines/alpha/scheduled' }),
       res,
       makeDeps(),
       { name: 'alpha' },
@@ -271,7 +265,7 @@ describe('factory-generated scheduled handlers', () => {
   it('handleGetScheduledById parses :id as number and dispatches to get_scheduled', async () => {
     const res = mockRes();
     await handleGetScheduledById(
-      mockReq('', '/api/lines/alpha/scheduled/42'),
+      mockReq({ method: 'POST', url: '/api/lines/alpha/scheduled/42' }),
       res,
       makeDeps(),
       { name: 'alpha', id: '42' },
@@ -282,7 +276,7 @@ describe('factory-generated scheduled handlers', () => {
   it('handleUpdateScheduled merges body with :id', async () => {
     const res = mockRes();
     await handleUpdateScheduled(
-      mockReq('{"text":"updated","scheduled_at":1767229200}', '/api/lines/alpha/scheduled/77'),
+      mockReq({ method: 'POST', body: '{"text":"updated","scheduled_at":1767229200}', url: '/api/lines/alpha/scheduled/77' }),
       res,
       makeDeps(),
       { name: 'alpha', id: '77' },
@@ -298,7 +292,7 @@ describe('factory-generated scheduled handlers', () => {
   it('handleCancelScheduledById dispatches to cancel_scheduled with numeric id', async () => {
     const res = mockRes();
     await handleCancelScheduledById(
-      mockReq('', '/api/lines/alpha/scheduled/5'),
+      mockReq({ method: 'POST', url: '/api/lines/alpha/scheduled/5' }),
       res,
       makeDeps(),
       { name: 'alpha', id: '5' },
@@ -310,7 +304,7 @@ describe('factory-generated scheduled handlers', () => {
 describe('factory-generated group handlers', () => {
   it('handleGetGroups dispatches to list_groups with 15s timeout', async () => {
     const res = mockRes();
-    await handleGetGroups(mockReq('', '/api/lines/alpha/groups'), res, makeDeps(), { name: 'alpha' });
+    await handleGetGroups(mockReq({ method: 'POST', url: '/api/lines/alpha/groups' }), res, makeDeps(), { name: 'alpha' });
     expect(mcpCall).toHaveBeenCalledWith(socketPath, 'list_groups', {}, 15_000);
   });
 
@@ -318,7 +312,7 @@ describe('factory-generated group handlers', () => {
     const res = mockRes();
     const encoded = encodeURIComponent('111111100000000001@g.us');
     await handleGetGroupDetail(
-      mockReq('', `/api/lines/alpha/groups/${encoded}`),
+      mockReq({ method: 'POST', url: `/api/lines/alpha/groups/${encoded}` }),
       res,
       makeDeps(),
       { name: 'alpha', jid: encoded },
@@ -335,7 +329,7 @@ describe('factory-generated group handlers', () => {
     const res = mockRes();
     const encoded = encodeURIComponent('111111100000000001@g.us');
     await handleLeaveGroup(
-      mockReq('', `/api/lines/alpha/groups/${encoded}`),
+      mockReq({ method: 'POST', url: `/api/lines/alpha/groups/${encoded}` }),
       res,
       makeDeps(),
       { name: 'alpha', jid: encoded },
@@ -352,7 +346,7 @@ describe('factory-generated group handlers', () => {
     const res = mockRes();
     const encoded = encodeURIComponent('111111100000000001@g.us');
     await handleUpdateGroupSubject(
-      mockReq('{"subject":"New Topic"}', `/api/lines/alpha/groups/${encoded}/subject`),
+      mockReq({ method: 'POST', body: '{"subject":"New Topic"}', url: `/api/lines/alpha/groups/${encoded}/subject` }),
       res,
       makeDeps(),
       { name: 'alpha', jid: encoded },
@@ -369,7 +363,7 @@ describe('factory-generated group handlers', () => {
     const res = mockRes();
     const encoded = encodeURIComponent('111111100000000001@g.us');
     await handleGetGroupInvite(
-      mockReq('', `/api/lines/alpha/groups/${encoded}/invite`),
+      mockReq({ method: 'POST', url: `/api/lines/alpha/groups/${encoded}/invite` }),
       res,
       makeDeps(),
       { name: 'alpha', jid: encoded },
@@ -386,7 +380,7 @@ describe('factory-generated group handlers', () => {
     const res = mockRes();
     const encoded = encodeURIComponent('111111100000000001@g.us');
     await handleRevokeGroupInvite(
-      mockReq('', `/api/lines/alpha/groups/${encoded}/invite/revoke`),
+      mockReq({ method: 'POST', url: `/api/lines/alpha/groups/${encoded}/invite/revoke` }),
       res,
       makeDeps(),
       { name: 'alpha', jid: encoded },
@@ -404,7 +398,7 @@ describe('shared error paths via factory handlers', () => {
   it('returns 503 when MCP socket is missing', async () => {
     fs.unlinkSync(socketPath);
     const res = mockRes();
-    await handleGetGroups(mockReq('', '/api/lines/alpha/groups'), res, makeDeps(), { name: 'alpha' });
+    await handleGetGroups(mockReq({ method: 'POST', url: '/api/lines/alpha/groups' }), res, makeDeps(), { name: 'alpha' });
     expect(res._status).toBe(503);
     expect(mcpCall).not.toHaveBeenCalled();
   });
@@ -412,7 +406,7 @@ describe('shared error paths via factory handlers', () => {
   it('returns 502 when MCP call resolves with success=false', async () => {
     vi.mocked(mcpCall).mockResolvedValueOnce({ success: false, error: 'tool exception' });
     const res = mockRes();
-    await handleGetGroups(mockReq('', '/api/lines/alpha/groups'), res, makeDeps(), { name: 'alpha' });
+    await handleGetGroups(mockReq({ method: 'POST', url: '/api/lines/alpha/groups' }), res, makeDeps(), { name: 'alpha' });
     expect(res._status).toBe(502);
     expect(JSON.parse(res._body)).toEqual({ error: 'tool exception' });
   });
@@ -420,14 +414,14 @@ describe('shared error paths via factory handlers', () => {
   it('returns 502 with generic message when MCP error is absent', async () => {
     vi.mocked(mcpCall).mockResolvedValueOnce({ success: false });
     const res = mockRes();
-    await handleGetGroups(mockReq('', '/api/lines/alpha/groups'), res, makeDeps(), { name: 'alpha' });
+    await handleGetGroups(mockReq({ method: 'POST', url: '/api/lines/alpha/groups' }), res, makeDeps(), { name: 'alpha' });
     expect(JSON.parse(res._body)).toEqual({ error: 'MCP call failed' });
   });
 
   it('unwraps tool-result envelope content[0].text to parsed JSON', async () => {
     vi.mocked(mcpCall).mockResolvedValueOnce(happyMcpResult([{ jid: 'g@g.us', name: 'Group A' }]));
     const res = mockRes();
-    await handleGetGroups(mockReq('', '/api/lines/alpha/groups'), res, makeDeps(), { name: 'alpha' });
+    await handleGetGroups(mockReq({ method: 'POST', url: '/api/lines/alpha/groups' }), res, makeDeps(), { name: 'alpha' });
     expect(JSON.parse(res._body)).toEqual([{ jid: 'g@g.us', name: 'Group A' }]);
   });
 
@@ -437,7 +431,7 @@ describe('shared error paths via factory handlers', () => {
       result: { content: [{ type: 'text', text: 'plain text' }] },
     });
     const res = mockRes();
-    await handleGetGroups(mockReq('', '/api/lines/alpha/groups'), res, makeDeps(), { name: 'alpha' });
+    await handleGetGroups(mockReq({ method: 'POST', url: '/api/lines/alpha/groups' }), res, makeDeps(), { name: 'alpha' });
     expect(JSON.parse(res._body)).toBe('plain text');
   });
 });
@@ -446,7 +440,7 @@ describe('mcpWithBody - JSON parse error path', () => {
   it('returns 400 on malformed JSON body', async () => {
     const res = mockRes();
     await handleCreateScheduled(
-      mockReq('{not json', '/api/lines/alpha/scheduled'),
+      mockReq({ method: 'POST', body: '{not json', url: '/api/lines/alpha/scheduled' }),
       res,
       makeDeps(),
       { name: 'alpha' },

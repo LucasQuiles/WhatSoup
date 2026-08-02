@@ -1,8 +1,9 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { spawn } from 'node:child_process';
 import { createServer, type Socket } from 'node:net';
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, utimesSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { trackTmpDirs } from '../helpers/tmp-dir.ts';
 
 const DRAIN_SCRIPT = join(process.cwd(), 'deploy/hooks/drain-stuck-replies.mjs');
 const WRAPPER_PATH = join(process.cwd(), 'deploy/scripts/reply-guarantee-drain.sh');
@@ -22,13 +23,11 @@ interface MockServer {
   close: () => Promise<void>;
 }
 
-const tmpDirs: string[] = [];
+const tmp = trackTmpDirs('rgp-drain-', { base: '/tmp' });
 const servers: MockServer[] = [];
 
 function makeHome(): string {
-  const dir = mkdtempSync(join('/tmp', 'rgp-drain-home-'));
-  tmpDirs.push(dir);
-  return dir;
+  return tmp.make('home');
 }
 
 function queuePath(home: string, instance: string): string {
@@ -73,8 +72,7 @@ function runDrain(home: string, args: string[] = []): Promise<{ status: number |
 }
 
 async function startMockServer(toolResult: unknown): Promise<MockServer> {
-  const dir = mkdtempSync(join('/tmp', 'rgp-drain-socket-'));
-  tmpDirs.push(dir);
+  const dir = tmp.make('socket');
   const socketPath = join(dir, 'whatsoup.sock');
   const received: JsonRpcRequest[] = [];
   const sockets = new Set<Socket>();
@@ -114,8 +112,6 @@ async function startMockServer(toolResult: unknown): Promise<MockServer> {
 
 afterEach(async () => {
   await Promise.all(servers.splice(0).map((server) => server.close()));
-  for (const dir of tmpDirs) rmSync(dir, { recursive: true, force: true });
-  tmpDirs.length = 0;
 });
 
 describe('drain-stuck-replies daemon', () => {

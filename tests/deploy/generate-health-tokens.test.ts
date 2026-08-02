@@ -1,20 +1,13 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { describe, expect, it } from 'vitest';
 import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
+import { trackTmpDirs } from '../helpers/tmp-dir.ts';
 
-const tmpDirs: string[] = [];
-
-afterEach(() => {
-  for (const dir of tmpDirs.splice(0)) {
-    fs.rmSync(dir, { recursive: true, force: true });
-  }
-});
+const tmp = trackTmpDirs('whatsoup-token-');
 
 function makeHome(): { home: string; instancesDir: string } {
-  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'whatsoup-token-home-'));
-  tmpDirs.push(home);
+  const home = tmp.make('home');
   const instancesDir = path.join(home, '.config', 'whatsoup', 'instances');
   for (const name of ['alpha', 'beta']) {
     const dir = path.join(instancesDir, name);
@@ -25,8 +18,7 @@ function makeHome(): { home: string; instancesDir: string } {
 }
 
 function makeFakeBin(platform: 'Linux' | 'Darwin' = 'Linux'): { bin: string; logPath: string } {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'whatsoup-token-bin-'));
-  tmpDirs.push(dir);
+  const dir = tmp.make('bin');
   const bin = path.join(dir, 'bin');
   fs.mkdirSync(bin);
   const logPath = path.join(dir, 'keyring.log');

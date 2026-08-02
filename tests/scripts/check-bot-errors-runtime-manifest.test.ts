@@ -1,10 +1,10 @@
 import { createHash } from 'node:crypto';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
+import { trackTmpDirs } from '../helpers/tmp-dir.ts';
 import {
   checkBotErrorsRuntimeManifest,
   computeRequiredRuntimePaths,
@@ -13,11 +13,10 @@ import {
 } from '../../scripts/check-bot-errors-runtime-manifest.ts';
 
 const repoRoot = fileURLToPath(new URL('../..', import.meta.url));
-const tempRoots: string[] = [];
+const tmp = trackTmpDirs('whatsoup-runtime-');
 
 function makeRoot(): string {
-  const root = mkdtempSync(path.join(tmpdir(), 'whatsoup-runtime-manifest-'));
-  tempRoots.push(root);
+  const root = tmp.make('manifest');
   mkdirSync(path.join(root, 'deploy'), { recursive: true });
   return root;
 }
@@ -37,7 +36,6 @@ function sha256(text: string): string {
 afterEach(() => {
   vi.restoreAllMocks();
   process.exitCode = undefined;
-  for (const root of tempRoots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
 
 describe('check-bot-errors-runtime-manifest guard', () => {

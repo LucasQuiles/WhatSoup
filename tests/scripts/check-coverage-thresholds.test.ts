@@ -1,22 +1,17 @@
-import { mkdtempSync, rmSync, writeFileSync, readFileSync } from 'node:fs';
+import { writeFileSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { afterEach, describe, expect, it } from 'vitest';
+import { describe, expect, it } from 'vitest';
+
+import { trackTmpDirs } from '../helpers/tmp-dir.ts';
 
 // Path to the script under test (resolved from repo root = process.cwd())
 const SCRIPT = resolve(process.cwd(), 'console/scripts/check-coverage-thresholds.mjs');
 const ROOT_PACKAGE_JSON = resolve(process.cwd(), 'package.json');
 const ROOT_COVERAGE_WRAPPER = resolve(process.cwd(), 'scripts/run-coverage-check.sh');
 
-const tmpDirs: string[] = [];
-
-afterEach(() => {
-  for (const dir of tmpDirs) {
-    rmSync(dir, { recursive: true, force: true });
-  }
-  tmpDirs.length = 0;
-});
+const tmp = trackTmpDirs('cov-');
 
 // ---------------------------------------------------------------------------
 // Fixture builders
@@ -41,8 +36,7 @@ function makeFileEntry(stmtTotal: number, stmtCovered: number, brTotal: number, 
  * Returns the path to the summary file.
  */
 function makeSummary(entries: Record<string, ReturnType<typeof makeFileEntry>>): string {
-  const dir = mkdtempSync(join(tmpdir(), 'cov-check-'));
-  tmpDirs.push(dir);
+  const dir = tmp.make('check');
   const total = makeFileEntry(100, 90, 50, 45);
   const obj: Record<string, ReturnType<typeof makeFileEntry>> = { total, ...entries };
   const path = join(dir, 'coverage-summary.json');
@@ -431,8 +425,7 @@ describe('check-coverage-thresholds.mjs', () => {
     });
 
     it('exits 2 with ERROR(parse-error) when file is not valid JSON', () => {
-      const dir = mkdtempSync(join(tmpdir(), 'cov-check-malformed-'));
-      tmpDirs.push(dir);
+      const dir = tmp.make('check-malformed');
       const path = join(dir, 'coverage-summary.json');
       writeFileSync(path, '{ "total": { INVALID JSON }');
       const result = runScript(path);
@@ -441,8 +434,7 @@ describe('check-coverage-thresholds.mjs', () => {
     });
 
     it('exits 2 with ERROR(schema-error) when root is not an object (array)', () => {
-      const dir = mkdtempSync(join(tmpdir(), 'cov-check-schema-'));
-      tmpDirs.push(dir);
+      const dir = tmp.make('check-schema');
       const path = join(dir, 'coverage-summary.json');
       writeFileSync(path, '["not", "an", "object"]');
       const result = runScript(path);
@@ -451,8 +443,7 @@ describe('check-coverage-thresholds.mjs', () => {
     });
 
     it('exits 2 with ERROR(schema-error) when a file entry lacks statements.total', () => {
-      const dir = mkdtempSync(join(tmpdir(), 'cov-check-badentry-'));
-      tmpDirs.push(dir);
+      const dir = tmp.make('check-badentry');
       const path = join(dir, 'coverage-summary.json');
       writeFileSync(path, JSON.stringify({
         total: makeFileEntry(100, 90, 50, 45),
@@ -467,8 +458,7 @@ describe('check-coverage-thresholds.mjs', () => {
     });
 
     it('exits 2 with ERROR(schema-error) when root is a JSON null', () => {
-      const dir = mkdtempSync(join(tmpdir(), 'cov-check-null-'));
-      tmpDirs.push(dir);
+      const dir = tmp.make('check-null');
       const path = join(dir, 'coverage-summary.json');
       writeFileSync(path, 'null');
       const result = runScript(path);
@@ -506,8 +496,7 @@ describe('check-coverage-thresholds.mjs', () => {
     });
 
     it('escapes newlines in malformed coverage entry keys', () => {
-      const dir = mkdtempSync(join(tmpdir(), 'cov-check-log-injection-'));
-      tmpDirs.push(dir);
+      const dir = tmp.make('check-log-injection');
       const path = join(dir, 'coverage-summary.json');
       const unsafeKey = '/fake/repo/console/src/hooks/use-foo.ts\n::error::injected';
       writeFileSync(path, JSON.stringify({

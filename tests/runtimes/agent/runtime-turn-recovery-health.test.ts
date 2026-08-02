@@ -20,17 +20,14 @@ vi.mock('../../../src/lib/emit-alert.ts', async (importOriginal) => ({
   emitAlert,
 }));
 
-vi.mock('../../../src/logger.ts', () => {
-  const logger = {
-    info: vi.fn(),
-    warn: vi.fn(),
-    error: vi.fn(),
-    debug: vi.fn(),
-  };
+vi.mock('../../../src/logger.ts', async () => {
+  const { loggerMock } = await import('../../helpers/logger-mock.ts');
+  const mock = loggerMock();
+  const logger = mock.createChildLogger();
   return {
+    ...mock,
     default: { ...logger, child: () => logger },
-    createChildLogger: () => logger,
-    flushLogger: () => Promise.resolve(),
+    flushLogger: vi.fn(),
   };
 });
 

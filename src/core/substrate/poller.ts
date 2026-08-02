@@ -37,7 +37,7 @@
 // legacy persisted row fails CLOSED here with errorKind 'shell_watch_removed'
 // rather than crashing.
 
-import type { DatabaseSync, SQLInputValue } from 'node:sqlite';
+import type { DatabaseSync, SQLInputValue, StatementSync } from 'node:sqlite';
 import { basename, resolve, sep } from 'node:path';
 import { realpathSync, statSync, createReadStream } from 'node:fs';
 import { createHash } from 'node:crypto';
@@ -423,6 +423,34 @@ export class TriggerPoller {
   private triggerPastDueAlertEmitted = false;
   public lastRunAt: string | null = null;
 
+  /**
+   * #2292 L15 — constant-SQL statements hoisted to instance fields, prepared
+   * once at construction rather than every call. `executeSqlite`'s
+   * operator-stored `spec.sql` (line ~922) is NOT here — that SQL is dynamic
+   * per-trigger and must stay prepared per-call.
+   */
+  private readonly stmtOverdueTerminalTriggers: StatementSync;
+  private readonly stmtLastDeliveredRun: StatementSync;
+  private readonly stmtLookupBead: StatementSync;
+  private readonly stmtLastRowCountRun: StatementSync;
+  private readonly stmtLastHashRun: StatementSync;
+  private readonly stmtLastUrlHashRun: StatementSync;
+  private readonly stmtLastScalarRun: StatementSync;
+  private readonly stmtInsertRun: StatementSync;
+  private readonly stmtFinishRun: StatementSync;
+  private readonly stmtRecordDeliveredWaMessageId: StatementSync;
+  private readonly stmtRecordNotifyDispatchFailed: StatementSync;
+  private readonly stmtRecordNotifyForbiddenTarget: StatementSync;
+  private readonly stmtRecentErrorKinds: StatementSync;
+  private readonly stmtRetireTriggerOnForbiddenTarget: StatementSync;
+  private readonly stmtScheduleNextFire: StatementSync;
+  private readonly stmtRecentRunStatuses: StatementSync;
+  private readonly stmtMarkPausedOnFailures: StatementSync;
+  private readonly stmtMarkExpiredTrigger: StatementSync;
+  private readonly stmtInsertExpiryRun: StatementSync;
+  private readonly stmtLookupBeadStatus: StatementSync;
+  private readonly stmtReopenBead: StatementSync;
+
   constructor(db: DatabaseSync, messenger: Messenger, opts: TriggerPollerOptions = {}) {
     this.db = db;
     this.messenger = messenger;
@@ -447,6 +475,120 @@ export class TriggerPoller {
     this.instance = opts.instance ?? null;
     this.overdueProposalAlertThreshold = opts.overdueProposalAlertThreshold ?? DEFAULT_OVERDUE_PROPOSAL_ALERT_THRESHOLD;
     this.triggerPastDueGraceSeconds = opts.triggerPastDueGraceSeconds ?? DEFAULT_TRIGGER_PAST_DUE_GRACE_SEC;
+
+    // #2292 L15 — prepare constant SQL once here rather than per-call/per-tick.
+    // SQL text below is byte-identical to what each call site used to inline.
+    this.stmtOverdueTerminalTriggers = this.db.prepare(
+      `SELECT * FROM bead_triggers
+       WHERE status = 'active' AND terminal_at IS NOT NULL AND terminal_at <= ?
+       LIMIT ?`,
+    );
+    this.stmtLastDeliveredRun = this.db.prepare(
+      `SELECT started_at FROM trigger_runs
+       WHERE trigger_id = ? AND status = 'ok'
+         AND json_valid(output_json)
+         AND json_extract(output_json, '$.deliveredWaMessageId') IS NOT NULL
+       ORDER BY started_at DESC, id DESC
+       LIMIT 1`,
+    );
+    this.stmtLookupBead = this.db.prepare(
+      `SELECT kind, title, body FROM beads WHERE id = ?`,
+    );
+    this.stmtLastRowCountRun = this.db.prepare(
+      `SELECT output_json FROM trigger_runs
+       WHERE trigger_id = ? AND status IN ('ok','noop')
+       ORDER BY started_at DESC
+       LIMIT 1`,
+    );
+    this.stmtLastHashRun = this.db.prepare(
+      `SELECT output_json FROM trigger_runs
+       WHERE trigger_id = ? AND status IN ('ok','noop')
+       ORDER BY started_at DESC, id DESC
+       LIMIT 1`,
+    );
+    this.stmtLastUrlHashRun = this.db.prepare(
+      `SELECT output_json FROM trigger_runs
+       WHERE trigger_id = ? AND status IN ('ok','noop')
+       ORDER BY started_at DESC, id DESC
+       LIMIT 1`,
+    );
+    this.stmtLastScalarRun = this.db.prepare(
+      `SELECT output_json FROM trigger_runs
+       WHERE trigger_id = ? AND status IN ('ok','noop')
+       ORDER BY started_at DESC, id DESC
+       LIMIT 1`,
+    );
+    this.stmtInsertRun = this.db.prepare(
+      `INSERT INTO trigger_runs (
+         trigger_id, bead_id, status, started_at, attempt, metadata_json
+       ) VALUES (?, ?, 'running', ?, 1, '{}')`,
+    );
+    this.stmtFinishRun = this.db.prepare(
+      `UPDATE trigger_runs
+       SET status = ?, finished_at = ?, duration_ms = ?,
+           output_summary = ?, output_json = ?,
+           error_kind = ?, error_message = ?
+       WHERE id = ?`,
+    );
+    this.stmtRecordDeliveredWaMessageId = this.db.prepare(
+      `UPDATE trigger_runs
+       SET output_json = json_set(COALESCE(output_json, '{}'), '$.deliveredWaMessageId', ?)
+       WHERE id = ?`,
+    );
+    this.stmtRecordNotifyDispatchFailed = this.db.prepare(
+      `UPDATE trigger_runs SET error_kind = 'notify_dispatch_failed'
+       WHERE id = ? AND error_kind IS NULL`,
+    );
+    this.stmtRecordNotifyForbiddenTarget = this.db.prepare(
+      `UPDATE trigger_runs SET error_kind = 'notify_forbidden_target'
+       WHERE id = ? AND error_kind IS NULL`,
+    );
+    this.stmtRecentErrorKinds = this.db.prepare(
+      `SELECT error_kind FROM trigger_runs
+       WHERE trigger_id = ?
+       ORDER BY started_at DESC, id DESC
+       LIMIT ?`,
+    );
+    this.stmtRetireTriggerOnForbiddenTarget = this.db.prepare(
+      `UPDATE bead_triggers
+       SET status = 'paused', next_fire_at = NULL, updated_at = ?
+       WHERE id = ? AND status = 'active'`,
+    );
+    this.stmtScheduleNextFire = this.db.prepare(
+      `UPDATE bead_triggers
+       SET next_fire_at = ?, last_fire_at = ?, updated_at = ?
+       WHERE id = ?`,
+    );
+    this.stmtRecentRunStatuses = this.db.prepare(
+      `SELECT status FROM trigger_runs
+       WHERE trigger_id = ?
+       ORDER BY started_at DESC, id DESC
+       LIMIT ?`,
+    );
+    this.stmtMarkPausedOnFailures = this.db.prepare(
+      `UPDATE bead_triggers
+       SET status = 'paused', next_fire_at = NULL, updated_at = ?
+       WHERE id = ?`,
+    );
+    this.stmtMarkExpiredTrigger = this.db.prepare(
+      `UPDATE bead_triggers
+       SET status = 'expired', next_fire_at = NULL, updated_at = ?
+       WHERE id = ?`,
+    );
+    this.stmtInsertExpiryRun = this.db.prepare(
+      `INSERT INTO trigger_runs (
+         trigger_id, bead_id, status, started_at, finished_at, duration_ms,
+         output_summary, output_json, attempt, metadata_json
+       ) VALUES (?, ?, 'terminal_fired', ?, ?, 0, ?, ?, 1, '{}')`,
+    );
+    this.stmtLookupBeadStatus = this.db.prepare(
+      `SELECT status FROM beads WHERE id = ?`,
+    );
+    this.stmtReopenBead = this.db.prepare(
+      `UPDATE beads
+       SET status = 'active', completed_at = NULL, cancelled_at = NULL, updated_at = ?
+       WHERE id = ?`,
+    );
   }
 
   start(): void {
@@ -481,11 +623,8 @@ export class TriggerPoller {
     let processed = 0;
     // 1. Expiry sweep — dueTriggers filters out triggers past terminal_at,
     //    so without this sweep they would stay status='active' forever.
-    const overdue = this.db.prepare(
-      `SELECT * FROM bead_triggers
-       WHERE status = 'active' AND terminal_at IS NOT NULL AND terminal_at <= ?
-       LIMIT ?`,
-    ).all(now, this.batchSize) as unknown as TriggerRow[];
+    const overdue = this.stmtOverdueTerminalTriggers
+      .all(now, this.batchSize) as unknown as TriggerRow[];
     for (const t of overdue) {
       try {
         this.expireTrigger(t, now);
@@ -724,14 +863,8 @@ export class TriggerPoller {
     // table whose rows contain that text) and on a literal-null value — wrongly
     // treating a never-delivered run as delivered and silently throttling future
     // notifications. json_extract(...) IS NOT NULL keys on the real value.
-    const row = this.db.prepare(
-      `SELECT started_at FROM trigger_runs
-       WHERE trigger_id = ? AND status = 'ok'
-         AND json_valid(output_json)
-         AND json_extract(output_json, '$.deliveredWaMessageId') IS NOT NULL
-       ORDER BY started_at DESC, id DESC
-       LIMIT 1`,
-    ).get(triggerId) as { started_at: number } | undefined;
+    const row = this.stmtLastDeliveredRun
+      .get(triggerId) as { started_at: number } | undefined;
     if (!row) return 0;
     const elapsed = now - row.started_at;
     if (elapsed >= this.notificationThrottleMinIntervalSec) return 0;
@@ -828,9 +961,8 @@ export class TriggerPoller {
   }
 
   private lookupBead(beadId: number): { kind: string; title: string; body: string | null } | undefined {
-    return this.db.prepare(
-      `SELECT kind, title, body FROM beads WHERE id = ?`,
-    ).get(beadId) as { kind: string; title: string; body: string | null } | undefined;
+    return this.stmtLookupBead
+      .get(beadId) as { kind: string; title: string; body: string | null } | undefined;
   }
 
   /**
@@ -984,12 +1116,8 @@ export class TriggerPoller {
   }
 
   private lastRowCountFor(triggerId: number): number | null {
-    const row = this.db.prepare(
-      `SELECT output_json FROM trigger_runs
-       WHERE trigger_id = ? AND status IN ('ok','noop')
-       ORDER BY started_at DESC
-       LIMIT 1`,
-    ).get(triggerId) as { output_json: string | null } | undefined;
+    const row = this.stmtLastRowCountRun
+      .get(triggerId) as { output_json: string | null } | undefined;
     if (!row?.output_json) return null;
     try {
       const parsed = JSON.parse(row.output_json) as { rowCount?: unknown };
@@ -1244,12 +1372,8 @@ export class TriggerPoller {
 
   /** Prior run's recorded content hash, mirroring `lastRowCountFor`. */
   private lastHashFor(triggerId: number): string | null {
-    const row = this.db.prepare(
-      `SELECT output_json FROM trigger_runs
-       WHERE trigger_id = ? AND status IN ('ok','noop')
-       ORDER BY started_at DESC, id DESC
-       LIMIT 1`,
-    ).get(triggerId) as { output_json: string | null } | undefined;
+    const row = this.stmtLastHashRun
+      .get(triggerId) as { output_json: string | null } | undefined;
     if (!row?.output_json) return null;
     try {
       const parsed = JSON.parse(row.output_json) as { hash?: unknown };
@@ -1356,12 +1480,8 @@ export class TriggerPoller {
 
   /** Prior run's recorded poll.url digest, mirroring `lastHashFor`. */
   private lastUrlHashFor(triggerId: number): string | null {
-    const row = this.db.prepare(
-      `SELECT output_json FROM trigger_runs
-       WHERE trigger_id = ? AND status IN ('ok','noop')
-       ORDER BY started_at DESC, id DESC
-       LIMIT 1`,
-    ).get(triggerId) as { output_json: string | null } | undefined;
+    const row = this.stmtLastUrlHashRun
+      .get(triggerId) as { output_json: string | null } | undefined;
     if (!row?.output_json) return null;
     try {
       const parsed = JSON.parse(row.output_json) as { urlHash?: unknown };
@@ -1372,12 +1492,8 @@ export class TriggerPoller {
   }
 
   private lastScalarFor(triggerId: number, key: string): number | null {
-    const row = this.db.prepare(
-      `SELECT output_json FROM trigger_runs
-       WHERE trigger_id = ? AND status IN ('ok','noop')
-       ORDER BY started_at DESC, id DESC
-       LIMIT 1`,
-    ).get(triggerId) as { output_json: string | null } | undefined;
+    const row = this.stmtLastScalarRun
+      .get(triggerId) as { output_json: string | null } | undefined;
     if (!row?.output_json) return null;
     try {
       const parsed = JSON.parse(row.output_json) as Record<string, unknown>;
@@ -1404,11 +1520,8 @@ export class TriggerPoller {
   }
 
   private insertRun(t: TriggerRow, startedAt: number): number {
-    const info = this.db.prepare(
-      `INSERT INTO trigger_runs (
-         trigger_id, bead_id, status, started_at, attempt, metadata_json
-       ) VALUES (?, ?, 'running', ?, 1, '{}')`,
-    ).run(t.id, t.bead_id, startedAt);
+    const info = this.stmtInsertRun
+      .run(t.id, t.bead_id, startedAt);
     return Number(info.lastInsertRowid);
   }
 
@@ -1423,13 +1536,7 @@ export class TriggerPoller {
     const outputJson = deliveredWaId
       ? { ...outcome.outputJson, deliveredWaMessageId: deliveredWaId }
       : outcome.outputJson;
-    this.db.prepare(
-      `UPDATE trigger_runs
-       SET status = ?, finished_at = ?, duration_ms = ?,
-           output_summary = ?, output_json = ?,
-           error_kind = ?, error_message = ?
-       WHERE id = ?`,
-    ).run(
+    this.stmtFinishRun.run(
       outcome.status,
       finishedAt,
       durationMs,
@@ -1442,11 +1549,7 @@ export class TriggerPoller {
   }
 
   private recordDeliveredWaMessageId(runId: number, deliveredWaId: string): void {
-    this.db.prepare(
-      `UPDATE trigger_runs
-       SET output_json = json_set(COALESCE(output_json, '{}'), '$.deliveredWaMessageId', ?)
-       WHERE id = ?`,
-    ).run(deliveredWaId, runId);
+    this.stmtRecordDeliveredWaMessageId.run(deliveredWaId, runId);
   }
 
   /**
@@ -1459,10 +1562,7 @@ export class TriggerPoller {
    * cannot have its execute classification silently replaced by a delivery note.
    */
   private recordNotifyDispatchFailed(runId: number): void {
-    this.db.prepare(
-      `UPDATE trigger_runs SET error_kind = 'notify_dispatch_failed'
-       WHERE id = ? AND error_kind IS NULL`,
-    ).run(runId);
+    this.stmtRecordNotifyDispatchFailed.run(runId);
   }
 
   /**
@@ -1475,10 +1575,7 @@ export class TriggerPoller {
    * commits error_kind=NULL, so this never clobbers an execute classification.
    */
   private recordNotifyForbiddenTarget(runId: number): void {
-    this.db.prepare(
-      `UPDATE trigger_runs SET error_kind = 'notify_forbidden_target'
-       WHERE id = ? AND error_kind IS NULL`,
-    ).run(runId);
+    this.stmtRecordNotifyForbiddenTarget.run(runId);
   }
 
   /**
@@ -1491,12 +1588,8 @@ export class TriggerPoller {
    * reschedules), so status alone can never bound this loop.
    */
   private countConsecutiveForbiddenRejects(triggerId: number): number {
-    const recent = this.db.prepare(
-      `SELECT error_kind FROM trigger_runs
-       WHERE trigger_id = ?
-       ORDER BY started_at DESC, id DESC
-       LIMIT ?`,
-    ).all(triggerId, this.maxConsecutiveForbiddenRejects) as Array<{ error_kind: string | null }>;
+    const recent = this.stmtRecentErrorKinds
+      .all(triggerId, this.maxConsecutiveForbiddenRejects) as Array<{ error_kind: string | null }>;
     let count = 0;
     for (const row of recent) {
       if (row.error_kind === 'notify_forbidden_target') count++;
@@ -1517,11 +1610,7 @@ export class TriggerPoller {
    * pause idempotent.
    */
   private retireTriggerOnForbiddenTarget(t: TriggerRow, now: number, rejectCount: number): void {
-    const info = this.db.prepare(
-      `UPDATE bead_triggers
-       SET status = 'paused', next_fire_at = NULL, updated_at = ?
-       WHERE id = ? AND status = 'active'`,
-    ).run(now, t.id);
+    const info = this.stmtRetireTriggerOnForbiddenTarget.run(now, t.id);
     if (info.changes === 0) return; // already retired by a prior tick — do not double-signal
     writeBeadEvent(this.db, {
       beadId: t.bead_id,
@@ -1604,11 +1693,7 @@ export class TriggerPoller {
       nextFireAt = null;
     }
 
-    this.db.prepare(
-      `UPDATE bead_triggers
-       SET next_fire_at = ?, last_fire_at = ?, updated_at = ?
-       WHERE id = ?`,
-    ).run(nextFireAt, now, now, t.id);
+    this.stmtScheduleNextFire.run(nextFireAt, now, now, t.id);
   }
 
   /**
@@ -1617,12 +1702,8 @@ export class TriggerPoller {
    * resets the implicit counter.
    */
   private countConsecutiveFailures(triggerId: number): number {
-    const recent = this.db.prepare(
-      `SELECT status FROM trigger_runs
-       WHERE trigger_id = ?
-       ORDER BY started_at DESC, id DESC
-       LIMIT ?`,
-    ).all(triggerId, this.maxConsecutiveFailures) as Array<{ status: string }>;
+    const recent = this.stmtRecentRunStatuses
+      .all(triggerId, this.maxConsecutiveFailures) as Array<{ status: string }>;
     let count = 0;
     for (const row of recent) {
       if (row.status === 'failed') count++;
@@ -1632,11 +1713,7 @@ export class TriggerPoller {
   }
 
   private markPausedOnFailures(t: TriggerRow, now: number, failureCount: number): boolean {
-    this.db.prepare(
-      `UPDATE bead_triggers
-       SET status = 'paused', next_fire_at = NULL, updated_at = ?
-       WHERE id = ?`,
-    ).run(now, t.id);
+    this.stmtMarkPausedOnFailures.run(now, t.id);
     writeBeadEvent(this.db, {
       beadId: t.bead_id,
       eventType: 'trigger_paused',
@@ -1686,11 +1763,7 @@ export class TriggerPoller {
   private static readonly SILENT_EXPIRY_REASONS = new Set(['one_shot_completed']);
 
   private markExpired(t: TriggerRow, now: number, reason: string): boolean {
-    this.db.prepare(
-      `UPDATE bead_triggers
-       SET status = 'expired', next_fire_at = NULL, updated_at = ?
-       WHERE id = ?`,
-    ).run(now, t.id);
+    this.stmtMarkExpiredTrigger.run(now, t.id);
     writeBeadEvent(this.db, {
       beadId: t.bead_id,
       eventType: 'trigger_expired',
@@ -1698,12 +1771,7 @@ export class TriggerPoller {
       payload: { trigger_id: t.id, reason, on_terminal: t.on_terminal },
       at: now,
     });
-    this.db.prepare(
-      `INSERT INTO trigger_runs (
-         trigger_id, bead_id, status, started_at, finished_at, duration_ms,
-         output_summary, output_json, attempt, metadata_json
-       ) VALUES (?, ?, 'terminal_fired', ?, ?, 0, ?, ?, 1, '{}')`,
-    ).run(
+    this.stmtInsertExpiryRun.run(
       t.id, t.bead_id, now, now,
       `trigger expired: ${reason}`,
       JSON.stringify({ reason, on_terminal: t.on_terminal }),
@@ -1715,19 +1783,14 @@ export class TriggerPoller {
   }
 
   private reopenTerminalBead(t: TriggerRow, now: number, reason: string): void {
-    const bead = this.db.prepare(
-      `SELECT status FROM beads WHERE id = ?`,
-    ).get(t.bead_id) as { status: BeadStatus } | undefined;
+    const bead = this.stmtLookupBeadStatus
+      .get(t.bead_id) as { status: BeadStatus } | undefined;
     if (!bead || !TERMINAL.includes(bead.status)) return;
 
     // This is the inverse of the normal terminal transition: transition()
     // intentionally rejects terminal beads, so reopen_bead writes the status
     // and matching status_change event directly inside the expiry transaction.
-    this.db.prepare(
-      `UPDATE beads
-       SET status = 'active', completed_at = NULL, cancelled_at = NULL, updated_at = ?
-       WHERE id = ?`,
-    ).run(now, t.bead_id);
+    this.stmtReopenBead.run(now, t.bead_id);
     writeBeadEvent(this.db, {
       beadId: t.bead_id,
       eventType: 'status_change',

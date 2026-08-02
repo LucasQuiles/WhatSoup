@@ -1,3 +1,4 @@
+import { z } from 'zod';
 import type { Database } from '../../core/database.ts';
 
 /**
@@ -29,8 +30,6 @@ export interface UserSurfacePrefs {
   readonly optionDefaults?: Readonly<Record<string, Readonly<Record<string, string>>>>;
 }
 
-const VERBOSITIES: ReadonlySet<string> = new Set(['terse', 'normal']);
-
 /** Ensure the per-sender command-surface prefs table exists. Idempotent —
  *  safe to call on a virgin db (lazy creation) or a db that already has the
  *  table (re-open across connections/process restarts). */
@@ -47,6 +46,29 @@ export function ensureCommandSurfacePrefsSchema(db: Database): void {
 }
 
 /**
+ * Shape schema for UserSurfacePrefs. All fields optional (additive-only
+ * contract); unknown top-level keys are stripped (default z.object() strip
+ * mode), matching the previous ladder's "ignored, forward-compatible"
+ * handling. `satisfies` pins the schema output to the exported type at
+ * compile time.
+ *
+ * One documented behavior delta vs. the previous typeof ladder (same class
+ * as the #2857/tranche-2 precedents): z.object() rejects a top-level value
+ * whose `typeof` is `'object'` but is not itself a plain object — e.g. a
+ * Date or Map — where the ladder's `typeof value !== 'object'` check
+ * accepted such host objects (finding no matching own properties on them,
+ * it returned `{}`). This is pinned as a trap case below; the guard's only
+ * production input is JSON.parse output, which can never produce a Date or
+ * Map.
+ */
+const SurfacePrefsShapeSchema = z.object({
+  hidden: z.array(z.string()).optional(),
+  verbosity: z.enum(['terse', 'normal']).optional(),
+  locale: z.string().optional(),
+  optionDefaults: z.record(z.string(), z.record(z.string(), z.string())).optional(),
+}) satisfies z.ZodType<UserSurfacePrefs>;
+
+/**
  * Fail-safe shape validation for a decoded prefs value. Mirrors
  * chat-preference-db.ts getPreference's validation ladder: SQLite affinity
  * (and hand-edited/legacy rows) can carry wrong-typed or out-of-contract
@@ -56,48 +78,8 @@ export function ensureCommandSurfacePrefsSchema(db: Database): void {
  * type itself is additive-only.
  */
 function validateSurfacePrefsShape(value: unknown): UserSurfacePrefs | null {
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) return null;
-  const v = value as Record<string, unknown>;
-
-  let hidden: readonly string[] | undefined;
-  if (v['hidden'] !== undefined) {
-    if (!Array.isArray(v['hidden']) || !(v['hidden'] as unknown[]).every((x) => typeof x === 'string')) {
-      return null;
-    }
-    hidden = v['hidden'] as readonly string[];
-  }
-
-  let verbosity: 'terse' | 'normal' | undefined;
-  if (v['verbosity'] !== undefined) {
-    if (typeof v['verbosity'] !== 'string' || !VERBOSITIES.has(v['verbosity'])) return null;
-    verbosity = v['verbosity'] as 'terse' | 'normal';
-  }
-
-  let locale: string | undefined;
-  if (v['locale'] !== undefined) {
-    if (typeof v['locale'] !== 'string') return null;
-    locale = v['locale'];
-  }
-
-  let optionDefaults: Readonly<Record<string, Readonly<Record<string, string>>>> | undefined;
-  if (v['optionDefaults'] !== undefined) {
-    const od = v['optionDefaults'];
-    if (typeof od !== 'object' || od === null || Array.isArray(od)) return null;
-    for (const cmdOpts of Object.values(od as Record<string, unknown>)) {
-      if (typeof cmdOpts !== 'object' || cmdOpts === null || Array.isArray(cmdOpts)) return null;
-      for (const optValue of Object.values(cmdOpts as Record<string, unknown>)) {
-        if (typeof optValue !== 'string') return null;
-      }
-    }
-    optionDefaults = od as Readonly<Record<string, Readonly<Record<string, string>>>>;
-  }
-
-  return {
-    ...(hidden !== undefined ? { hidden } : {}),
-    ...(verbosity !== undefined ? { verbosity } : {}),
-    ...(locale !== undefined ? { locale } : {}),
-    ...(optionDefaults !== undefined ? { optionDefaults } : {}),
-  };
+  const result = SurfacePrefsShapeSchema.safeParse(value);
+  return result.success ? result.data : null;
 }
 
 /** Persist (or replace) a sender's command-surface prefs. Idempotent upsert

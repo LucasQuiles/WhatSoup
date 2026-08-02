@@ -1,6 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { mkdirSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -12,9 +11,10 @@ import {
   parseArgs,
   run,
 } from '../../scripts/safeguard-diagnostics.ts';
+import { trackTmpDirs } from '../helpers/tmp-dir.ts';
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
-const tempRepos: string[] = [];
+const tmp = trackTmpDirs('');
 
 const requiredPackageScripts = {
   'guard:publication': 'node scripts/publication-guard.ts',
@@ -432,8 +432,7 @@ function makeRepo(options: {
   files?: Record<string, string | undefined>;
   trackedExtras?: Record<string, string>;
 } = {}): string {
-  const repo = mkdtempSync(path.join(tmpdir(), 'safeguard-diagnostics-'));
-  tempRepos.push(repo);
+  const repo = tmp.make('safeguard-diagnostics');
   const scripts = { ...requiredPackageScripts, ...(options.scripts ?? {}) };
   for (const [name, value] of Object.entries(scripts)) {
     if (value === undefined) delete scripts[name as keyof typeof scripts];
@@ -463,8 +462,7 @@ function makeRepo(options: {
 }
 
 function makeNonGitTree(): string {
-  const repo = mkdtempSync(path.join(tmpdir(), 'safeguard-diagnostics-nongit-'));
-  tempRepos.push(repo);
+  const repo = tmp.make('safeguard-diagnostics-nongit');
   writeRepoFile(repo, 'package.json', JSON.stringify({ scripts: requiredPackageScripts }, null, 2));
   writeRepoFile(repo, 'console/package.json', JSON.stringify({ scripts: requiredConsolePackageScripts }, null, 2));
   for (const [filePath, text] of Object.entries(requiredFiles)) {
@@ -476,7 +474,6 @@ function makeNonGitTree(): string {
 afterEach(() => {
   vi.restoreAllMocks();
   process.exitCode = undefined;
-  for (const repo of tempRepos.splice(0)) rmSync(repo, { recursive: true, force: true });
 });
 
 describe('safeguard diagnostics', () => {

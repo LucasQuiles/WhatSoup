@@ -10,12 +10,13 @@
 // configs, spawn the probe with the pinned interpreter, assert exit code + marker.
 
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync } from 'node:fs';
-import { tmpdir, homedir } from 'node:os';
+import { mkdirSync, writeFileSync, existsSync } from 'node:fs';
+import { homedir } from 'node:os';
 import { join, resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { afterEach, describe, expect, it } from 'vitest';
+import { describe, expect, it } from 'vitest';
 import { cleanGitEnv } from '../../src/lib/git-env.ts';
+import { trackTmpDirs } from '../helpers/tmp-dir.ts';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(__dirname, '../..');
@@ -23,21 +24,10 @@ const ENTRYPOINT = join(REPO_ROOT, 'deploy/preflight-instance-check.ts');
 const PINNED_NODE = process.execPath;
 const SPAWN_TIMEOUT_MS = 15_000;
 
-const tmpDirs: string[] = [];
-afterEach(() => {
-  for (const dir of tmpDirs.splice(0)) {
-    try {
-      rmSync(dir, { recursive: true, force: true });
-    } catch {
-      // best-effort cleanup
-    }
-  }
-});
+const tmp = trackTmpDirs('preflight-instance');
 
 function makeConfigHome(): string {
-  const dir = mkdtempSync(join(tmpdir(), 'preflight-instance-'));
-  tmpDirs.push(dir);
-  return dir;
+  return tmp.make('');
 }
 
 function writeInstance(configHome: string, name: string, config: unknown): void {
