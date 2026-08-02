@@ -10,28 +10,24 @@
  * execd, hit exit status 9 on the unknown flag, and crash-looped under systemd.
  */
 
-import { afterEach, describe, expect, it } from 'vitest';
+import { describe, expect, it } from 'vitest';
 import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { trackTmpDirs } from '../helpers/tmp-dir.ts';
 
 const repoRoot = fileURLToPath(new URL('../..', import.meta.url));
 const wrapperPath = path.join(repoRoot, 'deploy', 'whatsoup');
 
-const tmpDirs: string[] = [];
+const tmp = trackTmpDirs('');
 
-afterEach(() => {
-  for (const dir of tmpDirs.splice(0)) {
-    fs.rmSync(dir, { recursive: true, force: true });
-  }
-});
-
+// Callers pass the full literal prefix (including its trailing dash), matching
+// the pre-migration mkdtempSync(path.join(tmpdir(), prefix)) call exactly;
+// trackTmpDirs' make(name) re-appends the dash, so the one already on `prefix`
+// is stripped here to avoid a double dash.
 function makeTmpDir(prefix: string): string {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
-  tmpDirs.push(dir);
-  return dir;
+  return tmp.make(prefix.slice(0, -1));
 }
 
 function writeExecutable(filePath: string, contents: string): void {

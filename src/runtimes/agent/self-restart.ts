@@ -20,6 +20,7 @@ import { createChildLogger } from '../../logger.ts';
 import { isPnJid, isGroupJid } from '../../core/jid-constants.ts';
 import { resolvePhoneFromJidForGrant } from '../../core/access-list.ts';
 import { isAdminPhone } from '../../lib/phone.ts';
+import { MS_PER_MINUTE, MS_PER_SECOND } from '../../lib/time-units.ts';
 import type { Database } from '../../core/database.ts';
 import type { SessionContext, ToolDeclaration } from '../../mcp/types.ts';
 
@@ -40,7 +41,7 @@ export interface ServiceRestarter {
 export const INTENTIONAL_RESTART_MARKER = 'intentional-restart.marker';
 
 /** Default freshness window for the marker (matches the exhausted.marker window). */
-const DEFAULT_MAX_AGE_MS = 5 * 60 * 1000;
+const DEFAULT_MAX_AGE_MS = 5 * MS_PER_MINUTE;
 
 /** Taxonomy code distinguishing deliberate restart causes. */
 export type RestartReasonCode = 'self_restart' | 'redeploy' | 'config_reload';
@@ -142,7 +143,7 @@ export async function triggerSelfRestart(
   // timer means the restart is underway (success); a fast rejection means a real
   // invocation failure (masked/unknown unit, missing systemctl) worth surfacing.
   // Either way the marker stays written for crash suppression.
-  const RESTART_INVOKE_GRACE_MS = 2_000;
+  const RESTART_INVOKE_GRACE_MS = 2 * MS_PER_SECOND;
   let invocationError: unknown;
   let graceTimer: NodeJS.Timeout | undefined;
   const restartCall = opts.serviceManager

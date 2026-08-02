@@ -1,5 +1,4 @@
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { mkdirSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
@@ -9,8 +8,9 @@ import {
   findGuardsMissingTests,
   run,
 } from '../../scripts/guard-test-coverage-check.ts';
+import { trackTmpDirs } from '../helpers/tmp-dir.ts';
 
-const fixtureDirs: string[] = [];
+const tmp = trackTmpDirs('guard-test-');
 
 /**
  * Build a minimal repo fixture with a `scripts/` dir, a `tests/scripts/` dir,
@@ -33,8 +33,7 @@ function makeFixture(
     testBody?: string;
   }[],
 ): string {
-  const dir = mkdtempSync(path.join(tmpdir(), 'guard-test-coverage-'));
-  fixtureDirs.push(dir);
+  const dir = tmp.make('coverage');
   mkdirSync(path.join(dir, 'scripts'), { recursive: true });
   mkdirSync(path.join(dir, 'tests', 'scripts'), { recursive: true });
 
@@ -88,7 +87,6 @@ describe('guard-test-coverage meta-guard', () => {
   afterEach(() => {
     vi.restoreAllMocks();
     process.exitCode = undefined;
-    for (const dir of fixtureDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
   });
 
   it('enumerates *guard*.ts and check-*.ts but ignores unrelated scripts', () => {
@@ -106,8 +104,7 @@ describe('guard-test-coverage meta-guard', () => {
   });
 
   it('fails closed when the scripts directory cannot be scanned', () => {
-    const dir = mkdtempSync(path.join(tmpdir(), 'guard-test-coverage-missing-scripts-'));
-    fixtureDirs.push(dir);
+    const dir = tmp.make('coverage-missing-scripts');
     writeFileSync(
       path.join(dir, 'package.json'),
       JSON.stringify({ name: 'fixture', scripts: { 'verify:push:branch': 'npm test --' } }),

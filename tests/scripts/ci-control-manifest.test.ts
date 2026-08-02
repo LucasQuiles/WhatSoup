@@ -1,7 +1,6 @@
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { describe, expect, it } from 'vitest';
 
 import { runManifestCli } from '../../scripts/ci-control-manifest.ts';
 import { REF_POLICY_TOOL_SOURCE_PATHS } from '../../scripts/ci-control-ref-policy.ts';
@@ -17,13 +16,10 @@ import {
 } from '../../scripts/lib/ci-control/manifest.ts';
 import { CLASSIFIER_TOOL_SOURCE_PATHS } from '../../scripts/lib/ci-control/classifier.ts';
 import { runtimeSourceClosure } from '../helpers/runtime-source-closure.ts';
+import { trackTmpDirs } from '../helpers/tmp-dir.ts';
 
 const root = resolve(import.meta.dirname, '../..');
-const temporaryRoots: string[] = [];
-
-afterEach(() => {
-  for (const directory of temporaryRoots.splice(0)) rmSync(directory, { recursive: true, force: true });
-});
+const tmp = trackTmpDirs('ci-control-');
 
 function control(id: string, overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return {
@@ -121,8 +117,7 @@ function issueCodes(value: unknown): string[] {
 }
 
 function fixtureRoot(value: unknown): string {
-  const directory = mkdtempSync(join(tmpdir(), 'ci-control-manifest-'));
-  temporaryRoots.push(directory);
+  const directory = tmp.make('manifest');
   mkdirSync(join(directory, 'controls'));
   writeFileSync(join(directory, 'controls/ci-control-manifest.json'), `${JSON.stringify(value)}\n`, 'utf8');
   return directory;

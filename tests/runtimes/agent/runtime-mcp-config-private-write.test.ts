@@ -12,26 +12,18 @@
 // parent (0o755) and an attacker symlink to prove the contract holds for the
 // L1334 call site.
 
-import { describe, it, expect, afterEach } from 'vitest';
-import { existsSync, mkdtempSync, rmSync, statSync, symlinkSync, chmodSync, readFileSync } from 'node:fs';
+import { describe, it, expect } from 'vitest';
+import { existsSync, statSync, symlinkSync, chmodSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { tmpdir } from 'node:os';
 import { writePrivateFileSync } from '../../../src/core/workspace.ts';
+import { trackTmpDirs } from '../../helpers/tmp-dir.ts';
 
 describe('runtime .mcp.json write (issue #391)', () => {
-  const tmpDirs: string[] = [];
-
-  afterEach(() => {
-    for (const d of tmpDirs) {
-      try { rmSync(d, { recursive: true, force: true }); } catch { /* swallow */ }
-    }
-    tmpDirs.length = 0;
-  });
+  const tmp = trackTmpDirs('rt-mcp');
 
   function makeTmp(mode = 0o755): string {
-    const d = mkdtempSync(join(tmpdir(), 'rt-mcp-'));
+    const d = tmp.make('');
     chmodSync(d, mode);
-    tmpDirs.push(d);
     return d;
   }
 

@@ -10,14 +10,15 @@ from __future__ import annotations
 
 import glob
 import json
+import logging
 import os
 import re
 import shutil
 import subprocess
 import sys
-import syslog
 import tempfile
 import time
+from logging.handlers import SysLogHandler
 from pathlib import Path
 from typing import Any, Callable, Mapping, Optional
 
@@ -27,6 +28,11 @@ ALERT_PCT = 0.75
 DEFAULT_COOLDOWN_SECONDS = 1800
 HELPER_TIMEOUT_SECONDS = 30
 REQUIRED_NODE_MAJOR = 24
+# Captured at import time so tests can simulate a failed local syslog
+# endpoint (patching SysLogHandler's constructor) without also breaking this
+# unrelated priority-constant lookup, which run_cycle() needs regardless of
+# whether the endpoint is reachable.
+ALERT_SYSLOG_PRIORITY = SysLogHandler.LOG_WARNING
 
 
 class HelperResult:
@@ -85,7 +91,44 @@ def state_root(env: Mapping[str, str]) -> Path:
         return Path(override)
     bot = _require_env(env, "TOKENOMICS_BOT")
     home = Path(env.get("HOME") or str(Path.home()))
-    return home / "Library" / "Application Support" / state_dir_name(bot)
+    if sys.platform == "darwin":
+        return home / "Library" / "Application Support" / state_dir_name(bot)
+    xdg_state = env.get("XDG_STATE_HOME")
+    base = Path(xdg_state) if xdg_state else home / ".local" / "state"
+    return base / state_dir_name(bot)
+
+
+def syslog_address() -> str:
+    """Local syslog delivery path for this platform.
+
+    SysLogHandler's own default (`("localhost", 514)`, UDP) is not this: a
+    UDP send to a port nothing is listening on does not raise, so a caller
+    that relied on that default would silently drop every alert instead of
+    failing loudly or delivering it. Always resolve to a real local path.
+    """
+    return "/var/run/syslog" if sys.platform == "darwin" else "/dev/log"
+
+
+def _default_syslog_fn(priority: int, message: str) -> None:
+    # priority is accepted for signature parity with the run_cycle() call
+    # site (which always passes SysLogHandler.LOG_WARNING, matching this
+    # script's "warnings only" design per its module docstring above).
+    del priority
+    logger = logging.getLogger("token-budget-watchdog")
+    logger.setLevel(logging.WARNING)
+    logger.propagate = False
+    try:
+        handler: logging.Handler = SysLogHandler(address=syslog_address())
+    except OSError:
+        # No local syslog endpoint (sandboxed/minimal host). Fail open, same
+        # as the alert path around it never raising on infrastructure trouble.
+        handler = logging.NullHandler()
+    logger.addHandler(handler)
+    try:
+        logger.warning(message)
+    finally:
+        logger.removeHandler(handler)
+        handler.close()
 
 
 def _node_major(node_bin: str) -> Optional[int]:
@@ -293,7 +336,7 @@ def run_cycle(
     *,
     env: Mapping[str, str] = os.environ,
     now_fn: Callable[[], float] = time.time,
-    syslog_fn: Callable[[int, str], None] = syslog.syslog,
+    syslog_fn: Callable[[int, str], None] = _default_syslog_fn,
     helper_fn: Callable[[WatchdogConfig], HelperResult] = invoke_token_window,
 ) -> int:
     try:
@@ -334,7 +377,7 @@ def run_cycle(
 
     if pct >= ALERT_PCT and _should_alert(config, now):
         syslog_fn(
-            syslog.LOG_WARNING,
+            ALERT_SYSLOG_PRIORITY,
             (
                 f"tokenomics budget warning for {config.bot}: "
                 f"{total_tokens}/{config.ceiling} tokens in {WINDOW} ({pct:.1%})"

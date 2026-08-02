@@ -1,19 +1,14 @@
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { afterEach, describe, expect, it } from 'vitest';
+import { describe, expect, it } from 'vitest';
+
+import { trackTmpDirs } from '../helpers/tmp-dir.ts';
 
 const SCRIPT = resolve(process.cwd(), 'console/scripts/validate-visual-manifest.mjs');
 
-const tmpDirs: string[] = [];
-
-afterEach(() => {
-  for (const dir of tmpDirs) {
-    rmSync(dir, { recursive: true, force: true });
-  }
-  tmpDirs.length = 0;
-});
+const tmp = trackTmpDirs('visual-');
 
 interface FixtureOptions {
   mutate?: (manifest: Record<string, unknown>, fixture: Fixture) => void;
@@ -26,8 +21,7 @@ interface Fixture {
 }
 
 function makeFixture(options: FixtureOptions = {}): Fixture {
-  const dir = mkdtempSync(join(tmpdir(), 'visual-manifest-'));
-  tmpDirs.push(dir);
+  const dir = tmp.make('manifest');
   mkdirSync(join(dir, 'screenshots'), { recursive: true });
 
   const fixture: Fixture = {

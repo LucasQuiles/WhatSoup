@@ -171,6 +171,16 @@ export interface ImessagePort {
   resetConnection?(): void;
 
   /**
+   * Permanently release any held transport resource (e.g. a persistent
+   * socket). Unlike {@link resetConnection}, callers do not reconnect after
+   * this — it is the final-teardown counterpart, invoked once at shutdown.
+   * Safe to call repeatedly (idempotent), including after `resetConnection`.
+   * Backends with no persistent connection (BlueBubbles HTTP) need not
+   * implement it.
+   */
+  dispose?(): void;
+
+  /**
    * Send a reaction to a prior message. iMessage's tapback protocol supports
    * 6 reactions (👍, 👎, ❤️, ‼️, ❓, 😂) plus remove. The port forwards the
    * emoji; the backend rejects unsupported emojis.

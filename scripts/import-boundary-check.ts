@@ -76,6 +76,8 @@ export function buildLayerMatrix(params?: BoundaryParams): LayerMatrix {
 function resolveLayer(absFilePath: string, repoRoot: string): string | null {
   const rel = path.relative(repoRoot, absFilePath).split(path.sep).join('/');
 
+  if (rel.startsWith('console/src/')) return 'console';
+
   if (rel.startsWith('src/')) {
     const afterSrc = rel.slice('src/'.length);
     const slash = afterSrc.indexOf('/');
@@ -191,8 +193,10 @@ function extractImportSpecifiers(source: string): RawEdge[] {
 // ---------------------------------------------------------------------------
 
 function walkSrcFiles(repoRoot: string): string[] {
-  const srcDir = path.join(repoRoot, 'src');
-  if (!existsSync(srcDir)) return [];
+  // Ring/import boundaries are a global invariant (#2210): every package that
+  // participates in the import graph is in scope, including the console peer
+  // package. Skipping console/src created a tiered enforcement surface.
+  const roots = [path.join(repoRoot, 'src'), path.join(repoRoot, 'console', 'src')];
 
   const results: string[] = [];
 
@@ -203,7 +207,7 @@ function walkSrcFiles(repoRoot: string): string[] {
         walk(full);
       } else if (
         entry.isFile()
-        && entry.name.endsWith('.ts')
+        && (entry.name.endsWith('.ts') || entry.name.endsWith('.tsx'))
         && !entry.name.endsWith('.d.ts')
       ) {
         results.push(full);
@@ -211,7 +215,9 @@ function walkSrcFiles(repoRoot: string): string[] {
     }
   }
 
-  walk(srcDir);
+  for (const root of roots) {
+    if (existsSync(root)) walk(root);
+  }
   return results;
 }
 

@@ -23,6 +23,16 @@ vi.mock('../../../src/fleet/http-proxy.ts', () => ({
   proxyToInstance: proxyMock,
 }));
 
+const { mockLogWarn } = vi.hoisted(() => ({ mockLogWarn: vi.fn() }));
+vi.mock('../../../src/logger.ts', () => ({
+  createChildLogger: () => ({
+    info: vi.fn(),
+    warn: mockLogWarn,
+    error: vi.fn(),
+    debug: vi.fn(),
+  }),
+}));
+
 import {
   handleGetApprovals,
   handlePostApprovalDecision,
@@ -232,7 +242,7 @@ describe('GET /api/lines/:name/approvals (handleGetApprovals)', () => {
 });
 
 describe('POST /api/lines/:name/approvals/decision (handlePostApprovalDecision)', () => {
-  beforeEach(() => { proxyMock.mockReset(); });
+  beforeEach(() => { proxyMock.mockReset(); mockLogWarn.mockClear(); });
 
   it('400s on a malformed body (missing selectedOptions)', async () => {
     const deps = makeDeps(fakeInstance(), vi.fn());
@@ -356,5 +366,15 @@ describe('POST /api/lines/:name/approvals/decision (handlePostApprovalDecision)'
     );
     expect(res._status).toBe(502);
     expect(JSON.parse(res._body).error).toMatch(/offline|unreachable|not delivered/i);
+
+    // The swallowed write-failure detail must now reach the logger (#2292-remainders
+    // observability gap) — the client-facing 502 stays identical, but the actual
+    // DB error is no longer discarded.
+    expect(mockLogWarn).toHaveBeenCalledTimes(1);
+    const [ctx, msg] = mockLogWarn.mock.calls[0]!;
+    expect(msg).toMatch(/durable queue write failed/i);
+    expect(ctx).toMatchObject({ instance: 'agent-line', mapKey: 'agent:chat:1' });
+    expect(typeof (ctx as Record<string, unknown>).err).toBe('string');
+    expect(((ctx as Record<string, unknown>).err as string).length).toBeGreaterThan(0);
   });
 });

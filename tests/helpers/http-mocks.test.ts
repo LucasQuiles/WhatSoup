@@ -29,6 +29,21 @@ describe('http test helpers', () => {
     expect(res._body).toBe('{"ok":true}');
   });
 
+  // #2869: ServerResponse is an EventEmitter; createSSEWriter (src/fleet/sse-helpers.ts)
+  // attaches an 'error' listener via res.on(#2292 L7), so a mockRes without `on` is an
+  // incomplete fake for any consumer that constructs an SSE writer around it.
+  it('exposes a no-op .on() so an SSE writer can attach its error listener', () => {
+    const res = mockRes();
+
+    expect(() => res.on('error', () => {})).not.toThrow();
+  });
+
+  it('returns itself from .on() for chaining, matching writeHead/setHeader/end', () => {
+    const res = mockRes();
+
+    expect(res.on('error', () => {})).toBe(res);
+  });
+
   it('builds common fleet route deps with override support', () => {
     const deps = makeDeps({
       discovery: { getInstances: vi.fn(() => new Map([['line-a', { name: 'line-a' }]])) },

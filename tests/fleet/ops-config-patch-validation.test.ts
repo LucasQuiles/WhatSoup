@@ -13,39 +13,16 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
-import { PassThrough } from 'node:stream';
-import type { IncomingMessage, ServerResponse } from 'node:http';
 
 import { handleConfigUpdate } from '../../src/fleet/routes/ops.ts';
 import type { OpsDeps } from '../../src/fleet/routes/ops.ts';
 import type { DiscoveredInstance } from '../../src/fleet/discovery.ts';
 import { validateInstanceConfig } from '../../src/core/agent-config-validator.ts';
+import { makeDeps, mockReq, mockRes } from '../helpers/http-mocks.ts';
 
 vi.mock('../../src/fleet/mcp-client.ts', () => ({ mcpCall: vi.fn() }));
 vi.mock('../../src/fleet/http-proxy.ts', () => ({ proxyToInstance: vi.fn() }));
 vi.mock('node:child_process', () => ({ execFile: vi.fn(), spawn: vi.fn() }));
-
-function mockReq(body = ''): IncomingMessage {
-  const stream = new PassThrough() as unknown as IncomingMessage;
-  (stream as any).headers = {};
-  (stream as any).url = '/';
-  (stream as any).method = 'PATCH';
-  process.nextTick(() => {
-    (stream as unknown as PassThrough).write(body);
-    (stream as unknown as PassThrough).end();
-  });
-  return stream;
-}
-
-function mockRes(): ServerResponse & { _status: number; _body: string } {
-  const res = {
-    _status: 0,
-    _body: '',
-    writeHead(status: number) { res._status = status; },
-    end(data?: string) { if (data) res._body = data; },
-  };
-  return res as any;
-}
 
 function fakeInstance(configPath: string, overrides: Partial<DiscoveredInstance> = {}): DiscoveredInstance {
   return {
@@ -63,15 +40,8 @@ function fakeInstance(configPath: string, overrides: Partial<DiscoveredInstance>
   };
 }
 
-function makeDeps(instance: DiscoveredInstance): OpsDeps {
-  return {
-    discovery: {
-      getInstance: vi.fn(() => instance),
-      getInstances: vi.fn(() => new Map()),
-    } as any,
-    realtime: { publish: vi.fn() },
-    serviceManager: { restart: vi.fn(), stop: vi.fn(), disable: vi.fn(), enable: vi.fn() } as any,
-  };
+function depsFor(instance: DiscoveredInstance): OpsDeps {
+  return makeDeps({ discovery: { getInstance: vi.fn(() => instance) } as any });
 }
 
 /** Build a real, writable agent cwd under $HOME so the route-level
@@ -112,8 +82,8 @@ describe('handleConfigUpdate PATCH healthPort validation (#244)', () => {
     const cfg = writeConfig('test-line');
     const res = mockRes();
     await handleConfigUpdate(
-      mockReq(JSON.stringify({ healthPort: 80 })),
-      res, makeDeps(fakeInstance(cfg)), { name: 'test-line' },
+      mockReq({ method: 'PATCH', body: JSON.stringify({ healthPort: 80 }) }),
+      res, depsFor(fakeInstance(cfg)), { name: 'test-line' },
     );
     expect(res._status).toBe(400);
     expect(JSON.parse(res._body).message).toMatch(/healthPort must be between 1024 and 65535/);
@@ -123,8 +93,8 @@ describe('handleConfigUpdate PATCH healthPort validation (#244)', () => {
     const cfg = writeConfig('test-line');
     const res = mockRes();
     await handleConfigUpdate(
-      mockReq(JSON.stringify({ healthPort: 65536 })),
-      res, makeDeps(fakeInstance(cfg)), { name: 'test-line' },
+      mockReq({ method: 'PATCH', body: JSON.stringify({ healthPort: 65536 }) }),
+      res, depsFor(fakeInstance(cfg)), { name: 'test-line' },
     );
     expect(res._status).toBe(400);
     expect(JSON.parse(res._body).message).toMatch(/healthPort must be between 1024 and 65535/);
@@ -134,8 +104,8 @@ describe('handleConfigUpdate PATCH healthPort validation (#244)', () => {
     const cfg = writeConfig('test-line');
     const res = mockRes();
     await handleConfigUpdate(
-      mockReq(JSON.stringify({ healthPort: 'abc' })),
-      res, makeDeps(fakeInstance(cfg)), { name: 'test-line' },
+      mockReq({ method: 'PATCH', body: JSON.stringify({ healthPort: 'abc' }) }),
+      res, depsFor(fakeInstance(cfg)), { name: 'test-line' },
     );
     expect(res._status).toBe(400);
     expect(JSON.parse(res._body).message).toMatch(/healthPort must be (an integer|between)/);
@@ -146,8 +116,8 @@ describe('handleConfigUpdate PATCH healthPort validation (#244)', () => {
     const cfg = writeConfig('test-line');
     const res = mockRes();
     await handleConfigUpdate(
-      mockReq(JSON.stringify({ healthPort: 9100 })),
-      res, makeDeps(fakeInstance(cfg)), { name: 'test-line' },
+      mockReq({ method: 'PATCH', body: JSON.stringify({ healthPort: 9100 }) }),
+      res, depsFor(fakeInstance(cfg)), { name: 'test-line' },
     );
     expect(res._status).toBe(409);
     expect(JSON.parse(res._body).message).toMatch(/healthPort 9100 is already in use/);
@@ -157,8 +127,8 @@ describe('handleConfigUpdate PATCH healthPort validation (#244)', () => {
     const cfg = writeConfig('test-line');
     const res = mockRes();
     await handleConfigUpdate(
-      mockReq(JSON.stringify({ healthPort: 9200 })),
-      res, makeDeps(fakeInstance(cfg)), { name: 'test-line' },
+      mockReq({ method: 'PATCH', body: JSON.stringify({ healthPort: 9200 }) }),
+      res, depsFor(fakeInstance(cfg)), { name: 'test-line' },
     );
     expect(res._status).toBe(200);
     expect(JSON.parse(res._body).healthPort).toBe(9200);
@@ -169,8 +139,8 @@ describe('handleConfigUpdate PATCH healthPort validation (#244)', () => {
     const cfg = writeConfig('test-line');
     const res = mockRes();
     await handleConfigUpdate(
-      mockReq(JSON.stringify({ healthPort: 9090 })),
-      res, makeDeps(fakeInstance(cfg)), { name: 'test-line' },
+      mockReq({ method: 'PATCH', body: JSON.stringify({ healthPort: 9090 }) }),
+      res, depsFor(fakeInstance(cfg)), { name: 'test-line' },
     );
     expect(res._status).toBe(409);
     expect(JSON.parse(res._body).message).toMatch(/healthPort 9090 is already in use/);
@@ -184,8 +154,8 @@ describe('handleConfigUpdate PATCH healthPort validation (#244)', () => {
     const before = fs.readFileSync(cfg, 'utf-8');
     const res = mockRes();
     await handleConfigUpdate(
-      mockReq(JSON.stringify({ healthPort: 9200 })),
-      res, makeDeps(fakeInstance(cfg)), { name: 'test-line' },
+      mockReq({ method: 'PATCH', body: JSON.stringify({ healthPort: 9200 }) }),
+      res, depsFor(fakeInstance(cfg)), { name: 'test-line' },
     );
     expect(res._status).toBe(500);
     expect(JSON.parse(res._body)).toMatchObject({
@@ -200,8 +170,8 @@ describe('handleConfigUpdate PATCH healthPort validation (#244)', () => {
     const before = fs.readFileSync(cfg, 'utf-8');
     const res = mockRes();
     await handleConfigUpdate(
-      mockReq(JSON.stringify({ type: 'passive' })),
-      res, makeDeps(fakeInstance(cfg)), { name: 'test-line' },
+      mockReq({ method: 'PATCH', body: JSON.stringify({ type: 'passive' }) }),
+      res, depsFor(fakeInstance(cfg)), { name: 'test-line' },
     );
     expect(res._status).toBe(400);
     expect(JSON.parse(res._body).message).toMatch(/type is immutable/);
@@ -249,8 +219,8 @@ describe('handleConfigUpdate PATCH agentOptions validation (#249)', () => {
     const inst = fakeInstance(cfg, { name: 'test-agent', type: 'agent' });
     const res = mockRes();
     await handleConfigUpdate(
-      mockReq(JSON.stringify({ agentOptions: { sessionScope: 'bogus' } })),
-      res, makeDeps(inst), { name: 'test-agent' },
+      mockReq({ method: 'PATCH', body: JSON.stringify({ agentOptions: { sessionScope: 'bogus' } }) }),
+      res, depsFor(inst), { name: 'test-agent' },
     );
     expect(res._status).toBe(400);
     expect(JSON.parse(res._body).message).toMatch(/sessionScope must be (single|one of)/);
@@ -261,10 +231,10 @@ describe('handleConfigUpdate PATCH agentOptions validation (#249)', () => {
     const inst = fakeInstance(cfg, { name: 'test-agent', type: 'agent' });
     const res = mockRes();
     await handleConfigUpdate(
-      mockReq(JSON.stringify({
+      mockReq({ method: 'PATCH', body: JSON.stringify({
         agentOptions: { sessionScope: 'shared', sandboxPerChat: true },
-      })),
-      res, makeDeps(inst), { name: 'test-agent' },
+      }) }),
+      res, depsFor(inst), { name: 'test-agent' },
     );
     expect(res._status).toBe(400);
     expect(JSON.parse(res._body).message).toMatch(/sandboxPerChat requires sessionScope "per_chat"/);
@@ -275,8 +245,8 @@ describe('handleConfigUpdate PATCH agentOptions validation (#249)', () => {
     const inst = fakeInstance(cfg, { name: 'test-agent', type: 'agent' });
     const res = mockRes();
     await handleConfigUpdate(
-      mockReq(JSON.stringify({ agentOptions: { provider: '' } })),
-      res, makeDeps(inst), { name: 'test-agent' },
+      mockReq({ method: 'PATCH', body: JSON.stringify({ agentOptions: { provider: '' } }) }),
+      res, depsFor(inst), { name: 'test-agent' },
     );
     expect(res._status).toBe(400);
     // #447: provider is now validated against the shared PROVIDER_IDS registry,
@@ -290,8 +260,8 @@ describe('handleConfigUpdate PATCH agentOptions validation (#249)', () => {
     const inst = fakeInstance(cfg, { name: 'test-agent', type: 'agent' });
     const res = mockRes();
     await handleConfigUpdate(
-      mockReq(JSON.stringify({ agentOptions: { providerConfig: [] } })),
-      res, makeDeps(inst), { name: 'test-agent' },
+      mockReq({ method: 'PATCH', body: JSON.stringify({ agentOptions: { providerConfig: [] } }) }),
+      res, depsFor(inst), { name: 'test-agent' },
     );
     expect(res._status).toBe(400);
     expect(JSON.parse(res._body).message).toMatch(/providerConfig must be an object/);
@@ -302,8 +272,8 @@ describe('handleConfigUpdate PATCH agentOptions validation (#249)', () => {
     const inst = fakeInstance(cfg, { name: 'test-agent', type: 'agent' });
     const res = mockRes();
     await handleConfigUpdate(
-      mockReq(JSON.stringify({ agentOptions: { instructionsPath: 42 } })),
-      res, makeDeps(inst), { name: 'test-agent' },
+      mockReq({ method: 'PATCH', body: JSON.stringify({ agentOptions: { instructionsPath: 42 } }) }),
+      res, depsFor(inst), { name: 'test-agent' },
     );
     expect(res._status).toBe(400);
     expect(JSON.parse(res._body).message).toMatch(/instructionsPath must be a string/);
@@ -323,8 +293,8 @@ describe('handleConfigUpdate PATCH agentOptions validation (#249)', () => {
     const inst = fakeInstance(cfg, { name: 'test-passive', type: 'passive' });
     const res = mockRes();
     await handleConfigUpdate(
-      mockReq(JSON.stringify({ systemPrompt: 'You are a helpful assistant.' })),
-      res, makeDeps(inst), { name: 'test-passive' },
+      mockReq({ method: 'PATCH', body: JSON.stringify({ systemPrompt: 'You are a helpful assistant.' }) }),
+      res, depsFor(inst), { name: 'test-passive' },
     );
     expect(res._status).toBe(400);
     expect(JSON.parse(res._body).message).toMatch(/Passive instances must not have a systemPrompt/);
@@ -368,15 +338,15 @@ describe('handleConfigUpdate PATCH Pinecone project guard validation', () => {
     const res = mockRes();
 
     await handleConfigUpdate(
-      mockReq(JSON.stringify({
+      mockReq({ method: 'PATCH', body: JSON.stringify({
         memory: {
           pinecone: {
             apiKeyEnv: 'PINECONE_MINI3_KEY',
             index: 'whatsapp-bot',
           },
         },
-      })),
-      res, makeDeps(inst), { name: 'test-line' },
+      }) }),
+      res, depsFor(inst), { name: 'test-line' },
     );
 
     expect(res._status).toBe(400);
@@ -421,10 +391,10 @@ describe('handleConfigUpdate PATCH round-trip invariant (#244 #249)', () => {
 
     const res = mockRes();
     await handleConfigUpdate(
-      mockReq(JSON.stringify({
+      mockReq({ method: 'PATCH', body: JSON.stringify({
         agentOptions: { sessionScope: 'shared', provider: 'claude-cli' },
-      })),
-      res, makeDeps(inst), { name: 'roundtrip' },
+      }) }),
+      res, depsFor(inst), { name: 'roundtrip' },
     );
     expect(res._status).toBe(200);
     const responseBody = JSON.parse(res._body);
@@ -457,8 +427,8 @@ describe('handleConfigUpdate PATCH round-trip invariant (#244 #249)', () => {
 
     const res = mockRes();
     await handleConfigUpdate(
-      mockReq(JSON.stringify({ agentOptions: { sessionScope: 'bogus' } })),
-      res, makeDeps(inst), { name: 'roundtrip-neg' },
+      mockReq({ method: 'PATCH', body: JSON.stringify({ agentOptions: { sessionScope: 'bogus' } }) }),
+      res, depsFor(inst), { name: 'roundtrip-neg' },
     );
     expect(res._status).toBe(400);
     const persisted = JSON.parse(fs.readFileSync(cfg, 'utf-8'));
@@ -489,8 +459,8 @@ describe('handleConfigUpdate PATCH round-trip invariant (#244 #249)', () => {
 
     const res = mockRes();
     await handleConfigUpdate(
-      mockReq(JSON.stringify({ agentOptions: { provider: 'claude-cli', providerConfig, fallbacks } })),
-      res, makeDeps(inst), { name: 'roundtrip-byok' },
+      mockReq({ method: 'PATCH', body: JSON.stringify({ agentOptions: { provider: 'claude-cli', providerConfig, fallbacks } }) }),
+      res, depsFor(inst), { name: 'roundtrip-byok' },
     );
     expect(res._status, 'patch must succeed: ' + res._body).toBe(200);
 

@@ -31,6 +31,8 @@
  * `/model N default` recency-blind — the bug this single-slot design forecloses.)
  */
 
+import { MS_PER_MINUTE } from '../../lib/time-units.ts';
+
 export interface CatalogueEntry {
   providerId: string;
   id: string;
@@ -149,7 +151,7 @@ export interface CatalogueSnapshotCache {
   getMsgIdMapSize(): number;
 }
 
-const TTL_MS = 15 * 60_000; // 15 minutes
+const TTL_MS = 15 * MS_PER_MINUTE; // 15 minutes
 
 /** Composite key for the per-(chat, sender) "latest" slot. */
 function latestSlotKey(chatJid: string, senderJid: string): string {

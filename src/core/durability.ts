@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { createChildLogger } from '../logger.ts';
 import { emitAlertChecked, clearAlertSourceChecked } from '../lib/emit-alert.ts';
 import { gateQuarantineClear } from '../lib/fleet-health-gate.ts';
+import { MS_PER_MINUTE } from '../lib/time-units.ts';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
@@ -150,7 +151,7 @@ const log = createChildLogger('durability');
  * than this is stale misinformation, so dropping it is correct. Strictly scoped
  * to `op_type='status_ping'` — `text` ops have no age gate.
  */
-const STATUS_OP_TTL_MS = 30 * 60 * 1000;
+const STATUS_OP_TTL_MS = 30 * MS_PER_MINUTE;
 
 /**
  * PR-C: max deferrals for a `text` op before the drain quarantines it instead of

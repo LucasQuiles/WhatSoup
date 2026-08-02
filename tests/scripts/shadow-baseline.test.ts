@@ -1,24 +1,19 @@
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { describe, expect, it } from 'vitest';
+
+import { trackTmpDirs } from '../helpers/tmp-dir.ts';
 
 const SCRIPT = resolve(process.cwd(), 'console/scripts/check-shadow-baseline.mjs');
 
-const tmpDirs: string[] = [];
-
-afterEach(() => {
-  for (const dir of tmpDirs) rmSync(dir, { recursive: true, force: true });
-  tmpDirs.length = 0;
-});
+const tmp = trackTmpDirs('shadow-');
 
 // A captured eslint --format json array. filePath does not start with consoleRoot,
 // so the script keys the ratchet by the literal path — the same parse/tag/compare
 // path the real run uses, just fed from a fixture.
 function fixture(results: unknown, baseline: unknown) {
-  const dir = mkdtempSync(join(tmpdir(), 'shadow-baseline-'));
-  tmpDirs.push(dir);
+  const dir = tmp.make('baseline');
   const resultsPath = join(dir, 'results.json');
   const baselinePath = join(dir, 'baseline.json');
   writeFileSync(resultsPath, JSON.stringify(results));

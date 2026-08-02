@@ -1,22 +1,21 @@
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
+import { trackTmpDirs } from '../helpers/tmp-dir.ts';
 import { run } from '../../scripts/arc-runtime-proof.ts';
 
 const SHA_A = `sha256:${'a'.repeat(64)}`;
 const SHA_B = `sha256:${'b'.repeat(64)}`;
-const tempRoots: string[] = [];
+const tmp = trackTmpDirs('whatsoup-arc-');
 
 function makeRoot(): string {
   // The script scans its own `out=` diagnostic with assertNoSecretLike, which rejects
   // any 10+ digit run as phone-number-like. mkdtemp's 6-char suffix keeps the temp
   // path below that threshold; a full randomUUID() occasionally produced an all-decimal
   // 12-char segment and flaked the happy-path tests.
-  const root = mkdtempSync(path.join(tmpdir(), 'whatsoup-arc-proof-'));
+  const root = tmp.make('proof');
   mkdirSync(path.join(root, '.arc'), { recursive: true });
-  tempRoots.push(root);
   return root;
 }
 
@@ -75,7 +74,6 @@ function healthJson(root: string, opts: { payloadSha?: string; extra?: Record<st
 
 afterEach(() => {
   vi.restoreAllMocks();
-  for (const root of tempRoots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
 
 describe('arc-runtime-proof', () => {

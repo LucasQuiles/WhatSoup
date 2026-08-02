@@ -1,24 +1,18 @@
 import { execFileSync, spawnSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join as joinPath } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { describe, expect, it } from 'vitest';
 
+import { trackTmpDirs } from '../helpers/tmp-dir.ts';
 import { cleanGitEnv } from '../../scripts/lib/guard-core.ts';
 import { anonymizeText } from '../../scripts/anonymize-private-literals.ts';
 
 const join = (parts: string[]) => parts.join('');
-const tempDirs: string[] = [];
+const tmp = trackTmpDirs('whatsoup-');
 
 function git(cwd: string, args: string[]): void {
   execFileSync('git', args, { cwd, stdio: 'ignore', env: cleanGitEnv() });
 }
-
-afterEach(() => {
-  for (const dir of tempDirs.splice(0)) {
-    rmSync(dir, { recursive: true, force: true });
-  }
-});
 
 describe('anonymize-private-literals', () => {
   it('replaces private literals without exposing originals in replacement records', () => {
@@ -114,13 +108,12 @@ describe('anonymize-private-literals', () => {
   });
 
   it('supports report-only and write modes for directory arguments', () => {
-    const tmp = mkdtempSync(joinPath(tmpdir(), 'whatsoup-anonymizer-'));
-    tempDirs.push(tmp);
-    git(tmp, ['init']);
-    mkdirSync(joinPath(tmp, 'nested'));
+    const dir = tmp.make('anonymizer');
+    git(dir, ['init']);
+    mkdirSync(joinPath(dir, 'nested'));
     const rawPhone = join(['1845', '978', '0919']);
-    writeFileSync(joinPath(tmp, 'nested', 'fixture.ts'), `const phone = "${rawPhone}";\n`);
-    git(tmp, ['add', 'nested/fixture.ts']);
+    writeFileSync(joinPath(dir, 'nested', 'fixture.ts'), `const phone = "${rawPhone}";\n`);
+    git(dir, ['add', 'nested/fixture.ts']);
 
     const script = joinPath(process.cwd(), 'scripts/anonymize-private-literals.ts');
     const hookEnv = {
@@ -133,16 +126,16 @@ describe('anonymize-private-literals', () => {
       GIT_WORK_TREE: process.cwd(),
     };
     const report = spawnSync('node', ['--experimental-strip-types', script, '--json', 'nested'], {
-      cwd: tmp,
+      cwd: dir,
       encoding: 'utf8',
       env: hookEnv,
     });
 
     expect(report.status).toBe(1);
     expect(JSON.parse(report.stdout)).toMatchObject({ ok: false, write: false, files: 1 });
-    expect(readFileSync(joinPath(tmp, 'nested', 'fixture.ts'), 'utf8')).toContain(rawPhone);
+    expect(readFileSync(joinPath(dir, 'nested', 'fixture.ts'), 'utf8')).toContain(rawPhone);
 
-    execFileSync('node', ['--experimental-strip-types', script, '--write', 'nested'], { cwd: tmp, env: hookEnv });
-    expect(readFileSync(joinPath(tmp, 'nested', 'fixture.ts'), 'utf8')).toContain('15555550001');
+    execFileSync('node', ['--experimental-strip-types', script, '--write', 'nested'], { cwd: dir, env: hookEnv });
+    expect(readFileSync(joinPath(dir, 'nested', 'fixture.ts'), 'utf8')).toContain('15555550001');
   });
 });

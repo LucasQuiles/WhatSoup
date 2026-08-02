@@ -19,6 +19,17 @@ class JournalEntry:
     undone: bool = False
 
 
+@dataclasses.dataclass(frozen=True)
+class SkippedLine:
+    """A journal line that could not be parsed during from_path(), kept
+    operator-visible (RollbackJournal.skipped_lines) rather than swallowed
+    into a log, so a crash-recovery rollback still surfaces what it dropped."""
+
+    line_number: int
+    raw_line: str
+    error: str
+
+
 def _entry_to_record(entry: JournalEntry) -> dict:
     rec: dict = {"op": entry.op, "undone": entry.undone}
     if entry.path is not None:
@@ -41,6 +52,7 @@ class RollbackJournal:
     def __init__(self, journal_path: Optional[pathlib.Path] = None) -> None:
         self._entries: list[JournalEntry] = []
         self._journal_path = journal_path
+        self.skipped_lines: list[SkippedLine] = []
         if journal_path is not None:
             journal_path.parent.mkdir(parents=True, exist_ok=True)
             if not journal_path.exists():
@@ -137,9 +149,14 @@ class RollbackJournal:
         inst = cls(journal_path=None)
         inst._journal_path = journal_path
         text = journal_path.read_text(encoding="utf-8")
-        for line in text.splitlines():
-            line = line.strip()
+        for line_number, raw_line in enumerate(text.splitlines(), start=1):
+            line = raw_line.strip()
             if not line:
                 continue
-            inst._entries.append(_record_to_entry(json.loads(line)))
+            try:
+                inst._entries.append(_record_to_entry(json.loads(line)))
+            except (json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
+                inst.skipped_lines.append(
+                    SkippedLine(line_number=line_number, raw_line=raw_line, error=str(exc))
+                )
         return inst

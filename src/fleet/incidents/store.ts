@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import type { DatabaseSync } from 'node:sqlite';
+import { MS_PER_MINUTE } from '../../lib/time-units.ts';
 import {
   extractSignalId,
   parseSignalEnvelopeValue,
@@ -35,7 +36,7 @@ export type AcceptResult =
   | { outcome: 'identity_conflict'; existingDigest: string }
   | { outcome: 'invalid'; malformedJson: boolean; errors: string[] };
 
-const DEFAULT_MAX_FUTURE_SKEW_MS = 5 * 60 * 1000;
+const DEFAULT_MAX_FUTURE_SKEW_MS = 5 * MS_PER_MINUTE;
 
 // fatal: reject invalid UTF-8 instead of substituting U+FFFD. ignoreBOM: keep
 // a leading BOM in the decoded text so JSON.parse rejects it — a stripped BOM
