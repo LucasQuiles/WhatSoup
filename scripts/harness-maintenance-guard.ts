@@ -58,6 +58,20 @@ function asArray(value: unknown, label: string): unknown[] {
   return value;
 }
 
+// Rejects whitespace-only in addition to empty — SSOT requireString only
+// checks `.length === 0`. Every string field this guard validates (manifest
+// paths/names/versions, CLI-arg file paths) is meaningless when
+// whitespace-only, so this stays local rather than widening to the SSOT
+// check (same pattern as disposable-client-canary-artifact.ts's
+// requireNonNegativeNumber).
+function requireTrimmedString(value: unknown, label: string): string {
+  const result = requireString(value, label);
+  if (result.trim() === '') {
+    throw new Error(`${label} must be a string`);
+  }
+  return result;
+}
+
 function parseNpmrcMinReleaseAge(text: string): string | null {
   for (const line of text.split(/\r?\n/)) {
     const trimmed = line.trim();
@@ -127,8 +141,8 @@ export function validateManifestPayload(payload: unknown): ManifestValidation {
     );
   }
   const codexNode = requireRecord(npm.codex_node, 'npm.codex_node');
-  requireString(codexNode.node_bin, 'npm.codex_node.node_bin');
-  const codexNodeNpmMinVersion = requireString(
+  requireTrimmedString(codexNode.node_bin, 'npm.codex_node.node_bin');
+  const codexNodeNpmMinVersion = requireTrimmedString(
     codexNode.npm_min_version,
     'npm.codex_node.npm_min_version',
   );
@@ -136,8 +150,8 @@ export function validateManifestPayload(payload: unknown): ManifestValidation {
   const tier1 = asArray(root.tier1, 'tier1');
   const tier1Harnesses = tier1.map((entry, index) => {
     const record = requireRecord(entry, `tier1[${index}]`);
-    const name = requireString(record.name, `tier1[${index}].name`);
-    requireString(record.kind, `tier1[${index}].kind`);
+    const name = requireTrimmedString(record.name, `tier1[${index}].name`);
+    requireTrimmedString(record.kind, `tier1[${index}].kind`);
     asArray(record.smoke, `tier1[${index}].smoke`);
     return name;
   });
@@ -151,8 +165,8 @@ export function validateManifestPayload(payload: unknown): ManifestValidation {
   const probesPayload = asArray(tier2.probes, 'tier2.probes');
   const probes = probesPayload.map((entry, index) => {
     const record = requireRecord(entry, `tier2.probes[${index}]`);
-    const name = requireString(record.name, `tier2.probes[${index}].name`);
-    requireString(record.mode, `tier2.probes[${index}].mode`);
+    const name = requireTrimmedString(record.name, `tier2.probes[${index}].name`);
+    requireTrimmedString(record.mode, `tier2.probes[${index}].mode`);
     return name;
   });
 
@@ -295,11 +309,11 @@ function parseArgs(argv: string[]): Record<string, string | boolean> {
 export function run(argv: string[] = process.argv.slice(2)): unknown {
   const args = parseArgs(argv);
   if (args['npm-cooldown-config']) {
-    const npmVersion = requireString(args['npm-version'], '--npm-version');
-    const minVersion = requireString(args['min-version'], '--min-version');
-    const expectedDays = requireString(args['expected-days'], '--expected-days');
-    const npmrcPath = requireString(args['npmrc-file'], '--npmrc-file');
-    const stderrPath = requireString(args['stderr-file'], '--stderr-file');
+    const npmVersion = requireTrimmedString(args['npm-version'], '--npm-version');
+    const minVersion = requireTrimmedString(args['min-version'], '--min-version');
+    const expectedDays = requireTrimmedString(args['expected-days'], '--expected-days');
+    const npmrcPath = requireTrimmedString(args['npmrc-file'], '--npmrc-file');
+    const stderrPath = requireTrimmedString(args['stderr-file'], '--stderr-file');
     const installExitCode = Number(args['install-exit-code']);
     if (!Number.isInteger(installExitCode) || installExitCode < 0) {
       throw new Error('--install-exit-code must be a non-negative integer');
@@ -322,7 +336,7 @@ export function run(argv: string[] = process.argv.slice(2)): unknown {
 
   if (args['version-eligible']) {
     const version = String(args['version-eligible']);
-    const timeJsonPath = requireString(args['time-json'], '--time-json');
+    const timeJsonPath = requireTrimmedString(args['time-json'], '--time-json');
     const cooldownMinutes = args['cooldown-minutes']
       ? Number(args['cooldown-minutes'])
       : DEFAULT_COOLDOWN_MINUTES;
@@ -340,7 +354,7 @@ export function run(argv: string[] = process.argv.slice(2)): unknown {
   }
 
   if (args['latest-eligible-version']) {
-    const timeJsonPath = requireString(args['time-json'], '--time-json');
+    const timeJsonPath = requireTrimmedString(args['time-json'], '--time-json');
     const cooldownMinutes = args['cooldown-minutes']
       ? Number(args['cooldown-minutes'])
       : DEFAULT_COOLDOWN_MINUTES;
