@@ -9,11 +9,11 @@
  * executable + not-group/world-writable + root-or-euid-owned, and any failure to qualify throws
  * rather than falling back to a bare `git` lookup.
  */
-import { chmodSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdtempSync, realpathSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { afterEach, describe, expect, it } from 'vitest';
+import { describe, expect, it } from 'vitest';
 
 import {
   DEFAULT_TRUSTED_GIT_CANDIDATES,
@@ -21,16 +21,12 @@ import {
   isTrustedGitOwner,
   resolveTrustedGit,
 } from '../../scripts/lib/ci-control/trusted-git.ts';
+import { trackTmpDirs } from '../helpers/tmp-dir.ts';
 
-const roots: string[] = [];
-
-afterEach(() => {
-  for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
-});
+const tmp = trackTmpDirs('');
 
 function fixtureFile(mode: number): string {
-  const root = mkdtempSync(join(tmpdir(), 'trusted-git-'));
-  roots.push(root);
+  const root = tmp.make('trusted-git');
   const path = join(root, 'git');
   writeFileSync(path, '#!/bin/sh\nexit 0\n');
   chmodSync(path, mode);
@@ -82,8 +78,7 @@ describe('resolveTrustedGit', () => {
 
   it('resolves a symlink candidate to its realpath target, not the link itself', () => {
     const target = fixtureFile(0o755);
-    const linkRoot = mkdtempSync(join(tmpdir(), 'trusted-git-link-'));
-    roots.push(linkRoot);
+    const linkRoot = tmp.make('trusted-git-link');
     const link = join(linkRoot, 'git');
     symlinkSync(target, link);
     expect(resolveTrustedGit([link])).toBe(realpathSync(target));

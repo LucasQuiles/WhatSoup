@@ -15,11 +15,9 @@
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import * as fs from 'node:fs';
-import { PassThrough } from 'node:stream';
-import type { IncomingMessage, ServerResponse } from 'node:http';
 import { handleSend, handleSaveContact } from '../../../src/fleet/routes/ops.ts';
-import type { OpsDeps } from '../../../src/fleet/routes/ops.ts';
 import type { DiscoveredInstance } from '../../../src/fleet/discovery.ts';
+import { makeDeps, mockReq, mockRes } from '../../helpers/http-mocks.ts';
 
 vi.mock('../../../src/fleet/mcp-client.ts', () => ({
   mcpCall: vi.fn(),
@@ -37,34 +35,6 @@ vi.mock('node:fs', async (importOriginal) => {
 
 import { mcpCall } from '../../../src/fleet/mcp-client.ts';
 
-function mockReq(body = '', url = '/'): IncomingMessage {
-  const stream = new PassThrough() as unknown as IncomingMessage;
-  (stream as any).headers = {};
-  (stream as any).url = url;
-  (stream as any).method = 'POST';
-  process.nextTick(() => {
-    (stream as unknown as PassThrough).write(body);
-    (stream as unknown as PassThrough).end();
-  });
-  return stream;
-}
-
-function mockRes(): ServerResponse & { _status: number; _headers: Record<string, string>; _body: string } {
-  const res = {
-    _status: 0,
-    _headers: {} as Record<string, string>,
-    _body: '',
-    writeHead(status: number, headers?: Record<string, string>) {
-      res._status = status;
-      if (headers) Object.assign(res._headers, headers);
-    },
-    end(data?: string) {
-      if (data) res._body = data;
-    },
-  };
-  return res as any;
-}
-
 function fakeInstance(overrides: Partial<DiscoveredInstance> = {}): DiscoveredInstance {
   return {
     name: 'test-line',
@@ -77,25 +47,6 @@ function fakeInstance(overrides: Partial<DiscoveredInstance> = {}): DiscoveredIn
     healthToken: 'tok123',
     configPath: '/config/test-line/config.json',
     socketPath: null,
-    ...overrides,
-  };
-}
-
-function makeDeps(overrides: Partial<OpsDeps> = {}): OpsDeps {
-  return {
-    discovery: {
-      getInstance: vi.fn(() => undefined),
-      getInstances: vi.fn(() => new Map()),
-    } as any,
-    realtime: { publish: vi.fn() },
-    serviceManager: {
-      enable: vi.fn(),
-      disable: vi.fn(),
-      start: vi.fn(),
-      stop: vi.fn(),
-      restart: vi.fn(),
-      startFire: vi.fn(),
-    } as any,
     ...overrides,
   };
 }
@@ -127,7 +78,7 @@ describe('ops.ts mcpCall consumers honor isError tool envelopes (parity follow-u
 
       const res = mockRes();
       await handleSend(
-        mockReq(JSON.stringify({ chatJid: 'x@s.whatsapp.net', text: 'hi' })),
+        mockReq({ method: 'POST', body: JSON.stringify({ chatJid: 'x@s.whatsapp.net', text: 'hi' }) }),
         res,
         deps,
         { name: 'test-line' },
@@ -151,7 +102,7 @@ describe('ops.ts mcpCall consumers honor isError tool envelopes (parity follow-u
 
       const res = mockRes();
       await handleSend(
-        mockReq(JSON.stringify({ chatJid: 'x@s.whatsapp.net', text: 'hi' })),
+        mockReq({ method: 'POST', body: JSON.stringify({ chatJid: 'x@s.whatsapp.net', text: 'hi' }) }),
         res,
         deps,
         { name: 'test-line' },
@@ -169,7 +120,7 @@ describe('ops.ts mcpCall consumers honor isError tool envelopes (parity follow-u
 
       const res = mockRes();
       await handleSend(
-        mockReq(JSON.stringify({ chatJid: 'x@s.whatsapp.net', text: 'hi' })),
+        mockReq({ method: 'POST', body: JSON.stringify({ chatJid: 'x@s.whatsapp.net', text: 'hi' }) }),
         res,
         deps,
         { name: 'test-line' },
@@ -207,7 +158,7 @@ describe('ops.ts mcpCall consumers honor isError tool envelopes (parity follow-u
 
       const res = mockRes();
       await handleSend(
-        mockReq(JSON.stringify({ chatJid: 'x@s.whatsapp.net', text: 'hi' })),
+        mockReq({ method: 'POST', body: JSON.stringify({ chatJid: 'x@s.whatsapp.net', text: 'hi' }) }),
         res,
         deps,
         { name: 'test-line' },
@@ -231,7 +182,7 @@ describe('ops.ts mcpCall consumers honor isError tool envelopes (parity follow-u
 
       const res = mockRes();
       await handleSend(
-        mockReq(JSON.stringify({ chatJid: 'x@s.whatsapp.net', text: 'hi' })),
+        mockReq({ method: 'POST', body: JSON.stringify({ chatJid: 'x@s.whatsapp.net', text: 'hi' }) }),
         res,
         deps,
         { name: 'test-line' },
@@ -260,7 +211,7 @@ describe('ops.ts mcpCall consumers honor isError tool envelopes (parity follow-u
 
       const res = mockRes();
       await handleSaveContact(
-        mockReq(JSON.stringify({ jid: 'malformed', firstName: 'X' })),
+        mockReq({ method: 'POST', body: JSON.stringify({ jid: 'malformed', firstName: 'X' }) }),
         res,
         deps,
         { name: 'test-line' },
@@ -284,7 +235,7 @@ describe('ops.ts mcpCall consumers honor isError tool envelopes (parity follow-u
 
       const res = mockRes();
       await handleSaveContact(
-        mockReq(JSON.stringify({ jid: 'x@s.whatsapp.net', firstName: 'X' })),
+        mockReq({ method: 'POST', body: JSON.stringify({ jid: 'x@s.whatsapp.net', firstName: 'X' }) }),
         res,
         deps,
         { name: 'test-line' },
@@ -302,7 +253,7 @@ describe('ops.ts mcpCall consumers honor isError tool envelopes (parity follow-u
 
       const res = mockRes();
       await handleSaveContact(
-        mockReq(JSON.stringify({ jid: 'x@s.whatsapp.net', firstName: 'X' })),
+        mockReq({ method: 'POST', body: JSON.stringify({ jid: 'x@s.whatsapp.net', firstName: 'X' }) }),
         res,
         deps,
         { name: 'test-line' },
@@ -333,7 +284,7 @@ describe('ops.ts mcpCall consumers honor isError tool envelopes (parity follow-u
 
       const res = mockRes();
       await handleSaveContact(
-        mockReq(JSON.stringify({ jid: 'malformed', firstName: 'X' })),
+        mockReq({ method: 'POST', body: JSON.stringify({ jid: 'malformed', firstName: 'X' }) }),
         res,
         deps,
         { name: 'test-line' },

@@ -2,13 +2,13 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { EventEmitter } from 'node:events';
-import type { IncomingMessage, ServerResponse } from 'node:http';
+import type { ServerResponse } from 'node:http';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { openIncidentDb } from '../../../src/fleet/incidents/db.ts';
 import { IncidentStore } from '../../../src/fleet/incidents/store.ts';
 import { ProducerStore } from '../../../src/fleet/incidents/producers.ts';
 import { createSignalsHandlers, type SignalsDeps } from '../../../src/fleet/routes/signals.ts';
+import { mockReq } from '../../helpers/http-mocks.ts';
 
 const NOW = new Date('2026-07-28T12:00:00.000Z');
 
@@ -26,35 +26,6 @@ function deps(overrides: Partial<SignalsDeps> = {}): SignalsDeps {
     securityAudit: () => {},
     ...overrides,
   };
-}
-
-function mockReq(options: {
-  body?: string | Buffer;
-  /** Emit each entry as its own 'data' event (e.g. to split a multibyte
-   * character across chunk boundaries). Takes precedence over `body`. */
-  chunks?: Buffer[];
-  headers?: Record<string, string>;
-}): IncomingMessage {
-  const req = new EventEmitter() as IncomingMessage;
-  (req as unknown as { url: string }).url = '/api/signals';
-  (req as unknown as { method: string }).method = 'POST';
-  (req as unknown as { headers: Record<string, string> }).headers = {
-    'content-type': 'application/json',
-    ...options.headers,
-  };
-  process.nextTick(() => {
-    const parts = options.chunks ?? (options.body !== undefined ? [options.body] : []);
-    const emitNext = (index: number): void => {
-      if (index >= parts.length) {
-        req.emit('end');
-        return;
-      }
-      req.emit('data', parts[index]!);
-      setImmediate(() => emitNext(index + 1));
-    };
-    emitNext(0);
-  });
-  return req;
 }
 
 interface CapturedResponse {
@@ -91,14 +62,20 @@ function mockRes(): { res: ServerResponse; done: Promise<CapturedResponse> } {
 async function post(body: string | undefined, headers: Record<string, string> = {}, d = deps()): Promise<CapturedResponse> {
   const handlers = createSignalsHandlers(d);
   const { res, done } = mockRes();
-  await handlers.postSignal(mockReq({ body, headers }), res);
+  await handlers.postSignal(
+    mockReq({ method: 'POST', url: '/api/signals', body, headers: { 'content-type': 'application/json', ...headers } }),
+    res,
+  );
   return done;
 }
 
 async function postChunks(chunks: Buffer[], headers: Record<string, string> = {}, d = deps()): Promise<CapturedResponse> {
   const handlers = createSignalsHandlers(d);
   const { res, done } = mockRes();
-  await handlers.postSignal(mockReq({ chunks, headers }), res);
+  await handlers.postSignal(
+    mockReq({ method: 'POST', url: '/api/signals', chunks, headers: { 'content-type': 'application/json', ...headers } }),
+    res,
+  );
   return done;
 }
 
@@ -246,12 +223,28 @@ describe('POST /api/signals', () => {
     const statuses: number[] = [];
     for (let i = 0; i < 3; i += 1) {
       const { res, done } = mockRes();
-      await handlers.postSignal(mockReq({ body: heartbeat(`hb-rl-${i}`), headers: authed() }), res);
+      await handlers.postSignal(
+        mockReq({
+          method: 'POST',
+          url: '/api/signals',
+          body: heartbeat(`hb-rl-${i}`),
+          headers: { 'content-type': 'application/json', ...authed() },
+        }),
+        res,
+      );
       statuses.push((await done).status);
     }
     expect(statuses.slice(0, 2)).toEqual([201, 201]);
     const { res, done } = mockRes();
-    await handlers.postSignal(mockReq({ body: heartbeat('hb-rl-3'), headers: authed() }), res);
+    await handlers.postSignal(
+      mockReq({
+        method: 'POST',
+        url: '/api/signals',
+        body: heartbeat('hb-rl-3'),
+        headers: { 'content-type': 'application/json', ...authed() },
+      }),
+      res,
+    );
     const limited = await done;
     expect(limited.status).toBe(429);
     expect(Number(limited.headers['retry-after'])).toBeGreaterThan(0);

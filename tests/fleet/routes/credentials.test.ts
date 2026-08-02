@@ -1,12 +1,13 @@
 /**
  * Branch-coverage tests for src/fleet/routes/credentials.ts
  *
- * Harness style reused from tests/fleet/routes/feed.test.ts (mockReq/mockRes).
+ * mockRes comes from the shared harness (tests/helpers/http-mocks.ts); mockReq
+ * stays local — see the comment above its definition for why.
  * No real keychain/exec is touched — the keyring module is mocked.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { EventEmitter } from 'node:events';
-import type { IncomingMessage, ServerResponse } from 'node:http';
+import type { IncomingMessage } from 'node:http';
 
 // Keyring mock — hoisted so the factory can reference stable identities.
 const keyringMock = vi.hoisted(() => ({
@@ -39,10 +40,39 @@ import {
   type CredentialDeps,
 } from '../../../src/fleet/routes/credentials.ts';
 import { KeyringWriteError } from '../../../src/lib/keyring.ts';
+import { mockRes } from '../../helpers/http-mocks.ts';
 
 // ---------------------------------------------------------------------------
 // Helpers (style reused verbatim from feed.test.ts, extended to carry a body)
 // ---------------------------------------------------------------------------
+//
+// mockReq stays local (not migrated onto tests/helpers/http-mocks.ts): this
+// file's `beforeEach` calls `vi.useFakeTimers()` for every test, and the
+// shared mockReq schedules each body-chunk write via `setImmediate` (even a
+// single-chunk body needs one hop to reach `.end()`). `vi.useFakeTimers()`
+// replaces `globalThis.setImmediate` but NOT `process.nextTick` — confirmed
+// via an identity check (`globalThis.setImmediate !== realSetImmediate` is
+// true; `process.nextTick !== realNextTick` is false, under this repo's
+// Vitest config, which sets no `fakeTimers.toFake` override) — so any
+// `setImmediate` hop the shared mockReq schedules never fires without a
+// manual `vi.advanceTimers*` call; swapping it in hung every `readBody`-
+// consuming call to the 10s test timeout. Retrofitting a manual advance at
+// each of the ~25 body-bearing call sites was rejected — several tests here
+// (mutation throttle, verify cooldown, the AbortController-timeout test)
+// assert exact cooldown/timeout timer semantics, and interleaving an extra
+// timer-advance before every handler call risks perturbing that in-SUT
+// timing. This local mockReq schedules its single emit via `process.nextTick`
+// only (no `setImmediate`), which already coexists with the fake timers here
+// today. An unexplored alternative for a future lane: pin this file's
+// `vi.useFakeTimers({ toFake: [...] })` to exclude `setImmediate` while still
+// faking `setTimeout`/`Date` for the cooldown/timeout tests — not attempted
+// here since it changes fake-timer scope repo-file-wide, out of bounds for a
+// TEST-ONLY, behavior-preserving migration.
+//
+// mockRes DOES migrate below: it's purely synchronous (no timer/scheduling
+// dependency), so the only behavioral difference is that the shared MockRes
+// stores `_body` as a raw string instead of eagerly JSON.parsing it — every
+// call site below parses it explicitly via `JSON.parse(res._body)`.
 
 function mockReq(body?: unknown): IncomingMessage {
   const req = new EventEmitter() as IncomingMessage;
@@ -57,16 +87,6 @@ function mockReq(body?: unknown): IncomingMessage {
     req.emit('end');
   });
   return req;
-}
-
-function mockRes(): ServerResponse & { _status: number; _body: unknown } {
-  const res = {
-    _status: 0,
-    _body: undefined as unknown,
-    writeHead(status: number) { res._status = status; },
-    end(data?: string) { if (data) res._body = JSON.parse(data); },
-  };
-  return res as any;
 }
 
 const noopDeps: CredentialDeps = { instances: [] };
@@ -102,35 +122,35 @@ describe('checkService (via handlePutCredential)', () => {
     const res = mockRes();
     await handlePutCredential(mockReq({ value: 'test-value-abc' }), res, { name: 'Bad Name!' });
     expect(res._status).toBe(400);
-    expect(res._body).toEqual({ error: 'invalid service name' });
+    expect(JSON.parse(res._body)).toEqual({ error: 'invalid service name' });
   });
 
   it('rejects a blocklisted service with 403', async () => {
     const res = mockRes();
     await handlePutCredential(mockReq({ value: 'test-value-abc' }), res, { name: 'whatsoup-health-token' });
     expect(res._status).toBe(403);
-    expect(res._body).toEqual({ error: 'service is not writable' });
+    expect(JSON.parse(res._body)).toEqual({ error: 'service is not writable' });
   });
 
   it('rejects an allowlist-unknown but valid-charset service with 404', async () => {
     const res = mockRes();
     await handlePutCredential(mockReq({ value: 'test-value-abc' }), res, { name: 'notreal' });
     expect(res._status).toBe(404);
-    expect(res._body).toEqual({ error: 'unknown credential service' });
+    expect(JSON.parse(res._body)).toEqual({ error: 'unknown credential service' });
   });
 
   it('proceeds for an allowlisted service (openai) by reaching writeCredential)', async () => {
     const res = mockRes();
     await handlePutCredential(mockReq({ value: 'test-value-abc' }), res, { name: 'openai' });
     expect(res._status).toBe(200);
-    expect(res._body).toMatchObject({ ok: true, service: 'openai', backend: 'macos-keychain' });
+    expect(JSON.parse(res._body)).toMatchObject({ ok: true, service: 'openai', backend: 'macos-keychain' });
   });
 
   it('rejects with 400 when params.name is undefined (the ?? "" branch fails the charset regex)', async () => {
     const res = mockRes();
     await handlePutCredential(mockReq({ value: 'test-value-abc' }), res, {});
     expect(res._status).toBe(400);
-    expect(res._body).toEqual({ error: 'invalid service name' });
+    expect(JSON.parse(res._body)).toEqual({ error: 'invalid service name' });
   });
 });
 
@@ -149,7 +169,7 @@ describe('setExtraCredentialServices', () => {
     const res = mockRes();
     await handlePutCredential(mockReq({ value: 'test-value-abc' }), res, { name: 'custom-svc' });
     expect(res._status).toBe(200);
-    expect(res._body).toMatchObject({ ok: true, service: 'custom-svc' });
+    expect(JSON.parse(res._body)).toMatchObject({ ok: true, service: 'custom-svc' });
   });
 
   it('does NOT make a rejected custom service usable in a PUT', async () => {
@@ -157,7 +177,7 @@ describe('setExtraCredentialServices', () => {
     const res = mockRes();
     await handlePutCredential(mockReq({ value: 'test-value-abc' }), res, { name: 'Bad Name!' });
     expect(res._status).toBe(400);
-    expect(res._body).toEqual({ error: 'invalid service name' });
+    expect(JSON.parse(res._body)).toEqual({ error: 'invalid service name' });
   });
 });
 
@@ -173,8 +193,8 @@ describe('mutation throttle', () => {
     const r2 = mockRes();
     await handlePutCredential(mockReq({ value: 'test-value-abc' }), r2, { name: 'openai' });
     expect(r2._status).toBe(429);
-    expect(r2._body).toMatchObject({ error: 'mutation cooldown' });
-    expect((r2._body as any).retryAfter).toBeGreaterThan(0);
+    expect(JSON.parse(r2._body)).toMatchObject({ error: 'mutation cooldown' });
+    expect(JSON.parse(r2._body).retryAfter).toBeGreaterThan(0);
   });
 
   it('re-arms after MUTATION_COOLDOWN_MS (1000ms) elapses', async () => {
@@ -185,7 +205,7 @@ describe('mutation throttle', () => {
     const r2 = mockRes();
     await handlePutCredential(mockReq({ value: 'test-value-abc' }), r2, { name: 'openai' });
     expect(r2._status).toBe(200);
-    expect(r2._body).toMatchObject({ ok: true, service: 'openai' });
+    expect(JSON.parse(r2._body)).toMatchObject({ ok: true, service: 'openai' });
   });
 });
 
@@ -198,35 +218,35 @@ describe('handlePutCredential — body validation', () => {
     const res = mockRes();
     await handlePutCredential(mockReq('not-json'), res, { name: 'openai' });
     expect(res._status).toBe(400);
-    expect(res._body).toEqual({ error: 'invalid JSON body' });
+    expect(JSON.parse(res._body)).toEqual({ error: 'invalid JSON body' });
   });
 
   it('returns 400 when body value is not a string', async () => {
     const res = mockRes();
     await handlePutCredential(mockReq({ value: 123 }), res, { name: 'openai' });
     expect(res._status).toBe(400);
-    expect(res._body).toEqual({ error: 'body must be {"value": string}' });
+    expect(JSON.parse(res._body)).toEqual({ error: 'body must be {"value": string}' });
   });
 
   it('returns 400 when the body is empty (readBody "" || "{}" branch → value undefined)', async () => {
     const res = mockRes();
     await handlePutCredential(mockReq(), res, { name: 'openai' });
     expect(res._status).toBe(400);
-    expect(res._body).toEqual({ error: 'body must be {"value": string}' });
+    expect(JSON.parse(res._body)).toEqual({ error: 'body must be {"value": string}' });
   });
 
   it('returns 400 when value is empty / whitespace', async () => {
     const res = mockRes();
     await handlePutCredential(mockReq({ value: '   ' }), res, { name: 'openai' });
     expect(res._status).toBe(400);
-    expect(res._body).toEqual({ error: 'value must be a non-empty single-line string of at most 4096 bytes' });
+    expect(JSON.parse(res._body)).toEqual({ error: 'value must be a non-empty single-line string of at most 4096 bytes' });
   });
 
   it('returns 400 when value contains a newline', async () => {
     const res = mockRes();
     await handlePutCredential(mockReq({ value: 'line1\nline2' }), res, { name: 'openai' });
     expect(res._status).toBe(400);
-    expect(res._body).toEqual({ error: 'value must be a non-empty single-line string of at most 4096 bytes' });
+    expect(JSON.parse(res._body)).toEqual({ error: 'value must be a non-empty single-line string of at most 4096 bytes' });
   });
 
   it('returns 400 when value exceeds 4096 bytes', async () => {
@@ -234,7 +254,7 @@ describe('handlePutCredential — body validation', () => {
     const big = 'a'.repeat(4097);
     await handlePutCredential(mockReq({ value: big }), res, { name: 'openai' });
     expect(res._status).toBe(400);
-    expect(res._body).toEqual({ error: 'value must be a non-empty single-line string of at most 4096 bytes' });
+    expect(JSON.parse(res._body)).toEqual({ error: 'value must be a non-empty single-line string of at most 4096 bytes' });
   });
 });
 
@@ -246,7 +266,7 @@ describe('handlePutCredential — write outcomes', () => {
     const res = mockRes();
     await handlePutCredential(mockReq({ value: 'test-value-abc' }), res, { name: 'openai' });
     expect(res._status).toBe(503);
-    expect(res._body).toEqual({ error: 'keychain locked', code: 'KEYRING_LOCKED' });
+    expect(JSON.parse(res._body)).toEqual({ error: 'keychain locked', code: 'KEYRING_LOCKED' });
   });
 
   it('returns 501 on KeyringWriteError code KEYRING_WRITE_UNSUPPORTED', async () => {
@@ -256,7 +276,7 @@ describe('handlePutCredential — write outcomes', () => {
     const res = mockRes();
     await handlePutCredential(mockReq({ value: 'test-value-abc' }), res, { name: 'openai' });
     expect(res._status).toBe(501);
-    expect(res._body).toEqual({ error: 'unsupported backend', code: 'KEYRING_WRITE_UNSUPPORTED' });
+    expect(JSON.parse(res._body)).toEqual({ error: 'unsupported backend', code: 'KEYRING_WRITE_UNSUPPORTED' });
   });
 
   it('returns 500 on KeyringWriteError with an other code (KEYRING_ACCESS_DENIED)', async () => {
@@ -266,7 +286,7 @@ describe('handlePutCredential — write outcomes', () => {
     const res = mockRes();
     await handlePutCredential(mockReq({ value: 'test-value-abc' }), res, { name: 'openai' });
     expect(res._status).toBe(500);
-    expect(res._body).toEqual({ error: 'access denied', code: 'KEYRING_ACCESS_DENIED' });
+    expect(JSON.parse(res._body)).toEqual({ error: 'access denied', code: 'KEYRING_ACCESS_DENIED' });
   });
 
   it('returns 500 KEYRING_WRITE_FAILED on a non-KeyringWriteError throw', async () => {
@@ -276,7 +296,7 @@ describe('handlePutCredential — write outcomes', () => {
     const res = mockRes();
     await handlePutCredential(mockReq({ value: 'test-value-abc' }), res, { name: 'openai' });
     expect(res._status).toBe(500);
-    expect(res._body).toEqual({ error: 'credential write failed', code: 'KEYRING_WRITE_FAILED' });
+    expect(JSON.parse(res._body)).toEqual({ error: 'credential write failed', code: 'KEYRING_WRITE_FAILED' });
   });
 
   it('reports envShadowed:true when the service env var is set', async () => {
@@ -285,14 +305,14 @@ describe('handlePutCredential — write outcomes', () => {
     const res = mockRes();
     await handlePutCredential(mockReq({ value: 'test-value-abc' }), res, { name: 'openai' });
     expect(res._status).toBe(200);
-    expect(res._body).toMatchObject({ ok: true, service: 'openai', envShadowed: true });
+    expect(JSON.parse(res._body)).toMatchObject({ ok: true, service: 'openai', envShadowed: true });
   });
 
   it('reports envShadowed:false when no service env var is mapped', async () => {
     const res = mockRes();
     await handlePutCredential(mockReq({ value: 'test-value-abc' }), res, { name: 'openai' });
     expect(res._status).toBe(200);
-    expect(res._body).toMatchObject({ ok: true, service: 'openai', envShadowed: false });
+    expect(JSON.parse(res._body)).toMatchObject({ ok: true, service: 'openai', envShadowed: false });
   });
 });
 
@@ -306,7 +326,7 @@ describe('handleDeleteCredential', () => {
     const res = mockRes();
     await handleDeleteCredential(mockReq(), res, { name: 'openai' }, noopDeps);
     expect(res._status).toBe(200);
-    expect(res._body).toMatchObject({ ok: true, service: 'openai', envShadowed: false });
+    expect(JSON.parse(res._body)).toMatchObject({ ok: true, service: 'openai', envShadowed: false });
   });
 
   it('returns 404 when deleteCredential reports deleted:false', async () => {
@@ -314,7 +334,7 @@ describe('handleDeleteCredential', () => {
     const res = mockRes();
     await handleDeleteCredential(mockReq(), res, { name: 'openai' }, noopDeps);
     expect(res._status).toBe(404);
-    expect(res._body).toMatchObject({ ok: false, service: 'openai' });
+    expect(JSON.parse(res._body)).toMatchObject({ ok: false, service: 'openai' });
   });
 
   it('reports inUse:true when a deps instance resolves to the service', async () => {
@@ -327,7 +347,7 @@ describe('handleDeleteCredential', () => {
     const res = mockRes();
     await handleDeleteCredential(mockReq(), res, { name: 'openai' }, deps);
     expect(res._status).toBe(200);
-    expect(res._body).toMatchObject({ ok: true, service: 'openai', inUse: true });
+    expect(JSON.parse(res._body)).toMatchObject({ ok: true, service: 'openai', inUse: true });
   });
 
   it('reports inUse:true when a fallback provider resolves to the service', async () => {
@@ -340,7 +360,7 @@ describe('handleDeleteCredential', () => {
     const res = mockRes();
     await handleDeleteCredential(mockReq(), res, { name: 'openai' }, deps);
     expect(res._status).toBe(200);
-    expect(res._body).toMatchObject({ ok: true, service: 'openai', inUse: true });
+    expect(JSON.parse(res._body)).toMatchObject({ ok: true, service: 'openai', inUse: true });
   });
 
   it('reports inUse:false when no instance resolves to the service', async () => {
@@ -351,7 +371,7 @@ describe('handleDeleteCredential', () => {
     const res = mockRes();
     await handleDeleteCredential(mockReq(), res, { name: 'openai' }, deps);
     expect(res._status).toBe(200);
-    expect(res._body).toMatchObject({ ok: true, service: 'openai', inUse: false });
+    expect(JSON.parse(res._body)).toMatchObject({ ok: true, service: 'openai', inUse: false });
   });
 
   it('handles an instance with no agentOptions (nullish-coalesce branch) → inUse:false', async () => {
@@ -360,14 +380,14 @@ describe('handleDeleteCredential', () => {
     const res = mockRes();
     await handleDeleteCredential(mockReq(), res, { name: 'openai' }, deps);
     expect(res._status).toBe(200);
-    expect(res._body).toMatchObject({ ok: true, service: 'openai', inUse: false });
+    expect(JSON.parse(res._body)).toMatchObject({ ok: true, service: 'openai', inUse: false });
   });
 
   it('returns the checkService error early on an invalid service name (line 219 branch)', async () => {
     const res = mockRes();
     await handleDeleteCredential(mockReq(), res, { name: 'Bad Name!' }, noopDeps);
     expect(res._status).toBe(400);
-    expect(res._body).toEqual({ error: 'invalid service name' });
+    expect(JSON.parse(res._body)).toEqual({ error: 'invalid service name' });
   });
 
   it('returns 429 on a back-to-back DELETE to the same service (throttle branch)', async () => {
@@ -378,7 +398,7 @@ describe('handleDeleteCredential', () => {
     const r2 = mockRes();
     await handleDeleteCredential(mockReq(), r2, { name: 'openai' }, noopDeps);
     expect(r2._status).toBe(429);
-    expect(r2._body).toMatchObject({ error: 'mutation cooldown' });
+    expect(JSON.parse(r2._body)).toMatchObject({ error: 'mutation cooldown' });
   });
 });
 
@@ -391,7 +411,7 @@ describe('handleGetCredential', () => {
     const res = mockRes();
     handleGetCredential(mockReq(), res);
     expect(res._status).toBe(405);
-    expect(res._body).toEqual({ error: 'credentials are write-only' });
+    expect(JSON.parse(res._body)).toEqual({ error: 'credentials are write-only' });
   });
 });
 
@@ -404,7 +424,7 @@ describe('handleVerifyCredential', () => {
     const res = mockRes();
     await handleVerifyCredential(mockReq(), res, { name: 'Bad Name!' });
     expect(res._status).toBe(400);
-    expect(res._body).toEqual({ error: 'invalid service name' });
+    expect(JSON.parse(res._body)).toEqual({ error: 'invalid service name' });
   });
 
   it('returns 429 on a back-to-back verify to the same service', async () => {
@@ -416,7 +436,7 @@ describe('handleVerifyCredential', () => {
     const r2 = mockRes();
     await handleVerifyCredential(mockReq(), r2, { name: 'openai' });
     expect(r2._status).toBe(429);
-    expect(r2._body).toMatchObject({ error: 'verify cooldown' });
+    expect(JSON.parse(r2._body)).toMatchObject({ error: 'verify cooldown' });
   });
 
   it('returns 404 when no key is stored', async () => {
@@ -424,7 +444,7 @@ describe('handleVerifyCredential', () => {
     const res = mockRes();
     await handleVerifyCredential(mockReq(), res, { name: 'openai' });
     expect(res._status).toBe(404);
-    expect(res._body).toEqual({ error: 'no key stored for service', service: 'openai' });
+    expect(JSON.parse(res._body)).toEqual({ error: 'no key stored for service', service: 'openai' });
   });
 
   it('returns 200 status:unsupported when no verify descriptor exists', async () => {
@@ -434,7 +454,7 @@ describe('handleVerifyCredential', () => {
     const res = mockRes();
     await handleVerifyCredential(mockReq(), res, { name: 'custom-svc' });
     expect(res._status).toBe(200);
-    expect(res._body).toEqual({ ok: true, service: 'custom-svc', status: 'unsupported', envShadowed: false });
+    expect(JSON.parse(res._body)).toEqual({ ok: true, service: 'custom-svc', status: 'unsupported', envShadowed: false });
   });
 
   it('sends Authorization: Bearer <key> for a bearer descriptor (openai) and reports valid on 2xx', async () => {
@@ -447,7 +467,7 @@ describe('handleVerifyCredential', () => {
     const [, opts] = fetchMock.mock.calls[0];
     expect(opts.headers).toMatchObject({ Authorization: 'Bearer test-value-abc' });
     expect(res._status).toBe(200);
-    expect(res._body).toEqual({ ok: true, service: 'openai', status: 'valid', envShadowed: false });
+    expect(JSON.parse(res._body)).toEqual({ ok: true, service: 'openai', status: 'valid', envShadowed: false });
   });
 
   it('sends x-api-key header for a non-bearer descriptor (anthropic)', async () => {
@@ -461,7 +481,7 @@ describe('handleVerifyCredential', () => {
       'x-api-key': 'test-value-abc',
       'anthropic-version': '2023-06-01',
     });
-    expect(res._body).toMatchObject({ ok: true, status: 'valid' });
+    expect(JSON.parse(res._body)).toMatchObject({ ok: true, status: 'valid' });
   });
 
   it('reports status:invalid on a 401 response', async () => {
@@ -470,7 +490,7 @@ describe('handleVerifyCredential', () => {
     const res = mockRes();
     await handleVerifyCredential(mockReq(), res, { name: 'openai' });
     expect(res._status).toBe(200);
-    expect(res._body).toEqual({ ok: false, service: 'openai', status: 'invalid', envShadowed: false });
+    expect(JSON.parse(res._body)).toEqual({ ok: false, service: 'openai', status: 'invalid', envShadowed: false });
   });
 
   it('reports status:invalid on a 403 response', async () => {
@@ -479,7 +499,7 @@ describe('handleVerifyCredential', () => {
     const res = mockRes();
     await handleVerifyCredential(mockReq(), res, { name: 'openai' });
     expect(res._status).toBe(200);
-    expect(res._body).toEqual({ ok: false, service: 'openai', status: 'invalid', envShadowed: false });
+    expect(JSON.parse(res._body)).toEqual({ ok: false, service: 'openai', status: 'invalid', envShadowed: false });
   });
 
   it('reports status:unreachable on a 500 response', async () => {
@@ -488,7 +508,7 @@ describe('handleVerifyCredential', () => {
     const res = mockRes();
     await handleVerifyCredential(mockReq(), res, { name: 'openai' });
     expect(res._status).toBe(200);
-    expect(res._body).toEqual({ ok: false, service: 'openai', status: 'unreachable', envShadowed: false });
+    expect(JSON.parse(res._body)).toEqual({ ok: false, service: 'openai', status: 'unreachable', envShadowed: false });
   });
 
   it('reports status:unreachable when fetch throws', async () => {
@@ -497,7 +517,7 @@ describe('handleVerifyCredential', () => {
     const res = mockRes();
     await handleVerifyCredential(mockReq(), res, { name: 'openai' });
     expect(res._status).toBe(200);
-    expect(res._body).toEqual({ ok: false, service: 'openai', status: 'unreachable', envShadowed: false });
+    expect(JSON.parse(res._body)).toEqual({ ok: false, service: 'openai', status: 'unreachable', envShadowed: false });
   });
 
   it('reports status:unreachable when the AbortController timeout fires', async () => {
@@ -517,6 +537,6 @@ describe('handleVerifyCredential', () => {
     await vi.advanceTimersByTimeAsync(5_000);
     await p;
     expect(res._status).toBe(200);
-    expect(res._body).toEqual({ ok: false, service: 'openai', status: 'unreachable', envShadowed: false });
+    expect(JSON.parse(res._body)).toEqual({ ok: false, service: 'openai', status: 'unreachable', envShadowed: false });
   });
 });

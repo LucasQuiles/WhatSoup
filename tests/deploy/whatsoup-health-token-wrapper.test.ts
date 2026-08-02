@@ -1,16 +1,10 @@
-import { afterEach, describe, it, expect } from 'vitest';
+import { describe, it, expect } from 'vitest';
 import { execFileSync, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
+import { trackTmpDirs } from '../helpers/tmp-dir.ts';
 
-const tmpDirs: string[] = [];
-
-afterEach(() => {
-  for (const dir of tmpDirs.splice(0)) {
-    fs.rmSync(dir, { recursive: true, force: true });
-  }
-});
+const tmp = trackTmpDirs('');
 
 function extractKeyringLookup(source: string): string {
   const helperStart = source.indexOf('macos_keychain_lookup() {');
@@ -61,8 +55,7 @@ function runKeyringLookupProbe(
   platform: 'Darwin' | 'Linux',
   scenario: 'canonical-hit' | 'canonical-miss-legacy-hit' = 'canonical-hit',
 ): { stdout: string; log: string } {
-  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'whatsoup-wrapper-health-token-'));
-  tmpDirs.push(tmpDir);
+  const tmpDir = tmp.make('whatsoup-wrapper-health-token');
   const binDir = path.join(tmpDir, 'bin');
   fs.mkdirSync(binDir);
   const logPath = path.join(tmpDir, 'calls.log');
@@ -105,8 +98,7 @@ function runHealthTokenFileProbe(
   platform: 'Darwin' | 'Linux',
   scenario: HealthTokenFileScenario,
 ): { status: number | null; stdout: string; stderr: string; log: string } {
-  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'whatsoup-wrapper-health-token-file-'));
-  tmpDirs.push(tmpDir);
+  const tmpDir = tmp.make('whatsoup-wrapper-health-token-file');
   const binDir = path.join(tmpDir, 'bin');
   const homeDir = path.join(tmpDir, 'home');
   const instanceDir = path.join(homeDir, '.config', 'whatsoup', 'instances', 'fixture-bot');
@@ -228,8 +220,7 @@ function runHealthTokenCheckerProbe(): {
   stderr: string;
   log: string;
 } {
-  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'whatsoup-health-token-checker-'));
-  tmpDirs.push(tmpDir);
+  const tmpDir = tmp.make('whatsoup-health-token-checker');
   const binDir = path.join(tmpDir, 'bin');
   const configRoot = path.join(tmpDir, 'config');
   const instanceDir = path.join(configRoot, 'whatsoup', 'instances', 'fixture-checker');
@@ -297,8 +288,7 @@ function runVersionExposureProbe(
   stdout: string;
   stderr: string;
 } {
-  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'whatsoup-wrapper-version-'));
-  tmpDirs.push(tmpDir);
+  const tmpDir = tmp.make('whatsoup-wrapper-version');
   const binDir = path.join(tmpDir, 'bin');
   const repoRoot = path.join(tmpDir, 'repo');
   fs.mkdirSync(binDir);
@@ -422,8 +412,7 @@ describe('health token shell wrappers', () => {
   });
 
   it('deploy/whatsoup prefers an already-loaded WHATSOUP_HEALTH_TOKEN over keyring lookups', () => {
-    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'whatsoup-wrapper-env-first-'));
-    tmpDirs.push(tmpDir);
+    const tmpDir = tmp.make('whatsoup-wrapper-env-first');
     const binDir = path.join(tmpDir, 'bin');
     fs.mkdirSync(binDir);
     const logPath = path.join(tmpDir, 'calls.log');
@@ -631,8 +620,7 @@ describe('health token shell wrappers', () => {
   });
 
   it('deploy/whatsoup exports an owned per-instance TMPDIR before Node starts', () => {
-    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'whatsoup-wrapper-tmpdir-'));
-    tmpDirs.push(tmpDir);
+    const tmpDir = tmp.make('whatsoup-wrapper-tmpdir');
     const source = fs.readFileSync('deploy/whatsoup', 'utf8');
     const scriptPath = path.join(tmpDir, 'probe-tmpdir.sh');
     const homeDir = path.join(tmpDir, 'home');

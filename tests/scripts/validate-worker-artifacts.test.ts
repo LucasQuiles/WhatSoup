@@ -1,6 +1,5 @@
 import { createHash } from 'node:crypto';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { mkdirSync, writeFileSync } from 'node:fs';
 import { join as joinPath } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
@@ -9,13 +8,12 @@ import {
   run,
   validateWorkerArtifacts,
 } from '../../scripts/validate-worker-artifacts.ts';
+import { trackTmpDirs } from '../helpers/tmp-dir.ts';
 
-const tempDirs: string[] = [];
+const tmp = trackTmpDirs('worker-');
 
 function tempDir(): string {
-  const dir = mkdtempSync(joinPath(tmpdir(), 'worker-artifacts-'));
-  tempDirs.push(dir);
-  return dir;
+  return tmp.make('artifacts');
 }
 
 function digest(body: string): string {
@@ -66,9 +64,6 @@ function sortedCodes(result: { issues: { code: string }[] }): string[] {
 afterEach(() => {
   vi.restoreAllMocks();
   process.exitCode = undefined;
-  for (const dir of tempDirs.splice(0)) {
-    rmSync(dir, { recursive: true, force: true });
-  }
 });
 
 describe('worker artifact validator', () => {

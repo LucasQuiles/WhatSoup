@@ -15,33 +15,21 @@
 // No setTimeout/sleep in the test — the script is invoked with --settle 0.
 
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, chmodSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { mkdirSync, writeFileSync, readFileSync, existsSync, chmodSync } from 'node:fs';
 import { join, resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { afterEach, describe, expect, it } from 'vitest';
+import { describe, expect, it } from 'vitest';
+import { trackTmpDirs } from '../helpers/tmp-dir.ts';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 const REPO_ROOT = resolve(__dirname, '../..');
 const SCRIPT = join(REPO_ROOT, 'deploy/scripts/whatsoup-keychain-heal.sh');
 
-const tmpDirs: string[] = [];
-
-afterEach(() => {
-  for (const dir of tmpDirs.splice(0)) {
-    try {
-      rmSync(dir, { recursive: true, force: true });
-    } catch {
-      // best-effort cleanup
-    }
-  }
-});
+const tmp = trackTmpDirs('keychain-heal');
 
 function makeTmpDir(): string {
-  const dir = mkdtempSync(join(tmpdir(), 'keychain-heal-'));
-  tmpDirs.push(dir);
-  return dir;
+  return tmp.make('');
 }
 
 const FAKE_CURL = [

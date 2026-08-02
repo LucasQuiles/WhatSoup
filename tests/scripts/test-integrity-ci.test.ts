@@ -3,19 +3,18 @@ import {
   chmodSync,
   existsSync,
   mkdirSync,
-  mkdtempSync,
   readFileSync,
-  rmSync,
   writeFileSync,
 } from 'node:fs';
-import { tmpdir } from 'node:os';
 import path, { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { afterEach, describe, expect, it } from 'vitest';
+import { describe, expect, it } from 'vitest';
+
+import { trackTmpDirs } from '../helpers/tmp-dir.ts';
 
 const repoRoot = fileURLToPath(new URL('../..', import.meta.url));
 const wrapperScript = path.join(repoRoot, 'scripts', 'test-integrity-ci.sh');
-const fixtureDirs: string[] = [];
+const tmp = trackTmpDirs('whatsoup-test-integrity-');
 
 function runTestIntegrity(env: NodeJS.ProcessEnv): { status: number; stderr: string } {
   const result = spawnSync('bash', ['scripts/test-integrity-ci.sh'], {
@@ -34,9 +33,7 @@ function runTestIntegrity(env: NodeJS.ProcessEnv): { status: number; stderr: str
 }
 
 function makeFixture(): string {
-  const dir = mkdtempSync(path.join(tmpdir(), 'whatsoup-test-integrity-ci-'));
-  fixtureDirs.push(dir);
-  return dir;
+  return tmp.make('ci');
 }
 
 function writeFixtureFile(fixture: string, relativePath: string, contents: string): void {
@@ -101,10 +98,6 @@ echo "TEST_INTEGRITY_BASELINE_CHECK status=pass exit_class=clean total_findings=
   chmodSync(stubPath, 0o755);
   return stubPath;
 }
-
-afterEach(() => {
-  for (const dir of fixtureDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
-});
 
 describe('test-integrity CI wrapper', () => {
   it('routes verify:release through the required test-integrity gate', () => {
