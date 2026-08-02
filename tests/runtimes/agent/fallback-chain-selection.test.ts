@@ -456,7 +456,7 @@ describe('fallback chain selection — restore path', () => {
     lookupCredentialMock.mockImplementation((svc) => svc === 'openai' ? 'oa-key' : null);
     const now = Date.now();
     vi.spyOn(fallbackStateDb, 'ensureFallbackStateSchema').mockImplementation(() => {});
-    vi.spyOn(fallbackStateDb, 'loadFallbackState').mockReturnValue({
+    vi.spyOn(fallbackStateDb, 'getFallbackState').mockReturnValue({
       activeUntil: now + 60 * 60_000,
       activatedAt: now - 1000,
       reason: 'usage-limit',
@@ -499,7 +499,7 @@ describe('fallback chain selection — restore path', () => {
     lookupCredentialMock.mockReturnValue('present-key');
     const now = Date.now();
     vi.spyOn(fallbackStateDb, 'ensureFallbackStateSchema').mockImplementation(() => {});
-    vi.spyOn(fallbackStateDb, 'loadFallbackState').mockReturnValue({
+    vi.spyOn(fallbackStateDb, 'getFallbackState').mockReturnValue({
       activeUntil: now + 60 * 60_000,
       activatedAt: now - 1000,
       reason: 'usage-limit',
@@ -527,7 +527,7 @@ describe('fallback chain selection — restore path', () => {
   it('clears a persisted auth-required window when only same-provider fallbacks remain', () => {
     const now = Date.now();
     vi.spyOn(fallbackStateDb, 'ensureFallbackStateSchema').mockImplementation(() => {});
-    vi.spyOn(fallbackStateDb, 'loadFallbackState').mockReturnValue({
+    vi.spyOn(fallbackStateDb, 'getFallbackState').mockReturnValue({
       activeUntil: now + 60 * 60_000,
       activatedAt: now - 1000,
       reason: 'auth-required',

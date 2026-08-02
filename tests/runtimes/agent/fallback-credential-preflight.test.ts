@@ -376,7 +376,7 @@ describe('armFallbackWindow — credential pre-flight', () => {
 
   it('fires fallback_credential_missing when restorePersistedFallbackWindow arms with missing key', () => {
     const now = Date.now();
-    vi.spyOn(fallbackStateDb, 'loadFallbackState').mockReturnValue({
+    vi.spyOn(fallbackStateDb, 'getFallbackState').mockReturnValue({
       activeUntil: now + 60 * 60_000,
       activatedAt: now - 1000,
       reason: 'usage-limit',

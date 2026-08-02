@@ -77,7 +77,7 @@ vi.mock('../../../src/runtimes/chat/queue.ts', () => {
 
 // Stub remaining heavy deps that ChatRuntime imports
 vi.mock('../../../src/runtimes/chat/rate-limiter.ts', () => ({ checkRateLimit: vi.fn() }));
-vi.mock('../../../src/runtimes/chat/window.ts', () => ({ loadConversationWindow: vi.fn() }));
+vi.mock('../../../src/runtimes/chat/window.ts', () => ({ getConversationWindow: vi.fn() }));
 vi.mock('../../../src/runtimes/chat/context.ts', () => ({
   loadContext: vi.fn(),
   loadContextDetailed: vi.fn(),
