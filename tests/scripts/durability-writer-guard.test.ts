@@ -282,10 +282,15 @@ describe('durability-writer-guard — recovery_runs / enrichment_runs assert-pas
     expect(result.findings.filter((f) => f.table === 'recovery_runs')).toHaveLength(0);
   });
 
-  it('enrichment_runs (error-column failure catch) passes with no findings', async () => {
+  it('enrichment_runs (typed status receipt writer) passes with no findings', async () => {
     const snapshot = await loadRealSnapshot();
     const entry = REGISTRY.find((e) => e.table === 'enrichment_runs');
     expect(entry).toBeDefined();
+    expect(entry).toMatchObject({
+      statusColumn: 'status',
+      vocabulary: ['no_work', 'completed', 'partial', 'failed', 'legacy_unclassified'],
+      terminalFailureValues: ['partial', 'failed'],
+    });
     const result = scanDurabilityWriterInvariant(snapshot, repoRoot, { registry: entry ? [entry] : [] });
     expect(result.findings.filter((f) => f.table === 'enrichment_runs')).toHaveLength(0);
   });

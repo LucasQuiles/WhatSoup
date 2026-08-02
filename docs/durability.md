@@ -965,12 +965,11 @@ Recovery runs and their linked plans, dispositions, corroboration, and closure w
 indefinitely as audit evidence. There is no supported direct-delete or TTL path. Archive/capacity work
 must preserve identities and proof provenance through a dedicated forward migration.
 
-### `enrichment_runs` (#1789 failure-row addition)
+### `enrichment_runs` (#2565 typed cycle receipts)
 
 Not part of the inbound/outbound durability journal above — `enrichment_runs` is written by
-`EnrichmentPoller` (`src/runtimes/chat/enrichment/poller.ts`), one row per non-empty
-fact-extraction cycle (a cycle that finds no unprocessed messages returns before any write; a
-cycle that throws now writes a failure row — see below). It is documented here because the #1789
+`EnrichmentPoller` (`src/runtimes/chat/enrichment/poller.ts`), one typed receipt per online
+fact-extraction cycle, including no-work cycles. It is documented here because the #1789
 durability-writer invariant guard
 (`scripts/durability-writer-guard.ts`) treats it as one of the two tables the invariant was built
 to fix, alongside `recovery_runs` above.
@@ -978,22 +977,30 @@ to fix, alongside `recovery_runs` above.
 | Column | Type | Description |
 |---|---|---|
 | `run_id` | INTEGER PK | Auto-incrementing run ID. |
+| `schema_version` | INTEGER | Receipt schema version. Current typed rows use `1`. |
+| `source` | TEXT | `online` for the live poller; historical and backfill-shaped rows are `legacy` and are not interpreted as online health evidence. |
+| `status` | TEXT | Closed outcome: `no_work`, `completed`, `partial`, `failed`, or `legacy_unclassified`. |
+| `failure_code` | TEXT | Closed cause: `none`, `segment_failed`, `selection_failed`, `message_state_write_failed`, `ledger_write_failed`, or `legacy_unclassified`. |
+| `stage` | TEXT | Closed execution stage: `none`, `selection`, `segment`, `message_state`, or `ledger`. |
+| `retryable` | INTEGER | Boolean retry disposition (`0` or `1`). |
+| `evidence_coverage` | TEXT | `typed` for a current receipt, `legacy_unclassified` for migrated historical evidence. |
 | `started_at` | TEXT NOT NULL | Cycle start timestamp. |
-| `completed_at` | TEXT | Set on both the success and the failure path (`datetime('now')`). |
-| `messages_processed` | INTEGER | Success/failure counts accumulated before the write. |
-| `facts_extracted` | INTEGER | Same. |
-| `facts_upserted` | INTEGER | Same; column name retained for wire-compatibility with existing metrics readers even though the value now represents facts queued for external export, not a completed Pinecone upsert. |
-| `error` | TEXT | `NULL` on success. As of #1789, set to the caught error's `.message` when a cycle throws past every step-level handler inside `runCycle()` — this is the table's terminal-failure value. |
+| `completed_at` | TEXT | Completion timestamp for a terminal receipt. |
+| `success_at` | TEXT | Set only for `no_work` and `completed` outcomes. |
+| `messages_processed` | INTEGER | Compatibility count equal to typed `messages_succeeded + messages_terminal`. |
+| `messages_selected` / `messages_succeeded` / `messages_deferred` / `messages_terminal` | INTEGER | Non-negative aggregate message accounting for the cycle. |
+| `facts_extracted` | INTEGER | Aggregate facts extracted before queueing. |
+| `facts_upserted` | INTEGER | Compatibility count; retained for existing metrics readers and mirrors `facts_queued`. It does not prove a remote Pinecone upsert. |
+| `facts_queued` | INTEGER | Aggregate facts newly accepted by the local fact-export queue; remote export confirmation is owned separately. |
+| `error` | TEXT | Historical compatibility field. Typed online receipts always write `NULL`; they never persist raw exception prose. |
 
-Before #1789, a cycle that threw past its step-level handlers (most realistically, the initial
-message-fetch call) logged the error and returned with **no durable evidence at all** — no row was
-written for that cycle. `runCycle()`'s outer `catch` now records a failure row with `error` set,
-using whatever `messages_processed`/`facts_extracted`/`facts_upserted` counts were accumulated
-before the throw, so a failed cycle is no longer invisible to anything reading `enrichment_runs`.
-`lastRunAt` is deliberately left unadvanced on this path — `getHealthSnapshot()`
-(`src/runtimes/chat/runtime.ts`) derives `degraded` from `lastRunAt` staleness, so a persistently
-failing cycle must keep tripping that staleness window rather than reading healthy forever while
-failure rows accumulate.
+Migration 55 adds the receipt fields and online-reader indexes without assigning stable meaning to
+historical rows: those remain `legacy` / `legacy_unclassified`. On startup the runtime reads only
+the newest typed `online` receipt, separately remembers the last proven success, and fails closed
+for malformed or unreadable receipt evidence. Health projects only the bounded states `disabled`,
+`not_started`, `no_work`, `current`, `partial`, `failed`, `stale`, `unreadable`, and `invalid`.
+A fresh `partial` or `failed` receipt, or a stale previously successful cycle, therefore degrades
+health even when an older success is still recent.
 
 ---
 
