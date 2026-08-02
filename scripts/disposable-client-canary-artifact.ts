@@ -2,10 +2,11 @@ import { readFileSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
 
 import { assertNoSecretLike } from './artifact-redaction.ts';
+import { requireBoolean, requireEnum, requireRecord, requireString } from '../src/lib/type-guards.ts';
 
 const ARTIFACT_TYPE = 'disposable-client-canary';
 const ALLOWED_CLIENT_FAMILIES = new Set(['whatsapp-web-js', 'other']);
-const SCAN_VALUES = new Set(['pass', 'fail']);
+const SCAN_VALUES = new Set(['pass', 'fail'] as const);
 const ALLOWED_KEYS = new Set([
   'artifact_type',
   'run_id',
@@ -48,43 +49,15 @@ interface ParsedArgs {
   help: boolean;
 }
 
-function asRecord(value: unknown): Record<string, unknown> {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) {
-    throw new Error('artifact must be a JSON object');
-  }
-  return value as Record<string, unknown>;
-}
-
-function requireString(record: Record<string, unknown>, key: string): string {
-  const value = record[key];
-  if (typeof value !== 'string' || value.length === 0) {
-    throw new Error(`${key} must be a non-empty string`);
-  }
-  return value;
-}
-
-function requireBoolean(record: Record<string, unknown>, key: string): boolean {
-  const value = record[key];
-  if (typeof value !== 'boolean') {
-    throw new Error(`${key} must be a boolean`);
-  }
-  return value;
-}
-
-function requireNumber(record: Record<string, unknown>, key: string): number {
+// Enforces non-negative in addition to finite — SSOT requireNumber only
+// checks finiteness. A negative linked_duration_seconds is not a valid
+// duration, so this stays local rather than widening to the SSOT check.
+function requireNonNegativeNumber(record: Record<string, unknown>, key: string): number {
   const value = record[key];
   if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) {
     throw new Error(`${key} must be a non-negative number`);
   }
   return value;
-}
-
-function requireScanValue(record: Record<string, unknown>, key: string): 'pass' | 'fail' {
-  const value = record[key];
-  if (typeof value !== 'string' || !SCAN_VALUES.has(value)) {
-    throw new Error(`${key} must be pass or fail`);
-  }
-  return value as 'pass' | 'fail';
 }
 
 function assertAllowedKeys(record: Record<string, unknown>): void {
@@ -101,7 +74,7 @@ function assertAllowedKeys(record: Record<string, unknown>): void {
 export function validateDisposableClientCanaryArtifact(
   value: unknown,
 ): DisposableClientCanaryArtifact {
-  const record = asRecord(value);
+  const record = requireRecord(value, 'artifact');
   assertNoSecretLike(JSON.stringify(record), 'disposable client canary artifact');
   assertAllowedKeys(record);
 
@@ -109,8 +82,8 @@ export function validateDisposableClientCanaryArtifact(
     throw new Error(`artifact_type must be ${ARTIFACT_TYPE}`);
   }
 
-  const runId = requireString(record, 'run_id');
-  const clientFamily = requireString(record, 'client_family');
+  const runId = requireString(record.run_id, 'run_id');
+  const clientFamily = requireString(record.client_family, 'client_family');
   if (!ALLOWED_CLIENT_FAMILIES.has(clientFamily)) {
     throw new Error('client_family must be whatsapp-web-js or other');
   }
@@ -121,15 +94,15 @@ export function validateDisposableClientCanaryArtifact(
     throw new Error('send_disabled must be true');
   }
 
-  const authStarted = requireBoolean(record, 'auth_started');
-  const authCompleted = requireBoolean(record, 'auth_completed');
-  const readySeen = requireBoolean(record, 'ready_seen');
-  const linkedDurationSeconds = requireNumber(record, 'linked_duration_seconds');
-  const chatListReadable = requireBoolean(record, 'chat_list_readable');
-  const logoutSeen = requireBoolean(record, 'logout_seen');
-  const ghostConnectionSuspected = requireBoolean(record, 'ghost_connection_suspected');
-  const rawIdentifierScan = requireScanValue(record, 'raw_identifier_scan');
-  const messageContentScan = requireScanValue(record, 'message_content_scan');
+  const authStarted = requireBoolean(record.auth_started, 'auth_started');
+  const authCompleted = requireBoolean(record.auth_completed, 'auth_completed');
+  const readySeen = requireBoolean(record.ready_seen, 'ready_seen');
+  const linkedDurationSeconds = requireNonNegativeNumber(record, 'linked_duration_seconds');
+  const chatListReadable = requireBoolean(record.chat_list_readable, 'chat_list_readable');
+  const logoutSeen = requireBoolean(record.logout_seen, 'logout_seen');
+  const ghostConnectionSuspected = requireBoolean(record.ghost_connection_suspected, 'ghost_connection_suspected');
+  const rawIdentifierScan = requireEnum(record.raw_identifier_scan, 'raw_identifier_scan', SCAN_VALUES);
+  const messageContentScan = requireEnum(record.message_content_scan, 'message_content_scan', SCAN_VALUES);
   const killReason = record.kill_reason;
   if (killReason !== null && typeof killReason !== 'string') {
     throw new Error('kill_reason must be null or a string');
