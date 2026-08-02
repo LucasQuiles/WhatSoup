@@ -922,6 +922,24 @@ describe('safeguard diagnostics', () => {
       .toMatchObject({ status: 'fail', evidence: expect.arrayContaining([evidence]) });
   });
 
+  it('fails when a quality-job step is not a mapping (semantic shadow)', () => {
+    const workflow = requiredFiles['.github/workflows/quality.yml'];
+    const mutated = workflow.replace(
+      '      - name: Enforce CI disk budget\n        run: bash scripts/ci-disk-reclaim.sh',
+      '      - "not a mapping"',
+    );
+    expect(mutated).not.toBe(workflow);
+    const fixture = makeRepo({ files: { '.github/workflows/quality.yml': mutated } });
+    const result = checkSafeguards(fixture);
+
+    expect(result.ok).toBe(false);
+    expect(result.checks.find((check) => check.id === 'quality-ci-semantic-shadow'))
+      .toMatchObject({
+        status: 'fail',
+        evidence: expect.arrayContaining(['every quality-job step must be a mapping']),
+      });
+  });
+
   it.each([
     {
       name: 'renames the Node 25 required context',
@@ -1404,6 +1422,24 @@ describe('safeguard diagnostics', () => {
         evidence: expect.arrayContaining([
           'quality job must contain exactly one Playwright system-dependency install command (found 2)',
         ]),
+      });
+  });
+
+  it('fails when a quality-job step is not a mapping (playwright timeouts)', () => {
+    const workflow = requiredFiles['.github/workflows/quality.yml'];
+    const mutated = workflow.replace(
+      '      - name: Enforce CI disk budget\n        run: bash scripts/ci-disk-reclaim.sh',
+      '      - "not a mapping"',
+    );
+    expect(mutated).not.toBe(workflow);
+    const fixture = makeRepo({ files: { '.github/workflows/quality.yml': mutated } });
+    const result = checkSafeguards(fixture);
+
+    expect(result.ok).toBe(false);
+    expect(result.checks.find((check) => check.id === 'quality-ci-playwright-timeouts'))
+      .toMatchObject({
+        status: 'fail',
+        evidence: expect.arrayContaining(['every quality-job step must be a mapping']),
       });
   });
 

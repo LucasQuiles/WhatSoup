@@ -386,16 +386,20 @@ describe('handleSend', () => {
     expect(res._status).toBe(502);
   });
 
-  it('returns 400 for invalid JSON body on mcp route', async () => {
+  it('returns 400 for invalid JSON body without forwarding downstream', async () => {
     const inst = fakeInstance({ type: 'passive', socketPath: '/tmp/sock' });
     const deps = makeDeps({ discovery: { getInstance: vi.fn(() => inst) } as any });
 
     vi.mocked(fs.existsSync).mockReturnValue(true);
-    vi.mocked(proxyToInstance).mockResolvedValue({ status: 400, body: '{"error":"invalid JSON"}' });
     const res = mockRes();
     await handleSend(mockReq('not json'), res, deps, { name: 'test-line' });
     expect(res._status).toBe(400);
     expect(JSON.parse(res._body).error).toMatch(/invalid JSON/);
+    // The fleet must surface the parse failure itself rather than silently
+    // forwarding the malformed body downstream (previous behavior relied on
+    // the instance's own /send handler to reject it).
+    expect(mcpCall).not.toHaveBeenCalled();
+    expect(proxyToInstance).not.toHaveBeenCalled();
   });
 
   it('routes chat instances through proxyToInstance', async () => {
@@ -545,8 +549,9 @@ describe('handleSend', () => {
 
     const res = mockRes();
     // Without the I-1 guard, `JSON.parse('null')` returns null, `parsed.chatJid`
-    // throws TypeError, the catch swallows it, and the request falls through
-    // to mcpCall with a null payload — bypassing xor entirely.
+    // throws TypeError, and the catch below reports it as "invalid JSON body" —
+    // the wrong error for valid JSON that parses to `null` — instead of the
+    // "must be a JSON object" message this test pins.
     await handleSend(mockReq('null'), res, deps, { name: 'test-line' });
 
     expect(res._status).toBe(400);

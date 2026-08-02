@@ -58,13 +58,28 @@ import { readWhatsoupGitSha } from '../lib/git-env.ts';
 export type { IncomingMessage } from '../core/types.ts';
 
 export type WhatsAppSocket = ReturnType<typeof makeWASocket>;
-export type ConnectionLifecycleState =
-  | 'disconnected'
-  | 'connecting'
-  | 'connected'
-  | 'reconnecting'
-  | 'cooldown'
-  | 'shutting_down';
+
+// Canonical connection-lifecycle phase union (#2201). This models WHERE in the
+// connect/disconnect cycle the socket is — deliberately distinct from
+// AdapterState (contract/adapter.ts), which models the adapter's operational
+// health. The two axes share only 'connected'/'disconnected' by design; the
+// arch-ratchet test (tests/scripts/connection-state-union-ssot.test.ts)
+// asserts that declared overlap so neither side can drift silently.
+export const CONNECTION_LIFECYCLE_STATES = [
+  'disconnected',
+  'connecting',
+  'connected',
+  'reconnecting',
+  'cooldown',
+  'shutting_down',
+] as const;
+export type ConnectionLifecycleState = (typeof CONNECTION_LIFECYCLE_STATES)[number];
+
+/** Type-narrow for values crossing an untyped boundary (logs, JSON, IPC). */
+export function isConnectionLifecycleState(value: unknown): value is ConnectionLifecycleState {
+  return typeof value === 'string'
+    && (CONNECTION_LIFECYCLE_STATES as readonly string[]).includes(value);
+}
 
 export interface ConnectionRecentDisconnects {
   windowMs: number;
