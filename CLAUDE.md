@@ -79,7 +79,11 @@ If anything turns up, read the matched line in context — if your PR closes the
 
 **Local push gate is a SUBSET of CI — run the full suite on touched tests.** The
 `verify:push:branch` pre-push hook runs a curated guard-test list (`npm test -- <specific
-tests/scripts/*.test.ts> --pool=forks`), **not** the whole suite. CI `quality` runs
+tests/scripts/*.test.ts> --pool=forks`), **not** the whole suite. Both `verify:push:branch`
+and `verify:release` are thin entry points into the declarative manifest at
+`scripts/push-gate.ts` (ordered step arrays, per-step timing, fail-fast attribution; the
+registry test at `tests/scripts/push-gate-manifest.test.ts` asserts no guard is silently
+dropped from a pipeline). CI `quality` runs
 `coverage:check` (`vitest run --coverage`) — the full suite, a strict superset. So a test
 outside the curated list can pass locally and still fail in CI (e.g. the `arch.file-size`
 ratchet `tests/scripts/fitness-file-size-warning-budget.test.ts`, which once let an

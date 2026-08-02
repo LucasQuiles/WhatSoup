@@ -27,6 +27,7 @@ import {
   namedInCi as namedInCiWorkflow,
   pushGateGuards as pushGateGuardsOf,
 } from '../helpers/gate-membership.ts';
+import { BRANCH_STEPS, RELEASE_STEPS } from '../../scripts/push-gate.ts';
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const prePushHook = resolve(repoRoot, '.husky/pre-push');
@@ -34,6 +35,17 @@ const pushGateScope = readFileSync(resolve(repoRoot, 'scripts/print-push-gate-sc
 const packageJson = JSON.parse(
   readFileSync(resolve(repoRoot, 'package.json'), 'utf8'),
 ) as { scripts: Record<string, string> };
+// Gate composition lives in the declarative manifest (scripts/push-gate.ts) since
+// #2224; these chain views preserve the legacy 'a && b && c' assertion idiom against
+// the manifest's ordered step arrays (behavior-equivalent, order-preserving).
+const branchChain = BRANCH_STEPS.map((step) => step.cmd).join(' && ');
+const releaseChain = RELEASE_STEPS.map((step) => step.cmd).join(' && ');
+const gateChain = (scriptName: string): string =>
+  scriptName === 'verify:push:branch'
+    ? branchChain
+    : scriptName === 'verify:release'
+      ? releaseChain
+      : packageJson.scripts[scriptName];
 const vitestConfig = readFileSync(resolve(repoRoot, 'vitest.config.ts'), 'utf8');
 const qualityWorkflow = readFileSync(resolve(repoRoot, '.github/workflows/quality.yml'), 'utf8');
 const qualityGuardrailsChecklist = readFileSync(
@@ -916,7 +928,7 @@ describe('pre-push hook runtime isolation', () => {
   });
 });
 
-describe('verify chain composition (package.json)', () => {
+describe('verify chain composition (push-gate manifest)', () => {
   it('exposes one production semantic command with enforce and byte-validating shadow adapters', () => {
     expect(packageJson.scripts['guard:semantic-quality']).toBe(
       'bash scripts/run-with-pinned-node.sh scripts/semantic-quality-check.ts',
@@ -930,8 +942,8 @@ describe('verify chain composition (package.json)', () => {
   });
 
   it('runs semantic shadow feedback before the expensive local push and release suites', () => {
-    const push = packageJson.scripts['verify:push:branch'];
-    const release = packageJson.scripts['verify:release'];
+    const push = branchChain;
+    const release = releaseChain;
     expect(push).toContain('npm run verify:semantic:shadow');
     expect(release).toContain('npm run verify:semantic:shadow');
     expect(push.indexOf('npm run verify:semantic:shadow')).toBeLessThan(push.indexOf('npm test'));
@@ -949,7 +961,7 @@ describe('verify chain composition (package.json)', () => {
   });
 
   it('verify:push:branch invokes guard:work-index', () => {
-    const chain = packageJson.scripts['verify:push:branch'];
+    const chain = branchChain;
     expect(chain, 'verify:push:branch script must exist').toBeDefined();
     expect(chain).toMatch(/\bnpm run guard:work-index\b/);
   });
@@ -962,7 +974,7 @@ describe('verify chain composition (package.json)', () => {
   });
 
   it('verify:push:branch invokes staged publication guard', () => {
-    const chain = packageJson.scripts['verify:push:branch'];
+    const chain = branchChain;
     expect(chain, 'verify:push:branch script must exist').toBeDefined();
     expect(chain).toMatch(/\bnpm run guard:publication:staged\b/);
   });
@@ -971,20 +983,20 @@ describe('verify chain composition (package.json)', () => {
     // Regression guard for #495: verify:release was missing the work-index
     // step that verify:push:branch and CI quality.yml both run, allowing
     // work-index drift to land on main without local detection.
-    const chain = packageJson.scripts['verify:release'];
+    const chain = releaseChain;
     expect(chain, 'verify:release script must exist').toBeDefined();
     expect(chain).toMatch(/\bnpm run guard:work-index\b/);
   });
 
   it('verify:release invokes the test-integrity baseline gate', () => {
-    const chain = packageJson.scripts['verify:release'];
+    const chain = releaseChain;
     expect(chain, 'verify:release script must exist').toBeDefined();
     expect(chain).toMatch(/\bnpm run guard:test-integrity\b/);
   });
 
   it('verify chains invoke the agent decision polls protocol guard', () => {
     for (const scriptName of ['verify:push:branch', 'verify:release', 'verify:publish']) {
-      const chain = packageJson.scripts[scriptName];
+      const chain = gateChain(scriptName);
       expect(chain, `${scriptName} script must exist`).toBeDefined();
       expect(chain).toMatch(/\bnpm run guard:agent-decision-polls\b/);
     }
@@ -995,14 +1007,14 @@ describe('verify chain composition (package.json)', () => {
     // guard:test-integrity, so a weak-assertion violation slipped past the
     // local pre-push hook and was caught only by CI. The CI quality job runs
     // this gate; the local push gate must too so the dev cycle is fail-fast.
-    const chain = packageJson.scripts['verify:push:branch'];
+    const chain = branchChain;
     expect(chain, 'verify:push:branch script must exist').toBeDefined();
     expect(chain).toMatch(/\bnpm run guard:test-integrity\b/);
   });
 
   it('runs the catch-ratchet drift gate in push, release, and CI paths', () => {
-    const push = packageJson.scripts['verify:push:branch'] ?? '';
-    const release = packageJson.scripts['verify:release'] ?? '';
+    const push = branchChain ?? '';
+    const release = releaseChain ?? '';
 
     expect(push).toMatch(/\bnpm run guard:catch-ratchet\b/);
     expect(release).toMatch(/\bnpm run guard:catch-ratchet\b/);
@@ -1017,7 +1029,7 @@ describe('verify chain composition (package.json)', () => {
     // harness node-pin drift, tokenomics regressions) passed the local push gate
     // and failed only in CI. These are fast+deterministic; the slow coverage/
     // drills/browser tail intentionally stays in verify:release (asserted below).
-    const chain = packageJson.scripts['verify:push:branch'];
+    const chain = branchChain;
     expect(chain, 'verify:push:branch script must exist').toBeDefined();
     expect(chain).toMatch(/\bnpm run guard:design-system-hygiene\b/);
     expect(chain).toMatch(/\bnpm run guard:harness-maintenance\b/);
@@ -1031,7 +1043,7 @@ describe('verify chain composition (package.json)', () => {
     // local gate must mirror them so console strict-tsconfig violations fail fast.
     expect(qualityWorkflow).toMatch(/--prefix console run lint/);
     expect(qualityWorkflow).toMatch(/--prefix console run build/);
-    const chain = packageJson.scripts['verify:push:branch'];
+    const chain = branchChain;
     expect(chain).toMatch(/--prefix console run lint\b/);
     expect(chain).toMatch(/--prefix console run build\b/);
   });
@@ -1039,14 +1051,14 @@ describe('verify chain composition (package.json)', () => {
   it('verify:release retains the slow coverage/browser tail intentionally omitted from the push gate (#1105)', () => {
     // Documents the intentional split: the full-suite coverage gate and the
     // browser suites stay in verify:release (and CI), not the fast push gate.
-    const release = packageJson.scripts['verify:release'];
+    const release = releaseChain;
     expect(release, 'verify:release script must exist').toBeDefined();
     expect(release).toMatch(/\bnpm run coverage:check\b/);
     expect(release).toMatch(/\bnpm run verify:console-browser\b/);
   });
 
   it('verify:release runs the root full suite once through serialized coverage', () => {
-    const release = packageJson.scripts['verify:release'];
+    const release = releaseChain;
     expect(release, 'verify:release script must exist').toBeDefined();
 
     const rootFullSuitePatterns = [
@@ -1077,13 +1089,13 @@ describe('verify chain composition (package.json)', () => {
     expect(qualityWorkflow).toContain('run: npm run verify:console-design:live');
     expect(qualityWorkflow).not.toContain('run: npm run verify:console-design\n');
 
-    const release = packageJson.scripts['verify:release'];
+    const release = releaseChain;
     expect(release).toContain('npm run verify:console-design:live');
     expect(release).not.toMatch(/\bnpm run verify:console-design(?:\s|$)/);
   });
 
   it('retains design guard tests where no full-suite coverage run precedes design checks', () => {
-    expect(packageJson.scripts['verify:push:branch']).toMatch(
+    expect(branchChain).toMatch(
       /\bnpm run verify:console-design(?:\s|$)/,
     );
     expect(tagReleaseWorkflow).toContain('run: npm run verify:console-design');
@@ -1098,7 +1110,7 @@ describe('verify chain composition (package.json)', () => {
       expect(hookSource).not.toContain(`run ${scriptName}`);
     }
     for (const scriptName of ['verify:push:branch', 'verify:release']) {
-      expect(packageJson.scripts[scriptName].match(/npm run verify:console-design/g) ?? []).toHaveLength(1);
+      expect(gateChain(scriptName).match(/npm run verify:console-design/g) ?? []).toHaveLength(1);
     }
   });
 
@@ -1138,14 +1150,14 @@ describe('verify chain composition (package.json)', () => {
 
   it('verify chains invoke the commit-author guard', () => {
     for (const scriptName of ['verify:push:branch', 'verify:release']) {
-      const chain = packageJson.scripts[scriptName];
+      const chain = gateChain(scriptName);
       expect(chain, `${scriptName} script must exist`).toBeDefined();
       expect(chain).toMatch(/\bnpm run guard:repo:commit-authors\b/);
     }
   });
 
   it('verify:push:branch invokes branch-diff repo hygiene after staged smoke', () => {
-    const chain = packageJson.scripts['verify:push:branch'];
+    const chain = branchChain;
     expect(chain, 'verify:push:branch script must exist').toBeDefined();
     expect(chain).toMatch(/\bnpm run guard:repo:staged\b/);
     expect(chain).toMatch(/\bnpm run guard:repo:branch-diff\b/);
@@ -1159,7 +1171,7 @@ describe('verify chain composition (package.json)', () => {
 
   it('verify chains invoke BOT ERRORS runtime-source, runtime-manifest, and simulation-matrix guards', () => {
     for (const scriptName of ['verify:push:branch', 'verify:release']) {
-      const chain = packageJson.scripts[scriptName];
+      const chain = gateChain(scriptName);
       expect(chain, `${scriptName} script must exist`).toBeDefined();
       expect(chain).toMatch(/\bnpm run guard:source-runtime-drift\b/);
       expect(chain).toMatch(/\bnpm run guard:bot-errors-runtime-manifest\b/);
@@ -1175,14 +1187,14 @@ describe('verify chain composition (package.json)', () => {
   });
 
   it('verify:push:branch invokes full test typecheck, not source-only typecheck', () => {
-    const chain = packageJson.scripts['verify:push:branch'];
+    const chain = branchChain;
     expect(chain, 'verify:push:branch script must exist').toBeDefined();
     expect(chain).toMatch(/\bnpm run typecheck:all\b/);
     expect(chain).not.toMatch(/\bnpm run typecheck(?:\s|&&|$)/);
   });
 
   it('verify:release invokes the standalone whatsoup guard package checks', () => {
-    const chain = packageJson.scripts['verify:release'];
+    const chain = releaseChain;
     expect(chain, 'verify:release script must exist').toBeDefined();
     expect(chain).toMatch(/\bbash scripts\/run-with-pinned-npm\.sh --prefix tools\/whatsoup_guard ci\b/);
     expect(chain).toMatch(/\bbash scripts\/run-with-pinned-npm\.sh --prefix tools\/whatsoup_guard run typecheck\b/);
@@ -1197,14 +1209,14 @@ describe('verify chain composition (package.json)', () => {
   });
 
   it('verify:release invokes full publication audit guard', () => {
-    const chain = packageJson.scripts['verify:release'];
+    const chain = releaseChain;
     expect(chain, 'verify:release script must exist').toBeDefined();
     expect(chain).toMatch(/\bnpm run guard:publication:all\b/);
     expect(chain).not.toMatch(/\bnpm run guard:publication:release\b/);
   });
 
   it('verify:release invokes release repo hygiene guard', () => {
-    const chain = packageJson.scripts['verify:release'];
+    const chain = releaseChain;
     expect(chain, 'verify:release script must exist').toBeDefined();
     expect(chain).toMatch(/\bnpm run guard:repo:release-hygiene\b/);
   });
@@ -1220,7 +1232,7 @@ describe('verify chain composition (package.json)', () => {
   });
 
   it('verify:release invokes console lint', () => {
-    const chain = packageJson.scripts['verify:release'];
+    const chain = releaseChain;
     expect(chain, 'verify:release script must exist').toBeDefined();
     expect(chain).toMatch(/\bbash scripts\/run-with-pinned-npm\.sh --prefix console ci\b/);
     expect(chain).toMatch(/\bbash scripts\/run-with-pinned-npm\.sh --prefix console run lint\b/);
@@ -1244,7 +1256,7 @@ describe('quality workflow composition', () => {
     expect(packageJson.scripts['guard:pr-metadata']).toBe(
       'bash scripts/run-with-pinned-node.sh scripts/pr-metadata-guard.ts',
     );
-    expect(packageJson.scripts['verify:push:branch']).toContain(
+    expect(branchChain).toContain(
       'tests/scripts/pr-metadata-guard.test.ts',
     );
     expect(qualityWorkflow).toMatch(

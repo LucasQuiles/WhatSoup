@@ -27,6 +27,7 @@
  */
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
+import { BRANCH_STEPS } from '../../scripts/push-gate.ts';
 
 /**
  * The independent server-side gates. Neither subsumes the other:
@@ -118,11 +119,27 @@ export const CI_EXEMPT_PUSH_GATE_GUARDS: Readonly<
   },
 };
 
+/**
+ * The thin entry point into the declarative push-gate manifest (#2224). When
+ * verify:push:branch holds this one-liner, gate membership comes from the
+ * manifest; a legacy-format chain (fixture repos, stale checkouts) is parsed
+ * directly; an absent script yields [] (load-bearing for reachability tests).
+ */
+const MANIFEST_ENTRY_POINT_RE = /^bash scripts\/run-with-pinned-node\.sh scripts\/push-gate\.ts branch\s*$/;
+
 /** Every `guard:*` npm script that `verify:push:branch` invokes, deduped and sorted. */
 export function pushGateGuards(scripts: Record<string, string>): string[] {
+  const chain = scripts['verify:push:branch'];
+  if (chain && MANIFEST_ENTRY_POINT_RE.test(chain.trim())) {
+    return [
+      ...new Set(
+        BRANCH_STEPS.map((step) => step.name).filter((name) => name.startsWith('guard:')),
+      ),
+    ].sort();
+  }
   return [
     ...new Set(
-      [...(scripts['verify:push:branch'] ?? '').matchAll(/npm run (guard:[a-z0-9:._-]+)/g)].map(
+      [...(chain ?? '').matchAll(/npm run (guard:[a-z0-9:._-]+)/g)].map(
         (m) => m[1],
       ),
     ),

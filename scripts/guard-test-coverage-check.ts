@@ -2,6 +2,7 @@ import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import ts from 'typescript';
+import { CURATED_TEST_PATHS } from './push-gate.ts';
 
 /**
  * Meta-guard: every guard-family script under `scripts/` must ship a companion
@@ -105,12 +106,24 @@ export function companionTestCandidates(guardRelPath: string): string[] {
   return candidates;
 }
 
-function readVerifyPushBranch(cwd: string): string {
-  const pkgPath = path.join(cwd, 'package.json');
-  const pkg = JSON.parse(readFileSync(pkgPath, 'utf8')) as {
-    scripts?: Record<string, string>;
-  };
-  return pkg.scripts?.['verify:push:branch'] ?? '';
+function readWiredGateTestPaths(cwd: string): readonly string[] {
+  // The declarative manifest (scripts/push-gate.ts) is the SSOT for which
+  // tests run in the push gate (#2224). Read it as TEXT so fixture repos in
+  // tests can substitute their own manifest without a dynamic import; when
+  // no manifest exists at cwd, fall back to the compiled-in array (the real
+  // repo's SSOT). Membership in the curated array is exact, not the old
+  // substring match against a shell string.
+  try {
+    const source = readFileSync(path.join(cwd, 'scripts', 'push-gate.ts'), 'utf8');
+    const block = source.match(/CURATED_TEST_PATHS\s*=\s*\[([\s\S]*?)\] as const/);
+    const paths = block
+      ? [...block[1].matchAll(/'(tests\/[^']+\.test\.ts)'/g)].map((match) => match[1])
+      : [];
+    if (paths.length > 0) return paths;
+  } catch {
+    // No manifest at cwd — fall through to the compiled-in SSOT.
+  }
+  return CURATED_TEST_PATHS;
 }
 
 function readAllowlistReason(absGuardPath: string): string | null {
@@ -654,7 +667,7 @@ export function findGuardsMissingTests(
   options: GuardTestCoverageOptions = {},
 ): GuardCoverageResult {
   const cwd = options.cwd ?? process.cwd();
-  const verifyScript = readVerifyPushBranch(cwd);
+  const wiredTestPaths = readWiredGateTestPaths(cwd);
   const guards = enumerateGuardScripts(cwd);
 
   const covered: string[] = [];
@@ -679,7 +692,7 @@ export function findGuardsMissingTests(
     }
 
     // The test exists — but does it actually run in the pre-push gate?
-    const wired = candidates.some((rel) => verifyScript.includes(rel));
+    const wired = candidates.some((rel) => wiredTestPaths.includes(rel));
     if (!wired) {
       gaps.push({ guard, reason: 'test-not-wired', expectedTest: existing });
       continue;
@@ -698,13 +711,13 @@ function printResult(result: GuardCoverageResult): void {
     if (gap.reason === 'no-test') {
       console.error(
         `  MISSING-TEST ${gap.guard}: no companion test found (expected ${gap.expectedTest}). ` +
-          `Add it under tests/scripts/ and wire its path into verify:push:branch, ` +
+          `Add it under tests/scripts/ and wire its path into CURATED_TEST_PATHS in scripts/push-gate.ts, ` +
           `or add a top-of-file '// meta-guard:no-test <reason>' comment.`,
       );
     } else if (gap.reason === 'test-not-wired') {
       console.error(
         `  TEST-NOT-WIRED ${gap.guard}: companion test ${gap.expectedTest} exists but is ` +
-          `not listed in the verify:push:branch 'npm test --' arg list, so it never runs in the gate.`,
+          `not listed in CURATED_TEST_PATHS in scripts/push-gate.ts, so it never runs in the gate.`,
       );
     }
   }
