@@ -43,6 +43,7 @@ import {
   type ModelCatalogueRenderPort,
 } from './model-catalogue-render.ts';
 import { brandOf, listBrands } from './providers/provider-brand.ts';
+import { MS_PER_DAY } from '../../lib/time-units.ts';
 import { renderBrandLevel, renderEffortLevel, renderModelLevel, prettyEffortLabel, type RenderedLevel } from './model-drilldown-render.ts';
 import { nativeReasoningControl, providerConfigEffort, providerHasNativeReasoningControl, type ReasoningControl } from './reasoning-control.ts';
 import {
@@ -66,7 +67,7 @@ const GLOBAL_TOOL_SCOPE_KEY = GLOBAL_CONVERSATION_KEY;
 class RouteRecycleOwnershipChangedError extends Error {}
 
 /** TTL for an ephemeral (non-sticky) route preference row. */
-export const PREFERENCE_TTL_MS = 24 * 60 * 60 * 1000;
+export const PREFERENCE_TTL_MS = MS_PER_DAY;
 
 // Only the receipt's promised bare reply mutates routing (Q-CANARY model-pin
 // `keep` contract, 2026-07-23). Conversational uses such as "please keep it"
