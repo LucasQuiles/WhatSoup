@@ -212,10 +212,12 @@ import {
   type RuntimeResultHandlerPort,
 } from './runtime-turn-result-handler.ts';
 import {
+  FallbackReplayInvalidatedError,
   RuntimeTurnCoordinator,
   RUNTIME_TURN_SHUTDOWN_FINALIZATION_TIMEOUT_MS,
   type PerChatRuntimeScopeRef,
   type ProviderFallbackReplayArgs,
+  type ResolvedReplayRoute,
   type RuntimeTurnAfterTerminalAction,
   type RuntimeTurnCompletion,
   type RuntimeTurnCoordinatorPort,
@@ -2664,8 +2666,15 @@ export class AgentRuntime implements Runtime {
       sendTurnPerChat: (chatJid, text, mapKey, actorJid, context, scopeRef, systemTurnLease, excludeJobId, deliveryKind, dispatchAllowed, onProviderBoundary) =>
         runtime.sendTurnPerChat(chatJid, text, mapKey, actorJid, context, scopeRef, systemTurnLease, excludeJobId, deliveryKind, dispatchAllowed, onProviderBoundary),
       deleteOwnedPerChatSession: (mapKey, expected) => runtime.deleteOwnedPerChatSession(mapKey, expected),
-      recreatePerChatSessionForFallback: (mapKey, chatJid, actorJid) => runtime.recreatePerChatSessionForFallback(mapKey, chatJid, actorJid),
-      recreateSingletonSessionForFallback: (chatJid, actorJid) => runtime.recreateSingletonSessionForFallback(chatJid, actorJid),
+      discardPerChatSessionForFallback: (mapKey, expected) =>
+        runtime.discardPerChatSessionForFallback(mapKey, expected),
+      discardSingletonSessionForFallback: (expected) => runtime.discardSingletonSessionForFallback(expected),
+      recreatePerChatSessionForFallback: (mapKey, chatJid, actorJid, routeOverride) =>
+        runtime.recreatePerChatSessionForFallback(mapKey, chatJid, actorJid, routeOverride),
+      recreateSingletonSessionForFallback: (chatJid, actorJid, routeOverride) =>
+        runtime.recreateSingletonSessionForFallback(chatJid, actorJid, routeOverride),
+      isReplayRouteCurrent: (chatJid, actorJid, routeOverride) =>
+        runtime.isReplayRouteCurrent(chatJid, actorJid, routeOverride),
       bindActiveGlobalMcpConversation: (chatJid) => runtime.bindActiveGlobalMcpConversation(chatJid),
       sendTurnToSession: (...args) => runtime.sendTurnToSession(...args),
       sendVoiceReply: (chatJid, responseText) => runtime._sendVoiceReply(chatJid, responseText),
@@ -10621,7 +10630,12 @@ export class AgentRuntime implements Runtime {
     flushPendingHandoffNoticeImpl(this.db, queue);
   }
 
-  private recreatePerChatSessionForFallback(mapKey: string, chatJid: string, actorJid?: string): void {
+  private recreatePerChatSessionForFallback(
+    mapKey: string,
+    chatJid: string,
+    actorJid?: string,
+    routeOverride?: ResolvedReplayRoute,
+  ): void {
     this.operationTrackers.get(mapKey)?.shutdown();
     this.operationTrackers.delete(mapKey);
 
@@ -10647,6 +10661,7 @@ export class AgentRuntime implements Runtime {
       notifyUser: (msg) => this.handleCrashNotify(msg, chatJid),
       onResumeFailed: () => this.handleResumeFailed(chatJid),
       eventToolScopeKey: toolScopeKey,
+      routeOverride,
     });
     this.setOwnedPerChatSession(mapKey, session);
     if (!this.chatQueues.has(mapKey)) {
@@ -10659,7 +10674,19 @@ export class AgentRuntime implements Runtime {
     if (tracker) this.operationTrackers.set(mapKey, tracker);
   }
 
-  private recreateSingletonSessionForFallback(chatJid: string, actorJid?: string): void {
+  /** Remove a shutdown fallback source without disturbing a newer owner. */
+  private discardPerChatSessionForFallback(mapKey: string, expected: SessionManager): boolean {
+    if (this.chatSessions.get(mapKey) !== expected) return false;
+    this.operationTrackers.get(mapKey)?.shutdown();
+    this.operationTrackers.delete(mapKey);
+    return this.deleteOwnedPerChatSession(mapKey, expected);
+  }
+
+  private recreateSingletonSessionForFallback(
+    chatJid: string,
+    actorJid?: string,
+    routeOverride?: ResolvedReplayRoute,
+  ): void {
     this.operationTracker?.shutdown();
     this.operationTracker = null;
     let replacementSession!: SessionManager;
@@ -10686,6 +10713,7 @@ export class AgentRuntime implements Runtime {
       },
       notifyUser: (msg) => this.handleCrashNotify(msg),
       onResumeFailed: () => this.handleResumeFailed(chatJid),
+      routeOverride,
     });
     this.session = replacementSession;
     this.activeChatJid = chatJid;
@@ -10695,6 +10723,15 @@ export class AgentRuntime implements Runtime {
       this.queue = this.createOutboundQueue(chatJid, 'fallback single session replacement');
     }
     this.operationTracker = this.createOperationTracker(this.session, () => this.getActiveQueue());
+  }
+
+  /** Remove a shutdown singleton fallback source without clearing a replacement. */
+  private discardSingletonSessionForFallback(expected: SessionManager): boolean {
+    if (this.session !== expected) return false;
+    this.operationTracker?.shutdown();
+    this.operationTracker = null;
+    this.session = null;
+    return true;
   }
 
   private scheduleFallbackReplay(args: {
@@ -10717,8 +10754,7 @@ export class AgentRuntime implements Runtime {
       ? ((this.perChatTurnText.get(args.mapKey)?.trim() ?? '') !== '')
       : this.turnHadVisibleOutput;
     if (
-      args.activation.extended
-      || args.activation.keyPresent === false
+      args.activation.keyPresent === false
       || args.hadToolActivity
       || hadVisibleOutput
     ) return false;
@@ -10729,6 +10765,26 @@ export class AgentRuntime implements Runtime {
     const actorJid = args.mapKey !== undefined
       ? this.pendingTurnActorJid.get(args.mapKey)
       : this.currentTurnReplayActorJid;
+
+    let routeOverride: ResolvedReplayRoute;
+    try {
+      routeOverride = this.resolveRouteForTurn(args.chatJid, actorJid);
+    } catch {
+      return false;
+    }
+    // The route is captured and later passed to session creation, so an
+    // extended replay cannot pass this identity check then respawn onto a
+    // different route after the old session has shut down.
+    const replayTargetSafe = !args.activation.extended || (
+      args.oldSession !== null
+      && typeof args.oldSession.getProviderId === 'function'
+      && typeof args.oldSession.getModelRef === 'function'
+      && (
+        args.oldSession.getProviderId() !== routeOverride.provider
+        || args.oldSession.getModelRef() !== routeOverride.model
+      )
+    );
+    if (!replayTargetSafe) return false;
 
     const runtimeContext = args.mapKey !== undefined
       ? this.perChatRuntimeTurnContexts.get(args.mapKey)?.[0]
@@ -10765,6 +10821,7 @@ export class AgentRuntime implements Runtime {
         {
           ...(scopeRef === undefined ? args : { ...args, mapKey: scopeRef.value }),
           runtimeContext,
+          routeOverride,
         },
         replayText,
         actorJid,
@@ -10774,7 +10831,7 @@ export class AgentRuntime implements Runtime {
         err,
       ));
     } else {
-      void this.dispatchFallbackReplay(args, replayText, actorJid)
+      void this.dispatchFallbackReplay({ ...args, routeOverride }, replayText, actorJid)
         .then(() => {
           this.fallbackMetrics.recordReplay();
           emitAlertChecked(
@@ -10786,6 +10843,10 @@ export class AgentRuntime implements Runtime {
           );
         })
         .catch((err) => {
+          if (err instanceof FallbackReplayInvalidatedError) {
+            const queue = this.getQueueForChat(args.chatJid, args.mapKey);
+            if (queue) this.notifyFailedFallbackReplay(queue, args.chatJid);
+          }
           log.error({ err, chatJid: args.chatJid, mapKey: args.mapKey }, 'failed to replay unjournaled turn');
           emitAlertChecked(
             this.instanceName,
@@ -10798,6 +10859,35 @@ export class AgentRuntime implements Runtime {
     return true;
   }
 
+  /**
+   * Confirm that the route captured for a fallback replay still represents the
+   * live session target after the old child has stopped. Route source and
+   * effort affect spawn configuration too, so this is intentionally stricter
+   * than a provider/model-only comparison.
+   */
+  private isReplayRouteCurrent(
+    chatJid: string,
+    actorJid: string | undefined,
+    captured: ResolvedReplayRoute,
+  ): boolean {
+    try {
+      const live = this.resolveRouteForTurn(chatJid, actorJid);
+      return (
+        live.provider === captured.provider
+        && live.model === captured.model
+        && live.source === captured.source
+        && live.reasonCode === captured.reasonCode
+        && live.dataPolicy === captured.dataPolicy
+        && live.policyVersion === captured.policyVersion
+        && live.policyState === captured.policyState
+        && live.pinnedProvider === captured.pinnedProvider
+        && live.effort === captured.effort
+      );
+    } catch {
+      return false;
+    }
+  }
+
   private async dispatchFallbackReplay(
     args: {
       activation: ProviderFallbackActivation;
@@ -10805,6 +10895,7 @@ export class AgentRuntime implements Runtime {
       mapKey?: string;
       oldSession: SessionManager | null;
       runtimeContext?: RuntimeTurnContext;
+      routeOverride?: ResolvedReplayRoute;
     },
     replayText: string,
     actorJid: string | undefined,
@@ -10816,7 +10907,17 @@ export class AgentRuntime implements Runtime {
       actorJid,
       oldSession: args.oldSession,
       runtimeContext: args.runtimeContext,
+      routeOverride: args.routeOverride,
     });
+  }
+
+  private notifyFailedFallbackReplay(queue: IOutboundQueue, chatJid: string): void {
+    try {
+      clearStandbyNotice(this.db, toConversationKey(chatJid));
+    } catch (noticeError) {
+      log.warn({ err: noticeError, chatJid }, 'failed to clear abandoned fallback handoff notice');
+    }
+    queue.enqueueText('_The backup model could not continue this turn. Please try again._');
   }
 
   private async finalizeFailedFallbackContinuation(
@@ -10838,13 +10939,7 @@ export class AgentRuntime implements Runtime {
         'fallback continuation failed without an outbound queue');
       return;
     }
-    try {
-      clearStandbyNotice(this.db, toConversationKey(args.chatJid));
-    } catch (noticeError) {
-      log.warn({ err: noticeError, chatJid: args.chatJid },
-        'failed to clear abandoned fallback handoff notice');
-    }
-    queue.enqueueText('_The backup model could not continue this turn. Please try again._');
+    this.notifyFailedFallbackReplay(queue, args.chatJid);
     log.error({
       err: error,
       chatJid: args.chatJid,
@@ -10962,11 +11057,12 @@ export class AgentRuntime implements Runtime {
     mcpSocketPath?: string;
     providerConfigOverride?: Record<string, unknown>;
     eventToolScopeKey?: string;
+    routeOverride?: ResolvedReplayRoute;
   }): SessionManager {
     const conversationKey = toConversationKey(opts.chatJid);
     // Resolve the provider/model/policy tuple for every session. NL preferences
     // remain flag-gated inside resolveRouteForTurn; policy admission does not.
-    const route = this.resolveRouteForTurn(opts.chatJid, opts.actorJid);
+    const route = opts.routeOverride ?? this.resolveRouteForTurn(opts.chatJid, opts.actorJid);
     if (this.nlRoutingEnabled) this.noteRouteAtSpawn(opts.chatJid, conversationKey, route);
     // F-STICKY-ACTOR (QR-247 hardening): wire the per-chat actor socket HERE — the
     // single choke point every spawn path (ensure / proactive-resume / provider-
