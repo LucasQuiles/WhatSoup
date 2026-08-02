@@ -24,10 +24,14 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import { DatabaseSync } from 'node:sqlite';
 import { jsonResponse, readBody, requireInstance } from '../../lib/http.ts';
 import { SQLITE_BUSY_TIMEOUT_PRAGMA } from '../../lib/sqlite-constants.ts';
+import { errorMessage } from '../../lib/error-message.ts';
+import { createChildLogger } from '../../logger.ts';
 import { proxyToInstance } from '../http-proxy.ts';
 import { validationError } from '../response-error-projection.ts';
 import type { FleetDiscovery } from '../discovery.ts';
 import type { FleetDbReader } from '../db-reader.ts';
+
+const log = createChildLogger('fleet:approvals');
 
 export interface ApprovalsDeps {
   discovery: FleetDiscovery;
@@ -132,7 +136,11 @@ export async function handlePostApprovalDecision(
         notice: `line ${instance.name} is unreachable — decision queued durably and consumed at the line's next boot; if the line is actually up, retry instead`,
       });
       return;
-    } catch {
+    } catch (err) {
+      log.warn(
+        { err: errorMessage(err), instance: instance.name, mapKey: decision.mapKey },
+        'approvals: durable queue write failed after instance unreachable — falling back to honest 502',
+      );
       jsonResponse(res, 502, {
         error: `line ${instance.name} is offline or unreachable — decision NOT delivered (durable queue write also failed); retry when the line is up`,
         instance: instance.name,
