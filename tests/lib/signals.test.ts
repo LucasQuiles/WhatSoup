@@ -22,11 +22,15 @@ describe('SIGNAL constants', () => {
     expect(bareLiteral.test(platform)).toBe(false);
 
     const ops = readFileSync('src/fleet/routes/ops.ts', 'utf8');
-    expect(ops).toContain("import { SIGNAL } from '../../lib/signals.ts';");
-    expect(ops).toContain("existing.kill(SIGNAL.TERM);");
-    expect(ops).toContain('child.kill(SIGNAL.TERM);');
-    expect(ops).toContain('child.kill(SIGNAL.KILL);');
     expect(bareLiteral.test(ops)).toBe(false);
+
+    // handleAuth + its SIGNAL.* usage extracted to ops-auth.ts (#2239).
+    const opsAuth = readFileSync('src/fleet/routes/ops-auth.ts', 'utf8');
+    expect(opsAuth).toContain("import { SIGNAL } from '../../lib/signals.ts';");
+    expect(opsAuth).toContain("existing.kill(SIGNAL.TERM);");
+    expect(opsAuth).toContain('child.kill(SIGNAL.TERM);');
+    expect(opsAuth).toContain('child.kill(SIGNAL.KILL);');
+    expect(bareLiteral.test(opsAuth)).toBe(false);
 
     const binaryPreflight = readFileSync('src/runtimes/agent/providers/binary-preflight.ts', 'utf8');
     expect(binaryPreflight).toContain("import { SIGNAL } from '../../../lib/signals.ts';");
