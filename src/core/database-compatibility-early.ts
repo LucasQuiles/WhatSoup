@@ -20,6 +20,7 @@ import {
 } from './database-compatibility.ts';
 import { EX_CONFIG } from '../lib/exit-codes.ts';
 import { ConfigValidationError, isConfigValidationError } from '../lib/startup-error.ts';
+import { getBootstrapInstanceContext } from '../lib/instance-context.ts';
 
 // Single source of truth for the permanent-startup exit code: sysexits EX_CONFIG
 // (78), which is what deploy/whatsoup@.service lists in RestartPreventExitStatus.
@@ -325,12 +326,6 @@ export function waitForDatabaseCompatibilityDrain(
   });
 }
 
-type BootstrapInstanceConfig = {
-  name?: unknown;
-  healthPort?: unknown;
-  paths?: { dbPath?: unknown; lockPath?: unknown };
-};
-
 export type EarlyDatabaseCompatibilityGateDependencies = {
   inspectPath?: typeof inspectDatabasePathBeforeCreate;
   inspect?: typeof inspectExistingDatabaseForBootstrap;
@@ -344,20 +339,13 @@ export type EarlyDatabaseCompatibilityGateDependencies = {
 export async function runEarlyDatabaseCompatibilityGate(
   dependencies: EarlyDatabaseCompatibilityGateDependencies = {},
 ): Promise<boolean> {
-  const encoded = process.env.INSTANCE_CONFIG;
-  if (!encoded) throw new ConfigValidationError('INSTANCE_CONFIG is required before the database compatibility gate');
-  let instance: BootstrapInstanceConfig;
-  try {
-    instance = JSON.parse(encoded) as BootstrapInstanceConfig;
-  } catch (err) {
-    throw new ConfigValidationError(
-      `INSTANCE_CONFIG contains invalid JSON: ${err instanceof Error ? err.message : String(err)}`,
-    );
-  }
-  const dbPath = instance.paths?.dbPath;
-  const lockPath = instance.paths?.lockPath;
-  const instanceName = instance.name;
-  const healthPort = instance.healthPort;
+  // Typed store over the env round-trip (#2206): src/core cannot import the
+  // root-ring loader, and no longer needs to — the ring-0 leaf holds it.
+  const context = getBootstrapInstanceContext();
+  const dbPath = context.paths?.dbPath;
+  const lockPath = context.paths?.lockPath;
+  const instanceName = context.name;
+  const healthPort = context.healthPort;
   if (
     typeof dbPath !== 'string'
     || typeof lockPath !== 'string'
