@@ -397,6 +397,46 @@ describe('ImsgPort — dispose', () => {
     port.dispose();
     expect(mock.closeCalls).toBe(1);
   });
+
+  it('empties the in-memory inboundQueue Map on dispose', async () => {
+    const { port, mock } = makePort();
+    mock.on('chats.list', () => ({
+      chats: [{
+        id: 42,
+        identifier: 'friend@users.noreply.github.com',
+        guid: 'iMessage;-;friend@users.noreply.github.com',
+        participants: ['friend@users.noreply.github.com'],
+      }],
+    }));
+    mock.on('messages.history', () => ({
+      messages: [{
+        id: 1,
+        chat_id: 42,
+        chat_identifier: 'friend@users.noreply.github.com',
+        chat_guid: 'iMessage;-;friend@users.noreply.github.com',
+        participants: ['friend@users.noreply.github.com'],
+        is_group: false,
+        guid: 'g-1',
+        sender: 'friend@users.noreply.github.com',
+        text: 'hello',
+        is_from_me: false,
+        created_at: '2026-07-22T12:00:01.000Z',
+      }],
+    }));
+    mock.on('watch.subscribe', () => ({ subscription: 1 }));
+
+    // Bootstraps and enqueues one record into the private inboundQueue Map;
+    // listInboundSince only evicts entries once a later call commits their
+    // cursor, so this record is still resident in the Map after the call.
+    await port.listInboundSince(new Date('2026-07-22T12:00:00.000Z'));
+
+    const inboundQueue = (port as unknown as { inboundQueue: Map<number, unknown> }).inboundQueue;
+    expect(inboundQueue.size).toBeGreaterThan(0);
+
+    port.dispose();
+
+    expect(inboundQueue.size).toBe(0);
+  });
 });
 
 interface RpcFrame {
