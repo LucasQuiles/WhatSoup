@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { MS_PER_MINUTE } from '../src/lib/time-units.ts';
 
 export interface WorkerArtifactIssue {
   code: string;
@@ -404,14 +405,14 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
       if (!next || next.startsWith('--')) throw new Error('--max-age-minutes requires a number');
       const minutes = Number(next);
       if (!Number.isFinite(minutes) || minutes < 0) throw new Error('--max-age-minutes must be a non-negative number');
-      args.maxAgeMs = minutes * 60 * 1000;
+      args.maxAgeMs = minutes * MS_PER_MINUTE;
       i += 1;
     } else if (arg === '--max-duration-minutes') {
       const next = argv[i + 1];
       if (!next || next.startsWith('--')) throw new Error('--max-duration-minutes requires a number');
       const minutes = Number(next);
       if (!Number.isFinite(minutes) || minutes < 0) throw new Error('--max-duration-minutes must be a non-negative number');
-      args.maxDurationMs = minutes * 60 * 1000;
+      args.maxDurationMs = minutes * MS_PER_MINUTE;
       i += 1;
     } else if (arg === '--allow-no-reports') {
       args.allowNoReports = true;

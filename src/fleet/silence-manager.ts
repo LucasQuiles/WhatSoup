@@ -27,6 +27,7 @@ import {
   writeAtomicPrivateFileSync,
 } from '../lib/private-fs.ts';
 import { acquireProcessLock, releaseProcessLock } from '../lib/process-lock.ts';
+import { MS_PER_MINUTE } from '../lib/time-units.ts';
 
 const log = createChildLogger('silence-manager');
 
@@ -42,7 +43,7 @@ const EMPTY_SILENCE_REGISTRY_RAW = '[]\n';
 const ISO_TIMESTAMP_RE = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,9}))?(Z|([+-])(\d{2}):(\d{2}))$/;
 
 /** An in-memory read basis is deliberately short-lived; an old mute must not persist forever. */
-export const SILENCE_LAST_KNOWN_GOOD_MAX_AGE_MS = 5 * 60_000;
+export const SILENCE_LAST_KNOWN_GOOD_MAX_AGE_MS = 5 * MS_PER_MINUTE;
 
 export interface SilenceRule {
   instance: string;
@@ -867,7 +868,7 @@ export function addSilence(
   return withSilenceRegistryLock(() => {
     const rules = requireMutableRules().filter((rule) => rule.instance !== instance);
     const now = new Date();
-    const until = new Date(now.getTime() + durationMinutes * 60 * 1000);
+    const until = new Date(now.getTime() + durationMinutes * MS_PER_MINUTE);
     const rule: SilenceRule = {
       instance,
       until: until.toISOString(),

@@ -19,6 +19,7 @@ import {
   releaseProcessLock,
   type ProcessLockHandle,
 } from '../src/lib/process-lock.ts';
+import { MS_PER_SECOND, MS_PER_MINUTE } from '../src/lib/time-units.ts';
 
 type Disposition =
   | 'observed'
@@ -496,8 +497,8 @@ export function acquireRunLock(lockDir: string): { release: () => void } | null 
 // sentinel file instead.
 
 const DISPATCH_LOCK_FILENAME = '.qregistry-dispatch.lock';
-const DEFAULT_DISPATCH_LOCK_TIMEOUT_MS = 2_000;
-const DEFAULT_DISPATCH_LOCK_FORCE_TIMEOUT_MS = 60_000;
+const DEFAULT_DISPATCH_LOCK_TIMEOUT_MS = 2 * MS_PER_SECOND;
+const DEFAULT_DISPATCH_LOCK_FORCE_TIMEOUT_MS = MS_PER_MINUTE;
 const DEFAULT_DISPATCH_LOCK_POLL_MS = 100;
 
 export interface DispatchLockOptions {
@@ -650,7 +651,7 @@ function runCommand(
     cwd,
     encoding: 'utf8',
     maxBuffer: 20 * 1024 * 1024,
-    timeout: 20 * 60 * 1000,
+    timeout: 20 * MS_PER_MINUTE,
     env: buildChildEnv(baseEnv, extraEnv),
   });
   writeFileSync(outFile, result.stdout ?? '', 'utf8');

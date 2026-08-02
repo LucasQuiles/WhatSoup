@@ -111,6 +111,28 @@ describe('ConnectionManager — exhaustion limit reached', () => {
     expect(readFileSync(outside, 'utf-8')).toBe('unchanged\n');
   });
 
+  it('#2322 M4: drives shutdown() to completion before process.exit(1)', async () => {
+    // process.exit is mocked so execution does not actually terminate — it
+    // falls through past the exit call, so we cannot infer ordering from
+    // post-exit state. Spy on shutdown() itself and compare invocation order
+    // against the exit spy to prove shutdown() ran (and settled) first.
+    const exitSpy = vi
+      .spyOn(process, 'exit')
+      .mockImplementation((() => undefined) as any);
+    const shutdownSpy = vi.spyOn(ConnectionManager.prototype, 'shutdown');
+
+    const manager = new ConnectionManager();
+    manager.emit('exhausted');
+
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(shutdownSpy).toHaveBeenCalledTimes(1);
+    expect(exitSpy).toHaveBeenCalledWith(1);
+    expect(shutdownSpy.mock.invocationCallOrder[0]).toBeLessThan(
+      exitSpy.mock.invocationCallOrder[0]!,
+    );
+  });
+
   it('does not call process.exit when a shutdown is already in flight', async () => {
     const exitSpy = vi
       .spyOn(process, 'exit')

@@ -137,12 +137,14 @@ async function startSocket(): Promise<void> {
       // It must not start the managed instance while a failed save is still
       // possible, because the instance would otherwise race its auth material.
       process.stdout.write(JSON.stringify({ event: 'connected' }) + '\n');
-      // Give the file system a moment to flush before we exit
-      setTimeout(() => {
-        try { sock.end(undefined); } catch { /* best-effort */ }
-        console.error('Done. You can now start the bot.');
-        process.exit(0);
-      }, 2_000);
+      // #2322 M5: saveCreds() already fsync'd + renamed above — durability is
+      // guaranteed by the time the await returns, so there is nothing left to
+      // wait on. A wall-clock sleep here was a TOCTOU-flavored fragility (it
+      // misrepresented where the durability boundary actually is) and added
+      // 2s to every pair flow for no benefit.
+      try { sock.end(undefined); } catch { /* best-effort */ }
+      console.error('Done. You can now start the bot.');
+      process.exit(0);
     }
 
     if (connection === 'close') {

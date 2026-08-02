@@ -20,6 +20,7 @@ import { DEFAULT_FRESH_INVALID_GRACE_MS } from '../lib/auth-bond-policy.ts';
 import type { DurabilityEngine } from './durability.ts';
 import { sendTracked } from './durability.ts';
 import { isRecord } from '../lib/type-guards.ts';
+import { MS_PER_SECOND, MS_PER_MINUTE } from '../lib/time-units.ts';
 import { getModelAdvisories } from '../lib/model-advisor.ts';
 import { enqueueScheduledMessage, type EnqueueMessageParams } from './schedule-enqueue.ts';
 import { countPastDueTriggers } from './substrate/triggers.ts';
@@ -231,7 +232,7 @@ function safeDbQuery<T>(fn: () => T, fallback: T, warnMsg: string): T {
   try {
     const result = fn();
     const elapsed = Date.now() - start;
-    if (elapsed > 2_000) log.warn({ elapsed }, warnMsg + ' (slow query)');
+    if (elapsed > 2 * MS_PER_SECOND) log.warn({ elapsed }, warnMsg + ' (slow query)');
     noteProbeSuccess(warnMsg);
     return result;
   } catch (err) {
@@ -501,7 +502,7 @@ function agentRuntimeDetailsForHealth(
   };
 }
 
-export const ENRICHMENT_STALE_MS = 10 * 60 * 1000; // 10 minutes
+export const ENRICHMENT_STALE_MS = 10 * MS_PER_MINUTE; // 10 minutes
 const RECENT_DISCONNECT_DEGRADED_THRESHOLD = 3;
 // #1433 / B21-D — a post-first-turn error in one of these TRANSIENT, self-clearing
 // classes is benign-by-default: `empty-output` (the model returned one empty turn
@@ -516,13 +517,13 @@ const RECENT_DISCONNECT_DEGRADED_THRESHOLD = 3;
 //    it); a genuinely-broken model is still caught independently by
 //    model_usable===false. Classes OUTSIDE this set still degrade immediately.
 const TRANSIENT_SELF_CLEARING_TURN_ERROR_CLASSES = new Set(['empty-output', 'transient-network', 'server-error']);
-const TRANSIENT_TURN_ERROR_DEGRADE_DEBOUNCE_MS = 60 * 1000; // 1 minute
-const TRANSIENT_TURN_ERROR_STALE_MS = 15 * 60 * 1000; // 15 minutes
+const TRANSIENT_TURN_ERROR_DEGRADE_DEBOUNCE_MS = MS_PER_MINUTE; // 1 minute
+const TRANSIENT_TURN_ERROR_STALE_MS = 15 * MS_PER_MINUTE; // 15 minutes
 // An ambiguous outbound delivery (maybe_sent) should resolve within the echo
 // timeout + a recovery cycle. One left unresolved past this window is a
 // long-lived continuity risk that must degrade /health rather than read green
 // (#1865). Generous enough not to flap on transient reconciliation.
-const DURABILITY_STALE_MAYBE_SENT_MS = 30 * 60 * 1000; // 30 minutes
+const DURABILITY_STALE_MAYBE_SENT_MS = 30 * MS_PER_MINUTE; // 30 minutes
 
 /**
  * #2515 — Schema version stamped on the public liveness envelope returned to
@@ -543,7 +544,7 @@ const HEALTH_PUBLIC_SCHEMA_VERSION = 'health.public.v1';
 // alone (owner decision 2026-07-17). A bot that has never turned is treated as
 // idle: its stale evidence is benign here (the usability probe still catches a
 // hard failure via model_usable===false independently).
-export const MODEL_STALE_RELIANCE_MS = 30 * 60 * 1000; // 30 minutes
+export const MODEL_STALE_RELIANCE_MS = 30 * MS_PER_MINUTE; // 30 minutes
 
 export function modelEvidenceStaleWhileRelied(
   tc: {
@@ -580,7 +581,7 @@ type DisconnectClass =
 
 function emptyRecentDisconnects(): ConnectionRecentDisconnects {
   return {
-    windowMs: 10 * 60 * 1000,
+    windowMs: 10 * MS_PER_MINUTE,
     count: 0,
     lastAt: null,
     lastReason: null,
@@ -778,7 +779,7 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
   // to occur while a request is in flight.
   const loopLagSampler = deps.loopLagSampler ?? new LoopLagSampler();
   const loopLagWarningNow = deps.loopLagWarningNow ?? (() => performance.now());
-  const loopLagWarningRepeatMs = 5 * 60 * 1_000;
+  const loopLagWarningRepeatMs = 5 * MS_PER_MINUTE;
   let loopLagWasStarved = false;
   let lastLoopLagWarningAtMs: number | null = null;
   loopLagSampler.start();

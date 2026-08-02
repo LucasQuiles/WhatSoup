@@ -19,6 +19,7 @@ import {
 } from './core/provider-data-policy.ts';
 import { errorMessage } from './lib/error-message.ts';
 import { validateModelRoleValue } from './lib/model-resolver.ts';
+import { MS_PER_SECOND, MS_PER_MINUTE, MS_PER_HOUR } from './lib/time-units.ts';
 import { ConfigValidationError } from './lib/startup-error.ts';
 import { parseRuntimeBootstrapConfig, type RuntimeBootstrapConfig } from './lib/instance-config-shape.ts';
 
@@ -337,14 +338,14 @@ function knowledgeSearchMode(value: unknown, fallback: KnowledgeSearchMode): Kno
 // When absent, behavior is identical to before (backward compat for all tests).
 // ---------------------------------------------------------------------------
 const DEFAULT_TOOL_THRESHOLDS: Record<string, ToolThreshold> = {
-  agent:   { expectedMs: 120_000, slowMultiplier: 1.5, stallMultiplier: 3 },
-  bash:    { expectedMs: 15_000,  slowMultiplier: 2,   stallMultiplier: 5 },
-  read:    { expectedMs: 3_000,   slowMultiplier: 3,   stallMultiplier: 10 },
-  edit:    { expectedMs: 2_000,   slowMultiplier: 3,   stallMultiplier: 10 },
-  web:     { expectedMs: 10_000,  slowMultiplier: 2,   stallMultiplier: 4 },
-  mcp:     { expectedMs: 15_000,  slowMultiplier: 2,   stallMultiplier: 5 },
-  skill:   { expectedMs: 3_000,   slowMultiplier: 3,   stallMultiplier: 10 },
-  default: { expectedMs: 10_000,  slowMultiplier: 2,   stallMultiplier: 5 },
+  agent:   { expectedMs: 2 * MS_PER_MINUTE, slowMultiplier: 1.5, stallMultiplier: 3 },
+  bash:    { expectedMs: 15 * MS_PER_SECOND, slowMultiplier: 2,   stallMultiplier: 5 },
+  read:    { expectedMs: 3 * MS_PER_SECOND,  slowMultiplier: 3,   stallMultiplier: 10 },
+  edit:    { expectedMs: 2 * MS_PER_SECOND,  slowMultiplier: 3,   stallMultiplier: 10 },
+  web:     { expectedMs: 10 * MS_PER_SECOND, slowMultiplier: 2,   stallMultiplier: 4 },
+  mcp:     { expectedMs: 15 * MS_PER_SECOND, slowMultiplier: 2,   stallMultiplier: 5 },
+  skill:   { expectedMs: 3 * MS_PER_SECOND,  slowMultiplier: 3,   stallMultiplier: 10 },
+  default: { expectedMs: 10 * MS_PER_SECOND, slowMultiplier: 2,   stallMultiplier: 5 },
 };
 
 function mergeToolThresholds(
@@ -507,7 +508,7 @@ What you never do:
 // rateLimitNoticeWindowMs (the old dual-purpose field) and log a deprecation
 // note at startup.
 // ---------------------------------------------------------------------------
-const DEFAULT_RATE_WINDOW_MS = 60 * 60 * 1000; // 1 hour
+const DEFAULT_RATE_WINDOW_MS = MS_PER_HOUR; // 1 hour
 const resolvedRateLimitWindowMs: number = (() => {
   if (instance?.rateLimitWindowMs != null) {
     return instance.rateLimitWindowMs as number;
@@ -931,7 +932,7 @@ export function resolveMemoryConfig(rawSource: Record<string, unknown> | null | 
     conversation: {
       recent: numberProp(conversation, 'recent', 50),
       extended: numberProp(conversation, 'extended', 100),
-      extendedWithinMs: numberProp(conversation, 'extendedWithinMs', 10 * 60 * 1000),
+      extendedWithinMs: numberProp(conversation, 'extendedWithinMs', 10 * MS_PER_MINUTE),
     },
     retention: {
       days: numberProp(retention, 'days', 30),
@@ -943,7 +944,7 @@ export function resolveMemoryConfig(rawSource: Record<string, unknown> | null | 
       dryRun: booleanProp(consolidation, 'dryRun', true),
     },
     enrichment: {
-      intervalMs: numberProp(enrichment, 'intervalMs', 60 * 1000),
+      intervalMs: numberProp(enrichment, 'intervalMs', MS_PER_MINUTE),
       batchSize: numberProp(enrichment, 'batchSize', 200),
       minConfidence: numberProp(enrichment, 'minConfidence', 0.7),
       dedupThreshold: numberProp(enrichment, 'dedupThreshold', 0.95),
@@ -1082,13 +1083,13 @@ export const config = {
   // pacing wait for a single reservation never itself trips the shed.
   outboundGovernor: {
     enabled: (instance?.outboundGovernor?.enabled as boolean | undefined) ?? true,
-    windowMs: (instance?.outboundGovernor?.windowMs as number | undefined) ?? 3_000,
+    windowMs: (instance?.outboundGovernor?.windowMs as number | undefined) ?? 3 * MS_PER_SECOND,
     maxPerWindow: (instance?.outboundGovernor?.maxPerWindow as number | undefined) ?? 6,
-    maxWaitMs: (instance?.outboundGovernor?.maxWaitMs as number | undefined) ?? 5_000,
+    maxWaitMs: (instance?.outboundGovernor?.maxWaitMs as number | undefined) ?? 5 * MS_PER_SECOND,
     hardCeiling: (instance?.outboundGovernor?.hardCeiling as number | undefined) ?? 120,
-    hardCeilingWindowMs: (instance?.outboundGovernor?.hardCeilingWindowMs as number | undefined) ?? 3_600_000,
+    hardCeilingWindowMs: (instance?.outboundGovernor?.hardCeilingWindowMs as number | undefined) ?? MS_PER_HOUR,
     globalMaxPerWindow: (instance?.outboundGovernor?.globalMaxPerWindow as number | undefined) ?? 40,
-    globalWindowMs: (instance?.outboundGovernor?.globalWindowMs as number | undefined) ?? 3_000,
+    globalWindowMs: (instance?.outboundGovernor?.globalWindowMs as number | undefined) ?? 3 * MS_PER_SECOND,
   },
 
   // Enrichment
@@ -1137,18 +1138,18 @@ export const config = {
   restartLoopGuard: {
     enabled: (instance?.restartLoopGuard?.enabled as boolean | undefined) ?? true,
     maxRestarts: positiveIntValue(instance?.restartLoopGuard?.maxRestarts, 3),
-    windowMs: positiveIntValue(instance?.restartLoopGuard?.windowMs, 300_000),
+    windowMs: positiveIntValue(instance?.restartLoopGuard?.windowMs, 5 * MS_PER_MINUTE),
   },
-  textAggregateDelayMs: positiveIntValue(instance?.textAggregateDelayMs, 2_000),
+  textAggregateDelayMs: positiveIntValue(instance?.textAggregateDelayMs, 2 * MS_PER_SECOND),
 
   // Operation tracker: per-tool progress reporting & stall detection
   operationTracker: {
     enabled: (instance?.operationTracker?.enabled as boolean | undefined) ?? true,
-    progressIntervalMs: (instance?.operationTracker?.progressIntervalMs as number | undefined) ?? 30_000,
-    thinkingLongMs: (instance?.operationTracker?.thinkingLongMs as number | undefined) ?? 45_000,
-    thinkingStallMs: (instance?.operationTracker?.thinkingStallMs as number | undefined) ?? 300_000,
+    progressIntervalMs: (instance?.operationTracker?.progressIntervalMs as number | undefined) ?? 30 * MS_PER_SECOND,
+    thinkingLongMs: (instance?.operationTracker?.thinkingLongMs as number | undefined) ?? 45 * MS_PER_SECOND,
+    thinkingStallMs: (instance?.operationTracker?.thinkingStallMs as number | undefined) ?? 5 * MS_PER_MINUTE,
     progressPlaceholderRateLimitMs:
-      (instance?.operationTracker?.progressPlaceholderRateLimitMs as number | undefined) ?? 180_000,
+      (instance?.operationTracker?.progressPlaceholderRateLimitMs as number | undefined) ?? 3 * MS_PER_MINUTE,
     // PR-E status-narration cap default; literal mirrors MAX_STATUS_MESSAGES_PER_TURN
     // in outbound-queue.ts (kept literal here to avoid a config↔queue import cycle).
     maxStatusMessagesPerTurn:
@@ -1156,14 +1157,14 @@ export const config = {
     maxStatusMessagesPerWindow:
       positiveIntValue(instance?.operationTracker?.maxStatusMessagesPerWindow, 10),
     statusMessageWindowMs:
-      positiveIntValue(instance?.operationTracker?.statusMessageWindowMs, 300_000),
+      positiveIntValue(instance?.operationTracker?.statusMessageWindowMs, 5 * MS_PER_MINUTE),
     toolThresholds: mergeToolThresholds(instance?.operationTracker?.toolThresholds),
   } satisfies OperationTrackerConfig,
 
   // Poll resolution: configurable group poll behavior
   pollResolution: {
     defaultStrategy: (instance?.pollResolution?.defaultStrategy as string | undefined) ?? 'first-vote-wins',
-    defaultTimeoutMs: (instance?.pollResolution?.defaultTimeoutMs as number | undefined) ?? 3_600_000,
+    defaultTimeoutMs: (instance?.pollResolution?.defaultTimeoutMs as number | undefined) ?? MS_PER_HOUR,
   },
 
   // Health
@@ -1181,10 +1182,10 @@ export const config = {
   // fall back to the 30_000 default — intEnv() handles the non-numeric
   // case, the positive-only guard below handles 0 / negative.
   apiTimeoutMs: (() => {
-    const n = intEnv('WHATSOUP_API_TIMEOUT_MS', 30_000);
-    return n > 0 ? n : 30_000;
+    const n = intEnv('WHATSOUP_API_TIMEOUT_MS', 30 * MS_PER_SECOND);
+    return n > 0 ? n : 30 * MS_PER_SECOND;
   })(),
-  apiRetryDelayMs: 2_000,
+  apiRetryDelayMs: 2 * MS_PER_SECOND,
 
   // Access control — rehydrate from instance (string[]) or use defaults
   adminPhones: new Set<string>(resolvedAdminPhones),
@@ -1219,7 +1220,7 @@ export const config = {
   // In-memory, resets on restart. DMs are never affected.
   echoGuard: {
     enabled: ((instance?.echoGuard as Record<string, unknown> | undefined)?.enabled as boolean | undefined) !== false,
-    groupCooldownMs: ((instance?.echoGuard as Record<string, unknown> | undefined)?.groupCooldownMs as number | undefined) ?? 1_000,
+    groupCooldownMs: ((instance?.echoGuard as Record<string, unknown> | undefined)?.groupCooldownMs as number | undefined) ?? MS_PER_SECOND,
   },
 
   // Paused chats — messages are stored but never dispatched to runtime.

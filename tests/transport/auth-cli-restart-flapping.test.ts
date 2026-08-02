@@ -254,10 +254,9 @@ describe('auth CLI restartRequired handling', () => {
     expect(console.error).toHaveBeenCalledWith('Saving credentials...');
     expect(mocks.saveCreds).toHaveBeenCalledOnce();
 
-    await vi.advanceTimersByTimeAsync(1_999);
-    expect(mocks.sockets[0]!.end).not.toHaveBeenCalled();
-
-    await vi.advanceTimersByTimeAsync(1);
+    // #2322 M5: saveCreds() is already durable (fsync+rename) when it
+    // resolves, so the socket close + exit happen immediately — no wall-clock
+    // wait gates them anymore.
     expect(mocks.sockets[0]!.end).toHaveBeenCalledWith(undefined);
     expect(console.error).toHaveBeenCalledWith('Done. You can now start the bot.');
     expect(process.exit).toHaveBeenCalledWith(0);
