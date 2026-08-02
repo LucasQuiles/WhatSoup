@@ -17,6 +17,10 @@ import {
 } from '@whiskeysockets/baileys';
 import qrcodeTerminal from 'qrcode-terminal';
 import { config } from '../config.ts';
+// createChildLogger must be imported after config.ts in source order — config.ts sets
+// process.env.LOG_DIR at its own module top level, and logger.ts reads it once at import
+// time (see src/config.ts:421-422). No transitive dependency enforces this ordering.
+import { createChildLogger } from '../logger.ts';
 import { decideDisconnectAction } from './auth-disconnect-policy.ts';
 import { redactAuthCliText } from './auth-cli-redaction.ts';
 import { createAtomicCredsSaver } from './atomic-auth-save.ts';
@@ -25,6 +29,8 @@ import { baileysVersionLabel, resolveBaileysVersion } from './baileys-version.ts
 import { errorMessage } from '../lib/error-message.ts';
 import { classifyPairNumber, maskPairingCode, pairingEmissionLine, pairingGate } from './pairing.ts';
 
+const log = createChildLogger('auth-cli');
+
 // ---------------------------------------------------------------------------
 // Lock check
 // ---------------------------------------------------------------------------
@@ -32,6 +38,7 @@ import { classifyPairNumber, maskPairingCode, pairingEmissionLine, pairingGate }
 const lockPath = (config as any).lockPath ?? join(tmpdir(), 'whatsoup-auth.lock');
 
 if (existsSync(lockPath)) {
+  log.fatal({ lockPath }, 'bot is currently running; refusing auth attempt');
   console.error(
     `Bot is currently running. Stop it first:\n` +
     `  Linux: systemctl --user stop whatsoup\n` +
@@ -50,6 +57,7 @@ const RESTART_REQUIRED_FLAP_WINDOW_MS = 60_000;
 const RESTART_REQUIRED_FLAP_RECONNECT_DELAY_MS = 1_000;
 
 const timeoutHandle = setTimeout(() => {
+  log.error('auth timed out after 120s with no successful authentication');
   console.error('Timed out after 120 seconds — no successful authentication.');
   process.exit(1);
 }, TIMEOUT_MS);
@@ -74,6 +82,7 @@ async function startSocket(): Promise<void> {
   const { state } = await useMultiFileAuthState(config.authDir);
   const saveCreds = createAtomicCredsSaver(config.authDir, () => state.creds);
   const resolvedVersion = await resolveBaileysVersion();
+  log.info({ version: resolvedVersion.version, source: resolvedVersion.source }, 'using baileys web version');
   console.error(`Using Baileys web version ${baileysVersionLabel(resolvedVersion.version)} (${resolvedVersion.source})`);
 
   // Suppress Baileys internals (handshake material, signal keys, etc.)
@@ -97,6 +106,7 @@ async function startSocket(): Promise<void> {
   // terminates the pairing CLI with no explanation of what failed.
   sock.ev.on('creds.update', () => {
     void saveCreds().catch((err) => {
+      log.error({ err }, 'credential save failed');
       console.error('Credential save failed:', redactAuthCliText(errorMessage(err)));
     });
   });
@@ -108,6 +118,7 @@ async function startSocket(): Promise<void> {
       // Emit raw QR for fleet SSE consumers (stdout = structured JSON only)
       process.stdout.write(JSON.stringify({ event: 'qr', data: qr }) + '\n');
       // Terminal QR for interactive use — redirect to stderr so stdout stays clean
+      log.info('qr code ready for scanning');
       console.error('\nScan the QR code below with WhatsApp > Linked Devices > Link a Device:\n');
       qrcodeTerminal.generate(qr, { small: true }, (asciiArt: string) => {
         process.stderr.write(asciiArt + '\n');
@@ -118,7 +129,9 @@ async function startSocket(): Promise<void> {
       clearTimeout(timeoutHandle);
       const rawId: string | undefined = (sock as any).user?.id;
       const jid = rawId ?? 'unknown';
+      log.info({ jid: redactAuthCliText(jid) }, 'authenticated successfully');
       console.error(`\nAuthenticated successfully as ${redactAuthCliText(jid)}`);
+      log.info('saving credentials');
       console.error('Saving credentials...');
       // #2165: an unguarded await here had two failure modes, both silent to
       // the operator — the rejection was unhandled (listener bodies are outside
@@ -128,6 +141,7 @@ async function startSocket(): Promise<void> {
       try {
         await saveCreds();
       } catch (err) {
+        log.fatal({ err }, 'credential save failed; pairing cannot complete');
         console.error('FATAL: credential save failed:', redactAuthCliText(errorMessage(err)));
         console.error('Pairing did not complete — the bot cannot start without saved credentials.');
         process.exit(1);
@@ -143,6 +157,7 @@ async function startSocket(): Promise<void> {
       // misrepresented where the durability boundary actually is) and added
       // 2s to every pair flow for no benefit.
       try { sock.end(undefined); } catch { /* best-effort */ }
+      log.info('pairing complete; bot can now be started');
       console.error('Done. You can now start the bot.');
       process.exit(0);
     }
@@ -154,12 +169,14 @@ async function startSocket(): Promise<void> {
 
       if (action.type === 'exit') {
         clearTimeout(timeoutHandle);
+        log.warn('logged out; auth directory must be deleted before re-running');
         console.error('Logged out — delete the auth directory and re-run this script.');
         process.exit(1);
         return;
       }
 
       if (action.type === 'reconnect' && action.reason === 'restart-required-flapping') {
+        log.warn({ count: action.count }, 'restartRequired flapping detected; backing off before reconnecting');
         console.error(
           `restartRequired flapping detected (${action.count} in <60s) — backing off before reconnecting...`,
         );
@@ -172,12 +189,14 @@ async function startSocket(): Promise<void> {
       }
 
       if (action.type === 'reconnect' && action.reason === 'restart-required') {
+        log.info('restart required; reconnecting');
         console.error('Restart required — reconnecting...');
         try { sock.end(undefined); } catch { /* best-effort */ }
         await startSocket();
         return;
       }
       const reason = statusCode !== undefined ? (DisconnectReason[statusCode] ?? `unknown(${statusCode})`) : 'unknown';
+      log.warn({ reason }, 'connection closed during auth; reconnecting');
       console.error(`Connection closed during auth: ${reason} — reconnecting...`);
       try { sock.end(undefined); } catch { /* best-effort */ }
       await startSocket();
@@ -202,11 +221,13 @@ async function startSocket(): Promise<void> {
         // Real code: stdout automation channel only (consumed by the relink orchestrator).
         process.stdout.write(pairingEmissionLine(code) + '\n');
         // Logs/human: masked only — never the full code, never the phone number.
+        log.info({ maskedCode: maskPairingCode(code) }, 'pairing code ready');
         console.error(
           `Pairing code ready (masked ${maskPairingCode(code)}). Enter it on the primary phone: ` +
           `Linked devices > Link a device > Link with phone number.`,
         );
       } catch (err) {
+        log.error({ err }, 'requestPairingCode failed');
         console.error('requestPairingCode failed:', redactAuthCliText(errorMessage(err)));
         pairingRequested = false;
       }
@@ -217,9 +238,14 @@ async function startSocket(): Promise<void> {
 async function main(): Promise<void> {
   const pairCls = classifyPairNumber(process.env.WHATSOUP_PAIR_NUMBER);
   if (pairCls.reason === 'invalid') {
+    log.fatal('WHATSOUP_PAIR_NUMBER is set but not a valid number (expected 8-15 digits)');
     console.error('FATAL: WHATSOUP_PAIR_NUMBER is set but not a valid number (expected 8-15 digits).');
     process.exit(1);
   }
+  log.info(
+    { mode: pairCls.ok ? 'pairing-code' : 'QR', authDir: redactAuthCliText(config.authDir) },
+    'starting whatsapp authentication',
+  );
   console.error('Starting WhatsApp authentication...');
   console.error(`Auth mode: ${pairCls.ok ? 'pairing-code' : 'QR'}`);
   console.error(`Auth directory: ${redactAuthCliText(config.authDir)}`);
@@ -227,6 +253,7 @@ async function main(): Promise<void> {
 }
 
 main().catch((err) => {
+  log.fatal({ err }, 'auth failed');
   console.error('Auth failed:', redactAuthCliText(errorMessage(err)));
   process.exit(1);
 });
