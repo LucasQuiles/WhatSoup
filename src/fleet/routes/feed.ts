@@ -7,9 +7,22 @@ import { inspectLatestLogFile, readTailLinesDetailed, type LogReadFailure } from
 import { normalizeTimestamp } from '../time-utils.ts';
 import type { FleetDbReader } from '../db-reader.ts';
 import { toConversationKey } from '../../core/conversation-key.ts';
+import type { ConnectionLifecycleState } from '../../transport/connection.ts';
 import { createChildLogger } from '../../logger.ts';
 import { isNonEmptyString } from '../../lib/type-guards.ts';
 const log = createChildLogger('fleet:feed');
+
+// The feed's connection events are a compile-checked subset of the canonical
+// ConnectionLifecycleState union (#2201): the log lines this surface parses
+// only ever produce these three transitions. Deriving the subset (rather than
+// open-coding it inline) means a lifecycle-union rename breaks the build here
+// instead of silently drifting.
+const FEED_CONNECTION_STATES = [
+  'connecting',
+  'connected',
+  'disconnected',
+] as const satisfies readonly ConnectionLifecycleState[];
+type FeedConnectionState = (typeof FEED_CONNECTION_STATES)[number];
 
 export interface FeedDeps {
   discovery: FleetDiscovery;
@@ -18,7 +31,7 @@ export interface FeedDeps {
 }
 
 type FeedDetail =
-  | { type: 'connection'; statusCode?: number; reason?: string; reconnecting?: boolean; state?: 'connecting' | 'connected' | 'disconnected' }
+  | { type: 'connection'; statusCode?: number; reason?: string; reconnecting?: boolean; state?: FeedConnectionState }
   | { type: 'tool_error'; toolName: string; toolId?: string; error: string }
   | { type: 'tool_use'; toolName: string; toolId?: string }
   | { type: 'session'; action: string; sessionId?: string; chatJid?: string; reason?: string }
@@ -478,7 +491,7 @@ function coalesceConnectionEvents(events: FeedEvent[]): FeedEvent[] {
 
     // Find the richest error event (prefer connection-closed over stream-error)
     const errors = group.filter(e => {
-      const d = e.detail as { type: 'connection'; reason?: string; reconnecting?: boolean; state?: string };
+      const d = e.detail as { type: 'connection'; reason?: string; reconnecting?: boolean; state?: FeedConnectionState };
       return !d.reconnecting && !d.state && d.reason !== '_streamError';
     });
     const streamErrors = group.filter(e => {
@@ -486,7 +499,7 @@ function coalesceConnectionEvents(events: FeedEvent[]): FeedEvent[] {
       return d.reason === '_streamError';
     });
     const reconnects = group.filter(e => (e.detail as { reconnecting?: boolean }).reconnecting);
-    const states = group.filter(e => (e.detail as { state?: string }).state);
+    const states = group.filter(e => (e.detail as { state?: FeedConnectionState }).state);
 
     // Pick the best error event, or fall back to stream error
     const bestError = errors[0] ?? streamErrors[0];
@@ -494,7 +507,7 @@ function coalesceConnectionEvents(events: FeedEvent[]): FeedEvent[] {
     if (bestError) {
       // Build a merged event: error + reconnecting status + final state
       const d = bestError.detail as { type: 'connection'; statusCode?: number; reason?: string };
-      const finalState = states.find(e => (e.detail as { state?: string }).state === 'connected');
+      const finalState = states.find(e => (e.detail as { state?: FeedConnectionState }).state === 'connected');
       const isReconnecting = reconnects.length > 0;
       const reconnected = !!finalState;
 
@@ -518,7 +531,7 @@ function coalesceConnectionEvents(events: FeedEvent[]): FeedEvent[] {
       });
     } else {
       // No error in this group — just state transitions (connecting → connected)
-      const connected = states.find(e => (e.detail as { state?: string }).state === 'connected');
+      const connected = states.find(e => (e.detail as { state?: FeedConnectionState }).state === 'connected');
       if (connected) {
         result.push(connected);
       } else {

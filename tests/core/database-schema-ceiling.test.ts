@@ -8,7 +8,6 @@ import {
   lstatSync,
   readFileSync,
   mkdirSync,
-  mkdtempSync,
   realpathSync,
   renameSync,
   rmSync,
@@ -38,13 +37,10 @@ import {
 } from '../../src/core/database-compatibility-early.ts';
 import { openDatabaseForStartup } from '../../src/core/database-compatibility-health.ts';
 import { WhatSoupError } from '../../src/errors.ts';
+import { trackTmpDirs } from '../helpers/tmp-dir.ts';
 
 function fileSha256(path: string): string {
   return createHash('sha256').update(readFileSync(path)).digest('hex');
-}
-
-function tmpdir(): string {
-  return realpathSync(systemTmpdir());
 }
 
 function createCurrentDatabase(dbPath: string): void {
@@ -69,13 +65,16 @@ function injectNextSchemaInspectionFailure(failure: Error): void {
 }
 
 describe('database schema ceiling', () => {
-  const cleanup: string[] = [];
+  // realpathSync(os.tmpdir()) is required, not defensive: inspectDatabaseIdentity
+  // and assertTrustedDatabaseParent (src/core/database-compatibility.ts) reject
+  // any path whose own realpath differs from itself. On macOS, /var is a symlink
+  // to /private/var, so raw os.tmpdir() is not canonical — every one of this
+  // file's ~39 fixtures needs the canonical base, not just the symlink-named
+  // tests. Do not "simplify" this to trackTmpDirs('').
+  const tmp = trackTmpDirs('', { base: realpathSync(systemTmpdir()) });
 
   afterEach(() => {
     vi.restoreAllMocks();
-    for (const path of cleanup.splice(0)) {
-      rmSync(path, { recursive: true, force: true });
-    }
   });
 
   it.each([
@@ -207,8 +206,7 @@ describe('database schema ceiling', () => {
   );
 
   it('review hardening: early bootstrap keeps BUSY transient with exit status 1', async () => {
-    const dir = mkdtempSync(join(tmpdir(), 'whatsoup-schema-ceiling-early-busy-'));
-    cleanup.push(dir);
+    const dir = tmp.make('whatsoup-schema-ceiling-early-busy');
     const dbPath = join(dir, 'current.db');
     const lockPath = join(dir, 'whatsoup.lock');
     const previousConfig = process.env.INSTANCE_CONFIG;
@@ -241,8 +239,7 @@ describe('database schema ceiling', () => {
   });
 
   it('review hardening: runtime admission leaves IOERR transient without latching a fence', () => {
-    const dir = mkdtempSync(join(tmpdir(), 'whatsoup-schema-ceiling-admission-ioerr-'));
-    cleanup.push(dir);
+    const dir = tmp.make('whatsoup-schema-ceiling-admission-ioerr');
     const dbPath = join(dir, 'current.db');
     const db = new Database(dbPath);
     db.open();
@@ -270,8 +267,7 @@ describe('database schema ceiling', () => {
   it.each([264, 776])(
     'review hardening: early read-only schema inspection drains raw SQLite errcode %s',
     async (errcode) => {
-      const dir = mkdtempSync(join(tmpdir(), `whatsoup-schema-ceiling-early-${errcode}-`));
-      cleanup.push(dir);
+      const dir = tmp.make(`whatsoup-schema-ceiling-early-${errcode}`);
       const dbPath = join(dir, 'current.db');
       const lockPath = join(dir, 'whatsoup.lock');
       const previousConfig = process.env.INSTANCE_CONFIG;
@@ -311,8 +307,7 @@ describe('database schema ceiling', () => {
   it.each([264, 776])(
     'review hardening: Database read-only schema inspection drains raw SQLite errcode %s',
     async (errcode) => {
-      const dir = mkdtempSync(join(tmpdir(), `whatsoup-schema-ceiling-database-${errcode}-`));
-      cleanup.push(dir);
+      const dir = tmp.make(`whatsoup-schema-ceiling-database-${errcode}`);
       const dbPath = join(dir, 'current.db');
       createCurrentDatabase(dbPath);
       const source = Object.assign(new Error(`SQLite recovery ${errcode}`), { errcode });
@@ -346,8 +341,7 @@ describe('database schema ceiling', () => {
   it.each([264, 776])(
     'review hardening: actual read-only DatabaseSync constructor failure %s drains at both preflight boundaries',
     async (errcode) => {
-      const dir = mkdtempSync(join(tmpdir(), `whatsoup-schema-ceiling-constructor-${errcode}-`));
-      cleanup.push(dir);
+      const dir = tmp.make(`whatsoup-schema-ceiling-constructor-${errcode}`);
       const dbPath = join(dir, 'current.db');
       createCurrentDatabase(dbPath);
       const earlyFailure = Object.assign(new Error(`early open recovery ${errcode}`), { errcode });
@@ -397,8 +391,7 @@ describe('database schema ceiling', () => {
   );
 
   it('review hardening: Database schema preflight closes after BUSY without latching', () => {
-    const dir = mkdtempSync(join(tmpdir(), 'whatsoup-schema-ceiling-preflight-busy-'));
-    cleanup.push(dir);
+    const dir = tmp.make('whatsoup-schema-ceiling-preflight-busy');
     const dbPath = join(dir, 'current.db');
     createCurrentDatabase(dbPath);
     const source = Object.assign(new Error('BUSY during Database schema preflight'), { errcode: 5 });
@@ -428,8 +421,7 @@ describe('database schema ceiling', () => {
   });
 
   it('early bootstrap outcome: classifies a genuine hot rollback journal as drained without changing bytes', () => {
-    const dir = mkdtempSync(join(tmpdir(), 'whatsoup-schema-ceiling-hot-journal-'));
-    cleanup.push(dir);
+    const dir = tmp.make('whatsoup-schema-ceiling-hot-journal');
     const dbPath = join(dir, 'hot.db');
     const journalPath = `${dbPath}-journal`;
 
@@ -493,8 +485,7 @@ describe('database schema ceiling', () => {
   });
 
   it('early bootstrap outcome: classifies a newer database as drained before changing bytes', () => {
-    const dir = mkdtempSync(join(tmpdir(), 'whatsoup-schema-ceiling-'));
-    cleanup.push(dir);
+    const dir = tmp.make('whatsoup-schema-ceiling');
     const dbPath = join(dir, 'future.db');
     const futureVersion = CURRENT_SCHEMA_MIGRATION + 1;
 
@@ -545,8 +536,7 @@ describe('database schema ceiling', () => {
   });
 
   it('does not checkpoint, truncate, or remove a sole rejected future-schema WAL', () => {
-    const dir = mkdtempSync(join(tmpdir(), 'whatsoup-schema-ceiling-wal-'));
-    cleanup.push(dir);
+    const dir = tmp.make('whatsoup-schema-ceiling-wal');
     const dbPath = join(dir, 'future-wal.db');
     const walPath = `${dbPath}-wal`;
     const shmPath = `${dbPath}-shm`;
@@ -598,8 +588,7 @@ describe('database schema ceiling', () => {
   });
 
   it('uses a no-create writer open when the inspected database disappears', () => {
-    const dir = mkdtempSync(join(tmpdir(), 'whatsoup-schema-ceiling-no-recreate-'));
-    cleanup.push(dir);
+    const dir = tmp.make('whatsoup-schema-ceiling-no-recreate');
     const dbPath = join(dir, 'existing.db');
 
     const initial = new Database(dbPath);
@@ -625,8 +614,7 @@ describe('database schema ceiling', () => {
   });
 
   it('rejects symlink and hardlink database aliases before compatibility inspection', () => {
-    const dir = mkdtempSync(join(tmpdir(), 'whatsoup-schema-ceiling-alias-'));
-    cleanup.push(dir);
+    const dir = tmp.make('whatsoup-schema-ceiling-alias');
     const dbPath = join(dir, 'canonical.db');
     const symlinkPath = join(dir, 'symlink.db');
     const hardlinkPath = join(dir, 'hardlink.db');
@@ -643,8 +631,7 @@ describe('database schema ceiling', () => {
   });
 
   it('rejects a dangling database symlink without creating its target', () => {
-    const dir = mkdtempSync(join(tmpdir(), 'whatsoup-schema-ceiling-dangling-'));
-    cleanup.push(dir);
+    const dir = tmp.make('whatsoup-schema-ceiling-dangling');
     const targetDir = join(dir, 'target');
     const targetPath = join(targetDir, 'created.db');
     const symlinkPath = join(dir, 'bot.db');
@@ -660,8 +647,7 @@ describe('database schema ceiling', () => {
   });
 
   it('rejects a missing database beneath a symlinked parent without creating it', () => {
-    const dir = mkdtempSync(join(tmpdir(), 'whatsoup-schema-ceiling-parent-alias-'));
-    cleanup.push(dir);
+    const dir = tmp.make('whatsoup-schema-ceiling-parent-alias');
     const targetDir = join(dir, 'target');
     const aliasDir = join(dir, 'alias');
     const targetPath = join(targetDir, 'created.db');
@@ -678,8 +664,7 @@ describe('database schema ceiling', () => {
   });
 
   it('rejects a database parent exposed to group mutation before creating a file', () => {
-    const dir = mkdtempSync(join(tmpdir(), 'whatsoup-schema-ceiling-parent-mode-'));
-    cleanup.push(dir);
+    const dir = tmp.make('whatsoup-schema-ceiling-parent-mode');
     const dbPath = join(dir, 'bot.db');
     chmodSync(dir, 0o770);
     expect(inspectExistingDatabaseForBootstrap(dbPath)).toMatchObject({
@@ -702,8 +687,7 @@ describe('database schema ceiling', () => {
   });
 
   it('rejects a private database parent beneath a non-sticky writable ancestor', () => {
-    const root = mkdtempSync(join(tmpdir(), 'whatsoup-schema-ceiling-ancestor-mode-'));
-    cleanup.push(root);
+    const root = tmp.make('whatsoup-schema-ceiling-ancestor-mode');
     const writableAncestor = join(root, 'shared');
     const databaseParent = join(writableAncestor, 'private');
     const dbPath = join(databaseParent, 'bot.db');
@@ -721,8 +705,7 @@ describe('database schema ceiling', () => {
   });
 
   it('rejects a parent whose resolved inode differs from its lstat identity', () => {
-    const dir = mkdtempSync(join(tmpdir(), 'whatsoup-schema-ceiling-parent-identity-'));
-    cleanup.push(dir);
+    const dir = tmp.make('whatsoup-schema-ceiling-parent-identity');
     const dbPath = join(dir, 'bot.db');
     const assertWithDependencies = assertTrustedDatabaseParent as unknown as (
       path: string,
@@ -744,8 +727,7 @@ describe('database schema ceiling', () => {
   });
 
   it('early bootstrap outcome: classifies a symlink database path as permanent', () => {
-    const dir = mkdtempSync(join(tmpdir(), 'whatsoup-schema-ceiling-early-symlink-'));
-    cleanup.push(dir);
+    const dir = tmp.make('whatsoup-schema-ceiling-early-symlink');
     const dbPath = join(dir, 'canonical.db');
     const symlinkPath = join(dir, 'symlink.db');
 
@@ -761,8 +743,7 @@ describe('database schema ceiling', () => {
   });
 
   it('early bootstrap outcome: classifies a hardlink database path as permanent', () => {
-    const dir = mkdtempSync(join(tmpdir(), 'whatsoup-schema-ceiling-early-hardlink-'));
-    cleanup.push(dir);
+    const dir = tmp.make('whatsoup-schema-ceiling-early-hardlink');
     const dbPath = join(dir, 'canonical.db');
     const hardlinkPath = join(dir, 'hardlink.db');
 
@@ -778,8 +759,7 @@ describe('database schema ceiling', () => {
   });
 
   it('early bootstrap outcome: classifies a current database as ready', () => {
-    const dir = mkdtempSync(join(tmpdir(), 'whatsoup-schema-ceiling-early-ready-'));
-    cleanup.push(dir);
+    const dir = tmp.make('whatsoup-schema-ceiling-early-ready');
     const dbPath = join(dir, 'current.db');
     const db = new Database(dbPath);
     db.open();
@@ -789,8 +769,7 @@ describe('database schema ceiling', () => {
   });
 
   it('early bootstrap outcome: classifies a missing database as ready without creating it', () => {
-    const dir = mkdtempSync(join(tmpdir(), 'whatsoup-schema-ceiling-early-missing-'));
-    cleanup.push(dir);
+    const dir = tmp.make('whatsoup-schema-ceiling-early-missing');
     const dbPath = join(dir, 'missing.db');
 
     expect(inspectExistingDatabaseForBootstrap(dbPath)).toEqual({ outcome: 'ready' });
@@ -798,8 +777,7 @@ describe('database schema ceiling', () => {
   });
 
   it('early bootstrap outcome: classifies deterministic pathname replacement as transient', () => {
-    const dir = mkdtempSync(join(tmpdir(), 'whatsoup-schema-ceiling-early-replaced-'));
-    cleanup.push(dir);
+    const dir = tmp.make('whatsoup-schema-ceiling-early-replaced');
     const dbPath = join(dir, 'target.db');
     const replacementPath = join(dir, 'replacement.db');
     for (const path of [dbPath, replacementPath]) {
@@ -831,8 +809,7 @@ describe('database schema ceiling', () => {
   });
 
   it('detects pathname replacement before beginning the authoritative write transaction', () => {
-    const dir = mkdtempSync(join(tmpdir(), 'whatsoup-schema-ceiling-replaced-'));
-    cleanup.push(dir);
+    const dir = tmp.make('whatsoup-schema-ceiling-replaced');
     const dbPath = join(dir, 'target.db');
     const replacementPath = join(dir, 'replacement.db');
 
@@ -854,8 +831,7 @@ describe('database schema ceiling', () => {
   });
 
   it('holds BEGIN IMMEDIATE across the authoritative ceiling check and schema writes', () => {
-    const dir = mkdtempSync(join(tmpdir(), 'whatsoup-schema-ceiling-writer-race-'));
-    cleanup.push(dir);
+    const dir = tmp.make('whatsoup-schema-ceiling-writer-race');
     const dbPath = join(dir, 'race.db');
     const latest = CURRENT_SCHEMA_MIGRATION;
 
@@ -896,8 +872,7 @@ describe('database schema ceiling', () => {
   });
 
   it('rechecks the migration ceiling at runtime admission on the same database inode', () => {
-    const dir = mkdtempSync(join(tmpdir(), 'whatsoup-schema-ceiling-runtime-advance-'));
-    cleanup.push(dir);
+    const dir = tmp.make('whatsoup-schema-ceiling-runtime-advance');
     const dbPath = join(dir, 'runtime.db');
     const db = new Database(dbPath);
     db.open();
@@ -926,8 +901,7 @@ describe('database schema ceiling', () => {
   });
 
   it('latches and closes the runtime handle when the database pathname is replaced', () => {
-    const dir = mkdtempSync(join(tmpdir(), 'whatsoup-schema-ceiling-runtime-replace-'));
-    cleanup.push(dir);
+    const dir = tmp.make('whatsoup-schema-ceiling-runtime-replace');
     const dbPath = join(dir, 'runtime.db');
     const replacementPath = join(dir, 'replacement.db');
     const db = new Database(dbPath);
@@ -955,8 +929,7 @@ describe('database schema ceiling', () => {
   });
 
   it('rolls back the ledger and every schema mutation when a migration fails', () => {
-    const dir = mkdtempSync(join(tmpdir(), 'whatsoup-schema-ceiling-atomic-failure-'));
-    cleanup.push(dir);
+    const dir = tmp.make('whatsoup-schema-ceiling-atomic-failure');
     const dbPath = join(dir, 'atomic.db');
     const db = new Database(dbPath);
     const originalExec = db.raw.exec.bind(db.raw);
@@ -977,8 +950,7 @@ describe('database schema ceiling', () => {
   });
 
   it('rolls back all earlier schema work when the final migration fails', () => {
-    const dir = mkdtempSync(join(tmpdir(), 'whatsoup-schema-ceiling-late-failure-'));
-    cleanup.push(dir);
+    const dir = tmp.make('whatsoup-schema-ceiling-late-failure');
     const dbPath = join(dir, 'late.db');
     const db = new Database(dbPath);
     const originalExec = db.raw.exec.bind(db.raw);
@@ -999,8 +971,7 @@ describe('database schema ceiling', () => {
   });
 
   it('changes DELETE journaling to WAL only after the guarded schema transaction commits', () => {
-    const dir = mkdtempSync(join(tmpdir(), 'whatsoup-schema-ceiling-journal-order-'));
-    cleanup.push(dir);
+    const dir = tmp.make('whatsoup-schema-ceiling-journal-order');
     const dbPath = join(dir, 'journal.db');
     const initial = new Database(dbPath);
     initial.open();
@@ -1032,8 +1003,7 @@ describe('database schema ceiling', () => {
   });
 
   it('early bootstrap outcome: classifies a malformed migration ledger as permanent', () => {
-    const dir = mkdtempSync(join(tmpdir(), 'whatsoup-schema-ceiling-malformed-'));
-    cleanup.push(dir);
+    const dir = tmp.make('whatsoup-schema-ceiling-malformed');
     const dbPath = join(dir, 'malformed.db');
 
     const seed = new DatabaseSync(dbPath);
@@ -1074,8 +1044,7 @@ describe('database schema ceiling', () => {
   });
 
   it('early bootstrap gives an invalid ledger precedence over a future migration', async () => {
-    const dir = mkdtempSync(join(tmpdir(), 'whatsoup-schema-ceiling-invalid-future-'));
-    cleanup.push(dir);
+    const dir = tmp.make('whatsoup-schema-ceiling-invalid-future');
     const dbPath = join(dir, 'mixed.db');
     const lockPath = join(dir, 'state', 'whatsoup.lock');
     const previousConfig = process.env.INSTANCE_CONFIG;
@@ -1150,8 +1119,7 @@ describe('database schema ceiling', () => {
   });
 
   it('rejects a readable ledger containing a version outside the supported range', () => {
-    const dir = mkdtempSync(join(tmpdir(), 'whatsoup-schema-ceiling-gap-'));
-    cleanup.push(dir);
+    const dir = tmp.make('whatsoup-schema-ceiling-gap');
     const dbPath = join(dir, 'gap.db');
 
     const seed = new DatabaseSync(dbPath);
@@ -1176,8 +1144,7 @@ describe('database schema ceiling', () => {
   });
 
   it('accepts a ledger gap so an idempotent migration receipt can be repaired', () => {
-    const dir = mkdtempSync(join(tmpdir(), 'whatsoup-schema-ceiling-repair-'));
-    cleanup.push(dir);
+    const dir = tmp.make('whatsoup-schema-ceiling-repair');
     const dbPath = join(dir, 'repair.db');
 
     const initial = new Database(dbPath);
@@ -1200,8 +1167,7 @@ describe('database schema ceiling', () => {
   });
 
   it('rejects a readable ledger whose table shape is not canonical', () => {
-    const dir = mkdtempSync(join(tmpdir(), 'whatsoup-schema-ceiling-shape-'));
-    cleanup.push(dir);
+    const dir = tmp.make('whatsoup-schema-ceiling-shape');
     const dbPath = join(dir, 'shape.db');
 
     const seed = new DatabaseSync(dbPath);
@@ -1223,8 +1189,7 @@ describe('database schema ceiling', () => {
   });
 
   it('rejects hidden or generated additions to the canonical ledger shape', () => {
-    const dir = mkdtempSync(join(tmpdir(), 'whatsoup-schema-ceiling-hidden-'));
-    cleanup.push(dir);
+    const dir = tmp.make('whatsoup-schema-ceiling-hidden');
     const dbPath = join(dir, 'hidden.db');
 
     const seed = new DatabaseSync(dbPath);
@@ -1251,8 +1216,7 @@ describe('database schema ceiling', () => {
   });
 
   it('rejects a case-variant migration ledger instead of bypassing the ceiling', () => {
-    const dir = mkdtempSync(join(tmpdir(), 'whatsoup-schema-ceiling-case-'));
-    cleanup.push(dir);
+    const dir = tmp.make('whatsoup-schema-ceiling-case');
     const dbPath = join(dir, 'case.db');
     const futureVersion = CURRENT_SCHEMA_MIGRATION + 1;
 
@@ -1277,8 +1241,7 @@ describe('database schema ceiling', () => {
   });
 
   it('rejects a nonempty database with no migration ledger', () => {
-    const dir = mkdtempSync(join(tmpdir(), 'whatsoup-schema-ceiling-unledgered-'));
-    cleanup.push(dir);
+    const dir = tmp.make('whatsoup-schema-ceiling-unledgered');
     const dbPath = join(dir, 'unledgered.db');
 
     const seed = new DatabaseSync(dbPath);
@@ -1295,8 +1258,7 @@ describe('database schema ceiling', () => {
   });
 
   it('rejects an empty ledger that accompanies unledgered schema objects', () => {
-    const dir = mkdtempSync(join(tmpdir(), 'whatsoup-schema-ceiling-empty-ledger-'));
-    cleanup.push(dir);
+    const dir = tmp.make('whatsoup-schema-ceiling-empty-ledger');
     const dbPath = join(dir, 'empty-ledger.db');
 
     const seed = new DatabaseSync(dbPath);
@@ -1322,8 +1284,7 @@ describe('database schema ceiling', () => {
     { label: 'legacy', latest: CURRENT_SCHEMA_MIGRATION - 1 },
     { label: 'current', latest: CURRENT_SCHEMA_MIGRATION },
   ])('admits a supported $label migration ledger to normal schema verification', ({ latest }) => {
-    const dir = mkdtempSync(join(tmpdir(), `whatsoup-schema-ceiling-${latest}-`));
-    cleanup.push(dir);
+    const dir = tmp.make(`whatsoup-schema-ceiling-${latest}`);
     const dbPath = join(dir, 'supported.db');
 
     const initial = new Database(dbPath);
@@ -1346,8 +1307,7 @@ describe('database schema ceiling', () => {
   });
 
   it('accepts a fresh database with no migration ledger', () => {
-    const dir = mkdtempSync(join(tmpdir(), 'whatsoup-schema-ceiling-fresh-'));
-    cleanup.push(dir);
+    const dir = tmp.make('whatsoup-schema-ceiling-fresh');
     const dbPath = join(dir, 'fresh.db');
 
     const db = new Database(dbPath);

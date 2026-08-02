@@ -113,11 +113,11 @@ export async function handleSend(
     const parsed = JSON.parse(body);
 
     // Reject non-object payloads explicitly. Without this guard, a body of `null`
-    // throws TypeError on property access, the catch swallows it as "invalid
-    // JSON", and the request falls through to mcpCall with a `null` payload —
-    // bypassing xor validation. Arrays and primitives currently land at the
-    // "neither" branch by accident; explicit type-shape rejection makes the
-    // boundary deliberate.
+    // throws TypeError on property access; the catch below would report it as
+    // "invalid JSON body", masking the real problem (valid JSON that parses to
+    // `null`, not malformed JSON) behind the wrong error message. Arrays and
+    // primitives currently land at the "neither" branch by accident; explicit
+    // type-shape rejection makes the boundary deliberate.
     if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
       jsonResponse(res, 400, {
         error: 'request body must be a JSON object with chatJid (raw JID) or to (alias)',
@@ -128,8 +128,8 @@ export async function handleSend(
     // Trim before length check: whitespace-only values count as not-provided
     // (matches resolver semantics in src/core/chats-resolver.ts and prevents
     // forwarding `'   '` to the instance via JID normalization).
-    const hasChatJid = typeof parsed.chatJid === 'string' && parsed.chatJid.trim().length > 0;
-    const hasTo = typeof parsed.to === 'string' && parsed.to.trim().length > 0;
+    const hasChatJid = isNonEmptyString(parsed.chatJid);
+    const hasTo = isNonEmptyString(parsed.to);
 
     if (hasChatJid && hasTo) {
       jsonResponse(res, 400, {
@@ -144,7 +144,7 @@ export async function handleSend(
       return;
     }
 
-    if (parsed.profile !== undefined && (typeof parsed.profile !== 'string' || parsed.profile.trim().length === 0)) {
+    if (parsed.profile !== undefined && !isNonEmptyString(parsed.profile)) {
       jsonResponse(res, 400, { error: 'profile must be a non-empty string' });
       return;
     }
@@ -155,7 +155,10 @@ export async function handleSend(
         : toPersonalJid(parsed.chatJid);
       fixedBody = JSON.stringify(parsed);
     }
-  } catch { /* invalid JSON: existing fall-through; downstream returns 400 */ }
+  } catch {
+    jsonResponse(res, 400, { error: 'invalid JSON body' });
+    return;
+  }
 
   // Route 1: Try MCP socket (passive instances with verified socket)
   if (instance.type === 'passive' && instance.socketPath) {
@@ -500,34 +503,35 @@ export async function handleConfigUpdate(
         if (!validatePluginDirs(mergedAo!.pluginDirs as unknown[], res)) haltConfigUpdateAfterResponse();
       }
       if (patch.claudeMd && merged.type === 'agent') {
-        const ao = merged.agentOptions as Record<string, unknown> | undefined;
-        if (ao && isNonEmptyString(ao.cwd)) {
-          try {
-            const claudeDir = path.join(ao.cwd, '.claude');
-            ensureHomeConfinedDirectory(claudeDir);
-            writePrivateFileSync(path.join(claudeDir, 'CLAUDE.md'), patch.claudeMd as string);
-          } catch (err) {
-            jsonResponse(res, 500, projectError(err, { operation: 'config_write', stage: 'commit' }));
-            haltConfigUpdateAfterResponse();
-          }
+        // Invariant: resolveAndValidateAgentCwd() (called above whenever
+        // merged.type === 'agent') always leaves agentOptions.cwd a validated
+        // non-empty string, or halts the request first.
+        const ao = merged.agentOptions as Record<string, unknown>;
+        const cwd = ao.cwd as string;
+        try {
+          const claudeDir = path.join(cwd, '.claude');
+          ensureHomeConfinedDirectory(claudeDir);
+          writePrivateFileSync(path.join(claudeDir, 'CLAUDE.md'), patch.claudeMd as string);
+        } catch (err) {
+          jsonResponse(res, 500, projectError(err, { operation: 'config_write', stage: 'commit' }));
+          haltConfigUpdateAfterResponse();
         }
       }
 
       // Write settings.json when settingsJson is in the patch (agent instances only)
       if (patch.settingsJson && merged.type === 'agent') {
-        const ao = merged.agentOptions as Record<string, unknown> | undefined;
-        if (ao && isNonEmptyString(ao.cwd)) {
-          try {
-            const claudeDir = path.join(ao.cwd, '.claude');
-            const settings = mergeSettingsJson('agent', patch.settingsJson as PermissionsSettings);
-            if (settings) {
-              ensureHomeConfinedDirectory(claudeDir);
-              writePermissionsSettings(claudeDir, settings);
-            }
-          } catch (err) {
-            jsonResponse(res, 500, projectError(err, { operation: 'config_write', stage: 'commit' }));
-            haltConfigUpdateAfterResponse();
+        const ao = merged.agentOptions as Record<string, unknown>;
+        const cwd = ao.cwd as string;
+        try {
+          const claudeDir = path.join(cwd, '.claude');
+          const settings = mergeSettingsJson('agent', patch.settingsJson as PermissionsSettings);
+          if (settings) {
+            ensureHomeConfinedDirectory(claudeDir);
+            writePermissionsSettings(claudeDir, settings);
           }
+        } catch (err) {
+          jsonResponse(res, 500, projectError(err, { operation: 'config_write', stage: 'commit' }));
+          haltConfigUpdateAfterResponse();
         }
       }
 
@@ -535,33 +539,32 @@ export async function handleConfigUpdate(
       if (patch.agentOptions && merged.type === 'agent') {
         const patchAo = patch.agentOptions as Record<string, unknown>;
         if (patchAo.enabledPlugins !== undefined && (patchAo.enabledPlugins === null || typeof patchAo.enabledPlugins === 'object')) {
-          const ao = merged.agentOptions as Record<string, unknown> | undefined;
-          if (ao && isNonEmptyString(ao.cwd)) {
+          const ao = merged.agentOptions as Record<string, unknown>;
+          const cwd = ao.cwd as string;
+          try {
+            const claudeDir = path.join(cwd, '.claude');
+            ensureHomeConfinedDirectory(claudeDir);
+            // Build a full PermissionsSettings so writePermissionsSettings handles the merge
+            const settingsPath = path.join(claudeDir, 'settings.json');
+            let existingPerms = defaultSettingsJson('agent')!.permissions;
             try {
-              const claudeDir = path.join(ao.cwd, '.claude');
-              ensureHomeConfinedDirectory(claudeDir);
-              // Build a full PermissionsSettings so writePermissionsSettings handles the merge
-              const settingsPath = path.join(claudeDir, 'settings.json');
-              let existingPerms = defaultSettingsJson('agent')!.permissions;
-              try {
-                const existing = JSON.parse(fs.readFileSync(settingsPath, 'utf-8'));
-                if (existing.permissions) {
-                  const permissions = existing.permissions as PermissionsSettings['permissions'];
-                  existingPerms = {
-                    ...permissions,
-                    deny: applyRequiredDeny(Array.isArray(permissions.deny) ? permissions.deny : []),
-                  };
-                }
-              } catch { /* use defaults */ }
-              writePermissionsSettings(claudeDir, {
-                permissions: existingPerms,
-                // null or {} = reset to global inheritance
-                enabledPlugins: (patchAo.enabledPlugins ?? {}) as Record<string, boolean>,
-              });
-            } catch (err) {
-              jsonResponse(res, 500, projectError(err, { operation: 'config_write', stage: 'commit' }));
-              haltConfigUpdateAfterResponse();
-            }
+              const existing = JSON.parse(fs.readFileSync(settingsPath, 'utf-8'));
+              if (existing.permissions) {
+                const permissions = existing.permissions as PermissionsSettings['permissions'];
+                existingPerms = {
+                  ...permissions,
+                  deny: applyRequiredDeny(Array.isArray(permissions.deny) ? permissions.deny : []),
+                };
+              }
+            } catch { /* use defaults */ }
+            writePermissionsSettings(claudeDir, {
+              permissions: existingPerms,
+              // null or {} = reset to global inheritance
+              enabledPlugins: (patchAo.enabledPlugins ?? {}) as Record<string, boolean>,
+            });
+          } catch (err) {
+            jsonResponse(res, 500, projectError(err, { operation: 'config_write', stage: 'commit' }));
+            haltConfigUpdateAfterResponse();
           }
         }
       }
