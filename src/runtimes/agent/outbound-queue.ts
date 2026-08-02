@@ -18,6 +18,7 @@ import {
   type OutboundFailureEvidenceV1,
 } from '../../core/outbound-failure-disposition.ts';
 import { redactInternalArtifacts, resolveOutboundAudience } from '../../core/outbound-message-safety.ts';
+import { isNonEmptyString } from '../../lib/type-guards.ts';
 import { formatProviderErrorForUser } from '../../lib/provider-errors.ts';
 import { MS_PER_SECOND, MS_PER_MINUTE } from '../../lib/time-units.ts';
 import { isGroupJid } from '../../core/jid-constants.ts';
@@ -707,7 +708,7 @@ export class OutboundQueue implements IOutboundQueue {
 
   /** Enqueue a text message for immediate sending (after pacing). */
   enqueueText(text: string, role: OutboundMessageRole = 'answer'): void {
-    if (!text || text.trim() === '') return;
+    if (!isNonEmptyString(text)) return;
     const attribution = this.snapshotAttribution(role);
     // Flush any pending streaming buffer first to maintain ordering
     this.flushStreamBuffer();
@@ -802,7 +803,7 @@ export class OutboundQueue implements IOutboundQueue {
    * the message and asked for...") that shouldn't reach non-technical users.
    */
   enqueueResultText(text: string, role: OutboundMessageRole = 'answer'): void {
-    if (!text || text.trim() === '') return;
+    if (!isNonEmptyString(text)) return;
     if (this.toolUpdateMode === 'minimal' && this.turnHasVisibleText) {
       // Suppress — the user already got the real response during the turn
       return;
