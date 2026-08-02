@@ -1,18 +1,16 @@
 import {
   existsSync,
-  mkdtempSync,
   readFileSync,
   renameSync,
-  rmSync,
   statSync,
 } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
-import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { DatabaseSync } from 'node:sqlite';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { trackTmpDirs } from '../helpers/tmp-dir.ts';
 import { Database } from '../../src/core/database.ts';
 import { closeOperatorCatchupRecoveryRaw } from '../../src/core/recovery-catchup-closure.ts';
 import {
@@ -47,7 +45,7 @@ function runCliSubprocess(args: string[]): { code: number; stdout: string; stder
   return { code: result.status ?? -1, stdout: result.stdout ?? '', stderr: result.stderr ?? '' };
 }
 
-const tempRoots: string[] = [];
+const tmp = trackTmpDirs('whatsoup-close-');
 
 interface RecoveryFixture {
   dbPath: string;
@@ -58,9 +56,7 @@ interface RecoveryFixture {
 }
 
 function makeTempRoot(): string {
-  const root = mkdtempSync(path.join(tmpdir(), 'whatsoup-close-catchup-'));
-  tempRoots.push(root);
-  return root;
+  return tmp.make('catchup');
 }
 
 // Distinctive, explicitly-assigned seq base for fixture rows (inbound_events.seq
@@ -185,7 +181,6 @@ function closureCount(dbPath: string): number {
 
 afterEach(() => {
   vi.restoreAllMocks();
-  for (const root of tempRoots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
 
 describe('close-recovery-catchup CLI', () => {

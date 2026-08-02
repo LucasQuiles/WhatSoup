@@ -200,7 +200,12 @@ function fileSnapshot(path: string, includeHash = false): AuthBondFileSnapshot {
   }
 }
 
-function readJson(path: string): unknown {
+// #2292 L2 — unguarded by name: every call site wraps this in its own
+// try/catch (auth-bond.ts:481,517,616,919 verified), so the throw-on-invalid
+// contract is already load-bearing, not accidental. Renamed rather than
+// guarded internally so the contract is legible at the call site instead of
+// depending on caller discipline that happened to already be correct.
+function readJsonOrThrow(path: string): unknown {
   return JSON.parse(readFileSync(path, 'utf8'));
 }
 
@@ -478,7 +483,7 @@ function authTreeValidationError(
 
   let meHash: string | null = null;
   try {
-    const parsed = readJson(credsPath);
+    const parsed = readJsonOrThrow(credsPath);
     if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
       return `${prefix} creds.json is not an object`;
     }
@@ -514,7 +519,7 @@ function readLatestManifest(path: string): LatestManifest | null {
   try {
     const st = lstatSync(path);
     if (st.isSymbolicLink() || !st.isFile()) return null;
-    const parsed = readJson(path);
+    const parsed = readJsonOrThrow(path);
     if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return null;
     return parsed as LatestManifest;
   } catch {
@@ -613,7 +618,7 @@ export class AuthBondGuard {
         issues.push('creds_json_empty');
       } else {
         try {
-          const parsed = readJson(credsPath);
+          const parsed = readJsonOrThrow(credsPath);
           if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
             status = 'invalid';
             issues.push('creds_json_not_object');
@@ -916,7 +921,7 @@ export class AuthBondGuard {
     const manifestPath = join(backupPath, 'manifest.json');
     let manifest: BackupManifest;
     try {
-      const parsed = readJson(manifestPath);
+      const parsed = readJsonOrThrow(manifestPath);
       if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
         return `backup manifest is not an object: ${manifestPath}`;
       }

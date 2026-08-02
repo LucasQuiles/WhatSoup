@@ -145,7 +145,7 @@ export function createConnection(config: FactoryConfig): RuntimeConnection {
       }
 
       const adapter = new ImessageAdapter(config.imessageConfig, port);
-      return new ImessageConnection(adapter);
+      return new ImessageConnection(adapter, port);
     }
 
     default:

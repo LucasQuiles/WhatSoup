@@ -19,6 +19,7 @@
 //   maps them to typed TransportError subclasses.
 
 import { request } from 'undici';
+import { z } from 'zod';
 import type { ImessageConfig } from './types.ts';
 import type {
   ImessagePort,
@@ -148,6 +149,21 @@ function isSafeNonNegativeInteger(value: unknown): value is number {
   return Number.isSafeInteger(value) && (value as number) >= 0;
 }
 
+/**
+ * Shape schema for the decoded cursor payload. `afterRowId` must always be a
+ * safe non-negative integer; `upperRowId` and `bootstrapAfterMs` are
+ * NULLABLE-but-required (the previous ladder rejected a MISSING key the same
+ * as a wrong-typed one — only an explicit `null` or a valid integer passes —
+ * so `.nullable()` without `.optional()` mirrors that exactly). `satisfies`
+ * pins the schema output to the module-private BbCursorState type.
+ */
+const BbCursorStateSchema = z.object({
+  version: z.literal(1),
+  afterRowId: z.number().int().safe().nonnegative(),
+  upperRowId: z.number().int().safe().nonnegative().nullable(),
+  bootstrapAfterMs: z.number().int().safe().nonnegative().nullable(),
+}) satisfies z.ZodType<BbCursorState>;
+
 function encodeCursor(state: BbCursorState): string {
   return BB_CURSOR_PREFIX + Buffer.from(JSON.stringify(state), 'utf8').toString('base64url');
 }
@@ -162,20 +178,11 @@ function decodeCursor(cursor: string): BbCursorState {
   } catch {
     throw { message: 'invalid bluebubbles inbound cursor', code: 'BadCursor', status: 400 } satisfies ImessagePortError;
   }
-  const state = parsed as Partial<BbCursorState> | null;
-  if (state === null
-    || state.version !== 1
-    || !isSafeNonNegativeInteger(state.afterRowId)
-    || (state.upperRowId !== null && !isSafeNonNegativeInteger(state.upperRowId))
-    || (state.bootstrapAfterMs !== null && !isSafeNonNegativeInteger(state.bootstrapAfterMs))) {
+  const result = BbCursorStateSchema.safeParse(parsed);
+  if (!result.success) {
     throw { message: 'invalid bluebubbles inbound cursor', code: 'BadCursor', status: 400 } satisfies ImessagePortError;
   }
-  return {
-    version: 1,
-    afterRowId: state.afterRowId,
-    upperRowId: state.upperRowId,
-    bootstrapAfterMs: state.bootstrapAfterMs,
-  };
+  return result.data;
 }
 
 function parseQueryPage(

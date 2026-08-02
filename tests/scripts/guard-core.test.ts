@@ -2,7 +2,7 @@ import { execFileSync, spawnSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { describe, expect, it } from 'vitest';
 
 import {
   cleanGitEnv,
@@ -13,25 +13,21 @@ import {
   readStagedFileContentResult,
   readText,
 } from '../../scripts/lib/guard-core.ts';
+import { trackTmpDirs } from '../helpers/tmp-dir.ts';
 
-const repos: string[] = [];
+const tmp = trackTmpDirs('');
 
 function git(repo: string, args: string[]): string {
   return execFileSync('git', args, { cwd: repo, encoding: 'utf8', env: cleanGitEnv() }).trim();
 }
 
 function makeRepo(): string {
-  const repo = mkdtempSync(path.join(tmpdir(), 'guard-core-'));
-  repos.push(repo);
+  const repo = tmp.make('guard-core');
   git(repo, ['init']);
   git(repo, ['config', 'user.name', 'Guard Core Test']);
   git(repo, ['config', 'user.email', 'guard-core-test@users.noreply.github.com']);
   return repo;
 }
-
-afterEach(() => {
-  for (const repo of repos.splice(0)) rmSync(repo, { recursive: true, force: true });
-});
 
 describe('guard-core helpers', () => {
   it('normalizes repo paths and git list output', () => {

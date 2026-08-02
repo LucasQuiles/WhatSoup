@@ -21,7 +21,6 @@ import {
   chmodSync,
   copyFileSync,
   constants as fsConstants,
-  mkdtempSync,
   mkdirSync,
   writeFileSync,
   existsSync,
@@ -29,15 +28,16 @@ import {
   rmSync,
   symlinkSync,
 } from 'node:fs';
-import { tmpdir, homedir } from 'node:os';
+import { homedir } from 'node:os';
 import { join, resolve, dirname } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { afterEach, describe, expect, it } from 'vitest';
+import { describe, expect, it } from 'vitest';
 import { cleanGitEnv } from '../../src/lib/git-env.ts';
 import {
   gitFixture,
   gitFixtureEnv,
 } from './preflight-git-fixture-helper.ts';
+import { trackTmpDirs } from '../helpers/tmp-dir.ts';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -69,22 +69,10 @@ const FIXTURE_NODE_RANGE = `>=${PINNED_NODE_MAJOR}.0.0 <${PINNED_NODE_MAJOR + 1}
 // reporting false failures; the pin itself is enforced by guard:node-pin-consistency.
 const NODE_IN_PIN = PINNED_NODE_MAJOR >= 24 && PINNED_NODE_MAJOR < 26;
 
-const tmpDirs: string[] = [];
-
-afterEach(() => {
-  for (const dir of tmpDirs.splice(0)) {
-    try {
-      rmSync(dir, { recursive: true, force: true });
-    } catch {
-      // best-effort cleanup
-    }
-  }
-});
+const tmp = trackTmpDirs('preflight-test');
 
 function makeTmpDir(): string {
-  const dir = mkdtempSync(join(tmpdir(), 'preflight-test-'));
-  tmpDirs.push(dir);
-  return dir;
+  return tmp.make('');
 }
 
 /**

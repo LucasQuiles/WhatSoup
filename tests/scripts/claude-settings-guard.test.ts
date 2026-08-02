@@ -1,5 +1,4 @@
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -15,13 +14,13 @@ import {
   defaultSettingsJson,
   REQUIRED_DENY,
 } from '../../src/core/settings-template.ts';
+import { trackTmpDirs } from '../helpers/tmp-dir.ts';
 
 const repoRoot = fileURLToPath(new URL('../..', import.meta.url));
-const fixtureDirs: string[] = [];
+const tmp = trackTmpDirs('whatsoup-claude-');
 
 function makeFixture(settingsText?: string): string {
-  const dir = mkdtempSync(path.join(tmpdir(), 'whatsoup-claude-settings-'));
-  fixtureDirs.push(dir);
+  const dir = tmp.make('settings');
   mkdirSync(path.join(dir, '.claude'), { recursive: true });
   if (settingsText !== undefined) {
     writeFileSync(path.join(dir, '.claude/settings.json'), settingsText, 'utf8');
@@ -37,9 +36,6 @@ describe('claude-settings guard', () => {
   afterEach(() => {
     vi.restoreAllMocks();
     process.exitCode = undefined;
-    for (const dir of fixtureDirs.splice(0)) {
-      rmSync(dir, { recursive: true, force: true });
-    }
   });
 
   it('passes when .claude/settings.json matches the generated agent default', () => {

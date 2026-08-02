@@ -7,15 +7,16 @@ import {
 } from './core/database-compatibility-early.ts';
 import { configureDatabaseCompatibilityBootstrap } from './database-compatibility-config.ts';
 import { errorMessage } from './lib/error-message.ts';
+import { getBootstrapInstanceContextOrNull } from './lib/instance-context.ts';
 
 export function checkLoadedInstanceDatabase(): 'ready' | DrainableDatabaseCompatibilityReason {
-  const encoded = process.env.INSTANCE_CONFIG;
-  if (!encoded) throw new Error('INSTANCE_CONFIG is required for database compatibility inspection');
-  const parsed = JSON.parse(encoded) as { paths?: { dbPath?: unknown } };
-  if (typeof parsed.paths?.dbPath !== 'string') {
+  // Typed store over the env round-trip (#2206); error wording preserved.
+  const context = getBootstrapInstanceContextOrNull();
+  if (!context) throw new Error('INSTANCE_CONFIG is required for database compatibility inspection');
+  if (typeof context.paths?.dbPath !== 'string') {
     throw new Error('INSTANCE_CONFIG is missing the canonical database path');
   }
-  const inspection = inspectExistingDatabaseForBootstrap(parsed.paths.dbPath);
+  const inspection = inspectExistingDatabaseForBootstrap(context.paths.dbPath);
   if (inspection.outcome === 'ready') return 'ready';
   if (inspection.outcome === 'drained') return inspection.error.reason;
   if (inspection.outcome === 'permanent') {

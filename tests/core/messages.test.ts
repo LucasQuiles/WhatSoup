@@ -302,6 +302,34 @@ describe('messages', () => {
     expect(remaining).toHaveLength(0);
   });
 
+  it('markMessagesProcessed rolls back every chunk when a later chunk fails', () => {
+    const COUNT = 501;
+    for (let i = 0; i < COUNT; i++) {
+      storeMessageIfNew(db, makeMsg({
+        messageId: `atomic-enrichment-${i}`,
+        timestamp: BASE_TS + i,
+        isFromMe: false,
+      }));
+    }
+    const pks = getUnprocessedMessages(db, COUNT + 10).map((message) => message.pk);
+    const failingPk = pks[500];
+    db.raw.exec(`
+      CREATE TRIGGER test_fail_enrichment_processed_late_chunk
+      BEFORE UPDATE OF enrichment_processed_at ON messages
+      WHEN NEW.pk = ${failingPk}
+      BEGIN
+        SELECT RAISE(ABORT, 'synthetic late chunk failure');
+      END;
+    `);
+
+    try {
+      expect(() => markMessagesProcessed(db, pks)).toThrow('synthetic late chunk failure');
+      expect(getUnprocessedMessages(db, COUNT + 10)).toHaveLength(COUNT);
+    } finally {
+      db.raw.exec('DROP TRIGGER IF EXISTS test_fail_enrichment_processed_late_chunk');
+    }
+  });
+
   it('deleteOldMessages removes messages older than retentionDays', () => {
     const nowSec = Math.floor(Date.now() / 1000);
     const oldTs = nowSec - 31 * 86400; // 31 days ago

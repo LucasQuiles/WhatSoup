@@ -113,8 +113,8 @@ describe('public surface drift check', () => {
 
     expect(normalizedHealthSection).toContain('Inspection-only startup binds to `127.0.0.1`');
     expect(normalizedHealthSection).toContain('canonical instance `healthPort`');
-    expect(healthStatusRow).toContain('`src/core/health.ts:1310`');
-    expect(healthStatusRow).toContain('`src/core/database-compatibility-early.ts:166`');
+    expect(healthStatusRow).toContain('`src/core/health.ts:1377`');
+    expect(healthStatusRow).toContain('`src/core/database-compatibility-early.ts:172`');
     expect(healthStatusRow).toContain('`service_mode: "inspection_only"`');
     expect(healthStatusRow).toContain('`startup_block`');
     expect(healthStatusRow).toContain('provider and synthetic admission blocked');

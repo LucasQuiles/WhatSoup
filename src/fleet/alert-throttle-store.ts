@@ -4,13 +4,14 @@ import { join } from 'node:path';
 import { createChildLogger } from '../logger.ts';
 import { isRecord } from '../lib/type-guards.ts';
 import { errorMessage } from '../lib/error-message.ts';
+import { MS_PER_MINUTE } from '../lib/time-units.ts';
 
 const log = createChildLogger('alert-throttle-store');
 
 const CONFIG_DIR = join(homedir(), '.config', 'whatsoup');
 const ALERT_THROTTLE_FILE = join(CONFIG_DIR, 'fleet-alert-throttle.json');
 
-export const ALERT_THROTTLE_INTERVAL_MS = 15 * 60 * 1000;
+export const ALERT_THROTTLE_INTERVAL_MS = 15 * MS_PER_MINUTE;
 
 export interface AlertThrottleLoadError {
   file: string;

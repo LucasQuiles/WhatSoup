@@ -2,32 +2,27 @@ import { spawnSync } from 'node:child_process';
 import {
   cpSync,
   mkdirSync,
-  mkdtempSync,
   readFileSync,
   rmSync,
   symlinkSync,
   writeFileSync,
 } from 'node:fs';
-import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { afterEach, describe, expect, it } from 'vitest';
+import { describe, expect, it } from 'vitest';
+
+import { trackTmpDirs } from '../helpers/tmp-dir.ts';
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
-const tempRoots: string[] = [];
-
-afterEach(() => {
-  for (const dir of tempRoots.splice(0)) rmSync(dir, { recursive: true, force: true });
-});
+const tmp = trackTmpDirs('');
 
 function catchClause(body: string): string {
   return ['catch', ' {', body, '}'].join('');
 }
 
 function makeFixture(source: string, baseline: string): string {
-  const root = mkdtempSync(join(tmpdir(), 'catch-ratchet-generator-'));
-  tempRoots.push(root);
+  const root = tmp.make('catch-ratchet-generator');
   mkdirSync(join(root, 'scripts'), { recursive: true });
   mkdirSync(join(root, 'src'), { recursive: true });
   cpSync(

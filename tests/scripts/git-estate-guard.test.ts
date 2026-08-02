@@ -3,16 +3,14 @@ import {
   chmodSync,
   existsSync,
   mkdirSync,
-  mkdtempSync,
   readdirSync,
   readFileSync,
   rmSync,
   writeFileSync,
 } from 'node:fs';
-import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
   isFullObjectId,
   main as runGitEstateGuard,
@@ -21,10 +19,11 @@ import {
   parseStatus,
   parseWorktreePorcelain,
 } from '../../scripts/git-estate-guard.ts';
+import { trackTmpDirs } from '../helpers/tmp-dir.ts';
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const script = resolve(repoRoot, 'scripts/git-estate-guard.ts');
-const scratchRoots: string[] = [];
+const tmp = trackTmpDirs('');
 const STATUS_XY_CHARACTERS = ['.', 'M', 'T', 'A', 'D', 'R', 'C'] as const;
 const ALL_TRACKED_XY = STATUS_XY_CHARACTERS.flatMap((indexStatus) =>
   STATUS_XY_CHARACTERS.map((worktreeStatus) => `${indexStatus}${worktreeStatus}`)
@@ -325,8 +324,7 @@ function git(cwd: string, args: string[], expectedStatus = 0): string {
 }
 
 function initRepo(objectFormat: 'sha1' | 'sha256' = 'sha1'): { root: string; repo: string } {
-  const root = mkdtempSync(join(tmpdir(), 'whatsoup-git-estate-'));
-  scratchRoots.push(root);
+  const root = tmp.make('whatsoup-git-estate');
   const repo = join(root, 'repo');
   mkdirSync(repo);
   git(repo, ['init', `--object-format=${objectFormat}`, '--initial-branch=main']);
@@ -342,11 +340,6 @@ function snapshot(repo: string): SnapshotDocument {
   return JSON.parse(result.stdout) as SnapshotDocument;
 }
 
-afterEach(() => {
-  for (const root of scratchRoots.splice(0)) {
-    rmSync(root, { recursive: true, force: true });
-  }
-});
 
 describe('git-estate guard', () => {
   it('exposes the exact guard entrypoint for in-process harnesses', async () => {

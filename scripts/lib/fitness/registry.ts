@@ -132,6 +132,11 @@ export const fitnessRules = [
         runtimes: ['runtimes', 'core', 'lib', 'mcp', 'transport'],
         fleet: ['fleet', 'core', 'lib', 'mcp', 'transport', 'runtimes'],
         memory: ['memory', 'core', 'lib'],
+        // The console peer package is in scope (#2210): sanctioned reach is
+        // shared primitives (lib) and domain contracts (core) — never
+        // transport/mcp/runtimes/fleet internals. The self-entry is
+        // documentation only (same-layer is always permitted by the checker).
+        console: ['console', 'core', 'lib'],
         root: ['*'],
       },
       anyMayImportRoot: true,

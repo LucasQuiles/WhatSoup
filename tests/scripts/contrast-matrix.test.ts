@@ -1,23 +1,16 @@
-import { mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { writeFileSync, readFileSync, existsSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { afterEach, describe, expect, it } from 'vitest';
+import { describe, expect, it } from 'vitest';
+
+import { trackTmpDirs } from '../helpers/tmp-dir.ts';
 
 const SCRIPT = resolve(process.cwd(), 'console/scripts/check-contrast-matrix.mjs');
 
-const tmpDirs: string[] = [];
-
-afterEach(() => {
-  for (const dir of tmpDirs) {
-    rmSync(dir, { recursive: true, force: true });
-  }
-  tmpDirs.length = 0;
-});
+const tmp = trackTmpDirs('contrast-');
 
 function makeFixture(css: string) {
-  const dir = mkdtempSync(join(tmpdir(), 'contrast-matrix-'));
-  tmpDirs.push(dir);
+  const dir = tmp.make('matrix');
   const tokensPath = join(dir, 'tokens.semantic.css');
   const outPath = join(dir, 'contrast-matrix.json');
   writeFileSync(tokensPath, css);
@@ -187,8 +180,7 @@ describe('check-contrast-matrix.mjs', () => {
   it('still passes and is byte-identical in exit/summary when run against the real token file', () => {
     // Guard: the empty-scan check must not affect the normal code path.
     const realTokens = resolve(process.cwd(), 'console/src/styles/tokens.semantic.css');
-    const dir = mkdtempSync(join(tmpdir(), 'contrast-matrix-real-'));
-    tmpDirs.push(dir);
+    const dir = tmp.make('matrix-real');
     const outPath = join(dir, 'contrast-matrix.json');
     const result = spawnSync(
       'node',

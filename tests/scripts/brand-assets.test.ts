@@ -1,19 +1,12 @@
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { afterEach, describe, expect, it } from 'vitest';
+import { describe, expect, it } from 'vitest';
+import { trackTmpDirs } from '../helpers/tmp-dir.ts';
 
 const SCRIPT = resolve(process.cwd(), 'console/scripts/check-brand-assets.mjs');
 
-const tmpDirs: string[] = [];
-
-afterEach(() => {
-  for (const dir of tmpDirs) {
-    rmSync(dir, { recursive: true, force: true });
-  }
-  tmpDirs.length = 0;
-});
+const tmp = trackTmpDirs('brand-');
 
 interface FixtureOptions {
   extraConsoleFiles?: Record<string, string>;
@@ -24,8 +17,7 @@ interface FixtureOptions {
 }
 
 function makeFixture(options: FixtureOptions = {}) {
-  const root = mkdtempSync(join(tmpdir(), 'brand-assets-'));
-  tmpDirs.push(root);
+  const root = tmp.make('assets');
   const favicon = join(root, 'console/public/favicon.svg');
   const index = join(root, 'console/index.html');
   const manifest = join(root, 'console/public/manifest.webmanifest');

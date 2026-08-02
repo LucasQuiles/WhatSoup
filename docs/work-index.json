@@ -1,7 +1,7 @@
 {
-  "generated_at": "2026-07-31T23:51:13Z",
+  "generated_at": "2026-08-02T00:13:53Z",
   "repo": "WhatSoup",
-  "git_head": "02ec14577aefb9e02d1f714a2f5ae77fb30c4c64",
+  "git_head": "d6680e4ed593504a134c01467d33a1fe6ec98908",
   "git_head_note": "git_head is captured at scan time, so it reflects the branch HEAD at the moment `build-work-index` ran — NOT the commit that carries this index. Expect divergence in two cases: (1) intra-branch, when the regenerated index is committed after further content changes are staged; (2) post-squash-merge, when the landed main SHA differs from the pre-merge branch SHA. The row data and inconsistency detection remain accurate regardless of git_head freshness.",
   "total": 108,
   "schema_version": 5,
@@ -711,7 +711,7 @@
       "status_source": "body-marker",
       "canonical_parent": "docs/superpowers/plans",
       "supersedes_hint": null,
-      "last_modified": "2026-07-28",
+      "last_modified": "2026-07-31",
       "size_bytes": 7274
     },
     {
@@ -1179,7 +1179,7 @@
       "status_source": "body-marker",
       "canonical_parent": "docs/superpowers/specs",
       "supersedes_hint": null,
-      "last_modified": "2026-07-28",
+      "last_modified": "2026-07-31",
       "size_bytes": 8877
     },
     {
@@ -1276,7 +1276,7 @@
       "canonical_parent": "docs/superpowers/specs/provider-event-lifecycle",
       "supersedes_hint": null,
       "last_modified": "2026-07-31",
-      "size_bytes": 82392
+      "size_bytes": 82448
     },
     {
       "path": "docs/superpowers/specs/provider-event-lifecycle/requirements.md",
@@ -1288,7 +1288,7 @@
       "canonical_parent": "docs/superpowers/specs/provider-event-lifecycle",
       "supersedes_hint": null,
       "last_modified": "2026-07-31",
-      "size_bytes": 109872
+      "size_bytes": 110627
     },
     {
       "path": "docs/superpowers/specs/provider-event-lifecycle/tasks.md",
@@ -1300,7 +1300,7 @@
       "canonical_parent": "docs/superpowers/specs/provider-event-lifecycle",
       "supersedes_hint": null,
       "last_modified": "2026-07-31",
-      "size_bytes": 61335
+      "size_bytes": 61391
     }
   ],
   "cross_tree_topics": {

@@ -222,7 +222,24 @@ export interface LogEntry {
 }
 
 export type FeedDetail =
-  | { type: 'connection'; statusCode?: number; reason?: string; reconnecting?: boolean; state?: 'connecting' | 'connected' | 'disconnected' }
+  // SSOT-TRACK (#2201, superseded from hand-mirror by #2892): the 'connection'
+  // variant's `state` field tracks the canonical ConnectionLifecycleState union
+  // declared once in src/transport/connection.ts (CONNECTION_LIFECYCLE_STATES).
+  // Pre-#2892 this was a hand-mirror of feed.ts's own inline literal; #2892
+  // moved feed.ts to derive its own (narrower, 3-value: connecting/connected/
+  // disconnected — the only transitions its log-line parser emits today) subset
+  // from that same canonical union via a compile-checked `satisfies` array, so
+  // feed.ts's FeedDetail.state is no longer identical to this one — it's a
+  // proper subset. This console copy deliberately stays at the FULL 6-value
+  // domain (not narrowed to feed.ts's current subset) so a future emitter
+  // widening feed.ts's subset doesn't require a console PR; see
+  // tests/console/feed-detail-connection-state-type.test.ts, which asserts
+  // equality against ConnectionLifecycleState directly (src/transport/connection.ts),
+  // not against feed.ts. Not shared-imported because connection.ts is a
+  // 2900+ line module with a heavy Baileys/config import graph, unlike the
+  // light "leaf types" modules this file already shares across the
+  // console/server boundary (e.g. src/core/mark-read-types.ts, re-exported below).
+  | { type: 'connection'; statusCode?: number; reason?: string; reconnecting?: boolean; state?: 'connecting' | 'connected' | 'disconnected' | 'reconnecting' | 'cooldown' | 'shutting_down' }
   | { type: 'tool_error'; toolName: string; toolId?: string; error: string }
   | { type: 'tool_use'; toolName: string; toolId?: string }
   | { type: 'session'; action: string; sessionId?: string; chatJid?: string; reason?: string }

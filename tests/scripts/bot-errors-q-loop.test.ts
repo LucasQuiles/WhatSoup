@@ -1,21 +1,13 @@
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { readFileSync } from 'node:fs';
+import { describe, expect, it } from 'vitest';
 
-const tmpRoots: string[] = [];
+import { trackTmpDirs } from '../helpers/tmp-dir.ts';
 
-afterEach(() => {
-  for (const dir of tmpRoots.splice(0)) {
-    rmSync(dir, { recursive: true, force: true });
-  }
-});
+const tmp = trackTmpDirs('bot-errors-q-');
 
 function tmpRoot(): string {
-  const dir = mkdtempSync(join(tmpdir(), 'bot-errors-q-loop-'));
-  tmpRoots.push(dir);
-  return dir;
+  return tmp.make('loop');
 }
 
 function python(code: string): string {

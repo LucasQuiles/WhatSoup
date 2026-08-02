@@ -1,13 +1,13 @@
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { EventEmitter } from 'node:events';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { openIncidentDb } from '../../../src/fleet/incidents/db.ts';
 import { IncidentStore } from '../../../src/fleet/incidents/store.ts';
 import { ProducerStore } from '../../../src/fleet/incidents/producers.ts';
 import { createSignalsHandlers, type SignalsDeps } from '../../../src/fleet/routes/signals.ts';
+import { mockReq } from '../../helpers/http-mocks.ts';
 
 const NOW = new Date('2026-07-28T12:00:00.000Z');
 const ROOT = 'root-token-fixture';
@@ -25,21 +25,6 @@ function deps(overrides: Partial<SignalsDeps> = {}): SignalsDeps {
     securityAudit: () => {},
     ...overrides,
   };
-}
-
-function mockReq(options: { body?: string; headers?: Record<string, string> }): IncomingMessage {
-  const req = new EventEmitter() as IncomingMessage;
-  (req as unknown as { url: string }).url = '/api/producers';
-  (req as unknown as { method: string }).method = 'POST';
-  (req as unknown as { headers: Record<string, string> }).headers = {
-    'content-type': 'application/json',
-    ...options.headers,
-  };
-  process.nextTick(() => {
-    if (options.body !== undefined) req.emit('data', options.body);
-    req.emit('end');
-  });
-  return req;
 }
 
 interface CapturedResponse {
@@ -102,7 +87,12 @@ async function call(
 ): Promise<CapturedResponse> {
   const handlers = createSignalsHandlers(d);
   const { res, done } = mockRes();
-  const req = mockReq({ body: options.body, headers: options.headers });
+  const req = mockReq({
+    method: 'POST',
+    url: '/api/producers',
+    body: options.body,
+    headers: { 'content-type': 'application/json', ...options.headers },
+  });
   if (handler === 'postProducer') await handlers.postProducer(req, res);
   else if (handler === 'postProducerCredential') {
     await handlers.postProducerCredential(req, res, { id: options.producerId ?? 'prod-alpha' });
@@ -172,6 +162,8 @@ describe('producer admin routes', () => {
     const { res, done } = mockRes();
     await handlers.postSignal(
       mockReq({
+        method: 'POST',
+        url: '/api/producers',
         body: JSON.stringify({
           schemaVersion: 1,
           signalId: 'hb-1',
@@ -179,7 +171,7 @@ describe('producer admin routes', () => {
           subject: 'host:alpha',
           observedAt: '2026-07-28T11:59:00.000Z',
         }),
-        headers: { authorization: `Bearer ${credential}` },
+        headers: { 'content-type': 'application/json', authorization: `Bearer ${credential}` },
       }),
       res,
     );

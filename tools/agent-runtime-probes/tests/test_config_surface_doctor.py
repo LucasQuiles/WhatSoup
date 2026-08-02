@@ -212,7 +212,9 @@ def test_parse_plist_non_dict_top_level_reports_shape_only():
 
 def test_parse_plist_failure_branch_with_empty_stderr(monkeypatch_run=None):
     # Force the plutil nonzero-return path with empty stderr/stdout to cover the
-    # "plutil failed" fallback message (no real plutil dependency).
+    # "plutil failed" fallback message (no real plutil dependency). The XML tokenizer
+    # fallback is also attempted here and fails closed too, since the path doesn't
+    # exist to read raw XML from -> still reports the original plutil error_type.
     class _Proc:
         returncode = 1
         stderr = ""
@@ -227,6 +229,97 @@ def test_parse_plist_failure_branch_with_empty_stderr(monkeypatch_run=None):
     assert row["parse_status"] == "invalid", row
     assert row["error_type"] == "plutil", row
     assert row["error"] == "plutil failed", row
+
+
+def test_parse_plist_invokes_bare_plutil_command_not_absolute_path():
+    # L3: plutil must be resolved via PATH (bare "plutil"), not hardcoded to
+    # /usr/bin/plutil -- matches the sibling launchd_plist_inventory_probe.py pattern.
+    calls: list[list[str]] = []
+
+    class _Proc:
+        returncode = 0
+        stdout = "{}"
+        stderr = ""
+
+    def fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        return _Proc()
+
+    orig = probe.subprocess.run
+    probe.subprocess.run = fake_run
+    try:
+        parse_plist(Path("/whatever.plist"))
+    finally:
+        probe.subprocess.run = orig
+    assert calls, "expected parse_plist to invoke subprocess.run"
+    assert calls[0][0] == "plutil", calls[0]
+
+
+def test_parse_plist_falls_back_to_xml_tokenizer_when_plutil_reports_failure():
+    # L3: when plutil fails (nonzero rc) but the on-disk file is a valid plist, the
+    # probe must fall back to its own XML tokenizer rather than reporting invalid --
+    # mirrors launchd_plist_inventory_probe.py's load_plist_object fallback.
+    class _Proc:
+        returncode = 1
+        stdout = ""
+        stderr = "plutil refused"
+
+    orig = probe.subprocess.run
+    probe.subprocess.run = lambda *a, **k: _Proc()
+    try:
+        with tempfile.TemporaryDirectory(prefix="config-surface-doctor-") as tmp_dir:
+            path = Path(tmp_dir) / "com.q.example.plist"
+            path.write_text(PLIST_OK, encoding="utf-8")
+            row = parse_plist(path)
+    finally:
+        probe.subprocess.run = orig
+    assert row["parse_status"] == "valid", row
+    assert row["label"] == "com.q.example", row
+    assert row["argv0"] == "/usr/bin/true", row
+    assert row["argv_count"] == 2, row
+    assert row["environment_keys"] == ["BAZ", "FOO"], row
+    assert row["has_run_at_load"] is True, row
+
+
+def test_parse_plist_falls_back_to_xml_tokenizer_when_plutil_invocation_raises():
+    # L3 falsifier: a missing/non-executable plutil binary raises FileNotFoundError out
+    # of subprocess.run itself (not just a nonzero rc). The probe must not let that
+    # propagate unhandled -- it must attempt the same XML tokenizer fallback.
+    def boom(*a, **k):
+        raise FileNotFoundError("plutil not installed")
+
+    orig = probe.subprocess.run
+    probe.subprocess.run = boom
+    try:
+        with tempfile.TemporaryDirectory(prefix="config-surface-doctor-") as tmp_dir:
+            path = Path(tmp_dir) / "com.q.example.plist"
+            path.write_text(PLIST_OK, encoding="utf-8")
+            row = parse_plist(path)
+    finally:
+        probe.subprocess.run = orig
+    assert row["parse_status"] == "valid", row
+    assert row["label"] == "com.q.example", row
+
+
+def test_parse_plist_reports_invalid_when_plutil_and_fallback_both_fail():
+    # Both paths exhausted (plutil fails AND the on-disk content has no top-level
+    # plist dict for the tokenizer to find) -> still fails closed, never raises.
+    class _Proc:
+        returncode = 1
+        stdout = ""
+        stderr = "plutil refused"
+
+    orig = probe.subprocess.run
+    probe.subprocess.run = lambda *a, **k: _Proc()
+    try:
+        with tempfile.TemporaryDirectory(prefix="config-surface-doctor-") as tmp_dir:
+            path = Path(tmp_dir) / "broken.plist"
+            path.write_text("this is not a plist at all <<<", encoding="utf-8")
+            row = parse_plist(path)
+    finally:
+        probe.subprocess.run = orig
+    assert row["parse_status"] == "invalid", row
+    assert row["error_type"] == "plutil", row
 
 
 # ---------------------------------------------------------------------------
@@ -470,6 +563,64 @@ def test_expand_specs_tracks_maclab_launchd_prefix_not_retired_host_prefix():
 
     assert maclab_label in launchd_paths, launchd_paths
     assert retired_label not in launchd_paths, launchd_paths
+
+
+def test_expand_specs_derives_whatsoup_paths_from_whatsoup_repo_not_home():
+    """issue #2299 M3: WhatSoup-tagged surfaces must resolve under
+    WHATSOUP_REPO (env override, else __file__-derived repo root), never
+    a hardcoded HOME/LAB/WhatSoup literal — the old hardcode silently
+    reports "missing" forever on any host where the checkout lives
+    elsewhere."""
+    with tempfile.TemporaryDirectory(prefix="config-surface-doctor-repo-") as repo_dir, \
+         tempfile.TemporaryDirectory(prefix="config-surface-doctor-home-") as home_dir:
+        repo_root = Path(repo_dir)
+        home = Path(home_dir)  # deliberately does NOT contain LAB/WhatSoup
+
+        orig_home = probe.HOME
+        orig_repo = probe.WHATSOUP_REPO
+        probe.HOME = home
+        probe.WHATSOUP_REPO = repo_root
+        try:
+            specs = probe.expand_specs()
+        finally:
+            probe.HOME = orig_home
+            probe.WHATSOUP_REPO = orig_repo
+
+    whatsoup_specs = [s for s in specs if s.harness == "whatsoup"]
+    assert whatsoup_specs, "expand_specs must still emit whatsoup-tagged surfaces"
+    for spec in whatsoup_specs:
+        assert str(spec.path).startswith(str(repo_root)), spec
+        assert str(home) not in str(spec.path), spec
+
+
+def test_expand_specs_health_profile_glob_uses_whatsoup_repo_root():
+    """issue #2299 M3: the third, uncited hardcode site (the health-profiles
+    .glob loop) must also honor WHATSOUP_REPO — the fix covers 8 occurrences
+    across 3 sites (7 static entries + this glob), not just the 2 cited
+    lines in the original issue."""
+    with tempfile.TemporaryDirectory(prefix="config-surface-doctor-repo-") as repo_dir, \
+         tempfile.TemporaryDirectory(prefix="config-surface-doctor-home-") as home_dir:
+        repo_root = Path(repo_dir)
+        home = Path(home_dir)
+        profiles_dir = repo_root / "deploy" / "health-profiles"
+        profiles_dir.mkdir(parents=True)
+        profile_file = profiles_dir / "example.json"
+        profile_file.write_text("{}", encoding="utf-8")
+
+        orig_home = probe.HOME
+        orig_repo = probe.WHATSOUP_REPO
+        probe.HOME = home
+        probe.WHATSOUP_REPO = repo_root
+        try:
+            specs = probe.expand_specs()
+        finally:
+            probe.HOME = orig_home
+            probe.WHATSOUP_REPO = orig_repo
+
+    health_profile_paths = {
+        spec.path for spec in specs if spec.surface == "fleet_health_profile"
+    }
+    assert profile_file in health_profile_paths, health_profile_paths
 
 
 # ---------------------------------------------------------------------------
