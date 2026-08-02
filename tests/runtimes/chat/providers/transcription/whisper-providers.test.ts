@@ -133,10 +133,12 @@ describe('transcribeWithFasterWhisper', () => {
     );
   });
 
-  it('throws when stdout is not valid JSON', async () => {
+  it('throws a descriptive error (not an opaque SyntaxError) when stdout is not valid JSON', async () => {
     existsSyncMock.mockReturnValue(true);
-    runCommandMock.mockResolvedValueOnce({ stdout: 'not json' });
-    await expect(transcribeWithFasterWhisper(audioBuffer, 'audio/ogg')).rejects.toThrow();
+    runCommandMock.mockResolvedValueOnce({ stdout: 'Traceback (most recent call last):\n  RuntimeError: model load failed' });
+    await expect(transcribeWithFasterWhisper(audioBuffer, 'audio/ogg')).rejects.toThrow(
+      /faster-whisper produced non-JSON output: Traceback \(most recent call last\)/,
+    );
   });
 
   it('propagates errors thrown by runCommand', async () => {
