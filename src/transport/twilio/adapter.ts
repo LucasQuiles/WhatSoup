@@ -27,6 +27,7 @@ import {
   UnsupportedCapabilityError,
 } from '../contract/errors.ts';
 import type { CallRef, VoiceCapableTransport, PlaceCallOptions } from '../contract/voice.ts';
+import { isNonEmptyString } from '../../lib/type-guards.ts';
 import { E164_RE, DEFAULT_TWILIO_VOICE, type TwilioSmsConfig, type TwilioVoiceConfig } from './types.ts';
 import type { InboundSms, TwilioSmsPort } from './port.ts';
 import { SmsRateLimiter } from './sms-rate-limiter.ts';
@@ -518,7 +519,7 @@ export class TwilioSmsAdapter implements TransportAdapter, VoiceCapableTransport
       conversation: { channel: this.channelId, id: peer },
       sender: { channel: this.channelId, id: peer },
       fromMe: false,
-      text: t.text.trim().length > 0 ? t.text : null,
+      text: isNonEmptyString(t.text) ? t.text : null,
       attachments: [{ id: t.recordingSid, kind: 'voice', mime: 'audio/mpeg' }],
       timestamp: new Date(),
       inboundEventKey: t.recordingSid,

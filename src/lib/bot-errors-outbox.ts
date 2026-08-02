@@ -11,6 +11,7 @@ import {
 import { randomUUID } from 'node:crypto';
 import { forceEnsurePrivateDirectorySync, fsyncDirectory } from './private-fs.ts';
 import { jidPattern } from './redaction-patterns.ts';
+import { asNonEmptyString } from './type-guards.ts';
 import { homedir, hostname, platform, release, tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 
@@ -320,8 +321,7 @@ const STRONG_TEST_SIGNAL_KEYS = [
 ] as const;
 
 function envValue(key: string): string | undefined {
-  const value = process.env[key];
-  return value !== undefined && value.trim().length > 0 ? value : undefined;
+  return asNonEmptyString(process.env[key]);
 }
 
 function strongTestSignals(): string[] {
