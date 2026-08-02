@@ -20,6 +20,7 @@ import {
 import { errorMessage } from './lib/error-message.ts';
 import { validateModelRoleValue } from './lib/model-resolver.ts';
 import { ConfigValidationError } from './lib/startup-error.ts';
+import { parseRuntimeBootstrapConfig, type RuntimeBootstrapConfig } from './lib/instance-config-shape.ts';
 
 const APP_NAME = 'whatsoup';
 
@@ -368,14 +369,10 @@ function mergeToolThresholds(
 
 const instanceRaw = process.env.INSTANCE_CONFIG;
 let instance: Record<string, any> | null = null;
+let bootstrapConfig: RuntimeBootstrapConfig | null = null;
 if (instanceRaw) {
-  try {
-    instance = JSON.parse(instanceRaw) as Record<string, any>;
-  } catch (err) {
-    throw new ConfigValidationError(
-      `INSTANCE_CONFIG contains invalid JSON: ${errorMessage(err)}`
-    );
-  }
+  bootstrapConfig = parseRuntimeBootstrapConfig(instanceRaw);
+  instance = bootstrapConfig.raw;
 }
 
 // ---------------------------------------------------------------------------
@@ -392,17 +389,11 @@ let configRoot: string;
 let dataRoot: string;
 let stateRoot: string;
 
-if (instance) {
+if (bootstrapConfig) {
   // Multi-instance mode: use paths from INSTANCE_CONFIG
-  if (!instance.paths ||
-      typeof instance.paths.configRoot !== 'string' ||
-      typeof instance.paths.dataRoot !== 'string' ||
-      typeof instance.paths.stateRoot !== 'string') {
-    throw new ConfigValidationError('INSTANCE_CONFIG is missing required paths object');
-  }
-  configRoot = instance.paths.configRoot as string;
-  dataRoot = instance.paths.dataRoot as string;
-  stateRoot = instance.paths.stateRoot as string;
+  configRoot = bootstrapConfig.paths.configRoot;
+  dataRoot = bootstrapConfig.paths.dataRoot;
+  stateRoot = bootstrapConfig.paths.stateRoot;
   mkdirSync(configRoot, { recursive: true, mode: 0o700 });
   mkdirSync(dataRoot, { recursive: true, mode: 0o700 });
   mkdirSync(stateRoot, { recursive: true, mode: 0o700 });
@@ -425,16 +416,16 @@ if (instance) {
   );
 }
 
-const logDir = instance ? (instance.paths.logDir as string) : join(dataRoot, 'logs');
+const logDir = bootstrapConfig ? bootstrapConfig.paths.logDir : join(dataRoot, 'logs');
 mkdirSync(logDir, { recursive: true, mode: 0o700 });
 // Expose logDir to logger.ts via env var — logger.ts evaluates after config.ts in the
 // ESM module graph (no transitive dependency between them), so this is available in time.
 process.env.LOG_DIR = logDir;
 
-const mediaDir = instance ? (instance.paths.mediaDir as string) : join(dataRoot, 'media', 'tmp');
+const mediaDir = bootstrapConfig ? bootstrapConfig.paths.mediaDir : join(dataRoot, 'media', 'tmp');
 mkdirSync(mediaDir, { recursive: true, mode: 0o700 });
-const processTmpDir = instance && typeof instance.paths.tmpDir === 'string'
-  ? instance.paths.tmpDir as string
+const processTmpDir = bootstrapConfig?.paths.tmpDir
+  ? bootstrapConfig.paths.tmpDir
   : join(dataRoot, 'tmp');
 mkdirSync(processTmpDir, { recursive: true, mode: 0o700 });
 process.env.TMPDIR = processTmpDir;
