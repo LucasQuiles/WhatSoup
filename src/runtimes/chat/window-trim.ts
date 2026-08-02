@@ -62,7 +62,7 @@ function estimateTokens(
 /**
  * Providers (notably Anthropic's Messages API) require the message list to
  * strictly alternate user/assistant with no consecutive same-role turns.
- * `loadConversationWindow` already guarantees `remaining` alternates
+ * `getConversationWindow` already guarantees `remaining` alternates
  * internally, and the caller always appends a `user` turn after this
  * function returns (the current incoming message) — so the synthetic turn's
  * role must be the OPPOSITE of `remaining[0]` (or, if `remaining` is empty,

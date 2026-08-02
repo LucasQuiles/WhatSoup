@@ -4,7 +4,7 @@ import { storeMessageIfNew } from '../../../src/core/messages.ts';
 import { toConversationKey } from '../../../src/core/conversation-key.ts';
 import { resolvePhoneFromJid } from '../../../src/core/access-list.ts';
 import { upsertLidMapping } from '../../../src/core/lid-resolver.ts';
-import { loadConversationWindow } from '../../../src/runtimes/chat/window.ts';
+import { getConversationWindow } from '../../../src/runtimes/chat/window.ts';
 import { config } from '../../../src/config.ts';
 
 // Helper: open a fresh in-memory database for each test
@@ -29,7 +29,7 @@ function makeMessageId(): (() => string) {
   return () => `msg-${++seq}`;
 }
 
-describe('loadConversationWindow', () => {
+describe('getConversationWindow', () => {
   let db: Database;
   let nextId: () => string;
 
@@ -45,7 +45,7 @@ describe('loadConversationWindow', () => {
   // ---- Positive cases ----
 
   it('returns an empty array when the database has no messages', () => {
-    const result = loadConversationWindow(db, 'chat1@g.us');
+    const result = getConversationWindow(db, 'chat1@g.us');
     expect(result).toEqual([]);
   });
 
@@ -63,7 +63,7 @@ describe('loadConversationWindow', () => {
       });
     }
 
-    const result = loadConversationWindow(db, chat);
+    const result = getConversationWindow(db, chat);
     // All messages present (they are from different senders but same role 'user',
     // they will be merged into one because it's one consecutive block — but the
     // content of each should reflect the order)
@@ -87,7 +87,7 @@ describe('loadConversationWindow', () => {
       timestamp: BASE_TS,
     });
 
-    const result = loadConversationWindow(db, chat);
+    const result = getConversationWindow(db, chat);
     expect(result).toHaveLength(1);
     expect(result[0].role).toBe('assistant');
     expect(result[0].content).toBe('I am the bot');
@@ -105,7 +105,7 @@ describe('loadConversationWindow', () => {
       timestamp: BASE_TS,
     });
 
-    const result = loadConversationWindow(db, chat);
+    const result = getConversationWindow(db, chat);
     expect(result).toHaveLength(1);
     expect(result[0].role).toBe('user');
     expect(result[0].content).toBe('[Alice]: hello there');
@@ -126,7 +126,7 @@ describe('loadConversationWindow', () => {
       });
     }
 
-    const result = loadConversationWindow(db, chat);
+    const result = getConversationWindow(db, chat);
     expect(result).toHaveLength(1);
     expect(result[0].role).toBe('user');
     expect(result[0].content).toBe('[Alice]: line 1\n[Alice]: line 2\n[Alice]: line 3');
@@ -161,7 +161,7 @@ describe('loadConversationWindow', () => {
       timestamp: BASE_TS + 2,
     });
 
-    const result = loadConversationWindow(db, chat);
+    const result = getConversationWindow(db, chat);
     expect(result).toHaveLength(3);
     expect(result[0].role).toBe('user');
     expect(result[1].role).toBe('assistant');
@@ -181,7 +181,7 @@ describe('loadConversationWindow', () => {
       timestamp: BASE_TS,
     });
 
-    const result = loadConversationWindow(db, chat);
+    const result = getConversationWindow(db, chat);
     expect(result[0].content).toContain(unicodeContent);
   });
 
@@ -206,7 +206,7 @@ describe('loadConversationWindow', () => {
       timestamp: BASE_TS + 1,
     });
 
-    const result = loadConversationWindow(db, chat);
+    const result = getConversationWindow(db, chat);
     // Alice and Bob have different names so they are NOT merged (different names
     // does not change role, so they ARE merged — both role='user').
     // Merged into one user message, each line prefixed.
@@ -232,7 +232,7 @@ describe('loadConversationWindow', () => {
       });
     }
 
-    const result = loadConversationWindow(db, chat);
+    const result = getConversationWindow(db, chat);
     // With extension triggered, all 80 messages should be included
     // (they're all within the extended 100-message window)
     const allContent = result.map((m) => m.content).join('\n');
@@ -257,7 +257,7 @@ describe('loadConversationWindow', () => {
       });
     }
 
-    const result = loadConversationWindow(db, chat);
+    const result = getConversationWindow(db, chat);
     // No extension: only the latest 50 are fetched and merged
     const allContent = result.map((m) => m.content).join('\n');
     // The most recent 50 are 'old 30' through 'old 79'
@@ -294,7 +294,7 @@ describe('loadConversationWindow', () => {
       timestamp: BASE_TS + 1,
     });
 
-    const result = loadConversationWindow(db, chat);
+    const result = getConversationWindow(db, chat);
     expect(result).toHaveLength(1);
     expect(result[0].content).toContain('visible message');
   });
@@ -313,7 +313,7 @@ describe('loadConversationWindow', () => {
       });
     }
 
-    const result = loadConversationWindow(db, chat);
+    const result = getConversationWindow(db, chat);
     const allContent = result.map((m) => m.content).join('\n');
     // The very first message (#1) must be absent
     expect(allContent).not.toMatch(/\breply 1\b/);
@@ -334,7 +334,7 @@ describe('loadConversationWindow', () => {
       timestamp: BASE_TS,
     });
 
-    const result = loadConversationWindow(db, chat);
+    const result = getConversationWindow(db, chat);
     expect(result).toHaveLength(1);
     // Falls back to the local part of the JID: 'mystery'
     expect(result[0].content).toBe('[mystery]: who am I?');
@@ -363,8 +363,8 @@ describe('loadConversationWindow', () => {
       timestamp: BASE_TS + 1,
     });
 
-    const resultA = loadConversationWindow(db, chatA);
-    const resultB = loadConversationWindow(db, chatB);
+    const resultA = getConversationWindow(db, chatA);
+    const resultB = getConversationWindow(db, chatB);
 
     expect(resultA.map((m) => m.content).join()).not.toContain('only in B');
     expect(resultB.map((m) => m.content).join()).not.toContain('only in A');
@@ -384,7 +384,7 @@ describe('loadConversationWindow', () => {
       });
     }
 
-    const result = loadConversationWindow(db, chat);
+    const result = getConversationWindow(db, chat);
     expect(result).toEqual([]);
   });
 
@@ -408,7 +408,7 @@ describe('loadConversationWindow', () => {
       });
     });
 
-    const result = loadConversationWindow(db, chat);
+    const result = getConversationWindow(db, chat);
     expect(result).toHaveLength(4);
     expect(result.map((m) => m.role)).toEqual(['user', 'assistant', 'user', 'assistant']);
   });
@@ -432,7 +432,7 @@ describe('loadConversationWindow', () => {
       timestamp: BASE_TS + 1,
     });
 
-    const result = loadConversationWindow(db, chat);
+    const result = getConversationWindow(db, chat);
     expect(result).toHaveLength(1);
     expect(result[0].role).toBe('assistant');
     expect(result[0].content).toBe('part one\npart two');
@@ -468,7 +468,7 @@ describe('loadConversationWindow', () => {
     // The chat bot loads its per-turn window from the RAW @lid chatJid.
     // RED on main: window keys by toConversationKey('12345@lid')='12345' -> []
     // GREEN after fix: canonicalConversationKey resolves to the phone -> found.
-    const result = loadConversationWindow(db, lidJid);
+    const result = getConversationWindow(db, lidJid);
     expect(result).toHaveLength(1);
     expect(result[0].role).toBe('user');
     expect(result[0].content).toBe('[Mapped Contact]: hello from a mapped lid dm');
@@ -487,7 +487,7 @@ describe('loadConversationWindow', () => {
       });
     }
 
-    const result = loadConversationWindow(db, chat);
+    const result = getConversationWindow(db, chat);
     const allContent = result.map((m) => m.content).join('\n');
     expect(allContent).toContain('r0');
     expect(allContent).toContain('r49');

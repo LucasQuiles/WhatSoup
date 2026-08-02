@@ -36,14 +36,14 @@ vi.mock('../../../src/lib/emit-alert.ts', () => {
   };
 });
 
-const { loadFallbackStateMock } = vi.hoisted(() => ({
-  loadFallbackStateMock: vi.fn<() => unknown>(() => null),
+const { getFallbackStateMock } = vi.hoisted(() => ({
+  getFallbackStateMock: vi.fn<() => unknown>(() => null),
 }));
 vi.mock('../../../src/runtimes/agent/fallback-state-db.ts', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../../src/runtimes/agent/fallback-state-db.ts')>();
   return {
     ...actual,
-    loadFallbackState: () => loadFallbackStateMock(),
+    getFallbackState: () => getFallbackStateMock(),
   };
 });
 
@@ -200,18 +200,18 @@ describe('GAP 2 — expected-fallback severity downgrade', () => {
     vi.setSystemTime(new Date('2026-06-10T10:00:00Z'));
     vi.mocked(emitAlert).mockClear();
     lookupCredentialMock.mockReturnValue('present-key');
-    loadFallbackStateMock.mockReturnValue(null);
+    getFallbackStateMock.mockReturnValue(null);
   });
   afterEach(() => {
     vi.useRealTimers();
-    loadFallbackStateMock.mockReturnValue(null);
+    getFallbackStateMock.mockReturnValue(null);
   });
 
   // ── provider_fallback_restored ──────────────────────────────────────────────
 
   it('provider_fallback_restored fires at info — restoring is resumption, not a new fault', () => {
     const until = Date.now() + 60 * 60 * 1000;
-    loadFallbackStateMock.mockReturnValue({
+    getFallbackStateMock.mockReturnValue({
       activeUntil: until,
       activatedAt: Date.now() - 30 * 60 * 1000,
       reason: 'model-unavailable',
@@ -228,7 +228,7 @@ describe('GAP 2 — expected-fallback severity downgrade', () => {
 
   it('provider_fallback_restored does NOT fire at critical', () => {
     const until = Date.now() + 60 * 60 * 1000;
-    loadFallbackStateMock.mockReturnValue({
+    getFallbackStateMock.mockReturnValue({
       activeUntil: until,
       activatedAt: Date.now() - 30 * 60 * 1000,
       reason: 'model-unavailable',
@@ -357,11 +357,11 @@ describe('GAP 3 — opencode-cli benign-exit during fallback session', () => {
     vi.setSystemTime(new Date('2026-06-10T10:00:00Z'));
     vi.mocked(emitAlert).mockClear();
     lookupCredentialMock.mockReturnValue('present-key');
-    loadFallbackStateMock.mockReturnValue(null);
+    getFallbackStateMock.mockReturnValue(null);
   });
   afterEach(() => {
     vi.useRealTimers();
-    loadFallbackStateMock.mockReturnValue(null);
+    getFallbackStateMock.mockReturnValue(null);
   });
 
   /**

@@ -63,7 +63,7 @@ vi.mock('../../../src/runtimes/chat/rate-limiter.ts', () => ({
 }));
 
 vi.mock('../../../src/runtimes/chat/window.ts', () => ({
-  loadConversationWindow: vi.fn(),
+  getConversationWindow: vi.fn(),
 }));
 
 vi.mock('../../../src/runtimes/chat/context.ts', () => ({
@@ -133,7 +133,7 @@ vi.mock('../../../src/logger.ts', () => {
 // ---------------------------------------------------------------------------
 
 import { checkRateLimit } from '../../../src/runtimes/chat/rate-limiter.ts';
-import { loadConversationWindow } from '../../../src/runtimes/chat/window.ts';
+import { getConversationWindow } from '../../../src/runtimes/chat/window.ts';
 import { loadContextDetailed } from '../../../src/runtimes/chat/context.ts';
 import { storeMessageIfNew } from '../../../src/core/messages.ts';
 import { recordAttempt, recordResponse } from '../../../src/runtimes/chat/rate-limits-db.ts';
@@ -173,7 +173,7 @@ function mockEnrichmentPollerInstances(): unknown[] {
 // ---------------------------------------------------------------------------
 
 const mockCheckRateLimit = vi.mocked(checkRateLimit);
-const mockLoadConversationWindow = vi.mocked(loadConversationWindow);
+const mockLoadConversationWindow = vi.mocked(getConversationWindow);
 const mockLoadContext = vi.mocked(loadContextDetailed);
 const mockStoreMessage = vi.mocked(storeMessageIfNew);
 const mockRecordAttempt = vi.mocked(recordAttempt);
