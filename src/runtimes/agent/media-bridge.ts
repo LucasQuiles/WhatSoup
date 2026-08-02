@@ -5,6 +5,7 @@
 import { createServer, type Server, type Socket } from 'node:net';
 import { statSync, unlinkSync, realpathSync } from 'node:fs';
 import { resolve, extname, dirname, basename, join } from 'node:path';
+import { z } from 'zod';
 import type { Messenger, OutboundMedia } from '../../core/types.ts';
 import { destroyOutboundMediaStream } from '../../core/media-stream.ts';
 import { isPathWithinAllowedRoot } from '../../mcp/types.ts';
@@ -205,17 +206,58 @@ export function setMediaBridgeChat(bridge: MediaBridge, chatJid: string): void {
 
 // ─── Request handler ──────────────────────────────────────────────────────────
 
-interface BridgeRequest {
-  path?: unknown;
-  chatJid?: unknown;
-  caption?: unknown;
-  filename?: unknown;
-}
-
 interface BridgeResponse {
   ok: boolean;
   error?: string;
 }
+
+/**
+ * Shape schema for the *request-body prefix* handleRequest can express as
+ * pure validation: `path` (required, non-empty string) plus the two
+ * optional, non-rejecting string fields `caption`/`filename`. `chatJid` is
+ * deliberately not modeled — the handler never reads it from the parsed
+ * body (see setMediaBridgeChat/bridge._currentChatJid; a request-level
+ * chatJid is intentionally ignored), so validating it here would add a
+ * rejection mode the original ladder never had. Everything past this
+ * prefix (realpathSync canonicalization, isPathWithinAllowedRoot,
+ * statSync) depends on the filesystem and bridge state, not the request
+ * body, and stays hand-rolled below — per Tier-B lane 1
+ * (tierb-contract-lane-spec-r15 §1.5), only this prefix is expressible as
+ * a schema.
+ *
+ * Per-node `message` options reproduce the original ladder's literal
+ * `'missing path'` string exactly, regardless of which sub-condition
+ * (missing/wrong-type/empty) fired — this schema has exactly one
+ * rejectable field, so there is no first-failure-among-competing-messages
+ * ordering to resolve here (contrast with multi-message ladders elsewhere
+ * in the Tier-B set).
+ *
+ * `caption`/`filename` use `.optional().catch(undefined)` rather than a
+ * bare `.optional()`: the original ladder silently drops a wrong-typed
+ * optional field to `undefined` instead of rejecting the whole request,
+ * and a bare `.optional()` would reject on a wrong type instead of
+ * matching that cast-through behavior.
+ *
+ * The `z.object(...)` call also carries `invalid_type_error: 'missing
+ * path'` — the original ladder reached `req.path` via plain property
+ * access, which is safe (returns `undefined`) on any non-null JS value
+ * including primitives and arrays, so a non-object root (e.g. a bare
+ * `"42"` or `[]` request line) fell through to the same 'missing path'
+ * branch as an object with no `path` key. Without this override, zod's
+ * object-shape check would reject a non-object root with its own generic
+ * "Expected object, received ..." message before ever reaching the `path`
+ * field check — a byte-for-byte drift the equivalence net catches.
+ */
+const BridgeRequestShapeSchema = z.object(
+  {
+    path: z
+      .string({ required_error: 'missing path', invalid_type_error: 'missing path' })
+      .min(1, { message: 'missing path' }),
+    caption: z.string().optional().catch(undefined),
+    filename: z.string().optional().catch(undefined),
+  },
+  { invalid_type_error: 'missing path' },
+);
 
 async function handleRequest(
   rawLine: string,
@@ -223,17 +265,30 @@ async function handleRequest(
   allowedRoot: string,
   bridge: MediaBridge,
 ): Promise<BridgeResponse> {
-  let req: BridgeRequest;
+  let parsedJson: unknown;
   try {
-    req = JSON.parse(rawLine) as BridgeRequest;
+    parsedJson = JSON.parse(rawLine);
   } catch {
     return { ok: false, error: 'invalid JSON' };
   }
 
-  const filePath = typeof req.path === 'string' ? req.path : null;
-  if (!filePath) {
-    return { ok: false, error: 'missing path' };
+  // Legacy trap, preserved on purpose: a literal JSON `null` body used to
+  // crash on `req.path` property access (JS `.` access on null throws,
+  // while access on any other primitive/array is a safe `undefined`). That
+  // uncaught TypeError propagated to the outer socket handler's `.catch`,
+  // which maps it to `{ok:false, error:'internal error'}`. zod's
+  // safeParse would otherwise absorb `null` gracefully and answer
+  // 'missing path' instead — a real behavior change — so the crash path
+  // stays explicit rather than being silently fixed by the conversion.
+  if (parsedJson === null) {
+    throw new TypeError('media bridge request body is null');
   }
+
+  const shape = BridgeRequestShapeSchema.safeParse(parsedJson);
+  if (!shape.success) {
+    return { ok: false, error: shape.error.issues[0]?.message ?? 'missing path' };
+  }
+  const filePath = shape.data.path;
 
   // Canonicalize the incoming filePath so the boundary check is symmetric
   // across /var/folders vs /private/var/folders on macOS. realpathSync throws
@@ -275,11 +330,8 @@ async function handleRequest(
   const ext = extname(resolvedPath).toLowerCase();
   const mediaType: MediaType = EXT_TO_TYPE[ext] ?? 'document';
   const mimetype = EXT_TO_MIME[ext] ?? 'application/octet-stream';
-  const caption = typeof req.caption === 'string' ? req.caption : undefined;
-  const filename =
-    typeof req.filename === 'string'
-      ? req.filename
-      : basename(resolvedPath) ?? 'file';
+  const caption = shape.data.caption;
+  const filename = shape.data.filename ?? basename(resolvedPath) ?? 'file';
 
   for (let attempt = 0; ; attempt += 1) {
     const media = buildOutboundMediaFromPath(mediaType, resolvedPath, filename, mimetype, caption, allowedRoot);

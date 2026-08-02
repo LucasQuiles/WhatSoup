@@ -21,9 +21,9 @@ import type { Database } from '../../../src/core/database.ts';
 import type { Messenger } from '../../../src/core/types.ts';
 import { connect as netConnect } from 'node:net';
 import { request as httpRequest } from 'node:http';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { trackTmpDirs } from '../../helpers/tmp-dir.ts';
 
 const { mockConfig, mockRuntimeLogger } = vi.hoisted(() => ({
   mockConfig: {
@@ -294,8 +294,18 @@ function forwardGetStatus(proxyPort: number, targetHost: string, targetPort: num
 }
 
 describe('AgentRuntime egress proxy lifecycle (#1607)', () => {
-  let tmpDirs: string[] = [];
   const startedRuntimes = new Set<AgentRuntime>();
+  // Registered FIRST → under vitest's default "stack" sequence, afterEach
+  // hooks run in REVERSE registration order, so this one runs LAST — i.e.
+  // AFTER the shutdown-only afterEach below. This reproduces the original
+  // combined hook's shutdown-then-cleanup order. Do not move this below the
+  // afterEach() call — verified from @vitest/runner's own source
+  // (chunk-artifact.js getSuiteHooks, "stack" sequence default in
+  // coverage.DM_a_rWm.js) for hooks registered in the SAME describe scope;
+  // this guarantee has not been verified for cross-scope (module-level vs.
+  // describe-level) hook ordering, so this placement — not module scope — is
+  // the one to keep.
+  const tmp = trackTmpDirs('');
 
   beforeEach(() => {
     vi.clearAllMocks();
@@ -304,9 +314,9 @@ describe('AgentRuntime egress proxy lifecycle (#1607)', () => {
     mockConfig.agentFallbackProvider = undefined;
     mockConfig.agentFallbackModel = undefined;
     mockConfig.agentFallbacks = undefined;
-    tmpDirs = [];
   });
 
+  // Registered SECOND → runs FIRST under "stack" ordering.
   afterEach(async () => {
     const failures: unknown[] = [];
     const shutdownResults = await Promise.allSettled(
@@ -316,27 +326,17 @@ describe('AgentRuntime egress proxy lifecycle (#1607)', () => {
       if (result.status === 'rejected') failures.push(result.reason);
     }
     startedRuntimes.clear();
-    for (const dir of tmpDirs) {
-      try {
-        rmSync(dir, { recursive: true, force: true });
-      } catch (error) {
-        failures.push(error);
-      }
-    }
-    tmpDirs = [];
     if (failures.length > 0) {
       throw new AggregateError(failures, 'AgentRuntime egress-wiring test cleanup failed');
     }
   });
 
-  function tmp(): string {
-    const dir = mkdtempSync(join(tmpdir(), 'ws-egress-wiring-'));
-    tmpDirs.push(dir);
-    return dir;
+  function tmpCwd(): string {
+    return tmp.make('ws-egress-wiring');
   }
 
   it('sandbox WITHOUT allowedEgress starts no proxy and writes no allowedEgress key (opt-out preserved)', async () => {
-    const cwd = tmp();
+    const cwd = tmpCwd();
     const runtime = new AgentRuntime(makeDb(), makeMessenger(), 'egress-off-test', {
       cwd,
       sandbox: { allowedPaths: [], allowedTools: [], bash: { enabled: false } },
@@ -355,7 +355,7 @@ describe('AgentRuntime egress proxy lifecycle (#1607)', () => {
     // the proxy (only absent/undefined opts out). Pre-fix the start gate had
     // `.length > 0`, so `[]` started NO proxy → the child got no HTTP_PROXY →
     // UNBOUNDED egress, the exact opposite of the documented guarantee.
-    const cwd = tmp();
+    const cwd = tmpCwd();
     const runtime = new AgentRuntime(makeDb(), makeMessenger(), 'egress-empty-test', {
       cwd,
       sandbox: { allowedPaths: [], allowedTools: [], bash: { enabled: false }, allowedEgress: [] },
@@ -378,7 +378,7 @@ describe('AgentRuntime egress proxy lifecycle (#1607)', () => {
   });
 
   it('sandbox WITH a non-empty allowedEgress starts a proxy, writes the policy file, and shutdown closes it', async () => {
-    const cwd = tmp();
+    const cwd = tmpCwd();
     const runtime = new AgentRuntime(makeDb(), makeMessenger(), 'egress-on-test', {
       cwd,
       sandbox: {
