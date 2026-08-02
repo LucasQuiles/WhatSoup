@@ -10,7 +10,7 @@
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { Database } from '../../src/core/database.ts';
-import { DurabilityEngine, drainPendingOutbound } from '../../src/core/durability.ts';
+import { DurabilityEngine, drainPendingOutbound, drainPendingOutboundLocked } from '../../src/core/durability.ts';
 import type { Messenger, SubmissionReceipt } from '../../src/core/types.ts';
 
 const emitAlert = vi.hoisted(() => vi.fn(() => true));
@@ -248,5 +248,82 @@ describe('drainPendingOutbound()', () => {
     // Second claim loses: op is no longer pending, no state change.
     expect(engine.markSending(opId)).toBe(false);
     expect(getOutbound(db, opId)['status']).toBe('sending');
+  });
+
+  // #2903: replay-storm bound — an op that has cycled through crash-in-flight
+  // recovery (sending → maybe_sent → pending) many times must be quarantined
+  // instead of re-sent indefinitely. Without this bound, a crash-loop produces
+  // ~hundreds of duplicate notices/sec.
+  it('quarantines an op that exceeded MAX_OUTBOUND_REPLAY_ATTEMPTS instead of re-sending it', async () => {
+    const opId = engine.createOutboundOp({
+      conversationKey: 'k1', chatJid: 'j1@s.whatsapp.net', opType: 'text',
+      payload: JSON.stringify({ text: 'storm victim' }), replayPolicy: 'safe',
+    });
+    // Simulate 50 prior crash-loop cycles by bumping retry_count past the cap.
+    db.raw.prepare('UPDATE outbound_ops SET retry_count = 50 WHERE id = ?').run(opId);
+    expect(getOutbound(db, opId)['retry_count']).toBe(50);
+
+    const messenger = makeMessenger(async () => ({ waMessageId: 'SHOULD_NOT_SEND' }));
+    const { resent, expired } = await drainPendingOutbound(messenger, engine);
+
+    // The op must NOT have been re-sent.
+    expect(messenger.sendMessage).not.toHaveBeenCalled();
+    expect(resent).toBe(0);
+    expect(expired).toBe(0);
+
+    // The op must be quarantined (terminal state, not pending).
+    // Note: quarantine does not set is_terminal=1 in the drain path — it matches
+    // the existing pattern for deferral_limit_exceeded quarantine.
+    const row = getOutbound(db, opId);
+    expect(row['status']).toBe('quarantined');
+
+    // An alert must have been emitted for operator visibility.
+    expect(emitAlert).toHaveBeenCalled();
+  });
+
+  it('still re-sends an op that is under MAX_OUTBOUND_REPLAY_ATTEMPTS', async () => {
+    const opId = engine.createOutboundOp({
+      conversationKey: 'k1', chatJid: 'j1@s.whatsapp.net', opType: 'text',
+      payload: JSON.stringify({ text: 'under cap' }), replayPolicy: 'safe',
+    });
+    // 49 attempts — one under the cap of 50.
+    db.raw.prepare('UPDATE outbound_ops SET retry_count = 49 WHERE id = ?').run(opId);
+
+    const messenger = makeMessenger(async () => ({ waMessageId: 'WA_OK' }));
+    const { resent } = await drainPendingOutbound(messenger, engine);
+
+    expect(messenger.sendMessage).toHaveBeenCalledWith('j1@s.whatsapp.net', 'under cap');
+    expect(resent).toBe(1);
+    expect(getOutbound(db, opId)['status']).toBe('submitted');
+  });
+
+  // #2903: drainPendingOutboundLocked prevents concurrent drain invocations
+  // from overlapping on the same pending snapshot.
+  it('drainPendingOutboundLocked skips a concurrent drain invocation', async () => {
+    engine.createOutboundOp({
+      conversationKey: 'k1', chatJid: 'j1@s.whatsapp.net', opType: 'text',
+      payload: JSON.stringify({ text: 'lock test' }), replayPolicy: 'safe',
+    });
+
+    let sendResolve: (() => void) | undefined;
+    const messenger = makeMessenger(
+      () => new Promise<SubmissionReceipt>((resolve) => {
+        sendResolve = () => resolve({ waMessageId: 'WA_LOCK' });
+      }),
+    );
+
+    // Start first drain — it will hang on the unresolved sendMessage.
+    const first = drainPendingOutboundLocked(messenger, engine);
+    // Start second drain concurrently — must be skipped (lock held).
+    const second = drainPendingOutboundLocked(messenger, engine);
+    const secondResult = await second;
+
+    // Second drain returned immediately with zero work.
+    expect(secondResult).toEqual({ resent: 0, expired: 0 });
+
+    // Release the first drain.
+    sendResolve!();
+    const firstResult = await first;
+    expect(firstResult.resent).toBe(1);
   });
 });

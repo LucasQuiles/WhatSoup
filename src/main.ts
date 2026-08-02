@@ -44,7 +44,7 @@ import { createSettingsPolicyAdapter, createFileGrantStore, assertGroupsRespectD
 import { toConversationKey } from './core/conversation-key.ts';
 import { resolveConfiguredAdminJid, toPersonalJid, toLidJid, toSignalJid } from './core/jid-constants.ts';
 import { selectReplayableDms, rememberReplayedId, type AccessReplayOutcome } from './core/admin.ts';
-import { DurabilityEngine, sendTracked, drainPendingOutbound } from './core/durability.ts';
+import { DurabilityEngine, sendTracked, drainPendingOutboundLocked } from './core/durability.ts';
 import { waitForHistorySyncThenRecover } from './core/post-connect-recovery.ts';
 import { seedChatAliases } from './core/chats-resolver.ts';
 import { createProfileRegistry } from './core/profiles.ts';
@@ -999,7 +999,7 @@ const echoTimeoutInterval = setInterval(() => {
   } catch (err) { log.error({ err }, 'live maybe-sent reconciliation failed'); }
   // Drain any ops that landed in `pending` between reconnects (BEAD-057).
   // Fire-and-forget, matching this interval's existing style.
-  drainPendingOutbound(connectionManager, durability)
+  drainPendingOutboundLocked(connectionManager, durability)
     .catch((err) => log.error({ err }, 'echo timeout drain failed'));
 }, 10_000);
 
@@ -1126,9 +1126,9 @@ async function start(): Promise<void> {
       // Re-send ops that postConnectRecovery reset to `pending` (BEAD-057).
       // Failure-isolated: a drain error must never break startup.
       try {
-        await drainPendingOutbound(connectionManager, durability);
+        await drainPendingOutboundLocked(connectionManager, durability);
       } catch (err) {
-        log.error({ err }, 'drainPendingOutbound on post-connect recovery failed');
+        log.error({ err }, 'drainPendingOutboundLocked on post-connect recovery failed');
       }
     },
   });

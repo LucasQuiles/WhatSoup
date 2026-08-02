@@ -61,6 +61,7 @@ const INTERNAL_OUTBOUND_FAILURE_CODE_MAP: Record<InternalOutboundFailureCode, tr
   'outbound.identity_blocked': true,
   'outbound.replay_failed': true,
   'outbound.deferral_limit_exceeded': true,
+  'outbound.replay_attempt_limit_exceeded': true,
 };
 
 const sorted = (values: Iterable<string>): string[] => [...values].sort();

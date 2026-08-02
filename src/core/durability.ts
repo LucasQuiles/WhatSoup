@@ -166,6 +166,32 @@ const STATUS_OP_TTL_MS = 30 * MS_PER_MINUTE;
 const MAX_TEXT_OP_DEFERRAL_COUNT = 20;
 
 /**
+ * Hard cap on total replay attempts for any outbound op, regardless of failure
+ * class. Unlike {@link MAX_TEXT_OP_DEFERRAL_COUNT} (which only bounds the
+ * `retry_not_before` deferral path for text ops), this bound is checked at the
+ * TOP of the drain loop before any branching — so an op that cycles through
+ * `maybe_sent` → `pending` (crash-in-flight recovery without echo
+ * corroboration) is guaranteed to terminate rather than replay indefinitely.
+ *
+ * The crash-loop storm scenario (#2903): a process crashes mid-send on each
+ * cycle, recovery promotes `sending` → `maybe_sent`, the maybe_sent
+ * reconciliation finds no echo, resets to `pending`, and the drain re-sends —
+ * producing ~hundreds of duplicate notices/sec. This cap quarantines the op
+ * after {@link MAX_OUTBOUND_REPLAY_ATTEMPTS} attempts, breaking the loop.
+ */
+const MAX_OUTBOUND_REPLAY_ATTEMPTS = 50;
+
+/**
+ * Module-level lock for {@link drainPendingOutboundLocked}. Prevents
+ * concurrent drain invocations from overlapping on the same pending snapshot
+ * (the fire-and-forget call in main.ts vs. the post-connect recovery call).
+ * The per-op `markSending` CAS guard prevents double-sends on the same op ID,
+ * but concurrent drains waste cycles and can produce duplicate sends if the
+ * CAS window is raced by two read-then-iterate loops on the same snapshot.
+ */
+let drainOutboundInProgress = false;
+
+/**
  * Emits only bounded taxonomy data. A quarantined outbound record can contain
  * user content or provider diagnostics in its durable payload, so neither is
  * included in the operator-facing alert.
@@ -3090,6 +3116,34 @@ export async function drainPendingOutbound(
 
   for (const op of pending) {
     try {
+      // #2903: Hard replay-attempt cap. Checked BEFORE any failure-class
+      // branching so an op cycling through crash-in-flight recovery
+      // (sending → maybe_sent → pending) is guaranteed to terminate. The
+      // existing MAX_TEXT_OP_DEFERRAL_COUNT only bounds the retry_not_before
+      // deferral path; this cap covers ALL replay vectors.
+      if (op.retry_count >= MAX_OUTBOUND_REPLAY_ATTEMPTS) {
+        const priorEvidence = op.failure_evidence.schema === 'whatsoup-outbound-failure-v1'
+          ? op.failure_evidence
+          : undefined;
+        const evidence = createInternalOutboundFailureEvidence({
+          failureCode: 'outbound.replay_attempt_limit_exceeded',
+          stage: 'admission',
+          mutationState: 'not_started',
+          logicalAttemptCount: op.retry_count,
+          providerSubmissionCount: priorEvidence?.provider_submission_count ?? 0,
+          previousEvidence: priorEvidence,
+          evidenceCoverage: priorEvidence ? 'complete' : 'partial',
+        });
+        const changed = durability.markQuarantined(op.id, evidence);
+        if (!changed) continue;
+        log.warn(
+          { opId: op.id, retryCount: op.retry_count, maxReplayAttempts: MAX_OUTBOUND_REPLAY_ATTEMPTS },
+          'drainPendingOutbound: op exceeded MAX_OUTBOUND_REPLAY_ATTEMPTS → quarantined',
+        );
+        emitOutboundQuarantineAlert(evidence);
+        continue;
+      }
+
       const priorEvidence = op.failure_evidence.schema === 'whatsoup-outbound-failure-v1'
         ? op.failure_evidence
         : undefined;
@@ -3273,4 +3327,31 @@ export function makeConfirmedOutboundProbe(
       | undefined;
     return row?.ok === 1;
   };
+}
+
+/**
+ * Lock-guarded drain wrapper (#2903). Prevents concurrent invocations of
+ * {@link drainPendingOutbound} from overlapping on the same pending snapshot.
+ *
+ * The fire-and-forget call in main.ts and the post-connect recovery call can
+ * race when a reconnect happens while a drain is already in flight. The per-op
+ * `markSending` CAS guard prevents double-sends on the same op ID, but two
+ * concurrent drains iterating the same snapshot is wasteful and risks
+ * duplicate sends if the CAS window is narrow. This wrapper returns
+ * `{ resent: 0, expired: 0 }` when a drain is already in progress.
+ */
+export async function drainPendingOutboundLocked(
+  messenger: Messenger,
+  durability: DurabilityEngine,
+): Promise<{ resent: number; expired: number }> {
+  if (drainOutboundInProgress) {
+    log.debug('drainPendingOutboundLocked: drain already in progress, skipping');
+    return { resent: 0, expired: 0 };
+  }
+  drainOutboundInProgress = true;
+  try {
+    return await drainPendingOutbound(messenger, durability);
+  } finally {
+    drainOutboundInProgress = false;
+  }
 }
