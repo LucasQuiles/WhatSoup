@@ -75,6 +75,7 @@ export const CURATED_TEST_PATHS = [
   'tests/scripts/fail-closed-gate-guard.test.ts',
   'tests/scripts/shell-node-integer-capture-guard.test.ts',
   'tests/scripts/durability-writer-guard.test.ts',
+  'tests/scripts/tmpdir-helper-migration.test.ts',
   'tests/scripts/grant-resolver-inventory-guard.test.ts',
   'tests/scripts/ssot-pattern-guard.test.ts',
   'tests/scripts/ring-boundary-guard.test.ts',
