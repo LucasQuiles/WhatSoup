@@ -6,15 +6,30 @@ import type { TransportError } from './errors.ts';
 import type { Subscription } from './subscription.ts';
 import type { SendTextOptions } from './commands.ts';
 
-export type AdapterState =
-  | 'starting'
-  | 'connected'
-  | 'degraded'
-  | 'disconnected'
-  | 'auth_required'
-  | 'rate_limited'
-  | 'exhausted'
-  | 'stopping';
+// Canonical adapter operational-health union (#2201). This models HOW the
+// adapter is doing — deliberately distinct from ConnectionLifecycleState
+// (transport/connection.ts), which models the socket's connect/disconnect
+// phase. The two axes share only 'connected'/'disconnected' by design; the
+// arch-ratchet test (tests/scripts/connection-state-union-ssot.test.ts)
+// asserts that declared overlap so neither side can drift silently.
+export const ALL_ADAPTER_STATES = [
+  'starting',
+  'connected',
+  'degraded',
+  'disconnected',
+  'auth_required',
+  'rate_limited',
+  'exhausted',
+  'stopping',
+] as const;
+
+export type AdapterState = (typeof ALL_ADAPTER_STATES)[number];
+
+/** Type-narrow for values crossing an untyped boundary (logs, JSON, IPC). */
+export function isAdapterState(value: unknown): value is AdapterState {
+  return typeof value === 'string'
+    && (ALL_ADAPTER_STATES as readonly string[]).includes(value);
+}
 
 export interface AdapterHealth {
   readonly state: AdapterState;

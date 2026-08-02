@@ -1,5 +1,20 @@
 import { describe, it, expect } from 'vitest';
-import { asNonEmptyString, asRecord, isNonEmptyString, isRecord } from '../../src/lib/type-guards.js';
+import {
+  asNonEmptyString,
+  asRecord,
+  isNonEmptyString,
+  isRecord,
+  requireArrayOfRecords,
+  requireBoolean,
+  requireEnum,
+  requireNullableBoolean,
+  requireNullableNumber,
+  requireNullableString,
+  requireNumber,
+  requireRecord,
+  requireString,
+  requireStringArray,
+} from '../../src/lib/type-guards.js';
 
 /**
  * Contract-lock tests for isRecord.
@@ -212,5 +227,315 @@ describe('asNonEmptyString', () => {
     for (const probe of probes) {
       expect(asNonEmptyString(probe) !== undefined).toBe(isNonEmptyString(probe));
     }
+  });
+});
+
+/**
+ * Contract-lock tests for requireRecord — the throwing companion to
+ * isRecord/asRecord.
+ *
+ * Contract: returns the value itself (same reference, narrowed to
+ * Record<string, unknown>) when isRecord holds, otherwise throws an `Error`
+ * whose message contains the caller-supplied `label`. Naming mirrors the
+ * `require*` prefix already used by throwing validators elsewhere in the
+ * codebase (e.g. scripts/lib/ci-control/result.ts `requireRecord`) — kept
+ * distinct from `asRecord` (the non-throwing coercer) so the two never
+ * collide on name or behaviour.
+ */
+describe('requireRecord', () => {
+  describe('returns the same reference for record values', () => {
+    it.each([
+      ['empty object literal', {}],
+      ['object with primitive value', { a: 1 }],
+      ['nested object', { a: { b: 2 } }],
+      ['Object.create(null) — no prototype', Object.create(null) as Record<string, unknown>],
+      ['Date instance (pinned: isRecord accepts object instances)', new Date()],
+    ])('%s', (_label, value) => {
+      expect(requireRecord(value, 'X')).toBe(value);
+    });
+  });
+
+  describe('throws with the label embedded for non-records', () => {
+    it.each([
+      ['null', null],
+      ['undefined', undefined],
+      ['empty string', ''],
+      ['non-empty string', 'string'],
+      ['zero', 0],
+      ['true', true],
+      ['empty array', []],
+      ['populated array', [1, 2, 3]],
+    ])('%s', (_label, value) => {
+      expect(() => requireRecord(value, 'X')).toThrow('X must be an object');
+    });
+  });
+
+  it('agrees with isRecord on every probe (delegation contract)', () => {
+    const probes: unknown[] = [
+      {}, { a: 1 }, [], [1], null, undefined, '', 'x', 0, 1, true, false, new Date(), () => {},
+    ];
+    for (const probe of probes) {
+      let threw = false;
+      try {
+        requireRecord(probe, 'X');
+      } catch {
+        threw = true;
+      }
+      expect(!threw).toBe(isRecord(probe));
+    }
+  });
+});
+
+/**
+ * Contract-lock tests for requireString.
+ *
+ * Contract: returns the string itself (no trimming — distinct from
+ * asNonEmptyString, which trims) when the value is a non-empty string,
+ * otherwise throws an `Error` whose message contains `label`. "Non-empty"
+ * here means `.length > 0`, NOT `isNonEmptyString`'s whitespace-aware
+ * definition — a call site that needs whitespace-rejection should compose
+ * `asNonEmptyString`/`isNonEmptyString` instead.
+ */
+describe('requireString', () => {
+  describe('returns the string for non-empty strings', () => {
+    it.each([
+      ['single word', 'hello'],
+      ['whitespace-only string (accepted — length > 0, not trim-checked)', '   '],
+      ['single character', 'x'],
+    ])('%s', (_label, value) => {
+      expect(requireString(value, 'X')).toBe(value);
+    });
+  });
+
+  describe('throws with the label embedded for non-strings or empty string', () => {
+    it.each([
+      ['empty string', ''],
+      ['null', null],
+      ['undefined', undefined],
+      ['zero', 0],
+      ['positive integer', 42],
+      ['true', true],
+      ['empty object', {}],
+      ['empty array', []],
+    ])('%s', (_label, value) => {
+      expect(() => requireString(value, 'X')).toThrow('X must be a string');
+    });
+  });
+});
+
+/**
+ * Contract-lock tests for requireBoolean.
+ */
+describe('requireBoolean', () => {
+  it.each([
+    ['true', true],
+    ['false', false],
+  ])('returns the boolean for %s', (_label, value) => {
+    expect(requireBoolean(value, 'X')).toBe(value);
+  });
+
+  describe('throws with the label embedded for non-booleans', () => {
+    it.each([
+      ['null', null],
+      ['undefined', undefined],
+      ['zero', 0],
+      ['one', 1],
+      ['string "true"', 'true'],
+      ['empty object', {}],
+      ['empty array', []],
+    ])('%s', (_label, value) => {
+      expect(() => requireBoolean(value, 'X')).toThrow('X must be a boolean');
+    });
+  });
+});
+
+/**
+ * Contract-lock tests for requireNumber.
+ *
+ * Contract: accepts any finite number (rejects NaN/Infinity — a common
+ * silent-corruption vector for untrusted JSON payloads that the plain
+ * `typeof value === 'number'` clones being replaced do not uniformly guard
+ * against).
+ */
+describe('requireNumber', () => {
+  it.each([
+    ['zero', 0],
+    ['positive integer', 42],
+    ['negative integer', -1],
+    ['float', 3.14],
+  ])('returns the number for %s', (_label, value) => {
+    expect(requireNumber(value, 'X')).toBe(value);
+  });
+
+  describe('throws with the label embedded for non-finite-numbers', () => {
+    it.each([
+      ['null', null],
+      ['undefined', undefined],
+      ['string "1"', '1'],
+      ['true', true],
+      ['NaN', NaN],
+      ['Infinity', Infinity],
+      ['-Infinity', -Infinity],
+      ['empty object', {}],
+      ['empty array', []],
+    ])('%s', (_label, value) => {
+      expect(() => requireNumber(value, 'X')).toThrow('X must be a number');
+    });
+  });
+});
+
+/**
+ * Contract-lock tests for requireEnum.
+ *
+ * Contract: `(value, label, allowed)` — `label` is the second parameter
+ * (matching every other `require*` helper's argument order in this module)
+ * and `allowed` is a `ReadonlySet<T>` (not an array — `Set.has` gives O(1)
+ * membership, matching the SSOT's existing `Set`-based call sites such as
+ * scripts/provider-parity-report.ts's `EXPECTATION_VALUES`).
+ */
+describe('requireEnum', () => {
+  const ALLOWED = new Set(['a', 'b'] as const);
+
+  it('returns the value when it is a member of the allowed set', () => {
+    expect(requireEnum('a', 'X', ALLOWED)).toBe('a');
+    expect(requireEnum('b', 'X', ALLOWED)).toBe('b');
+  });
+
+  describe('throws with the label and allowed set embedded for non-members', () => {
+    it.each([
+      ['string not in the set', 'c'],
+      ['null', null],
+      ['undefined', undefined],
+      ['number', 1],
+      ['empty object', {}],
+    ])('%s', (_label, value) => {
+      expect(() => requireEnum(value, 'X', ALLOWED)).toThrow(/X must be one of a, b/);
+    });
+  });
+});
+
+/**
+ * Contract-lock tests for the nullable require* variants.
+ *
+ * Contract: accept `null` OR the base type; throw for everything else
+ * (including `undefined`, which is deliberately NOT treated as `null` — a
+ * missing key and an explicit null are different failure signatures for a
+ * strict schema, mirroring scripts/provider-parity-report.ts's original
+ * clones).
+ */
+describe('requireNullableString', () => {
+  it('returns null for null', () => {
+    expect(requireNullableString(null, 'X')).toBeNull();
+  });
+
+  it('returns the string for string values', () => {
+    expect(requireNullableString('hello', 'X')).toBe('hello');
+  });
+
+  describe('throws with the label embedded for everything else', () => {
+    it.each([
+      ['undefined', undefined],
+      ['number', 1],
+      ['boolean', true],
+      ['empty object', {}],
+      ['empty array', []],
+    ])('%s', (_label, value) => {
+      expect(() => requireNullableString(value, 'X')).toThrow('X must be a string or null');
+    });
+  });
+});
+
+describe('requireNullableBoolean', () => {
+  it('returns null for null', () => {
+    expect(requireNullableBoolean(null, 'X')).toBeNull();
+  });
+
+  it.each([
+    ['true', true],
+    ['false', false],
+  ])('returns the boolean for %s', (_label, value) => {
+    expect(requireNullableBoolean(value, 'X')).toBe(value);
+  });
+
+  describe('throws with the label embedded for everything else', () => {
+    it.each([
+      ['undefined', undefined],
+      ['number', 1],
+      ['string', 'true'],
+      ['empty object', {}],
+    ])('%s', (_label, value) => {
+      expect(() => requireNullableBoolean(value, 'X')).toThrow('X must be a boolean or null');
+    });
+  });
+});
+
+describe('requireNullableNumber', () => {
+  it('returns null for null', () => {
+    expect(requireNullableNumber(null, 'X')).toBeNull();
+  });
+
+  it.each([
+    ['zero', 0],
+    ['positive integer', 42],
+    ['float', 3.14],
+  ])('returns the number for %s', (_label, value) => {
+    expect(requireNullableNumber(value, 'X')).toBe(value);
+  });
+
+  describe('throws with the label embedded for everything else (including NaN/Infinity)', () => {
+    it.each([
+      ['undefined', undefined],
+      ['string', '1'],
+      ['boolean', true],
+      ['NaN', NaN],
+      ['Infinity', Infinity],
+      ['empty object', {}],
+    ])('%s', (_label, value) => {
+      expect(() => requireNullableNumber(value, 'X')).toThrow('X must be a finite number or null');
+    });
+  });
+});
+
+/**
+ * Contract-lock tests for requireStringArray.
+ *
+ * Contract: every element must satisfy requireString (non-empty string);
+ * per-element failures embed the array index in the thrown label
+ * (`${label}[${index}]`), matching the original clone's convention.
+ */
+describe('requireStringArray', () => {
+  it('returns the array for an all-string array (including empty)', () => {
+    expect(requireStringArray([], 'X')).toEqual([]);
+    expect(requireStringArray(['a', 'b'], 'X')).toEqual(['a', 'b']);
+  });
+
+  it('throws for a non-array', () => {
+    expect(() => requireStringArray('not-an-array', 'X')).toThrow('X must be an array');
+    expect(() => requireStringArray(null, 'X')).toThrow('X must be an array');
+  });
+
+  it('throws with the index embedded for a non-string element', () => {
+    expect(() => requireStringArray(['a', 1, 'c'], 'X')).toThrow('X[1] must be a string');
+  });
+});
+
+/**
+ * Contract-lock tests for requireArrayOfRecords.
+ *
+ * Contract: every element must satisfy requireRecord; per-element failures
+ * embed the array index in the thrown label.
+ */
+describe('requireArrayOfRecords', () => {
+  it('returns the array for an all-record array (including empty)', () => {
+    expect(requireArrayOfRecords([], 'X')).toEqual([]);
+    expect(requireArrayOfRecords([{ a: 1 }, {}], 'X')).toEqual([{ a: 1 }, {}]);
+  });
+
+  it('throws for a non-array', () => {
+    expect(() => requireArrayOfRecords('not-an-array', 'X')).toThrow('X must be an array');
+  });
+
+  it('throws with the index embedded for a non-record element', () => {
+    expect(() => requireArrayOfRecords([{}, 'nope'], 'X')).toThrow('X[1] must be an object');
   });
 });

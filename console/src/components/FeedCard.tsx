@@ -5,6 +5,7 @@ import FeedIcon from "./FeedIcon";
 import { formatWhatsAppText } from "../lib/format-wa-text";
 import { getProvider } from "../lib/providers";
 import { statusAlertMessage, statusColorToken, statusSeverity } from "../lib/status-severity";
+import { isNonEmptyString } from "../lib/type-guards";
 import { Button } from "./primitives/Button";
 
 // ---------------------------------------------------------------------------
@@ -50,11 +51,11 @@ type ImportDetail = Extract<FeedDetail, { type: "import" }>;
 const EMPTY_TEXT = "\u2014";
 
 function displayText(value: unknown): string {
-  return typeof value === "string" && value.trim() ? value : EMPTY_TEXT;
+  return isNonEmptyString(value) ? value : EMPTY_TEXT;
 }
 
 function optionalText(value: unknown): string | undefined {
-  return typeof value === "string" && value.trim() ? value : undefined;
+  return isNonEmptyString(value) ? value : undefined;
 }
 
 function healthTone(d: HealthDetail): BadgeTone {
