@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { chmodSync, existsSync, readFileSync, statSync, utimesSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
+import { trackTmpDirs } from '../helpers/tmp-dir.ts';
 
 // @ts-expect-error -- hook libraries are JavaScript modules imported by Node hooks; expires 2026-08-14
 import * as rgpState from '../../deploy/hooks/lib/rgp-state.mjs';
@@ -22,13 +22,12 @@ const {
   withQueueLock,
 } = rgpState;
 
-const tmpHomes: string[] = [];
+const tmp = trackTmpDirs('');
 let originalHome: string | undefined;
 let originalInstance: string | undefined;
 
 function useTmpHome(): string {
-  const dir = mkdtempSync(join(tmpdir(), 'rgp-state-'));
-  tmpHomes.push(dir);
+  const dir = tmp.make('rgp-state');
   process.env.HOME = dir;
   return dir;
 }
@@ -40,10 +39,6 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.useRealTimers();
-  for (const dir of tmpHomes) {
-    rmSync(dir, { recursive: true, force: true });
-  }
-  tmpHomes.length = 0;
   if (originalHome === undefined) delete process.env.HOME;
   else process.env.HOME = originalHome;
   if (originalInstance === undefined) delete process.env.WHATSOUP_INSTANCE;

@@ -13,6 +13,17 @@ import {
   type ProviderProbeSnapshotState,
 } from '../src/fleet/provider-parity.ts';
 import { assertNoSecretLike } from './artifact-redaction.ts';
+import {
+  requireArrayOfRecords,
+  requireBoolean,
+  requireEnum,
+  requireNullableBoolean,
+  requireNullableNumber,
+  requireNullableString,
+  requireRecord,
+  requireString,
+  requireStringArray,
+} from '../src/lib/type-guards.ts';
 
 interface ProviderParityReportArgs {
   inputPath: string;
@@ -63,76 +74,26 @@ function parseArgs(argv: string[]): ProviderParityReportArgs {
   return { inputPath, jsonOut, mdOut, help };
 }
 
-function asRecord(value: unknown, label: string): Record<string, unknown> {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) {
-    throw new Error(`${label} must be a JSON object`);
-  }
-  return value as Record<string, unknown>;
-}
-
-function requireString(value: unknown, label: string): string {
-  if (typeof value !== 'string' || value.length === 0) throw new Error(`${label} must be a string`);
-  return value;
-}
-
-function requireBoolean(value: unknown, label: string): boolean {
-  if (typeof value !== 'boolean') throw new Error(`${label} must be a boolean`);
-  return value;
-}
-
-function requireNullableString(value: unknown, label: string): string | null {
-  if (value === null || typeof value === 'string') return value;
-  throw new Error(`${label} must be a string or null`);
-}
-
-function requireNullableBoolean(value: unknown, label: string): boolean | null {
-  if (value === null || typeof value === 'boolean') return value;
-  throw new Error(`${label} must be a boolean or null`);
-}
-
-function requireNullableNumber(value: unknown, label: string): number | null {
-  if (value === null || (typeof value === 'number' && Number.isFinite(value))) return value;
-  throw new Error(`${label} must be a finite number or null`);
-}
-
-function requireStringArray(value: unknown, label: string): string[] {
-  if (!Array.isArray(value)) throw new Error(`${label} must be an array`);
-  value.forEach((entry, index) => requireString(entry, `${label}[${index}]`));
-  return value as string[];
-}
-
-function requireArrayOfRecords(value: unknown, label: string): Record<string, unknown>[] {
-  if (!Array.isArray(value)) throw new Error(`${label} must be an array`);
-  return value.map((entry, index) => asRecord(entry, `${label}[${index}]`));
-}
-
-function requireEnum<T extends string>(value: unknown, allowed: ReadonlySet<T>, label: string): T {
-  if (typeof value !== 'string' || !allowed.has(value as T)) {
-    throw new Error(`${label} must be one of: ${[...allowed].join(', ')}`);
-  }
-  return value as T;
-}
-
 function validateExpectedRows(rows: unknown[]): void {
   rows.forEach((row, index) => {
-    const item = asRecord(row, `expected[${index}]`);
+    const item = requireRecord(row, `expected[${index}]`);
     requireString(item.host, `expected[${index}].host`);
     requireString(item.instance, `expected[${index}].instance`);
-    requireEnum(item.expected, EXPECTATION_VALUES, `expected[${index}].expected`);
-    requireEnum(item.type, INSTANCE_TYPE_VALUES, `expected[${index}].type`);
+    requireEnum(item.expected, `expected[${index}].expected`, EXPECTATION_VALUES);
+    requireEnum(item.type, `expected[${index}].type`, INSTANCE_TYPE_VALUES);
     requireBoolean(item.providerProbeExpected, `expected[${index}].providerProbeExpected`);
   });
 }
 
 function validateStatusSnapshot(value: unknown, label: string): void {
   if (value === null) return;
-  const status = asRecord(value, label);
-  const primary = asRecord(status.primary, `${label}.primary`);
+  const status = requireRecord(value, label);
+  const primary = requireRecord(status.primary, `${label}.primary`);
   requireNullableString(primary.provider, `${label}.primary.provider`);
   requireNullableString(primary.model, `${label}.primary.model`);
   requireNullableBoolean(primary.keyPresent, `${label}.primary.keyPresent`);
 
-  const fallback = asRecord(status.fallback, `${label}.fallback`);
+  const fallback = requireRecord(status.fallback, `${label}.fallback`);
   requireNullableString(fallback.provider, `${label}.fallback.provider`);
   requireNullableString(fallback.model, `${label}.fallback.model`);
   requireNullableBoolean(fallback.keyPresent, `${label}.fallback.keyPresent`);
@@ -141,7 +102,7 @@ function validateStatusSnapshot(value: unknown, label: string): void {
   requireNullableString(fallback.effectiveProvider, `${label}.fallback.effectiveProvider`);
   requireBoolean(fallback.recoveryProbeRequired, `${label}.fallback.recoveryProbeRequired`);
   if (fallback.activeEntry !== null) {
-    const activeEntry = asRecord(fallback.activeEntry, `${label}.fallback.activeEntry`);
+    const activeEntry = requireRecord(fallback.activeEntry, `${label}.fallback.activeEntry`);
     requireString(activeEntry.provider, `${label}.fallback.activeEntry.provider`);
     requireNullableString(activeEntry.model, `${label}.fallback.activeEntry.model`);
   }
@@ -152,7 +113,7 @@ function validateStatusSnapshot(value: unknown, label: string): void {
     requireNullableBoolean(entry.eligible, `${label}.fallback.chain[${index}].eligible`);
   });
 
-  const signal = asRecord(status.signal, `${label}.signal`);
+  const signal = requireRecord(status.signal, `${label}.signal`);
   requireNullableString(signal.status, `${label}.signal.status`);
   requireNullableString(signal.confidence, `${label}.signal.confidence`);
   requireNullableString(signal.reason, `${label}.signal.reason`);
@@ -169,11 +130,11 @@ function validateStatuses(statuses: Record<string, unknown>): void {
 
 function validateProbes(probes: unknown[]): void {
   probes.forEach((probe, index) => {
-    const item = asRecord(probe, `probes[${index}]`);
+    const item = requireRecord(probe, `probes[${index}]`);
     requireString(item.host, `probes[${index}].host`);
     requireString(item.instance, `probes[${index}].instance`);
     requireString(item.provider, `probes[${index}].provider`);
-    requireEnum(item.state, PROBE_STATE_VALUES, `probes[${index}].state`);
+    requireEnum(item.state, `probes[${index}].state`, PROBE_STATE_VALUES);
     if (item.evidenceRef !== undefined) requireString(item.evidenceRef, `probes[${index}].evidenceRef`);
     if (item.reason !== undefined) requireString(item.reason, `probes[${index}].reason`);
   });
@@ -183,12 +144,12 @@ function readInput(file: string): ProviderParityInput {
   if (!existsSync(file)) throw new Error(`input not found: ${file}`);
   const text = readFileSync(file, 'utf8');
   assertRedacted(text);
-  const parsed = asRecord(JSON.parse(text), 'input');
+  const parsed = requireRecord(JSON.parse(text), 'input');
   if (typeof parsed.generatedAtUtc !== 'string') throw new Error('generatedAtUtc must be a string');
   if (typeof parsed.targetMain !== 'string') throw new Error('targetMain must be a string');
   if (!Array.isArray(parsed.expected)) throw new Error('expected must be an array');
   validateExpectedRows(parsed.expected);
-  const statuses = asRecord(parsed.statuses, 'statuses');
+  const statuses = requireRecord(parsed.statuses, 'statuses');
   validateStatuses(statuses);
   if (parsed.probes !== undefined && !Array.isArray(parsed.probes)) throw new Error('probes must be an array');
   if (Array.isArray(parsed.probes)) validateProbes(parsed.probes);

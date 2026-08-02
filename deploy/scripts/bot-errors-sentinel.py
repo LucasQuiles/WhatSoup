@@ -1729,7 +1729,7 @@ def _instance_lock_path() -> Path:
     return Path(
         os.environ.get(
             "BOT_ERRORS_FLEET_SENTINEL_LOCK",
-            str(Path.home() / ".local/state/bot-errors/fleet-sentinel/sentinel-instance.lock"),
+            str(state_root() / "sentinel-instance.lock"),
         )
     )
 

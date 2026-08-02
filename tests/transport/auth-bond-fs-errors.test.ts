@@ -1,23 +1,20 @@
-import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { trackTmpDirs } from '../helpers/tmp-dir.ts';
 
 type FsModule = typeof import('node:fs');
 
 const actualFs = await vi.importActual<FsModule>('node:fs');
 
-let tmpRoots: string[] = [];
+const tmp = trackTmpDirs('');
 
 afterEach(() => {
   vi.doUnmock('node:fs');
   vi.resetModules();
-  for (const root of tmpRoots.splice(0)) actualFs.rmSync(root, { recursive: true, force: true });
 });
 
 function makeRoot(): string {
-  const root = actualFs.mkdtempSync(join(tmpdir(), 'whatsoup-auth-bond-fs-errors-'));
-  tmpRoots.push(root);
-  return root;
+  return tmp.make('whatsoup-auth-bond-fs-errors');
 }
 
 function writeAuth(authDir: string, id = '15550100001:1@s.whatsapp.net'): void {

@@ -2,6 +2,7 @@ import { type FC, type ReactElement } from 'react'
 import { Image, Film, FileAudio, FileText, HelpCircle } from 'lucide-react'
 import type { Message } from '../types'
 import { formatWhatsAppText } from '../lib/format-wa-text'
+import { isNonEmptyString } from '../lib/type-guards'
 
 function formatMediaDuration(seconds: number): string {
   return seconds > 0 ? `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}` : ''
@@ -125,7 +126,7 @@ const RichMedia: FC<{ msg: Message; highlightQuery?: string }> = ({ msg, highlig
       const raw = JSON.parse(msg.rawMessage)
       const doc = raw?.message?.documentMessage || raw?.message?.documentWithCaptionMessage?.message?.documentMessage
       if (doc) {
-        const fileName = typeof doc.fileName === 'string' && doc.fileName.trim() ? doc.fileName : 'Document'
+        const fileName = isNonEmptyString(doc.fileName) ? doc.fileName : 'Document'
         const fileLength = doc.fileLength ? Number(doc.fileLength) : 0
         const fileSize = Number.isFinite(fileLength) && fileLength > 0 ? formatBytes(fileLength) : ''
         const ext = fileName.includes('.') ? fileName.split('.').pop()?.toUpperCase() : ''

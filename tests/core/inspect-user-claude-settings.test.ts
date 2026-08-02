@@ -1,31 +1,22 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { describe, expect, it } from 'vitest';
 import {
   existsSync,
   mkdirSync,
-  mkdtempSync,
   readFileSync,
-  rmSync,
   symlinkSync,
   writeFileSync,
 } from 'node:fs';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { inspectUserClaudeSettings } from '../../src/core/user-claude-settings.ts';
+import { trackTmpDirs } from '../helpers/tmp-dir.ts';
 
 const MANAGED_HOOK = '/opt/whatsoup/deploy/hooks/agent-sandbox.sh';
 
 describe('inspectUserClaudeSettings', () => {
-  const tmpDirs: string[] = [];
-
-  afterEach(() => {
-    for (const dir of tmpDirs) rmSync(dir, { recursive: true, force: true });
-    tmpDirs.length = 0;
-  });
+  const tmp = trackTmpDirs('');
 
   function makeRoot(): string {
-    const root = mkdtempSync(join(tmpdir(), 'user-claude-settings-'));
-    tmpDirs.push(root);
-    return root;
+    return tmp.make('user-claude-settings');
   }
 
   it('does not create a missing user-level .claude directory or settings file', () => {
