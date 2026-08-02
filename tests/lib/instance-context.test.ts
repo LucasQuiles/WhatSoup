@@ -1,6 +1,12 @@
-import { readFileSync } from 'node:fs';
-import { globSync } from 'tinyglobby';
+import { readFileSync, readdirSync } from 'node:fs';
 import { afterEach, describe, expect, it } from 'vitest';
+
+/** Walk src/ for .ts files (forward-slash-normalized) without an external glob dep. */
+function listSrcTsFiles(): string[] {
+  return readdirSync('src', { recursive: true })
+    .filter((entry) => entry.toString().endsWith('.ts'))
+    .map((entry) => `src/${entry.toString().replace(/\\/g, '/')}`);
+}
 import {
   _resetInstanceContext,
   getBootstrapInstanceContext,
@@ -102,7 +108,7 @@ describe('instance-context reader-set ratchet (#2206)', () => {
       'src/lib/instance-context.ts',
       'src/config.ts',
     ]);
-    const readers = globSync(['src/**/*.ts'], { ignore: ['**/node_modules/**'] })
+    const readers = listSrcTsFiles()
       .filter((file) => {
         const source = readFileSync(file, 'utf8');
         return /process\.env\.INSTANCE_CONFIG/.test(source)
@@ -120,7 +126,7 @@ describe('instance-context reader-set ratchet (#2206)', () => {
       'src/instance-loader.ts',
       'src/database-compatibility-config.ts',
     ]);
-    const writers = globSync(['src/**/*.ts'], { ignore: ['**/node_modules/**'] })
+    const writers = listSrcTsFiles()
       .filter((file) =>
         /process\.env\.INSTANCE_CONFIG\s*=/.test(readFileSync(file, 'utf8')),
       )
