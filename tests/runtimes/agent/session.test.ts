@@ -14,13 +14,17 @@ import {
 
 // ─── Mocks ────────────────────────────────────────────────────────────────────
 
+// #1869: a single shared, inspectable logger (not a fresh object per call) so
+// tests can assert on `log.debug`/`log.warn` calls — same idiom as
+// handoff-distill-coordinator.test.ts's `mockLogger`. Nothing else in this file
+// reads `log` calls today, so switching from "new object per call" to "one
+// shared object" is behaviorally invisible to every other test here.
+const { mockLogger } = vi.hoisted(() => ({
+  mockLogger: { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() },
+}));
+
 vi.mock('../../../src/logger.ts', () => ({
-  createChildLogger: () => ({
-    info: vi.fn(),
-    warn: vi.fn(),
-    error: vi.fn(),
-    debug: vi.fn(),
-  }),
+  createChildLogger: () => mockLogger,
 }));
 
 vi.mock('node:os', () => ({
@@ -6702,6 +6706,61 @@ describe('session.ts uncovered-branch coverage', () => {
     expect(spawn).toHaveBeenCalledTimes(2);
     expect(killSessionTree).toHaveBeenCalledTimes(1);
     expect(gate.snapshot()).toMatchObject({ active: true, pending: 0, totalWaits: 0 });
+
+    secondChild._closeCb?.(0, null);
+    expect(gate.snapshot()).toMatchObject({ active: false, pending: 0 });
+  });
+
+  it('#1869: wires onCgroupDivergence into killSessionTree and logs when the sink fires', async () => {
+    const firstChild = makeMockChild(12007);
+    const secondChild = makeMockChild(12008);
+    vi.mocked(spawn)
+      .mockReturnValueOnce(firstChild as never)
+      .mockReturnValueOnce(secondChild as never);
+    const gate = new ProviderExecutionGate();
+    const session = new SessionManager({
+      db: makeDb(),
+      messenger: makeMessenger().messenger,
+      chatJid: 'cgroup-divergence@s.whatsapp.net',
+      onEvent: vi.fn(),
+      provider: 'opencode-cli',
+      model: 'glm/test-model',
+      providerExecutionGate: gate,
+    });
+    await session.spawnSession();
+
+    await session.sendTurn('first');
+    session.completeProviderTurn();
+    const secondTurn = session.sendTurn('second');
+
+    await vi.waitFor(() => {
+      expect(killSessionTree).toHaveBeenCalledWith(
+        firstChild,
+        'SIGTERM',
+        expect.objectContaining({ onCgroupDivergence: expect.any(Function) }),
+      );
+    });
+    await secondTurn;
+
+    // The dormant #1869 telemetry (PR #1960) is wired at the killChildTree call
+    // site: killSessionTree must receive a sink, and firing it must log — proving
+    // the sink is not merely present but observable.
+    const [, , options] = vi.mocked(killSessionTree).mock.calls[0];
+    const onCgroupDivergence = (options as { onCgroupDivergence?: (info: unknown) => void }).onCgroupDivergence;
+    expect(onCgroupDivergence).toBeInstanceOf(Function);
+
+    mockLogger.debug.mockClear();
+    onCgroupDivergence?.({ cgroupMemberCount: 5, ownedCount: 2, offTreeCount: 3 });
+
+    expect(mockLogger.debug).toHaveBeenCalledWith(
+      expect.objectContaining({
+        cgroupMemberCount: 5,
+        ownedCount: 2,
+        offTreeCount: 3,
+        chatJid: 'cgroup-divergence@s.whatsapp.net',
+      }),
+      expect.stringContaining('cgroup divergence'),
+    );
 
     secondChild._closeCb?.(0, null);
     expect(gate.snapshot()).toMatchObject({ active: false, pending: 0 });
