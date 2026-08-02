@@ -1,4 +1,4 @@
-import { asNonEmptyString } from '../../lib/type-guards'
+import { asNonEmptyString, isNonEmptyString } from '../../lib/type-guards'
 
 export function parseQrPayload(data: string): string | null {
   const raw = data.trim()
@@ -19,13 +19,12 @@ export function parseAuthErrorMessage(data: string | undefined): string {
 
   try {
     const parsed = JSON.parse(raw) as unknown
-    if (typeof parsed === 'string' && parsed.trim()) return parsed.trim()
+    if (isNonEmptyString(parsed)) return parsed.trim()
     if (
       parsed &&
       typeof parsed === 'object' &&
       'message' in parsed &&
-      typeof parsed.message === 'string' &&
-      parsed.message.trim()
+      isNonEmptyString(parsed.message)
     ) {
       return parsed.message.trim()
     }

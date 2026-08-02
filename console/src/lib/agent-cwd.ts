@@ -1,3 +1,5 @@
+import { isNonEmptyString } from './type-guards';
+
 const FALLBACK_AGENT_NAME = 'new-agent';
 
 export function slugAgentWorkspaceName(name: string): string {
@@ -24,7 +26,7 @@ export function withDefaultAgentWorkspace<T extends Record<string, unknown>>(dat
     ? data.agentOptions
     : {}) as Record<string, unknown>;
   const cwd = agentOptions.cwd;
-  if (typeof cwd === 'string' && cwd.trim()) return data;
+  if (isNonEmptyString(cwd)) return data;
 
   const workspaceName = slugAgentWorkspaceName((data.name as string | undefined) ?? '');
   if (!workspaceName) return data;
