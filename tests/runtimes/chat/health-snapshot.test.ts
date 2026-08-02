@@ -47,8 +47,18 @@ vi.mock('../../../src/runtimes/chat/enrichment/poller.ts', () => {
   class EnrichmentPoller {
     lastRunAt: string | null = null;
     unprocessedCount: number = 0;
+    cycleHealthState = 'not_started';
+    latestCycleReceipt: {
+      status: string;
+      failureCode: string;
+      stage: string;
+      retryable: boolean;
+      evidenceCoverage: string;
+      completedAt: string | null;
+    } | null = null;
     start = vi.fn();
     stop = vi.fn();
+    hydrateLatestCycleReceipt = vi.fn();
     constructor(..._args: unknown[]) {}
   }
   return { EnrichmentPoller };
@@ -90,7 +100,21 @@ import type { Database } from '../../../src/core/database.ts';
 import type { Messenger } from '../../../src/core/types.ts';
 import type { LLMProvider } from '../../../src/runtimes/chat/providers/types.ts';
 import type { PineconeMemory } from '../../../src/runtimes/chat/providers/pinecone.ts';
-import { EnrichmentPoller } from '../../../src/runtimes/chat/enrichment/poller.ts';
+
+type SnapshotPoller = {
+  lastRunAt: string | null;
+  unprocessedCount: number;
+  cycleHealthState: 'not_started' | 'no_work' | 'current' | 'partial' | 'failed' | 'stale' | 'unreadable' | 'invalid';
+  latestCycleReceipt: {
+    status: string;
+    failureCode: string;
+    stage: string;
+    retryable: boolean;
+    evidenceCoverage: string;
+    startedAt?: string | null;
+    completedAt: string | null;
+  } | null;
+};
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -125,14 +149,11 @@ function makePinecone(): PineconeMemory {
 
 describe('ChatRuntime.getHealthSnapshot — shape', () => {
   let runtime: ChatRuntime;
-  let poller: EnrichmentPoller;
+  let poller: SnapshotPoller;
 
   beforeEach(() => {
     runtime = new ChatRuntime(makeDb(), makeMessenger(), makePinecone(), makeLLMProvider(), makeLLMProvider());
-    // Grab the EnrichmentPoller instance that was constructed internally
-    // (it's the only instance created; vi.mocked class stores it nowhere, so
-    //  we rely on the fact that we can reach it via getHealthSnapshot output,
-    //  or we just test the output shape directly).
+    poller = (runtime as unknown as { enrichmentPoller: SnapshotPoller }).enrichmentPoller;
   });
 
   it('details contains queueDepth as a number', () => {
@@ -168,5 +189,67 @@ describe('ChatRuntime.getHealthSnapshot — shape', () => {
   it('snapshot has a valid status string', () => {
     const snapshot = runtime.getHealthSnapshot();
     expect(['healthy', 'degraded', 'unhealthy']).toContain(snapshot.status);
+  });
+
+  it('degrades a fresh runtime when the latest durable enrichment receipt failed', () => {
+    poller.lastRunAt = new Date().toISOString();
+    poller.cycleHealthState = 'failed';
+    poller.latestCycleReceipt = {
+      status: 'failed',
+      failureCode: 'selection_failed',
+      stage: 'selection',
+      retryable: true,
+      evidenceCoverage: 'typed',
+      completedAt: '2026-07-30T00:00:01.000Z',
+    };
+
+    const snapshot = runtime.getHealthSnapshot();
+
+    expect(snapshot.status).toBe('degraded');
+    expect(snapshot.details['enrichmentCycle']).toEqual({
+      state: 'failed',
+      lastAttemptAt: '2026-07-30T00:00:01.000Z',
+      lastSuccessAt: poller.lastRunAt,
+      status: 'failed',
+      failureCode: 'selection_failed',
+      stage: 'selection',
+      retryable: true,
+      evidenceCoverage: 'typed',
+    });
+  });
+
+  it('projects a stale cycle state when the last proven success is stale', () => {
+    const staleAt = new Date(Date.now() - 3_600_001).toISOString();
+    poller.lastRunAt = staleAt;
+    poller.cycleHealthState = 'current';
+    poller.latestCycleReceipt = {
+      status: 'completed',
+      failureCode: 'none',
+      stage: 'none',
+      retryable: false,
+      evidenceCoverage: 'typed',
+      completedAt: staleAt,
+    };
+
+    const snapshot = runtime.getHealthSnapshot();
+
+    expect(snapshot.status).toBe('degraded');
+    expect(snapshot.details['enrichmentCycle']).toMatchObject({
+      state: 'stale',
+      lastSuccessAt: staleAt,
+      status: 'completed',
+    });
+  });
+
+  it('distinguishes disabled enrichment from a not-started enabled poller', () => {
+    const enabledSnapshot = runtime.getHealthSnapshot();
+    const disabledRuntime = new ChatRuntime(
+      makeDb(), makeMessenger(), makePinecone(), makeLLMProvider(), makeLLMProvider(),
+      { enableEnrichment: false },
+    );
+    const disabledSnapshot = disabledRuntime.getHealthSnapshot();
+
+    expect(enabledSnapshot.details['enrichmentCycle']).toMatchObject({ state: 'not_started' });
+    expect(disabledSnapshot.details['enrichmentCycle']).toMatchObject({ state: 'disabled' });
   });
 });
