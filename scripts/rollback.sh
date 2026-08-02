@@ -89,7 +89,7 @@ run_roll03() {
   echo '    "whatsoup-personal": { ... }'
   echo ""
   echo "  ADD (or restore) this entry:"
-  echo '    "whatsapp-mcp": { "type": "stdio", "command": "/home/whatsoup/.local/bin/whatsapp-mcp" }'
+  echo "    \"whatsapp-mcp\": { \"type\": \"stdio\", \"command\": \"${HOME}/.local/bin/whatsapp-mcp\" }"
   echo ""
 }
 
