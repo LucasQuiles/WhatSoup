@@ -71,7 +71,7 @@
     },
     {
       "path": "src/runtimes/agent/session.ts",
-      "sha256": "7700e4db7f3da0f1c05b15a8fcfbf164140f0cad19529f8b3bd99f1b19bdaee0",
+      "sha256": "0b4d360b8751cdeb790c4a5f4a0b5a04daa0b5bbae04300189d57718b02869b0",
       "mustContain": [
         "composeWithExactLineDedup"
       ],
