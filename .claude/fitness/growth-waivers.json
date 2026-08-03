@@ -20,10 +20,18 @@
     {
       "path": "eslint-rules/catch-ratchet-baseline.json",
       "maxWeight": 112,
-      "reason": "Identity-rename authorization for the #2849 isNonEmptyString migration: two staged lanes edit inside ops.ts try blocks, renaming their raw-token swallow identities (verified behavior-identical at gate review; guard:catch-ratchet reports 112 inherited, no growth, in both lanes and in their merge-tree-verified combination). maxWeight pinned at the exact current count 112 \u2014 replacements authorized, growth is not.",
+      "reason": "Identity-rename authorization for the #2849 isNonEmptyString migration: two staged lanes edit inside ops.ts try blocks, renaming their raw-token swallow identities (verified behavior-identical at gate review; guard:catch-ratchet reports 112 inherited, no growth, in both lanes and in their merge-tree-verified combination). maxWeight pinned at the exact current count 112 — replacements authorized, growth is not.",
       "issue": "https://github.com/LucasQuiles/WhatSoup/issues/2849",
       "grantedAt": "2026-08-01",
       "expiresAt": "2026-08-15"
+    },
+    {
+      "path": ".claude/fitness/baseline.json",
+      "maxWeight": 29165,
+      "reason": "TEMPORARY runtime.test.ts ceiling allowance 16579->16596 (+17) for PR #2128's two required module-scope provider mocks (per-chat-mcp-socket-manager, provider-mcp-config) — the per-chat actor isolation feature under test can only be mocked at module scope in that file; payback = post-landing fixture-scaffold extraction moving the shared AgentRuntime mock scaffold to an importable fixture and returning the ceiling to 16579 or lower. Self-spending cap at the exact resulting weight (29148 -> 29165); no further growth authorized.",
+      "issue": "https://github.com/LucasQuiles/WhatSoup/pull/2128",
+      "grantedAt": "2026-08-03",
+      "expiresAt": "2026-08-17"
     }
   ]
 }
