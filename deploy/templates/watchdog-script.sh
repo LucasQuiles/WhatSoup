@@ -88,7 +88,7 @@ log() { print -- "$(ts) $*" >> "$LOG"; }
 wd_rank() {
   case "$1" in
     CREDENTIAL-DEAD) print 4 ;;
-    RESTARTED|RESTART-SUPPRESSED) print 3 ;;
+    RESTARTED|RESTART-SUPPRESSED|RESTART-FAILED) print 3 ;;
     CREDENTIAL-UNKNOWN) print 2 ;;
     *) print 1 ;;
   esac
@@ -151,10 +151,18 @@ restart_label() {
     wd_note RESTART-SUPPRESSED
     return 0
   fi
-  print -- "$now" > "$stamp"
   log "restarting $job_label: $reason"
-  wd_note RESTARTED
-  launchctl kickstart -k "$domain/$job_label" >> "$LOG" 2>&1 || true
+  if launchctl kickstart -k "$domain/$job_label" >> "$LOG" 2>&1; then
+    wd_note RESTARTED
+    # Arm the cooldown only for a restart that actually happened; a failed
+    # kickstart must retry next cycle, not sit suppressed for 5 minutes.
+    if ! print -- "$now" > "$stamp" 2>>"$LOG"; then
+      log "ERROR: failed to write restart cooldown stamp for $job_label; cooldown not armed"
+    fi
+  else
+    log "ERROR: kickstart failed for $job_label; service was not restarted"
+    wd_note RESTART-FAILED
+  fi
 }
 
 ensure_loaded "$BOT_LABEL" "$BOT_PLIST"

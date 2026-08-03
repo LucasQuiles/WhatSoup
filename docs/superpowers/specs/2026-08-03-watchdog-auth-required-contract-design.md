@@ -160,11 +160,16 @@ by a marker I/O failure: `CREDENTIAL-DEAD` on a failed create, `ok` on a failed 
 error line and the nonzero invocation exit carry the failure.
 
 The final log line is managed by an upgrade-only escalation ladder: `CREDENTIAL-DEAD` >
-`RESTARTED`/`RESTART-SUPPRESSED` > `CREDENTIAL-UNKNOWN` > `ok`. Restart outcomes are recorded
-inside the restart helper at its terminal points (kickstart, cooldown suppression, permanent-stop
-suppression), so a restart-worthy cycle never reports a final `ok`, and a credential verdict
-recorded before the fleet-console check survives it. Restart paths keep the script's exit status
-`0`; only a credential-marker mutation failure makes the invocation exit nonzero.
+`RESTARTED`/`RESTART-SUPPRESSED`/`RESTART-FAILED` > `CREDENTIAL-UNKNOWN` > `ok`. Restart
+outcomes are recorded inside the restart helper at its terminal points and must be truthful:
+`RESTARTED` is recorded only after `launchctl kickstart` returns success, and only a successful
+kickstart arms the 5-minute cooldown stamp — a rejected kickstart logs
+`ERROR: kickstart failed …`, records `RESTART-FAILED`, and leaves the cooldown unarmed so the
+next cycle retries. A cooldown-stamp write failure after a successful restart keeps `RESTARTED`
+and surfaces as `ERROR: failed to write restart cooldown stamp …`. A restart-worthy cycle never
+reports a final `ok`, and a credential verdict recorded before the fleet-console check survives
+it. Restart paths keep the script's exit status `0`; only a credential-marker mutation failure
+makes the invocation exit nonzero.
 
 ## Known limitations
 

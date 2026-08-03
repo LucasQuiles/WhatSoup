@@ -9,13 +9,14 @@ curl/launchctl stubs, pinning the FINAL LOG contract
 (docs/superpowers/specs/2026-08-03-watchdog-auth-required-contract-design.md):
 
 - the last log line per cycle is one machine-readable state chosen by an
-  upgrade-only ladder: CREDENTIAL-DEAD > RESTARTED/RESTART-SUPPRESSED >
-  CREDENTIAL-UNKNOWN > ok;
+  upgrade-only ladder: CREDENTIAL-DEAD > RESTARTED/RESTART-SUPPRESSED/
+  RESTART-FAILED > CREDENTIAL-UNKNOWN > ok;
 - exit 3 ends on CREDENTIAL-DEAD; a fleet-console restart in the same cycle
   must not overwrite it;
 - exits 4/5 end on CREDENTIAL-UNKNOWN only when a marker is present or a
   fallback window is active (exit 5); a quiescent unknown stays "ok";
-- restart-worthy cycles end on RESTARTED (kickstart fired) or
+- restart-worthy cycles end on RESTARTED (kickstart returned success),
+  RESTART-FAILED (kickstart rejected; cooldown left unarmed), or
   RESTART-SUPPRESSED (cooldown / permanent launchd stop), never "ok", while
   the script's own exit status stays 0.
 
@@ -126,11 +127,20 @@ class Harness:
         self.script.write_text(rendered, encoding="utf-8")
         self.script.chmod(self.script.stat().st_mode | stat.S_IEXEC)
         self.write_curl_stub(bot_body, fleet_ok)
+        self.write_launchctl_stub()
 
-        lc = binroot / "launchctl"
+    def write_launchctl_stub(self, kickstart_rc: int = 0, print_body: str = ""):
+        """Record every call; `print` emits print_body, `kickstart` exits kickstart_rc."""
+        lc = self.home / ".local" / "bin" / "launchctl"
         lc.write_text(
             "#!/bin/sh\n"
             f"echo \"$@\" >> '{self.calls}'\n"
+            'if [ "$1" = print ]; then\n'
+            f"  printf '%s\\n' '{print_body}'\n"
+            "fi\n"
+            'if [ "$1" = kickstart ]; then\n'
+            f"  exit {kickstart_rc}\n"
+            "fi\n"
             "exit 0\n",
             encoding="utf-8",
         )
@@ -242,6 +252,38 @@ def test_cooldown_suppressed_restart_final_log_is_restart_suppressed(tmp_path):
     assert proc.returncode == 0, proc.stderr
     assert "kickstart" not in h.launchctl_calls()
     assert h.final_log_state() == "RESTART-SUPPRESSED"
+
+
+def test_kickstart_failure_final_log_is_restart_failed(tmp_path):
+    # A restart that launchctl rejected must not be reported as RESTARTED,
+    # and must not arm the cooldown (the next cycle should retry, not sit
+    # suppressed for 5 minutes on a restart that never happened).
+    h = Harness(tmp_path, "tier-kickfail-bot", _unknown_body())
+    h.write_curl_stub("", bot_unreachable=True)
+    h.write_launchctl_stub(kickstart_rc=1)
+    proc = h.run()
+    assert proc.returncode == 0, proc.stderr
+    assert "kickstart -k" in h.launchctl_calls(), "the restart must at least be attempted"
+    log_text = h.log.read_text(encoding="utf-8")
+    assert "ERROR: kickstart failed" in log_text
+    assert h.final_log_state() == "RESTART-FAILED"
+    stamp = h.log_dir / "com.whatsoup.tier-kickfail-bot.last-restart"
+    assert not stamp.exists(), "a failed kickstart must not arm the restart cooldown"
+
+
+def test_cooldown_stamp_write_failure_logs_error_after_successful_kickstart(tmp_path):
+    # The stamp path is a directory: the write fails, but the restart itself
+    # succeeded — final state stays RESTARTED and the failure is surfaced as
+    # an ERROR line instead of silently repeating the restart every cycle.
+    h = Harness(tmp_path, "tier-stampfail-bot", _unknown_body())
+    h.write_curl_stub("", bot_unreachable=True)
+    (h.log_dir / "com.whatsoup.tier-stampfail-bot.last-restart").mkdir()
+    proc = h.run()
+    assert proc.returncode == 0, proc.stderr
+    assert "kickstart -k" in h.launchctl_calls()
+    log_text = h.log.read_text(encoding="utf-8")
+    assert "ERROR: failed to write restart cooldown stamp" in log_text
+    assert h.final_log_state() == "RESTARTED"
 
 
 def test_fleet_console_down_final_log_is_restarted(tmp_path):
