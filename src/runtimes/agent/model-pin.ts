@@ -16,6 +16,7 @@ import type { IncomingMessage } from '../../core/types.ts';
 import { createChildLogger } from '../../logger.ts';
 import { GLOBAL_CONVERSATION_KEY, toConversationKey } from '../../core/conversation-key.ts';
 import type { fetchAnthropicModelIdsWithStatus } from '../../lib/model-advisor.ts';
+import type { RuntimeTurnQueueTeardown } from './runtime-turn-coordinator.ts';
 import type { CommandResult } from './commands.ts';
 import {
   getPreference,
@@ -105,6 +106,7 @@ export interface ModelPinPort extends ModelCatalogueRenderPort {
       mapKey: string,
       expectedQueue: TurnQueue | null,
     ): void;
+    terminalizePerChatTurnQueueForKill(mapKey: string): Promise<RuntimeTurnQueueTeardown>;
   };
   readonly modelCatalogueListFn: typeof listModelCatalog | undefined;
   readonly modelCatalogueAnthropicFn: typeof fetchAnthropicModelIdsWithStatus | undefined;

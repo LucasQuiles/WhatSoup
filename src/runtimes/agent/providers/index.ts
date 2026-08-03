@@ -24,9 +24,8 @@
 //      unmapped provider would silently vanish from the `/model` drill Level-1.
 
 import type { ExecutionMode } from './types.ts';
-export { isProviderId } from '../../../lib/provider-ids.ts';
-
-export { PROVIDER_IDS, isProviderId, type ProviderId } from '../../../lib/provider-ids.ts';
+import { PROVIDER_IDS, isProviderId, type ProviderId } from '../../../lib/provider-ids.ts';
+export { PROVIDER_IDS, isProviderId, type ProviderId };
 export type ProviderMcpMode = 'stdio_proxy' | 'none';
 
 /** Default provider when none is specified in config. */

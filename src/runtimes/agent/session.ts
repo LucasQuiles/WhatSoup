@@ -2164,6 +2164,9 @@ export class SessionManager {
 
     const systemPrompt = this.buildSystemPrompt();
 
+    const existingCheckpoint = this.readCheckpointWatchdogState();
+    const admissionWatchdogState = this.routePolicyAdmissionCheckpointState(existingCheckpoint);
+
     if (this.isManagedLoopProvider) {
       const providerSession = this.createManagedProviderSession();
       const managedGeneration = this.currentGenerationIdentity();
@@ -2189,7 +2192,7 @@ export class SessionManager {
           admissionWatchdogState,
         );
         this.persistRoutePolicyCheckpointWithCompensation(
-          checkpointWatchdogState,
+          existingCheckpoint,
           resumeSessionId ?? null,
           this.dbRowId,
         );
@@ -2295,7 +2298,7 @@ export class SessionManager {
           admissionWatchdogState,
         );
         this.persistRoutePolicyCheckpointWithCompensation(
-          checkpointWatchdogState,
+          existingCheckpoint,
           resumeSessionId ?? null,
           this.dbRowId,
         );
@@ -2376,7 +2379,7 @@ export class SessionManager {
         admissionWatchdogState,
       );
       this.persistRoutePolicyCheckpointWithCompensation(
-        checkpointWatchdogState,
+        existingCheckpoint,
         resumeSessionId ?? null,
         this.dbRowId,
       );

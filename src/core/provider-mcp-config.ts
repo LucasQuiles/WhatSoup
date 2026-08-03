@@ -175,6 +175,44 @@ export function mergeSessionProviderConfig(
   return merged;
 }
 
+
+/**
+ * Resolve the absolute path to the WhatSoup MCP proxy script.
+ */
+export function providerMcpProxyScriptPath(): string {
+  return join(new URL('.', import.meta.url).pathname, '../../deploy/mcp/whatsoup-proxy.ts');
+}
+
+function tomlString(value: string): string {
+  return JSON.stringify(value);
+}
+
+function tomlStringArray(values: readonly string[]): string {
+  return `[${values.map(tomlString).join(', ')}]`;
+}
+
+/**
+ * Provider CLI arguments for MCP transport config.
+ */
+export function buildProviderMcpConfigArgs(
+  providerId: string,
+  agentCwd: string,
+  socketPath: string,
+  proxyScriptPath: string,
+): readonly string[] {
+  if (providerId === 'claude-cli') {
+    return [`--mcp-config=${join(agentCwd, '.mcp.json')}`];
+  }
+  if (providerId !== 'codex-cli') return [];
+  const { command, args } = buildMcpLaunchCommand(proxyScriptPath);
+  return [
+    '-c', 'mcp_servers.whatsoup.command=' + tomlString(command),
+    '-c', 'mcp_servers.whatsoup.args=' + tomlStringArray(args),
+    '-c', 'mcp_servers.whatsoup.env={ WHATSOUP_SOCKET = ' + tomlString(socketPath) + ' }',
+    '-c', 'mcp_servers.whatsoup.env_vars=' + tomlStringArray(['WHATSOUP_MCP_SOCKET']),
+  ];
+}
+
 export function writeProviderMcpConfigTarget(providerId: string, agentCwd: string): string | null {
   switch (providerId) {
     case 'claude-cli':
