@@ -662,5 +662,8 @@ describe('per_chat global socket remains actor-less', () => {
     const shared = new AgentRuntime(makeDb(), makeMessenger(), 'test', { sessionScope: 'shared' });
     const perChat = new AgentRuntime(makeDb(), makeMessenger(), 'test', { sessionScope: 'per_chat' });
 
+    expect((single as unknown as Priv).shouldBroadcastGlobalActor()).toBe(true);
+    expect((shared as unknown as Priv).shouldBroadcastGlobalActor()).toBe(true);
+    expect((perChat as unknown as Priv).shouldBroadcastGlobalActor()).toBe(false);
   });
 });
