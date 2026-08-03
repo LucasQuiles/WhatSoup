@@ -191,6 +191,26 @@ current-cause fallback reasons are follow-up work outside this design.
 No in-repository consumer of the marker or final watchdog state exists. External/on-host
 consumers are unknown and must be checked in the separately authorized rollout phase.
 
+Separately, four defects that PREDATE this design (present verbatim on `main`) are documented
+here as rollout preconditions, not fixed by this source change. Each needs its own reviewed fix
+before or during the rollout phase:
+
+1. **Stale single-instance lock silently disables the watchdog.** The lock is a predictable,
+   UID-independent `/tmp` directory; a pre-existing or SIGKILL-orphaned lock makes every later
+   invocation exit `0` with no log line. On a multi-user host this is also a local
+   denial-of-service surface (any user can pre-create the path).
+2. **Fleet-console restarts race across per-bot watchdogs.** Every bot watchdog shares the fleet
+   label's cooldown stamp, and the read/check/kickstart sequence is non-atomic; watchdogs on the
+   same 120-second cadence can restart the fleet console simultaneously.
+3. **The renderer performs raw substring substitution without validating or escaping its
+   inputs.** A hostile bot name, home, or username becomes executable shell/Python fragments in
+   the rendered artifact while placeholder verification still passes. Render parameters must
+   come only from owner-controlled inventory until the renderer validates its inputs.
+4. **Operational I/O outside the credential marker is still masked.** A `log()` append to an
+   unopenable log file fails silently (the final state line is simply never written), and the
+   invocation still exits `0`. Only credential-marker mutation failures and the restart-path
+   errors above are unmasked by this design.
+
 ## Source changes
 
 The change is intentionally limited to:
