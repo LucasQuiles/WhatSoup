@@ -69,10 +69,14 @@ measured operational alignment.
 ## Credential-state contract
 
 The embedded decision block continues to evaluate transport and process liveness first. Existing
-restart-worthy failures retain exit code `1`; terminal transport-auth states and valid database
-compatibility drains use exit code `5` to preserve their existing no-restart behavior without
-being mistaken for provider recovery. Exit `5` never mutates the credential marker. Credential
-classification runs only after those checks pass.
+restart-worthy failures retain exit code `1`. Terminal transport-auth states and valid database
+compatibility drains route to exit code `4` (unknown-quiescent): their no-restart behavior and
+stderr detail lines are unchanged, but they no longer clear the credential marker — missing
+credential evidence during a drain or a transport-auth outage is inconclusive, not recovery.
+Credential classification runs only after those checks pass.
+
+The decision block's complete exit vocabulary is `0` recovered, `1` restart-worthy, `3` dead,
+`4` unknown with no active fallback window, `5` unknown while a fallback window is active.
 
 The credential state is one of three values:
 
@@ -86,11 +90,18 @@ Any one of these current signals is sufficient:
    later successful turn.
 
 The decision block exits `3`. The shell logs `CREDENTIAL-DEAD`, creates or retains the marker, and
-does not call `restart_label`.
+does not call `restart_label`. The status-based signal is exactly `credential-unavailable`; other
+non-usable statuses (`model-unavailable`, `provider-unavailable`, `timeout`, `unknown`) are not
+credential death and classify `unknown`.
 
-The active fallback reason is current by construction: the runtime returns it only while the
-fallback window is active. The turn tracker clears its last error on a successful user turn; the
-timestamp comparison remains a defensive guard for recorded or future-compatible payloads.
+The fallback reason's PRESENCE is current by construction: the runtime returns it only while the
+fallback window is active. Its VALUE, however, is the original arm reason frozen across window
+extensions, so the exact `auth-required` match is sound but incomplete (see Known limitations).
+The turn tracker clears its last error on a successful user turn; the timestamp comparison
+remains a defensive guard for recorded or future-compatible payloads. `last_turn_error_at` and
+`last_successful_turn_at` are epoch-millisecond numbers on live payloads; the guard parses
+numbers first and accepts ISO strings only as a recorded/future-compatible fallback, and an
+unparseable timestamp never converts an auth-required error into recovery.
 
 ### `recovered`
 
@@ -107,36 +118,88 @@ affirmative primary-recovery proof, not merely absence of a failure field.
 
 ### `unknown`
 
-Every other liveness-passing payload is inconclusive. Examples include missing turn-capability
-data, stale usability without a current auth error, or an unrecognized future shape.
+Every other liveness-passing payload is inconclusive. This includes missing or null
+turn-capability data (permanent and correct for non-agent instances — watchdogs install for every
+instance type), stale usability without a current auth error, non-dead usability statuses, and
+unrecognized future shapes.
 
-The decision block exits `4`. The shell does not restart the bot and does not create or remove the
-credential marker. Its final log state is `CREDENTIAL-UNKNOWN`, making the coverage gap visible
-without inventing either failure or recovery.
+The decision block exits `4` when no independent fallback window is active (unknown-quiescent)
+and `5` when one is. The fallback-activeness predicate is `instance.fallbackReason` being
+non-null — presence, not value, with no timestamp parsing. Neither exit restarts the bot; neither
+creates or removes the credential marker.
+
+The shell surfaces the gap only when there is something to surface: the final log state escalates
+to `CREDENTIAL-UNKNOWN` when a credential marker is already present or the fallback window is
+active (exit `5`); a quiescent unknown with no marker keeps the final log `ok`. This tiering
+exists because a healthy idle bot's startup usability proof goes stale within its 30-minute
+freshness TTL, so it classifies unknown-quiescent on essentially every cycle — logging
+`CREDENTIAL-UNKNOWN` there would page on every healthy idle bot. The quiescent exit is also
+stderr-silent for the same reason; exit `5` and the drain/terminal-auth branches keep their
+stderr detail lines.
 
 ## Marker state machine
 
-| Prior marker | Credential state | Result |
-|---|---|---|
-| absent | dead | create marker; log `CREDENTIAL-DEAD`; no bot restart |
-| present | dead | retain marker; log `CREDENTIAL-DEAD`; no bot restart |
-| absent | recovered | remain absent; log `ok` |
-| present | recovered | remove marker; log `ok` |
-| absent | unknown | remain absent; log `CREDENTIAL-UNKNOWN` |
-| present | unknown | retain marker; log `CREDENTIAL-UNKNOWN` |
+| Prior marker | Credential state | Result | Final log |
+|---|---|---|---|
+| absent | dead | create marker; no bot restart | `CREDENTIAL-DEAD` |
+| present | dead | retain marker (mtime untouched); no bot restart | `CREDENTIAL-DEAD` |
+| absent | recovered | remain absent | `ok` |
+| present | recovered | remove marker | `ok` |
+| absent | unknown-quiescent | remain absent | `ok` |
+| absent | unknown, fallback window active | remain absent | `CREDENTIAL-UNKNOWN` |
+| present | unknown-quiescent | retain marker | `CREDENTIAL-UNKNOWN` |
+| present | unknown, fallback window active | retain marker | `CREDENTIAL-UNKNOWN` |
 
 Marker mutation errors must not be masked as success. A failed create or clear is logged as a
 watchdog error and makes that watchdog invocation exit nonzero without calling `restart_label`.
-The next scheduled invocation may retry the marker transition.
+The next scheduled invocation may retry the marker transition. The final log state is unchanged
+by a marker I/O failure: `CREDENTIAL-DEAD` on a failed create, `ok` on a failed clear — the
+error line and the nonzero invocation exit carry the failure.
+
+The final log line is managed by an upgrade-only escalation ladder: `CREDENTIAL-DEAD` >
+`RESTARTED`/`RESTART-SUPPRESSED` > `CREDENTIAL-UNKNOWN` > `ok`. Restart outcomes are recorded
+inside the restart helper at its terminal points (kickstart, cooldown suppression, permanent-stop
+suppression), so a restart-worthy cycle never reports a final `ok`, and a credential verdict
+recorded before the fleet-console check survives it. Restart paths keep the script's exit status
+`0`; only a credential-marker mutation failure makes the invocation exit nonzero.
+
+## Known limitations
+
+Three documented evasions are accepted, not fixed, by this design:
+
+1. `instance.fallbackReason` is frozen at the ORIGINAL arm reason across window extensions, so an
+   auth-required death that occurs during an open usage-limit fallback window reports
+   `usage-limit`, not `auth-required`.
+2. A successful fallback turn clears `last_turn_error_class`, erasing the auth-required turn-error
+   signal.
+3. The usability probe runs once at startup with a 30-minute freshness TTL and is never re-probed,
+   so `model_usability_status` can stay a stale `usable` indefinitely.
+
+The combined worst case (all three at once) still lands on unknown-with-active-fallback: exit `5`,
+final log `CREDENTIAL-UNKNOWN`. A visible `CREDENTIAL-UNKNOWN` — not a false `ok` — is the
+designed detection floor. Runtime-side re-probing, provider-aware success tracking, and
+current-cause fallback reasons are follow-up work outside this design.
+
+No in-repository consumer of the marker or final watchdog state exists. External/on-host
+consumers are unknown and must be checked in the separately authorized rollout phase.
 
 ## Source changes
 
 The change is intentionally limited to:
 
-- `deploy/templates/watchdog-script.sh`: implement the three-state credential decision and marker
-  transition handling;
+- `deploy/templates/watchdog-script.sh`: implement the credential decision exits `0/1/3/4/5`,
+  marker transition handling, unmasked marker I/O, and the final-log escalation ladder;
 - `tests/deploy/watchdog-credential-dead.test.ts`: add sanitized current-health regressions,
-  recovery/unknown coverage, precedence checks, and shell-wiring assertions; and
+  recovery/unknown coverage, precedence checks, and shell-wiring assertions;
+- `deploy/scripts/tests/test_watchdog_restart_policy.py`: expectation updates for the new exit
+  vocabulary, plus exact-exit (`== 1`) restart assertions;
+- `deploy/scripts/tests/test_watchdog_terminal_logout_e2e.py`: rendered-template behavioral
+  coverage of the marker state machine and marker I/O failures;
+- `deploy/scripts/tests/test_watchdog_credential_tiering.py` (new): rendered-template coverage of
+  the final-log ladder and tiering;
+- gate registration: `tests/deploy/watchdog-credential-dead.test.ts` joins `CURATED_TEST_PATHS`
+  in `scripts/push-gate.ts`, and CI installs `zsh` so the rendered-template suites run in the
+  quality workflow; and
 - the relevant public runbook section: document the normalized signals, no-restart behavior, and
   proof required for marker clearing.
 
@@ -194,8 +257,11 @@ Use two live canaries after explicit execution-time approval:
 
 1. A credential-degraded, idle target proves the positive path: marker appears, the watchdog logs
    `CREDENTIAL-DEAD`, the bot PID is unchanged, and no restart line occurs.
-2. A healthy, idle target proves the negative path: no marker appears, the watchdog logs `ok`, the
-   bot PID is unchanged, and no restart line occurs.
+2. A healthy, idle target proves the negative path: no marker appears, the watchdog's final log
+   state is `ok`, the bot PID is unchanged, and no restart line occurs. Note that a healthy idle
+   target classifies unknown-quiescent (exit `4`), not `recovered` — its startup usability proof
+   is past the 30-minute freshness TTL. This canary therefore proves the quiescent `ok` tier;
+   affirmative marker clearing is proven by the test harness fixtures, not by this canary.
 
 An active provider child, an unproven in-memory queue, ambiguous authenticated health, unexpected
 installed preimage, or unrelated watchdog contract drift excludes a target. An excluded target is
