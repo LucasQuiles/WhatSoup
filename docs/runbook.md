@@ -406,6 +406,12 @@ usability-probe TTL, or any non-agent instance) stays `ok`.
   `ERROR: failed to create|clear credential marker …` and exits that watchdog
   invocation nonzero without restarting anything; the next cycle retries.
   Restart paths keep exit status `0`.
+- The single-instance lock lives in the log directory, is pid-stamped, and
+  self-reclaims when its holder is dead or the lock has aged out (a
+  `reclaiming stale lock …` line is logged); a genuinely held lock logs
+  `another watchdog invocation is running` and exits `0`. An unopenable log
+  file fails the invocation at entry (nonzero exit, one stderr line) — a
+  watchdog that cannot record state must not run silently.
 
 **Known detection limitations** (accepted by design): the fallback arm reason
 is frozen at its original value across window extensions, so an auth-required

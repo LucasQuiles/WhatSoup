@@ -24,7 +24,11 @@ set -u
 HOME_DIR="__HOME__"
 LOG_DIR="$HOME_DIR/Library/Logs/whatsoup"
 LOG="$LOG_DIR/BOT_NAME-watchdog.log"
-LOCK="/tmp/com.whatsoup.BOT_NAME-watchdog.lock"
+# Single-instance lock. Lives in the user-owned LOG_DIR (not /tmp): a
+# predictable world-writable path would let any local user pre-create it and
+# silently disable the watchdog. The dir holds a pid stamp for staleness
+# detection (see acquire_mutex).
+LOCK="$LOG_DIR/BOT_NAME-watchdog.lock"
 # Present while the bot's provider credential was last conclusively dead
 # (decision-block exit 3). Cleared ONLY by affirmative fresh primary recovery
 # (exit 0); inconclusive evidence (exits 4/5) retains it — presence means
@@ -50,6 +54,58 @@ export HOME="$HOME_DIR" PATH
 
 mkdir -p "$LOG_DIR"
 
+# If the log cannot be opened, no state line (including the final one) can
+# ever be recorded — running on would be unobservable. Fail loudly at entry;
+# launchd ignores the exit code, but tests and operators must see it.
+if ! : >> "$LOG" 2>/dev/null; then
+  print -u2 -- "watchdog: cannot open log file $LOG"
+  exit 1
+fi
+
+ts() { date -u +"%Y-%m-%dT%H:%M:%SZ"; }
+log() { print -- "$(ts) $*" >> "$LOG"; }
+
+# mkdir-based mutex with pid-stamp + age staleness. Held only while the
+# stamped pid is alive AND the lock is younger than stale_after seconds; a
+# dead holder, an unreadable/garbage pid, or an aged-out lock is reclaimed
+# (rename-then-remove so concurrent reapers cannot free a freshly re-acquired
+# lock; a sub-second reap race can still let two contenders through — the
+# cooldown stamp bounds the harm to one duplicate kickstart).
+acquire_mutex() {
+  local dir="$1" stale_after="$2" attempt holder_pid mtime age
+  for attempt in 1 2; do
+    if mkdir "$dir" 2>/dev/null; then
+      print -- $$ > "$dir/pid" 2>/dev/null || true
+      return 0
+    fi
+    holder_pid="$(cat "$dir/pid" 2>/dev/null || true)"
+    case "$holder_pid" in
+      (<->) ;;
+      (*) holder_pid="" ;;
+    esac
+    mtime="$(stat -f %m "$dir" 2>/dev/null || stat -c %Y "$dir" 2>/dev/null || true)"
+    case "$mtime" in
+      (<->) ;;
+      (*) mtime=0 ;;
+    esac
+    age=$(( $(date +%s) - mtime ))
+    if [ -n "$holder_pid" ]; then
+      if kill -0 "$holder_pid" 2>/dev/null && [ "$age" -le "$stale_after" ]; then
+        return 1
+      fi
+    elif [ "$age" -le "$stale_after" ]; then
+      # No pid stamp yet: a racer may be mid-acquisition. Reclaim only aged.
+      return 1
+    fi
+    log "reclaiming stale lock $dir (holder pid ${holder_pid:-none}, age ${age}s)"
+    if ! mv "$dir" "$dir.reap.$$" 2>/dev/null; then
+      continue
+    fi
+    rm -rf "$dir.reap.$$" 2>/dev/null || true
+  done
+  return 1
+}
+
 # #2515: the diagnostic health body is auth-gated; unauthenticated reads get
 # the minimal public liveness envelope, whose missing whatsapp/turn_capability
 # fields would read as restart-worthy (connected=false/state=None) and starve
@@ -62,11 +118,14 @@ WHATSOUP_HEALTH_TOKEN=""
 AUTH_ARGS=()
 [ -n "$WHATSOUP_HEALTH_TOKEN" ] && AUTH_ARGS=(-H "Authorization: Bearer $WHATSOUP_HEALTH_TOKEN")
 
-# Single-instance lock: if another watchdog invocation is still running, exit.
-if ! mkdir "$LOCK" 2>/dev/null; then
+# Single-instance lock: if another watchdog invocation is still running, exit
+# — but say so in the log, and reclaim stale locks (a SIGKILLed prior run must
+# not disable the watchdog forever).
+if ! acquire_mutex "$LOCK" 600; then
+  log "another watchdog invocation is running; exiting"
   exit 0
 fi
-trap 'rmdir "$LOCK" 2>/dev/null || true' EXIT
+trap 'rm -rf "$LOCK" 2>/dev/null || true' EXIT
 
 # Rotate log if it exceeds 1 MB.
 if [ -f "$LOG" ]; then
@@ -75,9 +134,6 @@ if [ -f "$LOG" ]; then
     tail -n 500 "$LOG" > "$LOG.tmp" 2>/dev/null && mv "$LOG.tmp" "$LOG"
   fi
 fi
-
-ts() { date -u +"%Y-%m-%dT%H:%M:%SZ"; }
-log() { print -- "$(ts) $*" >> "$LOG"; }
 
 # Final-log state ladder (upgrade-only). The last log line of each run is the
 # single machine-readable outcome; a higher-priority state must not be

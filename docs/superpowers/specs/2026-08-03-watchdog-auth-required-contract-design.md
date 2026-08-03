@@ -168,8 +168,8 @@ kickstart arms the 5-minute cooldown stamp — a rejected kickstart logs
 next cycle retries. A cooldown-stamp write failure after a successful restart keeps `RESTARTED`
 and surfaces as `ERROR: failed to write restart cooldown stamp …`. A restart-worthy cycle never
 reports a final `ok`, and a credential verdict recorded before the fleet-console check survives
-it. Restart paths keep the script's exit status `0`; only a credential-marker mutation failure
-makes the invocation exit nonzero.
+it. Restart paths keep the script's exit status `0`; a credential-marker mutation failure or an
+unopenable log file at entry makes the invocation exit nonzero.
 
 ## Known limitations
 
@@ -191,14 +191,17 @@ current-cause fallback reasons are follow-up work outside this design.
 No in-repository consumer of the marker or final watchdog state exists. External/on-host
 consumers are unknown and must be checked in the separately authorized rollout phase.
 
-Separately, four defects that PREDATE this design (present verbatim on `main`) are documented
-here as rollout preconditions, not fixed by this source change. Each needs its own reviewed fix
-before or during the rollout phase:
+Separately, four defects that PREDATE this design (present verbatim on `main`) were surfaced by
+audit and are tracked here as rollout preconditions, each with its resolution status in this
+branch:
 
-1. **Stale single-instance lock silently disables the watchdog.** The lock is a predictable,
-   UID-independent `/tmp` directory; a pre-existing or SIGKILL-orphaned lock makes every later
-   invocation exit `0` with no log line. On a multi-user host this is also a local
-   denial-of-service surface (any user can pre-create the path).
+1. **Stale single-instance lock silently disables the watchdog.** The lock was a predictable,
+   UID-independent `/tmp` directory; a pre-existing or SIGKILL-orphaned lock made every later
+   invocation exit `0` with no log line, and on a multi-user host any local user could
+   pre-create the path. FIXED in this branch: the lock lives in the user-owned log directory,
+   is pid-stamped, and is reclaimed when its holder is dead or the lock has aged out; a held
+   lock now logs before exiting. Residual: the reclaim uses rename-then-remove, so a sub-second
+   reap race can still admit one duplicate invocation (bounded by the restart cooldown).
 2. **Fleet-console restarts race across per-bot watchdogs.** Every bot watchdog shares the fleet
    label's cooldown stamp, and the read/check/kickstart sequence is non-atomic; watchdogs on the
    same 120-second cadence can restart the fleet console simultaneously.
@@ -206,10 +209,10 @@ before or during the rollout phase:
    inputs.** A hostile bot name, home, or username becomes executable shell/Python fragments in
    the rendered artifact while placeholder verification still passes. Render parameters must
    come only from owner-controlled inventory until the renderer validates its inputs.
-4. **Operational I/O outside the credential marker is still masked.** A `log()` append to an
-   unopenable log file fails silently (the final state line is simply never written), and the
-   invocation still exits `0`. Only credential-marker mutation failures and the restart-path
-   errors above are unmasked by this design.
+4. **Operational I/O outside the credential marker is still masked.** PARTIALLY FIXED in this
+   branch: an unopenable log file now fails the invocation at entry (nonzero exit, one stderr
+   line) instead of running unobservably. Residual: a log append that starts failing mid-run
+   (e.g. disk fills between entry and the final line) is still silent.
 
 ## Source changes
 

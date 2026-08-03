@@ -99,8 +99,8 @@ class Harness:
 
     Mirrors the stub pattern of test_watchdog_terminal_logout_e2e.py: the
     template hardcodes PATH with $HOME_DIR/.local/bin first, so stubs must
-    live there. Bot names must be unique per test (the /tmp lock is named
-    after the bot; xdist would otherwise cross-collide).
+    live there. The single-instance lock lives in the isolated LOG_DIR, so
+    tests never collide; bot names stay unique for log readability.
     """
 
     def __init__(self, tmp_path: Path, bot_name: str, bot_body: str, fleet_ok: bool = True):
@@ -167,10 +167,18 @@ class Harness:
             str(int(time.time())), encoding="utf-8"
         )
 
+    def make_lock(self, pid: int | None, age_seconds: int = 0) -> Path:
+        """Pre-create the single-instance lock, optionally pid-stamped and aged."""
+        lock = self.log_dir / f"{self.bot_name}-watchdog.lock"
+        lock.mkdir()
+        if pid is not None:
+            (lock / "pid").write_text(str(pid), encoding="utf-8")
+        if age_seconds:
+            old = time.time() - age_seconds
+            os.utime(lock, (old, old))
+        return lock
+
     def run(self) -> subprocess.CompletedProcess:
-        lock = Path(f"/tmp/com.whatsoup.{self.bot_name}-watchdog.lock")
-        if lock.exists():
-            shutil.rmtree(lock, ignore_errors=True)
         return subprocess.run(
             ["zsh", str(self.script)],
             env=dict(os.environ, HOME=str(self.home)),
@@ -360,6 +368,55 @@ def test_marker_clear_failure_keeps_ok_final_and_exits_nonzero(tmp_path):
         "the recovery verdict stands; the ERROR line and nonzero exit carry the failure"
     )
     assert "kickstart" not in h.launchctl_calls()
+
+
+def test_log_open_failure_exits_nonzero_before_acting(tmp_path):
+    # If the log cannot be opened, no final state line can ever be written —
+    # the watchdog must fail loudly at entry, not run silently unobservable.
+    h = Harness(tmp_path, "tier-logfail-bot", _unknown_body())
+    h.log.mkdir()
+    proc = h.run()
+    assert proc.returncode != 0, "an unloggable watchdog run must not report success"
+    assert "cannot open log file" in proc.stderr
+    assert not h.calls.exists(), "must exit before touching launchd"
+
+
+def test_live_lock_exits_quietly_with_log_line(tmp_path):
+    h = Harness(tmp_path, "tier-heldlock-bot", _unknown_body())
+    holder = subprocess.Popen(["sleep", "30"])
+    try:
+        h.make_lock(pid=holder.pid)
+        proc = h.run()
+        assert proc.returncode == 0, proc.stderr
+        assert "another watchdog invocation is running" in h.log.read_text(encoding="utf-8")
+        assert not h.calls.exists(), "a held lock must skip the whole cycle"
+    finally:
+        holder.kill()
+        holder.wait()
+
+
+def test_stale_lock_with_dead_holder_is_reclaimed(tmp_path):
+    # A SIGKILLed prior invocation must not disable the watchdog forever.
+    h = Harness(tmp_path, "tier-stalelock-bot", _unknown_body())
+    done = subprocess.Popen(["true"])
+    done.wait()
+    h.make_lock(pid=done.pid, age_seconds=3600)
+    proc = h.run()
+    assert proc.returncode == 0, proc.stderr
+    log_text = h.log.read_text(encoding="utf-8")
+    assert "reclaiming stale" in log_text
+    assert h.final_log_state() == "ok"
+
+
+def test_lock_without_pid_ages_out_and_is_reclaimed(tmp_path):
+    # Crash window: lock dir exists but the pid stamp never landed. It must
+    # be reclaimable once aged, not held forever.
+    h = Harness(tmp_path, "tier-agedlock-bot", _unknown_body())
+    h.make_lock(pid=None, age_seconds=3600)
+    proc = h.run()
+    assert proc.returncode == 0, proc.stderr
+    assert "reclaiming stale" in h.log.read_text(encoding="utf-8")
+    assert h.final_log_state() == "ok"
 
 
 if __name__ == "__main__":
