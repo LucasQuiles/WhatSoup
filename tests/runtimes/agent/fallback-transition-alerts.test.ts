@@ -10,7 +10,7 @@
  *     turn counters (deltas against an arm-time snapshot — never the lifetime
  *     totals), and window duration in the evidence — never when idle
  *   - provider_fallback_replayed fires only after the replay COMPLETES —
- *     never on gate-rejected replays (extended / key-absent / tool activity)
+ *     never on gate-rejected replays (unproven extended target / key-absent / tool activity)
  *     and never for a replay that fails (the failure alert covers that turn)
  *   - restoring a persisted window after a restart re-arms WITHOUT re-counting
  *     or re-emitting activation (the pre-restart arm already did; the
@@ -37,14 +37,14 @@ vi.mock('../../../src/lib/emit-alert.ts', () => {
 // Overridable persisted-window source for the restore-path tests; all other
 // fallback-state-db functions keep their real implementations (they are
 // harmless against the mocked db).
-const { loadFallbackStateMock } = vi.hoisted(() => ({
-  loadFallbackStateMock: vi.fn<() => unknown>(() => null),
+const { getFallbackStateMock } = vi.hoisted(() => ({
+  getFallbackStateMock: vi.fn<() => unknown>(() => null),
 }));
 vi.mock('../../../src/runtimes/agent/fallback-state-db.ts', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../../src/runtimes/agent/fallback-state-db.ts')>();
   return {
     ...actual,
-    loadFallbackState: () => loadFallbackStateMock(),
+    getFallbackState: () => getFallbackStateMock(),
   };
 });
 
@@ -116,6 +116,7 @@ vi.mock('../../../src/runtimes/agent/providers/binary-preflight.ts', () => ({
 // ─── Imports after mocks ──────────────────────────────────────────────────────
 
 import { AgentRuntime } from '../../../src/runtimes/agent/runtime.ts';
+import { FallbackReplayRouteChangedError } from '../../../src/runtimes/agent/runtime-turn-coordinator.ts';
 import type { Database } from '../../../src/core/database.ts';
 import type { Messenger } from '../../../src/core/types.ts';
 import { emitAlert, clearAlertSource } from '../../../src/lib/emit-alert.ts';
@@ -139,7 +140,7 @@ function makeMessenger(): Messenger {
   } as unknown as Messenger;
 }
 
-function makeRuntime(): AgentRuntime {
+function makeRuntime(options: ConstructorParameters<typeof AgentRuntime>[3] = {}): AgentRuntime {
   const config = mockConfigRef();
   config['agentProvider'] = 'claude-cli';
   config['agentProviderConfig'] = undefined;
@@ -147,6 +148,7 @@ function makeRuntime(): AgentRuntime {
   config['agentFallbackModel'] = 'minimax/MiniMax-M2.7';
   return new AgentRuntime(makeDb(), makeMessenger(), 'test', {
     model: 'claude-opus-4-8[1m]',
+    ...options,
   });
 }
 
@@ -387,6 +389,35 @@ describe('AgentRuntime — fallback transition alerts', () => {
     expect(alertsFor('runtime_provider_fallback_replay_failed')).toHaveLength(1);
   });
 
+  it('notifies the user when an unjournaled replay is abandoned after its route drifts', async () => {
+    const runtime = makeRuntime({ sessionScope: 'per_chat' });
+    const v = view(runtime);
+    const queue = { enqueueText: vi.fn() };
+    const state = runtime as unknown as {
+      chatQueues: Map<string, typeof queue>;
+    };
+
+    const activation = v.activateProviderFallback(null, 'model-unavailable')!;
+    v.pendingTurnText.set('chat-key', 'please continue the task');
+    v.pendingTurnActorJid.set('chat-key', 'sender@s.whatsapp.net');
+    state.chatQueues.set('chat-key', queue);
+    v.replayTurnOnFallback = vi.fn(async () => {
+      throw new FallbackReplayRouteChangedError();
+    });
+
+    expect(v.scheduleFallbackReplay({
+      activation,
+      chatJid: 'chat@s.whatsapp.net',
+      mapKey: 'chat-key',
+      oldSession: null,
+    })).toBe(true);
+    await vi.runAllTimersAsync();
+
+    expect(queue.enqueueText).toHaveBeenCalledWith(
+      '_The backup model could not continue this turn. Please try again._',
+    );
+  });
+
   it('does NOT emit provider_fallback_replayed on gate-rejected replays', () => {
     const runtime = makeRuntime();
     const v = view(runtime);
@@ -395,7 +426,7 @@ describe('AgentRuntime — fallback transition alerts', () => {
     v.pendingTurnText.set('chat-key', 'please continue the task');
     v.replayTurnOnFallback = vi.fn(async () => {});
 
-    // Gate 1: extension never replays.
+    // Gate 1: an extension with an unknown source route never replays.
     expect(v.scheduleFallbackReplay({
       activation: { ...activation, extended: true },
       chatJid: 'chat@s.whatsapp.net',
@@ -507,16 +538,16 @@ describe('AgentRuntime — fallback window restore telemetry', () => {
     vi.setSystemTime(new Date('2026-06-10T10:00:00Z'));
     vi.mocked(emitAlert).mockClear();
     lookupCredentialMock.mockReturnValue('present-key');
-    loadFallbackStateMock.mockReturnValue(null);
+    getFallbackStateMock.mockReturnValue(null);
   });
   afterEach(() => {
     vi.useRealTimers();
-    loadFallbackStateMock.mockReturnValue(null);
+    getFallbackStateMock.mockReturnValue(null);
   });
 
   it('restoring a persisted window re-arms WITHOUT re-counting or re-emitting activation', () => {
     const until = Date.now() + 60 * 60 * 1000;
-    loadFallbackStateMock.mockReturnValue({
+    getFallbackStateMock.mockReturnValue({
       activeUntil: until,
       activatedAt: Date.now() - 30 * 60 * 1000,
       reason: 'model-unavailable',
@@ -536,7 +567,7 @@ describe('AgentRuntime — fallback window restore telemetry', () => {
 
   it('emits provider_fallback_restored (additive source) when a persisted window is restored', () => {
     const until = Date.now() + 60 * 60 * 1000;
-    loadFallbackStateMock.mockReturnValue({
+    getFallbackStateMock.mockReturnValue({
       activeUntil: until,
       activatedAt: Date.now() - 30 * 60 * 1000,
       reason: 'model-unavailable',
@@ -573,7 +604,7 @@ describe('AgentRuntime — fallback window restore telemetry', () => {
       activatedAt: Date.now(),
       reason: 'model-unavailable',
     };
-    loadFallbackStateMock.mockReturnValue(persisted);
+    getFallbackStateMock.mockReturnValue(persisted);
     for (let restart = 0; restart < 2; restart++) {
       const restartedRuntime = makeRuntime();
       view(restartedRuntime).restorePersistedFallbackWindow();
@@ -588,7 +619,7 @@ describe('AgentRuntime — fallback window restore telemetry', () => {
 
   it('a fresh window after the restored one reverts still counts and emits once', () => {
     const until = Date.now() + 60 * 60 * 1000;
-    loadFallbackStateMock.mockReturnValue({
+    getFallbackStateMock.mockReturnValue({
       activeUntil: until,
       activatedAt: Date.now() - 30 * 60 * 1000,
       reason: 'model-unavailable',

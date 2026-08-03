@@ -8,7 +8,6 @@
  * could reasonably conclude no deletion was needed — while it remained stored.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { EventEmitter } from 'node:events';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 
 const keyringMock = vi.hoisted(() => ({
@@ -22,21 +21,14 @@ vi.mock('../../src/lib/keyring.ts', async (importOriginal) => ({
 }));
 
 import { handleDeleteCredential, _resetMutationCooldownsForTests } from '../../src/fleet/routes/credentials.ts';
+import { mockReq as helperMockReq, mockRes as helperMockRes } from '../helpers/http-mocks.ts';
 
 function fakeReq(): IncomingMessage {
-  const req = new EventEmitter() as IncomingMessage;
-  process.nextTick(() => req.emit('end'));
-  return req;
+  return helperMockReq();
 }
 function fakeRes(): { res: ServerResponse; status: () => number; json: () => Record<string, unknown> } {
-  let code = 0;
-  let payload = '';
-  const res = {
-    writeHead(c: number) { code = c; return res; },
-    setHeader() { return res; },
-    end(chunk?: string) { payload = chunk ?? ''; },
-  } as unknown as ServerResponse;
-  return { res, status: () => code, json: () => JSON.parse(payload || '{}') };
+  const res = helperMockRes();
+  return { res, status: () => res._status, json: () => JSON.parse(res._body || '{}') };
 }
 
 describe('DELETE /api/credentials/:service — outcome classification (#2292 L8)', () => {

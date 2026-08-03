@@ -4,6 +4,8 @@ import { pathToFileURL } from 'node:url';
 import { parseDocument } from 'yaml';
 import { git as runGit, gitList as runGitList, readText } from './lib/guard-core.ts';
 import { asRecord } from '../src/lib/type-guards.ts';
+import { BRANCH_STEPS, NEUTRALIZED_SKIP_VARS, RELEASE_STEPS } from './push-gate.ts';
+import type { GateStep } from './push-gate.ts';
 
 export type DiagnosticStatus = 'pass' | 'warn' | 'fail';
 export type DiagnosticCategory =
@@ -664,8 +666,46 @@ function findCommandIndex(chainSteps: string[], expected: string): number {
   return chainSteps.findIndex((actual) => commandMatches(expected, actual));
 }
 
+/**
+ * Chain source resolution (#2224). Gate composition lives in the declarative
+ * manifest (scripts/push-gate.ts); verify:push:branch/verify:release in
+ * package.json are thin entry points into it. The manifest chain view
+ * prepends a synthetic `unset` line DERIVED from NEUTRALIZED_SKIP_VARS, so
+ * the release-chain requirement keeps validating the skip-neutralization —
+ * if a var is dropped from the manifest, the synthetic line diverges from
+ * the requirement's expected text and the check fails. A package.json value
+ * that is NOT the one-line entry point (fixture repos, stale checkouts) is
+ * treated as a legacy-format chain and used directly.
+ */
+const MANIFEST_ENTRY_POINT_RE = /^bash scripts\/run-with-pinned-node\.sh scripts\/push-gate\.ts (?:branch|release)\s*$/;
+
+function manifestChainView(scriptName: string): string | null {
+  const steps: readonly GateStep[] | null =
+    scriptName === 'verify:push:branch'
+      ? BRANCH_STEPS
+      : scriptName === 'verify:release'
+        ? RELEASE_STEPS
+        : null;
+  if (!steps) return null;
+  return [`unset ${NEUTRALIZED_SKIP_VARS.join(' ')}`, ...steps.map((step) => step.cmd)].join(' && ');
+}
+
+function resolveChainSource(scriptName: string, scripts: Record<string, string>): string | undefined {
+  const fromPackage = scripts[scriptName];
+  if (fromPackage && !MANIFEST_ENTRY_POINT_RE.test(fromPackage.trim())) {
+    return fromPackage;
+  }
+  return manifestChainView(scriptName) ?? fromPackage;
+}
+
+function chainRemediation(scriptName: string): string {
+  return scriptName === 'verify:push:branch' || scriptName === 'verify:release'
+    ? `Restore the intended ${scriptName} guard order in scripts/push-gate.ts (${scriptName === 'verify:push:branch' ? 'BRANCH_STEPS' : 'RELEASE_STEPS'}).`
+    : `Restore the intended ${scriptName} guard order in package.json.`;
+}
+
 function checkChainRequirement(scripts: Record<string, string>, requirement: ChainRequirement): DiagnosticCheck {
-  const chain = scripts[requirement.scriptName];
+  const chain = resolveChainSource(requirement.scriptName, scripts);
   if (!chain) {
     return {
       id: requirement.id,
@@ -717,7 +757,7 @@ function checkChainRequirement(scripts: Record<string, string>, requirement: Cha
       ? `${requirement.scriptName} guard chain is present and ordered.`
       : `${requirement.scriptName} guard chain is incomplete or out of order.`,
     evidence: failures.length === 0 ? requirement.orderedSteps : failures,
-    remediation: `Restore the intended ${requirement.scriptName} guard order in package.json.`,
+    remediation: chainRemediation(requirement.scriptName),
   };
 }
 

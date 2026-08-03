@@ -486,7 +486,7 @@ describe('AgentRuntime — provider fallback state machine', () => {
     },
   );
 
-  it('schedules replay of the interrupted turn only when fallback is newly armed and usable', () => {
+  it('schedules replay of the interrupted turn only for a usable, route-safe fallback target', () => {
     const runtime = makeRuntime({
       agentFallbackProvider: 'opencode-cli',
       agentFallbackModel: 'minimax/MiniMax-M2.7',
@@ -539,10 +539,17 @@ describe('AgentRuntime — provider fallback state machine', () => {
       actorJid: 'sender@s.whatsapp.net',
       oldSession: null,
       runtimeContext,
+      routeOverride: expect.objectContaining({
+        provider: 'opencode-cli',
+        model: 'minimax/MiniMax-M2.7',
+        source: 'fallback',
+        reasonCode: 'fallback_window_active',
+      }),
     });
 
     const extended = v.activateProviderFallback(null, 'usage-limit')!;
     expect(extended.extended).toBe(true);
+    // An extension with no source-route identity remains fail-closed.
     expect(v.scheduleFallbackReplay({
       activation: extended,
       chatJid: 'chat@s.whatsapp.net',
@@ -1121,7 +1128,7 @@ describe('AgentRuntime — fallback persistence hooks', () => {
     const now = Date.now();
     const activeUntil = now + 60 * 60_000;
     const originalActivatedAt = now - 1000;
-    vi.spyOn(fallbackStateDb, 'loadFallbackState').mockReturnValue({
+    vi.spyOn(fallbackStateDb, 'getFallbackState').mockReturnValue({
       activeUntil,
       activatedAt: originalActivatedAt,
       reason: 'server-error',
@@ -1161,7 +1168,7 @@ describe('AgentRuntime — fallback persistence hooks', () => {
 
   it('discards a stale persisted window (past expiry) without re-arming', () => {
     const now = Date.now();
-    vi.spyOn(fallbackStateDb, 'loadFallbackState').mockReturnValue({
+    vi.spyOn(fallbackStateDb, 'getFallbackState').mockReturnValue({
       activeUntil: now - 1000,
       activatedAt: now - 10_000,
       reason: 'usage-limit',
@@ -1186,7 +1193,7 @@ describe('AgentRuntime — fallback persistence hooks', () => {
     // Covers the branch where agentFallbackProvider is undefined at restart —
     // the stale row must be cleared and the runtime must remain on the primary.
     const now = Date.now();
-    vi.spyOn(fallbackStateDb, 'loadFallbackState').mockReturnValue({
+    vi.spyOn(fallbackStateDb, 'getFallbackState').mockReturnValue({
       activeUntil: now + 60 * 60_000,
       activatedAt: now - 1000,
       reason: 'usage-limit',
@@ -1206,11 +1213,11 @@ describe('AgentRuntime — fallback persistence hooks', () => {
   });
 
   it('clears a corrupt persisted row that fails load validation', () => {
-    // loadFallbackState returns null for both "no row" and "bad-typed row" (SQLite
+    // getFallbackState returns null for both "no row" and "bad-typed row" (SQLite
     // affinity allows e.g. TEXT in an INTEGER column). On the null path the row must
     // be cleared so corruption does not linger across restarts — consistent with the
     // stale-row and no-fallback-provider treatments.
-    vi.spyOn(fallbackStateDb, 'loadFallbackState').mockReturnValue(null);
+    vi.spyOn(fallbackStateDb, 'getFallbackState').mockReturnValue(null);
     vi.spyOn(fallbackStateDb, 'ensureFallbackStateSchema').mockImplementation(() => {});
     const clearSpy = vi
       .spyOn(fallbackStateDb, 'clearFallbackState')
@@ -1226,8 +1233,8 @@ describe('AgentRuntime — fallback persistence hooks', () => {
     expect(clearSpy).toHaveBeenCalled();
   });
 
-  it('a throwing loadFallbackState never crashes restore', () => {
-    vi.spyOn(fallbackStateDb, 'loadFallbackState').mockImplementation(() => {
+  it('a throwing getFallbackState never crashes restore', () => {
+    vi.spyOn(fallbackStateDb, 'getFallbackState').mockImplementation(() => {
       throw new Error('db exploded');
     });
     vi.spyOn(fallbackStateDb, 'ensureFallbackStateSchema').mockImplementation(() => {});
@@ -1247,7 +1254,7 @@ describe('AgentRuntime — fallback persistence hooks', () => {
     // within the expected range.
     const now = Date.now();
     const farFuture = now + 72 * 60 * 60 * 1000; // 72 hours
-    vi.spyOn(fallbackStateDb, 'loadFallbackState').mockReturnValue({
+    vi.spyOn(fallbackStateDb, 'getFallbackState').mockReturnValue({
       activeUntil: farFuture,
       activatedAt: now - 1000,
       reason: 'usage-limit',

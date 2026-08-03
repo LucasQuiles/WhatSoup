@@ -7,7 +7,7 @@ import { Database } from '../../../src/core/database.ts';
 import {
   ensureFallbackStateSchema,
   saveFallbackState,
-  loadFallbackState,
+  getFallbackState,
   clearFallbackState,
 } from '../../../src/runtimes/agent/fallback-state-db.ts';
 
@@ -32,7 +32,7 @@ describe('fallback-state-db', () => {
   it('returns null when nothing is persisted', () => {
     // Ensure clean state
     clearFallbackState(db);
-    expect(loadFallbackState(db)).toStrictEqual(null);
+    expect(getFallbackState(db)).toStrictEqual(null);
   });
 
   it('round-trips a saved state', () => {
@@ -44,7 +44,7 @@ describe('fallback-state-db', () => {
       probeAttempts: 7,
     };
     saveFallbackState(db, state);
-    const loaded = loadFallbackState(db);
+    const loaded = getFallbackState(db);
     expect(loaded).toEqual(state);
   });
 
@@ -63,7 +63,7 @@ describe('fallback-state-db', () => {
       probeAttempts: 3,
     };
     saveFallbackState(db, updated);
-    const loaded = loadFallbackState(db);
+    const loaded = getFallbackState(db);
     expect(loaded?.activeUntil).toBe(1_800_000_000_000);
     expect(loaded?.reason).toBe('restored');
     expect(loaded?.probeAttempts).toBe(3);
@@ -77,7 +77,7 @@ describe('fallback-state-db', () => {
       probeAttempts: 0,
     });
     clearFallbackState(db);
-    expect(loadFallbackState(db)).toBeNull();
+    expect(getFallbackState(db)).toBeNull();
     // Double-clear: must not throw
     expect(() => clearFallbackState(db)).not.toThrow();
   });
@@ -91,7 +91,7 @@ describe('fallback-state-db', () => {
       reason: 'usage-limit',
       probeAttempts: 0,
     });
-    const loaded = loadFallbackState(db);
+    const loaded = getFallbackState(db);
     expect(loaded).not.toBeNull();
   });
 
@@ -107,7 +107,7 @@ describe('fallback-state-db', () => {
     }).toThrow();
   });
 
-  it('loadFallbackState returns null when a row has wrong-typed data (type validation)', () => {
+  it('getFallbackState returns null when a row has wrong-typed data (type validation)', () => {
     clearFallbackState(db);
     // SQLite type affinity lets us store TEXT in an INTEGER column.
     // Insert malformed data directly to test the loader's guard.
@@ -118,7 +118,7 @@ describe('fallback-state-db', () => {
       )
       .run();
     // The loader must return null rather than propagating garbage.
-    expect(loadFallbackState(db)).toStrictEqual(null);
+    expect(getFallbackState(db)).toStrictEqual(null);
   });
 
   it('migrates a legacy table without probe_attempts: ensure adds the column, old rows load as 0', () => {
@@ -148,7 +148,7 @@ describe('fallback-state-db', () => {
       // Idempotent against the already-migrated table too.
       expect(() => ensureFallbackStateSchema(legacyDb)).not.toThrow();
 
-      const loaded = loadFallbackState(legacyDb);
+      const loaded = getFallbackState(legacyDb);
       expect(loaded).toEqual({
         activeUntil: 1_700_000_000_000,
         activatedAt: 1_699_999_000_000,
@@ -175,7 +175,7 @@ describe('fallback-state-db', () => {
          VALUES (1, 1700000000000, 1699999000000, 'auth-required', 'garbage')`,
       )
       .run();
-    const loaded = loadFallbackState(db);
+    const loaded = getFallbackState(db);
     expect(loaded).toEqual({
       activeUntil: 1_700_000_000_000,
       activatedAt: 1_699_999_000_000,

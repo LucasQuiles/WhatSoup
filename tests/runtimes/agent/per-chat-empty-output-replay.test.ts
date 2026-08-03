@@ -51,6 +51,7 @@ vi.mock('../../../src/config.ts', () => {
     agentProviderConfig: undefined,
     agentFallbackProvider: undefined,
     agentFallbackModel: undefined,
+    agentFallbacks: undefined,
   };
   (globalThis as Record<string, unknown>)['__perChatReplayTestConfig__'] = config;
   return { config };
@@ -71,6 +72,7 @@ vi.mock('../../../src/mcp/registry.ts', () => ({
 }));
 
 vi.mock('../../../src/lib/keyring.ts', () => ({
+  SERVICE_ENV_MAP: { minimax: 'MINIMAX_API_KEY' },
   lookupCredential: vi.fn(() => 'present-key'),
   resolveProviderKeyService: vi.fn((provider: unknown, model: unknown) => {
     if (provider === 'opencode-cli' && typeof model === 'string') return model.split('/')[0]?.trim().toLowerCase() || null;
@@ -126,6 +128,7 @@ function makeMessenger(): Messenger {
 interface RuntimeOverrides {
   agentFallbackProvider?: string;
   agentFallbackModel?: string;
+  agentFallbacks?: Array<{ provider: string; model?: string }>;
 }
 
 function makeRuntime(overrides: RuntimeOverrides = {}): AgentRuntime {
@@ -134,6 +137,7 @@ function makeRuntime(overrides: RuntimeOverrides = {}): AgentRuntime {
   config['agentProviderConfig'] = undefined;
   config['agentFallbackProvider'] = overrides.agentFallbackProvider;
   config['agentFallbackModel'] = overrides.agentFallbackModel;
+  config['agentFallbacks'] = overrides.agentFallbacks;
   return new AgentRuntime(makeDb(), makeMessenger(), 'test', {
     model: 'claude-opus-4-8[1m]',
   });
@@ -157,12 +161,13 @@ function makeFakeQueue(chatJid = 'chat@s.whatsapp.net') {
   };
 }
 
-function makeEventSession() {
+function makeEventSession(route: { provider?: string; model?: string } = {}) {
   return {
     clearTurnWatchdog: vi.fn(),
     completeProviderTurn: vi.fn(),
     getDbRowId: vi.fn(() => null),
-    getProviderId: vi.fn(() => 'claude-cli'),
+    getProviderId: vi.fn(() => route.provider ?? 'claude-cli'),
+    getModelRef: vi.fn(() => route.model ?? 'claude-opus-4-8[1m]'),
     getStatus: vi.fn(() => ({ active: true })),
     bindGenerationOwnership: vi.fn(),
     sendTurn: vi.fn(async () => {}),
@@ -192,11 +197,14 @@ type RuntimeView = {
   session: unknown;
   turnHadVisibleOutput: boolean;
   consecutivePrimaryEmptyTurns: number;
+  effectiveProvider: string;
+  effectiveModel: string | undefined;
   // Methods
   handleEventPerChat(sourceSession: object, event: unknown, toolScopeKey: string): void;
   handleEvent(sourceSession: object, event: unknown): void;
   replayTurnOnFallback(args: unknown): Promise<void>;
   activateProviderFallback(resetAt: Date | null, reason?: string): unknown;
+  resolveRouteForTurn(chatJid: string, actorJid?: string): unknown;
   setOwnedPerChatSession(mapKey: string, session: object): void;
   managerIdFor(session: object): string;
   captureSystemTurnOwner(session: object, scopeKey: string): MarkSystemTurnInput['owner'];
@@ -211,6 +219,7 @@ const FALLBACK_CFG = {
   agentFallbackProvider: 'opencode-cli',
   agentFallbackModel: 'minimax/minimax-m2',
 };
+const USAGE_LIMIT_TEXT = 'Claude usage limit reached. Your limit will reset at 3pm.';
 
 // EMPTY_OUTPUT_FALLBACK_THRESHOLD = 2 (mirrors the module constant).
 const THRESHOLD = 2;
@@ -286,6 +295,161 @@ describe('per_chat empty-output fallback — replay sees pendingTurnText', () =>
     expect(callArgs.replayText).toBe(turnText);
     expect(callArgs.mapKey).toBe(mapKey);
     expect(callArgs.chatJid).toBe(mapKey);
+  });
+
+  it('per_chat: replays a primary usage-limit result into an already-active fallback', async () => {
+    const runtime = makeRuntime(FALLBACK_CFG);
+    const rv = v(runtime);
+    rv.activateProviderFallback(null, 'usage-limit');
+    rv.replayTurnOnFallback = vi.fn(async () => {});
+
+    const mapKey = 'primary-extension@s.whatsapp.net';
+    const queue = makeFakeQueue(mapKey);
+    const primarySession = makeEventSession();
+    const toolScopeKey = `${mapKey}#test`;
+    rv.setOwnedPerChatSession(mapKey, primarySession);
+    rv.sessionEventToolScopes.set(primarySession, toolScopeKey);
+    rv.chatQueues.set(mapKey, queue);
+    rv.perChatInboundSeqQueue.set(mapKey, [1]);
+    rv.pendingTurnText.set(mapKey, 'continue the retained task');
+    rv.pendingTurnActorJid.set(mapKey, 'user@s.whatsapp.net');
+
+    rv.publishLegacyProviderTurn(primarySession, mapKey, mapKey);
+    rv.handleEventPerChat(primarySession, { type: 'result', text: USAGE_LIMIT_TEXT }, toolScopeKey);
+    await Promise.resolve();
+
+    expect(rv.replayTurnOnFallback).toHaveBeenCalledTimes(1);
+    expect(rv.effectiveProvider).toBe('opencode-cli');
+    const args = (rv.replayTurnOnFallback as ReturnType<typeof vi.fn>).mock.calls[0][0] as {
+      replayText: string;
+      chatJid: string;
+    };
+    expect(args.replayText).toBe('continue the retained task');
+    expect(args.chatJid).toBe(mapKey);
+  });
+
+  it('per_chat: does not replay an extended result back to the failed only fallback target', async () => {
+    const runtime = makeRuntime(FALLBACK_CFG);
+    const rv = v(runtime);
+    rv.activateProviderFallback(null, 'usage-limit');
+    rv.replayTurnOnFallback = vi.fn(async () => {});
+
+    const mapKey = 'same-target@s.whatsapp.net';
+    const queue = makeFakeQueue(mapKey);
+    const fallbackSession = makeEventSession({
+      provider: 'opencode-cli',
+      model: 'minimax/minimax-m2',
+    });
+    const toolScopeKey = `${mapKey}#test`;
+    rv.setOwnedPerChatSession(mapKey, fallbackSession);
+    rv.sessionEventToolScopes.set(fallbackSession, toolScopeKey);
+    rv.chatQueues.set(mapKey, queue);
+    rv.perChatInboundSeqQueue.set(mapKey, [1]);
+    rv.pendingTurnText.set(mapKey, 'do not loop this retained task');
+    rv.pendingTurnActorJid.set(mapKey, 'user@s.whatsapp.net');
+
+    rv.publishLegacyProviderTurn(fallbackSession, mapKey, mapKey);
+    rv.handleEventPerChat(fallbackSession, { type: 'result', text: USAGE_LIMIT_TEXT }, toolScopeKey);
+    await Promise.resolve();
+
+    expect(rv.replayTurnOnFallback).not.toHaveBeenCalled();
+    expect(rv.effectiveProvider).toBe('opencode-cli');
+    expect(rv.effectiveModel).toBe('minimax/minimax-m2');
+  });
+
+  it('per_chat: replays when a failed fallback rotates to a distinct model route', async () => {
+    const runtime = makeRuntime({
+      agentFallbacks: [
+        { provider: 'opencode-cli', model: 'minimax/model-a' },
+        { provider: 'opencode-cli', model: 'minimax/model-b' },
+      ],
+    });
+    const rv = v(runtime);
+    rv.activateProviderFallback(null, 'usage-limit');
+    rv.replayTurnOnFallback = vi.fn(async () => {});
+
+    const mapKey = 'rotated-model@s.whatsapp.net';
+    const queue = makeFakeQueue(mapKey);
+    const firstFallbackSession = makeEventSession({
+      provider: 'opencode-cli',
+      model: 'minimax/model-a',
+    });
+    const toolScopeKey = `${mapKey}#test`;
+    rv.setOwnedPerChatSession(mapKey, firstFallbackSession);
+    rv.sessionEventToolScopes.set(firstFallbackSession, toolScopeKey);
+    rv.chatQueues.set(mapKey, queue);
+    rv.perChatInboundSeqQueue.set(mapKey, [1]);
+    rv.pendingTurnText.set(mapKey, 'continue after model rotation');
+    rv.pendingTurnActorJid.set(mapKey, 'user@s.whatsapp.net');
+
+    rv.publishLegacyProviderTurn(firstFallbackSession, mapKey, mapKey);
+    rv.handleEventPerChat(firstFallbackSession, { type: 'result', text: USAGE_LIMIT_TEXT }, toolScopeKey);
+    await Promise.resolve();
+
+    expect(rv.replayTurnOnFallback).toHaveBeenCalledTimes(1);
+    expect(rv.effectiveProvider).toBe('opencode-cli');
+    expect(rv.effectiveModel).toBe('minimax/model-b');
+    const args = (rv.replayTurnOnFallback as ReturnType<typeof vi.fn>).mock.calls[0][0] as {
+      replayText: string;
+      chatJid: string;
+    };
+    expect(args.replayText).toBe('continue after model rotation');
+    expect(args.chatJid).toBe(mapKey);
+  });
+
+  it('per_chat: blocks an extended model-unavailable replay when a verified pin keeps it on the failed route', async () => {
+    const runtime = makeRuntime({
+      agentFallbacks: [
+        { provider: 'opencode-cli', model: 'minimax/model-a' },
+        { provider: 'opencode-cli', model: 'minimax/model-b' },
+      ],
+    });
+    const rv = v(runtime);
+    rv.activateProviderFallback(null, 'usage-limit');
+    rv.replayTurnOnFallback = vi.fn(async () => {});
+
+    // A verified per-chat pin refines the active fallback to model-b, while
+    // the fallback activation itself remains model-a on this direct
+    // model-unavailable path. Comparing only with activation.model would
+    // wrongly treat model-b as a fresh target and replay it back to itself.
+    vi.spyOn(rv, 'resolveRouteForTurn').mockReturnValue({
+      provider: 'opencode-cli',
+      model: 'minimax/model-b',
+      source: 'fallback',
+      reasonCode: 'fallback_window_active_model_pin',
+      dataPolicy: null,
+      policyVersion: 'provider-data-policy-v1',
+      policyState: 'missing',
+      pinnedProvider: 'opencode-cli',
+    });
+
+    const mapKey = 'pinned-target@s.whatsapp.net';
+    const queue = makeFakeQueue(mapKey);
+    const pinnedFallbackSession = makeEventSession({
+      provider: 'opencode-cli',
+      model: 'minimax/model-b',
+    });
+    const toolScopeKey = `${mapKey}#test`;
+    rv.setOwnedPerChatSession(mapKey, pinnedFallbackSession);
+    rv.sessionEventToolScopes.set(pinnedFallbackSession, toolScopeKey);
+    rv.chatQueues.set(mapKey, queue);
+    rv.perChatInboundSeqQueue.set(mapKey, [1]);
+    rv.pendingTurnText.set(mapKey, 'do not replay to the pinned failed model');
+    rv.pendingTurnActorJid.set(mapKey, 'user@s.whatsapp.net');
+
+    rv.publishLegacyProviderTurn(pinnedFallbackSession, mapKey, mapKey);
+    rv.handleEventPerChat(
+      pinnedFallbackSession,
+      {
+        type: 'result',
+        text: "There's an issue with the selected model (missing-model). It may not exist or you may not have access to it.",
+      },
+      toolScopeKey,
+    );
+    await Promise.resolve();
+
+    expect(rv.resolveRouteForTurn).toHaveBeenCalledWith(mapKey, 'user@s.whatsapp.net');
+    expect(rv.replayTurnOnFallback).not.toHaveBeenCalled();
   });
 
   it('per_chat: pendingTurnText is cleared when the turn produces visible output (no stale text on success)', () => {

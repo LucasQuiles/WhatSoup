@@ -14,6 +14,10 @@ import type {
   PollVote,
 } from '../../../src/runtimes/agent/runtime.ts';
 import type { ResponseWorkflow } from '../../../src/runtimes/agent/response-registry.ts';
+import {
+  FallbackReplayOwnershipChangedError,
+  type ResolvedReplayRoute,
+} from '../../../src/runtimes/agent/runtime-turn-coordinator.ts';
 
 const {
   createdSessions,
@@ -27,6 +31,8 @@ const {
 } = vi.hoisted(() => {
   type SessionOptions = {
     chatJid: string;
+    provider: string;
+    model: string | undefined;
     cwd?: string;
     actorJid?: string;
     mcpSocketPath?: string;
@@ -178,7 +184,7 @@ vi.mock('../../../src/runtimes/agent/session-db.ts', () => ({
 vi.mock('../../../src/runtimes/agent/fallback-state-db.ts', () => ({
   ensureFallbackStateSchema: vi.fn(),
   saveFallbackState: vi.fn(),
-  loadFallbackState: vi.fn(() => null),
+  getFallbackState: vi.fn(() => null),
   clearFallbackState: vi.fn(),
 }));
 
@@ -370,6 +376,7 @@ type RuntimeView = {
   };
   currentTurnReplayText: string | null;
   currentTurnReplayActorJid: string | undefined;
+  replayTurnOnFallback(args: unknown): Promise<void>;
   handleEventPerChat(sourceSession: object, event: AgentEvent, toolScopeKey: string): void;
   handleEvent(sourceSession: object, event: AgentEvent): void;
   handlePerChatCrash: ReturnType<typeof vi.fn>;
@@ -459,8 +466,17 @@ type RuntimeView = {
     isSystemResult?: boolean,
   ): void;
   kickDiagnosticBundle(wf: ResponseWorkflow, providerText: string): void;
-  recreatePerChatSessionForFallback(mapKey: string, chatJid: string, actorJid?: string): void;
-  recreateSingletonSessionForFallback(chatJid: string, actorJid?: string): void;
+  recreatePerChatSessionForFallback(
+    mapKey: string,
+    chatJid: string,
+    actorJid?: string,
+    routeOverride?: ResolvedReplayRoute,
+  ): void;
+  recreateSingletonSessionForFallback(
+    chatJid: string,
+    actorJid?: string,
+    routeOverride?: ResolvedReplayRoute,
+  ): void;
   handleControlTurn(reportId: string, payload: string): Promise<void>;
   getFallbackState(): { fallbackReason: string | null; fallbackActiveUntil: number | null };
   setOwnedPerChatSession(mapKey: string, session: unknown): void;
@@ -1212,6 +1228,32 @@ describe('AgentRuntime edge coverage', () => {
     );
   });
 
+  it('recreates a fallback session on the route captured at replay admission', () => {
+    const runtime = makeRuntime({ sessionScope: 'per_chat', sandboxPerChat: true, cwd: '/tmp/runtime-edge' });
+    const state = view(runtime);
+    const capturedRoute: ResolvedReplayRoute = {
+      provider: 'opencode-cli',
+      model: 'minimax/model-b',
+      source: 'fallback',
+      reasonCode: 'fallback_window_active_model_pin',
+      dataPolicy: null,
+      policyVersion: 'provider-data-policy-v1',
+      policyState: 'missing',
+      pinnedProvider: 'opencode-cli',
+    };
+
+    state.recreatePerChatSessionForFallback(
+      'captured-route@g.us',
+      'captured-route@g.us',
+      'actor-edge@s.whatsapp.net',
+      capturedRoute,
+    );
+
+    const created = createdSessions.at(-1)!;
+    expect(created.opts.provider).toBe('opencode-cli');
+    expect(created.opts.model).toBe('minimax/model-b');
+  });
+
   it('wires operation tracker callbacks to queue progress and session recovery', async () => {
     const runtime = makeRuntime({ sessionScope: 'per_chat', cwd: '/tmp/runtime-edge-tracker' });
     mockConfig.operationTracker = {
@@ -1541,6 +1583,7 @@ describe('AgentRuntime edge coverage', () => {
     const runtime = makeRuntime({ sessionScope: 'single' });
     const state = view(runtime);
     const oldSession = makeSession();
+    state.session = oldSession;
     const activation = state.activateProviderFallback(null, 'usage-limit');
     expect(activation).not.toBeNull();
     state.currentTurnReplayText = 'retry this interrupted turn';
@@ -1567,6 +1610,35 @@ describe('AgentRuntime edge coverage', () => {
         'info',
       );
     });
+  });
+
+  it('notifies the originating shared chat when an unjournaled fallback replay is invalidated', async () => {
+    const runtime = makeRuntime({ shared: true });
+    const state = view(runtime);
+    const sourceQueue = makeQueue('source-edge@s.whatsapp.net');
+    const replacementQueue = makeQueue('replacement-edge@s.whatsapp.net');
+    state.outboundQueues.set(sourceQueue.targetChatJid, sourceQueue);
+    state.outboundQueues.set(replacementQueue.targetChatJid, replacementQueue);
+    state.currentTurnChatJid = replacementQueue.targetChatJid;
+    state.activeChatJid = replacementQueue.targetChatJid;
+    state.currentTurnReplayText = 'retry this interrupted shared turn';
+    state.currentTurnReplayActorJid = 'actor-edge@s.whatsapp.net';
+    state.replayTurnOnFallback = vi.fn(async () => {
+      throw new FallbackReplayOwnershipChangedError();
+    });
+    const activation = state.activateProviderFallback(null, 'usage-limit');
+    expect(activation).not.toBeNull();
+
+    expect(state.scheduleFallbackReplay({
+      activation: activation!,
+      chatJid: sourceQueue.targetChatJid,
+      oldSession: null,
+    })).toBe(true);
+
+    await vi.waitFor(() => expect(sourceQueue.enqueueText).toHaveBeenCalledWith(
+      '_The backup model could not continue this turn. Please try again._',
+    ));
+    expect(replacementQueue.enqueueText).not.toHaveBeenCalled();
   });
 
   it('runs a control repair turn and escalates on timeout', async () => {

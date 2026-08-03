@@ -15,9 +15,11 @@ import { ChatRuntime } from './runtimes/chat/runtime.ts';
 import { AgentRuntime } from './runtimes/agent/runtime.ts';
 import { consumeIntentionalRestartMarker } from './runtimes/agent/self-restart.ts';
 import { emitAlertChecked } from './lib/emit-alert.ts';
+import { MS_PER_MINUTE, MS_PER_HOUR, MS_PER_DAY } from './lib/time-units.ts';
 import { resolveLatestPluginDir } from './runtimes/agent/plugin-dir-resolver.ts';
 import { resolveAgentModel } from './instance-loader.ts';
 import { getLoadedInstanceConfigOrNull } from './lib/instance-context.ts';
+import { ConfigValidationError } from './lib/startup-error.ts';
 import { PassiveRuntime } from './runtimes/passive/runtime.ts';
 import { PineconeMemory, getPineconeReadinessObservation } from './runtimes/chat/providers/pinecone.ts';
 import { createAnthropicProvider } from './runtimes/chat/providers/anthropic.ts';
@@ -162,11 +164,20 @@ process.on('exit', () => releaseLock());
 // be journaled immediately after this process owns the instance lock. Typed
 // store over the env round-trip (#2206); absent-means-default semantics kept,
 // and the legacy invalid-JSON error contract is preserved verbatim.
+// Site 4 reclassification (qf/exitcode-rescope-stacked, ported from
+// qf/startup-exitcode-classification 11fbbef12): getLoadedInstanceConfigOrNull() already
+// throws a ConfigValidationError (via instance-context.ts's readEnvFallback) on malformed
+// JSON, but re-wrapping it in a bare Error here discarded that classification —
+// startupExitCode() does a top-level instanceof check with no .cause inspection, so the
+// wrap silently misclassified a permanent config fault to exit 1 (systemd restart-flap)
+// instead of 78. Re-thrown as ConfigValidationError with the legacy message text preserved
+// byte-identical (pinned by tests/main-bootstrap-helpers.test.ts); the underlying cause is
+// dropped — ConfigValidationError's constructor takes only a message, no `cause`.
 let instanceConfig: Record<string, unknown> | null = null;
 try {
   instanceConfig = getLoadedInstanceConfigOrNull();
-} catch (error) {
-  throw new Error('INSTANCE_CONFIG is set but is not valid JSON', { cause: error });
+} catch {
+  throw new ConfigValidationError('INSTANCE_CONFIG is set but is not valid JSON');
 }
 const instanceType = (instanceConfig?.type as string | undefined) ?? 'chat';
 const startupJournalPath = instanceType === 'agent' ? startupNotifyPath(config.stateRoot) : null;
@@ -469,7 +480,7 @@ if (instanceType === 'agent') {
       pinecone,
       anthropic,
       {
-        intervalMs: config.memory.consolidation.intervalHours * 60 * 60 * 1000,
+        intervalMs: config.memory.consolidation.intervalHours * MS_PER_HOUR,
         lookbackDays: config.memory.consolidation.lookbackDays,
         dryRun: config.memory.consolidation.dryRun,
       },
@@ -954,17 +965,17 @@ const retentionInterval = setInterval(() => {
     const attemptsDeleted = cleanupOldAttempts(db);
     if (attemptsDeleted > 0) log.info({ count: attemptsDeleted }, 'cleaned up old llm attempts');
   } catch (err) { log.error({ err }, 'retention cleanup failed'); }
-}, 24 * 60 * 60 * 1000);
+}, MS_PER_DAY);
 
 // 12. Media retention timer — periodic cleanup of tmp/ and cache/ subdirectories
 // config.mediaDir resolves to .../media/tmp; base is one level up
 const mediaBaseDir = join(config.mediaDir, '..');
 const mediaRetentionTimer = new MediaRetentionTimer(mediaBaseDir, db, {
-  intervalMs:    config.mediaRetention.intervalHours * 60 * 60 * 1000,
-  tempMaxAgeMs:  config.mediaRetention.tempHours     * 60 * 60 * 1000,
-  cacheMaxAgeMs: config.mediaRetention.cacheHours    * 60 * 60 * 1000,
+  intervalMs:    config.mediaRetention.intervalHours * MS_PER_HOUR,
+  tempMaxAgeMs:  config.mediaRetention.tempHours     * MS_PER_HOUR,
+  cacheMaxAgeMs: config.mediaRetention.cacheHours    * MS_PER_HOUR,
 });
-mediaRetentionTimer.start(config.mediaRetention.intervalHours * 60 * 60 * 1000);
+mediaRetentionTimer.start(config.mediaRetention.intervalHours * MS_PER_HOUR);
 
 const processTmpRetentionTimer = new ProcessTmpRetentionTimer(
   process.env.TMPDIR ?? join(config.dataRoot, 'tmp'),
@@ -1003,7 +1014,7 @@ const stuckInboundInterval = setInterval(() => {
   try {
     durability.sweepStuckInbound();
   } catch (err) { log.error({ err }, 'stuck-inbound sweep failed'); }
-}, 15 * 60 * 1000);
+}, 15 * MS_PER_MINUTE);
 
 // 14. Degradation signal check — detect persistent decryption failures (Type 2)
 // Only run on instances that have Q as a control peer (i.e., heal targets like Loops).
@@ -1035,7 +1046,7 @@ const lidReconcileInterval = setInterval(() => {
       if (result.hydrated > 0) connectionManager.contactsDir.invalidateLidCache();
     }
   } catch (err) { log.error({ err }, 'L6: LID reconciliation failed'); }
-}, 30 * 60 * 1000); // every 30 minutes
+}, 30 * MS_PER_MINUTE);
 
 // 16. Message scheduler
 const messageScheduler = new MessageScheduler(db, connectionManager, {

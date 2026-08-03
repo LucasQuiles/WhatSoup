@@ -115,6 +115,82 @@ describe('early INSTANCE_CONFIG gate producer path (qpi/exit-codes)', () => {
   });
 });
 
+describe('database-compatibility-bootstrap producer path — Site 3 throws ConfigValidationError (qf/exitcode-rescope-stacked)', () => {
+  // checkLoadedInstanceDatabase() (src/database-compatibility-bootstrap.ts) has three throw
+  // sites that predate the #2206 typed-store refactor and were never reclassified: a bare
+  // `Error` when INSTANCE_CONFIG is absent, and a bare `Error` when the canonical dbPath is
+  // missing. startupExitCode() cannot distinguish a bare Error from a transient failure, so
+  // both cases misclassify a permanent config fault to exit 1 (systemd restart-flap) instead
+  // of 78 (RestartPreventExitStatus, stops the flap) — the same class of bug qpi/exit-codes
+  // fixed for Sites 1/2, now closed here for Site 3. Ported from
+  // qf/startup-exitcode-classification (11fbbef12), rebased onto the #2206 typed
+  // instance-context store (830fd3a95): the malformed-JSON case moved into
+  // src/lib/instance-context.ts's readEnvFallback() when the store landed and was already
+  // classified there — kept below as a regression guard, not a fix under test here.
+  const saved = process.env.INSTANCE_CONFIG;
+  afterEach(() => {
+    if (saved === undefined) delete process.env.INSTANCE_CONFIG;
+    else process.env.INSTANCE_CONFIG = saved;
+    vi.resetModules();
+  });
+
+  // Load the error class, the classifier, and the function under test from ONE fresh
+  // module graph so the class Site 3 throws is identity-equal to the one asserted against
+  // (resetModules-safe instanceof), matching the loadGate() precedent above.
+  async function loadSite3(): Promise<{
+    CVE: typeof import('../src/lib/startup-error.ts').ConfigValidationError;
+    startupExitCode: typeof import('../src/core/database-compatibility-early.ts').startupExitCode;
+    checkLoadedInstanceDatabase: typeof import('../src/database-compatibility-bootstrap.ts').checkLoadedInstanceDatabase;
+  }> {
+    const { ConfigValidationError: CVE } = await import('../src/lib/startup-error.ts');
+    const { startupExitCode } = await import('../src/core/database-compatibility-early.ts');
+    const { checkLoadedInstanceDatabase } = await import('../src/database-compatibility-bootstrap.ts');
+    return { CVE, startupExitCode, checkLoadedInstanceDatabase };
+  }
+
+  it('classifies an absent INSTANCE_CONFIG to exit 78, not 1', async () => {
+    vi.resetModules();
+    delete process.env.INSTANCE_CONFIG;
+    const { CVE, startupExitCode, checkLoadedInstanceDatabase } = await loadSite3();
+    let caught: unknown;
+    try {
+      checkLoadedInstanceDatabase();
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(CVE);
+    expect(startupExitCode(caught)).toBe(78);
+  });
+
+  it('classifies malformed INSTANCE_CONFIG JSON to exit 78, not 1 (regression guard — the store already classifies this)', async () => {
+    vi.resetModules();
+    process.env.INSTANCE_CONFIG = '{bad';
+    const { CVE, startupExitCode, checkLoadedInstanceDatabase } = await loadSite3();
+    let caught: unknown;
+    try {
+      checkLoadedInstanceDatabase();
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(CVE);
+    expect(startupExitCode(caught)).toBe(78);
+  });
+
+  it('classifies a missing canonical database path to exit 78, not 1', async () => {
+    vi.resetModules();
+    process.env.INSTANCE_CONFIG = JSON.stringify({ paths: {} });
+    const { CVE, startupExitCode, checkLoadedInstanceDatabase } = await loadSite3();
+    let caught: unknown;
+    try {
+      checkLoadedInstanceDatabase();
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(CVE);
+    expect(startupExitCode(caught)).toBe(78);
+  });
+});
+
 describe('real-process exit code: a ConfigValidationError maps to OS exit 78 (qpi/exit-codes)', () => {
   // The load-bearing systemd claim is that the *real process* exits exactly 78 (which
   // deploy/whatsoup@.service lists in RestartPreventExitStatus). bootstrap.ts:15 is a

@@ -1,4 +1,5 @@
 import { isStrictIsoUtcTimestamp } from './time-utils.ts';
+import { requireEnum, requireRecord, requireString } from '../lib/type-guards.ts';
 
 const artifactName = 'auth-loss-mode-bucket-producer-dry-run';
 const proofName = 'auth-loss-mode-bucket-artifact-contract-proof';
@@ -101,11 +102,11 @@ export interface AuthLossModeArtifactContractProof {
 export function validateAuthLossModeProducerArtifact(input: unknown): AuthLossModeArtifactContractProof {
   assertNoUnsafeContent(input);
 
-  const artifact = asRecord(input, 'artifact');
+  const artifact = requireRecord(input, 'artifact');
   if (artifact.artifact !== artifactName) throw new Error('unknown artifact type');
   if (artifact.schemaVersion !== 1) throw new Error('unknown schemaVersion');
-  assertIsoTimestamp(asString(artifact.generatedAt, 'generatedAt'));
-  const redaction = asRecord(artifact.redaction, 'redaction');
+  assertIsoTimestamp(requireString(artifact.generatedAt, 'generatedAt'));
+  const redaction = requireRecord(artifact.redaction, 'redaction');
   if (redaction.rawIdentifiersAllowed !== false || redaction.evidenceCopied !== false) {
     throw new Error('redaction guarantees are required');
   }
@@ -122,15 +123,15 @@ export function validateAuthLossModeProducerArtifact(input: unknown): AuthLossMo
   let suppressedCount = 0;
 
   for (const [index, decisionValue] of decisions.entries()) {
-    const decision = asRecord(decisionValue, `decisions[${index}]`);
-    const id = asString(decision.id, `decisions[${index}].id`);
+    const decision = requireRecord(decisionValue, `decisions[${index}]`);
+    const id = requireString(decision.id, `decisions[${index}].id`);
     assertSafeSampleId(id);
     if (seenIds.has(id)) throw new Error(`duplicate decision id: ${id}`);
     seenIds.add(id);
 
     if (decision.emits === false) {
       suppressedCount += 1;
-      assertKnown(decision.reason, falseReasons, `decisions[${index}].reason`);
+      requireEnum(decision.reason, `decisions[${index}].reason`, falseReasons);
       if ('event' in decision || 'decision' in decision) {
         throw new Error(`suppressed decision ${id} must not include event or decision`);
       }
@@ -139,11 +140,11 @@ export function validateAuthLossModeProducerArtifact(input: unknown): AuthLossMo
 
     if (decision.emits !== true) throw new Error(`decisions[${index}].emits must be boolean`);
     emittedCount += 1;
-    assertKnown(decision.reason, trueReasons, `decisions[${index}].reason`);
-    validateEvent(asRecord(decision.event, `decisions[${index}].event`), index);
-    const outage = asRecord(decision.decision, `decisions[${index}].decision`);
+    requireEnum(decision.reason, `decisions[${index}].reason`, trueReasons);
+    validateEvent(requireRecord(decision.event, `decisions[${index}].event`), index);
+    const outage = requireRecord(decision.decision, `decisions[${index}].decision`);
     validateOpenOutageDecision(outage, index);
-    const bucket = asString(outage.bucket, `decisions[${index}].decision.bucket`);
+    const bucket = requireString(outage.bucket, `decisions[${index}].decision.bucket`);
     bucketCounts[bucket] = (bucketCounts[bucket] ?? 0) + 1;
   }
 
@@ -171,10 +172,10 @@ function validateEvent(event: Record<string, unknown>, index: number): void {
     }
   }
   if ('authFailureClass' in event) {
-    assertKnown(event.authFailureClass, authFailureClasses, `decisions[${index}].event.authFailureClass`);
+    requireEnum(event.authFailureClass, `decisions[${index}].event.authFailureClass`, authFailureClasses);
   }
   if ('disconnectClass' in event) {
-    assertKnown(event.disconnectClass, disconnectClasses, `decisions[${index}].event.disconnectClass`);
+    requireEnum(event.disconnectClass, `decisions[${index}].event.disconnectClass`, disconnectClasses);
   }
   if (!('authFailureClass' in event) && !('disconnectClass' in event)) {
     throw new Error(`decisions[${index}].event must include an auth or disconnect class`);
@@ -185,11 +186,11 @@ function validateOpenOutageDecision(decision: Record<string, unknown>, index: nu
   if (decision.action !== 'open_outage') {
     throw new Error(`decisions[${index}].decision.action must be open_outage`);
   }
-  const bucket = asString(decision.bucket, `decisions[${index}].decision.bucket`);
-  const closeEdge = asString(decision.closeEdge, `decisions[${index}].decision.closeEdge`);
-  assertKnown(bucket, buckets, `decisions[${index}].decision.bucket`);
-  assertKnown(closeEdge, closeEdges, `decisions[${index}].decision.closeEdge`);
-  assertKnown(decision.confidence, new Set(['confirmed', 'inferred']), `decisions[${index}].decision.confidence`);
+  const bucket = requireString(decision.bucket, `decisions[${index}].decision.bucket`);
+  const closeEdge = requireString(decision.closeEdge, `decisions[${index}].decision.closeEdge`);
+  requireEnum(bucket, `decisions[${index}].decision.bucket`, buckets);
+  requireEnum(closeEdge, `decisions[${index}].decision.closeEdge`, closeEdges);
+  requireEnum(decision.confidence, `decisions[${index}].decision.confidence`, new Set(['confirmed', 'inferred']));
 
   if (bucket === 'mode_1_manual_relink' && closeEdge !== 'WA_AUTH_BOND_RELINK_VERIFIED') {
     throw new Error('mode_1_manual_relink requires WA_AUTH_BOND_RELINK_VERIFIED close edge');
@@ -232,20 +233,13 @@ function assertNoUnsafeContent(value: unknown): void {
   }
 }
 
-function asRecord(value: unknown, label: string): Record<string, unknown> {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) {
-    throw new Error(`${label} must be an object`);
-  }
-  return value as Record<string, unknown>;
-}
-
+// Non-validating: only narrows to unknown[]; element shape is checked
+// per-entry inside the decisions loop via requireRecord. Left local (not
+// requireArrayOfRecords) because eagerly validating every element's shape
+// here would run before the sampleCount-vs-length check below, changing
+// which error surfaces first for a payload that is wrong in both ways.
 function asArray(value: unknown, label: string): unknown[] {
   if (!Array.isArray(value)) throw new Error(`${label} must be an array`);
-  return value;
-}
-
-function asString(value: unknown, label: string): string {
-  if (typeof value !== 'string' || value.length === 0) throw new Error(`${label} must be a non-empty string`);
   return value;
 }
 
@@ -254,12 +248,6 @@ function asNumber(value: unknown, label: string): number {
     throw new Error(`${label} must be a non-negative integer`);
   }
   return value;
-}
-
-function assertKnown(value: unknown, allowed: Set<string>, label: string): void {
-  if (typeof value !== 'string' || !allowed.has(value)) {
-    throw new Error(`unknown ${label}: ${String(value)}`);
-  }
 }
 
 function assertIsoTimestamp(value: string): void {

@@ -1710,6 +1710,7 @@ def local_event_exists(event_id: str, created_at: str = "") -> bool:
         root / "writefail",
         root / "writefail-recovered",
         root / "writefail-quarantine",
+        root / "dead-letter",
     ]
     seen: set[Path] = set()
     for directory in candidates:

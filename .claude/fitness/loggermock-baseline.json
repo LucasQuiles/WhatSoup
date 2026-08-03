@@ -1,0 +1,578 @@
+[
+  {
+    "file": "tests/console/connection-card-emitter-contract.test.tsx",
+    "keysMatched": 4
+  },
+  {
+    "file": "tests/core/admin-fallback-help.test.ts",
+    "keysMatched": 4
+  },
+  {
+    "file": "tests/core/admin-fallback.test.ts",
+    "keysMatched": 4
+  },
+  {
+    "file": "tests/core/admin.test.ts",
+    "keysMatched": 4
+  },
+  {
+    "file": "tests/core/admission-contract.test.ts",
+    "keysMatched": 4
+  },
+  {
+    "file": "tests/core/command-router.test.ts",
+    "keysMatched": 4
+  },
+  {
+    "file": "tests/core/heal-degradation.test.ts",
+    "keysMatched": 4
+  },
+  {
+    "file": "tests/core/heal-endpoint.test.ts",
+    "keysMatched": 4
+  },
+  {
+    "file": "tests/core/heal.test.ts",
+    "keysMatched": 4
+  },
+  {
+    "file": "tests/core/health-mark-read.test.ts",
+    "keysMatched": 4
+  },
+  {
+    "file": "tests/core/health-poll-decision.test.ts",
+    "keysMatched": 4
+  },
+  {
+    "file": "tests/core/health-probe-storm.test.ts",
+    "keysMatched": 4
+  },
+  {
+    "file": "tests/core/health-schedule.test.ts",
+    "keysMatched": 4
+  },
+  {
+    "file": "tests/core/health.test.ts",
+    "keysMatched": 4
+  },
+  {
+    "file": "tests/core/image-resize.test.ts",
+    "keysMatched": 4
+  },
+  {
+    "file": "tests/core/ingest-backpressure.test.ts",
+    "keysMatched": 4
+  },
+  {
+    "file": "tests/core/ingest-control-transport-gate.test.ts",
+    "keysMatched": 4
+  },
+  {
+    "file": "tests/core/ingest-control.test.ts",
+    "keysMatched": 4
+  },
+  {
+    "file": "tests/core/ingest-fallback-routing.test.ts",
+    "keysMatched": 4
+  },
+  {
+    "file": "tests/core/ingest-paused-chat-bypass.test.ts",
+    "keysMatched": 4
+  },
+  {
+    "file": "tests/core/ingest-paused-chats.test.ts",
+    "keysMatched": 4
+  },
+  {
+    "file": "tests/core/ingest.test.ts",
+    "keysMatched": 4
+  },
+  {
+    "file": "tests/core/lid-groups-only-policy-salvage.test.ts",
+    "keysMatched": 4
+  },
+  {
+    "file": "tests/core/lid-phone-resolution.test.ts",
+    "keysMatched": 4
+  },
+  {
+    "file": "tests/core/lid-resolver-reconcile-dedup.test.ts",
+    "keysMatched": 6
+  },
+  {
+    "file": "tests/core/media-download-fs-errors.test.ts",
+    "keysMatched": 4
+  },
+  {
+    "file": "tests/core/media-download.test.ts",
+    "keysMatched": 4
+  },
+  {
+    "file": "tests/core/media-retention-fs-errors.test.ts",
+    "keysMatched": 4
+  },
+  {
+    "file": "tests/core/outbound-identity/guard-store-unavailable.test.ts",
+    "keysMatched": 4
+  },
+  {
+    "file": "tests/core/outbound-message-safety.test.ts",
+    "keysMatched": 4
+  },
+  {
+    "file": "tests/core/process-tmp-retention.test.ts",
+    "keysMatched": 4
+  },
+  {
+    "file": "tests/core/scheduler-corrupt-payload.test.ts",
+    "keysMatched": 4
+  },
+  {
+    "file": "tests/core/scheduler-recurrence.test.ts",
+    "keysMatched": 4
+  },
+  {
+    "file": "tests/core/scheduler.test.ts",
+    "keysMatched": 5
+  },
+  {
+    "file": "tests/core/signal-access-identity.test.ts",
+    "keysMatched": 4
+  },
+  {
+    "file": "tests/core/sms-access-identity.test.ts",
+    "keysMatched": 4
+  },
+  {
+    "file": "tests/core/substrate/vault-fs-errors.test.ts",
+    "keysMatched": 4
+  },
+  {
+    "file": "tests/fleet/db-reader-metrics.test.ts",
+    "keysMatched": 4
+  },
+  {
+    "file": "tests/fleet/fleet-metrics-extended.test.ts",
+    "keysMatched": 4
+  },
+  {
+    "file": "tests/fleet/health-classifier-fuzz.test.ts",
+    "keysMatched": 5
+  },
+  {
+    "file": "tests/fleet/health-poller-auth-loss-signal.test.ts",
+    "keysMatched": 5
+  },
+  {
+    "file": "tests/fleet/health-poller-branches.test.ts",
+    "keysMatched": 5
+  },
+  {
+    "file": "tests/fleet/health-poller-branches2.test.ts",
+    "keysMatched": 5
+  },
+  {
+    "file": "tests/fleet/health-poller-observed-at.test.ts",
+    "keysMatched": 5
+  },
+  {
+    "file": "tests/fleet/health-poller-recovery-clear-episodes.test.ts",
+    "keysMatched": 5
+  },
+  {
+    "file": "tests/fleet/health-poller-suppression-episodes.test.ts",
+    "keysMatched": 5
+  },
+  {
+    "file": "tests/fleet/health-poller.test.ts",
+    "keysMatched": 5
+  },
+  {
+    "file": "tests/fleet/heatmap-by-date.test.ts",
+    "keysMatched": 4
+  },
+  {
+    "file": "tests/fleet/probe-liveness-escalation.test.ts",
+    "keysMatched": 5
+  },
+  {
+    "file": "tests/integration/heal-concurrency.test.ts",
+    "keysMatched": 4
+  },
+  {
+    "file": "tests/integration/heal-flow.test.ts",
+    "keysMatched": 4
+  },
+  {
+    "file": "tests/lib/api-key-resolver.test.ts",
+    "keysMatched": 4
+  },
+  {
+    "file": "tests/lib/keyring-typed-lookup.test.ts",
+    "keysMatched": 4
+  },
+  {
+    "file": "tests/logger-error-key-serializer.test.ts",
+    "keysMatched": 4
+  },
+  {
+    "file": "tests/logger-transport.test.ts",
+    "keysMatched": 7
+  },
+  {
+    "file": "tests/logger.test.ts",
+    "keysMatched": 7
+  },
+  {
+    "file": "tests/main-bootstrap-helpers.test.ts",
+    "keysMatched": 5
+  },
+  {
+    "file": "tests/main-bootstrap.test.ts",
+    "keysMatched": 5
+  },
+  {
+    "file": "tests/mcp/socket-server-log-redaction.test.ts",
+    "keysMatched": 4
+  },
+  {
+    "file": "tests/mcp/tools/heal.test.ts",
+    "keysMatched": 4
+  },
+  {
+    "file": "tests/mcp/tools/knowledge.test.ts",
+    "keysMatched": 4
+  },
+  {
+    "file": "tests/mcp/tools/memory-write.test.ts",
+    "keysMatched": 4
+  },
+  {
+    "file": "tests/memory/consolidation-cron.test.ts",
+    "keysMatched": 4
+  },
+  {
+    "file": "tests/memory/consolidation-scheduler.test.ts",
+    "keysMatched": 4
+  },
+  {
+    "file": "tests/memory/consolidation.test.ts",
+    "keysMatched": 4
+  },
+  {
+    "file": "tests/runtimes/agent/codex-turn-lifecycle.test.ts",
+    "keysMatched": 4
+  },
+  {
+    "file": "tests/runtimes/agent/command-gate-contract.test.ts",
+    "keysMatched": 4
+  },
+  {
+    "file": "tests/runtimes/agent/control-queue.test.ts",
+    "keysMatched": 4
+  },
+  {
+    "file": "tests/runtimes/agent/control-timeout.test.ts",
+    "keysMatched": 4
+  },
+  {
+    "file": "tests/runtimes/agent/crash-count-tracking.test.ts",
+    "keysMatched": 4
+  },
+  {
+    "file": "tests/runtimes/agent/handoff-distill-coordinator.test.ts",
+    "keysMatched": 4
+  },
+  {
+    "file": "tests/runtimes/agent/handoff-notice-prefix.test.ts",
+    "keysMatched": 5
+  },
+  {
+    "file": "tests/runtimes/agent/health-snapshot.test.ts",
+    "keysMatched": 4
+  },
+  {
+    "file": "tests/runtimes/agent/idle-reap-alerting.test.ts",
+    "keysMatched": 4
+  },
+  {
+    "file": "tests/runtimes/agent/idle-session-eviction.test.ts",
+    "keysMatched": 4
+  },
+  {
+    "file": "tests/runtimes/agent/mcp-config-dual-write.test.ts",
+    "keysMatched": 4
+  },
+  {
+    "file": "tests/runtimes/agent/media-prep.test.ts",
+    "keysMatched": 4
+  },
+  {
+    "file": "tests/runtimes/agent/model-pin.test.ts",
+    "keysMatched": 4
+  },
+  {
+    "file": "tests/runtimes/agent/opencode-custom-endpoint-args.test.ts",
+    "keysMatched": 4
+  },
+  {
+    "file": "tests/runtimes/agent/operation-tracker.test.ts",
+    "keysMatched": 4
+  },
+  {
+    "file": "tests/runtimes/agent/outbound-queue-idempotency.test.ts",
+    "keysMatched": 4
+  },
+  {
+    "file": "tests/runtimes/agent/outbound-queue-turn-evidence.test.ts",
+    "keysMatched": 4
+  },
+  {
+    "file": "tests/runtimes/agent/outbound-queue.test.ts",
+    "keysMatched": 4
+  },
+  {
+    "file": "tests/runtimes/agent/per-chat-actor-binding.test.ts",
+    "keysMatched": 4
+  },
+  {
+    "file": "tests/runtimes/agent/prepare-content.test.ts",
+    "keysMatched": 4
+  },
+  {
+    "file": "tests/runtimes/agent/progress-coalescing.bench.test.ts",
+    "keysMatched": 4
+  },
+  {
+    "file": "tests/runtimes/agent/progress-coalescing.integration.test.ts",
+    "keysMatched": 4
+  },
+  {
+    "file": "tests/runtimes/agent/progress-placeholder-rate-floor.test.ts",
+    "keysMatched": 4
+  },
+  {
+    "file": "tests/runtimes/agent/provider-execution-gate.test.ts",
+    "keysMatched": 4
+  },
+  {
+    "file": "tests/runtimes/agent/providers/api-error-ladder.test.ts",
+    "keysMatched": 4
+  },
+  {
+    "file": "tests/runtimes/agent/providers/api-mcp-bridge.test.ts",
+    "keysMatched": 4
+  },
+  {
+    "file": "tests/runtimes/agent/providers/conformance.test.ts",
+    "keysMatched": 4
+  },
+  {
+    "file": "tests/runtimes/agent/providers/http-provider-lifecycle-errors.test.ts",
+    "keysMatched": 4
+  },
+  {
+    "file": "tests/runtimes/agent/runtime-edge-coverage.test.ts",
+    "keysMatched": 4
+  },
+  {
+    "file": "tests/runtimes/agent/runtime-egress-wiring.test.ts",
+    "keysMatched": 4
+  },
+  {
+    "file": "tests/runtimes/agent/runtime-reset-teardown.test.ts",
+    "keysMatched": 4
+  },
+  {
+    "file": "tests/runtimes/agent/runtime-secondhalf-branches.test.ts",
+    "keysMatched": 4
+  },
+  {
+    "file": "tests/runtimes/agent/runtime-tool-registrations.test.ts",
+    "keysMatched": 5
+  },
+  {
+    "file": "tests/runtimes/agent/runtime.test.ts",
+    "keysMatched": 4
+  },
+  {
+    "file": "tests/runtimes/agent/session-budget.test.ts",
+    "keysMatched": 4
+  },
+  {
+    "file": "tests/runtimes/agent/session-checkpoints.test.ts",
+    "keysMatched": 4
+  },
+  {
+    "file": "tests/runtimes/agent/session-db.test.ts",
+    "keysMatched": 4
+  },
+  {
+    "file": "tests/runtimes/agent/session-error-durability.test.ts",
+    "keysMatched": 4
+  },
+  {
+    "file": "tests/runtimes/agent/session-residual-branches.test.ts",
+    "keysMatched": 4
+  },
+  {
+    "file": "tests/runtimes/agent/session-spawn-per-turn-handlers.test.ts",
+    "keysMatched": 4
+  },
+  {
+    "file": "tests/runtimes/agent/session-turn-error-branches.test.ts",
+    "keysMatched": 4
+  },
+  {
+    "file": "tests/runtimes/agent/session.test.ts",
+    "keysMatched": 4
+  },
+  {
+    "file": "tests/runtimes/agent/system-turn-timeout-retry.test.ts",
+    "keysMatched": 4
+  },
+  {
+    "file": "tests/runtimes/agent/turn-queue.test.ts",
+    "keysMatched": 4
+  },
+  {
+    "file": "tests/runtimes/agent/workspace-sweeper.test.ts",
+    "keysMatched": 4
+  },
+  {
+    "file": "tests/runtimes/agent/zombie-sessions.test.ts",
+    "keysMatched": 4
+  },
+  {
+    "file": "tests/runtimes/chat/context.test.ts",
+    "keysMatched": 4
+  },
+  {
+    "file": "tests/runtimes/chat/enrichment/extractor-selffact-provenance.test.ts",
+    "keysMatched": 4
+  },
+  {
+    "file": "tests/runtimes/chat/enrichment/extractor-toulmin.test.ts",
+    "keysMatched": 4
+  },
+  {
+    "file": "tests/runtimes/chat/enrichment/extractor.test.ts",
+    "keysMatched": 4
+  },
+  {
+    "file": "tests/runtimes/chat/enrichment/poller-strict-integration.test.ts",
+    "keysMatched": 4
+  },
+  {
+    "file": "tests/runtimes/chat/enrichment/poller.test.ts",
+    "keysMatched": 4
+  },
+  {
+    "file": "tests/runtimes/chat/enrichment/upserter.test.ts",
+    "keysMatched": 4
+  },
+  {
+    "file": "tests/runtimes/chat/enrichment/validator.test.ts",
+    "keysMatched": 4
+  },
+  {
+    "file": "tests/runtimes/chat/health-snapshot.test.ts",
+    "keysMatched": 4
+  },
+  {
+    "file": "tests/runtimes/chat/media/links-extraction.test.ts",
+    "keysMatched": 4
+  },
+  {
+    "file": "tests/runtimes/chat/media/links.test.ts",
+    "keysMatched": 4
+  },
+  {
+    "file": "tests/runtimes/chat/media/processor.test.ts",
+    "keysMatched": 4
+  },
+  {
+    "file": "tests/runtimes/chat/media/video.test.ts",
+    "keysMatched": 4
+  },
+  {
+    "file": "tests/runtimes/chat/memory/memory-provider-telemetry-confidentiality.test.ts",
+    "keysMatched": 4
+  },
+  {
+    "file": "tests/runtimes/chat/memory/memory-telemetry-cross-surface.test.ts",
+    "keysMatched": 4
+  },
+  {
+    "file": "tests/runtimes/chat/memory/memory-tool-telemetry-confidentiality.test.ts",
+    "keysMatched": 4
+  },
+  {
+    "file": "tests/runtimes/chat/providers/anthropic.test.ts",
+    "keysMatched": 4
+  },
+  {
+    "file": "tests/runtimes/chat/providers/api-error-classifier.test.ts",
+    "keysMatched": 6
+  },
+  {
+    "file": "tests/runtimes/chat/providers/openai-env-baseurl.test.ts",
+    "keysMatched": 4
+  },
+  {
+    "file": "tests/runtimes/chat/providers/openai.test.ts",
+    "keysMatched": 4
+  },
+  {
+    "file": "tests/runtimes/chat/providers/pinecone-readiness.test.ts",
+    "keysMatched": 4
+  },
+  {
+    "file": "tests/runtimes/chat/providers/pinecone.test.ts",
+    "keysMatched": 4
+  },
+  {
+    "file": "tests/runtimes/chat/providers/transcription/openai-whisper-extended.test.ts",
+    "keysMatched": 4
+  },
+  {
+    "file": "tests/runtimes/chat/providers/transcription/whisper-providers.test.ts",
+    "keysMatched": 4
+  },
+  {
+    "file": "tests/runtimes/chat/providers/whisper.test.ts",
+    "keysMatched": 4
+  },
+  {
+    "file": "tests/runtimes/chat/queue.test.ts",
+    "keysMatched": 4
+  },
+  {
+    "file": "tests/runtimes/chat/runtime-admission.test.ts",
+    "keysMatched": 4
+  },
+  {
+    "file": "tests/runtimes/passive/health-snapshot.test.ts",
+    "keysMatched": 4
+  },
+  {
+    "file": "tests/transport/baileys-stream-error.test.ts",
+    "keysMatched": 6
+  },
+  {
+    "file": "tests/transport/connection-auth-bond-edge.test.ts",
+    "keysMatched": 6
+  },
+  {
+    "file": "tests/transport/outbound-governor.test.ts",
+    "keysMatched": 4
+  },
+  {
+    "file": "tests/transport/poll-vote-bridge.test.ts",
+    "keysMatched": 6
+  },
+  {
+    "file": "tests/transport/third-party-console-redaction.test.ts",
+    "keysMatched": 4
+  }
+]

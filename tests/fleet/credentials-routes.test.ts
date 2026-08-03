@@ -1,6 +1,5 @@
 // tests/fleet/credentials-routes.test.ts
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { EventEmitter } from 'node:events';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 
 const keyringMock = vi.hoisted(() => ({
@@ -24,25 +23,15 @@ import {
   _resetVerifyCooldownsForTests,
   _resetMutationCooldownsForTests,
 } from '../../src/fleet/routes/credentials.ts';
+import { mockReq as helperMockReq, mockRes as helperMockRes } from '../helpers/http-mocks.ts';
 
 /** Minimal req/res doubles matching the node:http handler contract. */
 function fakeReq(body?: unknown): IncomingMessage {
-  const req = new EventEmitter() as IncomingMessage;
-  process.nextTick(() => {
-    if (body !== undefined) req.emit('data', JSON.stringify(body));
-    req.emit('end');
-  });
-  return req;
+  return helperMockReq({ body: body !== undefined ? JSON.stringify(body) : undefined });
 }
 function fakeRes(): { res: ServerResponse; status: () => number; json: () => Record<string, unknown> } {
-  let code = 0;
-  let payload = '';
-  const res = {
-    writeHead(c: number) { code = c; return res; },
-    setHeader() { return res; },
-    end(chunk?: string) { payload = chunk ?? ''; },
-  } as unknown as ServerResponse;
-  return { res, status: () => code, json: () => JSON.parse(payload || '{}') };
+  const res = helperMockRes();
+  return { res, status: () => res._status, json: () => JSON.parse(res._body || '{}') };
 }
 
 beforeEach(() => {

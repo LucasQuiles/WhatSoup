@@ -118,7 +118,7 @@ describe('validateAuthLossModeProducerArtifact', () => {
     const unknownReason = clone(safeArtifact()) as Record<string, unknown>;
     const unknownReasonDecisions = unknownReason.decisions as Array<Record<string, unknown>>;
     unknownReasonDecisions[1].reason = 'surprise';
-    expect(() => validateAuthLossModeProducerArtifact(unknownReason)).toThrow(/unknown/i);
+    expect(() => validateAuthLossModeProducerArtifact(unknownReason)).toThrow(/must be one of/i);
 
     const relinkRegistration = clone(safeArtifact()) as Record<string, unknown>;
     const relinkRegistrationDecision = ((relinkRegistration.decisions as Array<Record<string, unknown>>)[1].decision) as Record<string, unknown>;

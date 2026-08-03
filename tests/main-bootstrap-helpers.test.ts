@@ -664,6 +664,8 @@ describe('main.ts — uncovered helpers and signal paths', () => {
       const h = await importMainWithMocks({
         instanceConfig: { type: 'agent', agentOptions: { cwd: '~' } },
       });
+      // expect.anything is deliberate: this test verifies ONLY the cwd arg (arg 4).
+      // The first 3 AgentRuntime args (deps, config, model) are exercised by other tests.
       expect(h.AgentRuntime).toHaveBeenCalledWith(
         expect.anything(),
         expect.anything(),
@@ -676,6 +678,8 @@ describe('main.ts — uncovered helpers and signal paths', () => {
       const h = await importMainWithMocks({
         instanceConfig: { type: 'agent', agentOptions: { cwd: '/absolute/path' } },
       });
+      // expect.anything is deliberate: this test verifies ONLY the cwd arg (arg 4).
+      // The first 3 AgentRuntime args (deps, config, model) are exercised by other tests.
       expect(h.AgentRuntime).toHaveBeenCalledWith(
         expect.anything(),
         expect.anything(),
@@ -1241,6 +1245,27 @@ describe('main.ts — uncovered helpers and signal paths', () => {
       await expect(importMainWithMocks({ rawInstanceConfig: '{not json' })).rejects.toThrow(
         'INSTANCE_CONFIG is set but is not valid JSON',
       );
+    });
+
+    // qf/exitcode-rescope-stacked (ported from qf/startup-exitcode-classification,
+    // 11fbbef12): Site 4 threw a bare Error on malformed INSTANCE_CONFIG JSON.
+    // startupExitCode() cannot distinguish a bare Error from a transient failure, so this
+    // misclassified a permanent config fault to exit 1 (systemd restart-flap) instead of 78
+    // (RestartPreventExitStatus, stops the flap). Rebased onto the #2206 typed
+    // instance-context store (830fd3a95): main.ts's catch now re-wraps the store's own
+    // ConfigValidationError in a plain Error({ cause }) — startupExitCode does a bare
+    // top-level instanceof check with no .cause inspection, so the store's classification
+    // was getting silently discarded at this boundary. importMainWithMocks does not mock
+    // `../src/lib/startup-error.ts` or `../src/core/database-compatibility-early.ts`, so
+    // importing both AFTER the harness's internal vi.resetModules() (and before any
+    // subsequent reset) resolves them from the SAME module-registry generation main.ts's own
+    // import resolved from — instanceof stays identity-safe without extra mocking.
+    it('throws a ConfigValidationError classified to exit 78, not a bare Error', async () => {
+      const caught = await importMainWithMocks({ rawInstanceConfig: '{not json' }).catch((err: unknown) => err);
+      const { ConfigValidationError: CVE } = await import('../src/lib/startup-error.ts');
+      const { startupExitCode } = await import('../src/core/database-compatibility-early.ts');
+      expect(caught).toBeInstanceOf(CVE);
+      expect(startupExitCode(caught)).toBe(78);
     });
   });
 

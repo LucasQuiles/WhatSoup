@@ -106,7 +106,7 @@ describe('harness maintenance guard', () => {
         ...(manifest().npm as Record<string, unknown>),
         codex_node: { node_bin: '', npm_min_version: '11.12.0' },
       },
-    })).toThrow('npm.codex_node.node_bin must be a non-empty string');
+    })).toThrow('npm.codex_node.node_bin must be a string');
     expect(() => validateManifestPayload({ ...manifest(), tier1: 'bad' })).toThrow('tier1 must be an array');
     expect(() => validateManifestPayload({
       ...manifest(),
@@ -115,11 +115,68 @@ describe('harness maintenance guard', () => {
     expect(() => validateManifestPayload({
       ...manifest(),
       tier1: [{ name: '', kind: 'native', smoke: [] }, { name: 'codex', kind: 'npm-global', smoke: [] }, { name: 'opencode', kind: 'native', smoke: [] }],
-    })).toThrow('tier1[0].name must be a non-empty string');
+    })).toThrow('tier1[0].name must be a string');
     expect(() => validateManifestPayload({
       ...manifest(),
       tier2: { probes: [{ name: 'mcp-servers', mode: '' }] },
-    })).toThrow('tier2.probes[0].mode must be a non-empty string');
+    })).toThrow('tier2.probes[0].mode must be a string');
+  });
+
+  // Regression pin: scripts/harness-maintenance-guard.ts used to reject
+  // whitespace-only strings (its old local asString() used `.trim() === ''`)
+  // before its ~13 requireString() call sites migrated onto the shared
+  // src/lib/type-guards.ts SSOT, which is deliberately non-trimming
+  // (`.length === 0` only). This guard's manifest/CLI-arg fields need the
+  // stricter check composed back in — every whitespace-only value below must
+  // still throw.
+  it('rejects whitespace-only strings at every migrated requireString call site', () => {
+    expect(() => validateManifestPayload({
+      ...manifest(),
+      npm: {
+        ...(manifest().npm as Record<string, unknown>),
+        codex_node: { node_bin: '   ', npm_min_version: '11.12.0' },
+      },
+    })).toThrow('npm.codex_node.node_bin must be a string');
+    expect(() => validateManifestPayload({
+      ...manifest(),
+      npm: {
+        ...(manifest().npm as Record<string, unknown>),
+        codex_node: { node_bin: '/usr/bin/node', npm_min_version: '\t\n' },
+      },
+    })).toThrow('npm.codex_node.npm_min_version must be a string');
+    expect(() => validateManifestPayload({
+      ...manifest(),
+      tier1: [{ name: '   ', kind: 'native', smoke: [] }, { name: 'codex', kind: 'npm-global', smoke: [] }, { name: 'opencode', kind: 'native', smoke: [] }],
+    })).toThrow('tier1[0].name must be a string');
+    expect(() => validateManifestPayload({
+      ...manifest(),
+      tier1: [{ name: 'claude', kind: '   ', smoke: [] }, { name: 'codex', kind: 'npm-global', smoke: [] }, { name: 'opencode', kind: 'native', smoke: [] }],
+    })).toThrow('tier1[0].kind must be a string');
+    expect(() => validateManifestPayload({
+      ...manifest(),
+      tier2: { probes: [{ name: '   ', mode: 'detect-only' }] },
+    })).toThrow('tier2.probes[0].name must be a string');
+    expect(() => validateManifestPayload({
+      ...manifest(),
+      tier2: { probes: [{ name: 'mcp-servers', mode: '   ' }] },
+    })).toThrow('tier2.probes[0].mode must be a string');
+
+    const dir = mkdtempSync(path.join(tmpdir(), 'whatsoup-harness-ws-'));
+    try {
+      const npmrcPath = path.join(dir, 'npmrc');
+      const stderrPath = path.join(dir, 'stderr.txt');
+      writeFileSync(npmrcPath, 'min-release-age=7', 'utf8');
+      writeFileSync(stderrPath, '', 'utf8');
+      expect(() => run(['--npm-cooldown-config', '--npm-version', '   ', '--min-version', '11.12.0', '--expected-days', '7', '--npmrc-file', npmrcPath, '--stderr-file', stderrPath, '--install-exit-code', '0'])).toThrow('--npm-version must be a string');
+      expect(() => run(['--npm-cooldown-config', '--npm-version', '11.12.1', '--min-version', '   ', '--expected-days', '7', '--npmrc-file', npmrcPath, '--stderr-file', stderrPath, '--install-exit-code', '0'])).toThrow('--min-version must be a string');
+      expect(() => run(['--npm-cooldown-config', '--npm-version', '11.12.1', '--min-version', '11.12.0', '--expected-days', '   ', '--npmrc-file', npmrcPath, '--stderr-file', stderrPath, '--install-exit-code', '0'])).toThrow('--expected-days must be a string');
+      expect(() => run(['--npm-cooldown-config', '--npm-version', '11.12.1', '--min-version', '11.12.0', '--expected-days', '7', '--npmrc-file', '   ', '--stderr-file', stderrPath, '--install-exit-code', '0'])).toThrow('--npmrc-file must be a string');
+      expect(() => run(['--npm-cooldown-config', '--npm-version', '11.12.1', '--min-version', '11.12.0', '--expected-days', '7', '--npmrc-file', npmrcPath, '--stderr-file', '   ', '--install-exit-code', '0'])).toThrow('--stderr-file must be a string');
+      expect(() => run(['--version-eligible', '0.135.1', '--time-json', '   '])).toThrow('--time-json must be a string');
+      expect(() => run(['--latest-eligible-version', '--time-json', '   '])).toThrow('--time-json must be a string');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it('rejects manifests that omit a required harness', () => {

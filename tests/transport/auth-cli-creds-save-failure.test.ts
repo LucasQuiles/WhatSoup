@@ -239,5 +239,16 @@ describe('#2165 auth CLI credential-save failure', () => {
       expect(process.exit).toHaveBeenCalledWith(0);
       expect(errorLines().filter((l) => l.includes('FATAL'))).toHaveLength(0);
     });
+
+    it('#2322 M5: exits immediately after a durable save, with no wall-clock delay', async () => {
+      // saveCreds() (createAtomicCredsSaver) already fsyncs + renames before
+      // resolving — durability is complete when the await returns, so nothing
+      // should wait on a timer afterward. Assert completion WITHOUT advancing
+      // fake timers at all: if a `setTimeout` still gates the exit, this fails.
+      await openConnection();
+
+      expect(process.exit).toHaveBeenCalledWith(0);
+      expect(errorLines()).toContainEqual(expect.stringContaining('Done. You can now start the bot.'));
+    });
   });
 });

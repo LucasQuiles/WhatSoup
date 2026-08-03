@@ -6,7 +6,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
 import { PassThrough } from 'node:stream';
-import type { IncomingMessage, ServerResponse } from 'node:http';
+import type { ServerResponse } from 'node:http';
 
 import { handleConfigUpdate } from '../../src/fleet/routes/ops.ts';
 import type { OpsDeps } from '../../src/fleet/routes/ops.ts';
@@ -25,11 +25,7 @@ vi.mock('node:child_process', async () => {
 // Test helpers
 // ---------------------------------------------------------------------------
 
-import { mockReq as helperMockReq, mockRes } from '../helpers/http-mocks.ts';
-
-function mockReq(body = ''): IncomingMessage {
-  return helperMockReq({ body, method: 'PATCH' });
-}
+import { mockReq, mockRes } from '../helpers/http-mocks.ts';
 
 let tmpDirs: string[] = [];
 
@@ -108,7 +104,7 @@ describe('handleConfigUpdate — settingsJson patch', () => {
       },
     };
 
-    const req = mockReq(JSON.stringify({ settingsJson: customSettings }));
+    const req = mockReq({ body: JSON.stringify({ settingsJson: customSettings }), method: 'PATCH' });
     const res = mockRes();
     await handleConfigUpdate(req, res, deps, { name: 'test-agent' });
 
@@ -153,9 +149,9 @@ describe('handleConfigUpdate — settingsJson patch', () => {
       serviceManager: { restart: vi.fn(), stop: vi.fn(), disable: vi.fn(), enable: vi.fn() } as any,
     };
 
-    const req = mockReq(JSON.stringify({
+    const req = mockReq({ body: JSON.stringify({
       settingsJson: { permissions: { allow: ['Bash'], deny: [], defaultMode: 'bypassPermissions' } },
-    }));
+    }), method: 'PATCH' });
     const res = mockRes();
     await handleConfigUpdate(req, res, deps, { name: 'test-chat' });
 
@@ -203,7 +199,7 @@ describe('handleConfigUpdate — enabledPlugins via agentOptions', () => {
     };
 
     const plugins = { 'sdlc-os@sdlc-os-dev': false, 'tmup@tmup-dev': true };
-    const req = mockReq(JSON.stringify({ agentOptions: { enabledPlugins: plugins } }));
+    const req = mockReq({ body: JSON.stringify({ agentOptions: { enabledPlugins: plugins } }), method: 'PATCH' });
     const res = mockRes();
     await handleConfigUpdate(req, res, deps, { name: 'test-agent' });
 
@@ -243,7 +239,7 @@ describe('handleConfigUpdate — enabledPlugins via agentOptions', () => {
       serviceManager: { restart: vi.fn(), stop: vi.fn(), disable: vi.fn(), enable: vi.fn() } as any,
     };
 
-    const req = mockReq(JSON.stringify({ agentOptions: { enabledPlugins: { 'foo@bar': true } } }));
+    const req = mockReq({ body: JSON.stringify({ agentOptions: { enabledPlugins: { 'foo@bar': true } } }), method: 'PATCH' });
     const res = mockRes();
     await handleConfigUpdate(req, res, deps, { name: 'test-agent' });
 
@@ -278,9 +274,9 @@ describe('handleConfigUpdate — enabledPlugins via agentOptions', () => {
       serviceManager: { restart: vi.fn(), stop: vi.fn(), disable: vi.fn(), enable: vi.fn() } as any,
     };
 
-    const req = mockReq(JSON.stringify({
+    const req = mockReq({ body: JSON.stringify({
       settingsJson: { permissions: { allow: ['Bash'], deny: [], defaultMode: 'bypassPermissions' } },
-    }));
+    }), method: 'PATCH' });
     const res = mockRes();
     await handleConfigUpdate(req, res, deps, { name: 'test-agent' });
 
@@ -311,9 +307,9 @@ describe('handleConfigUpdate — enabledPlugins via agentOptions', () => {
       serviceManager: { restart: vi.fn(), stop: vi.fn(), disable: vi.fn(), enable: vi.fn() } as any,
     };
 
-    const req = mockReq(JSON.stringify({
+    const req = mockReq({ body: JSON.stringify({
       settingsJson: { permissions: { allow: ['Bash'], deny: [], defaultMode: 'bypassPermissions' } },
-    }));
+    }), method: 'PATCH' });
     const res = mockRes();
     await handleConfigUpdate(req, res, deps, { name: 'test-agent' });
 
@@ -359,7 +355,7 @@ describe('handleConfigUpdate — enabledPlugins via agentOptions', () => {
     };
 
     // Send null to clear
-    const req = mockReq(JSON.stringify({ agentOptions: { enabledPlugins: null } }));
+    const req = mockReq({ body: JSON.stringify({ agentOptions: { enabledPlugins: null } }), method: 'PATCH' });
     const res = mockRes();
     await handleConfigUpdate(req, res, deps, { name: 'test-agent' });
 
