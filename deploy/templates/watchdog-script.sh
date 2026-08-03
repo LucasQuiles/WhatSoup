@@ -189,7 +189,12 @@ expected_instance_name = "BOT_NAME"
 status = data.get("status")
 service_mode = data.get("service_mode")
 generated_at = data.get("generated_at")
-instance = data.get("instance") or {}
+# A truthy non-object instance is an unrecognized future shape: read nothing
+# from it, and (below) never let it satisfy the recovery conjunction — a
+# malformed shape must classify unknown, not crash into the restart path.
+instance_raw = data.get("instance")
+instance = instance_raw if isinstance(instance_raw, dict) else {}
+instance_shape_valid = instance_raw is None or isinstance(instance_raw, dict)
 whatsapp = data.get("whatsapp") or {}
 conn = whatsapp.get("connection") or {}
 connected = whatsapp.get("connected") is True
@@ -409,7 +414,8 @@ if credential_dead_signal:
     sys.exit(3)
 
 credential_recovered = (
-    model_usable is True
+    instance_shape_valid
+    and model_usable is True
     and model_usable_stale is False
     and model_status == "usable"
     and fallback_reason is None

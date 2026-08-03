@@ -245,6 +245,32 @@ describe('watchdog decision block — credential death', () => {
   });
 });
 
+describe('watchdog decision block — malformed future shapes classify unknown', () => {
+  // The spec promises unrecognized future shapes classify unknown. A truthy
+  // non-object `instance` must neither crash into the restart path (exit 1)
+  // nor pass the recovery conjunction (exit 0, which would clear the marker).
+  it('exits 4 silently for a string instance field on an otherwise-recovered-looking bot', () => {
+    const r = runDecision(healthyPayload({ instance: 'future-shape' }));
+    expect(r.status).toBe(4);
+    expect(r.stderr).toBe('');
+  });
+
+  it('exits 4 for an array instance field — a malformed shape must never reach recovery', () => {
+    const r = runDecision(healthyPayload({ instance: [] }));
+    expect(r.status).toBe(4);
+    expect(r.stderr).toBe('');
+  });
+
+  it('a dead usability status still wins over a malformed instance shape', () => {
+    const r = runDecision(healthyPayload({
+      instance: 'future-shape',
+      turn_capability: { model_usability_status: 'credential-unavailable' },
+    }));
+    expect(r.status).toBe(3);
+    expect(r.stderr).toContain('CREDENTIAL-DEAD');
+  });
+});
+
 describe('watchdog shell wiring — exit 3 routes to marker + log, never restart', () => {
   it('captures the decision exit code instead of `|| restart_label`', () => {
     expect(template).not.toMatch(/PY\s*\|\|\s*restart_label/);

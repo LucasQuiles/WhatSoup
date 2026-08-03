@@ -121,7 +121,10 @@ affirmative primary-recovery proof, not merely absence of a failure field.
 Every other liveness-passing payload is inconclusive. This includes missing or null
 turn-capability data (permanent and correct for non-agent instances — watchdogs install for every
 instance type), stale usability without a current auth error, non-dead usability statuses, and
-unrecognized future shapes.
+unrecognized future shapes. A truthy non-object `instance` or `turn_capability` value is such a
+future shape: the decision block reads nothing from it, and it can never satisfy the recovery
+conjunction — a malformed shape must classify unknown, not crash into the restart path or clear
+the marker.
 
 The decision block exits `4` when no independent fallback window is active (unknown-quiescent)
 and `5` when one is. The fallback-activeness predicate is `instance.fallbackReason` being
