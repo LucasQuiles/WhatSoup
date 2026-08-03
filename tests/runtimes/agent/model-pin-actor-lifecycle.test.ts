@@ -124,7 +124,7 @@ describe('model-pin per-chat actor lifecycle', () => {
     const child = deferred();
     const { port, session, order, releaseProofs } = makeHarness(child.promise);
 
-    const outcome = applyRouteChangeAndRecycle(port, 'chat', 'actor', 'chat');
+    const outcome = await applyRouteChangeAndRecycle(port, 'chat', 'actor', 'chat');
 
     expect(outcome).toBe('recycled');
     expect(session.getProviderId()).toBe('codex-cli');
