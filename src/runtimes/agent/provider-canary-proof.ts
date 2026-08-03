@@ -70,6 +70,21 @@ export interface ProviderCanaryValidation {
   reason: ProviderCanaryValidationReason;
 }
 
+/**
+ * Admission record binding the validated provider identity at admission time.
+ * Returned by readProviderCanaryAdmission and consumed by SessionManager at
+ * every spawn path to prevent TOCTOU swaps between admission and execution.
+ */
+export interface ProviderAdmission {
+  allowed: boolean;
+  /** Absolute resolved path to the provider binary (no PATH re-resolution). */
+  resolvedPath: string;
+  /** SHA-256 hex digest of the binary file at admission time. */
+  binarySha256: string;
+  /** SHA-256 hex digest of the MCP proxy script at admission time. */
+  proxyScriptSha256: string;
+}
+
 function isSafeReceiptShape(value: unknown): value is ProviderCanaryReceipt {
   if (!isRecord(value)) return false;
   if (Object.keys(value).some((key) => !ALLOWED_KEYS.has(key))) return false;
@@ -158,7 +173,7 @@ export function validateProviderCanaryAdmission(input: {
   return { required: true, allowed: result.proven, reason: result.reason };
 }
 
-function sha256File(path: string): string {
+export function sha256File(path: string): string {
   return createHash('sha256').update(readFileSync(path)).digest('hex');
 }
 
@@ -273,13 +288,21 @@ export function readProviderCanaryAdmission(input: {
   sessionScope: string;
   sandboxPerChat: boolean;
   nowMs?: number;
-}): ReturnType<typeof validateProviderCanaryAdmission> {
+}): ProviderAdmission {
   const required = providerCanaryRequired(
     input.providerId,
     input.sessionScope,
     input.sandboxPerChat,
   );
-  if (!required) return { required: false, allowed: true, reason: 'not-required' };
+  if (!required) {
+    const entrypoint = resolveExecutable(input.binary);
+    return {
+      allowed: true,
+      resolvedPath: entrypoint,
+      binarySha256: sha256File(entrypoint),
+      proxyScriptSha256: sha256File(realpathSync(input.proxyScriptPath)),
+    };
+  }
   let receipt: unknown = null;
   let evidence: ProviderCanaryEvidence;
   try {
@@ -294,9 +317,15 @@ export function readProviderCanaryAdmission(input: {
       input.proxyScriptPath,
     );
   } catch {
-    return { required: true, allowed: false, reason: receipt === null ? 'missing' : 'malformed' };
+    return {
+      allowed: false,
+      resolvedPath: resolveExecutable(input.binary),
+      binarySha256: '',
+      proxyScriptSha256: '',
+    };
   }
-  return validateProviderCanaryAdmission({
+  const resolvedPath = resolveExecutable(input.binary);
+  const validation = validateProviderCanaryAdmission({
     providerId: input.providerId,
     sessionScope: input.sessionScope,
     sandboxPerChat: input.sandboxPerChat,
@@ -304,4 +333,10 @@ export function readProviderCanaryAdmission(input: {
     evidence,
     nowMs: input.nowMs,
   });
+  return {
+    allowed: validation.allowed,
+    resolvedPath,
+    binarySha256: evidence.entrypointDigest,
+    proxyScriptSha256: evidence.proxyDigest,
+  };
 }

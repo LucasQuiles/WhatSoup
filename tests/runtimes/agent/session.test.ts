@@ -358,6 +358,34 @@ describe('SessionManager', () => {
     );
   });
 
+  it('refuses spawn when binary content changed since canary admission (TOCTOU swap)', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+
+    // Stub sha256File so ANY resolve returns a non-matching hash.
+    const canaryMod = await import('../../../src/runtimes/agent/provider-canary-proof.ts');
+    const sha256FileSpy = vi.spyOn(canaryMod, 'sha256File').mockReturnValue('this-hash-will-never-match-admission');
+
+    const sm = new SessionManager({
+      db,
+      messenger,
+      chatJid: CHAT_JID,
+      onEvent: vi.fn(),
+      provider: 'claude-cli',
+      providerCanaryAdmission: async () => ({
+        allowed: true,
+        resolvedPath: '/usr/bin/claude',
+        binarySha256: 'original-hash-that-was-admitted',
+        proxyScriptSha256: 'proxy-hash',
+      }),
+    });
+
+    await expect(sm.spawnSession()).rejects.toThrow(
+      /provider binary content changed since admission/,
+    );
+    expect(spawn).not.toHaveBeenCalled();
+  });
+
   it('rejects an eligible persistent child before spawn when actor-socket readiness fails', async () => {
     const rejection = new Error('actor socket readiness failed');
     let rejectReady!: (error: Error) => void;

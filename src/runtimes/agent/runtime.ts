@@ -11161,6 +11161,7 @@ export class AgentRuntime implements Runtime {
             if (!admission.allowed) {
               throw new Error('provider MCP canary proof unavailable');
             }
+            return admission;
           }
         : undefined,
     });
