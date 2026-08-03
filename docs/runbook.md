@@ -356,6 +356,27 @@ Request errors such as both targets, neither target, unknown alias, unknown prof
 
 **Important:** `degraded` returns HTTP 200 — enrichment staleness is a warning, not an outage. Monitoring scripts must inspect the JSON `status` field, not just the HTTP status code. Retained turn-finalization retries, outstanding/corrupt recovery jobs, echo conflicts, and preserved crash-exhaustion history also degrade agent health even when WhatsApp remains connected.
 
+### Watchdog provider-credential states
+
+The launchd watchdog reads authenticated diagnostic health and classifies the
+primary provider only after transport and process liveness pass:
+
+- `CREDENTIAL-DEAD` — current evidence reports
+  `model_usability_status=credential-unavailable`, an active
+  `fallbackReason=auth-required`, or an `auth-required` turn error that has not
+  been superseded by a later successful turn. The watchdog retains a marker and
+  does not restart the bot; a restart cannot restore provider credentials.
+- `ok` — recovery is affirmative: `model_usable=true`, the result is not stale,
+  status is `usable`, and no auth fallback is active. Only this state clears an
+  existing credential marker.
+- `CREDENTIAL-UNKNOWN` — provider evidence is absent, stale, or otherwise
+  inconclusive. The watchdog neither restarts the bot nor changes the marker.
+
+A cold SSH `claude auth status`, credential-item presence, or a passing public
+health envelope is not provider-recovery proof. Diagnose in the service owner's
+GUI/launchd context and require fresh authenticated health before clearing an
+incident.
+
 ### Database Compatibility Startup Classification
 
 A valid database compatibility drain is distinct from an ordinary WhatsApp

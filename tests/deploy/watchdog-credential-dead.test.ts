@@ -53,7 +53,15 @@ function healthyPayload(over: Record<string, unknown> = {}): Record<string, unkn
         auth_failure_class: 'none',
       },
     },
-    turn_capability: { model_usability_status: 'usable' },
+    instance: { fallbackReason: null },
+    turn_capability: {
+      model_usable: true,
+      model_usable_stale: false,
+      model_usability_status: 'usable',
+      last_successful_turn_at: 200,
+      last_turn_error_class: null,
+      last_turn_error_at: null,
+    },
     ...over,
   };
 }
@@ -76,6 +84,37 @@ describe('watchdog decision block — credential death', () => {
     expect(r.stderr).toContain('CREDENTIAL-DEAD');
   });
 
+  it('exits 3 for the observed stale-usable payload while an auth-required fallback is active', () => {
+    const r = runDecision(healthyPayload({
+      status: 'degraded',
+      instance: { effectiveProvider: 'opencode-cli', fallbackReason: 'auth-required' },
+      turn_capability: {
+        model_usable: null,
+        model_usable_stale: true,
+        model_usability_status: 'usable',
+        last_successful_turn_at: 100,
+        last_turn_error_class: 'auth-required',
+        last_turn_error_at: 200,
+      },
+    }));
+    expect(r.status).toBe(3);
+    expect(r.stderr).toContain('CREDENTIAL-DEAD');
+  });
+
+  it('exits 3 for a current auth-required turn error without an active fallback', () => {
+    const r = runDecision(healthyPayload({
+      turn_capability: {
+        model_usable: null,
+        model_usable_stale: true,
+        model_usability_status: 'usable',
+        last_successful_turn_at: 100,
+        last_turn_error_class: 'auth-required',
+        last_turn_error_at: 200,
+      },
+    }));
+    expect(r.status).toBe(3);
+  });
+
   it('still exits 0 for a healthy, usable bot', () => {
     const r = runDecision(healthyPayload());
     expect(r.status).toBe(0);
@@ -87,10 +126,39 @@ describe('watchdog decision block — credential death', () => {
     expect(r.status).toBe(0);
   });
 
-  it('exits 0 when turn_capability is absent or null (no evidence is not credential death)', () => {
-    expect(runDecision(healthyPayload({ turn_capability: null })).status).toBe(0);
+  it('exits 4 when turn_capability is absent or null (no evidence is unknown, not recovery)', () => {
+    expect(runDecision(healthyPayload({ turn_capability: null })).status).toBe(4);
     const { turn_capability: _drop, ...rest } = healthyPayload();
-    expect(runDecision(rest).status).toBe(0);
+    expect(runDecision(rest).status).toBe(4);
+  });
+
+  it('exits 4 for stale usable evidence without a current auth failure', () => {
+    const r = runDecision(healthyPayload({
+      turn_capability: {
+        model_usable: null,
+        model_usable_stale: true,
+        model_usability_status: 'usable',
+        last_successful_turn_at: 200,
+        last_turn_error_class: null,
+        last_turn_error_at: null,
+      },
+    }));
+    expect(r.status).toBe(4);
+    expect(r.stderr).toContain('CREDENTIAL-UNKNOWN');
+  });
+
+  it('accepts a later successful turn as superseding an older auth-required turn error', () => {
+    const r = runDecision(healthyPayload({
+      turn_capability: {
+        model_usable: true,
+        model_usable_stale: false,
+        model_usability_status: 'usable',
+        last_successful_turn_at: 300,
+        last_turn_error_class: 'auth-required',
+        last_turn_error_at: 200,
+      },
+    }));
+    expect(r.status).toBe(0);
   });
 
   it('keeps restart-worthy failures on exit 1 even when the credential is also dead (crash wins)', () => {
@@ -128,8 +196,24 @@ describe('watchdog shell wiring — exit 3 routes to marker + log, never restart
     expect(branch).not.toContain('restart_label');
   });
 
-  it('clears the marker file on a passing check so the marker reflects current state', () => {
-    expect(template).toMatch(/rm -f "\$CRED_MARKER"/);
+  it('routes exit 4 to an unknown log state without marker mutation or restart', () => {
+    const branch = template.match(/elif \[ "\$py_rc" -eq 4 \]; then\n([\s\S]*?)\n\s*elif/)?.[1];
+    expect(branch, 'exit-4 branch missing from shell wiring').toBeTruthy();
+    expect(branch).toContain('CREDENTIAL-UNKNOWN');
+    expect(branch).not.toContain('restart_label');
+    expect(branch).not.toContain('CRED_MARKER');
+  });
+
+  it('clears the marker only on affirmative recovery and does not mask removal failure', () => {
+    expect(template).toMatch(/if \[ -e "\$CRED_MARKER" \]; then/);
+    expect(template).toMatch(/if ! rm -f "\$CRED_MARKER"/);
+    expect(template).not.toMatch(/rm -f "\$CRED_MARKER"[^\n]*\|\| true/);
+  });
+
+  it('does not mask marker creation failure and returns the accumulated watchdog status', () => {
+    expect(template).toMatch(/if ! touch "\$CRED_MARKER"/);
+    expect(template).toMatch(/WD_EXIT=1/);
+    expect(template).toMatch(/exit "\$WD_EXIT"/);
   });
 
   it('keeps nonzero-but-not-3 exits on the restart path', () => {

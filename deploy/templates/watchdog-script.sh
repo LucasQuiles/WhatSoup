@@ -26,10 +26,11 @@ LOG_DIR="$HOME_DIR/Library/Logs/whatsoup"
 LOG="$LOG_DIR/BOT_NAME-watchdog.log"
 LOCK="/tmp/com.whatsoup.BOT_NAME-watchdog.lock"
 # Present while the bot's provider credential is dead (decision-block exit 3).
-# The fleet console / alert path stats this; it is cleared on the next passing
-# check so its presence always reflects current state.
+# The fleet console / alert path stats this; it is cleared only after fresh,
+# affirmative primary-provider recovery.
 CRED_MARKER="$LOG_DIR/BOT_NAME-credential-dead.marker"
 WD_FINAL="ok"
+WD_EXIT=0
 
 BOT_LABEL="com.whatsoup.BOT_NAME"
 FLEET_LABEL="com.whatsoup.whatsoup-fleet"
@@ -318,32 +319,93 @@ if reasons:
     print("; ".join(reasons), file=sys.stderr)
     sys.exit(1)
 
-# Credential death: every liveness/connectivity check above passed, but the
-# agent's provider credential is gone (claude deletes its file store and leaves
-# a dead keychain stub on refresh failure). A restart cannot mint a credential
-# — kicking the bot here would just loop it — and logging plain "ok" is how a
-# 12-day credential outage stayed invisible (mini11, Jul 15–27). Exit 3 is the
-# distinct no-restart escalation the shell routes to a CREDENTIAL-DEAD log
-# line + marker file.
-turn_capability = data.get("turn_capability") or {}
-if turn_capability.get("model_usability_status") == "credential-unavailable":
+# Provider credential state is evaluated only after liveness passes. A current
+# auth-required fallback or turn failure must not be masked by a stale `usable`
+# probe. Conversely, absence of a failure is not recovery: marker clearing
+# requires fresh affirmative primary usability. Exit 4 preserves inconclusive
+# state without restarting or mutating the marker.
+turn_capability_raw = data.get("turn_capability")
+turn_capability = turn_capability_raw if isinstance(turn_capability_raw, dict) else {}
+model_status = turn_capability.get("model_usability_status")
+model_usable = turn_capability.get("model_usable")
+model_usable_stale = turn_capability.get("model_usable_stale")
+last_success = turn_capability.get("last_successful_turn_at")
+last_error_class = turn_capability.get("last_turn_error_class")
+last_error = turn_capability.get("last_turn_error_at")
+fallback_reason = instance.get("fallbackReason", instance.get("fallback_reason"))
+
+
+def comparable_time(value):
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        try:
+            return dt.datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
+        except ValueError:
+            return None
+    return None
+
+
+success_time = comparable_time(last_success)
+error_time = comparable_time(last_error)
+auth_error_superseded = (
+    last_error_class == "auth-required"
+    and success_time is not None
+    and error_time is not None
+    and success_time > error_time
+)
+auth_error_current = last_error_class == "auth-required" and not auth_error_superseded
+credential_dead = (
+    model_status == "credential-unavailable"
+    or fallback_reason == "auth-required"
+    or auth_error_current
+)
+if credential_dead:
     print(
-        "CREDENTIAL-DEAD: turn_capability.model_usability_status=credential-unavailable — reauth required",
+        "CREDENTIAL-DEAD: current provider auth-required evidence — reauth required",
         file=sys.stderr,
     )
     sys.exit(3)
+
+credential_recovered = (
+    model_usable is True
+    and model_usable_stale is False
+    and model_status == "usable"
+    and fallback_reason is None
+)
+if credential_recovered:
+    sys.exit(0)
+
+print("CREDENTIAL-UNKNOWN: primary credential evidence is missing or stale", file=sys.stderr)
+sys.exit(4)
 PY
   py_rc=$?
   if [ "$py_rc" -eq 3 ]; then
     # marker: BOT_NAME-credential-dead.marker — deliberately no restart on this
     # branch (a restart cannot fix auth; see the exit-3 decision-block comment).
     log "CREDENTIAL-DEAD: claude credential unavailable — reauth required; restart suppressed"
-    touch "$CRED_MARKER"
-    WD_FINAL="CREDENTIAL-DEAD"
+    if ! touch "$CRED_MARKER"; then
+      log "WATCHDOG-ERROR: failed to create credential marker"
+      WD_FINAL="WATCHDOG-ERROR"
+      WD_EXIT=1
+    else
+      WD_FINAL="CREDENTIAL-DEAD"
+    fi
+  elif [ "$py_rc" -eq 4 ]; then
+    log "CREDENTIAL-UNKNOWN: primary credential evidence is missing or stale; marker unchanged; restart suppressed"
+    WD_FINAL="CREDENTIAL-UNKNOWN"
   elif [ "$py_rc" -ne 0 ]; then
     restart_label "$BOT_LABEL" "unhealthy JSON response"
   else
-    rm -f "$CRED_MARKER" 2>/dev/null || true
+    if [ -e "$CRED_MARKER" ]; then
+      if ! rm -f "$CRED_MARKER"; then
+        log "WATCHDOG-ERROR: failed to clear credential marker"
+        WD_FINAL="WATCHDOG-ERROR"
+        WD_EXIT=1
+      fi
+    fi
   fi
 fi
 
@@ -353,3 +415,4 @@ if ! curl --fail --silent --show-error --max-time 8 "$FLEET_HEALTH" >/dev/null 2
 fi
 
 log "$WD_FINAL"
+exit "$WD_EXIT"
