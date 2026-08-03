@@ -1778,11 +1778,11 @@ describe('WHATSOUP_ALERT_SINK dry-run capture', () => {
 
         const result = emitAlert('whatsoup-prod', 'connection_exhausted', 'sum2', 'evidence2');
         // cwd() no longer called during event building (issue #2386 stripped
-        // cwd/execPath/argv), so the event builds successfully and routes
-        // to the configured sink (not an outbox write-failure path).
+        // cwd/execPath/argv), so the event builds successfully. Channel
+        // reflects the sink path; status reflects the durable outbox write.
         expect(result.ok).toBe(true);
         expect(result.channel).toBe('sink');
-        expect(result.status).toBe('completed');
+        expect(result.status).toBe('durably_queued');
 
         // Still must not page: a construction failure is not a licence to fall
         // through to the outbox ladder any more than a write failure is.
