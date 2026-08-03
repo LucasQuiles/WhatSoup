@@ -236,7 +236,9 @@ describe('migration 56 — inbound_events.processing_status CHECK constraint', (
     // runs with foreign_keys=ON, verifying PRAGMA defer_foreign_keys handles them.
     const raw = new DatabaseSync(':memory:');
     try {
+      // Match production path: FK ON before BEGIN, migration sets defer within.
       raw.exec('PRAGMA foreign_keys = ON');
+      raw.exec('BEGIN IMMEDIATE');
       createLegacyInboundEvents(raw);
       raw.exec(`
         CREATE TABLE recovery_plans (plan_id TEXT PRIMARY KEY);
@@ -284,6 +286,7 @@ describe('migration 56 — inbound_events.processing_status CHECK constraint', (
 
       // Run migration 56 — must not throw FK constraint error.
       expect(() => runMigration56(raw)).not.toThrow();
+      raw.exec('COMMIT');
 
       // Schema_migrations records v56.
       const version = raw.prepare('SELECT MAX(version) AS v FROM schema_migrations').get() as { v: number };

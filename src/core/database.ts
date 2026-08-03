@@ -1610,6 +1610,7 @@ export class Database {
     let transactionOpen = false;
     try {
       this.assertDatabaseIdentity();
+      this.db.prepare('PRAGMA defer_foreign_keys = ON').run();
       this.db.exec('BEGIN IMMEDIATE');
       transactionOpen = true;
       this.assertDatabaseIdentity();

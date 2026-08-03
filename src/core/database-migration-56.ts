@@ -122,14 +122,17 @@ export function runMigration56(db: DatabaseSync): void {
 
   const statuses = INBOUND_STATUSES.map((status) => `'${status}'`).join(', ');
 
+  // Defer FK enforcement so the DROP TABLE inbound_events succeeds
+  // while FK-child tables (inbound_disposition_links,
+  // operator_catchup_closure_witnesses) hold REFERENCES.
+  // Must use prepare().run() not exec() for reliable PRAGMA effect.
+  db.prepare('PRAGMA defer_foreign_keys = ON').run();
   db.exec('SAVEPOINT migration_56');
   try {
     for (const object of [...recreateOrder].reverse()) {
       db.exec(`DROP ${object.type === 'view' ? 'VIEW' : 'TRIGGER'} IF EXISTS ${object.name}`);
     }
     db.exec(`
-      PRAGMA defer_foreign_keys = ON;
-
       CREATE TABLE inbound_events_v56 (
         seq INTEGER PRIMARY KEY AUTOINCREMENT,
         message_id TEXT NOT NULL,
