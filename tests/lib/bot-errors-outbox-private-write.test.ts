@@ -182,7 +182,6 @@ describe('bot-errors outbox private writes', () => {
       severity: 'info',
       instance: 'unknown',
       source: 'unknown',
-      schemaVersion: 2,
       runtime: {
         invocationId: 'launch-invocation',
         systemdExecPid: '12345',

@@ -79,7 +79,6 @@ describe('buildBotErrorsEvent', () => {
       severity: 'info',
       instance: 'unknown',
       source: 'unknown',
-      schemaVersion: 2,
       runtime: {
         invocationId: 'systemd-invocation',
         systemdExecPid: '4242',
