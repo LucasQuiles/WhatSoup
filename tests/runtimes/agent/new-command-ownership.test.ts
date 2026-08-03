@@ -25,36 +25,23 @@ import {
   waitUntil,
 } from './lib/session-harness.ts';
 
-vi.mock('../../../src/runtimes/agent/provider-canary-proof.ts', () => ({
-  readProviderCanaryAdmission: vi.fn(() => ({
-    allowed: true,
-    resolvedPath: '/usr/bin/claude',
-    binarySha256: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
-    proxyScriptSha256: 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
-  })),
-  sha256File: vi.fn(() => 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'),
-  resolveExecutable: vi.fn(),
-}));
-
-vi.mock('../../../src/logger.ts', () => ({
-  createChildLogger: () => ({
-    info: vi.fn(),
-    warn: vi.fn(),
-    error: vi.fn(),
-    debug: vi.fn(),
-  }),
-  flushLogger: vi.fn(),
-}));
+vi.mock('../../../src/logger.ts', async () => {
+  const { loggerMock } = await import('../../helpers/logger-mock.ts');
+  const mock = loggerMock();
+  const logger = mock.createChildLogger();
+  return {
+    ...mock,
+    default: { ...logger, child: () => logger },
+    flushLogger: vi.fn(),
+  };
+});
 
 type RuntimeState = {
   _handleMessageInner: (msg: IncomingMessage) => Promise<void>;
   resolvePerChatMapKey: (chatJid: string) => string;
   ensureSessionAndQueueSync: (chatJid: string, mapKey: string) => void;
   deleteOwnedPerChatSession: (mapKey: string, expected?: SessionManager) => boolean;
-  wirePerChatActorSocket: () => {
-    mcpSocketPath: string;
-    providerTransitionReady: Promise<void>;
-  };
+  wirePerChatActorSocket: () => { mcpSocketPath: string; providerConfigOverride: undefined };
   chatSessions: Map<string, SessionManager>;
   chatQueues: Map<string, unknown>;
   operationTrackers: Map<string, unknown>;
@@ -180,7 +167,7 @@ function configureRuntime(runtime: AgentRuntime): {
   state.operationTrackers = trackers;
   state.wirePerChatActorSocket = () => ({
     mcpSocketPath: '/tmp/whatsoup-new-ownership.sock',
-    providerTransitionReady: Promise.resolve(),
+    providerConfigOverride: undefined,
   });
   return { state, ownership, sessions, queues, trackers };
 }

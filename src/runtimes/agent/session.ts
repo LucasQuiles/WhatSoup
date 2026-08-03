@@ -2087,8 +2087,14 @@ export class SessionManager {
     if (this.active && (this.child !== null || this.managedProviderSession !== null)) {
       return;
     }
-    await this.providerTransitionReady;
+    if (this.providerTransitionReady) await this.providerTransitionReady;
     const provider = this.assertKnownProvider('spawnSession');
+    if (this.resolveGenerationOwnership === null && provider === 'codex-cli') {
+      this.localGenerationIdentity = {
+        managerId: this.localGenerationManagerId,
+        generation: ++this.localGeneration,
+      };
+    }
     if (this.providerCanaryAdmission) {
       this.providerAdmission = await this.providerCanaryAdmission();
       if (!this.providerAdmission.allowed) {
@@ -3135,7 +3141,7 @@ export class SessionManager {
       throw new Error('PROVIDER_TURN_IN_FLIGHT: wait for the current provider request to terminalize');
     }
     if (this.isSpawnPerTurn) {
-      await this.providerTransitionReady;
+      if (this.providerTransitionReady) await this.providerTransitionReady;
       if (this.providerCanaryAdmission) {
         this.providerAdmission = await this.providerCanaryAdmission();
         if (!this.providerAdmission.allowed) {
