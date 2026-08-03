@@ -79,6 +79,26 @@ fi
 ts() { date -u +"%Y-%m-%dT%H:%M:%SZ"; }
 log() { print -- "$(ts) $*" >> "$LOG"; }
 
+# Final-log state ladder (upgrade-only). The last log line of each run is the
+# single machine-readable outcome; a higher-priority state must not be
+# overwritten by a later, lower-priority one (the fleet check runs after the
+# bot check, and a credential verdict outranks a restart outcome). Strict >
+# means equal-rank states keep the FIRST writer, so a bot restart outcome
+# outranks a fleet one within the tier.
+wd_rank() {
+  case "$1" in
+    CREDENTIAL-DEAD) print 4 ;;
+    RESTARTED|RESTART-SUPPRESSED) print 3 ;;
+    CREDENTIAL-UNKNOWN) print 2 ;;
+    *) print 1 ;;
+  esac
+}
+wd_note() {
+  if [ "$(wd_rank "$1")" -gt "$(wd_rank "$WD_FINAL")" ]; then
+    WD_FINAL="$1"
+  fi
+}
+
 domain="gui/$(id -u)"
 
 # Ensure a launchd job is loaded; bootstrap from its plist if not.
@@ -120,6 +140,7 @@ restart_label() {
   local now last
   if launchd_reports_permanent_stop "$job_label"; then
     log "$job_label unhealthy but restart suppressed after permanent launchd exit code 78: $reason"
+    wd_note RESTART-SUPPRESSED
     return 0
   fi
   now=$(date +%s)
@@ -127,10 +148,12 @@ restart_label() {
   [ -r "$stamp" ] && last=$(cat "$stamp" 2>/dev/null || echo 0)
   if [ $((now - last)) -lt 300 ]; then
     log "$job_label unhealthy but restart suppressed by cooldown: $reason"
+    wd_note RESTART-SUPPRESSED
     return 0
   fi
   print -- "$now" > "$stamp"
   log "restarting $job_label: $reason"
+  wd_note RESTARTED
   launchctl kickstart -k "$domain/$job_label" >> "$LOG" 2>&1 || true
 }
 
@@ -416,7 +439,7 @@ PY
       fi
     fi
     if [ "$WD_EXIT" -eq 0 ]; then
-      WD_FINAL="CREDENTIAL-DEAD"
+      wd_note CREDENTIAL-DEAD
     fi
   elif [ "$py_rc" -eq 4 ] || [ "$py_rc" -eq 5 ]; then
     # Inconclusive credential evidence: never restart, never touch the marker.
@@ -425,7 +448,7 @@ PY
     # unknown (healthy idle bot past the usability-probe TTL, or a non-agent
     # instance with no turn_capability) stays "ok".
     if [ "$py_rc" -eq 5 ] || [ -e "$CRED_MARKER" ]; then
-      WD_FINAL="CREDENTIAL-UNKNOWN"
+      wd_note CREDENTIAL-UNKNOWN
     fi
   elif [ "$py_rc" -ne 0 ]; then
     restart_label "$BOT_LABEL" "unhealthy JSON response"
