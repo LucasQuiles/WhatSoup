@@ -56,7 +56,7 @@ export function saveFallbackState(db: Database, s: PersistedFallbackState): void
  * otherwise silently propagate as garbage. On any validation failure, null is
  * returned so the caller can treat it as "no persisted state".
  */
-export function loadFallbackState(db: Database): PersistedFallbackState | null {
+export function getFallbackState(db: Database): PersistedFallbackState | null {
   const row = db.raw
     .prepare(
       `SELECT active_until AS activeUntil, activated_at AS activatedAt, reason,

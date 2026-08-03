@@ -20,7 +20,10 @@ function validToken(value: unknown): string {
  * masked by a header-less proxy.
  */
 export function readFleetTokenForDevProxy(
-  configRoot = join(homedir(), '.config'),
+  // Mirrors xdgDir('XDG_CONFIG_HOME', '.config') in src/fleet/paths.ts — the
+  // fleet-path SSOT — which the console tree cannot import across the package
+  // boundary. Empty-string XDG_CONFIG_HOME falls back, matching the SSOT.
+  configRoot = process.env.XDG_CONFIG_HOME || join(homedir(), '.config'),
   options: FleetTokenReaderOptions = {},
 ): string {
   const warn = options.warn ?? defaultWarn;

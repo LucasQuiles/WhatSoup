@@ -19,7 +19,7 @@ const log = createChildLogger('conversation');
  * Bot messages → role 'assistant'.
  * Human messages → role 'user', prefixed with "[SenderName]: ".
  */
-export function loadConversationWindow(db: Database, chatJid: string): ChatMessage[] {
+export function getConversationWindow(db: Database, chatJid: string): ChatMessage[] {
   const conversationKey = canonicalConversationKey(chatJid, db);
   const initial = getRecentMessages(db, conversationKey, config.conversationWindow);
 

@@ -34,7 +34,7 @@ import { chatFailureMessage, type ChatFailureCause } from './response-messages.t
 import { config } from '../../config.ts';
 import { createChildLogger } from '../../logger.ts';
 import { checkRateLimit } from './rate-limiter.ts';
-import { loadConversationWindow } from './window.ts';
+import { getConversationWindow } from './window.ts';
 import { summarizeWindowBeforeTrim } from './window-trim.ts';
 import { loadContextDetailed, type ContextLoadResult } from './context.ts';
 import { ChatQueue } from './queue.ts';
@@ -438,7 +438,7 @@ export class ChatRuntime implements Runtime {
     } finally {
       if (contextTimeout) clearTimeout(contextTimeout);
     }
-    const conversationWindow = loadConversationWindow(this.db, msg.chatJid);
+    const conversationWindow = getConversationWindow(this.db, msg.chatJid);
     const contextDurationMs = Date.now() - contextStart;
 
     // 4. Build system prompt with identity injection + memory context + token budget trimming

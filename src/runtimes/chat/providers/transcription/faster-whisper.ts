@@ -39,7 +39,12 @@ export async function transcribeWithFasterWhisper(buffer: Buffer, mimeType: stri
       30_000,
     );
 
-    const parsed = JSON.parse(stdout) as { text?: string };
+    let parsed: { text?: string };
+    try {
+      parsed = JSON.parse(stdout) as { text?: string };
+    } catch (error) {
+      throw new Error(`faster-whisper produced non-JSON output: ${stdout.slice(0, 200)}`, { cause: error });
+    }
     const text = parsed.text?.trim();
     if (!text) throw new Error('faster-whisper returned an empty transcript');
     log.info({ model: DEFAULT_MODEL, textLength: text.length }, 'faster-whisper transcription complete');

@@ -139,6 +139,10 @@ const TRACKED_UNREACHABLE: readonly TrackedEntry[] = [
   // isolation. Route migration (the 31 errorMessage call sites in fleet
   // routes) lands in a follow-up PR and graduates this entry.
   { path: 'src/fleet/lib/response-error.ts', issue: '#2517', reason: 'closed schema/classifier surface; route migration lands in follow-up PR' },
+  // Clock abstraction (#2200 slice 1): the module lands first as the SSOT
+  // foundation; call-site migration (365 Date.now sites) lands in follow-up
+  // slices. Unreachable until the first cluster (heal, livez, etc) imports it.
+  { path: 'src/lib/clock.ts', issue: '#2200', reason: 'clock abstraction foundation; call-site migration lands in follow-up slices' },
 ];
 
 // ---------------------------------------------------------------------------

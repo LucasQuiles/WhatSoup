@@ -664,6 +664,8 @@ describe('main.ts — uncovered helpers and signal paths', () => {
       const h = await importMainWithMocks({
         instanceConfig: { type: 'agent', agentOptions: { cwd: '~' } },
       });
+      // expect.anything is deliberate: this test verifies ONLY the cwd arg (arg 4).
+      // The first 3 AgentRuntime args (deps, config, model) are exercised by other tests.
       expect(h.AgentRuntime).toHaveBeenCalledWith(
         expect.anything(),
         expect.anything(),
@@ -676,6 +678,8 @@ describe('main.ts — uncovered helpers and signal paths', () => {
       const h = await importMainWithMocks({
         instanceConfig: { type: 'agent', agentOptions: { cwd: '/absolute/path' } },
       });
+      // expect.anything is deliberate: this test verifies ONLY the cwd arg (arg 4).
+      // The first 3 AgentRuntime args (deps, config, model) are exercised by other tests.
       expect(h.AgentRuntime).toHaveBeenCalledWith(
         expect.anything(),
         expect.anything(),

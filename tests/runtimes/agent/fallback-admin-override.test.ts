@@ -153,7 +153,7 @@ describe('AgentRuntime.forceFallback', () => {
     vi.spyOn(fallbackStateDb, 'saveFallbackState').mockImplementation(() => {});
     vi.spyOn(fallbackStateDb, 'clearFallbackState').mockImplementation(() => {});
     vi.spyOn(fallbackStateDb, 'ensureFallbackStateSchema').mockImplementation(() => {});
-    vi.spyOn(fallbackStateDb, 'loadFallbackState').mockReturnValue(null);
+    vi.spyOn(fallbackStateDb, 'getFallbackState').mockReturnValue(null);
   });
   afterEach(() => {
     vi.restoreAllMocks();
@@ -246,7 +246,7 @@ describe('AgentRuntime.disableFallback', () => {
     vi.spyOn(fallbackStateDb, 'saveFallbackState').mockImplementation(() => {});
     vi.spyOn(fallbackStateDb, 'clearFallbackState').mockImplementation(() => {});
     vi.spyOn(fallbackStateDb, 'ensureFallbackStateSchema').mockImplementation(() => {});
-    vi.spyOn(fallbackStateDb, 'loadFallbackState').mockReturnValue(null);
+    vi.spyOn(fallbackStateDb, 'getFallbackState').mockReturnValue(null);
   });
   afterEach(() => {
     vi.restoreAllMocks();

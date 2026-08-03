@@ -168,7 +168,7 @@ describe('fallback reason provenance', () => {
 
   it('restore re-saves with the persisted reason, not "restored"', () => {
     const now = Date.now();
-    vi.spyOn(fallbackStateDb, 'loadFallbackState').mockReturnValue({
+    vi.spyOn(fallbackStateDb, 'getFallbackState').mockReturnValue({
       activeUntil: now + 60 * 60_000,
       activatedAt: now - 1000,
       reason: 'admin-forced',

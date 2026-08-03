@@ -111,6 +111,40 @@ describe('readFleetTokenForDevProxy', () => {
   });
 });
 
+describe('readFleetTokenForDevProxy default config root', () => {
+  const savedXdg = process.env.XDG_CONFIG_HOME;
+
+  afterEach(() => {
+    if (savedXdg === undefined) delete process.env.XDG_CONFIG_HOME;
+    else process.env.XDG_CONFIG_HOME = savedXdg;
+  });
+
+  it('derives the default config root from XDG_CONFIG_HOME when set', () => {
+    process.env.XDG_CONFIG_HOME = tmpRoot;
+    writeConfigFile('fleet-tokens.json', JSON.stringify({
+      active: 'e'.repeat(64),
+      accept: [],
+      rotatedAt: '2026-05-12T00:00:00.000Z',
+    }));
+
+    expect(readFleetTokenForDevProxy()).toBe('e'.repeat(64));
+  });
+
+  it('ignores an empty XDG_CONFIG_HOME, matching the fleet-path SSOT', () => {
+    process.env.XDG_CONFIG_HOME = '';
+    const warn = vi.fn();
+
+    const token = readFleetTokenForDevProxy(undefined, { warn });
+
+    // Empty string must fall back to ~/.config, never to a cwd-relative
+    // 'whatsoup' dir; assert no path derived from the empty root is reported.
+    expect(typeof token).toBe('string');
+    for (const call of warn.mock.calls) {
+      expect(String(call[0])).not.toMatch(/ whatsoup[/;]/);
+    }
+  });
+});
+
 describe('attachFleetTokenAuth', () => {
   it('reads the token on each proxied request and overwrites Authorization', () => {
     const proxy = new EventEmitter();

@@ -37,14 +37,14 @@ vi.mock('../../../src/lib/emit-alert.ts', () => {
 // Overridable persisted-window source for the restore-path tests; all other
 // fallback-state-db functions keep their real implementations (they are
 // harmless against the mocked db).
-const { loadFallbackStateMock } = vi.hoisted(() => ({
-  loadFallbackStateMock: vi.fn<() => unknown>(() => null),
+const { getFallbackStateMock } = vi.hoisted(() => ({
+  getFallbackStateMock: vi.fn<() => unknown>(() => null),
 }));
 vi.mock('../../../src/runtimes/agent/fallback-state-db.ts', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../../src/runtimes/agent/fallback-state-db.ts')>();
   return {
     ...actual,
-    loadFallbackState: () => loadFallbackStateMock(),
+    getFallbackState: () => getFallbackStateMock(),
   };
 });
 
@@ -538,16 +538,16 @@ describe('AgentRuntime — fallback window restore telemetry', () => {
     vi.setSystemTime(new Date('2026-06-10T10:00:00Z'));
     vi.mocked(emitAlert).mockClear();
     lookupCredentialMock.mockReturnValue('present-key');
-    loadFallbackStateMock.mockReturnValue(null);
+    getFallbackStateMock.mockReturnValue(null);
   });
   afterEach(() => {
     vi.useRealTimers();
-    loadFallbackStateMock.mockReturnValue(null);
+    getFallbackStateMock.mockReturnValue(null);
   });
 
   it('restoring a persisted window re-arms WITHOUT re-counting or re-emitting activation', () => {
     const until = Date.now() + 60 * 60 * 1000;
-    loadFallbackStateMock.mockReturnValue({
+    getFallbackStateMock.mockReturnValue({
       activeUntil: until,
       activatedAt: Date.now() - 30 * 60 * 1000,
       reason: 'model-unavailable',
@@ -567,7 +567,7 @@ describe('AgentRuntime — fallback window restore telemetry', () => {
 
   it('emits provider_fallback_restored (additive source) when a persisted window is restored', () => {
     const until = Date.now() + 60 * 60 * 1000;
-    loadFallbackStateMock.mockReturnValue({
+    getFallbackStateMock.mockReturnValue({
       activeUntil: until,
       activatedAt: Date.now() - 30 * 60 * 1000,
       reason: 'model-unavailable',
@@ -604,7 +604,7 @@ describe('AgentRuntime — fallback window restore telemetry', () => {
       activatedAt: Date.now(),
       reason: 'model-unavailable',
     };
-    loadFallbackStateMock.mockReturnValue(persisted);
+    getFallbackStateMock.mockReturnValue(persisted);
     for (let restart = 0; restart < 2; restart++) {
       const restartedRuntime = makeRuntime();
       view(restartedRuntime).restorePersistedFallbackWindow();
@@ -619,7 +619,7 @@ describe('AgentRuntime — fallback window restore telemetry', () => {
 
   it('a fresh window after the restored one reverts still counts and emits once', () => {
     const until = Date.now() + 60 * 60 * 1000;
-    loadFallbackStateMock.mockReturnValue({
+    getFallbackStateMock.mockReturnValue({
       activeUntil: until,
       activatedAt: Date.now() - 30 * 60 * 1000,
       reason: 'model-unavailable',

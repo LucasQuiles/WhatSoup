@@ -184,7 +184,7 @@ vi.mock('../../../src/runtimes/agent/session-db.ts', () => ({
 vi.mock('../../../src/runtimes/agent/fallback-state-db.ts', () => ({
   ensureFallbackStateSchema: vi.fn(),
   saveFallbackState: vi.fn(),
-  loadFallbackState: vi.fn(() => null),
+  getFallbackState: vi.fn(() => null),
   clearFallbackState: vi.fn(),
 }));
 
