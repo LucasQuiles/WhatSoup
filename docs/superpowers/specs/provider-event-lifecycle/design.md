@@ -433,7 +433,7 @@ provider-content replay path.
   status and terminal evidence retains the exact op ID/status proof; generic
   `failed_permanent` is not. Migration 57 enables aggregate no-send only for proved
   single-op answers; pre-lifecycle multi-op answers remain uncertain because they lack
-  a sealed expected set. Migration 57 may prove multi-op no-send only from an immutable
+  a sealed expected set. Migration 58 may prove multi-op no-send only from an immutable
   complete effect plan where every expected sibling is not-sent—missing, late-created,
   echoed, or ambiguous siblings dominate. No-send never clears an
   independent provider/tool/lifecycle replay veto. A receipt in a mixed/shared plan settles consumed only

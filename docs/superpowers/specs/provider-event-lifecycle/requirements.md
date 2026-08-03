@@ -814,13 +814,13 @@ unproved child origins default to internal no-send/no-effect handling.
     never proves no transmission.
     `not_sent` is a distinct outbound operation status emitted only by typed pre-send
     rejection, and terminal `deliveryKind=not_sent` retains exact operation/status and
-    singleton-set proof. Migration 56 permits aggregate `not_sent` only for
+    singleton-set proof. Migration 57 permits aggregate `not_sent` only for
     an immutable singleton answer-set seal created atomically with terminalization;
     database triggers reject a racing/later answer sibling. Without that seal, even one
     not-sent operation remains aggregate uncertain. No-send delivery evidence never clears provider/tool/
     lifecycle replay vetoes. Both lockstepped terminal validators, database triggers,
     recovery queries, and retention prove and preserve the referenced operation state.
-  - **CON-002.AC-07:** Migration 57 replaces the singleton seal with immutable fields on
+  - **CON-002.AC-07:** Migration 58 replaces the singleton seal with immutable fields on
     the final attempt: publication-seal ID/kind, owner, invocation epoch, exact count,
     canonical membership fingerprint, and sealed time. Membership is restart-rederived
     from every reply-bearing/external outbound link across all sealed plans; terminal
