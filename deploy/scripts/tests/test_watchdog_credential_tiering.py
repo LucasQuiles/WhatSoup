@@ -17,8 +17,9 @@ curl/launchctl stubs, pinning the FINAL LOG contract
   fallback window is active (exit 5); a quiescent unknown stays "ok";
 - restart-worthy cycles end on RESTARTED (kickstart returned success),
   RESTART-FAILED (kickstart rejected; cooldown left unarmed), or
-  RESTART-SUPPRESSED (cooldown / permanent launchd stop), never "ok", while
-  the script's own exit status stays 0.
+  RESTART-SUPPRESSED (cooldown / permanent launchd stop / concurrent-restart
+  mutex), never "ok"; clean and suppressed paths exit 0, while a rejected
+  kickstart or failed cooldown-stamp write exits nonzero.
 
 Skipped where zsh is unavailable (CI installs zsh in quality.yml).
 """
@@ -297,7 +298,7 @@ def test_kickstart_failure_final_log_is_restart_failed(tmp_path):
     h.write_curl_stub("", bot_unreachable=True)
     h.write_launchctl_stub(kickstart_rc=1)
     proc = h.run()
-    assert proc.returncode == 0, proc.stderr
+    assert proc.returncode != 0, "a failed restart is an operational failure; exit nonzero"
     assert "kickstart -k" in h.launchctl_calls(), "the restart must at least be attempted"
     log_text = h.log.read_text(encoding="utf-8")
     assert "ERROR: kickstart failed" in log_text
@@ -314,7 +315,7 @@ def test_cooldown_stamp_write_failure_logs_error_after_successful_kickstart(tmp_
     h.write_curl_stub("", bot_unreachable=True)
     (h.log_dir / "com.whatsoup.tier-stampfail-bot.last-restart").mkdir()
     proc = h.run()
-    assert proc.returncode == 0, proc.stderr
+    assert proc.returncode != 0, "an unarmed cooldown is an operational failure; exit nonzero"
     assert "kickstart -k" in h.launchctl_calls()
     log_text = h.log.read_text(encoding="utf-8")
     assert "ERROR: failed to write restart cooldown stamp" in log_text
@@ -368,6 +369,58 @@ def test_marker_clear_failure_keeps_ok_final_and_exits_nonzero(tmp_path):
         "the recovery verdict stands; the ERROR line and nonzero exit carry the failure"
     )
     assert "kickstart" not in h.launchctl_calls()
+
+
+def test_concurrent_fleet_restart_is_suppressed_by_mutex(tmp_path):
+    # Every bot watchdog shares the fleet label's cooldown stamp; the
+    # check/kickstart critical section must be serialized so same-cadence
+    # watchdogs cannot double-kick the fleet console.
+    h = Harness(tmp_path, "tier-fleetmutex-bot", _recovered_body(), fleet_ok=False)
+    holder = subprocess.Popen(["sleep", "30"])
+    try:
+        rlock = h.log_dir / "com.whatsoup.whatsoup-fleet.restart.lock"
+        rlock.mkdir()
+        (rlock / "pid").write_text(str(holder.pid), encoding="utf-8")
+        proc = h.run()
+        assert proc.returncode == 0, proc.stderr
+        assert "kickstart" not in h.launchctl_calls()
+        assert "restart already in progress" in h.log.read_text(encoding="utf-8")
+        assert h.final_log_state() == "RESTART-SUPPRESSED"
+    finally:
+        holder.kill()
+        holder.wait()
+
+
+def test_stale_fleet_restart_mutex_is_reclaimed(tmp_path):
+    h = Harness(tmp_path, "tier-fleetreclaim-bot", _recovered_body(), fleet_ok=False)
+    done = subprocess.Popen(["true"])
+    done.wait()
+    rlock = h.log_dir / "com.whatsoup.whatsoup-fleet.restart.lock"
+    rlock.mkdir()
+    (rlock / "pid").write_text(str(done.pid), encoding="utf-8")
+    old = time.time() - 3600
+    os.utime(rlock, (old, old))
+    proc = h.run()
+    assert proc.returncode == 0, proc.stderr
+    assert "reclaiming stale" in h.log.read_text(encoding="utf-8")
+    assert "kickstart -k" in h.launchctl_calls()
+    assert h.final_log_state() == "RESTARTED"
+
+
+def test_garbage_cooldown_stamp_is_ignored_and_logged(tmp_path):
+    # A corrupted stamp must not wedge the cooldown check; it reads as
+    # unarmed, gets logged, and the restart proceeds.
+    h = Harness(tmp_path, "tier-badstamp-bot", _unknown_body())
+    h.write_curl_stub("", bot_unreachable=True)
+    (h.log_dir / "com.whatsoup.tier-badstamp-bot.last-restart").write_text(
+        "not a number\n", encoding="utf-8"
+    )
+    proc = h.run()
+    assert proc.returncode == 0, proc.stderr
+    assert "kickstart -k" in h.launchctl_calls()
+    log_text = h.log.read_text(encoding="utf-8")
+    assert "ignoring unparseable restart cooldown stamp" in log_text
+    assert h.final_log_state() == "RESTARTED"
 
 
 def test_log_open_failure_exits_nonzero_before_acting(tmp_path):

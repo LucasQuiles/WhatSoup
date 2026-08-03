@@ -193,18 +193,36 @@ launchd_reports_permanent_stop() {
 restart_label() {
   local job_label="$1" reason="$2"
   local stamp="$LOG_DIR/$job_label.last-restart"
+  local rlock="$LOG_DIR/$job_label.restart.lock"
   local now last
   if launchd_reports_permanent_stop "$job_label"; then
     log "$job_label unhealthy but restart suppressed after permanent launchd exit code 78: $reason"
     wd_note RESTART-SUPPRESSED
     return 0
   fi
+  # Serialize the cooldown-check/kickstart critical section per label: the
+  # fleet console's label is shared by every bot watchdog on the host, and
+  # same-cadence watchdogs would otherwise pass the cooldown check together
+  # and double-kick it.
+  if ! acquire_mutex "$rlock" 120; then
+    log "$job_label restart already in progress by another watchdog; skipping"
+    wd_note RESTART-SUPPRESSED
+    return 0
+  fi
   now=$(date +%s)
   last=0
   [ -r "$stamp" ] && last=$(cat "$stamp" 2>/dev/null || echo 0)
+  case "$last" in
+    (<->) ;;
+    (*)
+      log "ignoring unparseable restart cooldown stamp for $job_label"
+      last=0
+      ;;
+  esac
   if [ $((now - last)) -lt 300 ]; then
     log "$job_label unhealthy but restart suppressed by cooldown: $reason"
     wd_note RESTART-SUPPRESSED
+    rm -rf "$rlock" 2>/dev/null || true
     return 0
   fi
   log "restarting $job_label: $reason"
@@ -214,11 +232,14 @@ restart_label() {
     # kickstart must retry next cycle, not sit suppressed for 5 minutes.
     if ! print -- "$now" > "$stamp" 2>>"$LOG"; then
       log "ERROR: failed to write restart cooldown stamp for $job_label; cooldown not armed"
+      WD_EXIT=1
     fi
   else
     log "ERROR: kickstart failed for $job_label; service was not restarted"
     wd_note RESTART-FAILED
+    WD_EXIT=1
   fi
+  rm -rf "$rlock" 2>/dev/null || true
 }
 
 ensure_loaded "$BOT_LABEL" "$BOT_PLIST"

@@ -168,8 +168,10 @@ kickstart arms the 5-minute cooldown stamp — a rejected kickstart logs
 next cycle retries. A cooldown-stamp write failure after a successful restart keeps `RESTARTED`
 and surfaces as `ERROR: failed to write restart cooldown stamp …`. A restart-worthy cycle never
 reports a final `ok`, and a credential verdict recorded before the fleet-console check survives
-it. Restart paths keep the script's exit status `0`; a credential-marker mutation failure or an
-unopenable log file at entry makes the invocation exit nonzero.
+it. Clean and suppressed restart paths keep the script's exit status `0`; a rejected kickstart,
+a cooldown-stamp write failure, a credential-marker mutation failure, or an unopenable log file
+at entry makes the invocation exit nonzero. launchd ignores the exit code (`KeepAlive=false`,
+no `SuccessfulExit`); tests and operators consume it.
 
 ## Known limitations
 
@@ -203,8 +205,14 @@ branch:
    lock now logs before exiting. Residual: the reclaim uses rename-then-remove, so a sub-second
    reap race can still admit one duplicate invocation (bounded by the restart cooldown).
 2. **Fleet-console restarts race across per-bot watchdogs.** Every bot watchdog shares the fleet
-   label's cooldown stamp, and the read/check/kickstart sequence is non-atomic; watchdogs on the
-   same 120-second cadence can restart the fleet console simultaneously.
+   label's cooldown stamp, and the read/check/kickstart sequence was non-atomic; watchdogs on
+   the same 120-second cadence could restart the fleet console simultaneously. FIXED in this
+   branch: a per-label restart mutex (same pid-stamp + age staleness mechanism as the
+   single-instance lock, 120-second staleness) serializes the cooldown-check/kickstart critical
+   section; a contender logs `restart already in progress` and records `RESTART-SUPPRESSED`.
+   Residual: the same sub-second reap race as the single-instance lock, and a corrupted
+   cooldown stamp now reads as unarmed with an `ignoring unparseable restart cooldown stamp`
+   line rather than wedging the check.
 3. **The renderer performs raw substring substitution without validating or escaping its
    inputs.** A hostile bot name, home, or username becomes executable shell/Python fragments in
    the rendered artifact while placeholder verification still passes. Render parameters must

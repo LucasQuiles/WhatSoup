@@ -405,7 +405,13 @@ usability-probe TTL, or any non-agent instance) stays `ok`.
 - A marker create/clear failure logs
   `ERROR: failed to create|clear credential marker …` and exits that watchdog
   invocation nonzero without restarting anything; the next cycle retries.
-  Restart paths keep exit status `0`.
+  Clean and suppressed restart paths keep exit status `0`; a rejected
+  kickstart or a cooldown-stamp write failure also exits nonzero (launchd
+  ignores the code — it exists for tests and operators).
+- Fleet-console restarts are serialized across the host's bot watchdogs by a
+  per-label restart mutex; a contender logs
+  `restart already in progress by another watchdog` and records
+  `RESTART-SUPPRESSED`.
 - The single-instance lock lives in the log directory, is pid-stamped, and
   self-reclaims when its holder is dead or the lock has aged out (a
   `reclaiming stale lock …` line is logged); a genuinely held lock logs
