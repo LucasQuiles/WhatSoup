@@ -261,5 +261,37 @@ def test_credential_dead_outranks_fleet_restart(tmp_path):
     assert h.final_log_state() == "CREDENTIAL-DEAD"
 
 
+def test_marker_create_failure_keeps_credential_dead_final_and_exits_nonzero(tmp_path):
+    # A dangling symlink into a missing parent makes `touch` fail without
+    # needing permission games (same fixture as the terminal-logout e2e).
+    h = Harness(tmp_path, "tier-mkfail-bot", _dead_body())
+    h.marker.symlink_to(h.home / "missing-parent" / "marker")
+    proc = h.run()
+    assert proc.returncode != 0, "marker create failure must exit nonzero"
+    assert not h.marker.exists()
+    log_text = h.log.read_text(encoding="utf-8")
+    assert "ERROR: failed to create credential marker" in log_text
+    assert h.final_log_state() == "CREDENTIAL-DEAD", (
+        "an I/O error must not mask the credential verdict"
+    )
+    assert "kickstart" not in h.launchctl_calls()
+
+
+def test_marker_clear_failure_keeps_ok_final_and_exits_nonzero(tmp_path):
+    # rm -f (no -r) fails on a directory: an undeletable "marker".
+    h = Harness(tmp_path, "tier-rmfail-bot", _recovered_body())
+    h.marker.mkdir()
+    (h.marker / "keep").touch()
+    proc = h.run()
+    assert proc.returncode != 0, "marker clear failure must exit nonzero"
+    assert h.marker.exists(), "failed clear must leave the marker for the next cycle"
+    log_text = h.log.read_text(encoding="utf-8")
+    assert "ERROR: failed to clear credential marker" in log_text
+    assert h.final_log_state() == "ok", (
+        "the recovery verdict stands; the ERROR line and nonzero exit carry the failure"
+    )
+    assert "kickstart" not in h.launchctl_calls()
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))

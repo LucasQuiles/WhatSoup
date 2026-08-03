@@ -432,15 +432,14 @@ PY
     # branch (a restart cannot fix auth; see the exit-3 decision-block comment).
     log "CREDENTIAL-DEAD: claude credential unavailable — reauth required; restart suppressed"
     if [ ! -e "$CRED_MARKER" ]; then
-      if ! touch "$CRED_MARKER"; then
-        log "WATCHDOG-ERROR: failed to create credential marker"
-        WD_FINAL="WATCHDOG-ERROR"
+      if ! touch "$CRED_MARKER" 2>>"$LOG"; then
+        # The verdict stands; the ERROR line and the nonzero invocation exit
+        # carry the failure, and the next scheduled run retries the create.
+        log "ERROR: failed to create credential marker $CRED_MARKER; retrying next cycle"
         WD_EXIT=1
       fi
     fi
-    if [ "$WD_EXIT" -eq 0 ]; then
-      wd_note CREDENTIAL-DEAD
-    fi
+    wd_note CREDENTIAL-DEAD
   elif [ "$py_rc" -eq 4 ] || [ "$py_rc" -eq 5 ]; then
     # Inconclusive credential evidence: never restart, never touch the marker.
     # Surface CREDENTIAL-UNKNOWN only when there is something to surface — a
@@ -454,9 +453,10 @@ PY
     restart_label "$BOT_LABEL" "unhealthy JSON response"
   else
     if [ -e "$CRED_MARKER" ]; then
-      if ! rm -f "$CRED_MARKER"; then
-        log "WATCHDOG-ERROR: failed to clear credential marker"
-        WD_FINAL="WATCHDOG-ERROR"
+      if ! rm -f "$CRED_MARKER" 2>>"$LOG"; then
+        # Recovery verdict stands (final state "ok"); the ERROR line and the
+        # nonzero invocation exit carry the failure for the next cycle's retry.
+        log "ERROR: failed to clear credential marker $CRED_MARKER; retrying next cycle"
         WD_EXIT=1
       fi
     fi
