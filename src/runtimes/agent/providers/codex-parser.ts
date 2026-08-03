@@ -12,6 +12,7 @@ import type {
   ProviderTurnTerminalStatus,
 } from '../stream-parser.ts';
 import { type JsonObject, isRecord, stringifyValue, extractMessage, extractTokenCounts } from './parser-utils.ts';
+import { isNonEmptyString } from '../../../lib/type-guards.ts';
 
 // ─── Item helpers ─────────────────────────────────────────────────────────────
 
@@ -108,10 +109,8 @@ function exactTurnIdentity(
   const sessionId = params['threadId'];
   const turnId = turn?.['id'];
   if (
-    typeof sessionId !== 'string'
-    || sessionId.trim() === ''
-    || typeof turnId !== 'string'
-    || turnId.trim() === ''
+    !isNonEmptyString(sessionId)
+    || !isNonEmptyString(turnId)
   ) {
     return null;
   }

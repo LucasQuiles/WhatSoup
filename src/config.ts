@@ -170,7 +170,7 @@ export interface OperationTrackerConfig {
 
 function intEnv(key: string, fallback: number): number {
   const raw = process.env[key];
-  if (!raw || raw.trim() === '') return fallback;
+  if (!isNonEmptyString(raw)) return fallback;
   const n = parseInt(raw, 10);
   if (isNaN(n)) return fallback;
   return n;
@@ -182,7 +182,7 @@ function positiveIntValue(value: unknown, fallback: number): number {
 
 function positiveIntEnv(key: string, fallback: number): number {
   const raw = process.env[key];
-  if (!raw || raw.trim() === '') return fallback;
+  if (!isNonEmptyString(raw)) return fallback;
   const trimmed = raw.trim();
   if (!/^[1-9]\d*$/.test(trimmed)) return fallback;
   return parseInt(trimmed, 10);
