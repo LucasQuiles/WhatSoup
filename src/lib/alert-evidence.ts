@@ -50,15 +50,16 @@ const EMPTY_CONFINED: ConfinedAlertContent = Object.freeze({
 
 /**
  * Well-known error-class patterns that may be safely extracted as bounded
- * metadata. Each entry is a regex that matches a class hint at the start of
- * the content. The match is reduced to the named group or a fixed label —
- * never the raw matched text.
+ * metadata. Each entry is a regex that matches a class hint anywhere in the
+ * content. The match is reduced to the named group or a fixed label —
+ * never the raw matched text. Mid-string matching is safe because the
+ * returned label is a bounded word, not raw matched text.
  */
 const FAILURE_CLASS_PATTERNS: readonly { readonly pattern: RegExp; readonly label: string }[] = [
-  // Standard Error subclasses.
-  { pattern: /^\s*(?:TypeError|RangeError|ReferenceError|SyntaxError|EvalError|URIError)\b/, label: '$0' },
-  // Generic Error prefix: "Error: ..." → "Error".
-  { pattern: /^\s*Error\b/, label: 'Error' },
+  // Standard Error subclasses — any position (e.g. "stderr: TypeError at line 42" → TypeError).
+  { pattern: /\b(?:TypeError|RangeError|ReferenceError|SyntaxError|EvalError|URIError)\b/, label: '$0' },
+  // Generic Error prefix: "... Error: ..." → "Error".
+  { pattern: /\bError\b/, label: 'Error' },
   // Provider-class signals used in the runtime.
   { pattern: /\bprovider_unknown_terminal\b/, label: 'provider_unknown' },
   { pattern: /\bprovider_timeout\b/, label: 'provider_timeout' },

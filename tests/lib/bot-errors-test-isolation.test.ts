@@ -76,7 +76,9 @@ describe('BOT ERRORS Vitest isolation', () => {
       eventType: 'alert',
       instance: 'vitest-isolation',
       source: 'sandbox-proof',
-      summary: 'test isolation proof',
+      summary: {
+        failureClass: 'unknown',
+      },
     });
 
     rmSync(dirname(dirname(written.path)), { recursive: true, force: true });

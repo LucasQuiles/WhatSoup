@@ -777,8 +777,8 @@ describe('emitAlert', () => {
         severity: 'critical',
         instance: 'whatsoup-prod',
         source: 'agent_respawn_failed',
-        summary: 'respawn exhausted',
-        evidence: 'Authorization: Bearer [REDACTED]',
+        summary: { failureClass: expect.any(String), length: expect.any(Number), correlationDigest: expect.any(String) },
+        evidence: { failureClass: expect.any(String), length: expect.any(Number), correlationDigest: expect.any(String) },
       },
     });
     expect(JSON.stringify(crumb)).not.toContain('lost-secret-token');
@@ -937,9 +937,9 @@ describe('emitAlert', () => {
         '--source',
         'agent_respawn_failed',
         '--summary',
-        'respawn exhausted',
+        expect.stringMatching(/"failureClass"/),
         '--evidence',
-        'crashed 3 times',
+        expect.any(String),
       ],
       SPAWN_OPTIONS,
     );
@@ -1604,7 +1604,7 @@ describe('clearAlertSource', () => {
         severity: 'info',
         instance: 'whatsoup-prod',
         source: 'agent_respawn_failed',
-        evidence: 'repair_lane:whatsoup-prod',
+        evidence: { failureClass: expect.any(String), length: expect.any(Number), correlationDigest: expect.any(String) },
       }),
     ]));
   });
@@ -1650,8 +1650,8 @@ describe('WHATSOUP_ALERT_SINK dry-run capture', () => {
       severity: 'critical',
       instance: 'whatsoup-prod',
       source: 'provider_fallback_activated',
-      summary: 'Provider fallback window activated',
-      evidence: 'reason=empty-output provider=opencode-cli',
+      summary: { failureClass: expect.any(String), length: expect.any(Number), correlationDigest: expect.any(String) },
+      evidence: { failureClass: expect.any(String), length: expect.any(Number), correlationDigest: expect.any(String) },
     });
     // The whole point: NO durable outbox event, NO operator page.
     expect(readdirSync(outboxDir)).toHaveLength(0);
@@ -1665,7 +1665,7 @@ describe('WHATSOUP_ALERT_SINK dry-run capture', () => {
 
     const lines = readFileSync(sinkPath, 'utf8').trim().split('\n');
     expect(lines).toHaveLength(2);
-    expect(JSON.parse(lines[0]!)).toMatchObject({ eventType: 'alert', source: 's1', evidence: 'reason=probe-unusable' });
+    expect(JSON.parse(lines[0]!)).toMatchObject({ eventType: 'alert', source: 's1', evidence: { failureClass: expect.any(String), length: expect.any(Number), correlationDigest: expect.any(String) } });
     expect(JSON.parse(lines[1]!)).toMatchObject({ eventType: 'clear', source: 's1', severity: 'info' });
     expect(readdirSync(outboxDir)).toHaveLength(0);
     expect(spawn).not.toHaveBeenCalled();
@@ -1777,9 +1777,12 @@ describe('WHATSOUP_ALERT_SINK dry-run capture', () => {
         expect(() => emitAlert('whatsoup-prod', 'connection_exhausted', 'sum', 'evidence')).not.toThrow();
 
         const result = emitAlert('whatsoup-prod', 'connection_exhausted', 'sum2', 'evidence2');
-        expect(result.ok).toBe(false);
+        // cwd() no longer called during event building (issue #2386 stripped
+        // cwd/execPath/argv), so the event builds successfully and routes
+        // to the configured sink (not an outbox write-failure path).
+        expect(result.ok).toBe(true);
         expect(result.channel).toBe('sink');
-        expect(result.status).toBe('failed');
+        expect(result.status).toBe('completed');
 
         // Still must not page: a construction failure is not a licence to fall
         // through to the outbox ladder any more than a write failure is.
