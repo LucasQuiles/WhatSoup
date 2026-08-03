@@ -8,7 +8,7 @@ import { INBOUND_STATUSES } from './inbound-status.ts';
  * reader (including `getInboundStatus`) saw a widened `string` type.
  *
  * SQLite cannot add a CHECK via ALTER TABLE, so the table is rebuilt:
- * create `_v55` with the constraint, copy every row verbatim, drop the old
+ * create `_v56` with the constraint, copy every row verbatim, drop the old
  * table, rename, then recreate the triggers captured before the drop.
  *
  * Fail-closed properties (adversarial review, #2250):
@@ -21,10 +21,16 @@ import { INBOUND_STATUSES } from './inbound-status.ts';
  *   mid-rebuild crash or error rolls back to the untouched old table, and
  *   the write lock held by the outer transaction prevents any
  *   concurrent-writer interleave during the copy.
+ * - FK-safe: `inbound_disposition_links` and
+ *   `operator_catchup_closure_witnesses` hold `REFERENCES
+ *   inbound_events(seq) ON DELETE RESTRICT`. `PRAGMA defer_foreign_keys = ON`
+ *   is set before the DROP, deferring FK enforcement to COMMIT. By then,
+ *   the new `inbound_events` carries the same seq values (verbatim copy),
+ *   so every child-table FK reference is satisfied.
  * - Idempotent: a completed rebuild is detected via the constraint text in
  *   the table SQL and skipped on retry.
  */
-export function runMigration55(db: DatabaseSync): void {
+export function runMigration56(db: DatabaseSync): void {
   const table = db
     .prepare(
       "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'inbound_events'",
@@ -45,7 +51,7 @@ export function runMigration55(db: DatabaseSync): void {
     );
   if (invalid.length > 0) {
     throw new Error(
-      'migration 55 abort: inbound_events.processing_status holds value(s)'
+      'migration 56 abort: inbound_events.processing_status holds value(s)'
         + ` outside the canonical InboundStatus union: ${invalid.map(String).join(', ')}`,
     );
   }
@@ -116,13 +122,15 @@ export function runMigration55(db: DatabaseSync): void {
 
   const statuses = INBOUND_STATUSES.map((status) => `'${status}'`).join(', ');
 
-  db.exec('SAVEPOINT migration_55');
+  db.exec('SAVEPOINT migration_56');
   try {
     for (const object of [...recreateOrder].reverse()) {
       db.exec(`DROP ${object.type === 'view' ? 'VIEW' : 'TRIGGER'} IF EXISTS ${object.name}`);
     }
     db.exec(`
-      CREATE TABLE inbound_events_v55 (
+      PRAGMA defer_foreign_keys = ON;
+
+      CREATE TABLE inbound_events_v56 (
         seq INTEGER PRIMARY KEY AUTOINCREMENT,
         message_id TEXT NOT NULL,
         conversation_key TEXT NOT NULL,
@@ -148,7 +156,7 @@ export function runMigration55(db: DatabaseSync): void {
         UNIQUE(message_id)
       );
 
-      INSERT INTO inbound_events_v55 (
+      INSERT INTO inbound_events_v56 (
         seq, message_id, conversation_key, chat_jid, received_at, routed_to,
         processing_status, completed_at, terminal_reason,
         continuity_candidate_reason, continuity_candidate_source,
@@ -162,7 +170,7 @@ export function runMigration55(db: DatabaseSync): void {
       FROM inbound_events;
 
       DROP TABLE inbound_events;
-      ALTER TABLE inbound_events_v55 RENAME TO inbound_events;
+      ALTER TABLE inbound_events_v56 RENAME TO inbound_events;
     `);
     for (const sql of triggerSql) {
       db.exec(sql);
@@ -170,10 +178,10 @@ export function runMigration55(db: DatabaseSync): void {
     for (const object of recreateOrder) {
       db.exec(object.sql);
     }
-    db.exec('RELEASE migration_55');
+    db.exec('RELEASE migration_56');
   } catch (error) {
-    db.exec('ROLLBACK TO migration_55');
-    db.exec('RELEASE migration_55');
+    db.exec('ROLLBACK TO migration_56');
+    db.exec('RELEASE migration_56');
     throw error;
   }
 }

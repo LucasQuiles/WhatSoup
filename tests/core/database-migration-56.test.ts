@@ -1,6 +1,6 @@
 import { DatabaseSync } from 'node:sqlite';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { runMigration55 } from '../../src/core/database-migration-55.ts';
+import { runMigration56 } from '../../src/core/database-migration-56.ts';
 import { CURRENT_SCHEMA_MIGRATION, Database } from '../../src/core/database.ts';
 
 /**
@@ -109,7 +109,7 @@ function allStatuses(raw: DatabaseSync): string[] {
   ).map((row) => row.status);
 }
 
-describe('migration 55 — inbound_events.processing_status CHECK constraint', () => {
+describe('migration 56 — inbound_events.processing_status CHECK constraint', () => {
   let raw: DatabaseSync;
 
   beforeEach(() => {
@@ -132,7 +132,7 @@ describe('migration 55 — inbound_events.processing_status CHECK constraint', (
       insertInbound(raw, `m-${index}`, status);
     }
 
-    runMigration55(raw);
+    runMigration56(raw);
 
     expect(tableSql(raw)).toContain('CHECK (processing_status IN');
     expect(allStatuses(raw)).toEqual([
@@ -161,7 +161,7 @@ describe('migration 55 — inbound_events.processing_status CHECK constraint', (
   it('cross-table trigger still enforces after the rebuild', () => {
     insertInbound(raw, 'm-pend', 'pending');
     raw.prepare("INSERT INTO legacy_jobs (source_inbound_seq, state) VALUES (1, 'open')").run();
-    runMigration55(raw);
+    runMigration56(raw);
 
     // Source inbound is 'pending' (not terminal) — the guard must still abort.
     expect(() =>
@@ -176,7 +176,7 @@ describe('migration 55 — inbound_events.processing_status CHECK constraint', (
 
   it('rejects out-of-union writes after the rebuild', () => {
     insertInbound(raw, 'm-ok', 'pending');
-    runMigration55(raw);
+    runMigration56(raw);
 
     expect(() => insertInbound(raw, 'm-bogus', 'bogus_status')).toThrow();
     expect(() =>
@@ -194,14 +194,14 @@ describe('migration 55 — inbound_events.processing_status CHECK constraint', (
     insertInbound(raw, 'm-bad', 'totally_unexpected');
     const before = tableSql(raw);
 
-    expect(() => runMigration55(raw)).toThrow(/totally_unexpected/);
+    expect(() => runMigration56(raw)).toThrow(/totally_unexpected/);
 
     // Fail-closed: no mutation, no remnant table, no CHECK, rows intact.
     expect(tableSql(raw)).toBe(before);
     expect(
       raw
         .prepare(
-          "SELECT name FROM sqlite_master WHERE name = 'inbound_events_v55'",
+          "SELECT name FROM sqlite_master WHERE name = 'inbound_events_v56'",
         )
         .all(),
     ).toEqual([]);
@@ -214,10 +214,10 @@ describe('migration 55 — inbound_events.processing_status CHECK constraint', (
 
   it('is idempotent on retry', () => {
     insertInbound(raw, 'm-1', 'complete');
-    runMigration55(raw);
+    runMigration56(raw);
     const afterFirst = tableSql(raw);
 
-    expect(() => runMigration55(raw)).not.toThrow();
+    expect(() => runMigration56(raw)).not.toThrow();
     expect(tableSql(raw)).toBe(afterFirst);
     expect(allStatuses(raw)).toEqual(['complete']);
   });
@@ -225,24 +225,24 @@ describe('migration 55 — inbound_events.processing_status CHECK constraint', (
   it('returns without error when inbound_events does not exist', () => {
     const empty = new DatabaseSync(':memory:');
     try {
-      expect(() => runMigration55(empty)).not.toThrow();
+      expect(() => runMigration56(empty)).not.toThrow();
     } finally {
       empty.close();
     }
   });
 
-  it('full migration chain records v55 and enforces the constraint', () => {
+  it('full migration chain records v56 and enforces the constraint', () => {
     const db = new Database(':memory:');
     try {
       db.open();
-      expect(CURRENT_SCHEMA_MIGRATION).toBe(55);
+      expect(CURRENT_SCHEMA_MIGRATION).toBe(56);
       expect(
         (
           db.raw
             .prepare('SELECT MAX(version) AS v FROM schema_migrations')
             .get() as { v: number }
         ).v,
-      ).toBe(55);
+      ).toBe(56);
       const sql = (
         db.raw
           .prepare(
