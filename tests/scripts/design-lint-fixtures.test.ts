@@ -1,19 +1,12 @@
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { afterEach, describe, expect, it } from 'vitest';
+import { describe, expect, it } from 'vitest';
+import { trackTmpDirs } from '../helpers/tmp-dir.ts';
 
 const SCRIPT = resolve(process.cwd(), 'console/scripts/check-design-lint-fixtures.mjs');
 
-const tmpDirs: string[] = [];
-
-afterEach(() => {
-  for (const dir of tmpDirs) {
-    rmSync(dir, { recursive: true, force: true });
-  }
-  tmpDirs.length = 0;
-});
+const tmp = trackTmpDirs('design-lint-fixtures');
 
 interface FixtureOverrides {
   designLints?: string;
@@ -24,8 +17,7 @@ interface FixtureOverrides {
 }
 
 function makeFixture(overrides: FixtureOverrides = {}) {
-  const dir = mkdtempSync(join(tmpdir(), 'design-lint-fixtures-'));
-  tmpDirs.push(dir);
+  const dir = tmp.make('');
   const paths = {
     designLints: join(dir, 'design-lints.test.ts'),
     lintPlan: join(dir, 'lint-plan.md'),
