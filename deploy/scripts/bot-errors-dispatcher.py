@@ -5092,7 +5092,24 @@ def process_one(path: Path, paths: dict[str, Path]) -> tuple[bool, str]:
     except EnvelopeError as exc:
         quarantine_invalid_envelope(claimed, paths["quarantine"], exc.code)
         return False, "invalid_envelope"
-    atomic_write_json(claimed, event)
+    normalize_target = _durable_target(claimed)
+    normalize_observation = observe_json(normalize_target)
+    normalize_operation = operation_id(
+        normalize_target,
+        event,
+        component="dispatcher.claimed_event_normalize",
+        predecessor=normalize_observation.version,
+    )
+    normalize_publication = publish_state_json(
+        normalize_target,
+        event,
+        component="dispatcher.claimed_event_normalize",
+        operation_id=normalize_operation,
+        expected=normalize_observation.version,
+        generation=(normalize_observation.version.generation or 0) + 1,
+    )
+    if not normalize_publication.advance_allowed:
+        require_advance(normalize_publication)
 
     # --- Test-leak defense-in-depth (B2) ---
     # Drop test-fixture events BEFORE any delivery, incident-state load, or
