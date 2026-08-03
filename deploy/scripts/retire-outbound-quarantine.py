@@ -77,6 +77,7 @@ KNOWN_FAILURE_CODES = {
     "outbound.unsafe_delivery_unconfirmed",
     "outbound.governor_shed",
     "outbound.identity_blocked",
+    "outbound.replay_attempt_limit_exceeded",
     "outbound.replay_failed",
     "outbound.deferral_limit_exceeded",
 }

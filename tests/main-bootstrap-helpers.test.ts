@@ -165,7 +165,7 @@ async function importMainWithMocks(options: {
     text: string;
   } | null;
   persistIntroSentFlagThrows?: boolean;
-  drainPendingOutboundRejectsOnStartup?: boolean;
+  drainPendingOutboundLockedRejectsOnStartup?: boolean;
   selfRestartMarker?: {
     chatJid?: string;
     reason: string;
@@ -445,7 +445,7 @@ async function importMainWithMocks(options: {
     })),
     rememberReplayedId: vi.fn(),
     sendTracked: vi.fn(async () => ({ waMessageId: 'sent-1' })),
-    drainPendingOutbound: options.drainPendingOutboundRejectsOnStartup
+    drainPendingOutboundLocked: options.drainPendingOutboundLockedRejectsOnStartup
       ? vi.fn(async () => { throw new Error('startup drain failed'); })
       : vi.fn(async () => undefined),
     waitForHistorySyncThenRecover: vi.fn(async ({ recover }: { recover: () => unknown }) => {
@@ -566,7 +566,7 @@ async function importMainWithMocks(options: {
   vi.doMock('../src/core/durability.ts', () => ({
     DurabilityEngine,
     sendTracked: mocks.sendTracked,
-    drainPendingOutbound: mocks.drainPendingOutbound,
+    drainPendingOutboundLocked: mocks.drainPendingOutboundLocked,
   }));
   vi.doMock('../src/runtimes/agent/self-restart.ts', () => ({
     consumeIntentionalRestartMarker: mocks.consumeIntentionalRestartMarker,
@@ -1968,7 +1968,7 @@ describe('main.ts — uncovered helpers and signal paths', () => {
       const h = await importMainWithMocks();
       h.durability.sweepStaleSubmitted.mockImplementationOnce(() => { throw new Error('sweep failed'); });
       h.durability.reconcileLiveMaybeSent.mockImplementationOnce(() => { throw new Error('reconcile failed'); });
-      h.drainPendingOutbound.mockRejectedValueOnce(new Error('drain failed'));
+      h.drainPendingOutboundLocked.mockRejectedValueOnce(new Error('drain failed'));
 
       h.capturedIntervals.find((timer) => timer.ms === 10_000)!.callback();
       await flushMicrotasks();
@@ -1988,12 +1988,12 @@ describe('main.ts — uncovered helpers and signal paths', () => {
     });
 
     it('logs post-connect drain failures without aborting startup', async () => {
-      const h = await importMainWithMocks({ drainPendingOutboundRejectsOnStartup: true });
+      const h = await importMainWithMocks({ drainPendingOutboundLockedRejectsOnStartup: true });
       await flushMicrotasks();
 
       expect(h.logger.error).toHaveBeenCalledWith(
         expect.objectContaining({ err: expect.any(Error) }),
-        'drainPendingOutbound on post-connect recovery failed',
+        'drainPendingOutboundLocked on post-connect recovery failed',
       );
     });
 
