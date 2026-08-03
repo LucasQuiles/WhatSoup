@@ -8,7 +8,7 @@ import {
 } from '../../src/core/reply-guarantee.ts';
 import { Database } from '../../src/core/database.ts';
 import { DurabilityEngine } from '../../src/core/durability.ts';
-import type { InboundStatus } from '../../src/core/durability.ts';
+import type { InboundStatus } from '../../src/core/inbound-status.ts';
 import type { Messenger } from '../../src/core/types.ts';
 import { finalizeRuntimeTurn } from '../../src/runtimes/agent/turn-finalizer.ts';
 
@@ -183,6 +183,27 @@ describe('ReplyGuaranteeManager', () => {
     await vi.advanceTimersByTimeAsync(100);
 
     expect(sendFallback).not.toHaveBeenCalled();
+  });
+
+  it('keeps an armed guarantee open while the inbound is still pending (#2244)', async () => {
+    // 'pending' is part of the canonical open set — an inbound that has not
+    // been picked up yet must NOT disarm the guarantee (pre-#2244 the local
+    // predicate treated only processing/turn_done as open and disarmed here).
+    const durability = makeDurability('pending');
+    const sendFallback = vi.fn(async () => undefined);
+    const manager = new ReplyGuaranteeManager({
+      durability,
+      sendFallback,
+      timeoutMs: 100,
+      rateLimitMs: 1_000,
+    });
+
+    manager.arm({ inboundSeq: 11, chatJid: '15550100002@s.whatsapp.net' });
+
+    await vi.advanceTimersByTimeAsync(100);
+
+    expect(manager.isArmed(11)).toBe(true);
+    expect(sendFallback).toHaveBeenCalledTimes(1);
   });
 
   it('rate-limits fallback sends per chat', async () => {

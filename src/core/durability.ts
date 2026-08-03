@@ -7,6 +7,8 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
 import type { Database } from './database.ts';
+import { isInboundStatus } from './inbound-status.ts';
+import type { InboundStatus } from './inbound-status.ts';
 import type { Messenger } from './types.ts';
 import type { GuardCaller } from './outbound-identity/types.ts';
 import { toConversationKey } from './conversation-key.ts';
@@ -220,7 +222,6 @@ const OUTBOUND_STATUSES = [
   'quarantined',
 ] as const;
 export type OutboundStatus = (typeof OUTBOUND_STATUSES)[number];
-export type InboundStatus = 'pending' | 'processing' | 'turn_done' | 'complete' | 'failed';
 export type SessionStatus = 'active' | 'suspended' | 'orphaned' | 'ended';
 
 type OutboundQuarantineEvidenceCoverage =
@@ -1352,8 +1353,18 @@ export class DurabilityEngine {
   }
 
   getInboundStatus(seq: number): InboundStatus | undefined {
-    const row = this.statements.selectInboundStatus.get(seq) as { processing_status: InboundStatus } | undefined;
-    return row?.processing_status;
+    const row = this.statements.selectInboundStatus.get(seq) as { processing_status: string } | undefined;
+    const status = row?.processing_status;
+    if (status === undefined) return undefined;
+    if (isInboundStatus(status)) return status;
+    // Unreachable once the migration-55 CHECK constraint lands; on a
+    // pre-constraint or otherwise corrupted row, fail loud in the logs and
+    // treat the inbound as not-open rather than silently widening to string.
+    log.error(
+      { seq, status },
+      'inbound_events.processing_status outside canonical InboundStatus union',
+    );
+    return undefined;
   }
 
   markInboundComplete(seq: number, terminalReason: string): void {

@@ -151,7 +151,7 @@ describe('migration 54 completed-delivery identity admissions', () => {
     const db = new Database(':memory:');
     db.open();
     try {
-      expect(CURRENT_SCHEMA_MIGRATION).toBe(55);
+      expect(CURRENT_SCHEMA_MIGRATION).toBe(56);
       expect(db.raw.prepare(
         'SELECT version FROM schema_migrations WHERE version = 53',
       ).get()).toEqual({ version: 53 });

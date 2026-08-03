@@ -2,7 +2,7 @@
 
 **Status:** Active — refreshed against canonical base `482b707d716aee5641db25d40c2a954caee5d78f`; migrations 47 through 52 are already consumed, and the current branch advances the schema to migration 53 for outbound-quarantine disposition and retirement receipts. Provider-lifecycle implementation and activation remain unauthorized
 
-**Schema allocation:** current canonical schema is migration 55; bounded terminal recovery/canonical `not_sent` is forward migration 56; the provider-event lifecycle ledger is migration 57. Migrations 50 and 51 are consumed by metadata-only durability evidence, migration 52 by outbound ambiguity-episode timing, migration 53 by outbound quarantine disposition/retirement receipts, migration 54 by the completed-delivery identity-admission ledger, and migration 55 by typed online enrichment-cycle receipts, so the still-unpublished forward allocations move to migrations 56 and 57.
+**Schema allocation:** current canonical schema is migration 56; bounded terminal recovery/canonical `not_sent` is forward migration 57; the provider-event lifecycle ledger is migration 58. Migrations 50 and 51 are consumed by metadata-only durability evidence, migration 52 by outbound ambiguity-episode timing, migration 53 by outbound quarantine disposition/retirement receipts, migration 54 by the completed-delivery identity-admission ledger, migration 55 by typed online enrichment-cycle receipts, and migration 56 by the inbound_events processing-status CHECK constraint (#2250), so the still-unpublished forward allocations move to migrations 57 and 58.
 
 ## Purpose
 
@@ -814,13 +814,13 @@ unproved child origins default to internal no-send/no-effect handling.
     never proves no transmission.
     `not_sent` is a distinct outbound operation status emitted only by typed pre-send
     rejection, and terminal `deliveryKind=not_sent` retains exact operation/status and
-    singleton-set proof. Migration 56 permits aggregate `not_sent` only for
+    singleton-set proof. Migration 57 permits aggregate `not_sent` only for
     an immutable singleton answer-set seal created atomically with terminalization;
     database triggers reject a racing/later answer sibling. Without that seal, even one
     not-sent operation remains aggregate uncertain. No-send delivery evidence never clears provider/tool/
     lifecycle replay vetoes. Both lockstepped terminal validators, database triggers,
     recovery queries, and retention prove and preserve the referenced operation state.
-  - **CON-002.AC-07:** Migration 57 replaces the singleton seal with immutable fields on
+  - **CON-002.AC-07:** Migration 58 replaces the singleton seal with immutable fields on
     the final attempt: publication-seal ID/kind, owner, invocation epoch, exact count,
     canonical membership fingerprint, and sealed time. Membership is restart-rederived
     from every reply-bearing/external outbound link across all sealed plans; terminal
@@ -1232,3 +1232,4 @@ unproved child origins default to internal no-send/no-effect handling.
 | AMD-057 | applied | schema-allocation-correction | CON-002, CON-005, DES-003, DES-008, DES-009 | Shifted the current canonical schema to 53, bounded terminal recovery/canonical `not_sent` to forward migration 54, and the provider-event lifecycle ledger/activation marker to 55, superseding the allocation portions of AMD-056 | Outbound quarantine disposition and retirement receipts consumed migration 53; shifting the still-unpublished forward allocations preserves immutable migration history and keeps provider lifecycle inactive until its dedicated migration 55 | TSK-001, TSK-003, TSK-008, TSK-010 | coordinator | 2026-07-30T00:00Z |
 | AMD-058 | applied | schema-allocation-correction | CON-002, CON-005, DES-003, DES-008, DES-009 | Shifted the current canonical schema to 54, bounded terminal recovery/canonical `not_sent` to forward migration 55, and the provider-event lifecycle ledger/activation marker to 56, superseding the allocation portions of AMD-057 | Completed-delivery identity-admission ledger consumed migration 54; shifting the still-unpublished forward allocations preserves immutable migration history and keeps provider lifecycle inactive until its dedicated migration 56 | TSK-001, TSK-003, TSK-008, TSK-010 | coordinator | 2026-07-31T00:00Z |
 | AMD-059 | applied | schema-allocation-correction | CON-002, CON-005, DES-003, DES-008, DES-009 | Shifted the current canonical schema to 55, bounded terminal recovery/canonical `not_sent` to forward migration 56, and the provider-event lifecycle ledger/activation marker to 57, superseding the allocation portions of AMD-058 | Typed online enrichment-cycle receipts (`enrichment_runs` status/cause/stage/retryability/evidence fields, #2565) consumed migration 55; shifting the still-unpublished forward allocations preserves immutable migration history and keeps provider lifecycle inactive until its dedicated migration 57 | TSK-001, TSK-003, TSK-008, TSK-010 | coordinator | 2026-08-01T23:00Z |
+| AMD-060 | applied | schema-allocation-correction | CON-002, CON-005, DES-003, DES-008, DES-009 | Shifted the current canonical schema to 56, bounded terminal recovery/canonical `not_sent` to forward migration 57, and the provider-event lifecycle ledger/activation marker to 58, superseding the allocation portions of AMD-059 | The inbound_events processing-status CHECK constraint (#2250) consumed migration 56; shifting the still-unpublished forward allocations preserves immutable migration history and keeps provider lifecycle inactive until its dedicated migration 58 | TSK-001, TSK-003, TSK-008, TSK-010 | coordinator | 2026-08-03T00:00Z |
