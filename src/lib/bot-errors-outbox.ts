@@ -540,6 +540,21 @@ export function buildBotErrorsEvent(input: BotErrorsOutboxInput, eventId = rando
 
 export function writeBotErrorsEvent(input: BotErrorsOutboxInput): BotErrorsOutboxWrite {
   const outbox = botErrorsOutboxDir();
+  // Fail closed: when the outbox dir is NOT explicitly set and we're under
+  // vitest, the resolved path MUST be under tmpdir — never the repo root
+  // or homedir. Prevents the recurring src/main.ts sha256 drift caused by
+  // a sandbox fallback writing into the working tree (#2658, #2887 CI).
+  if (process.env['BOT_ERRORS_OUTBOX_DIR'] === undefined
+      && process.env['BOT_ERRORS_STATE_DIR'] === undefined
+      && process.env['BOT_ERRORS_TEST_ISOLATED'] === '1'
+      && runningUnderVitest()) {
+    const resolved = join(outbox, 'guard');
+    if (!resolved.startsWith(tmpdir())) {
+      throw new Error(
+        `writeBotErrorsEvent under vitest would write outside tmpdir: ${outbox}`,
+      );
+    }
+  }
   const event = buildBotErrorsEvent(input);
   // Preserve milliseconds while sorting *after* old same-second names, which
   // ended at `...SSZ.<instance>`. `_` sorts after that separator and keeps
