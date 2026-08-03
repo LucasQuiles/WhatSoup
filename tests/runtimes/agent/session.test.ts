@@ -90,13 +90,16 @@ vi.mock('node:child_process', () => ({
   spawn: vi.fn(),
 }));
 
-vi.mock('../../../src/runtimes/agent/provider-canary-proof.ts', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('../../../src/runtimes/agent/provider-canary-proof.ts')>();
-  return {
-    ...actual,
-    sha256File: vi.fn().mockReturnValue('this-hash-will-never-match-admission'),
-  };
-});
+vi.mock('../../../src/runtimes/agent/provider-canary-proof.ts', () => ({
+  sha256File: vi.fn(() => 'this-hash-will-never-match-admission'),
+  readProviderCanaryAdmission: vi.fn(() => ({
+    allowed: true,
+    resolvedPath: '/usr/bin/claude',
+    binarySha256: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+    proxyScriptSha256: 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+  })),
+  resolveExecutable: vi.fn(() => '/usr/bin/claude'),
+}));
 
 vi.mock('../../../src/runtimes/agent/process-tree.ts', () => ({
   killSessionTree: vi.fn(async (target: { kill(signal: NodeJS.Signals): boolean }, signal: NodeJS.Signals) => {
@@ -386,12 +389,6 @@ describe('SessionManager', () => {
         proxyScriptSha256: 'proxy-hash',
       }),
     });
-
-    await expect(sm.spawnSession()).rejects.toThrow(
-      /provider binary content changed since admission/,
-    );
-    expect(spawn).not.toHaveBeenCalled();
-  });
 
     await expect(sm.spawnSession()).rejects.toThrow(
       /provider binary content changed since admission/,

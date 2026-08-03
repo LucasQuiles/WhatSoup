@@ -21,6 +21,8 @@ vi.mock('../../../src/runtimes/agent/provider-canary-proof.ts', () => ({
     binarySha256: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
     proxyScriptSha256: 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
   })),
+  sha256File: vi.fn(() => 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'),
+  resolveExecutable: vi.fn(),
 }));
 
 vi.mock('../../../src/logger.ts', () => ({
