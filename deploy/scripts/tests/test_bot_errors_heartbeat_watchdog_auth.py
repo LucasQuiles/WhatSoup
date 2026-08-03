@@ -36,6 +36,14 @@ def _load_roster_lib():
 _roster_lib = _load_roster_lib()
 
 
+def _write_private_json(path: Path, payload: dict) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    path.parent.chmod(0o700)
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    path.chmod(0o600)
+    return path
+
+
 def _bind_valid_roster(monkeypatch, tmp_path: Path) -> dict:
     """Write a roster the watchdog will load independently and return the
     matching heartbeat roster-binding fields, so an age-focused test is not also
@@ -104,7 +112,7 @@ def test_fleet_sentinel_heartbeat_check_is_quiet_when_fresh(tmp_path: Path, monk
     state = _private_state(monkeypatch, mod, tmp_path)
     roster_fields = _bind_valid_roster(monkeypatch, tmp_path)
     heartbeat = state / "fleet-sentinel" / "sentinel-heartbeat.json"
-    mod.atomic_write_json(
+    _write_private_json(
         heartbeat,
         {
             "schemaVersion": 1,
@@ -130,7 +138,7 @@ def test_fleet_sentinel_heartbeat_check_flags_stale_and_writes_deadman_event(tmp
     heartbeat = state / "fleet-sentinel" / "sentinel-heartbeat.json"
     # Roster-valid but STALE: only the age/deadman problem should fire (the
     # #1875 roster check must stay quiet on a well-bound roster).
-    mod.atomic_write_json(
+    _write_private_json(
         heartbeat,
         {
             "schemaVersion": 1,
@@ -159,7 +167,7 @@ def test_fleet_sentinel_heartbeat_check_flags_stale_and_writes_deadman_event(tmp
 def test_malformed_open_incident_counters_do_not_crash_reconcile(tmp_path: Path, monkeypatch):
     mod = _load_module()
     state = _private_state(monkeypatch, mod, tmp_path)
-    mod.atomic_write_json(
+    _write_private_json(
         state / "heartbeat-watchdog-state.json",
         {
             "version": 1,
@@ -188,7 +196,7 @@ def test_malformed_open_incident_counters_do_not_crash_reconcile(tmp_path: Path,
 def test_boolean_open_incident_counters_are_reinitialized(tmp_path: Path, monkeypatch):
     mod = _load_module()
     state = _private_state(monkeypatch, mod, tmp_path)
-    mod.atomic_write_json(
+    _write_private_json(
         state / "heartbeat-watchdog-state.json",
         {
             "version": 1,
@@ -216,7 +224,7 @@ def test_boolean_open_incident_counters_are_reinitialized(tmp_path: Path, monkey
 def test_non_finite_open_incident_counters_do_not_crash_reconcile(tmp_path: Path, monkeypatch):
     mod = _load_module()
     state = _private_state(monkeypatch, mod, tmp_path)
-    mod.atomic_write_json(
+    _write_private_json(
         state / "heartbeat-watchdog-state.json",
         {
             "version": 1,
@@ -248,7 +256,7 @@ def test_log_write_failure_does_not_block_renotify_event(tmp_path: Path, monkeyp
     outbox = tmp_path / "outbox"
     monkeypatch.setenv("BOT_ERRORS_OUTBOX_DIR", str(outbox))
     monkeypatch.setenv("BOT_ERRORS_WATCHDOG_RENOTIFY_SECONDS", "1")
-    mod.atomic_write_json(
+    _write_private_json(
         state / "heartbeat-watchdog-state.json",
         {
             "version": 1,
@@ -284,7 +292,7 @@ def test_log_write_failure_does_not_block_renotify_event(tmp_path: Path, monkeyp
 def test_malformed_open_incident_record_realerts_when_problem_persists(tmp_path: Path, monkeypatch):
     mod = _load_module()
     state = _private_state(monkeypatch, mod, tmp_path)
-    mod.atomic_write_json(
+    _write_private_json(
         state / "heartbeat-watchdog-state.json",
         {"version": 1, "open": {"fleet_sentinel": ["corrupt"]}},
     )
@@ -302,7 +310,7 @@ def test_malformed_open_incident_record_realerts_when_problem_persists(tmp_path:
 def test_malformed_recovery_counter_restarts_recovery_confirmation(tmp_path: Path, monkeypatch):
     mod = _load_module()
     state = _private_state(monkeypatch, mod, tmp_path)
-    mod.atomic_write_json(
+    _write_private_json(
         state / "heartbeat-watchdog-state.json",
         {
             "version": 1,
@@ -329,7 +337,7 @@ def test_malformed_recovery_counter_restarts_recovery_confirmation(tmp_path: Pat
 def test_non_finite_recovery_counter_restarts_recovery_confirmation(tmp_path: Path, monkeypatch):
     mod = _load_module()
     state = _private_state(monkeypatch, mod, tmp_path)
-    mod.atomic_write_json(
+    _write_private_json(
         state / "heartbeat-watchdog-state.json",
         {
             "version": 1,
@@ -356,7 +364,7 @@ def test_non_finite_recovery_counter_restarts_recovery_confirmation(tmp_path: Pa
 def test_malformed_open_incident_record_restarts_recovery_confirmation(tmp_path: Path, monkeypatch):
     mod = _load_module()
     state = _private_state(monkeypatch, mod, tmp_path)
-    mod.atomic_write_json(
+    _write_private_json(
         state / "heartbeat-watchdog-state.json",
         {"version": 1, "open": {"fleet_sentinel": ["corrupt"]}},
     )
@@ -374,7 +382,7 @@ def test_dispatcher_heartbeat_critical_inspect_error_is_reported_not_crashed(tmp
     mod = _load_module()
     state = _private_state(monkeypatch, mod, tmp_path)
     target = state / "dispatcher-state.json"
-    mod.atomic_write_json(target, {"updated_at": 1000})
+    _write_private_json(target, {"updated_at": 1000})
     original_lstat = Path.lstat
 
     def lstat(path: Path, *args, **kwargs):
@@ -399,7 +407,7 @@ def test_dispatcher_heartbeat_stat_error_after_private_check_is_reported_not_cra
     mod = _load_module()
     state = _private_state(monkeypatch, mod, tmp_path)
     target = state / "dispatcher-state.json"
-    mod.atomic_write_json(target, {"updated_at": 1000})
+    _write_private_json(target, {"updated_at": 1000})
     original_stat = Path.stat
 
     def stat(path: Path, *args, **kwargs):
@@ -422,7 +430,7 @@ def test_q_loop_future_updated_at_is_reported_not_fresh(tmp_path: Path, monkeypa
     state = _private_state(monkeypatch, mod, tmp_path)
     target = state / "q-loop" / "state.json"
     monkeypatch.setenv("BOT_ERRORS_Q_LOOP_STATE", str(target))
-    mod.atomic_write_json(target, {"updated_at": 1100})
+    _write_private_json(target, {"updated_at": 1100})
 
     problems = mod.collect_problems(_watchdog_args(), {"q_loop"})
 
@@ -437,7 +445,7 @@ def test_q_loop_non_finite_updated_at_is_reported_not_crashed(tmp_path: Path, mo
     state = _private_state(monkeypatch, mod, tmp_path)
     target = state / "q-loop" / "state.json"
     monkeypatch.setenv("BOT_ERRORS_Q_LOOP_STATE", str(target))
-    mod.atomic_write_json(target, {"updated_at": float("inf")})
+    _write_private_json(target, {"updated_at": float("inf")})
 
     problems = mod.collect_problems(_watchdog_args(), {"q_loop"})
 
@@ -452,7 +460,7 @@ def test_q_loop_boolean_updated_at_is_reported_not_numeric(tmp_path: Path, monke
     state = _private_state(monkeypatch, mod, tmp_path)
     target = state / "q-loop" / "state.json"
     monkeypatch.setenv("BOT_ERRORS_Q_LOOP_STATE", str(target))
-    mod.atomic_write_json(target, {"updated_at": True})
+    _write_private_json(target, {"updated_at": True})
 
     problems = mod.collect_problems(_watchdog_args(), {"q_loop"})
 
@@ -470,7 +478,7 @@ def test_q_loop_supervisor_non_finite_unavailable_at_is_unknown_not_crashed(
     state = _private_state(monkeypatch, mod, tmp_path)
     target = state / "q-loop" / "state.json"
     monkeypatch.setenv("BOT_ERRORS_Q_LOOP_STATE", str(target))
-    mod.atomic_write_json(
+    _write_private_json(
         target,
         {
             "updated_at": 1000,
@@ -494,7 +502,7 @@ def test_q_loop_supervisor_boolean_unavailable_at_is_unknown(tmp_path: Path, mon
     state = _private_state(monkeypatch, mod, tmp_path)
     target = state / "q-loop" / "state.json"
     monkeypatch.setenv("BOT_ERRORS_Q_LOOP_STATE", str(target))
-    mod.atomic_write_json(
+    _write_private_json(
         target,
         {
             "updated_at": 1000,
@@ -517,7 +525,7 @@ def test_dispatcher_future_mtime_is_reported_not_fresh(tmp_path: Path, monkeypat
     mod = _load_module()
     state = _private_state(monkeypatch, mod, tmp_path)
     target = state / "dispatcher-state.json"
-    mod.atomic_write_json(target, {"updated_at": 1000})
+    _write_private_json(target, {"updated_at": 1000})
     os.utime(target, (1100, 1100))
 
     problems = mod.collect_problems(_watchdog_args(), {"dispatcher"})
@@ -532,7 +540,7 @@ def test_fleet_sentinel_future_checked_at_is_reported_not_fresh(tmp_path: Path, 
     mod = _load_module()
     state = _private_state(monkeypatch, mod, tmp_path)
     heartbeat = state / "fleet-sentinel" / "sentinel-heartbeat.json"
-    mod.atomic_write_json(
+    _write_private_json(
         heartbeat,
         {
             "schemaVersion": 1,

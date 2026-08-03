@@ -60,6 +60,7 @@ def _write_state(mod, records: dict) -> None:
     path = mod.state_paths()["incident_state"]
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps({"version": 1, "openIncidents": records, "lastSentAt": {}}))
+    path.chmod(0o600)
 
 
 def _capture_sends(mod) -> list[str]:

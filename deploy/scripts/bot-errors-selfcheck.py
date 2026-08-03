@@ -25,6 +25,14 @@ from urllib.request import Request, urlopen
 
 sys.path.insert(0, str(Path(__file__).resolve().parent / "lib"))
 import sentinel_pin as sp  # noqa: E402
+from durable_json import (  # noqa: E402
+    durable_json_target,
+    observe_json,
+    operation_id,
+    publish_state_json,
+    require_advance,
+    require_all_advance,
+)
 
 
 SAFE_HEAL_CLASSES = {"drift", "manifest_missing"}
@@ -100,7 +108,19 @@ def default_config(root: Path, state_dir: Optional[Path] = None) -> SelfcheckCon
 
 
 def ensure_private_dir(path: Path) -> None:
-    path.mkdir(parents=True, exist_ok=True)
+    try:
+        path.lstat()
+    except FileNotFoundError:
+        path.mkdir(parents=True, exist_ok=True, mode=0o700)
+    else:
+        if path.is_symlink():
+            raise SelfcheckError(
+                f"refusing to use selfcheck state directory through symlink: {path}"
+            )
+        if not os.path.isdir(path):
+            raise SelfcheckError(
+                f"refusing to use selfcheck state directory over non-directory path: {path}"
+            )
     try:
         path.chmod(0o700)
     except OSError:
@@ -118,25 +138,12 @@ def fsync_parent(path: Path) -> None:
         os.close(fd)
 
 
-def atomic_write_json(path: Path, payload: dict) -> None:
+def _durable_target(path: Path):
     ensure_private_dir(path.parent)
-    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-    data = (json.dumps(payload, indent=2, sort_keys=True) + "\n").encode("utf-8")
-    fd = os.open(tmp, os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0), 0o600)
-    try:
-        with os.fdopen(fd, "wb") as handle:
-            handle.write(data)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(tmp, path)
-        path.chmod(0o600)
-        fsync_parent(path)
-    except BaseException:
-        try:
-            tmp.unlink()
-        except OSError:
-            pass
-        raise
+    return durable_json_target(
+        trusted_root=path.parent.resolve(strict=True),
+        relative_path=path.name,
+    )
 
 
 def read_json_object(path: Path, default: dict) -> dict:
@@ -837,7 +844,24 @@ def publish_heartbeat(config: SelfcheckConfig, deps: SelfcheckDeps, status: dict
     push_payload = central_telemetry_payload(status)
     result = {"path": str(config.heartbeat_path), "local": "pending", "push": {"attempted": False, "mode": "not_run"}}
     try:
-        atomic_write_json(config.heartbeat_path, local_payload)
+        target = _durable_target(config.heartbeat_path)
+        observation = observe_json(target)
+        publication_operation = operation_id(
+            target,
+            local_payload,
+            component="selfcheck.heartbeat",
+            predecessor=observation.version,
+        )
+        publication = publish_state_json(
+            target,
+            local_payload,
+            component="selfcheck.heartbeat",
+            operation_id=publication_operation,
+            expected=observation.version,
+            generation=(observation.version.generation or 0) + 1,
+        )
+        if not publication.advance_allowed:
+            require_advance(publication)
         result["local"] = "ok"
     except Exception as exc:  # noqa: BLE001 - heartbeat failure must not mask runtime status.
         result["local"] = f"write_failed:{type(exc).__name__}"
@@ -881,7 +905,24 @@ def publish_central_down_alert(config: SelfcheckConfig, status: dict) -> None:
     }
     result = {"active": True, "path": str(config.central_down_alert_path), "ok": False}
     try:
-        atomic_write_json(config.central_down_alert_path, payload)
+        target = _durable_target(config.central_down_alert_path)
+        observation = observe_json(target)
+        publication_operation = operation_id(
+            target,
+            payload,
+            component="selfcheck.central_down_alert",
+            predecessor=observation.version,
+        )
+        publication = publish_state_json(
+            target,
+            payload,
+            component="selfcheck.central_down_alert",
+            operation_id=publication_operation,
+            expected=observation.version,
+            generation=(observation.version.generation or 0) + 1,
+        )
+        if not publication.advance_allowed:
+            require_advance(publication)
         result["ok"] = True
     except Exception as exc:  # noqa: BLE001 - alert artifact failure must be visible without masking runtime status.
         result["error"] = f"{type(exc).__name__}: {exc}"[:300]
@@ -891,8 +932,41 @@ def publish_central_down_alert(config: SelfcheckConfig, status: dict) -> None:
 def finalize_status(config: SelfcheckConfig, deps: SelfcheckDeps, memory: dict, status: dict) -> dict:
     publish_central_down_alert(config, status)
     publish_heartbeat(config, deps, status)
-    atomic_write_json(config.memory_path, memory)
-    atomic_write_json(config.status_path, status)
+    memory_target = _durable_target(config.memory_path)
+    memory_observation = observe_json(memory_target)
+    memory_operation = operation_id(
+        memory_target,
+        memory,
+        component="selfcheck.memory",
+        predecessor=memory_observation.version,
+    )
+    memory_publication = publish_state_json(
+        memory_target,
+        memory,
+        component="selfcheck.memory",
+        operation_id=memory_operation,
+        expected=memory_observation.version,
+        generation=(memory_observation.version.generation or 0) + 1,
+    )
+    require_advance(memory_publication)
+
+    status_target = _durable_target(config.status_path)
+    status_observation = observe_json(status_target)
+    status_operation = operation_id(
+        status_target,
+        status,
+        component="selfcheck.status",
+        predecessor=status_observation.version,
+    )
+    status_publication = publish_state_json(
+        status_target,
+        status,
+        component="selfcheck.status",
+        operation_id=status_operation,
+        expected=status_observation.version,
+        generation=(status_observation.version.generation or 0) + 1,
+    )
+    require_all_advance([memory_publication, status_publication])
     return status
 
 
@@ -1138,7 +1212,23 @@ def main(argv: list[str]) -> int:
         except Exception as publish_exc:  # noqa: BLE001 - crash handler must not crash.
             status["problems"].append(f"heartbeat_publish_failed:{type(publish_exc).__name__}")
         try:
-            atomic_write_json(config.status_path, status)
+            target = _durable_target(config.status_path)
+            observation = observe_json(target)
+            publication_operation = operation_id(
+                target,
+                status,
+                component="selfcheck.error_status",
+                predecessor=observation.version,
+            )
+            publication = publish_state_json(
+                target,
+                status,
+                component="selfcheck.error_status",
+                operation_id=publication_operation,
+                expected=observation.version,
+                generation=(observation.version.generation or 0) + 1,
+            )
+            require_advance(publication)
         except Exception:
             pass
         print(json.dumps(status, sort_keys=True), file=sys.stderr)

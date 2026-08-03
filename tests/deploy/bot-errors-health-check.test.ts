@@ -34,9 +34,11 @@ function readOutboxBySource(): {
   fails: Array<Record<string, unknown>>;
 } {
   const outbox = join(tmpRoot, 'outbox');
-  const events = readdirSync(outbox).map(
-    (name) => JSON.parse(readFileSync(join(outbox, name), 'utf8')) as Record<string, unknown>,
-  );
+  const events = readdirSync(outbox)
+    .filter((name) => name.endsWith('.json'))
+    .map(
+      (name) => JSON.parse(readFileSync(join(outbox, name), 'utf8')) as Record<string, unknown>,
+    );
   const summaries = events.filter((event) => event.source === 'daily-health');
   const fails = events.filter((event) => event.source === 'daily-health-fail');
   expect(summaries).toHaveLength(1);

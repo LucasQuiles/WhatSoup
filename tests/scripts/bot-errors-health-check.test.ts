@@ -93,11 +93,15 @@ function readJsonl(path: string): Array<Record<string, unknown>> {
     .map((line) => JSON.parse(line) as Record<string, unknown>);
 }
 
+function dataEntries(directory: string): string[] {
+  return readdirSync(directory).filter((name) => name !== '.durable-json.lock');
+}
+
 function readOutboxBySource(outbox: string): {
   summary: Record<string, unknown>;
   fails: Array<Record<string, unknown>>;
 } {
-  const events = readdirSync(outbox).map(
+  const events = dataEntries(outbox).map(
     (name) => JSON.parse(readFileSync(join(outbox, name), 'utf8')) as Record<string, unknown>,
   );
   const summaries = events.filter((event) => event.source === 'daily-health');
@@ -181,7 +185,7 @@ describe('bot-errors-health-check', () => {
     const testRoot = join(writerTmp, 'whatsoup-vitest-bot-errors');
     const [workerDir] = readdirSync(testRoot);
     const outbox = join(testRoot, workerDir!, 'outbox');
-    const event = JSON.parse(readFileSync(join(outbox, readdirSync(outbox)[0]!), 'utf8')) as Record<string, any>;
+    const event = JSON.parse(readFileSync(join(outbox, dataEntries(outbox)[0]!), 'utf8')) as Record<string, any>;
     expect(event.runtime.provenance).toMatchObject({
       producer: 'python-health',
       test: true,
@@ -315,7 +319,7 @@ print(json.dumps(samples, sort_keys=True))
     });
 
     const outbox = join(tmpRoot, 'outbox');
-    const files = readdirSync(outbox);
+    const files = dataEntries(outbox);
     expect(files).toHaveLength(1);
     const event = JSON.parse(readFileSync(join(outbox, files[0]!), 'utf8')) as {
       severity: string;
@@ -360,7 +364,7 @@ print(json.dumps(samples, sort_keys=True))
     });
 
     const outbox = join(tmpRoot, 'outbox');
-    const files = readdirSync(outbox);
+    const files = dataEntries(outbox);
     expect(files).toHaveLength(1);
     const event = JSON.parse(readFileSync(join(outbox, files[0]!), 'utf8')) as {
       severity: string;
@@ -403,7 +407,7 @@ print(json.dumps(samples, sort_keys=True))
     });
 
     const outbox = join(tmpRoot, 'outbox');
-    const files = readdirSync(outbox);
+    const files = dataEntries(outbox);
     expect(files).toHaveLength(1);
     const event = JSON.parse(readFileSync(join(outbox, files[0]!), 'utf8')) as {
       severity: string;
@@ -445,7 +449,7 @@ print(json.dumps(samples, sort_keys=True))
     });
 
     const outbox = join(tmpRoot, 'outbox');
-    const files = readdirSync(outbox);
+    const files = dataEntries(outbox);
     expect(files).toHaveLength(1);
     const event = JSON.parse(readFileSync(join(outbox, files[0]!), 'utf8')) as {
       severity: string;
@@ -623,7 +627,7 @@ print(json.dumps(samples, sort_keys=True))
     });
 
     const outbox = join(tmpRoot, 'outbox');
-    const files = readdirSync(outbox);
+    const files = dataEntries(outbox);
     expect(files).toHaveLength(1);
     const event = JSON.parse(readFileSync(join(outbox, files[0]!), 'utf8')) as {
       eventType: string;
@@ -676,7 +680,7 @@ print(json.dumps(samples, sort_keys=True))
     });
 
     const outbox = join(tmpRoot, 'outbox');
-    const files = readdirSync(outbox);
+    const files = dataEntries(outbox);
     expect(files).toHaveLength(1);
     const event = JSON.parse(readFileSync(join(outbox, files[0]!), 'utf8')) as {
       severity: string;
@@ -718,7 +722,7 @@ print(json.dumps(samples, sort_keys=True))
     });
 
     const outbox = join(tmpRoot, 'outbox');
-    const files = readdirSync(outbox);
+    const files = dataEntries(outbox);
     expect(files).toHaveLength(1);
     const event = JSON.parse(readFileSync(join(outbox, files[0]!), 'utf8')) as {
       severity: string;
@@ -767,7 +771,7 @@ print(json.dumps(samples, sort_keys=True))
     });
 
     const outbox = join(tmpRoot, 'outbox');
-    const files = readdirSync(outbox);
+    const files = dataEntries(outbox);
     expect(files).toHaveLength(1);
     const event = JSON.parse(readFileSync(join(outbox, files[0]!), 'utf8')) as {
       severity: string;
@@ -910,7 +914,7 @@ print(json.dumps(samples, sort_keys=True))
     });
 
     const outbox = join(tmpRoot, 'outbox');
-    const files = readdirSync(outbox);
+    const files = dataEntries(outbox);
     expect(files).toHaveLength(1);
     const event = JSON.parse(readFileSync(join(outbox, files[0]!), 'utf8')) as {
       eventType: string;
@@ -954,7 +958,7 @@ print(json.dumps(samples, sort_keys=True))
     });
 
     const outbox = join(tmpRoot, 'outbox');
-    const files = readdirSync(outbox);
+    const files = dataEntries(outbox);
     expect(files).toHaveLength(1);
     const event = JSON.parse(readFileSync(join(outbox, files[0]!), 'utf8')) as {
       eventType: string;
@@ -1005,7 +1009,7 @@ print(json.dumps(samples, sort_keys=True))
     });
 
     const outbox = join(tmpRoot, 'outbox');
-    const files = readdirSync(outbox);
+    const files = dataEntries(outbox);
     expect(files).toHaveLength(1);
     const event = JSON.parse(readFileSync(join(outbox, files[0]!), 'utf8')) as {
       severity: string;
@@ -1064,7 +1068,7 @@ print(json.dumps(samples, sort_keys=True))
     });
 
     const outbox = join(tmpRoot, 'outbox');
-    const files = readdirSync(outbox);
+    const files = dataEntries(outbox);
     expect(files).toHaveLength(1);
     const event = JSON.parse(readFileSync(join(outbox, files[0]!), 'utf8')) as {
       eventType: string;
@@ -1130,7 +1134,7 @@ print(json.dumps(samples, sort_keys=True))
     });
 
     const outbox = join(tmpRoot, 'outbox');
-    const files = readdirSync(outbox);
+    const files = dataEntries(outbox);
     expect(files).toHaveLength(1);
     const event = JSON.parse(readFileSync(join(outbox, files[0]!), 'utf8')) as {
       severity: string;
@@ -1173,7 +1177,7 @@ print(json.dumps(samples, sort_keys=True))
     });
 
     const outbox = join(tmpRoot, 'outbox');
-    const events = readdirSync(outbox)
+    const events = dataEntries(outbox)
       .map((file) => JSON.parse(readFileSync(join(outbox, file), 'utf8')) as {
         eventType: string;
         severity: string;
@@ -1220,7 +1224,7 @@ print(json.dumps(samples, sort_keys=True))
       });
 
       const outbox = join(tmpRoot, 'outbox');
-      const files = readdirSync(outbox);
+      const files = dataEntries(outbox);
       expect(files).toHaveLength(1);
       const event = JSON.parse(readFileSync(join(outbox, files[0]!), 'utf8')) as {
         severity: string;
@@ -1290,7 +1294,7 @@ print(json.dumps(samples, sort_keys=True))
     });
 
     const outbox = join(tmpRoot, 'outbox');
-    const files = readdirSync(outbox);
+    const files = dataEntries(outbox);
     expect(files).toHaveLength(1);
     const event = JSON.parse(readFileSync(join(outbox, files[0]!), 'utf8')) as {
       severity: string;
@@ -1352,7 +1356,7 @@ print(json.dumps(samples, sort_keys=True))
     });
 
     const outbox = join(tmpRoot, 'outbox');
-    const files = readdirSync(outbox);
+    const files = dataEntries(outbox);
     expect(files).toHaveLength(1);
     const event = JSON.parse(readFileSync(join(outbox, files[0]!), 'utf8')) as {
       severity: string;
@@ -1403,7 +1407,7 @@ print(json.dumps(samples, sort_keys=True))
     });
 
     const outbox = join(tmpRoot, 'outbox');
-    const files = readdirSync(outbox);
+    const files = dataEntries(outbox);
     expect(files).toHaveLength(1);
     const event = JSON.parse(readFileSync(join(outbox, files[0]!), 'utf8')) as {
       severity: string;
@@ -1447,7 +1451,7 @@ print(json.dumps(samples, sort_keys=True))
     });
 
     const outbox = join(tmpRoot, 'outbox');
-    const files = readdirSync(outbox);
+    const files = dataEntries(outbox);
     expect(files).toHaveLength(1);
     const event = JSON.parse(readFileSync(join(outbox, files[0]!), 'utf8')) as {
       severity: string;
@@ -1484,7 +1488,7 @@ print(json.dumps(samples, sort_keys=True))
     });
 
     const outbox = join(tmpRoot, 'outbox');
-    const files = readdirSync(outbox);
+    const files = dataEntries(outbox);
     expect(files).toHaveLength(1);
     const event = JSON.parse(readFileSync(join(outbox, files[0]!), 'utf8')) as {
       severity: string;
@@ -1524,7 +1528,7 @@ print(json.dumps(samples, sort_keys=True))
     });
 
     const outbox = join(tmpRoot, 'outbox');
-    const files = readdirSync(outbox);
+    const files = dataEntries(outbox);
     expect(files).toHaveLength(1);
     const event = JSON.parse(readFileSync(join(outbox, files[0]!), 'utf8')) as {
       severity: string;
@@ -1648,7 +1652,7 @@ print(json.dumps(samples, sort_keys=True))
     });
 
     const outbox = join(tmpRoot, 'outbox');
-    const files = readdirSync(outbox);
+    const files = dataEntries(outbox);
     expect(files).toHaveLength(1);
     const event = JSON.parse(readFileSync(join(outbox, files[0]!), 'utf8')) as {
       severity: string;
@@ -1699,7 +1703,7 @@ print(json.dumps(samples, sort_keys=True))
     });
 
     const outbox = join(tmpRoot, 'outbox');
-    const files = readdirSync(outbox);
+    const files = dataEntries(outbox);
     expect(files).toHaveLength(1);
     const event = JSON.parse(readFileSync(join(outbox, files[0]!), 'utf8')) as {
       severity: string;
@@ -1755,7 +1759,7 @@ print(json.dumps(samples, sort_keys=True))
     });
 
     const outbox = join(tmpRoot, 'outbox');
-    const files = readdirSync(outbox);
+    const files = dataEntries(outbox);
     expect(files).toHaveLength(1);
     const event = JSON.parse(readFileSync(join(outbox, files[0]!), 'utf8')) as {
       severity: string;
@@ -1805,7 +1809,7 @@ print(json.dumps(samples, sort_keys=True))
     });
 
     const outbox = join(tmpRoot, 'outbox');
-    const files = readdirSync(outbox);
+    const files = dataEntries(outbox);
     expect(files).toHaveLength(1);
     const event = JSON.parse(readFileSync(join(outbox, files[0]!), 'utf8')) as {
       severity: string;
@@ -1888,7 +1892,7 @@ print(json.dumps({"result": m.json_rpc(${JSON.stringify(socket)}, "tools/list", 
     });
 
     const outbox = join(tmpRoot, 'outbox');
-    const files = readdirSync(outbox);
+    const files = dataEntries(outbox);
     expect(files).toHaveLength(1);
     const event = JSON.parse(readFileSync(join(outbox, files[0]!), 'utf8')) as {
       severity: string;
@@ -1930,7 +1934,7 @@ print(json.dumps({"result": m.json_rpc(${JSON.stringify(socket)}, "tools/list", 
     });
 
     const outbox = join(tmpRoot, 'outbox');
-    const files = readdirSync(outbox);
+    const files = dataEntries(outbox);
     expect(files).toHaveLength(1);
     const event = JSON.parse(readFileSync(join(outbox, files[0]!), 'utf8')) as {
       severity: string;
@@ -1974,7 +1978,7 @@ print(json.dumps({"result": m.json_rpc(${JSON.stringify(socket)}, "tools/list", 
     });
 
     const outbox = join(tmpRoot, 'outbox');
-    const files = readdirSync(outbox);
+    const files = dataEntries(outbox);
     expect(files).toHaveLength(1);
     const event = JSON.parse(readFileSync(join(outbox, files[0]!), 'utf8')) as {
       severity: string;
@@ -2019,7 +2023,7 @@ print(json.dumps({"result": m.json_rpc(${JSON.stringify(socket)}, "tools/list", 
     });
 
     const outbox = join(tmpRoot, 'outbox');
-    const files = readdirSync(outbox);
+    const files = dataEntries(outbox);
     expect(files).toHaveLength(1);
     const event = JSON.parse(readFileSync(join(outbox, files[0]!), 'utf8')) as {
       severity: string;
@@ -2076,7 +2080,7 @@ print(json.dumps({"result": m.json_rpc(${JSON.stringify(socket)}, "tools/list", 
     });
 
     let outbox = join(tmpRoot, 'outbox');
-    let files = readdirSync(outbox);
+    let files = dataEntries(outbox);
     let event = JSON.parse(readFileSync(join(outbox, files[0]!), 'utf8')) as {
       severity: string;
       evidence: string;
@@ -2121,7 +2125,7 @@ print(json.dumps({"result": m.json_rpc(${JSON.stringify(socket)}, "tools/list", 
     });
 
     outbox = join(tmpRoot, 'outbox');
-    files = readdirSync(outbox);
+    files = dataEntries(outbox);
     event = JSON.parse(readFileSync(join(outbox, files[0]!), 'utf8')) as {
       severity: string;
       evidence: string;
@@ -2163,7 +2167,7 @@ print(json.dumps({"result": m.json_rpc(${JSON.stringify(socket)}, "tools/list", 
     });
 
     const outbox = join(tmpRoot, 'outbox');
-    const files = readdirSync(outbox);
+    const files = dataEntries(outbox);
     expect(files).toHaveLength(1);
     const event = JSON.parse(readFileSync(join(outbox, files[0]!), 'utf8')) as {
       severity: string;
@@ -2281,7 +2285,7 @@ print(json.dumps({"result": m.json_rpc(${JSON.stringify(socket)}, "tools/list", 
     });
 
     const outbox = join(tmpRoot, 'outbox');
-    const files = readdirSync(outbox);
+    const files = dataEntries(outbox);
     expect(files).toHaveLength(1);
     const event = JSON.parse(readFileSync(join(outbox, files[0]!), 'utf8')) as {
       severity: string;
@@ -2318,7 +2322,7 @@ print(json.dumps({"result": m.json_rpc(${JSON.stringify(socket)}, "tools/list", 
     });
 
     const outbox = join(tmpRoot, 'outbox');
-    const files = readdirSync(outbox);
+    const files = dataEntries(outbox);
     expect(files).toHaveLength(1);
     const event = JSON.parse(readFileSync(join(outbox, files[0]!), 'utf8')) as {
       diagnostics: { logHints: string[] };
@@ -2427,7 +2431,7 @@ with patch.object(m.subprocess, "run", side_effect=failures):
     });
 
     const outbox = join(tmpRoot, 'outbox');
-    const files = readdirSync(outbox);
+    const files = dataEntries(outbox);
     expect(files).toHaveLength(1);
     const event = JSON.parse(readFileSync(join(outbox, files[0]!), 'utf8')) as {
       diagnostics: { logHints: string[] };
@@ -2493,7 +2497,7 @@ print(m.probe_health(9092))
     });
 
     const outbox = join(tmpRoot, 'outbox');
-    const files = readdirSync(outbox);
+    const files = dataEntries(outbox);
     expect(files).toHaveLength(1);
     const event = JSON.parse(readFileSync(join(outbox, files[0]!), 'utf8')) as {
       severity: string;
@@ -2649,7 +2653,7 @@ print(m.probe_health(9092))
     });
 
     const outbox = join(tmpRoot, 'outbox');
-    const files = readdirSync(outbox);
+    const files = dataEntries(outbox);
     expect(files).toHaveLength(1);
     const event = JSON.parse(readFileSync(join(outbox, files[0]!), 'utf8')) as {
       severity: string;
@@ -2700,7 +2704,7 @@ print(m.probe_health(9092))
     });
 
     const outbox = join(tmpRoot, 'outbox');
-    const files = readdirSync(outbox);
+    const files = dataEntries(outbox);
     expect(files).toHaveLength(1);
     const event = JSON.parse(readFileSync(join(outbox, files[0]!), 'utf8')) as {
       severity: string;
@@ -2761,7 +2765,7 @@ print(m.probe_health(9092))
     });
 
     const outbox = join(tmpRoot, 'outbox');
-    const files = readdirSync(outbox);
+    const files = dataEntries(outbox);
     expect(files).toHaveLength(1);
     const event = JSON.parse(readFileSync(join(outbox, files[0]!), 'utf8')) as {
       severity: string;
@@ -2827,7 +2831,7 @@ print(m.probe_health(9092))
     });
 
     const outbox = join(tmpRoot, 'outbox');
-    const files = readdirSync(outbox);
+    const files = dataEntries(outbox);
     expect(files).toHaveLength(1);
     const event = JSON.parse(readFileSync(join(outbox, files[0]!), 'utf8')) as {
       severity: string;
@@ -2883,7 +2887,7 @@ print(m.probe_health(9092))
     });
 
     const outbox = join(tmpRoot, 'outbox');
-    const files = readdirSync(outbox);
+    const files = dataEntries(outbox);
     expect(files).toHaveLength(1);
     const event = JSON.parse(readFileSync(join(outbox, files[0]!), 'utf8')) as {
       criticalAsset?: { failure?: { code?: string } };
@@ -3207,7 +3211,7 @@ print(m.probe_health(9092))
     });
 
     const outbox = join(tmpRoot, 'outbox');
-    const files = readdirSync(outbox);
+    const files = dataEntries(outbox);
     expect(files).toHaveLength(1);
     const event = JSON.parse(readFileSync(join(outbox, files[0]!), 'utf8')) as {
       severity: string;
@@ -3274,7 +3278,7 @@ print(m.probe_health(9092))
     });
 
     const outbox = join(tmpRoot, 'outbox');
-    const files = readdirSync(outbox);
+    const files = dataEntries(outbox);
     expect(files).toHaveLength(1);
     const event = JSON.parse(readFileSync(join(outbox, files[0]!), 'utf8')) as {
       severity: string;
@@ -3340,7 +3344,7 @@ print(m.probe_health(9092))
     });
 
     const outbox = join(tmpRoot, 'outbox');
-    const files = readdirSync(outbox);
+    const files = dataEntries(outbox);
     expect(files).toHaveLength(1);
     const event = JSON.parse(readFileSync(join(outbox, files[0]!), 'utf8')) as {
       severity: string;
@@ -3418,7 +3422,7 @@ print(m.probe_health(9092))
     });
 
     const outbox = join(tmpRoot, 'outbox');
-    const files = readdirSync(outbox);
+    const files = dataEntries(outbox);
     expect(files).toHaveLength(1);
     const event = JSON.parse(readFileSync(join(outbox, files[0]!), 'utf8')) as {
       eventType: string;
@@ -3588,7 +3592,7 @@ print(m.probe_health(9092))
     });
 
     const outbox = join(tmpRoot, 'outbox');
-    const files = readdirSync(outbox);
+    const files = dataEntries(outbox);
     expect(files).toHaveLength(1);
     const event = JSON.parse(readFileSync(join(outbox, files[0]!), 'utf8')) as {
       eventType: string;
@@ -3645,7 +3649,7 @@ print(m.probe_health(9092))
     });
 
     const outbox = join(tmpRoot, 'outbox');
-    const files = readdirSync(outbox);
+    const files = dataEntries(outbox);
     expect(files).toHaveLength(1);
     const event = JSON.parse(readFileSync(join(outbox, files[0]!), 'utf8')) as {
       eventType: string;
@@ -3815,7 +3819,7 @@ print(m.probe_health(9092))
     });
 
     const outbox = join(tmpRoot, 'outbox');
-    const files = readdirSync(outbox);
+    const files = dataEntries(outbox);
     expect(files).toHaveLength(1);
     const event = JSON.parse(readFileSync(join(outbox, files[0]!), 'utf8')) as {
       eventType: string;
@@ -4336,7 +4340,7 @@ print(m.probe_health(9092))
     });
 
     const outbox = join(tmpRoot, 'outbox');
-    const files = readdirSync(outbox);
+    const files = dataEntries(outbox);
     expect(files).toHaveLength(1);
     const event = JSON.parse(readFileSync(join(outbox, files[0]!), 'utf8')) as {
       severity: string;
@@ -4381,7 +4385,7 @@ print(m.probe_health(9092))
     });
 
     const outbox = join(tmpRoot, 'outbox');
-    const files = readdirSync(outbox);
+    const files = dataEntries(outbox);
     expect(files).toHaveLength(1);
     const event = JSON.parse(readFileSync(join(outbox, files[0]!), 'utf8')) as {
       severity: string;
@@ -4479,7 +4483,7 @@ print(m.probe_health(9092))
     });
 
     const outbox = join(tmpRoot, 'outbox');
-    const files = readdirSync(outbox);
+    const files = dataEntries(outbox);
     expect(files).toHaveLength(1);
     const event = JSON.parse(readFileSync(join(outbox, files[0]!), 'utf8')) as {
       severity: string;
@@ -4515,7 +4519,7 @@ print(m.probe_health(9092))
     });
 
     const outbox = join(tmpRoot, 'outbox');
-    const files = readdirSync(outbox);
+    const files = dataEntries(outbox);
     expect(files).toHaveLength(1);
     const event = JSON.parse(readFileSync(join(outbox, files[0]!), 'utf8')) as {
       severity: string;
@@ -4552,7 +4556,7 @@ print(m.probe_health(9092))
     });
 
     const outbox = join(tmpRoot, 'outbox');
-    const files = readdirSync(outbox);
+    const files = dataEntries(outbox);
     expect(files).toHaveLength(1);
     const event = JSON.parse(readFileSync(join(outbox, files[0]!), 'utf8')) as {
       severity: string;
@@ -4626,7 +4630,7 @@ print(m.probe_health(9092))
     });
 
     const outbox = join(tmpRoot, 'outbox');
-    const files = readdirSync(outbox);
+    const files = dataEntries(outbox);
     expect(files).toHaveLength(1);
     const event = JSON.parse(readFileSync(join(outbox, files[0]!), 'utf8')) as {
       severity: string;
@@ -4705,7 +4709,7 @@ print(m.probe_health(9092))
     });
 
     const outbox = join(tmpRoot, 'outbox');
-    const files = readdirSync(outbox);
+    const files = dataEntries(outbox);
     expect(files).toHaveLength(1);
     const event = JSON.parse(readFileSync(join(outbox, files[0]!), 'utf8')) as {
       severity: string;
@@ -5014,7 +5018,7 @@ print(m.probe_health(9092))
     });
 
     const outbox = join(tmpRoot, 'outbox');
-    const files = readdirSync(outbox);
+    const files = dataEntries(outbox);
     expect(files).toHaveLength(1);
     const event = JSON.parse(readFileSync(join(outbox, files[0]!), 'utf8')) as {
       severity: string;
@@ -5326,7 +5330,7 @@ print(m.probe_health(9092))
     });
 
     const outbox = join(tmpRoot, 'outbox');
-    const files = readdirSync(outbox);
+    const files = dataEntries(outbox);
     expect(files).toHaveLength(1);
     const event = JSON.parse(readFileSync(join(outbox, files[0]!), 'utf8')) as {
       severity: string;
@@ -5532,7 +5536,7 @@ print(m.probe_health(9092))
     });
 
     const outbox = join(tmpRoot, 'outbox');
-    const files = readdirSync(outbox);
+    const files = dataEntries(outbox);
     expect(files).toHaveLength(1);
     const event = JSON.parse(readFileSync(join(outbox, files[0]!), 'utf8')) as {
       severity: string;
@@ -6055,7 +6059,7 @@ print(m.probe_health(9092))
     });
 
     const outbox = join(tmpRoot, 'outbox');
-    const files = readdirSync(outbox);
+    const files = dataEntries(outbox);
     expect(files).toHaveLength(1);
     const event = JSON.parse(readFileSync(join(outbox, files[0]!), 'utf8')) as {
       severity: string;
@@ -6178,7 +6182,7 @@ print(m.probe_health(9092))
     });
 
     const outbox = join(tmpRoot, 'outbox');
-    const files = readdirSync(outbox);
+    const files = dataEntries(outbox);
     expect(files).toHaveLength(1);
     const event = JSON.parse(readFileSync(join(outbox, files[0]!), 'utf8')) as {
       severity: string;
@@ -6313,7 +6317,7 @@ print(m.probe_health(9092))
     });
 
     const outbox = join(tmpRoot, 'outbox');
-    const files = readdirSync(outbox);
+    const files = dataEntries(outbox);
     expect(files).toHaveLength(1);
     const event = JSON.parse(readFileSync(join(outbox, files[0]!), 'utf8')) as {
       severity: string;
@@ -6441,7 +6445,7 @@ print(m.probe_health(9092))
     });
 
     const outbox = join(tmpRoot, 'outbox');
-    const files = readdirSync(outbox);
+    const files = dataEntries(outbox);
     expect(files).toHaveLength(1);
     const event = JSON.parse(readFileSync(join(outbox, files[0]!), 'utf8')) as {
       severity: string;
@@ -6601,7 +6605,7 @@ print(m.probe_health(9092))
     });
 
     const outbox = join(tmpRoot, 'outbox');
-    const files = readdirSync(outbox);
+    const files = dataEntries(outbox);
     expect(files).toHaveLength(1);
     const event = JSON.parse(readFileSync(join(outbox, files[0]!), 'utf8')) as {
       severity: string;
@@ -6695,7 +6699,7 @@ print(m.probe_health(9092))
     });
 
     const outbox = join(tmpRoot, 'outbox');
-    const files = readdirSync(outbox);
+    const files = dataEntries(outbox);
     expect(files).toHaveLength(1);
     const event = JSON.parse(readFileSync(join(outbox, files[0]!), 'utf8')) as {
       severity: string;
@@ -6784,7 +6788,7 @@ print(m.probe_health(9092))
     });
 
     const outbox = join(tmpRoot, 'outbox');
-    const files = readdirSync(outbox);
+    const files = dataEntries(outbox);
     expect(files).toHaveLength(1);
     const event = JSON.parse(readFileSync(join(outbox, files[0]!), 'utf8')) as {
       severity: string;
@@ -6858,7 +6862,7 @@ print(m.probe_health(9092))
     });
 
     const outbox = join(tmpRoot, 'outbox');
-    const files = readdirSync(outbox);
+    const files = dataEntries(outbox);
     expect(files).toHaveLength(1);
     const event = JSON.parse(readFileSync(join(outbox, files[0]!), 'utf8')) as {
       severity: string;
@@ -6902,7 +6906,7 @@ print(m.probe_health(9092))
       },
     });
 
-    const files = readdirSync(outbox).filter((file) => file !== 'stuck.json');
+    const files = dataEntries(outbox).filter((file) => file !== 'stuck.json');
     expect(files).toHaveLength(1);
     const event = JSON.parse(readFileSync(join(outbox, files[0]!), 'utf8')) as {
       severity: string;
@@ -6942,7 +6946,7 @@ print(m.probe_health(9092))
     });
 
     const outbox = join(tmpRoot, 'outbox');
-    const files = readdirSync(outbox);
+    const files = dataEntries(outbox);
     expect(files).toHaveLength(1);
     const event = JSON.parse(readFileSync(join(outbox, files[0]!), 'utf8')) as {
       severity: string;

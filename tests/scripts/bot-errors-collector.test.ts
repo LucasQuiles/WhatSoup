@@ -5,6 +5,7 @@
  * test-integrity: source-string-ok
  */
 import { spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -217,14 +218,29 @@ function collectorEnv(overrides: Record<string, string>) {
   return { ...env, ...overrides };
 }
 
-function runAtomicWrite(targetPath: string) {
+function runDurableWrite(targetPath: string) {
   return spawnSync('python3', ['-c', `
 import importlib.util
 from pathlib import Path
 spec = importlib.util.spec_from_file_location("bot_errors_collector", "deploy/scripts/bot-errors-collector.py")
 m = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(m)
-m.atomic_write_json(Path(${JSON.stringify(targetPath)}), {"ok": True})
+path = Path(${JSON.stringify(targetPath)})
+target = m._durable_target(path)
+absent = m.JsonVersion(False, None, None, None)
+payload = {"ok": True}
+publication = m.publish_event_json(
+    target,
+    payload,
+    component="collector.test",
+    operation_id=m.operation_id(
+        target,
+        payload,
+        component="collector.test",
+        predecessor=absent,
+    ),
+)
+m.require_advance(publication)
 `], {
     cwd: process.cwd(),
     encoding: 'utf8',
@@ -341,24 +357,24 @@ afterEach(() => {
 });
 
 describe('bot-errors-collector', () => {
-  it('asserts the atomic-write parent is private before creating a temp file', () => {
+  it('asserts the durable-write parent is private before publication', () => {
     tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-collector-'));
     const realParent = join(tmpRoot, 'real-outbox');
     const linkedParent = join(tmpRoot, 'linked-outbox');
     mkdirSync(realParent, { recursive: true, mode: 0o700 });
     symlinkSync(realParent, linkedParent, 'dir');
 
-    const result = runAtomicWrite(join(linkedParent, 'event.json'));
+    const result = runDurableWrite(join(linkedParent, 'event.json'));
 
     expect(result.status).not.toBe(0);
     expect(result.stderr).toContain('refusing to use private directory through symlink');
     expect(readdirSync(realParent)).toEqual([]);
   });
 
-  it('creates a missing atomic-write parent with private permissions', () => {
+  it('creates a missing durable-write parent with private permissions', () => {
     tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-collector-'));
     const parent = join(tmpRoot, 'new-outbox');
-    const result = runAtomicWrite(join(parent, 'event.json'));
+    const result = runDurableWrite(join(parent, 'event.json'));
 
     expect(result.status).toBe(0);
     expect(statSync(parent).mode & 0o777).toBe(0o700);
@@ -728,7 +744,9 @@ describe('bot-errors-collector', () => {
     expect(result.status).toBe(0);
     expect(JSON.parse(result.stdout)).toMatchObject({ writefailHarvested: 1, writefailPoison: 1 });
     expect(readdirSync(join(tmpRoot, 'writefail')).filter((file) => file.endsWith('.writefail'))).toHaveLength(1);
-    expect(readdirSync(join(tmpRoot, 'writefail-harvest-quarantine'))).toHaveLength(1);
+    expect(
+      readdirSync(join(tmpRoot, 'writefail-harvest-quarantine')).filter((file) => file.endsWith('.poison')),
+    ).toHaveLength(1);
     const logEntries = readFileSync(join(tmpRoot, 'logs', 'collector.jsonl'), 'utf8')
       .trim()
       .split('\n')
@@ -1127,6 +1145,66 @@ exec(collector.REMOTE_WRITEFAIL_ACK_SCRIPT, {"__name__": "__main__"})
     expect(readdirSync(relayedDir).filter((file) => file.includes('.tmp'))).toHaveLength(0);
   });
 
+  it('fails closed on a remote terminal parent barrier and reconciles on retry', () => {
+    tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-collector-'));
+    const remoteRoot = join(tmpRoot, 'remote');
+    const claimDir = join(remoteRoot, 'relay-writefail-processing');
+    const targetDir = join(remoteRoot, 'writefail-relayed');
+    mkdirSync(claimDir, { recursive: true, mode: 0o700 });
+    const claim = join(claimDir, 'parent-barrier.writefail.123.relay');
+    writeFileSync(claim, 'parent barrier payload\n', { mode: 0o600 });
+    const input = (failBarrier: boolean) => `
+import errno
+import importlib.util
+import os
+import sys
+from pathlib import Path
+
+spec = importlib.util.spec_from_file_location("collector", "deploy/scripts/bot-errors-collector.py")
+collector = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(collector)
+claim = Path(${JSON.stringify(claim)})
+root = Path(${JSON.stringify(remoteRoot)})
+target_dir = Path(${JSON.stringify(targetDir)})
+original_replace = os.replace
+original_open = os.open
+
+def fake_replace(src, dst):
+    if str(src) == str(claim):
+        raise OSError(errno.EXDEV, "cross-device link")
+    return original_replace(src, dst)
+
+def fake_open(path, flags, *args, **kwargs):
+    if ${failBarrier ? 'True' : 'False'} and str(path) == str(target_dir) and flags & os.O_DIRECTORY:
+        raise OSError(errno.EIO, "synthetic parent barrier failure")
+    return original_open(path, flags, *args, **kwargs)
+
+os.replace = fake_replace
+if ${failBarrier ? 'True' : 'False'}:
+    os.open = fake_open
+sys.argv = ["ack-test", str(claim), str(root), "ack"]
+exec(collector.REMOTE_WRITEFAIL_ACK_SCRIPT, {"__name__": "__main__"})
+`;
+
+    const first = spawnSync('python3', ['-'], {
+      cwd: process.cwd(),
+      input: input(true),
+      encoding: 'utf8',
+    });
+    expect(first.status).not.toBe(0);
+    expect(existsSync(claim)).toBe(true);
+    expect(readdirSync(targetDir).filter((file) => file.endsWith('.relayed'))).toHaveLength(1);
+
+    const second = spawnSync('python3', ['-'], {
+      cwd: process.cwd(),
+      input: input(false),
+      encoding: 'utf8',
+    });
+    expect(second.status, second.stderr).toBe(0);
+    expect(existsSync(claim)).toBe(false);
+    expect(readdirSync(targetDir).filter((file) => file.endsWith('.relayed'))).toHaveLength(1);
+  });
+
   it('does not create duplicate terminal archives when unlink fails after EXDEV promotion', () => {
     tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-collector-'));
     const remoteRoot = join(tmpRoot, 'remote');
@@ -1177,6 +1255,115 @@ exec(collector.REMOTE_WRITEFAIL_ACK_SCRIPT, {"__name__": "__main__"})
     expect(existsSync(claim)).toBe(true);
     expect(readdirSync(relayedDir).filter((file) => file.endsWith('.relayed'))).toHaveLength(1);
     expect(readdirSync(relayedDir).filter((file) => file.includes('.tmp'))).toHaveLength(0);
+  });
+
+  it('does not accept an acknowledgement journal targeting a file outside its terminal directory', () => {
+    tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-collector-'));
+    const remoteRoot = join(tmpRoot, 'remote');
+    const claimDir = join(remoteRoot, 'relay-writefail-processing');
+    const targetDir = join(remoteRoot, 'writefail-relayed');
+    const outsideDir = join(tmpRoot, 'outside');
+    mkdirSync(claimDir, { recursive: true, mode: 0o700 });
+    mkdirSync(targetDir, { recursive: true, mode: 0o700 });
+    mkdirSync(outsideDir, { recursive: true, mode: 0o700 });
+    const claim = join(claimDir, 'outside-journal.writefail.123.relay');
+    const payload = 'outside journal payload\n';
+    writeFileSync(claim, payload, { mode: 0o600 });
+    const digest = createHash('sha256').update(payload).digest('hex');
+    const outsideTarget = join(outsideDir, 'matching.relayed');
+    writeFileSync(outsideTarget, payload, { mode: 0o600 });
+    const journal = join(targetDir, `.outside-journal.writefail.123.relay.${digest}.ack.json`);
+    writeFileSync(
+      journal,
+      `${JSON.stringify({
+        claim,
+        payloadSha256: digest,
+        target: outsideTarget,
+        createdAt: 1,
+      })}\n`,
+      { mode: 0o600 },
+    );
+
+    const result = spawnSync('python3', ['-'], {
+      cwd: process.cwd(),
+      input: `
+import importlib.util
+import sys
+
+spec = importlib.util.spec_from_file_location("collector", "deploy/scripts/bot-errors-collector.py")
+collector = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(collector)
+sys.argv = ["ack-test", ${JSON.stringify(claim)}, ${JSON.stringify(remoteRoot)}, "ack"]
+exec(collector.REMOTE_WRITEFAIL_ACK_SCRIPT, {"__name__": "__main__"})
+`,
+      encoding: 'utf8',
+    });
+
+    expect(result.status, result.stderr).toBe(0);
+    expect(existsSync(claim)).toBe(false);
+    expect(readdirSync(targetDir).filter((file) => file.endsWith('.relayed'))).toHaveLength(1);
+    expect(readFileSync(outsideTarget, 'utf8')).toBe(payload);
+  });
+
+  it('rejects a symlink substituted for an EXDEV terminal target', () => {
+    tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-collector-'));
+    const remoteRoot = join(tmpRoot, 'remote');
+    const remoteHome = join(tmpRoot, 'remote-home');
+    const remoteTmp = join(tmpRoot, 'remote-tmp');
+    const claimDir = join(remoteRoot, 'relay-writefail-processing');
+    const targetDir = join(remoteRoot, 'writefail-relayed');
+    mkdirSync(claimDir, { recursive: true, mode: 0o700 });
+    mkdirSync(targetDir, { recursive: true, mode: 0o700 });
+    mkdirSync(remoteHome, { recursive: true, mode: 0o700 });
+    mkdirSync(remoteTmp, { recursive: true, mode: 0o700 });
+    const claim = join(claimDir, 'symlink-target.writefail.123.relay');
+    const payload = 'symlink target payload\n';
+    writeFileSync(claim, payload, { mode: 0o600 });
+    const digest = createHash('sha256').update(payload).digest('hex');
+    const outsideTarget = join(tmpRoot, 'outside-matching.relayed');
+    writeFileSync(outsideTarget, payload, { mode: 0o600 });
+    const substitutedTarget = join(
+      targetDir,
+      `symlink-target.writefail.123.relay.${digest}.relayed`,
+    );
+    symlinkSync(outsideTarget, substitutedTarget);
+
+    const result = spawnSync('python3', ['-'], {
+      cwd: process.cwd(),
+      env: collectorEnv({ HOME: remoteHome, TMPDIR: remoteTmp }),
+      input: `
+import errno
+import importlib.util
+import os
+import sys
+from pathlib import Path
+
+spec = importlib.util.spec_from_file_location("collector", "deploy/scripts/bot-errors-collector.py")
+collector = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(collector)
+claim = Path(${JSON.stringify(claim)})
+original_replace = os.replace
+
+def fake_replace(src, dst):
+    if str(src) == str(claim):
+        raise OSError(errno.EXDEV, "cross-device link")
+    return original_replace(src, dst)
+
+os.replace = fake_replace
+sys.argv = ["ack-test", str(claim), ${JSON.stringify(remoteRoot)}, "ack"]
+exec(collector.REMOTE_WRITEFAIL_ACK_SCRIPT, {"__name__": "__main__"})
+`,
+      encoding: 'utf8',
+    });
+
+    expect(result.status, result.stderr).toBe(0);
+    expect(existsSync(claim)).toBe(false);
+    expect(
+      readdirSync(targetDir).filter((file) => file.endsWith('.ack.json')),
+    ).toHaveLength(0);
+    const fallbackDir = join(remoteHome, '.bot-errors-writefail-relayed');
+    expect(readdirSync(fallbackDir).filter((file) => file.endsWith('.relayed'))).toHaveLength(1);
+    expect(readFileSync(outsideTarget, 'utf8')).toBe(payload);
   });
 
   it('preserves a remote writefail claim when no terminal ack archive is writable', () => {

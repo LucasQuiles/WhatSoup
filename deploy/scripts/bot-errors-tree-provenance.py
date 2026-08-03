@@ -73,6 +73,13 @@ if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
 from lib.bot_errors_envelope import new_event_fields
+from lib.durable_json import (
+    JsonVersion,
+    durable_json_target,
+    operation_id,
+    publish_event_json,
+    require_advance,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -498,7 +505,15 @@ def _resolve_outbox_dir() -> Path:
 
 
 def _ensure_private_dir(path: Path) -> None:
-    path.mkdir(parents=True, exist_ok=True)
+    try:
+        path.lstat()
+    except FileNotFoundError:
+        path.mkdir(parents=True, exist_ok=True, mode=0o700)
+    else:
+        if path.is_symlink():
+            raise RuntimeError("refusing symlinked private publication directory")
+        if not path.is_dir():
+            raise RuntimeError("private publication path is not a directory")
     try:
         path.chmod(0o700)
     except OSError:
@@ -556,13 +571,24 @@ def emit_outbox_event(event: dict[str, Any]) -> Path:
     _ensure_private_dir(outbox)
     stamp = event["createdAt"].replace(":", "").replace("-", "")
     path = outbox / f"{stamp}.{event['id']}.json"
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(json.dumps(event, sort_keys=True, indent=2) + "\n", encoding="utf-8")
-    try:
-        tmp.chmod(0o600)
-    except OSError:
-        pass
-    os.replace(tmp, path)
+    publication_target = durable_json_target(
+        trusted_root=path.parent.resolve(strict=True),
+        relative_path=path.name,
+    )
+    absent = JsonVersion(False, None, None, None)
+    publication_operation = operation_id(
+        publication_target,
+        event,
+        component="tree_provenance.outbox_event",
+        predecessor=absent,
+    )
+    publication = publish_event_json(
+        publication_target,
+        event,
+        component="tree_provenance.outbox_event",
+        operation_id=publication_operation,
+    )
+    require_advance(publication)
     return path
 
 

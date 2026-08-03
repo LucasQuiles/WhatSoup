@@ -6,7 +6,7 @@
   "files": [
     {
       "path": "deploy/scripts/bot-errors-collector.py",
-      "sha256": "7a983fa3f742f275c7bb22aa8c9b4e2f709610688bcad276d70443caf4a31af7",
+      "sha256": "0f4c111f8fdd8df79f7e2a97e2b978d898df7ec2c051ccbd976554b1c10675ca",
       "mustContain": [
         "append_private_jsonl",
         "refusing to use private directory through symlink",
@@ -28,7 +28,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-dispatcher.py",
-      "sha256": "7bf6cd2c8379b9d3a8a12194906f8483c8f6081ab491d3d0edb4383b009711ee",
+      "sha256": "3fd423cd391e869758098aa5c54eeced4cb118b4b85b797026a86bfb17ee75b7",
       "mustContain": [
         "append_private_jsonl",
         "refusing to use private directory through symlink",
@@ -49,16 +49,16 @@
     },
     {
       "path": "deploy/scripts/bot-errors-emit.py",
-      "sha256": "e7d53ef558f40dafd1c241b56ecdd0fae8443452c72f65deab8975bf538a05f5",
+      "sha256": "ac849d62111881f384b27e6754441a6be587b02c6228aee3d79cc9297ebcd19d",
       "mustContain": [
-        "O_NOFOLLOW",
+        "publish_event_json",
         "refusing to use private directory through symlink",
         "outbox_write_failure"
       ]
     },
     {
       "path": "deploy/scripts/bot-errors-gui-session-monitor.py",
-      "sha256": "8720776527c3dca43da31bb13b3f53a38719a8074d4899c4139c2f8b409340ca",
+      "sha256": "f88ea9c360d1c1e0b44287bf3176d5fb30aac1a0bee7ceadfec1739a2f6e0bef",
       "mustContain": [
         "classify_gui_session",
         "gui_targets_from_fleet",
@@ -77,7 +77,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-health-check.py",
-      "sha256": "ba34d57cd9ef5c338358dc6a26fc74dbbf71629dbe72c2c633ece178d55d730e",
+      "sha256": "dad20c696c823aa6b6d4eed621701ae0da20274ae8eb7a1dc616593dc3ea7c01",
       "mustContain": [
         "critical_file_problem",
         "mustContain",
@@ -146,7 +146,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-heartbeat-watchdog.py",
-      "sha256": "96fd04178e28aaf767eca076ca4ab163b1ae020a64a1076c5006ffe73ef1a253",
+      "sha256": "6020f862b1e5797009b3e3eddb541c108046756dec5090d91441700b227817e1",
       "mustContain": [
         "BOT_ERRORS_Q_LOOP_STATE_DIR",
         "BOT_ERRORS_FLEET_SENTINEL_HEARTBEAT",
@@ -161,7 +161,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-q-loop.py",
-      "sha256": "c906d987a653d581916dcf709536d5c61000d2f012972a5f218d315ce6264f4b",
+      "sha256": "268c4b45ebf49cdee70d6333974ddf730adf92984a75ed33ed3096e5993cf556",
       "mustContain": [
         "q_unavailable_reason",
         "session_limit",
@@ -183,9 +183,9 @@
     },
     {
       "path": "deploy/scripts/bot-errors-runner.py",
-      "sha256": "cc937f0fe4eba5887250b7ed01575f9c0a9272c5b39eb7c75152bb1c344b156c",
+      "sha256": "4cd2d4cd748c9ca874964ac19a306b15fed46cb07f1e49b47ac05a3c5aa37ef9",
       "mustContain": [
-        "O_NOFOLLOW",
+        "publish_event_json",
         "refusing to use private directory through symlink",
         "outbox_write_failure"
       ]
@@ -200,7 +200,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-selfcheck.py",
-      "sha256": "a50e1093fb7d98ba767aa9834aa8d000d440535f666e8df76f6b0b5ea330e64c",
+      "sha256": "909b53eacb36b21453e15442b51a89ff5b1336d3baf25bb5318c80c5626011a0",
       "mustContain": [
         "SAFE_HEAL_CLASSES",
         "HEAL_WINDOW_SECONDS"
@@ -208,7 +208,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-sentinel.py",
-      "sha256": "500f4377291ccf3699ea76bbeafa6a2062d082b7a42a1ffdfc61ae0c60809d88",
+      "sha256": "d31458695c6183d5e80e10697269441279ee23486210f42c2452567226726142",
       "mustContain": [
         "DEFAULT_HEARTBEAT_MAX_AGE_SECONDS",
         "DEFAULT_HYSTERESIS_CYCLES"
@@ -216,7 +216,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-tree-provenance.py",
-      "sha256": "75eabfbd561ac89dcb608b6399280227771590582ed3de36e130562559b578d9",
+      "sha256": "62a2fa8f07a93d8438ca72b2b41c916c169fb926492583c9bd051b017983e45b",
       "mustContain": [
         "tree_provenance_inventory",
         "def redact_ref",
@@ -225,14 +225,31 @@
     },
     {
       "path": "deploy/scripts/bot_errors_cutover.py",
-      "sha256": "dae9e37f841216837f2ec9481d4534a9bad0a27ef265c1d33fec9b1d862f6232",
+      "sha256": "3cbd0c3e7dbbb42f251f80da71e994e7f896099d17cf0fae50e952aa0e4c6e5a",
       "mustContain": [
         "restore_service_to_always_on",
         "cutover_gate",
         "CutoverError",
         "_LEGAL_EXPECTED_STATES",
-        "atomic_write_json",
+        "publish_state_json",
+        "require_all_advance",
         "always_on"
+      ]
+    },
+    {
+      "path": "deploy/scripts/check-bot-errors-durable-writers.py",
+      "sha256": "940633b92316a20d8c154f4ab27364e4c628cf9aa1175654ea1714e435771e8b",
+      "mustContain": [
+        "_inventory_findings",
+        "DURABLE_PUBLISHERS"
+      ]
+    },
+    {
+      "path": "deploy/scripts/generate-bot-errors-remote-durability.py",
+      "sha256": "a765c660708b3054b7051bf6d5fcf8ba0441d47d2f3f73dd00172c082b51f5eb",
+      "mustContain": [
+        "durable_json_remote.py",
+        "REMOTE_DURABLE_JSON_SOURCE"
       ]
     },
     {
@@ -345,6 +362,26 @@
         "read_controller_state",
         "complete_reconciliation",
         "retention_exhausted"
+      ]
+    },
+    {
+      "path": "deploy/scripts/lib/durable_json.py",
+      "sha256": "fbc6320f29aeec6a3e4ef3d2d7625e1dc30e27809bfa103a1ec2a36b019c5fd0",
+      "mustContain": [
+        "publish_event_json",
+        "publish_state_json",
+        "require_all_advance",
+        "O_NOFOLLOW"
+      ]
+    },
+    {
+      "path": "deploy/scripts/lib/durable_json_remote.py",
+      "sha256": "42f20f670d53b1acaef5a457b088d38a4e85629f6045ac13cb78e71df3832571",
+      "mustContain": [
+        "publish_event_json",
+        "DurabilityProof",
+        "require_all_advance",
+        "O_NOFOLLOW"
       ]
     },
     {

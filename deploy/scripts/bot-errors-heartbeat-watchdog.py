@@ -33,6 +33,15 @@ from lib.controller_log import (
     metadata_only_controller_details,
     write_controller_log,
 )
+from lib.durable_json import (
+    JsonVersion,
+    durable_json_target,
+    observe_json,
+    operation_id,
+    publish_event_json,
+    publish_state_json,
+    require_advance,
+)
 
 
 DEFAULT_CHECKS = "q_loop,dispatcher,collector,daily_health,queue_backlog,local_services,local_instance_health,browser_debug"
@@ -278,28 +287,12 @@ def fsync_parent(path: Path) -> None:
         os.close(fd)
 
 
-def atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
+def _durable_target(path: Path):
     ensure_private_dir(path.parent)
-    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-    data = (json.dumps(payload, indent=2, sort_keys=True) + "\n").encode("utf-8")
-    fd = os.open(tmp, os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0), 0o600)
-    try:
-        with os.fdopen(fd, "wb") as handle:
-            handle.write(data)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(tmp, path)
-        try:
-            path.chmod(0o600)
-        except OSError:
-            pass
-        fsync_parent(path)
-    except BaseException:
-        try:
-            tmp.unlink()
-        except OSError:
-            pass
-        raise
+    return durable_json_target(
+        trusted_root=path.parent.resolve(strict=True),
+        relative_path=path.name,
+    )
 
 
 def assert_regular_or_missing(path: Path) -> None:
@@ -342,10 +335,26 @@ def redacted_watchdog_payload(value: Any) -> Any:
 
 
 def persist_controller_log_health(record: dict[str, Any]) -> None:
-    atomic_write_json(
-        state_root() / "controller-log-health" / "heartbeat-watchdog.json",
-        record,
+    target = _durable_target(
+        state_root() / "controller-log-health" / "heartbeat-watchdog.json"
     )
+    observation = observe_json(target)
+    publication_operation = operation_id(
+        target,
+        record,
+        component="heartbeat_watchdog.controller_log_health",
+        predecessor=observation.version,
+    )
+    publication = publish_state_json(
+        target,
+        record,
+        component="heartbeat_watchdog.controller_log_health",
+        operation_id=publication_operation,
+        expected=observation.version,
+        generation=(observation.version.generation or 0) + 1,
+    )
+    if not publication.advance_allowed:
+        require_advance(publication)
 
 
 def controller_log_fallback(line: str) -> None:
@@ -427,7 +436,23 @@ def load_state() -> dict[str, Any]:
 def save_state(state: dict[str, Any]) -> None:
     redacted_state = redacted_watchdog_payload(state)
     redacted_state["updatedAt"] = now_iso()
-    atomic_write_json(watchdog_state_path(), redacted_state)
+    target = _durable_target(watchdog_state_path())
+    observation = observe_json(target)
+    publication_operation = operation_id(
+        target,
+        redacted_state,
+        component="heartbeat_watchdog.state",
+        predecessor=observation.version,
+    )
+    publication = publish_state_json(
+        target,
+        redacted_state,
+        component="heartbeat_watchdog.state",
+        operation_id=publication_operation,
+        expected=observation.version,
+        generation=(observation.version.generation or 0) + 1,
+    )
+    require_advance(publication)
 
 
 def outbox_event(
@@ -472,7 +497,21 @@ def outbox_event(
         event["diagnostics"]["forceNotify"] = True
         event["diagnostics"]["forceNotifyLevel"] = "escalated" if "escalated=true" in safe_evidence else "still_open"
     path = outbox / f"{event['createdAt'].replace(':', '').replace('-', '')}.{event_id}.json"
-    atomic_write_json(path, event)
+    target = _durable_target(path)
+    absent = JsonVersion(False, None, None, None)
+    publication_operation = operation_id(
+        target,
+        event,
+        component="heartbeat_watchdog.outbox_event",
+        predecessor=absent,
+    )
+    publication = publish_event_json(
+        target,
+        event,
+        component="heartbeat_watchdog.outbox_event",
+        operation_id=publication_operation,
+    )
+    require_advance(publication)
     return path
 
 

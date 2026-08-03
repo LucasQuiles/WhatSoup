@@ -21,7 +21,7 @@ function runWatchdog(env: Record<string, string>, args: string[] = []) {
 
 function readOutboxEvents() {
   const outbox = join(tmpRoot, 'outbox');
-  return readdirSync(outbox).sort().map((file) => JSON.parse(readFileSync(join(outbox, file), 'utf8')) as {
+  return readdirSync(outbox).filter((file) => file !== '.durable-json.lock').sort().map((file) => JSON.parse(readFileSync(join(outbox, file), 'utf8')) as {
     eventType: string;
     severity: string;
     summary: string;
@@ -37,7 +37,7 @@ function writePrivateJson(path: string, payload: unknown): void {
 }
 
 describe('bot-errors-heartbeat-watchdog', () => {
-  it('fsyncs both event contents and the parent directory during atomic JSON writes', () => {
+  it('publishes watchdog state through the durable state contract', () => {
     tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-heartbeat-'));
     const output = execFileSync('python3', ['-c', `
 import importlib.util, json
@@ -45,17 +45,22 @@ from pathlib import Path
 spec = importlib.util.spec_from_file_location("watchdog", "deploy/scripts/bot-errors-heartbeat-watchdog.py")
 m = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(m)
-calls = []
-m.os.fsync = lambda fd: calls.append(fd)
-target = Path(${JSON.stringify(tmpRoot)}) / "state.json"
-m.atomic_write_json(target, {"ok": True})
-print(json.dumps({"fsyncs": len(calls), "exists": target.exists(), "ok": json.loads(target.read_text())["ok"]}))
+m.os.environ["BOT_ERRORS_STATE_DIR"] = ${JSON.stringify(tmpRoot)}
+m.os.environ["BOT_ERRORS_DRY_NOW"] = "1000"
+m.save_state({"version": 1, "open": {}})
+target = m.watchdog_state_path()
+print(json.dumps({
+    "exists": target.exists(),
+    "version": json.loads(target.read_text())["version"],
+    "mode": target.stat().st_mode & 0o777,
+    "lockMode": (target.parent / ".durable-json.lock").stat().st_mode & 0o777,
+}))
 `], {
       cwd: process.cwd(),
       encoding: 'utf8',
     });
 
-    expect(JSON.parse(output)).toEqual({ fsyncs: 2, exists: true, ok: true });
+    expect(JSON.parse(output)).toEqual({ exists: true, version: 1, mode: 0o600, lockMode: 0o600 });
   });
 
   it('emits a durable alert when the q-loop heartbeat is stale', () => {

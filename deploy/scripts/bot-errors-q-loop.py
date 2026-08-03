@@ -37,6 +37,13 @@ from lib.controller_log import (
     metadata_only_controller_details,
     write_controller_log,
 )
+from lib.durable_json import (
+    durable_json_target,
+    observe_json,
+    operation_id,
+    publish_state_json,
+    require_advance,
+)
 
 
 BOT_ERRORS_JID = os.environ.get("BOT_ERRORS_JID", "").strip()
@@ -302,11 +309,45 @@ def load_state() -> dict[str, Any]:
 def save_state(state: dict[str, Any]) -> None:
     ensure_private_dir(STATE_DIR)
     state["updated_at"] = now()
-    atomic_write_json(STATE_FILE, redact_json_value(state))
+    payload = redact_json_value(state)
+    target = _durable_target(STATE_FILE)
+    observation = observe_json(target)
+    publication_operation = operation_id(
+        target,
+        payload,
+        component="q_loop.state",
+        predecessor=observation.version,
+    )
+    publication = publish_state_json(
+        target,
+        payload,
+        component="q_loop.state",
+        operation_id=publication_operation,
+        expected=observation.version,
+        generation=(observation.version.generation or 0) + 1,
+    )
+    require_advance(publication)
 
 
 def persist_controller_log_health(record: dict[str, Any]) -> None:
-    atomic_write_json(STATE_DIR / "controller-log-health.json", record)
+    target = _durable_target(STATE_DIR / "controller-log-health.json")
+    observation = observe_json(target)
+    publication_operation = operation_id(
+        target,
+        record,
+        component="q_loop.controller_log_health",
+        predecessor=observation.version,
+    )
+    publication = publish_state_json(
+        target,
+        record,
+        component="q_loop.controller_log_health",
+        operation_id=publication_operation,
+        expected=observation.version,
+        generation=(observation.version.generation or 0) + 1,
+    )
+    if not publication.advance_allowed:
+        require_advance(publication)
 
 
 def controller_log_fallback(line: str) -> None:
@@ -495,33 +536,13 @@ def fsync_parent(path: Path) -> None:
         os.close(fd)
 
 
-def atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
+def _durable_target(path: Path):
     ensure_private_dir(path.parent)
     assert_regular_or_missing(path, "q-loop state")
-    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-    assert_regular_or_missing(tmp, "q-loop state temp")
-    data = (json.dumps(payload, indent=2, sort_keys=True) + "\n").encode("utf-8")
-    fd = os.open(
-        tmp, os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0), 0o600
+    return durable_json_target(
+        trusted_root=path.parent.resolve(strict=True),
+        relative_path=path.name,
     )
-    try:
-        with os.fdopen(fd, "wb") as handle:
-            handle.write(data)
-            handle.flush()
-            os.fsync(handle.fileno())
-        assert_regular_or_missing(path, "q-loop state")
-        os.replace(tmp, path)
-        try:
-            path.chmod(0o600)
-        except OSError:
-            pass
-        fsync_parent(path)
-    except BaseException:
-        try:
-            tmp.unlink()
-        except OSError:
-            pass
-        raise
 
 
 def db_connect(db_path: str) -> sqlite3.Connection:

@@ -30,6 +30,9 @@ _dispatcher = _load_dispatcher()
 def _write_event(paths: dict[str, Path], filename: str, event: dict[str, Any]) -> Path:
     path = paths["outbox"] / filename
     path.write_text(json.dumps(event), encoding="utf-8")
+    # Producers publish events 0600 (emit + durable_json enforce it); the
+    # fenced dispatcher rejects looser modes, so the fixture must match.
+    path.chmod(0o600)
     return path
 
 

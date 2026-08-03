@@ -37,6 +37,15 @@ from lib.controller_log import (
     metadata_only_controller_details,
     write_controller_log,
 )
+from lib.durable_json import (
+    JsonVersion,
+    durable_json_target,
+    observe_json,
+    operation_id,
+    publish_event_json,
+    publish_state_json,
+    require_advance,
+)
 
 
 BOT_ERRORS_JID = os.environ.get("BOT_ERRORS_JID", "").strip()
@@ -1219,28 +1228,12 @@ def fsync_parent(path: Path) -> None:
         os.close(fd)
 
 
-def atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
+def _durable_target(path: Path):
     ensure_private_dir(path.parent)
-    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-    data = (json.dumps(payload, indent=2, sort_keys=True) + "\n").encode("utf-8")
-    fd = os.open(tmp, os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0), 0o600)
-    try:
-        with os.fdopen(fd, "wb") as handle:
-            handle.write(data)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(tmp, path)
-        try:
-            path.chmod(0o600)
-        except OSError:
-            pass
-        fsync_parent(path)
-    except BaseException:
-        try:
-            tmp.unlink()
-        except OSError:
-            pass
-        raise
+    return durable_json_target(
+        trusted_root=path.parent.resolve(strict=True),
+        relative_path=path.name,
+    )
 
 
 def safe_segment(value: str) -> str:
@@ -1318,7 +1311,21 @@ def record_writefail(event: dict[str, Any], exc: BaseException, target: Path) ->
     for base in writefail_dirs():
         try:
             path = safe_child_path(base, name)
-            atomic_write_json(path, breadcrumb)
+            target = _durable_target(path)
+            absent = JsonVersion(False, None, None, None)
+            publication_operation = operation_id(
+                target,
+                breadcrumb,
+                component="health_check.writefail",
+                predecessor=absent,
+            )
+            publication = publish_event_json(
+                target,
+                breadcrumb,
+                component="health_check.writefail",
+                operation_id=publication_operation,
+            )
+            require_advance(publication)
             try:
                 sys.stderr.write(f"[bot-errors-health] lost-alert breadcrumb written: {redact_event_text(str(path))}\n")
                 sys.stderr.flush()
@@ -1377,10 +1384,26 @@ def append_private_jsonl(path: Path, payload: dict[str, Any]) -> None:
 
 
 def persist_controller_log_health(record: dict[str, Any]) -> None:
-    atomic_write_json(
-        state_root() / "controller-log-health" / "deadman.json",
-        record,
+    target = _durable_target(
+        state_root() / "controller-log-health" / "deadman.json"
     )
+    observation = observe_json(target)
+    publication_operation = operation_id(
+        target,
+        record,
+        component="health_check.controller_log_health",
+        predecessor=observation.version,
+    )
+    publication = publish_state_json(
+        target,
+        record,
+        component="health_check.controller_log_health",
+        operation_id=publication_operation,
+        expected=observation.version,
+        generation=(observation.version.generation or 0) + 1,
+    )
+    if not publication.advance_allowed:
+        require_advance(publication)
 
 
 def controller_log_fallback(line: str) -> None:
@@ -1436,7 +1459,23 @@ def load_deadman_state() -> dict[str, Any]:
 def save_deadman_state(state: dict[str, Any]) -> None:
     root = state_root()
     ensure_private_dir(root)
-    atomic_write_json(deadman_state_path(), state)
+    target = _durable_target(deadman_state_path())
+    observation = observe_json(target)
+    publication_operation = operation_id(
+        target,
+        state,
+        component="health_check.deadman_state",
+        predecessor=observation.version,
+    )
+    publication = publish_state_json(
+        target,
+        state,
+        component="health_check.deadman_state",
+        operation_id=publication_operation,
+        expected=observation.version,
+        generation=(observation.version.generation or 0) + 1,
+    )
+    require_advance(publication)
 
 
 def deadman_incident_key(problems: list[str]) -> str:
@@ -1817,7 +1856,21 @@ def outbox_event(
         event["diagnostics"]["forceNotifyLevel"] = "critical"
     path = outbox / f"{event['createdAt'].replace(':', '').replace('-', '')}.{event_id}.json"
     try:
-        atomic_write_json(path, event)
+        target = _durable_target(path)
+        absent = JsonVersion(False, None, None, None)
+        publication_operation = operation_id(
+            target,
+            event,
+            component="health_check.outbox_event",
+            predecessor=absent,
+        )
+        publication = publish_event_json(
+            target,
+            event,
+            component="health_check.outbox_event",
+            operation_id=publication_operation,
+        )
+        require_advance(publication)
     except Exception as exc:  # noqa: BLE001 - health alerts must leave a recoverable breadcrumb if queue write fails.
         record_writefail(event, exc, outbox)
         raise
@@ -5245,6 +5298,8 @@ def write_primary_phone_verification(
         raise ValueError("verified-at cannot be more than 5 minutes in the future")
 
     path = primary_phone_verifications_path()
+    target = _durable_target(path)
+    observation = observe_json(target)
     state: dict[str, Any] = {"version": 1, "instances": {}}
     if critical_file_present(path):
         loaded, error = read_private_json_record(path)
@@ -5266,7 +5321,21 @@ def write_primary_phone_verification(
     }
     state["version"] = 1
     state["updatedAt"] = now_iso()
-    atomic_write_json(path, state)
+    publication_operation = operation_id(
+        target,
+        state,
+        component="health_check.primary_phone_verification",
+        predecessor=observation.version,
+    )
+    publication = publish_state_json(
+        target,
+        state,
+        component="health_check.primary_phone_verification",
+        operation_id=publication_operation,
+        expected=observation.version,
+        generation=(observation.version.generation or 0) + 1,
+    )
+    require_advance(publication)
     return path
 
 

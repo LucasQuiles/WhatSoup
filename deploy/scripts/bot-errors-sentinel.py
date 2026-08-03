@@ -9,6 +9,7 @@ decisions. Later rollout slices can wire the action sink to heal/alert workers.
 from __future__ import annotations
 
 import argparse
+import copy
 from datetime import datetime, timezone
 import fcntl
 import hashlib
@@ -34,6 +35,16 @@ if str(_SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPT_DIR))
 
 from lib.bot_errors_roster import RosterError, load_roster, roster_epoch  # noqa: E402
+from lib.durable_json import (  # noqa: E402
+    JsonVersion,
+    durable_json_target,
+    observe_json,
+    operation_id,
+    publish_event_json,
+    publish_state_json,
+    require_advance,
+    require_all_advance,
+)
 
 DEFAULT_HEARTBEAT_MAX_AGE_SECONDS = 45 * 60
 DEFAULT_HYSTERESIS_CYCLES = 2
@@ -253,46 +264,31 @@ def default_config(hosts_path: Optional[Path] = None, state_dir: Optional[Path] 
 
 
 def ensure_private_dir(path: Path) -> None:
-    path.mkdir(parents=True, exist_ok=True)
+    try:
+        path.lstat()
+    except FileNotFoundError:
+        path.mkdir(parents=True, exist_ok=True, mode=0o700)
+    else:
+        if path.is_symlink():
+            raise SentinelError(
+                f"refusing to use sentinel state directory through symlink: {path}"
+            )
+        if not os.path.isdir(path):
+            raise SentinelError(
+                f"refusing to use sentinel state directory over non-directory path: {path}"
+            )
     try:
         path.chmod(0o700)
     except OSError:
         pass
 
 
-def fsync_parent(path: Path) -> None:
-    try:
-        fd = os.open(path.parent, os.O_DIRECTORY | os.O_RDONLY)
-    except OSError:
-        return
-    try:
-        os.fsync(fd)
-    finally:
-        os.close(fd)
-
-
-def atomic_write_json(path: Path, payload: dict) -> None:
+def _durable_target(path: Path):
     ensure_private_dir(path.parent)
-    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-    data = (json.dumps(payload, indent=2, sort_keys=True) + "\n").encode("utf-8")
-    fd = os.open(tmp, os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0), 0o600)
-    try:
-        with os.fdopen(fd, "wb") as handle:
-            handle.write(data)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(tmp, path)
-        try:
-            path.chmod(0o600)
-        except OSError:
-            pass
-        fsync_parent(path)
-    except BaseException:
-        try:
-            tmp.unlink()
-        except OSError:
-            pass
-        raise
+    return durable_json_target(
+        trusted_root=path.parent.resolve(strict=True),
+        relative_path=path.name,
+    )
 
 
 def read_json_object(path: Path) -> dict:
@@ -459,7 +455,23 @@ def state_record(state: dict, key: str) -> dict:
 
 
 def save_state(config: SentinelConfig, state: dict) -> None:
-    atomic_write_json(state_path(config), state)
+    target = _durable_target(state_path(config))
+    observation = observe_json(target)
+    publication_operation = operation_id(
+        target,
+        state,
+        component="sentinel.state",
+        predecessor=observation.version,
+    )
+    publication = publish_state_json(
+        target,
+        state,
+        component="sentinel.state",
+        operation_id=publication_operation,
+        expected=observation.version,
+        generation=(observation.version.generation or 0) + 1,
+    )
+    require_advance(publication)
 
 
 def _host_observation_bucket(observed_class: str) -> str:
@@ -562,7 +574,24 @@ def save_central_heartbeat(config: SentinelConfig, result: dict) -> str:
         "unknownInstanceCount": unknown_instance_count,
         "metrics": result.get("metrics") if isinstance(result.get("metrics"), dict) else None,
     }
-    atomic_write_json(heartbeat_path(config), payload)
+    path = heartbeat_path(config)
+    target = _durable_target(path)
+    observation = observe_json(target)
+    publication_operation = operation_id(
+        target,
+        payload,
+        component="sentinel.central_heartbeat",
+        predecessor=observation.version,
+    )
+    publication = publish_state_json(
+        target,
+        payload,
+        component="sentinel.central_heartbeat",
+        operation_id=publication_operation,
+        expected=observation.version,
+        generation=(observation.version.generation or 0) + 1,
+    )
+    require_advance(publication)
     return str(heartbeat_path(config))
 
 
@@ -1306,7 +1335,23 @@ def write_critical_whatsapp_digest(
         "criticalWhatsAppAllowedCount": int_or_zero(record.get("allowedCount")),
         "criticalWhatsAppOverflowCount": int_or_zero(record.get("overflowCount")),
     }
-    atomic_write_json(path, payload)
+    target = _durable_target(path)
+    observation = observe_json(target)
+    publication_operation = operation_id(
+        target,
+        payload,
+        component="sentinel.critical_whatsapp_digest",
+        predecessor=observation.version,
+    )
+    publication = publish_state_json(
+        target,
+        payload,
+        component="sentinel.critical_whatsapp_digest",
+        operation_id=publication_operation,
+        expected=observation.version,
+        generation=(observation.version.generation or 0) + 1,
+    )
+    require_advance(publication)
     record["overflowDigestPath"] = str(path)
     record["overflowDigestRequestId"] = request_id
     record["overflowDigestUpdatedAt"] = now_iso(now)
@@ -1441,6 +1486,7 @@ def emit_q_unavailable_event(state: dict, config: SentinelConfig, now: float, co
     if record is None:
         return []
     key = q_unavailable_key(record)
+    state_before_event = copy.deepcopy(state)
     timeout_record = state_record(state, "qUnavailableEvent")
     if event_recently_emitted(timeout_record, key, now, config.action_event_cooldown_seconds):
         state.pop("qRemediation", None)
@@ -1450,7 +1496,26 @@ def emit_q_unavailable_event(state: dict, config: SentinelConfig, now: float, co
     path = q_unavailable_event_path(config, now, host, request_id)
     payload = build_q_unavailable_event(record, now, controller_host, request_id)
     digest_ref = apply_critical_whatsapp_budget(payload, state, config, now, controller_host)
-    atomic_write_json(path, payload)
+    target = _durable_target(path)
+    absent = JsonVersion(False, None, None, None)
+    publication_operation = operation_id(
+        target,
+        payload,
+        component="sentinel.q_unavailable_event",
+        predecessor=absent,
+    )
+    try:
+        publication = publish_event_json(
+            target,
+            payload,
+            component="sentinel.q_unavailable_event",
+            operation_id=publication_operation,
+        )
+        require_all_advance([publication])
+    except Exception:
+        state.clear()
+        state.update(state_before_event)
+        raise
     ref = {"scope": "host", "host": host, "action": "q_unavailable", "requestId": request_id, "path": str(path)}
     emitted = [ref]
     if digest_ref is not None:
@@ -1484,6 +1549,7 @@ def emit_action_events(
             continue
         subject = str(result.get("host") or "unknown")
         key = f"host:{subject}:{result.get('class')}:{action}"
+        state_before_event = copy.deepcopy(state)
         record = host_state.setdefault(subject, {})
         if event_recently_emitted(record, key, now, config.action_event_cooldown_seconds):
             continue
@@ -1492,7 +1558,26 @@ def emit_action_events(
         payload = build_host_action_event(result, now, controller_host, fleet_action, request_id)
         add_tier2_remediation(payload, state, config, now, q_host_result)
         digest_ref = apply_critical_whatsapp_budget(payload, state, config, now, controller_host)
-        atomic_write_json(path, payload)
+        target = _durable_target(path)
+        absent = JsonVersion(False, None, None, None)
+        publication_operation = operation_id(
+            target,
+            payload,
+            component="sentinel.action_event_primary",
+            predecessor=absent,
+        )
+        try:
+            publication = publish_event_json(
+                target,
+                payload,
+                component="sentinel.action_event_primary",
+                operation_id=publication_operation,
+            )
+            require_all_advance([publication])
+        except Exception:
+            state.clear()
+            state.update(state_before_event)
+            raise
         ref = {"scope": "host", "host": subject, "action": action, "requestId": request_id, "path": str(path)}
         result["actionEvent"] = ref
         emitted.append(ref)
@@ -1504,6 +1589,7 @@ def emit_action_events(
         record["lastActionEventRequestId"] = request_id
 
     if fleet_action != "none":
+        state_before_event = copy.deepcopy(state)
         fleet_record = state_record(state, "fleetActionEvent")
         key = f"fleet:{fleet_action}"
         if not event_recently_emitted(fleet_record, key, now, config.action_event_cooldown_seconds):
@@ -1511,7 +1597,26 @@ def emit_action_events(
             path = action_event_path(config, now, "fleet", "all", fleet_action, request_id)
             payload = build_fleet_action_event(fleet_action, results, now, controller_host, oracle, request_id)
             digest_ref = apply_critical_whatsapp_budget(payload, state, config, now, controller_host)
-            atomic_write_json(path, payload)
+            target = _durable_target(path)
+            absent = JsonVersion(False, None, None, None)
+            publication_operation = operation_id(
+                target,
+                payload,
+                component="sentinel.action_event_secondary",
+                predecessor=absent,
+            )
+            try:
+                publication = publish_event_json(
+                    target,
+                    payload,
+                    component="sentinel.action_event_secondary",
+                    operation_id=publication_operation,
+                )
+                require_all_advance([publication])
+            except Exception:
+                state.clear()
+                state.update(state_before_event)
+                raise
             ref = {"scope": "fleet", "action": fleet_action, "requestId": request_id, "path": str(path)}
             emitted.append(ref)
             if digest_ref is not None and digest_ref not in emitted:
@@ -1533,7 +1638,23 @@ def write_ack(spec: HostSpec, result: dict, now: float) -> Optional[str]:
         "centralClass": result.get("class"),
         "centralAction": result.get("action"),
     }
-    atomic_write_json(spec.ack_path, payload)
+    target = _durable_target(spec.ack_path)
+    observation = observe_json(target)
+    publication_operation = operation_id(
+        target,
+        payload,
+        component="sentinel.ack",
+        predecessor=observation.version,
+    )
+    publication = publish_state_json(
+        target,
+        payload,
+        component="sentinel.ack",
+        operation_id=publication_operation,
+        expected=observation.version,
+        generation=(observation.version.generation or 0) + 1,
+    )
+    require_advance(publication)
     return str(spec.ack_path)
 
 

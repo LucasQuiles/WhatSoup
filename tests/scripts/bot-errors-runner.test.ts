@@ -24,14 +24,21 @@ function events(): Array<Record<string, any>> {
     .map((name) => JSON.parse(readFileSync(join(outbox, name), 'utf8')) as Record<string, any>);
 }
 
-function runAtomicWrite(targetPath: string) {
+function runDurableEventWrite(targetPath: string) {
   return spawnSync('python3', ['-c', `
 import importlib.util
 from pathlib import Path
 spec = importlib.util.spec_from_file_location("bot_errors_runner", "deploy/scripts/bot-errors-runner.py")
 m = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(m)
-m.atomic_write_json(Path(${JSON.stringify(targetPath)}), {"ok": True})
+target = Path(${JSON.stringify(targetPath)})
+m.outbox_dir = lambda: target.parent
+m.write_event({
+    "id": "event-1",
+    "createdAt": "2026-07-28T00:00:00Z",
+    "instance": "fixture",
+    "source": "preflight",
+})
 `], {
     cwd: process.cwd(),
     encoding: 'utf8',
@@ -46,7 +53,7 @@ describe('bot-errors-runner', () => {
     mkdirSync(realParent, { recursive: true, mode: 0o700 });
     symlinkSync(realParent, linkedParent, 'dir');
 
-    const result = runAtomicWrite(join(linkedParent, 'event.json'));
+    const result = runDurableEventWrite(join(linkedParent, 'event.json'));
 
     expect(result.status).not.toBe(0);
     expect(result.stderr).toContain('refusing to use private directory through symlink');
@@ -56,11 +63,12 @@ describe('bot-errors-runner', () => {
   it('creates a missing atomic-write parent with private permissions', () => {
     tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-runner-'));
     const parent = join(tmpRoot, 'new-outbox');
-    const result = runAtomicWrite(join(parent, 'event.json'));
+    const result = runDurableEventWrite(join(parent, 'event.json'));
 
     expect(result.status).toBe(0);
     expect(statSync(parent).mode & 0o777).toBe(0o700);
-    expect(JSON.parse(readFileSync(join(parent, 'event.json'), 'utf8'))).toEqual({ ok: true });
+    const eventFile = readdirSync(parent).find((name) => name.endsWith('.json'));
+    expect(JSON.parse(readFileSync(join(parent, eventFile!), 'utf8'))).toMatchObject({ id: 'event-1' });
   });
 
   it('emits a durable alert with command context when a process exits nonzero', () => {
@@ -228,7 +236,8 @@ describe('bot-errors-runner', () => {
     const testRoot = join(writerTmp, 'whatsoup-vitest-bot-errors');
     const [workerDir] = readdirSync(testRoot);
     const outbox = join(testRoot, workerDir!, 'outbox');
-    const event = JSON.parse(readFileSync(join(outbox, readdirSync(outbox)[0]!), 'utf8')) as Record<string, any>;
+    const eventFile = readdirSync(outbox).find((name) => name.endsWith('.json'));
+    const event = JSON.parse(readFileSync(join(outbox, eventFile!), 'utf8')) as Record<string, any>;
     expect(event.runtime.provenance).toMatchObject({
       producer: 'python-runner',
       test: true,

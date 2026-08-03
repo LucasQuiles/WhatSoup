@@ -1,16 +1,14 @@
-"""Tests for emit.py atomic_write_json ensure_private_dir preflight.
+"""Tests for emit.py durable event-writer private-directory preflight.
 
-Mirrors the collector/runner H1 pattern: writing to a path whose parent
+Mirrors the collector/runner H1 pattern: writing to an outbox whose directory
 does not yet exist should succeed (the preflight creates it) rather than
 crashing with a raw OS error.
 """
 from __future__ import annotations
 
 import importlib.util
-import os
+import json
 from pathlib import Path
-from typing import Any
-from unittest.mock import patch
 
 import pytest
 
@@ -27,22 +25,39 @@ def _load_emit():
 _mod = _load_emit()
 
 
-class TestAtomicWriteJsonPreflight:
-    """atomic_write_json creates the parent directory when it is absent."""
+class TestDurableEventPreflight:
+    """write_event creates and validates its private publication root."""
 
-    def test_creates_parent_dir_and_writes_file(self, tmp_path: Path) -> None:
-        not_yet_created = tmp_path / "subdir" / "state.json"
-        assert not not_yet_created.parent.exists(), "precondition: parent must not exist yet"
+    @staticmethod
+    def _event() -> dict[str, object]:
+        return {
+            "id": "event-1",
+            "createdAt": "2026-07-28T00:00:00Z",
+            "instance": "fixture",
+            "source": "preflight",
+        }
 
-        _mod.atomic_write_json(not_yet_created, {"ok": True})
+    def test_creates_parent_dir_and_writes_file(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        outbox = tmp_path / "subdir"
+        assert not outbox.exists(), "precondition: parent must not exist yet"
+        monkeypatch.setattr(_mod, "outbox_dir", lambda: outbox)
 
-        assert not_yet_created.exists(), "file should have been written"
-        import json
-        data = json.loads(not_yet_created.read_text())
-        assert data == {"ok": True}
+        written = _mod.write_event(self._event())
 
-    def test_parent_dir_has_restricted_permissions(self, tmp_path: Path) -> None:
-        not_yet_created = tmp_path / "subdir" / "state.json"
-        _mod.atomic_write_json(not_yet_created, {"x": 1})
-        mode = not_yet_created.parent.stat().st_mode & 0o777
+        assert written.exists()
+        assert json.loads(written.read_text(encoding="utf-8")) == self._event()
+
+    def test_parent_dir_has_restricted_permissions(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        outbox = tmp_path / "subdir"
+        monkeypatch.setattr(_mod, "outbox_dir", lambda: outbox)
+        _mod.write_event(self._event())
+        mode = outbox.stat().st_mode & 0o777
         assert mode == 0o700, f"expected 0o700 perms on parent, got {oct(mode)}"

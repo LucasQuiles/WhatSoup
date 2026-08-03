@@ -11,6 +11,10 @@ import { afterEach, describe, expect, it } from 'vitest';
 
 let tmpRoot = '';
 const tmpdir = () => '/tmp';
+
+function dataEntries(directory: string): string[] {
+  return readdirSync(directory).filter((file) => file !== '.durable-json.lock');
+}
 const AWS_KEY_SAMPLE = ['AKIA', 'IOSFODNN7EXAMPLE'].join('');
 const GITHUB_TOKEN_SAMPLE = ['ghp', 'abcdefghijklmnopqrstuvwxyz1234567890'].join('_');
 const JWT_SAMPLE = ['eyJhbGciOiJIUzI1NiJ9', 'eyJzdWIiOiIxMjMifQ', 'signaturepart1234567890'].join('.');
@@ -457,7 +461,7 @@ describe('bot-errors-dispatcher', () => {
 
     expect(JSON.parse(output)).toMatchObject({ processed: 1, sent: 1, reclaimed: 1, failed: 0 });
     expect(readFileSync(capturePath, 'utf8').match(/crash mid-claim must replay once/g)).toHaveLength(1);
-    expect(readdirSync(processing)).toHaveLength(0);
+    expect(dataEntries(processing)).toHaveLength(0);
     expect(readdirSync(sent)).toHaveLength(1);
     const [sentFile] = readdirSync(sent);
     expect(JSON.parse(readFileSync(join(sent, sentFile!), 'utf8'))).toMatchObject({
@@ -709,9 +713,9 @@ describe('bot-errors-dispatcher', () => {
     expect(readFileSync(dispatchLog, 'utf8')).toContain('"type": "storm_digest_queued"');
     expect(readFileSync(dispatchLog, 'utf8')).toContain('"type": "storm_collapsed"');
     expect(readdirSync(collapsed)).toHaveLength(13);
-    expect(readdirSync(manifests)).toHaveLength(1);
+    expect(dataEntries(manifests)).toHaveLength(1);
     expect(readdirSync(sent)).toHaveLength(1);
-    const manifest = JSON.parse(readFileSync(join(manifests, readdirSync(manifests)[0]!), 'utf8')) as {
+    const manifest = JSON.parse(readFileSync(join(manifests, dataEntries(manifests)[0]!), 'utf8')) as {
       affectedHosts: number;
       entries: unknown[];
       entriesCollapsed: unknown[];
@@ -885,7 +889,7 @@ describe('bot-errors-dispatcher', () => {
     expect(readdirSync(outbox).filter((file) => file.endsWith('.json'))).toHaveLength(0);
     expect(readdirSync(collapsed)).toHaveLength(16);
     expect(readdirSync(sent)).toHaveLength(1);
-    const manifest = JSON.parse(readFileSync(join(manifests, readdirSync(manifests)[0]!), 'utf8')) as {
+    const manifest = JSON.parse(readFileSync(join(manifests, dataEntries(manifests)[0]!), 'utf8')) as {
       entries: unknown[];
       entriesCollapsed: unknown[];
     };
@@ -1153,7 +1157,7 @@ describe('bot-errors-dispatcher', () => {
     const first = dispatchCaptured(tmpRoot, capturePath);
 
     expect(first).toMatchObject({ sent: 0, failed: 0 });
-    expect(readdirSync(join(tmpRoot, 'outbox'))).toHaveLength(0);
+    expect(dataEntries(join(tmpRoot, 'outbox'))).toHaveLength(0);
     expect(existsSync(capturePath)).toBe(false);
     expect(readFileSync(dispatchLog, 'utf8')).toContain('recovered_before_delivery');
 
@@ -1201,7 +1205,7 @@ describe('bot-errors-dispatcher', () => {
       failed: 0,
       recoveredBeforeDelivery: 1,
     });
-    expect(readdirSync(join(tmpRoot, 'outbox'))).toHaveLength(0);
+    expect(dataEntries(join(tmpRoot, 'outbox'))).toHaveLength(0);
     const rendered = readFileSync(capturePath, 'utf8');
     expect(rendered).toContain('BOT RECOVERY');
     expect(rendered).not.toContain('BOT ERROR');
@@ -1248,7 +1252,7 @@ describe('bot-errors-dispatcher', () => {
       failed: 0,
       recoveredBeforeDelivery: 1,
     });
-    expect(readdirSync(join(tmpRoot, 'outbox'))).toHaveLength(0);
+    expect(dataEntries(join(tmpRoot, 'outbox'))).toHaveLength(0);
     const rendered = readFileSync(capturePath, 'utf8');
     expect(rendered).toContain('BOT RECOVERY');
     expect(rendered).not.toContain('BOT ERROR');
@@ -1951,7 +1955,7 @@ describe('release-proof drill: two-run alert/clear traversal', () => {
 
   function dirCount(root: string, name: string): number {
     const dir = join(root, name);
-    return existsSync(dir) ? readdirSync(dir).length : 0;
+    return existsSync(dir) ? dataEntries(dir).length : 0;
   }
 
   it('one warning then one same-key clear; duplicates suppressed; queues drain', () => {
@@ -1970,7 +1974,10 @@ describe('release-proof drill: two-run alert/clear traversal', () => {
     emitDrill(tmpRoot, alertArgs);
     const alertRun = dispatchOnce(tmpRoot, capture);
     expect(JSON.parse(alertRun)).toMatchObject({ processed: 1, sent: 1, suppressed: 0, failed: 0 });
-    expect(dirCount(tmpRoot, 'outbox')).toBe(0);
+    expect(
+      dirCount(tmpRoot, 'outbox'),
+      dataEntries(join(tmpRoot, 'outbox')).join(','),
+    ).toBe(0);
     expect(dirCount(tmpRoot, 'sent')).toBe(1);
     const incidentsAfterAlert = JSON.parse(readFileSync(join(tmpRoot, 'incident-state.json'), 'utf8')) as {
       openIncidents: Record<string, unknown>;
@@ -1998,7 +2005,10 @@ describe('release-proof drill: two-run alert/clear traversal', () => {
     emitDrill(tmpRoot, alertArgs);
     const duplicateRun = dispatchOnce(tmpRoot, capture);
     expect(JSON.parse(duplicateRun)).toMatchObject({ processed: 1, sent: 0, suppressed: 1, failed: 0 });
-    expect(dirCount(tmpRoot, 'outbox')).toBe(0);
+    expect(
+      dirCount(tmpRoot, 'outbox'),
+      dataEntries(join(tmpRoot, 'outbox')).join(','),
+    ).toBe(0);
     const dispatchEntries = readFileSync(dispatchLog, 'utf8')
       .trim()
       .split('\n')
