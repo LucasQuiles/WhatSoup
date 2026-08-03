@@ -9,6 +9,7 @@
 import { REQUIRES_WHATSAPP_DETAIL, UnsupportedTransportOperationError } from '../unsupported-operation.ts';
 import { EventEmitter } from 'node:events';
 import { createChildLogger } from '../../logger.ts';
+import { isNonEmptyString } from '../../lib/type-guards.ts';
 import type { TransportAdapter } from '../contract/adapter.ts';
 import type { InboundMessage as ContractInboundMessage } from '../contract/events.ts';
 import type { RuntimeConnection } from '../runtime-connection.ts';
@@ -76,7 +77,7 @@ function contractToIncoming(msg: ContractInboundMessage): IncomingMessage {
     quotedMessageId: msg.inReplyTo?.id ?? null,
     // Mirrors message-parser's no-content guard: a null/blank-body record
     // (e.g. a future MMS-only inbound) must not trigger a response.
-    isResponseWorthy: msg.text !== null && msg.text.trim().length > 0,
+    isResponseWorthy: isNonEmptyString(msg.text),
   };
 }
 

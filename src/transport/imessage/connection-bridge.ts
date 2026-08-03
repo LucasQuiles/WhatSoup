@@ -15,6 +15,7 @@
 import { REQUIRES_WHATSAPP_DETAIL, UnsupportedTransportOperationError } from '../unsupported-operation.ts';
 import { EventEmitter } from 'node:events';
 import { createChildLogger } from '../../logger.ts';
+import { isNonEmptyString } from '../../lib/type-guards.ts';
 import type { InboundMessage as ContractInboundMessage } from '../contract/events.ts';
 import type { RuntimeConnection } from '../runtime-connection.ts';
 import type { IncomingMessage, OutboundMedia, SendOptions, SubmissionReceipt, TypingState } from '../../core/types.ts';
@@ -61,7 +62,7 @@ function contractToIncoming(msg: ContractInboundMessage, isGroup: boolean): Inco
     quotedMessageId: msg.inReplyTo?.id ?? null,
     // Mirrors message-parser's no-content guard: null/blank-body records
     // (reactions, receipts) must not trigger a response.
-    isResponseWorthy: msg.text !== null && msg.text.trim().length > 0,
+    isResponseWorthy: isNonEmptyString(msg.text),
   };
 }
 
