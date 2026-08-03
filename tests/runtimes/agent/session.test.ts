@@ -90,6 +90,14 @@ vi.mock('node:child_process', () => ({
   spawn: vi.fn(),
 }));
 
+vi.mock('../../../src/runtimes/agent/provider-canary-proof.ts', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../../src/runtimes/agent/provider-canary-proof.ts')>();
+  return {
+    ...actual,
+    sha256File: vi.fn().mockReturnValue('this-hash-will-never-match-admission'),
+  };
+});
+
 vi.mock('../../../src/runtimes/agent/process-tree.ts', () => ({
   killSessionTree: vi.fn(async (target: { kill(signal: NodeJS.Signals): boolean }, signal: NodeJS.Signals) => {
     target.kill(signal);
@@ -362,9 +370,8 @@ describe('SessionManager', () => {
     const db = makeDb();
     const { messenger } = makeMessenger();
 
-    // Stub sha256File so ANY resolve returns a non-matching hash.
-    const canaryMod = await import('../../../src/runtimes/agent/provider-canary-proof.ts');
-    const sha256FileSpy = vi.spyOn(canaryMod, 'sha256File').mockReturnValue('this-hash-will-never-match-admission');
+    // sha256File is already stubbed via vi.mock above to return
+    // 'this-hash-will-never-match-admission', which won't match the admission.
 
     const sm = new SessionManager({
       db,
@@ -379,6 +386,12 @@ describe('SessionManager', () => {
         proxyScriptSha256: 'proxy-hash',
       }),
     });
+
+    await expect(sm.spawnSession()).rejects.toThrow(
+      /provider binary content changed since admission/,
+    );
+    expect(spawn).not.toHaveBeenCalled();
+  });
 
     await expect(sm.spawnSession()).rejects.toThrow(
       /provider binary content changed since admission/,

@@ -33,19 +33,15 @@ vi.mock('../../../src/runtimes/agent/provider-canary-proof.ts', () => ({
   })),
 }));
 
-vi.mock('../../../src/logger.ts', () => {
-  const logger = {
+vi.mock('../../../src/logger.ts', () => ({
+  createChildLogger: () => ({
     info: vi.fn(),
     warn: vi.fn(),
     error: vi.fn(),
     debug: vi.fn(),
-  };
-  return {
-    ...mock,
-    default: { ...logger, child: () => logger },
-    flushLogger: vi.fn(),
-  };
-});
+  }),
+  flushLogger: vi.fn(),
+}));
 
 type RuntimeState = {
   _handleMessageInner: (msg: IncomingMessage) => Promise<void>;

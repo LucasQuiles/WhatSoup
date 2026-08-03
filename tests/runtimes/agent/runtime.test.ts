@@ -11,6 +11,9 @@ import type {
   SystemTurnLeaseToken,
   SystemTurnPurpose,
 } from '../../../src/runtimes/agent/pending-system-result-tracker.ts';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { mkdtempSync, rmSync } from 'node:fs';
 import {
   COMPLETED_DELIVERY_IDENTITY_DEBT_HEALTH,
   LEGACY_ACTIVE_SESSION_WITHOUT_COMPLETED_IDENTITY,

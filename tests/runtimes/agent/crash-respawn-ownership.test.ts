@@ -19,25 +19,22 @@ import {
 
 vi.mock('../../../src/runtimes/agent/provider-canary-proof.ts', () => ({
   readProviderCanaryAdmission: vi.fn(() => ({
-    required: true,
     allowed: true,
-    reason: 'proven',
+    resolvedPath: '/usr/bin/claude',
+    binarySha256: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+    proxyScriptSha256: 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
   })),
 }));
 
-vi.mock('../../../src/logger.ts', () => {
-  const logger = {
+vi.mock('../../../src/logger.ts', () => ({
+  createChildLogger: () => ({
     info: vi.fn(),
     warn: vi.fn(),
     error: vi.fn(),
     debug: vi.fn(),
-  };
-  return {
-    ...mock,
-    default: { ...logger, child: () => logger },
-    flushLogger: vi.fn(),
-  };
-});
+  }),
+  flushLogger: vi.fn(),
+}));
 
 type RespawnTimer = ReturnType<typeof setTimeout>;
 
