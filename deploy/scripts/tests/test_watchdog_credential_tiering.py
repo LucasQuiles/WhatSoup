@@ -226,6 +226,33 @@ def test_unknown_with_active_fallback_logs_credential_unknown_without_marker(tmp
     assert "kickstart" not in h.launchctl_calls()
 
 
+def test_unknown_fallback_with_marker_present_logs_credential_unknown_and_retains_marker(tmp_path):
+    # Marker-table row: marker present + active fallback window (exit 5).
+    h = Harness(tmp_path, "tier-marked-fallback-bot", _fallback_unknown_body())
+    h.marker.touch()
+    proc = h.run()
+    assert proc.returncode == 0, proc.stderr
+    assert h.marker.exists(), "exit 5 must retain an existing marker"
+    assert h.final_log_state() == "CREDENTIAL-UNKNOWN"
+    assert "kickstart" not in h.launchctl_calls()
+
+
+def test_permanent_stop_final_log_is_restart_suppressed(tmp_path):
+    # launchd reports a clean stopped/exit-78 snapshot: kickstart must be
+    # suppressed AND the cycle must end on exactly RESTART-SUPPRESSED.
+    h = Harness(tmp_path, "tier-permstop-bot", _unknown_body())
+    h.write_curl_stub("", bot_unreachable=True)
+    h.write_launchctl_stub(
+        print_body="gui = {\n  state = stopped\n  last exit code = 78\n}"
+    )
+    proc = h.run()
+    assert proc.returncode == 0, proc.stderr
+    assert "kickstart" not in h.launchctl_calls()
+    log_text = h.log.read_text(encoding="utf-8")
+    assert "restart suppressed after permanent launchd exit code 78" in log_text
+    assert h.final_log_state() == "RESTART-SUPPRESSED"
+
+
 def test_recovered_clears_marker_and_logs_ok(tmp_path):
     h = Harness(tmp_path, "tier-recover-bot", _recovered_body())
     h.marker.touch()
