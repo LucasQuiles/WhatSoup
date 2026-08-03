@@ -39,7 +39,10 @@ export default defineConfig({
     // blocking indefinitely under --pool=forks (issue #1834 root cause was
     // an incomplete child_process mock; this timeout is defense-in-depth).
     hookTimeout: 10_000,
-    setupFiles: ['./tests/setup/bot-errors-vitest-isolation.ts'],
+    setupFiles: [
+      './tests/setup/bot-errors-vitest-isolation.ts',
+      './tests/setup/source-mutation-tripwire.ts',
+    ],
     coverage: {
       provider: 'v8',
       include: ['src/**/*.ts', 'src/**/*.tsx'],
