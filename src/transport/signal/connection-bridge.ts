@@ -3,6 +3,7 @@ import { EventEmitter } from 'node:events';
 import type { IncomingMessage, OutboundMedia, SendOptions, SubmissionReceipt, TypingState } from '../../core/types.ts';
 import { ContactsDirectory } from '../../core/mentions.ts';
 import { applyOutboundIdentityGuard } from '../../core/outbound-identity/guard.ts';
+import { isNonEmptyString } from '../../lib/type-guards.ts';
 import type { GuardMode, IdentityStore } from '../../core/outbound-identity/types.ts';
 import { fromSignalJid, toSignalJid } from '../../core/jid-constants.ts';
 import { createChildLogger } from '../../logger.ts';
@@ -49,7 +50,7 @@ function contractToIncoming(message: ContractInboundMessage, isGroup: boolean): 
     mentionedJids: [],
     timestamp: Math.floor(message.timestamp.getTime() / 1000),
     quotedMessageId: message.inReplyTo?.id ?? null,
-    isResponseWorthy: message.text !== null && message.text.trim().length > 0,
+    isResponseWorthy: isNonEmptyString(message.text),
   };
 }
 

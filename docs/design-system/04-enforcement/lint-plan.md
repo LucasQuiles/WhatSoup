@@ -995,3 +995,9 @@ in `console/eslint.config.js`: the component was deleted as dead code (orphaned 
 console v3.5 de-wiring; #2327), so the M list drops from 10 files to 9 (8 in block 4a plus
 `line-detail/CreateGroupModal.tsx` in the full-union block 4b). No rule or selector changes —
 the entry was a per-file scope member for a file that no longer exists.
+
+Changelog: 2026-08-02 — `tests/scripts/design-lint-fixtures.test.ts` migrated from the inline
+`const tmpDirs: string[]` + `afterEach` cleanup pattern to the shared `trackTmpDirs()` helper
+from `tests/helpers/tmp-dir.ts` (#2205 completion). No rule or selector changes — the test
+fixture harness was the last holdout using inline tmpdir setup/teardown boilerplate; the
+fixture probes, fixture content, and `check-design-lint-fixtures.mjs` contract are unchanged.

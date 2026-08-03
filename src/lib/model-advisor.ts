@@ -30,6 +30,7 @@ import { readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { MS_PER_DAY } from './time-units.ts';
+import { isNonEmptyString } from './type-guards.ts';
 
 const log = createChildLogger('model-advisor');
 
@@ -448,7 +449,7 @@ export async function checkModelCurrencyStatus(
   const { ids: liveIds, liveScan } = await refreshLiveModelIdsCache();
   const advisories: ModelAdvisory[] = [];
   for (const [role, modelId] of Object.entries(models)) {
-    if (!modelId || modelId.trim() === '') continue;
+    if (!isNonEmptyString(modelId)) continue;
     // Advise on the RESOLVED target: for symbolic values the advisory-worthy
     // question is whether what they currently resolve to is current, not
     // whether the symbolic string itself parses as a model ID.
