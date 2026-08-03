@@ -213,10 +213,14 @@ branch:
    Residual: the same sub-second reap race as the single-instance lock, and a corrupted
    cooldown stamp now reads as unarmed with an `ignoring unparseable restart cooldown stamp`
    line rather than wedging the check.
-3. **The renderer performs raw substring substitution without validating or escaping its
-   inputs.** A hostile bot name, home, or username becomes executable shell/Python fragments in
-   the rendered artifact while placeholder verification still passes. Render parameters must
-   come only from owner-controlled inventory until the renderer validates its inputs.
+3. **The renderer performed raw substring substitution without validating or escaping its
+   inputs.** A hostile bot name, home, or username became executable shell/Python fragments in
+   the rendered artifact while placeholder verification still passed. FIXED in this branch:
+   `render-watchdog.py` rejects identity values outside conservative charsets (bot name
+   `[a-z0-9][a-z0-9-]*`, absolute `[A-Za-z0-9._/-]` home without `..` segments, username
+   `[A-Za-z0-9_][A-Za-z0-9._-]*`) with the typed exit `6 UNSAFE_VALUE` before any render.
+   Renders still must come from owner-controlled inventory; validation is defense in depth,
+   not an authorization boundary.
 4. **Operational I/O outside the credential marker is still masked.** PARTIALLY FIXED in this
    branch: an unopenable log file now fails the invocation at entry (nonzero exit, one stderr
    line) instead of running unobservably. Residual: a log append that starts failing mid-run

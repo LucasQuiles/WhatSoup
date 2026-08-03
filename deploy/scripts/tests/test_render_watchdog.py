@@ -122,6 +122,52 @@ def test_render_leading_zero_port_exits_3():
     assert proc.returncode == 3, proc.stdout
 
 
+def test_render_rejects_shell_metacharacter_bot_name(tmp_path):
+    # Raw substring substitution would turn this into executable shell in the
+    # rendered artifact while placeholder verification still passed.
+    out = tmp_path / "out.sh"
+    proc = _run("render", "--template", str(_TEMPLATE),
+                "--bot-name", 'zz"; rm -rf ~ #',
+                "--bot-port", "9001", "--fleet-port", "9002",
+                "--home", "/opt/zz-home", "--out", str(out))
+    assert proc.returncode == 6, proc.stdout + proc.stderr
+    assert "UNSAFE_VALUE" in proc.stdout
+    assert not out.exists(), "an unsafe render must not write an artifact"
+
+
+def test_render_rejects_expansion_in_home(tmp_path):
+    out = tmp_path / "out.sh"
+    proc = _run("render", "--template", str(_TEMPLATE), "--bot-name", "zz-bot",
+                "--bot-port", "9001", "--fleet-port", "9002",
+                "--home", "/opt/zz-home/$(id)", "--out", str(out))
+    assert proc.returncode == 6, proc.stdout + proc.stderr
+    assert not out.exists()
+
+
+def test_render_rejects_relative_or_traversal_home():
+    for home in ("opt/zz-home", "/opt/../etc"):
+        proc = _run("render", "--template", str(_TEMPLATE), "--bot-name", "zz-bot",
+                    "--bot-port", "9001", "--fleet-port", "9002", "--home", home)
+        assert proc.returncode == 6, f"home={home!r}: {proc.stdout}"
+
+
+def test_render_rejects_shell_metacharacter_username():
+    proc = _run("render", "--template", str(_TEMPLATE), "--bot-name", "zz-bot",
+                "--bot-port", "9001", "--fleet-port", "9002",
+                "--home", "/opt/zz-home", "--username", "tester; id")
+    assert proc.returncode == 6, proc.stdout
+
+
+def test_render_accepts_typical_fleet_values(tmp_path):
+    out = tmp_path / "out.sh"
+    proc = _run("render", "--template", str(_TEMPLATE), "--bot-name", "rb-bot",
+                "--bot-port", "9095", "--fleet-port", "9099",
+                "--home", "/opt/zz-home-2", "--username", "tester_2",
+                "--out", str(out))
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert out.exists()
+
+
 def test_verify_catches_raw_template():
     # The live churn bug: an unrendered template installed verbatim. verify must
     # flag it as unsubstituted (exit 2) and name the surviving tokens.
