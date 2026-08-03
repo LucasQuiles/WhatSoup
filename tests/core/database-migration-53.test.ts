@@ -15,7 +15,7 @@ describe('migration 53 outbound quarantine dispositions', () => {
     db = new Database(':memory:');
     db.open();
 
-    expect(CURRENT_SCHEMA_MIGRATION).toBe(55);
+    expect(CURRENT_SCHEMA_MIGRATION).toBe(56);
     const columns = db.raw.prepare("PRAGMA table_info('outbound_ops')").all() as Array<{ name: string }>;
     expect(columns.map(({ name }) => name)).toEqual(expect.arrayContaining([
       'error',
