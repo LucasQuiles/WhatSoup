@@ -358,19 +358,59 @@ Request errors such as both targets, neither target, unknown alias, unknown prof
 
 ### Watchdog provider-credential states
 
-The launchd watchdog reads authenticated diagnostic health and classifies the
-primary provider only after transport and process liveness pass:
+This section covers the **per-host launchd health watchdog**
+(`~/.local/bin/<instance>-watchdog`, rendered from
+`deploy/templates/watchdog-script.sh`) — not the agent operation-tracker
+watchdog and not the BOT ERRORS heartbeat-watchdog producer. It reads
+authenticated diagnostic health and classifies the primary provider only after
+transport and process liveness pass:
 
-- `CREDENTIAL-DEAD` — current evidence reports
+- **dead** — current evidence reports
   `model_usability_status=credential-unavailable`, an active
   `fallbackReason=auth-required`, or an `auth-required` turn error that has not
-  been superseded by a later successful turn. The watchdog retains a marker and
-  does not restart the bot; a restart cannot restore provider credentials.
-- `ok` — recovery is affirmative: `model_usable=true`, the result is not stale,
-  status is `usable`, and no auth fallback is active. Only this state clears an
-  existing credential marker.
-- `CREDENTIAL-UNKNOWN` — provider evidence is absent, stale, or otherwise
-  inconclusive. The watchdog neither restarts the bot nor changes the marker.
+  been superseded by a later successful turn. The watchdog creates/retains the
+  marker (`~/Library/Logs/whatsoup/<instance>-credential-dead.marker`) and does
+  not restart the bot; a restart cannot restore provider credentials.
+- **recovered** — recovery is affirmative: `model_usable=true`, the result is
+  not stale, status is `usable`, and no fallback window is active. Only this
+  state clears an existing credential marker; missing or stale evidence never
+  does.
+- **unknown** — provider evidence is absent, stale, or otherwise inconclusive
+  (including non-agent instances, which carry no `turn_capability` at all).
+  The watchdog neither restarts the bot nor changes the marker.
+
+**Final log states** (last line of
+`~/Library/Logs/whatsoup/<instance>-watchdog.log` per cycle): `ok`,
+`CREDENTIAL-DEAD`, `CREDENTIAL-UNKNOWN`, `RESTARTED`, `RESTART-SUPPRESSED`.
+The line is chosen by an upgrade-only ladder — `CREDENTIAL-DEAD` >
+`RESTARTED`/`RESTART-SUPPRESSED` > `CREDENTIAL-UNKNOWN` > `ok` — so a
+restart-worthy cycle never reports `ok`, and a credential verdict survives a
+fleet-console restart in the same cycle. An unknown verdict surfaces as
+`CREDENTIAL-UNKNOWN` only when a marker is already present or a fallback
+window is active; a quiescent unknown (healthy idle bot past the 30-minute
+usability-probe TTL, or any non-agent instance) stays `ok`.
+
+**Operator notes:**
+
+- `CREDENTIAL-DEAD` → re-authenticate the provider on that host. Do not
+  restart the bot to "fix" it; the watchdog deliberately never restarts on
+  credential death.
+- After reauth, the marker clears only on affirmative fresh proof. The
+  usability probe runs once at startup with a 30-minute freshness TTL, so in
+  practice the marker clears on the first watchdog cycle after the post-reauth
+  bot restart; `CREDENTIAL-UNKNOWN` in between is expected.
+- A marker create/clear failure logs
+  `ERROR: failed to create|clear credential marker …` and exits that watchdog
+  invocation nonzero without restarting anything; the next cycle retries.
+  Restart paths keep exit status `0`.
+
+**Known detection limitations** (accepted by design): the fallback arm reason
+is frozen at its original value across window extensions, so an auth-required
+death during an open usage-limit window reports `usage-limit`; a successful
+fallback turn clears `last_turn_error_class`; and a stale `usable` probe
+verdict is never re-probed. The combined worst case still surfaces as
+`CREDENTIAL-UNKNOWN` (active fallback window) rather than a false `ok` — that
+visibility is the designed detection floor.
 
 A cold SSH `claude auth status`, credential-item presence, or a passing public
 health envelope is not provider-recovery proof. Diagnose in the service owner's
