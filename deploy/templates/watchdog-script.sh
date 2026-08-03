@@ -25,9 +25,11 @@ HOME_DIR="__HOME__"
 LOG_DIR="$HOME_DIR/Library/Logs/whatsoup"
 LOG="$LOG_DIR/BOT_NAME-watchdog.log"
 LOCK="/tmp/com.whatsoup.BOT_NAME-watchdog.lock"
-# Present while the bot's provider credential is dead (decision-block exit 3).
-# The fleet console / alert path stats this; it is cleared only after fresh,
-# affirmative primary-provider recovery.
+# Present while the bot's provider credential was last conclusively dead
+# (decision-block exit 3). Cleared ONLY by affirmative fresh primary recovery
+# (exit 0); inconclusive evidence (exits 4/5) retains it — presence means
+# "dead until proven recovered", not "dead as of the last cycle". External
+# alert paths may stat this file; no in-repo consumer exists.
 CRED_MARKER="$LOG_DIR/BOT_NAME-credential-dead.marker"
 WD_FINAL="ok"
 WD_EXIT=0
@@ -239,11 +241,13 @@ if service_mode == "inspection_only":
         and auth_failure_class == "none"
     )
     if exact_drain:
+        # Accepted drains classify unknown-quiescent (exit 4): no restart,
+        # credential marker retained — a drain carries no credential evidence.
         print(
             f"database compatibility drain reason={reason!r}: operator action required, not restarting",
             file=sys.stderr,
         )
-        sys.exit(5)
+        sys.exit(4)
     print("malformed database compatibility drain health body", file=sys.stderr)
     sys.exit(1)
 
@@ -262,11 +266,14 @@ TERMINAL_AUTH_FAILURES = (
     "local_corruption_unrestorable",
 )
 if auth_failure_class in TERMINAL_AUTH_FAILURES:
+    # Terminal transport-auth states classify unknown-quiescent (exit 4): no
+    # restart, credential marker retained — a logout says nothing about the
+    # provider credential.
     print(
         f"terminal auth_failure_class={auth_failure_class!r}: human relink required, not restarting",
         file=sys.stderr,
     )
-    sys.exit(5)
+    sys.exit(4)
 
 STALE_PONG_SECONDS = 360
 RECOVERING_STATES = ("connecting", "reconnecting", "cooldown")
@@ -319,11 +326,19 @@ if reasons:
     print("; ".join(reasons), file=sys.stderr)
     sys.exit(1)
 
-# Provider credential state is evaluated only after liveness passes. A current
-# auth-required fallback or turn failure must not be masked by a stale `usable`
-# probe. Conversely, absence of a failure is not recovery: marker clearing
-# requires fresh affirmative primary usability. Exit 4 preserves inconclusive
-# state without restarting or mutating the marker.
+# Provider credential state is evaluated only after liveness passes:
+#   exit 3 — dead: a current normalized auth-required signal. A restart cannot
+#       mint a credential (the 12-day mini11 outage logged "ok"); the shell
+#       logs CREDENTIAL-DEAD and creates/retains the marker.
+#   exit 0 — recovered: affirmative fresh primary proof. The ONLY exit that
+#       clears the marker — absence of evidence is not recovery.
+#   exit 4 — unknown, no fallback window active. Stderr-silent: a healthy idle
+#       bot goes usability-stale within the 30-min probe TTL and a non-agent
+#       instance has no turn_capability at all; both land here every cycle.
+#   exit 5 — unknown while an independent fallback window is active
+#       (fallbackReason non-null — presence, not value).
+# Exits 4/5 never restart and never touch the marker; the shell ORs exit 5
+# with marker presence to pick the CREDENTIAL-UNKNOWN final log state.
 turn_capability_raw = data.get("turn_capability")
 turn_capability = turn_capability_raw if isinstance(turn_capability_raw, dict) else {}
 model_status = turn_capability.get("model_usability_status")
@@ -332,7 +347,7 @@ model_usable_stale = turn_capability.get("model_usable_stale")
 last_success = turn_capability.get("last_successful_turn_at")
 last_error_class = turn_capability.get("last_turn_error_class")
 last_error = turn_capability.get("last_turn_error_at")
-fallback_reason = instance.get("fallbackReason", instance.get("fallback_reason"))
+fallback_reason = instance.get("fallbackReason")
 
 
 def comparable_time(value):
@@ -357,16 +372,17 @@ auth_error_superseded = (
     and success_time > error_time
 )
 auth_error_current = last_error_class == "auth-required" and not auth_error_superseded
-credential_dead = (
-    model_status == "credential-unavailable"
-    or fallback_reason == "auth-required"
-    or auth_error_current
-)
-if credential_dead:
-    print(
-        "CREDENTIAL-DEAD: current provider auth-required evidence — reauth required",
-        file=sys.stderr,
+credential_dead_signal = None
+if model_status == "credential-unavailable":
+    credential_dead_signal = "turn_capability.model_usability_status=credential-unavailable"
+elif fallback_reason == "auth-required":
+    credential_dead_signal = "instance.fallbackReason=auth-required"
+elif auth_error_current:
+    credential_dead_signal = (
+        "turn_capability.last_turn_error_class=auth-required with no later successful turn"
     )
+if credential_dead_signal:
+    print(f"CREDENTIAL-DEAD: {credential_dead_signal} — reauth required", file=sys.stderr)
     sys.exit(3)
 
 credential_recovered = (
@@ -378,7 +394,13 @@ credential_recovered = (
 if credential_recovered:
     sys.exit(0)
 
-print("CREDENTIAL-UNKNOWN: primary credential evidence is missing or stale", file=sys.stderr)
+if fallback_reason is not None:
+    print(
+        "CREDENTIAL-UNKNOWN: inconclusive credential evidence during an active "
+        f"fallback window (fallbackReason={fallback_reason!r})",
+        file=sys.stderr,
+    )
+    sys.exit(5)
 sys.exit(4)
 PY
   py_rc=$?
@@ -396,11 +418,15 @@ PY
     if [ "$WD_EXIT" -eq 0 ]; then
       WD_FINAL="CREDENTIAL-DEAD"
     fi
-  elif [ "$py_rc" -eq 4 ]; then
-    log "CREDENTIAL-UNKNOWN: primary credential evidence is missing or stale; marker unchanged; restart suppressed"
-    WD_FINAL="CREDENTIAL-UNKNOWN"
-  elif [ "$py_rc" -eq 5 ]; then
-    WD_FINAL="NO-RESTART"
+  elif [ "$py_rc" -eq 4 ] || [ "$py_rc" -eq 5 ]; then
+    # Inconclusive credential evidence: never restart, never touch the marker.
+    # Surface CREDENTIAL-UNKNOWN only when there is something to surface — a
+    # retained marker or an active fallback window (exit 5). A quiescent
+    # unknown (healthy idle bot past the usability-probe TTL, or a non-agent
+    # instance with no turn_capability) stays "ok".
+    if [ "$py_rc" -eq 5 ] || [ -e "$CRED_MARKER" ]; then
+      WD_FINAL="CREDENTIAL-UNKNOWN"
+    fi
   elif [ "$py_rc" -ne 0 ]; then
     restart_label "$BOT_LABEL" "unhealthy JSON response"
   else

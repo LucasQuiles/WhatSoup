@@ -165,10 +165,12 @@ class TestDatabaseCompatibilityDrainNoRestart:
         }
 
     def test_future_schema_drain_no_restart(self):
-        assert _run_decision(self._body(), 503) == 5
+        # Accepted drains classify unknown-quiescent (exit 4): no restart,
+        # credential marker retained — a drain carries no credential evidence.
+        assert _run_decision(self._body(), 503) == 4
 
     def test_engine_recovery_drain_no_restart(self):
-        assert _run_decision(self._body("engine_recovery_required"), 503) == 5
+        assert _run_decision(self._body("engine_recovery_required"), 503) == 4
 
     def test_matching_body_over_http_200_is_restart_worthy(self):
         assert _run_decision(self._body(), 200) != 0
@@ -586,13 +588,16 @@ class TestTerminalAuthFailureNoRestart:
         }
 
     def test_serverside_logout_irreversible_no_restart(self):
-        assert _run_decision(self._logged_out("serverside_logout_irreversible")) == 5
+        # Terminal transport-auth states classify unknown-quiescent (exit 4):
+        # no restart, and a credential marker survives the outage — a logout
+        # says nothing about the provider credential.
+        assert _run_decision(self._logged_out("serverside_logout_irreversible")) == 4
 
     def test_pairing_required_no_restart(self):
-        assert _run_decision(self._logged_out("pairing_required")) == 5
+        assert _run_decision(self._logged_out("pairing_required")) == 4
 
     def test_local_corruption_unrestorable_no_restart(self):
-        assert _run_decision(self._logged_out("local_corruption_unrestorable")) == 5
+        assert _run_decision(self._logged_out("local_corruption_unrestorable")) == 4
 
     def test_non_terminal_auth_failure_still_restarts_on_liveness(self):
         # Guard against over-suppression: a non-terminal class ('none') with a

@@ -1,15 +1,22 @@
-// Watchdog credential-death escalation (deploy/templates/watchdog-script.sh).
+// Watchdog credential-state contract (deploy/templates/watchdog-script.sh).
 //
 // Root cause pinned on mini11 (Jul 15–27 outage): the watchdog's decision
-// block treats `degraded` as ok and never inspects turn capability, so a bot
-// whose claude credential is dead — model_usability_status
-// 'credential-unavailable', a state a restart cannot fix — logged plain "ok"
-// every two minutes for 12 days. These tests run the template's embedded
-// python decision block against real-shaped health payloads and pin the new
-// contract: exit 3 (distinct from restart-worthy exit 1) plus a
-// CREDENTIAL-DEAD stderr line when the credential is dead, existing
-// restart/ok behavior otherwise; the shell wiring routes exit 3 to a log
-// line + marker file and NEVER to restart_label.
+// block treated `degraded` as ok and only inspected one stale usability
+// field, so a bot whose provider credential was dead logged plain "ok" every
+// two minutes for 12 days. These tests run the template's embedded python
+// decision block against real-shaped health payloads and pin the contract
+// (docs/superpowers/specs/2026-08-03-watchdog-auth-required-contract-design.md):
+//   exit 3 — dead (any current normalized auth-required signal): the shell
+//            logs CREDENTIAL-DEAD, creates/retains the marker, never restarts;
+//   exit 0 — recovered (affirmative fresh primary proof): the ONLY exit that
+//            may clear the marker;
+//   exit 4 — unknown, no fallback window active (stderr-silent);
+//   exit 5 — unknown while a fallback window is active;
+//   exit 1 — restart-worthy liveness failures (unchanged, higher priority).
+// Shell wiring: exits 4/5 route to a branch that never restarts and never
+// touches the marker, ahead of the generic nonzero restart elif; the final
+// log escalates to CREDENTIAL-UNKNOWN only when a marker is present or the
+// fallback window is active.
 import { describe, expect, it } from 'vitest';
 import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
@@ -99,6 +106,7 @@ describe('watchdog decision block — credential death', () => {
     }));
     expect(r.status).toBe(3);
     expect(r.stderr).toContain('CREDENTIAL-DEAD');
+    expect(r.stderr).toContain('fallbackReason');
   });
 
   it('exits 3 for a current auth-required turn error without an active fallback', () => {
@@ -113,6 +121,7 @@ describe('watchdog decision block — credential death', () => {
       },
     }));
     expect(r.status).toBe(3);
+    expect(r.stderr).toContain('last_turn_error_class=auth-required');
   });
 
   it('still exits 0 for a healthy, usable bot', () => {
@@ -126,13 +135,19 @@ describe('watchdog decision block — credential death', () => {
     expect(r.status).toBe(0);
   });
 
-  it('exits 4 when turn_capability is absent or null (no evidence is unknown, not recovery)', () => {
-    expect(runDecision(healthyPayload({ turn_capability: null })).status).toBe(4);
+  it('exits 4 (stderr-silent) when turn_capability is absent or null — no evidence is unknown, not recovery', () => {
+    // Permanent and correct for non-agent instances: watchdogs install for
+    // every instance type, and non-agent health has turn_capability=null.
+    const absent = runDecision(healthyPayload({ turn_capability: null }));
+    expect(absent.status).toBe(4);
+    expect(absent.stderr).not.toContain('CREDENTIAL');
     const { turn_capability: _drop, ...rest } = healthyPayload();
     expect(runDecision(rest).status).toBe(4);
   });
 
-  it('exits 4 for stale usable evidence without a current auth failure', () => {
+  it('exits 4 (stderr-silent) for stale usable evidence without a current auth failure', () => {
+    // The healthy idle bot past its 30-minute probe TTL lands here every
+    // cycle — a stderr line here would double idle log volume fleet-wide.
     const r = runDecision(healthyPayload({
       turn_capability: {
         model_usable: null,
@@ -144,7 +159,54 @@ describe('watchdog decision block — credential death', () => {
       },
     }));
     expect(r.status).toBe(4);
+    expect(r.stderr).not.toContain('CREDENTIAL');
+  });
+
+  it('a bare usable status with no probe evidence is NOT recovered (regression to the one-field contract)', () => {
+    const r = runDecision(healthyPayload({
+      turn_capability: { model_usability_status: 'usable' },
+    }));
+    expect(r.status).toBe(4);
+  });
+
+  it('non-dead usability statuses classify unknown (exit 4) — the dead set is exactly credential-unavailable', () => {
+    for (const status of ['model-unavailable', 'provider-unavailable', 'timeout', 'unknown', null]) {
+      const r = runDecision(healthyPayload({
+        turn_capability: { model_usability_status: status },
+      }));
+      expect(r.status, `model_usability_status=${String(status)}`).toBe(4);
+      expect(r.stderr).not.toContain('CREDENTIAL-DEAD');
+    }
+  });
+
+  it('exits 5 with a CREDENTIAL-UNKNOWN line while a non-auth fallback window is active', () => {
+    const r = runDecision(healthyPayload({
+      instance: { fallbackReason: 'usage-limit' },
+      turn_capability: {
+        model_usable: null,
+        model_usable_stale: true,
+        model_usability_status: 'usable',
+        last_successful_turn_at: 200,
+        last_turn_error_class: null,
+        last_turn_error_at: null,
+      },
+    }));
+    expect(r.status).toBe(5);
     expect(r.stderr).toContain('CREDENTIAL-UNKNOWN');
+  });
+
+  it('the unauthenticated public envelope fails liveness closed (exit 1) — it can never reach recovery', () => {
+    // #2515: the 4-field public envelope has no whatsapp block, so the
+    // liveness checks exit 1 BEFORE credential classification runs. The
+    // pinned invariant: an unauthenticated read never exits 0 and therefore
+    // never clears the marker.
+    const r = runDecision({
+      schema_version: 'health.public.v1',
+      status: 'healthy',
+      generated_at: new Date().toISOString(),
+      startupNotification: null,
+    });
+    expect(r.status).toBe(1);
   });
 
   it('accepts a later successful turn as superseding an older auth-required turn error', () => {
@@ -170,7 +232,7 @@ describe('watchdog decision block — credential death', () => {
     expect(r.status).toBe(1);
   });
 
-  it('keeps terminal transport auth distinct from provider recovery', () => {
+  it('routes the terminal-auth branch to unknown-quiescent (exit 4): no restart, marker retained', () => {
     const r = runDecision(healthyPayload({
       status: 'unhealthy',
       whatsapp: {
@@ -178,7 +240,8 @@ describe('watchdog decision block — credential death', () => {
         connection: { state: 'close', last_pong_at: null, auth_failure_class: 'pairing_required' },
       },
     }));
-    expect(r.status).toBe(5);
+    expect(r.status).toBe(4);
+    expect(r.stderr).toContain('terminal auth_failure_class');
   });
 });
 
@@ -196,20 +259,15 @@ describe('watchdog shell wiring — exit 3 routes to marker + log, never restart
     expect(branch).not.toContain('restart_label');
   });
 
-  it('routes exit 4 to an unknown log state without marker mutation or restart', () => {
-    const branch = template.match(/elif \[ "\$py_rc" -eq 4 \]; then\n([\s\S]*?)\n\s*elif/)?.[1];
-    expect(branch, 'exit-4 branch missing from shell wiring').toBeTruthy();
+  it('routes exits 4 and 5 to a no-restart, no-marker-mutation branch ahead of the generic restart elif', () => {
+    const branch = template.match(
+      /elif \[ "\$py_rc" -eq 4 \] \|\| \[ "\$py_rc" -eq 5 \]; then\n([\s\S]*?)\n\s*elif \[ "\$py_rc" -ne 0 \]/,
+    )?.[1];
+    expect(branch, 'unknown-state branch missing or ordered after the restart elif').toBeTruthy();
     expect(branch).toContain('CREDENTIAL-UNKNOWN');
     expect(branch).not.toContain('restart_label');
-    expect(branch).not.toContain('CRED_MARKER');
-  });
-
-  it('routes exit 5 to a no-restart state without marker mutation', () => {
-    const branch = template.match(/elif \[ "\$py_rc" -eq 5 \]; then\n([\s\S]*?)\n\s*elif/)?.[1];
-    expect(branch, 'exit-5 branch missing from shell wiring').toBeTruthy();
-    expect(branch).toContain('NO-RESTART');
-    expect(branch).not.toContain('restart_label');
-    expect(branch).not.toContain('CRED_MARKER');
+    expect(branch).not.toContain('touch "$CRED_MARKER"');
+    expect(branch).not.toContain('rm -f "$CRED_MARKER"');
   });
 
   it('clears the marker only on affirmative recovery and does not mask removal failure', () => {
