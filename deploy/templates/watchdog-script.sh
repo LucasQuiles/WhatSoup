@@ -83,7 +83,9 @@ acquire_mutex() {
       (<->) ;;
       (*) holder_pid="" ;;
     esac
-    mtime="$(stat -f %m "$dir" 2>/dev/null || stat -c %Y "$dir" 2>/dev/null || true)"
+    # python3 is already a hard dependency (the decision block); BSD/GNU stat
+    # flag portability is not.
+    mtime="$(python3 -c 'import os, sys; print(int(os.stat(sys.argv[1]).st_mtime))' "$dir" 2>/dev/null || true)"
     case "$mtime" in
       (<->) ;;
       (*) mtime=0 ;;
