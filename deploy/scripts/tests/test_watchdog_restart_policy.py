@@ -173,22 +173,22 @@ class TestDatabaseCompatibilityDrainNoRestart:
         assert _run_decision(self._body("engine_recovery_required"), 503) == 4
 
     def test_matching_body_over_http_200_is_restart_worthy(self):
-        assert _run_decision(self._body(), 200) != 0
+        assert _run_decision(self._body(), 200) == 1
 
     def test_inspection_body_for_another_instance_is_restart_worthy(self):
         body = self._body()
         body["instance"]["name"] = "other-agent"
-        assert _run_decision(body, 503) != 0
+        assert _run_decision(body, 503) == 1
 
     def test_boolean_reconnect_attempts_is_restart_worthy(self):
         body = self._body()
         body["whatsapp"]["connection"]["reconnect_attempts"] = False
-        assert _run_decision(body, 503) != 0
+        assert _run_decision(body, 503) == 1
 
     def test_float_reconnect_attempts_is_restart_worthy(self):
         body = self._body()
         body["whatsapp"]["connection"]["reconnect_attempts"] = 0.0
-        assert _run_decision(body, 503) != 0
+        assert _run_decision(body, 503) == 1
 
     def test_malformed_inspection_body_is_restart_worthy(self):
         cases = [
@@ -222,7 +222,7 @@ class TestDatabaseCompatibilityDrainNoRestart:
             for key in path[:-1]:
                 target = target[key]
             target[path[-1]] = value
-            assert _run_decision(body, 503) != 0, (
+            assert _run_decision(body, 503) == 1, (
                 f"malformed field must fail closed: path={path!r} value={value!r}"
             )
 
@@ -246,7 +246,7 @@ class TestDatabaseCompatibilityDrainNoRestart:
             for key in path[:-1]:
                 target = target[key]
             del target[path[-1]]
-            assert _run_decision(body, 503) != 0, (
+            assert _run_decision(body, 503) == 1, (
                 f"missing field must fail closed: path={path!r}"
             )
 
@@ -446,7 +446,7 @@ class TestRenderedWatchdogLaunchdExitPolicy:
 
 class TestRestartOnLivenessFailure:
     def test_unhealthy_status_restarts(self):
-        assert _run_decision(_health("unhealthy")) != 0
+        assert _run_decision(_health("unhealthy")) == 1
 
     def test_disconnected_without_pong_evidence_restarts(self):
         # Disconnected + recovering state but NO pong to prove progress: the
@@ -459,7 +459,7 @@ class TestRestartOnLivenessFailure:
                 "connection": {"state": "connecting"},
             },
         }
-        assert _run_decision(body) != 0
+        assert _run_decision(body) == 1
 
     def test_disconnected_non_recovering_state_restarts_even_with_fresh_pong(self):
         # A non-recovering state (close/disconnected) is NOT exempt: even a fresh
@@ -471,7 +471,7 @@ class TestRestartOnLivenessFailure:
                 "connection": {"state": "close", "last_pong_at": _iso_ago(5)},
             },
         }
-        assert _run_decision(body) != 0
+        assert _run_decision(body) == 1
 
     def test_recovering_with_stale_pong_restarts(self):
         # Disconnected + reconnecting but the last pong is ancient: the session is
@@ -486,7 +486,7 @@ class TestRestartOnLivenessFailure:
                 },
             },
         }
-        assert _run_decision(body) != 0
+        assert _run_decision(body) == 1
 
     def test_unparseable_pong_fails_closed_and_restarts(self):
         # A malformed pong timestamp must not silently pass; it fails closed.
@@ -497,7 +497,7 @@ class TestRestartOnLivenessFailure:
                 "connection": {"state": "reconnecting", "last_pong_at": "not-a-date"},
             },
         }
-        assert _run_decision(body) != 0
+        assert _run_decision(body) == 1
 
 
 class TestRecoveringConnectionNoRestart:
@@ -545,7 +545,7 @@ class TestRecoveringConnectionNoRestart:
                 "connection": {"state": "close"},
             },
         }
-        assert _run_decision(body) != 0
+        assert _run_decision(body) == 1
 
     def test_stale_pong_restarts(self):
         body = {
@@ -558,7 +558,7 @@ class TestRecoveringConnectionNoRestart:
                 },
             },
         }
-        assert _run_decision(body) != 0
+        assert _run_decision(body) == 1
 
 
 class TestTerminalAuthFailureNoRestart:
@@ -610,7 +610,7 @@ class TestTerminalAuthFailureNoRestart:
                 "connection": {"state": "close", "auth_failure_class": "none"},
             },
         }
-        assert _run_decision(body) != 0
+        assert _run_decision(body) == 1
 
     def test_missing_auth_failure_class_still_restarts_on_liveness(self):
         # Older/partial health bodies without the field behave exactly as before.
@@ -618,7 +618,7 @@ class TestTerminalAuthFailureNoRestart:
             "status": "unhealthy",
             "whatsapp": {"connected": False, "connection": {"state": "close"}},
         }
-        assert _run_decision(body) != 0
+        assert _run_decision(body) == 1
 
     def test_non_terminal_restorable_corruption_still_restarts(self):
         # local_corruption_restorable is NOT terminal (a restart can recover from
@@ -630,7 +630,7 @@ class TestTerminalAuthFailureNoRestart:
                          "connection": {"state": "close",
                                         "auth_failure_class": "local_corruption_restorable"}},
         }
-        assert _run_decision(body) != 0
+        assert _run_decision(body) == 1
 
 
 if __name__ == "__main__":
