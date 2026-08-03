@@ -84,6 +84,7 @@ export const CURATED_TEST_PATHS = [
   'tests/scripts/check-zero-byte-tracked.test.ts',
   'tests/scripts/no-destructive-git-guard.test.ts',
   'tests/scripts/nonempty-string-ratchet.test.ts',
+  'tests/scripts/nonempty-string-trim-length-ratchet.test.ts',
   'tests/scripts/guards-refuse-empty-scope.test.ts',
   'tests/scripts/guards-refuse-empty-scope-all.test.ts',
   'tests/scripts/guard-command-resolver.test.ts',
