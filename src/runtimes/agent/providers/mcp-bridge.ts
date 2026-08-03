@@ -9,7 +9,7 @@ import {
   buildProviderMcpConfigArgs,
   generateMcpConfigFile,
   mergeOpencodeConfig,
-  mergeSessionProviderConfig,
+  providerMcpProxyScriptPath,
   writeMcpConfigToPath,
   writeProviderMcpConfig,
   writeProviderMcpConfigTarget,
@@ -25,7 +25,7 @@ import { errorMessage } from '../../../lib/error-message.ts';
 
 const log = createChildLogger('mcp-bridge');
 
-export { buildProviderMcpConfigArgs, generateMcpConfigFile, mergeOpencodeConfig, writeMcpConfigToPath, writeProviderMcpConfig, writeProviderMcpConfigTarget };
+export { buildProviderMcpConfigArgs, generateMcpConfigFile, mergeOpencodeConfig, providerMcpProxyScriptPath, writeMcpConfigToPath, writeProviderMcpConfig, writeProviderMcpConfigTarget };
 export type { AdditionalMcpServerConfig, OpencodeProviderConfig };
 
 // ---------------------------------------------------------------------------
