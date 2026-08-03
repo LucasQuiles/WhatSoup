@@ -703,7 +703,10 @@ function makeDiagnostic(outcome: 'warn' | 'block' | 'inconclusive', overrides: R
   return result;
 }
 
-describe('CP-F2 strict outcome and diagnostic contract', () => {
+// Subprocess-heavy fixture repos brush the global 10s budget under host load
+// (observed as pure timeouts with every assertion green); 30s keeps the local
+// push gate deterministic without weakening any check.
+describe('CP-F2 strict outcome and diagnostic contract', { timeout: 30_000 }, () => {
   it('accepts all five leaf outcomes with exact exit mappings and three aggregate decisions', () => {
     const nonBlockingOutcomes: ControlOutcome[] = ['pass', 'warn', 'not-applicable'];
     expect(nonBlockingOutcomes.map(exitCodeForOutcome)).toEqual([0, 0, 0]);
@@ -940,7 +943,7 @@ describe('CP-F2 strict outcome and diagnostic contract', () => {
   });
 });
 
-describe('CP-F2 parsing, bounds, canonical bytes, and safe feedback', () => {
+describe('CP-F2 parsing, bounds, canonical bytes, and safe feedback', { timeout: 30_000 }, () => {
   it('keeps canonical native receipt byte validation in the branch gate', () => {
     const packageJson = JSON.parse(readFileSync(path.join(process.cwd(), 'package.json'), 'utf8')) as { scripts: Record<string, string> };
     expect(BRANCH_STEPS.map((step) => step.cmd).join(' && ')).toContain('verify:semantic:shadow');
@@ -1110,7 +1113,7 @@ describe('CP-F2 parsing, bounds, canonical bytes, and safe feedback', () => {
   });
 });
 
-describe('CP-F2 precondition and terminal evidence', () => {
+describe('CP-F2 precondition and terminal evidence', { timeout: 30_000 }, () => {
   it('validates complete preconditions and makes setup failures inconclusive', () => {
     const receipt = makePreconditions();
     expect(validatePreconditionReceipt(receipt, { now: NOW, expected: expectedPreconditions() })).toEqual(receipt);
@@ -1245,7 +1248,7 @@ describe('CP-F2 precondition and terminal evidence', () => {
   });
 });
 
-describe('CP-F2 exact-set aggregation and thin native adapters', () => {
+describe('CP-F2 exact-set aggregation and thin native adapters', { timeout: 30_000 }, () => {
   it('requires exact required/observed tuples, trusted preconditions, and durable replay state', async () => {
     const required = [requiredCheck()];
     const fabricated = makeResult({ aggregateDecision: 'pass', requiredChecks: required, observedChecks: [observedCheck()] });
