@@ -193,9 +193,7 @@ describe('private operation record validation', () => {
   });
 
   it('compiles under a draft-2020-12 Ajv consumer and applies common validation to prefixes', async () => {
-    // @ts-expect-error — ajv/dist/2020.js type declarations not available in this project's dep version; expires 2026-09-01 (#2240 follow-up)
     const { default: Ajv2020 } = await import('ajv/dist/2020.js');
-    // @ts-expect-error — ajv-formats type declarations not available; expires 2026-09-01 (#2240 follow-up)
     const { default: addFormats } = await import('ajv-formats');
     const ajv = new Ajv2020({ strict: true });
     addFormats(ajv);
