@@ -82,7 +82,15 @@ _CONNECTED = {
 
 
 def _health(status: str, **overrides) -> dict:
-    body = {"status": status}
+    body = {
+        "status": status,
+        "instance": {"fallbackReason": None},
+        "turn_capability": {
+            "model_usable": True,
+            "model_usable_stale": False,
+            "model_usability_status": "usable",
+        },
+    }
     body.update(_CONNECTED)
     if overrides:
         body.update(overrides)
@@ -157,10 +165,10 @@ class TestDatabaseCompatibilityDrainNoRestart:
         }
 
     def test_future_schema_drain_no_restart(self):
-        assert _run_decision(self._body(), 503) == 0
+        assert _run_decision(self._body(), 503) == 5
 
     def test_engine_recovery_drain_no_restart(self):
-        assert _run_decision(self._body("engine_recovery_required"), 503) == 0
+        assert _run_decision(self._body("engine_recovery_required"), 503) == 5
 
     def test_matching_body_over_http_200_is_restart_worthy(self):
         assert _run_decision(self._body(), 200) != 0
@@ -505,7 +513,7 @@ class TestRecoveringConnectionNoRestart:
                 "connection": {"state": "reconnecting", "last_pong_at": _iso_ago(10)},
             },
         }
-        assert _run_decision(body) == 0
+        assert _run_decision(body) == 4
 
     def test_connecting_with_fresh_pong_no_restart(self):
         body = {
@@ -515,7 +523,7 @@ class TestRecoveringConnectionNoRestart:
                 "connection": {"state": "connecting", "last_pong_at": _iso_ago(30)},
             },
         }
-        assert _run_decision(body) == 0
+        assert _run_decision(body) == 4
 
     def test_cooldown_with_fresh_pong_no_restart(self):
         body = {
@@ -525,7 +533,7 @@ class TestRecoveringConnectionNoRestart:
                 "connection": {"state": "cooldown", "last_pong_at": _iso_ago(60)},
             },
         }
-        assert _run_decision(body) == 0
+        assert _run_decision(body) == 4
 
     def test_bad_connection_state_restarts(self):
         body = {
@@ -578,13 +586,13 @@ class TestTerminalAuthFailureNoRestart:
         }
 
     def test_serverside_logout_irreversible_no_restart(self):
-        assert _run_decision(self._logged_out("serverside_logout_irreversible")) == 0
+        assert _run_decision(self._logged_out("serverside_logout_irreversible")) == 5
 
     def test_pairing_required_no_restart(self):
-        assert _run_decision(self._logged_out("pairing_required")) == 0
+        assert _run_decision(self._logged_out("pairing_required")) == 5
 
     def test_local_corruption_unrestorable_no_restart(self):
-        assert _run_decision(self._logged_out("local_corruption_unrestorable")) == 0
+        assert _run_decision(self._logged_out("local_corruption_unrestorable")) == 5
 
     def test_non_terminal_auth_failure_still_restarts_on_liveness(self):
         # Guard against over-suppression: a non-terminal class ('none') with a

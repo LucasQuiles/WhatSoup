@@ -69,8 +69,10 @@ measured operational alignment.
 ## Credential-state contract
 
 The embedded decision block continues to evaluate transport and process liveness first. Existing
-restart-worthy failures retain exit code `1`; terminal transport-auth states retain their existing
-no-restart behavior. Credential classification runs only after those checks pass.
+restart-worthy failures retain exit code `1`; terminal transport-auth states and valid database
+compatibility drains use exit code `5` to preserve their existing no-restart behavior without
+being mistaken for provider recovery. Exit `5` never mutates the credential marker. Credential
+classification runs only after those checks pass.
 
 The credential state is one of three values:
 

@@ -170,7 +170,7 @@ describe('watchdog decision block — credential death', () => {
     expect(r.status).toBe(1);
   });
 
-  it('keeps the terminal-auth no-restart branch on exit 0 (unchanged)', () => {
+  it('keeps terminal transport auth distinct from provider recovery', () => {
     const r = runDecision(healthyPayload({
       status: 'unhealthy',
       whatsapp: {
@@ -178,7 +178,7 @@ describe('watchdog decision block — credential death', () => {
         connection: { state: 'close', last_pong_at: null, auth_failure_class: 'pairing_required' },
       },
     }));
-    expect(r.status).toBe(0);
+    expect(r.status).toBe(5);
   });
 });
 
@@ -204,6 +204,14 @@ describe('watchdog shell wiring — exit 3 routes to marker + log, never restart
     expect(branch).not.toContain('CRED_MARKER');
   });
 
+  it('routes exit 5 to a no-restart state without marker mutation', () => {
+    const branch = template.match(/elif \[ "\$py_rc" -eq 5 \]; then\n([\s\S]*?)\n\s*elif/)?.[1];
+    expect(branch, 'exit-5 branch missing from shell wiring').toBeTruthy();
+    expect(branch).toContain('NO-RESTART');
+    expect(branch).not.toContain('restart_label');
+    expect(branch).not.toContain('CRED_MARKER');
+  });
+
   it('clears the marker only on affirmative recovery and does not mask removal failure', () => {
     expect(template).toMatch(/if \[ -e "\$CRED_MARKER" \]; then/);
     expect(template).toMatch(/if ! rm -f "\$CRED_MARKER"/);
@@ -212,6 +220,7 @@ describe('watchdog shell wiring — exit 3 routes to marker + log, never restart
 
   it('does not mask marker creation failure and returns the accumulated watchdog status', () => {
     expect(template).toMatch(/if ! touch "\$CRED_MARKER"/);
+    expect(template).toMatch(/if \[ ! -e "\$CRED_MARKER" \]; then/);
     expect(template).toMatch(/WD_EXIT=1/);
     expect(template).toMatch(/exit "\$WD_EXIT"/);
   });

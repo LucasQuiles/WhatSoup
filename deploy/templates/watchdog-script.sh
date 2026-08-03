@@ -243,7 +243,7 @@ if service_mode == "inspection_only":
             f"database compatibility drain reason={reason!r}: operator action required, not restarting",
             file=sys.stderr,
         )
-        sys.exit(0)
+        sys.exit(5)
     print("malformed database compatibility drain health body", file=sys.stderr)
     sys.exit(1)
 
@@ -266,7 +266,7 @@ if auth_failure_class in TERMINAL_AUTH_FAILURES:
         f"terminal auth_failure_class={auth_failure_class!r}: human relink required, not restarting",
         file=sys.stderr,
     )
-    sys.exit(0)
+    sys.exit(5)
 
 STALE_PONG_SECONDS = 360
 RECOVERING_STATES = ("connecting", "reconnecting", "cooldown")
@@ -386,16 +386,21 @@ PY
     # marker: BOT_NAME-credential-dead.marker — deliberately no restart on this
     # branch (a restart cannot fix auth; see the exit-3 decision-block comment).
     log "CREDENTIAL-DEAD: claude credential unavailable — reauth required; restart suppressed"
-    if ! touch "$CRED_MARKER"; then
-      log "WATCHDOG-ERROR: failed to create credential marker"
-      WD_FINAL="WATCHDOG-ERROR"
-      WD_EXIT=1
-    else
+    if [ ! -e "$CRED_MARKER" ]; then
+      if ! touch "$CRED_MARKER"; then
+        log "WATCHDOG-ERROR: failed to create credential marker"
+        WD_FINAL="WATCHDOG-ERROR"
+        WD_EXIT=1
+      fi
+    fi
+    if [ "$WD_EXIT" -eq 0 ]; then
       WD_FINAL="CREDENTIAL-DEAD"
     fi
   elif [ "$py_rc" -eq 4 ]; then
     log "CREDENTIAL-UNKNOWN: primary credential evidence is missing or stale; marker unchanged; restart suppressed"
     WD_FINAL="CREDENTIAL-UNKNOWN"
+  elif [ "$py_rc" -eq 5 ]; then
+    WD_FINAL="NO-RESTART"
   elif [ "$py_rc" -ne 0 ]; then
     restart_label "$BOT_LABEL" "unhealthy JSON response"
   else

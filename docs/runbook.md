@@ -375,7 +375,9 @@ primary provider only after transport and process liveness pass:
 A cold SSH `claude auth status`, credential-item presence, or a passing public
 health envelope is not provider-recovery proof. Diagnose in the service owner's
 GUI/launchd context and require fresh authenticated health before clearing an
-incident.
+incident. A valid database compatibility drain or terminal WhatsApp-auth state
+also suppresses restart but preserves any provider-credential marker; neither
+state is evidence that the primary provider recovered.
 
 ### Database Compatibility Startup Classification
 
