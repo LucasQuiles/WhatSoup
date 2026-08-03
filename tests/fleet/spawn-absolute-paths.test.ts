@@ -73,9 +73,9 @@ describe('fleet spawn argv uses absolute repo-root paths (#419)', () => {
     expect(effectiveCwd).toBe(repoRoot);
   });
 
-  it('ops.ts handleAuth uses path.join(repoRoot, ...) for bootstrap-auth.ts', () => {
-    const opsPath = path.join(repoRoot, 'src', 'fleet', 'routes', 'ops.ts');
-    const source = fs.readFileSync(opsPath, 'utf-8');
+  it('ops-auth.ts handleAuth uses path.join(repoRoot, ...) for bootstrap-auth.ts', () => {
+    const authPath = path.join(repoRoot, 'src', 'fleet', 'routes', 'ops-auth.ts');
+    const source = fs.readFileSync(authPath, 'utf-8');
     const relativeOccurrences = source.includes(`'${REL_BOOTSTRAP_AUTH}'`)
       || source.includes(`"${REL_BOOTSTRAP_AUTH}"`);
     expect(relativeOccurrences).toBe(false);
