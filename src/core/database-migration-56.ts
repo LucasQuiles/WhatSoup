@@ -173,7 +173,46 @@ export function runMigration56(db: DatabaseSync): void {
       FROM inbound_events;
 
       DROP TABLE inbound_events;
-      ALTER TABLE inbound_events_v56 RENAME TO inbound_events;
+      CREATE TABLE inbound_events (
+        seq INTEGER PRIMARY KEY AUTOINCREMENT,
+        message_id TEXT NOT NULL,
+        conversation_key TEXT NOT NULL,
+        chat_jid TEXT NOT NULL,
+        received_at TEXT NOT NULL DEFAULT (datetime('now')),
+        routed_to TEXT,
+        processing_status TEXT NOT NULL DEFAULT 'pending'
+          CHECK (processing_status IN (${statuses})),
+        completed_at TEXT,
+        terminal_reason TEXT,
+        continuity_candidate_reason TEXT
+          CHECK (
+            continuity_candidate_reason IS NULL OR
+            continuity_candidate_reason IN ('crash_reclaim_no_terminal_outbound', 'runtime_fault_no_terminal_outbound')
+          ),
+        continuity_candidate_source TEXT
+          CHECK (
+            continuity_candidate_source IS NULL OR
+            continuity_candidate_source IN ('pre_connect_recovery', 'runtime_fault_disarm')
+          ),
+        continuity_candidate_marked_at TEXT,
+        failure_class TEXT,
+        UNIQUE(message_id)
+      );
+
+      INSERT INTO inbound_events (
+        seq, message_id, conversation_key, chat_jid, received_at, routed_to,
+        processing_status, completed_at, terminal_reason,
+        continuity_candidate_reason, continuity_candidate_source,
+        continuity_candidate_marked_at, failure_class
+      )
+      SELECT
+        seq, message_id, conversation_key, chat_jid, received_at, routed_to,
+        processing_status, completed_at, terminal_reason,
+        continuity_candidate_reason, continuity_candidate_source,
+        continuity_candidate_marked_at, failure_class
+      FROM inbound_events_v56;
+
+      DROP TABLE inbound_events_v56;
     `);
     for (const sql of triggerSql) {
       db.exec(sql);

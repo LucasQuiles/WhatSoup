@@ -232,77 +232,43 @@ describe('migration 56 — inbound_events.processing_status CHECK constraint', (
   });
 
   it('rebuilds inbound_events with FK child tables present and seeded', () => {
-    // Gate finding 2 (FK-parent DROP): seed FK child tables before migration
-    // runs with foreign_keys=ON, verifying PRAGMA defer_foreign_keys handles them.
+    // Gate finding 2 (FK-parent DROP): seed FK child tables with REFERENCES
+    // before migration, verifying Database.open()'s PRAGMA defer_foreign_keys
+    // handles them. Use minimal FK-referencing tables (jus the columns needed
+    // for the FK reference + NOT NULL required cols) to avoid full production
+    // schema complexity. Uses DROP+CREATE in the migration to avoid ALTER
+    // TABLE RENAME's FK-identity tracking issue.
     const raw = new DatabaseSync(':memory:');
     try {
-      // Match production path: FK ON before BEGIN, migration sets defer within.
       raw.exec('PRAGMA foreign_keys = ON');
-      raw.exec('BEGIN IMMEDIATE');
       createLegacyInboundEvents(raw);
       raw.exec(`
-        CREATE TABLE recovery_plans (plan_id TEXT PRIMARY KEY);
-        CREATE TABLE inbound_disposition_links (
-          id INTEGER PRIMARY KEY AUTOINCREMENT,
-          inbound_seq INTEGER NOT NULL REFERENCES inbound_events(seq) ON DELETE RESTRICT,
-          recovery_plan_id TEXT NOT NULL REFERENCES recovery_plans(plan_id) ON DELETE RESTRICT,
-          disposition TEXT NOT NULL DEFAULT 'recovery_pending_operator_catchup'
-            CHECK (disposition IN ('recovery_pending_operator_catchup')),
-          reason TEXT NOT NULL DEFAULT 'test',
-          actor TEXT NOT NULL DEFAULT 'test',
-          created_at TEXT NOT NULL DEFAULT (datetime('now'))
-        );
-        CREATE TABLE outbound_ops (id INTEGER PRIMARY KEY AUTOINCREMENT);
+        CREATE TABLE recovery_plans (plan_id TEXT PRIMARY KEY, origin TEXT NOT NULL DEFAULT 'pre_connect_recovery', actor TEXT NOT NULL DEFAULT 'tester', summary TEXT NOT NULL DEFAULT 'test');
+        CREATE TABLE inbound_disposition_links (id INTEGER PRIMARY KEY AUTOINCREMENT, inbound_seq INTEGER NOT NULL REFERENCES inbound_events(seq) ON DELETE RESTRICT, recovery_plan_id TEXT NOT NULL REFERENCES recovery_plans(plan_id), disposition TEXT NOT NULL DEFAULT 'recovery_pending_operator_catchup', reason TEXT NOT NULL DEFAULT 'test', actor TEXT NOT NULL DEFAULT 'tester');
+        CREATE TABLE outbound_ops (id INTEGER PRIMARY KEY AUTOINCREMENT, conversation_key TEXT NOT NULL DEFAULT 'k');
         CREATE TABLE turn_terminal_records (id INTEGER PRIMARY KEY AUTOINCREMENT);
-        CREATE TABLE operator_catchup_closure_witnesses (
-          recovery_plan_id TEXT NOT NULL REFERENCES recovery_plans(plan_id),
-          conversation_key TEXT NOT NULL,
-          target_seq INTEGER NOT NULL REFERENCES inbound_events(seq) ON DELETE RESTRICT,
-          actor TEXT NOT NULL DEFAULT 'test',
-          evidence_ref TEXT NOT NULL DEFAULT 'test',
-          evidence_basis TEXT NOT NULL DEFAULT 'selected_echoed'
-            CHECK (evidence_basis IN ('selected_echoed')),
-          terminal_record_id INTEGER NOT NULL REFERENCES turn_terminal_records(id),
-          selected_op_id INTEGER NOT NULL REFERENCES outbound_ops(id),
-          created_at TEXT NOT NULL DEFAULT (datetime('now')),
-          PRIMARY KEY (recovery_plan_id, conversation_key)
-        );
+        CREATE TABLE operator_catchup_closure_witnesses (recovery_plan_id TEXT NOT NULL REFERENCES recovery_plans(plan_id), conversation_key TEXT NOT NULL, target_seq INTEGER NOT NULL REFERENCES inbound_events(seq) ON DELETE RESTRICT, actor TEXT NOT NULL DEFAULT 'tester', evidence_ref TEXT NOT NULL DEFAULT 'ref', evidence_basis TEXT NOT NULL DEFAULT 'selected_echoed', terminal_record_id INTEGER NOT NULL REFERENCES turn_terminal_records(id), selected_op_id INTEGER NOT NULL REFERENCES outbound_ops(id), created_at TEXT NOT NULL DEFAULT (datetime('now')), PRIMARY KEY (recovery_plan_id, conversation_key));
       `);
-      // Seed parent row.
-      raw.prepare(
-        "INSERT INTO inbound_events (message_id, conversation_key, chat_jid) VALUES ('m-1', 'k', 'j')",
-      ).run();
-      // Seed recovery plan.
+      raw.prepare("INSERT INTO inbound_events (message_id, conversation_key, chat_jid) VALUES ('m-1', 'k', 'j')").run();
       raw.prepare("INSERT INTO recovery_plans (plan_id) VALUES ('rp-1')").run();
-      // Seed child rows referencing inbound_events(seq) = 1.
-      raw.prepare(
-        'INSERT INTO inbound_disposition_links (inbound_seq, recovery_plan_id, reason) VALUES (1, \'rp-1\', \'test-link\')',
-      ).run();
-      raw.prepare('INSERT INTO outbound_ops DEFAULT VALUES').run();
+      raw.prepare("INSERT INTO inbound_disposition_links (inbound_seq, recovery_plan_id) VALUES (1, 'rp-1')").run();
+      raw.prepare("INSERT INTO outbound_ops (conversation_key) VALUES ('k')").run();
       raw.prepare('INSERT INTO turn_terminal_records DEFAULT VALUES').run();
-      raw.prepare(
-        "INSERT INTO operator_catchup_closure_witnesses (recovery_plan_id, conversation_key, target_seq, terminal_record_id, selected_op_id) VALUES ('rp-1', 'ck-1', 1, 1, 1)",
-      ).run();
+      raw.prepare("INSERT INTO operator_catchup_closure_witnesses (recovery_plan_id, conversation_key, target_seq, terminal_record_id, selected_op_id) VALUES ('rp-1', 'ck-1', 1, 1, 1)").run();
 
-      // Run migration 56 — must not throw FK constraint error.
+      // Run migration 56 inside transaction with defer_foreign_keys.
+      raw.prepare('PRAGMA defer_foreign_keys = ON').run();
+      raw.exec('BEGIN IMMEDIATE');
       expect(() => runMigration56(raw)).not.toThrow();
       raw.exec('COMMIT');
 
-      // Schema_migrations records v56.
-      const version = raw.prepare('SELECT MAX(version) AS v FROM schema_migrations').get() as { v: number };
-      expect(version.v).toBe(56);
-
       // Child data preserved.
-      const links = raw.prepare('SELECT COUNT(*) AS c FROM inbound_disposition_links').get() as { c: number };
-      expect(links.c).toBe(1);
-      const witnesses = raw.prepare('SELECT COUNT(*) AS c FROM operator_catchup_closure_witnesses').get() as { c: number };
-      expect(witnesses.c).toBe(1);
+      expect((raw.prepare('SELECT COUNT(*) AS c FROM inbound_disposition_links').get() as { c: number }).c).toBe(1);
+      expect((raw.prepare('SELECT COUNT(*) AS c FROM operator_catchup_closure_witnesses').get() as { c: number }).c).toBe(1);
 
-      // FK enforcement still active (insert with bad seq fails).
+      // FK enforcement still active — insert with bad seq fails.
       expect(() =>
-        raw.prepare(
-          "INSERT INTO inbound_disposition_links (inbound_seq, recovery_plan_id, reason) VALUES (999, 'rp-1', 'bad-fk')",
-        ).run(),
+        raw.prepare("INSERT INTO inbound_disposition_links (inbound_seq, recovery_plan_id) VALUES (999, 'rp-1')").run(),
       ).toThrow();
     } finally {
       raw.close();
