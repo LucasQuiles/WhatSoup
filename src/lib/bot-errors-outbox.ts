@@ -10,9 +10,10 @@ import {
 } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { forceEnsurePrivateDirectorySync, fsyncDirectory } from './private-fs.ts';
+import { confineAlertContent } from './alert-evidence.ts';
 import { jidPattern } from './redaction-patterns.ts';
 import { asNonEmptyString } from './type-guards.ts';
-import { homedir, hostname, platform, release, tmpdir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 
 export type BotErrorsSeverity = 'critical' | 'error' | 'warning' | 'info';
@@ -403,14 +404,6 @@ export function botErrorsRuntimeProvenance(): {
   };
 }
 
-function hostPlatform(): string {
-  return process.env['BOT_ERRORS_DRY_PLATFORM'] ?? platform();
-}
-
-function hostRelease(): string {
-  return process.env['BOT_ERRORS_DRY_PLATFORM_RELEASE'] ?? release();
-}
-
 function writeFileDurable(path: string, payload: string): void {
   const fd = openSync(
     path,
@@ -468,64 +461,12 @@ export function recordBotErrorsWritefail(
   return null;
 }
 
-function relevantEnvKeys(): string[] {
-  const patterns = [
-    /^LOG_DIR$/,
-    /^NODE_ENV$/,
-    /^WHATSOUP_/,
-    /^BOT_ERRORS_/,
-    /^XDG_/,
-    /^SYSTEMD_/,
-    /^INVOCATION_ID$/,
-  ];
-
-  return Object.keys(process.env)
-    .filter((key) => patterns.some((pattern) => pattern.test(key)))
-    .filter((key) => !/(TOKEN|SECRET|KEY|PASSWORD|COOKIE|CREDENTIAL)/i.test(key))
-    .sort();
-}
-
-function shellSingleQuote(value: string): string {
-  return `'${value.replace(/'/g, `'\"'\"'`)}'`;
-}
-
-function logPredicateQuote(value: string): string {
-  return value.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
-}
-
-function logHints(instance: string): string[] {
-  const hints = new Set<string>();
-  const logDir = process.env['LOG_DIR'];
-  if (logDir) hints.add(join(logDir, 'whatsoup.log'));
-
-  const osPlatform = hostPlatform();
-  const osRelease = hostRelease().toLowerCase();
-  const isWsl = osPlatform === 'linux' && osRelease.includes('microsoft');
-
-  if (osPlatform === 'darwin') {
-    if (instance) {
-      hints.add(`launchctl print gui/$(id -u)/${instance}`);
-      hints.add(`log show --last 30m --predicate 'eventMessage CONTAINS "${logPredicateQuote(instance)}"'`);
-    }
-    hints.add('launchctl print gui/$(id -u)/com.bot-errors.dispatcher');
-    hints.add(`log show --last 30m --predicate 'process == "bot-errors-dispatcher"'`);
-    return [...hints];
-  }
-
-  if (isWsl) {
-    if (instance) {
-      hints.add(`ps -eo pid,etime,cmd | grep -F ${shellSingleQuote(instance)}`);
-    }
-    hints.add(join(homedir(), '.claude', 'observability', 'runtime'));
-    hints.add(join(homedir(), '.claude', 'observability', 'sessions'));
-    hints.add(join(stateDir(), 'logs', 'dispatch.jsonl'));
-    return [...hints];
-  }
-
-  if (instance) hints.add(`journalctl --user -u whatsoup@${instance}.service --since '30 minutes ago'`);
-  hints.add(`journalctl --user -u bot-errors-dispatcher.service --since '30 minutes ago'`);
-  return [...hints];
-}
+// Issue #2386: relevantEnvKeys(), logHints(), shellSingleQuote(),
+// logPredicateQuote(), hostPlatform(), and hostRelease() were removed.
+// They produced runtime environment keys and operator log-hint commands
+// that embedded instance names, paths, and host identifiers — exactly the
+// metadata the evidence boundary now strips. The dispatcher can reconstruct
+// operator hints from the bounded event fields (instance, source).
 
 function newBotErrorsEnvelope(eventType: BotErrorsEventType, severity: BotErrorsSeverity): BotErrorsEnvelopeFields {
   if (eventType === 'alert' && ['critical', 'error', 'warning'].includes(severity)) {
@@ -550,38 +491,41 @@ export function buildBotErrorsEvent(input: BotErrorsOutboxInput, eventId = rando
   const source = input.source.trim() || 'unknown';
   const severity = input.severity ?? (input.eventType === 'alert' ? 'critical' : 'info');
   const envelope = newBotErrorsEnvelope(input.eventType, severity);
-  const summary = input.summary.trim() || `${envelope.eventType} event from ${source}`;
-  const evidence = input.evidence?.trim() ?? '';
+  const rawSummary = input.summary.trim() || `${envelope.eventType} event from ${source}`;
+  const rawEvidence = input.evidence?.trim() ?? '';
   const criticalAsset = input.criticalAsset
     ? redactOutboxValue(input.criticalAsset) as BotErrorsCriticalAssetDiagnostic
     : null;
+
+  // Issue #2386: confine evidence and summary to bounded metadata-only
+  // fields at the emission boundary. Raw prose, exception text, provider
+  // output, identifiers, and paths are replaced with failure-class hints,
+  // length, and a non-reversible correlation digest.
+  const confinedSummary = confineAlertContent('summary', rawSummary);
+  const confinedEvidence = confineAlertContent('evidence', rawEvidence);
 
   return {
     ...envelope,
     id: eventId,
     createdAt,
-    machine: hostname(),
-    platform: `${hostPlatform()} ${hostRelease()}`,
     instance,
     source,
-    summary: redactText(summary),
-    evidence: redactText(evidence),
+    summary: confinedSummary,
+    evidence: confinedEvidence,
+    // Issue #2386: strip absolute paths and raw process arguments. Keep
+    // only bounded process metadata: pid, ppid, and node version.
     process: {
       pid: process.pid,
       ppid: process.ppid,
-      cwd: process.cwd(),
-      argv: process.argv.map(redactText),
-      execPath: process.execPath,
+      argvCount: process.argv.length,
       node: process.version,
     },
     runtime: {
-      envKeys: relevantEnvKeys(),
       invocationId: process.env['INVOCATION_ID'] ?? null,
       systemdExecPid: process.env['SYSTEMD_EXEC_PID'] ?? null,
       provenance: botErrorsRuntimeProvenance(),
     },
     diagnostics: {
-      logHints: logHints(instance),
       queue: botErrorsOutboxDir(),
     },
     delivery: {
@@ -596,6 +540,21 @@ export function buildBotErrorsEvent(input: BotErrorsOutboxInput, eventId = rando
 
 export function writeBotErrorsEvent(input: BotErrorsOutboxInput): BotErrorsOutboxWrite {
   const outbox = botErrorsOutboxDir();
+  // Fail closed: when the outbox dir is NOT explicitly set and we're under
+  // vitest, the resolved path MUST be under tmpdir — never the repo root
+  // or homedir. Prevents the recurring src/main.ts sha256 drift caused by
+  // a sandbox fallback writing into the working tree (#2658, #2887 CI).
+  if (process.env['BOT_ERRORS_OUTBOX_DIR'] === undefined
+      && process.env['BOT_ERRORS_STATE_DIR'] === undefined
+      && process.env['BOT_ERRORS_TEST_ISOLATED'] === '1'
+      && runningUnderVitest()) {
+    const resolved = join(outbox, 'guard');
+    if (!resolved.startsWith(tmpdir())) {
+      throw new Error(
+        `writeBotErrorsEvent under vitest would write outside tmpdir: ${outbox}`,
+      );
+    }
+  }
   const event = buildBotErrorsEvent(input);
   // Preserve milliseconds while sorting *after* old same-second names, which
   // ended at `...SSZ.<instance>`. `_` sorts after that separator and keeps

@@ -182,27 +182,33 @@ describe('bot-errors outbox private writes', () => {
       severity: 'info',
       instance: 'unknown',
       source: 'unknown',
-      summary: 'clear event from unknown',
       runtime: {
         invocationId: 'launch-invocation',
         systemdExecPid: '12345',
       },
     });
-    expect(event.runtime.envKeys).toEqual(expect.arrayContaining(['INVOCATION_ID', 'WHATSOUP_TEST_MODE', 'XDG_CONFIG_HOME']));
-    expect(event.runtime.envKeys).not.toContain('BOT_ERRORS_API_TOKEN');
-    expect(event.evidence).toContain('phone=[REDACTED PHONE]');
-    expect(event.evidence).toContain('for [REDACTED PHONE]');
-    expect(event.evidence).not.toContain('+1 (555) 123-4567');
-    expect(event.evidence).toContain('Authorization: Bearer [REDACTED]');
-    expect(event.evidence).toContain('api_key=[REDACTED]');
-    expect(event.evidence).toContain('https://[REDACTED]@example.invalid');
-    expect(event.evidence).toContain('[REDACTED AWS ACCESS KEY]');
-    expect(event.evidence).toContain('[REDACTED GITHUB TOKEN]');
-    expect(event.evidence).toContain('[REDACTED JWT]');
-    expect(event.evidence).toContain('[REDACTED CREDENTIAL PATH]');
-    expect(event.evidence).toContain('[REDACTED WHATSAPP JID]');
+    // Issue #2386: summary and evidence are confined to bounded metadata.
+    expect(typeof event.summary).toBe('object');
+    expect(typeof event.evidence).toBe('object');
+    // Raw secrets never cross the boundary.
+    const serialized = JSON.stringify(event);
+    expect(serialized).not.toContain('+15551234567');
+    expect(serialized).not.toContain('+15557654321');
+    expect(serialized).not.toContain('+1 (555) 123-4567');
+    expect(serialized).not.toContain('live-token');
+    expect(serialized).not.toContain('abc123');
+    expect(serialized).not.toContain('user:pass');
+    // envKeys stripped (issue #2386): no environment key names cross boundary.
+    expect(event.runtime).not.toHaveProperty('envKeys');
+    expect(serialized).not.toContain('WHATSOUP_TEST_MODE');
+    expect(serialized).not.toContain('XDG_CONFIG_HOME');
+    expect(serialized).not.toContain('BOT_ERRORS_API_TOKEN');
+    // CriticalAsset is still redacted via redactOutboxValue (defense-in-depth).
     expect(JSON.stringify(event.criticalAsset)).not.toContain('live-secret');
     expect(JSON.stringify(event.criticalAsset)).not.toContain('+15559876543');
+    expect(JSON.stringify(event.criticalAsset)).toContain('[REDACTED CREDENTIAL PATH]');
+    expect(JSON.stringify(event.criticalAsset)).toContain('[REDACTED]');
+    expect(JSON.stringify(event.criticalAsset)).toContain('[REDACTED PHONE]');
   });
 
   it('uses safe fallback file segments for empty sanitized instance and source names', async () => {
@@ -340,48 +346,42 @@ describe('bot-errors outbox private writes', () => {
     }
   });
 
-  it('emits platform-specific log hints for Linux, WSL, and Darwin hosts', async () => {
-    tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-log-hints-'));
+  it('strips operator log hints, env keys, hostname, platform, cwd, and argv (issue #2386)', async () => {
+    tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-metadata-strip-'));
     process.env['BOT_ERRORS_OUTBOX_DIR'] = join(tmpRoot, 'outbox');
     process.env['LOG_DIR'] = join(tmpRoot, 'logs');
-
-    const { buildBotErrorsEvent } = await import('../../src/lib/bot-errors-outbox.ts');
-
     process.env['BOT_ERRORS_DRY_PLATFORM'] = 'linux';
     process.env['BOT_ERRORS_DRY_PLATFORM_RELEASE'] = '6.8.0-generic';
-    const linuxEvent = buildBotErrorsEvent({
+
+    const { buildBotErrorsEvent } = await import('../../src/lib/bot-errors-outbox.ts');
+    const event = buildBotErrorsEvent({
       eventType: 'alert',
       instance: 'agent',
-      source: 'linux-log-hints',
-      summary: 'linux hints',
+      source: 'metadata-strip',
+      summary: 'agent failure',
+      evidence: 'TypeError: cannot read property x',
     });
-    expect(linuxEvent.diagnostics.logHints).toContain(['journalctl --user -u whatsoup', '@', "agent.service --since '30 minutes ago'"].join(''));
-    expect(linuxEvent.diagnostics.logHints).toContain(`journalctl --user -u bot-errors-dispatcher.service --since '30 minutes ago'`);
+    const serialized = JSON.stringify(event);
 
-    process.env['BOT_ERRORS_DRY_PLATFORM_RELEASE'] = '5.15.90.1-microsoft-standard-WSL2';
-    const wslEvent = buildBotErrorsEvent({
-      eventType: 'alert',
-      instance: 'wsl-agent',
-      source: 'wsl-log-hints',
-      summary: 'wsl hints',
-    });
-    expect(wslEvent.diagnostics.logHints).toContain("ps -eo pid,etime,cmd | grep -F 'wsl-agent'");
-    expect(wslEvent.diagnostics.logHints).toEqual(expect.arrayContaining([
-      join(tmpRoot, 'logs', 'whatsoup.log'),
-      expect.stringContaining(join('.claude', 'observability', 'runtime')),
-      expect.stringContaining(join('.claude', 'observability', 'sessions')),
-    ]));
+    // Issue #2386: logHints embedded instance names in operator commands
+    // (journalctl/launchctl) and paths — stripped entirely.
+    expect(event.diagnostics).not.toHaveProperty('logHints');
+    expect(serialized).not.toContain('journalctl');
+    expect(serialized).not.toContain('launchctl');
+    expect(serialized).not.toContain('log show');
 
-    process.env['BOT_ERRORS_DRY_PLATFORM'] = 'darwin';
-    process.env['BOT_ERRORS_DRY_PLATFORM_RELEASE'] = '25.0.0';
-    const darwinEvent = buildBotErrorsEvent({
-      eventType: 'alert',
-      instance: 'mac"agent',
-      source: 'darwin-log-hints',
-      summary: 'darwin hints',
-    });
-    expect(darwinEvent.diagnostics.logHints).toContain('launchctl print gui/$(id -u)/mac"agent');
-    expect(darwinEvent.diagnostics.logHints).toContain('log show --last 30m --predicate \'eventMessage CONTAINS "mac\\"agent"\'');
-    expect(darwinEvent.diagnostics.logHints).toContain('launchctl print gui/$(id -u)/com.bot-errors.dispatcher');
+    // envKeys revealed runtime environment variable names — stripped.
+    expect(event.runtime).not.toHaveProperty('envKeys');
+
+    // machine/platform/cwd/execPath/argv stripped — host/path identifiers.
+    expect(event).not.toHaveProperty('machine');
+    expect(event).not.toHaveProperty('platform');
+    expect(event.process).not.toHaveProperty('cwd');
+    expect(event.process).not.toHaveProperty('execPath');
+    expect(event.process).not.toHaveProperty('argv');
+    expect(event.process).toHaveProperty('argvCount');
+
+    // schemaVersion bumped to 2 for the confined shape.
+    expect(event.schemaVersion).toBe(2);
   });
 });
