@@ -518,7 +518,10 @@ describe('publication guard operational allowlist', () => {
   });
 });
 
-describe('publication guard exact-range native receipt', () => {
+// Subprocess-heavy fixture repos brush the global 10s budget under host load
+// (observed as pure timeouts with every assertion green); 30s keeps the local
+// push gate deterministic without weakening any check.
+describe('publication guard exact-range native receipt', { timeout: 30_000 }, () => {
   it('scans the exact outgoing OID rather than a safe ambient HEAD and validates the external byte binding', () => {
     const { repo, baseOid } = makeExactRangeRepo();
     const token = ['ghp_', 'abcdefghijklmnop'].join('');

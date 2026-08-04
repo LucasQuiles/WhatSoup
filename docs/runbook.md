@@ -356,6 +356,96 @@ Request errors such as both targets, neither target, unknown alias, unknown prof
 
 **Important:** `degraded` returns HTTP 200 — enrichment staleness is a warning, not an outage. Monitoring scripts must inspect the JSON `status` field, not just the HTTP status code. Retained turn-finalization retries, outstanding/corrupt recovery jobs, echo conflicts, and preserved crash-exhaustion history also degrade agent health even when WhatsApp remains connected.
 
+### Watchdog provider-credential states
+
+This section covers the **per-host launchd health watchdog**
+(`~/.local/bin/<instance>-watchdog`, rendered from
+`deploy/templates/watchdog-script.sh`) — not the agent operation-tracker
+watchdog and not the BOT ERRORS heartbeat-watchdog producer. It reads
+authenticated diagnostic health and classifies the primary provider only after
+transport and process liveness pass:
+
+- **dead** — current evidence reports
+  `model_usability_status=credential-unavailable`, an active
+  `fallbackReason=auth-required`, or an `auth-required` turn error that has not
+  been superseded by a later successful turn. The watchdog creates/retains the
+  marker (`~/Library/Logs/whatsoup/<instance>-credential-dead.marker`) and does
+  not restart the bot; a restart cannot restore provider credentials.
+- **recovered** — recovery is affirmative AND fresh: HTTP `200`, `generated_at`
+  within the freshness window, `model_usable=true`, the result is not stale,
+  status is `usable`, and no fallback window is active. Only this state clears
+  an existing credential marker; missing, stale, or HTTP-incoherent evidence
+  never does.
+- **unknown** — provider evidence is absent, stale, or otherwise inconclusive
+  (including non-agent instances, which carry no `turn_capability` at all).
+  The watchdog neither restarts the bot nor changes the marker.
+
+**Final log states** (last line of
+`~/Library/Logs/whatsoup/<instance>-watchdog.log` per cycle): `ok`,
+`CREDENTIAL-DEAD`, `HEALTH-UNKNOWN`, `RESTARTED`, `RESTART-SUPPRESSED`,
+`RESTART-FAILED`, `ERROR`, and `CREDENTIAL-UNKNOWN`. The line is chosen by an
+upgrade-only ladder — `CREDENTIAL-DEAD` > `HEALTH-UNKNOWN` >
+`RESTART-FAILED` > `RESTARTED` > `RESTART-SUPPRESSED` > `ERROR` >
+`CREDENTIAL-UNKNOWN` > `ok` — so untrusted diagnostic evidence cannot be
+masked by a restart outcome, a restart-worthy cycle never reports `ok`, a
+mixed bot/fleet cycle reports the most actionable restart outcome, and a
+credential verdict survives a fleet-console restart in the same cycle.
+`RESTARTED` is recorded only after `launchctl kickstart` succeeds; a rejected
+kickstart logs `ERROR: kickstart failed …`, ends on `RESTART-FAILED`, and
+leaves the restart cooldown unarmed so the next cycle retries. An unknown verdict surfaces as
+`CREDENTIAL-UNKNOWN` only when a marker is already present or a fallback
+window is active; a quiescent unknown (healthy idle bot past the 30-minute
+usability-probe TTL, or any non-agent instance) stays `ok`.
+`HEALTH-UNKNOWN` means the authenticated diagnostic body or its supporting
+token/timestamp evidence could not be trusted; it exits the watchdog invocation
+with status `2`, never restarts, and never changes the credential marker.
+`ERROR` records a lower-ranked watchdog-internal failure such as an unsafe marker
+path when no stronger credential, health-evidence, or restart outcome applies.
+
+**Operator notes:**
+
+- `CREDENTIAL-DEAD` → re-authenticate the provider on that host. Do not
+  restart the bot to "fix" it; the watchdog deliberately never restarts on
+  credential death.
+- After reauth, the marker clears only on affirmative fresh proof. The
+  usability probe runs once at startup with a 30-minute freshness TTL, so in
+  practice the marker clears on the first watchdog cycle after the post-reauth
+  bot restart; `CREDENTIAL-UNKNOWN` in between is expected.
+- A marker create/clear failure logs
+  `ERROR: failed to create|clear credential marker …` and exits that watchdog
+  invocation nonzero without restarting anything; the next cycle retries.
+  Clean and suppressed restart paths keep exit status `0`; a rejected
+  kickstart or a cooldown-stamp write failure also exits nonzero (launchd
+  ignores the code — it exists for tests and operators).
+- Fleet-console restarts are serialized across the host's bot watchdogs by a
+  per-label restart mutex; a contender logs
+  `restart already in progress by another watchdog` and records
+  `RESTART-SUPPRESSED`.
+- The single-instance lock lives in the log directory, is pid-stamped, and
+  self-reclaims when its holder is dead or the lock has aged out (a
+  `reclaiming stale lock …` line is logged); a genuinely held lock logs
+  `another watchdog invocation is running` and exits `0`. Cleanup is
+  ownership-guarded: an invocation deletes a lock only while its own pid is
+  still stamped inside, so a hung run whose lock was reclaimed cannot remove
+  the new owner's lock. An unopenable log
+  file fails the invocation at entry (nonzero exit, one stderr line) — a
+  watchdog that cannot record state must not run silently.
+
+**Known detection limitations** (accepted by design): the fallback arm reason
+is frozen at its original value across window extensions, so an auth-required
+death during an open usage-limit window reports `usage-limit`; a successful
+fallback turn clears `last_turn_error_class`; and a stale `usable` probe
+verdict is never re-probed. The combined worst case still surfaces as
+`CREDENTIAL-UNKNOWN` (active fallback window) rather than a false `ok` — that
+visibility is the designed detection floor.
+
+A cold SSH `claude auth status`, credential-item presence, or a passing public
+health envelope is not provider-recovery proof. Diagnose in the service owner's
+GUI/launchd context and require fresh authenticated health before clearing an
+incident. A valid database compatibility drain or terminal WhatsApp-auth state
+also suppresses restart but preserves any provider-credential marker; neither
+state is evidence that the primary provider recovered.
+
 ### Database Compatibility Startup Classification
 
 A valid database compatibility drain is distinct from an ordinary WhatsApp

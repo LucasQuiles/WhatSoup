@@ -18,7 +18,9 @@ logic itself is covered portably by test_watchdog_restart_policy.py.
 
 from __future__ import annotations
 
+import datetime as dt
 import os
+import json
 import shutil
 import stat
 import subprocess
@@ -42,6 +44,41 @@ _CRASHED_BODY = (
     '{"status":"unhealthy","whatsapp":{"connected":false,'
     '"connection":{"state":"close","auth_failure_class":"none"}}}'
 )
+_DEAD_PROVIDER_BODY = json.dumps({
+    "status": "degraded",
+    "instance": {"effectiveProvider": "opencode-cli", "fallbackReason": "auth-required"},
+    "whatsapp": {"connected": True, "connection": {"state": "connected"}},
+    "turn_capability": {
+        "model_usable": None,
+        "model_usable_stale": True,
+        "model_usability_status": "usable",
+        "last_turn_error_class": "auth-required",
+    },
+})
+_RECOVERED_PROVIDER_BODY = json.dumps({
+    "status": "healthy",
+    # Recovery (the only marker-clearing exit) additionally requires FRESH evidence.
+    "generated_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+    "instance": {"effectiveProvider": "claude-cli", "fallbackReason": None},
+    "whatsapp": {"connected": True, "connection": {"state": "connected"}},
+    "turn_capability": {
+        "model_usable": True,
+        "model_usable_stale": False,
+        "model_usability_status": "usable",
+        "last_turn_error_class": None,
+    },
+})
+_UNKNOWN_PROVIDER_BODY = json.dumps({
+    "status": "healthy",
+    "instance": {"effectiveProvider": "claude-cli", "fallbackReason": None},
+    "whatsapp": {"connected": True, "connection": {"state": "connected"}},
+    "turn_capability": {
+        "model_usable": None,
+        "model_usable_stale": True,
+        "model_usability_status": "usable",
+        "last_turn_error_class": None,
+    },
+})
 
 
 def _render(home: Path, bot_name: str, bot_port: str = "9999", fleet_port: str = "9998") -> Path:
@@ -60,7 +97,7 @@ def _render(home: Path, bot_name: str, bot_port: str = "9999", fleet_port: str =
     return script
 
 
-def _make_stubs(home: Path, bot_body: str) -> Path:
+def _make_stubs(home: Path, bot_body: str, bot_http: str = "503") -> Path:
     # The watchdog hardcodes its own PATH with $HOME_DIR/.local/bin FIRST (a
     # determinism guard), so injected stubs must live there — a tmp PATH entry
     # would be ignored and the script would hit real curl/launchctl.
@@ -78,7 +115,7 @@ def _make_stubs(home: Path, bot_body: str) -> Path:
         'for a in "$@"; do [ "$a" = "--fail" ] && has_fail=true; done\n'
         'for a in "$@"; do case "$a" in\n'
         "  *9999/health) $has_fail && exit 22; "
-        f"printf '%s\\n503' '{bot_body}'; exit 0;;\n"
+        f"printf '%s\\n{bot_http}' '{bot_body}'; exit 0;;\n"
         "  *9998/*) printf 'ok\\n200'; exit 0;;\n"
         "esac; done\n"
         "printf '\\n000'; exit 7\n",
@@ -97,22 +134,53 @@ def _make_stubs(home: Path, bot_body: str) -> Path:
     return calls
 
 
-def _run(tmp_path: Path, bot_body: str, bot_name: str) -> str:
+def _run_with_state(
+    tmp_path: Path,
+    bot_body: str,
+    bot_name: str,
+    *,
+    bot_http: str = "503",
+    marker_setup: str = "absent",
+) -> tuple[str, bool, int, int | None]:
     home = tmp_path / "home"
     home.mkdir()
+    token_file = home / ".config" / "whatsoup" / "instances" / bot_name / "tokens.env"
+    token_file.parent.mkdir(parents=True)
+    token_file.write_text(
+        f"WHATSOUP_HEALTH_TOKEN={'a' * 64}\n",
+        encoding="utf-8",
+    )
+    token_file.chmod(0o600)
     script = _render(home, bot_name)
-    calls = _make_stubs(home, bot_body)
-    # Lock is /tmp/com.whatsoup.<bot_name>-watchdog.lock; a unique bot_name per
-    # test avoids an xdist cross-test lock race. Clear residue so we don't early-exit.
-    lock = Path(f"/tmp/com.whatsoup.{bot_name}-watchdog.lock")
-    if lock.exists():
-        try:
-            lock.rmdir()
-        except OSError:
-            shutil.rmtree(lock, ignore_errors=True)
+    calls = _make_stubs(home, bot_body, bot_http)
+    marker = home / "Library" / "Logs" / "whatsoup" / f"{bot_name}-credential-dead.marker"
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    marker_mtime_before = None
+    if marker_setup == "file":
+        marker.write_text("existing", encoding="utf-8")
+        os.utime(marker, ns=(1_000_000_000, 1_000_000_000))
+        marker_mtime_before = marker.stat().st_mtime_ns
+    elif marker_setup == "directory":
+        marker.mkdir()
+    elif marker_setup == "dangling-symlink":
+        marker.symlink_to(home / "missing-parent" / "marker")
+    elif marker_setup != "absent":
+        raise AssertionError(f"unsupported marker setup: {marker_setup}")
     env = dict(os.environ, HOME=str(home))
-    subprocess.run(["zsh", str(script)], env=env, capture_output=True, text=True, timeout=20)
-    return calls.read_text(encoding="utf-8") if calls.exists() else ""
+    proc = subprocess.run(
+        ["zsh", str(script)], env=env, capture_output=True, text=True, timeout=20
+    )
+    calls_text = calls.read_text(encoding="utf-8") if calls.exists() else ""
+    marker_present = marker.exists() or marker.is_symlink()
+    marker_mtime_after = marker.stat().st_mtime_ns if marker.is_file() else None
+    if marker_mtime_before is not None and marker_mtime_after is None:
+        marker_mtime_after = -1
+    return calls_text, marker_present, proc.returncode, marker_mtime_after
+
+
+def _run(tmp_path: Path, bot_body: str, bot_name: str) -> str:
+    calls, _, _, _ = _run_with_state(tmp_path, bot_body, bot_name)
+    return calls
 
 
 def test_logged_out_503_does_not_kickstart_bot(tmp_path):
@@ -144,6 +212,74 @@ def test_crashed_503_still_kickstarts_bot(tmp_path):
     assert "kickstart" in calls and "com.whatsoup.crash-bot" in calls, (
         f"crashed (non-terminal) bot must still be kickstarted; calls were:\n{calls}"
     )
+
+
+@pytest.mark.parametrize("marker_setup", ["absent", "file"])
+def test_dead_provider_creates_or_retains_marker_without_restart(tmp_path, marker_setup):
+    calls, marker_present, rc, marker_mtime = _run_with_state(
+        tmp_path,
+        _DEAD_PROVIDER_BODY,
+        f"dead-{marker_setup}-bot",
+        bot_http="200",
+        marker_setup=marker_setup,
+    )
+    assert rc == 0
+    assert marker_present
+    assert "kickstart" not in calls
+    if marker_setup == "file":
+        assert marker_mtime == 1_000_000_000
+
+
+@pytest.mark.parametrize(
+    ("body", "marker_setup", "expected_present"),
+    [
+        (_RECOVERED_PROVIDER_BODY, "absent", False),
+        (_RECOVERED_PROVIDER_BODY, "file", False),
+        (_UNKNOWN_PROVIDER_BODY, "absent", False),
+        (_UNKNOWN_PROVIDER_BODY, "file", True),
+        (_LOGGED_OUT_BODY, "file", True),
+    ],
+)
+def test_marker_state_machine_preserves_only_nonrecovery_states(
+    tmp_path, body, marker_setup, expected_present
+):
+    http = "503" if body == _LOGGED_OUT_BODY else "200"
+    calls, marker_present, rc, _ = _run_with_state(
+        tmp_path,
+        body,
+        f"state-{marker_setup}-{abs(hash(body))}-bot",
+        bot_http=http,
+        marker_setup=marker_setup,
+    )
+    assert rc == 0
+    assert marker_present is expected_present
+    assert "kickstart" not in calls
+
+
+def test_marker_create_failure_is_nonzero(tmp_path):
+    calls, marker_present, rc, _ = _run_with_state(
+        tmp_path,
+        _DEAD_PROVIDER_BODY,
+        "marker-create-fail-bot",
+        bot_http="200",
+        marker_setup="dangling-symlink",
+    )
+    assert rc != 0
+    assert marker_present
+    assert "kickstart" not in calls
+
+
+def test_marker_remove_failure_is_nonzero(tmp_path):
+    calls, marker_present, rc, _ = _run_with_state(
+        tmp_path,
+        _RECOVERED_PROVIDER_BODY,
+        "marker-remove-fail-bot",
+        bot_http="200",
+        marker_setup="directory",
+    )
+    assert rc != 0
+    assert marker_present
+    assert "kickstart" not in calls
 
 
 if __name__ == "__main__":

@@ -122,6 +122,7 @@ export const CURATED_TEST_PATHS = [
   'tests/fleet/routes/ops-plaintext-key-strip.test.ts',
   'tests/scripts/generate-catch-ratchet.test.ts',
   'tests/eslint-rules/require-catch-justification.test.ts',
+  'tests/deploy/watchdog-credential-dead.test.ts',
   // The manifest's own registry test dogfoods into the gate.
   'tests/scripts/push-gate-manifest.test.ts',
 ] as const;

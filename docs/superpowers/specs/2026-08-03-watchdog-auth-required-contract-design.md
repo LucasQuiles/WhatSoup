@@ -1,0 +1,440 @@
+# Watchdog Auth-Required Contract Design
+
+**Status:** Active — source repair is implemented and undergoing final PR/merge-gate verification;
+fleet canary and rollout remain owner-gated and unperformed.
+
+## Status
+
+Approved approach: staged canonical repair. Source and tests land first, then owner-private
+rendered artifacts are canaried and rolled out one host at a time from the reviewed source
+revision. No installed script is edited in place.
+
+## Problem
+
+The launchd watchdog currently escalates a provider credential failure only when
+`turn_capability.model_usability_status` is exactly `credential-unavailable`. That contract
+predates the current health semantics. A current health response can correctly retain a stale
+`model_usability_status=usable` while also reporting all of the following:
+
+- `turn_capability.model_usable=null`;
+- `turn_capability.model_usable_stale=true`;
+- `turn_capability.last_turn_error_class=auth-required`;
+- `instance.fallbackReason=auth-required`; and
+- an active independent fallback provider.
+
+The bot remains available through fallback, but the watchdog logs `ok` and does not create its
+credential marker. This is a monitoring false negative. It is not fixed by restarting the bot,
+and a restart may interrupt a live turn without changing the credential.
+
+The existing marker lifecycle has a related evidence problem: a passing liveness decision clears
+the marker even when credential evidence is missing or stale. Missing evidence is inconclusive,
+not proof of credential recovery.
+
+## Goals
+
+1. Recognize current, normalized `auth-required` evidence without depending on one stale probe
+   field.
+2. Preserve the existing no-restart response for credential failures.
+3. Clear a credential marker only after affirmative fresh primary recovery.
+4. Keep liveness/restart decisions higher priority than provider-credential classification.
+5. Reuse the canonical template, renderer, managed-component registry, and fleet rollout gates.
+6. Prove both positive and negative behavior before a fleet rollout.
+
+## Non-goals
+
+- Reauthenticate a provider account.
+- Restart or redeploy a bot application process.
+- Change fallback selection, health serialization, or turn-capability tracking.
+- Add a second renderer or a host-specific watchdog fork.
+- Resolve the separately documented fleet-console/watchdog incompatibility on an excluded host.
+- Replay durability or operator catch-up records.
+
+## Considered approaches
+
+### Source-only repair
+
+This produces a reviewable fix with no live risk, but installed watchdogs remain divergent until a
+later operation. It is insufficient as the complete fleet-alignment outcome.
+
+### Immediate host patches
+
+Editing installed scripts directly restores the missing signal quickly, but creates unreviewed
+host-local code, inconsistent hashes, and another reconciliation burden. This approach is
+rejected.
+
+### Staged canonical repair
+
+Fix the source template and tests on current main, render every host artifact through the existing
+deterministic renderer, validate two complementary canaries, then roll out the same source revision
+one host at a time. This is the selected approach because it combines source durability with
+measured operational alignment.
+
+## Credential-state contract
+
+The embedded decision block continues to evaluate transport and process liveness first. Existing
+restart-worthy failures retain exit code `1`. Terminal transport-auth states and valid database
+compatibility drains route to exit code `4` (unknown-quiescent): their no-restart behavior and
+stderr detail lines are unchanged, but they no longer clear the credential marker — missing
+credential evidence during a drain or a transport-auth outage is inconclusive, not recovery.
+Credential classification runs only after those checks pass.
+
+The decision block's complete exit vocabulary is `0` recovered, `1` restart-worthy, `3` dead,
+`4` unknown with no active fallback window, `5` unknown while a fallback window is active.
+
+The credential state is one of three values:
+
+### `dead`
+
+Any one of these current signals is sufficient:
+
+1. `turn_capability.model_usability_status == credential-unavailable`;
+2. `instance.fallbackReason == auth-required`; or
+3. `turn_capability.last_turn_error_class == auth-required` and the error is not superseded by a
+   later successful turn.
+
+The decision block exits `3`. The shell logs `CREDENTIAL-DEAD`, creates or retains the marker, and
+does not call `restart_label`. The status-based signal is exactly `credential-unavailable`; other
+non-usable statuses (`model-unavailable`, `provider-unavailable`, `timeout`, `unknown`) are not
+credential death and classify `unknown`.
+
+The fallback reason's PRESENCE is current by construction: the runtime returns it only while the
+fallback window is active. Its VALUE, however, is the original arm reason frozen across window
+extensions, so the exact `auth-required` match is sound but incomplete (see Known limitations).
+The turn tracker clears its last error on a successful user turn; the timestamp comparison
+remains a defensive guard for recorded or future-compatible payloads. `last_turn_error_at` and
+`last_successful_turn_at` are epoch-millisecond numbers on live payloads; the guard parses
+numbers first and accepts ISO strings only as a recorded/future-compatible fallback, and an
+unparseable timestamp never converts an auth-required error into recovery.
+
+### `recovered`
+
+Recovery requires all of the following:
+
+- no credential-dead signal above;
+- the response arrived with HTTP `200`;
+- `generated_at` parses and lies inside the freshness window (−5..60 s), so a cached or
+  replayed body can never qualify;
+- `turn_capability.model_usable == true`;
+- `turn_capability.model_usable_stale == false`;
+- `turn_capability.model_usability_status == usable`; and
+- `instance.fallbackReason` is null or absent.
+
+The decision block exits `0`. The shell may remove an existing credential marker. This is an
+affirmative FRESH primary-recovery proof, not merely absence of a failure field: a stale
+`generated_at`, a missing `generated_at`, or a non-200 status with recovery-shaped fields all
+classify unknown and retain the marker.
+
+### `unknown`
+
+Every other liveness-passing payload is inconclusive. This includes missing or null
+turn-capability data (permanent and correct for non-agent instances — watchdogs install for every
+instance type), stale usability without a current auth error, non-dead usability statuses, and
+unrecognized future shapes. A truthy non-object `instance` or `turn_capability` value is such a
+future shape: the decision block reads nothing from it, and it can never satisfy the recovery
+conjunction — a malformed shape must classify unknown, not crash into the restart path or clear
+the marker.
+
+The decision block exits `4` when no independent fallback window is active (unknown-quiescent)
+and `5` when one is. The fallback-activeness predicate is `instance.fallbackReason` being
+non-null — presence, not value, with no timestamp parsing. Neither exit restarts the bot; neither
+creates or removes the credential marker.
+
+The shell surfaces the gap only when there is something to surface: the final log state escalates
+to `CREDENTIAL-UNKNOWN` when a credential marker is already present or the fallback window is
+active (exit `5`); a quiescent unknown with no marker keeps the final log `ok`. This tiering
+exists because a healthy idle bot's startup usability proof goes stale within its 30-minute
+freshness TTL, so it classifies unknown-quiescent on essentially every cycle — logging
+`CREDENTIAL-UNKNOWN` there would page on every healthy idle bot. The quiescent exit is also
+stderr-silent for the same reason; exit `5` and the drain/terminal-auth branches keep their
+stderr detail lines.
+
+## Marker state machine
+
+| Prior marker | Credential state | Result | Final log |
+|---|---|---|---|
+| absent | dead | create marker; no bot restart | `CREDENTIAL-DEAD` |
+| present | dead | retain marker (mtime untouched); no bot restart | `CREDENTIAL-DEAD` |
+| absent | recovered | remain absent | `ok` |
+| present | recovered | remove marker | `ok` |
+| absent | unknown-quiescent | remain absent | `ok` |
+| absent | unknown, fallback window active | remain absent | `CREDENTIAL-UNKNOWN` |
+| present | unknown-quiescent | retain marker | `CREDENTIAL-UNKNOWN` |
+| present | unknown, fallback window active | retain marker | `CREDENTIAL-UNKNOWN` |
+
+Marker mutation errors must not be masked as success. A failed create or clear is logged as a
+watchdog error and makes that watchdog invocation exit nonzero without calling `restart_label`.
+The next scheduled invocation may retry the marker transition. The final log state is unchanged
+by a marker I/O failure: `CREDENTIAL-DEAD` on a failed create, `ok` on a failed clear — the
+error line and the nonzero invocation exit carry the failure.
+
+The final log line is managed by an upgrade-only escalation ladder: `CREDENTIAL-DEAD` >
+`HEALTH-UNKNOWN` > `RESTART-FAILED` > `RESTARTED` > `RESTART-SUPPRESSED` > `ERROR` >
+`CREDENTIAL-UNKNOWN` > `ok`. Restart outcomes are severity-ordered within their tier so a
+mixed bot/fleet cycle reports the most actionable outcome (a suppressed bot restart cannot
+hide a fleet kickstart, and a successful bot restart cannot hide a failed fleet kickstart);
+per-job detail stays in the preceding log lines. Restart
+outcomes are recorded inside the restart helper at its terminal points and must be truthful:
+`RESTARTED` is recorded only after `launchctl kickstart` returns success, and only a successful
+kickstart arms the 5-minute cooldown stamp — a rejected kickstart logs
+`ERROR: kickstart failed …`, records `RESTART-FAILED`, and leaves the cooldown unarmed so the
+next cycle retries. A cooldown-stamp write failure after a successful restart keeps `RESTARTED`
+and surfaces as `ERROR: failed to write restart cooldown stamp …`. A restart-worthy cycle never
+reports a final `ok`, and a credential verdict recorded before the fleet-console check survives
+it. Clean and suppressed restart paths keep the script's exit status `0`; a rejected kickstart,
+a cooldown-stamp write failure, a credential-marker mutation failure, or an unopenable log file
+at entry makes the invocation exit nonzero. launchd ignores the exit code (`KeepAlive=false`,
+no `SuccessfulExit`); tests and operators consume it.
+
+## Known limitations
+
+Three documented evasions are accepted, not fixed, by this design:
+
+1. `instance.fallbackReason` is frozen at the ORIGINAL arm reason across window extensions, so an
+   auth-required death that occurs during an open usage-limit fallback window reports
+   `usage-limit`, not `auth-required`.
+2. A successful fallback turn clears `last_turn_error_class`, erasing the auth-required turn-error
+   signal.
+3. The usability probe runs once at startup with a 30-minute freshness TTL and is never re-probed,
+   so `model_usability_status` can stay a stale `usable` indefinitely.
+
+The combined worst case (all three at once) still lands on unknown-with-active-fallback: exit `5`,
+final log `CREDENTIAL-UNKNOWN`. A visible `CREDENTIAL-UNKNOWN` — not a false `ok` — is the
+designed detection floor. Runtime-side re-probing, provider-aware success tracking, and
+current-cause fallback reasons are follow-up work outside this design.
+
+No in-repository consumer of the marker or final watchdog state exists. External/on-host
+consumers are unknown and must be checked in the separately authorized rollout phase.
+
+Separately, four defects that PREDATE this design (present verbatim on `main`) were surfaced by
+audit and are tracked here as rollout preconditions, each with its resolution status in this
+branch:
+
+1. **Stale single-instance lock silently disables the watchdog.** The lock was a predictable,
+   UID-independent `/tmp` directory; a pre-existing or SIGKILL-orphaned lock made every later
+   invocation exit `0` with no log line, and on a multi-user host any local user could
+   pre-create the path. FIXED in this branch: the lock lives in the user-owned log directory,
+   is pid-stamped, and is reclaimed when its holder is dead or the lock has aged out; a held
+   lock now logs before exiting. Lock and restart-mutex release is ownership-guarded: cleanup
+   deletes the lock only while its pid stamp still names the releasing process, so a hung
+   invocation whose lock was age-reclaimed cannot delete the new owner's lock on exit.
+   Residuals: the reclaim uses rename-then-remove, so a sub-second reap race can still admit
+   one duplicate invocation (bounded by the restart cooldown); the ownership check itself is a
+   cat-then-remove micro-race whose loser is age-guarded; and `launchctl` calls carry no
+   timeout, so a hung invocation persists until its lock ages out.
+2. **Fleet-console restarts race across per-bot watchdogs.** Every bot watchdog shares the fleet
+   label's cooldown stamp, and the read/check/kickstart sequence was non-atomic; watchdogs on
+   the same 120-second cadence could restart the fleet console simultaneously. FIXED in this
+   branch: a per-label restart mutex (same pid-stamp + age staleness mechanism as the
+   single-instance lock, 120-second staleness) serializes the cooldown-check/kickstart critical
+   section; a contender logs `restart already in progress` and records `RESTART-SUPPRESSED`.
+   Residual: the same sub-second reap race as the single-instance lock, and a corrupted
+   cooldown stamp now reads as unarmed with an `ignoring unparseable restart cooldown stamp`
+   line rather than wedging the check.
+3. **The renderer performed raw substring substitution without validating or escaping its
+   inputs.** A hostile bot name, home, or username became executable shell/Python fragments in
+   the rendered artifact while placeholder verification still passed. FIXED in this branch:
+   `render-watchdog.py` rejects identity values outside conservative charsets (bot name
+   `[a-z0-9][a-z0-9-]*`, absolute `[A-Za-z0-9._/-]` home without `..` segments, username
+   `[A-Za-z0-9_][A-Za-z0-9._-]*`) and rejects every reserved template-placeholder substring
+   with the typed exit `6 UNSAFE_VALUE` before any render. The reserved-token check prevents a
+   later sequential replacement from silently changing a value that was already inserted.
+   Renders still must come from owner-controlled inventory; validation is defense in depth,
+   not an authorization boundary.
+4. **Operational I/O outside the credential marker was masked.** FIXED in this branch: an
+   unopenable log fails at entry; a later append failure and log-rotation failure set a nonzero
+   result and emit stderr; bootstrap, kickstart, and cooldown-stamp failures also propagate.
+   When log storage itself is unavailable, a final state line cannot be persisted, so stderr and
+   process status are the only remaining operator evidence.
+
+## Source changes
+
+The change is intentionally limited to:
+
+- `deploy/templates/watchdog-script.sh`: implement the credential decision exits `0/1/3/4/5/6`,
+  marker transition handling, unmasked marker I/O, and the final-log escalation ladder;
+- `deploy/scripts/render-watchdog.py` and its tests: reject shell-unsafe values and reserved
+  placeholder substrings before deterministic substitution;
+- `tests/deploy/watchdog-credential-dead.test.ts`: add sanitized current-health regressions,
+  recovery/unknown coverage, precedence checks, and shell-wiring assertions;
+- `deploy/scripts/tests/test_watchdog_restart_policy.py`: expectation updates for the new exit
+  vocabulary, plus exact-exit (`== 1`) restart assertions;
+- `deploy/scripts/tests/test_watchdog_terminal_logout_e2e.py`: rendered-template behavioral
+  coverage of the marker state machine and marker I/O failures;
+- `deploy/scripts/tests/test_watchdog_credential_tiering.py` (new): rendered-template coverage of
+  the final-log ladder and tiering;
+- gate registration: `tests/deploy/watchdog-credential-dead.test.ts` joins `CURATED_TEST_PATHS`
+  in `scripts/push-gate.ts`, and CI installs `zsh` so the rendered-template suites run in the
+  quality workflow; and
+- the relevant public runbook section: document the normalized signals, no-restart behavior, and
+  proof required for marker clearing.
+
+No new renderer is created. `deploy/scripts/render-watchdog.py` remains the only supported render
+and placeholder-verification path. `deploy/managed-components.json` remains the component
+inventory.
+
+## Test strategy
+
+Implementation follows red-green-refactor:
+
+1. Add a sanitized degraded payload with stale `usable`, current `auth-required`, and active
+   fallback. Confirm the current decision block incorrectly exits `0`.
+2. Add a current `auth-required` turn-error payload without an active fallback. Confirm it also
+   fails red.
+3. Add fresh recovered and inconclusive payloads that pin exits `0` and `4` respectively.
+4. Pin crash/restart precedence and terminal transport-auth behavior.
+5. Pin shell routing so exits `3` and `4` never call `restart_label`.
+6. Pin the marker state transitions and unmasked marker-I/O failures.
+7. Run the focused TypeScript suite, canonical renderer tests, watchdog Python policy tests,
+   shell syntax, typecheck, test-integrity guard, and the repository's applicable branch gates.
+
+Tests execute the real embedded Python decision block extracted from the template. Static wiring
+assertions supplement but do not replace behavioral execution.
+
+## Fleet alignment and drift control
+
+Operational data stays in an owner-private directory outside the public repository. The rollout
+manifest records, per target:
+
+- source commit and template SHA-256;
+- renderer SHA-256;
+- bot name, home, bot port, and fleet port as private parameters;
+- expected rendered SHA-256;
+- installed preimage SHA-256 and backup path;
+- service and watchdog PIDs before and after;
+- authenticated health classification before and after;
+- expected marker state;
+- watchdog log interval and absence of bot restart; and
+- exact rollback command and target.
+
+Different rendered hashes are expected when parameters differ. Alignment means every artifact is
+reproducible from the same reviewed template and canonical renderer with recorded parameters, not
+that every host has byte-identical output.
+
+Installed scripts are never hand-edited. A target is aligned only when the canonical renderer
+reproduces its installed hash exactly and placeholder verification reports none remaining.
+
+## Canary and rollout
+
+Before any installation, run rendered scripts against captured, sanitized health fixtures in an
+isolated environment. No bot or service-manager label may be reachable from that harness.
+
+Use two live canaries after explicit execution-time approval:
+
+1. A credential-degraded, idle target proves the positive path: marker appears, the watchdog logs
+   `CREDENTIAL-DEAD`, the bot PID is unchanged, and no restart line occurs.
+2. A healthy, idle target proves the negative path: no marker appears, the watchdog's final log
+   state is `ok`, the bot PID is unchanged, and no restart line occurs. Note that a healthy idle
+   target classifies unknown-quiescent (exit `4`), not `recovered` — its startup usability proof
+   is past the 30-minute freshness TTL. This canary therefore proves the quiescent `ok` tier;
+   affirmative marker clearing is proven by the test harness fixtures, not by this canary.
+
+An active provider child, an unproven in-memory queue, ambiguous authenticated health, unexpected
+installed preimage, or unrelated watchdog contract drift excludes a target. An excluded target is
+recorded and skipped; it is not forced into alignment.
+
+After both canaries pass, continue one host at a time. Each host must pass preimage, render,
+transfer, checksum, watchdog-only restart, two-cycle observation, bot-PID continuity, marker, and
+authenticated-health gates before the next host begins. The bot application service is never
+restarted by the rollout procedure.
+
+## Rollback
+
+Every live installation first preserves a timestamped, mode-preserving backup. Rollback restores
+that exact preimage atomically and restarts only the watchdog service. A failed or inconclusive
+post-install gate stops the wave; it does not trigger a second attempt or proceed to another host.
+
+The source change remains separate from operational rollout receipts. A successful source test is
+not reported as fleet deployment, and a successful canary is not reported as complete fleet
+alignment.
+
+## Security and privacy
+
+- Health reads use the existing instance bearer without printing it.
+- No credential value, chat identifier, message content, private hostname, user account, or local
+  path is committed to the public repository.
+- Owner-private rollout receipts contain only the minimum host parameters and bounded metadata.
+- Provider inference probes, reauthentication, message sends, database writes, and application
+  restarts are outside this design.
+
+## Acceptance criteria
+
+Source acceptance requires:
+
+- the recorded stale-usable/current-auth-required shapes exit `3`;
+- fresh usable primary recovery exits `0`;
+- missing or stale inconclusive evidence exits `4`;
+- credential and unknown states never call `restart_label`;
+- markers transition only according to the table above;
+- marker mutation failures are observable and nonzero;
+- canonical render/verify tests pass with no placeholders; and
+- focused tests, typecheck, test-integrity, syntax, and applicable repository guards pass.
+
+Fleet acceptance requires separate owner-approved receipts proving both canaries and every included
+target. Exclusions and skipped hosts remain explicit; they cannot be counted as aligned.
+
+## Post-adjudication fail-closed amendment
+
+Current-head adversarial reproduction at `90d0ac913` found that the source gates above can pass
+while malformed or unauthenticated diagnostic evidence still authorizes restart or clears a
+credential marker. Source acceptance therefore also requires the following contract.
+
+### Health evidence boundary
+
+`HEALTH-UNKNOWN` is the typed outcome for missing diagnostic authentication, an empty or oversized
+body, malformed JSON, duplicate object keys, invalid top-level shape, non-object `whatsapp`,
+`whatsapp.connection`, `instance`, or `turn_capability` fields, and timestamps beyond the allowed
+future-skew bound. It sets the watchdog process exit to `2`, never calls `restart_label`, and never
+creates or clears the credential marker. Python decision exit `6` is reserved for this shell
+mapping. `CREDENTIAL-DEAD` outranks `HEALTH-UNKNOWN`; `HEALTH-UNKNOWN` outranks restart outcomes in
+the single final-state ladder because the bot diagnostic was not trustworthy.
+
+JSON decoding rejects duplicate keys at every nesting level. The shell rejects an empty body and a
+body larger than 64 KiB before exporting it to the Python decision process. Timestamp comparison
+accepts finite numeric seconds for diagnostic-generation/pong evidence, finite epoch-millisecond
+numbers for live turn-success/error evidence, and timezone-aware ISO values for either, all no more
+than five seconds in the future. A future success cannot supersede a current auth failure, and a
+future pong cannot prove a recovering connection fresh.
+
+### Token transport boundary
+
+The installed watchdog remains a self-contained rendered artifact. It therefore cannot assume that
+repository-relative TypeScript helpers survive beside `~/.local/bin/<instance>-watchdog`. The
+template uses a self-contained Python reader that mirrors the canonical token-file contract:
+owner-only real directory, owner-only regular mode-0600 non-symlink file, no-follow descriptor open,
+stable file/directory identity, bounded read, and exactly one
+`WHATSOUP_HEALTH_TOKEN=<64 lowercase hex>` assignment. Independent characterization tests cover
+the same accepted and rejected classes as `src/fleet/health-token-file.ts`; a shared executable
+fixture corpus remains follow-up work and no stronger parity claim is made. This intentional
+deployment-boundary duplication is preferable to an unresolved source-tree runtime dependency.
+
+The validated token is captured only in an unexported shell variable, passed by the zsh `print`
+builtin through `curl --config -` stdin, and then cleared. It never appears in curl argv, an
+environment variable, a new file, or a log. Missing or rejected token evidence skips the bot curl
+entirely and produces `HEALTH-UNKNOWN` rather than parsing the public `health.public.v1` envelope as
+diagnostic evidence.
+
+### Watchdog-internal failures
+
+A future cooldown stamp is invalid state, not an indefinitely active cooldown: record an error,
+avoid suppression, attempt the needed restart, and retain a nonzero watchdog result. A rejected
+`launchctl bootstrap`, a post-preflight log write failure, or log rotation failure is never masked.
+These failures remain observable through stderr/nonzero exit even when the log itself cannot accept
+the final record. Fleet kickstart failure follows the same `RESTART-FAILED`, nonzero, no-cooldown
+contract already proven for the bot label.
+
+### Marker and log-projection boundary
+
+Credential-marker access is confined beneath an opened, user-owned, non-group/world-writable log
+directory descriptor. The marker has three states: absent, a valid user-owned regular file without
+group/world write permission, or unsafe/unusable. Creation uses exclusive no-follow descriptor
+operations and mode `0600`; legacy owned `0644` markers remain valid. Clearing unlinks only a marker
+that passed the same type, owner, and mode checks. Symlinks, directories, wrong-owner files, and
+writable files are never followed, removed, or treated as credential evidence. An unsafe marker
+keeps the credential verdict where applicable but makes the watchdog invocation nonzero and raises
+the final operational state to `ERROR` unless a higher-ranked state such as `CREDENTIAL-DEAD`
+already applies.
+
+The fallback decision semantics remain presence-based: `None` can satisfy recovery,
+`auth-required` is a dead-credential signal, and every other non-null value remains exit `5`.
+Watchdog logs project only the fixed bounded text `fallbackReason=present`; arbitrary strings,
+control characters, large values, and non-string JSON values are never interpolated into logs.
