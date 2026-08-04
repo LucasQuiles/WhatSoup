@@ -395,6 +395,7 @@ describe('handleGetMessages', () => {
       type: 'unknown',
       timestamp: '',
       fromMe: false,
+      modelUsed: null,
     }]);
   });
 
@@ -433,6 +434,7 @@ describe('handleGetMessages', () => {
       timestamp: '2024-04-05T16:00:00.000Z',
       fromMe: true,
       rawMessage: '{"conversation":"hello"}',
+      modelUsed: null,
     }]);
   });
 
@@ -534,6 +536,7 @@ describe('handleSearchMessages', () => {
         type: 'unknown',
         timestamp: '',
         fromMe: false,
+        modelUsed: null,
       }],
       total: 1,
       query: 'receipt',

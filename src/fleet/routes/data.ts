@@ -106,6 +106,7 @@ function messageDto(row: MessageRow) {
     timestamp: string;
     fromMe: boolean;
     rawMessage?: string;
+    modelUsed: string | null;
   } = {
     pk: row.pk,
     conversationKey: stringOrEmpty(row.conversation_key),
@@ -115,6 +116,7 @@ function messageDto(row: MessageRow) {
     type: requiredString(row.content_type, 'unknown'),
     timestamp: isoFromMaybeUnix(row.timestamp),
     fromMe: row.is_from_me === 1,
+    modelUsed: typeof row.model_used === 'string' ? row.model_used : null,
   };
 
   if (typeof row.raw_message === 'string') {

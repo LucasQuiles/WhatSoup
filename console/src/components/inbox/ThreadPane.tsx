@@ -32,12 +32,13 @@ const LOAD_OLDER_NOTE = 'Load older messages'
 
 function MessageRow({ msg, isGroup }: { msg: Message; isGroup: boolean }) {
   const text = typeof msg.content === 'string' && msg.content.length > 0 ? msg.content : `[${msg.type}]`
+  const modelBadge = msg.modelUsed ? <span className="inbox-bub__model">{msg.modelUsed}</span> : null
   if (msg.fromMe) {
     return (
       <div className="inbox-mrow inbox-mrow--me">
         <div className="inbox-bub">
           {text}
-          <div className="inbox-bub__tm">{formatBubbleTime(msg.timestamp)}</div>
+          <div className="inbox-bub__tm">{modelBadge}{formatBubbleTime(msg.timestamp)}</div>
         </div>
       </div>
     )
@@ -48,7 +49,7 @@ function MessageRow({ msg, isGroup }: { msg: Message; isGroup: boolean }) {
       <div className="inbox-bub">
         {isGroup ? <div className="inbox-bub__who">{msg.senderName}</div> : null}
         {text}
-        <div className="inbox-bub__tm">{formatBubbleTime(msg.timestamp)}</div>
+        <div className="inbox-bub__tm">{modelBadge}{formatBubbleTime(msg.timestamp)}</div>
       </div>
     </div>
   )

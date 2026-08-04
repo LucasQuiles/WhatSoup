@@ -42,6 +42,7 @@ const MINIMAL_SCHEMA = `
     edited_at TEXT,
     deleted_at TEXT,
     raw_message TEXT,
+    model_used TEXT,
     updated_at TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
   );

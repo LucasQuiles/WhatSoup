@@ -34,6 +34,7 @@ export interface MessageRow {
   timestamp: number;
   is_from_me: number;
   raw_message: string | null;
+  model_used: string | null;
 }
 
 /** Feed-path message row — raw_message intentionally excluded. */
@@ -289,7 +290,8 @@ export class FleetDbReader {
 
       return queryAll<MessageRow>(db, `
         SELECT pk, conversation_key, chat_jid, sender_jid, sender_name,
-               message_id, content, content_type, timestamp, is_from_me, raw_message
+               message_id, content, content_type, timestamp, is_from_me, raw_message,
+               model_used
         FROM messages m
         WHERE m.conversation_key = ? AND m.deleted_at IS NULL ${wherePk}
           AND m.pk = (
