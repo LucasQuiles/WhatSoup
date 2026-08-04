@@ -17,6 +17,7 @@ import {
 import type { SessionContext } from '../../mcp/types.ts';
 import { toConversationKey } from '../../core/conversation-key.ts';
 import { createChildLogger } from '../../logger.ts';
+import { MS_PER_HOUR } from '../../lib/time-units.ts';
 import {
   createSession,
   incrementMessageCount,
@@ -4083,6 +4084,6 @@ export class SessionManager {
 export function formatAge(isoUtcString: string): string {
   const ms = Date.now() - new Date(isoUtcString).getTime();
   if (ms < 60_000) return `${Math.floor(ms / 1000)}s ago`;
-  if (ms < 3_600_000) return `${Math.floor(ms / 60_000)}m ago`;
-  return `${Math.floor(ms / 3_600_000)}h ago`;
+  if (ms < MS_PER_HOUR) return `${Math.floor(ms / 60_000)}m ago`;
+  return `${Math.floor(ms / MS_PER_HOUR)}h ago`;
 }

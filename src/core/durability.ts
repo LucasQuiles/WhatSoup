@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { createChildLogger } from '../logger.ts';
 import { emitAlertChecked, clearAlertSourceChecked } from '../lib/emit-alert.ts';
 import { gateQuarantineClear } from '../lib/fleet-health-gate.ts';
-import { MS_PER_MINUTE } from '../lib/time-units.ts';
+import { MS_PER_HOUR, MS_PER_MINUTE } from '../lib/time-units.ts';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
@@ -2869,7 +2869,7 @@ export class DurabilityEngine {
             ? 'under_1m'
             : retryDelayMs < 300_000
               ? '1m_to_5m'
-              : retryDelayMs < 3_600_000
+              : retryDelayMs < MS_PER_HOUR
                 ? '5m_to_1h'
                 : 'over_1h';
       const group: OutboundFailureHealthGroup = evidence.schema === OUTBOUND_FAILURE_EVIDENCE_SCHEMA

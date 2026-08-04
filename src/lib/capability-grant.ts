@@ -1,4 +1,5 @@
 import { createChildLogger } from '../logger.ts';
+import { MS_PER_HOUR } from './time-units.ts';
 
 /**
  * Temporary capability grant manager.
@@ -189,7 +190,7 @@ export function parseDurationMs(input: string): number | null {
   const multiplier =
     unit === 's' ? 1_000 :
     unit === 'm' ? 60_000 :
-    unit === 'h' ? 3_600_000 :
+    unit === 'h' ? MS_PER_HOUR :
     86_400_000; // d
   const ms = n * multiplier;
   if (!Number.isSafeInteger(ms)) return null;
@@ -203,8 +204,8 @@ export function parseDurationMs(input: string): number | null {
 export function formatDurationMs(ms: number): string {
   if (ms <= 0) return '0s';
   if (ms < 60_000) return `${Math.round(ms / 1000)}s`;
-  if (ms < 3_600_000) return `${Math.round(ms / 60_000)}m`;
-  if (ms < 86_400_000) return `${Math.round(ms / 3_600_000)}h`;
+  if (ms < MS_PER_HOUR) return `${Math.round(ms / 60_000)}m`;
+  if (ms < 86_400_000) return `${Math.round(ms / MS_PER_HOUR)}h`;
   return `${Math.round(ms / 86_400_000)}d`;
 }
 

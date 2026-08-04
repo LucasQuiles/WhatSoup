@@ -12,6 +12,7 @@
 // With no env set the result is byte-identical to the prior hardcoded values.
 
 import { type DistillBudgetConfig } from './handoff-distill-gate.ts';
+import { MS_PER_HOUR } from '../../lib/time-units.ts';
 
 export interface HandoffDistillConfig {
   sweepMs: number;
@@ -46,7 +47,7 @@ export function resolveHandoffDistillConfig(env: Env): HandoffDistillConfig {
     env['WHATSOUP_HANDOFF_DISTILL_SWEEP_MS'],
     60_000,
     10_000, // 10s floor — sub-10s sweeps would hammer the runner machinery.
-    3_600_000, // 1h ceiling.
+    MS_PER_HOUR, // 1h ceiling.
     false,
   );
   const growthThreshold = resolveNumber(
@@ -79,7 +80,7 @@ export function resolveHandoffDistillConfig(env: Env): HandoffDistillConfig {
   );
   const windowMs = resolveNumber(
     env['WHATSOUP_HANDOFF_DISTILL_WINDOW_MS'],
-    3_600_000,
+    MS_PER_HOUR,
     60_000,
     86_400_000,
     false,
