@@ -79,7 +79,7 @@ function fakeInstance(overrides: Partial<DiscoveredInstance> = {}): DiscoveredIn
 }
 
 function depsFor(instance: DiscoveredInstance | null = null): OpsDeps {
-  return makeDeps({ discovery: { getInstance: vi.fn(() => instance ?? undefined), scan: vi.fn() } as any });
+  return makeDeps({ discovery: { getInstance: vi.fn(() => instance ?? undefined) } });
 }
 
 // ---------------------------------------------------------------------------
