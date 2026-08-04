@@ -207,7 +207,7 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 | `docs/superpowers/plans/2026-07-29-maybe-sent-ambiguity-episode.md` | plan | unknown | fallback | maybe-sent-ambiguity-episode | 2026-07-30 |  |
 | `docs/superpowers/plans/2026-07-29-portable-startup-notification-protocol.md` | plan | unknown | fallback | portable-startup-notification-protocol | 2026-07-30 |  |
 | `docs/superpowers/plans/2026-07-29-pr-metadata-guard.md` | plan | unknown | fallback | pr-metadata-guard | 2026-07-31 |  |
-| `docs/superpowers/plans/2026-08-03-watchdog-auth-required-contract.md` | plan | active | body-marker | watchdog-auth-required-contract | 2026-08-03 |  |
+| `docs/superpowers/plans/2026-08-03-watchdog-auth-required-contract.md` | plan | active | body-marker | watchdog-auth-required-contract | 2026-08-04 |  |
 
 ### docs/superpowers/reviews  _(4 entries)_
 
@@ -258,7 +258,7 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 | `docs/superpowers/specs/2026-07-29-launchd-restart-policy-2682-design.md` | spec | active | body-marker | launchd-restart-policy-2682-design | 2026-07-30 |  |
 | `docs/superpowers/specs/2026-07-29-maybe-sent-ambiguity-episode-design.md` | spec | unknown | fallback | maybe-sent-ambiguity-episode-design | 2026-07-30 |  |
 | `docs/superpowers/specs/2026-07-29-portable-startup-notification-protocol-design.md` | spec | unknown | body-marker | portable-startup-notification-protocol-design | 2026-07-30 |  |
-| `docs/superpowers/specs/2026-08-03-watchdog-auth-required-contract-design.md` | spec | active | body-marker | watchdog-auth-required-contract-design | 2026-08-03 |  |
+| `docs/superpowers/specs/2026-08-03-watchdog-auth-required-contract-design.md` | spec | active | body-marker | watchdog-auth-required-contract-design | 2026-08-04 |  |
 
 ### docs/superpowers/specs/kill-session-transactional-cancellation  _(3 entries)_
 
@@ -279,4 +279,4 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 ---
 
 - Derived from `docs/work-index.json`
-- Generated at 2026-08-04T04:22:51Z from commit `82c297337b5f6428e434eff627a529ddaa3e867e`
+- Generated at 2026-08-04T05:27:23Z from commit `610957d0fd058b3a03a46975b4cd381e86c11f86`
