@@ -25,8 +25,8 @@ scoped markdown files currently on disk.
 | Dimension | Breakdown |
 |---|---|
 | Kind | handoff=8, plan=56, review=4, spec=43, state=1 |
-| Status | active=27, closed=4, completed=35, deferred=7, pending=15, unknown=24 |
-| Status source | body-marker=95, fallback=16, state-md-status=1 |
+| Status | active=29, closed=4, completed=35, deferred=7, pending=15, unknown=22 |
+| Status source | body-marker=97, fallback=14, state-md-status=1 |
 
 ## Inconsistencies
 
@@ -34,7 +34,7 @@ scoped markdown files currently on disk.
 
 ## Synthesis
 
-### Active (27)
+### Active (29)
 
 | Path | Kind | Topic | Status source |
 |------|------|-------|---------------|
@@ -49,6 +49,7 @@ scoped markdown files currently on disk.
 | `docs/superpowers/plans/2026-07-28-runtime-health-signal-dispositions.md` | plan | runtime-health-signal-dispositions | body-marker |
 | `docs/superpowers/plans/2026-07-28-turn-recovery-safety.md` | plan | turn-recovery-safety | body-marker |
 | `docs/superpowers/plans/2026-07-29-launchd-restart-policy-2682.md` | plan | launchd-restart-policy-2682 | body-marker |
+| `docs/superpowers/plans/2026-08-03-watchdog-auth-required-contract.md` | plan | watchdog-auth-required-contract | body-marker |
 | `docs/superpowers/specs/2026-07-09-wall-to-wall-audit-remediation-design.md` | spec | wall-to-wall-audit-remediation-design | body-marker |
 | `docs/superpowers/specs/2026-07-11-central-hub-release-proof-pilot-design.md` | spec | central-hub-release-proof-pilot-design | body-marker |
 | `docs/superpowers/specs/2026-07-15-headless-fallback-runtime-alignment-design.md` | spec | headless-fallback-runtime-alignment-design | body-marker |
@@ -60,13 +61,14 @@ scoped markdown files currently on disk.
 | `docs/superpowers/specs/2026-07-28-runtime-health-signal-dispositions-design.md` | spec | runtime-health-signal-dispositions-design | body-marker |
 | `docs/superpowers/specs/2026-07-28-turn-recovery-safety-design.md` | spec | turn-recovery-safety-design | body-marker |
 | `docs/superpowers/specs/2026-07-29-launchd-restart-policy-2682-design.md` | spec | launchd-restart-policy-2682-design | body-marker |
+| `docs/superpowers/specs/2026-08-03-watchdog-auth-required-contract-design.md` | spec | watchdog-auth-required-contract-design | body-marker |
 | `docs/superpowers/specs/kill-session-transactional-cancellation/design.md` | spec | design | body-marker |
 | `docs/superpowers/specs/kill-session-transactional-cancellation/requirements.md` | spec | requirements | body-marker |
 | `docs/superpowers/specs/provider-event-lifecycle/design.md` | spec | design | body-marker |
 | `docs/superpowers/specs/provider-event-lifecycle/requirements.md` | spec | requirements | body-marker |
 | `docs/superpowers/specs/provider-event-lifecycle/tasks.md` | spec | tasks | body-marker |
 
-### Unknown-status — triage needed (24)
+### Unknown-status — triage needed (22)
 
 | Path | Kind | Topic | Last Mod |
 |------|------|-------|----------|
@@ -82,7 +84,6 @@ scoped markdown files currently on disk.
 | `docs/superpowers/plans/2026-07-29-maybe-sent-ambiguity-episode.md` | plan | maybe-sent-ambiguity-episode | 2026-07-30 |
 | `docs/superpowers/plans/2026-07-29-portable-startup-notification-protocol.md` | plan | portable-startup-notification-protocol | 2026-07-30 |
 | `docs/superpowers/plans/2026-07-29-pr-metadata-guard.md` | plan | pr-metadata-guard | 2026-07-31 |
-| `docs/superpowers/plans/2026-08-03-watchdog-auth-required-contract.md` | plan | watchdog-auth-required-contract | 2026-08-03 |
 | `docs/superpowers/specs/2026-07-11-turn-lifecycle-fitness-extraction-design.md` | spec | turn-lifecycle-fitness-extraction-design | 2026-07-11 |
 | `docs/superpowers/specs/2026-07-17-macos-credential-durability-design.md` | spec | macos-credential-durability-design | 2026-07-17 |
 | `docs/superpowers/specs/2026-07-23-agent-reliability-remediation-design.md` | spec | agent-reliability-remediation-design | 2026-07-27 |
@@ -93,7 +94,6 @@ scoped markdown files currently on disk.
 | `docs/superpowers/specs/2026-07-29-incident-evaluator-core-design.md` | spec | incident-evaluator-core-design | 2026-07-31 |
 | `docs/superpowers/specs/2026-07-29-maybe-sent-ambiguity-episode-design.md` | spec | maybe-sent-ambiguity-episode-design | 2026-07-30 |
 | `docs/superpowers/specs/2026-07-29-portable-startup-notification-protocol-design.md` | spec | portable-startup-notification-protocol-design | 2026-07-30 |
-| `docs/superpowers/specs/2026-08-03-watchdog-auth-required-contract-design.md` | spec | watchdog-auth-required-contract-design | 2026-08-03 |
 
 ### Cross-tree topic clusters (4)
 
@@ -207,7 +207,7 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 | `docs/superpowers/plans/2026-07-29-maybe-sent-ambiguity-episode.md` | plan | unknown | fallback | maybe-sent-ambiguity-episode | 2026-07-30 |  |
 | `docs/superpowers/plans/2026-07-29-portable-startup-notification-protocol.md` | plan | unknown | fallback | portable-startup-notification-protocol | 2026-07-30 |  |
 | `docs/superpowers/plans/2026-07-29-pr-metadata-guard.md` | plan | unknown | fallback | pr-metadata-guard | 2026-07-31 |  |
-| `docs/superpowers/plans/2026-08-03-watchdog-auth-required-contract.md` | plan | unknown | fallback | watchdog-auth-required-contract | 2026-08-03 |  |
+| `docs/superpowers/plans/2026-08-03-watchdog-auth-required-contract.md` | plan | active | body-marker | watchdog-auth-required-contract | 2026-08-03 |  |
 
 ### docs/superpowers/reviews  _(4 entries)_
 
@@ -258,7 +258,7 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 | `docs/superpowers/specs/2026-07-29-launchd-restart-policy-2682-design.md` | spec | active | body-marker | launchd-restart-policy-2682-design | 2026-07-30 |  |
 | `docs/superpowers/specs/2026-07-29-maybe-sent-ambiguity-episode-design.md` | spec | unknown | fallback | maybe-sent-ambiguity-episode-design | 2026-07-30 |  |
 | `docs/superpowers/specs/2026-07-29-portable-startup-notification-protocol-design.md` | spec | unknown | body-marker | portable-startup-notification-protocol-design | 2026-07-30 |  |
-| `docs/superpowers/specs/2026-08-03-watchdog-auth-required-contract-design.md` | spec | unknown | fallback | watchdog-auth-required-contract-design | 2026-08-03 |  |
+| `docs/superpowers/specs/2026-08-03-watchdog-auth-required-contract-design.md` | spec | active | body-marker | watchdog-auth-required-contract-design | 2026-08-03 |  |
 
 ### docs/superpowers/specs/kill-session-transactional-cancellation  _(3 entries)_
 
@@ -279,4 +279,4 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 ---
 
 - Derived from `docs/work-index.json`
-- Generated at 2026-08-04T03:12:55Z from commit `9fc263610a0d280d5f6dc597195e6971af07f414`
+- Generated at 2026-08-04T03:50:34Z from commit `993192eb0a689714ede4263235432f8b302c3b6a`

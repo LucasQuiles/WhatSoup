@@ -1,5 +1,9 @@
 # Watchdog Auth-Required Contract — TDD Implementation Plan
 
+**Status:** Active — source implementation and publication hardening are complete locally;
+final merge-gate verification and PR publication remain in progress. Host canary, rollout,
+and installed-state mutation remain owner-gated and unperformed.
+
 > **For agentic workers:** use `superpowers:subagent-driven-development` or
 > `superpowers:executing-plans` task-by-task. Keep the checkboxes current.
 
@@ -24,16 +28,18 @@ plan before proceeding.
 
 ## Contract to implement
 
-Liveness and restart policy have precedence over credential classification.
-After liveness passes, the embedded Python block returns exactly:
+Diagnostic object-shape validation precedes every mutation-authorizing liveness
+decision. After that boundary passes, liveness and restart policy have
+precedence over credential classification. The embedded Python block returns:
 
 | Exit | Meaning | Shell action | Marker action | Final state |
 |---:|---|---|---|---|
 | 0 | recovered | no restart | remove only if it exists | `ok` |
-| 1 | restart-worthy liveness/malformed body | existing restart path | unchanged | `RESTARTED` or `RESTART-SUPPRESSED` |
+| 1 | restart-worthy trusted liveness evidence | existing restart path | unchanged | `RESTARTED`, `RESTART-SUPPRESSED`, or `RESTART-FAILED` |
 | 3 | credential dead | never restart | create/retain | `CREDENTIAL-DEAD` |
 | 4 | unknown, no active fallback | never restart | unchanged | `CREDENTIAL-UNKNOWN` only if marker exists; otherwise `ok` |
 | 5 | unknown, active fallback | never restart | unchanged | `CREDENTIAL-UNKNOWN` |
+| 6 | untrusted diagnostic evidence | never restart | unchanged | `HEALTH-UNKNOWN` (shell exit `2`) |
 
 Dead is any of:
 
@@ -60,7 +66,8 @@ Use fallback-reason **presence**, not an allowlist, for the exit-5 predicate.
 Accepted database-compatibility drain and terminal transport-auth branches are
 evidence-free no-restart paths: change both from exit 0 to exit 4. Keep their
 existing diagnostic stderr lines. The unauthenticated public `/health` envelope
-lacks `whatsapp`, so it remains liveness exit 1; it must never reach recovery.
+lacks the diagnostic object shape, so it routes to exit 6 and must never reach
+recovery or restart.
 
 `last_turn_error_at` and `last_successful_turn_at` are live JSON epoch-
 millisecond numbers (`normalizeNumberOrNull`), not ISO strings. The parser must
@@ -72,17 +79,18 @@ timestamps parse and success is later.
 
 Final state uses an upgrade-only ladder:
 
-`CREDENTIAL-DEAD` (4) > `RESTARTED`/`RESTART-SUPPRESSED` (3) >
+`CREDENTIAL-DEAD` (6) > `HEALTH-UNKNOWN` (5) >
+`RESTARTED`/`RESTART-SUPPRESSED`/`RESTART-FAILED` (4) > `ERROR` (3) >
 `CREDENTIAL-UNKNOWN` (2) > `ok` (1). Equal rank retains the first writer.
 `restart_label` itself records restart outcome at permanent-stop, cooldown, and
 kickstart terminal points. Call sites, including fleet health, do not assign a
 lower final state afterward.
 
-Only credential-marker mutation failure may make the watchdog invocation
-nonzero. The existing `StartInterval=120`, `KeepAlive=false`, no
-`SuccessfulExit` plist behavior means that must not be used to trigger a
-restart. Marker failure must be logged through `log()` and must never call
-`restart_label`.
+Untrusted diagnostic evidence uses shell exit `2`; marker, log, rotation,
+bootstrap, kickstart, and cooldown-stamp failures also make the invocation
+nonzero without authorizing an unrelated restart. The existing
+`StartInterval=120`, `KeepAlive=false`, no `SuccessfulExit` plist behavior
+means launchd does not use those codes as a restart trigger.
 
 ## Non-negotiable source constraints
 
@@ -98,17 +106,17 @@ restart. Marker failure must be logged through `log()` and must never call
   contain `BOT_NAME`, `BOT_PORT`, `FLEET_PORT`, `USERNAME`, or `__HOME__` as a
   substring. Preserve the header’s `USERNAME` token.
 - Retain the TS static pins: exit-3 is the first `py_rc` branch; the 4/5 branch
-  precedes generic nonzero restart; literal `touch "$CRED_MARKER"` and
-  `rm -f "$CRED_MARKER"` remain inside checked guards; bearer-auth test block
-  stays byte-identical.
+  precedes generic nonzero restart; marker state/create/clear operations route
+  only through the descriptor-confined helper; bearer-auth transport remains
+  absent from curl argv.
 - New test code must not discard stderr. Existing harness skips are not proof:
   the final pytest command must report zero skipped.
 - Do not place credentials, chat IDs/content, private hostnames, accounts, or
   local paths in committed fixtures, logs, comments, commit messages, or docs.
-- Do not change `deploy/scripts/render-watchdog.py`,
-  `deploy/managed-components.json`, or the terminal-logout E2E test unless a
-  newly observed contradiction proves it necessary. The expected outcome is
-  that they remain byte-identical and pass.
+- Do not change `deploy/managed-components.json`. Change
+  `deploy/scripts/render-watchdog.py` or the terminal-logout E2E test only when
+  a reproduced contradiction proves it necessary; the publication-blocker
+  wave below records both justified changes and their regression tests.
 
 ## Known limitations to record, not conceal
 
@@ -125,7 +133,7 @@ authorized rollout phase. Do not claim a fleet console consumes the marker.
 
 ## Preflight and execution discipline
 
-- [ ] Confirm repository identity and a clean starting state:
+- [x] Confirm repository identity and a clean starting state:
 
   ```bash
   git rev-parse --show-toplevel
@@ -137,7 +145,7 @@ authorized rollout phase. Do not claim a fleet console consumes the marker.
   and no unrelated changes. Stop rather than overwrite a dirty overlapping
   change.
 
-- [ ] Activate and prove Node **24.15.0** before every `npx`/`npm` command.
+- [x] Activate and prove Node **24.15.0** before every `npx`/`npm` command.
   The review environment observed `v26.5.1`, which is out of the repository
   range and is inconclusive for JavaScript test results.
 
@@ -155,7 +163,7 @@ authorized rollout phase. Do not claim a fleet console consumes the marker.
   already invoke `scripts/run-with-pinned-node.sh`; direct `npx vitest` needs
   this explicit shell activation.
 
-- [ ] Use TDD per task: add/adjust the named tests, run the focused command and
+- [x] Use TDD per task: add/adjust the named tests, run the focused command and
   observe the expected red failure, implement the smallest change, rerun green,
   then commit only task-owned paths. A masked failure, timeout, or skip is
   inconclusive, not green.
@@ -166,21 +174,21 @@ authorized rollout phase. Do not claim a fleet console consumes the marker.
 `docs/superpowers/specs/2026-08-03-watchdog-auth-required-contract-design.md`,
 new `docs/superpowers/plans/2026-08-03-watchdog-auth-required-contract.md`.
 
-- [ ] Amend the design spec before code so it states exits 0/1/3/4/5, the
+- [x] Amend the design spec before code so it states exits 0/1/3/4/5, the
   table above, exit-4 stderr silence, exit-5 fallback diagnostics, and D2’s
   drain/terminal-auth exit-4 marker retention.
-- [ ] Replace the original “current by construction” wording with: fallback
+- [x] Replace the original “current by construction” wording with: fallback
   reason **presence** is current window state, but its value can be a frozen
   original arm reason; exact `auth-required` remains sound but incomplete.
-- [ ] Add the dead-set boundary, all known limitations above, and canary wording:
+- [x] Add the dead-set boundary, all known limitations above, and canary wording:
   healthy idle is an unknown-quiescent `ok` tier test; fixture harness proves
   affirmative clearing. The operational canary remains out of this source plan.
-- [ ] Document the final-state ladder and that only marker mutation failure
+- [x] Document the final-state ladder and that only marker mutation failure
   returns nonzero. Include source changes for restart-policy tests, tiering
   suite, curated TS test registration, and CI zsh installation.
-- [ ] Copy the final contents of this reviewed plan into the repository path
+- [x] Copy the final contents of this reviewed plan into the repository path
   named above without embedding the private source-plan pathname.
-- [ ] Commit only those docs:
+- [x] Commit only those docs:
 
   ```bash
   git add docs/superpowers/specs/2026-08-03-watchdog-auth-required-contract-design.md \
@@ -194,41 +202,41 @@ new `docs/superpowers/plans/2026-08-03-watchdog-auth-required-contract.md`.
 `tests/deploy/watchdog-credential-dead.test.ts`,
 `deploy/scripts/tests/test_watchdog_restart_policy.py`.
 
-- [ ] Update TS fixtures so `recovered` includes all four recovery fields plus
+- [x] Update TS fixtures so `recovered` includes all four recovery fields plus
   `instance.fallbackReason: null`. Use `epochMsAgo(seconds): number` for turn
   timestamps; retain ISO timestamps only for `whatsapp.connection.last_pong_at`.
-- [ ] Add decision tests for: status dead signal; degraded dead signal; the
+- [x] Add decision tests for: status dead signal; degraded dead signal; the
   stale-usable/auth-required problem shape; exact fallback reason; current
   auth error; a later successful turn; absent/null capability; stale idle;
   bare `usable`; all non-dead status values; non-auth active fallback; public
   envelope exit 1; liveness exit-1 precedence; terminal-auth exit 4; accepted
   drain exit 4. Assert exit-4 is credential-stderr-silent and exit-5 emits
   `CREDENTIAL-UNKNOWN`.
-- [ ] Keep the bearer-auth describe byte-identical. Update static routing pins
+- [x] Keep the bearer-auth describe byte-identical. Update static routing pins
   to require 3 first, a 4/5 no-restart/no-marker branch before generic nonzero,
   and recovery’s checked removal path.
-- [ ] Update Python policy fixtures: missing credential evidence now means
+- [x] Update Python policy fixtures: missing credential evidence now means
   exit 4; add fresh recovered evidence to keep exit-0 coverage. Change accepted
   drain and terminal-auth expectations to 4. In every assertion whose meaning
   is “restart-worthy,” use exact `== 1`, not `!= 0`. Commit that assertion
   tightening separately after the load-bearing change so a failure is localizable.
-- [ ] Run and preserve expected red results:
+- [x] Run and preserve expected red results:
 
   ```bash
   npx vitest run --pool=forks tests/deploy/watchdog-credential-dead.test.ts
   python3 -m pytest deploy/scripts/tests/test_watchdog_restart_policy.py --import-mode=importlib -q
   ```
 
-- [ ] Implement the classifier after the unchanged liveness branch. Numeric
+- [x] Implement the classifier after the unchanged liveness branch. Numeric
   timestamp parsing must precede ISO fallback. Set dead-signal text without
   secrets; calculate recovery precisely; emit 5 only for non-null fallback;
   otherwise emit 4. Change accepted drain and terminal-auth to exit 4.
-- [ ] Rewrite the template marker comment to say “last conclusively dead,”
+- [x] Rewrite the template marker comment to say “last conclusively dead,”
   “cleared only by exit 0,” “4/5 retain,” and “external alert paths may stat
   this file (no in-repo consumer).”
-- [ ] Add a minimal 4/5 `:` routing branch before generic nonzero restart; do
+- [x] Add a minimal 4/5 `:` routing branch before generic nonzero restart; do
   not yet alter final-state behavior here. Keep 0 as the sole removal path.
-- [ ] Run green, including the byte-unchanged terminal E2E and renderer test:
+- [x] Run green, including the byte-unchanged terminal E2E and renderer test:
 
   ```bash
   npx vitest run --pool=forks tests/deploy/watchdog-credential-dead.test.ts
@@ -237,7 +245,7 @@ new `docs/superpowers/plans/2026-08-03-watchdog-auth-required-contract.md`.
     deploy/scripts/tests/test_render_watchdog.py --import-mode=importlib -q
   ```
 
-- [ ] Commit classifier/routing and then the exact-exit assertion hardening as
+- [x] Commit classifier/routing and then the exact-exit assertion hardening as
   two commits:
 
   ```bash
@@ -250,27 +258,27 @@ new `docs/superpowers/plans/2026-08-03-watchdog-auth-required-contract.md`.
 **Files:** template, TS static test, new
 `deploy/scripts/tests/test_watchdog_credential_tiering.py`.
 
-- [ ] Create a pytest rendered-template harness with isolated HOME, unique bot
+- [x] Create a pytest rendered-template harness with isolated HOME, unique bot
   names (to avoid `/tmp` lock collision), deterministic curl/launchctl stubs,
   and helpers for dead, recovered, unknown-quiescent, and unknown-fallback
   authenticated bodies. `run()` captures output with a timeout; test assertions
   inspect output and log/call files. The suite is marked skip-if-zsh-missing,
   but the final command must have zero skips.
-- [ ] Add red tests for all eight marker table rows, no restart on exits 3/4/5,
+- [x] Add red tests for all eight marker table rows, no restart on exits 3/4/5,
   exit-0 marker clearing, fallback diagnostics, restart kickstart outcome,
   cooldown/permanent-stop suppressed outcome, and credential-dead outranking a
   fleet restart. Seed restart cooldown using the same `$LOG_DIR/<label>.last-restart`
   path and epoch-second content used by the template.
-- [ ] Add `wd_rank`/`wd_note` after `log()`. It only upgrades `WD_FINAL`.
+- [x] Add `wd_rank`/`wd_note` after `log()`. It only upgrades `WD_FINAL`.
   `restart_label` calls `wd_note RESTART-SUPPRESSED` for permanent-stop and
   cooldown and `wd_note RESTARTED` immediately before kickstart. Do not change
   its return contract or add `WD_FINAL` assignments at callers/fleet branch.
-- [ ] In the exit-3 branch call `wd_note CREDENTIAL-DEAD`. In the 4/5 branch,
+- [x] In the exit-3 branch call `wd_note CREDENTIAL-DEAD`. In the 4/5 branch,
   call `wd_note CREDENTIAL-UNKNOWN` only if exit is 5 or marker exists. The
   branch never creates/removes a marker and never restarts.
-- [ ] Extend the TS static pin to require `CREDENTIAL-UNKNOWN` in the 4/5
+- [x] Extend the TS static pin to require `CREDENTIAL-UNKNOWN` in the 4/5
   branch and no `restart_label`, `touch`, or removal there.
-- [ ] Verify red then green:
+- [x] Verify red then green:
 
   ```bash
   python3 -m pytest deploy/scripts/tests/test_watchdog_credential_tiering.py --import-mode=importlib -q
@@ -281,7 +289,7 @@ new `docs/superpowers/plans/2026-08-03-watchdog-auth-required-contract.md`.
     deploy/scripts/tests/test_render_watchdog.py --import-mode=importlib -q
   ```
 
-- [ ] Commit:
+- [x] Commit:
 
   ```bash
   git commit -m "fix(deploy): record watchdog final-state escalation ladder"
@@ -291,24 +299,24 @@ new `docs/superpowers/plans/2026-08-03-watchdog-auth-required-contract.md`.
 
 **Files:** template and tiering suite.
 
-- [ ] Add red whole-script tests for marker creation failure and marker removal
+- [x] Add red whole-script tests for marker creation failure and marker removal
   failure. Use a non-root-only permission fixture for creation (preserve the
   pre-existing log file so logging remains testable) and a marker directory
   containing a child for removal. Restore permissions in `finally`.
-- [ ] Require each test to prove: nonzero watchdog exit, exact `ERROR: failed
+- [x] Require each test to prove: nonzero watchdog exit, exact `ERROR: failed
   to create|clear credential marker` logged through the normal log file,
   expected marker retention/absence, unchanged final state (`CREDENTIAL-DEAD`
   on create failure, `ok` on clear failure), and no kickstart. The non-root
   skip is a test-environment limitation; run this proof on a non-root runner
   before accepting the task.
-- [ ] Initialize `WD_EXIT=0`; set it to 1 only after guarded
+- [x] Initialize `WD_EXIT=0`; set it to 1 only after guarded
   `touch "$CRED_MARKER" 2>>"$LOG"` or guarded
   `rm -f "$CRED_MARKER" 2>>"$LOG"` fails. Use `log()` for the error. At the
   common tail retain `log "$WD_FINAL"` then `exit "$WD_EXIT"`. Do not use
   `2>/dev/null || true`; do not restart on mutation failure.
-- [ ] Verify green with the Task-3 command. Assert existing restart-policy
+- [x] Verify green with the Task-3 command. Assert existing restart-policy
   full-script paths still return 0; only marker mutation failure returns 1.
-- [ ] Commit:
+- [x] Commit:
 
   ```bash
   git commit -m "fix(deploy): fail closed on watchdog credential marker I/O"
@@ -319,19 +327,19 @@ new `docs/superpowers/plans/2026-08-03-watchdog-auth-required-contract.md`.
 **Files:** `scripts/push-gate.ts`, `.github/workflows/quality.yml`,
 `docs/runbook.md`.
 
-- [ ] Append `tests/deploy/watchdog-credential-dead.test.ts` to
+- [x] Append `tests/deploy/watchdog-credential-dead.test.ts` to
   `CURATED_TEST_PATHS`; no new registry exists. In quality workflow’s existing
   apt install line add `zsh`, with a concise comment that it prevents rendered
   watchdog suites from skipping. Do not alter other jobs.
-- [ ] Add a **Launchd Watchdog Credential Marker** subsection after the
+- [x] Add a **Launchd Watchdog Credential Marker** subsection after the
   database compatibility section and before Quick Health Check in `## 4. Health
   Endpoint`. Name the per-host launchd watchdog explicitly; do not confuse it
   with section 5.8 operation tracker or BOT ERRORS.
-- [ ] Document marker path generically, the table above, authenticated-health
+- [x] Document marker path generically, the table above, authenticated-health
   prerequisite, final-state ladder, reauth guidance, expected post-reauth
   unknown interval, marker-I/O error handling, and known limitations. Check
   actual heading anchors at edit time instead of citing guessed section numbers.
-- [ ] Verify:
+- [x] Verify:
 
   ```bash
   npx vitest run --pool=forks tests/scripts/push-gate-manifest.test.ts \
@@ -341,7 +349,7 @@ new `docs/superpowers/plans/2026-08-03-watchdog-auth-required-contract.md`.
   npm run typecheck:scripts
   ```
 
-- [ ] Commit CI/gate then runbook separately:
+- [x] Commit CI/gate then runbook separately:
 
   ```bash
   git commit -m "test(scripts): gate watchdog credential suite and install zsh"
@@ -350,7 +358,7 @@ new `docs/superpowers/plans/2026-08-03-watchdog-auth-required-contract.md`.
 
 ## Task 6 — Final source verification and handoff
 
-- [ ] Re-run the exact Node 24.15.0 assertion, then:
+- [x] Re-run the exact Node 24.15.0 assertion, then:
 
   ```bash
   npx vitest run --pool=forks tests/deploy/watchdog-credential-dead.test.ts
@@ -364,7 +372,7 @@ new `docs/superpowers/plans/2026-08-03-watchdog-auth-required-contract.md`.
 
   Require zero pytest skips; if a skip occurs, stop and fix the runner/CI proof.
 
-- [ ] Render, syntax-check, and verify one sanitized temporary artifact. Remove
+- [x] Render, syntax-check, and verify one sanitized temporary artifact. Remove
   only that explicit temporary file after all three commands succeed:
 
   ```bash
@@ -377,14 +385,14 @@ new `docs/superpowers/plans/2026-08-03-watchdog-auth-required-contract.md`.
   rm -f "$render_out"
   ```
 
-- [ ] Run quality and branch gates:
+- [x] Run quality and branch gates:
 
   ```bash
   npm run guard:test-integrity
   npm run verify:push:branch
   ```
 
-- [ ] Report all commit SHAs, exact command results, Node receipt, and any
+- [x] Report all commit SHAs, exact command results, Node receipt, and any
   skip/failure. State only that source implementation is verified if every
   required command passes. State explicitly that operational rollout remains
   unperformed and owner-gated.
@@ -479,8 +487,9 @@ under the worktree writer lease; OpenCode strategy lanes stay read-only and advi
   evidence must skip bot curl and end `HEALTH-UNKNOWN`/exit `2` without marker mutation.
 - [x] Add an argv-capture test proving a valid token is absent from curl argv, `-H` is absent, and
   `--config -` is present.
-- [x] Implement the self-contained descriptor reader described in the amended design; add fixture
-  parity against `src/fleet/health-token-file.ts`.
+- [x] Implement the self-contained descriptor reader described in the amended design and add
+  characterization tests for its accepted and rejected cases. The two implementations currently
+  have independent coverage; an executable shared-fixture parity corpus remains follow-up work.
 - [x] Send the validated token through the zsh builtin to `curl --config -` stdin, clear the
   unexported variable, and remove the lenient `sed`/`AUTH_ARGS` path.
 - [x] Re-run focused token, renderer, and watchdog tests to GREEN; checkpointed in `1852da0b0`.
@@ -498,11 +507,35 @@ under the worktree writer lease; OpenCode strategy lanes stay read-only and advi
 
 ### Task 11 — Current-head review and gates
 
-- [ ] Re-run every command from Task 6 under Node `24.15.0`, require zero Python skips, render one
+- [x] Re-run every command from Task 6 under Node `24.15.0`, require zero Python skips, render one
   sanitized artifact, and run `npm run guard:test-integrity` plus
   `npm run verify:push:branch`.
-- [ ] Re-run the benign adversarial counterexamples recorded in the local Luna-swarm
+- [x] Re-run the benign adversarial counterexamples recorded in the local
   current-head adjudication packet.
-- [ ] Obtain independent read-only review from both strategy panes, verify every decisive claim at
+- [x] Obtain independent read-only review from both strategy panes, verify every decisive claim at
   the lead, and record residual medium-risk work explicitly.
-- [ ] Do not merge, canary, deploy, alter launchd state, or access a real token in this source wave.
+- [x] Do not merge, canary, deploy, alter launchd state, or access a real token in this source wave.
+
+### Task 12 — Publication-blocker closure
+
+- [x] Replace basic-offset pong fixtures with RFC 3339-compatible offsets so the watchdog tests run
+  under the macOS system Python as well as newer Python releases.
+- [x] Interpret live numeric turn timestamps as epoch milliseconds and replace toy timestamp
+  fixtures with production-shaped epoch-millisecond values.
+- [x] Validate non-object `turn_capability` before any liveness decision can authorize a restart;
+  prove the combined malformed-shape/liveness-failure case through the rendered script.
+- [x] Reject reserved template-placeholder substrings in renderer identity values so sequential
+  replacement cannot silently corrupt `--home` while reporting a clean artifact.
+- [x] Reconcile the design, runbook, execution checklist, and work index, then rerun final gates.
+- [ ] Publish the reviewed branch and open the PR against `main`.
+
+## Remaining objectives after source merge
+
+These are explicit follow-on work, not hidden source-wave completion criteria:
+
+1. Obtain separate owner approval for sanitized render/canary, installed-artifact drift proof,
+   one-host-at-a-time rollout, rollback receipts, and on-host marker-consumer discovery.
+2. Add a shared executable fixture corpus that proves the rendered Python token reader and
+   `src/fleet/health-token-file.ts` stay behaviorally aligned.
+3. Address runtime-side re-probing, provider-aware success tracking, and current-cause fallback
+   reasons described in the accepted detection limitations.

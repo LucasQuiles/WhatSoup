@@ -575,6 +575,24 @@ def test_lock_without_pid_ages_out_and_is_reclaimed(tmp_path):
             json.dumps({"status": "healthy", "whatsapp": {"connected": True}}),
             "tier-missing-connection-bot",
         ),
+        (
+            json.dumps(
+                {
+                    "status": "unhealthy",
+                    "whatsapp": {
+                        "connected": False,
+                        "connection": {
+                            "state": "close",
+                            "last_pong_at": None,
+                            "auth_failure_class": "none",
+                        },
+                    },
+                    "instance": {"fallbackReason": None},
+                    "turn_capability": ["malformed"],
+                }
+            ),
+            "tier-malformed-capability-liveness-bot",
+        ),
     ],
 )
 def test_untrusted_health_shapes_are_health_unknown_without_restart(

@@ -48,9 +48,9 @@ The instance `/health` response must include top-level `turn_capability`:
 |---|---|
 | `model_usable` | `true` after successful primary model usability proof, `false` after a configured primary usability failure, `null` before definitive proof |
 | `model_usability_status` | One of the normalized usability classes, such as `usable`, `model-unavailable`, `credential-unavailable`, `provider-unavailable`, `timeout`, or `unknown` |
-| `last_successful_turn_at` | Timestamp of the latest successful user turn, or `null` |
+| `last_successful_turn_at` | Epoch-millisecond timestamp of the latest successful user turn, or `null` |
 | `last_turn_error_class` | Normalized failure class only; no raw provider text |
-| `last_turn_error_at` | Timestamp of the latest failed user turn, or `null` |
+| `last_turn_error_at` | Epoch-millisecond timestamp of the latest failed user turn, or `null` |
 
 The top-level `/health.status` must degrade when the runtime is degraded,
 `model_usable=false`, or a user-turn error has no later successful turn.

@@ -39,7 +39,7 @@ def _iso_ago(seconds: float) -> str:
     """An ISO-8601 UTC timestamp `seconds` in the past (for pong-age fixtures)."""
     return (
         dt.datetime.now(dt.timezone.utc) - dt.timedelta(seconds=seconds)
-    ).strftime("%Y-%m-%dT%H:%M:%S%z")
+    ).isoformat(timespec="seconds")
 
 _TEMPLATE = (
     Path(__file__).resolve().parents[2] / "templates" / "watchdog-script.sh"

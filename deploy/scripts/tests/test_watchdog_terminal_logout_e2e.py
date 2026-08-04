@@ -163,14 +163,6 @@ def _run_with_state(
         marker.symlink_to(home / "missing-parent" / "marker")
     elif marker_setup != "absent":
         raise AssertionError(f"unsupported marker setup: {marker_setup}")
-    # Lock is /tmp/com.whatsoup.<bot_name>-watchdog.lock; a unique bot_name per
-    # test avoids an xdist cross-test lock race. Clear residue so we don't early-exit.
-    lock = Path(f"/tmp/com.whatsoup.{bot_name}-watchdog.lock")
-    if lock.exists():
-        try:
-            lock.rmdir()
-        except OSError:
-            shutil.rmtree(lock, ignore_errors=True)
     env = dict(os.environ, HOME=str(home))
     proc = subprocess.run(
         ["zsh", str(script)], env=env, capture_output=True, text=True, timeout=20

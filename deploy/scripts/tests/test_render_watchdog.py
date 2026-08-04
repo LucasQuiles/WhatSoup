@@ -19,6 +19,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 _SCRIPTS = Path(__file__).resolve().parents[1]
 _SCRIPT = _SCRIPTS / "render-watchdog.py"
 _TEMPLATE = _SCRIPTS.parent / "templates" / "watchdog-script.sh"
@@ -149,6 +151,20 @@ def test_render_rejects_relative_or_traversal_home():
         proc = _run("render", "--template", str(_TEMPLATE), "--bot-name", "zz-bot",
                     "--bot-port", "9001", "--fleet-port", "9002", "--home", home)
         assert proc.returncode == 6, f"home={home!r}: {proc.stdout}"
+
+
+@pytest.mark.parametrize("reserved", rw.PLACEHOLDER_TOKENS)
+def test_render_rejects_placeholder_substrings_in_home(tmp_path, reserved):
+    out = tmp_path / "out.sh"
+    home = f"/Users/x{reserved}x"
+    proc = _run("render", "--template", str(_TEMPLATE), "--bot-name", "zz-bot",
+                "--bot-port", "9001", "--fleet-port", "9002",
+                "--home", home, "--out", str(out), "--json")
+    assert proc.returncode == 6, proc.stdout + proc.stderr
+    payload = json.loads(proc.stdout)
+    assert payload["status"] == "unsafe_value"
+    assert payload["field"] == "--home"
+    assert not out.exists()
 
 
 def test_render_rejects_shell_metacharacter_username():

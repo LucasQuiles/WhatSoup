@@ -381,17 +381,24 @@ transport and process liveness pass:
 
 **Final log states** (last line of
 `~/Library/Logs/whatsoup/<instance>-watchdog.log` per cycle): `ok`,
-`CREDENTIAL-DEAD`, `CREDENTIAL-UNKNOWN`, `RESTARTED`, `RESTART-SUPPRESSED`,
-`RESTART-FAILED`. The line is chosen by an upgrade-only ladder —
-`CREDENTIAL-DEAD` > `RESTARTED`/`RESTART-SUPPRESSED`/`RESTART-FAILED` >
-`CREDENTIAL-UNKNOWN` > `ok` — so a restart-worthy cycle never reports `ok`,
-and a credential verdict survives a fleet-console restart in the same cycle.
+`CREDENTIAL-DEAD`, `HEALTH-UNKNOWN`, `RESTARTED`, `RESTART-SUPPRESSED`,
+`RESTART-FAILED`, `ERROR`, and `CREDENTIAL-UNKNOWN`. The line is chosen by an
+upgrade-only ladder — `CREDENTIAL-DEAD` > `HEALTH-UNKNOWN` >
+`RESTARTED`/`RESTART-SUPPRESSED`/`RESTART-FAILED` > `ERROR` >
+`CREDENTIAL-UNKNOWN` > `ok` — so untrusted diagnostic evidence cannot be
+masked by a restart outcome, a restart-worthy cycle never reports `ok`, and a
+credential verdict survives a fleet-console restart in the same cycle.
 `RESTARTED` is recorded only after `launchctl kickstart` succeeds; a rejected
 kickstart logs `ERROR: kickstart failed …`, ends on `RESTART-FAILED`, and
 leaves the restart cooldown unarmed so the next cycle retries. An unknown verdict surfaces as
 `CREDENTIAL-UNKNOWN` only when a marker is already present or a fallback
 window is active; a quiescent unknown (healthy idle bot past the 30-minute
 usability-probe TTL, or any non-agent instance) stays `ok`.
+`HEALTH-UNKNOWN` means the authenticated diagnostic body or its supporting
+token/timestamp evidence could not be trusted; it exits the watchdog invocation
+with status `2`, never restarts, and never changes the credential marker.
+`ERROR` records a lower-ranked watchdog-internal failure such as an unsafe marker
+path when no stronger credential, health-evidence, or restart outcome applies.
 
 **Operator notes:**
 

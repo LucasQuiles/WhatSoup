@@ -29,6 +29,10 @@ const template = fs.readFileSync(templatePath, 'utf8');
 
 const BOT = 'tb-bot';
 
+function epochMsAgo(seconds: number): number {
+  return Date.now() - seconds * 1_000;
+}
+
 function decisionScript(): string {
   const m = template.match(/python3 - <<'PY'[^\n]*\n([\s\S]*?)\nPY\n/);
   if (!m) throw new Error('embedded python decision block not found in watchdog template');
@@ -70,7 +74,7 @@ function healthyPayload(over: Record<string, unknown> = {}): Record<string, unkn
       model_usable: true,
       model_usable_stale: false,
       model_usability_status: 'usable',
-      last_successful_turn_at: 200,
+      last_successful_turn_at: epochMsAgo(10),
       last_turn_error_class: null,
       last_turn_error_at: null,
     },
@@ -104,9 +108,9 @@ describe('watchdog decision block — credential death', () => {
         model_usable: null,
         model_usable_stale: true,
         model_usability_status: 'usable',
-        last_successful_turn_at: 100,
+        last_successful_turn_at: epochMsAgo(20),
         last_turn_error_class: 'auth-required',
-        last_turn_error_at: 200,
+        last_turn_error_at: epochMsAgo(10),
       },
     }));
     expect(r.status).toBe(3);
@@ -120,9 +124,9 @@ describe('watchdog decision block — credential death', () => {
         model_usable: null,
         model_usable_stale: true,
         model_usability_status: 'usable',
-        last_successful_turn_at: 100,
+        last_successful_turn_at: epochMsAgo(20),
         last_turn_error_class: 'auth-required',
-        last_turn_error_at: 200,
+        last_turn_error_at: epochMsAgo(10),
       },
     }));
     expect(r.status).toBe(3);
@@ -158,7 +162,7 @@ describe('watchdog decision block — credential death', () => {
         model_usable: null,
         model_usable_stale: true,
         model_usability_status: 'usable',
-        last_successful_turn_at: 200,
+        last_successful_turn_at: epochMsAgo(10),
         last_turn_error_class: null,
         last_turn_error_at: null,
       },
@@ -191,7 +195,7 @@ describe('watchdog decision block — credential death', () => {
         model_usable: null,
         model_usable_stale: true,
         model_usability_status: 'usable',
-        last_successful_turn_at: 200,
+        last_successful_turn_at: epochMsAgo(10),
         last_turn_error_class: null,
         last_turn_error_at: null,
       },
@@ -238,9 +242,9 @@ describe('watchdog decision block — credential death', () => {
         model_usable: true,
         model_usable_stale: false,
         model_usability_status: 'usable',
-        last_successful_turn_at: 300,
+        last_successful_turn_at: epochMsAgo(10),
         last_turn_error_class: 'auth-required',
-        last_turn_error_at: 200,
+        last_turn_error_at: epochMsAgo(20),
       },
     }));
     expect(r.status).toBe(0);
@@ -288,6 +292,24 @@ describe('watchdog decision block — malformed evidence is HEALTH-UNKNOWN', () 
     }));
     expect(r.status).toBe(6);
     expect(r.stderr).not.toContain('CREDENTIAL-DEAD');
+  });
+
+  it('rejects malformed turn capability before a liveness failure can authorize restart', () => {
+    const r = runDecision({
+      status: 'unhealthy',
+      whatsapp: {
+        connected: false,
+        connection: {
+          state: 'close',
+          last_pong_at: null,
+          auth_failure_class: 'none',
+        },
+      },
+      instance: { fallbackReason: null },
+      turn_capability: ['malformed'],
+    });
+    expect(r.status).toBe(6);
+    expect(r.stderr).toContain('untrusted turn capability');
   });
 
   it('rejects duplicate keys at any nesting level with exit 6', () => {

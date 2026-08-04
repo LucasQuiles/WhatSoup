@@ -1,5 +1,8 @@
 # Watchdog Auth-Required Contract Design
 
+**Status:** Active — source repair is implemented and undergoing final PR/merge-gate verification;
+fleet canary and rollout remain owner-gated and unperformed.
+
 ## Status
 
 Approved approach: staged canonical repair. Source and tests land first, then owner-private
@@ -218,20 +221,25 @@ branch:
    the rendered artifact while placeholder verification still passed. FIXED in this branch:
    `render-watchdog.py` rejects identity values outside conservative charsets (bot name
    `[a-z0-9][a-z0-9-]*`, absolute `[A-Za-z0-9._/-]` home without `..` segments, username
-   `[A-Za-z0-9_][A-Za-z0-9._-]*`) with the typed exit `6 UNSAFE_VALUE` before any render.
+   `[A-Za-z0-9_][A-Za-z0-9._-]*`) and rejects every reserved template-placeholder substring
+   with the typed exit `6 UNSAFE_VALUE` before any render. The reserved-token check prevents a
+   later sequential replacement from silently changing a value that was already inserted.
    Renders still must come from owner-controlled inventory; validation is defense in depth,
    not an authorization boundary.
-4. **Operational I/O outside the credential marker is still masked.** PARTIALLY FIXED in this
-   branch: an unopenable log file now fails the invocation at entry (nonzero exit, one stderr
-   line) instead of running unobservably. Residual: a log append that starts failing mid-run
-   (e.g. disk fills between entry and the final line) is still silent.
+4. **Operational I/O outside the credential marker was masked.** FIXED in this branch: an
+   unopenable log fails at entry; a later append failure and log-rotation failure set a nonzero
+   result and emit stderr; bootstrap, kickstart, and cooldown-stamp failures also propagate.
+   When log storage itself is unavailable, a final state line cannot be persisted, so stderr and
+   process status are the only remaining operator evidence.
 
 ## Source changes
 
 The change is intentionally limited to:
 
-- `deploy/templates/watchdog-script.sh`: implement the credential decision exits `0/1/3/4/5`,
+- `deploy/templates/watchdog-script.sh`: implement the credential decision exits `0/1/3/4/5/6`,
   marker transition handling, unmasked marker I/O, and the final-log escalation ladder;
+- `deploy/scripts/render-watchdog.py` and its tests: reject shell-unsafe values and reserved
+  placeholder substrings before deterministic substitution;
 - `tests/deploy/watchdog-credential-dead.test.ts`: add sanitized current-health regressions,
   recovery/unknown coverage, precedence checks, and shell-wiring assertions;
 - `deploy/scripts/tests/test_watchdog_restart_policy.py`: expectation updates for the new exit
@@ -368,9 +376,10 @@ the single final-state ladder because the bot diagnostic was not trustworthy.
 
 JSON decoding rejects duplicate keys at every nesting level. The shell rejects an empty body and a
 body larger than 64 KiB before exporting it to the Python decision process. Timestamp comparison
-accepts only finite numeric seconds or timezone-aware ISO values no more than five seconds in the
-future. A future success cannot supersede a current auth failure, and a future pong cannot prove a
-recovering connection fresh.
+accepts finite numeric seconds for diagnostic-generation/pong evidence, finite epoch-millisecond
+numbers for live turn-success/error evidence, and timezone-aware ISO values for either, all no more
+than five seconds in the future. A future success cannot supersede a current auth failure, and a
+future pong cannot prove a recovering connection fresh.
 
 ### Token transport boundary
 
@@ -379,9 +388,10 @@ repository-relative TypeScript helpers survive beside `~/.local/bin/<instance>-w
 template uses a self-contained Python reader that mirrors the canonical token-file contract:
 owner-only real directory, owner-only regular mode-0600 non-symlink file, no-follow descriptor open,
 stable file/directory identity, bounded read, and exactly one
-`WHATSOUP_HEALTH_TOKEN=<64 lowercase hex>` assignment. Characterization tests keep its accepted and
-rejected fixtures aligned with `src/fleet/health-token-file.ts`; this intentional deployment-boundary
-duplication is preferable to an unresolved source-tree runtime dependency.
+`WHATSOUP_HEALTH_TOKEN=<64 lowercase hex>` assignment. Independent characterization tests cover
+the same accepted and rejected classes as `src/fleet/health-token-file.ts`; a shared executable
+fixture corpus remains follow-up work and no stronger parity claim is made. This intentional
+deployment-boundary duplication is preferable to an unresolved source-tree runtime dependency.
 
 The validated token is captured only in an unexported shell variable, passed by the zsh `print`
 builtin through `curl --config -` stdin, and then cleared. It never appears in curl argv, an

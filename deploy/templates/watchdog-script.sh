@@ -497,7 +497,7 @@ if not isinstance(data, dict):
 now_timestamp = dt.datetime.now(dt.timezone.utc).timestamp()
 
 
-def evidence_timestamp(value, label):
+def evidence_timestamp(value, label, numeric_unit="seconds"):
     if value is None:
         return None
     parsed = None
@@ -506,7 +506,7 @@ def evidence_timestamp(value, label):
     elif isinstance(value, (int, float)):
         candidate = float(value)
         if math.isfinite(candidate):
-            parsed = candidate
+            parsed = candidate / 1000 if numeric_unit == "milliseconds" else candidate
     elif isinstance(value, str):
         try:
             candidate = dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
@@ -543,6 +543,10 @@ if not isinstance(conn_raw, dict):
 conn = conn_raw or {}
 if not instance_shape_valid:
     print("untrusted instance health object shape", file=sys.stderr)
+    sys.exit(6)
+turn_capability_raw = data.get("turn_capability")
+if turn_capability_raw is not None and not isinstance(turn_capability_raw, dict):
+    print("untrusted turn capability object shape", file=sys.stderr)
     sys.exit(6)
 connected = whatsapp.get("connected") is True
 state = conn.get("state")
@@ -702,10 +706,6 @@ if reasons:
 #       (fallbackReason non-null — presence, not value).
 # Exits 4/5 never restart and never touch the marker; the shell ORs exit 5
 # with marker presence to pick the CREDENTIAL-UNKNOWN final log state.
-turn_capability_raw = data.get("turn_capability")
-if turn_capability_raw is not None and not isinstance(turn_capability_raw, dict):
-    print("untrusted turn capability object shape", file=sys.stderr)
-    sys.exit(6)
 turn_capability = turn_capability_raw if isinstance(turn_capability_raw, dict) else {}
 model_status = turn_capability.get("model_usability_status")
 model_usable = turn_capability.get("model_usable")
@@ -716,8 +716,8 @@ last_error = turn_capability.get("last_turn_error_at")
 fallback_reason = instance.get("fallbackReason")
 
 
-success_time = evidence_timestamp(last_success, "last successful turn")
-error_time = evidence_timestamp(last_error, "last turn error")
+success_time = evidence_timestamp(last_success, "last successful turn", "milliseconds")
+error_time = evidence_timestamp(last_error, "last turn error", "milliseconds")
 auth_error_superseded = (
     last_error_class == "auth-required"
     and success_time is not None

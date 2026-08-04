@@ -60,6 +60,13 @@ _HOME_RE = re.compile(r"/[A-Za-z0-9._/-]*\Z")
 
 def _unsafe_value(*, bot_name: str, home: str, username: str) -> tuple[str, str] | None:
     """Return (field, reason) for the first unsafe identity value, else None."""
+    for field, value in (
+        ("--bot-name", bot_name),
+        ("--home", home),
+        ("--username", username),
+    ):
+        if any(token in value for token in PLACEHOLDER_TOKENS):
+            return (field, "must not contain a reserved template placeholder token")
     if not _BOT_NAME_RE.fullmatch(bot_name):
         return ("--bot-name", "must match [a-z0-9][a-z0-9-]* (max 64 chars)")
     if (
