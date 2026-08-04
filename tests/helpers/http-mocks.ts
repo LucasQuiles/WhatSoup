@@ -48,14 +48,18 @@ export function mockReq({
     const writable = stream as unknown as PassThrough;
     const parts = chunks ?? (body ? [body] : []);
     const writeNext = (index: number): void => {
-      if (index >= parts.length) {
-        writable.end();
-        return;
-      }
       writable.write(parts[index]!);
-      setImmediate(() => writeNext(index + 1));
+      if (index + 1 >= parts.length) {
+        writable.end();
+      } else {
+        setImmediate(() => writeNext(index + 1));
+      }
     };
-    writeNext(0);
+    if (parts.length === 0) {
+      writable.end();
+    } else {
+      writeNext(0);
+    }
   });
   return stream;
 }
