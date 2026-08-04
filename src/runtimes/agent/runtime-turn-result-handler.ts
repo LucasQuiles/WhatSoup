@@ -652,6 +652,24 @@ if (wasSilentCompact || hadCompactBoundary) {
   }
   voice = { chatJid: chatJidForVoice, responseText, inboundContentType };
 }
+// Mirror the chat runtime: persist model_used + token counts on the
+// inbound message row so the messages table has the effective model for
+// this turn. Only for user turns (system / compact turns skip this).
+if (!isSystemResult && inboundSeq !== undefined && session && typeof (session as unknown as Record<string, unknown>).getModelRef === 'function' && (event.inputTokens !== undefined || event.outputTokens !== undefined)) {
+  const modelRef = (session as unknown as { getModelRef: () => string | undefined }).getModelRef() ?? null;
+  try {
+    const inboundRow = (host.db.raw
+      .prepare('SELECT message_id FROM inbound_events WHERE seq = ?')
+      .get(inboundSeq)) as { message_id: string } | undefined;
+    if (inboundRow) {
+      host.db.raw
+        .prepare('UPDATE messages SET input_tokens = ?, output_tokens = ?, model_used = ? WHERE message_id = ?')
+        .run(event.inputTokens ?? 0, event.outputTokens ?? 0, modelRef, inboundRow.message_id);
+    }
+  } catch (err) {
+    log.error({ err, inboundSeq }, 'failed to persist model_used on agent turn');
+  }
+}
 if (wasSilentCompact) host.clearSilentCompact(mapKey);
 } finally {
   if (
