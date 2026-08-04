@@ -351,12 +351,6 @@ describe('session.ts canary-admission — sha mismatch (line 2359) — DIRECT', 
 // a specific OS-level race (socket file deleted between stat and unlink
 // during acquire failure cleanup). Not reproducable in a unit test.
 
-// ---------------------------------------------------------------------------
-// runtime.ts 11040: sessionProvider via route.provider
-// ---------------------------------------------------------------------------
-
-describe('runtime.ts — route-based sessionProvider (line 11040)', () => {
-  it('is exercised by model-pin route-recycle tests', () => {
-    expect(true).toBe(true);
-  });
-});
+// runtime.ts 11040 (route-based sessionProvider): one-sided like the other
+// runtime spawn-path branches above — the untaken side needs a live child
+// process; no placeholder test is kept for it.
