@@ -18,15 +18,15 @@ The **Inconsistencies** section lists missing or stale index entries compared wi
 scoped markdown files currently on disk.
 
 **Repo:** `WhatSoup`
-**Total entries:** 110
+**Total entries:** 112
 
 ## Totals
 
 | Dimension | Breakdown |
 |---|---|
-| Kind | handoff=8, plan=55, review=4, spec=42, state=1 |
-| Status | active=27, closed=4, completed=35, deferred=7, pending=15, unknown=22 |
-| Status source | body-marker=95, fallback=14, state-md-status=1 |
+| Kind | handoff=8, plan=56, review=4, spec=43, state=1 |
+| Status | active=29, closed=4, completed=35, deferred=7, pending=15, unknown=22 |
+| Status source | body-marker=97, fallback=14, state-md-status=1 |
 
 ## Inconsistencies
 
@@ -34,7 +34,7 @@ scoped markdown files currently on disk.
 
 ## Synthesis
 
-### Active (27)
+### Active (29)
 
 | Path | Kind | Topic | Status source |
 |------|------|-------|---------------|
@@ -49,6 +49,7 @@ scoped markdown files currently on disk.
 | `docs/superpowers/plans/2026-07-28-runtime-health-signal-dispositions.md` | plan | runtime-health-signal-dispositions | body-marker |
 | `docs/superpowers/plans/2026-07-28-turn-recovery-safety.md` | plan | turn-recovery-safety | body-marker |
 | `docs/superpowers/plans/2026-07-29-launchd-restart-policy-2682.md` | plan | launchd-restart-policy-2682 | body-marker |
+| `docs/superpowers/plans/2026-08-03-watchdog-auth-required-contract.md` | plan | watchdog-auth-required-contract | body-marker |
 | `docs/superpowers/specs/2026-07-09-wall-to-wall-audit-remediation-design.md` | spec | wall-to-wall-audit-remediation-design | body-marker |
 | `docs/superpowers/specs/2026-07-11-central-hub-release-proof-pilot-design.md` | spec | central-hub-release-proof-pilot-design | body-marker |
 | `docs/superpowers/specs/2026-07-15-headless-fallback-runtime-alignment-design.md` | spec | headless-fallback-runtime-alignment-design | body-marker |
@@ -60,6 +61,7 @@ scoped markdown files currently on disk.
 | `docs/superpowers/specs/2026-07-28-runtime-health-signal-dispositions-design.md` | spec | runtime-health-signal-dispositions-design | body-marker |
 | `docs/superpowers/specs/2026-07-28-turn-recovery-safety-design.md` | spec | turn-recovery-safety-design | body-marker |
 | `docs/superpowers/specs/2026-07-29-launchd-restart-policy-2682-design.md` | spec | launchd-restart-policy-2682-design | body-marker |
+| `docs/superpowers/specs/2026-08-03-watchdog-auth-required-contract-design.md` | spec | watchdog-auth-required-contract-design | body-marker |
 | `docs/superpowers/specs/kill-session-transactional-cancellation/design.md` | spec | design | body-marker |
 | `docs/superpowers/specs/kill-session-transactional-cancellation/requirements.md` | spec | requirements | body-marker |
 | `docs/superpowers/specs/provider-event-lifecycle/design.md` | spec | design | body-marker |
@@ -146,7 +148,7 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 | `docs/superpowers/handoffs/2026-07-16-boundary-core-history-mining.md` | handoff | pending | body-marker | boundary-core-history-mining | 2026-07-16 |  |
 | `docs/superpowers/handoffs/2026-07-28-incident-control-plane-finder-report.md` | handoff | unknown | fallback | incident-control-plane-finder-report | 2026-07-28 |  |
 
-### docs/superpowers/plans  _(55 entries)_
+### docs/superpowers/plans  _(56 entries)_
 
 | Path | Kind | Status | Source | Topic | Last Mod | Supersedes |
 |------|------|--------|--------|-------|----------|------------|
@@ -205,6 +207,7 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 | `docs/superpowers/plans/2026-07-29-maybe-sent-ambiguity-episode.md` | plan | unknown | fallback | maybe-sent-ambiguity-episode | 2026-07-30 |  |
 | `docs/superpowers/plans/2026-07-29-portable-startup-notification-protocol.md` | plan | unknown | fallback | portable-startup-notification-protocol | 2026-07-30 |  |
 | `docs/superpowers/plans/2026-07-29-pr-metadata-guard.md` | plan | unknown | fallback | pr-metadata-guard | 2026-07-31 |  |
+| `docs/superpowers/plans/2026-08-03-watchdog-auth-required-contract.md` | plan | active | body-marker | watchdog-auth-required-contract | 2026-08-04 |  |
 
 ### docs/superpowers/reviews  _(4 entries)_
 
@@ -215,7 +218,7 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 | `docs/superpowers/reviews/2026-07-09-wall-to-wall-audit-pr-briefs.md` | review | completed | body-marker | wall-to-wall-audit-pr-briefs | 2026-07-10 |  |
 | `docs/superpowers/reviews/2026-07-24-r13-r15-tech-debt-review-map.md` | review | completed | body-marker | r13-r15-tech-debt-review-map | 2026-07-24 |  |
 
-### docs/superpowers/specs  _(36 entries)_
+### docs/superpowers/specs  _(37 entries)_
 
 | Path | Kind | Status | Source | Topic | Last Mod | Supersedes |
 |------|------|--------|--------|-------|----------|------------|
@@ -255,6 +258,7 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 | `docs/superpowers/specs/2026-07-29-launchd-restart-policy-2682-design.md` | spec | active | body-marker | launchd-restart-policy-2682-design | 2026-07-30 |  |
 | `docs/superpowers/specs/2026-07-29-maybe-sent-ambiguity-episode-design.md` | spec | unknown | fallback | maybe-sent-ambiguity-episode-design | 2026-07-30 |  |
 | `docs/superpowers/specs/2026-07-29-portable-startup-notification-protocol-design.md` | spec | unknown | body-marker | portable-startup-notification-protocol-design | 2026-07-30 |  |
+| `docs/superpowers/specs/2026-08-03-watchdog-auth-required-contract-design.md` | spec | active | body-marker | watchdog-auth-required-contract-design | 2026-08-04 |  |
 
 ### docs/superpowers/specs/kill-session-transactional-cancellation  _(3 entries)_
 
@@ -275,4 +279,4 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 ---
 
 - Derived from `docs/work-index.json`
-- Generated at 2026-08-03T09:12:57Z from commit `b5e9d71debcfed6625d0ccda9c941ef793373745`
+- Generated at 2026-08-04T05:27:23Z from commit `610957d0fd058b3a03a46975b4cd381e86c11f86`

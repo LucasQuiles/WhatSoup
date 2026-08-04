@@ -24,12 +24,19 @@ set -u
 HOME_DIR="__HOME__"
 LOG_DIR="$HOME_DIR/Library/Logs/whatsoup"
 LOG="$LOG_DIR/BOT_NAME-watchdog.log"
-LOCK="/tmp/com.whatsoup.BOT_NAME-watchdog.lock"
-# Present while the bot's provider credential is dead (decision-block exit 3).
-# The fleet console / alert path stats this; it is cleared on the next passing
-# check so its presence always reflects current state.
+# Single-instance lock. Lives in the user-owned LOG_DIR (not /tmp): a
+# predictable world-writable path would let any local user pre-create it and
+# silently disable the watchdog. The dir holds a pid stamp for staleness
+# detection (see acquire_mutex).
+LOCK="$LOG_DIR/BOT_NAME-watchdog.lock"
+# Present while the bot's provider credential was last conclusively dead
+# (decision-block exit 3). Cleared ONLY by affirmative fresh primary recovery
+# (exit 0); inconclusive evidence (exits 4/5) retains it — presence means
+# "dead until proven recovered", not "dead as of the last cycle". External
+# alert paths may stat this file; no in-repo consumer exists.
 CRED_MARKER="$LOG_DIR/BOT_NAME-credential-dead.marker"
 WD_FINAL="ok"
+WD_EXIT=0
 
 BOT_LABEL="com.whatsoup.BOT_NAME"
 FLEET_LABEL="com.whatsoup.whatsoup-fleet"
@@ -47,34 +54,209 @@ export HOME="$HOME_DIR" PATH
 
 mkdir -p "$LOG_DIR"
 
-# #2515: the diagnostic health body is auth-gated; unauthenticated reads get
-# the minimal public liveness envelope, whose missing whatsapp/turn_capability
-# fields would read as restart-worthy (connected=false/state=None) and starve
-# the CREDENTIAL-DEAD branch of turn_capability entirely. Send the instance
-# bearer from tokens.env when one resolves; the token reaches curl argv only,
-# never the log.
-BOT_TOKENS_ENV="$HOME_DIR/.config/whatsoup/instances/BOT_NAME/tokens.env"
-WHATSOUP_HEALTH_TOKEN=""
-[ -r "$BOT_TOKENS_ENV" ] && WHATSOUP_HEALTH_TOKEN="$(sed -n 's/^WHATSOUP_HEALTH_TOKEN=//p' "$BOT_TOKENS_ENV" | head -1)"
-AUTH_ARGS=()
-[ -n "$WHATSOUP_HEALTH_TOKEN" ] && AUTH_ARGS=(-H "Authorization: Bearer $WHATSOUP_HEALTH_TOKEN")
-
-# Single-instance lock: if another watchdog invocation is still running, exit.
-if ! mkdir "$LOCK" 2>/dev/null; then
-  exit 0
-fi
-trap 'rmdir "$LOCK" 2>/dev/null || true' EXIT
-
-# Rotate log if it exceeds 1 MB.
-if [ -f "$LOG" ]; then
-  size=$(wc -c < "$LOG" 2>/dev/null || echo 0)
-  if [ "${size:-0}" -gt 1048576 ]; then
-    tail -n 500 "$LOG" > "$LOG.tmp" 2>/dev/null && mv "$LOG.tmp" "$LOG"
-  fi
+# If the log cannot be opened, no state line (including the final one) can
+# ever be recorded — running on would be unobservable. Fail loudly at entry;
+# launchd ignores the exit code, but tests and operators must see it.
+if ! : >> "$LOG" 2>/dev/null; then
+  print -u2 -- "watchdog: cannot open log file $LOG"
+  exit 1
 fi
 
 ts() { date -u +"%Y-%m-%dT%H:%M:%SZ"; }
-log() { print -- "$(ts) $*" >> "$LOG"; }
+log() {
+  if ! print -- "$(ts) $*" >> "$LOG"; then
+    WD_EXIT=1
+    print -u2 -- "watchdog: failed to append to log"
+    return 1
+  fi
+}
+
+# mkdir-based mutex with pid-stamp + age staleness. Held only while the
+# stamped pid is alive AND the lock is younger than stale_after seconds; a
+# dead holder, an unreadable/garbage pid, or an aged-out lock is reclaimed
+# (rename-then-remove so concurrent reapers cannot free a freshly re-acquired
+# lock; a sub-second reap race can still let two contenders through — the
+# cooldown stamp bounds the harm to one duplicate kickstart).
+acquire_mutex() {
+  local dir="$1" stale_after="$2" attempt holder_pid mtime age
+  for attempt in 1 2; do
+    if mkdir "$dir" 2>/dev/null; then
+      print -- $$ > "$dir/pid" 2>/dev/null || true
+      return 0
+    fi
+    holder_pid="$(cat "$dir/pid" 2>/dev/null || true)"
+    case "$holder_pid" in
+      (<->) ;;
+      (*) holder_pid="" ;;
+    esac
+    # python3 is already a hard dependency (the decision block); BSD/GNU stat
+    # flag portability is not.
+    mtime="$(python3 -c 'import os, sys; print(int(os.stat(sys.argv[1]).st_mtime))' "$dir" 2>/dev/null || true)"
+    case "$mtime" in
+      (<->) ;;
+      (*) mtime=0 ;;
+    esac
+    age=$(( $(date +%s) - mtime ))
+    if [ -n "$holder_pid" ]; then
+      if kill -0 "$holder_pid" 2>/dev/null && [ "$age" -le "$stale_after" ]; then
+        return 1
+      fi
+    elif [ "$age" -le "$stale_after" ]; then
+      # No pid stamp yet: a racer may be mid-acquisition. Reclaim only aged.
+      return 1
+    fi
+    log "reclaiming stale lock $dir (holder pid ${holder_pid:-none}, age ${age}s)"
+    if ! mv "$dir" "$dir.reap.$$" 2>/dev/null; then
+      continue
+    fi
+    rm -rf "$dir.reap.$$" 2>/dev/null || true
+  done
+  return 1
+}
+
+# Release a mutex only while this process still owns it: a hung invocation
+# whose lock was age-reclaimed by a newer one must not delete the new owner's
+# lock on exit. The cat-then-remove window is a benign micro-race — a
+# contender that slips in is itself protected by the age guard.
+release_mutex() {
+  local dir="$1"
+  if [ "$(cat "$dir/pid" 2>/dev/null)" = "$$" ]; then
+    rm -rf "$dir" 2>/dev/null || true
+  fi
+}
+
+# Single-instance lock: if another watchdog invocation is still running, exit
+# — but say so in the log, and reclaim stale locks (a SIGKILLed prior run must
+# not disable the watchdog forever).
+if ! acquire_mutex "$LOCK" 600; then
+  log "another watchdog invocation is running; exiting"
+  exit 0
+fi
+trap 'release_mutex "$LOCK"' EXIT
+
+# Final-log state ladder (upgrade-only). The last log line of each run is the
+# single machine-readable outcome; a higher-priority state must not be
+# overwritten by a later, lower-priority one (the fleet check runs after the
+# bot check, and a credential verdict outranks a restart outcome). Restart
+# outcomes are severity-ordered — a failed kickstart beats a successful one
+# beats a suppression — so a mixed bot/fleet cycle reports the most actionable
+# outcome; per-job detail stays in the preceding log lines. Strict > means
+# identical states keep the first writer.
+wd_rank() {
+  case "$1" in
+    CREDENTIAL-DEAD) print 8 ;;
+    HEALTH-UNKNOWN) print 7 ;;
+    RESTART-FAILED) print 6 ;;
+    RESTARTED) print 5 ;;
+    RESTART-SUPPRESSED) print 4 ;;
+    ERROR) print 3 ;;
+    CREDENTIAL-UNKNOWN) print 2 ;;
+    *) print 1 ;;
+  esac
+}
+wd_note() {
+  if [ "$(wd_rank "$1")" -gt "$(wd_rank "$WD_FINAL")" ]; then
+    WD_FINAL="$1"
+  fi
+}
+health_unknown() {
+  log "HEALTH-UNKNOWN: $1"
+  wd_note HEALTH-UNKNOWN
+  WD_EXIT=2
+}
+
+# Credential-marker operations are confined beneath a verified, user-owned
+# log-directory descriptor. Exit 0 means success/present, exit 1 means absent
+# for the state operation, and exit 2 means unsafe or otherwise unusable.
+# Existing owned 0644 markers remain valid for upgrade compatibility; newly
+# created markers are 0600. Symlinks and non-regular paths are never followed,
+# cleared, or treated as evidence of prior credential death.
+credential_marker() {
+  python3 - "$1" "$CRED_MARKER" 2>>"$LOG" <<'MARKER_PY'
+import os
+import stat
+import sys
+
+
+def reject():
+    print("watchdog: unsafe credential marker", file=sys.stderr)
+    raise SystemExit(2)
+
+
+operation, path = sys.argv[1:]
+parent, name = os.path.split(path)
+uid = os.geteuid()
+directory_fd = None
+marker_fd = None
+try:
+    directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    directory_fd = os.open(parent, directory_flags)
+    directory = os.fstat(directory_fd)
+    if (
+        not stat.S_ISDIR(directory.st_mode)
+        or directory.st_uid != uid
+        or directory.st_mode & 0o022
+    ):
+        reject()
+
+    try:
+        marker = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        marker = None
+
+    if marker is not None and (
+        not stat.S_ISREG(marker.st_mode)
+        or marker.st_uid != uid
+        or marker.st_mode & 0o022
+    ):
+        reject()
+
+    if operation == "state":
+        raise SystemExit(0 if marker is not None else 1)
+    if operation == "create":
+        if marker is not None:
+            raise SystemExit(0)
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+        marker_fd = os.open(name, flags, 0o600, dir_fd=directory_fd)
+        os.fchmod(marker_fd, 0o600)
+        created = os.fstat(marker_fd)
+        if (
+            not stat.S_ISREG(created.st_mode)
+            or created.st_uid != uid
+            or stat.S_IMODE(created.st_mode) != 0o600
+        ):
+            reject()
+        raise SystemExit(0)
+    if operation == "clear":
+        if marker is not None:
+            os.unlink(name, dir_fd=directory_fd)
+        raise SystemExit(0)
+    reject()
+except SystemExit:
+    raise
+except (OSError, ValueError):
+    reject()
+finally:
+    if marker_fd is not None:
+        os.close(marker_fd)
+    if directory_fd is not None:
+        os.close(directory_fd)
+MARKER_PY
+}
+
+# Rotate log if it exceeds 1 MB. This runs after the state ladder is available
+# so a rotation error participates in the same upgrade-only final outcome.
+if [ -f "$LOG" ]; then
+  size=$(wc -c < "$LOG" 2>/dev/null || echo 0)
+  if [ "${size:-0}" -gt 1048576 ]; then
+    if ! tail -n 500 "$LOG" > "$LOG.tmp" 2>/dev/null || ! mv "$LOG.tmp" "$LOG" 2>/dev/null; then
+      wd_note ERROR
+      WD_EXIT=1
+      rm -f "$LOG.tmp" 2>/dev/null || true
+      log "ERROR: log rotation failed"
+    fi
+  fi
+fi
 
 domain="gui/$(id -u)"
 
@@ -83,7 +265,12 @@ ensure_loaded() {
   local job_label="$1" plist="$2"
   if ! launchctl print "$domain/$job_label" >/dev/null 2>&1; then
     log "$job_label not loaded; bootstrapping"
-    launchctl bootstrap "$domain" "$plist" >> "$LOG" 2>&1 || true
+    if ! launchctl bootstrap "$domain" "$plist" >> "$LOG" 2>&1; then
+      log "ERROR: bootstrap failed for $job_label"
+      wd_note ERROR
+      WD_EXIT=1
+      return 1
+    fi
   fi
 }
 
@@ -114,27 +301,164 @@ launchd_reports_permanent_stop() {
 restart_label() {
   local job_label="$1" reason="$2"
   local stamp="$LOG_DIR/$job_label.last-restart"
+  local rlock="$LOG_DIR/$job_label.restart.lock"
   local now last
   if launchd_reports_permanent_stop "$job_label"; then
     log "$job_label unhealthy but restart suppressed after permanent launchd exit code 78: $reason"
+    wd_note RESTART-SUPPRESSED
+    return 0
+  fi
+  # Serialize the cooldown-check/kickstart critical section per label: the
+  # fleet console's label is shared by every bot watchdog on the host, and
+  # same-cadence watchdogs would otherwise pass the cooldown check together
+  # and double-kick it.
+  if ! acquire_mutex "$rlock" 120; then
+    log "$job_label restart already in progress by another watchdog; skipping"
+    wd_note RESTART-SUPPRESSED
     return 0
   fi
   now=$(date +%s)
   last=0
   [ -r "$stamp" ] && last=$(cat "$stamp" 2>/dev/null || echo 0)
+  case "$last" in
+    (<->) ;;
+    (*)
+      log "ignoring unparseable restart cooldown stamp for $job_label"
+      last=0
+      ;;
+  esac
+  if [ "$last" -gt $((now + 5)) ]; then
+    log "ERROR: restart cooldown stamp is in the future for $job_label; ignoring invalid state"
+    wd_note ERROR
+    WD_EXIT=1
+    last=0
+  fi
   if [ $((now - last)) -lt 300 ]; then
     log "$job_label unhealthy but restart suppressed by cooldown: $reason"
+    wd_note RESTART-SUPPRESSED
+    release_mutex "$rlock"
     return 0
   fi
-  print -- "$now" > "$stamp"
   log "restarting $job_label: $reason"
-  launchctl kickstart -k "$domain/$job_label" >> "$LOG" 2>&1 || true
+  if launchctl kickstart -k "$domain/$job_label" >> "$LOG" 2>&1; then
+    wd_note RESTARTED
+    # Arm the cooldown only for a restart that actually happened; a failed
+    # kickstart must retry next cycle, not sit suppressed for 5 minutes.
+    if ! print -- "$now" > "$stamp" 2>>"$LOG"; then
+      log "ERROR: failed to write restart cooldown stamp for $job_label; cooldown not armed"
+      WD_EXIT=1
+    fi
+  else
+    log "ERROR: kickstart failed for $job_label; service was not restarted"
+    wd_note RESTART-FAILED
+    WD_EXIT=1
+  fi
+  release_mutex "$rlock"
 }
 
 ensure_loaded "$BOT_LABEL" "$BOT_PLIST"
 ensure_loaded "$FLEET_LABEL" "$FLEET_PLIST"
 
 # --- Bot health check ---
+# The diagnostic body is auth-gated. Read the transitional token file through
+# a verified descriptor using the same contract as src/fleet/health-token-file.ts.
+# The validated token remains in an unexported shell variable and is sent to
+# curl through config stdin, never argv, the environment, a new file, or logs.
+BOT_TOKENS_ENV="$HOME_DIR/.config/whatsoup/instances/BOT_NAME/tokens.env"
+read_health_token() {
+  python3 - "$BOT_TOKENS_ENV" <<'PY'
+import os
+import re
+import stat
+import sys
+
+PREFIX = b"WHATSOUP_HEALTH_TOKEN="
+MAX_BYTES = len(PREFIX) + 64 + 1
+TOKEN_RE = re.compile(r"[0-9a-f]{64}\Z")
+
+
+def reject():
+    print("watchdog: diagnostic health token file rejected", file=sys.stderr)
+    raise SystemExit(1)
+
+
+path = sys.argv[1]
+parent = os.path.dirname(path)
+uid = os.geteuid()
+fd = None
+try:
+    directory_before = os.lstat(parent)
+    if (
+        stat.S_ISLNK(directory_before.st_mode)
+        or not stat.S_ISDIR(directory_before.st_mode)
+        or directory_before.st_uid != uid
+        or directory_before.st_mode & 0o022
+    ):
+        reject()
+
+    file_before = os.lstat(path)
+    if (
+        stat.S_ISLNK(file_before.st_mode)
+        or not stat.S_ISREG(file_before.st_mode)
+        or file_before.st_uid != uid
+        or stat.S_IMODE(file_before.st_mode) != 0o600
+    ):
+        reject()
+
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+    fd = os.open(path, flags)
+    opened = os.fstat(fd)
+    if (
+        not stat.S_ISREG(opened.st_mode)
+        or opened.st_uid != uid
+        or stat.S_IMODE(opened.st_mode) != 0o600
+        or (file_before.st_dev, file_before.st_ino) != (opened.st_dev, opened.st_ino)
+    ):
+        reject()
+
+    directory_after = os.lstat(parent)
+    if (
+        stat.S_ISLNK(directory_after.st_mode)
+        or not stat.S_ISDIR(directory_after.st_mode)
+        or directory_after.st_uid != uid
+        or directory_after.st_mode & 0o022
+        or (directory_before.st_dev, directory_before.st_ino)
+        != (directory_after.st_dev, directory_after.st_ino)
+    ):
+        reject()
+
+    if opened.st_size > MAX_BYTES:
+        reject()
+    chunks = []
+    remaining = MAX_BYTES + 1
+    while remaining:
+        chunk = os.read(fd, remaining)
+        if not chunk:
+            break
+        chunks.append(chunk)
+        remaining -= len(chunk)
+    contents = b"".join(chunks)
+    if len(contents) > MAX_BYTES:
+        reject()
+    try:
+        text = contents.decode("utf-8")
+    except UnicodeDecodeError:
+        reject()
+    line = text[:-1] if text.endswith("\n") else text
+    if "\n" in line or not line.startswith(PREFIX.decode("ascii")):
+        reject()
+    token = line[len(PREFIX):]
+    if TOKEN_RE.fullmatch(token) is None:
+        reject()
+    print(token)
+except (OSError, ValueError):
+    reject()
+finally:
+    if fd is not None:
+        os.close(fd)
+PY
+}
+
 # Capture the body EVEN on an HTTP error status. A logged-out / terminally
 # auth-failed bot returns HTTP 503 *with* a body carrying
 # whatsapp.connection.auth_failure_class — `curl --fail` would discard that body
@@ -142,40 +466,110 @@ ensure_loaded "$FLEET_LABEL" "$FLEET_PLIST"
 # restart cannot fix. So: no --fail; capture body + code; treat only a real
 # TRANSPORT failure (no HTTP response at all) as unreachable, and let the
 # decision block below act on the body (incl. the terminal-no-restart branch).
-bot_resp="$(curl --silent --show-error --max-time 8 "${AUTH_ARGS[@]}" -w $'\n%{http_code}' "$BOT_HEALTH" 2>>"$LOG")"
-curl_rc=$?
-bot_code="${bot_resp##*$'\n'}"
-bot_json="${bot_resp%$'\n'*}"
-if [ "$curl_rc" -ne 0 ] || [ -z "$bot_code" ]; then
-  restart_label "$BOT_LABEL" "health endpoint unreachable"
-elif [ -z "$bot_json" ]; then
-  restart_label "$BOT_LABEL" "empty health body (http=$bot_code)"
-else
-  BOT_JSON="$bot_json" BOT_CODE="$bot_code" python3 - <<'PY' 2>>"$LOG"
+HEALTH_TOKEN=""
+if HEALTH_TOKEN="$(read_health_token 2>>"$LOG")"; then
+  bot_resp="$(print -r -- "header = \"Authorization: Bearer $HEALTH_TOKEN\"" | curl --config - --silent --show-error --max-time 8 -w $'\n%{http_code}' "$BOT_HEALTH" 2>>"$LOG")"
+  curl_rc=$?
+  HEALTH_TOKEN=""
+  bot_code="${bot_resp##*$'\n'}"
+  bot_json="${bot_resp%$'\n'*}"
+  if [ "$curl_rc" -ne 0 ] || [ -z "$bot_code" ]; then
+    restart_label "$BOT_LABEL" "health endpoint unreachable"
+  elif [ -z "$bot_json" ]; then
+    health_unknown "empty diagnostic health body"
+  elif [ "$(LC_ALL=C print -rn -- "$bot_json" | wc -c)" -gt 65536 ]; then
+    health_unknown "diagnostic health body exceeds 65536 bytes"
+  else
+    BOT_JSON="$bot_json" BOT_CODE="$bot_code" python3 - <<'PY' 2>>"$LOG"
 import datetime as dt
 import json
+import math
 import os
 import sys
 
-data = json.loads(os.environ["BOT_JSON"])
+
+class DuplicateKeyError(ValueError):
+    pass
+
+
+def reject_duplicate_keys(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise DuplicateKeyError("duplicate JSON key")
+        result[key] = value
+    return result
+
+
+try:
+    data = json.loads(os.environ["BOT_JSON"], object_pairs_hook=reject_duplicate_keys)
+except (DuplicateKeyError, json.JSONDecodeError, TypeError, ValueError):
+    print("untrusted diagnostic health JSON", file=sys.stderr)
+    sys.exit(6)
+if not isinstance(data, dict):
+    print("untrusted diagnostic health object shape", file=sys.stderr)
+    sys.exit(6)
+now_timestamp = dt.datetime.now(dt.timezone.utc).timestamp()
+
+
+def evidence_timestamp(value, label, numeric_unit="seconds"):
+    if value is None:
+        return None
+    parsed = None
+    if isinstance(value, bool):
+        pass
+    elif isinstance(value, (int, float)):
+        candidate = float(value)
+        if math.isfinite(candidate):
+            parsed = candidate / 1000 if numeric_unit == "milliseconds" else candidate
+    elif isinstance(value, str):
+        try:
+            candidate = dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
+            if candidate.tzinfo is not None:
+                parsed = candidate.timestamp()
+        except (OSError, OverflowError, ValueError):
+            pass
+    if parsed is None or not math.isfinite(parsed) or parsed > now_timestamp + 5:
+        print(f"untrusted {label} timestamp", file=sys.stderr)
+        sys.exit(6)
+    return parsed
+
+
 http_code = os.environ.get("BOT_CODE")
 expected_instance_name = "BOT_NAME"
 status = data.get("status")
 service_mode = data.get("service_mode")
 generated_at = data.get("generated_at")
-instance = data.get("instance") or {}
-whatsapp = data.get("whatsapp") or {}
-conn = whatsapp.get("connection") or {}
+# A truthy non-object instance is an unrecognized future shape: read nothing
+# from it, and (below) never let it satisfy the recovery conjunction — a
+# malformed shape must classify unknown, not crash into the restart path.
+instance_raw = data.get("instance")
+instance = instance_raw if isinstance(instance_raw, dict) else {}
+instance_shape_valid = instance_raw is None or isinstance(instance_raw, dict)
+whatsapp_raw = data.get("whatsapp")
+if not isinstance(whatsapp_raw, dict):
+    print("untrusted whatsapp health object shape", file=sys.stderr)
+    sys.exit(6)
+whatsapp = whatsapp_raw
+conn_raw = whatsapp.get("connection")
+if not isinstance(conn_raw, dict):
+    print("untrusted connection health object shape", file=sys.stderr)
+    sys.exit(6)
+conn = conn_raw or {}
+if not instance_shape_valid:
+    print("untrusted instance health object shape", file=sys.stderr)
+    sys.exit(6)
+turn_capability_raw = data.get("turn_capability")
+if turn_capability_raw is not None and not isinstance(turn_capability_raw, dict):
+    print("untrusted turn capability object shape", file=sys.stderr)
+    sys.exit(6)
 connected = whatsapp.get("connected") is True
 state = conn.get("state")
 last_pong = conn.get("last_pong_at")
 auth_failure_class = conn.get("auth_failure_class")
-try:
-    generated_time = dt.datetime.fromisoformat(generated_at.replace("Z", "+00:00"))
-    generated_age = (dt.datetime.now(dt.timezone.utc) - generated_time).total_seconds()
-    generated_is_fresh = -5 <= generated_age <= 60
-except (AttributeError, TypeError, ValueError):
-    generated_is_fresh = False
+generated_timestamp = evidence_timestamp(generated_at, "diagnostic generation")
+generated_age = None if generated_timestamp is None else now_timestamp - generated_timestamp
+generated_is_fresh = generated_age is not None and -5 <= generated_age <= 60
 
 # A compatibility drain is a deliberate, health-visible stop before transport,
 # recovery, providers, or timers exist. Restarting cannot make an older binary
@@ -238,11 +632,13 @@ if service_mode == "inspection_only":
         and auth_failure_class == "none"
     )
     if exact_drain:
+        # Accepted drains classify unknown-quiescent (exit 4): no restart,
+        # credential marker retained — a drain carries no credential evidence.
         print(
             f"database compatibility drain reason={reason!r}: operator action required, not restarting",
             file=sys.stderr,
         )
-        sys.exit(0)
+        sys.exit(4)
     print("malformed database compatibility drain health body", file=sys.stderr)
     sys.exit(1)
 
@@ -261,25 +657,22 @@ TERMINAL_AUTH_FAILURES = (
     "local_corruption_unrestorable",
 )
 if auth_failure_class in TERMINAL_AUTH_FAILURES:
+    # Terminal transport-auth states classify unknown-quiescent (exit 4): no
+    # restart, credential marker retained — a logout says nothing about the
+    # provider credential.
     print(
         f"terminal auth_failure_class={auth_failure_class!r}: human relink required, not restarting",
         file=sys.stderr,
     )
-    sys.exit(0)
+    sys.exit(4)
 
 STALE_PONG_SECONDS = 360
 RECOVERING_STATES = ("connecting", "reconnecting", "cooldown")
 
-# Parse the pong age once. `None` means absent; `pong_parse_failed` means a
-# value was present but unparseable (fail closed — never silently pass).
-pong_age = None
-pong_parse_failed = False
-if last_pong:
-    try:
-        parsed = dt.datetime.fromisoformat(str(last_pong).replace("Z", "+00:00"))
-        pong_age = (dt.datetime.now(dt.timezone.utc) - parsed).total_seconds()
-    except (ValueError, TypeError):
-        pong_parse_failed = True
+# Parse the pong age once. Invalid, offset-naive, non-finite, and future
+# evidence is HEALTH-UNKNOWN rather than restart evidence.
+pong_timestamp = evidence_timestamp(last_pong, "whatsapp pong")
+pong_age = None if pong_timestamp is None else now_timestamp - pong_timestamp
 
 # A bot that is disconnected but actively *recovering* (connecting/reconnecting/
 # cooldown) with FRESH liveness (a recent pong) is making progress on its own.
@@ -291,7 +684,6 @@ recovering_with_fresh_pong = (
     not connected
     and state in RECOVERING_STATES
     and pong_age is not None
-    and not pong_parse_failed
     and pong_age <= STALE_PONG_SECONDS
 )
 
@@ -308,43 +700,130 @@ if not recovering_with_fresh_pong:
     if state != "connected":
         reasons.append(f"state={state!r}")
 # A stale pong is an authoritative liveness failure regardless of state; a
-# malformed pong fails closed and is treated as restart-worthy.
+# invalid pong evidence has already exited HEALTH-UNKNOWN above.
 if pong_age is not None and pong_age > STALE_PONG_SECONDS:
     reasons.append(f"last_pong_age={pong_age:.0f}s")
-elif pong_parse_failed:
-    reasons.append("last_pong_unparseable")
 
 if reasons:
     print("; ".join(reasons), file=sys.stderr)
     sys.exit(1)
 
-# Credential death: every liveness/connectivity check above passed, but the
-# agent's provider credential is gone (claude deletes its file store and leaves
-# a dead keychain stub on refresh failure). A restart cannot mint a credential
-# — kicking the bot here would just loop it — and logging plain "ok" is how a
-# 12-day credential outage stayed invisible (mini11, Jul 15–27). Exit 3 is the
-# distinct no-restart escalation the shell routes to a CREDENTIAL-DEAD log
-# line + marker file.
-turn_capability = data.get("turn_capability") or {}
-if turn_capability.get("model_usability_status") == "credential-unavailable":
+# Provider credential state is evaluated only after liveness passes:
+#   exit 3 — dead: a current normalized auth-required signal. A restart cannot
+#       mint a credential (the 12-day mini11 outage logged "ok"); the shell
+#       logs CREDENTIAL-DEAD and creates/retains the marker.
+#   exit 0 — recovered: affirmative fresh primary proof. The ONLY exit that
+#       clears the marker — absence of evidence is not recovery.
+#   exit 4 — unknown, no fallback window active. Stderr-silent: a healthy idle
+#       bot goes usability-stale within the 30-min probe TTL and a non-agent
+#       instance has no turn_capability at all; both land here every cycle.
+#   exit 5 — unknown while an independent fallback window is active
+#       (fallbackReason non-null — presence, not value).
+# Exits 4/5 never restart and never touch the marker; the shell ORs exit 5
+# with marker presence to pick the CREDENTIAL-UNKNOWN final log state.
+turn_capability = turn_capability_raw if isinstance(turn_capability_raw, dict) else {}
+model_status = turn_capability.get("model_usability_status")
+model_usable = turn_capability.get("model_usable")
+model_usable_stale = turn_capability.get("model_usable_stale")
+last_success = turn_capability.get("last_successful_turn_at")
+last_error_class = turn_capability.get("last_turn_error_class")
+last_error = turn_capability.get("last_turn_error_at")
+fallback_reason = instance.get("fallbackReason")
+
+
+success_time = evidence_timestamp(last_success, "last successful turn", "milliseconds")
+error_time = evidence_timestamp(last_error, "last turn error", "milliseconds")
+auth_error_superseded = (
+    last_error_class == "auth-required"
+    and success_time is not None
+    and error_time is not None
+    and success_time > error_time
+)
+auth_error_current = last_error_class == "auth-required" and not auth_error_superseded
+credential_dead_signal = None
+if model_status == "credential-unavailable":
+    credential_dead_signal = "turn_capability.model_usability_status=credential-unavailable"
+elif fallback_reason == "auth-required":
+    credential_dead_signal = "instance.fallbackReason=auth-required"
+elif auth_error_current:
+    credential_dead_signal = (
+        "turn_capability.last_turn_error_class=auth-required with no later successful turn"
+    )
+if credential_dead_signal:
+    print(f"CREDENTIAL-DEAD: {credential_dead_signal} — reauth required", file=sys.stderr)
+    sys.exit(3)
+
+# Recovery is the ONLY marker-clearing exit, so it additionally demands a
+# coherent, fresh response: HTTP 200 and a generated_at inside the drain
+# freshness window. A cached/stale body or a 503 carrying recovery-shaped
+# fields classifies unknown instead — the marker stays until fresh proof.
+credential_recovered = (
+    instance_shape_valid
+    and http_code == "200"
+    and generated_is_fresh
+    and model_usable is True
+    and model_usable_stale is False
+    and model_status == "usable"
+    and fallback_reason is None
+)
+if credential_recovered:
+    sys.exit(0)
+
+if fallback_reason is not None:
     print(
-        "CREDENTIAL-DEAD: turn_capability.model_usability_status=credential-unavailable — reauth required",
+        "CREDENTIAL-UNKNOWN: inconclusive credential evidence during an active "
+        "fallback window (fallbackReason=present)",
         file=sys.stderr,
     )
-    sys.exit(3)
+    sys.exit(5)
+sys.exit(4)
 PY
   py_rc=$?
   if [ "$py_rc" -eq 3 ]; then
     # marker: BOT_NAME-credential-dead.marker — deliberately no restart on this
     # branch (a restart cannot fix auth; see the exit-3 decision-block comment).
     log "CREDENTIAL-DEAD: claude credential unavailable — reauth required; restart suppressed"
-    touch "$CRED_MARKER"
-    WD_FINAL="CREDENTIAL-DEAD"
+    if ! credential_marker create; then
+      # The verdict stands; the ERROR line and the nonzero invocation exit
+      # carry the failure, and the next scheduled run retries the create.
+      log "ERROR: failed to create credential marker $CRED_MARKER; retrying next cycle"
+      wd_note ERROR
+      WD_EXIT=1
+    fi
+    wd_note CREDENTIAL-DEAD
+  elif [ "$py_rc" -eq 4 ] || [ "$py_rc" -eq 5 ]; then
+    # Inconclusive credential evidence: never restart, never touch the marker.
+    # Surface CREDENTIAL-UNKNOWN only when there is something to surface — a
+    # retained marker or an active fallback window (exit 5). A quiescent
+    # unknown (healthy idle bot past the usability-probe TTL, or a non-agent
+    # instance with no turn_capability) stays "ok".
+    credential_marker state
+    marker_rc=$?
+    if [ "$py_rc" -eq 5 ] || [ "$marker_rc" -eq 0 ]; then
+      wd_note CREDENTIAL-UNKNOWN
+    fi
+    if [ "$marker_rc" -eq 2 ]; then
+      log "ERROR: unsafe credential marker; refusing credential-state inference"
+      wd_note ERROR
+      WD_EXIT=1
+    fi
+  elif [ "$py_rc" -eq 6 ]; then
+    health_unknown "untrusted diagnostic health evidence"
   elif [ "$py_rc" -ne 0 ]; then
     restart_label "$BOT_LABEL" "unhealthy JSON response"
   else
-    rm -f "$CRED_MARKER" 2>/dev/null || true
+    if ! credential_marker clear; then
+      # Recovery evidence remains valid, but the watchdog invocation is not
+      # healthy while an unsafe or unusable marker path persists.
+      log "ERROR: failed to clear credential marker $CRED_MARKER; retrying next cycle"
+      wd_note ERROR
+      WD_EXIT=1
+    fi
   fi
+  fi
+else
+  HEALTH_TOKEN=""
+  health_unknown "diagnostic health token unavailable"
 fi
 
 # --- Fleet console health check ---
@@ -353,3 +832,4 @@ if ! curl --fail --silent --show-error --max-time 8 "$FLEET_HEALTH" >/dev/null 2
 fi
 
 log "$WD_FINAL"
+exit "$WD_EXIT"
