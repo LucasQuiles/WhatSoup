@@ -1,5 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { EventEmitter } from 'node:events';
+import { join } from 'node:path';
+import { homedir } from 'node:os';
 import { SessionManager, MAX_STDOUT_LINE_BYTES, type SessionGenerationIdentity } from '../../../src/runtimes/agent/session.ts';
 import type { Database } from '../../../src/core/database.ts';
 import type { Messenger } from '../../../src/core/types.ts';
@@ -201,6 +203,7 @@ import {
   updateResumedSessionStatus,
   updateSessionId,
   updateSessionStatus,
+  updateTranscriptPath,
 } from '../../../src/runtimes/agent/session-db.ts';
 
 const CHAT_JID = 'test@s.whatsapp.net';
@@ -946,6 +949,105 @@ describe('SessionManager', () => {
     expect(updateSessionId).toHaveBeenCalledWith(db, 42, 'ses_abc123');
     expect(sm.getStatus().sessionId).toBe('ses_abc123');
     expect(events.some((e) => e.type === 'init')).toBe(true);
+  });
+
+  it('init event writes transcript path with no explicit cwd (falls back to homedir slug)', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+
+    const sm = new SessionManager({ db, messenger, chatJid: CHAT_JID, onEvent: () => {} });
+    await sm.spawnSession();
+
+    const initLine = JSON.stringify({ type: 'system', subtype: 'init', session_id: 'ses_home' }) + '\n';
+    mockChild.stdout.emit('data', Buffer.from(initLine));
+
+    // homedir() mocked to '/mock/home' — slug derived as '-mock-home'
+    const expectedPath = join(homedir(), '.claude', 'projects', '-mock-home', 'ses_home.jsonl');
+    expect(updateTranscriptPath).toHaveBeenCalledWith(db, 42, expectedPath);
+  });
+
+  it('init event writes transcript path with configuredCwd (Linux-style path)', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+
+    const sm = new SessionManager({
+      db, messenger, chatJid: CHAT_JID, onEvent: () => {},
+      cwd: '/srv/whatsoup/daemon',
+    });
+    await sm.spawnSession();
+
+    const initLine = JSON.stringify({ type: 'system', subtype: 'init', session_id: 'ses_lnx' }) + '\n';
+    mockChild.stdout.emit('data', Buffer.from(initLine));
+
+    expect(updateTranscriptPath).toHaveBeenCalledWith(
+      db, 42,
+      join(homedir(), '.claude', 'projects', '-srv-whatsoup-daemon', 'ses_lnx.jsonl'),
+    );
+  });
+
+  it('init event writes transcript path with configuredCwd (macOS-style path)', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+
+    const sm = new SessionManager({
+      db, messenger, chatJid: CHAT_JID, onEvent: () => {},
+      cwd: '/Applications/WhatSoup',
+    });
+    await sm.spawnSession();
+
+    const initLine = JSON.stringify({ type: 'system', subtype: 'init', session_id: 'ses_macos' }) + '\n';
+    mockChild.stdout.emit('data', Buffer.from(initLine));
+
+    expect(updateTranscriptPath).toHaveBeenCalledWith(
+      db, 42,
+      join(homedir(), '.claude', 'projects', '-Applications-WhatSoup', 'ses_macos.jsonl'),
+    );
+  });
+
+  it('init event writes transcript path with dot-in-path configuredCwd (double-dash regression guard)', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+
+    const sm = new SessionManager({
+      db, messenger, chatJid: CHAT_JID, onEvent: () => {},
+      cwd: '/Applications/WhatSoup/.worktrees/patch',
+    });
+    await sm.spawnSession();
+
+    const initLine = JSON.stringify({ type: 'system', subtype: 'init', session_id: 'ses_dot' }) + '\n';
+    mockChild.stdout.emit('data', Buffer.from(initLine));
+
+    expect(updateTranscriptPath).toHaveBeenCalledWith(
+      db, 42,
+      join(homedir(), '.claude', 'projects', '-Applications-WhatSoup--worktrees-patch', 'ses_dot.jsonl'),
+    );
+  });
+
+  it('init event writes transcript path under CLAUDE_CONFIG_DIR override', async () => {
+    const prev = process.env['CLAUDE_CONFIG_DIR'];
+    process.env['CLAUDE_CONFIG_DIR'] = '/custom/claude-config';
+
+    try {
+      const db = makeDb();
+      const { messenger } = makeMessenger();
+
+      const sm = new SessionManager({ db, messenger, chatJid: CHAT_JID, onEvent: () => {} });
+      await sm.spawnSession();
+
+      const initLine = JSON.stringify({ type: 'system', subtype: 'init', session_id: 'ses_cfg' }) + '\n';
+      mockChild.stdout.emit('data', Buffer.from(initLine));
+
+      expect(updateTranscriptPath).toHaveBeenCalledWith(
+        db, 42,
+        join('/custom/claude-config', 'projects', '-mock-home', 'ses_cfg.jsonl'),
+      );
+    } finally {
+      if (prev !== undefined) {
+        process.env['CLAUDE_CONFIG_DIR'] = prev;
+      } else {
+        delete process.env['CLAUDE_CONFIG_DIR'];
+      }
+    }
   });
 
   it('buffers stdout chunks separately from the parsed line remainder', async () => {
