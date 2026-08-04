@@ -360,6 +360,11 @@
   margin-top: var(--inbox-bub-tm-mt);
   text-align: right;
 }
+.inbox-bub__model {
+  font: 400 var(--text-xs) / 1.2 var(--font-mono);
+  color: var(--text-4-v35);
+  margin-right: var(--sp-2);
+}
 
 /* system pill (mockup .sys) */
 .inbox-sys {

@@ -148,6 +148,7 @@ export interface Message {
   fromMe: boolean;
   type: string;
   rawMessage?: string;
+  modelUsed?: string | null;
 }
 
 export type MetricsRange = '24h' | '7d' | '30d';

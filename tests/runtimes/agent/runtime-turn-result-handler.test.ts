@@ -51,6 +51,7 @@ vi.mock('../../../src/logger.ts', () => {
   };
 });
 
+import { Database } from '../../../src/core/database.ts';
 import type { IOutboundQueue } from '../../../src/runtimes/agent/outbound-queue.ts';
 import { createRuntimeTurnContext } from '../../../src/runtimes/agent/runtime-turn-context.ts';
 import {
@@ -537,5 +538,57 @@ describe('session shutdown rejection containment (#2698)', () => {
 
     expect(() => driveResult('scoped', harness, CASES[1]!.text)).not.toThrow();
     expect(harness.finalizeRuntimeTurnContext).toHaveBeenCalledOnce();
+  });
+
+  it('RED: writes model_used + token counts to messages table after a completed user turn', () => {
+    const realDb = new Database(':memory:');
+    realDb.open();
+
+    // Insert a messages row and an inbound_events row that references it
+    const msgId = 'wamid.red-test-model-used';
+    const now = Date.now();
+    realDb.raw.prepare(
+      'INSERT INTO messages (message_id, chat_jid, conversation_key, sender_jid, content, content_type, timestamp) VALUES (?, ?, ?, ?, ?, ?, ?)',
+    ).run(msgId, '15550190050@s.whatsapp.net', '15550190050', '15550190050@s.whatsapp.net', 'hello', 'text', now);
+
+    realDb.raw.prepare(
+      'INSERT INTO inbound_events (seq, message_id, conversation_key, chat_jid) VALUES (?, ?, ?, ?)',
+    ).run(72, msgId, '15550190050', '15550190050@s.whatsapp.net');
+
+    const harness = makeHarness({ fallbackActivation: null, replayScheduled: false });
+    // Override the test's mock db with a real one so the handler can query inbound_events
+    // and update messages.
+    (harness.host as unknown as Record<string, unknown>).db = realDb;
+    // Override session to provide a model ref and a real rowId
+    const mockSession = {
+      clearTurnWatchdog: vi.fn(),
+      completeProviderTurn: vi.fn(),
+      shutdown: vi.fn(),
+      getDbRowId: vi.fn(() => null),
+      getModelRef: vi.fn(() => 'claude-opus-4-8'),
+    };
+    (harness.host as unknown as Record<string, unknown>).session = mockSession;
+
+    handleScopedRuntimeResult(harness.host, {
+      event: { type: 'result' as const, text: 'reply from agent', inputTokens: 250, outputTokens: 50 },
+      queue: harness.queue,
+      session: mockSession as never,
+      conversationKey: '15550190050',
+      inboundSeq: 72,
+      mapKey: '15550190050',
+      toolScopeKey: '15550190050#session',
+      isSystemResult: false,
+      extractUsageLimitResetTime: () => null,
+    });
+
+    const row = realDb.raw.prepare(
+      'SELECT model_used, input_tokens, output_tokens FROM messages WHERE message_id = ?',
+    ).get(msgId) as { model_used: string | null; input_tokens: number | null; output_tokens: number | null };
+
+    expect(row.model_used).toBe('claude-opus-4-8');
+    expect(row.input_tokens).toBe(250);
+    expect(row.output_tokens).toBe(50);
+
+    realDb.close();
   });
 });
