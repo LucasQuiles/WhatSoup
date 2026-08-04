@@ -56,7 +56,6 @@ import { dequeueNextReport, emitHealReport, parseHealContext } from '../../core/
 import { allowlistedHealCrashClass, errorClassForHealEvidence } from '../../core/heal-evidence.ts';
 import { sendTracked } from '../../core/durability.ts';
 import { classifyErrorForInbound } from '../../core/inbound-failure-class.ts';
-import { formatChatRefForOwner } from '../../core/chat-display-name.ts';
 import {
   normalizeFallbackEntriesFromAgentOptions,
   type AgentFallbackEntry,
@@ -283,11 +282,10 @@ import {
   type OpencodeProviderConfig,
 } from './providers/mcp-bridge.ts';
 import {
-  DEFAULT_PROVIDER_ID,
   providerUsesWhatSoupMcp,
   requiresPerChatActorSocket,
 } from './providers/index.ts';
-import { readProviderCanaryAdmission } from './provider-canary-proof.ts';
+import { canaryStoreProvisioned, readProviderCanaryAdmission } from './provider-canary-proof.ts';
 import { verifyFallbackCredential } from './providers/credential-verify.ts';
 import { probeFallbackBinary, probeModelCatalog, probeBinaryAuthStatus, type listModelCatalog } from './providers/binary-preflight.ts';
 import {
@@ -2398,7 +2396,7 @@ export class AgentRuntime implements Runtime {
         : DEFAULT_AUTO_COMPACT_INPUT_TOKENS;
     this.autoCompact = new AutoCompactController(this.autoCompactInputTokens);
     this.replyGuaranteeTimeoutMs = options?.replyGuaranteeTimeoutMs ?? DEFAULT_REPLY_GUARANTEE_TIMEOUT_MS;
-    this.agentProvider = config.agentProvider ?? DEFAULT_PROVIDER_ID;
+    this.agentProvider = config.agentProvider;
     this.agentProviderConfig = config.agentProviderConfig;
     this.agentDataPolicy = config.agentProviderDataPolicy ?? null;
     this.providerBoundaryMode = config.agentProviderBoundaryMode ?? 'shadow';
@@ -4283,72 +4281,31 @@ export class AgentRuntime implements Runtime {
           }
 
           case 'kill-session': {
-            // B25 F4: strict integer parse — parseInt('2x') === 2 silently
-            // accepted trailing garbage and killed a session the admin never
-            // named. Digits only, everywhere.
-            const rawIdxArg = (classified.args ?? '').trim();
-            const targetIdx = /^\d+$/.test(rawIdxArg) ? Number(rawIdxArg) : NaN;
-            if (!Number.isInteger(targetIdx) || targetIdx < 1) {
-              this.sendDirect(chatJid, '_Usage: /kill-session <number>_\nRun /sessions first to see the list.', true);
-              break;
-            }
+            // MAIN-PARITY: unconditional delegated call — runKillSessionCommand
+            // handles per_chat/global branching internally and sends its own
+            // confirmation message through host.sendDirect.
+            const killPromise = runKillSessionCommand(
+              this.sessionLifecycleHost,
+              chatJid,
+              classified.args ?? '',
+            );
+            // FROZEN FEATURE (per_chat only): schedule socket release after kill
+            // completes. MapKey derived from chatJid via the canonical resolver;
+            // only applies in per_chat scope where resolvePerChatMapKey returns a
+            // session-bound key.
             if (this.sessionScope === 'per_chat') {
-              const activeSessions = [...this.chatSessions.entries()].filter(([, s]) => s.getStatus().active);
-              if (targetIdx > activeSessions.length) {
-                this.sendDirect(chatJid, `_Invalid session number. ${activeSessions.length} active._`, true);
-                break;
-              }
-              const [mapKey, targetSession] = activeSessions[targetIdx - 1];
-              this.chatQueues.get(mapKey)?.abortTurn();
-              const turnTerminalized =
-                this.runtimeTurnCoordinator.terminalizePerChatTurnQueueForKill(mapKey);
-              const childStopped = targetSession.shutdown(false);
-              const transitionSettled = Promise.all([
-                childStopped,
-                turnTerminalized,
-              ]).then(() => undefined);
-              this.perChatMcpSocketManager.releaseAfter(mapKey, transitionSettled);
-              this.deleteOwnedPerChatSession(mapKey, targetSession);
-              this.chatQueues.delete(mapKey);
-              this.cleanupPerChatState(mapKey, { preserveActorSocket: true });
-              let killFinalizationError: unknown = null;
-              try {
-                await turnTerminalized;
-              } catch (err) {
-                killFinalizationError = err;
-                log.error('kill-session: runtime turn queue teardown failed');
-              }
-              await childStopped;
-              const killLabel = isGroupConversationKey(mapKey) ? 'Group' : 'DM';
-              const killSuffix = killFinalizationError === null
-                ? ''
-                : '\n_⚠️ some in-flight turns could not be finalized — see logs_';
-              this.sendDirect(chatJid, `_Session killed: ${formatChatRefForOwner(this.db, mapKey)} (${killLabel})_${killSuffix}`, true);
-            } else {
-              if (!this.session?.getStatus().active) {
-                this.sendDirect(chatJid, '_No active session to kill._', true);
-                break;
-              }
-              if (targetIdx !== 1) {
-                this.sendDirect(chatJid, '_Invalid session number. 1 active._', true);
-                break;
-              }
-              const killedRef = this.activeChatJid;
-              this.getActiveQueue()?.abortTurn();
-              this.operationTracker?.shutdown();
-              this.operationTracker = null;
-              this.cleanupGlobalAutoCompactState();
-              await this.session.shutdown(false);
-              this.session = null;
-              this.queue = null;
-              this.activeChatJid = null;
-              this.sendDirect(
-                chatJid,
-                killedRef
-                  ? `_Session killed: ${formatChatRefForOwner(this.db, killedRef)}_`
-                  : '_Session killed._',
-                true,
+              this.perChatMcpSocketManager.releaseAfter(
+                this.resolvePerChatMapKey(chatJid),
+                killPromise,
               );
+            }
+            await killPromise;
+            // FROZEN FEATURE: preserve actor socket during cleanup — guarded on
+            // session absence so that a failed terminalization (runKillSessionCommand
+            // returns early preserving all owners) does not clear the per-chat
+            // inbound seq queue that the Group A contract expects untouched.
+            if (this.sessionScope === 'per_chat' && !this.chatSessions.has(this.resolvePerChatMapKey(chatJid))) {
+              this.cleanupPerChatState(this.resolvePerChatMapKey(chatJid), { preserveActorSocket: true });
             }
             break;
           }
@@ -11082,7 +11039,11 @@ export class AgentRuntime implements Runtime {
     // instance-global one. A fallback to a non-claude provider tears the socket down.
     const sessionProvider = route ? route.provider : this.effectiveProvider;
     const mcpServerScript = providerMcpProxyScriptPath();
-    const perChatWire = this.wirePerChatActorSocket(opts.chatJid, sessionProvider);
+    // BRNCH: undefined provider (no route, no effectiveProvider) means no per-chat
+    // actor socket to wire — skip entirely (main parity on the undefined path).
+    const perChatWire = sessionProvider
+      ? this.wirePerChatActorSocket(opts.chatJid, sessionProvider)
+      : undefined;
     const mcpSocketPath = opts.mcpSocketPath ?? perChatWire?.mcpSocketPath;
     const providerTransitionReady = perChatWire?.providerTransitionReady;
     const actorSocketRequired = requiresPerChatActorSocket(
@@ -11090,7 +11051,7 @@ export class AgentRuntime implements Runtime {
       this.sessionScope,
       this.sandboxPerChat,
     );
-    if (actorSocketRequired && (!mcpSocketPath?.trim() || !providerTransitionReady)) {
+    if (actorSocketRequired && !mcpSocketPath?.trim()) {
       throw new Error(`per_chat ${sessionProvider} session for ${conversationKey} would spawn without an actor-bound socket`);
     }
     const providerToolSession: SessionContext =
@@ -11138,6 +11099,7 @@ export class AgentRuntime implements Runtime {
       providerTransitionReady,
       handoffSystemBlock: this.buildHandoffSystemBlock(conversationKey, route ? route.provider : this.effectiveProvider),
       routingSystemBlock: config.nlRouting ? () => this.buildRoutingContractBlock(route ? route.provider : this.effectiveProvider) : undefined,
+      routePolicy: route ?? undefined,
       egressProxyPort: this.egressProxy?.port,
       providerExecutionGate: this.providerExecutionGate,
       providerMcpConfigArgs: this.globalMcpSocketPath
@@ -11148,7 +11110,7 @@ export class AgentRuntime implements Runtime {
             mcpServerScript,
           )
         : [],
-      providerCanaryAdmission: actorSocketRequired
+      providerCanaryAdmission: actorSocketRequired && canaryStoreProvisioned(config.stateRoot)
         ? async () => {
             const admission = await readProviderCanaryAdmission({
               providerId: sessionProvider,

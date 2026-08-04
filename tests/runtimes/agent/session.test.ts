@@ -14,6 +14,8 @@ import {
 
 // ─── Mocks ────────────────────────────────────────────────────────────────────
 
+vi.mock('../../../src/runtimes/agent/provider-canary-proof.ts');
+
 // #1869: a single shared, inspectable logger (not a fresh object per call) so
 // tests can assert on `log.debug`/`log.warn` calls — same idiom as
 // handoff-distill-coordinator.test.ts's `mockLogger`. Nothing else in this file
@@ -88,17 +90,6 @@ function exitOnSigkill(child: MockChild): void {
 
 vi.mock('node:child_process', () => ({
   spawn: vi.fn(),
-}));
-
-vi.mock('../../../src/runtimes/agent/provider-canary-proof.ts', () => ({
-  sha256File: vi.fn(() => 'this-hash-will-never-match-admission'),
-  readProviderCanaryAdmission: vi.fn(() => ({
-    allowed: true,
-    resolvedPath: '/usr/bin/claude',
-    binarySha256: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
-    proxyScriptSha256: 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
-  })),
-  resolveExecutable: vi.fn(() => '/usr/bin/claude'),
 }));
 
 vi.mock('../../../src/runtimes/agent/process-tree.ts', () => ({
@@ -373,8 +364,10 @@ describe('SessionManager', () => {
     const db = makeDb();
     const { messenger } = makeMessenger();
 
-    // sha256File is already stubbed via vi.mock above to return
-    // 'this-hash-will-never-match-admission', which won't match the admission.
+    // Override the auto-mocked sha256File to return a NON-matching hash so
+    // the re-hash check fires.
+    const { sha256File } = await import('../../../src/runtimes/agent/provider-canary-proof.ts');
+    vi.mocked(sha256File).mockReturnValue('this-hash-will-never-match-admission');
 
     const sm = new SessionManager({
       db,
@@ -384,6 +377,7 @@ describe('SessionManager', () => {
       provider: 'claude-cli',
       providerCanaryAdmission: async () => ({
         allowed: true,
+        required: true,
         resolvedPath: '/usr/bin/claude',
         binarySha256: 'original-hash-that-was-admitted',
         proxyScriptSha256: 'proxy-hash',

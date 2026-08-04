@@ -2088,7 +2088,11 @@ export class SessionManager {
       return;
     }
     if (this.providerTransitionReady) await this.providerTransitionReady;
+    this.assertDurableFailureReconciled();
     const provider = this.assertKnownProvider('spawnSession');
+    const existingCheckpoint = this.readCheckpointWatchdogState();
+    this.assertNoPendingRoutePolicyAdmission(existingCheckpoint);
+    const admissionWatchdogState = this.routePolicyAdmissionCheckpointState(existingCheckpoint);
     if (this.resolveGenerationOwnership === null && provider === 'codex-cli') {
       this.localGenerationIdentity = {
         managerId: this.localGenerationManagerId,
@@ -2177,9 +2181,6 @@ export class SessionManager {
     const cwd = this.configuredCwd ?? homedir();
 
     const systemPrompt = this.buildSystemPrompt();
-
-    const existingCheckpoint = this.readCheckpointWatchdogState();
-    const admissionWatchdogState = this.routePolicyAdmissionCheckpointState(existingCheckpoint);
 
     if (this.isManagedLoopProvider) {
       const providerSession = this.createManagedProviderSession();
@@ -2339,9 +2340,21 @@ export class SessionManager {
       return;
     }
 
+    // Persistent child spawn: capture provider admission + wait for transition
+    // before resolving the binary (TOCTOU binding: never re-resolve PATH).
+    if (this.providerTransitionReady) await this.providerTransitionReady;
+    if (this.providerCanaryAdmission) {
+      this.providerAdmission = await this.providerCanaryAdmission();
+      if (!this.providerAdmission.allowed) {
+        throw new Error('provider MCP canary proof unavailable');
+      }
+    }
     const admission = this.providerAdmission;
     const binary = admission?.resolvedPath ?? this.getProviderBinary();
-    if (admission) {
+    if (admission?.required) {
+      if (!admission.binarySha256) {
+        throw new Error('admission record incomplete — refusing spawn');
+      }
       const actualSha = sha256File(admission.resolvedPath);
       if (actualSha !== admission.binarySha256) {
         throw new Error('provider binary content changed since admission — refusing spawn');
@@ -3303,8 +3316,11 @@ export class SessionManager {
       try {
         args = this.buildSpawnPerTurnArgs(cwd, input);
         const admission = this.providerAdmission;
-        if (admission) {
+        if (admission?.required) {
           binary = admission.resolvedPath;
+          if (!admission.binarySha256) {
+            throw new Error('admission record incomplete — refusing spawn');
+          }
           const actualSha = sha256File(admission.resolvedPath);
           if (actualSha !== admission.binarySha256) {
             throw new Error('provider binary content changed since admission — refusing spawn');

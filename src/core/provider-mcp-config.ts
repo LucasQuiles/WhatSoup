@@ -217,8 +217,9 @@ export function writeProviderMcpConfigTarget(providerId: string, agentCwd: strin
   switch (providerId) {
     case 'claude-cli':
     case 'gemini-cli':
-    case 'codex-cli':
       return join(agentCwd, '.mcp.json');
+    case 'codex-cli':
+      return null;
     case 'opencode-cli':
       return join(agentCwd, 'opencode.json');
     default:
@@ -248,7 +249,6 @@ export function generateMcpConfigFile(
   switch (providerId) {
     case 'claude-cli':
     case 'gemini-cli':
-    case 'codex-cli':
       return {
         mcpServers: Object.fromEntries(
           servers.map((server) => [

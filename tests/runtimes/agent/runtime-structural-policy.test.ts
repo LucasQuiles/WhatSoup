@@ -133,12 +133,29 @@ describe('AgentRuntime structural policy', () => {
   });
 
   it('/kill-session retires actor ownership only after child and turn teardown settle', async () => {
-    const source = await readRuntimeSource();
-    expect(source).toContain(
-      'const transitionSettled = Promise.all([\n                childStopped,\n                turnTerminalized,\n              ]).then(() => undefined);',
+    const runtimeSource = await readRuntimeSource();
+    const lifecycleSource = await readFile(
+      new URL('../../../src/runtimes/agent/runtime-session-lifecycle.ts', import.meta.url),
+      'utf8',
     );
-    expect(source).toContain(
-      'this.perChatMcpSocketManager.releaseAfter(mapKey, transitionSettled);',
+    // runKillSessionCommand in the shared lifecycle file internalizes the
+    // serialization: terminalize → shutdown → retire → cleanup
+    expect(lifecycleSource).toContain(
+      'await host.terminalizePerChatTurn(mapKey)',
+    );
+    expect(lifecycleSource).toContain(
+      'await session.shutdown(false)',
+    );
+    expect(lifecycleSource).toContain(
+      'host.cleanupPerChatState(mapKey)',
+    );
+    // Frozen feature in the handler schedules socket release after the
+    // kill promise settles (decoupled: mapKey derived from chatJid resolver)
+    expect(runtimeSource).toContain(
+      'this.perChatMcpSocketManager.releaseAfter(',
+    );
+    expect(runtimeSource).toContain(
+      'this.resolvePerChatMapKey(chatJid),',
     );
   });
 

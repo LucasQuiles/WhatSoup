@@ -8,6 +8,7 @@ type TestResource = {
 export class FakePerChatMcpSocketManager {
   readonly resources = new Map<string, TestResource>();
   private readonly barriers = new Map<string, Promise<void>>();
+  private readonly rejectedBarriers = new Set<string>();
   private nextSocketId = 0;
 
   acquire(identity: string): { socketPath: string; ready: Promise<void> } {
@@ -30,9 +31,11 @@ export class FakePerChatMcpSocketManager {
   }
 
   release(identity: string): void {
-    if (this.barriers.has(identity)) {
+    if (this.barriers.has(identity) && !this.rejectedBarriers.has(identity)) {
       throw new Error('actor MCP socket release requires terminal child proof');
     }
+    this.barriers.delete(identity);
+    this.rejectedBarriers.delete(identity);
     const resource = this.resources.get(identity);
     if (!resource) return;
     resource.server.stop();
@@ -44,13 +47,16 @@ export class FakePerChatMcpSocketManager {
   }
 
   releaseAfter(identity: string, childStopped: Promise<void>): void {
-    if (this.barriers.has(identity)) return;
+    if (this.barriers.has(identity) && !this.rejectedBarriers.has(identity)) return;
+    this.rejectedBarriers.delete(identity);
     const barrier = childStopped.then(() => {
       this.barriers.delete(identity);
       this.release(identity);
     });
     this.barriers.set(identity, barrier);
-    void barrier.catch(() => {});
+    void barrier.catch(() => {
+      this.rejectedBarriers.add(identity);
+    });
   }
 
   rekey(oldIdentity: string, newIdentity: string): void {

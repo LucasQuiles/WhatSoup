@@ -24,17 +24,15 @@ vi.mock('../../../src/runtimes/agent/provider-canary-proof.ts', () => ({
     binarySha256: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
     proxyScriptSha256: 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
   })),
+  sha256File: vi.fn(() => 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'),
+  resolveExecutable: vi.fn(),
+  canaryStoreProvisioned: vi.fn(() => false),
 }));
 
-vi.mock('../../../src/logger.ts', () => ({
-  createChildLogger: () => ({
-    info: vi.fn(),
-    warn: vi.fn(),
-    error: vi.fn(),
-    debug: vi.fn(),
-  }),
-  flushLogger: vi.fn(),
-}));
+vi.mock('../../../src/logger.ts', async () => {
+  const { loggerMock } = await import('../../helpers/logger-mock.ts');
+  return { ...loggerMock(), flushLogger: vi.fn() };
+});
 
 type RespawnTimer = ReturnType<typeof setTimeout>;
 

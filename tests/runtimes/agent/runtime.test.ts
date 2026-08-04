@@ -1233,7 +1233,7 @@ describe('AgentRuntime', () => {
       agentFallbackModel?: string;
       model?: string;
     };
-    agentConfig.agentProvider = 'claude-cli';
+    delete agentConfig.agentProvider;
     delete agentConfig.agentProviderConfig;
     delete agentConfig.agentFallbackProvider;
     delete agentConfig.agentFallbackModel;
@@ -8026,6 +8026,7 @@ describe('AgentRuntime', () => {
     expect(state.sessionOwnership.get('chat-b')).toBeDefined();
     expect(state.sessionOwnership.get('chat-c')).toBeUndefined();
     expect(state.ownedSessionManagers.size).toBe(2);
+
     await expect(runtime.shutdown()).resolves.toBeUndefined();
 
     expect(shutdownA).toHaveBeenCalledTimes(2);
@@ -11835,7 +11836,7 @@ describe('AgentRuntime', () => {
       expect(mockSession.spawnSession).not.toHaveBeenCalled();
       expect(mockDurability.retireExactSessionLifecycle).toHaveBeenCalledWith({
         agentSessionRowId: 1,
-        provider: 'claude-cli',
+        provider: undefined,
         providerSessionId: 'sess-stale',
         workspaceKey: 'user',
         conversationKey: 'user',

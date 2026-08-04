@@ -18,6 +18,7 @@ import {
   acquireProcessLock,
   releaseProcessLock,
 } from '../../src/lib/process-lock.ts';
+import { systemClock } from '../../src/lib/clock.ts';
 import { buildChildEnv, getProviderBinary } from '../../src/runtimes/agent/session.ts';
 import {
   buildInitializeRequest,
@@ -494,10 +495,11 @@ async function runLockedProviderCanary(
       options.proxyScriptPath,
       options.binaryVersion,
     );
+    const nowMs = systemClock.now();
     const receipt: ProviderCanaryReceipt = {
       schemaVersion: 1,
       contractVersion: CANARY_CONTRACT_VERSION,
-      recordedAt: new Date().toISOString(),
+      recordedAt: new Date(nowMs).toISOString(),
       ...evidence,
       dynamicInitialize: true,
       dynamicToolsList: true,
@@ -505,7 +507,7 @@ async function runLockedProviderCanary(
       proxyDescendant: true,
       processGroupReaped: true,
     };
-    const validation = validateProviderCanaryReceipt(receipt, evidence);
+    const validation = validateProviderCanaryReceipt(receipt, evidence, nowMs);
     if (!validation.proven) throw new Error('provider MCP canary receipt is unproven');
     writeAtomicPrivateFileSync(
       receiptPath,

@@ -7,16 +7,10 @@ import {
 } from '../../../src/runtimes/agent/model-pin.ts';
 import type { SessionManager } from '../../../src/runtimes/agent/session.ts';
 
-const lifecycleLog = vi.hoisted(() => ({
-  debug: vi.fn(),
-  error: vi.fn(),
-  info: vi.fn(),
-  warn: vi.fn(),
-}));
-
-vi.mock('../../../src/logger.ts', () => ({
-  createChildLogger: () => lifecycleLog,
-}));
+vi.mock('../../../src/logger.ts', async () => {
+  const { loggerMock } = await import('../../helpers/logger-mock.ts');
+  return loggerMock();
+});
 
 function deferred(): {
   promise: Promise<void>;
@@ -64,6 +58,10 @@ function makeHarness(
         order.push('terminalize');
         return turnTerminalized;
       }),
+      retirePerChatTurnQueueAfterKill: vi.fn(() => {
+        order.push('retire');
+        return Promise.resolve();
+      }),
     },
     deleteOwnedPerChatSession: vi.fn(() => {
       order.push('detach');
@@ -94,8 +92,11 @@ describe('model-pin per-chat actor lifecycle', () => {
 
     expect(session.shutdown).toHaveBeenCalledWith(false);
     expect(order.indexOf('shutdown')).toBeLessThan(order.indexOf('release-after'));
-    expect(order.indexOf('release-after')).toBeLessThan(order.indexOf('detach'));
-    expect(order).toContain('cleanup-preserved');
+    // fail-closed contract: detach fires ONLY after childStopped resolves.
+    // At this point (synchronous), detach MUST NOT have fired yet.
+    // fail-closed: cleanup and detach fire ONLY after childStopped resolves.
+    expect(order).not.toContain('cleanup-preserved');
+    expect(order).not.toContain('detach');
     let stopped = false;
     void releaseProofs[0]!.then(() => { stopped = true; });
     await Promise.resolve();
@@ -104,6 +105,9 @@ describe('model-pin per-chat actor lifecycle', () => {
     child.resolve();
     await releaseProofs[0];
     expect(stopped).toBe(true);
+    // After childStopped resolves successfully: cleanup and detach must fire.
+    expect(order).toContain('cleanup-preserved');
+    expect(order).toContain('detach');
   });
 
   it('passes a rejected child-stop proof through the generic transition barrier', async () => {
@@ -114,22 +118,24 @@ describe('model-pin per-chat actor lifecycle', () => {
     child.reject(new Error('provider child still live'));
 
     await expect(releaseProofs[0]).rejects.toThrow(/still live/i);
-    expect(port.cleanupPerChatState).toHaveBeenCalledWith(
-      'chat',
-      { preserveActorSocket: true },
-    );
+    // fail-closed: on rejection, no cleanup, no detach — ownership retained.
+    expect(port.cleanupPerChatState).not.toHaveBeenCalled();
+    expect(port.deleteOwnedPerChatSession).not.toHaveBeenCalled();
   });
 
   it('uses the same child-stop barrier when a CLI route is replaced by an API route', async () => {
     const child = deferred();
     const { port, session, order, releaseProofs } = makeHarness(child.promise);
 
-    const outcome = await applyRouteChangeAndRecycle(port, 'chat', 'actor', 'chat');
+    // Do NOT await — the async path includes childStopped which resolves
+    // only when child is resolved below. Call then await after resolving.
+    const outcomePromise = applyRouteChangeAndRecycle(port, 'chat', 'actor', 'chat');
 
-    expect(outcome).toBe('recycled');
+    // Synchronous assertions: barrier registered, session/route reflect old state.
     expect(session.getProviderId()).toBe('codex-cli');
     expect(port.resolveRouteForTurn('chat', 'actor').provider).toBe('anthropic-api');
-    expect(order.indexOf('release-after')).toBeLessThan(order.indexOf('detach'));
+    // detach fires inside childStopped.then() — not yet called at this point.
+    expect(order).not.toContain('detach');
     let transitionReady = false;
     void releaseProofs[0]!.then(() => { transitionReady = true; });
     await Promise.resolve();
@@ -138,6 +144,8 @@ describe('model-pin per-chat actor lifecycle', () => {
     child.resolve();
     await releaseProofs[0];
     expect(transitionReady).toBe(true);
+    const outcome = await outcomePromise;
+    expect(outcome).toBe('recycled');
   });
 
   it('keeps replacement blocked until both child stop and turn terminalization settle', async () => {

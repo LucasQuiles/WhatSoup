@@ -4,6 +4,7 @@ import {
   accessSync,
   chmodSync,
   constants,
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -14,6 +15,7 @@ import {
 import { tmpdir } from 'node:os';
 import { delimiter, join } from 'node:path';
 
+import { systemClock } from '../../lib/clock.ts';
 import { readPrivateFileSync } from '../../lib/private-fs.ts';
 import { isRecord } from '../../lib/type-guards.ts';
 import { isProviderId, mcpModeForProvider } from './providers/index.ts';
@@ -77,11 +79,13 @@ export interface ProviderCanaryValidation {
  */
 export interface ProviderAdmission {
   allowed: boolean;
+  /** Whether the provider canary proof was required for this admission. */
+  required: boolean;
   /** Absolute resolved path to the provider binary (no PATH re-resolution). */
   resolvedPath: string;
-  /** SHA-256 hex digest of the binary file at admission time. */
+  /** SHA-256 hex digest of the binary file at admission time (empty if !required). */
   binarySha256: string;
-  /** SHA-256 hex digest of the MCP proxy script at admission time. */
+  /** SHA-256 hex digest of the MCP proxy script at admission time (empty if !required). */
   proxyScriptSha256: string;
 }
 
@@ -114,7 +118,7 @@ function isSafeReceiptShape(value: unknown): value is ProviderCanaryReceipt {
 export function validateProviderCanaryReceipt(
   value: unknown,
   expected: ProviderCanaryEvidence,
-  nowMs = Date.now(),
+  nowMs = systemClock.now(),
 ): ProviderCanaryValidation {
   if (value === null || value === undefined) return { proven: false, reason: 'missing' };
   if (!isSafeReceiptShape(value)) return { proven: false, reason: 'malformed' };
@@ -139,7 +143,21 @@ export function providerCanaryReceiptPath(stateRoot: string, providerId: string)
   if (!isProviderId(providerId) || mcpModeForProvider(providerId) !== 'stdio_proxy') {
     throw new Error('provider is not an eligible CLI provider');
   }
-  return join(stateRoot, 'provider-canaries', `${providerId}.json`);
+  return join(stateRoot, PROVIDER_CANARY_DIR, `${providerId}.json`);
+}
+
+/** The provider-canary receipts directory name (relative to stateRoot.
+ *  MUST be kept in sync with the join in providerCanaryReceiptPath — any
+ *  change to one MUST update the other. */
+const PROVIDER_CANARY_DIR = 'provider-canaries';
+
+/** Whether the canary-receipt store has been provisioned (directory exists).
+ *  Derived from the SAME constant as providerCanaryReceiptPath, so the
+ *  directory name never drifts. A non-provisioned store means the canary
+ *  proof is not enforceable in this deployment; admission proceeds as if
+ *  not required (allowed true, required false, empty hashes). */
+export function canaryStoreProvisioned(stateRoot: string): boolean {
+  return existsSync(join(stateRoot, PROVIDER_CANARY_DIR));
 }
 
 function providerCanaryRequired(
@@ -231,7 +249,7 @@ function resolveExecutable(binary: string, pathValue = process.env.PATH ?? ''): 
       accessSync(candidate, constants.X_OK);
       return realpathSync(candidate);
     } catch {
-      // Try the next PATH component.
+      // intentional: X_OK probe miss means this PATH component lacks the binary — continue scanning the remaining components.
     }
   }
   throw new Error('provider binary is unavailable');
@@ -294,13 +312,16 @@ export function readProviderCanaryAdmission(input: {
     input.sessionScope,
     input.sandboxPerChat,
   );
-  if (!required) {
-    const entrypoint = resolveExecutable(input.binary);
+  // Provisioning gate: if the receipts directory does not exist, the feature
+  // is not deployed — treat as not-required (matching main's test contract).
+  const effectiveRequired = required && canaryStoreProvisioned(input.stateRoot);
+  if (!effectiveRequired) {
     return {
       allowed: true,
-      resolvedPath: entrypoint,
-      binarySha256: sha256File(entrypoint),
-      proxyScriptSha256: sha256File(realpathSync(input.proxyScriptPath)),
+      required: false,
+      resolvedPath: input.binary,
+      binarySha256: '',
+      proxyScriptSha256: '',
     };
   }
   let receipt: unknown = null;
@@ -319,7 +340,8 @@ export function readProviderCanaryAdmission(input: {
   } catch {
     return {
       allowed: false,
-      resolvedPath: resolveExecutable(input.binary),
+      required: true,
+      resolvedPath: input.binary,
       binarySha256: '',
       proxyScriptSha256: '',
     };
@@ -335,6 +357,7 @@ export function readProviderCanaryAdmission(input: {
   });
   return {
     allowed: validation.allowed,
+    required: true,
     resolvedPath,
     binarySha256: evidence.entrypointDigest,
     proxyScriptSha256: evidence.proxyDigest,

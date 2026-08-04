@@ -1494,9 +1494,9 @@ describe('NL routing handlers (nlRouting flag)', () => {
       const mapKey = CHAT;
       const chatSessions = new Map([[mapKey, mockSession]]);
       const chatQueues = new Map([[mapKey, mockQueue as IOutboundQueue]]);
-      const runtimeQueue = {};
-      const captureIdle = vi.fn(() => runtimeQueue);
-      const retireIdle = vi.fn();
+      const teardown = { scope: 'per_chat', mapKey, queue: null, receipt: null };
+      const terminalize = vi.fn(async () => teardown);
+      const retire = vi.fn(async () => {});
       const deleteOwnedPerChatSession = vi.fn(() => {
         chatSessions.delete(mapKey);
         return true;
@@ -1507,29 +1507,30 @@ describe('NL routing handlers (nlRouting flag)', () => {
         chatSessions,
         chatQueues,
         runtimeTurnCoordinator: {
-          captureIdlePerChatTurnQueueForRecycle: captureIdle,
-          retireIdlePerChatTurnQueueForRecycle: retireIdle,
+          terminalizePerChatTurnQueueForKill: terminalize,
+          retirePerChatTurnQueueAfterKill: retire,
         },
         deleteOwnedPerChatSession,
         cleanupPerChatState,
+        retirePerChatProviderTransitionAfter: vi.fn<(key: string, proof: Promise<void>) => void>(),
       } as unknown as ModelPinPort;
-
       mockSession.shutdown.mockClear();
       await recycleLiveSession(port, mapKey, mockSession as never);
 
-      expect(captureIdle).toHaveBeenCalledWith(mapKey);
-      expect(retireIdle).toHaveBeenCalledWith(mapKey, runtimeQueue);
+      expect(terminalize).toHaveBeenCalledWith(mapKey);
+      expect(retire).toHaveBeenCalledWith(teardown);
       expect(deleteOwnedPerChatSession).toHaveBeenCalledWith(mapKey, mockSession);
-      expect(cleanupPerChatState).toHaveBeenCalledWith(mapKey);
+      expect(cleanupPerChatState).toHaveBeenCalledWith(mapKey, { preserveActorSocket: true });
       expect(chatQueues.has(mapKey)).toBe(false);
       expect(mockSession.shutdown).toHaveBeenCalledWith(false);
     });
 
-    it('a per-chat route recycle retains ownership and does not report success when idle proof fails', async () => {
+    it('a per-chat route recycle retains ownership and does not report success when turn terminalization fails', async () => {
       const mapKey = CHAT;
       const chatSessions = new Map([[mapKey, mockSession]]);
       const chatQueues = new Map([[mapKey, mockQueue as IOutboundQueue]]);
       const proofError = new Error('runtime queue is not idle');
+      const retire = vi.fn(async () => {});
       const deleteOwnedPerChatSession = vi.fn(() => true);
       const cleanupPerChatState = vi.fn();
       const port = {
@@ -1537,10 +1538,8 @@ describe('NL routing handlers (nlRouting flag)', () => {
         chatSessions,
         chatQueues,
         runtimeTurnCoordinator: {
-          captureIdlePerChatTurnQueueForRecycle: vi.fn(() => {
-            throw proofError;
-          }),
-          retireIdlePerChatTurnQueueForRecycle: vi.fn(),
+          terminalizePerChatTurnQueueForKill: vi.fn(() => Promise.reject(proofError)),
+          retirePerChatTurnQueueAfterKill: retire,
         },
         deleteOwnedPerChatSession,
         cleanupPerChatState,
@@ -1551,17 +1550,22 @@ describe('NL routing handlers (nlRouting flag)', () => {
       await expect(recycleLiveSession(port, mapKey, mockSession as never)).rejects.toThrow(proofError);
       expect(chatSessions.get(mapKey)).toBe(mockSession);
       expect(chatQueues.get(mapKey)).toBe(mockQueue);
+      // A rejected terminalization rolled its own teardown state back; the
+      // paired retire is only for a terminalization that RESOLVED.
+      expect(retire).not.toHaveBeenCalled();
       expect(deleteOwnedPerChatSession).not.toHaveBeenCalled();
       expect(cleanupPerChatState).not.toHaveBeenCalled();
-      expect(mockSession.shutdown).not.toHaveBeenCalled();
+      // Kill-protocol recycle starts the child teardown before the turn queue
+      // proof settles (the frozen actor-lifecycle contract requires it).
+      expect(mockSession.shutdown).toHaveBeenCalledWith(false);
     });
 
     it('retains the exact per-chat owner and queue when process-tree shutdown fails', async () => {
       const mapKey = CHAT;
       const chatSessions = new Map([[mapKey, mockSession]]);
       const chatQueues = new Map([[mapKey, mockQueue as IOutboundQueue]]);
-      const runtimeQueue = {};
-      const retireIdle = vi.fn();
+      const teardown = { scope: 'per_chat', mapKey, queue: null, receipt: null };
+      const retire = vi.fn(async () => {});
       const deleteOwnedPerChatSession = vi.fn(() => true);
       const cleanupPerChatState = vi.fn();
       const port = {
@@ -1569,8 +1573,8 @@ describe('NL routing handlers (nlRouting flag)', () => {
         chatSessions,
         chatQueues,
         runtimeTurnCoordinator: {
-          captureIdlePerChatTurnQueueForRecycle: vi.fn(() => runtimeQueue),
-          retireIdlePerChatTurnQueueForRecycle: retireIdle,
+          terminalizePerChatTurnQueueForKill: vi.fn(async () => teardown),
+          retirePerChatTurnQueueAfterKill: retire,
         },
         deleteOwnedPerChatSession,
         cleanupPerChatState,
@@ -1582,7 +1586,10 @@ describe('NL routing handlers (nlRouting flag)', () => {
 
       expect(chatSessions.get(mapKey)).toBe(mockSession);
       expect(chatQueues.get(mapKey)).toBe(mockQueue);
-      expect(retireIdle).not.toHaveBeenCalled();
+      // Fail-closed on ownership, but the teardown state the terminalize
+      // registered is STILL retired — a leaked state would poison every later
+      // runtime.shutdown() with the teardown-lifecycle deadline.
+      await vi.waitFor(() => expect(retire).toHaveBeenCalledWith(teardown));
       expect(deleteOwnedPerChatSession).not.toHaveBeenCalled();
       expect(cleanupPerChatState).not.toHaveBeenCalled();
     });
@@ -1682,7 +1689,6 @@ describe('NL routing handlers (nlRouting flag)', () => {
       const replacementQueue = { ...mockQueue } as IOutboundQueue;
       const chatSessions = new Map([[mapKey, mockSession]]);
       const chatQueues = new Map([[mapKey, mockQueue as IOutboundQueue]]);
-      const runtimeQueue = {};
       let releaseShutdown!: () => void;
       mockSession.shutdown.mockImplementationOnce(() => new Promise<void>((resolve) => {
         releaseShutdown = resolve;
@@ -1694,8 +1700,10 @@ describe('NL routing handlers (nlRouting flag)', () => {
         chatSessions,
         chatQueues,
         runtimeTurnCoordinator: {
-          captureIdlePerChatTurnQueueForRecycle: vi.fn(() => runtimeQueue),
-          retireIdlePerChatTurnQueueForRecycle: vi.fn(),
+          terminalizePerChatTurnQueueForKill: vi.fn(async () => ({
+            scope: 'per_chat', mapKey, queue: null, receipt: null,
+          })),
+          retirePerChatTurnQueueAfterKill: vi.fn(async () => {}),
         },
         deleteOwnedPerChatSession,
         cleanupPerChatState,

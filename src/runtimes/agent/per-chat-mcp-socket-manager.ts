@@ -140,7 +140,7 @@ export class PerChatMcpSocketManager {
             }
           } catch (cleanupErr) {
             if ((cleanupErr as NodeJS.ErrnoException).code !== 'ENOENT') {
-              // Preserve the readiness failure; an exact-path mismatch is left untouched.
+              // intentional: preserve the original readiness failure — cleanup stat/unlink errors are secondary and must not mask it.
             }
           }
         }
@@ -190,9 +190,16 @@ export class PerChatMcpSocketManager {
   }
 
   release(conversationIdentity: string): void {
-    if (this.teardownBarriers.has(conversationIdentity)) {
+    const barrier = this.teardownBarriers.get(conversationIdentity);
+    if (barrier?.state === 'pending') {
       throw new Error('actor MCP socket release requires terminal child proof');
     }
+    // A rejected barrier records a PAST transition whose child-stop proof
+    // failed; every direct release() caller reaches here only after its own
+    // terminal child proof (successful shutdown, paired retirement, or crash
+    // exit), which supersedes that stale failure. Only a PENDING barrier — a
+    // transition still in flight — blocks direct release.
+    if (barrier) this.teardownBarriers.delete(conversationIdentity);
     this.releaseOwned(conversationIdentity);
   }
 
