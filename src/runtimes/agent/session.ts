@@ -607,6 +607,8 @@ export const __provider_switch_for_test = {
 
 export class SessionManager {
   private static readonly SHUTDOWN_GRACE_MS = 5_000;
+  /** How long to wait for a managed provider session to shut down before force-killing. */
+  private static readonly MANAGED_PROVIDER_SHUTDOWN_TIMEOUT_MS = 5_000;
   private static readonly SPAWN_FAILURE_KILL_TIMEOUT_MS = 1_000;
   private readonly db: Database;
   private readonly messenger: Messenger;
@@ -3981,7 +3983,28 @@ export class SessionManager {
     if (this.managedProviderSession !== null) {
       const providerSession = this.managedProviderSession;
       try {
-        await providerSession.shutdown(suspend ? 'suspend' : 'end');
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        const shutdownTimeoutError = new Error('MANAGED_PROVIDER_SHUTDOWN_TIMEOUT');
+        try {
+          await Promise.race([
+            providerSession.shutdown(suspend ? 'suspend' : 'end'),
+            new Promise<never>((_, reject) => {
+              timer = setTimeout(
+                () => reject(shutdownTimeoutError),
+                SessionManager.MANAGED_PROVIDER_SHUTDOWN_TIMEOUT_MS,
+              );
+              timer.unref();
+            }),
+          ]);
+        } catch (raceErr) {
+          if (raceErr !== shutdownTimeoutError) {
+            throw raceErr;
+          }
+          log.warn({ chatJid: this.chatJid, sessionId: this.sessionId, provider: this.provider }, 'managed provider shutdown timed out — force-killing');
+          providerSession.kill();
+        } finally {
+          clearTimeout(timer);
+        }
       } catch (err) {
         try {
           this.closeDurableFailureLifecycle(closingSessionId, this.dbRowId);
