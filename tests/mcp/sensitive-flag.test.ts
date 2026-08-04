@@ -175,7 +175,7 @@ describe('R1 sensitive-tool gate', () => {
     const bound: SessionContext = {
       tier: 'global',
       actorJid: GUEST.actorJid,
-      binding: makeConversationBinding('15550000009@s.whatsapp.net'),
+      binding: makeConversationBinding('15550000009@s.whatsapp.net', '15550000009@s.whatsapp.net'),
     };
     const res = await registry.call('sensitive_probe', {}, bound);
     // Conversation-bound: only chat-scope + transcribe_audio listed → uniform reply
