@@ -20,9 +20,7 @@ import type { OpsDeps } from '../../../src/fleet/routes/ops.ts';
 import { makeDeps, mockReq, mockRes } from '../../helpers/http-mocks.ts';
 
 function failingDeps(): OpsDeps {
-  // makeDeps's base discovery has no scan(); handleCreateLine calls it.
   return makeDeps({
-    discovery: { scan: vi.fn() } as any,
     serviceManager: {
       // Force the rollback path: enable() throws after extras are written.
       enable: vi.fn().mockRejectedValue(new Error('boom: simulated service enable failure')),
