@@ -59,33 +59,18 @@ import { mcpCall } from '../../../src/fleet/mcp-client.ts';
 import { proxyToInstance } from '../../../src/fleet/http-proxy.ts';
 import { execFile, spawn } from 'node:child_process';
 import { lookupCredential } from '../../../src/lib/keyring.ts';
-import { mockReq, mockRes, mockSseRes } from '../../helpers/http-mocks.ts';
+import { makeDeps, mockReq, mockRes, mockSseRes } from '../../helpers/http-mocks.ts';
 
 // ---------------------------------------------------------------------------
 // Mock helpers
 // ---------------------------------------------------------------------------
 //
 // mockReq/mockRes/mockSseRes migrated onto the shared helper (#2240/#2923 umbrella).
-// fakeInstance, fakeChildProcess, mockServiceManager, and makeDeps below stay
-// local because of two behavioral divergences from the shared
-// makeDeps/mockServiceManager that this file's handleAuth coverage genuinely
-// depends on:
-//   1. The shared mockServiceManager's `startFire` is a bare `vi.fn()`.
-//      handleAuth (src/fleet/routes/ops.ts:1415, :1331) calls
-//      `startFire(name, onComplete)` and only calls `endOnce()` /
-//      `writeSSE('connected', ...)` from inside that callback — a bare stub
-//      never invokes it, so any test that doesn't explicitly override
-//      startFire would hang to the suite timeout instead of resolving. This
-//      file's local mockServiceManager auto-invokes the callback with `null`
-//      (success) by default, which dozens of handleAuth-flow tests below rely
-//      on implicitly.
-//   2. The shared makeDeps merges override sub-objects onto its base
-//      (`discovery: { ...base.discovery, ...override.discovery }`), which
-//      would inject a default `getInstances` into every override that only
-//      specified `getInstance`. This file's local makeDeps does a flat
-//      spread instead, so `makeDeps({ discovery: { getInstance, scan } })`
-//      produces a discovery with exactly those two keys — several tests here
-//      assert against a discovery mock with a deliberately narrow surface.
+// depsFor delegates to makeDeps() from tests/helpers/http-mocks.ts. The shared
+// harness now provides both a non-bare startFire (auto-invokes completion) and
+// a default discovery.scan, so the handleAuth flow no longer needs local
+// divergence. The type cast through OpsDeps handles structural differences
+// between CommonRouteDeps and FleetDiscovery (extra fields on the real type).
 
 function fileMode(filePath: string): number {
   return fs.statSync(filePath).mode & 0o777;
@@ -139,16 +124,8 @@ function fakeChildProcess({ emitCloseOnExit = true }: { emitCloseOnExit?: boolea
   return child;
 }
 
-function makeDeps(overrides: Partial<OpsDeps> = {}): OpsDeps {
-  return {
-    discovery: {
-      getInstance: vi.fn(() => undefined),
-      getInstances: vi.fn(() => new Map()),
-    } as any,
-    realtime: { publish: vi.fn() },
-    serviceManager: mockServiceManager(),
-    ...overrides,
-  };
+function depsFor(overrides: Partial<OpsDeps> = {}): OpsDeps {
+  return makeDeps(overrides) as unknown as OpsDeps;
 }
 
 // ---------------------------------------------------------------------------
@@ -170,7 +147,7 @@ describe('handleAuth', () => {
     const child = fakeChildProcess();
     vi.mocked(spawn).mockReturnValue(child as any);
 
-    const deps = makeDeps({
+    const deps = depsFor({
       discovery: { getInstance: vi.fn(() => inst), scan: vi.fn() } as any,
     });
     const req = mockReq({ method: 'POST', body: '', url: '/api/lines/test-line/auth' });
@@ -204,7 +181,7 @@ describe('handleAuth', () => {
     vi.mocked(spawn).mockReturnValue(child as any);
 
     const svc = mockServiceManager();
-    const deps = makeDeps({
+    const deps = depsFor({
       discovery: { getInstance: vi.fn(() => inst), scan: vi.fn() } as any,
       serviceManager: svc,
     });
@@ -228,7 +205,7 @@ describe('handleAuth', () => {
     vi.mocked(spawn).mockReturnValue(child as any);
 
     const svc = mockServiceManager();
-    const deps = makeDeps({
+    const deps = depsFor({
       discovery: { getInstance: vi.fn(() => inst), scan: vi.fn() } as any,
       serviceManager: svc,
     });
@@ -255,7 +232,7 @@ describe('handleAuth', () => {
       vi.mocked(spawn).mockReturnValue(child as any);
 
       const svc = mockServiceManager();
-      const deps = makeDeps({
+      const deps = depsFor({
         discovery: { getInstance: vi.fn(() => inst), scan: vi.fn() } as any,
         serviceManager: svc,
       });
@@ -291,7 +268,7 @@ describe('handleSend', () => {
   });
 
   it('returns 404 for unknown instance', async () => {
-    const deps = makeDeps();
+    const deps = depsFor();
     const res = mockRes();
     await handleSend(mockReq({ method: 'POST', body: '{}' }), res, deps, { name: 'nope' });
     expect(res._status).toBe(404);
@@ -299,7 +276,7 @@ describe('handleSend', () => {
 
   it('routes passive instances through mcpCall', async () => {
     const inst = fakeInstance({ type: 'passive', socketPath: '/state/test-line/whatsoup.sock' });
-    const deps = makeDeps({ discovery: { getInstance: vi.fn(() => inst) } as any });
+    const deps = depsFor({ discovery: { getInstance: vi.fn(() => inst) } as any });
 
     vi.mocked(fs.existsSync).mockReturnValue(true);
     vi.mocked(mcpCall).mockResolvedValue({ success: true, result: { sent: true } });
@@ -317,7 +294,7 @@ describe('handleSend', () => {
 
   it('routes agent instances through proxyToInstance', async () => {
     const inst = fakeInstance({ type: 'agent', socketPath: '/state/agent/whatsoup.sock' });
-    const deps = makeDeps({ discovery: { getInstance: vi.fn(() => inst) } as any });
+    const deps = depsFor({ discovery: { getInstance: vi.fn(() => inst) } as any });
 
     vi.mocked(proxyToInstance).mockResolvedValue({ status: 200, body: '{"ok":true}' });
 
@@ -332,7 +309,7 @@ describe('handleSend', () => {
 
   it('returns 502 when mcpCall fails', async () => {
     const inst = fakeInstance({ type: 'passive', socketPath: '/tmp/sock' });
-    const deps = makeDeps({ discovery: { getInstance: vi.fn(() => inst) } as any });
+    const deps = depsFor({ discovery: { getInstance: vi.fn(() => inst) } as any });
 
     vi.mocked(fs.existsSync).mockReturnValue(true);
     vi.mocked(mcpCall).mockResolvedValue({ success: false, error: 'timeout' });
@@ -346,7 +323,7 @@ describe('handleSend', () => {
 
   it('returns 400 for invalid JSON body without forwarding downstream', async () => {
     const inst = fakeInstance({ type: 'passive', socketPath: '/tmp/sock' });
-    const deps = makeDeps({ discovery: { getInstance: vi.fn(() => inst) } as any });
+    const deps = depsFor({ discovery: { getInstance: vi.fn(() => inst) } as any });
 
     vi.mocked(fs.existsSync).mockReturnValue(true);
     const res = mockRes();
@@ -362,7 +339,7 @@ describe('handleSend', () => {
 
   it('routes chat instances through proxyToInstance', async () => {
     const inst = fakeInstance({ type: 'chat' });
-    const deps = makeDeps({ discovery: { getInstance: vi.fn(() => inst) } as any });
+    const deps = depsFor({ discovery: { getInstance: vi.fn(() => inst) } as any });
 
     vi.mocked(proxyToInstance).mockResolvedValue({ status: 200, body: '{"ok":true}' });
 
@@ -377,7 +354,7 @@ describe('handleSend', () => {
   it('returns 422 when no route is available', async () => {
     // Must have no socketPath AND no healthPort to hit the 422 "no route" case
     const inst = fakeInstance({ type: 'passive', socketPath: null, healthPort: 0 });
-    const deps = makeDeps({ discovery: { getInstance: vi.fn(() => inst) } as any });
+    const deps = depsFor({ discovery: { getInstance: vi.fn(() => inst) } as any });
 
     const res = mockRes();
     // Body must include chatJid (post-P1-D xor validation) so we reach the
@@ -391,7 +368,7 @@ describe('handleSend', () => {
 
   it('forwards body with to (alias) through mcpCall', async () => {
     const inst = fakeInstance({ type: 'passive', socketPath: '/state/test-line/whatsoup.sock' });
-    const deps = makeDeps({ discovery: { getInstance: vi.fn(() => inst) } as any });
+    const deps = depsFor({ discovery: { getInstance: vi.fn(() => inst) } as any });
 
     vi.mocked(fs.existsSync).mockReturnValue(true);
     vi.mocked(mcpCall).mockResolvedValue({ success: true, result: { sent: true } });
@@ -411,7 +388,7 @@ describe('handleSend', () => {
 
   it('returns 400 when profile is not a string', async () => {
     const inst = fakeInstance({ type: 'passive', socketPath: '/state/test-line/whatsoup.sock' });
-    const deps = makeDeps({ discovery: { getInstance: vi.fn(() => inst) } as any });
+    const deps = depsFor({ discovery: { getInstance: vi.fn(() => inst) } as any });
 
     const res = mockRes();
     await handleSend(
@@ -429,7 +406,7 @@ describe('handleSend', () => {
 
   it('forwards string profile through mcpCall without resolving at fleet edge', async () => {
     const inst = fakeInstance({ type: 'passive', socketPath: '/state/test-line/whatsoup.sock' });
-    const deps = makeDeps({ discovery: { getInstance: vi.fn(() => inst) } as any });
+    const deps = depsFor({ discovery: { getInstance: vi.fn(() => inst) } as any });
 
     vi.mocked(fs.existsSync).mockReturnValue(true);
     vi.mocked(mcpCall).mockResolvedValue({ success: true, result: { sent: true } });
@@ -452,7 +429,7 @@ describe('handleSend', () => {
 
   it('returns 400 when body has both chatJid and to (mutual exclusion)', async () => {
     const inst = fakeInstance({ type: 'passive', socketPath: '/tmp/sock' });
-    const deps = makeDeps({ discovery: { getInstance: vi.fn(() => inst) } as any });
+    const deps = depsFor({ discovery: { getInstance: vi.fn(() => inst) } as any });
 
     const res = mockRes();
     await handleSend(
@@ -467,7 +444,7 @@ describe('handleSend', () => {
 
   it('returns 400 when body has neither chatJid nor to', async () => {
     const inst = fakeInstance({ type: 'passive', socketPath: '/tmp/sock' });
-    const deps = makeDeps({ discovery: { getInstance: vi.fn(() => inst) } as any });
+    const deps = depsFor({ discovery: { getInstance: vi.fn(() => inst) } as any });
 
     const res = mockRes();
     await handleSend(
@@ -482,7 +459,7 @@ describe('handleSend', () => {
 
   it('propagates 502 when instance reports unknown alias not found', async () => {
     const inst = fakeInstance({ type: 'passive', socketPath: '/tmp/sock' });
-    const deps = makeDeps({ discovery: { getInstance: vi.fn(() => inst) } as any });
+    const deps = depsFor({ discovery: { getInstance: vi.fn(() => inst) } as any });
 
     vi.mocked(fs.existsSync).mockReturnValue(true);
     // Simulate the per-instance MCP returning an alias-not-found error.
@@ -503,7 +480,7 @@ describe('handleSend', () => {
 
   it('returns 400 when JSON body parses to null (closes I-1 bypass)', async () => {
     const inst = fakeInstance({ type: 'passive', socketPath: '/tmp/sock' });
-    const deps = makeDeps({ discovery: { getInstance: vi.fn(() => inst) } as any });
+    const deps = depsFor({ discovery: { getInstance: vi.fn(() => inst) } as any });
 
     const res = mockRes();
     // Without the I-1 guard, `JSON.parse('null')` returns null, `parsed.chatJid`
@@ -520,7 +497,7 @@ describe('handleSend', () => {
 
   it('returns 400 when JSON body parses to an array', async () => {
     const inst = fakeInstance({ type: 'passive', socketPath: '/tmp/sock' });
-    const deps = makeDeps({ discovery: { getInstance: vi.fn(() => inst) } as any });
+    const deps = depsFor({ discovery: { getInstance: vi.fn(() => inst) } as any });
 
     const res = mockRes();
     await handleSend(mockReq({ method: 'POST', body: '[]' }), res, deps, { name: 'test-line' });
@@ -533,7 +510,7 @@ describe('handleSend', () => {
 
   it('returns 400 when chatJid is whitespace-only (closes I-2 trim gap)', async () => {
     const inst = fakeInstance({ type: 'passive', socketPath: '/tmp/sock' });
-    const deps = makeDeps({ discovery: { getInstance: vi.fn(() => inst) } as any });
+    const deps = depsFor({ discovery: { getInstance: vi.fn(() => inst) } as any });
 
     const res = mockRes();
     await handleSend(
@@ -550,7 +527,7 @@ describe('handleSend', () => {
 
   it('returns 400 when to is whitespace-only', async () => {
     const inst = fakeInstance({ type: 'passive', socketPath: '/tmp/sock' });
-    const deps = makeDeps({ discovery: { getInstance: vi.fn(() => inst) } as any });
+    const deps = depsFor({ discovery: { getInstance: vi.fn(() => inst) } as any });
 
     const res = mockRes();
     await handleSend(
@@ -569,7 +546,7 @@ describe('handleSend', () => {
 
 describe('handleAccessUpdate', () => {
   it('returns 404 for unknown instance', async () => {
-    const deps = makeDeps();
+    const deps = depsFor();
     const res = mockRes();
     await handleAccessUpdate(mockReq({ method: 'POST', body: '{}' }), res, deps, { name: 'nope' });
     expect(res._status).toBe(404);
@@ -577,7 +554,7 @@ describe('handleAccessUpdate', () => {
 
   it('proxies access update to the instance', async () => {
     const inst = fakeInstance();
-    const deps = makeDeps({ discovery: { getInstance: vi.fn(() => inst) } as any });
+    const deps = depsFor({ discovery: { getInstance: vi.fn(() => inst) } as any });
 
     vi.mocked(proxyToInstance).mockResolvedValue({ status: 200, body: '{"updated":true}' });
 
@@ -595,7 +572,7 @@ describe('handleAccessUpdate', () => {
 
 describe('handleRestart', () => {
   it('returns 404 for unknown instance', async () => {
-    const deps = makeDeps();
+    const deps = depsFor();
     const res = mockRes();
     await handleRestart(mockReq({ method: 'POST' }), res, deps, { name: 'nope' });
     expect(res._status).toBe(404);
@@ -604,7 +581,7 @@ describe('handleRestart', () => {
   it('calls serviceManager.restart and returns 202 on success', async () => {
     const inst = fakeInstance();
     const svc = mockServiceManager();
-    const deps = makeDeps({ discovery: { getInstance: vi.fn(() => inst) } as any, serviceManager: svc });
+    const deps = depsFor({ discovery: { getInstance: vi.fn(() => inst) } as any, serviceManager: svc });
 
     const res = mockRes();
     await handleRestart(mockReq({ method: 'POST' }), res, deps, { name: 'test-line' });
@@ -617,7 +594,7 @@ describe('handleRestart', () => {
     const inst = fakeInstance();
     const svc = mockServiceManager();
     svc.restart.mockRejectedValueOnce(new Error('unit not found'));
-    const deps = makeDeps({ discovery: { getInstance: vi.fn(() => inst) } as any, serviceManager: svc });
+    const deps = depsFor({ discovery: { getInstance: vi.fn(() => inst) } as any, serviceManager: svc });
 
     const res = mockRes();
     await handleRestart(mockReq({ method: 'POST' }), res, deps, { name: 'test-line' });
@@ -635,7 +612,7 @@ describe('handleRestart', () => {
     // rejection has a message leaves an absent value. errorMessage() normalizes
     // it to String(value).
     svc.restart.mockRejectedValueOnce('service vanished');
-    const deps = makeDeps({ serviceManager: svc });
+    const deps = depsFor({ serviceManager: svc });
     vi.spyOn(deps.discovery, 'getInstance').mockReturnValue(inst);
 
     const res = mockRes();
@@ -696,7 +673,7 @@ describe('handleDeleteLine', () => {
     const dirs = seedInstanceDirs(name);
     const svc = mockServiceManager();
     svc.stop.mockRejectedValueOnce(new Error('systemd timed out while stopping'));
-    const deps = makeDeps({
+    const deps = depsFor({
       discovery: { scan: vi.fn() } as any,
       serviceManager: svc,
     });
@@ -719,7 +696,7 @@ describe('handleDeleteLine', () => {
     const dirs = seedInstanceDirs(name);
     const svc = mockServiceManager();
     svc.disable.mockRejectedValueOnce(new Error('permission denied disabling service'));
-    const deps = makeDeps({
+    const deps = depsFor({
       discovery: { scan: vi.fn() } as any,
       serviceManager: svc,
     });
@@ -743,7 +720,7 @@ describe('handleDeleteLine', () => {
     const unit = ['whatsoup', `${name}.service`].join('@');
     svc.stop.mockRejectedValueOnce(new Error(`unit ${unit} not found`));
     svc.disable.mockRejectedValueOnce(new Error(`unit ${unit} not loaded`));
-    const deps = makeDeps({
+    const deps = depsFor({
       discovery: { scan: vi.fn() } as any,
       serviceManager: svc,
     });
@@ -768,7 +745,7 @@ describe('handleDeleteLine', () => {
       new Error('Command failed: launchctl stop com.whatsoup.delete-line'),
       { code: 3 },
     ));
-    const deps = makeDeps({
+    const deps = depsFor({
       discovery: { scan: vi.fn() } as any,
       serviceManager: svc,
     });
@@ -791,7 +768,7 @@ describe('handleDeleteLine', () => {
     const dirs = seedInstanceDirs(name);
     const svc = mockServiceManager();
     svc.stop.mockRejectedValueOnce(new Error('command not found: launchctl stop com.whatsoup.delete-line'));
-    const deps = makeDeps({
+    const deps = depsFor({
       discovery: { scan: vi.fn() } as any,
       serviceManager: svc,
     });
@@ -860,7 +837,7 @@ describe('handleCreateLine', () => {
   });
 
   it('creates config.json and CLAUDE.md with private file modes', async () => {
-    const deps = makeDeps({
+    const deps = depsFor({
       discovery: {
         getInstance: vi.fn(() => undefined),
         getInstances: vi.fn(() => new Map()),
@@ -896,7 +873,7 @@ describe('handleCreateLine', () => {
     fs.mkdirSync(homeDir, { recursive: true, mode: 0o700 });
     process.env.HOME = homeDir;
     const expectedCwd = path.join(homeDir, '.local', 'share', 'whatsoup', 'instances', 'default-agent', 'workspace');
-    const deps = makeDeps({
+    const deps = depsFor({
       discovery: {
         getInstance: vi.fn(() => undefined),
         getInstances: vi.fn(() => new Map()),
@@ -931,7 +908,7 @@ describe('handleCreateLine', () => {
     fs.mkdirSync(homeDir, { recursive: true, mode: 0o700 });
     fs.symlinkSync(homeDir, homeAlias);
     process.env.HOME = homeDir;
-    const deps = makeDeps({
+    const deps = depsFor({
       discovery: {
         getInstance: vi.fn(() => undefined),
         getInstances: vi.fn(() => new Map()),
@@ -962,7 +939,7 @@ describe('handleCreateLine', () => {
     fs.mkdirSync(homeDir, { recursive: true, mode: 0o700 });
     fs.writeFileSync(fileCwd, 'not a directory');
     process.env.HOME = homeDir;
-    const deps = makeDeps({
+    const deps = depsFor({
       discovery: {
         getInstance: vi.fn(() => undefined),
         getInstances: vi.fn(() => new Map()),
@@ -995,7 +972,7 @@ describe('handleCreateLine', () => {
     process.chdir(homeDir);
     const expectedCwd = path.join(homeDir, '.local', 'share', 'whatsoup', 'instances', 'tilde-agent', 'workspace');
     const literalTildeCwd = path.join(homeDir, '~', '.local', 'share', 'whatsoup', 'instances', 'tilde-agent', 'workspace');
-    const deps = makeDeps({
+    const deps = depsFor({
       discovery: {
         getInstance: vi.fn(() => undefined),
         getInstances: vi.fn(() => new Map()),
@@ -1030,7 +1007,7 @@ describe('handleCreateLine', () => {
     fs.mkdirSync(homeDir, { recursive: true, mode: 0o700 });
     process.env.HOME = homeDir;
     const expectedCwd = path.join(homeDir, '.local', 'share', 'whatsoup', 'instances', 'no-cwd-agent', 'workspace');
-    const deps = makeDeps({
+    const deps = depsFor({
       discovery: {
         getInstance: vi.fn(() => undefined),
         getInstances: vi.fn(() => new Map()),
@@ -1062,7 +1039,7 @@ describe('handleCreateLine', () => {
     fs.mkdirSync(homeDir, { recursive: true, mode: 0o700 });
     process.env.HOME = homeDir;
     const expectedCwd = path.join(homeDir, '.local', 'share', 'whatsoup', 'instances', 'omitted-agent-options', 'workspace');
-    const deps = makeDeps({
+    const deps = depsFor({
       discovery: {
         getInstance: vi.fn(() => undefined),
         getInstances: vi.fn(() => new Map()),
@@ -1094,7 +1071,7 @@ describe('handleCreateLine', () => {
     fs.mkdirSync(homeDir, { recursive: true, mode: 0o700 });
     process.env.HOME = homeDir;
     const expectedCwd = path.join(homeDir, '.local', 'share', 'whatsoup', 'instances', 'ws-cwd-agent', 'workspace');
-    const deps = makeDeps({
+    const deps = depsFor({
       discovery: {
         getInstance: vi.fn(() => undefined),
         getInstances: vi.fn(() => new Map()),
@@ -1122,7 +1099,7 @@ describe('handleCreateLine', () => {
   });
 
   it('rejects a non-string agentOptions.cwd with 400 during create', async () => {
-    const deps = makeDeps({
+    const deps = depsFor({
       discovery: {
         getInstance: vi.fn(() => undefined),
         getInstances: vi.fn(() => new Map()),
@@ -1148,7 +1125,7 @@ describe('handleCreateLine', () => {
   });
 
   it('rejects an array agentOptions with 400 during create', async () => {
-    const deps = makeDeps({
+    const deps = depsFor({
       discovery: {
         getInstance: vi.fn(() => undefined),
         getInstances: vi.fn(() => new Map()),
@@ -1181,7 +1158,7 @@ describe('handleCreateLine', () => {
     writePermissiveFile(claudeMdPath, 'old instructions\n');
     writePermissiveFile(settingsPath, JSON.stringify({ hooks: { PreToolUse: [] } }));
 
-    const deps = makeDeps({
+    const deps = depsFor({
       discovery: {
         getInstance: vi.fn(() => undefined),
         getInstances: vi.fn(() => new Map()),
@@ -1219,7 +1196,7 @@ describe('handleCreateLine', () => {
     });
 
     const svc = mockServiceManager();
-    const deps = makeDeps({
+    const deps = depsFor({
       discovery: {
         getInstance: vi.fn(() => undefined),
         getInstances: vi.fn(() => new Map()),
@@ -1250,7 +1227,7 @@ describe('handleCreateLine', () => {
   it('disables the service when creation fails after enabling it', async () => {
     const name = 'enable-rollback';
     const svc = mockServiceManager();
-    const deps = makeDeps({
+    const deps = depsFor({
       discovery: {
         getInstance: vi.fn(() => undefined),
         getInstances: vi.fn(() => new Map()),
@@ -1290,7 +1267,7 @@ describe('handleCreateLine', () => {
     const name = 'enable-rollback-fails';
     const svc = mockServiceManager();
     svc.disable.mockRejectedValueOnce(new Error('disable failed'));
-    const deps = makeDeps({
+    const deps = depsFor({
       discovery: {
         getInstance: vi.fn(() => undefined),
         getInstances: vi.fn(() => new Map()),
@@ -1338,7 +1315,7 @@ describe('handleCreateLine', () => {
       accessMode: 'self_only',
     }));
 
-    const deps = makeDeps({
+    const deps = depsFor({
       discovery: {
         getInstance: vi.fn(() => undefined),
         getInstances: vi.fn(() => new Map()),
@@ -1368,7 +1345,7 @@ describe('handleCreateLine', () => {
     fs.mkdirSync(siblingDir, { recursive: true });
     fs.writeFileSync(path.join(siblingDir, 'config.json'), '{bad json');
 
-    const deps = makeDeps({
+    const deps = depsFor({
       discovery: {
         getInstance: vi.fn(() => undefined),
         getInstances: vi.fn(() => new Map()),
@@ -1426,7 +1403,7 @@ describe('handleConfigUpdate', () => {
   });
 
   it('returns 404 for unknown instance', async () => {
-    const deps = makeDeps();
+    const deps = depsFor();
     const res = mockRes();
     await handleConfigUpdate(mockReq({ method: 'POST', body: '{}' }), res, deps, { name: 'nope' });
     expect(res._status).toBe(404);
@@ -1436,7 +1413,7 @@ describe('handleConfigUpdate', () => {
     const configPath = path.join(tmpDir, 'config.json');
     fs.writeFileSync(configPath, '{}');
     const inst = fakeInstance({ configPath });
-    const deps = makeDeps({ discovery: { getInstance: vi.fn(() => inst) } as any });
+    const deps = depsFor({ discovery: { getInstance: vi.fn(() => inst) } as any });
 
     const res = mockRes();
     await handleConfigUpdate(mockReq({ method: 'POST', body: 'not json' }), res, deps, { name: 'test-line' });
@@ -1451,7 +1428,7 @@ describe('handleConfigUpdate', () => {
     const configPath = path.join(tmpDir, 'config.json');
     fs.writeFileSync(configPath, '{}');
     const inst = fakeInstance({ configPath });
-    const deps = makeDeps({ discovery: { getInstance: vi.fn(() => inst) } as any });
+    const deps = depsFor({ discovery: { getInstance: vi.fn(() => inst) } as any });
 
     const res = mockRes();
     await handleConfigUpdate(mockReq({ method: 'POST', body: '[1,2,3]' }), res, deps, { name: 'test-line' });
@@ -1466,7 +1443,7 @@ describe('handleConfigUpdate', () => {
     const configPath = path.join(tmpDir, 'config.json');
     fs.writeFileSync(configPath, '{"type":"chat"');
     const inst = fakeInstance({ configPath });
-    const deps = makeDeps({ discovery: { getInstance: vi.fn(() => inst) } as any });
+    const deps = depsFor({ discovery: { getInstance: vi.fn(() => inst) } as any });
 
     const res = mockRes();
     await handleConfigUpdate(
@@ -1488,7 +1465,7 @@ describe('handleConfigUpdate', () => {
     fs.writeFileSync(configPath, JSON.stringify({ type: 'chat', healthPort: 3010, accessMode: 'self_only' }));
 
     const inst = fakeInstance({ configPath });
-    const deps = makeDeps({ discovery: { getInstance: vi.fn(() => inst) } as any });
+    const deps = depsFor({ discovery: { getInstance: vi.fn(() => inst) } as any });
 
     const res = mockRes();
     await handleConfigUpdate(
@@ -1519,7 +1496,7 @@ describe('handleConfigUpdate', () => {
     writePermissiveFile(tmpPath, JSON.stringify({ stale: true }));
 
     const inst = fakeInstance({ configPath });
-    const deps = makeDeps({ discovery: { getInstance: vi.fn(() => inst) } as any });
+    const deps = depsFor({ discovery: { getInstance: vi.fn(() => inst) } as any });
 
     const res = mockRes();
     await handleConfigUpdate(
@@ -1549,7 +1526,7 @@ describe('handleConfigUpdate', () => {
     writePermissiveFile(settingsPath, JSON.stringify({ hooks: { PreToolUse: [] } }));
 
     const inst = fakeInstance({ type: 'agent', configPath });
-    const deps = makeDeps({ discovery: { getInstance: vi.fn(() => inst) } as any });
+    const deps = depsFor({ discovery: { getInstance: vi.fn(() => inst) } as any });
 
     const res = mockRes();
     await handleConfigUpdate(
@@ -1585,7 +1562,7 @@ describe('handleConfigUpdate', () => {
     fs.writeFileSync(path.join(agentCwd, '.claude'), 'not a directory');
 
     const inst = fakeInstance({ type: 'agent', configPath });
-    const deps = makeDeps({ discovery: { getInstance: vi.fn(() => inst) } as any });
+    const deps = depsFor({ discovery: { getInstance: vi.fn(() => inst) } as any });
 
     const res = mockRes();
     await handleConfigUpdate(
@@ -1616,7 +1593,7 @@ describe('handleConfigUpdate', () => {
     fs.mkdirSync(path.join(claudeDir, 'settings.json'), { recursive: true });
 
     const inst = fakeInstance({ type: 'agent', configPath });
-    const deps = makeDeps({ discovery: { getInstance: vi.fn(() => inst) } as any });
+    const deps = depsFor({ discovery: { getInstance: vi.fn(() => inst) } as any });
 
     const res = mockRes();
     await handleConfigUpdate(
@@ -1659,7 +1636,7 @@ describe('handleConfigUpdate', () => {
     fs.mkdirSync(path.join(claudeDir, 'settings.json'), { recursive: true });
 
     const inst = fakeInstance({ type: 'agent', configPath });
-    const deps = makeDeps({ discovery: { getInstance: vi.fn(() => inst) } as any });
+    const deps = depsFor({ discovery: { getInstance: vi.fn(() => inst) } as any });
 
     const res = mockRes();
     await handleConfigUpdate(
@@ -1699,7 +1676,7 @@ describe('handleConfigUpdate', () => {
       agentOptions: { cwd: '', sessionScope: 'per_chat' },
     }));
     const inst = fakeInstance({ name: 'test-line', type: 'agent', configPath });
-    const deps = makeDeps({ discovery: { getInstance: vi.fn(() => inst) } as any });
+    const deps = depsFor({ discovery: { getInstance: vi.fn(() => inst) } as any });
 
     const res = mockRes();
     await handleConfigUpdate(
@@ -1732,7 +1709,7 @@ describe('handleConfigUpdate', () => {
       agentOptions: { cwd: '~/.local/share/whatsoup/instances/tilde-update/workspace', sessionScope: 'per_chat' },
     }));
     const inst = fakeInstance({ name: 'tilde-update', type: 'agent', configPath });
-    const deps = makeDeps({ discovery: { getInstance: vi.fn(() => inst) } as any });
+    const deps = depsFor({ discovery: { getInstance: vi.fn(() => inst) } as any });
 
     const res = mockRes();
     await handleConfigUpdate(
@@ -1763,7 +1740,7 @@ describe('handleConfigUpdate', () => {
       accessMode: 'self_only',
     }));
     const inst = fakeInstance({ name: 'update-no-agent-options', type: 'agent', configPath });
-    const deps = makeDeps({ discovery: { getInstance: vi.fn(() => inst) } as any });
+    const deps = depsFor({ discovery: { getInstance: vi.fn(() => inst) } as any });
 
     const res = mockRes();
     await handleConfigUpdate(
@@ -1789,7 +1766,7 @@ describe('handleConfigUpdate', () => {
       agentOptions: { sessionScope: 'per_chat', cwd: agentCwd },
     }));
     const inst = fakeInstance({ name: 'arr-update', type: 'agent', configPath });
-    const deps = makeDeps({ discovery: { getInstance: vi.fn(() => inst) } as any });
+    const deps = depsFor({ discovery: { getInstance: vi.fn(() => inst) } as any });
 
     const res = mockRes();
     await handleConfigUpdate(
@@ -1811,7 +1788,7 @@ describe('handleConfigUpdate', () => {
     fs.symlinkSync(targetPath, configPath + '.tmp');
 
     const inst = fakeInstance({ configPath });
-    const deps = makeDeps({ discovery: { getInstance: vi.fn(() => inst) } as any });
+    const deps = depsFor({ discovery: { getInstance: vi.fn(() => inst) } as any });
 
     const res = mockRes();
     await handleConfigUpdate(
@@ -1839,7 +1816,7 @@ describe('handleConfigUpdate', () => {
     fs.writeFileSync(targetConfigPath, JSON.stringify({ type: 'chat', healthPort: 3010, accessMode: 'self_only' }));
 
     const inst = fakeInstance({ configPath });
-    const deps = makeDeps({ discovery: { getInstance: vi.fn(() => inst) } as any });
+    const deps = depsFor({ discovery: { getInstance: vi.fn(() => inst) } as any });
 
     const res = mockRes();
     await handleConfigUpdate(
@@ -1872,7 +1849,7 @@ describe('handleConfigUpdate', () => {
         agentOptions: { cwd: symlinkCwd, sessionScope: 'per_chat' },
       }));
       const inst = fakeInstance({ type: 'agent', configPath });
-      const deps = makeDeps({ discovery: { getInstance: vi.fn(() => inst) } as any });
+      const deps = depsFor({ discovery: { getInstance: vi.fn(() => inst) } as any });
 
       const res = mockRes();
       await handleConfigUpdate(
@@ -1902,7 +1879,7 @@ describe('handleConfigUpdate', () => {
         agentOptions: { cwd: agentCwd, sessionScope: 'per_chat' },
       }));
       const inst = fakeInstance({ type: 'agent', configPath });
-      const deps = makeDeps({ discovery: { getInstance: vi.fn(() => inst) } as any });
+      const deps = depsFor({ discovery: { getInstance: vi.fn(() => inst) } as any });
 
       const res = mockRes();
       await handleConfigUpdate(
@@ -1920,7 +1897,7 @@ describe('handleConfigUpdate', () => {
   it('returns 500 when config file cannot be read', async () => {
     const configPath = path.join(tmpDir, 'nonexistent.json');
     const inst = fakeInstance({ configPath });
-    const deps = makeDeps({ discovery: { getInstance: vi.fn(() => inst) } as any });
+    const deps = depsFor({ discovery: { getInstance: vi.fn(() => inst) } as any });
 
     const res = mockRes();
     await handleConfigUpdate(mockReq({ method: 'POST', body: '{"x":1}' }), res, deps, { name: 'test-line' });
@@ -1947,7 +1924,7 @@ describe('ops.ts uncovered-branch coverage (wave)', () => {
 
   // validateInstanceName: invalid name path (ops.ts:39-41)
   it('handleSend rejects an invalid instance name with 400', async () => {
-    const deps = makeDeps();
+    const deps = depsFor();
     const res = mockRes();
     await handleSend(mockReq({ method: 'POST', body: '{}' }), res, deps, { name: 'Bad_Name!' });
     expect(res._status).toBe(400);
@@ -1955,7 +1932,7 @@ describe('ops.ts uncovered-branch coverage (wave)', () => {
   });
 
   it('handleAccessUpdate rejects an invalid instance name with 400', async () => {
-    const deps = makeDeps();
+    const deps = depsFor();
     const res = mockRes();
     await handleAccessUpdate(mockReq({ method: 'POST', body: '{}' }), res, deps, { name: 'UPPER' });
     expect(res._status).toBe(400);
@@ -1968,7 +1945,7 @@ describe('ops.ts uncovered-branch coverage (wave)', () => {
       socketPath: null,
       healthPort: 4567,
     });
-    const deps = makeDeps({
+    const deps = depsFor({
       discovery: { getInstance: vi.fn(() => inst) } as any,
     });
     vi.mocked(proxyToInstance).mockResolvedValue({ status: 200, body: '{"ok":true}' });
@@ -1989,7 +1966,7 @@ describe('ops.ts uncovered-branch coverage (wave)', () => {
       socketPath: '/state/test-line/whatsoup.sock',
       healthPort: 4568,
     });
-    const deps = makeDeps({
+    const deps = depsFor({
       discovery: { getInstance: vi.fn(() => inst) } as any,
     });
     vi.mocked(fs.existsSync).mockReturnValue(false);
@@ -2005,7 +1982,7 @@ describe('ops.ts uncovered-branch coverage (wave)', () => {
   // handleSend: proxy returns non-2xx -> no realtime publish (ops.ts:231 false branch)
   it('handleSend does not publish realtime events when proxy returns non-2xx', async () => {
     const inst = fakeInstance({ type: 'chat', healthPort: 4569 });
-    const deps = makeDeps({
+    const deps = depsFor({
       discovery: { getInstance: vi.fn(() => inst) } as any,
     });
     vi.mocked(proxyToInstance).mockResolvedValue({ status: 500, body: '{"error":"down"}' });
@@ -2020,7 +1997,7 @@ describe('ops.ts uncovered-branch coverage (wave)', () => {
   // handleSend: chatJid without @ gets normalized (ops.ts:194-198)
   it('handleSend normalizes a bare phone chatJid to a personal JID via proxy', async () => {
     const inst = fakeInstance({ type: 'chat', healthPort: 4570 });
-    const deps = makeDeps({
+    const deps = depsFor({
       discovery: { getInstance: vi.fn(() => inst) } as any,
     });
     vi.mocked(proxyToInstance).mockResolvedValue({ status: 200, body: '{"ok":true}' });
@@ -2039,7 +2016,7 @@ describe('ops.ts uncovered-branch coverage (wave)', () => {
       type: 'passive',
       socketPath: '/state/test-line/whatsoup.sock',
     });
-    const deps = makeDeps({
+    const deps = depsFor({
       discovery: { getInstance: vi.fn(() => inst) } as any,
     });
     vi.mocked(fs.existsSync).mockReturnValue(true);
@@ -2058,7 +2035,7 @@ describe('ops.ts uncovered-branch coverage (wave)', () => {
   // handleAccessUpdate: invalid JSON body (ops.ts:263-266)
   it('handleAccessUpdate returns 400 for invalid JSON body', async () => {
     const inst = fakeInstance();
-    const deps = makeDeps({ discovery: { getInstance: vi.fn(() => inst) } as any });
+    const deps = depsFor({ discovery: { getInstance: vi.fn(() => inst) } as any });
     const res = mockRes();
     await handleAccessUpdate(mockReq({ method: 'POST', body: 'not json' }), res, deps, { name: 'test-line' });
     expect(res._status).toBe(400);
@@ -2068,7 +2045,7 @@ describe('ops.ts uncovered-branch coverage (wave)', () => {
   // handleAccessUpdate: invalid subjectType (ops.ts:268-272)
   it('handleAccessUpdate returns 400 for invalid subjectType', async () => {
     const inst = fakeInstance();
-    const deps = makeDeps({ discovery: { getInstance: vi.fn(() => inst) } as any });
+    const deps = depsFor({ discovery: { getInstance: vi.fn(() => inst) } as any });
     const res = mockRes();
     await handleAccessUpdate(
       mockReq({ method: 'POST', body: JSON.stringify({ subjectType: 'user', subjectId: '15550000001', action: 'allow' }) }),
@@ -2080,7 +2057,7 @@ describe('ops.ts uncovered-branch coverage (wave)', () => {
   // handleAccessUpdate: missing/empty subjectId (ops.ts:269)
   it('handleAccessUpdate returns 400 when subjectId is empty', async () => {
     const inst = fakeInstance();
-    const deps = makeDeps({ discovery: { getInstance: vi.fn(() => inst) } as any });
+    const deps = depsFor({ discovery: { getInstance: vi.fn(() => inst) } as any });
     const res = mockRes();
     await handleAccessUpdate(
       mockReq({ method: 'POST', body: JSON.stringify({ subjectType: 'phone', subjectId: '', action: 'allow' }) }),
@@ -2091,7 +2068,7 @@ describe('ops.ts uncovered-branch coverage (wave)', () => {
   // handleAccessUpdate: invalid action (ops.ts:270)
   it('handleAccessUpdate returns 400 for invalid action', async () => {
     const inst = fakeInstance();
-    const deps = makeDeps({ discovery: { getInstance: vi.fn(() => inst) } as any });
+    const deps = depsFor({ discovery: { getInstance: vi.fn(() => inst) } as any });
     const res = mockRes();
     await handleAccessUpdate(
       mockReq({ method: 'POST', body: JSON.stringify({ subjectType: 'group', subjectId: '15550000001', action: 'delete' }) }),
@@ -2102,7 +2079,7 @@ describe('ops.ts uncovered-branch coverage (wave)', () => {
   // handleAccessUpdate: group subjectType proxies successfully (ops.ts:268 false branch + publish)
   it('handleAccessUpdate proxies a group access action', async () => {
     const inst = fakeInstance();
-    const deps = makeDeps({ discovery: { getInstance: vi.fn(() => inst) } as any });
+    const deps = depsFor({ discovery: { getInstance: vi.fn(() => inst) } as any });
     vi.mocked(proxyToInstance).mockResolvedValue({ status: 200, body: '{"ok":true}' });
     const res = mockRes();
     const body = JSON.stringify({
@@ -2119,7 +2096,7 @@ describe('ops.ts uncovered-branch coverage (wave)', () => {
   // handleAccessUpdate: non-2xx proxy -> no publish (ops.ts:278 false branch)
   it('handleAccessUpdate does not publish on non-2xx proxy response', async () => {
     const inst = fakeInstance();
-    const deps = makeDeps({ discovery: { getInstance: vi.fn(() => inst) } as any });
+    const deps = depsFor({ discovery: { getInstance: vi.fn(() => inst) } as any });
     vi.mocked(proxyToInstance).mockResolvedValue({ status: 403, body: '{"error":"denied"}' });
     const res = mockRes();
     await handleAccessUpdate(
@@ -2131,14 +2108,14 @@ describe('ops.ts uncovered-branch coverage (wave)', () => {
 
   // handleMarkRead: full coverage (ops.ts:287-308)
   it('handleMarkRead returns 404 for unknown instance', async () => {
-    const deps = makeDeps();
+    const deps = depsFor();
     const res = mockRes();
     await handleMarkRead(mockReq({ method: 'POST', body: '{}' }), res, deps, { name: 'nope' });
     expect(res._status).toBe(404);
   });
 
   it('handleMarkRead rejects invalid instance name with 400', async () => {
-    const deps = makeDeps();
+    const deps = depsFor();
     const res = mockRes();
     await handleMarkRead(mockReq({ method: 'POST', body: '{}' }), res, deps, { name: 'bad name' });
     expect(res._status).toBe(400);
@@ -2146,7 +2123,7 @@ describe('ops.ts uncovered-branch coverage (wave)', () => {
 
   it('handleMarkRead proxies to instance and publishes on 2xx', async () => {
     const inst = fakeInstance();
-    const deps = makeDeps({ discovery: { getInstance: vi.fn(() => inst) } as any });
+    const deps = depsFor({ discovery: { getInstance: vi.fn(() => inst) } as any });
     vi.mocked(proxyToInstance).mockResolvedValue({ status: 200, body: '{"ok":true}' });
     const res = mockRes();
     const body = '{"chatJid":"15550000001@s.whatsapp.net"}';
@@ -2158,7 +2135,7 @@ describe('ops.ts uncovered-branch coverage (wave)', () => {
 
   it('handleMarkRead does not publish on non-2xx response', async () => {
     const inst = fakeInstance();
-    const deps = makeDeps({ discovery: { getInstance: vi.fn(() => inst) } as any });
+    const deps = depsFor({ discovery: { getInstance: vi.fn(() => inst) } as any });
     vi.mocked(proxyToInstance).mockResolvedValue({ status: 500, body: '{"error":"x"}' });
     const res = mockRes();
     await handleMarkRead(mockReq({ method: 'POST', body: '{}' }), res, deps, { name: 'test-line' });
@@ -2169,7 +2146,7 @@ describe('ops.ts uncovered-branch coverage (wave)', () => {
   // handleSaveContact: full coverage (ops.ts:311-356)
   it('handleSaveContact returns 400 for invalid JSON body', async () => {
     const inst = fakeInstance();
-    const deps = makeDeps({ discovery: { getInstance: vi.fn(() => inst) } as any });
+    const deps = depsFor({ discovery: { getInstance: vi.fn(() => inst) } as any });
     const res = mockRes();
     await handleSaveContact(mockReq({ method: 'POST', body: 'not json' }), res, deps, { name: 'test-line' });
     expect(res._status).toBe(400);
@@ -2178,7 +2155,7 @@ describe('ops.ts uncovered-branch coverage (wave)', () => {
 
   it('handleSaveContact returns 400 when jid is missing', async () => {
     const inst = fakeInstance();
-    const deps = makeDeps({ discovery: { getInstance: vi.fn(() => inst) } as any });
+    const deps = depsFor({ discovery: { getInstance: vi.fn(() => inst) } as any });
     const res = mockRes();
     await handleSaveContact(
       mockReq({ method: 'POST', body: JSON.stringify({ firstName: 'Kio' }) }),
@@ -2189,7 +2166,7 @@ describe('ops.ts uncovered-branch coverage (wave)', () => {
 
   it('handleSaveContact returns 503 when MCP socket is not available', async () => {
     const inst = fakeInstance({ socketPath: null });
-    const deps = makeDeps({ discovery: { getInstance: vi.fn(() => inst) } as any });
+    const deps = depsFor({ discovery: { getInstance: vi.fn(() => inst) } as any });
     const res = mockRes();
     await handleSaveContact(
       mockReq({ method: 'POST', body: JSON.stringify({ jid: '15550000001@s.whatsapp.net', firstName: 'Kio' }) }),
@@ -2200,7 +2177,7 @@ describe('ops.ts uncovered-branch coverage (wave)', () => {
 
   it('handleSaveContact calls mcpCall when socket exists and returns 200', async () => {
     const inst = fakeInstance({ socketPath: '/state/test-line/whatsoup.sock' });
-    const deps = makeDeps({ discovery: { getInstance: vi.fn(() => inst) } as any });
+    const deps = depsFor({ discovery: { getInstance: vi.fn(() => inst) } as any });
     vi.mocked(fs.existsSync).mockReturnValue(true);
     vi.mocked(mcpCall).mockResolvedValue({ success: true, result: { added: true } });
     const res = mockRes();
@@ -2229,7 +2206,7 @@ describe('ops.ts uncovered-branch coverage (wave)', () => {
 
   it('handleSaveContact falls back to 503 when mcpCall throws', async () => {
     const inst = fakeInstance({ socketPath: '/state/test-line/whatsoup.sock' });
-    const deps = makeDeps({ discovery: { getInstance: vi.fn(() => inst) } as any });
+    const deps = depsFor({ discovery: { getInstance: vi.fn(() => inst) } as any });
     vi.mocked(fs.existsSync).mockReturnValue(true);
     vi.mocked(mcpCall).mockRejectedValue(new Error('socket dead'));
     const res = mockRes();
@@ -2243,7 +2220,7 @@ describe('ops.ts uncovered-branch coverage (wave)', () => {
   it('handleStop calls serviceManager.stop and returns 202 on success', async () => {
     const inst = fakeInstance();
     const svc = mockServiceManager();
-    const deps = makeDeps({
+    const deps = depsFor({
       discovery: { getInstance: vi.fn(() => inst) } as any,
       serviceManager: svc,
     });
@@ -2259,7 +2236,7 @@ describe('ops.ts uncovered-branch coverage (wave)', () => {
     const inst = fakeInstance();
     const svc = mockServiceManager();
     svc.stop.mockRejectedValueOnce(new Error('systemd unreachable'));
-    const deps = makeDeps({
+    const deps = depsFor({
       discovery: { getInstance: vi.fn(() => inst) } as any,
       serviceManager: svc,
     });
@@ -2273,14 +2250,14 @@ describe('ops.ts uncovered-branch coverage (wave)', () => {
   });
 
   it('handleStop returns 404 for unknown instance', async () => {
-    const deps = makeDeps();
+    const deps = depsFor();
     const res = mockRes();
     await handleStop(mockReq({ method: 'POST' }), res, deps, { name: 'nope' });
     expect(res._status).toBe(404);
   });
 
   it('handleStop rejects invalid instance name with 400', async () => {
-    const deps = makeDeps();
+    const deps = depsFor();
     const res = mockRes();
     await handleStop(mockReq({ method: 'POST' }), res, deps, { name: '1nv@lid' });
     expect(res._status).toBe(400);
@@ -2288,7 +2265,7 @@ describe('ops.ts uncovered-branch coverage (wave)', () => {
 
   // handleCreateLine: invalid name (ops.ts:1005-1008)
   it('handleCreateLine rejects a name shorter than 2 chars with 400', async () => {
-    const deps = makeDeps();
+    const deps = depsFor();
     const res = mockRes();
     await handleCreateLine(
       mockReq({ method: 'POST', body: JSON.stringify({ name: 'a', type: 'chat', adminPhones: ['15550000001'] }) }),
@@ -2299,7 +2276,7 @@ describe('ops.ts uncovered-branch coverage (wave)', () => {
 
   // handleCreateLine: name not a string
   it('handleCreateLine rejects a non-string name with 400', async () => {
-    const deps = makeDeps();
+    const deps = depsFor();
     const res = mockRes();
     await handleCreateLine(
       mockReq({ method: 'POST', body: JSON.stringify({ name: 42, type: 'chat', adminPhones: ['15550000001'] }) }),
@@ -2309,7 +2286,7 @@ describe('ops.ts uncovered-branch coverage (wave)', () => {
 
   // handleCreateLine: instance already exists in discovery (ops.ts:1012-1015)
   it('handleCreateLine returns 409 when instance already exists in discovery', async () => {
-    const deps = makeDeps({
+    const deps = depsFor({
       discovery: {
         getInstance: vi.fn(() => fakeInstance({ name: 'dup' })),
         getInstances: vi.fn(() => new Map()),
@@ -2326,7 +2303,7 @@ describe('ops.ts uncovered-branch coverage (wave)', () => {
 
   // handleCreateLine: invalid type (ops.ts:1019-1022)
   it('handleCreateLine rejects an unknown type with 400', async () => {
-    const deps = makeDeps({
+    const deps = depsFor({
       discovery: {
         getInstance: vi.fn(() => undefined),
         getInstances: vi.fn(() => new Map()),
@@ -2343,7 +2320,7 @@ describe('ops.ts uncovered-branch coverage (wave)', () => {
 
   // handleCreateLine: adminPhones invalid (ops.ts:1026-1030)
   it('handleCreateLine rejects empty adminPhones with 400', async () => {
-    const deps = makeDeps({
+    const deps = depsFor({
       discovery: {
         getInstance: vi.fn(() => undefined),
         getInstances: vi.fn(() => new Map()),
@@ -2359,7 +2336,7 @@ describe('ops.ts uncovered-branch coverage (wave)', () => {
   });
 
   it('handleCreateLine rejects non-array adminPhones with 400', async () => {
-    const deps = makeDeps({
+    const deps = depsFor({
       discovery: {
         getInstance: vi.fn(() => undefined),
         getInstances: vi.fn(() => new Map()),
@@ -2375,7 +2352,7 @@ describe('ops.ts uncovered-branch coverage (wave)', () => {
 
   // handleCreateLine: passive with systemPrompt (ops.ts:1037-1040)
   it('handleCreateLine rejects a passive instance with systemPrompt', async () => {
-    const deps = makeDeps({
+    const deps = depsFor({
       discovery: {
         getInstance: vi.fn(() => undefined),
         getInstances: vi.fn(() => new Map()),
@@ -2395,7 +2372,7 @@ describe('ops.ts uncovered-branch coverage (wave)', () => {
 
   // handleCreateLine: healthPort out of range (ops.ts:1044-1047)
   it('handleCreateLine rejects an out-of-range healthPort with 400', async () => {
-    const deps = makeDeps({
+    const deps = depsFor({
       discovery: {
         getInstance: vi.fn(() => undefined),
         getInstances: vi.fn(() => new Map()),
@@ -2415,7 +2392,7 @@ describe('ops.ts uncovered-branch coverage (wave)', () => {
 
   // handleCreateLine: invalid accessMode (ops.ts:1067-1070)
   it('handleCreateLine rejects an invalid accessMode with 400', async () => {
-    const deps = makeDeps({
+    const deps = depsFor({
       discovery: {
         getInstance: vi.fn(() => undefined),
         getInstances: vi.fn(() => new Map()),
@@ -2435,7 +2412,7 @@ describe('ops.ts uncovered-branch coverage (wave)', () => {
 
   // handleCreateLine: agent with invalid sessionScope (ops.ts:1082-1085)
   it('handleCreateLine rejects an invalid agent sessionScope with 400', async () => {
-    const deps = makeDeps({
+    const deps = depsFor({
       discovery: {
         getInstance: vi.fn(() => undefined),
         getInstances: vi.fn(() => new Map()),
@@ -2456,7 +2433,7 @@ describe('ops.ts uncovered-branch coverage (wave)', () => {
 
   // handleCreateLine: invalid JSON body (ops.ts:994-1001)
   it('handleCreateLine rejects an invalid JSON body with 400', async () => {
-    const deps = makeDeps();
+    const deps = depsFor();
     const res = mockRes();
     await handleCreateLine(mockReq({ method: 'POST', body: 'not json' }), res, deps);
     expect(res._status).toBe(400);
@@ -2467,7 +2444,7 @@ describe('ops.ts uncovered-branch coverage (wave)', () => {
   });
 
   it('handleCreateLine rejects a JSON array body with 400', async () => {
-    const deps = makeDeps();
+    const deps = depsFor();
     const res = mockRes();
     await handleCreateLine(mockReq({ method: 'POST', body: '[1,2,3]' }), res, deps);
     expect(res._status).toBe(400);
@@ -2489,7 +2466,7 @@ describe('ops.ts uncovered-branch coverage (wave)', () => {
       fs.mkdirSync(configDir, { recursive: true });
       fs.writeFileSync(path.join(configDir, 'config.json'), '{}');
       const svc = mockServiceManager();
-      const deps = makeDeps({
+      const deps = depsFor({
         discovery: { scan: vi.fn() } as any,
         serviceManager: svc,
       });
@@ -2507,7 +2484,7 @@ describe('ops.ts uncovered-branch coverage (wave)', () => {
   });
 
   it('handleDeleteLine rejects an invalid instance name with 400', async () => {
-    const deps = makeDeps();
+    const deps = depsFor();
     const res = mockRes();
     await handleDeleteLine(mockReq({ method: 'POST', body: '' }), res, deps, { name: 'BAD NAME' });
     expect(res._status).toBe(400);
@@ -2526,7 +2503,7 @@ describe('ops.ts uncovered-branch coverage (wave)', () => {
         agentOptions: ['legacy'],
       }));
       const inst = fakeInstance({ type: 'agent', configPath });
-      const deps = makeDeps({ discovery: { getInstance: vi.fn(() => inst) } as any });
+      const deps = depsFor({ discovery: { getInstance: vi.fn(() => inst) } as any });
       const res = mockRes();
       await handleConfigUpdate(
         mockReq({ method: 'POST', body: JSON.stringify({ description: 'patched' }) }),
@@ -2547,7 +2524,7 @@ describe('ops.ts uncovered-branch coverage (wave)', () => {
         type: 'chat', healthPort: 3010, accessMode: 'self_only',
       }));
       const inst = fakeInstance({ configPath });
-      const deps = makeDeps({ discovery: { getInstance: vi.fn(() => inst) } as any });
+      const deps = depsFor({ discovery: { getInstance: vi.fn(() => inst) } as any });
       const res = mockRes();
       await handleConfigUpdate(
         mockReq({ method: 'POST', body: JSON.stringify({ adminPhones: [] }) }),
@@ -2567,7 +2544,7 @@ describe('ops.ts uncovered-branch coverage (wave)', () => {
         type: 'chat', healthPort: 3010, accessMode: 'self_only',
       }));
       const inst = fakeInstance({ configPath });
-      const deps = makeDeps({ discovery: { getInstance: vi.fn(() => inst) } as any });
+      const deps = depsFor({ discovery: { getInstance: vi.fn(() => inst) } as any });
       const res = mockRes();
       await handleConfigUpdate(
         mockReq({ method: 'POST', body: JSON.stringify({ adminPhones: '15550000001' }) }),
@@ -2636,7 +2613,7 @@ describe('ops.ts handleCreateLine uncovered-branch coverage', () => {
   });
 
   function freshDeps() {
-    return makeDeps({
+    return depsFor({
       discovery: {
         getInstance: vi.fn(() => undefined),
         getInstances: vi.fn(() => new Map()),
@@ -2680,7 +2657,7 @@ describe('ops.ts handleCreateLine uncovered-branch coverage', () => {
   // Line 1012: discovery.getInstance() != null path → 409 already exists.
   it('returns 409 when discovery already reports the instance (line 1012)', async () => {
     const inst = fakeInstance({ name: 'dup-line' });
-    const deps = makeDeps({
+    const deps = depsFor({
       discovery: {
         getInstance: vi.fn(() => inst),
         getInstances: vi.fn(() => new Map()),
@@ -3028,7 +3005,7 @@ describe('ops.ts handleAuth uncovered-branch coverage', () => {
     const inst = fakeInstance({ name: 'test-line' });
     const child = fakeChildProcess();
     vi.mocked(spawn).mockReturnValue(child as any);
-    const deps = makeDeps({
+    const deps = depsFor({
       discovery: { getInstance: vi.fn(() => inst), scan: vi.fn() } as any,
     });
     const req = mockReq({ method: 'POST', body: '', url: '/api/lines/test-line/auth' });
@@ -3048,7 +3025,7 @@ describe('ops.ts handleAuth uncovered-branch coverage', () => {
     const inst = fakeInstance({ name: 'test-line' });
     const child = fakeChildProcess();
     vi.mocked(spawn).mockReturnValue(child as any);
-    const deps = makeDeps({
+    const deps = depsFor({
       discovery: { getInstance: vi.fn(() => inst), scan: vi.fn() } as any,
     });
     const req = mockReq({ method: 'POST', body: '', url: '/api/lines/test-line/auth' });
@@ -3067,7 +3044,7 @@ describe('ops.ts handleAuth uncovered-branch coverage', () => {
     const inst = fakeInstance({ name: 'test-line' });
     const child = fakeChildProcess();
     vi.mocked(spawn).mockReturnValue(child as any);
-    const deps = makeDeps({
+    const deps = depsFor({
       discovery: { getInstance: vi.fn(() => inst), scan: vi.fn() } as any,
     });
     const req = mockReq({ method: 'POST', body: '', url: '/api/lines/test-line/auth' });
@@ -3089,7 +3066,7 @@ describe('ops.ts handleAuth uncovered-branch coverage', () => {
     const inst = fakeInstance({ name: 'test-line' });
     const child = fakeChildProcess();
     vi.mocked(spawn).mockReturnValue(child as any);
-    const deps = makeDeps({
+    const deps = depsFor({
       discovery: { getInstance: vi.fn(() => inst), scan: vi.fn() } as any,
     });
     const req = mockReq({ method: 'POST', body: '', url: '/api/lines/test-line/auth' });
@@ -3111,7 +3088,7 @@ describe('ops.ts handleAuth uncovered-branch coverage', () => {
     const inst = fakeInstance({ name: 'test-line' });
     const child = fakeChildProcess();
     vi.mocked(spawn).mockReturnValue(child as any);
-    const deps = makeDeps({
+    const deps = depsFor({
       discovery: { getInstance: vi.fn(() => inst), scan: vi.fn() } as any,
     });
     const req = mockReq({ method: 'POST', body: '', url: '/api/lines/test-line/auth' });
@@ -3154,7 +3131,7 @@ describe('ops.ts uncovered-branch coverage (wave 2)', () => {
   // --- handleSend: group conversation-key normalization (ops.ts:195 true branch) ---
   it('handleSend normalizes a group conversation key chatJid to a g.us JID', async () => {
     const inst = fakeInstance({ type: 'chat', healthPort: 4601 });
-    const deps = makeDeps({
+    const deps = depsFor({
       discovery: { getInstance: vi.fn(() => inst) } as any,
     });
     vi.mocked(proxyToInstance).mockResolvedValue({ status: 200, body: '{"ok":true}' });
@@ -3175,7 +3152,7 @@ describe('ops.ts uncovered-branch coverage (wave 2)', () => {
       socketPath: '/state/test-line/whatsoup.sock',
       healthPort: 4602,
     });
-    const deps = makeDeps({
+    const deps = depsFor({
       discovery: { getInstance: vi.fn(() => inst) } as any,
     });
     vi.mocked(fs.existsSync).mockReturnValue(true);
@@ -3193,7 +3170,7 @@ describe('ops.ts uncovered-branch coverage (wave 2)', () => {
 
   // --- handleConfigUpdate: invalid instance name (ops.ts:442 true branch) ---
   it('handleConfigUpdate rejects an invalid instance name with 400 (line 442)', async () => {
-    const deps = makeDeps();
+    const deps = depsFor();
     const res = mockRes();
     await handleConfigUpdate(mockReq({ method: 'POST', body: '{}' }), res, deps, { name: 'BAD NAME' });
     expect(res._status).toBe(400);
@@ -3209,7 +3186,7 @@ describe('ops.ts uncovered-branch coverage (wave 2)', () => {
         type: 'chat', healthPort: 3010, accessMode: 'self_only',
       }));
       const inst = fakeInstance({ configPath });
-      const deps = makeDeps({ discovery: { getInstance: vi.fn(() => inst) } as any });
+      const deps = depsFor({ discovery: { getInstance: vi.fn(() => inst) } as any });
       const res = mockRes();
       await handleConfigUpdate(
         mockReq({ method: 'POST', body: JSON.stringify({ adminPhones: ['15550000001', 42] }) }),
@@ -3230,7 +3207,7 @@ describe('ops.ts uncovered-branch coverage (wave 2)', () => {
         type: 'chat', healthPort: 3010, accessMode: 'self_only',
       }));
       const inst = fakeInstance({ configPath });
-      const deps = makeDeps({ discovery: { getInstance: vi.fn(() => inst) } as any });
+      const deps = depsFor({ discovery: { getInstance: vi.fn(() => inst) } as any });
       const res = mockRes();
       await handleConfigUpdate(
         mockReq({ method: 'POST', body: JSON.stringify({ adminPhones: ['   '] }) }),
@@ -3260,7 +3237,7 @@ describe('ops.ts uncovered-branch coverage (wave 2)', () => {
         name: 'target-line', type: 'chat', healthPort: 9501, accessMode: 'self_only',
       }));
       const inst = fakeInstance({ name: 'target-line', configPath });
-      const deps = makeDeps({ discovery: { getInstance: vi.fn(() => inst) } as any });
+      const deps = depsFor({ discovery: { getInstance: vi.fn(() => inst) } as any });
       const res = mockRes();
       await handleConfigUpdate(
         mockReq({ method: 'POST', body: JSON.stringify({ healthPort: 9401 }) }),
@@ -3295,7 +3272,7 @@ describe('ops.ts uncovered-branch coverage (wave 2)', () => {
         agentOptions: { cwd: agentCwd, sessionScope: 'per_chat' },
       }));
       const inst = fakeInstance({ type: 'agent', configPath });
-      const deps = makeDeps({ discovery: { getInstance: vi.fn(() => inst) } as any });
+      const deps = depsFor({ discovery: { getInstance: vi.fn(() => inst) } as any });
       const res = mockRes();
       // settingsJson with an empty permissions object: mergeSettingsJson returns null when there
       // is nothing to merge beyond the empty default the instance already has.
@@ -3338,7 +3315,7 @@ describe('ops.ts uncovered-branch coverage (wave 2)', () => {
         agentOptions: { cwd: agentCwd, sessionScope: 'per_chat' },
       }));
       const inst = fakeInstance({ type: 'agent', configPath });
-      const deps = makeDeps({ discovery: { getInstance: vi.fn(() => inst) } as any });
+      const deps = depsFor({ discovery: { getInstance: vi.fn(() => inst) } as any });
       const res = mockRes();
       await handleConfigUpdate(
         mockReq({ method: 'POST', body: JSON.stringify({ agentOptions: { enabledPlugins: { 'whatsoup/x': true } } }) }),
@@ -3369,7 +3346,7 @@ describe('ops.ts uncovered-branch coverage (wave 2)', () => {
         agentOptions: { cwd: agentCwd, sessionScope: 'per_chat' },
       }));
       const inst = fakeInstance({ type: 'agent', configPath });
-      const deps = makeDeps({ discovery: { getInstance: vi.fn(() => inst) } as any });
+      const deps = depsFor({ discovery: { getInstance: vi.fn(() => inst) } as any });
       const res = mockRes();
       await handleConfigUpdate(
         mockReq({ method: 'POST', body: JSON.stringify({ agentOptions: { enabledPlugins: null } }) }),
@@ -3402,7 +3379,7 @@ describe('ops.ts uncovered-branch coverage (wave 2)', () => {
       const svc = mockServiceManager();
       // Reject with a non-Error primitive -> serviceErrorMessage takes the String(err) branch.
       svc.stop.mockRejectedValueOnce('a string failure, not an Error');
-      const deps = makeDeps({
+      const deps = depsFor({
         discovery: { scan: vi.fn() } as any,
         serviceManager: svc,
       });
@@ -3428,7 +3405,7 @@ describe('ops.ts uncovered-branch coverage (wave 2)', () => {
     process.env.XDG_DATA_HOME = path.join(cfgTmp, 'data');
     process.env.XDG_STATE_HOME = path.join(cfgTmp, 'state');
     try {
-      const deps = makeDeps({
+      const deps = depsFor({
         discovery: {
           getInstance: vi.fn(() => undefined),
           getInstances: vi.fn(() => new Map()),
@@ -3462,7 +3439,7 @@ describe('ops.ts uncovered-branch coverage (wave 2)', () => {
     process.env.XDG_DATA_HOME = path.join(cfgTmp, 'data');
     process.env.XDG_STATE_HOME = path.join(cfgTmp, 'state');
     try {
-      const deps = makeDeps({
+      const deps = depsFor({
         discovery: {
           getInstance: vi.fn(() => undefined),
           getInstances: vi.fn(() => new Map()),
@@ -3505,7 +3482,7 @@ describe('ops.ts uncovered-branch coverage (wave 2)', () => {
         name: 'disabled-line', type: 'chat', healthPort: 9401, accessMode: 'self_only',
         enabled: false,
       }));
-      const deps = makeDeps({
+      const deps = depsFor({
         discovery: {
           getInstance: vi.fn(() => undefined),
           getInstances: vi.fn(() => new Map()),
@@ -3543,7 +3520,7 @@ describe('ops.ts uncovered-branch coverage (wave 2)', () => {
       fs.writeFileSync(path.join(siblingDir, 'config.json'), JSON.stringify({
         name: 'badport-line', type: 'chat', healthPort: 'not-a-number', accessMode: 'self_only',
       }));
-      const deps = makeDeps({
+      const deps = depsFor({
         discovery: {
           getInstance: vi.fn(() => undefined),
           getInstances: vi.fn(() => new Map()),
@@ -3583,7 +3560,7 @@ describe('ops.ts uncovered-branch coverage (wave 2)', () => {
       fs.mkdirSync(siblingDir, { recursive: true });
       // Valid JSON, but a primitive (not an object).
       fs.writeFileSync(path.join(siblingDir, 'config.json'), '42');
-      const deps = makeDeps({
+      const deps = depsFor({
         discovery: {
           getInstance: vi.fn(() => undefined),
           getInstances: vi.fn(() => new Map()),
@@ -3615,7 +3592,7 @@ describe('ops.ts uncovered-branch coverage (wave 2)', () => {
     const inst = fakeInstance({ name: 'test-line' });
     const child = fakeChildProcess();
     vi.mocked(spawn).mockReturnValue(child as any);
-    const deps = makeDeps({
+    const deps = depsFor({
       discovery: { getInstance: vi.fn(() => inst), scan: vi.fn() } as any,
     });
     const req = mockReq({ method: 'POST', body: '', url: '/api/lines/test-line/auth' });
@@ -3648,7 +3625,7 @@ describe('ops.ts uncovered-branch coverage (wave 2)', () => {
       const child = fakeChildProcess();
       vi.mocked(spawn).mockReturnValue(child as any);
       const svc = mockServiceManager();
-      const deps = makeDeps({
+      const deps = depsFor({
         discovery: { getInstance: vi.fn(() => inst), scan: vi.fn() } as any,
         serviceManager: svc,
       });
@@ -3684,7 +3661,7 @@ describe('ops.ts uncovered-branch coverage (wave 2)', () => {
     const stopForAuth = vi.fn().mockResolvedValue(undefined);
     (svc as typeof svc & { startAfterAuthFire: typeof startAfterAuthFire }).startAfterAuthFire = startAfterAuthFire;
     (svc as typeof svc & { stopForAuth: typeof stopForAuth }).stopForAuth = stopForAuth;
-    const deps = makeDeps({
+    const deps = depsFor({
       discovery: { getInstance: vi.fn(() => inst), scan: vi.fn() } as any,
       serviceManager: svc,
     });
@@ -3719,7 +3696,7 @@ describe('ops.ts uncovered-branch coverage (wave 2)', () => {
       onComplete?.(null);
     });
     (svc as typeof svc & { startAfterAuthFire: typeof startAfterAuthFire }).startAfterAuthFire = startAfterAuthFire;
-    const deps = makeDeps({
+    const deps = depsFor({
       discovery: { getInstance: vi.fn(() => inst), scan: vi.fn() } as any,
       serviceManager: svc,
     });
@@ -3748,7 +3725,7 @@ describe('ops.ts uncovered-branch coverage (wave 2)', () => {
     const svc = mockServiceManager();
     const startAfterAuthFire = vi.fn((_name: string, onComplete?: (err: Error | null) => void) => onComplete?.(null));
     (svc as typeof svc & { startAfterAuthFire: typeof startAfterAuthFire }).startAfterAuthFire = startAfterAuthFire;
-    const deps = makeDeps({
+    const deps = depsFor({
       discovery: { getInstance: vi.fn(() => inst), scan: vi.fn() } as any,
       serviceManager: svc,
     });
@@ -3773,7 +3750,7 @@ describe('ops.ts uncovered-branch coverage (wave 2)', () => {
       const svc = mockServiceManager();
       const startAfterAuthFire = vi.fn((_name: string, onComplete?: (err: Error | null) => void) => onComplete?.(null));
       (svc as typeof svc & { startAfterAuthFire: typeof startAfterAuthFire }).startAfterAuthFire = startAfterAuthFire;
-      const deps = makeDeps({
+      const deps = depsFor({
         discovery: { getInstance: vi.fn(() => inst), scan: vi.fn() } as any,
         serviceManager: svc,
       });
@@ -3803,7 +3780,7 @@ describe('ops.ts uncovered-branch coverage (wave 2)', () => {
       onComplete?.(new Error('launchctl bootstrap denied'));
     });
     (svc as typeof svc & { startAfterAuthFire: typeof startAfterAuthFire }).startAfterAuthFire = startAfterAuthFire;
-    const deps = makeDeps({
+    const deps = depsFor({
       discovery: { getInstance: vi.fn(() => inst), scan: vi.fn() } as any,
       serviceManager: svc,
     });
@@ -3830,7 +3807,7 @@ describe('ops.ts uncovered-branch coverage (wave 2)', () => {
     const startAfterAuthFire = vi.fn();
     (svc as typeof svc & { stopForAuth: typeof stopForAuth }).stopForAuth = stopForAuth;
     (svc as typeof svc & { startAfterAuthFire: typeof startAfterAuthFire }).startAfterAuthFire = startAfterAuthFire;
-    const deps = makeDeps({
+    const deps = depsFor({
       discovery: { getInstance: vi.fn(() => inst), scan: vi.fn() } as any,
       serviceManager: svc,
     });
@@ -3858,7 +3835,7 @@ describe('ops.ts uncovered-branch coverage (wave 2)', () => {
     const svc = mockServiceManager();
     const stopForAuth = vi.fn().mockRejectedValue(new Error('launchctl permission denied'));
     (svc as typeof svc & { stopForAuth: typeof stopForAuth }).stopForAuth = stopForAuth;
-    const deps = makeDeps({
+    const deps = depsFor({
       discovery: { getInstance: vi.fn(() => inst), scan: vi.fn() } as any,
       serviceManager: svc,
     });
@@ -3884,7 +3861,7 @@ describe('ops.ts uncovered-branch coverage (wave 2)', () => {
     }));
     const svc = mockServiceManager();
     (svc as typeof svc & { stopForAuth: typeof stopForAuth }).stopForAuth = stopForAuth;
-    const deps = makeDeps({
+    const deps = depsFor({
       discovery: { getInstance: vi.fn(() => inst), scan: vi.fn() } as any,
       serviceManager: svc,
     });
@@ -3917,7 +3894,7 @@ describe('ops.ts uncovered-branch coverage (wave 2)', () => {
     const svc = mockServiceManager();
     (svc as typeof svc & { stopForAuth: typeof stopForAuth }).stopForAuth = stopForAuth;
     (svc as typeof svc & { startAfterAuthFire: typeof startAfterAuthFire }).startAfterAuthFire = startAfterAuthFire;
-    const deps = makeDeps({
+    const deps = depsFor({
       discovery: { getInstance: vi.fn(() => inst), scan: vi.fn() } as any,
       serviceManager: svc,
     });
@@ -3941,7 +3918,7 @@ describe('ops.ts uncovered-branch coverage (wave 2)', () => {
     const child = fakeChildProcess();
     vi.mocked(spawn).mockReturnValue(child as any);
     const svc = mockServiceManager();
-    const deps = makeDeps({
+    const deps = depsFor({
       discovery: { getInstance: vi.fn(() => inst), scan: vi.fn() } as any,
       serviceManager: svc,
     });
@@ -3967,7 +3944,7 @@ describe('ops.ts uncovered-branch coverage (wave 2)', () => {
     const inst = fakeInstance({ name: 'inflight-line' });
     const child = fakeChildProcess();
     vi.mocked(spawn).mockReturnValue(child as any);
-    const deps = makeDeps({
+    const deps = depsFor({
       discovery: { getInstance: vi.fn(() => inst), scan: vi.fn() } as any,
     });
 
@@ -3996,7 +3973,7 @@ describe('ops.ts uncovered-branch coverage (wave 2)', () => {
     vi.mocked(spawn)
       .mockReturnValueOnce(firstChild as any)
       .mockReturnValueOnce(secondChild as any);
-    const deps = makeDeps({
+    const deps = depsFor({
       discovery: { getInstance: vi.fn(() => inst), scan: vi.fn() } as any,
     });
 
@@ -4042,7 +4019,7 @@ describe('ops.ts uncovered-branch coverage (wave 2)', () => {
       const child = fakeChildProcess();
       vi.mocked(spawn).mockReturnValue(child as any);
       const svc = mockServiceManager();
-      const deps = makeDeps({
+      const deps = depsFor({
         discovery: { getInstance: vi.fn(() => inst), scan: vi.fn() } as any,
         serviceManager: svc,
       });
@@ -4087,7 +4064,7 @@ describe('ops.ts uncovered-branch coverage', () => {
 
   // ---- Lines 317, 319: handleSaveContact validateInstanceName + requireInstance guards ----
   it('handleSaveContact rejects an invalid instance name with 400 (line 317)', async () => {
-    const deps = makeDeps();
+    const deps = depsFor();
     const res = mockRes();
     await handleSaveContact(mockReq({ method: 'POST', body: '{}' }), res, deps, { name: 'INVALID' });
     expect(res._status).toBe(400);
@@ -4095,7 +4072,7 @@ describe('ops.ts uncovered-branch coverage', () => {
   });
 
   it('handleSaveContact returns 404 when instance is unknown (line 319)', async () => {
-    const deps = makeDeps({
+    const deps = depsFor({
       discovery: { getInstance: vi.fn(() => undefined) } as any,
     });
     const res = mockRes();
@@ -4106,7 +4083,7 @@ describe('ops.ts uncovered-branch coverage', () => {
 
   // ---- Lines 1251, 1253: handleAuth validateInstanceName + requireInstance guards ----
   it('handleAuth rejects an invalid instance name with 400 (line 1251)', async () => {
-    const deps = makeDeps();
+    const deps = depsFor();
     const res = mockSseRes();
     await handleAuth(mockReq({ method: 'POST' }), res, deps, { name: 'INVALID' });
     expect(res._status).toBe(400);
@@ -4114,7 +4091,7 @@ describe('ops.ts uncovered-branch coverage', () => {
   });
 
   it('handleAuth returns 404 when instance is unknown (line 1253)', async () => {
-    const deps = makeDeps({
+    const deps = depsFor({
       discovery: { getInstance: vi.fn(() => undefined) } as any,
     });
     const res = mockRes();
@@ -4136,7 +4113,7 @@ describe('ops.ts uncovered-branch coverage', () => {
       svc.startFire.mockImplementation((_name: string, cb?: (err: Error | null) => void) => {
         cb?.(new Error('post-auth restart failed'));
       });
-      const deps = makeDeps({
+      const deps = depsFor({
         discovery: { getInstance: vi.fn(() => inst), scan: vi.fn() } as any,
         serviceManager: svc,
       });
@@ -4163,7 +4140,7 @@ describe('ops.ts uncovered-branch coverage', () => {
     svc.startFire.mockImplementation((_name: string, cb?: (err: Error | null) => void) => {
       cb?.(new Error('post-connect restart failed'));
     });
-    const deps = makeDeps({
+    const deps = depsFor({
       discovery: { getInstance: vi.fn(() => inst), scan: vi.fn() } as any,
       serviceManager: svc,
     });
@@ -4195,7 +4172,7 @@ describe('ops.ts uncovered-branch coverage', () => {
         agentOptions: { cwd: agentCwd, sessionScope: 'per_chat' },
       }));
       const inst = fakeInstance({ type: 'agent', configPath });
-      const deps = makeDeps({ discovery: { getInstance: vi.fn(() => inst) } as any });
+      const deps = depsFor({ discovery: { getInstance: vi.fn(() => inst) } as any });
       const res = mockRes();
       // settingsJson with a fresh allowlist should normalize and be written to settings.json.
       // mergeSettingsJson requires defaultMode === 'bypassPermissions' to merge the custom payload.
@@ -4248,7 +4225,7 @@ describe('ops.ts uncovered-branch coverage', () => {
         agentOptions: { cwd: agentCwd, sessionScope: 'per_chat' },
       }));
       const inst = fakeInstance({ type: 'agent', configPath });
-      const deps = makeDeps({ discovery: { getInstance: vi.fn(() => inst) } as any });
+      const deps = depsFor({ discovery: { getInstance: vi.fn(() => inst) } as any });
       const res = mockRes();
       await handleConfigUpdate(
         mockReq({ method: 'POST', body: JSON.stringify({
@@ -4297,7 +4274,7 @@ describe('ops.ts uncovered-branch coverage', () => {
         agentOptions: { cwd: agentCwd, sessionScope: 'per_chat' },
       }));
       const inst = fakeInstance({ type: 'agent', configPath });
-      const deps = makeDeps({ discovery: { getInstance: vi.fn(() => inst) } as any });
+      const deps = depsFor({ discovery: { getInstance: vi.fn(() => inst) } as any });
       const res = mockRes();
       await handleConfigUpdate(
         mockReq({ method: 'POST', body: JSON.stringify({
@@ -4330,7 +4307,7 @@ describe('ops.ts uncovered-branch coverage', () => {
         agentOptions: { cwd: agentCwd, sessionScope: 'per_chat' },
       }));
       const inst = fakeInstance({ type: 'agent', configPath });
-      const deps = makeDeps({ discovery: { getInstance: vi.fn(() => inst) } as any });
+      const deps = depsFor({ discovery: { getInstance: vi.fn(() => inst) } as any });
       const res = mockRes();
       await handleConfigUpdate(
         mockReq({ method: 'POST', body: JSON.stringify({ claudeMd: '# fresh\nleaf coverage body\n' }) }),
@@ -4359,7 +4336,7 @@ describe('ops.ts uncovered-branch coverage', () => {
     process.env.XDG_DATA_HOME = path.join(cfgTmp, 'data');
     process.env.XDG_STATE_HOME = path.join(cfgTmp, 'state');
     try {
-      const deps = makeDeps({
+      const deps = depsFor({
         discovery: {
           // First call (uniqueness check) returns undefined; the racing mkdir hits EEXIST.
           getInstance: vi.fn(() => undefined),
@@ -4403,7 +4380,7 @@ describe('ops.ts uncovered-branch coverage', () => {
     process.env.XDG_DATA_HOME = path.join(cfgTmp, 'data');
     process.env.XDG_STATE_HOME = path.join(cfgTmp, 'state');
     try {
-      const deps = makeDeps({
+      const deps = depsFor({
         discovery: {
           getInstance: vi.fn(() => undefined),
           getInstances: vi.fn(() => new Map()),
@@ -4463,7 +4440,7 @@ describe('ops.ts uncovered-branch coverage', () => {
         name: 'target-line', type: 'chat', healthPort: 9501, accessMode: 'self_only',
       }));
       const inst = fakeInstance({ name: 'target-line', configPath });
-      const deps = makeDeps({ discovery: { getInstance: vi.fn(() => inst) } as any });
+      const deps = depsFor({ discovery: { getInstance: vi.fn(() => inst) } as any });
       const res = mockRes();
       // Patching healthPort triggers the inventory scan — which fails closed for the broken sibling.
       await handleConfigUpdate(
@@ -4489,7 +4466,7 @@ describe('ops.ts uncovered-branch coverage', () => {
     process.env.XDG_DATA_HOME = path.join(cfgTmp, 'data');
     process.env.XDG_STATE_HOME = path.join(cfgTmp, 'state');
     try {
-      const deps = makeDeps({
+      const deps = depsFor({
         discovery: {
           getInstance: vi.fn(() => undefined),
           getInstances: vi.fn(() => new Map()),
@@ -4525,7 +4502,7 @@ describe('ops.ts uncovered-branch coverage', () => {
     process.env.XDG_DATA_HOME = path.join(cfgTmp, 'data');
     process.env.XDG_STATE_HOME = path.join(cfgTmp, 'state');
     try {
-      const deps = makeDeps({
+      const deps = depsFor({
         discovery: {
           getInstance: vi.fn(() => undefined),
           getInstances: vi.fn(() => new Map()),
@@ -4561,7 +4538,7 @@ describe('ops.ts uncovered-branch coverage', () => {
     process.env.XDG_DATA_HOME = path.join(cfgTmp, 'data');
     process.env.XDG_STATE_HOME = path.join(cfgTmp, 'state');
     try {
-      const deps = makeDeps({
+      const deps = depsFor({
         discovery: {
           getInstance: vi.fn(() => undefined),
           getInstances: vi.fn(() => new Map()),
@@ -4604,7 +4581,7 @@ describe('ops.ts uncovered-branch coverage', () => {
         agentOptions: { cwd: agentCwd, sessionScope: 'per_chat' },
       }));
       const inst = fakeInstance({ type: 'agent', configPath });
-      const deps = makeDeps({ discovery: { getInstance: vi.fn(() => inst) } as any });
+      const deps = depsFor({ discovery: { getInstance: vi.fn(() => inst) } as any });
       const res = mockRes();
       await handleConfigUpdate(
         mockReq({ method: 'POST', body: JSON.stringify({
@@ -4631,7 +4608,7 @@ describe('ops.ts uncovered-branch coverage', () => {
         adminPhones: ['15550000001'],
       }));
       const inst = fakeInstance({ configPath });
-      const deps = makeDeps({ discovery: { getInstance: vi.fn(() => inst) } as any });
+      const deps = depsFor({ discovery: { getInstance: vi.fn(() => inst) } as any });
       const res = mockRes();
       await handleConfigUpdate(
         mockReq({ method: 'POST', body: JSON.stringify({
@@ -4662,7 +4639,7 @@ describe('ops.ts uncovered-branch coverage', () => {
         agentOptions: {},
       }));
       const inst = fakeInstance({ type: 'agent', configPath });
-      const deps = makeDeps({ discovery: { getInstance: vi.fn(() => inst) } as any });
+      const deps = depsFor({ discovery: { getInstance: vi.fn(() => inst) } as any });
       const res = mockRes();
       await handleConfigUpdate(
         mockReq({ method: 'POST', body: JSON.stringify({ claudeMd: '# fresh' }) }),
@@ -4693,7 +4670,7 @@ describe('ops.ts uncovered-branch coverage', () => {
         agentOptions: {},
       }));
       const inst = fakeInstance({ type: 'agent', configPath });
-      const deps = makeDeps({ discovery: { getInstance: vi.fn(() => inst) } as any });
+      const deps = depsFor({ discovery: { getInstance: vi.fn(() => inst) } as any });
       const res = mockRes();
       await handleConfigUpdate(
         mockReq({ method: 'POST', body: JSON.stringify({
@@ -4725,7 +4702,7 @@ describe('ops.ts uncovered-branch coverage', () => {
         agentOptions: {},
       }));
       const inst = fakeInstance({ type: 'agent', configPath });
-      const deps = makeDeps({ discovery: { getInstance: vi.fn(() => inst) } as any });
+      const deps = depsFor({ discovery: { getInstance: vi.fn(() => inst) } as any });
       const res = mockRes();
       await handleConfigUpdate(
         mockReq({ method: 'POST', body: JSON.stringify({ agentOptions: { enabledPlugins: { 'whatsoup/x': true } } }) }),
@@ -4760,7 +4737,7 @@ describe('ops.ts uncovered-branch coverage', () => {
       svc.startFire.mockImplementation((_name: string, cb?: (err: Error | null) => void) => {
         cb?.(null);
       });
-      const deps = makeDeps({
+      const deps = depsFor({
         discovery: { getInstance: vi.fn(() => inst), scan: vi.fn() } as any,
         serviceManager: svc,
       });
@@ -4790,7 +4767,7 @@ describe('ops.ts uncovered-branch coverage', () => {
         name: 'target-line', type: 'chat', healthPort: 9501, accessMode: 'self_only',
       }));
       const inst = fakeInstance({ name: 'target-line', configPath });
-      const deps = makeDeps({ discovery: { getInstance: vi.fn(() => inst) } as any });
+      const deps = depsFor({ discovery: { getInstance: vi.fn(() => inst) } as any });
       const res = mockRes();
       await handleConfigUpdate(
         mockReq({ method: 'POST', body: JSON.stringify({ healthPort: 9520 }) }),
@@ -4828,7 +4805,7 @@ describe('ops.ts uncovered-branch coverage', () => {
       const claudeMdPath = path.join(claudeDir, 'CLAUDE.md');
       fs.writeFileSync(claudeMdPath, '# original');
       fs.chmodSync(claudeMdPath, 0o400);
-      const deps = makeDeps({
+      const deps = depsFor({
         discovery: {
           getInstance: vi.fn(() => undefined),
           getInstances: vi.fn(() => new Map()),
@@ -4877,7 +4854,7 @@ describe('ops.ts uncovered-branch coverage', () => {
       const claudeDir = path.join(agentCwd, '.claude');
       fs.mkdirSync(claudeDir, { recursive: true });
       fs.mkdirSync(path.join(claudeDir, 'CLAUDE.md'));
-      const deps = makeDeps({
+      const deps = depsFor({
         discovery: {
           getInstance: vi.fn(() => undefined),
           getInstances: vi.fn(() => new Map()),
@@ -4920,7 +4897,7 @@ describe('ops.ts uncovered-branch coverage', () => {
       // Seed an empty sibling dir (no config.json) — line 886 ENOENT path.
       const siblingDir = path.join(process.env.XDG_CONFIG_HOME, 'whatsoup', 'instances', 'empty-line');
       fs.mkdirSync(siblingDir, { recursive: true });
-      const deps = makeDeps({
+      const deps = depsFor({
         discovery: {
           getInstance: vi.fn(() => undefined),
           getInstances: vi.fn(() => new Map()),
@@ -4971,7 +4948,7 @@ describe('ops.ts uncovered-branch coverage', () => {
         name: 'target-line', type: 'chat', healthPort: 9501, accessMode: 'self_only',
       }));
       const inst = fakeInstance({ name: 'target-line', configPath });
-      const deps = makeDeps({ discovery: { getInstance: vi.fn(() => inst) } as any });
+      const deps = depsFor({ discovery: { getInstance: vi.fn(() => inst) } as any });
       const res = mockRes();
       await handleConfigUpdate(
         mockReq({ method: 'POST', body: JSON.stringify({ healthPort: 9301 }) }),
@@ -5001,7 +4978,7 @@ describe('ops.ts uncovered-branch coverage', () => {
         agentOptions: { cwd: agentCwd, sessionScope: 'per_chat' },
       }));
       const inst = fakeInstance({ type: 'agent', configPath });
-      const deps = makeDeps({ discovery: { getInstance: vi.fn(() => inst) } as any });
+      const deps = depsFor({ discovery: { getInstance: vi.fn(() => inst) } as any });
       const res = mockRes();
       await handleConfigUpdate(
         mockReq({ method: 'POST', body: JSON.stringify({
@@ -5032,7 +5009,7 @@ describe('ops.ts uncovered-branch coverage', () => {
     process.env.XDG_DATA_HOME = path.join(cfgTmp, 'data');
     process.env.XDG_STATE_HOME = path.join(cfgTmp, 'state');
     try {
-      const deps = makeDeps({
+      const deps = depsFor({
         discovery: {
           getInstance: vi.fn(() => undefined),
           getInstances: vi.fn(() => new Map()),
@@ -5074,7 +5051,7 @@ describe('ops.ts uncovered-branch coverage', () => {
     svc.startFire.mockImplementation((_name: string, cb?: (err: Error | null) => void) => {
       cb?.(null);
     });
-    const deps = makeDeps({
+    const deps = depsFor({
       discovery: { getInstance: vi.fn(() => inst), scan: vi.fn() } as any,
       serviceManager: svc,
     });
