@@ -4,6 +4,7 @@
 
 import { z } from 'zod';
 import type { DatabaseSync } from 'node:sqlite';
+import { MS_PER_HOUR } from '../../lib/time-units.ts';
 import type { ToolRegistry } from '../registry.ts';
 import { errorResult, toolError, type SessionContext } from '../types.ts';
 import type { RuntimeConnection } from '../../transport/runtime-connection.ts';
@@ -737,7 +738,7 @@ export function registerMessagingTools(
       // Defense in depth: even though the zod schema enforces [1000, 86_400_000],
       // clamp at the handler too so any path that bypasses validation still gets safe bounds.
       const resolvedTimeoutMs = Math.min(
-        Math.max((params['timeoutMs'] as number | undefined) ?? 3_600_000, 1_000),
+        Math.max((params['timeoutMs'] as number | undefined) ?? MS_PER_HOUR, 1_000),
         86_400_000,
       );
       const awaitResult = (params['awaitResult'] as boolean | undefined) ?? false;

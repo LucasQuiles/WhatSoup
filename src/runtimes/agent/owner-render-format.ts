@@ -10,6 +10,7 @@
  * et al.), never before, so this layer only shapes already-safe strings.
  */
 
+import { MS_PER_HOUR } from '../../lib/time-units.ts';
 import { adviseModel } from '../../lib/model-catalog.ts';
 
 /** WhatsApp bullet prefix for owner-facing enumerations. */
@@ -63,7 +64,7 @@ export function savedPreferenceLine(
 ): string {
   if (!pref) return 'Saved preference: none';
   const target = (pref.modelPinVerified === true ? pref.requestedModel : null) ?? pref.requestedProvider ?? pref.intent;
-  const expiry = pref.expiresAt === null ? '' : ` (expires in ~${Math.max(1, Math.round((pref.expiresAt - now) / 3_600_000))}h)`;
+  const expiry = pref.expiresAt === null ? '' : ` (expires in ~${Math.max(1, Math.round((pref.expiresAt - now) / MS_PER_HOUR))}h)`;
   const effect = honoredWithinFallback ? ' — active within the health fallback provider' :
     fallbackActive ? ' — health fallback currently decides new sessions' : ' — steers new sessions';
   return `Saved preference: ${target}${expiry}${effect}`;

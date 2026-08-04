@@ -1,3 +1,4 @@
+import { MS_PER_HOUR } from '../lib/time-units.ts';
 import { config } from '../config.ts';
 import type { IncomingMessage } from './types.ts';
 import type { Database } from './database.ts';
@@ -59,7 +60,7 @@ export function parseAdminCommand(content: string): AdminCommand | null {
   if (fallbackOn) {
     const n = fallbackOn[1] ? Number(fallbackOn[1]) : undefined;
     const unit = fallbackOn[2]?.toLowerCase();
-    return { action: 'fallback', sub: 'on', ...(n !== undefined ? { durationMs: n * (unit === 'h' ? 3_600_000 : 60_000) } : {}) };
+    return { action: 'fallback', sub: 'on', ...(n !== undefined ? { durationMs: n * (unit === 'h' ? MS_PER_HOUR : 60_000) } : {}) };
   }
 
   // FALLBACK OFF / FALLBACK STATUS / FALLBACK HELP
@@ -85,7 +86,7 @@ export function parseAdminCommand(content: string): AdminCommand | null {
       action: 'grant',
       sub: 'arm',
       group: grantArm[1].toLowerCase(),
-      ...(n !== undefined ? { durationMs: n * (unit === 'h' ? 3_600_000 : 60_000) } : {}),
+      ...(n !== undefined ? { durationMs: n * (unit === 'h' ? MS_PER_HOUR : 60_000) } : {}),
     };
   }
 

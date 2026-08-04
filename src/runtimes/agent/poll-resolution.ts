@@ -20,7 +20,9 @@ import { redactInternalArtifacts, type OutboundAudience } from '../../core/outbo
 export const POLL_QUESTION_MAX_CHARS = 900;
 export const POLL_OPTION_MAX_CHARS = 95;  // leave margin under WhatsApp's ~100 char limit
 export const POLL_DETAIL_DESCRIPTION_MIN_CHARS = 72;
-export const DEFAULT_POLL_TIMEOUT_MS = 3_600_000;
+import { MS_PER_HOUR } from '../../lib/time-units.ts';
+
+export const DEFAULT_POLL_TIMEOUT_MS = MS_PER_HOUR;
 export const MIN_POLL_TIMEOUT_MS = 1_000;
 export const MAX_POLL_TIMEOUT_MS = 86_400_000;
 export const ASKUSER_OTHER_OPTION_LABEL = 'Other — propose a different option';
