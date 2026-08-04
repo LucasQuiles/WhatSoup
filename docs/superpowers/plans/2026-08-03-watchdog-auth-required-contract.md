@@ -445,3 +445,64 @@ The marker state machine and marker I/O failure proofs added to
 `test_watchdog_terminal_logout_e2e.py` in `4634c8cae` cover the marker-action
 column of the state table; the tiering suite covers the final-log column.
 Together every row is behaviorally proven.
+
+---
+## POST-ADJUDICATION HARDENING — 90d0ac913 (recorded 2026-08-03)
+
+The lead reproduced current-head failures after the earlier plan gates passed. Execute this wave
+under the worktree writer lease; OpenCode strategy lanes stay read-only and advisory.
+
+### Task 7 — RED tests for untrusted health evidence
+
+- [x] Add rendered-harness tests requiring final `HEALTH-UNKNOWN`, process exit `2`, no kickstart,
+  and no marker mutation for empty, malformed, duplicate-key, oversized, invalid top-level,
+  non-object `whatsapp`, and non-object `connection` bodies.
+- [x] Add future-success and future-pong cases. Both must be `HEALTH-UNKNOWN`; a future success must
+  not supersede a current auth-required error.
+- [x] Add the static TypeScript contract assertions for decision exit `6`, shell exit `2`, final
+  state, duplicate-key rejection, and the 64 KiB boundary.
+- [x] Run the focused Python and TypeScript tests and record the expected RED failures before editing
+  the template.
+
+### Task 8 — Implement `HEALTH-UNKNOWN`
+
+- [x] Add exit `6` to the embedded Python decision contract and map it to `HEALTH-UNKNOWN`,
+  `WD_EXIT=2`, no restart, and no marker mutation.
+- [x] Reject duplicate JSON keys, invalid object shapes, empty/oversized bodies, non-finite or
+  timezone-naive times, and evidence more than five seconds in the future.
+- [x] Preserve the existing exits `0`, `1`, `3`, `4`, and `5` for valid evidence.
+- [x] Re-run Task 7 to GREEN; checkpointed with the coupled source hardening in `1852da0b0`.
+
+### Task 9 — Fail closed on token acquisition without argv exposure
+
+- [x] Add RED tests for missing, quoted, duplicate, unsafe-mode, and valid token files. Invalid token
+  evidence must skip bot curl and end `HEALTH-UNKNOWN`/exit `2` without marker mutation.
+- [x] Add an argv-capture test proving a valid token is absent from curl argv, `-H` is absent, and
+  `--config -` is present.
+- [x] Implement the self-contained descriptor reader described in the amended design; add fixture
+  parity against `src/fleet/health-token-file.ts`.
+- [x] Send the validated token through the zsh builtin to `curl --config -` stdin, clear the
+  unexported variable, and remove the lenient `sed`/`AUTH_ARGS` path.
+- [x] Re-run focused token, renderer, and watchdog tests to GREEN; checkpointed in `1852da0b0`.
+
+### Task 10 — Fail closed on watchdog-internal state errors
+
+- [x] Add RED tests for a future cooldown stamp, failed `launchctl bootstrap`, failed log rotation,
+  and fleet-down plus rejected fleet kickstart.
+- [x] Reject future cooldown stamps as invalid, do not suppress the needed restart, and retain a
+  nonzero result.
+- [x] Propagate bootstrap, rotation, and post-open logging failures without masking stronger final
+  states.
+- [x] Prove the fleet kickstart failure produces `RESTART-FAILED`, nonzero exit, and no cooldown
+  stamp. Re-run focused suites to GREEN; checkpointed in `1852da0b0`.
+
+### Task 11 — Current-head review and gates
+
+- [ ] Re-run every command from Task 6 under Node `24.15.0`, require zero Python skips, render one
+  sanitized artifact, and run `npm run guard:test-integrity` plus
+  `npm run verify:push:branch`.
+- [ ] Re-run the benign adversarial counterexamples recorded in the local Luna-swarm
+  current-head adjudication packet.
+- [ ] Obtain independent read-only review from both strategy panes, verify every decisive claim at
+  the lead, and record residual medium-risk work explicitly.
+- [ ] Do not merge, canary, deploy, alter launchd state, or access a real token in this source wave.

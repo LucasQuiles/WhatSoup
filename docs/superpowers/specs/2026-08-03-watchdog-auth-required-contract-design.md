@@ -349,3 +349,54 @@ Source acceptance requires:
 
 Fleet acceptance requires separate owner-approved receipts proving both canaries and every included
 target. Exclusions and skipped hosts remain explicit; they cannot be counted as aligned.
+
+## Post-adjudication fail-closed amendment
+
+Current-head adversarial reproduction at `90d0ac913` found that the source gates above can pass
+while malformed or unauthenticated diagnostic evidence still authorizes restart or clears a
+credential marker. Source acceptance therefore also requires the following contract.
+
+### Health evidence boundary
+
+`HEALTH-UNKNOWN` is the typed outcome for missing diagnostic authentication, an empty or oversized
+body, malformed JSON, duplicate object keys, invalid top-level shape, non-object `whatsapp`,
+`whatsapp.connection`, `instance`, or `turn_capability` fields, and timestamps beyond the allowed
+future-skew bound. It sets the watchdog process exit to `2`, never calls `restart_label`, and never
+creates or clears the credential marker. Python decision exit `6` is reserved for this shell
+mapping. `CREDENTIAL-DEAD` outranks `HEALTH-UNKNOWN`; `HEALTH-UNKNOWN` outranks restart outcomes in
+the single final-state ladder because the bot diagnostic was not trustworthy.
+
+JSON decoding rejects duplicate keys at every nesting level. The shell rejects an empty body and a
+body larger than 64 KiB before exporting it to the Python decision process. Timestamp comparison
+accepts only finite numeric seconds or timezone-aware ISO values no more than five seconds in the
+future. A future success cannot supersede a current auth failure, and a future pong cannot prove a
+recovering connection fresh.
+
+### Token transport boundary
+
+The installed watchdog remains a self-contained rendered artifact. It therefore cannot assume that
+repository-relative TypeScript helpers survive beside `~/.local/bin/<instance>-watchdog`. The
+template uses a self-contained Python reader that mirrors the canonical token-file contract:
+owner-only real directory, owner-only regular mode-0600 non-symlink file, no-follow descriptor open,
+stable file/directory identity, bounded read, and exactly one
+`WHATSOUP_HEALTH_TOKEN=<64 lowercase hex>` assignment. Characterization tests keep its accepted and
+rejected fixtures aligned with `src/fleet/health-token-file.ts`; this intentional deployment-boundary
+duplication is preferable to an unresolved source-tree runtime dependency.
+
+The validated token is captured only in an unexported shell variable, passed by the zsh `print`
+builtin through `curl --config -` stdin, and then cleared. It never appears in curl argv, an
+environment variable, a new file, or a log. Missing or rejected token evidence skips the bot curl
+entirely and produces `HEALTH-UNKNOWN` rather than parsing the public `health.public.v1` envelope as
+diagnostic evidence.
+
+### Watchdog-internal failures
+
+A future cooldown stamp is invalid state, not an indefinitely active cooldown: record an error,
+avoid suppression, attempt the needed restart, and retain a nonzero watchdog result. A rejected
+`launchctl bootstrap`, a post-preflight log write failure, or log rotation failure is never masked.
+These failures remain observable through stderr/nonzero exit even when the log itself cannot accept
+the final record. Fleet kickstart failure follows the same `RESTART-FAILED`, nonzero, no-cooldown
+contract already proven for the bot label.
+
+Marker type/ownership hardening and arbitrary `fallbackReason` log projection remain separate
+medium-risk follow-up work; this amendment does not weaken their existing marker-retention behavior.
