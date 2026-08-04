@@ -36,6 +36,7 @@ vi.mock('node:fs', async (importOriginal) => {
 });
 
 import {
+  buildProviderMcpConfigArgs,
   generateMcpConfigFile,
   mergeOpencodeConfig,
   writeProviderMcpConfig,
@@ -99,9 +100,8 @@ describe('writeProviderMcpConfigTarget', () => {
       .toBe(join('/agent/cwd', '.mcp.json'));
   });
 
-  it('routes codex-cli to .mcp.json under the agent cwd', () => {
-    expect(writeProviderMcpConfigTarget('codex-cli', '/agent/cwd'))
-      .toBe(join('/agent/cwd', '.mcp.json'));
+  it('does not write Codex MCP config into the unsupported .mcp.json surface', () => {
+    expect(writeProviderMcpConfigTarget('codex-cli', '/agent/cwd')).toBeNull();
   });
 
   it('routes opencode-cli to opencode.json under the agent cwd', () => {
@@ -135,13 +135,27 @@ describe('generateMcpConfigFile', () => {
     expect(Array.isArray(whatsoup.args)).toBe(true);
   });
 
-  it('emits the same mcpServers shape for gemini-cli and codex-cli', () => {
+  it('keeps the mcpServers shape for gemini-cli and uses canonical Codex overrides', () => {
     const gem = generateMcpConfigFile('gemini-cli', SOCKET, PROXY) as Record<string, Record<string, unknown>>;
-    const cdx = generateMcpConfigFile('codex-cli', SOCKET, PROXY) as Record<string, Record<string, unknown>>;
     expect(Object.keys(gem)).toEqual(['mcpServers']);
-    expect(Object.keys(cdx)).toEqual(['mcpServers']);
     expect((gem.mcpServers.whatsoup as Record<string, unknown>).env).toEqual({ WHATSOUP_SOCKET: SOCKET });
-    expect((cdx.mcpServers.whatsoup as Record<string, unknown>).env).toEqual({ WHATSOUP_SOCKET: SOCKET });
+    expect(generateMcpConfigFile('codex-cli', SOCKET, PROXY)).toBeNull();
+    const args = buildProviderMcpConfigArgs('codex-cli', '/agent/cwd', SOCKET, PROXY);
+    expect(args).toEqual([
+      '-c', expect.stringMatching(/^mcp_servers\.whatsoup\.command=/),
+      '-c', expect.stringMatching(/^mcp_servers\.whatsoup\.args=/),
+      '-c', expect.stringMatching(/^mcp_servers\.whatsoup\.env=/),
+      '-c', 'mcp_servers.whatsoup.env_vars=["WHATSOUP_MCP_SOCKET"]',
+    ]);
+    expect(args.join('\n')).toContain('WHATSOUP_SOCKET');
+    expect(args.join('\n')).toContain(JSON.stringify(SOCKET));
+  });
+
+  it('makes Claude consume the generated production target explicitly', () => {
+    expect(buildProviderMcpConfigArgs('claude-cli', '/agent/cwd', SOCKET, PROXY))
+      .toEqual([`--mcp-config=${join('/agent/cwd', '.mcp.json')}`]);
+    expect(buildProviderMcpConfigArgs('gemini-cli', '/agent/cwd', SOCKET, PROXY)).toEqual([]);
+    expect(buildProviderMcpConfigArgs('opencode-cli', '/agent/cwd', SOCKET, PROXY)).toEqual([]);
   });
 
   it('emits the opencode `mcp` shape with type:local, environment, enabled:true', () => {
@@ -405,7 +419,7 @@ describe('writeProviderMcpConfig', () => {
     expect(writeProviderMcpConfig('anthropic-api', '/agent', SOCKET, PROXY)).toBeNull();
   });
 
-  it('writes the mcpServers shape to .mcp.json for claude-cli/gemini-cli/codex-cli', () => {
+  it('writes the mcpServers shape to .mcp.json for claude-cli/gemini-cli', () => {
     const target = writeProviderMcpConfig('claude-cli', '/agent', SOCKET, PROXY);
     expect(target).toBe(join('/agent', '.mcp.json'));
     expect(mockWritePrivate).toHaveBeenCalledTimes(1);
@@ -414,6 +428,11 @@ describe('writeProviderMcpConfig', () => {
     const parsed = JSON.parse(writtenJson);
     expect(Object.keys(parsed)).toEqual(['mcpServers']);
     expect(parsed.mcpServers.whatsoup.env).toEqual({ WHATSOUP_SOCKET: SOCKET });
+  });
+
+  it('returns null for codex-cli because runtime argv consumes canonical mcp_servers overrides', () => {
+    expect(writeProviderMcpConfig('codex-cli', '/agent', SOCKET, PROXY)).toBeNull();
+    expect(mockWritePrivate).not.toHaveBeenCalled();
   });
 
   it('appends additionalServers into the written .mcp.json for claude-cli', () => {

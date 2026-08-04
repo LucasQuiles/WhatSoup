@@ -142,7 +142,6 @@ const TRACKED_UNREACHABLE: readonly TrackedEntry[] = [
   // Clock abstraction (#2200 slice 1): the module lands first as the SSOT
   // foundation; call-site migration (365 Date.now sites) lands in follow-up
   // slices. Unreachable until the first cluster (heal, livez, etc) imports it.
-  { path: 'src/lib/clock.ts', issue: '#2200', reason: 'clock abstraction foundation; call-site migration lands in follow-up slices' },
 ];
 
 // ---------------------------------------------------------------------------

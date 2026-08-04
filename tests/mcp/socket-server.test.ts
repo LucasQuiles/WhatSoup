@@ -1,10 +1,13 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { createConnection, type Socket } from 'node:net';
+import { createConnection, type Server, type Socket } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { existsSync, writeFileSync, unlinkSync } from 'node:fs';
+import { existsSync, lstatSync, writeFileSync, unlinkSync } from 'node:fs';
 import { z } from 'zod';
-import { WhatSoupSocketServer } from '../../src/mcp/socket-server.ts';
+import {
+  SocketCleanupError,
+  WhatSoupSocketServer,
+} from '../../src/mcp/socket-server.ts';
 import { ToolRegistry } from '../../src/mcp/registry.ts';
 import type { SessionContext, ToolDeclaration } from '../../src/mcp/types.ts';
 import { waitForSocket } from '../helpers/wait-for.ts';
@@ -994,6 +997,47 @@ describe('socket-server.ts uncovered-branch coverage', () => {
     expect(server.connectionCount).toBe(0);
   });
 
+  it.each([
+    ['default cleanup', undefined],
+    ['unlink-disabled cleanup', { unlinkSocket: false }],
+  ] as const)('closes the original listener without unlinking a replacement socket during %s', async (_label, options) => {
+    server = new WhatSoupSocketServer(socketPath, registry, session);
+    await server.startAndWait();
+    const originalListener = (server as unknown as { server: Server }).server;
+    const original = lstatSync(socketPath);
+    expect((server as unknown as { ownedSocket: { dev: number; ino: number } }).ownedSocket)
+      .toEqual({ dev: original.dev, ino: original.ino });
+    unlinkSync(socketPath);
+
+    const replacement = new WhatSoupSocketServer(socketPath, registry, session);
+    await replacement.startAndWait();
+    const replacementStat = lstatSync(socketPath);
+    expect({ dev: replacementStat.dev, ino: replacementStat.ino })
+      .not.toEqual({ dev: original.dev, ino: original.ino });
+
+    let cleanupError: unknown;
+    try {
+      server.stop(options);
+    } catch (err) {
+      cleanupError = err;
+    }
+    expect(cleanupError).toBeInstanceOf(SocketCleanupError);
+    expect(cleanupError).toMatchObject({ message: 'MCP socket cleanup failed' });
+    expect(originalListener.listening).toBe(false);
+    expect(server.maxConnections).toBe(0);
+    const after = lstatSync(socketPath);
+    expect({ dev: after.dev, ino: after.ino })
+      .toEqual({ dev: replacementStat.dev, ino: replacementStat.ino });
+    await expect(sendJsonRpc(socketPath, {
+      jsonrpc: '2.0',
+      id: 99,
+      method: 'tools/list',
+    })).resolves.toMatchObject({ id: 99, result: { tools: expect.any(Array) } });
+
+    replacement.stop();
+    server = replacement;
+  });
+
   // --- blank/whitespace lines inside a frame are skipped (src line 99) ---
 
   it('blank lines embedded between JSON-RPC frames are skipped without response', async () => {
@@ -1188,5 +1232,64 @@ describe("F-STICKY-ACTOR: actorResolver overrides the per-request actor (D2)", (
 
   it("no resolver leaves the base-session actor unchanged (back-compat)", async () => {
     expect(await observeActor(undefined, "base-actor")).toBe("base-actor");
+  });
+
+  it("rejects provider-supplied actor context before tool dispatch", async () => {
+    const handler = vi.fn(async () => "unreachable");
+    registry.register(makeTool({
+      name: "actor_override_tool",
+      scope: "global",
+      schema: z.object({ actorJid: z.string().optional() }),
+      handler,
+    }));
+    server = new WhatSoupSocketServer(
+      socketPath,
+      registry,
+      makeSession({ actorJid: "base-actor" }),
+      () => "resolver-actor",
+    );
+    server.start();
+    await waitForSocket(socketPath);
+
+    const response = await sendJsonRpc(socketPath, {
+      jsonrpc: "2.0", id: 9, method: "tools/call",
+      params: { name: "actor_override_tool", arguments: { actorJid: "forged-actor" } },
+    });
+
+    expect(response).toEqual({
+      jsonrpc: "2.0",
+      id: 9,
+      error: { code: -32602, message: "Reserved session context" },
+    });
+    expect(handler).not.toHaveBeenCalled();
+  });
+
+  it("rejects provider-supplied conversation context before tool dispatch", async () => {
+    const handler = vi.fn(async () => "unreachable");
+    registry.register(makeTool({
+      name: "conversation_override_tool",
+      scope: "global",
+      schema: z.object({ conversationKey: z.string().optional() }),
+      handler,
+    }));
+    server = new WhatSoupSocketServer(
+      socketPath,
+      registry,
+      makeSession({ conversationKey: "bound-chat" }),
+    );
+    server.start();
+    await waitForSocket(socketPath);
+
+    const response = await sendJsonRpc(socketPath, {
+      jsonrpc: "2.0", id: 10, method: "tools/call",
+      params: { name: "conversation_override_tool", arguments: { conversationKey: "other-chat" } },
+    });
+
+    expect(response).toEqual({
+      jsonrpc: "2.0",
+      id: 10,
+      error: { code: -32602, message: "Reserved session context" },
+    });
+    expect(handler).not.toHaveBeenCalled();
   });
 });

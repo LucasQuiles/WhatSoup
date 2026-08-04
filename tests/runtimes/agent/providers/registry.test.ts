@@ -15,6 +15,7 @@ import {
   PROVIDER_IDS,
   executionModeForProvider,
   isProviderId,
+  mcpModeForProvider,
   type ProviderId,
 } from '../../../../src/runtimes/agent/providers/index.ts';
 import {
@@ -55,6 +56,17 @@ describe('Provider ID registry (#447)', () => {
       'opencode-cli': 'spawn_per_turn',
       'openai-api': 'managed_loop',
       'anthropic-api': 'managed_loop',
+    });
+  });
+
+  it('maps every canonical provider to one explicit WhatSoup MCP mode', () => {
+    expect(Object.fromEntries(PROVIDER_IDS.map((id) => [id, mcpModeForProvider(id)]))).toEqual({
+      'claude-cli': 'stdio_proxy',
+      'codex-cli': 'stdio_proxy',
+      'gemini-cli': 'stdio_proxy',
+      'opencode-cli': 'stdio_proxy',
+      'openai-api': 'none',
+      'anthropic-api': 'none',
     });
   });
 

@@ -35,6 +35,7 @@ import { createServer, request } from 'node:http';
 import type { Database } from '../../../src/core/database.ts';
 import type { IncomingMessage, Messenger } from '../../../src/core/types.ts';
 import type { AgentEvent } from '../../../src/runtimes/agent/stream-parser.ts';
+import { installFakePerChatMcpSocketManager } from './helpers/fake-per-chat-mcp-socket-manager.ts';
 
 // ─── Hoisted mocks (runtime.test.ts idiom) ───────────────────────────────────
 
@@ -405,7 +406,11 @@ async function sendAndDrain(runtime: AgentRuntime, msg: IncomingMessage): Promis
 
 function makeRuntime(scope: Scope, db: Database, messenger: Messenger): AgentRuntime {
   if (scope === 'shared') return new AgentRuntime(db, messenger, 'contract', { shared: true });
-  if (scope === 'per_chat') return new AgentRuntime(db, messenger, 'contract', { sessionScope: 'per_chat' });
+  if (scope === 'per_chat') {
+    const runtime = new AgentRuntime(db, messenger, 'contract', { sessionScope: 'per_chat' });
+    installFakePerChatMcpSocketManager(runtime);
+    return runtime;
+  }
   return new AgentRuntime(db, messenger); // default: single scope
 }
 

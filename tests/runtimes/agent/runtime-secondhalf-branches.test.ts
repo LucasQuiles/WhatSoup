@@ -70,6 +70,8 @@ const {
     getDbRowId: vi.fn((): number | null => null),
     setDurability: vi.fn((_durability: unknown) => {}),
     bindGenerationOwnership: vi.fn((_resolve: () => unknown) => {}),
+    getProviderId: vi.fn(() => 'claude-cli'),
+    getModelRef: vi.fn(() => undefined),
   };
 
   const mockQueue = {

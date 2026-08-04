@@ -23,19 +23,11 @@
 //      the registry test pins every ID to a brand, so a miss fails there; an
 //      unmapped provider would silently vanish from the `/model` drill Level-1.
 
-import {
-  PROVIDER_IDS,
-  type ProviderId,
-} from '../../../lib/provider-ids.ts';
 import type { ExecutionMode } from './types.ts';
+import { PROVIDER_IDS, isProviderId, type ProviderId } from '../../../lib/provider-ids.ts';
+export { PROVIDER_IDS, isProviderId, type ProviderId };
+export type ProviderMcpMode = 'stdio_proxy' | 'none';
 
-export {
-  PROVIDER_IDS,
-  isProviderId,
-  type ProviderId,
-} from '../../../lib/provider-ids.ts';
-
-/**
 /** Default provider when none is specified in config. */
 export const DEFAULT_PROVIDER_ID: ProviderId = 'claude-cli';
 
@@ -66,4 +58,38 @@ export function executionModeForProvider(provider: ProviderId): ExecutionMode {
     default:
       return assertNeverProvider(provider, 'providers:executionModeForProvider');
   }
+}
+
+/** Exhaustive WhatSoup MCP exposure decision for every supported provider. */
+export function mcpModeForProvider(provider: ProviderId): ProviderMcpMode {
+  switch (provider) {
+    case 'claude-cli':
+    case 'codex-cli':
+    case 'gemini-cli':
+    case 'opencode-cli':
+      return 'stdio_proxy';
+    case 'openai-api':
+    case 'anthropic-api':
+      return 'none';
+    default:
+      return assertNeverProvider(provider, 'providers:mcpModeForProvider');
+  }
+}
+
+/** True when a known provider launches the WhatSoup stdio MCP proxy. */
+export function providerUsesWhatSoupMcp(provider: unknown): provider is ProviderId {
+  return isProviderId(provider) && mcpModeForProvider(provider) === 'stdio_proxy';
+}
+
+/** Canonical eligibility policy for actor-bound per-chat MCP transport. */
+export function requiresPerChatActorSocket(
+  provider: unknown,
+  sessionScope: string,
+  sandboxPerChat: boolean,
+): provider is ProviderId {
+  return (
+    sessionScope === 'per_chat'
+    && !sandboxPerChat
+    && providerUsesWhatSoupMcp(provider)
+  );
 }

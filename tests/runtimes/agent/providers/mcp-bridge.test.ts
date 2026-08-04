@@ -34,9 +34,9 @@ describe('generateMcpConfigFile – oracle comparison', () => {
     expect(result).toEqual(inlineOracle(socketPath, proxyScript));
   });
 
-  it('codex-cli output matches the same shape', () => {
+  it('codex-cli does not emit the unsupported project JSON shape', () => {
     const result = generateMcpConfigFile('codex-cli', socketPath, proxyScript);
-    expect(result).toEqual(inlineOracle(socketPath, proxyScript));
+    expect(result).toStrictEqual(null);
   });
 
   it('API providers return null (no config file needed)', () => {

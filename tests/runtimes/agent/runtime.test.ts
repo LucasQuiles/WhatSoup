@@ -1,7 +1,4 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { mkdtempSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
 import type { Database } from '../../../src/core/database.ts';
 import type { IncomingMessage, Messenger } from '../../../src/core/types.ts';
 import type { AgentEvent } from '../../../src/runtimes/agent/stream-parser.ts';
@@ -14,6 +11,9 @@ import type {
   SystemTurnLeaseToken,
   SystemTurnPurpose,
 } from '../../../src/runtimes/agent/pending-system-result-tracker.ts';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { mkdtempSync, rmSync } from 'node:fs';
 import {
   COMPLETED_DELIVERY_IDENTITY_DEBT_HEALTH,
   LEGACY_ACTIVE_SESSION_WITHOUT_COMPLETED_IDENTITY,
@@ -412,6 +412,12 @@ vi.mock('../../../src/mcp/socket-server.ts', () => ({
   WhatSoupSocketServer: MockWhatSoupSocketServer,
 }));
 
+vi.mock('../../../src/runtimes/agent/per-chat-mcp-socket-manager.ts', async () => {
+  const { FakePerChatMcpSocketManager } =
+    await import('./helpers/fake-per-chat-mcp-socket-manager.ts');
+  return { PerChatMcpSocketManager: FakePerChatMcpSocketManager };
+});
+
 const { mockMediaBridgeHandle, mockStartMediaBridge, mockSetMediaBridgeChat } = vi.hoisted(() => {
   const mockMediaBridgeHandle = vi.fn() as unknown as ReturnType<typeof vi.fn> & {
     _server: null;
@@ -444,6 +450,17 @@ vi.mock('../../../src/runtimes/agent/providers/primary-model-usability.ts', asyn
 vi.mock('../../../src/runtimes/agent/providers/primary-model-usability-adapters.ts', () => ({
   createPrimaryModelProbeAdapters: mockCreatePrimaryModelProbeAdapters,
 }));
+
+vi.mock('../../../src/core/provider-mcp-config.ts', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../../src/core/provider-mcp-config.ts')>();
+  return {
+    ...actual,
+    // Runtime tests mock directory creation and must not write provider config
+    // into the operator's real home. Dedicated config-writer tests cover IO.
+    writeProviderMcpConfig: vi.fn((providerId: string, cwd: string) =>
+      actual.writeProviderMcpConfigTarget(providerId, cwd)),
+  };
+});
 
 vi.mock('../../../src/mcp/registry.ts', () => ({
   ToolRegistry: class {

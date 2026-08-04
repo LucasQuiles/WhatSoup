@@ -7,6 +7,7 @@ import { ToolRegistry } from '../../../../src/mcp/registry.ts';
 import { registerAllTools } from '../../../../src/mcp/register-all.ts';
 import { PresenceCache } from '../../../../src/transport/presence-cache.ts';
 import {
+  buildProviderMcpConfigArgs,
   generateMcpConfigFile,
 } from '../../../../src/runtimes/agent/providers/mcp-bridge.ts';
 
@@ -659,8 +660,23 @@ describe('agent provider conformance', () => {
         const tools = registry.listTools({ tier: 'global' });
         const config = generateMcpConfigFile(provider.id, '/tmp/whatsoup.sock', '/tmp/proxy.ts');
 
-        expect(config).not.toBeNull();
-        expect((config as { mcpServers: Record<string, unknown> }).mcpServers.whatsoup).toBeDefined();
+        if (provider.id === 'codex-cli') {
+          expect(config).toBeNull();
+          expect(buildProviderMcpConfigArgs(
+            provider.id,
+            '/tmp',
+            '/tmp/whatsoup.sock',
+            '/tmp/proxy.ts',
+          )).toEqual(expect.arrayContaining([
+            '-c',
+            expect.stringContaining('mcp_servers.whatsoup'),
+          ]));
+        } else {
+          expect(config).not.toBeNull();
+          expect(
+            (config as { mcpServers: Record<string, unknown> }).mcpServers.whatsoup,
+          ).toBeDefined();
+        }
         expect(tools.length).toBeGreaterThanOrEqual(100);
         expect(tools.map((tool) => tool.name)).toEqual(
           expect.arrayContaining(['send_message', 'list_chats']),

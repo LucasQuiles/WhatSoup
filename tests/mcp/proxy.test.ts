@@ -50,12 +50,19 @@ function startEchoServer(socketPath: string): Promise<Server> {
 /**
  * Spawn the proxy as a child process with WHATSOUP_SOCKET set.
  */
-function spawnProxy(socketPath: string): ChildProcessWithoutNullStreams {
+function spawnProxy(
+  socketPath: string,
+  actorSocketPath?: string,
+): ChildProcessWithoutNullStreams {
   return spawn(
     process.execPath,
     ['--experimental-strip-types', PROXY_PATH],
     {
-      env: { ...process.env, WHATSOUP_SOCKET: socketPath },
+      env: {
+        ...process.env,
+        WHATSOUP_SOCKET: socketPath,
+        ...(actorSocketPath === undefined ? {} : { WHATSOUP_MCP_SOCKET: actorSocketPath }),
+      },
       stdio: ['pipe', 'pipe', 'pipe'],
     },
   );
@@ -191,7 +198,15 @@ describe('whatsoup-proxy', () => {
     expect(r2).toEqual(msg2);
   });
 
-  it('outputs JSON-RPC error to stdout on bad socket path', async () => {
+  it('prefers WHATSOUP_MCP_SOCKET over the static WHATSOUP_SOCKET', async () => {
+    server = await startEchoServer(socketPath);
+    proxy = spawnProxy('/private/static-socket-must-not-be-used.sock', socketPath);
+
+    const msg = { jsonrpc: '2.0', id: 3, method: 'tools/list', params: {} };
+    await expect(sendAndReceive(proxy, msg)).resolves.toEqual(msg);
+  });
+
+  it('redacts transport details from JSON-RPC errors for an unreachable socket', async () => {
     const badSocketPath = join(tmpdir(), 'nonexistent-proxy-test.sock');
 
     proxy = spawnProxy(badSocketPath);
@@ -202,10 +217,12 @@ describe('whatsoup-proxy', () => {
     };
 
     expect(response.jsonrpc).toBe('2.0');
-    expect(response.error).toBeDefined();
-    expect(typeof response.error.code).toBe('number');
-    expect(typeof response.error.message).toBe('string');
-    expect(response.error.message).toMatch(/socket/i);
+    expect(response.error).toEqual({
+      code: -32603,
+      message: 'MCP transport unavailable',
+    });
+    expect(response.error).not.toHaveProperty('data');
+    expect(JSON.stringify(response)).not.toContain(badSocketPath);
   });
 
   it('exits cleanly when stdin closes', async () => {
@@ -226,13 +243,12 @@ describe('whatsoup-proxy', () => {
     expect(exitCode === 0 || exitCode === null).toBe(true);
   });
 
-  it('proxy is missing WHATSOUP_SOCKET env — exits with error on stdout', async () => {
-    // Spawn without WHATSOUP_SOCKET set
+  it('missing both socket variables returns one content-free configuration error', async () => {
     proxy = spawn(
       process.execPath,
       ['--experimental-strip-types', PROXY_PATH],
       {
-        env: { ...process.env, WHATSOUP_SOCKET: '' },
+        env: { ...process.env, WHATSOUP_MCP_SOCKET: '', WHATSOUP_SOCKET: '' },
         stdio: ['pipe', 'pipe', 'pipe'],
       },
     );
@@ -243,7 +259,11 @@ describe('whatsoup-proxy', () => {
     };
 
     expect(response.jsonrpc).toBe('2.0');
-    expect(response.error).toBeDefined();
-    expect(response.error.message).toMatch(/WHATSOUP_SOCKET/i);
+    expect(response.error).toEqual({
+      code: -32603,
+      message: 'MCP transport unavailable',
+    });
+    expect(response.error).not.toHaveProperty('data');
+    expect(JSON.stringify(response)).not.toMatch(/WHATSOUP|socket path|provider|session|chat|hostname|username/i);
   });
 });

@@ -14,6 +14,8 @@ import {
 
 // ─── Mocks ────────────────────────────────────────────────────────────────────
 
+vi.mock('../../../src/runtimes/agent/provider-canary-proof.ts');
+
 // #1869: a single shared, inspectable logger (not a fresh object per call) so
 // tests can assert on `log.debug`/`log.warn` calls — same idiom as
 // handoff-distill-coordinator.test.ts's `mockLogger`. Nothing else in this file
@@ -356,6 +358,138 @@ describe('SessionManager', () => {
         stdio: ['pipe', 'pipe', 'pipe'],
       }),
     );
+  });
+
+  it('refuses spawn when binary content changed since canary admission (TOCTOU swap)', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+
+    // Override the auto-mocked sha256File to return a NON-matching hash so
+    // the re-hash check fires.
+    const { sha256File } = await import('../../../src/runtimes/agent/provider-canary-proof.ts');
+    vi.mocked(sha256File).mockReturnValue('this-hash-will-never-match-admission');
+
+    const sm = new SessionManager({
+      db,
+      messenger,
+      chatJid: CHAT_JID,
+      onEvent: vi.fn(),
+      provider: 'claude-cli',
+      providerCanaryAdmission: async () => ({
+        allowed: true,
+        required: true,
+        resolvedPath: '/usr/bin/claude',
+        binarySha256: 'original-hash-that-was-admitted',
+        proxyScriptSha256: 'proxy-hash',
+      }),
+    });
+
+    await expect(sm.spawnSession()).rejects.toThrow(
+      /provider binary content changed since admission/,
+    );
+    expect(spawn).not.toHaveBeenCalled();
+  });
+
+  it('rejects an eligible persistent child before spawn when actor-socket readiness fails', async () => {
+    const rejection = new Error('actor socket readiness failed');
+    let rejectReady!: (error: Error) => void;
+    const ready = new Promise<void>((_resolve, reject) => {
+      rejectReady = reject;
+    });
+    const sm = new SessionManager({
+      db: makeDb(),
+      messenger: makeMessenger().messenger,
+      chatJid: CHAT_JID,
+      onEvent: vi.fn(),
+      whatsoupMcpSocket: '/private/actor.sock',
+      providerTransitionReady: ready,
+    });
+
+    const spawning = sm.spawnSession();
+    await Promise.resolve();
+    expect(spawn).not.toHaveBeenCalled();
+    rejectReady(rejection);
+
+    await expect(spawning).rejects.toBe(rejection);
+    expect(spawn).not.toHaveBeenCalled();
+  });
+
+  it('does not initialize an API provider until the previous provider transition settles', async () => {
+    let settleTransition!: () => void;
+    const transitionReady = new Promise<void>((resolve) => {
+      settleTransition = resolve;
+    });
+    const sm = new SessionManager({
+      db: makeDb(),
+      messenger: makeMessenger().messenger,
+      chatJid: CHAT_JID,
+      onEvent: vi.fn(),
+      provider: 'openai-api',
+      providerTransitionReady: transitionReady,
+    });
+
+    const spawning = sm.spawnSession();
+    await Promise.resolve();
+    expect(sm.getStatus().active).toBe(false);
+
+    settleTransition();
+    await spawning;
+    expect(sm.getStatus().active).toBe(true);
+  });
+
+  it('keeps API provider initialization fail-closed when transition retirement rejects', async () => {
+    const rejection = new Error('previous provider retirement failed');
+    const sm = new SessionManager({
+      db: makeDb(),
+      messenger: makeMessenger().messenger,
+      chatJid: CHAT_JID,
+      onEvent: vi.fn(),
+      provider: 'anthropic-api',
+      providerTransitionReady: Promise.reject(rejection),
+    });
+
+    await expect(sm.spawnSession()).rejects.toBe(rejection);
+    expect(sm.getStatus().active).toBe(false);
+  });
+
+  it('blocks an unproven provider at the final child-spawn boundary', async () => {
+    const admission = vi.fn(() => {
+      throw new Error('provider MCP canary proof unavailable');
+    });
+    const sm = new SessionManager({
+      db: makeDb(),
+      messenger: makeMessenger().messenger,
+      chatJid: CHAT_JID,
+      onEvent: vi.fn(),
+      provider: 'codex-cli',
+      providerCanaryAdmission: admission,
+    });
+
+    await expect(sm.spawnSession()).rejects.toThrow('provider MCP canary proof unavailable');
+    expect(admission).toHaveBeenCalledTimes(1);
+    expect(spawn).not.toHaveBeenCalled();
+  });
+
+  it('rechecks actor-socket readiness at the spawn-per-turn child boundary', async () => {
+    const sm = new SessionManager({
+      db: makeDb(),
+      messenger: makeMessenger().messenger,
+      chatJid: CHAT_JID,
+      onEvent: vi.fn(),
+      provider: 'opencode-cli',
+      model: 'glm/test-model',
+      whatsoupMcpSocket: '/private/actor.sock',
+      providerTransitionReady: Promise.resolve(),
+    });
+    await sm.spawnSession();
+    vi.mocked(spawn).mockClear();
+    const rejection = new Error('actor socket no longer ready');
+    const failedReady = Promise.reject(rejection);
+    void failedReady.catch(() => {});
+    (sm as unknown as { providerTransitionReady: Promise<void> }).providerTransitionReady = failedReady;
+
+    await expect(sm.sendTurn('blocked turn')).rejects.toBe(rejection);
+    expect(spawn).not.toHaveBeenCalled();
   });
 
   // @check CHK-019
@@ -3824,6 +3958,27 @@ import {
 } from '../../../src/runtimes/agent/session.ts';
 
 describe('buildChildEnv', () => {
+  it.each([
+    ['claude-cli', undefined],
+    ['codex-cli', undefined],
+    ['gemini-cli', undefined],
+    ['opencode-cli', 'openai/test-model'],
+  ])('%s receives the explicit actor socket at the child environment boundary', (provider, model) => {
+    const savedOpenAi = process.env.OPENAI_API_KEY;
+    process.env.OPENAI_API_KEY = 'test-only-key';
+    try {
+      const env = buildChildEnv(
+        provider,
+        { whatsoupMcpSocket: '/private/actor-bound.sock' },
+        model,
+      );
+      expect(env.WHATSOUP_MCP_SOCKET).toBe('/private/actor-bound.sock');
+    } finally {
+      if (savedOpenAi === undefined) delete process.env.OPENAI_API_KEY;
+      else process.env.OPENAI_API_KEY = savedOpenAi;
+    }
+  });
+
   it('throws for unknown provider id', () => {
     expect(() => buildChildEnv('not-a-provider')).toThrow(/unknown provider id/);
   });
@@ -3834,6 +3989,27 @@ describe('buildChildEnv', () => {
 
   it('throws for anthropic-api (managed-loop, no child process)', () => {
     expect(() => buildChildEnv('anthropic-api')).toThrow(/managed-loop provider/);
+  });
+
+  it.each([
+    ['claude-cli', 'OPENAI_API_KEY'],
+    ['codex-cli', 'OPENAI_API_KEY'],
+    ['gemini-cli', 'GEMINI_API_KEY'],
+    ['opencode-cli', 'OPENAI_API_KEY'],
+  ])('%s can omit provider credentials for a non-inference canary', (provider, envKey) => {
+    const saved = process.env[envKey];
+    process.env[envKey] = 'must-not-reach-canary';
+    try {
+      const env = buildChildEnv(
+        provider,
+        { providerCredentials: 'omit' },
+        provider === 'opencode-cli' ? 'openai/test-model' : undefined,
+      );
+      expect(env).not.toHaveProperty(envKey);
+    } finally {
+      if (saved === undefined) delete process.env[envKey];
+      else process.env[envKey] = saved;
+    }
   });
 
   it('claude-cli: forwards OPENAI_API_KEY when set', () => {
@@ -4089,6 +4265,40 @@ describe('__provider_switch_for_test', () => {
   it('getProviderArgs for codex-cli includes model when provided', () => {
     const args = __provider_switch_for_test.getProviderArgs('codex-cli', '', '/cwd', undefined, 'gpt-4o', []);
     expect(args).toEqual(['app-server', '--listen', 'stdio://', '--model', 'gpt-4o']);
+  });
+
+  it('getProviderArgs for codex-cli consumes canonical MCP config overrides', () => {
+    const mcpArgs = ['-c', 'mcp_servers.whatsoup.command="proxy"'];
+    const args = __provider_switch_for_test.getProviderArgs(
+      'codex-cli',
+      '',
+      '/cwd',
+      undefined,
+      undefined,
+      [],
+      undefined,
+      mcpArgs,
+    );
+    expect(args).toEqual([
+      'app-server',
+      ...mcpArgs,
+      '--listen',
+      'stdio://',
+    ]);
+  });
+
+  it('getProviderArgs for claude-cli consumes the generated MCP config target', () => {
+    const args = __provider_switch_for_test.getProviderArgs(
+      'claude-cli',
+      'system',
+      '/cwd',
+      undefined,
+      undefined,
+      [],
+      undefined,
+      ['--mcp-config=/cwd/.mcp.json'],
+    );
+    expect(args).toContain('--mcp-config=/cwd/.mcp.json');
   });
 
   it('getProviderArgs for opencode-cli returns expected base args', () => {
@@ -4740,6 +4950,7 @@ describe('spawn-per-turn error branches', () => {
     await sm.spawnSession();
     // sendTurn spawns a NEW child (spawn-per-turn). Capture it after spawn.
     const sendPromise = sm.sendTurn('hello');
+    await Promise.resolve();
 
     // The new child spawned by sendTurn registers its own 'error' handler.
     // It's the LAST set of mock calls after sendTurn.
@@ -4766,6 +4977,7 @@ describe('spawn-per-turn error branches', () => {
 
     await sm.spawnSession();
     const sendPromise = sm.sendTurn('hello');
+    await Promise.resolve();
 
     const allOnCalls = (mockChild.on as ReturnType<typeof vi.fn>).mock.calls;
     const errHandlerCall = [...allOnCalls].reverse().find((c: unknown[]) => c[0] === 'error');
@@ -5259,10 +5471,8 @@ describe('providerConfig-driven claude-cli args', () => {
     await sm.spawnSession();
 
     const args: string[] = (spawn as ReturnType<typeof vi.fn>).mock.calls[0][1];
-    const mcpIdx = args.indexOf('--mcp-config');
-    expect(mcpIdx).toBeGreaterThan(-1);
-    expect(args[mcpIdx + 1]).toBe('/path/to/mcp1.json');
-    expect(args[mcpIdx + 2]).toBe('/path/to/mcp2.json');
+    expect(args).toContain('--mcp-config=/path/to/mcp1.json');
+    expect(args).toContain('--mcp-config=/path/to/mcp2.json');
   });
 
   it('--mcp-config with string is forwarded directly', async () => {
@@ -5275,9 +5485,7 @@ describe('providerConfig-driven claude-cli args', () => {
     await sm.spawnSession();
 
     const args: string[] = (spawn as ReturnType<typeof vi.fn>).mock.calls[0][1];
-    const mcpIdx = args.indexOf('--mcp-config');
-    expect(mcpIdx).toBeGreaterThan(-1);
-    expect(args[mcpIdx + 1]).toBe('/path/to/mcp.json');
+    expect(args).toContain('--mcp-config=/path/to/mcp.json');
   });
 
   it('--setting-sources is forwarded when settingSources is set', async () => {

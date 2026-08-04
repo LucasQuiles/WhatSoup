@@ -11,21 +11,13 @@
  * satisfies with a host object, so AgentRuntime keeps thin delegating
  * privates for the call sites that remain in it and behavior is unchanged.
  */
-import { mkdirSync, unlinkSync } from 'node:fs';
-import { join, resolve } from 'node:path';
-import { homedir } from 'node:os';
-import { createHash } from 'node:crypto';
 import { createChildLogger } from '../../logger.ts';
-import { toConversationKey } from '../../core/conversation-key.ts';
 import type { Messenger } from '../../core/types.ts';
-import type { AgentFallbackEntry } from '../../core/fallback-chain.ts';
-import type { ToolRegistry } from '../../mcp/registry.ts';
-import { WhatSoupSocketServer } from '../../mcp/socket-server.ts';
-import { perChatActorSession } from './per-chat-actor-session.ts';
-import { writeMcpConfigToPath } from './providers/mcp-bridge.ts';
 import type { SessionManager } from './session.ts';
 import type { IOutboundQueue } from './outbound-queue.ts';
 import { OperationTracker, type ProgressEvent } from './operation-tracker.ts';
+import type { PerChatMcpSocketManager } from './per-chat-mcp-socket-manager.ts';
+import { isProviderId, providerUsesWhatSoupMcp } from './providers/index.ts';
 
 /**
  * Structurally derived from OperationTracker's own constructor rather than
@@ -45,29 +37,18 @@ const log = createChildLogger('agent-runtime');
 
 /** The AgentRuntime surface the per-chat transport helpers read and mutate. Declared here rather than importing AgentRuntime so this module stays free of a cycle back into runtime.ts; the runtime supplies it as a host object. */
 export interface ChatTransportPort {
-  readonly cwd: string | undefined;
   readonly sessionScope: 'single' | 'shared' | 'per_chat';
   readonly sandboxPerChat: boolean;
-  readonly perChatConversationBound: boolean;
-  readonly registry: ToolRegistry;
-  /** Live read, not a value captured at host-construction time — tests (and the /model-fallback surface) reassign this on the runtime after construction. */
-  readonly agentFallbacks: AgentFallbackEntry[];
-  /** Live read, not a value captured at host-construction time — see agentFallbacks. */
-  readonly nlRoutingEnabled: boolean;
   readonly shared: boolean;
   readonly instanceName: string;
   readonly messenger: Messenger;
-  readonly effectiveProvider: string;
   readonly queue: IOutboundQueue | null;
   readonly operationTracker: OperationTracker | null;
   readonly chatSessions: Map<string, SessionManager>;
   readonly chatQueues: Map<string, IOutboundQueue>;
   readonly outboundQueues: Map<string, IOutboundQueue>;
   readonly perChatExecActorQueue: Map<string, (string | undefined)[]>;
-  readonly perChatSocketResources: Map<
-    string,
-    { socketServer: WhatSoupSocketServer; socketPath: string; cfgPath: string }
-  >;
+  readonly perChatMcpSocketManager: PerChatMcpSocketManager;
   readonly operationTrackers: Map<string, OperationTracker>;
   /** Threaded from runtime.ts's own `config` import (src/config.ts) rather than importing `config` here — this module stays out of the composition ring, matching the model-pin.ts precedent (createModelPinHost's `nlRoutingTiers: config.nlRoutingTiers`). */
   readonly operationTrackerConfig: OperationTrackerConfig;
@@ -80,11 +61,7 @@ export interface ChatTransportPort {
    * still intercept the call. Only the functions actually called by another
    * function in this module need an entry here.
    */
-  resolveExecutingActor(chatJid: string): string | undefined;
-  derivePerChatSocketPath(chatJid: string): string;
   teardownPerChatActorSocket(mapKey: string): void;
-  createPerChatActorSocket(mapKey: string, chatJid: string): { socketPath: string; cfgPath: string };
-  exposedCliProviders(): string[];
   getQueueForChat(chatJid: string, mapKey?: string): IOutboundQueue | null;
 }
 
@@ -95,116 +72,38 @@ export function resolveExecutingActor(port: ChatTransportPort, chatJid: string):
   return port.perChatExecActorQueue.get(mapKey)?.[0];
 }
 
-/** F-STICKY-ACTOR (QR-247): per-chat socket path under <cwd>/.claude, sha1-shortened if it would exceed the unix sun_path limit. */
-export function derivePerChatSocketPath(port: ChatTransportPort, chatJid: string): string {
-  const dir = join(port.cwd ?? homedir(), '.claude');
-  const key = toConversationKey(chatJid);
-  const full = join(dir, `whatsoup-${key}.sock`);
-  if (Buffer.byteLength(full, 'utf8') <= 100) return full;
-  const h = createHash('sha1').update(key).digest('hex').slice(0, 16);
-  return join(dir, `whatsoup-${h}.sock`);
-}
-
-/** F-STICKY-ACTOR (QR-247): true only for the mode the fix covers — claude-cli, per_chat, non-sandbox. Gates the global-broadcast SKIP (keep the shared global socket actor-less = fail-closed) and the exec-queue push. Instance-global by design: the global socket's fail-closed property must not depend on per-chat socket timing. */
-export function usesPerChatActorSocket(port: ChatTransportPort): boolean {
-  return port.sessionScope === 'per_chat' && !port.sandboxPerChat && port.effectiveProvider === 'claude-cli';
-}
-
 /**
- * F-STICKY-ACTOR (QR-247): create this chat's own MCP socket (tier:'global',
- * bound to resolveExecutingActor) and write its per-session --mcp-config so the
- * subprocess talks to it instead of the shared global socket. Returns the socket
- * + cfg paths for the provider override. Torn down in cleanupPerChatState.
- *
- * #1785 rec-3: this socket's SessionContext also carries conversationKey, bound
- * once here to the chat it will exclusively serve for its entire lifetime (a
- * fresh socket is derived per chat — see derivePerChatSocketPath — and never
- * reused across chats, so a static bind is race-free, unlike the shared global
- * socket's per-turn rebind in bindActiveGlobalMcpConversation). Without it, the
- * registry's cross-conversation guard and the send-pipeline's beforeAudit check
- * (both gated on session.conversationKey) silently fail open for every send
- * this per-chat actor subprocess makes.
- */
-export function createPerChatActorSocket(
-  port: ChatTransportPort,
-  mapKey: string,
-  chatJid: string,
-): { socketPath: string; cfgPath: string } {
-  const socketPath = port.derivePerChatSocketPath(chatJid);
-  // Ensure <cwd>/.claude exists (mirrors the global-socket setup at startup). In
-  // production the dir already exists; wiring now runs from more spawn paths
-  // (resume / provider-fallback), so make socket creation self-sufficient.
-  mkdirSync(join(port.cwd ?? homedir(), '.claude'), { recursive: true, mode: 0o700 });
-  const cfgPath = socketPath.replace(/\.sock$/, '.mcp.json');
-  const proxyScriptPath = resolve(new URL('.', import.meta.url).pathname, '../../../deploy/mcp/whatsoup-proxy.ts');
-  writeMcpConfigToPath('claude-cli', cfgPath, socketPath, proxyScriptPath);
-  const socketServer = new WhatSoupSocketServer(
-    socketPath,
-    port.registry,
-    perChatActorSession(mapKey, port.cwd ?? homedir(), port.perChatConversationBound, chatJid),
-    () => port.resolveExecutingActor(chatJid),
-  );
-  socketServer.start();
-  port.perChatSocketResources.set(mapKey, { socketServer, socketPath, cfgPath });
-  return { socketPath, cfgPath };
-}
-
-/**
- * F-STICKY-ACTOR (QR-247 hardening): the single seam that binds a per-chat
- * session to its own actor socket, keyed on the ACTUAL session provider
- * (route?.provider ?? effectiveProvider) — NOT the instance-global provider.
- * Called from createSessionManager so the ensure / proactive-resume / provider-
- * fallback spawn paths all bind identically. claude-cli non-sandbox per_chat ->
- * create-or-reuse the socket and return the strict --mcp-config override; any
- * other provider -> tear down a stale socket (so a fallback subprocess now on the
- * shared global socket is not frozen behind the presence-based broadcast gate)
- * and return undefined.
+ * Bind an eligible per-chat session to the logical conversation's actor socket.
+ * Capability is evaluated from the actual selected provider. API-only providers
+ * wait for any prior CLI child teardown before they can start; unknown providers
+ * fail closed instead of inheriting the shared compatibility socket.
  */
 export function wirePerChatActorSocket(
   port: ChatTransportPort,
   chatJid: string,
   provider: string,
 ):
-  | { mcpSocketPath: string; providerConfigOverride: { mcpConfig: string[]; strictMcpConfig: true } }
+  | { mcpSocketPath?: string; providerTransitionReady: Promise<void> }
   | undefined {
   if (port.sessionScope !== 'per_chat' || port.sandboxPerChat) return undefined;
   const mapKey = port.resolvePerChatMapKey(chatJid);
-  if (provider !== 'claude-cli') {
-    port.teardownPerChatActorSocket(mapKey);
-    return undefined;
+  if (!isProviderId(provider)) {
+    throw new Error(`unrecognized provider MCP capability: ${provider}`);
   }
-  const existing = port.perChatSocketResources.get(mapKey);
-  const { socketPath, cfgPath } = existing
-    ? { socketPath: existing.socketPath, cfgPath: existing.cfgPath }
-    : port.createPerChatActorSocket(mapKey, chatJid);
-  return { mcpSocketPath: socketPath, providerConfigOverride: { mcpConfig: [cfgPath], strictMcpConfig: true } };
+  if (!providerUsesWhatSoupMcp(provider)) {
+    return {
+      providerTransitionReady:
+        port.perChatMcpSocketManager.providerTransitionReady(mapKey),
+    };
+  }
+  const { socketPath, ready } = port.perChatMcpSocketManager.acquire(mapKey, chatJid);
+  return { mcpSocketPath: socketPath, providerTransitionReady: ready };
 }
 
-/** F-STICKY-ACTOR (QR-247 hardening): stop + unlink a per-chat actor socket and clear its exec-queue. Idempotent — safe when no entry exists. */
+/** Clear actor publication before releasing the logical session's owned socket. */
 export function teardownPerChatActorSocket(port: ChatTransportPort, mapKey: string): void {
   port.perChatExecActorQueue.delete(mapKey);
-  const sockRes = port.perChatSocketResources.get(mapKey);
-  if (sockRes) {
-    try { sockRes.socketServer.stop(); } catch (err) { log.warn({ err, mapKey }, 'per-chat socket stop failed'); }
-    try { unlinkSync(sockRes.cfgPath); } catch { /* best-effort */ }
-    port.perChatSocketResources.delete(mapKey);
-  }
-}
-
-/** F-STICKY-ACTOR (QR-247): non-claude subprocess CLI providers (PRIMARY and/or configured FALLBACK) that stay on the shared global socket for this instance — the still-uncovered actor-race exposure. */
-export function exposedCliProviders(port: ChatTransportPort): string[] {
-  const isExposedCli = (p: string | undefined): p is string =>
-    typeof p === 'string' && p.endsWith('-cli') && p !== 'claude-cli';
-  const providers = new Set<string>();
-  if (isExposedCli(port.effectiveProvider)) providers.add(port.effectiveProvider);
-  for (const entry of port.agentFallbacks) if (isExposedCli(entry.provider)) providers.add(entry.provider);
-  return [...providers];
-}
-
-/** F-STICKY-ACTOR (QR-247): true when a non-sandbox per_chat instance has ANY non-claude subprocess CLI provider on the shared global socket, so the concurrent-sender actor race is NOT closed for it. Covers the STATIC config surface (primary OR fallback) and — QR-263 — the DYNAMIC nlRouting surface (a live per-sender pin can select a non-claude CLI provider at runtime even when the static config is claude-only). Drives the honest startup warning (F11). */
-export function perChatActorRaceExposed(port: ChatTransportPort): boolean {
-  if (port.sessionScope !== 'per_chat' || port.sandboxPerChat) return false;
-  return port.exposedCliProviders().length > 0 || port.nlRoutingEnabled;
+  port.perChatMcpSocketManager.release(mapKey);
 }
 
 export function findMapKeyForSession(

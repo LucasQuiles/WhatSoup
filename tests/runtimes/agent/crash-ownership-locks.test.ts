@@ -14,15 +14,21 @@ import {
   waitUntil,
 } from './lib/session-harness.ts';
 
+vi.mock('../../../src/runtimes/agent/provider-canary-proof.ts', () => ({
+  readProviderCanaryAdmission: vi.fn(() => ({
+    allowed: true,
+    resolvedPath: '/usr/bin/claude',
+    binarySha256: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+    proxyScriptSha256: 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+  })),
+  sha256File: vi.fn(() => 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'),
+  resolveExecutable: vi.fn(),
+  canaryStoreProvisioned: vi.fn(() => false),
+}));
+
 vi.mock('../../../src/logger.ts', async () => {
   const { loggerMock } = await import('../../helpers/logger-mock.ts');
-  const mock = loggerMock();
-  const logger = mock.createChildLogger();
-  return {
-    ...mock,
-    default: { ...logger, child: () => logger },
-    flushLogger: vi.fn(),
-  };
+  return loggerMock();
 });
 
 type RespawnTimer = ReturnType<typeof setTimeout>;
@@ -166,7 +172,7 @@ describe('B2 crash ownership regression locks', () => {
       state.chatSessions = sessions;
       state.wirePerChatActorSocket = () => ({
         mcpSocketPath: '/tmp/whatsoup-b2b.sock',
-        providerConfigOverride: undefined,
+        providerTransitionReady: Promise.resolve(),
       });
       state.handleCrashNotify = () => {
         notificationDeliveryCalls += 1;

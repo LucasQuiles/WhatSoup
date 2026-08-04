@@ -17,15 +17,21 @@ import {
   waitUntil,
 } from './lib/session-harness.ts';
 
+vi.mock('../../../src/runtimes/agent/provider-canary-proof.ts', () => ({
+  readProviderCanaryAdmission: vi.fn(() => ({
+    allowed: true,
+    resolvedPath: '/usr/bin/claude',
+    binarySha256: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+    proxyScriptSha256: 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+  })),
+  sha256File: vi.fn(() => 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'),
+  resolveExecutable: vi.fn(),
+  canaryStoreProvisioned: vi.fn(() => false),
+}));
+
 vi.mock('../../../src/logger.ts', async () => {
   const { loggerMock } = await import('../../helpers/logger-mock.ts');
-  const mock = loggerMock();
-  const logger = mock.createChildLogger();
-  return {
-    ...mock,
-    default: { ...logger, child: () => logger },
-    flushLogger: vi.fn(),
-  };
+  return { ...loggerMock(), flushLogger: vi.fn() };
 });
 
 type RespawnTimer = ReturnType<typeof setTimeout>;
@@ -73,7 +79,7 @@ type RuntimeState = {
   resolvePerChatMapKey: (chatJid: string) => string;
   wirePerChatActorSocket: () => {
     mcpSocketPath: string;
-    providerConfigOverride: undefined;
+    providerTransitionReady: Promise<void>;
   };
   chatSessions: Map<string, SessionManager>;
   sessionOwnership: SessionOwnershipRegistry;
@@ -149,7 +155,7 @@ describe('per-chat crash respawn ownership', () => {
     state.pendingRespawnTimers = timers;
     state.wirePerChatActorSocket = () => ({
       mcpSocketPath: '/tmp/whatsoup-crash-respawn.sock',
-      providerConfigOverride: undefined,
+      providerTransitionReady: Promise.resolve(),
     });
 
     let providerGeneration = 0;
@@ -283,7 +289,7 @@ describe('per-chat crash respawn ownership', () => {
     state.handleCrashNotify = notification;
     state.wirePerChatActorSocket = () => ({
       mcpSocketPath: '/tmp/whatsoup-stale-crash.sock',
-      providerConfigOverride: undefined,
+      providerTransitionReady: Promise.resolve(),
     });
 
     let manager: SessionManager | null = null;
@@ -412,7 +418,7 @@ describe('per-chat crash respawn ownership', () => {
     state.pendingRespawnTimers = timers;
     state.wirePerChatActorSocket = () => ({
       mcpSocketPath: '/tmp/whatsoup-signal-respawn.sock',
-      providerConfigOverride: undefined,
+      providerTransitionReady: Promise.resolve(),
     });
 
     let manager: SessionManager | null = null;

@@ -16,6 +16,7 @@ import type { IncomingMessage } from '../../core/types.ts';
 import { createChildLogger } from '../../logger.ts';
 import { GLOBAL_CONVERSATION_KEY, toConversationKey } from '../../core/conversation-key.ts';
 import type { fetchAnthropicModelIdsWithStatus } from '../../lib/model-advisor.ts';
+import type { RuntimeTurnQueueTeardown } from './runtime-turn-coordinator.ts';
 import type { CommandResult } from './commands.ts';
 import {
   getPreference,
@@ -105,6 +106,8 @@ export interface ModelPinPort extends ModelCatalogueRenderPort {
       mapKey: string,
       expectedQueue: TurnQueue | null,
     ): void;
+    terminalizePerChatTurnQueueForKill(mapKey: string): Promise<RuntimeTurnQueueTeardown>;
+    retirePerChatTurnQueueAfterKill(transaction: RuntimeTurnQueueTeardown): Promise<void>;
   };
   readonly modelCatalogueListFn: typeof listModelCatalog | undefined;
   readonly modelCatalogueAnthropicFn: typeof fetchAnthropicModelIdsWithStatus | undefined;
@@ -125,8 +128,13 @@ export interface ModelPinPort extends ModelCatalogueRenderPort {
   deleteOwnedPerChatSession(mapKey: string, expected?: SessionManager): boolean;
   cleanupPerChatState(
     mapKey: string,
-    options?: { preserveCrashHistory?: boolean; preserveProviderTurnOwnership?: boolean },
+    options?: {
+      preserveCrashHistory?: boolean;
+      preserveProviderTurnOwnership?: boolean;
+      preserveActorSocket?: boolean;
+    },
   ): void;
+  retirePerChatProviderTransitionAfter?(mapKey: string, transitionSettled: Promise<void>): void;
   cleanupGlobalAutoCompactState(): void;
   emitRouteEventChecked(ev: Omit<ModelRouteEvent, 'ts' | 'instance' | 'chatScope' | 'authority'>): void;
   recordRoutePreference(
@@ -529,18 +537,25 @@ function routeRecycleLifecycle(port: ModelPinPort): RouteRecycleLifecycle<Sessio
 }
 
 /**
- * Retire an idle live session without losing a journal/processor owner. Exact
- * ownership stays published while process-tree shutdown is awaited; the
- * runtime queue is then re-proven and retired synchronously before session/
- * queue maps detach, so success cannot race a next inbound onto the old route.
+ * Detach the live session from every map/queue it is reachable through —
+ * synchronously, so the caller's subsequent "does a session exist" check
+ * (ensureSessionAndQueueSync, reached either immediately after an idle
+ * recycle or on the next inbound after a deferred one) sees none and
+ * respawns fresh. Per-chat teardown starts first and its promise is registered
+ * with the actor-socket manager before detachment. The next spawn may be
+ * requested immediately, but its provider-transition readiness remains blocked
+ * until the old child proves stopped and the scoped turn queue terminalizes; a
+ * rejected proof keeps the old ownership fail-closed.
  *
- * Per-chat teardown awaits shutdown(false), then atomically retires the
- * already-proven runtime TurnQueue and drops chatSessions/chatQueues — NOT
- * resetOwnedPerChatSession, which respawns the SAME manager with its cached
- * readonly model and would never apply the switch. Single/shared teardown
- * follows the same shutdown-before-detach rule.
+ * Per-chat teardown uses the same provider-transition barrier as idle eviction
+ * and /kill-session, then aborts and terminalizes the runtime TurnQueue, drops
+ * chatSessions/chatQueues, and clears generation state without releasing the
+ * actor socket early. It does NOT use resetOwnedPerChatSession, which respawns
+ * the SAME manager with its
+ * cached readonly model and would never apply the switch. Single/shared
+ * teardown mirrors /kill-session's else branch.
  */
-export async function recycleLiveSession(
+export function recycleLiveSession(
   port: ModelPinPort,
   mapKey: string | undefined,
   session: SessionManager,
@@ -549,57 +564,89 @@ export async function recycleLiveSession(
     const key = mapKey!;
     const outboundQueue = port.chatQueues.get(key);
     if (port.chatSessions.get(key) !== session) {
-      throw new RouteRecycleOwnershipChangedError(
+      return Promise.reject(new RouteRecycleOwnershipChangedError(
         `Per-chat session ownership changed before route recycle for ${key}`,
+      ));
+    }
+    const childStopped = session.shutdown(false);
+    const turnTerminalized =
+      port.runtimeTurnCoordinator.terminalizePerChatTurnQueueForKill(key);
+    const work = (async () => {
+      try {
+        await childStopped;
+      } catch (err) {
+        // Fail-closed: the child never proved stopped, so ownership (session,
+        // queue, actor socket) is retained. The turn-queue teardown state the
+        // terminalize above registered must still be settled, or its pending
+        // lifecycle poisons runtime.shutdown()'s teardown join with the 2s
+        // deadline. Retire it off-path; a terminalize rejection rolled the
+        // state back already, so that arm only needs the log.
+        void turnTerminalized
+          .then((teardown) =>
+            port.runtimeTurnCoordinator.retirePerChatTurnQueueAfterKill(teardown))
+          .catch(() => {
+            log.error(
+              { mapKey: key },
+              'route recycle: per-chat turn teardown retirement failed after child-stop rejection',
+            );
+          });
+        throw err;
+      }
+      const teardown = await turnTerminalized;
+      await port.runtimeTurnCoordinator.retirePerChatTurnQueueAfterKill(teardown);
+      if (
+        port.chatSessions.get(key) !== session
+        || port.chatQueues.get(key) !== outboundQueue
+      ) {
+        throw new RouteRecycleOwnershipChangedError(
+          `Per-chat session or queue ownership changed during route recycle for ${key}`,
+        );
+      }
+      outboundQueue?.abortTurn({ preserveEvidence: true });
+      if (!port.deleteOwnedPerChatSession(key, session)) {
+        throw new Error(`Route recycle lost exact per-chat session ownership for ${key}`);
+      }
+      port.chatQueues.delete(key);
+      port.cleanupPerChatState(key, { preserveActorSocket: true });
+    })();
+    // The registered proof IS the recycle's own promise: replacement readiness
+    // (actor-socket release) stays blocked until child stop, terminalization,
+    // retirement, and detach ALL land; any rejection keeps it fail-closed.
+    // Identity matters — a wrapper promise here would leave the direct-call
+    // rejection unobserved.
+    port.retirePerChatProviderTransitionAfter?.(key, work);
+    return work;
+  }
+  return (async () => {
+    if (port.session !== session) {
+      throw new RouteRecycleOwnershipChangedError(
+        'Singleton/shared session ownership changed before route recycle',
       );
     }
-    const runtimeQueue = port.runtimeTurnCoordinator.captureIdlePerChatTurnQueueForRecycle(key);
+    const activeQueue = port.getActiveQueue();
+    const queue = port.queue;
+    const activeChatJid = port.activeChatJid;
+    const operationTracker = port.operationTracker;
     await session.shutdown(false);
     if (
-      port.chatSessions.get(key) !== session
-      || port.chatQueues.get(key) !== outboundQueue
+      port.session !== session
+      || port.getActiveQueue() !== activeQueue
+      || port.queue !== queue
+      || port.activeChatJid !== activeChatJid
+      || port.operationTracker !== operationTracker
     ) {
       throw new RouteRecycleOwnershipChangedError(
-        `Per-chat session or queue ownership changed during route recycle for ${key}`,
+        'Singleton/shared ownership changed during route recycle',
       );
     }
-    outboundQueue?.abortTurn({ preserveEvidence: true });
-    port.runtimeTurnCoordinator.retireIdlePerChatTurnQueueForRecycle(key, runtimeQueue);
-    if (!port.deleteOwnedPerChatSession(key, session)) {
-      throw new Error(`Route recycle lost exact per-chat session ownership for ${key}`);
-    }
-    port.chatQueues.delete(key);
-    port.cleanupPerChatState(key);
-    return;
-  }
-  if (port.session !== session) {
-    throw new RouteRecycleOwnershipChangedError(
-      'Singleton/shared session ownership changed before route recycle',
-    );
-  }
-  const activeQueue = port.getActiveQueue();
-  const queue = port.queue;
-  const activeChatJid = port.activeChatJid;
-  const operationTracker = port.operationTracker;
-  await session.shutdown(false);
-  if (
-    port.session !== session
-    || port.getActiveQueue() !== activeQueue
-    || port.queue !== queue
-    || port.activeChatJid !== activeChatJid
-    || port.operationTracker !== operationTracker
-  ) {
-    throw new RouteRecycleOwnershipChangedError(
-      'Singleton/shared ownership changed during route recycle',
-    );
-  }
-  activeQueue?.abortTurn({ preserveEvidence: true });
-  operationTracker?.shutdown();
-  port.operationTracker = null;
-  port.cleanupGlobalAutoCompactState();
-  port.session = null;
-  port.queue = null;
-  port.activeChatJid = null;
+    activeQueue?.abortTurn({ preserveEvidence: true });
+    operationTracker?.shutdown();
+    port.operationTracker = null;
+    port.cleanupGlobalAutoCompactState();
+    port.session = null;
+    port.queue = null;
+    port.activeChatJid = null;
+  })();
 }
 
 /**

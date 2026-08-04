@@ -11,8 +11,8 @@
         },
         {
           "filePath": "tests/runtimes/agent/runtime.test.ts",
-          "lines": 16579,
-          "maxLines": 16579
+          "lines": 16595,
+          "maxLines": 16596
         }
       ]
     },
