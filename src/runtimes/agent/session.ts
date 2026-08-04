@@ -4,7 +4,7 @@
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
-import { homedir, userInfo } from 'node:os';
+import { homedir } from 'node:os';
 import { join } from 'node:path';
 import type { Database } from '../../core/database.ts';
 import type { Messenger } from '../../core/types.ts';
@@ -1129,11 +1129,13 @@ export class SessionManager {
       }
 
       if (this.provider === 'claude-cli') {
+        const claudeConfigDir = process.env['CLAUDE_CONFIG_DIR'] || join(homedir(), '.claude');
+        const projectCwd = this.configuredCwd ?? homedir();
+        const projectDirName = projectCwd.replace(/[^a-zA-Z0-9]/g, '-');
         const transcriptPath = join(
-          homedir(),
-          '.claude',
+          claudeConfigDir,
           'projects',
-          `-home-${userInfo().username}`,
+          projectDirName,
           `${event.sessionId}.jsonl`,
         );
         updateTranscriptPath(this.db, this.dbRowId, transcriptPath);
