@@ -22,7 +22,7 @@ import {
   type TriggerSelfRestartOptions,
 } from '../../../src/runtimes/agent/self-restart.ts';
 import { Database } from '../../../src/core/database.ts';
-import { ToolRegistry } from '../../../src/mcp/registry.ts';
+import { ADMIN_REQUIRED_DENIAL, ToolRegistry } from '../../../src/mcp/registry.ts';
 import type { SessionContext } from '../../../src/mcp/types.ts';
 
 const ADMIN_DIGITS = '15550100111';
@@ -101,12 +101,12 @@ describe('restart_self central R1 gate (registry integration)', () => {
     return { registry, trigger };
   }
 
-  it('DENIES a spoofed @sms actor at the central gate (uniform non-disclosing reply, handler never reached)', async () => {
+  it('DENIES a spoofed @sms actor at the central gate (typed admin_required denial, handler never reached)', async () => {
     db = makeDb();
     const { registry, trigger } = registerWithCentralGate();
     const res = await registry.call('restart_self', { reason: 'r' }, { tier: 'global', actorJid: ADMIN_SMS_JID });
     expect(res.isError).toBe(true);
-    expect(res.content[0]?.text).toBe('Unknown tool: restart_self');
+    expect(res.content[0]?.text).toBe(ADMIN_REQUIRED_DENIAL('restart_self'));
     expect(trigger).not.toHaveBeenCalled();
   });
 

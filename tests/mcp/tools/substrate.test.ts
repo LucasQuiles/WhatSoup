@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { existsSync, readFileSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
 import { Database } from '../../../src/core/database.ts';
-import { ToolRegistry } from '../../../src/mcp/registry.ts';
+import { ADMIN_REQUIRED_DENIAL, ToolRegistry } from '../../../src/mcp/registry.ts';
 import { registerSubstrateTools } from '../../../src/mcp/tools/substrate.ts';
 import type { SessionContext } from '../../../src/mcp/types.ts';
 import { createBead, getBead } from '../../../src/core/substrate/beads.ts';
@@ -130,26 +130,24 @@ describe('substrate MCP tools', () => {
     for (const name of READ_TOOLS) expect(flaggedSensitive.has(name)).toBe(false);
   });
 
-  it('guest (non-admin actorJid) is rejected on capture_task without existence disclosure (R1)', async () => {
+  it('guest (non-admin actorJid) is rejected on capture_task with typed denial (list-visible, R1)', async () => {
     const res = await registry.call('capture_task', { title: 'x' }, guestSession);
     expect(res.isError).toBe(true);
-    // Central sensitive gate: indistinguishable from a nonexistent tool.
-    expect(res.content[0].text).toBe('Unknown tool: capture_task');
+    // Global tier → list-visible → typed admin_required denial (#2974).
+    expect(res.content[0].text).toBe(ADMIN_REQUIRED_DENIAL('capture_task'));
   });
 
-  it('regenerate_vault is admin gated without existence disclosure (R1)', async () => {
+  it('regenerate_vault is admin gated with typed denial (list-visible, R1)', async () => {
     const res = await registry.call('regenerate_vault', {}, guestSession);
     expect(res.isError).toBe(true);
-    expect(res.content[0].text).toBe('Unknown tool: regenerate_vault');
+    expect(res.content[0].text).toBe(ADMIN_REQUIRED_DENIAL('regenerate_vault'));
   });
 
-  it('missing actorJid is rejected on capture_task with the uniform non-disclosing reply (R1)', async () => {
+  it('missing actorJid is rejected on capture_task with typed denial (list-visible, R1)', async () => {
     const res = await registry.call('capture_task', { title: 'x' }, { tier: 'global' });
     expect(res.isError).toBe(true);
-    // R1: the central gate replies uniformly to avoid an existence oracle;
-    // the 'missing actorJid - runtime wiring fault' diagnosis is logged
-    // server-side rather than returned to the caller.
-    expect(res.content[0].text).toBe('Unknown tool: capture_task');
+    // Global tier (unbound) → list-visible → typed admin_required denial.
+    expect(res.content[0].text).toBe(ADMIN_REQUIRED_DENIAL('capture_task'));
   });
 
   it('resolves @lid actorJid through lid_mappings for admin check', async () => {
@@ -169,12 +167,11 @@ describe('substrate MCP tools', () => {
   it('rejects unresolved @lid actorJid (admin gate fails closed on LID miss)', async () => {
     // Raw @lid number with no lid_mappings row — resolvePhoneFromJid returns
     // the LID number as fallback, which is NOT on the admin list → reject.
-    // R1: the central gate denies BEFORE the handler, without existence
-    // disclosure — still fail-closed, earlier.
+    // R1: global tier → list-visible → typed denial.
     const lidSession: SessionContext = { tier: 'global', actorJid: 'missing-lid@lid' };
     const res = await registry.call('capture_task', { title: 'x' }, lidSession);
     expect(res.isError).toBe(true);
-    expect(res.content[0].text).toBe('Unknown tool: capture_task');
+    expect(res.content[0].text).toBe(ADMIN_REQUIRED_DENIAL('capture_task'));
   });
 
   it('fails closed when LID admin resolution throws', async () => {
@@ -195,9 +192,8 @@ describe('substrate MCP tools', () => {
     );
 
     expect(res.isError).toBe(true);
-    // R1 central gate: a throwing resolver denies fail-closed without
-    // existence disclosure (the same predicate backs the authorizer).
-    expect(res.content[0].text).toBe('Unknown tool: capture_task');
+    // R1 central gate: a throwing resolver denies with typed denial.
+    expect(res.content[0].text).toBe(ADMIN_REQUIRED_DENIAL('capture_task'));
   });
 
   it('capture_task round-trip', async () => {
@@ -683,7 +679,36 @@ describe('substrate MCP tools', () => {
     }, guestSession);
 
     expect(res.isError).toBe(true);
-    expect(res.content[0].text).toBe('Unknown tool: add_alias');
+    expect(res.content[0].text).toBe(ADMIN_REQUIRED_DENIAL('add_alias'));
+  });
+
+  // #2974 Option A — G1/@sms and G2/empty-adminPhones harvest cells
+  it('(G1) @sms admin-phone caller gets typed denial (QR-143)', async () => {
+    const smsSession: SessionContext = { tier: 'global', actorJid: `${adminPhone}@sms` };
+    const res = await registry.call('capture_task', { title: 'x' }, smsSession);
+    expect(res.isError).toBe(true);
+    // @sms is globally-visible but transport-authenticated as non-admin → typed denial.
+    expect(res.content[0].text).toBe(ADMIN_REQUIRED_DENIAL('capture_task'));
+  });
+
+  it('(G2) empty adminPhones still rejects with typed denial', async () => {
+    const emptyPhonesRegistry = new ToolRegistry();
+    registerSubstrateTools(emptyPhonesRegistry, {
+      db: db.raw,
+      dbWrapper: db,
+      adminPhones: new Set<string>(),
+      enableUrlWatch: false,
+      memory: {
+        adminJid: adminPhone,
+        vaultPath,
+        observationConfidenceMin: 0.4,
+        sweep: { beadProposeMin: 0.55, beadUpdateMin: 0.8, lookbackHours: 48, reviewByDays: 7 },
+        watchTtl: { defaultHours: 24, maxHours: 72 },
+      },
+    });
+    const res = await emptyPhonesRegistry.call('capture_task', { title: 'x' }, adminSession);
+    expect(res.isError).toBe(true);
+    expect(res.content[0].text).toBe(ADMIN_REQUIRED_DENIAL('capture_task'));
   });
 
   it('forget_observation reprojects the affected entity profile', async () => {

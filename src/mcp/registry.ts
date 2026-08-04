@@ -69,6 +69,20 @@ function conversationBoundMaySee(tool: ToolDeclaration): boolean {
   return tool.scope === 'chat' || CONVERSATION_SAFE_GLOBAL_TOOLS.has(tool.name);
 }
 
+/** Would this session's tools/list include this tool? Single predicate shared
+ *  by listTools filtering and the R1 denial-shape split (list-visible sessions
+ *  get a typed admin_required denial; hidden-listing sessions keep the
+ *  non-disclosing "Unknown tool" reply). */
+function sessionWouldList(tool: ToolDeclaration, session: SessionContext): boolean {
+  if (session.tier === 'chat-scoped' && tool.scope === 'global') return false;
+  if (conversationBoundKey(session) !== undefined && !conversationBoundMaySee(tool)) return false;
+  return true;
+}
+
+/** Typed denial for a list-visible sensitive-tool rejection (#2974). */
+export const ADMIN_REQUIRED_DENIAL = (name: string): string =>
+  `admin_required: tool "${name}" requires an authenticated WhatsApp admin actor`;
+
 // ---------------------------------------------------------------------------
 // Zod → JSON Schema (minimal, handles the types we use in tool declarations)
 // ---------------------------------------------------------------------------
@@ -394,15 +408,7 @@ export class ToolRegistry {
 
     const isBound = conversationBoundKey(session) !== undefined;
     for (const tool of this.tools.values()) {
-      // Chat-scoped sessions may not use global-scope tools
-      if (session.tier === 'chat-scoped' && tool.scope === 'global') {
-        continue;
-      }
-
-      // Conversation-bound sessions: default-deny outside the eligibility set.
-      if (isBound && !conversationBoundMaySee(tool)) {
-        continue;
-      }
+      if (!sessionWouldList(tool, session)) continue;
 
       result.push({
         name: tool.name,
@@ -493,15 +499,23 @@ export class ToolRegistry {
     // --- R1 sensitive-tool gate (central, authoritative; in-handler
     // assertAdmin checks remain as defense in depth) ---
     if (tool.sensitive && !this.sensitiveAllowed(session)) {
-      // UNIFORM reply for every denial — missing actorJid (wiring fault) and
-      // unauthorized actor are indistinguishable to the caller, identical to
-      // a nonexistent tool, so call() never becomes an existence oracle for
-      // sensitive names. The diagnosis (which actor, why) lives server-side:
-      // the specific admin-predicate reason is logged inside the authorizer.
+      // Server-side diagnosis (which actor, why) stays in the log — the typed
+      // reply must not distinguish unauthorized-actor from missing-actorJid.
       log.warn(
         { tool: name, tier: session.tier, actorJid: session.actorJid ?? null },
         session.actorJid ? 'sensitive tool denied (unauthorized actor)' : 'sensitive tool denied (missing actorJid - runtime wiring fault)',
       );
+      if (sessionWouldList(tool, session)) {
+        // Listing already advertises this name to this session ("listing is not
+        // a gate") — a disguised reply protects nothing here and mislabels an
+        // authorization fault as a discovery fault (#2974). One typed variant
+        // only: unauthorized-actor vs missing-actorJid stays server-side (log
+        // above).
+        return reject(ADMIN_REQUIRED_DENIAL(name), 'authorization_denied', 'authorization');
+      }
+      // Hidden-listing sessions (chat-scoped; conversation-bound): byte-identical
+      // to a nonexistent tool — call() must not become an existence oracle where
+      // tools/list hides sensitive names.
       return reject(`Unknown tool: ${name}`, 'authorization_denied', 'authorization');
     }
 

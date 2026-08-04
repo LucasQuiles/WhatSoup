@@ -12,7 +12,7 @@ vi.mock('../../src/logger.ts', () => ({
   }),
 }));
 
-import { ToolRegistry } from '../../src/mcp/registry.ts';
+import { ADMIN_REQUIRED_DENIAL, ToolRegistry } from '../../src/mcp/registry.ts';
 import type { ToolDeclaration, SessionContext } from '../../src/mcp/types.ts';
 
 // ---------------------------------------------------------------------------
@@ -189,7 +189,7 @@ describe('ToolRegistry.call durability containment', () => {
     // Uniform non-disclosing deny reply, unaffected by the durability throw
     // (no authorizer is installed, so this is a denial regardless).
     expect(result.isError).toBe(true);
-    expect(result.content[0].text).toBe('Unknown tool: sensitive_tool');
+    expect(result.content[0].text).toBe(ADMIN_REQUIRED_DENIAL('sensitive_tool'));
     // recordToolCall threw, so nothing downstream in the deny-path's
     // denyId-chained writes can fire.
     expect(throwingDurability.markToolExecuting).not.toHaveBeenCalled();

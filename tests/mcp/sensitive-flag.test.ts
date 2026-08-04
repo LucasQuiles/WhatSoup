@@ -8,7 +8,8 @@
  */
 import { describe, it, expect } from 'vitest';
 import { z } from 'zod';
-import { ToolRegistry } from '../../src/mcp/registry.ts';
+import { ADMIN_REQUIRED_DENIAL, ToolRegistry } from '../../src/mcp/registry.ts';
+import { makeConversationBinding } from '../../src/mcp/types.ts';
 import type { SessionContext } from '../../src/mcp/types.ts';
 
 const ADMIN: SessionContext = { tier: 'global', actorJid: '15550000001@s.whatsapp.net' };
@@ -50,21 +51,22 @@ describe('R1 sensitive-tool gate', () => {
     const registry = makeRegistry();
     const res = await registry.call('sensitive_probe', {}, ADMIN);
     expect(res.isError).toBe(true);
-    expect(res.content[0].text).toBe('Unknown tool: sensitive_probe');
+    expect(res.content[0].text).toBe(ADMIN_REQUIRED_DENIAL('sensitive_probe'));
   });
 
-  it('denies an actor-less session with the SAME reply as an unauthorized actor (no existence oracle, F01)', async () => {
+  it('denies an actor-less session with the typed denial (list-visible, F01)', async () => {
     const registry = makeRegistry();
     // Authorizer admits only the admin; ANON (no actorJid) and GUEST
-    // (actorJid, not admin) are both unauthorized and must be
-    // indistinguishable from an unknown tool.
+    // (actorJid, not admin) are both list-visible (global tier, unbound)
+    // and receive the typed ADMIN_REQUIRED_DENIAL.
     registry.setSensitiveToolAuthorizer((s) => s.actorJid === ADMIN.actorJid);
     const anon = await registry.call('sensitive_probe', {}, ANON);
     const guest = await registry.call('sensitive_probe', {}, GUEST);
     const unknown = await registry.call('never_registered', {}, ANON);
-    // All three replies are byte-identical in shape: 'Unknown tool: <name>'.
-    expect(anon.content[0].text).toBe('Unknown tool: sensitive_probe');
-    expect(guest.content[0].text).toBe('Unknown tool: sensitive_probe');
+    // List-visible sessions get the typed denial for registered sensitive tools.
+    expect(anon.content[0].text).toBe(ADMIN_REQUIRED_DENIAL('sensitive_probe'));
+    expect(guest.content[0].text).toBe(ADMIN_REQUIRED_DENIAL('sensitive_probe'));
+    // Genuine-unknown tools still get the non-disclosing reply (no ADMIN_REQUIRED_DENIAL).
     expect(unknown.content[0].text).toBe('Unknown tool: never_registered');
     expect(anon.isError && guest.isError && unknown.isError).toBe(true);
   });
@@ -75,8 +77,8 @@ describe('R1 sensitive-tool gate', () => {
     const res = await registry.call('sensitive_probe', {}, ADMIN);
     expect(res.isError).toBeUndefined();
     expect(res.content[0].text).toBe('sensitive-ok');
-    // The unauthorized guest is denied without existence disclosure (NT-1/NT-3).
-    expect((await registry.call('sensitive_probe', {}, GUEST)).content[0].text).toBe('Unknown tool: sensitive_probe');
+    // The unauthorized guest is denied with typed denial (list-visible).
+    expect((await registry.call('sensitive_probe', {}, GUEST)).content[0].text).toBe(ADMIN_REQUIRED_DENIAL('sensitive_probe'));
   });
 
   it('an authorizer that throws denies (fail-closed), never grants', async () => {
@@ -86,7 +88,7 @@ describe('R1 sensitive-tool gate', () => {
     });
     const res = await registry.call('sensitive_probe', {}, ADMIN);
     expect(res.isError).toBe(true);
-    expect(res.content[0].text).toBe('Unknown tool: sensitive_probe');
+    expect(res.content[0].text).toBe(ADMIN_REQUIRED_DENIAL('sensitive_probe'));
   });
 
   it('a truthy NON-boolean authorizer return does NOT open the gate (F11 async fail-open guard)', async () => {
@@ -96,7 +98,7 @@ describe('R1 sensitive-tool gate', () => {
     registry.setSensitiveToolAuthorizer(((): boolean => Promise.resolve(true) as unknown as boolean));
     const res = await registry.call('sensitive_probe', {}, ADMIN);
     expect(res.isError).toBe(true);
-    expect(res.content[0].text).toBe('Unknown tool: sensitive_probe');
+    expect(res.content[0].text).toBe(ADMIN_REQUIRED_DENIAL('sensitive_probe'));
   });
 
   it('a second authorizer install throws — no silent last-write-wins clobber (F13)', () => {
@@ -123,8 +125,8 @@ describe('R1 sensitive-tool gate', () => {
     (registry as unknown as { setDurability: (d: unknown) => void }).setDurability(durability);
     const session = { tier: 'global', actorJid: GUEST.actorJid, conversationKey: '15550000009' } as SessionContext;
     const res = await registry.call('sensitive_probe', {}, session);
-    // Caller still gets the uniform non-disclosing reply...
-    expect(res.content[0].text).toBe('Unknown tool: sensitive_probe');
+    // Caller gets typed denial (list-visible, global tier)...
+    expect(res.content[0].text).toBe(ADMIN_REQUIRED_DENIAL('sensitive_probe'));
     // ...but the denied attempt is recorded and terminalized without entering execution.
     expect(calls.map((c) => c.m)).toEqual(['record', 'complete']);
     expect(String(calls[0].args[1])).toBe('sensitive_probe'); // toolName
@@ -149,6 +151,51 @@ describe('R1 sensitive-tool gate', () => {
     (registry as unknown as { setDurability: (d: unknown) => void }).setDurability(durability);
     await registry.call('sensitive_probe', {}, GUEST); // GUEST has no conversationKey
     expect(recorded).toBe(1);
+  });
+
+  // #2974 Option A G3 — visibility-gated denial shape
+  it('(G3a) chat-scoped session gets uniform Unknown tool for sensitive global tool', async () => {
+    const registry = makeRegistry();
+    registry.setSensitiveToolAuthorizer((s) => s.actorJid === ADMIN.actorJid);
+    const chatScoped: SessionContext = {
+      tier: 'chat-scoped',
+      conversationKey: '15550000009@s.whatsapp.net',
+      deliveryJid: '15550000009@s.whatsapp.net',
+    };
+    const res = await registry.call('sensitive_probe', {}, chatScoped);
+    // Chat-scoped: listing hides global-scope sensitive tools → uniform reply
+    expect(res.content[0].text).toBe('Unknown tool: sensitive_probe');
+    // Non-vacuity: the same tool works for an authorized global session
+    expect((await registry.call('sensitive_probe', {}, ADMIN)).content[0].text).toBe('sensitive-ok');
+  });
+
+  it('(G3b) conversation-bound session gets uniform Unknown tool for non-eligible sensitive tool', async () => {
+    const registry = makeRegistry();
+    registry.setSensitiveToolAuthorizer((s) => s.actorJid === ADMIN.actorJid);
+    const bound: SessionContext = {
+      tier: 'global',
+      actorJid: GUEST.actorJid,
+      binding: makeConversationBinding('15550000009@s.whatsapp.net', '15550000009@s.whatsapp.net'),
+    };
+    const res = await registry.call('sensitive_probe', {}, bound);
+    // Conversation-bound: only chat-scope + transcribe_audio listed → uniform reply
+    expect(res.content[0].text).toBe('Unknown tool: sensitive_probe');
+    // Non-vacuity: same tool succeeds for authorized global session
+    expect((await registry.call('sensitive_probe', {}, ADMIN)).content[0].text).toBe('sensitive-ok');
+  });
+
+  it('(correlation) listTools(session) contains sensitive_probe ⇔ denial is typed', async () => {
+    const registry = makeRegistry();
+    registry.setSensitiveToolAuthorizer((s) => s.actorJid === ADMIN.actorJid);
+    const chatScoped: SessionContext = {
+      tier: 'chat-scoped',
+      conversationKey: '15550000009@s.whatsapp.net',
+      deliveryJid: '15550000009@s.whatsapp.net',
+    };
+    const anonList = registry.listTools(ANON);
+    const chatList = registry.listTools(chatScoped);
+    expect(anonList.some((t) => t.name === 'sensitive_probe')).toBe(true);
+    expect(chatList.some((t) => t.name === 'sensitive_probe')).toBe(false);
   });
 
 });

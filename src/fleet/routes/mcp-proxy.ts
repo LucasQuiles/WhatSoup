@@ -104,7 +104,8 @@ function unwrapMcpResult(raw: unknown): unknown {
 const VALIDATION_RE =
   /invalid parameters|requires .* parameter|unknown tool|not available|does not match|must be|is required|not allowed|cross-conversation|not found/i;
 
-function classifyToolErrorStatus(text: string): 422 | 500 {
+function classifyToolErrorStatus(text: string): 403 | 422 | 500 {
+  if (/^admin_required:/.test(text)) return 403;   // R1 typed denial (#2974)
   return VALIDATION_RE.test(text) ? 422 : 500;
 }
 

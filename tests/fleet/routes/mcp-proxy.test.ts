@@ -4,6 +4,7 @@ import type { ServerResponse } from 'node:http';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { ADMIN_REQUIRED_DENIAL } from '../../../src/mcp/registry.ts';
 import {
   handleCreateGroup,
   handleSearchContacts,
@@ -168,6 +169,22 @@ describe('mcp-proxy.ts uncovered-branch coverage', () => {
     const body = JSON.parse(res._body);
     expect(body.isError).toBe(true);
     expect(body.error).toBe('boom internal failure');
+  });
+
+  it('maps an admin_required tool error to 403 (#2974)', async () => {
+    vi.mocked(mcpCall).mockResolvedValue({
+      success: true,
+      toolError: true,
+      result: { content: [{ type: 'text', text: ADMIN_REQUIRED_DENIAL('create_agent_job') }] },
+    });
+    const res = mockRes();
+
+    await handleGetGroups(mockReq({ body: '', method: 'POST', url: '/api/lines/alpha/groups' }), res, makeDeps(), { name: 'alpha' });
+
+    expect(res._status).toBe(403);
+    const body = JSON.parse(res._body);
+    expect(body.isError).toBe(true);
+    expect(body.error).toContain('admin_required');
   });
 
   // ---- socketCheck branches ----
