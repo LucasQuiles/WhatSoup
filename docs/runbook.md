@@ -424,7 +424,10 @@ path when no stronger credential, health-evidence, or restart outcome applies.
 - The single-instance lock lives in the log directory, is pid-stamped, and
   self-reclaims when its holder is dead or the lock has aged out (a
   `reclaiming stale lock …` line is logged); a genuinely held lock logs
-  `another watchdog invocation is running` and exits `0`. An unopenable log
+  `another watchdog invocation is running` and exits `0`. Cleanup is
+  ownership-guarded: an invocation deletes a lock only while its own pid is
+  still stamped inside, so a hung run whose lock was reclaimed cannot remove
+  the new owner's lock. An unopenable log
   file fails the invocation at entry (nonzero exit, one stderr line) — a
   watchdog that cannot record state must not run silently.
 

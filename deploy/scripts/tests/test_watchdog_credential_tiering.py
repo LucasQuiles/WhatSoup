@@ -156,9 +156,12 @@ class Harness:
         bootstrap_rc: int = 0,
         make_log_readonly_on_print: bool = False,
         kickstart_fail_label: str | None = None,
+        steal_on_kickstart: Path | None = None,
     ):
         """Record every call; `print` emits print_body, `kickstart` exits kickstart_rc
-        (or 1 for calls naming kickstart_fail_label — mixed-outcome fixtures)."""
+        (or 1 for calls naming kickstart_fail_label — mixed-outcome fixtures).
+        steal_on_kickstart replaces that mutex with a foreign owner (pid 1) to
+        simulate a concurrent age-reclaim inside the critical section."""
         lc = self.home / ".local" / "bin" / "launchctl"
         readonly_line = (
             f"  chmod 400 '{self.log}'\n" if make_log_readonly_on_print else ""
@@ -166,6 +169,12 @@ class Harness:
         kick_fail_line = (
             f"  case \"$*\" in *'{kickstart_fail_label}'*) exit 1;; esac\n"
             if kickstart_fail_label
+            else ""
+        )
+        kick_steal_line = (
+            f"  rm -rf '{steal_on_kickstart}'; mkdir -p '{steal_on_kickstart}'; "
+            f"echo 1 > '{steal_on_kickstart}/pid'\n"
+            if steal_on_kickstart
             else ""
         )
         lc.write_text(
@@ -181,6 +190,7 @@ class Harness:
             "fi\n"
             'if [ "$1" = kickstart ]; then\n'
             f"{kick_fail_line}"
+            f"{kick_steal_line}"
             f"  exit {kickstart_rc}\n"
             "fi\n"
             "exit 0\n",
@@ -188,8 +198,25 @@ class Harness:
         )
         lc.chmod(0o755)
 
-    def write_curl_stub(self, bot_body: str, fleet_ok: bool = True, bot_unreachable: bool = False):
-        bot_line = "exit 7" if bot_unreachable else f"printf '%s\\n200' '{bot_body}'; exit 0"
+    def write_curl_stub(
+        self,
+        bot_body: str,
+        fleet_ok: bool = True,
+        bot_unreachable: bool = False,
+        steal_lock: Path | None = None,
+    ):
+        # steal_lock simulates a newer invocation age-reclaiming a mutex
+        # mid-run: the bot health call replaces it with a foreign owner (pid 1).
+        steal_line = (
+            f"rm -rf '{steal_lock}'; mkdir -p '{steal_lock}'; echo 1 > '{steal_lock}/pid'; "
+            if steal_lock
+            else ""
+        )
+        bot_line = (
+            "exit 7"
+            if bot_unreachable
+            else f"{steal_line}printf '%s\\n200' '{bot_body}'; exit 0"
+        )
         fleet_line = "printf 'ok\\n200'; exit 0" if fleet_ok else "exit 7"
         curl = self.home / ".local" / "bin" / "curl"
         curl.write_text(
@@ -579,6 +606,30 @@ def test_stale_lock_with_dead_holder_is_reclaimed(tmp_path):
     log_text = h.log.read_text(encoding="utf-8")
     assert "reclaiming stale" in log_text
     assert h.final_log_state() == "ok"
+
+
+def test_exit_trap_spares_lock_reclaimed_by_newer_invocation(tmp_path):
+    # A hung invocation whose lock was age-reclaimed by a newer one must not
+    # delete the new owner's lock on exit. Simulate the mid-run reclaim via a
+    # curl side effect that replaces the lock with a foreign owner (pid 1).
+    h = Harness(tmp_path, "tier-lockowner-bot", _unknown_body())
+    lock = h.log_dir / "tier-lockowner-bot-watchdog.lock"
+    h.write_curl_stub(_unknown_body(), steal_lock=lock)
+    proc = h.run()
+    assert proc.returncode == 0, proc.stderr
+    assert lock.is_dir(), "a lock owned by another invocation must survive the EXIT trap"
+    assert (lock / "pid").read_text(encoding="utf-8").strip() == "1"
+
+
+def test_restart_mutex_release_spares_lock_reclaimed_by_newer_invocation(tmp_path):
+    h = Harness(tmp_path, "tier-rlockowner-bot", _recovered_body(), fleet_ok=False)
+    rlock = h.log_dir / "com.whatsoup.whatsoup-fleet.restart.lock"
+    h.write_launchctl_stub(steal_on_kickstart=rlock)
+    proc = h.run()
+    assert proc.returncode == 0, proc.stderr
+    assert "kickstart -k" in h.launchctl_calls()
+    assert rlock.is_dir(), "a restart mutex owned by another invocation must survive release"
+    assert (rlock / "pid").read_text(encoding="utf-8").strip() == "1"
 
 
 def test_lock_without_pid_ages_out_and_is_reclaimed(tmp_path):

@@ -114,6 +114,17 @@ acquire_mutex() {
   return 1
 }
 
+# Release a mutex only while this process still owns it: a hung invocation
+# whose lock was age-reclaimed by a newer one must not delete the new owner's
+# lock on exit. The cat-then-remove window is a benign micro-race — a
+# contender that slips in is itself protected by the age guard.
+release_mutex() {
+  local dir="$1"
+  if [ "$(cat "$dir/pid" 2>/dev/null)" = "$$" ]; then
+    rm -rf "$dir" 2>/dev/null || true
+  fi
+}
+
 # Single-instance lock: if another watchdog invocation is still running, exit
 # — but say so in the log, and reclaim stale locks (a SIGKILLed prior run must
 # not disable the watchdog forever).
@@ -121,7 +132,7 @@ if ! acquire_mutex "$LOCK" 600; then
   log "another watchdog invocation is running; exiting"
   exit 0
 fi
-trap 'rm -rf "$LOCK" 2>/dev/null || true' EXIT
+trap 'release_mutex "$LOCK"' EXIT
 
 # Final-log state ladder (upgrade-only). The last log line of each run is the
 # single machine-readable outcome; a higher-priority state must not be
@@ -325,7 +336,7 @@ restart_label() {
   if [ $((now - last)) -lt 300 ]; then
     log "$job_label unhealthy but restart suppressed by cooldown: $reason"
     wd_note RESTART-SUPPRESSED
-    rm -rf "$rlock" 2>/dev/null || true
+    release_mutex "$rlock"
     return 0
   fi
   log "restarting $job_label: $reason"
@@ -342,7 +353,7 @@ restart_label() {
     wd_note RESTART-FAILED
     WD_EXIT=1
   fi
-  rm -rf "$rlock" 2>/dev/null || true
+  release_mutex "$rlock"
 }
 
 ensure_loaded "$BOT_LABEL" "$BOT_PLIST"
