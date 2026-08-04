@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
+import { waitForSocket } from '../../helpers/wait-for.ts';
 import { PassiveRuntime } from '../../../src/runtimes/passive/runtime.ts';
 import { Database } from '../../../src/core/database.ts';
 import { PresenceCache } from '../../../src/transport/presence-cache.ts';
@@ -104,9 +105,12 @@ describe('PassiveRuntime', () => {
 
       await runtime.start();
 
-      // Socket file should exist after start
+      // start() delegates to the socket server's fire-and-forget start(); the
+      // liveness-probed unlink path is async, so wait for the socket to appear
+      // instead of relying on incidental synchronous timing.
       const { existsSync } = await import('node:fs');
       const socketPath = join(tmpDir, 'whatsoup.sock');
+      await waitForSocket(socketPath);
       expect(existsSync(socketPath)).toBe(true);
 
       await runtime.shutdown();
