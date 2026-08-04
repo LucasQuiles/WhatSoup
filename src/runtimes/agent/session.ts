@@ -4,7 +4,7 @@
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
-import { homedir, userInfo } from 'node:os';
+import { homedir } from 'node:os';
 import { join } from 'node:path';
 import type { Database } from '../../core/database.ts';
 import type { Messenger } from '../../core/types.ts';
@@ -678,6 +678,8 @@ export class SessionManager {
   private providerTurnTerminalResolve: (() => void) | null = null;
   /** Bounded kill timer for a stalled tool; armed by recoverStalledOperation. */
   private stalledOpKill: ReturnType<typeof setTimeout> | null = null;
+  /** Monotonic CAS token for stalled-op kill rearm safety. */
+  private stalledOpKillToken = 0;
   /**
    * Records a kill this manager itself issued, so the exit handler can tell a supervisor
    * reap apart from a provider fault. Bound to the exact child and signal: an exit that
@@ -1129,11 +1131,13 @@ export class SessionManager {
       }
 
       if (this.provider === 'claude-cli') {
+        const claudeConfigDir = process.env['CLAUDE_CONFIG_DIR'] || join(homedir(), '.claude');
+        const projectCwd = this.configuredCwd ?? homedir();
+        const projectDirName = projectCwd.replace(/[^a-zA-Z0-9]/g, '-');
         const transcriptPath = join(
-          homedir(),
-          '.claude',
+          claudeConfigDir,
           'projects',
-          `-home-${userInfo().username}`,
+          projectDirName,
           `${event.sessionId}.jsonl`,
         );
         updateTranscriptPath(this.db, this.dbRowId, transcriptPath);
@@ -2838,7 +2842,8 @@ export class SessionManager {
       return;
     }
     log.warn({ ...ctx, graceMs: STALLED_OP_KILL_GRACE_MS, action: 'arm-kill' }, 'operation stalled — arming stalled-operation kill');
-    this.stalledOpKill = setTimeout(() => this.handleStalledOpKill(toolId, toolName), STALLED_OP_KILL_GRACE_MS);
+    const token = ++this.stalledOpKillToken;
+    this.stalledOpKill = setTimeout(() => this.handleStalledOpKill(toolId, toolName, token), STALLED_OP_KILL_GRACE_MS);
   }
 
   private clearStalledOpKill(): void {
@@ -2855,7 +2860,8 @@ export class SessionManager {
    * On a genuine kill the exit handler emits the crash notice and the runtime
    * auto-respawns on the next message.
    */
-  private handleStalledOpKill(toolId: string, toolName: string): void {
+  private handleStalledOpKill(toolId: string, toolName: string, token: number): void {
+    if (token !== this.stalledOpKillToken) return;
     this.stalledOpKill = null;
     if (!this.active || this.child === null) return;
     const child = this.child;
@@ -2863,8 +2869,9 @@ export class SessionManager {
       child,
       reason: 'stalled_operation',
       rearm: (maxDelayMs) => {
+        if (token !== this.stalledOpKillToken) return;
         this.stalledOpKill = setTimeout(
-          () => this.handleStalledOpKill(toolId, toolName),
+          () => this.handleStalledOpKill(toolId, toolName, token),
           Math.min(STALLED_OP_KILL_GRACE_MS, maxDelayMs),
         );
       },

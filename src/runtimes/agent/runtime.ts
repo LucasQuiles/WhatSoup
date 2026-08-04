@@ -9973,6 +9973,17 @@ export class AgentRuntime implements Runtime {
             'Fallback provider binary not found on this host',
             `binary=${fallbackBinary} provider=${fallbackEntry.provider} model=${fallbackEntry.model}`,
           );
+        } else if (r.status === 'incompatible') {
+          log.error(
+            { fallbackProvider: fallbackEntry.provider, binary: fallbackBinary },
+            'fallback provider binary has wrong architecture for this host',
+          );
+          emitAlertChecked(
+            this.instanceName,
+            'fallback_binary_incompatible',
+            'Fallback provider binary wrong architecture',
+            `binary=${fallbackBinary} provider=${fallbackEntry.provider} model=${fallbackEntry.model}`,
+          );
         } else if (r.status === 'present') {
           if (r.version) {
             log.info(

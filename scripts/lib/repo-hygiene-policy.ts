@@ -150,6 +150,11 @@ export function isAllowedPatternMatch(filePath: string, code: string, token: str
   if (allowedEnvVarNameToken.test(token)) return true;
   if (code === 'personal-email' && allowedMessagingAddressRhs.test(token)) return true;
   if (code === 'personal-email' && isGitHubSshTransportPrincipal(token)) return true;
+  // GitHub's support service mailbox appears in every dependabot commit's
+  // Signed-off-by trailer; it is organizational, never personal. Exact-token
+  // gated (mirroring the SSH-principal allowance) so mailbox detection for
+  // any other github.com address is unchanged.
+  if (code === 'personal-email' && token.toLowerCase() === 'support@github.com') return true;
   // File content only. scanCommitMessage scans with an empty filePath, and a commit
   // message never legitimately carries an email fixture — so the documentation-domain
   // allowance must not reach it, or history text would silently gain an email escape.

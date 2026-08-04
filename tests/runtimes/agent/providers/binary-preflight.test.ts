@@ -26,20 +26,24 @@ interface FakeChildOptions {
   errorCode?: string;
   /** Lines of stdout to emit before 'close'. */
   stdoutLines?: string[];
+  /** Lines of stderr to emit before 'close'. */
+  stderrLines?: string[];
   /** If true, never emit 'close' (simulates a hung process for timeout tests). */
   neverCloses?: boolean;
 }
 
 function makeFakeChild(opts: FakeChildOptions = {}): {
-  child: EventEmitter & { stdout: EventEmitter; kill: ReturnType<typeof vi.fn> };
+  child: EventEmitter & { stdout: EventEmitter; stderr: EventEmitter; kill: ReturnType<typeof vi.fn> };
   triggerClose: () => void;
   triggerError: (code?: string) => void;
 } {
   const child = new EventEmitter() as EventEmitter & {
     stdout: EventEmitter;
+    stderr: EventEmitter;
     kill: ReturnType<typeof vi.fn>;
   };
   child.stdout = new EventEmitter();
+  child.stderr = new EventEmitter();
   child.kill = vi.fn();
 
   const triggerClose = (): void => {
@@ -53,7 +57,7 @@ function makeFakeChild(opts: FakeChildOptions = {}): {
   };
 
   if (!opts.neverCloses) {
-    // Emit stdout data + close asynchronously so callers can await the probe.
+    // Emit stdout/stderr data + close asynchronously so callers can await the probe.
     setImmediate(() => {
       if (opts.errorCode) {
         triggerError(opts.errorCode);
@@ -61,6 +65,9 @@ function makeFakeChild(opts: FakeChildOptions = {}): {
       }
       for (const line of opts.stdoutLines ?? []) {
         child.stdout.emit('data', Buffer.from(line));
+      }
+      for (const line of opts.stderrLines ?? []) {
+        child.stderr.emit('data', Buffer.from(line));
       }
       triggerClose();
     });
@@ -164,6 +171,27 @@ describe('probeFallbackBinary', () => {
     expect(killCalled).toBe(true);
 
     vi.useRealTimers();
+  });
+
+  // ── incompatible architecture (strict-signal heuristic) ──────────────────────
+
+  it('returns incompatible when stderr has Exec format error and stdout is empty', async () => {
+    const spawnImpl = makeSpawnImpl({ stderrLines: ['Exec format error: wrong arch\n'] });
+    const result = await probeFallbackBinary('wrong-arch', PROBE_ENV, spawnImpl);
+    expect(result).toStrictEqual({ status: 'incompatible', version: null });
+  });
+
+  it('returns incompatible when stderr has Bad CPU type and stdout is empty', async () => {
+    const spawnImpl = makeSpawnImpl({ stderrLines: ['Bad CPU type for executable\n'] });
+    const result = await probeFallbackBinary('wrong-arch', PROBE_ENV, spawnImpl);
+    expect(result).toStrictEqual({ status: 'incompatible', version: null });
+  });
+
+  it('stays present when stderr matches but stdout is non-empty (not a pure arch failure)', async () => {
+    const spawnImpl = makeSpawnImpl({ stdoutLines: ['ffmpeg version 6.0\n'], stderrLines: ['Bad CPU type\n'] });
+    const result = await probeFallbackBinary('ffmpeg', PROBE_ENV, spawnImpl);
+    expect(result.status).toBe('present');
+    expect(result.version).toBe('ffmpeg version 6.0');
   });
 
   // ── never throws ────────────────────────────────────────────────────────────

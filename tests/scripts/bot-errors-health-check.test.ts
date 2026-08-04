@@ -195,6 +195,37 @@ describe('bot-errors-health-check', () => {
     expect(event.runtime.provenance.signals).toEqual(['PYTEST_CURRENT_TEST']);
   });
 
+  it('flags a zero-byte .db file under whatsoup instances root as FAIL', () => {
+    tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-health-'));
+    const home = join(tmpRoot, 'home');
+    const instanceRoot = join(home, '.local', 'share', 'whatsoup', 'instances', 'test-line');
+    mkdirSync(instanceRoot, { recursive: true });
+    writeFileSync(join(instanceRoot, 'bot.db'), '');
+
+    const outboxPath = execFileSync('python3', ['deploy/scripts/bot-errors-health-check.py', '--daily'], {
+      cwd: process.cwd(),
+      env: {
+        ...process.env,
+        HOME: home,
+        BOT_ERRORS_DRY_TOOL_NAMES: 'send_message',
+        BOT_ERRORS_HEALTH_PROFILE_JSON: JSON.stringify({
+          role: 'test-zero-byte',
+          expectDispatcher: false,
+          expectQLoop: false,
+          expectPersonalSocket: false,
+          expectConfigInventory: false,
+          expectPluginInventory: false,
+        }),
+      },
+    }).toString().trim();
+    const event = JSON.parse(readFileSync(outboxPath, 'utf8')) as Record<string, unknown>;
+
+    const evidence = event.evidence as string;
+    expect(evidence).toContain('FAIL instance_db test-line');
+    expect(evidence).toContain('zero_byte_db');
+    expect(evidence).toContain('bot.db');
+  });
+
   it('records a recoverable writefail breadcrumb when daily health outbox is unwritable', () => {
     tmpRoot = mkdtempSync('/tmp/bot-errors-health-');
     const blocked = join(tmpRoot, 'blocked-outbox-parent');

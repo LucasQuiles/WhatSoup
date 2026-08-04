@@ -1546,10 +1546,28 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
         postTurnTransientErrorAgeMs !== null &&
         postTurnTransientErrorAgeMs >= TRANSIENT_TURN_ERROR_DEGRADE_DEBOUNCE_MS &&
         postTurnTransientErrorAgeMs <= TRANSIENT_TURN_ERROR_STALE_MS;
+      // An auth-required error is superseded (no longer degrading) when a fresh
+      // usability probe proves the model is usable *after* the error occurred.
+      // This unlatches idle bots: without a user turn, recordSuccess never clears
+      // lastTurnErrorClass, so the degradation would persist forever after the
+      // owner re-authenticates. The probe timestamp proves recovery.
+      const turnCapabilityAuthErrorSuperseded =
+        turnCapability !== null &&
+        turnCapability.last_turn_error_class === 'auth-required' &&
+        turnCapability.model_usable === true &&
+        turnCapability.model_usable_stale !== true &&
+        turnCapability.model_usability_status === 'usable' &&
+        turnCapability.model_usable_checked_at !== null &&
+        turnCapability.last_turn_error_at !== null &&
+        turnCapability.model_usable_checked_at > turnCapability.last_turn_error_at;
       const turnCapabilityErrorIsDegraded =
         turnCapability !== null &&
         turnCapability.last_turn_error_class !== null &&
-        (transientSelfClearingError ? transientErrorIsDegrading : true);
+        (transientSelfClearingError
+          ? transientErrorIsDegrading
+          : turnCapability.last_turn_error_class === 'auth-required'
+            ? !turnCapabilityAuthErrorSuperseded
+            : true);
       const turnCapabilityIsDegraded =
         turnCapability !== null &&
         (turnCapability.model_usable === false

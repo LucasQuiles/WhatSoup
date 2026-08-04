@@ -1,5 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { EventEmitter } from 'node:events';
+import { join } from 'node:path';
+import { homedir } from 'node:os';
 import { SessionManager, MAX_STDOUT_LINE_BYTES, type SessionGenerationIdentity } from '../../../src/runtimes/agent/session.ts';
 import type { Database } from '../../../src/core/database.ts';
 import type { Messenger } from '../../../src/core/types.ts';
@@ -201,6 +203,7 @@ import {
   updateResumedSessionStatus,
   updateSessionId,
   updateSessionStatus,
+  updateTranscriptPath,
 } from '../../../src/runtimes/agent/session-db.ts';
 
 const CHAT_JID = 'test@s.whatsapp.net';
@@ -946,6 +949,105 @@ describe('SessionManager', () => {
     expect(updateSessionId).toHaveBeenCalledWith(db, 42, 'ses_abc123');
     expect(sm.getStatus().sessionId).toBe('ses_abc123');
     expect(events.some((e) => e.type === 'init')).toBe(true);
+  });
+
+  it('init event writes transcript path with no explicit cwd (falls back to homedir slug)', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+
+    const sm = new SessionManager({ db, messenger, chatJid: CHAT_JID, onEvent: () => {} });
+    await sm.spawnSession();
+
+    const initLine = JSON.stringify({ type: 'system', subtype: 'init', session_id: 'ses_home' }) + '\n';
+    mockChild.stdout.emit('data', Buffer.from(initLine));
+
+    // homedir() mocked to '/mock/home' — slug derived as '-mock-home'
+    const expectedPath = join(homedir(), '.claude', 'projects', '-mock-home', 'ses_home.jsonl');
+    expect(updateTranscriptPath).toHaveBeenCalledWith(db, 42, expectedPath);
+  });
+
+  it('init event writes transcript path with configuredCwd (Linux-style path)', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+
+    const sm = new SessionManager({
+      db, messenger, chatJid: CHAT_JID, onEvent: () => {},
+      cwd: '/srv/whatsoup/daemon',
+    });
+    await sm.spawnSession();
+
+    const initLine = JSON.stringify({ type: 'system', subtype: 'init', session_id: 'ses_lnx' }) + '\n';
+    mockChild.stdout.emit('data', Buffer.from(initLine));
+
+    expect(updateTranscriptPath).toHaveBeenCalledWith(
+      db, 42,
+      join(homedir(), '.claude', 'projects', '-srv-whatsoup-daemon', 'ses_lnx.jsonl'),
+    );
+  });
+
+  it('init event writes transcript path with configuredCwd (macOS-style path)', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+
+    const sm = new SessionManager({
+      db, messenger, chatJid: CHAT_JID, onEvent: () => {},
+      cwd: '/Applications/WhatSoup',
+    });
+    await sm.spawnSession();
+
+    const initLine = JSON.stringify({ type: 'system', subtype: 'init', session_id: 'ses_macos' }) + '\n';
+    mockChild.stdout.emit('data', Buffer.from(initLine));
+
+    expect(updateTranscriptPath).toHaveBeenCalledWith(
+      db, 42,
+      join(homedir(), '.claude', 'projects', '-Applications-WhatSoup', 'ses_macos.jsonl'),
+    );
+  });
+
+  it('init event writes transcript path with dot-in-path configuredCwd (double-dash regression guard)', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+
+    const sm = new SessionManager({
+      db, messenger, chatJid: CHAT_JID, onEvent: () => {},
+      cwd: '/Applications/WhatSoup/.worktrees/patch',
+    });
+    await sm.spawnSession();
+
+    const initLine = JSON.stringify({ type: 'system', subtype: 'init', session_id: 'ses_dot' }) + '\n';
+    mockChild.stdout.emit('data', Buffer.from(initLine));
+
+    expect(updateTranscriptPath).toHaveBeenCalledWith(
+      db, 42,
+      join(homedir(), '.claude', 'projects', '-Applications-WhatSoup--worktrees-patch', 'ses_dot.jsonl'),
+    );
+  });
+
+  it('init event writes transcript path under CLAUDE_CONFIG_DIR override', async () => {
+    const prev = process.env['CLAUDE_CONFIG_DIR'];
+    process.env['CLAUDE_CONFIG_DIR'] = '/custom/claude-config';
+
+    try {
+      const db = makeDb();
+      const { messenger } = makeMessenger();
+
+      const sm = new SessionManager({ db, messenger, chatJid: CHAT_JID, onEvent: () => {} });
+      await sm.spawnSession();
+
+      const initLine = JSON.stringify({ type: 'system', subtype: 'init', session_id: 'ses_cfg' }) + '\n';
+      mockChild.stdout.emit('data', Buffer.from(initLine));
+
+      expect(updateTranscriptPath).toHaveBeenCalledWith(
+        db, 42,
+        join('/custom/claude-config', 'projects', '-mock-home', 'ses_cfg.jsonl'),
+      );
+    } finally {
+      if (prev !== undefined) {
+        process.env['CLAUDE_CONFIG_DIR'] = prev;
+      } else {
+        delete process.env['CLAUDE_CONFIG_DIR'];
+      }
+    }
   });
 
   it('buffers stdout chunks separately from the parsed line remainder', async () => {
@@ -1959,6 +2061,48 @@ describe('SessionManager', () => {
     await Promise.resolve();
 
     expect(mockChild.kill).not.toHaveBeenCalledWith('SIGKILL');
+
+    vi.useRealTimers();
+  });
+
+  it('CAS token prevents rearmed timer from acting on stale liveness verdict', async () => {
+    vi.useFakeTimers();
+    let resolveA!: (verdict: { alive: boolean; cpuDeltaMs: number; pidChurn: number; pidCount: number }) => void;
+    const treeLivenessAssessor = vi.fn(() => new Promise<{
+      alive: boolean; cpuDeltaMs: number; pidChurn: number; pidCount: number;
+    }>((resolve) => { resolveA = resolve; }));
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const sm = new SessionManager({ db, messenger, chatJid: CHAT_JID, onEvent: vi.fn(), treeLivenessAssessor });
+    await sm.spawnSession();
+    await sm.sendTurn('CAS race test');
+
+    // Arm toolA — this is the first timer
+    sm.recoverStalledOperation('toolu_cas_race', 'Bash');
+    const firstToken = (sm as unknown as { stalledOpKillToken: number }).stalledOpKillToken;
+    expect(firstToken).toBeGreaterThan(0);
+
+    // Advance past toolA's grace — assessment fires, awaits
+    await vi.advanceTimersByTimeAsync(STALLED_OP_KILL_GRACE_MS + 1);
+    expect(treeLivenessAssessor).toHaveBeenCalledOnce();
+
+    // Arm toolB while assessment is pending (stalledOpKill is null during await)
+    sm.recoverStalledOperation('toolu_cas_race_b', 'Bash');
+    const secondToken = (sm as unknown as { stalledOpKillToken: number }).stalledOpKillToken;
+    expect(secondToken).toBeGreaterThan(firstToken);
+
+    // Resolve toolA's assessment as alive — this rearm would fire with OLD token
+    resolveA({ alive: true, cpuDeltaMs: 500, pidChurn: 0, pidCount: 2 });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    // The rearm callback from toolA's assessment should have been suppressed by CAS
+    // (token !== stalledOpKillToken). The kill timer should still belong to toolB.
+    expect((sm as unknown as { stalledOpKill: ReturnType<typeof setTimeout> | null }).stalledOpKill).not.toBeNull();
+
+    // Advance past toolB's grace — second assessment fires
+    await vi.advanceTimersByTimeAsync(STALLED_OP_KILL_GRACE_MS + 1);
+    expect(treeLivenessAssessor).toHaveBeenCalledTimes(2);
 
     vi.useRealTimers();
   });
