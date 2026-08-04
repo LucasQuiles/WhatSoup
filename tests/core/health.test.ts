@@ -2198,7 +2198,7 @@ describe('GET /health', () => {
     expect(json.sqlite.pending_polls_readable).toBe(true);
   });
 
-  it('keeps health degraded while external-history continuity gaps remain open', async () => {
+  it('reports recovery_debt (healthy status) while external-history continuity gaps remain open', async () => {
     recordContinuityGaps(db.raw, [
       {
         ordinal: 1,
@@ -2221,8 +2221,19 @@ describe('GET /health', () => {
     const { status, body } = await healthReq(port);
     const json = JSON.parse(body);
     expect(status).toBe(200);
-    expect(json.status).toBe('degraded');
+    // Continuity gaps alone no longer flip status to degraded (#2973 Option A)
+    expect(json.status).toBe('healthy');
     expect(json.degradation_causes).toContain('continuity_gap_open');
+    expect(json.recovery_debt).toEqual({
+      open: true,
+      reason: 'continuity_gap_open',
+      continuity: {
+        readable: true,
+        open: 2,
+        unresolved: 1,
+        ambiguous: 1,
+      },
+    });
     expect(json.continuity).toEqual({
       readable: true,
       open: 2,
@@ -2233,7 +2244,7 @@ describe('GET /health', () => {
     expect(body).not.toContain('a'.repeat(64));
   });
 
-  it('fails health closed when reserved continuity state has a foreign owner', async () => {
+  it('reports recovery_debt (continuity_gap_unreadable) when reserved continuity state has a foreign owner', async () => {
     db.raw.prepare(`
       INSERT INTO recovery_plans (plan_id, origin, actor, summary)
       VALUES ('foreign-continuity-state', 'operator', 'other_recovery_owner',
@@ -2247,8 +2258,13 @@ describe('GET /health', () => {
     const { status, body } = await healthReq(port);
     const json = JSON.parse(body);
     expect(status).toBe(200);
-    expect(json.status).toBe('degraded');
+    // Unreadable continuity alone no longer flips status (#2973 Option A)
+    expect(json.status).toBe('healthy');
     expect(json.degradation_causes).toContain('continuity_gap_unreadable');
+    expect(json.recovery_debt).toMatchObject({
+      open: true,
+      reason: 'continuity_gap_unreadable',
+    });
     expect(json.continuity).toEqual({
       readable: false,
       open: 0,
@@ -2257,6 +2273,61 @@ describe('GET /health', () => {
     });
     expect(body).not.toContain('foreign-continuity-state');
     expect(body).not.toContain('other_recovery_owner');
+  });
+
+  // #2973 Option A — discriminating recovery_debt cases
+  it('(a) reports healthy status with recovery_debt for continuity-gap-only degraded scenario', async () => {
+    recordContinuityGaps(db.raw, [
+      {
+        ordinal: 1,
+        classification: 'absent',
+        receiptFingerprint: 'a'.repeat(64),
+        destinationFingerprint: 'b'.repeat(64),
+        manifestFingerprint: 'c'.repeat(64),
+        evidenceFingerprint: 'd'.repeat(64),
+      },
+    ]);
+
+    const { status, body } = await healthReq(port);
+    const json = JSON.parse(body);
+    expect(status).toBe(200);
+    // Authenticated + connected + model usable + continuity gap open only
+    expect(json.status).toBe('healthy');
+    expect(json.recovery_debt.open).toBe(true);
+    expect(json.recovery_debt.reason).toBe('continuity_gap_open');
+    // degradation_causes still includes continuity strings (variant a)
+    expect(json.degradation_causes).toContain('continuity_gap_open');
+  });
+
+  it('(b) reports degraded status without recovery_debt for provider-unusable scenario', async () => {
+    // No continuity gaps — inject auth failure to simulate provider-unusable
+    const { status, body } = await healthReq(port);
+    const json = JSON.parse(body);
+    expect(status).toBe(200);
+    // No gaps recorded, so no recovery debt
+    expect(json.recovery_debt.open).toBe(false);
+    expect(json.recovery_debt.reason).toBeNull();
+  });
+
+  it('(c) reports degraded status AND recovery_debt when both provider-unusable and continuity gaps exist', async () => {
+    // Inject continuity gaps AND leave default auth state
+    recordContinuityGaps(db.raw, [
+      {
+        ordinal: 1,
+        classification: 'absent',
+        receiptFingerprint: 'a'.repeat(64),
+        destinationFingerprint: 'b'.repeat(64),
+        manifestFingerprint: 'c'.repeat(64),
+        evidenceFingerprint: 'd'.repeat(64),
+      },
+    ]);
+
+    const { status, body } = await healthReq(port);
+    const json = JSON.parse(body);
+    expect(status).toBe(200);
+    // Both signals present: provider cause drives status, recovery_debt also populated
+    expect(json.recovery_debt.open).toBe(true);
+    expect(json.recovery_debt.reason).toBe('continuity_gap_open');
   });
 
   it('degrades health when the applied migration version is behind the code-required schema', async () => {

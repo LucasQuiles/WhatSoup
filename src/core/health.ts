@@ -1612,6 +1612,17 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
         'failed to read continuity gap ledger',
       );
       const continuityIsDegraded = !continuity.readable || continuity.open > 0;
+      const recoveryDebt: {
+        open: boolean;
+        reason: 'continuity_gap_open' | 'continuity_gap_unreadable' | null;
+        continuity: typeof continuity;
+      } = {
+        open: continuityIsDegraded,
+        reason: continuityIsDegraded
+          ? (continuity.readable ? 'continuity_gap_open' : 'continuity_gap_unreadable')
+          : null,
+        continuity,
+      };
 
       let status: 'healthy' | 'degraded' | 'unhealthy';
       let statusReasons: string[] = [];
@@ -1646,9 +1657,6 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
         if (turnCapabilityIsDegraded) statusReasons.push('turn_capability_degraded');
         if (loopLag.locallyStarved) statusReasons.push('event_loop_starvation');
         if (durabilityDebtIsDegraded) statusReasons.push('durability_delivery_debt');
-        if (continuityIsDegraded) {
-          statusReasons.push(continuity.readable ? 'continuity_gap_open' : 'continuity_gap_unreadable');
-        }
         status = statusReasons.length > 0 ? 'degraded' : 'healthy';
       }
 
@@ -2063,6 +2071,7 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
         model_advisories: getModelAdvisories(),
         durability: durabilityStats,
         continuity,
+        recovery_debt: recoveryDebt,
         // Q control-peer wiring. The heal_delivery_unavailable critical latches
         // to one emission per process; this counter is where the suppressed
         // occurrences are visible afterward (see emitHealReport in heal.ts).
