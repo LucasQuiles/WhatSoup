@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { spawn } from 'node:child_process';
-import { createConnection, type Server, type Socket } from 'node:net';
+import { createConnection, Socket, type Server } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { existsSync, lstatSync, writeFileSync, unlinkSync } from 'node:fs';
@@ -530,6 +530,36 @@ describe('WhatSoupSocketServer', () => {
     }) as { result: { protocolVersion: string } };
     expect(response.result.protocolVersion).toBe('2024-11-05');
     deadServer.stop();
+  });
+
+  // --- L1: backpressure-aware writeResponse ---
+
+  it('applies backpressure when socket.write returns false and pause is invoked, response still arrives', async () => {
+    let forced = false;
+    const origWrite = Socket.prototype.write;
+    const pauseSpy = vi.spyOn(Socket.prototype, 'pause');
+    const writeSpy = vi.spyOn(Socket.prototype, 'write')
+      .mockImplementation(function (this: Socket, chunk: unknown): boolean {
+        const str = Buffer.isBuffer(chunk) ? chunk.toString() : String(chunk);
+        if (!forced && str.includes('"jsonrpc"') && !str.includes('"method"')) {
+          forced = true;
+          origWrite.call(this, chunk);
+          return false;
+        }
+        return origWrite.call(this, chunk);
+      });
+
+    server = new WhatSoupSocketServer(socketPath, registry, session);
+    await server.startAndWait();
+
+    const response = await sendJsonRpc(socketPath, {
+      jsonrpc: '2.0', id: 10, method: 'initialize',
+    }) as { result: { protocolVersion: string } };
+    expect(response.result.protocolVersion).toBe('2024-11-05');
+    expect(pauseSpy).toHaveBeenCalled();
+    expect(writeSpy).toHaveBeenCalled();
+    writeSpy.mockRestore();
+    pauseSpy.mockRestore();
   });
 
   // --- updateDeliveryJid ---
