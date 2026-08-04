@@ -539,7 +539,7 @@ describe('WhatSoupSocketServer', () => {
     const origWrite = Socket.prototype.write;
     const pauseSpy = vi.spyOn(Socket.prototype, 'pause');
     const writeSpy = vi.spyOn(Socket.prototype, 'write')
-      .mockImplementation(function (this: Socket, chunk: unknown): boolean {
+      .mockImplementation(function (this: Socket, chunk: string | Uint8Array): boolean {
         const str = Buffer.isBuffer(chunk) ? chunk.toString() : String(chunk);
         if (!forced && str.includes('"jsonrpc"') && !str.includes('"method"')) {
           forced = true;
