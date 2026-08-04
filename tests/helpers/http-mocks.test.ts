@@ -109,4 +109,22 @@ describe('http test helpers', () => {
     expect(deps.dbReader.getMessagesByIds('line-a', '/tmp/test.db', [])).toEqual({ ok: true, data: [] });
     expect(deps.realtime.publish).not.toHaveBeenCalled();
   });
+
+  it('makeDeps discovery.scan defaults to an empty Map', () => {
+    const deps = makeDeps();
+    expect(deps.discovery.scan()).toBeInstanceOf(Map);
+    expect(deps.discovery.scan().size).toBe(0);
+  });
+
+  it('makeDeps serviceManager.startFire auto-invokes the completion callback with null error', () => {
+    const deps = makeDeps();
+    const cb = vi.fn();
+    deps.serviceManager.startFire('service-a', cb);
+    expect(cb).toHaveBeenCalledWith(null);
+  });
+
+  it('makeDeps serviceManager.startFire tolerates no completion callback', () => {
+    const deps = makeDeps();
+    expect(() => deps.serviceManager.startFire('service-a')).not.toThrow();
+  });
 });

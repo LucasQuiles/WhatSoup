@@ -31,8 +31,7 @@ import type { DiscoveredInstance } from '../../../src/fleet/discovery.ts';
 import { makeDeps, mockReq, mockRes } from '../../helpers/http-mocks.ts';
 
 function successDeps(): OpsDeps {
-  // makeDeps's base discovery has no scan(); handleCreateLine calls it.
-  return makeDeps({ discovery: { scan: vi.fn() } as any });
+  return makeDeps<any>({});
 }
 
 describe('handleCreateLine — chatOptions gating (QR-218 PR-2)', () => {
@@ -241,7 +240,7 @@ describe('handleConfigUpdate PATCH chatOptions validation (QR-218 PR-2)', () => 
   }
 
   function depsFor(instance: DiscoveredInstance): OpsDeps {
-    return makeDeps({ discovery: { getInstance: vi.fn(() => instance) } as any });
+    return makeDeps<any>({ discovery: { getInstance: vi.fn(() => instance) } as any });
   }
 
   function writeChatConfig(name = 'test-line', data: Record<string, unknown> = {}): string {

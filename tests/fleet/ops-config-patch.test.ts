@@ -15,6 +15,7 @@ import type { ServerResponse } from 'node:http';
 
 import { normalizePhone, normalizePhoneE164, isAdminPhone } from '../../src/lib/phone.ts';
 import { handleConfigUpdate } from '../../src/fleet/routes/ops.ts';
+import { makeDeps } from '../helpers/http-mocks.ts';
 import type { OpsDeps } from '../../src/fleet/routes/ops.ts';
 import type { DiscoveredInstance } from '../../src/fleet/discovery.ts';
 import { privateConfigLockPath } from '../../src/core/private-config-file.ts';
@@ -50,15 +51,8 @@ function fakeInstance(configPath: string, overrides: Partial<DiscoveredInstance>
   };
 }
 
-function makeDeps(instance: DiscoveredInstance): OpsDeps {
-  return {
-    discovery: {
-      getInstance: vi.fn(() => instance),
-      getInstances: vi.fn(() => new Map()),
-    } as any,
-    realtime: { publish: vi.fn() },
-    serviceManager: { restart: vi.fn(), stop: vi.fn(), disable: vi.fn(), enable: vi.fn() } as any,
-  };
+function depsFor(instance: DiscoveredInstance): OpsDeps {
+  return makeDeps<any>({ discovery: { getInstance: vi.fn(() => instance) } });
 }
 
 // ---------------------------------------------------------------------------
@@ -176,7 +170,7 @@ describe('handleConfigUpdate PATCH validation', () => {
   it('rejects an invalid accessMode with 400', async () => {
     const configPath = writeConfig({ accessMode: 'self_only' });
     const inst = fakeInstance(configPath);
-    const deps = makeDeps(inst);
+    const deps = depsFor(inst);
 
     const res = mockRes();
     await handleConfigUpdate(
@@ -193,7 +187,7 @@ describe('handleConfigUpdate PATCH validation', () => {
     for (const mode of validModes) {
       const configPath = writeConfig({ accessMode: 'self_only' });
       const inst = fakeInstance(configPath);
-      const deps = makeDeps(inst);
+      const deps = depsFor(inst);
 
       const res = mockRes();
       await handleConfigUpdate(
@@ -211,7 +205,7 @@ describe('handleConfigUpdate PATCH validation', () => {
   it('rejects an empty adminPhones array with 400', async () => {
     const configPath = writeConfig();
     const inst = fakeInstance(configPath);
-    const deps = makeDeps(inst);
+    const deps = depsFor(inst);
 
     const res = mockRes();
     await handleConfigUpdate(
@@ -226,7 +220,7 @@ describe('handleConfigUpdate PATCH validation', () => {
   it('rejects adminPhones that is not an array with 400', async () => {
     const configPath = writeConfig();
     const inst = fakeInstance(configPath);
-    const deps = makeDeps(inst);
+    const deps = depsFor(inst);
 
     const res = mockRes();
     await handleConfigUpdate(
@@ -241,7 +235,7 @@ describe('handleConfigUpdate PATCH validation', () => {
   it('rejects adminPhones containing an empty string with 400', async () => {
     const configPath = writeConfig();
     const inst = fakeInstance(configPath);
-    const deps = makeDeps(inst);
+    const deps = depsFor(inst);
 
     const res = mockRes();
     await handleConfigUpdate(
@@ -256,7 +250,7 @@ describe('handleConfigUpdate PATCH validation', () => {
   it('accepts valid adminPhones and normalizes them to E.164', async () => {
     const configPath = writeConfig();
     const inst = fakeInstance(configPath);
-    const deps = makeDeps(inst);
+    const deps = depsFor(inst);
 
     const res = mockRes();
     await handleConfigUpdate(
@@ -274,7 +268,7 @@ describe('handleConfigUpdate PATCH validation', () => {
   it('deduplicates adminPhones after normalization', async () => {
     const configPath = writeConfig();
     const inst = fakeInstance(configPath);
-    const deps = makeDeps(inst);
+    const deps = depsFor(inst);
 
     const res = mockRes();
     await handleConfigUpdate(
@@ -295,7 +289,7 @@ describe('handleConfigUpdate PATCH validation', () => {
       imessageConfig: { account: 'test-imsg', backend: 'imsg', sender: 'sender@example.test' },
     });
     const inst = fakeInstance(configPath);
-    const deps = makeDeps(inst);
+    const deps = depsFor(inst);
     const res = mockRes();
 
     await handleConfigUpdate(
@@ -313,7 +307,7 @@ describe('handleConfigUpdate PATCH validation', () => {
       imessageConfig: { account: 'test-imsg', backend: 'imsg', sender: 'sender@example.test' },
     });
     const inst = fakeInstance(configPath);
-    const deps = makeDeps(inst);
+    const deps = depsFor(inst);
     const res = mockRes();
 
     await handleConfigUpdate(
@@ -330,7 +324,7 @@ describe('handleConfigUpdate PATCH validation', () => {
   it('accepts any string value for model without validation', async () => {
     const configPath = writeConfig({ model: 'claude-3-5-sonnet-20241022' });
     const inst = fakeInstance(configPath);
-    const deps = makeDeps(inst);
+    const deps = depsFor(inst);
 
     const res = mockRes();
     await handleConfigUpdate(
@@ -357,7 +351,7 @@ describe('handleConfigUpdate PATCH validation', () => {
       },
     });
     const inst = fakeInstance(configPath);
-    const deps = makeDeps(inst);
+    const deps = depsFor(inst);
 
     const res = mockRes();
     await handleConfigUpdate(
@@ -394,7 +388,7 @@ describe('handleConfigUpdate PATCH validation', () => {
     const configPath = writeConfig({ model: 'old-model' });
     const lock = acquireProcessLock(privateConfigLockPath(configPath), { token: 'held-fleet-patch-lock' });
     const inst = fakeInstance(configPath);
-    const deps = makeDeps(inst);
+    const deps = depsFor(inst);
 
     try {
       const res = mockRes();
@@ -421,7 +415,7 @@ describe('handleConfigUpdate PATCH validation', () => {
   it('accepts a combined patch with accessMode + adminPhones + model', async () => {
     const configPath = writeConfig({ accessMode: 'self_only' });
     const inst = fakeInstance(configPath);
-    const deps = makeDeps(inst);
+    const deps = depsFor(inst);
 
     const res = mockRes();
     await handleConfigUpdate(

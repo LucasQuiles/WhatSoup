@@ -79,7 +79,7 @@ function fakeInstance(overrides: Partial<DiscoveredInstance> = {}): DiscoveredIn
 }
 
 function depsFor(instance: DiscoveredInstance | null = null): OpsDeps {
-  return makeDeps({ discovery: { getInstance: vi.fn(() => instance ?? undefined), scan: vi.fn() } as any });
+  return makeDeps<any>({ discovery: { getInstance: vi.fn(() => instance ?? undefined) } });
 }
 
 // ---------------------------------------------------------------------------
@@ -258,7 +258,7 @@ describe('handleConfigUpdate: agent path validation branch arms', () => {
       healthPort: 9099, dbPath: '/tmp/bot.db', stateRoot: '/tmp/state',
       logDir: '/tmp/logs', healthToken: 'tok', configPath: configFile, socketPath: null,
     } as DiscoveredInstance;
-    const deps = makeDeps({ discovery: { getInstance: vi.fn(() => instance), scan: vi.fn() } as any });
+    const deps = makeDeps<any>({ discovery: { getInstance: vi.fn(() => instance), scan: vi.fn() } as any });
     return { instance, deps };
   }
 
@@ -358,7 +358,7 @@ describe('handleConfigUpdate: transport immutability + per-transport admin IDs',
       healthPort: 9099, dbPath: '/tmp/bot.db', stateRoot: '/tmp/state',
       logDir: '/tmp/logs', healthToken: 'tok', configPath: configFile, socketPath: null,
     } as DiscoveredInstance;
-    const deps = makeDeps({ discovery: { getInstance: vi.fn(() => instance), scan: vi.fn() } as any });
+    const deps = makeDeps<any>({ discovery: { getInstance: vi.fn(() => instance), scan: vi.fn() } as any });
     return { instance, deps, configFile };
   }
 

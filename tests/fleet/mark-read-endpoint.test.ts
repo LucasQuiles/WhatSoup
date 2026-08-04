@@ -7,6 +7,7 @@ import { PassThrough } from 'node:stream';
 import type { ServerResponse } from 'node:http';
 import { handleMarkRead } from '../../src/fleet/routes/ops.ts';
 import type { OpsDeps } from '../../src/fleet/routes/ops.ts';
+import { makeDeps } from '../helpers/http-mocks.ts';
 import type { DiscoveredInstance } from '../../src/fleet/discovery.ts';
 
 // ---------------------------------------------------------------------------
@@ -41,23 +42,8 @@ function fakeInstance(overrides: Partial<DiscoveredInstance> = {}): DiscoveredIn
   };
 }
 
-function makeDeps(overrides: Partial<OpsDeps> = {}): OpsDeps {
-  return {
-    discovery: {
-      getInstance: vi.fn(() => undefined),
-      getInstances: vi.fn(() => new Map()),
-    } as any,
-    realtime: { publish: vi.fn() },
-    serviceManager: {
-      enable: vi.fn(),
-      disable: vi.fn(),
-      start: vi.fn(),
-      stop: vi.fn(),
-      restart: vi.fn(),
-      startFire: vi.fn(),
-    } as any,
-    ...overrides,
-  };
+function depsFor(overrides: Partial<OpsDeps> = {}): OpsDeps {
+  return makeDeps(overrides);
 }
 
 // ---------------------------------------------------------------------------
@@ -70,7 +56,7 @@ describe('handleMarkRead', () => {
   });
 
   it('returns 404 when instance not found', async () => {
-    const deps = makeDeps();
+    const deps = depsFor();
     const res = mockRes();
     await handleMarkRead(mockReq({ body: '{}', method: 'POST' }), res, deps, { name: 'unknown-line' });
     expect(res._status).toBe(404);
@@ -79,7 +65,7 @@ describe('handleMarkRead', () => {
 
   it('proxies to /mark-read on the health server', async () => {
     const inst = fakeInstance();
-    const deps = makeDeps({ discovery: { getInstance: vi.fn(() => inst) } as any });
+    const deps = depsFor({ discovery: { getInstance: vi.fn(() => inst) } as any });
     vi.mocked(proxyToInstance).mockResolvedValue({ status: 200, body: '{"ok":true}' });
 
     const res = mockRes();
@@ -94,7 +80,7 @@ describe('handleMarkRead', () => {
   it('publishes feedEvent on success (2xx)', async () => {
     const inst = fakeInstance();
     const realtime = { publish: vi.fn() };
-    const deps = makeDeps({
+    const deps = depsFor({
       discovery: { getInstance: vi.fn(() => inst) } as any,
       realtime,
     });
@@ -114,7 +100,7 @@ describe('handleMarkRead', () => {
   it('does not publish feedEvent on failure (non-2xx)', async () => {
     const inst = fakeInstance();
     const realtime = { publish: vi.fn() };
-    const deps = makeDeps({
+    const deps = depsFor({
       discovery: { getInstance: vi.fn(() => inst) } as any,
       realtime,
     });
@@ -129,7 +115,7 @@ describe('handleMarkRead', () => {
 
   it('passes through non-2xx status from instance', async () => {
     const inst = fakeInstance();
-    const deps = makeDeps({ discovery: { getInstance: vi.fn(() => inst) } as any });
+    const deps = depsFor({ discovery: { getInstance: vi.fn(() => inst) } as any });
     vi.mocked(proxyToInstance).mockResolvedValue({ status: 422, body: '{"error":"unprocessable"}' });
 
     const res = mockRes();
