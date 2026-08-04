@@ -775,6 +775,17 @@ Co-Authored-By: Person <person@example.com>
     expect(issues.map((issue) => issue.line)).toEqual([3, 4, 4]);
   });
 
+  it('allows the dependabot service sign-off in commit messages while keeping personal emails flagged', () => {
+    // Regression: the GitHub service domain in dependabot's standard trailer is
+    // organizational, not personal; without the github.com exemption every
+    // dependabot PR fails the commit-authors guard (observed on #2952/#2955).
+    const dependabotIssues = scanCommitMessage(`chore(deps): bump the npm_and_yarn group
+
+Signed-off-by: dependabot[bot] <support@github.com>
+`);
+    expect(dependabotIssues).toEqual([]);
+  });
+
   it('allows messaging-address right-hand sides while flagging personal emails in commit messages', () => {
     const messagingIssues = scanCommitMessage(`test: add address fixtures
 
@@ -943,7 +954,10 @@ The migrated group was 1203631234567890@g.us.
     expect(issues[0].message).toContain('branch history');
   });
 
-  describe('exact-range native receipt', () => {
+  // Subprocess-heavy fixture repos brush the global 10s budget under host
+  // load (observed as pure timeouts with every assertion green); 30s keeps
+  // the local push gate deterministic without weakening any check.
+  describe('exact-range native receipt', { timeout: 30_000 }, () => {
     it('blocks the exact outgoing commit even when ambient HEAD is safe', () => {
       const repo = makeBranchRepo();
       const baseOid = gitOutput(repo, ['rev-parse', 'main']);
