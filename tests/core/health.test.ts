@@ -2300,18 +2300,51 @@ describe('GET /health', () => {
   });
 
   it('(b) reports degraded status without recovery_debt for provider-unusable scenario', async () => {
-    // No continuity gaps — inject auth failure to simulate provider-unusable
+    // Real provider-unusable injection: restorable local auth corruption
+    // (degraded-class auth failure) with zero continuity gaps recorded.
+    const db2 = makeDb();
+    const connectionManager = {
+      botJid: '15550199000@s.whatsapp.net',
+      botLid: null,
+      sendMessage: vi.fn().mockResolvedValue({ waMessageId: null }),
+      sendMedia: vi.fn().mockResolvedValue({ waMessageId: null }),
+      connect: vi.fn().mockResolvedValue(undefined),
+      disconnect: vi.fn().mockResolvedValue(undefined),
+      getConnectionState: vi.fn().mockReturnValue({
+        state: 'connected',
+        connected: true,
+        reconnectAttempts: 0,
+        reconnectPhase: null,
+        stateChangedAt: '2026-06-09T12:00:00.000Z',
+        firstFailureAt: null,
+        lastPingAt: null,
+        lastPongAt: null,
+        lastDisconnectReason: null,
+        lastStatusCode: null,
+        authBond: makeAuthBond({ status: 'invalid', issues: ['creds_json_invalid_json'] }),
+      }),
+    };
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    ({ server, port } = await buildTestServer(makeDeps(db2, { connectionManager } as any)));
+
     const { status, body } = await healthReq(port);
     const json = JSON.parse(body);
     expect(status).toBe(200);
-    // No gaps recorded, so no recovery debt
-    expect(json.recovery_debt.open).toBe(false);
-    expect(json.recovery_debt.reason).toBeNull();
+    expect(json).toMatchObject({
+      status: 'degraded',
+      whatsapp: { connection: { auth_failure_class: 'local_corruption_restorable' } },
+    });
+    // Provider-unusable alone carries NO recovery debt
+    expect(json.recovery_debt).toMatchObject({ open: false, reason: null });
+    db2.close();
   });
 
   it('(c) reports degraded status AND recovery_debt when both provider-unusable and continuity gaps exist', async () => {
-    // Inject continuity gaps AND leave default auth state
-    recordContinuityGaps(db.raw, [
+    // Both signals injected for real: degraded-class auth corruption AND an
+    // open continuity gap — the provider cause drives status, the gap rides
+    // in recovery_debt (and stays visible in degradation_causes, variant a).
+    const db2 = makeDb();
+    recordContinuityGaps(db2.raw, [
       {
         ordinal: 1,
         classification: 'absent',
@@ -2321,13 +2354,40 @@ describe('GET /health', () => {
         evidenceFingerprint: 'd'.repeat(64),
       },
     ]);
+    const connectionManager = {
+      botJid: '15550199000@s.whatsapp.net',
+      botLid: null,
+      sendMessage: vi.fn().mockResolvedValue({ waMessageId: null }),
+      sendMedia: vi.fn().mockResolvedValue({ waMessageId: null }),
+      connect: vi.fn().mockResolvedValue(undefined),
+      disconnect: vi.fn().mockResolvedValue(undefined),
+      getConnectionState: vi.fn().mockReturnValue({
+        state: 'connected',
+        connected: true,
+        reconnectAttempts: 0,
+        reconnectPhase: null,
+        stateChangedAt: '2026-06-09T12:00:00.000Z',
+        firstFailureAt: null,
+        lastPingAt: null,
+        lastPongAt: null,
+        lastDisconnectReason: null,
+        lastStatusCode: null,
+        authBond: makeAuthBond({ status: 'invalid', issues: ['creds_json_invalid_json'] }),
+      }),
+    };
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    ({ server, port } = await buildTestServer(makeDeps(db2, { connectionManager } as any)));
 
     const { status, body } = await healthReq(port);
     const json = JSON.parse(body);
     expect(status).toBe(200);
-    // Both signals present: provider cause drives status, recovery_debt also populated
-    expect(json.recovery_debt.open).toBe(true);
-    expect(json.recovery_debt.reason).toBe('continuity_gap_open');
+    expect(json).toMatchObject({
+      status: 'degraded',
+      whatsapp: { connection: { auth_failure_class: 'local_corruption_restorable' } },
+    });
+    expect(json.recovery_debt).toMatchObject({ open: true, reason: 'continuity_gap_open' });
+    expect(json.degradation_causes).toContain('continuity_gap_open');
+    db2.close();
   });
 
   it('degrades health when the applied migration version is behind the code-required schema', async () => {
