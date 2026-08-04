@@ -43,10 +43,14 @@ Complete reference for all 166 MCP tools exposed by WhatSoup. Tools are grouped 
   in-handler `assertAdmin` check (defense in depth). Enforcement is at call
   time, evaluated with the calling turn's actor; the gate is fail-closed
   (missing `actorJid`, no authorizer, an authorizer error, or any non-`true`
-  return all deny) and non-disclosing (an unauthorized or actor-less caller
-  receives the same `Unknown tool` reply as for a nonexistent tool). Sensitive
-  tools are still listed in `tools/list` for global sessions — listing is not
-  the gate. (The 15 admin-gated substrate tools carry this flag.)
+  return all deny). The denial reply is visibility-gated (#2974): sessions whose
+  `tools/list` shows the tool (global tier, unbound) receive
+  `admin_required: tool "<name>" requires an authenticated WhatsApp admin actor`;
+  sessions whose listing hides the name (chat-scoped, conversation-bound)
+  receive the non-disclosing `Unknown tool: <name>` reply — listing is not the
+  gate, but call() must not become an existence oracle where listing already
+  conceals. Sensitive tools are still listed in `tools/list` for global sessions
+  — listing is not the gate. (The 15 admin-gated substrate tools carry this flag.)
 
 ---
 
