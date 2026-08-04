@@ -79,6 +79,10 @@ function sessionWouldList(tool: ToolDeclaration, session: SessionContext): boole
   return true;
 }
 
+/** Typed denial for a list-visible sensitive-tool rejection (#2974). */
+export const ADMIN_REQUIRED_DENIAL = (name: string): string =>
+  `admin_required: tool "${name}" requires an authenticated WhatsApp admin actor`;
+
 // ---------------------------------------------------------------------------
 // Zod → JSON Schema (minimal, handles the types we use in tool declarations)
 // ---------------------------------------------------------------------------
@@ -495,15 +499,23 @@ export class ToolRegistry {
     // --- R1 sensitive-tool gate (central, authoritative; in-handler
     // assertAdmin checks remain as defense in depth) ---
     if (tool.sensitive && !this.sensitiveAllowed(session)) {
-      // UNIFORM reply for every denial — missing actorJid (wiring fault) and
-      // unauthorized actor are indistinguishable to the caller, identical to
-      // a nonexistent tool, so call() never becomes an existence oracle for
-      // sensitive names. The diagnosis (which actor, why) lives server-side:
-      // the specific admin-predicate reason is logged inside the authorizer.
+      // Server-side diagnosis (which actor, why) stays in the log — the typed
+      // reply must not distinguish unauthorized-actor from missing-actorJid.
       log.warn(
         { tool: name, tier: session.tier, actorJid: session.actorJid ?? null },
         session.actorJid ? 'sensitive tool denied (unauthorized actor)' : 'sensitive tool denied (missing actorJid - runtime wiring fault)',
       );
+      if (sessionWouldList(tool, session)) {
+        // Listing already advertises this name to this session ("listing is not
+        // a gate") — a disguised reply protects nothing here and mislabels an
+        // authorization fault as a discovery fault (#2974). One typed variant
+        // only: unauthorized-actor vs missing-actorJid stays server-side (log
+        // above).
+        return reject(ADMIN_REQUIRED_DENIAL(name), 'authorization_denied', 'authorization');
+      }
+      // Hidden-listing sessions (chat-scoped; conversation-bound): byte-identical
+      // to a nonexistent tool — call() must not become an existence oracle where
+      // tools/list hides sensitive names.
       return reject(`Unknown tool: ${name}`, 'authorization_denied', 'authorization');
     }
 
