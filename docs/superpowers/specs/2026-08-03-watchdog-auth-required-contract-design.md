@@ -398,5 +398,19 @@ These failures remain observable through stderr/nonzero exit even when the log i
 the final record. Fleet kickstart failure follows the same `RESTART-FAILED`, nonzero, no-cooldown
 contract already proven for the bot label.
 
-Marker type/ownership hardening and arbitrary `fallbackReason` log projection remain separate
-medium-risk follow-up work; this amendment does not weaken their existing marker-retention behavior.
+### Marker and log-projection boundary
+
+Credential-marker access is confined beneath an opened, user-owned, non-group/world-writable log
+directory descriptor. The marker has three states: absent, a valid user-owned regular file without
+group/world write permission, or unsafe/unusable. Creation uses exclusive no-follow descriptor
+operations and mode `0600`; legacy owned `0644` markers remain valid. Clearing unlinks only a marker
+that passed the same type, owner, and mode checks. Symlinks, directories, wrong-owner files, and
+writable files are never followed, removed, or treated as credential evidence. An unsafe marker
+keeps the credential verdict where applicable but makes the watchdog invocation nonzero and raises
+the final operational state to `ERROR` unless a higher-ranked state such as `CREDENTIAL-DEAD`
+already applies.
+
+The fallback decision semantics remain presence-based: `None` can satisfy recovery,
+`auth-required` is a dead-credential signal, and every other non-null value remains exit `5`.
+Watchdog logs project only the fixed bounded text `fallbackReason=present`; arbitrary strings,
+control characters, large values, and non-string JSON values are never interpolated into logs.

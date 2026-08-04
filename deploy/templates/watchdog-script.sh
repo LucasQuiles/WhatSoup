@@ -150,6 +150,85 @@ health_unknown() {
   WD_EXIT=2
 }
 
+# Credential-marker operations are confined beneath a verified, user-owned
+# log-directory descriptor. Exit 0 means success/present, exit 1 means absent
+# for the state operation, and exit 2 means unsafe or otherwise unusable.
+# Existing owned 0644 markers remain valid for upgrade compatibility; newly
+# created markers are 0600. Symlinks and non-regular paths are never followed,
+# cleared, or treated as evidence of prior credential death.
+credential_marker() {
+  python3 - "$1" "$CRED_MARKER" 2>>"$LOG" <<'MARKER_PY'
+import os
+import stat
+import sys
+
+
+def reject():
+    print("watchdog: unsafe credential marker", file=sys.stderr)
+    raise SystemExit(2)
+
+
+operation, path = sys.argv[1:]
+parent, name = os.path.split(path)
+uid = os.geteuid()
+directory_fd = None
+marker_fd = None
+try:
+    directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    directory_fd = os.open(parent, directory_flags)
+    directory = os.fstat(directory_fd)
+    if (
+        not stat.S_ISDIR(directory.st_mode)
+        or directory.st_uid != uid
+        or directory.st_mode & 0o022
+    ):
+        reject()
+
+    try:
+        marker = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        marker = None
+
+    if marker is not None and (
+        not stat.S_ISREG(marker.st_mode)
+        or marker.st_uid != uid
+        or marker.st_mode & 0o022
+    ):
+        reject()
+
+    if operation == "state":
+        raise SystemExit(0 if marker is not None else 1)
+    if operation == "create":
+        if marker is not None:
+            raise SystemExit(0)
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+        marker_fd = os.open(name, flags, 0o600, dir_fd=directory_fd)
+        os.fchmod(marker_fd, 0o600)
+        created = os.fstat(marker_fd)
+        if (
+            not stat.S_ISREG(created.st_mode)
+            or created.st_uid != uid
+            or stat.S_IMODE(created.st_mode) != 0o600
+        ):
+            reject()
+        raise SystemExit(0)
+    if operation == "clear":
+        if marker is not None:
+            os.unlink(name, dir_fd=directory_fd)
+        raise SystemExit(0)
+    reject()
+except SystemExit:
+    raise
+except (OSError, ValueError):
+    reject()
+finally:
+    if marker_fd is not None:
+        os.close(marker_fd)
+    if directory_fd is not None:
+        os.close(directory_fd)
+MARKER_PY
+}
+
 # Rotate log if it exceeds 1 MB. This runs after the state ladder is available
 # so a rotation error participates in the same upgrade-only final outcome.
 if [ -f "$LOG" ]; then
@@ -672,7 +751,7 @@ if credential_recovered:
 if fallback_reason is not None:
     print(
         "CREDENTIAL-UNKNOWN: inconclusive credential evidence during an active "
-        f"fallback window (fallbackReason={fallback_reason!r})",
+        "fallback window (fallbackReason=present)",
         file=sys.stderr,
     )
     sys.exit(5)
@@ -683,13 +762,12 @@ PY
     # marker: BOT_NAME-credential-dead.marker — deliberately no restart on this
     # branch (a restart cannot fix auth; see the exit-3 decision-block comment).
     log "CREDENTIAL-DEAD: claude credential unavailable — reauth required; restart suppressed"
-    if [ ! -e "$CRED_MARKER" ]; then
-      if ! touch "$CRED_MARKER" 2>>"$LOG"; then
-        # The verdict stands; the ERROR line and the nonzero invocation exit
-        # carry the failure, and the next scheduled run retries the create.
-        log "ERROR: failed to create credential marker $CRED_MARKER; retrying next cycle"
-        WD_EXIT=1
-      fi
+    if ! credential_marker create; then
+      # The verdict stands; the ERROR line and the nonzero invocation exit
+      # carry the failure, and the next scheduled run retries the create.
+      log "ERROR: failed to create credential marker $CRED_MARKER; retrying next cycle"
+      wd_note ERROR
+      WD_EXIT=1
     fi
     wd_note CREDENTIAL-DEAD
   elif [ "$py_rc" -eq 4 ] || [ "$py_rc" -eq 5 ]; then
@@ -698,21 +776,27 @@ PY
     # retained marker or an active fallback window (exit 5). A quiescent
     # unknown (healthy idle bot past the usability-probe TTL, or a non-agent
     # instance with no turn_capability) stays "ok".
-    if [ "$py_rc" -eq 5 ] || [ -e "$CRED_MARKER" ]; then
+    credential_marker state
+    marker_rc=$?
+    if [ "$py_rc" -eq 5 ] || [ "$marker_rc" -eq 0 ]; then
       wd_note CREDENTIAL-UNKNOWN
+    fi
+    if [ "$marker_rc" -eq 2 ]; then
+      log "ERROR: unsafe credential marker; refusing credential-state inference"
+      wd_note ERROR
+      WD_EXIT=1
     fi
   elif [ "$py_rc" -eq 6 ]; then
     health_unknown "untrusted diagnostic health evidence"
   elif [ "$py_rc" -ne 0 ]; then
     restart_label "$BOT_LABEL" "unhealthy JSON response"
   else
-    if [ -e "$CRED_MARKER" ]; then
-      if ! rm -f "$CRED_MARKER" 2>>"$LOG"; then
-        # Recovery verdict stands (final state "ok"); the ERROR line and the
-        # nonzero invocation exit carry the failure for the next cycle's retry.
-        log "ERROR: failed to clear credential marker $CRED_MARKER; retrying next cycle"
-        WD_EXIT=1
-      fi
+    if ! credential_marker clear; then
+      # Recovery evidence remains valid, but the watchdog invocation is not
+      # healthy while an unsafe or unusable marker path persists.
+      log "ERROR: failed to clear credential marker $CRED_MARKER; retrying next cycle"
+      wd_note ERROR
+      WD_EXIT=1
     fi
   fi
   fi

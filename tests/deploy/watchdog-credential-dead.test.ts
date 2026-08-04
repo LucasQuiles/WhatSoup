@@ -200,6 +200,26 @@ describe('watchdog decision block — credential death', () => {
     expect(r.stderr).toContain('CREDENTIAL-UNKNOWN');
   });
 
+  it('preserves non-null fallback semantics without projecting object contents', () => {
+    const r = runDecision(healthyPayload({
+      instance: { fallbackReason: { secret: 'DO-NOT-LOG-OBJECT-CONTENT' } },
+    }));
+    expect(r.status).toBe(5);
+    expect(r.stderr).toContain('fallbackReason=present');
+    expect(r.stderr).not.toContain('DO-NOT-LOG-OBJECT-CONTENT');
+  });
+
+  it('bounds fallback logging without changing empty or arbitrary-string exit semantics', () => {
+    for (const fallbackReason of ['', `line-one\nline-two-${'x'.repeat(2_000)}`]) {
+      const r = runDecision(healthyPayload({ instance: { fallbackReason } }));
+      expect(r.status).toBe(5);
+      expect(r.stderr).toContain('fallbackReason=present');
+      expect(r.stderr).not.toContain('line-two');
+      expect(r.stderr.length).toBeLessThan(200);
+      expect(r.stderr.trim().split('\n')).toHaveLength(1);
+    }
+  });
+
   it('classifies the unauthenticated public envelope as untrusted evidence (exit 6)', () => {
     // #2515: the 4-field public envelope has no whatsapp block, so the
     // diagnostic object shape, so it can never clear the marker or restart.
@@ -319,15 +339,21 @@ describe('watchdog shell wiring — exit 3 routes to marker + log, never restart
     expect(template).toContain('object_pairs_hook=reject_duplicate_keys');
   });
 
-  it('clears the marker only on affirmative recovery and does not mask removal failure', () => {
-    expect(template).toMatch(/if \[ -e "\$CRED_MARKER" \]; then/);
-    expect(template).toMatch(/if ! rm -f "\$CRED_MARKER"/);
-    expect(template).not.toMatch(/rm -f "\$CRED_MARKER"[^\n]*\|\| true/);
+  it('clears the marker only through the validated marker helper', () => {
+    expect(template).toContain('credential_marker clear');
+    expect(template).not.toMatch(/rm -f "\$CRED_MARKER"/);
   });
 
-  it('does not mask marker creation failure and returns the accumulated watchdog status', () => {
-    expect(template).toMatch(/if ! touch "\$CRED_MARKER"/);
-    expect(template).toMatch(/if \[ ! -e "\$CRED_MARKER" \]; then/);
+  it('uses no-follow exclusive creation and tri-state validation for the marker', () => {
+    expect(template).toContain('credential_marker()');
+    expect(template).toContain('credential_marker create');
+    expect(template).toContain('credential_marker state');
+    expect(template).toContain('follow_symlinks=False');
+    expect(template).toContain('os.O_EXCL');
+    expect(template).toContain('getattr(os, "O_NOFOLLOW", 0)');
+    expect(template).toContain('0o600');
+    expect(template).not.toMatch(/touch "\$CRED_MARKER"/);
+    expect(template).not.toMatch(/\[ (?:! )?-e "\$CRED_MARKER" \]/);
     expect(template).toMatch(/WD_EXIT=1/);
     expect(template).toMatch(/exit "\$WD_EXIT"/);
   });

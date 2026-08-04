@@ -241,6 +241,7 @@ def test_dead_final_log_is_credential_dead_no_restart(tmp_path):
     proc = h.run()
     assert proc.returncode == 0, proc.stderr
     assert h.marker.exists(), "exit 3 must create the credential marker"
+    assert stat.S_IMODE(h.marker.stat().st_mode) == 0o600
     assert h.final_log_state() == "CREDENTIAL-DEAD"
     assert "kickstart" not in h.launchctl_calls()
 
@@ -257,10 +258,22 @@ def test_unknown_quiescent_without_marker_logs_ok(tmp_path):
 def test_unknown_with_marker_present_logs_credential_unknown_and_retains_marker(tmp_path):
     h = Harness(tmp_path, "tier-marked-bot", _unknown_body())
     h.marker.touch()
+    h.marker.chmod(0o644)  # Legacy touch-created markers remain upgrade-compatible.
     proc = h.run()
     assert proc.returncode == 0, proc.stderr
     assert h.marker.exists(), "unknown must retain an existing marker"
     assert h.final_log_state() == "CREDENTIAL-UNKNOWN"
+    assert "kickstart" not in h.launchctl_calls()
+
+
+def test_unknown_rejects_group_writable_marker(tmp_path):
+    h = Harness(tmp_path, "tier-writable-marker-bot", _unknown_body())
+    h.marker.touch()
+    h.marker.chmod(0o620)
+    proc = h.run()
+    assert proc.returncode != 0
+    assert h.marker.exists()
+    assert h.final_log_state() == "ERROR"
     assert "kickstart" not in h.launchctl_calls()
 
 
@@ -378,13 +391,16 @@ def test_credential_dead_outranks_fleet_restart(tmp_path):
 
 
 def test_marker_create_failure_keeps_credential_dead_final_and_exits_nonzero(tmp_path):
-    # A dangling symlink into a missing parent makes `touch` fail without
-    # needing permission games (same fixture as the terminal-logout e2e).
+    # The old `touch` path followed this dangling symlink and created target.
     h = Harness(tmp_path, "tier-mkfail-bot", _dead_body())
-    h.marker.symlink_to(h.home / "missing-parent" / "marker")
+    target_dir = h.home / "attacker-controlled"
+    target_dir.mkdir()
+    target = target_dir / "marker-target"
+    h.marker.symlink_to(target)
     proc = h.run()
     assert proc.returncode != 0, "marker create failure must exit nonzero"
-    assert not h.marker.exists()
+    assert h.marker.is_symlink(), "unsafe marker path must be retained for inspection"
+    assert not target.exists(), "marker creation must never follow a symlink"
     log_text = h.log.read_text(encoding="utf-8")
     assert "ERROR: failed to create credential marker" in log_text
     assert h.final_log_state() == "CREDENTIAL-DEAD", (
@@ -393,8 +409,8 @@ def test_marker_create_failure_keeps_credential_dead_final_and_exits_nonzero(tmp
     assert "kickstart" not in h.launchctl_calls()
 
 
-def test_marker_clear_failure_keeps_ok_final_and_exits_nonzero(tmp_path):
-    # rm -f (no -r) fails on a directory: an undeletable "marker".
+def test_marker_clear_failure_reports_error_final_and_exits_nonzero(tmp_path):
+    # A directory is not a valid marker and must never be removed recursively.
     h = Harness(tmp_path, "tier-rmfail-bot", _recovered_body())
     h.marker.mkdir()
     (h.marker / "keep").touch()
@@ -403,9 +419,35 @@ def test_marker_clear_failure_keeps_ok_final_and_exits_nonzero(tmp_path):
     assert h.marker.exists(), "failed clear must leave the marker for the next cycle"
     log_text = h.log.read_text(encoding="utf-8")
     assert "ERROR: failed to clear credential marker" in log_text
-    assert h.final_log_state() == "ok", (
-        "the recovery verdict stands; the ERROR line and nonzero exit carry the failure"
-    )
+    assert h.final_log_state() == "ERROR"
+    assert "kickstart" not in h.launchctl_calls()
+
+
+def test_recovery_refuses_dangling_marker_symlink_and_reports_error(tmp_path):
+    h = Harness(tmp_path, "tier-rmsymlink-bot", _recovered_body())
+    target = h.home / "attacker-controlled" / "marker-target"
+    target.parent.mkdir()
+    h.marker.symlink_to(target)
+    proc = h.run()
+    assert proc.returncode != 0
+    assert h.marker.is_symlink(), "clear must not unlink an unsafe marker path"
+    assert not target.exists()
+    assert "ERROR: failed to clear credential marker" in h.log.read_text(encoding="utf-8")
+    assert h.final_log_state() == "ERROR"
+    assert "kickstart" not in h.launchctl_calls()
+
+
+def test_unknown_refuses_unsafe_marker_path_instead_of_treating_it_as_absent(tmp_path):
+    h = Harness(tmp_path, "tier-unsafe-unknown-bot", _unknown_body())
+    target = h.home / "attacker-controlled" / "marker-target"
+    target.parent.mkdir()
+    h.marker.symlink_to(target)
+    proc = h.run()
+    assert proc.returncode != 0
+    assert h.marker.is_symlink()
+    assert not target.exists()
+    assert "ERROR: unsafe credential marker" in h.log.read_text(encoding="utf-8")
+    assert h.final_log_state() == "ERROR"
     assert "kickstart" not in h.launchctl_calls()
 
 
