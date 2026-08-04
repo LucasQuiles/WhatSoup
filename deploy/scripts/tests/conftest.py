@@ -167,3 +167,16 @@ def _outbox_by_source(outbox_dir: Path) -> dict[str, list[dict[str, Any]]]:
         s = ev.get("source", "_unknown")
         by_source.setdefault(s, []).append(ev)
     return by_source
+
+
+def _read_collector_state(mod) -> dict[str, Any]:
+    """Inspect collector state through the exclusive library session.
+
+    Replaces the removed corrupt-to-empty ``mod.load_state()`` for test
+    inspection; must run inside ``_env`` scope like the function it replaced.
+    """
+    session = mod.open_collector_state_session()
+    try:
+        return session.load().payload
+    finally:
+        session.close()

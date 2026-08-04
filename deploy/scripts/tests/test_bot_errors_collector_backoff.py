@@ -5,7 +5,7 @@ TDD: written BEFORE implementation. Verifies:
 - SSH attempts are spaced per 5m/15m/60m schedule (not called inside window)
 - relay_host_down emitted exactly once at state ENTRY (across many cycles)
 - relay_host_recovered emitted after consecutive successes, not after one flapping success
-- backoff state persists across save_state/load_state (no re-emit on restart)
+- backoff state persists across library session save/load (no re-emit on restart)
 - per-attempt enqueue_meta_alert NOT called while host is in down state
 - live host alongside dead host keeps polling every cycle
 - skipped-backoff hosts counted in remotesSkippedBackoff, not in failed/isolatedFailures
@@ -43,6 +43,7 @@ _conftest = importlib.util.module_from_spec(_conftest_spec)  # type: ignore[arg-
 _conftest_spec.loader.exec_module(_conftest)  # type: ignore[union-attr]
 
 _env = _conftest._env
+_read_collector_state = _conftest._read_collector_state
 _load_mod_with_dirs = _conftest._load_mod_with_dirs
 _run_once_defaults = _conftest._run_once_defaults
 FakeCollectorClock = _conftest.FakeCollectorClock
@@ -149,7 +150,7 @@ def test_relay_host_down_emitted_exactly_once(tmp_state):
         assert len(events_after["relay_host_down"]) == 1
 
         # Persist state — verify downEventEmitted stored
-        state = mod.load_state()
+        state = _read_collector_state(mod)
         rr = state["remotes"][remote]
         assert rr.get("consecutiveFailures", 0) >= mod.RELAY_BACKOFF_FAILURE_THRESHOLD
         assert rr.get("downEventEmitted") is True
@@ -194,20 +195,20 @@ def test_backoff_schedule_nextAttemptAt(tmp_state):
 
         # Cycle 1: 1 failure
         _run_once_defaults(mod, [remote])
-        state = mod.load_state()
+        state = _read_collector_state(mod)
         assert state["remotes"][remote].get("consecutiveFailures", 0) == 1
         clock.advance(30)
 
         # Cycle 2: 2 failures
         _run_once_defaults(mod, [remote])
-        state = mod.load_state()
+        state = _read_collector_state(mod)
         assert state["remotes"][remote].get("consecutiveFailures", 0) == 2
         clock.advance(30)
 
         # Cycle 3: 3rd failure — enters backoff, scheduleIndex=0 → 300s delay
         attempt_time = clock.now
         _run_once_defaults(mod, [remote])
-        state = mod.load_state()
+        state = _read_collector_state(mod)
         rr = state["remotes"][remote]
         assert rr.get("consecutiveFailures", 0) >= 3
         assert rr.get("downEventEmitted") is True
@@ -242,7 +243,7 @@ def test_backoff_schedule_nextAttemptAt(tmp_state):
             _run_once_defaults(mod, [remote])
         # Both outbox-claim and writefail-claim attempt SSH, so expect >= 1 calls
         assert fail_calls_2[0] >= 1, "SSH attempt must be made when backoff window expires"
-        state = mod.load_state()
+        state = _read_collector_state(mod)
         rr = state["remotes"][remote]
         # After a retry-fail, scheduleIndex moves to 1 → nextAttemptAt += 900
         assert rr.get("nextAttemptAt") == pytest.approx(clock.now + schedule[1], abs=2)
@@ -272,7 +273,7 @@ def test_backoff_window_boundary_is_deterministic(tmp_state):
             _run_once_defaults(mod, [remote])
             clock.advance(30)
 
-        state = mod.load_state()
+        state = _read_collector_state(mod)
         next_attempt_at = int(state["remotes"][remote]["nextAttemptAt"])
         calls_before_window_checks = len(ssh_calls)
 
@@ -316,7 +317,7 @@ def test_relay_host_recovered_and_reset(tmp_state):
         evs = _outbox_by_source(outbox_dir)
         assert len(evs.get("relay_host_down", [])) == 1
 
-        state = mod.load_state()
+        state = _read_collector_state(mod)
         rr = state["remotes"][remote]
         next_attempt = rr.get("nextAttemptAt", 0)
 
@@ -328,7 +329,7 @@ def test_relay_host_recovered_and_reset(tmp_state):
         # First success is only recovery evidence; do not clear a flapping host yet.
         evs = _outbox_by_source(outbox_dir)
         assert len(evs.get("relay_host_recovered", [])) == 0
-        state = mod.load_state()
+        state = _read_collector_state(mod)
         rr = state["remotes"][remote]
         assert rr.get("downEventEmitted") is True
         assert rr.get("outboxRecoveryConsecutiveSuccesses") == 1
@@ -340,7 +341,7 @@ def test_relay_host_recovered_and_reset(tmp_state):
         assert len(evs.get("relay_host_recovered", [])) == 1
 
         # State reset
-        state = mod.load_state()
+        state = _read_collector_state(mod)
         rr = state["remotes"][remote]
         assert rr.get("consecutiveFailures", 0) == 0
         assert rr.get("backoffScheduleIndex", 0) == 0
@@ -397,7 +398,7 @@ def test_restart_does_not_reemit_host_down(tmp_state):
 
     with _env(state_dir, outbox_dir):
         # Verify state round-trips backoff fields
-        state = mod2.load_state()
+        state = _read_collector_state(mod2)
         rr = state["remotes"].get(remote, {})
         assert rr.get("consecutiveFailures", 0) >= 3
         assert rr.get("downEventEmitted") is True
@@ -573,7 +574,7 @@ def test_event_severities(tmp_state):
         assert down_evs[0]["severity"] == "warning"
 
         # Advance past window; first success is evidence, second clears recovery.
-        state = mod.load_state()
+        state = _read_collector_state(mod)
         next_attempt = state["remotes"][remote].get("nextAttemptAt", 0)
         clock.set(next_attempt + 1)
         failing[0] = False
@@ -628,7 +629,7 @@ def test_recovery_on_outbox_success_despite_writefail_failure(tmp_state):
             _run_once_defaults(mod, [remote])
             clock.advance(30)
         assert len(_outbox_by_source(outbox_dir).get("relay_host_down", [])) == 1
-        rr = mod.load_state()["remotes"][remote]
+        rr = _read_collector_state(mod)["remotes"][remote]
         assert rr.get("downEventEmitted") is True
 
         # Advance past backoff window; switch to split-success (outbox OK, writefail FAIL).
@@ -639,7 +640,7 @@ def test_recovery_on_outbox_success_despite_writefail_failure(tmp_state):
         # First split-success is not enough to clear a flapping host.
         rec = _outbox_by_source(outbox_dir).get("relay_host_recovered", [])
         assert len(rec) == 0
-        rr_pending = mod.load_state()["remotes"][remote]
+        rr_pending = _read_collector_state(mod)["remotes"][remote]
         assert rr_pending.get("downEventEmitted") is True
         assert rr_pending.get("outboxRecoveryConsecutiveSuccesses") == 1
 
@@ -652,7 +653,7 @@ def test_recovery_on_outbox_success_despite_writefail_failure(tmp_state):
 
         # Backoff state fully reset (no livelock): consecutiveFailures back to 0,
         # down flag cleared, so a healthy outbox no longer triggers the skip path.
-        rr2 = mod.load_state()["remotes"][remote]
+        rr2 = _read_collector_state(mod)["remotes"][remote]
         assert rr2.get("consecutiveFailures", 0) == 0
         assert rr2.get("downEventEmitted", False) is False
         assert rr2.get("backoffScheduleIndex", 0) == 0
@@ -665,4 +666,4 @@ def test_recovery_on_outbox_success_despite_writefail_failure(tmp_state):
             _run_once_defaults(mod, [remote])
             clock.advance(30)
         assert len(_outbox_by_source(outbox_dir).get("relay_host_down", [])) == 1
-        assert mod.load_state()["remotes"][remote].get("consecutiveFailures", 0) == 0
+        assert _read_collector_state(mod)["remotes"][remote].get("consecutiveFailures", 0) == 0

@@ -56,6 +56,7 @@ _conftest = importlib.util.module_from_spec(_conftest_spec)  # type: ignore[arg-
 _conftest_spec.loader.exec_module(_conftest)  # type: ignore[union-attr]
 
 _env = _conftest._env
+_read_collector_state = _conftest._read_collector_state
 _load_mod_with_dirs = _conftest._load_mod_with_dirs
 _run_once_defaults = _conftest._run_once_defaults
 _all_outbox_events = _conftest._all_outbox_events
@@ -174,10 +175,10 @@ def test_further_failures_do_not_reemit(tmp_state):
             _run_once_defaults(mod, [remote])
             clock.advance(30)
 
-        # load_state() must run inside _env's scope: BOT_ERRORS_STATE_DIR is
-        # only set for the duration of the with-block, and load_state() reads
+        # _read_collector_state() must run inside _env's scope: BOT_ERRORS_STATE_DIR
+        # is only set for the duration of the with-block, and the session reads
         # state_root() from the environment at call time, not from tmp_state.
-        state = mod.load_state()
+        state = _read_collector_state(mod)
         rr = state["remotes"][remote]
         # Tier 2's flag resets to False when tier 3 (relay_host_down)
         # supersedes it at consecutiveFailures=3 -- it is NOT "escalated" by
@@ -236,7 +237,7 @@ def test_recovery_emits_one_clear_and_reescalates_on_new_episode(tmp_state):
         assert clear_ev["severity"] == "info"
         assert clear_ev["diagnostics"]["remote"] == remote
 
-        state = mod.load_state()
+        state = _read_collector_state(mod)
         assert state["remotes"][remote].get("captureFailureEscalated") is False
 
         # New failure episode -> escalates again (not a one-shot-forever guard)
@@ -307,7 +308,7 @@ def test_flap_through_backoff_stays_on_relay_host_down_tier(tmp_state):
         )
         assert len(events.get("relay_host_down", [])) == 1
 
-        state = mod.load_state()
+        state = _read_collector_state(mod)
         rr = state["remotes"][remote]
         assert rr.get("consecutiveFailures") == 3
         assert rr.get("downEventEmitted") is True
@@ -331,7 +332,7 @@ def test_flap_through_backoff_stays_on_relay_host_down_tier(tmp_state):
         )
         assert len(events_after_one_success.get("relay_host_down", [])) == 1, "one success is not enough to recover backoff"
 
-        state = mod.load_state()
+        state = _read_collector_state(mod)
         rr = state["remotes"][remote]
         assert rr.get("captureFailureEscalated") is False
         assert rr.get("consecutiveFailures") == 3, "backoff recovery needs recovery_successes, not just 1"
@@ -429,10 +430,10 @@ def test_escalation_state_survives_restart(tmp_state):
     # Simulate a collector restart: fresh module load, same state dir.
     mod2 = _load_mod_with_dirs(state_dir, outbox_dir)
     with _env(state_dir, outbox_dir):
-        # load_state() reads state_root() from the environment at call time;
+        # _read_collector_state() reads state_root() from the environment at call time;
         # must run inside _env's scope, not against whatever BOT_ERRORS_STATE_DIR
         # (if any) happens to be set to outside this test.
-        state = mod2.load_state()
+        state = _read_collector_state(mod2)
         assert state["remotes"][remote].get("captureFailureEscalated") is True
 
     with _env(state_dir, outbox_dir), \
@@ -454,7 +455,7 @@ def test_escalation_state_survives_restart(tmp_state):
         assert [e["eventType"] for e in events.get(ESCALATION_SOURCE, [])] == ["alert", "clear"]
         assert len(events.get("relay_host_down", [])) == 1
 
-        state = mod2.load_state()
+        state = _read_collector_state(mod2)
         assert state["remotes"][remote].get("captureFailureEscalated") is False
 
         # Clear the backoff window (300s schedule[0]) before the success

@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 
-import { makeDeps, mockReq, mockRes } from './http-mocks.ts';
+import { makeDeps, mockReq, mockRes, mockSseRes } from './http-mocks.ts';
 import type { FeedDeps } from '../../src/fleet/routes/feed.ts';
 
 describe('http test helpers', () => {
@@ -40,6 +40,46 @@ describe('http test helpers', () => {
 
   it('returns itself from .on() for chaining, matching writeHead/setHeader/end', () => {
     const res = mockRes();
+
+    expect(res.on('error', () => {})).toBe(res);
+  });
+
+  it('accumulates chunks across multiple write() calls on mockSseRes', () => {
+    const res = mockSseRes();
+
+    res.write('data: {"a":1}\n\n');
+    res.write('data: {"b":2}\n\n');
+
+    expect(res._chunks).toEqual(['data: {"a":1}\n\n', 'data: {"b":2}\n\n']);
+  });
+
+  it('sets _ended on mockSseRes.end()', () => {
+    const res = mockSseRes();
+
+    expect(res._ended).toBe(false);
+    res.write('data: {"a":1}\n\n');
+    res.end();
+    expect(res._ended).toBe(true);
+  });
+
+  it('accumulates data passed to end() and marks _ended on mockSseRes', () => {
+    const res = mockSseRes();
+
+    res.write('data: {"a":1}\n\n');
+    res.end('data: done\n\n');
+
+    expect(res._chunks).toEqual(['data: {"a":1}\n\n', 'data: done\n\n']);
+    expect(res._ended).toBe(true);
+  });
+
+  it('exposes a no-op .on() on mockSseRes so an SSE writer can attach its error listener', () => {
+    const res = mockSseRes();
+
+    expect(() => res.on('error', () => {})).not.toThrow();
+  });
+
+  it('returns itself from mockSseRes.on() for chaining', () => {
+    const res = mockSseRes();
 
     expect(res.on('error', () => {})).toBe(res);
   });

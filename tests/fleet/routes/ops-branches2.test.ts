@@ -18,8 +18,6 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
-import type { ServerResponse } from 'node:http';
-
 vi.mock('../../../src/fleet/mcp-client.ts', () => ({ mcpCall: vi.fn() }));
 vi.mock('../../../src/fleet/http-proxy.ts', () => ({ proxyToInstance: vi.fn() }));
 vi.mock('node:child_process', async () => {
@@ -58,38 +56,11 @@ import type { OpsDeps } from '../../../src/fleet/routes/ops.ts';
 import type { DiscoveredInstance } from '../../../src/fleet/discovery.ts';
 import { REQUIRED_DENY } from '../../../src/core/settings-template.ts';
 import { spawn } from 'node:child_process';
-import { makeDeps, mockReq, mockRes } from '../../helpers/http-mocks.ts';
+import { makeDeps, mockReq, mockRes, mockSseRes } from '../../helpers/http-mocks.ts';
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-function mockSseRes(): ServerResponse & { _chunks: string[]; _ended: boolean } {
-  const res = {
-    _status: 0,
-    _headers: {} as Record<string, string>,
-    _chunks: [] as string[],
-    _ended: false,
-    writeHead(status: number, headers?: Record<string, string>) {
-      res._status = status;
-      if (headers) Object.assign(res._headers, headers);
-    },
-    write(chunk: string) {
-      res._chunks.push(chunk);
-      return true;
-    },
-    end(data?: string) {
-      if (data) res._chunks.push(data);
-      res._ended = true;
-    },
-    // ServerResponse is an EventEmitter; createSSEWriter attaches an 'error'
-    // listener (#2292 L7), so a fake without `on` is an incomplete fake.
-    on() {
-      return res;
-    },
-  };
-  return res as unknown as ServerResponse & { _chunks: string[]; _ended: boolean };
-}
 
 function fakeInstance(overrides: Partial<DiscoveredInstance> = {}): DiscoveredInstance {
   return {
