@@ -1,15 +1,23 @@
-// Watchdog credential-death escalation (deploy/templates/watchdog-script.sh).
+// Watchdog credential-state contract (deploy/templates/watchdog-script.sh).
 //
 // Root cause pinned on mini11 (Jul 15–27 outage): the watchdog's decision
-// block treats `degraded` as ok and never inspects turn capability, so a bot
-// whose claude credential is dead — model_usability_status
-// 'credential-unavailable', a state a restart cannot fix — logged plain "ok"
-// every two minutes for 12 days. These tests run the template's embedded
-// python decision block against real-shaped health payloads and pin the new
-// contract: exit 3 (distinct from restart-worthy exit 1) plus a
-// CREDENTIAL-DEAD stderr line when the credential is dead, existing
-// restart/ok behavior otherwise; the shell wiring routes exit 3 to a log
-// line + marker file and NEVER to restart_label.
+// block treated `degraded` as ok and only inspected one stale usability
+// field, so a bot whose provider credential was dead logged plain "ok" every
+// two minutes for 12 days. These tests run the template's embedded python
+// decision block against real-shaped health payloads and pin the contract
+// (docs/superpowers/specs/2026-08-03-watchdog-auth-required-contract-design.md):
+//   exit 3 — dead (any current normalized auth-required signal): the shell
+//            logs CREDENTIAL-DEAD, creates/retains the marker, never restarts;
+//   exit 0 — recovered (affirmative fresh primary proof): the ONLY exit that
+//            may clear the marker;
+//   exit 4 — unknown, no fallback window active (stderr-silent);
+//   exit 5 — unknown while a fallback window is active;
+//   exit 6 — untrusted diagnostic evidence (shell HEALTH-UNKNOWN / exit 2);
+//   exit 1 — restart-worthy liveness failures (unchanged, higher priority).
+// Shell wiring: exits 4/5 route to a branch that never restarts and never
+// touches the marker, ahead of the generic nonzero restart elif; the final
+// log escalates to CREDENTIAL-UNKNOWN only when a marker is present or the
+// fallback window is active.
 import { describe, expect, it } from 'vitest';
 import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
@@ -20,6 +28,10 @@ const templatePath = path.join(repoRoot, 'deploy', 'templates', 'watchdog-script
 const template = fs.readFileSync(templatePath, 'utf8');
 
 const BOT = 'tb-bot';
+
+function epochMsAgo(seconds: number): number {
+  return Date.now() - seconds * 1_000;
+}
 
 function decisionScript(): string {
   const m = template.match(/python3 - <<'PY'[^\n]*\n([\s\S]*?)\nPY\n/);
@@ -33,10 +45,14 @@ interface RunResult {
 }
 
 function runDecision(payload: Record<string, unknown>, httpCode = '200'): RunResult {
+  return runRawDecision(JSON.stringify(payload), httpCode);
+}
+
+function runRawDecision(payload: string, httpCode = '200'): RunResult {
   const r = spawnSync('python3', ['-'], {
     input: decisionScript(),
     encoding: 'utf8',
-    env: { ...process.env, BOT_JSON: JSON.stringify(payload), BOT_CODE: httpCode },
+    env: { ...process.env, BOT_JSON: payload, BOT_CODE: httpCode },
     timeout: 15_000,
   });
   return { status: r.status, stderr: r.stderr };
@@ -45,6 +61,7 @@ function runDecision(payload: Record<string, unknown>, httpCode = '200'): RunRes
 function healthyPayload(over: Record<string, unknown> = {}): Record<string, unknown> {
   return {
     status: 'healthy',
+    generated_at: new Date().toISOString(),
     whatsapp: {
       connected: true,
       connection: {
@@ -53,7 +70,15 @@ function healthyPayload(over: Record<string, unknown> = {}): Record<string, unkn
         auth_failure_class: 'none',
       },
     },
-    turn_capability: { model_usability_status: 'usable' },
+    instance: { fallbackReason: null },
+    turn_capability: {
+      model_usable: true,
+      model_usable_stale: false,
+      model_usability_status: 'usable',
+      last_successful_turn_at: epochMsAgo(10),
+      last_turn_error_class: null,
+      last_turn_error_at: null,
+    },
     ...over,
   };
 }
@@ -76,6 +101,39 @@ describe('watchdog decision block — credential death', () => {
     expect(r.stderr).toContain('CREDENTIAL-DEAD');
   });
 
+  it('exits 3 for the observed stale-usable payload while an auth-required fallback is active', () => {
+    const r = runDecision(healthyPayload({
+      status: 'degraded',
+      instance: { effectiveProvider: 'opencode-cli', fallbackReason: 'auth-required' },
+      turn_capability: {
+        model_usable: null,
+        model_usable_stale: true,
+        model_usability_status: 'usable',
+        last_successful_turn_at: epochMsAgo(20),
+        last_turn_error_class: 'auth-required',
+        last_turn_error_at: epochMsAgo(10),
+      },
+    }));
+    expect(r.status).toBe(3);
+    expect(r.stderr).toContain('CREDENTIAL-DEAD');
+    expect(r.stderr).toContain('fallbackReason');
+  });
+
+  it('exits 3 for a current auth-required turn error without an active fallback', () => {
+    const r = runDecision(healthyPayload({
+      turn_capability: {
+        model_usable: null,
+        model_usable_stale: true,
+        model_usability_status: 'usable',
+        last_successful_turn_at: epochMsAgo(20),
+        last_turn_error_class: 'auth-required',
+        last_turn_error_at: epochMsAgo(10),
+      },
+    }));
+    expect(r.status).toBe(3);
+    expect(r.stderr).toContain('last_turn_error_class=auth-required');
+  });
+
   it('still exits 0 for a healthy, usable bot', () => {
     const r = runDecision(healthyPayload());
     expect(r.status).toBe(0);
@@ -87,10 +145,110 @@ describe('watchdog decision block — credential death', () => {
     expect(r.status).toBe(0);
   });
 
-  it('exits 0 when turn_capability is absent or null (no evidence is not credential death)', () => {
-    expect(runDecision(healthyPayload({ turn_capability: null })).status).toBe(0);
+  it('exits 4 (stderr-silent) when turn_capability is absent or null — no evidence is unknown, not recovery', () => {
+    // Permanent and correct for non-agent instances: watchdogs install for
+    // every instance type, and non-agent health has turn_capability=null.
+    const absent = runDecision(healthyPayload({ turn_capability: null }));
+    expect(absent.status).toBe(4);
+    expect(absent.stderr).not.toContain('CREDENTIAL');
     const { turn_capability: _drop, ...rest } = healthyPayload();
-    expect(runDecision(rest).status).toBe(0);
+    expect(runDecision(rest).status).toBe(4);
+  });
+
+  it('exits 4 (stderr-silent) for stale usable evidence without a current auth failure', () => {
+    // The healthy idle bot past its 30-minute probe TTL lands here every
+    // cycle — a stderr line here would double idle log volume fleet-wide.
+    const r = runDecision(healthyPayload({
+      turn_capability: {
+        model_usable: null,
+        model_usable_stale: true,
+        model_usability_status: 'usable',
+        last_successful_turn_at: epochMsAgo(10),
+        last_turn_error_class: null,
+        last_turn_error_at: null,
+      },
+    }));
+    expect(r.status).toBe(4);
+    expect(r.stderr).not.toContain('CREDENTIAL');
+  });
+
+  it('a bare usable status with no probe evidence is NOT recovered (regression to the one-field contract)', () => {
+    const r = runDecision(healthyPayload({
+      turn_capability: { model_usability_status: 'usable' },
+    }));
+    expect(r.status).toBe(4);
+  });
+
+  it('non-dead usability statuses classify unknown (exit 4) — the dead set is exactly credential-unavailable', () => {
+    for (const status of ['model-unavailable', 'provider-unavailable', 'timeout', 'unknown', null]) {
+      const r = runDecision(healthyPayload({
+        turn_capability: { model_usability_status: status },
+      }));
+      expect(r.status, `model_usability_status=${String(status)}`).toBe(4);
+      expect(r.stderr).not.toContain('CREDENTIAL-DEAD');
+    }
+  });
+
+  it('exits 5 with a CREDENTIAL-UNKNOWN line while a non-auth fallback window is active', () => {
+    const r = runDecision(healthyPayload({
+      instance: { fallbackReason: 'usage-limit' },
+      turn_capability: {
+        model_usable: null,
+        model_usable_stale: true,
+        model_usability_status: 'usable',
+        last_successful_turn_at: epochMsAgo(10),
+        last_turn_error_class: null,
+        last_turn_error_at: null,
+      },
+    }));
+    expect(r.status).toBe(5);
+    expect(r.stderr).toContain('CREDENTIAL-UNKNOWN');
+  });
+
+  it('preserves non-null fallback semantics without projecting object contents', () => {
+    const r = runDecision(healthyPayload({
+      instance: { fallbackReason: { secret: 'DO-NOT-LOG-OBJECT-CONTENT' } },
+    }));
+    expect(r.status).toBe(5);
+    expect(r.stderr).toContain('fallbackReason=present');
+    expect(r.stderr).not.toContain('DO-NOT-LOG-OBJECT-CONTENT');
+  });
+
+  it('bounds fallback logging without changing empty or arbitrary-string exit semantics', () => {
+    for (const fallbackReason of ['', `line-one\nline-two-${'x'.repeat(2_000)}`]) {
+      const r = runDecision(healthyPayload({ instance: { fallbackReason } }));
+      expect(r.status).toBe(5);
+      expect(r.stderr).toContain('fallbackReason=present');
+      expect(r.stderr).not.toContain('line-two');
+      expect(r.stderr.length).toBeLessThan(200);
+      expect(r.stderr.trim().split('\n')).toHaveLength(1);
+    }
+  });
+
+  it('classifies the unauthenticated public envelope as untrusted evidence (exit 6)', () => {
+    // #2515: the 4-field public envelope has no whatsapp block, so the
+    // diagnostic object shape, so it can never clear the marker or restart.
+    const r = runDecision({
+      schema_version: 'health.public.v1',
+      status: 'healthy',
+      generated_at: new Date().toISOString(),
+      startupNotification: null,
+    });
+    expect(r.status).toBe(6);
+  });
+
+  it('accepts a later successful turn as superseding an older auth-required turn error', () => {
+    const r = runDecision(healthyPayload({
+      turn_capability: {
+        model_usable: true,
+        model_usable_stale: false,
+        model_usability_status: 'usable',
+        last_successful_turn_at: epochMsAgo(10),
+        last_turn_error_class: 'auth-required',
+        last_turn_error_at: epochMsAgo(20),
+      },
+    }));
+    expect(r.status).toBe(0);
   });
 
   it('keeps restart-worthy failures on exit 1 even when the credential is also dead (crash wins)', () => {
@@ -102,7 +260,7 @@ describe('watchdog decision block — credential death', () => {
     expect(r.status).toBe(1);
   });
 
-  it('keeps the terminal-auth no-restart branch on exit 0 (unchanged)', () => {
+  it('routes the terminal-auth branch to unknown-quiescent (exit 4): no restart, marker retained', () => {
     const r = runDecision(healthyPayload({
       status: 'unhealthy',
       whatsapp: {
@@ -110,7 +268,79 @@ describe('watchdog decision block — credential death', () => {
         connection: { state: 'close', last_pong_at: null, auth_failure_class: 'pairing_required' },
       },
     }));
-    expect(r.status).toBe(0);
+    expect(r.status).toBe(4);
+    expect(r.stderr).toContain('terminal auth_failure_class');
+  });
+});
+
+describe('watchdog decision block — recovery requires fresh, coherent evidence', () => {
+  // "Affirmative fresh primary recovery" is the ONLY marker-clearing exit; a
+  // cached/stale body or an HTTP-incoherent response must never qualify.
+  it('a stale generated_at must not reach recovery (exit 4, marker retained)', () => {
+    const r = runDecision(healthyPayload({ generated_at: '2000-01-01T00:00:00Z' }));
+    expect(r.status).toBe(4);
+    expect(r.stderr).toBe('');
+  });
+
+  it('a missing generated_at must not reach recovery', () => {
+    const { generated_at: _drop, ...rest } = healthyPayload();
+    expect(runDecision(rest).status).toBe(4);
+  });
+
+  it('an HTTP 503 response must not reach recovery even with recovery-shaped fields', () => {
+    const r = runDecision(healthyPayload(), '503');
+    expect(r.status).toBe(4);
+  });
+});
+
+describe('watchdog decision block — malformed evidence is HEALTH-UNKNOWN', () => {
+  it('exits 6 for a string instance field on an otherwise-recovered-looking bot', () => {
+    const r = runDecision(healthyPayload({ instance: 'future-shape' }));
+    expect(r.status).toBe(6);
+    expect(r.stderr).toContain('untrusted instance');
+  });
+
+  it('exits 6 for an array instance field — a malformed shape must never reach recovery', () => {
+    const r = runDecision(healthyPayload({ instance: [] }));
+    expect(r.status).toBe(6);
+    expect(r.stderr).toContain('untrusted instance');
+  });
+
+  it('does not trust a dead usability status paired with a malformed instance shape', () => {
+    const r = runDecision(healthyPayload({
+      instance: 'future-shape',
+      turn_capability: { model_usability_status: 'credential-unavailable' },
+    }));
+    expect(r.status).toBe(6);
+    expect(r.stderr).not.toContain('CREDENTIAL-DEAD');
+  });
+
+  it('rejects malformed turn capability before a liveness failure can authorize restart', () => {
+    const r = runDecision({
+      status: 'unhealthy',
+      whatsapp: {
+        connected: false,
+        connection: {
+          state: 'close',
+          last_pong_at: null,
+          auth_failure_class: 'none',
+        },
+      },
+      instance: { fallbackReason: null },
+      turn_capability: ['malformed'],
+    });
+    expect(r.status).toBe(6);
+    expect(r.stderr).toContain('untrusted turn capability');
+  });
+
+  it('rejects duplicate keys at any nesting level with exit 6', () => {
+    const r = runRawDecision(
+      '{"status":"healthy","whatsapp":{"connected":true,"connection":{"state":"connected"}},' +
+      '"turn_capability":{"model_usability_status":"credential-unavailable"},' +
+      '"turn_capability":{"model_usability_status":"usable"}}',
+    );
+    expect(r.status).toBe(6);
+    expect(r.stderr).toContain('untrusted diagnostic health JSON');
   });
 });
 
@@ -128,8 +358,47 @@ describe('watchdog shell wiring — exit 3 routes to marker + log, never restart
     expect(branch).not.toContain('restart_label');
   });
 
-  it('clears the marker file on a passing check so the marker reflects current state', () => {
-    expect(template).toMatch(/rm -f "\$CRED_MARKER"/);
+  it('routes exits 4 and 5 to a no-restart, no-marker-mutation branch ahead of the generic restart elif', () => {
+    const branch = template.match(
+      /elif \[ "\$py_rc" -eq 4 \] \|\| \[ "\$py_rc" -eq 5 \]; then\n([\s\S]*?)\n\s*elif \[ "\$py_rc" -ne 0 \]/,
+    )?.[1];
+    expect(branch, 'unknown-state branch missing or ordered after the restart elif').toBeTruthy();
+    expect(branch).toContain('CREDENTIAL-UNKNOWN');
+    expect(branch).not.toContain('restart_label');
+    expect(branch).not.toContain('touch "$CRED_MARKER"');
+    expect(branch).not.toContain('rm -f "$CRED_MARKER"');
+  });
+
+  it('routes decision exit 6 to HEALTH-UNKNOWN without restart or marker mutation', () => {
+    const branch = template.match(
+      /elif \[ "\$py_rc" -eq 6 \]; then\n([\s\S]*?)\n\s*elif \[ "\$py_rc" -ne 0 \]/,
+    )?.[1];
+    expect(branch, 'exit-6 branch missing or ordered after generic restart').toBeTruthy();
+    expect(branch).toContain('health_unknown');
+    expect(branch).not.toContain('restart_label');
+    expect(branch).not.toContain('CRED_MARKER');
+    expect(template).toMatch(/health_unknown\(\)[\s\S]*WD_EXIT=2/);
+    expect(template).toMatch(/65536/);
+    expect(template).toContain('object_pairs_hook=reject_duplicate_keys');
+  });
+
+  it('clears the marker only through the validated marker helper', () => {
+    expect(template).toContain('credential_marker clear');
+    expect(template).not.toMatch(/rm -f "\$CRED_MARKER"/);
+  });
+
+  it('uses no-follow exclusive creation and tri-state validation for the marker', () => {
+    expect(template).toContain('credential_marker()');
+    expect(template).toContain('credential_marker create');
+    expect(template).toContain('credential_marker state');
+    expect(template).toContain('follow_symlinks=False');
+    expect(template).toContain('os.O_EXCL');
+    expect(template).toContain('getattr(os, "O_NOFOLLOW", 0)');
+    expect(template).toContain('0o600');
+    expect(template).not.toMatch(/touch "\$CRED_MARKER"/);
+    expect(template).not.toMatch(/\[ (?:! )?-e "\$CRED_MARKER" \]/);
+    expect(template).toMatch(/WD_EXIT=1/);
+    expect(template).toMatch(/exit "\$WD_EXIT"/);
   });
 
   it('keeps nonzero-but-not-3 exits on the restart path', () => {
@@ -145,23 +414,28 @@ describe('watchdog shell wiring — authenticated health read (#2515 public enve
   // CREDENTIAL-DEAD branch can never see turn_capability at all. Surfaced
   // live on mini11 (2026-07-29): the watchdog kicked a healthy bot two
   // minutes after a green gate. The bot health curl must therefore send the
-  // instance bearer from tokens.env when one resolves.
-  it('resolves the bearer from the instance tokens.env', () => {
+  // instance bearer from a strictly validated tokens.env.
+  it('reads the bearer through a private descriptor with canonical validation', () => {
     expect(template).toMatch(/BOT_TOKENS_ENV="\$HOME_DIR\/\.config\/whatsoup\/instances\/BOT_NAME\/tokens\.env"/);
-    expect(template).toMatch(/WHATSOUP_HEALTH_TOKEN=.*sed -n 's\/\^WHATSOUP_HEALTH_TOKEN=\/\/p'/);
+    expect(template).toContain('os.lstat(path)');
+    expect(template).toContain('getattr(os, "O_NOFOLLOW", 0)');
+    expect(template).toContain('stat.S_IMODE(file_before.st_mode) != 0o600');
+    expect(template).toContain('(file_before.st_dev, file_before.st_ino) != (opened.st_dev, opened.st_ino)');
+    expect(template).toContain('TOKEN_RE.fullmatch(token)');
+    expect(template).not.toMatch(/sed -n 's\/\^WHATSOUP_HEALTH_TOKEN=/);
   });
 
-  it('sends the bearer on the bot health curl when available', () => {
-    expect(template).toMatch(/AUTH_ARGS=\(\)/);
-    expect(template).toMatch(/AUTH_ARGS=\(-H "Authorization: Bearer \$WHATSOUP_HEALTH_TOKEN"\)/);
-    const botCurl = template.match(/bot_resp="\$\(curl[^\n]*/)?.[0];
+  it('sends the bearer through curl config stdin, never curl argv', () => {
+    const botCurl = template.match(/bot_resp="\$\([^\n]*curl --config -[^\n]*/)?.[0];
     expect(botCurl, 'bot health curl line missing').toBeTruthy();
-    expect(botCurl).toContain('"${AUTH_ARGS[@]}"');
+    expect(botCurl).toContain('header = \\"Authorization: Bearer $HEALTH_TOKEN\\"');
+    expect(botCurl).not.toContain(' -H ');
+    expect(template).not.toContain('AUTH_ARGS=');
   });
 
   it('never writes the token to the log', () => {
-    // The token flows only into curl argv; no log/echo/print line references it.
-    const tokenUses = template.split('\n').filter((l) => l.includes('WHATSOUP_HEALTH_TOKEN') && /\b(log|echo|print)\b/.test(l));
-    expect(tokenUses).toEqual([]);
+    expect(template).not.toMatch(/export[^\n]*HEALTH_TOKEN/);
+    expect(template).not.toMatch(/log[^\n]*\$HEALTH_TOKEN/);
+    expect(template).toMatch(/curl_rc=\$\?\n\s*HEALTH_TOKEN=""/);
   });
 });

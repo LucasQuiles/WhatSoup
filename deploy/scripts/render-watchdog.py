@@ -9,7 +9,10 @@ host-free modes (NO ssh, NO host mutation, NO secret access):
           [--username U] [--out FILE] [--json]
       Substitute the host tokens, FAIL CLOSED if any known placeholder survives
       (the exact bug that churned mini7/8/9: literal BOT_PORT/FLEET_PORT), reject
-      non-numeric/out-of-range ports, and emit the rendered script + its sha256.
+      non-numeric/out-of-range ports AND shell-unsafe identity values (the
+      substitution is raw text replacement, so an unvalidated bot name, home, or
+      username would become executable fragments in the rendered script), and
+      emit the rendered script + its sha256.
 
   verify  --script FILE [--json]
       Report any surviving placeholder tokens + sha256 for an already-installed
@@ -22,6 +25,7 @@ Exit codes (typed failure classes):
   3 BAD_PORT                   (bot/fleet port not an integer in 1..65535)
   4 BAD_INPUT                  (missing arg / unreadable template)
   5 IO_ERROR                   (write failed)
+  6 UNSAFE_VALUE               (bot name / home / username outside the safe charset)
 
 The tool never reads credentials and never contacts a host. Installation
 (backup + checksum transfer + launchctl) stays an explicit owner-gated step.
@@ -44,6 +48,36 @@ EXIT_UNSUBSTITUTED = 2
 EXIT_BAD_PORT = 3
 EXIT_BAD_INPUT = 4
 EXIT_IO_ERROR = 5
+EXIT_UNSAFE_VALUE = 6
+
+# The substitution below is raw text replacement into a zsh script (and its
+# embedded Python heredoc), so identity values must stay inside charsets that
+# cannot terminate a quote, expand, or comment. Conservative on purpose.
+_BOT_NAME_RE = re.compile(r"[a-z0-9][a-z0-9-]{0,63}\Z")
+_USERNAME_RE = re.compile(r"[A-Za-z0-9_][A-Za-z0-9._-]{0,31}\Z")
+_HOME_RE = re.compile(r"/[A-Za-z0-9._/-]*\Z")
+
+
+def _unsafe_value(*, bot_name: str, home: str, username: str) -> tuple[str, str] | None:
+    """Return (field, reason) for the first unsafe identity value, else None."""
+    for field, value in (
+        ("--bot-name", bot_name),
+        ("--home", home),
+        ("--username", username),
+    ):
+        if any(token in value for token in PLACEHOLDER_TOKENS):
+            return (field, "must not contain a reserved template placeholder token")
+    if not _BOT_NAME_RE.fullmatch(bot_name):
+        return ("--bot-name", "must match [a-z0-9][a-z0-9-]* (max 64 chars)")
+    if (
+        not _HOME_RE.fullmatch(home)
+        or ".." in home.split("/")
+        or (len(home) > 1 and home.endswith("/"))
+    ):
+        return ("--home", "must be an absolute [A-Za-z0-9._/-] path without .. segments")
+    if username and not _USERNAME_RE.fullmatch(username):
+        return ("--username", "must match [A-Za-z0-9_][A-Za-z0-9._-]* (max 32 chars)")
+    return None
 
 
 def _valid_port(value: str) -> bool:
@@ -100,6 +134,12 @@ def cmd_render(args: argparse.Namespace) -> int:
             _emit({"mode": "render", "status": "bad_port", "field": label, "value": value},
                   as_json=args.json, human=f"BAD_PORT: {label}={value!r} is not an integer in 1..65535")
             return EXIT_BAD_PORT
+    unsafe = _unsafe_value(bot_name=args.bot_name, home=args.home, username=args.username)
+    if unsafe is not None:
+        field, reason = unsafe
+        _emit({"mode": "render", "status": "unsafe_value", "field": field, "reason": reason},
+              as_json=args.json, human=f"UNSAFE_VALUE: {field} {reason}")
+        return EXIT_UNSAFE_VALUE
     try:
         template_text = Path(args.template).read_text(encoding="utf-8")
     except OSError as err:

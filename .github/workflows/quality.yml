@@ -95,11 +95,13 @@ jobs:
       # qSesh Python lane (tools/qsesh): pinned Ruff + ShellCheck, then the
       # lint/test package scripts. Requires the Setup Python 3.12 step above.
       # ripgrep is also a hard requirement of the console design-regression gate.
+      # zsh runs the rendered-watchdog whole-script suites in the BOT ERRORS
+      # full-suite step (otherwise skipif-skipped).
       - name: Install Python and Linux quality prerequisites
         run: |
           python3 -m pip install --user pytest pytest-cov hypothesis ruff==0.15.10
           sudo apt-get update
-          sudo apt-get install -y shellcheck ripgrep
+          sudo apt-get install -y shellcheck ripgrep zsh
 
       - name: qSesh lint
         run: npm run lint:qsesh
