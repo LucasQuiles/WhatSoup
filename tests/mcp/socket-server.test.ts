@@ -13,6 +13,7 @@ import {
 } from '../../src/mcp/socket-server.ts';
 import { ToolRegistry } from '../../src/mcp/registry.ts';
 import type { SessionContext, ToolDeclaration } from '../../src/mcp/types.ts';
+import { once } from 'node:events';
 import { waitForSocket } from '../helpers/wait-for.ts';
 import { makeSocketPath, sendJsonRpc } from '../helpers/socket-rpc.ts';
 
@@ -447,8 +448,7 @@ describe('WhatSoupSocketServer', () => {
 
     // Server should unlink the stale file and bind without error
     server = new WhatSoupSocketServer(socketPath, registry, session);
-    server.start();
-    await waitForSocket(socketPath);
+    await server.startAndWait();
 
     // Verify the server is functional after cleanup
     const response = await sendJsonRpc(socketPath, {
@@ -468,7 +468,7 @@ describe('WhatSoupSocketServer', () => {
     const longPath = join(tmpdir(), 'x'.repeat(limit));
 
     server = new WhatSoupSocketServer(longPath, registry, session);
-    await expect(server.startAndWait()).rejects.toThrow('SocketPathTooLongError');
+    await expect(server.startAndWait()).rejects.toThrow(SocketPathTooLongError);
   });
 
   it('permits a socket path exactly at SUN_PATH_LIMIT', async () => {
@@ -490,7 +490,7 @@ describe('WhatSoupSocketServer', () => {
 
     // Second server at same path — should detect collision
     const second = new WhatSoupSocketServer(socketPath, registry, makeSession());
-    await expect(second.startAndWait()).rejects.toThrow('SocketCollisionError');
+    await expect(second.startAndWait()).rejects.toThrow(SocketCollisionError);
 
     // First server must still be functional
     const response = await sendJsonRpc(socketPath, {
@@ -513,17 +513,13 @@ describe('WhatSoupSocketServer', () => {
       `,
     ], { stdio: ['pipe', 'pipe', 'pipe', 'ipc'] });
 
-    await new Promise<void>((resolve) => {
-      const onMsg = (msg: string) => {
-        if (msg === 'ready') resolve();
-      };
-      child.on('message', onMsg);
-      setTimeout(() => resolve(), 2000);
-    });
+    // Deterministic: the socket file appearing IS the readiness signal.
+    await waitForSocket(deadPath);
     expect(existsSync(deadPath)).toBe(true);
     child.kill('SIGKILL');
-    // Give OS time to acknowledge the kill
-    await new Promise((r) => setTimeout(r, 200));
+    // Deterministic: the exit event proves the kill landed (same idiom as
+    // per-chat-mcp-socket-manager.test.ts) — the socket inode is orphaned after this.
+    await once(child, 'exit');
 
     // Now start our server at the same path — should unlink the dead socket
     const deadServer = new WhatSoupSocketServer(deadPath, registry, session);
