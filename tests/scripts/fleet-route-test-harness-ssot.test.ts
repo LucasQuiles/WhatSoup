@@ -37,7 +37,7 @@ const EXCLUDED = new Set<string>([
 // makeDeps() — i.e. its body contains a hand-rolled object literal rather
 // than `return makeDeps(`.
 const OPSDEPS_BUILDER = /(?:function|const)\s+(makeDeps|depsFor|successDeps|failingDeps|succeedingDeps)\b/;
-const USES_SHARED_MAKEDEPS = /return\s+makeDeps\s*\(/;
+const USES_SHARED_MAKEDEPS = /return\s+makeDeps\s*(?:<[^>]*>)?\s*\(/;
 
 function collectFleetTestFiles(): string[] {
   return readdirSync(fleetTestRoot, { recursive: true, withFileTypes: true })
