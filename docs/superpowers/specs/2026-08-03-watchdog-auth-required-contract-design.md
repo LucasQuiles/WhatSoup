@@ -111,13 +111,18 @@ unparseable timestamp never converts an auth-required error into recovery.
 Recovery requires all of the following:
 
 - no credential-dead signal above;
+- the response arrived with HTTP `200`;
+- `generated_at` parses and lies inside the freshness window (−5..60 s), so a cached or
+  replayed body can never qualify;
 - `turn_capability.model_usable == true`;
 - `turn_capability.model_usable_stale == false`;
 - `turn_capability.model_usability_status == usable`; and
 - `instance.fallbackReason` is null or absent.
 
 The decision block exits `0`. The shell may remove an existing credential marker. This is an
-affirmative primary-recovery proof, not merely absence of a failure field.
+affirmative FRESH primary-recovery proof, not merely absence of a failure field: a stale
+`generated_at`, a missing `generated_at`, or a non-200 status with recovery-shaped fields all
+classify unknown and retain the marker.
 
 ### `unknown`
 

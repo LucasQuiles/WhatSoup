@@ -84,6 +84,8 @@ _CONNECTED = {
 def _health(status: str, **overrides) -> dict:
     body = {
         "status": status,
+        # Recovery (exit 0) additionally requires FRESH evidence.
+        "generated_at": dt.datetime.now(dt.timezone.utc).isoformat(),
         "instance": {"fallbackReason": None},
         "turn_capability": {
             "model_usable": True,

@@ -738,8 +738,14 @@ if credential_dead_signal:
     print(f"CREDENTIAL-DEAD: {credential_dead_signal} — reauth required", file=sys.stderr)
     sys.exit(3)
 
+# Recovery is the ONLY marker-clearing exit, so it additionally demands a
+# coherent, fresh response: HTTP 200 and a generated_at inside the drain
+# freshness window. A cached/stale body or a 503 carrying recovery-shaped
+# fields classifies unknown instead — the marker stays until fresh proof.
 credential_recovered = (
     instance_shape_valid
+    and http_code == "200"
+    and generated_is_fresh
     and model_usable is True
     and model_usable_stale is False
     and model_status == "usable"

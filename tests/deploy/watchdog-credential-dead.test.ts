@@ -61,6 +61,7 @@ function runRawDecision(payload: string, httpCode = '200'): RunResult {
 function healthyPayload(over: Record<string, unknown> = {}): Record<string, unknown> {
   return {
     status: 'healthy',
+    generated_at: new Date().toISOString(),
     whatsapp: {
       connected: true,
       connection: {
@@ -269,6 +270,26 @@ describe('watchdog decision block — credential death', () => {
     }));
     expect(r.status).toBe(4);
     expect(r.stderr).toContain('terminal auth_failure_class');
+  });
+});
+
+describe('watchdog decision block — recovery requires fresh, coherent evidence', () => {
+  // "Affirmative fresh primary recovery" is the ONLY marker-clearing exit; a
+  // cached/stale body or an HTTP-incoherent response must never qualify.
+  it('a stale generated_at must not reach recovery (exit 4, marker retained)', () => {
+    const r = runDecision(healthyPayload({ generated_at: '2000-01-01T00:00:00Z' }));
+    expect(r.status).toBe(4);
+    expect(r.stderr).toBe('');
+  });
+
+  it('a missing generated_at must not reach recovery', () => {
+    const { generated_at: _drop, ...rest } = healthyPayload();
+    expect(runDecision(rest).status).toBe(4);
+  });
+
+  it('an HTTP 503 response must not reach recovery even with recovery-shaped fields', () => {
+    const r = runDecision(healthyPayload(), '503');
+    expect(r.status).toBe(4);
   });
 });
 

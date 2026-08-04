@@ -87,6 +87,7 @@ def _fallback_unknown_body() -> str:
 
 def _recovered_body() -> str:
     return _liveness_ok(
+        generated_at=_iso_now(),  # recovery additionally requires FRESH evidence
         instance={"fallbackReason": None},
         turn_capability={
             "model_usable": True,

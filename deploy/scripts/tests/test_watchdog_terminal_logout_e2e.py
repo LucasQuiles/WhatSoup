@@ -18,6 +18,7 @@ logic itself is covered portably by test_watchdog_restart_policy.py.
 
 from __future__ import annotations
 
+import datetime as dt
 import os
 import json
 import shutil
@@ -56,6 +57,8 @@ _DEAD_PROVIDER_BODY = json.dumps({
 })
 _RECOVERED_PROVIDER_BODY = json.dumps({
     "status": "healthy",
+    # Recovery (the only marker-clearing exit) additionally requires FRESH evidence.
+    "generated_at": dt.datetime.now(dt.timezone.utc).isoformat(),
     "instance": {"effectiveProvider": "claude-cli", "fallbackReason": None},
     "whatsapp": {"connected": True, "connection": {"state": "connected"}},
     "turn_capability": {

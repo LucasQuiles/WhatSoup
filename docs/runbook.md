@@ -371,10 +371,11 @@ transport and process liveness pass:
   been superseded by a later successful turn. The watchdog creates/retains the
   marker (`~/Library/Logs/whatsoup/<instance>-credential-dead.marker`) and does
   not restart the bot; a restart cannot restore provider credentials.
-- **recovered** — recovery is affirmative: `model_usable=true`, the result is
-  not stale, status is `usable`, and no fallback window is active. Only this
-  state clears an existing credential marker; missing or stale evidence never
-  does.
+- **recovered** — recovery is affirmative AND fresh: HTTP `200`, `generated_at`
+  within the freshness window, `model_usable=true`, the result is not stale,
+  status is `usable`, and no fallback window is active. Only this state clears
+  an existing credential marker; missing, stale, or HTTP-incoherent evidence
+  never does.
 - **unknown** — provider evidence is absent, stale, or otherwise inconclusive
   (including non-agent instances, which carry no `turn_capability` at all).
   The watchdog neither restarts the bot nor changes the marker.
