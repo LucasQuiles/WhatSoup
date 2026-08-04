@@ -42,23 +42,8 @@ const mockedLookupCredential = vi.mocked(lookupCredential);
 
 import { makeDeps, mockReq, mockRes } from '../helpers/http-mocks.ts';
 
-function makeDeps(): OpsDeps {
-  return {
-    discovery: {
-      getInstance: vi.fn(() => undefined),
-      getInstances: vi.fn(() => new Map()),
-      scan: vi.fn(),
-    } as any,
-    realtime: { publish: vi.fn() },
-    serviceManager: {
-      enable: vi.fn().mockResolvedValue(undefined),
-      disable: vi.fn().mockResolvedValue(undefined),
-      start: vi.fn().mockResolvedValue(undefined),
-      stop: vi.fn().mockResolvedValue(undefined),
-      restart: vi.fn().mockResolvedValue(undefined),
-      startFire: vi.fn(),
-    },
-  };
+function depsFor(): OpsDeps {
+  return makeDeps();
 }
 
 describe('ops handleCreateLine spawn-token warn', () => {
@@ -102,7 +87,7 @@ describe('ops handleCreateLine spawn-token warn', () => {
         adminPhones: ['+15551230000'],
       }), method: 'POST', url: '/api/lines' }),
       res,
-      makeDeps(),
+      depsFor(),
     );
 
     expect(res._status).toBe(201);
@@ -131,7 +116,7 @@ describe('ops handleCreateLine spawn-token warn', () => {
         adminPhones: ['+15551230001'],
       }), method: 'POST', url: '/api/lines' }),
       res,
-      makeDeps(),
+      depsFor(),
     );
 
     expect(res._status).toBe(201);

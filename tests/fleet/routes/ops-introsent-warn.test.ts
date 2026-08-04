@@ -35,7 +35,7 @@ import type { DiscoveredInstance } from '../../../src/fleet/discovery.ts';
 import { privateConfigLockPath } from '../../../src/core/private-config-file.ts';
 import { acquireProcessLock, releaseProcessLock } from '../../../src/lib/process-lock.ts';
 import { spawn } from 'node:child_process';
-import { mockReq, mockSseRes } from '../../helpers/http-mocks.ts';
+import { makeDeps, mockReq, mockSseRes } from '../../helpers/http-mocks.ts';
 
 function fakeInstance(overrides: Partial<DiscoveredInstance> = {}): DiscoveredInstance {
   return {
@@ -64,7 +64,7 @@ describe('handleAuth introSent reset failure', () => {
 
   it('warns when the introSent config rewrite fails after auth connects', async () => {
     const instance = fakeInstance();
-    const deps = makeDeps(instance);
+    const deps = depsFor(instance);
     const req = mockReq({ method: 'POST', url: '/api/lines/test-line/auth' });
     const res = mockSseRes();
 
@@ -117,7 +117,7 @@ describe('handleAuth introSent reset failure', () => {
 
     try {
       const instance = fakeInstance({ configPath });
-      const deps = makeDeps(instance);
+      const deps = depsFor(instance);
       const req = mockReq({ method: 'POST', url: '/api/lines/test-line/auth' });
       const res = mockSseRes();
 
