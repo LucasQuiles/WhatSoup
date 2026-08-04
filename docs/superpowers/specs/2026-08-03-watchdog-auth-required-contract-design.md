@@ -168,7 +168,11 @@ by a marker I/O failure: `CREDENTIAL-DEAD` on a failed create, `ok` on a failed 
 error line and the nonzero invocation exit carry the failure.
 
 The final log line is managed by an upgrade-only escalation ladder: `CREDENTIAL-DEAD` >
-`RESTARTED`/`RESTART-SUPPRESSED`/`RESTART-FAILED` > `CREDENTIAL-UNKNOWN` > `ok`. Restart
+`HEALTH-UNKNOWN` > `RESTART-FAILED` > `RESTARTED` > `RESTART-SUPPRESSED` > `ERROR` >
+`CREDENTIAL-UNKNOWN` > `ok`. Restart outcomes are severity-ordered within their tier so a
+mixed bot/fleet cycle reports the most actionable outcome (a suppressed bot restart cannot
+hide a fleet kickstart, and a successful bot restart cannot hide a failed fleet kickstart);
+per-job detail stays in the preceding log lines. Restart
 outcomes are recorded inside the restart helper at its terminal points and must be truthful:
 `RESTARTED` is recorded only after `launchctl kickstart` returns success, and only a successful
 kickstart arms the 5-minute cooldown stamp — a rejected kickstart logs

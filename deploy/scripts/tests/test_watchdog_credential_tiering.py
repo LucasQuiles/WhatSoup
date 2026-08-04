@@ -9,8 +9,10 @@ curl/launchctl stubs, pinning the FINAL LOG contract
 (docs/superpowers/specs/2026-08-03-watchdog-auth-required-contract-design.md):
 
 - the last log line per cycle is one machine-readable state chosen by an
-  upgrade-only ladder: CREDENTIAL-DEAD > RESTARTED/RESTART-SUPPRESSED/
-  RESTART-FAILED > CREDENTIAL-UNKNOWN > ok;
+  upgrade-only ladder: CREDENTIAL-DEAD > HEALTH-UNKNOWN > RESTART-FAILED >
+  RESTARTED > RESTART-SUPPRESSED > ERROR > CREDENTIAL-UNKNOWN > ok (restart
+  states severity-ordered so mixed bot/fleet cycles report the most
+  actionable outcome);
 - exit 3 ends on CREDENTIAL-DEAD; a fleet-console restart in the same cycle
   must not overwrite it;
 - exits 4/5 end on CREDENTIAL-UNKNOWN only when a marker is present or a
@@ -153,11 +155,18 @@ class Harness:
         print_rc: int = 0,
         bootstrap_rc: int = 0,
         make_log_readonly_on_print: bool = False,
+        kickstart_fail_label: str | None = None,
     ):
-        """Record every call; `print` emits print_body, `kickstart` exits kickstart_rc."""
+        """Record every call; `print` emits print_body, `kickstart` exits kickstart_rc
+        (or 1 for calls naming kickstart_fail_label — mixed-outcome fixtures)."""
         lc = self.home / ".local" / "bin" / "launchctl"
         readonly_line = (
             f"  chmod 400 '{self.log}'\n" if make_log_readonly_on_print else ""
+        )
+        kick_fail_line = (
+            f"  case \"$*\" in *'{kickstart_fail_label}'*) exit 1;; esac\n"
+            if kickstart_fail_label
+            else ""
         )
         lc.write_text(
             "#!/bin/sh\n"
@@ -171,6 +180,7 @@ class Harness:
             f"  exit {bootstrap_rc}\n"
             "fi\n"
             'if [ "$1" = kickstart ]; then\n'
+            f"{kick_fail_line}"
             f"  exit {kickstart_rc}\n"
             "fi\n"
             "exit 0\n",
@@ -470,6 +480,35 @@ def test_concurrent_fleet_restart_is_suppressed_by_mutex(tmp_path):
     finally:
         holder.kill()
         holder.wait()
+
+
+def test_mixed_bot_suppressed_fleet_restarted_final_is_restarted(tmp_path):
+    # Mixed bot/fleet outcomes: a suppressed bot restart must not hide that a
+    # fleet kickstart actually fired — the more actionable outcome wins.
+    h = Harness(tmp_path, "tier-mix-supp-bot", _unknown_body(), fleet_ok=False)
+    h.write_curl_stub("", fleet_ok=False, bot_unreachable=True)
+    h.seed_restart_stamp("com.whatsoup.tier-mix-supp-bot")
+    proc = h.run()
+    assert proc.returncode == 0, proc.stderr
+    calls = h.launchctl_calls()
+    assert "kickstart -k" in calls and "com.whatsoup.whatsoup-fleet" in calls
+    log_text = h.log.read_text(encoding="utf-8")
+    assert "restart suppressed by cooldown" in log_text
+    assert h.final_log_state() == "RESTARTED"
+
+
+def test_mixed_bot_restarted_fleet_kickstart_failure_final_is_restart_failed(tmp_path):
+    # The inverse: an earlier successful bot restart must not hide a later
+    # failed fleet kickstart.
+    h = Harness(tmp_path, "tier-mix-fail-bot", _unknown_body(), fleet_ok=False)
+    h.write_curl_stub("", fleet_ok=False, bot_unreachable=True)
+    h.write_launchctl_stub(kickstart_fail_label="whatsoup-fleet")
+    proc = h.run()
+    assert proc.returncode != 0, "a failed fleet kickstart must surface in the exit code"
+    log_text = h.log.read_text(encoding="utf-8")
+    assert "restarting com.whatsoup.tier-mix-fail-bot" in log_text
+    assert "ERROR: kickstart failed for com.whatsoup.whatsoup-fleet" in log_text
+    assert h.final_log_state() == "RESTART-FAILED"
 
 
 def test_stale_fleet_restart_mutex_is_reclaimed(tmp_path):

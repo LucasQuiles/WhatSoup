@@ -385,9 +385,10 @@ transport and process liveness pass:
 `CREDENTIAL-DEAD`, `HEALTH-UNKNOWN`, `RESTARTED`, `RESTART-SUPPRESSED`,
 `RESTART-FAILED`, `ERROR`, and `CREDENTIAL-UNKNOWN`. The line is chosen by an
 upgrade-only ladder — `CREDENTIAL-DEAD` > `HEALTH-UNKNOWN` >
-`RESTARTED`/`RESTART-SUPPRESSED`/`RESTART-FAILED` > `ERROR` >
+`RESTART-FAILED` > `RESTARTED` > `RESTART-SUPPRESSED` > `ERROR` >
 `CREDENTIAL-UNKNOWN` > `ok` — so untrusted diagnostic evidence cannot be
-masked by a restart outcome, a restart-worthy cycle never reports `ok`, and a
+masked by a restart outcome, a restart-worthy cycle never reports `ok`, a
+mixed bot/fleet cycle reports the most actionable restart outcome, and a
 credential verdict survives a fleet-console restart in the same cycle.
 `RESTARTED` is recorded only after `launchctl kickstart` succeeds; a rejected
 kickstart logs `ERROR: kickstart failed …`, ends on `RESTART-FAILED`, and

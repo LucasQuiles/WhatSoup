@@ -126,14 +126,18 @@ trap 'rm -rf "$LOCK" 2>/dev/null || true' EXIT
 # Final-log state ladder (upgrade-only). The last log line of each run is the
 # single machine-readable outcome; a higher-priority state must not be
 # overwritten by a later, lower-priority one (the fleet check runs after the
-# bot check, and a credential verdict outranks a restart outcome). Strict >
-# means equal-rank states keep the FIRST writer, so a bot restart outcome
-# outranks a fleet one within the tier.
+# bot check, and a credential verdict outranks a restart outcome). Restart
+# outcomes are severity-ordered — a failed kickstart beats a successful one
+# beats a suppression — so a mixed bot/fleet cycle reports the most actionable
+# outcome; per-job detail stays in the preceding log lines. Strict > means
+# identical states keep the first writer.
 wd_rank() {
   case "$1" in
-    CREDENTIAL-DEAD) print 6 ;;
-    HEALTH-UNKNOWN) print 5 ;;
-    RESTARTED|RESTART-SUPPRESSED|RESTART-FAILED) print 4 ;;
+    CREDENTIAL-DEAD) print 8 ;;
+    HEALTH-UNKNOWN) print 7 ;;
+    RESTART-FAILED) print 6 ;;
+    RESTARTED) print 5 ;;
+    RESTART-SUPPRESSED) print 4 ;;
     ERROR) print 3 ;;
     CREDENTIAL-UNKNOWN) print 2 ;;
     *) print 1 ;;
