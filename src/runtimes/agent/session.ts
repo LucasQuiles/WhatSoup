@@ -3984,19 +3984,20 @@ export class SessionManager {
       const providerSession = this.managedProviderSession;
       try {
         let timer: ReturnType<typeof setTimeout> | undefined;
+        const shutdownTimeoutError = new Error('MANAGED_PROVIDER_SHUTDOWN_TIMEOUT');
         try {
           await Promise.race([
             providerSession.shutdown(suspend ? 'suspend' : 'end'),
             new Promise<never>((_, reject) => {
               timer = setTimeout(
-                () => reject(new Error('MANAGED_PROVIDER_SHUTDOWN_TIMEOUT')),
+                () => reject(shutdownTimeoutError),
                 SessionManager.MANAGED_PROVIDER_SHUTDOWN_TIMEOUT_MS,
               );
-              timer.unref?.();
+              timer.unref();
             }),
           ]);
         } catch (raceErr) {
-          if (!(raceErr instanceof Error) || raceErr.message !== 'MANAGED_PROVIDER_SHUTDOWN_TIMEOUT') {
+          if (raceErr !== shutdownTimeoutError) {
             throw raceErr;
           }
           log.warn({ chatJid: this.chatJid, sessionId: this.sessionId, provider: this.provider }, 'managed provider shutdown timed out — force-killing');
