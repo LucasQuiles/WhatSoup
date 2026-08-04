@@ -69,6 +69,16 @@ function conversationBoundMaySee(tool: ToolDeclaration): boolean {
   return tool.scope === 'chat' || CONVERSATION_SAFE_GLOBAL_TOOLS.has(tool.name);
 }
 
+/** Would this session's tools/list include this tool? Single predicate shared
+ *  by listTools filtering and the R1 denial-shape split (list-visible sessions
+ *  get a typed admin_required denial; hidden-listing sessions keep the
+ *  non-disclosing "Unknown tool" reply). */
+function sessionWouldList(tool: ToolDeclaration, session: SessionContext): boolean {
+  if (session.tier === 'chat-scoped' && tool.scope === 'global') return false;
+  if (conversationBoundKey(session) !== undefined && !conversationBoundMaySee(tool)) return false;
+  return true;
+}
+
 // ---------------------------------------------------------------------------
 // Zod → JSON Schema (minimal, handles the types we use in tool declarations)
 // ---------------------------------------------------------------------------
@@ -394,15 +404,7 @@ export class ToolRegistry {
 
     const isBound = conversationBoundKey(session) !== undefined;
     for (const tool of this.tools.values()) {
-      // Chat-scoped sessions may not use global-scope tools
-      if (session.tier === 'chat-scoped' && tool.scope === 'global') {
-        continue;
-      }
-
-      // Conversation-bound sessions: default-deny outside the eligibility set.
-      if (isBound && !conversationBoundMaySee(tool)) {
-        continue;
-      }
+      if (!sessionWouldList(tool, session)) continue;
 
       result.push({
         name: tool.name,
