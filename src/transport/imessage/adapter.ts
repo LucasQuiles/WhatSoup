@@ -36,7 +36,6 @@ import type {
   TransportError,
 } from '../contract/index.ts';
 import { makeSubscription } from '../contract/subscription.ts';
-import { AdapterReasonCode } from '../contract/adapter-reason-codes.ts';
 import {
   AuthRequiredError,
   ConversationNotFoundError,
@@ -159,6 +158,18 @@ function trimSeenSet(seen: Set<string>): void {
   }
 }
 
+/**
+ * Bound the read-receipt dedup set to the same cap as `seen`. Only outbound
+ * message guids enter this set, so it grows more slowly than `seen`, but it
+ * still needs a cap to prevent unbounded growth across a long-running session.
+ */
+function trimReadReceiptSet(reads: Set<string>): void {
+  for (const oldest of reads) {
+    if (reads.size <= DEDUPE_CAP) break;
+    reads.delete(oldest);
+  }
+}
+
 // iMessage itself has no hard text cap, but BlueBubbles Server chunks at
 // ~64 KiB and imsg's framework bridge truncates above 64 KiB. Match Signal's
 // 64 KiB ceiling for cross-transport uniformity.
@@ -209,6 +220,20 @@ export class ImessageAdapter
 
   private lastPolledAt: Date = new Date(0);
   private readonly seen: Set<string> = new Set();
+  /**
+   * Wall-clock time this connection was established. Used by the read-receipt
+   * restart-dedup filter: a `dateRead` older than this value was set before
+   * this session and is suppressed to avoid replaying reads from a prior run.
+   * Unlike `lastPolledAt` (which advances as polls succeed), this is frozen
+   * at connect time so mid-session reads always pass the filter.
+   */
+  private sessionStartedAt: Date = new Date(0);
+  /**
+   * Outbound-message guids for which a ReadEvent has already been emitted
+   * this session. Prevents double-emission of the same read transition if
+   * the same record appears in successive poll pages.
+   */
+  private readonly emittedReadReceipts: Set<string> = new Set();
   private pollTimer: ReturnType<typeof setInterval> | null = null;
   private disposed = false;
   private cursorInitialized = false;
@@ -288,6 +313,7 @@ export class ImessageAdapter
     if (!this.cursorInitialized && this.inboundMode === 'poll' && this.pollIntervalMs > 0) {
       this.lastPolledAt = new Date(Date.now() - this.pollIntervalMs);
     }
+    this.sessionStartedAt = new Date();
     this.cursorInitialized = true;
     this.transitionTo({ state: 'connected', since: new Date() });
 
@@ -534,7 +560,7 @@ export class ImessageAdapter
             clearInterval(this.pollTimer);
             this.pollTimer = null;
           }
-          this.transitionTo({ state: 'auth_required', since: new Date(), reasonCode: AdapterReasonCode.PollAuthFailure });
+          this.transitionTo({ state: 'auth_required', since: new Date(), reasonCode: 'poll-auth-failure' });
         }
         return;
       }
@@ -542,10 +568,23 @@ export class ImessageAdapter
       if (this.disposed || generation !== this.lifecycleGeneration) return;
 
       for (const record of records) {
-        if (this.inboundMaxTimestamp === null || record.timestamp > this.inboundMaxTimestamp) {
-          this.inboundMaxTimestamp = record.timestamp;
+        try {
+          if (this.inboundMaxTimestamp === null || record.timestamp > this.inboundMaxTimestamp) {
+            this.inboundMaxTimestamp = record.timestamp;
+          }
+          this.handleInboundRecord(record);
+        } catch (err) {
+          // A malformed provider record must not crash the poll loop or the
+          // process (#2289 M2). Log and continue with the next record.
+          this.safeEmit(this.listeners.error, new TransientProviderError({
+            channelId: this.channelId,
+            operation: 'pollInbound:handleRecord',
+            correlationId: this.nextCorrelationId(),
+            message: `malformed inbound record: ${err instanceof Error ? err.message : String(err)}`,
+            scope: 'channel',
+            phase: 'provider_call_started',
+          }));
         }
-        this.handleInboundRecord(record);
         if (this.disposed || generation !== this.lifecycleGeneration) return;
       }
       this.inboundCursor = cursor;
@@ -575,6 +614,14 @@ export class ImessageAdapter
 
   handleInboundRecord(record: InboundImessage): boolean {
     if (this.disposed || this.health.state !== 'connected') return false;
+
+    // Read receipts ride on the `dateRead` field of outbound messages
+    // (fromMe === true). Check before the `seen` dedup so a read transition
+    // is detected even if the record was already processed for text.
+    if (record.fromMe && typeof record.dateRead === 'number' && record.dateRead > 0) {
+      this.maybeEmitReadReceipt(record);
+    }
+
     if (
       record.kind === 'reaction'
       && (
@@ -608,11 +655,6 @@ export class ImessageAdapter
     } else {
       return false;
     }
-    // Read receipts (iMessage `dateRead` on the original outbound message) and
-    // typing indicators (BlueBubbles socket/SSE events) require polling-model
-    // changes — dateRead is state on an existing record (needs cross-poll
-    // diffing), typing is push-only (not surfaced by `/message/query`). Both
-    // are deferred until the inbound pipeline moves to streaming/webhook mode.
 
     return true;
   }
@@ -689,6 +731,55 @@ export class ImessageAdapter
       at: new Date(record.timestamp),
     };
     this.safeEmit(this.listeners.reaction, event);
+  }
+
+  /**
+   * Emit a `ReadEvent` for a newly-observed remote read transition on an
+   * outbound message. iMessage read receipts ride on the `dateRead` field
+   * of the original outbound record (state updated in place by the backend
+   * when the peer reads it).
+   *
+   * Dedup: the `emittedReadReceipts` set prevents double-emission within a
+   * session. Restart dedup: reads with `dateRead` older than `lastPolledAt`
+   * are assumed to have been emitted in a prior session and are suppressed.
+   * This is the minimum prior state needed to distinguish a new read from
+   * an unchanged record without external persistence (#2189).
+   *
+   * Limitation: messages read AFTER the inbound cursor advances past their
+   * ROWID are not re-fetched and will not trigger an emission. Full coverage
+   * requires a streaming/webhook inbound mode (documented in the runbook).
+   */
+  private maybeEmitReadReceipt(record: InboundImessage): void {
+    if (this.emittedReadReceipts.has(record.guid)) return;
+    const dateReadMs = record.dateRead!;
+    // Restart dedup: suppress reads that predate this session. A `dateRead`
+    // set before connect was observed in a prior run and must not replay.
+    // sessionStartedAt is frozen at connect time (unlike lastPolledAt which
+    // advances with each poll), so mid-session reads always pass this filter.
+    if (dateReadMs <= this.sessionStartedAt.getTime()) return;
+
+    const message = this.buildInboundMessage(record);
+    if (message === null) return;
+
+    this.emittedReadReceipts.add(record.guid);
+    trimReadReceiptSet(this.emittedReadReceipts);
+
+    const channelId = this.channelId;
+    // For 1:1: the reader is the peer (the `to` field on our outbound).
+    // For groups: iMessage surfaces only one dateRead per message (not
+    // per-recipient), so the reader identity is the group conversation.
+    const rawReader = record.chatGuid ?? record.to;
+    const readerId = isImessageGroupAddress(rawReader) || rawReader.startsWith('iMessage;-;')
+      ? rawReader
+      : canonicalizeImessageDirectIdentity(rawReader);
+    if (readerId === null) return;
+
+    const event: ReadEvent = {
+      target: message.ref,
+      reader: { channel: channelId, id: readerId },
+      at: new Date(dateReadMs),
+    };
+    this.safeEmit(this.listeners.read, event);
   }
 
   private safeEmit<T>(set: Set<(e: T) => void>, payload: T): void {

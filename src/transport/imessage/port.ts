@@ -31,14 +31,13 @@ export interface SendImessageArgs {
  * The `kind` discriminator selects which optional payload fields are set:
  *   - 'text'     → `body` is non-null
  *   - 'reaction' → `reactionEmoji`, `reactionRemove`, `reactionTargetGuid` set
- *   - 'other'    → none of the above (typing indicators, read receipts, call
- *                  events, etc.); the adapter drops these silently today
+ *   - 'other'    → none of the above (typing indicators, call events, etc.)
  *
- * Read receipts and typing indicators are NOT surfaced via this type yet:
- * iMessage read receipts ride on the `dateRead` field of the ORIGINAL outbound
- * message (state-tracking across polls), and typing indicators are pushed via
- * BlueBubbles socket/SSE events rather than surfaced in `/message/query`. Both
- * require polling-model changes and are deferred.
+ * Read receipts ride on the `dateRead` field of the ORIGINAL outbound message
+ * (state updated in place by the backend when the peer reads it). The adapter
+ * detects newly-observed `dateRead` transitions and emits a `ReadEvent`.
+ * Typing indicators are pushed via BlueBubbles socket/SSE events rather than
+ * surfaced in `/message/query` and remain deferred.
  */
 export interface InboundImessage {
   /**
@@ -73,6 +72,15 @@ export interface InboundImessage {
    * BlueBubbles: `associatedMessageGuid` field. imsg: `associated_guid`.
    */
   readonly reactionTargetGuid?: string;
+  /**
+   * Epoch ms when a remote peer read this outbound message. Set by the
+   * backend on the ORIGINAL outbound record (`fromMe: true`) when the
+   * recipient's device reports a read receipt. Undefined if the message
+   * has not been read, is inbound (`fromMe: false`), or the backend
+   * cannot surface read state. BlueBubbles: `dateRead` field. imsg:
+   * `date_read` field (parsed from ISO 8601).
+   */
+  readonly dateRead?: number;
 }
 
 /**
@@ -169,16 +177,6 @@ export interface ImessagePort {
 
   /** Drop any cached transport connection. Safe to call repeatedly. */
   resetConnection?(): void;
-
-  /**
-   * Permanently release any held transport resource (e.g. a persistent
-   * socket). Unlike {@link resetConnection}, callers do not reconnect after
-   * this — it is the final-teardown counterpart, invoked once at shutdown.
-   * Safe to call repeatedly (idempotent), including after `resetConnection`.
-   * Backends with no persistent connection (BlueBubbles HTTP) need not
-   * implement it.
-   */
-  dispose?(): void;
 
   /**
    * Send a reaction to a prior message. iMessage's tapback protocol supports
