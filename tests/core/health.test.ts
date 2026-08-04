@@ -2390,6 +2390,63 @@ describe('GET /health', () => {
     db2.close();
   });
 
+  it('surfaces turn_recovery_degraded and provider_execution_pressure causes from runtime counters', async () => {
+    const db2 = makeDb();
+    let outstanding = 1;
+    let exhausted = 0;
+    let pressureActive = false;
+    const fakeAgentRuntime = {
+      getHealthSnapshot: () => ({
+        status: 'degraded',
+        details: {
+          recentCrashes: 0,
+          autoCompactActiveBackoffScopes: 0,
+          turnFinalizationRetainedRetries: 0,
+          turnFinalizationDegradedScopes: 0,
+          turnRecoveryOutstanding: outstanding,
+          turnRecoveryExhausted: exhausted,
+          turnRecoveryOpenRecoveries: 0,
+          turnRecoveryCorruptLinks: 0,
+          turnRecoveryEchoConflicts: 0,
+          providerExecution: { pressureActive },
+          turnCapability: {
+            modelUsable: false,
+            modelUsableStale: false,
+            modelUsabilityStatus: 'provider-unavailable',
+            lastSuccessfulTurnAt: Date.now() - 1_000,
+            lastTurnErrorClass: null,
+            lastTurnErrorAt: null,
+          },
+        },
+      }),
+    };
+    const deps = makeDeps(db2, {
+      instanceType: 'agent',
+      runtime: fakeAgentRuntime as unknown as HealthDeps['runtime'],
+    });
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    ({ server, port } = await buildTestServer(deps));
+
+    // Leg 1: outstanding recoveries flag the recovery cause.
+    let json = JSON.parse((await healthReq(port)).body);
+    expect(json.degradation_causes).toContain('turn_recovery_degraded');
+    expect(json.degradation_causes).not.toContain('provider_execution_pressure');
+
+    // Leg 2: a different positive counter (exhausted) flags the same cause.
+    outstanding = 0;
+    exhausted = 1;
+    json = JSON.parse((await healthReq(port)).body);
+    expect(json.degradation_causes).toContain('turn_recovery_degraded');
+
+    // Leg 3: counters clear, provider execution pressure flags its own cause.
+    exhausted = 0;
+    pressureActive = true;
+    json = JSON.parse((await healthReq(port)).body);
+    expect(json.degradation_causes).not.toContain('turn_recovery_degraded');
+    expect(json.degradation_causes).toContain('provider_execution_pressure');
+    db2.close();
+  });
+
   it('degrades health when the applied migration version is behind the code-required schema', async () => {
     db.raw.prepare('DELETE FROM schema_migrations WHERE version = ?').run(CURRENT_SCHEMA_MIGRATION);
 
