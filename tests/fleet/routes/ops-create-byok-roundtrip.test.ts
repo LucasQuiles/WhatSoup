@@ -22,8 +22,7 @@ import type { OpsDeps } from '../../../src/fleet/routes/ops.ts';
 import { makeDeps, mockReq, mockRes } from '../../helpers/http-mocks.ts';
 
 function successDeps(): OpsDeps {
-  // makeDeps's base discovery has no scan(); handleCreateLine calls it.
-  return makeDeps({ discovery: { scan: vi.fn() } as any });
+  return makeDeps();
 }
 
 describe('handleCreateLine — BYOK providerConfig/fallbacks round-trip', () => {
