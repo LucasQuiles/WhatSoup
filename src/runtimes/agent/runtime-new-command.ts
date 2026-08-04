@@ -22,7 +22,9 @@ const log = createChildLogger('runtime-new-command');
  * stays opaque here — every session operation the command needs is a host
  * closure, so this module never imports the session manager.
  */
-export interface NewCommandHost<TSession, TTeardown> {
+type TeardownWithDisposition = { disposition: 'interruption' | 'kill' | null };
+
+export interface NewCommandHost<TSession, TTeardown extends TeardownWithDisposition> {
   chatJid: string;
   sessionScope: 'single' | 'shared' | 'per_chat';
   shared: boolean;
@@ -54,10 +56,11 @@ export interface NewCommandHost<TSession, TTeardown> {
 }
 
 /** Execute /new: interrupt an in-flight turn if one exists, then reset. */
-export async function runNewCommand<TSession, TTeardown>(
+export async function runNewCommand<TSession, TTeardown extends TeardownWithDisposition>(
   host: NewCommandHost<TSession, TTeardown>,
 ): Promise<void> {
   const interruptingTurn = host.isTurnInFlight();
+  let teardownDisposition: 'interruption' | 'kill' | null = null;
   if (interruptingTurn) {
     log.warn({
       chatJid: host.chatJid,
@@ -70,6 +73,7 @@ export async function runNewCommand<TSession, TTeardown>(
       let teardown: TTeardown;
       try {
         teardown = await host.terminalizeTurnForInterrupt();
+        teardownDisposition = teardown.disposition;
       } catch (err) {
         log.error({ err, mapKey: host.perChatMapKey }, '/new interrupt: runtime turn queue teardown failed');
         throw err;
@@ -84,6 +88,7 @@ export async function runNewCommand<TSession, TTeardown>(
       let teardown: TTeardown;
       try {
         teardown = await host.terminalizeTurnForInterrupt();
+        teardownDisposition = teardown.disposition;
       } catch (err) {
         log.error({ err, scopeKey: host.scopeKey }, '/new interrupt: runtime turn teardown failed');
         throw err;
@@ -149,7 +154,9 @@ export async function runNewCommand<TSession, TTeardown>(
   host.clearTurnHadVisibleOutput();
   host.sendDirect(
     interruptingTurn
-      ? '*Interrupted the running task — starting new session* ✓'
+      ? teardownDisposition === 'kill'
+        ? '*Interrupted the running task — recovery pending, use /new again* ✓'
+        : '*Interrupted the running task — starting new session* ✓'
       : '*Starting new session* ✓',
   );
 }

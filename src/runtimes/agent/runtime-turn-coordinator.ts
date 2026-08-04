@@ -107,6 +107,7 @@ export interface RuntimeTurnQueueTeardown {
   readonly mapKey?: string;
   readonly queue: TurnQueue | null;
   readonly receipt: TurnQueueTeardownReceipt | null;
+  disposition: 'interruption' | 'kill' | null;
 }
 
 interface RuntimeTurnQueueTeardownState {
@@ -951,9 +952,13 @@ async terminalizeGlobalTurnForReset(): Promise<RuntimeTurnQueueTeardown> {
     scope: 'global',
     queue: runtimeQueue,
     receipt: teardown,
+    disposition: null,
   };
   const state = this.createTeardownState(transaction);
   this.globalTeardown = state;
+  // In-place mutation — callers hold a reference to `transaction` (reference
+  // equality is load-bearing for the teardown lifecycle).
+  transaction.disposition = 'interruption';
   const detachedFinalizations: Array<{
     readonly turn: QueuedTurn;
     settledIndex: number | null;
@@ -1126,9 +1131,13 @@ async terminalizePerChatTurnQueueForKill(mapKey: string): Promise<RuntimeTurnQue
     mapKey,
     queue: runtimeQueue ?? null,
     receipt: teardown ?? null,
+    disposition: null,
   };
   const state = this.createTeardownState(transaction);
   this.perChatTeardowns.set(mapKey, state);
+  // In-place mutation — callers hold a reference to `transaction` (reference
+  // equality is load-bearing for the teardown lifecycle).
+  transaction.disposition = 'kill';
   const scopeRef = runtimeQueue === undefined
     ? { value: mapKey }
     : this.host.perChatTurnQueueKeys.get(runtimeQueue) ?? { value: mapKey };
