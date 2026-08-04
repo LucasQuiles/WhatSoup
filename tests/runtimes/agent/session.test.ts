@@ -2065,6 +2065,48 @@ describe('SessionManager', () => {
     vi.useRealTimers();
   });
 
+  it('CAS token prevents rearmed timer from acting on stale liveness verdict', async () => {
+    vi.useFakeTimers();
+    let resolveA!: (verdict: { alive: boolean; cpuDeltaMs: number; pidChurn: number; pidCount: number }) => void;
+    const treeLivenessAssessor = vi.fn(() => new Promise<{
+      alive: boolean; cpuDeltaMs: number; pidChurn: number; pidCount: number;
+    }>((resolve) => { resolveA = resolve; }));
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const sm = new SessionManager({ db, messenger, chatJid: CHAT_JID, onEvent: vi.fn(), treeLivenessAssessor });
+    await sm.spawnSession();
+    await sm.sendTurn('CAS race test');
+
+    // Arm toolA — this is the first timer
+    sm.recoverStalledOperation('toolu_cas_race', 'Bash');
+    const firstToken = (sm as unknown as { stalledOpKillToken: number }).stalledOpKillToken;
+    expect(firstToken).toBeGreaterThan(0);
+
+    // Advance past toolA's grace — assessment fires, awaits
+    await vi.advanceTimersByTimeAsync(STALLED_OP_KILL_GRACE_MS + 1);
+    expect(treeLivenessAssessor).toHaveBeenCalledOnce();
+
+    // Arm toolB while assessment is pending (stalledOpKill is null during await)
+    sm.recoverStalledOperation('toolu_cas_race_b', 'Bash');
+    const secondToken = (sm as unknown as { stalledOpKillToken: number }).stalledOpKillToken;
+    expect(secondToken).toBeGreaterThan(firstToken);
+
+    // Resolve toolA's assessment as alive — this rearm would fire with OLD token
+    resolveA({ alive: true, cpuDeltaMs: 500, pidChurn: 0, pidCount: 2 });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    // The rearm callback from toolA's assessment should have been suppressed by CAS
+    // (token !== stalledOpKillToken). The kill timer should still belong to toolB.
+    expect((sm as unknown as { stalledOpKill: ReturnType<typeof setTimeout> | null }).stalledOpKill).not.toBeNull();
+
+    // Advance past toolB's grace — second assessment fires
+    await vi.advanceTimersByTimeAsync(STALLED_OP_KILL_GRACE_MS + 1);
+    expect(treeLivenessAssessor).toHaveBeenCalledTimes(2);
+
+    vi.useRealTimers();
+  });
+
   it('liveness gate: a CPU-active tree defers the stalled-op kill and re-arms the grace timer', async () => {
     vi.useFakeTimers();
 
