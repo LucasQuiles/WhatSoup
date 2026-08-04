@@ -26,6 +26,7 @@ export interface CommonRouteDeps {
   discovery: {
     getInstance: Mock<(name: string) => unknown | undefined>;
     getInstances: Mock<() => Map<string, unknown>>;
+    scan: Mock<() => Map<string, unknown>>;
   };
   realtime: {
     publish: Mock<(...args: unknown[]) => unknown>;
@@ -135,7 +136,7 @@ function mockServiceManager() {
     start: vi.fn().mockResolvedValue(undefined),
     stop: vi.fn().mockResolvedValue(undefined),
     restart: vi.fn().mockResolvedValue(undefined),
-    startFire: vi.fn(),
+    startFire: vi.fn((_name: string, onComplete?: (err: Error | null) => void) => onComplete?.(null)),
   };
 }
 
@@ -146,6 +147,7 @@ export function makeDeps<T extends object>(overrides: DeepPartial<T> = {}): Comm
     discovery: {
       getInstance: vi.fn<(name: string) => unknown | undefined>(() => undefined),
       getInstances: vi.fn<() => Map<string, unknown>>(() => new Map()),
+      scan: vi.fn<() => Map<string, unknown>>(() => new Map()),
     },
     realtime: { publish: vi.fn<(...args: unknown[]) => unknown>() },
     serviceManager: mockServiceManager(),
