@@ -7,7 +7,7 @@
  */
 
 import { describe, it, expect, vi } from 'vitest';
-import { RouteRecycleOwnershipChangedError } from '../../../src/runtimes/agent/model-pin.ts';
+import type { SessionManager } from '../../../src/runtimes/agent/session.ts';
 
 // Mock sha256File so we can control its return for the TOCTOU branch.
 const mockSha256File = vi.hoisted(() => vi.fn(() => ''));
@@ -74,8 +74,8 @@ describe('model-pin — pre-verify ownership reject (line 566)', () => {
       deleteOwnedPerChatSession: vi.fn(),
       cleanupPerChatState: vi.fn(),
     };
-    await expect(recycleLiveSession(port, 'tk', session))
-      .rejects.toThrow(RouteRecycleOwnershipChangedError);
+    await expect(recycleLiveSession(port, 'tk', session as unknown as SessionManager))
+      .rejects.toThrow(/ownership changed/);
   });
 });
 
@@ -96,7 +96,7 @@ describe('model-pin — deleteOwned fails (line 606)', () => {
       cleanupPerChatState: vi.fn(),
       retirePerChatProviderTransitionAfter: vi.fn(),
     };
-    await expect(recycleLiveSession(port, 'tk', session))
+    await expect(recycleLiveSession(port, 'tk', session as unknown as SessionManager))
       .rejects.toThrow('Route recycle lost exact per-chat session ownership');
   });
 });
@@ -118,8 +118,8 @@ describe('model-pin — singleton ownership reject (line 621)', () => {
       operationTracker: { shutdown: vi.fn() },
       cleanupGlobalAutoCompactState: vi.fn(),
     };
-    await expect(recycleLiveSession(port, undefined, session))
-      .rejects.toThrow(RouteRecycleOwnershipChangedError);
+    await expect(recycleLiveSession(port, undefined, session as unknown as SessionManager))
+      .rejects.toThrow(/ownership changed/);
   });
 });
 
@@ -141,8 +141,8 @@ describe('model-pin — singleton post-shutdown re-verify (line 631)', () => {
       cleanupGlobalAutoCompactState: vi.fn(),
     };
     session.shutdown = vi.fn(async () => { port.session = mockSession(); });
-    await expect(recycleLiveSession(port, undefined, session))
-      .rejects.toThrow(RouteRecycleOwnershipChangedError);
+    await expect(recycleLiveSession(port, undefined, session as unknown as SessionManager))
+      .rejects.toThrow(/ownership changed/);
   });
 });
 
@@ -164,7 +164,7 @@ describe('model-pin — kill-session per_chat success cleanup (covers 4307)', ()
       cleanupPerChatState: cleanup,
       retirePerChatProviderTransitionAfter: vi.fn(),
     };
-    await recycleLiveSession(port, 'tk', session);
+    await recycleLiveSession(port, 'tk', session as unknown as SessionManager);
     expect(cleanup).toHaveBeenCalledWith('tk', { preserveActorSocket: true });
   });
 });
