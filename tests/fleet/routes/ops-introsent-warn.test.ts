@@ -53,26 +53,8 @@ function fakeInstance(overrides: Partial<DiscoveredInstance> = {}): DiscoveredIn
   } as DiscoveredInstance;
 }
 
-function makeDeps(instance: DiscoveredInstance): OpsDeps {
-  return {
-    discovery: {
-      getInstance: vi.fn(() => instance),
-      getInstances: vi.fn(() => new Map()),
-      scan: vi.fn(),
-    },
-    realtime: { publish: vi.fn() },
-    serviceManager: {
-      enable: vi.fn().mockResolvedValue(undefined),
-      disable: vi.fn().mockResolvedValue(undefined),
-      start: vi.fn().mockResolvedValue(undefined),
-      stop: vi.fn().mockResolvedValue(undefined),
-      restart: vi.fn().mockResolvedValue(undefined),
-      // The deferred post-auth start passes a completion callback; invoking it
-      // lets the SSE flow finish (endOnce) so authInFlight is released between
-      // tests.
-      startFire: vi.fn((_name: string, onComplete?: (err: Error | null) => void) => onComplete?.(null)),
-    },
-  } as unknown as OpsDeps;
+function depsFor(instance: DiscoveredInstance): OpsDeps {
+  return makeDeps({ discovery: { getInstance: vi.fn(() => instance) } });
 }
 
 describe('handleAuth introSent reset failure', () => {
